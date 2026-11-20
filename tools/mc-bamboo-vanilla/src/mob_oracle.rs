@@ -1079,6 +1079,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,

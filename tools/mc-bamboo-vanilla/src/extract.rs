@@ -840,6 +840,11 @@ pub struct ProjectileFacts {
     pub arrow_pierce: u8,
     pub arrow_in_ground: u8,
     pub skeleton_eye_height: f32,
+    pub pig_boost_time: u8,
+    pub pig_variant: u8,
+    pub pig_sound_variant: u8,
+    pub pig_variant_serializer: i32,
+    pub pig_sound_variant_serializer: i32,
 }
 
 /// 一个物品。列表里的位置就是它的注册表 ID。

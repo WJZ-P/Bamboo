@@ -24,6 +24,7 @@ pub mod motion;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
+mod pig;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
@@ -49,6 +50,7 @@ use super::{EntityUid, JavaRandom};
 pub enum MobType {
     #[default]
     Cow,
+    Pig,
     Zombie,
     Husk,
     Skeleton,
@@ -60,6 +62,7 @@ impl MobType {
         use mc_bamboo_data::registries::entity_type as ids;
         match self {
             Self::Cow => ids::COW,
+            Self::Pig => ids::PIG,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -70,6 +73,7 @@ impl MobType {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:cow",
+            Self::Pig => "minecraft:pig",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -77,9 +81,15 @@ impl MobType {
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
-            .into_iter()
-            .find(|kind| kind.name() == name)
+        [
+            Self::Cow,
+            Self::Pig,
+            Self::Zombie,
+            Self::Husk,
+            Self::Skeleton,
+        ]
+        .into_iter()
+        .find(|kind| kind.name() == name)
     }
 
     /// 成年和幼年的（宽，高，眼高）。
@@ -93,6 +103,7 @@ impl MobType {
                     mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
                 )
             }
+            (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -109,7 +120,7 @@ impl MobType {
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
     pub const fn allowed_in_peaceful(self) -> bool {
-        matches!(self, Self::Cow)
+        !self.is_monster()
     }
 
     /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
@@ -132,6 +143,7 @@ impl MobType {
     pub const fn loot_table(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:entities/cow",
+            Self::Pig => "minecraft:entities/pig",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -151,13 +163,13 @@ impl MobType {
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
-        if self.is_monster() { 1.0 } else { 0.4 }
+        if matches!(self, Self::Cow) { 0.4 } else { 1.0 }
     }
 
     /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig => None,
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
@@ -166,7 +178,7 @@ impl MobType {
 
     pub const fn hurt_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig => None,
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -175,7 +187,7 @@ impl MobType {
 
     pub const fn death_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig => None,
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -184,7 +196,7 @@ impl MobType {
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig => None,
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
@@ -196,6 +208,7 @@ impl MobType {
         use mc_bamboo_data::items;
         match self {
             Self::Cow => items::COW_SPAWN_EGG,
+            Self::Pig => items::PIG_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -206,6 +219,7 @@ impl MobType {
     pub const fn translation_key(self) -> &'static str {
         match self {
             Self::Cow => "entity.minecraft.cow",
+            Self::Pig => "entity.minecraft.pig",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -895,6 +909,7 @@ pub struct Mob {
     pub love_cause: Option<[u8; 16]>,
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
+    pub pig_sound_variant: pig::SoundVariant,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -940,6 +955,7 @@ pub enum MobEvent {
         position: Vec3,
         /// `Monster.getSoundSource()` 是 HOSTILE，牛是 NEUTRAL。
         hostile: bool,
+        seed: Option<i64>,
     },
 }
 
@@ -954,6 +970,7 @@ impl Mob {
     pub fn new(mob_type: MobType) -> Self {
         let attributes = match mob_type {
             MobType::Cow => Attributes::cow(),
+            MobType::Pig => pig::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
@@ -961,11 +978,12 @@ impl Mob {
         let mut navigation = Navigation::new(follow_range);
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
+            MobType::Pig => pig::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
-            MobType::Cow => GoalSelector::default(),
+            MobType::Cow | MobType::Pig => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
@@ -1078,6 +1096,7 @@ impl Mob {
             love_cause: None,
             variant: CowVariant::Temperate,
             sound_variant: CowSoundVariant::Classic,
+            pig_sound_variant: pig::SoundVariant::Classic,
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1167,6 +1186,7 @@ pub struct MobPublic {
     pub no_gravity: bool,
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
+    pub pig_sound_variant: pig::SoundVariant,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1211,6 +1231,7 @@ impl MobPublic {
             no_gravity: mob.no_gravity,
             variant: mob.variant,
             sound_variant: mob.sound_variant,
+            pig_sound_variant: mob.pig_sound_variant,
             on_fire: remaining_fire_ticks > 0,
             ticks_frozen: mob.ticks_frozen,
             air_supply: mob.air_supply,

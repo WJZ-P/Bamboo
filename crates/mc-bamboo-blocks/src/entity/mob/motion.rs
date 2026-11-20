@@ -303,7 +303,12 @@ fn step_effects(
     }
     if play_sound {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
-        super::living::play_sound(me, mob, mob.sound_variant.step(), 0.15, 1.0);
+        let sound = if mob.mob_type == super::MobType::Pig {
+            super::pig::step_sound(mob.is_baby())
+        } else {
+            mob.sound_variant.step()
+        };
+        super::living::play_sound(me, mob, sound, 0.15, 1.0);
     }
     if play_sound
         && state.is_tagged(block_tags::CRYSTAL_SOUND_BLOCKS)

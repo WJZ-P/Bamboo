@@ -1142,7 +1142,21 @@ public final class Extractor {
         out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
         out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        Class<?> pig = net.minecraft.world.entity.animal.pig.Pig.class;
+        out.addProperty("pigBoostTime", entityAccessor(pig, "DATA_BOOST_TIME").id());
+        var variant = entityAccessor(pig, "DATA_VARIANT_ID");
+        var sound = entityAccessor(pig, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("pigVariant", variant.id());
+        out.addProperty("pigSoundVariant", sound.id());
+        out.addProperty("pigVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(variant.serializer()));
+        out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
         return out;
+    }
+
+    private static net.minecraft.network.syncher.EntityDataAccessor<?> entityAccessor(Class<?> type, String name) throws ReflectiveOperationException {
+        Field field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
     }
 
     private static int arrowAccessorId(String name) throws ReflectiveOperationException {

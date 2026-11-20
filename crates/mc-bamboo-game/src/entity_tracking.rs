@@ -901,6 +901,19 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Pig {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::PIG_BOOST_TIME => return EntityData::PigBoostTime(0),
+            facts::PIG_VARIANT => {
+                return EntityData::PigVariant(pig_variant_id("minecraft:temperate"));
+            }
+            facts::PIG_SOUND_VARIANT => {
+                return EntityData::PigSoundVariant(pig_sound_variant_default());
+            }
+            _ => {}
+        }
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1071,13 +1084,38 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.
-    if mob.variant.registry_id() != 1 {
-        out.push(EntityData::CowVariant(mob.variant.registry_id()));
-    }
-    if mob.sound_variant.registry_id() != 0 {
-        out.push(EntityData::CowSoundVariant(mob.sound_variant.registry_id()));
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
+        let variant = mob.variant.name();
+        if variant != "minecraft:temperate" {
+            out.push(EntityData::PigVariant(pig_variant_id(variant)));
+        }
+        let sound = mob.pig_sound_variant.registry_id();
+        if sound != pig_sound_variant_default() {
+            out.push(EntityData::PigSoundVariant(sound));
+        }
+    } else {
+        if mob.variant.registry_id() != 1 {
+            out.push(EntityData::CowVariant(mob.variant.registry_id()));
+        }
+        if mob.sound_variant.registry_id() != 0 {
+            out.push(EntityData::CowSoundVariant(mob.sound_variant.registry_id()));
+        }
     }
     out
+}
+
+fn pig_variant_id(name: &str) -> i32 {
+    mc_bamboo_data::component_registries::registry_names::PIG_VARIANT
+        .iter()
+        .position(|entry| *entry == name)
+        .expect("pig variant in the registry") as i32
+}
+
+fn pig_sound_variant_default() -> i32 {
+    mc_bamboo_data::component_registries::registry_names::PIG_SOUND_VARIANT
+        .iter()
+        .position(|entry| *entry == "minecraft:classic")
+        .expect("classic pig sound variant in the registry") as i32
 }
 
 /// 把这一刻的生物事件换成「包 ID + 包体」字节，按事件发生顺序。
@@ -1196,6 +1234,7 @@ fn event_packet(
             pitch,
             position,
             hostile,
+            seed,
         } => EventPacket::Sound(Sound {
             sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
             inline: None,
@@ -1209,7 +1248,7 @@ fn event_packet(
             z: position.z,
             volume: *volume,
             pitch: *pitch,
-            seed: sound_seed(),
+            seed: seed.unwrap_or_else(sound_seed),
         }),
     }
 }

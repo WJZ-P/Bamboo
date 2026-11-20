@@ -101,7 +101,9 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.WrappedGoal;
+import net.minecraft.world.entity.animal.Animal;
 import net.minecraft.world.entity.animal.cow.Cow;
+import net.minecraft.world.entity.animal.pig.Pig;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
@@ -798,6 +800,22 @@ public final class MobOracle {
         static List<Scene> all() {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
+            {
+                Scene pig = new Scene("pig_rod_tempt").ticks(80);
+                ground(pig, 12);
+                pig.cow(0.5, 64.0, 0.5, 0.0F, 25L);
+                pig.player(6.5, 64.0, 0.5, Items.CARROT_ON_A_STICK);
+                scenes.add(pig);
+            }
+            {
+                Scene pig = new Scene("pig_saddle").ticks(24);
+                ground(pig, 6);
+                pig.cow(0.5, 64.0, 0.5, 0.0F, 39L);
+                pig.player(1.5, 64.0, 0.5, Items.SADDLE);
+                pig.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
+                pig.packets = true;
+                scenes.add(pig);
+            }
             for (long seed : seeds) {
                 Scene flat = new Scene("flat_" + seed).ticks(2000);
                 ground(flat, 12);
@@ -1796,7 +1814,7 @@ public final class MobOracle {
             players.add(player);
         }
         level.playersList().addAll(players);
-        List<Cow> cows = new ArrayList<>();
+        List<Animal> cows = new ArrayList<>();
         int playerIds = level.nextId;
         /** 逐刻的出站包字节；外层数组是刻，内层是那一刻这一头牛的全部包。 */
         List<List<String>> packets = null;
@@ -1828,7 +1846,8 @@ public final class MobOracle {
             }
         }
         for (int i = 0; i < scene.cows.size(); i++) {
-            Cow cow = EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            Animal cow = (scene.name.startsWith("pig_") ? EntityTypes.PIG : EntityTypes.COW)
+                    .create(level, EntitySpawnReason.COMMAND);
             double[] at = scene.cows.get(i);
             // Bamboo 生成这头牛时从种子源取过一个数，随后被场景的种子盖掉；这里照样消耗一个。
             // Bamboo draws one seed when spawning it before the scene seed overrides it.
@@ -1852,7 +1871,7 @@ public final class MobOracle {
         if (scene.packets) {
             // 先给每头牛建 ServerEntity；配对包在 tick 0 由 `sendPairingData` 发出。
             // Create a ServerEntity per cow; sendPairingData emits the tick-0 packets.
-            for (Cow cow : cows) {
+            for (Animal cow : cows) {
                 Sync sync = new Sync(level, cow, official.registries);
                 syncs.add(sync);
                 sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
@@ -1875,6 +1894,7 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
+            line.append(",\"kind\":").append(scene.name.startsWith("pig_") ? 3 : 0);
             line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
         line.append("],\"players\":[");
@@ -1941,7 +1961,7 @@ public final class MobOracle {
                 if (action[0] != tick) {
                     continue;
                 }
-                Cow target = cows.get(action[1]);
+                Animal target = cows.get(action[1]);
                 ServerPlayer actor = players.get(action[2]);
                 // 只改 `Abilities.instabuild`：`setGameMode` 会给不存在的连接发包。
                 putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
@@ -1961,7 +1981,7 @@ public final class MobOracle {
             }
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick) {
-                    Cow target = cows.get((int) hurt[1]);
+                    Animal target = cows.get((int) hurt[1]);
                     ServerPlayer attacker = players.get((int) hurt[3]);
                     net.minecraft.world.damagesource.DamageSource source = switch (scene.deathKind) {
                         case 1 -> level.damageSources().fall();
@@ -2013,7 +2033,7 @@ public final class MobOracle {
                         players.get(0).hurtServer(level, source, action.amount);
                     } else {
                         // 官方 `ServerGamePacketListenerImpl.handleAttack` 的伤害入口。
-                        Cow target = cows.get(action.cow);
+                        Animal target = cows.get(action.cow);
                         players.get(0).attack(target);
                     }
                 }
@@ -2063,7 +2083,7 @@ public final class MobOracle {
             }
             for (int[] action : scene.cowEffectActions) {
                 if (action[0] != tick || action[1] >= cows.size()) continue;
-                Cow target = cows.get(action[1]);
+                Animal target = cows.get(action[1]);
                 var holder = official.registries.lookupOrThrow(Registries.MOB_EFFECT)
                         .get(action[3]).orElseThrow();
                 if (action[2] == 0) {
@@ -2072,7 +2092,7 @@ public final class MobOracle {
                     target.removeAllEffects();
                 }
             }
-            for (Cow cow : new ArrayList<>(cows)) {
+            for (Animal cow : new ArrayList<>(cows)) {
                 if (cow.isRemoved()) {
                     continue;
                 }
@@ -2087,7 +2107,7 @@ public final class MobOracle {
                 for (Entity born : level.spawned) {
                     level.reseedBorn(born);
                     spawns.get(tick).add(spawnJson(born));
-                    if (born instanceof Cow calf) {
+                    if (born instanceof Animal calf) {
                         cows.add(calf);
                         level.tracked.add(born);
                     }
@@ -2121,7 +2141,7 @@ public final class MobOracle {
                 List<String> step = packets.get(tick);
                 step.addAll(events.take());
                 for (int i = 0; i < cows.size(); i++) {
-                    Cow cow = cows.get(i);
+                    Animal cow = cows.get(i);
                     Sync sync = syncs.get(i);
                     syncFlags.get(tick).add(flags(cow));
                     sync.entity.sendChanges();
@@ -4356,7 +4376,7 @@ public final class MobOracle {
     }
 
     /** 生成后中途出现的牛：这一刻发一次配对包。 */
-    private static void addSync(FakeLevel level, Official official, Cow cow, List<Sync> syncs,
+    private static void addSync(FakeLevel level, Official official, Animal cow, List<Sync> syncs,
             List<List<String>> packets, int tick) {
         Sync sync = new Sync(level, cow, official.registries);
         syncs.add(sync);
@@ -4420,12 +4440,12 @@ public final class MobOracle {
         return out.append('}').toString();
     }
 
-    private static String stepJson(List<Cow> cows) throws Exception {
+    private static String stepJson(List<Animal> cows) throws Exception {
         StringBuilder out = new StringBuilder(512);
         out.append('[');
         for (int i = 0; i < cows.size(); i++) {
             if (i > 0) out.append(',');
-            Cow cow = cows.get(i);
+            Animal cow = cows.get(i);
             Vec3 pos = cow.position();
             Vec3 delta = cow.getDeltaMovement();
             out.append("{\"x\":").append(Double.doubleToRawLongBits(pos.x));
@@ -4454,8 +4474,8 @@ public final class MobOracle {
             out.append(",\"lh\":").append(cow.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     cow.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"").append(cow.getVariant().unwrapKey().orElseThrow().identifier()).append('"');
-            Method sound = Cow.class.getDeclaredMethod("getSoundVariant");
+            out.append(",\"var\":\"").append((cow instanceof Pig pig ? pig.getVariant() : ((Cow)cow).getVariant()).unwrapKey().orElseThrow().identifier()).append('"');
+            Method sound = cow.getClass().getDeclaredMethod("getSoundVariant");
             sound.setAccessible(true);
             Holder<?> soundVariant = (Holder<?>) sound.invoke(cow);
             out.append(",\"snd\":\"").append(soundVariant.unwrapKey().orElseThrow().identifier()).append('"');

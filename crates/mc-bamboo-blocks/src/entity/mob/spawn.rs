@@ -220,14 +220,17 @@ pub(crate) fn finalize_spawn(
     let random = world.random();
     let variant = cow_variant_for_biome(biome);
     let _ = random.next_int(1);
-    let sound = if random.next_int(2) == 0 {
-        CowSoundVariant::Classic
-    } else {
-        CowSoundVariant::Moody
-    };
     entity.with_mob(|_, mob| {
         mob.variant = variant;
-        mob.sound_variant = sound;
+        if kind == MobType::Pig {
+            mob.pig_sound_variant = super::pig::SoundVariant::pick(random);
+        } else {
+            mob.sound_variant = if random.next_int(2) == 0 {
+                CowSoundVariant::Classic
+            } else {
+                CowSoundVariant::Moody
+            };
+        }
         if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
             && range.modifier(RANDOM_SPAWN_BONUS).is_none()
         {

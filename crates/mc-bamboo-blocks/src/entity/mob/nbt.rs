@@ -310,7 +310,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
     // ---- AgeableMob / Animal / Cow ----
-    if mob.mob_type == MobType::Cow {
+    if !mob.mob_type.is_monster() {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
@@ -318,6 +318,8 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
+    }
+    if matches!(mob.mob_type, MobType::Cow | MobType::Pig) {
         put(
             &mut out,
             "variant",
@@ -326,7 +328,14 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(
             &mut out,
             "sound_variant",
-            Tag::String(mob.sound_variant.name().to_owned()),
+            Tag::String(
+                if mob.mob_type == MobType::Pig {
+                    mob.pig_sound_variant.name()
+                } else {
+                    mob.sound_variant.name()
+                }
+                .to_owned(),
+            ),
         );
     }
     // ---- Zombie ----
@@ -464,18 +473,29 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
         // ---- AgeableMob / Animal / Cow ----
-        if mob.mob_type == MobType::Cow {
+        if !mob.mob_type.is_monster() {
             living::set_age(me, mob, tag::int_or(tag, "Age", 0));
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
-            if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
+        }
+        if matches!(mob.mob_type, MobType::Cow | MobType::Pig) {
+            if let Some(variant) = tag::string_or(tag, "variant").and_then(|name| {
+                if mob.mob_type == MobType::Pig && !name.contains(':') {
+                    CowVariant::from_name(&format!("minecraft:{name}"))
+                } else {
+                    CowVariant::from_name(name)
+                }
+            }) {
                 mob.variant = variant;
             }
-            if let Some(variant) =
-                tag::string_or(tag, "sound_variant").and_then(CowSoundVariant::from_name)
-            {
+            let sound = tag::string_or(tag, "sound_variant");
+            if mob.mob_type == MobType::Pig {
+                if let Some(variant) = sound.and_then(super::pig::SoundVariant::from_name) {
+                    mob.pig_sound_variant = variant;
+                }
+            } else if let Some(variant) = sound.and_then(CowSoundVariant::from_name) {
                 mob.sound_variant = variant;
             }
         }

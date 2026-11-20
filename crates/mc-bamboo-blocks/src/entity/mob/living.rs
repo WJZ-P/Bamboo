@@ -422,7 +422,7 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             let sound = mob
                 .mob_type
                 .ambient_sound()
-                .unwrap_or_else(|| mob.sound_variant.ambient());
+                .unwrap_or_else(|| ambient_sound(mob));
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
     }
@@ -511,9 +511,6 @@ pub fn remove_effect(mob: &mut Mob, effect: i32) -> bool {
     !events.changes.is_empty()
 }
 
-/// `AbstractCow.getSoundVolume()`：叫声、受伤和死亡都用这个音量。
-const COW_SOUND_VOLUME: f32 = 0.4;
-
 /// `Entity.playSound`：静音的生物不出声（音高这些参数调用方已经取过）。
 ///
 /// `Entity.playSound`: a silent mob makes no sound (the caller already drew the pitch).
@@ -527,6 +524,7 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
         pitch,
         position: me.position,
         hostile: mob.mob_type.is_monster(),
+        seed: None,
     });
 }
 
@@ -536,14 +534,27 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     play_sound(
         me,
         mob,
-        mob.sound_variant.ambient(),
-        COW_SOUND_VOLUME,
+        ambient_sound(mob),
+        if mob.mob_type == super::MobType::Pig {
+            1.0
+        } else {
+            0.4
+        },
         pitch,
     );
 }
 
-/// `getVoicePitch()`：两个 `nextFloat`，牛的叫声从不为空，静音时也照取。
-fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
+fn ambient_sound(mob: &Mob) -> &'static str {
+    match mob.mob_type {
+        super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
+        _ => mob.sound_variant.ambient(),
+    }
+}
+
+/// 生物叫声的音高取两次随机数；幼年基础音高为 1.5。
+///
+/// The voice pitch takes two draws and uses a higher base pitch for babies.
+pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
@@ -798,7 +809,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             set_age(me, mob, 6000);
             mob.events.push(MobEvent::Hearts);
             ctx.emit(
-                Command::BreedCows {
+                Command::BreedAnimals {
+                    kind: mob.mob_type,
+                    variant: mob.variant,
                     partner,
                     position: me.position,
                 },
@@ -1374,7 +1387,10 @@ pub(crate) fn hurt_server(
             let sound = mob
                 .mob_type
                 .death_sound()
-                .unwrap_or_else(|| mob.sound_variant.death());
+                .unwrap_or_else(|| match mob.mob_type {
+                    super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
+                    _ => mob.sound_variant.death(),
+                });
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
         die(me, mob, ctx, source);
@@ -1385,7 +1401,10 @@ pub(crate) fn hurt_server(
         let sound = mob
             .mob_type
             .hurt_sound()
-            .unwrap_or_else(|| mob.sound_variant.hurt());
+            .unwrap_or_else(|| match mob.mob_type {
+                super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
+                _ => mob.sound_variant.hurt(),
+            });
         play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
     }
     mob.last_damage_source = Some(source);
@@ -1572,6 +1591,27 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
+    if mob.mob_type == super::MobType::Pig && adult && drops {
+        mob.events.push(MobEvent::Death);
+        ctx.emit(
+            Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+            me,
+        );
+        if let Some(stack) = super::skeleton_drops::drop_slot(
+            &mut mob.equipment,
+            mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle,
+            by_player,
+            source.looting_level,
+            &mut me.random,
+        ) {
+            ctx.emit(Command::DropItem { stack }, me);
+        }
+        if by_player {
+            let amount = 1 + me.random.next_int_bounded(3);
+            ctx.emit(Command::AwardDeathExperience { amount }, me);
+        }
+        return;
+    }
     let experience = if mob.mob_type.is_monster() {
         // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
         let base = if adult {
@@ -1598,7 +1638,7 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
 }
 
-/// [`Command::BreedCows`] 的落地：`Animal.spawnChildFromBreeding` 和
+/// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
 /// `finalizeSpawnChildFromBreeding`。父母的年龄设成 6000、求爱清零，父亲发爱心事件，
 /// 按 `mob_drops` 生成一颗 `1 + random.nextInt(7)` 的经验球。
 ///
@@ -1609,24 +1649,33 @@ pub(crate) fn apply_breed(
     partner: crate::entity::EntityUid,
     position: Vec3,
     world: &mut crate::world::World,
+    kind: super::MobType,
+    variant: super::CowVariant,
 ) {
-    // `Cow.getBreedOffspring` 从父亲随机源取一个 `nextBoolean` 选花色，
-    // 然后 `finalizeSpawnChildFromBreeding` 取 `nextInt(7)+1` 定经验值。
-    let _from_father = me.random.next_boolean();
+    // 繁殖先用父亲的随机源选花纹，再取经验值。
+    // Breeding chooses the coat before drawing XP from the parent's random source.
+    let from_father = me.random.next_boolean();
+    let mut child_variant = variant;
     let xp = 1 + me.random.next_int_bounded(7);
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
+            if !from_father {
+                child_variant = mob.variant;
+            }
             mob.in_love = 0;
             set_age(me, mob, 6000);
         });
     });
     // 官方先构造幼崽（拿到 ID）再构造经验球；岛种子源和网络 ID 都按这个顺序。
-    let mut calf = Entity::cow(position);
+    let mut calf = Entity::by_mob_type(kind, position);
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;
     calf.with_mob(|me, mob| {
         set_age(me, mob, -24000);
+        if kind == super::MobType::Pig {
+            mob.variant = child_variant;
+        }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;
         mob.y_body_rot_o = 0.0;

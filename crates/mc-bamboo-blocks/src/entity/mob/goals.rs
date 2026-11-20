@@ -8,10 +8,7 @@
 //! family, with identical scheduling and random draw order.
 
 use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
-use mc_bamboo_data::{
-    blocks,
-    tags::{fluid_tags, item_tags},
-};
+use mc_bamboo_data::{blocks, tags::fluid_tags};
 
 use super::{Mob, living, navigation::Navigation, path::static_path_type};
 use crate::{
@@ -20,7 +17,6 @@ use crate::{
         ctx::{BlockView, EntityCtx, PlayerView},
     },
     shape::{self, CollisionContext},
-    state::item_is_tagged,
 };
 
 /// `Goal.Flag`，按枚举顺序。
@@ -46,6 +42,7 @@ pub enum Goal {
         love_time: i32,
     },
     Tempt {
+        steering_item: bool,
         speed: f64,
         player: Option<EntityUid>,
         calm_down: i32,
@@ -232,6 +229,7 @@ impl GoalSelector {
                 3,
                 Goal::Tempt {
                     speed: 1.25,
+                    steering_item: false,
                     player: None,
                     calm_down: 0,
                 },
@@ -688,17 +686,20 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if mob.in_love <= 0 {
                 return false;
             }
-            *partner = free_partner(me, ctx);
+            *partner = free_partner(me, mob.mob_type, ctx);
             partner.is_some()
         }
         Goal::Tempt {
-            player, calm_down, ..
+            player,
+            calm_down,
+            steering_item,
+            ..
         } => {
             if *calm_down > 0 {
                 *calm_down -= 1;
                 return false;
             }
-            *player = nearest_tempting_player(me, mob, ctx);
+            *player = nearest_tempting_player(me, mob, ctx, *steering_item);
             player.is_some()
         }
         Goal::FollowParent { parent, .. } => {
@@ -1530,7 +1531,12 @@ fn nearest_look_target(
 }
 
 /// `TemptGoal.canUse` 里的 `getNearestPlayer(targetingConditions.range(TEMPT_RANGE), mob)`。
-fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+fn nearest_tempting_player(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    steering_item: bool,
+) -> Option<EntityUid> {
     let view = ctx.blocks();
     let range = mob
         .attributes
@@ -1543,8 +1549,13 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
         if player.spectator || !player.alive {
             continue;
         }
-        let follows = item_is_tagged(player.main_hand, item_tags::COW_FOOD)
-            || item_is_tagged(player.off_hand, item_tags::COW_FOOD);
+        let follows = [player.main_hand, player.off_hand].into_iter().any(|item| {
+            if steering_item {
+                item == mc_bamboo_data::items::CARROT_ON_A_STICK
+            } else {
+                super::interact::is_food(mob.mob_type, item)
+            }
+        });
         if !follows {
             continue;
         }
@@ -1561,7 +1572,7 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
 }
 
 /// `BreedGoal.getFreePartner`：8 格内同种、在发情、不在恐慌的，取最近的。
-fn free_partner(me: &Entity, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+fn free_partner(me: &Entity, mob_type: super::MobType, ctx: &dyn EntityCtx) -> Option<EntityUid> {
     let area = me.bounding_box().inflate(8.0, 8.0, 8.0);
     let mut best = f64::MAX;
     let mut found = None;
@@ -1569,7 +1580,12 @@ fn free_partner(me: &Entity, ctx: &dyn EntityCtx) -> Option<EntityUid> {
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };
-        if other.uid == me.id || public.in_love <= 0 || public.panicking || !public.is_alive() {
+        if other.uid == me.id
+            || public.mob_type != mob_type
+            || public.in_love <= 0
+            || public.panicking
+            || !public.is_alive()
+        {
             return;
         }
         let distance = me.position.distance_to_sqr(other.position);
