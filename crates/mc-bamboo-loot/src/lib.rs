@@ -33,7 +33,7 @@ pub use drops::{
     BlockDropParams, ChestParams, EntityDeathParams, block_drops, chest_loot, entity_death_drops,
 };
 pub use error::{LootError, Result};
-pub use function::LootFunction;
+pub use function::{LootFunction, mob_spawn_enchantments};
 pub use names::{
     EnchantmentDef, Registry, biome_id, block_experience_set, block_id, block_name,
     enchantment_def, enchantment_defs_all, enchantment_id, enchantment_name, entity_type_id,

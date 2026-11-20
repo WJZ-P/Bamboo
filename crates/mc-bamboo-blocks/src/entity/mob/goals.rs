@@ -87,6 +87,7 @@ pub enum Goal {
         /// `MeleeAttackGoal.canUse` 算出的路径，官方存在字段里由 `start()` 装入导航。
         start_path: Option<super::path::Path>,
     },
+    Bow(super::skeleton::BowGoal),
     /// `HurtByTargetGoal`：记住上一次伤害的时间戳，把攻击者设成目标。
     HurtByTarget {
         timestamp: i32,
@@ -142,7 +143,7 @@ impl Goal {
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
             Self::Unavailable(_) => &[],
-            Self::MeleeAttack { .. } => &[Flag::Move, Flag::Look],
+            Self::MeleeAttack { .. } | Self::Bow(_) => &[Flag::Move, Flag::Look],
             Self::HurtByTarget { .. } | Self::NearestAttackableTarget { .. } => &[Flag::Target],
             Self::RestrictSun => &[],
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
@@ -160,6 +161,7 @@ impl Goal {
             Self::Float
                 | Self::RandomLookAround { .. }
                 | Self::MeleeAttack { .. }
+                | Self::Bow(_)
                 | Self::TurtleEgg { .. }
         )
     }
@@ -176,7 +178,9 @@ impl Goal {
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
+            Self::MeleeAttack { speed, .. } if *speed == 1.2 => "MeleeAttackGoal",
             Self::MeleeAttack { .. } => "ZombieAttackGoal",
+            Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
             Self::NearestAttackableTarget { .. } => "NearestAttackableTargetGoal",
             Self::RestrictSun => "RestrictSunGoal",
@@ -350,6 +354,104 @@ impl GoalSelector {
             locked: [None; 4],
             disabled: [false; 4],
         }
+    }
+
+    /// AbstractSkeleton.registerGoals：按注册顺序而非优先级排序。
+    ///
+    /// AbstractSkeleton.registerGoals uses insertion order, not sorted priority.
+    pub(crate) fn skeleton() -> Self {
+        Self {
+            goals: [
+                (2, Goal::RestrictSun),
+                (
+                    3,
+                    Goal::FleeSun {
+                        speed: 1.0,
+                        wanted: Vec3::default(),
+                    },
+                ),
+                (3, Goal::Unavailable("AvoidEntityGoal")),
+                (
+                    5,
+                    Goal::Stroll {
+                        speed: 1.0,
+                        interval: 120,
+                        probability: 0.001,
+                        wanted: Vec3::default(),
+                        force_trigger: false,
+                    },
+                ),
+                (
+                    6,
+                    Goal::LookAtPlayer {
+                        look_distance: 8.0,
+                        probability: 0.02,
+                        look_at: None,
+                        look_time: 0,
+                    },
+                ),
+                (
+                    6,
+                    Goal::RandomLookAround {
+                        rel_x: 0.0,
+                        rel_z: 0.0,
+                        look_time: 0,
+                    },
+                ),
+                (4, Self::skeleton_melee()),
+            ]
+            .into_iter()
+            .map(|(priority, goal)| WrappedGoal {
+                priority,
+                goal,
+                running: false,
+            })
+            .collect(),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn skeleton_targets() -> Self {
+        let mut selector = Self::zombie_targets();
+        selector.goals.remove(2);
+        selector.goals[3].priority = 3;
+        selector
+    }
+
+    fn skeleton_melee() -> Goal {
+        Goal::MeleeAttack {
+            speed: 1.2,
+            ticks_until_next_attack: 0,
+            ticks_until_path_recalc: 0,
+            pathed_target: Vec3::default(),
+            raise_arm_ticks: 0,
+            last_can_use_check: 0,
+            start_path: None,
+        }
+    }
+
+    pub(crate) fn reassess_skeleton_weapon(
+        &mut self,
+        me: &mut Entity,
+        mob: &mut Mob,
+        ctx: &mut dyn EntityCtx,
+    ) {
+        let index = self.goals.len() - 1;
+        let has_bow = super::skeleton::bow_slot(mob).is_some();
+        if has_bow == matches!(self.goals[index].goal, Goal::Bow(_)) {
+            return;
+        }
+        self.stop(index, me, mob, ctx);
+        for holder in &mut self.locked {
+            if *holder == Some(index) {
+                *holder = None;
+            }
+        }
+        self.goals[index].goal = if has_bow {
+            Goal::Bow(super::skeleton::BowGoal::new(ctx.blocks().difficulty()))
+        } else {
+            Self::skeleton_melee()
+        };
     }
 
     /// `Zombie.addBehaviourGoals` 里的 `targetSelector`。缺实体的目标仍注册，
@@ -549,6 +651,9 @@ const fn adjusted_tick_delay(every_tick: bool, ticks: i32) -> i32 {
 
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
+        Goal::Bow(_) => {
+            super::skeleton::bow_slot(mob).is_some() && target_player(mob, ctx).is_some()
+        }
         Goal::Float => float_can_use(me, mob),
         Goal::Panic { target, .. } => {
             if !should_panic(mob, ctx) {
@@ -766,6 +871,10 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
 
 fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
+        Goal::Bow(_) => {
+            super::skeleton::bow_slot(mob).is_some()
+                && (target_player(mob, ctx).is_some() || !mob.navigation.is_done())
+        }
         Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
         Goal::Breed {
             partner, love_time, ..
@@ -857,6 +966,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
 
 fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *target, *speed);
@@ -915,7 +1025,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.target = *found;
             *unseen_ticks = 0;
         }
-        Goal::RestrictSun => mob.navigation.flags.can_open_doors = true,
+        Goal::RestrictSun => mob.navigation.avoid_sun = true,
         Goal::FleeSun { speed, wanted } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
@@ -952,6 +1062,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
 
 fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::Bow(bow) => bow.stop(mob),
         Goal::Breed {
             partner, love_time, ..
         } => {
@@ -968,11 +1079,9 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
-        Goal::Float
-        | Goal::Panic { .. }
-        | Goal::RandomLookAround { .. }
-        | Goal::Unavailable(_)
-        | Goal::RestrictSun => {}
+        Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } | Goal::Unavailable(_) => {
+        }
+        Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
         Goal::HurtByTarget { .. } => mob.target = None,
         Goal::NearestAttackableTarget { found, .. } => {
@@ -992,7 +1101,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.aggressive = false;
             mob.navigation.stop();
         }
-        Goal::FleeSun { .. } => mob.navigation.stop(),
+        Goal::FleeSun { .. } => {}
         Goal::BreakDoor => {
             mob.door_break_time = 0;
             mob.door_break_progress = -1;
@@ -1006,6 +1115,11 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::Bow(bow) => {
+            if let Some(target) = target_player(mob, ctx) {
+                bow.tick(me, mob, ctx, target);
+            }
+        }
         Goal::Float => {
             if me.random.next_float() < 0.8 {
                 mob.jump.jump = true;
@@ -1165,9 +1279,11 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
             // `ZombieAttackGoal.tick`：`super.tick()` 之后抬手计时加一，按新的
             // `ticksUntilNextAttack` 决定举不举手。
-            *raise_arm_ticks += 1;
-            mob.aggressive = *raise_arm_ticks >= 5
-                && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
+            if mob.mob_type != super::MobType::Skeleton {
+                *raise_arm_ticks += 1;
+                mob.aggressive = *raise_arm_ticks >= 5
+                    && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
+            }
         }
         Goal::FleeSun { .. } => {}
         Goal::BreakDoor => {

@@ -17,6 +17,7 @@ pub enum Pickup {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArrowPublic {
+    pub uuid: [u8; 16],
     pub owner: Option<EntityUid>,
     pub pitch: f32,
     pub critical: bool,
@@ -29,6 +30,7 @@ pub struct ArrowPublic {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arrow {
+    pub uuid: [u8; 16],
     pub owner: Option<EntityUid>,
     pub owner_uuid: Option<[u8; 16]>,
     pub pitch: f32,
@@ -51,6 +53,7 @@ pub struct Arrow {
 impl Default for Arrow {
     fn default() -> Self {
         Self {
+            uuid: [0; 16],
             owner: None,
             owner_uuid: None,
             pitch: 0.0,
@@ -75,6 +78,7 @@ impl Default for Arrow {
 impl Arrow {
     pub(crate) fn public(&self, remaining_fire_ticks: i32) -> ArrowPublic {
         ArrowPublic {
+            uuid: self.uuid,
             owner: self.owner,
             pitch: self.pitch,
             critical: self.critical,

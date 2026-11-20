@@ -330,7 +330,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         );
     }
     // ---- Zombie ----
-    if mob.mob_type.is_monster() {
+    if mob.mob_type.uses_baby_metadata() {
         put(&mut out, "IsBaby", Tag::Byte(i8::from(mob.zombie_baby)));
         put(
             &mut out,
@@ -480,7 +480,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             }
         }
         // ---- Zombie ----
-        if mob.mob_type.is_monster() {
+        if mob.mob_type.uses_baby_metadata() {
             let baby = tag::bool_or(tag, "IsBaby", false);
             mob.set_zombie_baby(baby);
             let (width, height, eye) = mob.mob_type.dimensions(baby);

@@ -30,6 +30,7 @@ pub struct NavMob {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Navigation {
     pub path: Option<Path>,
+    pub avoid_sun: bool,
     pub speed_modifier: f64,
     pub tick: i32,
     pub last_stuck_check: i32,
@@ -58,6 +59,7 @@ impl Navigation {
     pub fn new(follow_range_base: f64) -> Self {
         Self {
             path: None,
+            avoid_sun: false,
             speed_modifier: 0.0,
             tick: 0,
             last_stuck_check: 0,
@@ -149,7 +151,7 @@ impl Navigation {
         if self.is_done() {
             return false;
         }
-        self.trim_path(view);
+        self.trim_path(view, mob.path.position);
         if self.path.as_ref().is_none_or(|path| path.node_count() == 0) {
             return false;
         }
@@ -347,7 +349,7 @@ impl Navigation {
     }
 
     /// `PathNavigation.trimPath`：炼药锅格子上抬一格。
-    fn trim_path(&mut self, view: &dyn BlockView) {
+    fn trim_path(&mut self, view: &dyn BlockView, feet: Vec3) {
         let Some(path) = &mut self.path else {
             return;
         };
@@ -371,6 +373,15 @@ impl Navigation {
                     path.nodes[index + 1] = lifted;
                 }
             }
+        }
+        if self.avoid_sun
+            && !view.can_see_sky(BlockPos::containing(feet.add(Vec3::new(0.0, 0.5, 0.0))))
+            && let Some(first_sunny) = path
+                .nodes
+                .iter()
+                .position(|node| view.can_see_sky(node.pos()))
+        {
+            path.nodes.truncate(first_sunny);
         }
     }
 

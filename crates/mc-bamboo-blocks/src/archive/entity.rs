@@ -90,7 +90,11 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     put(&mut out, "OnGround", Tag::Byte(i8::from(public.on_ground)));
     put(&mut out, "Invulnerable", Tag::Byte(0));
     put(&mut out, "PortalCooldown", Tag::Int(0));
-    put(&mut out, "UUID", entity_uuid_tag(public.uid));
+    let uuid = match &public.kind {
+        crate::entity::KindPublic::Arrow(arrow) => uuid_tag(&arrow.uuid),
+        _ => entity_uuid_tag(public.uid),
+    };
+    put(&mut out, "UUID", uuid);
 
     match &public.kind {
         crate::entity::KindPublic::FallingBlock { state: block, .. } => {

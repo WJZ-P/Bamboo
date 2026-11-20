@@ -1,0 +1,414 @@
+use mc_bamboo_core::{Vec3, mth};
+use mc_bamboo_data::{items, registries::attribute};
+use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+
+use super::{Mob, control, living};
+use crate::{
+    World,
+    entity::{
+        Entity, EntityKind, EntityUid,
+        ctx::{BlockView, Command, EntityCtx, PlayerView},
+    },
+};
+
+pub(crate) fn bow_slot(mob: &Mob) -> Option<EquipmentSlot> {
+    [EquipmentSlot::MainHand, EquipmentSlot::OffHand]
+        .into_iter()
+        .find(|&slot| mob.equipment.get(slot).item == items::BOW)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BowGoal {
+    interval: i32,
+    attack_time: i32,
+    see_time: i32,
+    strafing_time: i32,
+    strafing_clockwise: bool,
+    strafing_backwards: bool,
+    draw_start: Option<i32>,
+}
+
+impl BowGoal {
+    pub(crate) fn new(difficulty: i32) -> Self {
+        Self {
+            interval: if difficulty == 3 { 20 } else { 40 },
+            attack_time: -1,
+            see_time: 0,
+            strafing_time: -1,
+            strafing_clockwise: false,
+            strafing_backwards: false,
+            draw_start: None,
+        }
+    }
+
+    pub(crate) fn stop(&mut self, mob: &mut Mob) {
+        mob.aggressive = false;
+        self.see_time = 0;
+        self.attack_time = -1;
+        self.stop_using(mob);
+    }
+
+    fn stop_using(&mut self, mob: &mut Mob) {
+        self.draw_start = None;
+        mob.using_item_flags = 0;
+    }
+
+    /// RangedBowAttackGoal.tick：先更新视线与移动，再推进拉弓。
+    ///
+    /// RangedBowAttackGoal.tick updates visibility and movement before the draw.
+    pub(crate) fn tick(
+        &mut self,
+        me: &mut Entity,
+        mob: &mut Mob,
+        ctx: &mut dyn EntityCtx,
+        target: PlayerView,
+    ) {
+        let Some(slot) = bow_slot(mob) else { return };
+        let visible =
+            living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position());
+        if visible != (self.see_time > 0) {
+            self.see_time = 0;
+        }
+        self.see_time += if visible { 1 } else { -1 };
+        self.move_and_look(me, mob, ctx.blocks(), target);
+
+        if let Some(start) = self.draw_start {
+            if !visible && self.see_time < -60 {
+                self.stop_using(mob);
+            } else if visible && me.tick_count - start >= 20 {
+                self.stop_using(mob);
+                shoot(me, mob, ctx, target, slot);
+                self.attack_time = self.interval;
+            }
+        } else {
+            self.attack_time -= 1;
+            if self.attack_time <= 0 && self.see_time >= -60 {
+                self.draw_start = Some(me.tick_count);
+                mob.using_item_flags = if slot == EquipmentSlot::OffHand { 3 } else { 1 };
+            }
+        }
+    }
+
+    fn move_and_look(
+        &mut self,
+        me: &mut Entity,
+        mob: &mut Mob,
+        view: &dyn BlockView,
+        target: PlayerView,
+    ) {
+        const RADIUS_SQR: f64 = 15.0 * 15.0;
+        let distance = target.position.distance_to_sqr(me.position);
+        if distance <= RADIUS_SQR && self.see_time >= 20 {
+            mob.navigation.stop();
+            self.strafing_time += 1;
+        } else {
+            let nav = living::nav_mob(me, mob, view);
+            mob.navigation
+                .move_to_entity(view, &nav, target.position, 1.0, 1);
+            self.strafing_time = -1;
+        }
+        if self.strafing_time >= 20 {
+            if me.random.next_float() < 0.3 {
+                self.strafing_clockwise = !self.strafing_clockwise;
+            }
+            if me.random.next_float() < 0.3 {
+                self.strafing_backwards = !self.strafing_backwards;
+            }
+            self.strafing_time = 0;
+        }
+        if self.strafing_time >= 0 {
+            if distance > RADIUS_SQR * 0.75 {
+                self.strafing_backwards = false;
+            } else if distance < RADIUS_SQR * 0.25 {
+                self.strafing_backwards = true;
+            }
+            mob.mover.strafe(
+                if self.strafing_backwards { -0.5 } else { 0.5 },
+                if self.strafing_clockwise { 0.5 } else { -0.5 },
+            );
+            look_at_now(me, mob, target.eye_position());
+        } else {
+            mob.look.set_look_at(
+                target.position.x,
+                target.eye_y(),
+                target.position.z,
+                30.0,
+                30.0,
+            );
+        }
+    }
+}
+
+fn look_at_now(me: &mut Entity, mob: &mut Mob, eye: Vec3) {
+    let dx = eye.x - me.position.x;
+    let dy = eye.y - (me.position.y + f64::from(mob.eye_height));
+    let dz = eye.z - me.position.z;
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    let degrees = |rad: f64| rad * 180.0 / f64::from(std::f32::consts::PI);
+    let yaw = degrees(mth::atan2(dz, dx)) as f32 - 90.0;
+    let pitch = -degrees(mth::atan2(dy, horizontal)) as f32;
+    me.y_rot = control::rotate_towards(me.y_rot, yaw, 30.0);
+    mob.x_rot = control::rotate_towards(mob.x_rot, pitch, 30.0);
+}
+
+fn shoot(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    target: PlayerView,
+    slot: EquipmentSlot,
+) {
+    let position = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height) - f64::from(0.1_f32),
+        me.position.z,
+    );
+    let relative = target.position.subtract(position);
+    let distance = (relative.x * relative.x + relative.z * relative.z).sqrt();
+    let target_height = if target.sneaking { 1.5_f32 } else { 1.8_f32 };
+    let direction = Vec3::new(
+        relative.x,
+        (target.position.y + f64::from(target_height) / 3.0 - position.y)
+            + distance * f64::from(0.2_f32),
+        relative.z,
+    );
+    let difficulty = ctx.blocks().difficulty();
+    ctx.emit(
+        Command::ShootMobArrow {
+            position,
+            direction,
+            owner_uuid: mob.uuid,
+            weapon: mob.equipment.get(slot).clone(),
+            difficulty,
+        },
+        me,
+    );
+    let pitch = 1.0 / (me.random.next_float() * 0.4 + 0.8);
+    living::play_sound(me, mob, "minecraft:entity.skeleton.shoot", 1.0, pitch);
+}
+
+/// ProjectileUtil.getMobArrow：箭用自身随机源算伤害和散布，不用射手的随机源。
+///
+/// ProjectileUtil.getMobArrow uses the newly constructed arrow's RNG for damage and spread.
+pub(crate) fn spawn_arrow(
+    world: &mut World<'_>,
+    position: Vec3,
+    direction: Vec3,
+    owner: EntityUid,
+    owner_uuid: [u8; 16],
+    weapon: ItemStack,
+    difficulty: i32,
+) {
+    let mut entity = world.prepare_entity(Entity::arrow(position));
+    let EntityKind::Arrow(arrow) = &mut entity.kind else {
+        unreachable!()
+    };
+    arrow.owner = Some(owner);
+    arrow.owner_uuid = Some(owner_uuid);
+    arrow.weapon = Some(weapon);
+    arrow.base_damage = 2.0
+        + entity
+            .random
+            .triangle(f64::from(difficulty) * 0.11, 0.57425);
+    entity.shoot_arrow(direction, 1.6, (14 - 4 * difficulty) as f32);
+    world.add_prepared_entity(entity);
+}
+
+pub(crate) fn strafe(me: &Entity, mob: &mut Mob, view: &dyn BlockView) {
+    use super::path::static_path_type;
+    use mc_bamboo_data::PathType;
+    let control = &mut mob.mover;
+    let speed =
+        control.speed_modifier as f32 * mob.attributes.value(attribute::MOVEMENT_SPEED) as f32;
+    let mut forward = control.strafe_forwards;
+    let mut right = control.strafe_right;
+    let scale = speed / (forward * forward + right * right).sqrt().max(1.0);
+    let (dx, dz) = control::strafe_projection(me.y_rot, forward * scale, right * scale);
+    if static_path_type(
+        view,
+        control::walkable_probe(me.position.x, me.block_position().y, me.position.z, dx, dz),
+    ) != PathType::Walkable
+    {
+        forward = 1.0;
+        right = 0.0;
+        control.strafe_forwards = forward;
+        control.strafe_right = right;
+    }
+    mob.speed = speed;
+    mob.zza = forward;
+    mob.xxa = right;
+    control.operation = super::control::Operation::Wait;
+}
+
+pub(super) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
+    let difficulty = BlockView::difficulty(world);
+    let special = ((BlockView::effective_difficulty(world, entity.block_position()) - 2.0) / 2.0)
+        .clamp(0.0, 1.0);
+    let random = world.random();
+    entity.with_mob(|_, mob| {
+        if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
+            && range.modifier(super::spawn::RANDOM_SPAWN_BONUS).is_none()
+        {
+            range.modifiers.push(super::attributes::Modifier {
+                id: super::spawn::RANDOM_SPAWN_BONUS.to_owned(),
+                amount: random.triangle(0.0, 0.114_850_000_000_000_01),
+                operation: super::attributes::Operation::AddMultipliedBase,
+                permanent: true,
+            });
+        }
+        mob.left_handed = random.next_float() < 0.05;
+        populate_armor(mob, random, difficulty, special);
+        mob.equipment
+            .set(EquipmentSlot::MainHand, ItemStack::new(items::BOW, 1));
+        for (slot, chance) in [
+            (EquipmentSlot::MainHand, 0.25),
+            (EquipmentSlot::Feet, 0.5),
+            (EquipmentSlot::Legs, 0.5),
+            (EquipmentSlot::Chest, 0.5),
+            (EquipmentSlot::Head, 0.5),
+        ] {
+            let stack = mob.equipment.get(slot);
+            if !stack.is_empty() && random.next_float() < chance * special {
+                let mut stack = stack.clone();
+                world
+                    .level()
+                    .enchant_mob_spawn_equipment(&mut stack, special);
+                mob.equipment.set(slot, stack);
+            }
+        }
+        mob.can_pick_up_loot = random.next_float() < 0.55 * special;
+    });
+}
+
+fn populate_armor(
+    mob: &mut Mob,
+    random: &crate::random::LegacyRandom,
+    difficulty: i32,
+    special: f32,
+) {
+    use EquipmentSlot::{Chest, Feet, Head, Legs};
+    if random.next_float() >= 0.15 * special {
+        return;
+    }
+    let mut material = random.next_int(3) as usize;
+    for _ in 0..3 {
+        if random.next_float() < 0.1087 {
+            material += 1;
+        }
+    }
+    let partial = if difficulty == 3 { 0.1 } else { 0.25 };
+    let armor = [
+        [
+            items::LEATHER_HELMET,
+            items::LEATHER_CHESTPLATE,
+            items::LEATHER_LEGGINGS,
+            items::LEATHER_BOOTS,
+        ],
+        [
+            items::COPPER_HELMET,
+            items::COPPER_CHESTPLATE,
+            items::COPPER_LEGGINGS,
+            items::COPPER_BOOTS,
+        ],
+        [
+            items::GOLDEN_HELMET,
+            items::GOLDEN_CHESTPLATE,
+            items::GOLDEN_LEGGINGS,
+            items::GOLDEN_BOOTS,
+        ],
+        [
+            items::CHAINMAIL_HELMET,
+            items::CHAINMAIL_CHESTPLATE,
+            items::CHAINMAIL_LEGGINGS,
+            items::CHAINMAIL_BOOTS,
+        ],
+        [
+            items::IRON_HELMET,
+            items::IRON_CHESTPLATE,
+            items::IRON_LEGGINGS,
+            items::IRON_BOOTS,
+        ],
+        [
+            items::DIAMOND_HELMET,
+            items::DIAMOND_CHESTPLATE,
+            items::DIAMOND_LEGGINGS,
+            items::DIAMOND_BOOTS,
+        ],
+    ];
+    for (index, (slot, item)) in [Head, Chest, Legs, Feet]
+        .into_iter()
+        .zip(armor[material])
+        .enumerate()
+    {
+        if index != 0 && random.next_float() < partial {
+            break;
+        }
+        if mob.equipment.get(slot).is_empty() {
+            mob.equipment.set(slot, ItemStack::new(item, 1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockTicks, entity::ctx::PreciseCtx};
+
+    #[test]
+    fn draw_takes_twenty_ticks_in_addition_to_difficulty_cooldown() {
+        assert_eq!(BowGoal::new(3).interval, 20);
+        assert_eq!(BowGoal::new(2).interval, 40);
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut shooter =
+            Entity::by_mob_type(super::super::MobType::Skeleton, Vec3::new(0.5, 64.0, 0.5));
+        let player = PlayerView {
+            uid: 123,
+            uuid: None,
+            position: Vec3::new(10.5, 64.0, 0.5),
+            eye_height: 1.62,
+            alive: true,
+            spectator: false,
+            creative: false,
+            sneaking: false,
+            invisible: false,
+            armor_cover: 0.0,
+            main_hand: 0,
+            off_hand: 0,
+        };
+        shooter.with_mob(|shooter, mob| {
+            mob.equipment
+                .set(EquipmentSlot::MainHand, ItemStack::new(items::BOW, 1));
+            let mut goal = BowGoal::new(2);
+            let mut previous = 0;
+            let mut shots = Vec::new();
+            for tick in 1..=100 {
+                shooter.tick_count = tick;
+                mob.seen.clear();
+                let mut ctx = PreciseCtx::new(&mut world, shooter.id);
+                goal.tick(shooter, mob, &mut ctx, player);
+                let count = world.entity_ids().len();
+                if count > previous {
+                    shots.push(tick);
+                    previous = count;
+                }
+            }
+            assert_eq!(shots, vec![21, 81]);
+        });
+    }
+
+    #[test]
+    fn skeleton_finalize_spawn_equips_the_bow() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut skeleton = Entity::by_mob_type(super::super::MobType::Skeleton, Vec3::default());
+        assert!(bow_slot(skeleton.kind.mob().unwrap()).is_none());
+        finalize_spawn(&mut world, &mut skeleton);
+        let mob = skeleton.kind.mob().unwrap();
+        assert_eq!(bow_slot(mob), Some(EquipmentSlot::MainHand));
+        assert_eq!(mob.health, 20.0);
+        assert_eq!(mob.attributes.value(attribute::MOVEMENT_SPEED), 0.25);
+    }
+}

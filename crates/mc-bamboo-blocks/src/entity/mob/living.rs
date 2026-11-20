@@ -777,6 +777,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
         // `tickCount` 是实体自己的 tick 数；`id` 用网络实体 ID。
         let mut goals = std::mem::take(&mut mob.goals);
+        if mob.mob_type == super::MobType::Skeleton {
+            goals.reassess_skeleton_weapon(me, mob, ctx);
+        }
         let mut targets = std::mem::take(&mut mob.target_goals);
         let phase = me.tick_count.wrapping_add(me.id);
         if phase % 2 != 0 && me.tick_count > 1 {
@@ -876,7 +879,8 @@ fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
                 mob.mover.operation = Operation::Wait;
             }
         }
-        Operation::Wait | Operation::Strafe => mob.zza = 0.0,
+        Operation::Strafe => super::skeleton::strafe(me, mob, view),
+        Operation::Wait => mob.zza = 0.0,
     }
 }
 

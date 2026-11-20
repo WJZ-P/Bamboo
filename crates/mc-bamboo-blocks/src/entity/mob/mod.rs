@@ -24,6 +24,7 @@ pub mod motion;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
+pub mod skeleton;
 pub mod spawn;
 pub(crate) mod timing;
 
@@ -49,6 +50,7 @@ pub enum MobType {
     Cow,
     Zombie,
     Husk,
+    Skeleton,
 }
 
 impl MobType {
@@ -59,6 +61,7 @@ impl MobType {
             Self::Cow => ids::COW,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
+            Self::Skeleton => ids::SKELETON,
         }
     }
 
@@ -68,11 +71,12 @@ impl MobType {
             Self::Cow => "minecraft:cow",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
+            Self::Skeleton => "minecraft:skeleton",
         }
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk]
+        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
             .into_iter()
             .find(|kind| kind.name() == name)
     }
@@ -80,6 +84,10 @@ impl MobType {
     /// 成年和幼年的（宽，高，眼高）。
     pub const fn dimensions(self, baby: bool) -> (f32, f32, f32) {
         match (self, baby) {
+            (Self::Skeleton, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (facts.width, facts.height, 1.74)
+            }
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -91,7 +99,7 @@ impl MobType {
 
     /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
     pub const fn is_monster(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk)
+        matches!(self, Self::Zombie | Self::Husk | Self::Skeleton)
     }
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
@@ -121,13 +129,14 @@ impl MobType {
             Self::Cow => "minecraft:entities/cow",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
+            Self::Skeleton => "minecraft:entities/skeleton",
         }
     }
 
     /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
     /// 尸壳不烧，僵尸烧。
     pub const fn burns_in_daylight(self) -> bool {
-        matches!(self, Self::Zombie)
+        matches!(self, Self::Zombie | Self::Skeleton)
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -146,6 +155,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
         }
     }
 
@@ -154,6 +164,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
         }
     }
 
@@ -162,6 +173,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.death"),
         }
     }
 
@@ -170,6 +182,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.step"),
         }
     }
 
@@ -180,6 +193,7 @@ impl MobType {
             Self::Cow => items::COW_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
+            Self::Skeleton => items::SKELETON_SPAWN_EGG,
         }
     }
 
@@ -189,12 +203,13 @@ impl MobType {
             Self::Cow => "entity.minecraft.cow",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
+            Self::Skeleton => "entity.minecraft.skeleton",
         }
     }
 
     /// 幼年是不是用 `Zombie.DATA_BABY_ID`（布尔元数据），而不是牛的 `age < 0`。
     pub const fn uses_baby_metadata(self) -> bool {
-        self.is_monster()
+        matches!(self, Self::Zombie | Self::Husk)
     }
 }
 
@@ -773,6 +788,7 @@ pub struct Mob {
     pub target: Option<EntityUid>,
     /// `Mob.setAggressive`：`ZombieAttackGoal` 抬手时置真，同步进 `MobFlags` 的第 4 位。
     pub aggressive: bool,
+    pub using_item_flags: u8,
     /// `Zombie.canBreakDoors`；`finalizeSpawn` 按 0.1 概率置真。
     pub can_break_doors: bool,
     /// `BreakDoorGoal` 的 240 刻进度，随实体行搬岛。
@@ -864,22 +880,22 @@ impl Mob {
 
     /// 按类型构造。牛的属性/目标/导航一条不改，其它类型只换这三张表。
     pub fn new(mob_type: MobType) -> Self {
-        let attributes = if mob_type.is_monster() {
-            Attributes::zombie()
-        } else {
-            Attributes::cow()
+        let attributes = match mob_type {
+            MobType::Cow => Attributes::cow(),
+            MobType::Skeleton => Attributes::skeleton(),
+            MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
-        let goals = if mob_type.is_monster() {
-            GoalSelector::zombie(&mut navigation)
-        } else {
-            GoalSelector::cow(&mut navigation)
+        let goals = match mob_type {
+            MobType::Cow => GoalSelector::cow(&mut navigation),
+            MobType::Skeleton => GoalSelector::skeleton(),
+            MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
-        let target_goals = if mob_type.is_monster() {
-            GoalSelector::zombie_targets()
-        } else {
-            GoalSelector::default()
+        let target_goals = match mob_type {
+            MobType::Cow => GoalSelector::default(),
+            MobType::Skeleton => GoalSelector::skeleton_targets(),
+            MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
         Self {
@@ -965,6 +981,7 @@ impl Mob {
             loot_table_seed: 0,
             target: None,
             aggressive: false,
+            using_item_flags: 0,
             can_break_doors: false,
             door_break_time: 0,
             door_break_progress: -1,
@@ -1082,6 +1099,7 @@ pub struct MobPublic {
     pub dying: bool,
     /// `Mob.DATA_MOB_FLAGS_ID` 的攻击性位；牛恒为假。
     pub aggressive: bool,
+    pub using_item_flags: u8,
     /// `Zombie.DATA_BABY_ID`（布尔元数据），牛不用。
     pub zombie_baby: bool,
     /// `Zombie.DATA_SPECIAL_TYPE_ID`。
@@ -1124,6 +1142,7 @@ impl MobPublic {
             left_handed: mob.left_handed,
             dying: mob.is_dead_or_dying(),
             aggressive: mob.aggressive,
+            using_item_flags: mob.using_item_flags,
             zombie_baby: mob.zombie_baby,
             zombie_special_type: mob.zombie_special_type,
             drowned_converting: mob.drowned_converting,

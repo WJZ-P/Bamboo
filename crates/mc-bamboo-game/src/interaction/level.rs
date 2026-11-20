@@ -301,6 +301,23 @@ impl Level for RegionLevel<'_> {
         MAX_Y
     }
 
+    fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
+        use mc_bamboo_protocol::components::{ComponentValue, PatchEntry};
+        let levels = mc_bamboo_loot::mob_spawn_enchantments(
+            &game_stack_to_loot(stack),
+            special,
+            self.random().source(),
+        );
+        if !levels.is_empty() {
+            let mut patch = stack.patch();
+            patch.put(
+                kinds::ENCHANTMENTS,
+                PatchEntry::Set(ComponentValue::Enchantments(levels)),
+            );
+            (stack.added, stack.removed) = patch.to_opaque();
+        }
+    }
+
     fn random(&self) -> &LevelRandom {
         self.random
     }

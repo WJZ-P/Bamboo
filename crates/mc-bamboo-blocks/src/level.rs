@@ -701,6 +701,11 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
     fn random(&self) -> &LevelRandom;
 
+    /// 通过游戏层的附魔表执行生成装备附魔。
+    ///
+    /// Apply the mob-spawn equipment enchantment provider from the game registry.
+    fn enchant_mob_spawn_equipment(&self, _stack: &mut ItemStack, _special: f32) {}
+
     /// 只取一个 `next_float()`，供活塞音高这类「取数 → 算参数 → 发效果」的动作使用。
     /// 默认实现转发给 [`Self::random`]；录制包装覆盖它把这次取数记成可重放的效果。
     fn next_random_float(&self) -> f32 {

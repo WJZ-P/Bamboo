@@ -39,6 +39,13 @@ impl MoveControl {
         }
     }
 
+    pub(crate) fn strafe(&mut self, forwards: f32, right: f32) {
+        self.operation = Operation::Strafe;
+        self.strafe_forwards = forwards;
+        self.strafe_right = right;
+        self.speed_modifier = 0.25;
+    }
+
     pub fn has_wanted(&self) -> bool {
         self.operation == Operation::MoveTo
     }
@@ -155,6 +162,13 @@ pub struct JumpControl {
 }
 
 /// 方块坐标的中心偏移，`MoveControl.isWalkable` 用。
+pub(crate) fn strafe_projection(yaw: f32, forward: f32, right: f32) -> (f32, f32) {
+    let radians = yaw * (std::f32::consts::PI / 180.0);
+    let sin = mth::sin(f64::from(radians));
+    let cos = mth::cos(f64::from(radians));
+    (forward * cos - right * sin, right * cos + forward * sin)
+}
+
 pub fn walkable_probe(x: f64, y: i32, z: f64, dx: f32, dz: f32) -> BlockPos {
     BlockPos::new(
         mth::floor(x + f64::from(dx)),

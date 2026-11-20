@@ -816,6 +816,7 @@ impl KindData {
     fn mob_uuid(&self) -> Option<[u8; 16]> {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
+            Self::Arrow(arrow) => Some(arrow.uuid),
             _ => None,
         }
     }
@@ -899,6 +900,7 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             5 => EntityData::NoGravity(false),
             6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
             7 => EntityData::TicksFrozen(0),
+            8 => EntityData::LivingFlags(0),
             9 => EntityData::Health(1.0),
             15 => EntityData::MobFlags(0),
             16 => EntityData::Baby(false),
@@ -957,6 +959,9 @@ fn zombie_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Ve
         out.push(EntityData::TicksFrozen(mob.ticks_frozen));
     }
     out.push(EntityData::Health(mob.health));
+    if mob.using_item_flags != 0 {
+        out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
     let mut mob_flags = 0u8;
     if mob.no_ai {
         mob_flags |= 1;
@@ -1032,6 +1037,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     // `LivingEntity` 的 `DATA_LIVING_ENTITY_FLAGS` 恒为 0，`DATA_HEALTH_ID` 默认 1。
     // The living flags are always 0 and health defaults to 1.
     out.push(EntityData::Health(mob.health));
+    if mob.using_item_flags != 0 {
+        out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
     let mut mob_flags = 0u8;
     if mob.no_ai {
         mob_flags |= 1;

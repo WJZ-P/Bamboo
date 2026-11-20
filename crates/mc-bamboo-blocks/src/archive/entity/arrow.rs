@@ -41,15 +41,8 @@ pub(super) fn write(arrow: &Arrow, out: &mut Vec<(String, Tag)>) -> Result<()> {
 pub(super) fn read(input: &Tag, pitch: f32) -> Arrow {
     let mut arrow = Arrow::default();
     arrow.pitch = pitch;
-    if let Some(Tag::IntArray(uuid)) = tag::field(input, "Owner")
-        && let [a, b, c, d] = uuid.as_slice()
-    {
-        let mut bytes = [0; 16];
-        for (output, word) in bytes.chunks_exact_mut(4).zip([a, b, c, d]) {
-            output.copy_from_slice(&word.to_be_bytes());
-        }
-        arrow.owner_uuid = Some(bytes);
-    }
+    arrow.uuid = uuid_from(input, "UUID").unwrap_or([0; 16]);
+    arrow.owner_uuid = uuid_from(input, "Owner");
     arrow.left_owner = tag::bool_or(input, "LeftOwner", false);
     arrow.has_been_shot = tag::bool_or(input, "HasBeenShot", false);
     arrow.life = i32::from(tag::short_or(input, "life", 0));
@@ -80,6 +73,20 @@ pub(super) fn read(input: &Tag, pitch: f32) -> Arrow {
     }
     arrow.weapon = tag::field(input, "weapon").and_then(|t| slots::decode_item(t).ok());
     arrow
+}
+
+fn uuid_from(input: &Tag, key: &str) -> Option<[u8; 16]> {
+    let Tag::IntArray(words) = tag::field(input, key)? else {
+        return None;
+    };
+    let [a, b, c, d] = words.as_slice() else {
+        return None;
+    };
+    let mut bytes = [0; 16];
+    for (output, word) in bytes.chunks_exact_mut(4).zip([a, b, c, d]) {
+        output.copy_from_slice(&word.to_be_bytes());
+    }
+    Some(bytes)
 }
 
 fn encode_item(stack: &ItemStack) -> Result<Tag> {

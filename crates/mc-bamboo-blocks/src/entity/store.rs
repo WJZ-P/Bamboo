@@ -882,6 +882,9 @@ impl EntityStore {
         entity.finish_item_random();
         super::orb::finish_spawn(&mut entity, Vec3::default());
         entity.finish_mob_random();
+        if let EntityKind::Arrow(arrow) = &mut entity.kind {
+            arrow.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         entity
     }
 

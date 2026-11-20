@@ -470,6 +470,13 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    ShootMobArrow {
+        position: Vec3,
+        direction: Vec3,
+        owner_uuid: [u8; 16],
+        weapon: ItemStack,
+        difficulty: i32,
+    },
     ArrowImpact {
         block: Option<BlockHit>,
         hits: Vec<super::arrow::ArrowEntityHit>,
@@ -573,6 +580,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::MergeWithNeighbours { others } => {
             Entity::apply_merge_with_neighbours(me, &others, world);
+        }
+        Command::ShootMobArrow {
+            position,
+            direction,
+            owner_uuid,
+            weapon,
+            difficulty,
+        } => {
+            super::mob::skeleton::spawn_arrow(
+                world, position, direction, me.id, owner_uuid, weapon, difficulty,
+            );
         }
         Command::ArrowImpact { block, hits, end } => {
             super::arrow::impact(me, world, hits, block, end)
