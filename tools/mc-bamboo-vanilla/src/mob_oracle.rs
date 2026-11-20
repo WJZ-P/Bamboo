@@ -71,6 +71,7 @@ enum Line {
     Header(Header),
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
+    ArrowPickup(projectile::ArrowPickupCase),
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     End(End),
@@ -467,6 +468,7 @@ struct End {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ZombieFacts {
+    halloween: bool,
     /// 主世界时钟（真实时间模式逐刻推进，否则 0）。
     clock: i64,
     inhabited_time: i64,
@@ -685,6 +687,10 @@ impl Level for MobLevel {
         skeleton_spawn::enchant_equipment(stack, special, self.random.source());
     }
 
+    fn is_halloween(&self) -> bool {
+        self.facts.halloween
+    }
+
     /// `LivingEntity.dropFromLootTable`：官方一侧用真的 `minecraft:entities/cow` 表，
     /// 世界种子 0 的随机序列，攻击者的主手带抢夺等级。
     ///
@@ -881,6 +887,7 @@ impl Report {
                 Line::Header(header) => self.check_header(&header)?,
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
+                Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
                 Line::End(end) => {
@@ -985,6 +992,7 @@ impl Report {
             looting: case.players.iter().map(|player| player.looting).collect(),
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             facts: ZombieFacts {
+                halloween: false,
                 clock: 0,
                 inhabited_time: 0,
                 can_see_sky: case.monsters_burn,

@@ -12,6 +12,47 @@ use super::*;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct ArrowPickupCase {
+    count: i32,
+    pickup: u8,
+    grounded: bool,
+    shake: u8,
+    creative: bool,
+    full_inventory: i32,
+    removed: bool,
+    arrows: i32,
+    remaining: i32,
+}
+
+impl Report {
+    pub(super) fn replay_arrow_pickup(&mut self, case: &ArrowPickupCase) {
+        use mc_bamboo_blocks::entity::arrow::Pickup;
+        self.cases += 1;
+        let pickup = match case.pickup {
+            0 => Pickup::Disallowed,
+            1 => Pickup::Allowed,
+            2 => Pickup::CreativeOnly,
+            value => panic!("unrecognized pickup mode {value}"),
+        };
+        let actual = mc_bamboo_game::replay_arrow_pickup(
+            case.count,
+            pickup,
+            case.grounded,
+            case.shake,
+            case.creative,
+            (case.full_inventory >= 0).then_some(case.full_inventory),
+        );
+        let expected = (case.removed, case.arrows, case.remaining);
+        if actual != expected {
+            self.mismatch(format!(
+                "arrow pickup {case:?}: official {expected:?}, bamboo {actual:?}"
+            ));
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct ProjectileCase {
     name: String,
     difficulty: i32,

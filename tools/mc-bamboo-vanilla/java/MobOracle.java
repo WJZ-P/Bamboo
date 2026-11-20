@@ -238,7 +238,13 @@ public final class MobOracle {
             }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
-                cases += playSkeletonSpawns(official, out);
+                cases += playSkeletonSpawns(official, out, false);
+            }
+            if ("skeleton_halloween".equals(only)) {
+                cases += playHalloweenSpawns(official, out);
+            }
+            if (only == null || "arrow_pickup".equals(only)) {
+                cases += playArrowPickups(official, out);
             }
             if (only == null || "skeleton_death".startsWith(only)) {
                 cases += playSkeletonDeaths(official, out);
@@ -2428,15 +2434,83 @@ public final class MobOracle {
         return player;
     }
 
-    private static int playSkeletonSpawns(Official official, Writer out) throws Exception {
-        if (net.minecraft.util.SpecialDates.isHalloween()) {
-            throw new IllegalStateException("skeleton_spawn compares only ordinary, non-Halloween spawns");
+    private record ArrowPickupSetup(int count, int pickup, boolean grounded, int shake,
+                                    boolean creative, int fullInventory) {}
+
+    private static int playArrowPickups(Official official, Writer out) throws Exception {
+        var setups = List.of(
+                new ArrowPickupSetup(1, 1, true, 0, false, -1),
+                new ArrowPickupSetup(2, 1, true, 0, false, 63),
+                new ArrowPickupSetup(2, 1, true, 0, true, 63),
+                new ArrowPickupSetup(1, 1, true, 0, false, 0),
+                new ArrowPickupSetup(1, 1, true, 0, true, 0),
+                new ArrowPickupSetup(1, 2, true, 0, false, -1),
+                new ArrowPickupSetup(1, 2, true, 0, true, -1),
+                new ArrowPickupSetup(1, 0, true, 0, true, -1),
+                new ArrowPickupSetup(1, 1, true, 1, false, -1),
+                new ArrowPickupSetup(1, 1, false, 0, false, -1));
+        for (var setup : setups) playArrowPickup(official, out, setup);
+        return setups.size();
+    }
+
+    private static void playArrowPickup(Official official, Writer out, ArrowPickupSetup setup) throws Exception {
+        var world = FakeLevel.create(official);
+        var player = skeletonDeathPlayer(official, world, 0);
+        player.getAbilities().instabuild = setup.creative();
+        var inventory = player.getInventory();
+        inventory.setItem(0, ItemStack.EMPTY);
+        if (setup.fullInventory() >= 0) {
+            for (int slot = 0; slot < 36; slot++) inventory.setItem(slot, new ItemStack(Items.STONE, 64));
+            if (setup.fullInventory() > 0) inventory.setItem(0, new ItemStack(Items.ARROW, setup.fullInventory()));
+        }
+        var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+        var ground = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class.getDeclaredMethod("setInGround", boolean.class);
+        ground.setAccessible(true);
+        ground.invoke(arrow, setup.grounded());
+        arrow.shakeTime = setup.shake();
+        arrow.pickup = net.minecraft.world.entity.projectile.arrow.AbstractArrow.Pickup.values()[setup.pickup()];
+        arrow.getPickupItemStackOrigin().setCount(setup.count());
+        arrow.playerTouch(player);
+        int arrows = 0;
+        for (int slot = 0; slot < 36; slot++) {
+            var stack = inventory.getItem(slot);
+            if (stack.is(Items.ARROW)) arrows += stack.getCount();
+        }
+        out.write("{\"type\":\"arrowPickup\",\"count\":" + setup.count() + ",\"pickup\":" + setup.pickup()
+                + ",\"grounded\":" + setup.grounded() + ",\"shake\":" + setup.shake()
+                + ",\"creative\":" + setup.creative() + ",\"fullInventory\":" + setup.fullInventory()
+                + ",\"removed\":" + arrow.isRemoved() + ",\"arrows\":" + arrows
+                + ",\"remaining\":" + arrow.getPickupItemStackOrigin().getCount() + "}\n");
+    }
+
+    private static int playHalloweenSpawns(Official official, Writer out) throws Exception {
+        // 只在定向对拍 JVM 中替换节日日期常量，不改系统日期，也不改原版生成逻辑。
+        // Replace the holiday's calendar constant in this targeted JVM only, leaving
+        // the system clock and all of the official spawn logic untouched.
+        var old = net.minecraft.util.SpecialDates.HALLOWEEN;
+        Field field = net.minecraft.util.SpecialDates.class.getDeclaredField("HALLOWEEN");
+        var base = UNSAFE.staticFieldBase(field);
+        long offset = UNSAFE.staticFieldOffset(field);
+        try {
+            UNSAFE.putObject(base, offset, net.minecraft.util.SpecialDates.dayNow());
+            return playSkeletonSpawns(official, out, true);
+        } finally {
+            UNSAFE.putObject(base, offset, old);
+        }
+    }
+
+    private static int playSkeletonSpawns(Official official, Writer out, boolean halloween) throws Exception {
+        if (net.minecraft.util.SpecialDates.isHalloween() != halloween) {
+            throw new IllegalStateException("skeleton spawn calendar does not match the fixture");
         }
         FakeLevel world = FakeLevel.create(official);
         BlockPos pos = new BlockPos(0, 64, 0);
         int cases = 0;
         int armored = 0;
         int enchanted = 0;
+        int pumpkins = 0;
+        int lanterns = 0;
+        int helmets = 0;
         for (int sample = 0; sample < 64; sample++) {
             long seed = 20261120L + sample * 104729L;
             Difficulty difficulty = List.of(Difficulty.EASY, Difficulty.NORMAL, Difficulty.HARD).get(sample % 3);
@@ -2453,9 +2527,15 @@ public final class MobOracle {
                 var stacks = slots.stream().map(mob::getItemBySlot).toList();
                 if (stacks.stream().skip(1).anyMatch(stack -> !stack.isEmpty())) armored++;
                 if (stacks.stream().anyMatch(ItemStack::isEnchanted)) enchanted++;
+                var head = stacks.getLast();
+                if (head.is(Items.CARVED_PUMPKIN)) pumpkins++;
+                else if (head.is(Items.JACK_O_LANTERN)) lanterns++;
+                else if (!head.isEmpty()) helmets++;
                 var follow = mob.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE);
                 var bonus = follow.getModifier(Identifier.withDefaultNamespace("random_spawn_bonus"));
                 out.write("{\"type\":\"skeletonSpawn\",\"seed\":" + seed + ",\"egg\":" + egg
+                        + ",\"halloween\":" + halloween
+                        + ",\"headDropBits\":" + Float.floatToRawIntBits(mob.getDropChances().byEquipment(slots.getLast()))
                         + ",\"difficulty\":" + difficulty.getId() + ",\"clock\":" + clock
                         + ",\"inhabitedTime\":" + inhabitedTime + ",\"leftHanded\":" + mob.isLeftHanded()
                         + ",\"canPickUpLoot\":" + mob.canPickUpLoot()
@@ -2469,6 +2549,9 @@ public final class MobOracle {
         }
         if (armored == 0 || enchanted == 0) {
             throw new IllegalStateException("skeleton_spawn did not exercise armor and enchantment generation");
+        }
+        if (halloween && (pumpkins == 0 || lanterns == 0 || helmets == 0)) {
+            throw new IllegalStateException("skeleton_halloween needs both holiday items and an ordinary helmet");
         }
         return cases;
     }

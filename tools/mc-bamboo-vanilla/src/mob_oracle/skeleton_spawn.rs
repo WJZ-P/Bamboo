@@ -17,6 +17,8 @@ pub(super) struct SkeletonSpawnCase {
     difficulty: i32,
     clock: i64,
     inhabited_time: i64,
+    halloween: bool,
+    head_drop_bits: i32,
     left_handed: bool,
     can_pick_up_loot: bool,
     follow_bonus: i64,
@@ -37,6 +39,9 @@ pub(super) struct Coverage {
     eggs: usize,
     armored: usize,
     enchanted: usize,
+    pumpkins: usize,
+    lanterns: usize,
+    helmets: usize,
 }
 
 impl Coverage {
@@ -46,12 +51,29 @@ impl Coverage {
         } else {
             self.summons += 1;
         }
-        self.armored += usize::from(case.equipment.iter().skip(1).any(|stack| stack.item != 0));
+        use mc_bamboo_data::items;
+        let is_armor = |item| {
+            !matches!(
+                item,
+                items::AIR | items::CARVED_PUMPKIN | items::JACK_O_LANTERN
+            )
+        };
+        self.armored += usize::from(
+            case.equipment
+                .iter()
+                .skip(1)
+                .any(|stack| is_armor(stack.item)),
+        );
         self.enchanted += usize::from(
             case.equipment
                 .iter()
                 .any(|stack| !stack.enchantments.is_empty()),
         );
+        if let Some(head) = case.equipment.last() {
+            self.pumpkins += usize::from(head.item == items::CARVED_PUMPKIN);
+            self.lanterns += usize::from(head.item == items::JACK_O_LANTERN);
+            self.helmets += usize::from(is_armor(head.item));
+        }
     }
 
     pub(super) fn print(&self) {
@@ -60,6 +82,12 @@ impl Coverage {
                 "skeleton_spawn: {} summons, {} eggs, {} armored, {} enchanted",
                 self.summons, self.eggs, self.armored, self.enchanted
             );
+            if self.pumpkins + self.lanterns != 0 {
+                println!(
+                    "skeleton_halloween: {} pumpkins, {} lanterns, {} ordinary helmets",
+                    self.pumpkins, self.lanterns, self.helmets
+                );
+            }
         }
     }
 }
@@ -99,6 +127,8 @@ impl Report {
             looting: Vec::new(),
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             facts: ZombieFacts {
+                halloween: case.halloween
+                    && self.break_test.as_deref() != Some("skeleton_halloween"),
                 clock: case.clock,
                 inhabited_time: case.inhabited_time,
                 difficulty: case.difficulty,
@@ -172,6 +202,13 @@ impl Report {
             self.mismatch(format!(
                 "{label} equipment: official {:?}, bamboo {actual:?}",
                 case.equipment
+            ));
+        }
+        let head_drop = mob.equipment.drop_chance(EquipmentSlot::Head).to_bits() as i32;
+        if head_drop != case.head_drop_bits {
+            self.mismatch(format!(
+                "{label} head drop bits: official {}, bamboo {head_drop}",
+                case.head_drop_bits
             ));
         }
     }
