@@ -15,6 +15,8 @@ pub(super) struct DeathCase {
     player_kill: bool,
     looting: i32,
     drops: bool,
+    indirect: bool,
+    memory_ticks: i32,
     spawned: Vec<Drop>,
     remaining: Vec<i32>,
     mob_seed: i64,
@@ -41,7 +43,7 @@ struct Drop {
 fn player_view() -> PlayerView {
     PlayerView {
         uid: 1025,
-        uuid: None,
+        uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         position: Vec3::new(2.5, 64.0, 0.5),
         eye_height: 1.62,
         alive: true,
@@ -131,6 +133,10 @@ impl Report {
         ));
         entity.random = JavaRandom::new(case.seed);
         entity.with_mob(|_, mob| {
+            if case.memory_ticks > 0 {
+                mob.last_hurt_by_player_ref = player.uuid;
+                mob.last_hurt_by_player_memory_time = case.memory_ticks;
+            }
             for gear in &case.gear {
                 let slot = SLOTS[gear.slot];
                 mob.equipment.set(slot, gear_stack(gear));
@@ -138,21 +144,28 @@ impl Report {
             }
         });
         let uid = world.add_prepared_entity(entity);
-        let source = if case.player_kill {
-            let mut weapon = ItemStack::new(items::DIAMOND_SWORD, 1);
-            if case.looting > 0 {
-                let id = mc_bamboo_loot::enchantment_id("minecraft:looting").unwrap();
-                let mut patch = weapon.patch();
-                patch.put(
-                    kinds::ENCHANTMENTS,
-                    PatchEntry::Set(ComponentValue::Enchantments(vec![(id, case.looting)])),
-                );
-                (weapon.added, weapon.removed) = patch.to_opaque();
-            }
-            DamageSource::player(player.uid, player.position, false).with_looting_from(&weapon)
+        let mut source = if case.player_kill {
+            DamageSource::player(player.uid, player.position, false)
         } else {
             DamageSource::environment(DamageKind::Fall)
         };
+        if case.indirect {
+            source.kind = DamageKind::Arrow;
+            source.direct = Some(2048);
+            source.projectile_motion = Some(Vec3::new(1.0, 0.0, 0.0));
+        }
+        if self.break_test.as_deref() == Some("skeleton_death_credit") {
+            if case.indirect {
+                source.attacker_is_player = false;
+            }
+            if case.memory_ticks > 0 {
+                world.with_entity_mut(uid, &mut |entity| {
+                    if let Some(mob) = entity.kind.mob_mut() {
+                        mob.last_hurt_by_player_memory_time = 0;
+                    }
+                });
+            }
+        }
         if self.break_test.as_deref() == Some("skeleton_death") {
             world.with_entity_mut(uid, &mut |entity| {
                 entity.random.next_float();
@@ -174,7 +187,10 @@ impl Report {
             .filter_map(snapshot)
             .collect();
         let expected = (true, true, case.mob_seed, case.level_seed);
-        let label = format!("skeleton_death seed {} looting {}", case.seed, case.looting);
+        let label = format!(
+            "skeleton_death seed {} looting {} indirect {} memory {}",
+            case.seed, case.looting, case.indirect, case.memory_ticks
+        );
         if state != expected {
             self.mismatch(format!(
                 "{label} hit/dead/mob RNG/world RNG: official {expected:?}, bamboo {state:?}"

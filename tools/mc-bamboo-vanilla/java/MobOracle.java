@@ -2307,7 +2307,7 @@ public final class MobOracle {
     }
 
     private static int playSkeletonDeaths(Official official, Writer out) throws Exception {
-        final int samples = 34;
+        final int samples = 38;
         boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
         try {
             for (int sample = 0; sample < samples; sample++) {
@@ -2322,12 +2322,15 @@ public final class MobOracle {
     private static void playSkeletonDeath(Official official, Writer out, int sample) throws Exception {
         // 同一个临界随机种子的两次玩家击杀，只改变抢夺等级。
         // Two player kills with the same boundary seed; only Looting changes.
-        boolean lootingBoundary = sample >= 32;
-        int mode = lootingBoundary ? 3 : sample % 8;
-        long seed = lootingBoundary ? 20261173L : 20261120L + sample * 104729L;
+        boolean rememberedFall = sample >= 36;
+        boolean indirect = sample == 34 || sample == 35;
+        boolean lootingBoundary = sample >= 32 && !rememberedFall;
+        int memoryTicks = sample == 37 ? 1 : 0;
+        int mode = lootingBoundary ? 3 : rememberedFall ? 0 : sample % 8;
+        long seed = sample >= 32 ? 20261173L : 20261120L + sample * 104729L;
         boolean playerKill = mode == 1 || mode == 2 || mode == 3 || mode == 6 || mode == 7;
         boolean drops = mode != 6;
-        int looting = (mode == 3 && sample != 32) || mode == 7 ? 3 : 0;
+        int looting = (mode == 3 && sample != 32 && sample != 34) || mode == 7 || rememberedFall ? 3 : 0;
         FakeLevel world = FakeLevel.create(official);
         setRule(official, GameRules.MOB_DROPS, drops);
         official.server.sequences = new RandomSequences();
@@ -2347,9 +2350,9 @@ public final class MobOracle {
             case 5 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 31, true);
             case 6 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 0, false);
         }
-        var source = playerKill
-                ? world.damageSources().playerAttack(skeletonDeathPlayer(official, world, looting))
-                : world.damageSources().fall();
+        ServerPlayer player = playerKill || rememberedFall ? skeletonDeathPlayer(official, world, looting) : null;
+        if (rememberedFall) mob.setLastHurtByPlayer(player, memoryTicks);
+        var source = skeletonDeathSource(world, playerKill ? player : null, indirect);
         if (!mob.hurtServer(world, source, 100.0F) || !mob.isDeadOrDying()) {
             throw new IllegalStateException("skeleton_death did not kill the mob: " + sample);
         }
@@ -2370,7 +2373,7 @@ public final class MobOracle {
             }
         }
         boolean mainHandDropped = mob.getItemBySlot(slots.getFirst()).isEmpty();
-        if ((!drops && !spawned.isEmpty()) || xpDropped != (playerKill && drops)
+        if ((!drops && !spawned.isEmpty()) || xpDropped != ((playerKill || memoryTicks > 0) && drops)
                 || (mode == 4 && !mainHandDropped) || (mode == 5 && mainHandDropped)
                 || (lootingBoundary && mainHandDropped != (looting > 0))) {
             throw new IllegalStateException("skeleton_death did not exercise the expected drops: " + sample);
@@ -2379,8 +2382,20 @@ public final class MobOracle {
                 .mapToInt(stack -> BuiltInRegistries.ITEM.getId(stack.getItem())).toArray();
         out.write("{\"type\":\"skeletonDeath\",\"seed\":" + seed + ",\"gear\":[" + String.join(",", gear)
                 + "],\"playerKill\":" + playerKill + ",\"looting\":" + looting + ",\"drops\":" + drops
+                + ",\"indirect\":" + indirect + ",\"memoryTicks\":" + memoryTicks
                 + ",\"spawned\":[" + String.join(",", spawned) + "],\"remaining\":" + Arrays.toString(remaining)
                 + ",\"mobSeed\":" + randomSeed(mob) + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+    }
+
+    private static net.minecraft.world.damagesource.DamageSource skeletonDeathSource(
+            FakeLevel world, ServerPlayer player, boolean indirect) {
+        if (player == null) return world.damageSources().fall();
+        if (!indirect) return world.damageSources().playerAttack(player);
+        var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+        arrow.setOwner(player);
+        arrow.setPos(player.position());
+        arrow.setDeltaMovement(1.0, 0.0, 0.0);
+        return world.damageSources().arrow(arrow, player);
     }
 
     private static void equipSkeletonDeath(Official official, Mob mob, List<String> gear,

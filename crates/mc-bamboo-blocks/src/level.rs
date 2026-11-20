@@ -980,6 +980,10 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
 
+    fn player_mob_attack(&self, _uid: EntityUid) -> Option<crate::entity::mob::PlayerMobAttack> {
+        None
+    }
+
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
         0

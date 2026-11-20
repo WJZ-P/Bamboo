@@ -678,11 +678,12 @@ impl DamageSource {
         self
     }
 
-    /// 记录出手时主手武器的抢夺等级，供死亡掉落使用。
+    /// 记录致因玩家的 UUID 和命中时的主手抢夺。
     ///
-    /// Capture the main-hand Looting level at the hit for death drops.
-    pub fn with_looting_from(mut self, stack: &mc_bamboo_protocol::item::ItemStack) -> Self {
-        self.looting_level = super::arrow::enchantment_level(stack, "minecraft:looting");
+    /// Capture the causing player's UUID and their main-hand Looting at impact.
+    pub(crate) fn with_player_mob_attack(mut self, player: PlayerMobAttack) -> Self {
+        self.attacker_uuid = Some(player.uuid);
+        self.looting_level = player.looting;
         self
     }
 
@@ -710,6 +711,15 @@ impl DamageSource {
     pub const fn scales_with_difficulty(self) -> bool {
         self.kind.scales_with_difficulty() || self.scale_when_non_player
     }
+}
+
+/// 命中生物时取的玩家信息；弹射物也按致因玩家当前持有物计算抢夺。
+///
+/// Player data at a mob hit; projectiles also use their owner's current main hand.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerMobAttack {
+    pub uuid: [u8; 16],
+    pub looting: i32,
 }
 
 /// 掉落表区分致死来源和最近伤害过它的玩家。

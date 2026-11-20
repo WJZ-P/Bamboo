@@ -3031,12 +3031,18 @@ impl<'a> World<'a> {
     pub fn hurt_mob(
         &mut self,
         id: i32,
-        source: crate::entity::mob::DamageSource,
+        mut source: crate::entity::mob::DamageSource,
         amount: f32,
     ) -> bool {
         let Some(mut entity) = self.level.take_entity(id) else {
             return false;
         };
+        if source.attacker_is_player
+            && let Some(uid) = source.attacker
+            && let Some(player) = self.level.player_mob_attack(uid)
+        {
+            source = source.with_player_mob_attack(player);
+        }
         let hurt = {
             let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
             entity

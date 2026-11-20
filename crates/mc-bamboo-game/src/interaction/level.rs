@@ -766,6 +766,34 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    fn player_mob_attack(
+        &self,
+        uid: i32,
+    ) -> Option<mc_bamboo_blocks::entity::mob::PlayerMobAttack> {
+        let player = self.players.get(&PlayerId(uid))?;
+        let held = player.inventory.held(mc_bamboo_core::Hand::Main);
+        let patch = held.patch();
+        let enchantments = mc_bamboo_protocol::components::defaults::resolve(
+            held.item,
+            &patch,
+            kinds::ENCHANTMENTS,
+        );
+        let looting = match (
+            mc_bamboo_loot::enchantment_id("minecraft:looting"),
+            enchantments,
+        ) {
+            (Some(id), Some(ComponentValue::Enchantments(levels))) => levels
+                .iter()
+                .find_map(|&(kind, level)| (kind == id).then_some(level))
+                .unwrap_or(0),
+            _ => 0,
+        };
+        Some(mc_bamboo_blocks::entity::mob::PlayerMobAttack {
+            uuid: *player.uuid.as_bytes(),
+            looting,
+        })
+    }
+
     /// `getEntitiesOfClass(LivingEntity)`。玩家按 `PlayerId` 排序，和实体列表的顺序不一定相同。
     ///
     /// `getEntitiesOfClass(LivingEntity)`. Players are ordered by `PlayerId`, which is not
@@ -889,6 +917,62 @@ mod tests {
 
     use crate::region::Region;
     use mc_bamboo_core::Vec3;
+
+    #[test]
+    fn indirect_skeleton_death_uses_the_causing_players_current_looting() {
+        use crate::{inbound::PlayerId, player::Player};
+        use mc_bamboo_core::Hand;
+        use mc_bamboo_protocol::{
+            components::{ComponentValue, PatchEntry},
+            packet::play::{ClientInformation, GameMode},
+        };
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1025);
+        let uuid = uuid::Uuid::from_u128(53);
+        let position = Vec3::new(2.5, 64.0, 0.5);
+        let mut player = Player::new(
+            id,
+            uuid,
+            "Archer".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            position,
+        );
+        let mut sword = ItemStack::new(items::DIAMOND_SWORD, 1);
+        let mut patch = sword.patch();
+        patch.put(
+            mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(vec![(
+                mc_bamboo_loot::enchantment_id("minecraft:looting").unwrap(),
+                3,
+            )])),
+        );
+        (sword.added, sword.removed) = patch.to_opaque();
+        let hand = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[hand] = sword;
+        region.insert_player(player);
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        let mut skeleton = world.prepare_entity(Entity::by_mob_type(
+            MobType::Skeleton,
+            Vec3::new(0.5, 64.0, 0.5),
+        ));
+        skeleton.random = mc_bamboo_blocks::entity::JavaRandom::new(20261173);
+        skeleton.with_mob(|_, mob| {
+            mob.equipment
+                .set(EquipmentSlot::MainHand, ItemStack::new(items::BOW, 1))
+        });
+        let uid = world.add_prepared_entity(skeleton);
+        let mut source = DamageSource::player(id.0, position, false);
+        source.kind = DamageKind::Arrow;
+        source.direct = Some(2000);
+        source.projectile_motion = Some(Vec3::new(1.0, 0.0, 0.0));
+        assert!(world.hurt_mob(uid, source, 100.0));
+        let entity = world.entity(uid).unwrap();
+        let mob = entity.kind.mob().unwrap();
+        assert_eq!(mob.last_hurt_by_player_ref, Some(*uuid.as_bytes()));
+        assert!(mob.equipment.get(EquipmentSlot::MainHand).is_empty());
+    }
 
     #[test]
     fn skeleton_death_uses_the_region_loot_table_and_drops_preserved_gear() {

@@ -763,6 +763,17 @@ impl Level for MobLevel {
             Err(_) => Vec::new(),
         }
     }
+
+    fn player_mob_attack(
+        &self,
+        uid: i32,
+    ) -> Option<mc_bamboo_blocks::entity::mob::PlayerMobAttack> {
+        let index = self.players.iter().position(|player| player.uid == uid)?;
+        Some(mc_bamboo_blocks::entity::mob::PlayerMobAttack {
+            uuid: self.players[index].uuid?,
+            looting: self.looting.get(index).copied().unwrap_or(0),
+        })
+    }
 }
 
 struct Report {
