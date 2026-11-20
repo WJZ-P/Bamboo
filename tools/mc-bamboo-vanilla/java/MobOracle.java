@@ -71,6 +71,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.RandomSequences;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.TickRateManager;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSources;
@@ -234,6 +235,10 @@ public final class MobOracle {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
+            }
+            if ("skeleton_spawn".equals(only)
+                    || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
+                cases += playSkeletonSpawns(official, out);
             }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
@@ -2296,6 +2301,73 @@ public final class MobOracle {
             arrow.setBaseDamageFromMob(power);
             return arrow;
         }
+    }
+
+    private static int playSkeletonSpawns(Official official, Writer out) throws Exception {
+        if (net.minecraft.util.SpecialDates.isHalloween()) {
+            throw new IllegalStateException("skeleton_spawn compares only ordinary, non-Halloween spawns");
+        }
+        FakeLevel world = FakeLevel.create(official);
+        BlockPos pos = new BlockPos(0, 64, 0);
+        int cases = 0;
+        int armored = 0;
+        int enchanted = 0;
+        for (int sample = 0; sample < 64; sample++) {
+            long seed = 20261120L + sample * 104729L;
+            Difficulty difficulty = List.of(Difficulty.EASY, Difficulty.NORMAL, Difficulty.HARD).get(sample % 3);
+            long clock = sample % 4 == 0 ? 0L : 1536000L;
+            long inhabitedTime = sample % 4 == 0 ? 0L : 3600000L;
+            ((TickingLevelData) world.levelData).difficulty = difficulty;
+            world.spawnDifficulty = new DifficultyInstance(difficulty, clock, inhabitedTime, 1.0F);
+            for (boolean egg : new boolean[] {false, true}) {
+                world.getRandom().setSeed(seed);
+                var mob = skeletonSpawn(world, pos, egg);
+                var slots = List.of(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                        net.minecraft.world.entity.EquipmentSlot.FEET, net.minecraft.world.entity.EquipmentSlot.LEGS,
+                        net.minecraft.world.entity.EquipmentSlot.CHEST, net.minecraft.world.entity.EquipmentSlot.HEAD);
+                var stacks = slots.stream().map(mob::getItemBySlot).toList();
+                if (stacks.stream().skip(1).anyMatch(stack -> !stack.isEmpty())) armored++;
+                if (stacks.stream().anyMatch(ItemStack::isEnchanted)) enchanted++;
+                var follow = mob.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE);
+                var bonus = follow.getModifier(Identifier.withDefaultNamespace("random_spawn_bonus"));
+                out.write("{\"type\":\"skeletonSpawn\",\"seed\":" + seed + ",\"egg\":" + egg
+                        + ",\"difficulty\":" + difficulty.getId() + ",\"clock\":" + clock
+                        + ",\"inhabitedTime\":" + inhabitedTime + ",\"leftHanded\":" + mob.isLeftHanded()
+                        + ",\"canPickUpLoot\":" + mob.canPickUpLoot()
+                        + ",\"followBonus\":" + Double.doubleToRawLongBits(bonus.amount())
+                        + (egg ? ",\"yaw\":" + Float.floatToRawIntBits(mob.getYRot()) : "")
+                        + ",\"equipment\":" + stacks.stream().map(stack -> skeletonSpawnEquipment(official, stack))
+                                .collect(java.util.stream.Collectors.joining(",", "[", "]"))
+                        + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+                cases++;
+            }
+        }
+        if (armored == 0 || enchanted == 0) {
+            throw new IllegalStateException("skeleton_spawn did not exercise armor and enchantment generation");
+        }
+        return cases;
+    }
+
+    private static Mob skeletonSpawn(FakeLevel world, BlockPos pos, boolean egg) {
+        if (egg) {
+            return EntityTypes.SKELETON.spawn(world, new ItemStack(Items.SKELETON_SPAWN_EGG), null,
+                    pos, EntitySpawnReason.SPAWN_ITEM_USE, true, false);
+        }
+        var mob = EntityTypes.SKELETON.create(world, EntitySpawnReason.COMMAND);
+        mob.setPos(0.5, 64.0, 0.5);
+        mob.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+        return mob;
+    }
+
+    private static String skeletonSpawnEquipment(Official official, ItemStack stack) {
+        var registry = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+        String enchantments = net.minecraft.world.item.enchantment.EnchantmentHelper.getEnchantmentsForCrafting(stack)
+                .entrySet().stream()
+                .sorted(java.util.Comparator.comparingInt(entry -> registry.getId(entry.getKey().value())))
+                .map(entry -> "[" + registry.getId(entry.getKey().value()) + "," + entry.getIntValue() + "]")
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+        return "{\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
+                + ",\"enchantments\":" + enchantments + "}";
     }
 
     private static void playProjectile(Official official, Writer out, String name) throws Exception {
@@ -4686,6 +4758,12 @@ public final class MobOracle {
     }
 
     private static final class FakeLevel extends ServerLevel {
+        DifficultyInstance spawnDifficulty;
+
+        @Override
+        public DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
+            return spawnDifficulty == null ? super.getCurrentDifficultyAt(pos) : spawnDifficulty;
+        }
         private Official official;
         private Long2ObjectOpenHashMap<BlockState> blocks;
         private LevelTicks<Block> blockTicks;

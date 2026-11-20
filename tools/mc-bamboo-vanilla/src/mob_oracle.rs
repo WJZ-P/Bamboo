@@ -25,11 +25,13 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::version;
 use mc_bamboo_game::entity_tracking::{EntityTracking, Snapshot, event_packets};
+use mc_bamboo_protocol::item::ItemStack;
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
 mod projectile;
+mod skeleton_spawn;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -68,6 +70,7 @@ enum Line {
     Header(Header),
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
+    SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     End(End),
 }
 
@@ -464,6 +467,7 @@ struct End {
 struct ZombieFacts {
     /// 主世界时钟（真实时间模式逐刻推进，否则 0）。
     clock: i64,
+    inhabited_time: i64,
     can_see_sky: bool,
     sky_darken: i32,
     difficulty: i32,
@@ -671,6 +675,14 @@ impl Level for MobLevel {
         self.facts.clock
     }
 
+    fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
+        self.facts.inhabited_time
+    }
+
+    fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
+        skeleton_spawn::enchant_equipment(stack, special, self.random.source());
+    }
+
     /// `LivingEntity.dropFromLootTable`：官方一侧用真的 `minecraft:entities/cow` 表，
     /// 世界种子 0 的随机序列，攻击者的主手带抢夺等级。
     ///
@@ -739,6 +751,7 @@ impl Level for MobLevel {
 struct Report {
     cases: u32,
     steps: usize,
+    skeleton_spawns: skeleton_spawn::Coverage,
     mismatches: Vec<String>,
     ended: bool,
     show: usize,
@@ -802,6 +815,7 @@ fn run_with_options(mut command: Command, options: &[&str]) -> Result<(), String
     let mut report = Report {
         cases: 0,
         steps: 0,
+        skeleton_spawns: skeleton_spawn::Coverage::default(),
         mismatches: Vec::new(),
         ended: false,
         show,
@@ -839,6 +853,7 @@ impl Report {
                 Line::Header(header) => self.check_header(&header)?,
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
+                Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
@@ -942,6 +957,7 @@ impl Report {
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             facts: ZombieFacts {
                 clock: 0,
+                inhabited_time: 0,
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
@@ -2201,6 +2217,7 @@ impl Report {
         if !self.ended {
             return Err("mob oracle stopped before the end line".to_owned());
         }
+        self.skeleton_spawns.print();
         if !self.mismatches.is_empty() {
             return Err(format!(
                 "mob oracle: {} mismatches\n{}",
