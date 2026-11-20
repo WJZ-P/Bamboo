@@ -486,7 +486,9 @@ pub struct OfficialConfig {
     pub level_type: String,
     /// `generator-settings` 原文（flat 预设的 JSON）。
     pub generator_settings: String,
-    /// `generate-structures`：先读进来存好，结构接上后生效。
+    /// 控制新区块的结构生成与放置（普通与超平坦）。
+    ///
+    /// Controls structure generation and placement in new chunks (noise and flat).
     pub generate_structures: bool,
     /// 未实现或未知的键，按读入顺序保存原文，写回时原样输出。
     passthrough: Vec<(String, String)>,

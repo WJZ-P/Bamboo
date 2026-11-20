@@ -196,10 +196,7 @@ impl Default for WorldConfig {
             islands: crate::island::default_islands(),
             island_dead_timeout: crate::island::default_island_dead_timeout(),
             world_dir: None,
-            world_gen: crate::world_options::WorldGenConfig {
-                generate_structures: false,
-                ..Default::default()
-            },
+            world_gen: crate::world_options::WorldGenConfig::flat_template(),
             spawn_radius: None,
             broadcast_console_to_ops: true,
             bench: None,

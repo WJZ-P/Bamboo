@@ -243,6 +243,16 @@ impl Default for WorldGenConfig {
 }
 
 impl WorldGenConfig {
+    /// 不读取服务器配置时使用的无结构超平坦模板。
+    ///
+    /// Structure-free superflat template for embedded use without server properties.
+    pub fn flat_template() -> Self {
+        Self {
+            generate_structures: false,
+            ..Self::default()
+        }
+    }
+
     /// 按官方 `DedicatedServerProperties` 组装。空种子用 `random_seed()`；
     /// 坏的 `level-type` / `generator-settings` 回退并交给调用方记日志。
     ///
