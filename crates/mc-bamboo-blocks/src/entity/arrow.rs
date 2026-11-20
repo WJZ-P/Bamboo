@@ -679,7 +679,18 @@ pub(super) fn impact(
             }
             break;
         }
+        // 官方 `hitTargetsOrDeflectSelf` 只在箭死掉或目标主动偏转时提前返回；
+        // 拒伤的反弹发生在 `onHitEntity` 内部，不会中断这一批。
+        // Vanilla `hitTargetsOrDeflectSelf` stops only when the arrow dies or the
+        // target deflects it; the rejection bounce happens inside `onHitEntity` and
+        // does not abort the batch.
         if !hits.into_iter().all(|hit| hit_entity(me, world, hit)) {
+            break;
+        }
+        // 官方只在还有穿透次数时重查剩余线段；没有穿透的箭这一批处理完就停。
+        // Vanilla rescans only while piercing is left; a non-piercing arrow stops
+        // after this batch.
+        if !arrow_pierces(me) {
             break;
         }
         // 这一批命中后，沿原先的方块裁剪终点重查剩余线段。
@@ -799,9 +810,10 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
             me.removed = true;
         }
     }
-    // 拒伤造成的反弹发生在 onHitEntity 内，不是目标主动偏转。
-    // Reversal after rejected damage happens within onHitEntity, not as a target deflection.
-    arrow_pierces(me) && !me.removed
+    // 拒伤造成的反弹发生在 onHitEntity 内，不是目标主动偏转；箭还活着就继续处理这一批。
+    // Reversal after rejected damage happens within onHitEntity, not as a target
+    // deflection; keep walking the batch while the arrow is alive.
+    !me.removed
 }
 
 /// `AbstractArrow.doKnockback`：冲击附魔在受伤成功后再推一次。
@@ -1298,6 +1310,51 @@ mod tests {
         let health = targets.map(|id| world.entity(id).unwrap().kind.mob().unwrap().health);
         assert_eq!(health, [10.0, 9.0, 10.0]);
         assert!(world.entity(projectile).is_none());
+    }
+
+    #[test]
+    fn non_piercing_arrow_keeps_the_batch_after_a_rejected_hit() {
+        use crate::entity::mob::MobType;
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let targets = [2.0, 4.0].map(|x| {
+            let mut target = Entity::by_mob_type(MobType::Cow, Vec3::new(x, 64.0, 0.5));
+            target.with_mob(|_, mob| {
+                mob.no_ai = true;
+                mob.invulnerable = true;
+            });
+            world.spawn_entity(target)
+        });
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 65.0, 0.5));
+        if let EntityKind::Arrow(data) = &mut arrow.kind {
+            data.base_damage = 0.5;
+        }
+        arrow.delta = Vec3::new(6.0, 0.0, 0.0);
+        let end = arrow.position.add(arrow.delta);
+        // 两个目标都拒伤；每次都把速度反向。两次反弹后 X 速度回到正值。
+        // Both targets reject damage; each rejection reverses the motion, so the X
+        // speed is positive again only after both hits were processed.
+        impact(
+            &mut arrow,
+            &mut world,
+            vec![
+                ArrowEntityHit {
+                    uid: targets[0],
+                    contact: Vec3::new(1.7, 65.0, 0.5),
+                    player: false,
+                },
+                ArrowEntityHit {
+                    uid: targets[1],
+                    contact: Vec3::new(3.7, 65.0, 0.5),
+                    player: false,
+                },
+            ],
+            None,
+            end,
+        );
+        assert!(arrow.delta.x > 0.0, "delta was {:?}", arrow.delta);
+        assert!(!arrow.removed);
     }
 
     #[test]
