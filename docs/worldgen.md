@@ -997,10 +997,11 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
 * 生成期光照：`initialize_light` / `light` 的真实计算**已做完并接进游戏**：
   `mc_bamboo_world::light::generate::generate_light_from_layers` 在 `light` 阶段算好
   天空光 / 方块光，完工装进交付盒子并标 `isLightOn=true`，不再等运行时光照引擎补算；
-  `gen-light` 对拍逐格 0 不一致。剩下的正确性风险是**输入**：`generate_light_stage`
-  输入也已改成 FEATURES 后视图（见「生成期光照的输入」），`light-pipeline` 整块对拍
-  逐格 0 不一致，`--break-carvers` 改坏确认报 5147 处差异；`gen-light` 的合成场景
-  仍只证明光引擎一致。
+  `gen-light` 对拍逐格 0 不一致。输入也已对齐：`generate_light_stage_with_input`
+  用与完工组装同一份 `feature_writes_into` + `merge_feature_writes` 把 9 个来源
+  中心的 FEATURES 写折进 3×3，再交给光引擎；`light-pipeline` 整块对拍（带结构 /
+  不带结构）逐格证明流水线挑的方块与官方 LIGHT 一致，`--break-carvers` 改坏确认
+  会把输入退回 CARVERS 并报差异。
 * `spawn` 刷怪仍是空实现：官方 `ChunkStatusTasks.generateSpawn` →
   `ChunkGenerator.spawnOriginalMobs` → `NaturalSpawner.spawnMobsForChunkGeneration`
   用群系 `CREATURE` 加权表、环境属性和 `SpawnPlacements` 放动物；Bamboo 的
@@ -1036,8 +1037,20 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   增量维护过程，最终值等价，是纯性能差异。`PostProcessing` 位置表已逐段对拍并写进
   存档（见「`PostProcessing` 位置表」），`ProtoChunk` 其余字段仍按
   `docs/worldgen-remaining.md` 记录逐项推进。
-* 非 `full` 的 ProtoChunk 从盘上读回后从它的状态继续生成：由 `worldgen-resume`
-  分支单独实现并写文档，本分支不碰存档读取路径。
+* 非 `full` 的 ProtoChunk 从盘上读回后从它的状态继续生成：**已做完**。
+  `chunk_nbt::decode` 用 `ChunkStatus.CODEC` 的规则解析盘上 `Status`，原样恢复
+  已写出的方块 / 群系 / 高度图 / 光照 / 结构；`region::chunk_content::decode`、
+  `ChunkCodec::DecodedColumn`、`TaskResult::Decoded { column, status }` 把阶段交给
+  Director，只跑它之后的 `ChunkStatus` 阶段；`partials` 按阶段恢复 CARVERS 快照、
+  `feature_deltas` / `generated_light` / `generated_structures` 分别恢复地物写、
+  生成期光照和结构标签；写盘写真实阶段。
+  对拍 `mc-bamboo-vanilla resume-world` 用官方 `SerializableChunkData` codec 写
+  各阶段存档，Bamboo 读回续跑，和官方一口气生成到 `full` 的方块、群系、高度图、
+  方块实体、光照、结构逐格比；带结构 / 不带结构各一组，含四种邻居状态组合和三种
+  改坏确认（把状态当 full、丢掉邻居写增量、抹掉生成期光照）。全部 0 不一致。
+  常用命令：`mc-bamboo-vanilla resume-world java --seeds 1 --chunks 1 --salt 7`、
+  带结构加 `--seed 42 --chunk 17 7 --structures`、改坏确认加
+  `--break-self-test --break-neighbor --break-light`。
 * 出生点 `setInitialSpawn` 仍只比较到 CARVERS 地形；树 / 雪层 / 结构改变
   `MOTION_BLOCKING` 时，个别种子的落点可能和满配官方世界不同。
 * 并行化和 SIMD：逐位一致的基线已经把生成期光照输入修对，仍建议先不优化。

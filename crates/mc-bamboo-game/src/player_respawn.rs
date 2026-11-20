@@ -16,9 +16,9 @@ use mc_bamboo_data::{gamerules, registries::dimension_type};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
-        ChangeDifficulty, CommonPlayerSpawnInfo, ContainerSetContent, GameEvent, GameMode,
-        InitializeBorder, PlayerPosition, Respawn, SetDefaultSpawnPosition, SetEntityData,
-        SetEquipment, SetExperience, SetHeldSlot, SetTime, UpdateAttributes,
+        ChangeDifficulty, ClockState, CommonPlayerSpawnInfo, ContainerSetContent, GameEvent,
+        GameMode, InitializeBorder, PlayerPosition, Respawn, SetDefaultSpawnPosition,
+        SetEntityData, SetEquipment, SetExperience, SetHeldSlot, SetTime, UpdateAttributes,
     },
 };
 
@@ -85,6 +85,11 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
         food: FoodData::default(),
         ..PlayerHealth::default()
     };
+    // 官方重建 `ServerPlayer` 再 `restoreFrom`：效果表是空的，
+    // 重生序列里 `sendActivePlayerEffects` 因此不发效果包。
+    // Vanilla rebuilds `ServerPlayer` before `restoreFrom`, so effects are empty.
+    player.effects = mc_bamboo_blocks::entity::mob::effects::EffectMap::new();
+    player.environment = crate::player_environment::Environment::default();
     player.dead = false;
     player.awaiting_respawn = false;
     player.in_combat = false;
@@ -132,7 +137,8 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     let border = region.global.world_border.clone();
     let weather = region.global.weather;
     let time = region.global.time;
-    let clock = region.global.clock;
+    let clocks = region.global.clocks();
+    let advance_time = region.global.time_advances();
     let world_spawn = region.global.spawn;
     let (is_flat, sea_level) = crate::spawn_landing::search_from(region).level_flags();
     // 官方 `findRespawnAndUseSpawnBlock`：强制个人点的两格不能重生就回退到
@@ -176,7 +182,7 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     // 4) set_default_spawn_position
     // 5) change_difficulty
     // 6) set_experience
-    // 7) sendActivePlayerEffects（没有药水效果，空）
+    // 7) sendActivePlayerEffects：重生后效果表已清空，正常不发包。
     // 8) sendLevelInfo：initialize_border / set_time /
     //    set_default_spawn_position / 雨三个 game_event / game_event 13
     // 9) sendPlayerPermissionLevel（entity_event 权限 + 命令树）
@@ -258,6 +264,9 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
             total_experience: experience.total,
         },
     );
+    // `PlayerList.sendActivePlayerEffects`（第 7 步）。重生后为空，
+    // 但保留调用点：改成功效保留规则时这里会按官方补发。
+    crate::player_effects::send_active(region, id);
 
     // `PlayerList.sendLevelInfo`。
     region.links.send(
@@ -273,14 +282,28 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
             warning_time: border.warning_time(),
         },
     );
+    // `PlayerList.sendLevelInfo` 发的是整表：主世界和末地两份时钟。
+    let states: Vec<_> = clocks
+        .iter()
+        .map(|(name, clock)| {
+            let id = if *name == "minecraft:the_end" {
+                mc_bamboo_data::registries::world_clock::THE_END
+            } else {
+                mc_bamboo_data::registries::world_clock::OVERWORLD
+            };
+            ClockState {
+                clock: id,
+                ticks: clock.total_ticks,
+                partial: clock.partial_tick,
+                rate: clock.network_rate(advance_time),
+            }
+        })
+        .collect();
     region.links.send(
         id,
         &SetTime {
             game_time: time.0,
-            clock: mc_bamboo_data::registries::world_clock::OVERWORLD,
-            clock_ticks: clock.total_ticks,
-            clock_partial: clock.partial_tick,
-            clock_rate: clock.network_rate(),
+            clocks: &states,
         },
     );
     region.links.send(id, &spawn_packet);

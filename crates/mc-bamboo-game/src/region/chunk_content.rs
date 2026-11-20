@@ -37,7 +37,7 @@ use mc_bamboo_storage::{
     },
     chunk_nbt::{self, ChunkEncodeExtra, DecodedChunk as DecodedColumn, field},
 };
-use mc_bamboo_world::column::ChunkColumn;
+use mc_bamboo_world::{column::ChunkColumn, ticket::ChunkStatus};
 
 use super::column::{PackedContainer, RegionColumn, RegionColumnParts};
 use crate::{
@@ -71,11 +71,18 @@ pub struct EncodedChunk {
     pub entities: Option<Tag>,
 }
 
-/// 读回来的区块束和问题清单，可直接交给 `Region::deliver_column`。
+/// 读回来的区块束和问题清单。`persisted_status` 是盘上 `Status` 对应的生成阶段，
+/// 非 `full` 时 Director 要从这个阶段接着跑生成流水线（官方
+/// `SerializableChunkData.read` + `ChunkStep.apply`）。
+///
+/// Decoded bundle, problems and the on-disk generation stage. A stage below
+/// `full` tells the Director where to resume generation (vanilla
+/// `SerializableChunkData.read` + `ChunkStep.apply`).
 #[derive(Debug)]
 pub struct DecodedChunk {
     pub column: Box<RegionColumn>,
     pub problems: Vec<Problem>,
+    pub persisted_status: ChunkStatus,
 }
 
 /// 存档编码需要的只读部件。`RegionColumn`（卸载存盘）和 `BorrowedParts`
@@ -214,6 +221,7 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
     // 2. 计划刻：两条列表混进 ChunkEncodeExtra。
     let mut extra = ChunkEncodeExtra {
         chunk_pos: pos,
+        status: Some(column.chunk().archive().status),
         ..Default::default()
     };
     let archive = column.chunk().archive();
@@ -360,6 +368,7 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
     Ok(DecodedChunk {
         column: RegionColumn::from_parts(parts),
         problems,
+        persisted_status: decoded.persisted_status,
     })
 }
 

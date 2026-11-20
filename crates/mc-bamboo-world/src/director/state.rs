@@ -262,8 +262,14 @@ pub enum TaskResult<C> {
     Read {
         bytes: Option<Vec<u8>>,
     },
+    /// 从盘上读回的盒子。`status` 是盘上 `Status` 对应的阶段：
+    /// `full` 直接交付，其余从该阶段接着跑生成流水线。
+    ///
+    /// A box read from disk. `status` is its on-disk stage: `full` is delivered
+    /// directly; earlier stages resume generation from there.
     Decoded {
         column: C,
+        status: ChunkStatus,
     },
     Generated {
         stage: ChunkStatus,
@@ -805,7 +811,7 @@ impl<C: ChunkBundle> Director<C> {
     /// 把结果里带着的盒子取出来，交给 `park_orphan`。
     fn park_orphan_result(out: &mut Vec<Effect<C>>, pos: ChunkPos, result: TaskResult<C>) {
         let column = match result {
-            TaskResult::Decoded { column }
+            TaskResult::Decoded { column, .. }
             | TaskResult::Generated { column, .. }
             | TaskResult::Assembled { column }
             | TaskResult::Saved { column, .. } => Some(column),
@@ -1223,9 +1229,21 @@ impl<C: ChunkBundle> Director<C> {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
             }
             TaskResult::Read { bytes: None } => self.advance_stage(out, pos, generation, None),
-            TaskResult::Decoded { column } | TaskResult::Assembled { column } => {
-                self.deliver(out, pos, generation, column);
+            TaskResult::Decoded { column, status } => {
+                // 官方 `ChunkStep.apply` 只跑 `persistedStatus` 之后的阶段：
+                // 把记录推进到盘上的阶段，再从下一阶段接着生成；`full` 直接交付。
+                // Vanilla `ChunkStep.apply` only runs stages after the persisted
+                // one: advance the record to the on-disk stage and resume there.
+                if let Some(record) = self.chunks.get_mut(&pos) {
+                    record.stage = status;
+                }
+                if status == ChunkStatus::Full {
+                    self.deliver(out, pos, generation, column);
+                } else {
+                    self.advance_stage(out, pos, generation, Some(column));
+                }
             }
+            TaskResult::Assembled { column } => self.deliver(out, pos, generation, column),
             TaskResult::Generated { stage, column } => {
                 if let Some(record) = self.chunks.get_mut(&pos) {
                     record.stage = stage;

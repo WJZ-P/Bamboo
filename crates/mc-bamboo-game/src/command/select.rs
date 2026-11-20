@@ -144,6 +144,71 @@ pub(crate) fn with_scoreboard(
     optional_players(region, board, source, level, selector)
 }
 
+/// 这个选择器有没有可能选到非玩家实体（计划 4.5.1：只选玩家时一个岛都不用借）。
+///
+/// Whether this selector may select non-player entities (plan 4.5.1: a
+/// players-only selector never needs another island).
+pub(crate) fn may_include_non_players(selector: &EntitySelector) -> bool {
+    selector.includes_entities || selector.uuid.is_some()
+}
+
+/// 规划期只读筛查：这个岛上有没有任何一个**非玩家实体**能过选择器的全部过滤
+/// 条件（计划 4.5.1 第 3 节）。和执行期共用 `matches` / `volume_box` /
+/// `selector.position`，但**不排序、不截断、不取随机数、不受 `limit` 影响**：
+/// `sort=nearest` / `random` 要先看到全部候选才知道谁命中，所以借的是「至少
+/// 有一个候选的岛」，不是「最终选中者所在的岛」。
+///
+/// Read-only planning pass: does this island hold at least one non-player
+/// entity passing every filter (plan 4.5.1, section 3)? Shares `matches`,
+/// `volume_box` and `selector.position` with execution, but never sorts,
+/// truncates, draws randomness or honours `limit`: nearest/random ordering
+/// needs the complete candidate set before it can tell who wins.
+pub(crate) fn has_non_player_candidate(
+    region: &Region,
+    source: source::Source,
+    selector: &EntitySelector,
+    origin: Vec3,
+) -> bool {
+    if !may_include_non_players(selector) {
+        return false;
+    }
+    let origin = selector.position(origin);
+    let volume = volume_box(origin, selector);
+    // 名字 / UUID / `@s` 的短路形式：和执行期一样，按全局 ID 序找唯一命中者。
+    // Name / UUID / `@s` short-circuit like execution: find the one match in
+    // ascending global id order.
+    if selector.player_name.is_some() {
+        return false;
+    }
+    if let Some(uuid) = selector.uuid {
+        return entity_by_uuid(region, uuid).is_some_and(|target| {
+            matches!(target, Target::World(_))
+                && matches(region, target, selector, origin, volume, None)
+        });
+    }
+    if selector.current_entity {
+        return match source.entity {
+            Some(Target::World(uid)) => region.entities.public_at(uid).is_some_and(|_| {
+                matches(region, Target::World(uid), selector, origin, volume, None)
+            }),
+            _ => false,
+        };
+    }
+    let limited_type = positive_type(selector);
+    let skip_entities =
+        !selector.includes_entities || limited_type.is_some_and(|id| id == entity_type::PLAYER);
+    if skip_entities {
+        return false;
+    }
+    region.entities.iter_public().any(|public| {
+        if public.removed {
+            return false;
+        }
+        let target = Target::World(public.uid);
+        matches(region, target, selector, origin, volume, None)
+    })
+}
+
 /// 官方 `EntitySelector.findEntities`：先按名字/UUID 短路，再收集候选、排序、截断。
 ///
 /// Official `EntitySelector.findEntities`: short-circuit on a name/UUID, then
@@ -683,11 +748,30 @@ fn distance_sqr(region: &Region, target: &Target, origin: Vec3) -> f64 {
 /// which uses the process-wide unseeded `java.util.Random` held inside
 /// `java.util.Collections`, not `level.random` or any entity random. Bamboo
 /// keeps one process-wide `JavaRandom` with the same `nextInt(bound)` draws.
+/// `Collections.shuffle` 的进程级随机源（官方 `java.util.Collections` 里那一份）。
+/// The process-wide source behind `Collections.shuffle` (the one in official
+/// `java.util.Collections`).
+static SHUFFLE_RANDOM: OnceLock<Mutex<JavaRandom>> = OnceLock::new();
+
+fn shuffle_random() -> &'static Mutex<JavaRandom> {
+    SHUFFLE_RANDOM.get_or_init(|| Mutex::new(JavaRandom::new(0x6a09_e667_f3bc_c909)))
+}
+
 fn shuffle(ids: &mut [Target]) {
-    static RANDOM: OnceLock<Mutex<JavaRandom>> = OnceLock::new();
-    let random = RANDOM.get_or_init(|| Mutex::new(JavaRandom::new(0x6a09_e667_f3bc_c909)));
-    let mut random = random
+    let mut random = shuffle_random()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     random.shuffle(ids);
+}
+
+/// 测试专用：把 `sort=random` 的进程级随机源重置回初始值，让两份对照世界
+/// 从同一个状态各跑一遍（计划 4.5.1 第 7 节）。正式路径不调用。
+///
+/// Test-only: reset the process-wide `sort=random` source so two comparison
+/// worlds start from the same state (plan 4.5.1, section 7).
+#[cfg(test)]
+pub(crate) fn reset_shuffle_random() {
+    *shuffle_random()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = JavaRandom::new(0x6a09_e667_f3bc_c909);
 }

@@ -71,7 +71,7 @@
 |---|---|---|
 | 难度状态 | `WorldState::difficulty`（默认 Easy）、`/difficulty` 查询/设置、进服 `ChangeDifficulty` 包、`level.dat` 读写都有；`GlobalView` 每刻把难度发布给每个岛。**但没有任何逻辑读它**（`World::difficulty_id()` 恒返回 NORMAL=2） | `crates/mc-bamboo-game/src/world_state.rs:29-49`, `:118-140`；`crates/mc-bamboo-game/src/global.rs:637-680`；`crates/mc-bamboo-game/src/command/world_settings.rs:22-67`；`crates/mc-bamboo-blocks/src/world.rs:96-99`, `:1811-1814` |
 | 和平清除 | 官方入口是 `Mob.checkDespawn` 开头：难度 == PEACEFUL 且 `!EntityType.isAllowedInPeaceful()` 时 `discard()`（不是 `ServerLevel` 主动扫全表）。Bamboo 的 `check_despawn` 按牛写死，注释「难度不是和平，`isAllowedInPeaceful` 也为真，这一支不删」，且 `Animal.removeWhenFarAway=false` 不消失；没有类别化 `MobCategory`/128 格消失 | `crates/mc-bamboo-blocks/src/entity/mob/living.rs:112-139`；官方 `Mob.java` 1605 行起 |
-| 光照 | `BlockView::brightness(sky/block)` 已有（真实光照逐格读区块表）；`sky_darken()` 默认 0，`World` 里 `SKY_DARKEN=0` 常量（世界时钟新建时**停在正午且 paused**，`/time resume` 可开）；`max_local_raw_brightness` / `effective_sky_brightness` / `can_see_sky` / `is_raining_at` 在 `World` 精确路径已有；**并行 `SourceView` 没覆盖** `sky_darken` / `is_raining_at` / `game_time` / `level_random_*`，恒给缺省值 | `crates/mc-bamboo-blocks/src/entity/ctx.rs:85-139`；`crates/mc-bamboo-blocks/src/entity/view.rs:340-373`；`crates/mc-bamboo-blocks/src/world.rs:98-99`, `:1771-1808`, `:1895-1910`；`crates/mc-bamboo-blocks/src/level.rs:807-856`, `:981-984`；`crates/mc-bamboo-game/src/global.rs:35-71`, `:508-515` |
+| 光照 | `BlockView::brightness(sky/block)` 已有（真实光照逐格读区块表）；新世界时钟按官方从 0 刻走起来，`GlobalView::sky_darken` 每刻按官方 `Level.updateSkyBrightness` 从主世界时钟 + `SKY_LIGHT_LEVEL` 时间线 + 雨 / 雷暴算出，`World::max_local_raw_brightness` / `effective_sky_brightness` 读 `Level::sky_darken()`，并行 `SourceView` 的 `ViewFacts::sky_darken` 读同一份快照；`can_see_sky` / `is_raining_at` 在 `World` 精确路径已有；**并行 `SourceView` 仍未覆盖** `is_raining_at` / `level_random_*`，恒给缺省值 | `crates/mc-bamboo-blocks/src/sky.rs`；`crates/mc-bamboo-blocks/src/entity/ctx.rs`；`crates/mc-bamboo-blocks/src/entity/view.rs`；`crates/mc-bamboo-blocks/src/world.rs`；`crates/mc-bamboo-game/src/global.rs`, `:interaction.rs` |
 | 阳光下燃烧 | `Mob.aiStep` 里 `EntityTypeTags.BURN_IN_DAYLIGHT` → `burnUndead()`；`isSunBurnTick` 要 `EnvironmentAttributes.MONSTERS_BURN`、`getLightLevelDependentMagicValue()>0.5`、`random.nextFloat()*30 < (magic−0.4)*2`、不在水/雨/粉雪、眼睛那格 `canSeeSky`；`burnUndead` 头盔可损坏则 `hurtAndBreak(nextInt(2))` 并挡住，否则 `igniteForSeconds(8)`。`LevelReader.getLightLevelDependentMagicValue` = `maxLocalRawBrightness/15` → `f/(4−3f)` → 按维度 `ambientLight` 插值。Bamboo 只有牛的 `walk_target_value` 算了类似的魔法值（`goals.rs:873-884`），没有 `burnUndead`；`generated/tags.rs:967` 已有 `burn_in_daylight` 标签（含 zombie/skeleton/husk/stray/drowned 等 ID） | 官方 `Mob.java` 884-1075 / `LevelReader.java` 203-234；`crates/mc-bamboo-blocks/src/entity/mob/goals.rs:873-884`；`crates/mc-bamboo-data/src/generated/tags.rs:967` |
 | `Monster` 基类 | 官方：`xpReward=5`；`aiStep` 里 `magic>0.5` 时 `noActionTime += 2`；`getWalkTargetValue = −getPathfindingCostFromLightLevels`；`shouldDropExperience=true`；`shouldDropLoot` 读 `MOB_DROPS`；`createMonsterAttributes` 只加 `ATTACK_DAMAGE`；`isDarkEnoughToSpawn` 生成条件（sky brightness ≤ `nextInt(32)`、block light > 维度上限则拒绝、雷暴用 `getMaxLocalRawBrightness(pos,10)`、和 `monsterSpawnLightTest.sample(random)` 比较）。Bamboo 的 `Mob` 是「`LivingEntity → Mob → PathfinderMob → AgeableMob → Animal → Cow`」一条链，没有 `Monster` 层：`xp_reward` 写死在 `die()` 里为牛的 `1+nextInt(3)`、声音是 `CowSoundVariant`、`check_despawn` 按牛、`Malus::animal()`、`getWalkTargetValue` 是草方块+亮度加权 | `crates/mc-bamboo-blocks/src/entity/mob/mod.rs:1-5`, `:459-570`；`crates/mc-bamboo-blocks/src/entity/mob/living.rs:112-139`, `:1212-1255`；`crates/mc-bamboo-blocks/src/entity/mob/path.rs:41-63`；官方 `Monster.java` 全文 |
 
@@ -314,9 +314,9 @@ keepInventory）。
 - 难度：`BlockView::difficulty` 接 `Region.global.difficulty`；`check_despawn`
   按 `MobCategory` 分类（和平清除、`MONSTER` 128 格 / 600 刻 / 1/800 消失、
   牛仍 `removeWhenFarAway=false`）；`isSpawningMonsters` 读 `spawn_mobs`+`spawn_monsters`。
-- 光照/燃烧：`sky_darken` 按官方 `Level.updateSkyBrightness` 从主世界时钟 +
-  `SKY_LIGHT_LEVEL` + 天气算（当前时钟停在正午，所以默认仍是 0；`/time set night`
-  / `resume` 后要有值），`SourceView` 同步；`Monster.updateNoActionTime`、
+- 光照/燃烧：`sky_darken` 已按官方 `Level.updateSkyBrightness` 从主世界时钟 +
+  `SKY_LIGHT_LEVEL` + 天气算好，`SourceView` 同步；本轮直接读它实现
+  `Monster.updateNoActionTime`、
   `BURN_IN_DAYLIGHT` 的 `burnUndead`（头盔耐久/点燃 8 秒）、`getWalkTargetValue`
   改成 `−成本`。`is_raining_at` / `can_see_sky` 也补到 `SourceView`。
 - 攻击：`Mob.doHurtTarget`（ATTACK_DAMAGE + 附魔修正 + 额外击退）→
@@ -421,12 +421,11 @@ keepInventory）。
    还是用 `PlayerGrid::players_within` 按半径算出的区块数？两者在多人多岛时数值不同。
    倾向「精确模式用官方全局上限，非精确模式用 PlayerGrid 的玩家半径上限」
    （和设计稿 4.6 一致），需要确认半径与开关名字。
-7. **天色/白天燃烧的触发方式**：Bamboo 新世界时钟**停在正午且 `paused=true`**，
-   `SKY_DARKEN` 写死 0。是这一轮就接 `Level.updateSkyBrightness`（时钟能走后
-   按 `SKY_LIGHT_LEVEL` + 天气算 `sky_darken`，会影响所有方块逻辑的亮度读数，
-   也要给 `SourceView` 补齐），还是只在对拍假世界里注入 `sky_darken`、正式游戏
-   仍恒正午（玩家 `/time resume` 后怪也不会自燃）？倾向前者，但需要意识到
-   它是跨方块/实体的公共改动，最好在期 0 单独一个小 PR。
+7. **天色/白天燃烧的触发方式（已定）**：新世界时钟按官方从 0 刻走起来，
+   `sky_darken` 由 `GlobalView` 每刻按官方 `Level.updateSkyBrightness` 从
+   主世界时钟 + `SKY_LIGHT_LEVEL` 时间线 + 雨 / 雷暴算出，精确模式的 `World`
+   和并行 `SourceView` 读同一份值；`clock-oracle` 逐刻与官方类对拍，
+   方块 oracle 另有 `--clock-ticks 18000` 的夜晚 / 雷暴场景。
 8. **村民/铁傀儡/海龟/狼目标**：这些实体都还没有。是现在就把
    `NearestAttackableTargetGoal` 写成「类型可配置、缺的目标跳过」，还是等对应
    生物实现时再加？倾向前者（目标系统本来就要泛化），但对拍场景里明确

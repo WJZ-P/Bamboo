@@ -52,7 +52,15 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.animal.cow.Cow;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.server.network.ServerCommonPacketListenerImpl;
+import net.minecraft.network.Connection;
+import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
@@ -126,6 +134,21 @@ public final class ExecuteOracle {
         "execute if data storage minecraft:test Value run setblock 4 -60 6 stone",
         "execute unless data storage minecraft:test Missing run setblock 4 -60 6 stone",
         "execute store result storage minecraft:test Value int 1 run setblock 4 -60 6 stone",
+        // /effect give|clear 的副作用与反馈（单/多目标、非生物目标、infinite、
+        // hideParticles、强度上限、时长上限、清除指定效果、无可清效果）
+        "effect give @s minecraft:speed 30 1",
+        "effect give @s minecraft:speed infinite 2",
+        "effect give @s minecraft:speed 1000000 255",
+        "effect give @s minecraft:speed 3 0 true",
+        "effect give @e[type=cow] minecraft:regeneration 12 1",
+        "effect give @s minecraft:instant_health 5 2",
+        "effect clear @s",
+        "effect clear @s minecraft:speed",
+        "effect clear @e[type=cow]",
+        "effect give @s minecraft:speed 30 1 ;; effect clear @s minecraft:haste",
+        "effect give @s minecraft:speed 30 1 ;; effect clear @s",
+        "effect give @s minecraft:speed 30 1 ;; effect clear @s minecraft:speed",
+        "effect give @e[type=item] minecraft:speed 10",
     };
 
     private ExecuteOracle() {
@@ -171,19 +194,30 @@ public final class ExecuteOracle {
 
     private static void emit(Writer out, Official official, String line) throws Exception {
         Scene scene = new Scene(official);
+        String setup = null;
+        String command = line;
+        int split = line.indexOf(" ;; ");
+        if (split >= 0) {
+            setup = line.substring(0, split);
+            command = line.substring(split + 4);
+        }
+        CommandSourceStack source = scene.source;
+        if (setup != null) {
+            try {
+                official.commands.performCommand(
+                        official.commands.getDispatcher().parse(setup, source), setup);
+            } catch (Throwable ignored) {
+            }
+        }
         List<String> feedback = new ArrayList<>();
-        CommandSourceStack source = scene.source.withSource(new Recording(feedback));
-        int ran = 0;
+        CommandSourceStack measured = source.withSource(new Recording(feedback));
         try {
             official.commands.performCommand(
-                    official.commands.getDispatcher().parse(line, source), line);
+                    official.commands.getDispatcher().parse(command, measured), command);
         } catch (Throwable error) {
-            ran = 0;
+            feedback.add("L[throw:" + error.getClass().getSimpleName() + "]");
         }
-        if (feedback.isEmpty()) {
-            ran = 0;
-        }
-        ran = feedback.stream().anyMatch(text -> text.contains("commands.setblock.success")) ? 1 : 0;
+        int ran = feedback.stream().anyMatch(text -> text.contains("commands.setblock.success")) ? 1 : 0;
         var info = scene.board.getPlayerScoreInfo(ScoreHolder.forNameOnly("#total"),
                 scene.board.getObjective("result"));
         int score = info == null ? 0 : info.value();
@@ -194,7 +228,38 @@ public final class ExecuteOracle {
                 + ",\"score\":" + score
                 + ",\"ran\":" + ran
                 + ",\"feedback\":" + hash(feedback)
+                + ",\"effects\":" + effectState(scene)
                 + "}\n");
+    }
+
+    /** 玩家 + 两头牛的 `activeEffects`：按实体 ID 和效果 ID 排序后逐字段哈希。 */
+    private static int effectState(Scene scene) {
+        var registry = scene.level.registryAccess().lookupOrThrow(Registries.MOB_EFFECT);
+        StringBuilder all = new StringBuilder();
+        // `tracked` 的顺序固定：玩家、牛 A、牛 B；两边都按这个顺序，
+        // 不用实体 ID（多岛 / 全局分配器给牛的号两边本来就不同）。
+        int index = 0;
+        for (Entity entity : scene.tracked) {
+            if (!(entity instanceof LivingEntity living)) continue;
+            all.append(index++).append(':');
+            List<MobEffectInstance> effects = new ArrayList<>(living.getActiveEffects());
+            effects.sort(java.util.Comparator.comparingInt(
+                    e -> registry.getId(e.getEffect().value())));
+            for (MobEffectInstance e : effects) {
+                all.append(registry.getId(e.getEffect().value())).append(',')
+                        .append(e.getDuration()).append(',').append(e.getAmplifier())
+                        .append(',').append(e.isAmbient() ? 1 : 0)
+                        .append(',').append(e.isVisible() ? 1 : 0)
+                        .append(',').append(e.showIcon() ? 1 : 0).append(';');
+            }
+            all.append('\n');
+        }
+        int hash = 0x811c9dc5;
+        for (byte b : all.toString().getBytes(StandardCharsets.UTF_8)) {
+            hash ^= b & 0xff;
+            hash *= 0x01000193;
+        }
+        return hash;
     }
 
     private static int stone(Scene scene, BlockPos pos) {
@@ -214,13 +279,27 @@ public final class ExecuteOracle {
         if (contents instanceof net.minecraft.network.chat.contents.TranslatableContents translated) {
             String key = translated.getKey();
             out.append("T[").append(key).append(']');
-            for (Object arg : translated.getArgs()) {
+            Object[] args = translated.getArgs();
+            // Bamboo 的 `Component.translate` 用 NBT 列表存参数，混合类型时
+            // `unify_elements` 会把数字转成 `{text:"n"}`；这里对混合参数做
+            // 同样的归一化，纯数字参数（如 `commands.setblock.success`）仍按 S[]。
+            boolean hasComponent = false;
+            boolean hasPlain = false;
+            for (Object arg : args) {
+                if (arg instanceof Component || arg instanceof net.minecraft.network.chat.contents.PlainTextContents) {
+                    hasComponent = true;
+                } else {
+                    hasPlain = true;
+                }
+            }
+            boolean mixed = hasComponent && hasPlain;
+            for (Object arg : args) {
                 out.append('{');
                 if (arg instanceof Component nested) {
                     decomposeInto(nested, out);
                 } else if (arg instanceof net.minecraft.network.chat.contents.PlainTextContents plain) {
                     out.append("L[").append(plain.text()).append(']');
-                } else if (key.equals("arguments.nbtpath.nothing_found")) {
+                } else if (mixed || key.equals("arguments.nbtpath.nothing_found")) {
                     out.append("L[").append(String.valueOf(arg)).append(']');
                 } else {
                     out.append("S[").append(String.valueOf(arg)).append(']');
@@ -302,6 +381,28 @@ public final class ExecuteOracle {
             set(ServerLevel.class, level, "chunkSource", fake.chunkSource);
 
             ServerPlayer player = allocate(ServerPlayer.class);
+            // `allocate(ServerPlayer)` 不跑构造函数；`/effect` 的
+            // `onEffectAdded` 会用到这些字段，逐个补最小初始化。
+            var advancements = UNSAFE.allocateInstance(net.minecraft.server.PlayerAdvancements.class);
+            set(net.minecraft.server.PlayerAdvancements.class, advancements, "activeTriggers",
+                    new java.util.HashMap<>());
+            set(ServerPlayer.class, player, "advancements", advancements);
+            set(LivingEntity.class, player, "activeEffects", new java.util.HashMap<>());
+            set(LivingEntity.class, player, "attributes",
+                    new net.minecraft.world.entity.ai.attributes.AttributeMap(
+                            LivingEntity.createLivingAttributes().build()));
+            set(Entity.class, player, "type", EntityTypes.PLAYER);
+            set(Entity.class, player, "passengers", com.google.common.collect.ImmutableList.of());
+            set(net.minecraft.world.entity.player.Player.class, player, "gameProfile",
+                    new com.mojang.authlib.GameProfile(
+                            java.util.UUID.fromString("00000000-0000-0000-0000-000000000001"),
+                            "Kitten"));
+            var connection = allocate(SilentListener.class);
+            set(ServerGamePacketListenerImpl.class, connection, "player", player);
+            set(ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+            set(ServerCommonPacketListenerImpl.class, connection, "connection",
+                    new Connection(PacketFlow.CLIENTBOUND));
+            set(ServerPlayer.class, player, "connection", connection);
             set(Entity.class, player, "id", 1);
             set(Entity.class, player, "level", level);
             set(Entity.class, player, "position", new Vec3(8.5, -60.0, 8.5));
@@ -323,6 +424,19 @@ public final class ExecuteOracle {
                     official.server,
                     player);
         }
+    }
+
+    /** `/effect` 发包用的空连接：`send` 什么都不做。 */
+    private static final class SilentListener extends ServerGamePacketListenerImpl {
+        private SilentListener() {
+            super(null, null, null, null);
+        }
+
+        @Override
+        public void send(Packet<?> packet) {}
+
+        @Override
+        public void send(Packet<?> packet, io.netty.channel.ChannelFutureListener listener) {}
     }
 
     private static final class Recording implements CommandSource {
@@ -441,6 +555,12 @@ public final class ExecuteOracle {
 
         @Override
         public void sendSystemMessage(Component message) {
+        }
+
+        /** `ServerPlayer` 构造函数问强制游戏模式；假世界没有 server.properties。 */
+        @Override
+        public net.minecraft.world.level.GameType getForcedGameType() {
+            return null;
         }
     }
 

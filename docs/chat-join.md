@@ -707,7 +707,7 @@ Bamboo 的 M2 只回第一条也可以，写成 `{translate:"command.unknown.com
 | 14 | `player_info_update` 已在线玩家 → 新玩家 | 71 | | 无 |
 | 15 | `player_info_update` 新玩家 → 所有人 | 71 | | 只发给自己 |
 | 16 | `initialize_border` | 44 | `sendLevelInfo` | 无 |
-| 17 | `set_time` | 115 | 同上 | 有，只含主世界时钟 |
+| 17 | `set_time` | 115 | 同上 | 有，按官方 `sendLevelInfo` 含主世界和末地两份时钟 |
 | 18 | `set_default_spawn_position` | 99 | 同上 | 无 |
 | 19 | `game_event` 下雨 | 39 | 下雨时 | 不需要 |
 | 20 | `game_event` 13 | 39 | 同上 | 有 |
@@ -747,7 +747,7 @@ Bamboo 的 M2 只回第一条也可以，写成 `{translate:"command.unknown.com
 | `set_experience` | 全 0 | 创造模式不显示（`Hud` 里 `hasExperience` 为假） | 不用补 |
 | `update_advancements` | `ClientAdvancements` 空树 | 进度界面为空 | 不用补 |
 | `waypoint` | `ClientWaypointManager` 为空 | `hasWaypoints()` 为假，定位栏不出现 | 不用补 |
-| 周期 `set_time` | 客户端自己累加 `gameTime` | Bamboo 的时钟 `rate=0`，时间静止，不受影响 | 世界循环后按需 |
+| 周期 `set_time`，时钟列表为空 | 客户端自己累加 `gameTime` | 服务端每 20 刻发一次，客户端按包里的 `gameTime` 对齐；时钟流速仍由进服 / `/time` 的时钟表给出 | 已发 |
 | **`set_entity_data` 给自己** | `Avatar` 定义 `DATA_PLAYER_MODE_CUSTOMISATION=0`，`DATA_PLAYER_MAIN_HAND=RIGHT`。客户端没有本地赋值的代码 | **有 bug。** `isModelPartShown` 全部为 false，自己的帽子、外套、袖子、裤腿和披风不显示。左手玩家的 `getMainArm()` 仍是右手 | **要补** |
 | **`update_attributes` 给自己** | 基础值 `block_interaction_range` 4.5，`entity_interaction_range` 3.0。创造模式的加成只在 `ServerPlayer.updatePlayerAttributes` 里 | **有差异。** 客户端的方块触及距离是 4.5 而不是 5.0，实体是 3.0 而不是 5.0 | **要补** |
 | **`award_stats`** | `StatsScreen.isLoading = true` | **有 bug。** 打开统计界面后一直显示 `Retrieving statistics...`，Done 按钮能退出 | **要补** |

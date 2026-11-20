@@ -406,6 +406,16 @@ pub(crate) enum Metric {
     /// Multi-island: running a whole-world command itself on the joined
     /// world, between the join and the split (one sample per command).
     IslandWorldCommand,
+    /// 多岛：按需借岛的命令借了几个岛（0 表示没拼，全拼兜底 = 全部；每次一条样本）。
+    ///
+    /// Multi-island: how many islands an on-demand command borrowed (0 means
+    /// no join; a full-join fallback borrows all of them; one sample per command).
+    IslandBorrowedIslands,
+    /// 多岛：按需借算不出岛集合、退回全拼的次数（每兜底一次一条样本）。
+    ///
+    /// Multi-island: fallbacks to a full join when the island set cannot be
+    /// planned (one sample per fallback).
+    IslandWorldCommandFallbacks,
     /// 混合驱动：岛派出时全部 tick 线程都忙着，从派出到开跑等了多久（每次一条样本）。
     /// 这一段不算交接（`island_handoff` 只记线程空着时的唤醒和交回）。
     ///
@@ -423,7 +433,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 32] = [
+    const ALL: [Self; 34] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -454,6 +464,8 @@ impl Metric {
         Self::IslandUnify,
         Self::IslandDivide,
         Self::IslandWorldCommand,
+        Self::IslandBorrowedIslands,
+        Self::IslandWorldCommandFallbacks,
         Self::IslandQueueWait,
         Self::IslandDroppedTicks,
     ];
@@ -490,6 +502,8 @@ impl Metric {
             Self::IslandUnify => "island_unify",
             Self::IslandDivide => "island_divide",
             Self::IslandWorldCommand => "island_world_command",
+            Self::IslandBorrowedIslands => "island_borrowed_islands",
+            Self::IslandWorldCommandFallbacks => "island_world_command_fallbacks",
             Self::IslandQueueWait => "island_queue_wait",
             Self::IslandDroppedTicks => "island_dropped_ticks",
             Self::SkippedCatchUps => "skipped_catch_ups",
@@ -516,7 +530,9 @@ impl Metric {
             Self::FlushBytes => "bytes",
             Self::IslandCount => "islands",
             Self::IslandTopologyWait | Self::IslandDroppedTicks => "ticks",
-            Self::IslandSplitDeferrals => "times",
+            Self::IslandSplitDeferrals
+            | Self::IslandBorrowedIslands
+            | Self::IslandWorldCommandFallbacks => "times",
             Self::IslandCrossings => "players",
             Self::SkippedCatchUps => "times",
             Self::TickTotal

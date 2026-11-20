@@ -175,7 +175,7 @@ S1（`ChunkStorage` trait）、S2（Linear 可选项）、S4 的两线程方案�
 | `yPos` | `MIN_Y / 16` = −4 |
 | `LastUpdate` | 调用方给的 `last_update`（接进游戏后来自 `GameTime`） |
 | `InhabitedTime` | 调用方给的 `inhabited_time`（现在写 0） |
-| `Status` | 写 `"minecraft:full"`；读任意 `Status`，非 `full` 按 ProtoChunk 用超平坦模板补齐（见「外置区块和非 `full` 的 ProtoChunk」） |
+| `Status` | 写 `ChunkColumn` 里的 `ChunkArchiveMeta.status`（官方 `getPersistedStatus()`；完工才是 `minecraft:full`）；读任意 `Status` 并解析成 `ChunkStatus`，交给 Director 从该阶段续跑（见「外置区块和非 `full` 的 ProtoChunk」） |
 | `UpgradeData` | 不写（官方只在非空时写） |
 | `blending_data` / `below_zero_retrogen` | 不写（官方 `storeNullable` 只在非空时写） |
 | `sections` | 见 5.2 |
@@ -715,9 +715,9 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    `InlineCodec`（默认 `chunk_worker_threads = 0` 在世界线程内联、剖析器累计耗时）；
    `chunk_worker_threads ≥ 1` 时 `Decode` / `Generate` / `Save` 由 `chunk_jobs::ChunkJob`
    交给常驻计算池，`Assemble` 仍内联、`Read` 仍在 IO 线程（`082a7c9`）。
-   Director 的 `Task::Read` 是真正的读盘阶段：任意 `Status` 都解码（非 `full` 按
-   ProtoChunk 补齐）、盘上没有走超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐
-   才交付（D8）。卸载时脏区块序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，
+   Director 的 `Task::Read` 是真正的读盘阶段：任意 `Status` 都解码，
+   非 `full` 把盘上阶段交给 Director 续跑到 `Full`、盘上没有走超平坦模板、
+   读坏 warn + 模板；实体文件与区块一起读齐才交付（D8）。卸载时脏区块序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，
    写盘途中被请求回来拿最新内容；同区块新快照按 `(pos, seq)` 丢旧快照；运行中按官方字节码的节奏保存
    （6000 刻全量 + 每刻最多 20 个、单区块 10 秒冷却），已加载脏区块用 `BorrowedParts` 只读拍快照、
    不取出盒子也不算完光照。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
@@ -945,26 +945,28 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   转去读 `.mcc`，所以外置区块本来就能被扫到、也能读回；新增回归测试
   `startup_scan_recognizes_external_mcc_chunks` 钉住这一点。`.mcc` 丢了时
   `has_chunk` 仍为真、读失败走 warn + 模板，和官方一致。
-- 非 `full` 的 `Status` 的语义差异：官方 `SerializableChunkData.parse` 读任意
-  `Status`（`ChunkStatus.CODEC`，读不出来当 `EMPTY`），`read` 造 `ProtoChunk`
-  并 `setPersistedStatus(status)`，`ChunkMap` 从该阶段继续跑世界生成流水线到
-  `Full`。Bamboo 只有一步的超平坦模板生成，没有分阶段生成器，所以做法是：
-  接受任意 `Status`，把盘上已经写出的顶层附加信息（`LastUpdate`、
-  `InhabitedTime`、不认识的键）、方块实体、计划刻和实体原样保留，**方块层和
-  两层光照用超平坦模板补齐**（这些阶段在 ProtoChunk 里可能还没写出），高度图
-  按补齐后的方块重算，然后当成「已经生成完」交付；下次写盘时 `Status` 是
-  `minecraft:full`。与官方的差别：Bamboo 不会重跑 `structure_starts`…`spawn`
-  那些生成阶段，也不会按原 `Status` 决定从哪一步续跑；模板之外的世界生成
-  内容（结构、生物群系、地形）会丢，这是 M4 接真生成器时再补的。
-  回归测试 `chunk_nbt::tests::status_and_data_version_are_checked` 和
-  `chunk_codec::tests::a_non_full_chunk_is_completed_from_the_flat_template`。
-  M4 的地形生成已经走到噪声阶段：`mc-bamboo-worldgen` 有 `BIOMES` 的 quart 格和
-  `NoiseBasedChunkGenerator.doFill` 的纯函数，官方 `chunkgen` 逐方块 / 逐群系对拍 0 不一致，
-  但还没接进 Director 的生成流水线，所以这里读非 `full` 区块时仍只能用超平坦模板补齐
-  （`ae76868`、`docs/worldgen.md`）。接进游戏时 `possibleBiomes` 要照官方用周围 3×3
-  区块群系调色板的并集，不能沿用对拍里的「全部群系」。
-
-  （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节；合并提交 `ae76868`）
+- 非 `full` 的 `Status`：官方 `SerializableChunkData.parse` 读任意 `Status`
+  （`ChunkStatus.CODEC`，读不出来当 `EMPTY`），`read` 造 `ProtoChunk` 并
+  `setPersistedStatus(status)`；`ChunkStep.apply` 只在 `persistedStatus` 落后于
+  目标阶段时真正跑该阶段，`ChunkMap` 的 `LOADING_PYRAMID` 十步没有依赖，
+  `structure_starts` 步是 `loadStructureStarts`（只复用盘上的起点）。
+  `ChunkMap.save` 对未完工的 ProtoChunk 照样 `copyOf().write()`，
+  `Status` 写 `getPersistedStatus()` 的真实阶段；只有盘上已有 full 区块时才跳过。
+  Bamboo 现在照做：`chunk_nbt::decode` 把盘上的方块 / quart 群系 / 高度图 /
+  两层光照 / 结构 / PostProcessing / 方块实体 / 计划刻 / `isLightOn` 原样保留
+  （缺的高度图由 `ChunkColumn::from_parts` 从方块重算，等价于
+  `Heightmap.primeHeightmaps`），不再用超平坦模板盖掉半成品；解析出的
+  `ChunkStatus` 经 `region::chunk_content::decode` → `ChunkCodec::DecodedColumn`
+  → `TaskResult::Decoded { column, status }` 交给 Director，记录推进到该阶段，
+  `advance_stage` 只跑它之后的阶段；`Terrain` 及之后把盘上方块还原成
+  `GeneratedChunk` 放进 `partials`，供 `Features` / `Light` 阶段使用，
+  盘上已有的地物写不再重算，已完成 `Light` 的光照直接复用。写盘时
+  `ChunkEncodeExtra.status` 来自 `ChunkArchiveMeta`，半成品写真实阶段，
+  只有完工才写 `minecraft:full`。
+  回归：`chunk_nbt::tests::status_and_data_version_are_checked`、
+  `chunk_codec::tests::a_non_full_chunk_keeps_its_status_and_blocks`（含
+  Bamboo 写出 → Bamboo 读回）、`director::tests::a_non_full_decoded_chunk_resumes_from_its_stage`、
+  以及官方 codec 多阶段往返对拍 `mc-bamboo-vanilla resume-world`。
 
 ### 已知但没处理的（以后再看）
 

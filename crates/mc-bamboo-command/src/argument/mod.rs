@@ -516,6 +516,11 @@ fn registry_entries(registry: &str) -> Option<&'static [&'static str]> {
     if registry == "minecraft:entity_type" {
         return Some(mc_bamboo_data::registries::entity_type::NAMES);
     }
+    // 药水效果注册表也不在同步给客户端的那一组里（`/effect` 的参数要查它）。
+    // Mob effects are a built-in registry too, needed by `/effect`.
+    if registry == "minecraft:mob_effect" {
+        return Some(mc_bamboo_data::registries::mob_effect::NAMES);
+    }
     mc_bamboo_data::registries::SYNCED_REGISTRIES
         .iter()
         .find(|synced| synced.name == registry)

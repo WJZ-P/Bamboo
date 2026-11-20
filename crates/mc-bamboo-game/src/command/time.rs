@@ -405,14 +405,20 @@ fn set_paused(
     Ok(())
 }
 
+/// 官方 `ServerClockManager.modifyClock`：改哪个时钟就只发哪个，流速按
+/// 全局的 `advance_time` 规则算。
+///
+/// Official `ServerClockManager.modifyClock`: send only the changed clock,
+/// with a rate derived from the global `advance_time` rule.
 fn publish(global: &Global, region: &mut Region, name: &str) {
     let Some(clock) = global.clock_named(name).copied() else {
         return;
     };
+    let advance_time = global.rules().bool(mc_bamboo_data::gamerules::ADVANCE_TIME);
     if name == THE_END {
-        region.broadcast_clock(global.time(), world_clock::THE_END, clock);
+        region.broadcast_clock(global.time(), world_clock::THE_END, clock, advance_time);
     } else {
-        region.broadcast_time(global.time(), clock);
+        region.broadcast_time(global.time(), clock, advance_time);
     }
 }
 

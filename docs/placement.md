@@ -107,8 +107,9 @@ pub trait Level {
 - `destroy_block(pos, limit) -> bool`：`Level.destroyBlock`，不掉落。
 - `neighbor_shape_changed`、`update_neighbors_at`：`CollectingNeighborUpdater` 的完整移植，包括分层栈的顺序。
 - `schedule_tick(pos, block, delay)`。
-- `raw_brightness(pos) -> i32`、`brightness(layer, pos) -> i32`、`effective_sky_brightness(pos) -> i32`：读 `Level::brightness`，
-  天色固定是正午，`getSkyDarken` 是 0。
+- `raw_brightness(pos) -> i32`、`brightness(layer, pos) -> i32`、`effective_sky_brightness(pos) -> i32`：读 `Level::brightness`；
+  `getSkyDarken` 由世界线程按官方 `Level.updateSkyBrightness` 从主世界时钟、维度时间线和天气算出，
+  经 `Level::sky_darken()` 发布给精确模式和并行只读视图。
 - `has_neighbor_signal(pos) -> bool`：固定 `false`，写成函数是为了以后有红石时只改一处。
 
 `Effect` 现在只有一种：

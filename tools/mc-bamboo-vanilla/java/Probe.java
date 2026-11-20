@@ -2640,12 +2640,23 @@ public final class Probe {
                             && !actor.commandParses("gamerule nope")
                             && !actor.commandParses("gamerule max_minecart_speed"));
 
+            // 官方新世界时钟一直在走：先 `/time pause` 冻结，再显式设到正午，
+            // 让时间标记稳定命中「已经在那儿」；之后 resume 恢复官方流速。
+            //
+            // Official fresh clocks keep running: pause first, set noon explicitly,
+            // then let the marker hit the "already there" branch; resume afterwards.
+            actor.send(new ServerboundChatCommandPacket("time pause"));
+            await("commands: the clock is paused", () -> containsText(actor, "Paused clock minecraft:overworld"));
+            actor.send(new ServerboundChatCommandPacket("time set 6000"));
+            await("commands: noon is set", () -> containsText(actor, "Set minecraft:overworld to 6000 tick(s)"));
             actor.send(new ServerboundChatCommandPacket("time set noon"));
             await("commands: noon is already the clock",
                     () -> containsText(actor, "already at time marker"));
 
             actor.send(new ServerboundChatCommandPacket("time set 1000"));
             await("commands: time set is announced", () -> containsText(actor, "Set minecraft:overworld to 1000 tick(s)"));
+            actor.send(new ServerboundChatCommandPacket("time resume"));
+            await("commands: the clock is resumed", () -> containsText(actor, "Resumed clock minecraft:overworld"));
             check("commands: other ops see the admin broadcast",
                     containsText(observer, "[Kitten: Set minecraft:overworld to 1000 tick(s)]"));
 
@@ -3933,11 +3944,25 @@ public final class Probe {
                 return;
             }
             timeChecked = true;
-            check("play: one clock is synced", packet.clockUpdates().size() == 1);
+            // 官方 `PlayerList.sendLevelInfo` 发的是全部时钟；新世界两份时钟都从 0 刻
+            // 起、流速 1。周期同步（空时钟表）不会覆盖它们。
+            //
+            // Official `PlayerList.sendLevelInfo` sends every clock; a fresh world
+            // starts both at tick 0 with rate 1. Periodic syncs (empty map) do not
+            // overwrite them.
+            check("play: both clocks are synced", packet.clockUpdates().size() == 2);
             packet.clockUpdates().forEach((clock, state) -> {
-                check("play: clock is the overworld one",
-                        clock.unwrapKey().map(key -> key.identifier().getPath().equals("overworld")).orElse(false));
-                check("play: clock is at noon", state.totalTicks() == 6000);
+                check("play: clock is a known world clock",
+                        clock.unwrapKey().map(key -> key.identifier().getPath().equals("overworld")
+                                || key.identifier().getPath().equals("the_end")).orElse(false));
+                // 官方新世界时钟从 0 刻起、流速 1；探针连进来时已经过去了几刻，
+                // 所以这里只要求它还在第一个周期里，且总刻数不为正午的 6000。
+                //
+                // Official fresh clocks start at tick 0 with rate 1. The probe
+                // connects several ticks later, so require only that the clock
+                // is still in its first cycle and not the old noon special case.
+                check("play: clock is in its first cycle", state.totalTicks() >= 0 && state.totalTicks() < 24_000);
+                check("play: clock advances at the official rate", state.rate() == 1.0F);
             });
         }
 

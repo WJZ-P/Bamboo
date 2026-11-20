@@ -93,8 +93,6 @@ pub const MAX_CHAINED_NEIGHBOR_UPDATES: u32 = 1_000_000;
 const WORLD_BOUND: i32 = 30_000_000;
 /// `ChunkPos.isValid` 的边界，单位是区块。
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
-/// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
-const SKY_DARKEN: i32 = 0;
 
 /// 官方 `Level.playSound(null, pos, ...)` 用的坐标：方块的中心。
 pub fn block_center_public(pos: BlockPos) -> Vec3 {
@@ -1765,10 +1763,10 @@ impl<'a> World<'a> {
         item.run(self);
     }
 
-    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗。
+    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。
     pub fn max_local_raw_brightness(&self, pos: BlockPos) -> i32 {
         self.brightness(LightLayer::Block, pos)
-            .max(self.brightness(LightLayer::Sky, pos) - SKY_DARKEN)
+            .max(self.brightness(LightLayer::Sky, pos) - self.level.sky_darken())
     }
 
     /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。
@@ -1903,7 +1901,28 @@ impl<'a> World<'a> {
 
     /// `getEffectiveSkyBrightness`：天空光减去天色变暗的部分。
     pub fn effective_sky_brightness(&self, pos: BlockPos) -> i32 {
-        (self.brightness(LightLayer::Sky, pos) - SKY_DARKEN).max(0)
+        (self.brightness(LightLayer::Sky, pos) - self.level.sky_darken()).max(0)
+    }
+
+    /// `Level.getSkyDarken()`：这一刻由世界线程按官方 `updateSkyBrightness` 算好。
+    pub fn sky_darken(&self) -> i32 {
+        self.level.sky_darken()
+    }
+
+    /// `Level.isDarkOutside()`：床的 `when_dark` 规则读它。
+    pub fn is_dark_outside(&self) -> bool {
+        self.level.is_dark_outside()
+    }
+
+    /// `ServerPlayer.startSleepInBed` 的怪物检查：`Monster.isPreventingPlayerRest`
+    /// 在床周围 8 × 5 × 8 的盒子里。世界里还没有怪物，假世界也恒为假；
+    /// 僵尸分支接上后由 [`Level`] 覆盖。
+    ///
+    /// The monster check in `ServerPlayer.startSleepInBed`: any
+    /// `Monster.isPreventingPlayerRest` within an 8 × 5 × 8 box around the
+    /// bed. No monsters exist yet; mob implementations override [`Level`].
+    pub fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
+        self.level.monster_prevents_rest(pos)
     }
 
     /// `getSignal`：`pos` 这一格朝 `direction` 输出多强的信号。
@@ -2994,6 +3013,42 @@ impl<'a> World<'a> {
         outcome
     }
 
+    /// `LivingEntity.addEffect`：给一头生物挂一个效果并刷新属性。
+    /// 返回是否找到目标；效果本身是否变化由 `add_effect` 判定。
+    ///
+    /// `LivingEntity.addEffect` for a non-player mob, with attribute refresh.
+    pub fn add_mob_effect(
+        &mut self,
+        id: i32,
+        instance: crate::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        let found = entity
+            .with_mob(|_, mob| crate::entity::mob::living::add_effect(mob, instance))
+            .unwrap_or(false);
+        self.level.put_entity(entity);
+        found
+    }
+
+    /// `LivingEntity.removeEffect` / `removeAllEffects`：`None` 表示清全部。
+    ///
+    /// `LivingEntity.removeEffect` / `removeAllEffects`; `None` clears all.
+    pub fn clear_mob_effects(&mut self, id: i32, effect: Option<i32>) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        let found = entity
+            .with_mob(|_, mob| match effect {
+                Some(effect) => crate::entity::mob::living::remove_effect(mob, effect),
+                None => crate::entity::mob::living::clear_effects(mob),
+            })
+            .unwrap_or(false);
+        self.level.put_entity(entity);
+        found
+    }
+
     /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
     pub fn with_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
         self.level.with_just_spawned(id, f)
@@ -3623,7 +3678,8 @@ mod tests {
                 | Effect::DispenserEquipped { .. }
                 | Effect::CampfireChanged { .. }
                 | Effect::Overlay { .. }
-                | Effect::OpenCommandBlock { .. } => None,
+                | Effect::OpenCommandBlock { .. }
+                | Effect::SleepInBed { .. } => None,
             })
             .collect()
     }
