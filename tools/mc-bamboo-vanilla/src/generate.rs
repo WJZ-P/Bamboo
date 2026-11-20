@@ -50,6 +50,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let recipes = recipes_file(data)?;
     let heightmaps = heightmaps_file(data)?;
     let sounds = sounds_file(data)?;
+    let advancements = advancement_data(data)?;
     let loot = loot_file(data)?;
     let gamerules = gamerules_file(&data.game_rules)?;
 
@@ -97,6 +98,9 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "sounds.rs", &sounds)?;
+    let path = output_dir.join("advancements.json");
+    fs::write(&path, advancements)
+        .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
     write_file(output_dir, "loot.rs", &loot)?;
     if !data.game_rules.is_empty() {
         write_file(output_dir, "gamerules.rs", &gamerules)?;
@@ -144,9 +148,8 @@ fn saved_world_file(snbt: &str) -> String {
 /// `float_roundtrip`）。默认的快路径用 `significand as f64 * 10^exp`，少数 17 位有效数字的
 /// 串会差一个最低位；下面的单元测试把官方运行时的位模式钉死，防止读报告那一步悄悄出错。
 fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
-    // `probe-online` 会把 `mc-bamboo-server` 的 serde_json `preserve_order` 特性统一进来，
-    // 那时 `Value` 的键保持 Java 报告的插入顺序，而 `--no-default-features` 下是 BTreeMap
-    // 的字母序。统一排序，两种特性配置写出的文件才逐字符一致。
+    // 世界生成用字典序固定输出，和进度定义保留的数据包键序各自独立。
+    // Sort world generation data independently of the pack's advancement member order.
     let mut canonical = data.worldgen.clone();
     canonical.sort_all_objects();
     let json = serde_json::to_string_pretty(&canonical)
@@ -3461,6 +3464,29 @@ fn tags_file(data: &VersionData) -> Result<String, String> {
     }
     let _ = writeln!(out, "];");
     Ok(out)
+}
+
+/// 注册表包括内置进度未用到的触发器。原文保留对象成员和 requirements 的顺序。
+/// The registry includes unused triggers. Preserve member and requirement order in definitions.
+fn advancement_data(data: &VersionData) -> Result<String, String> {
+    let triggers = data
+        .builtin_registries
+        .get("minecraft:trigger_type")
+        .filter(|entries| !entries.is_empty())
+        .ok_or("缺少进度触发器注册表")?;
+    if data.advancements.is_empty() {
+        return Err("没有进度定义".to_owned());
+    }
+    let mut definitions = BTreeMap::new();
+    for (id, raw) in &data.advancements {
+        let definition: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw)
+            .map_err(|error| format!("进度 {id} 不是合法的 JSON 对象：{error}"))?;
+        definitions.insert(id, definition);
+    }
+    let table = serde_json::json!({ "triggers": triggers, "advancements": definitions });
+    serde_json::to_string_pretty(&table)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| error.to_string())
 }
 
 /// 战利品表、它的条件注册表和方块到掉落表的对应，都是官方数据包里的原文。

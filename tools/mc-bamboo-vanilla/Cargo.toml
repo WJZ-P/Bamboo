@@ -46,5 +46,5 @@ mc-bamboo-worldgen = { workspace = true, optional = true, features = ["perf"] }
 rand_core = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 tokio = { workspace = true, optional = true }
