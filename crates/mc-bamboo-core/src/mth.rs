@@ -367,7 +367,9 @@ const ASIN_TAB_BITS: [u64; 257] = [
     0x3ff921fb54442d18,
 ];
 
-/// `Mth.COS_TAB`：`Math.cos(ASIN_TAB[i])`，同上。
+/// `Mth.COS_TAB`：参考 JVM 关闭 `Math.cos` 内建函数后导出的位模式。
+///
+/// `Mth.COS_TAB` bits exported from the reference JVM with the cosine intrinsic disabled.
 const COS_TAB_BITS: [u64; 257] = [
     0x3ff0000000000000,
     0x3fefffeffffbfffe,
@@ -574,7 +576,7 @@ const COS_TAB_BITS: [u64; 257] = [
     0x3fe3a87394da947a,
     0x3fe37f13aba2fbb6,
     0x3fe355264082fea0,
-    0x3fe32aa7b2d3fd90,
+    0x3fe32aa7b2d3fd8f,
     0x3fe2ff9434b34639,
     0x3fe2d3e7c7da540a,
     0x3fe2a79e3a2cd2e6,
