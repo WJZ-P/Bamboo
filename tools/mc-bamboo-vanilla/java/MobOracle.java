@@ -815,6 +815,14 @@ public final class MobOracle {
                 pig.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
                 pig.packets = true;
                 scenes.add(pig);
+                Scene bred = new Scene("pig_breed").ticks(160).drops().packets();
+                ground(bred, 8);
+                bred.cow(0.5, 64.0, 0.5, 0.0F, 63L);
+                bred.cow(1.1, 64.0, 0.5, 0.0F, 64L);
+                bred.player(3.5, 64.0, 0.5, Items.AIR);
+                bred.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.CARROT), 0);
+                bred.interact(2, 1, 0, BuiltInRegistries.ITEM.getId(Items.BEETROOT), 0);
+                scenes.add(bred);
                 // 上鞍后被玩家打死：战利品、必掉的鞍、经验的取数顺序。
                 // Killed after saddling: loot, the guaranteed saddle and XP draw order.
                 Scene dead = new Scene("pig_saddle_death").ticks(60).drops().packets();
@@ -4406,7 +4414,7 @@ public final class MobOracle {
             out.append(",\"count\":").append(item.getItem().getCount());
         } else if (entity instanceof net.minecraft.world.entity.ExperienceOrb orb) {
             out.append(",\"kind\":\"orb\",\"value\":").append(orb.getValue());
-        } else if (entity instanceof Cow calf) {
+        } else if (entity instanceof Animal calf) {
             // 幼崽的构造随机数和朝向在生成时定下，作为场景起点交给 Bamboo。
             out.append(",\"kind\":\"cow\",\"value\":").append(calf.getAge());
             out.append(",\"seed\":").append(randomSeed(calf));
@@ -5357,7 +5365,7 @@ public final class MobOracle {
                 random.nextFloat();
                 eggSeed = null;
             }
-            if (entity instanceof Cow calf && dropUuids) {
+            if (entity instanceof Animal calf && dropUuids) {
                 newbornCows.add(calf);
             }
             spawned.add(entity);
@@ -5369,7 +5377,7 @@ public final class MobOracle {
             if (!dropUuids) {
                 return;
             }
-            if (entity instanceof Cow calf) {
+            if (entity instanceof Animal calf) {
                 long seed = entitySeeds.nextLong();
                 BORN_SEEDS.put(calf.getId(), seed);
                 setRandom(calf, seed);
@@ -5429,7 +5437,7 @@ public final class MobOracle {
         /** 死亡场景给掉落物和球用确定性 UUID。 */
         boolean dropUuids;
         /** 交互/繁殖场景新生成的幼崽，由 `play` 收进牛名单继续 tick。 */
-        List<Cow> newbornCows;
+        List<Animal> newbornCows;
 
         @Override
         public net.minecraft.world.DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {

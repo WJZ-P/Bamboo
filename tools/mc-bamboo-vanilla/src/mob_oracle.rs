@@ -1366,7 +1366,7 @@ impl Report {
             let mut spawn_public = level.entities.take_spawn_snapshots();
             // 繁殖生成的幼崽也是牛：加进 `ids`，并把官方给的构造随机数、朝向和
             // UUID 作为场景起点写进实体，后面每刻比对它自己的行为。
-            for public in &spawn_public {
+            for public in &mut spawn_public {
                 if !matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
                     continue;
                 }
@@ -1404,6 +1404,12 @@ impl Report {
                             mob.y_rot_o = 0.0;
                         }
                     });
+                }
+                // 配对快照在 `addFreshEntity` 时记下，这里同样换成场景起点的朝向。
+                // The pairing snapshot predates the override; give it the same start rotation.
+                public.yaw = 0.0;
+                if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &mut public.kind {
+                    mob.y_head_rot = hr;
                 }
             }
             // 场景开始时就存在的牛在 tick 0 已经建过同步状态，这里只处理
