@@ -176,7 +176,7 @@ pub(crate) fn run_entity_ticks(entity_threads: usize, region: &mut Region) {
     // so pickup sees the item where it was before this tick's movement.
     crate::drops::pickup_before_entities(region);
     if entity_threads == 0 {
-        let (mut level, ticks) = region.block_level();
+        let (mut level, ticks) = region.entity_level();
         let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
         send_effects(region, None, &outcome.effects);
     } else {
@@ -219,6 +219,9 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             difficulty: global.difficulty as i32,
             sky_darken: global.sky_darken,
             game_time,
+            weather: global.block_weather,
+            clock_ticks: global.clock.total_ticks,
+            monsters_burn: mc_bamboo_blocks::sky::monsters_burn(global.clock.total_ticks),
             ..ViewFacts::default()
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
@@ -643,6 +646,34 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::command_block::open(region, id, pos);
                 }
             }
+            Effect::HurtPlayer {
+                target,
+                source,
+                amount,
+            } => {
+                // 只有并行驱动走到这里：精确驱动在生物自己的 tick 里当场落地
+                // （`RegionLevel::hurt_player_now`）。并行驱动按实体顺序把意图收进
+                // effects 逐个走正式入口，算阶段已经按「打中」取过数（性能模式差异）。
+                let id = crate::inbound::PlayerId(target);
+                let (_, drops) = crate::player_hurt::hurt_player_by_mob(
+                    &mut region.hurt_parts(),
+                    id,
+                    source,
+                    amount,
+                );
+                if let Some(drops) = drops {
+                    let (mut level, ticks) = region.block_level();
+                    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+                    world.spawn_player_death_drops(&drops);
+                }
+            }
+            Effect::IgnitePlayer { target, ticks } => {
+                crate::player_environment::ignite_for_ticks(
+                    region,
+                    crate::inbound::PlayerId(target),
+                    ticks,
+                );
+            }
             Effect::SleepInBed {
                 pos,
                 set_spawn,
@@ -700,6 +731,16 @@ fn send_level_event(
 /// `playSeededSound` 的广播。范围是音效的固定范围，没有就是音量大于 1 时的 16 × 音量，否则 16。
 /// 内联的音效是 `createVariableRangeEvent`，没有固定范围。
 pub(crate) fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
+    send_sound_to(&region.players, &mut region.links, except, sound);
+}
+
+/// [`send_sound`] 只用玩家表和连接的那一半。
+pub(crate) fn send_sound_to(
+    players: &std::collections::BTreeMap<PlayerId, Player>,
+    links: &mut crate::links::Links,
+    except: Option<PlayerId>,
+    sound: &Sound,
+) {
     let range = if sound.inline.is_some() {
         if sound.volume > 1.0 {
             16.0 * sound.volume
@@ -717,7 +758,7 @@ pub(crate) fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &
     };
     let range = f64::from(range);
     let frames = encode_frames(sound);
-    for player in region.players.values() {
+    for player in players.values() {
         if Some(player.id) == except {
             continue;
         }
@@ -726,7 +767,7 @@ pub(crate) fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &
         let dy = sound.y - y;
         let dz = sound.z - z;
         if dx * dx + dy * dy + dz * dz < range * range {
-            region.links.send_frames(player.id, &frames);
+            links.send_frames(player.id, &frames);
         }
     }
 }

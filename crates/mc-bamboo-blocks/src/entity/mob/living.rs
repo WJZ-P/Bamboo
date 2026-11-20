@@ -74,6 +74,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     me.tick_count += 1;
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
+    detect_equipment_updates(mob);
     if !me.removed {
         ai_step(me, mob, ctx);
     }
@@ -85,6 +86,47 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(Flag::Move, true);
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
+    }
+}
+
+/// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
+fn detect_equipment_updates(mob: &mut Mob) {
+    let update = mob.equipment.detect_updates(&mut mob.attributes);
+    if update.hand_swap {
+        mob.events.push(MobEvent::EntityEvent { event: 55 });
+    }
+    if !update.changes.is_empty() {
+        mob.events.push(MobEvent::Equipment(update.changes));
+    }
+}
+
+/// `Mob.burnUndead`：晒到太阳时，`sunProtectionSlot()`（头）有东西就替它挡；可损坏的
+/// 扣 `nextInt(2)` 点耐久（坏了广播实体事件 49），不可损坏的什么也不做。头上空着才着火 8 秒。
+fn burn_undead(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    use mc_bamboo_protocol::packet::play::EquipmentSlot;
+    let slot = EquipmentSlot::Head;
+    let stack = mob.equipment.get(slot);
+    if stack.is_empty() {
+        motion::ignite_for_seconds(me, mob, 8.0);
+        return;
+    }
+    if !crate::durability::is_damageable_stack(stack) {
+        return;
+    }
+    let amount = me.random.next_int_bounded(2);
+    let before = stack.clone();
+    let mut broke = false;
+    let blocks = ctx.blocks();
+    mob.equipment.edit(slot, |stack| {
+        broke = blocks.hurt_mob_equipment(stack, amount);
+    });
+    if broke {
+        // `LivingEntity.onEquippedItemBroken`：广播破损事件，当场摘掉坏之前那件的属性修饰
+        // （`stopLocationBasedEffects`）；下一刻的装备比较再摘一次是空操作。
+        mob.events.push(MobEvent::EntityEvent {
+            event: super::equipment::break_event(slot),
+        });
+        super::equipment::remove_stack_modifiers(&before, slot, &mut mob.attributes);
     }
 }
 
@@ -111,7 +153,11 @@ pub(crate) fn is_alive(me: &Entity, mob: &Mob) -> bool {
 
 /// `Mob.checkDespawn`。牛不会被远离玩家删掉，但最近的玩家决定 `noActionTime` 归不归零。
 fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    // 难度不是和平，`isAllowedInPeaceful` 也为真，这一支不删。
+    // 和平难度 + `!isAllowedInPeaceful()` 直接丢弃，且不再取随机数。
+    if ctx.blocks().difficulty() == 0 && !mob.mob_type.allowed_in_peaceful() {
+        me.discard();
+        return;
+    }
     let persistent = mob.persistence_required;
     let mut nearest: Option<f64> = None;
     ctx.blocks().for_each_player(&mut |player| {
@@ -126,15 +172,25 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let Some(distance) = nearest else {
         return;
     };
-    // `CREATURE` 的 `despawnDistance` 是 128，`Animal.removeWhenFarAway` 为假。
-    const NO_DESPAWN: f64 = 32.0 * 32.0;
+    let far = mob.mob_type.despawn_distance();
+    let far_sqr = f64::from(far * far);
+    let near_sqr = 32.0 * 32.0;
+    // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
+    // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
+    if !persistent && distance > far_sqr && mob.mob_type.removes_when_far_away() {
+        me.discard();
+        return;
+    }
     if !persistent
         && mob.no_action_time > 600
         && me.random.next_int_bounded(800) == 0
-        && distance > NO_DESPAWN
+        && distance > near_sqr
     {
-        // `removeWhenFarAway` 为假，不删。
-    } else if distance < NO_DESPAWN {
+        // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
+        if mob.mob_type.removes_when_far_away() {
+            me.discard();
+        }
+    } else if distance < near_sqr {
         mob.no_action_time = 0;
     }
 }
@@ -215,6 +271,26 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
         follow_range: mob.attributes.value(attribute::FOLLOW_RANGE),
         game_time: view.game_time(),
     }
+}
+
+/// `Mob.isSunBurnTick`：官方 `nextFloat` 在 `magic > 0.5` 之后取，
+/// 且 `MONSTERS_BURN` 为假时在取数之前就短路。
+fn sun_burn_tick(me: &mut Entity, mob: &Mob, ctx: &mut dyn EntityCtx) -> bool {
+    let view = ctx.blocks();
+    // 官方 `Mob.isSunBurnTick` 先读 `MONSTERS_BURN`；为假时一个随机数都不取。
+    if !view.monsters_burn() {
+        return false;
+    }
+    let eye = BlockPos::containing(Vec3::new(me.position.x, eye_y(me, mob), me.position.z));
+    let raw = view.max_local_raw_brightness(eye, view.sky_darken()) as f32 / 15.0;
+    let magic = raw / (4.0 - 3.0 * raw);
+    if magic <= 0.5 {
+        return false;
+    }
+    let roll = me.random.next_float() * 30.0 < (magic - 0.4) * 2.0;
+    let wet =
+        me.is_in_water() || mob.in_powder_snow || mob.was_in_powder_snow || view.is_raining_at(eye);
+    roll && !wet && view.can_see_sky(eye)
 }
 
 /// `LivingEntity.maxUpStep()`。
@@ -341,15 +417,13 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let time = mob.ambient_sound_time;
         mob.ambient_sound_time += 1;
         if roll < time {
-            mob.ambient_sound_time = -120;
+            mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
             let pitch = voice_pitch(me, mob);
-            play_sound(
-                me,
-                mob,
-                mob.sound_variant.ambient(),
-                COW_SOUND_VOLUME,
-                pitch,
-            );
+            let sound = mob
+                .mob_type
+                .ambient_sound()
+                .unwrap_or_else(|| mob.sound_variant.ambient());
+            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
     }
 }
@@ -452,6 +526,7 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
         volume,
         pitch,
         position: me.position,
+        hostile: mob.mob_type.is_monster(),
     });
 }
 
@@ -520,6 +595,18 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
+    // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
+    // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
+    if mob.mob_type.is_monster() {
+        let view = ctx.blocks();
+        let eye = BlockPos::containing(Vec3::new(me.position.x, eye_y(me, mob), me.position.z));
+        let raw = view.max_local_raw_brightness(eye, view.sky_darken()) as f32 / 15.0;
+        let magic = raw / (4.0 - 3.0 * raw);
+        if magic > 0.5 {
+            mob.no_action_time += 2;
+        }
+    }
     if mob.no_jump_delay > 0 {
         mob.no_jump_delay -= 1;
     }
@@ -621,8 +708,13 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         timing::span!(Push);
         push_entities(me, mob, ctx);
     }
-    // `AgeableMob.aiStep`。
-    if mob.forced_age_timer > 0 {
+    // `Mob.aiStep` 在 `LivingEntity.aiStep` 之后跑 `BURN_IN_DAYLIGHT` → `burnUndead()`。
+    // 官方用 `EntityTypeTags.BURN_IN_DAYLIGHT` + `isSunSensitive()`；尸壳不烧。
+    if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
+        burn_undead(me, mob, ctx);
+    }
+    // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
+    if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
             for _ in 0..3 {
                 me.random.next_double();
@@ -630,7 +722,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
         mob.forced_age_timer -= 1;
     }
-    if is_alive(me, mob) {
+    if !mob.mob_type.is_monster() && is_alive(me, mob) {
         if mob.is_baby() && !mob.age_locked {
             set_age(me, mob, mob.age + 1);
         } else if mob.age > 0 {
@@ -682,13 +774,19 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.seen.clear();
     {
         timing::span!(Goals);
+        // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
+        // `tickCount` 是实体自己的 tick 数；`id` 用网络实体 ID。
         let mut goals = std::mem::take(&mut mob.goals);
+        let mut targets = std::mem::take(&mut mob.target_goals);
         let phase = me.tick_count.wrapping_add(me.id);
         if phase % 2 != 0 && me.tick_count > 1 {
+            targets.tick_running(false, me, mob, ctx);
             goals.tick_running(false, me, mob, ctx);
         } else {
+            targets.tick(me, mob, ctx);
             goals.tick(me, mob, ctx);
         }
+        mob.target_goals = targets;
         mob.goals = goals;
         // `BreedGoal.breed` 就在这一刻发生：父亲的年龄先设成 6000，
         // 后面 `aiStep` 会照官方再减一；伴侣和幼崽交给命令落地。
@@ -1268,14 +1366,22 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            play_sound(me, mob, mob.sound_variant.death(), COW_SOUND_VOLUME, pitch);
+            let sound = mob
+                .mob_type
+                .death_sound()
+                .unwrap_or_else(|| mob.sound_variant.death());
+            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
         die(me, mob, ctx, source);
     } else if full_hit {
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
-        mob.ambient_sound_time = -120;
+        mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        play_sound(me, mob, mob.sound_variant.hurt(), COW_SOUND_VOLUME, pitch);
+        let sound = mob
+            .mob_type
+            .hurt_sound()
+            .unwrap_or_else(|| mob.sound_variant.hurt());
+        play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();
@@ -1331,6 +1437,122 @@ pub(crate) fn knockback(me: &mut Entity, mob: &Mob, strength: f64, dx: f64, dz: 
     );
 }
 
+/// `Mob.doHurtTarget`：ATTACK_DAMAGE 加空手的伤害修正，再走玩家/生物的伤害入口。
+/// 玩家不在实体表里，所以命中玩家记成同刻落地的 [`Command::HurtPlayer`]。
+///
+/// `Mob.doHurtTarget`: ATTACK_DAMAGE through the player / mob hurt path.
+pub(crate) fn do_hurt_target(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    target: crate::entity::EntityUid,
+) {
+    let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
+    let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
+    source.attacker = Some(me.id);
+    source.direct = Some(me.id);
+    source.attacker_uuid = Some(mob.uuid);
+    source.position = Some(me.position);
+    // 玩家在 `for_each_player` 里；查不到（已离岛/死亡）就当作没打中。
+    let is_player = {
+        let mut found = false;
+        ctx.blocks().for_each_player(&mut |player| {
+            if player.uid == target && player.alive {
+                found = true;
+            }
+        });
+        found
+    };
+    if is_player {
+        let attacker = {
+            let mut whole = me.clone();
+            whole.kind = crate::entity::EntityKind::Mob(Box::new(mob.clone()));
+            whole.split().public
+        };
+        let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `Zombie.doHurtTarget`：打中了、空手、自己着火时，按区域难度传染火焰：
+        // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
+        if hurt
+            && matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk)
+            && mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                .is_empty()
+            && me.remaining_fire_ticks > 0
+        {
+            let difficulty = ctx.blocks().effective_difficulty(me.block_position());
+            if me.random.next_float() < difficulty * 0.3 {
+                let seconds = 2 * difficulty as i32;
+                ctx.emit(
+                    Command::IgnitePlayer {
+                        target,
+                        ticks: mth::floor_f32(seconds as f32 * 20.0),
+                    },
+                    me,
+                );
+            }
+        }
+    } else if let Some(other) = ctx.other(target) {
+        let _ = other;
+        ctx.emit(
+            Command::HurtMob {
+                target,
+                source,
+                amount,
+            },
+            me,
+        );
+    }
+}
+
+/// 落地 `Command::HurtPlayer`（并行驱动的缓冲命令）：能当场落地就当场落地，
+/// 否则转成 `Effect::HurtPlayer`，由游戏层在同一刻的效果阶段调正式的 `hurt_player`。
+pub(crate) fn apply_hurt_player(
+    world: &mut crate::world::World,
+    me: &Entity,
+    target: crate::entity::EntityUid,
+    source: DamageSource,
+    amount: f32,
+) {
+    let attacker = me.clone().split().public;
+    let _ = world.hurt_player_from_mob(target, source, amount, Some(&attacker));
+}
+
+/// 落地 `Command::TrampleTurtleEgg`：`TurtleEggBlock.destroyEgg` 从「还是不是蛋」开始的部分。
+/// `nextInt(chance) == 0` 才 `decreaseEggs`：先放碎蛋声（音高也取世界随机数），
+/// 最后一枚用 `destroyBlock(pos, false)`，否则少一枚并发 2001 事件（带减之前的状态）。
+pub(crate) fn apply_trample_turtle_egg(
+    world: &mut crate::world::World,
+    pos: BlockPos,
+    chance: i32,
+) {
+    let state = world.block_state(pos);
+    if !state.is(mc_bamboo_data::blocks::TURTLE_EGG) {
+        return;
+    }
+    if world.random().next_int(chance) != 0 {
+        return;
+    }
+    let pitch = 0.9 + world.random().next_float() * 0.2;
+    world.play_block_sound(
+        pos,
+        mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.egg_break"),
+        0.7,
+        pitch,
+    );
+    let eggs = state.get(crate::state::EGGS);
+    if eggs <= 1 {
+        world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+    } else {
+        world.set_block(pos, state.with(crate::state::EGGS, eggs - 1), 2);
+        world.push_effect(crate::Effect::Destroyed {
+            pos,
+            state,
+            except_initiator: false,
+        });
+    }
+}
+
 /// `LivingEntity.die`：掉落交给 [`Command::DropMobLoot`]，经验只在被玩家打过时掉。
 fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSource) {
     if me.removed || mob.dead {
@@ -1340,17 +1562,25 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     let by_player = mob.last_hurt_by_player_memory_time > 0;
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
-    let experience = if by_player && adult && drops {
+    let experience = if mob.mob_type.is_monster() {
+        // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
+        let base = if adult {
+            mob.mob_type.xp_reward()
+        } else {
+            (f64::from(mob.mob_type.xp_reward()) * 2.5) as i32
+        };
+        if by_player && drops { base } else { 0 }
+    } else if by_player && adult && drops {
         // `Animal.getBaseExperienceReward`：`1 + random.nextInt(3)`。
         1 + me.random.next_int_bounded(3)
     } else {
         0
     };
     mob.events.push(MobEvent::Death);
-    if adult && drops {
+    if (adult || mob.mob_type.is_monster()) && drops {
         ctx.emit(
             Command::DropMobLoot {
-                table: "minecraft:entities/cow",
+                table: mob.mob_type.loot_table(),
                 on_fire: me.remaining_fire_ticks > 0,
                 killer: source.attacker,
                 experience,

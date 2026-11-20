@@ -759,7 +759,9 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::CampfireChanged { .. } => 16,
         Effect::Overlay { .. } => 17,
         Effect::OpenCommandBlock { .. } => 18,
+        Effect::HurtPlayer { .. } => 20,
         Effect::SleepInBed { .. } => 19,
+        Effect::IgnitePlayer { .. } => 21,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -856,6 +858,19 @@ fn hash_effect(effect: &Effect) -> u64 {
         } => {
             entity_id.hash(&mut hasher);
             menu_slot.hash(&mut hasher);
+        }
+        Effect::HurtPlayer {
+            target,
+            source,
+            amount,
+        } => {
+            target.hash(&mut hasher);
+            std::hash::Hash::hash(&source.kind, &mut hasher);
+            amount.to_bits().hash(&mut hasher);
+        }
+        Effect::IgnitePlayer { target, ticks } => {
+            target.hash(&mut hasher);
+            ticks.hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);
@@ -1562,6 +1577,7 @@ impl Level for Recording<'_> {
                 value.max_block_modifications,
                 value.max_snow_accumulation_height,
                 value.spawn_mobs,
+                value.spawn_monsters,
             ),
         );
         value

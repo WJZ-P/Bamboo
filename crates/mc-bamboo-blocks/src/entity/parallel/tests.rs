@@ -4,7 +4,7 @@ use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    Aabb, BlockState, BlockTicks, World,
+    Aabb, BlockState, BlockTicks, BlockWeather, World,
     entity::{
         Entity,
         ctx::Command,
@@ -500,4 +500,35 @@ fn both_drives_read_the_same_global_facts() {
     assert!(!view.is_raining_at(pos));
     assert_eq!(view.level_random_float(), 0.0);
     assert!(!view.level_random_boolean());
+    assert!(!view.is_bright_outside());
+    assert!(view.monsters_burn());
+    assert!(view.block_game_rules().spawn_monsters);
+}
+
+/// 雨天 / 夜晚 / 关掉 `MONSTERS_BURN` 的快照也要和精确 `World` 的读数一致。
+/// 故意把雨强改回晴天，`isRainingAt` 必须跟着变。
+#[test]
+fn both_drives_read_the_same_weather_facts() {
+    use crate::entity::ctx::BlockView;
+    use mc_bamboo_core::BlockPos;
+
+    let mut facts = ViewFacts {
+        sky_brightness: 15,
+        weather: BlockWeather {
+            rain_level: 1.0,
+            thunder_level: 0.0,
+        },
+        monsters_burn: false,
+        ..ViewFacts::default()
+    };
+    let view = SourceView::new(FlatSource { floor_y: 64, facts });
+    let open = BlockPos::new(1, 70, 1);
+    assert!(view.is_raining_at(open));
+    assert!(view.is_bright_outside());
+    assert!(!view.monsters_burn());
+    // 高度图是 65：64 这一格被地面挡着，雨落不到。
+    assert!(!view.is_raining_at(BlockPos::new(1, 64, 1)));
+    facts.weather = BlockWeather::CLEAR;
+    let dry = SourceView::new(FlatSource { floor_y: 64, facts });
+    assert!(!dry.is_raining_at(open));
 }

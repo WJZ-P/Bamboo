@@ -1,19 +1,22 @@
-//! 生物：官方 `LivingEntity` → `Mob` → `PathfinderMob` → `AgeableMob` → `Animal` → `Cow`。
+//! 生物：官方 `LivingEntity` → `Mob`，再分出 `Animal` → `Cow` 和 `Monster` → `Zombie`。
 //!
-//! 这一轮只有牛。状态都在 [`Mob`] 里，按官方的类分组；一刻的流程在 [`living`]，
+//! 所有种类共用一个 [`Mob`] 状态，按官方的类分组；每种生物的事实集中在
+//! [`MobType`] 的一张表里，牛专属的字段只在 `Cow` 分支读写。一刻的流程在 [`living`]，
 //! 移动和方块效果在 [`motion`]，目标在 [`goals`]，寻路在 [`path`] 和 [`navigation`]。
 //!
 //! tick 期间 [`Mob`] 被从 `Entity.kind` 里暂时取出来，和 `Entity` 本身分开借用；
 //! 实体的尺寸因此存在 [`Entity::dimensions`] 上，不从 `kind` 推。
 //!
-//! Mobs: vanilla `LivingEntity` through `Cow`. Only cows this round. During a tick the
-//! [`Mob`] is moved out of `Entity.kind` so it can be borrowed apart from the entity;
-//! sizes therefore live on [`Entity::dimensions`].
+//! Mobs: vanilla `LivingEntity` through `Cow` and `Zombie`. All types share one
+//! [`Mob`] state with a [`MobType`] fact table. During a tick the [`Mob`] is moved
+//! out of `Entity.kind` so it can be borrowed apart from the entity; sizes
+//! therefore live on [`Entity::dimensions`].
 
 pub mod attributes;
 pub mod control;
 pub mod damage;
 pub mod effects;
+pub mod equipment;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -36,18 +39,42 @@ use self::{
 };
 use super::{EntityUid, JavaRandom};
 
-/// 生物种类。现在只有牛。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 生物种类。牛走 `Animal` 一支，僵尸和尸壳走 `Monster` → `Zombie` 一支。
+///
+/// Mob kinds. Cows use the `Animal` branch; zombies and husks the
+/// `Monster` → `Zombie` branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MobType {
+    #[default]
     Cow,
+    Zombie,
+    Husk,
 }
 
 impl MobType {
     /// 注册表 ID。
     pub const fn entity_type(self) -> i32 {
+        use mc_bamboo_data::registries::entity_type as ids;
         match self {
-            Self::Cow => mc_bamboo_data::registries::entity_type::COW,
+            Self::Cow => ids::COW,
+            Self::Zombie => ids::ZOMBIE,
+            Self::Husk => ids::HUSK,
         }
+    }
+
+    /// 存档 / 命令里的官方名字。
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Cow => "minecraft:cow",
+            Self::Zombie => "minecraft:zombie",
+            Self::Husk => "minecraft:husk",
+        }
+    }
+
+    pub fn by_name(name: &str) -> Option<Self> {
+        [Self::Cow, Self::Zombie, Self::Husk]
+            .into_iter()
+            .find(|kind| kind.name() == name)
     }
 
     /// 成年和幼年的（宽，高，眼高）。
@@ -56,7 +83,118 @@ impl MobType {
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
+            (Self::Zombie | Self::Husk, false) => (0.6, 1.95, 1.74),
+            // `Zombie.BABY_DIMENSIONS`：`scalable(0.49F, 0.98F).withEyeHeight(0.775F)`。
+            (Self::Zombie | Self::Husk, true) => (0.49, 0.98, 0.775),
         }
+    }
+
+    /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
+    pub const fn is_monster(self) -> bool {
+        matches!(self, Self::Zombie | Self::Husk)
+    }
+
+    /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
+    pub const fn allowed_in_peaceful(self) -> bool {
+        matches!(self, Self::Cow)
+    }
+
+    /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
+    /// 僵尸是 `MONSTER`（128 / 32）。
+    pub const fn despawn_distance(self) -> i32 {
+        if self.is_monster() { 128 } else { 32 }
+    }
+
+    /// `Mob.removeWhenFarAway`：牛为假，`Monster` 为真。
+    pub const fn removes_when_far_away(self) -> bool {
+        self.is_monster()
+    }
+
+    /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
+    pub const fn xp_reward(self) -> i32 {
+        if self.is_monster() { 5 } else { 0 }
+    }
+
+    /// `LivingEntity.dropAllDeathLoot` 用的战利品表。
+    pub const fn loot_table(self) -> &'static str {
+        match self {
+            Self::Cow => "minecraft:entities/cow",
+            Self::Zombie => "minecraft:entities/zombie",
+            Self::Husk => "minecraft:entities/husk",
+        }
+    }
+
+    /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
+    /// 尸壳不烧，僵尸烧。
+    pub const fn burns_in_daylight(self) -> bool {
+        matches!(self, Self::Zombie)
+    }
+
+    /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
+    pub const fn ambient_sound_interval(self) -> i32 {
+        if self.is_monster() { 80 } else { 120 }
+    }
+
+    /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
+    pub const fn sound_volume(self) -> f32 {
+        if self.is_monster() { 1.0 } else { 0.4 }
+    }
+
+    /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
+    pub const fn ambient_sound(self) -> Option<&'static str> {
+        match self {
+            Self::Cow => None,
+            Self::Zombie => Some("minecraft:entity.zombie.ambient"),
+            Self::Husk => Some("minecraft:entity.husk.ambient"),
+        }
+    }
+
+    pub const fn hurt_sound(self) -> Option<&'static str> {
+        match self {
+            Self::Cow => None,
+            Self::Zombie => Some("minecraft:entity.zombie.hurt"),
+            Self::Husk => Some("minecraft:entity.husk.hurt"),
+        }
+    }
+
+    pub const fn death_sound(self) -> Option<&'static str> {
+        match self {
+            Self::Cow => None,
+            Self::Zombie => Some("minecraft:entity.zombie.death"),
+            Self::Husk => Some("minecraft:entity.husk.death"),
+        }
+    }
+
+    pub const fn step_sound(self) -> Option<&'static str> {
+        match self {
+            Self::Cow => None,
+            Self::Zombie => Some("minecraft:entity.zombie.step"),
+            Self::Husk => Some("minecraft:entity.husk.step"),
+        }
+    }
+
+    /// `SpawnEggItem` 的物品 ID；牛刷怪蛋已有，僵尸/尸壳的 ID 也在数据表里。
+    pub const fn spawn_egg(self) -> i32 {
+        use mc_bamboo_data::items;
+        match self {
+            Self::Cow => items::COW_SPAWN_EGG,
+            Self::Zombie => items::ZOMBIE_SPAWN_EGG,
+            Self::Husk => items::HUSK_SPAWN_EGG,
+        }
+    }
+
+    /// `/summon` 成功反馈里的翻译键。
+    pub const fn translation_key(self) -> &'static str {
+        match self {
+            Self::Cow => "entity.minecraft.cow",
+            Self::Zombie => "entity.minecraft.zombie",
+            Self::Husk => "entity.minecraft.husk",
+        }
+    }
+
+    /// 幼年是不是用 `Zombie.DATA_BABY_ID`（布尔元数据），而不是牛的 `age < 0`。
+    pub const fn uses_baby_metadata(self) -> bool {
+        self.is_monster()
     }
 }
 
@@ -179,7 +317,7 @@ pub enum DeathMessageType {
     IntentionalGameDesign,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DamageKind {
     Generic,
     GenericKill,
@@ -630,6 +768,36 @@ pub struct Mob {
     pub can_pick_up_loot: bool,
     pub home: Option<(BlockPos, i32)>,
     pub loot_table_seed: i64,
+    // ---- Monster（牛恒为缺省值，不参与它的 tick）----
+    /// `Mob.target`：当前攻击目标的 uid。玩家不在实体表里，按 uid 在玩家表找。
+    pub target: Option<EntityUid>,
+    /// `Mob.setAggressive`：`ZombieAttackGoal` 抬手时置真，同步进 `MobFlags` 的第 4 位。
+    pub aggressive: bool,
+    /// `Zombie.canBreakDoors`；`finalizeSpawn` 按 0.1 概率置真。
+    pub can_break_doors: bool,
+    /// `BreakDoorGoal` 的 240 刻进度，随实体行搬岛。
+    pub door_break_time: i32,
+    pub door_break_progress: i32,
+    pub door_break_pos: Option<BlockPos>,
+    /// 目标选择器。牛是空的，僵尸/尸壳按官方优先级注册。
+    pub target_goals: GoalSelector,
+    /// `Zombie.DATA_BABY_ID`：僵尸用布尔元数据，不用 `age < 0`。
+    pub zombie_baby: bool,
+    /// `Zombie.DATA_SPECIAL_TYPE_ID`（僵尸村民类型，本期恒 0）。
+    pub zombie_special_type: i32,
+    /// 六个人形装备槽、掉落几率和上次同步出去的装备（通用生物层，牛的全空）。
+    pub equipment: equipment::MobEquipment,
+    /// `Zombie.DATA_DROWNED_CONVERSION_ID`（转化后放，元数据恒 false）。
+    pub drowned_converting: bool,
+    /// `MoveToBlockGoal.nextStartTick`：海龟蛋目标的倒计时。
+    pub turtle_egg_next_start_tick: i32,
+    /// `MoveToBlockGoal.tryTicks` / `RemoveBlockGoal.ticksSinceReachedGoal`。
+    pub turtle_egg_try_ticks: i32,
+    pub turtle_egg_ticks_since_reached: i32,
+    pub turtle_egg_pos: Option<BlockPos>,
+    /// `MoveToBlockGoal.maxStayTicks` / `reachedTarget`。
+    pub turtle_egg_max_stay: i32,
+    pub turtle_egg_reached: bool,
     // ---- AgeableMob / Animal / Cow ----
     pub age: i32,
     pub forced_age: i32,
@@ -649,8 +817,18 @@ pub struct Mob {
 }
 
 /// 要发给客户端的一次生物事件。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MobEvent {
+    /// `LivingEntity.handleEquipmentChanges`：`sendToTrackingPlayers` 一个 `set_equipment`，
+    /// 变了的槽按 ordinal。
+    Equipment(
+        Vec<(
+            mc_bamboo_protocol::packet::play::EquipmentSlot,
+            mc_bamboo_protocol::item::ItemStack,
+        )>,
+    ),
+    /// 别的 `broadcastEntityEvent`：装备坏掉（47–52）、主副手互换（55）。
+    EntityEvent { event: u8 },
     /// `broadcastDamageEvent`：受了一次完整的伤害。
     Damage {
         kind: DamageKind,
@@ -672,6 +850,8 @@ pub enum MobEvent {
         volume: f32,
         pitch: f32,
         position: Vec3,
+        /// `Monster.getSoundSource()` 是 HOSTILE，牛是 NEUTRAL。
+        hostile: bool,
     },
 }
 
@@ -679,18 +859,36 @@ impl Mob {
     /// `EntityType.create`：构造函数链。随机数（UUID 两个 `nextLong`、`yRot` 一个
     /// `nextFloat`）由调用方在实体拿到 ID 之后取，见 [`super::Entity::cow`]。
     pub fn cow() -> Self {
-        let attributes = Attributes::cow();
+        Self::new(MobType::Cow)
+    }
+
+    /// 按类型构造。牛的属性/目标/导航一条不改，其它类型只换这三张表。
+    pub fn new(mob_type: MobType) -> Self {
+        let attributes = if mob_type.is_monster() {
+            Attributes::zombie()
+        } else {
+            Attributes::cow()
+        };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
-        let goals = GoalSelector::cow(&mut navigation);
+        let goals = if mob_type.is_monster() {
+            GoalSelector::zombie(&mut navigation)
+        } else {
+            GoalSelector::cow(&mut navigation)
+        };
+        let target_goals = if mob_type.is_monster() {
+            GoalSelector::zombie_targets()
+        } else {
+            GoalSelector::default()
+        };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
         Self {
-            mob_type: MobType::Cow,
+            mob_type,
             uuid: [0; 16],
             x_rot: 0.0,
             y_rot_o: 0.0,
             x_rot_o: 0.0,
-            eye_height: MobType::Cow.dimensions(false).2,
+            eye_height: mob_type.dimensions(false).2,
             invulnerable_time: 0,
             minor_horizontal_collision: false,
             fluid_trackers: Vec::new(),
@@ -754,13 +952,34 @@ impl Mob {
             navigation,
             goals,
             seen: Vec::new(),
-            malus: Malus::animal(),
+            malus: if mob_type.is_monster() {
+                Malus::monster()
+            } else {
+                Malus::animal()
+            },
             persistence_required: false,
             left_handed: false,
             no_ai: false,
             can_pick_up_loot: false,
             home: None,
             loot_table_seed: 0,
+            target: None,
+            aggressive: false,
+            can_break_doors: false,
+            door_break_time: 0,
+            door_break_progress: -1,
+            door_break_pos: None,
+            target_goals,
+            zombie_baby: false,
+            zombie_special_type: 0,
+            equipment: equipment::MobEquipment::default(),
+            drowned_converting: false,
+            turtle_egg_next_start_tick: 0,
+            turtle_egg_try_ticks: 0,
+            turtle_egg_ticks_since_reached: 0,
+            turtle_egg_pos: None,
+            turtle_egg_max_stay: 0,
+            turtle_egg_reached: false,
             age: 0,
             forced_age: 0,
             forced_age_timer: 0,
@@ -777,7 +996,33 @@ impl Mob {
     }
 
     pub fn is_baby(&self) -> bool {
-        self.age < 0
+        if self.mob_type.uses_baby_metadata() {
+            self.zombie_baby
+        } else {
+            self.age < 0
+        }
+    }
+
+    /// `Zombie.setBaby`：换元数据、尺寸和 `+0.5` 速度修饰符。
+    pub fn set_zombie_baby(&mut self, baby: bool) {
+        self.zombie_baby = baby;
+        // `Zombie.onSyncedDataUpdated` 会 `refreshDimensions()`，眼高随
+        // `Zombie.BABY_DIMENSIONS` 变成 0.775（成年是 1.74）。
+        self.eye_height = self.mob_type.dimensions(baby).2;
+        if let Some(speed) = self
+            .attributes
+            .instance(mc_bamboo_data::registries::attribute::MOVEMENT_SPEED)
+        {
+            speed.remove_modifier("minecraft:baby");
+            if baby {
+                speed.modifiers.push(attributes::Modifier {
+                    id: "minecraft:baby".to_owned(),
+                    amount: 0.5,
+                    operation: attributes::Operation::AddMultipliedBase,
+                    permanent: false,
+                });
+            }
+        }
     }
 
     /// （宽，高）。
@@ -835,6 +1080,19 @@ pub struct MobPublic {
     pub glowing: bool,
     pub left_handed: bool,
     pub dying: bool,
+    /// `Mob.DATA_MOB_FLAGS_ID` 的攻击性位；牛恒为假。
+    pub aggressive: bool,
+    /// `Zombie.DATA_BABY_ID`（布尔元数据），牛不用。
+    pub zombie_baby: bool,
+    /// `Zombie.DATA_SPECIAL_TYPE_ID`。
+    pub zombie_special_type: i32,
+    /// `Zombie.DATA_DROWNED_CONVERSION_ID`。
+    pub drowned_converting: bool,
+    /// 非空的装备槽，按 ordinal；配对时的 `set_equipment` 用它。
+    pub equipment: Vec<(
+        mc_bamboo_protocol::packet::play::EquipmentSlot,
+        mc_bamboo_protocol::item::ItemStack,
+    )>,
 }
 
 impl MobPublic {
@@ -865,6 +1123,16 @@ impl MobPublic {
             glowing: mob.glowing,
             left_handed: mob.left_handed,
             dying: mob.is_dead_or_dying(),
+            aggressive: mob.aggressive,
+            zombie_baby: mob.zombie_baby,
+            zombie_special_type: mob.zombie_special_type,
+            drowned_converting: mob.drowned_converting,
+            equipment: mob
+                .equipment
+                .iter()
+                .filter(|(_, stack)| !stack.is_empty())
+                .map(|(slot, stack)| (slot, stack.clone()))
+                .collect(),
         }
     }
 
@@ -886,4 +1154,81 @@ pub fn insecure_uuid(random: &mut JavaRandom) -> [u8; 16] {
     bytes[..8].copy_from_slice(&most.to_be_bytes());
     bytes[8..].copy_from_slice(&least.to_be_bytes());
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::Entity;
+    use mc_bamboo_data::registries::attribute;
+
+    /// 官方 `Zombie.createAttributes` 的四个覆盖值和元数据 index 都从字节码导出。
+    #[test]
+    fn zombie_attributes_and_metadata_match_the_official_values() {
+        let zombie = Mob::new(MobType::Zombie);
+        let cow = Mob::new(MobType::Cow);
+        assert_eq!(zombie.attributes.value(attribute::MAX_HEALTH), 20.0);
+        assert_eq!(zombie.attributes.value(attribute::FOLLOW_RANGE), 35.0);
+        assert_eq!(
+            zombie.attributes.value(attribute::MOVEMENT_SPEED),
+            f64::from(0.23_f32)
+        );
+        assert_eq!(zombie.attributes.value(attribute::ATTACK_DAMAGE), 3.0);
+        assert_eq!(zombie.attributes.value(attribute::ARMOR), 2.0);
+        assert_eq!(cow.attributes.value(attribute::MAX_HEALTH), 10.0);
+        assert_eq!(MobType::Zombie.dimensions(false), (0.6, 1.95, 1.74));
+        assert_eq!(MobType::Zombie.dimensions(true), (0.49, 0.98, 0.775));
+        assert_eq!(zombie.target_goals.goals.len(), 5);
+        assert_eq!(zombie.goals.goals.len(), 7);
+        assert_eq!(cow.target_goals.goals.len(), 0);
+        assert!(!MobType::Husk.burns_in_daylight());
+        assert!(MobType::Zombie.burns_in_daylight());
+    }
+
+    /// 幼年僵尸用布尔元数据并换速度修饰符；牛仍按 `age < 0`。
+    #[test]
+    fn baby_metadata_is_type_specific() {
+        let mut zombie = Mob::new(MobType::Zombie);
+        assert!(!zombie.is_baby());
+        zombie.set_zombie_baby(true);
+        assert!(zombie.is_baby());
+        assert_eq!(
+            zombie.attributes.value(attribute::MOVEMENT_SPEED),
+            f64::from(0.23_f32) * 1.5
+        );
+        let mut cow = Mob::new(MobType::Cow);
+        assert!(!cow.is_baby());
+        cow.age = -24000;
+        assert!(cow.is_baby());
+        assert!(MobPublic::of(&cow, 0).baby);
+    }
+
+    /// 存档往返保留僵尸的 `IsBaby` / `CanBreakDoors`，牛的键不串类型。
+    #[test]
+    fn zombie_nbt_round_trip_keeps_monster_fields() {
+        let mut entity = Entity::zombie(Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|_, mob| {
+            mob.set_zombie_baby(true);
+            mob.can_break_doors = true;
+        });
+        let row = entity.split();
+        let tag = nbt::write_mob(&row).expect("write zombie");
+        let mc_bamboo_nbt::Tag::Compound(entries) = &tag else {
+            panic!("mob NBT is a compound");
+        };
+        let has = |key: &str| entries.iter().any(|(name, _)| name == key);
+        assert!(has("IsBaby"));
+        assert!(has("CanBreakDoors"));
+        assert!(!has("Age"));
+        assert!(!has("variant"));
+        let loaded = nbt::read_mob(&tag, "minecraft:zombie", 7)
+            .expect("read zombie")
+            .expect("modelled");
+        let mut rebuilt = loaded.into_entity();
+        rebuilt.with_mob(|_, mob| {
+            assert!(mob.is_baby());
+            assert!(mob.can_break_doors);
+            assert_eq!(mob.mob_type, MobType::Zombie);
+        });
+    }
 }

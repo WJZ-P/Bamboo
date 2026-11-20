@@ -5,10 +5,10 @@
 //! 高度范围和游戏规则这些不写在区块表里的只读事实。
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3};
-use mc_bamboo_data::{BlockAncestor, blocks};
+use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 
 use crate::{
-    Aabb, BlockGameRules, BlockHit, WorldBorder,
+    Aabb, BlockGameRules, BlockHit, BlockWeather, Precipitation, PrecipitationFacts, WorldBorder,
     shape::{self, CollisionContext},
     state::{BlockState, FluidState, SupportType},
     world::{CollisionBlocks, collect_block_collisions_with_sections, traverse_blocks},
@@ -30,6 +30,14 @@ pub struct ViewFacts {
     pub difficulty: i32,
     pub sky_darken: i32,
     pub game_time: i64,
+    /// `Level.isRaining()` / `isThundering()` 的天气快照，和 `Level::block_weather()`
+    /// 是同一份值；算阶段不借用世界，按值拷进来。
+    pub weather: BlockWeather,
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线求值，
+    /// 发布方用 [`crate::sky::monsters_burn`] 从同一个时钟算好。
+    pub monsters_burn: bool,
+    /// 主世界时钟的整数刻（`getOverworldClockTime()`），区域难度和月相读它。
+    pub clock_ticks: i64,
 }
 
 impl Default for ViewFacts {
@@ -43,6 +51,9 @@ impl Default for ViewFacts {
             difficulty: 2,
             sky_darken: 0,
             game_time: 0,
+            weather: BlockWeather::CLEAR,
+            monsters_burn: true,
+            clock_ticks: 0,
         }
     }
 }
@@ -82,6 +93,11 @@ pub trait BlockSource: Sync {
     /// `ShulkerBoxBlockEntity.getBoundingBox(state)`，算阶段开始时就按位置拷出来的形状。
     fn shulker_box_shape(&self, _pos: BlockPos) -> Option<Aabb> {
         None
+    }
+
+    /// 区块的 `InhabitedTime`。没有区块表的视图给 0。
+    fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
+        0
     }
 
     /// 这一整段 16³ 里有没有可能产生碰撞形状的方块状态。默认按有算，
@@ -132,6 +148,32 @@ pub trait BlockSource: Sync {
     /// kinds also collide with a shrunken border.
     fn world_border(&self) -> WorldBorder {
         WorldBorder::default()
+    }
+
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：这一列挡运动的最高方块上面一格。
+    /// 和 [`crate::Level::heightmap_y`] 的默认实现一致；有真实高度图的视图覆盖它。
+    ///
+    /// `getHeightmapPos(MOTION_BLOCKING, pos)`: the cell above the highest
+    /// motion-blocking block. Views with a real heightmap override this.
+    fn heightmap_y(&self, pos: BlockPos) -> i32 {
+        let facts = self.facts();
+        for y in (facts.min_y..=facts.max_y).rev() {
+            let state = self.block_state(BlockPos::new(pos.x, y, pos.z));
+            if state.is_tagged(block_tags::BLOCKS_MOTION_IN_HEIGHTMAP) || !state.fluid().is_empty()
+            {
+                return y + 1;
+            }
+        }
+        facts.min_y - 1
+    }
+
+    /// 这一格的群系降水条件。默认平原（暖、降雨），和 [`crate::Level`] 的默认一致。
+    /// 游戏层的只读视图按区块调色板和群系温度覆盖它。
+    ///
+    /// Biome precipitation facts at this cell. Plains by default, like [`crate::Level`];
+    /// the game layer overrides it with the chunk palette and biome temperature.
+    fn precipitation_facts(&self, _pos: BlockPos) -> PrecipitationFacts {
+        PrecipitationFacts::PLAINS
     }
 }
 
@@ -400,6 +442,39 @@ impl<T: BlockSource> BlockView for SourceView<T> {
     fn max_local_raw_brightness(&self, pos: BlockPos, darken: i32) -> i32 {
         self.brightness(LightLayer::Block, pos)
             .max(self.brightness(LightLayer::Sky, pos) - darken)
+    }
+
+    fn is_raining_at(&self, pos: BlockPos) -> bool {
+        let facts = self.0.facts();
+        if !facts.weather.is_raining() || !self.can_see_sky(pos) {
+            return false;
+        }
+        if self.0.heightmap_y(pos) > pos.y {
+            return false;
+        }
+        self.0.precipitation_facts(pos).precipitation == Precipitation::Rain
+    }
+
+    fn is_bright_outside(&self) -> bool {
+        self.sky_darken() < 4
+    }
+
+    fn monsters_burn(&self) -> bool {
+        self.0.facts().monsters_burn
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.0.facts().clock_ticks
+    }
+
+    fn effective_difficulty(&self, pos: BlockPos) -> f32 {
+        let clock = self.clock_ticks();
+        crate::sky::effective_difficulty(
+            self.difficulty(),
+            clock,
+            self.0.inhabited_time(ChunkPos::new(pos.x >> 4, pos.z >> 4)),
+            crate::sky::moon_brightness(clock),
+        )
     }
 }
 

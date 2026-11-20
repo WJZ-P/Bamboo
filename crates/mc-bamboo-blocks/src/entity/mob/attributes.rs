@@ -188,6 +188,50 @@ impl Attributes {
         }
     }
 
+    /// `Zombie.createAttributes`：`Monster.createMonsterAttributes` 的全部
+    /// （`createMobAttributes` 加 `ATTACK_DAMAGE`），再覆盖跟随距离 35、
+    /// 速度 0.23、攻击力 3、护甲 2，以及增援概率属性。
+    ///
+    /// `Zombie.createAttributes`: `Monster.createMonsterAttributes` plus
+    /// follow range 35, speed 0.23, attack damage 3, armor 2 and the
+    /// reinforcement-chance attribute.
+    pub fn zombie() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut table = Self::cow();
+        table.set_base(attribute::MAX_HEALTH, defaults::MAX_HEALTH);
+        table.set_base(attribute::MOVEMENT_SPEED, f64::from(0.23_f32));
+        table.set_base(attribute::FOLLOW_RANGE, 35.0);
+        table.set_base(attribute::TEMPT_RANGE, defaults::TEMPT_RANGE);
+        table.set_base(attribute::ARMOR, 2.0);
+        if let Some(entry) = table
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == attribute::ATTACK_DAMAGE)
+        {
+            entry.base = 3.0;
+        } else {
+            table
+                .entries
+                .push(Attribute::new(attribute::ATTACK_DAMAGE, 3.0));
+        }
+        table.entries.push(Attribute::new(
+            attribute::SPAWN_REINFORCEMENTS,
+            defaults::SPAWN_REINFORCEMENTS,
+        ));
+        table
+    }
+
+    /// 对拍的改坏确认用：直接改一个属性的基础值。
+    pub fn set_base_for_oracle(&mut self, id: i32, base: f64) {
+        self.set_base(id, base);
+    }
+
+    fn set_base(&mut self, id: i32, base: f64) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.base = base;
+        }
+    }
+
     pub fn get(&self, id: i32) -> Option<&Attribute> {
         self.entries.iter().find(|entry| entry.id == id)
     }

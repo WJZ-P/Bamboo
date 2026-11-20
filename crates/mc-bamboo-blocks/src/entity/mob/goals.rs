@@ -73,6 +73,61 @@ pub enum Goal {
         rel_z: f64,
         look_time: i32,
     },
+    /// 官方已注册、这一期还不建模的目标。保留优先级和标志位锁顺序；
+    /// `canUse` 恒假、不取随机数，名字仍进对拍的 running names。
+    Unavailable(&'static str),
+    /// `ZombieAttackGoal` / `MeleeAttackGoal`：追着当前目标走并在 20 刻间隔挥手。
+    MeleeAttack {
+        speed: f64,
+        ticks_until_next_attack: i32,
+        ticks_until_path_recalc: i32,
+        pathed_target: Vec3,
+        raise_arm_ticks: i32,
+        last_can_use_check: i64,
+        /// `MeleeAttackGoal.canUse` 算出的路径，官方存在字段里由 `start()` 装入导航。
+        start_path: Option<super::path::Path>,
+    },
+    /// `HurtByTargetGoal`：记住上一次伤害的时间戳，把攻击者设成目标。
+    HurtByTarget {
+        timestamp: i32,
+    },
+    /// `NearestAttackableTargetGoal`：按 `TargetType` 选最近目标，缺省类型跳过。
+    NearestAttackableTarget {
+        kind: TargetType,
+        interval: i32,
+        unseen_ticks: i32,
+        found: Option<EntityUid>,
+    },
+    /// `RestrictSunGoal`：白天且没有头盔时只打开导航的躲太阳标志。
+    RestrictSun,
+    /// `FleeSunGoal`：白天着火且看得见天时找个躲处。
+    FleeSun {
+        speed: f64,
+        wanted: Vec3,
+    },
+    /// `BreakDoorGoal`：HARD 难度、开着 `canBreakDoors` 时逐刻推进 240 刻破坏进度。
+    BreakDoor,
+    /// `ZombieAttackTurtleEggGoal`（`RemoveBlockGoal` 一系）：倒计时、扫描、走过去踩蛋。
+    TurtleEgg {
+        speed: f64,
+    },
+}
+
+/// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
+/// 但注册项、优先级和 `Target` 标志位仍和官方一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetType {
+    Player,
+    Villager,
+    IronGolem,
+    Turtle,
+}
+
+impl TargetType {
+    /// Bamboo 现在有没有这种实体；没有时对应的目标直接跳过。
+    pub const fn available(self) -> bool {
+        matches!(self, Self::Player)
+    }
 }
 
 impl Goal {
@@ -86,12 +141,27 @@ impl Goal {
             }
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
+            Self::Unavailable(_) => &[],
+            Self::MeleeAttack { .. } => &[Flag::Move, Flag::Look],
+            Self::HurtByTarget { .. } | Self::NearestAttackableTarget { .. } => &[Flag::Target],
+            Self::RestrictSun => &[],
+            Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
+            Self::BreakDoor => &[Flag::Move],
         }
     }
 
     /// `requiresUpdateEveryTick`。
     pub const fn every_tick(&self) -> bool {
-        matches!(self, Self::Float | Self::RandomLookAround { .. })
+        // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
+        // Float/RandomLookAround/MeleeAttack/MoveToBlock/DoorInteract 为真，
+        // LookAtPlayer/RandomStroll/LookAround 的其它目标为假。
+        matches!(
+            self,
+            Self::Float
+                | Self::RandomLookAround { .. }
+                | Self::MeleeAttack { .. }
+                | Self::TurtleEgg { .. }
+        )
     }
 
     /// 对拍和调试用的名字，官方的类名。
@@ -105,6 +175,14 @@ impl Goal {
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
+            Self::Unavailable(name) => name,
+            Self::MeleeAttack { .. } => "ZombieAttackGoal",
+            Self::HurtByTarget { .. } => "HurtByTargetGoal",
+            Self::NearestAttackableTarget { .. } => "NearestAttackableTargetGoal",
+            Self::RestrictSun => "RestrictSunGoal",
+            Self::FleeSun { .. } => "FleeSunGoal",
+            Self::BreakDoor => "BreakDoorGoal",
+            Self::TurtleEgg { .. } => "ZombieAttackTurtleEggGoal",
         }
     }
 }
@@ -202,6 +280,157 @@ impl GoalSelector {
             locked: [None; 4],
             disabled: [false; 4],
         }
+    }
+
+    /// `Zombie.registerGoals` + `addBehaviourGoals`。
+    /// `GoalSelector.availableGoals` 是 `ObjectLinkedOpenHashSet`：按 `addGoal`
+    /// 的调用顺序迭代，不按优先级排。官方字节码里 `registerGoals` 先注册
+    /// `(4, ZombieAttackTurtleEggGoal)`、`(8, LookAtPlayerGoal)`、
+    /// `(8, RandomLookAroundGoal)`，随后 `addBehaviourGoals` 依次注册
+    /// `(2, SpearUseGoal)`、`(3, ZombieAttackGoal)`、
+    /// `(6, MoveThroughVillageGoal)`、`(7, WaterAvoidingRandomStrollGoal)`。
+    /// 近战第一次启动前，LOOK 还没被锁住，两个看的目标先各取一次 `nextFloat`；
+    /// 按优先级排序会让近战先锁 LOOK，随机源少两次取数。
+    /// `BreakDoorGoal(1)` 只在 `setCanBreakDoors(true)` 时追加到末尾。
+    pub fn zombie(_navigation: &mut Navigation) -> Self {
+        let wrap = |priority, goal| WrappedGoal {
+            priority,
+            running: false,
+            goal,
+        };
+        let turtle_egg = wrap(4, Goal::TurtleEgg { speed: 1.0 });
+        let look = wrap(
+            8,
+            Goal::LookAtPlayer {
+                look_distance: 8.0,
+                probability: 0.02,
+                look_at: None,
+                look_time: 0,
+            },
+        );
+        let look_around = wrap(
+            8,
+            Goal::RandomLookAround {
+                rel_x: 0.0,
+                rel_z: 0.0,
+                look_time: 0,
+            },
+        );
+        let goals = vec![
+            turtle_egg,
+            look,
+            look_around,
+            wrap(2, Goal::Unavailable("SpearUseGoal")),
+            wrap(
+                3,
+                Goal::MeleeAttack {
+                    speed: 1.0,
+                    ticks_until_next_attack: 0,
+                    ticks_until_path_recalc: 0,
+                    pathed_target: Vec3::default(),
+                    raise_arm_ticks: 0,
+                    last_can_use_check: 0,
+                    start_path: None,
+                },
+            ),
+            wrap(6, Goal::Unavailable("MoveThroughVillageGoal")),
+            wrap(
+                7,
+                Goal::Stroll {
+                    speed: 1.0,
+                    interval: 120,
+                    probability: 0.001,
+                    wanted: Vec3::default(),
+                    force_trigger: false,
+                },
+            ),
+        ];
+        Self {
+            goals,
+            locked: [None; 4],
+            disabled: [false; 4],
+        }
+    }
+
+    /// `Zombie.addBehaviourGoals` 里的 `targetSelector`。缺实体的目标仍注册，
+    /// 但 `TargetType::available()` 为假时 `canUse` 不查世界、不取随机数。
+    pub fn zombie_targets() -> Self {
+        let wrap = |priority, goal| WrappedGoal {
+            priority,
+            running: false,
+            goal,
+        };
+        Self {
+            goals: vec![
+                wrap(1, Goal::HurtByTarget { timestamp: -1 }),
+                wrap(
+                    2,
+                    Goal::NearestAttackableTarget {
+                        kind: TargetType::Player,
+                        interval: reduced_tick_delay(10),
+                        unseen_ticks: 0,
+                        found: None,
+                    },
+                ),
+                wrap(
+                    3,
+                    Goal::NearestAttackableTarget {
+                        kind: TargetType::Villager,
+                        interval: reduced_tick_delay(10),
+                        unseen_ticks: 0,
+                        found: None,
+                    },
+                ),
+                wrap(
+                    3,
+                    Goal::NearestAttackableTarget {
+                        kind: TargetType::IronGolem,
+                        interval: reduced_tick_delay(10),
+                        unseen_ticks: 0,
+                        found: None,
+                    },
+                ),
+                wrap(
+                    5,
+                    Goal::NearestAttackableTarget {
+                        kind: TargetType::Turtle,
+                        interval: reduced_tick_delay(10),
+                        unseen_ticks: 0,
+                        found: None,
+                    },
+                ),
+            ],
+            locked: [None; 4],
+            disabled: [false; 4],
+        }
+    }
+
+    /// `setCanBreakDoors(true)` 时官方在优先级 1 追加 `BreakDoorGoal`。
+    /// `ObjectLinkedOpenHashSet` 的新元素排在末尾，移除后再加仍排在末尾。
+    pub fn insert_break_door(&mut self) {
+        if self
+            .goals
+            .iter()
+            .any(|wrapped| matches!(wrapped.goal, Goal::BreakDoor))
+        {
+            return;
+        }
+        self.goals.push(WrappedGoal {
+            priority: 1,
+            running: false,
+            goal: Goal::BreakDoor,
+        });
+    }
+
+    /// `setCanBreakDoors(false)` 时官方 `removeGoal(BreakDoorGoal)`。
+    pub fn remove_break_door(&mut self) {
+        self.goals
+            .retain(|wrapped| !matches!(wrapped.goal, Goal::BreakDoor));
+    }
+
+    /// 对拍的改坏确认用：把目标按优先级排序（官方按注册顺序）。
+    pub fn sort_by_priority_for_oracle(&mut self) {
+        self.goals.sort_by_key(|wrapped| wrapped.priority);
     }
 
     /// `setControlFlag`。
@@ -308,6 +537,16 @@ const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
 }
 
+/// `Goal.adjustedTickDelay`：`requiresUpdateEveryTick()` 为真时原样返回，
+/// 为假时才折半。
+const fn adjusted_tick_delay(every_tick: bool, ticks: i32) -> i32 {
+    if every_tick {
+        ticks
+    } else {
+        reduced_tick_delay(ticks)
+    }
+}
+
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
         Goal::Float => float_can_use(me, mob),
@@ -384,6 +623,8 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 if mob.no_action_time >= 100 {
                     return false;
                 }
+                // 官方 `RandomStrollGoal.canUse` 用 `nextInt(reducedTickDelay(interval))`；
+                // 牛和僵尸都用 120，所以是 `nextInt(60)`。
                 if me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0 {
                     return false;
                 }
@@ -416,6 +657,110 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             look_at.is_some()
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
+        Goal::Unavailable(_) => false,
+        Goal::MeleeAttack {
+            last_can_use_check,
+            start_path,
+            ..
+        } => {
+            // 官方 `lastCanUseCheck` 初值是 0：第一个满刻（1001）就允许，
+            // 之后每 20 刻一次。Bamboo 之前给了一个很大的负数，语义等价，
+            // 但 `gameTime - last` 用 long 减法，这里按官方改成初值 0。
+            let now = ctx.blocks().game_time();
+            if now - *last_can_use_check < 20 {
+                return false;
+            }
+            *last_can_use_check = now;
+            let Some(target) = target_player(mob, ctx) else {
+                return false;
+            };
+            if !target.alive {
+                return false;
+            }
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            *start_path = mob.navigation.create_path(
+                ctx.blocks(),
+                &nav,
+                BlockPos::containing(target.position),
+                0,
+            );
+            start_path.is_some() || within_melee_range(me, mob, target)
+        }
+        Goal::HurtByTarget { timestamp } => {
+            let last = mob.last_hurt_by_mob;
+            let stamp = mob.last_hurt_by_mob_timestamp;
+            last.is_some() && stamp != *timestamp
+        }
+        Goal::NearestAttackableTarget {
+            kind,
+            interval,
+            found,
+            ..
+        } => {
+            // 官方先按 `randomInterval` 取数，再按类型找目标。缺实体的目标
+            // 虽跳过搜索，取数次数必须和官方一致，否则随机源会错开。
+            if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
+                return false;
+            }
+            // 官方每个 `NearestAttackableTargetGoal` 都先取 `nextInt(interval)`；
+            // 缺实体的目标仍注册、仍取数，只是查不到目标（场景里明确无此类实体）。
+            *found = if kind.available() {
+                nearest_attackable(me, mob, ctx, *kind)
+            } else {
+                None
+            };
+            found.is_some()
+        }
+        // `RestrictSunGoal.canUse`：白天、头上没东西、地面导航（僵尸恒是）。
+        // 官方这里不看 `MONSTERS_BURN`。
+        Goal::RestrictSun => {
+            ctx.blocks().is_bright_outside()
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head)
+                    .is_empty()
+        }
+        Goal::FleeSun { wanted, .. } => {
+            mob.target.is_none()
+                && ctx.blocks().is_bright_outside()
+                && me.remaining_fire_ticks > 0
+                && ctx.blocks().can_see_sky(me.block_position())
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head)
+                    .is_empty()
+                && flee_sun_target(me, mob, ctx).is_some_and(|at| {
+                    *wanted = at;
+                    true
+                })
+        }
+        Goal::BreakDoor => {
+            mob.can_break_doors
+                && ctx.blocks().block_game_rules().mob_griefing
+                && ctx.blocks().difficulty() == 3
+        }
+        Goal::TurtleEgg { .. } => {
+            // `RemoveBlockGoal.canUse` 覆写了 `MoveToBlockGoal`：
+            // mobGriefing → 倒计时 → 先 `findNearestBlock()`，命中才设 10；
+            // 未命中才取 `nextInt(200)` 设下次倒计时。
+            if !ctx.blocks().block_game_rules().mob_griefing {
+                return false;
+            }
+            if mob.turtle_egg_next_start_tick > 0 {
+                mob.turtle_egg_next_start_tick -= 1;
+                return false;
+            }
+            let egg = nearest_turtle_egg(me, ctx);
+            mob.turtle_egg_pos = egg;
+            if egg.is_some() {
+                mob.turtle_egg_next_start_tick = reduced_tick_delay(20);
+                true
+            } else {
+                mob.turtle_egg_next_start_tick =
+                    reduced_tick_delay(200 + me.random.next_int_bounded(200));
+                false
+            }
+        }
     }
 }
 
@@ -467,6 +812,46 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float => can_use(goal, me, mob, ctx),
+        Goal::Unavailable(_) => false,
+        Goal::MeleeAttack { .. } => {
+            // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
+            // `!navigation.isDone()` 才继续；路径走完就停。
+            target_player(mob, ctx).is_some() && !mob.navigation.is_done()
+        }
+        Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
+            // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
+            // 旁观、和平难度）读成 null，回退到的 `targetMob` 是同一个玩家，同样打不了；
+            // 打得了还要在跟随距离内。`mustSee` 的视线记忆本期不建模（目标恒看得见）。
+            let range = mob
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+            target_player(mob, ctx).is_some_and(|player| {
+                let (dx, dy, dz) = (
+                    player.position.x - me.position.x,
+                    player.position.y - me.position.y,
+                    player.position.z - me.position.z,
+                );
+                dx * dx + dy * dy + dz * dz <= range * range
+            })
+        }
+        Goal::RestrictSun => {
+            ctx.blocks().is_bright_outside()
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head)
+                    .is_empty()
+        }
+        Goal::FleeSun { .. } => !mob.navigation.is_done(),
+        Goal::BreakDoor => mob.door_break_time <= 240 && ctx.blocks().difficulty() == 3,
+        Goal::TurtleEgg { .. } => {
+            // `MoveToBlockGoal.canContinueToUse`：尝试刻数在
+            // `[-maxStayTicks, 1200]` 内且目标方块仍然有效。
+            mob.turtle_egg_try_ticks >= -mob.turtle_egg_max_stay
+                && mob.turtle_egg_try_ticks <= 1200
+                && mob
+                    .turtle_egg_pos
+                    .is_some_and(|pos| valid_turtle_egg_target(ctx.blocks(), pos))
+        }
     }
 }
 
@@ -497,11 +882,75 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *rel_z = angle.sin();
             *look_time = 20 + me.random.next_int_bounded(20);
         }
-        Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } => {}
+        Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::MeleeAttack {
+            speed,
+            ticks_until_next_attack,
+            ticks_until_path_recalc,
+            raise_arm_ticks,
+            start_path,
+            ..
+        } => {
+            if let Some(path) = start_path.take() {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation
+                    .move_to_path(ctx.blocks(), &nav, Some(path), *speed);
+            }
+            *ticks_until_next_attack = 0;
+            *ticks_until_path_recalc = 0;
+            *raise_arm_ticks = 0;
+            // 官方 `MeleeAttackGoal.start()` 显式置真；同一刻的
+            // `ZombieAttackGoal.tick()` 会按抬手计时再覆盖。
+            mob.aggressive = true;
+        }
+        Goal::HurtByTarget { timestamp } => {
+            *timestamp = mob.last_hurt_by_mob_timestamp;
+            mob.target = mob.last_hurt_by_mob;
+        }
+        Goal::NearestAttackableTarget {
+            found,
+            unseen_ticks,
+            ..
+        } => {
+            mob.target = *found;
+            *unseen_ticks = 0;
+        }
+        Goal::RestrictSun => mob.navigation.flags.can_open_doors = true,
+        Goal::FleeSun { speed, wanted } => {
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
+        }
+        Goal::BreakDoor => {
+            mob.door_break_time = 0;
+            mob.door_break_progress = -1;
+            mob.door_break_pos = None;
+        }
+        Goal::TurtleEgg { speed } => {
+            // `MoveToBlockGoal.start()`：先 `moveMobToBlock()`，再清 `tryTicks`，
+            // 最后取 `maxStayTicks = 1200 + nextInt(1200 + nextInt(1200))`。
+            if let Some(pos) = mob.turtle_egg_pos {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation.move_to(
+                    ctx.blocks(),
+                    &nav,
+                    Vec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y + 1),
+                        f64::from(pos.z) + 0.5,
+                    ),
+                    *speed,
+                );
+            }
+            mob.turtle_egg_try_ticks = 0;
+            let inner = me.random.next_int_bounded(1200);
+            mob.turtle_egg_max_stay = 1200 + me.random.next_int_bounded(1200 + inner);
+            mob.turtle_egg_reached = false;
+            mob.turtle_egg_ticks_since_reached = 0;
+        }
     }
 }
 
-fn stop_goal(goal: &mut Goal, _me: &mut Entity, mob: &mut Mob, _ctx: &mut dyn EntityCtx) {
+fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
         Goal::Breed {
             partner, love_time, ..
@@ -519,7 +968,39 @@ fn stop_goal(goal: &mut Goal, _me: &mut Entity, mob: &mut Mob, _ctx: &mut dyn En
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
-        Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } => {}
+        Goal::Float
+        | Goal::Panic { .. }
+        | Goal::RandomLookAround { .. }
+        | Goal::Unavailable(_)
+        | Goal::RestrictSun => {}
+        // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
+        Goal::HurtByTarget { .. } => mob.target = None,
+        Goal::NearestAttackableTarget { found, .. } => {
+            mob.target = None;
+            *found = None;
+        }
+        Goal::MeleeAttack { .. } => {
+            // `MeleeAttackGoal.stop()`：目标是创造或旁观模式的玩家才清掉
+            // （`NO_CREATIVE_OR_SPECTATOR`），普通玩家目标保留。
+            let excluded = mob
+                .target
+                .and_then(|uid| player_by_uid(ctx.blocks(), uid))
+                .is_some_and(|player| player.creative || player.spectator);
+            if excluded {
+                mob.target = None;
+            }
+            mob.aggressive = false;
+            mob.navigation.stop();
+        }
+        Goal::FleeSun { .. } => mob.navigation.stop(),
+        Goal::BreakDoor => {
+            mob.door_break_time = 0;
+            mob.door_break_progress = -1;
+        }
+        Goal::TurtleEgg { .. } => {
+            // `RemoveBlockGoal.stop`：落地前的摔落距离按 1 格算。
+            me.fall_distance = 1.0;
+        }
     }
 }
 
@@ -548,7 +1029,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             );
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation
-                .move_to_entity(ctx.blocks(), &nav, other.position, *speed);
+                .move_to_entity(ctx.blocks(), &nav, other.position, *speed, 1);
             *love_time += 1;
             // `BreedGoal.tick`：累计 `adjustedTickDelay(60)` 刻且距离小于 3 格时生小牛。
             // 非每刻目标把 60 折成 30，因为整套目标隔刻才跑一次。
@@ -576,7 +1057,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             } else {
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 mob.navigation
-                    .move_to_entity(ctx.blocks(), &nav, player.position, *speed);
+                    .move_to_entity(ctx.blocks(), &nav, player.position, *speed, 1);
             }
         }
         Goal::FollowParent {
@@ -592,7 +1073,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             if let Some(other) = parent.and_then(|uid| ctx.other(uid)) {
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 mob.navigation
-                    .move_to_entity(ctx.blocks(), &nav, other.position, *speed);
+                    .move_to_entity(ctx.blocks(), &nav, other.position, *speed, 1);
             }
         }
         Goal::LookAtPlayer {
@@ -619,6 +1100,174 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 .set_look_at_default(me.position.x + *rel_x, eye, me.position.z + *rel_z);
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
+        Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
+        Goal::NearestAttackableTarget { unseen_ticks, .. } => {
+            *unseen_ticks += 1;
+            // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
+            // `unseenTicks`；本期的玩家目标恒可攻击，不改随机源。
+        }
+        Goal::MeleeAttack {
+            speed,
+            ticks_until_next_attack,
+            ticks_until_path_recalc,
+            pathed_target,
+            raise_arm_ticks,
+            ..
+        } => {
+            let Some(target) = target_player(mob, ctx) else {
+                return;
+            };
+            mob.look.set_look_at(
+                target.position.x,
+                target.eye_y(),
+                target.position.z,
+                30.0,
+                30.0,
+            );
+            *ticks_until_path_recalc = (*ticks_until_path_recalc - 1).max(0);
+            // 官方 `MeleeAttackGoal.tick`：三个短路串行，
+            // `nextFloat` 只在「pathed 非零且目标离它 < 1」时被求值。
+            if *ticks_until_path_recalc == 0
+                && (*pathed_target == Vec3::default()
+                    || target.position.distance_to_sqr(*pathed_target) >= 1.0
+                    || me.random.next_float() < 0.05)
+            {
+                *pathed_target = target.position;
+                *ticks_until_path_recalc = 4 + me.random.next_int_bounded(7);
+                let distance = me.position.distance_to_sqr(target.position);
+                if distance > 1024.0 {
+                    *ticks_until_path_recalc += 10;
+                } else if distance > 256.0 {
+                    *ticks_until_path_recalc += 5;
+                }
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                if !mob
+                    .navigation
+                    .move_to_entity(ctx.blocks(), &nav, target.position, *speed, 0)
+                {
+                    *ticks_until_path_recalc += 15;
+                }
+                *ticks_until_path_recalc = adjusted_tick_delay(true, *ticks_until_path_recalc);
+            }
+            *ticks_until_next_attack = (*ticks_until_next_attack - 1).max(0);
+            if *ticks_until_next_attack == 0
+                && within_melee_range(me, mob, target)
+                && living::has_line_of_sight(
+                    me,
+                    mob,
+                    ctx.blocks(),
+                    target.uid,
+                    target.eye_position(),
+                )
+            {
+                *ticks_until_next_attack = adjusted_tick_delay(true, 20);
+                super::living::do_hurt_target(me, mob, ctx, target.uid);
+            }
+            // `ZombieAttackGoal.tick`：`super.tick()` 之后抬手计时加一，按新的
+            // `ticksUntilNextAttack` 决定举不举手。
+            *raise_arm_ticks += 1;
+            mob.aggressive = *raise_arm_ticks >= 5
+                && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
+        }
+        Goal::FleeSun { .. } => {}
+        Goal::BreakDoor => {
+            // 进度和 1019/1021/2001 事件落地在命令层，这里只推倒计时和取随机数。
+            mob.door_break_time += 1;
+            if me.random.next_int_bounded(20) == 0 {
+                ctx.emit(
+                    crate::entity::ctx::Command::MobLevelEvent {
+                        event: 1019,
+                        pos: mob.door_break_pos.unwrap_or(me.block_position()),
+                        data: 0,
+                    },
+                    me,
+                );
+            }
+            if mob.door_break_time >= 240 {
+                mob.door_break_time = 0;
+                let pos = mob.door_break_pos.unwrap_or(me.block_position());
+                ctx.emit(crate::entity::ctx::Command::RemoveMobBlock { pos }, me);
+            }
+        }
+        Goal::TurtleEgg { speed } => {
+            let Some(egg) = mob.turtle_egg_pos else {
+                return;
+            };
+            // `MoveToBlockGoal.tick`：目标格是蛋的上方，`closerToCenterThan`
+            // 按 1.14 的欧氏距离（含 Y）判定；没到时每 40 个尝试刻才重算一次路径。
+            let target = egg.above();
+            let centre = Vec3::new(
+                f64::from(target.x) + 0.5,
+                f64::from(target.y) + 0.5,
+                f64::from(target.z) + 0.5,
+            );
+            if me.position.distance_to_sqr(centre) >= 1.14 * 1.14 {
+                mob.turtle_egg_reached = false;
+                mob.turtle_egg_try_ticks += 1;
+                if mob.turtle_egg_try_ticks % 40 == 0 {
+                    let nav = living::nav_mob(me, mob, ctx.blocks());
+                    mob.navigation.move_to(
+                        ctx.blocks(),
+                        &nav,
+                        Vec3::new(
+                            f64::from(target.x) + 0.5,
+                            f64::from(target.y),
+                            f64::from(target.z) + 0.5,
+                        ),
+                        *speed,
+                    );
+                }
+            } else {
+                mob.turtle_egg_reached = true;
+                mob.turtle_egg_try_ticks -= 1;
+            }
+            // `RemoveBlockGoal.tick`：到达目标且脚边找得到蛋时，先往上一跳、撒蛋壳，
+            // 隔刻往下压并每 6 刻响一次啄蛋声，超过 60 刻把蛋移除。
+            // 粒子包这一期不发，只按官方顺序取生物随机数。
+            let found = turtle_egg_at(ctx.blocks(), me.block_position());
+            if !mob.turtle_egg_reached {
+                return;
+            }
+            let Some(pos) = found else {
+                return;
+            };
+            let since = mob.turtle_egg_ticks_since_reached;
+            if since > 0 {
+                me.delta = Vec3::new(me.delta.x, 0.3, me.delta.z);
+                for _ in 0..3 {
+                    me.random.next_float();
+                }
+            }
+            if since % 2 == 0 {
+                me.delta = Vec3::new(me.delta.x, -0.3, me.delta.z);
+                if since % 6 == 0 {
+                    // `ZombieAttackTurtleEggGoal.playDestroyProgressSound`：放在目标蛋上，
+                    // 音高取生物自己的随机数。
+                    let pitch = 0.9 + me.random.next_float() * 0.2;
+                    ctx.emit(
+                        crate::entity::ctx::Command::MobBlockSound {
+                            pos: egg,
+                            sound: "minecraft:entity.zombie.destroy_egg",
+                            source: mc_bamboo_data::sounds::HOSTILE,
+                            volume: 0.5,
+                            pitch,
+                        },
+                        me,
+                    );
+                }
+            }
+            if since > 60 {
+                // `level.removeBlock(pos, false)`：只换成流体或空气，没有 2001 事件。
+                ctx.emit(crate::entity::ctx::Command::RemoveMobBlock { pos }, me);
+                // 20 团烟雾，每团三个生物随机数的高斯偏移。
+                for _ in 0..60 {
+                    me.random.next_gaussian();
+                }
+                // `playBreakSound`：音高取世界随机数，落地时取。
+                ctx.emit(crate::entity::ctx::Command::TurtleEggBreakSound { pos }, me);
+            }
+            mob.turtle_egg_ticks_since_reached += 1;
+        }
     }
 }
 
@@ -869,8 +1518,12 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
     mob.malus.get(static_path_type(view, pos)) != 0.0
 }
 
-/// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度。
-fn walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
+/// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
+/// `Monster.getWalkTargetValue` 取负的光照路径代价。
+fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
+    if mob.mob_type.is_monster() {
+        return monster_walk_target_value(view, pos);
+    }
     if view.block_state(pos.below()).is(blocks::GRASS_BLOCK) {
         return 10.0;
     }
@@ -884,14 +1537,18 @@ fn walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
 }
 
 /// `RandomPos.generateRandomPos(mob, supplier)`：取 10 次，严格更大才换。
-fn pick_best(view: &dyn BlockView, mut supplier: impl FnMut() -> Option<BlockPos>) -> Option<Vec3> {
+fn pick_best(
+    mob: &Mob,
+    view: &dyn BlockView,
+    mut supplier: impl FnMut() -> Option<BlockPos>,
+) -> Option<Vec3> {
     let mut best = f64::NEG_INFINITY;
     let mut best_pos = None;
     for _ in 0..10 {
         let Some(pos) = supplier() else {
             continue;
         };
-        let weight = f64::from(walk_target_value(view, pos));
+        let weight = f64::from(walk_target_value(mob, view, pos));
         if weight > best {
             best = weight;
             best_pos = Some(pos);
@@ -915,7 +1572,7 @@ pub(crate) fn default_random_pos(
     vertical: i32,
 ) -> Option<Vec3> {
     let restricted = mob_restricted(me, mob, f64::from(horizontal));
-    pick_best(view, || {
+    pick_best(mob, view, || {
         let direction = random_direction(me, horizontal, vertical);
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
@@ -938,7 +1595,7 @@ pub(crate) fn land_random_pos(
     vertical: i32,
 ) -> Option<Vec3> {
     let restricted = mob_restricted(me, mob, f64::from(horizontal));
-    pick_best(view, || {
+    pick_best(mob, view, || {
         let direction = random_direction(me, horizontal, vertical);
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
@@ -960,4 +1617,169 @@ pub(crate) fn land_random_pos(
         }
         Some(moved)
     })
+}
+
+// ---- 敌对目标的查询 ----
+
+/// `Mob.getTarget()` 在 Bamboo 里只可能是本岛玩家（别的生物还没做目标实体）。
+fn target_player(mob: &Mob, ctx: &dyn EntityCtx) -> Option<PlayerView> {
+    // 官方 `TargetingConditions.forCombat().test` 的视线要求由
+    // `NearestAttackableTargetGoal` 在选择目标时已判；近战目标只看活着、非旁观/创造。
+    mob.target
+        .and_then(|uid| player_by_uid(ctx.blocks(), uid))
+        .filter(|player| player.alive && !player.spectator && !player.creative)
+        .filter(|_| ctx.blocks().difficulty() != 0)
+}
+
+/// `NearestAttackableTargetGoal.findTarget` 的玩家分支：按 `FOLLOW_RANGE`
+/// 找最近、看得见、非创造/旁观且在战斗条件下能被打的目标。
+fn nearest_attackable(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    kind: TargetType,
+) -> Option<EntityUid> {
+    if kind != TargetType::Player || ctx.blocks().difficulty() == 0 {
+        return None;
+    }
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+    let view = ctx.blocks();
+    let mut players = Vec::new();
+    view.for_each_player(&mut |player| players.push(*player));
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let mut best = f64::MAX;
+    let mut found = None;
+    for player in players {
+        if !targeting_test(me, mob, view, &player, range, true) {
+            continue;
+        }
+        let distance = eye.distance_to_sqr(player.eye_position());
+        if distance < best {
+            best = distance;
+            found = Some(player.uid);
+        }
+    }
+    found
+}
+
+/// `PathfinderMob.isWithinMeleeAttackRange`：用实体交互范围算的方形距离。
+fn within_melee_range(me: &Entity, _mob: &Mob, player: PlayerView) -> bool {
+    // `Mob.DEFAULT_ATTACK_REACH = sqrt(2.04f) - 0.6f`（26.3 字节码）。
+    // 官方用 `getAttackBoundingBox(reach).intersects(target.getHitbox())`，
+    // 这里按双方 Aabb 膨胀后的相交判定，而不是旧的「交互范围 + 1」方格。
+    let reach = 2.039_999_961_853_027_3_f64.sqrt() - f64::from(0.6_f32);
+    let (width, height) = _mob.dimensions();
+    let half = f64::from(width) / 2.0;
+    let ours = crate::shape::Aabb::new(
+        me.position.x - half - reach,
+        me.position.y - reach,
+        me.position.z - half - reach,
+        me.position.x + half + reach,
+        me.position.y + f64::from(height) + reach,
+        me.position.z + half + reach,
+    );
+    let theirs = crate::shape::Aabb::new(
+        player.position.x - 0.3,
+        player.position.y,
+        player.position.z - 0.3,
+        player.position.x + 0.3,
+        player.position.y + 1.8,
+        player.position.z + 0.3,
+    );
+    ours.intersects(theirs)
+}
+
+/// `FleeSunGoal.getHidePos`：10 次随机采样，找看不见天且路径代价小于 0 的格子。
+fn flee_sun_target(me: &mut Entity, _mob: &Mob, ctx: &dyn EntityCtx) -> Option<Vec3> {
+    let centre = me.block_position();
+    for _ in 0..10 {
+        let x = me.random.next_int_bounded(20) - 10;
+        let y = me.random.next_int_bounded(6) - 3;
+        let z = me.random.next_int_bounded(20) - 10;
+        let pos = centre.offset(x, y, z);
+        if ctx.blocks().can_see_sky(pos) {
+            continue;
+        }
+        let cost = monster_walk_target_value(ctx.blocks(), pos);
+        if cost < 0.0 {
+            return Some(Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y),
+                f64::from(pos.z) + 0.5,
+            ));
+        }
+    }
+    None
+}
+
+/// `Monster.getWalkTargetValue = -LevelReader.getPathfindingCostFromLightLevels`。
+pub(crate) fn monster_walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
+    let raw = view.max_local_raw_brightness(pos, view.sky_darken()) as f32 / 15.0;
+    let magic = raw / (4.0 - 3.0 * raw);
+    -(magic - 0.5)
+}
+
+/// `RemoveBlockGoal.isValidTarget`：区块在、蛋在、上面两格是空气。
+fn valid_turtle_egg_target(view: &dyn BlockView, pos: BlockPos) -> bool {
+    view.is_loaded(pos)
+        && view.block_state(pos).is(mc_bamboo_data::blocks::TURTLE_EGG)
+        && view.block_state(pos.above()).is_air()
+        && view.block_state(pos.above().above()).is_air()
+}
+
+/// `RemoveBlockGoal.getPosWithBlock`：实体脚下附近 6 格里第一块海龟蛋。
+fn turtle_egg_at(view: &dyn BlockView, pos: BlockPos) -> Option<BlockPos> {
+    let egg = mc_bamboo_data::blocks::TURTLE_EGG;
+    if view.block_state(pos).is(egg) {
+        return Some(pos);
+    }
+    let below = pos.below();
+    [
+        below,
+        pos.west(),
+        pos.east(),
+        pos.north(),
+        pos.south(),
+        below.below(),
+    ]
+    .into_iter()
+    .find(|candidate| view.block_state(*candidate).is(egg))
+}
+
+/// `MoveToBlockGoal.findNearestBlock`：以实体脚下一格为基准搜海龟蛋。
+///
+/// `RemoveBlockGoal` 构造 `MoveToBlockGoal(mob, speed, 24, 3)`。官方的三层循环都按
+/// `0, 1, -1, 2, -2, …` 的顺序走：纵向 `y` 从 0 到 3，水平半径 `r` 从 0 到 23，
+/// 每圈先 `x` 后 `z`，`|x| < r` 时 `z` 只取 `±r`。第一个 `isValidTarget` 的格子就是目标。
+fn nearest_turtle_egg(me: &Entity, ctx: &dyn EntityCtx) -> Option<BlockPos> {
+    const SEARCH_RANGE: i32 = 24;
+    const VERTICAL_RANGE: i32 = 3;
+    let next = |v: i32| if v > 0 { -v } else { 1 - v };
+    let centre = me.block_position();
+    let view = ctx.blocks();
+    let mut y = 0;
+    while y <= VERTICAL_RANGE {
+        for r in 0..SEARCH_RANGE {
+            let mut x = 0;
+            while x <= r {
+                let mut z = if x < r && x > -r { r } else { 0 };
+                while z <= r {
+                    let pos = centre.offset(x, y - 1, z);
+                    if valid_turtle_egg_target(view, pos) {
+                        return Some(pos);
+                    }
+                    z = next(z);
+                }
+                x = next(x);
+            }
+        }
+        y = next(y);
+    }
+    None
 }

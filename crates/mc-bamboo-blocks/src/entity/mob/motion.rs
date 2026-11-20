@@ -15,7 +15,7 @@ use super::{DamageKind, DamageSource, Mob, living};
 use crate::{
     entity::{
         Entity, Movement, axis_component,
-        ctx::{BlockView, EntityCtx},
+        ctx::{BlockView, Command, EntityCtx},
         item::{apply_current, flow_vector, fluid_box},
         physics::{for_each_block_intersected_between, offset_along, sweep_movement, world_boxes},
         with_axis,
@@ -124,7 +124,7 @@ fn check_fall_damage(
     ctx: &mut dyn EntityCtx,
     ya: f64,
     state: BlockState,
-    _pos: BlockPos,
+    pos: BlockPos,
 ) {
     if !me.in_water {
         update_fluid_interaction(me, mob, ctx.blocks());
@@ -135,7 +135,7 @@ fn check_fall_damage(
     if me.on_ground {
         if me.fall_distance > 0.0 {
             let distance = me.fall_distance;
-            fall_on(me, mob, ctx, state, distance);
+            fall_on(me, mob, ctx, pos, state, distance);
         }
         me.fall_distance = 0.0;
         mob.last_climbable_pos = None;
@@ -147,10 +147,17 @@ fn fall_on(
     me: &mut Entity,
     mob: &mut Mob,
     ctx: &mut dyn EntityCtx,
+    pos: BlockPos,
     state: BlockState,
     distance: f64,
 ) {
-    if state.is(blocks::HAY_BLOCK) || state.is(blocks::HONEY_BLOCK) {
+    if state.is(blocks::TURTLE_EGG) {
+        // `TurtleEggBlock.fallOn`：僵尸一系（含尸壳）落上去不踩蛋，其它生物 1/3。
+        if !mob.mob_type.is_monster() {
+            destroy_turtle_egg(me, ctx, pos, 3);
+        }
+        cause_fall_damage(me, mob, ctx, distance, 1.0);
+    } else if state.is(blocks::HAY_BLOCK) || state.is(blocks::HONEY_BLOCK) {
         cause_fall_damage(me, mob, ctx, distance, 0.2);
     } else if state.is(blocks::SLIME_BLOCK) {
         cause_fall_damage(me, mob, ctx, distance, 0.0);
@@ -445,7 +452,7 @@ pub(crate) fn apply_effects_from_blocks(me: &mut Entity, mob: &mut Mob, ctx: &mu
     if me.on_ground {
         let pos = me.on_pos(ctx.blocks(), 0.2);
         let state = ctx.blocks().block_state(pos);
-        step_on(me, mob, ctx, state);
+        step_on(me, mob, ctx, pos, state);
     }
     let was_on_fire = me.remaining_fire_ticks > 0;
     let was_freezing = mob.ticks_frozen > 0;
@@ -484,9 +491,18 @@ pub(crate) fn apply_effects_from_blocks(me: &mut Entity, mob: &mut Mob, ctx: &mu
     }
 }
 
-/// `Block.stepOn`：岩浆块烫，史莱姆块减速。
-fn step_on(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, state: BlockState) {
-    if state.is(blocks::MAGMA_BLOCK) {
+/// `Block.stepOn`：岩浆块烫，史莱姆块减速，海龟蛋可能被踩坏。
+fn step_on(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    pos: BlockPos,
+    state: BlockState,
+) {
+    if state.is(blocks::TURTLE_EGG) {
+        // 生物不会潜行，`isSteppingCarefully` 恒为假。
+        destroy_turtle_egg(me, ctx, pos, 100);
+    } else if state.is(blocks::MAGMA_BLOCK) {
         living::hurt_server(
             me,
             mob,
@@ -501,6 +517,15 @@ fn step_on(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, state: Block
             me.delta = me.delta.multiply(factor, 1.0, factor);
         }
     }
+}
+
+/// `TurtleEggBlock.destroyEgg`：生物（非海龟、蝙蝠、玩家）要 `mobGriefing`；
+/// 之后的世界随机数和改方块在命令落地时做。
+fn destroy_turtle_egg(me: &mut Entity, ctx: &mut dyn EntityCtx, pos: BlockPos, chance: i32) {
+    if !ctx.blocks().block_game_rules().mob_griefing {
+        return;
+    }
+    ctx.emit(Command::TrampleTurtleEgg { pos, chance }, me);
 }
 
 fn run_action(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, action: Action) {
@@ -546,6 +571,14 @@ fn run_action(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, action: A
             }
         }
     }
+}
+
+/// `Entity.igniteForSeconds(8)` 走 `LivingEntity.igniteForTicks`，再把
+/// 燃烧时间属性乘进去。白天燃烧和僵尸着火传染共用这一层。
+///
+/// `Entity.igniteForSeconds(8)` via `LivingEntity.igniteForTicks`.
+pub(crate) fn ignite_for_seconds(me: &mut Entity, mob: &mut Mob, seconds: f32) {
+    ignite_for_ticks(me, mob, mth::floor_f32(seconds * 20.0));
 }
 
 /// `LivingEntity.igniteForTicks` → `Entity.igniteForTicks`：燃烧时间属性是 1。

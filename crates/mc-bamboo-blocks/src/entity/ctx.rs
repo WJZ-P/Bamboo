@@ -144,6 +144,36 @@ pub trait BlockView {
         false
     }
 
+    /// `Level.isBrightOutside()`：主世界没有固定时间，天色暗于 4 才算夜里。
+    ///
+    /// `Level.isBrightOutside()`: the overworld has no fixed time, so night
+    /// starts when `skyDarken` reaches 4.
+    fn is_bright_outside(&self) -> bool {
+        self.sky_darken() < 4
+    }
+
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线求值。
+    fn monsters_burn(&self) -> bool {
+        crate::sky::monsters_burn(self.clock_ticks())
+    }
+
+    /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
+    fn clock_ticks(&self) -> i64 {
+        0
+    }
+
+    /// `getCurrentDifficultyAt(pos).getEffectiveDifficulty()`：区域难度。
+    /// 默认把区块的 `InhabitedTime` 当 0。
+    fn effective_difficulty(&self, _pos: BlockPos) -> f32 {
+        let clock = self.clock_ticks();
+        crate::sky::effective_difficulty(
+            self.difficulty(),
+            clock,
+            0,
+            crate::sky::moon_brightness(clock),
+        )
+    }
+
     /// `level.random.nextFloat()`。只有精确模式的世界能当场取世界随机数；
     /// 并行的只读视图给 0，取数的地方列在设计稿的性能模式差异里。
     fn level_random_float(&self) -> f32 {
@@ -153,6 +183,17 @@ pub trait BlockView {
     /// `level.random.nextBoolean()`，并行视图同上。
     fn level_random_boolean(&self) -> bool {
         false
+    }
+
+    /// 生物身上装备的 `hurtAndBreak(amount, entity, slot)`：耐久附魔用 `level.random`。
+    /// 返回装备是不是坏了。并行的只读视图没有世界随机源，按没有耐久附魔算
+    /// （带耐久附魔的装备扣耐久的次数和原版不同，是性能模式差异）。
+    fn hurt_mob_equipment(
+        &self,
+        stack: &mut mc_bamboo_protocol::item::ItemStack,
+        amount: i32,
+    ) -> bool {
+        crate::durability::hurt_equipment(stack, amount, &crate::random::LegacyRandom::new(0))
     }
 }
 
@@ -318,12 +359,43 @@ impl BlockView for World<'_> {
         World::is_raining_at(self, pos)
     }
 
+    fn is_bright_outside(&self) -> bool {
+        self.level().is_bright_outside()
+    }
+
+    fn monsters_burn(&self) -> bool {
+        self.level().monsters_burn()
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.level().clock_ticks()
+    }
+
+    fn effective_difficulty(&self, pos: BlockPos) -> f32 {
+        let clock = self.level().clock_ticks();
+        crate::sky::effective_difficulty(
+            self.level().difficulty_id(),
+            clock,
+            self.level()
+                .inhabited_time(ChunkPos::new(pos.x >> 4, pos.z >> 4)),
+            crate::sky::moon_brightness(clock),
+        )
+    }
+
     fn level_random_float(&self) -> f32 {
         self.random().next_float()
     }
 
     fn level_random_boolean(&self) -> bool {
         self.random().next_boolean()
+    }
+
+    fn hurt_mob_equipment(
+        &self,
+        stack: &mut mc_bamboo_protocol::item::ItemStack,
+        amount: i32,
+    ) -> bool {
+        crate::durability::hurt_equipment(stack, amount, self.random())
     }
 }
 
@@ -350,6 +422,35 @@ pub trait EntityCtx {
     /// `me` 是发出者的完整视图；落地函数可以直接改它，tick 函数在 `emit` 之后
     /// 看到的就是改完的自己。tick 函数不能根据 `emit` 之后自己的状态分支。
     fn emit(&mut self, command: Command, me: &mut Entity);
+    /// 生物打一名玩家（官方 `Mob.doHurtTarget` 里的 `target.hurtServer`），返回 `wasHurt`。
+    ///
+    /// 精确驱动当场落地，返回真实结果；并行驱动缓冲成 [`Command::HurtPlayer`]，
+    /// 一律按打中算（性能模式的已知差异）。
+    ///
+    /// `attacker` 是打人的生物这一刻完整的公开数据（tick 期间 `me.kind` 被临时取走，
+    /// 死亡消息要从这里拿名字和 UUID）。
+    ///
+    /// A mob hits a player. The precise driver applies it at once and returns the real
+    /// `wasHurt`; the parallel driver buffers a command and reports a hit.
+    fn hurt_player(
+        &mut self,
+        target: EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        me: &mut Entity,
+        attacker: &EntityPublic,
+    ) -> bool {
+        let _ = attacker;
+        self.emit(
+            Command::HurtPlayer {
+                target,
+                source,
+                amount,
+            },
+            me,
+        );
+        true
+    }
 }
 
 /// 下落方块「算」阶段得到的落地判定事实，随命令带进落地阶段。
@@ -364,7 +465,7 @@ pub struct LandFacts {
 /// 一条对外影响，按「意图」而不是底层操作划分。
 ///
 /// 底层操作（写方块、发事件、生成实体、取世界随机数）都在 [`apply`] 的内部发生。
-/// 给以后生物和 AI 预留的命令名：`ChangeBlock`、`TriggerBlock`、`Damage`、`Push`、
+/// 给以后生物和 AI 预留的命令名：`ChangeBlock`、`TriggerBlock`、
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -409,6 +510,45 @@ pub enum Command {
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
     },
+    /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
+    HurtPlayer {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
+    /// `Zombie.doHurtTarget` 的着火传染（打到玩家）。
+    IgnitePlayer { target: EntityUid, ticks: i32 },
+    /// `Mob.doHurtTarget` 打到另一头生物。
+    HurtMob {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
+    /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
+    MobLevelEvent {
+        event: i32,
+        pos: mc_bamboo_core::BlockPos,
+        data: i32,
+    },
+    /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
+    /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
+    RemoveMobBlock { pos: mc_bamboo_core::BlockPos },
+    /// `TurtleEggBlock.destroyEgg` 里取世界随机数之后的部分：`nextInt(chance) == 0`
+    /// 时 `decreaseEggs`。世界随机数只在落地时取，两种驱动取数顺序一样。
+    TrampleTurtleEgg {
+        pos: mc_bamboo_core::BlockPos,
+        chance: i32,
+    },
+    /// `ZombieAttackTurtleEggGoal.playBreakSound`：音高取世界随机数。
+    TurtleEggBreakSound { pos: mc_bamboo_core::BlockPos },
+    /// `level.playSound(null, pos, sound, source, volume, pitch)`：方块中心的音效。
+    MobBlockSound {
+        pos: mc_bamboo_core::BlockPos,
+        sound: &'static str,
+        source: mc_bamboo_data::sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -448,6 +588,60 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::BreedCows { partner, position } => {
             super::mob::living::apply_breed(me, partner, position, world)
+        }
+        Command::HurtPlayer {
+            target,
+            source,
+            amount,
+        } => {
+            super::mob::living::apply_hurt_player(world, me, target, source, amount);
+        }
+        Command::IgnitePlayer { target, ticks } => world.ignite_player_from_mob(target, ticks),
+        Command::HurtMob {
+            target,
+            source,
+            amount,
+        } => {
+            let _ = world.hurt_mob(target, source, amount);
+        }
+        Command::MobLevelEvent { event, pos, data } => {
+            world.push_effect(crate::Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator: false,
+            });
+        }
+        Command::RemoveMobBlock { pos } => {
+            let _ = world.remove_block(pos);
+        }
+        Command::TrampleTurtleEgg { pos, chance } => {
+            super::mob::living::apply_trample_turtle_egg(world, pos, chance);
+        }
+        Command::TurtleEggBreakSound { pos } => {
+            let pitch = 0.9 + world.random().next_float() * 0.2;
+            world.play_block_sound(
+                pos,
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.egg_break"),
+                0.7,
+                pitch,
+            );
+        }
+        Command::MobBlockSound {
+            pos,
+            sound,
+            source,
+            volume,
+            pitch,
+        } => {
+            world.play_sound(
+                crate::world::block_center_public(pos),
+                mc_bamboo_data::sounds::sound_event(sound),
+                source,
+                volume,
+                pitch,
+                false,
+            );
         }
     }
 }
@@ -500,6 +694,19 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn emit(&mut self, command: Command, me: &mut Entity) {
         apply(command, me, self.world);
+    }
+
+    fn hurt_player(
+        &mut self,
+        target: EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        _me: &mut Entity,
+        attacker: &EntityPublic,
+    ) -> bool {
+        // 打人的生物正被驱动拿在手里，不在表里；把它这一刻的公开数据带过去。
+        self.world
+            .hurt_player_from_mob(target, source, amount, Some(attacker))
     }
 }
 

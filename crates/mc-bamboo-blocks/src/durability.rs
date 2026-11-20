@@ -428,6 +428,45 @@ fn is_broken(stack: &ItemStack) -> bool {
         && damage_value(stack.item, &patch) >= max_damage(stack.item, &patch)
 }
 
+/// `ItemStack.setDamageValue`：对拍和测试给物品设初始耐久损耗。
+pub fn set_damage_for_oracle(stack: &mut ItemStack, damage: i32) {
+    let _ = write_damage(stack, damage);
+}
+
+/// `ItemStack.isBroken`，给装备同步用。
+pub(crate) fn is_broken_stack(stack: &ItemStack) -> bool {
+    !stack.is_empty() && is_broken(stack)
+}
+
+/// `ItemStack.isDamageableItem`。
+pub(crate) fn is_damageable_stack(stack: &ItemStack) -> bool {
+    if stack.is_empty() {
+        return false;
+    }
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return false;
+    };
+    is_damageable(stack.item, &patch)
+}
+
+/// 生物身上的 `hurtAndBreak(amount, entity, slot)`：没有玩家，耐久附魔用 `level.random`。
+/// 坏了就数量减一并返回真，实体事件由调用方发。
+pub(crate) fn hurt_equipment(stack: &mut ItemStack, amount: i32, random: &LegacyRandom) -> bool {
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return false;
+    };
+    let spent = durability_change(stack.item, &patch, amount, random, false);
+    if spent == 0 {
+        return false;
+    }
+    let new_damage = damage_value(stack.item, &patch).wrapping_add(spent);
+    if write_damage(stack, new_damage) {
+        stack.count -= 1;
+        return true;
+    }
+    false
+}
+
 /// `getDamageValue`。
 fn damage_value(item: i32, patch: &ComponentPatch) -> i32 {
     let damage = component_int(item, patch, kinds::DAMAGE).unwrap_or(0);

@@ -91,6 +91,10 @@ mod pos_map;
 mod profiler;
 pub mod region;
 #[cfg(feature = "oracle-samples")]
+mod replay_players;
+#[cfg(feature = "oracle-samples")]
+pub use replay_players::{ReplayPlayerSetup, ReplayPlayers};
+#[cfg(feature = "oracle-samples")]
 #[doc(hidden)]
 pub mod resume_replay;
 mod save_data;

@@ -300,6 +300,8 @@ impl TrackedEntity {
             items: &self.last_data,
         }));
         // `LivingEntity` 的可同步属性，属性表里哪些是同步的由数据层给出。
+        // 官方 `AttributeSnapshot` 带 `getModifiers()` 的全部修饰符，临时的（效果、装备、
+        // 细雪减速）也在里面。
         // Syncable `LivingEntity` attributes; the data layer says which ones.
         if let KindData::Mob(mob) = &snapshot.data {
             let mut snapshots = Vec::new();
@@ -312,7 +314,6 @@ impl TrackedEntity {
                     entry
                         .modifiers
                         .iter()
-                        .filter(|modifier| modifier.permanent)
                         .map(|modifier| AttributeModifier {
                             id: &modifier.id,
                             amount: modifier.amount,
@@ -346,6 +347,17 @@ impl TrackedEntity {
                     entity_id: snapshot.id,
                     attributes: &attributes,
                 }));
+            }
+            // `sendPairingData`：非空的装备槽一个 `set_equipment`。
+            let slots: Vec<_> = mob
+                .equipment
+                .iter()
+                .map(|(slot, stack)| (*slot, stack))
+                .collect();
+            if let Some(packet) =
+                mc_bamboo_protocol::packet::play::SetEquipment::new(snapshot.id, &slots)
+            {
+                out.push(packet_body(&packet));
             }
         }
         out
@@ -488,7 +500,13 @@ impl TrackedEntity {
                 .find(|item| EntityData::index(item) == index);
             let item = match now {
                 Some(item) if Some(item) != before => item.clone(),
-                None if before.is_some() => default_data(index),
+                None if before.is_some() => default_data_for_type(
+                    index,
+                    match &snapshot.data {
+                        KindData::Mob(mob) => mob.mob_type,
+                        _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
+                    },
+                ),
                 _ => continue,
             };
             out.push(item);
@@ -549,7 +567,6 @@ impl TrackedEntity {
             let modifiers = entry
                 .modifiers
                 .iter()
-                .filter(|modifier| modifier.permanent)
                 .map(|modifier| {
                     let operation = match modifier.operation {
                         mc_bamboo_blocks::entity::mob::attributes::Operation::AddValue => 0,
@@ -824,7 +841,13 @@ impl KindData {
                 vec![EntityData::ExperienceValue(*value)]
             }
             Self::ExperienceOrb { .. } => Vec::new(),
-            Self::Mob(mob) => mob_non_default_data(mob),
+            Self::Mob(mob) => {
+                if mob.mob_type.is_monster() {
+                    zombie_non_default_data(mob)
+                } else {
+                    mob_non_default_data(mob)
+                }
+            }
         }
     }
 }
@@ -834,25 +857,30 @@ impl KindData {
 ///
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
-fn default_data(index: u8) -> EntityData {
-    match index {
-        0 => EntityData::SharedFlags(0),
-        1 => EntityData::AirSupply(300),
-        3 => EntityData::CustomNameVisible(false),
-        4 => EntityData::Silent(false),
-        5 => EntityData::NoGravity(false),
-        6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
-        7 => EntityData::TicksFrozen(0),
-        9 => EntityData::Health(1.0),
-        15 => EntityData::MobFlags(0),
-        16 => EntityData::Baby(false),
-        17 => EntityData::AgeLocked(false),
-        18 => EntityData::CowVariant(1),
-        19 => EntityData::CowSoundVariant(0),
-        // `CustomName` 是 optional component，空时写 boolean false。
-        // `CustomName` is an optional component; absent is a false boolean.
-        2 => EntityData::NoCustomName,
-        _ => EntityData::SharedFlags(0),
+fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    match (index, kind.is_monster()) {
+        (16, true) => EntityData::Baby(false),
+        (17, true) => EntityData::SpecialType(0),
+        (18, true) => EntityData::DrownedConverting(false),
+        _ => match index {
+            0 => EntityData::SharedFlags(0),
+            1 => EntityData::AirSupply(300),
+            3 => EntityData::CustomNameVisible(false),
+            4 => EntityData::Silent(false),
+            5 => EntityData::NoGravity(false),
+            6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
+            7 => EntityData::TicksFrozen(0),
+            9 => EntityData::Health(1.0),
+            15 => EntityData::MobFlags(0),
+            16 => EntityData::Baby(false),
+            17 => EntityData::AgeLocked(false),
+            18 => EntityData::CowVariant(1),
+            19 => EntityData::CowSoundVariant(0),
+            // `CustomName` 是 optional component，空时写 boolean false。
+            // `CustomName` is an optional component; absent is a false boolean.
+            2 => EntityData::NoCustomName,
+            _ => EntityData::SharedFlags(0),
+        },
     }
 }
 
@@ -862,6 +890,69 @@ fn default_data(index: u8) -> EntityData {
 /// Every non-default metadata item of a cow, in ascending index order. This is
 /// vanilla `SynchedEntityData.getNonDefaultValues`, including shared flags,
 /// health, the baby flag, variant and sound variant.
+/// 僵尸/尸壳的元数据。官方 `ClassTreeIdRegistry` 按类树导出：
+/// 16 `ZombieBaby`(BOOL)、17 `SpecialType`(INT)、18 `DrownedConverting`(BOOL)，
+/// 和牛的 `AgeableMob.Baby`(16) 不是同一个字段。
+fn zombie_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    use mc_bamboo_protocol::packet::play::Pose;
+    let mut flags = 0u8;
+    if mob.on_fire {
+        flags |= 1;
+    }
+    if mob.glowing {
+        flags |= 1 << 6;
+    }
+    let mut out = Vec::new();
+    if flags != 0 {
+        out.push(EntityData::SharedFlags(flags));
+    }
+    if mob.dying {
+        out.push(EntityData::Pose(Pose::Dying));
+    }
+    if mob.air_supply != 300 {
+        out.push(EntityData::AirSupply(mob.air_supply));
+    }
+    if let Some(name) = &mob.custom_name {
+        out.push(EntityData::CustomName(name.clone()));
+    }
+    if mob.custom_name_visible {
+        out.push(EntityData::CustomNameVisible(true));
+    }
+    if mob.silent {
+        out.push(EntityData::Silent(true));
+    }
+    if mob.no_gravity {
+        out.push(EntityData::NoGravity(true));
+    }
+    if mob.ticks_frozen != 0 {
+        out.push(EntityData::TicksFrozen(mob.ticks_frozen));
+    }
+    out.push(EntityData::Health(mob.health));
+    let mut mob_flags = 0u8;
+    if mob.no_ai {
+        mob_flags |= 1;
+    }
+    if mob.left_handed {
+        mob_flags |= 2;
+    }
+    if mob.aggressive {
+        mob_flags |= 4;
+    }
+    if mob_flags != 0 {
+        out.push(EntityData::MobFlags(mob_flags));
+    }
+    if mob.zombie_baby {
+        out.push(EntityData::Baby(true));
+    }
+    if mob.zombie_special_type != 0 {
+        out.push(EntityData::SpecialType(mob.zombie_special_type));
+    }
+    if mob.drowned_converting {
+        out.push(EntityData::DrownedConverting(true));
+    }
+    out
+}
+
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
@@ -953,7 +1044,7 @@ pub fn event_packets(
     let mut out = Vec::new();
     for (id, mob_events) in events {
         for event in mob_events {
-            out.push(event_packet(*id, event, &mut sound_seed).body());
+            out.extend(event_packet(*id, event, &mut sound_seed).body());
         }
     }
     out
@@ -973,13 +1064,16 @@ enum EventPacket {
     ///
     /// Sent to the players within the sound's range (vanilla `PlayerList.broadcast`).
     Sound(mc_bamboo_protocol::packet::play::Sound),
+    /// 没有包（`set_equipment` 至少要一个槽）。
+    Nothing,
 }
 
 impl EventPacket {
-    fn body(&self) -> Vec<u8> {
+    fn body(&self) -> Option<Vec<u8>> {
         match self {
-            Self::Tracking(body) => body.clone(),
-            Self::Sound(sound) => packet_body(sound),
+            Self::Tracking(body) => Some(body.clone()),
+            Self::Sound(sound) => Some(packet_body(sound)),
+            Self::Nothing => None,
         }
     }
 }
@@ -1008,6 +1102,17 @@ fn event_packet(
             entity_id: id,
             event: 18,
         })),
+        MobEvent::EntityEvent { event } => EventPacket::Tracking(packet_body(&EntityEvent {
+            entity_id: id,
+            event: *event,
+        })),
+        MobEvent::Equipment(changes) => {
+            let slots: Vec<_> = changes.iter().map(|(slot, stack)| (*slot, stack)).collect();
+            match mc_bamboo_protocol::packet::play::SetEquipment::new(id, &slots) {
+                Some(packet) => EventPacket::Tracking(packet_body(&packet)),
+                None => EventPacket::Nothing,
+            }
+        }
         MobEvent::MilkSound { position } => EventPacket::Sound(Sound {
             sound: i32::from(mc_bamboo_data::sounds::sound_event(
                 "minecraft:entity.cow.milk",
@@ -1036,10 +1141,15 @@ fn event_packet(
             volume,
             pitch,
             position,
+            hostile,
         } => EventPacket::Sound(Sound {
             sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
             inline: None,
-            source: mc_bamboo_data::sounds::NEUTRAL,
+            source: if *hostile {
+                mc_bamboo_data::sounds::HOSTILE
+            } else {
+                mc_bamboo_data::sounds::NEUTRAL
+            },
             x: position.x,
             y: position.y,
             z: position.z,
@@ -1082,6 +1192,7 @@ fn send_mob_events(
                     }
                 }
                 EventPacket::Sound(sound) => crate::interaction::send_sound(region, None, &sound),
+                EventPacket::Nothing => {}
             }
         }
     }

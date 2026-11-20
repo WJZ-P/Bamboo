@@ -14,7 +14,7 @@ use mc_bamboo_data::registries::attribute;
 use mc_bamboo_nbt::Tag;
 
 use super::{
-    CowSoundVariant, CowVariant,
+    CowSoundVariant, CowVariant, MobType,
     attributes::{Modifier, Operation},
     living, nbt,
 };
@@ -62,6 +62,16 @@ pub fn summon_cow(
     pos: Vec3,
     nbt: Option<&Tag>,
 ) -> Result<EntityUid, SummonError> {
+    summon_mob(world, MobType::Cow, pos, nbt)
+}
+
+/// `/summon`：按实体类型构造、读 NBT、`snapTo`，不带 NBT 时跑 `finalizeSpawn`。
+pub fn summon_mob(
+    world: &mut World,
+    kind: MobType,
+    pos: Vec3,
+    nbt: Option<&Tag>,
+) -> Result<EntityUid, SummonError> {
     if !is_in_spawnable_bounds(BlockPos::containing(pos)) {
         return Err(SummonError::InvalidPosition);
     }
@@ -71,17 +81,17 @@ pub fn summon_cow(
         _ => Vec::new(),
     };
     entries.retain(|(key, _)| key != "id");
-    entries.push(("id".to_owned(), Tag::String("minecraft:cow".to_owned())));
+    entries.push(("id".to_owned(), Tag::String(kind.name().to_owned())));
     let tag = Tag::Compound(entries);
     // 构造（ID、种子、UUID、朝向）→ `load` → `snapTo(pos, yRot, xRot)`。
     // Construct, load, then snap to the target with the loaded rotation.
-    let mut entity = world.prepare_entity(Entity::cow(Vec3::default()));
+    let mut entity = world.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
     nbt::load_into(&mut entity, &tag).map_err(|error| SummonError::Failed(error.0))?;
     let x_rot = entity.kind.mob().map_or(0.0, |mob| mob.x_rot);
     let y_rot = entity.y_rot;
     snap_to(&mut entity, pos, y_rot, x_rot);
     if randomize {
-        finalize_spawn(world, &mut entity, SpawnReason::Command);
+        finalize_spawn(world, kind, &mut entity, SpawnReason::Command);
     }
     let uuid = entity.kind.mob().map(|mob| mob.uuid).unwrap_or_default();
     if world.has_mob_uuid(&uuid) {
@@ -102,7 +112,18 @@ pub fn spawn_cow_from_egg(
     offset_more: bool,
     custom_name: Option<Tag>,
 ) -> EntityUid {
-    let mut entity = world.prepare_entity(Entity::cow(Vec3::default()));
+    spawn_egg(world, MobType::Cow, pos, offset_more, custom_name)
+}
+
+/// `SpawnEggItem.useOn`：按刷怪蛋对应的实体类型生成。
+pub fn spawn_egg(
+    world: &mut World,
+    kind: MobType,
+    pos: BlockPos,
+    offset_more: bool,
+    custom_name: Option<Tag>,
+) -> EntityUid {
+    let mut entity = world.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
     // `shouldOffsetY`：先摆到上一格，再按碰撞算往下落多少。
     // Place it one block up first, then drop it onto the collisions.
     let centre = Vec3::new(
@@ -123,7 +144,7 @@ pub fn spawn_cow_from_egg(
         mob.y_head_rot = me.y_rot;
         mob.y_body_rot = me.y_rot;
     });
-    finalize_spawn(world, &mut entity, SpawnReason::SpawnItemUse);
+    finalize_spawn(world, kind, &mut entity, SpawnReason::SpawnItemUse);
     // `appendComponentsConfig`：刷怪蛋的 `custom_name` 套到实体上。
     if let Some(name) = custom_name {
         entity.with_mob(|_, mob| mob.custom_name = Some(name));
@@ -180,8 +201,17 @@ pub(crate) fn snap_to(entity: &mut Entity, pos: Vec3, y_rot: f32, x_rot: f32) {
 /// 3. `AgeableMobGroupData(true)` 的组大小是 0，`getGroupSize() > 0` 为假，不取数也不变小；
 /// 4. 跟随距离加一个 `triangle(0, 0.11485)` 的修饰符（没有时才加）；
 /// 5. `nextFloat() < 0.05` 左撇子。
-pub(crate) fn finalize_spawn(world: &mut World, entity: &mut Entity, reason: SpawnReason) {
+pub(crate) fn finalize_spawn(
+    world: &mut World,
+    kind: MobType,
+    entity: &mut Entity,
+    reason: SpawnReason,
+) {
     let _ = reason;
+    if kind.is_monster() {
+        finalize_monster(world, kind, entity);
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
     let variant = cow_variant_for_biome(biome);
@@ -206,6 +236,46 @@ pub(crate) fn finalize_spawn(world: &mut World, entity: &mut Entity, reason: Spa
             });
         }
         mob.left_handed = random.next_float() < 0.05;
+    });
+}
+
+/// `Zombie.finalizeSpawn` 的随机取数顺序（本期不生成鸡骑士/增援）：
+/// 捡物 `nextFloat < 0.55*specialMultiplier` → 幼年 `nextFloat < 0.05` →
+/// 破门 `nextFloat < 0.1` → 随机装备 `nextFloat` + `nextInt(6)`。
+fn finalize_monster(world: &mut World, kind: MobType, entity: &mut Entity) {
+    let _ = kind;
+    let random = world.random();
+    let can_pick_up_loot = random.next_float() < 0.55;
+    let baby = random.next_float() < 0.05;
+    let can_break_doors = random.next_float() < 0.1;
+    // `Monster.populateDefaultEquipmentSlots` + `Zombie.populateDefaultEquipmentSlots`。
+    let has_weapon = random.next_float() < 0.01;
+    let weapon = if has_weapon { random.next_int(6) } else { 0 };
+    entity.with_mob(|me, mob| {
+        mob.can_pick_up_loot = can_pick_up_loot;
+        if baby {
+            mob.set_zombie_baby(true);
+            let (width, height, eye) = mob.mob_type.dimensions(true);
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
+        }
+        mob.can_break_doors = can_break_doors;
+        if can_break_doors {
+            mob.navigation.flags.can_open_doors = true;
+            mob.goals.insert_break_door();
+        }
+        if has_weapon {
+            // 剑 / 长矛 / 铲子；长矛会让 `SpearUseGoal` 启动，这一期不建模它。
+            let item = match weapon {
+                0 => mc_bamboo_data::items::IRON_SWORD,
+                1 => mc_bamboo_data::items::IRON_SPEAR,
+                _ => mc_bamboo_data::items::IRON_SHOVEL,
+            };
+            mob.equipment.set(
+                mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+                mc_bamboo_protocol::item::ItemStack::new(item, 1),
+            );
+        }
     });
 }
 

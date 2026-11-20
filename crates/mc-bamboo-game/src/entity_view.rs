@@ -76,6 +76,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
         self.shulker_box_shapes.get(&pos).copied()
     }
 
+    fn inhabited_time(&self, chunk: ChunkPos) -> i64 {
+        self.chunks.chunk(chunk).archive().inhabited_time
+    }
+
     fn section_has_collision(&self, section_x: i32, section_y: i32, section_z: i32) -> bool {
         self.chunks
             .section_has_any_collision(ChunkPos::new(section_x, section_z), section_y)
@@ -97,6 +101,30 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn world_border(&self) -> WorldBorder {
         self.world_border.clone()
+    }
+
+    /// 算阶段不借方块实体表，但高度图和群系调色板都在这份只读区块表里。
+    /// 和精确 `RegionLevel` 的两个方法给同一份答案。
+    fn heightmap_y(&self, pos: BlockPos) -> i32 {
+        self.chunks
+            .heightmap_y(pos)
+            .unwrap_or(mc_bamboo_world::MIN_Y - 1)
+    }
+
+    fn precipitation_facts(&self, pos: BlockPos) -> mc_bamboo_blocks::PrecipitationFacts {
+        use mc_bamboo_worldgen::biome_temperature as biome;
+        let id = self.chunks.biome_at(pos).unwrap_or(0) as i32;
+        let climate = biome::BiomeClimate::of(id);
+        let sea_level = mc_bamboo_world::flat::SEA_LEVEL;
+        let warm = climate.warm_enough_to_rain(pos.x, pos.y, pos.z, sea_level);
+        mc_bamboo_blocks::PrecipitationFacts {
+            precipitation: match biome::precipitation_at(climate, pos.x, pos.y, pos.z, sea_level) {
+                biome::Precipitation::None => mc_bamboo_blocks::Precipitation::None,
+                biome::Precipitation::Rain => mc_bamboo_blocks::Precipitation::Rain,
+                biome::Precipitation::Snow => mc_bamboo_blocks::Precipitation::Snow,
+            },
+            warm_enough_to_rain: warm,
+        }
     }
 }
 

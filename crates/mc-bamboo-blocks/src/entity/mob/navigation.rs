@@ -118,14 +118,16 @@ impl Navigation {
     }
 
     /// `moveTo(entity, speed)`：`GroundPathNavigation` 也走地面搜索，终点是实体的方块坐标。
+    /// `reach` 由调用方按官方 `createPath(entity, reach)` 给；近战目标是 0。
     pub fn move_to_entity(
         &mut self,
         view: &dyn BlockView,
         mob: &NavMob,
         entity_pos: Vec3,
         speed: f64,
+        reach: i32,
     ) -> bool {
-        let path = self.create_path(view, mob, BlockPos::containing(entity_pos), 1);
+        let path = self.create_path(view, mob, BlockPos::containing(entity_pos), reach);
         path.is_some() && self.move_to_path(view, mob, path, speed)
     }
 

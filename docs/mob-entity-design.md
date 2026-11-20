@@ -614,3 +614,45 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   依赖方块实体 / 实体的动态碰撞形状按 `CollisionShapeKind::Other` 处理。
 - 官方 `createThreadLocalInstance()` 的 `ThreadLocalRandom` 种子不确定，
   生产同样不确定；对拍才注入固定种子。
+
+---
+
+## 9. 敌对生物地基 + 僵尸（期 2，进行中）
+
+### 9.1 公共接缝（不碰天色计算）
+
+- `BlockView` / `SourceView` 补 `is_bright_outside()`（`skyDarken < 4`）、
+  `monsters_burn()`（`EnvironmentAttributes.MONSTERS_BURN`）和
+  `is_raining_at(pos)`：并行算阶段从 [`ViewFacts`] 的天气快照、区块表的真实
+  高度图和群系调色板算出与精确 `World::is_raining_at` 相同的答案。
+  权威副本仍是主控每刻发布的 `GlobalView`；`sky_darken` 怎么算由另一期负责，
+  这里只读接口，不改数值来源。
+- `BlockGameRules` 增 `spawn_monsters`，`GameRuleSet::block_snapshot` 一起下发；
+  `ServerLevel.isSpawningMonsters()` 是 `spawn_mobs && spawn_monsters`。
+- 单测 `both_drives_read_the_same_weather_facts` 覆盖雨天/晴天、被地面挡住
+  的格子、夜晚与关掉 `MONSTERS_BURN` 的快照；故意改回晴天会让断言失败。
+
+### 9.2 已知差异（本节随实现补齐）
+
+- 尸壳的附加饥饿效果：不接（Bamboo 没有药水效果系统），本体行为、音效和
+  战利品表照官方。
+- HARD 难度增援、溺尸转化、鸡骑士、僵尸村民转化：后放。
+- 村民 / 铁傀儡 / 海龟 / 狼 / 僵尸猪灵目标：Bamboo 没有这些实体，
+  `NearestAttackableTargetGoal` 按「类型可配置、缺的跳过」实现；对拍场景明确
+  「无此类实体」。
+- 自然生成（期 4）不做；生成入口只有 `/summon` 和刷怪蛋。
+- 正式游戏里「白天会烧」的端到端测试等时钟/天色那一期合入后补；
+  本期白天燃烧在 Java 假世界里注入 `sky_darken` 对拍。
+
+### 9.3 期 2 当前状态与已知差异
+
+- 牛的 52 个场景、玩家 1a/1b/1c 的 65 个场景在泛化后仍逐刻 0 不一致。
+- 僵尸场景的第一批（追逐、绕墙、白天/夜晚/雨天燃烧、和平清除、幼年、尸壳、
+  远处消失、海龟蛋、两只僵尸同刻打玩家）已接入 `mob-oracle`，前 21 刻逐位一致；
+  注册顺序与 `adjustedTickDelay` 修正后追逐场景前 62 刻已逐位一致，
+  第 63 刻起的攻击性位/目标停止差异尚未收敛，见 `.agent-notes.md`。
+  在收敛之前不能声称这一组场景通过。原有 124 个场景按前缀复跑仍 0 不一致，
+  `player-data` 3016 checks / 496 cases、探针两种配置各 764/764 通过。
+- 尸壳不接饥饿效果；HARD 增援、溺尸转化、鸡骑士、村民/铁傀儡/海龟/狼目标、
+  长矛与穿村行为按字节码保留注册项但本期不建模，写进已知差异。
+- 正式游戏的白天燃烧端到端测试等 `day-night` 合入后补；本期不在正式世界计算天色。

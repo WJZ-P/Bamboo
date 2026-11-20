@@ -17,7 +17,7 @@ use mc_bamboo_data::registries::{attribute, mob_effect};
 use mc_bamboo_nbt::Tag;
 
 use super::{
-    CowSoundVariant, CowVariant, Mob,
+    CowSoundVariant, CowVariant, Mob, MobType,
     attributes::{Attribute, Modifier, Operation},
     effects::{EffectInstance, EffectMap},
     living,
@@ -31,8 +31,6 @@ use crate::{
 ///
 /// Vanilla keys kept verbatim and written back.
 const PASSTHROUGH: &[&str] = &[
-    "equipment",
-    "drop_chances",
     "leash",
     "DeathLootTable",
     "data",
@@ -185,7 +183,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         return Err(Error::new("mismatched mob entity halves"));
     };
     let mut out = Vec::new();
-    put(&mut out, "id", Tag::String("minecraft:cow".to_owned()));
+    put(&mut out, "id", Tag::String(mob.mob_type.name().to_owned()));
     // ---- Entity.saveWithoutId ----
     put(&mut out, "Pos", vec3_tag(public.position));
     put(&mut out, "Motion", vec3_tag(public.delta));
@@ -277,6 +275,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             ),
         );
     }
+    // `LivingEntity`：装备非空才写 `equipment`（`EntityEquipment.CODEC`）。
+    if !mob.equipment.is_empty() {
+        put(&mut out, "equipment", mob.equipment.equipment_tag());
+    }
     // ---- Mob ----
     put(
         &mut out,
@@ -288,6 +290,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         "PersistenceRequired",
         Tag::Byte(i8::from(mob.persistence_required)),
     );
+    // `Mob`：掉落几率不是 `DropChances.DEFAULT` 才写，等于缺省值的槽省略。
+    if !mob.equipment.default_drop_chances() {
+        put(&mut out, "drop_chances", mob.equipment.drop_chances_tag());
+    }
     if let Some((pos, radius)) = mob.home {
         put(&mut out, "home_radius", Tag::Int(radius));
         put(&mut out, "home_pos", block_pos_tag(pos));
@@ -303,25 +309,35 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.no_ai {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
-    // ---- AgeableMob / Animal ----
-    put(&mut out, "Age", Tag::Int(mob.age));
-    put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
-    put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
-    put(&mut out, "InLove", Tag::Int(mob.in_love));
-    if let Some(uuid) = &mob.love_cause {
-        put(&mut out, "LoveCause", uuid_tag(uuid));
+    // ---- AgeableMob / Animal / Cow ----
+    if mob.mob_type == MobType::Cow {
+        put(&mut out, "Age", Tag::Int(mob.age));
+        put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
+        put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
+        put(&mut out, "InLove", Tag::Int(mob.in_love));
+        if let Some(uuid) = &mob.love_cause {
+            put(&mut out, "LoveCause", uuid_tag(uuid));
+        }
+        put(
+            &mut out,
+            "variant",
+            Tag::String(mob.variant.name().to_owned()),
+        );
+        put(
+            &mut out,
+            "sound_variant",
+            Tag::String(mob.sound_variant.name().to_owned()),
+        );
     }
-    // ---- Cow ----
-    put(
-        &mut out,
-        "variant",
-        Tag::String(mob.variant.name().to_owned()),
-    );
-    put(
-        &mut out,
-        "sound_variant",
-        Tag::String(mob.sound_variant.name().to_owned()),
-    );
+    // ---- Zombie ----
+    if mob.mob_type.is_monster() {
+        put(&mut out, "IsBaby", Tag::Byte(i8::from(mob.zombie_baby)));
+        put(
+            &mut out,
+            "CanBreakDoors",
+            Tag::Byte(i8::from(mob.can_break_doors)),
+        );
+    }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
         out.push((key.clone(), value.clone()));
@@ -331,10 +347,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
 
 /// 读一个生物；不是这一轮支持的生物时返回 `None`，交回调用方照旧处理。
 pub fn read_mob(tag: &Tag, id: &str, uid: i32) -> Result<Option<EntityRow>> {
-    if id != "minecraft:cow" {
+    let Some(kind) = MobType::by_name(id) else {
         return Ok(None);
-    }
-    let mut entity = Entity::cow(Vec3::default());
+    };
+    let mut entity = Entity::by_mob_type(kind, Vec3::default());
     entity.id = uid;
     // 读盘的实体不是新建的：构造时的随机数（UUID、朝向）不取，缺 `UUID` 时全零。
     // A loaded entity is not freshly built: the constructor draws are skipped.
@@ -427,9 +443,13 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             me.tick_count
                 .wrapping_sub(tag::int_or(tag, "ticks_since_last_hurt_by_mob", 0));
         mob.impulse_grace_time = tag::int_or(tag, "current_impulse_context_reset_grace_time", 0);
+        // `equipment`：官方读失败时取部分结果，坏的条目丢掉、好的留下。
+        mob.equipment.read_equipment(tag::field(tag, "equipment"));
         // ---- Mob.readAdditionalSaveData ----
         mob.can_pick_up_loot = tag::bool_or(tag, "CanPickUpLoot", false);
         mob.persistence_required = tag::bool_or(tag, "PersistenceRequired", false);
+        mob.equipment
+            .read_drop_chances(tag::field(tag, "drop_chances"));
         let radius = tag::int_or(tag, "home_radius", -1);
         mob.home = (radius >= 0).then(|| {
             let pos = tag::int_array(tag, "home_pos");
@@ -443,20 +463,34 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.left_handed = tag::bool_or(tag, "LeftHanded", false);
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
-        // ---- AgeableMob / Animal ----
-        living::set_age(me, mob, tag::int_or(tag, "Age", 0));
-        mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
-        mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
-        mob.in_love = tag::int_or(tag, "InLove", 0);
-        mob.love_cause = uuid_field(tag, "LoveCause");
-        // ---- Cow ----
-        if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
-            mob.variant = variant;
+        // ---- AgeableMob / Animal / Cow ----
+        if mob.mob_type == MobType::Cow {
+            living::set_age(me, mob, tag::int_or(tag, "Age", 0));
+            mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
+            mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
+            mob.in_love = tag::int_or(tag, "InLove", 0);
+            mob.love_cause = uuid_field(tag, "LoveCause");
+            if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
+                mob.variant = variant;
+            }
+            if let Some(variant) =
+                tag::string_or(tag, "sound_variant").and_then(CowSoundVariant::from_name)
+            {
+                mob.sound_variant = variant;
+            }
         }
-        if let Some(variant) =
-            tag::string_or(tag, "sound_variant").and_then(CowSoundVariant::from_name)
-        {
-            mob.sound_variant = variant;
+        // ---- Zombie ----
+        if mob.mob_type.is_monster() {
+            let baby = tag::bool_or(tag, "IsBaby", false);
+            mob.set_zombie_baby(baby);
+            let (width, height, eye) = mob.mob_type.dimensions(baby);
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
+            mob.can_break_doors = tag::bool_or(tag, "CanBreakDoors", false);
+            if mob.can_break_doors {
+                mob.navigation.flags.can_open_doors = true;
+                mob.goals.insert_break_door();
+            }
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries
@@ -701,5 +735,47 @@ mod tests {
         let map = read_effects(&tag);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(mob_effect::HASTE).unwrap().duration, 42);
+    }
+
+    /// `equipment` 跟在 `LivingEntity` 的键后面、`drop_chances` 跟在 `PersistenceRequired`
+    /// 后面；读回来装备和几率都一样，属性修饰符要等第一刻的装备比较才挂上。
+    #[test]
+    fn equipment_and_drop_chances_round_trip_in_the_vanilla_key_order() {
+        use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+
+        let mut zombie = Entity::zombie(Vec3::new(0.5, 64.0, 0.5));
+        let helmet = ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1);
+        if let Some(mob) = zombie.kind.mob_mut() {
+            mob.equipment.set(EquipmentSlot::Head, helmet.clone());
+            mob.equipment.set_drop_chance(
+                EquipmentSlot::Head,
+                super::super::equipment::GUARANTEED_DROP_CHANCE,
+            );
+        }
+        let tag = write_mob(&zombie.split()).expect("zombie saves");
+        let Tag::Compound(entries) = &tag else {
+            panic!("a compound");
+        };
+        let keys: Vec<&str> = entries.iter().map(|(key, _)| key.as_str()).collect();
+        let at = |key: &str| keys.iter().position(|candidate| *candidate == key).unwrap();
+        assert!(at("equipment") > at("Brain"));
+        assert!(at("equipment") < at("CanPickUpLoot"));
+        assert_eq!(at("drop_chances"), at("PersistenceRequired") + 1);
+        let row = read_mob(&tag, "minecraft:zombie", 3)
+            .expect("reads")
+            .expect("a zombie");
+        let entity = row.into_entity();
+        let mob = entity.kind.mob().expect("a mob");
+        assert_eq!(mob.equipment.get(EquipmentSlot::Head), &helmet);
+        assert!(mob.equipment.is_preserved(EquipmentSlot::Head));
+    }
+
+    /// 牛没有装备、几率是缺省值：两个键都不写。
+    #[test]
+    fn a_cow_writes_no_equipment_keys() {
+        let cow = Entity::cow(Vec3::new(0.5, 64.0, 0.5));
+        let tag = write_mob(&cow.split()).expect("cow saves");
+        assert!(tag::field(&tag, "equipment").is_none());
+        assert!(tag::field(&tag, "drop_chances").is_none());
     }
 }

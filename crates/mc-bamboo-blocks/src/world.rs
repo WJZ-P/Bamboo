@@ -672,6 +672,66 @@ impl<'a> World<'a> {
     }
 
     /// 记下一个发给玩家的结果，官方的 `levelEvent`。
+    /// 生物打玩家：先试 [`Level::hurt_player_now`] 当场落地（玩家死了就在这里生成掉落），
+    /// 这一层做不到时记成延后的 [`Effect::HurtPlayer`] 并按打中算。返回 `wasHurt`。
+    ///
+    /// A mob's hit on a player: applied at once through the level hook when possible,
+    /// otherwise deferred as an effect and reported as a hit.
+    pub fn hurt_player_from_mob(
+        &mut self,
+        target: crate::entity::EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        attacker: Option<&crate::entity::EntityPublic>,
+    ) -> bool {
+        match self.level.hurt_player_now(target, source, amount, attacker) {
+            Some(outcome) => {
+                if let Some(drops) = &outcome.death_drops {
+                    self.spawn_player_death_drops(drops);
+                }
+                outcome.hurt
+            }
+            None => {
+                self.push_effect(Effect::HurtPlayer {
+                    target,
+                    source,
+                    amount,
+                });
+                true
+            }
+        }
+    }
+
+    /// 生物给玩家点火（`Entity.igniteForTicks`）：能当场就当场，否则记成延后的效果。
+    pub fn ignite_player_from_mob(&mut self, target: crate::entity::EntityUid, ticks: i32) {
+        if !self.level.ignite_player_now(target, ticks) {
+            self.push_effect(Effect::IgnitePlayer { target, ticks });
+        }
+    }
+
+    /// `Player.dropEquipment` + `LivingEntity.dropExperience` 的世界部分：物品从眼高
+    /// 往下 0.3 处生成、拾取延迟 40，然后按经验值拆成经验球。
+    pub fn spawn_player_death_drops(&mut self, drops: &crate::level::PlayerDeathDrops) {
+        let at = Vec3::new(
+            drops.position.x,
+            drops.position.y + 1.62 - 0.300_000_011_920_928_96,
+            drops.position.z,
+        );
+        for stack in &drops.items {
+            let Some(entity_id) = self.spawn_at_location(at, stack.clone()) else {
+                continue;
+            };
+            self.with_entity_mut(entity_id, &mut |entity| {
+                if let Some(item) = entity.ground_mut() {
+                    item.set_pickup_delay(40);
+                }
+            });
+        }
+        if drops.experience > 0 {
+            crate::entity::award(self, drops.position, drops.experience);
+        }
+    }
+
     pub fn push_effect(&mut self, effect: Effect) {
         self.level.observe(Observation::Effect(&effect));
         self.effects.push(effect);
@@ -1914,13 +1974,10 @@ impl<'a> World<'a> {
         self.level.is_dark_outside()
     }
 
-    /// `ServerPlayer.startSleepInBed` 的怪物检查：`Monster.isPreventingPlayerRest`
-    /// 在床周围 8 × 5 × 8 的盒子里。世界里还没有怪物，假世界也恒为假；
-    /// 僵尸分支接上后由 [`Level`] 覆盖。
+    /// `ServerPlayer.startSleepInBed` 的怪物检查，见 [`Level::monster_prevents_rest`]。
     ///
-    /// The monster check in `ServerPlayer.startSleepInBed`: any
-    /// `Monster.isPreventingPlayerRest` within an 8 × 5 × 8 box around the
-    /// bed. No monsters exist yet; mob implementations override [`Level`].
+    /// The monster check in `ServerPlayer.startSleepInBed`; see
+    /// [`Level::monster_prevents_rest`].
     pub fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
         self.level.monster_prevents_rest(pos)
     }
@@ -3679,6 +3736,8 @@ mod tests {
                 | Effect::CampfireChanged { .. }
                 | Effect::Overlay { .. }
                 | Effect::OpenCommandBlock { .. }
+                | Effect::HurtPlayer { .. }
+                | Effect::IgnitePlayer { .. }
                 | Effect::SleepInBed { .. } => None,
             })
             .collect()

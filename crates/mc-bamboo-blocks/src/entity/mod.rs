@@ -430,7 +430,26 @@ impl Entity {
     /// `EntityType.COW.create`：构造函数链。UUID 和朝向的随机数在
     /// [`EntityStore::spawn`] 设好随机源以后取，见 [`Entity::finish_mob_random`]。
     pub fn cow(position: Vec3) -> Self {
-        Self::new(EntityKind::Mob(Box::new(mob::Mob::cow())), position)
+        Self::mob_of(mob::MobType::Cow, position)
+    }
+
+    /// `EntityType.ZOMBIE.create`。
+    pub fn zombie(position: Vec3) -> Self {
+        Self::mob_of(mob::MobType::Zombie, position)
+    }
+
+    /// `EntityType.HUSK.create`。
+    pub fn husk(position: Vec3) -> Self {
+        Self::mob_of(mob::MobType::Husk, position)
+    }
+
+    /// 按注册表类型构造生物；未知类型返回 `None`，调用方按命令失败处理。
+    pub fn by_mob_type(kind: mob::MobType, position: Vec3) -> Self {
+        Self::new(EntityKind::Mob(Box::new(mob::Mob::new(kind))), position)
+    }
+
+    fn mob_of(kind: mob::MobType, position: Vec3) -> Self {
+        Self::by_mob_type(kind, position)
     }
 
     /// 构造函数里的随机数：`Entity` 的 UUID 两个 `nextLong`，`LivingEntity` 的

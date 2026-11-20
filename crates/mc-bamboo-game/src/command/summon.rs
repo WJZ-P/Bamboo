@@ -6,7 +6,10 @@
 
 use mc_bamboo_blocks::{
     World,
-    entity::mob::spawn::{SummonError, summon_cow},
+    entity::mob::{
+        MobType,
+        spawn::{SummonError, summon_mob},
+    },
 };
 use mc_bamboo_command::ParsedCommand;
 use mc_bamboo_protocol::text::{Component, TranslateArg};
@@ -98,13 +101,13 @@ fn summon(
     } else {
         None
     };
-    if entity != "minecraft:cow" {
+    let Some(kind) = MobType::by_name(&entity) else {
         return Err(fail("commands.summon.failed"));
-    }
+    };
     let (result, effects, name) = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
-        let result = summon_cow(&mut world, position, nbt.as_ref());
+        let result = summon_mob(&mut world, kind, position, nbt.as_ref());
         let mut name = None;
         if let Ok(uid) = result {
             world.with_entity_mut(uid, &mut |entity| {
@@ -120,7 +123,7 @@ fn summon(
             // `Entity.getDisplayName()`：有自定义名字时用它，否则是类型名。
             let display = match name {
                 Some(tag) => Component::trusted(tag),
-                None => Component::translate("entity.minecraft.cow", []),
+                None => Component::translate(kind.translation_key(), []),
             };
             feedback::success(
                 region,

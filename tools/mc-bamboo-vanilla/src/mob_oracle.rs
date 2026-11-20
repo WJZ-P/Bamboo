@@ -148,6 +148,38 @@ struct Case {
     /// 1c：官方 `PlayerSpawnFinder.findSpawn` 的落位结果。
     #[serde(default)]
     spawn_result: Option<SpawnResult>,
+    /// 僵尸场景注入的世界事实。
+    #[serde(default)]
+    sky_darken: i32,
+    #[serde(default)]
+    raining: bool,
+    #[serde(default)]
+    bright_outside: bool,
+    #[serde(default)]
+    monsters_burn: bool,
+    /// 僵尸场景：玩家走游戏层真实的受伤链路（[`mc_bamboo_game::ReplayPlayers`]）。
+    #[serde(default)]
+    real_players: bool,
+    /// 僵尸场景：主世界时钟的起始刻，`>= 0` 时天色、`MONSTERS_BURN` 和月相按真实时间线逐刻算。
+    #[serde(default = "minus_one_i64")]
+    clock_start: i64,
+    /// 真实时间模式的雨强（f32 位）。
+    #[serde(default)]
+    rain: i32,
+    /// 每只生物头上戴的物品 ID（0 是空）和初始耐久损耗。
+    #[serde(default)]
+    helmet: i32,
+    #[serde(default)]
+    helmet_damage: i32,
+    /// 每刻生物发出的 `entity_event` 和 `set_equipment`（base64，按发生顺序）。
+    #[serde(default)]
+    mob_event_packets: Option<Vec<Vec<String>>>,
+    /// 每刻 0 号玩家的状态：血量位、受伤冷却、受伤动画、死亡、着火刻数。
+    #[serde(default)]
+    zombie_player_states: Option<Vec<[i64; 5]>>,
+    /// 每刻 0 号玩家自己收到的那几种包（受伤动画、战斗进出、死亡界面、血量）。
+    #[serde(default)]
+    zombie_player_packets: Option<Vec<Vec<String>>>,
     /// S2 玩家效果场景的规则与动作。
     #[serde(default)]
     effect_scene: Option<EffectScene>,
@@ -335,6 +367,9 @@ struct CowSetup {
     seed: i64,
     #[serde(default)]
     age: i32,
+    /// 0 牛 / 1 僵尸 / 2 尸壳；缺省按牛（旧场景）。
+    #[serde(default)]
+    kind: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,11 +417,56 @@ struct CowStep {
     lr: i64,
     goals: String,
     path: Option<Vec<i32>>,
+    /// 僵尸场景专属；旧牛场景缺省 -1/false/0，比较时按类型跳过。
+    #[serde(default = "minus_one")]
+    target: i32,
+    #[serde(default)]
+    baby: bool,
+    #[serde(default)]
+    aggr: bool,
+    #[serde(default)]
+    doors: bool,
+    #[serde(default)]
+    ph: i32,
+    #[serde(default)]
+    pht: i32,
+    #[serde(default)]
+    pcd: i32,
+    /// 僵尸场景：整张方块表的散列，见 [`block_hash`]。
+    #[serde(default)]
+    bh: i64,
+    /// 僵尸场景：头盔的耐久损耗（空是 -1）、数量和 `ARMOR` 属性值（f64 位）。
+    #[serde(default)]
+    hd: i32,
+    #[serde(default)]
+    hc: i32,
+    #[serde(default)]
+    armor: i64,
+}
+
+const fn minus_one_i64() -> i64 {
+    -1
+}
+
+const fn minus_one() -> i32 {
+    -1
 }
 
 #[derive(Debug, Deserialize)]
 struct End {
     cases: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ZombieFacts {
+    /// 主世界时钟（真实时间模式逐刻推进，否则 0）。
+    clock: i64,
+    can_see_sky: bool,
+    sky_darken: i32,
+    difficulty: i32,
+    bright_outside: bool,
+    monsters_burn: bool,
+    raining: bool,
 }
 
 /// 假世界：方块表、玩家表、世界随机源。和 `entity-oracle` 的那个同一个做法。
@@ -398,11 +478,17 @@ struct MobLevel {
     /// 死亡时攻击者的主手抢夺等级，按玩家下标。
     looting: Vec<i32>,
     rules: mc_bamboo_blocks::BlockGameRules,
+    /// 僵尸场景注入的天色 / 天气 / 环境属性；旧场景恒为缺省。
+    facts: ZombieFacts,
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
     entities: Entities,
     players: Vec<PlayerView>,
+    /// 走真实受伤链路的玩家；有它时 `for_each_player` 和生物打玩家都交给它。
+    game: Option<mc_bamboo_game::ReplayPlayers>,
+    /// 改坏确认：`wasHurt` 一律当真。
+    wrong_was_hurt: bool,
 }
 
 impl LevelTables for MobLevel {
@@ -513,9 +599,73 @@ impl Level for MobLevel {
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        if let Some(game) = &self.game {
+            for player in game.views() {
+                visit(&player);
+            }
+            return;
+        }
         for player in &self.players {
             visit(player);
         }
+    }
+
+    fn hurt_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        source: DamageSource,
+        amount: f32,
+        attacker: Option<&mc_bamboo_blocks::entity::EntityPublic>,
+    ) -> Option<mc_bamboo_blocks::PlayerHurtNow> {
+        let game = self.game.as_mut()?;
+        let mut outcome = game.hurt(target, source, amount, attacker);
+        if self.wrong_was_hurt {
+            outcome.hurt = true;
+        }
+        Some(outcome)
+    }
+
+    fn ignite_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        ticks: i32,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.ignite(target, ticks);
+        true
+    }
+
+    fn sky_darken(&self) -> i32 {
+        self.facts.sky_darken
+    }
+
+    fn difficulty_id(&self) -> i32 {
+        self.facts.difficulty
+    }
+
+    fn is_bright_outside(&self) -> bool {
+        self.facts.bright_outside
+    }
+
+    fn monsters_burn(&self) -> bool {
+        self.facts.monsters_burn
+    }
+
+    fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
+        mc_bamboo_blocks::BlockWeather {
+            rain_level: if self.facts.raining { 1.0 } else { 0.0 },
+            thunder_level: 0.0,
+        }
+    }
+
+    fn can_see_sky(&self, _pos: BlockPos) -> bool {
+        self.facts.can_see_sky
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.facts.clock
     }
 
     /// `LivingEntity.dropFromLootTable`：官方一侧用真的 `minecraft:entities/cow` 表，
@@ -758,12 +908,27 @@ impl Report {
             self.replay_player_hurt(case);
             return;
         }
+        // 改坏确认：故意改一处生产参数，对拍必须报不一致。
+        let break_test = self.break_test.as_deref();
         let mut level = MobLevel {
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             looting: case.players.iter().map(|player| player.looting).collect(),
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                clock: 0,
+                can_see_sky: case.monsters_burn,
+                sky_darken: case.sky_darken,
+                difficulty: case.difficulty,
+                bright_outside: case.bright_outside || !case.name.starts_with("zombie_"),
+                monsters_burn: if case.name.starts_with("zombie_") {
+                    case.monsters_burn
+                } else {
+                    true
+                },
+                raining: case.raining,
+            },
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
@@ -789,11 +954,37 @@ impl Report {
                     off_hand: 0,
                 })
                 .collect(),
+            game: case.real_players.then(|| {
+                let health = f32::from_bits(case.player_health as u32);
+                let setups: Vec<_> = case
+                    .players
+                    .iter()
+                    .enumerate()
+                    .map(|(index, player)| mc_bamboo_game::ReplayPlayerSetup {
+                        id: player.id,
+                        uuid: (1_u128 << 64) | (2 + index as u128),
+                        name: format!("ZombieOracle{index}"),
+                        position: Vec3::new(
+                            f64::from_bits(player.x as u64),
+                            f64::from_bits(player.y as u64),
+                            f64::from_bits(player.z as u64),
+                        ),
+                        health,
+                        seed: 0x0DDB_1A5E_5BAD_5EED_i64.wrapping_add(index as i64),
+                    })
+                    .collect();
+                mc_bamboo_game::ReplayPlayers::new(case.difficulty, &setups)
+            }),
+            wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
         };
         for &[x, y, z, state] in &case.blocks {
             level
                 .blocks
                 .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+        }
+        if matches!(break_test, Some("zombie_egg")) {
+            // 改坏确认：关掉 `mobGriefing`，海龟蛋既不会被踩坏也不会被啄碎。
+            level.rules.mob_griefing = false;
         }
         let mut ticks = BlockTicks::new();
         ticks.set_time(case.start_time);
@@ -809,7 +1000,12 @@ impl Report {
                     f64::from_bits(cow.z as u64),
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
-                let id = world.spawn_entity(Entity::cow(position));
+                let kind = match cow.kind {
+                    2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
+                    1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
+                    _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
+                };
+                let id = world.spawn_entity(Entity::by_mob_type(kind, position));
                 world.with_entity_mut(id, &mut |entity| {
                     entity.random = JavaRandom::new(cow.seed);
                     entity.y_rot = yaw;
@@ -825,16 +1021,85 @@ impl Report {
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if cow.age != 0 {
-                        let baby = cow.age < 0;
-                        let (width, height, eye) =
-                            mc_bamboo_blocks::entity::mob::MobType::Cow.dimensions(baby);
+                        // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
+                        // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
+                        let baby = kind.is_monster() || cow.age < 0;
+                        let (width, height, eye) = kind.dimensions(baby);
                         entity.dimensions = (width, height);
                         if let Some(mob) = entity.kind.mob_mut() {
-                            mob.age = cow.age;
+                            if kind.is_monster() {
+                                mob.set_zombie_baby(true);
+                                mob.can_break_doors = case.difficulty == 3;
+                                if mob.can_break_doors {
+                                    mob.navigation.flags.can_open_doors = true;
+                                    mob.goals.insert_break_door();
+                                }
+                            } else {
+                                mob.age = cow.age;
+                            }
                             mob.eye_height = eye;
                         }
+                    } else if kind.is_monster()
+                        && case.difficulty == 3
+                        && let Some(mob) = entity.kind.mob_mut()
+                    {
+                        mob.can_break_doors = true;
+                        mob.navigation.flags.can_open_doors = true;
+                        mob.goals.insert_break_door();
                     }
                 });
+                if case.name.starts_with("zombie_") {
+                    world.with_entity_mut(id, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            if matches!(break_test, Some("zombie_goal_order")) {
+                                // 改坏确认：按优先级排序会打乱官方注册顺序。
+                                mob.goals.sort_by_priority_for_oracle();
+                            }
+                            match break_test {
+                                Some("zombie_speed") => {
+                                    mob.attributes.set_base_for_oracle(
+                                        mc_bamboo_data::registries::attribute::MOVEMENT_SPEED,
+                                        0.2,
+                                    );
+                                }
+                                Some("zombie_attack") => {
+                                    mob.attributes.set_base_for_oracle(
+                                        mc_bamboo_data::registries::attribute::ATTACK_DAMAGE,
+                                        2.0,
+                                    );
+                                }
+                                Some("zombie_burn") => {
+                                    // 燃烧阈值改成永不触发。
+                                    mob.ticks_frozen = 140;
+                                }
+                                Some("zombie_xp") => {
+                                    mob.health = 1.0;
+                                }
+                                Some("zombie_baby") => {
+                                    mob.set_zombie_baby(!mob.zombie_baby);
+                                }
+                                _ => {}
+                            }
+                            if case.helmet != 0 {
+                                let mut helmet =
+                                    mc_bamboo_protocol::item::ItemStack::new(case.helmet, 1);
+                                // 改坏确认：头盔多掉一点耐久，烧坏的时刻和装备包都会提前。
+                                let damage = case.helmet_damage
+                                    + i32::from(matches!(break_test, Some("zombie_helmet")));
+                                if damage != 0 {
+                                    mc_bamboo_blocks::durability::set_damage_for_oracle(
+                                        &mut helmet,
+                                        damage,
+                                    );
+                                }
+                                mob.equipment.set(
+                                    mc_bamboo_protocol::packet::play::EquipmentSlot::Head,
+                                    helmet,
+                                );
+                            }
+                        }
+                    });
+                }
                 ids.push(id);
             }
         }
@@ -842,8 +1107,10 @@ impl Report {
             self.mismatch(format!("{}: no steps", case.name));
             return;
         };
+        set_zombie_clock(&mut level, case, 0, break_test);
         let ours = snapshot(&level, &ids);
         self.compare(&case.name, 0, &ours, first);
+        self.compare_zombie_player(case, &mut level, 0);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
         // 不该出现在后面逐刻的新实体比对里。
         let _ = level.entities.take_spawn_snapshots();
@@ -878,6 +1145,10 @@ impl Report {
         }
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
+            set_zombie_clock(&mut level, case, index as i64, self.break_test.as_deref());
+            if let Some(game) = level.game.as_mut() {
+                game.tick_cooldowns();
+            }
             let mut ours_interactions = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
@@ -1090,8 +1361,35 @@ impl Report {
                 );
             }
             self.steps += 1;
-            let ours = snapshot(&level, &ids);
+            let mut ours = snapshot(&level, &ids);
+            // 官方一侧输出的是 `Mob.getTarget()`：打不了的目标（死了的玩家）读成 null。
+            if let Some(game) = &level.game {
+                for step in ours.iter_mut().flatten() {
+                    if step.target >= 0 && game.state(step.target)[3] != 0 {
+                        step.target = -1;
+                    }
+                }
+            }
             self.compare(&case.name, index, &ours, expected);
+            self.compare_zombie_player(case, &mut level, index);
+            if let Some(expected) = &case.mob_event_packets
+                && let Some(expected) = expected.get(index)
+            {
+                // 只比 `entity_event`（34）和 `set_equipment`（104）；音效不取种子。
+                let events = level.entities.take_mob_events();
+                let ours: Vec<Vec<u8>> = event_packets(&events, || 0)
+                    .into_iter()
+                    .filter(|body| matches!(body.first(), Some(34 | 104)))
+                    .collect();
+                compare_packet_list(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    index,
+                    &ours,
+                    expected,
+                );
+            }
             // 官方 `ChunkMap.removeEntity` 在被丢弃的那一刻发移除包。
             let mut gone = Vec::new();
             for &id in &ids {
@@ -1139,6 +1437,42 @@ impl Report {
             if self.mismatches.len() >= self.show {
                 return;
             }
+        }
+    }
+
+    /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
+    fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
+        const SELF_PACKETS: [u8; 5] = [43, 67, 68, 69, 106];
+        let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
+            return;
+        };
+        let ours: Vec<Vec<u8>> = game
+            .take_packets(player.id)
+            .into_iter()
+            .filter(|body| body.first().is_some_and(|id| SELF_PACKETS.contains(id)))
+            .collect();
+        if let Some(states) = &case.zombie_player_states
+            && let Some(expected) = states.get(index)
+        {
+            let state = game.state(player.id);
+            if &state != expected && self.mismatches.len() < self.show {
+                self.mismatches.push(format!(
+                    "{} tick {index} player: official {expected:?} bamboo {state:?}",
+                    case.name
+                ));
+            }
+        }
+        if let Some(packets) = &case.zombie_player_packets
+            && let Some(expected) = packets.get(index)
+        {
+            compare_packet_list(
+                &mut self.mismatches,
+                &self.show,
+                &case.name,
+                index,
+                &ours,
+                expected,
+            );
         }
     }
 
@@ -1222,12 +1556,28 @@ impl Report {
             plain!(love);
             plain!(lh);
             bits64!(fr);
-            plain!(var);
-            plain!(snd);
             plain!(uuid);
             plain!(lr);
-            plain!(goals);
             plain!(path);
+            plain!(var);
+            plain!(snd);
+            plain!(goals);
+            if name.starts_with("zombie_") {
+                plain!(target);
+                plain!(baby);
+                plain!(aggr);
+                plain!(doors);
+                plain!(ph);
+                plain!(pht);
+                plain!(pcd);
+                plain!(bh);
+                plain!(hd);
+                plain!(hc);
+                bits64!(armor);
+            }
+            if diffs.is_empty() {
+                continue;
+            }
             self.mismatch(format!("{place}: {}", diffs.join("; ")));
         }
     }
@@ -2317,16 +2667,63 @@ fn table_hashes() -> [i64; 2] {
     [sin as i64, atan as i64]
 }
 
+/// 真实时间模式：这一刻的主世界时钟和由它算出的天色、白天、`MONSTERS_BURN`。
+/// 和官方一侧一样，在实体 tick 之前更新。
+fn set_zombie_clock(level: &mut MobLevel, case: &Case, tick: i64, break_test: Option<&str>) {
+    if case.clock_start < 0 {
+        return;
+    }
+    let mut clock = case.clock_start + tick;
+    if break_test == Some("zombie_clock") {
+        // 改坏确认：时钟慢半天，白天的场景变成夜里。
+        clock += 12_000;
+    }
+    let rain = f32::from_bits(case.rain as u32);
+    level.facts.clock = clock;
+    level.facts.raining = rain > 0.2;
+    level.facts.sky_darken = mc_bamboo_blocks::sky::sky_darken(clock, rain, 0.0);
+    level.facts.bright_outside = level.facts.sky_darken < 4;
+    level.facts.monsters_burn = mc_bamboo_blocks::sky::monsters_burn(clock);
+}
+
 fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
     let lr = level.random.source().seed();
+    let bh = block_hash(level);
     ids.iter()
         .map(|&id| {
-            level
-                .entities
-                .get(id)
-                .and_then(|entity| step_of(&entity, lr))
+            level.entities.get(id).and_then(|entity| {
+                step_of(&entity, lr).map(|mut step| {
+                    step.bh = bh;
+                    step
+                })
+            })
         })
         .collect()
+}
+
+/// 和 Java 一侧 `blockHash` 同一个算法：非空气格子按 (x, y, z) 排序后做 FNV-1a。
+fn block_hash(level: &MobLevel) -> i64 {
+    let mut cells: Vec<[i64; 4]> = level
+        .blocks
+        .iter()
+        .filter(|(_, state)| !state.is_air())
+        .map(|(pos, state)| {
+            [
+                i64::from(pos.x),
+                i64::from(pos.y),
+                i64::from(pos.z),
+                i64::from(state.0),
+            ]
+        })
+        .collect();
+    cells.sort_unstable();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64 as i64;
+    for cell in cells {
+        for value in cell {
+            hash = (hash ^ value).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 fn step_of(entity: &Entity, lr: i64) -> Option<CowStep> {
@@ -2408,5 +2805,32 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         lr,
         goals: mob.goals.running_names().join(" "),
         path,
+        target: mob.target.unwrap_or(-1),
+        baby: mob.is_baby(),
+        aggr: mob.aggressive,
+        doors: mob.can_break_doors,
+        ph: 0,
+        pht: 0,
+        pcd: 0,
+        bh: 0,
+        hd: {
+            let head = mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head);
+            if head.is_empty() {
+                -1
+            } else {
+                mc_bamboo_blocks::durability::damage_of(head).unwrap_or(0)
+            }
+        },
+        hc: mob
+            .equipment
+            .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head)
+            .count
+            .max(0),
+        armor: mob
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::ARMOR)
+            .to_bits() as i64,
     }
 }
