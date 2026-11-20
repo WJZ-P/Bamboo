@@ -6,6 +6,9 @@ use super::{Error, Result, put, tag, uuid_tag};
 use crate::entity::arrow::{Arrow, Pickup, arrow_hit_sound};
 
 pub(super) fn write(arrow: &Arrow, out: &mut Vec<(String, Tag)>) -> Result<()> {
+    if arrow.no_gravity {
+        put(out, "NoGravity", Tag::Byte(1));
+    }
     if let Some(uuid) = arrow.owner_uuid {
         put(out, "Owner", uuid_tag(&uuid));
     }
@@ -41,6 +44,7 @@ pub(super) fn write(arrow: &Arrow, out: &mut Vec<(String, Tag)>) -> Result<()> {
 pub(super) fn read(input: &Tag, pitch: f32) -> Arrow {
     let mut arrow = Arrow::default();
     arrow.pitch = pitch;
+    arrow.no_gravity = tag::bool_or(input, "NoGravity", false);
     arrow.uuid = uuid_from(input, "UUID").unwrap_or([0; 16]);
     arrow.owner_uuid = uuid_from(input, "Owner");
     arrow.left_owner = tag::bool_or(input, "LeftOwner", false);

@@ -504,6 +504,7 @@ impl TrackedEntity {
                 Some(item) if Some(item) != before => item.clone(),
                 None if matches!(snapshot.data, KindData::Arrow(_)) => match index {
                     0 => EntityData::SharedFlags(0),
+                    5 => EntityData::NoGravity(false),
                     entity_types::ARROW_FLAGS => EntityData::ArrowFlags(0),
                     entity_types::ARROW_PIERCE => EntityData::ArrowPierce(0),
                     entity_types::ARROW_IN_GROUND => EntityData::ArrowInGround(false),
@@ -864,6 +865,9 @@ impl KindData {
                 let mut data = Vec::new();
                 if arrow.on_fire {
                     data.push(EntityData::SharedFlags(1));
+                }
+                if arrow.no_gravity {
+                    data.push(EntityData::NoGravity(true));
                 }
                 if arrow.critical {
                     data.push(EntityData::ArrowFlags(1));

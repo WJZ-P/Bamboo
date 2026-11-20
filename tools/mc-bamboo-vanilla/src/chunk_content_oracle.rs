@@ -1471,6 +1471,7 @@ fn arrow_archive_cases() -> [Tag; 2] {
     arrow.uuid = 24_u128.to_be_bytes();
     arrow.owner_uuid = Some(17_u128.to_be_bytes());
     arrow.pitch = -10.0;
+    arrow.no_gravity = true;
     arrow.critical = true;
     arrow.pierce = 2;
     arrow.pickup = Pickup::CreativeOnly;

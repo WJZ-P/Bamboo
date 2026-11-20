@@ -53,6 +53,10 @@ impl ProjectileCase {
         self.name == "arrow_block_overlaps_flight"
     }
 
+    fn starts_without_gravity(&self) -> bool {
+        self.name == "arrow_no_gravity"
+    }
+
     fn level(&self) -> MobLevel {
         MobLevel {
             blocks: self
@@ -109,6 +113,9 @@ impl ProjectileCase {
             world.add_prepared_entity(skeleton);
         } else {
             let mut arrow = world.prepare_entity(Entity::arrow(Vec3::new(0.5, 65.5, 0.5)));
+            if let EntityKind::Arrow(data) = &mut arrow.kind {
+                data.no_gravity = self.starts_without_gravity();
+            }
             if !self.overlaps_flight() {
                 arrow.shoot_arrow(
                     Vec3::new(1.0, if mutate { 0.25 } else { 0.0 }, 0.0),
@@ -146,6 +153,13 @@ impl Report {
                         BlockPos::new(0, 65, 0),
                         BlockState(mc_bamboo_data::blocks::STONE),
                     );
+                }
+                if case.starts_without_gravity() && tick == 10 {
+                    level.entities.with_mut(case.first_id, |entity| {
+                        if let EntityKind::Arrow(data) = &mut entity.kind {
+                            data.no_gravity = false;
+                        }
+                    });
                 }
                 level.game.as_mut().unwrap().tick_cooldowns();
                 ticks.set_time(1000 + tick as i64);

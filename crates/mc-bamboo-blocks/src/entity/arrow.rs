@@ -26,6 +26,7 @@ pub struct ArrowPublic {
     pub shake_time: u8,
     pub pickup: Pickup,
     pub on_fire: bool,
+    pub no_gravity: bool,
     pub needs_sync: bool,
 }
 
@@ -35,6 +36,7 @@ pub struct Arrow {
     pub owner: Option<EntityUid>,
     pub owner_uuid: Option<[u8; 16]>,
     pub pitch: f32,
+    pub no_gravity: bool,
     pub base_damage: f64,
     pub critical: bool,
     pub pierce: i8,
@@ -63,6 +65,7 @@ impl Default for Arrow {
             owner: None,
             owner_uuid: None,
             pitch: 0.0,
+            no_gravity: false,
             base_damage: 2.0,
             critical: false,
             pierce: 0,
@@ -95,6 +98,7 @@ impl Arrow {
             shake_time: self.shake_time,
             pickup: self.pickup,
             on_fire: remaining_fire_ticks > 0,
+            no_gravity: self.no_gravity,
             needs_sync: self.needs_sync,
         }
     }
@@ -632,7 +636,7 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
     if !me.in_water {
         me.delta = me.delta.scale(f64::from(0.99_f32));
     }
-    if matches!(&me.kind, EntityKind::Arrow(arrow) if !arrow.in_ground) {
+    if matches!(&me.kind, EntityKind::Arrow(arrow) if !arrow.in_ground && !arrow.no_gravity) {
         me.delta.y -= 0.05;
     }
     if me.remaining_fire_ticks > 0 {
@@ -651,6 +655,24 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_gravity_keeps_air_drag_and_does_not_add_vertical_speed() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 64.5, 0.5));
+        let EntityKind::Arrow(data) = &mut arrow.kind else {
+            unreachable!()
+        };
+        data.no_gravity = true;
+        arrow.delta = Vec3::new(1.0, 0.0, 0.0);
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = world.spawn_entity(arrow);
+        world.tick_entities();
+        let arrow = world.entity(uid).unwrap();
+        assert_eq!(arrow.position, Vec3::new(1.5, 64.5, 0.5));
+        assert_eq!(arrow.delta, Vec3::new(f64::from(0.99_f32), 0.0, 0.0));
+    }
 
     #[test]
     fn entity_clip_excludes_inside_starts_and_endpoint_contacts() {
