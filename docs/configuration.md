@@ -51,7 +51,12 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 ### 世界生成相关的键
 
 世界生成接进游戏后，这四个键生效（解析在 `mc-bamboo-game/src/world_options.rs`，
-接进流水线见 `docs/worldgen.md`）：
+接进流水线见 `docs/worldgen.md`）。桌面端设置页的「世界生成」一组直接编辑这四项：
+种子输入框（留空 = 随机）、世界类型下拉、生成结构开关，世界类型是超平坦时还能编辑
+`generator-settings` 的 JSON 文本；保存时按官方 `Properties.store` 的写法写回
+`server.properties`（值里的 `:` 等字符转义成 `\:`），往返和命令行版读写同一份文件。
+`level-type` 保存时归一成注册名，旧名 `default` / `largebiomes` 会写成
+`minecraft:normal` / `minecraft:large_biomes`（语义不变）。
 
 | 键 | 类型 | 官方 26.3 默认值 | 作用 |
 |---|---|---|---|
@@ -65,7 +70,7 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 （官方行为）。四种 `level-type` 的差别：三种噪声世界共用 `minecraft:overworld`
 群系预设，只是 `NoiseGeneratorSettings` 不同（`normal`=`overworld`、
 `large_biomes`=`large_biomes`、`amplified`=`amplified`）；`flat` 走 `FlatLevelSource`。
-`generate-structures` 目前只存储、不影响生成。
+`generate-structures` 关掉时地物阶段不放结构件（村庄、要塞等），地形和地物照常生成。
 
 **和 `ServerConfig::default()` 的关系**：写出来的文件和这份表格一律用官方默认值；
 `ServerConfig::default()` 是「不读配置文件」的嵌入用法（单元测试、oracle、probe、
@@ -326,6 +331,8 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
   路径；命令行版用 `bamboo --server-dir <这个路径>` 就读写同一份。
 - APP 的设置页分成「官方设置」和「Bamboo 优化设置」两个分区：前者写
   `server.properties`，后者写 `bamboo.toml`。每一项下面标了对应的文件里的键名和默认值。
+  「世界生成」一组（种子、世界类型、生成结构、超平坦设置）和上面四个键一一对应，
+  只对新建的世界生效，已有存档按存档里的世界生成参数继续。
 - 老版本 APP 把设置存在应用配置目录的 `server-settings.json` 里。第一次启动时如果
   服务器目录里两个新文件都不存在且老文件存在，就导入一次、写成新文件，之后不再读它。
   老文件**保留不删**（用户数据），只是不再读取。旧文件里「正版验证 + 代理转发」这种

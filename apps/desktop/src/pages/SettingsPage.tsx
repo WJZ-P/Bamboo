@@ -2,7 +2,15 @@ import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import styled from "styled-components";
 
 import type { ServerSettings } from "../api/bamboo";
-import { PanelTitle, PixelButton, PixelInput, PixelPanel, PixelSlider } from "../components/pixel";
+import {
+  PanelTitle,
+  PixelButton,
+  PixelInput,
+  PixelPanel,
+  PixelSelect,
+  PixelSlider,
+  PixelTextarea,
+} from "../components/pixel";
 import {
   describeDefault,
   FIELDS,
@@ -10,6 +18,7 @@ import {
   GROUPS,
   type NumberField,
   SECTIONS,
+  type SelectField,
   type SettingField,
 } from "../settings/fields";
 import { useServer } from "../state/ServerContext";
@@ -131,19 +140,33 @@ export function SettingsPage() {
 
     switch (field.control) {
       case "text":
-      case "password":
+      case "password": {
+        // 多行只给文本项用，密码框永远是单行。
+        // Only plain text fields can be multiline; password stays single-line.
+        const multiline = field.control === "text" && field.multiline === true;
         return (
           <Row>
-            <PixelInput
-              type={field.control === "password" && !revealSecret ? "password" : "text"}
-              aria-label={field.label}
-              value={draft[field.key]}
-              maxLength={field.maxLength}
-              disabled={disabled}
-              aria-invalid={invalid}
-              spellCheck={false}
-              onChange={(event) => setValue(field.key, event.target.value)}
-            />
+            {multiline ? (
+              <PixelTextarea
+                aria-label={field.label}
+                value={draft[field.key]}
+                disabled={disabled}
+                aria-invalid={invalid}
+                spellCheck={false}
+                onChange={(event) => setValue(field.key, event.target.value)}
+              />
+            ) : (
+              <PixelInput
+                type={field.control === "password" && !revealSecret ? "password" : "text"}
+                aria-label={field.label}
+                value={draft[field.key]}
+                maxLength={field.maxLength}
+                disabled={disabled}
+                aria-invalid={invalid}
+                spellCheck={false}
+                onChange={(event) => setValue(field.key, event.target.value)}
+              />
+            )}
             {field.control === "password" && (
               <PixelButton
                 type="button"
@@ -156,6 +179,7 @@ export function SettingsPage() {
             )}
           </Row>
         );
+      }
       case "number":
         return (
           <Row>
@@ -198,6 +222,26 @@ export function SettingsPage() {
               </PixelButton>
             ))}
           </Row>
+        );
+      case "select":
+        return (
+          <PixelSelect
+            aria-label={field.label}
+            value={draft[field.key]}
+            disabled={disabled}
+            aria-invalid={invalid}
+            onChange={(event) =>
+              // 原生下拉只给出字符串，这里收窄回这个字段自己的取值类型。
+              // A native select only yields a string; narrow it to this field's type.
+              setValue(field.key, event.target.value as ServerSettings[SelectField["key"]])
+            }
+          >
+            {field.options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </PixelSelect>
         );
       case "toggle":
         return (
@@ -253,7 +297,13 @@ export function SettingsPage() {
                   {FIELDS.filter((field) => field.group === group.id).map((field) => (
                     <Field
                       key={field.key}
-                      as={field.control === "text" || field.control === "number" ? "label" : "div"}
+                      as={
+                        field.control === "text" ||
+                        field.control === "number" ||
+                        field.control === "select"
+                          ? "label"
+                          : "div"
+                      }
                       $wide={field.wide}
                     >
                       {field.control === "slider"
