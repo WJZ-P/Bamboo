@@ -122,16 +122,9 @@ fn generated_cells_with_seed(
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
-    // 这里比的是生成结果。区块交付后世界还在 tick，随机刻会让草蔓延到树下的泥土上、
-    // 让够不到原木的树叶腐烂，而两次运行经过的 tick 数不同。关掉随机刻再比。
-    // This compares generation output. The world keeps ticking after delivery, and
-    // random ticks spread grass onto the dirt under trees and decay leaves out of
-    // reach of a log, while the two runs see different numbers of ticks. Turn random
-    // ticks off for the comparison.
-    disable_random_ticks(&mut world);
-    for &pos in positions {
-        world.apply_ticket(TicketOp::Forced { pos, forced: true });
-    }
+    // 在 FULL 档取生成期的逐格基准；升入 BLOCK_TICKING 会消费完工表。
+    // Compare the assembled FULL output before promotion consumes its generation marks.
+    world.load_chunks_unpaced(positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
 
     let deadline = Instant::now() + Duration::from_secs(900);
     let mut quiet = 0;

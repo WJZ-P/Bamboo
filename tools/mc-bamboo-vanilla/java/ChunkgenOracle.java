@@ -1555,6 +1555,7 @@ public final class ChunkgenOracle {
             java.util.Map<BlockState, Integer> ids = new java.util.HashMap<>();
             JsonArray sources = new JsonArray();
             JsonArray marks = new JsonArray();
+            JsonArray entitySources = new JsonArray();
             int runs = 0;
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
@@ -1583,6 +1584,11 @@ public final class ChunkgenOracle {
                     // Marks this center added to the target: each section's entries
                     // past the clean prefix, in call order (marks only append).
                     marks.add(saved[12].newMarks(target));
+                    // 这个中心在目标区块里留下的方块实体（干净地形没有方块实体，
+                    // 还原时表也换回去，所以目标里的全是这一次写的）。
+                    // Block entities this center left in the target (the clean
+                    // terrain has none and the restore swaps the tables back).
+                    entitySources.add(blockEntityRows(target, true));
                     JsonArray writes = new JsonArray();
                     AreaSnapshot clean = saved[12];
                     for (int y = 0; y < height; y++) {
@@ -1629,6 +1635,7 @@ public final class ChunkgenOracle {
             line.add("writePalette", names);
             line.add("sources", sources);
             line.add("marks", marks);
+            line.add("blockEntities", entitySources);
             // 还原后目标的 `postProcessing` 就是干净地形（doFill / 地表）的标记。
             // After the restore the target's `postProcessing` is the clean terrain marks.
             addBlocks(line, target);
@@ -3009,6 +3016,37 @@ public final class ChunkgenOracle {
          * `saveWithFullMetadata`. The DUMMY nbt left in `pendingBlockEntities` by
          * `WorldGenRegion.setBlock` is a placeholder, not an entity, so it is skipped.
          */
+        /**
+         * 区块里全部方块实体的 `[x,y,z,SNBT]`，按 y、x、z 排序。`withDummy` 为真时
+         * `WorldGenRegion.setBlock` 留下的 DUMMY 占位也列出（SNBT 写成 "DUMMY"）。
+         *
+         * The chunk's block entities as `[x,y,z,SNBT]` sorted by y, x, z; with
+         * `withDummy` the DUMMY placeholders are listed too, as "DUMMY".
+         */
+        private JsonArray blockEntityRows(ChunkAccess chunk, boolean withDummy) {
+            JsonArray entities = new JsonArray();
+            List<BlockPos> positions = new ArrayList<>(chunk.getBlockEntitiesPos());
+            positions.sort(Comparator.comparingInt((BlockPos p) -> p.getY())
+                    .thenComparingInt(p -> p.getX()).thenComparingInt(p -> p.getZ()));
+            for (BlockPos pos : positions) {
+                CompoundTag tag = chunk.getBlockEntityNbtForSaving(pos, registries);
+                if (tag == null) {
+                    continue;
+                }
+                boolean dummy = "DUMMY".equals(tag.getStringOr("id", ""));
+                if (dummy && !withDummy) {
+                    continue;
+                }
+                JsonArray entry = new JsonArray();
+                entry.add(pos.getX());
+                entry.add(pos.getY());
+                entry.add(pos.getZ());
+                entry.add(dummy ? "DUMMY" : tag.toString());
+                entities.add(entry);
+            }
+            return entities;
+        }
+
         private void addBlockEntities(JsonObject line, ChunkAccess chunk) {
             JsonArray entities = new JsonArray();
             List<BlockPos> positions = new ArrayList<>(chunk.getBlockEntitiesPos());

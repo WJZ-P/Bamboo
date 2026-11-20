@@ -387,7 +387,7 @@ pub(crate) fn send_chunks(region: &mut Region) {
         let chunks = &region.chunks;
         let batch = player.chunks.sender.next_batch(
             player.chunk_pos(),
-            |pos| chunks.is_loaded(pos),
+            |pos| chunks.is_loaded(pos) && region.tick_levels.ready_to_send(pos),
             &mut region.profiler,
         );
         if batch.is_empty() {

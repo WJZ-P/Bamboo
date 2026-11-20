@@ -286,9 +286,60 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
     parts.ticks = Some(ticks);
 
     // 2. 方块实体条目：按 id 建具体类型，游戏层四张表各取自己那部分键。
+    install_block_entities(&mut parts, pos, &decoded.block_entities, &mut problems);
+
+    // 3. 实体文件：认识的三种交给 blocks 解码，不认识的原样保留。
+    let mut rows: Vec<EntityRow> = Vec::new();
+    let mut preserved_entities = Vec::new();
+    if let Some(root) = entities {
+        let file = EntityFile::decode(root, pos)?;
+        problems.extend(file.problems.into_iter().map(|message| Problem {
+            at: "entities".to_owned(),
+            message,
+        }));
+        let (modeled, unknown) = split_entity_entries(file.entities);
+        for (index, tag) in modeled.iter().enumerate() {
+            match read_entity(tag, FIRST_UID + index as i32) {
+                Ok(Some(row)) => rows.push(row),
+                Ok(None) => problems.push(Problem {
+                    at: format!("entities[{index}]"),
+                    message: "unknown entity id".to_owned(),
+                }),
+                Err(error) => problems.push(Problem {
+                    at: format!("entities[{index}]"),
+                    message: error.0,
+                }),
+            }
+        }
+        preserved_entities.extend(unknown);
+        preserved_entities.extend(file.preserved_entities);
+    }
+    rows.sort_by_key(|row| row.public.uid);
+    parts.entities = ChunkEntities::from_parts(rows, preserved_entities);
+
+    Ok(DecodedChunk {
+        column: RegionColumn::from_parts(parts),
+        problems,
+        persisted_status: decoded.persisted_status,
+    })
+}
+
+/// 把一组完整的方块实体条目（带 `id` 和 `x`/`y`/`z`）装进区块部件：按 id 建具体
+/// 类型，游戏层四张表（容器、命令方块、讲台、组件补丁）和红石记忆各取自己那部分键。
+/// 读盘和世界生成交付共用这一条，生成的箱子和读回的箱子走同一套规则。
+///
+/// Install complete block entity entries (with `id` and `x`/`y`/`z`) into the
+/// column parts: build the concrete kinds and let the game tables and redstone
+/// memory take their keys. Disk loads and generated chunks share this path.
+pub(crate) fn install_block_entities(
+    parts: &mut RegionColumnParts,
+    pos: ChunkPos,
+    tags: &[Tag],
+    problems: &mut Vec<Problem>,
+) {
     let mut live = Vec::new();
     let mut redstone_entries = Vec::new();
-    for tag in &decoded.block_entities {
+    for tag in tags {
         let Some((x, y, z)) = tag_position(tag) else {
             problems.push(Problem {
                 at: "block_entities".to_owned(),
@@ -328,48 +379,13 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
                 message: error.0,
             }),
         }
-        read_game_fields(&mut parts, &mut problems, id, world_pos, tag, state);
+        read_game_fields(parts, problems, id, world_pos, tag, state);
         redstone_entries.extend(read_redstone(world_pos, id, tag));
     }
     parts.block_entities = ChunkBlockEntities::from_entities(live);
     for entry in redstone_entries {
         parts.redstone.push_archive_entry(entry);
     }
-
-    // 3. 实体文件：认识的三种交给 blocks 解码，不认识的原样保留。
-    let mut rows: Vec<EntityRow> = Vec::new();
-    let mut preserved_entities = Vec::new();
-    if let Some(root) = entities {
-        let file = EntityFile::decode(root, pos)?;
-        problems.extend(file.problems.into_iter().map(|message| Problem {
-            at: "entities".to_owned(),
-            message,
-        }));
-        let (modeled, unknown) = split_entity_entries(file.entities);
-        for (index, tag) in modeled.iter().enumerate() {
-            match read_entity(tag, FIRST_UID + index as i32) {
-                Ok(Some(row)) => rows.push(row),
-                Ok(None) => problems.push(Problem {
-                    at: format!("entities[{index}]"),
-                    message: "unknown entity id".to_owned(),
-                }),
-                Err(error) => problems.push(Problem {
-                    at: format!("entities[{index}]"),
-                    message: error.0,
-                }),
-            }
-        }
-        preserved_entities.extend(unknown);
-        preserved_entities.extend(file.preserved_entities);
-    }
-    rows.sort_by_key(|row| row.public.uid);
-    parts.entities = ChunkEntities::from_parts(rows, preserved_entities);
-
-    Ok(DecodedChunk {
-        column: RegionColumn::from_parts(parts),
-        problems,
-        persisted_status: decoded.persisted_status,
-    })
 }
 
 /// 读盘时给实体重新分配的第一号 ID，和 `EntityStore` 的默认一致。

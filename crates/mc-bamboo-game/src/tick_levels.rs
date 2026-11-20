@@ -10,6 +10,11 @@
 //! - 实体：两套等级都 ≤31，且自己和周围两圈（5×5）都已交付。
 //!
 //! 逐区块 tick 还要模拟等级 ≤31，单独存一个集合。
+//!
+//! 另有一组只看加载等级的「可运行」状态，对应官方 `prepareTickingChunk`：加载等级 ≤32
+//! 且周围 8 个区块都已交付时进「待处理」，岛线程做完完工后处理（见
+//! [`crate::generation_post_process`]）后进「可发送」，跌出这一条件时两边都清掉。
+//! 玩家视距内、模拟距离外的区块也会走到这一步，所以不能复用方块逻辑集合。
 
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -129,6 +134,12 @@ pub(crate) struct TickLevels {
     /// used to be kept as well, read only by tests yet moved chunk by chunk
     /// on every island split and merge; tests now sort this one on demand.)
     blocks: ChunkSet,
+    /// 加载档达到 BLOCK_TICKING 且 3×3 已交付，等岛线程执行完工后处理。
+    /// Loading-tier promotions awaiting generation post-processing on the island.
+    preparing: BTreeSet<ChunkPos>,
+    /// 同一加载档内已完成后处理，可以向玩家发首包。
+    /// Prepared chunks in the current loading tier, eligible for sending.
+    ready: ChunkSet,
     /// 能跑实体的区块，同上。
     entities: ChunkSet,
     /// 逐区块 tick 的区块：属于 `blocks`，且模拟等级 ≤31。
@@ -158,8 +169,36 @@ impl TickLevels {
         self.enabled = false;
         self.tiers.clear();
         self.blocks.clear();
+        self.preparing.clear();
+        self.ready.clear();
         self.entities.clear();
         self.random.clear();
+    }
+
+    /// 取走这一刻之前新跨入可运行、等完工后处理的区块，按坐标升序。
+    /// Take the chunks awaiting generation post-processing, in position order.
+    pub(crate) fn take_preparing(&mut self) -> BTreeSet<ChunkPos> {
+        std::mem::take(&mut self.preparing)
+    }
+
+    /// 后处理做完：在当前加载档内算可发送，直到跌出可运行。
+    /// Post-processing done: sendable until the chunk drops out of ticking.
+    pub(crate) fn finish_preparing(&mut self, pos: ChunkPos) {
+        if self.loading_ready(pos) {
+            self.ready.insert(pos);
+        }
+    }
+
+    /// 区块做完完工后处理、可以发给玩家（官方 `onChunkReadyToSend` 之后）。
+    /// Whether the chunk finished generation post-processing and may be sent.
+    pub(crate) fn ready_to_send(&self, pos: ChunkPos) -> bool {
+        !self.enabled || self.ready.contains(&pos) || crate::generation_post_process::send_early()
+    }
+
+    /// 后处理已经做完（不看改坏开关）。对拍用它判断处理发生了没有。
+    /// Post-processing has run (ignores the break switch); the oracle uses it.
+    pub(crate) fn prepared(&self, pos: ChunkPos) -> bool {
+        self.ready.contains(&pos)
     }
 
     pub(crate) fn chunk_ticks_blocks(&self, pos: ChunkPos) -> bool {
@@ -257,6 +296,7 @@ impl TickLevels {
             }
             for (from, to) in [
                 (&mut self.blocks, &mut out.blocks),
+                (&mut self.ready, &mut out.ready),
                 (&mut self.entities, &mut out.entities),
             ] {
                 if from.remove(&pos) {
@@ -264,6 +304,7 @@ impl TickLevels {
                 }
             }
         }
+        out.preparing = split_ordered(&mut self.preparing, chunks);
         out.random = split_ordered(&mut self.random, chunks);
         let (moved, kept) = std::mem::take(&mut self.block_tick_changes)
             .into_iter()
@@ -280,6 +321,8 @@ impl TickLevels {
         debug_assert_eq!(self.enabled, other.enabled);
         self.tiers.extend(other.tiers);
         self.blocks.extend(other.blocks);
+        self.ready.extend(other.ready);
+        absorb_ordered(&mut self.preparing, other.preparing);
         self.entities.extend(other.entities);
         absorb_ordered(&mut self.random, other.random);
         self.block_tick_changes.extend(other.block_tick_changes);
@@ -310,7 +353,14 @@ impl TickLevels {
         let mut entity_centers: Vec<ChunkPos> = entity_centers.into_iter().collect();
         entity_centers.sort_unstable();
         for center in block_centers {
-            let eligible = self.blocks_eligible(center);
+            let full_ring = self.loading_ready(center);
+            if !full_ring {
+                self.ready.remove(&center);
+                self.preparing.remove(&center);
+            } else if !self.ready.contains(&center) {
+                self.preparing.insert(center);
+            }
+            let eligible = full_ring && self.tiers[&center].simulation <= TickTier::Block;
             let random = eligible && self.ticks_randomly(center);
             let was = self.blocks.contains(&center);
             if was != eligible {
@@ -325,13 +375,11 @@ impl TickLevels {
         }
     }
 
-    fn blocks_eligible(&self, pos: ChunkPos) -> bool {
+    fn loading_ready(&self, pos: ChunkPos) -> bool {
         let Some(tiers) = self.tiers.get(&pos) else {
             return false;
         };
-        if !matches!(tiers.loading, TickTier::Entity | TickTier::Block)
-            || !matches!(tiers.simulation, TickTier::Entity | TickTier::Block)
-        {
+        if tiers.loading > TickTier::Block {
             return false;
         }
         neighborhood(pos, BLOCK_RADIUS).all(|neighbor| self.tiers.contains_key(&neighbor))
@@ -366,7 +414,7 @@ impl TickLevels {
         let mut positions: Vec<ChunkPos> = self.tiers.keys().copied().collect();
         positions.sort_unstable();
         for pos in positions {
-            if self.blocks_eligible(pos) {
+            if self.loading_ready(pos) && self.tiers[&pos].simulation <= TickTier::Block {
                 blocks.insert(pos);
                 if self.ticks_randomly(pos) {
                     random.insert(pos);
@@ -430,6 +478,38 @@ mod tests {
             loading: (0, loading),
             simulation: (0, simulation),
         }
+    }
+
+    #[test]
+    fn sending_waits_for_preparation_even_outside_simulation_distance() {
+        let center = ChunkPos::new(0, 0);
+        let corner = ChunkPos::new(1, 1);
+        let mut levels = TickLevels::new(true);
+        levels.deliver(
+            neighborhood(center, 1)
+                .filter(|pos| *pos != corner)
+                .map(|pos| {
+                    (
+                        pos,
+                        desired(if pos == center { 32 } else { 33 }, UNLOADED_LEVEL),
+                    )
+                }),
+        );
+        assert!(levels.take_preparing().is_empty());
+        assert!(!levels.ready_to_send(center));
+        levels.deliver([(corner, desired(33, UNLOADED_LEVEL))]);
+        assert_eq!(levels.take_preparing(), BTreeSet::from([center]));
+        assert!(!levels.ready_to_send(center));
+        levels.finish_preparing(center);
+        assert!(levels.ready_to_send(center));
+        assert!(!levels.chunk_ticks_blocks(center));
+
+        levels.level_changed(&[change(center, 33, 31)]);
+        assert!(!levels.ready_to_send(center));
+        levels.level_changed(&[change(center, 32, 31)]);
+        levels.reclaim([&corner]);
+        assert!(levels.take_preparing().is_empty());
+        assert!(!levels.ready_to_send(center));
     }
 
     /// 交付一整片，中心全是实体档，边缘留给调用方改档。

@@ -855,6 +855,7 @@ impl Report {
                 biomes: Vec::new(),
                 heightmaps: Default::default(),
                 post_processing: Vec::new(),
+                block_entities: Vec::new(),
             };
             compare_blocks_exact(
                 &mut self.stats,
@@ -1827,6 +1828,7 @@ mod tests {
             biomes: vec![],
             heightmaps: Default::default(),
             post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         let palette = vec![Value::String("Block{minecraft:stone}".to_owned())];
         let indices: Vec<Value> = (0..256).map(|_| Value::from(0u64)).collect();
@@ -1850,6 +1852,7 @@ mod tests {
             biomes: vec![vec![registries::biome::PLAINS as u32; 64]],
             heightmaps: Default::default(),
             post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         let sections = vec![vec!["minecraft:desert".to_owned(); 64]];
         let mut stats = Stats::default();
@@ -1870,6 +1873,7 @@ mod tests {
             biomes: vec![],
             heightmaps,
             post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         let mut columns = serde_json::Map::new();
         for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
