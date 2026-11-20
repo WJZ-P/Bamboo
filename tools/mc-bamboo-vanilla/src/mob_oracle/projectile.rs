@@ -221,6 +221,12 @@ impl Report {
     pub(super) fn replay_projectile(&mut self, case: &ProjectileCase) {
         self.cases += 1;
         let mut level = case.level();
+        if self.break_test.as_deref() == Some("arrow_water") {
+            // 改坏确认：拿掉水面，熄火音效和火焰刻都应该对不上。
+            // Break self-test: drop the water so the extinguish sound and fire ticks must differ.
+            level.blocks.remove(&BlockPos::new(3, 65, 0));
+            level.blocks.remove(&BlockPos::new(4, 65, 0));
+        }
         level.game.as_mut().unwrap().set_arrow_target(
             case.player_id,
             case.name.ends_with("_rejected"),
