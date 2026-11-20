@@ -450,8 +450,25 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         data: i32,
     },
-    /// `BreakDoorGoal.tick` 的 `removeBlock` 或 `RemoveBlockGoal` 踩碎海龟蛋。
+    /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
+    /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
     RemoveMobBlock { pos: mc_bamboo_core::BlockPos },
+    /// `TurtleEggBlock.destroyEgg` 里取世界随机数之后的部分：`nextInt(chance) == 0`
+    /// 时 `decreaseEggs`。世界随机数只在落地时取，两种驱动取数顺序一样。
+    TrampleTurtleEgg {
+        pos: mc_bamboo_core::BlockPos,
+        chance: i32,
+    },
+    /// `ZombieAttackTurtleEggGoal.playBreakSound`：音高取世界随机数。
+    TurtleEggBreakSound { pos: mc_bamboo_core::BlockPos },
+    /// `level.playSound(null, pos, sound, source, volume, pitch)`：方块中心的音效。
+    MobBlockSound {
+        pos: mc_bamboo_core::BlockPos,
+        sound: &'static str,
+        source: mc_bamboo_data::sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -518,13 +535,35 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             });
         }
         Command::RemoveMobBlock { pos } => {
-            let state = world.block_state(pos);
             let _ = world.remove_block(pos);
-            world.push_effect(crate::Effect::Destroyed {
+        }
+        Command::TrampleTurtleEgg { pos, chance } => {
+            super::mob::living::apply_trample_turtle_egg(world, pos, chance);
+        }
+        Command::TurtleEggBreakSound { pos } => {
+            let pitch = 0.9 + world.random().next_float() * 0.2;
+            world.play_block_sound(
                 pos,
-                state,
-                except_initiator: false,
-            });
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.egg_break"),
+                0.7,
+                pitch,
+            );
+        }
+        Command::MobBlockSound {
+            pos,
+            sound,
+            source,
+            volume,
+            pitch,
+        } => {
+            world.play_sound(
+                crate::world::block_center_public(pos),
+                mc_bamboo_data::sounds::sound_event(sound),
+                source,
+                volume,
+                pitch,
+                false,
+            );
         }
     }
 }

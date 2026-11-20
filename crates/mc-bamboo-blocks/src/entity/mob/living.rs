@@ -375,7 +375,7 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let time = mob.ambient_sound_time;
         mob.ambient_sound_time += 1;
         if roll < time {
-            mob.ambient_sound_time = -120;
+            mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
             let pitch = voice_pitch(me, mob);
             let sound = mob
                 .mob_type
@@ -1339,7 +1339,7 @@ pub(crate) fn hurt_server(
         die(me, mob, ctx, source);
     } else if full_hit {
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
-        mob.ambient_sound_time = -120;
+        mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
         let sound = mob
             .mob_type
@@ -1478,6 +1478,41 @@ pub(crate) fn apply_hurt_player(
         source,
         amount,
     });
+}
+
+/// 落地 `Command::TrampleTurtleEgg`：`TurtleEggBlock.destroyEgg` 从「还是不是蛋」开始的部分。
+/// `nextInt(chance) == 0` 才 `decreaseEggs`：先放碎蛋声（音高也取世界随机数），
+/// 最后一枚用 `destroyBlock(pos, false)`，否则少一枚并发 2001 事件（带减之前的状态）。
+pub(crate) fn apply_trample_turtle_egg(
+    world: &mut crate::world::World,
+    pos: BlockPos,
+    chance: i32,
+) {
+    let state = world.block_state(pos);
+    if !state.is(mc_bamboo_data::blocks::TURTLE_EGG) {
+        return;
+    }
+    if world.random().next_int(chance) != 0 {
+        return;
+    }
+    let pitch = 0.9 + world.random().next_float() * 0.2;
+    world.play_block_sound(
+        pos,
+        mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.egg_break"),
+        0.7,
+        pitch,
+    );
+    let eggs = state.get(crate::state::EGGS);
+    if eggs <= 1 {
+        world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+    } else {
+        world.set_block(pos, state.with(crate::state::EGGS, eggs - 1), 2);
+        world.push_effect(crate::Effect::Destroyed {
+            pos,
+            state,
+            except_initiator: false,
+        });
+    }
 }
 
 /// `LivingEntity.die`：掉落交给 [`Command::DropMobLoot`]，经验只在被玩家打过时掉。

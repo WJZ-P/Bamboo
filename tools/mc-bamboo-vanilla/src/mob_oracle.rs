@@ -409,6 +409,9 @@ struct CowStep {
     pht: i32,
     #[serde(default)]
     pcd: i32,
+    /// 僵尸场景：整张方块表的散列，见 [`block_hash`]。
+    #[serde(default)]
+    bh: i64,
 }
 
 const fn minus_one() -> i32 {
@@ -877,6 +880,10 @@ impl Report {
                 .blocks
                 .insert(BlockPos::new(x, y, z), BlockState(state as u32));
         }
+        if matches!(break_test, Some("zombie_egg")) {
+            // 改坏确认：关掉 `mobGriefing`，海龟蛋既不会被踩坏也不会被啄碎。
+            level.rules.mob_griefing = false;
+        }
         let mut ticks = BlockTicks::new();
         ticks.set_time(case.start_time);
         let mut ids = Vec::new();
@@ -912,7 +919,9 @@ impl Report {
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if cow.age != 0 {
-                        let baby = cow.age < 0;
+                        // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
+                        // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
+                        let baby = kind.is_monster() || cow.age < 0;
                         let (width, height, eye) = kind.dimensions(baby);
                         entity.dimensions = (width, height);
                         if let Some(mob) = entity.kind.mob_mut() {
@@ -938,7 +947,6 @@ impl Report {
                     }
                 });
                 if case.name.starts_with("zombie_") {
-                    let id = ids.last().copied().unwrap_or(0);
                     world.with_entity_mut(id, &mut |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {
                             if matches!(break_test, Some("zombie_goal_order")) {
@@ -1374,6 +1382,7 @@ impl Report {
                 plain!(ph);
                 plain!(pht);
                 plain!(pcd);
+                plain!(bh);
             }
             if diffs.is_empty() {
                 continue;
@@ -2469,14 +2478,42 @@ fn table_hashes() -> [i64; 2] {
 
 fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
     let lr = level.random.source().seed();
+    let bh = block_hash(level);
     ids.iter()
         .map(|&id| {
-            level
-                .entities
-                .get(id)
-                .and_then(|entity| step_of(&entity, lr))
+            level.entities.get(id).and_then(|entity| {
+                step_of(&entity, lr).map(|mut step| {
+                    step.bh = bh;
+                    step
+                })
+            })
         })
         .collect()
+}
+
+/// 和 Java 一侧 `blockHash` 同一个算法：非空气格子按 (x, y, z) 排序后做 FNV-1a。
+fn block_hash(level: &MobLevel) -> i64 {
+    let mut cells: Vec<[i64; 4]> = level
+        .blocks
+        .iter()
+        .filter(|(_, state)| !state.is_air())
+        .map(|(pos, state)| {
+            [
+                i64::from(pos.x),
+                i64::from(pos.y),
+                i64::from(pos.z),
+                i64::from(state.0),
+            ]
+        })
+        .collect();
+    cells.sort_unstable();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64 as i64;
+    for cell in cells {
+        for value in cell {
+            hash = (hash ^ value).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 fn step_of(entity: &Entity, lr: i64) -> Option<CowStep> {
@@ -2565,5 +2602,6 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         ph: 0,
         pht: 0,
         pcd: 0,
+        bh: 0,
     }
 }

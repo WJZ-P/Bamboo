@@ -1395,13 +1395,38 @@ public final class MobOracle {
                 far.mob(1, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
                 far.player(150.5, 64.0, 0.5, Items.AIR);
                 scenes.add(far);
-                Scene egg = new Scene("zombie_turtle_egg").ticks(120).difficulty(2);
+                // 一枚蛋：走过去、站上去（每刻踩蛋取世界随机数）、61 刻后啄碎。
+                Scene egg = new Scene("zombie_turtle_egg").ticks(200).difficulty(2);
                 egg.monstersBurn = false;
                 ground(egg, 12);
                 egg.set(4, 64, 0, Blocks.TURTLE_EGG.defaultBlockState());
                 egg.mob(1, 0.5, 64.0, 0.5, 0.0F, 19L, 0);
-                egg.player(20.5, 64.0, 0.5, Items.AIR);
+                // 玩家在跟随距离 35 格之外，近战目标不会抢走移动标志。
+                egg.player(50.5, 64.0, 0.5, Items.AIR);
                 scenes.add(egg);
+                // 一窝四枚：踩蛋的 1/100 会把蛋数减一并发 2001 事件，换几个种子覆盖到。
+                for (long seed : new long[] {31L, 37L, 41L}) {
+                    Scene eggs = new Scene("zombie_turtle_eggs_" + seed).ticks(240).difficulty(2);
+                    eggs.monstersBurn = false;
+                    ground(eggs, 12);
+                    eggs.set(3, 64, 0, Blocks.TURTLE_EGG.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.TurtleEggBlock.EGGS, 4));
+                    eggs.mob(1, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                    eggs.player(50.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(eggs);
+                }
+                // 牛从三格高落到一窝蛋上：`fallOn` 对非僵尸 1/3 踩坏一枚，落地后每刻再 1/100。
+                Scene fall = new Scene("zombie_eggs_fall").ticks(80).difficulty(2);
+                fall.monstersBurn = false;
+                ground(fall, 12);
+                int[] columns = {-6, -3, 3, 6};
+                for (int i = 0; i < columns.length; i++) {
+                    fall.set(columns[i], 64, 0, Blocks.TURTLE_EGG.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.TurtleEggBlock.EGGS, 1 + i));
+                    fall.mob(0, columns[i] + 0.5, 67.0, 0.5, 0.0F, 43L + i, 0);
+                }
+                fall.player(50.5, 64.0, 0.5, Items.AIR);
+                scenes.add(fall);
                 // 两只僵尸同一刻打到同一玩家：第二下必须落在无敌帧里。
                 Scene two = new Scene("zombie_two_hit_same_tick").ticks(60).difficulty(2);
                 two.monstersBurn = false;
@@ -2357,6 +2382,7 @@ public final class MobOracle {
             out.append(",\"ph\":0");
             out.append(",\"pht\":0");
             out.append(",\"pcd\":0");
+            out.append(",\"bh\":").append(blockHash(level));
             out.append(",\"goals\":\"");
             boolean first = true;
             for (WrappedGoal goal : mob.getGoalSelector().getAvailableGoals()) {
@@ -3694,6 +3720,31 @@ public final class MobOracle {
         }
         out.append(']');
         return out.toString();
+    }
+
+    /** 僵尸场景逐刻比方块：非空气格子按 (x, y, z) 排序后做 FNV-1a。 */
+    private static long blockHash(FakeLevel level) {
+        java.util.List<long[]> cells = new java.util.ArrayList<>();
+        for (var entry : level.blocks.long2ObjectEntrySet()) {
+            BlockState state = entry.getValue();
+            if (state.isAir()) continue;
+            BlockPos pos = BlockPos.of(entry.getLongKey());
+            cells.add(new long[] {pos.getX(), pos.getY(), pos.getZ(), Block.getId(state)});
+        }
+        cells.sort((a, b) -> {
+            for (int i = 0; i < 3; i++) {
+                int c = Long.compare(a[i], b[i]);
+                if (c != 0) return c;
+            }
+            return 0;
+        });
+        long hash = 0xcbf29ce484222325L;
+        for (long[] cell : cells) {
+            for (long value : cell) {
+                hash = (hash ^ value) * 0x100000001b3L;
+            }
+        }
+        return hash;
     }
 
     private static long levelSeed(Level level) throws Exception {

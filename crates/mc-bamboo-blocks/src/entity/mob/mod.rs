@@ -129,6 +129,11 @@ impl MobType {
         matches!(self, Self::Zombie)
     }
 
+    /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
+    pub const fn ambient_sound_interval(self) -> i32 {
+        if self.is_monster() { 80 } else { 120 }
+    }
+
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
         if self.is_monster() { 1.0 } else { 0.4 }
@@ -791,6 +796,9 @@ pub struct Mob {
     pub turtle_egg_try_ticks: i32,
     pub turtle_egg_ticks_since_reached: i32,
     pub turtle_egg_pos: Option<BlockPos>,
+    /// `MoveToBlockGoal.maxStayTicks` / `reachedTarget`。
+    pub turtle_egg_max_stay: i32,
+    pub turtle_egg_reached: bool,
     // ---- AgeableMob / Animal / Cow ----
     pub age: i32,
     pub forced_age: i32,
@@ -962,6 +970,8 @@ impl Mob {
             turtle_egg_try_ticks: 0,
             turtle_egg_ticks_since_reached: 0,
             turtle_egg_pos: None,
+            turtle_egg_max_stay: 0,
+            turtle_egg_reached: false,
             age: 0,
             forced_age: 0,
             forced_age_timer: 0,
@@ -988,6 +998,9 @@ impl Mob {
     /// `Zombie.setBaby`：换元数据、尺寸和 `+0.5` 速度修饰符。
     pub fn set_zombie_baby(&mut self, baby: bool) {
         self.zombie_baby = baby;
+        // `Zombie.onSyncedDataUpdated` 会 `refreshDimensions()`，眼高随
+        // `Zombie.BABY_DIMENSIONS` 变成 0.775（成年是 1.74）。
+        self.eye_height = self.mob_type.dimensions(baby).2;
         if let Some(speed) = self
             .attributes
             .instance(mc_bamboo_data::registries::attribute::MOVEMENT_SPEED)
