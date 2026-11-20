@@ -209,8 +209,7 @@ fn sleep_problem(
     if !can_sleep {
         return Some(BedProblem::NotPossibleNow);
     }
-    // 创造模式跳过怪物检查；世界里还没有怪物，但按官方逻辑保留这个入口，
-    // 让僵尸分支合并之后自然生效。
+    // `isCreative()` 跳过怪物检查。Bamboo 的创造模式就是 `instabuild` 能力，两者等价。
     if !actor.prevents_block_drops && world.monster_prevents_rest(foot) {
         return Some(BedProblem::NotSafe);
     }

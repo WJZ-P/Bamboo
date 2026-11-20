@@ -1327,6 +1327,133 @@ fn sleep_scene() -> (Harness, Client, BlockPos, BlockPos) {
     (server, client, foot, head)
 }
 
+/// 午夜晴天、站在床尾，`prepare` 摆好怪物 / 改好模式之后右键床尾。
+/// 返回玩家睡着没有，以及这次右键收到的包里有没有 `block.minecraft.bed.not_safe`。
+fn try_sleep_with(prepare: impl FnOnce(&mut crate::region::Region, PlayerId)) -> (bool, bool) {
+    use mc_bamboo_blocks::{BlockState, state::BED_PART, state::BedPart};
+    use mc_bamboo_core::Vec3;
+
+    let mut server = Harness::new_one_island(8);
+    let client = server.join_and_settle("Kitten");
+    let foot = BlockPos::new(8, -59, 8);
+    let head = foot.south();
+    let bed = BlockState(mc_bamboo_data::blocks::RED_BED)
+        .with(mc_bamboo_blocks::state::HORIZONTAL_FACING, Direction::South);
+    server.world.islands.region.chunks.set_block(foot, bed.0);
+    server
+        .world
+        .islands
+        .region
+        .chunks
+        .set_block(head, bed.with(BED_PART, BedPart::Head).0);
+    let region = &mut server.world.islands.region;
+    if let Some(player) = region.players.get_mut(&client.id) {
+        player.set_position(&mut region.player_grid, Vec3::new(8.5, -59.0, 8.5));
+    }
+    server
+        .world
+        .master
+        .global
+        .clock_named_mut("minecraft:overworld")
+        .unwrap()
+        .total_ticks = 18_000;
+    server.world.publish_global();
+    if let Some(player) = server.world.islands.region.players.get_mut(&client.id) {
+        player.game_mode = mc_bamboo_protocol::packet::play::GameMode::Survival;
+    }
+    prepare(&mut server.world.islands.region, client.id);
+    client.take_frames();
+    crate::interaction::on_use_item_on(
+        &mut server.world.islands.region,
+        client.id,
+        crate::interaction::UseItemOn {
+            hand: Hand::Main,
+            pos: foot,
+            face: Direction::Up,
+            cursor: (0.5, 0.5, 0.5),
+            inside: false,
+            sequence: 1,
+        },
+    );
+    server.world.islands.region.links.flush();
+    let sleeping = server.world.islands.region.players[&client.id]
+        .sleep
+        .is_some();
+    let needle = b"block.minecraft.bed.not_safe";
+    let warned = client.take_frames().iter().any(|frame| {
+        frame
+            .body
+            .windows(needle.len())
+            .any(|window| window == needle)
+    });
+    (sleeping, warned)
+}
+
+/// 放一只僵尸；`dying` 时血量是 0（倒地动画里，还没被移除）。
+fn place_zombie(region: &mut crate::region::Region, x: f64, y: f64, z: f64, dying: bool) -> i32 {
+    let mut zombie = mc_bamboo_blocks::entity::Entity::zombie(mc_bamboo_core::Vec3::new(x, y, z));
+    if dying && let Some(mob) = zombie.kind.mob_mut() {
+        mob.health = 0.0;
+    }
+    region.entities.spawn(zombie)
+}
+
+/// `ServerPlayer.startSleepInBed`：床头底面中心 ±8 / ±5 / ±8 的盒里有怪物就睡不着，
+/// 提示 `block.minecraft.bed.not_safe`。床头是 (8, -59, 9)，盒是 x、z 各 [0.5, 16.5]、
+/// y [-64, -54]。
+#[test]
+fn a_zombie_near_the_bed_keeps_the_player_awake() {
+    let (sleeping, warned) = try_sleep_with(|region, _| {
+        place_zombie(region, 14.5, -60.0, 14.5, false);
+    });
+    assert!(!sleeping, "附近有僵尸不能睡");
+    assert!(warned, "要提示 not_safe");
+}
+
+/// 倒地动画里的僵尸还在实体表里，官方的查询不看死活，照样挡着。
+#[test]
+fn a_dying_zombie_still_counts() {
+    let (sleeping, warned) = try_sleep_with(|region, _| {
+        place_zombie(region, 14.5, -60.0, 14.5, true);
+    });
+    assert!(!sleeping && warned, "倒地的僵尸也挡着");
+}
+
+/// 盒外的僵尸（碰撞箱离盒的 x 上界还差 0.2）、已经被移除的僵尸都不挡；
+/// 创造模式不查怪物。
+#[test]
+fn zombies_outside_the_box_removed_or_ignored_in_creative_do_not_block_sleep() {
+    // 僵尸宽 0.6：中心 17.1 时碰撞箱从 16.8 起，和盒的 16.5 不相交。
+    let (sleeping, warned) = try_sleep_with(|region, _| {
+        place_zombie(region, 17.1, -60.0, 9.5, false);
+    });
+    assert!(sleeping && !warned, "盒外的僵尸不挡");
+    // 碰撞箱刚好压进盒里 0.1 就挡。
+    let (sleeping, _) = try_sleep_with(|region, _| {
+        place_zombie(region, 16.7, -60.0, 9.5, false);
+    });
+    assert!(!sleeping, "碰撞箱和盒相交就挡");
+    let (sleeping, warned) = try_sleep_with(|region, _| {
+        let uid = place_zombie(region, 14.5, -60.0, 14.5, false);
+        region.entities.remove(uid);
+    });
+    assert!(sleeping && !warned, "移除之后不挡");
+    let (sleeping, warned) = try_sleep_with(|region, id| {
+        place_zombie(region, 14.5, -60.0, 14.5, false);
+        if let Some(player) = region.players.get_mut(&id) {
+            player.game_mode = mc_bamboo_protocol::packet::play::GameMode::Creative;
+        }
+    });
+    assert!(sleeping && !warned, "创造模式不查怪物");
+    // 牛不是怪物。
+    let (sleeping, _) = try_sleep_with(|region, _| {
+        region.entities.spawn(mc_bamboo_blocks::entity::Entity::cow(
+            mc_bamboo_core::Vec3::new(14.5, -60.0, 14.5),
+        ));
+    });
+    assert!(sleeping, "牛不挡");
+}
+
 /// 逐刻记录跳早的那一刻：时钟跳到多少、哪一刻发醒来包和时钟同步包。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct SleepTrace {

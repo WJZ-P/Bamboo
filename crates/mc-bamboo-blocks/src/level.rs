@@ -1041,13 +1041,32 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
-    /// `Monster.isPreventingPlayerRest` 的近似入口；世界里还没有怪物，默认没有。
-    /// 见 [`World::monster_prevents_rest`](crate::World::monster_prevents_rest)。
+    /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
+    /// 水平 ±8、竖直 ±5 的盒，`getEntitiesOfClass(Monster.class, box,
+    /// m -> m.isPreventingPlayerRest(level, player))` 非空。
     ///
-    /// Hook for `Monster.isPreventingPlayerRest`; no monsters yet, so false.
-    /// See [`World::monster_prevents_rest`](crate::World::monster_prevents_rest).
-    fn monster_prevents_rest(&self, _pos: BlockPos) -> bool {
-        false
+    /// 僵尸和尸壳都不覆盖 `isPreventingPlayerRest`（缺省恒真）。官方的实体查询只看碰撞箱和
+    /// 盒相交（严格不等，只碰到表面不算），不看死活：倒地动画里的僵尸还在区块里，照样
+    /// 挡着；被移除（`discard`）之后才不算。
+    ///
+    /// The monster query of `ServerPlayer.startSleepInBed`: any monster whose box
+    /// intersects the ±8 / ±5 / ±8 box around the bed's bottom centre. Dying monsters
+    /// still count, as in vanilla; discarded ones do not.
+    fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
+        let x = f64::from(pos.x) + 0.5;
+        let y = f64::from(pos.y);
+        let z = f64::from(pos.z) + 0.5;
+        let area = mc_bamboo_core::Aabb::new(x - 8.0, y - 5.0, z - 8.0, x + 8.0, y + 5.0, z + 8.0);
+        let mut found = false;
+        self.for_each_entity_in(area, &mut |public| {
+            if !public.removed
+                && let crate::entity::KindPublic::Mob(mob) = &public.kind
+                && mob.mob_type.is_monster()
+            {
+                found = true;
+            }
+        });
+        found
     }
 
     /// `getDifficulty().getId()`：0 和平、1 简单、2 普通、3 困难。

@@ -1974,13 +1974,10 @@ impl<'a> World<'a> {
         self.level.is_dark_outside()
     }
 
-    /// `ServerPlayer.startSleepInBed` 的怪物检查：`Monster.isPreventingPlayerRest`
-    /// 在床周围 8 × 5 × 8 的盒子里。世界里还没有怪物，假世界也恒为假；
-    /// 僵尸分支接上后由 [`Level`] 覆盖。
+    /// `ServerPlayer.startSleepInBed` 的怪物检查，见 [`Level::monster_prevents_rest`]。
     ///
-    /// The monster check in `ServerPlayer.startSleepInBed`: any
-    /// `Monster.isPreventingPlayerRest` within an 8 × 5 × 8 box around the
-    /// bed. No monsters exist yet; mob implementations override [`Level`].
+    /// The monster check in `ServerPlayer.startSleepInBed`; see
+    /// [`Level::monster_prevents_rest`].
     pub fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
         self.level.monster_prevents_rest(pos)
     }
