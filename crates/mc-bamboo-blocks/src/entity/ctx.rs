@@ -184,6 +184,17 @@ pub trait BlockView {
     fn level_random_boolean(&self) -> bool {
         false
     }
+
+    /// 生物身上装备的 `hurtAndBreak(amount, entity, slot)`：耐久附魔用 `level.random`。
+    /// 返回装备是不是坏了。并行的只读视图没有世界随机源，按没有耐久附魔算
+    /// （带耐久附魔的装备扣耐久的次数和原版不同，是性能模式差异）。
+    fn hurt_mob_equipment(
+        &self,
+        stack: &mut mc_bamboo_protocol::item::ItemStack,
+        amount: i32,
+    ) -> bool {
+        crate::durability::hurt_equipment(stack, amount, &crate::random::LegacyRandom::new(0))
+    }
 }
 
 /// 生物看得见的一个玩家。
@@ -377,6 +388,14 @@ impl BlockView for World<'_> {
 
     fn level_random_boolean(&self) -> bool {
         self.random().next_boolean()
+    }
+
+    fn hurt_mob_equipment(
+        &self,
+        stack: &mut mc_bamboo_protocol::item::ItemStack,
+        amount: i32,
+    ) -> bool {
+        crate::durability::hurt_equipment(stack, amount, self.random())
     }
 }
 

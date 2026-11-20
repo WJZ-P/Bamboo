@@ -711,15 +711,24 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             };
             found.is_some()
         }
+        // `RestrictSunGoal.canUse`：白天、头上没东西、地面导航（僵尸恒是）。
+        // 官方这里不看 `MONSTERS_BURN`。
         Goal::RestrictSun => {
-            ctx.blocks().is_bright_outside() && mob.helmet.is_none() && ctx.blocks().monsters_burn()
+            ctx.blocks().is_bright_outside()
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head)
+                    .is_empty()
         }
         Goal::FleeSun { wanted, .. } => {
             mob.target.is_none()
                 && ctx.blocks().is_bright_outside()
                 && me.remaining_fire_ticks > 0
                 && ctx.blocks().can_see_sky(me.block_position())
-                && mob.helmet.is_none()
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head)
+                    .is_empty()
                 && flee_sun_target(me, mob, ctx).is_some_and(|at| {
                     *wanted = at;
                     true
@@ -825,7 +834,13 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 dx * dx + dy * dy + dz * dz <= range * range
             })
         }
-        Goal::RestrictSun => ctx.blocks().is_bright_outside() && mob.helmet.is_none(),
+        Goal::RestrictSun => {
+            ctx.blocks().is_bright_outside()
+                && mob
+                    .equipment
+                    .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Head)
+                    .is_empty()
+        }
         Goal::FleeSun { .. } => !mob.navigation.is_done(),
         Goal::BreakDoor => mob.door_break_time <= 240 && ctx.blocks().difficulty() == 3,
         Goal::TurtleEgg { .. } => {

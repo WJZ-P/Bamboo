@@ -31,8 +31,6 @@ use crate::{
 ///
 /// Vanilla keys kept verbatim and written back.
 const PASSTHROUGH: &[&str] = &[
-    "equipment",
-    "drop_chances",
     "leash",
     "DeathLootTable",
     "data",
@@ -277,6 +275,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             ),
         );
     }
+    // `LivingEntity`：装备非空才写 `equipment`（`EntityEquipment.CODEC`）。
+    if !mob.equipment.is_empty() {
+        put(&mut out, "equipment", mob.equipment.equipment_tag());
+    }
     // ---- Mob ----
     put(
         &mut out,
@@ -288,6 +290,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         "PersistenceRequired",
         Tag::Byte(i8::from(mob.persistence_required)),
     );
+    // `Mob`：掉落几率不是 `DropChances.DEFAULT` 才写，等于缺省值的槽省略。
+    if !mob.equipment.default_drop_chances() {
+        put(&mut out, "drop_chances", mob.equipment.drop_chances_tag());
+    }
     if let Some((pos, radius)) = mob.home {
         put(&mut out, "home_radius", Tag::Int(radius));
         put(&mut out, "home_pos", block_pos_tag(pos));
@@ -437,9 +443,13 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             me.tick_count
                 .wrapping_sub(tag::int_or(tag, "ticks_since_last_hurt_by_mob", 0));
         mob.impulse_grace_time = tag::int_or(tag, "current_impulse_context_reset_grace_time", 0);
+        // `equipment`：官方读失败时取部分结果，坏的条目丢掉、好的留下。
+        mob.equipment.read_equipment(tag::field(tag, "equipment"));
         // ---- Mob.readAdditionalSaveData ----
         mob.can_pick_up_loot = tag::bool_or(tag, "CanPickUpLoot", false);
         mob.persistence_required = tag::bool_or(tag, "PersistenceRequired", false);
+        mob.equipment
+            .read_drop_chances(tag::field(tag, "drop_chances"));
         let radius = tag::int_or(tag, "home_radius", -1);
         mob.home = (radius >= 0).then(|| {
             let pos = tag::int_array(tag, "home_pos");
@@ -725,5 +735,47 @@ mod tests {
         let map = read_effects(&tag);
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(mob_effect::HASTE).unwrap().duration, 42);
+    }
+
+    /// `equipment` 跟在 `LivingEntity` 的键后面、`drop_chances` 跟在 `PersistenceRequired`
+    /// 后面；读回来装备和几率都一样，属性修饰符要等第一刻的装备比较才挂上。
+    #[test]
+    fn equipment_and_drop_chances_round_trip_in_the_vanilla_key_order() {
+        use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+
+        let mut zombie = Entity::zombie(Vec3::new(0.5, 64.0, 0.5));
+        let helmet = ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1);
+        if let Some(mob) = zombie.kind.mob_mut() {
+            mob.equipment.set(EquipmentSlot::Head, helmet.clone());
+            mob.equipment.set_drop_chance(
+                EquipmentSlot::Head,
+                super::super::equipment::GUARANTEED_DROP_CHANCE,
+            );
+        }
+        let tag = write_mob(&zombie.split()).expect("zombie saves");
+        let Tag::Compound(entries) = &tag else {
+            panic!("a compound");
+        };
+        let keys: Vec<&str> = entries.iter().map(|(key, _)| key.as_str()).collect();
+        let at = |key: &str| keys.iter().position(|candidate| *candidate == key).unwrap();
+        assert!(at("equipment") > at("Brain"));
+        assert!(at("equipment") < at("CanPickUpLoot"));
+        assert_eq!(at("drop_chances"), at("PersistenceRequired") + 1);
+        let row = read_mob(&tag, "minecraft:zombie", 3)
+            .expect("reads")
+            .expect("a zombie");
+        let entity = row.into_entity();
+        let mob = entity.kind.mob().expect("a mob");
+        assert_eq!(mob.equipment.get(EquipmentSlot::Head), &helmet);
+        assert!(mob.equipment.is_preserved(EquipmentSlot::Head));
+    }
+
+    /// 牛没有装备、几率是缺省值：两个键都不写。
+    #[test]
+    fn a_cow_writes_no_equipment_keys() {
+        let cow = Entity::cow(Vec3::new(0.5, 64.0, 0.5));
+        let tag = write_mob(&cow.split()).expect("cow saves");
+        assert!(tag::field(&tag, "equipment").is_none());
+        assert!(tag::field(&tag, "drop_chances").is_none());
     }
 }

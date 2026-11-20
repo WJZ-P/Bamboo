@@ -16,6 +16,7 @@ pub mod attributes;
 pub mod control;
 pub mod damage;
 pub mod effects;
+pub mod equipment;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -784,10 +785,8 @@ pub struct Mob {
     pub zombie_baby: bool,
     /// `Zombie.DATA_SPECIAL_TYPE_ID`（僵尸村民类型，本期恒 0）。
     pub zombie_special_type: i32,
-    /// 头盔槽的物品 ID（0 表示空）。`burnUndead` / `RestrictSun` / `FleeSun` 读它。
-    pub helmet: Option<u16>,
-    /// 主手物品（随机装备）；`SpearUseGoal` 只认长矛，这一期不建模它的行为。
-    pub held_item: Option<u16>,
+    /// 六个人形装备槽、掉落几率和上次同步出去的装备（通用生物层，牛的全空）。
+    pub equipment: equipment::MobEquipment,
     /// `Zombie.DATA_DROWNED_CONVERSION_ID`（转化后放，元数据恒 false）。
     pub drowned_converting: bool,
     /// `MoveToBlockGoal.nextStartTick`：海龟蛋目标的倒计时。
@@ -818,8 +817,18 @@ pub struct Mob {
 }
 
 /// 要发给客户端的一次生物事件。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MobEvent {
+    /// `LivingEntity.handleEquipmentChanges`：`sendToTrackingPlayers` 一个 `set_equipment`，
+    /// 变了的槽按 ordinal。
+    Equipment(
+        Vec<(
+            mc_bamboo_protocol::packet::play::EquipmentSlot,
+            mc_bamboo_protocol::item::ItemStack,
+        )>,
+    ),
+    /// 别的 `broadcastEntityEvent`：装备坏掉（47–52）、主副手互换（55）。
+    EntityEvent { event: u8 },
     /// `broadcastDamageEvent`：受了一次完整的伤害。
     Damage {
         kind: DamageKind,
@@ -963,8 +972,7 @@ impl Mob {
             target_goals,
             zombie_baby: false,
             zombie_special_type: 0,
-            helmet: None,
-            held_item: None,
+            equipment: equipment::MobEquipment::default(),
             drowned_converting: false,
             turtle_egg_next_start_tick: 0,
             turtle_egg_try_ticks: 0,
@@ -1080,6 +1088,11 @@ pub struct MobPublic {
     pub zombie_special_type: i32,
     /// `Zombie.DATA_DROWNED_CONVERSION_ID`。
     pub drowned_converting: bool,
+    /// 非空的装备槽，按 ordinal；配对时的 `set_equipment` 用它。
+    pub equipment: Vec<(
+        mc_bamboo_protocol::packet::play::EquipmentSlot,
+        mc_bamboo_protocol::item::ItemStack,
+    )>,
 }
 
 impl MobPublic {
@@ -1114,6 +1127,12 @@ impl MobPublic {
             zombie_baby: mob.zombie_baby,
             zombie_special_type: mob.zombie_special_type,
             drowned_converting: mob.drowned_converting,
+            equipment: mob
+                .equipment
+                .iter()
+                .filter(|(_, stack)| !stack.is_empty())
+                .map(|(slot, stack)| (slot, stack.clone()))
+                .collect(),
         }
     }
 

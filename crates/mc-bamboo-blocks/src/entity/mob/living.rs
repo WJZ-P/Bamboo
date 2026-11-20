@@ -74,6 +74,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     me.tick_count += 1;
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
+    detect_equipment_updates(mob);
     if !me.removed {
         ai_step(me, mob, ctx);
     }
@@ -85,6 +86,47 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(Flag::Move, true);
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
+    }
+}
+
+/// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
+fn detect_equipment_updates(mob: &mut Mob) {
+    let update = mob.equipment.detect_updates(&mut mob.attributes);
+    if update.hand_swap {
+        mob.events.push(MobEvent::EntityEvent { event: 55 });
+    }
+    if !update.changes.is_empty() {
+        mob.events.push(MobEvent::Equipment(update.changes));
+    }
+}
+
+/// `Mob.burnUndead`：晒到太阳时，`sunProtectionSlot()`（头）有东西就替它挡；可损坏的
+/// 扣 `nextInt(2)` 点耐久（坏了广播实体事件 49），不可损坏的什么也不做。头上空着才着火 8 秒。
+fn burn_undead(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    use mc_bamboo_protocol::packet::play::EquipmentSlot;
+    let slot = EquipmentSlot::Head;
+    let stack = mob.equipment.get(slot);
+    if stack.is_empty() {
+        motion::ignite_for_seconds(me, mob, 8.0);
+        return;
+    }
+    if !crate::durability::is_damageable_stack(stack) {
+        return;
+    }
+    let amount = me.random.next_int_bounded(2);
+    let before = stack.clone();
+    let mut broke = false;
+    let blocks = ctx.blocks();
+    mob.equipment.edit(slot, |stack| {
+        broke = blocks.hurt_mob_equipment(stack, amount);
+    });
+    if broke {
+        // `LivingEntity.onEquippedItemBroken`：广播破损事件，当场摘掉坏之前那件的属性修饰
+        // （`stopLocationBasedEffects`）；下一刻的装备比较再摘一次是空操作。
+        mob.events.push(MobEvent::EntityEvent {
+            event: super::equipment::break_event(slot),
+        });
+        super::equipment::remove_stack_modifiers(&before, slot, &mut mob.attributes);
     }
 }
 
@@ -554,13 +596,12 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
-    // 官方 `getLightLevelDependentMagicValue` 用 `getMaxLocalRawBrightness(pos)`
-    // 不带 `skyDarken` 参数（那个版本默认传 `getSkyDarken()`，但此处
-    // `LevelReader.getMaxLocalRawBrightness(BlockPos)` 在 26.3 是另一路）；
-    // 假世界恒返回 15，所以白天/夜里都是 3 点/刻，牛场景不受影响。
+    // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
+    // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
     if mob.mob_type.is_monster() {
-        let eye = me.block_position();
-        let raw = ctx.blocks().max_local_raw_brightness(eye, 0) as f32 / 15.0;
+        let view = ctx.blocks();
+        let eye = BlockPos::containing(Vec3::new(me.position.x, eye_y(me, mob), me.position.z));
+        let raw = view.max_local_raw_brightness(eye, view.sky_darken()) as f32 / 15.0;
         let magic = raw / (4.0 - 3.0 * raw);
         if magic > 0.5 {
             mob.no_action_time += 2;
@@ -670,12 +711,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Mob.aiStep` 在 `LivingEntity.aiStep` 之后跑 `BURN_IN_DAYLIGHT` → `burnUndead()`。
     // 官方用 `EntityTypeTags.BURN_IN_DAYLIGHT` + `isSunSensitive()`；尸壳不烧。
     if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
-        if mob.helmet.is_some() {
-            // 可损坏的头盔挡住燃烧，按官方扣 0 或 1 点耐久（这一期不建模耐久）。
-            let _ = me.random.next_int_bounded(2);
-        } else {
-            motion::ignite_for_seconds(me, mob, 8.0);
-        }
+        burn_undead(me, mob, ctx);
     }
     // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
     if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
@@ -1438,7 +1474,10 @@ pub(crate) fn do_hurt_target(
         // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
         if hurt
             && matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk)
-            && mob.held_item.is_none()
+            && mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                .is_empty()
             && me.remaining_fire_ticks > 0
         {
             let difficulty = ctx.blocks().effective_difficulty(me.block_position());

@@ -810,3 +810,41 @@ fn mob_events_reach_trackers_and_sounds_reach_listeners_in_range() {
     assert!(received(3).is_empty(), "正好 16 格听不到（严格小于）");
     assert!(received(4).is_empty(), "远处的人什么都收不到");
 }
+
+/// 戴头盔的僵尸：配对包最后是 `set_equipment`（只有头盔一个槽），头盔的护甲修饰符是临时的，
+/// 也跟着 `update_attributes` 发出去（官方 `AttributeSnapshot` 带全部修饰符）。
+#[test]
+fn a_zombie_pairs_with_its_equipment_and_transient_armor() {
+    use mc_bamboo_blocks::entity::{Entity, mob::equipment::EquipmentUpdate};
+    use mc_bamboo_protocol::packet::play::{EquipmentSlot, SetEquipment};
+
+    let mut zombie = Entity::zombie(Vec3::new(0.5, 64.0, 0.5));
+    zombie.id = 7;
+    let helmet = ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1);
+    if let Some(mob) = zombie.kind.mob_mut() {
+        mob.equipment.set(EquipmentSlot::Head, helmet.clone());
+        let update = mob.equipment.detect_updates(&mut mob.attributes);
+        assert_eq!(
+            update,
+            EquipmentUpdate {
+                hand_swap: false,
+                changes: vec![(EquipmentSlot::Head, helmet.clone())],
+            }
+        );
+    }
+    let row = zombie.split();
+    let snapshot = Snapshot::of(&row.public);
+    let tracked = TrackedEntity::new(&snapshot);
+    let packets = tracked.pairing_packets(&snapshot);
+    let slots = [(EquipmentSlot::Head, &helmet)];
+    let expected = mc_bamboo_protocol::frame::packet_body(&SetEquipment::new(7, &slots).unwrap());
+    assert_eq!(packets.last(), Some(&expected));
+    let attributes = &packets[packets.len() - 2];
+    let needle = b"minecraft:armor.helmet";
+    assert!(
+        attributes
+            .windows(needle.len())
+            .any(|window| window == needle),
+        "the helmet's armor modifier is synced"
+    );
+}

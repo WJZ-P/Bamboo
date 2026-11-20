@@ -300,6 +300,8 @@ impl TrackedEntity {
             items: &self.last_data,
         }));
         // `LivingEntity` 的可同步属性，属性表里哪些是同步的由数据层给出。
+        // 官方 `AttributeSnapshot` 带 `getModifiers()` 的全部修饰符，临时的（效果、装备、
+        // 细雪减速）也在里面。
         // Syncable `LivingEntity` attributes; the data layer says which ones.
         if let KindData::Mob(mob) = &snapshot.data {
             let mut snapshots = Vec::new();
@@ -312,7 +314,6 @@ impl TrackedEntity {
                     entry
                         .modifiers
                         .iter()
-                        .filter(|modifier| modifier.permanent)
                         .map(|modifier| AttributeModifier {
                             id: &modifier.id,
                             amount: modifier.amount,
@@ -346,6 +347,17 @@ impl TrackedEntity {
                     entity_id: snapshot.id,
                     attributes: &attributes,
                 }));
+            }
+            // `sendPairingData`：非空的装备槽一个 `set_equipment`。
+            let slots: Vec<_> = mob
+                .equipment
+                .iter()
+                .map(|(slot, stack)| (*slot, stack))
+                .collect();
+            if let Some(packet) =
+                mc_bamboo_protocol::packet::play::SetEquipment::new(snapshot.id, &slots)
+            {
+                out.push(packet_body(&packet));
             }
         }
         out
@@ -555,7 +567,6 @@ impl TrackedEntity {
             let modifiers = entry
                 .modifiers
                 .iter()
-                .filter(|modifier| modifier.permanent)
                 .map(|modifier| {
                     let operation = match modifier.operation {
                         mc_bamboo_blocks::entity::mob::attributes::Operation::AddValue => 0,
@@ -1033,7 +1044,7 @@ pub fn event_packets(
     let mut out = Vec::new();
     for (id, mob_events) in events {
         for event in mob_events {
-            out.push(event_packet(*id, event, &mut sound_seed).body());
+            out.extend(event_packet(*id, event, &mut sound_seed).body());
         }
     }
     out
@@ -1053,13 +1064,16 @@ enum EventPacket {
     ///
     /// Sent to the players within the sound's range (vanilla `PlayerList.broadcast`).
     Sound(mc_bamboo_protocol::packet::play::Sound),
+    /// 没有包（`set_equipment` 至少要一个槽）。
+    Nothing,
 }
 
 impl EventPacket {
-    fn body(&self) -> Vec<u8> {
+    fn body(&self) -> Option<Vec<u8>> {
         match self {
-            Self::Tracking(body) => body.clone(),
-            Self::Sound(sound) => packet_body(sound),
+            Self::Tracking(body) => Some(body.clone()),
+            Self::Sound(sound) => Some(packet_body(sound)),
+            Self::Nothing => None,
         }
     }
 }
@@ -1088,6 +1102,17 @@ fn event_packet(
             entity_id: id,
             event: 18,
         })),
+        MobEvent::EntityEvent { event } => EventPacket::Tracking(packet_body(&EntityEvent {
+            entity_id: id,
+            event: *event,
+        })),
+        MobEvent::Equipment(changes) => {
+            let slots: Vec<_> = changes.iter().map(|(slot, stack)| (*slot, stack)).collect();
+            match mc_bamboo_protocol::packet::play::SetEquipment::new(id, &slots) {
+                Some(packet) => EventPacket::Tracking(packet_body(&packet)),
+                None => EventPacket::Nothing,
+            }
+        }
         MobEvent::MilkSound { position } => EventPacket::Sound(Sound {
             sound: i32::from(mc_bamboo_data::sounds::sound_event(
                 "minecraft:entity.cow.milk",
@@ -1167,6 +1192,7 @@ fn send_mob_events(
                     }
                 }
                 EventPacket::Sound(sound) => crate::interaction::send_sound(region, None, &sound),
+                EventPacket::Nothing => {}
             }
         }
     }

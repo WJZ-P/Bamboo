@@ -271,7 +271,10 @@ fn finalize_monster(world: &mut World, kind: MobType, entity: &mut Entity) {
                 1 => mc_bamboo_data::items::IRON_SPEAR,
                 _ => mc_bamboo_data::items::IRON_SHOVEL,
             };
-            mob.held_item = Some(u16::try_from(item).unwrap_or(0));
+            mob.equipment.set(
+                mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+                mc_bamboo_protocol::item::ItemStack::new(item, 1),
+            );
         }
     });
 }

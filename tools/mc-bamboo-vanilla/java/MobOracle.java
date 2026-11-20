@@ -380,6 +380,13 @@ public final class MobOracle {
         boolean monstersBurn = true;
         /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
         boolean realPlayers;
+        /** 僵尸场景：主世界时钟的起始刻；`>= 0` 时天色、`MONSTERS_BURN`、月相都按真实时间线逐刻算。 */
+        long clockStart = -1;
+        /** 真实时间模式下的雨强（`getRainLevel`），雷暴恒 0。 */
+        float rain;
+        /** 僵尸场景：每只生物头上戴的东西（`null` 是空）和它的初始耐久损耗。 */
+        Item helmet;
+        int helmetDamage;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
@@ -1353,20 +1360,60 @@ public final class MobOracle {
                 wall.mob(1, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
                 wall.player(8.5, 64.0, 0.5, Items.AIR);
                 scenes.add(wall);
+                // 白天燃烧按真实时间：主世界时钟逐刻走，天色、`MONSTERS_BURN`、月相
+                // 都由时间线算；天空一直看得见（场景的 `monstersBurn` 只管 `canSeeSky`）。
                 Scene burn = new Scene("zombie_burn_day").ticks(40).difficulty(2);
                 ground(burn, 12);
-                burn.skyDarken = 0;
+                burn.clockStart = 1000;
                 burn.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
                 burn.player(20.5, 64.0, 0.5, Items.AIR);
                 scenes.add(burn);
                 Scene night = new Scene("zombie_burn_night").ticks(40).difficulty(2);
                 ground(night, 12);
-                night.skyDarken = 11;
-                night.brightOutside = false;
-                night.monstersBurn = false;
+                night.clockStart = 18000;
                 night.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
                 night.player(20.5, 64.0, 0.5, Items.AIR);
                 scenes.add(night);
+                // 黄昏：第 242 刻跨过 12542，`MONSTERS_BURN` 变假，天色同时在变暗。
+                Scene dusk = new Scene("zombie_burn_dusk").ticks(320).difficulty(2);
+                ground(dusk, 12);
+                dusk.clockStart = 12300;
+                dusk.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                dusk.player(50.5, 64.0, 0.5, Items.AIR);
+                scenes.add(dusk);
+                // 黎明：第 60 刻跨过 23460，`MONSTERS_BURN` 变真，但天还暗，要等亮度上来。
+                Scene dawn = new Scene("zombie_burn_dawn").ticks(400).difficulty(2);
+                ground(dawn, 12);
+                dawn.clockStart = 23400;
+                dawn.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                dawn.player(50.5, 64.0, 0.5, Items.AIR);
+                scenes.add(dawn);
+                // 戴头盔晒太阳：铁头盔每次 `nextInt(2)` 掉耐久，不着火；护甲 +2。
+                Scene helmet = new Scene("zombie_helmet_sun").ticks(600).difficulty(2);
+                ground(helmet, 12);
+                helmet.clockStart = 6000;
+                helmet.helmet = Items.IRON_HELMET;
+                helmet.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                helmet.player(50.5, 64.0, 0.5, Items.AIR);
+                scenes.add(helmet);
+                // 快坏的皮头盔：烧坏的那一刻广播实体事件 49，下一刻发装备包、护甲回落、开始着火。
+                Scene broken = new Scene("zombie_helmet_breaks").ticks(600).difficulty(2);
+                ground(broken, 12);
+                broken.clockStart = 6000;
+                broken.helmet = Items.LEATHER_HELMET;
+                broken.helmetDamage = 53;
+                broken.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                broken.mob(1, 4.5, 64.0, 4.5, 0.0F, 21L, 0);
+                broken.player(50.5, 64.0, 0.5, Items.AIR);
+                scenes.add(broken);
+                // 不可损坏的东西（南瓜）戴在头上：挡太阳，不取 `nextInt(2)`。
+                Scene pumpkin = new Scene("zombie_pumpkin_sun").ticks(80).difficulty(2);
+                ground(pumpkin, 12);
+                pumpkin.clockStart = 6000;
+                pumpkin.helmet = Items.CARVED_PUMPKIN;
+                pumpkin.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                pumpkin.player(50.5, 64.0, 0.5, Items.AIR);
+                scenes.add(pumpkin);
                 Scene peaceful = new Scene("zombie_peaceful_clear").ticks(3).difficulty(0);
                 peaceful.monstersBurn = false;
                 ground(peaceful, 12);
@@ -1387,7 +1434,8 @@ public final class MobOracle {
                 scenes.add(husk);
                 Scene rain = new Scene("zombie_burn_rain").ticks(40).difficulty(2);
                 ground(rain, 12);
-                rain.raining = true;
+                rain.clockStart = 6000;
+                rain.rain = 1.0F;
                 rain.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
                 rain.player(20.5, 64.0, 0.5, Items.AIR);
                 scenes.add(rain);
@@ -2236,12 +2284,34 @@ public final class MobOracle {
         // `EnvironmentAttributes.MONSTERS_BURN` 的注册默认值是 false，
         // 假世界没有主世界的 timeline 层；用一层常量显式注入场景值，
         // 两边读的是同一个布尔，白天燃烧才会真的发生。
-        official.attributes = EnvironmentAttributeSystem.builder()
-                .addStaticLayers(level)
-                .addConstantLayer(
-                        net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN,
-                        v -> scene.monstersBurn)
-                .build();
+        if (scene.clockStart >= 0) {
+            // 真实时间：主世界的维度层、群系层、时间线层和天气层，时钟由场景逐刻推进。
+            level.realSky = true;
+            level.clock = scene.clockStart;
+            level.rainLevel = scene.rain;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(level);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return level.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : level.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            net.minecraft.world.attribute.WeatherAttributes.addBuiltinLayers(builder,
+                    net.minecraft.world.attribute.WeatherAttributes.WeatherAccess.from(level));
+            official.attributes = builder.build();
+            level.updateSkyBrightness();
+        } else {
+            official.attributes = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(level)
+                    .addConstantLayer(
+                            net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN,
+                            v -> scene.monstersBurn)
+                    .build();
+        }
         ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
         level.nextId = FIRST_ID;
         java.util.List<ServerPlayer> players = new java.util.ArrayList<>();
@@ -2278,6 +2348,10 @@ public final class MobOracle {
             zombieSinks.add(sink);
         }
         level.playersList().addAll(players);
+        // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
+        Bytes mobSink = new Bytes(official.registries);
+        level.mobPackets = mobSink::add;
+        StringBuilder mobEvents = new StringBuilder("[[");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
         for (int i = 0; i < scene.cows.size(); i++) {
             double[] at = scene.cows.get(i);
@@ -2302,6 +2376,11 @@ public final class MobOracle {
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
+            }
+            if (scene.helmet != null) {
+                ItemStack helmet = new ItemStack(scene.helmet);
+                if (scene.helmetDamage != 0) helmet.setDamageValue(scene.helmetDamage);
+                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD, helmet);
             }
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
@@ -2347,6 +2426,11 @@ public final class MobOracle {
         line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
                 scene.realPlayers ? scene.playerHealth : 20.0F));
         line.append(",\"realPlayers\":").append(scene.realPlayers);
+        line.append(",\"clockStart\":").append(scene.clockStart);
+        line.append(",\"rain\":").append(Float.floatToRawIntBits(scene.rain));
+        line.append(",\"helmet\":").append(scene.helmet == null ? 0
+                : net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(scene.helmet));
+        line.append(",\"helmetDamage\":").append(scene.helmetDamage);
         line.append(",\"playerAbsorption\":0,\"playerExhaustion\":0");
         line.append(",\"playerSteps\":null,\"playerPackets\":null,\"keyPackets\":null");
         line.append(",\"interactActions\":[],\"interactions\":null");
@@ -2359,6 +2443,11 @@ public final class MobOracle {
         }
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
+            if (level.realSky) {
+                level.clock = scene.clockStart + tick;
+                official.attributes.invalidateTickCache();
+                level.updateSkyBrightness();
+            }
             if (scene.realPlayers) {
                 // 只推进受伤冷却和受伤动画（`ServerPlayer.tick` / `baseTick`），
                 // 不跑物理、饥饿和回血；Bamboo 一侧是 `PlayerHealth::tick_cooldowns`。
@@ -2384,6 +2473,7 @@ public final class MobOracle {
                 mob.tick();
             }
             level.tracked.removeIf(Entity::isRemoved);
+            appendMobEvents(mobEvents, mobSink.takeRaw());
             line.append(',').append(zombieStepJson(mobs, players, level));
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
@@ -2391,12 +2481,28 @@ public final class MobOracle {
             }
         }
         line.append("]");
+        line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
         }
         line.append("}\n");
         out.write(line.toString());
+    }
+
+    /** `entity_event`（34）和 `set_equipment`（104）。 */
+    private static final java.util.Set<Integer> ZOMBIE_MOB_PACKETS = java.util.Set.of(34, 104);
+
+    /** 把这一刻生物自己的那两种包按 base64 追加成 JSON 数组的一项（第 0 刻是空表）。 */
+    private static void appendMobEvents(StringBuilder out, List<byte[]> packets) {
+        out.append("],[");
+        boolean any = false;
+        for (byte[] body : packets) {
+            if (body.length == 0 || !ZOMBIE_MOB_PACKETS.contains(body[0] & 0xFF)) continue;
+            if (any) out.append(',');
+            any = true;
+            out.append('"').append(java.util.Base64.getEncoder().encodeToString(body)).append('"');
+        }
     }
 
     /** 玩家自己收到的包里要比的那几种：受伤动画、进入 / 离开战斗、死亡界面、血量。 */
@@ -2486,6 +2592,11 @@ public final class MobOracle {
             out.append(",\"pht\":0");
             out.append(",\"pcd\":0");
             out.append(",\"bh\":").append(blockHash(level));
+            ItemStack head = mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD);
+            out.append(",\"hd\":").append(head.isEmpty() ? -1 : head.getDamageValue());
+            out.append(",\"hc\":").append(head.getCount());
+            out.append(",\"armor\":").append(Double.doubleToRawLongBits(
+                    mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.ARMOR)));
             out.append(",\"goals\":\"");
             boolean first = true;
             for (WrappedGoal goal : mob.getGoalSelector().getAvailableGoals()) {
@@ -4372,6 +4483,9 @@ public final class MobOracle {
             if (events != null) {
                 events.accept(packet);
             }
+            if (level.mobPackets != null && entity instanceof Mob) {
+                level.mobPackets.accept(packet);
+            }
         }
     }
 
@@ -4396,6 +4510,10 @@ public final class MobOracle {
         boolean injectedBrightOutside = true;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
+        /** 僵尸场景的真实时间模式：时钟、雨强由场景给，天色由官方环境属性系统算。 */
+        boolean realSky;
+        long clock;
+        float rainLevel;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -4469,17 +4587,28 @@ public final class MobOracle {
 
         @Override
         public int getMaxLocalRawBrightness(BlockPos pos) {
-            return 15;
+            return realSky ? getMaxLocalRawBrightness(pos, getSkyDarken()) : 15;
         }
 
+        /** 真实时间模式：天空光 15、方块光 0，按官方 `max(block, sky - darken)`。 */
         @Override
         public int getMaxLocalRawBrightness(BlockPos pos, int darken) {
-            return 15;
+            return realSky ? Math.max(0, 15 - darken) : 15;
         }
 
         @Override
         public int getSkyDarken() {
-            return injectedSkyDarken;
+            return realSky ? super.getSkyDarken() : injectedSkyDarken;
+        }
+
+        @Override
+        public float getRainLevel(float partial) {
+            return realSky ? rainLevel : super.getRainLevel(partial);
+        }
+
+        @Override
+        public float getThunderLevel(float partial) {
+            return realSky ? 0.0F : super.getThunderLevel(partial);
         }
 
         @Override
@@ -4487,14 +4616,15 @@ public final class MobOracle {
             return injectedCanSeeSky;
         }
 
+        /** 真实时间模式：下雨且看得见天（场景的地面都在高度图之下，平原的降水是雨）。 */
         @Override
         public boolean isRainingAt(BlockPos pos) {
-            return injectedRaining;
+            return realSky ? isRaining() && canSeeSky(pos) : injectedRaining;
         }
 
         @Override
         public boolean isBrightOutside() {
-            return injectedBrightOutside;
+            return realSky ? super.isBrightOutside() : injectedBrightOutside;
         }
 
         /** 假世界没有 POI / 村庄数据；`MoveThroughVillageGoal.canUse` 在这里
@@ -4506,7 +4636,7 @@ public final class MobOracle {
 
         @Override
         public boolean isRaining() {
-            return injectedRaining;
+            return realSky ? rainLevel > 0.2F : injectedRaining;
         }
 
         /** 破门 / 踩蛋要真的改掉方块表；官方 `Level.removeBlock` 在假世界里
@@ -4718,6 +4848,10 @@ public final class MobOracle {
 
         @Override
         public net.minecraft.world.DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
+            if (realSky) {
+                // 官方 `ServerLevel.getCurrentDifficultyAt`：难度、主世界时钟、区块居住时间（假世界 0）、月相亮度。
+                return new net.minecraft.world.DifficultyInstance(getDifficulty(), clock, 0L, getMoonBrightness(pos));
+            }
             return new net.minecraft.world.DifficultyInstance(Difficulty.NORMAL, gameTime, 0L, 0.0F);
         }
 
@@ -4808,11 +4942,16 @@ public final class MobOracle {
 
         /** 实体事件、伤害事件和音效都记进同一刻的包序列。 */
         java.util.function.Consumer<Packet<? super ClientGamePacketListener>> packets;
+        /** 僵尸场景：只收生物自己发出的实体事件和 `sendToTrackingPlayers` 包。 */
+        java.util.function.Consumer<Packet<? super ClientGamePacketListener>> mobPackets;
 
         @Override
         public void broadcastEntityEvent(Entity entity, byte event) {
             if (packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(entity, event));
+            }
+            if (mobPackets != null && entity instanceof Mob) {
+                mobPackets.accept(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(entity, event));
             }
         }
 
