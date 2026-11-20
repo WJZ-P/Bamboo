@@ -74,6 +74,7 @@ pub const OVERWORLD_PRESET: &str = "minecraft:overworld";
 /// 六条密度函数和所有噪声实例共用一个 [`Compiler`]，所以 `cache` 编号也共用。
 #[derive(Debug)]
 pub struct Generator<'a> {
+    flat_columns: Option<(&'static str, i32, i32)>,
     worldgen: &'a Worldgen,
     settings: &'a Settings,
     biomes: &'a MultiNoiseBiomeSource,
@@ -188,6 +189,7 @@ impl<'a> Generator<'a> {
         let default_block = block_state(raw.get("default_block"))?;
         let default_fluid = block_state(raw.get("default_fluid"))?;
         Ok(Self {
+            flat_columns: None,
             worldgen,
             settings,
             biomes,
@@ -718,7 +720,39 @@ impl<'a> Generator<'a> {
     /// accounts for structure terrain, so this stays on the EMPTY branch and must never call
     /// `terrain_with_beardifier`. Keep it EMPTY when a real Beardifier is wired in, or structure
     /// height checks would wrongly include structure terrain and diverge from vanilla.
+    /// ? FlatLevelSource.getBaseHeight ???????????????????
+    ///
+    /// Use FlatLevelSource.getBaseHeight's constant column for structure layout queries.
+    pub fn set_flat_columns(
+        &mut self,
+        biome: &'static str,
+        min_y: i32,
+        height: i32,
+        layers: &[(u32, i32)],
+    ) {
+        use crate::feature::{
+            flat::terrain_layer,
+            world::{HeightmapKind, is_heightmap_opaque},
+        };
+        let (mut surface, mut floor) = (min_y - 1, min_y - 1);
+        let mut y = min_y;
+        for &(state, count) in layers {
+            let end = y + count;
+            if y < min_y + height && count > 0 && terrain_layer(state) {
+                surface = end.min(min_y + height) - 1;
+                if is_heightmap_opaque(state, HeightmapKind::OceanFloorWg) {
+                    floor = surface;
+                }
+            }
+            y = end;
+        }
+        self.flat_columns = Some((biome, surface, floor));
+    }
+
     pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
+        if let Some((_, surface, _)) = self.flat_columns {
+            return Ok(surface);
+        }
         self.first_occupied_height_impl(block_x, block_z, false)
     }
 
@@ -732,6 +766,9 @@ impl<'a> Generator<'a> {
         block_x: i32,
         block_z: i32,
     ) -> Result<i32, String> {
+        if let Some((_, _, floor)) = self.flat_columns {
+            return Ok(floor);
+        }
         self.first_occupied_height_impl(block_x, block_z, true)
     }
 
@@ -822,6 +859,9 @@ impl<'a> Generator<'a> {
         max_quart_y: i32,
     ) -> Result<Vec<String>, String> {
         let count = max_quart_y - min_quart_y + 1;
+        if let Some((biome, _, _)) = self.flat_columns {
+            return Ok(vec![biome.to_owned(); count.max(0) as usize]);
+        }
         let volume = Volume::new(
             (1, count, 1),
             (

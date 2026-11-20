@@ -144,6 +144,36 @@ pub fn ring_positions(
     spread: i32,
     count: i32,
 ) -> Vec<(i32, i32)> {
+    rings(seed, (distance, spread, count), |params, search| {
+        find_biome_horizontal(resolver, params, allowed, search).map(|(x, z, _)| (x, z))
+    })
+}
+
+/// ???????????? FixedBiomeSource.findBiomeHorizontal ????????
+///
+/// Fixed biomes use ring seed zero and draw two coordinates in FixedBiomeSource.findBiomeHorizontal.
+pub(super) fn flat_ring_positions(
+    biome: &str,
+    allowed: &HashSet<String>,
+    dimensions: (i32, i32, i32),
+) -> Vec<(i32, i32)> {
+    let matches = allowed.contains(biome);
+    rings(0, dimensions, |params, search| {
+        matches.then(|| {
+            let r = params.search_radius;
+            (
+                params.origin_x - r + search.next_int(r * 2 + 1),
+                params.origin_z - r + search.next_int(r * 2 + 1),
+            )
+        })
+    })
+}
+
+fn rings(
+    seed: i64,
+    (distance, spread, count): (i32, i32, i32),
+    mut find: impl FnMut(FindBiomeParams, &mut LegacyRandom) -> Option<(i32, i32)>,
+) -> Vec<(i32, i32)> {
     let main = LegacyRandom::new(seed);
     let mut angle = main.next_double() * std::f64::consts::PI * 2.0;
     let mut positions = Vec::with_capacity(count.max(0) as usize);
@@ -172,8 +202,8 @@ pub fn ring_positions(
             skip_steps: 1,
             find_closest: false,
         };
-        match find_biome_horizontal(resolver, params, allowed, &mut search) {
-            Some((block_x, block_z, _)) => positions.push((block_x >> 4, block_z >> 4)),
+        match find(params, &mut search) {
+            Some((block_x, block_z)) => positions.push((block_x >> 4, block_z >> 4)),
             None => positions.push((initial_x, initial_z)),
         }
         angle += (std::f64::consts::PI * 2.0) / f64::from(spread);

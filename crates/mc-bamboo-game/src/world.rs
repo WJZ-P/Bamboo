@@ -196,7 +196,10 @@ impl Default for WorldConfig {
             islands: crate::island::default_islands(),
             island_dead_timeout: crate::island::default_island_dead_timeout(),
             world_dir: None,
-            world_gen: crate::world_options::WorldGenConfig::default(),
+            world_gen: crate::world_options::WorldGenConfig {
+                generate_structures: false,
+                ..Default::default()
+            },
             spawn_radius: None,
             broadcast_console_to_ops: true,
             bench: None,
@@ -500,7 +503,10 @@ impl World {
             .and_then(|session| session.loaded_world_gen())
             .cloned()
             .unwrap_or_else(|| config.world_gen.clone());
-        let staged = !infinite_flat && !world_gen.level_type.is_flat();
+        let staged = !infinite_flat
+            && (!world_gen.level_type.is_flat()
+                || world_gen.generate_structures
+                || world_gen.flat != crate::world_options::FlatSettings::default());
         if let Some(save) = save.as_mut() {
             save.set_world_gen(world_gen.clone());
         }

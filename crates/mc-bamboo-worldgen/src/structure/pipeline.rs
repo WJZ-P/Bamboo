@@ -213,6 +213,7 @@ pub struct WorldStructureState {
     pub jigsaw: JigsawStructures,
     pub pools: TemplatePools,
     pub seed: i64,
+    flat_order: Option<Vec<String>>,
 }
 
 impl WorldStructureState {
@@ -226,6 +227,25 @@ impl WorldStructureState {
         seed: i64,
         resolver: &mut BiomeResolver<'_>,
     ) -> Result<Self, String> {
+        Self::build(worldgen, seed, resolver, None)
+    }
+
+    pub fn new_flat(
+        worldgen: &Worldgen,
+        seed: i64,
+        resolver: &mut BiomeResolver<'_>,
+        biome: &str,
+        overrides: Option<&[String]>,
+    ) -> Result<Self, String> {
+        Self::build(worldgen, seed, resolver, Some((biome, overrides)))
+    }
+
+    fn build(
+        worldgen: &Worldgen,
+        seed: i64,
+        resolver: &mut BiomeResolver<'_>,
+        flat: Option<(&str, Option<&[String]>)>,
+    ) -> Result<Self, String> {
         let raw = worldgen.raw();
         let all_sets = crate::structure::StructureSets::parse(
             raw.get("structure_set").ok_or("missing structure_set")?,
@@ -233,28 +253,44 @@ impl WorldStructureState {
         let structures = Structures::parse(raw.get("structure").ok_or("missing structure")?)?;
         // `BiomeSource.possibleBiomes()`：预设参数表里实际出现的群系（去重）。
         // `BiomeSource.possibleBiomes()`: the distinct biomes in the preset's parameter list.
-        let possible: HashSet<i32> = worldgen
-            .preset("minecraft:overworld")
-            .ok_or("missing overworld preset")?
-            .parameters()
-            .entries()
-            .filter_map(|(_, name)| {
-                BIOME_CLIMATES
-                    .iter()
-                    .position(|biome| biome.name == *name)
-                    .map(|id| id as i32)
-            })
-            .collect();
+        let possible: HashSet<i32> = if let Some((biome, _)) = flat {
+            BIOME_CLIMATES
+                .iter()
+                .position(|entry| entry.name == biome)
+                .map(|id| id as i32)
+                .into_iter()
+                .collect()
+        } else {
+            worldgen
+                .preset("minecraft:overworld")
+                .ok_or("missing overworld preset")?
+                .parameters()
+                .entries()
+                .filter_map(|(_, name)| {
+                    BIOME_CLIMATES
+                        .iter()
+                        .position(|biome| biome.name == *name)
+                        .map(|id| id as i32)
+                })
+                .collect()
+        };
         let allowed_sets =
             crate::structure::possible_structure_sets(&all_sets, &structures, &possible);
+        let flat_order = flat.and_then(|(_, overrides)| overrides).map(|overrides| {
+            overrides
+                .iter()
+                .filter(|name| allowed_sets.contains(name))
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         let mut filtered = serde_json::Map::new();
-        for name in allowed_sets {
+        for name in flat_order.as_deref().unwrap_or(allowed_sets.as_slice()) {
             // 原始 JSON 按名字取；`StructureSets::parse` 只认 placement / structures。
             let value = raw
                 .get("structure_set")
-                .and_then(|v| v.get(&name))
+                .and_then(|v| v.get(name))
                 .ok_or_else(|| format!("missing structure_set {name}"))?;
-            filtered.insert(name, value.clone());
+            filtered.insert(name.clone(), value.clone());
         }
         let mut sets = crate::structure::StructureState::new(
             crate::structure::StructureSets::parse(&Value::Object(filtered))?,
@@ -272,9 +308,17 @@ impl WorldStructureState {
                 _ => (32, 3, 128, "#minecraft:stronghold_biased_to".to_owned()),
             };
             let allowed = resolve_allowed_biomes(&tag)?;
-            let positions = crate::structure::rings::ring_positions(
-                seed, resolver, &allowed, distance, spread, count,
-            );
+            let positions = if let Some((biome, _)) = flat {
+                crate::structure::rings::flat_ring_positions(
+                    biome,
+                    &allowed,
+                    (distance, spread, count),
+                )
+            } else {
+                crate::structure::rings::ring_positions(
+                    seed, resolver, &allowed, distance, spread, count,
+                )
+            };
             sets.set_ring_positions("minecraft:strongholds", positions);
         }
         Ok(Self {
@@ -283,6 +327,7 @@ impl WorldStructureState {
             jigsaw: JigsawStructures::parse(raw.get("structure").ok_or("missing structure")?)?,
             pools: TemplatePools::parse(raw.get("template_pool").ok_or("missing template_pool")?)?,
             seed,
+            flat_order,
         })
     }
 
@@ -595,7 +640,19 @@ pub fn create_structures(
         source: preset,
     };
     // `possibleStructureSets()` 的遍历序是结构集名字（注册表顺序）。
-    for set in state.sets.sets().iter() {
+    let registered = state.sets.sets();
+    let all_sets = state
+        .flat_order
+        .is_none()
+        .then(|| registered.iter())
+        .into_iter()
+        .flatten();
+    let direct_sets = state
+        .flat_order
+        .iter()
+        .flatten()
+        .filter_map(|name| registered.get(name));
+    for set in all_sets.chain(direct_sets) {
         if out.has_valid_for_set(&set.structures) {
             continue;
         }

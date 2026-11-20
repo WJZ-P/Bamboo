@@ -315,7 +315,7 @@ fn run_features_filtered(
     // 按 `structure.step()` 分组；`generate-structures=false` 时整段跳过。
     // Vanilla's structure branch: resolve the starts referenced by the center,
     // group by `structure.step()`; skipped when `generate-structures=false`.
-    let references = if config.generate_structures && !config.level_type.is_flat() {
+    let references = if config.generate_structures {
         crate::worldgen_structures::structure_references_stage(config, cx, cz)?
     } else {
         Default::default()

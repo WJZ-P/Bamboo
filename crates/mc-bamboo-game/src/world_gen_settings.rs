@@ -137,8 +137,11 @@ fn flat_generator(flat: &FlatSettings) -> Tag {
         ("biome".to_owned(), string_tag(biome)),
         ("layers".to_owned(), Tag::List(layers)),
     ];
-    if let Some(overrides) = structure_overrides_tag(&flat.structure_overrides) {
-        settings.push(("structure_overrides".to_owned(), overrides));
+    if let Some(overrides) = &flat.structure_overrides {
+        settings.push((
+            "structure_overrides".to_owned(),
+            structure_overrides_tag(overrides),
+        ));
     }
     Tag::Compound(vec![
         ("type".to_owned(), string_tag("minecraft:flat")),
@@ -149,16 +152,13 @@ fn flat_generator(flat: &FlatSettings) -> Tag {
 /// 单个 `#tag` 写成字符串标签，其余写成字符串列表（官方 `HolderSet` 的 NBT 形状）。
 /// A single `#tag` becomes a string tag; anything else becomes a string list
 /// (the official `HolderSet` NBT shape).
-fn structure_overrides_tag(overrides: &[String]) -> Option<Tag> {
-    if overrides.is_empty() {
-        return None;
+fn structure_overrides_tag(overrides: &[String]) -> Tag {
+    if let [tag] = overrides
+        && tag.starts_with('#')
+    {
+        return string_tag(tag);
     }
-    if overrides.len() == 1 && overrides[0].starts_with('#') {
-        return Some(string_tag(&overrides[0]));
-    }
-    Some(Tag::List(
-        overrides.iter().map(|name| string_tag(name)).collect(),
-    ))
+    Tag::List(overrides.iter().map(|name| string_tag(name)).collect())
 }
 
 /// 从存档里的 `data` 复合标签恢复世界生成参数。文件缺失或坏字段时返回 `None`，
@@ -212,15 +212,15 @@ fn decode_flat(generator: &Tag) -> FlatSettings {
     flat.features = boolean(settings, "features", false);
     flat.lakes = boolean(settings, "lakes", false);
     flat.structure_overrides = match field(settings, "structure_overrides") {
-        Some(Tag::String(tag)) => vec![tag.clone()],
+        Some(Tag::String(tag)) => Some(vec![tag.clone()]),
         Some(Tag::List(items)) => items
             .iter()
-            .filter_map(|item| match item {
+            .map(|item| match item {
                 Tag::String(name) => Some(name.clone()),
                 _ => None,
             })
             .collect(),
-        _ => Vec::new(),
+        _ => None,
     };
     if let Some(Tag::List(entries)) = field(settings, "layers") {
         let mut layers = Vec::with_capacity(entries.len());
@@ -306,7 +306,7 @@ mod tests {
                 biome: registries::biome::DESERT as u32,
                 features: true,
                 lakes: true,
-                structure_overrides: vec!["#minecraft:villages".to_owned()],
+                structure_overrides: Some(vec!["#minecraft:villages".to_owned()]),
             },
             ..WorldGenConfig::default()
         };
@@ -316,10 +316,10 @@ mod tests {
         // 直接列表形态。/ Direct list form.
         let list_config = WorldGenConfig {
             flat: FlatSettings {
-                structure_overrides: vec![
+                structure_overrides: Some(vec![
                     "minecraft:villages".to_owned(),
                     "minecraft:desert_pyramids".to_owned(),
-                ],
+                ]),
                 ..config.flat.clone()
             },
             ..config.clone()

@@ -515,6 +515,21 @@ fn terrain_shards() -> &'static [Mutex<TerrainShard>] {
     })
 }
 
+fn terrain_cache_key(config: &WorldGenConfig, x: i32, z: i32, beardified: bool) -> TerrainCacheKey {
+    if config.level_type.is_flat() {
+        (0, None, 0, 0, false, Some(config.flat.clone()))
+    } else {
+        (
+            config.seed,
+            config.level_type.settings_id(),
+            x,
+            z,
+            beardified,
+            None,
+        )
+    }
+}
+
 fn shard_index(key: &TerrainCacheKey) -> usize {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -728,14 +743,7 @@ fn cached_terrain(
     z: i32,
     beardifier: Option<&mc_bamboo_worldgen::beardifier::Beardifier>,
 ) -> Result<Arc<GeneratedChunk>, String> {
-    let key = (
-        config.seed,
-        config.level_type.settings_id(),
-        x,
-        z,
-        beardifier.is_some(),
-        config.level_type.is_flat().then(|| config.flat.clone()),
-    );
+    let key = terrain_cache_key(config, x, z, beardifier.is_some());
     let shards = terrain_shards();
     let index = shard_index(&key);
     // 锁内只做查表 / 放占位；生成在锁外。同一个键只有一条线程真正在算，
@@ -1359,7 +1367,7 @@ mod tests {
         let cached = cached_generate_chunk(&cfg, x, z).unwrap();
         assert_eq!(cached.blocks, fresh.blocks);
         assert_eq!(cached.biomes, fresh.biomes);
-        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
+        let key = terrain_cache_key(&cfg, x, z, false);
         let shards = terrain_shards();
         let shard = shards[shard_index(&key)].lock().expect("shard");
         assert!(shard.entries.contains_key(&key));
@@ -1380,7 +1388,7 @@ mod tests {
         TEST_COMPUTE_ERROR.store(true, Ordering::Relaxed);
         let error = cached_generate_chunk(&cfg, x, z).unwrap_err();
         assert!(error.contains("test-only"));
-        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
+        let key = terrain_cache_key(&cfg, x, z, false);
         let shards = terrain_shards();
         {
             let shard = shards[shard_index(&key)].lock().expect("shard");
@@ -1407,7 +1415,7 @@ mod tests {
         let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = normal(0x5eed_5555);
         let (x, z) = (5111, -4111);
-        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
+        let key = terrain_cache_key(&cfg, x, z, false);
         let shards = terrain_shards();
         let index = shard_index(&key);
         clear_terrain_cache();

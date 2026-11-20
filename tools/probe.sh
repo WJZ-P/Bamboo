@@ -135,6 +135,7 @@ enforce-secure-profile=true
 prevent-proxy-connections=false
 level-type=minecraft:flat
 level-seed=0
+generate-structures=false
 PROPS
 
 (cd "$TREE" && cargo build -q --bin bamboo) || exit 1

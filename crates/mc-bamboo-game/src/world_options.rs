@@ -111,12 +111,10 @@ pub struct FlatSettings {
     pub features: bool,
     /// `lakes`：放不放湖特征。/ `lakes`: whether lake features are placed.
     pub lakes: bool,
-    /// `structure_overrides`：官方 codec 的 `HolderSet`，规范化成注册名列表
-    /// （`#tag` 是单个带 `#` 前缀的元素，列表就是各项）。空表示没有该字段。
-    /// `structure_overrides`: the codec's `HolderSet`, normalized to a list of
-    /// ids (a `#tag` is one `#`-prefixed element, a list keeps its entries).
-    /// Empty means the field is absent.
-    pub structure_overrides: Vec<String>,
+    /// 缺省表示所有结构集，显式空列表表示没有结构集；标签保留为一个 `#tag` 元素。
+    ///
+    /// Absent means all structure sets; an explicit empty list means none. A tag is a single `#tag` entry.
+    pub structure_overrides: Option<Vec<String>>,
 }
 
 impl Default for FlatSettings {
@@ -137,7 +135,10 @@ impl Default for FlatSettings {
             biome: registries::biome::PLAINS as u32,
             features: false,
             lakes: false,
-            structure_overrides: Vec::new(),
+            structure_overrides: Some(vec![
+                "minecraft:strongholds".into(),
+                "minecraft:villages".into(),
+            ]),
         }
     }
 }
@@ -208,14 +209,16 @@ impl FlatSettings {
         // 坏形状按 `lenientOptionalFieldOf` 当空处理。
         // `structure_overrides`: a tag is one `#tag` string, a direct list is a
         // string array; a bad shape is treated as empty (lenient).
-        settings.structure_overrides = match root.get("structure_overrides") {
-            Some(Value::String(tag)) => vec![tag.clone()],
-            Some(Value::Array(items)) => items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_owned))
-                .collect(),
-            _ => Vec::new(),
-        };
+        if root.get("layers").is_some() || root.get("structure_overrides").is_some() {
+            settings.structure_overrides = match root.get("structure_overrides") {
+                Some(Value::String(tag)) => Some(vec![tag.clone()]),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|item| item.as_str().map(str::to_owned))
+                    .collect(),
+                _ => None,
+            };
+        }
         Ok(settings)
     }
 }
@@ -435,7 +438,7 @@ mod tests {
         assert_eq!(parsed.biome, registries::biome::DESERT as u32);
         assert!(!parsed.features);
         assert!(!parsed.lakes);
-        assert!(parsed.structure_overrides.is_empty());
+        assert_eq!(parsed.structure_overrides, None);
         assert!(FlatSettings::parse("[]").is_err());
         assert!(FlatSettings::parse(r#"{"layers":"x"}"#).is_err());
     }
@@ -452,7 +455,7 @@ mod tests {
         assert!(parsed.lakes);
         assert_eq!(
             parsed.structure_overrides,
-            vec!["#minecraft:villages".to_owned()]
+            Some(vec!["#minecraft:villages".to_owned()])
         );
 
         // 直接列表形态。/ Direct list form.
@@ -460,10 +463,10 @@ mod tests {
         let parsed = FlatSettings::parse(list).unwrap();
         assert_eq!(
             parsed.structure_overrides,
-            vec![
+            Some(vec![
                 "minecraft:villages".to_owned(),
                 "minecraft:desert_pyramids".to_owned()
-            ]
+            ])
         );
     }
 
