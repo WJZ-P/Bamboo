@@ -1014,3 +1014,5 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
 
 
 补充现状：普通箭和骷髅已加入建模实体。骷髅复用生物装备和属性存档；箭的 `Owner` 存 UUID，插地状态和 `inBlockState` 通过官方键读写，`item` / `weapon` 走 ItemStack 组件 codec。重新分配的网络 ID 不写进 `Owner`，飞行时只在本岛查找所有者。
+
+`chunk-content` 对拍包含飞行箭和插地箭：由 Bamboo 写出 NBT，经官方实体加载并重存，再由 Bamboo 读回并重存，两次都逐键比较。

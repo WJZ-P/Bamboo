@@ -20,7 +20,7 @@ use mc_bamboo_blocks::{
         entity::{entity_uuid_tag, read_entity, write_entity},
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
     },
-    entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt},
+    entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt, arrow::Pickup},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::{blocks, items::STONE, version};
@@ -501,8 +501,9 @@ fn run_cases(
         let _ = case.encoded.as_ref();
     }
 
-    // 4. 实体：Bamboo 写出三种实体（含官方默认值、极端值、带组件的物品），
-    //    官方 FakeLevel 真的 load 再 save，按键比较。
+    // 4. 实体：Bamboo 写出实体 NBT，官方 FakeLevel 加载并重存，按键比较。
+    // 4. Entities: write NBT in Bamboo, then load and resave in the official
+    // FakeLevel and compare by key.
     let entities = entity_cases();
     let request = json!({"command": "entities", "entities": entities.iter().map(canonical_tag).collect::<Vec<_>>()});
     let answer = ask(stdin, lines, request)?;
@@ -530,6 +531,16 @@ fn run_cases(
                 rebuilt.is_some(),
                 format!("entity {label}: Bamboo cannot read the official NBT"),
             );
+            if matches!(&tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
+                key == "id" && matches!(value, Tag::String(id) if id == "minecraft:arrow")
+            })) && let Some(row) = rebuilt
+            {
+                let saved = write_entity(&row).map_err(|error| error.to_string())?;
+                report.check(
+                    canonical_tag(&saved) == *written,
+                    format!("entity {label}: Bamboo arrow load -> save changed the NBT"),
+                );
+            }
         }
     }
 
@@ -1444,7 +1455,43 @@ fn entity_cases() -> Vec<Tag> {
     with_uuid.retain(|(key, _)| key != "UUID");
     with_uuid.push(("UUID".to_owned(), uuid));
     out.push(Tag::Compound(with_uuid));
+    out.extend(arrow_archive_cases());
     out
+}
+
+fn arrow_archive_cases() -> [Tag; 2] {
+    let mut flight = Entity::arrow(Vec3::new(1.5, 65.25, -2.0));
+    flight.id = 24;
+    flight.remaining_fire_ticks = 73;
+    flight.delta = Vec3::new(1.4, -0.25, 0.2);
+    flight.y_rot = 75.0;
+    let EntityKind::Arrow(arrow) = &mut flight.kind else {
+        unreachable!()
+    };
+    arrow.uuid = 24_u128.to_be_bytes();
+    arrow.owner_uuid = Some(17_u128.to_be_bytes());
+    arrow.pitch = -10.0;
+    arrow.critical = true;
+    arrow.pierce = 2;
+    arrow.pickup = Pickup::CreativeOnly;
+    arrow.base_damage = 3.25;
+    arrow.weapon = Some(ItemStack::new(mc_bamboo_data::items::BOW, 1));
+    arrow.has_been_shot = true;
+    arrow.left_owner = true;
+
+    let mut embedded = Entity::arrow(Vec3::new(1.5, 64.25, -2.0));
+    embedded.id = 25;
+    let EntityKind::Arrow(arrow) = &mut embedded.kind else {
+        unreachable!()
+    };
+    arrow.uuid = 25_u128.to_be_bytes();
+    arrow.in_ground = true;
+    arrow.last_state = Some(BlockState(blocks::STONE));
+    arrow.shake_time = 6;
+    arrow.life = 1199;
+    arrow.pickup = Pickup::Allowed;
+
+    [flight, embedded].map(|entity| write_entity(&entity.split()).unwrap())
 }
 
 /// 一段最小合法的区块 NBT，只为检查 `block_entities` 的键能原样通过官方 parse/write。
