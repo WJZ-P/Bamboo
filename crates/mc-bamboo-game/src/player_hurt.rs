@@ -200,6 +200,34 @@ pub(crate) fn hurt_player_in(
     amount: f32,
     random: &mut Option<JavaRandom>,
 ) -> (bool, Option<PlayerDeathDrops>) {
+    // 火矢先点燃，再伤害；拒绝伤害时只恢复火焰刻数，不恢复冰冻。
+    // Flaming arrows ignite before damage; rejection restores only the fire timer, not freezing.
+    let previous_fire = if source.arrow_ignite_ticks > 0 {
+        parts.players.get_mut(&id).map(|player| {
+            let previous = player.environment.remaining_fire_ticks;
+            crate::player_environment::ignite_player(player, source.arrow_ignite_ticks);
+            previous
+        })
+    } else {
+        None
+    };
+    let outcome = hurt_player_damage(parts, id, source, amount, random);
+    if !outcome.0
+        && let Some(previous) = previous_fire
+        && let Some(player) = parts.players.get_mut(&id)
+    {
+        crate::player_environment::set_player_fire_ticks(player, previous);
+    }
+    outcome
+}
+
+fn hurt_player_damage(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    source: DamageSource,
+    amount: f32,
+    random: &mut Option<JavaRandom>,
+) -> (bool, Option<PlayerDeathDrops>) {
     let difficulty = parts.difficulty;
     let Some(player) = parts.players.get_mut(&id) else {
         return (false, None);
@@ -337,7 +365,11 @@ fn broadcast_damage_event(parts: &mut HurtParts<'_>, id: PlayerId, source: &Dama
 /// `CombatTracker.recordDamage`：造成者是非玩家生物时，`ServerPlayer.onEnterCombat`
 /// 给玩家自己发一个没有包体的 `player_combat_enter`。
 fn send_player_combat_enter(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
-    if source.attacker.is_some() && parts.players.get(&id).is_some_and(|p| !p.in_combat) {
+    let living_source = source.attacker.is_some()
+        && (source.kind != mc_bamboo_blocks::entity::mob::DamageKind::Arrow
+            || source.attacker_is_player
+            || source.scale_when_non_player);
+    if living_source && parts.players.get(&id).is_some_and(|p| !p.in_combat) {
         if let Some(player) = parts.players.get_mut(&id) {
             player.in_combat = true;
         }
@@ -465,9 +497,7 @@ fn knockback(
     position: Vec3,
     random: &mut Option<JavaRandom>,
 ) {
-    let (mut dx, mut dz) = source
-        .position
-        .map_or((0.0, 0.0), |at| (at.x - position.x, at.z - position.z));
+    let (mut dx, mut dz) = source.knockback_direction(position).unwrap_or((0.0, 0.0));
     if let Some(random) = random.as_mut()
         && dx * dx + dz * dz < 1.0e-5
     {
@@ -623,6 +653,46 @@ mod mob_hit_tests {
         source.direct = Some(1 << 20);
         source.position = Some(Vec3::new(1.5, 64.0, 0.5));
         source
+    }
+
+    #[test]
+    fn flaming_arrow_restores_only_fire_after_creative_rejection() {
+        let (mut region, id) = region_with_player(20.0);
+        let player = region.players.get_mut(&id).unwrap();
+        player.game_mode = GameMode::Creative;
+        player.environment.remaining_fire_ticks = 37;
+        player.environment.ticks_frozen = 80;
+        let mut source = DamageSource::environment(DamageKind::Arrow);
+        source.arrow_ignite_ticks = 100;
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(!world.hurt_player_from_mob(id.0, source, 3.0, None));
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 20.0);
+        assert_eq!(player.environment.remaining_fire_ticks, 1);
+        assert_eq!(player.environment.ticks_frozen, 0);
+    }
+
+    #[test]
+    fn flaming_arrow_restores_the_uncapped_fire_timer_in_survival() {
+        let (mut region, id) = region_with_player(20.0);
+        let player = region.players.get_mut(&id).unwrap();
+        player.environment.remaining_fire_ticks = 37;
+        player.environment.ticks_frozen = 80;
+        let mut source = DamageSource::environment(DamageKind::Arrow);
+        source.arrow_ignite_ticks = 100;
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(world.hurt_player_from_mob(id.0, zombie_hit(), 3.0, None));
+            assert!(!world.hurt_player_from_mob(id.0, source, 2.0, None));
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 17.0);
+        assert_eq!(player.environment.remaining_fire_ticks, 37);
+        assert_eq!(player.environment.ticks_frozen, 0);
     }
 
     /// 精确驱动的世界当场落地：第一下打中，同一刻的第二下落在无敌帧里返回假，

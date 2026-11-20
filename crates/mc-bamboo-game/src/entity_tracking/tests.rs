@@ -791,6 +791,7 @@ fn mob_events_reach_trackers_and_sounds_reach_listeners_in_range() {
             MobEvent::Damage {
                 kind: DamageKind::Generic,
                 attacker: None,
+                direct: None,
             },
             MobEvent::Sound {
                 sound: "minecraft:entity.cow.ambient",

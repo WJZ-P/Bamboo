@@ -71,6 +71,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.RandomSequences;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.TickRateManager;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSources;
@@ -227,6 +228,28 @@ public final class MobOracle {
                 }
                 play(official, out, scene);
                 cases++;
+            }
+            for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
+                    "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
+                    "arrow_piercing_hit", "arrow_piercing_rejected",
+                    "arrow_water_crossing", "arrow_water_after_pierce",
+                    "skeleton_bow_normal", "skeleton_bow_hard")) {
+                if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
+                playProjectile(official, out, name);
+                cases++;
+            }
+            if ("skeleton_spawn".equals(only)
+                    || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
+                cases += playSkeletonSpawns(official, out, false);
+            }
+            if ("skeleton_halloween".equals(only)) {
+                cases += playHalloweenSpawns(official, out);
+            }
+            if (only == null || "arrow_pickup".equals(only)) {
+                cases += playArrowPickups(official, out);
+            }
+            if (only == null || "skeleton_death".startsWith(only)) {
+                cases += playSkeletonDeaths(official, out);
             }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
@@ -2271,6 +2294,536 @@ public final class MobOracle {
         }
     }
 
+
+    // 只注入构造随机源；运行原版的目标、射击、物理、玩家受伤和同步。
+    // Inject constructor seeds only; use vanilla goals, shooting, physics, damage and tracking.
+    private static final class OracleSkeleton extends net.minecraft.world.entity.monster.skeleton.Skeleton {
+        OracleSkeleton(FakeLevel level) {
+            super(EntityTypes.SKELETON, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            FakeLevel world = (FakeLevel) level();
+            var arrow = ((net.minecraft.world.item.ArrowItem) Items.ARROW).createArrow(world, projectile, this, weapon);
+            setRandom(arrow, world.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            arrow.setBaseDamageFromMob(power);
+            return arrow;
+        }
+    }
+
+    private static int playSkeletonDeaths(Official official, Writer out) throws Exception {
+        final int samples = 38;
+        boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
+        try {
+            for (int sample = 0; sample < samples; sample++) {
+                playSkeletonDeath(official, out, sample);
+            }
+        } finally {
+            setRule(official, GameRules.MOB_DROPS, previousMobDrops);
+        }
+        return samples;
+    }
+
+    private static void playSkeletonDeath(Official official, Writer out, int sample) throws Exception {
+        // 同一个临界随机种子的两次玩家击杀，只改变抢夺等级。
+        // Two player kills with the same boundary seed; only Looting changes.
+        boolean rememberedFall = sample >= 36;
+        boolean indirect = sample == 34 || sample == 35;
+        boolean lootingBoundary = sample >= 32 && !rememberedFall;
+        int memoryTicks = sample == 37 ? 1 : 0;
+        int mode = lootingBoundary ? 3 : rememberedFall ? 0 : sample % 8;
+        long seed = sample >= 32 ? 20261173L : 20261120L + sample * 104729L;
+        boolean playerKill = mode == 1 || mode == 2 || mode == 3 || mode == 6 || mode == 7;
+        boolean drops = mode != 6;
+        int looting = (mode == 3 && sample != 32 && sample != 34) || mode == 7 || rememberedFall ? 3 : 0;
+        FakeLevel world = FakeLevel.create(official);
+        setRule(official, GameRules.MOB_DROPS, drops);
+        official.server.sequences = new RandomSequences();
+        var mob = EntityTypes.SKELETON.create(world, EntitySpawnReason.COMMAND);
+        mob.setPos(0.5, 64.0, 0.5);
+        setRandom(mob, seed);
+        var slots = net.minecraft.world.entity.EquipmentSlot.VALUES.subList(0, 6);
+        List<String> gear = new ArrayList<>();
+        switch (mode) {
+            case 0 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 0.085F, 0, false);
+            case 2 -> {
+                equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 0.085F, 0, false);
+                equipSkeletonDeath(official, mob, gear, slots.get(2), Items.IRON_BOOTS, 1.0F, 0, false);
+            }
+            case 3 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 0.085F, 0, false);
+            case 4 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 31, false);
+            case 5 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 31, true);
+            case 6 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 0, false);
+        }
+        ServerPlayer player = playerKill || rememberedFall ? skeletonDeathPlayer(official, world, looting) : null;
+        if (rememberedFall) mob.setLastHurtByPlayer(player, memoryTicks);
+        var source = skeletonDeathSource(world, playerKill ? player : null, indirect);
+        if (!mob.hurtServer(world, source, 100.0F) || !mob.isDeadOrDying()) {
+            throw new IllegalStateException("skeleton_death did not kill the mob: " + sample);
+        }
+        List<String> spawned = new ArrayList<>();
+        boolean xpDropped = false;
+        for (Entity entity : world.spawned) {
+            switch (entity) {
+                case net.minecraft.world.entity.item.ItemEntity item -> {
+                    var stack = item.getItem();
+                    spawned.add("{\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
+                            + ",\"count\":" + stack.getCount() + ",\"damage\":" + stack.getDamageValue() + ",\"xp\":0}");
+                }
+                case net.minecraft.world.entity.ExperienceOrb orb -> {
+                    xpDropped = true;
+                    spawned.add("{\"item\":0,\"count\":0,\"damage\":0,\"xp\":" + orb.getValue() + "}");
+                }
+                default -> throw new IllegalStateException("unexpected skeleton death spawn: " + entity);
+            }
+        }
+        boolean mainHandDropped = mob.getItemBySlot(slots.getFirst()).isEmpty();
+        if ((!drops && !spawned.isEmpty()) || xpDropped != ((playerKill || memoryTicks > 0) && drops)
+                || (mode == 4 && !mainHandDropped) || (mode == 5 && mainHandDropped)
+                || (lootingBoundary && mainHandDropped != (looting > 0))) {
+            throw new IllegalStateException("skeleton_death did not exercise the expected drops: " + sample);
+        }
+        int[] remaining = slots.stream().map(mob::getItemBySlot)
+                .mapToInt(stack -> BuiltInRegistries.ITEM.getId(stack.getItem())).toArray();
+        out.write("{\"type\":\"skeletonDeath\",\"seed\":" + seed + ",\"gear\":[" + String.join(",", gear)
+                + "],\"playerKill\":" + playerKill + ",\"looting\":" + looting + ",\"drops\":" + drops
+                + ",\"indirect\":" + indirect + ",\"memoryTicks\":" + memoryTicks
+                + ",\"spawned\":[" + String.join(",", spawned) + "],\"remaining\":" + Arrays.toString(remaining)
+                + ",\"mobSeed\":" + randomSeed(mob) + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+    }
+
+    private static net.minecraft.world.damagesource.DamageSource skeletonDeathSource(
+            FakeLevel world, ServerPlayer player, boolean indirect) {
+        if (player == null) return world.damageSources().fall();
+        if (!indirect) return world.damageSources().playerAttack(player);
+        var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+        arrow.setOwner(player);
+        arrow.setPos(player.position());
+        arrow.setDeltaMovement(1.0, 0.0, 0.0);
+        return world.damageSources().arrow(arrow, player);
+    }
+
+    private static void equipSkeletonDeath(Official official, Mob mob, List<String> gear,
+            net.minecraft.world.entity.EquipmentSlot slot, Item item, float chance, int damage, boolean vanishing) {
+        ItemStack stack = new ItemStack(item);
+        stack.setDamageValue(damage);
+        if (vanishing) {
+            stack.enchant(official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                    .getOrThrow(net.minecraft.world.item.enchantment.Enchantments.VANISHING_CURSE), 1);
+        }
+        mob.setItemSlot(slot, stack);
+        mob.setDropChance(slot, chance);
+        gear.add("{\"slot\":" + slot.ordinal() + ",\"item\":" + BuiltInRegistries.ITEM.getId(item)
+                + ",\"chance\":" + chance + ",\"damage\":" + damage + ",\"vanishing\":" + vanishing + "}");
+    }
+
+    private static ServerPlayer skeletonDeathPlayer(Official official, FakeLevel world, int looting) {
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "DeathOracle"), ClientInformation.createDefault());
+        player.setId(1025);
+        player.setPos(2.5, 64.0, 0.5);
+        ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+        if (looting > 0) {
+            sword.enchant(official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                    .getOrThrow(net.minecraft.world.item.enchantment.Enchantments.LOOTING), looting);
+        }
+        player.setItemInHand(InteractionHand.MAIN_HAND, sword);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        return player;
+    }
+
+    private record ArrowPickupSetup(int count, int pickup, boolean grounded, int shake,
+                                    boolean creative, int fullInventory) {}
+
+    private static int playArrowPickups(Official official, Writer out) throws Exception {
+        var setups = List.of(
+                new ArrowPickupSetup(1, 1, true, 0, false, -1),
+                new ArrowPickupSetup(2, 1, true, 0, false, 63),
+                new ArrowPickupSetup(2, 1, true, 0, true, 63),
+                new ArrowPickupSetup(1, 1, true, 0, false, 0),
+                new ArrowPickupSetup(1, 1, true, 0, true, 0),
+                new ArrowPickupSetup(1, 2, true, 0, false, -1),
+                new ArrowPickupSetup(1, 2, true, 0, true, -1),
+                new ArrowPickupSetup(1, 0, true, 0, true, -1),
+                new ArrowPickupSetup(1, 1, true, 1, false, -1),
+                new ArrowPickupSetup(1, 1, false, 0, false, -1));
+        for (var setup : setups) playArrowPickup(official, out, setup);
+        return setups.size();
+    }
+
+    private static void playArrowPickup(Official official, Writer out, ArrowPickupSetup setup) throws Exception {
+        var world = FakeLevel.create(official);
+        var player = skeletonDeathPlayer(official, world, 0);
+        player.getAbilities().instabuild = setup.creative();
+        var inventory = player.getInventory();
+        inventory.setItem(0, ItemStack.EMPTY);
+        if (setup.fullInventory() >= 0) {
+            for (int slot = 0; slot < 36; slot++) inventory.setItem(slot, new ItemStack(Items.STONE, 64));
+            if (setup.fullInventory() > 0) inventory.setItem(0, new ItemStack(Items.ARROW, setup.fullInventory()));
+        }
+        var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+        var ground = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class.getDeclaredMethod("setInGround", boolean.class);
+        ground.setAccessible(true);
+        ground.invoke(arrow, setup.grounded());
+        arrow.shakeTime = setup.shake();
+        arrow.pickup = net.minecraft.world.entity.projectile.arrow.AbstractArrow.Pickup.values()[setup.pickup()];
+        arrow.getPickupItemStackOrigin().setCount(setup.count());
+        arrow.playerTouch(player);
+        int arrows = 0;
+        for (int slot = 0; slot < 36; slot++) {
+            var stack = inventory.getItem(slot);
+            if (stack.is(Items.ARROW)) arrows += stack.getCount();
+        }
+        out.write("{\"type\":\"arrowPickup\",\"count\":" + setup.count() + ",\"pickup\":" + setup.pickup()
+                + ",\"grounded\":" + setup.grounded() + ",\"shake\":" + setup.shake()
+                + ",\"creative\":" + setup.creative() + ",\"fullInventory\":" + setup.fullInventory()
+                + ",\"removed\":" + arrow.isRemoved() + ",\"arrows\":" + arrows
+                + ",\"remaining\":" + arrow.getPickupItemStackOrigin().getCount() + "}\n");
+    }
+
+    private static int playHalloweenSpawns(Official official, Writer out) throws Exception {
+        // 只在定向对拍 JVM 中替换节日日期常量，不改系统日期，也不改原版生成逻辑。
+        // Replace the holiday's calendar constant in this targeted JVM only, leaving
+        // the system clock and all of the official spawn logic untouched.
+        var old = net.minecraft.util.SpecialDates.HALLOWEEN;
+        Field field = net.minecraft.util.SpecialDates.class.getDeclaredField("HALLOWEEN");
+        var base = UNSAFE.staticFieldBase(field);
+        long offset = UNSAFE.staticFieldOffset(field);
+        try {
+            UNSAFE.putObject(base, offset, net.minecraft.util.SpecialDates.dayNow());
+            return playSkeletonSpawns(official, out, true);
+        } finally {
+            UNSAFE.putObject(base, offset, old);
+        }
+    }
+
+    private static int playSkeletonSpawns(Official official, Writer out, boolean halloween) throws Exception {
+        if (net.minecraft.util.SpecialDates.isHalloween() != halloween) {
+            throw new IllegalStateException("skeleton spawn calendar does not match the fixture");
+        }
+        FakeLevel world = FakeLevel.create(official);
+        BlockPos pos = new BlockPos(0, 64, 0);
+        int cases = 0;
+        int armored = 0;
+        int enchanted = 0;
+        int pumpkins = 0;
+        int lanterns = 0;
+        int helmets = 0;
+        for (int sample = 0; sample < 64; sample++) {
+            long seed = 20261120L + sample * 104729L;
+            Difficulty difficulty = List.of(Difficulty.EASY, Difficulty.NORMAL, Difficulty.HARD).get(sample % 3);
+            long clock = sample % 4 == 0 ? 0L : 1536000L;
+            long inhabitedTime = sample % 4 == 0 ? 0L : 3600000L;
+            ((TickingLevelData) world.levelData).difficulty = difficulty;
+            world.spawnDifficulty = new DifficultyInstance(difficulty, clock, inhabitedTime, 1.0F);
+            for (boolean egg : new boolean[] {false, true}) {
+                world.getRandom().setSeed(seed);
+                var mob = skeletonSpawn(world, pos, egg);
+                var slots = List.of(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                        net.minecraft.world.entity.EquipmentSlot.FEET, net.minecraft.world.entity.EquipmentSlot.LEGS,
+                        net.minecraft.world.entity.EquipmentSlot.CHEST, net.minecraft.world.entity.EquipmentSlot.HEAD);
+                var stacks = slots.stream().map(mob::getItemBySlot).toList();
+                if (stacks.stream().skip(1).anyMatch(stack -> !stack.isEmpty())) armored++;
+                if (stacks.stream().anyMatch(ItemStack::isEnchanted)) enchanted++;
+                var head = stacks.getLast();
+                if (head.is(Items.CARVED_PUMPKIN)) pumpkins++;
+                else if (head.is(Items.JACK_O_LANTERN)) lanterns++;
+                else if (!head.isEmpty()) helmets++;
+                var follow = mob.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE);
+                var bonus = follow.getModifier(Identifier.withDefaultNamespace("random_spawn_bonus"));
+                out.write("{\"type\":\"skeletonSpawn\",\"seed\":" + seed + ",\"egg\":" + egg
+                        + ",\"halloween\":" + halloween
+                        + ",\"headDropBits\":" + Float.floatToRawIntBits(mob.getDropChances().byEquipment(slots.getLast()))
+                        + ",\"difficulty\":" + difficulty.getId() + ",\"clock\":" + clock
+                        + ",\"inhabitedTime\":" + inhabitedTime + ",\"leftHanded\":" + mob.isLeftHanded()
+                        + ",\"canPickUpLoot\":" + mob.canPickUpLoot()
+                        + ",\"followBonus\":" + Double.doubleToRawLongBits(bonus.amount())
+                        + (egg ? ",\"yaw\":" + Float.floatToRawIntBits(mob.getYRot()) : "")
+                        + ",\"equipment\":" + stacks.stream().map(stack -> skeletonSpawnEquipment(official, stack))
+                                .collect(java.util.stream.Collectors.joining(",", "[", "]"))
+                        + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+                cases++;
+            }
+        }
+        if (armored == 0 || enchanted == 0) {
+            throw new IllegalStateException("skeleton_spawn did not exercise armor and enchantment generation");
+        }
+        if (halloween && (pumpkins == 0 || lanterns == 0 || helmets == 0)) {
+            throw new IllegalStateException("skeleton_halloween needs both holiday items and an ordinary helmet");
+        }
+        return cases;
+    }
+
+    private static Mob skeletonSpawn(FakeLevel world, BlockPos pos, boolean egg) {
+        if (egg) {
+            return EntityTypes.SKELETON.spawn(world, new ItemStack(Items.SKELETON_SPAWN_EGG), null,
+                    pos, EntitySpawnReason.SPAWN_ITEM_USE, true, false);
+        }
+        var mob = EntityTypes.SKELETON.create(world, EntitySpawnReason.COMMAND);
+        mob.setPos(0.5, 64.0, 0.5);
+        mob.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+        return mob;
+    }
+
+    private static String skeletonSpawnEquipment(Official official, ItemStack stack) {
+        var registry = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+        String enchantments = net.minecraft.world.item.enchantment.EnchantmentHelper.getEnchantmentsForCrafting(stack)
+                .entrySet().stream()
+                .sorted(java.util.Comparator.comparingInt(entry -> registry.getId(entry.getKey().value())))
+                .map(entry -> "[" + registry.getId(entry.getKey().value()) + "," + entry.getIntValue() + "]")
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+        return "{\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
+                + ",\"enchantments\":" + enchantments + "}";
+    }
+
+    private static void playProjectile(Official official, Writer out, String name) throws Exception {
+        boolean skeleton = name.startsWith("skeleton_");
+        boolean wall = name.equals("arrow_hits_wall");
+        boolean overlap = name.equals("arrow_block_overlaps_flight");
+        boolean noGravity = name.equals("arrow_no_gravity");
+        boolean despawn = name.equals("arrow_despawn");
+        boolean flame = name.startsWith("arrow_flame_");
+        boolean piercing = name.startsWith("arrow_piercing_");
+        boolean water = name.startsWith("arrow_water_");
+        boolean waterTail = name.equals("arrow_water_after_pierce");
+        boolean rejected = name.endsWith("_rejected");
+        boolean hasWall = wall || noGravity || despawn || waterTail;
+        Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
+        FakeLevel world = FakeLevel.create(official);
+        world.injectedBrightOutside = false;
+        world.injectedMonstersBurn = false;
+        ((TickingLevelData) world.levelData).difficulty = difficulty;
+        var attributes = EnvironmentAttributeSystem.builder().addStaticLayers(world)
+                .addConstantLayer(net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN, v -> false)
+                .build();
+        official.attributes = attributes;
+        put(ServerLevel.class, world, "environmentAttributes", attributes);
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos obstacle = new BlockPos(7, 65, 0);
+        if (hasWall) world.blocks.put(obstacle.asLong(), Blocks.STONE.defaultBlockState());
+        if (water) {
+            world.blocks.put(BlockPos.asLong(waterTail ? 4 : 3, 65, 0), Blocks.WATER.defaultBlockState());
+            world.projectileExtinguishes = new ArrayList<>();
+        }
+        String blocks = blockArray(world.blocks);
+        int playerId = FIRST_ID + 1024;
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        double playerX = skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
+        player.setPos(playerX, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        if (flame) {
+            player.setRemainingFireTicks(37);
+            player.setTicksFrozen(80);
+        }
+        player.getAbilities().invulnerable = rejected;
+        Bytes playerSink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = playerSink;
+        put(ServerPlayer.class, player, "connection", connection);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        world.nextId = FIRST_ID;
+        Mob shooter = null;
+        var arrows = new ArrayList<net.minecraft.world.entity.projectile.arrow.AbstractArrow>();
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        if (skeleton) {
+            shooter = new OracleSkeleton(world);
+            world.entitySeeds.nextLong();
+            setRandom(shooter, 42L);
+            shooter.setUUID(new UUID(0, 1));
+            shooter.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            shooter.setYHeadRot(0.0F);
+            shooter.setYBodyRot(0.0F);
+            shooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.BOW));
+            world.tracked.add(shooter);
+        } else {
+            var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+            setRandom(arrow, world.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            arrow.setPos(0.5, water ? 65.25 : piercing ? 65.0 : 65.5, 0.5);
+            arrow.setNoGravity(noGravity);
+            if (piercing || waterTail) {
+                var setPierce = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class
+                        .getDeclaredMethod("setPierceLevel", byte.class);
+                setPierce.setAccessible(true);
+                setPierce.invoke(arrow, (byte)1);
+                arrow.setBaseDamage(0.5);
+            }
+            if (!overlap) arrow.shoot(1.0, 0.0, 0.0, water ? 7.0F : piercing ? 6.0F : 1.6F, 0.0F);
+            arrows.add(arrow);
+            world.tracked.add(arrow);
+        }
+        var targets = new ArrayList<Cow>();
+        if (piercing) {
+            for (double x : new double[] {3.5, 5.5}) {
+                var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+                target.setPos(x, 64.0, 0.5);
+                target.setNoAi(true);
+                world.tracked.add(target);
+                targets.add(target);
+            }
+        }
+
+        var frames = new StringBuilder("[");
+        var playerStates = new StringBuilder("[");
+        var playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
+        int ticks = skeleton ? 105 : (piercing || water) ? 3 : 26;
+        int embeds = 0;
+        int extinguishes = 0;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var arrowPackets = new ArrayList<String>();
+            if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
+            if (tick > 0) {
+                world.gameTime++;
+                if ((flame || water) && tick == 1) arrows.getFirst().setRemainingFireTicks(200);
+                if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
+                if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
+                if (noGravity && tick == 10) arrows.getFirst().setNoGravity(false);
+                if (despawn && tick == 6) {
+                    putInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "life", 1198);
+                }
+                if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+                if (player.hurtTime > 0) player.hurtTime--;
+                if (shooter != null) {
+                    shooter.checkDespawn();
+                    shooter.commonTick();
+                    shooter.tick();
+                }
+                for (var arrow : arrows) {
+                    if (arrow.isRemoved()) continue;
+                    arrow.commonTick();
+                    arrow.tick();
+                    if (arrow.isRemoved()) {
+                        Bytes gone = new Bytes(official.registries);
+                        gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(arrow.getId()));
+                        arrowPackets.addAll(gone.take());
+                        sync.remove(arrow.getId());
+                    }
+                }
+                world.tracked.removeIf(Entity::isRemoved);
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
+                        arrows.add(arrow);
+                        world.tracked.add(arrow);
+                        pairArrow(world, official, arrow, sync, arrowPackets);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    arrowPackets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"arrows\":[");
+            boolean first = true;
+            var ground = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class.getDeclaredMethod("isInGround");
+            ground.setAccessible(true);
+            for (var arrow : arrows) {
+                if (arrow.isRemoved()) continue;
+                if (!first) frames.append(',');
+                first = false;
+                boolean embedded = (boolean) ground.invoke(arrow);
+                if (embedded) embeds++;
+                frames.append("{\"id\":").append(arrow.getId());
+                frames.append(",\"motion\":").append(projectileMotion(arrow));
+                frames.append(",\"ground\":").append(embedded).append(",\"shake\":").append(arrow.shakeTime);
+                frames.append(",\"seed\":").append(randomSeed(arrow));
+                if (water) frames.append(",\"fire\":").append(arrow.getRemainingFireTicks());
+                frames.append('}');
+            }
+            frames.append("],\"packets\":").append(arrowPackets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            if (shooter != null) {
+                frames.append(",\"shooter\":").append(projectileMotion(shooter));
+                frames.append(",\"shooterSeed\":").append(randomSeed(shooter));
+                frames.append(",\"aggressive\":").append(shooter.isAggressive());
+                frames.append(",\"drawing\":").append(shooter.isUsingItem());
+            }
+            if (flame || water) {
+                frames.append(",\"playerThermal\":[").append(player.getRemainingFireTicks())
+                        .append(',').append(player.getTicksFrozen()).append(']');
+            }
+            if (water) {
+                extinguishes += world.projectileExtinguishes.size();
+                frames.append(",\"extinguished\":").append(world.projectileExtinguishes.stream()
+                        .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                world.projectileExtinguishes.clear();
+            }
+            if (piercing) {
+                frames.append(",\"targets\":").append(Arrays.toString(targets.stream()
+                        .mapToInt(target -> Float.floatToRawIntBits(target.getHealth())).toArray()));
+            }
+            frames.append('}');
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
+                || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
+                || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())) {
+            throw new IllegalStateException("projectile scenario failed to exercise " + name);
+        }
+        if (flame && (player.getTicksFrozen() != 0
+                || player.getRemainingFireTicks() != (rejected ? 1 : 100)
+                || (player.getHealth() == 20.0F) != rejected)) {
+            throw new IllegalStateException("flame scenario did not exercise ignition: " + name
+                    + " health=" + player.getHealth() + " fire=" + player.getRemainingFireTicks()
+                    + " frozen=" + player.getTicksFrozen());
+        }
+        if (piercing && ((player.getHealth() == 20.0F) != rejected
+                || targets.getFirst().getHealth() != (rejected ? 9.0F : 7.0F)
+                || targets.getLast().getHealth() != 10.0F || !arrows.getFirst().isRemoved())) {
+            throw new IllegalStateException("piercing scenario did not exercise the hit cap: " + name);
+        }
+        if (water && (player.getHealth() == 20.0F || extinguishes != 1
+                || player.getRemainingFireTicks() != (waterTail ? 100 : 0)
+                || arrows.getFirst().getRemainingFireTicks() != 0)) {
+            throw new IllegalStateException("water scenario missed the expected contact: " + name
+                    + " health=" + player.getHealth() + " sounds=" + extinguishes
+                    + " player_fire=" + player.getRemainingFireTicks()
+                    + " arrow_fire=" + arrows.getFirst().getRemainingFireTicks());
+        }
+        out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name) + ",\"difficulty\":" + difficulty.getId()
+                + ",\"wall\":" + wall + ",\"skeleton\":" + skeleton + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"blocks\":" + blocks
+                + ",\"shots\":" + arrows.size() + ",\"embeds\":" + embeds + ",\"frames\":" + frames + "]"
+                + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    private static void pairArrow(FakeLevel world, Official official, Entity arrow,
+            java.util.Map<Integer, Sync> sync, List<String> packets) {
+        Sync tracking = new Sync(world, arrow, official.registries);
+        sync.put(arrow.getId(), tracking);
+        tracking.entity.sendPairingData(null, tracking.bytes::add);
+        packets.addAll(tracking.take());
+    }
+
+    private static String projectileMotion(Entity entity) {
+        Vec3 pos = entity.position();
+        Vec3 v = entity.getDeltaMovement();
+        return Arrays.toString(new long[] {
+                Double.doubleToRawLongBits(pos.x), Double.doubleToRawLongBits(pos.y), Double.doubleToRawLongBits(pos.z),
+                Double.doubleToRawLongBits(v.x), Double.doubleToRawLongBits(v.y), Double.doubleToRawLongBits(v.z),
+                Float.floatToRawIntBits(entity.getYRot()), Float.floatToRawIntBits(entity.getXRot()),
+        });
+    }
 
     /** 僵尸场景：官方 `Mob` 逐刻 tick，输出与 `CowStep` 同形的状态加僵尸专属字段。 */
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
@@ -4490,6 +5043,9 @@ public final class MobOracle {
     }
 
     private static final class FakeLevel extends ServerLevel {
+        List<long[]> projectileExtinguishes;
+        DifficultyInstance spawnDifficulty;
+
         private Official official;
         private Long2ObjectOpenHashMap<BlockState> blocks;
         private LevelTicks<Block> blockTicks;
@@ -4848,6 +5404,9 @@ public final class MobOracle {
 
         @Override
         public net.minecraft.world.DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
+            if (spawnDifficulty != null) {
+                return spawnDifficulty;
+            }
             if (realSky) {
                 // 官方 `ServerLevel.getCurrentDifficultyAt`：难度、主世界时钟、区块居住时间（假世界 0）、月相亮度。
                 return new net.minecraft.world.DifficultyInstance(getDifficulty(), clock, 0L, getMoonBrightness(pos));
@@ -4976,6 +5535,11 @@ public final class MobOracle {
             if (packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundSoundPacket(
                         sound, source, x, y, z, volume, pitch, seed));
+            }
+            if (projectileExtinguishes != null && sound.value() == net.minecraft.sounds.SoundEvents.GENERIC_EXTINGUISH_FIRE) {
+                projectileExtinguishes.add(new long[] {Double.doubleToRawLongBits(x),
+                        Double.doubleToRawLongBits(y), Double.doubleToRawLongBits(z),
+                        Float.floatToRawIntBits(volume), Float.floatToRawIntBits(pitch), source.ordinal()});
             }
         }
 

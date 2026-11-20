@@ -44,7 +44,7 @@ pub enum SummonError {
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
-const RANDOM_SPAWN_BONUS: &str = "minecraft:random_spawn_bonus";
+pub(super) const RANDOM_SPAWN_BONUS: &str = "minecraft:random_spawn_bonus";
 
 /// `Level.isInSpawnableBounds`：竖直 `[-2e7, 2e7)`，水平绝对值小于 3e7。
 pub fn is_in_spawnable_bounds(pos: BlockPos) -> bool {
@@ -208,6 +208,10 @@ pub(crate) fn finalize_spawn(
     reason: SpawnReason,
 ) {
     let _ = reason;
+    if kind == MobType::Skeleton {
+        super::skeleton::finalize_spawn(world, entity);
+        return;
+    }
     if kind.is_monster() {
         finalize_monster(world, kind, entity);
         return;

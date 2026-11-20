@@ -701,6 +701,11 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
     fn random(&self) -> &LevelRandom;
 
+    /// 通过游戏层的附魔表执行生成装备附魔。
+    ///
+    /// Apply the mob-spawn equipment enchantment provider from the game registry.
+    fn enchant_mob_spawn_equipment(&self, _stack: &mut ItemStack, _special: f32) {}
+
     /// 只取一个 `next_float()`，供活塞音高这类「取数 → 算参数 → 发效果」的动作使用。
     /// 默认实现转发给 [`Self::random`]；录制包装覆盖它把这次取数记成可重放的效果。
     fn next_random_float(&self) -> f32 {
@@ -960,22 +965,31 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
-    /// 生物死时的战利品，`LivingEntity.dropFromLootTable`。`table` 是战利品表名，
-    /// 随机数取这张表的随机序列。默认没有战利品。
+    /// 生物死时的战利品，取战利品表自己的随机序列。默认不掉落。
     ///
     /// Mob death loot. The draw uses the table's random sequence. Default: nothing.
     fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<EntityUid>,
+        loot: crate::entity::mob::MobDeathLoot,
+        origin: mc_bamboo_core::Vec3,
     ) -> Vec<ItemStack> {
-        let _ = (table, on_fire, killer);
+        let _ = (loot, origin);
         Vec::new()
     }
 
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
+
+    /// 现实中的本地日期，不是世界时间。
+    ///
+    /// The local calendar date, independent of the world clock.
+    fn is_halloween(&self) -> bool {
+        false
+    }
+
+    fn player_mob_attack(&self, _uid: EntityUid) -> Option<crate::entity::mob::PlayerMobAttack> {
+        None
+    }
 
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {

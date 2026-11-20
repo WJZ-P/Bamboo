@@ -417,6 +417,7 @@ impl Player {
         let off = self.inventory.held(Hand::Off);
         PlayerView {
             uid: id.0,
+            uuid: Some(*self.uuid.as_bytes()),
             position: self.position,
             eye_height: self.eye_height() as f32,
             // 药水效果还没有；`armor_cover` 按四格盔甲里非空的比例算。

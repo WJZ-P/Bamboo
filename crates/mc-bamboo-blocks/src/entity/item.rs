@@ -633,6 +633,10 @@ impl Entity {
         }
         scan.heights
     }
+
+    pub(crate) fn update_projectile_fluid(&mut self, world: &dyn BlockView) -> bool {
+        self.update_item_fluid(world).lava > 0.0
+    }
 }
 
 struct FluidDetail {

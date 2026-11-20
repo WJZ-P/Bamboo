@@ -281,7 +281,7 @@ impl TrackedEntity {
             entity_id: snapshot.id,
             uuid: snapshot
                 .data
-                .mob_uuid()
+                .stable_uuid()
                 .map_or_else(|| entity_uuid(snapshot.id), Uuid::from_bytes),
             entity_type: snapshot.entity_type,
             position: self.base,
@@ -291,14 +291,14 @@ impl TrackedEntity {
             head_yaw: self.last_head,
             data: snapshot.add_data(),
         })];
-        // 官方 `trackedDataValues` 在构造时总是非 null（哪怕空表），所以配对时
-        // 总有一个 `set_entity_data`，空表时只有一个结束标记。
-        // Vanilla's `trackedDataValues` is never null, so pairing always sends
-        // one `set_entity_data`; an empty list only carries the end marker.
-        out.push(packet_body(&SetEntityData {
-            entity_id: snapshot.id,
-            items: &self.last_data,
-        }));
+        // 官方箭的 trackedDataValues 为空时不发；其它类型保留现有空表包行为。
+        // Vanilla skips empty arrow metadata; other types retain their existing empty packet.
+        if !matches!(snapshot.data, KindData::Arrow(_)) || !self.last_data.is_empty() {
+            out.push(packet_body(&SetEntityData {
+                entity_id: snapshot.id,
+                items: &self.last_data,
+            }));
+        }
         // `LivingEntity` 的可同步属性，属性表里哪些是同步的由数据层给出。
         // 官方 `AttributeSnapshot` 带 `getModifiers()` 的全部修饰符，临时的（效果、装备、
         // 细雪减速）也在里面。
@@ -379,7 +379,9 @@ impl TrackedEntity {
         let mut packets = Vec::new();
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
-        self.ticks_since_step += 1;
+        if !matches!(snapshot.data, KindData::Arrow(_)) {
+            self.ticks_since_step += 1;
+        }
         if snapshot.sync_position {
             self.ticks_since_step = 0;
         }
@@ -465,7 +467,11 @@ impl TrackedEntity {
         }
         self.tick_count += 1;
         if sync_velocity {
-            self.last_movement = snapshot.delta;
+            // 箭的 syncVelocity 来自 markHurt；官方这个分支不更新常规速度基线。
+            // Arrow syncVelocity comes from markHurt; vanilla leaves its regular velocity baseline intact.
+            if !matches!(snapshot.data, KindData::Arrow(_)) {
+                self.last_movement = snapshot.delta;
+            }
             packets.push(packet_body(&SetEntityMotion {
                 entity_id: snapshot.id,
                 movement: snapshot.delta,
@@ -500,6 +506,14 @@ impl TrackedEntity {
                 .find(|item| EntityData::index(item) == index);
             let item = match now {
                 Some(item) if Some(item) != before => item.clone(),
+                None if matches!(snapshot.data, KindData::Arrow(_)) => match index {
+                    0 => EntityData::SharedFlags(0),
+                    5 => EntityData::NoGravity(false),
+                    entity_types::ARROW_FLAGS => EntityData::ArrowFlags(0),
+                    entity_types::ARROW_PIERCE => EntityData::ArrowPierce(0),
+                    entity_types::ARROW_IN_GROUND => EntityData::ArrowInGround(false),
+                    _ => continue,
+                },
                 None if before.is_some() => default_data_for_type(
                     index,
                     match &snapshot.data {
@@ -662,7 +676,10 @@ impl TrackedEntity {
             self.teleport_delay = 0;
             return Some(Movement::Sync);
         }
-        let send_position = has_moved(self.base, snapshot.position)
+        let arrow = matches!(snapshot.data, KindData::Arrow(_));
+        let rotation_changed = arrow || rotation_changed;
+        let send_position = arrow
+            || has_moved(self.base, snapshot.position)
             || self.tick_count % FORCED_POS_UPDATE_PERIOD == 0;
         if !send_position {
             return rotation_changed.then_some(Movement::Rotation);
@@ -726,6 +743,7 @@ pub enum KindData {
         value: i32,
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
+    Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
 }
 
 impl Snapshot {
@@ -742,8 +760,8 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
-            needs_sync: false,
-            sync_velocity: false,
+            needs_sync: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.needs_sync),
+            sync_velocity: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.sync_velocity),
             sync_position: false,
             fall_flying: false,
         }
@@ -753,6 +771,7 @@ impl Snapshot {
     fn add_data(&self) -> i32 {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
+            KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -776,6 +795,7 @@ impl KindData {
             KindPublic::Item { stack, .. } => Self::Item(stack.clone()),
             KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
+            KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
         }
     }
 
@@ -785,7 +805,8 @@ impl KindData {
             Self::FallingBlock { .. }
             | Self::Item(_)
             | Self::ExperienceOrb { .. }
-            | Self::Mob(_) => None,
+            | Self::Mob(_)
+            | Self::Arrow(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -796,14 +817,16 @@ impl KindData {
             Self::FallingBlock { .. }
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
-            | Self::Mob(_) => None,
+            | Self::Mob(_)
+            | Self::Arrow(_) => None,
         }
     }
 
     /// 生物自己的 UUID；其它三类按网络 ID 派生。
-    fn mob_uuid(&self) -> Option<[u8; 16]> {
+    fn stable_uuid(&self) -> Option<[u8; 16]> {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
+            Self::Arrow(arrow) => Some(arrow.uuid),
             _ => None,
         }
     }
@@ -812,6 +835,7 @@ impl KindData {
     fn mob_x_rot(&self) -> Option<f32> {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
+            Self::Arrow(arrow) => Some(arrow.pitch),
             _ => None,
         }
     }
@@ -841,9 +865,28 @@ impl KindData {
                 vec![EntityData::ExperienceValue(*value)]
             }
             Self::ExperienceOrb { .. } => Vec::new(),
+            Self::Arrow(arrow) => {
+                let mut data = Vec::new();
+                if arrow.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if arrow.no_gravity {
+                    data.push(EntityData::NoGravity(true));
+                }
+                if arrow.critical {
+                    data.push(EntityData::ArrowFlags(1));
+                }
+                if arrow.pierce != 0 {
+                    data.push(EntityData::ArrowPierce(arrow.pierce));
+                }
+                if arrow.in_ground {
+                    data.push(EntityData::ArrowInGround(true));
+                }
+                data
+            }
             Self::Mob(mob) => {
                 if mob.mob_type.is_monster() {
-                    zombie_non_default_data(mob)
+                    monster_non_default_data(mob)
                 } else {
                     mob_non_default_data(mob)
                 }
@@ -858,7 +901,7 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
-    match (index, kind.is_monster()) {
+    match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
         (18, true) => EntityData::DrownedConverting(false),
@@ -870,6 +913,7 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             5 => EntityData::NoGravity(false),
             6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
             7 => EntityData::TicksFrozen(0),
+            8 => EntityData::LivingFlags(0),
             9 => EntityData::Health(1.0),
             15 => EntityData::MobFlags(0),
             16 => EntityData::Baby(false),
@@ -893,7 +937,7 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
 /// 僵尸/尸壳的元数据。官方 `ClassTreeIdRegistry` 按类树导出：
 /// 16 `ZombieBaby`(BOOL)、17 `SpecialType`(INT)、18 `DrownedConverting`(BOOL)，
 /// 和牛的 `AgeableMob.Baby`(16) 不是同一个字段。
-fn zombie_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::Pose;
     let mut flags = 0u8;
     if mob.on_fire {
@@ -928,6 +972,9 @@ fn zombie_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Ve
         out.push(EntityData::TicksFrozen(mob.ticks_frozen));
     }
     out.push(EntityData::Health(mob.health));
+    if mob.using_item_flags != 0 {
+        out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
     let mut mob_flags = 0u8;
     if mob.no_ai {
         mob_flags |= 1;
@@ -1003,6 +1050,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     // `LivingEntity` 的 `DATA_LIVING_ENTITY_FLAGS` 恒为 0，`DATA_HEALTH_ID` 默认 1。
     // The living flags are always 0 and health defaults to 1.
     out.push(EntityData::Health(mob.health));
+    if mob.using_item_flags != 0 {
+        out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
     let mut mob_flags = 0u8;
     if mob.no_ai {
         mob_flags |= 1;
@@ -1126,13 +1176,17 @@ fn event_packet(
             pitch: 1.0,
             seed: sound_seed(),
         }),
-        MobEvent::Damage { kind, attacker } => {
+        MobEvent::Damage {
+            kind,
+            attacker,
+            direct,
+        } => {
             let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
             EventPacket::Tracking(packet_body(&DamageEvent {
                 entity_id: id,
                 damage_type,
                 source_cause: *attacker,
-                source_direct: *attacker,
+                source_direct: direct.or(*attacker),
                 position: None,
             }))
         }

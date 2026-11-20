@@ -900,6 +900,60 @@ pub(super) fn assert_alive(scene: &Scene) {
     );
 }
 
+#[test]
+fn an_embedded_arrow_moves_without_its_skeleton_owner() {
+    use mc_bamboo_blocks::entity::{EntityKind, mob::MobType};
+
+    with_stack(|| {
+        let mut scene = build(13);
+        let position = |chunk: ChunkPos| {
+            Vec3::new(
+                f64::from(chunk.x * 16) + 0.5,
+                f64::from(Y + 8),
+                f64::from(chunk.z * 16) + 0.5,
+            )
+        };
+        let shooter_pos = position(scene.centers[0]);
+        let arrow_pos = position(scene.centers[1]);
+        let parent = island(&mut scene);
+        let shooter = parent
+            .region
+            .entities
+            .spawn(Entity::by_mob_type(MobType::Skeleton, shooter_pos));
+        let owner_uuid = parent
+            .region
+            .entities
+            .get(shooter)
+            .unwrap()
+            .kind
+            .mob()
+            .unwrap()
+            .uuid;
+        let mut embedded = Entity::arrow(arrow_pos);
+        let EntityKind::Arrow(data) = &mut embedded.kind else {
+            unreachable!()
+        };
+        data.owner = Some(shooter);
+        data.owner_uuid = Some(owner_uuid);
+        data.in_ground = true;
+        data.life = 177;
+        data.shake_time = 3;
+        let id = parent.region.entities.spawn(embedded);
+        let expected = parent.region.entities.get(id).unwrap();
+        let mut child = split(&mut scene, &[1].into_iter().collect());
+        let parent = island(&mut scene);
+        assert!(parent.region.entities.get(id).is_none());
+        assert!(child.region.entities.get(shooter).is_none());
+        assert_eq!(child.region.entities.get(id).unwrap().kind, expected.kind);
+        child.region.rebase_clock(-12);
+        parent.absorb_island(child, 12);
+        let joined = parent.region.entities.get(id).unwrap();
+        assert_eq!(joined.kind, expected.kind);
+        assert_eq!(joined.random, expected.random);
+        assert!(parent.region.entities.get(shooter).is_some());
+    });
+}
+
 /// 拆了马上合回来，和从没拆过的世界逐位相同（含网络 ID、版本号、跨组的先后），之后
 /// 继续跑也逐刻相同，每名玩家收到的字节也逐位相同。随机的组、随机的时刻、几个种子。
 #[test]
