@@ -321,7 +321,7 @@ fn spawn_category_for_chunk(
     params: &SpawnParams,
 ) {
     let start = random_pos_within(world, chunk);
-    if start.y >= world.min_y() + 1 {
+    if start.y > world.min_y() {
         spawn_category_for_position(world, category, chunk, start, state, params);
     }
 }
