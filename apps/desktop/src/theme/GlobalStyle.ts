@@ -30,7 +30,7 @@ export const GlobalStyle = createGlobalStyle`
     user-select: none;
   }
 
-  button, input {
+  button, input, select, textarea {
     font: inherit;
     color: inherit;
   }
