@@ -46,7 +46,6 @@ pub(crate) fn tick(region: &mut Region) {
     }
     let params = SpawnParams {
         spawnable_chunk_count,
-        spawn_mobs: true,
         spawn_enemies,
         per_player_cap: region.spawn_per_player_cap,
         respawn_pos: Some(region.global.spawn.pos),

@@ -40,9 +40,6 @@ use crate::{
 /// `NaturalSpawner.MIN_SPAWN_DISTANCE` 的平方：离玩家 24 格以内不刷。
 pub const MIN_SPAWN_DISTANCE_SQR: f64 = 576.0;
 
-/// `NaturalSpawner.SPAWN_DISTANCE_CHUNK`：`LocalMobCapCalculator` 只看 8 个区块内的玩家。
-pub const SPAWN_DISTANCE_CHUNK: i32 = 8;
-
 /// `NaturalSpawner.MAGIC_NUMBER`，全局上限按 `max * chunks / 289`。
 pub const MAGIC_NUMBER: i32 = 289;
 
@@ -279,8 +276,6 @@ fn chunk_at(pos: BlockPos) -> ChunkPos {
 pub struct SpawnParams {
     /// `DistanceManager.getNaturalSpawnChunkCount()`。
     pub spawnable_chunk_count: i32,
-    /// `spawn_mobs`。
-    pub spawn_mobs: bool,
     /// `spawn_monsters`（官方的 `spawnEnemies`）。
     pub spawn_enemies: bool,
     /// 按玩家的上限（`bamboo.toml` 的 `spawn_per_player_cap`）：关掉时只查全局上限。
@@ -829,7 +824,6 @@ mod tests {
     fn params(spawnable_chunk_count: i32, per_player_cap: bool) -> SpawnParams {
         SpawnParams {
             spawnable_chunk_count,
-            spawn_mobs: true,
             spawn_enemies: true,
             per_player_cap,
             respawn_pos: None,
