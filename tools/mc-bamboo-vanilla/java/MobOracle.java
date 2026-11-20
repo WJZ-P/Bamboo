@@ -228,6 +228,11 @@ public final class MobOracle {
                 play(official, out, scene);
                 cases++;
             }
+            for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "skeleton_bow_normal", "skeleton_bow_hard")) {
+                if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
+                playProjectile(official, out, name);
+                cases++;
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -2271,6 +2276,190 @@ public final class MobOracle {
         }
     }
 
+
+    // 只注入构造随机源；运行原版的目标、射击、物理、玩家受伤和同步。
+    // Inject constructor seeds only; use vanilla goals, shooting, physics, damage and tracking.
+    private static final class OracleSkeleton extends net.minecraft.world.entity.monster.skeleton.Skeleton {
+        OracleSkeleton(FakeLevel level) {
+            super(EntityTypes.SKELETON, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            FakeLevel world = (FakeLevel) level();
+            var arrow = ((net.minecraft.world.item.ArrowItem) Items.ARROW).createArrow(world, projectile, this, weapon);
+            setRandom(arrow, world.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            arrow.setBaseDamageFromMob(power);
+            return arrow;
+        }
+    }
+
+    private static void playProjectile(Official official, Writer out, String name) throws Exception {
+        boolean skeleton = name.startsWith("skeleton_");
+        boolean wall = name.equals("arrow_hits_wall");
+        Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
+        FakeLevel world = FakeLevel.create(official);
+        world.injectedBrightOutside = false;
+        world.injectedMonstersBurn = false;
+        ((TickingLevelData) world.levelData).difficulty = difficulty;
+        var attributes = EnvironmentAttributeSystem.builder().addStaticLayers(world)
+                .addConstantLayer(net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN, v -> false)
+                .build();
+        official.attributes = attributes;
+        put(ServerLevel.class, world, "environmentAttributes", attributes);
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        BlockPos obstacle = new BlockPos(7, 65, 0);
+        if (wall) world.blocks.put(obstacle.asLong(), Blocks.STONE.defaultBlockState());
+        String blocks = blockArray(world.blocks);
+        int playerId = FIRST_ID + 1024;
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        double playerX = skeleton ? 11.5 : wall ? 18.5 : 6.5;
+        player.setPos(playerX, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        Bytes playerSink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = playerSink;
+        put(ServerPlayer.class, player, "connection", connection);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        world.nextId = FIRST_ID;
+        Mob shooter = null;
+        var arrows = new ArrayList<net.minecraft.world.entity.projectile.arrow.AbstractArrow>();
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        if (skeleton) {
+            shooter = new OracleSkeleton(world);
+            world.entitySeeds.nextLong();
+            setRandom(shooter, 42L);
+            shooter.setUUID(new UUID(0, 1));
+            shooter.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            shooter.setYHeadRot(0.0F);
+            shooter.setYBodyRot(0.0F);
+            shooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.BOW));
+            world.tracked.add(shooter);
+        } else {
+            var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+            setRandom(arrow, world.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            arrow.setPos(0.5, 65.5, 0.5);
+            arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
+            arrows.add(arrow);
+            world.tracked.add(arrow);
+        }
+
+        var frames = new StringBuilder("[");
+        var playerStates = new StringBuilder("[");
+        var playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
+        int ticks = skeleton ? 105 : 26;
+        int embeds = 0;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var arrowPackets = new ArrayList<String>();
+            if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
+            if (tick > 0) {
+                world.gameTime++;
+                if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
+                if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+                if (player.hurtTime > 0) player.hurtTime--;
+                if (shooter != null) {
+                    shooter.checkDespawn();
+                    shooter.commonTick();
+                    shooter.tick();
+                }
+                for (var arrow : arrows) {
+                    if (arrow.isRemoved()) continue;
+                    arrow.commonTick();
+                    arrow.tick();
+                    if (arrow.isRemoved()) {
+                        Bytes gone = new Bytes(official.registries);
+                        gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(arrow.getId()));
+                        arrowPackets.addAll(gone.take());
+                        sync.remove(arrow.getId());
+                    }
+                }
+                world.tracked.removeIf(Entity::isRemoved);
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
+                        arrows.add(arrow);
+                        world.tracked.add(arrow);
+                        pairArrow(world, official, arrow, sync, arrowPackets);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    arrowPackets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"arrows\":[");
+            boolean first = true;
+            var ground = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class.getDeclaredMethod("isInGround");
+            ground.setAccessible(true);
+            for (var arrow : arrows) {
+                if (arrow.isRemoved()) continue;
+                if (!first) frames.append(',');
+                first = false;
+                boolean embedded = (boolean) ground.invoke(arrow);
+                if (embedded) embeds++;
+                frames.append("{\"id\":").append(arrow.getId());
+                frames.append(",\"motion\":").append(projectileMotion(arrow));
+                frames.append(",\"ground\":").append(embedded).append(",\"shake\":").append(arrow.shakeTime);
+                frames.append(",\"seed\":").append(randomSeed(arrow)).append('}');
+            }
+            frames.append("],\"packets\":").append(arrowPackets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            if (shooter != null) {
+                frames.append(",\"shooter\":").append(projectileMotion(shooter));
+                frames.append(",\"shooterSeed\":").append(randomSeed(shooter));
+                frames.append(",\"aggressive\":").append(shooter.isAggressive());
+                frames.append(",\"drawing\":").append(shooter.isUsingItem());
+            }
+            frames.append('}');
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
+                || wall && embeds == 0 || skeleton && arrows.size() < 2) {
+            throw new IllegalStateException("projectile scenario failed to exercise " + name);
+        }
+        out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name) + ",\"difficulty\":" + difficulty.getId()
+                + ",\"wall\":" + wall + ",\"skeleton\":" + skeleton + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"blocks\":" + blocks
+                + ",\"shots\":" + arrows.size() + ",\"embeds\":" + embeds + ",\"frames\":" + frames + "]"
+                + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    private static void pairArrow(FakeLevel world, Official official, Entity arrow,
+            java.util.Map<Integer, Sync> sync, List<String> packets) {
+        Sync tracking = new Sync(world, arrow, official.registries);
+        sync.put(arrow.getId(), tracking);
+        tracking.entity.sendPairingData(null, tracking.bytes::add);
+        packets.addAll(tracking.take());
+    }
+
+    private static String projectileMotion(Entity entity) {
+        Vec3 pos = entity.position();
+        Vec3 v = entity.getDeltaMovement();
+        return Arrays.toString(new long[] {
+                Double.doubleToRawLongBits(pos.x), Double.doubleToRawLongBits(pos.y), Double.doubleToRawLongBits(pos.z),
+                Double.doubleToRawLongBits(v.x), Double.doubleToRawLongBits(v.y), Double.doubleToRawLongBits(v.z),
+                Float.floatToRawIntBits(entity.getYRot()), Float.floatToRawIntBits(entity.getXRot()),
+        });
+    }
 
     /** 僵尸场景：官方 `Mob` 逐刻 tick，输出与 `CowStep` 同形的状态加僵尸专属字段。 */
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {

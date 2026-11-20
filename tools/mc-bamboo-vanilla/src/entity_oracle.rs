@@ -927,6 +927,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             data.pickup_delay,
             data.health,
         ),
+        EntityKind::Arrow(_) => ("arrow".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::Mob(_) => ("mob".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::ExperienceOrb(data) => (
             "experience_orb".to_owned(),

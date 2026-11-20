@@ -29,6 +29,8 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod projectile;
+
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
 const USAGE: &str = "usage: mob-oracle <java> [--only PREFIX] [--show N]";
@@ -65,6 +67,7 @@ mod base64_stub {
 enum Line {
     Header(Header),
     Case(Box<Case>),
+    Projectile(Box<projectile::ProjectileCase>),
     End(End),
 }
 
@@ -815,6 +818,7 @@ impl Report {
             match parsed {
                 Line::Header(header) => self.check_header(&header)?,
                 Line::Case(case) => self.replay(&case),
+                Line::Projectile(case) => self.replay_projectile(&case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
