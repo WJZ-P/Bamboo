@@ -404,6 +404,20 @@ impl Entity {
         self.final_movements = movements;
     }
 
+    /// 弹射物逐段调用 `applyEffectsFromBlocks(from, to)`，不重走已处理的位移。
+    ///
+    /// Apply projectile block effects for just this segment, without replaying earlier movement.
+    pub(crate) fn apply_effects_along(&mut self, world: &dyn BlockView, from: Vec3) {
+        self.check_inside_blocks(
+            world,
+            &[Movement {
+                from,
+                to: self.position,
+                original: None,
+            }],
+        );
+    }
+
     /// `checkInsideBlocks`：按轴把每段移动拆开，逐个方块看实体有没有穿过去。
     fn check_inside_blocks(&mut self, world: &dyn BlockView, movements: &[Movement]) {
         if self.removed {

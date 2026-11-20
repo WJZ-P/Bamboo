@@ -246,18 +246,13 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let owner = arrow
         .owner
         .or_else(|| arrow.owner_uuid.and_then(|uuid| resolve_owner(ctx, uuid)));
-    let area = me
-        .bounding_box()
-        .expanded_towards(me.delta.x, me.delta.y, me.delta.z)
-        .inflated(1.0);
+    let area = sweep_area(me);
     let mut owner_in_range = owner
         .and_then(|uid| ctx.other(uid))
         .is_some_and(|entity| entity.bounding_box().intersects(area));
-    let mut players = Vec::new();
     blocks.for_each_player(&mut |p| {
         if p.alive && !p.spectator && player_box(p).intersects(area) {
             owner_in_range |= owner == Some(p.uid);
-            players.push(*p);
         }
     });
     let EntityKind::Arrow(arrow) = &mut me.kind else {
@@ -274,10 +269,41 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let end = position.add(movement);
     let block_hit = clip_including_border(blocks, position, end, collision);
     let end = block_hit.map_or(end, |hit| hit.location);
+    let hits = find_targets(me, ctx, end);
+    if hits.is_empty() && block_hit.is_none() {
+        me.position = end;
+        me.apply_effects_along(blocks, position);
+        finish_flight(me, blocks);
+    } else {
+        ctx.emit(
+            Command::ArrowImpact {
+                block: block_hit,
+                hits,
+                end,
+            },
+            me,
+        );
+    }
+}
+
+fn sweep_area(me: &Entity) -> Aabb {
+    me.bounding_box()
+        .expanded_towards(me.delta.x, me.delta.y, me.delta.z)
+        .inflated(1.0)
+}
+
+fn find_targets(me: &Entity, ctx: &dyn EntityCtx, end: Vec3) -> Vec<ArrowEntityHit> {
+    let EntityKind::Arrow(arrow) = &me.kind else {
+        return Vec::new();
+    };
+    let blocks = ctx.blocks();
+    let area = sweep_area(me);
+    let position = me.position;
+    let collision = me.collision_context();
     let mut hits = Vec::new();
     let margin = f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3));
     let mut consider = |uid, feet, bb: Aabb, player| {
-        if (arrow.left_owner || Some(uid) != owner) && !arrow.pierced.contains(&uid) {
+        if (arrow.left_owner || Some(uid) != arrow.owner) && !arrow.pierced.contains(&uid) {
             let contact = clip_entity_with_margin(blocks, bb, position, end, collision, margin);
             if let Some(contact) = contact {
                 hits.push((
@@ -296,24 +322,14 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
             consider(other.uid, other.position, other.bounding_box(), false);
         }
     });
-    for player in players {
-        consider(player.uid, player.position, player_box(&player), true);
-    }
-    if hits.is_empty() && block_hit.is_none() {
-        me.position = end;
-        me.apply_effects_from_blocks(blocks);
-        finish_flight(me, blocks);
-    } else {
-        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-        ctx.emit(
-            Command::ArrowImpact {
-                block: block_hit,
-                hits: hits.into_iter().map(|(_, hit)| hit).collect(),
-                end,
-            },
-            me,
-        );
-    }
+    blocks.for_each_player(&mut |player| {
+        let bb = player_box(player);
+        if player.alive && !player.spectator && bb.intersects(area) {
+            consider(player.uid, player.position, bb, true);
+        }
+    });
+    hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+    hits.into_iter().map(|(_, hit)| hit).collect()
 }
 
 fn clip_entity_with_margin(
@@ -438,27 +454,33 @@ pub struct ArrowEntityHit {
 pub(super) fn impact(
     me: &mut Entity,
     world: &mut World<'_>,
-    hits: Vec<ArrowEntityHit>,
+    mut hits: Vec<ArrowEntityHit>,
     block: Option<BlockHit>,
     end: Vec3,
 ) {
     if let EntityKind::Arrow(arrow) = &mut me.kind {
         arrow.needs_sync = true;
     }
-    let first = hits.first();
-    me.position = first.map_or(end, |hit| hit.contact);
-    me.apply_effects_from_blocks(world);
-    if !me.removed {
-        for hit in hits {
-            if !hit_entity(me, world, hit) {
-                finish_flight(me, world);
-                return;
+    while !me.removed {
+        let from = me.position;
+        me.position = hits.first().map_or(end, |hit| hit.contact);
+        me.apply_effects_along(world, from);
+        if me.removed {
+            break;
+        }
+        if hits.is_empty() {
+            if let Some(hit) = block {
+                hit_block(me, world, hit);
             }
+            break;
         }
-        me.position = end;
-        if let Some(hit) = block {
-            hit_block(me, world, hit);
+        if !hits.into_iter().all(|hit| hit_entity(me, world, hit)) {
+            break;
         }
+        // 这一批命中后，沿原先的方块裁剪终点重查剩余线段。
+        // After this batch, query the remaining segment against the original block-clip endpoint.
+        let ctx = super::ctx::PreciseCtx::new(world, me.id);
+        hits = find_targets(me, &ctx, end);
     }
     finish_flight(me, world);
 }
@@ -662,6 +684,49 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn piercing_rescans_and_applies_blocks_in_the_remaining_segment() {
+        use crate::entity::mob::MobType;
+        let mut level = crate::testing::TestLevel::new();
+        level.set(
+            BlockPos::new(5, 65, 0),
+            BlockState(mc_bamboo_data::blocks::COBWEB),
+        );
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let targets = [2.0, 4.0].map(|x| {
+            world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(x, 64.0, 0.5)))
+        });
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 65.0, 0.5));
+        let EntityKind::Arrow(data) = &mut arrow.kind else {
+            unreachable!()
+        };
+        data.pierce = 1;
+        data.base_damage = 0.5;
+        arrow.delta = Vec3::new(6.0, 0.0, 0.0);
+        let end = arrow.position.add(arrow.delta);
+        // 首批候选只给第一头牛；后续扫描应发现第二头，并穿过其后的蛛网。
+        // Supply only the first cow in the initial batch. The rescan should find
+        // the second one and apply the web behind it.
+        impact(
+            &mut arrow,
+            &mut world,
+            vec![ArrowEntityHit {
+                uid: targets[0],
+                contact: Vec3::new(1.7, 65.0, 0.5),
+                player: false,
+            }],
+            None,
+            end,
+        );
+        assert_eq!(
+            targets.map(|id| world.entity(id).unwrap().kind.mob().unwrap().health),
+            [7.0, 7.0]
+        );
+        assert_eq!(arrow.position, end);
+        assert_eq!(arrow.stuck_speed_multiplier.x, 0.25);
+    }
 
     #[test]
     fn burning_arrow_forces_velocity_sync_on_the_fire_damage_pulse() {
