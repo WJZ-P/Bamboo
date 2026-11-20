@@ -210,6 +210,16 @@ def main():
         print(f"island_world_command_fallbacks: total=0 commands={borrowed['samples'] if borrowed else 0} ratio=0.000")
     if borrowed:
         print(describe("island_borrowed_islands", borrowed, "islands"))
+    # 按命令类别分开看（计划 4.5.1）：每类借了几个岛、兜底几次。
+    # Per command class (plan 4.5.1): islands borrowed and fallbacks.
+    for kind in ("gamemode", "hurt", "effect", "execute"):
+        per = combine(steady, f"island_borrowed_{kind}")
+        fell = combine(steady, f"island_fallback_{kind}")
+        fell_total = fell["mean"] * fell["samples"] if fell else 0
+        if per:
+            print(describe(f"island_borrowed_{kind}", per, "islands") + f" fallbacks={fell_total:.0f}")
+        else:
+            print(f"island_borrowed_{kind}: no samples fallbacks={fell_total:.0f}")
     crossings = combine(steady, "island_crossings")
     if crossings:
         print(f"island_crossings: players moved={crossings['mean'] * crossings['samples']:.0f}")

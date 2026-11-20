@@ -438,10 +438,18 @@ async fn play(
                 }
                 if now >= next_command {
                     let other = rng.between((0, (*bots).max(1) as u64 - 1));
-                    let command = match rng.between((0, 2)) {
+                    // 后三种要管理员（场景给每名假玩家 `op`），量按需借岛：改自己的模式、
+                    // 杀自己（死了按 `player_combat_kill` 点重生）、给自己加效果。
+                    // The last three need operator status (the scene ops every bot)
+                    // and exercise on-demand borrowing: own game mode, killing
+                    // oneself (respawning on `player_combat_kill`), an own effect.
+                    let command = match rng.between((0, 5)) {
                         0 => format!("msg {name_prefix}{other:04} hello from {index}"),
                         1 => "list".to_owned(),
-                        _ => "me waves".to_owned(),
+                        2 => "me waves".to_owned(),
+                        3 => "gamemode creative".to_owned(),
+                        4 => "kill @s".to_owned(),
+                        _ => "effect give @s minecraft:speed 5".to_owned(),
                     };
                     second.bytes_out += connection
                         .write(&wire::chat_command_frame(&command))
@@ -560,6 +568,11 @@ async fn handle(
                     motion.direction(),
                 );
             }
+        }
+        ServerPacket::PlayerCombatKill => {
+            let bytes = connection.write(&wire::perform_respawn_frame()).await?;
+            second.bytes_out += bytes;
+            second.packets_out += 1;
         }
         ServerPacket::Disconnect(_) => {
             return Err(format!(
