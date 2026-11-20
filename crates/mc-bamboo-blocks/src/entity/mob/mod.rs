@@ -1078,12 +1078,15 @@ impl Mob {
     }
 
     /// 岛合并时把绝对时刻平移 `delta`。
+    ///
+    /// Shift the absolute timestamps by `delta` when islands merge.
     pub fn rebase(&mut self, delta: i64) {
         self.last_damage_stamp = self.last_damage_stamp.saturating_add(delta);
         self.navigation.rebase(delta);
-        if self.mob_type == MobType::Skeleton {
-            self.goals.rebase_clock(delta);
-        }
+        // `MeleeAttackGoal.lastCanUseCheck` 也是 `gameTime`，牛没有这个目标，平移到它身上是空操作。
+        // `MeleeAttackGoal.lastCanUseCheck` is `gameTime` as well; cows have no such goal,
+        // so rebasing it is a no-op for them.
+        self.goals.rebase_clock(delta);
     }
 }
 
