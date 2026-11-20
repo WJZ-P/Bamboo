@@ -716,6 +716,7 @@ impl Level for RegionLevel<'_> {
         let victim_type = match table {
             "minecraft:entities/zombie" => mc_bamboo_data::registries::entity_type::ZOMBIE,
             "minecraft:entities/husk" => mc_bamboo_data::registries::entity_type::HUSK,
+            "minecraft:entities/skeleton" => mc_bamboo_data::registries::entity_type::SKELETON,
             _ => mc_bamboo_data::registries::entity_type::COW,
         };
         let mut victim = mc_bamboo_loot::EntityView::new(victim_type);

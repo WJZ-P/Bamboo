@@ -25,6 +25,7 @@ pub mod navigation;
 pub mod nbt;
 pub mod path;
 pub mod skeleton;
+mod skeleton_drops;
 pub mod spawn;
 pub(crate) mod timing;
 
@@ -618,6 +619,7 @@ pub struct DamageSource {
     /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
     /// 空表示没有武器。
     pub weapon: Option<u16>,
+    pub looting_level: i32,
 }
 
 impl DamageSource {
@@ -636,6 +638,7 @@ impl DamageSource {
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            looting_level: 0,
         }
     }
 
@@ -675,6 +678,14 @@ impl DamageSource {
         self
     }
 
+    /// 记录出手时主手武器的抢夺等级，供死亡掉落使用。
+    ///
+    /// Capture the main-hand Looting level at the hit for death drops.
+    pub fn with_looting_from(mut self, stack: &mc_bamboo_protocol::item::ItemStack) -> Self {
+        self.looting_level = super::arrow::enchantment_level(stack, "minecraft:looting");
+        self
+    }
+
     /// `damageSources().playerAttack(player)`。
     pub const fn player(uid: EntityUid, position: Vec3, creative: bool) -> Self {
         Self {
@@ -690,6 +701,7 @@ impl DamageSource {
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            looting_level: 0,
         }
     }
 

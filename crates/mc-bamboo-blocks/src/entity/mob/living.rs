@@ -1565,6 +1565,11 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     mob.dead = true;
     let by_player = mob.last_hurt_by_player_memory_time > 0;
+    if mob.mob_type == super::MobType::Skeleton {
+        mob.events.push(MobEvent::Death);
+        super::skeleton_drops::drop_on_death(me, mob, ctx, source, by_player);
+        return;
+    }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
     let experience = if mob.mob_type.is_monster() {
