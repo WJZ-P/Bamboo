@@ -10,6 +10,8 @@ use mc_bamboo_data::{blocks, registries::entity_type as kinds};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
+mod arrow;
+
 use super::tag::{self, Error, Result, put};
 use crate::{
     BlockState,
@@ -52,6 +54,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::Tnt { .. } => kinds::TNT,
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
+        crate::entity::KindPublic::Arrow(_) => kinds::ARROW,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -68,7 +71,13 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     put(
         &mut out,
         "Rotation",
-        Tag::List(vec![Tag::Float(public.yaw), Tag::Float(0.0)]),
+        Tag::List(vec![
+            Tag::Float(public.yaw),
+            Tag::Float(match &public.kind {
+                crate::entity::KindPublic::Arrow(arrow) => arrow.pitch,
+                _ => 0.0,
+            }),
+        ]),
     );
     put(&mut out, "fall_distance", Tag::Double(state.fall_distance));
     put(
@@ -117,6 +126,12 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             );
         }
         crate::entity::KindPublic::Mob(_) => {}
+        crate::entity::KindPublic::Arrow(_) => {
+            let crate::entity::KindState::Arrow(saved) = &state.kind else {
+                return Err(Error::new("mismatched arrow entity halves"));
+            };
+            arrow::write(saved, &mut out)?;
+        }
         crate::entity::KindPublic::ExperienceOrb { value } => {
             let crate::entity::KindState::ExperienceOrb(saved) = &state.kind else {
                 return Err(Error::new("mismatched experience orb entity halves"));
@@ -178,6 +193,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         // `split` 不读尺寸，拼回来时按 `kind` 重算。
         dimensions: (0.0, 0.0),
         kind: match id {
+            "minecraft:arrow" => EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1]))),
             "minecraft:falling_block" => {
                 let block = match tag::field(tag, "BlockState") {
                     Some(value) => tag::decode_block_state(value)?,

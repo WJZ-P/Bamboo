@@ -937,6 +937,7 @@ impl Report {
                 .players
                 .iter()
                 .map(|player| PlayerView {
+                    uuid: None,
                     uid: player.id,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),

@@ -203,6 +203,7 @@ pub trait BlockView {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerView {
     pub uid: EntityUid,
+    pub uuid: Option<[u8; 16]>,
     pub position: Vec3,
     pub eye_height: f32,
     pub alive: bool,
@@ -469,6 +470,11 @@ pub struct LandFacts {
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    ArrowImpact {
+        block: Option<BlockHit>,
+        hits: Vec<super::arrow::ArrowEntityHit>,
+        end: Vec3,
+    },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode { center: Vec3, radius: f32 },
     /// 下落方块这一刻的落地判定和后果：能不能放回去、发 1031 还是 1029、
@@ -567,6 +573,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::MergeWithNeighbours { others } => {
             Entity::apply_merge_with_neighbours(me, &others, world);
+        }
+        Command::ArrowImpact { block, hits, end } => {
+            super::arrow::impact(me, world, hits, block, end)
         }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {

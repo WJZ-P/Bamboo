@@ -9,6 +9,7 @@
 //! They tick after scheduled ticks and random ticks. Vanilla ticks entities before
 //! block entities; those already ran inside the scheduled-tick step.
 
+pub mod arrow;
 pub mod ctx;
 pub mod mob;
 pub mod parallel;
@@ -201,6 +202,7 @@ pub enum EntityKind {
     Tnt(PrimedTnt),
     Item(GroundItem),
     ExperienceOrb(ExperienceOrb),
+    Arrow(Box<arrow::Arrow>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -215,6 +217,7 @@ impl EntityKind {
             Self::Tnt(_) => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
+            Self::Arrow(_) => mc_bamboo_data::registries::entity_type::ARROW,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -411,6 +414,7 @@ impl Entity {
             &EntityKind::Tnt(data) => tnt::tick_tnt(self, data, ctx),
             EntityKind::Item(_) => Entity::tick_item(self, ctx),
             EntityKind::ExperienceOrb(_) => orb::tick_orb(self, ctx),
+            EntityKind::Arrow(_) => arrow::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }

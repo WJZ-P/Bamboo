@@ -158,6 +158,12 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
         };
+        if let mc_bamboo_blocks::entity::EntityKind::Arrow(arrow) = &entity.kind {
+            if !entity.removed && arrow.in_ground && arrow.shake_time == 0 {
+                pickup_arrow(region, id, entity_id, arrow, creative);
+            }
+            continue;
+        }
         if !mc_bamboo_blocks::entity::can_pick_up(&entity, &owner) {
             continue;
         }
@@ -208,6 +214,40 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         let chosen = orbs[player.random.next_int_bounded(orbs.len() as i32) as usize];
         crate::experience_pickup::pickup_orb(region, id, chosen);
     }
+}
+
+fn pickup_arrow(
+    region: &mut Region,
+    id: PlayerId,
+    uid: i32,
+    arrow: &mc_bamboo_blocks::entity::arrow::Arrow,
+    creative: bool,
+) {
+    use mc_bamboo_blocks::entity::arrow::Pickup;
+    match arrow.pickup {
+        Pickup::Disallowed => return,
+        Pickup::CreativeOnly if !creative => return,
+        Pickup::CreativeOnly => {}
+        Pickup::Allowed => {
+            let Some(player) = region.players.get_mut(&id) else {
+                return;
+            };
+            let before = player.inventory.slots.clone();
+            let left = player
+                .inventory
+                .receive(arrow.pickup_item.clone(), creative);
+            if !left.is_empty() {
+                return;
+            }
+            for slot in changed_slots(&before, &player.inventory) {
+                inventory::send_slot(player, &mut region.links, slot);
+            }
+        }
+    }
+    entity_tracking::broadcast_take(region, uid, id, 1);
+    region
+        .entities
+        .with_mut(uid, |entity| entity.removed = true);
 }
 
 fn changed_slots(before: &[ItemStack], inventory: &Inventory) -> Vec<usize> {

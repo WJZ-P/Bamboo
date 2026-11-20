@@ -500,6 +500,13 @@ impl TrackedEntity {
                 .find(|item| EntityData::index(item) == index);
             let item = match now {
                 Some(item) if Some(item) != before => item.clone(),
+                None if matches!(snapshot.data, KindData::Arrow(_)) => match index {
+                    0 => EntityData::SharedFlags(0),
+                    8 => EntityData::ArrowFlags(0),
+                    9 => EntityData::ArrowPierce(0),
+                    10 => EntityData::ArrowInGround(false),
+                    _ => continue,
+                },
                 None if before.is_some() => default_data_for_type(
                     index,
                     match &snapshot.data {
@@ -726,6 +733,7 @@ pub enum KindData {
         value: i32,
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
+    Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
 }
 
 impl Snapshot {
@@ -753,6 +761,7 @@ impl Snapshot {
     fn add_data(&self) -> i32 {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
+            KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -776,6 +785,7 @@ impl KindData {
             KindPublic::Item { stack, .. } => Self::Item(stack.clone()),
             KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
+            KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
         }
     }
 
@@ -785,7 +795,8 @@ impl KindData {
             Self::FallingBlock { .. }
             | Self::Item(_)
             | Self::ExperienceOrb { .. }
-            | Self::Mob(_) => None,
+            | Self::Mob(_)
+            | Self::Arrow(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -796,7 +807,8 @@ impl KindData {
             Self::FallingBlock { .. }
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
-            | Self::Mob(_) => None,
+            | Self::Mob(_)
+            | Self::Arrow(_) => None,
         }
     }
 
@@ -812,6 +824,7 @@ impl KindData {
     fn mob_x_rot(&self) -> Option<f32> {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
+            Self::Arrow(arrow) => Some(arrow.pitch),
             _ => None,
         }
     }
@@ -841,6 +854,22 @@ impl KindData {
                 vec![EntityData::ExperienceValue(*value)]
             }
             Self::ExperienceOrb { .. } => Vec::new(),
+            Self::Arrow(arrow) => {
+                let mut data = Vec::new();
+                if arrow.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if arrow.critical {
+                    data.push(EntityData::ArrowFlags(1));
+                }
+                if arrow.pierce != 0 {
+                    data.push(EntityData::ArrowPierce(arrow.pierce));
+                }
+                if arrow.in_ground {
+                    data.push(EntityData::ArrowInGround(true));
+                }
+                data
+            }
             Self::Mob(mob) => {
                 if mob.mob_type.is_monster() {
                     zombie_non_default_data(mob)

@@ -129,6 +129,7 @@ mod bench {
         for px in (-half..half).step_by(32) {
             for pz in (-half..half).step_by(32) {
                 level.players.push(PlayerView {
+                    uuid: None,
                     uid: 1_000_000 + level.players.len() as i32,
                     position: Vec3::new(f64::from(px) + 16.5, 64.0, f64::from(pz) + 16.5),
                     eye_height: 1.62,
