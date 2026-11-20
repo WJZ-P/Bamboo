@@ -124,15 +124,36 @@ fn spawning_chunks(region: &Region) -> Vec<ChunkPos> {
 fn spawnable_chunk_count(region: &Region) -> i32 {
     let mut chunks = BTreeSet::new();
     for player in region.players.values() {
-        let center = player.chunk_pos();
-        for dx in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
-            for dz in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
-                let chunk = ChunkPos::new(center.x + dx, center.z + dz);
-                if region.chunks.is_loaded(chunk) {
-                    chunks.insert(chunk);
-                }
+        for chunk in chunk_square(player.chunk_pos(), SPAWN_CHUNK_RADIUS) {
+            if region.chunks.is_loaded(chunk) {
+                chunks.insert(chunk);
             }
         }
     }
     chunks.len() as i32
+}
+
+/// 以 `center` 为中心、切比雪夫半径 `radius` 的区块，含对角。
+///
+/// The chunks within Chebyshev `radius` of `center`, diagonals included.
+fn chunk_square(center: ChunkPos, radius: i32) -> impl Iterator<Item = ChunkPos> {
+    (-radius..=radius).flat_map(move |dx| {
+        (-radius..=radius).map(move |dz| ChunkPos::new(center.x + dx, center.z + dz))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_spawn_chunk_square_is_seventeen_by_seventeen() {
+        let chunks: Vec<ChunkPos> = chunk_square(ChunkPos::new(0, 0), SPAWN_CHUNK_RADIUS).collect();
+        // 官方的追踪器八方向传播，所以是 17×17 的方形，不是 8 格的菱形。
+        // The vanilla tracker propagates in eight directions, so this is a 17 by 17
+        // square, not an 8-step diamond.
+        assert_eq!(chunks.len(), 289);
+        assert!(chunks.contains(&ChunkPos::new(8, 8)));
+        assert!(!chunks.contains(&ChunkPos::new(9, 0)));
+    }
 }
