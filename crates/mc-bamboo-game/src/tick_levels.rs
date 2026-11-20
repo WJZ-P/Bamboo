@@ -186,7 +186,9 @@ impl TickLevels {
         self.blocks.iter().copied().collect()
     }
 
-    #[cfg(test)]
+    /// 能 tick 实体的区块，按坐标有序。自然生成收集刷怪区块用。
+    ///
+    /// The entity-ticking chunks in coordinate order, for the spawn chunk list.
     pub(crate) fn entity_chunks(&self) -> BTreeSet<ChunkPos> {
         self.entities.iter().copied().collect()
     }

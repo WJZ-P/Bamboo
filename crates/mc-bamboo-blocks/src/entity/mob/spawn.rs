@@ -30,6 +30,8 @@ pub enum SpawnReason {
     Command,
     SpawnItemUse,
     Breeding,
+    /// `EntitySpawnReason.NATURAL`：自然生成。
+    Natural,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -41,6 +43,25 @@ pub enum SummonError {
     Failed(String),
     /// `commands.summon.failed.uuid`。
     DuplicateUuid,
+}
+
+/// `AgeableMob.AgeableMobGroupData`：一组自然生成的动物共享的组计数和幼年概率。
+///
+/// `AgeableMob.AgeableMobGroupData`: the group counter and baby odds shared by one
+/// naturally spawned group of animals.
+#[derive(Debug, Clone, Copy)]
+pub struct AgeableGroupData {
+    pub group_size: i32,
+    pub should_spawn_baby: bool,
+    pub baby_spawn_chance: f32,
+}
+
+/// 自然生成的组数据（`SpawnGroupData`）。Bamboo 只建模动物这一种。
+///
+/// Spawn-group data (`SpawnGroupData`). Only the animal variant is modelled.
+#[derive(Debug, Clone, Copy)]
+pub enum SpawnGroup {
+    Ageable(AgeableGroupData),
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -207,6 +228,33 @@ pub(crate) fn finalize_spawn(
     entity: &mut Entity,
     reason: SpawnReason,
 ) {
+    let mut group = None;
+    finalize_spawn_in_group(world, kind, entity, reason, &mut group);
+}
+
+/// `finalizeSpawn` 的自然生成入口：组数据在一组的多个个体之间共享。
+///
+/// The natural-spawn entry of `finalizeSpawn`: the group data is shared by every mob
+/// of one group.
+pub(crate) fn finalize_spawn_with_group(
+    world: &mut World,
+    kind: MobType,
+    entity: &mut Entity,
+    group: &mut Option<SpawnGroup>,
+) {
+    finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
+}
+
+/// `AgeableMob.getBabyStartAge()`。
+const BABY_START_AGE: i32 = -24000;
+
+fn finalize_spawn_in_group(
+    world: &mut World,
+    kind: MobType,
+    entity: &mut Entity,
+    reason: SpawnReason,
+    group: &mut Option<SpawnGroup>,
+) {
     let _ = reason;
     if kind.is_monster() {
         finalize_monster(world, kind, entity);
@@ -221,9 +269,27 @@ pub(crate) fn finalize_spawn(
     } else {
         CowSoundVariant::Moody
     };
-    entity.with_mob(|_, mob| {
+    // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
+    // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
+    // the mob into the group.
+    let data = group.get_or_insert(SpawnGroup::Ageable(AgeableGroupData {
+        group_size: 0,
+        should_spawn_baby: true,
+        baby_spawn_chance: 0.05,
+    }));
+    let SpawnGroup::Ageable(data) = data;
+    let baby = data.should_spawn_baby
+        && data.group_size > 0
+        && random.next_float() <= data.baby_spawn_chance;
+    data.group_size += 1;
+    entity.with_mob(|me, mob| {
         mob.variant = variant;
         mob.sound_variant = sound;
+        if baby {
+            living::set_age(me, mob, BABY_START_AGE);
+        }
+        // `Mob.finalizeSpawn`：跟随距离的随机加成和左撇子。
+        // `Mob.finalizeSpawn`: the random follow-range bonus and left-handedness.
         if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
             && range.modifier(RANDOM_SPAWN_BONUS).is_none()
         {

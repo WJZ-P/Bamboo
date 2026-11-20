@@ -72,6 +72,7 @@ mod lock;
 mod loot_stacks;
 mod menu;
 mod movement;
+mod natural_spawn;
 mod outgoing;
 mod pacing;
 mod partition_stats;

@@ -424,6 +424,15 @@ impl Level for RegionLevel<'_> {
             .unwrap_or(mc_bamboo_world::MIN_Y - 1)
     }
 
+    /// `getHeight(WORLD_SURFACE, pos)`：读区块里算好的世界表面高度图。
+    ///
+    /// `getHeight(WORLD_SURFACE, pos)`: the chunk's `WORLD_SURFACE` heightmap.
+    fn world_surface_y(&self, pos: BlockPos) -> i32 {
+        self.chunks
+            .world_surface_y(pos)
+            .unwrap_or(mc_bamboo_world::MIN_Y)
+    }
+
     /// 群系注册表 ID 来自区块的调色板，温度按官方 `Biome.getTemperature` 算。
     fn precipitation_facts(&self, pos: BlockPos) -> mc_bamboo_blocks::PrecipitationFacts {
         use mc_bamboo_worldgen::biome_temperature as biome;

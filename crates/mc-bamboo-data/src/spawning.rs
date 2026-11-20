@@ -7,12 +7,12 @@
 //! settings, exported from the official `MobCategory` and `Biome.getMobSettings()`.
 //! This module only provides the lookups.
 
-use crate::generated::mob_spawns::{
-    BiomeMobSpawns, MobCategoryDef, MobCategorySpawns, MobSpawnCostDef, MobSpawnerDef,
-};
+use crate::generated::mob_spawns::{BiomeMobSpawns, MobCategoryDef, MobCategorySpawns};
 use crate::generated::registries;
 
-pub use crate::generated::mob_spawns::{BIOME_MOB_SPAWNS, MOB_CATEGORIES};
+pub use crate::generated::mob_spawns::{
+    BIOME_MOB_SPAWNS, MOB_CATEGORIES, MobSpawnCostDef, MobSpawnerDef,
+};
 
 /// 官方 `MobCategory`，判别值就是 `MobCategory.values()` 的下标。
 ///

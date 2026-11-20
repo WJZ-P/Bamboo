@@ -841,8 +841,23 @@ pub trait Level: LevelSideState + LevelEntities {
         self.min_y() - 1
     }
 
-    /// 这一格所在群系的降水条件，`Biome.getPrecipitationAt(pos, seaLevel)` 加上
-    /// `Biome.warmEnoughToRain(pos, seaLevel)`。默认平原（测试用），真实实现读区块的
+    /// `getHeight(WORLD_SURFACE, pos)`：最高的非空气方块上面一格，整列是空气时是世界底部。
+    /// 自然刷怪取随机起点用得到（`NaturalSpawner.getRandomPosWithin`）。有真实高度图的
+    /// 实现应该覆盖它。
+    ///
+    /// `getHeight(WORLD_SURFACE, pos)`: one above the highest non-air block, or the world
+    /// bottom for an all-air column. Used by `NaturalSpawner.getRandomPosWithin`; levels
+    /// with a real heightmap should override it.
+    fn world_surface_y(&self, pos: BlockPos) -> i32 {
+        for y in (self.min_y()..=self.max_y()).rev() {
+            if !self.block_state(BlockPos::new(pos.x, y, pos.z)).is_air() {
+                return y + 1;
+            }
+        }
+        self.min_y()
+    }
+
+    /// 这一格所在群系的降水条件，`Biome.getPrecipitationAt(pos, seaLevel)` 加上    /// `Biome.warmEnoughToRain(pos, seaLevel)`。默认平原（测试用），真实实现读区块的
     /// 群系调色板再按 `mc-bamboo-worldgen` 算温度。
     fn precipitation_facts(&self, _pos: BlockPos) -> crate::weather::PrecipitationFacts {
         crate::weather::PrecipitationFacts::PLAINS
