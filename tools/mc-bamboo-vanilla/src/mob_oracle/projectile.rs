@@ -120,6 +120,21 @@ impl ProjectileCase {
         }
     }
 
+    fn fades(&self) -> bool {
+        self.name == "arrow_tipped_fade"
+    }
+
+    /// 弹药带的效果；褪色场景用毒箭，但不放靶子。
+    ///
+    /// The ammo's effect; the fade case uses a poison arrow without a target.
+    fn ammo_effect(&self) -> Option<i32> {
+        if self.fades() {
+            Some(mc_bamboo_data::registries::mob_effect::POISON)
+        } else {
+            self.effect()
+        }
+    }
+
     fn configure_effect_arrow(&self, data: &mut mc_bamboo_blocks::entity::arrow::Arrow) {
         use mc_bamboo_blocks::entity::arrow::ArrowVariant;
         use mc_bamboo_data::{
@@ -128,7 +143,7 @@ impl ProjectileCase {
         };
         use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
 
-        match self.effect() {
+        match self.ammo_effect() {
             Some(mob_effect::GLOWING) => {
                 data.pickup_item = ItemStack::new(items::SPECTRAL_ARROW, 1);
                 data.variant = ArrowVariant::of_ammo(&data.pickup_item);
@@ -368,6 +383,13 @@ impl Report {
                         }
                     });
                 }
+                if case.fades() && tick == 6 {
+                    level.entities.with_mut(case.first_id, |entity| {
+                        if let EntityKind::Arrow(data) = &mut entity.kind {
+                            data.in_ground_time = 597;
+                        }
+                    });
+                }
                 level.game.as_mut().unwrap().tick_cooldowns();
                 ticks.set_time(1000 + tick as i64);
                 let mut world = World::new(&mut level, &mut ticks);
@@ -451,7 +473,21 @@ impl Report {
                     self.mismatch(format!("{} tick {tick} target health bits: official {targets:?}, bamboo {actual:?}", case.name));
                 }
             }
-            let mut packets = Vec::new();
+            // 箭自己的实体事件（药水褪色）在 tick 里广播，排在移除和配对包前面。
+            // An arrow's own entity events (the potion puff) are broadcast during
+            // its tick, ahead of removal and pairing packets.
+            let arrow_events: Vec<_> = level
+                .entities
+                .take_mob_events()
+                .into_iter()
+                .filter(|(uid, _)| {
+                    level
+                        .entities
+                        .public_at(*uid)
+                        .is_some_and(|public| matches!(public.kind, KindPublic::Arrow(_)))
+                })
+                .collect();
+            let mut packets = event_packets(&arrow_events, || 0);
             let active: BTreeSet<_> = level
                 .entities
                 .ids()

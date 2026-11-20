@@ -239,7 +239,7 @@ public final class MobOracle {
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
-                    "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_spectral_hit", "arrow_power_punch_hit",
+                    "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
                     "skeleton_bow_normal", "skeleton_bow_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
@@ -2828,7 +2828,10 @@ public final class MobOracle {
         boolean water = name.startsWith("arrow_water_");
         boolean waterTail = name.equals("arrow_water_after_pierce");
         boolean rejected = name.endsWith("_rejected");
-        boolean hasWall = wall || noGravity || despawn || waterTail;
+        // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
+        // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
+        boolean fade = name.equals("arrow_tipped_fade");
+        boolean hasWall = wall || noGravity || despawn || waterTail || fade;
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -2903,7 +2906,7 @@ public final class MobOracle {
             } else {
                 arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
             }
-            if (tipped) {
+            if (tipped || fade) {
                 ItemStack ammo = new ItemStack(Items.TIPPED_ARROW);
                 ammo.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.POISON));
                 arrow.getSlot(0).set(ammo);
@@ -2950,6 +2953,16 @@ public final class MobOracle {
         int ticks = (effectHit || enchanted) ? 4 : skeleton ? 105 : (piercing || water) ? 3 : 26;
         int embeds = 0;
         int extinguishes = 0;
+        Bytes arrowEvents = new Bytes(official.registries);
+        int[] puffs = {0};
+        if (fade) {
+            world.packets = packet -> {
+                if (packet instanceof net.minecraft.network.protocol.game.ClientboundEntityEventPacket) {
+                    arrowEvents.add(packet);
+                    puffs[0]++;
+                }
+            };
+        }
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
             if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
@@ -2962,6 +2975,9 @@ public final class MobOracle {
                 if (despawn && tick == 6) {
                     putInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "life", 1198);
                 }
+                if (fade && tick == 6) {
+                    putInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "inGroundTime", 597);
+                }
                 if (player.damageCooldownTime > 0) player.damageCooldownTime--;
                 if (player.hurtTime > 0) player.hurtTime--;
                 if (shooter != null) {
@@ -2973,6 +2989,7 @@ public final class MobOracle {
                     if (arrow.isRemoved()) continue;
                     arrow.commonTick();
                     arrow.tick();
+                    arrowPackets.addAll(arrowEvents.take());
                     if (arrow.isRemoved()) {
                         Bytes gone = new Bytes(official.registries);
                         gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(arrow.getId()));
@@ -3059,7 +3076,8 @@ public final class MobOracle {
         }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
                 || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
-                || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())) {
+                || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
+                || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
         }
         if (flame && (player.getTicksFrozen() != 0

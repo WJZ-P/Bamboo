@@ -1156,10 +1156,21 @@ impl EntityStore {
     pub fn take_mob_events(&mut self) -> Vec<(EntityUid, Vec<super::mob::MobEvent>)> {
         let mut out = Vec::new();
         let take = |row: &mut EntityRow| -> Option<(EntityUid, Vec<super::mob::MobEvent>)> {
-            let super::KindState::Mob(mob) = &mut row.state.kind else {
-                return None;
-            };
-            (!mob.events.is_empty()).then(|| (row.public.uid, std::mem::take(&mut mob.events)))
+            match &mut row.state.kind {
+                super::KindState::Mob(mob) => (!mob.events.is_empty())
+                    .then(|| (row.public.uid, std::mem::take(&mut mob.events))),
+                // 药水箭褪色的 `broadcastEntityEvent(this, 0)` 走同一条事件通道。
+                // A tipped arrow's fading `broadcastEntityEvent(this, 0)` shares this channel.
+                super::KindState::Arrow(arrow) => {
+                    super::arrow::take_potion_puff(arrow).then(|| {
+                        (
+                            row.public.uid,
+                            vec![super::mob::MobEvent::EntityEvent { event: 0 }],
+                        )
+                    })
+                }
+                _ => None,
+            }
         };
         for &row in self.index.values() {
             if let Some(entry) = self.slots[row].as_mut()

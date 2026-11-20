@@ -103,6 +103,15 @@ pub struct Arrow {
     needs_sync: bool,
     sync_velocity: bool,
     pierced: Vec<EntityUid>,
+    /// `AbstractArrow.inGroundTime`：连续插地的刻数，不进存档。
+    ///
+    /// `AbstractArrow.inGroundTime`: consecutive ticks in the ground; not saved.
+    pub in_ground_time: i32,
+    /// 这一刻 `Arrow.tick` 广播了实体事件 0（药水褪色的粒子），等同步层取走。
+    ///
+    /// `Arrow.tick` broadcast entity event 0 (the potion puff) this tick; the
+    /// sync layer takes it.
+    potion_puff: bool,
 }
 
 impl Default for Arrow {
@@ -131,6 +140,8 @@ impl Default for Arrow {
             sync_velocity: false,
             pierced: Vec::new(),
             variant: ArrowVariant::Normal,
+            in_ground_time: 0,
+            potion_puff: false,
         }
     }
 }
@@ -360,6 +371,8 @@ fn tick_or_check_ground(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
             arrow.life += 1;
             me.removed = arrow.life >= 1200;
         }
+        arrow.in_ground_time += 1;
+        fade_exposed_potion(arrow);
         if !me.removed
             && let Some(pitch) = travel_effects(me, blocks, position)
         {
@@ -367,8 +380,55 @@ fn tick_or_check_ground(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
         }
         true
     } else {
+        arrow.in_ground_time = 0;
         false
     }
+}
+
+/// `Arrow.tick` 服务端那半：药水箭连续插地 600 刻后广播事件 0，拾取物换成普通箭。
+/// 官方在 `super.tick()` 之后判，这里放在插地分支末尾；这一刻落地（`inGroundTime`
+/// 是 0）或被拔出（不再插地）都不触发，所以只有插地分支需要判。
+///
+/// The server half of `Arrow.tick`: after 600 consecutive ticks in the ground a
+/// tipped arrow broadcasts event 0 and its pickup becomes a plain arrow. Vanilla
+/// checks after `super.tick()`; only the in-ground branch can satisfy it, since a
+/// landing tick has `inGroundTime == 0` and a dislodged arrow is no longer in ground.
+fn fade_exposed_potion(arrow: &mut Arrow) {
+    if arrow.in_ground
+        && arrow.variant == ArrowVariant::Normal
+        && arrow.in_ground_time >= 600
+        && has_potion_contents(arrow)
+    {
+        arrow.potion_puff = true;
+        arrow.pickup_item = ItemStack::new(item::ARROW, 1);
+    }
+}
+
+/// 取走这一刻的药水褪色事件。
+///
+/// Take this tick's potion puff event.
+pub(crate) fn take_potion_puff(arrow: &mut Arrow) -> bool {
+    std::mem::take(&mut arrow.potion_puff)
+}
+
+/// `!getPotionContents().equals(PotionContents.EMPTY)`。
+fn has_potion_contents(arrow: &Arrow) -> bool {
+    use mc_bamboo_data::registries::data_component_type::POTION_CONTENTS;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let patch = arrow.pickup_item.patch();
+    matches!(
+        defaults::resolve(arrow.pickup_item.item, &patch, POTION_CONTENTS),
+        Some(ComponentValue::PotionContents {
+            potion,
+            custom_color,
+            custom_effects,
+            custom_name,
+        }) if potion.is_some()
+            || custom_color.is_some()
+            || !custom_effects.is_empty()
+            || custom_name.is_some()
+    )
 }
 
 fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
@@ -1227,28 +1287,14 @@ mod tests {
     #[test]
     fn a_tipped_arrow_applies_its_potion_effects() {
         use crate::entity::mob::MobType;
-        use mc_bamboo_data::registries::{data_component_type as kinds, mob_effect};
-        use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+        use mc_bamboo_data::registries::mob_effect;
 
         let mut level = crate::testing::TestLevel::new();
         let mut ticks = crate::BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
         let target =
             world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(3.0, 64.0, 0.5)));
-        let mut ammo = ItemStack::new(item::TIPPED_ARROW, 1);
-        let mut patch = ComponentPatch::new();
-        patch.put(
-            kinds::POTION_CONTENTS,
-            PatchEntry::Set(ComponentValue::PotionContents {
-                potion: Some(mc_bamboo_data::registries::potion::POISON),
-                custom_color: None,
-                custom_effects: Vec::new(),
-                custom_name: None,
-            }),
-        );
-        let (added, removed) = patch.to_opaque();
-        ammo.added = added;
-        ammo.removed = removed;
+        let ammo = poison_arrow_stack();
         let arrow = Entity::arrow_from_shot(ArrowShot {
             position: Vec3::new(0.5, 65.0, 0.5),
             direction: Vec3::new(1.0, 0.0, 0.0),
@@ -1274,6 +1320,63 @@ mod tests {
             Some(112),
             "药水箭的 `potion_duration_scale` 是 0.125，45 秒的毒变成 112 刻"
         );
+    }
+
+    fn poison_arrow_stack() -> ItemStack {
+        use mc_bamboo_data::registries::data_component_type as kinds;
+        use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+        let mut ammo = ItemStack::new(item::TIPPED_ARROW, 1);
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::POTION_CONTENTS,
+            PatchEntry::Set(ComponentValue::PotionContents {
+                potion: Some(mc_bamboo_data::registries::potion::POISON),
+                custom_color: None,
+                custom_effects: Vec::new(),
+                custom_name: None,
+            }),
+        );
+        let (added, removed) = patch.to_opaque();
+        ammo.added = added;
+        ammo.removed = removed;
+        ammo
+    }
+
+    /// `Arrow.tick`：插地第 600 刻广播事件 0，拾取物变成普通箭，颜色回到 -1。
+    #[test]
+    fn a_tipped_arrow_fades_after_600_ticks_in_the_ground() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        level.set(
+            BlockPos::new(2, 64, 0),
+            BlockState(mc_bamboo_data::blocks::STONE),
+        );
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut arrow = Entity::arrow(Vec3::new(2.5, 64.5, 0.5));
+        if let EntityKind::Arrow(state) = &mut arrow.kind {
+            state.pickup_item = poison_arrow_stack();
+        }
+        let uid = world.spawn_entity(arrow);
+        let state = |world: &World<'_>| match &world.entity(uid).unwrap().kind {
+            EntityKind::Arrow(arrow) => {
+                (arrow.in_ground_time, arrow.potion_puff, potion_color(arrow))
+            }
+            _ => unreachable!(),
+        };
+        for _ in 0..599 {
+            world.tick_entities();
+        }
+        let (time, puff, color) = state(&world);
+        assert_eq!((time, puff), (599, false));
+        assert_ne!(color, -1);
+        world.tick_entities();
+        assert_eq!(state(&world), (600, true, -1));
+        let entity = world.entity(uid).unwrap();
+        let EntityKind::Arrow(arrow) = &entity.kind else {
+            unreachable!()
+        };
+        assert_eq!(arrow.pickup_item, ItemStack::new(item::ARROW, 1));
     }
 
     #[test]
