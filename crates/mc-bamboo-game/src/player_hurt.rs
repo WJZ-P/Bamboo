@@ -200,6 +200,34 @@ pub(crate) fn hurt_player_in(
     amount: f32,
     random: &mut Option<JavaRandom>,
 ) -> (bool, Option<PlayerDeathDrops>) {
+    // 火矢先点燃，再伤害；拒绝伤害时只恢复火焰刻数，不恢复冰冻。
+    // Flaming arrows ignite before damage; rejection restores only the fire timer, not freezing.
+    let previous_fire = if source.arrow_ignite_ticks > 0 {
+        parts.players.get_mut(&id).map(|player| {
+            let previous = player.environment.remaining_fire_ticks;
+            crate::player_environment::ignite_player(player, source.arrow_ignite_ticks);
+            previous
+        })
+    } else {
+        None
+    };
+    let outcome = hurt_player_damage(parts, id, source, amount, random);
+    if !outcome.0
+        && let Some(previous) = previous_fire
+        && let Some(player) = parts.players.get_mut(&id)
+    {
+        player.environment.remaining_fire_ticks = previous;
+    }
+    outcome
+}
+
+fn hurt_player_damage(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    source: DamageSource,
+    amount: f32,
+    random: &mut Option<JavaRandom>,
+) -> (bool, Option<PlayerDeathDrops>) {
     let difficulty = parts.difficulty;
     let Some(player) = parts.players.get_mut(&id) else {
         return (false, None);
@@ -625,6 +653,26 @@ mod mob_hit_tests {
         source.direct = Some(1 << 20);
         source.position = Some(Vec3::new(1.5, 64.0, 0.5));
         source
+    }
+
+    #[test]
+    fn flaming_arrow_restores_only_fire_after_creative_rejection() {
+        let (mut region, id) = region_with_player(20.0);
+        let player = region.players.get_mut(&id).unwrap();
+        player.game_mode = GameMode::Creative;
+        player.environment.remaining_fire_ticks = 37;
+        player.environment.ticks_frozen = 80;
+        let mut source = DamageSource::environment(DamageKind::Arrow);
+        source.arrow_ignite_ticks = 100;
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(!world.hurt_player_from_mob(id.0, source, 3.0, None));
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 20.0);
+        assert_eq!(player.environment.remaining_fire_ticks, 37);
+        assert_eq!(player.environment.ticks_frozen, 0);
     }
 
     /// 精确驱动的世界当场落地：第一下打中，同一刻的第二下落在无敌帧里返回假，

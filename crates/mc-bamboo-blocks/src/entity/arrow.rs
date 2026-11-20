@@ -497,21 +497,17 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
         creative_player: owner_player.is_some_and(|p| p.creative),
         position: Some(me.position),
         projectile_motion: Some(me.delta),
+        arrow_ignite_ticks: if me.remaining_fire_ticks > 0 { 100 } else { 0 },
         attacker_uuid: arrow.owner_uuid,
         scale_when_non_player: owner
             .as_ref()
             .is_some_and(|p| matches!(p.kind, KindPublic::Mob(_))),
         ..DamageSource::environment(DamageKind::Arrow)
     };
-    let burning = me.remaining_fire_ticks > 0;
     let accepted = if hit.player {
-        let accepted = world.hurt_player_from_mob(hit.uid, source, damage as f32, owner.as_ref());
-        if accepted && burning {
-            world.ignite_player_from_mob(hit.uid, 100);
-        }
-        accepted
+        world.hurt_player_from_mob(hit.uid, source, damage as f32, owner.as_ref())
     } else {
-        hurt_mob(world, hit.uid, source, damage as f32, burning)
+        hurt_mob(world, hit.uid, source, damage as f32)
     };
     if accepted {
         play_hit_sound(me, world);
@@ -577,18 +573,13 @@ pub(super) fn enchantment_level(stack: &ItemStack, enchantment: &str) -> i32 {
         .unwrap_or(0)
 }
 
-fn hurt_mob(
-    world: &mut World<'_>,
-    target: EntityUid,
-    source: DamageSource,
-    damage: f32,
-    burning: bool,
-) -> bool {
+fn hurt_mob(world: &mut World<'_>, target: EntityUid, source: DamageSource, damage: f32) -> bool {
+    let burning = source.arrow_ignite_ticks > 0;
     let mut previous_fire = 0;
     if burning {
         world.with_entity_mut(target, &mut |entity| {
             previous_fire = entity.remaining_fire_ticks;
-            entity.remaining_fire_ticks = previous_fire.max(100);
+            entity.remaining_fire_ticks = previous_fire.max(source.arrow_ignite_ticks);
             if let Some(mob) = entity.kind.mob_mut() {
                 mob.ticks_frozen = 0;
             }

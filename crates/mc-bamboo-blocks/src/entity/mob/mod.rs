@@ -619,6 +619,10 @@ pub struct DamageSource {
     /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
     /// 空表示没有武器。
     pub weapon: Option<u16>,
+    /// 火矢命中时，在受伤判定前尝试点燃目标的刻数。
+    ///
+    /// If nonzero, a flaming arrow tries to ignite the target before damage.
+    pub arrow_ignite_ticks: i32,
     pub(super) looting_level: i32,
 }
 
@@ -638,6 +642,7 @@ impl DamageSource {
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            arrow_ignite_ticks: 0,
             looting_level: 0,
         }
     }
@@ -702,6 +707,7 @@ impl DamageSource {
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            arrow_ignite_ticks: 0,
             looting_level: 0,
         }
     }
