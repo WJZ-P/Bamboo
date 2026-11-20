@@ -1165,6 +1165,11 @@ WebView2 的渲染进程不算在内。
 - 实体容器（矿车、船）没有移植，`EntityKind` 只有物品、下落方块和点燃的 TNT；
   官方漏斗的 `getEntityContainer` 会读中心 1×1×1 盒里的容器实体，这一支连官方行为本身都缺，
   闲置漏斗休眠也按「没有这类实体」处理。
+- 桌面端设置页保存这四个世界生成键时和官方的写法有两处差别（语义不变）：`level-type` 的旧名
+  `default` / `largebiomes` 会归一成 `minecraft:normal` / `minecraft:large_biomes`，种子和
+  `generator-settings` 的前后空白会去掉；官方保留文件里的原字符串。另外，世界类型是超平坦时，
+  界面里解析不了的 `generator-settings`（坏 JSON、未知方块或群系）会**拒绝保存并提示**，
+  而官方只是记一条 error、静默用默认超平坦预设。命令行版和直接改文件都不受影响。
 
 （2026-11-14 按实现更新：`docs/performance-optimizations.md` 7g.1–7g.6 / 7i / 第 9 节、
 `docs/configuration.md`、`README.md`「现在能玩什么」的世界边界条目、`crates/mc-bamboo-server/src/config_files.rs`；
