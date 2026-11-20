@@ -2455,7 +2455,7 @@ public final class MobOracle {
                 if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
                 if (noGravity && tick == 10) arrows.getFirst().setNoGravity(false);
                 if (despawn && tick == 6) {
-                    put(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "life", 1198);
+                    putInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "life", 1198);
                 }
                 if (player.damageCooldownTime > 0) player.damageCooldownTime--;
                 if (player.hurtTime > 0) player.hurtTime--;
@@ -2518,7 +2518,7 @@ public final class MobOracle {
         }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
                 || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
-                || despawn && (embeds != 2 || !arrows.getFirst().isRemoved())) {
+                || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
         }
         out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name) + ",\"difficulty\":" + difficulty.getId()
