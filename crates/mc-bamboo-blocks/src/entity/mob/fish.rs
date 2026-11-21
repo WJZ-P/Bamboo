@@ -895,6 +895,41 @@ mod tests {
         row.into_entity().kind.mob().expect("a mob").clone()
     }
 
+    /// `AbstractFish.aiStep` 只属于鱼：站在平整石头上的羊不管闲不闲逛，脚都不该离地。
+    /// 守卫丢了时羊落地后的下一刻就被加 0.4 的竖直速度（`sheep_eat` 和 `island_command`
+    /// 的回归）。羊要带 AI：没有 AI 的生物不 `travel`，永远不着地，也就不会扑腾。
+    ///
+    /// `AbstractFish.aiStep` belongs to fish only: a sheep on flat stone must keep its feet
+    /// on the ground whether it strolls or not. Without the guard it gains 0.4 upward speed
+    /// the tick after landing (the `sheep_eat` and `island_command` regressions). The sheep
+    /// needs its AI: a mob without AI never travels, never lands and so never flops.
+    #[test]
+    fn land_animals_on_the_ground_never_flop() {
+        use mc_bamboo_core::BlockPos;
+
+        use crate::{BlockTicks, state::BlockState, testing::TestLevel, world::World};
+
+        let mut level = TestLevel::new();
+        for x in -3..=3 {
+            for z in -3..=3 {
+                level.set(
+                    BlockPos::new(x, 63, z),
+                    BlockState(mc_bamboo_data::blocks::STONE),
+                );
+            }
+        }
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let sheep = Entity::by_mob_type(MobType::Sheep, Vec3::new(0.5, 64.0, 0.5));
+        let id = world.spawn_entity(sheep);
+        for tick in 0..20 {
+            world.tick_entities();
+            let mut y = None;
+            world.with_entity_mut(id, &mut |entity| y = Some(entity.position.y));
+            assert_eq!(y, Some(64.0), "tick {tick}: the sheep left the ground");
+        }
+    }
+
     #[test]
     fn salmon_variant_survives_a_save_and_load() {
         let tag = saved(MobType::Salmon, 2, 0);
