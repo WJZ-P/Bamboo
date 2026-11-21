@@ -76,6 +76,7 @@ pub use interact::{
     run_block_event_phase_with_cache, run_due_ticks, run_due_ticks_with_cache, run_entity_tick,
     run_scheduled_ticks, run_scheduled_ticks_with_cache, use_item, use_item_on,
     use_item_on_checked, use_item_on_checked_with_stack, use_item_on_with_stack,
+    use_item_with_stack,
 };
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use item_use::{StickSelect, debug_stick_select};

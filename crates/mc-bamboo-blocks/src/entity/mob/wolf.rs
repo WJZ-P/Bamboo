@@ -554,10 +554,7 @@ fn outcome(result: InteractionResult, shrink_held: bool) -> MobInteraction {
     MobInteraction {
         result,
         shrink_held,
-        replacement: None,
-        open_inventory: false,
-        shear: false,
-        ride: false,
+        ..MobInteraction::pass()
     }
 }
 

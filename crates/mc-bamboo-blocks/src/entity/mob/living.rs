@@ -65,6 +65,9 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if me.removed {
         return;
     }
+    // `Pufferfish.tick` 在 `super.tick()` 之前跑膨胀 / 收缩。
+    // `Pufferfish.tick` runs the inflate/deflate machine before `super.tick()`.
+    super::fish::pre_tick(me, mob, ctx);
     // `Entity.commonTick`。
     if mob.invulnerable_time > 0 {
         mob.invulnerable_time -= 1;
@@ -179,7 +182,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         me.discard();
         return;
     }
-    let persistent = mob.persistence_required;
+    let persistent = mob.requires_custom_persistence();
     let mut nearest: Option<f64> = None;
     ctx.blocks().for_each_player(&mut |player| {
         if player.spectator {
@@ -198,7 +201,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let near_sqr = 32.0 * 32.0;
     // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
     // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
-    if !persistent && distance > far_sqr && mob.mob_type.removes_when_far_away() {
+    if !persistent && distance > far_sqr && mob.removes_when_far_away() {
         me.discard();
         return;
     }
@@ -208,7 +211,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         && distance > near_sqr
     {
         // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
-        if mob.mob_type.removes_when_far_away() {
+        if mob.removes_when_far_away() {
             me.discard();
         }
     } else if distance < near_sqr {
@@ -280,6 +283,7 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             position: me.position,
             on_ground: me.on_ground,
             in_floatable_fluid: fluid_height(mob, fluid_tags::ENTITY_FLOATABLE) > 0.0,
+            in_water: me.in_water,
             width,
             height,
             max_up_step: max_up_step(mob),
@@ -319,8 +323,21 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
     mob.attributes.value(attribute::STEP_HEIGHT) as f32
 }
 
-/// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
+/// `AgeableWaterCreature.baseTick`：先记下氧气，`super.baseTick()` 之后再 `handleAirSupply`；
+/// 别的生物只有 `super.baseTick()`。
+///
+/// `AgeableWaterCreature.baseTick` remembers the air first and handles it after
+/// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let pre_tick_air = mob.air_supply;
+    mob_base_tick(me, mob, ctx);
+    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
+        super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    }
+}
+
+/// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
+fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`。
     mob.was_in_powder_snow = mob.in_powder_snow;
     mob.in_powder_snow = false;
@@ -370,8 +387,15 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 .is(mc_bamboo_data::blocks::BUBBLE_COLUMN)
         {
             // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。
-            mob.air_supply -= 1;
-            if mob.air_supply <= -20 {
+            // 能在水下呼吸的（`canDrownInWater` 为假）走补气那一支。
+            // Mobs that breathe under water take the refill branch instead.
+            let drowns = !mob.mob_type.can_breathe_under_water();
+            if drowns {
+                mob.air_supply -= 1;
+            } else if mob.air_supply < 300 {
+                mob.air_supply = (mob.air_supply + 4).min(300);
+            }
+            if drowns && mob.air_supply <= -20 {
                 mob.air_supply = 0;
                 hurt_server(
                     me,
@@ -447,10 +471,26 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
                 return;
             }
+            // `Entity.makeSound` 遇到空的叫声直接返回，也不取音高的两个随机数。
+            // `Entity.makeSound` returns on a null sound without drawing the pitch.
+            let Some(sound) = ambient_voice(me, mob) else {
+                return;
+            };
             let pitch = voice_pitch(me, mob);
-            let sound = voice_of(mob, Voice::Ambient);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
+    }
+}
+
+/// `Mob.getAmbientSound`：河豚没有叫声；海龟只有成年、在水外、站在地上时才叫。
+///
+/// `Mob.getAmbientSound`: the pufferfish has none, and a turtle only calls as an adult
+/// standing on land out of the water.
+fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
+    match mob.mob_type {
+        super::MobType::Pufferfish => None,
+        super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
+        _ => Some(voice_of(mob, Voice::Ambient)),
     }
 }
 
@@ -461,6 +501,18 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
     if mob.mob_type.is_equine() {
         return super::equine::voice(mob, voice);
+    }
+    // 海龟的受伤和死亡音按幼年分两种，叫声只在陆地上有（见 `play_ambient_sound`）。
+    // Turtle hurt and death sounds depend on age; the ambient sound is land-only.
+    if super::turtle::is_turtle(mob.mob_type) {
+        return match voice {
+            Voice::Hurt if mob.is_baby() => "minecraft:entity.turtle.hurt_baby",
+            Voice::Hurt => "minecraft:entity.turtle.hurt",
+            Voice::Death if mob.is_baby() => "minecraft:entity.turtle.death_baby",
+            Voice::Death => "minecraft:entity.turtle.death",
+            Voice::Ambient => "minecraft:entity.turtle.ambient_land",
+            Voice::Eat | Voice::Angry => "minecraft:entity.turtle.ambient_land",
+        };
     }
     match voice {
         Voice::Hurt => mob
@@ -611,6 +663,23 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         super::wolf::play_ambient_sound(me, mob, 0);
         return;
     }
+    if super::turtle::is_turtle(mob.mob_type) {
+        // `Turtle.getAmbientSound`：只有成年的、在水外站在地上时才叫，其余没有声音，
+        // 也不取音高的两个随机数。
+        // `Turtle.getAmbientSound`: only an adult on land out of water makes a sound;
+        // otherwise no sound and no pitch draws.
+        if !me.in_water && me.on_ground && !mob.is_baby() {
+            let pitch = voice_pitch(me, mob);
+            play_sound(
+                me,
+                mob,
+                "minecraft:entity.turtle.ambient_land",
+                mob.mob_type.sound_volume(),
+                pitch,
+            );
+        }
+        return;
+    }
     if mob.mob_type.is_equine() {
         // 马科的叫声和音量（0.8）按自己的类。
         // Equines use their own ambient sound and volume (0.8).
@@ -718,6 +787,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// The shared chain from `Animal.aiStep` down to `LivingEntity.aiStep`.
 fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    // `AbstractFish.aiStep` 在 `LivingEntity.aiStep` 之前：只有这一支的鱼离水才扑腾。
+    // `AbstractFish.aiStep` runs before `LivingEntity.aiStep`: only fish flop out of water.
+    if super::fish::is_fish(mob.mob_type) {
+        super::fish::ai_step(me, mob);
+    }
     let fox = mob.mob_type == super::MobType::Fox;
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
@@ -815,6 +889,11 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
             }
             me.delta = Vec3::default();
+        } else if super::squid::is_squid(mob.mob_type) {
+            // `Squid.travel`：只有 `move(SELF, deltaMovement)`。
+            // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
+            let movement = me.delta;
+            motion::move_living(me, mob, ctx, movement);
         } else {
             travel(me, mob, ctx, input);
         }
@@ -866,8 +945,8 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if fox {
         super::fox::pick_up_items(me, mob, ctx);
     }
-    // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
-    if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
+    // `AgeableMob.aiStep`：僵尸和鱼都不在这一层，年龄/求爱都不动。
+    if mob.mob_type.is_ageable() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
             for _ in 0..3 {
                 me.random.next_double();
@@ -875,12 +954,26 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
         mob.forced_age_timer -= 1;
     }
-    if !mob.mob_type.is_monster() && is_alive(me, mob) {
+    if mob.mob_type.is_ageable() && is_alive(me, mob) {
+        let was_baby = mob.is_baby();
         if mob.is_baby() && !mob.age_locked {
             set_age(me, mob, mob.age + 1);
         } else if mob.age > 0 {
             set_age(me, mob, mob.age - 1);
         }
+        // `Turtle.ageBoundaryReached`：长大成人时按 `turtle_grow` 表掉鳞甲。
+        // `Turtle.ageBoundaryReached`: a turtle that grows up drops from `turtle_grow`.
+        if was_baby
+            && !mob.is_baby()
+            && super::turtle::is_turtle(mob.mob_type)
+            && ctx.blocks().block_game_rules().mob_drops
+        {
+            let request = super::EntityLootRequest::new(super::turtle::grow_loot(), me, mob, None);
+            ctx.emit(crate::entity::ctx::Command::DropEntityLoot(request), me);
+        }
+    }
+    if super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::ai_step(me, mob, ctx);
     }
     if mob.age_lock_particle_timer > 0 {
         if mob.age_lock_particle_timer % 2 == 0 {
@@ -917,6 +1010,12 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Chicken {
         super::chicken::ai_step(me, mob, ctx);
     }
+    if super::squid::is_squid(mob.mob_type) {
+        super::squid::ai_step(me, mob);
+    }
+    // `Pufferfish.aiStep` 的尾部：膨胀时蜇附近的生物。
+    // The tail of `Pufferfish.aiStep`: sting nearby mobs while puffed up.
+    super::fish::puffer_touch(me, mob, ctx);
 }
 
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
@@ -1031,13 +1130,21 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 }
 
 /// `Mob.setSpeed`：同时设 `zza`。
-fn set_speed(mob: &mut Mob, speed: f32) {
+pub(crate) fn set_speed(mob: &mut Mob, speed: f32) {
     mob.speed = speed;
     mob.zza = speed;
 }
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
 fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+    if super::fish::is_fish(mob.mob_type) {
+        super::fish::move_control_tick(me, mob);
+        return;
+    }
+    if super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::move_control_tick(me, mob);
+        return;
+    }
     match mob.mover.operation {
         Operation::MoveTo => {
             mob.mover.operation = Operation::Wait;
@@ -1302,7 +1409,7 @@ fn relative_friction_movement(
 }
 
 /// `Entity.moveRelative`。
-pub(super) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
+pub(crate) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
     let length = input.length_sqr();
     if length < 1.0e-7 {
         return;
@@ -1361,6 +1468,18 @@ fn handle_on_climbable(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView, del
 
 /// `travelInFluid`。
 fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
+    // `AbstractFish.travelInWater` 整个换掉了水里的推进。
+    // `AbstractFish.travelInWater` replaces the whole in-water path.
+    if me.in_water && super::fish::is_fish(mob.mob_type) {
+        super::fish::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    // `Turtle.travelInWater` 换掉了水里的推进。
+    // `Turtle.travelInWater` replaces the in-water thrust.
+    if me.in_water && super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     let falling = me.delta.y <= 0.0;
     let old_y = me.position.y;
     let gravity = effective_gravity(me, mob);
@@ -1550,8 +1669,25 @@ pub(crate) fn has_line_of_sight(
 
 // ---- 受伤和死亡 ----
 
-/// `LivingEntity.hurtServer`。
+/// `hurtServer` 的虚分派：鱿鱼一支有自己的覆盖，其余直接走 `LivingEntity.hurtServer`。
+///
+/// The virtual dispatch of `hurtServer`: squid override it, everything else goes straight
+/// to `LivingEntity.hurtServer`.
 pub(crate) fn hurt_server(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    amount: f32,
+) -> bool {
+    if super::squid::is_squid(mob.mob_type) {
+        return super::squid::hurt_server(me, mob, ctx, source, amount);
+    }
+    living_hurt_server(me, mob, ctx, source, amount)
+}
+
+/// `LivingEntity.hurtServer`。
+pub(super) fn living_hurt_server(
     me: &mut Entity,
     mob: &mut Mob,
     ctx: &mut dyn EntityCtx,
@@ -1965,6 +2101,12 @@ pub(crate) fn apply_breed(
     world: &mut crate::world::World,
 ) {
     let kind = parent.kind;
+    // `Turtle.TurtleBreedGoal`：不生成幼崽，给母亲挂一颗蛋。
+    // `Turtle.TurtleBreedGoal`: the mother gets an egg instead of a calf.
+    if super::turtle::is_turtle(kind) {
+        super::turtle::breed(me, partner, position, world);
+        return;
+    }
     let mother = world.entity(partner).and_then(|entity| {
         entity
             .kind
