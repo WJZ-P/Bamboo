@@ -79,10 +79,10 @@ enum Line {
     ArrowPickup(projectile::ArrowPickupCase),
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
-    Egg(Box<egg::EggCase>),
-    EggThrow(egg::EggThrowCase),
     NaturalSpawn(natural_spawn::Case),
     GenSpawn(gen_spawn::Case),
+    Egg(Box<egg::EggCase>),
+    EggThrow(egg::EggThrowCase),
     End(End),
 }
 

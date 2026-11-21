@@ -84,7 +84,6 @@ impl EggCase {
                 difficulty: 2,
                 ..ZombieFacts::default()
             },
-            natural_spawn: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
@@ -92,6 +91,7 @@ impl EggCase {
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
+            natural_spawn: None,
         }
     }
 

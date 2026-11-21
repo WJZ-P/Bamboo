@@ -268,17 +268,16 @@ fn finalize_spawn_in_group(
         return;
     }
     let biome = world.biome_id(entity.block_position());
-    finalize_animal(kind, entity, biome, world.random(), group);
+    finalize_cow(kind, entity, biome, world.random(), group);
 }
 
 /// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
-/// `WorldGenRegion.random`。牛、猪、羊、鸡走 [`finalize_animal`]；以后加进来的动物
-/// 还没接区域随机源，暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
+/// `WorldGenRegion.random`。牛走 [`finalize_cow`]；以后加进来的动物还没接区域随机源，
+/// 暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
 ///
 /// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
-/// `WorldGenRegion.random`. Cows, pigs, sheep and chickens use [`finalize_animal`];
-/// later animals fall back to the level random until wired, which only affects their
-/// variants and age.
+/// `WorldGenRegion.random`. Cows use [`finalize_cow`]; animals added later fall back to
+/// the level random until wired, which only affects their variants and age.
 pub(super) fn finalize_generated(
     world: &mut World,
     kind: MobType,
@@ -291,19 +290,18 @@ pub(super) fn finalize_generated(
         kind,
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
     ) {
-        finalize_animal(kind, entity, biome, region_random, group);
+        finalize_cow(kind, entity, biome, region_random, group);
     } else {
         finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
     }
 }
 
-/// 农场动物的 `finalizeSpawn` 加 `AgeableMob` / `Mob` 那两层，随机源由调用方给：
-/// 运行时是 `Level.random`，生成期是 `WorldGenRegion.random`。
+/// `Cow.finalizeSpawn` 加 `AgeableMob` / `Mob` 那两层，随机源由调用方给：运行时是
+/// `Level.random`，生成期是 `WorldGenRegion.random`。
 ///
-/// Farm animals' `finalizeSpawn` plus the `AgeableMob` / `Mob` layers with a
-/// caller-supplied random: `Level.random` at run time, `WorldGenRegion.random` during
-/// generation.
-fn finalize_animal(
+/// `Cow.finalizeSpawn` plus the `AgeableMob` / `Mob` layers with a caller-supplied
+/// random: `Level.random` at run time, `WorldGenRegion.random` during generation.
+pub(super) fn finalize_cow(
     kind: MobType,
     entity: &mut Entity,
     biome: i32,
@@ -316,24 +314,22 @@ fn finalize_animal(
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
         let _ = random.next_int(1);
     }
-    entity.with_mob(|_, mob| {
-        if kind != MobType::Sheep {
-            mob.variant = variant;
-        }
-        if kind == MobType::Sheep {
-            super::sheep::set_color(mob, super::sheep::spawn_color(variant, random));
-        } else if kind == MobType::Chicken {
-            mob.chicken_sound_variant = super::chicken::SoundVariant::pick(random);
-        } else if kind == MobType::Pig {
-            mob.pig_sound_variant = super::pig::SoundVariant::pick(random);
-        } else {
-            mob.sound_variant = if random.next_int(2) == 0 {
+    // 各物种自己那层 `finalizeSpawn` 的取数：羊的毛色、鸡 / 猪 / 牛的叫声，都在
+    // `AgeableMob` 那层之前。
+    // Each species' own `finalizeSpawn` draws (sheep colour, chicken / pig / cow sound)
+    // come before the `AgeableMob` layer.
+    let sheep_color = (kind == MobType::Sheep).then(|| super::sheep::spawn_color(variant, random));
+    let chicken_sound =
+        (kind == MobType::Chicken).then(|| super::chicken::SoundVariant::pick(random));
+    let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
+    let cow_sound =
+        (!matches!(kind, MobType::Sheep | MobType::Chicken | MobType::Pig)).then(|| {
+            if random.next_int(2) == 0 {
                 CowSoundVariant::Classic
             } else {
                 CowSoundVariant::Moody
-            };
-        }
-    });
+            }
+        });
     // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
     // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
     // the mob into the group.
@@ -347,13 +343,28 @@ fn finalize_animal(
         }));
     }
     let Some(SpawnGroup::Ageable(data)) = group else {
-        unreachable!("animal spawn group was just initialized");
+        unreachable!("刚放进去的动物组数据");
     };
     let baby = data.should_spawn_baby
         && data.group_size > 0
         && random.next_float() <= data.baby_spawn_chance;
     data.group_size += 1;
     entity.with_mob(|me, mob| {
+        if kind != MobType::Sheep {
+            mob.variant = variant;
+        }
+        if let Some(color) = sheep_color {
+            super::sheep::set_color(mob, color);
+        }
+        if let Some(sound) = chicken_sound {
+            mob.chicken_sound_variant = sound;
+        }
+        if let Some(sound) = pig_sound {
+            mob.pig_sound_variant = sound;
+        }
+        if let Some(sound) = cow_sound {
+            mob.sound_variant = sound;
+        }
         if baby {
             living::set_age(me, mob, BABY_START_AGE);
         }

@@ -21,12 +21,7 @@ use super::{
     goals::{Goal, GoalSelector, WrappedGoal},
     interact::{MobInteractRequest, MobInteraction},
 };
-use crate::{
-    InteractionResult,
-    entity::Entity,
-    random::{LegacyRandom, RandomSource},
-    state::item_is_tagged,
-};
+use crate::{InteractionResult, entity::Entity, random::LegacyRandom, state::item_is_tagged};
 
 /// `DATA_WOOL_ID` 的第 5 位：已剪毛。低 4 位是颜色。
 ///
@@ -120,7 +115,10 @@ pub fn set_sheared(mob: &mut Mob, sheared: bool) {
 ///
 /// `SheepColorSpawnRules.getSheepColor`: one draw over the outer weights (100 total) and,
 /// for the common colour, a second 499:1 draw against pink.
-pub(super) fn spawn_color(climate: CowVariant, random: &dyn RandomSource) -> DyeColor {
+pub(super) fn spawn_color(
+    climate: CowVariant,
+    random: &dyn crate::random::RandomSource,
+) -> DyeColor {
     use DyeColor::{Black, Brown, Gray, LightGray, White};
     let (singles, common) = match climate {
         CowVariant::Temperate => ([(Black, 5), (Gray, 5), (LightGray, 5), (Brown, 3)], White),
