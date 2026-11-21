@@ -2186,14 +2186,26 @@ pub(crate) fn apply_trample_turtle_egg(
     }
 }
 
-/// 落地 [`Command::EatBlock`]：`destroyBlock(pos, false)` 吃草，或在下面的草方块上发 2001 事件、
-/// 以标志 2 换成泥土。
+/// 落地 [`Command::EatBlock`]：重查目标方块仍在原位后再 `destroyBlock(pos, false)` 吃草，
+/// 或在下面的草方块上发 2001 事件、以标志 2 换成泥土。
 ///
-/// Applies [`Command::EatBlock`]: `destroyBlock(pos, false)` for a plant, or a 2001 event and a
-/// flag-2 swap to dirt for the grass block below.
+/// Applies [`Command::EatBlock`]: re-checks the target block before running
+/// `destroyBlock(pos, false)` for a plant, or a 2001 event and a flag-2 swap to
+/// dirt for the grass block below.
 pub(crate) fn apply_eat_block(world: &mut crate::world::World, pos: BlockPos, grass_below: bool) {
     if !grass_below {
-        world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+        if world
+            .block_state(pos)
+            .is_tagged(block_tags::EDIBLE_FOR_SHEEP)
+        {
+            world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+        }
+        return;
+    }
+    if !world
+        .block_state(pos)
+        .is(mc_bamboo_data::blocks::GRASS_BLOCK)
+    {
         return;
     }
     world.push_effect(crate::Effect::Destroyed {

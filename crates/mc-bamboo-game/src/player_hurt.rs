@@ -811,6 +811,32 @@ mod mob_hit_tests {
         assert_eq!(player.health.damage_cooldown, 20);
     }
 
+    /// 鸡蛋打中玩家是 0 点伤害：官方 `Player.hurtServer` 末尾 `damage == 0.0F`
+    /// 直接返回假，不扣血、不进无敌帧、不击退，也不发任何包。
+    ///
+    /// A thrown egg deals 0 damage to a player: vanilla `Player.hurtServer` ends
+    /// with `damage == 0.0F ? false`, so there is no health loss, no cooldown, no
+    /// knockback and no packet.
+    #[test]
+    fn a_thrown_egg_does_not_hurt_a_player() {
+        let (mut region, id) = region_with_player(20.0);
+        let mut source =
+            DamageSource::environment(DamageKind::Thrown).with_position(Vec3::new(1.5, 64.0, 0.5));
+        source.direct = Some(1 << 20);
+        source.projectile_motion = Some(Vec3::new(-1.0, 0.0, 0.0));
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(!world.hurt_player_from_mob(id.0, source, 0.0, None));
+            assert!(world.drain_effects().is_empty());
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 20.0);
+        assert_eq!(player.health.damage_cooldown, 0);
+        assert_eq!(player.health.hurt_time, 0);
+        assert_eq!(player.motion.delta, Vec3::default());
+    }
+
     /// 方块逻辑和并行驱动的落地阶段没有玩家那一半：记成延后的效果，按打中算。
     #[test]
     fn the_block_level_defers_a_mob_hit() {

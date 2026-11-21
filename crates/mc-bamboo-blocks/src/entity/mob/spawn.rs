@@ -514,7 +514,7 @@ pub(super) fn finalize_cow(
         *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(baby_chance)));
     }
     let Some(SpawnGroup::Ageable(data)) = group else {
-        unreachable!("刚放进去的动物组数据");
+        unreachable!("animal spawn group was just initialized");
     };
     let baby = data.roll_baby(random);
     entity.with_mob(|me, mob| {

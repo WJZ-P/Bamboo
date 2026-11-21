@@ -164,7 +164,7 @@ pub(crate) struct Player {
     ///
     /// A bow or crossbow in `LivingEntity.useItem`.
     pub(crate) weapon_use: Option<crate::player_weapon::WeaponUse>,
-    pub(crate) weapon_stats: crate::player_weapon::WeaponStats,
+    pub(crate) item_use_stats: crate::item_use_stats::ItemUseStats,
     /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
     pub(crate) pending_exhaustion: f32,
     /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
@@ -283,7 +283,7 @@ impl Player {
             environment: crate::player_environment::Environment::default(),
             use_item: None,
             weapon_use: None,
-            weapon_stats: Default::default(),
+            item_use_stats: Default::default(),
             pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,

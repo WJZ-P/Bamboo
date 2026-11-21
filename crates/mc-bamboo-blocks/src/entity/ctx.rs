@@ -751,7 +751,7 @@ pub enum Command {
         volume: f32,
         pitch: f32,
     },
-    ArrowExtinguished {
+    ProjectileExtinguished {
         pitch: f32,
     },
     /// `Pufferfish.touch`：先 `hurtServer`，打中了才下毒并放蜇刺声。
@@ -1076,7 +1076,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 pitch,
             );
         }
-        Command::ArrowExtinguished { pitch } => {
+        Command::ProjectileExtinguished { pitch } => {
             super::arrow::play_extinguished_sound(me, world, pitch);
         }
         Command::PufferSting {

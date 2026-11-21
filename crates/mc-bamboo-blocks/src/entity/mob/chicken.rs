@@ -175,3 +175,60 @@ impl SoundVariant {
 pub(super) fn sounds(mob: &Mob) -> [&'static str; 4] {
     mob.chicken_sound_variant.sounds(mob.is_baby())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use mc_bamboo_core::{ChunkPos, Vec3};
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+
+    use super::*;
+    use crate::entity::store::{EntityIds, EntityStore};
+
+    /// 羊毛字节、下蛋计时、叫声变种和猪鞍随实体整体搬到拆出去的岛，再原样合回来。
+    ///
+    /// The wool byte, egg timer, sound variants and pig saddle move with the entity to
+    /// a split-off island and come back unchanged.
+    #[test]
+    fn farm_animal_state_survives_an_island_split_and_merge() {
+        let mut store = EntityStore::with_ids(EntityIds::default());
+        let at = |x: f64| Vec3::new(x, 64.0, 0.5);
+        let mut sheep = Entity::by_mob_type(MobType::Sheep, at(40.5));
+        sheep.with_mob(|_, mob| mob.wool = 5 | 16);
+        let mut chicken = Entity::by_mob_type(MobType::Chicken, at(41.5));
+        chicken.with_mob(|_, mob| mob.chicken_sound_variant = SoundVariant::Picky);
+        let mut pig = Entity::by_mob_type(MobType::Pig, at(42.5));
+        pig.with_mob(|_, mob| {
+            mob.pig_sound_variant = super::super::pig::SoundVariant::Big;
+            mob.equipment
+                .set(EquipmentSlot::Saddle, ItemStack::new(items::SADDLE, 1));
+        });
+        let ids = [sheep, chicken, pig].map(|entity| store.spawn(entity));
+        store.spawn(Entity::by_mob_type(MobType::Chicken, at(1.5)));
+        let before: Vec<Entity> = store.iter().collect();
+
+        let wanted: BTreeSet<ChunkPos> = [ChunkPos::new(2, 0)].into_iter().collect();
+        let island = store.split_off(&wanted, 0x1234).unwrap();
+        assert_eq!(island.ids(), ids);
+        let mob = |uid| island.get(uid).unwrap().kind.mob().unwrap().clone();
+        assert_eq!(mob(ids[0]).wool, 5 | 16);
+        let moved_chicken = mob(ids[1]);
+        assert!((6000..12000).contains(&moved_chicken.egg_time));
+        assert_eq!(moved_chicken.chicken_sound_variant, SoundVariant::Picky);
+        let moved_pig = mob(ids[2]);
+        assert_eq!(
+            moved_pig.pig_sound_variant,
+            super::super::pig::SoundVariant::Big
+        );
+        assert_eq!(
+            moved_pig.equipment.get(EquipmentSlot::Saddle).item,
+            items::SADDLE
+        );
+
+        store.absorb(island);
+        let after: Vec<Entity> = store.iter().collect();
+        assert_eq!(after, before);
+    }
+}
