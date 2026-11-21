@@ -250,6 +250,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .collect();
     let player = PlayerView {
         uid: 1,
+        yaw: 0.0,
+        pitch: 0.0,
         uuid: None,
         position: Vec3::new(case.player_x, -62.0, 8.5),
         eye_height: 1.62,

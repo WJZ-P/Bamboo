@@ -1145,6 +1145,8 @@ impl Report {
                 .map(|player| PlayerView {
                     uuid: None,
                     uid: player.id,
+                    yaw: 0.0,
+                    pitch: 0.0,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),
                         f64::from_bits(player.y as u64),
