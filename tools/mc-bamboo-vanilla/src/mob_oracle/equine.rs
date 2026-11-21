@@ -459,7 +459,7 @@ impl Report {
             sneaking: case.sneak,
         };
         let outcome = entity
-            .with_mob(|me, mob| interact::interact(me, mob, &request, 0))
+            .with_mob(|me, mob| interact::interact(me, mob, &request, 0, false))
             .unwrap();
         let swing = match outcome.result {
             InteractionResult::Success => "PREDICTED",

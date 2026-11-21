@@ -3572,6 +3572,13 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PIG_VARIANT", facts.pig_variant),
         ("PIG_SOUND_VARIANT", facts.pig_sound_variant),
         ("SHEEP_WOOL", facts.sheep_wool),
+        ("POLAR_BEAR_STANDING", facts.polar_bear_standing),
+        ("PANDA_UNHAPPY", facts.panda_unhappy),
+        ("PANDA_SNEEZE", facts.panda_sneeze),
+        ("PANDA_EAT", facts.panda_eat),
+        ("PANDA_MAIN_GENE", facts.panda_main_gene),
+        ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
+        ("PANDA_FLAGS", facts.panda_flags),
         ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
         ("FISH_FROM_BUCKET", facts.fish_from_bucket),
         ("SALMON_VARIANT", facts.salmon_variant),
@@ -3611,6 +3618,7 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
     }
+    mooshroom_facts(&mut out, facts);
     // 敌对生物自己定义的元数据 index 和眼高，按常量名排序。
     // Hostile-mob metadata indices and eye heights, sorted by constant name.
     for (name, id) in &data.monster_facts.data_ids {
@@ -3620,6 +3628,31 @@ fn entity_types_file(data: &VersionData) -> String {
         let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(*eye));
     }
     out
+}
+
+/// 哞菇的元数据 index 和「花 → 迷之炖菜效果」表（官方 `SuspiciousEffectHolder`）。
+///
+/// The mooshroom metadata index and the flower → suspicious stew effects table
+/// (vanilla `SuspiciousEffectHolder`).
+fn mooshroom_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    let _ = writeln!(
+        out,
+        "pub const MOOSHROOM_TYPE: u8 = {};",
+        facts.mooshroom_type
+    );
+    let _ = writeln!(
+        out,
+        "/// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。"
+    );
+    let _ = writeln!(out, "pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[");
+    for (item, effects) in &facts.stew_flowers {
+        let list: Vec<String> = effects
+            .iter()
+            .map(|[effect, duration]| format!("({effect}, {duration})"))
+            .collect();
+        let _ = writeln!(out, "    ({item}, &[{}]),", list.join(", "));
+    }
+    let _ = writeln!(out, "];");
 }
 
 /// 狼的尺寸、元数据下标（含 `TamableAnimal` 的两项）和属性。
