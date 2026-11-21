@@ -3211,9 +3211,6 @@ public final class Probe {
         final List<String> chats = new ArrayList<>();
         final List<String> narrations = new ArrayList<>();
         int entityDataPackets;
-        /** 只有关于 `actor` 自己的元数据包；自然刷怪不会打乱它。 */
-        /** Only metadata packets about the actor; natural spawns cannot disturb it. */
-        int entityDataPackets;
         int heldSlot = -1;
         /** 最近一次捡起动画里的物品实体和玩家。 */
         int takenItem = -1;
@@ -4082,12 +4079,8 @@ public final class Probe {
         }
 
         private void onAttributes(ClientboundUpdateAttributesPacket packet) {
-            Remote remote = remotes.get(packet.getEntityId());
-            boolean naturallySpawned = remote != null && remote.type.getCategory() == MobCategory.CREATURE;
-            if (packet.getEntityId() == lastCowId || naturallySpawned) {
-                if (packet.getEntityId() == lastCowId) {
-                    cowAttributes += 1;
-                }
+            if (packet.getEntityId() == lastCowId) {
+                cowAttributes += 1;
                 check("cow: attributes carry the cow's movement speed",
                         packet.getValues().stream().anyMatch(snapshot ->
                                 snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));

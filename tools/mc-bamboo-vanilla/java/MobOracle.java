@@ -6271,8 +6271,8 @@ public final class MobOracle {
         if (scene.startsWith("pig_")) return 3;
         if (scene.startsWith("sheep_")) return 4;
         if (scene.startsWith("chicken_")) return 5;
-        if (scene.startsWith("mooshroom_")) return 6;
-        if (scene.startsWith("polar_bear_")) return 7;
+        if (scene.startsWith("mooshroom_")) return 10;
+        if (scene.startsWith("polar_bear_")) return 11;
         return 0;
     }
 
