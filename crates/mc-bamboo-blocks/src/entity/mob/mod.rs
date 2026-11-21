@@ -844,16 +844,26 @@ impl DamageKind {
         }
     }
 
-    /// `#panic_causes`。
+    /// `#no_anger`：挨打的不记 `lastHurtByMob`。
+    ///
+    /// `#no_anger`: the victim does not record `lastHurtByMob`.
+    pub const fn no_anger(self) -> bool {
+        matches!(self, Self::MobAttackNoAggro)
+    }
+
+    /// `#panic_causes`。没有 `mob_attack_no_aggro`（山羊冲撞不吓人）和 `thorns`。
+    ///
+    /// `#panic_causes`, which lists neither `mob_attack_no_aggro` (goat rams) nor `thorns`.
     pub const fn panic_causes(self) -> bool {
         matches!(
             self,
             Self::PlayerAttack
                 | Self::MobAttack
-                | Self::MobAttackNoAggro
                 | Self::Arrow
                 | Self::Thrown
-                | Self::Thorns
+                | Self::Magic
+                | Self::Wither
+                | Self::Explosion
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor

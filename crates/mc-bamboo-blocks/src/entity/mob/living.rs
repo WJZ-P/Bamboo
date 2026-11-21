@@ -1650,9 +1650,13 @@ pub(crate) fn hurt_server(
         true
     };
     if let Some(attacker) = source.attacker {
-        mob.last_hurt_by_mob = Some(attacker);
-        mob.last_hurt_by_mob_ref = source.attacker_uuid;
-        mob.last_hurt_by_mob_timestamp = me.tick_count;
+        // `resolveMobResponsibleForDamage`：`#no_anger`（山羊冲撞）不记仇。
+        // `resolveMobResponsibleForDamage`: `#no_anger` (a goat ram) leaves no grudge.
+        if !source.kind.no_anger() {
+            mob.last_hurt_by_mob = Some(attacker);
+            mob.last_hurt_by_mob_ref = source.attacker_uuid;
+            mob.last_hurt_by_mob_timestamp = me.tick_count;
+        }
         if source.attacker_is_player {
             mob.last_hurt_by_player = Some(attacker);
             mob.last_hurt_by_player_ref = source.attacker_uuid;
