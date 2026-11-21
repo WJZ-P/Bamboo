@@ -39,7 +39,9 @@ fn the_egg_keeps_a_single_item_and_the_throw_sets_its_angles() {
     };
     assert_eq!(data.item.count, 1);
     assert_eq!(egg.delta, Vec3::new(1.5, 0.0, 0.0));
-    assert_eq!(egg.y_rot, 90.0);
+    // 乘折叠常量 `57.295776F`，正东是 89.99999 而不是 90（mob-oracle 对过）。
+    // Multiplying by the folded `57.295776F` gives 89.99999 due east, not 90.
+    assert_eq!(egg.y_rot, 89.99999);
     assert_eq!(data.x_rot, 0.0);
 }
 
