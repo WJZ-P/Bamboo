@@ -406,6 +406,9 @@ pub(crate) fn on_move_vehicle(
     let Some(public) = region.entities.public_at(vehicle) else {
         return;
     };
+    let KindPublic::Mob(mob) = &public.kind else {
+        return;
+    };
     // 「移动太快」：和上一刻末的位置差太多就拉回去，官方阈值是 100 个平方格。
     //
     // "Moved too quickly": too far from the end of the last tick snaps back; the
@@ -415,17 +418,19 @@ pub(crate) fn on_move_vehicle(
         .length_sqr();
     let expected = public.delta.length_sqr();
     if moved - expected > 100.0 {
+        // 官方同样用 `ClientboundMoveVehiclePacket.fromEntity(vehicle)`，位置和朝向
+        // 都是载具的当前值。
+        //
+        // Vanilla also uses `fromEntity(vehicle)`: the vehicle's current position
+        // and rotation.
         let back = MoveVehicle {
             position: public.position,
-            yaw: player.yaw,
-            pitch: player.pitch,
+            yaw: public.yaw,
+            pitch: mob.x_rot,
         };
         region.links.send(id, &back);
         return;
     }
-    let KindPublic::Mob(mob) = &public.kind else {
-        return;
-    };
     // 官方 `vehicle.move(MoverType.PLAYER, 从 lastGood 到包里的位置)`：先用方块碰撞
     // 走一遍，再和客户端报的位置比。载具的位置由客户端模拟，服务端这一步只做校验。
     //
