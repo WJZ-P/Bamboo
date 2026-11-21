@@ -287,10 +287,12 @@ pub fn pickup(entity: &Entity, mob: &mut Mob) -> Option<ItemStack> {
 /// `MobBucketItem.checkExtraContent`: spawn on the server only.
 pub fn check_extra_content(world: &mut World, item: i32, stack: Option<&ItemStack>, pos: BlockPos) {
     let Some(kind) = kind_of_bucket(item) else {
-        // 还没建模的生物桶（蝌蚪、美西螈、硫磺立方）不生成实体，但官方
-        // `EntityType.create` 对 `level.random` 的取数照取。
-        // Buckets of unmodelled mobs (tadpole, axolotl, sulfur cube) spawn no entity,
-        // but vanilla's `EntityType.create` still draws from `level.random`.
+        // 还没建模的生物桶（蝌蚪、硫磺立方）不生成实体，但官方
+        // `EntityType.create` 对 `level.random` 的取数照取。美西螈现已建模，走
+        // `kind_of_bucket` 那一路，不进这里。
+        // Buckets of unmodelled mobs (tadpole, sulfur cube) spawn no entity, but
+        // vanilla's `EntityType.create` still draws from `level.random`. The axolotl
+        // is modelled now and goes through `kind_of_bucket`, not this branch.
         if is_mob_bucket(item) {
             unmodelled_spawn_draws(world, item);
         }

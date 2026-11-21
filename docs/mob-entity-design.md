@@ -959,7 +959,7 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
 
 ## 鱿鱼和发光鱿鱼的实施现状
 
-鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，以后海豚、鱼类也要用的公共部分在 `entity/mob/water.rs`：
+鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，海豚和鱼类共用的公共部分在 `entity/mob/water.rs`（见文末海豚一节）：
 
 - `water::handle_air_supply`（`AgeableWaterCreature.handleAirSupply`，在 `super.baseTick()` 之后用这一刻开始时的氧气算）、`water::surface_spawn_rules`（`checkSurfaceAgeableWaterCreatureSpawnRules`）、`water::in_water_position_ok`（`SpawnPlacementTypes.IN_WATER`）和 `water::finalize_ageable`（不带花色那一层的 `AgeableMob.finalizeSpawn` + `Mob.finalizeSpawn`）。
 - `MobType` 新增几个按类型的开关，别的水生生物加进来时只改这些函数：`is_ageable_water_creature`、`is_animal`（存档的 `InLove` / `LoveCause` 只有 `Animal` 写）、`can_breathe_under_water`、`is_pushed_by_fluid`、`emits_movement_sounds`（`MovementEmission.EVENTS` 不放脚步声、也不取游泳声的两个随机数）、`spawns_in_water`。
@@ -987,7 +987,7 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   （六个方向 + 两边都可走的四个水平对角），`WaterBoundPathNavigation` 的
   `canUpdatePath` / `getTempMobPos` / `getGroundY` / `isStableDestination` /
   `getMaxVerticalDistanceToWaypoint` 都按 `flags.swim` 分派；鱼的
-  `allowBreaching` 是假（以后海豚为真）。`BlockState::is_pathfindable_water` 来自新导出的
+  `allowBreaching` 是假，海豚是真（见文末海豚一节）。`BlockState::is_pathfindable_water` 来自新导出的
   `PATHFINDABLE_WATER` 状态事实。
 - 移动：`fish::move_control_tick`（`FishMoveControl`）、`fish::travel_in_water`
   （`AbstractFish.travelInWater`）、`fish::ai_step`（离水扑腾）；`motion::movement_emission`
@@ -1017,7 +1017,8 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   `FromBucket = true` 的鱼（朝向取 `level.random`，`finalizeSpawn` 用 `BUCKET` 原因，
   之后套组件并 `loadFromBucketTag`），发射器倒鱼桶也生成。鲑鱼存 `salmon/size`，
   热带鱼存 `tropical_fish/pattern` / `base_color` / `pattern_color`，其余只有默认数据。
-  美西螈 / 蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。
+  美西螈现已建模（见文末），倒美西螈桶会放出 `FromBucket = true` 的美西螈；
+  蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。
   验证：块级单元测试（组件拆分、只改有的键、存档往返）、游戏层两条（生存换桶、
   创造加桶）、发射器一条（生成的鱼 + 随机源种子）。没有 Java 逐刻对拍。
 - 2026-11-21 修掉的三处：`AbstractFish.aiStep`（离水扑腾）原来对所有动物都跑，陆地动物
@@ -1036,7 +1037,7 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   贴着 `BLOCKED` 的水是 `WATER_BORDER`、搜索期间 `WATER` / `WALKABLE` / `WATER_BORDER`
   的代价临时改成 0 / 6 / 4）和 `AmphibiousPathNavigation`（`canUpdatePath` 恒真、
   `getTempMobPos` 取 `getY(0.5)`、`getGroundY` 原样、`isStableDestination` 要求下面
-  不是空气、只在液体里允许直走）。美西螈以后直接用这个开关。
+  不是空气、只在液体里允许直走）。美西螈现在直接用这个开关（见文末）。
 - 实体：`Mob.turtle`（家方块、`travelPos`、`goingHome`、`layEggCounter`、`has_egg`、
   `laying_egg`、回家目标的两个计数、产卵 `MoveToBlockGoal` 的四个进度）。属性、
   尺寸（幼年 0.3 倍）、水 / 门三种 `PathfindingMalus`、音效（幼年受伤和死亡、
@@ -1066,3 +1067,52 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
 - 验证：`mob-oracle --only zombie_turtle_ai`（类型 60，借僵尸场景的多生物路径）四个场景：
   沙滩找水两个种子、幼年、水下远行，共 1500 刻 **0 不一致**（位置、速度、朝向、随机源、
   氧气、运行中的目标、路径节点）。产卵、孵化、回家还没有场景，也没有自然生成夹具。
+
+## 海豚和美西螈的实施现状（2026-11-21，分支 `op-water`）
+
+海豚是官方 `Dolphin`（`AgeableWaterCreature` = `AgeableMob` 但不是 `Animal`），美西螈是
+`Animal` + `Bucketable`、官方用 Brain（`AxolotlAi`）驱动。两者专属逻辑各自在
+`entity/mob/dolphin.rs` / `entity/mob/axolotl.rs`，共用的水面刷怪规则、`AgeableMob`
+组数据那一层在 `entity/mob/water.rs`。
+
+- 实体：`Mob.dolphin`（`got_fish` / `moistness` / `treasure_pos` / `stuck`）、
+  `Mob.axolotl`（`variant` / `playing_dead` / `from_bucket` / `play_dead_ticks`）。
+  属性、尺寸（幼年 `BABY_DIMENSIONS`）、`WATER` 的 `PathfindingMalus`、音效、战利品表
+  `entities/dolphin` / `entities/axolotl`、刷怪蛋、`/summon` 的 `by_entity_type` 都按官方。
+- 氧气：海豚覆写 `handleAirSupply` 为空（氧气走 `LivingEntity.baseTick`）、`increaseAirSupply`
+  直接回满，满值 4800；美西螈满值 6000，`baseTick` 之后按 `preTick - 1` 掉、到 -20 归零并
+  受 2 点 `dry_out`。`living::base_tick` 按 `squid::is_squid` / `fish::is_fish` /
+  `MobType::Axolotl` 分派，海豚不进 `handleAirSupply`，`isNoAi()` 时只剩 `LivingEntity.baseTick`。
+- 海豚：`Dolphin.tick` 在 `super.tick()` 后管湿度 `Moistness`（2400，水 / 雨里回满、否则每刻减一，
+  到 0 受 1 点 `dry_out`）、离水着地扑腾（两个 `nextFloat` 定水平速度、一个定 `yRot`、`needsSync`）。
+  `SmoothSwimmingMoveControl` + 允许跃出水面的 `WaterBoundPathNavigation`（`swim = Some(true)`）；
+  `travelInWater` 是 `moveRelative` + `move(SELF)` + ×0.9、无攻击目标每刻下沉 0.005。
+  拿 `#fishes` 右键走自己的 `mobInteract`：幼年 `ageUp`、成年 `gotFish`，消费一条鱼。
+- 美西螈：五花色，`finalizeSpawn` 抽两个常见花色编号组成 `AxolotlGroupData`、再抽一个给这一只，
+  一组第三只起是幼年、`BUCKET` 原因直接返回；`hurtServer` 前按官方短路判定把
+  `PLAY_DEAD_TICKS` 设 200，`customServerAiStep` 映射成 `playingDead` 元数据，装死时不叫；
+  两栖寻路（`AmphibiousPathNavigation`）、`travelInWater` 没有重力项、不吃水流。
+- 装桶 / 存档 / 同步：`Bucketable`（鲑鱼 / 热带鱼的花纹组件之外）为美西螈写
+  `bucket_entity_data` 的 `Variant` / `Age` / `AgeLocked`，倒桶 / 发射器按 `MobBucketItem.spawn`
+  放出 `FromBucket = true` 的美西螈；`GotFish` / `Moistness`、`Variant` / `FromBucket` 进存档
+  （`nbt.rs`）；`GOT_FISH`(18) / `MOISTNESS_LEVEL`(19)、`DATA_VARIANT`(18) /
+  `DATA_PLAYING_DEAD`(19) / `FROM_BUCKET`(20) 在 `entity_tracking.rs` / `packet/play/entity.rs`
+  同步，多岛拆合时这些状态随 `Mob` 整块搬。
+- 自然生成：`natural.rs` 的 `check_spawn_rules` 给海豚接
+  `checkSurfaceAgeableWaterCreatureSpawnRules`（和鱿鱼同源）、给美西螈接
+  `checkAxolotlSpawnRules`（脚下 `axolotls_spawnable_on` 黏土）；`spawn.rs` 的 `finalizeSpawn`
+  走 `dolphin::finalize_spawn` / `axolotl::finalize_spawn`，组数据 `SpawnGroup::Axolotl`；
+  `MobType::mob_category` 给海豚 `WaterCreature`、美西螈 `Axolotls`。
+- 验证：`mob-oracle --only dolphin`（3 场景 603 刻）/ `--only axolotl`（4 场景 804 刻），
+  两边都设 `NoAI`、给同一个显式实体随机源种子、不重放构造取数，逐刻比位置、速度、朝向、
+  随机源、氧气、年龄、着地 / 在水里、各自元数据、尺寸和世界随机源，**0 不一致**；
+  `--break-self-test water_mob` 把 `got_fish` / `playing_dead` 改坏能在第 0 刻被抓到。
+  `mob-oracle --only natural_spawn` 的 `dolphin_ocean` / `axolotl_lush` 夹具（后者把底层水换成黏土）
+  各刷出 37 / 40 只，0 不一致；`natural-spawn`（全部）1727 例 0 不一致。
+- 已知限制：海豚 `registerGoals` 的十四个目标和 `HurtByTargetGoal` 都按官方优先级登记成
+  `Unavailable`（`canUse` 恒假、不取随机数），因为 Brain、`findNearestMapStructure`、物品实体、
+  船 / 鹦鹉螺、守卫者这些设施还没接——引路去宝藏、给玩家 `DOLPHINS_GRACE`、跃水、捡物、近战
+  都不发生，`gotFish` 目前只靠喂鱼设置；美西螈 Brain 的传感器 / 记忆 / 活动、装死回血、
+  攻击水生怪物、繁殖（1/1200 蓝色）没建模，`PLAY_DEAD_TICKS` 设 200 后没有 Brain 逐刻递减，
+  `playingDead` 不会自己复位；拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
+  死亡掉落的逐题 loot-oracle 都没做。逐刻对拍开 `NoAI`，没覆盖 AI / 受伤 / 繁殖 / 死亡路径。
