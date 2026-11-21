@@ -4104,6 +4104,12 @@ public final class MobOracle {
             ServerPlayer player = new ServerPlayer(official.server, level,
                     new GameProfile(new UUID(1L, 2L + i), "ZombieOracle" + i),
                     ClientInformation.createDefault());
+            // 玩家的实体 ID 不能和生物的（`FIRST_ID + i`）撞号：Bamboo 用同一套号认目标，
+            // 撞了会把「恨第一只生物」认成「恨玩家」。
+            // Player ids must not collide with the mobs' (`FIRST_ID + i`): Bamboo resolves
+            // targets through one id space, so a clash turns anger at the first mob into
+            // anger at the player.
+            player.setId(FIRST_ID + 1024 + i);
             player.setPos(at[0], at[1], at[2]);
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
             player.setYRot(0.0F);
