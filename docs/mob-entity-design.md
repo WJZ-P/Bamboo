@@ -669,3 +669,11 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 不引入猪专属装备 NBT；玩家装上的鞍使用保证掉落概率。
 载具和乘客的同组 tick 尚未实现（见世界模型设计第 7 段），所以
 上鞍不会启用骑乘或加速，未新增玩家输入或跨岛载具规则。
+
+## 羊和鸡的实施现状
+
+羊的专属逻辑在 `entity/mob/sheep.rs`：羊毛字节（`DATA_WOOL_ID`）存在 `Mob.wool`，`EatBlockGoal` 进同一个目标选择器（非每刻目标，`adjustedTickDelay` 折半），改方块走 `Command::EatBlock`，羊自己的 `ate` 当场执行。剪毛在 `World::interact_mob` 里落地：玩家音源的剪毛声、`shearing/sheep` 表（游戏层 `interaction/level/farm_loot.rs` 给实体谓词补 `sheep/color` 组件和 `type_specific/sheep`）、每团羊毛一个物品实体加五个羊随机数的速度，最后用 `durability::hurt_hand` 扣剪刀耐久（游戏层在交互期间把手借给方块逻辑）。繁殖混色按生成的合成配方表查两格染料（`findColorMixInRecipes`），混不出时取世界随机源。
+
+鸡在 `entity/mob/chicken.rs`：构造函数在 UUID 和朝向之后抽 `eggTime`；`aiStep` 尾部做缓慢下落和下蛋，下蛋表经 `Command::DropEntityLoot` 在落地时求值（礼物参数集：原点 + 实体本身，鸡花纹进 `chicken/variant` 组件）。剪毛和下蛋共用 `Level::entity_loot_drops` / `EntityLootRequest`，以后的雪傀儡、哞菇也能复用。
+
+生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。扔出的鸡蛋（`ThrownEgg`）还没做。
