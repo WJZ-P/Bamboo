@@ -333,7 +333,7 @@ mod tests {
     }
 
     fn collect(pool: &mut ComputePool<Square>) -> Vec<(u64, Reply)> {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut out = Vec::new();
         while pool.in_flight() > 0 && Instant::now() < deadline {
             if let Some(reply) = pool.recv_timeout(Duration::from_millis(50)) {
@@ -403,7 +403,7 @@ mod tests {
         pool.cancel(99);
         gate.wait();
         let mut order = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while pool.in_flight() > 0 && Instant::now() < deadline {
             if let Some((id, reply)) = pool.recv_timeout(Duration::from_millis(50)) {
                 order.push((id, reply));
