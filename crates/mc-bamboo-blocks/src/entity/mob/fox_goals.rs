@@ -557,14 +557,24 @@ fn alertable(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
         if found || other.uid == me.id || other.removed || !public.is_alive() {
             return;
         }
-        // `FoxAlertableEntitiesSelector`：别的狐狸不算；其余生物不睡觉、不潜行就算。
-        // Other foxes never count; every other mob that is awake does.
-        if public.mob_type == MobType::Fox {
-            return;
-        }
-        found = me.position.distance_to_sqr(other.position) <= 144.0;
+        found =
+            alertable_mob(&mob.fox, public) && me.position.distance_to_sqr(other.position) <= 144.0;
     });
     found
+}
+
+/// `FoxAlertableEntitiesSelector.test` 的非玩家分支；当前其余生物没有睡眠或潜行状态。
+///
+/// The non-player branch of `FoxAlertableEntitiesSelector.test`; the remaining
+/// mobs have no sleeping or discrete state.
+fn alertable_mob(fox: &super::fox::Fox, target: &super::MobPublic) -> bool {
+    match target.mob_type {
+        MobType::Fox => false,
+        MobType::Rabbit => true,
+        kind if kind.is_monster() => true,
+        kind if super::tame::is_tamable(kind) => target.tame_flags & super::tame::FLAG_TAME == 0,
+        _ => !fox.trusts(Some(target.uuid)),
+    }
 }
 
 /// `SleepGoal.canSleep`：倒计时没到就减一。
@@ -837,4 +847,36 @@ fn find_berries(origin: BlockPos, mob: &Mob, view: &dyn BlockView) -> Option<Blo
 fn alternating(start: i32, max: i32) -> impl Iterator<Item = i32> {
     std::iter::successors(Some(start), |&n| Some(if n > 0 { -n } else { 1 - n }))
         .take_while(move |&n| n <= max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::mob::{MobPublic, tame};
+
+    #[test]
+    fn fox_is_alerted_by_wild_but_not_tamed_wolves() {
+        let fox = super::super::fox::Fox::default();
+        let mut wolf = Mob::new(MobType::Wolf);
+        assert!(alertable_mob(&fox, &MobPublic::of(&wolf, 0)));
+        tame::set_tame(&mut wolf, true, false);
+        assert!(!alertable_mob(&fox, &MobPublic::of(&wolf, 0)));
+    }
+
+    #[test]
+    fn fox_trust_only_applies_after_species_exclusions() {
+        let mut fox = super::super::fox::Fox::default();
+        fox.add_trusted([1; 16]);
+        for (kind, alerts) in [
+            (MobType::Cow, false),
+            (MobType::Fox, false),
+            (MobType::Rabbit, true),
+            (MobType::Zombie, true),
+            (MobType::Wolf, true),
+        ] {
+            let mut mob = Mob::new(kind);
+            mob.uuid = [1; 16];
+            assert_eq!(alertable_mob(&fox, &MobPublic::of(&mob, 0)), alerts);
+        }
+    }
 }

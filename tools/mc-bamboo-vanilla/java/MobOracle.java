@@ -876,6 +876,18 @@ public final class MobOracle {
             roof.fill(-8, 66, -8, 8, 66, 8, Scenes.STONE);
             roof.mob(4, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
             scenes.add(roof);
+            for (boolean tame : new boolean[] {false, true}) {
+                // 同一处遮蔽：野狼让狐狸警觉，驯服后则不再妨碍睡觉。
+                // Under the same shelter, a wild wolf alerts the fox but a tamed one does not.
+                Scene wolf = new Scene(tame ? "fox_sleep_tamed_wolf" : "fox_sleep_wild_wolf").ticks(160);
+                Scenes.ground(wolf, 16);
+                wolf.fill(-8, 66, -8, 8, 66, 8, Scenes.STONE);
+                wolf.mob(4, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
+                wolf.mob(5, 9.5, 64.0, 0.5, 0.0F, 62L, 0);
+                wolf.player(20.5, 64.0, 0.5, Items.AIR);
+                if (tame) wolf.interact(2, 1, 0, BuiltInRegistries.ITEM.getId(Items.BONE), 0);
+                scenes.add(wolf);
+            }
             Scene flee = new Scene("fox_flee_player").ticks(200).difficulty(2);
             Scenes.ground(flee, 15);
             flee.mob(4, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
