@@ -276,7 +276,7 @@ mod tests {
             mob.dolphin.moistness = 1234;
         });
         let saved = nbt::write_mob(&entity.split()).expect("a dolphin saves");
-        assert_eq!(tag::bool_or(&saved, "GotFish", false), true);
+        assert!(tag::bool_or(&saved, "GotFish", false));
         assert_eq!(tag::int_or(&saved, "Moistness", 0), 1234);
         let row = nbt::read_mob(&saved, "minecraft:dolphin", 7)
             .expect("the tag loads")
