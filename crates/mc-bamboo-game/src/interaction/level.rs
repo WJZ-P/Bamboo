@@ -155,6 +155,8 @@ impl RegionLevel<'_> {
     }
 }
 
+mod farm_loot;
+
 impl Level for RegionLevel<'_> {
     fn world_border(&self) -> WorldBorder {
         self.world_border.clone()
@@ -741,6 +743,7 @@ impl Level for RegionLevel<'_> {
         victim.is_living = true;
         victim.is_on_fire = loot.on_fire;
         victim.position = Some(loot_position(origin));
+        farm_loot::describe(&mut victim, loot.victim, loot.wool, None);
         let view = crate::block_drops::ChunkLevel {
             chunks: self.chunks,
             weather: self.block_weather,
@@ -773,6 +776,13 @@ impl Level for RegionLevel<'_> {
                 Vec::new()
             }
         }
+    }
+
+    fn entity_loot_drops(
+        &mut self,
+        request: mc_bamboo_blocks::entity::mob::EntityLootRequest,
+    ) -> Vec<ItemStack> {
+        farm_loot::entity_loot_drops(self, request)
     }
 
     fn is_halloween(&self) -> bool {

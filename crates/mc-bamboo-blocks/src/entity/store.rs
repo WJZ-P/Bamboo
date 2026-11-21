@@ -130,6 +130,10 @@ pub enum KindPublic {
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
+    /// 扔出的鸡蛋：同步要它的物品、主人和俯仰角。
+    ///
+    /// A thrown egg: the sync layer reads its item, owner and pitch.
+    Egg(Box<super::thrown_egg::EggPublic>),
 }
 
 impl KindPublic {
@@ -141,6 +145,7 @@ impl KindPublic {
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
+            Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -192,6 +197,7 @@ pub enum KindState {
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
+    Egg(Box<super::thrown_egg::ThrownEgg>),
 }
 
 /// `FallingBlockEntity` 里别人不读的字段。
@@ -306,6 +312,7 @@ impl EntityRow {
                 EntityKind::ExperienceOrb(orb)
             }
             (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
+            (KindPublic::Egg(_), KindState::Egg(egg)) => EntityKind::Egg(egg),
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -379,6 +386,10 @@ impl Entity {
             EntityKind::Arrow(arrow) => (
                 KindPublic::Arrow(arrow.public(self.remaining_fire_ticks)),
                 KindState::Arrow(arrow),
+            ),
+            EntityKind::Egg(egg) => (
+                KindPublic::Egg(Box::new(egg.public(self.remaining_fire_ticks))),
+                KindState::Egg(egg),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(
@@ -885,6 +896,9 @@ impl EntityStore {
         if let EntityKind::Arrow(arrow) = &mut entity.kind {
             arrow.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
+        if let EntityKind::Egg(egg) = &mut entity.kind {
+            egg.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         entity
     }
 
@@ -1169,6 +1183,12 @@ impl EntityStore {
                         )
                     })
                 }
+                super::KindState::Egg(egg) => super::thrown_egg::take_cracked(egg).then(|| {
+                    (
+                        row.public.uid,
+                        vec![super::mob::MobEvent::EntityEvent { event: 3 }],
+                    )
+                }),
                 _ => None,
             }
         };
@@ -1197,6 +1217,19 @@ impl EntityStore {
     ///
     /// Keep a discarded entity's pending events for the sync layer.
     pub fn keep_departed_events(&mut self, entity: &Entity) {
+        // 鸡蛋命中的那一刻就消失；`broadcastEntityEvent(this, 3)` 跟死亡事件走同一条路。
+        // An egg vanishes on its impact tick; event 3 takes the same path as death events.
+        if let EntityKind::Egg(egg) = &entity.kind
+            && egg.is_cracked()
+        {
+            self.departed_mob_events.insert(
+                entity.id,
+                (
+                    ChunkPos::containing(entity.position.x, entity.position.z),
+                    vec![super::mob::MobEvent::EntityEvent { event: 3 }],
+                ),
+            );
+        }
         if let Some(mob) = entity.kind.mob()
             && !mob.events.is_empty()
         {

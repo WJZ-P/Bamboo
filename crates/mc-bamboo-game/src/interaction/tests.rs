@@ -2703,3 +2703,6 @@ fn a_cow_spawn_egg_places_a_cow_and_consumes_the_egg() {
 
 #[path = "weapon_tests.rs"]
 mod weapon_tests;
+
+#[path = "egg_tests.rs"]
+mod egg_tests;

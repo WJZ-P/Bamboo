@@ -53,7 +53,7 @@ pub(super) fn drop_on_death(
     }
 }
 
-fn drop_slot(
+pub(super) fn drop_slot(
     equipment: &mut MobEquipment,
     slot: EquipmentSlot,
     player_kill: bool,

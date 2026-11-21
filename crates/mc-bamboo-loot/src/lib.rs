@@ -30,7 +30,8 @@ pub use context::{
     LootContext, LootParams, Position, entity_enchantment_level,
 };
 pub use drops::{
-    BlockDropParams, ChestParams, EntityDeathParams, block_drops, chest_loot, entity_death_drops,
+    BlockDropParams, ChestParams, EntityDeathParams, EntityLootParams, block_drops, chest_loot,
+    entity_death_drops, entity_loot_drops,
 };
 pub use error::{LootError, Result};
 pub use function::{LootFunction, mob_spawn_enchantments};

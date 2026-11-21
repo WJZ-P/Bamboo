@@ -123,6 +123,38 @@ pub fn entity_death_drops(
     table.get_random_items_with_seed(&loot_params, seed, sequences, fallback)
 }
 
+/// `LivingEntity.dropFromShearingLootTable` / `dropFromGiftLootTable` 的参数：原点、实体本身，
+/// 剪毛时再加工具。
+///
+/// Parameters of `dropFromShearingLootTable` / `dropFromGiftLootTable`: origin, this entity,
+/// and the tool when shearing.
+pub struct EntityLootParams<'a> {
+    pub entity: EntityView,
+    pub origin: Position,
+    pub tool: Option<LootStack>,
+    pub level: Option<&'a dyn LevelView>,
+}
+
+/// 按 [`EntityLootParams`] 求值一张实体战利品表（剪羊毛、鸡下蛋）。
+///
+/// Rolls an entity loot table (shearing, egg laying) with [`EntityLootParams`].
+pub fn entity_loot_drops(
+    table_name: &str,
+    params: &EntityLootParams<'_>,
+    sequences: Option<&RandomSequences>,
+    fallback: &dyn mc_bamboo_blocks::random::RandomSource,
+) -> Result<Vec<LootStack>> {
+    let table = LootTable::from_name(table_name)?;
+    let loot_params = LootParams {
+        level: params.level,
+        origin: Some(params.origin),
+        this_entity: Some(params.entity.clone()),
+        tool: params.tool.clone(),
+        ..LootParams::default()
+    };
+    table.get_random_items_with_seed(&loot_params, 0, sequences, fallback)
+}
+
 /// `RandomizableContainer.unpackLootTable` 的参数。
 pub struct ChestParams<'a> {
     /// 方块实体的位置，`ORIGIN` 取它的中心。
