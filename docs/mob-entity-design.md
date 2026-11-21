@@ -389,6 +389,29 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   山羊 / 青蛙 / 犰狳 / 骆驼用官方 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` / `CamelAi`），
   Bamboo 只有 `GoalSelector`，没有 `Brain` / 传感器 / 记忆，这是下一步的公共地基。
 
+### 5.10 熊猫（2026-11-21，分支 `op-misc`）
+
+- 代码在 `entity/mob/panda.rs`。六个基因按官方显性 / 隐性规则合成七种外观，显性基因直接
+  是外观，`Brown` / `Weak` 要 `main == hidden` 才显现；`MainGene` / `HiddenGene` 存盘，
+  六个元数据（三个计数器、两个基因、一个旗帜字节）同步，index 由生成器导出。
+- 目标表照 `Panda.registerGoals` 一比一注册，包括 `PandaPanicGoal`、`PandaBreedGoal`、
+  `PandaAttackGoal`、`PandaAvoidGoal`、`PandaSitGoal`、`PandaLieOnBackGoal`、
+  `PandaSneezeGoal`、`PandaLookAtPlayerGoal`、`PandaRollGoal`、`PandaHurtByTargetGoal`。
+  对拍的 running names 按种类取官方子类名（`Goal::name_for`）。
+- 每刻在 `super.tick()` 之后处理：担心基因在雷雨坐下、不乐意计数器（29 / 14 刻叫）、
+  喷嚏计数和 `afterSneeze`、打滚、坐着清零俯仰、`handleEating` 的 80 / 100 刻和粒子取数。
+- 交互直接复刻 `Panda.mobInteract`：害怕时 PASS、仰躺时起来、竹子让成年求爱 / 幼年长大 /
+  坐下吃（换竹子丢旧的）、吃的东西进主手。捡物在 `Mob.aiStep` 的 looting 位置，只捡
+  `panda_eats_from_ground` 且主手为空时，走 `Command::PickUpItem`。
+- 繁殖的基因遗传在 `getBreedOffspring`：父母各一次 `nextBoolean`（`getOneOfGenesRandomly`
+  在父母自己的随机源上）、幼崽一次 `nextBoolean` 和两次 1/32 变异。父亲在命令落地时不在
+  实体表里，所以它的基因随 `Command::BreedAnimals` 带过来。
+- 状态：`mob-oracle --only panda` 5 个 1278 刻场景 + 512 题基因遗传 0 不一致；
+  生成期刷怪把熊猫接进 `natural_gen` 的放置表，运行时接进 `check_spawn_rules` 和
+  `finalizeSpawn`（组数据 `AgeableMobGroupData(0.2)`）。
+- 已知差异：`ITEM` / `SNEEZE` 粒子不发（取数照官方）；喷嚏让同伴跳的水中判定没有建模；
+  幼崽金蒲公英的 `Animal.mobInteract` 兜底未接。山羊 / 青蛙 / 犰狳 / 骆驼仍等 `Brain`。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）

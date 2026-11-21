@@ -459,6 +459,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
         self.sky_darken() < 4
     }
 
+    fn is_thundering(&self) -> bool {
+        self.0.facts().weather.is_thundering()
+    }
+
     fn monsters_burn(&self) -> bool {
         self.0.facts().monsters_burn
     }

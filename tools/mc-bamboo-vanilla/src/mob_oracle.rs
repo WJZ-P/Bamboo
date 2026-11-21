@@ -90,9 +90,27 @@ enum Line {
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     NaturalSpawn(natural_spawn::Case),
     GenSpawn(gen_spawn::Case),
+    PandaGenes(PandaGenesCase),
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
     End(End),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PandaGenesCase {
+    father_main: u8,
+    father_hidden: u8,
+    mother_main: u8,
+    mother_hidden: u8,
+    father_seed: i64,
+    mother_seed: i64,
+    baby_seed: i64,
+    father_after: i64,
+    mother_after: i64,
+    baby_after: i64,
+    baby_main: u8,
+    baby_hidden: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,6 +437,16 @@ struct CowSetup {
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
     #[serde(default)]
     egg: i32,
+    /// 熊猫的显性 / 隐性基因 id。
+    ///
+    /// The panda's main and hidden gene ids.
+    #[serde(default)]
+    genes: Vec<u8>,
+    /// 熊猫主手一开始拿的物品。
+    ///
+    /// The item a panda holds at the start.
+    #[serde(default)]
+    held: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1023,6 +1051,7 @@ impl Report {
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
+                Line::PandaGenes(case) => self.replay_panda_genes(&case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
@@ -1220,6 +1249,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    12 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     11 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     10 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
@@ -1251,6 +1281,19 @@ impl Report {
                             mob.wool = cow.wool;
                         }
                         mob.egg_time = cow.egg;
+                        if kind == mc_bamboo_blocks::entity::mob::MobType::Panda {
+                            use mc_bamboo_blocks::entity::mob::panda::Gene;
+                            let main = cow.genes.first().copied().unwrap_or(0);
+                            let hidden = cow.genes.get(1).copied().unwrap_or(0);
+                            mob.panda.main_gene = Gene::from_id(i32::from(main));
+                            mob.panda.hidden_gene = Gene::from_id(i32::from(hidden));
+                            if cow.held != 0 {
+                                mob.equipment.set(
+                                    mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+                                    ItemStack::new(cow.held, 1),
+                                );
+                            }
+                        }
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if cow.age != 0 {
@@ -3093,7 +3136,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         snd: farm_sound(mob),
         uuid: uuid_text(&mob.uuid),
         lr,
-        goals: mob.goals.running_names().join(" "),
+        goals: mob.goals.running_names(mob.mob_type).join(" "),
         path,
         target: mob.target.unwrap_or(-1),
         baby: mob.is_baby(),
@@ -3164,6 +3207,15 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
                 ""
             }
         ),
+        MobType::Panda => format!(
+            "g{}/{}|u{}|n{}|e{}|f{}",
+            mob.panda.main_gene.id(),
+            mob.panda.hidden_gene.id(),
+            mob.panda.unhappy_counter,
+            mob.panda.sneeze_counter,
+            mob.panda.eat_counter,
+            mob.panda.flags,
+        ),
         _ => mob.variant.name().to_owned(),
     }
 }
@@ -3176,7 +3228,7 @@ fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     match mob.mob_type {
         MobType::Pig => mob.pig_sound_variant.name().to_owned(),
         MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
-        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear => String::new(),
+        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear | MobType::Panda => String::new(),
         _ => mob.sound_variant.name().to_owned(),
     }
 }
@@ -3215,5 +3267,52 @@ fn describe_farm_animal(
             );
         }
         _ => {}
+    }
+}
+
+impl Report {
+    /// 熊猫基因遗传：三方随机源的取数顺序和结果。
+    ///
+    /// Panda gene inheritance: the draw order over the three random sources and the result.
+    fn replay_panda_genes(&mut self, case: &PandaGenesCase) {
+        use mc_bamboo_blocks::entity::mob::{MobType, panda};
+        self.cases += 1;
+        let mut father = JavaRandom::new(case.father_seed);
+        let mut mother = JavaRandom::new(case.mother_seed);
+        let mut baby = Entity::by_mob_type(MobType::Panda, Vec3::default());
+        baby.random = JavaRandom::new(case.baby_seed);
+        let genes = panda::offspring_genes(
+            &mut baby,
+            &mut father,
+            (
+                panda::Gene::from_id(i32::from(case.father_main)),
+                panda::Gene::from_id(i32::from(case.father_hidden)),
+            ),
+            &mut mother,
+            (
+                panda::Gene::from_id(i32::from(case.mother_main)),
+                panda::Gene::from_id(i32::from(case.mother_hidden)),
+            ),
+        );
+        let actual = (
+            genes.0.id() as u8,
+            genes.1.id() as u8,
+            father.state(),
+            mother.state(),
+            baby.random.state(),
+        );
+        let expected = (
+            case.baby_main,
+            case.baby_hidden,
+            case.father_after,
+            case.mother_after,
+            case.baby_after,
+        );
+        if actual != expected {
+            self.mismatch(format!(
+                "panda genes father {}/{} mother {}/{}: official {expected:?}, bamboo {actual:?}",
+                case.father_main, case.father_hidden, case.mother_main, case.mother_hidden
+            ));
+        }
     }
 }

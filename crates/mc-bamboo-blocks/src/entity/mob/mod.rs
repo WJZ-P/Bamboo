@@ -30,6 +30,7 @@ pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
 pub mod neutral;
+pub mod panda;
 pub mod path;
 mod pig;
 pub mod polar_bear;
@@ -65,6 +66,7 @@ pub enum MobType {
     Sheep,
     Chicken,
     PolarBear,
+    Panda,
     Zombie,
     Husk,
     Skeleton,
@@ -78,13 +80,14 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Pig,
         Self::Sheep,
         Self::Chicken,
         Self::PolarBear,
+        Self::Panda,
         Self::Horse,
         Self::Donkey,
         Self::Mule,
@@ -104,6 +107,7 @@ impl MobType {
             Self::Sheep => ids::SHEEP,
             Self::Chicken => ids::CHICKEN,
             Self::PolarBear => ids::POLAR_BEAR,
+            Self::Panda => ids::PANDA,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -123,6 +127,7 @@ impl MobType {
             Self::Sheep => "minecraft:sheep",
             Self::Chicken => "minecraft:chicken",
             Self::PolarBear => "minecraft:polar_bear",
+            Self::Panda => "minecraft:panda",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -160,6 +165,7 @@ impl MobType {
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
             (Self::PolarBear, baby) => polar_bear::dimensions(baby),
+            (Self::Panda, baby) => panda::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -204,6 +210,7 @@ impl MobType {
             Self::Sheep => "minecraft:entities/sheep",
             Self::Chicken => "minecraft:entities/chicken",
             Self::PolarBear => "minecraft:entities/polar_bear",
+            Self::Panda => "minecraft:entities/panda",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -250,7 +257,12 @@ impl MobType {
     /// `living::ambient_sound` pick by age.
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken | Self::PolarBear => None,
+            Self::Cow
+            | Self::Mooshroom
+            | Self::Pig
+            | Self::Chicken
+            | Self::PolarBear
+            | Self::Panda => None,
             Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
@@ -267,6 +279,7 @@ impl MobType {
             Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.hurt"),
             Self::PolarBear => Some("minecraft:entity.polar_bear.hurt"),
+            Self::Panda => Some("minecraft:entity.panda.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -282,6 +295,7 @@ impl MobType {
             Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.death"),
             Self::PolarBear => Some("minecraft:entity.polar_bear.death"),
+            Self::Panda => Some("minecraft:entity.panda.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -297,6 +311,7 @@ impl MobType {
             Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
             Self::PolarBear => Some("minecraft:entity.polar_bear.step"),
+            Self::Panda => Some("minecraft:entity.panda.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
@@ -317,6 +332,7 @@ impl MobType {
             Self::Sheep => items::SHEEP_SPAWN_EGG,
             Self::Chicken => items::CHICKEN_SPAWN_EGG,
             Self::PolarBear => items::POLAR_BEAR_SPAWN_EGG,
+            Self::Panda => items::PANDA_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -336,6 +352,7 @@ impl MobType {
             Self::Sheep => "entity.minecraft.sheep",
             Self::Chicken => "entity.minecraft.chicken",
             Self::PolarBear => "entity.minecraft.polar_bear",
+            Self::Panda => "entity.minecraft.panda",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -1193,6 +1210,10 @@ pub struct Mob {
     ///
     /// The polar bear standing flag and growl cooldown.
     pub polar_bear: polar_bear::PolarBear,
+    /// 熊猫的基因、旗帜位和计数器。
+    ///
+    /// The panda's genes, flags and counters.
+    pub panda: panda::Panda,
     /// 中立生物的持久愤怒（`NeutralMob`），北极熊在用。
     ///
     /// Persistent anger of neutral mobs (`NeutralMob`); polar bears use it.
@@ -1266,6 +1287,7 @@ impl Mob {
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
             MobType::PolarBear => polar_bear::attributes(),
+            MobType::Panda => panda::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
             kind => equine::attributes(kind),
@@ -1278,6 +1300,7 @@ impl Mob {
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::PolarBear => polar_bear::goals(&mut navigation),
+            MobType::Panda => panda::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
@@ -1289,6 +1312,7 @@ impl Mob {
             | MobType::Sheep
             | MobType::Chicken => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
+            MobType::Panda => panda::target_goals(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             kind => equine::targets(kind),
@@ -1409,6 +1433,7 @@ impl Mob {
             egg_time: 0,
             mooshroom: mooshroom::Mooshroom::default(),
             polar_bear: polar_bear::PolarBear::default(),
+            panda: panda::Panda::default(),
             anger: neutral::Anger::default(),
             events: Vec::new(),
             hurt_marked: false,
@@ -1519,6 +1544,10 @@ pub struct MobPublic {
     ///
     /// `PolarBear.DATA_STANDING_ID`.
     pub polar_bear_standing: bool,
+    /// 熊猫的同步字段。
+    ///
+    /// The synced panda fields.
+    pub panda: panda::PandaPublic,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1574,6 +1603,7 @@ impl MobPublic {
             chicken_sound_variant: mob.chicken_sound_variant,
             mooshroom_brown: mob.mooshroom.brown,
             polar_bear_standing: mob.polar_bear.standing,
+            panda: panda::PandaPublic::of(&mob.panda),
             on_fire: mob.visible_fire,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

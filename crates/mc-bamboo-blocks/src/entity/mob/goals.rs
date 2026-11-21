@@ -148,6 +148,42 @@ pub enum Goal {
     EatBlock {
         eat_tick: i32,
     },
+    /// `PandaSitGoal`：拿着能吃的东西时坐下。
+    ///
+    /// `PandaSitGoal`: sit down while holding something edible.
+    PandaSit,
+    /// `PandaLieOnBackGoal`：懒惰熊猫仰面躺一会儿。
+    ///
+    /// `PandaLieOnBackGoal`: a lazy panda lies on its back for a while.
+    PandaLieOnBack,
+    /// `PandaSneezeGoal`：幼崽偶尔打个喷嚏。
+    ///
+    /// `PandaSneezeGoal`: a cub sneezes now and then.
+    PandaSneeze,
+    /// `PandaRollGoal`：幼崽或顽皮熊猫就地打滚。
+    ///
+    /// `PandaRollGoal`: a cub or a playful panda rolls on the spot.
+    PandaRoll,
+    /// `AvoidEntityGoal`：担心基因的熊猫躲开玩家或怪物。
+    ///
+    /// `AvoidEntityGoal`: a worried panda runs from players or monsters.
+    AvoidEntity {
+        target: AvoidTarget,
+        max_dist: f32,
+        walk_speed: f64,
+        sprint_speed: f64,
+        avoid: Option<EntityUid>,
+        path: Option<super::path::Path>,
+    },
+}
+
+/// [`Goal::AvoidEntity`] 躲的是哪一类。
+///
+/// What a [`Goal::AvoidEntity`] runs from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvoidTarget {
+    Player,
+    Monster,
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -237,6 +273,9 @@ impl Goal {
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
+            Self::PandaSit | Self::AvoidEntity { .. } => &[Flag::Move],
+            Self::PandaRoll => &[Flag::Move, Flag::Look, Flag::Jump],
+            Self::PandaLieOnBack | Self::PandaSneeze => &[],
         }
     }
 
@@ -286,7 +325,31 @@ impl Goal {
             Self::RangedAttack { .. } => "RangedAttackGoal",
             Self::LlamaHurtByTarget { .. } => "LlamaHurtByTargetGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
+            Self::PandaSit => "PandaSitGoal",
+            Self::PandaLieOnBack => "PandaLieOnBackGoal",
+            Self::PandaSneeze => "PandaSneezeGoal",
+            Self::PandaRoll => "PandaRollGoal",
+            Self::AvoidEntity { .. } => "PandaAvoidGoal",
         }
+    }
+
+    /// 官方类名。熊猫的若干目标是内部子类，名字按种类换。
+    ///
+    /// The vanilla class name. Several panda goals are inner subclasses whose names
+    /// depend on the mob kind.
+    pub fn name_for(&self, mob_type: super::MobType) -> &'static str {
+        use super::MobType;
+        if mob_type == MobType::Panda {
+            return match self {
+                Self::Panic { .. } => "PandaPanicGoal",
+                Self::Breed { .. } => "PandaBreedGoal",
+                Self::MeleeAttack { .. } => "PandaAttackGoal",
+                Self::LookAtPlayer { .. } => "PandaLookAtPlayerGoal",
+                Self::HurtByTarget { .. } => "PandaHurtByTargetGoal",
+                _ => self.name(),
+            };
+        }
+        self.name()
     }
 }
 
@@ -668,11 +731,11 @@ impl GoalSelector {
     }
 
     /// 正在跑的目标名，按加入顺序。对拍用。
-    pub fn running_names(&self) -> Vec<&'static str> {
+    pub fn running_names(&self, mob_type: super::MobType) -> Vec<&'static str> {
         self.goals
             .iter()
             .filter(|wrapped| wrapped.running)
-            .map(|wrapped| wrapped.goal.name())
+            .map(|wrapped| wrapped.goal.name_for(mob_type))
             .collect()
     }
 
@@ -855,7 +918,18 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 return false;
             }
             *partner = free_partner(me, mob, ctx);
-            partner.is_some()
+            if partner.is_none() {
+                return false;
+            }
+            // `PandaBreedGoal.canUse`：不乐意时先记下来并在 30 秒内不再试；附近没有竹子就
+            // 不繁殖，还要让「看玩家」目标盯着最近的玩家。
+            // `PandaBreedGoal.canUse`: an unhappy panda refuses for 30 seconds; with no
+            // bamboo nearby it gives up and points its look-at-player goal at the nearest one.
+            if mob.mob_type == super::MobType::Panda && !super::panda::breed_can_use(me, mob, ctx) {
+                *partner = None;
+                return false;
+            }
+            true
         }
         Goal::Tempt {
             player,
@@ -942,6 +1016,19 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if me.random.next_float() >= *probability {
                 return false;
             }
+            // `PandaLookAtPlayerGoal.canUse`：已有的目标不重找，繁殖目标塞进来的优先。
+            // `PandaLookAtPlayerGoal.canUse`: an existing target is kept, and the breeding
+            // goal's pick comes first.
+            if mob.mob_type == super::MobType::Panda {
+                if look_at.is_none() {
+                    *look_at =
+                        mob.panda.look_at_override.take().or_else(|| {
+                            nearest_look_target(me, mob, ctx, f64::from(*look_distance))
+                        });
+                }
+                return mob.panda_can_perform_action(ctx.blocks().is_thundering())
+                    && look_at.is_some();
+            }
             *look_at = nearest_look_target(me, mob, ctx, f64::from(*look_distance));
             look_at.is_some()
         }
@@ -955,6 +1042,13 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             start_path,
             ..
         } => {
+            // `PandaAttackGoal.canUse`：先要求 `canPerformAction`。
+            // `PandaAttackGoal.canUse`: `canPerformAction` comes first.
+            if mob.mob_type == super::MobType::Panda
+                && !mob.panda_can_perform_action(ctx.blocks().is_thundering())
+            {
+                return false;
+            }
             // 官方 `lastCanUseCheck` 初值是 0：第一个满刻（1001）就允许，
             // 之后每 20 刻一次。Bamboo 之前给了一个很大的负数，语义等价，
             // 但 `gameTime - last` 用 long 减法，这里按官方改成初值 0。
@@ -1087,6 +1181,43 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 false
             }
         }
+        Goal::PandaSit => super::panda::sit_can_use(me, mob, ctx),
+        Goal::PandaLieOnBack => super::panda::lie_can_use(me, mob, ctx.blocks().is_thundering()),
+        Goal::PandaSneeze => super::panda::sneeze_can_use(me, mob, ctx.blocks().is_thundering()),
+        Goal::PandaRoll => super::panda::roll_can_use(me, mob, ctx),
+        Goal::AvoidEntity {
+            target,
+            max_dist,
+            walk_speed,
+            sprint_speed,
+            avoid,
+            path,
+        } => {
+            // `PandaAvoidGoal.canUse`：先要求担心基因并做得了动作。
+            // `PandaAvoidGoal.canUse`: the worried gene and a free action come first.
+            if !mob.panda.is_worried()
+                || !mob.panda_can_perform_action(ctx.blocks().is_thundering())
+            {
+                return false;
+            }
+            let found = nearest_avoidable(me, mob, ctx, *target, *max_dist);
+            let Some((uid, at)) = found else {
+                return false;
+            };
+            *avoid = Some(uid);
+            let Some(pos) = away_random_pos(me, mob, ctx.blocks(), 16, 7, at) else {
+                return false;
+            };
+            if at.distance_to_sqr(pos) < at.distance_to_sqr(me.position) {
+                return false;
+            }
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            *path = mob
+                .navigation
+                .create_path(ctx.blocks(), &nav, BlockPos::containing(pos), 0);
+            let _ = (walk_speed, sprint_speed);
+            path.is_some()
+        }
     }
 }
 
@@ -1096,7 +1227,16 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             super::skeleton::bow_slot(mob).is_some()
                 && (combat_target(mob, ctx).is_some() || !mob.navigation.is_done())
         }
-        Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
+        Goal::Panic { .. } => {
+            // `PandaPanicGoal.canContinueToUse`：坐下时停下导航。
+            // `PandaPanicGoal.canContinueToUse`: sitting stops the navigation.
+            if mob.mob_type == super::MobType::Panda && mob.panda.is_sitting() {
+                mob.navigation.stop();
+                return false;
+            }
+            !mob.navigation.is_done()
+        }
+        Goal::Stroll { .. } => !mob.navigation.is_done(),
         Goal::Breed {
             partner, love_time, ..
         } => partner
@@ -1186,6 +1326,15 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             target_can_continue_seen(me, mob, ctx, unseen_ticks, reduced_tick_delay(300))
         }
         Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
+            // `PandaHurtByTargetGoal.canContinueToUse`：吃到了竹子或咬过一口就停手。
+            // `PandaHurtByTargetGoal.canContinueToUse`: stop after eating bamboo or biting.
+            if matches!(goal, Goal::HurtByTarget { .. })
+                && mob.mob_type == super::MobType::Panda
+                && (mob.panda.got_bamboo || mob.panda.did_bite)
+            {
+                mob.target = None;
+                return false;
+            }
             // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
             // 旁观、和平难度）读成 null，回退到的 `targetMob` 是同一个玩家，同样打不了；
             // 打得了还要在跟随距离内。`mustSee` 的视线记忆本期不建模（目标恒看得见）。
@@ -1210,6 +1359,10 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                     .turtle_egg_pos
                     .is_some_and(|pos| valid_turtle_egg_target(ctx.blocks(), pos))
         }
+        Goal::PandaSit => super::panda::sit_can_continue(me, mob),
+        Goal::PandaLieOnBack => super::panda::lie_can_continue(me, mob),
+        Goal::PandaSneeze | Goal::PandaRoll => false,
+        Goal::AvoidEntity { .. } => !mob.navigation.is_done(),
     }
 }
 
@@ -1276,6 +1429,11 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
                 super::polar_bear::alert_adults(me, mob, ctx);
                 mob.target = None;
             }
+            // `PandaHurtByTargetGoal` 带 `setAlertOthers()`，只叫好斗的熊猫。
+            // `PandaHurtByTargetGoal` sets `setAlertOthers()`, calling aggressive pandas.
+            if mob.mob_type == super::MobType::Panda {
+                super::panda::alert_pandas(me, mob, ctx);
+            }
         }
         // `HurtByTargetGoal.start` 再 `TargetGoal.start`：`unseenTicks` 清零。
         // `HurtByTargetGoal.start`, then `TargetGoal.start` clears `unseenTicks`.
@@ -1334,6 +1492,19 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.turtle_egg_max_stay = 1200 + me.random.next_int_bounded(1200 + inner);
             mob.turtle_egg_reached = false;
             mob.turtle_egg_ticks_since_reached = 0;
+        }
+        Goal::PandaSit => super::panda::sit_start(me, mob, ctx),
+        Goal::PandaLieOnBack => super::panda::lie_start(me, mob),
+        Goal::PandaSneeze => mob.panda.sneeze(true),
+        Goal::PandaRoll => mob.panda.roll(true),
+        Goal::AvoidEntity {
+            path, walk_speed, ..
+        } => {
+            if let Some(path) = path.take() {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation
+                    .move_to_path(ctx.blocks(), &nav, Some(path), *walk_speed);
+            }
         }
     }
 }
@@ -1403,6 +1574,13 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::TurtleEgg { .. } => {
             // `RemoveBlockGoal.stop`：落地前的摔落距离按 1 格算。
             me.fall_distance = 1.0;
+        }
+        Goal::PandaSit => super::panda::sit_stop(me, mob, ctx),
+        Goal::PandaLieOnBack => super::panda::lie_stop(me, mob),
+        Goal::PandaSneeze | Goal::PandaRoll => {}
+        Goal::AvoidEntity { avoid, path, .. } => {
+            *avoid = None;
+            *path = None;
         }
     }
 }
@@ -1706,6 +1884,22 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
             mob.turtle_egg_ticks_since_reached += 1;
         }
+        Goal::PandaSit => super::panda::sit_tick(me, mob),
+        Goal::AvoidEntity {
+            avoid,
+            walk_speed,
+            sprint_speed,
+            ..
+        } => {
+            let Some(target) = *avoid else {
+                return;
+            };
+            let close = ctx
+                .other(target)
+                .is_some_and(|other| me.position.distance_to_sqr(other.position) < 49.0);
+            mob.navigation.speed_modifier = if close { *sprint_speed } else { *walk_speed };
+        }
+        Goal::PandaLieOnBack | Goal::PandaSneeze | Goal::PandaRoll => {}
     }
 }
 
@@ -1986,6 +2180,121 @@ fn random_direction(me: &mut Entity, horizontal: i32, vertical: i32) -> BlockPos
     let y = me.random.next_int_bounded(2 * vertical + 1) - vertical;
     let z = me.random.next_int_bounded(2 * horizontal + 1) - horizontal;
     BlockPos::new(x, y, z)
+}
+
+/// `RandomPos.generateRandomDirectionWithinRadians`。
+///
+/// `RandomPos.generateRandomDirectionWithinRadians`.
+fn random_direction_within_radians(
+    me: &mut Entity,
+    horizontal: (f64, f64),
+    vertical: i32,
+    flying_height: i32,
+    x_dir: f64,
+    z_dir: f64,
+    max_radians: f64,
+) -> Option<BlockPos> {
+    let centre = mth::atan2(z_dir, x_dir) as f64 - f64::from(std::f32::consts::FRAC_PI_2);
+    let radians = centre + (2.0 * f64::from(me.random.next_float()) - 1.0) * max_radians;
+    let dist = mth::lerp(me.random.next_double().sqrt(), horizontal.0, horizontal.1)
+        * std::f64::consts::SQRT_2;
+    let x = -dist * radians.sin();
+    let z = dist * radians.cos();
+    if x.abs() > horizontal.1 || z.abs() > horizontal.1 {
+        return None;
+    }
+    let y = me.random.next_int_bounded(2 * vertical + 1) - vertical + flying_height;
+    Some(BlockPos::containing(Vec3::new(x, f64::from(y), z)))
+}
+
+/// `DefaultRandomPos.getPosAway`。
+///
+/// `DefaultRandomPos.getPosAway`.
+pub(super) fn away_random_pos(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    avoid: Vec3,
+) -> Option<Vec3> {
+    let dir_away = me.position.subtract(avoid);
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            0,
+            dir_away.x,
+            dir_away.z,
+            std::f64::consts::FRAC_PI_2,
+        )?;
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos)
+            || (restricted && !within_home(mob, pos))
+            || !Navigation::is_stable_destination(view, pos)
+            || has_malus(mob, view, pos)
+        {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `AvoidEntityGoal.canUse` 里的 `getNearestEntity`。
+///
+/// The `getNearestEntity` of `AvoidEntityGoal.canUse`.
+fn nearest_avoidable(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    target: AvoidTarget,
+    max_dist: f32,
+) -> Option<(EntityUid, Vec3)> {
+    let area = me
+        .bounding_box()
+        .inflate(f64::from(max_dist), 3.0, f64::from(max_dist));
+    let mut best = f64::MAX;
+    let mut found = None;
+    match target {
+        AvoidTarget::Player => {
+            let view = ctx.blocks();
+            view.for_each_player(&mut |player| {
+                if player.spectator
+                    || !player.alive
+                    || me.position.distance_to_sqr(player.position) > f64::from(max_dist * max_dist)
+                {
+                    return;
+                }
+                if !living::has_line_of_sight(me, mob, view, player.uid, player.eye_position()) {
+                    return;
+                }
+                let distance = me.position.distance_to_sqr(player.position);
+                if distance < best {
+                    best = distance;
+                    found = Some((player.uid, player.position));
+                }
+            });
+        }
+        AvoidTarget::Monster => {
+            ctx.for_each_other_in(area, &mut |other| {
+                let KindPublic::Mob(public) = &other.kind else {
+                    return;
+                };
+                if !public.mob_type.is_monster() || !public.is_alive() || other.removed {
+                    return;
+                }
+                let distance = me.position.distance_to_sqr(other.position);
+                if distance > f64::from(max_dist * max_dist) || distance >= best {
+                    return;
+                }
+                best = distance;
+                found = Some((other.uid, other.position));
+            });
+        }
+    }
+    found
 }
 
 /// `RandomPos.generateRandomPosTowardDirection`。

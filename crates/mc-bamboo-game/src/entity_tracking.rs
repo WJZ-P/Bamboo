@@ -1259,6 +1259,12 @@ fn farm_default_data(
         (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
             Some(EntityData::PolarBearStanding(false))
         }
+        (MobType::Panda, facts::PANDA_UNHAPPY) => Some(EntityData::PandaUnhappy(0)),
+        (MobType::Panda, facts::PANDA_SNEEZE) => Some(EntityData::PandaSneeze(0)),
+        (MobType::Panda, facts::PANDA_EAT) => Some(EntityData::PandaEat(0)),
+        (MobType::Panda, facts::PANDA_MAIN_GENE) => Some(EntityData::PandaMainGene(0)),
+        (MobType::Panda, facts::PANDA_HIDDEN_GENE) => Some(EntityData::PandaHiddenGene(0)),
+        (MobType::Panda, facts::PANDA_FLAGS) => Some(EntityData::PandaFlags(0)),
         (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
             registry_index(chicken_variants(), "minecraft:temperate"),
         )),
@@ -1293,6 +1299,28 @@ fn farm_non_default_data(
         MobType::PolarBear => {
             if mob.polar_bear_standing {
                 out.push(EntityData::PolarBearStanding(true));
+            }
+            true
+        }
+        MobType::Panda => {
+            let panda = &mob.panda;
+            if panda.unhappy_counter != 0 {
+                out.push(EntityData::PandaUnhappy(panda.unhappy_counter));
+            }
+            if panda.sneeze_counter != 0 {
+                out.push(EntityData::PandaSneeze(panda.sneeze_counter));
+            }
+            if panda.eat_counter != 0 {
+                out.push(EntityData::PandaEat(panda.eat_counter));
+            }
+            if panda.main_gene != 0 {
+                out.push(EntityData::PandaMainGene(panda.main_gene));
+            }
+            if panda.hidden_gene != 0 {
+                out.push(EntityData::PandaHiddenGene(panda.hidden_gene));
+            }
+            if panda.flags != 0 {
+                out.push(EntityData::PandaFlags(panda.flags));
             }
             true
         }

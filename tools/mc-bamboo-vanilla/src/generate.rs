@@ -3547,6 +3547,12 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PIG_SOUND_VARIANT", facts.pig_sound_variant),
         ("SHEEP_WOOL", facts.sheep_wool),
         ("POLAR_BEAR_STANDING", facts.polar_bear_standing),
+        ("PANDA_UNHAPPY", facts.panda_unhappy),
+        ("PANDA_SNEEZE", facts.panda_sneeze),
+        ("PANDA_EAT", facts.panda_eat),
+        ("PANDA_MAIN_GENE", facts.panda_main_gene),
+        ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
+        ("PANDA_FLAGS", facts.panda_flags),
         ("CHICKEN_VARIANT", facts.chicken_variant),
         ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
     ] {

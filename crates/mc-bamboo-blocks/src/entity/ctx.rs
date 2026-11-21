@@ -144,6 +144,13 @@ pub trait BlockView {
         false
     }
 
+    /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
+    ///
+    /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
+    fn is_thundering(&self) -> bool {
+        false
+    }
+
     /// `Level.isBrightOutside()`：主世界没有固定时间，天色暗于 4 才算夜里。
     ///
     /// `Level.isBrightOutside()`: the overworld has no fixed time, so night
@@ -360,6 +367,10 @@ impl BlockView for World<'_> {
         World::is_raining_at(self, pos)
     }
 
+    fn is_thundering(&self) -> bool {
+        self.level().block_weather().is_thundering()
+    }
+
     fn is_bright_outside(&self) -> bool {
         self.level().is_bright_outside()
     }
@@ -549,6 +560,10 @@ pub enum Command {
         wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
+        /// 熊猫父亲的显性 / 隐性基因（落地时父亲不在实体表里）。
+        ///
+        /// The panda father's main and hidden genes (it is not in the table when this lands).
+        father_genes: Option<(u8, u8)>,
     },
     /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
     HurtPlayer {
@@ -620,6 +635,18 @@ pub enum Command {
         others: Vec<EntityUid>,
         enemy: EntityUid,
     },
+    /// `Panda.pickUpItem`：把脚下那份吃的拿进主手。
+    ///
+    /// `Panda.pickUpItem`: take the edible stack into the main hand.
+    PickUpItem {
+        item: EntityUid,
+    },
+    /// `Panda.afterSneeze`：附近的成年熊猫原地跳一下。
+    ///
+    /// `Panda.afterSneeze`: nearby adult pandas hop.
+    JumpMobs {
+        others: Vec<EntityUid>,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -682,7 +709,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             wool,
             partner,
             position,
-        } => super::mob::living::apply_breed(me, partner, position, world, kind, variant, wool),
+            father_genes,
+        } => super::mob::living::apply_breed(
+            me,
+            world,
+            super::mob::living::BreedRequest {
+                kind,
+                variant,
+                wool,
+                partner,
+                position,
+                father_genes,
+            },
+        ),
         Command::HurtPlayer {
             target,
             source,
@@ -717,6 +756,23 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::AlertMobs { others, enemy } => {
             super::mob::polar_bear::apply_alert(world, &others, enemy);
+        }
+        Command::PickUpItem { item } => {
+            super::mob::panda::apply_pick_up(world, item, me);
+        }
+        Command::JumpMobs { others } => {
+            for other in others {
+                world.with_entity_mut(other, &mut |entity| {
+                    let power = entity.kind.mob().map_or(0.0, |mob| {
+                        mob.attributes
+                            .value(mc_bamboo_data::registries::attribute::JUMP_STRENGTH)
+                            as f32
+                    });
+                    if power > 1.0e-5 {
+                        entity.delta.y = entity.delta.y.max(f64::from(power));
+                    }
+                });
+            }
         }
         Command::EatBlock { pos, grass_below } => {
             super::mob::living::apply_eat_block(world, pos, grass_below);

@@ -67,6 +67,9 @@ fn placement(entity: i32) -> Option<Placement> {
         // 哞菇的放置方式和高度图一样，规则换成 `checkMushroomSpawnRules`（见 [`spawn_rules`]）。
         // Mooshrooms share the placement and heightmap; [`spawn_rules`] swaps the rule.
         entity_type::MOOSHROOM,
+        // 熊猫用普通动物规则，放置方式和高度图一样。
+        // Pandas use the plain animal rule and the same placement and heightmap.
+        entity_type::PANDA,
         entity_type::PIG,
         // 北极熊同样的放置方式和高度图，规则是 `checkPolarBearSpawnRules`。
         // Polar bears share the placement and heightmap; the rule is `checkPolarBearSpawnRules`.

@@ -97,6 +97,12 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::PolarBear {
         super::polar_bear::tick_end(me, mob, ctx);
     }
+    // `Panda.tick` 在 `super.tick()` 之后：担心基因、不乐意计数、喷嚏和打滚。
+    // `Panda.tick` after `super.tick()`: the worried gene, the unhappy counter,
+    // sneezing and rolling.
+    if mob.mob_type == super::MobType::Panda {
+        super::panda::tick_end(me, mob, ctx);
+    }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
     // `AbstractHorse.tick` advances its timers after `super.tick()`.
     if mob.mob_type.is_equine() {
@@ -614,6 +620,7 @@ fn ambient_sound(mob: &Mob) -> &'static str {
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
         super::MobType::PolarBear => super::polar_bear::ambient_sound(mob.is_baby()),
+        super::MobType::Panda => super::panda::ambient_sound(&mob.panda),
         _ => mob
             .mob_type
             .ambient_sound()
@@ -810,6 +817,34 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
         burn_undead(me, mob, ctx);
     }
+    // `Mob.aiStep` 的 looting：熊猫空着手、脚下有能吃的东西时拿进主手。
+    // `Mob.aiStep` looting: an empty-handed panda takes edible items at its feet.
+    if mob.mob_type == super::MobType::Panda
+        && mob.can_pick_up_loot
+        && is_alive(me, mob)
+        && !mob.dead
+        && ctx.blocks().block_game_rules().mob_griefing
+    {
+        let mut found = None;
+        ctx.for_each_other_in(me.bounding_box().inflate(1.0, 0.0, 1.0), &mut |other| {
+            if found.is_some() || other.removed {
+                return;
+            }
+            if let KindPublic::Item {
+                stack,
+                pickup_delay,
+                ..
+            } = &other.kind
+                && !stack.is_empty()
+                && super::panda::wants_pick_up(mob, stack, *pickup_delay)
+            {
+                found = Some(other.uid);
+            }
+        });
+        if let Some(item) = found {
+            ctx.emit(crate::entity::ctx::Command::PickUpItem { item }, me);
+        }
+    }
     // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
     if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
@@ -911,6 +946,12 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     },
                     partner,
                     position: me.position,
+                    father_genes: (mob.mob_type == super::MobType::Panda).then(|| {
+                        (
+                            mob.panda.main_gene.id() as u8,
+                            mob.panda.hidden_gene.id() as u8,
+                        )
+                    }),
                 },
                 me,
             );
@@ -941,6 +982,12 @@ fn set_speed(mob: &mut Mob, speed: f32) {
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
 fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+    // `Panda.PandaMoveControl.tick`：做不了动作时不响应移动控制。
+    // `Panda.PandaMoveControl.tick`: no move control while an action is playing.
+    if mob.mob_type == super::MobType::Panda && !mob.panda_can_perform_action(view.is_thundering())
+    {
+        return;
+    }
     match mob.mover.operation {
         Operation::MoveTo => {
             mob.mover.operation = Operation::Wait;
@@ -1421,6 +1468,11 @@ pub(crate) fn hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
+    // `Panda.hurtServer`：先站起来，再做官方的无敌和冷却判定。
+    // `Panda.hurtServer`: stand up first, then the vanilla invulnerability checks.
+    if mob.mob_type == super::MobType::Panda {
+        mob.panda.sit(false);
+    }
     // `isInvulnerableTo`。
     if me.removed
         || ((mob.invulnerable || mob.invulnerable_time > 0)
@@ -1560,6 +1612,12 @@ pub(crate) fn do_hurt_target(
     target: crate::entity::EntityUid,
 ) {
     let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
+    // `Panda.doHurtTarget`：不咬回去的好斗熊猫记下这一口，`PandaHurtByTargetGoal` 会停手。
+    // `Panda.doHurtTarget`: a non-aggressive panda records the bite so its goal stops.
+    let bites = mob.mob_type == super::MobType::Panda;
+    if bites && !mob.panda.is_aggressive() {
+        mob.panda.did_bite = true;
+    }
     let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
     source.attacker = Some(me.id);
     source.direct = Some(me.id);
@@ -1604,6 +1662,11 @@ pub(crate) fn do_hurt_target(
                 );
             }
         }
+        // `Mob.playAttackSound` 的熊猫版本：咬中才响。
+        // The panda `Mob.playAttackSound`: only on a hit.
+        if bites && hurt {
+            play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
+        }
     } else if let Some(other) = ctx.other(target) {
         let _ = other;
         ctx.emit(
@@ -1614,6 +1677,9 @@ pub(crate) fn do_hurt_target(
             },
             me,
         );
+        if bites {
+            play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
+        }
     }
 }
 
@@ -1779,21 +1845,35 @@ fn animal_death_drops(
     }
 }
 
+/// [`Command::BreedAnimals`] 落地时带的参数。父亲在落地时不在实体表里，所以它的
+/// 熊猫基因随命令带过来。
+///
+/// The parameters of a landed [`Command::BreedAnimals`]. The father is not in the table when
+/// this lands, so its panda genes travel with the command.
+pub(crate) struct BreedRequest {
+    pub kind: super::MobType,
+    pub variant: super::CowVariant,
+    pub wool: u8,
+    pub partner: crate::entity::EntityUid,
+    pub position: Vec3,
+    pub father_genes: Option<(u8, u8)>,
+}
+
 /// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
 /// `finalizeSpawnChildFromBreeding`。父母的年龄设成 6000、求爱清零，父亲发爱心事件，
 /// 按 `mob_drops` 生成一颗 `1 + random.nextInt(7)` 的经验球。
 ///
 /// Breeding: spawn the calf, set both parents' age to 6000, reset their love,
 /// broadcast hearts on this parent and award one experience orb.
-pub(crate) fn apply_breed(
-    me: &mut Entity,
-    partner: crate::entity::EntityUid,
-    position: Vec3,
-    world: &mut crate::world::World,
-    kind: super::MobType,
-    variant: super::CowVariant,
-    wool: u8,
-) {
+pub(crate) fn apply_breed(me: &mut Entity, world: &mut crate::world::World, request: BreedRequest) {
+    let BreedRequest {
+        kind,
+        variant,
+        wool,
+        partner,
+        position,
+        father_genes,
+    } = request;
     // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
     // 马科的 `getBreedOffspring` 自己取数（属性遗传和花色），也不取这个 `nextBoolean`。
     // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
@@ -1823,8 +1903,35 @@ pub(crate) fn apply_breed(
     } else {
         None
     };
+    // 熊猫的基因在 `getBreedOffspring` 里抽：父 / 母各抽一次 `nextBoolean`，幼崽自己抽
+    // 初始的 `nextBoolean` 和两次 1/32 的变异。
+    // Panda genes are drawn in `getBreedOffspring`: one `nextBoolean` per parent, plus the
+    // calf's own initial `nextBoolean` and two 1/32 mutations.
+    let panda_genes = if kind == super::MobType::Panda {
+        let father = father_genes.map(|(main, hidden)| {
+            (
+                super::panda::Gene::from_id(i32::from(main)),
+                super::panda::Gene::from_id(i32::from(hidden)),
+            )
+        });
+        let mother = world.entity(partner).and_then(|entity| {
+            entity.kind.mob().map(|mob| {
+                (
+                    (mob.panda.main_gene, mob.panda.hidden_gene),
+                    entity.random.state(),
+                )
+            })
+        });
+        father.zip(mother)
+    } else {
+        None
+    };
     let equine = foal.is_some();
-    let from_father = sheep || equine || calf_brown.is_some() || me.random.next_boolean();
+    let from_father = sheep
+        || equine
+        || calf_brown.is_some()
+        || panda_genes.is_some()
+        || me.random.next_boolean();
     let mut child_variant = variant;
     let mut partner_wool = wool;
     world.with_entity_mut(partner, &mut |entity| {
@@ -1845,15 +1952,42 @@ pub(crate) fn apply_breed(
             world.random(),
         )
     });
-    // `finalizeSpawnChildFromBreeding` 只在 `MOB_DROPS` 开着时取经验值。
-    // `finalizeSpawnChildFromBreeding` only draws the orb value with `MOB_DROPS` on.
+    // `finalizeSpawnChildFromBreeding` 只在 `MOB_DROPS` 开着时取经验值；它在
+    // `getBreedOffspring` 之后，所以熊猫的父母基因取数排在它前面。
+    // `finalizeSpawnChildFromBreeding` draws the orb value only with `MOB_DROPS`, and
+    // after `getBreedOffspring`, so the panda parent gene draws come first.
     let mob_drops = world.block_game_rules().mob_drops;
+    let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
+    // 熊猫幼崽要先拿到 ID 和随机种子，基因才是从它自己的随机源抽的。
+    // A panda calf takes its id and random seed first, so the genes come from its own random.
+    let panda_prepared = panda_genes.is_some();
+    if panda_prepared {
+        calf = world.prepare_entity(calf);
+        if let Some((father, (mother, mother_state))) = panda_genes {
+            let mut mother_random = crate::entity::JavaRandom::from_state(mother_state);
+            let genes = super::panda::offspring_genes(
+                &mut calf,
+                &mut me.random,
+                father,
+                &mut mother_random,
+                mother,
+            );
+            let new_state = mother_random.state();
+            world.with_entity_mut(partner, &mut |entity| {
+                entity.random = crate::entity::JavaRandom::from_state(new_state);
+            });
+            calf.with_mob(|_me, mob| {
+                mob.panda.main_gene = genes.0;
+                mob.panda.hidden_gene = genes.1;
+                super::panda::set_attributes(mob);
+            });
+        }
+    }
     let xp = if mob_drops {
         1 + me.random.next_int_bounded(7)
     } else {
         0
     };
-    let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;
@@ -1870,7 +2004,11 @@ pub(crate) fn apply_breed(
         mob.y_body_rot = 0.0;
         mob.y_body_rot_o = 0.0;
     });
-    let calf_id = world.spawn_entity(calf);
+    let calf_id = if panda_prepared {
+        world.add_prepared_entity(calf)
+    } else {
+        world.spawn_entity(calf)
+    };
     // `finish_mob_random` 在分配 ID 之后重取了朝向；`snapTo` 把 yRot 清成 0，
     // 但构造时的 yHeadRot 要保留。
     world.with_entity_mut(calf_id, &mut |entity| {

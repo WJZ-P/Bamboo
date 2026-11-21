@@ -3195,8 +3195,11 @@ impl<'a> World<'a> {
         let Some(mut entity) = self.level.take_entity(id) else {
             return crate::entity::mob::interact::MobInteraction::pass();
         };
+        let thundering = self.is_thundering();
         let outcome = entity
-            .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request))
+            .with_mob(|me, mob| {
+                crate::entity::mob::interact::interact(me, mob, request, thundering)
+            })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         if outcome.shear {
             crate::entity::mob::interact::apply_shear(
@@ -3205,6 +3208,11 @@ impl<'a> World<'a> {
                 request.hand,
                 &request.held,
             );
+        }
+        if let Some(stack) = outcome.drop_stack.clone() {
+            // `Entity.spawnAtLocation(stack)`：脚下生成一件掉落物。
+            // `Entity.spawnAtLocation(stack)`: a drop at the mob's feet.
+            self.spawn_at_location(entity.position, stack);
         }
         self.level.put_entity(entity);
         outcome

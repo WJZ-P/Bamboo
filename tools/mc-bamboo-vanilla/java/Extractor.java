@@ -1190,6 +1190,13 @@ public final class Extractor {
         out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
         out.add("stewFlowers", stewFlowers());
         out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());
+        Class<?> panda = net.minecraft.world.entity.animal.panda.Panda.class;
+        out.addProperty("pandaUnhappy", entityAccessor(panda, "UNHAPPY_COUNTER").id());
+        out.addProperty("pandaSneeze", entityAccessor(panda, "SNEEZE_COUNTER").id());
+        out.addProperty("pandaEat", entityAccessor(panda, "EAT_COUNTER").id());
+        out.addProperty("pandaMainGene", entityAccessor(panda, "MAIN_GENE_ID").id());
+        out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
+        out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();

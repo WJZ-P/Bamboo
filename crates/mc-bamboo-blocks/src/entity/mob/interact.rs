@@ -59,6 +59,10 @@ pub struct MobInteraction {
     /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`: true for milk, false
     /// for mooshroom stew, which creative players receive as well.
     pub replacement_limit_creative: bool,
+    /// `spawnAtLocation`：熊猫换手里那份竹子时丢下的旧物品。
+    ///
+    /// `spawnAtLocation`: the old stack a panda drops when given a new one.
+    pub drop_stack: Option<ItemStack>,
 }
 
 impl MobInteraction {
@@ -71,6 +75,7 @@ impl MobInteraction {
             open_inventory: false,
             shear: false,
             replacement_limit_creative: true,
+            drop_stack: None,
         }
     }
 }
@@ -81,12 +86,24 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         MobType::Pig => item_is_tagged(item, item_tags::PIG_FOOD),
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
+        MobType::Panda => super::panda::is_food(item),
         _ => false,
     }
 }
 
 /// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
-pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+pub fn interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+    thundering: bool,
+) -> MobInteraction {
+    if mob.mob_type == MobType::Panda
+        && let Some(outcome) =
+            super::panda::interact(me, mob, req, super::panda::is_scared(mob, thundering))
+    {
+        return outcome;
+    }
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }

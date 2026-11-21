@@ -268,6 +268,9 @@ public final class MobOracle {
             if (only == null || "equine".startsWith(only)) {
                 cases += playEquines(official, out);
             }
+            if (only == null || "panda".startsWith(only)) {
+                cases += playPandaGenes(official, out);
+            }
             if (only == null || "llama_spit".startsWith(only)) {
                 OracleLlama.checkAim(official);
                 playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
@@ -364,6 +367,10 @@ public final class MobOracle {
         final List<float[]> yaws = new ArrayList<>();
         /** 每头牛的初始 `Age`，默认 0（成年）。 */
         final List<Integer> cowAges = new ArrayList<>();
+        /** 每头熊猫的显性 / 隐性基因 id，和 `cows` 下标对齐。 */
+        final List<int[]> genes = new ArrayList<>();
+        /** 每头熊猫主手一开始拿的东西，和 `cows` 下标对齐。 */
+        final List<Item> holds = new ArrayList<>();
         final List<double[]> players = new ArrayList<>();
         final List<Item> playerItems = new ArrayList<>();
         /** 玩家主手物品的抢夺等级，0 表示没有。 */
@@ -511,6 +518,15 @@ public final class MobOracle {
             seeds.add(seed);
             cowAges.add(age);
             mobKinds.add(new int[] {kind});
+            return this;
+        }
+
+        /** 一只熊猫：显性 / 隐性基因和主手物品跟在它后面。 */
+        Scene panda(double x, double y, double z, float yaw, long seed, int age,
+                int mainGene, int hiddenGene, Item hold) {
+            cow(x, y, z, yaw, seed, age);
+            genes.add(new int[] {mainGene, hiddenGene});
+            holds.add(hold);
             return this;
         }
 
@@ -929,6 +945,70 @@ public final class MobOracle {
                 scenes.add(baby);
             }
             polarBearScenes(scenes);
+            pandaScenes(scenes);
+        }
+
+        /**
+         * 熊猫：闲逛、三种基因、坐下吃竹子、繁殖和死亡掉落。
+         *
+         * Pandas: strolling, three genes, sitting down to eat bamboo, breeding and death loot.
+         */
+        static void pandaScenes(List<Scene> scenes) {
+            int bamboo = BuiltInRegistries.ITEM.getId(Items.BAMBOO);
+            {
+                // 成年和幼崽闲逛：玩家在 20 格外，躲避和看玩家目标都看不见人。
+                Scene idle = new Scene("panda_idle").ticks(400).packets();
+                ground(idle, 24);
+                idle.panda(0.5, 64.0, 0.5, 0.0F, 501L, 0, 0, 0, Items.AIR);
+                idle.panda(3.5, 64.0, 2.5, 90.0F, 502L, 0, 0, 0, Items.AIR);
+                idle.panda(1.5, 64.0, 1.5, 180.0F, 503L, -24000, 0, 0, Items.AIR);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                // 懒惰、虚弱和棕色：站立数值、仰躺和外观都要对上。
+                Scene genes = new Scene("panda_genes").ticks(400).packets();
+                ground(genes, 24);
+                genes.panda(0.5, 64.0, 0.5, 45.0F, 504L, 0, 1, 0, Items.AIR);
+                genes.panda(3.5, 64.0, 0.5, 0.0F, 505L, 0, 5, 5, Items.AIR);
+                genes.panda(6.5, 64.0, 0.5, 0.0F, 506L, 0, 4, 4, Items.AIR);
+                genes.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(genes);
+            }
+            {
+                // 喂竹子：坐下、吃、再喂一次丢下旧的；最后打一下站起来。
+                Scene eat = new Scene("panda_bamboo").ticks(260).drops().packets();
+                eat.realPlayers = true;
+                eat.deathKind = 2;
+                ground(eat, 8);
+                eat.panda(0.5, 64.0, 0.5, 0.0F, 507L, 0, 0, 0, Items.AIR);
+                eat.player(1.5, 64.0, 0.5, Items.AIR);
+                eat.interact(3, 0, 0, bamboo, 0);
+                eat.interact(60, 0, 0, bamboo, 0);
+                eat.hurts.add(new double[] {200, 0, 1.0, 0});
+                scenes.add(eat);
+            }
+            {
+                // 繁殖：附近有竹子，两只成年熊猫进入求爱并生下幼崽。
+                Scene breed = new Scene("panda_breed").ticks(160).drops().packets();
+                ground(breed, 12);
+                breed.fill(4, 64, 4, 5, 66, 5, Blocks.BAMBOO.defaultBlockState());
+                breed.panda(0.5, 64.0, 0.5, 0.0F, 508L, 0, 0, 0, Items.AIR);
+                breed.panda(1.1, 64.0, 0.5, 0.0F, 509L, 0, 0, 0, Items.AIR);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(2, 0, 0, bamboo, 0);
+                breed.interact(2, 1, 0, bamboo, 0);
+                scenes.add(breed);
+            }
+            {
+                // 打死看掉落：竹子，经验 1–3。
+                Scene death = new Scene("panda_death").ticks(58).drops().packets();
+                ground(death, 6);
+                death.panda(0.5, 64.0, 0.5, 0.0F, 510L, 0, 0, 0, Items.AIR);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
         }
 
         /**
@@ -2256,6 +2336,16 @@ public final class MobOracle {
             if (cow instanceof Chicken chicken && scene.eggTime >= 0) {
                 chicken.eggTime = scene.eggTime;
             }
+            if (cow instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+                int[] geneIds = i < scene.genes.size() ? scene.genes.get(i) : new int[] {0, 0};
+                panda.setMainGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(geneIds[0]));
+                panda.setHiddenGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(geneIds[1]));
+                Item hold = i < scene.holds.size() ? scene.holds.get(i) : Items.AIR;
+                if (hold != Items.AIR) {
+                    panda.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                            new ItemStack(hold, 1));
+                }
+            }
             cows.add(cow);
             level.tracked.add(cow);
         }
@@ -2290,6 +2380,12 @@ public final class MobOracle {
                     ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
                     : scene.name.startsWith("mooshroom_") ? scene.wool : 0);
             line.append(",\"egg\":").append(cows.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
+            int[] geneIds = i < scene.genes.size() ? scene.genes.get(i) : new int[] {0, 0};
+            line.append(",\"genes\":[").append(geneIds[0]).append(',').append(geneIds[1]).append(']');
+            Item hold = cows.get(i) instanceof net.minecraft.world.entity.animal.panda.Panda panda
+                    ? panda.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND).getItem()
+                    : Items.AIR;
+            line.append(",\"held\":").append(BuiltInRegistries.ITEM.getId(hold));
             line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
         line.append("],\"players\":[");
@@ -3370,10 +3466,52 @@ public final class MobOracle {
     }
 
     /**
-     * 马科存档：每种 × 三种状态（生成后驯服并装备、野生默认、幼崽），输出官方 `saveWithoutId` 的整份 SNBT。
-     * Bamboo 读进来再写出去，逐键比较马科相关的键。
-     * Equine saves: vanilla's full SNBT, which Bamboo loads and writes back for a per-key comparison.
+     * 熊猫的基因遗传：官方 `setGeneFromParents` 的取数顺序（父母各一次 `nextBoolean`，
+     * 幼崽两次 1/32 的变异）和结果，逐题和 Bamboo 的 `offspring_genes` 比。
+     *
+     * Panda gene inheritance: the draw order of `setGeneFromParents` (one parent `nextBoolean`
+     * each, two 1/32 mutations on the calf) and the resulting genes.
      */
+    private static int playPandaGenes(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        int cases = 0;
+        for (int sample = 0; sample < 512; sample++) {
+            int fatherMain = sample % 7;
+            int fatherHidden = (sample / 7) % 7;
+            int motherMain = (sample / 49) % 7;
+            int motherHidden = 6 - sample % 7;
+            long fatherSeed = 0x5EED0000L + sample * 7919L;
+            long motherSeed = 0x5EED0000L + sample * 104729L + 17;
+            long babySeed = 0x5EED0000L + sample * 15485863L + 3;
+            var father = net.minecraft.world.entity.EntityTypes.PANDA.create(world, EntitySpawnReason.COMMAND);
+            var mother = net.minecraft.world.entity.EntityTypes.PANDA.create(world, EntitySpawnReason.COMMAND);
+            var baby = net.minecraft.world.entity.EntityTypes.PANDA.create(world, EntitySpawnReason.COMMAND);
+            father.setMainGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(fatherMain));
+            father.setHiddenGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(fatherHidden));
+            mother.setMainGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(motherMain));
+            mother.setHiddenGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(motherHidden));
+            setRandom(father, fatherSeed);
+            setRandom(mother, motherSeed);
+            setRandom(baby, babySeed);
+            baby.setGeneFromParents(father, mother);
+            out.write("{\"type\":\"pandaGenes\",\"fatherMain\":" + fatherMain
+                    + ",\"fatherHidden\":" + fatherHidden
+                    + ",\"motherMain\":" + motherMain
+                    + ",\"motherHidden\":" + motherHidden
+                    + ",\"fatherSeed\":" + fatherSeed
+                    + ",\"motherSeed\":" + motherSeed
+                    + ",\"babySeed\":" + babySeed
+                    + ",\"fatherAfter\":" + randomSeed(father)
+                    + ",\"motherAfter\":" + randomSeed(mother)
+                    + ",\"babyAfter\":" + randomSeed(baby)
+                    + ",\"babyMain\":" + baby.getMainGene().getId()
+                    + ",\"babyHidden\":" + baby.getHiddenGene().getId() + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+
     private static int playEquineSaves(Official official, Writer out,
             List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
             throws Exception {
@@ -6279,6 +6417,8 @@ public final class MobOracle {
         if (scene.startsWith("chicken_")) return EntityTypes.CHICKEN;
         if (scene.startsWith("mooshroom_")) return EntityTypes.MOOSHROOM;
         if (scene.startsWith("polar_bear_")) return EntityTypes.POLAR_BEAR;
+        if (scene.startsWith("panda_")) return EntityTypes.PANDA;
+        if (scene.startsWith("panda_")) return EntityTypes.PANDA;
         return EntityTypes.COW;
     }
 
@@ -6289,6 +6429,8 @@ public final class MobOracle {
         if (scene.startsWith("chicken_")) return 5;
         if (scene.startsWith("mooshroom_")) return 10;
         if (scene.startsWith("polar_bear_")) return 11;
+        if (scene.startsWith("panda_")) return 12;
+        if (scene.startsWith("panda_")) return 12;
         return 0;
     }
 
@@ -6306,8 +6448,29 @@ public final class MobOracle {
                 + "|t" + (target == null ? "-" : target.getUUID().toString());
     }
 
+    /**
+     * 熊猫的状态列：两个基因、三个计数器和四位旗帜。
+     *
+     * The panda state column: both genes, the three counters and the four flag bits.
+     */
+    private static String pandaState(net.minecraft.world.entity.animal.panda.Panda panda) throws Exception {
+        Field eat = net.minecraft.world.entity.animal.panda.Panda.class.getDeclaredField("EAT_COUNTER");
+        eat.setAccessible(true);
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) eat.get(null);
+        int flags = (panda.isSneezing() ? 2 : 0) | (panda.isRolling() ? 4 : 0)
+                | (panda.isSitting() ? 8 : 0) | (panda.isOnBack() ? 16 : 0);
+        return "g" + panda.getMainGene().getId() + "/" + panda.getHiddenGene().getId()
+                + "|u" + panda.getUnhappyCounter()
+                + "|n" + panda.getSneezeCounter()
+                + "|e" + panda.getEntityData().get(accessor)
+                + "|f" + flags;
+    }
+
     /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
     private static String farmVariant(Animal animal) throws Exception {
+        if (animal instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+            return pandaState(panda);
+        }
         if (animal instanceof PolarBear bear) {
             return bearState(bear);
         }
@@ -6326,9 +6489,11 @@ public final class MobOracle {
         return variant.unwrapKey().orElseThrow().identifier().toString();
     }
 
-    /** 叫声列；羊没有叫声变种。 */
+    /** 叫声列；羊、北极熊、哞菇和熊猫没有叫声变种。 */
     private static String farmSound(Animal animal) throws Exception {
-        if (animal instanceof Sheep || animal instanceof PolarBear || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow) {
+        if (animal instanceof Sheep || animal instanceof PolarBear
+                || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow
+                || animal instanceof net.minecraft.world.entity.animal.panda.Panda) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");

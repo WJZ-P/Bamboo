@@ -167,6 +167,7 @@ WebView2 的渲染进程不算在内。
 - `/summon minecraft:skeleton` 和骷髅刷怪蛋生成会射箭的骷髅；带 NBT 召唤时和官方一样不执行默认装备生成，无弓时走近战。骷髅复用敌对生物的难度、日晒、装备和战利品流程。普通箭可命中实体或插地，支撑方块失去碰撞后掉落；可拾取的箭按库存、模式和震颤时间判定，普通骷髅的箭不可拾取。箭的运动和插地状态会同步，已建模实体字段写入 Anvil 实体存档。火矢扫过水面会按 `WaterFluid.entityInside` 熄火并播放一次 `entity.generic.extinguish_fire`；穿透箭命中后会在同一刻沿剩余线段重新取候选和方块效果。
 - **猪**：可用 `/summon` 或猪刷怪蛋生成；支持食物、寻路、繁殖（幼崽随机继承一方花纹）、掉落、花纹和声音变种、上鞍（鞍走 `SetEquipment` 同步，死亡必掉）及存档。已知限制：胡萝卜钓竿只能诱惑；未接入载具/乘客、骑乘、下马、钓竿加速、剪除鞍、发射器上鞍、带自定义组件的上鞍/刷怪蛋和雷击转化；已上鞍的猪被空手右键时官方会让玩家骑上去并返回 SUCCESS，Bamboo 返回 PASS。
 - **哞菇**：可用 `/summon` 或哞菇刷怪蛋生成，蘑菇岛（`mooshrooms_spawnable_on` + 亮度）自然刷出；属性、目标、叫声同牛（叫声固定 `classic`），脚下是菌丝时游荡权重 10。碗接蘑菇煲，棕色哞菇喂花（`SuspiciousEffectHolder` 表由生成器导出）后接迷之炖菜（带 `suspicious_stew_effects` 组件），桶挤奶，小麦繁殖 / 催熟；繁殖时父母同色先抽 1/1024 变异再二选一。剪刀把它换成一头牛（公共模块 `conversion.rs`，官方 `Mob.convertTo` 的 `SINGLE`：抄位置、朝向、速度、年龄、效果、名字、标签等，血量不抄），按 `shearing/mooshroom` 表掉 5 个对应颜色的蘑菇并扣剪刀耐久。`Type` / `stew_effects` 存盘，`DATA_TYPE` 同步。对拍：`mob-oracle --only mooshroom` 7 例 0 不一致，`chunk-content` 含新生和棕色带效果两例。已知限制：喂花的 `SMOKE` / `EFFECT` 粒子和剪毛的 `EXPLOSION` 粒子不发；剪毛声发成按坐标的音效包（官方是跟随实体的 `sound_entity` 包，羊同此）；Bamboo 还没有闪电实体，雷击换色（`thunder_hit`）已写但没有调用方；`SHEAR` 游戏事件不发；发射器剪哞菇未接入；转换出的牛照官方 `convertCommon` 抄着火显示标志（`setSharedFlagOnFire`）。
+- **熊猫**：可用 `/summon` 或熊猫刷怪蛋生成，丛林按 `checkAnimalSpawnRules` 自然刷出。六个基因按官方显性 / 隐性规则拼成七种外观（`Brown` / `Weak` 要两份相同才显现），`MainGene` / `HiddenGene` 存盘，`UNHAPPY_COUNTER` / `SNEEZE_COUNTER` / `EAT_COUNTER` / `MAIN_GENE_ID` / `HIDDEN_GENE_ID` / `DATA_ID_FLAGS` 同步。属性 20 血 / 跟随 16 / 速度 0.15 / 攻击 6，虚弱基因 10 血、懒惰基因速度 0.07（只在 `finalizeSpawn` / 繁殖后重设，和官方一样读档不重设）。右键竹子：成年求爱、幼年加速长大、求爱冷却中或成年时坐下吃（吃掉后手里那份消失，中途换竹子会丢下旧的）；脚下有 `panda_eats_from_ground` 的物品会捡进主手。六种移动 / 闲逛目标：panic（坐下就停）、繁殖（附近 8 格找不到竹子就不乐意 32 刻并在 30 秒内不再试）、攻击（做不了动作时不启动）、诱惑、躲避玩家 / 怪物（只有担心基因）、坐下、仰躺（懒惰）、打喷嚏（幼年；虚弱先抽 1/500）、看玩家、打滚（幼年或顽皮）、跟随父母、避水闲逛。打喷嚏按 `gameplay/panda_sneeze` 掉礼物并让 10 格内成年熊猫跳一下；好斗熊猫被同伴叫来（`HurtByTargetGoal.setAlertOthers`，只叫好斗的）；吃到竹子或咬过一口就停手。繁殖在 `getBreedOffspring` 里按官方顺序抽父母各一次 `nextBoolean` 和幼崽两次 1/32 变异。对拍：`mob-oracle --only panda` 5 个逐刻场景（闲逛、三种基因、吃竹子、繁殖、死亡掉落）+ 512 题基因遗传，共 1278 刻 0 不一致。已知限制：吃东西的 `ITEM` 粒子和喷嚏的 `SNEEZE` 粒子不发（取数照官方）；`PandaLookAtPlayerGoal` 的 `lookAt` 只在目标被清掉时重找，跨刻保持的细节和官方一致但未单独对拍；雷雨坐下依赖 `BlockView::is_thundering`，只有真实世界和对拍注入过；喷嚏让同伴跳的水中判定没有建模（只看 `onGround`）；幼崽拿金蒲公英走 `Animal.mobInteract` 的兜底未接；熊猫的 `canBeLeashed` 为假，拴绳本来就没建模。
 - **北极熊**：可用 `/summon` 或北极熊刷怪蛋生成，冰冻海洋和冰冻深海这两个「替代方块」群系按 `checkPolarBearSpawnRules`（亮度 + 脚下 `polar_bears_spawnable_on_alternate`）刷，其它群系走 `checkAnimalSpawnRules`；属性 30 血 / 跟随 20 / 速度 0.25 / 攻击 6，`getWaterSlowDown` 0.98。`PolarBearMeleeAttackGoal`（不要求看得见目标）在够不着但在「目标宽度 + 3」格内时站起来吼（40 刻冷却）再扑咬；幼崽挨打时叫来成年北极熊后自己停手（`alertOther` 只认成年），成年熊带崽时主动打 10 格内的玩家（搜索距离减半）；持久愤怒（`neutral.rs`，`anger_end_time` / `angry_at` 存盘）让被打的熊记住 20–39 秒。成年熊只在环境伤害下恐慌，幼崽和别的动物一样；幼年用 `BABY_DIMENSIONS`，组生成按 `AgeableMobGroupData(1.0)` 从第二只起都是幼崽；幼崽叫声是 `ambient_baby`；`DATA_STANDING_ID` 同步。对拍：`mob-oracle --only polar_bear` 9 例 1081 刻 0 不一致（闲逛带崽、柱子上的玩家、死亡掉落含着火、环境恐慌、挨打反击、带崽打玩家、打幼崽叫帮手、和平难度）。已知限制：狐狸不存在，`NearestAttackableTargetGoal<Fox>` 只注册不找目标；`universalAnger` 游戏规则没建模（恒为假，`ResetUniversalAngerTargetGoal` 只占位）；官方玩家死亡时 `NeutralMob.playerDied` 会按 `forgive_dead_players` 消气，Bamboo 没有接（对拍的假世界没有玩家死亡，`polar_bear_fight_cub` 场景因此止于玩家 2 血）。
 - **羊**：可用 `/summon` 或羊刷怪蛋生成；自然生成颜色按群系权重（含 1/500 粉色），剪刀剪毛按 `shearing/sheep` 战利品表掉 1–3 团羊毛并扣剪刀耐久，染料染色，`EatBlockGoal` 吃草让草方块变泥土并长回羊毛（幼年加速长大），繁殖按合成配方混色、混不出时按世界随机源选一方；死亡按颜色和剪毛状态选子战利品表；`Sheared` / `Color` 存盘，羊毛字节同步。已知限制：脚下的草（`edible_for_sheep`）被吃掉的分支未对拍；`EatBlockGoal` 的游戏事件（`EAT` / `SHEAR`）不发；发射器剪羊毛未接入。
 - **鸡**：可用 `/summon` 或鸡刷怪蛋生成；花纹和叫声变种、构造时的下蛋计时（`6000 + nextInt(6000)`）、按 `gameplay/chicken_lay` 礼物表按花纹下（蓝 / 棕）蛋、缓慢下落、种子繁殖和 `EggLayTime` / `IsChickenJockey` 存盘。玩家右键和发射器都能扔出鸡蛋（含蓝 / 棕蛋），命中时对生物打 0 点 `thrown` 伤害（有击退），按蛋自己的随机源 1/8 孵小鸡、其中 1/32 孵四只，小鸡按蛋的花纹组件定花纹、从零尺寸找空位放下。已知限制：鸡骑士不生成（`IsChickenJockey` 恒写 0）；扇翅膀只影响客户端动画，服务端不记 `flyDist` 的翅膀游戏事件。下蛋声在战利品落地前取音高，礼物表求值失败时官方不放声音，Bamboo 仍会放。扔出的鸡蛋：首刻的气泡柱推力不建模；撞到方块不触发 `onProjectileHit`（标靶、钟、紫颂花等），也不发 `PROJECTILE_SHOOT` / `PROJECTILE_LAND` 游戏事件；打中下落方块不 `markHurt`；着火的蛋穿过水面不按 `WaterFluid.entityInside` 熄火（只有箭做了）；扔蛋不计 `ITEM_USED` 统计；孵化找空位按盒子切格子求最近点，没有复刻 `VoxelShape` 合并坐标时 1e-7 的容差和同距并列时的遍历顺序。雪球等其它投掷物还没有实现，右键雪球不会扔出。
@@ -515,7 +516,7 @@ WebView2 的渲染进程不算在内。
   `Monster.isDarkEnoughToSpawn`、`PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`）、
   `finalizeSpawn` 与按组生成（牛按 `AgeableMobGroupData` 抽幼年；马按 `HorseGroupData`、羊驼按 `LlamaGroupData` 同组共享毛色，驴和骡的幼年概率是 0.2；马科的 `getMaxSpawnClusterSize` 是 6）。刷怪区块列表用岛自己的
   世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
-  - **只有牛、哞菇、猪、羊、鸡、北极熊、马、驴、骡、羊驼、僵尸、尸壳、骷髅会真的生成**。
+  - **只有牛、哞菇、猪、羊、鸡、北极熊、熊猫、马、驴、骡、羊驼、僵尸、尸壳、骷髅会真的生成**。
     `ON_GROUND` 按实体类型检查落脚块：冰和霜冰只允许北极熊通过此层，北极熊自己的群系与亮度规则仍须通过。
     群系刷怪表里其它条目（苦力怕、蜘蛛、
     史莱姆、末影人、女巫、蝙蝠、鱿鱼等）仍占原版权重，抽完组大小后结束这一组。官方会继续
@@ -548,9 +549,9 @@ WebView2 的渲染进程不算在内。
   `mob-oracle --only gen_spawn_misc` 对拍蘑菇岛与冰冻海洋的动物表。两者都比随机源指纹和每只动物的类型、
   坐标、朝向、幼年和左撇子；平原场景还比马科的属性与品种。
   **已知差异**：
-  - 真正生成的有牛、猪、羊、鸡、哞菇、北极熊和马科（马、驴、骡、羊驼）。
+  - 真正生成的有牛、猪、羊、鸡、哞菇、北极熊、熊猫和马科（马、驴、骡、羊驼）。
     兔、狼、狐、山羊、
-    犰狳、鹦鹉、熊猫、青蛙、海龟、骆驼、炽足兽的放置规则还没翻译，抽到时停止这个
+    犰狳、鹦鹉、青蛙、海龟、骆驼、炽足兽的放置规则还没翻译，抽到时停止这个
     区块的生成期刷怪（之后的取数没法对齐）。这些生物合进来后在 `natural_gen.rs` 的放置表里接上。
   - 刷怪在世界线程的完工组装里跑，不在计算池的 `spawn` 阶段：那一刻计算线程还拿不到最终方块
     和光照。每个区块平均只取一两个随机数。

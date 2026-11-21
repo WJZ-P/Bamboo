@@ -300,6 +300,10 @@ fn finalize_spawn_in_group(
         super::skeleton::finalize_spawn(world, entity);
         return;
     }
+    if kind == MobType::Panda {
+        super::panda::finalize_spawn(entity, world.random(), group);
+        return;
+    }
     if matches!(kind, MobType::Zombie | MobType::Husk) {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
@@ -334,6 +338,8 @@ pub(super) fn finalize_generated(
             | MobType::PolarBear
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
+    } else if kind == MobType::Panda {
+        super::panda::finalize_spawn(entity, region_random, group);
     } else if kind.is_equine() {
         super::equine::finalize_spawn(entity, region_random, group);
     } else {
@@ -422,6 +428,30 @@ pub(super) fn finalize_cow(
         if let Some(sound) = cow_sound {
             mob.sound_variant = sound;
         }
+        if baby {
+            living::set_age(me, mob, BABY_START_AGE);
+        }
+        finalize_mob(random, mob);
+    });
+}
+
+/// `AgeableMob.finalizeSpawn` 加 `Mob.finalizeSpawn` 那两层，组数据由调用方给。
+///
+/// The `AgeableMob.finalizeSpawn` and `Mob.finalizeSpawn` layers with caller group data.
+pub(super) fn finalize_ageable(
+    entity: &mut Entity,
+    random: &dyn RandomSource,
+    group: &mut Option<SpawnGroup>,
+    baby_chance: f32,
+) {
+    if !matches!(group, Some(SpawnGroup::Ageable(_))) {
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(baby_chance)));
+    }
+    let Some(SpawnGroup::Ageable(data)) = group else {
+        unreachable!("刚放进去的动物组数据");
+    };
+    let baby = data.roll_baby(random);
+    entity.with_mob(|me, mob| {
         if baby {
             living::set_age(me, mob, BABY_START_AGE);
         }

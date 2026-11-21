@@ -938,6 +938,15 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `PolarBear.DATA_STANDING_ID`.
     pub polar_bear_standing: u8,
+    /// 熊猫的六个元数据 index：计数器、基因和标志位。
+    ///
+    /// The six panda metadata indices: the counters, the genes and the flags byte.
+    pub panda_unhappy: u8,
+    pub panda_sneeze: u8,
+    pub panda_eat: u8,
+    pub panda_main_gene: u8,
+    pub panda_hidden_gene: u8,
+    pub panda_flags: u8,
     /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
     ///
     /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).

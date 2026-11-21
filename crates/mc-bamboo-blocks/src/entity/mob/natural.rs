@@ -624,6 +624,7 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         | MobType::Llama => animal_spawn_rules(world, pos),
         MobType::Mooshroom => super::mooshroom::spawn_rules(world, pos),
         MobType::PolarBear => super::polar_bear::spawn_rules(world, pos),
+        MobType::Panda => super::panda::spawn_rules(world, pos),
         MobType::Zombie | MobType::Skeleton => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
