@@ -75,7 +75,9 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: mc_bamboo_core::Han
         complete(region, id, hand, item);
         return true;
     }
-    let player = region.players.get_mut(&id).expect("player");
+    if player.use_item.is_some() || player.weapon_use.is_some() {
+        return true;
+    }
     player.use_item = Some(UsingItem {
         hand,
         item,

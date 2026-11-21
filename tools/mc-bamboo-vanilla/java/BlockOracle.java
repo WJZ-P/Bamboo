@@ -3031,13 +3031,13 @@ public final class BlockOracle {
         private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
         /** 随机填进场景容器的物品。剑用来试堆叠上限 1。后面那些放进发射器才会被红石触发并和官方比较。
          * TNT 会生成点燃的实体，方块、声音、容器和 `level.random` 照常比较。
-         * 箭、船、矿车、刷怪蛋和盔甲架不放进来，那些题会整题排除。
+         * 箭由单独的固定题比较；船、矿车、刷怪蛋和盔甲架不放进随机题。
          *
          * Items placed into scene containers at random. The sword checks a stack limit of 1.
          * The rest are placed in a dispenser so a powered dispenser fires them and the oracle
          * compares the shot. TNT spawns a primed entity; blocks, sounds, contents and
-         * `level.random` are still compared. Arrows, boats, minecarts, spawn eggs and armour
-         * stands are left out. Those cases are excluded wholesale.
+         * `level.random` are still compared. Arrows get dedicated fixtures; boats,
+         * minecarts, spawn eggs and armour stands stay out of the random list.
          */
         private static final List<Item> CONTAINER_ITEMS = List.of(Items.STONE, Items.DIRT, Items.OAK_LOG, Items.BREAD,
                 Items.COBBLESTONE, Items.IRON_INGOT, Items.IRON_SWORD, Items.WATER_BUCKET, Items.LAVA_BUCKET,
@@ -3428,6 +3428,29 @@ public final class BlockOracle {
                         c.actor = new Vec3(4.5, 70.0, 4.5);
                     }
                     c.settle = settle;
+                    cases.add(c);
+                }
+            }
+            return cases;
+        }
+
+        /**
+         * 发射器计划刻固定题：三类箭各走横向和竖向，核对余量、事件、世界随机源。
+         *
+         * Fixed dispenser-tick fixtures for all three arrow items, both horizontally
+         * and vertically. Compare remaining inventory, events and the level random.
+         */
+        List<Case> dispenserArrowCases(int base) {
+            List<Case> cases = new ArrayList<>();
+            BlockPos pos = new BlockPos(0, 64, 0);
+            for (Item item : List.of(Items.ARROW, Items.TIPPED_ARROW, Items.SPECTRAL_ARROW)) {
+                for (Direction direction : List.of(Direction.EAST, Direction.UP)) {
+                    Case c = new Case(base + cases.size(), Kind.TICK, new Subject(Blocks.DISPENSER, item), height);
+                    c.put(pos, Blocks.DISPENSER.defaultBlockState()
+                            .setValue(DispenserBlock.FACING, direction).setValue(DispenserBlock.TRIGGERED, true));
+                    c.putContents(pos, new ItemStack(item, 2));
+                    c.target = pos;
+                    c.actor = new Vec3(4.5, 70.0, 4.5);
                     cases.add(c);
                 }
             }
@@ -4655,23 +4678,29 @@ public final class BlockOracle {
         private static final int HOPPER_CASE_BASE = 2_000_000;
         /** 显式合成器题的 id 从这里开始。 */
         private static final int CRAFTER_CASE_BASE = 3_000_000;
+        private static final int DISPENSER_ARROW_CASE_BASE = 4_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
             List<Case> pistonCases = generator.pistonCases(PISTON_CASE_BASE);
             List<Case> hopperCases = generator.hopperCases(HOPPER_CASE_BASE);
             List<Case> crafterCases = generator.crafterCases(CRAFTER_CASE_BASE);
+            List<Case> dispenserArrowCases = generator.dispenserArrowCases(DISPENSER_ARROW_CASE_BASE);
             boolean single = options.single >= 0;
             boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
                     : includesPistonCases();
             boolean hoppers = single ? options.single >= HOPPER_CASE_BASE && options.single < CRAFTER_CASE_BASE
                     : includesHopperCases();
-            boolean crafters = single ? options.single >= CRAFTER_CASE_BASE : includesCrafterCases();
+            boolean crafters = single ? options.single >= CRAFTER_CASE_BASE
+                    && options.single < DISPENSER_ARROW_CASE_BASE : includesCrafterCases();
+            boolean dispenserArrows = single ? options.single >= DISPENSER_ARROW_CASE_BASE
+                    : options.only == null || Subjects.matches(options.only, Blocks.DISPENSER);
             List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
                     + (hoppers ? hopperCases.size() : 0)
                     + (crafters ? crafterCases.size() : 0)
+                    + (dispenserArrows ? dispenserArrowCases.size() : 0)
                     + mines.size());            int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
@@ -4697,6 +4726,13 @@ public final class BlockOracle {
             }
             if (crafters) {
                 for (Case c : crafterCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
+            if (dispenserArrows) {
+                for (Case c : dispenserArrowCases) {
                     if (!single || c.id == options.single) {
                         runBuilt(c, statsOf(c.subject));
                     }

@@ -3,7 +3,7 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
 use super::{Error, Result, put, tag, uuid_tag};
-use crate::entity::arrow::{Arrow, Pickup, arrow_hit_sound};
+use crate::entity::arrow::{Arrow, ArrowVariant, Pickup, arrow_hit_sound};
 
 pub(super) fn write(arrow: &Arrow, out: &mut Vec<(String, Tag)>) -> Result<()> {
     if arrow.no_gravity {
@@ -38,12 +38,20 @@ pub(super) fn write(arrow: &Arrow, out: &mut Vec<(String, Tag)>) -> Result<()> {
     if let Some(weapon) = &arrow.weapon {
         put(out, "weapon", encode_item(weapon)?);
     }
+    if let ArrowVariant::Spectral { duration } = arrow.variant {
+        put(out, "Duration", Tag::Int(duration));
+    }
     Ok(())
 }
 
-pub(super) fn read(input: &Tag, pitch: f32) -> Arrow {
+pub(super) fn read(input: &Tag, pitch: f32, spectral: bool) -> Arrow {
     let mut arrow = Arrow::default();
     arrow.pitch = pitch;
+    if spectral {
+        arrow.variant = ArrowVariant::Spectral {
+            duration: tag::int_or(input, "Duration", 200),
+        };
+    }
     arrow.no_gravity = tag::bool_or(input, "NoGravity", false);
     arrow.uuid = uuid_from(input, "UUID").unwrap_or([0; 16]);
     arrow.owner_uuid = uuid_from(input, "Owner");

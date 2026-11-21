@@ -3344,6 +3344,10 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     crate::player_environment::tick_environment(region);
     // `LivingEntity.updateUsingItem`：吃东西的剩余刻数和完成结算。
     crate::player_consume::tick(region);
+    // `LivingEntity.updateUsingItem` 的弓 / 弩分支。
+    //
+    // The bow and crossbow branch of `LivingEntity.updateUsingItem`.
+    crate::player_weapon::tick(region);
     // 移动 / 跳跃 / 攻击 / 挖掘累计的饥饿消耗在 tick 末尾落到 FoodData。
     crate::player_exhaustion::flush(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。

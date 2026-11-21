@@ -512,6 +512,7 @@ impl TrackedEntity {
                     entity_types::ARROW_FLAGS => EntityData::ArrowFlags(0),
                     entity_types::ARROW_PIERCE => EntityData::ArrowPierce(0),
                     entity_types::ARROW_IN_GROUND => EntityData::ArrowInGround(false),
+                    entity_types::ARROW_COLOR => EntityData::ArrowColor(-1),
                     _ => continue,
                 },
                 None if before.is_some() => default_data_for_type(
@@ -885,6 +886,9 @@ impl KindData {
                 }
                 if arrow.in_ground {
                     data.push(EntityData::ArrowInGround(true));
+                }
+                if arrow.color != -1 {
+                    data.push(EntityData::ArrowColor(arrow.color));
                 }
                 data
             }

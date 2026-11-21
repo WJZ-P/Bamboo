@@ -144,6 +144,13 @@ impl ReplayPlayers {
         [env.remaining_fire_ticks, env.ticks_frozen]
     }
 
+    /// 比较箭命中的附魔推力单独使用的玩家速度。
+    ///
+    /// Player velocity for comparison of the arrow's enchanted push.
+    pub fn arrow_target_motion(&self, target: EntityUid) -> Vec3 {
+        self.region.players[&PlayerId(target)].motion.delta
+    }
+
     /// 逐刻比对的玩家状态：血量位、受伤冷却、受伤动画、是否死亡、着火刻数。
     pub fn state(&self, target: EntityUid) -> [i64; 5] {
         self.region

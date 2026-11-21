@@ -206,6 +206,7 @@ pub enum EntityData {
     ///
     /// `Fox.DATA_TRUSTED_ID_0` / `_1`: an optional UUID reference.
     FoxTrusted(u8, Option<[u8; 16]>),
+    ArrowColor(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -237,6 +238,7 @@ impl EntityData {
             Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
             Self::ArrowPierce(_) => mc_bamboo_data::entity_types::ARROW_PIERCE,
             Self::ArrowInGround(_) => mc_bamboo_data::entity_types::ARROW_IN_GROUND,
+            Self::ArrowColor(_) => mc_bamboo_data::entity_types::ARROW_COLOR,
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
@@ -280,6 +282,10 @@ impl EntityData {
             Self::ArrowPierce(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*value as u8);
+            }
+            Self::ArrowColor(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
             }
             Self::ArrowInGround(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
