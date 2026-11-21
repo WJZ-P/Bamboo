@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 
-use mc_bamboo_blocks::entity::{JavaRandom, KindPublic, mob::MobType, thrown_egg::EggShot};
+use mc_bamboo_blocks::entity::{
+    FIRST_ENTITY_ID as FIRST_ID, JavaRandom, KindPublic, mob::MobType, thrown_egg::EggShot,
+};
 use mc_bamboo_protocol::{frame::packet_body, item::ItemStack, packet::play::RemoveEntities};
 
 use super::*;
@@ -68,14 +70,39 @@ pub(super) struct EggThrowCase {
     level_seed: i64,
 }
 
+/// 发射器扔蛋那一刻：蛋的运动、随机源、蛋里的物品、剩下的物品数和世界随机源。
+///
+/// A dispensed egg right after the shot: its motion, random, carried item, the stack
+/// left behind and the level random.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct EggDispenseCase {
+    name: String,
+    up: bool,
+    motion: [i64; 8],
+    seed: i64,
+    item: [i32; 2],
+    left: i32,
+    level_seed: i64,
+}
+
 impl EggCase {
     fn level(&self) -> MobLevel {
+        let mut level = Self::empty_level(self.first_id);
+        level.blocks = self
+            .blocks
+            .iter()
+            .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))
+            .collect();
+        level
+    }
+
+    /// 没有方块、世界随机源种子为 1 的普通难度假世界。
+    ///
+    /// A blockless normal-difficulty fake level whose level random is seeded with 1.
+    fn empty_level(first_id: i32) -> MobLevel {
         MobLevel {
-            blocks: self
-                .blocks
-                .iter()
-                .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))
-                .collect(),
+            blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             looting: Vec::new(),
@@ -87,7 +114,7 @@ impl EggCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
-            entities: Entities::with_next_id(self.first_id),
+            entities: Entities::with_next_id(first_id),
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
@@ -288,6 +315,50 @@ impl Report {
         }
         self.steps += 1;
         println!("{}: egg thrown, {} left", case.name, ours.left);
+    }
+
+    pub(super) fn replay_egg_dispense(&mut self, case: &EggDispenseCase) {
+        self.cases += 1;
+        self.steps += 1;
+        let mut level = EggCase::empty_level(FIRST_ID);
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let facing = if case.up {
+            mc_bamboo_core::Direction::Up
+        } else {
+            mc_bamboo_core::Direction::East
+        };
+        let left = mc_bamboo_blocks::dispense::dispense_arrow_at(
+            &mut World::new(&mut level, &mut ticks),
+            BlockPos::new(0, 64, 0),
+            facing,
+            ItemStack::new(mc_bamboo_data::items::BLUE_EGG, 3),
+        );
+        let eggs: Vec<_> = level
+            .entities
+            .iter()
+            .filter_map(|entity| match &entity.kind {
+                EntityKind::Egg(egg) => Some((
+                    projectile_motion(&entity, egg.x_rot),
+                    entity.random.state(),
+                    [egg.item.item, egg.item.count],
+                )),
+                _ => None,
+            })
+            .collect();
+        let ours = (eggs, left.count, level.random.source().seed());
+        let theirs = (
+            vec![(case.motion, case.seed, case.item)],
+            case.left,
+            case.level_seed,
+        );
+        if ours != theirs {
+            self.mismatch(format!(
+                "{}: official {theirs:?}, bamboo {ours:?}",
+                case.name
+            ));
+        }
+        println!("{}: egg dispensed, {} left", case.name, left.count);
     }
 }
 

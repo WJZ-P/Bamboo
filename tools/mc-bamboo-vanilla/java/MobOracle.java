@@ -284,6 +284,11 @@ public final class MobOracle {
                 playEggThrow(official, out, name);
                 cases++;
             }
+            for (String name : List.of("egg_dispense", "egg_dispense_up")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playEggDispense(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -876,6 +881,19 @@ public final class MobOracle {
                 plant.cow(4.5, 64.0, 0.5, 0.0F, 72L, -24000);
                 plant.player(6.5, 64.0, 0.5, Items.AIR);
                 scenes.add(plant);
+            }
+            {
+                // 关掉 `mobGriefing`：草方块不变泥土，但羊照样算吃过（长回羊毛、幼年加速）。
+                // With `mobGriefing` off the grass block stays, yet the sheep still "ate".
+                Scene calm = new Scene("sheep_eat_no_grief").ticks(300).packets();
+                ground(calm, 8);
+                calm.fill(-1, 64, -1, 1, 64, 1, Blocks.GLASS.defaultBlockState());
+                calm.fill(0, 64, 0, 0, 64, 0, Blocks.AIR.defaultBlockState());
+                calm.wool = 16;
+                calm.cow(0.5, 64.0, 0.5, 0.0F, 71L, -24000);
+                calm.cow(4.5, 64.0, 0.5, 0.0F, 72L);
+                calm.player(6.5, 64.0, 0.5, Items.AIR);
+                scenes.add(calm);
             }
             {
                 // 剪毛：第一次掉羊毛，第二次已剪过只返回 CONSUME；之后被打死只掉羊肉。
@@ -1859,6 +1877,9 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
+        // 只有名字以 `_no_grief` 结尾的场景关掉 `mobGriefing`，每个场景都重设一次。
+        // Only scenes named `*_no_grief` turn `mobGriefing` off; every scene resets it.
+        setRule(official, GameRules.MOB_GRIEFING, !scene.name.endsWith("_no_grief"));
         if (scene.name.startsWith("zombie_")) {
             playZombie(official, out, scene);
             return;
@@ -2726,6 +2747,11 @@ public final class MobOracle {
         scenes.add(new NaturalScene("pig_day", EntityTypes.PIG, "savanna", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("sheep_day", EntityTypes.SHEEP, "snowy_taiga", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("chicken_day", EntityTypes.CHICKEN, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        // 猪和鸡的另外两种花色：冷（积雪针叶林）和暖（热带草原）。
+        // The other pig and chicken variants: cold (snowy taiga) and warm (savanna).
+        scenes.add(new NaturalScene("pig_cold", EntityTypes.PIG, "snowy_taiga", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("chicken_warm", EntityTypes.CHICKEN, "savanna", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("chicken_cold", EntityTypes.CHICKEN, "snowy_taiga", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int cap = MobCategory.CREATURE.getMaxInstancesPerChunk();
         scenes.add(new NaturalScene("cow_global_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 289, false, false));
         scenes.add(new NaturalScene("cow_local_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 578, true, false));
@@ -3430,6 +3456,46 @@ public final class MobOracle {
                 + ",\"motion\":" + projectileMotion(egg) + ",\"seed\":" + randomSeed(egg)
                 + ",\"item\":[" + BuiltInRegistries.ITEM.getId(inside.getItem()) + ',' + inside.getCount() + ']'
                 + ",\"left\":" + player.getInventory().getItem(player.getInventory().getSelectedSlot()).getCount()
+                + ",\"levelSeed\":" + randomSeed(level.getRandom()) + "}\n");
+        out.flush();
+    }
+
+    /**
+     * 发射器扔蛋：照 `ProjectileDispenseBehavior.execute` 的顺序（`asProjectile` → 发射 → `shrink`），
+     * 只把蛋的随机源换成场景种子源；比发射那一刻的蛋、剩下的物品堆和世界随机源。
+     *
+     * A dispensed egg: `ProjectileDispenseBehavior.execute` in order (`asProjectile`, the
+     * shot, `shrink`) with the egg's random swapped for the scene's seed source; compare
+     * the egg, the remaining stack and the level random right after it.
+     */
+    private static void playEggDispense(Official official, Writer out, String name) throws Exception {
+        Direction facing = name.endsWith("_up") ? Direction.UP : Direction.EAST;
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+        net.minecraft.core.dispenser.BlockSource source = new net.minecraft.core.dispenser.BlockSource(
+                level, new BlockPos(0, 64, 0),
+                Blocks.DISPENSER.defaultBlockState().setValue(
+                        net.minecraft.world.level.block.DispenserBlock.FACING, facing),
+                null);
+        ItemStack stack = new ItemStack(Items.BLUE_EGG, 3);
+        net.minecraft.world.item.ProjectileItem item = (net.minecraft.world.item.ProjectileItem) stack.getItem();
+        var config = item.createDispenseConfig();
+        var egg = (net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg) item.asProjectile(
+                level, config.positionFunction().getDispensePosition(source, facing), stack, facing);
+        setRandom(egg, level.entitySeeds.nextLong());
+        egg.setUUID(Mth.createInsecureUUID(egg.getRandom()));
+        net.minecraft.world.entity.projectile.Projectile.spawnProjectileUsingShoot(egg, level, stack,
+                facing.getStepX(), facing.getStepY(), facing.getStepZ(), config.power(), config.uncertainty());
+        stack.shrink(1);
+        ItemStack inside = egg.getItem();
+        out.write("{\"type\":\"eggDispense\",\"name\":" + jsonString(name) + ",\"up\":" + (facing == Direction.UP)
+                + ",\"motion\":" + projectileMotion(egg) + ",\"seed\":" + randomSeed(egg)
+                + ",\"item\":[" + BuiltInRegistries.ITEM.getId(inside.getItem()) + ',' + inside.getCount() + ']'
+                + ",\"left\":" + stack.getCount()
                 + ",\"levelSeed\":" + randomSeed(level.getRandom()) + "}\n");
         out.flush();
     }

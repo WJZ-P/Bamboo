@@ -688,8 +688,9 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
 - **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
 - **已知差异**：只有牛、猪、羊、鸡、僵尸、尸壳、骷髅会真的生成（猪、羊、鸡 2026-11-20 接入，
-  `mob-oracle --only natural_spawn` 的 `pig_day` / `sheep_day` / `chicken_day` 和 `gen_spawn`
-  另比花色 / 羊毛颜色和叫声）；表里其它生物被挑中后照常抽组大小，
+  `mob-oracle --only natural_spawn` 的 `pig_day` / `pig_cold` / `sheep_day` / `chicken_day` /
+  `chicken_warm` / `chicken_cold` 和 `gen_spawn` 另比花色 / 羊毛颜色和叫声，暖、冷、温带三种
+  花色都覆盖到）；表里其它生物被挑中后照常抽组大小，
   然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序

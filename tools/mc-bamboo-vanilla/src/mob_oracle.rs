@@ -83,6 +83,7 @@ enum Line {
     GenSpawn(gen_spawn::Case),
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
+    EggDispense(egg::EggDispenseCase),
     End(End),
 }
 
@@ -990,6 +991,7 @@ impl Report {
                 Line::Shot(case) => self.replay_shot(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
+                Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -1165,6 +1167,11 @@ impl Report {
             level
                 .blocks
                 .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+        }
+        if case.name.ends_with("_no_grief") {
+            // 和 `MobOracle.play` 一样按场景名关掉 `mobGriefing`。
+            // Turn `mobGriefing` off by scene name, like `MobOracle.play`.
+            level.rules.mob_griefing = false;
         }
         if matches!(break_test, Some("zombie_egg")) {
             // 改坏确认：关掉 `mobGriefing`，海龟蛋既不会被踩坏也不会被啄碎。
