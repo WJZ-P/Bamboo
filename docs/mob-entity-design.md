@@ -966,9 +966,12 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   恒真和 `Drowned.closeToNextPos` 量的是终点格子的角而不是格心，两处都已修。
   `DrownedGoToBeachGoal`（`MoveToBlockGoal`）也补上了：倒计时取 `nextInt(200)`、
   方环搜索岸边、`start` 两次 `nextInt(1200)`、`tick` 每 40 刻重算。
-- **溺尸对拍**：`mob-oracle --only drowned_flat`（夜间平地追玩家 120 刻，包含两栖导航、
-  `DrownedGoToBeachGoal` 的 `nextInt(200)`、近战和随机源）1 例 120 刻 0 不一致。
-  水里的追击和上浮场景还没对齐（见 README 已知限制）。
+  `PathNavigation.shouldTargetNextNodeInDirection` 在几何折角检查前，照官方对液体中的两栖
+  生物作一次忽略流体的碰撞射线：从临时位置（身体中点）到当前路径节点的身体中点，
+  无阻挡即可推进节点。
+- **溺尸对拍**：`mob-oracle --only drowned_`（平地追击 120 刻、水中追击 40 刻、上浮 40 刻）
+  3 例 200 刻 0 不一致，逐刻比较位置、速度、路径节点及索引、游泳标志和随机源。
+  尚未覆盖跨水面、流动水和上岸。
 - **海平面**：`Level::sea_level()` 和 `BlockView::sea_level()` 取代溺尸文件里手写的 63；
   游戏层按 `WorldGenConfig.level_type` 给噪声世界 63、超平坦 -63，`mob-oracle` 的假世界
   跟官方的 `-63` 一致，场景可以用 `Scene.sea` 覆盖。`DrownedGoToWaterGoal` 的白天判断
@@ -976,7 +979,9 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `nextInt(reducedTickDelay(10))` 已照官方改正。
 - **游泳**：`updateSwimming`（共享标志第 4 位）、`DrownedMoveControl`（`mob.swimming` /
   `searching_for_land` / 目标高度）、`travelInWater` 的 0.01 分支、`isPushedByFluid` 为假时
-  不推水流。
+  不推水流。`updateSwimming` 和 `travelInWater` 读 `Entity.isUnderWater` 的缓存眼部状态
+  和当前身体入水状态，而不是本刻扫描到的眼部状态；`DrownedMoveControl` 保持用 `f32`
+  插值速度，再按 Java 数值提升规则用 `f64` 计算位移增量。
 - **生成**：`SpawnPlacementTypes.IN_WATER` 放置、`checkDrownedSpawnRules` 的 1/40（
   `#more_frequent_drowned_spawns` 1/15）和海平面 5 格、3% 副手鹦鹉螺壳、三叉戟 / 钓鱼竿
   的 `populateDefaultEquipmentSlots`（不拿盔甲）、`handleAttributes`、`entities/drowned`

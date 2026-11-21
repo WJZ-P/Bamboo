@@ -85,7 +85,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
     if mob.mob_type == super::MobType::Drowned {
         let target_in_water = super::goals::current_target_in_water(mob, ctx);
-        super::drowned::update_swimming(mob, target_in_water);
+        super::drowned::update_swimming(me, mob, target_in_water);
     }
     if !me.removed {
         ai_step(me, mob, ctx);

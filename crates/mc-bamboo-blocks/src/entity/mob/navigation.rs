@@ -288,7 +288,14 @@ impl Navigation {
         let close = dx < limit && dz < limit && dy < 1.0;
         if close
             || (can_cut_corner(path.next_node().path_type)
-                && should_target_next_node_in_direction(path, temp))
+                && should_target_next_node_in_direction(path, temp, || {
+                    if !self.flags.amphibious || !mob.in_liquid {
+                        return false;
+                    }
+                    let stop = path.next_entity_pos(width);
+                    let to = Vec3::new(stop.x, stop.y + f64::from(mob.path.height) * 0.5, stop.z);
+                    view.clip_collider(temp, to, mob.path.context).is_none()
+                }))
         {
             path.advance();
         }
@@ -481,7 +488,11 @@ fn can_cut_corner(path_type: PathType) -> bool {
         && path_type != PathType::WalkableDoor
 }
 
-fn should_target_next_node_in_direction(path: &Path, temp: Vec3) -> bool {
+fn should_target_next_node_in_direction(
+    path: &Path,
+    temp: Vec3,
+    can_move_directly: impl FnOnce() -> bool,
+) -> bool {
     if path.next_node_index + 1 >= path.node_count() {
         return false;
     }
@@ -495,6 +506,9 @@ fn should_target_next_node_in_direction(path: &Path, temp: Vec3) -> bool {
     let next = bottom_centre(path.next_node_pos());
     if temp.distance_to_sqr(next).partial_cmp(&(2.0 * 2.0)) != Some(std::cmp::Ordering::Less) {
         return false;
+    }
+    if can_move_directly() {
+        return true;
     }
     let after = bottom_centre(path.nodes[path.next_node_index + 1].pos());
     let to_next = next.subtract(temp);

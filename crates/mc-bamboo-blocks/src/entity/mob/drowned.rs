@@ -191,8 +191,8 @@ pub(super) fn wants_to_swim(mob: &Mob, target_in_water: bool) -> bool {
 ///
 /// `Drowned.updateSwimming()`: `isEffectiveAi() && isUnderWater() && wantsToSwim()`. The
 /// eye check reads last tick's fluid trackers.
-pub(super) fn update_swimming(mob: &mut Mob, target_in_water: bool) {
-    let under_water = living::eye_in_fluid(mob, fluid_tags::WATER);
+pub(super) fn update_swimming(me: &Entity, mob: &mut Mob, target_in_water: bool) {
+    let under_water = mob.was_eye_in_water && me.is_in_water();
     let swimming = !mob.no_ai && under_water && wants_to_swim(mob, target_in_water);
     mob.swimming = swimming;
 }
@@ -209,7 +209,7 @@ pub(super) fn travel_in_water(
     input: Vec3,
     target_in_water: bool,
 ) -> bool {
-    let under_water = living::eye_in_fluid(mob, fluid_tags::WATER);
+    let under_water = mob.was_eye_in_water && me.is_in_water();
     if !under_water || !wants_to_swim(mob, target_in_water) {
         return false;
     }
@@ -254,11 +254,11 @@ pub(super) fn move_control_tick(
             (mob.mover.speed_modifier * mob.attributes.value(attribute::MOVEMENT_SPEED)) as f32;
         let new_speed = mob.speed + 0.125 * (target_speed - mob.speed);
         living::set_speed(mob, new_speed);
-        let (dx, dy, dz) = (dx as f32, dy as f32, dz as f32);
+        let new_speed = f64::from(new_speed);
         me.delta = me.delta.add(Vec3::new(
-            f64::from(new_speed * dx * 0.005),
-            f64::from(new_speed * dy * 0.1),
-            f64::from(new_speed * dz * 0.005),
+            new_speed * dx * 0.005,
+            new_speed * dy * 0.1,
+            new_speed * dz * 0.005,
         ));
     } else {
         if !me.on_ground {

@@ -466,6 +466,8 @@ struct CowStep {
     g: bool,
     rm: bool,
     w: bool,
+    #[serde(default)]
+    swimming: bool,
     fd: i64,
     nat: i32,
     ht: i32,
@@ -1905,6 +1907,9 @@ impl Report {
             plain!(g);
             plain!(rm);
             plain!(w);
+            if name.starts_with("drowned_") {
+                plain!(swimming);
+            }
             bits64!(fd);
             plain!(nat);
             plain!(ht);
@@ -3241,6 +3246,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         g: entity.on_ground,
         rm: entity.removed,
         w: entity.in_water,
+        swimming: mob.swimming,
         fd: entity.fall_distance.to_bits() as i64,
         nat: mob.no_action_time,
         ht: mob.hurt_time,

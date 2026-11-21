@@ -2074,6 +2074,18 @@ public final class MobOracle {
             drownedFlat.mob(15, 0.5, 64.0, 0.5, 0.0F, 3L, 0);
             drownedFlat.player(6.5, 64.0, 0.5, Items.AIR);
             scenes.add(drownedFlat);
+            for (boolean chase : new boolean[] {true, false}) {
+                String name = chase ? "drowned_water_chase_3" : "drowned_swim_up_3";
+                Scene swim = new Scene(name).ticks(40).difficulty(2).sea(70);
+                swim.brightOutside = false;
+                swim.skyDarken = 11;
+                swim.monstersBurn = false;
+                ground(swim, 12);
+                swim.fill(-12, 64, -12, 12, 69, 12, WATER);
+                swim.mob(15, 0.5, 64.0, 0.5, 0.0F, 3L, 0);
+                swim.player(chase ? 6.5 : 60.5, 64.0, 0.5, Items.AIR);
+                scenes.add(swim);
+            }
             // ---- S2：玩家药水效果的状态和出站包 ----
             scenes.add(effectBase("effect_give_600", 60)
                     .effectGive(1, 9, 600, 1));
@@ -5529,6 +5541,7 @@ public final class MobOracle {
             out.append(",\"g\":").append(mob.onGround());
             out.append(",\"rm\":").append(mob.isRemoved());
             out.append(",\"w\":").append(mob.isInWater());
+            out.append(",\"swimming\":").append(mob.isSwimming());
             out.append(",\"fd\":").append(Double.doubleToRawLongBits(mob.fallDistance));
             out.append(",\"nat\":").append(mob.getNoActionTime());
             out.append(",\"ht\":").append(mob.hurtTime);
