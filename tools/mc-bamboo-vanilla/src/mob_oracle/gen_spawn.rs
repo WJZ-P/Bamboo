@@ -63,12 +63,8 @@ impl Coverage {
         // 平原刷怪表里的物种现在都已建模，`others` 正常为 0；只要求四种农家动物和马科都出现。
         // Every species in the plains table is modelled now, so `others` is normally 0; only
         // require all four farm species and the equines to show up.
-        if self.cases > 0
-            && (self.farms.len() != 4 || self.equines == 0 || self.details == 0)
-        {
-            return Err(
-                "gen spawn fixtures did not exercise all farm species and equines".into(),
-            );
+        if self.cases > 0 && (self.farms.len() != 4 || self.equines == 0 || self.details == 0) {
+            return Err("gen spawn fixtures did not exercise all farm species and equines".into());
         }
         Ok(())
     }
