@@ -477,6 +477,8 @@ public final class MobOracle {
         int helmetDamage;
         /** 苦力怕场景：第 0 位带电，第 1 位已点燃。 */
         int creeperFlags;
+        /** 末影人场景：初始搬着的方块，`null` 表示空手。 */
+        BlockState carried;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
@@ -927,7 +929,65 @@ public final class MobOracle {
             }
         }
 
-        /** 蜘蛛：夜里追玩家、翻越不可达的墙、白天不锁定，以及洞穴蜘蛛的追击。 */
+        /** 末影人：注视激怒、白天传送、淋雨、搬方块、躲箭。 */
+        static void endermanScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            BlockState dirt = Blocks.DIRT.defaultBlockState();
+            for (boolean stare : new boolean[] {true, false}) {
+                Scene scene = new Scene(stare ? "enderman_stare" : "enderman_neutral").ticks(24).difficulty(2);
+                scene.clockStart = 18000;
+                scene.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                scene.mob(13, 0.5, 64.0, 0.5, 0.0F, 13L, 0);
+                scene.player(0.5, 64.0, stare ? -6.5 : 7.5, Items.AIR);
+                scenes.add(scene);
+            }
+            {
+                // 白天站在露天：`customServerAiStep` 反复随机传送。
+                // Out in the open during the day: `customServerAiStep` teleports it.
+                Scene day = new Scene("enderman_day_teleport").ticks(200).difficulty(2);
+                day.clockStart = 1000;
+                day.monstersBurn = true;
+                day.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                day.mob(13, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+                day.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(day);
+                // 夜里淋雨：每刻 1 点溺水伤害，偶尔传送躲雨。
+                // In the rain at night: 1 drown damage a tick and the occasional dodge.
+                Scene rain = new Scene("enderman_rain").ticks(80).difficulty(2);
+                rain.clockStart = 18000;
+                rain.raining = true;
+                rain.rain = 1.0F;
+                rain.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                rain.mob(13, 0.5, 64.0, 0.5, 0.0F, 41L, 0);
+                rain.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(rain);
+                // 箭射过来：不掉血，只传送。
+                // Hit by an arrow: no damage, it only teleports away.
+                Scene dodge = new Scene("enderman_arrow").ticks(40).difficulty(2);
+                dodge.clockStart = 18000;
+                dodge.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                dodge.mob(13, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+                dodge.player(11.5, 64.0, 0.5, Items.AIR);
+                dodge.hurts.add(new double[] {5, 0, 4.0, -1});
+                scenes.add(dodge);
+                // 地上全是泥土：捡起方块；搬着方块时再放回原处。
+                // A dirt floor: it picks a block up, then puts it back down.
+                Scene carry = new Scene("enderman_blocks").ticks(3000).difficulty(2);
+                carry.clockStart = 18000;
+                carry.fill(-12, 63, -12, 12, 63, 12, dirt);
+                carry.mob(13, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                carry.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(carry);
+                Scene place = new Scene("enderman_place").ticks(3000).difficulty(2);
+                place.clockStart = 18000;
+                place.carried = dirt;
+                place.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                place.mob(13, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+                place.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(place);
+            }
+        }
+
         static void spiderScenes(List<Scene> scenes) {
             BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
             for (long seed : new long[] {13L, 91L}) {
@@ -1063,6 +1123,7 @@ public final class MobOracle {
             farmScenes(scenes);
             creeperScenes(scenes);
             spiderScenes(scenes);
+            endermanScenes(scenes);
             {
                 Scene pig = new Scene("pig_rod_tempt").ticks(80);
                 ground(pig, 12);
@@ -2006,7 +2067,8 @@ public final class MobOracle {
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("creeper_")
-                || scene.name.startsWith("spider_") || scene.name.startsWith("cave_spider_")) {
+                || scene.name.startsWith("spider_") || scene.name.startsWith("cave_spider_")
+                || scene.name.startsWith("enderman_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -4603,7 +4665,7 @@ public final class MobOracle {
             ServerPlayer player = new ServerPlayer(official.server, level,
                     new GameProfile(new UUID(1L, 2L + i), "ZombieOracle" + i),
                     ClientInformation.createDefault());
-            if (scene.name.startsWith("creeper_")) {
+            if (scene.name.startsWith("creeper_") || scene.name.startsWith("enderman_")) {
                 // 生物的 ID 从 `FIRST_ID` 起显式指定；玩家挪开，免得爆炸的来源 ID 和玩家撞上。
                 // Mob ids start at `FIRST_ID`; move players away so a blast source id never
                 // collides with a player id.
@@ -4612,6 +4674,10 @@ public final class MobOracle {
             player.setPos(at[0], at[1], at[2]);
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
             player.setYRot(0.0F);
+            if (scene.name.startsWith("enderman_stare")) {
+                float pitch = (float) -Math.toDegrees(Math.atan2(2.55F - player.getEyeHeight(), 7.0));
+                player.setXRot(pitch);
+            }
             player.setYHeadRot(0.0F);
             player.setYBodyRot(0.0F);
             player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(scene.playerItems.get(i)));
@@ -4653,6 +4719,7 @@ public final class MobOracle {
             Mob mob = switch (kind[0]) {
                 case 10 -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
                 case 11 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, level);
+                case 13 -> new net.minecraft.world.entity.monster.Enderman(EntityTypes.ENDERMAN, level);
                 case 12 -> new net.minecraft.world.entity.monster.spider.CaveSpider(EntityTypes.CAVE_SPIDER, level);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
@@ -4694,6 +4761,10 @@ public final class MobOracle {
                 }
                 if ((scene.creeperFlags & 2) != 0) creeper.ignite();
             }
+            if (mob instanceof net.minecraft.world.entity.monster.Enderman enderman
+                    && scene.carried != null) {
+                enderman.setCarriedBlock(scene.carried);
+            }
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
             mobs.add(mob);
@@ -4716,6 +4787,8 @@ public final class MobOracle {
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
             line.append(",\"creeper\":").append(kind[0] == 10 ? scene.creeperFlags : 0);
+            line.append(",\"carried\":").append(
+                    kind[0] == 13 && scene.carried != null ? Block.getId(scene.carried) : 0);
             line.append(",\"kind\":").append(kind[0]).append('}');
         }
         line.append("],\"players\":[");
@@ -4727,6 +4800,8 @@ public final class MobOracle {
             line.append(",\"y\":").append(Double.doubleToRawLongBits(player.getY()));
             line.append(",\"z\":").append(Double.doubleToRawLongBits(player.getZ()));
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
+            line.append(",\"yaw\":").append(Float.floatToRawIntBits(player.getYRot()));
+            line.append(",\"pitch\":").append(Float.floatToRawIntBits(player.getXRot()));
             line.append(",\"item\":0,\"looting\":0}");
         }
         // 玩家打生物的时刻、对象、伤害量和打的人，和牛场景同一格式。
@@ -4781,10 +4856,18 @@ public final class MobOracle {
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick && (int) hurt[1] < mobs.size()) {
                     Mob target = mobs.get((int) hurt[1]);
-                    ServerPlayer attacker = players.isEmpty() ? null : players.get((int) hurt[3]);
-                    if (attacker != null) {
-                        target.hurtServer(level, level.damageSources().playerAttack(attacker),
+                    int attackerIndex = (int) hurt[3];
+                    if (attackerIndex >= 0 && attackerIndex < players.size()) {
+                        target.hurtServer(level, level.damageSources().playerAttack(players.get(attackerIndex)),
                                 (float) hurt[2]);
+                    } else if (attackerIndex == -1) {
+                        // 没有射手的一箭：走 `IS_PROJECTILE` 那条链，末影人只传送不掉血。
+                        // An ownerless arrow: the `IS_PROJECTILE` path, where an enderman teleports unhurt.
+                        net.minecraft.world.entity.projectile.arrow.Arrow arrow =
+                                new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, level);
+                        target.hurtServer(level, level.damageSources().arrow(arrow, null), (float) hurt[2]);
+                    } else {
+                        target.hurtServer(level, level.damageSources().drown(), (float) hurt[2]);
                     }
                 }
             }
@@ -4917,6 +5000,12 @@ public final class MobOracle {
                 // Same format as `spider::describe` on the Bamboo side.
                 out.append(",\"var\":\"climb=").append(spider.isClimbing());
                 out.append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.Enderman enderman) {
+                BlockState carried = enderman.getCarriedBlock();
+                out.append(",\"var\":\"carry=").append(carried == null ? 0 : Block.getId(carried))
+                        .append(",creepy=").append(enderman.isCreepy())
+                        .append(",stared=").append(enderman.hasBeenStaredAt())
+                        .append("\",\"snd\":\"minecraft:classic\"");
             } else {
                 out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
             }

@@ -253,6 +253,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         uuid: None,
         position: Vec3::new(case.player_x, -62.0, 8.5),
         eye_height: 1.62,
+        look_direction: Vec3::default(),
+        gaze_disguise: false,
         alive: true,
         spectator: false,
         creative: false,

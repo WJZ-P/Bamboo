@@ -427,6 +427,17 @@ impl Player {
             uuid: Some(*self.uuid.as_bytes()),
             position: self.position,
             eye_height: self.eye_height() as f32,
+            look_direction: Vec3::view_vector(self.yaw, self.pitch),
+            gaze_disguise: self
+                .inventory
+                .equipment(EquipmentSlot::Head)
+                .is_some_and(|stack| {
+                    !stack.is_empty()
+                        && mc_bamboo_blocks::state::item_is_tagged(
+                            stack.item,
+                            mc_bamboo_data::tags::item_tags::GAZE_DISGUISE_EQUIPMENT,
+                        )
+                }),
             // 药水效果还没有；`armor_cover` 按四格盔甲里非空的比例算。
             // Potion effects are not modelled; armor cover follows the worn slots.
             alive: !self.health.is_dead_or_dying(),

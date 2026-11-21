@@ -206,6 +206,8 @@ pub struct PlayerView {
     pub uuid: Option<[u8; 16]>,
     pub position: Vec3,
     pub eye_height: f32,
+    pub look_direction: Vec3,
+    pub gaze_disguise: bool,
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
@@ -546,6 +548,11 @@ pub enum Command {
     ///
     /// Death loot table, separate from equipment and XP to preserve vanilla order.
     DropMobLoot(super::mob::MobDeathLoot),
+    EndermanBlock {
+        origin: BlockPos,
+        pos: BlockPos,
+        place: bool,
+    },
     AwardDeathExperience {
         amount: i32,
     },
@@ -690,6 +697,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             from,
             self_pushable,
         } => super::mob::living::apply_push(me, other, from, self_pushable, world),
+        Command::EndermanBlock { origin, pos, place } => {
+            super::mob::enderman::apply_block_goal(me, world, origin, pos, place)
+        }
         Command::DropMobLoot(loot) => {
             for stack in world.mob_loot_drops(loot, me.position) {
                 world.spawn_at_location(me.position, stack);

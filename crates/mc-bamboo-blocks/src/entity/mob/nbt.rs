@@ -362,6 +362,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Creeper {
         super::creeper::write_nbt(mob, &mut out);
     }
+    if mob.mob_type == MobType::Enderman {
+        super::enderman::write_nbt(mob, &mut out);
+    }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
         out.push((key.clone(), value.clone()));
@@ -545,6 +548,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Creeper {
             super::creeper::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::Enderman {
+            super::enderman::read_nbt(mob, tag);
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries

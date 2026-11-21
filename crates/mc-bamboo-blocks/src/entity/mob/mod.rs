@@ -18,6 +18,7 @@ pub mod control;
 pub mod creeper;
 pub mod damage;
 pub mod effects;
+pub(crate) mod enderman;
 pub mod equine;
 pub mod equipment;
 pub mod goals;
@@ -67,6 +68,7 @@ pub enum MobType {
     Creeper,
     Spider,
     CaveSpider,
+    Enderman,
     Horse,
     Donkey,
     Mule,
@@ -88,6 +90,7 @@ impl MobType {
             Self::Creeper => ids::CREEPER,
             Self::Spider => ids::SPIDER,
             Self::CaveSpider => ids::CAVE_SPIDER,
+            Self::Enderman => ids::ENDERMAN,
             Self::Horse => ids::HORSE,
             Self::Donkey => ids::DONKEY,
             Self::Mule => ids::MULE,
@@ -108,6 +111,7 @@ impl MobType {
             Self::Creeper => "minecraft:creeper",
             Self::Spider => "minecraft:spider",
             Self::CaveSpider => "minecraft:cave_spider",
+            Self::Enderman => "minecraft:enderman",
             Self::Horse => "minecraft:horse",
             Self::Donkey => "minecraft:donkey",
             Self::Mule => "minecraft:mule",
@@ -127,6 +131,7 @@ impl MobType {
             Self::Creeper,
             Self::Spider,
             Self::CaveSpider,
+            Self::Enderman,
             Self::Horse,
             Self::Donkey,
             Self::Mule,
@@ -152,6 +157,7 @@ impl MobType {
                 )
             }
             (Self::Creeper, _) => creeper::dimensions(),
+            (Self::Enderman, _) => enderman::dimensions(),
             (Self::Spider, _) => {
                 let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
                 (
@@ -193,6 +199,7 @@ impl MobType {
                 | Self::Creeper
                 | Self::Spider
                 | Self::CaveSpider
+                | Self::Enderman
         )
     }
 
@@ -204,7 +211,7 @@ impl MobType {
     pub const fn full_target_rules(self) -> bool {
         matches!(
             self,
-            Self::Skeleton | Self::Creeper | Self::Spider | Self::CaveSpider
+            Self::Skeleton | Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman
         )
     }
 
@@ -220,7 +227,7 @@ impl MobType {
     ///
     /// Footsteps use the `SoundType` of the block below (the default `Entity.playStepSound`).
     pub const fn uses_block_step_sound(self) -> bool {
-        matches!(self, Self::Creeper)
+        matches!(self, Self::Creeper | Self::Enderman)
     }
 
     /// `Spider.onClimbable()` 读 `DATA_FLAGS_ID` 的第 0 位，攀爬物理因此改走实体标志。
@@ -265,6 +272,7 @@ impl MobType {
             Self::Creeper => "minecraft:entities/creeper",
             Self::Spider => "minecraft:entities/spider",
             Self::CaveSpider => "minecraft:entities/cave_spider",
+            Self::Enderman => "minecraft:entities/enderman",
             Self::Horse => "minecraft:entities/horse",
             Self::Donkey => "minecraft:entities/donkey",
             Self::Mule => "minecraft:entities/mule",
@@ -308,6 +316,7 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
+            Self::Enderman => Some("minecraft:entity.enderman.ambient"),
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.ambient"),
             Self::Horse => Some("minecraft:entity.horse.ambient"),
             Self::Donkey => Some("minecraft:entity.donkey.ambient"),
@@ -324,6 +333,7 @@ impl MobType {
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
             Self::Creeper => Some("minecraft:entity.creeper.hurt"),
+            Self::Enderman => Some("minecraft:entity.enderman.hurt"),
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.hurt"),
             Self::Horse => Some("minecraft:entity.horse.hurt"),
             Self::Donkey => Some("minecraft:entity.donkey.hurt"),
@@ -340,6 +350,7 @@ impl MobType {
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
             Self::Creeper => Some("minecraft:entity.creeper.death"),
+            Self::Enderman => Some("minecraft:entity.enderman.death"),
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.death"),
             Self::Horse => Some("minecraft:entity.horse.death"),
             Self::Donkey => Some("minecraft:entity.donkey.death"),
@@ -350,7 +361,7 @@ impl MobType {
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Pig | Self::Chicken | Self::Creeper => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Creeper | Self::Enderman => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
@@ -377,6 +388,7 @@ impl MobType {
             Self::Creeper => items::CREEPER_SPAWN_EGG,
             Self::Spider => items::SPIDER_SPAWN_EGG,
             Self::CaveSpider => items::CAVE_SPIDER_SPAWN_EGG,
+            Self::Enderman => items::ENDERMAN_SPAWN_EGG,
             Self::Horse => items::HORSE_SPAWN_EGG,
             Self::Donkey => items::DONKEY_SPAWN_EGG,
             Self::Mule => items::MULE_SPAWN_EGG,
@@ -397,6 +409,7 @@ impl MobType {
             Self::Creeper => "entity.minecraft.creeper",
             Self::Spider => "entity.minecraft.spider",
             Self::CaveSpider => "entity.minecraft.cave_spider",
+            Self::Enderman => "entity.minecraft.enderman",
             Self::Horse => "entity.minecraft.horse",
             Self::Donkey => "entity.minecraft.donkey",
             Self::Mule => "entity.minecraft.mule",
@@ -422,6 +435,7 @@ impl MobType {
             Self::Creeper,
             Self::Spider,
             Self::CaveSpider,
+            Self::Enderman,
             Self::Horse,
             Self::Donkey,
             Self::Mule,
@@ -1242,6 +1256,7 @@ pub struct Mob {
     ///
     /// Bit 0 of the spider's `DATA_FLAGS_ID` (`isClimbing`); default for other mobs.
     pub spider: spider::SpiderState,
+    pub(crate) enderman: enderman::EndermanState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1312,6 +1327,7 @@ impl Mob {
             MobType::Chicken => chicken::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Creeper => creeper::attributes(),
+            MobType::Enderman => enderman::attributes(),
             MobType::Spider => spider::attributes(MobType::Spider),
             MobType::CaveSpider => spider::attributes(MobType::CaveSpider),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
@@ -1331,6 +1347,7 @@ impl Mob {
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Creeper => creeper::goals(&mut navigation),
+            MobType::Enderman => enderman::goals(&mut navigation),
             MobType::Spider | MobType::CaveSpider => spider::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
@@ -1341,6 +1358,7 @@ impl Mob {
             }
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Creeper => creeper::target_goals(),
+            MobType::Enderman => enderman::target_goals(),
             MobType::Spider | MobType::CaveSpider => spider::target_goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             kind => equine::targets(kind),
@@ -1419,6 +1437,7 @@ impl Mob {
             malus: match mob_type {
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
+                MobType::Enderman => enderman::malus(),
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -1460,6 +1479,7 @@ impl Mob {
             egg_time: 0,
             creeper: creeper::CreeperState::default(),
             spider: spider::SpiderState::default(),
+            enderman: enderman::EndermanState::default(),
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1570,6 +1590,9 @@ pub struct MobPublic {
     ///
     /// The spider `DATA_FLAGS_ID`, with the climbing bit.
     pub spider_flags: u8,
+    pub enderman_carried: Option<crate::state::BlockState>,
+    pub enderman_creepy: bool,
+    pub enderman_stared_at: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1627,6 +1650,9 @@ impl MobPublic {
             creeper_powered: mob.creeper.powered,
             creeper_ignited: mob.creeper.ignited,
             spider_flags: if mob.spider.climbing { 1 } else { 0 },
+            enderman_carried: mob.enderman.carried,
+            enderman_creepy: mob.enderman.creepy,
+            enderman_stared_at: mob.enderman.stared_at,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

@@ -30,6 +30,7 @@ const SERIALIZER_ITEM_STACK: i32 = 7;
 const SERIALIZER_BOOLEAN: i32 = 8;
 const SERIALIZER_BLOCK_POS: i32 = 10;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
+const SERIALIZER_OPTIONAL_BLOCK_STATE: i32 = 15;
 /// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
 const SERIALIZER_PARTICLES: i32 = 17;
 const SERIALIZER_POSE: i32 = 20;
@@ -209,6 +210,9 @@ pub enum EntityData {
     ///
     /// `Spider.DATA_FLAGS_ID` (BYTE, default 0, bit 0 is climbing).
     SpiderFlags(u8),
+    EndermanCarried(Option<i32>),
+    EndermanCreepy(bool),
+    EndermanStaredAt(bool),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -281,6 +285,9 @@ impl EntityData {
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
+            Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
+            Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
             Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
         }
     }
@@ -453,7 +460,14 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *direction);
             }
-            Self::CreeperPowered(flag) | Self::CreeperIgnited(flag) => {
+            Self::EndermanCarried(state) => {
+                write_data_header(out, self.index(), SERIALIZER_OPTIONAL_BLOCK_STATE);
+                write_varint(out, state.unwrap_or(0));
+            }
+            Self::CreeperPowered(flag)
+            | Self::CreeperIgnited(flag)
+            | Self::EndermanCreepy(flag)
+            | Self::EndermanStaredAt(flag) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *flag);
             }

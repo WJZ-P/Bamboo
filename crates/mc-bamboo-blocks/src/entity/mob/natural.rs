@@ -631,7 +631,8 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         | MobType::Skeleton
         | MobType::Creeper
         | MobType::Spider
-        | MobType::CaveSpider => {
+        | MobType::CaveSpider
+        | MobType::Enderman => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
         MobType::Husk => {
@@ -876,6 +877,8 @@ mod tests {
             uid,
             position,
             eye_height: 1.62,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
             alive: true,
             spectator: false,
             creative: false,
@@ -982,7 +985,16 @@ mod tests {
         assert!(spawned > 0, "平原草地上应该刷出牛");
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
-            assert_eq!(mob.mob_type, MobType::Cow, "白天只支持牛刷出来");
+            // 马的合并把马和驴也放进了平原的 `CREATURE` 刷怪表。
+            // The horse merge put horses and donkeys in the plains `CREATURE` table too.
+            assert!(
+                matches!(
+                    mob.mob_type,
+                    MobType::Cow | MobType::Horse | MobType::Donkey
+                ),
+                "白天只支持被动动物刷出来：{:?}",
+                mob.mob_type
+            );
         }
     }
 

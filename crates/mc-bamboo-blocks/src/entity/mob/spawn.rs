@@ -313,7 +313,7 @@ fn finalize_spawn_in_group(
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
     }
-    if kind == MobType::Creeper {
+    if matches!(kind, MobType::Creeper | MobType::Enderman) {
         super::creeper::finalize_spawn(entity, world.random());
         return;
     }
@@ -321,10 +321,11 @@ fn finalize_spawn_in_group(
         super::spider::finalize_spawn(world, entity, reason, group);
         return;
     }
-    // `CaveSpider.finalizeSpawn` 只把组数据原样返回，不走 `Mob.finalizeSpawn`：
-    // 不取随机数，也没有跟随距离加成和左撇子。
-    // `CaveSpider.finalizeSpawn` returns the group data unchanged without calling
-    // `Mob.finalizeSpawn`: no draws, no follow-range bonus, no left-handedness.
+    // `CaveSpider.finalizeSpawn` 只把组数据原样返回，连 `Mob.finalizeSpawn` 都不走：
+    // 没有跟随距离加成、没有左撇子，也没有骑士和药水效果，一个随机数都不取。
+    // `CaveSpider.finalizeSpawn` returns the group data untouched without calling
+    // `Mob.finalizeSpawn`: no follow-range bonus, no left-handedness, no jockey, no
+    // effect, and no random draws at all.
     if kind == MobType::CaveSpider {
         return;
     }

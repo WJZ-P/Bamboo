@@ -419,6 +419,11 @@ struct CowSetup {
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
     #[serde(default)]
     egg: i32,
+    /// 末影人搬着的方块状态 ID，0 表示空手。
+    ///
+    /// The block state an enderman carries; 0 means empty-handed.
+    #[serde(default)]
+    carried: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,6 +433,10 @@ struct PlayerSetup {
     y: i64,
     z: i64,
     eye: i32,
+    #[serde(default)]
+    yaw: i32,
+    #[serde(default)]
+    pitch: i32,
     item: i32,
     #[serde(default)]
     looting: i32,
@@ -508,6 +517,7 @@ fn monster_scene(name: &str) -> bool {
         || name.starts_with("creeper_")
         || name.starts_with("spider_")
         || name.starts_with("cave_spider_")
+        || name.starts_with("enderman_")
 }
 
 const fn minus_one_i64() -> i64 {
@@ -758,7 +768,6 @@ impl Level for MobLevel {
             },
         }
     }
-
     fn can_see_sky(&self, _pos: BlockPos) -> bool {
         self.facts.can_see_sky
     }
@@ -1166,6 +1175,11 @@ impl Report {
                         f64::from_bits(player.z as u64),
                     ),
                     eye_height: f32::from_bits(player.eye as u32),
+                    look_direction: Vec3::view_vector(
+                        f32::from_bits(player.yaw as u32),
+                        f32::from_bits(player.pitch as u32),
+                    ),
+                    gaze_disguise: false,
                     alive: true,
                     spectator: false,
                     creative: false,
@@ -1226,6 +1240,7 @@ impl Report {
                     10 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     11 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     12 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
+                    13 => mc_bamboo_blocks::entity::mob::MobType::Enderman,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
@@ -1258,6 +1273,9 @@ impl Report {
                         mob.egg_time = cow.egg;
                         mob.creeper.powered = cow.creeper & 1 != 0;
                         mob.creeper.ignited = cow.creeper & 2 != 0;
+                        if cow.carried != 0 {
+                            mob.set_carried_block(Some(BlockState(cow.carried as u32)));
+                        }
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if cow.age != 0 {
@@ -1469,20 +1487,32 @@ impl Report {
                     if tick as usize != index {
                         continue;
                     }
-                    let player = &case.players[attacker as usize];
-                    let position = Vec3::new(
-                        f64::from_bits(player.x as u64),
-                        f64::from_bits(player.y as u64),
-                        f64::from_bits(player.z as u64),
-                    );
-                    let source = match case.death_kind {
-                        1 => DamageSource::environment(
-                            mc_bamboo_blocks::entity::mob::DamageKind::Fall,
-                        ),
-                        2 => DamageSource::environment(
-                            mc_bamboo_blocks::entity::mob::DamageKind::OnFire,
-                        ),
-                        _ => DamageSource::player(player.id, position, false),
+                    // 负数攻击者编号是场景注入的环境 / 投掷物伤害：-1 箭，-2 溺水。
+                    // A negative attacker index injects environment or projectile damage:
+                    // -1 an arrow, -2 drowning.
+                    let source = if attacker < 0 {
+                        let kind = if attacker == -1 {
+                            mc_bamboo_blocks::entity::mob::DamageKind::Arrow
+                        } else {
+                            mc_bamboo_blocks::entity::mob::DamageKind::Drown
+                        };
+                        DamageSource::environment(kind)
+                    } else {
+                        let player = &case.players[attacker as usize];
+                        let position = Vec3::new(
+                            f64::from_bits(player.x as u64),
+                            f64::from_bits(player.y as u64),
+                            f64::from_bits(player.z as u64),
+                        );
+                        match case.death_kind {
+                            1 => DamageSource::environment(
+                                mc_bamboo_blocks::entity::mob::DamageKind::Fall,
+                            ),
+                            2 => DamageSource::environment(
+                                mc_bamboo_blocks::entity::mob::DamageKind::OnFire,
+                            ),
+                            _ => DamageSource::player(player.id, position, false),
+                        }
                     };
                     world.hurt_mob(ids[cow as usize], source, f32::from_bits(amount as u32));
                 }
@@ -3123,6 +3153,7 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
         ),
         MobType::Chicken => format!("{}|egg{}", mob.variant.name(), mob.egg_time),
         MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
+        MobType::Enderman => mob.describe_enderman(),
         MobType::Spider | MobType::CaveSpider => {
             mc_bamboo_blocks::entity::mob::spider::describe(mob)
         }

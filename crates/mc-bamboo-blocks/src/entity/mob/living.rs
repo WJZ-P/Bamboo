@@ -43,6 +43,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         tick_mob(me, mob, ctx);
     }
     me.kind = kind;
+    super::enderman::flush_block_goal(me, ctx);
 }
 
 /// 对一个生物跑一段外部逻辑（受伤、命令），期间 `kind` 也换成占位。
@@ -178,7 +179,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         me.discard();
         return;
     }
-    let persistent = mob.persistence_required;
+    let persistent = mob.persistence_required || mob.enderman.carried.is_some();
     let mut nearest: Option<f64> = None;
     ctx.blocks().for_each_player(&mut |player| {
         if player.spectator {
@@ -629,6 +630,7 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 
 fn ambient_sound(mob: &Mob) -> &'static str {
     match mob.mob_type {
+        super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
         _ => mob
@@ -696,6 +698,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let equine = mob.mob_type.is_equine();
     if equine {
         super::equine::ai_step_start(me, mob);
+    }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx);
     if equine {
@@ -822,6 +827,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         timing::span!(Push);
         push_entities(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::hurt_if_wet(me, mob, ctx);
+    }
     // `Mob.aiStep` 在 `LivingEntity.aiStep` 之后跑 `BURN_IN_DAYLIGHT` → `burnUndead()`。
     // 官方用 `EntityTypeTags.BURN_IN_DAYLIGHT` + `isSunSensitive()`；尸壳不烧。
     if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
@@ -931,6 +939,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
         mob.mover
             .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
+    }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::custom_server_ai_step(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1449,6 +1460,25 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         return false;
     }
+    if mob.mob_type == super::MobType::Enderman {
+        if matches!(source.kind, DamageKind::Arrow | DamageKind::Spit) {
+            super::enderman::dodge_projectile(me, mob, ctx);
+            return false;
+        }
+        let result = hurt_living(me, mob, ctx, source, amount);
+        super::enderman::after_hurt(me, mob, ctx, source);
+        return result;
+    }
+    hurt_living(me, mob, ctx, source, amount)
+}
+
+fn hurt_living(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    amount: f32,
+) -> bool {
     mob.no_action_time = 0;
     let mut amount = if amount < 0.0 { 0.0 } else { amount };
     if amount.is_nan() || amount.is_infinite() {

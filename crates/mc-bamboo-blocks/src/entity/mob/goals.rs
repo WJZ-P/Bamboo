@@ -112,6 +112,11 @@ pub enum Goal {
     Swell {
         target: Option<EntityUid>,
     },
+    EndermanGaze(super::enderman::GazeGoal),
+    EndermanFreeze,
+    EndermanBlock {
+        place: bool,
+    },
     Bow(super::skeleton::BowGoal),
     /// `HurtByTargetGoal`：记住上一次伤害的时间戳，把攻击者设成目标。
     HurtByTarget {
@@ -185,6 +190,10 @@ pub enum TargetType {
     ///
     /// The llama's `LlamaAttackWolfGoal`: untamed wolves.
     Wolf,
+    /// 末影人的 `NearestAttackableTargetGoal<Endermite>`；末影螨还没实现。
+    ///
+    /// The enderman's `NearestAttackableTargetGoal<Endermite>`; endermites are not modelled.
+    Endermite,
 }
 
 impl TargetType {
@@ -263,6 +272,9 @@ impl Goal {
     pub const fn flags(&self) -> &'static [Flag] {
         match self {
             Self::Float => &[Flag::Jump],
+            Self::EndermanGaze(_) => &[Flag::Target],
+            Self::EndermanFreeze => &[Flag::Jump, Flag::Move],
+            Self::EndermanBlock { .. } => &[],
             Self::Panic { .. } | Self::Stroll { .. } | Self::Swell { .. } => &[Flag::Move],
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
                 &[Flag::Move, Flag::Look]
@@ -306,6 +318,10 @@ impl Goal {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Float => "FloatGoal",
+            Self::EndermanGaze(_) => "EndermanLookForPlayerGoal",
+            Self::EndermanFreeze => "EndermanFreezeWhenLookedAt",
+            Self::EndermanBlock { place: true } => "EndermanLeaveBlockGoal",
+            Self::EndermanBlock { place: false } => "EndermanTakeBlockGoal",
             Self::Panic { .. } => "PanicGoal",
             Self::Breed { .. } => "BreedGoal",
             Self::Tempt { .. } => "TemptGoal",
@@ -953,6 +969,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             super::skeleton::bow_slot(mob).is_some() && combat_target(mob, ctx).is_some()
         }
         Goal::Float => float_can_use(me, mob),
+        Goal::EndermanGaze(goal) => goal.can_use(me, mob, ctx),
+        Goal::EndermanFreeze => super::enderman::freeze_target(me, mob, ctx).is_some(),
+        Goal::EndermanBlock { place } => {
+            super::enderman::block_can_use(me, mob, ctx.blocks(), *place)
+        }
         Goal::Panic { target, .. } => {
             if !should_panic(mob, ctx) {
                 return false;
@@ -1215,6 +1236,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
 
 fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
+        Goal::EndermanGaze(goal) => goal.can_continue(me, mob, ctx),
+        Goal::EndermanFreeze => super::enderman::freeze_target(me, mob, ctx).is_some(),
+        Goal::EndermanBlock { .. } => can_use(goal, me, mob, ctx),
         Goal::Bow(_) => {
             super::skeleton::bow_slot(mob).is_some()
                 && (combat_target(mob, ctx).is_some() || !mob.navigation.is_done())
@@ -1279,7 +1303,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 && light_dependent_magic(me, mob, ctx) >= 0.5
                 && me.random.next_int_bounded(100) == 0
             {
-                mob.target = None;
+                super::enderman::set_target(me, mob, None);
                 return false;
             }
             if *follow_unseen {
@@ -1363,6 +1387,9 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
 
 fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::EndermanGaze(goal) => goal.start(mob),
+        Goal::EndermanFreeze => mob.navigation.stop(),
+        Goal::EndermanBlock { .. } => {}
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
@@ -1437,7 +1464,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         }
         Goal::HurtByTarget { timestamp } => {
             *timestamp = mob.last_hurt_by_mob_timestamp;
-            mob.target = mob.last_hurt_by_mob;
+            super::enderman::set_target(me, mob, mob.last_hurt_by_mob);
         }
         // `HurtByTargetGoal.start` 再 `TargetGoal.start`：`unseenTicks` 清零。
         // `HurtByTargetGoal.start`, then `TargetGoal.start` clears `unseenTicks`.
@@ -1446,7 +1473,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             unseen_ticks,
         } => {
             *timestamp = mob.last_hurt_by_mob_timestamp;
-            mob.target = mob.last_hurt_by_mob;
+            super::enderman::set_target(me, mob, mob.last_hurt_by_mob);
             *unseen_ticks = 0;
         }
         Goal::RangedAttack { .. } => {}
@@ -1455,7 +1482,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             unseen_ticks,
             ..
         } => {
-            mob.target = *found;
+            super::enderman::set_target(me, mob, *found);
             *unseen_ticks = 0;
         }
         Goal::RestrictSun => mob.navigation.avoid_sun = true,
@@ -1502,6 +1529,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
 
 fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::EndermanGaze(goal) => goal.stop(me, mob),
+        Goal::EndermanFreeze | Goal::EndermanBlock { .. } => {}
         Goal::Bow(bow) => bow.stop(mob),
         Goal::Breed {
             partner, love_time, ..
@@ -1527,7 +1556,9 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::RandomStand { .. } => {}
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
-        Goal::HurtByTarget { .. } | Goal::LlamaHurtByTarget { .. } => mob.target = None,
+        Goal::HurtByTarget { .. } | Goal::LlamaHurtByTarget { .. } => {
+            super::enderman::set_target(me, mob, None)
+        }
         Goal::RangedAttack {
             target,
             attack_time,
@@ -1538,7 +1569,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             *attack_time = -1;
         }
         Goal::NearestAttackableTarget { found, .. } => {
-            mob.target = None;
+            super::enderman::set_target(me, mob, None);
             *found = None;
         }
         Goal::MeleeAttack { .. } => {
@@ -1549,7 +1580,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 .and_then(|uid| player_by_uid(ctx.blocks(), uid))
                 .is_some_and(|player| player.creative || player.spectator);
             if excluded {
-                mob.target = None;
+                super::enderman::set_target(me, mob, None);
             }
             mob.aggressive = false;
             mob.navigation.stop();
@@ -1569,6 +1600,14 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::EndermanGaze(goal) => goal.tick(me, mob, ctx),
+        Goal::EndermanFreeze => {
+            if let Some(player) = mob.target.and_then(|uid| player_by_uid(ctx.blocks(), uid)) {
+                let eye = player.eye_position();
+                mob.look.set_look_at_default(eye.x, eye.y, eye.z);
+            }
+        }
+        Goal::EndermanBlock { place } => super::enderman::sample_block(me, mob, *place),
         Goal::EatBlock { eat_tick } => eat_block_tick(eat_tick, me, mob, ctx),
         Goal::Swell { target } => swell_tick(*target, me, mob, ctx),
         Goal::Bow(bow) => {
@@ -2154,6 +2193,9 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
 /// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
 /// `Monster.getWalkTargetValue` 取负的光照路径代价。
 pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
+    if mob.mob_type == super::MobType::Enderman {
+        return 0.0;
+    }
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
     }
@@ -2302,6 +2344,10 @@ impl CombatTarget {
         }
     }
 
+    pub(crate) fn bounds(&self) -> Aabb {
+        self.hitbox
+    }
+
     pub(crate) fn eye_y(&self) -> f64 {
         self.position.y + f64::from(self.eye)
     }
@@ -2311,7 +2357,7 @@ impl CombatTarget {
     }
 }
 
-fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
+pub(super) fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
     target_by_uid(mob, ctx, mob.target?)
 }
 
@@ -2545,4 +2591,23 @@ fn nearest_turtle_egg(me: &Entity, ctx: &dyn EntityCtx) -> Option<BlockPos> {
         y = next(y);
     }
     None
+}
+
+pub(super) fn can_target_player(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    player: PlayerView,
+) -> bool {
+    !player.creative
+        && ctx.blocks().difficulty() != 0
+        && targeting_test(
+            me,
+            mob,
+            ctx.blocks(),
+            &player,
+            mob.attributes
+                .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE),
+            true,
+        )
 }
