@@ -71,6 +71,70 @@ pub(super) struct InteractCase {
     data: String,
 }
 
+/// 一题死亡掉落：哪种马科、哪种模式（见 Java 的 `playEquineDeaths`）、种子和官方的掉落。
+///
+/// One death-drop case: kind, mode (see the Java `playEquineDeaths`), seed and
+/// vanilla's drops.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DeathCase {
+    kind: usize,
+    mode: i32,
+    seed: i64,
+    spawned: Vec<super::skeleton_death::Drop>,
+    mob_seed: i64,
+    level_seed: i64,
+}
+
+/// 死亡对拍的装备：成年带鞍（羊驼除外）和身体（马铠 / 红地毯），箱子马带箱子和两格物品。
+///
+/// Death gear: adults wear a saddle (not llamas) and body armor or a red carpet;
+/// chested kinds carry a chest with two stacks.
+fn setup_death(entity: &mut Entity, mode: i32) {
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+    entity.with_mob(|me, mob| {
+        let kind = mob.mob_type;
+        if mode == 3 {
+            mob.age = -24000;
+            let (width, height, eye) = kind.dimensions(true);
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
+        }
+        let worn = [
+            (kind != MobType::Llama, EquipmentSlot::Saddle, items::SADDLE),
+            (
+                kind == MobType::Horse,
+                EquipmentSlot::Body,
+                items::IRON_HORSE_ARMOR,
+            ),
+            (
+                kind == MobType::Llama,
+                EquipmentSlot::Body,
+                items::RED_CARPET,
+            ),
+        ];
+        for (wears, slot, item) in worn {
+            if wears && mode != 3 {
+                mob.equipment.set(slot, ItemStack::new(item, 1));
+                mob.equipment.set_drop_chance(slot, 2.0);
+            }
+        }
+        let equine = mob.equine.as_mut().unwrap();
+        equine.tame = true;
+        if kind == MobType::Llama {
+            equine.strength = 3;
+        }
+        if kind != MobType::Horse {
+            equine.chested = true;
+            let size = if kind == MobType::Llama { 9 } else { 15 };
+            equine.chest_items = vec![ItemStack::empty(); size];
+            equine.chest_items[0] = ItemStack::new(items::DIAMOND, 3);
+            equine.chest_items[2] = ItemStack::new(items::WHEAT, 10);
+        }
+    });
+}
+
 /// Java 一侧 `setupEquine` 的六种初始状态。
 ///
 /// The six starting setups of the Java `setupEquine`.
@@ -284,6 +348,67 @@ impl Report {
             self.mismatch(format!(
                 "equine interact kind {} setup {} item {} creative {} sneak {}: official {expected:?}, bamboo {actual:?}",
                 case.kind, case.setup, case.item, case.creative, case.sneak
+            ));
+        }
+    }
+
+    pub(super) fn replay_equine_death(&mut self, case: DeathCase) {
+        use mc_bamboo_blocks::entity::mob::{DamageKind, DamageSource};
+        self.cases += 1;
+        let kind = KINDS[case.kind];
+        let mut rules = mc_bamboo_blocks::BlockGameRules::vanilla();
+        rules.mob_drops = case.mode != 2;
+        let player = super::skeleton_death::player_view();
+        let looting = if case.mode == 4 { 3 } else { 0 };
+        let mut level = MobLevel {
+            blocks: HashMap::new(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: vec![looting],
+            rules,
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            entities: Entities::with_next_id(1),
+            players: vec![player],
+            game: None,
+            wrong_was_hurt: false,
+        };
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut entity = world.prepare_entity(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5)));
+        entity.random = JavaRandom::new(case.seed);
+        setup_death(&mut entity, case.mode);
+        let uid = world.add_prepared_entity(entity);
+        let source = if matches!(case.mode, 0 | 2 | 4) {
+            DamageSource::player(player.uid, player.position, false)
+        } else {
+            DamageSource::environment(DamageKind::Fall)
+        };
+        world.hurt_mob(uid, source, 100.0);
+        let mob = world.entity(uid).unwrap();
+        let state = (mob.random.state(), world.random().seed());
+        let spawned: Vec<_> = level
+            .entities
+            .take_spawn_snapshots()
+            .into_iter()
+            .filter_map(super::skeleton_death::snapshot)
+            .collect();
+        let label = format!("{kind:?} death mode {} seed {}", case.mode, case.seed);
+        let expected = (case.mob_seed, case.level_seed);
+        if state != expected {
+            self.mismatch(format!(
+                "{label} mob/world RNG: official {expected:?}, bamboo {state:?}"
+            ));
+        }
+        if spawned != case.spawned {
+            self.mismatch(format!(
+                "{label} drops: official {:?}, bamboo {spawned:?}",
+                case.spawned
             ));
         }
     }

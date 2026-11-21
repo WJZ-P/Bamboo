@@ -20,12 +20,14 @@ use crate::{
     random::LegacyRandom,
 };
 
+mod death;
 mod goals;
 mod horse;
 mod interact;
 mod life;
 mod llama;
 
+pub(super) use death::drop_on_death;
 pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets};
 pub(super) use interact::interact;
 pub(super) use life::{

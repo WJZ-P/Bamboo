@@ -2654,7 +2654,87 @@ public final class MobOracle {
                 cases++;
             }
         }
-        return cases + playEquineInteractions(official, out, world, types);
+        return cases + playEquineInteractions(official, out, world, types) + playEquineDeaths(official, out, types);
+    }
+
+    /**
+     * 马科死亡掉落：每种 × 五种模式 × 两个种子。0 玩家击杀、1 摔死、2 关掉 MOB_DROPS、
+     * 3 幼崽、4 抢夺 III。成年的带鞍、马铠或地毯，箱子马带箱子和两格物品。
+     * Equine death drops: kind × mode × seed, with saddles, body armor, chests and contents.
+     */
+    private static int playEquineDeaths(Official official, Writer out,
+            List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
+            throws Exception {
+        int cases = 0;
+        boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
+        try {
+            for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+                for (int mode = 0; mode < 5; mode++) {
+                    for (int sample = 0; sample < 2; sample++) {
+                        long seed = 7700L + typeIndex * 100L + mode * 10L + sample;
+                        boolean drops = mode != 2;
+                        boolean playerKill = mode == 0 || mode == 2 || mode == 4;
+                        int looting = mode == 4 ? 3 : 0;
+                        FakeLevel world = FakeLevel.create(official);
+                        setRule(official, GameRules.MOB_DROPS, drops);
+                        official.server.sequences = new RandomSequences();
+                        net.minecraft.world.entity.animal.equine.AbstractHorse mob =
+                                types.get(typeIndex).create(world, EntitySpawnReason.COMMAND);
+                        mob.setPos(0.5, 64.0, 0.5);
+                        setRandom(mob, seed);
+                        mob.setTamed(true);
+                        if (mode == 3) mob.setAge(-24000);
+                        boolean llama = mob instanceof net.minecraft.world.entity.animal.equine.Llama;
+                        if (!llama && mode != 3) {
+                            mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+                            mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.SADDLE, 2.0F);
+                        }
+                        Item body = mob instanceof net.minecraft.world.entity.animal.equine.Horse ? Items.IRON_HORSE_ARMOR
+                                : llama ? Items.CARPET.pick(net.minecraft.world.item.DyeColor.RED) : null;
+                        if (body != null && mode != 3) {
+                            mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(body));
+                            mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.BODY, 2.0F);
+                        }
+                        if (llama) {
+                            java.lang.reflect.Method strength = net.minecraft.world.entity.animal.equine.Llama.class
+                                    .getDeclaredMethod("setStrength", int.class);
+                            strength.setAccessible(true);
+                            strength.invoke(mob, 3);
+                        }
+                        if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse) {
+                            mob.getSlot(499).set(new ItemStack(Items.CHEST));
+                            mob.getSlot(500).set(new ItemStack(Items.DIAMOND, 3));
+                            mob.getSlot(502).set(new ItemStack(Items.WHEAT, 10));
+                        }
+                        ServerPlayer player = playerKill ? skeletonDeathPlayer(official, world, looting) : null;
+                        var source = playerKill ? world.damageSources().playerAttack(player) : world.damageSources().fall();
+                        if (!mob.hurtServer(world, source, 100.0F) || !mob.isDeadOrDying()) {
+                            throw new IllegalStateException("equine_death did not kill the mob");
+                        }
+                        List<String> spawned = new ArrayList<>();
+                        for (Entity entity : world.spawned) {
+                            switch (entity) {
+                                case net.minecraft.world.entity.item.ItemEntity item -> {
+                                    var stack = item.getItem();
+                                    spawned.add("{\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
+                                            + ",\"count\":" + stack.getCount() + ",\"damage\":" + stack.getDamageValue() + ",\"xp\":0}");
+                                }
+                                case net.minecraft.world.entity.ExperienceOrb orb ->
+                                    spawned.add("{\"item\":0,\"count\":0,\"damage\":0,\"xp\":" + orb.getValue() + "}");
+                                default -> throw new IllegalStateException("unexpected equine death spawn: " + entity);
+                            }
+                        }
+                        out.write("{\"type\":\"equineDeath\",\"kind\":" + typeIndex + ",\"mode\":" + mode
+                                + ",\"seed\":" + seed + ",\"spawned\":[" + String.join(",", spawned)
+                                + "],\"mobSeed\":" + randomSeed(mob) + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+                        cases++;
+                    }
+                }
+            }
+        } finally {
+            setRule(official, GameRules.MOB_DROPS, previousMobDrops);
+        }
+        return cases;
     }
 
     /** 交互对拍用的物品，按顺序编号。 */
