@@ -3121,8 +3121,8 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         goals: mob.goals.running_class_names(mob.mob_type).join(" "),
         path,
         target: mob.target.unwrap_or(-1),
-        // Java 一侧只报僵尸的幼年元数据。
-        // The Java side only reports the zombie baby metadata.
+        // 僵尸式场景额外比较僵尸和马科的幼年标志；其他动物比较 age。
+        // Zombie-style scenes compare the baby flag for zombies and equines; other animals use age.
         baby: (mob.mob_type.uses_baby_metadata() || mob.mob_type.is_equine()) && mob.is_baby(),
         aggr: mob.aggressive,
         doors: mob.can_break_doors,

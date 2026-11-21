@@ -138,6 +138,12 @@ impl Report {
         region: &XoroshiroRandom,
     ) {
         let label = format!("{} seed {}", case.name, case.seed);
+        if case.spawned.len() != case.details.len() {
+            self.mismatch(format!(
+                "{label}: spawn rows and variant details differ in count"
+            ));
+            return;
+        }
         let mut in_sync = true;
         let mut ours = mobs.iter();
         for (row, detail) in case.spawned.iter().zip(&case.details) {
