@@ -613,7 +613,7 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算；
   这份 CARVERS 缓存是**全进程共用一份**（16 个分片），载荷预算默认 128 MiB（`bamboo.toml` 的 `worldgen_terrain_cache_mb`）。
   热层的值是不可变 `Arc`，命中不复制方块；按预算淘汰的条目压缩进冷层，冷命中在锁外解码。
-  生成与解码在锁外，热层淘汰的压缩在分片锁内。地形是纯函数，命中、淘汰和分片顺序
+  生成、解码和热层淘汰后的压缩都在分片锁外（压缩完再短暂拿锁放进冷层）。地形是纯函数，命中、淘汰和分片顺序
   都不改变结果。`terrain` 阶段交回世界线程的也是同一个 `Arc`，`merge_generated`
   直接 `Arc::clone` 进 `partials`。发出后世界线程不再改这份 `Arc`（只在
   `Forgot` / 完工时移除）。
