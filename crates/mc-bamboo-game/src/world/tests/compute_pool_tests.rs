@@ -50,16 +50,29 @@ impl Drop for TempWorld {
 }
 
 /// 跑刻直到池子里没有在途任务、信箱也空了，再多跑几刻让后续效果落地。
+/// 池子有在途任务时阻塞等一条回执再推进，避免空转抢 CPU。
+///
+/// Tick until the pool and mailboxes are empty, then run a few more ticks to
+/// settle follow-up effects. Waits on a pool reply while jobs are in flight so
+/// busy-spinning does not starve worker threads.
 fn settle(server: &mut Harness) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         server.tick();
         let (deliveries, reclaims, _) = server.director_mail();
         if server.world.master.host.compute_in_flight() == 0 && deliveries == 0 && reclaims == 0 {
             break;
         }
-        assert!(Instant::now() < deadline, "区块平面 30 秒内没有安定下来");
-        std::thread::sleep(Duration::from_millis(1));
+        assert!(Instant::now() < deadline, "区块平面 60 秒内没有安定下来");
+        if server.world.master.host.compute_in_pool() > 0 {
+            server
+                .world
+                .master
+                .host
+                .wait_for_compute_reply(Duration::from_millis(50));
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
     for _ in 0..3 {
         server.tick();
@@ -225,54 +238,78 @@ fn inline_and_pool_produce_identical_worlds() {
     }
 }
 
-/// 一个故意变慢的生成器（每个区块 5 ms）：内联时整批生成算在这一刻里，
-/// 用池子时这一刻只是把任务交出去，生成在后台线程上做。
-#[test]
-fn a_slow_generator_runs_off_the_world_thread() {
-    let delay = Duration::from_millis(5);
-    let positions: Vec<ChunkPos> = (10..15)
-        .flat_map(|x| (10..15).map(move |z| ChunkPos::new(x, z)))
-        .collect();
-    let generation_time = delay * positions.len() as u32;
-
-    let mut timings = Vec::new();
-    for threads in [0, 4] {
-        let mut server = Harness::new_loaded_with_threads(2, threads);
-        server
-            .world
-            .master
-            .host
-            .set_generator(Arc::new(FlatGenerator { delay }));
-        let started = Instant::now();
-        force(&mut server, &positions, true);
-        server.tick();
-        timings.push(started.elapsed());
-        settle(&mut server);
-        for pos in &positions {
-            assert!(
-                server.world.islands.region.chunks.is_loaded(*pos),
-                "线程数 {threads}：区块最终都要交付"
-            );
-        }
-    }
-    let (inline, pooled) = (timings[0], timings[1]);
-    assert!(
-        inline >= generation_time,
-        "内联执行器在这一刻里做完全部生成：{inline:?} < {generation_time:?}"
-    );
-    assert!(
-        pooled < generation_time / 2,
-        "用池子时世界线程这一刻不该等生成：{pooled:?}（内联 {inline:?}）"
-    );
-}
-
-/// 数一数生成器真的被调了几次。
-struct CountingGenerator {
+/// 测试用带闸生成器：统计生成落在世界线程还是后台线程，并可在闸门关闭时阻塞
+/// 后台线程，用来在不依赖墙钟快慢的前提下证明「世界线程不会在 tick 内等生成完成」。
+///
+/// Gated test generator: counts calls on the world thread vs. background pool
+/// threads, and blocks pool threads while the gate is closed so tests can prove
+/// the world thread does not wait for generation without relying on wall-clock timing.
+struct GatedGenerator {
     inner: FlatGenerator,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
+    world_thread: std::thread::ThreadId,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    on_world_thread: Arc<std::sync::atomic::AtomicUsize>,
+    off_thread_started: Arc<std::sync::atomic::AtomicUsize>,
+    off_thread_finished: Arc<std::sync::atomic::AtomicUsize>,
+    gate_timed_out: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl crate::chunk_generator::ChunkGenerator for CountingGenerator {
+impl GatedGenerator {
+    fn new(world_thread: std::thread::ThreadId, initially_open: bool) -> (Arc<Self>, GateHandle) {
+        let gate = Arc::new((
+            std::sync::Mutex::new(initially_open),
+            std::sync::Condvar::new(),
+        ));
+        let on_world_thread = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let off_thread_started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let off_thread_finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate_timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let generator = Arc::new(Self {
+            inner: FlatGenerator::default(),
+            world_thread,
+            gate: Arc::clone(&gate),
+            on_world_thread: Arc::clone(&on_world_thread),
+            off_thread_started: Arc::clone(&off_thread_started),
+            off_thread_finished: Arc::clone(&off_thread_finished),
+            gate_timed_out: Arc::clone(&gate_timed_out),
+        });
+        let handle = GateHandle {
+            gate,
+            on_world_thread,
+            off_thread_started,
+            off_thread_finished,
+            gate_timed_out,
+        };
+        (generator, handle)
+    }
+}
+
+struct GateHandle {
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    on_world_thread: Arc<std::sync::atomic::AtomicUsize>,
+    off_thread_started: Arc<std::sync::atomic::AtomicUsize>,
+    off_thread_finished: Arc<std::sync::atomic::AtomicUsize>,
+    gate_timed_out: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl GateHandle {
+    fn open(&self) {
+        let (lock, cvar) = &*self.gate;
+        let mut open = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *open = true;
+        cvar.notify_all();
+    }
+}
+
+impl Drop for GateHandle {
+    fn drop(&mut self) {
+        // 哪怕测试提前 panic 也要开闸，免得计算池线程在析构 join 时卡死。
+        // Always open the gate on unwind so pool drop/join never hangs.
+        self.open();
+    }
+}
+
+impl crate::chunk_generator::ChunkGenerator for GatedGenerator {
     fn generate(
         &self,
         stage: mc_bamboo_world::ticket::ChunkStatus,
@@ -281,32 +318,154 @@ impl crate::chunk_generator::ChunkGenerator for CountingGenerator {
         center_snapshot: crate::chunk_generator::CenterSnapshot,
         neighbors: crate::chunk_generator::NeighborView<'_>,
     ) -> crate::worldgen_features::GenerateOutput {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        use std::sync::atomic::Ordering;
+        if std::thread::current().id() == self.world_thread {
+            self.on_world_thread.fetch_add(1, Ordering::SeqCst);
+            // 不卡死世界线程，立刻返回让断言直接报出在世界线程上跑了。
+            // Never deadlock the world thread; return so assertions fail immediately.
+            return self
+                .inner
+                .generate(stage, pos, center, center_snapshot, neighbors);
+        }
+        self.off_thread_started.fetch_add(1, Ordering::SeqCst);
+        let (lock, cvar) = &*self.gate;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (_guard, wait) = cvar
+            .wait_timeout_while(guard, Duration::from_secs(60), |open| !*open)
+            .unwrap_or_else(|e| e.into_inner());
+        if wait.timed_out() {
+            self.gate_timed_out.store(true, Ordering::SeqCst);
+        }
+        drop(_guard);
+        self.off_thread_finished.fetch_add(1, Ordering::SeqCst);
         self.inner
             .generate(stage, pos, center, center_snapshot, neighbors)
     }
 }
 
+/// 慢生成不阻塞世界线程：内联时生成都在世界线程上同步完成；用池子时生成全在后台线程
+/// 上做，而且 `server.tick()` 在后台生成被闸门挡住、尚未完成时就能直接返回。
+///
+/// A slow generator runs off the world thread: inline finishes every generation
+/// synchronously on the world thread during `tick()`; with a pool, generation
+/// runs only on worker threads and `tick()` returns while the workers are still
+/// blocked behind a closed gate.
+#[test]
+fn a_slow_generator_runs_off_the_world_thread() {
+    use std::sync::atomic::Ordering;
+
+    let positions: Vec<ChunkPos> = (10..15)
+        .flat_map(|x| (10..15).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    let world_thread = std::thread::current().id();
+
+    // 1. 内联执行器：所有生成同步跑在世界线程上。
+    // 1. Inline executor: all generation runs synchronously on the world thread.
+    {
+        let mut server = Harness::new_loaded_with_threads(2, 0);
+        let (generator, handle) = GatedGenerator::new(world_thread, true);
+        server.world.master.host.set_generator(generator);
+        force(&mut server, &positions, true);
+        server.tick();
+        assert!(
+            handle.on_world_thread.load(Ordering::SeqCst) >= positions.len(),
+            "内联执行器应在世界线程这一刻里做完全部生成"
+        );
+        assert_eq!(
+            handle.off_thread_started.load(Ordering::SeqCst),
+            0,
+            "内联执行器不该切到后台线程"
+        );
+        settle(&mut server);
+        for pos in &positions {
+            assert!(
+                server.world.islands.region.chunks.is_loaded(*pos),
+                "内联执行器：区块最终都要交付"
+            );
+        }
+    }
+
+    // 2. 计算池：闸门关着时 `tick()` 照常返回，生成只在后台线程开始并在开闸后完成。
+    // 2. Compute pool: `tick()` returns while the gate is closed; generation only
+    //    starts on worker threads and completes once the gate opens.
+    {
+        let mut server = Harness::new_loaded_with_threads(2, 4);
+        let (generator, handle) = GatedGenerator::new(world_thread, false);
+        server.world.master.host.set_generator(generator);
+        force(&mut server, &positions, true);
+        server.tick();
+
+        assert_eq!(
+            handle.on_world_thread.load(Ordering::SeqCst),
+            0,
+            "用池子时不该在世界线程上跑生成"
+        );
+        assert!(
+            !handle.gate_timed_out.load(Ordering::SeqCst),
+            "世界线程这一刻不该阻塞等待后台生成完成"
+        );
+        assert_eq!(
+            handle.off_thread_finished.load(Ordering::SeqCst),
+            0,
+            "闸门还没开，后台生成不该已经完成"
+        );
+        assert!(
+            server.world.master.host.compute_in_flight() > 0,
+            "生成任务应在池子里在途"
+        );
+
+        // 等至少一条池子线程真的进到生成器里，证明后台正在独立跑生成。
+        // Wait until at least one worker actually enters `generate` off-thread.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while handle.off_thread_started.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "计算池线程 60 秒内没有开始跑生成任务"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            handle.on_world_thread.load(Ordering::SeqCst),
+            0,
+            "后台开跑期间世界线程仍未执行任何生成"
+        );
+
+        handle.open();
+        settle(&mut server);
+        assert_eq!(handle.on_world_thread.load(Ordering::SeqCst), 0);
+        assert!(!handle.gate_timed_out.load(Ordering::SeqCst));
+        assert!(
+            handle.off_thread_finished.load(Ordering::SeqCst) >= positions.len(),
+            "开闸后全部生成都应在后台线程上完成"
+        );
+        for pos in &positions {
+            assert!(
+                server.world.islands.region.chunks.is_loaded(*pos),
+                "计算池：区块最终都要交付"
+            );
+        }
+    }
+}
+
 /// 池子里同时最多放 `线程数 × POOL_JOBS_PER_THREAD` 个任务，其余留在宿主的待办里；
 /// 撤票时待办里的任务直接丢掉，不会在池子里排着。
+///
+/// The pool holds at most `threads * POOL_JOBS_PER_THREAD` jobs while the rest
+/// stay in the host backlog; dropping tickets cancels the backlog immediately.
 #[test]
 fn the_pool_holds_a_bounded_number_of_jobs_and_cancels_the_backlog() {
+    use std::sync::atomic::Ordering;
+
     use crate::director_host::POOL_JOBS_PER_THREAD;
 
     let threads = 2;
     let cap = threads * POOL_JOBS_PER_THREAD;
     let mut server = Harness::new_loaded_with_threads(2, threads);
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    server
-        .world
-        .master
-        .host
-        .set_generator(Arc::new(CountingGenerator {
-            inner: FlatGenerator {
-                delay: Duration::from_millis(20),
-            },
-            calls: Arc::clone(&calls),
-        }));
+    // 用闸门卡住进池子的任务，不靠固定睡眠，确保撤票前任务不会跑完。
+    // Block pooled jobs behind a gate instead of a fixed sleep so nothing races
+    // ticket cancellation.
+    let (generator, handle) = GatedGenerator::new(std::thread::current().id(), false);
+    server.world.master.host.set_generator(generator);
     let positions: Vec<ChunkPos> = (40..46)
         .flat_map(|x| (40..46).map(move |z| ChunkPos::new(x, z)))
         .collect();
@@ -327,9 +486,10 @@ fn the_pool_holds_a_bounded_number_of_jobs_and_cancels_the_backlog() {
         0,
         "撤票后待办清空"
     );
+    handle.open();
     settle(&mut server);
     assert_eq!(server.world.master.host.compute_in_flight(), 0);
-    let ran = calls.load(std::sync::atomic::Ordering::SeqCst);
+    let ran = handle.off_thread_finished.load(Ordering::SeqCst);
     assert!(
         ran <= cap * 2,
         "撤票后待办里的 {queued} 个生成不该再跑：实际跑了 {ran} 个"

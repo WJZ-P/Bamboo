@@ -335,6 +335,14 @@ pub(crate) enum IslandTestHook {
     RecordThread(std::sync::Arc<std::sync::Mutex<Option<String>>>),
     /// 卡住，直到这个标志被置上。
     Stall(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    /// 进入卡住点时通知调用方，再一直等到 `release` 被置上。
+    ///
+    /// Notify the caller once the worker reaches the stall point, then wait
+    /// until `release` is set.
+    StallNotifying {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
     /// 每一刻开头都睡这么久（真的慢岛，给烟雾测试用），一直留着。
     Lag(std::time::Duration),
     Panic,
@@ -1495,6 +1503,12 @@ impl Island {
                 *name.lock().unwrap() = std::thread::current().name().map(str::to_owned);
             }
             Some(IslandTestHook::Stall(release)) => {
+                while !release.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            Some(IslandTestHook::StallNotifying { entered, release }) => {
+                let _ = entered.send(());
                 while !release.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
