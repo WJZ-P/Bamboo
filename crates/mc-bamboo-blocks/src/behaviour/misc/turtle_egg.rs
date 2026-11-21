@@ -94,7 +94,14 @@ impl Behaviour for TurtleEgg {
         let data = state.0 as i32;
         for index in 0..eggs {
             world.level_event(2001, pos, data);
-            let mut turtle = Entity::by_mob_type(MobType::Turtle, Vec3::default());
+            // `EntityTypes.TURTLE.create` 照样分配 ID 和实体随机种子，否则孵出来的
+            // 小海龟全带 0 号 ID、共用一个构造随机源。构造取的是实体自己的随机源，
+            // 不是 `level.random`。
+            // `EntityTypes.TURTLE.create` allocates an id and an entity random seed;
+            // without it every hatchling carries id 0 and shares one constructor
+            // random. The draws use the entity's own random, not `level.random`.
+            let mut turtle =
+                world.prepare_entity(Entity::by_mob_type(MobType::Turtle, Vec3::default()));
             turtle.with_mob(|me, mob| {
                 living::set_age(me, mob, -24_000);
                 mob.turtle.home_pos = pos;
@@ -111,5 +118,84 @@ impl Behaviour for TurtleEgg {
             );
             world.add_prepared_entity(turtle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockTicks, entity::EntityKind, testing::TestLevel};
+    use mc_bamboo_data::blocks;
+
+    const EGG_POS: BlockPos = BlockPos::new(0, 62, 0);
+
+    /// 夜里 `Timelines` 把孵化概率顶到 1.0，不用赌白天那 0.002 的 `nextFloat`。
+    ///
+    /// At night `Timelines` raises the chance to 1.0, so the test need not gamble
+    /// on the daytime 0.002 draw.
+    fn night_egg(eggs: i32, hatch: i32) -> (TestLevel, BlockTicks, BlockState) {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(21_500);
+        let egg = BlockState(blocks::TURTLE_EGG)
+            .with(EGGS, eggs)
+            .with(HATCH, hatch);
+        level.set(EGG_POS.below(), BlockState(blocks::SAND));
+        level.set(EGG_POS, egg);
+        (level, ticks, egg)
+    }
+
+    #[test]
+    fn a_cracking_egg_advances_hatch_without_spawning() {
+        let (mut level, mut ticks, egg) = night_egg(2, 0);
+        let mut world = World::new(&mut level, &mut ticks);
+        egg.random_tick(&mut world, EGG_POS);
+        drop(world);
+        assert_eq!(level.get(EGG_POS).get(HATCH), 1);
+        assert!(level.entities().is_empty());
+    }
+
+    #[test]
+    fn hatching_spawns_one_baby_per_egg_with_distinct_ids() {
+        let (mut level, mut ticks, egg) = night_egg(3, 2);
+        let mut world = World::new(&mut level, &mut ticks);
+        egg.random_tick(&mut world, EGG_POS);
+        drop(world);
+
+        assert!(!level.get(EGG_POS).is_same_block(egg));
+        let mut turtles: Vec<_> = level.entities().iter().collect();
+        assert_eq!(turtles.len(), 3);
+        turtles.sort_by(|a, b| a.position.x.total_cmp(&b.position.x));
+        let mut ids = Vec::new();
+        for (index, turtle) in turtles.iter().enumerate() {
+            let EntityKind::Mob(mob) = &turtle.kind else {
+                panic!("a hatchling is a mob");
+            };
+            assert_eq!(mob.mob_type, MobType::Turtle);
+            assert_eq!(mob.age, -24_000);
+            assert_eq!(mob.turtle.home_pos, EGG_POS);
+            let x = f64::from(EGG_POS.x) + 0.3 + index as f64 * 0.2;
+            assert!((turtle.position.x - x).abs() < 1.0e-9);
+            assert!((turtle.position.y - f64::from(EGG_POS.y)).abs() < 1.0e-9);
+            assert!((turtle.position.z - (f64::from(EGG_POS.z) + 0.3)).abs() < 1.0e-9);
+            ids.push(turtle.id);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "each hatchling gets its own allocated id");
+    }
+
+    #[test]
+    fn an_egg_off_sand_never_advances() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(21_500);
+        let egg = BlockState(blocks::TURTLE_EGG).with(EGGS, 2).with(HATCH, 2);
+        level.set(EGG_POS, egg);
+        let mut world = World::new(&mut level, &mut ticks);
+        egg.random_tick(&mut world, EGG_POS);
+        drop(world);
+        assert_eq!(level.get(EGG_POS), egg);
+        assert!(level.entities().is_empty());
     }
 }

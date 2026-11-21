@@ -972,6 +972,18 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if let Some(data) = fish_default_data(index, kind) {
         return data;
     }
+    // 海龟的 18、19 是「有蛋」「正在产卵」两个布尔，不是牛的花色和叫声；
+    // 从 true 变回 false 时要发这两条默认值。
+    // A turtle's 18 and 19 are the has-egg / laying-egg booleans, not the cow
+    // variants; send these defaults when either flips back to false.
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Turtle {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::TURTLE_HAS_EGG => return EntityData::TurtleHasEgg(false),
+            facts::TURTLE_LAYING_EGG => return EntityData::TurtleLayingEgg(false),
+            _ => {}
+        }
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Pig {
         use mc_bamboo_data::entity_types as facts;
         match index {

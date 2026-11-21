@@ -770,9 +770,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// The shared chain from `Animal.aiStep` down to `LivingEntity.aiStep`.
 fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    // `AbstractFish.aiStep` 在 `LivingEntity.aiStep` 之前：离水扑腾一下。
-    // `AbstractFish.aiStep` runs before `LivingEntity.aiStep`: the beached flop.
-    super::fish::ai_step(me, mob);
+    // `AbstractFish.aiStep` 在 `LivingEntity.aiStep` 之前：只有这一支的鱼离水才扑腾。
+    // `AbstractFish.aiStep` runs before `LivingEntity.aiStep`: only fish flop out of water.
+    if super::fish::is_fish(mob.mob_type) {
+        super::fish::ai_step(me, mob);
+    }
     let fox = mob.mob_type == super::MobType::Fox;
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
