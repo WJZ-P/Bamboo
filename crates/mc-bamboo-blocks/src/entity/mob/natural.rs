@@ -619,8 +619,10 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         return false;
     }
     match kind {
-        MobType::Cow => animal_spawn_rules(world, pos),
         MobType::Rabbit | MobType::Fox | MobType::Wolf => false,
+        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
+            animal_spawn_rules(world, pos)
+        }
         MobType::Zombie | MobType::Skeleton => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }

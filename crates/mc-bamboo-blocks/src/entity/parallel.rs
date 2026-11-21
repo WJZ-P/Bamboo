@@ -393,7 +393,11 @@ fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
         for command in result.commands.commands.drain(..) {
             ctx::apply(command, &mut me, world);
         }
-        if !me.removed {
+        if me.removed {
+            // 落地时才消失的实体（命中的鸡蛋）要把这一刻的实体事件留给同步层。
+            // An entity removed while applying (an egg that hit) keeps its events for sync.
+            world.entities_mut().keep_departed_mob_events(&me);
+        } else {
             world.entities_mut().put_entity(me);
         }
     }

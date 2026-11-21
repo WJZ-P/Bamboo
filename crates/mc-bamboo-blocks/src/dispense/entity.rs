@@ -50,6 +50,9 @@ pub(super) fn execute(
     if is_arrow(item) {
         return arrow(world, pos, facing, stack);
     }
+    if matches!(item, items::EGG | items::BLUE_EGG | items::BROWN_EGG) {
+        return egg(world, pos, facing, stack);
+    }
     if is_projectile(item) {
         return Shot::plain(throw_one(world, pos, facing, stack));
     }
@@ -184,6 +187,32 @@ fn arrow(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) 
         pickup: Pickup::Allowed,
     };
     world.spawn_arrow_shot(shot);
+    Shot::with_event(without_one(&stack), 1002)
+}
+
+/// `EggItem.asProjectile` 加默认的 `ProjectileItem.DispenseConfig`：位置同箭，力度 1.1，
+/// 散布 6，事件 1002。
+///
+/// `EggItem.asProjectile` with the default `DispenseConfig`: the arrow's position,
+/// power 1.1, uncertainty 6 and event 1002.
+fn egg(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
+    let (x, y, z) = facing.normal();
+    let (x, y, z) = (f64::from(x), f64::from(y), f64::from(z));
+    let shot = crate::entity::thrown_egg::EggShot {
+        position: Vec3::new(
+            f64::from(pos.x) + 0.5 + (0.7 * x),
+            f64::from(pos.y) + 0.5 + (0.7 * y + 0.1),
+            f64::from(pos.z) + 0.5 + (0.7 * z),
+        ),
+        direction: Vec3::new(x, y, z),
+        power: 1.1,
+        uncertainty: 6.0,
+        source_movement: None,
+        owner: None,
+        owner_uuid: None,
+        item: stack.clone(),
+    };
+    world.spawn_egg_shot(&shot);
     Shot::with_event(without_one(&stack), 1002)
 }
 

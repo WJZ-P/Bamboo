@@ -17,7 +17,6 @@ use crate::{
         ctx::{BlockView, EntityCtx, PlayerView},
     },
     shape::{self, CollisionContext},
-    state::item_is_tagged,
 };
 
 /// `Goal.Flag`，按枚举顺序。
@@ -64,6 +63,7 @@ pub enum Goal {
         love_time: i32,
     },
     Tempt {
+        steering_item: bool,
         speed: f64,
         player: Option<EntityUid>,
         calm_down: i32,
@@ -136,6 +136,12 @@ pub enum Goal {
     TurtleEgg {
         speed: f64,
     },
+    /// `EatBlockGoal`：羊低头吃草的 40 刻（非每刻目标，折半成 20）。
+    ///
+    /// `EatBlockGoal`: the sheep's grazing animation (40 ticks, halved to 20).
+    EatBlock {
+        eat_tick: i32,
+    },
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -185,6 +191,7 @@ impl Goal {
             Self::RestrictSun => &[],
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
             Self::BreakDoor => &[Flag::Move],
+            Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
         }
     }
 
@@ -245,6 +252,7 @@ impl Goal {
             Self::FleeSun { .. } => "FleeSunGoal",
             Self::BreakDoor => "BreakDoorGoal",
             Self::TurtleEgg { .. } => "ZombieAttackTurtleEggGoal",
+            Self::EatBlock { .. } => "EatBlockGoal",
         }
     }
 }
@@ -290,6 +298,7 @@ impl GoalSelector {
                 3,
                 Goal::Tempt {
                     speed: 1.25,
+                    steering_item: false,
                     player: None,
                     calm_down: 0,
                 },
@@ -740,6 +749,56 @@ fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
     }
 }
 
+/// `EatBlockGoal.canUse`：先 `nextInt(adjustedTickDelay(幼年 50 / 成年 1000))`，再看脚下能吃的植物或下面的草方块。
+///
+/// `EatBlockGoal.canUse`: one `nextInt` gate (50 for babies, 1000 for adults, halved), then an
+/// edible plant at the feet or a grass block below.
+fn eat_block_can_use(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
+    let bound = adjusted_tick_delay(false, if mob.is_baby() { 50 } else { 1000 });
+    if me.random.next_int_bounded(bound) != 0 {
+        return false;
+    }
+    let pos = me.block_position();
+    let view = ctx.blocks();
+    view.block_state(pos)
+        .is_tagged(mc_bamboo_data::tags::block_tags::EDIBLE_FOR_SHEEP)
+        || view.block_state(pos.below()).is(blocks::GRASS_BLOCK)
+}
+
+/// `EatBlockGoal.tick`：倒计时到 `adjustedTickDelay(4)` 时吃。改方块交给命令，羊自己的 `ate` 当场做。
+///
+/// `EatBlockGoal.tick`: eat when the countdown hits `adjustedTickDelay(4)`. The block change is a
+/// command; the sheep's own `ate` happens here.
+fn eat_block_tick(eat_tick: &mut i32, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    *eat_tick = (*eat_tick - 1).max(0);
+    if *eat_tick != adjusted_tick_delay(false, 4) {
+        return;
+    }
+    let pos = me.block_position();
+    let view = ctx.blocks();
+    let griefing = view.block_game_rules().mob_griefing;
+    let target = if view
+        .block_state(pos)
+        .is_tagged(mc_bamboo_data::tags::block_tags::EDIBLE_FOR_SHEEP)
+    {
+        Some((pos, false))
+    } else if view.block_state(pos.below()).is(blocks::GRASS_BLOCK) {
+        Some((pos.below(), true))
+    } else {
+        None
+    };
+    let Some((pos, grass_below)) = target else {
+        return;
+    };
+    if griefing {
+        ctx.emit(
+            crate::entity::ctx::Command::EatBlock { pos, grass_below },
+            me,
+        );
+    }
+    super::sheep::ate(me, mob);
+}
+
 /// `Goal.reducedTickDelay`。
 pub(super) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
@@ -798,13 +857,16 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             partner.is_some()
         }
         Goal::Tempt {
-            player, calm_down, ..
+            player,
+            calm_down,
+            steering_item,
+            ..
         } => {
             if *calm_down > 0 {
                 *calm_down -= 1;
                 return false;
             }
-            *player = nearest_tempting_player(me, mob, ctx);
+            *player = nearest_tempting_player(me, mob, ctx, *steering_item);
             player.is_some()
         }
         Goal::FollowParent { parent, .. } => {
@@ -966,6 +1028,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                     true
                 })
         }
+        Goal::EatBlock { .. } => eat_block_can_use(me, mob, ctx),
         Goal::BreakDoor => {
             mob.can_break_doors
                 && ctx.blocks().block_game_rules().mob_griefing
@@ -1100,6 +1163,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::FleeSun { .. } => !mob.navigation.is_done(),
         Goal::BreakDoor => mob.door_break_time <= 240 && ctx.blocks().difficulty() == 3,
+        Goal::EatBlock { eat_tick } => *eat_tick > 0,
         Goal::TurtleEgg { .. } => {
             // `MoveToBlockGoal.canContinueToUse`：尝试刻数在
             // `[-maxStayTicks, 1200]` 内且目标方块仍然有效。
@@ -1213,6 +1277,13 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.door_break_progress = -1;
             mob.door_break_pos = None;
         }
+        Goal::EatBlock { eat_tick } => {
+            // `start`：倒计时、实体事件 10（低头动画）、停下导航。
+            // `start`: the countdown, entity event 10 (head-down animation), stop navigation.
+            *eat_tick = adjusted_tick_delay(false, 40);
+            mob.events.push(super::MobEvent::EntityEvent { event: 10 });
+            mob.navigation.stop();
+        }
         Goal::TurtleEgg { speed } => {
             // `MoveToBlockGoal.start()`：先 `moveMobToBlock()`，再清 `tryTicks`，
             // 最后取 `maxStayTicks = 1200 + nextInt(1200 + nextInt(1200))`。
@@ -1293,6 +1364,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.door_break_time = 0;
             mob.door_break_progress = -1;
         }
+        Goal::EatBlock { eat_tick } => *eat_tick = 0,
         Goal::TurtleEgg { .. } => {
             // `RemoveBlockGoal.stop`：落地前的摔落距离按 1 格算。
             me.fall_distance = 1.0;
@@ -1302,6 +1374,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::EatBlock { eat_tick } => eat_block_tick(eat_tick, me, mob, ctx),
         Goal::Bow(bow) => {
             if let Some(target) = combat_target(mob, ctx) {
                 bow.tick(me, mob, ctx, target);
@@ -1753,7 +1826,12 @@ fn nearest_look_target(
 }
 
 /// `TemptGoal.canUse` 里的 `getNearestPlayer(targetingConditions.range(TEMPT_RANGE), mob)`。
-fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+fn nearest_tempting_player(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    steering_item: bool,
+) -> Option<EntityUid> {
     let view = ctx.blocks();
     let range = mob
         .attributes
@@ -1766,8 +1844,12 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
         if player.spectator || !player.alive {
             continue;
         }
-        let follows = mob.mob_type.food_tag().is_some_and(|tag| {
-            item_is_tagged(player.main_hand, tag) || item_is_tagged(player.off_hand, tag)
+        let follows = [player.main_hand, player.off_hand].into_iter().any(|item| {
+            if steering_item {
+                item == mc_bamboo_data::items::CARROT_ON_A_STICK
+            } else {
+                super::interact::is_food(mob.mob_type, item)
+            }
         });
         if !follows {
             continue;

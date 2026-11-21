@@ -740,3 +740,22 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 ### 11.4 已知差异
 
 见 README「兔子的已知限制」「狐狸的已知限制」「狼的已知限制」。对拍环境另有几处：Java 一侧玩家现在在牛、僵尸和野生动物场景里都进实体表（`getEntitiesOfClass(Player)` 和 `getPushableEntities` 才找得到），排在生物前面；僵尸式场景的右键交互和玩家攻击现在两边都重放，交互之后玩家手里换回场景给的那件；兔子死后的掉落物不进 Java 实体表；狐狸的 `SleepGoal` 倒计时在官方构造时用不可复现的种子取，对拍把官方的值报给 Bamboo 照填。
+
+## 猪的实施现状
+
+猪沿用 Animal 的实体表与岛迁移路径，专属目标、属性和音效位于
+`entity/mob/pig.rs`。钓竿诱惑和食物诱惑是同一优先级的两个独立目标，
+按官方注册次序争用移动和观察标志。鞍存为 LivingEntity 的装备槽，
+不引入猪专属装备 NBT；玩家装上的鞍使用保证掉落概率。
+载具和乘客的同组 tick 尚未实现（见世界模型设计第 7 段），所以
+上鞍不会启用骑乘或加速，未新增玩家输入或跨岛载具规则。
+
+## 羊和鸡的实施现状
+
+羊的专属逻辑在 `entity/mob/sheep.rs`：羊毛字节（`DATA_WOOL_ID`）存在 `Mob.wool`，`EatBlockGoal` 进同一个目标选择器（非每刻目标，`adjustedTickDelay` 折半），改方块走 `Command::EatBlock`，羊自己的 `ate` 当场执行。剪毛在 `World::interact_mob` 里落地：玩家音源的剪毛声、`shearing/sheep` 表（游戏层 `interaction/level/farm_loot.rs` 给实体谓词补 `sheep/color` 组件和 `type_specific/sheep`）、每团羊毛一个物品实体加五个羊随机数的速度，最后用 `durability::hurt_hand` 扣剪刀耐久（游戏层在交互期间把手借给方块逻辑）。繁殖混色按生成的合成配方表查两格染料（`findColorMixInRecipes`），混不出时取世界随机源。
+
+鸡在 `entity/mob/chicken.rs`：构造函数在 UUID 和朝向之后抽 `eggTime`；`aiStep` 尾部做缓慢下落和下蛋，下蛋表经 `Command::DropEntityLoot` 在落地时求值（礼物参数集：原点 + 实体本身，鸡花纹进 `chicken/variant` 组件）。剪毛和下蛋共用 `Level::entity_loot_drops` / `EntityLootRequest`，以后的雪傀儡、哞菇也能复用。
+
+生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
+
+扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。

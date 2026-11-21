@@ -3199,8 +3199,21 @@ impl<'a> World<'a> {
         let outcome = entity
             .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request, now))
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
+        if outcome.shear {
+            crate::entity::mob::sheep::apply_shear(self, &mut entity, request.hand, &request.held);
+        }
         self.level.put_entity(entity);
         outcome
+    }
+
+    /// 剪毛 / 下蛋这类实体战利品表的掉落，见 [`Level::entity_loot_drops`]。
+    ///
+    /// Shearing or egg-laying loot drops; see [`Level::entity_loot_drops`].
+    pub(crate) fn entity_loot_drops(
+        &mut self,
+        request: crate::entity::mob::EntityLootRequest,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.entity_loot_drops(request)
     }
 
     /// `LivingEntity.addEffect`：给一头生物挂一个效果并刷新属性。

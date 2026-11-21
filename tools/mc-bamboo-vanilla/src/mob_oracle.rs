@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod egg;
 mod gen_spawn;
 mod natural_spawn;
 mod projectile;
@@ -80,6 +81,8 @@ enum Line {
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     NaturalSpawn(natural_spawn::Case),
     GenSpawn(gen_spawn::Case),
+    Egg(Box<egg::EggCase>),
+    EggThrow(egg::EggThrowCase),
     End(End),
 }
 
@@ -367,6 +370,11 @@ struct Spawn {
     hr: Option<i32>,
     #[serde(default)]
     uuid: Option<String>,
+    /// 幼鸡构造时抽的 `eggTime`，同样是场景起点。
+    ///
+    /// A chick's constructor `eggTime`, also a scene starting point.
+    #[serde(default)]
+    egg: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,7 +395,10 @@ struct CowSetup {
     seed: i64,
     #[serde(default)]
     age: i32,
-    /// 0 牛 / 1 僵尸 / 2 尸壳；缺省按牛（旧场景）。
+    /// 0 牛 / 1 僵尸 / 2 尸壳 / 3 猪 / 4 羊 / 5 鸡 / 6 兔 / 7 狐 / 8 狼；缺省按牛（旧场景）。
+    ///
+    /// 0 cow / 1 zombie / 2 husk / 3 pig / 4 sheep / 5 chicken / 6 rabbit / 7 fox / 8 wolf;
+    /// cow when absent.
     #[serde(default)]
     kind: i32,
     /// 狐狸 `SleepGoal` 构造时取的倒计时，官方那一边报过来。
@@ -395,6 +406,16 @@ struct CowSetup {
     /// The fox `SleepGoal` countdown drawn at construction, from the official side.
     #[serde(default)]
     sleep: i32,
+    /// 羊的 `DATA_WOOL_ID` 起点。
+    ///
+    /// The sheep's starting `DATA_WOOL_ID`.
+    #[serde(default)]
+    wool: u8,
+    /// 鸡的 `eggTime` 起点（官方在构造函数里用重设种子之前的随机源抽）。
+    ///
+    /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
+    #[serde(default)]
+    egg: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -788,6 +809,7 @@ impl Level for MobLevel {
         let mut victim = EntityView::new(loot.victim.entity_type());
         victim.is_living = true;
         victim.is_on_fire = loot.on_fire;
+        describe_farm_animal(&mut victim, loot.victim, loot.wool, None);
         let player = |uid| {
             let index = self.players.iter().position(|p| p.uid == uid)?;
             let mut view = EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
@@ -838,6 +860,44 @@ impl Level for MobLevel {
             loot.victim.loot_table(),
             &params,
             0,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) {
+            Ok(stacks) => stacks
+                .iter()
+                .map(|stack| mc_bamboo_protocol::item::ItemStack::new(stack.item, stack.count))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn entity_loot_drops(
+        &mut self,
+        request: mc_bamboo_blocks::entity::mob::EntityLootRequest,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        use mc_bamboo_loot::{EntityLootParams, EntityView, LootStack, Position};
+        let mut entity = EntityView::new(request.kind.entity_type());
+        entity.is_living = true;
+        let origin = Position::new(request.origin.x, request.origin.y, request.origin.z);
+        entity.position = Some(origin);
+        describe_farm_animal(
+            &mut entity,
+            request.kind,
+            request.wool,
+            Some(request.variant),
+        );
+        let params = EntityLootParams {
+            entity,
+            origin,
+            tool: request
+                .tool
+                .as_ref()
+                .map(|stack| LootStack::new(stack.item, stack.count)),
+            level: None,
+        };
+        match mc_bamboo_loot::entity_loot_drops(
+            request.table,
+            &params,
             Some(&self.loot_sequences),
             self.random.source(),
         ) {
@@ -971,6 +1031,8 @@ impl Report {
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
+                Line::Egg(case) => self.replay_egg(&case),
+                Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -1170,9 +1232,12 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
-                    5 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
-                    4 => mc_bamboo_blocks::entity::mob::MobType::Fox,
-                    3 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
+                    8 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
+                    7 => mc_bamboo_blocks::entity::mob::MobType::Fox,
+                    6 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
+                    5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
+                    4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
+                    3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
@@ -1190,6 +1255,8 @@ impl Report {
                         mob.x_rot_o = 0.0;
                         mob.y_head_rot = yaw;
                         mob.y_body_rot = yaw;
+                        mob.wool = cow.wool;
+                        mob.egg_time = cow.egg;
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if let Some(mob) = entity.kind.mob_mut()
@@ -1467,7 +1534,7 @@ impl Report {
             let mut spawn_public = level.entities.take_spawn_snapshots();
             // 繁殖生成的幼崽也是牛：加进 `ids`，并把官方给的构造随机数、朝向和
             // UUID 作为场景起点写进实体，后面每刻比对它自己的行为。
-            for public in &spawn_public {
+            for public in &mut spawn_public {
                 if !matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
                     continue;
                 }
@@ -1492,6 +1559,7 @@ impl Report {
                     .as_deref()
                     .and_then(parse_uuid)
                     .unwrap_or([0; 16]);
+                let egg = setup.egg;
                 let uid = public.uid;
                 {
                     let mut world = World::new(&mut level, &mut ticks);
@@ -1500,11 +1568,20 @@ impl Report {
                         entity.y_rot = 0.0;
                         if let Some(mob) = entity.kind.mob_mut() {
                             mob.uuid = uuid;
+                            if let Some(egg) = egg {
+                                mob.egg_time = egg;
+                            }
                             mob.y_head_rot = hr;
                             mob.y_head_rot_o = hr;
                             mob.y_rot_o = 0.0;
                         }
                     });
+                }
+                // 配对快照在 `addFreshEntity` 时记下，这里同样换成场景起点的朝向。
+                // The pairing snapshot predates the override; give it the same start rotation.
+                public.yaw = 0.0;
+                if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &mut public.kind {
+                    mob.y_head_rot = hr;
                 }
             }
             // 场景开始时就存在的牛在 tick 0 已经建过同步状态，这里只处理
@@ -2339,6 +2416,7 @@ impl Report {
                         seed: None,
                         hr: None,
                         uuid: None,
+                        egg: None,
                     })
                     .collect();
                 // 只比数量 / 种类 / 物品 / 经验值，不比实体 ID 和速度随机源。
@@ -2702,6 +2780,7 @@ fn spawn_snapshot(
                 seed: None,
                 hr: None,
                 uuid: None,
+                egg: None,
             })
         })
         .collect()
@@ -3004,8 +3083,8 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .attributes
             .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE)
             .to_bits() as i64,
-        var: mob.variant.name().to_owned(),
-        snd: mob.sound_variant.name().to_owned(),
+        var: farm_variant(mob),
+        snd: farm_sound(mob),
         uuid: uuid_text(&mob.uuid),
         lr,
         goals: mob.goals.running_class_names(mob.mob_type).join(" "),
@@ -3074,5 +3153,68 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .attributes
             .value(mc_bamboo_data::registries::attribute::ARMOR)
             .to_bits() as i64,
+    }
+}
+
+/// 对拍里的花纹列：羊是颜色加剪毛标记，鸡还带下蛋计时。
+///
+/// The oracle's variant column: colour and shear mark for sheep, plus the egg timer for chickens.
+fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
+    use mc_bamboo_blocks::entity::mob::{MobType, sheep};
+    match mob.mob_type {
+        MobType::Sheep => format!(
+            "{}{}",
+            sheep::color(mob).name(),
+            if sheep::is_sheared(mob) {
+                "|sheared"
+            } else {
+                ""
+            }
+        ),
+        MobType::Chicken => format!("{}|egg{}", mob.variant.name(), mob.egg_time),
+        _ => mob.variant.name().to_owned(),
+    }
+}
+
+/// 对拍里的叫声列。
+///
+/// The oracle's sound variant column.
+fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    match mob.mob_type {
+        MobType::Pig => mob.pig_sound_variant.name().to_owned(),
+        MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
+        MobType::Sheep => String::new(),
+        _ => mob.sound_variant.name().to_owned(),
+    }
+}
+
+/// 和游戏层一样给羊 / 鸡的实体谓词补组件（`interaction/level/farm_loot.rs`）。
+///
+/// Adds the sheep and chicken predicate fields, as the game layer does.
+fn describe_farm_animal(
+    view: &mut mc_bamboo_loot::EntityView,
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+    wool: u8,
+    variant: Option<mc_bamboo_blocks::entity::mob::CowVariant>,
+) {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    match (kind, variant) {
+        (MobType::Sheep, _) => {
+            let color = mc_bamboo_core::sign::DyeColor::from_id(i32::from(wool & 15));
+            view.is_sheep = true;
+            view.sheep_sheared = wool & 16 != 0;
+            view.components.insert(
+                "minecraft:sheep/color".to_owned(),
+                serde_json::Value::String(color.name().to_owned()),
+            );
+        }
+        (MobType::Chicken, Some(variant)) => {
+            view.components.insert(
+                "minecraft:chicken/variant".to_owned(),
+                serde_json::Value::String(variant.name().to_owned()),
+            );
+        }
+        _ => {}
     }
 }

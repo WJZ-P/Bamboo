@@ -441,7 +441,7 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             let sound = mob
                 .mob_type
                 .ambient_sound()
-                .unwrap_or_else(|| mob.sound_variant.ambient());
+                .unwrap_or_else(|| ambient_sound(mob));
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
     }
@@ -543,6 +543,7 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
         pitch,
         position: me.position,
         hostile: mob.mob_type.is_monster(),
+        seed: None,
     });
 }
 
@@ -555,14 +556,29 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         return;
     }
     let pitch = voice_pitch(me, mob);
-    let sound = mob
-        .mob_type
-        .ambient_sound()
-        .unwrap_or_else(|| mob.sound_variant.ambient());
-    play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+    play_sound(
+        me,
+        mob,
+        ambient_sound(mob),
+        mob.mob_type.sound_volume(),
+        pitch,
+    );
 }
 
-/// `getVoicePitch()`：两个 `nextFloat`，牛的叫声从不为空，静音时也照取。
+fn ambient_sound(mob: &Mob) -> &'static str {
+    match mob.mob_type {
+        super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
+        super::MobType::Chicken => super::chicken::sounds(mob)[0],
+        _ => mob
+            .mob_type
+            .ambient_sound()
+            .unwrap_or(mob.sound_variant.ambient()),
+    }
+}
+
+/// 生物叫声的音高取两次随机数；幼年基础音高为 1.5。
+///
+/// The voice pitch takes two draws and uses a higher base pitch for babies.
 pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
@@ -796,6 +812,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Wolf {
         super::wolf::ai_step_after(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Chicken {
+        super::chicken::ai_step(me, mob, ctx);
+    }
 }
 
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
@@ -855,6 +874,8 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             mob.events.push(MobEvent::Hearts);
             ctx.emit(
                 Command::BreedAnimals {
+                    variant: mob.variant,
+                    wool: mob.wool,
                     partner,
                     position: me.position,
                     kind: mob.mob_type,
@@ -1492,13 +1513,15 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            let sound = if mob.mob_type == super::MobType::Wolf {
-                super::wolf::sound(mob, super::wolf::Sound::Death)
-            } else {
-                mob.mob_type
-                    .death_sound()
-                    .unwrap_or_else(|| mob.sound_variant.death())
-            };
+            let sound = mob
+                .mob_type
+                .death_sound()
+                .unwrap_or_else(|| match mob.mob_type {
+                    super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Death),
+                    super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
+                    super::MobType::Chicken => super::chicken::sounds(mob)[2],
+                    _ => mob.sound_variant.death(),
+                });
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
         die(me, mob, ctx, source);
@@ -1506,13 +1529,15 @@ pub(crate) fn hurt_server(
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = if mob.mob_type == super::MobType::Wolf {
-            super::wolf::sound(mob, super::wolf::Sound::Hurt)
-        } else {
-            mob.mob_type
-                .hurt_sound()
-                .unwrap_or_else(|| mob.sound_variant.hurt())
-        };
+        let sound = mob
+            .mob_type
+            .hurt_sound()
+            .unwrap_or_else(|| match mob.mob_type {
+                super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Hurt),
+                super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[1],
+                _ => mob.sound_variant.hurt(),
+            });
         play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
     }
     mob.last_damage_source = Some(source);
@@ -1688,6 +1713,28 @@ pub(crate) fn apply_trample_turtle_egg(
     }
 }
 
+/// 落地 [`Command::EatBlock`]：`destroyBlock(pos, false)` 吃草，或在下面的草方块上发 2001 事件、
+/// 以标志 2 换成泥土。
+///
+/// Applies [`Command::EatBlock`]: `destroyBlock(pos, false)` for a plant, or a 2001 event and a
+/// flag-2 swap to dirt for the grass block below.
+pub(crate) fn apply_eat_block(world: &mut crate::world::World, pos: BlockPos, grass_below: bool) {
+    if !grass_below {
+        world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+        return;
+    }
+    world.push_effect(crate::Effect::Destroyed {
+        pos,
+        state: crate::state::BlockState(mc_bamboo_data::blocks::GRASS_BLOCK),
+        except_initiator: false,
+    });
+    world.set_block(
+        pos,
+        crate::state::BlockState(mc_bamboo_data::blocks::DIRT),
+        2,
+    );
+}
+
 /// `LivingEntity.die`：掉落交给 [`Command::DropMobLoot`]，经验只在被玩家打过时掉。
 fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSource) {
     if me.removed || mob.dead {
@@ -1710,22 +1757,27 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
-    let experience = if mob.mob_type.is_monster() {
-        // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
-        let base = if adult {
-            mob.mob_type.xp_reward()
-        } else {
-            (f64::from(mob.mob_type.xp_reward()) * 2.5) as i32
-        };
-        if by_player && drops { base } else { 0 }
-    } else if by_player && adult && drops {
-        // `Animal.getBaseExperienceReward`：`1 + random.nextInt(3)`。
-        1 + me.random.next_int_bounded(3)
+    if !mob.mob_type.is_monster() {
+        mob.events.push(MobEvent::Death);
+        animal_death_drops(
+            me,
+            mob,
+            ctx,
+            source,
+            by_player && adult && drops,
+            adult && drops,
+        );
+        return;
+    }
+    // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
+    let base = if adult {
+        mob.mob_type.xp_reward()
     } else {
-        0
+        (f64::from(mob.mob_type.xp_reward()) * 2.5) as i32
     };
+    let experience = if by_player && drops { base } else { 0 };
     mob.events.push(MobEvent::Death);
-    if (adult || mob.mob_type.is_monster()) && drops {
+    if drops {
         ctx.emit(
             Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
             me,
@@ -1742,11 +1794,55 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BreedFather {
     pub(crate) kind: super::MobType,
+    pub(crate) variant: super::CowVariant,
+    pub(crate) wool: u8,
     pub(crate) rabbit: super::rabbit::Variant,
     pub(crate) fox: super::fox::Variant,
     pub(crate) love: Option<[u8; 16]>,
     pub(crate) wolf: super::wolf::Wolf,
     pub(crate) tame: super::tame::Tamable,
+}
+
+/// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
+/// 按槽位顺序掉装备（鞍），最后 `Animal.getBaseExperienceReward` 取 `1 + nextInt(3)`。
+///
+/// The animal branch of `dropAllDeathLoot`: loot table, then equipment slots in ordinal
+/// order (the saddle), then `Animal.getBaseExperienceReward` draws `1 + nextInt(3)`.
+fn animal_death_drops(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    experience: bool,
+    loot: bool,
+) {
+    let by_player = mob.last_hurt_by_player_memory_time > 0;
+    if loot {
+        ctx.emit(
+            Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+            me,
+        );
+        let looting = if source.attacker_is_player {
+            source.looting_level
+        } else {
+            0
+        };
+        for slot in super::equipment::SLOTS {
+            if let Some(stack) = super::skeleton_drops::drop_slot(
+                &mut mob.equipment,
+                slot,
+                by_player,
+                looting,
+                &mut me.random,
+            ) {
+                ctx.emit(Command::DropItem { stack }, me);
+            }
+        }
+    }
+    if experience {
+        let amount = 1 + me.random.next_int_bounded(3);
+        ctx.emit(Command::AwardDeathExperience { amount }, me);
+    }
 }
 
 /// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
@@ -1775,6 +1871,7 @@ pub(crate) fn apply_breed(
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
     let mut wolf = None;
+    let mut from_father = true;
     match kind {
         super::MobType::Wolf => {
             wolf = Some(super::wolf::offspring(
@@ -1797,20 +1894,35 @@ pub(crate) fn apply_breed(
                 [parent.love, love],
             ));
         }
+        super::MobType::Sheep => {}
         _ => {
-            // `Cow.getBreedOffspring` 从父亲随机源取一个 `nextBoolean` 选花色。
-            // `Cow.getBreedOffspring` draws one `nextBoolean` for the colour.
-            let _ = me.random.next_boolean();
+            // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
+            // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
+            from_father = me.random.next_boolean();
         }
     }
-    let xp = 1 + me.random.next_int_bounded(7);
+    let sheep = kind == super::MobType::Sheep;
+    let mut child_variant = parent.variant;
+    let mut partner_wool = parent.wool;
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
+            if !from_father {
+                child_variant = mob.variant;
+            }
+            partner_wool = mob.wool;
             mob.in_love = 0;
             set_age(me, mob, 6000);
         });
     });
     // 官方先构造幼崽（拿到 ID）再构造经验球；岛种子源和网络 ID 都按这个顺序。
+    let lamb_color = sheep.then(|| {
+        super::sheep::offspring_color(
+            mc_bamboo_core::sign::DyeColor::from_id(i32::from(parent.wool & 15)),
+            mc_bamboo_core::sign::DyeColor::from_id(i32::from(partner_wool & 15)),
+            world.random(),
+        )
+    });
+    let xp = 1 + me.random.next_int_bounded(7);
     let mut calf = Entity::by_mob_type(kind, position);
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
@@ -1828,6 +1940,10 @@ pub(crate) fn apply_breed(
             }
         }
         set_age(me, mob, -24000);
+        match lamb_color {
+            Some(color) => super::sheep::set_color(mob, color),
+            None => mob.variant = child_variant,
+        }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;
         mob.y_body_rot_o = 0.0;

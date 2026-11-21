@@ -1164,17 +1164,33 @@ public final class Extractor {
         var rabbit = net.minecraft.world.entity.EntityTypes.RABBIT.getDimensions();
         var baby = (net.minecraft.world.entity.EntityDimensions) readField(Rabbit.class, "BABY_DIMENSIONS", null);
         var attributes = Rabbit.createAttributes().build();
-        var variant = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(Rabbit.class, "DATA_TYPE_ID", null);
+        var rabbitVariant = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(Rabbit.class, "DATA_TYPE_ID", null);
         out.addProperty("rabbitEyeHeight", rabbit.eyeHeight());
         out.addProperty("rabbitBabyWidth", baby.width());
         out.addProperty("rabbitBabyHeight", baby.height());
         out.addProperty("rabbitBabyEyeHeight", baby.eyeHeight());
-        out.addProperty("rabbitVariant", variant.id());
+        out.addProperty("rabbitVariant", rabbitVariant.id());
         out.addProperty("rabbitMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
         out.addProperty("rabbitMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
         out.addProperty("rabbitAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
         addFoxFacts(out);
         addWolfFacts(out);
+        Class<?> pig = net.minecraft.world.entity.animal.pig.Pig.class;
+        out.addProperty("pigBoostTime", entityAccessor(pig, "DATA_BOOST_TIME").id());
+        var variant = entityAccessor(pig, "DATA_VARIANT_ID");
+        var sound = entityAccessor(pig, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("pigVariant", variant.id());
+        out.addProperty("pigSoundVariant", sound.id());
+        out.addProperty("pigVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(variant.serializer()));
+        out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
+        out.addProperty("sheepWool", entityAccessor(net.minecraft.world.entity.animal.sheep.Sheep.class, "DATA_WOOL_ID").id());
+        Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
+        var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
+        var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("chickenVariant", chickenVariant.id());
+        out.addProperty("chickenSoundVariant", chickenSound.id());
+        out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
+        out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();
@@ -1254,6 +1270,12 @@ public final class Extractor {
         out.addProperty("wolfMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
         out.addProperty("wolfMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
         out.addProperty("wolfAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+    }
+
+    private static net.minecraft.network.syncher.EntityDataAccessor<?> entityAccessor(Class<?> type, String name) throws ReflectiveOperationException {
+        Field field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
     }
 
     private static int arrowAccessorId(String name) throws ReflectiveOperationException {

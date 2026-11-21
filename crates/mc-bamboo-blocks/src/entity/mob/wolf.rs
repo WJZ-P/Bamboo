@@ -543,6 +543,7 @@ fn outcome(result: InteractionResult, shrink_held: bool) -> MobInteraction {
         result,
         shrink_held,
         replacement: None,
+        shear: false,
     }
 }
 

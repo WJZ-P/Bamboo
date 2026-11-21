@@ -105,7 +105,13 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.WrappedGoal;
+import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.animal.cow.Cow;
+import net.minecraft.world.entity.animal.pig.Pig;
+import net.minecraft.world.entity.animal.sheep.Sheep;
+import net.minecraft.world.entity.animal.chicken.Chicken;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
@@ -268,6 +274,16 @@ public final class MobOracle {
                 playShot(official, out, name);
                 cases++;
             }
+            for (String name : List.of("egg_floor", "egg_hatch_one", "egg_hatch_four", "egg_hit_cow")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playEgg(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("egg_throw", "egg_throw_moving", "egg_throw_creative")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playEggThrow(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -363,6 +379,10 @@ public final class MobOracle {
         final List<int[]> interactions = new ArrayList<>();
         /** 玩家受伤场景：`getDifficulty()` 的值，缺省 NORMAL。 */
         int difficulty = 2;
+        /** 羊的 `DATA_WOOL_ID` 起点（颜色 | 16 已剪毛）。 */
+        int wool;
+        /** 鸡的 `eggTime` 起点；负数表示保留构造函数抽的值。 */
+        int eggTime = -1;
         /** 玩家受伤场景：逐刻的动作，见 `PlayerAction`。 */
         final List<PlayerAction> playerActions = new ArrayList<>();
         /** 玩家受伤场景：起始装备（四件盔甲 + 主手），按物品 ID。 */
@@ -862,19 +882,19 @@ public final class MobOracle {
             for (long seed : new long[] {3L, 31L}) {
                 Scene day = new Scene("fox_day_" + seed).ticks(600);
                 Scenes.ground(day, 15);
-                day.mob(4, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                day.mob(7, 0.5, 64.0, 0.5, 0.0F, seed, 0);
                 scenes.add(day);
             }
             Scene night = new Scene("fox_night").ticks(600);
             night.skyDarken = 11;
             night.brightOutside = false;
             Scenes.ground(night, 15);
-            night.mob(4, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+            night.mob(7, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
             scenes.add(night);
             Scene roof = new Scene("fox_sleep_roof").ticks(400);
             Scenes.ground(roof, 8);
             roof.fill(-8, 66, -8, 8, 66, 8, Scenes.STONE);
-            roof.mob(4, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
+            roof.mob(7, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
             scenes.add(roof);
             for (boolean tame : new boolean[] {false, true}) {
                 // 同一处遮蔽：野狼让狐狸警觉，驯服后则不再妨碍睡觉。
@@ -882,42 +902,42 @@ public final class MobOracle {
                 Scene wolf = new Scene(tame ? "fox_sleep_tamed_wolf" : "fox_sleep_wild_wolf").ticks(160);
                 Scenes.ground(wolf, 16);
                 wolf.fill(-8, 66, -8, 8, 66, 8, Scenes.STONE);
-                wolf.mob(4, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
-                wolf.mob(5, 9.5, 64.0, 0.5, 0.0F, 62L, 0);
+                wolf.mob(7, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
+                wolf.mob(8, 9.5, 64.0, 0.5, 0.0F, 62L, 0);
                 wolf.player(20.5, 64.0, 0.5, Items.AIR);
                 if (tame) wolf.interact(2, 1, 0, BuiltInRegistries.ITEM.getId(Items.BONE), 0);
                 scenes.add(wolf);
             }
             Scene flee = new Scene("fox_flee_player").ticks(200).difficulty(2);
             Scenes.ground(flee, 15);
-            flee.mob(4, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
+            flee.mob(7, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
             flee.player(6.5, 64.0, 0.5, Items.AIR);
             scenes.add(flee);
             Scene berries = new Scene("fox_berries").ticks(300);
             Scenes.ground(berries, 10);
             berries.set(2, 64, 0, Blocks.SWEET_BERRY_BUSH.defaultBlockState()
                     .setValue(net.minecraft.world.level.block.SweetBerryBushBlock.AGE, 3));
-            berries.mob(4, 0.5, 64.0, 0.5, 0.0F, 25L, 0);
+            berries.mob(7, 0.5, 64.0, 0.5, 0.0F, 25L, 0);
             scenes.add(berries);
             for (long seed : new long[] {41L, 43L}) {
                 // 兔子死后掉的东西 Java 一侧不进实体表，场景在狐狸去捡之前结束。
                 Scene hunt = new Scene("fox_hunt_" + seed).ticks(seed == 41L ? 270 : 115);
                 hunt.foxHunts = true;
                 Scenes.ground(hunt, 15);
-                hunt.mob(4, 0.5, 64.0, 0.5, 0.0F, seed, 0);
-                hunt.mob(3, 9.5, 64.0, 0.5, 0.0F, seed + 1, 0);
+                hunt.mob(7, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                hunt.mob(6, 9.5, 64.0, 0.5, 0.0F, seed + 1, 0);
                 scenes.add(hunt);
             }
             Scene snow = new Scene("fox_hunt_snow").ticks(108);
             snow.foxHunts = true;
             Scenes.ground(snow, 12);
             snow.fill(-12, 64, -12, 12, 64, 12, Blocks.SNOW.defaultBlockState());
-            snow.mob(4, 0.5, 64.2, 0.5, 0.0F, 45L, 0);
-            snow.mob(3, 8.5, 64.2, 0.5, 0.0F, 46L, 0);
+            snow.mob(7, 0.5, 64.2, 0.5, 0.0F, 45L, 0);
+            snow.mob(6, 8.5, 64.2, 0.5, 0.0F, 46L, 0);
             scenes.add(snow);
             Scene baby = new Scene("fox_baby").ticks(300);
             Scenes.ground(baby, 15);
-            baby.mob(4, 0.5, 64.0, 0.5, 0.0F, 27L, -24000);
+            baby.mob(7, 0.5, 64.0, 0.5, 0.0F, 27L, -24000);
             scenes.add(baby);
         }
     }
@@ -935,18 +955,18 @@ public final class MobOracle {
             for (long seed : new long[] {7L, 17L}) {
                 Scene wander = new Scene("wolf_wander_" + seed).ticks(600);
                 Scenes.ground(wander, 15);
-                wander.mob(5, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                wander.mob(8, 0.5, 64.0, 0.5, 0.0F, seed, 0);
                 scenes.add(wander);
             }
             Scene hunt = new Scene("wolf_hunt_rabbit").ticks(300);
             Scenes.ground(hunt, 15);
-            hunt.mob(5, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
-            hunt.mob(3, 7.5, 64.0, 0.5, 0.0F, 52L, 0);
+            hunt.mob(8, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+            hunt.mob(6, 7.5, 64.0, 0.5, 0.0F, 52L, 0);
             scenes.add(hunt);
             for (long seed : new long[] {61L, 62L, 63L}) {
                 Scene tame = new Scene("wolf_tame_" + seed).ticks(300);
                 Scenes.ground(tame, 15);
-                tame.mob(5, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                tame.mob(8, 0.5, 64.0, 0.5, 0.0F, seed, 0);
                 tame.player(2.5, 64.0, 0.5, Items.AIR);
                 for (int t = 2; t <= 14; t += 4) tame.interact(t, 0, 0, bone, 0);
                 tame.interact(100, 0, 0, blueDye, 0);
@@ -957,7 +977,7 @@ public final class MobOracle {
             for (long seed : new long[] {65L, 66L}) {
                 Scene follow = new Scene("wolf_follow_" + seed).ticks(300);
                 Scenes.ground(follow, 15);
-                follow.mob(5, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                follow.mob(8, 0.5, 64.0, 0.5, 0.0F, seed, 0);
                 follow.player(14.5, 64.0, 0.5, Items.AIR);
                 for (int t = 2; t <= 14; t += 4) follow.interact(t, 0, 0, bone, 0);
                 follow.interact(60, 0, 0, air, 0);
@@ -966,19 +986,19 @@ public final class MobOracle {
             Scene angry = new Scene("wolf_angry").ticks(90).difficulty(2);
             angry.realPlayers = true;
             Scenes.ground(angry, 15);
-            angry.mob(5, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
-            angry.mob(5, 0.5, 64.0, 3.5, 0.0F, 72L, 0);
+            angry.mob(8, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+            angry.mob(8, 0.5, 64.0, 3.5, 0.0F, 72L, 0);
             angry.player(4.5, 64.0, 0.5, Items.AIR);
             angry.hurts.add(new double[] {5, 0, 1.0, 0});
             scenes.add(angry);
             Scene wet = new Scene("wolf_wet").ticks(400);
             Scenes.ground(wet, 10);
             wet.fill(-1, 63, -1, 1, 63, 1, Scenes.WATER);
-            wet.mob(5, 0.5, 63.0, 0.5, 0.0F, 81L, 0);
+            wet.mob(8, 0.5, 63.0, 0.5, 0.0F, 81L, 0);
             scenes.add(wet);
             Scene puppy = new Scene("wolf_puppy").ticks(300);
             Scenes.ground(puppy, 15);
-            puppy.mob(5, 0.5, 64.0, 0.5, 0.0F, 91L, -24000);
+            puppy.mob(8, 0.5, 64.0, 0.5, 0.0F, 91L, -24000);
             puppy.player(3.5, 64.0, 0.5, Items.BONE);
             scenes.add(puppy);
         }
@@ -990,39 +1010,39 @@ public final class MobOracle {
             for (long seed : new long[] {7L, 99L, 2024L}) {
                 Scene hop = new Scene("rabbit_hop_" + seed).ticks(600);
                 Scenes.ground(hop, 15);
-                hop.mob(3, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                hop.mob(6, 0.5, 64.0, 0.5, 0.0F, seed, 0);
                 scenes.add(hop);
             }
             Scene flee = new Scene("rabbit_flee_player").ticks(200).difficulty(2);
             Scenes.ground(flee, 15);
-            flee.mob(3, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
+            flee.mob(6, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
             flee.player(4.5, 64.0, 0.5, Items.AIR);
             scenes.add(flee);
             Scene calm = new Scene("rabbit_peaceful_player").ticks(120).difficulty(0);
             Scenes.ground(calm, 15);
-            calm.mob(3, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
+            calm.mob(6, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
             calm.player(4.5, 64.0, 0.5, Items.AIR);
             scenes.add(calm);
             Scene zombie = new Scene("rabbit_flee_zombie").ticks(100).difficulty(2);
             zombie.monstersBurn = false;
             Scenes.ground(zombie, 15);
-            zombie.mob(3, 0.5, 64.0, 0.5, 0.0F, 6L, 0);
+            zombie.mob(6, 0.5, 64.0, 0.5, 0.0F, 6L, 0);
             zombie.mob(1, 3.5, 64.0, 0.5, 0.0F, 8L, 0);
             zombie.player(14.5, 64.0, 0.5, Items.AIR);
             scenes.add(zombie);
             Scene water = new Scene("rabbit_water").ticks(200);
             Scenes.ground(water, 10);
             water.fill(-3, 62, -3, 3, 63, 3, Scenes.WATER);
-            water.mob(3, 0.5, 63.2, 0.5, 0.0F, 11L, 0);
+            water.mob(6, 0.5, 63.2, 0.5, 0.0F, 11L, 0);
             scenes.add(water);
             Scene baby = new Scene("rabbit_baby").ticks(400);
             Scenes.ground(baby, 15);
-            baby.mob(3, 0.5, 64.0, 0.5, 0.0F, 13L, -24000);
+            baby.mob(6, 0.5, 64.0, 0.5, 0.0F, 13L, -24000);
             scenes.add(baby);
             Scene snow = new Scene("rabbit_powder_snow").ticks(120);
             Scenes.ground(snow, 10);
             snow.fill(-1, 64, -1, 1, 64, 1, Blocks.POWDER_SNOW.defaultBlockState());
-            snow.mob(3, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
+            snow.mob(6, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
             scenes.add(snow);
         }
     }
@@ -1034,6 +1054,93 @@ public final class MobOracle {
         static final BlockState WATER = Blocks.WATER.defaultBlockState();
         static final BlockState LAVA = Blocks.LAVA.defaultBlockState();
 
+        /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
+        static void farmScenes(List<Scene> scenes) {
+            int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
+            int wheat = BuiltInRegistries.ITEM.getId(Items.WHEAT);
+            {
+                // 剪过毛的幼羊和成年羊站在草方块上：幼年 1/25 的概率低头吃草，草变泥土、长回羊毛。
+                Scene eat = new Scene("sheep_eat").ticks(300).packets();
+                ground(eat, 8);
+                eat.wool = 16;
+                eat.cow(0.5, 64.0, 0.5, 0.0F, 71L, -24000);
+                eat.cow(3.5, 64.0, 0.5, 0.0F, 72L);
+                eat.player(6.5, 64.0, 0.5, Items.AIR);
+                scenes.add(eat);
+            }
+            {
+                // 剪毛：第一次掉羊毛，第二次已剪过只返回 CONSUME；之后被打死只掉羊肉。
+                Scene shear = new Scene("sheep_shear").ticks(60).drops().packets();
+                ground(shear, 6);
+                shear.cow(0.5, 64.0, 0.5, 0.0F, 73L);
+                shear.player(1.5, 64.0, 0.5, Items.AIR);
+                shear.interact(3, 0, 0, shears, 0);
+                shear.interact(6, 0, 0, shears, 0);
+                shear.hurts.add(new double[] {30, 0, 30.0, 0});
+                scenes.add(shear);
+            }
+            {
+                // 染色后被打死：按颜色的子战利品表掉对应羊毛。
+                Scene dye = new Scene("sheep_dye_death").ticks(40).drops().packets();
+                ground(dye, 6);
+                dye.cow(0.5, 64.0, 0.5, 0.0F, 74L);
+                dye.player(1.5, 64.0, 0.5, Items.AIR);
+                dye.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(dye("lime")), 0);
+                dye.interact(5, 0, 0, BuiltInRegistries.ITEM.getId(dye("lime")), 0);
+                dye.hurts.add(new double[] {20, 0, 30.0, 0});
+                scenes.add(dye);
+            }
+            String[][] pairs = {{"red", "yellow"}, {"black", "red"}};
+            for (String[] pair : pairs) {
+                // 繁殖混色：红 + 黄有配方（橙色），黑 + 红没有，按世界随机源选一方。
+                Scene breed = new Scene("sheep_breed_" + pair[0] + "_" + pair[1]).ticks(120).drops().packets();
+                ground(breed, 8);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 75L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 76L);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(1, 0, 0, BuiltInRegistries.ITEM.getId(dye(pair[0])), 0);
+                breed.interact(1, 1, 0, BuiltInRegistries.ITEM.getId(dye(pair[1])), 0);
+                breed.interact(2, 0, 0, wheat, 0);
+                breed.interact(2, 1, 0, wheat, 0);
+                scenes.add(breed);
+            }
+            {
+                // 下蛋：计时设成 20，到点按礼物表掉蛋、放下蛋声并重抽计时。
+                Scene lay = new Scene("chicken_lay").ticks(80).drops().packets();
+                ground(lay, 6);
+                lay.eggTime = 20;
+                lay.cow(0.5, 64.0, 0.5, 0.0F, 81L);
+                lay.player(3.5, 64.0, 0.5, Items.AIR);
+                scenes.add(lay);
+            }
+            {
+                // 缓慢下落：从 8 格高处落下，空中纵向速度每刻乘 0.6。
+                Scene fall = new Scene("chicken_fall").ticks(60).packets();
+                ground(fall, 6);
+                fall.cow(0.5, 72.0, 0.5, 0.0F, 82L);
+                fall.player(3.5, 64.0, 0.5, Items.AIR);
+                scenes.add(fall);
+            }
+            {
+                // 用种子繁殖，再打死一只：小鸡的构造计时、经验球和鸡的掉落。
+                // 在尸体移除（第 120 刻）之前结束：假世界在本刻末才清掉已移除的实体，真服务端当场就清。
+                Scene breed = new Scene("chicken_breed").ticks(115).drops().packets();
+                ground(breed, 8);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 83L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 84L);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                int seeds = BuiltInRegistries.ITEM.getId(Items.WHEAT_SEEDS);
+                breed.interact(2, 0, 0, seeds, 0);
+                breed.interact(2, 1, 0, seeds, 0);
+                breed.hurts.add(new double[] {100, 1, 30.0, 0});
+                scenes.add(breed);
+            }
+        }
+
+        static net.minecraft.world.item.Item dye(String color) {
+            return BuiltInRegistries.ITEM.getValue(net.minecraft.resources.Identifier.withDefaultNamespace(color + "_dye"));
+        }
+
         static void ground(Scene scene, int radius) {
             scene.fill(-radius, 62, -radius, radius, 62, radius, DIRT);
             scene.fill(-radius, 63, -radius, radius, 63, radius, GRASS);
@@ -1042,6 +1149,40 @@ public final class MobOracle {
         static List<Scene> all() {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
+            farmScenes(scenes);
+            {
+                Scene pig = new Scene("pig_rod_tempt").ticks(80);
+                ground(pig, 12);
+                pig.cow(0.5, 64.0, 0.5, 0.0F, 25L);
+                pig.player(6.5, 64.0, 0.5, Items.CARROT_ON_A_STICK);
+                scenes.add(pig);
+            }
+            {
+                Scene pig = new Scene("pig_saddle").ticks(24);
+                ground(pig, 6);
+                pig.cow(0.5, 64.0, 0.5, 0.0F, 39L);
+                pig.player(1.5, 64.0, 0.5, Items.AIR);
+                pig.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
+                pig.packets = true;
+                scenes.add(pig);
+                Scene bred = new Scene("pig_breed").ticks(160).drops().packets();
+                ground(bred, 8);
+                bred.cow(0.5, 64.0, 0.5, 0.0F, 63L);
+                bred.cow(1.1, 64.0, 0.5, 0.0F, 64L);
+                bred.player(3.5, 64.0, 0.5, Items.AIR);
+                bred.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.CARROT), 0);
+                bred.interact(2, 1, 0, BuiltInRegistries.ITEM.getId(Items.BEETROOT), 0);
+                scenes.add(bred);
+                // 上鞍后被玩家打死：战利品、必掉的鞍、经验的取数顺序。
+                // Killed after saddling: loot, the guaranteed saddle and XP draw order.
+                Scene dead = new Scene("pig_saddle_death").ticks(60).drops().packets();
+                ground(dead, 6);
+                dead.cow(0.5, 64.0, 0.5, 0.0F, 40L);
+                dead.player(1.5, 64.0, 0.5, Items.AIR);
+                dead.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
+                dead.hurts.add(new double[] {20, 0, 30.0, 0});
+                scenes.add(dead);
+            }
             for (long seed : seeds) {
                 Scene flat = new Scene("flat_" + seed).ticks(2000);
                 ground(flat, 12);
@@ -1825,7 +1966,7 @@ public final class MobOracle {
             scenes.add(consumeBase("consume_stew", 40, itemId(Items.SUSPICIOUS_STEW), 10));
             Scene rabbitHop = new Scene("rabbit_hop").ticks(240);
             rabbitHop.fill(-15, 63, -15, 15, 63, 15, Blocks.GRASS_BLOCK.defaultBlockState());
-            rabbitHop.mob(3, 0.5, 64.0, 0.5, 0.0F, 42L, 0);
+            rabbitHop.mob(6, 0.5, 64.0, 0.5, 0.0F, 42L, 0);
             scenes.add(rabbitHop);
             RabbitScenes.add(scenes);
             FoxScenes.add(scenes);
@@ -1836,7 +1977,7 @@ public final class MobOracle {
             rabbitRaid.set(0, 63, 0, Blocks.FARMLAND.defaultBlockState());
             rabbitRaid.set(0, 64, 0, Blocks.CARROTS.defaultBlockState()
                     .setValue(net.minecraft.world.level.block.CarrotBlock.AGE, 7));
-            rabbitRaid.mob(3, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
+            rabbitRaid.mob(6, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
             scenes.add(rabbitRaid);
             return scenes;
         }
@@ -2058,7 +2199,7 @@ public final class MobOracle {
         level.playersList().addAll(players);
         // `LivingEntity.pushEntities` 也会被玩家推：玩家要进实体表，排在牛前面。
         level.tracked.addAll(0, players);
-        List<Cow> cows = new ArrayList<>();
+        List<Animal> cows = new ArrayList<>();
         int playerIds = level.nextId;
         /** 逐刻的出站包字节；外层数组是刻，内层是那一刻这一头牛的全部包。 */
         List<List<String>> packets = null;
@@ -2090,7 +2231,7 @@ public final class MobOracle {
             }
         }
         for (int i = 0; i < scene.cows.size(); i++) {
-            Cow cow = EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            Animal cow = animalType(scene.name).create(level, EntitySpawnReason.COMMAND);
             double[] at = scene.cows.get(i);
             // Bamboo 生成这头牛时从种子源取过一个数，随后被场景的种子盖掉；这里照样消耗一个。
             // Bamboo draws one seed when spawning it before the scene seed overrides it.
@@ -2108,13 +2249,20 @@ public final class MobOracle {
             if (age != 0) {
                 cow.setAge(age);
             }
+            if (cow instanceof Sheep sheep) {
+                sheep.setColor(DyeColor.byId(scene.wool & 15));
+                sheep.setSheared((scene.wool & 16) != 0);
+            }
+            if (cow instanceof Chicken chicken && scene.eggTime >= 0) {
+                chicken.eggTime = scene.eggTime;
+            }
             cows.add(cow);
             level.tracked.add(cow);
         }
         if (scene.packets) {
             // 先给每头牛建 ServerEntity；配对包在 tick 0 由 `sendPairingData` 发出。
             // Create a ServerEntity per cow; sendPairingData emits the tick-0 packets.
-            for (Cow cow : cows) {
+            for (Animal cow : cows) {
                 Sync sync = new Sync(level, cow, official.registries);
                 syncs.add(sync);
                 sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
@@ -2137,6 +2285,10 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
+            line.append(",\"kind\":").append(animalKind(scene.name));
+            line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
+                    ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0)) : 0);
+            line.append(",\"egg\":").append(cows.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
             line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
         line.append("],\"players\":[");
@@ -2203,7 +2355,7 @@ public final class MobOracle {
                 if (action[0] != tick) {
                     continue;
                 }
-                Cow target = cows.get(action[1]);
+                Animal target = cows.get(action[1]);
                 ServerPlayer actor = players.get(action[2]);
                 // 只改 `Abilities.instabuild`：`setGameMode` 会给不存在的连接发包。
                 putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
@@ -2212,6 +2364,12 @@ public final class MobOracle {
                         new ItemStack(net.minecraft.world.item.Item.byId(action[3])));
                 // 官方 `Player.interactOn` 是这条链的入口；牛只看手里这一堆。
                 net.minecraft.world.InteractionResult result = target.mobInteract(actor, InteractionHand.MAIN_HAND);
+                ItemStack inHand = actor.getItemInHand(InteractionHand.MAIN_HAND);
+                if (!result.consumesAction() && !inHand.isEmpty()) {
+                    // `interactOn` 的下一步：物品自己的 `interactLivingEntity`（染料给羊染色）。
+                    // The next `interactOn` step: the item's `interactLivingEntity` (dye on sheep).
+                    result = inHand.interactLivingEntity(actor, target, InteractionHand.MAIN_HAND);
+                }
                 ItemStack held = actor.getItemInHand(InteractionHand.MAIN_HAND);
                 StringBuilder one = new StringBuilder("{\"result\":\"");
                 one.append(result.getClass().getSimpleName()).append('"');
@@ -2223,7 +2381,7 @@ public final class MobOracle {
             }
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick) {
-                    Cow target = cows.get((int) hurt[1]);
+                    Animal target = cows.get((int) hurt[1]);
                     ServerPlayer attacker = players.get((int) hurt[3]);
                     net.minecraft.world.damagesource.DamageSource source = switch (scene.deathKind) {
                         case 1 -> level.damageSources().fall();
@@ -2275,7 +2433,7 @@ public final class MobOracle {
                         players.get(0).hurtServer(level, source, action.amount);
                     } else {
                         // 官方 `ServerGamePacketListenerImpl.handleAttack` 的伤害入口。
-                        Cow target = cows.get(action.cow);
+                        Animal target = cows.get(action.cow);
                         players.get(0).attack(target);
                     }
                 }
@@ -2325,7 +2483,7 @@ public final class MobOracle {
             }
             for (int[] action : scene.cowEffectActions) {
                 if (action[0] != tick || action[1] >= cows.size()) continue;
-                Cow target = cows.get(action[1]);
+                Animal target = cows.get(action[1]);
                 var holder = official.registries.lookupOrThrow(Registries.MOB_EFFECT)
                         .get(action[3]).orElseThrow();
                 if (action[2] == 0) {
@@ -2334,7 +2492,7 @@ public final class MobOracle {
                     target.removeAllEffects();
                 }
             }
-            for (Cow cow : new ArrayList<>(cows)) {
+            for (Animal cow : new ArrayList<>(cows)) {
                 if (cow.isRemoved()) {
                     continue;
                 }
@@ -2349,7 +2507,7 @@ public final class MobOracle {
                 for (Entity born : level.spawned) {
                     level.reseedBorn(born);
                     spawns.get(tick).add(spawnJson(born));
-                    if (born instanceof Cow calf) {
+                    if (born instanceof Animal calf) {
                         cows.add(calf);
                         level.tracked.add(born);
                     }
@@ -2383,7 +2541,7 @@ public final class MobOracle {
                 List<String> step = packets.get(tick);
                 step.addAll(events.take());
                 for (int i = 0; i < cows.size(); i++) {
-                    Cow cow = cows.get(i);
+                    Animal cow = cows.get(i);
                     Sync sync = syncs.get(i);
                     syncFlags.get(tick).add(flags(cow));
                     sync.entity.sendChanges();
@@ -3278,6 +3436,204 @@ public final class MobOracle {
         out.flush();
     }
 
+    /**
+     * 扔出的鸡蛋：逐刻比蛋的位置、速度、朝向、随机源和出站包；蛋碎的那一刻比孵出的小鸡和被打的牛。
+     * 孵化场景把蛋的随机源换成搜出来的种子，让 `nextInt(8)` / `nextInt(32)` 落到想要的分支。
+     *
+     * Thrown eggs: compare the egg's motion, random and packets each tick; on the
+     * breaking tick compare the hatched chicks and the struck cow. Hatch scenes swap
+     * the egg's random for a searched seed so the hatch draws take the wanted branch.
+     */
+    private static void playEgg(Official official, Writer out, String name) throws Exception {
+        boolean cowHit = name.equals("egg_hit_cow");
+        boolean four = name.equals("egg_hatch_four");
+        int hatch = four ? 4 : (name.equals("egg_hatch_one") || cowHit) ? 1 : 0;
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        ItemStack stack = new ItemStack(four ? Items.BLUE_EGG : Items.EGG, 16);
+        double[] start = cowHit ? new double[] {0.5, 64.5, 0.5} : new double[] {0.5, 66.0, 0.5};
+        double[] dir = cowHit ? new double[] {1.0, 0.0, 0.0}
+                : name.equals("egg_floor") ? new double[] {1.0, -0.2, 0.3} : new double[] {1.0, -0.5, 0.25};
+        var egg = new net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg(
+                world, start[0], start[1], start[2], stack);
+        setRandom(egg, world.entitySeeds.nextLong());
+        egg.setUUID(Mth.createInsecureUUID(egg.getRandom()));
+        egg.shoot(dir[0], dir[1], dir[2], 1.5F, 1.0F);
+        long forced = 0;
+        if (hatch > 0) {
+            forced = hatchSeed(four);
+            setRandom(egg, forced);
+        }
+        world.tracked.add(egg);
+        Cow cow = null;
+        if (cowHit) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource random = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(random));
+            float yaw = random.nextFloat() * 6.2831855F;
+            cow.setYRot(yaw);
+            cow.setYHeadRot(yaw);
+            cow.setPos(4.5, 64.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Bytes events = new Bytes(official.registries);
+        world.packets = packet -> {
+            if (packet instanceof net.minecraft.network.protocol.game.ClientboundEntityEventPacket) {
+                events.add(packet);
+            }
+        };
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        var chicks = new ArrayList<Chicken>();
+        var frames = new StringBuilder("[");
+        for (int tick = 0; ; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) pairArrow(world, official, egg, sync, packets);
+            if (tick > 0) {
+                world.gameTime++;
+                egg.commonTick();
+                egg.tick();
+                packets.addAll(events.take());
+                if (egg.isRemoved()) {
+                    Bytes gone = new Bytes(official.registries);
+                    gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(egg.getId()));
+                    packets.addAll(gone.take());
+                    sync.remove(egg.getId());
+                }
+                if (cow != null) {
+                    cow.checkDespawn();
+                    cow.commonTick();
+                    cow.tick();
+                }
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof Chicken chick) {
+                        // 小鸡按岛种子源重放构造时的取数：UUID、yRot（只留给头部朝向）、下蛋计时。
+                        // Replay the chick's constructor draws from the scene's seed source.
+                        setRandom(chick, world.entitySeeds.nextLong());
+                        RandomSource random = chick.getRandom();
+                        chick.setUUID(Mth.createInsecureUUID(random));
+                        chick.setYHeadRot(random.nextFloat() * 6.2831855F);
+                        chick.eggTime = random.nextInt(6000) + 6000;
+                        chicks.add(chick);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    packets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"eggs\":[");
+            if (!egg.isRemoved()) {
+                frames.append("{\"id\":").append(egg.getId()).append(",\"motion\":").append(projectileMotion(egg))
+                        .append(",\"seed\":").append(randomSeed(egg)).append('}');
+            }
+            frames.append("],\"chicks\":[");
+            for (int i = 0; i < chicks.size(); i++) {
+                Chicken chick = chicks.get(i);
+                if (i > 0) frames.append(',');
+                frames.append("{\"id\":").append(chick.getId())
+                        .append(",\"motion\":").append(projectileMotion(chick))
+                        .append(",\"seed\":").append(randomSeed(chick))
+                        .append(",\"uuid\":[").append(chick.getUUID().getMostSignificantBits()).append(',')
+                        .append(chick.getUUID().getLeastSignificantBits()).append(']')
+                        .append(",\"age\":").append(chick.getAge())
+                        .append(",\"egg\":").append(chick.eggTime)
+                        .append(",\"head\":").append(Float.floatToRawIntBits(chick.getYHeadRot()))
+                        .append(",\"variant\":").append(jsonString(
+                                chick.getVariant().unwrapKey().orElseThrow().identifier().toString()))
+                        .append('}');
+            }
+            frames.append(']');
+            if (cow != null) {
+                frames.append(",\"cow\":").append(projectileMotion(cow))
+                        .append(",\"cowState\":[").append(Float.floatToRawIntBits(cow.getHealth())).append(',')
+                        .append(cow.hurtTime).append(',').append(randomSeed(cow)).append(']');
+            }
+            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append('}');
+            if (egg.isRemoved()) break;
+            if (tick > 200) throw new IllegalStateException("egg never landed: " + name);
+        }
+        if (chicks.size() != hatch || cowHit && cow.hurtTime == 0) {
+            throw new IllegalStateException("egg scene missed its branch: " + name + " chicks=" + chicks.size()
+                    + " forced=" + forced + " egg=" + egg.position() + " seed=" + randomSeed(egg));
+        }
+        out.write("{\"type\":\"egg\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"dir\":" + Arrays.toString(dir)
+                + ",\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem()) + ",\"forced\":" + forced
+                + ",\"cow\":" + cowHit + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /** 第一个让蛋孵一只（或四只）的种子：`nextInt(8) == 0`，再看 `nextInt(32)`。 */
+    private static long hatchSeed(boolean four) {
+        for (long seed = 0; ; seed++) {
+            RandomSource random = new net.minecraft.world.level.levelgen.LegacyRandomSource(seed);
+            if (random.nextInt(8) == 0 && (random.nextInt(32) == 0) == four) return seed;
+        }
+    }
+
+    /**
+     * 玩家扔蛋：照抄 `EggItem.use`，只把蛋的随机源换成场景种子源；比扔出那一刻的蛋、物品栏和世界随机源。
+     *
+     * A player throw: `EggItem.use` with the egg's random swapped for the scene's seed
+     * source; compare the egg, the inventory and the level random right after it.
+     */
+    private static void playEggThrow(Official official, Writer out, String name) throws Exception {
+        boolean moving = name.endsWith("_moving");
+        boolean creative = name.endsWith("_creative");
+        float yaw = moving ? 37.0F : -20.0F;
+        float pitch = moving ? -42.0F : -10.0F;
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "EggOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1024);
+        player.setPos(0.5, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(yaw);
+        player.setXRot(pitch);
+        player.setYHeadRot(yaw);
+        if (moving) player.setKnownMovement(new Vec3(0.125, -0.25, 0.0625));
+        player.getAbilities().instabuild = creative;
+        level.playersList().add(player);
+        ItemStack stack = new ItemStack(Items.BROWN_EGG, 3);
+        player.getInventory().setItem(player.getInventory().getSelectedSlot(), stack);
+        level.playSound(null, player.getX(), player.getY(), player.getZ(),
+                net.minecraft.sounds.SoundEvents.EGG_THROW, net.minecraft.sounds.SoundSource.PLAYERS,
+                0.5F, 0.4F / (level.getRandom().nextFloat() * 0.4F + 0.8F));
+        var egg = new net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg(level, player, stack);
+        setRandom(egg, level.entitySeeds.nextLong());
+        egg.setUUID(Mth.createInsecureUUID(egg.getRandom()));
+        net.minecraft.world.entity.projectile.Projectile.spawnProjectile(egg, level, stack,
+                e -> e.shootFromRotation(player, player.getXRot(), player.getYRot(), 0.0F, 1.5F, 1.0F));
+        stack.consume(1, player);
+        ItemStack inside = egg.getItem();
+        out.write("{\"type\":\"eggThrow\",\"name\":" + jsonString(name) + ",\"yaw\":" + Float.floatToRawIntBits(yaw)
+                + ",\"pitch\":" + Float.floatToRawIntBits(pitch) + ",\"moving\":" + moving + ",\"creative\":" + creative
+                + ",\"motion\":" + projectileMotion(egg) + ",\"seed\":" + randomSeed(egg)
+                + ",\"item\":[" + BuiltInRegistries.ITEM.getId(inside.getItem()) + ',' + inside.getCount() + ']'
+                + ",\"left\":" + player.getInventory().getItem(player.getInventory().getSelectedSlot()).getCount()
+                + ",\"levelSeed\":" + randomSeed(level.getRandom()) + "}\n");
+        out.flush();
+    }
+
     /** 射出的箭用场景的实体种子源，和 Bamboo 的 `EntityStore::prepare` 对齐。 */
     static class SeedBow extends BowItem {        private final RandomSource seeds;
 
@@ -3744,9 +4100,9 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
-                case 5 -> EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND);
-                case 4 -> EntityTypes.FOX.create(level, EntitySpawnReason.COMMAND);
-                case 3 -> EntityTypes.RABBIT.create(level, EntitySpawnReason.COMMAND);
+                case 8 -> EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND);
+                case 7 -> EntityTypes.FOX.create(level, EntitySpawnReason.COMMAND);
+                case 6 -> EntityTypes.RABBIT.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
@@ -5245,7 +5601,7 @@ public final class MobOracle {
     }
 
     /** 生成后中途出现的牛：这一刻发一次配对包。 */
-    private static void addSync(FakeLevel level, Official official, Cow cow, List<Sync> syncs,
+    private static void addSync(FakeLevel level, Official official, Animal cow, List<Sync> syncs,
             List<List<String>> packets, int tick) {
         Sync sync = new Sync(level, cow, official.registries);
         syncs.add(sync);
@@ -5266,11 +5622,14 @@ public final class MobOracle {
             out.append(",\"count\":").append(item.getItem().getCount());
         } else if (entity instanceof net.minecraft.world.entity.ExperienceOrb orb) {
             out.append(",\"kind\":\"orb\",\"value\":").append(orb.getValue());
-        } else if (entity instanceof Cow calf) {
+        } else if (entity instanceof Animal calf) {
             // 幼崽的构造随机数和朝向在生成时定下，作为场景起点交给 Bamboo。
             out.append(",\"kind\":\"cow\",\"value\":").append(calf.getAge());
             out.append(",\"seed\":").append(randomSeed(calf));
             out.append(",\"hr\":").append(Float.floatToRawIntBits(calf.getYHeadRot()));
+            if (calf instanceof Chicken chick) {
+                out.append(",\"egg\":").append(chick.eggTime);
+            }
             out.append(",\"uuid\":\"").append(calf.getUUID()).append('"');
         } else {
             out.append(",\"kind\":\"other\"");
@@ -5309,12 +5668,51 @@ public final class MobOracle {
         return out.append('}').toString();
     }
 
-    private static String stepJson(List<Cow> cows) throws Exception {
+    /** 场景名前缀决定动物种类：pig_ / sheep_ / chicken_，其余是牛。 */
+    private static EntityType<? extends Animal> animalType(String scene) {
+        if (scene.startsWith("pig_")) return EntityTypes.PIG;
+        if (scene.startsWith("sheep_")) return EntityTypes.SHEEP;
+        if (scene.startsWith("chicken_")) return EntityTypes.CHICKEN;
+        return EntityTypes.COW;
+    }
+
+    /** 和 Bamboo 一侧 `CowSetup.kind` 的编号一致。 */
+    private static int animalKind(String scene) {
+        if (scene.startsWith("pig_")) return 3;
+        if (scene.startsWith("sheep_")) return 4;
+        if (scene.startsWith("chicken_")) return 5;
+        return 0;
+    }
+
+    /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
+    private static String farmVariant(Animal animal) {
+        if (animal instanceof Sheep sheep) {
+            return sheep.getColor().getSerializedName() + (sheep.isSheared() ? "|sheared" : "");
+        }
+        if (animal instanceof Chicken chicken) {
+            return chicken.getVariant().unwrapKey().orElseThrow().identifier() + "|egg" + chicken.eggTime;
+        }
+        Holder<?> variant = animal instanceof Pig pig ? pig.getVariant() : ((Cow) animal).getVariant();
+        return variant.unwrapKey().orElseThrow().identifier().toString();
+    }
+
+    /** 叫声列；羊没有叫声变种。 */
+    private static String farmSound(Animal animal) throws Exception {
+        if (animal instanceof Sheep) {
+            return "";
+        }
+        Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");
+        sound.setAccessible(true);
+        Holder<?> soundVariant = (Holder<?>) sound.invoke(animal);
+        return soundVariant.unwrapKey().orElseThrow().identifier().toString();
+    }
+
+    private static String stepJson(List<Animal> cows) throws Exception {
         StringBuilder out = new StringBuilder(512);
         out.append('[');
         for (int i = 0; i < cows.size(); i++) {
             if (i > 0) out.append(',');
-            Cow cow = cows.get(i);
+            Animal cow = cows.get(i);
             Vec3 pos = cow.position();
             Vec3 delta = cow.getDeltaMovement();
             out.append("{\"x\":").append(Double.doubleToRawLongBits(pos.x));
@@ -5343,11 +5741,8 @@ public final class MobOracle {
             out.append(",\"lh\":").append(cow.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     cow.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"").append(cow.getVariant().unwrapKey().orElseThrow().identifier()).append('"');
-            Method sound = Cow.class.getDeclaredMethod("getSoundVariant");
-            sound.setAccessible(true);
-            Holder<?> soundVariant = (Holder<?>) sound.invoke(cow);
-            out.append(",\"snd\":\"").append(soundVariant.unwrapKey().orElseThrow().identifier()).append('"');
+            out.append(",\"var\":\"").append(farmVariant(cow)).append('"');
+            out.append(",\"snd\":\"").append(farmSound(cow)).append('"');
             out.append(",\"uuid\":\"").append(cow.getUUID()).append('"');
             out.append(",\"lr\":").append(levelSeed(cow.level()));
             out.append(",\"goals\":\"");
@@ -6263,7 +6658,7 @@ public final class MobOracle {
                 random.nextFloat();
                 eggSeed = null;
             }
-            if (entity instanceof Cow calf && dropUuids) {
+            if (entity instanceof Animal calf && dropUuids) {
                 newbornCows.add(calf);
             }
             // 生成期区域查不到实体（`WorldGenRegion.getEntities` 恒空），不进 tracked。
@@ -6280,7 +6675,7 @@ public final class MobOracle {
             if (!dropUuids) {
                 return;
             }
-            if (entity instanceof Cow calf) {
+            if (entity instanceof Animal calf) {
                 long seed = entitySeeds.nextLong();
                 BORN_SEEDS.put(calf.getId(), seed);
                 setRandom(calf, seed);
@@ -6340,7 +6735,7 @@ public final class MobOracle {
         /** 死亡场景给掉落物和球用确定性 UUID。 */
         boolean dropUuids;
         /** 交互/繁殖场景新生成的幼崽，由 `play` 收进牛名单继续 tick。 */
-        List<Cow> newbornCows;
+        List<Animal> newbornCows;
 
         @Override
         public net.minecraft.world.DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
