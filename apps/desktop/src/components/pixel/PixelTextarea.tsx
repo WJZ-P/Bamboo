@@ -8,7 +8,7 @@ export const PixelTextarea = styled.textarea`
   min-height: 84px;
   padding: 8px 10px;
   ${({ theme }) => sunkenBorder(theme.color.sunkenShade, theme.color.panelLight)}
-  background: ${({ theme }) => theme.color.black};
+  background: ${({ theme }) => theme.color.field};
   color: ${({ theme }) => theme.color.panelLight};
   line-height: 1.6;
   outline: none;
@@ -19,8 +19,9 @@ export const PixelTextarea = styled.textarea`
     color: ${({ theme }) => theme.color.panelShade};
   }
 
+  /* 照原版文本框：聚焦时整圈边框是白色高亮。Like the vanilla text field: white border on focus. */
   &:focus {
-    border-color: ${({ theme }) => theme.color.bamboo.light};
+    border-color: ${({ theme }) => theme.color.panelLight};
   }
 
   &[aria-invalid="true"] {

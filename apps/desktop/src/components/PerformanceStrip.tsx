@@ -7,8 +7,11 @@ import { SunkenBox } from "./pixel";
 
 const Strip = styled.div`
   display: grid;
-  flex: none;
+  flex: 1;
+  min-height: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* 一行占满上栏高度，可以压到比内容矮。One row filling the pane, allowed to shrink. */
+  grid-template-rows: minmax(0, 1fr);
   gap: 10px;
 `;
 
@@ -17,6 +20,7 @@ const Card = styled(SunkenBox)`
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+  min-height: 0;
   padding: 10px 12px;
 `;
 
@@ -69,11 +73,23 @@ const LegendItem = styled.span`
 `;
 
 const ChartFrame = styled.div`
-  height: 64px;
+  /* 跟着上栏高度伸缩，最矮 40px。Grows with the top pane, at least 40px. */
+  position: relative;
+  flex: 1;
+  min-height: 40px;
   border: 2px solid ${({ theme }) => theme.chart.grid};
 `;
 
+/**
+ * 绝对定位铺满图框：SVG 有 viewBox 时会按宽高比给出很高的固有高度，留在文档流里会把卡片撑高，
+ * 上栏缩小时图表就压不下去。
+ *
+ * Absolutely positioned to fill the frame: with a viewBox the SVG reports a tall intrinsic
+ * height from its aspect ratio, which would otherwise keep the card from shrinking.
+ */
 const Svg = styled.svg`
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
