@@ -779,7 +779,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `nextInt(6)`、加权表 `nextInt(总权重)`、`count.sample`、离玩家/出生点 24 格、
   `ON_GROUND` 的方块/光照/碰撞条件、`noCollision`、`checkSpawnObstruction`、
   `finalizeSpawn` 与组生成。
-- **刷怪规则**：牛走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
+- **刷怪规则**：牛、猪、羊、鸡和马科走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
   僵尸走 `Monster.checkMonsterSpawnRules`（`isDarkEnoughToSpawn`：天空光 `> nextInt(32)`、
   方块光上限 0、`maxLocalRawBrightness <= nextInt(8)`，再查可生成方块），
   尸壳额外要求 `canSeeSky`。落脚块用生成器导出的状态位 `facts::VALID_SPAWN`（官方
@@ -793,13 +793,18 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   不限制为已加载区块；旁观者仅在 `spectators_generate_chunks` 开启时贡献区块。
 - **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
 - **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
-- **已知差异**：（2026-11-20 第二轮起，猪、羊、鸡、兔子、狐狸、狼、骷髅也会真的生成，见 11.5。）
-  下面是这一期写下时的状态：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
+- **已知差异**：（2026-11-20 第二轮起，猪、羊、鸡、兔子、狐狸、狼、马科、骷髅也会真的生成，见 11.5。）
+  现在能走实体生成路径的有牛、猪、羊、鸡、马、驴、骡、羊驼、兔子、狐狸、狼、僵尸、尸壳、骷髅
+  （猪、羊、鸡 2026-11-20 接入，`mob-oracle --only natural_spawn` 的 `pig_temperate` / `pig_day` /
+  `pig_cold` / `sheep_day` / `chicken_day` / `chicken_warm` / `chicken_cold` 和 `gen_spawn` 另比
+  花色 / 羊毛颜色和叫声，暖、冷、温带三种花色都覆盖到）；表里其它生物被挑中后照常抽组大小，
   然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
   收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
-  生成期刷怪、结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。
+  结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。生成期刷怪已接入牛、猪、羊、鸡、马科、
+  兔子、狐狸和狼；
+  装饰随机源决定放置，区域随机源用于 `finalizeSpawn`，用 `mob-oracle --only gen_spawn` 分别比对。
 - **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
   `MobCategory`，用 7 个固定种子各跑 8 次官方 `WeightedList.getRandom` + `IntProvider.sample`，
   再取一个 `nextInt(1000)` 当随机源指纹；另外把 0..15 交给官方 `Util.shuffle`。
@@ -855,7 +860,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - **生成期刷怪**（`natural_gen.rs`）：放置表加了兔子、狼（`ON_GROUND`）和狐狸（不查落脚点），规则换成各自的标签；`finalize_generated` 用区域随机源跑 `wild_spawn::finalize`。
 - **`MobType::by_entity_type`** 以前只列了牛和三种怪物，所以猪、羊、鸡、兔子、狐狸、狼即使接好了规则也不会被自然刷出来；现在列全了。
 - **捕食关系**：`Wolf.PREY_SELECTOR` 加上羊；狐狸的猎物 / `STALKABLE_PREY` / `FoxAlertableEntitiesSelector` 加上鸡（`fox_goals::is_small_prey`）。
-- **对拍**：`mob-oracle --only gen_spawn` 的场景带上群系（平原 4 个 + 针叶林 3 个 + 雪地针叶林 1 个，共 7000 例），所有建模了的生物比类型、坐标、朝向，区域随机源同步时再比幼年、左撇子和 `genSpawnDetail`（兔子品种、狐狸品种和嘴里的物品、狼的品种和叫声）：1043 只里 34 只兔子、109 只狐狸、126 只狼，0 不一致。`--only natural_spawn` 加了猪 / 羊 / 鸡（平原）、兔子 / 狐狸 / 狼（针叶林、雪地针叶林）、森林的狼和夜里的狐狸，192 例 768 刻 0 不一致（比类型、位置、朝向、幼年、左撇子、主手物品和每刻之后的世界随机源种子）。改坏确认：把狐狸幼崽的门槛从「组里已有两只」改成一只，`gen_taiga_flat` 报出幼年不一致。
+- **对拍**：`mob-oracle --only gen_spawn` 的场景带上群系（平原 4 个 + 针叶林 3 个 + 雪地针叶林 1 个，共 7000 例），所有建模了的生物比类型、坐标、朝向，区域随机源同步时再比幼年、左撇子和 `genSpawnDetail`（兔子品种、狐狸品种和嘴里的物品、狼的品种和叫声）：1088 只里 34 只兔子、109 只狐狸、126 只狼，0 不一致。对拍还要求在区域随机源同步时，每种农场动物都至少有一对生成品种匹配（并比较适用物种的叫声）；本轮牛、猪、羊、鸡分别匹配了 156、194、232、192 只。`--only natural_spawn` 加了猪 / 羊 / 鸡（平原）、兔子 / 狐狸 / 狼（针叶林、雪地针叶林）、森林的狼和夜里的狐狸，整组 252 例 1008 刻 0 不一致（比类型、位置、朝向、幼年、左撇子、主手物品和每刻之后的世界随机源种子）。改坏确认：把狐狸幼崽的门槛从「组里已有两只」改成一只，`gen_taiga_flat` 报出幼年不一致。
 - **对拍夹具的一处修正**：僵尸式场景里玩家的实体 ID 和第一只生物都是 `FIRST_ID`。Bamboo 用同一套号认目标，`fox_sleep_wild_wolf` 里狼恨的是狐狸、却把同号的玩家认成了仇恨对象（第 13 刻随机源差一次取数）。Java 一侧玩家改成 `FIRST_ID + 1024 + 下标`，全量 `mob-oracle` 439 例 72339 刻 0 不一致。真实游戏里非玩家实体从 `FIRST_ENTITY_ID`（`1 << 24`）起发号、玩家用它下面的号，不会撞号。
 
 ### 11.6 捕食关系的逐刻对拍（第三轮）
@@ -870,6 +875,9 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - 运行时与生成期均保留牛、猪、羊、鸡、兔、狐、狼与马科规则。`finalize_cow(kind, …)` 继续分派农场动物；野生动物和马科分别维护各自的组数据，生成期统一使用区域随机源。
 - 生成期对拍同时校验野生动物的品种 / 叼物 / 叫声和马科属性；逐刻夹具给兔 / 狐 / 狼保留 6–8 号，马 / 驴 / 骡 / 羊驼使用 9–12 号。场景名称不变。
 - 此次合并没有实现狼与羊驼之间的躲避 / 主动攻击，也未扩展马科骑乘。
+- 2026-11-21 再次合并 `main`（苦力怕 / 蜘蛛 / 洞穴蜘蛛 / 末影人、水生生物、世界生成缓存）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 306 例 1224 刻；三种 `loot-oracle` 各 200 题、`chunk-content` 488 项均通过。此次合并未改动农场动物的代码与上述现状。
+- 2026-11-21 再合并 `main`（op-misc：哞菇 / 熊猫 / 北极熊）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题，生成期 `--only gen_spawn_misc` 128 例 / `--only gen_spawn_panda` 128 例均 0 不一致。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项报「官方无法载入该实体」：该用例及官方加载器与 `main` 逐字相同，是随本次合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关（详见汇报疑点清单）。此次合并只解决公共文件的冲突，未改动农场动物代码。
+- 2026-11-21 合并 `main`（`2448b76c`：compute pool / IO 线程 / 岛 / staged pipeline 的计时测试确定性，仅动 `mc-bamboo-game` 的测试与 `chunk_io.rs`，与农场动物代码零重叠）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题 0 不一致。`cargo check --workspace --all-targets` 通过。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项仍报「官方无法载入该实体」，是第十五轮合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关。此次为无文本冲突合并，未改动农场动物代码。
 
 ## 猪的实施现状
 
@@ -888,7 +896,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
 
-扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。
+扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；移动段穿过水时用共用的流体判定熄火，灭火声的音高取蛋自己的随机源；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），生成后按手中蛋的种类累加会话内使用统计，再按模式消耗；发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、穿水熄火、孵一只、孵四只、打牛、玩家扔蛋、发射器，逐刻比位置、随机源、着火状态、出站包、小鸡和牛，玩家扔蛋另比 `ITEM_USED`），存档见 `chunk-content` 的两枚蛋。
 
 ## 哞菇的实施现状（op-misc，2026-11-20）
 

@@ -24,43 +24,6 @@ use mc_bamboo_protocol::{
 
 use crate::{inbound::PlayerId, player::Player, region::Region};
 
-#[derive(Debug, Default)]
-pub(crate) struct WeaponStats {
-    bow: WeaponStat,
-    crossbow: WeaponStat,
-}
-
-#[derive(Debug, Default)]
-struct WeaponStat {
-    value: i32,
-    dirty: bool,
-}
-
-impl WeaponStats {
-    fn award(&mut self, weapon: i32) {
-        let stat = if weapon == items::BOW {
-            &mut self.bow
-        } else {
-            &mut self.crossbow
-        };
-        stat.value = stat.value.saturating_add(1);
-        stat.dirty = true;
-    }
-
-    /// 和 `ServerStatsCounter.sendStats` 一样，只发送变过的累计计数。
-    ///
-    /// Like `ServerStatsCounter.sendStats`, sends only changed cumulative counts.
-    pub(crate) fn take_dirty(&mut self) -> Vec<(i32, i32)> {
-        [
-            (items::BOW, &mut self.bow),
-            (items::CROSSBOW, &mut self.crossbow),
-        ]
-        .into_iter()
-        .filter_map(|(id, stat)| std::mem::take(&mut stat.dirty).then_some((id, stat.value)))
-        .collect()
-    }
-}
-
 /// `BowItem.MAX_DRAW_DURATION` / `ProjectileWeaponItem` 的 `useDuration`：72000。
 ///
 /// `BowItem.getUseDuration` is 72000 for both weapons.
@@ -341,7 +304,7 @@ fn release_bow(region: &mut Region, id: PlayerId, hand: Hand, power: f32) {
         1.0,
         pitch,
     );
-    award_use(region, id, items::BOW);
+    crate::item_use_stats::award(region, id, items::BOW);
 }
 
 /// `CrossbowItem.performShooting`：组件里的弹药逐个射出。
@@ -424,13 +387,7 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
     if region.players[&id].inventory.slots[slot].matches(&cleared) {
         sync_slots(region, id, [slot]);
     }
-    award_use(region, id, items::CROSSBOW);
-}
-
-fn award_use(region: &mut Region, id: PlayerId, item: i32) {
-    if let Some(player) = region.players.get_mut(&id) {
-        player.weapon_stats.award(item);
-    }
+    crate::item_use_stats::award(region, id, items::CROSSBOW);
 }
 
 fn hurt_weapon(region: &mut Region, id: PlayerId, hand: Hand) {

@@ -39,6 +39,7 @@ mod egg;
 mod equine;
 mod fish;
 mod gen_spawn;
+mod grazing;
 mod llama_spit;
 mod natural_spawn;
 mod projectile;
@@ -100,6 +101,7 @@ enum Line {
     PandaGenes(PandaGenesCase),
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
+    EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Fish(Box<fish::FishCase>),
     End(End),
@@ -159,6 +161,11 @@ struct Case {
     /// 每刻新生成的掉落物和经验球。
     #[serde(default)]
     spawns: Option<Vec<Vec<Spawn>>>,
+    /// 吃草场景：每刻 `blocks` 里每一格此刻的状态号，顺序相同。
+    ///
+    /// Grazing scenes: the current state id of every `blocks` cell per tick, same order.
+    #[serde(default)]
+    block_steps: Option<Vec<Vec<u32>>>,
     /// 致死伤害的种类：0 玩家攻击，1 摔落，2 着火。
     #[serde(default)]
     death_kind: i32,
@@ -1116,6 +1123,7 @@ impl Report {
                 Line::Shot(case) => self.replay_shot(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
+                Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
@@ -1224,6 +1232,13 @@ impl Report {
             self.replay_player_hurt(case);
             return;
         }
+        // 吃草场景先确认官方那一侧真的发生了场景想测的事。
+        // Grazing scenes first confirm the official side did what the scene is for.
+        if let Some(steps) = &case.block_steps
+            && let Some(error) = grazing::coverage_error(&case.name, &case.blocks, steps)
+        {
+            self.mismatch(error);
+        }
         // 改坏确认：故意改一处生产参数，对拍必须报不一致。
         let break_test = self.break_test.as_deref();
         let mut level = MobLevel {
@@ -1310,6 +1325,11 @@ impl Report {
             level
                 .blocks
                 .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+        }
+        if case.name.ends_with("_no_grief") {
+            // 和 `MobOracle.play` 一样按场景名关掉 `mobGriefing`。
+            // Turn `mobGriefing` off by scene name, like `MobOracle.play`.
+            level.rules.mob_griefing = false;
         }
         if matches!(break_test, Some("zombie_egg")) {
             // 改坏确认：关掉 `mobGriefing`，海龟蛋既不会被踩坏也不会被啄碎。
@@ -1772,6 +1792,7 @@ impl Report {
                 }
             }
             self.compare(&case.name, index, &ours, expected);
+            self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
             if let Some(expected) = &case.mob_event_packets
                 && let Some(expected) = expected.get(index)
@@ -1837,6 +1858,24 @@ impl Report {
             }
             if self.mismatches.len() >= self.show {
                 return;
+            }
+        }
+    }
+
+    /// 吃草场景：这一刻场景里每一格的方块状态和官方逐格相同。
+    ///
+    /// Grazing scenes: every scene cell holds the official block state this tick.
+    fn compare_blocks(&mut self, case: &Case, level: &MobLevel, index: usize) {
+        let Some(expected) = case.block_steps.as_ref().and_then(|all| all.get(index)) else {
+            return;
+        };
+        for (&[x, y, z, _], &official) in case.blocks.iter().zip(expected) {
+            let ours = level.block_state(BlockPos::new(x, y, z)).0;
+            if ours != official {
+                self.mismatch(format!(
+                    "{} tick {index} block {x},{y},{z}: official {official} bamboo {ours}",
+                    case.name
+                ));
             }
         }
     }
@@ -3399,6 +3438,22 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
         }
         _ => mob.variant.name().to_owned(),
     }
+}
+
+/// 刷怪对拍的花色 / 羊毛颜色和叫声；鸡不带下蛋计时（官方取自没播种的实体随机源），
+/// 不是农场动物时为 `None`。和 `MobOracle.spawnVariants` 对应。
+///
+/// The spawn oracles' variant or wool colour and sound; chickens omit the egg timer
+/// (vanilla draws it from an unseeded entity random), and other mobs give `None`.
+/// Mirrors `MobOracle.spawnVariants`.
+fn spawn_variants(mob: &mc_bamboo_blocks::entity::mob::Mob) -> Option<[String; 2]> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    let variant = match mob.mob_type {
+        MobType::Chicken => mob.variant.name().to_owned(),
+        MobType::Cow | MobType::Pig | MobType::Sheep => farm_variant(mob),
+        _ => return None,
+    };
+    Some([variant, farm_sound(mob)])
 }
 
 /// 对拍里的叫声列。
