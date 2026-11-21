@@ -22,7 +22,7 @@
 | 高度图 | **做完**（逐位一致）；增量 WG 维护未搬，是纯性能差异 | 无（当前结果正确） | 0–2（可选优化） |
 | `gen-light` 光引擎对拍 | **做完**（0 不一致） | 无 | 0 |
 | 游戏流水线 `light` 阶段的**输入** | **做完**（`406f71dd`，FEATURES 后方块视图与 `light-pipeline`） | 光照读入树冠、结构光源和邻区增量 | 0 |
-| 生成期刷怪（`spawn`） | **没做** | 新区块生成时一只动物都没有 | 15–60（取决于实体范围） |
+| 生成期刷怪（`spawn`） | **部分**（2026-11-20）：算法和对拍做完，只有牛真正生成 | 新区块里有牛；其它动物等实体合进来 | 见 §2 现状 |
 | 下界 / 末地**生成本身** | **部分**：数学与三套 settings、下界多噪声预设、五群系末地源、无含水层地形已导出/对拍；真维度地形、地物、结构没接 | 进不了下界 / 末地，所以暂时不可见 | 20–40 |
 | 下界 / 末地**游戏侧多维度** | **没做** | 玩家无法进下界 / 末地、无法换维度、重生不回主世界 | 40–80（大项目，需用户拍板） |
 | 性能 | **已有数据**，本轮不优化 | 只影响区块到达延迟 | 0（记录） |
@@ -338,6 +338,25 @@ vs 游戏 LIGHT」的整块 oracle，重跑 `gen-light` 和 `structure-e2e`。
   和 `docs/zombie-skeleton-plan.md` 的生物系统是一整个项目。
 
 **建议**：此项需要用户拍板实体范围，不属于「马上能收尾」的小项。
+
+### 现状（2026-11-20，分支 `cx-spawn`）
+
+- 生成器导出每个群系的 `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层，
+  `mob_spawns.rs` 的 `creature_spawn_probability`）。
+- `crates/mc-bamboo-blocks/src/entity/mob/natural_gen.rs` 照官方移植
+  `spawnMobsForChunkGeneration`：装饰随机源驱动循环、选表、组大小、起点、漂移和朝向，
+  区域随机源给 `finalizeSpawn`。牛真正生成；鸡、猪、羊、马、驴、羊驼按
+  `Animal.checkAnimalSpawnRules` 模拟放置、只推进装饰随机源；其余放置规则没翻译的种类抽到时
+  停止这个区块。
+- `crates/mc-bamboo-game/src/worldgen_mobs.rs` 在 Director 完工组装（`Task::Assemble`）里、
+  装好光照之后跑：查询点 `(minX, 319, minZ)` 的全分辨率群系定刷怪表、quart 群系定概率，
+  `WorldGenRegion.random` 取 `worldgen_region_random` 在区块原点的源。生物进区块实体盒，
+  随区块交付和存盘。超平坦、`doMobSpawning` 为假、盘上已过 `SPAWN` 的区块不刷。
+  计算线程的 `spawn` 阶段仍是透传：那时还没有最终方块和光照。
+- 对拍：`mob-oracle --only gen_spawn`，官方 `NaturalSpawner.spawnMobsForChunkGeneration`
+  跑在 MobOracle 的假世界上（平原真实刷怪表、公式地形、四种光照、2000 个种子），比装饰随机源
+  指纹、牛的类型 / 坐标 / 朝向和区域随机源同步时的幼年与左撇子，0 不一致；`--break-self-test gen_spawn`
+  会报不一致。查询点群系的位置只有单元测试，没有拿官方真实世界对拍。
 
 ---
 

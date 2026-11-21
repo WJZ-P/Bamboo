@@ -356,6 +356,22 @@ impl ChunkStore {
         ))
     }
 
+    /// `getHeight(WORLD_SURFACE, pos)`：最高的非空气方块上面一格，读世界表面高度图。
+    /// 区块没加载时返回 `None`。
+    ///
+    /// `getHeight(WORLD_SURFACE, pos)`: one above the highest non-air block, read from
+    /// the `WORLD_SURFACE` heightmap. `None` when the chunk is not loaded.
+    pub fn world_surface_y(&self, pos: BlockPos) -> Option<i32> {
+        if !self.is_loaded(pos.chunk()) {
+            return None;
+        }
+        Some(self.chunk(pos.chunk()).heightmap_y(
+            HeightmapKind::WorldSurface,
+            local(pos.x),
+            local(pos.z),
+        ))
+    }
+
     /// 这一格所在 quart 位置的群系注册表 ID。高度超出世界时返回 `None`。
     pub fn biome_at(&self, pos: BlockPos) -> Option<u32> {
         if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {

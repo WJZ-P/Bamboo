@@ -72,6 +72,7 @@ mod lock;
 mod loot_stacks;
 mod menu;
 mod movement;
+mod natural_spawn;
 mod outgoing;
 mod pacing;
 mod partition_stats;
@@ -117,6 +118,7 @@ mod world_state;
 pub mod worldgen;
 pub mod worldgen_features;
 pub mod worldgen_light;
+mod worldgen_mobs;
 #[doc(hidden)]
 pub mod worldgen_profile;
 mod worldgen_spawn;

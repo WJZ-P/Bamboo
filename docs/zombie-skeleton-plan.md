@@ -389,6 +389,18 @@ keepInventory）。
   注意官方区块列表按哈希顺序打乱，Bamboo 按坐标顺序，这是已有差异，
   对拍要固定/注入顺序或只比集合与计数。
 
+**现状（2026-11-20，第二轮）**：已接入数据、刷怪计数和上限、候选条件、已有实体的组生成与岛 tick。
+`natural-spawn` 对拍覆盖加权选择、组大小、打乱、随机起点及区块距离，见
+`docs/mob-entity-design.md` 9.4。牛、僵尸、尸壳、骷髅都能实际生成；僵尸 / 尸壳的
+`finalizeSpawn` 已完整移植，生成点的实体阻挡改按 `blocksBuilding` 实体。新增逐刻对拍
+`mob-oracle --only natural_spawn`：官方 `NaturalSpawner.createState` + `spawnForChunk` 在固定的
+两个区块上逐刻跑，刷怪表注入成单个官方条目（权重、组大小不改），比每刻计数、生成的每只
+生物（类型、坐标、朝向、幼年、左撇子、主手）和世界随机源末态；126 例 504 刻 0 不一致。
+真实群系混有未建模物种时产率仍不同（见 README 已知差异）。
+
+生成期刷怪（`spawnMobsForChunkGeneration`，`docs/worldgen-remaining.md` 第 2 节）也已接入，
+对拍是 `mob-oracle --only gen_spawn`。
+
 ### 期 5（可后放，不属于本轮计划）：变体与增强
 
 溺尸转化 + 水中 AI、僵尸增援（HARD）、流浪者细雪转化 + 迟缓箭、
