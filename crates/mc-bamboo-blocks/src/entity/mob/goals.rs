@@ -1589,10 +1589,12 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::WitchHealRaiders { .. } => {}
         // `DrownedSwimUpGoal.stop` 关掉「正在找陆地」。
         Goal::DrownedSwimUp { .. } => mob.searching_for_land = false,
-        // `DrownedGoToBeachGoal.stop` 只调 `MoveToBlockGoal.stop`：停导航。
+        // `DrownedGoToBeachGoal.stop` 只调 `super.stop()`，而 `MoveToBlockGoal` 没有覆写
+        // `stop`，所以官方这一步什么都不做。
         //
-        // `DrownedGoToBeachGoal.stop` only calls `MoveToBlockGoal.stop`: stop the navigation.
-        Goal::DrownedGoToBeach { .. } => mob.navigation.stop(),
+        // `DrownedGoToBeachGoal.stop` only calls `super.stop()`, and `MoveToBlockGoal` does
+        // not override `stop`, so vanilla does nothing here.
+        Goal::DrownedGoToBeach { .. } => {}
         Goal::WitchRangedAttack {
             target,
             attack_time,
