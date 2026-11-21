@@ -3517,6 +3517,7 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PIG_VARIANT", facts.pig_variant),
         ("PIG_SOUND_VARIANT", facts.pig_sound_variant),
         ("SHEEP_WOOL", facts.sheep_wool),
+        ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
         ("CHICKEN_VARIANT", facts.chicken_variant),
         ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
     ] {

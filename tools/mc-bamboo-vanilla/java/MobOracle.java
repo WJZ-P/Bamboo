@@ -284,6 +284,12 @@ public final class MobOracle {
                 playEggThrow(official, out, name);
                 cases++;
             }
+            for (String name : List.of("squid_swim", "squid_hurt", "squid_beached", "squid_swim_baby",
+                    "glow_squid_swim", "glow_squid_hurt")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playSquid(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -3766,6 +3772,155 @@ public final class MobOracle {
                 + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
     }
 
+    /**
+     * 鱿鱼 / 发光鱿鱼：逐刻比位置、速度、随机源、氧气、身体和触手的状态、目标写下的移动向量，
+     * 以及出站包（配对、同步、实体事件 19、音效、墨汁粒子、掉落）。`_swim` 在水池里游，
+     * `_hurt` 第 10 刻被旁边的牛打一下（喷墨、逃跑、发光鱿鱼变暗），`_beached` 在石头上窒息到死。
+     *
+     * Squid and glow squid: compare position, velocity, random, air, body and tentacle
+     * state, the goal-written movement vector and the outgoing packets each tick.
+     * `_swim` swims in a pool, `_hurt` is hit by a cow on tick 10 (ink, fleeing, a dark
+     * glow squid) and `_beached` suffocates on stone until it dies.
+     */
+    private static void playSquid(Official official, Writer out, String name) throws Exception {
+        boolean glow = name.startsWith("glow_squid");
+        boolean beached = name.endsWith("_beached");
+        boolean hurt = name.endsWith("_hurt");
+        boolean baby = name.endsWith("_baby");
+        int ticks = beached ? 460 : 240;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                for (int y = 61; y <= 66 && !beached; y++) {
+                    world.blocks.put(BlockPos.asLong(x, y, z),
+                            wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        world.particlePackets = true;
+        Bytes events = new Bytes(official.registries);
+        world.packets = events::add;
+        double[] start = beached ? new double[] {0.5, 61.0, 0.5} : new double[] {0.5, 63.0, 0.5};
+        net.minecraft.world.entity.animal.squid.Squid squid = (glow ? EntityTypes.GLOW_SQUID : EntityTypes.SQUID)
+                .create(world, EntitySpawnReason.COMMAND);
+        // 按 Bamboo 的种子源重放构造时的取数：UUID、yRot、触手速度。
+        // Replay the constructor draws from Bamboo's seed source: UUID, yRot, tentacle speed.
+        setRandom(squid, world.entitySeeds.nextLong());
+        RandomSource random = squid.getRandom();
+        squid.setUUID(Mth.createInsecureUUID(random));
+        float yaw = random.nextFloat() * 6.2831855F;
+        squid.setYRot(yaw);
+        squid.setYHeadRot(yaw);
+        squidField("tentacleSpeed").setFloat(squid, 1.0F / (random.nextFloat() + 1.0F) * 0.2F);
+        squid.setPos(start[0], start[1], start[2]);
+        if (baby) squid.setAge(-24000);
+        world.tracked.add(squid);
+        Cow cow = null;
+        if (hurt) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource cowRandom = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(cowRandom));
+            float cowYaw = cowRandom.nextFloat() * 6.2831855F;
+            cow.setYRot(cowYaw);
+            cow.setYHeadRot(cowYaw);
+            cow.setPos(3.5, 61.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Sync sync = new Sync(world, squid, official.registries);
+        boolean gone = false;
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) {
+                sync.entity.sendPairingData(null, sync.bytes::add);
+                packets.addAll(sync.take());
+            } else {
+                world.gameTime++;
+                if (hurt && tick == 10) {
+                    squid.hurtServer(world, world.damageSources().mobAttack(cow), 1.0F);
+                }
+                for (Mob mob : cow == null ? List.<Mob>of(squid) : List.<Mob>of(squid, cow)) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+                packets.addAll(events.take());
+                if (squid.isRemoved()) {
+                    if (!gone) {
+                        Bytes removal = new Bytes(official.registries);
+                        removal.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(squid.getId()));
+                        packets.addAll(removal.take());
+                    }
+                    gone = true;
+                } else {
+                    sync.entity.sendChanges();
+                    packets.addAll(sync.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"gone\":").append(gone);
+            if (!gone) {
+                Vec3 movement = (Vec3) squidField("movementVector").get(squid);
+                frames.append(",\"motion\":").append(projectileMotion(squid))
+                        .append(",\"seed\":").append(randomSeed(squid))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(squid.getHealth()), squid.getAirSupply(), squid.hurtTime,
+                                squid.deathTime, squid.getNoActionTime(), squid.getAge(),
+                                squid instanceof net.minecraft.world.entity.animal.squid.GlowSquid glowing
+                                        ? glowing.getDarkTicksRemaining() : 0,
+                                squid.onGround() ? 1 : 0, squid.isInWater() ? 1 : 0}))
+                        .append(",\"body\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(squid.xBodyRot), Float.floatToRawIntBits(squid.zBodyRot),
+                                Float.floatToRawIntBits(squid.tentacleMovement),
+                                Float.floatToRawIntBits(squid.tentacleAngle),
+                                Float.floatToRawIntBits(squidField("tentacleSpeed").getFloat(squid)),
+                                Float.floatToRawIntBits(squidField("rotateSpeed").getFloat(squid)),
+                                Float.floatToRawIntBits(squid.yBodyRot), Float.floatToRawIntBits(squid.getYHeadRot())}))
+                        .append(",\"movement\":").append(Arrays.toString(new long[] {
+                                Double.doubleToRawLongBits(movement.x), Double.doubleToRawLongBits(movement.y),
+                                Double.doubleToRawLongBits(movement.z)}));
+            }
+            frames.append(",\"drops\":[");
+            boolean first = true;
+            for (Entity entity : world.spawned) {
+                if (entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    if (!first) frames.append(',');
+                    first = false;
+                    frames.append('[').append(BuiltInRegistries.ITEM.getId(item.getItem().getItem())).append(',')
+                            .append(item.getItem().getCount()).append(']');
+                }
+            }
+            world.spawned.clear();
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append('}');
+        }
+        if (beached != gone) {
+            throw new IllegalStateException("squid scene missed its branch: " + name + " gone=" + gone);
+        }
+        out.write("{\"type\":\"squid\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"glow\":" + glow
+                + ",\"hurt\":" + hurt + ",\"baby\":" + baby + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    private static Field squidField(String name) throws Exception {
+        Field field = net.minecraft.world.entity.animal.squid.Squid.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field;
+    }
+
     private static void pairArrow(FakeLevel world, Official official, Entity arrow,
             java.util.Map<Integer, Sync> sync, List<String> packets) {
         Sync tracking = new Sync(world, arrow, official.registries);
@@ -6545,8 +6700,15 @@ public final class MobOracle {
         @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(
                 T particle, double x, double y, double z, int count, double xd, double yd, double zd, double speed) {
+            if (particlePackets && packets != null) {
+                packets.accept(new net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket(
+                        particle, false, false, x, y, z, (float) xd, (float) yd, (float) zd, (float) speed, count));
+            }
             return 0;
         }
+
+        /** 鱿鱼场景：把 `sendParticles` 的粒子包也记进包序列。 */
+        boolean particlePackets;
 
         /** 实体事件、伤害事件和音效都记进同一刻的包序列。 */
         java.util.function.Consumer<Packet<? super ClientGamePacketListener>> packets;

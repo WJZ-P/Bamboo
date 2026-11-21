@@ -298,8 +298,21 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
     mob.attributes.value(attribute::STEP_HEIGHT) as f32
 }
 
-/// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
+/// `AgeableWaterCreature.baseTick`：先记下氧气，`super.baseTick()` 之后再 `handleAirSupply`；
+/// 别的生物只有 `super.baseTick()`。
+///
+/// `AgeableWaterCreature.baseTick` remembers the air first and handles it after
+/// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let pre_tick_air = mob.air_supply;
+    mob_base_tick(me, mob, ctx);
+    if mob.mob_type.is_ageable_water_creature() {
+        super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    }
+}
+
+/// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
+fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`。
     mob.was_in_powder_snow = mob.in_powder_snow;
     mob.in_powder_snow = false;
@@ -349,8 +362,15 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 .is(mc_bamboo_data::blocks::BUBBLE_COLUMN)
         {
             // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。
-            mob.air_supply -= 1;
-            if mob.air_supply <= -20 {
+            // 能在水下呼吸的（`canDrownInWater` 为假）走补气那一支。
+            // Mobs that breathe under water take the refill branch instead.
+            let drowns = !mob.mob_type.can_breathe_under_water();
+            if drowns {
+                mob.air_supply -= 1;
+            } else if mob.air_supply < 300 {
+                mob.air_supply = (mob.air_supply + 4).min(300);
+            }
+            if drowns && mob.air_supply <= -20 {
                 mob.air_supply = 0;
                 hurt_server(
                     me,
@@ -680,7 +700,14 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if !mob.no_ai {
         timing::span!(Travel);
-        travel(me, mob, ctx, input);
+        if super::squid::is_squid(mob.mob_type) {
+            // `Squid.travel`：只有 `move(SELF, deltaMovement)`。
+            // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
+            let movement = me.delta;
+            motion::move_living(me, mob, ctx, movement);
+        } else {
+            travel(me, mob, ctx, input);
+        }
     }
     {
         timing::span!(BlockEffects);
@@ -765,6 +792,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if mob.mob_type == super::MobType::Chicken {
         super::chicken::ai_step(me, mob, ctx);
+    }
+    if super::squid::is_squid(mob.mob_type) {
+        super::squid::ai_step(me, mob);
     }
 }
 
@@ -1320,8 +1350,25 @@ pub(crate) fn has_line_of_sight(
 
 // ---- 受伤和死亡 ----
 
-/// `LivingEntity.hurtServer`。
+/// `hurtServer` 的虚分派：鱿鱼一支有自己的覆盖，其余直接走 `LivingEntity.hurtServer`。
+///
+/// The virtual dispatch of `hurtServer`: squid override it, everything else goes straight
+/// to `LivingEntity.hurtServer`.
 pub(crate) fn hurt_server(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    amount: f32,
+) -> bool {
+    if super::squid::is_squid(mob.mob_type) {
+        return super::squid::hurt_server(me, mob, ctx, source, amount);
+    }
+    living_hurt_server(me, mob, ctx, source, amount)
+}
+
+/// `LivingEntity.hurtServer`。
+pub(super) fn living_hurt_server(
     me: &mut Entity,
     mob: &mut Mob,
     ctx: &mut dyn EntityCtx,

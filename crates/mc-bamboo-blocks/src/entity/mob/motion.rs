@@ -270,7 +270,11 @@ fn movement_emission(
     mob.fly_dist += length;
     if mob.move_dist > mob.next_step && !on_state.is_air() {
         let same = on_pos == legacy_pos;
-        let mut stepped = step_effects(me, mob, legacy_state, true, collided);
+        // `MovementEmission.EVENTS`（鱿鱼）只发游戏事件：没有脚步声，也不取游泳声的随机数。
+        // `MovementEmission.EVENTS` (squid) only emits game events: no step sound and no
+        // swim-sound draws.
+        let sounds = mob.mob_type.emits_movement_sounds();
+        let mut stepped = step_effects(me, mob, legacy_state, sounds, collided);
         if !same {
             stepped |= step_effects(me, mob, on_state, false, collided);
         }
@@ -279,8 +283,10 @@ fn movement_emission(
         } else if me.in_water {
             mob.next_step = (mob.move_dist as i32 + 1) as f32;
             // `waterSwimSound` → `playSwimSound`：两个 `nextFloat`。
-            me.random.next_float();
-            me.random.next_float();
+            if sounds {
+                me.random.next_float();
+                me.random.next_float();
+            }
         }
     }
 }
@@ -878,6 +884,11 @@ pub(crate) fn update_fluid_interaction(me: &mut Entity, mob: &mut Mob, view: &dy
         }
     }
     me.in_water = in_water;
+    // `isPushedByFluid()` 为假的（水生生物）不吃水流。
+    // Mobs whose `isPushedByFluid()` is false (water creatures) ignore currents.
+    if !mob.mob_type.is_pushed_by_fluid() {
+        return;
+    }
     if in_water && water.count > 0 {
         apply_current(me, &water.current, 0.014);
     }

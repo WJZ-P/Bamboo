@@ -162,6 +162,7 @@ impl Report {
                 -62,
                 8,
             )),
+            sea_level: -63,
         };
         for official in &case.steps {
             ticks.set_time(official.time);

@@ -314,10 +314,21 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
+    }
+    // 鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
+    // Squid are `AgeableMob`s but not `Animal`s and have no love keys.
+    if mob.mob_type.is_animal() {
         put(&mut out, "InLove", Tag::Int(mob.in_love));
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
+    }
+    if mob.mob_type == MobType::GlowSquid {
+        put(
+            &mut out,
+            "DarkTicksRemaining",
+            Tag::Int(mob.squid.dark_ticks),
+        );
     }
     // ---- Sheep / Chicken ----
     if mob.mob_type == MobType::Sheep {
@@ -488,8 +499,13 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             living::set_age(me, mob, tag::int_or(tag, "Age", 0));
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
+        }
+        if mob.mob_type.is_animal() {
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
+        }
+        if mob.mob_type == MobType::GlowSquid {
+            mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);
         }
         // ---- Sheep / Chicken ----
         if mob.mob_type == MobType::Sheep {

@@ -52,6 +52,7 @@ pub(crate) fn tick(region: &mut Region) {
         spawn_enemies,
         per_player_cap: region.spawn_per_player_cap,
         respawn_pos: Some(region.global.spawn.pos),
+        sea_level: sea_level(region),
     };
     let mut state = {
         let (mut level, ticks) = region.block_level();
@@ -85,6 +86,21 @@ pub(crate) fn tick(region: &mut Region) {
         let effects = world.into_effects();
         crate::interaction::send_effects(region, None, &effects);
     }
+}
+
+/// `ChunkGenerator.getSeaLevel()`：超平坦是 `FlatLevelSource` 的 -63，噪声世界读设置。
+/// 设置要解析整份世界生成数据，所以只算一次；三个噪声预设的值相同（63）。
+///
+/// `ChunkGenerator.getSeaLevel()`: -63 for `FlatLevelSource`, the settings value for noise
+/// worlds. Reading the settings parses the worldgen data, so it is computed once; the
+/// three noise presets share the value (63).
+fn sea_level(region: &Region) -> i32 {
+    static NOISE: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    let level_type = region.global.world_gen.level_type;
+    if level_type.is_flat() {
+        return mc_bamboo_world::flat::SEA_LEVEL;
+    }
+    *NOISE.get_or_init(|| crate::spawn_landing::noise_sea_level(level_type))
 }
 
 /// `ChunkMap.collectSpawningChunks`：从候选区块中收集已达方块 tick 等级、且区块中心距

@@ -32,7 +32,9 @@ pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
+pub mod squid;
 pub(crate) mod timing;
+mod water;
 mod zombie_spawn;
 
 use mc_bamboo_core::{BlockPos, Vec3};
@@ -61,6 +63,8 @@ pub enum MobType {
     Zombie,
     Husk,
     Skeleton,
+    Squid,
+    GlowSquid,
 }
 
 impl MobType {
@@ -75,6 +79,8 @@ impl MobType {
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
+            Self::Squid => ids::SQUID,
+            Self::GlowSquid => ids::GLOW_SQUID,
         }
     }
 
@@ -88,6 +94,8 @@ impl MobType {
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
+            Self::Squid => "minecraft:squid",
+            Self::GlowSquid => "minecraft:glow_squid",
         }
     }
 
@@ -100,6 +108,8 @@ impl MobType {
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
+            Self::Squid,
+            Self::GlowSquid,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -119,6 +129,7 @@ impl MobType {
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
+            (Self::Squid | Self::GlowSquid, baby) => squid::dimensions(self, baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -140,13 +151,65 @@ impl MobType {
 
     /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
     /// 僵尸是 `MONSTER`（128 / 32）。
-    pub const fn despawn_distance(self) -> i32 {
-        if self.is_monster() { 128 } else { 32 }
+    pub fn despawn_distance(self) -> i32 {
+        self.mob_category().facts().despawn_distance
     }
 
     /// `Mob.removeWhenFarAway`：牛为假，`Monster` 为真。
     pub const fn removes_when_far_away(self) -> bool {
-        self.is_monster()
+        // 鱿鱼不是 `Animal`，沿用 `Mob.removeWhenFarAway` 的缺省值真。
+        // Squid are not `Animal`s and keep the `Mob.removeWhenFarAway` default of true.
+        self.is_monster() || squid::is_squid(self)
+    }
+
+    /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 里已建模的水生生物。
+    /// 标签里还有 `#undead`，僵尸和骷髅的溺水行为沿用旧实现，这里不改。
+    ///
+    /// `LivingEntity.canBreatheUnderwater()` for the modelled aquatic members of
+    /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
+    /// drowning keeps its earlier behaviour and is not changed here.
+    pub const fn can_breathe_under_water(self) -> bool {
+        squid::is_squid(self)
+    }
+
+    /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼；以后加海豚）：离水掉氧气、
+    /// 不吃水流、生成时不查液体。
+    ///
+    /// Whether this is on vanilla's `AgeableWaterCreature` branch (squid and glow squid;
+    /// dolphins later): air drains out of water, currents do not push it and spawning
+    /// skips the liquid check.
+    pub const fn is_ageable_water_creature(self) -> bool {
+        squid::is_squid(self)
+    }
+
+    /// `Entity.isPushedByFluid()`：`AgeableWaterCreature` 覆盖成假。
+    ///
+    /// `Entity.isPushedByFluid()`, overridden to false by `AgeableWaterCreature`.
+    pub const fn is_pushed_by_fluid(self) -> bool {
+        !self.is_ageable_water_creature()
+    }
+
+    /// 是不是官方 `Animal`（有求爱和喂食）：非怪物里除掉 `AgeableWaterCreature` 一支。
+    ///
+    /// Whether this is a vanilla `Animal` (love and feeding): every non-monster except the
+    /// `AgeableWaterCreature` branch.
+    pub const fn is_animal(self) -> bool {
+        !self.is_monster() && !self.is_ageable_water_creature()
+    }
+
+    /// `Entity.getMovementEmission().emitsSounds()`：鱿鱼覆盖成 `EVENTS`，移动不出声。
+    ///
+    /// `Entity.getMovementEmission().emitsSounds()`: squid override it to `EVENTS` and
+    /// move silently.
+    pub const fn emits_movement_sounds(self) -> bool {
+        !squid::is_squid(self)
+    }
+
+    /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
+    ///
+    /// Types registered as `IN_WATER` in `SpawnPlacements`.
+    pub const fn spawns_in_water(self) -> bool {
+        squid::is_squid(self)
     }
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
@@ -164,6 +227,8 @@ impl MobType {
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
+            Self::Squid => "minecraft:entities/squid",
+            Self::GlowSquid => "minecraft:entities/glow_squid",
         }
     }
 
@@ -180,7 +245,11 @@ impl MobType {
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
-        if matches!(self, Self::Cow) { 0.4 } else { 1.0 }
+        if matches!(self, Self::Cow | Self::Squid | Self::GlowSquid) {
+            0.4
+        } else {
+            1.0
+        }
     }
 
     /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
@@ -191,6 +260,7 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
+            Self::Squid | Self::GlowSquid => Some(squid::ambient_sound(self)),
         }
     }
 
@@ -201,6 +271,7 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
+            Self::Squid | Self::GlowSquid => Some(squid::hurt_sound(self)),
         }
     }
 
@@ -211,6 +282,7 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
+            Self::Squid | Self::GlowSquid => Some(squid::death_sound(self)),
         }
     }
 
@@ -221,6 +293,9 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
+            // `MovementEmission.EVENTS`：没有脚步声。
+            // `MovementEmission.EVENTS`: no step sound.
+            Self::Squid | Self::GlowSquid => None,
         }
     }
 
@@ -235,6 +310,8 @@ impl MobType {
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
+            Self::Squid => items::SQUID_SPAWN_EGG,
+            Self::GlowSquid => items::GLOW_SQUID_SPAWN_EGG,
         }
     }
 
@@ -248,6 +325,8 @@ impl MobType {
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
+            Self::Squid => "entity.minecraft.squid",
+            Self::GlowSquid => "entity.minecraft.glow_squid",
         }
     }
 
@@ -261,9 +340,16 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
-            .into_iter()
-            .find(|kind| kind.entity_type() == entity_type)
+        [
+            Self::Cow,
+            Self::Zombie,
+            Self::Husk,
+            Self::Skeleton,
+            Self::Squid,
+            Self::GlowSquid,
+        ]
+        .into_iter()
+        .find(|kind| kind.entity_type() == entity_type)
     }
 
     /// `EntityType.getCategory()`。
@@ -271,10 +357,11 @@ impl MobType {
     /// The vanilla `EntityType.getCategory()` of this kind.
     pub const fn mob_category(self) -> mc_bamboo_data::spawning::MobCategory {
         use mc_bamboo_data::spawning::MobCategory;
-        if self.is_monster() {
-            MobCategory::Monster
-        } else {
-            MobCategory::Creature
+        match self {
+            Self::Squid => MobCategory::WaterCreature,
+            Self::GlowSquid => MobCategory::UndergroundWaterCreature,
+            _ if self.is_monster() => MobCategory::Monster,
+            _ => MobCategory::Creature,
         }
     }
 
@@ -1047,6 +1134,10 @@ pub struct Mob {
     /// The chicken sound variant and `eggTime` countdown.
     pub chicken_sound_variant: chicken::SoundVariant,
     pub egg_time: i32,
+    /// 鱿鱼 / 发光鱿鱼的专属状态，别的生物恒为缺省值。
+    ///
+    /// Squid and glow squid state; default for every other mob.
+    pub squid: squid::SquidState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1082,6 +1173,17 @@ pub enum MobEvent {
     Hearts,
     /// `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，不是中立生物。
     MilkSound { position: Vec3 },
+    /// `ServerLevel.sendParticles`：一个粒子包，发给 32 格内的玩家（按玩家所在方块的中心算）。
+    ///
+    /// `ServerLevel.sendParticles`: one particle packet for players within 32 blocks,
+    /// measured from the centre of the player's block.
+    Particles {
+        particle: i32,
+        position: Vec3,
+        offset: Vec3,
+        speed: f32,
+        count: i32,
+    },
     /// 玩家音源（`SoundSource.PLAYERS`）的音效，比如给羊染色。
     ///
     /// A sound in the player category, such as dyeing a sheep.
@@ -1114,6 +1216,7 @@ impl Mob {
             MobType::Pig => pig::attributes(),
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
+            MobType::Squid | MobType::GlowSquid => squid::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
@@ -1124,13 +1227,17 @@ impl Mob {
             MobType::Pig => pig::goals(&mut navigation),
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
+            MobType::Squid | MobType::GlowSquid => squid::goals(),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
-            MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
-                GoalSelector::default()
-            }
+            MobType::Cow
+            | MobType::Pig
+            | MobType::Sheep
+            | MobType::Chicken
+            | MobType::Squid
+            | MobType::GlowSquid => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
@@ -1208,6 +1315,9 @@ impl Mob {
             malus: match mob_type {
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
+                // `AgeableWaterCreature` 构造函数：`setPathfindingMalus(WATER, 0)`。
+                // The `AgeableWaterCreature` constructor zeroes the water malus.
+                MobType::Squid | MobType::GlowSquid => squid::malus(),
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -1247,6 +1357,7 @@ impl Mob {
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
+            squid: squid::SquidState::default(),
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1339,6 +1450,8 @@ pub struct MobPublic {
     pub pig_sound_variant: pig::SoundVariant,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
+    /// `GlowSquid.DATA_DARK_TICKS_REMAINING`。
+    pub dark_ticks: i32,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1390,6 +1503,7 @@ impl MobPublic {
             pig_sound_variant: mob.pig_sound_variant,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
+            dark_ticks: mob.squid.dark_ticks,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

@@ -477,6 +477,11 @@ impl Entity {
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
             mob.egg_time = self.random.next_int_bounded(6000) + 6000;
         }
+        if mob::squid::is_squid(mob.mob_type) {
+            // `Squid` 构造函数最后的 `tentacleSpeed`，取一次 `nextFloat`。
+            // The `Squid` constructor's trailing `tentacleSpeed`, one `nextFloat`.
+            mob.squid.tentacle_speed = mob::squid::roll_tentacle_speed(&mut self.random);
+        }
     }
 
     /// 对生物跑一段逻辑；不是生物时返回 `None`。

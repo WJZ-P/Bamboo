@@ -37,6 +37,7 @@ mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
+mod squid;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -83,6 +84,7 @@ enum Line {
     GenSpawn(gen_spawn::Case),
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
+    Squid(Box<squid::SquidCase>),
     End(End),
 }
 
@@ -990,6 +992,7 @@ impl Report {
                 Line::Shot(case) => self.replay_shot(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
+                Line::Squid(case) => self.replay_squid(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

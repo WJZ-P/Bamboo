@@ -1181,6 +1181,9 @@ fn farm_default_data(
     use mc_bamboo_data::entity_types as facts;
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
+            Some(EntityData::GlowSquidDarkTicks(0))
+        }
         (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
             registry_index(chicken_variants(), "minecraft:temperate"),
         )),
@@ -1214,6 +1217,14 @@ fn farm_non_default_data(
             let sound = mob.chicken_sound_variant.registry_id();
             if sound != registry_index(chicken_sound_variants(), "minecraft:classic") {
                 out.push(EntityData::ChickenSoundVariant(sound));
+            }
+            true
+        }
+        // 鱿鱼没有花色；发光鱿鱼多一项变暗计时。
+        // Squid have no variant; glow squid add the dark countdown.
+        MobType::Squid | MobType::GlowSquid => {
+            if mob.dark_ticks != 0 {
+                out.push(EntityData::GlowSquidDarkTicks(mob.dark_ticks));
             }
             true
         }
@@ -1284,6 +1295,14 @@ enum EventPacket {
     ///
     /// Sent to the players within the sound's range (vanilla `PlayerList.broadcast`).
     Sound(mc_bamboo_protocol::packet::play::Sound),
+    /// `ServerLevel.sendParticles`：发给所在方块中心离粒子不到 32 格的玩家。
+    ///
+    /// `ServerLevel.sendParticles`: sent to the players whose block centre is within 32
+    /// blocks of the particle.
+    Particles {
+        body: Vec<u8>,
+        position: mc_bamboo_core::Vec3,
+    },
     /// 没有包（`set_equipment` 至少要一个槽）。
     Nothing,
 }
@@ -1293,6 +1312,7 @@ impl EventPacket {
         match self {
             Self::Tracking(body) => Some(body.clone()),
             Self::Sound(sound) => Some(packet_body(sound)),
+            Self::Particles { body, .. } => Some(body.clone()),
             Self::Nothing => None,
         }
     }
@@ -1337,6 +1357,35 @@ fn event_packet(
             player_sound("minecraft:entity.cow.milk", *position, sound_seed())
         }
         MobEvent::PlayerSound { sound, position } => player_sound(sound, *position, sound_seed()),
+        MobEvent::Particles {
+            particle,
+            position,
+            offset,
+            speed,
+            count,
+        } => {
+            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID。
+            // A simple particle's `ParticleTypes.STREAM_CODEC` is the type id alone.
+            let mut options = Vec::new();
+            mc_bamboo_protocol::codec::write_varint(&mut options, *particle);
+            EventPacket::Particles {
+                body: packet_body(&mc_bamboo_protocol::packet::play::LevelParticles {
+                    options: &options,
+                    override_limiter: false,
+                    always_show: false,
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    x_dist: offset.x as f32,
+                    y_dist: offset.y as f32,
+                    z_dist: offset.z as f32,
+                    max_speed: *speed,
+                    count: *count,
+                    randomization: mc_bamboo_protocol::packet::play::Randomization::Default,
+                }),
+                position: *position,
+            }
+        }
         MobEvent::Damage {
             kind,
             attacker,
@@ -1408,9 +1457,36 @@ fn send_mob_events(
                     }
                 }
                 EventPacket::Sound(sound) => crate::interaction::send_sound(region, None, &sound),
+                EventPacket::Particles { body, position } => {
+                    send_particles(region, &body, position)
+                }
                 EventPacket::Nothing => {}
             }
         }
+    }
+}
+
+/// `ServerLevel.sendParticles(player, false, x, y, z, packet)`：玩家所在方块的中心离粒子
+/// 不到 32 格才发（`BlockPos.closerToCenterThan`）。
+///
+/// `ServerLevel.sendParticles(player, false, x, y, z, packet)`: only players whose block
+/// centre is within 32 blocks get the packet (`BlockPos.closerToCenterThan`).
+fn send_particles(region: &mut Region, body: &[u8], position: mc_bamboo_core::Vec3) {
+    let frames = frame_from_body(body);
+    let near: Vec<_> = region
+        .players
+        .iter()
+        .filter(|(_, player)| {
+            let block = mc_bamboo_core::BlockPos::containing(player.position());
+            let dx = f64::from(block.x) + 0.5 - position.x;
+            let dy = f64::from(block.y) + 0.5 - position.y;
+            let dz = f64::from(block.z) + 0.5 - position.z;
+            dx * dx + dy * dy + dz * dz < 32.0 * 32.0
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for player in near {
+        region.links.send_frames(player, &frames);
     }
 }
 

@@ -265,6 +265,10 @@ pub struct SpawnParams {
     pub per_player_cap: bool,
     /// `getRespawnData()` 的位置，离它 24 格以内不刷。
     pub respawn_pos: Option<BlockPos>,
+    /// `LevelAccessor.getSeaLevel()`：水生生物的生成规则读它。
+    ///
+    /// `LevelAccessor.getSeaLevel()`, read by the aquatic spawn rules.
+    pub sea_level: i32,
 }
 
 /// `ServerChunkCache.tickSpawningChunk` → `NaturalSpawner.spawnForChunk`：对一个刷怪区块
@@ -375,8 +379,8 @@ fn spawn_category_for_position(
             let Some(kind) = MobType::by_entity_type(entry.entity_type) else {
                 break;
             };
-            if !is_valid_spawn_position_for_type(world, category, entry, kind, pos, nearest, state)
-            {
+            let facts = (nearest, params.sea_level);
+            if !is_valid_spawn_position_for_type(world, category, entry, kind, pos, facts, state) {
                 continue;
             }
             let Some(mut entity) = create_mob(world, kind) else {
@@ -436,7 +440,7 @@ fn is_valid_spawn_position_for_type(
     entry: &MobSpawnerDef,
     kind: MobType,
     pos: BlockPos,
-    nearest_player_distance_sqr: f64,
+    (nearest_player_distance_sqr, sea_level): (f64, i32),
     state: &mut SpawnState,
 ) -> bool {
     if kind.mob_category() == MobCategory::Misc {
@@ -452,7 +456,7 @@ fn is_valid_spawn_position_for_type(
     if !spawn_placement_ok(world, kind, pos) {
         return false;
     }
-    if !check_spawn_rules(world, kind, pos) {
+    if !check_spawn_rules(world, kind, pos, sea_level) {
         return false;
     }
     no_collision(world, spawn_aabb(kind, pos)) && state.can_spawn(world, kind, pos)
@@ -543,6 +547,11 @@ pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    // 水生生物登记的是 `SpawnPlacementTypes.IN_WATER`。
+    // Aquatic mobs are registered with `SpawnPlacementTypes.IN_WATER`.
+    if kind.spawns_in_water() {
+        return super::water::in_water_position_ok(world, pos);
+    }
     on_ground_position_ok(world, kind.fire_immune(), pos)
 }
 
@@ -614,11 +623,19 @@ fn is_burning_block(state: BlockState) -> bool {
 
 /// `SpawnPlacements.checkSpawnRules`：`NATURAL` 走两条分支，动物看亮度和地面，
 /// 怪物看黑暗和可生成方块（尸壳还要看得见天）。
-pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> bool {
+pub(super) fn check_spawn_rules(
+    world: &World,
+    kind: MobType,
+    pos: BlockPos,
+    sea_level: i32,
+) -> bool {
     if !kind.allowed_in_peaceful() && world.level().difficulty_id() == 0 {
         return false;
     }
     match kind {
+        MobType::Squid | MobType::GlowSquid => {
+            super::squid::check_spawn_rules(world, kind, pos, sea_level)
+        }
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
             animal_spawn_rules(world, pos)
         }
@@ -685,8 +702,10 @@ fn is_valid_position_for_mob(
     }
     // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住。
     // `Mob.checkSpawnObstruction`: no liquid in the box and nothing in the way.
+    // `AgeableWaterCreature.checkSpawnObstruction` 只剩 `isUnobstructed`，不查液体。
+    // `AgeableWaterCreature.checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
     pathfinder_spawn_rules(world, entity, entity.block_position())
-        && !contains_any_liquid(world, entity.bounding_box())
+        && (kind.is_ageable_water_creature() || !contains_any_liquid(world, entity.bounding_box()))
         && is_unobstructed_by_entities(world, entity.bounding_box())
 }
 
@@ -893,6 +912,7 @@ mod tests {
             spawn_enemies: true,
             per_player_cap,
             respawn_pos: None,
+            sea_level: 63,
         }
     }
 

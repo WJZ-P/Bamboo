@@ -115,6 +115,16 @@ pub enum Goal {
     EatBlock {
         eat_tick: i32,
     },
+    /// `Squid.SquidRandomMovementGoal`：只改鱿鱼的移动向量，不占标志位。
+    ///
+    /// `Squid.SquidRandomMovementGoal`: writes the squid movement vector, no flags.
+    SquidRandomMovement,
+    /// `Squid.SquidFleeGoal`：在水里远离最近打它的生物（每刻目标）。
+    ///
+    /// `Squid.SquidFleeGoal`: swim away from the last attacker (ticks every tick).
+    SquidFlee {
+        flee_ticks: i32,
+    },
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -152,6 +162,7 @@ impl Goal {
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
+            Self::SquidRandomMovement | Self::SquidFlee { .. } => &[],
         }
     }
 
@@ -167,6 +178,7 @@ impl Goal {
                 | Self::MeleeAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
+                | Self::SquidFlee { .. }
         )
     }
 
@@ -192,6 +204,8 @@ impl Goal {
             Self::BreakDoor => "BreakDoorGoal",
             Self::TurtleEgg { .. } => "ZombieAttackTurtleEggGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
+            Self::SquidRandomMovement => "SquidRandomMovementGoal",
+            Self::SquidFlee { .. } => "SquidFleeGoal",
         }
     }
 }
@@ -911,6 +925,8 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 })
         }
         Goal::EatBlock { .. } => eat_block_can_use(me, mob, ctx),
+        Goal::SquidRandomMovement => true,
+        Goal::SquidFlee { .. } => super::squid::flee_can_use(me, mob, ctx),
         Goal::BreakDoor => {
             mob.can_break_doors
                 && ctx.blocks().block_game_rules().mob_griefing
@@ -958,7 +974,9 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 }
                 _ => false,
             }),
-        Goal::Tempt { .. } => can_use(goal, me, mob, ctx),
+        Goal::Tempt { .. } | Goal::SquidRandomMovement | Goal::SquidFlee { .. } => {
+            can_use(goal, me, mob, ctx)
+        }
         Goal::FollowParent { parent, .. } => {
             if mob.age >= 0 {
                 return false;
@@ -1071,7 +1089,12 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *rel_z = angle.sin();
             *look_time = 20 + me.random.next_int_bounded(20);
         }
-        Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::Float
+        | Goal::Breed { .. }
+        | Goal::Tempt { .. }
+        | Goal::Unavailable(_)
+        | Goal::SquidRandomMovement => {}
+        Goal::SquidFlee { flee_ticks } => *flee_ticks = 0,
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1187,7 +1210,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.aggressive = false;
             mob.navigation.stop();
         }
-        Goal::FleeSun { .. } => {}
+        Goal::FleeSun { .. } | Goal::SquidRandomMovement | Goal::SquidFlee { .. } => {}
         Goal::BreakDoor => {
             mob.door_break_time = 0;
             mob.door_break_progress = -1;
@@ -1203,6 +1226,8 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
         Goal::EatBlock { eat_tick } => eat_block_tick(eat_tick, me, mob, ctx),
+        Goal::SquidRandomMovement => super::squid::random_movement_tick(me, mob),
+        Goal::SquidFlee { flee_ticks } => super::squid::flee_tick(flee_ticks, me, mob, ctx),
         Goal::Bow(bow) => {
             if let Some(target) = combat_target(mob, ctx) {
                 bow.tick(me, mob, ctx, target);
@@ -1742,6 +1767,11 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
 pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
+    }
+    // 不是 `Animal` 的生物用 `PathfinderMob.getWalkTargetValue` 的缺省值 0。
+    // Mobs that are not `Animal`s keep the `PathfinderMob.getWalkTargetValue` default of 0.
+    if mob.mob_type.is_ageable_water_creature() {
+        return 0.0;
     }
     animal_walk_target_value(view, pos)
 }

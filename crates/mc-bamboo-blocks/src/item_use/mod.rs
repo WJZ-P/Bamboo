@@ -66,6 +66,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::CHICKEN_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Chicken)
         }
+        _ if ctx.item == items::SQUID_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Squid)
+        }
+        _ if ctx.item == items::GLOW_SQUID_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::GlowSquid)
+        }
         _ if ctx.item == items::ZOMBIE_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Zombie)
         }
