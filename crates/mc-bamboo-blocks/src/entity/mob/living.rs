@@ -103,6 +103,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Wolf && !me.removed {
         super::wolf::tick_after(me, mob, ctx);
     }
+    // `Armadillo.tick` 在 `super.tick()` 之后夹头、数 `inStateTicks`。
+    // `Armadillo.tick` clamps the head and counts `inStateTicks` after `super.tick()`.
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::tick_after(mob);
+    }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
     // `AbstractHorse.tick` advances its timers after `super.tick()`.
     if mob.mob_type.is_equine() {
@@ -254,7 +259,7 @@ pub(crate) fn is_in_lava(me: &Entity, mob: &Mob) -> bool {
     !me.first_tick && fluid_height(mob, fluid_tags::LAVA) > 0.0
 }
 
-fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
+pub(crate) fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
     me.in_water || is_in_lava(me, mob)
 }
 
@@ -447,6 +452,11 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
                 return;
             }
+            // 受惊的犰狳没有叫声：`makeSound` 不跑，也不取音高。
+            // A scared armadillo has no ambient sound, so no pitch draws either.
+            if super::armadillo::is_scared(mob) {
+                return;
+            }
             let pitch = voice_pitch(me, mob);
             let sound = voice_of(mob, Voice::Ambient);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
@@ -463,6 +473,9 @@ fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
         return super::equine::voice(mob, voice);
     }
     match voice {
+        Voice::Hurt if super::armadillo::is_scared(mob) => {
+            "minecraft:entity.armadillo.hurt_reduced"
+        }
         Voice::Hurt => mob
             .mob_type
             .hurt_sound()
@@ -605,6 +618,11 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    // `Armadillo.getAmbientSound` 受惊时是 `null`：`makeSound` 不跑，也不取音高。
+    // A scared armadillo has no ambient sound, so `makeSound` and its pitch draws are skipped.
+    if super::armadillo::is_scared(mob) {
+        return;
+    }
     if mob.mob_type == super::MobType::Wolf {
         // 刚生成的狼还没有仇恨，时刻不影响叫声。
         // A fresh wolf has no anger, so the clock does not matter.
@@ -911,6 +929,36 @@ pub(crate) fn set_age(me: &mut Entity, mob: &mut Mob, age: i32) {
     }
 }
 
+/// `Animal.spawnChildFromBreeding` 的父亲一侧：年龄设成 6000、清掉求爱、发爱心，
+/// 伴侣、幼崽和经验球交给命令落地。
+///
+/// The father's side of `Animal.spawnChildFromBreeding`: age 6000, love reset, hearts;
+/// the partner, offspring and orb are applied by a command.
+pub(crate) fn breed_with(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    partner: crate::entity::EntityUid,
+) {
+    mob.in_love = 0;
+    set_age(me, mob, 6000);
+    mob.events.push(MobEvent::Hearts);
+    ctx.emit(
+        Command::BreedAnimals {
+            variant: mob.variant,
+            wool: mob.wool,
+            partner,
+            position: me.position,
+            kind: mob.mob_type,
+            father_rabbit: mob.rabbit.variant,
+            father_fox: mob.fox.variant,
+            father_love: mob.love_cause,
+            father_wolf: Box::new((mob.wolf, mob.tame)),
+        },
+        me,
+    );
+}
+
 /// `Mob.serverAiStep`。
 fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.no_action_time += 1;
@@ -949,23 +997,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `BreedGoal.breed` 就在这一刻发生：父亲的年龄先设成 6000，
         // 后面 `aiStep` 会照官方再减一；伴侣和幼崽交给命令落地。
         if let Some(partner) = mob.pending_breed.take() {
-            mob.in_love = 0;
-            set_age(me, mob, 6000);
-            mob.events.push(MobEvent::Hearts);
-            ctx.emit(
-                Command::BreedAnimals {
-                    variant: mob.variant,
-                    wool: mob.wool,
-                    partner,
-                    position: me.position,
-                    kind: mob.mob_type,
-                    father_rabbit: mob.rabbit.variant,
-                    father_fox: mob.fox.variant,
-                    father_love: mob.love_cause,
-                    father_wolf: Box::new((mob.wolf, mob.tame)),
-                },
-                me,
-            );
+            breed_with(me, mob, ctx, partner);
         }
     }
     timing::span!(Navigation);
@@ -977,6 +1009,11 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             mob.mover
                 .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
         }
+    }
+    // 跑大脑的生物在 `super.customServerAiStep` 之前跑大脑。
+    // Brain-driven mobs run their brain before `super.customServerAiStep`.
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::custom_server_ai_step(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1088,15 +1125,31 @@ fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
     }
     if !mob.navigation.is_done() {
         mob.y_head_rot =
-            mth::rotate_if_necessary(mob.y_head_rot, mob.y_body_rot, MAX_HEAD_Y_ROT as f32);
+            mth::rotate_if_necessary(mob.y_head_rot, mob.y_body_rot, max_head_y_rot(mob));
     }
 }
 
-/// `BodyRotationControl.clientTick`。
+/// `Mob.getMaxHeadYRot()`：犰狳受惊时 0、平时 32，其余 75。
+///
+/// `Mob.getMaxHeadYRot()`: 0 for a scared armadillo, 32 otherwise; 75 for the rest.
+fn max_head_y_rot(mob: &Mob) -> f32 {
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::max_head_y_rot(mob)
+    } else {
+        MAX_HEAD_Y_ROT as f32
+    }
+}
+
+/// `BodyRotationControl.clientTick`；犰狳受惊时整个跳过。
+///
+/// `BodyRotationControl.clientTick`; skipped entirely for a scared armadillo.
 fn body_rotation_tick(me: &Entity, mob: &mut Mob) {
+    if super::armadillo::is_scared(mob) {
+        return;
+    }
     let dx = me.position.x - me.old_position.x;
     let dz = me.position.z - me.old_position.z;
-    let max = MAX_HEAD_Y_ROT as f32;
+    let max = max_head_y_rot(mob);
     if dx * dx + dz * dz > 2.500_000_277_905_201e-7 {
         mob.y_body_rot = me.y_rot;
         mob.y_head_rot = mth::rotate_if_necessary(mob.y_head_rot, mob.y_body_rot, max);
@@ -1524,6 +1577,13 @@ pub(crate) fn hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
+    // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
+    // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.
+    let amount = if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::reduce_damage(mob, amount)
+    } else {
+        amount
+    };
     // `isInvulnerableTo`。
     if me.removed
         || ((mob.invulnerable || mob.invulnerable_time > 0)
@@ -1548,12 +1608,14 @@ pub(crate) fn hurt_server(
             return false;
         }
         actually_hurt(me, mob, source, amount - mob.last_hurt);
+        after_actually_hurt(me, mob, &source);
         mob.last_hurt = amount;
         false
     } else {
         mob.last_hurt = amount;
         mob.damage_cooldown = 20;
         actually_hurt(me, mob, source, amount);
+        after_actually_hurt(me, mob, &source);
         mob.hurt_duration = 10;
         mob.hurt_time = mob.hurt_duration;
         true
@@ -1610,6 +1672,15 @@ pub(crate) fn hurt_server(
         super::equine::after_hurt(me, mob);
     }
     true
+}
+
+/// 物种覆写的 `actuallyHurt` 在 `super` 之后的那部分。
+///
+/// The part of species `actuallyHurt` overrides after `super`.
+fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource) {
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::after_actually_hurt(me, mob, source);
+    }
 }
 
 /// `Animal.actuallyHurt` → `LivingEntity.actuallyHurt`。没有护甲、效果和吸收。

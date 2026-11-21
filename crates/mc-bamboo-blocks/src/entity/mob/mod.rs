@@ -12,8 +12,10 @@
 //! out of `Entity.kind` so it can be borrowed apart from the entity; sizes
 //! therefore live on [`Entity::dimensions`].
 
+pub mod armadillo;
 pub mod attributes;
 pub mod avoid;
+pub mod brain;
 pub mod chicken;
 pub mod control;
 pub mod damage;
@@ -77,6 +79,7 @@ pub enum MobType {
     Donkey,
     Mule,
     Llama,
+    Armadillo,
 }
 
 impl MobType {
@@ -98,6 +101,7 @@ impl MobType {
             Self::Donkey => ids::DONKEY,
             Self::Mule => ids::MULE,
             Self::Llama => ids::LLAMA,
+            Self::Armadillo => ids::ARMADILLO,
         }
     }
 
@@ -118,6 +122,7 @@ impl MobType {
             Self::Donkey => "minecraft:donkey",
             Self::Mule => "minecraft:mule",
             Self::Llama => "minecraft:llama",
+            Self::Armadillo => "minecraft:armadillo",
         }
     }
 
@@ -128,6 +133,7 @@ impl MobType {
             Self::Rabbit => Some(item_tags::RABBIT_FOOD),
             Self::Fox => Some(item_tags::FOX_FOOD),
             Self::Wolf => Some(item_tags::WOLF_FOOD),
+            Self::Armadillo => Some(item_tags::ARMADILLO_FOOD),
             _ => None,
         }
     }
@@ -160,6 +166,7 @@ impl MobType {
             Self::Donkey,
             Self::Mule,
             Self::Llama,
+            Self::Armadillo,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -187,6 +194,7 @@ impl MobType {
                 equine::dimensions(self, baby)
             }
             (Self::Pig, baby) => pig::dimensions(baby),
+            (Self::Armadillo, baby) => armadillo::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
@@ -241,6 +249,7 @@ impl MobType {
             Self::Donkey => "minecraft:entities/donkey",
             Self::Mule => "minecraft:entities/mule",
             Self::Llama => "minecraft:entities/llama",
+            Self::Armadillo => "minecraft:entities/armadillo",
         }
     }
 
@@ -289,6 +298,7 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.donkey.ambient"),
             Self::Mule => Some("minecraft:entity.mule.ambient"),
             Self::Llama => Some("minecraft:entity.llama.ambient"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.ambient"),
         }
     }
 
@@ -306,6 +316,7 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.donkey.hurt"),
             Self::Mule => Some("minecraft:entity.mule.hurt"),
             Self::Llama => Some("minecraft:entity.llama.hurt"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.hurt"),
         }
     }
 
@@ -323,6 +334,7 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.donkey.death"),
             Self::Mule => Some("minecraft:entity.mule.death"),
             Self::Llama => Some("minecraft:entity.llama.death"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.death"),
         }
     }
 
@@ -338,6 +350,7 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.horse.step"),
             Self::Mule => Some("minecraft:entity.horse.step"),
             Self::Llama => Some("minecraft:entity.llama.step"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.step"),
         }
     }
 
@@ -359,6 +372,7 @@ impl MobType {
             Self::Donkey => items::DONKEY_SPAWN_EGG,
             Self::Mule => items::MULE_SPAWN_EGG,
             Self::Llama => items::LLAMA_SPAWN_EGG,
+            Self::Armadillo => items::ARMADILLO_SPAWN_EGG,
         }
     }
 
@@ -379,6 +393,7 @@ impl MobType {
             Self::Donkey => "entity.minecraft.donkey",
             Self::Mule => "entity.minecraft.mule",
             Self::Llama => "entity.minecraft.llama",
+            Self::Armadillo => "entity.minecraft.armadillo",
         }
     }
 
@@ -407,6 +422,7 @@ impl MobType {
             Self::Donkey,
             Self::Mule,
             Self::Llama,
+            Self::Armadillo,
         ]
         .into_iter()
         .find(|kind| kind.entity_type() == entity_type)
@@ -1227,6 +1243,14 @@ pub struct Mob {
     /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
     pub pending_breed: Option<EntityUid>,
     pub equine: Option<Box<equine::EquineState>>,
+    /// 跑大脑的生物（犰狳）的 `Brain`；用目标选择器的生物是 `None`。
+    ///
+    /// The `Brain` of brain-driven mobs (armadillos); `None` for goal-driven mobs.
+    pub brain: Option<Box<brain::Brain>>,
+    /// 犰狳的状态机和掉鳞甲计时。
+    ///
+    /// The armadillo state machine and scute timer.
+    pub armadillo: armadillo::Armadillo,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -1293,6 +1317,7 @@ impl Mob {
             MobType::Chicken => chicken::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
+            MobType::Armadillo => armadillo::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -1307,14 +1332,18 @@ impl Mob {
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
+            MobType::Armadillo => GoalSelector::default(),
             kind => equine::goals(kind, &mut navigation),
         };
         let target_goals = match mob_type {
             MobType::Fox => fox::target_goals(),
             MobType::Wolf => wolf::target_goals(),
-            MobType::Cow | MobType::Rabbit | MobType::Pig | MobType::Sheep | MobType::Chicken => {
-                GoalSelector::default()
-            }
+            MobType::Cow
+            | MobType::Rabbit
+            | MobType::Pig
+            | MobType::Sheep
+            | MobType::Chicken
+            | MobType::Armadillo => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             kind => equine::targets(kind),
@@ -1444,12 +1473,19 @@ impl Mob {
             needs_sync: false,
             hurt_marked: false,
             pending_breed: None,
+            brain: new_brain(mob_type),
+            armadillo: armadillo::Armadillo::default(),
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
         };
         if mob_type == MobType::Fox {
             fox::configure(&mut mob);
+        }
+        if mob_type == MobType::Armadillo {
+            // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
+            // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
+            mob.navigation.flags.can_float = true;
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -1513,8 +1549,16 @@ impl Mob {
         self.health <= 0.0 || self.dead
     }
 
-    /// `PathfinderMob.isPanicking`：正在跑的目标里有恐慌。
+    /// `PathfinderMob.isPanicking`：大脑里有 `IS_PANICKING` 记忆，或者正在跑的目标里有恐慌。
+    ///
+    /// `PathfinderMob.isPanicking`: an `IS_PANICKING` memory in the brain, or a running
+    /// panic goal.
     pub fn is_panicking(&self) -> bool {
+        if let Some(brain) = &self.brain
+            && brain.memories.has(brain::memory::MemoryType::IsPanicking)
+        {
+            return true;
+        }
         self.goals.is_panicking()
     }
 
@@ -1589,6 +1633,10 @@ pub struct MobPublic {
     pub pig_sound_variant: pig::SoundVariant,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
+    /// `Armadillo.ARMADILLO_STATE` 的网络 ID。
+    ///
+    /// The network id of `Armadillo.ARMADILLO_STATE`.
+    pub armadillo_state: i32,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1655,6 +1703,7 @@ impl MobPublic {
             pig_sound_variant: mob.pig_sound_variant,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
+            armadillo_state: mob.armadillo.state.id(),
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,
@@ -1685,6 +1734,18 @@ impl MobPublic {
 
     pub fn is_alive(&self) -> bool {
         self.health > 0.0
+    }
+}
+
+/// `makeBrain(Brain.Packed.EMPTY)`：跑大脑的种类建一个新大脑（传感器延迟还没取），
+/// 用目标选择器的种类是 `None`。
+///
+/// `makeBrain(Brain.Packed.EMPTY)`: a fresh brain for brain-driven kinds (sensor delays
+/// not drawn yet), `None` for goal-driven kinds.
+pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
+    match kind {
+        MobType::Armadillo => Some(Box::new(armadillo::brain())),
+        _ => None,
     }
 }
 

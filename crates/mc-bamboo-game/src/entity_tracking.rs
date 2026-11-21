@@ -966,6 +966,11 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if kind.is_equine() && index >= mc_bamboo_data::entity_types::HORSE_FLAGS {
         return equine_default_data(index, kind);
     }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Armadillo
+        && index == mc_bamboo_data::entity_types::ARMADILLO_STATE
+    {
+        return EntityData::ArmadilloState(0);
+    }
     if let Some(data) = farm_default_data(index, kind) {
         return data;
     }
@@ -1312,6 +1317,14 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
         out.extend(fox_non_default_data(mob));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Armadillo {
+        // 犰狳只有 `ARMADILLO_STATE` 一项，缺省 `IDLE`（0）。
+        // Armadillos only add `ARMADILLO_STATE`, `IDLE` (0) by default.
+        if mob.armadillo_state != 0 {
+            out.push(EntityData::ArmadilloState(mob.armadillo_state));
+        }
+        return out;
     }
     if farm_non_default_data(mob, &mut out) {
         return out;

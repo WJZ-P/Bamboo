@@ -355,7 +355,7 @@ pub(super) fn finalize_generated(
 ) {
     if matches!(
         kind,
-        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken | MobType::Armadillo
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
     } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
@@ -380,7 +380,10 @@ pub(super) fn finalize_cow(
     group: &mut Option<SpawnGroup>,
 ) {
     let variant = cow_variant_for_biome(biome);
-    if kind != MobType::Sheep {
+    // 犰狳没有自己的 `finalizeSpawn`，直接是 `AgeableMob` 那层。
+    // Armadillos have no `finalizeSpawn` of their own and go straight to `AgeableMob`.
+    let plain = kind == MobType::Armadillo;
+    if kind != MobType::Sheep && !plain {
         // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
         let _ = random.next_int(1);
@@ -393,8 +396,8 @@ pub(super) fn finalize_cow(
     let chicken_sound =
         (kind == MobType::Chicken).then(|| super::chicken::SoundVariant::pick(random));
     let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
-    let cow_sound =
-        (!matches!(kind, MobType::Sheep | MobType::Chicken | MobType::Pig)).then(|| {
+    let cow_sound = (!plain && !matches!(kind, MobType::Sheep | MobType::Chicken | MobType::Pig))
+        .then(|| {
             if random.next_int(2) == 0 {
                 CowSoundVariant::Classic
             } else {
@@ -414,7 +417,7 @@ pub(super) fn finalize_cow(
     };
     let baby = data.roll_baby(random);
     entity.with_mob(|me, mob| {
-        if kind != MobType::Sheep {
+        if kind != MobType::Sheep && !plain {
             mob.variant = variant;
         }
         if let Some(color) = sheep_color {

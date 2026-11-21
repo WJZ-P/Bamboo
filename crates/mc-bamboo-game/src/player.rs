@@ -438,6 +438,7 @@ impl Player {
             spectator: self.game_mode == GameMode::Spectator,
             creative: self.game_mode == GameMode::Creative,
             sneaking: self.sync.is_crouching(),
+            sprinting: self.sync.is_sprinting(),
             invisible: false,
             armor_cover: self.armor_cover(),
             main_hand: if main.is_empty() { 0 } else { main.item },

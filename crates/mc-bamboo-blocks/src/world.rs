@@ -3199,7 +3199,18 @@ impl<'a> World<'a> {
         let outcome = entity
             .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request, now))
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
-        if outcome.shear {
+        let armadillo = entity
+            .kind
+            .mob()
+            .is_some_and(|mob| mob.mob_type == crate::entity::mob::MobType::Armadillo);
+        if outcome.shear && armadillo {
+            crate::entity::mob::armadillo::apply_brush(
+                self,
+                &mut entity,
+                request.hand,
+                &request.held,
+            );
+        } else if outcome.shear {
             crate::entity::mob::sheep::apply_shear(self, &mut entity, request.hand, &request.held);
         }
         self.level.put_entity(entity);

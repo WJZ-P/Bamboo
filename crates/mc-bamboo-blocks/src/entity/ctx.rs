@@ -188,6 +188,14 @@ pub trait BlockView {
     }
 
     /// `level.random.nextBoolean()`，并行视图同上。
+    /// `level.random.nextInt(bound)`：大脑行为的时长、偶尔看人的间隔用它。并行视图同上给 0。
+    ///
+    /// `level.random.nextInt(bound)`, for brain behaviour durations and look intervals;
+    /// 0 on parallel views as above.
+    fn level_random_int(&self, _bound: i32) -> i32 {
+        0
+    }
+
     fn level_random_boolean(&self) -> bool {
         false
     }
@@ -218,6 +226,10 @@ pub struct PlayerView {
     pub creative: bool,
     /// `isDiscrete()`，也就是潜行。
     pub sneaking: bool,
+    /// `isSprinting()`：犰狳会被疾跑的玩家吓到。
+    ///
+    /// `isSprinting()`; sprinting players scare armadillos.
+    pub sprinting: bool,
     pub invisible: bool,
     /// `getArmorCoverPercentage()`，隐身时才用。
     pub armor_cover: f32,
@@ -415,6 +427,10 @@ impl BlockView for World<'_> {
 
     fn level_random_float(&self) -> f32 {
         self.random().next_float()
+    }
+
+    fn level_random_int(&self, bound: i32) -> i32 {
+        self.random().next_int(bound)
     }
 
     fn level_random_boolean(&self) -> bool {
@@ -692,6 +708,15 @@ pub enum Command {
     /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
     /// the origin.
     DropEntityLoot(super::mob::EntityLootRequest),
+    /// 改另一只跑大脑的生物的记忆（`AnimalMakeLove` 给伴侣设繁殖、走路和看的目标）。
+    ///
+    /// Writes another brain-driven mob's memory (`AnimalMakeLove` setting the partner's
+    /// breed, walk and look targets).
+    SetBrainMemory {
+        target: EntityUid,
+        memory: super::mob::brain::memory::MemoryType,
+        value: Option<super::mob::brain::memory::MemoryValue>,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -818,6 +843,20 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::SetBrainMemory {
+            target,
+            memory,
+            value,
+        } => {
+            let mut value = value;
+            world.with_entity_mut(target, &mut |entity| {
+                entity.with_mob(|_, mob| {
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.memories.set_or_erase(memory, value.take());
+                    }
+                });
+            });
         }
         Command::DropEntityLoot(request) => {
             let origin = request.origin;

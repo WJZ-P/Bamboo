@@ -201,6 +201,10 @@ pub enum EntityData {
     /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID` as registry IDs.
     ChickenVariant(i32),
     ChickenSoundVariant(i32),
+    /// `Armadillo.ARMADILLO_STATE`：状态的网络 ID（`ARMADILLO_STATE` 序列化器，VarInt）。
+    ///
+    /// `Armadillo.ARMADILLO_STATE`: the state'"'"'s network id (its own serializer, a VarInt).
+    ArmadilloState(i32),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -317,6 +321,7 @@ impl EntityData {
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
         }
     }
 
@@ -523,6 +528,14 @@ impl EntityData {
             Self::SheepWool(wool) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*wool);
+            }
+            Self::ArmadilloState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::ARMADILLO_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
             }
             Self::ChickenVariant(value) | Self::ChickenSoundVariant(value) => {
                 use mc_bamboo_data::entity_types as facts;

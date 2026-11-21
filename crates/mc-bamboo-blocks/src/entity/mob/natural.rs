@@ -627,6 +627,9 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         MobType::Rabbit => bright_spawn_rules(world, pos, block_tags::RABBITS_SPAWNABLE_ON),
         MobType::Fox => bright_spawn_rules(world, pos, block_tags::FOXES_SPAWNABLE_ON),
         MobType::Wolf => bright_spawn_rules(world, pos, block_tags::WOLVES_SPAWNABLE_ON),
+        // `Armadillo.checkArmadilloSpawnRules`。
+        // `Armadillo.checkArmadilloSpawnRules`.
+        MobType::Armadillo => bright_spawn_rules(world, pos, block_tags::ARMADILLO_SPAWNABLE_ON),
         MobType::Cow
         | MobType::Pig
         | MobType::Sheep
@@ -903,6 +906,7 @@ mod tests {
             spectator: false,
             creative: false,
             sneaking: false,
+            sprinting: false,
             invisible: false,
             armor_cover: 0.0,
             main_hand: 0,
