@@ -867,7 +867,7 @@ fn try_compute_path(sink: &mut MoveToTargetSink, cx: &mut Cx, walk: WalkTarget) 
         10,
         7,
         toward,
-        f64::from(std::f32::consts::FRAC_PI_2),
+        std::f32::consts::FRAC_PI_2,
     ) else {
         return false;
     };

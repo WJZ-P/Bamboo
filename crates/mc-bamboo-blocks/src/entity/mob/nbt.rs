@@ -309,14 +309,30 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
     // ---- AgeableMob / Animal / Cow ----
-    if !mob.mob_type.is_monster() {
+    if mob.mob_type.is_ageable() {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
+    }
+    // 鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
+    // Squid are `AgeableMob`s but not `Animal`s and have no love keys.
+    if mob.mob_type.is_animal() {
         put(&mut out, "InLove", Tag::Int(mob.in_love));
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
+    }
+    if mob.mob_type == MobType::GlowSquid {
+        put(
+            &mut out,
+            "DarkTicksRemaining",
+            Tag::Int(mob.squid.dark_ticks),
+        );
+    }
+    // ---- Turtle.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Turtle {
+        put(&mut out, "home_pos", block_pos_tag(mob.turtle.home_pos));
+        put(&mut out, "has_egg", Tag::Byte(i8::from(mob.turtle.has_egg)));
     }
     if mob.mob_type == MobType::Rabbit {
         put(&mut out, "RabbitType", Tag::Int(mob.rabbit.variant.id()));
@@ -407,6 +423,24 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             "CanBreakDoors",
             Tag::Byte(i8::from(mob.can_break_doors)),
         );
+    }
+    // ---- AbstractFish / Salmon / TropicalFish / Pufferfish ----
+    if super::fish::is_fish(mob.mob_type) {
+        put(
+            &mut out,
+            "FromBucket",
+            Tag::Byte(i8::from(mob.fish.from_bucket)),
+        );
+    }
+    match mob.mob_type {
+        MobType::Salmon => put(
+            &mut out,
+            "type",
+            Tag::String(super::fish::salmon_variant_name(mob.fish.variant).to_owned()),
+        ),
+        MobType::TropicalFish => put(&mut out, "Variant", Tag::Int(mob.fish.variant)),
+        MobType::Pufferfish => put(&mut out, "PuffState", Tag::Int(mob.fish.puff_state)),
+        _ => {}
     }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
@@ -563,12 +597,28 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
         // ---- AgeableMob / Animal / Cow ----
-        if !mob.mob_type.is_monster() {
+        if mob.mob_type.is_ageable() {
             living::set_age(me, mob, tag::int_or(tag, "Age", 0));
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
+        }
+        if mob.mob_type.is_animal() {
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
+        }
+        if mob.mob_type == MobType::GlowSquid {
+            mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);
+        }
+        // `Turtle.readAdditionalSaveData`：先读自己的家方块，再交给父类。
+        // `Turtle.readAdditionalSaveData`: the home first, then the superclass.
+        if mob.mob_type == MobType::Turtle {
+            let pos = tag::int_array(tag, "home_pos");
+            mob.turtle.home_pos = if pos.len() == 3 {
+                BlockPos::new(pos[0], pos[1], pos[2])
+            } else {
+                me.block_position()
+            };
+            mob.turtle.has_egg = tag::bool_or(tag, "has_egg", false);
         }
         if mob.mob_type == MobType::Rabbit {
             mob.rabbit.variant = super::rabbit::Variant::from_id(tag::int_or(tag, "RabbitType", 0));
@@ -626,6 +676,27 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             } else if let Some(variant) = sound.and_then(CowSoundVariant::from_name) {
                 mob.sound_variant = variant;
             }
+        }
+        // ---- AbstractFish / Salmon / TropicalFish / Pufferfish ----
+        if super::fish::is_fish(mob.mob_type) {
+            mob.fish.from_bucket = tag::bool_or(tag, "FromBucket", false);
+        }
+        match mob.mob_type {
+            MobType::Salmon => {
+                let variant = tag::string_or(tag, "type")
+                    .and_then(super::fish::salmon_variant_from_name)
+                    .unwrap_or(1);
+                mob.fish.variant = variant;
+                super::fish::refresh_dimensions(me, mob);
+            }
+            MobType::TropicalFish => {
+                mob.fish.variant = tag::int_or(tag, "Variant", 0);
+            }
+            MobType::Pufferfish => {
+                mob.fish.puff_state = tag::int_or(tag, "PuffState", 0).min(2);
+                super::fish::refresh_dimensions(me, mob);
+            }
+            _ => {}
         }
         super::equine::load(mob, tag);
         // ---- Zombie ----

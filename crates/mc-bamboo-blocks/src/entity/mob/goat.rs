@@ -553,7 +553,7 @@ pub(crate) fn refresh_dimensions(me: &mut Entity, mob: &mut Mob, view: &dyn Bloc
     mob.eye_height = eye;
     if !me.first_tick
         && (width > old.0 || height > old.1)
-        && let Some(position) = crate::entity::thrown_egg::fudge_after_size_change(view, me, old)
+        && let Some(position) = crate::entity::resize::fudge_position(view, me, old)
     {
         me.position = position;
     }
@@ -1349,6 +1349,8 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
         open_inventory: false,
         shear: false,
+        discard: false,
+        limit_creative: true,
     })
 }
 
@@ -1467,6 +1469,8 @@ mod tests {
             replacement: None,
             open_inventory: false,
             shear: false,
+            discard: false,
+            limit_creative: true,
         };
         assert_eq!(
             eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),

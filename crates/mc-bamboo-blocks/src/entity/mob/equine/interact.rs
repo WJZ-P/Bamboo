@@ -45,8 +45,7 @@ fn success(shrink: bool, req: &MobInteractRequest) -> MobInteraction {
         result: InteractionResult::Success,
         shrink_held: shrink && !req.creative,
         replacement: None,
-        open_inventory: false,
-        shear: false,
+        ..MobInteraction::pass()
     }
 }
 
@@ -177,8 +176,7 @@ fn fed_food(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInte
         result: InteractionResult::SuccessServer,
         shrink_held: !req.creative,
         replacement: None,
-        open_inventory: false,
-        shear: false,
+        ..MobInteraction::pass()
     }
 }
 

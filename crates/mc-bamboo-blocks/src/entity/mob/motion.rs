@@ -280,22 +280,53 @@ fn movement_emission(
     mob.fly_dist += length;
     if mob.move_dist > mob.next_step && !on_state.is_air() {
         let same = on_pos == legacy_pos;
-        let mut stepped = step_effects(me, mob, legacy_state, true, collided);
+        // `MovementEmission.EVENTS`（鱿鱼）只发游戏事件：没有脚步声，也不取游泳声的随机数。
+        // `MovementEmission.EVENTS` (squid) only emits game events: no step sound and no
+        // swim-sound draws.
+        let sounds = mob.mob_type.emits_movement_sounds();
+        let mut stepped = step_effects(me, mob, legacy_state, sounds, collided);
         if !same {
             stepped |= step_effects(me, mob, on_state, false, collided);
         }
         if stepped {
-            mob.next_step = (mob.move_dist as i32 + 1) as f32;
+            mob.next_step = next_step_value(mob);
         } else if me.in_water {
-            mob.next_step = (mob.move_dist as i32 + 1) as f32;
-            // `waterSwimSound` → `playSwimSound`：两个 `nextFloat`。
-            me.random.next_float();
-            me.random.next_float();
+            mob.next_step = next_step_value(mob);
+            // `waterSwimSound` → `playSwimSound`：音量按速度算，音高取两个 `nextFloat`。
+            // `waterSwimSound` → `playSwimSound`: the volume follows the speed and the
+            // pitch draws two `nextFloat`s.
+            if sounds {
+                let delta = me.delta;
+                let speed = (delta.x * delta.x * 0.2 + delta.y * delta.y + delta.z * delta.z * 0.2)
+                    .sqrt() as f32
+                    * 0.35;
+                let mut volume = mth::java_min_f32(1.0, speed);
+                // `Turtle.playSwimSound`：音量乘 1.5。
+                // `Turtle.playSwimSound` scales the volume by 1.5.
+                if super::turtle::is_turtle(mob.mob_type) {
+                    volume *= 1.5;
+                }
+                let first = me.random.next_float();
+                let second = me.random.next_float();
+                let pitch = 1.0 + (first - second) * 0.4;
+                super::living::play_sound(me, mob, mob.mob_type.swim_sound(), volume, pitch);
+            }
         }
     }
 }
 
 /// `vibrationAndSoundEffectsFromBlock`。
+/// `Entity.nextStep()`：海龟覆写成 `moveDist + 0.15F`，其余是 `floor(moveDist) + 1`。
+///
+/// `Entity.nextStep()`: turtles override it with `moveDist + 0.15F`.
+fn next_step_value(mob: &Mob) -> f32 {
+    if super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::next_step(mob.move_dist)
+    } else {
+        (mob.move_dist as i32 + 1) as f32
+    }
+}
+
 fn step_effects(
     me: &mut Entity,
     mob: &mut Mob,
@@ -311,11 +342,14 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
-    if play_sound {
+    if play_sound && !mob.mob_type.is_water_animal() {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
+        // `AbstractFish.playStepSound` 是空实现，但这一步仍算「踩过」。
         // `Wolf.playStepSound` 用叫声品种里的脚步声。
-        // `Wolf.playStepSound` uses the step sound of its sound set.
+        // `AbstractCow.playStepSound` plays; `AbstractFish.playStepSound` is empty yet
+        // the step still counts. `Wolf.playStepSound` uses the sound set's step sound.
         let sound = match mob.mob_type {
+            super::MobType::Turtle => super::turtle::step_sound(mob.is_baby()),
             super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Step),
             super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
             super::MobType::Chicken => super::chicken::sounds(mob)[3],
@@ -893,6 +927,11 @@ pub(crate) fn update_fluid_interaction(me: &mut Entity, mob: &mut Mob, view: &dy
         }
     }
     me.in_water = in_water;
+    // `isPushedByFluid()` 为假的（水生生物）不吃水流。
+    // Mobs whose `isPushedByFluid()` is false (water creatures) ignore currents.
+    if !mob.mob_type.is_pushed_by_fluid() {
+        return;
+    }
     if in_water && water.count > 0 {
         apply_current(me, &water.current, 0.014);
     }
