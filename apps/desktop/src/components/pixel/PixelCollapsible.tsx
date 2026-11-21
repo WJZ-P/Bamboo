@@ -63,8 +63,10 @@ const Header = styled.button`
     outline-offset: -8px;
   }
 
+  /* 收起时去掉分隔线本身，不只是变透明，否则卡片底色会从这 4px 里露出来。 */
+  /* Drop the divider when collapsed, not just its colour, or the card shows through. */
   &[aria-expanded="false"] {
-    border-bottom-color: transparent;
+    border-bottom-width: 0;
   }
 `;
 
