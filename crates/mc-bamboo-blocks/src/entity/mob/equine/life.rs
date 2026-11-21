@@ -30,6 +30,26 @@ pub(in crate::entity::mob) fn is_immobile(mob: &Mob) -> bool {
     state.eating || state.standing
 }
 
+/// `AbstractHorse.causeFallDamage` 开头：摔落超过 1 格时用 0.4 音量、1.0 音高播落地声，
+/// 不取随机数。羊驼覆写了整个方法，不播这个声音。伤害公式和 `LivingEntity` 的相同，
+/// 由调用方照常结算。
+///
+/// The start of `AbstractHorse.causeFallDamage`: falls longer than one block play
+/// the landing sound at volume 0.4 and pitch 1.0 without drawing randomness. The
+/// llama overrides the whole method and stays quiet. The damage formula is the
+/// same as `LivingEntity`'s and the caller settles it as usual.
+pub(in crate::entity::mob) fn land_sound(me: &Entity, mob: &mut Mob, distance: f64) {
+    if mob.mob_type == MobType::Llama || distance <= 1.0 {
+        return;
+    }
+    let sound = if mob.is_baby() {
+        "minecraft:entity.baby_horse.land"
+    } else {
+        "minecraft:entity.horse.land"
+    };
+    living::play_sound(me, mob, sound, 0.4, 1.0);
+}
+
 /// `AbstractHorse.aiStep` 开头：`nextInt(200) == 0` 时甩尾。
 ///
 /// The start of `AbstractHorse.aiStep`: swish the tail on `nextInt(200) == 0`.
@@ -208,5 +228,54 @@ pub(in crate::entity::mob) fn voice(mob: &Mob, voice: Voice) -> &'static str {
         (_, Voice::Death) => "minecraft:entity.llama.death",
         (_, Voice::Eat) => "minecraft:entity.llama.eat",
         (_, Voice::Angry) => "minecraft:entity.llama.angry",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::Vec3;
+
+    use super::*;
+    use crate::entity::mob::MobEvent;
+
+    fn landing_sounds(kind: MobType, baby: bool, distance: f64) -> Vec<&'static str> {
+        let mut entity = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
+        entity
+            .with_mob(|me, mob| {
+                if baby {
+                    mob.age = -24000;
+                }
+                land_sound(me, mob, distance);
+                mob.events
+                    .iter()
+                    .filter_map(|event| match event {
+                        MobEvent::Sound { sound, .. } => Some(*sound),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .expect("equine row")
+    }
+
+    /// 马、驴、骡摔落超过 1 格播落地声（幼崽换幼马的声音），羊驼不播。
+    ///
+    /// Horses, donkeys and mules play the landing sound past one block (babies use
+    /// the foal sound); llamas stay quiet.
+    #[test]
+    fn landing_sound_follows_the_abstract_horse_override() {
+        assert!(landing_sounds(MobType::Horse, false, 1.0).is_empty());
+        assert_eq!(
+            landing_sounds(MobType::Horse, false, 1.5),
+            ["minecraft:entity.horse.land"]
+        );
+        assert_eq!(
+            landing_sounds(MobType::Donkey, true, 3.0),
+            ["minecraft:entity.baby_horse.land"]
+        );
+        assert_eq!(
+            landing_sounds(MobType::Mule, false, 3.0),
+            ["minecraft:entity.horse.land"]
+        );
+        assert!(landing_sounds(MobType::Llama, false, 9.0).is_empty());
     }
 }

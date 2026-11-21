@@ -183,6 +183,11 @@ fn cause_fall_damage(
     multiplier: f32,
 ) {
     use mc_bamboo_data::registries::attribute;
+    if mob.mob_type.is_equine() {
+        // 马科覆写的 `causeFallDamage` 先播落地声，伤害结算相同。
+        // The equine override plays its landing sound first; damage is unchanged.
+        super::equine::land_sound(me, mob, distance);
+    }
     let power = distance + 1.0e-6 - mob.attributes.value(attribute::SAFE_FALL_DISTANCE);
     let damage = mth::floor(
         power * f64::from(multiplier) * mob.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER),

@@ -31,7 +31,7 @@ pub(super) use death::drop_on_death;
 pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets};
 pub(super) use interact::interact;
 pub(super) use life::{
-    Voice, after_hurt, ai_step_end, ai_step_start, is_immobile, tick_end, voice,
+    Voice, after_hurt, ai_step_end, ai_step_start, is_immobile, land_sound, tick_end, voice,
 };
 
 /// 马科同步给客户端的元数据：标志字节、马的花色或羊驼的毛色、有没有箱子、羊驼力量。
