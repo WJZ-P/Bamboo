@@ -466,6 +466,8 @@ public final class MobOracle {
         /** 僵尸场景：每只生物头上戴的东西（`null` 是空）和它的初始耐久损耗。 */
         Item helmet;
         int helmetDamage;
+        /** 苦力怕场景：第 0 位带电，第 1 位已点燃。 */
+        int creeperFlags;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
@@ -846,8 +848,77 @@ public final class MobOracle {
         static final BlockState WATER = Blocks.WATER.defaultBlockState();
         static final BlockState LAVA = Blocks.LAVA.defaultBlockState();
 
-        /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
-        static void farmScenes(List<Scene> scenes) {
+        /** 苦力怕：追玩家并爆炸、点燃、带电、摔落提前膨胀、隔墙被打、炸到真实玩家。 */
+        static void creeperScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            BlockState glass = Blocks.GLASS.defaultBlockState();
+            for (long seed : new long[] {11L, 58L}) {
+                // 基岩地面炸不动；旁边的牛见证爆炸的伤害、击退和世界随机源。
+                // Bedrock survives the blast; the cow witnesses damage, knockback and level random.
+                Scene chase = new Scene("creeper_chase_" + seed).ticks(160).difficulty(2);
+                chase.monstersBurn = false;
+                chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                chase.mob(10, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                chase.mob(0, 3.5, 64.0, 4.5, 0.0F, seed + 100L, 0);
+                chase.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(chase);
+            }
+            {
+                Scene ignited = new Scene("creeper_ignited").ticks(50).difficulty(2);
+                ignited.monstersBurn = false;
+                ignited.creeperFlags = 2;
+                ignited.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                ignited.fill(2, 64, -2, 2, 65, -1, glass);
+                ignited.fill(-3, 64, 1, -3, 64, 3, glass);
+                ignited.mob(10, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
+                ignited.mob(0, 2.5, 64.0, 2.5, 0.0F, 22L, 0);
+                ignited.mob(0, -4.5, 64.0, 2.5, 0.0F, 23L, 0);
+                // 第三头牛没有遮挡、离得够远，炸不死：血量直接反映伤害公式。
+                // The third cow is unshielded and far enough to survive: its health shows the formula.
+                ignited.mob(0, 4.5, 64.0, 3.5, 0.0F, 24L, 0);
+                scenes.add(ignited);
+                Scene powered = new Scene("creeper_powered").ticks(50).difficulty(2);
+                powered.monstersBurn = false;
+                powered.creeperFlags = 3;
+                powered.fill(-14, 63, -14, 14, 63, 14, bedrock);
+                powered.fill(5, 64, -3, 5, 66, 3, glass);
+                powered.fill(-7, 64, 0, -6, 64, 2, glass);
+                powered.mob(10, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+                powered.mob(0, 3.5, 64.0, -4.5, 0.0F, 32L, 0);
+                powered.mob(0, 8.5, 64.0, 0.5, 0.0F, 33L, 0);
+                powered.mob(0, -9.5, 64.0, -6.5, 0.0F, 34L, 0);
+                scenes.add(powered);
+                Scene fall = new Scene("creeper_fall").ticks(60).difficulty(2);
+                fall.monstersBurn = false;
+                fall.fill(-6, 63, -6, 6, 63, 6, bedrock);
+                fall.mob(10, 0.5, 70.0, 0.5, 0.0F, 41L, 0);
+                scenes.add(fall);
+                // 玻璃墙挡住视线：被打之后靠 `HurtByTargetGoal` 记仇，绕墙过来再膨胀。
+                // Glass blocks sight: retaliation targets the player, then the creeper paths around.
+                Scene wall = new Scene("creeper_wall_hurt").ticks(200).difficulty(2);
+                wall.monstersBurn = false;
+                wall.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                wall.fill(3, 64, -2, 3, 66, 2, glass);
+                wall.mob(10, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+                wall.mob(0, -3.5, 64.0, -3.5, 0.0F, 52L, 0);
+                wall.player(5.5, 64.0, 0.5, Items.AIR);
+                wall.hurts.add(new double[] {5, 0, 2.0, 0});
+                scenes.add(wall);
+                // 真实玩家：比爆炸打到玩家后的血量、受伤冷却和玩家自己收到的包。
+                // A real player: health, hurt cooldown and self packets after the blast.
+                for (int difficulty : new int[] {1, 2, 3}) {
+                    Scene blast = new Scene("creeper_blast_player_" + difficulty).ticks(80).difficulty(difficulty);
+                    blast.monstersBurn = false;
+                    blast.realPlayers = true;
+                    blast.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                    blast.mob(10, 0.5, 64.0, 0.5, 0.0F, 60L + difficulty, 0);
+                    blast.player(4.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(blast);
+                }
+            }
+        }
+
+        /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */        static void farmScenes(List<Scene> scenes) {
             int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
             int wheat = BuiltInRegistries.ITEM.getId(Items.WHEAT);
             {
@@ -942,6 +1013,7 @@ public final class MobOracle {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
             farmScenes(scenes);
+            creeperScenes(scenes);
             {
                 Scene pig = new Scene("pig_rod_tempt").ticks(80);
                 ground(pig, 12);
@@ -1842,7 +1914,7 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
-        if (scene.name.startsWith("zombie_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("creeper_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -3787,6 +3859,11 @@ public final class MobOracle {
     /** 僵尸场景：官方 `Mob` 逐刻 tick，输出与 `CowStep` 同形的状态加僵尸专属字段。 */
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
         FakeLevel level = FakeLevel.create(official);
+        // `EntityReference` 找不到实体时会查所有维度（被炸的牛记着已经消失的苦力怕）。
+        // `EntityReference` falls back to every dimension when the entity is gone.
+        java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+        levels.put(net.minecraft.world.level.Level.OVERWORLD, level);
+        put(MinecraftServer.class, official.server, "levels", levels);
         level.blocks.putAll(scene.blocks);
         level.injectedSkyDarken = scene.skyDarken;
         level.injectedRaining = scene.raining;
@@ -3836,6 +3913,12 @@ public final class MobOracle {
             ServerPlayer player = new ServerPlayer(official.server, level,
                     new GameProfile(new UUID(1L, 2L + i), "ZombieOracle" + i),
                     ClientInformation.createDefault());
+            if (scene.name.startsWith("creeper_")) {
+                // 生物的 ID 从 `FIRST_ID` 起显式指定；玩家挪开，免得爆炸的来源 ID 和玩家撞上。
+                // Mob ids start at `FIRST_ID`; move players away so a blast source id never
+                // collides with a player id.
+                player.setId(FIRST_ID + 1000 + i);
+            }
             player.setPos(at[0], at[1], at[2]);
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
             player.setYRot(0.0F);
@@ -3860,6 +3943,13 @@ public final class MobOracle {
             zombieSinks.add(sink);
         }
         level.playersList().addAll(players);
+        if (scene.name.startsWith("creeper_") && scene.realPlayers) {
+            // 爆炸用 `getEntities` 找受害者，玩家得在实体查询表里。别的场景保持原样：
+            // 放进去会让生物和玩家互相推挤，Bamboo 还没有这一段。
+            // The blast finds victims through `getEntities`, so players must be listed.
+            // Other scenes stay as they were: listing players would add mob-player pushing.
+            level.tracked.addAll(players);
+        }
         // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
@@ -3871,6 +3961,7 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
+                case 10 -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
@@ -3894,6 +3985,17 @@ public final class MobOracle {
                 if (scene.helmetDamage != 0) helmet.setDamageValue(scene.helmetDamage);
                 mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD, helmet);
             }
+            if (mob instanceof net.minecraft.world.entity.monster.Creeper creeper) {
+                if ((scene.creeperFlags & 1) != 0) {
+                    Field powered = net.minecraft.world.entity.monster.Creeper.class.getDeclaredField("DATA_IS_POWERED");
+                    powered.setAccessible(true);
+                    @SuppressWarnings("unchecked")
+                    net.minecraft.network.syncher.EntityDataAccessor<Boolean> accessor =
+                            (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) powered.get(null);
+                    creeper.getEntityData().set(accessor, true);
+                }
+                if ((scene.creeperFlags & 2) != 0) creeper.ignite();
+            }
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
             mobs.add(mob);
@@ -3915,6 +4017,7 @@ public final class MobOracle {
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
+            line.append(",\"creeper\":").append(kind[0] == 10 ? scene.creeperFlags : 0);
             line.append(",\"kind\":").append(kind[0]).append('}');
         }
         line.append("],\"players\":[");
@@ -3928,7 +4031,14 @@ public final class MobOracle {
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
             line.append(",\"item\":0,\"looting\":0}");
         }
-        line.append("],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append("],\"hurts\":[");
+        for (int i = 0; i < scene.hurts.size(); i++) {
+            if (i > 0) line.append(',');
+            double[] hurt = scene.hurts.get(i);
+            line.append('[').append((int) hurt[0]).append(',').append((int) hurt[1]).append(',')
+                    .append(Float.floatToRawIntBits((float) hurt[2])).append(',').append((int) hurt[3]).append(']');
+        }
+        line.append("],\"summons\":[],\"eggs\":[]");
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -4093,7 +4203,17 @@ public final class MobOracle {
             out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            if (mob instanceof net.minecraft.world.entity.monster.Creeper creeper) {
+                // 和 Bamboo 一侧 `creeper::describe` 同一个格式。
+                // Same format as `creeper::describe` on the Bamboo side.
+                out.append(",\"var\":\"swell=").append(getInt(net.minecraft.world.entity.monster.Creeper.class, creeper, "swell"));
+                out.append(",dir=").append(creeper.getSwellDir());
+                out.append(",powered=").append(creeper.isPowered());
+                out.append(",ignited=").append(creeper.isIgnited());
+                out.append("\",\"snd\":\"minecraft:classic\"");
+            } else {
+                out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            }
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             out.append(",\"target\":").append(mob.getTarget() == null ? -1 : mob.getTarget().getId());

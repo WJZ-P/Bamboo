@@ -1441,7 +1441,14 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             *ticks_until_path_recalc = (*ticks_until_path_recalc - 1).max(0);
             // 官方 `MeleeAttackGoal.tick`：三个短路串行，
             // `nextFloat` 只在「pathed 非零且目标离它 < 1」时被求值。
-            if *ticks_until_path_recalc == 0
+            // `followingTargetEvenIfNotSeen` 为假（僵尸、骷髅、苦力怕都是）时，
+            // 最前面还有一条「看得见目标」：看不见就不重算路径，也不取随机数。
+            // With `followingTargetEvenIfNotSeen` false (zombies, skeletons, creepers) a
+            // line-of-sight check comes first: unseen targets cause no repath and no draws.
+            let visible =
+                living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position());
+            if visible
+                && *ticks_until_path_recalc == 0
                 && (*pathed_target == Vec3::default()
                     || target.position.distance_to_sqr(*pathed_target) >= 1.0
                     || me.random.next_float() < 0.05)

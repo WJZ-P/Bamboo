@@ -400,6 +400,11 @@ struct CowSetup {
     /// The sheep's starting `DATA_WOOL_ID`.
     #[serde(default)]
     wool: u8,
+    /// 苦力怕的起始标志：第 0 位带电，第 1 位已点燃。
+    ///
+    /// Creeper start flags: bit 0 powered, bit 1 ignited.
+    #[serde(default)]
+    creeper: i32,
     /// 鸡的 `eggTime` 起点（官方在构造函数里用重设种子之前的随机源抽）。
     ///
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
@@ -477,6 +482,13 @@ struct CowStep {
     hc: i32,
     #[serde(default)]
     armor: i64,
+}
+
+/// 走敌对生物那条对拍路径的场景（Java 一侧的 `playZombie`）。
+///
+/// Scenes replayed on the hostile-mob path (`playZombie` on the Java side).
+fn monster_scene(name: &str) -> bool {
+    name.starts_with("zombie_") || name.starts_with("creeper_")
 }
 
 const fn minus_one_i64() -> i64 {
@@ -1103,8 +1115,8 @@ impl Report {
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
-                bright_outside: case.bright_outside || !case.name.starts_with("zombie_"),
-                monsters_burn: if case.name.starts_with("zombie_") {
+                bright_outside: case.bright_outside || !monster_scene(&case.name),
+                monsters_burn: if monster_scene(&case.name) {
                     case.monsters_burn
                 } else {
                     true
@@ -1185,6 +1197,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    10 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
@@ -1192,6 +1205,13 @@ impl Report {
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
+                // 幼年标志和破门是僵尸一系专属的起始状态。
+                // The baby flag and door breaking are zombie-only start state.
+                let zombie_kind = matches!(
+                    kind,
+                    mc_bamboo_blocks::entity::mob::MobType::Zombie
+                        | mc_bamboo_blocks::entity::mob::MobType::Husk
+                );
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));
                 world.with_entity_mut(id, &mut |entity| {
                     entity.random = JavaRandom::new(cow.seed);
@@ -1207,16 +1227,18 @@ impl Report {
                         mob.y_body_rot = yaw;
                         mob.wool = cow.wool;
                         mob.egg_time = cow.egg;
+                        mob.creeper.powered = cow.creeper & 1 != 0;
+                        mob.creeper.ignited = cow.creeper & 2 != 0;
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if cow.age != 0 {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
-                        let baby = kind.is_monster() || cow.age < 0;
+                        let baby = zombie_kind || cow.age < 0;
                         let (width, height, eye) = kind.dimensions(baby);
                         entity.dimensions = (width, height);
                         if let Some(mob) = entity.kind.mob_mut() {
-                            if kind.is_monster() {
+                            if zombie_kind {
                                 mob.set_zombie_baby(true);
                                 mob.can_break_doors = case.difficulty == 3;
                                 if mob.can_break_doors {
@@ -1228,7 +1250,7 @@ impl Report {
                             }
                             mob.eye_height = eye;
                         }
-                    } else if kind.is_monster()
+                    } else if zombie_kind
                         && case.difficulty == 3
                         && let Some(mob) = entity.kind.mob_mut()
                     {
@@ -1761,7 +1783,7 @@ impl Report {
             plain!(var);
             plain!(snd);
             plain!(goals);
-            if name.starts_with("zombie_") {
+            if monster_scene(name) {
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -3063,6 +3085,7 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             }
         ),
         MobType::Chicken => format!("{}|egg{}", mob.variant.name(), mob.egg_time),
+        MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
         _ => mob.variant.name().to_owned(),
     }
 }
