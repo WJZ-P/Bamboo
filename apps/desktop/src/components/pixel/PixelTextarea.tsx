@@ -8,7 +8,7 @@ export const PixelTextarea = styled.textarea`
   min-height: 84px;
   padding: 8px 10px;
   ${({ theme }) => sunkenBorder(theme.color.sunkenShade, theme.color.panelLight)}
-  background: ${({ theme }) => theme.color.black};
+  background: ${({ theme }) => theme.color.field};
   color: ${({ theme }) => theme.color.panelLight};
   line-height: 1.6;
   outline: none;

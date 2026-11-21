@@ -7,7 +7,7 @@ export const PixelSelect = styled.select`
   width: 100%;
   padding: 8px 10px;
   ${({ theme }) => sunkenBorder(theme.color.sunkenShade, theme.color.panelLight)}
-  background: ${({ theme }) => theme.color.black};
+  background: ${({ theme }) => theme.color.field};
   color: ${({ theme }) => theme.color.panelLight};
   outline: none;
   cursor: pointer;
