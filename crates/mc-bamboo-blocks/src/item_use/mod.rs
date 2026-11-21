@@ -111,8 +111,20 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::SKELETON_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Skeleton)
         }
+        _ if ctx.item == items::CREEPER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Creeper)
+        }
         _ if ctx.item == items::HUSK_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Husk)
+        }
+        _ if ctx.item == items::SPIDER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Spider)
+        }
+        _ if ctx.item == items::ENDERMAN_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Enderman)
+        }
+        _ if ctx.item == items::CAVE_SPIDER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::CaveSpider)
         }
         _ => default_use_on(world, item, ctx),
     }
