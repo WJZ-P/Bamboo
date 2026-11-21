@@ -479,6 +479,8 @@ public final class MobOracle {
         int creeperFlags;
         /** 末影人场景：初始搬着的方块，`null` 表示空手。 */
         BlockState carried;
+        /** 末影人注视场景：玩家的初始朝向（`setYRot`）。 */
+        float playerYaw;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
@@ -941,6 +943,17 @@ public final class MobOracle {
                 scene.player(0.5, 64.0, stare ? -6.5 : 7.5, Items.AIR);
                 scenes.add(scene);
             }
+            // 注视锥的边缘：偏 3 度还算盯着（`0.025 / 距离` 的锥），偏 6 度不算。
+            // The edge of the stare cone: 3 degrees still counts, 6 degrees does not.
+            for (float yaw : new float[] {3.0F, 6.0F}) {
+                Scene edge = new Scene("enderman_stare_edge_" + (int) yaw).ticks(24).difficulty(2);
+                edge.clockStart = 18000;
+                edge.playerYaw = yaw;
+                edge.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                edge.mob(13, 0.5, 64.0, 0.5, 0.0F, yaw == 3.0F ? 15L : 17L, 0);
+                edge.player(0.5, 64.0, -6.5, Items.AIR);
+                scenes.add(edge);
+            }
             {
                 // 白天站在露天：`customServerAiStep` 反复随机传送。
                 // Out in the open during the day: `customServerAiStep` teleports it.
@@ -972,16 +985,27 @@ public final class MobOracle {
                 scenes.add(dodge);
                 // 地上全是泥土：捡起方块；搬着方块时再放回原处。
                 // A dirt floor: it picks a block up, then puts it back down.
-                Scene carry = new Scene("enderman_blocks").ticks(3000).difficulty(2);
-                carry.clockStart = 18000;
-                carry.fill(-12, 63, -12, 12, 63, 12, dirt);
+                Scene carry = new Scene("enderman_blocks").ticks(30000).difficulty(2);
+                carry.clockStart = 14000;
+                carry.monstersBurn = false;
+                carry.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                // 脚边一圈泥土：`EndermanTakeBlockGoal` 在自身高度上下 3 格采样，
+                // 只有这个高度的方块会被捡起来。
+                // A ring of dirt at foot level: the take goal samples within three blocks
+                // above the enderman and only finds these.
+                for (int[] at : new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {2, 0}, {-2, 0}}) {
+                    carry.set(at[0], 64, at[1], dirt);
+                }
                 carry.mob(13, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
                 carry.player(11.5, 64.0, 0.5, Items.AIR);
                 scenes.add(carry);
-                Scene place = new Scene("enderman_place").ticks(3000).difficulty(2);
-                place.clockStart = 18000;
+                Scene place = new Scene("enderman_place").ticks(30000).difficulty(2);
+                place.clockStart = 14000;
+                place.monstersBurn = false;
                 place.carried = dirt;
-                place.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                // 基岩不能当垫底方块（`canPlaceBlock` 排除基岩），用石头。
+                // Bedrock cannot support a placed block; use stone.
+                place.fill(-12, 63, -12, 12, 63, 12, Blocks.STONE.defaultBlockState());
                 place.mob(13, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
                 place.player(11.5, 64.0, 0.5, Items.AIR);
                 scenes.add(place);
@@ -4673,13 +4697,13 @@ public final class MobOracle {
             }
             player.setPos(at[0], at[1], at[2]);
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
-            player.setYRot(0.0F);
+            player.setYRot(scene.playerYaw);
             if (scene.name.startsWith("enderman_stare")) {
                 float pitch = (float) -Math.toDegrees(Math.atan2(2.55F - player.getEyeHeight(), 7.0));
                 player.setXRot(pitch);
             }
-            player.setYHeadRot(0.0F);
-            player.setYBodyRot(0.0F);
+            player.setYHeadRot(scene.playerYaw);
+            player.setYBodyRot(scene.playerYaw);
             player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(scene.playerItems.get(i)));
             if (scene.realPlayers) {
                 player.setHealth(scene.playerHealth);

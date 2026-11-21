@@ -816,5 +816,5 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 其他生物可以复用的：`TargetType::Endermite` 这种「类型不存在但取数照旧」的目标写法、`MobType::uses_block_step_sound`（末影人和苦力怕一样用脚下方块的 `SoundType`）、`enderman::set_target` 这种「设目标时同步专属状态」的包装。
 
-逐刻对拍场景（`mob-oracle --only enderman_`）：`enderman_stare` / `enderman_neutral`（注视与不注视）、`enderman_day_teleport`（白天露天）、`enderman_rain`（夜里淋雨）、`enderman_arrow`（箭）、`enderman_blocks`（泥土上捡方块）、`enderman_place`（开局搬着泥土）。7 个场景 6368 刻 0 不一致。已知限制见 README 的末影人一条。
+逐刻对拍场景（`mob-oracle --only enderman_`）：`enderman_stare` / `enderman_neutral`（注视与不注视）、`enderman_day_teleport`（白天露天）、`enderman_rain`（夜里淋雨）、`enderman_arrow`（箭）、`enderman_stare_edge_3` / `enderman_stare_edge_6`（注视锥的边缘，偏 3 度和 6 度）、`enderman_blocks`（脚边的泥土捡起再放下）、`enderman_place`（开局搬着泥土再放下）。9 个场景 60416 刻 0 不一致。方块场景把天色固定在傍晚并关掉「看得见天」，避免长场景跑到白天传送；传送后的头部 / 身体朝向差异见 README。已知限制见 README 的末影人一条。
 
