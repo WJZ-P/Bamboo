@@ -343,3 +343,71 @@ fn the_vehicle_rotation_is_wrapped() {
     assert_eq!(wrap_degrees(370.0), 10.0);
     assert_eq!(wrap_degrees(-190.0), 170.0);
 }
+
+/// `OPEN_INVENTORY` 骑在驯服的马科上打开坐骑物品栏：马的列数是 0，实体 ID 是 int。
+///
+/// `OPEN_INVENTORY` on a tamed equine opens its inventory: a horse has zero
+/// columns and the entity id is an int.
+#[test]
+fn the_inventory_key_opens_a_tamed_mount() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_protocol::packet::play::PlayerCommandKind;
+
+    use crate::world::tests::{Harness, frames_with_id};
+
+    let mut server = Harness::new(2);
+    let client = server.join("Rider");
+    server.tick();
+    let _ = client.take_frames();
+    let at = server.region().players[&client.id].position();
+    let mut horse = Entity::by_mob_type(MobType::Horse, at);
+    horse.with_mob(|_, mob| {
+        mob.equine.as_mut().expect("horse state").tame = true;
+    });
+    let uid = server.spawn_entity(horse);
+    super::mount(server.region(), client.id, uid);
+    crate::entity_sync::on_player_command(
+        server.region(),
+        client.id,
+        PlayerCommandKind::OpenInventory,
+        0,
+    );
+    server.region().links.flush();
+    let frames = client.take_frames();
+    let opened = frames_with_id(&frames, 42);
+    assert_eq!(opened.len(), 1, "one mount_screen_open");
+    let container_id = server.region().menus[&client.id].container_id;
+    let mut expected = vec![container_id as u8, 0];
+    expected.extend_from_slice(&uid.to_be_bytes());
+    assert_eq!(opened[0].body, expected);
+}
+
+/// 没驯服的马不响应物品栏键：官方 `openCustomInventoryScreen` 要求 `isTamed()`。
+///
+/// An untamed horse ignores the inventory key; vanilla
+/// `openCustomInventoryScreen` requires `isTamed()`.
+#[test]
+fn the_inventory_key_ignores_an_untamed_mount() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_protocol::packet::play::PlayerCommandKind;
+
+    use crate::world::tests::{Harness, frames_with_id};
+
+    let mut server = Harness::new(2);
+    let client = server.join("Rider");
+    server.tick();
+    let _ = client.take_frames();
+    let at = server.region().players[&client.id].position();
+    let horse = Entity::by_mob_type(MobType::Horse, at);
+    let uid = server.spawn_entity(horse);
+    super::mount(server.region(), client.id, uid);
+    crate::entity_sync::on_player_command(
+        server.region(),
+        client.id,
+        PlayerCommandKind::OpenInventory,
+        0,
+    );
+    server.region().links.flush();
+    assert!(frames_with_id(&client.take_frames(), 42).is_empty());
+    assert!(!server.region().menus.contains_key(&client.id));
+}

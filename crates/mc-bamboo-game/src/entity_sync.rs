@@ -649,7 +649,10 @@ fn may_fly(game_mode: GameMode) -> bool {
     matches!(game_mode, GameMode::Creative | GameMode::Spectator)
 }
 
-/// `player_command`：冲刺和拒绝滑翔，其余动作都忽略。`entities.md` 第 10 节。
+/// `player_command`：冲刺、拒绝滑翔、起跳，以及骑乘时开坐骑物品栏。`entities.md` 第 10 节。
+///
+/// `player_command`: sprinting, refusing the elytra, the riding jump and opening
+/// the mount inventory. `entities.md` section 10.
 pub(crate) fn on_player_command(
     region: &mut Region,
     id: PlayerId,
@@ -663,7 +666,7 @@ pub(crate) fn on_player_command(
         PlayerCommandKind::StopSleeping => crate::sleep::stop_sleeping(region, id),
         PlayerCommandKind::StartRidingJump => start_riding_jump(region, id, data),
         PlayerCommandKind::StopRidingJump => stop_riding_jump(region, id),
-        PlayerCommandKind::OpenInventory => {}
+        PlayerCommandKind::OpenInventory => crate::riding::open_vehicle_inventory(region, id),
     }
 }
 

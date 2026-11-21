@@ -193,6 +193,42 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
     });
 }
 
+/// `OPEN_INVENTORY`：骑着驯服的马科时打开坐骑物品栏。官方
+/// `AbstractHorse.openCustomInventoryScreen` 的条件是「没人在骑，或者骑的就是这名玩家」
+/// 再加 `isTamed()`；骑着的时候前一半恒真。
+///
+/// `OPEN_INVENTORY`: open the mount's inventory while riding a tamed equine.
+/// Vanilla `AbstractHorse.openCustomInventoryScreen` needs "not ridden, or ridden
+/// by this player" and `isTamed()`; the first half is always true while riding.
+pub(crate) fn open_vehicle_inventory(region: &mut Region, id: PlayerId) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let Some(vehicle) = player.riding.vehicle else {
+        return;
+    };
+    let Some(public) = region.entities.public_at(vehicle) else {
+        return;
+    };
+    let KindPublic::Mob(mob) = &public.kind else {
+        return;
+    };
+    if !mob.passengers.contains(&id.0) {
+        return;
+    }
+    let tamed = region
+        .entities
+        .with_mut(vehicle, |row| {
+            row.with_mob(|_, mob| mob.equine.as_ref().is_some_and(|state| state.tame))
+        })
+        .flatten()
+        .unwrap_or(false);
+    if !tamed {
+        return;
+    }
+    crate::menu::station::open_mount(region, id, vehicle);
+}
+
 /// 载具上骑手该站的位置：官方 `getPassengerAttachmentPoint` 的缺省点减去骑手的
 /// `VEHICLE` 附着点（玩家在脚底，是 0）。
 ///
