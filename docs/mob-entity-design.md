@@ -382,7 +382,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   2. 着火显示标志原来由 `remainingFireTicks > 0` 直接推出，点燃当刻就同步；
      官方在 `baseTick` 末尾才 `setSharedFlagOnFire`，晚一刻。现在 `Mob.visible_fire`
      在 `baseTick` 末尾重算，`convertCommon` 照官方抄这个标志。
-- **状态**：北极熊已对拍 0 不一致（`mob-oracle --only polar_bear` 9 例 1081 刻）。
+- **状态**：北极熊已对拍 0 不一致（`mob-oracle --only polar_bear` 11 例 1121 刻，含成年 / 幼崽选狐两场景）。
   `SpawnPlacementTypes.ON_GROUND` 的落脚块检查传入实体类型：冰和霜冰按官方 `Blocks`
   的专用谓词只允许北极熊，之后仍检查 `PolarBear.checkPolarBearSpawnRules`。
   自然生成与生成期刷怪的对拍分别覆盖蘑菇岛菌丝上的哞菇、冰冻海洋冰面上的北极熊。
@@ -919,3 +919,112 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
 - 北极熊的 `NearestAttackableTargetGoal<Fox>` 在抽取间隔随机数后才过滤幼崽；成年熊扫描附近活着且可见的狐狸。`mob-oracle --only polar_bear_fight_fox` 分别比较成年和幼崽的目标与逐刻状态。狐狸反向躲熊尚未接入。
 - `mob-oracle --only natural_spawn_panda` 从原版丛林表固定熊猫条目，比较亮度 15 / 8 下逐刻的刷出数量、位置、双基因和世界随机源。
 - `mob-oracle --only gen_spawn_panda` 用竹林完整动物表，比较位置、朝向、双基因和随机源指纹。鹦鹉按官方 `ON_GROUND`、`MOTION_BLOCKING` 和 `parrots_spawnable_on` 模拟放置，但不创建实体，也不运行鹦鹉的 `finalizeSpawn`。同一区块先出现原版鹦鹉时，仍比较装饰随机源和后续已实现生物的位置；后续区域随机源和依赖它的属性不在夹具比较范围内。
+## 鱿鱼和发光鱿鱼的实施现状
+
+鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，以后海豚、鱼类也要用的公共部分在 `entity/mob/water.rs`：
+
+- `water::handle_air_supply`（`AgeableWaterCreature.handleAirSupply`，在 `super.baseTick()` 之后用这一刻开始时的氧气算）、`water::surface_spawn_rules`（`checkSurfaceAgeableWaterCreatureSpawnRules`）、`water::in_water_position_ok`（`SpawnPlacementTypes.IN_WATER`）和 `water::finalize_ageable`（不带花色那一层的 `AgeableMob.finalizeSpawn` + `Mob.finalizeSpawn`）。
+- `MobType` 新增几个按类型的开关，别的水生生物加进来时只改这些函数：`is_ageable_water_creature`、`is_animal`（存档的 `InLove` / `LoveCause` 只有 `Animal` 写）、`can_breathe_under_water`、`is_pushed_by_fluid`、`emits_movement_sounds`（`MovementEmission.EVENTS` 不放脚步声、也不取游泳声的两个随机数）、`spawns_in_water`。
+- `living::hurt_server` 现在是 `hurtServer` 的虚分派入口：鱿鱼走 `squid::hurt_server`（父类成功且 `getLastHurtByMob() != null` 才返回真并喷墨，发光鱿鱼再设 100 刻变暗），其余走 `living_hurt_server`。
+- 目标：`Goal::SquidRandomMovement`（优先级 0）和 `Goal::SquidFlee`（优先级 1，每刻目标）都不占标志位，只写 `Mob.squid.movement`；`Squid.aiStep` 的尾部（`squid::ai_step`）按触手节拍把它写成速度，`travel` 只是 `move(SELF, deltaMovement)`。官方 `SquidFleeGoal.tick` 里 `fleeTo.normalize()` 的返回值被丢弃，这里同样不归一化。
+- 新的生物事件 `MobEvent::Particles`（`ServerLevel.sendParticles`）：游戏层按「玩家所在方块的中心离粒子不到 32 格」发 `level_particles`。以后别的生物的服务端粒子可以复用。
+- 发光鱿鱼的 `DATA_DARK_TICKS_REMAINING` 下标由生成器导出（`entity_types::GLOW_SQUID_DARK_TICKS`）。服务端的 `addParticle(GLOW, getRandomX, getRandomY, getRandomZ)` 不发包，但三个 `nextDouble` 照取。
+- 自然生成：`SpawnParams` 多一个 `sea_level`（`natural_spawn.rs` 按世界类型给）；`check_spawn_rules`、`spawn_placement_ok`、`is_valid_position_for_mob`（`AgeableWaterCreature.checkSpawnObstruction` 不查液体）按类型分派。`walk_target_value` 对非 `Animal` 返回 `PathfinderMob` 的缺省值 0。
+
+岛的拆合：新增的按实体状态只有 `Mob.squid`（`SquidState`：身体倾角、触手节拍、移动向量、变暗倒计时）和目标里的 `flee_ticks`，全是相对量、都在实体行上，整行搬走即可，没有改 `IslandPart` 清单和 `region/island_split.rs`。
+
+对拍：`mob-oracle --only squid_` / `--only glow`（`squid_swim`、`squid_hurt`、`squid_beached`、`squid_swim_baby`、`glow_squid_swim`、`glow_squid_hurt`，共 1666 刻）逐刻比位置、速度、朝向、随机源、氧气、身体与触手状态、移动向量、掉落、世界随机源和出站包字节（配对、同步、实体事件 19、音效、墨汁粒子、变暗元数据）；`--break-self-test squid` 把那一下伤害改成 2 点能被抓到。自然生成见 `mob-oracle --only natural_spawn` 的 `squid_ocean*` / `glow_squid_*` 夹具，存档见 `chunk-content` 的 fresh 实体对拍。
+
+已知差异：生物受伤后 `ServerEntity.sendChanges` 因 `hurtMarked` 多发的那个速度包，正式游戏路径一直没有发（`Mob.hurt_marked` 只写不读，牛和僵尸也一样）；`mob-oracle` 的鱿鱼场景在对拍里自己读并清这个标志。
+
+## 鱼的实施现状（2026-11-21）
+
+鳕鱼、鲑鱼、热带鱼、河豚是官方的 `WaterAnimal` → `AbstractFish` 一支，专属逻辑在
+`entity/mob/fish.rs`。它们不是 `AgeableMob`：没有年龄、求爱和繁殖，存档不写 `Age`。
+
+- 公共部分：`water::handle_air_supply` 对 `is_water_animal()` 也生效；`MobType` 加了
+  `is_water_animal` / `is_ageable`，`is_animal`、`is_pushed_by_fluid`、`spawns_in_water`、
+  `can_breathe_under_water` 都跟着这两种鱼类分支改。
+- 导航：`EvaluatorFlags.swim = Some(allowBreaching)` 选中 `SwimNodeEvaluator`
+  （六个方向 + 两边都可走的四个水平对角），`WaterBoundPathNavigation` 的
+  `canUpdatePath` / `getTempMobPos` / `getGroundY` / `isStableDestination` /
+  `getMaxVerticalDistanceToWaypoint` 都按 `flags.swim` 分派；鱼的
+  `allowBreaching` 是假（以后海豚为真）。`BlockState::is_pathfindable_water` 来自新导出的
+  `PATHFINDABLE_WATER` 状态事实。
+- 移动：`fish::move_control_tick`（`FishMoveControl`）、`fish::travel_in_water`
+  （`AbstractFish.travelInWater`）、`fish::ai_step`（离水扑腾）；`motion::movement_emission`
+  现在真的发游泳声（音量按速度、音高两个 `nextFloat`），鱼的脚步声为空但「踩过」仍成立。
+- 目标：`Goal::Swim`（`RandomSwimmingGoal` + `getRandomSwimmablePos` 的 11 次抽点）、
+  `Goal::PufferfishPuff`、`Goal::FollowFlock`（`FollowFlockLeaderGoal`，跟随时用
+  `Command::SchoolFollow` / `SchoolLeave` 改领头和群计数）。`AvoidEntityGoal`（优先级 2）未建模。
+- 河豚蜇刺走新的 `Command::PufferSting`：先 `hurtMob`，打中了才下毒并放蜇刺声。
+- 数据：`FROM_BUCKET`(16)、`SALMON_VARIANT`/`TROPICAL_FISH_VARIANT`/`PUFFERFISH_PUFF_STATE`(17)
+  由生成器导出，元数据和存档都用它们；`MobPublic` 多带鱼的花纹、膨胀和群的三个字段。
+- 对拍：`mob-oracle --only cod|salmon|tropical|puffer` 和 `--only natural_fish`。
+  `cod_swim` / `salmon_swim` / `tropical_fish_swim` 各 241 刻 **0 不一致**（位置、速度、
+  朝向、随机源、氧气、尺寸、掉落、世界随机源、出站包逐字节）；`cod_beached` 461 刻、
+  `pufferfish_puff` 241 刻也都 **0 不一致**（2026-11-21 修好，原因见下）。
+- 自然生成：`natural_fish` 五个夹具（鳕鱼 / 鲑鱼 / 热带鱼 / 繁茂洞穴热带鱼 / 河豚）
+  各 6 个种子 × 4 个时刻，**30 例 0 不一致**。为此修了两处公共规则：
+  `MobType::can_spawn_far_from_player` 原来对所有非怪物返回真，官方只对
+  `CREATURE | MISC` 为真（`WATER_AMBIENT` 的消失距离是 64，超过就不该进
+  `isValidSpawnPostitionForType`）；`goals::walk_target_value` 对 `is_water_animal()`
+  也返回 0，因为鱼不是 `Animal`，`PathfinderMob.getWalkTargetValue` 的缺省就是 0
+  （原来落到 `Animal` 的亮度权重，繁茂洞穴里是负数，滤掉全部候选）。
+- 桶装（`Bucketable`）：`entity/mob/bucketable.rs` 负责
+  `saveDefaultDataToBucketTag` / `loadDefaultDataFromBucketTag`（`bucket_entity_data`
+  组件）、鱼桶物品、`bucketMobPickup` 和 `MobBucketItem.spawn`。水桶右键活鱼按
+  `AbstractFish.mobInteract` → `Bucketable.bucketMobPickup` 换桶并 `discard()`；
+  倒鱼桶先走 `BucketItem.emptyContents` 放水，再 `checkExtraContent` 在落点生成
+  `FromBucket = true` 的鱼（朝向取 `level.random`，`finalizeSpawn` 用 `BUCKET` 原因，
+  之后套组件并 `loadFromBucketTag`），发射器倒鱼桶也生成。鲑鱼存 `salmon/size`，
+  热带鱼存 `tropical_fish/pattern` / `base_color` / `pattern_color`，其余只有默认数据。
+  美西螈 / 蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。
+  验证：块级单元测试（组件拆分、只改有的键、存档往返）、游戏层两条（生存换桶、
+  创造加桶）、发射器一条（生成的鱼 + 随机源种子）。没有 Java 逐刻对拍。
+- 2026-11-21 修掉的三处：`AbstractFish.aiStep`（离水扑腾）原来对所有动物都跑，陆地动物
+  站在地上每刻都会蹦、取实体随机数、放扑腾声并从岛的音效种子源取数（`sheep_eat` 漂移和
+  `island_command` 岛 1 随机源不一致都是它），现在只对 `is_fish` 跑；扑腾时补上
+  `needsSync`，死后倒计时那 20 刻里速度和移动包才会当刻发出（`cod_beached`）；河豚没有
+  叫声，原来回落到牛的叫声并多取两个音高随机数（`pufferfish_puff` 第 62 刻），另外对拍
+  Rust 一侧的牛位置从 1.5 改成和官方一样的 0.9。
+
+## 海龟的实施现状（2026-11-21，分支 `op-water`）
+
+海龟是官方 `Animal` 一支，专属逻辑在 `entity/mob/turtle.rs`。它的移动是两栖的，
+所以这一轮给寻路加了一层公共设施：
+
+- `EvaluatorFlags.amphibious`：`AmphibiousNodeEvaluator`（水当可走、上下两个水邻居、
+  贴着 `BLOCKED` 的水是 `WATER_BORDER`、搜索期间 `WATER` / `WALKABLE` / `WATER_BORDER`
+  的代价临时改成 0 / 6 / 4）和 `AmphibiousPathNavigation`（`canUpdatePath` 恒真、
+  `getTempMobPos` 取 `getY(0.5)`、`getGroundY` 原样、`isStableDestination` 要求下面
+  不是空气、只在液体里允许直走）。美西螈以后直接用这个开关。
+- 实体：`Mob.turtle`（家方块、`travelPos`、`goingHome`、`layEggCounter`、`has_egg`、
+  `laying_egg`、回家目标的两个计数、产卵 `MoveToBlockGoal` 的四个进度）。属性、
+  尺寸（幼年 0.3 倍）、水 / 门三种 `PathfindingMalus`、音效（幼年受伤和死亡、
+  陆地上的叫声、`nextStep = moveDist + 0.15`）、`travelInWater` 和 `canFallInLove`
+  都按官方。
+- 目标：0 `TurtlePanicGoal`（先找 7 格内的水）、1 `TurtleBreedGoal`、1
+  `TurtleLayEggGoal`、2 `TemptGoal`、3 `TurtleGoToWaterGoal`、4 `TurtleGoHomeGoal`、
+  7 `TurtleTravelGoal`、8 `LookAtPlayerGoal`、9 `TurtleRandomStrollGoal`。
+  `MoveToBlockGoal.findNearestBlock` 按官方的 y / 圈 / x / z 交替顺序写成一个通用函数，
+  产卵（半径 16，y 依次 0、1、-1）和找水（半径 24，只看 y = -1 那一层，即脚下两格）共用；
+  `MoveToBlockGoal` 没有 `stop`，停止时不停导航。远行目标读 `BlockView::sea_level`
+  （游戏层按世界类型给 63 / -63），有远行目标时 `TurtlePathNavigation.isStableDestination`
+  只认水格。
+- 移动：`TurtleMoveControl`（水里上浮 0.005，离家 16 格外速度减半、幼年再除以 3，地上
+  速度减半，0.125 插值，不跳也不回到 `WAIT`）；`AmphibiousNodeEvaluator.getStart` 在水里
+  从包围盒最小角起步（原来按走路求值器往下找地面，会穿过水下的空气一路找到世界底部）。
+  能在水下呼吸，游泳声 `entity.turtle.swim` 音量 ×1.5。
+- 繁殖：`TurtleBreedGoal.breed` 不走 `Animal.spawnChildFromBreeding`，母亲设
+  `has_egg`、双方年龄 6000、掉一颗 `1 + nextInt(7)` 的经验球；`apply_breed` 里有一条
+  海龟分支。喂食时 `canFallInLove` 为假（有蛋）就不进求爱。
+- 产卵和孵化：`TurtleLayEggGoal` 在离家 9 格内找上面是空气、下面是沙子的格子，
+  `layEggCounter > 200` 时用 `Command::LayTurtleEgg` 放 1–4 只蛋（`EGGS`），
+  蛋的 `randomTick` 按 `TURTLE_EGG_HATCH_CHANCE`（白天 0.002、夜里 21062–21905 刻
+  为 1.0）推进 `HATCH`，第三阶段清掉方块并生成 `EGGS` 只幼年海龟（家方块是蛋的位置）。
+- 存档和同步：`home_pos` / `has_egg` 存盘；`HAS_EGG`(18) / `LAYING_EGG`(19) 同步，
+  非默认才发。长大的那一刻按 `entities/turtle_grow` 掉鳞甲（走 `EntityLootRequest`）。
+- 验证：`mob-oracle --only zombie_turtle_ai`（类型 60，借僵尸场景的多生物路径）四个场景：
+  沙滩找水两个种子、幼年、水下远行，共 1500 刻 **0 不一致**（位置、速度、朝向、随机源、
+  氧气、运行中的目标、路径节点）。产卵、孵化、回家还没有场景，也没有自然生成夹具。

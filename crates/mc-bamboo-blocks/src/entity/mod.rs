@@ -24,6 +24,7 @@ mod falling;
 mod item;
 mod orb;
 mod physics;
+mod resize;
 mod tnt;
 
 use mc_bamboo_core::{Axis, BlockPos, Vec3};
@@ -502,6 +503,11 @@ impl Entity {
             // `Chicken` 构造函数最后的 `eggTime = nextInt(6000) + 6000`。
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
             mob.egg_time = self.random.next_int_bounded(6000) + 6000;
+        }
+        if mob::squid::is_squid(mob.mob_type) {
+            // `Squid` 构造函数最后的 `tentacleSpeed`，取一次 `nextFloat`。
+            // The `Squid` constructor's trailing `tentacleSpeed`, one `nextFloat`.
+            mob.squid.tentacle_speed = mob::squid::roll_tentacle_speed(&mut self.random);
         }
     }
 

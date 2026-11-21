@@ -3579,11 +3579,23 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PANDA_MAIN_GENE", facts.panda_main_gene),
         ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
         ("PANDA_FLAGS", facts.panda_flags),
+        ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
+        ("FISH_FROM_BUCKET", facts.fish_from_bucket),
+        ("SALMON_VARIANT", facts.salmon_variant),
+        ("TROPICAL_FISH_VARIANT", facts.tropical_fish_variant),
+        ("PUFFERFISH_PUFF_STATE", facts.pufferfish_puff_state),
         ("CHICKEN_VARIANT", facts.chicken_variant),
         ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
+        ("TURTLE_HAS_EGG", facts.turtle_has_egg),
+        ("TURTLE_LAYING_EGG", facts.turtle_laying_egg),
     ] {
         let _ = writeln!(out, "pub const {name}: u8 = {value};");
     }
+    let _ = writeln!(
+        out,
+        "pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &{:?};",
+        facts.tropical_fish_common_variants
+    );
     for (name, value) in [
         ("PIG_VARIANT_SERIALIZER", facts.pig_variant_serializer),
         (

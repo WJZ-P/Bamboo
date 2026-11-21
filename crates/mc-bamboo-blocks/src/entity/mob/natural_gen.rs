@@ -210,7 +210,12 @@ fn spawn_one(
 /// `SpawnPlacements.checkSpawnRules`: use each modelled animal's own rule.
 fn spawn_rules(world: &World, placement: Placement, pos: BlockPos) -> bool {
     match placement.kind {
-        Some(kind) => natural::check_spawn_rules(world, kind, pos),
+        // 生成期 `CREATURE` 表只有陆生动物；`sea_level` 只在海龟和水生分支读取，
+        // 这里用官方 `Level.getSeaLevel()` 的缺省 63（生成期没有 `SpawnParams`）。
+        // World-gen `CREATURE` tables only contain land animals; `sea_level` is read
+        // by the turtle and aquatic branches only, so use the `Level.getSeaLevel()`
+        // default of 63 (there is no `SpawnParams` during world generation).
+        Some(kind) => natural::check_spawn_rules(world, kind, pos, 63),
         None if placement.entity_type == entity_type::PARROT => {
             natural::bright_spawn_rules(world, pos, block_tags::PARROTS_SPAWNABLE_ON)
         }

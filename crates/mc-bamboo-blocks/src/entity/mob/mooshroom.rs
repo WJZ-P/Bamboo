@@ -175,7 +175,7 @@ fn fill_bowl(me: &Entity, mob: &mut Mob) -> MobInteraction {
     MobInteraction {
         result: InteractionResult::Success,
         replacement: Some(stew),
-        replacement_limit_creative: false,
+        limit_creative: false,
         ..MobInteraction::pass()
     }
 }

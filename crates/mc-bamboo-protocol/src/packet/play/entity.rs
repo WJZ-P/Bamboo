@@ -224,6 +224,27 @@ pub enum EntityData {
     ///
     /// `Panda.DATA_ID_FLAGS` (BYTE): sneezing, rolling, sitting, on its back.
     PandaFlags(u8),
+    /// `GlowSquid.DATA_DARK_TICKS_REMAINING`，INT。
+    ///
+    /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
+    GlowSquidDarkTicks(i32),
+    /// `AbstractFish.FROM_BUCKET`，BOOLEAN，index 16。
+    ///
+    /// `AbstractFish.FROM_BUCKET`, a BOOLEAN at index 16.
+    FishFromBucket(bool),
+    /// `Salmon.DATA_TYPE` / `TropicalFish.DATA_ID_TYPE_VARIANT` / `Pufferfish.PUFF_STATE`，
+    /// 都在 index 17，INT。
+    ///
+    /// `Salmon.DATA_TYPE` / `TropicalFish.DATA_ID_TYPE_VARIANT` / `Pufferfish.PUFF_STATE`,
+    /// all at index 17 as an INT.
+    SalmonVariant(i32),
+    TropicalFishVariant(i32),
+    PufferfishPuffState(i32),
+    /// `Turtle.HAS_EGG` / `Turtle.LAYING_EGG`，BOOLEAN。
+    ///
+    /// `Turtle.HAS_EGG` / `Turtle.LAYING_EGG`, BOOLEANs.
+    TurtleHasEgg(bool),
+    TurtleLayingEgg(bool),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -348,6 +369,13 @@ impl EntityData {
             Self::PandaMainGene(_) => mc_bamboo_data::entity_types::PANDA_MAIN_GENE,
             Self::PandaHiddenGene(_) => mc_bamboo_data::entity_types::PANDA_HIDDEN_GENE,
             Self::PandaFlags(_) => mc_bamboo_data::entity_types::PANDA_FLAGS,
+            Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
+            Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
+            Self::SalmonVariant(_) => mc_bamboo_data::entity_types::SALMON_VARIANT,
+            Self::TropicalFishVariant(_) => mc_bamboo_data::entity_types::TROPICAL_FISH_VARIANT,
+            Self::PufferfishPuffState(_) => mc_bamboo_data::entity_types::PUFFERFISH_PUFF_STATE,
+            Self::TurtleHasEgg(_) => mc_bamboo_data::entity_types::TURTLE_HAS_EGG,
+            Self::TurtleLayingEgg(_) => mc_bamboo_data::entity_types::TURTLE_LAYING_EGG,
         }
     }
 
@@ -580,6 +608,24 @@ impl EntityData {
             Self::PandaMainGene(gene) | Self::PandaHiddenGene(gene) | Self::PandaFlags(gene) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*gene);
+            }
+            Self::GlowSquidDarkTicks(ticks) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *ticks);
+            }
+            Self::FishFromBucket(from_bucket) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *from_bucket);
+            }
+            Self::TurtleHasEgg(value) | Self::TurtleLayingEgg(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::SalmonVariant(value)
+            | Self::TropicalFishVariant(value)
+            | Self::PufferfishPuffState(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
             }
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);

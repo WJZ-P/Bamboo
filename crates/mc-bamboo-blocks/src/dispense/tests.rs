@@ -367,8 +367,9 @@ fn a_blocked_filled_bucket_nests_a_default_throw() {
 }
 
 #[test]
-fn a_fish_bucket_pours_water_and_skips_the_mob() {
-    let shot = fire_id(&mut TestLevel::new(), Direction::Up, items::SALMON_BUCKET);
+fn a_fish_bucket_pours_water_and_spawns_its_fish() {
+    let mut level = TestLevel::new();
+    let shot = fire_id(&mut level, Direction::Up, items::SALMON_BUCKET);
     assert!(shot.front.is(blocks::WATER));
     assert_eq!(shot.left, ItemStack::new(items::BUCKET, 1));
     assert_eq!(
@@ -378,7 +379,23 @@ fn a_fish_bucket_pours_water_and_skips_the_mob() {
             mob_spawn_draws(random);
         })
     );
+    // 水面上多一条鲑鱼；桶里的生物真的生成了，不再只取随机数。
+    // A salmon now exists in the water: the mob is really spawned, not just modelled
+    // through its random draws.
+    assert_eq!(
+        level
+            .entities()
+            .iter()
+            .filter(|entity| matches!(
+                &entity.kind,
+                EntityKind::Mob(mob) if mob.mob_type == crate::entity::mob::MobType::Salmon
+            ))
+            .count(),
+        1
+    );
 
+    // 美西螈还没建模，只按官方的次数取数。
+    // The axolotl is not modelled; only its vanilla draw count is taken.
     let axolotl = fire_id(&mut TestLevel::new(), Direction::Up, items::AXOLOTL_BUCKET);
     assert!(axolotl.front.is(blocks::WATER));
     assert_eq!(
