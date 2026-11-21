@@ -2653,7 +2653,118 @@ public final class MobOracle {
                 cases++;
             }
         }
+        return cases + playEquineInteractions(official, out, world, types);
+    }
+
+    /** 交互对拍用的物品，按顺序编号。 */
+    private static List<Item> equineItems() {
+        return List.of(Items.WHEAT, Items.SUGAR, Items.HAY_BLOCK,
+            Items.APPLE, Items.CARROT, Items.RED_MUSHROOM, Items.GOLDEN_CARROT, Items.GOLDEN_APPLE,
+            Items.CHEST, Items.SADDLE, Items.IRON_HORSE_ARMOR, Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE), Items.STICK);
+    }
+
+    /**
+     * 马科右键：每种马科 × 六种初始状态 × 每件物品，走官方 `Player.interactOn`，
+     * 比结果、手里剩几个、马的标志字节、脾气、血量、求爱、年龄、箱子、鞍、身体和随机源。
+     * 驯服的成年个体潜行会开物品栏（要连接），不出这一题。
+     * Equine right-click through `Player.interactOn`, compared on the result, the held
+     * count and the mount's state. Sneaking on a tamed adult opens a screen and is skipped.
+     */
+    private static int playEquineInteractions(Official official, Writer out, FakeLevel world,
+            List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
+            throws Exception {
+        int cases = 0;
+        List<Item> EQUINE_ITEMS = equineItems();
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+            for (int setup = 0; setup < 6; setup++) {
+                for (int itemIndex = 0; itemIndex < EQUINE_ITEMS.size(); itemIndex++) {
+                    for (int mode = 0; mode < 2; mode++) {
+                        boolean creative = mode == 1 && setup == 2;
+                        boolean sneak = mode == 1 && setup >= 4;
+                        if (mode == 1 && !creative && !sneak) continue;
+                        long seed = 9001L + typeIndex * 1000L + setup * 100L + itemIndex * 3L + mode;
+                        net.minecraft.world.entity.animal.equine.AbstractHorse mob =
+                                types.get(typeIndex).create(world, EntitySpawnReason.COMMAND);
+                        setRandom(mob, seed);
+                        setupEquine(mob, setup);
+                        ServerPlayer player = new ServerPlayer(official.server, world, profile,
+                                ClientInformation.createDefault());
+                        player.setPos(1.5, 64.0, 0.5);
+                        // `doPlayerRide` 会 `startRiding`，`ServerPlayer` 要一个能收包的连接。
+                        // `doPlayerRide` starts riding, which needs a connection that takes packets.
+                        ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+                        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+                        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                                connection, "server", official.server);
+                        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+                        ((RecordingListener) connection).bytes = new Bytes(official.registries);
+                        put(ServerPlayer.class, player, "connection", connection);
+                        putBoolean(net.minecraft.world.entity.player.Abilities.class, player.getAbilities(),
+                                "instabuild", creative);
+                        player.setShiftKeyDown(sneak);
+                        player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(EQUINE_ITEMS.get(itemIndex)));
+                        var result = player.interactOn(mob, InteractionHand.MAIN_HAND, mob.position());
+                        String swing = result instanceof net.minecraft.world.InteractionResult.Success success
+                                ? success.swingSource().name() : "PASS";
+                        out.write("{\"type\":\"equineInteract\",\"kind\":" + typeIndex + ",\"setup\":" + setup
+                                + ",\"item\":" + BuiltInRegistries.ITEM.getId(EQUINE_ITEMS.get(itemIndex))
+                                + ",\"creative\":" + creative + ",\"sneak\":" + sneak + ",\"seed\":" + seed
+                                + ",\"swing\":\"" + swing + "\""
+                                + ",\"count\":" + player.getItemInHand(InteractionHand.MAIN_HAND).getCount()
+                                + ",\"after\":" + equineAfter(mob) + "}\n");
+                        cases++;
+                    }
+                }
+            }
+        }
         return cases;
+    }
+
+    /** 六种初始状态：0 野生满血、1 野生残血高脾气、2 驯服满血、3 驯服残血带鞍带护甲带箱子、4 驯服幼崽残血、5 野生幼崽。 */
+    private static void setupEquine(net.minecraft.world.entity.animal.equine.AbstractHorse mob, int setup) {
+        boolean llama = mob instanceof net.minecraft.world.entity.animal.equine.Llama;
+        mob.setTamed(setup >= 2 && setup <= 4);
+        if (setup == 1) {
+            mob.setTemper(llama ? 28 : 95);
+        }
+        if (setup == 1 || setup == 3 || setup == 4) {
+            mob.setHealth(10.0F);
+        }
+        if (setup >= 4) {
+            mob.setAge(-24000);
+        }
+        if (setup == 3) {
+            if (!llama) {
+                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.equine.Horse) {
+                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(Items.IRON_HORSE_ARMOR));
+            }
+            if (llama) {
+                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE)));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse chested) {
+                chested.setChest(true);
+            }
+        }
+        // 已经在世界里跑过的生物：`onEquipItem` 只在 `!firstTick` 时出声取数。
+        // A mob that has already ticked: `onEquipItem` only plays and draws after the first tick.
+        putBoolean(Entity.class, mob, "firstTick", false);
+    }
+
+    /** 交互之后：标志字节、脾气、血量位、求爱、年龄、箱子、鞍、身体、随机源。 */
+    private static String equineAfter(net.minecraft.world.entity.animal.equine.AbstractHorse mob) throws Exception {
+        boolean chest = mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse chested
+                && chested.hasChest();
+        var saddle = mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.SADDLE);
+        var body = mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.BODY);
+        return "[" + equineFlags(mob) + "," + mob.getTemper() + "," + Float.floatToRawIntBits(mob.getHealth())
+                + "," + mob.getInLoveTime() + "," + mob.getAge() + "," + (chest ? 1 : 0)
+                + "," + (saddle.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(saddle.getItem()))
+                + "," + (body.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(body.getItem()))
+                + "," + randomSeed(mob) + "]";
     }
 
     /** `AbstractHorse.DATA_ID_FLAGS` 的字节（私有，反射读）。 */

@@ -77,6 +77,7 @@ enum Line {
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     EquineSpawn(equine::SpawnCase),
     EquineBreed(equine::BreedCase),
+    EquineInteract(equine::InteractCase),
     End(End),
 }
 
@@ -902,6 +903,7 @@ impl Report {
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
                 Line::EquineSpawn(case) => self.replay_equine_spawn(case),
                 Line::EquineBreed(case) => self.replay_equine_breed(case),
+                Line::EquineInteract(case) => self.replay_equine_interact(case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {

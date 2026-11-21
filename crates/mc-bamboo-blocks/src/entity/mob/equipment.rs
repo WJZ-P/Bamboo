@@ -1,11 +1,12 @@
 //! 生物的装备：`LivingEntity.equipment`（`EntityEquipment`）、`Mob.dropChances`
 //! （`DropChances`）和 `LivingEntity.lastEquipmentItems`（`detectEquipmentUpdates` 的比较基准）。
 //!
-//! 只建模六个人形槽（主手、副手、脚、腿、胸、头），顺序是官方 `EquipmentSlot` 的 ordinal，
-//! 和协议里的 [`EquipmentSlot`] 一致。`BODY` / `SADDLE` 是马和狼的槽，这里的生物用不到。
+//! 八个槽都建模（主手、副手、脚、腿、胸、头、身体、鞍），顺序是官方 `EquipmentSlot` 的
+//! ordinal，和协议里的 [`EquipmentSlot`] 一致。身体和鞍是马科用的。
 //!
-//! Mob equipment: the six humanoid slots in vanilla `EquipmentSlot` ordinal order, the
-//! drop chances and the last-sent copies `detectEquipmentUpdates` compares against.
+//! Mob equipment: all eight slots in vanilla `EquipmentSlot` ordinal order (body
+//! and saddle are for equines), the drop chances and the last-sent copies
+//! `detectEquipmentUpdates` compares against.
 
 use mc_bamboo_data::registries::data_component_type as kinds;
 use mc_bamboo_nbt::Tag;
@@ -95,7 +96,21 @@ pub fn stack_modifiers(stack: &ItemStack, slot: EquipmentSlot) -> Vec<(i32, Modi
     out
 }
 
-/// 六个槽，按官方 ordinal。
+/// 八个槽，按官方 ordinal。
+///
+/// All eight slots in vanilla ordinal order.
+pub const ALL_SLOTS: [EquipmentSlot; 8] = [
+    EquipmentSlot::MainHand,
+    EquipmentSlot::OffHand,
+    EquipmentSlot::Feet,
+    EquipmentSlot::Legs,
+    EquipmentSlot::Chest,
+    EquipmentSlot::Head,
+    EquipmentSlot::Body,
+    EquipmentSlot::Saddle,
+];
+
+/// 六个人形槽，按官方 ordinal。
 pub const SLOTS: [EquipmentSlot; 6] = [
     EquipmentSlot::MainHand,
     EquipmentSlot::OffHand,
@@ -140,23 +155,23 @@ pub const fn break_event(slot: EquipmentSlot) -> u8 {
 }
 
 fn index(slot: EquipmentSlot) -> Option<usize> {
-    SLOTS.iter().position(|candidate| *candidate == slot)
+    ALL_SLOTS.iter().position(|candidate| *candidate == slot)
 }
 
 /// 一个生物的装备、掉落几率和上次同步出去的装备。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobEquipment {
-    items: [ItemStack; 6],
-    drop_chances: [f32; 6],
+    items: [ItemStack; 8],
+    drop_chances: [f32; 8],
     /// `lastEquipmentItems`：上次 `detectEquipmentUpdates` 记下的副本，初始全空。
-    last_sent: [ItemStack; 6],
+    last_sent: [ItemStack; 8],
 }
 
 impl Default for MobEquipment {
     fn default() -> Self {
         Self {
             items: std::array::from_fn(|_| ItemStack::empty()),
-            drop_chances: [DEFAULT_DROP_CHANCE; 6],
+            drop_chances: [DEFAULT_DROP_CHANCE; 8],
             last_sent: std::array::from_fn(|_| ItemStack::empty()),
         }
     }
@@ -179,9 +194,11 @@ impl MobEquipment {
         }
     }
 
-    /// 六个槽和其中的物品，按官方 ordinal。
+    /// 八个槽和其中的物品，按官方 ordinal。
+    ///
+    /// The eight slots and their items, in vanilla ordinal order.
     pub fn iter(&self) -> impl Iterator<Item = (EquipmentSlot, &ItemStack)> {
-        SLOTS.iter().copied().zip(self.items.iter())
+        ALL_SLOTS.iter().copied().zip(self.items.iter())
     }
 
     /// `EntityEquipment.isEmpty`。
@@ -229,7 +246,7 @@ impl MobEquipment {
     /// - `handleHandSwap`：只是主副手互换时不发装备，改发实体事件 55；
     /// - 收集到的槽都记成已同步（`lastEquipmentItems`）。
     pub fn detect_updates(&mut self, attributes: &mut Attributes) -> EquipmentUpdate {
-        let changed: Vec<usize> = (0..SLOTS.len())
+        let changed: Vec<usize> = (0..ALL_SLOTS.len())
             .filter(|&at| !same_stack(&self.items[at], &self.last_sent[at]))
             .collect();
         if changed.is_empty() {
@@ -238,7 +255,7 @@ impl MobEquipment {
         for &at in &changed {
             let old = &self.last_sent[at];
             if !old.is_empty() {
-                remove_stack_modifiers(old, SLOTS[at], attributes);
+                remove_stack_modifiers(old, ALL_SLOTS[at], attributes);
             }
         }
         for &at in &changed {
@@ -246,7 +263,7 @@ impl MobEquipment {
             if new.is_empty() || crate::durability::is_broken_stack(new) {
                 continue;
             }
-            for (attribute, modifier) in stack_modifiers(new, SLOTS[at]) {
+            for (attribute, modifier) in stack_modifiers(new, ALL_SLOTS[at]) {
                 if let Some(instance) = attributes.instance(attribute) {
                     instance.remove_modifier(&modifier.id);
                     instance.modifiers.push(modifier);
@@ -267,7 +284,7 @@ impl MobEquipment {
             if swapped && (at == main || at == off) {
                 continue;
             }
-            update.changes.push((SLOTS[at], self.items[at].clone()));
+            update.changes.push((ALL_SLOTS[at], self.items[at].clone()));
         }
         update
     }
@@ -289,7 +306,7 @@ impl MobEquipment {
     /// `DropChances.CODEC`：只写不等于缺省值的槽。
     pub fn drop_chances_tag(&self) -> Tag {
         let mut entries = Vec::new();
-        for (at, slot) in SLOTS.iter().enumerate() {
+        for (at, slot) in ALL_SLOTS.iter().enumerate() {
             let chance = self.drop_chances[at];
             if chance.to_bits() != DEFAULT_DROP_CHANCE.to_bits() {
                 entries.push((slot_name(*slot).to_owned(), Tag::Float(chance)));
@@ -304,7 +321,11 @@ impl MobEquipment {
             return;
         };
         for (key, value) in entries {
-            let Some(slot) = SLOTS.iter().copied().find(|slot| slot_name(*slot) == key) else {
+            let Some(slot) = ALL_SLOTS
+                .iter()
+                .copied()
+                .find(|slot| slot_name(*slot) == key)
+            else {
                 continue;
             };
             if let Ok(stack) = mc_bamboo_protocol::components::archive::slots::decode_item(value) {
@@ -319,7 +340,11 @@ impl MobEquipment {
             return;
         };
         for (key, value) in entries {
-            let Some(slot) = SLOTS.iter().copied().find(|slot| slot_name(*slot) == key) else {
+            let Some(slot) = ALL_SLOTS
+                .iter()
+                .copied()
+                .find(|slot| slot_name(*slot) == key)
+            else {
                 continue;
             };
             let chance = match value {

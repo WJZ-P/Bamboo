@@ -58,6 +58,24 @@ pub(in crate::entity::mob) fn interact(
     mob: &mut Mob,
     req: &MobInteractRequest,
 ) -> MobInteraction {
+    let outcome = mob_interact(me, mob, req);
+    if outcome.result.consumes_action() || req.held.is_empty() {
+        return outcome;
+    }
+    // `Player.interactOn`：生物自己放过时，再让手里的物品 `interactLivingEntity`。
+    // 马的 `canUseSlot` 恒真，所以幼马也能这样被套上鞍。
+    // `Player.interactOn`: when the mob passes, the held stack gets
+    // `interactLivingEntity`; `Horse.canUseSlot` is always true, so foals take saddles.
+    if let Some(equippable) = equippable(&req.held)
+        && equippable.equip_on_interact
+        && equip_on_target(me, mob, &equippable, &req.held)
+    {
+        return success(true, req);
+    }
+    outcome
+}
+
+fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
     let open_inventory = !mob.is_baby() && tame(mob) && req.sneaking;
     // `isHolding(GOLDEN_DANDELION)` 看两只手；请求里只有这一只手的物品。
     // `isHolding` checks both hands; the request only carries this hand's stack.
@@ -319,18 +337,28 @@ fn wearing(mob: &Mob, slot: EquipmentSlot) -> bool {
     !mob.equipment.get(slot).is_empty()
 }
 
-/// `LivingEntity.isEquippableInSlot` 对马科的身体和鞍两格：`canUseSlot` 对马和羊驼恒真，
-/// 驴和骡的鞍位要活着、成年、驯服（走到这里时都已满足）；再看允许的实体类型。
+/// `LivingEntity.isEquippableInSlot` 对马科的身体和鞍两格：先 `canUseSlot`，再看允许的实体类型。
 ///
-/// `isEquippableInSlot` for the body and saddle slots. `canUseSlot` is always true
-/// for horses and llamas; donkeys and mules need an alive, adult, tamed mount for
-/// the saddle (always true on this path). Then the allowed entity types.
+/// `isEquippableInSlot` for the body and saddle slots: `canUseSlot`, then the
+/// allowed entity types.
 fn can_equip(mob: &Mob, equippable: &Equippable) -> bool {
-    slot_of(equippable).is_some()
+    slot_of(equippable).is_some_and(|slot| can_use_slot(mob, slot))
         && crate::dispense::equippable_allows(
             equippable.allowed_entities.as_ref(),
             mob.mob_type.entity_type(),
         )
+}
+
+/// `canUseSlot`：马和羊驼覆写成恒真；驴和骡用 `AbstractHorse` 的版本，鞍位要活着、
+/// 成年、驯服，其余格子恒真。
+///
+/// `canUseSlot`: always true for horses and llamas; donkeys and mules need an
+/// alive, adult, tamed mount for the saddle slot only.
+fn can_use_slot(mob: &Mob, slot: EquipmentSlot) -> bool {
+    if matches!(mob.mob_type, MobType::Horse | MobType::Llama) || slot != EquipmentSlot::Saddle {
+        return true;
+    }
+    !mob.is_dead_or_dying() && !mob.is_baby() && tame(mob)
 }
 
 /// `Equippable.equipOnTarget`：能穿、那一格空着、活着才穿上一个，掉落改成必掉。
