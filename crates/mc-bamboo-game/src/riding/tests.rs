@@ -64,6 +64,148 @@ fn a_rider_dropped_from_the_passenger_list_is_dismounted() {
     assert!(passengers.is_empty());
 }
 
+/// 官方 `Entity.removePassenger` / `baseTick`：下车后 60 刻内不能再上，冷却每刻减一。
+///
+/// Vanilla `Entity.removePassenger` / `baseTick`: no mounting for 60 ticks after a
+/// dismount, and the cooldown drops by one each tick.
+#[test]
+fn dismounting_starts_the_boarding_cooldown() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(1);
+    let player = Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    region.insert_player(player);
+    let horse = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    super::mount(&mut region, id, horse);
+    super::dismount(&mut region, id);
+    assert_eq!(
+        region.players.get(&id).expect("player").riding.boarding_cooldown,
+        60
+    );
+
+    super::mount(&mut region, id, horse);
+    assert_eq!(
+        region.players.get(&id).expect("player").riding.vehicle,
+        None,
+        "the cooldown blocks the mount"
+    );
+    for _ in 0..60 {
+        super::tick(&mut region);
+    }
+    assert_eq!(
+        region.players.get(&id).expect("player").riding.boarding_cooldown,
+        0
+    );
+    super::mount(&mut region, id, horse);
+    assert_eq!(
+        region.players.get(&id).expect("player").riding.vehicle,
+        Some(horse)
+    );
+}
+
+/// 官方 `canRide`：按着潜行键不能上马。
+///
+/// Vanilla `canRide`: holding sneak blocks mounting.
+#[test]
+fn sneaking_blocks_mounting() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(1);
+    let player = Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    region.insert_player(player);
+    let horse = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    region.players.get_mut(&id).expect("player").sync.shift_key_down = true;
+    super::mount(&mut region, id, horse);
+    assert_eq!(
+        region.players.get(&id).expect("player").riding.vehicle,
+        None
+    );
+}
+
+/// 官方 `AbstractHorse.getDismountLocationForPassenger`：右脚一侧没地方站时换另一侧，
+/// 两边都悬空就落在载具自己的位置。
+///
+/// Vanilla `AbstractHorse.getDismountLocationForPassenger`: try the right-hand
+/// side, then the other side, and fall back to the vehicle's own position.
+#[test]
+fn a_dismount_lands_beside_the_horse_or_on_it() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use mc_bamboo_world::store::ChunkStore;
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player};
+
+    let player = || {
+        Player::new(
+            PlayerId(1),
+            Uuid::from_u128(1),
+            "Rider".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, -60.0, 0.5),
+        )
+    };
+    // 超平坦的地面在 y=-61，顶面是 -60；马站在 (0.5, -60, 0.5)，朝向 0。
+    //
+    // The flat floor sits at y=-61 with its top at -60; the horse stands at
+    // (0.5, -60, 0.5) facing 0.
+    let chunks = ChunkStore::flat();
+    let vehicle = Vec3::new(0.5, -60.0, 0.5);
+    let spot = super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
+        .expect("a floor exists");
+    assert!((spot.y + 60.0).abs() < 1.0e-9, "{spot:?}");
+    assert!(spot.x < 0.0, "right hand side is -x at yaw 0: {spot:?}");
+
+    // 主手一侧立一堵墙，落点换到另一侧。
+    // A wall on the main-hand side moves the spot to the other side.
+    let mut chunks = ChunkStore::flat();
+    for y in -60..=-58 {
+        chunks.set_block(BlockPos::new(-1, y, 0), blocks::STONE);
+    }
+    let spot = super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
+        .expect("a floor exists");
+    assert!(spot.x > 0.5, "the other side is +x: {spot:?}");
+
+    // 两边都没有地：官方返回 `this.position()`。
+    // No floor on either side: vanilla returns `this.position()`.
+    let air = Vec3::new(0.5, 100.0, 0.5);
+    let spot = super::dismount::dismount_location(&chunks, &player(), air, 1.396_484_4, 1.6, 0.0)
+        .expect("the fallback is always a position");
+    assert_eq!(spot, air);
+}
+
 /// 官方 `EntityTypes` 的 `passengerAttachments`：马 1.44375，驴 1.1125，骡 1.2125，
 /// 羊驼 (1.37, -0.3)。朝向 0 时偏移只在 y 和 z 上。
 ///

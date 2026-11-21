@@ -19,6 +19,8 @@ use mc_bamboo_protocol::packet::play::MoveVehicle;
 
 use crate::{inbound::PlayerId, region::Region};
 
+mod dismount;
+
 /// 官方 `ServerGamePacketListenerImpl` 里和载具有关的那几个字段。
 ///
 /// The vehicle fields of vanilla `ServerGamePacketListenerImpl`.
@@ -46,6 +48,12 @@ pub(crate) struct Riding {
     ///
     /// Vanilla `vehiclePositionLastResetAt`, kept as a tick count.
     pub(crate) last_reset_at: i64,
+    /// 官方 `Entity.boardingCooldown`：下车后 60 刻内不能再上。放在骑乘状态里，
+    /// 因为它只由上下车改动。
+    ///
+    /// Vanilla `Entity.boardingCooldown`: 60 ticks after dismounting before another
+    /// mount. It lives here because only mounting and dismounting change it.
+    pub(crate) boarding_cooldown: i32,
 }
 
 impl Riding {
@@ -101,6 +109,12 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     if player.riding.vehicle == Some(vehicle) {
         return;
     }
+    // 官方 `canRide`：按着潜行键或还在下车冷却里就不能上。
+    //
+    // Vanilla `canRide`: the sneak key or the dismount cooldown blocks mounting.
+    if player.sync.shift_key_down || player.riding.boarding_cooldown > 0 {
+        return;
+    }
     // `doPlayerRide` 先把玩家的朝向设成载具的，再 `startRiding`。
     //
     // `doPlayerRide` copies the vehicle's facing to the player before `startRiding`.
@@ -116,11 +130,38 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     });
 }
 
-/// 下车。官方 `Player.rideTick → stopRiding`：清掉两边的关系，位置留给下一刻的重力。
+/// 下车。官方 `Player.rideTick → stopRiding`：按载具的位置算好落点，清掉两边的关系，
+/// 60 刻内不能再上。
 ///
-/// Dismounts. Vanilla `Player.rideTick → stopRiding`: clear both sides and let
-/// gravity handle the position from the next tick on.
+/// Dismounts. Vanilla `Player.rideTick → stopRiding`: compute the landing spot from
+/// the vehicle, clear both sides and block mounting for 60 ticks.
 pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let Some(vehicle) = player.riding.vehicle else {
+        return;
+    };
+    // 官方 `stopRiding → dismountVehicle → getDismountLocationForPassenger`：先按载具
+    // 现在的姿态找落点，再摘关系。载具已经不在表里时官方也保持原位。
+    //
+    // Vanilla `stopRiding → dismountVehicle → getDismountLocationForPassenger`: find
+    // the spot from the vehicle's current pose, then clear the links. A vehicle that
+    // already left the table leaves the player where it is, as vanilla does.
+    let target = region.entities.public_at(vehicle).and_then(|public| {
+        let KindPublic::Mob(mob) = &public.kind else {
+            return None;
+        };
+        let (width, height, _) = mob.mob_type.dimensions(mob.baby);
+        dismount::dismount_location(
+            &region.chunks,
+            player,
+            public.position,
+            f64::from(width),
+            f64::from(height),
+            public.yaw,
+        )
+    });
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
@@ -128,6 +169,13 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
         return;
     };
     player.riding.last_vehicle = None;
+    // 官方 `Entity.removePassenger`：乘客下车后 60 刻内不能再上。
+    //
+    // Vanilla `Entity.removePassenger`: the passenger cannot mount again for 60 ticks.
+    player.riding.boarding_cooldown = 60;
+    if let Some(target) = target {
+        player.set_position(&mut region.player_grid, target);
+    }
     region.entities.with_mut(vehicle, |entity| {
         entity.with_mob(|_, mob| mob.passengers.retain(|passenger| *passenger != id.0))
     });
@@ -157,6 +205,13 @@ fn passenger_offset(mob: &mc_bamboo_blocks::entity::mob::MobPublic, yaw: f32) ->
 /// One pass per tick: riders that want off dismount, the rest follow their
 /// vehicle, and the vehicle position at the end of the tick is recorded.
 pub(crate) fn tick(region: &mut Region) {
+    // 官方 `Entity.baseTick`：下车冷却每刻减一，不管有没有在骑。
+    //
+    // Vanilla `Entity.baseTick`: the dismount cooldown ticks down every tick,
+    // riding or not.
+    for player in region.players.values_mut() {
+        player.riding.boarding_cooldown = player.riding.boarding_cooldown.saturating_sub(1);
+    }
     let riders: Vec<PlayerId> = region
         .players
         .iter()
