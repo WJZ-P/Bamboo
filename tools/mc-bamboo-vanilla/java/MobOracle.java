@@ -963,6 +963,94 @@ public final class MobOracle {
             brushed.interact(3, 0, 0, brush, 0);
             brushed.interact(10, 0, 0, spiderEye, 0);
             scenes.add(brushed);
+            addGoatScenes(scenes);
+        }
+
+        /**
+         * 山羊场景。场景里的山羊不跑 `finalizeSpawn`，开局没有长跳和冲撞冷却，所以一开始
+         * 就进冲撞活动、随后长跳。
+         *
+         * <p>Goat scenes. Scene goats skip `finalizeSpawn`, so they start without long-jump
+         * and ram cooldowns: they enter the ram activity at once and long-jump after it.
+         */
+        static void addGoatScenes(List<Scene> scenes) {
+            int wheat = BuiltInRegistries.ITEM.getId(Items.WHEAT);
+            int bucket = BuiltInRegistries.ITEM.getId(Items.BUCKET);
+            for (long seed : new long[] {11L, 23L}) {
+                // 平地：冲撞找不到目标，长跳的候选全都走得到，一个也不选。
+                // Flat ground: no ram target, and every long-jump candidate is walkable.
+                Scene wander = new Scene("goat_wander_" + seed).ticks(600);
+                Scenes.ground(wander, 15);
+                wander.mob(14, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(wander);
+            }
+            // 三格高的石台走不上去，只能长跳上去。
+            // A three-block stone ledge that can only be reached by a long jump.
+            Scene ledge = new Scene("goat_long_jump").ticks(400);
+            Scenes.ground(ledge, 15);
+            ledge.fill(3, 64, -3, 8, 66, 3, Scenes.STONE);
+            ledge.mob(14, 0.5, 64.0, 0.5, 0.0F, 29L, 0);
+            scenes.add(ledge);
+            // 冲撞一头牛：找起跑点、蓄力、冲过去、伤害加击退。
+            // Ramming a cow: pick a run-up spot, lower the head, charge, hurt and knock back.
+            Scene cow = new Scene("goat_ram_cow").ticks(400);
+            Scenes.ground(cow, 15);
+            cow.mob(14, 0.5, 64.0, 0.5, 0.0F, 53L, 0);
+            cow.mob(0, 6.5, 64.0, 0.5, 0.0F, 59L, 0);
+            scenes.add(cow);
+            // 冲撞站着不动的玩家。
+            // Ramming a player who stands still.
+            Scene player = new Scene("goat_ram_player").ticks(300);
+            Scenes.ground(player, 15);
+            player.mob(14, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+            player.player(6.5, 64.0, 0.5, Items.AIR);
+            scenes.add(player);
+            // 拿小麦的玩家：诱惑压住冲撞和长跳；挤奶，喂小麦进入求爱；幼崽跟着大人。
+            // A player with wheat: temptation keeps the goat out of ramming and long jumps;
+            // milking, wheat puts it in love, and the kid follows the adult.
+            Scene tempt = new Scene("goat_tempt").ticks(300);
+            Scenes.ground(tempt, 15);
+            tempt.mob(14, 0.5, 64.0, 0.5, 0.0F, 67L, 0);
+            tempt.mob(14, -6.5, 64.0, 0.5, 0.0F, 71L, -24000);
+            tempt.player(3.5, 64.0, 0.5, Items.WHEAT);
+            tempt.interact(3, 0, 0, bucket, 0);
+            tempt.interact(10, 0, 0, wheat, 0);
+            tempt.interact(12, 1, 0, bucket, 0);
+            scenes.add(tempt);
+        }
+
+        /**
+         * `LongJumpToRandomPos` 的角度洗牌用 `Collections` 里那个不带种子的静态随机源；
+         * 这里换成一个子类，只把那一次 `Collections.shuffle` 改成带种子的随机源，其余照搬
+         * `calculateOptimalJumpVector`。
+         *
+         * <p>`LongJumpToRandomPos` shuffles its angles with the unseeded static random of
+         * `Collections`; this subclass only swaps that shuffle for a seeded random and
+         * otherwise repeats `calculateOptimalJumpVector`.
+         */
+        static net.minecraft.world.entity.ai.behavior.LongJumpToRandomPos<net.minecraft.world.entity.animal.goat.Goat>
+                seededGoatLongJump(long seed) {
+            java.util.Random random = new java.util.Random(seed);
+            return new net.minecraft.world.entity.ai.behavior.LongJumpToRandomPos<>(
+                    net.minecraft.util.valueproviders.UniformInt.of(600, 1200), 5, 5, 3.5714288F,
+                    goat -> goat.isScreamingGoat()
+                            ? net.minecraft.sounds.SoundEvents.GOAT_SCREAMING_LONG_JUMP
+                            : net.minecraft.sounds.SoundEvents.GOAT_LONG_JUMP) {
+                @Override
+                protected Vec3 calculateOptimalJumpVector(final Mob body, final Vec3 targetPos) {
+                    List<Integer> angles = new ArrayList<>(List.of(65, 70, 75, 80));
+                    java.util.Collections.shuffle(angles, random);
+                    float maxJumpVelocity = (float) (body.getAttributeValue(
+                            net.minecraft.world.entity.ai.attributes.Attributes.JUMP_STRENGTH)
+                            * this.maxJumpVelocityMultiplier);
+                    for (int angle : angles) {
+                        java.util.Optional<Vec3> vector = net.minecraft.world.entity.ai.behavior.LongJumpUtil
+                                .calculateJumpVectorForAngle(body, targetPos, maxJumpVelocity, angle, true);
+                        if (vector.isPresent()) return vector.get();
+                    }
+                    return null;
+                }
+            };
         }
 
         /** Bamboo 的 `shuffle_seed`：SplitMix64 的终混合。 */
@@ -983,14 +1071,36 @@ public final class MobOracle {
                     java.util.Set<net.minecraft.world.entity.ai.behavior.BehaviorControl<?>>>>) field.get(brain);
         }
 
-        /** 按行为遍历顺序（先序）给每个闸门的 `ShufflingList` 换上第 k 个种子。 */
+        /**
+         * 按行为遍历顺序（先序）给每个闸门的 `ShufflingList` 换上第 k 个种子；山羊的
+         * `LongJumpToRandomPos` 也按这个顺序取一个序号，换成带种子的子类。
+         *
+         * <p>Gives each gate's `ShufflingList` the k-th seed in pre-order; a goat's
+         * `LongJumpToRandomPos` takes the next index in the same walk and is replaced by
+         * the seeded subclass.
+         */
+        @SuppressWarnings({"unchecked", "rawtypes"})
         static void reseedShuffles(Mob mob, long base) throws Exception {
             if (mob.getBrain().isBrainDead()) return;
             long[] index = {0};
             for (var byActivity : behaviors(mob.getBrain()).values()) {
                 for (var set : byActivity.values()) {
+                    List<Object> kept = new ArrayList<>();
+                    boolean replaced = false;
                     for (var behavior : set) {
+                        if (mob instanceof net.minecraft.world.entity.animal.goat.Goat
+                                && behavior instanceof net.minecraft.world.entity.ai.behavior.LongJumpToRandomPos<?>) {
+                            kept.add(seededGoatLongJump(shuffleSeed(base, index[0])));
+                            index[0]++;
+                            replaced = true;
+                            continue;
+                        }
                         reseed(behavior, base, index);
+                        kept.add(behavior);
+                    }
+                    if (replaced) {
+                        ((java.util.Set) set).clear();
+                        ((java.util.Set) set).addAll(kept);
                     }
                 }
             }
@@ -2388,7 +2498,7 @@ public final class MobOracle {
     private static void play(Official official, Writer out, Scene scene) throws Exception {
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("rabbit_")
                 || scene.name.startsWith("fox_") || scene.name.startsWith("wolf_")
-                || scene.name.startsWith("armadillo_")) {
+                || scene.name.startsWith("armadillo_") || scene.name.startsWith("goat_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -5082,6 +5192,7 @@ public final class MobOracle {
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
                 case 12 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
                 case 13 -> EntityTypes.ARMADILLO.create(level, EntitySpawnReason.COMMAND);
+                case 14 -> EntityTypes.GOAT.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();
@@ -5363,6 +5474,14 @@ public final class MobOracle {
             }
             if (mob instanceof net.minecraft.world.entity.animal.wolf.Wolf wolf) {
                 appendWolfState(out, wolf);
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.goat.Goat goat) {
+                // 尖叫、左角、右角、长跳姿势，各占一位。
+                // Screaming, left horn, right horn and the long-jump pose, one bit each.
+                int flags = (goat.isScreamingGoat() ? 1 : 0) | (goat.hasLeftHorn() ? 2 : 0)
+                        | (goat.hasRightHorn() ? 4 : 0)
+                        | (goat.getPose() == net.minecraft.world.entity.Pose.LONG_JUMPING ? 8 : 0);
+                out.append(",\"goat\":").append(flags);
             }
             out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
                     ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);

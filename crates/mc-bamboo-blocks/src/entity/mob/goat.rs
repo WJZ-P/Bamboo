@@ -157,7 +157,7 @@ pub(crate) fn init_memories(mob: &mut Mob, next_int: &mut dyn FnMut(i32) -> i32)
 /// `Goat.ageBoundaryReached`：攻击力幼年 1、成年 2。
 ///
 /// `Goat.ageBoundaryReached`: 1 attack damage for babies, 2 for adults.
-pub(crate) fn age_boundary_reached(mob: &mut Mob) {
+pub fn age_boundary_reached(mob: &mut Mob) {
     let damage = if mob.is_baby() { 1.0 } else { 2.0 };
     mob.attributes.set_base(attribute::ATTACK_DAMAGE, damage);
 }

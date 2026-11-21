@@ -516,6 +516,12 @@ struct CowStep {
     fox_flags: i32,
     #[serde(default, rename = "foxMouth")]
     fox_mouth: i32,
+    /// 山羊：尖叫、左角、右角、长跳姿势各一位；其余生物是 0。
+    ///
+    /// Goats: screaming, left horn, right horn and the long-jump pose, one bit each; 0
+    /// for other mobs.
+    #[serde(default)]
+    goat: i32,
     /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
     ///
     /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
@@ -551,7 +557,7 @@ struct CowStep {
 ///
 /// Scenes played by the Java `playZombie` driver: zombies and the wild animals.
 fn zombie_style(name: &str) -> bool {
-    ["zombie_", "rabbit_", "fox_", "wolf_", "armadillo_"]
+    ["zombie_", "rabbit_", "fox_", "wolf_", "armadillo_", "goat_"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
 }
@@ -1284,6 +1290,7 @@ impl Report {
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     9..=12 => equine::scene_kind(cow.kind),
                     13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
+                    14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));
@@ -1338,6 +1345,11 @@ impl Report {
                                 }
                             } else {
                                 mob.age = cow.age;
+                            }
+                            if kind == mc_bamboo_blocks::entity::mob::MobType::Goat {
+                                // `setAge` 跨过 0 时 `Goat.ageBoundaryReached` 换攻击力。
+                                // Crossing zero in `setAge` runs `Goat.ageBoundaryReached`.
+                                mc_bamboo_blocks::entity::mob::goat::age_boundary_reached(mob);
                             }
                             mob.eye_height = eye;
                         }
@@ -1884,6 +1896,7 @@ impl Report {
                 plain!(rabbit_carrot_ticks);
                 plain!(fox_flags);
                 plain!(fox_mouth);
+                plain!(goat);
                 plain!(wolf_tame);
                 plain!(wolf_sit);
                 plain!(wolf_owned);
@@ -3176,6 +3189,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         } else {
             0
         },
+        goat: goat_flags(mob),
         wolf_tame: if is_wolf(mob) {
             i32::from(mob.tame.flags)
         } else {
@@ -3224,6 +3238,20 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         tmp: mob.equine.as_ref().map_or(0, |state| state.temper),
         brain: String::new(),
     }
+}
+
+/// 山羊的四个标志位，和 Java 一侧 `zombieStepJson` 的 `goat` 一致。
+///
+/// The goat's four flag bits, matching `goat` in the Java `zombieStepJson`.
+fn goat_flags(mob: &mc_bamboo_blocks::entity::mob::Mob) -> i32 {
+    if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Goat {
+        return 0;
+    }
+    let goat = mob.goat;
+    i32::from(goat.screaming)
+        | i32::from(goat.left_horn) << 1
+        | i32::from(goat.right_horn) << 2
+        | i32::from(goat.long_jumping) << 3
 }
 
 /// 对拍里的花纹列：羊是颜色加剪毛标记，鸡还带下蛋计时。
