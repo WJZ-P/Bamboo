@@ -7,14 +7,15 @@ export const PixelSelect = styled.select`
   width: 100%;
   padding: 8px 10px;
   ${({ theme }) => sunkenBorder(theme.color.sunkenShade, theme.color.panelLight)}
-  background: ${({ theme }) => theme.color.black};
+  background: ${({ theme }) => theme.color.field};
   color: ${({ theme }) => theme.color.panelLight};
   outline: none;
   cursor: pointer;
   color-scheme: dark;
 
+  /* 照原版文本框：聚焦时整圈边框是白色高亮。Like the vanilla text field: white border on focus. */
   &:focus {
-    border-color: ${({ theme }) => theme.color.bamboo.light};
+    border-color: ${({ theme }) => theme.color.panelLight};
   }
 
   &:disabled {
