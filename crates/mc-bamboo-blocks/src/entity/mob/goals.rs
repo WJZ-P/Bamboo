@@ -1459,8 +1459,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    !(mob.mob_type.full_target_rules()
-                        || mob.mob_type == super::MobType::PolarBear)
+                    !(mob.mob_type.full_target_rules() || mob.mob_type == super::MobType::PolarBear)
                         || target_by_uid(mob, ctx, uid).is_some()
                 })
         }
@@ -1734,8 +1733,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::NearestAttackableTarget {
             unseen_ticks, kind, ..
-        } if mob.mob_type == super::MobType::PolarBear =>
-        {
+        } if mob.mob_type == super::MobType::PolarBear => {
             target_still_seen(me, mob, ctx, unseen_ticks, kind.follow_scale(), 60)
         }
         Goal::HurtByTarget { unseen_ticks, .. } if mob.mob_type == super::MobType::PolarBear => {
