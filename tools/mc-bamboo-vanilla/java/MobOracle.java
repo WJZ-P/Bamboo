@@ -305,6 +305,12 @@ public final class MobOracle {
                 playFish(official, out, name);
                 cases++;
             }
+            for (String name : List.of("dolphin_water", "dolphin_land", "dolphin_baby",
+                    "axolotl_water", "axolotl_land", "axolotl_variant", "axolotl_baby")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playWaterMob(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -4892,6 +4898,111 @@ public final class MobOracle {
         out.write("{\"type\":\"fish\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"kind\":"
                 + jsonString(kind) + ",\"variant\":0,\"puffState\":0,\"cow\":" + (cow != null)
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /**
+     * 海豚和美西螈：逐刻比位置、速度、朝向、随机源、氧气、年龄、着地 / 在水里、
+     * 各自的元数据状态（gotFish / moistness / variant / playingDead / fromBucket）和尺寸。
+     *
+     * 两边都设 `NoAI`：官方的 goalSelector / Brain 不跑，只剩 `baseTick`（氧气、环境音
+     * 的两类取数）和 `Dolphin.tick()` / `Axolotl.baseTick()` 的 NoAI 分支，便于逐位对拍。
+     * 显式给两边同一个实体随机源种子、不重放构造取数，避免 Brain 传感器构造取数的差异。
+     *
+     * Dolphins and axolotls: compare position, velocity, rotation, random, air, age,
+     * on-ground / in-water, their own metadata state (gotFish / moistness / variant /
+     * playingDead / fromBucket) and size each tick.
+     *
+     * Both sides set `NoAI`: vanilla's goalSelector / Brain does not run, leaving only
+     * `baseTick` (air, ambient-sound draws) and the NoAI branches of `Dolphin.tick()` /
+     * `Axolotl.baseTick()`. Both get the same explicit entity-random seed and skip
+     * constructor draws, avoiding differences from Brain sensor construction.
+     */
+    private static void playWaterMob(Official official, Writer out, String name) throws Exception {
+        boolean dolphin = name.startsWith("dolphin");
+        boolean land = name.endsWith("_land");
+        boolean baby = name.endsWith("_baby");
+        int variant = name.endsWith("_variant") ? 3 : 0;
+        int ticks = 200;
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                if (!land) {
+                    for (int y = 61; y <= 66; y++) {
+                        world.blocks.put(BlockPos.asLong(x, y, z),
+                                wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                    }
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        Mob mob = (dolphin ? EntityTypes.DOLPHIN : EntityTypes.AXOLOTL)
+                .create(world, EntitySpawnReason.COMMAND);
+        // 显式种子：两边都不重放构造取数（UUID / yRot）。
+        // Explicit seed: neither side replays the constructor draws (UUID / yRot).
+        setRandom(mob, 0x5EED_5EEDL);
+        mob.setUUID(new UUID(1L, 2L));
+        mob.setYRot(0.0F);
+        mob.setYHeadRot(0.0F);
+        double[] start = land ? new double[] {0.5, 61.0, 0.5} : new double[] {0.5, 63.0, 0.5};
+        mob.setPos(start[0], start[1], start[2]);
+        mob.setNoAi(true);
+        if (baby) ((net.minecraft.world.entity.AgeableMob) mob).setAge(-24000);
+        if (!dolphin) {
+            // `Axolotl.setVariant` 是私有的，用它的 `DATA_VARIANT` 访问器直接写。
+            // `Axolotl.setVariant` is private; write its `DATA_VARIANT` accessor directly.
+            java.lang.reflect.Field field = net.minecraft.world.entity.animal.axolotl.Axolotl.class
+                    .getDeclaredField("DATA_VARIANT");
+            field.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
+                    (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
+            mob.getEntityData().set(accessor, variant);
+        }
+        world.tracked.add(mob);
+        net.minecraft.world.entity.animal.dolphin.Dolphin dolphinMob =
+                dolphin ? (net.minecraft.world.entity.animal.dolphin.Dolphin) mob : null;
+        net.minecraft.world.entity.animal.axolotl.Axolotl axolotl =
+                dolphin ? null : (net.minecraft.world.entity.animal.axolotl.Axolotl) mob;
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                if (!mob.isRemoved()) {
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+            }
+            frames.append(tick == 0 ? "" : ",");
+            frames.append("{\"gone\":").append(mob.isRemoved());
+            if (!mob.isRemoved()) {
+                frames.append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(mob.getHealth()), mob.getAirSupply(), mob.hurtTime,
+                                mob.deathTime, mob.getNoActionTime(),
+                                ((net.minecraft.world.entity.AgeableMob) mob).getAge(),
+                                mob.onGround() ? 1 : 0, mob.isInWater() ? 1 : 0,
+                                dolphin ? (dolphinMob.gotFish() ? 1 : 0) : axolotl.getVariant().getId(),
+                                dolphin ? dolphinMob.getMoistnessLevel() : (axolotl.isPlayingDead() ? 1 : 0),
+                                dolphin ? 0 : (axolotl.fromBucket() ? 1 : 0)}))
+                        .append(",\"dimensions\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(mob.getDimensions(net.minecraft.world.entity.Pose.STANDING).width()),
+                                Float.floatToRawIntBits(mob.getDimensions(net.minecraft.world.entity.Pose.STANDING).height()),
+                                Float.floatToRawIntBits(mob.getEyeHeight())}));
+            }
+            frames.append(",\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append('}');
+        }
+        out.write("{\"type\":\"waterMob\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start)
+                + ",\"dolphin\":" + dolphin + ",\"baby\":" + baby + ",\"variant\":" + variant
                 + ",\"frames\":" + frames + "]}\n");
         out.flush();
     }
