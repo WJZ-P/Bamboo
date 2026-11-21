@@ -627,14 +627,22 @@ fn run_cases(
             ),
         );
     }
-    {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    for kind in [MobType::Cow, MobType::Pig, MobType::Sheep, MobType::Chicken] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
-        let uid = store.spawn(Entity::cow(Vec3::new(0.5, 64.0, -3.5)));
+        let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
+        let mut extra = (0_u8, 0_i32);
         store.with_mut(uid, |entity| {
             entity.y_rot = 33.5;
             entity.with_mob(|me, mob| {
                 mob.y_head_rot = me.y_rot;
                 mob.y_body_rot = me.y_rot;
+                if kind == MobType::Sheep {
+                    // 浅蓝、已剪毛：非默认的羊毛字节。
+                    // Light blue and sheared: a non-default wool byte.
+                    mob.wool = 3 | 16;
+                }
+                extra = (mob.wool, mob.egg_time);
             });
         });
         let row = store.get(uid).expect("刚生成").split();
@@ -643,14 +651,16 @@ fn run_cases(
         let answer = ask(
             stdin,
             lines,
-            json!({"command": "fresh-cow", "x": 0.5, "y": 64.0, "z": -3.5, "yaw": 33.5, "uuid": uuid}),
+            json!({"command": "fresh-cow", "type": kind.name(), "wool": extra.0, "egg": extra.1,
+                "x": 0.5, "y": 64.0, "z": -3.5, "yaw": 33.5, "uuid": uuid}),
         )?;
         let official = sorted_attributes(answer.written.clone().unwrap_or(Value::Null));
         let bamboo = sorted_attributes(canonical_tag(&ours));
         report.check(
             official == bamboo,
             format!(
-                "fresh cow: Bamboo save differs from the official one: {}",
+                "fresh {}: Bamboo save differs from the official one: {}",
+                kind.name(),
                 first_difference(&official, &bamboo)
             ),
         );
