@@ -660,3 +660,33 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 ## 10. 箭实体与骷髅（期 3）
 
 骷髅随敌对生物走同一对选择器。弓目标按视线记忆决定寻路或横移，并把生成箭作为实体命令落地；无弓切换到近战。箭不需要自己的岛表：所有者 UID、装备、插地状态和计时跟随 `Entities`，配对和生成快照仍随 `EntityTracking` / `SpawnSnapshots`。岛重定基只平移近战选择器的游戏时间戳，不改箭的寿命或拉弓计数。精确驱动用当前状态解析命中结果；并行驱动用快照选碰撞候选，落地时才确认伤害。支持范围与已知差异见 README 和 `zombie-skeleton-plan.md`。
+
+## 11. 兔子和狐狸（cx-wild，2026-11-20）
+
+### 11.1 现状
+
+| 生物 | 状态 | 代码 | 对拍 |
+| --- | --- | --- | --- |
+| 兔子 | 已对拍 0 不一致 | `entity/mob/rabbit.rs`、`avoid.rs` | `mob-oracle --only rabbit_`：闲逛 4 个种子、躲玩家、和平难度不躲、躲僵尸、水里、幼年、细雪、啃胡萝卜，11 例 3240 刻；`loot-oracle --entity-table minecraft:entities/rabbit` 2000 例 |
+| 狐狸 | 已对拍 0 不一致 | `entity/mob/fox.rs`、`fox_goals.rs` | `mob-oracle --only fox_`：白天 2 个种子、夜里、屋顶下睡觉、躲玩家、吃浆果、幼年、捕猎兔子 2 个种子、雪层里扑跳，10 例 3493 刻；`loot-oracle --entity-table minecraft:entities/fox` 500 例 |
+| 狼 | 没做 | — | — |
+
+### 11.2 新的公共接缝
+
+- `Goal::Avoid(AvoidEntity)`：`AvoidEntityGoal`，`AvoidClass`（玩家 / 狼 / 敌对生物 / 北极熊）加 `AvoidFilter`（缺省排除创造旁观；狐狸的三种）。取点是 `DefaultRandomPos.getPosAway`（`goals::default_random_pos_away`）。
+- `Goal::Fox(FoxGoal)`：狐狸专属的目标都在这个变体里，`goals.rs` 只做分派；`Goal::LeapAtTarget`；`goals::melee_attack(speed, followingTargetEvenIfNotSeen, 类名)`。
+- `Goal::interruptable`：`WrappedGoal.canBeReplacedBy` 现在看占位目标能不能打断（狐狸扑跳不能）。
+- `GoalSelector::running_class_names(kind)`：兔子和狐狸的几个目标是内部子类，对拍按子类名比较。
+- `TargetType::FoxPrey` / `Fish`、`goals::nearest_mob_target`：`NearestAttackableTargetGoal` 的生物分支；狐狸和骷髅的 `combat_target` 可以是生物，和平难度只排除玩家目标。
+- `Mob::walks_on_powder_snow` 和 `Entity::mob_collision_context`：生物 tick 时被拆出实体，碰撞上下文单独带上能不能在细雪上走；攀爬分支加上细雪那一支。
+- `Mob.needs_sync`：所有生物 `jumpFromGround` 都设，实体同步按它发速度。
+- `Command::BreedAnimals` 带上父亲的种类、兔子/狐狸品种和求爱者：落地时父亲被拆出来读不到（以前读 `me.kind` 恒为空，繁殖整个失效，`interact_breed` 场景抓到）。
+- `BlockView::is_thundering`、`World::spawn_item_with_delay`。
+
+### 11.3 拆岛 / 并岛
+
+兔子和狐狸的新状态都在 `Mob` 里随实体走（`Mob.rabbit`、`Mob.fox`、目标里的倒计时），不含绝对时钟，拆合不需要平移。狐狸的信任名单和繁殖求爱者都是 UUID。
+
+### 11.4 已知差异
+
+见 README「兔子的已知限制」「狐狸的已知限制」。对拍环境另有两处：Java 一侧玩家只在野生动物场景里进实体表（`getEntitiesOfClass(Player)` 才找得到），兔子死后的掉落物不进 Java 实体表；狐狸的 `SleepGoal` 倒计时在官方构造时用不可复现的种子取，对拍把官方的值报给 Bamboo 照填。
