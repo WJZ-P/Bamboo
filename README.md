@@ -465,6 +465,12 @@ WebView2 的渲染进程不算在内。
   边界状态写进官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`
   （`export_settings` / `restore`，`restore` 传存档里的游戏时间），启动时读回，编码和官方
   `WorldBorder.Settings.CODEC` 对拍。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
+- **重生包的超平坦海平面**：Bamboo 超平坦世界把重生包（`ClientboundRespawnPacket`）的
+  `sea_level` 写成 -63（`level_flags()`，噪声世界是 63），官方离线逐刻夹具的假
+  `ServerLevel` 给 0；不带 `--only` 的全量 `mob-oracle` 因此在 6 个 `player_death_*`
+  玩家死亡 / 重生场景报 6 处不一致，差异只在这一字段。这是夹具与超平坦世界的既有差异
+  （base 的重生包已带该字段），与敌对生物无关；按前缀的针对性 `mob-oracle` 全部 0 不一致，
+  官方联机探针通过。按 `verify-scope.md` 这属非关键路径，不追；全量结果不算通过。
 - **世界生成（本轮接入）的已知限制**：`biomes` / `terrain` 阶段接了真生成，`possibleBiomes`、雕刻器的
   `carverBiome` 分支和 `WorldGenRegion` 的 `uncachedBiomeResolver` 已按真实服务端路径逐方块对拍 0 不一致，
   六张高度图逐列、存档里四张 FINAL 高度图位流逐字对拍 0 不一致（见 `docs/worldgen.md`）。

@@ -1181,3 +1181,16 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - 验证：`mob-oracle --only zombie_turtle_ai`（类型 60，借僵尸场景的多生物路径）四个场景：
   沙滩找水两个种子、幼年、水下远行，共 1500 刻 **0 不一致**（位置、速度、朝向、随机源、
   氧气、运行中的目标、路径节点）。产卵、孵化、回家还没有场景，也没有自然生成夹具。
+
+## 与 main 合并后的现状（op-hostile2，2026-11-21）
+
+按队长 04:30 的要求先 `git merge main`（`ceb0562f`，op-hostile 的苦力怕 / 蜘蛛 /
+洞穴蜘蛛 / 末影人和世界生成缓存）。公共文件按两边并集解：`generated/entity_types.rs`
+用 `extract` 重新生成，和并集逐字节一致；`drowned.rs` / `slime.rs` / `witch.rs` 的
+`NearestAttackableTarget` 补上 main 新增的 `light_gate: false`，`spider.rs` 测试补齐
+`PlayerView` 新字段，`mod.rs` 合并重复的 `ambient_sound` 分支。合并后
+`cargo check --workspace --all-targets`、clippy、单测、五种生物各前缀的针对性
+`mob-oracle`（含 `--only natural_spawn` 620 例 2480 刻）、`loot-oracle` 和官方联机探针
+（769/769）都通过。全量 `mob-oracle` 仍有 6 处 `player_death_*` 不一致，是超平坦世界
+重生包 `sea_level` 给 -63、官方离线夹具给 0 的既有差异（base 已带该字段），与生物无关，
+见 README 已知限制；按 `verify-scope.md` 属非关键路径，不追。
