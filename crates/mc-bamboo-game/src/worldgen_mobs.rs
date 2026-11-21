@@ -301,7 +301,18 @@ mod tests {
                 assert_eq!(rows.len(), again.len());
                 for (row, replay) in rows.iter().zip(&again) {
                     assert_eq!(row.public.position, replay.public.position);
-                    assert_eq!(row.public.kind.entity_type(), entity_type::COW);
+                    // 生成期会刷出来的只有已建模的动物（马、驴等只模拟放置）。
+                    // Only modelled animals are generated; horses and the like are simulated.
+                    assert!(
+                        [
+                            entity_type::COW,
+                            entity_type::MOOSHROOM,
+                            entity_type::PIG,
+                            entity_type::SHEEP,
+                            entity_type::CHICKEN,
+                        ]
+                        .contains(&row.public.kind.entity_type())
+                    );
                     let at = row.public.position;
                     assert_eq!(BlockPos::containing(at).chunk(), pos, "牛要落在本区块");
                     cows += 1;
