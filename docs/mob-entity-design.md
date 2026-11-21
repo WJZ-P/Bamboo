@@ -320,6 +320,13 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 | 死亡掉落 | `dropAllDeathLoot`、`dropCustomDeathLoot`、`dropEquipment` | `equine/death.rs` | `equineDeath` 40 题 |
 | 元数据 | `DATA_ID_FLAGS`、`DATA_ID_TYPE_VARIANT`、`DATA_ID_CHEST`、`DATA_STRENGTH_ID`、`DATA_VARIANT_ID` | `EntityData::Horse*` / `Llama*`，index 由生成器导出 | 配对 `set_entity_data` 逐字节 |
 | 存档 | `addAdditionalSaveData` / `readAdditionalSaveData` | `equine::save` / `load` | `equineSave` 12 题往返 |
+| 坐骑物品栏 | `openCustomInventoryScreen`、`ServerPlayer.openHorseInventory`、`HorseInventoryMenu`、`AbstractMountInventoryMenu.quickMoveStack` / `stillValid`、`ArmorSlot.setByPlayer` | 生物一半 `equine/inventory.rs`；菜单是工作台菜单的 `Kind::Mount`（`menu/station/mount.rs`） | 单元测试（开菜单的包、Shift 取放鞍、两次装备声、超距关闭）；没有官方逐题对拍 |
+| 落地声 | `AbstractHorse.causeFallDamage` 的 `HORSE_LAND` | `equine::land_sound` | 单元测试；音效包不在对拍范围 |
+
+坐骑物品栏每次点击前从生物读回鞍、身体和箱子格，点击后把鞍位 / 身体位的每次 `setByPlayer`
+按发生顺序在生物上重放（官方 `ArmorSlot.setByPlayer` 先调一次 `onEquipItem`，装备容器的
+`setItem` → `setItemSlot` 再调一次，所以穿上会出两次声、取两次 `nextLong`），箱子格整份写回。
+菜单的 `stillValid` 读实体表的公开快照（上一个实体阶段结束时的血量、箱子、位置）。
 
 生物装备从六个人形槽扩成官方全部八个槽（加 `BODY`、`SADDLE`）。马科的全部状态都在
 `Mob.equine` 里，跟着实体走，所以岛的拆分合并不需要新的按实体迁移。
