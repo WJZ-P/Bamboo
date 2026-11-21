@@ -650,16 +650,54 @@ fn may_fly(game_mode: GameMode) -> bool {
 }
 
 /// `player_command`：冲刺和拒绝滑翔，其余动作都忽略。`entities.md` 第 10 节。
-pub(crate) fn on_player_command(region: &mut Region, id: PlayerId, action: PlayerCommandKind) {
+pub(crate) fn on_player_command(
+    region: &mut Region,
+    id: PlayerId,
+    action: PlayerCommandKind,
+    data: i32,
+) {
     match action {
         PlayerCommandKind::StartSprinting => set_sprinting(region, id, true),
         PlayerCommandKind::StopSprinting => set_sprinting(region, id, false),
         PlayerCommandKind::StartFallFlying => refuse_fall_flying(region, id),
         PlayerCommandKind::StopSleeping => crate::sleep::stop_sleeping(region, id),
-        PlayerCommandKind::StartRidingJump
-        | PlayerCommandKind::StopRidingJump
-        | PlayerCommandKind::OpenInventory => {}
+        PlayerCommandKind::StartRidingJump => start_riding_jump(region, id, data),
+        PlayerCommandKind::StopRidingJump => stop_riding_jump(region, id),
+        PlayerCommandKind::OpenInventory => {}
     }
+}
+
+/// `START_RIDING_JUMP`：只对「这名玩家正在控制的载具」生效，官方看
+/// `getControlledVehicle()`、`canJump()` 和正数刻度。
+///
+/// `START_RIDING_JUMP`: only the vehicle this player controls reacts, matching
+/// vanilla's `getControlledVehicle()`, `canJump()` and the positive scale.
+fn start_riding_jump(region: &mut Region, id: PlayerId, scale: i32) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let Some(vehicle) = player.riding.vehicle else {
+        return;
+    };
+    region.entities.with_mut(vehicle, |entity| {
+        entity.with_mob(|me, mob| {
+            mc_bamboo_blocks::entity::mob::start_riding_jump(me, mob, scale);
+        })
+    });
+}
+
+/// `STOP_RIDING_JUMP`：官方 `handleStopJump` 是空的，这里只确认载具还在。
+///
+/// `STOP_RIDING_JUMP`: vanilla `handleStopJump` is empty; this only makes sure the
+/// vehicle still exists.
+fn stop_riding_jump(region: &mut Region, id: PlayerId) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let Some(vehicle) = player.riding.vehicle else {
+        return;
+    };
+    let _ = region.entities.public_at(vehicle);
 }
 
 fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) {

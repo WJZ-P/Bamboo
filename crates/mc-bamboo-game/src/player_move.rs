@@ -203,6 +203,18 @@ pub(crate) fn on_move_player(
     }
     let reported = position.unwrap_or(player.position());
     let (yaw, pitch) = rotation.unwrap_or((player.yaw, player.pitch));
+    // 骑在载具上时位置由 `positionRider` 决定，移动包只用来更新朝向：官方的客户端
+    // 这时发的是 `move_vehicle`，这里不接受 `move_player` 带来的位置。
+    //
+    // While riding, `positionRider` owns the position: a move packet only updates
+    // the rotation. Vanilla clients send `move_vehicle` then, so the position a
+    // `move_player` carries is ignored.
+    if player.riding.is_passenger() {
+        if rotation.is_some() {
+            set_rotation(player, yaw, pitch);
+        }
+        return;
+    }
     if movement::invalid_position(reported, (yaw, pitch)) {
         links.kick(id, &movement::invalid_movement());
         return;

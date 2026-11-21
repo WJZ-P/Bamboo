@@ -188,5 +188,6 @@ pub(super) fn equip_saddle(
         replacement: None,
         open_inventory: false,
         shear: false,
+        ride: false,
     }
 }

@@ -217,6 +217,12 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 朝向，骑乘时用作骑手的朝向（`AbstractHorse.getRiddenRotation`）。
+    ///
+    /// The facing, used as the rider's rotation while riding
+    /// (`AbstractHorse.getRiddenRotation`).
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
 impl PlayerView {
@@ -412,6 +418,19 @@ pub trait EntityCtx {
     fn blocks(&self) -> &dyn BlockView;
     /// 按 ID 读别的实体的公开数据。自己已经被驱动从表里取出来，查不到是正常的。
     fn other(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 按 ID 读一名玩家（骑手）。不在本岛时返回 `None`。
+    ///
+    /// Reads one player (a rider) by id. `None` when they are not on this island.
+    fn player(&self, uid: EntityUid) -> Option<PlayerView> {
+        let mut found = None;
+        self.blocks().for_each_player(&mut |player| {
+            if player.uid == uid {
+                found = Some(*player);
+            }
+        });
+        found
+    }
+
     /// 这一刻参与 tick 的实体 ID，按 uid 升序。
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。

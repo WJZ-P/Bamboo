@@ -870,6 +870,8 @@ mod tests {
         PlayerView {
             uuid: None,
             uid,
+            yaw: 0.0,
+            pitch: 0.0,
             position,
             eye_height: 1.62,
             alive: true,

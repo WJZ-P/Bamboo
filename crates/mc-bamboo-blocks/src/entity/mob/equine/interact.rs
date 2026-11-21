@@ -47,6 +47,7 @@ fn success(shrink: bool, req: &MobInteractRequest) -> MobInteraction {
         replacement: None,
         open_inventory: false,
         shear: false,
+        ride: false,
     }
 }
 
@@ -138,14 +139,17 @@ fn abstract_horse_interact(
         }
     }
     do_player_ride(mob);
-    success(false, req)
+    MobInteraction {
+        ride: true,
+        ..success(false, req)
+    }
 }
 
 /// `doPlayerRide`：停止吃草、清掉扬蹄，然后 `player.startRiding(this)`。
-/// 骑乘还没有，所以只落前两步。
+/// 最后一步要改玩家和载具两边，由游戏层按 `ride` 标记落地。
 ///
-/// `doPlayerRide`: stop grazing, clear rearing, then `startRiding`; only the
-/// first two steps happen while riding is missing.
+/// `doPlayerRide`: stop grazing, clear rearing, then `startRiding`; the last step
+/// touches both sides, so the game layer applies it from the `ride` flag.
 fn do_player_ride(mob: &mut Mob) {
     if let Some(state) = &mut mob.equine {
         state.eating = false;
@@ -179,6 +183,7 @@ fn fed_food(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInte
         replacement: None,
         open_inventory: false,
         shear: false,
+        ride: false,
     }
 }
 

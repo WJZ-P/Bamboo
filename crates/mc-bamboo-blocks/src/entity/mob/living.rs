@@ -719,7 +719,13 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.jumping = false;
         mob.xxa = 0.0;
         mob.zza = 0.0;
-    } else if !mob.no_ai {
+    } else if !mob.no_ai && mob.controlling_passenger().is_none() {
+        // 官方 `Mob.isEffectiveAi()` 在服务端等于「没有玩家在控制」：有人骑着上鞍的载具时
+        // AI 停摆，位置完全由客户端决定。
+        //
+        // On the server vanilla `Mob.isEffectiveAi()` means "no player is in
+        // control": AI stops while a player rides a saddled vehicle, and the
+        // client alone decides where it goes.
         server_ai_step(me, mob, ctx);
     }
     // 跳。
@@ -757,7 +763,23 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if !mob.no_ai {
         timing::span!(Travel);
-        travel(me, mob, ctx, input);
+        // 官方 `LivingEntity.travel`：有人控制时走 `travelRidden`，服务端不模拟载具的运动，
+        // 只跑 `tickRidden` 再把速度清零；位置由客户端的 `move_vehicle` 决定。
+        //
+        // Vanilla `LivingEntity.travel`: with a controlling passenger it goes through
+        // `travelRidden`; the server does not simulate the vehicle, it only runs
+        // `tickRidden` and zeroes the velocity. The position comes from the client's
+        // `move_vehicle` packet.
+        if let Some(rider) = mob.controlling_passenger() {
+            if let Some(view) = ctx.player(rider)
+                && mob.mob_type.is_equine()
+            {
+                super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+            }
+            me.delta = Vec3::default();
+        } else {
+            travel(me, mob, ctx, input);
+        }
     }
     {
         timing::span!(BlockEffects);

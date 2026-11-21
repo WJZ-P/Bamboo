@@ -218,6 +218,10 @@ pub(crate) struct Player {
     /// screen. The server never respawns on its own; without a client packet
     /// the player stays dead.
     pub(crate) awaiting_respawn: bool,
+    /// 骑乘状态：骑着的载具和载具移动校验用的几个位置。
+    ///
+    /// Riding state: the vehicle and the positions its movement is checked against.
+    pub(crate) riding: crate::riding::Riding,
 }
 
 impl Player {
@@ -291,6 +295,7 @@ impl Player {
             last_death_location: None,
             entity_ticks: 0,
             awaiting_respawn: false,
+            riding: crate::riding::Riding::default(),
         }
     }
 
@@ -437,6 +442,8 @@ impl Player {
             armor_cover: self.armor_cover(),
             main_hand: if main.is_empty() { 0 } else { main.item },
             off_hand: if off.is_empty() { 0 } else { off.item },
+            yaw: self.yaw,
+            pitch: self.pitch,
         }
     }
 

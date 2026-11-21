@@ -15,11 +15,20 @@ fn state(mob: &mut Mob) -> &mut EquineState {
     mob.equine.as_mut().expect("equine state")
 }
 
-/// `AbstractHorse.isImmobile`：`(isDeadOrDying && isVehicle && isSaddled) || isEating || isStanding`。
-/// 没有骑乘时第一项恒假，所以濒死的马照样跑 AI。羊驼覆写成 `isDeadOrDying || isEating`。
+/// `AbstractHorse.isSaddled()`：鞍位上有东西。
 ///
-/// `AbstractHorse.isImmobile`. Without riding the first term is always false, so
-/// a dying horse still runs its AI. The llama overrides it with `isDeadOrDying || isEating`.
+/// `AbstractHorse.isSaddled()`: the saddle slot is occupied.
+pub(in crate::entity::mob) fn is_saddled(mob: &Mob) -> bool {
+    !mob.equipment
+        .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+        .is_empty()
+}
+
+/// `AbstractHorse.isImmobile`：`(isDeadOrDying && isVehicle && isSaddled) || isEating || isStanding`。
+/// 羊驼覆写成 `isDeadOrDying || isEating`。
+///
+/// `AbstractHorse.isImmobile`: `(isDeadOrDying && isVehicle && isSaddled) || isEating
+/// || isStanding`. The llama overrides it with `isDeadOrDying || isEating`.
 pub(in crate::entity::mob) fn is_immobile(mob: &Mob) -> bool {
     let Some(state) = &mob.equine else {
         return mob.is_dead_or_dying();
@@ -27,7 +36,29 @@ pub(in crate::entity::mob) fn is_immobile(mob: &Mob) -> bool {
     if mob.mob_type == MobType::Llama {
         return mob.is_dead_or_dying() || state.eating;
     }
-    state.eating || state.standing
+    (mob.is_dead_or_dying() && mob.is_vehicle() && is_saddled(mob))
+        || state.eating
+        || state.standing
+}
+
+/// `AbstractHorse.tickRidden`：朝向跟着骑手（俯仰取一半），旧朝向、身体和头都对齐到新朝向。
+/// 服务端上玩家控制的载具 `isLocalInstanceAuthoritative()` 为假，所以跳跃蓄力那一段不跑，
+/// 起跳由客户端模拟后经 `move_vehicle` 报位置。
+///
+/// `AbstractHorse.tickRidden`: the facing follows the rider (half the pitch), and the
+/// previous yaw, body and head all snap to the new yaw. On the server a player
+/// controlled vehicle is not locally authoritative, so the jump-charge branch does
+/// not run: the client simulates the jump and reports the position with
+/// `move_vehicle`.
+pub(in crate::entity::mob) fn tick_ridden(me: &mut Entity, mob: &mut Mob, yaw: f32, pitch: f32) {
+    let yaw = if yaw.is_finite() { yaw } else { me.y_rot };
+    me.y_rot = yaw;
+    mob.x_rot = crate::entity::mob::control::clamp_x_rot(pitch * 0.5, mob.x_rot);
+    mob.y_rot_o = yaw;
+    mob.y_body_rot = yaw;
+    mob.y_head_rot = yaw;
+    mob.y_head_rot_o = yaw;
+    mob.y_body_rot_o = yaw;
 }
 
 /// `AbstractHorse.causeFallDamage` 开头：摔落超过 1 格时用 0.4 音量、1.0 音高播落地声，
@@ -208,6 +239,16 @@ pub(in crate::entity::mob) fn stand_if_possible(mob: &mut Mob) {
     state.eating = false;
     state.standing = true;
     state.stand_counter = 20;
+}
+
+/// `AbstractHorse.handleStartJump`：允许站在鞍上滑行、扬蹄，再播跳跃声。
+/// `handleStopJump` 是空的，所以落地那一边不用做什么。
+///
+/// `AbstractHorse.handleStartJump`: allow standing on the saddle, rear, then play
+/// the jump sound. `handleStopJump` is empty, so the landing side does nothing.
+pub(in crate::entity::mob) fn handle_start_jump(me: &mut Entity, mob: &mut Mob) {
+    stand_if_possible(mob);
+    living::play_sound(me, mob, "minecraft:entity.horse.jump", 0.4, 1.0);
 }
 
 /// `AbstractHorse.openMouth`：张嘴 30 刻。

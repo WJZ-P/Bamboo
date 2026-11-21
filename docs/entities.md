@@ -926,7 +926,7 @@ M2 简化：组件按 `blocks-inventory.md` 2.5、8.3 当不透明字节保留�
 | `teleport_entity`（128） | 第 7 节 |
 | `animate`（2） | 只有起床和暴击粒子 |
 | `entity_event`（34） | 第 11 节 |
-| `set_passengers`、`set_entity_link` | 没有载具和拴绳 |
+| `set_passengers`、`set_entity_link` | `set_passengers` 有了：马科骑乘时按 `Entity.passengers` 的名单变化发（`ServerEntity.sendChanges`）。`set_entity_link` 还没有拴绳 |
 | `waypoint`（141） | 定位栏。不发时 `ClientWaypointManager.hasWaypoints()` 为 false |
 
 滑翔不做：`START_FALL_FLYING` 按第 10 节拒绝，别人看到的是普通站姿。

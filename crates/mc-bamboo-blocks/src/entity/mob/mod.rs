@@ -48,6 +48,27 @@ use self::{
 };
 use super::{EntityUid, JavaRandom};
 
+/// 载具收到 `START_RIDING_JUMP`：官方 `ServerGamePacketListenerImpl.handlePlayerCommand` 里
+/// 那一支，`canJump()` 就是「上了鞍」。
+///
+/// The vehicle got `START_RIDING_JUMP`: the branch of vanilla
+/// `ServerGamePacketListenerImpl.handlePlayerCommand`, where `canJump()` means
+/// "saddled".
+pub fn start_riding_jump(entity: &mut super::Entity, mob: &mut Mob, scale: i32) -> bool {
+    if scale <= 0
+        || mob
+            .equipment
+            .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+            .is_empty()
+    {
+        return false;
+    }
+    if mob.mob_type.is_equine() {
+        self::equine::handle_start_jump(entity, mob);
+    }
+    true
+}
+
 /// 生物种类。牛走 `Animal` 一支，僵尸和尸壳走 `Monster` → `Zombie` 一支。
 ///
 /// Mob kinds. Cows use the `Animal` branch; zombies and husks the
@@ -1136,6 +1157,13 @@ pub struct Mob {
     pub hurt_marked: bool,
     /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
     pub pending_breed: Option<EntityUid>,
+    /// 骑在它身上的玩家，按上下车顺序。玩家不在实体表里，ID 就是玩家自己的实体 ID；
+    /// 官方 `Entity.passengers` 在这里也只会有玩家，因为 Bamboo 还没有生物骑生物。
+    ///
+    /// The players riding this mob, in boarding order. Players are not in the entity
+    /// table, so the id is the player's own entity id. Vanilla `Entity.passengers`
+    /// only ever holds players here: Bamboo has no mobs riding mobs yet.
+    pub passengers: Vec<EntityUid>,
     pub equine: Option<Box<equine::EquineState>>,
 }
 
@@ -1337,6 +1365,7 @@ impl Mob {
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
+            passengers: Vec::new(),
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
@@ -1382,6 +1411,37 @@ impl Mob {
     /// `isDeadOrDying`。
     pub fn is_dead_or_dying(&self) -> bool {
         self.health <= 0.0 || self.dead
+    }
+
+    /// `Entity.isVehicle()`：有人骑着。
+    ///
+    /// `Entity.isVehicle()`: someone is riding.
+    pub fn is_vehicle(&self) -> bool {
+        !self.passengers.is_empty()
+    }
+
+    /// `Entity.getFirstPassenger()`：最先上车的那个。
+    ///
+    /// `Entity.getFirstPassenger()`: whoever boarded first.
+    pub fn first_passenger(&self) -> Option<EntityUid> {
+        self.passengers.first().copied()
+    }
+
+    /// `Entity.getControllingPassenger()`：上鞍的载具由第一位乘客控制。
+    /// 官方的马、猪和骆驼都是这一条；羊驼没有鞍位，所以永远不由玩家控制。
+    ///
+    /// `Entity.getControllingPassenger()`: a saddled vehicle is controlled by its
+    /// first passenger. Vanilla horses, pigs and camels follow this rule; llamas
+    /// have no saddle slot, so a player never controls one.
+    pub fn controlling_passenger(&self) -> Option<EntityUid> {
+        if self
+            .equipment
+            .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+            .is_empty()
+        {
+            return None;
+        }
+        self.first_passenger()
     }
 
     /// `PathfinderMob.isPanicking`：正在跑的目标里有恐慌。
@@ -1460,6 +1520,10 @@ pub struct MobPublic {
         mc_bamboo_protocol::packet::play::EquipmentSlot,
         mc_bamboo_protocol::item::ItemStack,
     )>,
+    /// 骑在上面的玩家，同步阶段按它决定要不要发 `set_passengers`。
+    ///
+    /// The players riding this mob; the sync layer sends `set_passengers` from it.
+    pub passengers: Vec<EntityUid>,
 }
 
 impl MobPublic {
@@ -1507,6 +1571,7 @@ impl MobPublic {
                 .filter(|(_, stack)| !stack.is_empty())
                 .map(|(slot, stack)| (slot, stack.clone()))
                 .collect(),
+            passengers: mob.passengers.clone(),
         }
     }
 

@@ -35,7 +35,8 @@ pub(super) use death::drop_on_death;
 pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets};
 pub(super) use interact::interact;
 pub(super) use life::{
-    Voice, after_hurt, ai_step_end, ai_step_start, is_immobile, land_sound, tick_end, voice,
+    Voice, after_hurt, ai_step_end, ai_step_start, handle_start_jump, is_immobile, land_sound,
+    tick_end, tick_ridden, voice,
 };
 pub(super) use ranged::{ranged_attack_tick, take_did_spit};
 
@@ -212,11 +213,15 @@ pub(super) fn offspring_kind(a: MobType, b: MobType) -> Option<MobType> {
     }
 }
 
-/// `AbstractHorse.canParent`（没有骑乘时载具和乘客两项恒真）。
+/// `AbstractHorse.canParent`：`!isVehicle() && !isPassenger() && isTamed() && !isBaby() &&
+/// 满血 && isInLove()`。Bamboo 的生物不会骑别的生物，`isPassenger()` 恒假。
 ///
-/// `AbstractHorse.canParent`; the vehicle and passenger checks always pass without riding.
+/// `AbstractHorse.canParent`: `!isVehicle() && !isPassenger() && isTamed() && !isBaby()
+/// && full health && isInLove()`. Bamboo mobs never ride other mobs, so
+/// `isPassenger()` is always false.
 pub(super) fn can_parent(mob: &Mob) -> bool {
-    mob.equine.as_ref().is_some_and(|state| state.tame)
+    !mob.is_vehicle()
+        && mob.equine.as_ref().is_some_and(|state| state.tame)
         && !mob.is_baby()
         && mob.health >= mob.attributes.value(attribute::MAX_HEALTH) as f32
         && mob.in_love > 0

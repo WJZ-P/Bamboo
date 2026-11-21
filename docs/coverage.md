@@ -115,7 +115,7 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 | 25 | `entity_tag_query` | 同 `block_entity_tag_query` |
 | 27 | `jigsaw_generate` | 拼图方块界面要 `canUseGameMasterBlocks` |
 | 29 | `lock_difficulty` | 同 `change_difficulty` |
-| 34 | `move_vehicle` | 要骑乘（`LocalPlayer.sendChanges`） |
+| 34 | `move_vehicle` | 已收：比官方松（只做夹取、非法值、「移动太快」拉回，没做碰撞校验），见 `docs/mob-entity-design.md` 5.8 |
 | 35 | `paddle_boat` | 要控制船（`AbstractBoat`） |
 | 39 | `place_recipe` | 配方书只在生存物品栏和容器界面。创造模式的 `InventoryScreen.init` 直接换成 `CreativeModeInventoryScreen` |
 | 45 | `pong` | 只回应 clientbound `ping`，Bamboo 不发 |

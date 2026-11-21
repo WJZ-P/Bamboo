@@ -53,6 +53,10 @@ pub struct MobInteraction {
     ///
     /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point.
     pub shear: bool,
+    /// `AbstractHorse.doPlayerRide`：调用方把这名玩家放到这只生物身上。
+    ///
+    /// `AbstractHorse.doPlayerRide`: the caller puts this player on the mob.
+    pub ride: bool,
 }
 
 impl MobInteraction {
@@ -64,6 +68,7 @@ impl MobInteraction {
             replacement: None,
             open_inventory: false,
             shear: false,
+            ride: false,
         }
     }
 }
@@ -94,6 +99,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
             open_inventory: false,
             shear: false,
+            ride: false,
         };
     }
     if mob.mob_type == MobType::Sheep
@@ -124,6 +130,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             replacement: None,
             open_inventory: false,
             shear: false,
+            ride: false,
         };
     }
     if mob.is_baby() && !mob.age_locked {
@@ -139,6 +146,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             replacement: None,
             open_inventory: false,
             shear: false,
+            ride: false,
         };
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。

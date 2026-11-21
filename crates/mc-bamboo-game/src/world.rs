@@ -2752,9 +2752,15 @@ impl World {
             PlayRequest::PlayerInput { flags } => {
                 entity_sync::on_player_input(region, player, flags);
             }
-            PlayRequest::PlayerCommand { action } => {
-                entity_sync::on_player_command(region, player, action);
+            PlayRequest::PlayerCommand { action, data } => {
+                entity_sync::on_player_command(region, player, action, data);
             }
+            PlayRequest::MoveVehicle {
+                position,
+                yaw,
+                pitch,
+                on_ground,
+            } => crate::riding::on_move_vehicle(region, player, position, yaw, pitch, on_ground),
             PlayRequest::PlayerAbilities { flags } => {
                 entity_sync::on_player_abilities(region, player, flags);
             }
@@ -3320,6 +3326,14 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::BlockEvents);
     interaction::run_entity_ticks(island.entity_threads, region);
+    // 乘客的 `rideTick`：载具这一刻的位置定了，骑手的位置跟上来，要下车的在这里下车。
+    // 官方把乘客紧跟在载具后面 tick，这里放在实体阶段之后、玩家自己的 tick 之前。
+    //
+    // The passenger's `rideTick`: the vehicle position is settled for this tick, so
+    // riders follow it and dismounts land here. Vanilla ticks passengers right
+    // after the vehicle; this runs after the entity phase and before the player's
+    // own tick.
+    crate::riding::tick(region);
     if island.entity_threads == 0 {
         region.profiler.lap(Phase::Entities);
     }
