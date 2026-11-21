@@ -267,6 +267,12 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 朝向，骑乘时用作骑手的朝向（`AbstractHorse.getRiddenRotation`）。
+    ///
+    /// The facing, used as the rider's rotation while riding
+    /// (`AbstractHorse.getRiddenRotation`).
+    pub yaw: f32,
+    pub pitch: f32,
     /// 战斗记忆，被驯服的狼保护主人时读。
     ///
     /// Combat memory, read by tamed wolves guarding their owner.
@@ -493,6 +499,19 @@ pub trait EntityCtx {
     fn blocks(&self) -> &dyn BlockView;
     /// 按 ID 读别的实体的公开数据。自己已经被驱动从表里取出来，查不到是正常的。
     fn other(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 按 ID 读一名玩家（骑手）。不在本岛时返回 `None`。
+    ///
+    /// Reads one player (a rider) by id. `None` when they are not on this island.
+    fn player(&self, uid: EntityUid) -> Option<PlayerView> {
+        let mut found = None;
+        self.blocks().for_each_player(&mut |player| {
+            if player.uid == uid {
+                found = Some(*player);
+            }
+        });
+        found
+    }
+
     /// 这一刻参与 tick 的实体 ID，按 uid 升序。
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
@@ -787,7 +806,7 @@ pub enum Command {
         volume: f32,
         pitch: f32,
     },
-    ArrowExtinguished {
+    ProjectileExtinguished {
         pitch: f32,
     },
     /// `Pufferfish.touch`：先 `hurtServer`，打中了才下毒并放蜇刺声。
@@ -1099,7 +1118,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 pitch,
             );
         }
-        Command::ArrowExtinguished { pitch } => {
+        Command::ProjectileExtinguished { pitch } => {
             super::arrow::play_extinguished_sound(me, world, pitch);
         }
         Command::PufferSting {

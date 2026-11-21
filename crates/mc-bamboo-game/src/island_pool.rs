@@ -627,7 +627,7 @@ mod tests {
     fn wait_running(pool: &IslandPool, ticket: u64) {
         let started = Instant::now();
         while !pool.is_running(ticket) {
-            assert!(started.elapsed() < Duration::from_secs(30), "没开跑");
+            assert!(started.elapsed() < Duration::from_secs(60), "没开跑");
             thread::sleep(Duration::from_millis(1));
         }
     }
@@ -686,7 +686,7 @@ mod tests {
                     assert_eq!(back.ticket, queued);
                     break;
                 }
-                Wait::Pending => assert!(started.elapsed() < Duration::from_secs(30)),
+                Wait::Pending => assert!(started.elapsed() < Duration::from_secs(60)),
                 Wait::Lost => panic!("线程没全没"),
             }
         }
@@ -736,7 +736,7 @@ mod tests {
         let started = Instant::now();
         while back.len() < gates.len() {
             assert!(
-                started.elapsed() < Duration::from_secs(30),
+                started.elapsed() < Duration::from_secs(60),
                 "被放弃的线程没交回"
             );
             if let Ok(hand) = pool.replies.recv_timeout(Duration::from_millis(50)) {

@@ -531,6 +531,33 @@ impl DirectorHost {
         self.compute_backlog.len()
     }
 
+    /// 测试专用：池子里有在途任务时阻塞等待最多 `timeout` 收一条回执并暂存到
+    /// `early_replies`，让下一刻 `collect_compute` 原样接手；避免测试空转 `world.tick()`
+    /// 抢占计算线程。返回是否已有回执可收。
+    ///
+    /// Test only: while pool jobs are in flight, wait up to `timeout` for one
+    /// reply and buffer it in `early_replies` so the next tick's
+    /// `collect_compute` consumes it as usual, avoiding busy-spinning
+    /// `world.tick()` and starving worker threads. Returns whether a reply is ready.
+    #[cfg(test)]
+    pub(crate) fn wait_for_compute_reply(&mut self, timeout: Duration) -> bool {
+        if !self.early_replies.is_empty() {
+            return true;
+        }
+        let Some(pool) = &mut self.pool else {
+            return false;
+        };
+        if pool.in_flight() == 0 {
+            return false;
+        }
+        if let Some(reply) = pool.recv_timeout(timeout) {
+            self.early_replies.push(reply);
+            true
+        } else {
+            false
+        }
+    }
+
     /// 关服排空：等此前所有写落盘并 `sync_all`。失败要报出来，不能当成功。
     /// Drain at shutdown: wait for all writes to land and `sync_all`. A failure
     /// is logged, never silently treated as success.

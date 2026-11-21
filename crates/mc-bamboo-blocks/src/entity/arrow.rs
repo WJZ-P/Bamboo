@@ -374,9 +374,9 @@ fn tick_or_check_ground(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
         arrow.in_ground_time += 1;
         fade_exposed_potion(arrow);
         if !me.removed
-            && let Some(pitch) = travel_effects(me, blocks, position)
+            && let Some(pitch) = projectile_travel_effects(me, blocks, position)
         {
-            ctx.emit(Command::ArrowExtinguished { pitch }, me);
+            ctx.emit(Command::ProjectileExtinguished { pitch }, me);
         }
         true
     } else {
@@ -473,8 +473,8 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let hits = find_targets(me, ctx, end);
     if hits.is_empty() && block_hit.is_none() {
         me.position = end;
-        if let Some(pitch) = travel_effects(me, blocks, position) {
-            ctx.emit(Command::ArrowExtinguished { pitch }, me);
+        if let Some(pitch) = projectile_travel_effects(me, blocks, position) {
+            ctx.emit(Command::ProjectileExtinguished { pitch }, me);
         }
         finish_flight(me, ctx.blocks());
     } else {
@@ -667,7 +667,7 @@ pub(super) fn impact(
     while !me.removed {
         let from = me.position;
         me.position = hits.first().map_or(end, |hit| hit.contact);
-        if let Some(pitch) = travel_effects(me, world, from) {
+        if let Some(pitch) = projectile_travel_effects(me, world, from) {
             play_extinguished_sound(me, world, pitch);
         }
         if me.removed {
@@ -690,7 +690,11 @@ pub(super) fn impact(
     finish_flight(me, world);
 }
 
-fn travel_effects(me: &mut Entity, blocks: &dyn BlockView, from: Vec3) -> Option<f32> {
+pub(super) fn projectile_travel_effects(
+    me: &mut Entity,
+    blocks: &dyn BlockView,
+    from: Vec3,
+) -> Option<f32> {
     let burning = me.remaining_fire_ticks > 0;
     me.apply_effects_along(blocks, from);
     // Entity.playEntityOnFireExtinguishedSound 使用本实体的随机源。

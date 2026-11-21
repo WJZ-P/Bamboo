@@ -84,6 +84,10 @@ struct Step {
     count: i32,
     world_seed: i64,
     spawned: Vec<[i32; 12]>,
+    /// 每只刷出来的生物的花色和叫声（`MobOracle.spawnVariants`）。
+    ///
+    /// Each spawned mob's variant and sound (`MobOracle.spawnVariants`).
+    variants: Vec<Option<[String; 2]>>,
 }
 
 pub(super) struct SceneFacts {
@@ -100,6 +104,10 @@ pub(super) struct Coverage {
     cases: usize,
     pub(super) ticks: usize,
     cows: usize,
+    /// 刷出来的猪、羊、鸡（新加的农场动物）。
+    ///
+    /// Spawned pigs, sheep and chickens (the newer farm animals).
+    farm: [usize; 3],
     skeletons: usize,
     zombies: usize,
     slimes: usize,
@@ -121,6 +129,13 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::COW)
             .count();
+        for (count, kind) in
+            self.farm
+                .iter_mut()
+                .zip([entity_type::PIG, entity_type::SHEEP, entity_type::CHICKEN])
+        {
+            *count += step.spawned.iter().filter(|row| row[0] == kind).count();
+        }
         self.skeletons += step
             .spawned
             .iter()
@@ -159,10 +174,11 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
+                self.farm,
                 self.skeletons,
                 self.zombies,
                 self.slimes,
@@ -240,7 +256,10 @@ impl Coverage {
             self.equines,
         ];
         let full = self.per_scene.contains_key("cow_day");
-        if self.cases > 0 && full && (mobs.contains(&0) || self.cap_off == 0 || !covered_misc) {
+        if self.cases > 0
+            && full
+            && (mobs.contains(&0) || self.farm.contains(&0) || self.cap_off == 0 || !covered_misc)
+        {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
             );
@@ -314,12 +333,17 @@ fn spawn_tick(
         natural::spawn_for_chunk(&mut world, chunk, &mut state, params, &categories);
     }
     let world_seed = world.random().seed();
-    let spawned = level.entities.iter().skip(present).map(spawn_row).collect();
+    let fresh: Vec<Entity> = level.entities.iter().skip(present).collect();
+    let variants = fresh
+        .iter()
+        .map(|entity| super::spawn_variants(entity.kind.mob().expect("natural spawns are mobs")))
+        .collect();
     Step {
         time,
         count: state.count(category),
         world_seed,
-        spawned,
+        spawned: fresh.into_iter().map(spawn_row).collect(),
+        variants,
     }
 }
 
@@ -417,6 +441,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .collect();
     let player = PlayerView {
         uid: 1,
+        yaw: 0.0,
+        pitch: 0.0,
         uuid: None,
         position: Vec3::new(case.player_x, f64::from(case.floors[0] + 1), 8.5),
         delta: Vec3::default(),

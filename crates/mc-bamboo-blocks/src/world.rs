@@ -3256,9 +3256,9 @@ impl<'a> World<'a> {
             );
         }
         if let Some(stack) = outcome.drop_stack.clone() {
-            // `Entity.spawnAtLocation(stack)`：脚下生成一件掉落物。
-            // `Entity.spawnAtLocation(stack)`: a drop at the mob's feet.
-            self.spawn_at_location(entity.position, stack);
+            // `Entity.spawnAtLocation(stack, offset)`：按偏移生成一件掉落物。
+            // `Entity.spawnAtLocation(stack, offset)`: drop at the mob plus offset.
+            self.spawn_at_location(entity.position.add(outcome.drop_offset), stack);
         }
         if outcome.damage_held {
             crate::durability::hurt_hand(self, request.hand, 1);

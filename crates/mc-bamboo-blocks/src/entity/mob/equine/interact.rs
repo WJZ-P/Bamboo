@@ -1,14 +1,13 @@
-//! 马科的右键交互：`Horse.mobInteract` / `AbstractChestedHorse.mobInteract` →
-//! `AbstractHorse.mobInteract`，喂食的 `handleEating`，以及箱子、鞍和身体护甲的装备。
+//! 马科的右键交互：`Entity.interact` 的剪刀卸装、`Horse.mobInteract` /
+//! `AbstractChestedHorse.mobInteract` → `AbstractHorse.mobInteract`，喂食的
+//! `handleEating`，以及箱子、鞍和身体护甲的装备。潜行右键驯服的坐骑和骑乘都在结果里
+//! 记标记，由游戏层落地。
 //!
-//! 骑乘（`doPlayerRide` 里的 `startRiding`）还没有，见 README 已知限制。潜行右键驯服的
-//! 坐骑只在结果里要求打开物品栏，菜单由游戏层开。
-//!
-//! Equine right-click: `Horse.mobInteract` / `AbstractChestedHorse.mobInteract`
-//! → `AbstractHorse.mobInteract`, feeding through `handleEating`, and equipping
-//! chests, saddles and body armor. Riding (`startRiding`) does not exist yet; see
-//! the README known limitations. Sneaking on a tamed mount only asks the caller
-//! to open the inventory menu.
+//! Equine right-click: equipment shearing from `Entity.interact`,
+//! `Horse.mobInteract` / `AbstractChestedHorse.mobInteract` →
+//! `AbstractHorse.mobInteract`, feeding through `handleEating`, and equipping
+//! chests, saddles and body armor. Sneak-opening the inventory and mounting set
+//! flags in the outcome for the game layer to apply.
 
 use mc_bamboo_data::{items, registries::data_component_type as kinds, tags::item_tags};
 use mc_bamboo_protocol::{
@@ -61,6 +60,18 @@ pub(in crate::entity::mob) fn interact(
     mob: &mut Mob,
     req: &MobInteractRequest,
 ) -> MobInteraction {
+    if !living::is_alive(me, mob) {
+        return MobInteraction::pass();
+    }
+    // `Mob.interact` 先走 `Entity.interact` 的剪刀卸装，再走 `mobInteract`。
+    // `Mob.interact` runs `Entity.interact` equipment shearing before `mobInteract`.
+    if req.held.item == items::SHEARS
+        && !mob.is_vehicle()
+        && !req.sneaking
+        && let Some(outcome) = attempt_to_shear_equipment(me, mob, req)
+    {
+        return outcome;
+    }
     let outcome = mob_interact(me, mob, req);
     if outcome.result.consumes_action() || req.held.is_empty() {
         return outcome;
@@ -78,12 +89,55 @@ pub(in crate::entity::mob) fn interact(
     outcome
 }
 
+/// `Mob.attemptToShearEquipment`：按 `EquipmentSlot.VALUES` 顺序找第一件 `can_be_sheared`
+/// 的装备（无绑定诅咒或创造模式），清槽、播卸装声、按 `PASSENGER` 附着点均值掉落并扣剪刀耐久。
+///
+/// `Mob.attemptToShearEquipment`: walk `EquipmentSlot.VALUES` for the first
+/// shearable item (without binding curse unless creative), clear the slot, play
+/// its shearing sound, drop at the average `PASSENGER` attachment and hurt the shears.
+fn attempt_to_shear_equipment(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> Option<MobInteraction> {
+    for slot in crate::entity::mob::equipment::SLOTS {
+        let stack = mob.equipment.get(slot);
+        if stack.is_empty() {
+            continue;
+        }
+        let Some(eq) = equippable(stack) else {
+            continue;
+        };
+        if !eq.can_be_sheared {
+            continue;
+        }
+        if !req.creative
+            && crate::entity::arrow::enchantment_level(stack, "minecraft:binding_curse") > 0
+        {
+            continue;
+        }
+        let dropped = stack.clone();
+        mob.equipment.set(slot, ItemStack::empty());
+        if let Some(sound) = sound_name(&eq.shearing_sound) {
+            living::play_sound(me, mob, sound, 1.0, 1.0);
+        }
+        return Some(MobInteraction {
+            result: InteractionResult::Success,
+            damage_held: !req.creative,
+            drop_stack: Some(dropped),
+            drop_offset: super::shear_drop_offset(mob.mob_type, mob.is_baby()),
+            ..MobInteraction::pass()
+        });
+    }
+    None
+}
+
 fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
     let open_inventory = !mob.is_baby() && tame(mob) && req.sneaking;
     // `isHolding(GOLDEN_DANDELION)` 看两只手；请求里只有这一只手的物品。
     // `isHolding` checks both hands; the request only carries this hand's stack.
     let baby_dandelion = mob.is_baby() && req.held.item == items::GOLDEN_DANDELION;
-    if !open_inventory && !baby_dandelion && !req.held.is_empty() {
+    if !mob.is_vehicle() && !open_inventory && !baby_dandelion && !req.held.is_empty() {
         if is_food(mob.mob_type, &req.held) {
             return fed_food(me, mob, req);
         }
@@ -99,18 +153,20 @@ fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
     abstract_horse_interact(me, mob, req)
 }
 
-/// `AbstractHorse.mobInteract`：幼崽交给 `Animal.mobInteract`（这里走不到食物那一支，
-/// 结果是 `PASS`）；驯服后潜行开物品栏；手里的东西先试 `interactLivingEntity`
-/// （鞍），再试身体护甲；最后 `doPlayerRide`。
+/// `AbstractHorse.mobInteract`：有人骑或幼崽交给 `Animal.mobInteract`；
+/// 驯服后潜行开物品栏；手里的东西先试 `interactLivingEntity`（鞍），再试身体护甲；最后 `doPlayerRide`。
 ///
-/// `AbstractHorse.mobInteract`: babies go to `Animal.mobInteract` (never with
-/// food here, so `PASS`); sneaking opens the inventory once tamed; the held stack
-/// tries `interactLivingEntity` (saddles) and then body armor; finally `doPlayerRide`.
+/// `AbstractHorse.mobInteract`: ridden mounts and babies go to `Animal.mobInteract`;
+/// sneaking opens the inventory once tamed; the held stack tries
+/// `interactLivingEntity` (saddles) and then body armor; finally `doPlayerRide`.
 fn abstract_horse_interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
 ) -> MobInteraction {
+    if mob.is_vehicle() {
+        return crate::entity::mob::interact::animal_interact(me, mob, req);
+    }
     if mob.is_baby() {
         return MobInteraction::pass();
     }
@@ -137,14 +193,17 @@ fn abstract_horse_interact(
         }
     }
     do_player_ride(mob);
-    success(false, req)
+    MobInteraction {
+        ride: true,
+        ..success(false, req)
+    }
 }
 
 /// `doPlayerRide`：停止吃草、清掉扬蹄，然后 `player.startRiding(this)`。
-/// 骑乘还没有，所以只落前两步。
+/// 最后一步要改玩家和载具两边，由游戏层按 `ride` 标记落地。
 ///
-/// `doPlayerRide`: stop grazing, clear rearing, then `startRiding`; only the
-/// first two steps happen while riding is missing.
+/// `doPlayerRide`: stop grazing, clear rearing, then `startRiding`; the last step
+/// touches both sides, so the game layer applies it from the `ride` flag.
 fn do_player_ride(mob: &mut Mob) {
     if let Some(state) = &mut mob.equine {
         state.eating = false;
@@ -280,7 +339,7 @@ fn handle_eating(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> bo
 /// `getMaxTemper`：马、驴、骡 100，羊驼 30。
 ///
 /// `getMaxTemper`: 100 for horses, donkeys and mules, 30 for llamas.
-const fn max_temper(kind: MobType) -> i32 {
+pub(super) const fn max_temper(kind: MobType) -> i32 {
     if matches!(kind, MobType::Llama) {
         30
     } else {
@@ -450,11 +509,194 @@ fn play_equip_sound(me: &mut Entity, mob: &mut Mob, slot: EquipmentSlot, equippa
 }
 
 fn equip_sound(equippable: &Equippable) -> Option<&'static str> {
-    match &equippable.equip_sound {
+    sound_name(&equippable.equip_sound)
+}
+
+fn sound_name(
+    sound: &Holder<mc_bamboo_protocol::components::value::SoundEvent>,
+) -> Option<&'static str> {
+    match sound {
         Holder::Id(id) => usize::try_from(*id)
             .ok()
             .and_then(|id| mc_bamboo_data::sounds::SOUND_EVENTS.get(id))
             .map(|sound| sound.name),
         Holder::Inline(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::{Hand, Vec3};
+
+    use super::*;
+
+    fn req(held: ItemStack, sneaking: bool) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 99,
+            player_uuid: [9; 16],
+            hand: Hand::Main,
+            held,
+            creative: false,
+            position: Vec3::new(0.5, 64.0, 0.5),
+            sneaking,
+        }
+    }
+
+    /// 有人骑着的马科：别人潜行右键不开物品栏、空手不上马、拿马铠不穿、拿食物走 `Animal.mobInteract`。
+    ///
+    /// A ridden equine ignores sneak-open, empty-hand riding and body armor from
+    /// another player, and routes food through `Animal.mobInteract`.
+    #[test]
+    fn a_ridden_equine_routes_through_animal_interact() {
+        let mut entity = Entity::by_mob_type(MobType::Horse, Vec3::new(0.5, 64.0, 0.5));
+        entity
+            .with_mob(|me, mob| {
+                let state = mob.equine.as_mut().expect("horse state");
+                state.tame = true;
+                mob.passengers.push(7);
+
+                let sneak = interact(me, mob, &req(ItemStack::empty(), true));
+                assert_eq!(sneak.result, InteractionResult::Pass);
+                assert!(!sneak.open_inventory);
+
+                let armor = interact(
+                    me,
+                    mob,
+                    &req(ItemStack::new(items::IRON_HORSE_ARMOR, 1), false),
+                );
+                assert_eq!(armor.result, InteractionResult::Pass);
+                assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
+
+                let empty = interact(me, mob, &req(ItemStack::empty(), false));
+                assert_eq!(empty.result, InteractionResult::Pass);
+                assert!(!empty.ride);
+
+                let wheat = interact(me, mob, &req(ItemStack::new(items::WHEAT, 1), false));
+                assert_eq!(wheat.result, InteractionResult::SuccessServer);
+                assert_eq!(mob.in_love, 600);
+            })
+            .expect("horse row");
+    }
+
+    /// 剪刀按槽位顺序先卸马铠再卸鞍，掉在附着点并扣耐久；羊驼卸地毯；潜行、被骑或
+    /// 生存模式下的绑定诅咒不卸。
+    ///
+    /// Shears remove body armor before the saddle in slot order, drop at the
+    /// passenger attachment and spend durability; llamas drop their carpet;
+    /// sneaking, a rider, or survival binding curse prevents shearing.
+    #[test]
+    fn shears_remove_equine_equipment_in_slot_order() {
+        let shears = ItemStack::new(items::SHEARS, 1);
+        let armor = ItemStack::new(items::IRON_HORSE_ARMOR, 1);
+        let saddle = ItemStack::new(items::SADDLE, 1);
+        let mut horse = Entity::by_mob_type(MobType::Horse, Vec3::new(0.5, 64.0, 0.5));
+        horse
+            .with_mob(|me, mob| {
+                mob.equine.as_mut().expect("horse").tame = true;
+                mob.equipment.set(EquipmentSlot::Body, armor.clone());
+                mob.equipment.set(EquipmentSlot::Saddle, saddle.clone());
+
+                // 潜行时不开卸装，走驯服坐骑开物品栏。
+                // Sneaking skips shearing and opens the mount inventory instead.
+                let sneak = interact(me, mob, &req(shears.clone(), true));
+                assert!(sneak.open_inventory);
+                assert!(sneak.drop_stack.is_none());
+                assert_eq!(mob.equipment.get(EquipmentSlot::Body), &armor);
+
+                // 第一次剪下马铠，鞍还在。
+                // First shear removes the horse armor; the saddle stays on.
+                let first = interact(me, mob, &req(shears.clone(), false));
+                assert_eq!(first.result, InteractionResult::Success);
+                assert!(first.damage_held);
+                assert!(!first.shrink_held);
+                assert_eq!(first.drop_stack, Some(armor.clone()));
+                assert!((first.drop_offset.y - 1.443_75).abs() < 1.0e-6);
+                assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
+                assert_eq!(mob.equipment.get(EquipmentSlot::Saddle), &saddle);
+                assert!(mob.events.iter().any(|event| matches!(
+                    event,
+                    MobEvent::Sound {
+                        sound: "minecraft:item.horse_armor.unequip",
+                        volume,
+                        pitch,
+                        ..
+                    } if (*volume - 1.0).abs() < 1.0e-6 && (*pitch - 1.0).abs() < 1.0e-6
+                )));
+                mob.events.clear();
+
+                // 第二次剪下鞍。
+                // Second shear removes the saddle.
+                let second = interact(me, mob, &req(shears.clone(), false));
+                assert_eq!(second.result, InteractionResult::Success);
+                assert!(second.damage_held);
+                assert_eq!(second.drop_stack, Some(saddle.clone()));
+                assert!(mob.equipment.get(EquipmentSlot::Saddle).is_empty());
+                assert!(mob.events.iter().any(|event| matches!(
+                    event,
+                    MobEvent::Sound {
+                        sound: "minecraft:item.saddle.unequip",
+                        ..
+                    }
+                )));
+
+                // 绑定诅咒：生存模式不能剪，创造模式可以且不扣耐久。
+                // Binding curse blocks survival shearing, while creative removes it without durability cost.
+                let binding_id = mc_bamboo_data::registries::SYNCED_REGISTRIES
+                    .iter()
+                    .find(|registry| registry.name == "minecraft:enchantment")
+                    .and_then(|registry| {
+                        registry
+                            .entries
+                            .iter()
+                            .position(|name| *name == "minecraft:binding_curse")
+                    })
+                    .expect("binding_curse id") as i32;
+                let mut cursed = saddle.clone();
+                let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+                patch.put(
+                    kinds::ENCHANTMENTS,
+                    mc_bamboo_protocol::components::PatchEntry::Set(ComponentValue::Enchantments(
+                        vec![(binding_id, 1)],
+                    )),
+                );
+                (cursed.added, cursed.removed) = patch.to_opaque();
+                mob.equipment.set(EquipmentSlot::Saddle, cursed.clone());
+                let blocked = interact(me, mob, &req(shears.clone(), false));
+                assert!(blocked.drop_stack.is_none());
+                assert_eq!(mob.equipment.get(EquipmentSlot::Saddle), &cursed);
+                let mut creative_req = req(shears.clone(), false);
+                creative_req.creative = true;
+                let removed = interact(me, mob, &creative_req);
+                assert_eq!(removed.result, InteractionResult::Success);
+                assert!(!removed.damage_held);
+                assert_eq!(removed.drop_stack, Some(cursed));
+                assert!(mob.equipment.get(EquipmentSlot::Saddle).is_empty());
+
+                // 被骑着时不能剪。
+                // A ridden horse cannot be sheared.
+                mob.equipment.set(EquipmentSlot::Saddle, saddle.clone());
+                mob.passengers.push(7);
+                let ridden = interact(me, mob, &req(shears.clone(), false));
+                assert_eq!(ridden.result, InteractionResult::Pass);
+                assert_eq!(mob.equipment.get(EquipmentSlot::Saddle), &saddle);
+            })
+            .expect("horse row");
+
+        // 羊驼剪地毯：掉落偏移含向后的 -0.3。
+        // Shearing a llama carpet uses the llama's (1.37, -0.3) attachment offset.
+        let carpet = ItemStack::new(items::WHITE_CARPET, 1);
+        let mut llama = Entity::by_mob_type(MobType::Llama, Vec3::new(0.5, 64.0, 0.5));
+        llama
+            .with_mob(|me, mob| {
+                mob.equipment.set(EquipmentSlot::Body, carpet.clone());
+                let sheared = interact(me, mob, &req(shears.clone(), false));
+                assert_eq!(sheared.result, InteractionResult::Success);
+                assert!(sheared.damage_held);
+                assert_eq!(sheared.drop_stack, Some(carpet.clone()));
+                assert!((sheared.drop_offset.y - 1.37).abs() < 1.0e-6);
+                assert!((sheared.drop_offset.z + 0.3).abs() < 1.0e-6);
+                assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
+            })
+            .expect("llama row");
     }
 }

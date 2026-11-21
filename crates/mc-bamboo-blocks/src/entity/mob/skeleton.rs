@@ -569,6 +569,8 @@ mod tests {
             Entity::by_mob_type(super::super::MobType::Skeleton, Vec3::new(0.5, 64.0, 0.5));
         let player = PlayerView {
             uid: 123,
+            yaw: 0.0,
+            pitch: 0.0,
             uuid: None,
             position: Vec3::new(10.5, 64.0, 0.5),
             delta: Vec3::default(),

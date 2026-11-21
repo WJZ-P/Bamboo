@@ -661,7 +661,12 @@ fn pairing_bundle_matches_official_bytes() {
     let mut stage = Stage::with_client(POSITION, left_handed_client());
     stage.player().yaw = 90.0;
     on_player_input(&mut stage.region, STEVE, SHIFT);
-    on_player_command(&mut stage.region, STEVE, PlayerCommandKind::StartSprinting);
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartSprinting,
+        0,
+    );
     stage.step();
 
     let bytes = pairing_frames(stage.player());
@@ -883,7 +888,12 @@ fn sprinting_sets_and_clears_its_flag_next_to_sneaking() {
     let mut stage = Stage::at(POSITION);
     stage.skip_first_cycle();
 
-    on_player_command(&mut stage.region, STEVE, PlayerCommandKind::StartSprinting);
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartSprinting,
+        0,
+    );
     stage.step();
     assert_eq!(
         stage.take_received(),
@@ -900,7 +910,12 @@ fn sprinting_sets_and_clears_its_flag_next_to_sneaking() {
         )]
     );
 
-    on_player_command(&mut stage.region, STEVE, PlayerCommandKind::StopSprinting);
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StopSprinting,
+        0,
+    );
     stage.step();
     assert_eq!(
         stage.take_received(),
@@ -919,7 +934,7 @@ fn other_player_commands_change_nothing() {
         PlayerCommandKind::StopRidingJump,
         PlayerCommandKind::OpenInventory,
     ] {
-        on_player_command(&mut stage.region, STEVE, action);
+        on_player_command(&mut stage.region, STEVE, action, 0);
     }
     stage.step();
 
@@ -932,13 +947,28 @@ fn other_player_commands_change_nothing() {
 fn fall_flying_refusal_uses_the_current_flags_and_only_reaches_the_player() {
     let mut stage = Stage::at(POSITION);
 
-    on_player_command(&mut stage.region, STEVE, PlayerCommandKind::StartFallFlying);
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
     stage.region.links.flush();
     assert_eq!(stage.own.take_bytes(), hex("06 65 07 00 00 00 ff"));
 
     // 冲刺还没进入周期，回应也要写上它。
-    on_player_command(&mut stage.region, STEVE, PlayerCommandKind::StartSprinting);
-    on_player_command(&mut stage.region, STEVE, PlayerCommandKind::StartFallFlying);
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartSprinting,
+        0,
+    );
+    on_player_command(
+        &mut stage.region,
+        STEVE,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
     assert_eq!(
         stage.flush_own(),
         [frame(clientbound::SET_ENTITY_DATA, "07 00 00 08 ff")]
@@ -993,8 +1023,18 @@ fn requests_for_a_player_that_is_gone_are_ignored() {
     on_punch(&mut stage.region, gone);
     on_player_input(&mut stage.region, gone, SHIFT);
     on_player_abilities(&mut stage.region, gone, FLYING);
-    on_player_command(&mut stage.region, gone, PlayerCommandKind::StartSprinting);
-    on_player_command(&mut stage.region, gone, PlayerCommandKind::StartFallFlying);
+    on_player_command(
+        &mut stage.region,
+        gone,
+        PlayerCommandKind::StartSprinting,
+        0,
+    );
+    on_player_command(
+        &mut stage.region,
+        gone,
+        PlayerCommandKind::StartFallFlying,
+        0,
+    );
     on_leave(&mut stage.region, gone);
 
     assert!(stage.flush_watcher().is_empty());

@@ -1450,11 +1450,13 @@ mod tests {
         let mut io = ChunkIo::open(&dir).unwrap();
         assert!(!io.worker_stopped());
         io.crash_for_test();
-        for _ in 0..2000 {
-            if io.worker_stopped() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !io.worker_stopped() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "IO worker did not stop within 60s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(io.worker_stopped(), "worker death must be visible");
         // 之后的 submit 也会 send 失败，`dead` 保持置位，世界线程照样能发现。

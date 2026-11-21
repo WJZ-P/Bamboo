@@ -43,6 +43,8 @@ pub(super) struct Drop {
 pub(super) fn player_view() -> PlayerView {
     PlayerView {
         uid: 1025,
+        yaw: 0.0,
+        pitch: 0.0,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         position: Vec3::new(2.5, 64.0, 0.5),
         delta: Vec3::default(),
