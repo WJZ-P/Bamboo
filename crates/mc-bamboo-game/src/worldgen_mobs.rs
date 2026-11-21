@@ -310,11 +310,9 @@ mod tests {
                     assert_eq!(row.public.position, replay.public.position);
                     let kind = row.public.kind.entity_type();
                     assert_eq!(kind, replay.public.kind.entity_type());
-                    let slot = farm
-                        .iter()
-                        .position(|&farm_kind| farm_kind == kind)
-                        .expect("only farm animals are modelled for generation spawns");
-                    counts[slot] += 1;
+                    if let Some(slot) = farm.iter().position(|&farm_kind| farm_kind == kind) {
+                        counts[slot] += 1;
+                    }
                     let at = row.public.position;
                     assert_eq!(
                         BlockPos::containing(at).chunk(),

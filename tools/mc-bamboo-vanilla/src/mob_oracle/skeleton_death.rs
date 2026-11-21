@@ -33,14 +33,14 @@ struct Gear {
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Drop {
+pub(super) struct Drop {
     item: i32,
     count: i32,
     damage: i32,
     xp: i32,
 }
 
-fn player_view() -> PlayerView {
+pub(super) fn player_view() -> PlayerView {
     PlayerView {
         uid: 1025,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
@@ -77,7 +77,7 @@ fn gear_stack(gear: &Gear) -> ItemStack {
     stack
 }
 
-fn snapshot(public: mc_bamboo_blocks::entity::EntityPublic) -> Option<Drop> {
+pub(super) fn snapshot(public: mc_bamboo_blocks::entity::EntityPublic) -> Option<Drop> {
     match public.kind {
         KindPublic::Item { stack, .. } => {
             let damage = match defaults::resolve(stack.item, &stack.patch(), kinds::DAMAGE) {

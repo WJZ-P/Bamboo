@@ -1,9 +1,9 @@
 //! 用官方平原刷怪表和公式地形重放生成期刷怪（`NaturalSpawner.spawnMobsForChunkGeneration`）。
 //!
-//! 比农场动物的类型、坐标、朝向和装饰随机源指纹。区域随机源和生成属性在遇到
+//! 比已建模动物的类型、坐标、朝向和装饰随机源指纹。区域随机源和生成属性在遇到
 //! 未实现的动物前保持同步；遇到后仍比位置，因为放置使用独立的装饰随机源。
 //!
-//! Compare farm animal types, positions, facing and decoration RNG fingerprint.
+//! Compare modelled animal types, positions, facing and decoration RNG fingerprint.
 //! Compare region RNG and spawn traits until an unsupported species consumes
 //! region draws; positions still use the independent decoration RNG.
 
@@ -11,7 +11,10 @@ use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, LegacyRandom, LevelRandom, World,
     entity::{
         Entities, Entity,
-        mob::natural_gen::{GenSpawn, spawn_mobs_for_chunk_generation},
+        mob::{
+            MobType,
+            natural_gen::{GenSpawn, spawn_mobs_for_chunk_generation},
+        },
     },
     random::{RandomSource, XoroshiroRandom},
 };
@@ -32,7 +35,7 @@ pub(super) struct Case {
     sky: i32,
     block: i32,
     terrain: bool,
-    spawned: Vec<([i64; 7], Option<[String; 2]>)>,
+    spawned: Vec<(Vec<i64>, Option<[String; 2]>)>,
     random: i64,
     region: i64,
 }
@@ -41,6 +44,7 @@ pub(super) struct Case {
 pub(super) struct Coverage {
     pub(super) cases: usize,
     farms: std::collections::BTreeMap<i32, usize>,
+    equines: usize,
     others: usize,
     details: usize,
 }
@@ -49,16 +53,16 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {:?} farm animals by type, {} unsupported animals, {} animals with finalize details compared",
-                self.cases, self.farms, self.others, self.details
+                "GEN SPAWN: {} cases, {:?} farm animals by type, {} equines, {} unsupported animals, {} animals with finalize details compared",
+                self.cases, self.farms, self.equines, self.others, self.details
             );
         }
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        if self.cases > 0 && (self.farms.len() != 4 || self.others == 0 || self.details == 0) {
+        if self.cases > 0 && (self.farms.len() != 4 || self.equines == 0 || self.others == 0 || self.details == 0) {
             return Err(
-                "gen spawn fixtures did not exercise all farm species and unsupported animals"
+                "gen spawn fixtures did not exercise all farm species, equines and unsupported animals"
                     .into(),
             );
         }
@@ -112,26 +116,21 @@ impl Report {
         let mut in_sync = true;
         let mut ours = mobs.iter();
         for (row, variants) in &case.spawned {
-            let Some(variants) = variants else {
+            let Some(kind) = modelled(row[0]) else {
                 self.gen_spawns.others += 1;
                 in_sync = false;
                 continue;
             };
-            *self.gen_spawns.farms.entry(row[0] as i32).or_default() += 1;
-            let Some(animal) = ours.next() else {
-                self.mismatch(format!(
-                    "{label}: official animal {row:?} missing in Bamboo"
-                ));
+            if kind.is_equine() {
+                self.gen_spawns.equines += 1;
+            } else {
+                *self.gen_spawns.farms.entry(kind.entity_type()).or_default() += 1;
+            }
+            let Some(entity) = ours.next() else {
+                self.mismatch(format!("{label}: official {row:?} missing in Bamboo"));
                 return;
             };
-            let mob = animal.kind.mob().expect("generated mobs are mobs");
-            let place = [
-                i64::from(mob.mob_type.entity_type()),
-                animal.position.x.to_bits() as i64,
-                animal.position.y.to_bits() as i64,
-                animal.position.z.to_bits() as i64,
-                i64::from(animal.y_rot.to_bits() as i32),
-            ];
+            let place = placement(entity);
             if place[..] != row[..5] {
                 self.mismatch(format!(
                     "{label}: official {row:?}, Bamboo placement {place:?}"
@@ -139,9 +138,9 @@ impl Report {
             }
             if in_sync {
                 self.gen_spawns.details += 1;
-                let details = [i64::from(mob.is_baby()), i64::from(mob.left_handed)];
-                let actual = super::spawn_variants(mob);
-                if actual.as_ref() != Some(variants) {
+                let details = details(entity);
+                let actual = entity.kind.mob().and_then(super::spawn_variants);
+                if &actual != variants {
                     self.mismatch(format!(
                         "{label}: official variants {variants:?}, Bamboo {actual:?}"
                     ));
@@ -170,6 +169,44 @@ impl Report {
             self.mismatch(format!("{label}: region random drifted"));
         }
     }
+}
+
+/// Bamboo 已经建模、会真的生成的种类。
+///
+/// Kinds Bamboo models and really spawns.
+fn modelled(entity: i64) -> Option<MobType> {
+    let kind = MobType::by_entity_type(i32::try_from(entity).ok()?)?;
+    (matches!(
+        kind,
+        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+    ) || kind.is_equine())
+    .then_some(kind)
+}
+
+/// 类型、坐标原始位和朝向原始位。
+///
+/// Type, raw coordinate bits and raw yaw bits.
+fn placement(entity: &Entity) -> [i64; 5] {
+    let mob = entity.kind.mob().expect("generated mobs are mobs");
+    [
+        i64::from(mob.mob_type.entity_type()),
+        entity.position.x.to_bits() as i64,
+        entity.position.y.to_bits() as i64,
+        entity.position.z.to_bits() as i64,
+        i64::from(entity.y_rot.to_bits() as i32),
+    ]
+}
+
+/// 幼年、左撇子；马科再加 [`super::equine::state`]。
+///
+/// Baby and left-handedness, plus [`super::equine::state`] for equines.
+fn details(entity: &Entity) -> Vec<i64> {
+    let mob = entity.kind.mob().expect("generated mobs are mobs");
+    let mut details = vec![i64::from(mob.is_baby()), i64::from(mob.left_handed)];
+    if mob.mob_type.is_equine() {
+        details.extend(super::equine::state(entity));
+    }
+    details
 }
 
 /// 和 `MobOracle.genColumn` 同一个坐标公式。

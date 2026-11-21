@@ -12,6 +12,7 @@ use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
 mod arrow;
 mod egg;
+mod spit;
 
 use super::tag::{self, Error, Result, put};
 use crate::{
@@ -56,6 +57,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
         crate::entity::KindPublic::Arrow(arrow) => arrow.variant.entity_type(),
+        crate::entity::KindPublic::LlamaSpit(_) => kinds::LLAMA_SPIT,
         crate::entity::KindPublic::Egg(_) => kinds::EGG,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
@@ -77,6 +79,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             Tag::Float(public.yaw),
             Tag::Float(match &public.kind {
                 crate::entity::KindPublic::Arrow(arrow) => arrow.pitch,
+                crate::entity::KindPublic::LlamaSpit(spit) => spit.pitch,
                 crate::entity::KindPublic::Egg(egg) => egg.x_rot,
                 _ => 0.0,
             }),
@@ -95,6 +98,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     put(&mut out, "PortalCooldown", Tag::Int(0));
     let uuid = match &public.kind {
         crate::entity::KindPublic::Arrow(arrow) => uuid_tag(&arrow.uuid),
+        crate::entity::KindPublic::LlamaSpit(spit) => uuid_tag(&spit.uuid),
         crate::entity::KindPublic::Egg(egg) => uuid_tag(&egg.uuid),
         _ => entity_uuid_tag(public.uid),
     };
@@ -139,6 +143,12 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 return Err(Error::new("mismatched arrow entity halves"));
             };
             arrow::write(saved, &mut out)?;
+        }
+        crate::entity::KindPublic::LlamaSpit(_) => {
+            let crate::entity::KindState::LlamaSpit(saved) = &state.kind else {
+                return Err(Error::new("mismatched llama spit entity halves"));
+            };
+            spit::write(saved, &mut out);
         }
         crate::entity::KindPublic::Egg(_) => {
             let crate::entity::KindState::Egg(saved) = &state.kind else {
@@ -211,6 +221,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
             "minecraft:spectral_arrow" => {
                 EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], true)))
             }
+            "minecraft:llama_spit" => EntityKind::LlamaSpit(Box::new(spit::read(tag, rotation[1]))),
             "minecraft:egg" => EntityKind::Egg(Box::new(egg::read(tag, rotation[1]))),
             "minecraft:falling_block" => {
                 let block = match tag::field(tag, "BlockState") {

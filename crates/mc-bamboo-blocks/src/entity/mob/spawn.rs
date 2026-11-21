@@ -57,6 +57,30 @@ pub struct AgeableGroupData {
     pub baby_spawn_chance: f32,
 }
 
+impl AgeableGroupData {
+    /// `new AgeableMobGroupData(babySpawnChance)`：会生幼崽，组里还没有成员。
+    ///
+    /// `new AgeableMobGroupData(babySpawnChance)`: babies allowed, no members yet.
+    pub(super) fn new(baby_spawn_chance: f32) -> Self {
+        Self {
+            group_size: 0,
+            should_spawn_baby: true,
+            baby_spawn_chance,
+        }
+    }
+
+    /// `AgeableMob.finalizeSpawn`：仅从第二只开始抽幼崽概率。
+    ///
+    /// `AgeableMob.finalizeSpawn`: roll for a baby only from the second member onward.
+    pub(super) fn roll_baby(&mut self, random: &dyn RandomSource) -> bool {
+        let baby = self.should_spawn_baby
+            && self.group_size > 0
+            && random.next_float() <= self.baby_spawn_chance;
+        self.group_size += 1;
+        baby
+    }
+}
+
 /// 自然生成的组数据（`SpawnGroupData`）：动物的 `AgeableMobGroupData` 和僵尸的
 /// `ZombieGroupData`。
 ///
@@ -65,6 +89,14 @@ pub struct AgeableGroupData {
 #[derive(Debug, Clone, Copy)]
 pub enum SpawnGroup {
     Ageable(AgeableGroupData),
+    /// `Horse.HorseGroupData`：同组共享的毛色编号。
+    ///
+    /// `Horse.HorseGroupData`: the coat id shared by the group.
+    Horse(AgeableGroupData, i32),
+    /// `Llama.LlamaGroupData`：同组共享的毛色编号。
+    ///
+    /// `Llama.LlamaGroupData`: the colour id shared by the group.
+    Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
 }
 
@@ -170,6 +202,11 @@ pub fn spawn_egg(
         mob.y_body_rot = me.y_rot;
     });
     finalize_spawn(world, kind, &mut entity, SpawnReason::SpawnItemUse);
+    // 刷怪蛋自带 `entity_data`：官方 `saveWithoutId` → 合并 → `load`，`setHealth`
+    // 把血量夹到 `finalizeSpawn` 之后的最大血量（马科的最大血量是随机的）。
+    // The egg's `entity_data` round-trips the mob through save and load, and
+    // `setHealth` clamps to the post-`finalizeSpawn` maximum (random for equines).
+    entity.with_mob(|_, mob| living::clamp_health(mob));
     // `appendComponentsConfig`：刷怪蛋的 `custom_name` 套到实体上。
     if let Some(name) = custom_name {
         entity.with_mob(|_, mob| mob.custom_name = Some(name));
@@ -240,7 +277,7 @@ pub(crate) fn finalize_spawn(
 ///
 /// The natural-spawn entry of `finalizeSpawn`: the group data is shared by every mob
 /// of one group.
-pub(crate) fn finalize_spawn_with_group(
+pub fn finalize_spawn_with_group(
     world: &mut World,
     kind: MobType,
     entity: &mut Entity,
@@ -250,7 +287,7 @@ pub(crate) fn finalize_spawn_with_group(
 }
 
 /// `AgeableMob.getBabyStartAge()`。
-const BABY_START_AGE: i32 = -24000;
+pub(super) const BABY_START_AGE: i32 = -24000;
 
 fn finalize_spawn_in_group(
     world: &mut World,
@@ -267,16 +304,20 @@ fn finalize_spawn_in_group(
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
     }
+    if kind.is_equine() {
+        super::equine::finalize_spawn(entity, world.random(), group);
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     finalize_cow(kind, entity, biome, world.random(), group);
 }
 
 /// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
-/// `WorldGenRegion.random`。牛、猪、羊、鸡走 [`finalize_cow`]；以后加进来的动物还没接
+/// `WorldGenRegion.random`。牛、猪、羊、鸡和马科使用这个随机源；以后加进来的动物还没接
 /// 区域随机源，暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
 ///
 /// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
-/// `WorldGenRegion.random`. Cows, pigs, sheep and chickens use [`finalize_cow`]; animals
+/// `WorldGenRegion.random`. Cows, pigs, sheep, chickens and equines use it; animals
 /// added later fall back to the level random until wired, which only affects their
 /// variants and age.
 pub(super) fn finalize_generated(
@@ -292,6 +333,8 @@ pub(super) fn finalize_generated(
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
+    } else if kind.is_equine() {
+        super::equine::finalize_spawn(entity, region_random, group);
     } else {
         finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
     }
@@ -337,19 +380,12 @@ pub(super) fn finalize_cow(
     // `AgeableMob.finalizeSpawn`：不是动物组数据时新建一份（官方 `groupData == null`）。
     // `AgeableMob.finalizeSpawn`: start a fresh animal group when there is none.
     if !matches!(group, Some(SpawnGroup::Ageable(_))) {
-        *group = Some(SpawnGroup::Ageable(AgeableGroupData {
-            group_size: 0,
-            should_spawn_baby: true,
-            baby_spawn_chance: 0.05,
-        }));
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(0.05)));
     }
     let Some(SpawnGroup::Ageable(data)) = group else {
         unreachable!("animal spawn group was just initialized");
     };
-    let baby = data.should_spawn_baby
-        && data.group_size > 0
-        && random.next_float() <= data.baby_spawn_chance;
-    data.group_size += 1;
+    let baby = data.roll_baby(random);
     entity.with_mob(|me, mob| {
         if kind != MobType::Sheep {
             mob.variant = variant;
@@ -369,21 +405,25 @@ pub(super) fn finalize_cow(
         if baby {
             living::set_age(me, mob, BABY_START_AGE);
         }
-        // `Mob.finalizeSpawn`：跟随距离的随机加成和左撇子。
-        // `Mob.finalizeSpawn`: the random follow-range bonus and left-handedness.
-        if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
-            && range.modifier(RANDOM_SPAWN_BONUS).is_none()
-        {
-            let amount = random.triangle(0.0, 0.114_850_000_000_000_01);
-            range.modifiers.push(Modifier {
-                id: RANDOM_SPAWN_BONUS.to_owned(),
-                amount,
-                operation: Operation::AddMultipliedBase,
-                permanent: true,
-            });
-        }
-        mob.left_handed = random.next_float() < 0.05;
+        finalize_mob(random, mob);
     });
+}
+
+pub(super) fn finalize_mob(random: &dyn RandomSource, mob: &mut super::Mob) {
+    // `Mob.finalizeSpawn`：跟随距离的随机加成和左撇子。
+    // `Mob.finalizeSpawn`: the random follow-range bonus and left-handedness.
+    if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
+        && range.modifier(RANDOM_SPAWN_BONUS).is_none()
+    {
+        let amount = random.triangle(0.0, 0.114_850_000_000_000_01);
+        range.modifiers.push(Modifier {
+            id: RANDOM_SPAWN_BONUS.to_owned(),
+            amount,
+            operation: Operation::AddMultipliedBase,
+            permanent: true,
+        });
+    }
+    mob.left_handed = random.next_float() < 0.05;
 }
 
 /// `cow_variant` 的生成条件：暖和冷各按一个群系标签，优先级 1；其余是温带。
