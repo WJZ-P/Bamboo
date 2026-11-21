@@ -310,4 +310,28 @@ mod tests {
         }
         assert!(cows > 0, "576 个分散的区块里应该刷出牛");
     }
+
+    /// `ChunkAccess.getNoiseBiome` 把 quart y 夹进区块高度：顶上之外的查询等于最顶一层。
+    ///
+    /// `ChunkAccess.getNoiseBiome` clamps the quart y into the chunk: queries above the
+    /// top equal the topmost layer.
+    #[test]
+    fn region_biomes_clamp_the_quart_height() {
+        let config = WorldGenConfig {
+            seed: 99,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        with_generator(&config, |generator| {
+            for (x, z) in [(0, 0), (37, -12), (-80, 64)] {
+                let top = generator.region_noise_biome(x, 79, z);
+                assert_eq!(generator.region_noise_biome(x, 80, z), top);
+                assert_eq!(generator.region_noise_biome(x, 400, z), top);
+                let bottom = generator.region_noise_biome(x, -16, z);
+                assert_eq!(generator.region_noise_biome(x, -40, z), bottom);
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
 }
