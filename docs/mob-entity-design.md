@@ -406,7 +406,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 繁殖的基因遗传在 `getBreedOffspring`：父母各一次 `nextBoolean`（`getOneOfGenesRandomly`
   在父母自己的随机源上）、幼崽一次 `nextBoolean` 和两次 1/32 变异。父亲在命令落地时不在
   实体表里，所以它的基因随 `Command::BreedAnimals` 带过来。
-- 状态：`mob-oracle --only panda` 5 个 1278 刻场景 + 512 题基因遗传 0 不一致；
+- 状态：`mob-oracle --only panda` 6 个场景 3278 刻 + 512 题基因遗传 0 不一致；
   生成期刷怪把熊猫接进 `natural_gen` 的放置表，运行时接进 `check_spawn_rules` 和
   `finalizeSpawn`（组数据 `AgeableMobGroupData(0.2)`）。
 - 已知差异：`ITEM` / `SNEEZE` 粒子不发（取数照官方）；喷嚏让同伴跳的水中判定没有建模；

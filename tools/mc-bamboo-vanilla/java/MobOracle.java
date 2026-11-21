@@ -1001,6 +1001,15 @@ public final class MobOracle {
                 scenes.add(breed);
             }
             {
+                // 虚弱幼崽打喷嚏：1/500 起步，掉礼物并让附近成年熊猫跳一下。
+                Scene sneeze = new Scene("panda_sneeze").ticks(2000).drops().packets();
+                ground(sneeze, 12);
+                sneeze.panda(0.5, 64.0, 0.5, 0.0F, 511L, -24000, 5, 5, Items.AIR);
+                sneeze.panda(3.5, 64.0, 0.5, 0.0F, 512L, 0, 0, 0, Items.AIR);
+                sneeze.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(sneeze);
+            }
+            {
                 // 打死看掉落：竹子，经验 1–3。
                 Scene death = new Scene("panda_death").ticks(58).drops().packets();
                 ground(death, 6);

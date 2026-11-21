@@ -9,7 +9,7 @@
 //! module holds the genes, the flags byte, the per-tick animation state and the panda's
 //! own interactions, spawning and breeding.
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::tags::item_tags;
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
@@ -491,12 +491,16 @@ fn handle_roll(me: &mut Entity, mob: &mut Mob) {
     }
     let movement = me.delta;
     if mob.panda.roll_counter == 1 {
-        let angle = f64::from(me.y_rot) * (std::f64::consts::PI / 180.0);
-        let multiplier = if mob.is_baby() { 0.1 } else { 0.2 };
+        // 官方这里是 `float angle` 加 `Mth.sin` / `Mth.cos`，结果先按 float 算再抬成 double。
+        // Vanilla uses a `float` angle and `Mth.sin` / `Mth.cos`; the product is float first.
+        let angle = me.y_rot * (std::f32::consts::PI / 180.0);
+        let multiplier = if mob.is_baby() { 0.1_f32 } else { 0.2_f32 };
+        let sin = mth::sin(f64::from(angle));
+        let cos = mth::cos(f64::from(angle));
         let delta = Vec3::new(
-            movement.x + -angle.sin() * multiplier,
+            movement.x + f64::from(-sin * multiplier),
             0.0,
-            movement.z + angle.cos() * multiplier,
+            movement.z + f64::from(cos * multiplier),
         );
         mob.panda.roll_delta = delta;
         me.delta = delta.add(Vec3::new(0.0, 0.27, 0.0));
@@ -968,9 +972,9 @@ pub(super) fn roll_can_use(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx) -> b
     if !can_perform_action(mob, is_scared(mob, thundering)) {
         return false;
     }
-    let angle = f64::from(me.y_rot) * (std::f64::consts::PI / 180.0);
-    let x_dir = -angle.sin();
-    let z_dir = angle.cos();
+    let angle = me.y_rot * (std::f32::consts::PI / 180.0);
+    let x_dir = -mth::sin(f64::from(angle));
+    let z_dir = mth::cos(f64::from(angle));
     let x_step = if x_dir.abs() > 0.5 {
         x_dir.signum() as i32
     } else {
