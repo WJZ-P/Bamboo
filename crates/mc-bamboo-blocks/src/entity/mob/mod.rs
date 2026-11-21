@@ -22,6 +22,8 @@ pub mod goals;
 pub mod interact;
 pub mod living;
 pub mod motion;
+pub mod natural;
+pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
@@ -31,6 +33,7 @@ pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
 pub(crate) mod timing;
+mod zombie_spawn;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 
@@ -251,6 +254,44 @@ impl MobType {
     /// 幼年是不是用 `Zombie.DATA_BABY_ID`（布尔元数据），而不是牛的 `age < 0`。
     pub const fn uses_baby_metadata(self) -> bool {
         matches!(self, Self::Zombie | Self::Husk)
+    }
+
+    /// 按 `minecraft:entity_type` 注册表 ID 找种类，Bamboo 没建模的返回 `None`。
+    ///
+    /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
+    /// Bamboo does not model.
+    pub fn by_entity_type(entity_type: i32) -> Option<Self> {
+        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
+            .into_iter()
+            .find(|kind| kind.entity_type() == entity_type)
+    }
+
+    /// `EntityType.getCategory()`。
+    ///
+    /// The vanilla `EntityType.getCategory()` of this kind.
+    pub const fn mob_category(self) -> mc_bamboo_data::spawning::MobCategory {
+        use mc_bamboo_data::spawning::MobCategory;
+        if self.is_monster() {
+            MobCategory::Monster
+        } else {
+            MobCategory::Creature
+        }
+    }
+
+    /// `EntityType.canSpawnFarFromPlayer()`：`EntityType.Builder` 的缺省是
+    /// `CREATURE | MISC`，牛为真、怪物为假。
+    ///
+    /// `EntityType.canSpawnFarFromPlayer()`: the builder default is `CREATURE | MISC`,
+    /// so cows may spawn far from players and monsters may not.
+    pub const fn can_spawn_far_from_player(self) -> bool {
+        matches!(self, Self::Cow)
+    }
+
+    /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
+    ///
+    /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
+    pub const fn fire_immune(self) -> bool {
+        false
     }
 }
 
@@ -1315,6 +1356,10 @@ pub struct MobPublic {
     pub zombie_special_type: i32,
     /// `Zombie.DATA_DROWNED_CONVERSION_ID`。
     pub drowned_converting: bool,
+    /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
+    ///
+    /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
+    pub persistence_required: bool,
     /// 非空的装备槽，按 ordinal；配对时的 `set_equipment` 用它。
     pub equipment: Vec<(
         mc_bamboo_protocol::packet::play::EquipmentSlot,
@@ -1346,6 +1391,7 @@ impl MobPublic {
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
             on_fire: remaining_fire_ticks > 0,
+            persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,
             air_supply: mob.air_supply,
             custom_name: mob.custom_name.clone(),

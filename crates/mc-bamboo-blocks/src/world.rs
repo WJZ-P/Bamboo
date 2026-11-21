@@ -1924,6 +1924,22 @@ impl<'a> World<'a> {
             .max(self.brightness(LightLayer::Sky, pos) - self.level.sky_darken())
     }
 
+    /// `getMaxLocalRawBrightness(pos, skyDarken)`：雷暴时生物生成规则按 10 算。
+    ///
+    /// `getMaxLocalRawBrightness(pos, skyDarken)`: the monster spawn rule passes 10
+    /// while thundering.
+    pub fn max_local_raw_brightness_with(&self, pos: BlockPos, darken: i32) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos) - darken)
+    }
+
+    /// `getHeight(WORLD_SURFACE, pos)`：最高的非空气方块上面一格。
+    ///
+    /// `getHeight(WORLD_SURFACE, pos)`: one above the highest non-air block.
+    pub fn world_surface_y(&self, pos: BlockPos) -> i32 {
+        self.level.world_surface_y(pos)
+    }
+
     /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。
     pub fn block_light(&self, pos: BlockPos) -> i32 {
         self.brightness(LightLayer::Block, pos)

@@ -235,6 +235,10 @@ pub(crate) struct DirectorHost {
     disk_upper_bytes: BTreeMap<ChunkPos, Vec<u8>>,
     /// 盘上 `Status >= FEATURES` 的区块：完工组装不能重建方块层。
     disk_saved_after_features: BTreeMap<ChunkPos, bool>,
+    /// 盘上 `Status` 已经过了 `SPAWN` 的半成品区块：续跑完工时不再生成期刷怪。
+    ///
+    /// Decoded chunks already past `SPAWN`: no world-generation spawning on completion.
+    resumed_after_spawn: BTreeSet<ChunkPos>,
     /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
     pool: Option<ComputePool<ChunkJob>>,
     /// 还没交给池子的计算任务（待办）。池子里最多放 `threads × POOL_JOBS_PER_THREAD`
@@ -348,6 +352,10 @@ pub(crate) struct DirectorHost {
     /// stopping paced/unload writes. Player-leave saves, `/save-all` (force)
     /// and shutdown are unaffected.
     saves_enabled: bool,
+    /// 游戏规则 `SPAWN_MOBS` 的快照，每刻由 `World` 刷新；生成期刷怪读它。
+    ///
+    /// Snapshot of the `SPAWN_MOBS` rule, refreshed each tick; read by world-generation spawning.
+    spawn_mobs: bool,
 }
 
 impl DirectorHost {
@@ -379,6 +387,7 @@ impl DirectorHost {
             generated_structures: BTreeMap::new(),
             disk_upper_bytes: BTreeMap::new(),
             disk_saved_after_features: BTreeMap::new(),
+            resumed_after_spawn: BTreeSet::new(),
             pool: None,
             compute_backlog: HashMap::new(),
             backlog_order: BinaryHeap::new(),
@@ -413,6 +422,7 @@ impl DirectorHost {
             held_islands: BTreeSet::new(),
             shutting_down: false,
             saves_enabled: true,
+            spawn_mobs: true,
         }
     }
 
@@ -547,6 +557,12 @@ impl DirectorHost {
     /// Refreshed each tick by `World` from `SaveSession::auto_save` (F7).
     pub(crate) fn set_saves_enabled(&mut self, enabled: bool) {
         self.saves_enabled = enabled;
+    }
+
+    /// 每刻由 `World` 按游戏规则 `SPAWN_MOBS` 刷新。
+    /// Refreshed each tick by `World` from the `SPAWN_MOBS` rule.
+    pub(crate) fn set_spawn_mobs(&mut self, enabled: bool) {
+        self.spawn_mobs = enabled;
     }
 
     /// 登记一次 `/save-all`：它排进去的快照全部交给 IO 之后才排自己的栅栏。
@@ -2151,6 +2167,10 @@ impl DirectorHost {
                 // 会跳过已完成的阶段）；只把续跑阶段交回的增量合进去。
                 let disk_after_features = self.disk_saved_after_features.get(&pos) == Some(&true)
                     && self.partials.contains_key(&pos);
+                // 走过生成流水线（有 CARVERS 快照）、盘上又还没过 `SPAWN` 的区块才刷怪。
+                // Only columns that ran the pipeline and were not saved past `SPAWN` spawn.
+                let runs_spawn =
+                    self.partials.contains_key(&pos) && !self.resumed_after_spawn.remove(&pos);
                 let mut column = if disk_after_features {
                     let snapshot = self.partials.get(&pos).cloned();
                     if let (Some(snapshot), Some(mut groups)) =
@@ -2188,6 +2208,16 @@ impl DirectorHost {
                 // delivered column with `isLightOn=true`; flat/disk keep theirs.
                 if let Some(light) = self.generated_light.remove(&pos) {
                     column.set_generated_light(light);
+                }
+                // `ChunkStatus.SPAWN`：方块和光照都装好之后跑生成期刷怪。
+                // `ChunkStatus.SPAWN`: world-generation spawning once blocks and light are in.
+                if runs_spawn {
+                    crate::worldgen_mobs::spawn_original_mobs(
+                        &self.world_gen_config,
+                        pos,
+                        &mut column,
+                        self.spawn_mobs,
+                    );
                 }
                 // `structures` 标签最后装：它会从当前列读出读盘元数据并只覆盖
                 // `archive.structures`，不会动光照或方块。
@@ -2408,6 +2438,9 @@ impl DirectorHost {
         // 解码第二份盒子留住（方块实体 / 计划刻 / 实体 / 四张表）。
         self.disk_saved_after_features
             .insert(pos, (status as usize) >= (ChunkStatus::Features as usize));
+        if status == ChunkStatus::Spawn {
+            self.resumed_after_spawn.insert(pos);
+        }
         if let Some(bytes) = bytes {
             self.disk_upper_bytes.insert(pos, bytes.to_vec());
         }
@@ -2775,6 +2808,7 @@ impl DirectorHost {
                     self.generated_structures.remove(&pos);
                     self.disk_upper_bytes.remove(&pos);
                     self.disk_saved_after_features.remove(&pos);
+                    self.resumed_after_spawn.remove(&pos);
                 }
                 return;
             }

@@ -258,6 +258,13 @@ pub(crate) struct Region {
     pub(crate) random: LevelRandom,
     /// 红石缓存，一个 region 一份；开关从 `bamboo.toml` 读，默认关。
     pub(crate) redstone_cache: mc_bamboo_blocks::cache::RedstoneCache,
+    /// 自然刷怪要不要按玩家算上限（`bamboo.toml` 的 `spawn_per_player_cap`）；
+    /// 关掉只剩官方的全局上限。
+    ///
+    /// Whether natural spawning caps each category per player
+    /// (`spawn_per_player_cap` in `bamboo.toml`); off keeps only the vanilla
+    /// global cap.
+    pub(crate) spawn_per_player_cap: bool,
     /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
@@ -445,6 +452,7 @@ impl Region {
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 mc_bamboo_blocks::cache::CacheConfig::default(),
             ),
+            spawn_per_player_cap: true,
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),

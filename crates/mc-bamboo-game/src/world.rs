@@ -116,6 +116,11 @@ pub struct WorldConfig {
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
     /// ≥ 1 = 常驻后台线程。区块内容和线程数无关，只有交付的时刻可能不同。
     pub chunk_worker_threads: usize,
+    /// 自然刷怪按玩家算上限（默认开）；关掉只剩官方的全局上限。
+    ///
+    /// Per-player natural spawn caps (on by default); off keeps only the
+    /// vanilla global cap.
+    pub spawn_per_player_cap: bool,
     /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
     pub mail_budget: MailBudget,
     /// 岛的 tick 线程数（岛的实施计划第 6 节第 7 步）。0 = 齐步：岛在世界线程上内联跑，
@@ -191,6 +196,7 @@ impl Default for WorldConfig {
             entity_threads: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
+            spawn_per_player_cap: true,
             mail_budget: MailBudget::default(),
             island_threads: crate::island::default_island_threads(),
             islands: crate::island::default_islands(),
@@ -641,6 +647,7 @@ impl World {
                     ..Default::default()
                 });
         }
+        world.islands.region.spawn_per_player_cap = config.spawn_per_player_cap;
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
         if staged {
@@ -3301,6 +3308,9 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_partition_phase();
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::ScheduledTicks);
+    // 官方 `chunkSource.tick` 先刷怪再跑随机刻，位置照它。
+    // Vanilla `chunkSource.tick` spawns before the random ticks; keep that order.
+    crate::natural_spawn::tick(region);
     interaction::run_random_ticks(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
@@ -3426,6 +3436,13 @@ impl Master {
         // 没接 SaveSession（测试 / oracle）时保持匀速写盘开启；接了就照 `noSave`。
         let saves_enabled = self.save.as_ref().is_none_or(|save| save.auto_save());
         self.host.set_saves_enabled(saves_enabled);
+        // 生成期刷怪读游戏规则 `SPAWN_MOBS`。
+        // World-generation spawning reads the `SPAWN_MOBS` rule.
+        let spawn_mobs = self
+            .global
+            .rules()
+            .bool(mc_bamboo_data::gamerules::SPAWN_MOBS);
+        self.host.set_spawn_mobs(spawn_mobs);
         self.host.tick(island, self.director_tick);
     }
 

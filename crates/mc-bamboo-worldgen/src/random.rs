@@ -586,6 +586,46 @@ pub fn slime_chunk_seed(x: i32, z: i32, seed: i64, salt: i64) -> i64 {
         ^ salt
 }
 
+/// 让方块与实体代码通过 `mc-bamboo-blocks` 的接口取数，比如生成期刷怪的
+/// `WorldGenRegion.random`。每个方法都转发给官方同名实现。
+///
+/// Lets block and entity code draw through the `mc-bamboo-blocks` interface, such as
+/// `WorldGenRegion.random` for world-generation spawning. Every method forwards to the
+/// vanilla implementation of the same name.
+impl mc_bamboo_blocks::RandomSource for Random {
+    fn next_int_unbounded(&self) -> i32 {
+        Random::next_int_unbounded(self)
+    }
+
+    fn next_int(&self, bound: i32) -> i32 {
+        Random::next_int(self, bound)
+    }
+
+    fn next_long(&self) -> i64 {
+        Random::next_long(self)
+    }
+
+    fn next_boolean(&self) -> bool {
+        Random::next_boolean(self)
+    }
+
+    fn next_float(&self) -> f32 {
+        Random::next_float(self)
+    }
+
+    fn next_double(&self) -> f64 {
+        Random::next_double(self)
+    }
+
+    fn next_gaussian(&self) -> f64 {
+        Random::next_gaussian(self)
+    }
+
+    fn consume_count(&self, rounds: i32) {
+        Random::consume_count(self, rounds);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

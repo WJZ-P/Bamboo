@@ -138,6 +138,7 @@ const BAMBOO_KEYS: &[&str] = &[
     "entity_threads",
     "redstone_cache",
     "chunk_worker_threads",
+    "spawn_per_player_cap",
     "deliveries_per_tick",
     "reclaims_per_tick",
     "island_threads",
@@ -168,6 +169,11 @@ pub struct BambooConfig {
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
     pub chunk_worker_threads: usize,
+    /// 自然刷怪按玩家算上限（默认 true）；false 只剩官方的全局上限。
+    ///
+    /// Per-player natural spawn caps (default true); false keeps only the
+    /// vanilla global cap.
+    pub spawn_per_player_cap: bool,
     /// Director 信箱每刻交付区块的个数上限，0 表示不限。
     pub deliveries_per_tick: usize,
     /// Director 信箱每刻收回区块的个数上限，0 表示不限。
@@ -216,6 +222,7 @@ impl Default for BambooConfig {
             entity_threads: defaults.entity_threads,
             redstone_cache: defaults.redstone_cache,
             chunk_worker_threads: defaults.chunk_worker_threads,
+            spawn_per_player_cap: defaults.spawn_per_player_cap,
             deliveries_per_tick: defaults.mail_budget.deliveries,
             reclaims_per_tick: defaults.mail_budget.reclaims,
             // 文件里的缺省不跟环境变量走：环境变量只在运行时盖过，不能被写回文件。
@@ -275,6 +282,10 @@ impl BambooConfig {
                 "# >= 1 = 交给这么多条常驻后台线程。区块内容一样，只有到达的时刻可能不同。\n",
                 "chunk_worker_threads = {}\n",
                 "\n",
+                "# 自然刷怪按玩家算上限（默认 true）：每名玩家附近的同类生物不超过官方上限；\n",
+                "# false = 只剩官方的全局上限（maxInstancesPerChunk * 刷怪区块数 / 289）。\n",
+                "spawn_per_player_cap = {}\n",
+                "\n",
                 "# Director 信箱每刻最多交付多少个区块，0 表示不限，默认 64。\n",
                 "deliveries_per_tick = {}\n",
                 "\n",
@@ -305,6 +316,7 @@ impl BambooConfig {
             self.entity_threads,
             self.redstone_cache,
             self.chunk_worker_threads,
+            self.spawn_per_player_cap,
             self.deliveries_per_tick,
             self.reclaims_per_tick,
             self.island_threads,
@@ -363,6 +375,12 @@ impl BambooConfig {
                 defaults.chunk_worker_threads,
                 0,
                 MAX_CHUNK_WORKER_THREADS,
+            ),
+            spawn_per_player_cap: boolean(
+                table,
+                "spawn_per_player_cap",
+                file,
+                defaults.spawn_per_player_cap,
             ),
             deliveries_per_tick: integer(
                 table,
@@ -777,6 +795,7 @@ impl ConfigFiles {
             entity_threads: self.bamboo.entity_threads,
             redstone_cache: self.bamboo.redstone_cache,
             chunk_worker_threads: self.bamboo.chunk_worker_threads,
+            spawn_per_player_cap: self.bamboo.spawn_per_player_cap,
             mail_budget: MailBudget {
                 deliveries: self.bamboo.deliveries_per_tick,
                 reclaims: self.bamboo.reclaims_per_tick,
@@ -819,6 +838,7 @@ impl ConfigFiles {
         bamboo.entity_threads = config.entity_threads;
         bamboo.redstone_cache = config.redstone_cache;
         bamboo.chunk_worker_threads = config.chunk_worker_threads;
+        bamboo.spawn_per_player_cap = config.spawn_per_player_cap;
         bamboo.deliveries_per_tick = config.mail_budget.deliveries;
         bamboo.reclaims_per_tick = config.mail_budget.reclaims;
         // 环境变量盖过时 `config` 里的值来自环境变量，不写回文件。

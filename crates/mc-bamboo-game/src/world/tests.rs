@@ -2984,6 +2984,16 @@ fn skin_parts_and_main_hand_are_stored_and_sent_in_the_same_tick() {
 #[test]
 fn latency_reaches_the_tab_list_on_the_periodic_broadcast() {
     let mut server = Harness::new(8);
+    // 自然刷怪会在这 600 刻里刷出生物并发实体包，这个测试只关心延迟广播。
+    // Natural spawning would add entities and their packets during these 600 ticks;
+    // this test only cares about the latency broadcast.
+    let _ = server
+        .world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::SPAWN_MOBS, "false");
+    server.world.publish_global();
     let client = server.join_and_settle("Kitten");
     let ticks_so_far = server.world.master.global.time().0;
     client.take_frames();
