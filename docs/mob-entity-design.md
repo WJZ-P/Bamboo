@@ -676,4 +676,6 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 鸡在 `entity/mob/chicken.rs`：构造函数在 UUID 和朝向之后抽 `eggTime`；`aiStep` 尾部做缓慢下落和下蛋，下蛋表经 `Command::DropEntityLoot` 在落地时求值（礼物参数集：原点 + 实体本身，鸡花纹进 `chicken/variant` 组件）。剪毛和下蛋共用 `Level::entity_loot_drops` / `EntityLootRequest`，以后的雪傀儡、哞菇也能复用。
 
-生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。扔出的鸡蛋（`ThrownEgg`）还没做。
+生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
+
+扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。
