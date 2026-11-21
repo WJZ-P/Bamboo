@@ -3120,6 +3120,11 @@ public final class MobOracle {
         scenes.add(new NaturalScene("fish_tropical", EntityTypes.TROPICAL_FISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_tropical_lush", EntityTypes.TROPICAL_FISH, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_puffer", EntityTypes.PUFFERFISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        // 海豚（WATER_CREATURE）用和鱿鱼一样的水面规则；美西螈（AXOLOTLS）要脚下黏土。
+        // Dolphins (WATER_CREATURE) use the squid surface rules; axolotls (AXOLOTLS)
+        // need clay below.
+        scenes.add(new NaturalScene("dolphin_ocean", EntityTypes.DOLPHIN, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("axolotl_lush", EntityTypes.AXOLOTL, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
             if (fishOnly && !scene.name().startsWith("fish_")) continue;
@@ -3154,13 +3159,20 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
-        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT;
+        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT
+                || category == MobCategory.WATER_CREATURE || category == MobCategory.AXOLOTLS;
+        // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才会通过。
+        // The axolotl fixture swaps the bottom water layer for clay so
+        // `checkAxolotlSpawnRules` passes.
+        boolean clayFloor = scene.mob() == EntityTypes.AXOLOTL;
         level.naturalSeaLevel = scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63;
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
                 if (aquatic) {
                     for (int y = -64; y <= -62; y++) {
-                        level.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                        net.minecraft.world.level.block.state.BlockState state = clayFloor && y == -64
+                                ? Blocks.CLAY.defaultBlockState() : Blocks.WATER.defaultBlockState();
+                        level.blocks.put(BlockPos.asLong(x, y, z), state);
                     }
                     continue;
                 }
@@ -3230,7 +3242,8 @@ public final class MobOracle {
                 row.add(mob instanceof net.minecraft.world.entity.animal.fish.TropicalFish fish
                         ? new net.minecraft.world.entity.animal.fish.TropicalFish.Variant(
                                 fish.getPattern(), fish.getBaseColor(), fish.getPatternColor()).getPackedId()
-                        : 0);
+                        : mob instanceof net.minecraft.world.entity.animal.axolotl.Axolotl axolotl
+                                ? axolotl.getVariant().getId() : 0);
                 spawned.add(row);
             }
             step.add("spawned", spawned);
@@ -3253,6 +3266,7 @@ public final class MobOracle {
         row.addProperty("localCap", scene.localCap());
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
         row.addProperty("aquatic", aquatic);
+        row.addProperty("clayFloor", clayFloor);
         row.addProperty("seaLevel", level.naturalSeaLevel);
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.add("steps", steps);

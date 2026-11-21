@@ -614,6 +614,8 @@ impl MobType {
             Self::TropicalFish,
             Self::Pufferfish,
             Self::Turtle,
+            Self::Dolphin,
+            Self::Axolotl,
             Self::Pig,
             Self::Sheep,
             Self::Chicken,

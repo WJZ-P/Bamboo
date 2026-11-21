@@ -47,6 +47,11 @@ pub(super) struct Case {
     /// Aquatic fixture: three water layers (-64..=-62) replace the grass.
     #[serde(default)]
     aquatic: bool,
+    /// 美西螈夹具：三层水里最底下那层是黏土。
+    ///
+    /// Axolotl fixture: the bottom of the three "water" layers is clay.
+    #[serde(default)]
+    clay_floor: bool,
     #[serde(default = "flat_sea_level")]
     sea_level: i32,
     steps: Vec<Step>,
@@ -153,9 +158,11 @@ impl Coverage {
             "fish_tropical",
             "fish_tropical_lush",
             "fish_puffer",
+            "dolphin_ocean",
+            "axolotl_lush",
         ] {
             if self.per_scene.get(name) == Some(&0) {
-                return Err(format!("natural spawn fixture {name} produced no fish"));
+                return Err(format!("natural spawn fixture {name} produced no mobs"));
             }
         }
         let mobs = [
@@ -261,6 +268,8 @@ fn spawn_row(entity: Entity) -> [i32; 9] {
         mob.equipment.get(EquipmentSlot::MainHand).item,
         if mob.mob_type == MobType::TropicalFish {
             mob.fish.variant
+        } else if mob.mob_type == MobType::Axolotl {
+            mob.axolotl.variant
         } else {
             0
         },
@@ -288,8 +297,14 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             (-16..32).flat_map(move |z| {
                 let floor = (BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK));
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
-                let water =
-                    (-64..=-62).map(move |y| (BlockPos::new(x, y, z), BlockState(blocks::WATER)));
+                let water = (-64..=-62).map(move |y| {
+                    let state = if case.clay_floor && y == -64 {
+                        blocks::CLAY
+                    } else {
+                        blocks::WATER
+                    };
+                    (BlockPos::new(x, y, z), BlockState(state))
+                });
                 (!aquatic)
                     .then_some(floor)
                     .into_iter()
