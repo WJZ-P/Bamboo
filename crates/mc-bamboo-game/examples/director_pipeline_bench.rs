@@ -1,7 +1,8 @@
 //! 真实 Director 流水线的吞吐和阶段耗时测量（不是 `wg-perf` 的纯函数路径）。
 //!
 //! `cargo run --release -p mc-bamboo-game --example director_pipeline_bench -- \
-//!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--cold] [--label NAME]`
+//!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--cold] [--label NAME] \
+//!     [--idle-secs S]`
 //!
 //! 起一个 `World::new`（`normal` 世界、`Staged` 流水线、计算池），强加载一块
 //! 正方形区块，不睡节拍器地 tick 到全部交付且计算池排空。默认先在远处跑一片同样
@@ -34,6 +35,9 @@ struct Options {
     structures: bool,
     warmup: bool,
     label: String,
+    /// 跑完图后按 50 ms 一刻空转的秒数，用来量闲置工作集。
+    /// Seconds of 50 ms-tick idling after generation, for the idle working set.
+    idle_secs: f64,
 }
 
 impl Options {
@@ -45,6 +49,7 @@ impl Options {
             structures: true,
             warmup: true,
             label: "run".to_owned(),
+            idle_secs: 0.0,
         };
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -64,6 +69,7 @@ impl Options {
                 "--no-structures" => options.structures = false,
                 "--cold" => options.warmup = false,
                 "--label" => options.label = value(),
+                "--idle-secs" => options.idle_secs = value().parse().expect("number"),
                 _ => panic!("unknown argument {arg}"),
             }
         }
@@ -95,6 +101,36 @@ fn thread_cpu_ms() -> f64 {
         // The current thread pseudo-handle does not need closing.
         unsafe { GetThreadTimes(GetCurrentThread(), created, exited, kernel, user) }
     })
+}
+
+/// 进程当前和累计峰值常驻内存（字节）。
+///
+/// Current and peak resident set size in bytes.
+#[cfg(windows)]
+fn rss_bytes() -> (u64, u64) {
+    use windows_sys::Win32::System::{
+        ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+        Threading::GetCurrentProcess,
+    };
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut usage = PROCESS_MEMORY_COUNTERS {
+        cb: size,
+        ..Default::default()
+    };
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut usage, size) };
+    if ok == 0 {
+        (0, 0)
+    } else {
+        (usage.WorkingSetSize as u64, usage.PeakWorkingSetSize as u64)
+    }
+}
+
+/// 内存测量只在 Windows 上跑；其它平台返回 0。
+///
+/// Memory measurement runs on Windows only; other platforms report zero.
+#[cfg(unix)]
+fn rss_bytes() -> (u64, u64) {
+    (0, 0)
 }
 
 /// tick 到这批区块全部交付、计算池排空再多跑 4 刻；返回期间交付的区块数。
@@ -181,6 +217,19 @@ fn main() {
         let p = worldgen_profile::stats();
         worldgen_profile::disable();
         let cache = terrain_cache_stats();
+        // 峰值是进程启动以来的累计最高工作集；空转后读当前工作集作闲置值。
+        // Peak is the cumulative high-water working set; idle reads the current one.
+        let (_, peak_rss) = rss_bytes();
+        let idle_rss = if options.idle_secs > 0.0 {
+            let deadline = Instant::now() + Duration::from_secs_f64(options.idle_secs);
+            while Instant::now() < deadline {
+                black_box(world.tick_unpaced());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            rss_bytes().0
+        } else {
+            rss_bytes().0
+        };
         let ns = |v: u64| v as f64 / 1_000_000.0;
         println!(
             "{},structures={},warm={},threads={},requested={},delivered={},wall_s={:.3},\
@@ -196,7 +245,8 @@ fn main() {
              feature_run_calls={},feature_run_hits={},feature_run_misses={},feature_run_hit_rate={:.4},\
              distinct_feature_centers={},feature_centers_called_once={},feature_centers_max_calls={},\
              build_view_calls={},build_view_cells={},run_features_calls={},\
-             entries={},bytes_mb={:.1},cross_thread_duplicates={}",
+             entries={},bytes_mb={:.1},cross_thread_duplicates={},\
+             peak_rss_mb={:.1},idle_rss_mb={:.1}",
             options.label,
             options.structures,
             options.warmup,
@@ -242,6 +292,8 @@ fn main() {
             cache.entries,
             cache.bytes as f64 / (1024.0 * 1024.0),
             cache.cross_thread_duplicates,
+            peak_rss as f64 / (1024.0 * 1024.0),
+            idle_rss as f64 / (1024.0 * 1024.0),
         );
         black_box(world.is_chunk_loaded(positions[0]));
     }
