@@ -164,6 +164,7 @@ mod tests {
             spectator: false,
             creative: false,
             sneaking: false,
+            sprinting: false,
             invisible: false,
             armor_cover: 0.0,
             main_hand: 0,

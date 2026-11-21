@@ -202,6 +202,13 @@ impl EntitySync {
         self.shift_key_down && !self.flying
     }
 
+    /// `isSprinting()`：共享标志里的疾跑位。
+    ///
+    /// `isSprinting()`: the sprinting bit of the shared flags.
+    pub(crate) fn is_sprinting(&self) -> bool {
+        self.shared_flags & ENTITY_FLAG_SPRINTING != 0
+    }
+
     /// 其他玩家的姿势完全由 index 6 决定，客户端不会根据潜行位自己推算。
     fn pose(&self) -> Pose {
         if self.sleeping {

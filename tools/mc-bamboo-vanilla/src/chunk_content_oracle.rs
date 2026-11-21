@@ -635,6 +635,7 @@ fn run_cases(
         MobType::Pig,
         MobType::Sheep,
         MobType::Chicken,
+        MobType::Goat,
         MobType::PolarBear,
         MobType::Creeper,
         MobType::Spider,
@@ -1783,6 +1784,7 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("variant", Tag::String("minecraft:cold".to_owned())),
         ]),
     ));
+    out.extend(brain_resave_cases());
     let mut store = mc_bamboo_blocks::EntityStore::new();
     let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
     let row = store.get(uid).expect("刚生成").split();
@@ -1827,6 +1829,100 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
         write_entity(&orb_row).expect("经验球能写出"),
     ));
     out
+}
+
+/// 跑大脑的生物的重存题：山羊的三个布尔值、犰狳的状态和掉鳞甲计时，以及 `Brain` 里
+/// 带和不带 `ttl` 的记忆；没有编解码器的记忆（`ram_target`）读档时丢掉。
+///
+/// Resave cases for brain-driven mobs: the goat's three booleans, the armadillo state
+/// and scute timer, and `Brain` memories with and without `ttl`; memories without a codec
+/// (`ram_target`) are dropped on load.
+fn brain_resave_cases() -> Vec<(String, Tag)> {
+    let compound = |entries: Vec<(&str, Tag)>| {
+        Tag::Compound(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
+        )
+    };
+    let uuid = Tag::IntArray(vec![0x0bad_f00d, 0x1357_9bdf, -0x2468_ace0, 0x600d_0001]);
+    let pos = Tag::List(vec![Tag::Double(4.5), Tag::Double(64.0), Tag::Double(-2.5)]);
+    let memory = |value: Tag, ttl: Option<i64>| {
+        let mut entries = vec![("value", value)];
+        if let Some(ttl) = ttl {
+            entries.push(("ttl", Tag::Long(ttl)));
+        }
+        compound(entries)
+    };
+    let goat_memories = compound(vec![(
+        "memories",
+        compound(vec![
+            ("minecraft:ram_cooldown_ticks", memory(Tag::Int(321), None)),
+            (
+                "minecraft:long_jump_cooling_down",
+                memory(Tag::Int(45), None),
+            ),
+            (
+                "minecraft:ram_target",
+                memory(
+                    Tag::List(vec![Tag::Double(1.0), Tag::Double(2.0), Tag::Double(3.0)]),
+                    None,
+                ),
+            ),
+        ]),
+    )]);
+    let armadillo_memories = compound(vec![(
+        "memories",
+        compound(vec![
+            (
+                "minecraft:danger_detected_recently",
+                memory(Tag::Byte(1), Some(57)),
+            ),
+            (
+                "minecraft:temptation_cooldown_ticks",
+                memory(Tag::Int(90), None),
+            ),
+        ]),
+    )]);
+    vec![
+        (
+            "goat_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:goat".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "goat_screaming_one_horn".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:goat".to_owned())),
+                ("Pos", pos.clone()),
+                (
+                    "Rotation",
+                    Tag::List(vec![Tag::Float(140.0), Tag::Float(-5.0)]),
+                ),
+                ("UUID", uuid.clone()),
+                ("IsScreamingGoat", Tag::Byte(1)),
+                ("HasLeftHorn", Tag::Byte(0)),
+                ("HasRightHorn", Tag::Byte(1)),
+                ("Age", Tag::Int(-600)),
+                ("Brain", goat_memories),
+            ]),
+        ),
+        (
+            "armadillo_scared".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:armadillo".to_owned())),
+                ("Pos", pos),
+                ("UUID", uuid),
+                ("state", Tag::String("scared".to_owned())),
+                ("scute_time", Tag::Int(1234)),
+                ("Brain", armadillo_memories),
+            ]),
+        ),
+    ]
 }
 
 /// 把规范 JSON 里 `attributes` 列表按 `id` 排序。
