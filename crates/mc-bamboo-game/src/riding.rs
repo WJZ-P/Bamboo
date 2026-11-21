@@ -103,18 +103,30 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
         return;
     }
     let (yaw, pitch, position) = (public.yaw, mob.x_rot, public.position);
-    let Some(player) = region.players.get_mut(&id) else {
+    let Some(player) = region.players.get(&id) else {
         return;
     };
     if player.riding.vehicle == Some(vehicle) {
         return;
     }
-    // 官方 `canRide`：按着潜行键或还在下车冷却里就不能上。
+    // 官方 `canRide`：按着潜行键或还在下车冷却里就不能上。官方先判这一条，
+    // 再 `stopRiding` 旧载具，所以下车设的冷却不会拦住这次上车。
     //
     // Vanilla `canRide`: the sneak key or the dismount cooldown blocks mounting.
+    // Vanilla checks this before `stopRiding` on the old vehicle, so the cooldown
+    // that dismount sets does not block this mount.
     if player.sync.shift_key_down || player.riding.boarding_cooldown > 0 {
         return;
     }
+    // 官方 `startRiding`：已经骑着别的载具时先 `stopRiding`。
+    //
+    // Vanilla `startRiding`: a passenger already on another vehicle dismounts first.
+    if player.riding.is_passenger() {
+        dismount(region, id);
+    }
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
     // `doPlayerRide` 先把玩家的朝向设成载具的，再 `startRiding`。
     //
     // `doPlayerRide` copies the vehicle's facing to the player before `startRiding`.

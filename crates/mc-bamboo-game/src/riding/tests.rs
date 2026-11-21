@@ -128,6 +128,55 @@ fn dismounting_starts_the_boarding_cooldown() {
     );
 }
 
+/// 官方 `startRiding`：已经骑着别的载具时先 `stopRiding`，旧载具的乘客名单也清空。
+///
+/// Vanilla `startRiding`: mounting another vehicle first dismounts the old one,
+/// and the old vehicle's passenger list is cleared too.
+#[test]
+fn mounting_another_vehicle_dismounts_the_first() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(1);
+    let player = Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    region.insert_player(player);
+    let first = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    let second = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(2.5, 64.0, 0.5),
+    ));
+    super::mount(&mut region, id, first);
+    super::mount(&mut region, id, second);
+
+    assert_eq!(
+        region.players.get(&id).expect("player").riding.vehicle,
+        Some(second)
+    );
+    let first_passengers = region
+        .entities
+        .public_at(first)
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.passengers.clone()),
+            _ => None,
+        })
+        .expect("first horse");
+    assert!(first_passengers.is_empty());
+}
+
 /// 官方 `canRide`：按着潜行键不能上马。
 ///
 /// Vanilla `canRide`: holding sneak blocks mounting.
