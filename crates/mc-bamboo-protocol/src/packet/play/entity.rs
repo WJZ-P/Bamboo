@@ -18,6 +18,8 @@ use crate::{
 /// 实体元数据序列化器的 ID。顺序是 `EntityDataSerializers` 静态块里 `registerSerializer` 的调用顺序。
 const SERIALIZER_BYTE: i32 = 0;
 const SERIALIZER_INT: i32 = 1;
+/// `EntityDataSerializers.LONG`：变长整数。
+const SERIALIZER_LONG: i32 = 2;
 const SERIALIZER_FLOAT: i32 = 3;
 /// `EntityDataSerializers.OPTIONAL_COMPONENT`，注册顺序里的第 7 个。
 ///
@@ -29,6 +31,8 @@ const SERIALIZER_OPTIONAL_COMPONENT: i32 = 6;
 const SERIALIZER_ITEM_STACK: i32 = 7;
 const SERIALIZER_BOOLEAN: i32 = 8;
 const SERIALIZER_BLOCK_POS: i32 = 10;
+/// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`，注册顺序第 13 个。
+const SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE: i32 = 13;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
 /// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
 const SERIALIZER_PARTICLES: i32 = 17;
@@ -38,6 +42,8 @@ const SERIALIZER_POSE: i32 = 20;
 /// `EntityDataSerializers.COW_VARIANT`, the 24th `registerSerializer` call.
 const SERIALIZER_COW_VARIANT: i32 = 23;
 const SERIALIZER_COW_SOUND_VARIANT: i32 = 24;
+const SERIALIZER_WOLF_VARIANT: i32 = 25;
+const SERIALIZER_WOLF_SOUND_VARIANT: i32 = 26;
 const SERIALIZER_HUMANOID_ARM: i32 = 42;
 
 /// `set_entity_data` 的结束标记。
@@ -177,6 +183,10 @@ pub enum EntityData {
     ///
     /// index 18, COW_VARIANT. `Cow.DATA_VARIANT_ID`, a VarInt registry id.
     CowVariant(i32),
+    /// `Rabbit.DATA_TYPE_ID`：普通整数序列化器，值为旧版品种 ID。
+    ///
+    /// `Rabbit.DATA_TYPE_ID`: ordinary integer serializer, with a legacy variant ID.
+    RabbitVariant(i32),
     /// index 19，COW_SOUND_VARIANT。`Cow.DATA_SOUND_VARIANT_ID`。
     CowSoundVariant(i32),
     PigBoostTime(i32),
@@ -218,6 +228,16 @@ pub enum EntityData {
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
+    /// `Fox.DATA_TYPE_ID`：INT，红 0 雪 1。
+    ///
+    /// `Fox.DATA_TYPE_ID`: INT, red 0 and snow 1.
+    FoxType(i32),
+    /// `Fox.DATA_FLAGS_ID`：BYTE。
+    FoxFlags(u8),
+    /// `Fox.DATA_TRUSTED_ID_0` / `_1`：OPTIONAL_LIVING_ENTITY_REFERENCE（可空 UUID）。
+    ///
+    /// `Fox.DATA_TRUSTED_ID_0` / `_1`: an optional UUID reference.
+    FoxTrusted(u8, Option<[u8; 16]>),
     /// BYTE。`AbstractHorse.DATA_ID_FLAGS`：2 驯服、8 繁殖过、16 吃草、32 扬蹄、64 张嘴。
     ///
     /// BYTE. `AbstractHorse.DATA_ID_FLAGS`: tame, bred, eating, standing, open mouth.
@@ -233,6 +253,24 @@ pub enum EntityData {
     /// INT。`Llama.DATA_VARIANT_ID`。
     LlamaVariant(i32),
     ArrowColor(i32),
+    /// `TamableAnimal.DATA_FLAGS_ID`：BYTE，坐姿 1、驯服 4。
+    ///
+    /// `TamableAnimal.DATA_FLAGS_ID`: BYTE, sitting 1 and tame 4.
+    TameFlags(u8),
+    /// `TamableAnimal.DATA_OWNERUUID_ID`：可空的 UUID 引用。
+    ///
+    /// `TamableAnimal.DATA_OWNERUUID_ID`: an optional UUID reference.
+    TameOwner(Option<[u8; 16]>),
+    /// `Wolf.DATA_INTERESTED_ID`：BOOLEAN。
+    WolfInterested(bool),
+    /// `Wolf.DATA_COLLAR_COLOR`：INT，`DyeColor` 的 ID。
+    WolfCollar(i32),
+    /// `Wolf.DATA_ANGER_END_TIME`：LONG（变长）。
+    WolfAngerEndTime(i64),
+    /// `Wolf.DATA_VARIANT_ID`：`wolf_variant` 注册表 ID。
+    WolfVariant(i32),
+    /// `Wolf.DATA_SOUND_VARIANT_ID`：`wolf_sound_variant` 注册表 ID。
+    WolfSoundVariant(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -277,7 +315,18 @@ impl EntityData {
             Self::MainHand(_) | Self::Baby(_) => 16,
             Self::ModelCustomisation(_) | Self::AgeLocked(_) | Self::SpecialType(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
+            Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
+            Self::FoxType(_) => mc_bamboo_data::entity_types::FOX_TYPE,
+            Self::FoxFlags(_) => mc_bamboo_data::entity_types::FOX_FLAGS,
+            Self::FoxTrusted(index, _) => *index,
+            Self::TameFlags(_) => mc_bamboo_data::entity_types::TAME_FLAGS,
+            Self::TameOwner(_) => mc_bamboo_data::entity_types::TAME_OWNER,
+            Self::WolfInterested(_) => mc_bamboo_data::entity_types::WOLF_INTERESTED,
+            Self::WolfCollar(_) => mc_bamboo_data::entity_types::WOLF_COLLAR,
+            Self::WolfAngerEndTime(_) => mc_bamboo_data::entity_types::WOLF_ANGER_END_TIME,
+            Self::WolfVariant(_) => mc_bamboo_data::entity_types::WOLF_VARIANT,
+            Self::WolfSoundVariant(_) => mc_bamboo_data::entity_types::WOLF_SOUND_VARIANT,
             Self::PigBoostTime(_) => mc_bamboo_data::entity_types::PIG_BOOST_TIME,
             Self::PigVariant(_) => mc_bamboo_data::entity_types::PIG_VARIANT,
             Self::PigSoundVariant(_) => mc_bamboo_data::entity_types::PIG_SOUND_VARIANT,
@@ -294,6 +343,60 @@ impl EntityData {
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
+            Self::TameFlags(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value);
+            }
+            Self::TameOwner(uuid) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE,
+                );
+                out.push(u8::from(uuid.is_some()));
+                if let Some(uuid) = uuid {
+                    out.extend_from_slice(uuid);
+                }
+            }
+            Self::WolfInterested(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::WolfCollar(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::WolfAngerEndTime(value) => {
+                write_data_header(out, self.index(), SERIALIZER_LONG);
+                crate::codec::write_varlong(out, *value);
+            }
+            Self::WolfVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_WOLF_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::WolfSoundVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_WOLF_SOUND_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::FoxType(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::FoxFlags(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value);
+            }
+            Self::FoxTrusted(_, uuid) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE,
+                );
+                out.push(u8::from(uuid.is_some()));
+                if let Some(uuid) = uuid {
+                    out.extend_from_slice(uuid);
+                }
+            }
             Self::ArrowFlags(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*value);
@@ -468,6 +571,10 @@ impl EntityData {
             }
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::RabbitVariant(kind) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *kind);
             }
             Self::DrownedConverting(converting) => {
