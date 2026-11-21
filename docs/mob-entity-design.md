@@ -1272,3 +1272,26 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
 （769/769）都通过。全量 `mob-oracle` 仍有 6 处 `player_death_*` 不一致，是超平坦世界
 重生包 `sea_level` 给 -63、官方离线夹具给 0 的既有差异（base 已带该字段），与生物无关，
 见 README 已知限制；按 `verify-scope.md` 属非关键路径，不追。
+
+### 与 main 二次合并后的现状（op-hostile2，2026-11-21 本轮）
+
+main 又合进了马驴骡羊驼、兔狐狼、水生（鱿鱼、鱼、海龟）和杂项（哞菇、北极熊、熊猫），
+本轮 `git merge main`（`e1d69b66`）。公共文件按 main 的结构解冲突：`MobType` 改用
+`Self::ALL`（扩到 33 种，含本分支的流浪者 / 沼骸 / 史莱姆 / 溺尸 / 女巫），
+`spawn.rs` 的 `finalize_spawn_in_group` 按 `is_skeleton()` / `is_zombie()` 加 Panda 分支，
+`natural.rs` 的 `ON_GROUND` 落脚检查合成一个 `entity_type` + `immune_to` 的入口，
+`generated/entity_types.rs` 用 `extract` 重新生成（和并集逐字节一致，
+`registries.rs` 的 `game_event` 注册序漂移照旧还原）。两处真分叉按官方字节码定：
+① `MobPublic::of` 保留 `in_water` 入参（女巫 / 溺尸 AI 读公开视图），`on_fire` 改用
+`Mob.visible_fire`（`Entity.baseTick` 才写共享标志，tick 0 仍为假，官方 `Entity.baseTick`），
+`unseenTicks` 只在 `canContinueToUse` 里按视线刷新（`TargetGoal` 没有 `tick`），去掉了
+main 在 `tick_goal` 里多加的一次自增——`slime_target_height` 有石柱挡视线时会累积发散；
+② `mob-oracle` 的 `cow.kind` 是全局命名空间，两分支都占了 13/14/15，本分支的史莱姆 /
+女巫 / 溺尸改到 16/17/18，main 的北极熊 / 哞菇 / 熊猫保留 13/14/15，Java 侧
+`MobOracle.java` 的 `.mob()` 场景号和 switch 一起改。合并后 `cargo check --workspace
+--all-targets`、clippy `-- -D warnings`、`cargo fmt --check` 都通过；`mob-oracle` 按前缀
+针对性对拍：本分支五种生物（natural_spawn 632 例 2528 刻、stray_spawn、bogged_spawn、
+witch_spawn、drowned_spawn、witch_drink、witch_throw、slime_、drowned_、projectile）
+和 main 的杂项（polar_bear_、panda_、mooshroom_）全部 0 不一致。全量 `mob-oracle` 剩
+12 处 `player_death_*` 不一致，全是上述重生包 `sea_level` 既有差异（main 新增死亡消息
+场景后由 6 处增至 12 处），按 `verify-scope.md` 属非关键路径，不追。
