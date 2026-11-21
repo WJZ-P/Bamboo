@@ -308,12 +308,18 @@ pub(super) fn target_goals() -> GoalSelector {
 
 /// `Wolf.applyTamingSideEffects`：驯服后最大生命 40 并回满，否则回到 8。
 pub(super) fn apply_taming_side_effects(mob: &mut Mob) {
-    if mob.tame.is_tame() {
-        mob.attributes
-            .set_base(attribute::MAX_HEALTH, f64::from(TAME_HEALTH));
-        mob.health = TAME_HEALTH;
+    // `getAttribute(MAX_HEALTH).setBaseValue(...)`：实例化，存盘和同步都会带上。
+    // `getAttribute` instantiates the entry, so it is saved and synced.
+    let base = if mob.tame.is_tame() {
+        f64::from(TAME_HEALTH)
     } else {
-        mob.attributes.set_base(attribute::MAX_HEALTH, START_HEALTH);
+        START_HEALTH
+    };
+    if let Some(max) = mob.attributes.instance(attribute::MAX_HEALTH) {
+        max.base = base;
+    }
+    if mob.tame.is_tame() {
+        mob.health = TAME_HEALTH;
     }
 }
 
@@ -912,6 +918,120 @@ mod tests {
         // `DyeColor` IDs: red 14, yellow 4, orange 1.
         assert_eq!(dye_from_recipes(14, 4), Some(1));
         assert_eq!(dye_from_recipes(14, 14), None);
+    }
+
+    fn request(item: i32, player: u8) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [player; 16],
+            hand: mc_bamboo_core::Hand::Main,
+            held: if item == items::AIR {
+                ItemStack::empty()
+            } else {
+                ItemStack::new(item, 1)
+            },
+            creative: false,
+            position: Vec3::default(),
+        }
+    }
+
+    /// 一直喂骨头直到驯服：驯服后满血 40、坐下、事件 7；之前每次失败都是事件 6。
+    fn tamed_wolf() -> (Entity, Mob) {
+        let mut me = Entity::by_mob_type(MobType::Wolf, Vec3::default());
+        let mut mob = Mob::new(MobType::Wolf);
+        for _ in 0..64 {
+            let outcome = interact(&mut me, &mut mob, &request(items::BONE, 7), 0);
+            assert_eq!(outcome.result, InteractionResult::SuccessServer);
+            assert!(outcome.shrink_held);
+            if mob.tame.is_tame() {
+                break;
+            }
+            assert_eq!(mob.events.pop(), Some(MobEvent::EntityEvent { event: 6 }));
+        }
+        assert_eq!(mob.events.pop(), Some(MobEvent::EntityEvent { event: 7 }));
+        (me, mob)
+    }
+
+    #[test]
+    fn a_bone_tames_and_seats_the_wolf() {
+        let (_, mob) = tamed_wolf();
+        assert!(mob.tame.is_owned_by(Some([7; 16])));
+        assert!(mob.tame.ordered_to_sit);
+        assert_eq!(mob.health, 40.0);
+        assert_eq!(mob.attributes.value(attribute::MAX_HEALTH), 40.0);
+    }
+
+    #[test]
+    fn the_owner_toggles_sitting_but_strangers_do_not() {
+        let (mut me, mut mob) = tamed_wolf();
+        let outcome = interact(&mut me, &mut mob, &request(items::AIR, 7), 0);
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(!outcome.shrink_held);
+        assert!(!mob.tame.ordered_to_sit);
+        let outcome = interact(&mut me, &mut mob, &request(items::AIR, 8), 0);
+        assert_eq!(outcome.result, InteractionResult::Pass);
+        assert!(!mob.tame.ordered_to_sit);
+    }
+
+    #[test]
+    fn dyes_recolour_the_collar_once() {
+        let (mut me, mut mob) = tamed_wolf();
+        let blue = items_with_dye(11)[0];
+        let outcome = interact(&mut me, &mut mob, &request(blue, 7), 0);
+        assert!(outcome.shrink_held);
+        assert_eq!(mob.wolf.collar, 11);
+        // 同色染料走 `Animal.mobInteract`，什么都不做，也不切换坐姿。
+        let sitting = mob.tame.ordered_to_sit;
+        let outcome = interact(&mut me, &mut mob, &request(blue, 7), 0);
+        assert_eq!(outcome.result, InteractionResult::Pass);
+        assert_eq!(mob.tame.ordered_to_sit, sitting);
+    }
+
+    #[test]
+    fn meat_heals_twice_its_nutrition() {
+        let (mut me, mut mob) = tamed_wolf();
+        mob.health = 10.0;
+        let outcome = interact(&mut me, &mut mob, &request(items::BEEF, 9), 0);
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert_eq!(mob.health, 16.0);
+    }
+
+    #[test]
+    fn an_angry_wolf_refuses_bones() {
+        let mut me = Entity::by_mob_type(MobType::Wolf, Vec3::default());
+        let mut mob = Mob::new(MobType::Wolf);
+        mob.wolf.anger_end_time = 50;
+        let outcome = interact(&mut me, &mut mob, &request(items::BONE, 7), 10);
+        assert_eq!(outcome.result, InteractionResult::Pass);
+        assert!(!mob.tame.is_tame());
+    }
+
+    #[test]
+    fn wolves_survive_a_save_and_load() {
+        let (mut me, mut mob) = tamed_wolf();
+        mob.wolf.collar = 3;
+        mob.wolf.variant = variant_id("minecraft:snowy").unwrap();
+        mob.wolf.sound_variant = sound_variant_id("minecraft:cute").unwrap();
+        mob.wolf.anger_end_time = 1234;
+        mob.wolf.angry_at = Some([5; 16]);
+        me.kind = crate::entity::EntityKind::Mob(Box::new(mob.clone()));
+        let tag = super::super::nbt::write_mob(&me.split()).expect("wolf saves");
+        let row = super::super::nbt::read_mob(&tag, "minecraft:wolf", 4)
+            .expect("reads")
+            .expect("a wolf");
+        let entity = row.into_entity();
+        let loaded = entity.kind.mob().expect("a mob");
+        // 读盘时 `setInSittingPose(orderedToSit)`：坐姿位直接跟着命令。
+        // Loading sets the sitting pose straight from the order.
+        assert_eq!(loaded.tame.owner, mob.tame.owner);
+        assert!(loaded.tame.is_tame() && loaded.tame.ordered_to_sit);
+        assert!(loaded.tame.in_sitting_pose());
+        assert_eq!(loaded.wolf.collar, 3);
+        assert_eq!(loaded.wolf.variant, mob.wolf.variant);
+        assert_eq!(loaded.wolf.sound_variant, mob.wolf.sound_variant);
+        assert_eq!(loaded.wolf.anger_end_time, 1234);
+        assert_eq!(loaded.wolf.angry_at, Some([5; 16]));
+        assert_eq!(loaded.health, 40.0);
     }
 
     #[test]
