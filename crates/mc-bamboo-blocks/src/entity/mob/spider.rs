@@ -64,7 +64,11 @@ pub fn attributes(kind: MobType) -> Attributes {
         16.0
     };
     table.set_base(attribute::MAX_HEALTH, health);
-    table.set_base(attribute::MOVEMENT_SPEED, 0.3);
+    // 官方写的是 `0.3F`：按 float 存，加宽成 double 后是 0.30000001192092896。
+    // 散步的 0.8 倍速下差的这一位会让 `setSpeed` 的 float 差一个 ulp。
+    // Vanilla writes `0.3F`, so the base widens to 0.30000001192092896; at the
+    // stroll's 0.8 modifier the difference shows up as one float ulp in `setSpeed`.
+    table.set_base(attribute::MOVEMENT_SPEED, f64::from(0.3_f32));
     table
 }
 
@@ -256,7 +260,10 @@ mod tests {
     fn spiders_have_the_official_attributes_and_goals() {
         let spider = Mob::new(MobType::Spider);
         assert_eq!(spider.attributes.value(attribute::MAX_HEALTH), 16.0);
-        assert_eq!(spider.attributes.value(attribute::MOVEMENT_SPEED), 0.3);
+        assert_eq!(
+            spider.attributes.value(attribute::MOVEMENT_SPEED),
+            f64::from(0.3_f32)
+        );
         assert_eq!(spider.attributes.value(attribute::ATTACK_DAMAGE), 2.0);
         assert_eq!(spider.attributes.value(attribute::FOLLOW_RANGE), 16.0);
         assert_eq!(MobType::Spider.dimensions(false), (1.4, 0.9, 0.65));
