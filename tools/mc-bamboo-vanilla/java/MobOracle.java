@@ -998,6 +998,16 @@ public final class MobOracle {
                 pig.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
                 pig.packets = true;
                 scenes.add(pig);
+                // 幼年猪也能上鞍：`Pig` 没有按幼年重写 `canUseSlot`，鞍照样进鞍槽、发声音和装备包。
+                // A baby pig takes a saddle too: `Pig` does not narrow `canUseSlot` for babies,
+                // so the saddle still lands in the slot with the sound and equipment packet.
+                Scene babyPig = new Scene("pig_saddle_baby").ticks(24);
+                ground(babyPig, 6);
+                babyPig.cow(0.5, 64.0, 0.5, 0.0F, 41L, -24000);
+                babyPig.player(1.5, 64.0, 0.5, Items.AIR);
+                babyPig.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
+                babyPig.packets = true;
+                scenes.add(babyPig);
                 Scene bred = new Scene("pig_breed").ticks(160).drops().packets();
                 ground(bred, 8);
                 bred.cow(0.5, 64.0, 0.5, 0.0F, 63L);

@@ -154,6 +154,12 @@ pub(super) fn step_sound(baby: bool) -> &'static str {
     }
 }
 
+/// `ItemStack.interactLivingEntity` → `Equippable.equipOnTarget` 的鞍分支：成年（`Pig.canUseSlot`
+/// 对鞍槽要求 `!isBaby()`）、活着、鞍槽空才装上，声音来自 `LivingEntity.onEquipItem`。
+///
+/// The saddle branch of `ItemStack.interactLivingEntity` → `Equippable.equipOnTarget`: equip an
+/// empty saddle slot only on a live adult (`Pig.canUseSlot` requires `!isBaby()` for the saddle
+/// slot); the sound comes from `LivingEntity.onEquipItem`.
 pub(super) fn equip_saddle(
     me: &mut Entity,
     mob: &mut Mob,
