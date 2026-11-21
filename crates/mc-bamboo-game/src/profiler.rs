@@ -1680,36 +1680,32 @@ mod tests {
 
     #[test]
     fn lap_charges_time_to_the_named_phase() {
-        let mut profiler = Profiler::with_report_interval(None);
+        // 用可控假时钟推进，不靠真实睡眠，断言精确耗时。
+        // Advance a manual clock instead of sleeping so assertions are exact.
+        let mut profiler = Profiler::with_manual_clock();
         profiler.begin_tick();
         for phase in Phase::ALL {
-            std::thread::sleep(Duration::from_micros(50));
+            profiler.advance_clock(Duration::from_micros(50));
             profiler.lap(phase);
         }
         profiler.end_tick();
         for phase in Phase::ALL {
-            assert_eq!(
-                profiler.histogram(Series::Phase(phase)).count(),
-                1,
-                "{}",
-                phase.name()
-            );
+            let hist = profiler.histogram(Series::Phase(phase));
+            assert_eq!(hist.count(), 1, "{}", phase.name());
+            assert_eq!(hist.sum(), 50_000, "{}", phase.name());
         }
-        assert_eq!(
-            profiler
-                .histogram(Series::Metric(Metric::TickTotal))
-                .count(),
-            1
-        );
+        let total = profiler.histogram(Series::Metric(Metric::TickTotal));
+        assert_eq!(total.count(), 1);
+        assert_eq!(total.sum(), 50_000 * Phase::ALL.len() as u128);
     }
 
     #[test]
     fn sub_phase_totals_are_per_tick_and_do_not_move_the_parent_lap() {
-        let mut profiler = Profiler::with_report_interval(None);
+        let mut profiler = Profiler::with_manual_clock();
         profiler.begin_tick();
         for sub in [SubPhase::DeliverStorage, SubPhase::DeliverStorage] {
             profiler.start_sub(sub);
-            std::thread::sleep(Duration::from_micros(50));
+            profiler.advance_clock(Duration::from_micros(50));
             profiler.end_sub();
         }
         profiler.lap(Phase::Delivery);
@@ -1720,17 +1716,16 @@ mod tests {
             "一刻一条合计样本"
         );
         let first_total = profiler.sub_histogram(SubPhase::DeliverStorage).sum();
-        assert!(first_total >= 80_000, "两次调用都算进去了");
+        assert_eq!(first_total, 100_000, "两次调用都算进去了");
         assert_eq!(
             profiler.sub_histogram(SubPhase::EncodeBody).count(),
             1,
             "没调用的子段也记 0"
         );
         assert_eq!(profiler.sub_histogram(SubPhase::EncodeBody).sum(), 0);
-        assert_eq!(
-            profiler.histogram(Series::Phase(Phase::Delivery)).count(),
-            1
-        );
+        let delivery = profiler.histogram(Series::Phase(Phase::Delivery));
+        assert_eq!(delivery.count(), 1);
+        assert_eq!(delivery.sum(), 100_000, "父阶段 lap 不受子段影响");
         profiler.end_tick();
         assert_eq!(
             profiler.sub_histogram(SubPhase::DeliverStorage).count(),
@@ -1748,26 +1743,26 @@ mod tests {
 
     #[test]
     fn an_abandoned_tick_does_not_poison_the_next_one() {
-        let mut profiler = Profiler::with_report_interval(None);
+        let mut profiler = Profiler::with_manual_clock();
         profiler.begin_tick();
-        std::thread::sleep(Duration::from_millis(2));
+        profiler.advance_clock(Duration::from_millis(2));
         // 模拟 process_inbox 提前返回：没有 lap、没有 end_tick。
         profiler.begin_tick();
+        profiler.advance_clock(Duration::from_micros(100));
         profiler.lap(Phase::Inbox);
         profiler.end_tick();
-        assert_eq!(profiler.histogram(Series::Phase(Phase::Inbox)).count(), 1);
+        let inbox = profiler.histogram(Series::Phase(Phase::Inbox));
+        assert_eq!(inbox.count(), 1);
+        assert_eq!(inbox.sum(), 100_000, "废弃的那一刻不能污染下一刻的耗时");
         assert_eq!(
             profiler
                 .histogram(Series::Phase(Phase::LightUpdates))
                 .count(),
             0
         );
-        assert_eq!(
-            profiler
-                .histogram(Series::Metric(Metric::TickTotal))
-                .count(),
-            1
-        );
+        let total = profiler.histogram(Series::Metric(Metric::TickTotal));
+        assert_eq!(total.count(), 1);
+        assert_eq!(total.sum(), 100_000);
     }
 
     #[test]
