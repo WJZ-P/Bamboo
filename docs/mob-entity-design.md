@@ -1013,18 +1013,27 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `ON_GROUND` + `Monster.checkMonsterSpawnRules`；`PatrollingMonster.finalizeSpawn` 会先掷一次
   巡逻队长概率，即使女巫不能当队长，也必须消费该随机数。
   `mob-oracle --only witch_spawn`：平原黑暗、方块光 1、和平，18 例 72 刻 0 不一致，生成 30 只。
+  `Witch.performRangedAttack` 的选药五支（袭击者按血量给治疗 / 再生、缓慢、剧毒、虚弱、瞬间伤害，
+  短路顺序和官方一致，只有虚弱一支取 `nextFloat`）和按目标速度的提前量照官方实现；
+  `Witch.getDamageAfterMagicAbsorb` 现在也把 `indirectMagic` 算进 15% 抗性；
+  `mob-oracle --only witch_throw` 逐刻对拍（3 例 553 刻 0 不一致）。
 - **喷溅药水**（`entity/splash_potion.rs`）：新的投掷物实体，物理照 `ThrowableProjectile`
-  （重力 0.05），命中后按 `ThrownSplashPotion.onHitAsPotion` 的 4/2/4 范围和
-  `1 - sqrt(d)/4` 的缩放分效果；瞬时效果对生物当场结算，其余按 `scale * duration + 0.5`
-  挂上（20 刻以内不挂）。世界事件 2002 / 2007 和 1053 / 1054。存档、同步和
+  （重力 0.05）。命中后按 `ThrownSplashPotion.onHitAsPotion` 的 4 格水平 / 2 格竖直范围、
+  `computeMargin`（`clamp((tickCount - 2) / 20, 0, 0.3)`）和距离缩放分效果：瞬时治疗 / 伤害按
+  `(int)(scale * base + 0.5)` 取整并对 `#inverted_healing_and_harm` 的亡灵反转，其余按
+  `scale * duration * durationScale + 0.5` 挂上（20 刻以内不挂），跳过带免疫标签的效果。命中实体
+  不打额外的 0 点 `thrown` 伤害，改用 `DamageSources.indirectMagic` 做击退；世界事件
+  2002 / 2007（有无瞬间效果）和 1053 / 1054。选药、提前量、亡灵反转、时长取整和等级事件都和官方
+  逐刻对拍（`mob-oracle --only witch_throw`：3 例 553 刻 0 不一致）；存档、同步和
   `entity-oracle` 的快照都接上了。
 - **仓库外改动**：`mc-bamboo-protocol` 加了一个实体数据项；`mc-bamboo-storage` 的建模实体
   清单加了溺尸和女巫。
-- **没做的**：三叉戟投掷（没有 `ThrownTrident`）、鹦鹉僵尸（僵尸骑鹦鹉螺）、
-  袭击、女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
-  目标速度和目标药水效果（选药用不到）。溺尸的对拍及未覆盖的水面、上岸边界见上文和 README。女巫的抗火、自愈、水下呼吸和速度由
+- **没做的**：三叉戟投掷（没有 `ThrownTrident`）、鹦鹉僵尸（僵尸骑鹦鹉螺）、袭击、
+  女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`（营火 / 蜡烛）、滞留药水云、
+  喷溅水瓶对末影人的伤害。溺尸的对拍及未覆盖的水面、上岸边界见上文和 README。女巫四种自饮药水由
   `mob-oracle --only witch_drink` 逐刻比较位置、血量、效果时长、喝药状态和随机源
-  （3 例、268 刻、0 不一致）；投掷仍未对拍。
+  （3 例、268 刻、0 不一致）；投掷由 `mob-oracle --only witch_throw` 逐刻对拍
+  （3 例 553 刻 0 不一致）。
 ## 鱿鱼和发光鱿鱼的实施现状
 
 鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，以后海豚、鱼类也要用的公共部分在 `entity/mob/water.rs`：
