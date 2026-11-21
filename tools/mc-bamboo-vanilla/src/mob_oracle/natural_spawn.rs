@@ -52,6 +52,8 @@ pub(super) struct Case {
     /// The grass floor heights; swamp slime scenes stack five floors from 50 to 66.
     #[serde(default = "default_floors")]
     floors: Vec<i32>,
+    water_depth: i32,
+    sea_level: i32,
     /// 主世界时钟，月相读它。
     ///
     /// The overworld clock, read for the moon phase.
@@ -70,7 +72,7 @@ struct Step {
     time: i64,
     count: i32,
     world_seed: i64,
-    spawned: Vec<[i32; 8]>,
+    spawned: Vec<[i32; 9]>,
 }
 
 pub(super) struct SceneFacts {
@@ -162,6 +164,17 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if let Some(&deep) = self.per_scene.get("drowned_deep_ocean")
+            && (deep == 0
+                || self
+                    .per_scene
+                    .get("drowned_shallow_river")
+                    .copied()
+                    .unwrap_or(0)
+                    == 0)
+        {
+            return Err("natural spawn fixtures did not spawn drowned in ocean and river".into());
+        }
         if self.per_scene.contains_key("witch_night") && self.witches == 0 {
             return Err("natural spawn fixtures did not spawn any witches".into());
         }
@@ -252,7 +265,7 @@ fn spawn_tick(
     }
 }
 
-fn spawn_row(entity: Entity) -> [i32; 8] {
+fn spawn_row(entity: Entity) -> [i32; 9] {
     let mob = entity.kind.mob().expect("natural spawns are mobs");
     [
         mob.mob_type.entity_type(),
@@ -276,6 +289,11 @@ fn spawn_row(entity: Entity) -> [i32; 8] {
         },
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
+        if mob.mob_type == MobType::Drowned {
+            mob.equipment.get(EquipmentSlot::OffHand).item
+        } else {
+            0
+        },
     ]
 }
 
@@ -302,7 +320,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
                     .iter()
                     .map(move |&y| (BlockPos::new(x, y, z), BlockState(blocks::GRASS_BLOCK)));
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
-                floors.chain(roof.then_some(glass))
+                let water = (1..=case.water_depth).map(move |dy| {
+                    (
+                        BlockPos::new(x, case.floors[0] + dy, z),
+                        BlockState(blocks::WATER),
+                    )
+                });
+                floors.chain(water).chain(roof.then_some(glass))
             })
         })
         .collect();
@@ -335,6 +359,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             halloween: case.halloween,
             clock: case.clock,
             world_seed: case.level_seed,
+            sea_level: case.sea_level,
             ..ZombieFacts::default()
         },
         natural_spawn: Some(SceneFacts {
@@ -346,7 +371,11 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             } else {
                 case.sky
             },
-            block: if broken && case.name == "skeleton_night_2" {
+            block: if broken
+                && matches!(
+                    case.name.as_str(),
+                    "skeleton_night_2" | "drowned_shallow_river"
+                ) {
                 15
             } else {
                 case.block

@@ -985,7 +985,14 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - **生成**：`SpawnPlacementTypes.IN_WATER` 放置、`checkDrownedSpawnRules` 的 1/40（
   `#more_frequent_drowned_spawns` 1/15）和海平面 5 格、3% 副手鹦鹉螺壳、三叉戟 / 钓鱼竿
   的 `populateDefaultEquipmentSlots`（不拿盔甲）、`handleAttributes`、`entities/drowned`
-  战利品。鹦鹉螺僵尸骑手只取随机数、不生成坐骑。
+  战利品。照 `Drowned.checkSpawnObstruction`，实例生成阶段检查实体遮挡但不因碰撞盒内有液体而拒绝。
+  `mob-oracle --only drowned_spawn`：固定区块 (0,0) 与 (1,0)，4 种水域／光照条件，
+  34 例 136 刻 0 不一致。深海生成 2 只、浅河 13 只；浅海和强光浅河为 0。比较
+  类型、位置、朝向、幼年、左撇子、双手装备和每刻世界随机源。未覆盖真实混合刷怪表；
+  鹦鹉螺僵尸骑手只取触发随机数、不生成坐骑。
+- **溺尸战利品表对拍**：`loot-oracle --entity-table minecraft:entities/drowned --cases 64 --seed 3`，
+  64 题实际比较，0 排除、0 不一致；只验证表求值与随机源后继值，不涵盖装备掉落和死亡流程。
+  离线夹具提供 `ServerLevel.getSeaLevel`，供构造函数注册上浮目标时调用。
 - **女巫**（`entity/mob/witch.rs`）：`MobType::Witch` 接进各表；`Witch.aiStep` 在
   `Monster.aiStep` 之前跑喝药逻辑和 7.5e-4 的冒烟事件，`WitchHealRaiders` 目标在没有袭击时
   仍每刻抽一次 `nextBoolean`，`RangedAttackGoal` 用 `Goal::WitchRangedAttack` 实现。
@@ -1005,7 +1012,6 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   清单加了溺尸和女巫。
 - **没做的**：三叉戟投掷（没有 `ThrownTrident`）、鹦鹉僵尸（僵尸骑鹦鹉螺）、
   袭击、女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
-  目标速度和目标药水效果（选药用不到）。溺尸只启用了平地追击场景（1 例 120 刻 0 不一致）；
-  水里的追击 / 上浮场景位置还差几毫，见 README 已知限制。女巫的抗火、自愈、水下呼吸和速度由
+  目标速度和目标药水效果（选药用不到）。溺尸的对拍及未覆盖的水面、上岸边界见上文和 README。女巫的抗火、自愈、水下呼吸和速度由
   `mob-oracle --only witch_drink` 逐刻比较位置、血量、效果时长、喝药状态和随机源
   （3 例、268 刻、0 不一致）；投掷仍未对拍。

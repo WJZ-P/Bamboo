@@ -302,8 +302,8 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only) || "witch_spawn".equals(only)) {
-                cases += playNaturalSpawns(official, out, "witch_spawn".equals(only));
+            if ("natural_spawn".equals(only) || "witch_spawn".equals(only) || "drowned_spawn".equals(only)) {
+                cases += playNaturalSpawns(official, out, only);
             }
             if ("gen_spawn".equals(only)) {
                 cases += playGenSpawns(official, out);
@@ -3193,7 +3193,7 @@ public final class MobOracle {
             int sky, int block, int darken, boolean thunder, double playerX, int population,
             int spawnableChunks, boolean localCap, boolean nearbyRespawn) {}
 
-    private static int playNaturalSpawns(Official official, Writer out, boolean witchOnly) throws Exception {
+    private static int playNaturalSpawns(Official official, Writer out, String only) throws Exception {
         List<NaturalScene> scenes = new ArrayList<>();
         scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("cow_night", EntityTypes.COW, "savanna", 2, 15, 0, 11, false, -32, 0, 289, true, false));
@@ -3252,15 +3252,22 @@ public final class MobOracle {
         scenes.add(new NaturalScene("witch_night", EntityTypes.WITCH, "plains", 2, 0, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("witch_torch", EntityTypes.WITCH, "plains", 2, 0, 1, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("witch_peaceful", EntityTypes.WITCH, "plains", 0, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_deep_ocean", EntityTypes.DROWNED, "deep_ocean", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_shallow_ocean", EntityTypes.DROWNED, "deep_ocean", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_shallow_river", EntityTypes.DROWNED, "river", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_lit_river", EntityTypes.DROWNED, "river", 2, 0, 15, 11, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
-            if (witchOnly && scene.mob() != EntityTypes.WITCH) continue;
+            if ("witch_spawn".equals(only) && scene.mob() != EntityTypes.WITCH) continue;
+            if ("drowned_spawn".equals(only) && scene.mob() != EntityTypes.DROWNED) continue;
             // 沼泽场景的起点高度要正好落在某层地面上才有戏，多跑一些种子。
             // Swamp scenes only get anywhere when the start height lands on a floor, so they
             // run more seeds.
             long[] seeds = scene.name().startsWith("slime_swamp")
                     ? java.util.stream.LongStream.range(0, 60).toArray()
-                    : new long[] {0, 1, 2, 7, 42, 12345};
+                    : scene.name().equals("drowned_shallow_river")
+                            ? java.util.stream.LongStream.range(0, 16).toArray()
+                            : new long[] {0, 1, 2, 7, 42, 12345};
             for (long seed : seeds) {
                 out.write(naturalSpawnCase(official, scene, seed) + "\n");
                 count++;
@@ -3285,6 +3292,8 @@ public final class MobOracle {
         // 2.08-tall slime spawn box.
         int[] floors = scene.name().startsWith("slime_swamp") ? new int[] {50, 54, 58, 62, 66} : new int[] {-63};
         int floorY = floors[0];
+        int waterDepth = scene.mob() == EntityTypes.DROWNED ? 6 : 0;
+        level.injectedSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51 : -63;
         if (slime) {
             // 世界种子：从 1 起找第一个让区块 (0,0) 是（`slime_no_chunk` 是「(0,0) 和 (1,0) 都不是」）
             // 史莱姆区块的种子，用的是官方 `WorldgenRandom.seedSlimeChunk`。
@@ -3338,6 +3347,9 @@ public final class MobOracle {
             for (int z = -16; z < 32; z++) {
                 for (int floor : floors) {
                     level.blocks.put(BlockPos.asLong(x, floor, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                }
+                for (int dy = 1; dy <= waterDepth; dy++) {
+                    level.blocks.put(BlockPos.asLong(x, floorY + dy, z), Blocks.WATER.defaultBlockState());
                 }
                 // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
                 // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
@@ -3411,6 +3423,7 @@ public final class MobOracle {
                         : mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                row.add(mob.getType() == EntityTypes.DROWNED ? BuiltInRegistries.ITEM.getId(mob.getOffhandItem().getItem()) : 0);
                 spawned.add(row);
             }
             step.add("spawned", spawned);
@@ -3434,6 +3447,8 @@ public final class MobOracle {
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.addProperty("levelSeed", level.worldSeed);
+        row.addProperty("waterDepth", waterDepth);
+        row.addProperty("seaLevel", level.injectedSeaLevel);
         var floorRows = new JsonArray();
         for (int floor : floors) floorRows.add(floor);
         row.add("floors", floorRows);

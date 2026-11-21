@@ -745,11 +745,12 @@ fn is_valid_position_for_mob(
     if nearest_player_distance_sqr > despawn * despawn && kind.removes_when_far_away() {
         return false;
     }
-    // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住。
-    // `Mob.checkSpawnObstruction`: no liquid in the box and nothing in the way.
+    // `Drowned.checkSpawnObstruction` 只检查实体遮挡；普通生物还检查液体。
+    // `Drowned.checkSpawnObstruction` checks only entity obstruction; ordinary mobs also check liquid.
+    let bounds = entity.bounding_box();
     pathfinder_spawn_rules(world, entity, entity.block_position())
-        && !contains_any_liquid(world, entity.bounding_box())
-        && is_unobstructed_by_entities(world, entity.bounding_box())
+        && (kind == MobType::Drowned || !contains_any_liquid(world, bounds))
+        && is_unobstructed_by_entities(world, bounds)
 }
 
 /// `EntityGetter.isUnobstructed(entity)`：盒子里没有未移除、`blocksBuilding` 的实体。
