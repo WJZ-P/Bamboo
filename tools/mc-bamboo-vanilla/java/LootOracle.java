@@ -1165,6 +1165,13 @@ public final class LootOracle {
         }
 
         @Override
+        public int getSeaLevel() {
+            // 溺尸注册上浮目标时会读取海平面；夹具没有区块生成器。
+            // Drowned reads sea level when registering its swim-up goal; this fixture has no generator.
+            return 63;
+        }
+
+        @Override
         public Difficulty getDifficulty() {
             return Difficulty.NORMAL;
         }
