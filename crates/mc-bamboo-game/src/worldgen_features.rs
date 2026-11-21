@@ -261,7 +261,7 @@ fn processor_lists() -> Result<&'static ProcessorLists, String> {
     static LISTS: OnceLock<Result<ProcessorLists, String>> = OnceLock::new();
     LISTS
         .get_or_init(|| {
-            let worldgen = Worldgen::load()?;
+            let worldgen = Worldgen::shared()?;
             let raw = worldgen
                 .raw()
                 .get("processor_list")
