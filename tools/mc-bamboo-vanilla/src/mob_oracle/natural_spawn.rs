@@ -178,6 +178,18 @@ impl Coverage {
         if self.per_scene.contains_key("witch_night") && self.witches == 0 {
             return Err("natural spawn fixtures did not spawn any witches".into());
         }
+        // 流浪者和沼骸的正例必须真的刷出生物，否则找天 / 黑暗规则没被覆盖。
+        // The stray and bogged positive scenes must really spawn, or the sky / darkness
+        // rules went untested.
+        for (scene, creature) in [("stray_night", "strays"), ("bogged_night", "bogged")] {
+            if let Some(&count) = self.per_scene.get(scene)
+                && count == 0
+            {
+                return Err(format!(
+                    "natural spawn fixture {scene} did not spawn any {creature}"
+                ));
+            }
+        }
         let mobs = [
             self.cows,
             self.skeletons,
@@ -354,7 +366,11 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         facts: ZombieFacts {
             difficulty: case.difficulty,
             sky_darken: case.darken,
-            can_see_sky: case.sky == 15,
+            // 改坏自检：把流浪者正例的找天判据拿掉，官方仍刷、Bamboo 不刷，
+            // 用来证明流浪者夹具确实覆盖 `Stray.checkStraySpawnRules` 的找天一支。
+            // Break-self-test: drop the stray positive scene's open-sky fact, so vanilla
+            // still spawns and Bamboo does not — proving the fixture covers the sky gate.
+            can_see_sky: case.sky == 15 && !(broken && case.name == "stray_night"),
             raining: case.thunder,
             halloween: case.halloween,
             clock: case.clock,

@@ -881,8 +881,18 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `bogged_shear`（两次剪刀右键：结果、掉落物的物品 / 位置 / 速度、已剪标志）。官方一侧让
   真的 `Stray.getArrow` / `Bogged.getArrow` 造箭，再把它加的效果搬到带种子的箭上。
   改坏确认：中毒时长改成 101、受冻刻数改成 141，两个场景各自报不一致。
-- 未对拍：流浪者 / 沼骸的自然刷怪规则、死亡掉落（走骷髅同一条路径，战利品表由
-  `mc-bamboo-loot` 求值）、存档 NBT 和官方的逐键比较、转化时带效果 / 名字 / 标签的搬运。
+- 自然刷怪对拍（2026-11-21）：`mob-oracle --only stray_spawn`（28 例 112 刻 0 不一致；
+  `stray_night` 雪地针叶林找天正例刷 90 只，`stray_no_sky` 无天、`stray_peaceful` 和平各 0 只）
+  和 `--only bogged_spawn`（12 例 48 刻 0 不一致；`bogged_night` 沼泽正例 48 只、
+  `bogged_peaceful` 0 只）。夹具把 `sky=15` 注入成 `canSeeSky`，逐刻比类型、位置、朝向、
+  幼年、左撇子、主手和每刻世界随机源种子；`Stray.checkStraySpawnRules` 的「从上一格起跳过
+  连续细雪再找天」已和官方字节码核对（26.3 的 `Stray.java` 用 `do..while` 上抬一格，等价）。
+  改坏确认：`--only stray_spawn --break-self-test natural_spawn` 把 Bamboo 正例的找天判据拿掉，
+  官方仍刷而 Bamboo 不刷，报 4 处不一致。并入 `--only natural_spawn` 后 566 例 2264 刻
+  0 不一致，原有牛 / 马科 / 史莱姆 / 溺尸 / 女巫场景无回归。夹具的 `canSeeSky` 是注入常量，
+  细雪上方连续跳过的那一支无法单独区分，仍记在已知限制。
+- 未对拍：死亡掉落（走骷髅同一条路径，战利品表由 `mc-bamboo-loot` 求值）、存档 NBT 和
+  官方的逐键比较、转化时带效果 / 名字 / 标签的搬运。
 
 ## 史莱姆的实施现状（2026-11-20）
 

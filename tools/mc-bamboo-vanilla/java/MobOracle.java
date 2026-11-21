@@ -302,7 +302,8 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only) || "witch_spawn".equals(only) || "drowned_spawn".equals(only)) {
+            if ("natural_spawn".equals(only) || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
+                    || "stray_spawn".equals(only) || "bogged_spawn".equals(only)) {
                 cases += playNaturalSpawns(official, out, only);
             }
             if ("gen_spawn".equals(only)) {
@@ -3256,16 +3257,30 @@ public final class MobOracle {
         scenes.add(new NaturalScene("drowned_shallow_ocean", EntityTypes.DROWNED, "deep_ocean", 2, 0, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("drowned_shallow_river", EntityTypes.DROWNED, "river", 2, 0, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("drowned_lit_river", EntityTypes.DROWNED, "river", 2, 0, 15, 11, false, -32, 0, 289, true, false));
+        // 流浪者只在雪地群系刷怪表里，要求看得见天（夹具把 sky=15 当作看得见天）；
+        // 沼骸在沼泽表里，走普通怪物规则，和平难度不刷。
+        // Strays appear only in the snowy biome table and need open sky (sky=15 means
+        // canSeeSky in this fixture); bogged are in the swamp table with the ordinary
+        // monster rule, and peaceful clears them.
+        scenes.add(new NaturalScene("stray_night", EntityTypes.STRAY, "snowy_plains", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("stray_no_sky", EntityTypes.STRAY, "snowy_plains", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("stray_peaceful", EntityTypes.STRAY, "snowy_plains", 0, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("bogged_night", EntityTypes.BOGGED, "swamp", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("bogged_peaceful", EntityTypes.BOGGED, "swamp", 0, 0, 0, 11, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
             if ("witch_spawn".equals(only) && scene.mob() != EntityTypes.WITCH) continue;
             if ("drowned_spawn".equals(only) && scene.mob() != EntityTypes.DROWNED) continue;
-            // 沼泽场景的起点高度要正好落在某层地面上才有戏，多跑一些种子。
-            // Swamp scenes only get anywhere when the start height lands on a floor, so they
-            // run more seeds.
+            if ("stray_spawn".equals(only) && scene.mob() != EntityTypes.STRAY) continue;
+            if ("bogged_spawn".equals(only) && scene.mob() != EntityTypes.BOGGED) continue;
+            // 沼泽场景的起点高度要正好落在某层地面上才有戏；浅河和雪地流浪者
+            // 有光 / 找天的门槛，命中概率低，多跑一些种子。
+            // Swamp scenes only get anywhere when the start height lands on a floor; the
+            // shallow-river and snowy-stray scenes have light / sky gates, so they run more seeds.
             long[] seeds = scene.name().startsWith("slime_swamp")
                     ? java.util.stream.LongStream.range(0, 60).toArray()
                     : scene.name().equals("drowned_shallow_river")
+                            || scene.name().equals("stray_night")
                             ? java.util.stream.LongStream.range(0, 16).toArray()
                             : new long[] {0, 1, 2, 7, 42, 12345};
             for (long seed : seeds) {
