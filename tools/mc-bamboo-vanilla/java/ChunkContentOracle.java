@@ -640,7 +640,10 @@ public final class ChunkContentOracle {
                             : type == net.minecraft.world.entity.EntityTypes.CAVE_SPIDER
                                     ? new net.minecraft.world.entity.monster.spider.CaveSpider(
                                             net.minecraft.world.entity.EntityTypes.CAVE_SPIDER, level)
-                                    : type.create(level, EntitySpawnReason.COMMAND);
+                                    : type == net.minecraft.world.entity.EntityTypes.ENDERMAN
+                                            ? new net.minecraft.world.entity.monster.Enderman(
+                                                    net.minecraft.world.entity.EntityTypes.ENDERMAN, level)
+                                            : type.create(level, EntitySpawnReason.COMMAND);
             // 羊的羊毛字节和鸡的下蛋计时照 Bamboo 一侧设，只比存盘格式。
             // Copy the sheep wool byte and chicken egg timer from Bamboo; only the format is compared.
             if (cow instanceof net.minecraft.world.entity.animal.sheep.Sheep sheep && request.has("wool")) {

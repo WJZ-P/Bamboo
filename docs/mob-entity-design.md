@@ -802,5 +802,19 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 别的生物可以复用的东西：`Command::AddPlayerEffect` / `World::give_mob_effect`（给另一个实体挂效果）、`Goal::LeapAtTarget`、`MeleeAttack` 的 `follow_unseen`、`spider::can_be_affected` 这种「按种类挡效果」的钩子。
 
-逐刻对拍场景：`spider_chase_*`（午夜追玩家）、`spider_day`（白天中立）、`cave_spider_chase`（`mob-oracle --only spider_` / `--only cave_spider_`）。翻墙只有单测 `a_wall_climber_pushes_up_an_unreachable_wall`：`spider_wall` 场景里翻墙那一刻起随机源比官方多走两刻，位置 / 目标 / 路径仍逐刻相同，没有进对拍。已知限制见 README 的蜘蛛一条。
+逐刻对拍场景：`spider_chase_*`（午夜追玩家）、`spider_day`（白天中立）、`cave_spider_chase`（`mob-oracle --only spider_` / `--only cave_spider_`）。翻墙只有单测 `a_wall_climber_pushes_up_an_unreachable_wall`：`spider_wall` 场景里翻墙那一刻起随机源比官方多走两刻，位置 / 目标 / 路径仍逐刻相同，没有进对拍。`spider_day` 从第 34 刻（散步启动）起位置 / 速度有约 1e-9 的差（朝向、路径、随机源相同），怀疑是共用移动 / 摩擦代码和官方差一个 f32 ulp，未收敛。已知限制见 README 的蜘蛛一条。
+
+## 末影人的实施现状（2026-11-21）
+
+末影人在 `entity/mob/enderman.rs`：`EndermanState`（`carried` / `creepy` / `stared_at`、`target_change_time`、怒气目标与到期刻、待落地的搬放方块）挂在 `Mob.enderman` 上，都是相对状态，随实体行搬岛。`MobType::Enderman` 在 `set_target` 上套了一层 `enderman::set_target`：写目标的同刻设 `DATA_CREEPY`、`targetChangeTime` 并加「attacking」移速修饰（+0.15 加法），清目标时全部回退；所有设目标的地方（目标选择器、`HurtByTargetGoal`、`getNearestPlayer` 路径）都走这个包装，和官方 `Enderman.setTarget` 一致。
+
+目标选择器：`Goal::EndermanFreezeWhenLookedAt`（JUMP + MOVE，`canUse` 只看 `getTarget()` 是玩家、16 格内、`isBeingStaredBy`）和 `Goal::EndermanGaze`（`EndermanLookForPlayerGoal`：`getNearestPlayer(forCombat().range(64).selector(isAngerInducing))`，agro 计时 `adjustedTickDelay(5)`，锁定时 4 格内传送、16 格外每 15 刻朝玩家传送）；`Goal::EndermanBlock { place }` 复用 `canUse` 的随机闸门和 `tick` 的三次 double，改方块走新命令 `Command::EndermanBlock`（游戏层在世界线程落地，`World::set_block_and_update` / `remove_block`）。`NearestAttackableTargetGoal<Endermite>` 用 `TargetType::Endermite`：`available()` 为假，但 `nextInt(reducedTickDelay(10))` 照取，随机源不会错开。
+
+`LivingEntity.isSensitiveToWater`：`living::animal_ai_step` 在 `pushEntities` 之后、`Mob.aiStep` 的日晒之前调 `enderman::hurt_if_wet`（1 点溺水伤害，位置用包围盒顶上的那一格，官方 `isInRain`）。`LivingEntity.hurtServer` 的投掷物分支在 `living::hurt_server` 顶部：`DamageKind::Arrow | Spit` 先连续 64 次 `teleport()` 并返回 false；其余伤害走原路径后再按「来源不是生物」1/10 概率传送。`Entity.getLightLevelDependentMagicValue` 用 `living::light_dependent_magic` 的共用实现（眼位置那一格）。
+
+存档：`carriedBlockState` / `anger_end_time` / `angry_at`；`requiresCustomPersistence` 让搬着方块的末影人不被自然清除。同步：`EntityData::EndermanCarried`（`OPTIONAL_BLOCK_STATE`，序列化器号 15）、`EndermanCreepy` / `EndermanStaredAt`（BOOLEAN），index 来自生成器。死亡掉落：实体表之外，游戏层 `mob_loot_drops` 在表求值后用一把带 `minecraft:silk_touch` 的假钻石斧再查一次方块表（`MobDeathLoot.carried`）。
+
+其他生物可以复用的：`TargetType::Endermite` 这种「类型不存在但取数照旧」的目标写法、`MobType::uses_block_step_sound`（末影人和苦力怕一样用脚下方块的 `SoundType`）、`enderman::set_target` 这种「设目标时同步专属状态」的包装。
+
+逐刻对拍场景（`mob-oracle --only enderman_`）：`enderman_stare` / `enderman_neutral`（注视与不注视）、`enderman_day_teleport`（白天露天）、`enderman_rain`（夜里淋雨）、`enderman_arrow`（箭）、`enderman_blocks`（泥土上捡方块）、`enderman_place`（开局搬着泥土）。7 个场景 6368 刻 0 不一致。已知限制见 README 的末影人一条。
 

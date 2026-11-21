@@ -1047,6 +1047,11 @@ pub struct MobDeathLoot {
     pub source: DamageSource,
     pub recent_player: Option<[u8; 16]>,
     pub recent_player_id: Option<EntityUid>,
+    /// 末影人搬着的方块：`dropCustomDeathLoot` 用带精准采集的假工具掉它。
+    ///
+    /// The block an enderman carries: `dropCustomDeathLoot` drops it with a fake
+    /// silk-touch tool.
+    pub carried: Option<crate::state::BlockState>,
 }
 
 /// 剪毛（`SHEARING`）或下蛋（`GIFT`）的一次战利品表求值：表名、原点、实体本身和可选的工具。
@@ -1091,6 +1096,7 @@ impl MobDeathLoot {
             source,
             recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
             recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
+            carried: mob.enderman.carried,
         }
     }
 }
