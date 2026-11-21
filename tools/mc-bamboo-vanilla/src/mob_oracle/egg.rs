@@ -61,6 +61,7 @@ struct EggFrame {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 struct EggState {
     id: i32,
     motion: [i64; 8],
