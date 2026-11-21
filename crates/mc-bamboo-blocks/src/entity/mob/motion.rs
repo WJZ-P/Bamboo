@@ -275,9 +275,9 @@ fn movement_emission(
     mob.fly_dist += length;
     if mob.move_dist > mob.next_step && !on_state.is_air() {
         let same = on_pos == legacy_pos;
-        let mut stepped = step_effects(me, mob, legacy_state, true, collided);
+        let mut stepped = step_effects(me, mob, view, legacy_pos, legacy_state, true, collided);
         if !same {
-            stepped |= step_effects(me, mob, on_state, false, collided);
+            stepped |= step_effects(me, mob, view, on_pos, on_state, false, collided);
         }
         if stepped {
             mob.next_step = (mob.move_dist as i32 + 1) as f32;
@@ -294,6 +294,8 @@ fn movement_emission(
 fn step_effects(
     me: &mut Entity,
     mob: &mut Mob,
+    view: &dyn BlockView,
+    pos: BlockPos,
     state: BlockState,
     play_sound: bool,
     collided: Vec3,
@@ -308,15 +310,23 @@ fn step_effects(
     }
     if play_sound {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
-        // `Wolf.playStepSound` 用叫声品种里的脚步声。
-        // `Wolf.playStepSound` uses the step sound of its sound set.
-        let sound = match mob.mob_type {
-            super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Step),
-            super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
-            super::MobType::Chicken => super::chicken::sounds(mob)[3],
-            kind => kind.step_sound().unwrap_or(mob.sound_variant.step()),
-        };
-        super::living::play_sound(me, mob, sound, 0.15, 1.0);
+        // 马科按自己的 `playStepSound`（方块声音类型、奔跑步声）走。
+        //
+        // `AbstractCow.playStepSound`: `playSound(stepSound, 0.15F, 1.0F)`.
+        // Equines go through their own `playStepSound` (block sound type, gallop).
+        if mob.mob_type.is_equine() {
+            super::equine::play_step_sound(me, mob, view, pos, state);
+        } else {
+            // `Wolf.playStepSound` 用叫声品种里的脚步声。
+            // `Wolf.playStepSound` uses the step sound of its sound set.
+            let sound = match mob.mob_type {
+                super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Step),
+                super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[3],
+                kind => kind.step_sound().unwrap_or(mob.sound_variant.step()),
+            };
+            super::living::play_sound(me, mob, sound, 0.15, 1.0);
+        }
     }
     if play_sound
         && state.is_tagged(block_tags::CRYSTAL_SOUND_BLOCKS)

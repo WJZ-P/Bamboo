@@ -9,7 +9,7 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{blocks, registries::attribute};
 
 use super::{EquineState, Mob, MobType};
-use crate::entity::{Entity, ctx::EntityCtx, mob::living};
+use crate::entity::{Entity, ctx::BlockView, ctx::EntityCtx, mob::living};
 
 fn state(mob: &mut Mob) -> &mut EquineState {
     mob.equine.as_mut().expect("equine state")
@@ -79,6 +79,75 @@ pub(in crate::entity::mob) fn land_sound(me: &Entity, mob: &mut Mob, distance: f
         "minecraft:entity.horse.land"
     };
     living::play_sound(me, mob, sound, 0.4, 1.0);
+}
+
+/// `AbstractHorse.playStepSound` / `Llama.playStepSound`：音量和音高取自脚下的方块
+/// 声音类型（上面盖着雪层时换成雪的声音），被骑着跑的马按 `gallopSoundCounter`
+/// 换成奔跑步声。不取随机数。
+///
+/// `AbstractHorse.playStepSound` / `Llama.playStepSound`: volume and pitch come
+/// from the sound type of the block below (a snow layer above wins), and a ridden
+/// galloping horse switches to gallop sounds on its counter. No randomness.
+pub(in crate::entity::mob) fn play_step_sound(
+    me: &Entity,
+    mob: &mut Mob,
+    view: &dyn BlockView,
+    pos: BlockPos,
+    block_state: crate::state::BlockState,
+) {
+    if mob.mob_type == MobType::Llama {
+        living::play_sound(me, mob, "minecraft:entity.llama.step", 0.15, 1.0);
+        return;
+    }
+    if block_state.is_liquid() {
+        return;
+    }
+    let mut sound_type = block_state.sound_type();
+    let above = view.block_state(pos.above());
+    if above.is(blocks::SNOW) {
+        sound_type = above.sound_type();
+    }
+    let volume = sound_type.volume * 0.15;
+    let pitch = sound_type.pitch;
+    // `canGallop`：只有马为真（驴、骡走 `AbstractChestedHorse` 的假）。
+    //
+    // `canGallop` is true for horses only; donkeys and mules come from
+    // `AbstractChestedHorse`, which turns it off.
+    if mob.is_vehicle() && mob.mob_type == MobType::Horse {
+        let counter = &mut state(mob).gallop_sound_counter;
+        *counter += 1;
+        if *counter > 5 && *counter % 3 == 0 {
+            living::play_sound(me, mob, "minecraft:entity.horse.gallop", volume, pitch);
+        } else if *counter <= 5 {
+            living::play_sound(me, mob, "minecraft:entity.horse.step_wood", volume, pitch);
+        }
+        return;
+    }
+    if is_wood_sound_type(sound_type) {
+        living::play_sound(me, mob, "minecraft:entity.horse.step_wood", volume, pitch);
+    } else {
+        let sound = if mob.is_baby() {
+            "minecraft:entity.baby_horse.step"
+        } else {
+            "minecraft:entity.horse.step"
+        };
+        living::play_sound(me, mob, sound, volume, pitch);
+    }
+}
+
+/// `AbstractHorse.isWoodSoundType`：五种木头声音类型。
+///
+/// `AbstractHorse.isWoodSoundType`: the five wooden sound types.
+fn is_wood_sound_type(sound: &mc_bamboo_data::SoundTypeDef) -> bool {
+    [
+        blocks::OAK_PLANKS,
+        blocks::CRIMSON_PLANKS,
+        blocks::CRIMSON_STEM,
+        blocks::CHERRY_PLANKS,
+        blocks::BAMBOO_PLANKS,
+    ]
+    .into_iter()
+    .any(|state| std::ptr::eq(crate::state::BlockState(state).sound_type(), sound))
 }
 
 /// `AbstractHorse.aiStep` 开头：`nextInt(200) == 0` 时甩尾。
@@ -330,6 +399,7 @@ mod tests {
 
     use super::*;
     use crate::entity::mob::MobEvent;
+    use crate::state::BlockState;
 
     fn landing_sounds(kind: MobType, baby: bool, distance: f64) -> Vec<&'static str> {
         let mut entity = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
@@ -411,5 +481,143 @@ mod tests {
             Some(BlockPos::new(6, 64, 0))
         );
         assert_eq!(mommy_target(false, MobType::Horse), None);
+    }
+
+    /// 在某个方块上走一步的声音：`(声音, 音量, 音高)` 列表。
+    ///
+    /// One step on a block: the list of `(sound, volume, pitch)`.
+    fn step_sounds(
+        kind: MobType,
+        baby: bool,
+        ridden: bool,
+        ground: BlockState,
+        steps: usize,
+    ) -> Vec<(&'static str, f32, f32)> {
+        let pos = BlockPos::new(0, 63, 0);
+        let mut level = crate::testing::TestLevel::new();
+        level.set(pos, ground);
+        let mut ticks = crate::BlockTicks::new();
+        let world = crate::World::new(&mut level, &mut ticks);
+        let mut entity = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
+        entity
+            .with_mob(|me, mob| {
+                if baby {
+                    mob.age = -24000;
+                }
+                if ridden {
+                    mob.passengers.push(7);
+                }
+                for _ in 0..steps {
+                    play_step_sound(me, mob, &world, pos, ground);
+                }
+                mob.events
+                    .iter()
+                    .filter_map(|event| match event {
+                        MobEvent::Sound {
+                            sound,
+                            volume,
+                            pitch,
+                            ..
+                        } => Some((*sound, *volume, *pitch)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .expect("equine row")
+    }
+
+    /// `AbstractHorse.playStepSound`：草地用马的脚步声，木头用地板声（驴、骡也是），
+    /// 幼马用幼马的脚步声，羊驼用自己的脚步声。
+    ///
+    /// `AbstractHorse.playStepSound`: grass uses the horse step, wood uses the
+    /// wooden step (donkeys and mules too), foals use the baby step and llamas
+    /// their own.
+    #[test]
+    fn step_sounds_follow_the_abstract_horse_override() {
+        let grass = BlockState(blocks::GRASS_BLOCK);
+        let sound = grass.sound_type();
+        let expected = (
+            "minecraft:entity.horse.step",
+            sound.volume * 0.15,
+            sound.pitch,
+        );
+        assert_eq!(
+            step_sounds(MobType::Horse, false, false, grass, 1),
+            [expected]
+        );
+        assert_eq!(
+            step_sounds(MobType::Horse, true, false, grass, 1)
+                .first()
+                .map(|sound| sound.0),
+            Some("minecraft:entity.baby_horse.step")
+        );
+        assert_eq!(
+            step_sounds(
+                MobType::Donkey,
+                false,
+                false,
+                BlockState(blocks::OAK_PLANKS),
+                1
+            )
+            .first()
+            .map(|sound| sound.0),
+            Some("minecraft:entity.horse.step_wood")
+        );
+        assert_eq!(
+            step_sounds(MobType::Llama, false, false, grass, 1),
+            [("minecraft:entity.llama.step", 0.15, 1.0)]
+        );
+        // `blockState.liquid()`：水里不播。
+        assert!(step_sounds(MobType::Horse, false, false, BlockState::WATER, 1).is_empty());
+    }
+
+    /// 被骑着的马：前五步是木头地板声，第六步起每三步一次奔跑步声，其余步不播。
+    ///
+    /// A ridden horse: the first five steps are wooden, from the sixth on every
+    /// third step gallops and the rest stay silent.
+    #[test]
+    fn a_ridden_horse_gallops_every_third_step() {
+        let plank = BlockState(blocks::OAK_PLANKS);
+        let sounds: Vec<&'static str> = step_sounds(MobType::Horse, false, true, plank, 9)
+            .into_iter()
+            .map(|sound| sound.0)
+            .collect();
+        assert_eq!(
+            sounds,
+            [
+                "minecraft:entity.horse.step_wood",
+                "minecraft:entity.horse.step_wood",
+                "minecraft:entity.horse.step_wood",
+                "minecraft:entity.horse.step_wood",
+                "minecraft:entity.horse.step_wood",
+                "minecraft:entity.horse.gallop",
+                "minecraft:entity.horse.gallop",
+            ]
+        );
+    }
+
+    /// 上面盖着雪层时用雪的声音类型（`AbstractHorse.playStepSound` 的 `aboveState`）。
+    ///
+    /// A snow layer above wins over the block below, as in vanilla's `aboveState`.
+    #[test]
+    fn a_snow_layer_above_swaps_the_sound_type() {
+        let pos = BlockPos::new(0, 63, 0);
+        let mut level = crate::testing::TestLevel::new();
+        level.set(pos, BlockState(blocks::GRASS_BLOCK));
+        level.set(pos.above(), BlockState(blocks::SNOW));
+        let mut ticks = crate::BlockTicks::new();
+        let world = crate::World::new(&mut level, &mut ticks);
+        let mut entity = Entity::by_mob_type(MobType::Horse, Vec3::new(0.5, 64.0, 0.5));
+        let heard = entity
+            .with_mob(|me, mob| {
+                play_step_sound(me, mob, &world, pos, BlockState(blocks::GRASS_BLOCK));
+                mob.events.iter().find_map(|event| match event {
+                    MobEvent::Sound { volume, pitch, .. } => Some((*volume, *pitch)),
+                    _ => None,
+                })
+            })
+            .expect("equine row");
+        let snow = BlockState(blocks::SNOW).sound_type();
+        assert_eq!(heard, Some((snow.volume * 0.15, snow.pitch)));
     }
 }

@@ -37,7 +37,7 @@ pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets}
 pub(super) use interact::interact;
 pub(super) use life::{
     Voice, after_hurt, ai_step_end, ai_step_start, handle_start_jump, is_immobile, land_sound,
-    tick_end, tick_ridden, voice,
+    play_step_sound, tick_end, tick_ridden, voice,
 };
 pub(super) use ranged::{ranged_attack_tick, take_did_spit};
 
@@ -93,6 +93,11 @@ pub struct EquineState {
     pub mouth_counter: i32,
     pub stand_counter: i32,
     pub tail_counter: i32,
+    /// `AbstractHorse.gallopSoundCounter`：被骑着跑时按步数换成奔跑步声。不存档。
+    ///
+    /// `AbstractHorse.gallopSoundCounter`: turns walked steps into gallop sounds
+    /// while ridden. Not saved.
+    pub gallop_sound_counter: i32,
     pub variant: i32,
     pub strength: i32,
     pub chested: bool,
