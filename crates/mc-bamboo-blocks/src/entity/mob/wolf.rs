@@ -557,6 +557,7 @@ fn outcome(result: InteractionResult, shrink_held: bool) -> MobInteraction {
         result,
         shrink_held,
         replacement: None,
+        open_inventory: false,
         shear: false,
     }
 }
@@ -947,6 +948,7 @@ mod tests {
             },
             creative: false,
             position: Vec3::default(),
+            sneaking: false,
         }
     }
 

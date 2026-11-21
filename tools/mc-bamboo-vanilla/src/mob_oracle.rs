@@ -1263,7 +1263,7 @@ impl Report {
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
-                    6..=9 => equine::scene_kind(cow.kind),
+                    9..=12 => equine::scene_kind(cow.kind),
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));
@@ -3123,7 +3123,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         target: mob.target.unwrap_or(-1),
         // Java 一侧只报僵尸的幼年元数据。
         // The Java side only reports the zombie baby metadata.
-        baby: mob.mob_type.uses_baby_metadata() && mob.is_baby(),
+        baby: (mob.mob_type.uses_baby_metadata() || mob.mob_type.is_equine()) && mob.is_baby(),
         aggr: mob.aggressive,
         doors: mob.can_break_doors,
         ph: 0,

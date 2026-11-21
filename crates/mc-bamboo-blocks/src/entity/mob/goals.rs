@@ -2365,7 +2365,10 @@ pub(super) fn attack_candidate(
 ) -> Option<CombatTarget> {
     // 骷髅和羊驼按精确的玩家碰撞箱算，其余生物用一个近似的。
     // Skeletons and llamas use the exact player box; other mobs use an approximation.
-    let exact_player_box = matches!(mob.mob_type, super::MobType::Skeleton | super::MobType::Llama);
+    let exact_player_box = matches!(
+        mob.mob_type,
+        super::MobType::Skeleton | super::MobType::Llama
+    );
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
         // `LivingEntity.canAttack`：和平难度只排除玩家目标。
         // `LivingEntity.canAttack`: peaceful only rules out player targets.

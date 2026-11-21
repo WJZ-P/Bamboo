@@ -718,6 +718,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// The shared chain from `Animal.aiStep` down to `LivingEntity.aiStep`.
 fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let fox = mob.mob_type == super::MobType::Fox;
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。

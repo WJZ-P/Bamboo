@@ -257,7 +257,8 @@ fn details(entity: &Entity) -> Vec<i64> {
 }
 
 fn biome_of(case: &Case) -> i32 {
-    biome::by_name(&case.biome).expect("known biome")}
+    biome::by_name(&case.biome).expect("known biome")
+}
 
 /// 和 `MobOracle.genColumn` 同一个坐标公式。
 fn gen_column(x: i32, z: i32, terrain: bool) -> Vec<(BlockPos, BlockState)> {

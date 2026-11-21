@@ -2039,21 +2039,21 @@ public final class MobOracle {
                 for (long seed : new long[] {11L, 4242L}) {
                     Scene graze = new Scene("zombie_equine_graze_" + kind + "_" + seed).ticks(1500).difficulty(2);
                     ground(graze, 12);
-                    graze.mob(kind, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                    graze.mob(kind + 3, 0.5, 64.0, 0.5, 0.0F, seed, 0);
                     graze.player(20.5, 64.0, 0.5, Items.AIR);
                     scenes.add(graze);
                 }
             }
             Scene foal = new Scene("zombie_equine_foal").ticks(800).difficulty(2);
             ground(foal, 12);
-            foal.mob(6, 0.5, 64.0, 0.5, 0.0F, 31L, -24000);
-            foal.mob(9, 4.5, 64.0, 0.5, 90.0F, 32L, -24000);
+            foal.mob(9, 0.5, 64.0, 0.5, 0.0F, 31L, -24000);
+            foal.mob(12, 4.5, 64.0, 0.5, 90.0F, 32L, -24000);
             foal.player(20.5, 64.0, 0.5, Items.AIR);
             scenes.add(foal);
             for (int kind : new int[] {6, 8}) {
                 Scene hurt = new Scene("zombie_equine_hurt_" + kind).ticks(400).difficulty(2);
                 ground(hurt, 12);
-                hurt.mob(kind, 0.5, 64.0, 0.5, 0.0F, 57L, 0);
+                hurt.mob(kind + 3, 0.5, 64.0, 0.5, 0.0F, 57L, 0);
                 hurt.player(3.5, 64.0, 0.5, Items.AIR);
                 for (int tick : new int[] {20, 60, 100, 140, 180}) {
                     hurt.hurts.add(new double[] {tick, 0, 1.0, 0});
@@ -2062,9 +2062,9 @@ public final class MobOracle {
             }
             Scene herd = new Scene("zombie_equine_herd").ticks(1200).difficulty(2);
             ground(herd, 12);
-            herd.mob(6, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
-            herd.mob(7, 3.5, 64.0, 2.5, 45.0F, 72L, 0);
-            herd.mob(9, -3.5, 64.0, -2.5, 180.0F, 73L, 0);
+            herd.mob(9, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+            herd.mob(10, 3.5, 64.0, 2.5, 45.0F, 72L, 0);
+            herd.mob(12, -3.5, 64.0, -2.5, 180.0F, 73L, 0);
             herd.player(4.5, 64.0, 4.5, Items.WHEAT);
             scenes.add(herd);
         }
@@ -4842,10 +4842,10 @@ public final class MobOracle {
                 case 4 -> EntityTypes.SHEEP.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
-                case 6 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
-                case 7 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
-                case 8 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
-                case 9 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
+                case 9 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
+                case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
+                case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
+                case 12 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();
@@ -4868,9 +4868,6 @@ public final class MobOracle {
                 java.lang.reflect.Method hunts = fox.getClass().getDeclaredMethod("setTargetGoals");
                 hunts.setAccessible(true);
                 hunts.invoke(fox);
-            }
-            if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
-                ageable.setAge(scene.cowAges.get(i));
             }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);
@@ -5133,7 +5130,7 @@ public final class MobOracle {
                     || mob instanceof net.minecraft.world.entity.animal.wolf.Wolf
                     ? mob.getTargetUnchecked() : mob.getTarget();
             out.append(",\"target\":").append(shownTarget == null ? -1 : shownTarget.getId());
-            out.append(",\"baby\":").append(mob instanceof Zombie z && z.isBaby());
+            out.append(",\"baby\":").append((mob instanceof Zombie || mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse) && mob.isBaby());
             if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
                 out.append(",\"eq\":").append(equineFlags(horse));
                 out.append(",\"tmp\":").append(horse.getTemper());
