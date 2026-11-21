@@ -191,6 +191,7 @@ pub const PIG_BOOST_TIME: u8 = 18;
 pub const PIG_VARIANT: u8 = 19;
 pub const PIG_SOUND_VARIANT: u8 = 20;
 pub const SHEEP_WOOL: u8 = 18;
+pub const POLAR_BEAR_STANDING: u8 = 18;
 pub const CHICKEN_VARIANT: u8 = 18;
 pub const CHICKEN_SOUND_VARIANT: u8 = 19;
 pub const PIG_VARIANT_SERIALIZER: i32 = 28;

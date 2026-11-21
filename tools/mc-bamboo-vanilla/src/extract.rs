@@ -925,6 +925,10 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `MushroomCow.DATA_TYPE`.
     pub mooshroom_type: u8,
+    /// `PolarBear.DATA_STANDING_ID` 的元数据 index。
+    ///
+    /// The metadata index of `PolarBear.DATA_STANDING_ID`.
+    pub polar_bear_standing: u8,
     /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
     ///
     /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).

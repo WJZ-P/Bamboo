@@ -1124,8 +1124,15 @@ impl Report {
             players: case
                 .players
                 .iter()
-                .map(|player| PlayerView {
-                    uuid: None,
+                .enumerate()
+                .map(|(index, player)| PlayerView {
+                    // 北极熊场景要按 UUID 认愤怒对象：和官方一侧一样是 (1, 2 + 下标)。
+                    // Polar bear scenes match the anger target by UUID: (1, 2 + index), as on
+                    // the official side.
+                    uuid: case
+                        .name
+                        .starts_with("polar_bear_")
+                        .then(|| ((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),
                     uid: player.id,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),
@@ -1190,6 +1197,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    7 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     6 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
@@ -1762,7 +1770,7 @@ impl Report {
             plain!(var);
             plain!(snd);
             plain!(goals);
-            if name.starts_with("zombie_") {
+            if name.starts_with("zombie_") || name.starts_with("polar_bear_fight_") {
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -3106,6 +3114,15 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             }
         ),
         MobType::Chicken => format!("{}|egg{}", mob.variant.name(), mob.egg_time),
+        MobType::PolarBear => format!(
+            "s{}|w{}|e{}|t{}",
+            u8::from(mob.polar_bear.standing),
+            mob.polar_bear.warning_sound_ticks,
+            mob.anger.end_time,
+            mob.anger
+                .target
+                .map_or_else(|| "-".to_owned(), |uuid| uuid_text(&uuid)),
+        ),
         MobType::Mooshroom => format!(
             "{}{}",
             mob.mooshroom.type_name(),
@@ -3127,7 +3144,7 @@ fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     match mob.mob_type {
         MobType::Pig => mob.pig_sound_variant.name().to_owned(),
         MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
-        MobType::Sheep | MobType::Mooshroom => String::new(),
+        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear => String::new(),
         _ => mob.sound_variant.name().to_owned(),
     }
 }

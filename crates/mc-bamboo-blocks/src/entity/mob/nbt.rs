@@ -335,6 +335,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Mooshroom {
         super::mooshroom::write_nbt(mob, &mut out);
     }
+    if mob.mob_type == MobType::PolarBear {
+        super::polar_bear::write_nbt(mob, &mut out);
+    }
     if mob.mob_type == MobType::Chicken {
         put(&mut out, "IsChickenJockey", Tag::Byte(0));
         put(&mut out, "EggLayTime", Tag::Int(mob.egg_time));
@@ -502,6 +505,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Mooshroom {
             super::mooshroom::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::PolarBear {
+            super::polar_bear::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Chicken {
             // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。
@@ -695,7 +701,7 @@ pub(crate) fn uuid_tag(bytes: &[u8; 16]) -> Tag {
     Tag::IntArray(words.to_vec())
 }
 
-fn uuid_field(tag: &Tag, key: &str) -> Option<[u8; 16]> {
+pub(super) fn uuid_field(tag: &Tag, key: &str) -> Option<[u8; 16]> {
     match tag::field(tag, key) {
         Some(Tag::IntArray(words)) if words.len() == 4 => {
             let mut out = [0u8; 16];

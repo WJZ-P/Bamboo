@@ -52,6 +52,11 @@ pub enum Goal {
         parent: Option<EntityUid>,
         time_to_recalc_path: i32,
     },
+    /// `WaterAvoidingRandomStrollGoal`；`probability` 取 [`PLAIN_STROLL`] 时是不避水的
+    /// `RandomStrollGoal`，不抽那个 `nextFloat`。
+    ///
+    /// `WaterAvoidingRandomStrollGoal`; with `probability` set to [`PLAIN_STROLL`] it is the
+    /// plain `RandomStrollGoal`, which skips that `nextFloat`.
     Stroll {
         speed: f64,
         interval: i32,
@@ -88,6 +93,10 @@ pub enum Goal {
     /// `HurtByTargetGoal`：记住上一次伤害的时间戳，把攻击者设成目标。
     HurtByTarget {
         timestamp: i32,
+        /// `TargetGoal.unseenTicks`；只有北极熊按 `mustSee` 记（300 刻的记忆）。
+        ///
+        /// `TargetGoal.unseenTicks`; only polar bears track `mustSee` (a 300 tick memory).
+        unseen_ticks: i32,
     },
     /// `NearestAttackableTargetGoal`：按 `TargetType` 选最近目标，缺省类型跳过。
     NearestAttackableTarget {
@@ -125,12 +134,56 @@ pub enum TargetType {
     Villager,
     IronGolem,
     Turtle,
+    /// 狐狸（北极熊的猎物），Bamboo 还没有。
+    ///
+    /// Foxes (polar bear prey); Bamboo has none yet.
+    Fox,
+    /// `PolarBearAttackPlayersGoal`：身边有幼崽的成年北极熊找玩家，搜索和跟随距离减半。
+    ///
+    /// `PolarBearAttackPlayersGoal`: an adult polar bear with a cub nearby looks for
+    /// players at half the follow distance.
+    GuardedPlayer,
+    /// 选择器是 `NeutralMob.isAngryAt` 的玩家目标。
+    ///
+    /// A player target whose selector is `NeutralMob.isAngryAt`.
+    AngerPlayer,
 }
 
 impl TargetType {
     /// Bamboo 现在有没有这种实体；没有时对应的目标直接跳过。
     pub const fn available(self) -> bool {
-        matches!(self, Self::Player)
+        matches!(self, Self::Player | Self::GuardedPlayer | Self::AngerPlayer)
+    }
+
+    /// `TargetGoal.getFollowDistance` 相对 `FOLLOW_RANGE` 的倍数。
+    ///
+    /// The `TargetGoal.getFollowDistance` factor on `FOLLOW_RANGE`.
+    const fn follow_scale(self) -> f64 {
+        if matches!(self, Self::GuardedPlayer) {
+            0.5
+        } else {
+            1.0
+        }
+    }
+}
+
+/// [`Goal::Stroll`] 的 `probability` 取这个值时表示不避水的 `RandomStrollGoal`。
+///
+/// The [`Goal::Stroll`] `probability` that marks the plain `RandomStrollGoal`.
+pub(super) const PLAIN_STROLL: f32 = -1.0;
+
+/// 一个还没跑过的 `MeleeAttackGoal`。
+///
+/// A fresh `MeleeAttackGoal`.
+pub(super) fn melee_attack(speed: f64) -> Goal {
+    Goal::MeleeAttack {
+        speed,
+        ticks_until_next_attack: 0,
+        ticks_until_path_recalc: 0,
+        pathed_target: Vec3::default(),
+        raise_arm_ticks: 0,
+        last_can_use_check: 0,
+        start_path: None,
     }
 }
 
@@ -178,11 +231,15 @@ impl Goal {
             Self::Breed { .. } => "BreedGoal",
             Self::Tempt { .. } => "TemptGoal",
             Self::FollowParent { .. } => "FollowParentGoal",
+            Self::Stroll { probability, .. } if *probability < 0.0 => "RandomStrollGoal",
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
             Self::MeleeAttack { speed, .. } if *speed == 1.2 => "MeleeAttackGoal",
+            Self::MeleeAttack { speed, .. } if *speed == super::polar_bear::MELEE_SPEED => {
+                "PolarBearMeleeAttackGoal"
+            }
             Self::MeleeAttack { .. } => "ZombieAttackGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
@@ -213,6 +270,16 @@ pub struct GoalSelector {
 }
 
 impl GoalSelector {
+    /// 按注册顺序装好一组目标，标志位都没人占。
+    ///
+    /// A selector over goals in registration order with every flag free.
+    pub(super) fn with_goals(goals: Vec<WrappedGoal>) -> Self {
+        Self {
+            goals,
+            ..Self::default()
+        }
+    }
+
     /// `AbstractCow.registerGoals`。`FloatGoal` 的构造函数顺手打开导航的浮水。
     pub fn cow(navigation: &mut Navigation) -> Self {
         navigation.flags.can_float = true;
@@ -481,7 +548,13 @@ impl GoalSelector {
         };
         Self {
             goals: vec![
-                wrap(1, Goal::HurtByTarget { timestamp: -1 }),
+                wrap(
+                    1,
+                    Goal::HurtByTarget {
+                        timestamp: -1,
+                        unseen_ticks: 0,
+                    },
+                ),
                 wrap(
                     2,
                     Goal::NearestAttackableTarget {
@@ -804,7 +877,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                     return false;
                 }
             }
-            let found = if me.in_water {
+            let found = if *probability < 0.0 {
+                // `RandomStrollGoal.getPosition`：不看水，也不抽那个 `nextFloat`。
+                // `RandomStrollGoal.getPosition`: no water check and no `nextFloat`.
+                default_random_pos(me, mob, ctx.blocks(), 10, 7)
+            } else if me.in_water {
                 land_random_pos(me, mob, ctx.blocks(), 15, 7)
                     .or_else(|| default_random_pos(me, mob, ctx.blocks(), 10, 7))
             } else if me.random.next_float() >= *probability {
@@ -858,13 +935,15 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             );
             start_path.is_some() || within_melee_range(me, mob, target)
         }
-        Goal::HurtByTarget { timestamp } => {
+        Goal::HurtByTarget { timestamp, .. } => {
             let last = mob.last_hurt_by_mob;
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    mob.mob_type != super::MobType::Skeleton
-                        || target_by_uid(mob, ctx, uid).is_some()
+                    !matches!(
+                        mob.mob_type,
+                        super::MobType::Skeleton | super::MobType::PolarBear
+                    ) || target_by_uid(mob, ctx, uid).is_some()
                 })
         }
         Goal::NearestAttackableTarget {
@@ -873,6 +952,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             found,
             ..
         } => {
+            // `PolarBearAttackPlayersGoal.canUse`：幼崽在取数之前就返回。
+            // `PolarBearAttackPlayersGoal.canUse`: a cub returns before any draw.
+            if *kind == TargetType::GuardedPlayer && mob.is_baby() {
+                return false;
+            }
             // 官方先按 `randomInterval` 取数，再按类型找目标。缺实体的目标
             // 虽跳过搜索，取数次数必须和官方一致，否则随机源会错开。
             if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
@@ -885,6 +969,14 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             } else {
                 None
             };
+            // 找到了玩家，还要身边有幼崽才动手。
+            // A player was found; a cub must be nearby as well.
+            if *kind == TargetType::GuardedPlayer
+                && found.is_some()
+                && !super::polar_bear::cub_nearby(me, ctx)
+            {
+                return false;
+            }
             found.is_some()
         }
         // `RestrictSunGoal.canUse`：白天、头上没东西、地面导航（僵尸恒是）。
@@ -994,26 +1086,34 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float => can_use(goal, me, mob, ctx),
         Goal::Unavailable(_) => false,
+        Goal::MeleeAttack { .. } if mob.mob_type == super::MobType::PolarBear => {
+            // `followingTargetEvenIfNotSeen=true`：目标打得了、还在家的范围里就继续，不看导航。
+            // `followingTargetEvenIfNotSeen=true`: continue while the target is attackable and
+            // inside the home range, whatever the navigation says.
+            combat_target(mob, ctx)
+                .is_some_and(|target| within_home(mob, BlockPos::containing(target.position)))
+        }
         Goal::MeleeAttack { .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。
             combat_target(mob, ctx).is_some() && !mob.navigation.is_done()
         }
-        Goal::NearestAttackableTarget { unseen_ticks, .. }
-            if mob.mob_type == super::MobType::Skeleton =>
+        Goal::NearestAttackableTarget {
+            unseen_ticks, kind, ..
+        } if matches!(
+            mob.mob_type,
+            super::MobType::Skeleton | super::MobType::PolarBear
+        ) =>
         {
-            let Some(target) = combat_target(mob, ctx) else {
-                return false;
-            };
-            if !target_in_follow_range(me, mob, target) {
-                return false;
-            }
-            if living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position()) {
-                *unseen_ticks = 0;
-            } else {
-                *unseen_ticks += 1;
-            }
-            *unseen_ticks <= reduced_tick_delay(60)
+            target_still_seen(me, mob, ctx, unseen_ticks, kind.follow_scale(), 60)
+        }
+        Goal::HurtByTarget { unseen_ticks, .. } if mob.mob_type == super::MobType::PolarBear => {
+            // `HurtByTargetGoal.start` 把 `unseenMemoryTicks` 设成 300。`targetMob` 的回退
+            // 没有建模：目标被清掉而原来的攻击者还打得了的情形在北极熊身上不会出现。
+            // `HurtByTargetGoal.start` sets `unseenMemoryTicks` to 300. The `targetMob`
+            // fallback is not modelled: a cleared target with a still attackable attacker
+            // does not arise for polar bears.
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
         }
         Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
             // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
@@ -1092,9 +1192,19 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             // `ZombieAttackGoal.tick()` 会按抬手计时再覆盖。
             mob.aggressive = true;
         }
-        Goal::HurtByTarget { timestamp } => {
+        Goal::HurtByTarget {
+            timestamp,
+            unseen_ticks,
+        } => {
             *timestamp = mob.last_hurt_by_mob_timestamp;
             mob.target = mob.last_hurt_by_mob;
+            *unseen_ticks = 0;
+            // `PolarBearHurtByTargetGoal.start`：幼崽叫来成年北极熊，自己当场 `stop()`。
+            // `PolarBearHurtByTargetGoal.start`: a cub alerts the adults and stops at once.
+            if mob.mob_type == super::MobType::PolarBear && mob.is_baby() {
+                super::polar_bear::alert_adults(me, mob, ctx);
+                mob.target = None;
+            }
         }
         Goal::NearestAttackableTarget {
             found,
@@ -1184,6 +1294,9 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             if excluded {
                 mob.target = None;
             }
+            // `PolarBearMeleeAttackGoal.stop`：先放下身子。
+            // `PolarBearMeleeAttackGoal.stop`: drop down first.
+            mob.polar_bear.standing = false;
             mob.aggressive = false;
             mob.navigation.stop();
         }
@@ -1303,6 +1416,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
         Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
+        Goal::NearestAttackableTarget { .. } if mob.mob_type == super::MobType::PolarBear => {
+            // 北极熊的 `unseenTicks` 只在 `canContinueToUse` 里记（见 `target_still_seen`）。
+            // Polar bears count `unseenTicks` in `canContinueToUse` only (`target_still_seen`).
+        }
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
             *unseen_ticks += 1;
             // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
@@ -1352,7 +1469,15 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 *ticks_until_path_recalc = adjusted_tick_delay(true, *ticks_until_path_recalc);
             }
             *ticks_until_next_attack = (*ticks_until_next_attack - 1).max(0);
-            if *ticks_until_next_attack == 0
+            if mob.mob_type == super::MobType::PolarBear {
+                super::polar_bear::check_and_perform_attack(
+                    ticks_until_next_attack,
+                    me,
+                    mob,
+                    ctx,
+                    target,
+                );
+            } else if *ticks_until_next_attack == 0
                 && within_melee_range(me, mob, target)
                 && living::has_line_of_sight(
                     me,
@@ -1367,7 +1492,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
             // `ZombieAttackGoal.tick`：`super.tick()` 之后抬手计时加一，按新的
             // `ticksUntilNextAttack` 决定举不举手。
-            if mob.mob_type != super::MobType::Skeleton {
+            if matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk) {
                 *raise_arm_ticks += 1;
                 mob.aggressive = *raise_arm_ticks >= 5
                     && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
@@ -1485,8 +1610,48 @@ fn float_can_use(me: &Entity, mob: &Mob) -> bool {
 
 /// `PanicGoal.shouldPanic`：最近 40 刻的伤害在 `#panic_causes` 里。
 fn should_panic(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
-    living::last_damage_source(mob, ctx.blocks().game_time())
-        .is_some_and(|source| source.kind.panic_causes())
+    // 成年北极熊只怕环境伤害（`PANIC_ENVIRONMENTAL_CAUSES`），幼崽和别的动物一样。
+    // Adult polar bears panic from environmental damage only; cubs panic like any animal.
+    let environmental = mob.mob_type == super::MobType::PolarBear && !mob.is_baby();
+    living::last_damage_source(mob, ctx.blocks().game_time()).is_some_and(|source| {
+        if environmental {
+            source.kind.panic_environmental_causes()
+        } else {
+            source.kind.panic_causes()
+        }
+    })
+}
+
+/// `TargetGoal.canContinueToUse` 带 `mustSee` 的版本：目标打得了、在跟随距离里；看不见的
+/// 满刻数超过 `reducedTickDelay(memory)` 就放弃。
+///
+/// `TargetGoal.canContinueToUse` with `mustSee`: the target is attackable and within the
+/// follow distance; it is dropped once unseen for more than `reducedTickDelay(memory)`
+/// full ticks.
+fn target_still_seen(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    unseen_ticks: &mut i32,
+    follow_scale: f64,
+    memory: i32,
+) -> bool {
+    let Some(target) = combat_target(mob, ctx) else {
+        return false;
+    };
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE)
+        * follow_scale;
+    if me.position.distance_to_sqr(target.position) > range * range {
+        return false;
+    }
+    if living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position()) {
+        *unseen_ticks = 0;
+    } else {
+        *unseen_ticks += 1;
+    }
+    *unseen_ticks <= reduced_tick_delay(memory)
 }
 
 /// `PanicGoal.lookForWater`：脚下没有碰撞时，按曼哈顿距离找最近的水。
@@ -1866,6 +2031,8 @@ pub(crate) struct CombatTarget {
     pub(crate) position: Vec3,
     eye: f32,
     pub(crate) height: f64,
+    /// `getBbWidth()`。
+    pub(crate) width: f32,
     hitbox: Aabb,
 }
 
@@ -1887,6 +2054,7 @@ impl CombatTarget {
             position: feet,
             eye: view.eye_height,
             height,
+            width: 0.6,
             hitbox: Aabb::new(
                 feet.x - half,
                 feet.y,
@@ -1907,7 +2075,7 @@ impl CombatTarget {
     }
 }
 
-fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
+pub(super) fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
     target_by_uid(mob, ctx, mob.target?)
 }
 
@@ -1922,7 +2090,12 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
     if ctx.blocks().difficulty() == 0 {
         return None;
     }
-    let skeleton = mob.mob_type == super::MobType::Skeleton;
+    // 骷髅和北极熊按玩家真实的碰撞箱算，也能把别的生物当目标。
+    // Skeletons and polar bears use the player's exact box and may target other mobs.
+    let skeleton = matches!(
+        mob.mob_type,
+        super::MobType::Skeleton | super::MobType::PolarBear
+    );
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
         return (player.alive && !player.spectator && !player.creative)
             .then(|| CombatTarget::player(player, skeleton));
@@ -1943,6 +2116,7 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
         position: other.position,
         eye,
         height: f64::from(target.dimensions().1),
+        width: target.dimensions().0,
         hitbox: other.bounding_box(),
     })
 }
@@ -1955,13 +2129,15 @@ fn nearest_attackable(
     ctx: &dyn EntityCtx,
     kind: TargetType,
 ) -> Option<EntityUid> {
-    if kind != TargetType::Player || ctx.blocks().difficulty() == 0 {
+    if !kind.available() || ctx.blocks().difficulty() == 0 {
         return None;
     }
     let range = mob
         .attributes
-        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE)
+        * kind.follow_scale();
     let view = ctx.blocks();
+    let difficulty = view.difficulty();
     let mut players = Vec::new();
     view.for_each_player(&mut |player| players.push(*player));
     let eye = Vec3::new(
@@ -1972,6 +2148,19 @@ fn nearest_attackable(
     let mut best = f64::MAX;
     let mut found = None;
     for player in players {
+        // 选择器（`isAngryAt`）在 `TargetingConditions.test` 里先于距离和视线。
+        // The selector (`isAngryAt`) runs before range and sight in `TargetingConditions.test`.
+        if kind == TargetType::AngerPlayer
+            && !super::neutral::is_angry_at_player(mob, &player, difficulty)
+        {
+            continue;
+        }
+        // `Player.canBeSeenAsEnemy`：创造模式的玩家不会被选中。僵尸和骷髅的旧行为不动。
+        // `Player.canBeSeenAsEnemy`: creative players are never picked. Zombies and
+        // skeletons keep their previous behaviour.
+        if kind != TargetType::Player && player.creative {
+            continue;
+        }
         if !targeting_test(me, mob, view, &player, range, true) {
             continue;
         }
@@ -1985,7 +2174,7 @@ fn nearest_attackable(
 }
 
 /// `PathfinderMob.isWithinMeleeAttackRange`：用实体交互范围算的方形距离。
-fn within_melee_range(me: &Entity, _mob: &Mob, target: CombatTarget) -> bool {
+pub(super) fn within_melee_range(me: &Entity, _mob: &Mob, target: CombatTarget) -> bool {
     // `Mob.DEFAULT_ATTACK_REACH = sqrt(2.04f) - 0.6f`（26.3 字节码）。
     // 官方用 `getAttackBoundingBox(reach).intersects(target.getHitbox())`，
     // 这里按双方 Aabb 膨胀后的相交判定，而不是旧的「交互范围 + 1」方格。

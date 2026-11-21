@@ -288,7 +288,12 @@ pub(super) fn finalize_generated(
 ) {
     if matches!(
         kind,
-        MobType::Cow | MobType::Mooshroom | MobType::Pig | MobType::Sheep | MobType::Chicken
+        MobType::Cow
+            | MobType::Mooshroom
+            | MobType::Pig
+            | MobType::Sheep
+            | MobType::Chicken
+            | MobType::PolarBear
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
     } else {
@@ -312,7 +317,12 @@ pub(super) fn finalize_cow(
     // 羊和哞菇没有按群系选的花纹；哞菇没有自己的 `finalizeSpawn`，也不抽叫声。
     // Sheep and mooshrooms have no biome variant; mooshrooms have no `finalizeSpawn` of
     // their own and draw no sound either.
-    let has_variant = !matches!(kind, MobType::Sheep | MobType::Mooshroom);
+    // 北极熊也一样：`PolarBear.finalizeSpawn` 只把组里的幼年概率换成 1。
+    // Polar bears too: `PolarBear.finalizeSpawn` only raises the group's baby odds to 1.
+    let has_variant = !matches!(
+        kind,
+        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear
+    );
     if has_variant {
         // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
@@ -328,7 +338,7 @@ pub(super) fn finalize_cow(
     let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
     let cow_sound = (!matches!(
         kind,
-        MobType::Sheep | MobType::Chicken | MobType::Pig | MobType::Mooshroom
+        MobType::Sheep | MobType::Chicken | MobType::Pig | MobType::Mooshroom | MobType::PolarBear
     ))
     .then(|| {
         if random.next_int(2) == 0 {
@@ -346,7 +356,13 @@ pub(super) fn finalize_cow(
         *group = Some(SpawnGroup::Ageable(AgeableGroupData {
             group_size: 0,
             should_spawn_baby: true,
-            baby_spawn_chance: 0.05,
+            // `new AgeableMobGroupData(1.0F)`：北极熊组里第二只起一定是幼崽。
+            // `new AgeableMobGroupData(1.0F)`: from the second polar bear on, always a cub.
+            baby_spawn_chance: if kind == MobType::PolarBear {
+                1.0
+            } else {
+                0.05
+            },
         }));
     }
     let Some(SpawnGroup::Ageable(data)) = group else {
@@ -403,7 +419,7 @@ fn cow_variant_for_biome(biome: i32) -> CowVariant {
     }
 }
 
-fn biome_tag_contains(name: &str, biome: i32) -> bool {
+pub(super) fn biome_tag_contains(name: &str, biome: i32) -> bool {
     mc_bamboo_data::tags::TAG_GROUPS
         .iter()
         .filter(|group| group.registry == "minecraft:worldgen/biome")

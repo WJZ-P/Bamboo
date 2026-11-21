@@ -1119,6 +1119,11 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.left_handed {
         mob_flags |= 2;
     }
+    // `Mob.setAggressive` 也写这一位，官方对所有生物都同步。
+    // `Mob.setAggressive` writes this bit too, for every mob.
+    if mob.aggressive {
+        mob_flags |= 4;
+    }
     if mob_flags != 0 {
         out.push(EntityData::MobFlags(mob_flags));
     }
@@ -1182,6 +1187,9 @@ fn farm_default_data(
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
         (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
+        (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
+            Some(EntityData::PolarBearStanding(false))
+        }
         (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
             registry_index(chicken_variants(), "minecraft:temperate"),
         )),
@@ -1210,6 +1218,12 @@ fn farm_non_default_data(
         MobType::Mooshroom => {
             if mob.mooshroom_brown {
                 out.push(EntityData::MooshroomType(1));
+            }
+            true
+        }
+        MobType::PolarBear => {
+            if mob.polar_bear_standing {
+                out.push(EntityData::PolarBearStanding(true));
             }
             true
         }

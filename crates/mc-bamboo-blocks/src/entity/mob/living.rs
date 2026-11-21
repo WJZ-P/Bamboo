@@ -87,6 +87,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
     }
+    // `PolarBear.tick` 在 `super.tick()` 之后：吼叫冷却和持久愤怒。
+    // `PolarBear.tick` after `super.tick()`: the growl cooldown and persistent anger.
+    if mob.mob_type == super::MobType::PolarBear {
+        super::polar_bear::tick_end(me, mob, ctx);
+    }
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
@@ -330,6 +335,9 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     me.first_tick = false;
+    // `Entity.baseTick`：服务端每刻按剩余着火刻数重写共享标志位。
+    // `Entity.baseTick`: the server rewrites the shared flag from the remaining fire ticks.
+    mob.visible_fire = me.remaining_fire_ticks > 0;
     // `LivingEntity.baseTick` 自己的部分。
     if is_alive(me, mob) {
         if is_in_wall(me, mob, ctx.blocks()) {
@@ -544,6 +552,7 @@ fn ambient_sound(mob: &Mob) -> &'static str {
     match mob.mob_type {
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
+        super::MobType::PolarBear => super::polar_bear::ambient_sound(mob.is_baby()),
         _ => mob
             .mob_type
             .ambient_sound()
@@ -1170,7 +1179,7 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
     let old_y = me.position.y;
     let gravity = effective_gravity(me, mob);
     if me.in_water {
-        let slow = 0.8_f32;
+        let slow = mob.mob_type.water_slow_down();
         let speed = 0.02_f32;
         let mut efficiency = mob.attributes.value(attribute::WATER_MOVEMENT_EFFICIENCY) as f32;
         if !me.on_ground {

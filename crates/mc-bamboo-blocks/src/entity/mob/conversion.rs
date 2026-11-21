@@ -52,11 +52,9 @@ pub(crate) fn convert_single(from: &Entity, to: &mut Entity, params: ConversionP
     });
 }
 
-/// `ConversionType.convertCommon`。`setSharedFlagOnFire` 不单独抄：着火标志由
-/// `remainingFireTicks` 推出来，官方下一刻 `baseTick` 也会按它重算。
+/// `ConversionType.convertCommon`。
 ///
-/// `ConversionType.convertCommon`. The on-fire flag is not copied on its own: it follows
-/// `remainingFireTicks`, as vanilla's next `baseTick` recomputes it.
+/// `ConversionType.convertCommon`.
 fn convert_common(
     old: &super::Mob,
     me: &mut Entity,
@@ -81,6 +79,7 @@ fn convert_common(
         mob.persistence_required = true;
     }
     mob.custom_name_visible = old.custom_name_visible;
+    mob.visible_fire = old.visible_fire;
     mob.invulnerable = old.invulnerable;
     mob.invulnerable_time = old.invulnerable_time;
     mob.no_gravity = old.no_gravity;

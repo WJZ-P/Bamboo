@@ -111,6 +111,7 @@ import net.minecraft.world.entity.animal.cow.Cow;
 import net.minecraft.world.entity.animal.pig.Pig;
 import net.minecraft.world.entity.animal.sheep.Sheep;
 import net.minecraft.world.entity.animal.chicken.Chicken;
+import net.minecraft.world.entity.animal.polarbear.PolarBear;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
@@ -918,8 +919,99 @@ public final class MobOracle {
                 baby.interact(9, 0, 0, wheat, 0);
                 scenes.add(baby);
             }
+            polarBearScenes(scenes);
         }
 
+        /**
+         * 北极熊：闲逛和幼崽跟随、站起来警告、死亡掉落（含着火）、环境恐慌，以及四个打玩家的场景
+         * （`polar_bear_fight_*` 走 `playZombie`，玩家是真实的受伤链路）。
+         *
+         * Polar bears: strolling with a cub, the stand-up warning, death drops (also on
+         * fire), environmental panic, and four fight scenes (`polar_bear_fight_*` run
+         * through `playZombie` with real player damage).
+         */
+        static void polarBearScenes(List<Scene> scenes) {
+            {
+                // 成年和幼崽闲逛：玩家在 20 格外，护崽目标每次只取数、找不到人。
+                Scene idle = new Scene("polar_bear_idle").ticks(300).packets();
+                ground(idle, 24);
+                idle.cow(0.5, 64.0, 0.5, 0.0F, 401L);
+                idle.cow(5.5, 64.0, 3.5, 90.0F, 402L, -24000);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                // 玩家站在三格高的柱子上打一下：熊追到柱子边够不着，反复站起来吼。
+                Scene warn = new Scene("polar_bear_warn").ticks(200).packets();
+                ground(warn, 12);
+                warn.fill(4, 64, 0, 4, 66, 0, STONE);
+                warn.cow(0.5, 64.0, 0.5, 0.0F, 403L);
+                warn.player(4.5, 67.0, 0.5, Items.AIR);
+                warn.hurts.add(new double[] {5, 0, 1.0, 0});
+                scenes.add(warn);
+            }
+            for (int fire = 0; fire < 2; fire++) {
+                // 打死看掉落：鳕鱼或鲑鱼，着火时是熟的；经验 1–3。
+                Scene death = new Scene(fire == 0 ? "polar_bear_death" : "polar_bear_death_fire")
+                        .ticks(58).drops().packets();
+                ground(death, 6);
+                if (fire == 1) death.fire(200);
+                death.cow(0.5, 64.0, 0.5, 0.0F, 404L + fire);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
+            {
+                // 成年北极熊只怕环境伤害：被火烧一下就按 2 倍速逃。
+                Scene panic = new Scene("polar_bear_panic_fire").ticks(80).deathKind(2);
+                ground(panic, 12);
+                panic.cow(0.5, 64.0, 0.5, 0.0F, 406L);
+                panic.player(20.5, 64.0, 0.5, Items.AIR);
+                panic.hurts.add(new double[] {5, 0, 1.0, 0});
+                scenes.add(panic);
+            }
+            {
+                // 挨打后追上去站起来再咬：三口之内结束，玩家还活着。
+                Scene hurt = new Scene("polar_bear_fight_hurt").ticks(75).difficulty(2);
+                hurt.realPlayers = true;
+                ground(hurt, 12);
+                hurt.mob(7, 0.5, 64.0, 0.5, 0.0F, 411L, 0);
+                hurt.player(5.5, 64.0, 0.5, Items.AIR);
+                hurt.hurts.add(new double[] {3, 0, 1.0, 0});
+                scenes.add(hurt);
+            }
+            {
+                // 带崽的大熊主动打 10 格内的玩家。到 110 刻玩家还剩 2 点血；
+                // 再往后玩家会被咬死，官方的 `playerDied` 会消气，而假世界没有玩家死亡。
+                Scene cub = new Scene("polar_bear_fight_cub").ticks(110).difficulty(2);
+                cub.realPlayers = true;
+                ground(cub, 12);
+                cub.mob(7, 0.5, 64.0, 0.5, 0.0F, 412L, 0);
+                cub.mob(7, 2.5, 64.0, 2.5, 0.0F, 413L, -24000);
+                cub.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(cub);
+            }
+            {
+                // 打幼崽：幼崽自己逃，叫来 14 格外的大熊（护崽目标够不着这么远）。
+                Scene alert = new Scene("polar_bear_fight_cub_hurt").ticks(140).difficulty(2);
+                alert.realPlayers = true;
+                ground(alert, 20);
+                alert.mob(7, 0.5, 64.0, 0.5, 0.0F, 414L, 0);
+                alert.mob(7, 12.5, 64.0, 2.5, 0.0F, 415L, -24000);
+                alert.player(14.5, 64.0, 0.5, Items.AIR);
+                alert.hurts.add(new double[] {3, 1, 1.0, 0});
+                scenes.add(alert);
+            }
+            {
+                // 和平难度：挨了打也不还手。
+                Scene peaceful = new Scene("polar_bear_fight_peaceful").ticks(60).difficulty(0);
+                ground(peaceful, 12);
+                peaceful.mob(7, 0.5, 64.0, 0.5, 0.0F, 416L, 0);
+                peaceful.player(4.5, 64.0, 0.5, Items.AIR);
+                peaceful.hurts.add(new double[] {3, 0, 1.0, 0});
+                scenes.add(peaceful);
+            }
+        }
         /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
         static void farmScenes(List<Scene> scenes) {
             int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
@@ -1917,7 +2009,7 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
-        if (scene.name.startsWith("zombie_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("polar_bear_fight_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -3948,6 +4040,7 @@ public final class MobOracle {
             Mob mob = switch (kind[0]) {
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
+                case 7 -> new PolarBear(EntityTypes.POLAR_BEAR, level);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();
@@ -3963,6 +4056,9 @@ public final class MobOracle {
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
+            }
+            if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
+                ageable.setAge(scene.cowAges.get(i));
             }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);
@@ -4003,7 +4099,14 @@ public final class MobOracle {
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
             line.append(",\"item\":0,\"looting\":0}");
         }
-        line.append("],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append("],\"hurts\":[");
+        for (int i = 0; i < scene.hurts.size(); i++) {
+            if (i > 0) line.append(',');
+            double[] hurt = scene.hurts.get(i);
+            line.append('[').append((int) hurt[0]).append(',').append((int) hurt[1]).append(',')
+                    .append(Float.floatToRawIntBits((float) hurt[2])).append(',').append((int) hurt[3]).append(']');
+        }
+        line.append("],\"summons\":[],\"eggs\":[]");
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -4164,15 +4267,19 @@ public final class MobOracle {
             out.append(",\"fire\":").append(mob.getRemainingFireTicks());
             out.append(",\"air\":").append(mob.getAirSupply());
             out.append(",\"seed\":").append(randomSeed(mob));
-            out.append(",\"age\":").append(mob instanceof Cow cow ? cow.getAge() : 0);
+            out.append(",\"age\":").append(mob instanceof net.minecraft.world.entity.AgeableMob ageable ? ageable.getAge() : 0);
             out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            if (mob instanceof PolarBear bear) {
+                out.append(",\"var\":\"").append(bearState(bear)).append("\",\"snd\":\"\"");
+            } else {
+                out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            }
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             out.append(",\"target\":").append(mob.getTarget() == null ? -1 : mob.getTarget().getId());
-            out.append(",\"baby\":").append(mob instanceof Zombie z && z.isBaby());
+            out.append(",\"baby\":").append(mob.isBaby());
             out.append(",\"aggr\":").append(mob.isAggressive());
             out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());
             out.append(",\"ph\":0");
@@ -5493,6 +5600,7 @@ public final class MobOracle {
         if (scene.startsWith("sheep_")) return EntityTypes.SHEEP;
         if (scene.startsWith("chicken_")) return EntityTypes.CHICKEN;
         if (scene.startsWith("mooshroom_")) return EntityTypes.MOOSHROOM;
+        if (scene.startsWith("polar_bear_")) return EntityTypes.POLAR_BEAR;
         return EntityTypes.COW;
     }
 
@@ -5502,11 +5610,29 @@ public final class MobOracle {
         if (scene.startsWith("sheep_")) return 4;
         if (scene.startsWith("chicken_")) return 5;
         if (scene.startsWith("mooshroom_")) return 6;
+        if (scene.startsWith("polar_bear_")) return 7;
         return 0;
+    }
+
+    /**
+     * 北极熊的状态列：站立标志、吼叫冷却、愤怒结束时刻和愤怒对象的 UUID。
+     *
+     * The polar bear state column: standing flag, growl cooldown, anger end time and the
+     * anger target's UUID.
+     */
+    private static String bearState(PolarBear bear) throws Exception {
+        var target = bear.getPersistentAngerTarget();
+        return "s" + (bear.isStanding() ? 1 : 0)
+                + "|w" + getInt(PolarBear.class, bear, "warningSoundTicks")
+                + "|e" + bear.getPersistentAngerEndTime()
+                + "|t" + (target == null ? "-" : target.getUUID().toString());
     }
 
     /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
     private static String farmVariant(Animal animal) throws Exception {
+        if (animal instanceof PolarBear bear) {
+            return bearState(bear);
+        }
         if (animal instanceof Sheep sheep) {
             return sheep.getColor().getSerializedName() + (sheep.isSheared() ? "|sheared" : "");
         }
@@ -5524,7 +5650,7 @@ public final class MobOracle {
 
     /** 叫声列；羊没有叫声变种。 */
     private static String farmSound(Animal animal) throws Exception {
-        if (animal instanceof Sheep || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow) {
+        if (animal instanceof Sheep || animal instanceof PolarBear || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");

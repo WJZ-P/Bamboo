@@ -392,10 +392,7 @@ impl Entity {
                 KindState::Egg(egg),
             ),
             EntityKind::Mob(mob) => (
-                KindPublic::Mob(Box::new(super::mob::MobPublic::of(
-                    &mob,
-                    self.remaining_fire_ticks,
-                ))),
+                KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob))),
                 KindState::Mob(mob),
             ),
         };

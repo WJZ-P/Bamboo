@@ -604,6 +604,14 @@ pub enum Command {
     /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
     /// the origin.
     DropEntityLoot(super::mob::EntityLootRequest),
+    /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
+    ///
+    /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
+    /// those that already have one.
+    AlertMobs {
+        others: Vec<EntityUid>,
+        enemy: EntityUid,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -696,6 +704,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             for stack in world.entity_loot_drops(request) {
                 world.spawn_at_location(origin, stack);
             }
+        }
+        Command::AlertMobs { others, enemy } => {
+            super::mob::polar_bear::apply_alert(world, &others, enemy);
         }
         Command::EatBlock { pos, grass_below } => {
             super::mob::living::apply_eat_block(world, pos, grass_below);

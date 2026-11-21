@@ -66,6 +66,9 @@ fn placement(entity: i32) -> Option<Placement> {
         // Mooshrooms share the placement and heightmap; [`spawn_rules`] swaps the rule.
         entity_type::MOOSHROOM,
         entity_type::PIG,
+        // 北极熊同样的放置方式和高度图，规则是 `checkPolarBearSpawnRules`。
+        // Polar bears share the placement and heightmap; the rule is `checkPolarBearSpawnRules`.
+        entity_type::POLAR_BEAR,
         entity_type::SHEEP,
     ]
     .contains(&entity);

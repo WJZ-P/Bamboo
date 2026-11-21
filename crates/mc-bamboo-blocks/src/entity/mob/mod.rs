@@ -28,8 +28,10 @@ pub mod natural;
 pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
+pub mod neutral;
 pub mod path;
 mod pig;
+pub mod polar_bear;
 pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
@@ -61,6 +63,7 @@ pub enum MobType {
     Pig,
     Sheep,
     Chicken,
+    PolarBear,
     Zombie,
     Husk,
     Skeleton,
@@ -70,12 +73,13 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Pig,
         Self::Sheep,
         Self::Chicken,
+        Self::PolarBear,
         Self::Zombie,
         Self::Husk,
         Self::Skeleton,
@@ -90,6 +94,7 @@ impl MobType {
             Self::Pig => ids::PIG,
             Self::Sheep => ids::SHEEP,
             Self::Chicken => ids::CHICKEN,
+            Self::PolarBear => ids::POLAR_BEAR,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -104,6 +109,7 @@ impl MobType {
             Self::Pig => "minecraft:pig",
             Self::Sheep => "minecraft:sheep",
             Self::Chicken => "minecraft:chicken",
+            Self::PolarBear => "minecraft:polar_bear",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -129,6 +135,7 @@ impl MobType {
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
+            (Self::PolarBear, baby) => polar_bear::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -172,6 +179,7 @@ impl MobType {
             Self::Pig => "minecraft:entities/pig",
             Self::Sheep => "minecraft:entities/sheep",
             Self::Chicken => "minecraft:entities/chicken",
+            Self::PolarBear => "minecraft:entities/polar_bear",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -198,10 +206,15 @@ impl MobType {
         }
     }
 
-    /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
+    /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。幼崽叫声不同的
+    /// （猪、鸡、北极熊）返回 `None`，由 `living::ambient_sound` 按年龄分派。
+    ///
+    /// The four sounds are dispatched by class; zombies and husks have their own events.
+    /// Kinds whose cubs sound different (pigs, chickens, polar bears) return `None` and let
+    /// `living::ambient_sound` pick by age.
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken | Self::PolarBear => None,
             Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
@@ -213,6 +226,7 @@ impl MobType {
         match self {
             Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.hurt"),
+            Self::PolarBear => Some("minecraft:entity.polar_bear.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -223,6 +237,7 @@ impl MobType {
         match self {
             Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.death"),
+            Self::PolarBear => Some("minecraft:entity.polar_bear.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -233,6 +248,7 @@ impl MobType {
         match self {
             Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
+            Self::PolarBear => Some("minecraft:entity.polar_bear.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
@@ -248,6 +264,7 @@ impl MobType {
             Self::Pig => items::PIG_SPAWN_EGG,
             Self::Sheep => items::SHEEP_SPAWN_EGG,
             Self::Chicken => items::CHICKEN_SPAWN_EGG,
+            Self::PolarBear => items::POLAR_BEAR_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -262,6 +279,7 @@ impl MobType {
             Self::Pig => "entity.minecraft.pig",
             Self::Sheep => "entity.minecraft.sheep",
             Self::Chicken => "entity.minecraft.chicken",
+            Self::PolarBear => "entity.minecraft.polar_bear",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -309,6 +327,17 @@ impl MobType {
     /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
     pub const fn fire_immune(self) -> bool {
         false
+    }
+
+    /// `LivingEntity.getWaterSlowDown()`：缺省 0.8，北极熊覆写成 0.98。
+    ///
+    /// `LivingEntity.getWaterSlowDown()`: 0.8 by default, 0.98 for polar bears.
+    pub const fn water_slow_down(self) -> f32 {
+        if matches!(self, Self::PolarBear) {
+            0.98
+        } else {
+            0.8
+        }
     }
 }
 
@@ -674,6 +703,17 @@ impl DamageKind {
         }
     }
 
+    /// `#panic_environmental_causes`（这里有的那几种；`lightning_bolt` 和 `sulfur_cube_hot` 还没有）。
+    ///
+    /// `#panic_environmental_causes` (the kinds modelled here; `lightning_bolt` and
+    /// `sulfur_cube_hot` do not exist yet).
+    pub const fn panic_environmental_causes(self) -> bool {
+        matches!(
+            self,
+            Self::Cactus | Self::Freeze | Self::HotFloor | Self::InFire | Self::Lava | Self::OnFire
+        )
+    }
+
     /// `#panic_causes`。
     pub const fn panic_causes(self) -> bool {
         matches!(
@@ -1002,6 +1042,13 @@ pub struct Mob {
     pub last_pos: Option<BlockPos>,
     pub last_climbable_pos: Option<BlockPos>,
     pub fall_flying: bool,
+    /// `Entity.setSharedFlagOnFire` 写进共享标志位的那一位。每刻 `baseTick` 末尾按
+    /// `remainingFireTicks > 0` 重算，所以点燃后晚一刻才显示、熄灭当刻就消失。
+    ///
+    /// The shared-flag bit written by `Entity.setSharedFlagOnFire`. Recomputed at the end
+    /// of every `baseTick` from `remainingFireTicks > 0`, so a fresh fire shows one tick
+    /// late and an extinguished one clears at once.
+    pub visible_fire: bool,
     // ---- Mob ----
     pub ambient_sound_time: i32,
     pub look: LookControl,
@@ -1074,6 +1121,14 @@ pub struct Mob {
     ///
     /// The mooshroom type, its stored stew effects and the last lightning bolt.
     pub mooshroom: mooshroom::Mooshroom,
+    /// 北极熊的站立标志和吼叫冷却。
+    ///
+    /// The polar bear standing flag and growl cooldown.
+    pub polar_bear: polar_bear::PolarBear,
+    /// 中立生物的持久愤怒（`NeutralMob`），北极熊在用。
+    ///
+    /// Persistent anger of neutral mobs (`NeutralMob`); polar bears use it.
+    pub anger: neutral::Anger,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1141,6 +1196,7 @@ impl Mob {
             MobType::Pig => pig::attributes(),
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
+            MobType::PolarBear => polar_bear::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
@@ -1151,6 +1207,7 @@ impl Mob {
             MobType::Pig => pig::goals(&mut navigation),
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
+            MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
@@ -1160,6 +1217,7 @@ impl Mob {
             | MobType::Pig
             | MobType::Sheep
             | MobType::Chicken => GoalSelector::default(),
+            MobType::PolarBear => polar_bear::target_goals(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
@@ -1226,6 +1284,7 @@ impl Mob {
             last_pos: None,
             last_climbable_pos: None,
             fall_flying: false,
+            visible_fire: false,
             ambient_sound_time: 0,
             look: LookControl::default(),
             mover: MoveControl::default(),
@@ -1277,6 +1336,8 @@ impl Mob {
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
             mooshroom: mooshroom::Mooshroom::default(),
+            polar_bear: polar_bear::PolarBear::default(),
+            anger: neutral::Anger::default(),
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1339,6 +1400,7 @@ impl Mob {
         // `MeleeAttackGoal.lastCanUseCheck` is `gameTime` as well; cows have no such goal,
         // so rebasing it is a no-op for them.
         self.goals.rebase_clock(delta);
+        self.anger.rebase(delta);
     }
 }
 
@@ -1373,6 +1435,10 @@ pub struct MobPublic {
     ///
     /// `MushroomCow.DATA_TYPE`: true for brown.
     pub mooshroom_brown: bool,
+    /// `PolarBear.DATA_STANDING_ID`。
+    ///
+    /// `PolarBear.DATA_STANDING_ID`.
+    pub polar_bear_standing: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1402,7 +1468,7 @@ pub struct MobPublic {
 }
 
 impl MobPublic {
-    pub fn of(mob: &Mob, remaining_fire_ticks: i32) -> Self {
+    pub fn of(mob: &Mob) -> Self {
         Self {
             mob_type: mob.mob_type,
             uuid: mob.uuid,
@@ -1425,7 +1491,8 @@ impl MobPublic {
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
             mooshroom_brown: mob.mooshroom.brown,
-            on_fire: remaining_fire_ticks > 0,
+            polar_bear_standing: mob.polar_bear.standing,
+            on_fire: mob.visible_fire,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,
             air_supply: mob.air_supply,
@@ -1512,7 +1579,7 @@ mod tests {
         assert!(!cow.is_baby());
         cow.age = -24000;
         assert!(cow.is_baby());
-        assert!(MobPublic::of(&cow, 0).baby);
+        assert!(MobPublic::of(&cow).baby);
     }
 
     /// 存档往返保留僵尸的 `IsBaby` / `CanBreakDoors`，牛的键不串类型。

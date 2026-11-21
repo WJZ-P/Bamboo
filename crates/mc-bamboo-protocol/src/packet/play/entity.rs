@@ -195,6 +195,10 @@ pub enum EntityData {
     ///
     /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
     MooshroomType(i32),
+    /// `PolarBear.DATA_STANDING_ID`（BOOLEAN）：站起来警告。
+    ///
+    /// `PolarBear.DATA_STANDING_ID` (BOOLEAN): standing up to warn.
+    PolarBearStanding(bool),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -254,6 +258,7 @@ impl EntityData {
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
             Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
+            Self::PolarBearStanding(_) => mc_bamboo_data::entity_types::POLAR_BEAR_STANDING,
         }
     }
 
@@ -412,6 +417,10 @@ impl EntityData {
             Self::MooshroomType(kind) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *kind);
+            }
+            Self::PolarBearStanding(standing) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *standing);
             }
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
