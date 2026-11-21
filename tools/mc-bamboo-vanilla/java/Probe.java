@@ -3218,6 +3218,10 @@ public final class Probe {
         /** 最近一次出现的物品实体。 */
         int lastItemId = -1;
         int lastCowId = -1;
+        // 自然生成的马、驴、骡、羊驼：配对时会带属性包（血量、速度、跳跃都是随机的）。
+        // Naturally spawned horses, donkeys, mules and llamas: pairing sends their
+        // attributes, since health, speed and jump are randomized.
+        final Set<Integer> equineIds = new HashSet<>();
         int cowAdds;
         int cowAttributes;
         int cowData;
@@ -4079,6 +4083,9 @@ public final class Probe {
                                 snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));
                 return;
             }
+            if (equineIds.contains(packet.getEntityId())) {
+                return;
+            }
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
             // 进服第一包是创造触及距离。`/gamemode` 之后还会再发。
             //
@@ -4179,8 +4186,13 @@ public final class Probe {
             boolean tnt = packet.getType() == EntityTypes.TNT;
             boolean item = packet.getType() == EntityTypes.ITEM;
             boolean cow = packet.getType() == EntityTypes.COW;
-            check("entity: only players, falling blocks, primed tnt, items and cows are added",
-                    player || falling || tnt || item || cow);
+            boolean equine = packet.getType() == EntityTypes.HORSE || packet.getType() == EntityTypes.DONKEY
+                    || packet.getType() == EntityTypes.MULE || packet.getType() == EntityTypes.LLAMA;
+            if (equine) {
+                equineIds.add(packet.getId());
+            }
+            check("entity: only players, falling blocks, primed tnt, items, cows and equines are added",
+                    player || falling || tnt || item || cow || equine);
             if (cow) {
                 lastCowId = packet.getId();
                 cowAdds += 1;
