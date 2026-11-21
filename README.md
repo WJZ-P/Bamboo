@@ -165,6 +165,7 @@ WebView2 的渲染进程不算在内。
 ## 现在能玩什么
 
 - `/summon minecraft:skeleton` 和骷髅刷怪蛋生成会射箭的骷髅；带 NBT 召唤时和官方一样不执行默认装备生成，无弓时走近战。骷髅复用敌对生物的难度、日晒、装备和战利品流程。普通箭可命中实体或插地，支撑方块失去碰撞后掉落；可拾取的箭按库存、模式和震颤时间判定，普通骷髅的箭不可拾取。箭的运动和插地状态会同步，已建模实体字段写入 Anvil 实体存档。火矢扫过水面会按 `WaterFluid.entityInside` 熄火并播放一次 `entity.generic.extinguish_fire`；穿透箭命中后会在同一刻沿剩余线段重新取候选和方块效果。
+- **苦力怕**：可用 `/summon minecraft:creeper`（含 `powered` / `Fuse` / `ExplosionRadius` / `ignited` NBT）或苦力怕刷怪蛋生成，也会在黑暗处自然生成。属性、目标优先级和注册顺序照官方 `Creeper.registerGoals`：离目标不到 3 格开始膨胀（`SwellGoal`），超过 7 格或看不见就收缩，膨胀满 30 刻爆炸；摔落会提前膨胀（最多到引信前 5 刻），有目标时肯从高处跳下（`getMaxFallDistance`）；打火石和火焰弹右键点燃（打火石扣 1 点耐久，火焰弹消耗一个）。爆炸走 `ExplosionInteraction.MOB`：按官方射线算被炸的方块，按距离和曝光度伤害生物和玩家（伤害类型 `player_explosion`，死亡消息是「被苦力怕炸死」），生物按爆炸击退抗性被推开；`mobGriefing` 关着时不破坏方块，`mobExplosionDropDecay`（默认开）下方块掉落带爆炸半径衰减；带电时威力翻倍。死亡按 `entities/creeper` 战利品表掉火药，被骷髅射死时掉一张 `#creeper_drop_music_discs` 唱片，经验 5。膨胀方向、带电、点燃三项元数据同步给客户端，四个存档键和官方逐键一致。对拍：`mob-oracle --only creeper`（9 个场景 920 刻，逐刻比位置、速度、膨胀计数、目标、随机源、旁边的牛受的伤害和击退、真实玩家的血量和死亡消息字节，0 不一致）、`loot-oracle --entity-table minecraft:entities/creeper`（4000 例 0 不一致）、`chunk-content` 的新建苦力怕存档。已知限制：不发 `ClientboundExplodePacket`，所以客户端听不到爆炸声、看不到爆炸粒子，玩家也不会被爆炸推开（和 TNT 一样）；没有闪电实体，雷击不会把苦力怕变成带电的（只能用 NBT）；猫和豹猫还不存在，两个 `AvoidEntityGoal` 只占注册位；带电苦力怕炸死僵尸、骷髅、苦力怕时不掉头颅（`killedEntity` 的 `charged_creeper` 表未接）；身上有药水效果时爆炸不留滞留药水云；爆炸不推开也不伤害经验球、箭、下落方块和点燃的 TNT（只处理掉落物、生物和玩家），多个受害者的处理顺序是掉落物、生物（实体 ID 升序）、玩家，官方按实体分区顺序；`GameEvent` 不发；攻击挥手动画（`swingForAttack`）不发。
 - **猪**：可用 `/summon` 或猪刷怪蛋生成；支持食物、寻路、繁殖（幼崽随机继承一方花纹）、掉落、花纹和声音变种、上鞍（鞍走 `SetEquipment` 同步，死亡必掉）及存档。已知限制：胡萝卜钓竿只能诱惑；未接入载具/乘客、骑乘、下马、钓竿加速、剪除鞍、发射器上鞍、带自定义组件的上鞍/刷怪蛋和雷击转化；已上鞍的猪被空手右键时官方会让玩家骑上去并返回 SUCCESS，Bamboo 返回 PASS。
 - **羊**：可用 `/summon` 或羊刷怪蛋生成；自然生成颜色按群系权重（含 1/500 粉色），剪刀剪毛按 `shearing/sheep` 战利品表掉 1–3 团羊毛并扣剪刀耐久，染料染色，`EatBlockGoal` 吃草让草方块变泥土并长回羊毛（幼年加速长大），繁殖按合成配方混色、混不出时按世界随机源选一方；死亡按颜色和剪毛状态选子战利品表；`Sheared` / `Color` 存盘，羊毛字节同步。已知限制：脚下的草（`edible_for_sheep`）被吃掉的分支未对拍；`EatBlockGoal` 的游戏事件（`EAT` / `SHEAR`）不发；发射器剪羊毛未接入。
 - **鸡**：可用 `/summon` 或鸡刷怪蛋生成；花纹和叫声变种、构造时的下蛋计时（`6000 + nextInt(6000)`）、按 `gameplay/chicken_lay` 礼物表按花纹下（蓝 / 棕）蛋、缓慢下落、种子繁殖和 `EggLayTime` / `IsChickenJockey` 存盘。玩家右键和发射器都能扔出鸡蛋（含蓝 / 棕蛋），命中时对生物打 0 点 `thrown` 伤害（有击退），按蛋自己的随机源 1/8 孵小鸡、其中 1/32 孵四只，小鸡按蛋的花纹组件定花纹、从零尺寸找空位放下。已知限制：鸡骑士不生成（`IsChickenJockey` 恒写 0）；扇翅膀只影响客户端动画，服务端不记 `flyDist` 的翅膀游戏事件。下蛋声在战利品落地前取音高，礼物表求值失败时官方不放声音，Bamboo 仍会放。扔出的鸡蛋：首刻的气泡柱推力不建模；撞到方块不触发 `onProjectileHit`（标靶、钟、紫颂花等），也不发 `PROJECTILE_SHOOT` / `PROJECTILE_LAND` 游戏事件；打中下落方块不 `markHurt`；着火的蛋穿过水面不按 `WaterFluid.entityInside` 熄火（只有箭做了）；扔蛋不计 `ITEM_USED` 统计；孵化找空位按盒子切格子求最近点，没有复刻 `VoxelShape` 合并坐标时 1e-7 的容差和同距并列时的遍历顺序。雪球等其它投掷物还没有实现，右键雪球不会扔出。
@@ -511,7 +512,7 @@ WebView2 的渲染进程不算在内。
   `Monster.isDarkEnoughToSpawn`、`PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`）、
   `finalizeSpawn` 与按组生成（牛按 `AgeableMobGroupData` 抽幼年）。刷怪区块列表用岛自己的
   世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
-  - **只有牛、僵尸、尸壳、骷髅会真的生成**：群系刷怪表里其它条目（羊、猪、鸡、苦力怕、蜘蛛、
+  - **只有牛、僵尸、尸壳、骷髅、苦力怕会真的生成**：群系刷怪表里其它条目（羊、猪、鸡、蜘蛛、
     史莱姆、末影人、女巫、蝙蝠、鱿鱼等）仍占原版权重，抽完组大小后结束这一组。官方会继续
     尝试生成该物种、消耗后续随机数，并把实际生成的实体计入上限。所以**只有刷怪表里全是已建模
     物种的情形**逐刻产率和官方一致（`mob-oracle --only natural_spawn`：单条目刷怪表、固定区块
@@ -933,6 +934,7 @@ WebView2 的渲染进程不算在内。
   铁砧落地发 1031，摔碎发 1029；滴水石摔碎发 1045，硫磺尖刺发 1052；刷子方块摔碎在碰撞盒中心发 2001。
   点燃的 TNT 播放 `entity.tnt.primed` 并生成实体。它不走传送门，也不被水推动。爆炸会打到地上的物品，
   但不发 `ClientboundExplodePacket`（官方的爆炸声和粒子在这个包里，不在 `playSound`）。
+  TNT 的爆炸不伤生物和玩家；生物引发的爆炸（苦力怕）会，见上面苦力怕一条。
   TNT 爆炸在换成空气之前按 `getDrops` 收集掉落，整圈方块处理完再 `popResource`；`tntExplosionDropDecay` 默认是假，
   所以不传爆炸半径，`explosion_decay` 不取数。TNT 自己的 `dropFromExplosion` 是假，不掉 TNT 物品。
   容器被炸开时，`dropContents` 仍在这一圈里、在后面 TNT 的引信之前取 `level.random`。不调用 `spawnAfterBreak`：

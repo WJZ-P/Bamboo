@@ -722,3 +722,15 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
 
 扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。
+
+## 苦力怕的实施现状（2026-11-20）
+
+苦力怕在 `entity/mob/creeper.rs`：`CreeperState`（`swell` / `maxSwell` / `explosionRadius` 和三项同步元数据）挂在 `Mob.creeper` 上，全是相对计数，随实体行搬岛，不需要时钟平移，也没有新增 `IslandPart`。`Creeper.tick` 里 `super.tick()` 之前的那段在 `living::tick_mob` 的 `base_tick` 之前调用；`SwellGoal` 是 `Goal::Swell`（每刻目标，MOVE 标志），记住的目标按原始引用查死活，不走 `getTarget()` 的可攻击过滤。近战用通用的 `Goal::MeleeAttack`，新加的 `raise_arms` 字段区分 `ZombieAttackGoal` 和普通 `MeleeAttackGoal`（苦力怕、骷髅）；`Creeper.doHurtTarget` 直接返回真，不造成伤害。目标选择走骷髅那套完整的 `TargetGoal` 规则（`MobType::full_target_rules`）。
+
+爆炸是新命令 `Command::ExplodeMob`，落地在 `World::explode_mob`（`entity/explosion.rs`）：和 TNT 共用射线和 `interact_with_blocks`，另加 `hurt_living_by_explosion`（生物和玩家的伤害、生物的击退）。命令里带来源生物的 `EntityPublic`：发出者正在 tick，`me.kind` 是占位，玩家的死亡消息要靠它拿名字和 UUID。方块掉落的衰减经 `Level::explosion_block_drops_decayed` 把爆炸半径交给战利品表，由新的方块层游戏规则 `mob_explosion_drop_decay` 控制。伤害类型新增 `DamageKind::PlayerExplosion`。并行驱动里这条命令和 TNT 的 `Explode` 一样在落地阶段执行，世界随机数只在落地时取。
+
+别的生物可以复用的东西：`GoalSelector::from_goals` / `Goal::melee` / `Goal::nearest_target`（按注册顺序搭目标表）、`MobType::has_no_ambient_sound`（`getAmbientSound()` 为 null 时不取音高随机数）、`MobType::uses_block_step_sound`（走路声用方块的 `SoundType`）、`MobInteraction::damage_held`（交互后给手里的物品扣 1 点耐久）、`World::explode_mob`（任何生物引发的 `ExplosionInteraction.MOB` 爆炸）、`creeper::finalize_spawn`（只有 `Mob.finalizeSpawn` 那一层的怪物）。
+
+顺带修正：`MeleeAttackGoal.tick` 重算路径前要先 `hasLineOfSight`（`followingTargetEvenIfNotSeen` 为假时），原先漏了；隔墙被打的场景才会暴露，僵尸和骷髅的既有场景逐刻结果不变。
+
+逐刻对拍场景：`creeper_chase_*`、`creeper_ignited`、`creeper_powered`、`creeper_fall`、`creeper_wall_hurt`、`creeper_blast_player_{1,2,3}`（`mob-oracle --only creeper`）。已知限制见 README 的苦力怕一条。
