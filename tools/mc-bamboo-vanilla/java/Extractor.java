@@ -1154,7 +1154,31 @@ public final class Extractor {
         out.addProperty("rabbitMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
         out.addProperty("rabbitMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
         out.addProperty("rabbitAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        addFoxFacts(out);
         return out;
+    }
+
+    /** 狐狸的尺寸、元数据下标和属性。 */
+    private static void addFoxFacts(JsonObject out) throws ReflectiveOperationException {
+        Class<?> fox = net.minecraft.world.entity.animal.fox.Fox.class;
+        var adult = net.minecraft.world.entity.EntityTypes.FOX.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(fox, "BABY_DIMENSIONS", null);
+        var attributes = net.minecraft.world.entity.animal.fox.Fox.createAttributes().build();
+        out.addProperty("foxEyeHeight", adult.eyeHeight());
+        out.addProperty("foxBabyWidth", baby.width());
+        out.addProperty("foxBabyHeight", baby.height());
+        out.addProperty("foxBabyEyeHeight", baby.eyeHeight());
+        for (String[] accessor : new String[][] {
+                {"foxTrusted0", "DATA_TRUSTED_ID_0"}, {"foxTrusted1", "DATA_TRUSTED_ID_1"},
+                {"foxType", "DATA_TYPE_ID"}, {"foxFlags", "DATA_FLAGS_ID"}}) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(fox, accessor[1], null);
+            out.addProperty(accessor[0], data.id());
+        }
+        out.addProperty("foxMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("foxMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("foxAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        out.addProperty("foxSafeFallDistance", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.SAFE_FALL_DISTANCE));
+        out.addProperty("foxFollowRange", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE));
     }
 
     private static int arrowAccessorId(String name) throws ReflectiveOperationException {

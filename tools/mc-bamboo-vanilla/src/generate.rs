@@ -3358,7 +3358,39 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const RABBIT_{name}: f64 = {value:?};");
     }
+    fox_facts(&mut out, facts);
     out
+}
+
+/// 狐狸的尺寸、元数据下标和属性。
+///
+/// The fox dimensions, metadata indices and attributes.
+fn fox_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    for (name, value) in [
+        ("EYE_HEIGHT", facts.fox_eye_height),
+        ("BABY_WIDTH", facts.fox_baby_width),
+        ("BABY_HEIGHT", facts.fox_baby_height),
+        ("BABY_EYE_HEIGHT", facts.fox_baby_eye_height),
+    ] {
+        let _ = writeln!(out, "pub const FOX_{name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("TRUSTED_0", facts.fox_trusted0),
+        ("TRUSTED_1", facts.fox_trusted1),
+        ("TYPE", facts.fox_type),
+        ("FLAGS", facts.fox_flags),
+    ] {
+        let _ = writeln!(out, "pub const FOX_{name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("MAX_HEALTH", facts.fox_max_health),
+        ("MOVEMENT_SPEED", facts.fox_movement_speed),
+        ("ATTACK_DAMAGE", facts.fox_attack_damage),
+        ("SAFE_FALL_DISTANCE", facts.fox_safe_fall_distance),
+        ("FOLLOW_RANGE", facts.fox_follow_range),
+    ] {
+        let _ = writeln!(out, "pub const FOX_{name}: f64 = {value:?};");
+    }
 }
 
 /// 一个注册表按 ID 排列的条目，先找同步注册表，再找内置注册表。
