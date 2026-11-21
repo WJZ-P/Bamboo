@@ -437,22 +437,6 @@ type TerrainCacheKey = (
     Option<crate::world_options::FlatSettings>,
 );
 
-/// 全进程共用的地形缓存上限：256 MiB。
-///
-/// 依据：一条 CARVERS 地形实测 414 720 B（384 层 × 256 个 u32 的 `blocks` 占
-/// 393 216 B，加 24 段群系、6 张高度图和 `Vec` 头）。改前的按线程缓存每条计算线程
-/// 最多 1024 条：4 线程 1.62 GiB、8 线程 3.24 GiB，进程 RSS 峰值实测 2.7 / 4.6 GiB。
-/// 256 MiB 装得下约 647 条，覆盖一片持续跑图时的 3×3 工作集，又给整台机器留出
-/// 余量；这是「所有计算线程合起来」的硬上限，不再随线程数线性增长。
-///
-/// Global terrain cache limit: 256 MiB. One CARVERS entry measures 414 720 B
-/// (393 216 B of block layers + biomes, heightmaps and Vec headers). The old
-/// per-thread 1024-entry cap reached 1.62 GiB on 4 threads and 3.24 GiB on 8,
-/// with measured process RSS peaks of 2.7 / 4.6 GiB. 256 MiB holds ~647 entries,
-/// covers a working 3x3 window, and is a hard process-wide bound independent of
-/// the worker count.
-pub const TERRAIN_CACHE_BYTE_LIMIT: usize = 256 * 1024 * 1024;
-
 /// 分片数：每片一把锁，8 条计算线程不会全堵在一把锁上。键按哈希取片。
 ///
 /// Shard count: one lock per shard, keyed by hash, so worker threads do not
@@ -494,6 +478,104 @@ struct TerrainShard {
     /// so the measurement map cannot grow without bound.
     computed_by: HashMap<TerrainCacheKey, Vec<usize>>,
     duplicate_total: u64,
+    /// 每条条目「哪些使用者已经用完」的位图：低 9 位是 3×3 个中心的地物已算完，
+    /// 接着 9 位是 3×3 个区块已完工。两组都满就删（见 `worldgen_cache`）。
+    /// Per-entry bitmap of finished consumers: the low 9 bits are the 3×3
+    /// feature runs already computed, the next 9 the 3×3 chunks already
+    /// assembled. The entry is dropped when both are full (see `worldgen_cache`).
+    consumers_done: HashMap<TerrainCacheKey, u32>,
+    /// 因为使用者都用完而删掉的条目数。
+    /// Entries dropped because every consumer was done.
+    dependency_releases: u64,
+}
+
+impl TerrainShard {
+    /// 删掉一条条目和它的占位、位图、测量记录，更新字节数；`order` 里的旧键
+    /// 留给淘汰循环跳过。
+    /// Remove an entry with its placeholder, bitmap and measurement record and
+    /// update the byte counts; the stale key in `order` is skipped by eviction.
+    fn remove_entry(&mut self, key: &TerrainCacheKey) -> bool {
+        let Some(removed) = self.entries.remove(key) else {
+            return false;
+        };
+        self.inflight.remove(key);
+        self.consumers_done.remove(key);
+        let bytes = generated_chunk_heap_bytes(&removed);
+        self.bytes = self.bytes.saturating_sub(bytes);
+        TOTAL_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        if let Some(threads) = self.computed_by.remove(key) {
+            self.duplicate_total += threads.len().saturating_sub(1) as u64;
+        }
+        true
+    }
+
+    /// `order` 里攒了太多已删条目的旧键时压一遍，免得只靠按依赖释放时它无限增长。
+    /// Compact `order` once stale keys of released entries pile up, so it cannot
+    /// grow without bound when entries leave by dependency release.
+    fn compact_order(&mut self) {
+        if self.order.len() > 2 * self.entries.len() + 64 {
+            let entries = &self.entries;
+            self.order.retain(|key| entries.contains_key(key));
+        }
+    }
+}
+
+/// 给 `(x, z)` 的地形条目（带 / 不带 Beardifier 两条都算）记上使用者位，
+/// 两组位都满了就删。条目不在缓存里时什么都不做。
+///
+/// Set consumer bits on the terrain entries at `(x, z)` (with and without a
+/// Beardifier) and drop an entry once both groups are full. Missing entries are
+/// left alone.
+fn mark_terrain_consumer(config: &WorldGenConfig, x: i32, z: i32, bits: u32) {
+    use crate::worldgen_cache::ALL_3X3;
+    for beardified in [false, true] {
+        let key = terrain_cache_key(config, x, z, beardified);
+        let Ok(mut shard) = terrain_shards()[shard_index(&key)].lock() else {
+            continue;
+        };
+        if !shard.entries.contains_key(&key) {
+            continue;
+        }
+        let done = shard.consumers_done.entry(key.clone()).or_default();
+        *done |= bits;
+        if *done == ALL_3X3 | (ALL_3X3 << 9) && shard.remove_entry(&key) {
+            shard.dependency_releases += 1;
+            shard.compact_order();
+        }
+    }
+}
+
+/// 以 `(x, z)` 的第 `bit` 个 3×3 邻居为中心的地物已经算完。
+/// The feature run centered on 3×3 neighbor `bit` of `(x, z)` is computed.
+pub(crate) fn mark_terrain_feature_run(config: &WorldGenConfig, x: i32, z: i32, bit: u32) {
+    mark_terrain_consumer(config, x, z, 1 << bit);
+}
+
+/// `(x, z)` 的第 `bit` 个 3×3 邻居区块已经完工。
+/// 3×3 neighbor chunk `bit` of `(x, z)` has been assembled.
+pub(crate) fn mark_terrain_chunk_finished(config: &WorldGenConfig, x: i32, z: i32, bit: u32) {
+    mark_terrain_consumer(config, x, z, 1 << (bit + 9));
+}
+
+/// 空闲释放：清空全部条目，但保留测量计数（和压测用的 [`clear_terrain_cache`]
+/// 不同）。正在算的占位留着：计算方算完照常提交，等待方照常拿到结果。
+///
+/// Idle release: drop every entry but keep the measurement counters (unlike the
+/// benchmark-only [`clear_terrain_cache`]). In-flight placeholders stay, so a
+/// computing thread still commits and its waiters still get the result.
+pub(crate) fn release_terrain_cache() {
+    for shard in terrain_shards() {
+        let Ok(mut shard) = shard.lock() else {
+            continue;
+        };
+        let keys: Vec<TerrainCacheKey> = shard.entries.keys().cloned().collect();
+        for key in &keys {
+            shard.remove_entry(key);
+        }
+        shard.order.clear();
+        shard.entries.shrink_to_fit();
+        shard.inflight.shrink_to_fit();
+    }
 }
 
 /// 全进程一份的缓存；`OnceLock` 初始化后只读，锁只护查表和插入。
@@ -532,11 +614,13 @@ fn shard_index(key: &TerrainCacheKey) -> usize {
     (hasher.finish() as usize) % TERRAIN_CACHE_SHARDS
 }
 
-/// 每片的字节预算；所有片加起来不超过 [`TERRAIN_CACHE_BYTE_LIMIT`]。
+/// 每片的字节预算；所有片加起来不超过配置的上限
+/// （`bamboo.toml` 的 `worldgen_terrain_cache_mb`，见 `worldgen_cache`）。
 ///
-/// Per-shard byte budget; the sum across shards never exceeds the global limit.
+/// Per-shard byte budget; the sum across shards never exceeds the configured
+/// limit (`worldgen_terrain_cache_mb` in `bamboo.toml`, see `worldgen_cache`).
 fn shard_byte_limit() -> usize {
-    TERRAIN_CACHE_BYTE_LIMIT / TERRAIN_CACHE_SHARDS
+    crate::worldgen_cache::terrain_byte_limit() / TERRAIN_CACHE_SHARDS
 }
 
 /// 一个 `GeneratedChunk` 占的堆字节数（各 `Vec` 的 `capacity` 相加）。
@@ -579,6 +663,9 @@ pub struct TerrainCacheStats {
     pub evictions: u64,
     pub trims: u64,
     pub cross_thread_duplicates: u64,
+    /// 因为使用者都用完而提前删掉的条目数。
+    /// Entries dropped early because every consumer was done.
+    pub dependency_releases: u64,
 }
 
 /// 测量用的全局字节数 / 峰值（只在插入和淘汰时更新，Relaxed 足够，压测报告跑完读一次）。
@@ -660,7 +747,7 @@ thread_local! {
 /// Read the process-wide aggregate cache measurement snapshot (benchmarks / reports).
 pub fn terrain_cache_stats() -> TerrainCacheStats {
     let mut stats = TerrainCacheStats {
-        byte_limit: TERRAIN_CACHE_BYTE_LIMIT,
+        byte_limit: crate::worldgen_cache::terrain_byte_limit(),
         peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
         ..TerrainCacheStats::default()
     };
@@ -675,6 +762,7 @@ pub fn terrain_cache_stats() -> TerrainCacheStats {
         stats.evictions += shard.evictions;
         stats.trims += shard.trims;
         stats.clears += shard.trims;
+        stats.dependency_releases += shard.dependency_releases;
         // 每个键只在一个片里；被 N 条不同线程算过就贡献 N-1 次重复计算。
         // Each key lives in exactly one shard and contributes N-1 duplicates.
         stats.cross_thread_duplicates += shard.duplicate_total
@@ -738,6 +826,7 @@ fn cached_terrain(
     z: i32,
     beardifier: Option<&mc_bamboo_worldgen::beardifier::Beardifier>,
 ) -> Result<Arc<GeneratedChunk>, String> {
+    crate::worldgen_cache::touch();
     let key = terrain_cache_key(config, x, z, beardifier.is_some());
     let shards = terrain_shards();
     let index = shard_index(&key);
@@ -924,17 +1013,9 @@ fn cached_terrain(
                 let Some(oldest) = shard.order.pop_front() else {
                     break;
                 };
-                let Some(removed) = shard.entries.remove(&oldest) else {
-                    continue;
-                };
-                shard.inflight.remove(&oldest);
-                let removed_bytes = generated_chunk_heap_bytes(&removed);
-                shard.bytes = shard.bytes.saturating_sub(removed_bytes);
-                TOTAL_BYTES.fetch_sub(removed_bytes, Ordering::Relaxed);
-                if let Some(threads) = shard.computed_by.remove(&oldest) {
-                    shard.duplicate_total += threads.len().saturating_sub(1) as u64;
+                if shard.remove_entry(&oldest) {
+                    shard.evictions += 1;
                 }
-                shard.evictions += 1;
             }
         }
         return Ok(Arc::clone(shard.entries.get(&key).unwrap_or(&chunk)));
@@ -1612,21 +1693,24 @@ mod tests {
             assert_eq!(chunk.blocks, expected.blocks);
         }
         let stats = terrain_cache_stats();
-        assert_eq!(stats.byte_limit, TERRAIN_CACHE_BYTE_LIMIT);
+        let limit = crate::worldgen_cache::terrain_byte_limit();
+        assert_eq!(stats.byte_limit, limit);
         assert!(
-            stats.bytes <= TERRAIN_CACHE_BYTE_LIMIT,
+            stats.bytes <= limit,
             "cache holds {} bytes, limit {}",
             stats.bytes,
-            TERRAIN_CACHE_BYTE_LIMIT
+            limit
         );
-        // 峰值允许比上限多一条：插入后才触发淘汰，一条约 405 KiB。
-        // The peak may exceed the limit by one entry (~405 KiB): eviction runs
-        // right after the insertion that crosses the boundary.
+        // 峰值允许每条线程比上限多一条：插入后才触发淘汰，一条约 405 KiB，
+        // 4 条线程可能同时各在一片里刚插入、还没淘汰。
+        // The peak may exceed the limit by one entry (~405 KiB) per thread:
+        // eviction runs right after the insertion that crosses the boundary and
+        // the 4 threads may each be at that point in a different shard.
         assert!(
-            stats.peak_bytes <= TERRAIN_CACHE_BYTE_LIMIT + 1024 * 1024,
+            stats.peak_bytes <= limit + 4 * 1024 * 1024,
             "cache peaked at {} bytes, limit {}",
             stats.peak_bytes,
-            TERRAIN_CACHE_BYTE_LIMIT
+            limit
         );
     }
 

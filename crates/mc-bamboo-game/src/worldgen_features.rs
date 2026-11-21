@@ -639,10 +639,27 @@ struct FeatureShard {
     inflight: HashMap<FeatureCacheKey, FeatureSlot>,
     order: std::collections::VecDeque<FeatureCacheKey>,
     bytes: usize,
+    /// 每条条目「5×5 里哪些区块已经完工」的位图，满了就删（见 `worldgen_cache`）。
+    /// Per-entry bitmap of assembled chunks in its 5×5; the entry is dropped
+    /// once it is full (see `worldgen_cache`).
+    finished: HashMap<FeatureCacheKey, u32>,
+}
+
+impl FeatureShard {
+    /// 删掉一条条目和它的占位、位图，更新字节数。
+    /// Remove an entry with its placeholder and bitmap and update the bytes.
+    fn remove_entry(&mut self, key: &FeatureCacheKey) -> bool {
+        let Some(removed) = self.entries.remove(key) else {
+            return false;
+        };
+        self.inflight.remove(key);
+        self.finished.remove(key);
+        self.bytes = self.bytes.saturating_sub(feature_run_heap_bytes(&removed));
+        true
+    }
 }
 
 const FEATURE_CACHE_SHARDS: usize = 16;
-const FEATURE_CACHE_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 static FEATURE_CACHE: OnceLock<Vec<std::sync::Mutex<FeatureShard>>> = OnceLock::new();
 
 fn feature_shards() -> &'static [std::sync::Mutex<FeatureShard>] {
@@ -674,6 +691,74 @@ fn feature_run_heap_bytes(run: &FeatureRun) -> usize {
         .map(|marks| marks.capacity() * size_of::<(i32, i32, i32)>())
         .sum();
     deltas + marks
+}
+
+fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> FeatureCacheKey {
+    (
+        config.seed,
+        config.level_type.settings_id(),
+        cx,
+        cz,
+        config.generate_structures,
+        config.level_type.is_flat().then(|| config.flat.clone()),
+    )
+}
+
+/// `(cx, cz)` 的 5×5 里第 `bit` 个区块已经完工；25 个都完工就删掉这条地物结果。
+/// 条目不在缓存里时什么都不做。
+///
+/// Chunk `bit` of the 5×5 around `(cx, cz)` has been assembled; drop this
+/// feature result once all 25 are. Missing entries are left alone.
+pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: i32, bit: u32) {
+    let key = feature_cache_key(config, cx, cz);
+    let Ok(mut shard) = feature_shards()[feature_shard_index(&key)].lock() else {
+        return;
+    };
+    if !shard.entries.contains_key(&key) {
+        return;
+    }
+    let done = shard.finished.entry(key.clone()).or_default();
+    *done |= 1 << bit;
+    if *done == crate::worldgen_cache::ALL_5X5 && shard.remove_entry(&key) {
+        // `order` 里的旧键留给淘汰循环跳过；攒多了压一遍。
+        // The stale key in `order` is skipped by eviction; compact when many.
+        if shard.order.len() > 2 * shard.entries.len() + 64 {
+            let FeatureShard { entries, order, .. } = &mut *shard;
+            order.retain(|key| entries.contains_key(key));
+        }
+    }
+}
+
+/// 空闲释放：清空全部条目；正在算的占位留着，计算方算完照常提交。
+/// Idle release: drop every entry; in-flight placeholders stay so a computing
+/// thread still commits.
+pub(crate) fn release_feature_cache() {
+    for shard in feature_shards() {
+        let Ok(mut shard) = shard.lock() else {
+            continue;
+        };
+        let keys: Vec<FeatureCacheKey> = shard.entries.keys().cloned().collect();
+        for key in &keys {
+            shard.remove_entry(key);
+        }
+        shard.order.clear();
+        shard.entries.shrink_to_fit();
+        shard.inflight.shrink_to_fit();
+    }
+}
+
+/// 地物结果缓存现在的条目数和实测字节数（压测 / 测试用）。
+/// Current entry count and measured bytes of the feature cache (benchmarks / tests).
+#[doc(hidden)]
+pub fn feature_cache_usage() -> (usize, usize) {
+    let mut usage = (0, 0);
+    for shard in feature_shards() {
+        if let Ok(shard) = shard.lock() {
+            usage.0 += shard.entries.len();
+            usage.1 += shard.bytes;
+        }
+    }
+    usage
 }
 
 /// 测量 / 冷启动用：清掉整份地物结果缓存。
@@ -760,14 +845,8 @@ fn cached_feature_run(
 ) -> Result<Arc<FeatureRun>, String> {
     crate::worldgen_profile::count(&FEATURE_RUN_CALLS);
     crate::worldgen_profile::record_feature_center(config.seed, cx, cz);
-    let key = (
-        config.seed,
-        config.level_type.settings_id(),
-        cx,
-        cz,
-        config.generate_structures,
-        config.level_type.is_flat().then(|| config.flat.clone()),
-    );
+    crate::worldgen_cache::touch();
+    let key = feature_cache_key(config, cx, cz);
     let shards = feature_shards();
     let index = feature_shard_index(&key);
     // 锁内只查表 / 放占位；地物在锁外算。同一个中心只有一条线程真正在算，
@@ -811,27 +890,46 @@ fn cached_feature_run(
     };
     // 只有计算方提交条目；等待方直接返回，避免重复计字节。
     // Only the computing thread commits; waiters just return.
-    if let Ok(mut shard) = shards[index].lock()
-        && !shard.entries.contains_key(&key)
-    {
-        shard.order.push_back(key.clone());
-        shard.entries.insert(key, Arc::clone(&run));
-        shard.bytes += feature_run_heap_bytes(&run);
-        let target = FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS * 3 / 4;
-        if shard.bytes > FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS {
-            while shard.bytes > target {
-                let Some(oldest) = shard.order.pop_front() else {
-                    break;
-                };
-                let Some(removed) = shard.entries.remove(&oldest) else {
-                    continue;
-                };
-                shard.bytes = shard.bytes.saturating_sub(feature_run_heap_bytes(&removed));
-                shard.inflight.remove(&oldest);
-            }
-        }
+    let committed = commit_feature_run(&shards[index], key, &run);
+    if committed {
+        // 这个中心算完了：它读过的 3×3 地形各少一个使用者（锁外做）。
+        // This center is done: its 3×3 terrain has one consumer fewer (done
+        // outside the feature shard lock).
+        crate::worldgen_cache::feature_run_computed(config, cx, cz);
     }
     Ok(run)
+}
+
+/// 把算好的地物结果放进分片并按字节上限（`bamboo.toml` 的
+/// `worldgen_feature_cache_mb`）淘汰最旧的；返回这次是不是新放进去的。
+///
+/// Insert a computed feature result and evict the oldest past the byte limit
+/// (`worldgen_feature_cache_mb` in `bamboo.toml`); returns whether it was
+/// newly inserted.
+fn commit_feature_run(
+    shard: &std::sync::Mutex<FeatureShard>,
+    key: FeatureCacheKey,
+    run: &Arc<FeatureRun>,
+) -> bool {
+    let Ok(mut shard) = shard.lock() else {
+        return false;
+    };
+    if shard.entries.contains_key(&key) {
+        return false;
+    }
+    shard.order.push_back(key.clone());
+    shard.entries.insert(key, Arc::clone(run));
+    shard.bytes += feature_run_heap_bytes(run);
+    let limit = crate::worldgen_cache::feature_byte_limit() / FEATURE_CACHE_SHARDS;
+    if shard.bytes > limit {
+        while shard.bytes > limit * 3 / 4 {
+            let Some(oldest) = shard.order.pop_front() else {
+                break;
+            };
+            shard.remove_entry(&oldest);
+        }
+    }
+    true
 }
 
 /// 真正跑一遍 `applyBiomeDecoration`：拼视图、调纯函数、只保留 9 份写增量

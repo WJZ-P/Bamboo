@@ -22,7 +22,8 @@ use mc_bamboo_game::{
     MailBudget, World, WorldConfig,
     world_options::{LevelType, WorldGenConfig},
     worldgen::{clear_terrain_cache, terrain_cache_stats},
-    worldgen_features::clear_feature_cache,
+    worldgen_cache::{self, WorldgenCacheSettings},
+    worldgen_features::{clear_feature_cache, feature_cache_usage},
     worldgen_profile,
 };
 
@@ -34,6 +35,16 @@ struct Options {
     structures: bool,
     warmup: bool,
     label: String,
+    /// 交付完以后再按 50 ms 一刻空转多少秒，量闲置内存。
+    /// Seconds to keep ticking at 50 ms after delivery, to measure idle memory.
+    idle_secs: u64,
+    /// 再强加载紧挨着的一片同样大小的区域，量边缘缓存复用后的吞吐。
+    /// Also force the adjacent square, measuring throughput with frontier reuse.
+    second: bool,
+    /// 世界生成缓存的上限和空闲释放秒数（`--terrain-mb` / `--feature-mb` /
+    /// `--cache-idle-secs`）。
+    /// Worldgen cache limits and idle-release delay.
+    cache: WorldgenCacheSettings,
 }
 
 impl Options {
@@ -45,6 +56,9 @@ impl Options {
             structures: true,
             warmup: true,
             label: "run".to_owned(),
+            idle_secs: 0,
+            second: false,
+            cache: WorldgenCacheSettings::default(),
         };
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -64,6 +78,14 @@ impl Options {
                 "--no-structures" => options.structures = false,
                 "--cold" => options.warmup = false,
                 "--label" => options.label = value(),
+                "--idle-secs" => options.idle_secs = value().parse().expect("number"),
+                "--second" => options.second = true,
+                "--terrain-mb" => options.cache.terrain_mb = value().parse().expect("number"),
+                "--feature-mb" => options.cache.feature_mb = value().parse().expect("number"),
+                "--cache-idle-secs" => {
+                    options.cache.idle_seconds = value().parse().expect("number");
+                }
+                "--no-dependency-release" => worldgen_cache::set_dependency_release(false),
                 _ => panic!("unknown argument {arg}"),
             }
         }
@@ -74,6 +96,9 @@ impl Options {
 #[path = "support/process_cpu.rs"]
 mod process_cpu;
 use process_cpu::process_cpu_ms;
+#[path = "support/process_memory.rs"]
+mod process_memory;
+use process_memory::process_memory_mb;
 
 /// 当前线程的累计 CPU 毫秒（不含等待）。
 ///
@@ -142,6 +167,7 @@ fn main() {
                 ..WorldGenConfig::default()
             },
             chunk_worker_threads: threads,
+            worldgen_cache: options.cache,
             // 测量不限制每刻交付数，交付节奏不成为吞吐瓶颈。
             // No per-tick delivery cap: the pacing is not part of the measurement.
             mail_budget: MailBudget {
@@ -181,6 +207,28 @@ fn main() {
         let p = worldgen_profile::stats();
         worldgen_profile::disable();
         let cache = terrain_cache_stats();
+        let features = feature_cache_usage();
+        let (rss_mb, _) = process_memory_mb();
+        let second_per_s = if options.second {
+            let side = options.side as i32;
+            let next: Vec<ChunkPos> = positions
+                .iter()
+                .map(|pos| ChunkPos::new(pos.x + side, pos.z))
+                .collect();
+            world.force_chunks_unpaced(&next);
+            let started = Instant::now();
+            let count = settle(&mut world, &next, threads);
+            count as f64 / started.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
+        let idle_until = Instant::now() + Duration::from_secs(options.idle_secs);
+        while Instant::now() < idle_until {
+            world.tick_unpaced();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (idle_rss_mb, peak_rss_mb) = process_memory_mb();
+        let after = terrain_cache_stats();
         let ns = |v: u64| v as f64 / 1_000_000.0;
         println!(
             "{},structures={},warm={},threads={},requested={},delivered={},wall_s={:.3},\
@@ -196,7 +244,11 @@ fn main() {
              feature_run_calls={},feature_run_hits={},feature_run_misses={},feature_run_hit_rate={:.4},\
              distinct_feature_centers={},feature_centers_called_once={},feature_centers_max_calls={},\
              build_view_calls={},build_view_cells={},run_features_calls={},\
-             entries={},bytes_mb={:.1},cross_thread_duplicates={}",
+             entries={},bytes_mb={:.1},cross_thread_duplicates={},\
+             rss_mb={:.0},peak_rss_mb={:.0},idle_rss_mb={:.0},second_per_s={:.2},\
+             cache_peak_mb={:.1},idle_entries={},idle_bytes_mb={:.1},\
+             dependency_releases={},evictions={},feature_entries={},feature_mb={:.1},\
+             idle_releases={}",
             options.label,
             options.structures,
             options.warmup,
@@ -242,6 +294,18 @@ fn main() {
             cache.entries,
             cache.bytes as f64 / (1024.0 * 1024.0),
             cache.cross_thread_duplicates,
+            rss_mb,
+            peak_rss_mb,
+            idle_rss_mb,
+            second_per_s,
+            after.peak_bytes as f64 / (1024.0 * 1024.0),
+            after.entries,
+            after.bytes as f64 / (1024.0 * 1024.0),
+            cache.dependency_releases,
+            cache.evictions,
+            features.0,
+            features.1 as f64 / (1024.0 * 1024.0),
+            worldgen_cache::idle_releases(),
         );
         black_box(world.is_chunk_loaded(positions[0]));
     }
