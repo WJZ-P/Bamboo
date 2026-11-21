@@ -101,6 +101,11 @@ pub struct ServerConfig {
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
     pub chunk_worker_threads: usize,
+    /// 世界生成缓存的上限和空闲释放秒数（`bamboo.toml` 的 `worldgen_terrain_cache_mb` /
+    /// `worldgen_feature_cache_mb` / `worldgen_cache_idle_seconds`）。
+    ///
+    /// Worldgen cache limits and idle-release delay (three `bamboo.toml` keys).
+    pub worldgen_cache: mc_bamboo_game::worldgen_cache::WorldgenCacheSettings,
     /// 自然刷怪按玩家算上限（`bamboo.toml` 的 `spawn_per_player_cap`，默认开）；
     /// 关掉只剩官方的全局上限。
     ///
@@ -192,6 +197,7 @@ impl Default for ServerConfig {
             entity_threads: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
+            worldgen_cache: mc_bamboo_game::worldgen_cache::WorldgenCacheSettings::default(),
             spawn_per_player_cap: true,
             mail_budget: MailBudget::default(),
             island_threads: mc_bamboo_game::default_island_threads(),

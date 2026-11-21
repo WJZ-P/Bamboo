@@ -59,7 +59,7 @@ export const GROUPS = [
     id: "performance",
     section: "bamboo",
     title: "性能",
-    hint: "实体阶段和区块信箱的执行方式。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
+    hint: "实体阶段和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
   },
 ] as const;
 
@@ -146,6 +146,10 @@ const MAX_ENTITY_THREADS = 256;
 /** 服务端能接受的区块计算线程数上限，和 `MAX_CHUNK_WORKER_THREADS` 一致。 */
 const MAX_CHUNK_WORKER_THREADS = 64;
 const MAX_MAIL_BUDGET = 65_536;
+/** 世界生成缓存三个键的上限，和服务端 `worldgen_cache` 里的 `MAX_*` 一致。 */
+const MAX_TERRAIN_CACHE_MB = 4096;
+const MAX_FEATURE_CACHE_MB = 1024;
+const MAX_CACHE_IDLE_SECONDS = 3600;
 /** 服务端能接受的岛 tick 线程数上限，和 `MAX_ISLAND_THREADS` 一致。 */
 const MAX_ISLAND_THREADS = 64;
 
@@ -410,6 +414,36 @@ export const FIELDS: readonly SettingField[] = [
     min: 0,
     max: MAX_CHUNK_WORKER_THREADS,
     hint: "区块的解析、生成和存盘序列化放到多少条常驻后台线程上做。0 = 在世界线程上做（默认）。区块内容和线程数无关，只有区块到达的时刻可能不同。",
+  },
+  {
+    key: "worldgenTerrainCacheMb",
+    group: "performance",
+    fileKey: "worldgen_terrain_cache_mb",
+    label: "地形缓存上限（MiB）",
+    control: "number",
+    min: 0,
+    max: MAX_TERRAIN_CACHE_MB,
+    hint: "世界生成时暂存的半成品地形最多占多少内存，默认 128。缓存只影响内存和跑图速度，不影响生成结果；周围区块都生成完的条目会立刻释放。0 = 不缓存（跑图明显变慢）。",
+  },
+  {
+    key: "worldgenFeatureCacheMb",
+    group: "performance",
+    fileKey: "worldgen_feature_cache_mb",
+    label: "地物缓存上限（MiB）",
+    control: "number",
+    min: 0,
+    max: MAX_FEATURE_CACHE_MB,
+    hint: "世界生成时暂存的地物（树、矿石等）结果最多占多少内存，默认 64。只影响内存和跑图速度，不影响生成结果。0 = 不缓存。",
+  },
+  {
+    key: "worldgenCacheIdleSeconds",
+    group: "performance",
+    fileKey: "worldgen_cache_idle_seconds",
+    label: "缓存空闲释放（秒）",
+    control: "number",
+    min: 0,
+    max: MAX_CACHE_IDLE_SECONDS,
+    hint: "区块计算队列空闲，且多久没有查询缓存后清空上面两份缓存，默认 30 秒。不会卸载区块。0 = 关闭空闲清理。",
   },
   {
     key: "deliveriesPerTick",

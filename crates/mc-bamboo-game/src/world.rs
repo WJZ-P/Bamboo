@@ -116,6 +116,12 @@ pub struct WorldConfig {
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
     /// ≥ 1 = 常驻后台线程。区块内容和线程数无关，只有交付的时刻可能不同。
     pub chunk_worker_threads: usize,
+    /// 世界生成两份全进程缓存的上限和空闲释放秒数（`bamboo.toml` 的三个键）。
+    /// 只影响内存和速度，不影响生成结果。
+    ///
+    /// Limits and idle-release delay of the two process-wide worldgen caches
+    /// (three `bamboo.toml` keys). They affect memory and speed, never output.
+    pub worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings,
     /// 自然刷怪按玩家算上限（默认开）；关掉只剩官方的全局上限。
     ///
     /// Per-player natural spawn caps (on by default); off keeps only the
@@ -196,6 +202,7 @@ impl Default for WorldConfig {
             entity_threads: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
+            worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings::default(),
             spawn_per_player_cap: true,
             mail_budget: MailBudget::default(),
             island_threads: crate::island::default_island_threads(),
@@ -650,6 +657,7 @@ impl World {
         world.islands.region.spawn_per_player_cap = config.spawn_per_player_cap;
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
+        crate::worldgen_cache::configure(config.worldgen_cache);
         if staged {
             // 真生成比超平坦模板慢得多，默认就用计算池把它挪出世界线程；配置文件
             // 显式给了 `chunk_worker_threads` 就照给的值（0 = 仍然内联）。
