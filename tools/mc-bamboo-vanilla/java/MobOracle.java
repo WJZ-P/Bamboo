@@ -1792,6 +1792,23 @@ public final class MobOracle {
                 scenes.add(kill);
             }
             slimeScenes(scenes);
+            Scene witch = new Scene("witch_drink_fire").ticks(140).difficulty(2).fire(200);
+            ground(witch, 16);
+            witch.mob(11, 0.5, 64.0, 0.5, 0.0F, 503L, 0);
+            witch.player(60.5, 64.0, 0.5, Items.AIR);
+            scenes.add(witch);
+            Scene submerged = new Scene("witch_drink_water").ticks(80).difficulty(2);
+            ground(submerged, 16);
+            submerged.fill(-3, 58, -3, 3, 63, 3, WATER);
+            submerged.fill(-4, 57, -4, 4, 57, 4, STONE);
+            submerged.mob(11, 0.5, 58.0, 0.5, 0.0F, 503L, 0);
+            submerged.player(60.5, 64.0, 0.5, Items.AIR);
+            scenes.add(submerged);
+            Scene distant = new Scene("witch_drink_speed").ticks(48).difficulty(2);
+            ground(distant, 16);
+            distant.mob(11, 0.5, 64.0, 0.5, 0.0F, 12L, 0);
+            distant.player(14.5, 64.0, 0.5, Items.AIR);
+            scenes.add(distant);
             // ---- S2：玩家药水效果的状态和出站包 ----
             scenes.add(effectBase("effect_give_600", 60)
                     .effectGive(1, 9, 600, 1));
@@ -1960,7 +1977,8 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
-        if (scene.name.startsWith("zombie_") || scene.name.startsWith("slime_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("slime_")
+                || scene.name.startsWith("witch_drink_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -4785,11 +4803,11 @@ public final class MobOracle {
                     new GameProfile(new UUID(1L, 2L + i), "ZombieOracle" + i),
                     ClientInformation.createDefault());
             player.setPos(at[0], at[1], at[2]);
-            if (scene.name.startsWith("slime_")) {
+            if (scene.name.startsWith("slime_") || scene.name.startsWith("witch_drink_")) {
                 // 玩家的实体 ID 和 0 号生物撞在一起（都是 `FIRST_ID`）；死亡消息按 ID 找攻击者，
-                // 史莱姆场景里把玩家挪开。
+                // 史莱姆和女巫场景里把玩家挪开。
                 // The player's entity id collides with mob 0 (both `FIRST_ID`); death messages
-                // look the attacker up by id, so slime scenes move the player away.
+                // look the attacker up by id, so slime and witch scenes reassign the player ids.
                 player.setId(FIRST_ID + 4096 + i);
             }
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
@@ -4830,6 +4848,7 @@ public final class MobOracle {
             Mob mob = switch (kind[0]) {
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 10 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
+                case 11 -> new net.minecraft.world.entity.monster.Witch(EntityTypes.WITCH, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 case 6 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 7 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
@@ -5015,6 +5034,20 @@ public final class MobOracle {
             }
         }
         line.append("]");
+        if (scene.name.equals("witch_drink_fire")) {
+            Mob witch = mobs.getFirst();
+            if (!witch.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE) || witch.getHealth() != 26.0F) {
+                throw new IllegalStateException("fire scene must drink fire resistance and heal");
+            }
+        }
+        if (scene.name.equals("witch_drink_water")
+                && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING)) {
+            throw new IllegalStateException("water scene must drink water breathing");
+        }
+        if (scene.name.equals("witch_drink_speed")
+                && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.SPEED)) {
+            throw new IllegalStateException("distant target scene must drink swiftness");
+        }
         if (slimeScene) {
             line.append(",\"cubeSplits\":").append(splits).append(']');
         }
@@ -5129,6 +5162,18 @@ public final class MobOracle {
                         .append(':').append(Float.floatToRawIntBits(getFloat(control.getClass(), control, "yRot")))
                         .append(':').append(getBoolean(
                                 net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, slime, "wasOnGround"))
+                        .append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.Witch witch) {
+                var fireResistance = witch.getEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE);
+                var healing = witch.getEffect(net.minecraft.world.effect.MobEffects.INSTANT_HEALTH);
+                var breathing = witch.getEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING);
+                var speed = witch.getEffect(net.minecraft.world.effect.MobEffects.SPEED);
+                out.append(",\"var\":\"witch:").append(witch.isDrinkingPotion())
+                        .append(':').append(getInt(witch.getClass(), witch, "usingTime"))
+                        .append(':').append(fireResistance == null ? 0 : fireResistance.getDuration())
+                        .append(':').append(healing == null ? 0 : healing.getDuration())
+                        .append(':').append(breathing == null ? 0 : breathing.getDuration())
+                        .append(':').append(speed == null ? 0 : speed.getDuration())
                         .append("\",\"snd\":\"minecraft:classic\"");
             } else {
                 out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");

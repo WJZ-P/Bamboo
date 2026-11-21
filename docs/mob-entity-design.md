@@ -902,7 +902,9 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - **女巫**（`entity/mob/witch.rs`）：`MobType::Witch` 接进各表；`Witch.aiStep` 在
   `Monster.aiStep` 之前跑喝药逻辑和 7.5e-4 的冒烟事件，`WitchHealRaiders` 目标在没有袭击时
   仍每刻抽一次 `nextBoolean`，`RangedAttackGoal` 用 `Goal::WitchRangedAttack` 实现。
-  喝药走 `EffectInstance`，瞬时治疗直接加血；喝药移速修饰符是瞬时的 `minecraft:drinking`。
+  喝完用 `PotionContents` 加效果（读取物品的持续时间倍率）；瞬时治疗进入效果表，在效果刻回血。
+  `LivingEntity.hurtServer` 会先拒绝抗火生物收到的火焰伤害，不改受伤冷却或攻击者归因。
+  喝药移速修饰符是瞬时的 `minecraft:drinking`；入水的 `FloatGoal` 会打开导航的浮水标志。
   同步 index 17 的 `Witch.DATA_USING_ITEM`（`EntityData::WitchUsingItem`）。自然生成是
   `ON_GROUND` + `Monster.checkMonsterSpawnRules`；`PatrollingMonster.finalizeSpawn` 会先掷一次
   巡逻队长概率，即使女巫不能当队长，也必须消费该随机数。
@@ -916,4 +918,6 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   清单加了溺尸和女巫。
 - **没做的**：三叉戟投掷（没有 `ThrownTrident`）、`DrownedGoToBeachGoal`、鹦鹉螺僵尸、
   袭击、女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
-  目标速度和目标药水效果（选药用不到）。溺尸没有 `mob-oracle` 场景；女巫喝药和投掷未对拍。
+  目标速度和目标药水效果（选药用不到）。溺尸没有 `mob-oracle` 场景；女巫的抗火、自愈、水下呼吸和速度由
+  `mob-oracle --only witch_drink` 逐刻比较位置、血量、效果时长、喝药状态和随机源
+  （3 例、268 刻、0 不一致）；投掷仍未对拍。

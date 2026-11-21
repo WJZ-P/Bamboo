@@ -1223,6 +1223,7 @@ impl Report {
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
                     10 => mc_bamboo_blocks::entity::mob::MobType::Slime,
+                    11 => mc_bamboo_blocks::entity::mob::MobType::Witch,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
@@ -3204,6 +3205,19 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             mob.cube.move_y_rot.to_bits() as i32,
             mob.cube.was_on_ground
         ),
+        MobType::Witch => {
+            use mc_bamboo_data::registries::mob_effect;
+            let duration = |effect| mob.effects.get(effect).map_or(0, |entry| entry.duration);
+            format!(
+                "witch:{}:{}:{}:{}:{}:{}",
+                mob.witch_drinking,
+                mob.witch.using_time,
+                duration(mob_effect::FIRE_RESISTANCE),
+                duration(mob_effect::INSTANT_HEALTH),
+                duration(mob_effect::WATER_BREATHING),
+                duration(mob_effect::SPEED)
+            )
+        }
         MobType::Sheep => format!(
             "{}{}",
             sheep::color(mob).name(),

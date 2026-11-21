@@ -1509,6 +1509,11 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         return false;
     }
+    // 抗火在受伤冷却、音效及攻击者归因之前拒绝火焰伤害。
+    // Fire Resistance rejects fire damage before cooldowns, sounds, or attacker bookkeeping.
+    if source.kind.is_fire() && mob.effects.has(mob_effect::FIRE_RESISTANCE) {
+        return false;
+    }
     mob.no_action_time = 0;
     let mut amount = if amount < 0.0 { 0.0 } else { amount };
     if amount.is_nan() || amount.is_infinite() {

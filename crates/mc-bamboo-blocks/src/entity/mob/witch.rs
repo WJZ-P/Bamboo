@@ -2,13 +2,13 @@
 //! 「治疗袭击者」目标只保留注册顺序和官方那一次 `nextBoolean` 取数。
 //!
 //! 自己的行为：主手拿药水喝（水下呼吸 / 抗火 / 治疗 / 速度），喝的时候移速 -0.25；
-//! 每 60 刻朝目标扔一瓶喷溅药水（伤害 / 缓慢 / 中毒 / 虚弱）；火焰和魔法伤害只吃 15%。
+//! 每 60 刻朝目标扔一瓶喷溅药水（伤害 / 缓慢 / 中毒 / 虚弱）；魔法和荆棘伤害只吃 15%。
 //!
 //! Witch: vanilla `Raider` → `Witch`. Bamboo has no raids, so the four `Raider` goals and
 //! the heal-raiders goal only keep their registration order and vanilla's `nextBoolean`
 //! draw. Its own behaviour: drink a potion (water breathing, fire resistance, healing,
 //! swiftness) with a -0.25 speed modifier while drinking; throw a splash potion at the
-//! target every 60 ticks; fire and magic damage is cut to 15%.
+//! target every 60 ticks; magic and thorns damage is cut to 15%.
 
 use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{
@@ -20,7 +20,6 @@ use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 use super::{
     Mob,
     attributes::Attributes,
-    effects::EffectInstance,
     goals::{Goal, GoalSelector, TargetType},
     living,
     navigation::Navigation,
@@ -65,7 +64,8 @@ pub(super) fn attributes() -> Attributes {
 
 /// `PatrollingMonster.finalizeSpawn` 先掷巡逻队长概率，再由 `Mob` 初始化；女巫不能当队长。
 ///
-/// `PatrollingMonster.finalizeSpawn` rolls for a patrol leader before `Mob` initializes the mob, even though a witch cannot become a leader.
+/// `PatrollingMonster.finalizeSpawn` rolls for a patrol leader before `Mob` initializes
+/// the mob, even though a witch cannot become a leader.
 pub(super) fn finalize_spawn(entity: &mut Entity, random: &dyn crate::random::RandomSource) {
     let _ = random.next_float();
     entity.with_mob(|_, mob| super::spawn::finalize_mob(random, mob));
@@ -119,7 +119,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
             },
         ),
     ];
-    let _ = navigation;
+    navigation.flags.can_float = true;
     GoalSelector::from_goals(goals)
 }
 
@@ -148,7 +148,7 @@ pub(super) fn targets() -> GoalSelector {
 /// The part of `Witch.aiStep` before `super.aiStep()`: the heal cooldown, drinking and the
 /// occasional smoke event.
 pub(super) fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    if mob.no_ai || !living::is_alive(me, mob) {
+    if !living::is_alive(me, mob) {
         return;
     }
     // `healRaidersGoal.decrementCooldown()`，冷却到 0 之后允许攻击玩家。没有袭击时
@@ -162,7 +162,7 @@ pub(super) fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     {
         *cooldown -= 1;
     }
-    if mob.witch.using_time > 0 || mob.witch_drinking {
+    if mob.witch_drinking {
         drink_tick(mob);
     } else if let Some(potion) = choose_potion(me, mob, ctx) {
         start_drinking(me, mob, potion);
@@ -188,60 +188,15 @@ fn drink_tick(mob: &mut Mob) {
     mob.equipment
         .set(EquipmentSlot::MainHand, ItemStack::empty());
     if stack.item == mc_bamboo_data::items::POTION {
-        apply_potion(mob, &stack);
+        for effect in crate::entity::arrow::potion_effect_instances(&stack) {
+            living::add_effect(mob, effect);
+        }
     }
     // `gameEvent(GameEvent.DRINK)`：没有监听方，只保留语义。
     // `gameEvent(GameEvent.DRINK)`: nothing listens, so this is only semantic.
     if let Some(speed) = mob.attributes.instance(attribute::MOVEMENT_SPEED) {
         speed.remove_modifier(DRINKING_SPEED);
     }
-}
-
-/// `PotionContents.forEachEffect(this::addEffect, durationScale)`：瞬时效果立刻结算，
-/// 其余挂上去。
-///
-/// `PotionContents.forEachEffect(this::addEffect, durationScale)`: instantaneous effects
-/// resolve at once, the rest are added.
-fn apply_potion(mob: &mut Mob, stack: &ItemStack) {
-    use mc_bamboo_data::registries::data_component_type as kinds;
-    use mc_bamboo_protocol::components::{ComponentValue, defaults};
-
-    let patch = stack.patch();
-    let Some(ComponentValue::PotionContents {
-        potion: Some(potion),
-        ..
-    }) = defaults::resolve(stack.item, &patch, kinds::POTION_CONTENTS)
-    else {
-        return;
-    };
-    let Some(effects) = mc_bamboo_data::potions::effects(*potion) else {
-        return;
-    };
-    for &(effect, duration, amplifier) in effects {
-        add_or_apply(mob, effect, duration, amplifier);
-    }
-}
-
-/// `MobEffect.isInstantaneous()` 的效果立刻结算，其余按 `EffectInstance` 挂上。
-///
-/// An instantaneous effect resolves now; anything else is added as an `EffectInstance`.
-fn add_or_apply(mob: &mut Mob, effect: i32, duration: i32, amplifier: i32) {
-    if effect == mob_effect::INSTANT_HEALTH {
-        let amount = 4.0 * (amplifier as f32 + 1.0);
-        let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
-        mob.health = (mob.health + amount).min(max);
-        return;
-    }
-    if effect == mob_effect::INSTANT_DAMAGE {
-        // 女巫不会给自己扔伤害药水，这一支只为完整性保留。
-        //
-        // A witch never drinks harming potions; kept for completeness.
-        return;
-    }
-    living::add_effect(
-        mob,
-        EffectInstance::with_amplifier(effect, duration, amplifier),
-    );
 }
 
 /// `Witch.aiStep` 选药的四支：水下呼吸、抗火、治疗、速度。四次 `nextFloat` 按短路顺序取。
@@ -253,8 +208,7 @@ fn choose_potion(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<i32>
     if me.random.next_float() < 0.15 && eye_water && !mob.effects.has(mob_effect::WATER_BREATHING) {
         return Some(potion::WATER_BREATHING);
     }
-    let fire_damage = mob
-        .last_damage_source
+    let fire_damage = living::last_damage_source(mob, ctx.blocks().game_time())
         .is_some_and(|source| source.kind.is_fire());
     if me.random.next_float() < 0.15
         && (me.remaining_fire_ticks > 0 || fire_damage)
@@ -276,10 +230,10 @@ fn choose_potion(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<i32>
 }
 
 /// `Witch.aiStep` 拿到药水之后：放进主手、设 `usingTime`、同步喝药标志、放喝药音效
-/// （音高两次取数）、加 -0.25 移速。
+/// （音高取数一次）、加 -0.25 移速。
 ///
 /// After `Witch.aiStep` picks a potion: put it in the main hand, set `usingTime`, sync the
-/// drinking flag, play the drink sound (two pitch draws) and add the -0.25 speed modifier.
+/// drinking flag, play the drink sound (one pitch draw) and add the -0.25 speed modifier.
 fn start_drinking(me: &mut Entity, mob: &mut Mob, potion: i32) {
     mob.equipment.set(
         EquipmentSlot::MainHand,
