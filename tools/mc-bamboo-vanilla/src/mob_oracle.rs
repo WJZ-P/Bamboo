@@ -79,6 +79,7 @@ enum Line {
     EquineBreed(equine::BreedCase),
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
+    EquineSave(equine::SaveCase),
     End(End),
 }
 
@@ -906,6 +907,7 @@ impl Report {
                 Line::EquineBreed(case) => self.replay_equine_breed(case),
                 Line::EquineInteract(case) => self.replay_equine_interact(case),
                 Line::EquineDeath(case) => self.replay_equine_death(case),
+                Line::EquineSave(case) => self.replay_equine_save(case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {

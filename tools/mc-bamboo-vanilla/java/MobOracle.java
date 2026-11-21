@@ -2654,7 +2654,63 @@ public final class MobOracle {
                 cases++;
             }
         }
-        return cases + playEquineInteractions(official, out, world, types) + playEquineDeaths(official, out, types);
+        return cases + playEquineInteractions(official, out, world, types) + playEquineDeaths(official, out, types)
+                + playEquineSaves(official, out, types);
+    }
+
+    /**
+     * 马科存档：每种 × 三种状态（生成后驯服并装备、野生默认、幼崽），输出官方 `saveWithoutId` 的整份 SNBT。
+     * Bamboo 读进来再写出去，逐键比较马科相关的键。
+     * Equine saves: vanilla's full SNBT, which Bamboo loads and writes back for a per-key comparison.
+     */
+    private static int playEquineSaves(Official official, Writer out,
+            List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
+            throws Exception {
+        int cases = 0;
+        for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+            for (int setup = 0; setup < 3; setup++) {
+                FakeLevel world = FakeLevel.create(official);
+                world.getRandom().setSeed(4400L + typeIndex * 10L + setup);
+                net.minecraft.world.entity.animal.equine.AbstractHorse mob =
+                        types.get(typeIndex).create(world, EntitySpawnReason.COMMAND);
+                mob.setPos(0.5, 64.0, 0.5);
+                mob.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+                if (setup == 0) {
+                    mob.setTamed(true);
+                    mob.setTemper(42);
+                    mob.setOwner(skeletonDeathPlayer(official, world, 0));
+                    mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+                    mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.SADDLE, 2.0F);
+                    if (mob instanceof net.minecraft.world.entity.animal.equine.Horse) {
+                        mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(Items.GOLDEN_HORSE_ARMOR));
+                        mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.BODY, 2.0F);
+                    }
+                    if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse) {
+                        mob.getSlot(499).set(new ItemStack(Items.CHEST));
+                        mob.getSlot(501).set(new ItemStack(Items.EMERALD, 7));
+                    }
+                }
+                if (setup == 2) {
+                    mob.setAge(-12000);
+                }
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                mob.saveWithoutId(output);
+                // 读回一份再存：官方读档时 `setHealth` 也把血量夹到上限，和 Bamboo 读档后再存同一口径。
+                // Load it back and save again; vanilla's load clamps the health just like Bamboo's.
+                var copy = types.get(typeIndex).create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"equineSave\",\"kind\":" + typeIndex + ",\"setup\":" + setup
+                        + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
     }
 
     /**

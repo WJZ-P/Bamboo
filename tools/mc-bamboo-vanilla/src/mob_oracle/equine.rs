@@ -86,6 +86,81 @@ pub(super) struct DeathCase {
     level_seed: i64,
 }
 
+/// 一题存档：官方 `saveWithoutId` 的整份 SNBT。
+///
+/// One save case: vanilla's full `saveWithoutId` SNBT.
+#[derive(Debug, Deserialize)]
+pub(super) struct SaveCase {
+    kind: usize,
+    setup: i32,
+    nbt: String,
+    reloaded: String,
+}
+
+/// 读回再写出后逐个比较的键：马科自己的、装备、掉落几率、年龄、血量和属性。
+///
+/// Keys compared after the load and save round trip.
+const SAVE_KEYS: &[&str] = &[
+    "EatingHaystack",
+    "Bred",
+    "Temper",
+    "Tame",
+    "Owner",
+    "ChestedHorse",
+    "Items",
+    "Variant",
+    "Strength",
+    "equipment",
+    "drop_chances",
+    "Age",
+    "Health",
+    "attributes",
+];
+
+fn field<'a>(tag: &'a mc_bamboo_nbt::Tag, key: &str) -> Option<&'a mc_bamboo_nbt::Tag> {
+    match tag {
+        mc_bamboo_nbt::Tag::Compound(entries) => entries
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+/// 复合标签的键按名字排序，便于和官方的哈希表顺序比较。
+///
+/// Sort compound keys by name so they compare against vanilla's hash order.
+fn canonical(tag: &mc_bamboo_nbt::Tag) -> mc_bamboo_nbt::Tag {
+    use mc_bamboo_nbt::Tag;
+    match tag {
+        Tag::Compound(entries) => {
+            let mut sorted: Vec<_> = entries
+                .iter()
+                .map(|(name, value)| (name.clone(), canonical(value)))
+                .collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            Tag::Compound(sorted)
+        }
+        Tag::List(items) => Tag::List(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
+}
+
+/// `attributes` 列表官方按哈希表顺序写，读档不看顺序；比较前按 `id` 排序（已知差异）。
+///
+/// Vanilla writes `attributes` in hash order and the loader ignores order, so the
+/// list is sorted by `id` before comparing (a known difference).
+fn canonical_for(key: &str, tag: &mc_bamboo_nbt::Tag) -> mc_bamboo_nbt::Tag {
+    let tag = canonical(tag);
+    match (key, tag) {
+        ("attributes", mc_bamboo_nbt::Tag::List(mut items)) => {
+            items.sort_by_key(|item| format!("{:?}", field(item, "id")));
+            mc_bamboo_nbt::Tag::List(items)
+        }
+        (_, tag) => tag,
+    }
+}
+
 /// 死亡对拍的装备：成年带鞍（羊驼除外）和身体（马铠 / 红地毯），箱子马带箱子和两格物品。
 ///
 /// Death gear: adults wear a saddle (not llamas) and body armor or a red carpet;
@@ -410,6 +485,48 @@ impl Report {
                 "{label} drops: official {:?}, bamboo {spawned:?}",
                 case.spawned
             ));
+        }
+    }
+
+    pub(super) fn replay_equine_save(&mut self, case: SaveCase) {
+        use mc_bamboo_blocks::entity::mob::nbt;
+        self.cases += 1;
+        let kind = KINDS[case.kind];
+        let label = format!("{kind:?} save setup {}", case.setup);
+        let official = match mc_bamboo_nbt::parse_snbt(&case.nbt) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        let mut entity = Entity::by_mob_type(kind, Vec3::default());
+        if let Err(error) = nbt::load_into(&mut entity, &official) {
+            self.mismatch(format!("{label}: load failed: {error:?}"));
+            return;
+        }
+        let ours = match nbt::write_mob(&entity.split()) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: save failed: {error:?}"));
+                return;
+            }
+        };
+        let reloaded = match mc_bamboo_nbt::parse_snbt(&case.reloaded) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: reloaded SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        for key in SAVE_KEYS {
+            let expected = field(&reloaded, key).map(|tag| canonical_for(key, tag));
+            let actual = field(&ours, key).map(|tag| canonical_for(key, tag));
+            if expected != actual {
+                self.mismatch(format!(
+                    "{label} {key}: official {expected:?}, bamboo {actual:?}"
+                ));
+            }
         }
     }
 
