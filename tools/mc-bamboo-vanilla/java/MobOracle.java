@@ -425,6 +425,11 @@ public final class MobOracle {
         int wool;
         /** 鸡的 `eggTime` 起点；负数表示保留构造函数抽的值。 */
         int eggTime = -1;
+        /// 海龟场景：开局带蛋，以及每头海龟的家方块（x, y, z）。
+        ///
+        /// Turtle scenes: start with an egg, and each turtle's home position (x, y, z).
+        boolean turtleHasEgg;
+        int[] turtleHome = {0, 0, 0};
         /** 玩家受伤场景：逐刻的动作，见 `PlayerAction`。 */
         final List<PlayerAction> playerActions = new ArrayList<>();
         /** 玩家受伤场景：起始装备（四件盔甲 + 主手），按物品 ID。 */
@@ -563,6 +568,15 @@ public final class MobOracle {
             seeds.add(seed);
             cowAges.add(age);
             mobKinds.add(new int[] {kind});
+            return this;
+        }
+
+        /// 海龟场景：开局带蛋，并把家方块设在给定位置。
+        ///
+        /// Turtle scenes: start with an egg and put the home block at the given position.
+        Scene turtleEgg(int x, int y, int z) {
+            this.turtleHasEgg = true;
+            this.turtleHome = new int[] {x, y, z};
             return this;
         }
 
@@ -1175,6 +1189,26 @@ public final class MobOracle {
             swim.fill(-10, 56, -10, 10, 62, 10, Scenes.WATER);
             swim.mob(60, 0.5, 59.0, 0.5, 0.0F, 31L, 0);
             scenes.add(swim);
+            // 带蛋的海龟：家就在脚下的沙子里，过一会儿找一块沙子产下 1–4 枚蛋。
+            // 逐刻比带蛋 / 正在产卵 / 产卵计数 / 家方块，蛋放下那一刻方块表散列 `bh` 会变。
+            // A turtle carrying an egg: home is the sand underfoot; after a while it finds
+            // a sand block and lays 1–4 eggs. Compare has-egg / laying / counter / home
+            // every tick; the block hash `bh` changes the moment the eggs appear.
+            for (long seed : new long[] {3L, 77L, 123L}) {
+                Scene lay = new Scene("zombie_turtle_egg_lay_" + seed).ticks(600);
+                beach(lay);
+                lay.mob(60, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                lay.turtleEgg(0, 63, 0);
+                scenes.add(lay);
+            }
+            // 离家 12 格、带着蛋：产卵目标够不着家，回家目标带着它往家走。
+            // Twelve blocks from home and carrying an egg: the lay-egg goal cannot reach
+            // home, so the go-home goal walks it back.
+            Scene home = new Scene("zombie_turtle_egg_go_home").ticks(500);
+            beach(home);
+            home.mob(60, 12.5, 64.0, 0.5, 0.0F, 5L, 0);
+            home.turtleEgg(0, 63, 0);
+            scenes.add(home);
         }
     }
 
@@ -6318,6 +6352,17 @@ public final class MobOracle {
                 hunts.setAccessible(true);
                 hunts.invoke(fox);
             }
+            if (mob instanceof net.minecraft.world.entity.animal.turtle.Turtle turtle
+                    && scene.turtleHasEgg) {
+                // `Turtle.setHasEgg` 是私有的，直接写 `HAS_EGG` 实体数据；`setHomePos` 是公开的。
+                // `Turtle.setHasEgg` is private, so write the `HAS_EGG` entity data; `setHomePos` is public.
+                turtle.setHomePos(new BlockPos(
+                        scene.turtleHome[0], scene.turtleHome[1], scene.turtleHome[2]));
+                turtle.getEntityData().set(
+                        (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) readStatic(
+                                net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG"),
+                        true);
+            }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);
                 if (scene.helmetDamage != 0) helmet.setDamageValue(scene.helmetDamage);
@@ -6372,6 +6417,11 @@ public final class MobOracle {
             // 鸡的蛋计时在构造时抽，Java 一侧报给 Bamboo 照填。
             // The chicken's egg timer is drawn at construction; report it to Bamboo.
             line.append(",\"egg\":").append(mobs.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
+            // 海龟场景：开局带蛋标志和家方块，Bamboo 一侧照填。
+            // Turtle scenes: the starting has-egg flag and home position, mirrored by Bamboo.
+            line.append(",\"turtleEgg\":").append(scene.turtleHasEgg);
+            line.append(",\"turtleHome\":[").append(scene.turtleHome[0]).append(',')
+                    .append(scene.turtleHome[1]).append(',').append(scene.turtleHome[2]).append(']');
             line.append('}');
         }
         line.append("],\"players\":[");
@@ -6530,6 +6580,21 @@ public final class MobOracle {
             throw new IllegalStateException(scene.name + " expected wolf avoidance without llama targeting: target="
                     + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
         }
+        if (scene.name.startsWith("zombie_turtle_egg_lay_")) {
+            // 防止种子只跑到一半没真的产卵；`bh` 逐刻比方块表，蛋放下那一刻两边都得变。
+            // Ensure the seed really lays eggs; `bh` compares the block table every tick.
+            var turtle = (net.minecraft.world.entity.animal.turtle.Turtle) mobs.getFirst();
+            boolean placed = false;
+            for (BlockState state : level.blocks.values()) {
+                if (state.is(Blocks.TURTLE_EGG)) {
+                    placed = true;
+                    break;
+                }
+            }
+            if (turtle.hasEgg() || !placed) {
+                throw new IllegalStateException(scene.name + " never laid a turtle egg");
+            }
+        }
         line.append("]");
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         if (scene.realPlayers) {
@@ -6639,6 +6704,20 @@ public final class MobOracle {
             }
             if (mob instanceof net.minecraft.world.entity.animal.wolf.Wolf wolf) {
                 appendWolfState(out, wolf);
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.turtle.Turtle turtle) {
+                // 海龟逐刻状态：带蛋、正在产卵、产卵计数、回家标志和家方块。
+                // Turtle per-tick state: carrying an egg, laying, the laying counter, going home and home.
+                out.append(",\"turtleEgg\":").append(turtle.hasEgg() ? 1 : 0);
+                out.append(",\"turtleLaying\":").append(turtle.isLayingEgg() ? 1 : 0);
+                out.append(",\"turtleLayCount\":").append(getInt(
+                        net.minecraft.world.entity.animal.turtle.Turtle.class, turtle, "layEggCounter"));
+                out.append(",\"turtleGoingHome\":").append(getBoolean(
+                        net.minecraft.world.entity.animal.turtle.Turtle.class, turtle, "goingHome"));
+                BlockPos home = turtle.getHomePos();
+                out.append(",\"turtleHomeX\":").append(home.getX());
+                out.append(",\"turtleHomeY\":").append(home.getY());
+                out.append(",\"turtleHomeZ\":").append(home.getZ());
             }
             out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
                     ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);

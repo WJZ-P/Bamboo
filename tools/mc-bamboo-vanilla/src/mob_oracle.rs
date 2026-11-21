@@ -496,6 +496,16 @@ struct CowSetup {
     /// The block state an enderman carries; 0 means empty-handed.
     #[serde(default)]
     carried: i32,
+    /// 海龟场景：开局带蛋标志。
+    ///
+    /// Turtle scenes: the starting has-egg flag.
+    #[serde(default, rename = "turtleEgg")]
+    turtle_egg: bool,
+    /// 海龟场景：家方块（x, y, z）。
+    ///
+    /// Turtle scenes: the home block (x, y, z).
+    #[serde(default, rename = "turtleHome")]
+    turtle_home: [i32; 3],
 }
 
 #[derive(Debug, Deserialize)]
@@ -606,6 +616,24 @@ struct CowStep {
     rider_count: usize,
     #[serde(default)]
     owner: Option<String>,
+    /// 海龟逐刻状态；别的生物官方那侧不写这几个键，缺省全是 0 / false。
+    ///
+    /// Turtle per-tick state; the official side omits these keys for other mobs,
+    /// so they default to 0 / false.
+    #[serde(default, rename = "turtleEgg")]
+    turtle_egg: i32,
+    #[serde(default, rename = "turtleLaying")]
+    turtle_laying: i32,
+    #[serde(default, rename = "turtleLayCount")]
+    turtle_lay_count: i32,
+    #[serde(default, rename = "turtleGoingHome")]
+    turtle_going_home: bool,
+    #[serde(default, rename = "turtleHomeX")]
+    turtle_home_x: i32,
+    #[serde(default, rename = "turtleHomeY")]
+    turtle_home_y: i32,
+    #[serde(default, rename = "turtleHomeZ")]
+    turtle_home_z: i32,
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，以及苦力怕、蜘蛛、
@@ -1443,6 +1471,22 @@ impl Report {
                         if cow.carried != 0 {
                             mob.set_carried_block(Some(BlockState(cow.carried as u32)));
                         }
+                        // 海龟场景：把开局带蛋和家方块写进状态，和官方那一侧一致。
+                        // Turtle scenes: seed the starting has-egg flag and home position,
+                        // matching the official side.
+                        if kind == mc_bamboo_blocks::entity::mob::MobType::Turtle {
+                            mob.turtle.home_pos = BlockPos::new(
+                                cow.turtle_home[0],
+                                cow.turtle_home[1],
+                                cow.turtle_home[2],
+                            );
+                            mob.turtle.has_egg = cow.turtle_egg;
+                            // 改坏确认：把带蛋标志取反，产卵场景从第一刻起状态就不一致。
+                            // Break-self-test: flip the has-egg flag so the lay scenes mismatch.
+                            if matches!(break_test, Some("turtle_egg")) {
+                                mob.turtle.has_egg = !mob.turtle.has_egg;
+                            }
+                        }
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if let Some(mob) = entity.kind.mob_mut()
@@ -2066,6 +2110,13 @@ impl Report {
                 plain!(tmp);
                 plain!(rider_count);
                 plain!(owner);
+                plain!(turtle_egg);
+                plain!(turtle_laying);
+                plain!(turtle_lay_count);
+                plain!(turtle_going_home);
+                plain!(turtle_home_x);
+                plain!(turtle_home_y);
+                plain!(turtle_home_z);
             }
             if diffs.is_empty() {
                 continue;
@@ -3431,6 +3482,13 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .as_ref()
             .and_then(|state| state.owner.as_ref())
             .map(uuid_text),
+        turtle_egg: i32::from(mob.turtle.has_egg),
+        turtle_laying: i32::from(mob.turtle.laying_egg),
+        turtle_lay_count: mob.turtle.lay_egg_counter,
+        turtle_going_home: mob.turtle.going_home,
+        turtle_home_x: mob.turtle.home_pos.x,
+        turtle_home_y: mob.turtle.home_pos.y,
+        turtle_home_z: mob.turtle.home_pos.z,
     }
 }
 

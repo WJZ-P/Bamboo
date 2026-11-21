@@ -1077,9 +1077,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 0.3,
                 pitch,
             );
-            let block =
-                &mc_bamboo_data::blocks::BLOCKS[mc_bamboo_data::blocks::TURTLE_EGG as usize];
-            let state = crate::state::BlockState(block.default_state);
+            // `blocks::TURTLE_EGG` 已经是默认状态 ID，不是方块注册表下标。
+            // `blocks::TURTLE_EGG` is already the default state id, not a block registry index.
+            let state = crate::state::BlockState(mc_bamboo_data::blocks::TURTLE_EGG);
             world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
         }
     }
