@@ -1167,6 +1167,18 @@ impl World<'_> {
         Some(self.spawn_dropped_item(position, stack, true, 10))
     }
 
+    /// `new ItemEntity(level, x, y, z, stack)` 加 `addFreshEntity`：物品自己的随机速度，
+    /// 拾取延迟是构造时的 0（哞菇剪下来的蘑菇）。
+    ///
+    /// `new ItemEntity(level, x, y, z, stack)` plus `addFreshEntity`: the item's own random
+    /// velocity and the constructor's pickup delay of 0 (sheared mooshroom mushrooms).
+    pub(crate) fn spawn_fresh_item(&mut self, position: Vec3, stack: ItemStack) -> Option<i32> {
+        if stack.is_empty() {
+            return None;
+        }
+        Some(self.spawn_dropped_item(position, stack, true, 0))
+    }
+
     fn spawn_dropped_item(
         &mut self,
         position: Vec3,

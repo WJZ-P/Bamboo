@@ -622,6 +622,7 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
             animal_spawn_rules(world, pos)
         }
+        MobType::Mooshroom => super::mooshroom::spawn_rules(world, pos),
         MobType::Zombie | MobType::Skeleton => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
@@ -972,7 +973,15 @@ mod tests {
         assert!(spawned > 0, "平原草地上应该刷出牛");
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
-            assert_eq!(mob.mob_type, MobType::Cow, "白天只支持牛刷出来");
+            // 平原白天的 `CREATURE` 表里建模了的只有这四种（马、驴还没有）。
+            // Of the plains daytime `CREATURE` list only these four are modelled.
+            assert!(
+                matches!(
+                    mob.mob_type,
+                    MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+                ),
+                "白天只刷已建模的农场动物"
+            );
         }
     }
 

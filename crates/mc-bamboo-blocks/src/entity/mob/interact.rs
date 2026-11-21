@@ -13,7 +13,7 @@ use mc_bamboo_core::{Hand, Vec3};
 use mc_bamboo_data::{items, tags::item_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
-use super::{Mob, MobEvent, MobType, chicken, living, pig, sheep};
+use super::{Mob, MobEvent, MobType, chicken, living, mooshroom, pig, sheep};
 use crate::entity::Entity;
 use crate::{InteractionResult, state::item_is_tagged};
 
@@ -44,6 +44,12 @@ pub struct MobInteraction {
     ///
     /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point.
     pub shear: bool,
+    /// `ItemUtils.createFilledResult` 的 `limitCreativeStackSize`：挤奶为真，哞菇的炖菜为假
+    /// （创造模式也照常放进物品栏）。
+    ///
+    /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`: true for milk, false
+    /// for mooshroom stew, which creative players receive as well.
+    pub replacement_limit_creative: bool,
 }
 
 impl MobInteraction {
@@ -54,13 +60,14 @@ impl MobInteraction {
             shrink_held: false,
             replacement: None,
             shear: false,
+            replacement_limit_creative: true,
         }
     }
 }
 
 pub(super) fn is_food(kind: MobType, item: i32) -> bool {
     match kind {
-        MobType::Cow => item_is_tagged(item, item_tags::COW_FOOD),
+        MobType::Cow | MobType::Mooshroom => item_is_tagged(item, item_tags::COW_FOOD),
         MobType::Pig => item_is_tagged(item, item_tags::PIG_FOOD),
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
@@ -70,7 +77,15 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
 
 /// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
 pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
-    if mob.mob_type == MobType::Cow && req.held.item == items::BUCKET && !mob.is_baby() {
+    if mob.mob_type == MobType::Mooshroom
+        && let Some(outcome) = mooshroom::interact(me, mob, req)
+    {
+        return outcome;
+    }
+    if matches!(mob.mob_type, MobType::Cow | MobType::Mooshroom)
+        && req.held.item == items::BUCKET
+        && !mob.is_baby()
+    {
         // `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，位置取交互发生处。
         mob.events.push(MobEvent::MilkSound {
             position: req.position,
@@ -79,7 +94,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     if mob.mob_type == MobType::Sheep
@@ -107,8 +122,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
         return MobInteraction {
             result: InteractionResult::SuccessServer,
             shrink_held: !req.creative,
-            replacement: None,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     if mob.is_baby() && !mob.age_locked {
@@ -121,12 +135,27 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
         return MobInteraction {
             result: InteractionResult::Success,
             shrink_held: !req.creative,
-            replacement: None,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。
     MobInteraction::pass()
+}
+
+/// `Shearable.shear` 的落地：按种类分给羊或哞菇。
+///
+/// Applies `Shearable.shear` for the sheep or the mooshroom.
+pub(crate) fn apply_shear(
+    world: &mut crate::world::World,
+    entity: &mut Entity,
+    hand: Hand,
+    tool: &ItemStack,
+) {
+    match entity.kind.mob().map(|mob| mob.mob_type) {
+        Some(MobType::Sheep) => sheep::apply_shear(world, entity, hand, tool),
+        Some(MobType::Mooshroom) => mooshroom::apply_shear(world, entity, hand, tool),
+        _ => {}
+    }
 }
 
 /// `AgeableMob.ageUp(int, boolean)`：跨过 0 时换尺寸，forcedAge 和粒子计时一起推进。

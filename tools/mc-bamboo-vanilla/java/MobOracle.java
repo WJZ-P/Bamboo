@@ -846,6 +846,80 @@ public final class MobOracle {
         static final BlockState WATER = Blocks.WATER.defaultBlockState();
         static final BlockState LAVA = Blocks.LAVA.defaultBlockState();
 
+        /** op-misc 的生物：哞菇（接炖菜、挤奶、喂花、剪成牛、繁殖变种、幼年不能剪）。 */
+        static void miscScenes(List<Scene> scenes) {
+            int bowl = BuiltInRegistries.ITEM.getId(Items.BOWL);
+            int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
+            int wheat = BuiltInRegistries.ITEM.getId(Items.WHEAT);
+            int bucket = BuiltInRegistries.ITEM.getId(Items.BUCKET);
+            int daisy = BuiltInRegistries.ITEM.getId(Items.OXEYE_DAISY);
+            {
+                // 红色哞菇：碗接蘑菇煲、桶挤奶、花不吃（PASS）、小麦求爱，最后打死看掉落。
+                // 在尸体移除（第 60 刻）之前结束，原因同 chicken_breed。
+                Scene stew = new Scene("mooshroom_stew").ticks(58).drops().packets();
+                ground(stew, 6);
+                stew.cow(0.5, 64.0, 0.5, 0.0F, 301L);
+                stew.player(1.5, 64.0, 0.5, Items.AIR);
+                stew.interact(3, 0, 0, bowl, 0);
+                stew.interact(5, 0, 0, bucket, 0);
+                stew.interact(7, 0, 0, daisy, 0);
+                stew.interact(9, 0, 0, wheat, 0);
+                stew.interact(11, 0, 0, bowl, 1);
+                stew.hurts.add(new double[] {40, 0, 30.0, 0});
+                scenes.add(stew);
+            }
+            {
+                // 棕色哞菇吃花：第一次吃掉并记下效果，第二次只冒烟不消耗；碗先接迷之炖菜再接蘑菇煲。
+                Scene flower = new Scene("mooshroom_flower").ticks(40).drops().packets();
+                ground(flower, 6);
+                flower.wool = 1;
+                flower.cow(0.5, 64.0, 0.5, 0.0F, 302L);
+                flower.player(1.5, 64.0, 0.5, Items.AIR);
+                flower.interact(3, 0, 0, daisy, 0);
+                flower.interact(5, 0, 0, daisy, 0);
+                flower.interact(7, 0, 0, bowl, 0);
+                flower.interact(9, 0, 0, bowl, 0);
+                flower.interact(11, 0, 0, daisy, 1);
+                scenes.add(flower);
+            }
+            for (int type = 0; type < 2; type++) {
+                // 剪毛：哞菇变成牛（抄位置、朝向、速度），掉五个对应颜色的蘑菇。
+                Scene shear = new Scene(type == 0 ? "mooshroom_shear_red" : "mooshroom_shear_brown")
+                        .ticks(60).drops().packets();
+                ground(shear, 6);
+                shear.wool = type;
+                shear.cow(0.5, 64.0, 0.5, 75.0F, 303L + type);
+                shear.player(1.5, 64.0, 0.5, Items.AIR);
+                shear.interact(12, 0, 0, shears, 0);
+                scenes.add(shear);
+            }
+            for (int type = 0; type < 2; type++) {
+                // 同色繁殖：先抽 nextInt(1024) 的变异，再 nextBoolean。
+                Scene breed = new Scene(type == 0 ? "mooshroom_breed_red" : "mooshroom_breed_brown")
+                        .ticks(120).drops().packets();
+                ground(breed, 8);
+                breed.wool = type;
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 305L + type);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 307L + type);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(2, 0, 0, wheat, 0);
+                breed.interact(2, 1, 0, wheat, 0);
+                scenes.add(breed);
+            }
+            {
+                // 幼年哞菇：剪刀、碗、桶都是 PASS，小麦催熟。
+                Scene baby = new Scene("mooshroom_baby").ticks(40).packets();
+                ground(baby, 6);
+                baby.cow(0.5, 64.0, 0.5, 0.0F, 309L, -24000);
+                baby.player(1.5, 64.0, 0.5, Items.AIR);
+                baby.interact(3, 0, 0, shears, 0);
+                baby.interact(5, 0, 0, bowl, 0);
+                baby.interact(7, 0, 0, bucket, 0);
+                baby.interact(9, 0, 0, wheat, 0);
+                scenes.add(baby);
+            }
+        }
+
         /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
         static void farmScenes(List<Scene> scenes) {
             int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
@@ -942,6 +1016,7 @@ public final class MobOracle {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
             farmScenes(scenes);
+            miscScenes(scenes);
             {
                 Scene pig = new Scene("pig_rod_tempt").ticks(80);
                 ground(pig, 12);
@@ -2027,6 +2102,14 @@ public final class MobOracle {
                 sheep.setColor(DyeColor.byId(scene.wool & 15));
                 sheep.setSheared((scene.wool & 16) != 0);
             }
+            if (cow instanceof net.minecraft.world.entity.animal.cow.MushroomCow mooshroom && scene.wool != 0) {
+                // 哞菇场景借 wool 字段选品种：非 0 是棕色。
+                // Mooshroom scenes reuse the wool field for the type: non-zero is brown.
+                Method setVariant = mooshroom.getClass().getDeclaredMethod("setVariant",
+                        net.minecraft.world.entity.animal.cow.MushroomCow.Variant.class);
+                setVariant.setAccessible(true);
+                setVariant.invoke(mooshroom, net.minecraft.world.entity.animal.cow.MushroomCow.Variant.BROWN);
+            }
             if (cow instanceof Chicken chicken && scene.eggTime >= 0) {
                 chicken.eggTime = scene.eggTime;
             }
@@ -2061,7 +2144,8 @@ public final class MobOracle {
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"kind\":").append(animalKind(scene.name));
             line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
-                    ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0)) : 0);
+                    ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
+                    : animalKind(scene.name) == 6 ? scene.wool : 0);
             line.append(",\"egg\":").append(cows.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
             line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
@@ -2152,6 +2236,13 @@ public final class MobOracle {
                 interactions.get(tick).add(one.toString());
                 putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
                         "instabuild", false);
+            }
+            // 交互里生成的实体（剪下来的物品、哞菇剪成的牛）在实体 tick 之前就进了世界，
+            // 真服务端里它们这一刻就会 tick，所以在这里先收一次。
+            // Entities spawned by interactions (sheared items, the cow a mooshroom turns
+            // into) join the world before the entity ticks, so collect them here first.
+            if (scene.drops && !scene.interactions.isEmpty()) {
+                collectBorn(level, official, scene.packets, cows, syncs, packets, spawns, tick);
             }
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick) {
@@ -2277,23 +2368,7 @@ public final class MobOracle {
             level.tracked.removeIf(Entity::isRemoved);
             // 实体 tick 里也会生成实体（繁殖的幼崽、死亡掉落物和经验球），在这一刻收齐。
             if (scene.drops) {
-                level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
-                for (Entity born : level.spawned) {
-                    level.reseedBorn(born);
-                    spawns.get(tick).add(spawnJson(born));
-                    if (born instanceof Animal calf) {
-                        cows.add(calf);
-                        level.tracked.add(born);
-                    }
-                    if (scene.packets) {
-                        Sync sync = new Sync(level, born, official.registries);
-                        syncs.add(sync);
-                        sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
-                        packets.get(tick).addAll(sync.take());
-                    }
-                }
-                level.spawned.clear();
-                level.newbornCows.clear();
+                collectBorn(level, official, scene.packets, cows, syncs, packets, spawns, tick);
             }
             level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(stepJson(cows));
@@ -5324,6 +5399,33 @@ public final class MobOracle {
     }
 
     /** 一个新生成的实体：种类、物品或经验值、位置。速度用实体自己的随机源，不比。 */
+    /**
+     * 把这一段里新进世界的实体按 ID 收齐：重新播种、记进 spawns、动物加进 cows 并建同步状态。
+     *
+     * Collects entities that joined the world since the last call, in id order: reseed,
+     * record, add animals to the cow list and create their sync state.
+     */
+    private static void collectBorn(FakeLevel level, Official official, boolean withPackets, List<Animal> cows,
+            List<Sync> syncs, List<List<String>> packets, List<List<String>> spawns, int tick) throws Exception {
+        level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
+        for (Entity born : level.spawned) {
+            level.reseedBorn(born);
+            spawns.get(tick).add(spawnJson(born));
+            if (born instanceof Animal calf) {
+                cows.add(calf);
+                level.tracked.add(born);
+            }
+            if (withPackets) {
+                Sync sync = new Sync(level, born, official.registries);
+                syncs.add(sync);
+                sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+                packets.get(tick).addAll(sync.take());
+            }
+        }
+        level.spawned.clear();
+        level.newbornCows.clear();
+    }
+
     private static String spawnJson(Entity entity) throws Exception {
         StringBuilder out = new StringBuilder("{\"id\":").append(entity.getId());
         Vec3 pos = entity.position();
@@ -5341,6 +5443,9 @@ public final class MobOracle {
             out.append(",\"kind\":\"cow\",\"value\":").append(calf.getAge());
             out.append(",\"seed\":").append(randomSeed(calf));
             out.append(",\"hr\":").append(Float.floatToRawIntBits(calf.getYHeadRot()));
+            // 身体朝向：幼崽是 0，哞菇剪成的牛抄哞菇的。
+            // Body yaw: 0 for a calf, copied from the mooshroom for a converted cow.
+            out.append(",\"yr\":").append(Float.floatToRawIntBits(calf.getYRot()));
             if (calf instanceof Chicken chick) {
                 out.append(",\"egg\":").append(chick.eggTime);
             }
@@ -5387,6 +5492,7 @@ public final class MobOracle {
         if (scene.startsWith("pig_")) return EntityTypes.PIG;
         if (scene.startsWith("sheep_")) return EntityTypes.SHEEP;
         if (scene.startsWith("chicken_")) return EntityTypes.CHICKEN;
+        if (scene.startsWith("mooshroom_")) return EntityTypes.MOOSHROOM;
         return EntityTypes.COW;
     }
 
@@ -5395,16 +5501,22 @@ public final class MobOracle {
         if (scene.startsWith("pig_")) return 3;
         if (scene.startsWith("sheep_")) return 4;
         if (scene.startsWith("chicken_")) return 5;
+        if (scene.startsWith("mooshroom_")) return 6;
         return 0;
     }
 
     /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
-    private static String farmVariant(Animal animal) {
+    private static String farmVariant(Animal animal) throws Exception {
         if (animal instanceof Sheep sheep) {
             return sheep.getColor().getSerializedName() + (sheep.isSheared() ? "|sheared" : "");
         }
         if (animal instanceof Chicken chicken) {
             return chicken.getVariant().unwrapKey().orElseThrow().identifier() + "|egg" + chicken.eggTime;
+        }
+        if (animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow mooshroom) {
+            Field stew = mooshroom.getClass().getDeclaredField("stewEffects");
+            stew.setAccessible(true);
+            return mooshroom.getVariant().getSerializedName() + (stew.get(mooshroom) != null ? "|stew" : "");
         }
         Holder<?> variant = animal instanceof Pig pig ? pig.getVariant() : ((Cow) animal).getVariant();
         return variant.unwrapKey().orElseThrow().identifier().toString();
@@ -5412,7 +5524,7 @@ public final class MobOracle {
 
     /** 叫声列；羊没有叫声变种。 */
     private static String farmSound(Animal animal) throws Exception {
-        if (animal instanceof Sheep) {
+        if (animal instanceof Sheep || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");
@@ -6385,6 +6497,15 @@ public final class MobOracle {
         }
 
         /** 按幼崽 / 掉落物的构造顺序给新实体换上岛的种子源，并重放构造取数。 */
+        /** 假世界的玩家没有连接，粒子包不发（哞菇喂花 / 剪毛会走到这里）。 */
+        @Override
+        public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(T particle,
+                boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count,
+                double xDist, double yDist, double zDist, double xSpeed, double ySpeed, double zSpeed,
+                net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket.RandomizationType type) {
+            return 0;
+        }
+
         void reseedBorn(Entity entity) {
             if (!dropUuids) {
                 return;

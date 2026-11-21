@@ -722,3 +722,27 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
 
 扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。
+
+## 哞菇的实施现状（op-misc，2026-11-20）
+
+哞菇是 `MobType::Mooshroom`，属性、目标选择器、叫声全部复用牛（`AbstractCow`），自己的部分在
+`entity/mob/mooshroom.rs`：品种 / 炖菜效果 / 上一道闪电存在 `Mob.mooshroom`（跟实体行走，岛拆合不需要
+平移时钟），交互三个分支（碗、剪刀、棕色吃花）排在 `AbstractCow.mobInteract` 之前，`getWalkTargetValue`
+对菌丝给 10，生成规则是 `checkMushroomSpawnRules`。花对应的炖菜效果表 `STEW_FLOWERS` 和 `DATA_TYPE` 的
+index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
+
+剪毛走新的公共模块 `entity/mob/conversion.rs`（官方 `Mob.convertTo` + `ConversionType.SINGLE`）：先
+`prepare_entity` 构造牛（拿 ID 和种子，和官方 `EntityType.create` 同一时刻），抄状态，回调里掉蘑菇
+（`World::spawn_fresh_item`：直接 `new ItemEntity`，拾取延迟 0），牛进世界，哞菇丢弃。以后僵尸转化、
+猪被雷劈可以复用；乘客 / 载具 / 拴绳 / 队伍 / `Brain` 记忆没有建模。
+
+`MobInteraction` 多了 `replacement_limit_creative`（`createFilledResult` 的 `limitCreativeStackSize`）。游戏层
+有交回物品时不再另扣手里的物品：`createFilledResult` 自己消耗一个，原来挤奶时手里一叠桶会多扣一个。
+
+`MobType::ALL` 统一了按名字 / 注册表 ID 的查找；猪、羊、鸡、哞菇因此进入运行时自然生成和生成期刷怪
+（之前 `by_entity_type` 只列了牛和三种怪物）。`can_spawn_far_from_player` 改成按类别（`CREATURE` 为真）。
+
+对拍：`mob-oracle --only mooshroom`（接炖菜、挤奶、喂花、迷之炖菜、剪成牛红 / 棕、同色繁殖红 / 棕、幼年），
+逐刻比位置、随机源、出站包、交互结果和新生实体，7 例 498 刻 0 不一致；`chunk-content` 比新生哞菇和
+带 `Type` / `stew_effects` 的读写往返。对拍工具里「交互生成的实体」改成在实体 tick 之前收集（真服务端里
+它们这一刻就会 tick），新生生物多带一个身体朝向 `yr`。

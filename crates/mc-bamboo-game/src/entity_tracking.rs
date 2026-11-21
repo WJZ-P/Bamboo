@@ -1181,6 +1181,7 @@ fn farm_default_data(
     use mc_bamboo_data::entity_types as facts;
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
         (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
             registry_index(chicken_variants(), "minecraft:temperate"),
         )),
@@ -1203,6 +1204,12 @@ fn farm_non_default_data(
         MobType::Sheep => {
             if mob.wool != 0 {
                 out.push(EntityData::SheepWool(mob.wool));
+            }
+            true
+        }
+        MobType::Mooshroom => {
+            if mob.mooshroom_brown {
+                out.push(EntityData::MooshroomType(1));
             }
             true
         }

@@ -62,6 +62,9 @@ fn placement(entity: i32) -> Option<Placement> {
         entity_type::DONKEY,
         entity_type::HORSE,
         entity_type::LLAMA,
+        // 哞菇的放置方式和高度图一样，规则换成 `checkMushroomSpawnRules`（见 [`spawn_rules`]）。
+        // Mooshrooms share the placement and heightmap; [`spawn_rules`] swaps the rule.
+        entity_type::MOOSHROOM,
         entity_type::PIG,
         entity_type::SHEEP,
     ]
@@ -157,7 +160,7 @@ fn spawn_one(
             let at = Vec3::new(fx, f64::from(pos.y), fz);
             let area = body(placement, at);
             if !natural::no_collision(world, area)
-                || !natural::animal_spawn_rules(world, BlockPos::containing(at))
+                || !spawn_rules(world, placement, BlockPos::containing(at))
             {
                 continue;
             }
@@ -174,6 +177,18 @@ fn spawn_one(
             };
         }
         *cursor = drift(random, *cursor, start, xo, zo);
+    }
+}
+
+/// `SpawnPlacements.checkSpawnRules`：哞菇用 `MushroomCow.checkMushroomSpawnRules`，其余是
+/// `Animal.checkAnimalSpawnRules`。
+///
+/// `SpawnPlacements.checkSpawnRules`: mooshrooms use `checkMushroomSpawnRules`, the rest
+/// `Animal.checkAnimalSpawnRules`.
+fn spawn_rules(world: &World, placement: Placement, pos: BlockPos) -> bool {
+    match placement.kind {
+        Some(kind) => natural::check_spawn_rules(world, kind, pos),
+        None => natural::animal_spawn_rules(world, pos),
     }
 }
 

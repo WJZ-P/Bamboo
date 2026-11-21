@@ -3539,7 +3539,33 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
     }
+    mooshroom_facts(&mut out, facts);
     out
+}
+
+/// 哞菇的元数据 index 和「花 → 迷之炖菜效果」表（官方 `SuspiciousEffectHolder`）。
+///
+/// The mooshroom metadata index and the flower → suspicious stew effects table
+/// (vanilla `SuspiciousEffectHolder`).
+fn mooshroom_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    let _ = writeln!(
+        out,
+        "pub const MOOSHROOM_TYPE: u8 = {};",
+        facts.mooshroom_type
+    );
+    let _ = writeln!(
+        out,
+        "/// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。"
+    );
+    let _ = writeln!(out, "pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[");
+    for (item, effects) in &facts.stew_flowers {
+        let list: Vec<String> = effects
+            .iter()
+            .map(|[effect, duration]| format!("({effect}, {duration})"))
+            .collect();
+        let _ = writeln!(out, "    ({item}, &[{}]),", list.join(", "));
+    }
+    let _ = writeln!(out, "];");
 }
 
 /// 药水注册表每条药水的效果，下标是 `minecraft:potion` 的注册表 ID。

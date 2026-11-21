@@ -629,7 +629,13 @@ fn run_cases(
         );
     }
     use mc_bamboo_blocks::entity::mob::MobType;
-    for kind in [MobType::Cow, MobType::Pig, MobType::Sheep, MobType::Chicken] {
+    for kind in [
+        MobType::Cow,
+        MobType::Mooshroom,
+        MobType::Pig,
+        MobType::Sheep,
+        MobType::Chicken,
+    ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
         let mut extra = (0_u8, 0_i32);
@@ -1572,6 +1578,42 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("UUID", uuid.clone()),
         ]),
     )];
+    // 哞菇：缺省（红色、没有炖菜效果）和棕色带两条效果（一条时长等于缺省 160，存盘时省略）。
+    // Mooshrooms: the default (red, no stew effects) and a brown one with two effects, one
+    // at the default duration of 160 that the save omits.
+    out.push((
+        "mooshroom bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:mooshroom".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    let stew = |id: &str, duration: Option<i32>| {
+        let mut entry = vec![("id", Tag::String(id.to_owned()))];
+        if let Some(duration) = duration {
+            entry.push(("duration", Tag::Int(duration)));
+        }
+        compound(entry)
+    };
+    out.push((
+        "mooshroom brown stew".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:mooshroom".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("Age", Tag::Int(-1200)),
+            ("Type", Tag::String("brown".to_owned())),
+            (
+                "stew_effects",
+                Tag::List(vec![
+                    stew("minecraft:regeneration", Some(140)),
+                    stew("minecraft:blindness", Some(160)),
+                    stew("minecraft:saturation", None),
+                ]),
+            ),
+        ]),
+    ));
     out.push((
         "rich".to_owned(),
         compound(vec![

@@ -1180,11 +1180,19 @@ pub(crate) fn on_interact_entity(
         if !outcome.result.consumes_action() {
             continue;
         }
-        if outcome.shrink_held {
+        // `createFilledResult` 自己会消耗手里的一个，有交回物品时不再另扣。
+        // `createFilledResult` consumes the held item itself, so no extra shrink then.
+        if outcome.shrink_held && outcome.replacement.is_none() {
             inventory::shrink_held(region, id, try_hand);
         }
         if let Some(replacement) = outcome.replacement {
-            inventory::give_filled_result(region, id, try_hand, replacement, true);
+            inventory::give_filled_result(
+                region,
+                id,
+                try_hand,
+                replacement,
+                outcome.replacement_limit_creative,
+            );
         }
         // 生物事件（爱心、挤奶音效）留在实体表里，同步阶段按官方收件人发出去。
         swing(region, id, try_hand, outcome.result);

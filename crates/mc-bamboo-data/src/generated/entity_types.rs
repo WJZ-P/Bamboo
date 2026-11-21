@@ -197,3 +197,24 @@ pub const PIG_VARIANT_SERIALIZER: i32 = 28;
 pub const PIG_SOUND_VARIANT_SERIALIZER: i32 = 29;
 pub const CHICKEN_VARIANT_SERIALIZER: i32 = 30;
 pub const CHICKEN_SOUND_VARIANT_SERIALIZER: i32 = 31;
+pub const MOOSHROOM_TYPE: u8 = 18;
+/// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。
+pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[
+    (298, &[(22, 7)]),
+    (299, &[(22, 7)]),
+    (300, &[(14, 220)]),
+    (301, &[(8, 140)]),
+    (302, &[(15, 100)]),
+    (303, &[(22, 7)]),
+    (304, &[(11, 60)]),
+    (305, &[(14, 220)]),
+    (306, &[(17, 140)]),
+    (307, &[(17, 140)]),
+    (308, &[(17, 140)]),
+    (309, &[(17, 140)]),
+    (310, &[(9, 140)]),
+    (311, &[(7, 100)]),
+    (312, &[(18, 220)]),
+    (313, &[(19, 140)]),
+    (314, &[(15, 100)]),
+];

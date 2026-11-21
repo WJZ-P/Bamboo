@@ -1743,6 +1743,9 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
     }
+    if mob.mob_type == super::MobType::Mooshroom {
+        return super::mooshroom::walk_target_value(view, pos);
+    }
     animal_walk_target_value(view, pos)
 }
 
@@ -1753,6 +1756,13 @@ pub(super) fn animal_walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f
     if view.block_state(pos.below()).is(blocks::GRASS_BLOCK) {
         return 10.0;
     }
+    light_level_cost(view, pos)
+}
+
+/// `LevelReader.getPathfindingCostFromLightLevels`：按亮度算的路径代价。
+///
+/// `LevelReader.getPathfindingCostFromLightLevels`: the light-based path cost.
+pub(super) fn light_level_cost(view: &dyn BlockView, pos: BlockPos) -> f32 {
     let block = view.brightness(mc_bamboo_core::LightLayer::Block, pos);
     let sky = view.brightness(mc_bamboo_core::LightLayer::Sky, pos) - view.sky_darken();
     let raw = block.max(sky);

@@ -191,6 +191,10 @@ pub enum EntityData {
     /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID` as registry IDs.
     ChickenVariant(i32),
     ChickenSoundVariant(i32),
+    /// `MushroomCow.DATA_TYPE`（INT）：0 红色，1 棕色。
+    ///
+    /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
+    MooshroomType(i32),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -249,6 +253,7 @@ impl EntityData {
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
         }
     }
 
@@ -403,6 +408,10 @@ impl EntityData {
                 };
                 write_data_header(out, self.index(), serializer);
                 write_varint(out, *value);
+            }
+            Self::MooshroomType(kind) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *kind);
             }
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);

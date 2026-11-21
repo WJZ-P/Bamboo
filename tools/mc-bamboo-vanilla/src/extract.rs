@@ -921,6 +921,14 @@ pub struct ProjectileFacts {
     pub chicken_sound_variant: u8,
     pub chicken_variant_serializer: i32,
     pub chicken_sound_variant_serializer: i32,
+    /// `MushroomCow.DATA_TYPE` 的元数据 index。
+    ///
+    /// The metadata index of `MushroomCow.DATA_TYPE`.
+    pub mooshroom_type: u8,
+    /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
+    ///
+    /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).
+    pub stew_flowers: Vec<(i32, Vec<[i32; 2]>)>,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
     ///
     /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.

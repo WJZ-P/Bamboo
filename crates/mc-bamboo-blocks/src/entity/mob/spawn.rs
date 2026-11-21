@@ -288,7 +288,7 @@ pub(super) fn finalize_generated(
 ) {
     if matches!(
         kind,
-        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+        MobType::Cow | MobType::Mooshroom | MobType::Pig | MobType::Sheep | MobType::Chicken
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
     } else {
@@ -309,7 +309,11 @@ pub(super) fn finalize_cow(
     group: &mut Option<SpawnGroup>,
 ) {
     let variant = cow_variant_for_biome(biome);
-    if kind != MobType::Sheep {
+    // 羊和哞菇没有按群系选的花纹；哞菇没有自己的 `finalizeSpawn`，也不抽叫声。
+    // Sheep and mooshrooms have no biome variant; mooshrooms have no `finalizeSpawn` of
+    // their own and draw no sound either.
+    let has_variant = !matches!(kind, MobType::Sheep | MobType::Mooshroom);
+    if has_variant {
         // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
         let _ = random.next_int(1);
@@ -322,14 +326,17 @@ pub(super) fn finalize_cow(
     let chicken_sound =
         (kind == MobType::Chicken).then(|| super::chicken::SoundVariant::pick(random));
     let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
-    let cow_sound =
-        (!matches!(kind, MobType::Sheep | MobType::Chicken | MobType::Pig)).then(|| {
-            if random.next_int(2) == 0 {
-                CowSoundVariant::Classic
-            } else {
-                CowSoundVariant::Moody
-            }
-        });
+    let cow_sound = (!matches!(
+        kind,
+        MobType::Sheep | MobType::Chicken | MobType::Pig | MobType::Mooshroom
+    ))
+    .then(|| {
+        if random.next_int(2) == 0 {
+            CowSoundVariant::Classic
+        } else {
+            CowSoundVariant::Moody
+        }
+    });
     // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
     // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
     // the mob into the group.
@@ -350,7 +357,7 @@ pub(super) fn finalize_cow(
         && random.next_float() <= data.baby_spawn_chance;
     data.group_size += 1;
     entity.with_mob(|me, mob| {
-        if kind != MobType::Sheep {
+        if has_variant {
             mob.variant = variant;
         }
         if let Some(color) = sheep_color {

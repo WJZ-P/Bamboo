@@ -815,7 +815,14 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 Command::BreedAnimals {
                     kind: mob.mob_type,
                     variant: mob.variant,
-                    wool: mob.wool,
+                    // 哞菇借这个字节传自己的品种（落地时生物状态不在实体上）。
+                    // Mooshrooms pass their type in this byte: the mob state is detached
+                    // from the entity when the command lands.
+                    wool: if mob.mob_type == super::MobType::Mooshroom {
+                        mob.mooshroom.brown as u8
+                    } else {
+                        mob.wool
+                    },
                     partner,
                     position: me.position,
                 },
@@ -1710,7 +1717,17 @@ pub(crate) fn apply_breed(
     // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
     // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
     let sheep = kind == super::MobType::Sheep;
-    let from_father = sheep || me.random.next_boolean();
+    // 哞菇的品种自己抽（`getOffspringVariant`），不取牛那个 `nextBoolean`。
+    // Mooshrooms draw their own type (`getOffspringVariant`) instead of the cow `nextBoolean`.
+    let calf_brown = (kind == super::MobType::Mooshroom).then(|| {
+        let mine = wool != 0;
+        let mut mate = false;
+        world.with_entity_mut(partner, &mut |entity| {
+            mate = entity.kind.mob().is_some_and(|mob| mob.mooshroom.brown);
+        });
+        super::mooshroom::offspring_brown(mine, mate, &mut me.random)
+    });
+    let from_father = sheep || calf_brown.is_some() || me.random.next_boolean();
     let mut child_variant = variant;
     let mut partner_wool = wool;
     world.with_entity_mut(partner, &mut |entity| {
@@ -1741,6 +1758,9 @@ pub(crate) fn apply_breed(
         match lamb_color {
             Some(color) => super::sheep::set_color(mob, color),
             None => mob.variant = child_variant,
+        }
+        if let Some(brown) = calf_brown {
+            mob.mooshroom.brown = brown;
         }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;

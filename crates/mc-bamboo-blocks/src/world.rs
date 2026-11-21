@@ -3199,7 +3199,12 @@ impl<'a> World<'a> {
             .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request))
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         if outcome.shear {
-            crate::entity::mob::sheep::apply_shear(self, &mut entity, request.hand, &request.held);
+            crate::entity::mob::interact::apply_shear(
+                self,
+                &mut entity,
+                request.hand,
+                &request.held,
+            );
         }
         self.level.put_entity(entity);
         outcome
