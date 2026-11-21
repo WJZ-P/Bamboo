@@ -34,12 +34,23 @@ use crate::{
 /// keeps delivering replies the test does not time out under heavy CPU load.
 const COMPUTE_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// 每个等待阶段的防挂死底线：待办队列非空不代表真正推进了。
+///
+/// Final watchdog for each wait phase: a nonempty backlog does not prove progress.
+const PIPELINE_WATCHDOG: Duration = Duration::from_secs(900);
+
 /// 池子里有在途任务时阻塞等至少一条回执，避免主线程和岛线程空转抢占计算线程。
 ///
 /// While compute jobs are in flight, block until at least one pool reply
 /// arrives so the test and island threads do not busy-spin and starve workers.
-fn wait_for_compute_progress(world: &mut World, last_progress: &mut Instant, context: &str) {
+fn wait_for_compute_progress(
+    world: &mut World,
+    last_progress: &mut Instant,
+    deadline: Instant,
+    context: &str,
+) {
     while world.master.host.compute_in_pool() > 0 {
+        check_pipeline_deadline(deadline, context);
         if world
             .master
             .host
@@ -53,6 +64,16 @@ fn wait_for_compute_progress(world: &mut World, last_progress: &mut Instant, con
             "{context}: no compute progress for {COMPUTE_STALL_TIMEOUT:?}"
         );
     }
+}
+
+/// 每个等待阶段的绝对防挂死底线：超过就失败，而不是无限等下去。
+///
+/// Absolute per-phase hang guard: fail past the deadline instead of looping forever.
+fn check_pipeline_deadline(deadline: Instant, context: &str) {
+    assert!(
+        Instant::now() < deadline,
+        "{context}: pipeline watchdog expired after {PIPELINE_WATCHDOG:?}"
+    );
 }
 
 /// 区块平面是否仍有待交付 / 待处理的计算工作。
@@ -99,19 +120,18 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
     // Delivery has a per-tick budget and pool replies arrive a tick later;
     // wait on pool replies while workers run instead of busy-spinning.
     let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
     let mut idle_ticks = 0_u32;
     loop {
         let _ = world.tick();
         if world.islands.region.chunks.is_loaded(origin) {
             break;
         }
+        let context = "staged pipeline waiting for origin chunk";
+        check_pipeline_deadline(deadline, context);
         if world.master.host.compute_in_pool() > 0 {
             idle_ticks = 0;
-            wait_for_compute_progress(
-                &mut world,
-                &mut last_progress,
-                "staged pipeline waiting for origin chunk",
-            );
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, context);
         } else if has_pending_work(&world) {
             last_progress = Instant::now();
             idle_ticks = 0;
@@ -191,6 +211,8 @@ fn generated_cells_with_seed(
     }
 
     let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
+    let context = format!("normal-world generation (threads={threads})");
     let mut quiet = 0;
     let mut idle_unloaded_ticks = 0_u32;
     loop {
@@ -199,6 +221,7 @@ fn generated_cells_with_seed(
             .iter()
             .all(|pos| world.islands.region.chunks.is_loaded(*pos));
         let idle = world.master.host.compute_in_flight() == 0;
+        check_pipeline_deadline(deadline, &context);
         if all_loaded && idle {
             quiet += 1;
             // 池子空了以后再跑几刻，让待办任务和世界线程的增量合并都落地。
@@ -212,11 +235,7 @@ fn generated_cells_with_seed(
         quiet = 0;
         if world.master.host.compute_in_pool() > 0 {
             idle_unloaded_ticks = 0;
-            wait_for_compute_progress(
-                &mut world,
-                &mut last_progress,
-                &format!("normal-world generation (threads={threads})"),
-            );
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, &context);
         } else if has_pending_work(&world) {
             last_progress = Instant::now();
             idle_unloaded_ticks = 0;
@@ -443,6 +462,8 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
     // Wait until some features deltas or light reached the world thread while
     // some chunks are still undelivered.
     let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
+    let context = "waiting for mid-pipeline generation state";
     let mut idle_ticks = 0_u32;
     loop {
         let _ = world.tick();
@@ -454,17 +475,14 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         if (!deltas.is_empty() || !light.is_empty()) && delivered < positions.len() {
             break;
         }
+        check_pipeline_deadline(deadline, context);
         assert!(
             delivered < positions.len(),
             "everything was delivered before a mid-pipeline state was observed"
         );
         if world.master.host.compute_in_pool() > 0 {
             idle_ticks = 0;
-            wait_for_compute_progress(
-                &mut world,
-                &mut last_progress,
-                "waiting for mid-pipeline generation state",
-            );
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, context);
         } else if has_pending_work(&world) {
             last_progress = Instant::now();
             idle_ticks = 0;
@@ -478,6 +496,8 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
     }
 
     let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
+    let context = "draining compute pool after dropping tickets";
     let mut quiet = 0;
     let mut stalled_ticks = 0_u32;
     loop {
@@ -490,6 +510,7 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
                 .debug_state()
                 .records()
                 .is_empty();
+        check_pipeline_deadline(deadline, context);
         if idle {
             quiet += 1;
             if quiet >= 8 {
@@ -500,11 +521,7 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         quiet = 0;
         if world.master.host.compute_in_pool() > 0 {
             stalled_ticks = 0;
-            wait_for_compute_progress(
-                &mut world,
-                &mut last_progress,
-                "draining compute pool after dropping tickets",
-            );
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, context);
         } else if has_pending_work(&world) {
             last_progress = Instant::now();
             stalled_ticks = 0;
