@@ -319,6 +319,22 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
     }
+    // ---- Skeleton / Bogged ----
+    if mob.mob_type == MobType::Skeleton {
+        // `ConversionTracker.addAdditionalSaveData`：`isAfflicted` 是存档这一刻的
+        // `isInPowderSnow`。
+        // `ConversionTracker.addAdditionalSaveData`: `isAfflicted` is `isInPowderSnow` at
+        // save time.
+        mob.freeze_conversion.write(
+            &mut out,
+            super::conversion::STRAY_CONVERSION_KEY,
+            super::conversion::FREEZING_KEY,
+            mob.in_powder_snow,
+        );
+    }
+    if mob.mob_type == MobType::Bogged {
+        put(&mut out, "sheared", Tag::Byte(i8::from(mob.bogged_sheared)));
+    }
     // ---- Sheep / Chicken ----
     if mob.mob_type == MobType::Sheep {
         put(
@@ -490,6 +506,17 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
+        }
+        // ---- Skeleton / Bogged ----
+        if mob.mob_type == MobType::Skeleton {
+            mob.freeze_conversion.read(
+                tag,
+                super::conversion::STRAY_CONVERSION_KEY,
+                super::conversion::FREEZING_KEY,
+            );
+        }
+        if mob.mob_type == MobType::Bogged {
+            mob.bogged_sheared = tag::bool_or(tag, "sheared", false);
         }
         // ---- Sheep / Chicken ----
         if mob.mob_type == MobType::Sheep {

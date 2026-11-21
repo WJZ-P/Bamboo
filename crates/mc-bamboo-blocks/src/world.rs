@@ -3199,7 +3199,13 @@ impl<'a> World<'a> {
             .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request))
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         if outcome.shear {
-            crate::entity::mob::sheep::apply_shear(self, &mut entity, request.hand, &request.held);
+            let shear = match entity.kind.mob().map(|mob| mob.mob_type) {
+                Some(crate::entity::mob::MobType::Bogged) => {
+                    crate::entity::mob::bogged::apply_shear
+                }
+                _ => crate::entity::mob::sheep::apply_shear,
+            };
+            shear(self, &mut entity, request.hand, &request.held);
         }
         self.level.put_entity(entity);
         outcome

@@ -1047,7 +1047,11 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     if mob_flags != 0 {
         out.push(EntityData::MobFlags(mob_flags));
     }
-    if mob.zombie_baby {
+    // 骷髅的 `DATA_STRAY_CONVERSION_ID` 和沼骸的 `DATA_SHEARED` 都是 index 16 的 BOOLEAN，
+    // 和这里的 `Baby` 字节完全相同；变回假时走 `default_data_for_type` 的 16 号缺省。
+    // `Skeleton.DATA_STRAY_CONVERSION_ID` and `Bogged.DATA_SHEARED` are index-16 booleans,
+    // byte-identical to `Baby`; the reset goes through `default_data_for_type`.
+    if mob.zombie_baby || mob.skeleton_flag {
         out.push(EntityData::Baby(true));
     }
     if mob.zombie_special_type != 0 {

@@ -537,7 +537,11 @@ fn run_action(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, action: A
     match action {
         Action::Effect(EffectType::Freeze) => {
             mob.in_powder_snow = true;
-            mob.ticks_frozen = (mob.ticks_frozen + 1).min(140);
+            // `InsideBlockEffectType.FREEZE`：`canFreeze()` 为假时只记「在细雪里」。
+            // `InsideBlockEffectType.FREEZE`: without `canFreeze()` only the flag is set.
+            if super::living::can_freeze(mob) {
+                mob.ticks_frozen = (mob.ticks_frozen + 1).min(140);
+            }
         }
         Action::Effect(EffectType::ClearFreeze) => mob.ticks_frozen = 0,
         Action::Effect(EffectType::FireIgnite) => {

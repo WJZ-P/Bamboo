@@ -259,7 +259,9 @@ public final class MobOracle {
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
                     "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
-                    "skeleton_bow_normal", "skeleton_bow_hard")) {
+                    "skeleton_bow_normal", "skeleton_bow_hard",
+                    "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
+                    "skeleton_freeze", "bogged_shear")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -2508,6 +2510,66 @@ public final class MobOracle {
         }
     }
 
+    // 流浪者 / 沼骸：先让官方的 `getArrow` 造一支箭（带它加的药水效果），再换成带种子的箭，
+    // 把官方那支箭上的 `potion_contents` 自定义效果原样搬过去。丢掉的那支箭把实体 ID 还回去。
+    // Strays and bogged: let vanilla `getArrow` build its arrow (with the effect it adds),
+    // then swap in a seeded arrow carrying the same custom `potion_contents` effects. The
+    // discarded arrow returns its entity id.
+    private static net.minecraft.world.entity.projectile.arrow.AbstractArrow seededArrow(
+            Mob shooter, ItemStack projectile, float power, ItemStack weapon,
+            java.util.function.Supplier<net.minecraft.world.entity.projectile.arrow.AbstractArrow> vanilla) {
+        FakeLevel world = (FakeLevel) shooter.level();
+        int id = world.nextId;
+        var official = vanilla.get();
+        world.nextId = id;
+        var arrow = ((net.minecraft.world.item.ArrowItem) Items.ARROW).createArrow(world, projectile, shooter, weapon);
+        setRandom(arrow, world.entitySeeds.nextLong());
+        arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+        arrow.setBaseDamageFromMob(power);
+        var contents = official.getPickupItemStackOrigin().get(DataComponents.POTION_CONTENTS);
+        if (contents != null && arrow instanceof net.minecraft.world.entity.projectile.arrow.Arrow tipped) {
+            for (var effect : contents.customEffects()) {
+                tipped.addEffect(new net.minecraft.world.effect.MobEffectInstance(effect));
+            }
+        }
+        return arrow;
+    }
+
+    private static final class OracleStray extends net.minecraft.world.entity.monster.skeleton.Stray {
+        OracleStray(FakeLevel level) {
+            super(EntityTypes.STRAY, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            return seededArrow(this, projectile, power, weapon, () -> super.getArrow(projectile, power, weapon));
+        }
+    }
+
+    private static final class OracleBogged extends net.minecraft.world.entity.monster.skeleton.Bogged {
+        OracleBogged(FakeLevel level) {
+            super(EntityTypes.BOGGED, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            return seededArrow(this, projectile, power, weapon, () -> super.getArrow(projectile, power, weapon));
+        }
+    }
+
+    /** 骷髅一支的逐刻状态：实体 ID、类型、index 16 的布尔（转化中 / 已剪）、冻结刻数、血量、主手物品。 */
+    private static String skeletonKinState(Mob shooter) {
+        boolean flag = shooter instanceof net.minecraft.world.entity.monster.skeleton.Skeleton skeleton
+                ? skeleton.isShaking()
+                : shooter instanceof net.minecraft.world.entity.monster.skeleton.Bogged bogged && bogged.isSheared();
+        return "[" + shooter.getId() + "," + BuiltInRegistries.ENTITY_TYPE.getId(shooter.getType())
+                + "," + (flag ? 1 : 0) + "," + shooter.getTicksFrozen()
+                + "," + Float.floatToRawIntBits(shooter.getHealth())
+                + "," + BuiltInRegistries.ITEM.getId(shooter.getMainHandItem().getItem()) + "]";
+    }
+
     private static int playSkeletonDeaths(Official official, Writer out) throws Exception {
         final int samples = 38;
         boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
@@ -3477,7 +3539,18 @@ public final class MobOracle {
         boolean tipped = name.equals("arrow_tipped_hit");
         boolean spectral = name.equals("arrow_spectral_hit");
         boolean effectHit = tipped || spectral;
-        boolean skeleton = name.startsWith("skeleton_");
+        // 骷髅一支的射手场景：流浪者 / 沼骸射带效果的箭；`skeleton_freeze` 把骷髅关在细雪里
+        // 等它变成流浪者；`bogged_shear` 用剪刀右键两次。后两个场景的玩家无敌，不会被当成目标。
+        // Skeleton-family shooter scenes: strays and bogged shoot tipped arrows;
+        // `skeleton_freeze` pens a skeleton in powder snow until it becomes a stray;
+        // `bogged_shear` right-clicks twice with shears. The last two use an invulnerable
+        // player that is never targeted.
+        boolean stray = name.startsWith("stray_");
+        boolean bogged = name.startsWith("bogged_");
+        boolean freeze = name.equals("skeleton_freeze");
+        boolean shear = name.equals("bogged_shear");
+        boolean passive = freeze || shear;
+        boolean skeleton = name.startsWith("skeleton_") || stray || bogged;
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
@@ -3512,6 +3585,24 @@ public final class MobOracle {
             world.blocks.put(BlockPos.asLong(waterTail ? 4 : 3, 65, 0), Blocks.WATER.defaultBlockState());
             world.projectileExtinguishes = new ArrayList<>();
         }
+        if (freeze) {
+            // 一格细雪井：四周两格高的石头，骷髅走不出去。
+            // A one-block powder-snow well walled by stone two blocks high.
+            for (int x = -1; x <= 1; x++) {
+                for (int z = -1; z <= 1; z++) {
+                    for (int y = 64; y <= 65; y++) {
+                        world.blocks.put(BlockPos.asLong(x, y, z), (x == 0 && z == 0 ? Blocks.POWDER_SNOW : Blocks.STONE)
+                                .defaultBlockState());
+                    }
+                }
+            }
+        }
+        if (skeleton) {
+            world.levelEvents = new ArrayList<>();
+            // 剪蘑菇的战利品表从干净的随机序列开始，和 Bamboo 一侧每个 case 新建一份对应。
+            // The shearing table starts from fresh random sequences, like a fresh Bamboo case.
+            official.server.sequences = new RandomSequences();
+        }
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
         ServerPlayer player = new ServerPlayer(official.server, world,
@@ -3527,7 +3618,7 @@ public final class MobOracle {
             player.setRemainingFireTicks(37);
             player.setTicksFrozen(80);
         }
-        player.getAbilities().invulnerable = rejected;
+        player.getAbilities().invulnerable = rejected || passive;
         Bytes playerSink = new Bytes(official.registries);
         RecordingListener connection = allocate(RecordingListener.class);
         put(ServerGamePacketListenerImpl.class, connection, "player", player);
@@ -3543,7 +3634,7 @@ public final class MobOracle {
         var arrows = new ArrayList<net.minecraft.world.entity.projectile.arrow.AbstractArrow>();
         var sync = new java.util.LinkedHashMap<Integer, Sync>();
         if (skeleton) {
-            shooter = new OracleSkeleton(world);
+            shooter = stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
             world.entitySeeds.nextLong();
             setRandom(shooter, 42L);
             shooter.setUUID(new UUID(0, 1));
@@ -3609,7 +3700,10 @@ public final class MobOracle {
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = (effectHit || enchanted) ? 4 : skeleton ? 105 : (piercing || water) ? 3 : 26;
+        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : skeleton ? 105
+                : (piercing || water) ? 3 : 26;
+        int conversions = 0;
+        int sheared = 0;
         int embeds = 0;
         int extinguishes = 0;
         Bytes arrowEvents = new Bytes(official.registries);
@@ -3624,9 +3718,38 @@ public final class MobOracle {
         }
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
+            // 剪蘑菇那一刻的结果：是否消耗动作、剪刀耐久损耗、掉出来的物品实体。
+            // The shearing result of this tick: consumed, shears damage and the dropped items.
+            String shearing = null;
             if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
             if (tick > 0) {
                 world.gameTime++;
+                if (shear && (tick == 3 || tick == 6)) {
+                    ItemStack shears = new ItemStack(Items.SHEARS);
+                    player.setItemInHand(InteractionHand.MAIN_HAND, shears);
+                    var result = shooter.interact(player, InteractionHand.MAIN_HAND, shooter.position());
+                    var drops = new ArrayList<String>();
+                    // 掉落物和别的场景一样换上岛的种子源，速度由物品实体自己的随机源重放。
+                    // Dropped items get the island seed source like the other scenes; their
+                    // velocity is replayed from the item's own random.
+                    world.dropUuids = true;
+                    for (Entity entity : world.spawned) {
+                        world.reseedBorn(entity);
+                        var item = (net.minecraft.world.entity.item.ItemEntity) entity;
+                        Vec3 at = item.position();
+                        Vec3 v = item.getDeltaMovement();
+                        drops.add(Arrays.toString(new long[] {
+                                BuiltInRegistries.ITEM.getId(item.getItem().getItem()), item.getItem().getCount(),
+                                Double.doubleToRawLongBits(at.x), Double.doubleToRawLongBits(at.y),
+                                Double.doubleToRawLongBits(at.z), Double.doubleToRawLongBits(v.x),
+                                Double.doubleToRawLongBits(v.y), Double.doubleToRawLongBits(v.z)}));
+                    }
+                    if (result.consumesAction()) sheared++;
+                    shearing = "{\"consumed\":" + result.consumesAction() + ",\"damage\":" + shears.getDamageValue()
+                            + ",\"drops\":[" + String.join(",", drops) + "]}";
+                    world.spawned.clear();
+                    player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+                }
                 if ((flame || water) && tick == 1) arrows.getFirst().setRemainingFireTicks(200);
                 if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
                 if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
@@ -3664,6 +3787,18 @@ public final class MobOracle {
                         world.tracked.add(arrow);
                         pairArrow(world, official, arrow, sync, arrowPackets);
                     }
+                    if (entity instanceof net.minecraft.world.entity.monster.skeleton.Stray converted) {
+                        // `Mob.convertTo` 造出来的流浪者：换成岛的种子源并重放构造函数的取数
+                        // （UUID、朝向），头的朝向是构造函数抽的那个角度。
+                        // The stray made by `Mob.convertTo`: reseed it from the island source and
+                        // replay the constructor draws (UUID, facing); the head keeps that angle.
+                        setRandom(converted, world.entitySeeds.nextLong());
+                        converted.setUUID(Mth.createInsecureUUID(converted.getRandom()));
+                        converted.setYHeadRot(converted.getRandom().nextFloat() * (float) (Math.PI * 2));
+                        shooter = converted;
+                        world.tracked.add(converted);
+                        conversions++;
+                    }
                 }
                 world.spawned.clear();
                 for (Sync tracking : sync.values()) {
@@ -3696,6 +3831,18 @@ public final class MobOracle {
                 frames.append(",\"shooterSeed\":").append(randomSeed(shooter));
                 frames.append(",\"aggressive\":").append(shooter.isAggressive());
                 frames.append(",\"drawing\":").append(shooter.isUsingItem());
+                frames.append(",\"kin\":").append(skeletonKinState(shooter));
+                frames.append(",\"levelEvents\":").append(world.levelEvents.stream().map(Arrays::toString)
+                        .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                world.levelEvents.clear();
+                // 玩家身上现有的效果（玩家不 tick，时长不变）：效果 ID、时长、等级。
+                // Effects on the (unticked) player: effect id, duration, amplifier.
+                frames.append(",\"playerEffects\":").append(player.getActiveEffects().stream()
+                        .map(effect -> new int[] {BuiltInRegistries.MOB_EFFECT.getId(effect.getEffect().value()),
+                                effect.getDuration(), effect.getAmplifier()})
+                        .sorted(java.util.Comparator.comparingInt(row -> row[0]))
+                        .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                if (shearing != null) frames.append(",\"shearing\":").append(shearing);
             }
             if (flame || water) {
                 frames.append(",\"playerThermal\":[").append(player.getRemainingFireTicks())
@@ -3734,7 +3881,12 @@ public final class MobOracle {
             throw new IllegalStateException("projectile scenario missed " + name);
         }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
-                || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
+                || hasWall && embeds == 0 || overlap && embeds != ticks - 1
+                || skeleton && !passive && arrows.size() < 2
+                || freeze && (conversions != 1 || shooter.getType() != EntityTypes.STRAY
+                        || !shooter.getMainHandItem().is(Items.BOW))
+                || shear && (sheared != 1 || !((net.minecraft.world.entity.monster.skeleton.Bogged) shooter).isSheared())
+                || stray && !player.hasEffect(MobEffects.SLOWNESS) || bogged && !shear && !player.hasEffect(MobEffects.POISON)
                 || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
                 || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
@@ -6540,7 +6692,14 @@ public final class MobOracle {
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}
 
         @Override
-        public void levelEvent(Entity source, int type, BlockPos pos, int data) {}
+        public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            if (levelEvents != null) {
+                levelEvents.add(new int[] {type, pos.getX(), pos.getY(), pos.getZ(), data});
+            }
+        }
+
+        /** 非空时记下这一刻的 `levelEvent`（转化音效）。 */
+        List<int[]> levelEvents;
 
         @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(

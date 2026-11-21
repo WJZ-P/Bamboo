@@ -13,8 +13,10 @@
 //! therefore live on [`Entity::dimensions`].
 
 pub mod attributes;
+pub mod bogged;
 pub mod chicken;
 pub mod control;
+pub mod conversion;
 pub mod damage;
 pub mod effects;
 pub mod equipment;
@@ -32,6 +34,7 @@ pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
+pub mod stray;
 pub(crate) mod timing;
 mod zombie_spawn;
 
@@ -61,6 +64,8 @@ pub enum MobType {
     Zombie,
     Husk,
     Skeleton,
+    Stray,
+    Bogged,
 }
 
 impl MobType {
@@ -75,6 +80,8 @@ impl MobType {
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
+            Self::Stray => ids::STRAY,
+            Self::Bogged => ids::BOGGED,
         }
     }
 
@@ -88,6 +95,8 @@ impl MobType {
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
+            Self::Stray => "minecraft:stray",
+            Self::Bogged => "minecraft:bogged",
         }
     }
 
@@ -100,6 +109,8 @@ impl MobType {
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
+            Self::Stray,
+            Self::Bogged,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -108,7 +119,9 @@ impl MobType {
     /// 成年和幼年的（宽，高，眼高）。
     pub const fn dimensions(self, baby: bool) -> (f32, f32, f32) {
         match (self, baby) {
-            (Self::Skeleton, _) => {
+            // 三种骷髅的 `EntityType` 都是 `sized(0.6F, 1.99F).eyeHeight(1.74F)`。
+            // All three skeletons are `sized(0.6F, 1.99F).eyeHeight(1.74F)`.
+            (Self::Skeleton | Self::Stray | Self::Bogged, _) => {
                 let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
                 (
                     facts.width,
@@ -130,7 +143,24 @@ impl MobType {
 
     /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
     pub const fn is_monster(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk | Self::Skeleton)
+        matches!(self, Self::Zombie | Self::Husk) || self.is_skeleton()
+    }
+
+    /// 是不是 `AbstractSkeleton` 一支：骷髅、流浪者、沼骸共用弓 / 近战目标和装备逻辑。
+    ///
+    /// Whether this is an `AbstractSkeleton`: skeletons, strays and bogged share the
+    /// bow / melee goals and the equipment logic.
+    pub const fn is_skeleton(self) -> bool {
+        matches!(self, Self::Skeleton | Self::Stray | Self::Bogged)
+    }
+
+    /// `Entity.canFreeze()` 的类型部分：`#freeze_immune_entity_types`（流浪者）和
+    /// `Skeleton.canFreeze()` 的覆写（恒假）。
+    ///
+    /// The type part of `Entity.canFreeze()`: `#freeze_immune_entity_types` (strays) and
+    /// the `Skeleton.canFreeze()` override (always false).
+    pub const fn can_freeze(self) -> bool {
+        !matches!(self, Self::Skeleton | Self::Stray)
     }
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
@@ -164,13 +194,15 @@ impl MobType {
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
+            Self::Stray => "minecraft:entities/stray",
+            Self::Bogged => "minecraft:entities/bogged",
         }
     }
 
     /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
     /// 尸壳不烧，僵尸烧。
     pub const fn burns_in_daylight(self) -> bool {
-        matches!(self, Self::Zombie | Self::Skeleton)
+        matches!(self, Self::Zombie) || self.is_skeleton()
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -191,6 +223,8 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
+            Self::Stray => Some("minecraft:entity.stray.ambient"),
+            Self::Bogged => Some("minecraft:entity.bogged.ambient"),
         }
     }
 
@@ -201,6 +235,8 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
+            Self::Stray => Some("minecraft:entity.stray.hurt"),
+            Self::Bogged => Some("minecraft:entity.bogged.hurt"),
         }
     }
 
@@ -211,6 +247,8 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
+            Self::Stray => Some("minecraft:entity.stray.death"),
+            Self::Bogged => Some("minecraft:entity.bogged.death"),
         }
     }
 
@@ -221,6 +259,8 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
+            Self::Stray => Some("minecraft:entity.stray.step"),
+            Self::Bogged => Some("minecraft:entity.bogged.step"),
         }
     }
 
@@ -235,6 +275,8 @@ impl MobType {
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
+            Self::Stray => items::STRAY_SPAWN_EGG,
+            Self::Bogged => items::BOGGED_SPAWN_EGG,
         }
     }
 
@@ -248,6 +290,8 @@ impl MobType {
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
+            Self::Stray => "entity.minecraft.stray",
+            Self::Bogged => "entity.minecraft.bogged",
         }
     }
 
@@ -261,9 +305,16 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
-            .into_iter()
-            .find(|kind| kind.entity_type() == entity_type)
+        [
+            Self::Cow,
+            Self::Zombie,
+            Self::Husk,
+            Self::Skeleton,
+            Self::Stray,
+            Self::Bogged,
+        ]
+        .into_iter()
+        .find(|kind| kind.entity_type() == entity_type)
     }
 
     /// `EntityType.getCategory()`。
@@ -292,6 +343,18 @@ impl MobType {
     /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
     pub const fn fire_immune(self) -> bool {
         false
+    }
+
+    /// `EntityType.Builder.immuneTo(tag)`：`isBlockDangerous` 对这个标签里的方块恒假。
+    /// 流浪者是 `#stray_immune_to`（细雪），所以能在细雪里生成。
+    ///
+    /// `EntityType.Builder.immuneTo(tag)`: `isBlockDangerous` is false for blocks in the
+    /// tag. Strays use `#stray_immune_to` (powder snow) and may spawn inside it.
+    pub const fn immune_to(self) -> Option<mc_bamboo_data::BlockTag> {
+        match self {
+            Self::Stray => Some(mc_bamboo_data::tags::block_tags::STRAY_IMMUNE_TO),
+            _ => None,
+        }
     }
 }
 
@@ -1047,6 +1110,15 @@ pub struct Mob {
     /// The chicken sound variant and `eggTime` countdown.
     pub chicken_sound_variant: chicken::SoundVariant,
     pub egg_time: i32,
+    /// `Skeleton.freezingTracker`：细雪里转化成流浪者的计时。只有相对计数，随实体行搬岛。
+    ///
+    /// `Skeleton.freezingTracker`: the powder-snow conversion into a stray. Relative
+    /// counters only, so it moves with the entity row.
+    pub freeze_conversion: conversion::ConversionTracker,
+    /// `Bogged.DATA_SHEARED`：蘑菇已经被剪掉。
+    ///
+    /// `Bogged.DATA_SHEARED`: the mushrooms have been sheared off.
+    pub bogged_sheared: bool,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1114,7 +1186,8 @@ impl Mob {
             MobType::Pig => pig::attributes(),
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
-            MobType::Skeleton => Attributes::skeleton(),
+            MobType::Skeleton | MobType::Stray => Attributes::skeleton(),
+            MobType::Bogged => bogged::attributes(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -1124,14 +1197,16 @@ impl Mob {
             MobType::Pig => pig::goals(&mut navigation),
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
-            MobType::Skeleton => GoalSelector::skeleton(),
+            MobType::Skeleton | MobType::Stray | MobType::Bogged => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
             MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
                 GoalSelector::default()
             }
-            MobType::Skeleton => GoalSelector::skeleton_targets(),
+            MobType::Skeleton | MobType::Stray | MobType::Bogged => {
+                GoalSelector::skeleton_targets()
+            }
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -1247,6 +1322,8 @@ impl Mob {
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
+            freeze_conversion: conversion::ConversionTracker::default(),
+            bogged_sheared: false,
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1356,6 +1433,12 @@ pub struct MobPublic {
     pub zombie_special_type: i32,
     /// `Zombie.DATA_DROWNED_CONVERSION_ID`。
     pub drowned_converting: bool,
+    /// 骷髅一支在 `Mob` 之后的第一个布尔元数据：骷髅是 `DATA_STRAY_CONVERSION_ID`，
+    /// 沼骸是 `DATA_SHEARED`，流浪者没有。
+    ///
+    /// The first boolean after `Mob` for the skeleton family: `DATA_STRAY_CONVERSION_ID`
+    /// on skeletons, `DATA_SHEARED` on bogged, absent on strays.
+    pub skeleton_flag: bool,
     /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
     ///
     /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
@@ -1404,6 +1487,11 @@ impl MobPublic {
             zombie_baby: mob.zombie_baby,
             zombie_special_type: mob.zombie_special_type,
             drowned_converting: mob.drowned_converting,
+            skeleton_flag: match mob.mob_type {
+                MobType::Skeleton => mob.freeze_conversion.converting,
+                MobType::Bogged => mob.bogged_sheared,
+                _ => false,
+            },
             equipment: mob
                 .equipment
                 .iter()

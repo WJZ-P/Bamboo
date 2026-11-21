@@ -259,7 +259,7 @@ fn finalize_spawn_in_group(
     reason: SpawnReason,
     group: &mut Option<SpawnGroup>,
 ) {
-    if kind == MobType::Skeleton {
+    if kind.is_skeleton() {
         super::skeleton::finalize_spawn(world, entity);
         return;
     }

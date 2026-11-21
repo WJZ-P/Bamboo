@@ -87,6 +87,9 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
     {
         return outcome;
     }
+    if mob.mob_type == MobType::Bogged {
+        return super::bogged::interact(mob, req);
+    }
     let food = !req.held.is_empty() && is_food(mob.mob_type, req.held.item);
     if !food {
         return match mob.mob_type {

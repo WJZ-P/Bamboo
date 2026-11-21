@@ -543,13 +543,25 @@ pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
-    on_ground_position_ok(world, kind.fire_immune(), pos)
+    on_ground_position_ok_for(world, kind.fire_immune(), kind.immune_to(), pos)
 }
 
 /// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`，只看实体类型的防火属性。
 ///
 /// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`, keyed only by fire immunity.
 pub(super) fn on_ground_position_ok(world: &World, fire_immune: bool, pos: BlockPos) -> bool {
+    on_ground_position_ok_for(world, fire_immune, None, pos)
+}
+
+/// 同上，另带 `EntityType.immuneTo` 的方块标签。
+///
+/// As above, with the `EntityType.immuneTo` block tag.
+fn on_ground_position_ok_for(
+    world: &World,
+    fire_immune: bool,
+    immune_to: Option<mc_bamboo_data::BlockTag>,
+    pos: BlockPos,
+) -> bool {
     if !world.world_border().is_within_bounds_pos(pos) {
         return false;
     }
@@ -558,8 +570,8 @@ pub(super) fn on_ground_position_ok(world: &World, fire_immune: bool, pos: Block
     if !is_valid_spawn_below(world, below) {
         return false;
     }
-    is_valid_empty_spawn_block(world, fire_immune, pos)
-        && is_valid_empty_spawn_block(world, fire_immune, above)
+    is_valid_empty_spawn_block(world, fire_immune, immune_to, pos)
+        && is_valid_empty_spawn_block(world, fire_immune, immune_to, above)
 }
 
 /// `BlockState.isValidSpawn`：能不能当落脚块。官方默认是「顶面 `isFaceSturdy(FULL)` 且发光
@@ -573,7 +585,12 @@ pub(super) fn is_valid_spawn_below(world: &World, pos: BlockPos) -> bool {
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
-fn is_valid_empty_spawn_block(world: &World, fire_immune: bool, pos: BlockPos) -> bool {
+fn is_valid_empty_spawn_block(
+    world: &World,
+    fire_immune: bool,
+    immune_to: Option<mc_bamboo_data::BlockTag>,
+    pos: BlockPos,
+) -> bool {
     let state = world.block_state(pos);
     if state.is_collision_shape_full_block() {
         return false;
@@ -587,14 +604,19 @@ fn is_valid_empty_spawn_block(world: &World, fire_immune: bool, pos: BlockPos) -
     if state.is_tagged(block_tags::PREVENT_MOB_SPAWNING_INSIDE) {
         return false;
     }
+    // `EntityType.isBlockDangerous` 开头的 `immuneTo`：标签里的方块直接不算危险。
+    // The `immuneTo` check at the head of `EntityType.isBlockDangerous`.
+    if immune_to.is_some_and(|tag| state.is_tagged(tag)) {
+        return true;
+    }
     !is_block_dangerous(fire_immune, state)
 }
 
 /// `EntityType.isBlockDangerous`：烧着的方块、凋灵玫瑰、甜浆果丛、仙人掌、细雪。
-/// 防火的类型只是不怕烧着的方块，其余几种照样危险（`immuneTo` 名单不建模）。
+/// 防火的类型只是不怕烧着的方块，其余几种照样危险；`immuneTo` 标签由调用方先查。
 ///
-/// Fire-immune types only ignore burning blocks; the rest stay dangerous (the
-/// `immuneTo` list is not modelled).
+/// Fire-immune types only ignore burning blocks; the rest stay dangerous. The caller
+/// checks the `immuneTo` tag first.
 fn is_block_dangerous(fire_immune: bool, state: BlockState) -> bool {
     (!fire_immune && is_burning_block(state))
         || state.0 == mc_bamboo_data::blocks::WITHER_ROSE
@@ -622,8 +644,16 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
             animal_spawn_rules(world, pos)
         }
-        MobType::Zombie | MobType::Skeleton => {
+        MobType::Zombie | MobType::Skeleton | MobType::Bogged => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
+        }
+        // `Stray.checkStraySpawnRules`：怪物规则之后再要求看得见天；找天只读方块，不取随机数。
+        // `Stray.checkStraySpawnRules`: the monster rules, then open sky; the sky search
+        // only reads blocks and draws nothing.
+        MobType::Stray => {
+            is_dark_enough_to_spawn(world, pos)
+                && valid_mob_spawn_block(world, kind, pos)
+                && super::stray::sees_sky_through_powder_snow(world, pos)
         }
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)

@@ -75,6 +75,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::HUSK_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Husk)
         }
+        _ if ctx.item == items::STRAY_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Stray)
+        }
+        _ if ctx.item == items::BOGGED_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Bogged)
+        }
         _ => default_use_on(world, item, ctx),
     }
 }

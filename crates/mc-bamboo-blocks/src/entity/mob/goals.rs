@@ -465,7 +465,10 @@ impl GoalSelector {
             }
         }
         self.goals[index].goal = if has_bow {
-            Goal::Bow(super::skeleton::BowGoal::new(ctx.blocks().difficulty()))
+            Goal::Bow(super::skeleton::BowGoal::for_kind(
+                mob.mob_type,
+                ctx.blocks().difficulty(),
+            ))
         } else {
             Self::skeleton_melee()
         };
@@ -863,8 +866,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    mob.mob_type != super::MobType::Skeleton
-                        || target_by_uid(mob, ctx, uid).is_some()
+                    !mob.mob_type.is_skeleton() || target_by_uid(mob, ctx, uid).is_some()
                 })
         }
         Goal::NearestAttackableTarget {
@@ -999,9 +1001,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // `!navigation.isDone()` 才继续；路径走完就停。
             combat_target(mob, ctx).is_some() && !mob.navigation.is_done()
         }
-        Goal::NearestAttackableTarget { unseen_ticks, .. }
-            if mob.mob_type == super::MobType::Skeleton =>
-        {
+        Goal::NearestAttackableTarget { unseen_ticks, .. } if mob.mob_type.is_skeleton() => {
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
@@ -1367,7 +1367,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
             // `ZombieAttackGoal.tick`：`super.tick()` 之后抬手计时加一，按新的
             // `ticksUntilNextAttack` 决定举不举手。
-            if mob.mob_type != super::MobType::Skeleton {
+            if !mob.mob_type.is_skeleton() {
                 *raise_arm_ticks += 1;
                 mob.aggressive = *raise_arm_ticks >= 5
                     && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
@@ -1912,7 +1912,7 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
     if ctx.blocks().difficulty() == 0 {
         return None;
     }
-    let skeleton = mob.mob_type == super::MobType::Skeleton;
+    let skeleton = mob.mob_type.is_skeleton();
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
         return (player.alive && !player.spectator && !player.creative)
             .then(|| CombatTarget::player(player, skeleton));
@@ -1962,6 +1962,15 @@ fn nearest_attackable(
     let mut best = f64::MAX;
     let mut found = None;
     for player in players {
+        // 战斗用的 `TargetingConditions.test`：`targeter.canAttack(target)` 要求
+        // `Player.canBeSeenAsEnemy()`，能力里 `invulnerable` 的玩家（创造模式）在测距离和
+        // 视线之前就被排除，目标选择器不会为他启动。
+        // Combat `TargetingConditions.test`: `targeter.canAttack(target)` needs
+        // `Player.canBeSeenAsEnemy()`, so a player with the `invulnerable` ability
+        // (creative) is rejected before the range and sight checks and never starts the goal.
+        if player.creative {
+            continue;
+        }
         if !targeting_test(me, mob, view, &player, range, true) {
             continue;
         }

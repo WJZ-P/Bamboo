@@ -72,6 +72,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.y_rot_o = me.y_rot;
     mob.x_rot_o = mob.x_rot;
     me.tick_count += 1;
+    // `Skeleton.tick`：`freezingTracker.tick()` 在 `super.tick()` 之前。
+    // `Skeleton.tick`: `freezingTracker.tick()` runs ahead of `super.tick()`.
+    if mob.mob_type == super::MobType::Skeleton {
+        super::conversion::tick_freezing(me, mob, ctx);
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
@@ -687,7 +692,8 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         motion::apply_effects_from_blocks(me, mob, ctx);
     }
     // 冻结。
-    if !mob.in_powder_snow {
+    let can_freeze = can_freeze(mob);
+    if !mob.in_powder_snow || !can_freeze {
         mob.ticks_frozen = (mob.ticks_frozen - 2).max(0);
     }
     if let Some(speed) = mob.attributes.instance(attribute::MOVEMENT_SPEED) {
@@ -706,7 +712,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             });
         }
     }
-    if me.tick_count % 40 == 0 && mob.ticks_frozen >= 140 {
+    if me.tick_count % 40 == 0 && mob.ticks_frozen >= 140 && can_freeze {
         hurt_server(
             me,
             mob,
@@ -768,6 +774,23 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
 }
 
+/// `LivingEntity.canFreeze()`：盔甲槽里有 `#freeze_immune_wearables` 就不会冻，否则看类型
+/// （[`super::MobType::can_freeze`]）。生物没有旁观模式。
+///
+/// `LivingEntity.canFreeze()`: any `#freeze_immune_wearables` armour piece prevents freezing;
+/// otherwise the type decides ([`super::MobType::can_freeze`]). Mobs are never spectators.
+pub(crate) fn can_freeze(mob: &Mob) -> bool {
+    use mc_bamboo_data::tags::item_tags::FREEZE_IMMUNE_WEARABLES;
+    use mc_bamboo_protocol::packet::play::EquipmentSlot::{Body, Chest, Feet, Head, Legs};
+    // `EquipmentSlotGroup.ARMOR`：四件人形盔甲加身体槽。
+    // `EquipmentSlotGroup.ARMOR`: the four humanoid armour slots plus the body slot.
+    let immune = [Feet, Legs, Chest, Head, Body].into_iter().any(|slot| {
+        let stack = mob.equipment.get(slot);
+        !stack.is_empty() && crate::state::item_is_tagged(stack.item, FREEZE_IMMUNE_WEARABLES)
+    });
+    !immune && mob.mob_type.can_freeze()
+}
+
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
 const POWDER_SNOW_SLOW: &str = "minecraft:powder_snow";
 
@@ -791,7 +814,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
         // `tickCount` 是实体自己的 tick 数；`id` 用网络实体 ID。
         let mut goals = std::mem::take(&mut mob.goals);
-        if mob.mob_type == super::MobType::Skeleton {
+        if mob.mob_type.is_skeleton() {
             goals.reassess_skeleton_weapon(me, mob, ctx);
         }
         let mut targets = std::mem::take(&mut mob.target_goals);
@@ -1612,7 +1635,7 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     mob.dead = true;
     let by_player = mob.last_hurt_by_player_memory_time > 0;
-    if mob.mob_type == super::MobType::Skeleton {
+    if mob.mob_type.is_skeleton() {
         mob.events.push(MobEvent::Death);
         super::skeleton_drops::drop_on_death(me, mob, ctx, source, by_player);
         return;

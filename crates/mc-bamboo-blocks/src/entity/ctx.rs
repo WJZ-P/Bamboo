@@ -476,6 +476,10 @@ pub enum Command {
         owner_uuid: [u8; 16],
         weapon: ItemStack,
         difficulty: i32,
+        /// `Stray.getArrow` / `Bogged.getArrow` 加的效果：（效果 ID，时长）。
+        ///
+        /// The effect added by `Stray.getArrow` / `Bogged.getArrow`: (effect id, duration).
+        effect: Option<(i32, i32)>,
     },
     ArrowImpact {
         block: Option<BlockHit>,
@@ -604,6 +608,17 @@ pub enum Command {
     /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
     /// the origin.
     DropEntityLoot(super::mob::EntityLootRequest),
+    /// `Mob.convertTo(type, ConversionParams.single(..))`：按 `from` 这一刻的状态造出目标
+    /// 生物；发出者自己随后 `discard`。`level_event` 是转化音效的世界事件。
+    ///
+    /// `Mob.convertTo(type, ConversionParams.single(..))`: create the target from the state
+    /// `from` has this tick; the emitter discards itself. `level_event` is the conversion
+    /// sound.
+    ConvertMob {
+        from: Box<super::mob::Mob>,
+        to: super::mob::MobType,
+        level_event: i32,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -629,10 +644,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             owner_uuid,
             weapon,
             difficulty,
+            effect,
         } => {
-            super::mob::skeleton::spawn_arrow(
-                world, position, direction, me.id, owner_uuid, weapon, difficulty,
-            );
+            let shot = super::mob::skeleton::MobArrowShot {
+                position,
+                direction,
+                owner_uuid,
+                weapon,
+                difficulty,
+                effect,
+            };
+            super::mob::skeleton::spawn_arrow(world, me.id, shot);
         }
         Command::ArrowImpact { block, hits, end } => {
             super::arrow::impact(me, world, hits, block, end)
@@ -700,6 +722,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::EatBlock { pos, grass_below } => {
             super::mob::living::apply_eat_block(world, pos, grass_below);
         }
+        Command::ConvertMob {
+            from,
+            to,
+            level_event,
+        } => super::mob::conversion::apply_convert(me, &from, to, level_event, world),
         Command::TrampleTurtleEgg { pos, chance } => {
             super::mob::living::apply_trample_turtle_egg(world, pos, chance);
         }
