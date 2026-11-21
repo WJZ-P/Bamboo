@@ -301,9 +301,22 @@ mod tests {
                 assert_eq!(rows.len(), again.len());
                 for (row, replay) in rows.iter().zip(&again) {
                     assert_eq!(row.public.position, replay.public.position);
-                    // 马、猪、羊等合进来以后同一张刷怪表也会刷出它们，这里只数牛。
-                    // Once horses, pigs, sheep and others are in, the same table spawns
-                    // them too; only cows are counted here.
+                    // 生成期刷怪现在会放所有建模了的动物，不只是牛。
+                    // Generation spawning now places every modelled animal, not only cows.
+                    let modelled = [
+                        entity_type::COW,
+                        entity_type::PIG,
+                        entity_type::SHEEP,
+                        entity_type::CHICKEN,
+                        entity_type::RABBIT,
+                        entity_type::FOX,
+                        entity_type::WOLF,
+                        entity_type::HORSE,
+                        entity_type::DONKEY,
+                        entity_type::MULE,
+                        entity_type::LLAMA,
+                    ];
+                    assert!(modelled.contains(&row.public.kind.entity_type()));
                     assert_eq!(
                         row.public.kind.entity_type(),
                         replay.public.kind.entity_type()

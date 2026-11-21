@@ -19,11 +19,11 @@ const ATTRIBUTES: [i32; 3] = [
 ];
 type State = [i64; 6];
 
-/// 逐刻场景里的类型编号：6 马、7 驴、8 骡、9 羊驼（3–5 是猪、羊、鸡）。
+/// 逐刻场景里的类型编号：9 马、10 驴、11 骡、12 羊驼（3–5 是猪、羊、鸡）。
 ///
-/// Tick-scene kind numbers: 6 horse, 7 donkey, 8 mule, 9 llama (3 to 5 are pig, sheep, chicken).
+/// Tick-scene kind numbers: 9 horse, 10 donkey, 11 mule, 12 llama (3 to 5 are pig, sheep, chicken).
 pub(super) fn scene_kind(kind: i32) -> MobType {
-    KINDS[(kind - 6) as usize]
+    KINDS[(kind - 9) as usize]
 }
 
 #[derive(Debug, Deserialize)]
@@ -459,7 +459,7 @@ impl Report {
             sneaking: case.sneak,
         };
         let outcome = entity
-            .with_mob(|me, mob| interact::interact(me, mob, &request))
+            .with_mob(|me, mob| interact::interact(me, mob, &request, 0))
             .unwrap();
         let swing = match outcome.result {
             InteractionResult::Success => "PREDICTED",

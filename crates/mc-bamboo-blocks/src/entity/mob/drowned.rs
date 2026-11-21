@@ -96,15 +96,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
         (2, Goal::Unavailable("DrownedTridentAttackGoal")),
         (
             2,
-            Goal::MeleeAttack {
-                speed: 1.0,
-                ticks_until_next_attack: 0,
-                ticks_until_path_recalc: 0,
-                pathed_target: Vec3::default(),
-                raise_arm_ticks: 0,
-                last_can_use_check: 0,
-                start_path: None,
-            },
+            super::goals::melee_attack(1.0, false, "DrownedAttackGoal"),
         ),
         (
             5,
@@ -497,7 +489,7 @@ mod tests {
                 (8, "RandomLookAroundGoal"),
                 (1, "DrownedGoToWaterGoal"),
                 (2, "DrownedTridentAttackGoal"),
-                (2, "ZombieAttackGoal"),
+                (2, "DrownedAttackGoal"),
                 (5, "DrownedGoToBeachGoal"),
                 (6, "DrownedSwimUpGoal"),
                 (7, "RandomStrollGoal"),

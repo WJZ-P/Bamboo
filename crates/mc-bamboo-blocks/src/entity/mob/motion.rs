@@ -49,7 +49,7 @@ pub(crate) fn move_living(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCt
             me.bounding_box(),
             living::max_up_step(mob),
             me.on_ground,
-            me.collision_context(),
+            me.mob_collision_context(mob),
             world::CollisionBlocks {
                 block_at: |pos| view.block_state(pos),
                 piston_at: |pos| view.moving_piston_shape(pos),
@@ -314,7 +314,10 @@ fn step_effects(
         super::living::play_sound(me, mob, name, sounds.volume * 0.15, sounds.pitch);
     } else if play_sound {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
+        // `Wolf.playStepSound` 用叫声品种里的脚步声。
+        // `Wolf.playStepSound` uses the step sound of its sound set.
         let sound = match mob.mob_type {
+            super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Step),
             super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
             super::MobType::Chicken => super::chicken::sounds(mob)[3],
             kind => kind.step_sound().unwrap_or(mob.sound_variant.step()),
@@ -337,7 +340,7 @@ fn step_effects(
 /// `Entity.isFree(box)`：没有碰撞，也没有液体。
 pub(crate) fn is_free(me: &Entity, mob: &Mob, view: &dyn BlockView, bounds: Aabb) -> bool {
     let _ = mob;
-    if super::path::has_block_collision(view, bounds, me.collision_context(), |pos| {
+    if super::path::has_block_collision(view, bounds, me.mob_collision_context(mob), |pos| {
         view.block_state(pos)
     }) {
         return false;
@@ -700,7 +703,7 @@ fn inside_between(
         if state.is_air() {
             continue;
         }
-        let inside = shape::entity_inside_boxes(state, pos, entity_context(me));
+        let inside = shape::entity_inside_boxes(state, pos, entity_context(me, mob));
         let from_box = me.make_bounding_box_at(from);
         let in_block = shape::is_unit_cube(&inside)
             || from_box.collided_along_vector(to.subtract(from), &world_boxes(&inside, pos));
@@ -740,14 +743,14 @@ fn inside_between(
     last + 1
 }
 
-fn entity_context(me: &Entity) -> shape::EntityContext {
+fn entity_context(me: &Entity, mob: &Mob) -> shape::EntityContext {
     shape::EntityContext {
         fall_distance: me.fall_distance,
         bottom: me.position.y,
         falling_block: false,
         descending: false,
         placement: false,
-        powder_snow_walkable: false,
+        powder_snow_walkable: mob.walks_on_powder_snow(),
     }
 }
 
@@ -768,7 +771,9 @@ fn entity_inside(
             DamageSource::environment(DamageKind::Cactus),
             1.0,
         );
-    } else if state.is(blocks::SWEET_BERRY_BUSH) {
+    } else if state.is(blocks::SWEET_BERRY_BUSH) && mob.mob_type != super::MobType::Fox {
+        // 狐狸（和蜜蜂）不被浆果丛卡住也不扎。
+        // Foxes (and bees) are neither slowed nor pricked by berry bushes.
         me.fall_distance = 0.0;
         me.stuck_speed_multiplier = Vec3::new(f64::from(0.8_f32), 0.75, f64::from(0.8_f32));
         if state.try_get(AGE_3).unwrap_or(0) != 0 {
