@@ -1865,6 +1865,11 @@ pub struct MobPublic {
     ///
     /// `AbstractSchoolingFish.schoolSize`.
     pub school_size: i32,
+    /// `Turtle.HAS_EGG` / `LAYING_EGG`。
+    ///
+    /// `Turtle.HAS_EGG` / `LAYING_EGG`.
+    pub turtle_has_egg: bool,
+    pub turtle_laying_egg: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1937,6 +1942,8 @@ impl MobPublic {
             puff_state: mob.fish.puff_state,
             fish_leader: mob.fish.leader,
             school_size: mob.fish.school_size,
+            turtle_has_egg: mob.turtle.has_egg,
+            turtle_laying_egg: mob.turtle.laying_egg,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

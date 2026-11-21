@@ -330,6 +330,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Int(mob.squid.dark_ticks),
         );
     }
+    // ---- Turtle.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Turtle {
+        put(&mut out, "home_pos", block_pos_tag(mob.turtle.home_pos));
+        put(&mut out, "has_egg", Tag::Byte(i8::from(mob.turtle.has_egg)));
+    }
     if mob.mob_type == MobType::Rabbit {
         put(&mut out, "RabbitType", Tag::Int(mob.rabbit.variant.id()));
         put(
@@ -551,6 +556,17 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);
+        }
+        // `Turtle.readAdditionalSaveData`：先读自己的家方块，再交给父类。
+        // `Turtle.readAdditionalSaveData`: the home first, then the superclass.
+        if mob.mob_type == MobType::Turtle {
+            let pos = tag::int_array(tag, "home_pos");
+            mob.turtle.home_pos = if pos.len() == 3 {
+                BlockPos::new(pos[0], pos[1], pos[2])
+            } else {
+                me.block_position()
+            };
+            mob.turtle.has_egg = tag::bool_or(tag, "has_egg", false);
         }
         if mob.mob_type == MobType::Rabbit {
             mob.rabbit.variant = super::rabbit::Variant::from_id(tag::int_or(tag, "RabbitType", 0));

@@ -1475,6 +1475,15 @@ fn farm_non_default_data(
             }
             true
         }
+        MobType::Turtle => {
+            if mob.turtle_has_egg {
+                out.push(EntityData::TurtleHasEgg(true));
+            }
+            if mob.turtle_laying_egg {
+                out.push(EntityData::TurtleLayingEgg(true));
+            }
+            true
+        }
         _ => false,
     }
 }

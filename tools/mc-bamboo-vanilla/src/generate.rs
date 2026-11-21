@@ -3579,6 +3579,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PUFFERFISH_PUFF_STATE", facts.pufferfish_puff_state),
         ("CHICKEN_VARIANT", facts.chicken_variant),
         ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
+        ("TURTLE_HAS_EGG", facts.turtle_has_egg),
+        ("TURTLE_LAYING_EGG", facts.turtle_laying_egg),
     ] {
         let _ = writeln!(out, "pub const {name}: u8 = {value};");
     }

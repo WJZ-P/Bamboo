@@ -171,6 +171,7 @@ WebView2 的渲染进程不算在内。
 - **鱿鱼 / 发光鱿鱼**：可用 `/summon` 或刷怪蛋生成，也会自然生成（鱿鱼 `WATER_CREATURE`：`IN_WATER` 落点 + 海平面下 13 格以内、下面是水、上面是水方块；发光鱿鱼 `UNDERGROUND_WATER_CREATURE`：海平面下 33 格以下、原始亮度 0、这一格是水方块；组里第二只起 5% 幼年）。10 点血；按触手节拍游动（两个不占标志位的目标只写移动向量，`travel` 只是 `move`），不吃水流；离水每刻掉 1 点氧气，到 -20 受 2 点溺水伤害；被生物（含玩家）打到时喷墨（喷墨声 + 30 个 `squid_ink` / `glow_squid_ink` 粒子包，发给 32 格内的玩家）并逃离攻击者，发光鱿鱼再变暗 100 刻（`DarkTicksRemaining` 存盘并同步）；死亡按 `entities/squid` / `entities/glow_squid` 掉墨囊 / 荧光墨囊，被玩家打死给 1–3 点经验。逐刻对拍见 `mob-oracle --only squid` / `--only glow`。已知限制：拴绳（`canBeLeashed`）未实现；刷怪蛋对着水面用（`SpawnEggItem.use` 的流体射线）和对着鱿鱼用（生幼崽）未实现，只能点方块；`SWIM` 等游戏事件不发；守卫者、美西螈等以鱿鱼为目标的生物还没有；非生物来源的伤害照官方 `Squid.hurtServer` 返回假（不喷墨）。
 - **鳕鱼 / 鲑鱼 / 热带鱼 / 河豚**：`WaterAnimal` → `AbstractFish` 一支，可用 `/summon` 和刷怪蛋生成，并会自然生成（`WATER_AMBIENT`：`IN_WATER` 落点 + 海平面下 13 格内、下面是水、上面是水方块；热带鱼在繁茂洞穴仍要求上下水，但不限海平面高度）。3 点血；水下用 `WaterBoundPathNavigation`（`SwimNodeEvaluator`，不允许跃出水面），`FishMoveControl` 每刻上浮 0.005、速度按 0.125 插值；`travelInWater` 推进 0.01、乘 0.9、没有目标时每刻下沉 0.005；离水落在方块上会扑腾（`cod.flop` 等，取两次 `nextFloat` 定音高）并重设 `needsSync`；氧气按 `WaterAnimal.handleAirSupply` 掉，到 -20 受 2 点溺水伤害。目标：0 惊慌、4 `RandomSwimmingGoal`（`BehaviorUtils.getRandomSwimmablePos`，最多 11 次抽点）、5 `FollowFlockLeaderGoal`（成群）；河豚多一个 1 `PufferfishPuffGoal`。鲑鱼的花纹（small / medium / large，权重 30/50/15）按尺寸缩放并同步、存 `type`；热带鱼的花纹打包值（低 16 位花纹、16–23 底色、24–31 花纹色，22 个常见组合由官方导出）按组共享、存 `Variant`；河豚 `PuffState` 0/1/2 决定尺寸、膨胀时蜇附近生物（1+状态点伤害 + 60×状态刻中毒）并存 `PuffState`。鱼群按 `FollowFlockLeaderGoal` 跟随同种的领头鱼（8 格内、最多到各自的 `getMaxSchoolSize`）。自然生成按官方 `getMaxSpawnClusterSize`（鳕鱼 / 热带鱼 8、鲑鱼 5、河豚 8）和 `TropicalFish.isMaxGroupSizeReached`（单条不成群时一组只出这一条）收尾；`WATER_AMBIENT` 的 `canSpawnFarFromPlayer` 为假（离玩家超过 64 格不刷），鱼不是 `Animal` 所以 `getWalkTargetValue` 取 0。桶装（`Bucketable`）：拿水桶右键活鱼会放 `item.bucket.fill_fish`、把鱼从世界拿掉并换给玩家对应的鱼桶，`bucket_entity_data` 存 `NoAI` / `Silent` / `NoGravity` / `Glowing` / `Invulnerable` / `PersistenceRequired` / `Health`，鲑鱼的 `salmon/size`、热带鱼的三个花纹组件另存；倒鱼桶先放水源再按 `MobBucketItem.spawn` 放出 `FromBucket = true` 的鱼（朝向取 `level.random`，`finalizeSpawn` 用 `BUCKET` 原因，再套组件和 `loadFromBucketTag`），发射器倒鱼桶同样会生成鱼。逐刻对拍见 `mob-oracle --only cod` / `salmon` / `tropical` / `puffer` / `natural_fish`。已知限制：玩家附近 8 格内的 `AvoidEntityGoal`（优先级 2）未建模；鱼群的初始跟群倒计时在官方是构造函数里从实体随机源抽的（那时还没有种子），这里固定为折半后的 100；`Pufferfish.playerTouch`（玩家碰到被蜇）未接；河豚鼓到第二级时官方晚一刻发 `blow_up` 音效（Bamboo 早一刻），因此 `pufferfish_puff` 从第 64 刻起实体随机源偏一个音效的取值；水花声（`entity.fish.swim`）现在和其他生物一样按体积发 `ClientboundSoundPacket`。
 - 玩家手持弓右键拉弓，松手按 `getPowerForTime` 射出，满弓暴击；创造模式或无限附魔按官方 `useAmmo` 决定是否消耗箭，无限附魔只对普通箭生效，省下的箭标记为只能创造模式拾取。力量 / 冲击 / 火矢 / 穿透附魔和耐久损耗已接入。弩要先装填（`charged_projectiles` 组件，快速装填 II 缩短到 15 刻），装好后再次右键射出；多重射击一次三发、只消耗一支箭。发射器对准箭、药水箭和光灵箭时生成真的箭实体并播放 1002。药水箭命中后按 `PotionContents.forEachEffect` 施加效果（`potion_duration_scale` 生效），光灵箭给 200 刻发光。弓和弩成功开火各计一次 `Stats.ITEM_USED`，客户端请求时回同步；一组多重射击仍只计一次。
+- **海龟**（分支 `op-water`，2026-11-21）：`Animal` 一支，可用 `/summon` 生成，也会自然生成（`CREATURE`：`ON_GROUND` 落点，脚下是沙子、亮度 > 8、海平面 +4 以下）。30 点血、0.25 速度、台阶高度 1；两栖寻路（`AmphibiousPathNavigation` + `AmphibiousNodeEvaluator`：水里也能走，接受上下两个水邻居，贴着 `BLOCKED` 的水算 `WATER_BORDER`）；`travelInWater` 推进 0.1、乘 0.9，没目标且不在回家附近时每刻下沉 0.005；`nextStep` 是 `moveDist + 0.15`。目标按官方优先级：0 惊慌（先找 7 格内的水）、1 繁殖、1 产卵、2 诱惑、4 回家、8 看玩家、9 随机漫步（水里、回家途中、身上有蛋时不逛）。家方块在 `finalizeSpawn` 和读档时记下（`home_pos`）；求爱成功不生成幼崽，母亲挂上 `has_egg`（同步 `HAS_EGG`，存 `has_egg`），6000 刻后不冷却；回家 9 格内、站在沙子上时按 `TurtleLayEggGoal` 放下 1–4 只海龟蛋（`HATCH` 从 0 起、音效音高取世界随机源）；蛋的随机刻按 `TURTLE_EGG_HATCH_CHANCE` 推进 `HATCH`，第三阶段孵出 `EGGS` 只带家方块的幼年海龟；长大成人时按 `entities/turtle_grow` 掉鳞甲。受伤 / 死亡音分幼年，叫声只在成年、水外、站在地上时发（其余不取音高随机数）。已知限制：`TurtleGoToWaterGoal`（3）和 `TurtleTravelGoal`（7）没建模（没有对应的 `Unavailable` 占位，目标表里直接缺这两项）；蛋在三更半夜的孵化概率按 `Timelines` 的 21062–21905 刻用 1.0，其余时段用 0.002，没有建模其它时间线属性；`TurtleEggBlock` 的 `stepOn` / `fallOn` 踩碎、玩家破坏掉蛋、`getShape` 的蛋数形状没做；`/summon` 以外没有逐刻对拍（还没有 `mob-oracle` 场景）。
 - **箭和骷髅的已知限制**：没有自然刷怪、骷髅变体，或铁傀儡和小海龟的具体行为（骷髅会躲狼，狼也会追骷髅）。弩未接烟花火箭和 `SHOT_CROSSBOW` 进度。开火统计不写原版 `stats/<UUID>.json`，也不更新统计计分板目标；玩家用物标志已同步，但没有官方开始使用时立即同步装备的专门路径。弓继承已接受的客户端位移（在地面时去掉竖直分量）；弩不继承。跨维度和载具上的射手位移未对拍。快速装填音效标志按玩家使用状态存放，不复现官方 `CrossbowItem` 共享实例的多玩家交错。药水箭连续插地 600 刻后按 `Arrow.tick` 褪色：广播实体事件 0，拾取物变回普通箭，颜色回到 -1；`inGroundTime` 不进存档，读档后重新计数，和官方一样。药水箭的瞬间效果（治疗 / 伤害）对生物当场结算，对玩家走延后的 `Effect::PlayerEffect`；`Effect` 落地比官方 `addEffect` 晚一个实体阶段（同一刻内）。箭不触发标靶、木按钮、振动或命中特效；未建模的载具、盾牌弹反和组队/PVP 规则也不参与命中。箭支持只关闭重力、仍保留碰撞的 `NoGravity`，但未实现独立的 no-physics 飞行分支。水体熄火按整格水平范围近似流体形状，流动水可能和官方不同；只对箭做这条判定。未同步受击者身上插着的箭数量。骷髅生成按现实本地日期判断万圣节；同类武器重装备后仍不强制重建正在运行的目标。骷髅装备掉率的抢夺取致因玩家命中时的主手（包括玩家拥有的箭）；尚不支持无法在本岛解析的致因玩家及自定义掉落附魔效果。精确模式当场落地命中，并行模式用本刻快照取首批碰撞候选，穿透后的重查发生在命令落地时、看到的是落地时刻的实体表，目标在同一刻移动或失效时可能不同。
 - `/summon minecraft:rabbit` 和兔子刷怪蛋生成兔子：按群系选品种（雪地白兔/白斑兔、沙漠金兔，其余棕/盐/黑），用自己的移动和跳跃控制一跳一跳地走，躲玩家（8 格）、狼（10 格）和敌对生物（4 格），会爬出细雪、啃成熟胡萝卜（`mobGriefing`），吃胡萝卜/金胡萝卜/蒲公英繁殖，幼崽按 1/20 取群系品种、否则随机继承父母一方。存档写 `RabbitType`、`MoreCarrotTicks`，网络同步品种和跳跃事件。`mob-oracle --only rabbit_` 11 个场景逐刻 0 不一致，`loot-oracle --entity-table minecraft:entities/rabbit` 0 不一致。
 - **兔子的已知限制**：杀手兔（品种 99）读写品种号，但不加护甲、攻击目标和名字，行为和普通兔子一样；「躲」的目标只认玩家、狼、僵尸/尸壳/骷髅（其余敌对生物还没有）；躲避取点用平台的 `sin`/`cos`，和 Java `Math.sin` 理论上可能差一位。
@@ -525,7 +526,7 @@ WebView2 的渲染进程不算在内。
   `Monster.isDarkEnoughToSpawn`、`PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`）、
   `finalizeSpawn` 与按组生成（牛按 `AgeableMobGroupData` 抽幼年；马按 `HorseGroupData`、羊驼按 `LlamaGroupData` 同组共享毛色，驴和骡的幼年概率是 0.2；马科的 `getMaxSpawnClusterSize` 是 6）。刷怪区块列表用岛自己的
   世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
-  - **只有已建模的生物会真的生成**（牛、猪、羊、鸡、马、驴、骡、羊驼、僵尸、尸壳、骷髅、鱿鱼、发光鱿鱼、鳕鱼、鲑鱼、热带鱼、河豚）：群系刷怪表里
+  - **只有已建模的生物会真的生成**（牛、猪、羊、鸡、马、驴、骡、羊驼、僵尸、尸壳、骷髅、鱿鱼、发光鱿鱼、鳕鱼、鲑鱼、热带鱼、河豚、海龟）：群系刷怪表里
     其它条目（苦力怕、蜘蛛、史莱姆、末影人、女巫、蝙蝠、海豚等）仍占原版权重，抽完组大小后结束这一组。官方会继续
     尝试生成该物种、消耗后续随机数，并把实际生成的实体计入上限。所以**只有刷怪表里全是已建模
     物种的情形**逐刻产率和官方一致（`mob-oracle --only natural_spawn`：单条目刷怪表、固定区块
@@ -560,6 +561,7 @@ WebView2 的渲染进程不算在内。
   - 真正生成的有牛、猪、羊、鸡、兔子、狐狸、狼、马、驴、骡、羊驼，它们的 `finalizeSpawn` 都取区域随机源。
     山羊、犰狳、北极熊、鹦鹉、熊猫、青蛙、海龟、骆驼、哞菇、炽足兽的放置规则还没翻译，抽到时停止这个
     区块的生成期刷怪（之后的取数没法对齐）。这些生物合进来后在 `natural_gen.rs` 的放置表里接上。
+    海龟虽然已经能在运行时自然生成，生成期这一支还没接。
   - 刷怪在世界线程的完工组装里跑，不在计算池的 `spawn` 阶段：那一刻计算线程还拿不到最终方块
     和光照。每个区块平均只取一两个随机数。
   - 中心区块外的格子按空气、无光照数据读（官方 `spawn` 只要求邻居到 `biomes`）；群系按纯函数
@@ -1044,7 +1046,7 @@ WebView2 的渲染进程不算在内。
   玻璃瓶对着满蜜的蜂巢即使创造模式也消耗一个，手里空了就换成蜜瓶，否则放进背包，放不下就按 `Player.drop` 丢掉；不放蜜蜂、不检查营火的烟，也不记统计。
   要生成实体、改世界生成或者看物品组件的物品还不能用：
   骨粉不能让树苗长成树、不能催大型蘑菇和草方块上的植物，刷怪蛋、矿车、盔甲架、拴绳放不出来，水瓶不能把泥土变成泥巴，
-  刷子只吃掉点击。世界生成决定的方块（紫颂花生长）和要生成实体（海龟蛋、嗅探兽蛋、青蛙卵）的随机刻也不做。
+  刷子只吃掉点击。世界生成决定的方块（紫颂花生长）和要生成实体（嗅探兽蛋、青蛙卵）的随机刻也不做；海龟蛋的随机刻会推进 `HATCH` 并在第三阶段孵出小海龟。
 - 生存模式的挖掘有进度、裂纹和工具耐久。硬度不是 0 时按 `tool` 的 `damage_per_block` 扣，剪刀不看硬度、剪火不扣。
   创造模式不扣。冒险模式挖得动的时候照样扣，旁观模式挖不动。耐久用完物品减一，并发实体事件。
   生存和冒险模式挖掉方块后按战利品表生成物品实体，创造和旁观不掉。不给经验，也不调用 `spawnAfterBreak`，

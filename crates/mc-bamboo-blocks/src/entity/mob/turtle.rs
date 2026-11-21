@@ -635,3 +635,50 @@ pub(super) fn go_home_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityC
 pub(super) fn go_home_stop(mob: &mut Mob) {
     mob.turtle.going_home = false;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{archive::tag, entity::mob::nbt};
+    use mc_bamboo_core::Vec3;
+
+    #[test]
+    fn turtle_dimensions_scale_babies() {
+        assert_eq!(dimensions(MobType::Turtle, false), (1.2, 0.4, 0.4));
+        let (width, height, eye) = dimensions(MobType::Turtle, true);
+        assert!((width - 0.36).abs() < 1.0e-6);
+        assert!((height - 0.12).abs() < 1.0e-6);
+        assert_eq!(height, eye);
+    }
+
+    #[test]
+    fn turtle_attributes_match_vanilla() {
+        let table = attributes();
+        assert_eq!(
+            table.base(attribute::MAX_HEALTH),
+            30.0,
+            "Turtle.createAttributes sets thirty health"
+        );
+        assert_eq!(table.base(attribute::MOVEMENT_SPEED), 0.25);
+        assert_eq!(table.base(attribute::STEP_HEIGHT), 1.0);
+    }
+
+    #[test]
+    fn turtle_saves_home_and_egg_flag() {
+        let mut entity = Entity::by_mob_type(MobType::Turtle, Vec3::new(0.5, 62.0, 0.5));
+        let home = BlockPos::new(4, 61, 9);
+        entity.with_mob(|_, mob| {
+            mob.turtle.home_pos = home;
+            mob.turtle.has_egg = true;
+        });
+        let tag = nbt::write_mob(&entity.split()).expect("a turtle saves");
+        assert_eq!(tag::int_array(&tag, "home_pos"), vec![4, 61, 9]);
+        assert!(tag::bool_or(&tag, "has_egg", false));
+        let row = nbt::read_mob(&tag, MobType::Turtle.name(), 7)
+            .expect("the tag loads")
+            .expect("the turtle is modelled");
+        let mob = row.into_entity().kind.mob().expect("a mob").clone();
+        assert_eq!(mob.turtle.home_pos, home);
+        assert!(mob.turtle.has_egg);
+    }
+}

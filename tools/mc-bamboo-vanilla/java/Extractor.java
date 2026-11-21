@@ -1203,6 +1203,8 @@ public final class Extractor {
         TropicalFish.COMMON_VARIANTS.forEach(variant -> tropicalFishCommonVariants.add(variant.getPackedId()));
         out.add("tropicalFishCommonVariants", tropicalFishCommonVariants);
         out.addProperty("pufferfishPuffState", entityAccessor(net.minecraft.world.entity.animal.fish.Pufferfish.class, "PUFF_STATE").id());
+        out.addProperty("turtleHasEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG").id());
+        out.addProperty("turtleLayingEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "LAYING_EGG").id());
         Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
         var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
         var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");

@@ -907,3 +907,34 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   创造加桶）、发射器一条（生成的鱼 + 随机源种子）。没有 Java 逐刻对拍。
 - 已知差异：`pufferfish_puff` 里河豚从 1 鼓到 2 时 Bamboo 的音效早官方一刻（早取两个
   `nextFloat`），第 64 刻起实体随机源就不一致；`cod_beached` 溺水瞬间两组包差一拍。
+
+## 海龟的实施现状（2026-11-21，分支 `op-water`）
+
+海龟是官方 `Animal` 一支，专属逻辑在 `entity/mob/turtle.rs`。它的移动是两栖的，
+所以这一轮给寻路加了一层公共设施：
+
+- `EvaluatorFlags.amphibious`：`AmphibiousNodeEvaluator`（水当可走、上下两个水邻居、
+  贴着 `BLOCKED` 的水是 `WATER_BORDER`、搜索期间 `WATER` / `WALKABLE` / `WATER_BORDER`
+  的代价临时改成 0 / 6 / 4）和 `AmphibiousPathNavigation`（`canUpdatePath` 恒真、
+  `getTempMobPos` 取 `getY(0.5)`、`getGroundY` 原样、`isStableDestination` 要求下面
+  不是空气、只在液体里允许直走）。美西螈以后直接用这个开关。
+- 实体：`Mob.turtle`（家方块、`travelPos`、`goingHome`、`layEggCounter`、`has_egg`、
+  `laying_egg`、回家目标的两个计数、产卵 `MoveToBlockGoal` 的四个进度）。属性、
+  尺寸（幼年 0.3 倍）、水 / 门三种 `PathfindingMalus`、音效（幼年受伤和死亡、
+  陆地上的叫声、`nextStep = moveDist + 0.15`）、`travelInWater` 和 `canFallInLove`
+  都按官方。
+- 目标：0 `TurtlePanicGoal`（先找 7 格内的水）、1 `TurtleBreedGoal`、1
+  `TurtleLayEggGoal`、2 `TemptGoal`、4 `TurtleGoHomeGoal`、8 `LookAtPlayerGoal`、
+  9 `TurtleRandomStrollGoal`。`TurtleGoToWaterGoal` 和 `TurtleTravelGoal` 没做。
+- 繁殖：`TurtleBreedGoal.breed` 不走 `Animal.spawnChildFromBreeding`，母亲设
+  `has_egg`、双方年龄 6000、掉一颗 `1 + nextInt(7)` 的经验球；`apply_breed` 里有一条
+  海龟分支。喂食时 `canFallInLove` 为假（有蛋）就不进求爱。
+- 产卵和孵化：`TurtleLayEggGoal` 在离家 9 格内找上面是空气、下面是沙子的格子，
+  `layEggCounter > 200` 时用 `Command::LayTurtleEgg` 放 1–4 只蛋（`EGGS`），
+  蛋的 `randomTick` 按 `TURTLE_EGG_HATCH_CHANCE`（白天 0.002、夜里 21062–21905 刻
+  为 1.0）推进 `HATCH`，第三阶段清掉方块并生成 `EGGS` 只幼年海龟（家方块是蛋的位置）。
+- 存档和同步：`home_pos` / `has_egg` 存盘；`HAS_EGG`(18) / `LAYING_EGG`(19) 同步，
+  非默认才发。长大的那一刻按 `entities/turtle_grow` 掉鳞甲（走 `EntityLootRequest`）。
+- 验证：`cargo test -p mc-bamboo-blocks --lib` 716 条通过（含 3 条海龟单元测试：
+  尺寸、属性、存档往返），`cargo clippy --workspace --all-targets -D warnings` 干净。
+  还没有 `mob-oracle` 场景，也没有自然生成夹具。

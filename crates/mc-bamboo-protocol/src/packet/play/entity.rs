@@ -217,6 +217,11 @@ pub enum EntityData {
     SalmonVariant(i32),
     TropicalFishVariant(i32),
     PufferfishPuffState(i32),
+    /// `Turtle.HAS_EGG` / `Turtle.LAYING_EGG`，BOOLEAN。
+    ///
+    /// `Turtle.HAS_EGG` / `Turtle.LAYING_EGG`, BOOLEANs.
+    TurtleHasEgg(bool),
+    TurtleLayingEgg(bool),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -338,6 +343,8 @@ impl EntityData {
             Self::SalmonVariant(_) => mc_bamboo_data::entity_types::SALMON_VARIANT,
             Self::TropicalFishVariant(_) => mc_bamboo_data::entity_types::TROPICAL_FISH_VARIANT,
             Self::PufferfishPuffState(_) => mc_bamboo_data::entity_types::PUFFERFISH_PUFF_STATE,
+            Self::TurtleHasEgg(_) => mc_bamboo_data::entity_types::TURTLE_HAS_EGG,
+            Self::TurtleLayingEgg(_) => mc_bamboo_data::entity_types::TURTLE_LAYING_EGG,
         }
     }
 
@@ -562,6 +569,10 @@ impl EntityData {
             Self::FishFromBucket(from_bucket) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *from_bucket);
+            }
+            Self::TurtleHasEgg(value) | Self::TurtleLayingEgg(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
             }
             Self::SalmonVariant(value)
             | Self::TropicalFishVariant(value)
