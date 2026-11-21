@@ -658,8 +658,9 @@ fn long_jump_tick(jump: &mut LongJump, cx: &mut Cx) {
     cx.mob.discard_friction = true;
     let length = chosen.length();
     let boosted = length + f64::from(living::jump_boost_power(cx.mob));
+    // 只是 `setDeltaMovement`，不置 `needsSync`。
+    // Only `setDeltaMovement`; `needsSync` stays as it is.
     cx.me.delta = chosen.scale(boosted / length);
-    cx.mob.needs_sync = true;
     cx.memories
         .set(MemoryType::LongJumpMidJump, MemoryValue::Bool(true));
     let sound = if cx.mob.goat.screaming {
@@ -1152,8 +1153,14 @@ pub(crate) fn apply_ram_hit(
     let _ = world.hurt_mob(target, source, amount);
     world.with_entity_mut(target, &mut |entity| {
         entity.with_mob(|me, mob| {
+            // `LivingEntity.knockback` 只在扣掉击退抗性后还有力道时置 `needsSync`。
+            // `LivingEntity.knockback` sets `needsSync` only when strength survives the
+            // knockback resistance.
+            let resisted = strength * (1.0 - mob.attributes.value(attribute::KNOCKBACK_RESISTANCE));
             living::knockback(me, mob, strength, dx, dz);
-            mob.needs_sync = true;
+            if resisted > 0.0 {
+                mob.needs_sync = true;
+            }
         });
     });
 }
@@ -1210,7 +1217,6 @@ fn drop_horn(cx: &mut Cx) -> bool {
     } else {
         cx.mob.goat.right_horn = false;
     }
-    cx.mob.needs_sync = true;
     let stack = create_horn(cx.mob);
     let mut between = |min: f32, max: f32| f64::from(min + cx.me.random.next_float() * (max - min));
     let delta = Vec3::new(between(-0.2, 0.2), between(0.3, 0.7), between(-0.2, 0.2));
@@ -1431,6 +1437,59 @@ mod tests {
         assert_eq!(width, 0.9_f32 * 0.7);
         assert_eq!(height, 1.3_f32 * 0.7);
         assert_eq!(dimensions(true), (0.45, 0.65, 0.593_75));
+    }
+
+    /// 喂一个小麦：`usePlayerItem` 之后手里空了只放一遍吃东西的声音；创造模式或者原来
+    /// 不止一个时 `Goat.mobInteract` 再放一遍；不是食物不放。
+    ///
+    /// Feeding one wheat plays the eating sound once when the hand ends up empty; in
+    /// creative or with more than one item `Goat.mobInteract` plays it again; non-food
+    /// plays nothing.
+    #[test]
+    fn eating_sounds_follow_the_stack() {
+        let goat = Entity::by_mob_type(MobType::Goat, Vec3::new(0.0, 64.0, 0.0));
+        let request = |count: i32, creative: bool, item: i32| MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [0; 16],
+            hand: mc_bamboo_core::Hand::Main,
+            held: ItemStack::new(item, count),
+            creative,
+            position: Vec3::new(1.0, 64.0, 0.0),
+            sneaking: false,
+        };
+        let fed = |creative: bool| MobInteraction {
+            result: InteractionResult::SuccessServer,
+            shrink_held: !creative,
+            replacement: None,
+            open_inventory: false,
+            shear: false,
+        };
+        assert_eq!(
+            eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),
+            1
+        );
+        assert_eq!(
+            eating_sounds(&goat, &request(5, false, items::WHEAT), &fed(false)),
+            2
+        );
+        assert_eq!(
+            eating_sounds(&goat, &request(1, true, items::WHEAT), &fed(true)),
+            2
+        );
+        assert_eq!(
+            eating_sounds(&goat, &request(1, false, items::STICK), &fed(false)),
+            0
+        );
+    }
+
+    /// 读档时头相对旧的身体朝向夹在 ±15 度内。
+    ///
+    /// On load the head is clamped to ±15 degrees around the old body yaw.
+    #[test]
+    fn head_clamps_around_the_body() {
+        assert_eq!(clamped_head_rot(0.0, 10.0), 10.0);
+        assert_eq!(clamped_head_rot(0.0, 90.0), 15.0);
+        assert_eq!(clamped_head_rot(0.0, 350.0), -10.0);
     }
 
     /// 冲撞终点在目标那格远离山羊的一侧。
