@@ -602,11 +602,62 @@ pub fn terrain_lookup_counts() -> (u64, u64) {
     )
 }
 
-/// 测试专用：计算闭包里的延迟（毫秒），让并发测试能确定地造出一个等待方。
-/// Test-only delay in the computing closure so concurrency tests can reliably
-/// produce a waiter.
+/// 测试专用：并发到达计数与条件变量，让计算线程确定等到所有并发线程都拿到同一份
+/// 在途占位后再继续执行（或 panic），替代固定睡眠。
+///
+/// Test-only arrival counter and condvar so the computing thread waits until
+/// every concurrent thread has obtained the shared in-flight slot before
+/// proceeding (or panicking), replacing fixed sleeps.
 #[cfg(test)]
-static TEST_COMPUTE_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+static TEST_WAIT_ARRIVALS: OnceLock<(Mutex<(usize, usize)>, std::sync::Condvar)> = OnceLock::new();
+
+#[cfg(test)]
+fn test_wait_arrivals() -> &'static (Mutex<(usize, usize)>, std::sync::Condvar) {
+    TEST_WAIT_ARRIVALS.get_or_init(|| (Mutex::new((0, 0)), std::sync::Condvar::new()))
+}
+
+#[cfg(test)]
+fn arm_test_waiters(expected: usize) {
+    let (lock, cvar) = test_wait_arrivals();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    *state = (0, expected);
+    cvar.notify_all();
+}
+
+#[cfg(test)]
+fn note_test_arrival() {
+    let (lock, cvar) = test_wait_arrivals();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if state.1 > 0 {
+        state.0 += 1;
+        if state.0 >= state.1 {
+            cvar.notify_all();
+        }
+    }
+}
+
+#[cfg(test)]
+fn wait_for_test_arrivals() {
+    let (lock, cvar) = test_wait_arrivals();
+    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut state, wait) = cvar
+        .wait_timeout_while(
+            guard,
+            std::time::Duration::from_secs(60),
+            |&mut (arrived, expected)| expected > 0 && arrived < expected,
+        )
+        .unwrap_or_else(|e| e.into_inner());
+    let expected = state.1;
+    let arrived = state.0;
+    // 只拦第一次进入计算闭包的线程（panic 后重跑的等待方不再等）。
+    // Only hold the first computing thread; a waiter retrying after panic runs freely.
+    *state = (0, 0);
+    drop(state);
+    assert!(
+        !wait.timed_out(),
+        "concurrent test threads did not all reach the in-flight slot ({arrived}/{expected})"
+    );
+}
 /// 测试专用：让等待方拿到一个不同坐标的结果，用于改坏确认。
 /// Test-only: give waiters a result from a different coordinate (break test).
 #[cfg(test)]
@@ -772,6 +823,10 @@ fn cached_terrain(
             slot
         }
     };
+    #[cfg(test)]
+    if test_switches_apply(config.seed) {
+        note_test_arrival();
+    }
 
     // `get_or_init` 的闭包只在第一条到达的线程上跑；它不持有分片锁，也
     // 不会再次进入地形缓存（`generate_chunk_with_beardifier` 只调纯函数
@@ -833,10 +888,7 @@ fn cached_terrain(
         #[cfg(test)]
         if test_switches_apply(config.seed) {
             TEST_COMPUTATIONS.fetch_add(1, Ordering::Relaxed);
-            let delay = TEST_COMPUTE_DELAY_MS.load(Ordering::Relaxed);
-            if delay > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(delay as u64));
-            }
+            wait_for_test_arrivals();
             if TEST_COMPUTE_PANIC.swap(false, Ordering::Relaxed) {
                 panic!("test-only terrain generation panic");
             }
@@ -1242,7 +1294,7 @@ mod tests {
         let (x, z) = (8123, -4567);
         clear_terrain_cache();
         TEST_COMPUTATIONS.store(0, Ordering::Relaxed);
-        TEST_COMPUTE_DELAY_MS.store(60, Ordering::Relaxed);
+        arm_test_waiters(4);
         TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
         let barrier = Arc::new(std::sync::Barrier::new(4));
         let results: Vec<Arc<GeneratedChunk>> = std::thread::scope(|scope| {
@@ -1258,7 +1310,7 @@ mod tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        arm_test_waiters(0);
         for chunk in &results {
             assert!(Arc::ptr_eq(&results[0], chunk));
         }
@@ -1277,7 +1329,7 @@ mod tests {
         // 改坏确认：清缓存后重来，让等待方拿到 x+1 的结果。
         // Break confirmation: repeat with waiters receiving x+1.
         clear_terrain_cache();
-        TEST_COMPUTE_DELAY_MS.store(60, Ordering::Relaxed);
+        arm_test_waiters(4);
         TEST_BREAK_WAITER.store(true, Ordering::Relaxed);
         let broken: Vec<Arc<GeneratedChunk>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
@@ -1292,7 +1344,7 @@ mod tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        arm_test_waiters(0);
         TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
         assert!(
             broken.iter().any(|chunk| !Arc::ptr_eq(&broken[0], chunk)),
@@ -1313,7 +1365,7 @@ mod tests {
         let cfg = Arc::new(normal(0x5eed_7777));
         let (x, z) = (9111, -8111);
         clear_terrain_cache();
-        TEST_COMPUTE_DELAY_MS.store(80, Ordering::Relaxed);
+        arm_test_waiters(4);
         TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
         TEST_COMPUTE_PANIC.store(true, Ordering::Relaxed);
         let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -1340,7 +1392,7 @@ mod tests {
         let mut panics = 0;
         for _ in 0..4 {
             let outcome = rx
-                .recv_timeout(std::time::Duration::from_secs(10))
+                .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("a waiter hung after the computing thread panicked");
             match outcome {
                 Ok(Ok(_)) => successes += 1,
@@ -1353,7 +1405,7 @@ mod tests {
             successes >= 1,
             "a waiter must re-run the closure and succeed"
         );
-        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        arm_test_waiters(0);
         TEST_COMPUTE_PANIC.store(false, Ordering::Relaxed);
 
         // 之后再查同一个键，必须拿到正确结果，且失败占位没有残留。
