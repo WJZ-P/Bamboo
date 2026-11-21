@@ -61,12 +61,10 @@ pub(in crate::entity::mob) fn ai_step_start(me: &mut Entity, mob: &mut Mob) {
 
 /// `AbstractHorse.aiStep` 在 `super.aiStep()` 之后：活着时 `nextInt(900)` 回一点血，
 /// 能吃草的（不是羊驼）不在吃、没人骑时 `nextInt(300)` 并且脚下是草方块就开始吃，
-/// 吃满 50 刻停下。`followMommy` 只对存档里 `Bred` 为真的幼崽生效，而且官方只
-/// `createPath` 不走，没有可见效果，这里不做。
+/// 吃满 50 刻停下，最后 `followMommy`。
 ///
 /// After `super.aiStep()`: heal on `nextInt(900)`, start grazing on `nextInt(300)`
-/// over a grass block, stop after 50 ticks. `followMommy` only computes a path it
-/// never follows, so it has no visible effect and is skipped.
+/// over a grass block, stop after 50 ticks, then `followMommy`.
 pub(in crate::entity::mob) fn ai_step_end(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if !living::is_alive(me, mob) {
         return;
@@ -74,9 +72,16 @@ pub(in crate::entity::mob) fn ai_step_end(me: &mut Entity, mob: &mut Mob, ctx: &
     if me.random.next_int_bounded(900) == 0 && mob.death_time == 0 {
         heal(mob, 1.0);
     }
-    if mob.mob_type == MobType::Llama {
-        return;
+    if mob.mob_type != MobType::Llama {
+        graze(me, mob, ctx);
     }
+    follow_mommy(me, mob, ctx);
+}
+
+/// `AbstractHorse.aiStep` 里 `canEatGrass()` 为真（不是羊驼）的那一段。
+///
+/// The `canEatGrass()` part of `AbstractHorse.aiStep` (everything but llamas).
+fn graze(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let below = BlockPos::containing(me.position).below();
     if !state(mob).eating
         && me.random.next_int_bounded(300) == 0
@@ -91,6 +96,48 @@ pub(in crate::entity::mob) fn ai_step_end(me: &mut Entity, mob: &mut Mob, ctx: &
             state.eating_counter = 0;
             state.eating = false;
         }
+    }
+}
+
+/// `AbstractHorse.followMommy`（羊驼不在商队时同样）：繁殖出生、还是幼崽、没在吃草时，
+/// 在碰撞箱外扩 16 格里找 16 格内最近的、活着的、`isBred()` 的马科，离得超过 2 格就
+/// `navigation.createPath(mommy, 0)`。官方只算路径不走，但会改导航的目标格并重置卡住计时。
+///
+/// `AbstractHorse.followMommy` (llamas outside a caravan alike): a bred, baby,
+/// non-grazing equine looks for the nearest living bred equine within 16 blocks
+/// and, if it is more than 2 blocks away, calls `navigation.createPath(mommy, 0)`.
+/// Vanilla never follows that path, but it updates the target and resets the
+/// stuck timeout.
+fn follow_mommy(me: &Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let (bred, eating) = {
+        let state = state(mob);
+        (state.bred, state.eating)
+    };
+    if !bred || !mob.is_baby() || eating {
+        return;
+    }
+    let area = me.bounding_box().inflate(16.0, 16.0, 16.0);
+    let mut mommy: Option<(f64, mc_bamboo_core::Vec3)> = None;
+    ctx.for_each_other_in(area, &mut |other| {
+        let crate::entity::KindPublic::Mob(public) = &other.kind else {
+            return;
+        };
+        let bred = public.equine.is_some_and(|equine| equine.flags & 8 != 0);
+        if other.removed || !public.is_alive() || !bred {
+            return;
+        }
+        let distance = me.position.distance_to_sqr(other.position);
+        if distance <= 16.0 * 16.0 && mommy.is_none_or(|(best, _)| distance < best) {
+            mommy = Some((distance, other.position));
+        }
+    });
+    let Some((distance, position)) = mommy else {
+        return;
+    };
+    if distance > 4.0 {
+        let nav = living::nav_mob(me, mob, ctx.blocks());
+        mob.navigation
+            .create_path(ctx.blocks(), &nav, BlockPos::containing(position), 0);
     }
 }
 
@@ -277,5 +324,46 @@ mod tests {
             ["minecraft:entity.horse.land"]
         );
         assert!(landing_sounds(MobType::Llama, false, 9.0).is_empty());
+    }
+
+    /// 繁殖标记的幼崽找繁殖标记的成年马科算一条路（只改导航目标，不走）。
+    fn mommy_target(adult_bred: bool, foal_kind: MobType) -> Option<BlockPos> {
+        let mut level = crate::testing::TestLevel::new();
+        for x in -2..12 {
+            for z in -3..4 {
+                level.set(BlockPos::new(x, 63, z), crate::BlockState(blocks::STONE));
+            }
+        }
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = crate::World::new(&mut level, &mut ticks);
+        let mut adult = Entity::by_mob_type(MobType::Donkey, Vec3::new(6.5, 64.0, 0.5));
+        adult.with_mob(|_, mob| state(mob).bred = adult_bred);
+        world.spawn_entity(adult);
+        let mut foal = Entity::by_mob_type(foal_kind, Vec3::new(0.5, 64.0, 0.5));
+        foal.on_ground = true;
+        foal.with_mob(|me, mob| {
+            mob.age = -24000;
+            state(mob).bred = true;
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, 0);
+            follow_mommy(me, mob, &mut ctx);
+            mob.navigation.target_pos
+        })
+        .expect("equine row")
+    }
+
+    /// `followMommy` 只认 `isBred()` 的马科，羊驼幼崽也找（不在商队）。
+    ///
+    /// `followMommy` only picks bred equines; llama foals look too outside a caravan.
+    #[test]
+    fn bred_foal_plans_a_path_to_the_nearest_bred_equine() {
+        assert_eq!(
+            mommy_target(true, MobType::Horse),
+            Some(BlockPos::new(6, 64, 0))
+        );
+        assert_eq!(
+            mommy_target(true, MobType::Llama),
+            Some(BlockPos::new(6, 64, 0))
+        );
+        assert_eq!(mommy_target(false, MobType::Horse), None);
     }
 }
