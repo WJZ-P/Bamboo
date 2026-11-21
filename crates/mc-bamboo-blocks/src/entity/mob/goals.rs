@@ -417,7 +417,15 @@ impl GoalSelector {
                         wanted: Vec3::default(),
                     },
                 ),
-                (3, Goal::Unavailable("AvoidEntityGoal")),
+                (
+                    3,
+                    Goal::Avoid(super::avoid::AvoidEntity::new(
+                        super::avoid::AvoidClass::Wolf,
+                        6.0,
+                        1.0,
+                        1.2,
+                    )),
+                ),
                 (
                     5,
                     Goal::Stroll {

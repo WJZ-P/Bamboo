@@ -802,6 +802,20 @@ public final class MobOracle {
         }
     }
 
+    /** 狼的驯服标志、坐下命令、主人、持续仇恨、讨食、项圈色和最大生命。 */
+    @SuppressWarnings("unchecked")
+    static void appendWolfState(StringBuilder out, net.minecraft.world.entity.animal.wolf.Wolf wolf) {
+        var flags = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) readStatic(
+                net.minecraft.world.entity.TamableAnimal.class, "DATA_FLAGS_ID");
+        out.append(",\"wolfTame\":").append(wolf.getEntityData().get(flags) & 0xFF);
+        out.append(",\"wolfSit\":").append(wolf.isOrderedToSit());
+        out.append(",\"wolfOwned\":").append(wolf.getOwnerReference() != null);
+        out.append(",\"wolfAnger\":").append(wolf.getPersistentAngerEndTime());
+        out.append(",\"wolfBeg\":").append(wolf.isInterested());
+        out.append(",\"wolfCollar\":").append(wolf.getCollarColor().getId());
+        out.append(",\"wolfMaxHp\":").append(Float.floatToRawIntBits(wolf.getMaxHealth()));
+    }
+
     /** `SleepGoal.countdown` 在构造时用随机种子取，对拍时报给 Bamboo 一侧照填。 */
     static int foxSleepCountdown(Mob mob) {
         if (!(mob instanceof net.minecraft.world.entity.animal.fox.Fox)) return 0;
@@ -874,6 +888,68 @@ public final class MobOracle {
             Scenes.ground(baby, 15);
             baby.mob(4, 0.5, 64.0, 0.5, 0.0F, 27L, -24000);
             scenes.add(baby);
+        }
+    }
+
+    /**
+     * 狼场景：野狼闲逛、追兔子、骨头驯服 + 染项圈 + 喂肉 + 起身、主人在远处时跟随和瞬移、
+     * 被打后反击并呼叫同伴、湿身抖水、幼崽。
+     */
+    static final class WolfScenes {
+        static void add(List<Scene> scenes) {
+            int bone = BuiltInRegistries.ITEM.getId(Items.BONE);
+            int air = BuiltInRegistries.ITEM.getId(Items.AIR);
+            int beef = BuiltInRegistries.ITEM.getId(Items.BEEF);
+            int blueDye = BuiltInRegistries.ITEM.getId(Items.DYE.blue());
+            for (long seed : new long[] {7L, 17L}) {
+                Scene wander = new Scene("wolf_wander_" + seed).ticks(600);
+                Scenes.ground(wander, 15);
+                wander.mob(5, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(wander);
+            }
+            Scene hunt = new Scene("wolf_hunt_rabbit").ticks(300);
+            Scenes.ground(hunt, 15);
+            hunt.mob(5, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+            hunt.mob(3, 7.5, 64.0, 0.5, 0.0F, 52L, 0);
+            scenes.add(hunt);
+            for (long seed : new long[] {61L, 62L, 63L}) {
+                Scene tame = new Scene("wolf_tame_" + seed).ticks(300);
+                Scenes.ground(tame, 15);
+                tame.mob(5, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                tame.player(2.5, 64.0, 0.5, Items.AIR);
+                for (int t = 2; t <= 14; t += 4) tame.interact(t, 0, 0, bone, 0);
+                tame.interact(100, 0, 0, blueDye, 0);
+                tame.interact(120, 0, 0, beef, 0);
+                tame.interact(140, 0, 0, air, 0);
+                scenes.add(tame);
+            }
+            for (long seed : new long[] {65L, 66L}) {
+                Scene follow = new Scene("wolf_follow_" + seed).ticks(300);
+                Scenes.ground(follow, 15);
+                follow.mob(5, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                follow.player(14.5, 64.0, 0.5, Items.AIR);
+                for (int t = 2; t <= 14; t += 4) follow.interact(t, 0, 0, bone, 0);
+                follow.interact(60, 0, 0, air, 0);
+                scenes.add(follow);
+            }
+            Scene angry = new Scene("wolf_angry").ticks(90).difficulty(2);
+            angry.realPlayers = true;
+            Scenes.ground(angry, 15);
+            angry.mob(5, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+            angry.mob(5, 0.5, 64.0, 3.5, 0.0F, 72L, 0);
+            angry.player(4.5, 64.0, 0.5, Items.AIR);
+            angry.hurts.add(new double[] {5, 0, 1.0, 0});
+            scenes.add(angry);
+            Scene wet = new Scene("wolf_wet").ticks(400);
+            Scenes.ground(wet, 10);
+            wet.fill(-1, 63, -1, 1, 63, 1, Scenes.WATER);
+            wet.mob(5, 0.5, 63.0, 0.5, 0.0F, 81L, 0);
+            scenes.add(wet);
+            Scene puppy = new Scene("wolf_puppy").ticks(300);
+            Scenes.ground(puppy, 15);
+            puppy.mob(5, 0.5, 64.0, 0.5, 0.0F, 91L, -24000);
+            puppy.player(3.5, 64.0, 0.5, Items.BONE);
+            scenes.add(puppy);
         }
     }
 
@@ -1722,6 +1798,7 @@ public final class MobOracle {
             scenes.add(rabbitHop);
             RabbitScenes.add(scenes);
             FoxScenes.add(scenes);
+            WolfScenes.add(scenes);
 
             Scene rabbitRaid = new Scene("rabbit_raid").ticks(60);
             rabbitRaid.fill(-4, 63, -4, 4, 63, 4, Blocks.GRASS_BLOCK.defaultBlockState());
@@ -1948,6 +2025,8 @@ public final class MobOracle {
             players.add(player);
         }
         level.playersList().addAll(players);
+        // `LivingEntity.pushEntities` 也会被玩家推：玩家要进实体表，排在牛前面。
+        level.tracked.addAll(0, players);
         List<Cow> cows = new ArrayList<>();
         int playerIds = level.nextId;
         /** 逐刻的出站包字节；外层数组是刻，内层是那一刻这一头牛的全部包。 */
@@ -3336,8 +3415,9 @@ public final class MobOracle {
             zombieSinks.add(sink);
         }
         level.playersList().addAll(players);
-        // 野生动物场景要用 `getEntitiesOfClass(Player.class, ...)` 找到玩家（躲避目标）。
-        if (!scene.name.startsWith("zombie_")) level.tracked.addAll(players);
+        // 野生动物场景要用 `getEntitiesOfClass(Player.class, ...)` 找到玩家（躲避目标）；
+        // `LivingEntity.pushEntities` 也会被玩家推，所以僵尸场景同样放进实体表。
+        level.tracked.addAll(players);
         // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
@@ -3349,6 +3429,7 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
+                case 5 -> EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND);
                 case 4 -> EntityTypes.FOX.create(level, EntitySpawnReason.COMMAND);
                 case 3 -> EntityTypes.RABBIT.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
@@ -3415,9 +3496,17 @@ public final class MobOracle {
             line.append(",\"y\":").append(Double.doubleToRawLongBits(player.getY()));
             line.append(",\"z\":").append(Double.doubleToRawLongBits(player.getZ()));
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
-            line.append(",\"item\":0,\"looting\":0}");
+            line.append(",\"item\":").append(BuiltInRegistries.ITEM.getId(scene.playerItems.get(i)));
+            line.append(",\"looting\":0}");
         }
-        line.append("],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append("],\"hurts\":[");
+        for (int i = 0; i < scene.hurts.size(); i++) {
+            if (i > 0) line.append(',');
+            double[] hurt = scene.hurts.get(i);
+            line.append('[').append((int) hurt[0]).append(',').append((int) hurt[1]).append(',')
+                    .append(Float.floatToRawIntBits((float) hurt[2])).append(',').append((int) hurt[3]).append(']');
+        }
+        line.append("],\"summons\":[],\"eggs\":[]");
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -3435,7 +3524,15 @@ public final class MobOracle {
         line.append(",\"helmetDamage\":").append(scene.helmetDamage);
         line.append(",\"playerAbsorption\":0,\"playerExhaustion\":0");
         line.append(",\"playerSteps\":null,\"playerPackets\":null,\"keyPackets\":null");
-        line.append(",\"interactActions\":[],\"interactions\":null");
+        line.append(",\"interactActions\":[");
+        for (int i = 0; i < scene.interactions.size(); i++) {
+            if (i > 0) line.append(',');
+            int[] action = scene.interactions.get(i);
+            line.append('[').append(action[0]).append(',').append(action[1]).append(',')
+                    .append(action[2]).append(',').append(action[3]).append(',')
+                    .append(action[4]).append(']');
+        }
+        line.append("],\"interactions\":null");
         line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
         line.append(",\"steps\":[");
         line.append(zombieStepJson(mobs, players, level));
@@ -3457,6 +3554,16 @@ public final class MobOracle {
                     if (player.damageCooldownTime > 0) player.damageCooldownTime--;
                     if (player.hurtTime > 0) player.hurtTime--;
                 }
+            }
+            // 右键交互先于玩家攻击，和 Bamboo 一侧的重放顺序相同。
+            for (int[] action : scene.interactions) {
+                if (action[0] != tick) continue;
+                ServerPlayer actor = players.get(action[2]);
+                actor.setItemInHand(InteractionHand.MAIN_HAND,
+                        new ItemStack(net.minecraft.world.item.Item.byId(action[3])));
+                ((net.minecraft.world.entity.animal.Animal) mobs.get(action[1])).mobInteract(actor, InteractionHand.MAIN_HAND);
+                // 交互完换回场景给的那件，Bamboo 一侧的玩家视图手里一直是它。
+                actor.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(scene.playerItems.get(action[2])));
             }
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick && (int) hurt[1] < mobs.size()) {
@@ -3589,14 +3696,21 @@ public final class MobOracle {
             if (mob instanceof net.minecraft.world.entity.animal.rabbit.Rabbit rabbit) {
                 out.append(",\"rabbitCarrotTicks\":").append(getInt(rabbit.getClass(), rabbit, "moreCarrotTicks"));
             }
-            out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
+            if (mob instanceof net.minecraft.world.entity.animal.wolf.Wolf wolf) {
+                appendWolfState(out, wolf);
+            }
+            out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
+                    ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);
+            out.append(",\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
             out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             // 狐狸比原始的 `target` 字段：`getTarget()` 会把死掉的猎物读成空，Bamboo 存原始值。
-            LivingEntity shownTarget = mob instanceof net.minecraft.world.entity.animal.fox.Fox ? mob.getTargetUnchecked() : mob.getTarget();
+            LivingEntity shownTarget = mob instanceof net.minecraft.world.entity.animal.fox.Fox
+                    || mob instanceof net.minecraft.world.entity.animal.wolf.Wolf
+                    ? mob.getTargetUnchecked() : mob.getTarget();
             out.append(",\"target\":").append(shownTarget == null ? -1 : shownTarget.getId());
             out.append(",\"baby\":").append(mob instanceof Zombie z && z.isBaby());
             out.append(",\"aggr\":").append(mob.isAggressive());

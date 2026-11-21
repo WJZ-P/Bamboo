@@ -1325,11 +1325,22 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             others.push((other.uid, other.position));
         }
     });
-    if others.is_empty() {
+    // `getPushableEntities` 也收玩家（旁观者除外）；玩家那一侧的推力服务端不生效，
+    // 这里只算生物自己被推开的那一半。
+    // Players count as pushable too (not spectators); only the mob's half applies.
+    let mut players = Vec::new();
+    ctx.blocks().for_each_player(&mut |player| {
+        if player.alive && !player.spectator && super::avoid::player_box(player).intersects(bounds)
+        {
+            players.push(player.position);
+        }
+    });
+    if others.is_empty() && players.is_empty() {
         return;
     }
     let cramming = ctx.blocks().block_game_rules().max_entity_cramming;
-    if cramming > 0 && others.len() as i32 > cramming - 1 && me.random.next_int_bounded(4) == 0 {
+    let crowd = (others.len() + players.len()) as i32;
+    if cramming > 0 && crowd > cramming - 1 && me.random.next_int_bounded(4) == 0 {
         hurt_server(
             me,
             mob,
@@ -1339,6 +1350,11 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     let pushable_self = is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks());
+    for position in players {
+        if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
+            me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+        }
+    }
     for (uid, position) in others {
         ctx.emit(
             Command::PushMob {

@@ -469,6 +469,23 @@ struct CowStep {
     fox_flags: i32,
     #[serde(default, rename = "foxMouth")]
     fox_mouth: i32,
+    /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
+    ///
+    /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
+    #[serde(default, rename = "wolfTame")]
+    wolf_tame: i32,
+    #[serde(default, rename = "wolfSit")]
+    wolf_sit: bool,
+    #[serde(default, rename = "wolfOwned")]
+    wolf_owned: bool,
+    #[serde(default, rename = "wolfAnger")]
+    wolf_anger: i64,
+    #[serde(default, rename = "wolfBeg")]
+    wolf_beg: bool,
+    #[serde(default, rename = "wolfCollar")]
+    wolf_collar: i32,
+    #[serde(default, rename = "wolfMaxHp")]
+    wolf_max_hp: i64,
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸和兔子、狐狸、狼。
@@ -1041,8 +1058,11 @@ impl Report {
             players: case
                 .players
                 .iter()
-                .map(|player| PlayerView {
-                    uuid: None,
+                .enumerate()
+                .map(|(index, player)| PlayerView {
+                    // 官方一侧的玩家 UUID 是 (1, 2 + 下标)；狼认主人要用它。
+                    // The official players use UUID (1, 2 + index); wolves match owners by it.
+                    uuid: Some(((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),
                     uid: player.id,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),
@@ -1108,6 +1128,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    5 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Fox,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
@@ -1683,6 +1704,13 @@ impl Report {
                 plain!(rabbit_carrot_ticks);
                 plain!(fox_flags);
                 plain!(fox_mouth);
+                plain!(wolf_tame);
+                plain!(wolf_sit);
+                plain!(wolf_owned);
+                plain!(wolf_anger);
+                plain!(wolf_beg);
+                plain!(wolf_collar);
+                plain!(wolf_max_hp);
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -2883,6 +2911,10 @@ fn uuid_text(bytes: &[u8; 16]) -> String {
     )
 }
 
+fn is_wolf(mob: &Mob) -> bool {
+    mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Wolf
+}
+
 fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
     let path = mob.navigation.path.as_ref().map(|path| {
         let mut values = vec![path.next_node_index as i32];
@@ -2946,6 +2978,28 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             mob.equipment
                 .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
                 .item
+        } else {
+            0
+        },
+        wolf_tame: if is_wolf(mob) {
+            i32::from(mob.tame.flags)
+        } else {
+            0
+        },
+        wolf_sit: is_wolf(mob) && mob.tame.ordered_to_sit,
+        wolf_owned: is_wolf(mob) && mob.tame.owner.is_some(),
+        wolf_anger: if is_wolf(mob) {
+            mob.wolf.anger_end_time
+        } else {
+            0
+        },
+        wolf_beg: is_wolf(mob) && mob.wolf.interested,
+        wolf_collar: if is_wolf(mob) { mob.wolf.collar } else { 0 },
+        wolf_max_hp: if is_wolf(mob) {
+            let max = mob
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::MAX_HEALTH);
+            i64::from((max as f32).to_bits())
         } else {
             0
         },

@@ -27,8 +27,7 @@ impl AvoidClass {
     fn matches(self, kind: MobType) -> bool {
         match self {
             Self::Player => false,
-            // 狼还没实现，先匹配不到。Wolves are not modelled yet.
-            Self::Wolf => false,
+            Self::Wolf => kind == MobType::Wolf,
             Self::Monster => kind.is_monster(),
             // 北极熊还没实现。Polar bears are not modelled yet.
             Self::PolarBear => false,
@@ -195,6 +194,7 @@ impl AvoidEntity {
                     position: other.position,
                     eye,
                     alive: public.is_alive(),
+                    tame: public.tame_flags & super::tame::FLAG_TAME != 0,
                 }
                 .into(),
             );
@@ -234,8 +234,14 @@ impl AvoidEntity {
                 position,
                 eye,
                 alive,
+                tame,
             } => {
                 if !alive {
+                    return false;
+                }
+                // `FoxWolf`：狐狸不躲驯服的狼。
+                // `FoxWolf`: foxes ignore tamed wolves.
+                if self.filter == AvoidFilter::FoxWolf && tame {
                     return false;
                 }
                 if matches!(
@@ -264,6 +270,7 @@ enum Candidate {
         position: Vec3,
         eye: f32,
         alive: bool,
+        tame: bool,
     },
 }
 
