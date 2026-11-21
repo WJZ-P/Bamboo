@@ -165,14 +165,15 @@ impl World<'_> {
     }
 }
 
-/// `Projectile.shoot` / `updateRotation` 的目标朝向：`atan2 * 180.0F / (float) PI`，
-/// 先按 double 算完再截成 float。
+/// `Projectile.shoot` / `updateRotation` 的目标朝向。反编译出来的 `180.0F / (float) PI`
+/// 是编译期折叠好的 float 常量 `57.295776F`，所以是 double 乘这个常量再截成 float。
 ///
-/// The target angles of `Projectile.shoot` / `updateRotation`, computed in double
-/// and narrowed to float at the end.
+/// The target angles of `Projectile.shoot` / `updateRotation`. The decompiled
+/// `180.0F / (float) PI` is the folded float constant `57.295776F`, so the double is
+/// multiplied by that constant and then narrowed.
 fn rotation(movement: Vec3) -> (f32, f32) {
     let horizontal = (movement.x * movement.x + movement.z * movement.z).sqrt();
-    let degrees = |radians: f64| (radians * 180.0 / f64::from(std::f32::consts::PI)) as f32;
+    let degrees = |radians: f64| (radians * f64::from(180.0_f32 / std::f32::consts::PI)) as f32;
     (
         degrees(mth::atan2(movement.x, movement.z)),
         degrees(mth::atan2(movement.y, horizontal)),

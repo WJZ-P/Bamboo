@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod egg;
 mod projectile;
 mod shot;
 mod skeleton_death;
@@ -76,6 +77,8 @@ enum Line {
     ArrowPickup(projectile::ArrowPickupCase),
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
+    Egg(Box<egg::EggCase>),
+    EggThrow(egg::EggThrowCase),
     End(End),
 }
 
@@ -946,6 +949,8 @@ impl Report {
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
+                Line::Egg(case) => self.replay_egg(&case),
+                Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

@@ -532,13 +532,14 @@ fn run_cases(
                 format!("entity {label}: Bamboo cannot read the official NBT"),
             );
             if matches!(&tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
-                key == "id" && matches!(value, Tag::String(id) if id == "minecraft:arrow")
+                key == "id"
+                    && matches!(value, Tag::String(id) if id == "minecraft:arrow" || id == "minecraft:egg")
             })) && let Some(row) = rebuilt
             {
                 let saved = write_entity(&row).map_err(|error| error.to_string())?;
                 report.check(
                     canonical_tag(&saved) == *written,
-                    format!("entity {label}: Bamboo arrow load -> save changed the NBT"),
+                    format!("entity {label}: Bamboo projectile load -> save changed the NBT"),
                 );
             }
         }
@@ -1466,7 +1467,50 @@ fn entity_cases() -> Vec<Tag> {
     with_uuid.push(("UUID".to_owned(), uuid));
     out.push(Tag::Compound(with_uuid));
     out.extend(arrow_archive_cases());
+    out.extend(egg_archive_cases());
     out
+}
+
+/// 扔出的鸡蛋：带主人、离开主人、无重力的蓝蛋，和一枚刚生成的普通蛋。
+///
+/// Thrown eggs: a blue egg with an owner, left owner and no gravity, and a fresh plain egg.
+fn egg_archive_cases() -> [Tag; 2] {
+    use mc_bamboo_blocks::entity::thrown_egg::EggShot;
+    let shot = |item, position| EggShot {
+        position,
+        direction: Vec3::new(1.0, 0.0, 0.0),
+        power: 1.5,
+        uncertainty: 1.0,
+        source_movement: None,
+        owner: None,
+        owner_uuid: None,
+        item: ItemStack::new(item, 16),
+    };
+    let mut blue = Entity::thrown_egg(&shot(
+        mc_bamboo_data::items::BLUE_EGG,
+        Vec3::new(1.5, 65.5, -2.0),
+    ));
+    blue.id = 26;
+    blue.delta = Vec3::new(0.9, -0.3, 0.1);
+    blue.y_rot = 40.0;
+    let EntityKind::Egg(egg) = &mut blue.kind else {
+        unreachable!()
+    };
+    egg.uuid = 26_u128.to_be_bytes();
+    egg.owner_uuid = Some(17_u128.to_be_bytes());
+    egg.x_rot = -12.5;
+    egg.no_gravity = true;
+    egg.left_owner = true;
+    egg.has_been_shot = true;
+    let mut plain = Entity::thrown_egg(&shot(
+        mc_bamboo_data::items::EGG,
+        Vec3::new(2.5, 66.0, -2.0),
+    ));
+    plain.id = 27;
+    if let EntityKind::Egg(egg) = &mut plain.kind {
+        egg.uuid = 27_u128.to_be_bytes();
+    }
+    [blue, plain].map(|entity| write_entity(&entity.split()).unwrap())
 }
 
 fn arrow_archive_cases() -> [Tag; 2] {

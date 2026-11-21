@@ -261,6 +261,16 @@ public final class MobOracle {
                 playShot(official, out, name);
                 cases++;
             }
+            for (String name : List.of("egg_floor", "egg_hatch_one", "egg_hatch_four", "egg_hit_cow")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playEgg(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("egg_throw", "egg_throw_moving", "egg_throw_creative")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playEggThrow(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -2894,6 +2904,204 @@ public final class MobOracle {
         line.append(",\"levelSeed\":").append(randomSeed(level.getRandom()));
         line.append("}\n");
         out.write(line.toString());
+        out.flush();
+    }
+
+    /**
+     * 扔出的鸡蛋：逐刻比蛋的位置、速度、朝向、随机源和出站包；蛋碎的那一刻比孵出的小鸡和被打的牛。
+     * 孵化场景把蛋的随机源换成搜出来的种子，让 `nextInt(8)` / `nextInt(32)` 落到想要的分支。
+     *
+     * Thrown eggs: compare the egg's motion, random and packets each tick; on the
+     * breaking tick compare the hatched chicks and the struck cow. Hatch scenes swap
+     * the egg's random for a searched seed so the hatch draws take the wanted branch.
+     */
+    private static void playEgg(Official official, Writer out, String name) throws Exception {
+        boolean cowHit = name.equals("egg_hit_cow");
+        boolean four = name.equals("egg_hatch_four");
+        int hatch = four ? 4 : (name.equals("egg_hatch_one") || cowHit) ? 1 : 0;
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        ItemStack stack = new ItemStack(four ? Items.BLUE_EGG : Items.EGG, 16);
+        double[] start = cowHit ? new double[] {0.5, 64.5, 0.5} : new double[] {0.5, 66.0, 0.5};
+        double[] dir = cowHit ? new double[] {1.0, 0.0, 0.0}
+                : name.equals("egg_floor") ? new double[] {1.0, -0.2, 0.3} : new double[] {1.0, -0.5, 0.25};
+        var egg = new net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg(
+                world, start[0], start[1], start[2], stack);
+        setRandom(egg, world.entitySeeds.nextLong());
+        egg.setUUID(Mth.createInsecureUUID(egg.getRandom()));
+        egg.shoot(dir[0], dir[1], dir[2], 1.5F, 1.0F);
+        long forced = 0;
+        if (hatch > 0) {
+            forced = hatchSeed(four);
+            setRandom(egg, forced);
+        }
+        world.tracked.add(egg);
+        Cow cow = null;
+        if (cowHit) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource random = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(random));
+            float yaw = random.nextFloat() * 6.2831855F;
+            cow.setYRot(yaw);
+            cow.setYHeadRot(yaw);
+            cow.setPos(4.5, 64.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Bytes events = new Bytes(official.registries);
+        world.packets = packet -> {
+            if (packet instanceof net.minecraft.network.protocol.game.ClientboundEntityEventPacket) {
+                events.add(packet);
+            }
+        };
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        var chicks = new ArrayList<Chicken>();
+        var frames = new StringBuilder("[");
+        for (int tick = 0; ; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) pairArrow(world, official, egg, sync, packets);
+            if (tick > 0) {
+                world.gameTime++;
+                egg.commonTick();
+                egg.tick();
+                packets.addAll(events.take());
+                if (egg.isRemoved()) {
+                    Bytes gone = new Bytes(official.registries);
+                    gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(egg.getId()));
+                    packets.addAll(gone.take());
+                    sync.remove(egg.getId());
+                }
+                if (cow != null) {
+                    cow.checkDespawn();
+                    cow.commonTick();
+                    cow.tick();
+                }
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof Chicken chick) {
+                        // 小鸡按岛种子源重放构造时的取数：UUID、yRot（只留给头部朝向）、下蛋计时。
+                        // Replay the chick's constructor draws from the scene's seed source.
+                        setRandom(chick, world.entitySeeds.nextLong());
+                        RandomSource random = chick.getRandom();
+                        chick.setUUID(Mth.createInsecureUUID(random));
+                        chick.setYHeadRot(random.nextFloat() * 6.2831855F);
+                        chick.eggTime = random.nextInt(6000) + 6000;
+                        chicks.add(chick);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    packets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"eggs\":[");
+            if (!egg.isRemoved()) {
+                frames.append("{\"id\":").append(egg.getId()).append(",\"motion\":").append(projectileMotion(egg))
+                        .append(",\"seed\":").append(randomSeed(egg)).append('}');
+            }
+            frames.append("],\"chicks\":[");
+            for (int i = 0; i < chicks.size(); i++) {
+                Chicken chick = chicks.get(i);
+                if (i > 0) frames.append(',');
+                frames.append("{\"id\":").append(chick.getId())
+                        .append(",\"motion\":").append(projectileMotion(chick))
+                        .append(",\"seed\":").append(randomSeed(chick))
+                        .append(",\"uuid\":[").append(chick.getUUID().getMostSignificantBits()).append(',')
+                        .append(chick.getUUID().getLeastSignificantBits()).append(']')
+                        .append(",\"age\":").append(chick.getAge())
+                        .append(",\"egg\":").append(chick.eggTime)
+                        .append(",\"head\":").append(Float.floatToRawIntBits(chick.getYHeadRot()))
+                        .append(",\"variant\":").append(jsonString(
+                                chick.getVariant().unwrapKey().orElseThrow().identifier().toString()))
+                        .append('}');
+            }
+            frames.append(']');
+            if (cow != null) {
+                frames.append(",\"cow\":").append(projectileMotion(cow))
+                        .append(",\"cowState\":[").append(Float.floatToRawIntBits(cow.getHealth())).append(',')
+                        .append(cow.hurtTime).append(',').append(randomSeed(cow)).append(']');
+            }
+            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append('}');
+            if (egg.isRemoved()) break;
+            if (tick > 200) throw new IllegalStateException("egg never landed: " + name);
+        }
+        if (chicks.size() != hatch || cowHit && cow.hurtTime == 0) {
+            throw new IllegalStateException("egg scene missed its branch: " + name + " chicks=" + chicks.size()
+                    + " forced=" + forced + " egg=" + egg.position() + " seed=" + randomSeed(egg));
+        }
+        out.write("{\"type\":\"egg\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"dir\":" + Arrays.toString(dir)
+                + ",\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem()) + ",\"forced\":" + forced
+                + ",\"cow\":" + cowHit + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /** 第一个让蛋孵一只（或四只）的种子：`nextInt(8) == 0`，再看 `nextInt(32)`。 */
+    private static long hatchSeed(boolean four) {
+        for (long seed = 0; ; seed++) {
+            RandomSource random = new net.minecraft.world.level.levelgen.LegacyRandomSource(seed);
+            if (random.nextInt(8) == 0 && (random.nextInt(32) == 0) == four) return seed;
+        }
+    }
+
+    /**
+     * 玩家扔蛋：照抄 `EggItem.use`，只把蛋的随机源换成场景种子源；比扔出那一刻的蛋、物品栏和世界随机源。
+     *
+     * A player throw: `EggItem.use` with the egg's random swapped for the scene's seed
+     * source; compare the egg, the inventory and the level random right after it.
+     */
+    private static void playEggThrow(Official official, Writer out, String name) throws Exception {
+        boolean moving = name.endsWith("_moving");
+        boolean creative = name.endsWith("_creative");
+        float yaw = moving ? 37.0F : -20.0F;
+        float pitch = moving ? -42.0F : -10.0F;
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "EggOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1024);
+        player.setPos(0.5, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(yaw);
+        player.setXRot(pitch);
+        player.setYHeadRot(yaw);
+        if (moving) player.setKnownMovement(new Vec3(0.125, -0.25, 0.0625));
+        player.getAbilities().instabuild = creative;
+        level.playersList().add(player);
+        ItemStack stack = new ItemStack(Items.BROWN_EGG, 3);
+        player.getInventory().setItem(player.getInventory().getSelectedSlot(), stack);
+        level.playSound(null, player.getX(), player.getY(), player.getZ(),
+                net.minecraft.sounds.SoundEvents.EGG_THROW, net.minecraft.sounds.SoundSource.PLAYERS,
+                0.5F, 0.4F / (level.getRandom().nextFloat() * 0.4F + 0.8F));
+        var egg = new net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg(level, player, stack);
+        setRandom(egg, level.entitySeeds.nextLong());
+        egg.setUUID(Mth.createInsecureUUID(egg.getRandom()));
+        net.minecraft.world.entity.projectile.Projectile.spawnProjectile(egg, level, stack,
+                e -> e.shootFromRotation(player, player.getXRot(), player.getYRot(), 0.0F, 1.5F, 1.0F));
+        stack.consume(1, player);
+        ItemStack inside = egg.getItem();
+        out.write("{\"type\":\"eggThrow\",\"name\":" + jsonString(name) + ",\"yaw\":" + Float.floatToRawIntBits(yaw)
+                + ",\"pitch\":" + Float.floatToRawIntBits(pitch) + ",\"moving\":" + moving + ",\"creative\":" + creative
+                + ",\"motion\":" + projectileMotion(egg) + ",\"seed\":" + randomSeed(egg)
+                + ",\"item\":[" + BuiltInRegistries.ITEM.getId(inside.getItem()) + ',' + inside.getCount() + ']'
+                + ",\"left\":" + player.getInventory().getItem(player.getInventory().getSelectedSlot()).getCount()
+                + ",\"levelSeed\":" + randomSeed(level.getRandom()) + "}\n");
         out.flush();
     }
 
