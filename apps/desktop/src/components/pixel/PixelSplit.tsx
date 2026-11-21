@@ -52,7 +52,7 @@ const Pane = styled.div`
   overflow: hidden;
 `;
 
-/** 分隔条：石头色的凸起横条，中间三道握把；按住时变成竹绿。 */
+/** 分隔条：石头色的凸起横条，中间三道握把；悬停稍亮，按住再亮一档。 */
 const Bar = styled.div<{ $dragging: boolean }>`
   position: relative;
   flex: none;
@@ -60,12 +60,12 @@ const Bar = styled.div<{ $dragging: boolean }>`
   margin: 2px 0;
   cursor: row-resize;
   touch-action: none;
-  background: ${({ theme, $dragging }) => ($dragging ? theme.color.bamboo.base : theme.color.stone.base)};
+  background: ${({ theme, $dragging }) => ($dragging ? theme.color.stone.light : theme.color.stone.base)};
   border: 2px solid ${({ theme }) => theme.color.black};
   ${({ theme }) => raisedBevel(theme.color.stone.light, theme.color.stone.dark, 2)}
 
   &:hover {
-    background: ${({ theme, $dragging }) => ($dragging ? theme.color.bamboo.base : theme.color.stone.light)};
+    filter: brightness(1.12);
   }
 
   &:focus-visible {
