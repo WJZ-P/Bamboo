@@ -73,6 +73,10 @@ pub struct PathMob {
     pub on_ground: bool,
     /// `isInFloatableFluid()`。
     pub in_floatable_fluid: bool,
+    /// `isInWater()`（`wasTouchingWater`），两栖求值器换起点时读它。
+    ///
+    /// `isInWater()` (`wasTouchingWater`), read by the amphibious evaluator's start node.
+    pub in_water: bool,
     pub width: f32,
     pub height: f32,
     /// `maxUpStep()`。
@@ -110,6 +114,11 @@ pub struct EvaluatorFlags {
     pub can_open_doors: bool,
     pub can_float: bool,
     pub can_walk_over_fences: bool,
+    /// `AmphibiousNodeEvaluator`：水当成零代价，陆地和水边更贵，还多上下两个水邻格。
+    ///
+    /// `AmphibiousNodeEvaluator`: free water, pricier land and water borders, plus the
+    /// vertical water neighbours.
+    pub amphibious: bool,
 }
 
 impl Default for EvaluatorFlags {
@@ -119,6 +128,7 @@ impl Default for EvaluatorFlags {
             can_open_doors: false,
             can_float: false,
             can_walk_over_fences: false,
+            amphibious: false,
         }
     }
 }
@@ -556,9 +566,19 @@ impl<'a> Search<'a> {
         mth::java_max(1.125, f64::from(self.mob.max_up_step))
     }
 
-    /// `getStart`。
+    /// `getStart`；两栖求值器在水里换成碰撞盒最小角那一格。
+    ///
+    /// `getStart`; the amphibious evaluator uses the bounding box's min corner in water.
     fn get_start(&mut self) -> usize {
         let mob = self.mob;
+        if self.flags.amphibious && mob.in_water {
+            let bounds = mob.bounding_box();
+            return self.get_start_node(BlockPos::new(
+                mth::floor(bounds.min_x),
+                mth::floor(bounds.min_y + 0.5),
+                mth::floor(bounds.min_z),
+            ));
+        }
         let mut y = mth::floor(mob.position.y);
         let containing =
             |y: i32| BlockPos::new(mth::floor(mob.position.x), y, mth::floor(mob.position.z));
@@ -664,6 +684,47 @@ impl<'a> Search<'a> {
                 }
             }
         }
+        if self.flags.amphibious {
+            // `AmphibiousNodeEvaluator.getNeighbors` 在水里多出上下两个水邻格。
+            //
+            // The amphibious evaluator adds the vertical water neighbours.
+            let up = self.find_accepted_node(
+                node.x,
+                node.y + 1,
+                node.z,
+                (jump_size - 1).max(0),
+                floor,
+                Direction::Up,
+                here,
+            );
+            let down = self.find_accepted_node(
+                node.x,
+                node.y - 1,
+                node.z,
+                jump_size,
+                floor,
+                Direction::Down,
+                here,
+            );
+            if let Some(index) = up
+                && self.is_vertical_neighbor_valid(index, parent)
+            {
+                out.push(index);
+            }
+            if let Some(index) = down
+                && here != PathType::Trapdoor
+                && self.is_vertical_neighbor_valid(index, parent)
+            {
+                out.push(index);
+            }
+        }
+    }
+
+    /// `isVerticalNeighborValid`：和普通邻格一样有效，而且那一格是水。
+    ///
+    /// `isVerticalNeighborValid`: valid like a normal neighbour and made of water.
+    fn is_vertical_neighbor_valid(&self, node: usize, parent: usize) -> bool {
+        self.is_neighbor_valid(Some(node), parent) && self.nodes[node].path_type == PathType::Water
     }
 
     fn is_neighbor_valid(&self, node: Option<usize>, parent: usize) -> bool {
@@ -742,7 +803,7 @@ impl<'a> Search<'a> {
             && path_type != PathType::PowderSnow
         {
             node = self.try_jump_on(x, y, z, jump_size, parent_floor, direction, parent_type);
-        } else if path_type == PathType::Water && !self.flags.can_float {
+        } else if path_type == PathType::Water && !self.flags.can_float && !self.flags.amphibious {
             node = self.first_non_water_below(x, y, z, node);
         } else if path_type == PathType::Open {
             node = self.first_ground_below(x, y, z);
@@ -897,7 +958,7 @@ impl<'a> Search<'a> {
     }
 
     fn floor_level(&self, pos: BlockPos) -> f64 {
-        if self.flags.can_float
+        if (self.flags.can_float || self.flags.amphibious)
             && self
                 .state(pos)
                 .fluid()
@@ -926,7 +987,7 @@ impl<'a> Search<'a> {
         for i in 0..self.entity_width {
             for j in 0..self.entity_height {
                 for k in 0..self.entity_depth {
-                    let mut path_type = self.path_type_static(BlockPos::new(i + x, j + y, k + z));
+                    let mut path_type = self.cell_path_type(BlockPos::new(i + x, j + y, k + z));
                     let mob_pos = self.mob.block_position();
                     if path_type == PathType::DoorWoodClosed
                         && self.flags.can_open_doors
@@ -938,8 +999,8 @@ impl<'a> Search<'a> {
                         path_type = PathType::Blocked;
                     }
                     if path_type == PathType::Rail
-                        && self.path_type_static(mob_pos) != PathType::Rail
-                        && self.path_type_static(mob_pos.below()) != PathType::Rail
+                        && self.cell_path_type(mob_pos) != PathType::Rail
+                        && self.cell_path_type(mob_pos.below()) != PathType::Rail
                     {
                         path_type = PathType::UnpassableRail;
                     }
@@ -975,7 +1036,7 @@ impl<'a> Search<'a> {
                 best = path_type;
             }
         }
-        let centre = self.path_type_static(BlockPos::new(x, y, z));
+        let centre = self.cell_path_type(BlockPos::new(x, y, z));
         if self.entity_width > 1 {
             let lower = self.malus(centre) < best_malus;
             let danger = lower && self.malus(PathType::BigMobsCloseToDanger) < best_malus;
@@ -991,7 +1052,20 @@ impl<'a> Search<'a> {
         best
     }
 
-    fn path_type_static(&self, pos: BlockPos) -> PathType {
+    /// `AmphibiousNodeEvaluator.getPathType`：水里贴着阻挡方块就是水边，别处照走地规则。
+    ///
+    /// `AmphibiousNodeEvaluator.getPathType`: water next to a blocked state is a water
+    /// border; everything else follows the walking rules.
+    fn cell_path_type(&self, pos: BlockPos) -> PathType {
+        if self.flags.amphibious && state_path_type(self.state(pos)) == PathType::Water {
+            for direction in Direction::ALL {
+                let (dx, dy, dz) = direction.normal();
+                if state_path_type(self.state(pos.offset(dx, dy, dz))) == PathType::Blocked {
+                    return PathType::WaterBorder;
+                }
+            }
+            return PathType::Water;
+        }
         path_type_static_with(&|pos| self.state(pos), self.min_y, pos)
     }
 }

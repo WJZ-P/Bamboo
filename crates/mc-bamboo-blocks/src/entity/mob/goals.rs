@@ -17,6 +17,7 @@ use crate::{
         ctx::{BlockView, EntityCtx, PlayerView},
     },
     shape::{self, CollisionContext},
+    state::SupportType,
 };
 
 /// `Goal.Flag`，按枚举顺序。
@@ -177,6 +178,18 @@ pub enum Goal {
         speed: f64,
         stuck: bool,
     },
+    /// `Drowned.DrownedGoToBeachGoal`（`MoveToBlockGoal`）：夜里泡在近海面水里时找岸边。
+    ///
+    /// `Drowned.DrownedGoToBeachGoal` (`MoveToBlockGoal`): at night, a drowned in water near
+    /// the surface looks for a beach.
+    DrownedGoToBeach {
+        speed: f64,
+        next_start_tick: i32,
+        try_ticks: i32,
+        max_stay_ticks: i32,
+        block_pos: Option<BlockPos>,
+        reached_target: bool,
+    },
     /// `RandomStrollGoal`（不避水）：`DefaultRandomPos.getPos(mob, 10, 7)`。
     ///
     /// `RandomStrollGoal` (not water avoiding): `DefaultRandomPos.getPos(mob, 10, 7)`.
@@ -256,6 +269,10 @@ impl Goal {
             | Self::CubeRandomDirection { .. }
             | Self::CubeKeepJumping => super::slime::flags(self),
             Self::DrownedGoToWater { .. } | Self::RandomStroll { .. } => &[Flag::Move],
+            // `MoveToBlockGoal` 同时锁 MOVE 和 JUMP。
+            //
+            // `MoveToBlockGoal` locks MOVE and JUMP.
+            Self::DrownedGoToBeach { .. } => &[Flag::Move, Flag::Jump],
             // `DrownedSwimUpGoal` 没有 `setFlags`：不锁任何标志。
             // `DrownedSwimUpGoal` never calls `setFlags`, so it locks nothing.
             Self::DrownedSwimUp { .. } => &[],
@@ -281,6 +298,7 @@ impl Goal {
                 | Self::WitchRangedAttack { .. }
                 | Self::RandomStand { .. }
                 | Self::RangedAttack { .. }
+                | Self::DrownedGoToBeach { .. }
         )
     }
 
@@ -315,6 +333,7 @@ impl Goal {
             Self::CubeKeepJumping => "CubeMobKeepOnJumpingGoal",
             Self::DrownedGoToWater { .. } => "DrownedGoToWaterGoal",
             Self::DrownedSwimUp { .. } => "DrownedSwimUpGoal",
+            Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
             Self::RandomStroll { .. } => "RandomStrollGoal",
             Self::WitchHealRaiders { .. } => "NearestHealableRaiderTargetGoal",
             Self::WitchRangedAttack { .. } => "RangedAttackGoal",
@@ -713,6 +732,22 @@ impl GoalSelector {
             .collect()
     }
 
+    /// 同 [`Self::running_names`]，但按生物类型改名：溺尸的近战目标是
+    /// `Drowned.DrownedAttackGoal`，官方类名不同。
+    ///
+    /// Like [`Self::running_names`] but renamed per mob type: the drowned's melee goal is
+    /// vanilla's `Drowned.DrownedAttackGoal`.
+    pub fn running_names_of(&self, mob: &Mob) -> Vec<&'static str> {
+        self.goals
+            .iter()
+            .filter(|wrapped| wrapped.running)
+            .map(|wrapped| match (&wrapped.goal, mob.mob_type) {
+                (Goal::MeleeAttack { .. }, super::MobType::Drowned) => "DrownedAttackGoal",
+                _ => wrapped.goal.name(),
+            })
+            .collect()
+    }
+
     pub fn is_panicking(&self) -> bool {
         self.goals
             .iter()
@@ -1103,6 +1138,29 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 && me.in_water
                 && me.position.y < f64::from(ctx.blocks().sea_level() - 2)
         }
+        // `DrownedGoToBeachGoal.canUse`：先走 `MoveToBlockGoal.canUse`（倒计时、取
+        // `nextInt(200)`、找岸边），再看天色、是否泡水和海平面。
+        //
+        // `DrownedGoToBeachGoal.canUse`: `MoveToBlockGoal.canUse` first (countdown,
+        // `nextInt(200)`, search), then the sky, water and sea level checks.
+        Goal::DrownedGoToBeach {
+            next_start_tick,
+            block_pos,
+            ..
+        } => {
+            if *next_start_tick > 0 {
+                *next_start_tick -= 1;
+                return false;
+            }
+            *next_start_tick = reduced_tick_delay(200 + me.random.next_int_bounded(200));
+            let Some(found) = find_beach_target(me, mob, ctx, 8, 2) else {
+                return false;
+            };
+            *block_pos = Some(found);
+            !ctx.blocks().is_bright_outside()
+                && me.in_water
+                && me.position.y >= f64::from(ctx.blocks().sea_level() - 3)
+        }
         Goal::RandomStroll {
             interval,
             wanted,
@@ -1184,6 +1242,19 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 && !ctx.blocks().is_bright_outside()
                 && me.in_water
                 && me.position.y < f64::from(ctx.blocks().sea_level() - 2)
+        }
+        // `MoveToBlockGoal.canContinueToUse`：尝试次数没超限，目标格仍然合格。
+        //
+        // `MoveToBlockGoal.canContinueToUse`: within the try limits and the target still valid.
+        Goal::DrownedGoToBeach {
+            try_ticks,
+            max_stay_ticks,
+            block_pos,
+            ..
+        } => {
+            *try_ticks >= -*max_stay_ticks
+                && *try_ticks <= 1200
+                && block_pos.is_some_and(|pos| beach_target_valid(ctx.blocks(), pos))
         }
         Goal::WitchHealRaiders { .. } => {
             combat_target(mob, ctx).is_some_and(|target| target_in_follow_range(me, mob, target))
@@ -1348,6 +1419,34 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.searching_for_land = true;
             *stuck = false;
         }
+        // `DrownedGoToBeachGoal.start`：先关掉「正在找陆地」，再走 `MoveToBlockGoal.start`。
+        //
+        // `DrownedGoToBeachGoal.start`: clear "searching for land", then `MoveToBlockGoal.start`.
+        Goal::DrownedGoToBeach {
+            speed,
+            try_ticks,
+            max_stay_ticks,
+            block_pos,
+            ..
+        } => {
+            mob.searching_for_land = false;
+            if let Some(pos) = *block_pos {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation.move_to(
+                    ctx.blocks(),
+                    &nav,
+                    Vec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y + 1),
+                        f64::from(pos.z) + 0.5,
+                    ),
+                    *speed,
+                );
+            }
+            *try_ticks = 0;
+            let inner = me.random.next_int_bounded(1200);
+            *max_stay_ticks = me.random.next_int_bounded(inner + 1200) + 1200;
+        }
         Goal::WitchHealRaiders { cooldown } => *cooldown = reduced_tick_delay(200),
         Goal::LookAtPlayer { look_time, .. } => {
             *look_time = reduced_tick_delay(40 + me.random.next_int_bounded(40));
@@ -1490,6 +1589,10 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::WitchHealRaiders { .. } => {}
         // `DrownedSwimUpGoal.stop` 关掉「正在找陆地」。
         Goal::DrownedSwimUp { .. } => mob.searching_for_land = false,
+        // `DrownedGoToBeachGoal.stop` 只调 `MoveToBlockGoal.stop`：停导航。
+        //
+        // `DrownedGoToBeachGoal.stop` only calls `MoveToBlockGoal.stop`: stop the navigation.
+        Goal::DrownedGoToBeach { .. } => mob.navigation.stop(),
         Goal::WitchRangedAttack {
             target,
             attack_time,
@@ -1589,6 +1692,45 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 };
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 mob.navigation.move_to(ctx.blocks(), &nav, next, *speed);
+            }
+        }
+        // `MoveToBlockGoal.tick`：走到目标块上方，够不到就计一次尝试，每 40 次重算路径。
+        //
+        // `MoveToBlockGoal.tick`: step onto the block above the target; count a try when it
+        // is out of reach and recompute the path every forty.
+        Goal::DrownedGoToBeach {
+            speed,
+            try_ticks,
+            block_pos,
+            reached_target,
+            ..
+        } => {
+            let Some(pos) = *block_pos else {
+                return;
+            };
+            let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
+            let dx = f64::from(above.x) + 0.5 - me.position.x;
+            let dy = f64::from(above.y) + 0.5 - me.position.y;
+            let dz = f64::from(above.z) + 0.5 - me.position.z;
+            if dx * dx + dy * dy + dz * dz >= 1.0 {
+                *reached_target = false;
+                *try_ticks += 1;
+                if *try_ticks % 40 == 0 {
+                    let nav = living::nav_mob(me, mob, ctx.blocks());
+                    mob.navigation.move_to(
+                        ctx.blocks(),
+                        &nav,
+                        Vec3::new(
+                            f64::from(above.x) + 0.5,
+                            f64::from(above.y),
+                            f64::from(above.z) + 0.5,
+                        ),
+                        *speed,
+                    );
+                }
+            } else {
+                *reached_target = true;
+                *try_ticks -= 1;
             }
         }
         // `RangedAttackGoal.tick`：视线、距离、导航、注视，再按 60 刻的间隔攻击。
@@ -2269,7 +2411,7 @@ pub(crate) fn default_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !mob.navigation.is_stable_destination(view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -2301,7 +2443,7 @@ pub(crate) fn pos_towards(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !mob.navigation.is_stable_destination(view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -2350,7 +2492,7 @@ pub(crate) fn land_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !mob.navigation.is_stable_destination(view, pos)
         {
             return None;
         }
@@ -2579,6 +2721,51 @@ fn water_pos(me: &mut Entity, view: &dyn BlockView) -> Option<Vec3> {
         }
     }
     None
+}
+
+/// `MoveToBlockGoal.findNearestBlock` 的扫描顺序：纵向 0、1、-1、2、-2，再按半径
+/// 0..R 和方环。`isWithinHome` 对没有家的生物恒真。
+///
+/// The `MoveToBlockGoal.findNearestBlock` scan order: vertical 0, 1, -1, 2, -2, then
+/// radius 0..R around a square ring. `isWithinHome` is always true without a home.
+fn find_beach_target(
+    me: &Entity,
+    _mob: &Mob,
+    ctx: &dyn EntityCtx,
+    search_range: i32,
+    vertical_range: i32,
+) -> Option<BlockPos> {
+    let view = ctx.blocks();
+    let mob_pos = me.block_position();
+    let mut y = 0;
+    while y <= vertical_range {
+        for r in 0..search_range {
+            let mut x = 0;
+            while x <= r {
+                let mut z = if x < r && x > -r { r } else { 0 };
+                while z <= r {
+                    let pos = BlockPos::new(mob_pos.x + x, mob_pos.y + y - 1, mob_pos.z + z);
+                    if beach_target_valid(view, pos) {
+                        return Some(pos);
+                    }
+                    z = if z > 0 { -z } else { 1 - z };
+                }
+                x = if x > 0 { -x } else { 1 - x };
+            }
+        }
+        y = if y > 0 { -y } else { 1 - y };
+    }
+    let _ = view;
+    None
+}
+
+/// `DrownedGoToBeachGoal.isValidTarget`：上面两格空、脚下这格能站。
+///
+/// `DrownedGoToBeachGoal.isValidTarget`: two empty blocks above and a standable floor.
+fn beach_target_valid(view: &dyn BlockView, pos: BlockPos) -> bool {
+    view.block_state(pos.above()).is_air()
+        && view.block_state(pos.above().above()).is_air()
+        && view.is_face_sturdy(pos, mc_bamboo_core::Direction::Up, SupportType::Full)
 }
 
 fn nearest_attackable(

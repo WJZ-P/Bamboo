@@ -1375,13 +1375,13 @@ impl Mob {
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
         if mob_type == MobType::Drowned {
-            // `AmphibiousNodeEvaluator.prepare` 把水当成零代价、把走地和水边调贵；
-            // `can_float` 让 `findAcceptedNode` 不再把水节点换成水下的地面节点。
+            // `Drowned.createNavigation` 给的是 `AmphibiousPathNavigation`：恒可重算路径、
+            // 水里也走、水里贴墙算水边，陆地和水边更贵（代价在 `Mob::malus`）。
             //
-            // `AmphibiousNodeEvaluator.prepare` makes water free and walking pricier;
-            // `can_float` stops `findAcceptedNode` from replacing a water node with the
-            // ground below it.
-            navigation.flags.can_float = true;
+            // `Drowned.createNavigation` builds an `AmphibiousPathNavigation`: paths may
+            // always be recomputed, it walks in water, water against a wall is a water
+            // border, and land costs more (the maluses live in `Mob::malus`).
+            navigation.flags.amphibious = true;
         }
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),

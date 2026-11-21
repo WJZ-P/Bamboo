@@ -290,6 +290,7 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             position: me.position,
             on_ground: me.on_ground,
             in_floatable_fluid: fluid_height(mob, fluid_tags::ENTITY_FLOATABLE) > 0.0,
+            in_water: me.in_water,
             width,
             height,
             max_up_step: max_up_step(mob),
@@ -379,17 +380,28 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 .block_state(eye)
                 .is(mc_bamboo_data::blocks::BUBBLE_COLUMN)
         {
-            // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。
-            mob.air_supply -= 1;
-            if mob.air_supply <= -20 {
-                mob.air_supply = 0;
-                hurt_server(
-                    me,
-                    mob,
-                    ctx,
-                    DamageSource::environment(DamageKind::Drown),
-                    2.0,
-                );
+            // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。溺尸在
+            // `#can_breathe_under_water` 里，水呼吸效果同理不消耗空气。
+            //
+            // A cow cannot breathe underwater and has no effect; `OXYGEN_BONUS` is zero so
+            // there is no draw. The drowned is in `#can_breathe_under_water`, and the water
+            // breathing effect likewise spends no air.
+            let can_breathe = mob.mob_type == super::MobType::Drowned
+                || mob
+                    .effects
+                    .has(mc_bamboo_data::registries::mob_effect::WATER_BREATHING);
+            if !can_breathe {
+                mob.air_supply -= 1;
+                if mob.air_supply <= -20 {
+                    mob.air_supply = 0;
+                    hurt_server(
+                        me,
+                        mob,
+                        ctx,
+                        DamageSource::environment(DamageKind::Drown),
+                        2.0,
+                    );
+                }
             }
         } else if mob.air_supply < 300 {
             mob.air_supply = (mob.air_supply + 4).min(300);

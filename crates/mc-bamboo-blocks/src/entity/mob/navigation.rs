@@ -108,9 +108,11 @@ impl Navigation {
         self.flags.can_float
     }
 
-    /// `GroundPathNavigation.canUpdatePath`。
-    fn can_update_path(mob: &NavMob) -> bool {
-        mob.path.on_ground || mob.in_liquid
+    /// `GroundPathNavigation.canUpdatePath`；两栖导航恒为真。
+    ///
+    /// `GroundPathNavigation.canUpdatePath`; the amphibious navigation always allows it.
+    fn can_update_path(mob: &NavMob, flags: &EvaluatorFlags) -> bool {
+        flags.amphibious || mob.path.on_ground || mob.in_liquid
     }
 
     /// `moveTo(x, y, z, speed)`。
@@ -188,7 +190,7 @@ impl Navigation {
         if mob.path.position.y < f64::from(view.min_y()) {
             return None;
         }
-        if !Self::can_update_path(mob) {
+        if !Self::can_update_path(mob, &self.flags) {
             return None;
         }
         if let Some(path) = &self.path
@@ -232,12 +234,12 @@ impl Navigation {
             return None;
         }
         let width = mob.path.width;
-        if Self::can_update_path(mob) {
+        if Self::can_update_path(mob, &self.flags) {
             self.follow_the_path(view, mob);
         } else if let Some(path) = &mut self.path
             && !path.is_done()
         {
-            let temp = temp_mob_pos(view, mob, self.flags.can_float);
+            let temp = temp_mob_pos(view, mob, self.flags);
             let next = path.next_entity_pos(width);
             if temp.y > next.y
                 && !mob.path.on_ground
@@ -251,14 +253,19 @@ impl Navigation {
             return None;
         }
         let next = self.path.as_ref()?.next_entity_pos(width);
-        Some((
-            Vec3::new(next.x, ground_y(view, next), next.z),
-            self.speed_modifier,
-        ))
+        // `AmphibiousPathNavigation.getGroundY` 原样返回节点高度。
+        //
+        // `AmphibiousPathNavigation.getGroundY` returns the node height unchanged.
+        let ground = if self.flags.amphibious {
+            next.y
+        } else {
+            ground_y(view, next)
+        };
+        Some((Vec3::new(next.x, ground, next.z), self.speed_modifier))
     }
 
     fn temp_mob_pos(&self, view: &dyn BlockView, mob: &NavMob) -> Vec3 {
-        temp_mob_pos(view, mob, self.flags.can_float)
+        temp_mob_pos(view, mob, self.flags)
     }
 
     fn follow_the_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
@@ -336,7 +343,8 @@ impl Navigation {
 
     /// `recomputePath`：方块变了以后的延迟重算。
     pub fn recompute_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
-        if mob.game_time - self.time_last_recompute > 20 && Self::can_update_path(mob) {
+        if mob.game_time - self.time_last_recompute > 20 && Self::can_update_path(mob, &self.flags)
+        {
             if let Some(target) = self.target_pos {
                 self.path = None;
                 self.path = self.create_path(view, mob, target, self.reach_range);
@@ -385,18 +393,35 @@ impl Navigation {
         }
     }
 
-    /// `isStableDestination`：下面一格是实心渲染的。
-    pub fn is_stable_destination(view: &dyn BlockView, pos: BlockPos) -> bool {
-        view.block_state(pos.below()).is_solid_render()
+    /// `isStableDestination`：下面一格是实心渲染的；两栖导航只要求不是空气。
+    ///
+    /// `isStableDestination`: the block below renders solid; the amphibious navigation only
+    /// requires it to be non-air.
+    pub fn is_stable_destination(&self, view: &dyn BlockView, pos: BlockPos) -> bool {
+        let below = view.block_state(pos.below());
+        if self.flags.amphibious {
+            !below.is_air()
+        } else {
+            below.is_solid_render()
+        }
     }
 }
 
-/// `GroundPathNavigation.getTempMobPos`。
-fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, can_float: bool) -> Vec3 {
+/// `GroundPathNavigation.getTempMobPos`；两栖导航取身体高度的中间。
+///
+/// `GroundPathNavigation.getTempMobPos`; the amphibious one uses the body's mid height.
+fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, flags: EvaluatorFlags) -> Vec3 {
     let position = mob.path.position;
+    if flags.amphibious {
+        return Vec3::new(
+            position.x,
+            position.y + f64::from(mob.path.height) * 0.5,
+            position.z,
+        );
+    }
     Vec3::new(
         position.x,
-        f64::from(surface_y(view, mob, can_float)),
+        f64::from(surface_y(view, mob, flags.can_float)),
         position.z,
     )
 }

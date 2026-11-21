@@ -1860,7 +1860,7 @@ impl Report {
             plain!(var);
             plain!(snd);
             plain!(goals);
-            if name.starts_with("zombie_") {
+            if name.starts_with("zombie_") || name.starts_with("drowned_") {
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -3181,7 +3181,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         snd: farm_sound(mob),
         uuid: uuid_text(&mob.uuid),
         lr,
-        goals: mob.goals.running_names().join(" "),
+        goals: mob.goals.running_names_of(mob).join(" "),
         path,
         target: mob.target.unwrap_or(-1),
         baby: mob.is_baby(),

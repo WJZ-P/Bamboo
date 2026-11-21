@@ -1816,15 +1816,20 @@ public final class MobOracle {
             distant.mob(11, 0.5, 64.0, 0.5, 0.0F, 12L, 0);
             distant.player(14.5, 64.0, 0.5, Items.AIR);
             scenes.add(distant);
-            // 溺尸的逐刻场景暂未启用：`drowned_flat_chase_3` 暴露出 Bamboo 的溺尸
-            // 在平地上 `createPath` 返回空（僵尸同场景能寻路），见 README 已知限制。
-            // `kind=12`、`seaLevel` 和水中玩家的注入已经留好，修好后直接加回场景。
+            // 溺尸：夜里才把玩家当目标（`okTarget`）。平地上追 120 刻，覆盖两栖导航、
+            // `DrownedGoToBeachGoal` 的 `nextInt(200)` 和近战。
             //
-            // Drowned tick scenes are disabled for now: `drowned_flat_chase_3` shows
-            // Bamboo's drowned fails `createPath` on flat ground while a zombie in the
-            // same scene paths fine (see the README limitations). Kind 12, `seaLevel`
-            // and the wet-player injection are ready for when it is fixed.
-
+            // Drowned only target players at night (`okTarget`). The flat chase runs 120
+            // ticks and covers the amphibious navigation, `DrownedGoToBeachGoal`'s
+            // `nextInt(200)` and melee.
+            Scene drownedFlat = new Scene("drowned_flat_chase_3").ticks(120).difficulty(2);
+            drownedFlat.brightOutside = false;
+            drownedFlat.skyDarken = 11;
+            drownedFlat.monstersBurn = false;
+            ground(drownedFlat, 12);
+            drownedFlat.mob(12, 0.5, 64.0, 0.5, 0.0F, 3L, 0);
+            drownedFlat.player(6.5, 64.0, 0.5, Items.AIR);
+            scenes.add(drownedFlat);
             // ---- S2：玩家药水效果的状态和出站包 ----
             scenes.add(effectBase("effect_give_600", 60)
                     .effectGive(1, 9, 600, 1));
@@ -7282,7 +7287,14 @@ public final class MobOracle {
 
         @Override
         public int getMaxLocalRawBrightness(BlockPos pos) {
-            return naturalScene != null || realSky ? getMaxLocalRawBrightness(pos, getSkyDarken()) : 15;
+            // 注入的天色要真的参与亮度：官方 `Level.getMaxLocalRawBrightness(pos)` 走
+            // `getSkyDarken()`，这里不能固定 15，否则夜里的场景对怪物来说还是白天。
+            //
+            // The injected sky darken must take part: vanilla's one-arg call uses
+            // `getSkyDarken()`, so a fixed 15 would keep night scenes bright for monsters.
+            return naturalScene != null || realSky
+                    ? getMaxLocalRawBrightness(pos, getSkyDarken())
+                    : Math.max(0, 15 - injectedSkyDarken);
         }
 
         /** 真实时间模式：天空光 15、方块光 0，按官方 `max(block, sky - darken)`。 */

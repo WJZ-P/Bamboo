@@ -106,7 +106,17 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 start_path: None,
             },
         ),
-        (5, Goal::Unavailable("DrownedGoToBeachGoal")),
+        (
+            5,
+            Goal::DrownedGoToBeach {
+                speed: 1.0,
+                next_start_tick: 0,
+                try_ticks: 0,
+                max_stay_ticks: 0,
+                block_pos: None,
+                reached_target: false,
+            },
+        ),
         (
             6,
             Goal::DrownedSwimUp {
@@ -266,17 +276,19 @@ pub(super) fn move_control_tick(
     }
 }
 
-/// `Drowned.closeToNextPos()`：路径终点在自己 4 格（平方）以内。
+/// `Drowned.closeToNextPos()`：路径终点在自己 4 格（平方）以内。官方量的是终点格子的
+/// **角**（`pos.getX()/getZ()`），不是格心。
 ///
-/// `Drowned.closeToNextPos()`: the path target is within four squared blocks.
+/// `Drowned.closeToNextPos()`: the path target is within four squared blocks. Vanilla
+/// measures to the block's corner (`pos.getX()`/`getZ()`), not its centre.
 pub(super) fn close_to_next_pos(me: &Entity, mob: &Mob) -> bool {
     let Some(path) = &mob.navigation.path else {
         return false;
     };
     let target = path.target;
-    let dx = me.position.x - (f64::from(target.x) + 0.5);
+    let dx = me.position.x - f64::from(target.x);
     let dy = me.position.y - f64::from(target.y);
-    let dz = me.position.z - (f64::from(target.z) + 0.5);
+    let dz = me.position.z - f64::from(target.z);
     dx * dx + dy * dy + dz * dz < 4.0
 }
 

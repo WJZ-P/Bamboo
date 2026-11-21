@@ -887,13 +887,22 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   600 刻后开始转化，再过 300 刻发 `Command::ConvertMob`；落地时照 `ConversionType.SINGLE`
   搬状态（共享的是 `conversion::copy_state`），并额外跑一次 `Zombie.handleAttributes`
   （`Command::ConvertMob.zombie_attributes`）。
-- **两栖寻路**：没有照 `AmphibiousNodeEvaluator` 做独立节点求值器；溺尸借用导航的
-  `can_float`（水节点不再被替换成水下的地面节点）加三项寻路代价覆盖（水 0、走地 6、水边 4，
-  即 `AmphibiousNodeEvaluator.prepare` 的设置）让水可以走。副作用是 `jumpInLiquid` 的上浮量
-  按浮水生物的 0.04 而不是 0.3，起点和临时位置也按浮水处理，竖直邻接节点没有实现，见
-  README 的已知限制。2026-11-21 加 `mob-oracle` 场景时发现：**溺尸在平地上
-  `createPath` 返回空**，而同一场景的僵尸能寻路；把 `can_float` 关掉、换成怪物默认
-  malus 都仍然返回空，还没有定位。修好之前溺尸没有可用的逐刻场景。
+- **两栖寻路**（2026-11-21 重做）：`Navigation` 加了 `EvaluatorFlags::amphibious`，溺尸走
+  `AmphibiousPathNavigation` 的规则：`canUpdatePath` 恒真、`getTempMobPos` 取身体中间、
+  `getGroundY` 原样返回节点高度、`isStableDestination` 只要求脚下不是空气、
+  `setCanFloat` 不生效（所以 `jumpInLiquid` 是 0.3 而不是浮水生物的 0.04）。
+  `Search` 里照 `AmphibiousNodeEvaluator`：水里贴着 `BLOCKED` 的格子算 `WATER_BORDER`
+  （代价 4），水里多出上下两个竖直水邻格（`isVerticalNeighborValid` 只收 `WATER`），
+  求值器起点在水中换成碰撞盒最小角、`isAmphibious` 让 `findAcceptedNode` 不再把水节点
+  换成水下地面。三项代价覆盖（水 0、走地 6、水边 4）留在 `Mob::malus`。
+  上次报告里「平地上 `createPath` 返回空」是误判：白天 `Drowned.okTarget` 本来就不选玩家，
+  夜间场景下原来的僵尸近战逻辑能正常寻路；真正缺的是 `AmphibiousPathNavigation.canUpdatePath`
+  恒真和 `Drowned.closeToNextPos` 量的是终点格子的角而不是格心，两处都已修。
+  `DrownedGoToBeachGoal`（`MoveToBlockGoal`）也补上了：倒计时取 `nextInt(200)`、
+  方环搜索岸边、`start` 两次 `nextInt(1200)`、`tick` 每 40 刻重算。
+- **溺尸对拍**：`mob-oracle --only drowned_flat`（夜间平地追玩家 120 刻，包含两栖导航、
+  `DrownedGoToBeachGoal` 的 `nextInt(200)`、近战和随机源）1 例 120 刻 0 不一致。
+  水里的追击和上浮场景还没对齐（见 README 已知限制）。
 - **海平面**：`Level::sea_level()` 和 `BlockView::sea_level()` 取代溺尸文件里手写的 63；
   游戏层按 `WorldGenConfig.level_type` 给噪声世界 63、超平坦 -63，`mob-oracle` 的假世界
   跟官方的 `-63` 一致，场景可以用 `Scene.sea` 覆盖。`DrownedGoToWaterGoal` 的白天判断
@@ -923,10 +932,9 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `entity-oracle` 的快照都接上了。
 - **仓库外改动**：`mc-bamboo-protocol` 加了一个实体数据项；`mc-bamboo-storage` 的建模实体
   清单加了溺尸和女巫。
-- **没做的**：三叉戟投掷（没有 `ThrownTrident`）、`DrownedGoToBeachGoal`、鹦鹉螺僵尸、
+- **没做的**：三叉戟投掷（没有 `ThrownTrident`）、鹦鹉僵尸（僵尸骑鹦鹉螺）、
   袭击、女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
-  目标速度和目标药水效果（选药用不到）。溺尸没有启用的 `mob-oracle` 场景：`kind=12`、
-  `seaLevel` 和水中玩家的注入都在 `MobOracle.java` 里留好了，但被上面那个
-  `createPath` 空路径的问题挡住，场景暂时从 `Scenes.all()` 拿掉；女巫的抗火、自愈、水下呼吸和速度由
+  目标速度和目标药水效果（选药用不到）。溺尸只启用了平地追击场景（1 例 120 刻 0 不一致）；
+  水里的追击 / 上浮场景位置还差几毫，见 README 已知限制。女巫的抗火、自愈、水下呼吸和速度由
   `mob-oracle --only witch_drink` 逐刻比较位置、血量、效果时长、喝药状态和随机源
   （3 例、268 刻、0 不一致）；投掷仍未对拍。
