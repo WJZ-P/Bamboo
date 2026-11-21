@@ -86,8 +86,9 @@ Beardifier；`beard` 子命令对拍它的单点和成批两条路径（见 `doc
 `MultiNoiseBiomeSource.createResolverForChunk` 对六个气候函数在 quart 体积
 `(4, height/4, 4)`、步长 `(4,4,4)` 上各做一次 `sampleVolume`，再 `Climate.target` 量化成定点数查
 R 树。填进区块时 `section` 从下到上、段内 `x → y → z`，和
-`LevelChunkSection.fillBiomesFromNoise` 一样。R 树的 `lastResult` 是每线程一格 `Cell`：平局时选
-哪条依赖查询顺序，所以顺序也照搬。
+`LevelChunkSection.fillBiomesFromNoise` 一样。R 树的 `lastResult` 是每线程一格、按
+`ParameterList` 编号索引的线程本地状态（官方是 `ThreadLocal`）：平局时选哪条依赖查询顺序，
+所以顺序也照搬。
 
 **`NOISE`**：`doFill` 先对整块 `16 × height × 16` 体积做**一次** `finalDensity.sampleVolume`，
 然后 `z → x → y`（y 从顶到底）逐点问 `Aquifer.computeSubstance`。含水层的六条密度函数走
@@ -587,10 +588,15 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   3×3 quart 群系视图和 `possibleBiomes` 并集，不再是早期记录里的 uncached 单点群系。
   `initialize_light` / `spawn` / `full` 原样透传，`light` 已算生成期光照（见下），
   `features` 见下。
-* 数据交接：`Worldgen` 解析一次后按线程 `Box::leak`，`chunk::Generator` 每条计算线程
-  各缓存一份（它的 `ParameterList` 用 `Cell` 记 R 树 `lastResult`，官方是
-  `ThreadLocal`，不能跨线程共享）。生成的方块/群系按官方 `PalettedContainer` 下标写进
-  24 个 `SectionParts`，组装成 `ChunkColumn` / `RegionColumn`。
+* 数据交接：解析好的只读 `Worldgen`（噪声、密度函数、群系表、地物 / 结构定义）经
+  `Worldgen::shared()` 的 `OnceLock` 全进程只解析一次，所有生成线程引用同一份
+  `&'static` 数据（2026-11-21，`op-wgmem`）；`chunk::Generator` 每条计算线程仍各缓存
+  一份，保留随机源、临时缓冲等按线程可变的工作状态。群系 R 树的 `lastResult`
+  （官方 `Climate.RTree` 是实例上的 `ThreadLocal`）从 `ParameterList` 里的 `Cell`
+  改成按「线程 + 表」隔离的线程本地状态，共享数据因此是 `Sync` 的只读数据，结果
+  逐字节不变（见 `docs/performance-optimizations.md` 第 23 节）。生成的方块/群系按
+  官方 `PalettedContainer` 下标写进 24 个 `SectionParts`，组装成
+  `ChunkColumn` / `RegionColumn`。
 * 存档：`data/minecraft/world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 写出
   种子与维度生成器（`flat` 写 `minecraft:flat` + 地层，噪声世界写 `minecraft:noise` +
   settings 注册名），读档时以它为准，空 `level-seed` 的随机种子重启后固定。
@@ -779,7 +785,8 @@ p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算�
 **计算池默认线程数建议**：保留 `min(4, 核数/2) = 4` 作为默认。实测它把世界线程
 稳稳压在 ~1 ms/tick，已经达成「不拖慢 tick」这个首要目标；本机 ~34 ms/区块、4 线程
 理论约 120 区块/秒，但已被 6 名飞行玩家打满，再加线程会线性增加常驻内存
-（每线程一份 `Worldgen` + `Generator`），而这台 31 GB 机器当时已用到 97%。期望更多
+（每线程一份 `Generator`；解析好的 `Worldgen` 现在全进程共用一份，见
+`docs/performance-optimizations.md` 第 23 节），而这台 31 GB 机器当时已用到 97%。期望更多
 玩家同时在噪声世界飞行、且内存宽裕的部署，再显式把 `chunk_worker_threads` 提到 8，
 以 `compute_backlog` 不再持续增长、`chunk_latency` 回落到亚秒为准；**不要**因为这次
 测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测

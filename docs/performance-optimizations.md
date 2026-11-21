@@ -3467,3 +3467,62 @@ N 组各 256 个掉落物 + 10 名玩家、组距 1024 格，2 刻预热 + 8 刻
   `remove_missing` 每刻也扫一遍 `tracked` 表。
 - 改后 `entity_sync_and_tracking` 阶段里剩下的约 10% 是 `entity_sync::sync_entities`、
   装备变化、方块变化确认和全局延迟广播，这次没有动。
+
+## 23. 世界生成数据全进程共用一份：闲置 RSS 4 线程 −189 MiB / 8 线程 −383 MiB（2026-11-21）
+
+`op-cache` 收尾后闲置内存的大头是每条计算线程各自解析一份 `Worldgen`：
+`worldgen.rs` 的 `with_generator` 和 `worldgen_structures.rs` 的 `with_thread` 都在
+`thread_local!` 的 `Vacant` 分支里 `Box::leak(Box::new(Worldgen::load()?))`，一条线程最多
+漏两份（地形、结构各一份），结构开启时线程越多常驻越多。
+
+### 23.1 做法
+
+- `mc-bamboo-worldgen` 新增 `Worldgen::shared()`：`static SHARED:
+  OnceLock<Result<Worldgen, String>>` 只解析一次，返回同一份 `&'static Worldgen`；
+  `with_generator` / `with_thread` 以及 `processor_lists` / `select_spawn` /
+  `noise_sea_level` 等只读调用都改用它。每条线程仍各缓存自己的 `Generator`（编译好的
+  采样器、随机源、临时缓冲），但都引用共享的 `Worldgen`。
+- 唯一挡住共享的是 `Climate.ParameterList` 的 `last_result: Cell<Option<usize>>`
+  （R 树 `lastResult`，官方 `Climate.RTree` 是实例上的 `ThreadLocal`，`Cell` 让
+  `Worldgen` 变成 `!Sync`）。改成按「线程 + 表」隔离：`ParameterList` 持一个进程内唯一
+  `id`，`LAST_RESULTS` 是 `thread_local!` 的 `Vec<Option<usize>>` 按 `id` 索引，
+  `find_value` / `reset` 只读写本线程那一格。共享数据因此是 `Sync` 的只读数据，平局
+  判定仍按线程隔离，结果逐字节不变。
+
+### 23.2 数字（改前 / 改后，各 3 轮交替取中位数）
+
+口径：`director_pipeline_bench --chunks 9 --threads 4|8 --idle-secs 8`，`normal` 世界、
+带结构、先在远处暖机；改前是父提交 `9f210652` 编出的二进制、改后是当前代码编出的
+二进制，两者都带 `--idle-secs` 测量脚手架（`K32GetProcessMemoryInfo` 读当前 / 峰值
+工作集）。本 worktree 没有空闲释放，所以峰值与闲置 RSS 相等。测量经 `heavy.js` 排队，
+期间采样整机 CPU 忙 2.8–47.8%（16 核），多数低于 16%。
+
+| 中位数（3 轮） | 改前 4 线程 | 改后 4 线程 | 变化 | 改前 8 线程 | 改后 8 线程 | 变化 |
+|---|---:|---:|---:|---:|---:|---:|
+| 闲置 RSS (MiB) | 888.8 | 699.8 | −189.0 (−21%) | 1476.1 | 1093.5 | −382.6 (−26%) |
+| 峰值 RSS (MiB) | 888.8 | 699.8 | −189.0 | 1476.1 | 1093.5 | −382.6 |
+| 每秒交付区块 | 56.13 | 47.83 | 噪声内 | 71.64 | 78.15 | 噪声内 |
+
+吞吐单轮波动约 ±20%，A/D 交替后无系统性回退；`find_value` 每次多一次 `RefCell`
+借用，相对 R 树搜索（微秒级）可忽略。改前每多一条线程多约 48 MiB 常驻，说明解析
+数据按线程成倍常驻；`op-cache` 早先估的「约 170 MB/线程」是含解析峰值 / 编译状态的
+另一种口径，本轮直接量到的是工作集差值。
+
+### 23.3 逐字节不变的证据
+
+`gen-world`（393216 方块 / 406392 项）、`gen-world --through features`（3538944 方块 /
+3545088 项）、`structure-e2e`（4 个结构区块、151 个官方结构件 / 3545097 项）都是
+0 不一致；`staged_tests` 6 个（1/4/2/8 线程逐字节相同，release）、`compute_pool_tests`
+3 个（标准 debug 配置）全过。`cargo fmt --check`、
+`cargo clippy --workspace --all-targets -- -D warnings` 干净。
+
+### 23.4 已知限制
+
+- 世界生成数据随编译嵌进二进制、进程内只有一份；将来支持运行时换数据包或同进程多份
+  不同生成数据时，`shared()` 要改成按实例索引。
+- `Worldgen::load()` 失败的错误被 `OnceLock` 缓存到进程结束（当前内嵌数据恒能解析）。
+- `LAST_RESULTS` 槽位按 `ParameterList` 编号增长；共享后每线程用到的表很少，但某进程
+  创建极多 `ParameterList`（主要是测试）时线程本地 `Vec` 会随之增长。
+- `compute_pool_tests::inline_and_pool_produce_identical_worlds` 单独用 `--release` 跑时
+  会在 `Detached / 4 线程` 的区块 `("region", -13, -1)` 失败；这在父提交 `9f210652`
+  上同样失败（分离驱动 + 存档时序，与本次改动无关），标准 debug 配置下通过。

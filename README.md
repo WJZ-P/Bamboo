@@ -515,6 +515,15 @@ WebView2 的渲染进程不算在内。
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`。第二轮 features 接入见
   `docs/worldgen.md`、`docs/worldgen-features-plan.md`、`docs/world-model-design.md` 5.3.1 / 第 16 节）
+- **世界生成数据全进程共用一份**（`op-wgmem`，2026-11-21）：只读的解析结果（噪声、密度函数、
+  群系表、地物 / 结构定义）由 `Worldgen::shared()` 的 `OnceLock` 只解析一次，所有生成线程引用
+  同一份 `&'static`，每条线程只留自己的 `Generator` 和随机 / 临时缓冲。群系 R 树 `lastResult`
+  （官方 `ThreadLocal`）从 `Cell` 改成「线程 + 表」的线程本地状态，共享数据是 `Sync` 的只读数据；
+  `gen-world` / `--through features` / `structure-e2e` 0 不一致、`staged_tests` 1/2/4/8 线程
+  逐字节相同。4 / 8 线程闲置 RSS 实测 889 → 700 / 1476 → 1094 MiB（各 3 轮中位数，见
+  `docs/performance-optimizations.md` 第 23 节）。**已知限制**：数据随编译嵌入、进程内只有一份，
+  将来支持运行时换数据包或同进程多份生成数据时 `shared()` 要按实例索引；解析失败的错误会被
+  `OnceLock` 缓存到进程结束（当前内嵌数据恒能解析）。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
