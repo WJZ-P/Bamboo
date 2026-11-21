@@ -821,7 +821,18 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - 河豚蜇刺走新的 `Command::PufferSting`：先 `hurtMob`，打中了才下毒并放蜇刺声。
 - 数据：`FROM_BUCKET`(16)、`SALMON_VARIANT`/`TROPICAL_FISH_VARIANT`/`PUFFERFISH_PUFF_STATE`(17)
   由生成器导出，元数据和存档都用它们；`MobPublic` 多带鱼的花纹、膨胀和群的三个字段。
-- 对拍：`mob-oracle --only cod|salmon|tropical|puffer`。`cod_swim` / `salmon_swim` /
-  `tropical_fish_swim` 各 241 刻 **0 不一致**（位置、速度、朝向、随机源、氧气、尺寸、掉落、
-  世界随机源、出站包逐字节）；`cod_beached` 461 刻只剩溺水那一刻的两组包差一拍（4 处），
-  `pufferfish_puff` 12 处（膨胀时 y 的微小漂移）。
+- 对拍：`mob-oracle --only cod|salmon|tropical|puffer` 和 `--only natural_fish`。
+  `cod_swim` / `salmon_swim` / `tropical_fish_swim` 各 241 刻 **0 不一致**（位置、速度、
+  朝向、随机源、氧气、尺寸、掉落、世界随机源、出站包逐字节）；`cod_beached` 461 刻只剩
+  溺水那一刻的两组包差一拍（4 处）；`pufferfish_puff` 从第 64 刻起实体随机源相差一个
+  `blow_up` 音效的取值（见下）。
+- 自然生成：`natural_fish` 五个夹具（鳕鱼 / 鲑鱼 / 热带鱼 / 繁茂洞穴热带鱼 / 河豚）
+  各 6 个种子 × 4 个时刻，**30 例 0 不一致**。为此修了两处公共规则：
+  `MobType::can_spawn_far_from_player` 原来对所有非怪物返回真，官方只对
+  `CREATURE | MISC` 为真（`WATER_AMBIENT` 的消失距离是 64，超过就不该进
+  `isValidSpawnPostitionForType`）；`goals::walk_target_value` 对 `is_water_animal()`
+  也返回 0，因为鱼不是 `Animal`，`PathfinderMob.getWalkTargetValue` 的缺省就是 0
+  （原来落到 `Animal` 的亮度权重，繁茂洞穴里是负数，滤掉全部候选）。
+- 已知差异：`pufferfish_puff` 里河豚从 1 鼓到 2 时 Bamboo 的音效早官方一刻（早取两个
+  `nextFloat`），第 64 刻起实体随机源就不一致；`cod_beached` 溺水瞬间两组包差一拍。
+  桶装鱼（`Bucketable` 的拾起 / 释放）还没接，`FromBucket` 只做存档和「不自然消失」。
