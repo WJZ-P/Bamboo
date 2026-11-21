@@ -433,7 +433,7 @@ export const FIELDS: readonly SettingField[] = [
     control: "number",
     min: 0,
     max: MAX_FEATURE_CACHE_MB,
-    hint: "世界生成时暂存的地物（树、矿石等）结果最多占多少内存，默认 16。只影响内存和跑图速度，不影响生成结果。0 = 不缓存。",
+    hint: "世界生成时暂存的地物（树、矿石等）结果最多占多少内存，默认 64。只影响内存和跑图速度，不影响生成结果。0 = 不缓存。",
   },
   {
     key: "worldgenCacheIdleSeconds",
@@ -443,7 +443,7 @@ export const FIELDS: readonly SettingField[] = [
     control: "number",
     min: 0,
     max: MAX_CACHE_IDLE_SECONDS,
-    hint: "多少秒没有区块生成就把上面两份缓存清空，把内存还给系统，默认 30。0 = 不清。",
+    hint: "区块计算队列空闲，且多久没有查询缓存后清空上面两份缓存，默认 30 秒。不会卸载区块。0 = 关闭空闲清理。",
   },
   {
     key: "deliveriesPerTick",

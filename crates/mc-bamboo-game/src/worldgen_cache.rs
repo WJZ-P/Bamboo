@@ -49,15 +49,17 @@ use crate::world_options::WorldGenConfig;
 
 const MIB: usize = 1024 * 1024;
 
-/// 地形缓存默认上限（MiB）。一条 CARVERS 地形实测 414 720 B，64 MiB 约 160 条。
+/// 地形缓存默认上限（MiB），包括未压缩的热层和调色板压缩的冷层。
 /// 依据见 `docs/performance-optimizations.md` 第 23 节的实测。
 ///
-/// Default terrain cache limit in MiB. One CARVERS entry measures 414 720 B, so
-/// 64 MiB holds about 160. See section 23 of `performance-optimizations.md`.
+/// Default terrain cache limit in MiB, including the raw hot tier and
+/// palette-compressed cold tier. See section 23 of `performance-optimizations.md`.
 pub const DEFAULT_TERRAIN_CACHE_MB: usize = 64;
-/// 地物结果缓存默认上限（MiB）。
-/// Default feature-result cache limit in MiB.
-pub const DEFAULT_FEATURE_CACHE_MB: usize = 16;
+/// 地物结果缓存默认上限（MiB）；更小的预算会反复计算仍被光照使用的地物。
+///
+/// Default feature-result cache limit in MiB; smaller budgets repeatedly
+/// recompute features that lighting still needs.
+pub const DEFAULT_FEATURE_CACHE_MB: usize = 64;
 /// 默认空闲释放秒数；0 表示不做空闲释放。
 /// Default idle-release delay in seconds; 0 disables the idle release.
 pub const DEFAULT_IDLE_SECONDS: u64 = 30;
@@ -100,13 +102,12 @@ static IDLE_SECONDS: AtomicU64 = AtomicU64::new(DEFAULT_IDLE_SECONDS);
 /// 按依赖释放的总开关：只给压测对比用，正式配置没有这个键。
 /// Dependency-release switch: for benchmark comparisons only, not a config key.
 static DEPENDENCY_RELEASE: AtomicBool = AtomicBool::new(true);
-/// 最近一次缓存查询的时刻（进程启动以来的毫秒）。
-/// Time of the latest cache lookup, in milliseconds since process start.
+/// 冷层（压缩条目）的总开关：同样只给压测对比用，正式配置没有这个键。
+/// Cold-tier switch: again for benchmark comparisons only, not a config key.
+static COLD_TIER: AtomicBool = AtomicBool::new(true);
+/// 最近查询的毫秒数加 1；0 表示上次释放后没有查询。
+/// Last lookup time in milliseconds plus 1; zero means no lookup since release.
 static LAST_USE_MS: AtomicU64 = AtomicU64::new(0);
-/// 上次清空之后有没有查询过；没有就不用再去拿 32 把分片锁。
-/// Whether any lookup happened since the last release; if not, the 32 shard
-/// locks are left alone.
-static USED_SINCE_RELEASE: AtomicBool = AtomicBool::new(false);
 static IDLE_RELEASES: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
@@ -133,6 +134,19 @@ pub fn set_dependency_release(enabled: bool) {
     DEPENDENCY_RELEASE.store(enabled, Ordering::Relaxed);
 }
 
+/// 压测对比用：关掉 / 打开地形缓存的冷层（压缩条目）。
+/// Benchmark comparisons only: switch the cold (compacted) tier off or on.
+#[doc(hidden)]
+pub fn set_cold_tier(enabled: bool) {
+    COLD_TIER.store(enabled, Ordering::Relaxed);
+}
+
+/// 冷层是否打开（`worldgen.rs` 按它决定冷层预算）。
+/// Whether the cold tier is on (`worldgen.rs` sizes its budget from this).
+pub(crate) fn cold_tier_enabled() -> bool {
+    COLD_TIER.load(Ordering::Relaxed)
+}
+
 /// 空闲释放一共触发过几次（压测 / 测试用）。
 /// How many idle releases have happened (benchmarks / tests).
 #[doc(hidden)]
@@ -151,8 +165,7 @@ pub(crate) fn feature_byte_limit() -> usize {
 /// 每次缓存查询都调：记下「刚刚还有生成在用缓存」。
 /// Called by every cache lookup: generation used the caches just now.
 pub(crate) fn touch() {
-    LAST_USE_MS.store(now_ms(), Ordering::Relaxed);
-    USED_SINCE_RELEASE.store(true, Ordering::Relaxed);
+    LAST_USE_MS.fetch_max(now_ms() + 1, Ordering::Relaxed);
 }
 
 /// 世界线程每刻调一次：空闲够久就清空两份缓存，返回这次有没有清。
@@ -164,23 +177,26 @@ pub(crate) fn touch() {
 /// only when releasing.
 pub fn release_if_idle() -> bool {
     let idle_ms = IDLE_SECONDS.load(Ordering::Relaxed).saturating_mul(1000);
-    let used = USED_SINCE_RELEASE.load(Ordering::Relaxed);
     let last = LAST_USE_MS.load(Ordering::Relaxed);
-    if !idle_elapsed(idle_ms, used, last, now_ms()) {
+    if !idle_elapsed(idle_ms, last, now_ms()) {
         return false;
     }
-    // 先清标记再清缓存：清的过程中进来的查询会重新置位，下一轮再清。
-    // Clear the flag first: a lookup racing with the release sets it again and
-    // the next round handles it.
-    USED_SINCE_RELEASE.store(false, Ordering::Relaxed);
+    // 仅消费观察到的空闲时刻，不能覆盖刚发生的查询。
+    // Claim only the observed idle timestamp, without erasing a fresh lookup.
+    if LAST_USE_MS
+        .compare_exchange(last, 0, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return false;
+    }
     crate::worldgen::release_terrain_cache();
     crate::worldgen_features::release_feature_cache();
     IDLE_RELEASES.fetch_add(1, Ordering::Relaxed);
     true
 }
 
-fn idle_elapsed(idle_ms: u64, used: bool, last_use: u64, now: u64) -> bool {
-    idle_ms > 0 && used && now.saturating_sub(last_use) >= idle_ms
+fn idle_elapsed(idle_ms: u64, last_use: u64, now: u64) -> bool {
+    idle_ms > 0 && last_use != 0 && now.saturating_sub(last_use - 1) >= idle_ms
 }
 
 /// 3×3 / 5×5 邻域里 `(dx, dz)` 的位下标（行优先，`radius` 是 1 或 2）。
@@ -280,12 +296,10 @@ mod tests {
 
     #[test]
     fn idle_needs_a_delay_a_lookup_and_enough_time() {
-        assert!(!idle_elapsed(0, true, 5, 1_000_000), "0 disables it");
-        assert!(
-            !idle_elapsed(30_000, false, 5, 1_000_000),
-            "nothing to drop"
-        );
-        assert!(!idle_elapsed(30_000, true, 5, 30_004));
-        assert!(idle_elapsed(30_000, true, 5, 30_005));
+        assert!(!idle_elapsed(0, 6, 1_000_000), "0 disables it");
+        assert!(!idle_elapsed(30_000, 0, 1_000_000), "nothing to drop");
+        assert!(!idle_elapsed(30_000, 6, 30_004));
+        assert!(idle_elapsed(30_000, 6, 30_005));
+        assert!(idle_elapsed(30_000, 1, 30_000), "lookup at time zero");
     }
 }

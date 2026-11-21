@@ -545,12 +545,11 @@ impl TerrainShard {
     /// Evict one hot entry: keep it compacted in the cold tier (or drop it when
     /// the cold budget is 0), then drop the oldest cold entries past the cold
     /// budget. Returns whether the hot tier held the key.
-    fn demote(&mut self, key: &TerrainCacheKey) -> bool {
+    fn demote(&mut self, key: &TerrainCacheKey, cold_limit: usize) -> bool {
         let Some(chunk) = self.remove_hot(key) else {
             return false;
         };
-        let limit = cold_shard_byte_limit();
-        if limit == 0 {
+        if cold_limit == 0 {
             self.consumers_done.remove(key);
             return true;
         }
@@ -561,7 +560,7 @@ impl TerrainShard {
         self.cold_bytes += bytes;
         let total = TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
         PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
-        while self.cold_bytes > limit {
+        while self.cold_bytes > cold_limit {
             let Some(oldest) = self.cold_order.pop_front() else {
                 break;
             };
@@ -691,26 +690,17 @@ fn shard_index(key: &TerrainCacheKey) -> usize {
     (hasher.finish() as usize) % TERRAIN_CACHE_SHARDS
 }
 
-/// 每片的字节预算；所有片加起来不超过配置的上限
-/// （`bamboo.toml` 的 `worldgen_terrain_cache_mb`，见 `worldgen_cache`）。
+/// 用同一次设置读取拆分热层、冷层预算；冷层占每片预算的 1/4。
 ///
-/// Per-shard byte budget; the sum across shards never exceeds the configured
-/// limit (`worldgen_terrain_cache_mb` in `bamboo.toml`, see `worldgen_cache`).
-fn shard_byte_limit() -> usize {
-    let shard = crate::worldgen_cache::terrain_byte_limit() / TERRAIN_CACHE_SHARDS;
-    shard - cold_shard_byte_limit()
-}
-
-/// 每片冷层（压缩条目）的字节预算：整片预算的 1/4，其余 3/4 归热层。
-/// 一条压缩地形约 20 KiB，是热层一条的 1/20，所以 1/4 的预算能留住的条目数是
-/// 热层的好几倍。
-///
-/// Per-shard budget of the cold (compacted) tier: a quarter of the shard's
-/// budget, the other three quarters being the hot tier. A compacted entry is
-/// ~20 KiB, a twentieth of a hot one, so this quarter keeps several times as
-/// many entries as the hot tier.
-fn cold_shard_byte_limit() -> usize {
-    crate::worldgen_cache::terrain_byte_limit() / TERRAIN_CACHE_SHARDS / 4
+/// Split hot and cold budgets from one settings read; cold gets one quarter.
+fn shard_byte_limits() -> (usize, usize) {
+    let total = crate::worldgen_cache::terrain_byte_limit() / TERRAIN_CACHE_SHARDS;
+    let cold = if crate::worldgen_cache::cold_tier_enabled() {
+        total / 4
+    } else {
+        0
+    };
+    (total - cold, cold)
 }
 
 /// 一个 `GeneratedChunk` 占的堆字节数（各 `Vec` 的 `capacity` 相加）。
@@ -1122,15 +1112,15 @@ fn cached_terrain(
         // 占位和条目一起淘汰；不在 `entries` 里的（正在算的）占位不能被淘汰。
         // Byte-bounded oldest-first eviction; placeholders without an entry
         // (still computing) are never evicted.
-        let target =
-            shard_byte_limit() * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
-        if shard.bytes > shard_byte_limit() {
+        let (hot_limit, cold_limit) = shard_byte_limits();
+        let target = hot_limit * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
+        if shard.bytes > hot_limit {
             shard.trims += 1;
             while shard.bytes > target {
                 let Some(oldest) = shard.order.pop_front() else {
                     break;
                 };
-                if shard.demote(&oldest) {
+                if shard.demote(&oldest, cold_limit) {
                     shard.evictions += 1;
                 }
             }
@@ -1941,7 +1931,7 @@ mod tests {
         let key = terrain_cache_key(&cfg, x, z, false);
         let before = {
             let mut shard = terrain_shards()[shard_index(&key)].lock().unwrap();
-            assert!(shard.demote(&key));
+            assert!(shard.demote(&key, shard_byte_limits().1));
             assert!(shard.cold.contains_key(&key) && !shard.entries.contains_key(&key));
             assert!(!shard.inflight.contains_key(&key));
             shard.cold_hits

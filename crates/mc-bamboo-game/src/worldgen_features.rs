@@ -914,13 +914,13 @@ fn commit_feature_run(
     let Ok(mut shard) = shard.lock() else {
         return false;
     };
-    if shard.entries.contains_key(&key) {
+    let limit = crate::worldgen_cache::feature_byte_limit() / FEATURE_CACHE_SHARDS;
+    if limit == 0 || shard.entries.contains_key(&key) {
         return false;
     }
     shard.order.push_back(key.clone());
     shard.entries.insert(key, Arc::clone(run));
     shard.bytes += feature_run_heap_bytes(run);
-    let limit = crate::worldgen_cache::feature_byte_limit() / FEATURE_CACHE_SHARDS;
     if shard.bytes > limit {
         while shard.bytes > limit * 3 / 4 {
             let Some(oldest) = shard.order.pop_front() else {

@@ -122,7 +122,7 @@ pub struct WorldConfig {
     /// Limits and idle-release delay of the two process-wide worldgen caches
     /// (three `bamboo.toml` keys). They affect memory and speed, never output.
     pub worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings,
-    ///自然刷怪按玩家算上限（默认开）；关掉只剩官方的全局上限。
+    /// 自然刷怪按玩家算上限（默认开）；关掉只剩官方的全局上限。
     ///
     /// Per-player natural spawn caps (on by default); off keeps only the
     /// vanilla global cap.
