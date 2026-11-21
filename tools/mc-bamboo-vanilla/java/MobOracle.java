@@ -304,11 +304,11 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only)) {
-                cases += playNaturalSpawns(official, out);
+            if ("natural_spawn".equals(only) || "natural_spawn_panda".equals(only)) {
+                cases += playNaturalSpawns(official, out, only.endsWith("_panda"));
             }
-            if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only)) {
-                cases += playGenSpawns(official, out, only.endsWith("_misc"));
+            if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
+                cases += playGenSpawns(official, out, only);
             }
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
@@ -900,7 +900,7 @@ public final class MobOracle {
      * (colour plus shear mark, variant plus egg timer); the rest keep the defaults,
      * matching Bamboo's `farm_variant`.
      */
-    static String caseVariant(Mob mob) {
+    static String caseVariant(Mob mob) throws Exception {
         if (mob instanceof Sheep || mob instanceof Chicken) {
             return farmVariant((Animal) mob);
         }
@@ -1352,6 +1352,16 @@ public final class MobOracle {
                 peaceful.player(4.5, 64.0, 0.5, Items.AIR);
                 peaceful.hurts.add(new double[] {3, 0, 1.0, 0});
                 scenes.add(peaceful);
+            }
+            for (int age : new int[] {0, -24000}) {
+                // 狐狸在熊的跟随距离内、狐狸自己的躲避距离外；只比是否选中目标。
+                // The fox is within the bear's follow range but outside its own avoidance range.
+                Scene fox = new Scene(age == 0 ? "polar_bear_fight_fox" : "polar_bear_fight_fox_cub")
+                        .ticks(20).difficulty(2);
+                ground(fox, 18);
+                fox.mob(13, 0.5, 64.0, 0.5, 0.0F, 417L, age);
+                fox.mob(7, 14.5, 64.0, 0.5, 0.0F, 418L, 0);
+                scenes.add(fox);
             }
         }
         /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
@@ -3287,7 +3297,12 @@ public final class MobOracle {
             int sky, int block, int darken, boolean thunder, double playerX, int population,
             int spawnableChunks, boolean localCap, boolean nearbyRespawn) {}
 
-    private static int playNaturalSpawns(Official official, Writer out) throws Exception {
+    private static int playNaturalSpawns(Official official, Writer out, boolean pandaOnly) throws Exception {
+        if (pandaOnly) {
+            return playNaturalSpawnScenes(official, out, List.of(
+                    new NaturalScene("panda_day", EntityTypes.PANDA, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false),
+                    new NaturalScene("panda_dim", EntityTypes.PANDA, "jungle", 2, 8, 0, 0, false, -32, 0, 289, true, false)));
+        }
         List<NaturalScene> scenes = new ArrayList<>();
         scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("cow_night", EntityTypes.COW, "savanna", 2, 15, 0, 11, false, -32, 0, 289, true, false));
@@ -3332,6 +3347,10 @@ public final class MobOracle {
         scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("mooshroom_day", EntityTypes.MOOSHROOM, "mushroom_fields", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("polar_bear_day", EntityTypes.POLAR_BEAR, "frozen_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        return playNaturalSpawnScenes(official, out, scenes);
+    }
+
+    private static int playNaturalSpawnScenes(Official official, Writer out, List<NaturalScene> scenes) throws Exception {
         int count = 0;
         for (var scene : scenes) {
             for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
@@ -3441,6 +3460,13 @@ public final class MobOracle {
                 row.add(mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                if (mob instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+                    row.add(panda.getMainGene().getId());
+                    row.add(panda.getHiddenGene().getId());
+                } else {
+                    row.add(-1);
+                    row.add(-1);
+                }
                 spawned.add(row);
             }
             step.add("spawned", spawned);
@@ -3468,15 +3494,18 @@ public final class MobOracle {
     }
 
     // 生成期刷怪：用真实群系刷怪表，地面用平地或坐标公式地形。`misc` 那一组只跑少量种子，
-    // 覆盖蘑菇岛和冰冻海洋。
+    // 覆盖蘑菇岛和冰冻海洋；熊猫组单独对拍竹林。
     // World-generation spawning over real biome spawn tables, on flat or formula terrain.
-    // The `misc` group runs few seeds and covers mushroom fields and frozen oceans.
+    // The `misc` group covers mushroom fields and frozen oceans; the panda group uses bamboo jungle.
     private record GenScene(String name, int sky, int block, boolean terrain, String biome, int seeds) {}
 
-    private static int playGenSpawns(Official official, Writer out, boolean misc) throws Exception {
-        List<GenScene> scenes = misc ? List.of(
+    private static int playGenSpawns(Official official, Writer out, String suite) throws Exception {
+        List<GenScene> scenes = switch (suite) {
+            case "gen_spawn_panda" -> List.of(new GenScene("gen_panda", 15, 0, false, "bamboo_jungle", 128));
+            case "gen_spawn_misc" -> List.of(
                 new GenScene("gen_mooshroom", 15, 0, false, "mushroom_fields", 64),
-                new GenScene("gen_polar_bear", 15, 0, false, "frozen_ocean", 64)) : List.of(
+                new GenScene("gen_polar_bear", 15, 0, false, "frozen_ocean", 64));
+            default -> List.of(
                 new GenScene("gen_flat", 15, 0, false, "plains", 500),
                 new GenScene("gen_terrain", 15, 0, true, "plains", 500),
                 new GenScene("gen_dim", 8, 0, true, "plains", 500),
@@ -3488,6 +3517,7 @@ public final class MobOracle {
                 new GenScene("gen_taiga", 15, 0, true, "taiga", 1500),
                 new GenScene("gen_snowy_taiga", 15, 0, true, "snowy_taiga", 1500),
                 new GenScene("gen_taiga_dim", 8, 0, true, "taiga", 500));
+        };
         int count = 0;
         for (GenScene scene : scenes) {
             for (long index = 0; index < scene.seeds(); index++) {
@@ -3522,7 +3552,8 @@ public final class MobOracle {
         for (int cx = -1; cx <= 1; cx++) {
             for (int cz = -1; cz <= 1; cz++) {
                 net.minecraft.world.level.levelgen.Heightmap.primeHeightmaps(level.chunkSource.getChunkNow(cx, cz),
-                        java.util.Set.of(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
+                        java.util.Set.of(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                                net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING));
             }
         }
         RandomSource region = new net.minecraft.world.level.levelgen.XoroshiroRandomSource(seed * 31 + 7);
@@ -3570,8 +3601,8 @@ public final class MobOracle {
     }
 
     /**
-     * 兔子、狐狸、狼在 `finalizeSpawn` 里定下的东西：品种、狐狸嘴里的物品、狼的叫声。其余生物为空串。
-     * What `finalizeSpawn` decides for rabbits, foxes and wolves; empty for other mobs.
+     * `finalizeSpawn` 定下的品种、狐狸嘴里的物品、狼的叫声和熊猫的双基因。
+     * Variants, fox held items, wolf sounds and both panda genes set by `finalizeSpawn`.
      */
     private static String genSpawnDetail(Mob mob) {
         if (mob instanceof net.minecraft.world.entity.animal.rabbit.Rabbit rabbit) {
@@ -3583,6 +3614,9 @@ public final class MobOracle {
         if (mob instanceof net.minecraft.world.entity.animal.wolf.Wolf wolf) {
             return "wolf|" + wolf.get(DataComponents.WOLF_VARIANT).unwrapKey().orElseThrow().identifier()
                     + "|" + wolf.get(DataComponents.WOLF_SOUND_VARIANT).unwrapKey().orElseThrow().identifier();
+        }
+        if (mob instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+            return "panda|" + panda.getMainGene().getId() + "|" + panda.getHiddenGene().getId();
         }
         return "";
     }
@@ -5338,6 +5372,12 @@ public final class MobOracle {
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                         lastSentHealth, false);
+            }
+        }
+        if (scene.name.startsWith("polar_bear_fight_fox")) {
+            Entity expected = scene.name.endsWith("_cub") ? null : mobs.get(1);
+            if (mobs.getFirst().getTarget() != expected) {
+                throw new IllegalStateException(scene.name + " did not exercise fox target selection");
             }
         }
         line.append("]");

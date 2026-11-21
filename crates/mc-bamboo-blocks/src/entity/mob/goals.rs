@@ -1220,6 +1220,15 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::FoxPrey => {
                     nearest_mob_target(me, mob, ctx, super::fox_goals::is_small_prey)
                 }
+                // `NearestAttackableTargetGoal<Fox>`：北极熊找狐狸，幼崽不打。
+                // `NearestAttackableTargetGoal<Fox>`: a polar bear looks for foxes; cubs pass.
+                TargetType::Fox => {
+                    if mob.is_baby() {
+                        None
+                    } else {
+                        nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Fox)
+                    }
+                }
                 _ if kind.available() => nearest_attackable(me, mob, ctx, *kind),
                 _ => None,
             };

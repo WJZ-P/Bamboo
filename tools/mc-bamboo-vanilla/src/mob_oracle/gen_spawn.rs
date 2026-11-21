@@ -64,9 +64,11 @@ pub(super) struct Coverage {
     /// Spawned mooshrooms and polar bears.
     mooshrooms: usize,
     bears: usize,
-    /// 非平原场景（蘑菇岛、冰冻海洋）的例数。
-    /// Fixture cases whose biome is not plains (mushroom fields, frozen ocean).
+    /// 蘑菇岛和冰冻海洋对拍的例数。
+    /// Mushroom-field and frozen-ocean fixture cases.
     misc_cases: usize,
+    panda_cases: usize,
+    pandas_compared: usize,
     /// 兔子、狐狸、狼各生成了多少只，以及其中的幼崽和叼着东西的狐狸。
     /// Spawned rabbits, foxes and wolves, plus babies among them and foxes with an item.
     wild: [usize; 3],
@@ -93,10 +95,23 @@ impl Coverage {
                 "GEN SPAWN: {} rabbits, {} foxes, {} wolves, {} babies among them, {} foxes holding an item",
                 self.wild[0], self.wild[1], self.wild[2], self.wild_babies, self.fox_items
             );
+            if self.panda_cases > 0 {
+                println!(
+                    "GEN SPAWN: {} pandas with both genes compared",
+                    self.pandas_compared
+                );
+            }
         }
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if self.panda_cases > 0 {
+            return if self.pandas_compared > 0 {
+                Ok(())
+            } else {
+                Err("jungle world-gen fixtures did not compare any panda genes".into())
+            };
+        }
         if self.misc_cases > 0 {
             return if self.mooshrooms > 0 && self.bears > 0 && self.simulated == 0 {
                 Ok(())
@@ -126,7 +141,11 @@ impl Report {
             .iter()
             .position(|name| *name == case.biome)
             .expect("known fixture biome") as i32;
-        self.gen_spawns.misc_cases += usize::from(biome_id != biome::PLAINS);
+        self.gen_spawns.misc_cases += usize::from(matches!(
+            biome_id,
+            biome::MUSHROOM_FIELDS | biome::FROZEN_OCEAN
+        ));
+        self.gen_spawns.panda_cases += usize::from(biome_id == biome::BAMBOO_JUNGLE);
         let mut level = fixture(case, biome_id);
         let mut ticks = BlockTicks::new();
         let decoration = mc_bamboo_worldgen::random::WorldgenRandom::new(
@@ -204,7 +223,8 @@ impl Report {
                 self.gen_spawns.details += 1;
                 self.gen_spawns.record_wild(mob);
                 let ours_details = details(entity);
-                let ours_detail = wild_detail(mob);
+                self.gen_spawns.pandas_compared += usize::from(kind == MobType::Panda);
+                let ours_detail = finalize_detail(mob);
                 if ours_details[..] != row[5..] || &ours_detail != detail {
                     self.mismatch(format!(
                         "{label}: official {row:?} {detail:?}, Bamboo details {ours_details:?} {ours_detail:?}"
@@ -254,7 +274,7 @@ fn mouth_item(mob: &Mob) -> i32 {
 /// 和 `MobOracle.genSpawnDetail` 同一个格式。
 ///
 /// The same format as `MobOracle.genSpawnDetail`.
-fn wild_detail(mob: &Mob) -> String {
+fn finalize_detail(mob: &Mob) -> String {
     match mob.mob_type {
         MobType::Rabbit => format!("rabbit|{}", mob.rabbit.variant.id()),
         MobType::Fox => format!("fox|{}|{}", mob.fox.variant.id(), mouth_item(mob)),
@@ -262,6 +282,11 @@ fn wild_detail(mob: &Mob) -> String {
             "wolf|{}|{}",
             mob.wolf.variant_name(),
             mob.wolf.sound_variant_name()
+        ),
+        MobType::Panda => format!(
+            "panda|{}|{}",
+            mob.panda.main_gene.id(),
+            mob.panda.hidden_gene.id()
         ),
         _ => String::new(),
     }

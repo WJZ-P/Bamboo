@@ -913,3 +913,9 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
 逐刻比位置、随机源、出站包、交互结果和新生实体，7 例 498 刻 0 不一致；`chunk-content` 比新生哞菇和
 带 `Type` / `stew_effects` 的读写往返。对拍工具里「交互生成的实体」改成在实体 tick 之前收集（真服务端里
 它们这一刻就会 tick），新生生物多带一个身体朝向 `yr`。
+
+## 北极熊与熊猫的补充对拍（op-misc，2026-11-21）
+
+- 北极熊的 `NearestAttackableTargetGoal<Fox>` 在抽取间隔随机数后才过滤幼崽；成年熊扫描附近活着且可见的狐狸。`mob-oracle --only polar_bear_fight_fox` 分别比较成年和幼崽的目标与逐刻状态。狐狸反向躲熊尚未接入。
+- `mob-oracle --only natural_spawn_panda` 从原版丛林表固定熊猫条目，比较亮度 15 / 8 下逐刻的刷出数量、位置、双基因和世界随机源。
+- `mob-oracle --only gen_spawn_panda` 用竹林完整动物表，比较位置、朝向、双基因和随机源指纹。鹦鹉按官方 `ON_GROUND`、`MOTION_BLOCKING` 和 `parrots_spawnable_on` 模拟放置，但不创建实体，也不运行鹦鹉的 `finalizeSpawn`。同一区块先出现原版鹦鹉时，仍比较装饰随机源和后续已实现生物的位置；后续区域随机源和依赖它的属性不在夹具比较范围内。

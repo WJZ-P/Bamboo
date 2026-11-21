@@ -51,7 +51,7 @@ struct Step {
     time: i64,
     count: i32,
     world_seed: i64,
-    spawned: Vec<[i32; 8]>,
+    spawned: Vec<[i32; 10]>,
 }
 
 pub(super) struct SceneFacts {
@@ -129,6 +129,13 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if let Some(&day) = self.per_scene.get("panda_day") {
+            return if day > 0 && self.per_scene.get("panda_dim") == Some(&0) {
+                Ok(())
+            } else {
+                Err("panda natural spawn fixtures must spawn at raw brightness 15 but not 8".into())
+            };
+        }
         let covered_misc = ["mooshroom_day", "polar_bear_day"]
             .iter()
             .all(|name| self.per_scene.get(*name).is_some_and(|&count| count > 0));
@@ -213,8 +220,13 @@ fn spawn_tick(
     }
 }
 
-fn spawn_row(entity: Entity) -> [i32; 8] {
+fn spawn_row(entity: Entity) -> [i32; 10] {
     let mob = entity.kind.mob().expect("natural spawns are mobs");
+    let [main_gene, hidden_gene] = if mob.mob_type == MobType::Panda {
+        [mob.panda.main_gene.id(), mob.panda.hidden_gene.id()]
+    } else {
+        [-1; 2]
+    };
     [
         mob.mob_type.entity_type(),
         (entity.position.x * 2.0) as i32,
@@ -224,6 +236,8 @@ fn spawn_row(entity: Entity) -> [i32; 8] {
         i32::from(mob.is_baby()),
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
+        main_gene,
+        hidden_gene,
     ]
 }
 

@@ -14,7 +14,9 @@
 //! puts them.
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
-use mc_bamboo_data::{entity_types::FACTS, registries::entity_type, spawning::MobSpawnerDef};
+use mc_bamboo_data::{
+    entity_types::FACTS, facts, registries::entity_type, spawning::MobSpawnerDef, tags::block_tags,
+};
 
 use super::{MobType, goals, natural, spawn};
 use crate::{entity::Entity, random::RandomSource, shape::Aabb, world::World};
@@ -35,12 +37,10 @@ pub struct GenSpawn<'a> {
     pub region_random: &'a dyn RandomSource,
 }
 
-/// 生成期刷怪要用的放置事实：`SpawnPlacements` 登记的放置方式和刷怪规则
-/// （高度图都是 `MOTION_BLOCKING_NO_LEAVES`），以及身体尺寸。
+/// 生成期刷怪用的放置事实：`SpawnPlacements` 登记的放置方式、高度图以及身体尺寸。
 ///
 /// Placement facts for generation spawning: the placement type and spawn rule
-/// registered in `SpawnPlacements` (always the `MOTION_BLOCKING_NO_LEAVES`
-/// heightmap) and the body size.
+/// registered in `SpawnPlacements`, the heightmap, and the body size.
 #[derive(Debug, Clone, Copy)]
 struct Placement {
     entity_type: i32,
@@ -50,16 +50,14 @@ struct Placement {
     ///
     /// True for `ON_GROUND`; false for the fox's `NO_RESTRICTIONS`.
     on_ground: bool,
+    heightmap_mask: u64,
     /// Bamboo 建模了的种类；`None` 时只模拟放置、推进随机数，不生成实体。
     kind: Option<MobType>,
 }
 
-/// 用 `Animal.checkAnimalSpawnRules` 注册的七种动物，加上兔子、狼、狐狸各自的规则。
-/// 其余种类（山羊、北极熊……）的规则还没翻译，遇到时返回 `None`。
+/// 查已翻译的生成期放置规则；鹦鹉只模拟放置，不生成实体。
 ///
-/// The seven animals registered with `Animal.checkAnimalSpawnRules`, plus the rabbit,
-/// wolf and fox rules. Other kinds (goat, polar bear, ...) are not yet translated and
-/// give `None`.
+/// Look up translated world-generation placement rules; parrots are simulated, not spawned.
 fn placement(entity: i32) -> Option<Placement> {
     let animal = [
         entity_type::CHICKEN,
@@ -83,8 +81,7 @@ fn placement(entity: i32) -> Option<Placement> {
     .contains(&entity);
     let on_ground = match entity {
         _ if animal => true,
-        entity_type::RABBIT => true,
-        entity_type::WOLF => true,
+        entity_type::RABBIT | entity_type::WOLF | entity_type::PARROT => true,
         entity_type::FOX => false,
         _ => return None,
     };
@@ -94,6 +91,11 @@ fn placement(entity: i32) -> Option<Placement> {
         width: facts.width,
         height: facts.height,
         on_ground,
+        heightmap_mask: if entity == entity_type::PARROT {
+            facts::MOTION_BLOCKING
+        } else {
+            facts::MOTION_BLOCKING_NO_LEAVES
+        },
         kind: MobType::by_entity_type(entity),
     })
 }
@@ -161,7 +163,11 @@ fn spawn_one(
     while !success && attempts < 4 {
         attempts += 1;
         let (x, z) = *cursor;
-        let pos = BlockPos::new(x, top_non_colliding_y(world, x, z), z);
+        let pos = BlockPos::new(
+            x,
+            top_non_colliding_y(world, x, z, placement.heightmap_mask),
+            z,
+        );
         if !placement.on_ground
             || natural::on_ground_position_ok(world, placement.entity_type, false, pos)
         {
@@ -205,6 +211,9 @@ fn spawn_one(
 fn spawn_rules(world: &World, placement: Placement, pos: BlockPos) -> bool {
     match placement.kind {
         Some(kind) => natural::check_spawn_rules(world, kind, pos),
+        None if placement.entity_type == entity_type::PARROT => {
+            natural::bright_spawn_rules(world, pos, block_tags::PARROTS_SPAWNABLE_ON)
+        }
         None => natural::animal_spawn_rules(world, pos),
     }
 }
@@ -248,17 +257,14 @@ fn body(placement: Placement, at: Vec3) -> Aabb {
     )
 }
 
-/// `getTopNonCollidingPos`：`MOTION_BLOCKING_NO_LEAVES` 高度图的值（主世界没有天花板，
-/// `ON_GROUND` 不调整）。
+/// `getTopNonCollidingPos`：主世界没有天花板，按该生物注册的高度图查找。
 ///
-/// `getTopNonCollidingPos`: the `MOTION_BLOCKING_NO_LEAVES` heightmap value (no ceiling
-/// in the overworld, and `ON_GROUND` does not adjust).
-fn top_non_colliding_y(world: &World, x: i32, z: i32) -> i32 {
-    use mc_bamboo_data::facts;
+/// `getTopNonCollidingPos`: use the registered heightmap; the overworld has no ceiling.
+fn top_non_colliding_y(world: &World, x: i32, z: i32, heightmap_mask: u64) -> i32 {
     for y in (world.min_y()..=world.max_y()).rev() {
         let pos = BlockPos::new(x, y, z);
         let state = world.block_state(pos);
-        let blocks = mc_bamboo_data::state_facts(state.0) & facts::MOTION_BLOCKING_NO_LEAVES != 0;
+        let blocks = mc_bamboo_data::state_facts(state.0) & heightmap_mask != 0;
         if blocks || !world.fluid_state(pos).is_empty() {
             return y + 1;
         }

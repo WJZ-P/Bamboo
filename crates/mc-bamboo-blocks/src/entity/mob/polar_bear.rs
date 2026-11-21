@@ -1,15 +1,13 @@
 //! 北极熊：站起来警告再扑咬的近战、幼崽挨打时叫大熊、带崽的大熊主动打玩家、持久愤怒。
 //!
 //! 目标的调度在 [`goals`](super::goals) 里，这里放北极熊覆写的那几段和它自己的状态。
-//! 狐狸还没有，`NearestAttackableTargetGoal<Fox>` 只注册、不找目标；`universalAnger`
-//! 规则没有建模，`ResetUniversalAngerTargetGoal` 只占位置。
+//! 成年熊会选狐狸为目标；`universalAnger` 规则没有建模，`ResetUniversalAngerTargetGoal` 只占位置。
 //!
 //! Polar bears: the stand-up warning before a bite, cubs calling adults when hurt, adults
 //! with a cub nearby attacking players, and persistent anger. Scheduling lives in
 //! [`goals`](super::goals); this module holds the polar bear overrides and its own state.
-//! Foxes do not exist yet, so `NearestAttackableTargetGoal<Fox>` is registered but finds
-//! nothing; the `universalAnger` rule is not modelled, so `ResetUniversalAngerTargetGoal`
-//! is a placeholder.
+//! Adults target foxes. The `universalAnger` rule is not modelled, so
+//! `ResetUniversalAngerTargetGoal` is a placeholder.
 
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{entity_types, registries::attribute, tags::block_tags};
