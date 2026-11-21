@@ -671,10 +671,12 @@ impl Level for RegionLevel<'_> {
             self.loot_sequences,
             self.random.source(),
             self.block_weather,
-            state,
-            pos,
-            block_entity,
-            None,
+            crate::block_drops::ExplodedBlock {
+                state,
+                pos,
+                block_entity,
+                explosion_radius: None,
+            },
         )
     }
 
@@ -693,10 +695,12 @@ impl Level for RegionLevel<'_> {
             self.loot_sequences,
             self.random.source(),
             self.block_weather,
-            state,
-            pos,
-            block_entity,
-            Some(radius),
+            crate::block_drops::ExplodedBlock {
+                state,
+                pos,
+                block_entity,
+                explosion_radius: Some(radius),
+            },
         )
     }
 
@@ -708,10 +712,12 @@ impl Level for RegionLevel<'_> {
             self.loot_sequences,
             self.random.source(),
             self.block_weather,
-            state,
-            pos,
-            block_entity,
-            None,
+            crate::block_drops::ExplodedBlock {
+                state,
+                pos,
+                block_entity,
+                explosion_radius: None,
+            },
         )
     }
 

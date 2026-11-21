@@ -396,6 +396,66 @@ mod tests {
         });
     }
 
+    /// 一只点燃的苦力怕旁边放一块石头和一头不动的牛，跑 30 刻：
+    /// （石头还在不在，牛剩多少血，苦力怕还在不在）。
+    ///
+    /// An ignited creeper beside a stone block and a still cow, run for 30 ticks:
+    /// (stone left, cow health, creeper left).
+    fn ignited_blast(griefing: bool) -> (bool, f32, bool) {
+        use crate::{BlockTicks, World, state::BlockState, world::UPDATE_ALL};
+        use mc_bamboo_core::BlockPos;
+        use mc_bamboo_data::blocks;
+
+        let mut level = crate::testing::TestLevel::new();
+        level.rules.mob_griefing = griefing;
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        for x in -6..=6 {
+            for z in -6..=6 {
+                let floor = BlockPos::new(x, 63, z);
+                world.set_block(floor, BlockState(blocks::OBSIDIAN), UPDATE_ALL);
+            }
+        }
+        let stone = BlockPos::new(1, 64, 0);
+        world.set_block(stone, BlockState(blocks::STONE), UPDATE_ALL);
+        let still = |kind, x: f64| {
+            let mut entity = Entity::by_mob_type(kind, Vec3::new(x, 64.0, 0.5));
+            entity.with_mob(|_, mob| mob.no_ai = true);
+            entity
+        };
+        let mut creeper = still(MobType::Creeper, 0.5);
+        creeper.with_mob(|_, mob| mob.creeper.ignited = true);
+        let creeper = world.spawn_entity(creeper);
+        let cow = world.spawn_entity(still(MobType::Cow, -4.5));
+        for _ in 0..30 {
+            world.tick_entities();
+        }
+        let health = world
+            .entity(cow)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+            .expect("the cow survives");
+        (
+            world.block_state(stone).is(blocks::STONE),
+            health,
+            world.entity(creeper).is_some(),
+        )
+    }
+
+    /// 第 30 刻爆炸：5 格外的牛按官方公式掉 5.08 点血，石头只在 `mobGriefing` 开着时被炸掉。
+    ///
+    /// The blast comes on tick 30: a cow five blocks away loses 5.08 health by the vanilla
+    /// formula, and the stone only breaks under `mobGriefing`.
+    #[test]
+    fn an_ignited_creeper_explodes_after_its_fuse() {
+        let expected = 10.0 - ((1.0 / 36.0 + 1.0 / 6.0) / 2.0 * 7.0 * 6.0 + 1.0);
+        let (stone, health, creeper) = ignited_blast(true);
+        assert!(!stone && !creeper);
+        assert!((f64::from(health) - expected).abs() < 1.0e-4, "{health}");
+        let (stone, health, creeper) = ignited_blast(false);
+        assert!(stone && !creeper);
+        assert!((f64::from(health) - expected).abs() < 1.0e-4, "{health}");
+    }
+
     /// 打火石点燃并扣耐久，火焰弹被消耗，别的物品不理。
     ///
     /// Flint and steel ignites and takes damage, a fire charge is consumed, anything
