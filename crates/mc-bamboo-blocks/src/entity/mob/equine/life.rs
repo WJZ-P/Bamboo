@@ -479,6 +479,59 @@ mod tests {
         assert!(landing_sounds(MobType::Llama, false, 9.0).is_empty());
     }
 
+    /// `START_RIDING_JUMP` 的服务端门槛：官方 `handlePlayerCommand` 只在
+    /// `canJump()`（上鞍）且 `data > 0` 时调 `handleStartJump`（扬蹄 + 跳跃声）。
+    /// 蓄力值本身由客户端计算冲量，服务端只用它判正数，所以不随刻度改变行为。
+    ///
+    /// Server gate for `START_RIDING_JUMP`: vanilla `handlePlayerCommand` calls
+    /// `handleStartJump` (rear + jump sound) only when `canJump()` (saddled) and
+    /// `data > 0`. The charge drives the client-side impulse; the server only
+    /// checks that it is positive, so the behaviour does not vary with the scale.
+    #[test]
+    fn riding_jump_needs_a_saddle_and_a_positive_scale() {
+        use mc_bamboo_data::items;
+        use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+
+        let mut entity = Entity::by_mob_type(MobType::Horse, Vec3::new(0.5, 64.0, 0.5));
+        entity
+            .with_mob(|me, mob| {
+                mob.events.clear();
+                // 没上鞍时任意刻度都不响应（`canJump()` 为假）。
+                // Without a saddle no scale reacts (`canJump()` is false).
+                for scale in [0, -5, 100] {
+                    assert!(!crate::entity::mob::start_riding_jump(me, mob, scale));
+                }
+                assert!(!state(mob).standing);
+                assert!(mob.events.is_empty());
+
+                // 上鞍后只有正刻度才扬蹄 20 刻、清掉吃草、播一次跳跃声。
+                // Once saddled, only a positive scale rears for 20 ticks, clears
+                // grazing and plays the jump sound once.
+                mob.equipment
+                    .set(EquipmentSlot::Saddle, ItemStack::new(items::SADDLE, 1));
+                state(mob).eating = true;
+                assert!(!crate::entity::mob::start_riding_jump(me, mob, 0));
+                assert!(!state(mob).standing);
+                assert!(crate::entity::mob::start_riding_jump(me, mob, 90));
+                {
+                    let state = state(mob);
+                    assert!(state.standing);
+                    assert_eq!(state.stand_counter, 20);
+                    assert!(!state.eating);
+                }
+                let sounds: Vec<&'static str> = mob
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        MobEvent::Sound { sound, .. } => Some(*sound),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(sounds, ["minecraft:entity.horse.jump"]);
+            })
+            .expect("horse row");
+    }
+
     /// 繁殖标记的幼崽找繁殖标记的成年马科算一条路（只改导航目标，不走）。
     fn mommy_target(adult_bred: bool, foal_kind: MobType) -> Option<BlockPos> {
         let mut level = crate::testing::TestLevel::new();

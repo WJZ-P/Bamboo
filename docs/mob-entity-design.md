@@ -314,7 +314,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 |---|---|---|---|
 | 属性、生成 | `createBaseHorseAttributes`、`randomizeAttributes`、`Horse/Llama.finalizeSpawn` | `equine::attributes` / `finalize_spawn` | `equineSpawn` 64 题 |
 | 繁殖遗传 | `setOffspringAttributes`、`createOffspringAttribute`、花色 / 力量继承，马驴生骡 | `equine::offspring` | `equineBreed` 32 题 |
-| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 12 场景 14800 刻 |
+| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 20 场景 15258 刻 |
 | 目标表 | `registerGoals` + `addBehaviourGoals`、`Llama.registerGoals`、`RandomStandGoal` | `equine/goals.rs` | 同上（running names 逐刻比） |
 | 交互 | `Horse/AbstractChestedHorse/AbstractHorse.mobInteract`、`handleEating`、`Player.interactOn` 兜底 | `equine/interact.rs` | `equineInteract` 468 题 |
 | 死亡掉落 | `dropAllDeathLoot`、`dropCustomDeathLoot`、`dropEquipment` | `equine/death.rs` | `equineDeath` 40 题 |
@@ -395,6 +395,15 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 取两个 `nextFloat`，`play_sound` 不取数，所以马科的取数顺序不变）。`cargo check --workspace --all-targets`
 通过；`mob-oracle --only equine / llama_spit / zombie_equine / wolf_ / natural_spawn / gen_spawn` 复跑全部
 0 不一致。本轮另补上狼与羊驼的互动，见 11.7。
+
+**复核 main 合并（2026-11-21，第九轮）。** 本轮开始时 `main` 已是 HEAD 的祖先
+（`git merge main` 报 `Already up to date`），按 main 的结构核对了 `spawn.rs` 的
+`finalize_spawn_in_group` / `finalize_generated` 按 `kind.is_equine()` 分派到
+`equine::finalize_spawn`、`natural.rs` 的 `check_spawn_rules` 把马 / 驴 / 骡 / 羊驼归到
+`animal_spawn_rules`，没有重复的马科实现。`cargo check --workspace --all-targets` 通过；
+`mob-oracle --only equine`（648 题）、`--only zombie_equine`（20 场景 15258 刻）、
+`--only llama_spit`（2 场景 322 刻）复跑全部 0 不一致，确认合并没有改变马科的取数顺序。
+另补了 `START_RIDING_JUMP` 服务端门槛的单元测试（上鞍 + 正刻度才扬蹄、播跳跃声）。
 
 其余已知差异见 README「马科的已知限制」。
 
