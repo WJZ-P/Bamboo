@@ -1124,6 +1124,15 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// 精确驱动当场治疗一名玩家（喷溅治疗药水）。`false` 表示不能当场做，
+    /// 调用方改成延后的 [`Effect::HealPlayer`]。
+    ///
+    /// Heals a player at once in the precise driver (splash healing potion).
+    /// `false` means this level cannot, and the caller falls back to [`Effect::HealPlayer`].
+    fn heal_player_now(&mut self, _target: crate::entity::EntityUid, _amount: f32) -> bool {
+        false
+    }
+
     /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
     /// 水平 ±8、竖直 ±5 的盒，`getEntitiesOfClass(Monster.class, box,
     /// m -> m.isPreventingPlayerRest(level, player))` 非空。
@@ -2164,6 +2173,10 @@ pub enum Effect {
         visible: bool,
         show_icon: bool,
     },
+    /// 喷溅治疗药水按距离缩放给玩家回血：`LivingEntity.heal(amount)`。
+    ///
+    /// A splash healing potion heals a player by a distance-scaled amount.
+    HealPlayer { target: EntityUid, amount: f32 },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

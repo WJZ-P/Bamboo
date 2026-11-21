@@ -257,6 +257,13 @@ impl MobType {
         matches!(self, Self::Skeleton | Self::Stray | Self::Bogged)
     }
 
+    /// `LivingEntity.isInvertedHealAndHarm()`：`#inverted_healing_and_harm` 标签。
+    ///
+    /// `LivingEntity.isInvertedHealAndHarm()`: the `#inverted_healing_and_harm` tag.
+    pub fn is_inverted_heal_and_harm(self) -> bool {
+        self.in_entity_tag("minecraft:inverted_healing_and_harm")
+    }
+
     /// `Entity.canFreeze()` 的类型部分：`#freeze_immune_entity_types`（流浪者）和
     /// `Skeleton.canFreeze()` 的覆写（恒假）。
     ///
@@ -717,6 +724,10 @@ pub enum DamageKind {
     Starve,
     Thorns,
     Magic,
+    /// 间接魔法（药水 / 唤魔者尖牙等），`minecraft:indirect_magic`。
+    ///
+    /// Indirect magic (potions, evoker fangs, etc.), `minecraft:indirect_magic`.
+    IndirectMagic,
     Wither,
     Explosion,
 }
@@ -748,6 +759,7 @@ impl DamageKind {
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
             Self::Magic => "minecraft:magic",
+            Self::IndirectMagic => "minecraft:indirect_magic",
             Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
         }
@@ -799,6 +811,7 @@ impl DamageKind {
             Self::Starve => "starve",
             Self::Thorns => "thorns",
             Self::Magic => "magic",
+            Self::IndirectMagic => "indirectMagic",
             Self::Wither => "wither",
             Self::Explosion => "explosion",
         }
@@ -808,7 +821,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 25] = [
+        let all: [DamageKind; 26] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -832,6 +845,7 @@ impl DamageKind {
             Self::Starve,
             Self::Thorns,
             Self::Magic,
+            Self::IndirectMagic,
             Self::Wither,
             Self::Explosion,
         ];
@@ -850,6 +864,7 @@ impl DamageKind {
                 | Self::Spit
                 | Self::Thrown
                 | Self::Thorns
+                | Self::IndirectMagic
         ) || matches!(self, Self::Wither)
     }
 
@@ -866,6 +881,8 @@ impl DamageKind {
                 | Self::Freeze
                 | Self::OutOfWorld
                 | Self::GenericKill
+                | Self::Magic
+                | Self::IndirectMagic
                 | Self::Wither
         )
     }
@@ -950,6 +967,8 @@ impl DamageKind {
                 | Self::Arrow
                 | Self::Thrown
                 | Self::Thorns
+                | Self::Magic
+                | Self::IndirectMagic
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor
@@ -1821,6 +1840,10 @@ pub struct MobPublic {
     ///
     /// `Witch.DATA_USING_ITEM`.
     pub witch_using_item: bool,
+    /// 目标药水效果标志（缓慢 / 中毒 / 虚弱），女巫选药时读它。
+    ///
+    /// Target potion effect flags (slowness, poison, weakness), read by witches.
+    pub effects: super::ctx::TargetEffects,
     /// `Entity.isSwimming()`：共享标志第 4 位。
     ///
     /// `Entity.isSwimming()`: shared flag 4.
@@ -1904,6 +1927,7 @@ impl MobPublic {
             zombie_special_type: mob.zombie_special_type,
             drowned_converting: mob.drowned_converting,
             witch_using_item: mob.witch_drinking,
+            effects: super::ctx::TargetEffects::from_map(&mob.effects),
             swimming: mob.swimming,
             in_water,
             skeleton_flag: match mob.mob_type {

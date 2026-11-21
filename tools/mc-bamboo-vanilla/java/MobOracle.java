@@ -275,6 +275,13 @@ public final class MobOracle {
                 playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
                 cases += 2;
             }
+            if (only == null || "witch_throw".startsWith(only)) {
+                OracleWitch.checkAim(official);
+                playWitchThrow(official, out, "witch_throw_far", 9.5, 20.0F, 73L, 220, false);
+                playWitchThrow(official, out, "witch_throw_near", 2.5, 7.0F, 419L, 220, false);
+                playWitchThrow(official, out, "witch_throw_undead", 6.5, 7.0F, 911L, 110, true);
+                cases += 3;
+            }
             for (String name : List.of("shot_bow_short_draw", "shot_bow_half_draw", "shot_bow_full_draw",
                     "shot_bow_moving", "shot_bow_enchanted",
                     "shot_bow_infinity", "shot_bow_tipped", "shot_bow_creative",
@@ -5106,6 +5113,255 @@ public final class MobOracle {
                 + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"seed\":" + seed
                 + ",\"blocks\":" + blocks + ",\"shots\":" + spits.size() + ",\"frames\":" + frames + "]"
                 + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    /**
+     * 女巫投掷喷溅药水的对拍用女巫：直接跑原版 `Witch.performRangedAttack` 选药与消费女巫随机源，
+     * 只把新生成喷溅药水的无种子随机源换成 Bamboo 的岛种子源并重放 `shoot`。
+     * The witch for splash-potion replays: runs vanilla `Witch.performRangedAttack` for potion
+     * selection and witch RNG draws, then swaps only the newly spawned potion's unseeded random
+     * for Bamboo's island seed source and replays `shoot`.
+     */
+    private static final class OracleWitch extends net.minecraft.world.entity.monster.Witch {
+        boolean zeroUncertainty;
+
+        OracleWitch(FakeLevel level) {
+            super(EntityTypes.WITCH, level);
+        }
+
+        @Override
+        public float rangedAttackUncertainty(final Level level) {
+            return zeroUncertainty ? 0.0F : super.rangedAttackUncertainty(level);
+        }
+
+        @Override
+        public void performRangedAttack(final LivingEntity target, final float power) {
+            FakeLevel world = (FakeLevel) level();
+            int before = world.spawned.size();
+            Vec3 targetMovement = target.getDeltaMovement();
+            double xd = target.getX() + targetMovement.x - getX();
+            double yd = target.getEyeY() - 1.1F - getY();
+            double zd = target.getZ() + targetMovement.z - getZ();
+            double dist = Math.sqrt(xd * xd + zd * zd);
+            super.performRangedAttack(target, power);
+            if (!zeroUncertainty && world.spawned.size() > before
+                    && world.spawned.getLast() instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownSplashPotion potion) {
+                setRandom(potion, world.entitySeeds.nextLong());
+                potion.setUUID(Mth.createInsecureUUID(potion.getRandom()));
+                potion.shoot(xd, yd + dist * 0.2, zd, dist <= 2.0 ? 0.45F : 0.75F, rangedAttackUncertainty(world));
+            }
+        }
+
+        String running() {
+            StringBuilder out = new StringBuilder();
+            for (var selector : List.of(goalSelector, targetSelector)) {
+                for (var goal : selector.getAvailableGoals()) {
+                    if (!goal.isRunning()) continue;
+                    if (!out.isEmpty()) out.append(' ');
+                    out.append(goal.getGoal().getClass().getSimpleName());
+                }
+            }
+            return out.toString();
+        }
+
+        static void checkAim(Official official) throws Exception {
+            FakeLevel world = FakeLevel.create(official);
+            OracleWitch witch = new OracleWitch(world);
+            witch.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            witch.zeroUncertainty = true;
+            var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            target.setPos(7.25, 64.0, -3.75);
+            target.setDeltaMovement(0.15, 0.0, -0.08);
+            witch.performRangedAttack(target, 1.0F);
+            Entity shot = world.spawned.getLast();
+            Vec3 move = target.getDeltaMovement();
+            double xd = target.getX() + move.x - witch.getX();
+            double yd = target.getEyeY() - 1.1F - witch.getY();
+            double zd = target.getZ() + move.z - witch.getZ();
+            double dist = Math.sqrt(xd * xd + zd * zd);
+            Vec3 expected = new Vec3(xd, yd + dist * 0.2, zd).normalize().scale(dist <= 2.0 ? 0.45F : 0.75F);
+            if (!expected.equals(shot.getDeltaMovement())) {
+                throw new IllegalStateException("witch splash aim differs: " + expected + " vs " + shot.getDeltaMovement());
+            }
+        }
+    }
+
+    /**
+     * 女巫投掷喷溅药水的逐刻对拍：覆盖远距缓慢 / 剧毒 / 伤害、近距虚弱 / 伤害与自溅免伤、
+     * 以及同范围溅射活体（牛受伤惊慌）与亡灵（僵尸反向治疗）。
+     * Tick-by-tick witch splash-potion replay covering far slowness/poison/harming, near
+     * weakness/harming + self-splash resistance, and AoE hitting both living and undead mobs.
+     */
+    private static void playWitchThrow(Official official, Writer out, String name, double playerX,
+            float playerHealth, long seed, int ticks, boolean withExtras) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        world.injectedBrightOutside = false;
+        world.injectedMonstersBurn = false;
+        world.levelEvents = new ArrayList<>();
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        int playerId = FIRST_ID + 1024;
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "WitchOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(playerX, 64.0, 0.5);
+        player.setHealth(playerHealth);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        Bytes playerSink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = playerSink;
+        put(ServerPlayer.class, player, "connection", connection);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        world.nextId = FIRST_ID;
+        OracleWitch witch = new OracleWitch(world);
+        world.entitySeeds.nextLong();
+        setRandom(witch, seed);
+        witch.setUUID(new UUID(0, 1));
+        witch.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        witch.setYHeadRot(0.0F);
+        witch.setYBodyRot(0.0F);
+        world.tracked.add(witch);
+        var extras = new ArrayList<Mob>();
+        if (withExtras) {
+            var cow = new net.minecraft.world.entity.animal.cow.Cow(EntityTypes.COW, world);
+            world.entitySeeds.nextLong();
+            setRandom(cow, 77L);
+            cow.setUUID(new UUID(0, 2));
+            cow.snapTo(playerX, 64.0, 2.0, 0.0F, 0.0F);
+            cow.setYHeadRot(0.0F);
+            cow.setYBodyRot(0.0F);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+            extras.add(cow);
+
+            var zombie = new net.minecraft.world.entity.monster.zombie.Zombie(EntityTypes.ZOMBIE, world);
+            world.entitySeeds.nextLong();
+            setRandom(zombie, 88L);
+            zombie.setUUID(new UUID(0, 3));
+            zombie.snapTo(playerX, 64.0, -1.0, 0.0F, 0.0F);
+            zombie.setYHeadRot(0.0F);
+            zombie.setYBodyRot(0.0F);
+            zombie.setHealth(10.0F);
+            zombie.setNoAi(true);
+            world.tracked.add(zombie);
+            extras.add(zombie);
+        }
+        var potions = new ArrayList<Entity>();
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        var frames = new StringBuilder("[");
+        var playerStates = new StringBuilder("[");
+        var playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
+        int totalEvents = 0;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var potionPackets = new ArrayList<String>();
+            if (tick > 0) {
+                world.gameTime++;
+                if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+                if (player.hurtTime > 0) player.hurtTime--;
+                witch.checkDespawn();
+                witch.commonTick();
+                witch.tick();
+                for (Mob extra : extras) {
+                    if (extra.isRemoved()) continue;
+                    extra.checkDespawn();
+                    extra.commonTick();
+                    extra.tick();
+                }
+                for (Entity potion : potions) {
+                    if (potion.isRemoved()) continue;
+                    potion.commonTick();
+                    potion.tick();
+                    if (potion.isRemoved()) {
+                        Bytes gone = new Bytes(official.registries);
+                        gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(potion.getId()));
+                        potionPackets.addAll(gone.take());
+                        sync.remove(potion.getId());
+                    }
+                }
+                world.tracked.removeIf(Entity::isRemoved);
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownSplashPotion potion) {
+                        potions.add(potion);
+                        world.tracked.add(potion);
+                        pairArrow(world, official, potion, sync, potionPackets);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    potionPackets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            totalEvents += world.levelEvents.size();
+            frames.append("{\"potions\":[");
+            boolean first = true;
+            for (Entity potion : potions) {
+                if (potion.isRemoved()) continue;
+                if (!first) frames.append(',');
+                first = false;
+                frames.append("{\"id\":").append(potion.getId());
+                frames.append(",\"motion\":").append(projectileMotion(potion));
+                frames.append(",\"seed\":").append(randomSeed(potion)).append('}');
+            }
+            frames.append("],\"packets\":").append(potionPackets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append(",\"levelEvents\":").append(world.levelEvents.stream().map(Arrays::toString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            world.levelEvents.clear();
+            frames.append(",\"witch\":").append(projectileMotion(witch));
+            frames.append(",\"witchSeed\":").append(randomSeed(witch));
+            frames.append(",\"witchHealth\":").append(Float.floatToRawIntBits(witch.getHealth()));
+            frames.append(",\"goals\":").append(jsonString(witch.running()));
+            frames.append(",\"playerEffects\":").append(activeEffectsJson(player));
+            frames.append(",\"extras\":[");
+            for (int i = 0; i < extras.size(); i++) {
+                if (i > 0) frames.append(',');
+                Mob extra = extras.get(i);
+                frames.append("{\"id\":").append(extra.getId())
+                        .append(",\"health\":").append(Float.floatToRawIntBits(extra.getHealth()))
+                        .append(",\"effects\":").append(activeEffectsJson(extra))
+                        .append('}');
+            }
+            frames.append("]}");
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        if (potions.isEmpty() || totalEvents == 0) {
+            throw new IllegalStateException("witch throw scenario did not exercise " + name
+                    + ": potions=" + potions.size() + " events=" + totalEvents);
+        }
+        out.write("{\"type\":\"witchThrow\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX
+                + ",\"playerHealth\":" + Float.floatToRawIntBits(playerHealth)
+                + ",\"seed\":" + seed + ",\"withExtras\":" + withExtras
+                + ",\"blocks\":" + blocks + ",\"shots\":" + potions.size() + ",\"frames\":" + frames + "]"
+                + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    private static String activeEffectsJson(LivingEntity entity) {
+        return entity.getActiveEffects().stream()
+                .map(effect -> new int[] {
+                        BuiltInRegistries.MOB_EFFECT.getId(effect.getEffect().value()),
+                        effect.getDuration(),
+                        effect.getAmplifier(),
+                })
+                .sorted(java.util.Comparator.comparingInt(row -> row[0]))
+                .map(Arrays::toString)
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
     }
 
     private static String projectileMotion(Entity entity) {

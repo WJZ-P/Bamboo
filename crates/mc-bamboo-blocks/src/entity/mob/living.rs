@@ -592,10 +592,29 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
 }
 
-/// `LivingEntity.addEffect`：给一头生物挂一个效果，刷新属性。
+/// `LivingEntity.canBeAffected`：按生物标签筛掉免疫的状态效果。
 ///
-/// `LivingEntity.addEffect`: adds an effect to a mob and refreshes attributes.
+/// `LivingEntity.canBeAffected`: filters out effects the mob type is immune to.
+pub fn can_be_affected(kind: super::MobType, effect: i32) -> bool {
+    if kind.in_entity_tag("minecraft:immune_to_infested") {
+        return effect != mob_effect::INFESTED;
+    }
+    if kind.in_entity_tag("minecraft:immune_to_oozing") {
+        return effect != mob_effect::OOZING;
+    }
+    if kind.in_entity_tag("minecraft:ignores_poison_and_regen") {
+        return effect != mob_effect::REGENERATION && effect != mob_effect::POISON;
+    }
+    true
+}
+
+/// `LivingEntity.addEffect`：先检查免疫标签，再给生物挂上效果并刷新属性。
+///
+/// `LivingEntity.addEffect`: checks `canBeAffected`, adds the effect and refreshes attributes.
 pub fn add_effect(mob: &mut Mob, instance: super::effects::EffectInstance) -> bool {
+    if !can_be_affected(mob.mob_type, instance.effect) {
+        return false;
+    }
     let events = mob.effects.add(instance);
     if events.attributes_changed {
         mob.effects.rebuild_attributes(&mut mob.attributes);

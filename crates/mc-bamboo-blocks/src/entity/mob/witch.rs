@@ -289,14 +289,11 @@ pub(super) fn perform_ranged_attack(
     if mob.witch_drinking {
         return;
     }
-    // `target.getDeltaMovement()` 这一期没有进 `CombatTarget`，提前量按零算。
-    //
-    // `target.getDeltaMovement()` is not in `CombatTarget` yet, so the lead is zero.
-    let xd = target.position.x - me.position.x;
-    let yd = target.eye_position().y - 1.1 - me.position.y;
-    let zd = target.position.z - me.position.z;
+    let xd = target.position.x + target.delta.x - me.position.x;
+    let yd = target.eye_y() - f64::from(1.1_f32) - me.position.y;
+    let zd = target.position.z + target.delta.z - me.position.z;
     let dist = (xd * xd + zd * zd).sqrt();
-    let potion = choose_throw_potion(me, dist);
+    let potion = choose_throw_potion(me, mob, target, dist);
     let speed = if dist <= 2.0 { 0.45 } else { 0.75 };
     let stack = potion_stack(mc_bamboo_data::items::SPLASH_POTION, potion);
     let shot = crate::entity::splash_potion::SplashShot {
@@ -306,7 +303,11 @@ pub(super) fn perform_ranged_attack(
         direction: Vec3::new(xd, yd + dist * 0.2, zd),
         power: speed,
         uncertainty: 8.0,
-        position: Vec3::new(me.position.x, living::eye_y(me, mob) - 0.1, me.position.z),
+        position: Vec3::new(
+            me.position.x,
+            living::eye_y(me, mob) - f64::from(0.1_f32),
+            me.position.z,
+        ),
         source_movement: None,
     };
     ctx.emit(
@@ -322,28 +323,44 @@ pub(super) fn perform_ranged_attack(
     }
 }
 
-/// `Witch.performRangedAttack` 选药：8 格外缓慢、3 格内 25% 虚弱，否则伤害。官方还有
-/// 「目标血量」「目标已有药水效果」「袭击者」三支，`CombatTarget` 里没有这些字段，
-/// 见汇报的疑点。
+/// `Witch.performRangedAttack` 选药：袭击者按血量给治疗 / 再生并清目标；
+/// 8 格外且无缓慢给缓慢；血量 >= 8 且无中毒给剧毒；3 格内、无虚弱且 25% 概率给虚弱；
+/// 其余给瞬间伤害。短路顺序和官方一致，只有进了虚弱一支才会取 `nextFloat`。
 ///
-/// The potion choice of `Witch.performRangedAttack`: slowness past eight blocks, weakness
-/// within three blocks at 25%, otherwise harming. Vanilla also tests the target's health,
-/// effects and whether it is a raider, none of which `CombatTarget` carries.
-fn choose_throw_potion(me: &mut Entity, dist: f64) -> i32 {
-    if dist >= 8.0 {
+/// The potion choice of `Witch.performRangedAttack`: raiders receive healing or regeneration
+/// and clear the target; otherwise slowness at >= 8 blocks if absent, poison at >= 8 health
+/// if absent, weakness within 3 blocks at 25% if absent, and harming otherwise. Short-circuit
+/// order matches vanilla so `nextFloat` is drawn only on the weakness branch.
+fn choose_throw_potion(
+    me: &mut Entity,
+    mob: &mut Mob,
+    target: super::goals::CombatTarget,
+    dist: f64,
+) -> i32 {
+    if target.is_raider {
+        mob.target = None;
+        if target.health <= 4.0 {
+            return potion::HEALING;
+        }
+        return potion::REGENERATION;
+    }
+    if dist >= 8.0 && !target.effects.slowness {
         return potion::SLOWNESS;
     }
-    if me.random.next_float() < 0.25 && dist <= 3.0 {
+    if target.health >= 8.0 && !target.effects.poison {
+        return potion::POISON;
+    }
+    if dist <= 3.0 && !target.effects.weakness && me.random.next_float() < 0.25 {
         return potion::WEAKNESS;
     }
     potion::HARMING
 }
 
 /// `Witch.getDamageAfterMagicAbsorb`：自己打自己为 0，`#witch_resistant_to`（魔法、
-/// 荆棘）乘 0.15。
+/// 间接魔法、荆棘）乘 0.15。
 ///
 /// `Witch.getDamageAfterMagicAbsorb`: self-inflicted damage is zero and
-/// `#witch_resistant_to` (magic, thorns) is multiplied by 0.15.
+/// `#witch_resistant_to` (magic, indirect magic, thorns) is multiplied by 0.15.
 pub(super) fn damage_after_magic_absorb(
     source: super::DamageSource,
     damage: f32,
@@ -355,7 +372,7 @@ pub(super) fn damage_after_magic_absorb(
     }
     if matches!(
         source.kind,
-        super::DamageKind::Magic | super::DamageKind::Thorns
+        super::DamageKind::Magic | super::DamageKind::IndirectMagic | super::DamageKind::Thorns
     ) {
         damage *= 0.15;
     }

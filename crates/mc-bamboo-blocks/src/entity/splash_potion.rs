@@ -332,19 +332,21 @@ fn base_tick(me: &mut Entity, blocks: &dyn BlockView) {
     }
 }
 
-/// `AbstractThrownPotion.onHit`：先把效果分给周围，再按有没有瞬间效果选 2007 / 2002 号
-/// 世界事件，最后消失。
+/// `AbstractThrownPotion.onHit`：先按药水组件把效果分给周围，再按有没有瞬间效果选
+/// 2007 / 2002 和 1054 / 1053 号世界事件，最后消失。官方 `AbstractThrownPotion` 不覆写
+/// `onHitEntity`，命中实体时不打额外的 0 点投掷伤害。
 ///
-/// `AbstractThrownPotion.onHit`: hand the effects to the surroundings, pick level event
-/// 2007 or 2002 depending on instant effects, then disappear.
+/// `AbstractThrownPotion.onHit`: hand the potion effects to the surroundings, emit level
+/// events 2007/1054 or 2002/1053 depending on instant effects, then discard. Vanilla
+/// `AbstractThrownPotion` does not override `onHitEntity`, so there is no extra 0-damage hit.
 pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: SplashHit) {
     let EntityKind::SplashPotion(potion) = &me.kind else {
         return;
     };
     let stack = potion.item.clone();
-    let effects = super::arrow::potion_effect_instances(&stack);
+    let (effects, duration_scale) = super::arrow::potion_raw_effects_and_scale(&stack);
     let instant = super::arrow::potion_has_instant(&stack);
-    let color = super::arrow::potion_color_of(&stack);
+    let color = super::arrow::potion_contents_color(&stack);
     let silent = false;
     let box_now = me.bounding_box();
     let dx = hit.location.x - me.position.x;
@@ -358,23 +360,9 @@ pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: SplashHit) {
         box_now.max_y + dy,
         box_now.max_z + dz,
     );
-    // 命中实体时先打一下 0 点投掷伤害，和鸡蛋一样。
-    // Entity hits take a zero-damage `thrown` hit first, as for eggs.
-    match hit.target {
-        SplashTarget::Mob(uid) => {
-            let source = damage_source(me, world);
-            world.hurt_mob(uid, source, 0.0);
-        }
-        SplashTarget::Player(uid) => {
-            let source = damage_source(me, world);
-            let owner = source
-                .attacker
-                .and_then(|uid| world.level().entity_public(uid));
-            world.hurt_player_from_mob(uid, source, 0.0, owner.as_ref());
-        }
-        SplashTarget::Block | SplashTarget::Other => {}
+    if !effects.is_empty() {
+        apply_splash(me, world, moved, &effects, duration_scale);
     }
-    apply_splash(world, moved, &effects);
     let pos = me.block_position();
     world.push_effect(Effect::LevelEvent {
         event: if instant { 2007 } else { 2002 },
@@ -393,12 +381,14 @@ pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: SplashHit) {
     me.removed = true;
 }
 
-/// `AbstractThrownPotion.damageSources().thrown(this, getOwner())`。
+/// `DamageSources.indirectMagic(this, getOwner())`：击退方向用 `position`（`AbstractThrownPotion`
+/// 覆写 `calculateHorizontalHurtKnockbackDirection` 为目标位置减药水位置，不取速度向量）。
 ///
-/// `AbstractThrownPotion.damageSources().thrown(this, getOwner())`.
-fn damage_source(me: &Entity, world: &World<'_>) -> DamageSource {
+/// `DamageSources.indirectMagic(this, getOwner())`: knockback uses `position` (matching
+/// `AbstractThrownPotion.calculateHorizontalHurtKnockbackDirection`, not projectile motion).
+fn indirect_magic_source(me: &Entity, world: &World<'_>) -> DamageSource {
     let EntityKind::SplashPotion(potion) = &me.kind else {
-        return DamageSource::environment(DamageKind::Thrown);
+        return DamageSource::environment(DamageKind::IndirectMagic);
     };
     let owner_mob = potion
         .owner
@@ -420,12 +410,12 @@ fn damage_source(me: &Entity, world: &World<'_>) -> DamageSource {
         attacker_is_player: owner_player.is_some(),
         creative_player: owner_player.is_some_and(|player| player.creative),
         position: Some(me.position),
-        projectile_motion: Some(me.delta),
+        projectile_motion: None,
         attacker_uuid: potion.owner_uuid,
         scale_when_non_player: owner_mob
             .as_ref()
             .is_some_and(|owner| matches!(owner.kind, KindPublic::Mob(_))),
-        ..DamageSource::environment(DamageKind::Thrown)
+        ..DamageSource::environment(DamageKind::IndirectMagic)
     }
 }
 
@@ -433,7 +423,13 @@ fn damage_source(me: &Entity, world: &World<'_>) -> DamageSource {
 ///
 /// `ThrownSplashPotion.onHitAsPotion`: hand the potion effects to nearby mobs and players
 /// with distance falloff.
-fn apply_splash(world: &mut World<'_>, potion_box: Aabb, effects: &[EffectInstance]) {
+fn apply_splash(
+    me: &Entity,
+    world: &mut World<'_>,
+    potion_box: Aabb,
+    effects: &[EffectInstance],
+    duration_scale: f32,
+) {
     let area = Aabb::new(
         potion_box.min_x - 4.0,
         potion_box.min_y - 2.0,
@@ -442,32 +438,56 @@ fn apply_splash(world: &mut World<'_>, potion_box: Aabb, effects: &[EffectInstan
         potion_box.max_y + 2.0,
         potion_box.max_z + 4.0,
     );
-    let margin = 0.0;
+    // `ProjectileUtil.computeMargin(this)`：`clamp((tickCount - 2) / 20.0F, 0.0F, 0.3F)`。
+    //
+    // `ProjectileUtil.computeMargin(this)`: `clamp((tickCount - 2) / 20.0F, 0.0F, 0.3F)`.
+    let margin = f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3));
     let mut mobs = Vec::new();
     world.level().for_each_entity_in(area, &mut |other| {
         if let KindPublic::Mob(mob) = &other.kind
+            && !other.removed
             && mob.health > 0.0
         {
-            mobs.push((other.uid, other.bounding_box()));
+            mobs.push((
+                other.uid,
+                other.bounding_box(),
+                mob.mob_type.is_inverted_heal_and_harm(),
+            ));
         }
     });
     let mut players = Vec::new();
     world.level().for_each_player(&mut |player| {
-        if player.alive && !player.spectator {
-            players.push((player.uid, super::arrow::player_box(player)));
+        let bounds = super::arrow::player_box(player);
+        if player.alive && !player.spectator && bounds.intersects(area) {
+            players.push((player.uid, bounds));
         }
     });
-    for (uid, bounds) in mobs {
+    if mobs.is_empty() && players.is_empty() {
+        return;
+    }
+    let source = indirect_magic_source(me, world);
+    let owner = source
+        .attacker
+        .and_then(|uid| world.level().entity_public(uid));
+    for (uid, bounds, inverted) in mobs {
         if let Some(scale) = splash_scale(potion_box, bounds, margin) {
             for effect in effects {
-                apply_to_mob(world, uid, effect, scale);
+                apply_to_mob(world, uid, inverted, effect, scale, duration_scale, source);
             }
         }
     }
     for (uid, bounds) in players {
         if let Some(scale) = splash_scale(potion_box, bounds, margin) {
             for effect in effects {
-                apply_to_player(world, uid, effect, scale);
+                apply_to_player(
+                    world,
+                    uid,
+                    effect,
+                    scale,
+                    duration_scale,
+                    source,
+                    owner.as_ref(),
+                );
             }
         }
     }
@@ -504,35 +524,54 @@ fn splash_scale(potion_box: Aabb, bounds: Aabb, margin: f64) -> Option<f64> {
     (distance < SPLASH_RANGE * SPLASH_RANGE).then(|| 1.0 - distance.sqrt() / SPLASH_RANGE)
 }
 
-/// 瞬时效果当场结算，其余挂上；时长按 `scale * duration * durationScale + 0.5` 截断，
-/// 20 刻以内的不挂（`endsWithin(20)`）。
+/// `ThrownSplashPotion.onHitAsPotion` 的生物分支：`HealOrHarmMobEffect.applyInstantaneousEffect`
+/// 按 `(int)(scale * base + 0.5)` 取整并反转亡灵，其余效果按 `scale * duration * durationScale + 0.5`
+/// 截断，20 刻以内（`endsWithin(20)`）不挂。
 ///
-/// Instantaneous effects resolve now; the rest are added with
-/// `scale * duration * durationScale + 0.5` ticks, skipped when within twenty ticks.
-fn apply_to_mob(world: &mut World<'_>, uid: EntityUid, effect: &EffectInstance, scale: f64) {
-    if effect.effect == mob_effect::INSTANT_HEALTH {
-        let amount = (scale * f64::from(4i32 << effect.amplifier)) as f32;
-        world.with_entity_mut(uid, &mut |entity| {
-            if let Some(mob) = entity.kind.mob_mut() {
-                let max = mob
-                    .attributes
-                    .value(mc_bamboo_data::registries::attribute::MAX_HEALTH)
-                    as f32;
-                mob.health = (mob.health + amount).min(max);
-            }
-        });
+/// The mob branch of `ThrownSplashPotion.onHitAsPotion`: `HealOrHarmMobEffect` rounds
+/// `(int)(scale * base + 0.5)` and inverts undead; other effects scale duration with
+/// `scale * duration * durationScale + 0.5` and skip durations within twenty ticks.
+fn apply_to_mob(
+    world: &mut World<'_>,
+    uid: EntityUid,
+    inverted: bool,
+    effect: &EffectInstance,
+    scale: f64,
+    duration_scale: f32,
+    source: DamageSource,
+) {
+    if effect.effect == mob_effect::INSTANT_HEALTH || effect.effect == mob_effect::INSTANT_DAMAGE {
+        let is_harm = effect.effect == mob_effect::INSTANT_DAMAGE;
+        if is_harm == inverted {
+            let amount = (scale * f64::from(4i32 << effect.amplifier) + 0.5) as i32 as f32;
+            world.with_entity_mut(uid, &mut |entity| {
+                if let Some(mob) = entity.kind.mob_mut()
+                    && mob.health > 0.0
+                {
+                    let max = mob
+                        .attributes
+                        .value(mc_bamboo_data::registries::attribute::MAX_HEALTH)
+                        as f32;
+                    mob.health = (mob.health + amount).min(max);
+                }
+            });
+        } else {
+            let amount = (scale * f64::from(6i32 << effect.amplifier) + 0.5) as i32 as f32;
+            world.hurt_mob(uid, source, amount);
+        }
         return;
     }
-    if effect.effect == mob_effect::INSTANT_DAMAGE {
-        let amount = (scale * f64::from(6i32 << effect.amplifier)) as f32;
-        world.hurt_mob(uid, DamageSource::environment(DamageKind::Magic), amount);
+    let duration = scaled_splash_duration(effect, scale, duration_scale);
+    if !effect.is_infinite() && duration <= 20 {
         return;
     }
-    let duration = (scale * f64::from(effect.duration) + 0.5) as i32;
-    if duration <= 20 {
-        return;
-    }
-    let instance = EffectInstance::with_amplifier(effect.effect, duration, effect.amplifier);
+    let instance = EffectInstance::with_flags(
+        effect.effect,
+        duration,
+        effect.amplifier,
+        effect.ambient,
+        effect.visible,
+    );
     world.with_entity_mut(uid, &mut |entity| {
         if let Some(mob) = entity.kind.mob_mut() {
             living::add_effect(mob, instance.clone());
@@ -540,20 +579,53 @@ fn apply_to_mob(world: &mut World<'_>, uid: EntityUid, effect: &EffectInstance, 
     });
 }
 
-/// 玩家身上的同一套结算。
+/// 玩家身上的同一套结算：瞬时治疗走 `heal_player`，瞬时伤害按 `indirectMagic` 走
+/// `hurt_player_from_mob`，其余效果按距离缩放后挂上。
 ///
-/// The same resolution for players.
-fn apply_to_player(world: &mut World<'_>, uid: EntityUid, effect: &EffectInstance, scale: f64) {
-    if effect.effect == mob_effect::INSTANT_HEALTH || effect.effect == mob_effect::INSTANT_DAMAGE {
-        world.instant_player_effect(uid, effect.effect, effect.amplifier);
+/// The same resolution for players: instant health heals by the scaled integer amount,
+/// instant damage hurts with `indirectMagic`, and non-instant effects scale duration.
+fn apply_to_player(
+    world: &mut World<'_>,
+    uid: EntityUid,
+    effect: &EffectInstance,
+    scale: f64,
+    duration_scale: f32,
+    source: DamageSource,
+    owner: Option<&super::EntityPublic>,
+) {
+    if effect.effect == mob_effect::INSTANT_HEALTH {
+        let amount = (scale * f64::from(4i32 << effect.amplifier) + 0.5) as i32 as f32;
+        world.heal_player(uid, amount);
         return;
     }
-    let duration = (scale * f64::from(effect.duration) + 0.5) as i32;
-    if duration <= 20 {
+    if effect.effect == mob_effect::INSTANT_DAMAGE {
+        let amount = (scale * f64::from(6i32 << effect.amplifier) + 0.5) as i32 as f32;
+        world.hurt_player_from_mob(uid, source, amount, owner);
+        return;
+    }
+    let duration = scaled_splash_duration(effect, scale, duration_scale);
+    if !effect.is_infinite() && duration <= 20 {
         return;
     }
     world.give_player_effect(
         uid,
-        EffectInstance::with_amplifier(effect.effect, duration, effect.amplifier),
+        EffectInstance::with_flags(
+            effect.effect,
+            duration,
+            effect.amplifier,
+            effect.ambient,
+            effect.visible,
+        ),
     );
+}
+
+/// `MobEffectInstance.mapDuration(d -> (int)(scale * d * durationScale + 0.5))`。
+///
+/// `MobEffectInstance.mapDuration(d -> (int)(scale * d * durationScale + 0.5))`.
+fn scaled_splash_duration(effect: &EffectInstance, scale: f64, duration_scale: f32) -> i32 {
+    if effect.is_infinite() {
+        crate::entity::mob::effects::INFINITE
+    } else {
+        (scale * f64::from(effect.duration) * f64::from(duration_scale) + 0.5) as i32
+    }
 }

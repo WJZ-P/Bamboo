@@ -571,7 +571,9 @@ mod tests {
             uid: 123,
             uuid: None,
             position: Vec3::new(10.5, 64.0, 0.5),
+            delta: Vec3::default(),
             eye_height: 1.62,
+            health: 20.0,
             alive: true,
             spectator: false,
             creative: false,
@@ -581,6 +583,7 @@ mod tests {
             main_hand: 0,
             off_hand: 0,
             combat: Default::default(),
+            effects: Default::default(),
         };
         shooter.with_mob(|shooter, mob| {
             mob.equipment

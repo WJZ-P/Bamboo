@@ -637,7 +637,10 @@ impl Report {
                 ));
             }
             if let Some(theirs) = &expected.player_effects {
-                let ours: Vec<_> = player_effects.values().copied().collect();
+                let mut ours = level.game.as_ref().unwrap().effects(case.player_id);
+                if ours.is_empty() && !player_effects.is_empty() {
+                    ours = player_effects.values().copied().collect();
+                }
                 if *theirs != ours {
                     self.mismatch(format!(
                         "{label} player effects: official {theirs:?}, bamboo {ours:?}"

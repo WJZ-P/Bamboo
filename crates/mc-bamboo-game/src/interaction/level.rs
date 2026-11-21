@@ -452,6 +452,43 @@ impl Level for RegionLevel<'_> {
         true
     }
 
+    fn give_player_effect_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        let Some(side) = self.player_side.as_mut() else {
+            return false;
+        };
+        if mc_bamboo_blocks::entity::mob::effects::is_instantaneous(instance.effect) {
+            return false;
+        }
+        crate::player_effects::give_in(
+            self.players,
+            side.links,
+            PlayerId(target),
+            instance.clone(),
+        );
+        true
+    }
+
+    fn heal_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        amount: f32,
+    ) -> bool {
+        if self.player_side.is_none() {
+            return false;
+        }
+        if let Some(player) = self.players.get_mut(&PlayerId(target))
+            && player.health.health > 0.0
+        {
+            let max = crate::player_effects::max_health(player);
+            player.health.health = (player.health.health + amount).min(max);
+        }
+        true
+    }
+
     /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：读区块里算好的真实高度图。
     fn heightmap_y(&self, pos: BlockPos) -> i32 {
         self.chunks

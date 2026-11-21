@@ -943,7 +943,9 @@ mod tests {
             uuid: None,
             uid,
             position,
+            delta: Vec3::default(),
             eye_height: 1.62,
+            health: 20.0,
             alive: true,
             spectator: false,
             creative: false,
@@ -953,6 +955,7 @@ mod tests {
             main_hand: 0,
             off_hand: 0,
             combat: Default::default(),
+            effects: Default::default(),
         }
     }
 

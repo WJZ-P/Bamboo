@@ -39,6 +39,7 @@ mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
+mod witch_throw;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -88,6 +89,7 @@ enum Line {
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
+    WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     GenSpawn(gen_spawn::Case),
     Egg(Box<egg::EggCase>),
@@ -794,6 +796,33 @@ impl Level for MobLevel {
         true
     }
 
+    fn give_player_effect_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        if mc_bamboo_blocks::entity::mob::effects::is_instantaneous(instance.effect) {
+            return false;
+        }
+        game.give_effect(target, instance.clone());
+        true
+    }
+
+    fn heal_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        amount: f32,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.heal(target, amount);
+        true
+    }
+
     fn sky_darken(&self) -> i32 {
         self.facts.sky_darken
     }
@@ -1101,6 +1130,7 @@ impl Report {
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
+                Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::End(end) => {
@@ -1240,7 +1270,9 @@ impl Report {
                         f64::from_bits(player.y as u64),
                         f64::from_bits(player.z as u64),
                     ),
+                    delta: Vec3::default(),
                     eye_height: f32::from_bits(player.eye as u32),
+                    health: 20.0,
                     alive: true,
                     spectator: false,
                     creative: false,
@@ -1250,6 +1282,7 @@ impl Report {
                     main_hand: player.item,
                     off_hand: 0,
                     combat: Default::default(),
+                    effects: Default::default(),
                 })
                 .collect(),
             game: case.real_players.then(|| {

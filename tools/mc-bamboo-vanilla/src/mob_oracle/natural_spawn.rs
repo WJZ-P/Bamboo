@@ -346,7 +346,9 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         uid: 1,
         uuid: None,
         position: Vec3::new(case.player_x, f64::from(case.floors[0] + 1), 8.5),
+        delta: Vec3::default(),
         eye_height: 1.62,
+        health: 20.0,
         alive: true,
         spectator: false,
         creative: false,
@@ -356,6 +358,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         main_hand: 0,
         off_hand: 0,
         combat: Default::default(),
+        effects: Default::default(),
     };
     Ok(MobLevel {
         blocks,

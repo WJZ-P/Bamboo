@@ -927,6 +927,9 @@ impl EntityStore {
         if let EntityKind::Egg(egg) = &mut entity.kind {
             egg.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
+        if let EntityKind::SplashPotion(potion) = &mut entity.kind {
+            potion.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         entity
     }
 

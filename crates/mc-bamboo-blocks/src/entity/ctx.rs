@@ -210,6 +210,30 @@ pub trait BlockView {
     }
 }
 
+/// 生物选药或决策时要看的目标药水效果（女巫的 `performRangedAttack` 读这三项）。
+///
+/// Target potion effects inspected by mob AI (`Witch.performRangedAttack` reads these three).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetEffects {
+    pub slowness: bool,
+    pub poison: bool,
+    pub weakness: bool,
+}
+
+impl TargetEffects {
+    /// 从效果表提取这三项标志。
+    ///
+    /// Extracts the three flags from an active effect map.
+    pub fn from_map(effects: &super::mob::effects::EffectMap) -> Self {
+        use mc_bamboo_data::registries::mob_effect;
+        Self {
+            slowness: effects.has(mob_effect::SLOWNESS),
+            poison: effects.has(mob_effect::POISON),
+            weakness: effects.has(mob_effect::WEAKNESS),
+        }
+    }
+}
+
 /// 生物看得见的一个玩家。
 ///
 /// A player as seen by mobs.
@@ -218,7 +242,15 @@ pub struct PlayerView {
     pub uid: EntityUid,
     pub uuid: Option<[u8; 16]>,
     pub position: Vec3,
+    /// `Entity.getDeltaMovement()`，女巫计算投掷提前量时读它。
+    ///
+    /// `Entity.getDeltaMovement()`, read by witches to lead thrown potions.
+    pub delta: Vec3,
     pub eye_height: f32,
+    /// `LivingEntity.getHealth()`，女巫选毒药还是伤害药水时读它。
+    ///
+    /// `LivingEntity.getHealth()`, read by witches when picking poison vs harming.
+    pub health: f32,
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
@@ -234,6 +266,10 @@ pub struct PlayerView {
     ///
     /// Combat memory, read by tamed wolves guarding their owner.
     pub combat: PlayerCombat,
+    /// 目标身上的缓慢 / 中毒 / 虚弱状态，女巫选药时读它。
+    ///
+    /// Whether the target has slowness, poison or weakness, read by witches.
+    pub effects: TargetEffects,
 }
 
 /// 玩家的 `getLastHurtByMob` / `getLastHurtMob` 和两个时间戳（玩家自己的 tick 数），

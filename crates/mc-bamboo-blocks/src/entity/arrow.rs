@@ -937,6 +937,64 @@ pub(crate) fn potion_has_instant(stack: &mc_bamboo_protocol::item::ItemStack) ->
     })
 }
 
+/// `PotionContents.getColor()`：没有药水组件时返回 `BASE_POTION_COLOR`（-13083194），
+/// 供喷溅药水的世界事件使用。
+///
+/// `PotionContents.getColor()`: returns `BASE_POTION_COLOR` (-13083194) when empty,
+/// for splash potion level events.
+pub(crate) fn potion_contents_color(stack: &mc_bamboo_protocol::item::ItemStack) -> i32 {
+    let color = potion_color_of(stack);
+    if color == -1 { -13_083_194 } else { color }
+}
+
+/// `PotionContents.getAllEffects()` 与 `POTION_DURATION_SCALE`：返回未缩放的原始效果和
+/// 持续时间倍率，供 `ThrownSplashPotion.onHitAsPotion` 一次缩放并四舍五入。
+///
+/// `PotionContents.getAllEffects()` plus `POTION_DURATION_SCALE`: returns the unscaled
+/// effects and the duration scale so `ThrownSplashPotion.onHitAsPotion` scales once.
+pub(crate) fn potion_raw_effects_and_scale(
+    stack: &mc_bamboo_protocol::item::ItemStack,
+) -> (Vec<crate::entity::mob::effects::EffectInstance>, f32) {
+    use crate::entity::mob::effects::EffectInstance;
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let patch = stack.patch();
+    let Some(ComponentValue::PotionContents {
+        potion,
+        custom_effects,
+        ..
+    }) = defaults::resolve(stack.item, &patch, kinds::POTION_CONTENTS)
+    else {
+        return (Vec::new(), 1.0);
+    };
+    let scale = match defaults::resolve(stack.item, &patch, kinds::POTION_DURATION_SCALE) {
+        Some(ComponentValue::PotionDurationScale(scale)) => *scale,
+        _ => 1.0,
+    };
+    let mut out = Vec::new();
+    if let Some(potion) = potion
+        && let Some(effects) = mc_bamboo_data::potions::effects(*potion)
+    {
+        for &(effect, duration, amplifier) in effects {
+            out.push(EffectInstance::with_amplifier(effect, duration, amplifier));
+        }
+    }
+    for instance in custom_effects {
+        let details = &instance.details;
+        let mut effect = EffectInstance::with_flags(
+            instance.effect,
+            details.duration,
+            details.amplifier,
+            details.ambient,
+            details.show_particles,
+        );
+        effect.show_icon = details.show_icon;
+        out.push(effect);
+    }
+    (out, scale)
+}
+
 pub(crate) fn potion_effect_instances(
     stack: &mc_bamboo_protocol::item::ItemStack,
 ) -> Vec<crate::entity::mob::effects::EffectInstance> {

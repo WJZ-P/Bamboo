@@ -746,6 +746,16 @@ impl<'a> World<'a> {
         );
     }
 
+    /// 喷溅药水给玩家回血（`LivingEntity.heal`）：能当场就当场，否则延后。
+    ///
+    /// Heals a player from a splash potion (`LivingEntity.heal`): applied at once
+    /// when the level can, otherwise deferred.
+    pub fn heal_player(&mut self, target: crate::entity::EntityUid, amount: f32) {
+        if !self.level.heal_player_now(target, amount) {
+            self.push_effect(Effect::HealPlayer { target, amount });
+        }
+    }
+
     /// 药水箭带给生物的瞬间效果：`MobEffect.applyInstantaneousEffect`。
     ///
     /// An arrow's instantaneous effect on a mob: `MobEffect.applyInstantaneousEffect`.
@@ -3898,6 +3908,7 @@ mod tests {
                 | Effect::HurtPlayer { .. }
                 | Effect::IgnitePlayer { .. }
                 | Effect::PlayerEffect { .. }
+                | Effect::HealPlayer { .. }
                 | Effect::SleepInBed { .. } => None,
             })
             .collect()

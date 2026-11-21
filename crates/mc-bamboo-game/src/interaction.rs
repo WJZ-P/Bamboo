@@ -698,6 +698,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::player_effects::give(region, id, instance);
                 }
             }
+            Effect::HealPlayer { target, amount } => {
+                let id = crate::inbound::PlayerId(target);
+                if let Some(player) = region.players.get_mut(&id)
+                    && player.health.health > 0.0
+                {
+                    let max = crate::player_effects::max_health(player);
+                    player.health.health = (player.health.health + amount).min(max);
+                }
+            }
             Effect::SleepInBed {
                 pos,
                 set_spawn,

@@ -1151,7 +1151,23 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    !mob.mob_type.is_skeleton() || target_by_uid(mob, ctx, uid).is_some()
+                    if mob.mob_type == super::MobType::Witch {
+                        // `new HurtByTargetGoal(this, Raider.class)`：女巫不报复自己或别的袭击者。
+                        //
+                        // `new HurtByTargetGoal(this, Raider.class)`: witches ignore themselves
+                        // and other raiders.
+                        uid != me.id
+                            && !ctx.other(uid).is_some_and(|other| {
+                                matches!(
+                                    &other.kind,
+                                    KindPublic::Mob(other_mob)
+                                        if other_mob.mob_type == super::MobType::Witch
+                                )
+                            })
+                            && target_by_uid(mob, ctx, uid).is_some()
+                    } else {
+                        !mob.mob_type.is_skeleton() || target_by_uid(mob, ctx, uid).is_some()
+                    }
                 })
         }
         // `HurtByTargetGoal.canUse`：时间戳变了，并且 `canAttack(lastHurtByMob, HURT_BY_TARGETING)`。
@@ -1297,11 +1313,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             false
         }
         Goal::WitchRangedAttack { target, .. } => {
-            let Some(found) = combat_target(mob, ctx) else {
-                return false;
-            };
-            *target = Some(found.uid);
-            true
+            let alive = mob.target.filter(|&uid| alive_target(ctx, uid).is_some());
+            if alive.is_some() {
+                *target = alive;
+            }
+            alive.is_some()
         }
         Goal::BreakDoor => {
             mob.can_break_doors
@@ -1372,11 +1388,13 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             combat_target(mob, ctx).is_some_and(|target| target_in_follow_range(me, mob, target))
         }
         // `RangedAttackGoal.canContinueToUse`：`canUse` 或目标还活着且导航没完。
+        //
+        // `RangedAttackGoal.canContinueToUse`: `canUse` or the stored target is alive while navigating.
         Goal::WitchRangedAttack { target, .. } => {
-            if combat_target(mob, ctx).is_some() {
-                return true;
-            }
-            target.is_some() && !mob.navigation.is_done()
+            let stored = *target;
+            can_use(goal, me, mob, ctx)
+                || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
+                    && !mob.navigation.is_done())
         }
         Goal::Breed {
             partner, love_time, ..
@@ -1889,12 +1907,14 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
         }
         // `RangedAttackGoal.tick`：视线、距离、导航、注视，再按 60 刻的间隔攻击。
+        //
+        // `RangedAttackGoal.tick`: line of sight, distance, navigation, look, then attack every 60 ticks.
         Goal::WitchRangedAttack {
+            target,
             attack_time,
             see_time,
-            ..
         } => {
-            let Some(target) = combat_target(mob, ctx) else {
+            let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) else {
                 return;
             };
             let dist_sqr = me.position.distance_to_sqr(target.position);
@@ -1928,7 +1948,9 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 // `attackIntervalMin == attackIntervalMax == 60`.
                 *attack_time = 60;
             } else if *attack_time < 0 {
-                *attack_time = mth::floor((dist_sqr.sqrt() / radius) * 60.0) as i32;
+                // `Mth.floor(Mth.lerp(d, 60, 60))` 恒等于 60。
+                // `Mth.floor(Mth.lerp(d, 60, 60))` is always 60.
+                *attack_time = 60;
             }
         }
         Goal::Bow(bow) => {
@@ -2778,8 +2800,12 @@ pub(crate) fn land_random_pos(
 pub(crate) struct CombatTarget {
     pub(crate) uid: EntityUid,
     pub(crate) position: Vec3,
+    pub(crate) delta: Vec3,
     eye: f32,
     pub(crate) height: f64,
+    pub(crate) health: f32,
+    pub(crate) effects: crate::entity::ctx::TargetEffects,
+    pub(crate) is_raider: bool,
     hitbox: Aabb,
 }
 
@@ -2799,8 +2825,12 @@ impl CombatTarget {
         Self {
             uid: view.uid,
             position: feet,
+            delta: view.delta,
             eye: view.eye_height,
             height,
+            health: view.health,
+            effects: view.effects,
+            is_raider: false,
             hitbox: Aabb::new(
                 feet.x - half,
                 feet.y,
@@ -2856,12 +2886,15 @@ pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
 }
 
 fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
-    // 骷髅、狐狸、狼和羊驼会把别的生物当目标。
-    // Skeletons, foxes, wolves and llamas can target other mobs.
+    // 骷髅、狐狸、狼、羊驼和女巫会把别的生物当目标。
+    // Skeletons, foxes, wolves, llamas and witches can target other mobs.
     let mobs_allowed = mob.mob_type.is_skeleton()
         || matches!(
             mob.mob_type,
-            super::MobType::Fox | super::MobType::Wolf | super::MobType::Llama
+            super::MobType::Fox
+                | super::MobType::Wolf
+                | super::MobType::Llama
+                | super::MobType::Witch
         );
     if !mobs_allowed && player_by_uid(ctx.blocks(), uid).is_none() {
         return None;
@@ -2908,8 +2941,12 @@ fn mob_target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget,
     let view = CombatTarget {
         uid,
         position: other.position,
+        delta: other.delta,
         eye,
         height: f64::from(target.dimensions().1),
+        health: target.health,
+        effects: target.effects,
+        is_raider: target.mob_type == super::MobType::Witch,
         hitbox: other.bounding_box(),
     };
     Some((view, !other.removed && target.is_alive()))
