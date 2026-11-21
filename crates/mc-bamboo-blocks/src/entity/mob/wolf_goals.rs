@@ -50,6 +50,10 @@ impl WolfTarget {
 /// The wolf-only goals and their state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WolfGoal {
+    /// `Wolf.WolfAvoidEntityGoal(wolf, Llama.class, 24, 1.5, 1.5)`。
+    ///
+    /// `Wolf.WolfAvoidEntityGoal`: flee llamas based on strength when untamed.
+    AvoidLlama(Box<super::avoid::AvoidEntity>),
     /// `BegGoal(wolf, 8)`。
     Beg {
         player: Option<EntityUid>,
@@ -76,6 +80,15 @@ const RANDOM_INTERVAL: i32 = 5;
 const BEG_DISTANCE: f64 = 8.0;
 
 impl WolfGoal {
+    pub fn avoid_llama() -> Self {
+        Self::AvoidLlama(Box::new(super::avoid::AvoidEntity::new(
+            super::avoid::AvoidClass::Llama,
+            24.0,
+            1.5,
+            1.5,
+        )))
+    }
+
     pub const fn beg() -> Self {
         Self::Beg {
             player: None,
@@ -100,6 +113,7 @@ impl WolfGoal {
 
     pub const fn flags(&self) -> &'static [Flag] {
         match self {
+            Self::AvoidLlama(_) => &[Flag::Move],
             Self::Beg { .. } => &[Flag::Look],
             Self::HurtBy { .. } | Self::Nearest { .. } => &[Flag::Target],
             Self::ResetUniversalAnger => &[],
@@ -108,6 +122,7 @@ impl WolfGoal {
 
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::AvoidLlama(_) => "WolfAvoidEntityGoal",
             Self::Beg { .. } => "BegGoal",
             Self::HurtBy { .. } => "HurtByTargetGoal",
             Self::Nearest { kind, .. } if kind.wild_only() => "NonTameRandomTargetGoal",
@@ -118,6 +133,16 @@ impl WolfGoal {
 
     pub(super) fn can_use(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
         match self {
+            Self::AvoidLlama(avoid) => {
+                // 官方 `WolfAvoidEntityGoal.canUse` 先跑 `super.canUse()`（即使已驯服也会
+                // 取逃跑点），再判 `!isTame() && llama.getStrength() >= random.nextInt(5)`。
+                //
+                // Vanilla `WolfAvoidEntityGoal.canUse` runs `super.canUse()` first (drawing
+                // escape points even if tame), then `!isTame() && strength >= nextInt(5)`.
+                avoid.can_use(me, mob, ctx)
+                    && !mob.tame.is_tame()
+                    && avoid.avoided_llama_strength() >= me.random.next_int_bounded(5)
+            }
             Self::Beg { player, .. } => {
                 *player = nearest_beg_player(me, mob, ctx).map(|found| found.uid);
                 player
@@ -151,6 +176,7 @@ impl WolfGoal {
         ctx: &dyn EntityCtx,
     ) -> bool {
         match self {
+            Self::AvoidLlama(_) => super::avoid::AvoidEntity::can_continue(mob),
             Self::Beg { player, look_time } => {
                 let Some(found) = player.and_then(|uid| goals::player_by_uid(ctx.blocks(), uid))
                 else {
@@ -184,6 +210,10 @@ impl WolfGoal {
 
     pub(super) fn start(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         match self {
+            Self::AvoidLlama(avoid) => {
+                mob.target = None;
+                avoid.start(me, mob, ctx);
+            }
             Self::Beg { look_time, .. } => {
                 mob.wolf.interested = true;
                 *look_time = goals::reduced_tick_delay(40 + me.random.next_int_bounded(40));
@@ -211,6 +241,7 @@ impl WolfGoal {
 
     pub(super) fn stop(&mut self, mob: &mut Mob) {
         match self {
+            Self::AvoidLlama(avoid) => avoid.stop(),
             Self::Beg { player, .. } => {
                 mob.wolf.interested = false;
                 *player = None;
@@ -224,18 +255,26 @@ impl WolfGoal {
         }
     }
 
-    pub(super) fn tick(&mut self, mob: &mut Mob, ctx: &dyn EntityCtx) {
-        if let Self::Beg { player, look_time } = self {
-            if let Some(found) = player.and_then(|uid| goals::player_by_uid(ctx.blocks(), uid)) {
-                mob.look.set_look_at(
-                    found.position.x,
-                    found.eye_y(),
-                    found.position.z,
-                    10.0,
-                    wolf::max_head_x_rot(mob),
-                );
+    pub(super) fn tick(&mut self, me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
+        match self {
+            Self::AvoidLlama(avoid) => {
+                mob.target = None;
+                avoid.tick(me, mob, ctx);
             }
-            *look_time -= 1;
+            Self::Beg { player, look_time } => {
+                if let Some(found) = player.and_then(|uid| goals::player_by_uid(ctx.blocks(), uid))
+                {
+                    mob.look.set_look_at(
+                        found.position.x,
+                        found.eye_y(),
+                        found.position.z,
+                        10.0,
+                        wolf::max_head_x_rot(mob),
+                    );
+                }
+                *look_time -= 1;
+            }
+            _ => {}
         }
     }
 }

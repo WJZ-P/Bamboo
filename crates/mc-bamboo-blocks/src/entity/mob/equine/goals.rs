@@ -155,14 +155,10 @@ pub(in crate::entity::mob) fn goals(kind: MobType, navigation: &mut Navigation) 
     ])
 }
 
-/// 马、驴、骡没有 `targetSelector`；羊驼有回击和打狼两个。
+/// 马、驴、骡没有 `targetSelector`；羊驼有回击（吐过一口就停）和打野狼（四分之一跟随距离）两个。
 ///
-/// `LlamaAttackWolfGoal` 每次 `canUse` 都取 `nextInt(reducedTickDelay(16))`，
-/// 狼还没有实体也照取；回击是 `LlamaHurtByTargetGoal`，吐过一口就停。
-///
-/// Horses, donkeys and mules have no target goals; the llama has retaliation and
-/// wolf hunting. `LlamaAttackWolfGoal` still draws its interval with no wolves;
-/// retaliation is `LlamaHurtByTargetGoal`, which stops after one spit.
+/// Horses, donkeys and mules have no target goals; the llama has retaliation
+/// (which stops after one spit) and targeting untamed wolves at quarter range.
 pub(in crate::entity::mob) fn targets(kind: MobType) -> GoalSelector {
     if kind != MobType::Llama {
         return GoalSelector::default();

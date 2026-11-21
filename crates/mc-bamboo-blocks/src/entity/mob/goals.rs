@@ -201,7 +201,7 @@ pub enum TargetType {
 impl TargetType {
     /// Bamboo 现在有没有这种实体；没有时对应的目标直接跳过。
     pub const fn available(self) -> bool {
-        matches!(self, Self::Player | Self::FoxPrey)
+        matches!(self, Self::Player | Self::FoxPrey | Self::Wolf)
     }
 }
 
@@ -290,6 +290,10 @@ impl Goal {
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
+            Self::NearestAttackableTarget {
+                kind: TargetType::Wolf,
+                ..
+            } => "LlamaAttackWolfGoal",
             Self::NearestAttackableTarget { .. } => "NearestAttackableTargetGoal",
             Self::RestrictSun => "RestrictSunGoal",
             Self::FleeSun { .. } => "FleeSunGoal",
@@ -1070,6 +1074,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::FoxPrey => {
                     nearest_mob_target(me, mob, ctx, super::fox_goals::is_small_prey)
                 }
+                TargetType::Wolf => nearest_wild_wolf_target(me, mob, ctx),
                 _ if kind.available() => nearest_attackable(me, mob, ctx, *kind),
                 _ => None,
             };
@@ -1231,11 +1236,18 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }
             target_can_continue_seen(me, mob, ctx, unseen_ticks, reduced_tick_delay(300))
         }
-        Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
+        Goal::HurtByTarget { .. } => {
             // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
             // 旁观、和平难度）读成 null，回退到的 `targetMob` 是同一个玩家，同样打不了；
             // 打得了还要在跟随距离内。`mustSee` 的视线记忆本期不建模（目标恒看得见）。
             combat_target(mob, ctx).is_some_and(|target| target_in_follow_range(me, mob, target))
+        }
+        Goal::NearestAttackableTarget { kind, .. } => {
+            // `LlamaAttackWolfGoal.getFollowDistance` 是跟随距离的 0.25 倍。
+            // `LlamaAttackWolfGoal.getFollowDistance` is 0.25× `FOLLOW_RANGE`.
+            let scale = if *kind == TargetType::Wolf { 0.25 } else { 1.0 };
+            combat_target(mob, ctx)
+                .is_some_and(|target| target_in_scaled_follow_range(me, mob, target, scale))
         }
         Goal::RestrictSun => {
             ctx.blocks().is_bright_outside()
@@ -1600,7 +1612,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Avoid(avoid) => avoid.tick(me, mob, ctx),
         Goal::Fox(goal) => goal.tick(me, mob, ctx),
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
-        Goal::Wolf(goal) => goal.tick(mob, ctx),
+        Goal::Wolf(goal) => goal.tick(me, mob, ctx),
         Goal::LeapAtTarget { .. } => {}
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
         // `TamableAnimalPanicGoal.tick` teleports to a distant owner first.
@@ -2335,9 +2347,19 @@ pub(super) fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarg
 }
 
 fn target_in_follow_range(me: &Entity, mob: &Mob, target: CombatTarget) -> bool {
+    target_in_scaled_follow_range(me, mob, target, 1.0)
+}
+
+fn target_in_scaled_follow_range(
+    me: &Entity,
+    mob: &Mob,
+    target: CombatTarget,
+    scale: f64,
+) -> bool {
     let range = mob
         .attributes
-        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE)
+        * scale;
     me.position.distance_to_sqr(target.position) <= range * range
 }
 
@@ -2501,6 +2523,57 @@ fn nearest_attackable(
         if distance < best {
             best = distance;
             found = Some(player.uid);
+        }
+    }
+    found
+}
+
+/// `LlamaAttackWolfGoal.findTarget`：四分之一跟随距离内、看得见的最近野狼（`!wolf.isTame()`）。
+///
+/// `LlamaAttackWolfGoal.findTarget`: the nearest untamed wolf in sight within
+/// a quarter of `FOLLOW_RANGE`.
+fn nearest_wild_wolf_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE)
+        * 0.25;
+    let area = me.bounding_box().inflate(range, range, range);
+    let mut candidates = Vec::new();
+    ctx.for_each_other_in(area, &mut |other| {
+        let KindPublic::Mob(public) = &other.kind else {
+            return;
+        };
+        if other.uid == me.id
+            || other.removed
+            || !public.is_alive()
+            || public.mob_type != super::MobType::Wolf
+            || public.tame_flags & super::tame::FLAG_TAME != 0
+        {
+            return;
+        }
+        let (_, _, eye) = public.mob_type.dimensions(public.baby);
+        candidates.push((other.uid, other.position, eye));
+    });
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let limit = mth::java_max(range, 2.0);
+    let mut best = -1.0_f64;
+    let mut found = None;
+    for (uid, position, target_eye) in candidates {
+        if me.position.distance_to_sqr(position) > limit * limit {
+            continue;
+        }
+        let target_eye = Vec3::new(position.x, position.y + f64::from(target_eye), position.z);
+        if !living::has_line_of_sight(me, mob, ctx.blocks(), uid, target_eye) {
+            continue;
+        }
+        let distance = position.distance_to_sqr(eye);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(uid);
         }
     }
     found

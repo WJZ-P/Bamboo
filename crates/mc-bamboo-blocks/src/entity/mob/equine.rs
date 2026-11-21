@@ -70,6 +70,13 @@ impl EquinePublic {
             stand_anim_o: state.stand_anim_o,
         }
     }
+
+    /// `AbstractHorse.isTamed()`：`DATA_ID_FLAGS` 的第 1 位（2）。
+    ///
+    /// `AbstractHorse.isTamed()`: bit 1 (value 2) of `DATA_ID_FLAGS`.
+    pub const fn is_tamed(self) -> bool {
+        self.flags & 2 != 0
+    }
 }
 
 /// 马科在 `Mob` 之外的状态：`AbstractHorse` 的标志字节（驯服、吃草、扬蹄、张嘴）、

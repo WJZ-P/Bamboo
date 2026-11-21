@@ -231,9 +231,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
             },
         ),
         wrap(2, Goal::Tame(TameGoal::Sit)),
-        // 羊驼还没有，`WolfAvoidEntityGoal` 找不到要躲的，不取随机数。
-        // Llamas do not exist yet; the goal finds nothing and draws nothing.
-        wrap(3, Goal::Unavailable("WolfAvoidEntityGoal")),
+        wrap(3, Goal::Wolf(WolfGoal::avoid_llama())),
         wrap(4, Goal::LeapAtTarget { yd: 0.4 }),
         wrap(5, goals::melee_attack(1.0, true, "MeleeAttackGoal")),
         wrap(6, Goal::Tame(TameGoal::follow_owner(1.0, 10.0, 2.0))),
@@ -592,10 +590,10 @@ pub(super) fn before_hurt(mob: &mut Mob) {
     }
 }
 
-/// `Wolf.wantsToAttack`：不打驯服的动物（同一个主人的狼也不打）。
-/// 苦力怕、恶魂、盔甲架和马在 Bamboo 里还没有。
+/// `Wolf.wantsToAttack`：不打驯服的动物（同一个主人的狼也不打）和驯服的马科。
+/// 苦力怕、恶魂、盔甲架在 Bamboo 里还没有。
 ///
-/// `Wolf.wantsToAttack`: tamed animals are spared.
+/// `Wolf.wantsToAttack`: tamed animals and tamed equines are spared.
 pub(super) fn wants_to_attack(ctx: &dyn EntityCtx, target: EntityUid, owner: &PlayerView) -> bool {
     let Some(other) = ctx.other(target) else {
         // 玩家：没有 PVP 规则，`canHarmPlayer` 恒真。
@@ -608,6 +606,12 @@ pub(super) fn wants_to_attack(ctx: &dyn EntityCtx, target: EntityUid, owner: &Pl
     let tame = public.tame_flags & tame::FLAG_TAME != 0;
     if public.mob_type == MobType::Wolf {
         return !tame || public.owner != owner.uuid;
+    }
+    if public
+        .equine
+        .is_some_and(super::equine::EquinePublic::is_tamed)
+    {
+        return false;
     }
     !(tame::is_tamable(public.mob_type) && tame)
 }
