@@ -431,6 +431,98 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   `brain` 分支、定案载具后再接；猫 / 鹦鹉 / 豹猫用 `tame.rs`，各一个新文件、共用文件最小追加、
   各配逐刻对拍场景。本轮不新增 `MobType`，避免刚被撤回的合并再次扩大共用文件冲突面。
 
+### 5.12 剩余生物的状态与接入规格（op-misc，2026-11-21，第 8 轮）
+
+**本轮复核**：按规矩先 `git merge main`，返回 `Already up to date`（`main=2448b76c` 仍是本分支
+祖先，合进 main 是快进）。08:40 两处修复逐字核对仍在：`MobOracle.java:926` 的
+`caseVariant(Mob mob) throws Exception`、`goals.rs:1511` 的显式 `TargetType::Fox` 分支
+（`available()` 已从本分支彻底移除）；5.11 节在。全套检查在最终提交上重跑、全部通过
+（数字见本轮汇报）。**本轮不新增生物、不新增 `MobType`**，理由见下。下面行号均以当前提交
+为准，合并后可能漂移，定位以 `fn` 名为准。
+
+**剩余 7 种的状态**（任务清单：山羊、青蛙、犰狳、骆驼、鹦鹉、豹猫、猫）：
+
+| 生物 | 状态 | 前置 |
+|---|---|---|
+| 哞菇 | 已对拍（`e1d69b66`，剪成牛 / 炖蘑菇 / 闪电变色） | — |
+| 北极熊 | 已对拍（`08e297cf` 修 Fox 目标后 11 例 1121 刻 0 不一致） | — |
+| 熊猫 | 已对拍（6 场景 3278 刻 + 512 题基因遗传 0 不一致） | — |
+| 山羊 / 青蛙 / 犰狳 / 骆驼 | 没做 | 官方 `Brain`（`GoatAi`/`FrogAi`/`ArmadilloAi`/`CamelAi`），本仓库只有 `GoalSelector`（5.9）；骆驼另需载具 |
+| 鹦鹉 | 没做（仅生成期放置模拟 `natural_gen.rs`） | 上肩需载具 / 乘客（世界模型 8.2 未定） |
+| 豹猫 / 猫 | 没做 | 无硬前置（`registerGoals()`，非 `Brain`），但接入面见下 |
+
+**5 种被前置挡住**：5.9 / 5.10 / 5.11 已确认 `Brain` 是「下一步的公共地基」、`brain` 分支未合入
+main；世界模型 8.2「载具和它的乘客」未定案，牵涉岛拆分与一刻顺序。按「超出设计文档、又必须
+改动线程模型或 tick 顺序的部分停下来写汇报，不要自己定」，不自行引入 `Brain` / 载具。
+
+**豹猫 / 猫本轮也不做**：二者技术上可行（官方 `Ocelot` / `Cat` 都用 `registerGoals()`，非
+`Brain`），但新增 `MobType` 会一次性改到一批和 `cx-wild` / `cx-horse` / `op-water` 等并行队员
+高度共用的文件（下表），且 `by_entity_type`（`mod.rs:719`，遍历 `ALL`）把官方刷怪表的
+`minecraft:ocelot` 条目（`registries.rs:585` 已有 ID 92）映射成新种类后，会直接碰到「必须
+0 不一致」的关键路径 `natural-spawn` 与 `check_spawn_rules`。本分支刚被撤回过一次合并，
+单轮无人值守（一旦开工无法收敛必留半成品、违背「检查要干净」）不宜扩大共用文件冲突面；
+5.11 的「建议顺序」也把它们排在 `Brain` / 载具整合之后。这是判断取舍、非硬阻塞。
+
+**更正 5.11 一处**：豹猫 `Ocelot extends Animal`，**不是** `TamableAnimal`，用
+`DATA_TRUSTING` 信任位（无主人 / 跟随 / 坐下）；只有猫 / 鹦鹉是 `TamableAnimal`、才复用
+`tame.rs`。豹猫新文件应自带 `trusting` 状态，不动 `tame.rs:77` 的 `is_tamable`。
+
+**豹猫（`Ocelot`）接入规格**（官方 `net.minecraft.world.entity.animal.feline.Ocelot.java`）：
+
+- 属性 `createAttributes()`：`MAX_HEALTH` 10.0、`MOVEMENT_SPEED` 0.3F、`ATTACK_DAMAGE` 3.0。
+  成年尺寸取 `entity_types.rs:114`（0.6×0.7）；幼崽 `BABY_DIMENSIONS` 0.3×0.35、眼高 0.34375。
+  ambient 间隔 900。**注意**：`entity_types.rs` 目前只有 `RABBIT_MAX_HEALTH`（`:204`）/
+  `FOX_MAX_HEALTH`（`:215`）等，没有 `OCELOT_MAX_HEALTH` / `OCELOT_MOVEMENT_SPEED` /
+  `OCELOT_ATTACK_DAMAGE`；按「版本数字由生成器导出，不要手写」，做豹猫要先动生成器 /
+  `Extractor.java` 的实体属性导出（共用文件禁区），须先和队长确认。
+- `registerGoals()` 优先级（照官方）：goal 1 `FloatGoal`、3 `OcelotTemptGoal(0.6,
+  OCELOT_FOOD, canScare)`、7 `LeapAtTargetGoal(0.3F)`、8 `OcelotAttackGoal`、9
+  `BreedGoal(0.8)`、10 `WaterAvoidingRandomStrollGoal(0.8, 1.0000001E-5F)`、11
+  `LookAtPlayerGoal(Player, 10)`；target 1 `NearestAttackableTargetGoal<Chicken>`、
+  1 `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`；`reassessTrustingGoals`
+  在 `!trusting` 时加 goal 4 `OcelotAvoidEntityGoal<Player>(16, 0.8, 1.33)`。
+- `goals.rs` 现状：`Goal::Float/Tempt/LeapAtTarget/Breed/Stroll/LookAtPlayer/Avoid/
+  MeleeAttack/NearestAttackableTarget`（`:33` 起）齐备；`TargetType`（`:293`）已有 `Turtle`、
+  **缺 `Chicken`**，`Turtle` 的 `BABY_ON_LAND_SELECTOR`（只选陆地幼年海龟）要特判；
+  `OcelotTemptGoal.canScare` / `OcelotAvoidEntityGoal` / `OcelotAttackGoal` 的 `trusting`
+  闸门与官方子类名（`Goal::name`）要按种类补。
+- 每刻 `customServerAiStep`：按 moveControl speed `0.6`→`CROUCHING`、`1.33`→
+  `STANDING`+疾跑、其余 `STANDING`；接 `living.rs` 每刻分派。
+  `removeWhenFarAway`：`!trusting && tickCount > 2400`。
+- 交互 `mobInteract`：tempt 未跑或在跑、`!trusting`、`OCELOT_FOOD`（`tags.rs:461` 已有）、
+  `distanceToSqr<9` → `usePlayerItem` 后 `nextInt(3)==0` 才 `setTrusting(true)` + 心形粒子 +
+  event 41，否则烟粒子 + event 40；`spawnTrustingParticles` 取 7 组
+  `nextGaussian()*0.02`（世界随机源取数须对齐）。接 `interact.rs`。
+- 存盘：`addAdditionalSaveData` / `readAdditionalSaveData` 的 `Trusting` 布尔，接 `nbt.rs`。
+- **关键路径取数**：`checkOcelotSpawnRules` 是 `random.nextInt(3) != 0`；`natural.rs:625`
+  的 `check_spawn_rules` 是穷举 `match`，必须补 Ocelot 分支，否则编译不过且 `natural-spawn`
+  分叉。`checkSpawnObstruction`：海平面以上、脚下 `GRASS_BLOCK` 或 `LEAVES`、无液体。
+- `spawn.rs`：`:335` `finalize_spawn_in_group` 按 kind 分派，豹猫 `finalizeSpawn` 的
+  `groupData == null → AgeableMobGroupData(1.0F)`；`:149` `/summon`、`:196` 刷怪蛋。
+  `getBreedOffspring` 为 `OCELOT(BREEDING)`。
+- `mod.rs` 需最小追加的点（下列为 `fn` 起始行，分支在其后）：`:77` 枚举、`:113`
+  `ALL: [Self; 28]`→29、`:145` `entity_type()`、`:179` 官方名字、`:220` `is_food` 的 tag、
+  `:246` `dimensions`、`:454` `loot_table`、`:494` `ambient_sound_interval`、
+  `:526`/`:565`/`:592`/`:622` 音效、`:642` `spawn_egg`（`items.rs:1303` 的
+  `OCELOT_SPAWN_EGG`）、`:688` 翻译键；`:719` `by_entity_type` 自动覆盖。
+- 元数据 `DATA_TRUSTING` 的 `SynchedEntityData` index 来源（生成器是否导出、还是像
+  `living.rs:1145` 熊猫那样按种类写）**待确认**；若需动生成器同样撞共用文件禁区。
+- 对拍：`MobOracle.java` 与 `mob_oracle.rs` 目前都**没有** ocelot 场景，新建逐刻场景须覆盖
+  信任 `nextInt(3)`、avoid-player、扑击、Chicken / Turtle 目标、pose / sprint。
+
+**猫（`Cat`）接入规格**（官方 `net.minecraft.world.entity.animal.feline.Cat.java extends
+TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目标）：比豹猫多
+`DATA_VARIANT_ID`（`CatVariant` registry，26.3 为 registry holder）、`DATA_COLLAR_COLOR`、
+`DATA_SOUND_VARIANT_ID`（`Cat.java:77-84`）；`finalizeSpawn` 用
+`VariantUtils.selectVariantToSpawn` + `CatSoundVariants.pickRandomSoundVariant` 抽品种
+（`Cat.java:398-406`）；驯服 `nextInt(3)`、`mobInteract` 喂食回血（`:408` 起）、怕苦力怕、
+晨间礼物、蹭人。村庄猫按任务「可先不做」。品种接 `mc-bamboo-data` 的 registry holder 面更大
+（`component_registries.rs:1521` 有 `CAT_VARIANT` 表、`registries.rs:776` 有 ID），故排在豹猫之后。
+
+**下一轮建议**：按 5.11 顺序，先由队长整合 `brain` 分支、定案载具；解锁前若仍要产出，优先选
+豹猫（共用面最小、非 `TamableAnimal`），严格照上表「一种一个新文件、共用文件最小追加、先小样本
+守 `natural-spawn` 关键路径、各配逐刻场景」；动生成器 / 元数据 index 前先和队长确认。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
