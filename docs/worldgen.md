@@ -611,9 +611,9 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   世界线程（`director_host.rs` 的 `partials`）把每个区块的 CARVERS 半成品存成不可变
   `Arc<GeneratedChunk>`，发任务时按位置挂到 `ChunkWork::Generate` 上——全是 `Arc` 克隆，
   不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算；
-  这份 CARVERS 缓存是**全进程共用一份**、按总字节 256 MiB 封顶（16 个分片各一把锁，
-  锁内只查表 / 插入、生成在锁外，值是不可变 `Arc`，命中不复制 400 KiB 方块数组，
-  见 `performance-optimizations.md` 第 12 节）。地形是纯函数，命中、淘汰和分片顺序
+  这份 CARVERS 缓存是**全进程共用一份**（16 个分片），载荷预算默认 128 MiB（`bamboo.toml` 的 `worldgen_terrain_cache_mb`）。
+  热层的值是不可变 `Arc`，命中不复制方块；按预算淘汰的条目压缩进冷层，冷命中在锁外解码。
+  生成、解码和热层淘汰后的压缩都在分片锁外（压缩完再短暂拿锁放进冷层）。地形是纯函数，命中、淘汰和分片顺序
   都不改变结果。`terrain` 阶段交回世界线程的也是同一个 `Arc`，`merge_generated`
   直接 `Arc::clone` 进 `partials`。发出后世界线程不再改这份 `Arc`（只在
   `Forgot` / 完工时移除）。
@@ -630,9 +630,11 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   合、同格先写的赢——与线程调度、回执到达顺序无关（`merge_feature_writes`，
   `performance-optimizations.md` 18.10）。
 * **确定性重算**：Bamboo 的调度不保证 8 个邻居的 `features` 都在中心组装前落地，所以中心
-  这次 `features` 用 `cached_feature_run`（线程本地缓存）纯函数重算 8 个邻居中心写进来的
+  这次 `features` 用 `cached_feature_run`（全进程分片缓存）纯函数重算 8 个邻居中心写进来的
   增量，保证本区块需要的集合从自己的 features 结果就齐。`features` 是纯函数、随机数只从
-  种子和坐标派生，命中缓存不改结果。
+  种子和坐标派生，命中缓存不改结果。两份缓存记录邻域消费者的完成位图，已知消费者全完成
+  时释放；未请求的外圈仍可复用，最终由预算淘汰或空闲释放回收。Director 的阶段依赖与
+  `partials` 的所有权保持不变。见 [缓存配置](configuration.md#世界生成缓存)。
 * **验收**：`gen-world <java> --through features`（Bamboo 调**游戏里这份**
   `game_features_with_mask_skipping`）逐方块比 3×3 九宫格；不带白名单时仍保留旧的
   `--ore-only` 语义，`--all-features` 跑全部 11 step / 全部地物，`--feature-types` /
@@ -640,8 +642,8 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   `tools/mc-bamboo-vanilla/feature-e2e.sh` 的 28 个类型全部 PASS；本轮把
   `--all-features --seeds 6 --chunks 36 --salt 7` 扩到 216 中心 / 191102976 格 0 不一致，
   三种噪声预设的 `chunkgen --through features` 也各 216 中心 / 0 skipped / 0 不一致。
-  `world::staged_tests::one_and_four_threads_generate_identical_feature_blocks`
-  用 1 线程和 4 线程计算池生成同一片 3×3 normal 区块，逐格方块相同。
+  `world::staged_tests::worker_counts_generate_identical_feature_blocks`
+  用 1、2、4、8 线程计算池生成同一片 3×3 normal 区块，逐格方块及两层光照相同。
 
 和官方的**语义差异**（写进本轮汇报的疑点清单）：官方邻居溢出的写来自各邻居区块跑到
 `FEATURES` 时的 `WorldGenRegion`，Bamboo 改为中心纯函数重算；增量按中心的固定先后

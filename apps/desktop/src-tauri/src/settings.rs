@@ -14,6 +14,9 @@ use std::{
 };
 
 use mc_bamboo_game::world_options::{FlatSettings, LevelType, WorldGenConfig};
+use mc_bamboo_game::worldgen_cache::{
+    MAX_FEATURE_CACHE_MB, MAX_IDLE_SECONDS, MAX_TERRAIN_CACHE_MB, WorldgenCacheSettings,
+};
 use mc_bamboo_server::{
     CLIENT_READ_TIMEOUT, ForwardingMode, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE, ServerConfig,
     config_files::{
@@ -196,6 +199,15 @@ pub struct ServerSettings {
     pub redstone_cache: bool,
     /// 区块计算池的线程数：0 = 内联（默认），≥ 1 = 常驻后台线程。
     pub chunk_worker_threads: u32,
+    /// 世界生成地形缓存的上限（MiB），0 = 不缓存。只影响内存和速度。
+    /// Worldgen terrain cache limit in MiB, 0 = no cache. Memory and speed only.
+    pub worldgen_terrain_cache_mb: u32,
+    /// 世界生成地物结果缓存的上限（MiB），0 = 不缓存。
+    /// Worldgen feature-result cache limit in MiB, 0 = no cache.
+    pub worldgen_feature_cache_mb: u32,
+    /// 多少秒没有区块生成就清空这两份缓存，0 = 不清。
+    /// Seconds without chunk generation before both caches are emptied, 0 = never.
+    pub worldgen_cache_idle_seconds: u32,
     /// Director 信箱每刻最多交付多少个区块，0 表示不限。
     pub deliveries_per_tick: u32,
     /// Director 信箱每刻最多收回多少个区块，0 表示不限。
@@ -273,6 +285,12 @@ impl ServerSettings {
             entity_threads: u32::try_from(bamboo.entity_threads).unwrap_or(u32::MAX),
             redstone_cache: bamboo.redstone_cache,
             chunk_worker_threads: u32::try_from(bamboo.chunk_worker_threads).unwrap_or(u32::MAX),
+            worldgen_terrain_cache_mb: u32::try_from(bamboo.worldgen_cache.terrain_mb)
+                .unwrap_or(u32::MAX),
+            worldgen_feature_cache_mb: u32::try_from(bamboo.worldgen_cache.feature_mb)
+                .unwrap_or(u32::MAX),
+            worldgen_cache_idle_seconds: u32::try_from(bamboo.worldgen_cache.idle_seconds)
+                .unwrap_or(u32::MAX),
             deliveries_per_tick: u32::try_from(bamboo.deliveries_per_tick).unwrap_or(u32::MAX),
             reclaims_per_tick: u32::try_from(bamboo.reclaims_per_tick).unwrap_or(u32::MAX),
             island_threads: u32::try_from(bamboo.island_threads).unwrap_or(u32::MAX),
@@ -331,6 +349,11 @@ impl ServerSettings {
             entity_threads: self.entity_threads as usize,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
+            worldgen_cache: WorldgenCacheSettings {
+                terrain_mb: self.worldgen_terrain_cache_mb as usize,
+                feature_mb: self.worldgen_feature_cache_mb as usize,
+                idle_seconds: u64::from(self.worldgen_cache_idle_seconds),
+            },
             // 桌面界面不暴露这一项，按官方/缺省开。
             // The desktop UI does not expose this knob; keep the default (on).
             spawn_per_player_cap: defaults.spawn_per_player_cap,
@@ -450,6 +473,15 @@ impl ServerSettings {
                 "每刻区块预算不能超过 {}",
                 mc_bamboo_game::MAX_MAIL_BUDGET
             ));
+        }
+        if self.worldgen_terrain_cache_mb as usize > MAX_TERRAIN_CACHE_MB {
+            return Err(format!("地形缓存上限不能超过 {MAX_TERRAIN_CACHE_MB} MiB"));
+        }
+        if self.worldgen_feature_cache_mb as usize > MAX_FEATURE_CACHE_MB {
+            return Err(format!("地物缓存上限不能超过 {MAX_FEATURE_CACHE_MB} MiB"));
+        }
+        if u64::from(self.worldgen_cache_idle_seconds) > MAX_IDLE_SECONDS {
+            return Err(format!("缓存空闲释放秒数不能超过 {MAX_IDLE_SECONDS}"));
         }
         // 服务端那边会把正版验证悄悄关掉，与其让用户以为两个都开着，不如在这里说清楚。
         if self.online_mode && self.forwarding != Forwarding::Off {
@@ -633,6 +665,9 @@ mod tests {
             entity_threads: 4,
             redstone_cache: true,
             chunk_worker_threads: 3,
+            worldgen_terrain_cache_mb: 48,
+            worldgen_feature_cache_mb: 12,
+            worldgen_cache_idle_seconds: 45,
             deliveries_per_tick: 16,
             reclaims_per_tick: 8,
             island_threads: 2,
@@ -658,6 +693,9 @@ mod tests {
         assert_eq!(config.entity_threads, 4);
         assert!(config.redstone_cache);
         assert_eq!(config.chunk_worker_threads, 3);
+        assert_eq!(config.worldgen_cache.terrain_mb, 48);
+        assert_eq!(config.worldgen_cache.feature_mb, 12);
+        assert_eq!(config.worldgen_cache.idle_seconds, 45);
         assert_eq!(config.mail_budget.deliveries, 16);
         assert_eq!(config.mail_budget.reclaims, 8);
         // 环境变量 `BAMBOO_ISLAND_THREADS` 设了就盖过设置。
@@ -1001,6 +1039,11 @@ mod tests {
         assert!(validate(|settings| settings.deliveries_per_tick = 0).is_ok());
         assert!(validate(|settings| settings.deliveries_per_tick = u32::MAX).is_err());
         assert!(validate(|settings| settings.reclaims_per_tick = u32::MAX).is_err());
+        assert!(validate(|settings| settings.worldgen_terrain_cache_mb = 0).is_ok());
+        assert!(validate(|settings| settings.worldgen_terrain_cache_mb = u32::MAX).is_err());
+        assert!(validate(|settings| settings.worldgen_feature_cache_mb = u32::MAX).is_err());
+        assert!(validate(|settings| settings.worldgen_cache_idle_seconds = 0).is_ok());
+        assert!(validate(|settings| settings.worldgen_cache_idle_seconds = u32::MAX).is_err());
     }
 
     #[test]
