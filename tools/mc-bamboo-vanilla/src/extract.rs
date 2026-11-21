@@ -130,6 +130,12 @@ pub struct BiomeMobSpawnFact {
     pub categories: Vec<CategorySpawnsFact>,
     /// `getMobSpawnCost` 的表，按实体类型名排序。
     pub costs: Vec<MobSpawnCostFact>,
+    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` 的 float 原始位（主世界维度层叠群系层）。
+    ///
+    /// Raw float bits of `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` (overworld dimension
+    /// layer, then the biome layer).
+    #[serde(rename = "creatureSpawnProbability")]
+    pub creature_spawn_probability: u32,
 }
 
 /// 一个类别下的一张加权刷怪表。

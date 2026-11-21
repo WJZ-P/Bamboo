@@ -71,13 +71,24 @@ pub struct MobSpawnSettings {
     pub name: &'static str,
     pub categories: &'static [MobCategorySpawns],
     pub costs: &'static [MobSpawnCostDef],
+    /// 环境属性 `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`：生成期刷动物的概率。
+    ///
+    /// The `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` attribute: the world-generation
+    /// creature odds.
+    pub creature_spawn_probability: f32,
 }
+
+/// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` 的缺省值 `0.1F`。
+///
+/// The `0.1F` default of `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`.
+pub const DEFAULT_CREATURE_SPAWN_PROBABILITY: f32 = 0.1;
 
 /// 空表：`MobSpawnSettings.EMPTY`。
 pub const EMPTY: MobSpawnSettings = MobSpawnSettings {
     name: "",
     categories: &[],
     costs: &[],
+    creature_spawn_probability: DEFAULT_CREATURE_SPAWN_PROBABILITY,
 };
 
 impl MobSpawnSettings {
@@ -112,6 +123,7 @@ pub fn for_biome_id(id: i32) -> MobSpawnSettings {
         name: biome.name,
         categories: biome.categories,
         costs: biome.costs,
+        creature_spawn_probability: biome.creature_spawn_probability,
     })
 }
 
@@ -146,6 +158,13 @@ mod tests {
             creatures
                 .iter()
                 .any(|entry| entry.entity_type == registries::entity_type::COW)
+        );
+        assert_eq!(plains.creature_spawn_probability, 0.1);
+        assert!(
+            BIOME_MOB_SPAWNS
+                .iter()
+                .any(|biome| biome.creature_spawn_probability < 0.1),
+            "少数群系把生成期刷怪概率覆盖得更低"
         );
         let monsters = plains.mobs_to_spawn(MobCategory::Monster);
         assert!(

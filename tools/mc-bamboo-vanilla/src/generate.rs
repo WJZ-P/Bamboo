@@ -942,6 +942,11 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
     let _ = writeln!(out, "    pub name: &'static str,");
     let _ = writeln!(out, "    pub categories: &'static [MobCategorySpawns],");
     let _ = writeln!(out, "    pub costs: &'static [MobSpawnCostDef],");
+    let _ = writeln!(
+        out,
+        "    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层）。"
+    );
+    let _ = writeln!(out, "    pub creature_spawn_probability: f32,");
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
     let _ = writeln!(
@@ -987,6 +992,11 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
             );
         }
         let _ = writeln!(out, "        ],");
+        let _ = writeln!(
+            out,
+            "        creature_spawn_probability: f32::from_bits({:#010x}),",
+            settings.creature_spawn_probability
+        );
         let _ = writeln!(out, "    }},");
     }
     let _ = writeln!(out, "];");

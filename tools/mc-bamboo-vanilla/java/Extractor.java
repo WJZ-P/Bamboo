@@ -1633,6 +1633,16 @@ public final class Extractor {
                 costs.add(entry);
             }
             biome.add("costs", costs);
+            // 生成期刷怪的概率：先过主世界维度层，再过群系层（`EnvironmentAttributeSystem` 的顺序）。
+            // World-generation creature odds: overworld dimension layer, then the biome layer.
+            float creatureProbability = biomeRegistry.getValue(name).getAttributes().applyModifier(
+                    EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
+                    registries.lookupOrThrow(Registries.DIMENSION_TYPE)
+                            .getValue(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD)
+                            .attributes()
+                            .applyModifier(EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
+                                    EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY.defaultValue()));
+            biome.addProperty("creatureSpawnProbability", Integer.toUnsignedLong(Float.floatToRawIntBits(creatureProbability)));
             biomes.add(name.toString(), biome);
         }
         result.add("biomes", biomes);
