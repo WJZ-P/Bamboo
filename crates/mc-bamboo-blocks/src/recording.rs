@@ -762,6 +762,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::HurtPlayer { .. } => 20,
         Effect::SleepInBed { .. } => 19,
         Effect::IgnitePlayer { .. } => 21,
+        Effect::PlayerEffect { .. } => 22,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -871,6 +872,23 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::IgnitePlayer { target, ticks } => {
             target.hash(&mut hasher);
             ticks.hash(&mut hasher);
+        }
+        Effect::PlayerEffect {
+            target,
+            effect,
+            duration,
+            amplifier,
+            ambient,
+            visible,
+            show_icon,
+        } => {
+            target.hash(&mut hasher);
+            effect.hash(&mut hasher);
+            duration.hash(&mut hasher);
+            amplifier.hash(&mut hasher);
+            ambient.hash(&mut hasher);
+            visible.hash(&mut hasher);
+            show_icon.hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

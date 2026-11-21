@@ -60,6 +60,7 @@ struct Metadata {
     shared_flags: u8,
     pose: Pose,
     health: f32,
+    weapon_use_flags: u8,
     main_hand: HumanoidArm,
     model_customisation: u8,
     /// `LivingEntity.DATA_EFFECT_PARTICLES` 的颜色列表。
@@ -74,6 +75,7 @@ impl Metadata {
         shared_flags: 0,
         pose: Pose::Standing,
         health: 1.0,
+        weapon_use_flags: 0,
         main_hand: HumanoidArm::Right,
         model_customisation: 0,
         effect_particles: Vec::new(),
@@ -85,6 +87,10 @@ impl Metadata {
             shared_flags: player.sync.shared_flags,
             pose: player.sync.pose(),
             health: player.health.health,
+            weapon_use_flags: player
+                .weapon_use
+                .as_ref()
+                .map_or(0, |active| 1 | (u8::from(active.hand == Hand::Off) << 1)),
             main_hand: player.client.main_hand,
             model_customisation: player.client.model_customisation,
             effect_particles: player.effects.particle_colors(),
@@ -104,6 +110,8 @@ impl Metadata {
         [
             flags.then_some(EntityData::SharedFlags(self.shared_flags)),
             pose.then_some(EntityData::Pose(self.pose)),
+            (self.weapon_use_flags != previous.weapon_use_flags)
+                .then_some(EntityData::LivingFlags(self.weapon_use_flags)),
             health.then_some(EntityData::Health(self.health)),
             main_hand.then_some(EntityData::MainHand(self.main_hand)),
             model.then_some(EntityData::ModelCustomisation(self.model_customisation)),

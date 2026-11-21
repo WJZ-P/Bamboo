@@ -939,7 +939,7 @@ ID 3（`0x03`），clientbound，Play。来源：`ClientboundAwardStatsPacket`�
 |---|---|
 | `stats` | `VarInt` 个数，每项 `Stat` + `VarInt` 值 |
 
-空统计的 body 是 `00` **[官方编码]**。服务端要做的事：收到 `client_command` 的 `action=1` 时回这个包。
+空统计的 body 是 `00` **[官方编码]**。服务端要做的事：收到 `client_command` 的 `action=1` 时回这个包。 当前回复包含本次连接内发生变化的弓 / 弩 `minecraft:used` 累计值；没有变更时仍回空列表。还不读写 `stats/<UUID>.json`。
 
 ### 8.5 M2 建议的进服顺序
 
