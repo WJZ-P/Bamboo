@@ -55,7 +55,10 @@ pub(super) struct Case {
 #[derive(Default)]
 pub(super) struct Coverage {
     pub(super) cases: usize,
-    cows: usize,
+    /// 成功比对过生成品种的牛、猪、羊、鸡，按此顺序计数。
+    ///
+    /// Cows, pigs, sheep and chickens whose spawn variants matched, in that order.
+    farms: [usize; 4],
     equines: usize,
     others: usize,
     details: usize,
@@ -70,13 +73,16 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {} cows, {} equines, {} wild animals, {} other animals, {} mobs with finalize details compared",
+                "GEN SPAWN: {} cases, {} equines, {} wild animals, {} other animals, {} mobs with finalize details compared",
                 self.cases,
-                self.cows,
                 self.equines,
                 self.wild.iter().sum::<usize>(),
                 self.others,
                 self.details
+            );
+            println!(
+                "GEN SPAWN: matched spawn variants for {} cows, {} pigs, {} sheep and {} chickens",
+                self.farms[0], self.farms[1], self.farms[2], self.farms[3]
             );
             println!(
                 "GEN SPAWN: {} rabbits, {} foxes, {} wolves, {} babies among them, {} foxes holding an item",
@@ -86,16 +92,33 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        let missing = self.cows == 0 || self.equines == 0;
-        if self.cases > 0 && (missing || self.details == 0) {
-            return Err("gen spawn fixtures did not exercise cows and equines".into());
+        if self.cases == 0 {
+            return Ok(());
         }
-        if self.cases > 0
-            && (self.wild.contains(&0) || self.wild_babies == 0 || self.fox_items == 0)
-        {
+        if self.farms.contains(&0) {
+            return Err(format!(
+                "gen spawn fixtures must compare variants for cows, pigs, sheep and chickens; got {:?}",
+                self.farms
+            ));
+        }
+        if self.equines == 0 || self.details == 0 {
+            return Err("gen spawn fixtures did not exercise equines and finalize details".into());
+        }
+        if self.wild.contains(&0) || self.wild_babies == 0 || self.fox_items == 0 {
             return Err("gen spawn fixtures did not exercise rabbits, foxes and wolves".into());
         }
         Ok(())
+    }
+
+    fn record_farm(&mut self, kind: MobType) {
+        let farm = match kind {
+            MobType::Cow => 0,
+            MobType::Pig => 1,
+            MobType::Sheep => 2,
+            MobType::Chicken => 3,
+            _ => return,
+        };
+        self.farms[farm] += 1;
     }
 }
 
@@ -157,9 +180,7 @@ impl Report {
                 in_sync = false;
                 continue;
             };
-            if kind == MobType::Cow {
-                self.gen_spawns.cows += 1;
-            } else if kind.is_equine() {
+            if kind.is_equine() {
                 self.gen_spawns.equines += 1;
             }
             let Some(entity) = ours.next() else {
@@ -188,6 +209,8 @@ impl Report {
                     self.mismatch(format!(
                         "{label}: official spawn variants {variants:?}, Bamboo {ours_variants:?}"
                     ));
+                } else if variants.is_some() {
+                    self.gen_spawns.record_farm(kind);
                 }
             }
         }
@@ -333,5 +356,31 @@ fn fixture(case: &Case) -> MobLevel {
         players: Vec::new(),
         game: None,
         wrong_was_hurt: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Coverage;
+
+    #[test]
+    fn gen_spawn_requires_each_farm_species_in_variant_comparisons() {
+        let mut coverage = Coverage {
+            cases: 1,
+            farms: [1; 4],
+            equines: 1,
+            details: 8,
+            wild: [1; 3],
+            wild_babies: 1,
+            fox_items: 1,
+            ..Coverage::default()
+        };
+        assert!(coverage.check().is_ok());
+        for i in 0..coverage.farms.len() {
+            coverage.farms[i] = 0;
+            assert!(coverage.check().is_err());
+            coverage.farms[i] = 1;
+        }
+        assert!(Coverage::default().check().is_ok());
     }
 }
