@@ -283,7 +283,7 @@ public final class MobOracle {
                 playShot(official, out, name);
                 cases++;
             }
-            for (String name : List.of("egg_floor", "egg_hatch_one", "egg_hatch_four", "egg_hit_cow",
+            for (String name : List.of("egg_floor", "egg_water_extinguish", "egg_hatch_one", "egg_hatch_four", "egg_hit_cow",
                     "egg_hit_cow_owned")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playEgg(official, out, name);
@@ -4074,6 +4074,7 @@ public final class MobOracle {
         // `_owned`：蛋有玩家主人，牛开着 AI，蛋碎之后再跑 OWNED_TICKS 刻看它恐慌逃跑。
         // `_owned`: a player owns the egg and the cow keeps its AI; run on after the
         // egg breaks to compare the cow's panic.
+        boolean water = name.equals("egg_water_extinguish");
         boolean owned = name.equals("egg_hit_cow_owned");
         boolean cowHit = name.startsWith("egg_hit_cow");
         boolean four = name.equals("egg_hatch_four");
@@ -4095,12 +4096,14 @@ public final class MobOracle {
                 world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
             }
         }
+        if (water) world.blocks.put(BlockPos.asLong(1, 65, 0), Blocks.WATER.defaultBlockState());
         String blocks = blockArray(world.blocks);
         world.nextId = FIRST_ID;
         world.spawned = new ArrayList<>();
         ItemStack stack = new ItemStack(four ? Items.BLUE_EGG : Items.EGG, 16);
         double[] start = cowHit ? new double[] {0.5, 64.5, 0.5} : new double[] {0.5, 66.0, 0.5};
-        double[] dir = cowHit ? new double[] {1.0, 0.0, 0.0}
+        if (water) start = new double[] {0.95, 65.5, 0.5};
+        double[] dir = water || cowHit ? new double[] {1.0, 0.0, 0.0}
                 : name.equals("egg_floor") ? new double[] {1.0, -0.2, 0.3} : new double[] {1.0, -0.5, 0.25};
         var egg = new net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEgg(
                 world, start[0], start[1], start[2], stack);
@@ -4114,6 +4117,12 @@ public final class MobOracle {
         if (hatch > 0) {
             forced = hatchSeed(four);
             setRandom(egg, forced);
+        }
+        int fireTicks = water ? 200 : 0;
+        if (water) {
+            setRandom(egg, forced);
+            egg.setRemainingFireTicks(fireTicks);
+            egg.setSharedFlagOnFire(true);
         }
         world.tracked.add(egg);
         Cow cow = null;
@@ -4150,6 +4159,9 @@ public final class MobOracle {
                 if (broke < 0) {
                     egg.commonTick();
                     egg.tick();
+                }
+                if (water && tick == 1 && (egg.isOnFire() || egg.getX() < 2.125 || egg.isInWater())) {
+                    throw new IllegalStateException("burning egg did not cross water into dry air");
                 }
                 packets.addAll(events.take());
                 if (egg.isRemoved() && broke < 0) {
@@ -4194,7 +4206,7 @@ public final class MobOracle {
             frames.append("{\"eggs\":[");
             if (!egg.isRemoved()) {
                 frames.append("{\"id\":").append(egg.getId()).append(",\"motion\":").append(projectileMotion(egg))
-                        .append(",\"seed\":").append(randomSeed(egg)).append('}');
+                        .append(",\"seed\":").append(randomSeed(egg)).append(",\"onFire\":").append(egg.isOnFire()).append('}');
             }
             frames.append("],\"chicks\":[");
             for (int i = 0; i < chicks.size(); i++) {
@@ -4237,7 +4249,7 @@ public final class MobOracle {
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"dir\":" + Arrays.toString(dir)
                 + ",\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem()) + ",\"forced\":" + forced
                 + ",\"cow\":" + cowHit + ",\"owner\":" + (owned ? owner.getId() : -1)
-                + ",\"frames\":" + frames + "]}\n");
+                + ",\"fireTicks\":" + fireTicks + ",\"frames\":" + frames + "]}\n");
         out.flush();
     }
 

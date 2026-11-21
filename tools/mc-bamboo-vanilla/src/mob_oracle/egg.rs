@@ -23,6 +23,7 @@ pub(super) struct EggCase {
     item: i32,
     forced: i64,
     cow: bool,
+    fire_ticks: i32,
     /// 蛋的玩家主人的实体号；没有主人时是 -1。有主人的场景里牛开着 AI。
     ///
     /// The entity id of the egg's player owner, -1 without one. With an owner the
@@ -64,6 +65,7 @@ struct EggState {
     id: i32,
     motion: [i64; 8],
     seed: i64,
+    on_fire: bool,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -170,7 +172,7 @@ impl EggCase {
     fn spawn(&self, world: &mut World<'_>) -> i32 {
         let [x, y, z] = self.start;
         let [dx, dy, dz] = self.dir;
-        let id = world.spawn_egg_shot(&EggShot {
+        let shot = EggShot {
             position: Vec3::new(x, y, z),
             direction: Vec3::new(dx, dy, dz),
             power: 1.5,
@@ -179,13 +181,14 @@ impl EggCase {
             owner: (self.owner >= 0).then_some(self.owner),
             owner_uuid: (self.owner >= 0).then_some(EGG_OWNER_UUID.to_be_bytes()),
             item: ItemStack::new(self.item, 16),
-        });
-        // `egg_floor` 用自然种子，其余场景都换成搜出来的种子（可能恰好是 0）。
-        // `egg_floor` keeps its natural seed; the others use the searched one, which may be 0.
+        };
+        let mut egg = world.prepare_entity(Entity::thrown_egg(&shot));
+        egg.shoot_egg(&shot);
+        egg.remaining_fire_ticks = self.fire_ticks;
         if self.name != "egg_floor" {
-            let forced = self.forced;
-            world.with_entity_mut(id, &mut |egg| egg.random = JavaRandom::new(forced));
+            egg.random = JavaRandom::new(self.forced);
         }
+        let id = world.add_prepared_entity(egg);
         if self.cow {
             let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(4.5, 64.0, 0.5));
             let no_ai = self.owner < 0;
@@ -271,6 +274,7 @@ impl Report {
                         id,
                         motion: projectile_motion(&entity, egg.x_rot),
                         seed: entity.random.state(),
+                        on_fire: entity.remaining_fire_ticks > 0,
                     }
                 })
                 .collect();

@@ -676,7 +676,7 @@ pub enum Command {
         volume: f32,
         pitch: f32,
     },
-    ArrowExtinguished {
+    ProjectileExtinguished {
         pitch: f32,
     },
     /// `EatBlockGoal.tick` 在 `mobGriefing` 下的改方块：吃掉脚下的草，或把下面的草方块变成泥土。
@@ -840,7 +840,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 pitch,
             );
         }
-        Command::ArrowExtinguished { pitch } => {
+        Command::ProjectileExtinguished { pitch } => {
             super::arrow::play_extinguished_sound(me, world, pitch);
         }
         Command::MobBlockSound {

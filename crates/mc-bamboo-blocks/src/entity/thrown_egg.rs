@@ -243,9 +243,12 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let hit = find_hit(me, ctx, owner, left_owner);
     me.position = hit.map_or_else(|| me.position.add(me.delta), |hit| hit.location);
     update_rotation(me);
-    me.apply_effects_along(blocks, me.old_position);
+    let extinguish_pitch = super::arrow::projectile_travel_effects(me, blocks, me.old_position);
     check_left_owner(me, ctx, owner);
     base_tick(me, blocks);
+    if let Some(pitch) = extinguish_pitch {
+        ctx.emit(Command::ProjectileExtinguished { pitch }, me);
+    }
     if let Some(hit) = hit
         && !me.removed
     {
