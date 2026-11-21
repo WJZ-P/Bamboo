@@ -164,7 +164,7 @@ pub(crate) fn dismount_location(
                     }
                 }
                 y += 1;
-                if !(f64::from(y) < limit) {
+                if f64::from(y) >= limit {
                     break;
                 }
             }
