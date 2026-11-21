@@ -2701,6 +2701,102 @@ fn a_cow_spawn_egg_places_a_cow_and_consumes_the_egg() {
     );
 }
 
+/// 拿水桶右键一条鳕鱼：生存模式手里换成鳕鱼桶，鱼从世界消失。
+///
+/// Water-bucketing a cod in survival: the hand becomes a cod bucket and the fish leaves.
+#[test]
+fn a_water_bucket_picks_up_a_cod_and_discards_it() {
+    let (mut server, client) = settled();
+    move_player(&mut server, &client, 11.5, -59.0, 8.5);
+    hold(&server, &client, items::WATER_BUCKET);
+    server.tick();
+    // 先以创造模式把水桶塞进手里，再切成生存：`set_creative_mode_slot` 在生存模式会被忽略。
+    // Fill the hand in creative first, then switch to survival: `set_creative_mode_slot`
+    // is ignored in survival.
+    player_mut(&mut server, &client).game_mode =
+        mc_bamboo_protocol::packet::play::GameMode::Survival;
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::Cod,
+            Vec3::new(11.5, -59.0, 8.5),
+        ));
+    client.take_frames();
+
+    crate::interaction::on_interact_entity(server.region(), client.id, uid, Hand::Main, false);
+
+    let held = server.player(&client).inventory.held(Hand::Main).clone();
+    assert_eq!(held.item, items::COD_BUCKET);
+    assert_eq!(held.count, 1);
+    assert!(
+        server.region().entities.get(uid).is_none(),
+        "the cod should be gone"
+    );
+}
+
+/// 创造模式拿水桶右键一条鳕鱼：水桶留在手里，鳕鱼桶进物品栏。官方
+/// `createFilledResult(..., false)` 在创造模式不会消耗手里的堆。
+///
+/// Water-bucketing a cod in creative: the water bucket stays in hand and a cod bucket
+/// goes into the inventory, because `createFilledResult(..., false)` cannot consume an
+/// infinite stack.
+#[test]
+fn a_creative_bucket_keeps_the_water_bucket_and_adds_the_fish_bucket() {
+    let (mut server, client) = settled();
+    move_player(&mut server, &client, 11.5, -59.0, 8.5);
+    hold(&server, &client, items::WATER_BUCKET);
+    server.tick();
+    let uid = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::Cod,
+            Vec3::new(11.5, -59.0, 8.5),
+        ));
+    client.take_frames();
+
+    crate::interaction::on_interact_entity(server.region(), client.id, uid, Hand::Main, false);
+
+    let hand = server.player(&client).inventory.held(Hand::Main).item;
+    assert_eq!(hand, items::WATER_BUCKET);
+    let has_bucket = server
+        .player(&client)
+        .inventory
+        .slots
+        .iter()
+        .any(|stack| stack.item == items::COD_BUCKET);
+    assert!(has_bucket, "the cod bucket goes into the inventory");
+    assert!(server.region().entities.get(uid).is_none());
+}
+
+/// 倒一桶鳕鱼：放下水源，水里多一条 `FromBucket` 的鳕鱼。
+///
+/// Pouring a cod bucket: a water source appears and a `FromBucket` cod swims in it.
+#[test]
+fn a_cod_bucket_pours_water_and_spawns_a_cod() {
+    let (mut server, client) = settled();
+    use_looking_down(&mut server, &client, items::COD_BUCKET);
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::WATER));
+    let cods: Vec<_> = server
+        .region()
+        .entities
+        .iter()
+        .filter(|entity| {
+            matches!(
+                entity.kind.mob(),
+                Some(mob) if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Cod
+            )
+        })
+        .collect();
+    assert_eq!(cods.len(), 1, "one cod should be in the world");
+    assert!(
+        cods[0].kind.mob().expect("a mob").fish.from_bucket,
+        "the cod comes out of a bucket"
+    );
+}
+
 #[path = "weapon_tests.rs"]
 mod weapon_tests;
 

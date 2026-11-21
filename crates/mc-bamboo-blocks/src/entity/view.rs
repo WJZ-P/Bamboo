@@ -38,6 +38,10 @@ pub struct ViewFacts {
     pub monsters_burn: bool,
     /// 主世界时钟的整数刻（`getOverworldClockTime()`），区域难度和月相读它。
     pub clock_ticks: i64,
+    /// `getSeaLevel()`：噪声主世界 63，超平坦 -63。
+    ///
+    /// `getSeaLevel()`: 63 for the noise overworld, -63 for superflat.
+    pub sea_level: i32,
 }
 
 impl Default for ViewFacts {
@@ -54,6 +58,7 @@ impl Default for ViewFacts {
             weather: BlockWeather::CLEAR,
             monsters_burn: true,
             clock_ticks: 0,
+            sea_level: 63,
         }
     }
 }
@@ -429,6 +434,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn difficulty(&self) -> i32 {
         self.0.facts().difficulty
+    }
+
+    fn sea_level(&self) -> i32 {
+        self.0.facts().sea_level
     }
 
     fn game_time(&self) -> i64 {

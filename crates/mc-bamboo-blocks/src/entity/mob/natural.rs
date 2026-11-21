@@ -124,9 +124,11 @@ impl SpawnState {
             let KindPublic::Mob(mob) = &public.kind else {
                 continue;
             };
-            // `Mob.requiresCustomPersistence()` 只认载具和拴绳，Bamboo 都没有。
-            // Vanilla `requiresCustomPersistence()` needs a vehicle or a leash; neither exists.
-            if mob.persistence_required {
+            // `Mob.requiresCustomPersistence()` 只认载具和拴绳，Bamboo 都没有；鱼从桶里
+            // 放出来的那种要算进来。
+            // Vanilla `requiresCustomPersistence()` needs a vehicle or a leash; fish
+            // released from a bucket count as well.
+            if mob.requires_custom_persistence() {
                 continue;
             }
             let kind = mob.mob_type;
@@ -265,6 +267,10 @@ pub struct SpawnParams {
     pub per_player_cap: bool,
     /// `getRespawnData()` 的位置，离它 24 格以内不刷。
     pub respawn_pos: Option<BlockPos>,
+    /// `LevelAccessor.getSeaLevel()`：水生生物的生成规则读它。
+    ///
+    /// `LevelAccessor.getSeaLevel()`, read by the aquatic spawn rules.
+    pub sea_level: i32,
 }
 
 /// `ServerChunkCache.tickSpawningChunk` → `NaturalSpawner.spawnForChunk`：对一个刷怪区块
@@ -345,7 +351,6 @@ fn spawn_category_for_position(
         let mut current = None;
         let mut group: Option<spawn::SpawnGroup> = None;
         let mut max = mth::ceil(f64::from(world.random().next_float()) * 4.0);
-        let mut group_size = 0;
         let mut step = 0;
         while step < max {
             step += 1;
@@ -375,8 +380,8 @@ fn spawn_category_for_position(
             let Some(kind) = MobType::by_entity_type(entry.entity_type) else {
                 break;
             };
-            if !is_valid_spawn_position_for_type(world, category, entry, kind, pos, nearest, state)
-            {
+            let facts = (nearest, params.sea_level);
+            if !is_valid_spawn_position_for_type(world, category, entry, kind, pos, facts, state) {
                 continue;
             }
             let Some(mut entity) = create_mob(world, kind) else {
@@ -389,13 +394,13 @@ fn spawn_category_for_position(
             }
             spawn::finalize_spawn_with_group(world, kind, &mut entity, &mut group);
             cluster_size += 1;
-            group_size += 1;
+            let group_reached = is_max_group_size_reached(kind, entity.kind.mob());
             world.add_prepared_entity(entity);
             state.after_spawn(world, kind, pos);
             if cluster_size >= max_spawn_cluster_size(kind) {
                 return;
             }
-            if is_max_group_size_reached(kind, group_size) {
+            if group_reached {
                 break;
             }
         }
@@ -436,7 +441,7 @@ fn is_valid_spawn_position_for_type(
     entry: &MobSpawnerDef,
     kind: MobType,
     pos: BlockPos,
-    nearest_player_distance_sqr: f64,
+    (nearest_player_distance_sqr, sea_level): (f64, i32),
     state: &mut SpawnState,
 ) -> bool {
     if kind.mob_category() == MobCategory::Misc {
@@ -452,7 +457,7 @@ fn is_valid_spawn_position_for_type(
     if !spawn_placement_ok(world, kind, pos) {
         return false;
     }
-    if !check_spawn_rules(world, kind, pos) {
+    if !check_spawn_rules(world, kind, pos, sea_level) {
         return false;
     }
     no_collision(world, spawn_aabb(kind, pos)) && state.can_spawn(world, kind, pos)
@@ -543,6 +548,11 @@ pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    // 水生生物登记的是 `SpawnPlacementTypes.IN_WATER`。
+    // Aquatic mobs are registered with `SpawnPlacementTypes.IN_WATER`.
+    if kind.spawns_in_water() {
+        return super::water::in_water_position_ok(world, pos);
+    }
     // 狐狸注册的是 `NO_RESTRICTIONS`，位置恒可用。
     // Foxes are registered with `NO_RESTRICTIONS`, which accepts every position.
     kind == MobType::Fox || on_ground_position_ok(world, kind.fire_immune(), pos)
@@ -616,11 +626,29 @@ fn is_burning_block(state: BlockState) -> bool {
 
 /// `SpawnPlacements.checkSpawnRules`：`NATURAL` 走两条分支，动物看亮度和地面，
 /// 怪物看黑暗和可生成方块（尸壳还要看得见天）。
-pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> bool {
+pub(super) fn check_spawn_rules(
+    world: &World,
+    kind: MobType,
+    pos: BlockPos,
+    sea_level: i32,
+) -> bool {
     if !kind.allowed_in_peaceful() && world.level().difficulty_id() == 0 {
         return false;
     }
     match kind {
+        MobType::Squid | MobType::GlowSquid => {
+            super::squid::check_spawn_rules(world, kind, pos, sea_level)
+        }
+        MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
+            super::fish::check_spawn_rules(world, kind, pos, sea_level)
+        }
+        // `Turtle.checkTurtleSpawnRules`：海平面 +4 以下、沙子上、亮度足够。
+        // `Turtle.checkTurtleSpawnRules`: below sea level + 4, on sand and bright.
+        MobType::Turtle => {
+            pos.y < sea_level + 4
+                && world.block_state(pos.below()).is_tagged(block_tags::SAND)
+                && world.raw_brightness(pos) > 8
+        }
         // `Rabbit.checkRabbitSpawnRules`、`Fox.checkFoxSpawnRules`、`Wolf.checkWolfSpawnRules`：
         // 只是脚下的标签各不相同。
         // The three only differ in the tag of the block below.
@@ -704,13 +732,20 @@ fn is_valid_position_for_mob(
     nearest_player_distance_sqr: f64,
 ) -> bool {
     let despawn = f64::from(kind.mob_category().facts().despawn_distance);
-    if nearest_player_distance_sqr > despawn * despawn && kind.removes_when_far_away() {
+    // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真。
+    // A fresh fish has no bucket flag and no name, so `removeWhenFarAway` is true.
+    let removes = kind.removes_when_far_away() || super::fish::is_fish(kind);
+    if nearest_player_distance_sqr > despawn * despawn && removes {
         return false;
     }
     // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住。
     // `Mob.checkSpawnObstruction`: no liquid in the box and nothing in the way.
+    // `AgeableWaterCreature.checkSpawnObstruction` 只剩 `isUnobstructed`，不查液体。
+    // `AgeableWaterCreature.checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
     pathfinder_spawn_rules(world, entity, entity.block_position())
-        && !contains_any_liquid(world, entity.bounding_box())
+        && (kind.is_ageable_water_creature()
+            || kind.is_water_animal()
+            || !contains_any_liquid(world, entity.bounding_box()))
         && is_unobstructed_by_entities(world, entity.bounding_box())
 }
 
@@ -823,11 +858,13 @@ pub(super) fn create_mob(world: &mut World, kind: MobType) -> Option<Entity> {
     Some(world.prepare_entity(Entity::by_mob_type(kind, Vec3::default())))
 }
 
-/// `Mob.getMaxSpawnClusterSize()`，马科覆写为 6。
+/// `Mob.getMaxSpawnClusterSize()`，按物种使用各自的簇上限。
 ///
-/// `Mob.getMaxSpawnClusterSize()`; equines override it to 6.
+/// `Mob.getMaxSpawnClusterSize()` with per-species cluster limits.
 fn max_spawn_cluster_size(kind: MobType) -> i32 {
-    if kind.is_equine() {
+    if kind.is_water_animal() {
+        super::fish::max_school_size(kind)
+    } else if kind.is_equine() {
         6
     } else if kind == MobType::Wolf {
         // `Wolf.getMaxSpawnClusterSize` 是 8，其余用 `Mob` 的 4。
@@ -838,10 +875,11 @@ fn max_spawn_cluster_size(kind: MobType) -> i32 {
     }
 }
 
-/// `Mob.isMaxGroupSizeReached`。
-fn is_max_group_size_reached(kind: MobType, group_size: i32) -> bool {
-    let _ = (kind, group_size);
-    false
+/// `Mob.isMaxGroupSizeReached`：只有热带鱼覆盖成「不在鱼群里就停」。
+///
+/// `Mob.isMaxGroupSizeReached`: only tropical fish override it, to `!isSchool`.
+fn is_max_group_size_reached(kind: MobType, mob: Option<&super::Mob>) -> bool {
+    kind == MobType::TropicalFish && mob.is_some_and(|mob| !mob.fish.is_school)
 }
 
 /// `ChunkMap.playerIsCloseEnoughForSpawning` 的几何条件：水平距区块中心小于 128 格。
@@ -877,7 +915,7 @@ fn nearest_player_distance_sqr(world: &World, x: f64, y: f64, z: f64) -> Option<
 }
 
 /// 群系标签查询，只有刷怪相关的两个标签用得到。
-fn biome_tag_contains(name: &str, biome: i32) -> bool {
+pub(super) fn biome_tag_contains(name: &str, biome: i32) -> bool {
     mc_bamboo_data::tags::TAG_GROUPS
         .iter()
         .filter(|group| group.registry == "minecraft:worldgen/biome")
@@ -927,6 +965,7 @@ mod tests {
             spawn_enemies: true,
             per_player_cap,
             respawn_pos: None,
+            sea_level: 63,
         }
     }
 

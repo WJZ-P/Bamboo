@@ -53,6 +53,16 @@ pub struct MobInteraction {
     ///
     /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point.
     pub shear: bool,
+    /// `Bucketable.bucketMobPickup`：调用方把这只生物从世界里拿掉。
+    ///
+    /// `Bucketable.bucketMobPickup`: the caller discards the mob.
+    pub discard: bool,
+    /// `ItemUtils.createFilledResult` 的 `limitCreativeStackSize`。鱼桶拾起传假：
+    /// 创造模式也消耗手里的水桶。
+    ///
+    /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`. Bucketing passes false:
+    /// creative mode consumes the water bucket too.
+    pub limit_creative: bool,
 }
 
 impl MobInteraction {
@@ -64,6 +74,8 @@ impl MobInteraction {
             replacement: None,
             open_inventory: false,
             shear: false,
+            discard: false,
+            limit_creative: true,
         }
     }
 }
@@ -92,6 +104,22 @@ pub fn interact(
     req: &MobInteractRequest,
     now: i64,
 ) -> MobInteraction {
+    // `AbstractFish.mobInteract`：先试 `Bucketable.bucketMobPickup`，成功就换桶并丢弃
+    // 这只生物；失败才走 `super.mobInteract`（对鱼是 `PASS`）。
+    // `AbstractFish.mobInteract`: try `Bucketable.bucketMobPickup` first, then fall
+    // back to `super.mobInteract` (which is `PASS` for fish).
+    if req.held.item == items::WATER_BUCKET
+        && living::is_alive(me, mob)
+        && let Some(bucket) = super::bucketable::pickup(me, mob)
+    {
+        return MobInteraction {
+            result: InteractionResult::Success,
+            replacement: Some(bucket),
+            discard: true,
+            limit_creative: false,
+            ..MobInteraction::pass()
+        };
+    }
     if mob.mob_type == super::MobType::Wolf {
         return super::wolf::interact(me, mob, req, now);
     }
@@ -107,8 +135,7 @@ pub fn interact(
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
-            open_inventory: false,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     animal_interact(me, mob, req)
@@ -136,7 +163,10 @@ pub(super) fn animal_interact(
         };
     }
     let age = mob.age;
-    if age == 0 && mob.in_love <= 0 {
+    // `Turtle.canFallInLove`：身上有蛋时不进求爱。
+    // `Turtle.canFallInLove`: no love while carrying an egg.
+    let can_fall_in_love = mob.mob_type != MobType::Turtle || !mob.turtle.has_egg;
+    if age == 0 && mob.in_love <= 0 && can_fall_in_love {
         // `Animal.setInLove(player)`：600 刻求爱、记住玩家 UUID、发爱心事件 18。
         mob.in_love = 600;
         mob.love_cause = Some(req.player_uuid);
@@ -148,8 +178,7 @@ pub(super) fn animal_interact(
             result: InteractionResult::SuccessServer,
             shrink_held: !req.creative,
             replacement: None,
-            open_inventory: false,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     if mob.is_baby() && !mob.age_locked {
@@ -163,8 +192,7 @@ pub(super) fn animal_interact(
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: None,
-            open_inventory: false,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。

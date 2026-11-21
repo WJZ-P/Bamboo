@@ -42,7 +42,18 @@ pub(super) struct Case {
     local_cap: bool,
     nearby_respawn: bool,
     halloween: bool,
+    /// 水生夹具：三层水（-64..=-62）代替草地。
+    ///
+    /// Aquatic fixture: three water layers (-64..=-62) replace the grass.
+    #[serde(default)]
+    aquatic: bool,
+    #[serde(default = "flat_sea_level")]
+    sea_level: i32,
     steps: Vec<Step>,
+}
+
+fn flat_sea_level() -> i32 {
+    -63
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -51,7 +62,7 @@ struct Step {
     time: i64,
     count: i32,
     world_seed: i64,
-    spawned: Vec<[i32; 8]>,
+    spawned: Vec<[i32; 9]>,
     /// 每只刷出来的生物的花色和叫声（`MobOracle.spawnVariants`）。
     ///
     /// Each spawned mob's variant and sound (`MobOracle.spawnVariants`).
@@ -78,6 +89,7 @@ pub(super) struct Coverage {
     farm: [usize; 3],
     skeletons: usize,
     zombies: usize,
+    squid: usize,
     equines: usize,
     without_spawn: usize,
     cap_off: usize,
@@ -111,6 +123,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::ZOMBIE || row[0] == entity_type::HUSK)
             .count();
+        self.squid += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::SQUID || row[0] == entity_type::GLOW_SQUID)
+            .count();
         self.equines += step
             .spawned
             .iter()
@@ -124,13 +141,14 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} equines, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} squid or glow squid, {} equines, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
                 self.farm,
                 self.skeletons,
                 self.zombies,
+                self.squid,
                 self.equines,
                 self.without_spawn,
                 self.cap_off
@@ -145,8 +163,27 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        let mobs = [self.cows, self.skeletons, self.zombies, self.equines];
-        if self.cases > 0 && (mobs.contains(&0) || self.farm.contains(&0) || self.cap_off == 0) {
+        for name in [
+            "fish_cod",
+            "fish_salmon",
+            "fish_tropical",
+            "fish_tropical_lush",
+            "fish_puffer",
+        ] {
+            if self.per_scene.get(name) == Some(&0) {
+                return Err(format!("natural spawn fixture {name} produced no fish"));
+            }
+        }
+        let mobs = [
+            self.cows,
+            self.skeletons,
+            self.zombies,
+            self.squid,
+            self.equines,
+        ];
+        if self.per_scene.contains_key("cow_day")
+            && (mobs.contains(&0) || self.farm.contains(&0) || self.cap_off == 0)
+        {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
             );
@@ -184,6 +221,9 @@ impl Report {
                 -62,
                 8,
             )),
+            // 改坏确认：海平面降一格，鱿鱼的「不高于海平面」就不成立。
+            // Break check: one block lower and the squid's "at or below sea level" fails.
+            sea_level: case.sea_level - i32::from(broken && case.name == "squid_ocean"),
         };
         for official in &case.steps {
             ticks.set_time(official.time);
@@ -231,7 +271,7 @@ fn spawn_tick(
     }
 }
 
-fn spawn_row(entity: Entity) -> [i32; 8] {
+fn spawn_row(entity: Entity) -> [i32; 9] {
     let mob = entity.kind.mob().expect("natural spawns are mobs");
     [
         mob.mob_type.entity_type(),
@@ -242,6 +282,11 @@ fn spawn_row(entity: Entity) -> [i32; 8] {
         i32::from(mob.is_baby()),
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
+        if mob.mob_type == MobType::TropicalFish {
+            mob.fish.variant
+        } else {
+            0
+        },
     ]
 }
 
@@ -260,12 +305,19 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     let roof = kind == MobType::Husk;
+    let aquatic = case.aquatic;
     let blocks = (-16..48)
         .flat_map(|x| {
             (-16..32).flat_map(move |z| {
                 let floor = (BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK));
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
-                std::iter::once(floor).chain(roof.then_some(glass))
+                let water =
+                    (-64..=-62).map(move |y| (BlockPos::new(x, y, z), BlockState(blocks::WATER)));
+                (!aquatic)
+                    .then_some(floor)
+                    .into_iter()
+                    .chain(roof.then_some(glass))
+                    .chain(water.filter(move |_| aquatic))
             })
         })
         .collect();

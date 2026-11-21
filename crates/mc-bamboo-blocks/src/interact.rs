@@ -193,7 +193,27 @@ pub fn use_item(
 ) -> Outcome {
     let mut world = World::new(level, ticks);
     let result = match Bucket::of(actor.item_in(hand)) {
-        Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket),
+        Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, None),
+        None => placement::use_in_air(&mut world, actor, hand),
+    };
+    outcome_from(world, result, false)
+}
+
+/// 和 [`use_item`] 一样，另外带上这只手里的物品堆。生物桶要从 `bucket_entity_data`
+/// 和物种组件里还原鱼。
+///
+/// [`use_item`] plus the stack in that hand. A mob bucket restores its fish from the
+/// `bucket_entity_data` and species components.
+pub fn use_item_with_stack(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    actor: &Actor,
+    hand: Hand,
+    stack: &ItemStack,
+) -> Outcome {
+    let mut world = World::new(level, ticks);
+    let result = match Bucket::of(actor.item_in(hand)) {
+        Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket, Some(stack)),
         None => placement::use_in_air(&mut world, actor, hand),
     };
     outcome_from(world, result, false)

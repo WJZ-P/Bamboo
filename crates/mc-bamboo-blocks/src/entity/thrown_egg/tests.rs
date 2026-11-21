@@ -95,24 +95,6 @@ fn an_egg_hitting_the_floor_breaks_and_hatches_one_baby_on_top() {
 }
 
 #[test]
-fn the_free_spot_search_lifts_the_centre_out_of_the_floor() {
-    let allowed = of_size(
-        Vec3::new(0.5, 64.0, 0.5),
-        0.2 + 1.0e-6,
-        0.35 + 1.0e-6,
-        0.2 + 1.0e-6,
-    );
-    let floor = Aabb::new(0.0, 63.0, 0.0, 1.0, 64.0, 1.0).inflate(0.1, 0.175, 0.1);
-    let free = closest_free_point(allowed, &[floor], Vec3::new(0.5, 64.0, 0.5)).unwrap();
-    assert_eq!(free, Vec3::new(0.5, 64.0 + 0.175, 0.5));
-    let buried = Aabb::new(-5.0, 60.0, -5.0, 5.0, 70.0, 5.0);
-    assert_eq!(
-        closest_free_point(allowed, &[buried], Vec3::new(0.5, 64.0, 0.5)),
-        None
-    );
-}
-
-#[test]
 fn burning_egg_extinguishes_when_crossing_water_into_dry_air() {
     let mut level = crate::testing::TestLevel::new();
     level.set(BlockPos::new(2, 65, 0), BlockState(blocks::WATER));

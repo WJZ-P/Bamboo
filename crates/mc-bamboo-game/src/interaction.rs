@@ -222,6 +222,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             weather: global.block_weather,
             clock_ticks: global.clock.total_ticks,
             monsters_burn: mc_bamboo_blocks::sky::monsters_burn(global.clock.total_ticks),
+            sea_level: crate::natural_spawn::sea_level_of(global),
             ..ViewFacts::default()
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
@@ -1062,6 +1063,9 @@ pub(crate) fn on_use_item(
     // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
     // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
     let actor = actor_of(player);
+    // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
+    // A fish bucket restores its fish from this stack's components, so copy it first.
+    let held = player.inventory.held(hand).clone();
     if crate::player_consume::start(region, id, hand) {
         return;
     }
@@ -1079,7 +1083,7 @@ pub(crate) fn on_use_item(
     }
 
     let (mut level, ticks) = region.block_level();
-    let outcome = mc_bamboo_blocks::use_item(&mut level, ticks, &actor, hand);
+    let outcome = mc_bamboo_blocks::use_item_with_stack(&mut level, ticks, &actor, hand, &held);
 
     // 睡莲这类 `PlaceOnWaterBlockItem` 的放置走这条路，一样要把组件留给方块实体。
     if let Some(placed) = outcome.placed_at {
@@ -1185,7 +1189,13 @@ pub(crate) fn on_interact_entity(
             inventory::shrink_held(region, id, try_hand);
         }
         if let Some(replacement) = outcome.replacement {
-            inventory::give_filled_result(region, id, try_hand, replacement, true);
+            inventory::give_filled_result(
+                region,
+                id,
+                try_hand,
+                replacement,
+                outcome.limit_creative,
+            );
         }
         // 马科 `openCustomInventoryScreen` 在 `mobInteract` 里当场开菜单，先于挥手。
         // Equine `openCustomInventoryScreen` opens the menu inside `mobInteract`, before the swing.
