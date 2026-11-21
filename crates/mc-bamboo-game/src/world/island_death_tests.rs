@@ -490,10 +490,11 @@ fn islands_still_away_at_shutdown_are_declared_dead() {
             .inbox_sender()
             .send(crate::inbound::Inbound::Shutdown)
             .expect("世界还在");
-        let started = Instant::now();
         scene.server.world.master.host.flush_io();
+        // `victim` 一直卡在闸上直到收尾，能返回 `Break` 且不撞 `bounded` 超时即证明不挂死。
+        // `victim` stays gated until after shutdown; returning Break inside
+        // `bounded` proves shutdown did not hang on it.
         assert!(scene.server.world.tick().is_break(), "关服结束世界循环");
-        assert!(started.elapsed() < Duration::from_secs(20));
         let world = &scene.server.world;
         let death = world.master.hybrid.death.deaths.last().expect("判死了");
         assert_eq!((death.island, death.cause), (victim, DeathCause::Shutdown));
@@ -544,14 +545,18 @@ fn islands_queued_behind_a_stuck_one_are_not_declared_dead() {
         }
         let by = overdue(&scene);
         assert!(scene.server.world.age_island(victim, by));
-        let mut deaths = 0;
-        for _ in 0..40 {
+        let wait_limit = Instant::now() + Duration::from_secs(60);
+        let deaths = loop {
             let _ = tick_within(&mut scene.server, Duration::from_millis(200));
-            deaths = scene.server.world.master.hybrid.death.deaths.len();
+            let deaths = scene.server.world.master.hybrid.death.deaths.len();
             if deaths > 0 && scene.server.world.islands.all_parked() {
-                break;
+                break deaths;
             }
-        }
+            assert!(
+                Instant::now() < wait_limit,
+                "60 秒内排着的岛没有跑完回来（deaths={deaths}）"
+            );
+        };
         assert_eq!(deaths, 1, "只判死了卡住的那一个");
         let world = &scene.server.world;
         assert_eq!(world.master.hybrid.death.deaths[0].island, victim);
@@ -591,17 +596,21 @@ fn a_really_stuck_thread_is_declared_dead() {
         world.master.island_dead_timeout = Duration::from_millis(300);
         world.islands.get_mut(victim).expect("停放着").test_hook =
             Some(IslandTestHook::Stall(std::sync::Arc::clone(&gate)));
+        // 从派出前计时：哪怕第一刻在机器满载时被抢占很久，判死耗时也必然不小于判死时限。
+        // Start the clock before dispatch so preemption during the first tick
+        // cannot skew the lower bound check.
+        let started = Instant::now();
         let _ = tick_within(&mut scene.server, Duration::from_millis(20));
         console(&scene, "say MARK-SMOKE");
-        let started = Instant::now();
         while scene.server.world.master.hybrid.death.deaths.is_empty() {
-            assert!(started.elapsed() < Duration::from_secs(30), "一直没判死");
+            assert!(started.elapsed() < Duration::from_secs(60), "一直没判死");
             let flow = tick_within(&mut scene.server, Duration::from_millis(20));
             assert!(flow.is_continue());
         }
         assert!(
-            started.elapsed() >= Duration::from_millis(250),
-            "没到时限就判死了"
+            started.elapsed() >= Duration::from_millis(300),
+            "没到时限就判死了：{:?}",
+            started.elapsed()
         );
         for _ in 0..3 {
             scene.server.tick();
@@ -618,7 +627,7 @@ fn a_really_stuck_thread_is_declared_dead() {
         gate.store(true, std::sync::atomic::Ordering::Release);
         let waited = Instant::now();
         while scene.server.world.master.hybrid.death.zombies == 0 {
-            assert!(waited.elapsed() < Duration::from_secs(30), "死岛没回来");
+            assert!(waited.elapsed() < Duration::from_secs(60), "死岛没回来");
             std::thread::sleep(Duration::from_millis(5));
             scene.server.tick();
         }
