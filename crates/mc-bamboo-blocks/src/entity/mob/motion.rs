@@ -782,8 +782,12 @@ fn entity_inside(
             }
         }
     } else if state.is_a(BlockAncestor::WebBlock) {
-        me.fall_distance = 0.0;
-        me.stuck_speed_multiplier = Vec3::new(0.25, f64::from(0.05_f32), 0.25);
+        // `Spider.makeStuckInBlock` 对蜘蛛网直接返回：既不减速也不清摔落距离。
+        // `Spider.makeStuckInBlock` returns early for cobwebs: no slowdown, no fall reset.
+        if !mob.mob_type.climbs_walls() {
+            me.fall_distance = 0.0;
+            me.stuck_speed_multiplier = Vec3::new(0.25, f64::from(0.05_f32), 0.25);
+        }
     } else if state.is_a(BlockAncestor::PowderSnowBlock) {
         if ctx
             .blocks()

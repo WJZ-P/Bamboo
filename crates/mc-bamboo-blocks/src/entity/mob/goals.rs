@@ -87,6 +87,23 @@ pub enum Goal {
         ///
         /// Whether this is `ZombieAttackGoal`, which drives `aggressive` from its arm timer.
         raise_arms: bool,
+        /// `Spider.SpiderAttackGoal`：亮处每刻按 1/100 放弃目标。
+        ///
+        /// `Spider.SpiderAttackGoal`: in bright light it drops the target on a 1-in-100 roll.
+        light_flee: bool,
+        /// `followingTargetEvenIfNotSeen`：目标看不见也继续追，`canContinueToUse`
+        /// 也不再看路径是否走完。蜘蛛的 `SpiderAttackGoal` 是唯一为真的。
+        ///
+        /// `followingTargetEvenIfNotSeen`: keep chasing an unseen target and ignore a
+        /// finished path. Only the spider's `SpiderAttackGoal` sets it.
+        follow_unseen: bool,
+    },
+    /// `LeapAtTargetGoal`：离目标 2–4 格、站在地上时按 1/3 跳过去。
+    ///
+    /// `LeapAtTargetGoal`: a 1-in-3 leap when grounded and 2–4 blocks from the target.
+    LeapAtTarget {
+        yd: f32,
+        target: Option<EntityUid>,
     },
     /// `SwellGoal`：苦力怕靠近目标时把膨胀方向设成 1，看不见或离远了设回 -1。
     ///
@@ -106,6 +123,10 @@ pub enum Goal {
         interval: i32,
         unseen_ticks: i32,
         found: Option<EntityUid>,
+        /// `Spider.SpiderTargetGoal` 的亮处闸门。
+        ///
+        /// The bright-light gate of `Spider.SpiderTargetGoal`.
+        light_gate: bool,
     },
     /// `RestrictSunGoal`：白天且没有头盔时只打开导航的躲太阳标志。
     RestrictSun,
@@ -159,6 +180,41 @@ impl Goal {
             last_can_use_check: 0,
             start_path: None,
             raise_arms,
+            light_flee: false,
+            follow_unseen: false,
+        }
+    }
+
+    /// `Spider.SpiderAttackGoal`：`MeleeAttackGoal(mob, 1.0, true)` 加亮处放弃目标的检查。
+    ///
+    /// `Spider.SpiderAttackGoal`: `MeleeAttackGoal(mob, 1.0, true)` plus the bright-light check.
+    pub(super) fn spider_melee(speed: f64) -> Self {
+        Self::MeleeAttack {
+            speed,
+            ticks_until_next_attack: 0,
+            ticks_until_path_recalc: 0,
+            pathed_target: Vec3::default(),
+            raise_arm_ticks: 0,
+            last_can_use_check: 0,
+            start_path: None,
+            raise_arms: false,
+            light_flee: true,
+            follow_unseen: true,
+        }
+    }
+
+    /// `Spider.SpiderTargetGoal`：`NearestAttackableTargetGoal(mob, type, true)`，
+    /// 亮处直接不启动。
+    ///
+    /// `Spider.SpiderTargetGoal`: `NearestAttackableTargetGoal(mob, type, true)` that
+    /// refuses to start in bright light.
+    pub(super) fn spider_target(kind: TargetType) -> Self {
+        Self::NearestAttackableTarget {
+            kind,
+            interval: reduced_tick_delay(10),
+            unseen_ticks: 0,
+            found: None,
+            light_gate: true,
         }
     }
 
@@ -171,6 +227,7 @@ impl Goal {
             interval: reduced_tick_delay(10),
             unseen_ticks: 0,
             found: None,
+            light_gate: false,
         }
     }
 
@@ -186,6 +243,7 @@ impl Goal {
             Self::LookAtPlayer { .. } => &[Flag::Look],
             Self::Unavailable(_) => &[],
             Self::MeleeAttack { .. } | Self::Bow(_) => &[Flag::Move, Flag::Look],
+            Self::LeapAtTarget { .. } => &[Flag::Jump, Flag::Move],
             Self::HurtByTarget { .. } | Self::NearestAttackableTarget { .. } => &[Flag::Target],
             Self::RestrictSun => &[],
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
@@ -223,10 +281,16 @@ impl Goal {
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
             Self::MeleeAttack {
+                raise_arms: false,
+                light_flee: true,
+                ..
+            } => "SpiderAttackGoal",
+            Self::MeleeAttack {
                 raise_arms: false, ..
             } => "MeleeAttackGoal",
             Self::MeleeAttack { .. } => "ZombieAttackGoal",
             Self::Swell { .. } => "SwellGoal",
+            Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
             Self::NearestAttackableTarget { .. } => "NearestAttackableTargetGoal",
@@ -395,6 +459,8 @@ impl GoalSelector {
                     last_can_use_check: 0,
                     start_path: None,
                     raise_arms: true,
+                    light_flee: false,
+                    follow_unseen: false,
                 },
             ),
             wrap(6, Goal::Unavailable("MoveThroughVillageGoal")),
@@ -499,6 +565,8 @@ impl GoalSelector {
             last_can_use_check: 0,
             start_path: None,
             raise_arms: false,
+            light_flee: false,
+            follow_unseen: false,
         }
     }
 
@@ -544,6 +612,7 @@ impl GoalSelector {
                         interval: reduced_tick_delay(10),
                         unseen_ticks: 0,
                         found: None,
+                        light_gate: false,
                     },
                 ),
                 wrap(
@@ -553,6 +622,7 @@ impl GoalSelector {
                         interval: reduced_tick_delay(10),
                         unseen_ticks: 0,
                         found: None,
+                        light_gate: false,
                     },
                 ),
                 wrap(
@@ -562,6 +632,7 @@ impl GoalSelector {
                         interval: reduced_tick_delay(10),
                         unseen_ticks: 0,
                         found: None,
+                        light_gate: false,
                     },
                 ),
                 wrap(
@@ -571,6 +642,7 @@ impl GoalSelector {
                         interval: reduced_tick_delay(10),
                         unseen_ticks: 0,
                         found: None,
+                        light_gate: false,
                     },
                 ),
             ],
@@ -821,6 +893,23 @@ const fn adjusted_tick_delay(every_tick: bool, ticks: i32) -> i32 {
     }
 }
 
+/// `Entity.getLightLevelDependentMagicValue()`：眼睛所在格的亮度换算成 0–1。
+/// 主世界环境光为 0，最后一步线性插值等于原值。
+///
+/// `Entity.getLightLevelDependentMagicValue()` at the eye: 0–1 from the light level.
+/// The overworld ambient light is 0, so the closing lerp is the identity.
+fn light_dependent_magic(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> f32 {
+    let view = ctx.blocks();
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let raw =
+        view.max_local_raw_brightness(BlockPos::containing(eye), view.sky_darken()) as f32 / 15.0;
+    raw / (4.0 - 3.0 * raw)
+}
+
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
         Goal::Bow(_) => {
@@ -939,6 +1028,21 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
         Goal::Swell { .. } => swell_can_use(me, mob, ctx),
+        Goal::LeapAtTarget { target, .. } => {
+            // `LeapAtTargetGoal.canUse`：`getTarget()` 为空、距离不在 2–4 格、
+            // 不在地上时都不取随机数；站在地上才 `nextInt(reducedTickDelay(5))`。
+            // `LeapAtTargetGoal.canUse`: no draw without a target, outside 2–4 blocks
+            // or while airborne; grounded mobs roll `nextInt(reducedTickDelay(5))`.
+            let Some(found) = combat_target(mob, ctx) else {
+                return false;
+            };
+            *target = Some(found.uid);
+            let distance = me.position.distance_to_sqr(found.position);
+            if distance < 4.0 || distance > 16.0 {
+                return false;
+            }
+            me.on_ground && me.random.next_int_bounded(reduced_tick_delay(5)) == 0
+        }
         Goal::MeleeAttack {
             last_can_use_check,
             start_path,
@@ -976,8 +1080,14 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             kind,
             interval,
             found,
+            light_gate,
             ..
         } => {
+            // `SpiderTargetGoal.canUse`：亮处直接返回假，连 `nextInt` 都不取。
+            // `SpiderTargetGoal.canUse`: bright light returns false before any draw.
+            if *light_gate && light_dependent_magic(me, mob, ctx) >= 0.5 {
+                return false;
+            }
             // 官方先按 `randomInterval` 取数，再按类型找目标。缺实体的目标
             // 虽跳过搜索，取数次数必须和官方一致，否则随机源会错开。
             if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
@@ -1099,11 +1209,47 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float | Goal::Swell { .. } => can_use(goal, me, mob, ctx),
         Goal::Unavailable(_) => false,
-        Goal::MeleeAttack { .. } => {
+        Goal::MeleeAttack {
+            light_flee,
+            follow_unseen,
+            ..
+        } => {
+            // `Spider.SpiderAttackGoal.canContinueToUse`：亮处每刻先取一次
+            // `nextInt(100)`，命中 0 就清掉目标并停下，否则走 `super`。
+            // `Spider.SpiderAttackGoal.canContinueToUse`: each bright tick draws
+            // `nextInt(100)`; zero drops the target, anything else defers to `super`.
+            if *light_flee
+                && light_dependent_magic(me, mob, ctx) >= 0.5
+                && me.random.next_int_bounded(100) == 0
+            {
+                mob.target = None;
+                return false;
+            }
+            if *follow_unseen {
+                // `followingTargetEvenIfNotSeen=true`：不看路径是否走完，只看目标、
+                // 家和工作台之外的那条创造 / 旁观判定。
+                // `followingTargetEvenIfNotSeen=true`: the finished path does not matter;
+                // only the live target, the home check and creative/spectator players do.
+                let Some(target) = combat_target(mob, ctx) else {
+                    return false;
+                };
+                let home_ok = match mob.home {
+                    None => true,
+                    Some((pos, radius)) => {
+                        target.position.distance_to_sqr(Vec3::new(
+                            f64::from(pos.x) + 0.5,
+                            f64::from(pos.y) + 0.5,
+                            f64::from(pos.z) + 0.5,
+                        )) < f64::from(radius * radius)
+                    }
+                };
+                return home_ok;
+            }
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。
             combat_target(mob, ctx).is_some() && !mob.navigation.is_done()
         }
+        Goal::LeapAtTarget { .. } => !me.on_ground,
         Goal::NearestAttackableTarget { unseen_ticks, .. } if mob.mob_type.full_target_rules() => {
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
@@ -1175,6 +1321,24 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *look_time = 20 + me.random.next_int_bounded(20);
         }
         Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::LeapAtTarget { yd, target } => {
+            // `LeapAtTargetGoal.start`：朝目标水平方向的 0.4 加上原速度的 0.2，竖直用 `yd`。
+            // `LeapAtTargetGoal.start`: 0.4 toward the target plus 0.2 of the old velocity,
+            // and `yd` vertically.
+            let Some(found) = target.and_then(|_| combat_target(mob, ctx)) else {
+                return;
+            };
+            let movement = me.delta;
+            let mut delta = Vec3::new(
+                found.position.x - me.position.x,
+                0.0,
+                found.position.z - me.position.z,
+            );
+            if delta.length_sqr() > 1.0e-7 {
+                delta = delta.normalize().scale(0.4).add(movement.scale(0.2));
+            }
+            me.delta = Vec3::new(delta.x, f64::from(*yd), delta.z);
+        }
         Goal::Swell { target } => {
             // `SwellGoal.start`：停下导航，记住这一刻的目标。
             // `SwellGoal.start`: stop navigating and remember the current target.
@@ -1277,6 +1441,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Swell { target } => *target = None,
         Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } | Goal::Unavailable(_) => {
         }
+        Goal::LeapAtTarget { target, .. } => *target = None,
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
         Goal::HurtByTarget { .. } => mob.target = None,
@@ -1414,6 +1579,9 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
         Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
+        // `LeapAtTargetGoal` 没有 `tick`。
+        // `LeapAtTargetGoal` has no `tick`.
+        Goal::LeapAtTarget { .. } => {}
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
             *unseen_ticks += 1;
             // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
@@ -1426,6 +1594,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             pathed_target,
             raise_arm_ticks,
             raise_arms,
+            follow_unseen,
             ..
         } => {
             let Some(target) = combat_target(mob, ctx) else {
@@ -1445,8 +1614,14 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             // 最前面还有一条「看得见目标」：看不见就不重算路径，也不取随机数。
             // With `followingTargetEvenIfNotSeen` false (zombies, skeletons, creepers) a
             // line-of-sight check comes first: unseen targets cause no repath and no draws.
-            let visible =
-                living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position());
+            let visible = *follow_unseen
+                || living::has_line_of_sight(
+                    me,
+                    mob,
+                    ctx.blocks(),
+                    target.uid,
+                    target.eye_position(),
+                );
             if visible
                 && *ticks_until_path_recalc == 0
                 && (*pathed_target == Vec3::default()

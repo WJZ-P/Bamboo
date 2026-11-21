@@ -969,6 +969,12 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => {}
         }
     }
+    if kind.climbs_walls() {
+        use mc_bamboo_data::entity_types as facts;
+        if index == facts::SPIDER_FLAGS {
+            return EntityData::SpiderFlags(0);
+        }
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1077,6 +1083,11 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
         if mob.creeper_ignited {
             out.push(EntityData::CreeperIgnited(true));
         }
+    }
+    if mob.mob_type.climbs_walls() && mob.spider_flags != 0 {
+        // `Spider.DATA_FLAGS_ID`：缺省 0，攀爬位是第 0 位。
+        // `Spider.DATA_FLAGS_ID`: default 0, bit 0 is climbing.
+        out.push(EntityData::SpiderFlags(mob.spider_flags));
     }
     out
 }

@@ -66,6 +66,15 @@ pub struct AgeableGroupData {
 pub enum SpawnGroup {
     Ageable(AgeableGroupData),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    Spider(SpiderGroupData),
+}
+
+/// `Spider.SpiderEffectsGroupData`：同一组蜘蛛共享的药水效果。
+///
+/// `Spider.SpiderEffectsGroupData`: the potion effect shared by one spider group.
+#[derive(Debug, Clone, Copy)]
+pub struct SpiderGroupData {
+    pub effect: Option<i32>,
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -269,6 +278,10 @@ fn finalize_spawn_in_group(
     }
     if kind == MobType::Creeper {
         super::creeper::finalize_spawn(entity, world.random());
+        return;
+    }
+    if kind.climbs_walls() {
+        super::spider::finalize_spawn(world, entity, reason, group);
         return;
     }
     let biome = world.biome_id(entity.block_position());

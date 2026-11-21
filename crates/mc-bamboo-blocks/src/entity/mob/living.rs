@@ -83,6 +83,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if !me.removed {
         ai_step(me, mob, ctx);
     }
+    // `Spider.tick` 在 `super.tick()` 之后把这一刻的 `horizontalCollision` 写进攀爬标志。
+    // `Spider.tick` records this tick's `horizontalCollision` after `super.tick()`.
+    if mob.mob_type.climbs_walls() && !me.removed {
+        super::spider::tick(me, mob);
+    }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
     range_checks(me, mob);
@@ -499,6 +504,11 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// `LivingEntity.addEffect`: adds an effect to a mob and refreshes attributes.
 pub fn add_effect(mob: &mut Mob, instance: super::effects::EffectInstance) -> bool {
+    // `LivingEntity.addEffect` 先问 `canBeAffected`；蜘蛛对中毒返回假。
+    // `LivingEntity.addEffect` asks `canBeAffected` first; spiders refuse poison.
+    if !super::spider::can_be_affected(mob, instance.effect) {
+        return false;
+    }
     let events = mob.effects.add(instance);
     if events.attributes_changed {
         mob.effects.rebuild_attributes(&mut mob.attributes);
@@ -1139,7 +1149,14 @@ fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
 }
 
 /// `LivingEntity.onClimbable`：可攀爬的方块，或下面是同向梯子的开着的活板门。
+/// 蜘蛛改写这一条，只看自己的攀爬标志。
+///
+/// `LivingEntity.onClimbable`: a climbable block, or an open trapdoor over a matching
+/// ladder. Spiders override it to read their own climbing flag.
 pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
+    if mob.mob_type.climbs_walls() {
+        return super::spider::on_climbable(mob);
+    }
     let pos = me.block_position();
     let state = view.block_state(pos);
     if state.is_tagged(block_tags::CLIMBABLE) {
@@ -1521,6 +1538,20 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
+        // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
+        if hurt && let Some(effect) = super::spider::poison_instance(mob, ctx.blocks().difficulty())
+        {
+            ctx.emit(
+                Command::AddPlayerEffect {
+                    target,
+                    effect: effect.effect,
+                    duration: effect.duration,
+                    amplifier: effect.amplifier,
+                },
+                me,
+            );
+        }
         // `Zombie.doHurtTarget`：打中了、空手、自己着火时，按区域难度传染火焰：
         // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
         if hurt
@@ -1550,6 +1581,7 @@ pub(crate) fn do_hurt_target(
                 target,
                 source,
                 amount,
+                on_hit: super::spider::poison_instance(mob, ctx.blocks().difficulty()),
             },
             me,
         );

@@ -734,3 +734,16 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 顺带修正：`MeleeAttackGoal.tick` 重算路径前要先 `hasLineOfSight`（`followingTargetEvenIfNotSeen` 为假时），原先漏了；隔墙被打的场景才会暴露，僵尸和骷髅的既有场景逐刻结果不变。
 
 逐刻对拍场景：`creeper_chase_*`、`creeper_ignited`、`creeper_powered`、`creeper_fall`、`creeper_wall_hurt`、`creeper_blast_player_{1,2,3}`（`mob-oracle --only creeper`）。已知限制见 README 的苦力怕一条。
+
+## 蜘蛛和洞穴蜘蛛的实施现状（2026-11-21）
+
+蜘蛛在 `entity/mob/spider.rs`：`SpiderState`（`DATA_FLAGS_ID` 的攀爬位）挂在 `Mob.spider` 上，是相对状态，随实体行搬岛。`Spider.tick` 在 `living::tick_mob` 的 `ai_step` 之后执行，把 `Entity.horizontal_collision` 写进标志；`living::on_climbable` 对 `MobType::climbs_walls()` 的种类直接读这个标志（官方 `Spider.onClimbable`），爬墙的 0.2 上升、-0.15 下滑和水平 0.15 的夹取都走原有的 `travel` 代码。导航新增 `Navigation::wall_climber` / `path_to_position`：`create_path` 记录目标方块，`move_to_entity` 在无路径时记下目标并返回真，`tick` 在路径走完后返回目标方块的三维坐标（`WallClimberNavigation`）。
+
+目标：`Goal::LeapAtTarget` 是新的目标（JUMP + MOVE 标志，起跳改速度）；`Goal::MeleeAttack` 新增 `light_flee`（`SpiderAttackGoal` 的亮处放弃和类名）和 `follow_unseen`（`followingTargetEvenIfNotSeen=true`，`canContinueToUse` 不看路径走完，`tick` 不要求视线）。`Goal::NearestAttackableTarget` 新增 `light_gate`（`SpiderTargetGoal` 的亮处闸门，连 `nextInt` 都不取）。`living::light_dependent_magic` 是 `Entity.getLightLevelDependentMagicValue` 的共用实现。
+
+洞穴蜘蛛复用同一套目标和尺寸表，只有属性（12 点生命）和命中中毒不同：`living::do_hurt_target` 命中后按难度给目标中毒，玩家走新命令 `Command::AddPlayerEffect`，生物走 `Command::HurtMob` 的新字段 `on_hit`（伤害真的落地才挂）。`living::add_effect` 会先问 `spider::can_be_affected`，中毒对蜘蛛无效。自然生成：`check_spawn_rules` 走怪物那条黑暗分支，`spawn::SpawnGroup::Spider` 保存同一组共享的药水效果。
+
+别的生物可以复用的东西：`Command::AddPlayerEffect` / `World::give_mob_effect`（给另一个实体挂效果）、`Goal::LeapAtTarget`、`MeleeAttack` 的 `follow_unseen`、`spider::can_be_affected` 这种「按种类挡效果」的钩子。
+
+逐刻对拍场景：`spider_chase_*`（午夜追玩家）、`spider_day`（白天中立）、`cave_spider_chase`（`mob-oracle --only spider_` / `--only cave_spider_`）。翻墙只有单测 `a_wall_climber_pushes_up_an_unreachable_wall`：`spider_wall` 场景里翻墙那一刻起随机源比官方多走两刻，位置 / 目标 / 路径仍逐刻相同，没有进对拍。已知限制见 README 的蜘蛛一条。
+

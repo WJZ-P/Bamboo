@@ -488,7 +488,10 @@ struct CowStep {
 ///
 /// Scenes replayed on the hostile-mob path (`playZombie` on the Java side).
 fn monster_scene(name: &str) -> bool {
-    name.starts_with("zombie_") || name.starts_with("creeper_")
+    name.starts_with("zombie_")
+        || name.starts_with("creeper_")
+        || name.starts_with("spider_")
+        || name.starts_with("cave_spider_")
 }
 
 const fn minus_one_i64() -> i64 {
@@ -1198,6 +1201,8 @@ impl Report {
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
                     10 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
+                    11 => mc_bamboo_blocks::entity::mob::MobType::Spider,
+                    12 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
@@ -3086,6 +3091,9 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
         ),
         MobType::Chicken => format!("{}|egg{}", mob.variant.name(), mob.egg_time),
         MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
+        MobType::Spider | MobType::CaveSpider => {
+            mc_bamboo_blocks::entity::mob::spider::describe(mob)
+        }
         _ => mob.variant.name().to_owned(),
     }
 }

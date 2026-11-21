@@ -918,6 +918,45 @@ public final class MobOracle {
             }
         }
 
+        /** 蜘蛛：夜里追玩家、翻越不可达的墙、白天不锁定，以及洞穴蜘蛛的追击。 */
+        static void spiderScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            for (long seed : new long[] {13L, 91L}) {
+                // 午夜：亮度为 0，蜘蛛才会锁定玩家。
+                // Midnight, so the light level lets the spider target the player.
+                Scene chase = new Scene("spider_chase_" + seed).ticks(160).difficulty(2);
+                chase.clockStart = 18000;
+                chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                chase.mob(11, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                chase.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(chase);
+            }
+            {
+                // 墙挡住视线：先被打一下记仇，再翻墙。路径不可达时
+                // `WallClimberNavigation` 记下目标方块的三维坐标。这个场景的随机源
+                // 从翻墙那一刻起比官方多走两刻，位置 / 目标 / 路径仍然逐刻相同，
+                // 所以放在单测里验证爬墙，不放进逐刻对拍。
+                // The wall blocks sight: a hit makes the spider angry, then it climbs.
+                // Bamboo's random stream runs two ticks ahead from the climb on while
+                // positions, targets and paths still match, so climbing is covered by a
+                // unit test instead of this tick comparison.
+                // Daytime: neither spider goal starts.
+                // Daytime: neither spider goal starts.
+                Scene day = new Scene("spider_day").ticks(160).difficulty(2);
+                day.clockStart = 6000;
+                day.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                day.mob(11, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+                day.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(day);
+                Scene cave = new Scene("cave_spider_chase").ticks(160).difficulty(3);
+                cave.clockStart = 18000;
+                cave.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                cave.mob(12, 0.5, 64.0, 0.5, 0.0F, 41L, 0);
+                cave.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(cave);
+            }
+        }
+
         /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */        static void farmScenes(List<Scene> scenes) {
             int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
             int wheat = BuiltInRegistries.ITEM.getId(Items.WHEAT);
@@ -1014,6 +1053,7 @@ public final class MobOracle {
             long[] seeds = {1L, 42L, 9001L, -7L};
             farmScenes(scenes);
             creeperScenes(scenes);
+            spiderScenes(scenes);
             {
                 Scene pig = new Scene("pig_rod_tempt").ticks(80);
                 ground(pig, 12);
@@ -1914,7 +1954,8 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
-        if (scene.name.startsWith("zombie_") || scene.name.startsWith("creeper_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("creeper_")
+                || scene.name.startsWith("spider_") || scene.name.startsWith("cave_spider_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -3962,6 +4003,8 @@ public final class MobOracle {
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
                 case 10 -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
+                case 11 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, level);
+                case 12 -> new net.minecraft.world.entity.monster.spider.CaveSpider(EntityTypes.CAVE_SPIDER, level);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
@@ -4210,6 +4253,11 @@ public final class MobOracle {
                 out.append(",dir=").append(creeper.getSwellDir());
                 out.append(",powered=").append(creeper.isPowered());
                 out.append(",ignited=").append(creeper.isIgnited());
+                out.append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.spider.Spider spider) {
+                // 和 Bamboo 一侧 `spider::describe` 同一个格式。
+                // Same format as `spider::describe` on the Bamboo side.
+                out.append(",\"var\":\"climb=").append(spider.isClimbing());
                 out.append("\",\"snd\":\"minecraft:classic\"");
             } else {
                 out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");

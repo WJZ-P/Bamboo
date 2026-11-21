@@ -567,11 +567,25 @@ pub enum Command {
         target: EntityUid,
         ticks: i32,
     },
-    /// `Mob.doHurtTarget` 打到另一头生物。
+    /// `Mob.doHurtTarget` 打到另一头生物。`on_hit` 是命中后立刻挂上的效果
+    /// （洞穴蜘蛛的中毒），只有伤害真的落地才生效。
+    ///
+    /// `Mob.doHurtTarget` against another mob. `on_hit` is applied only if the hurt lands
+    /// (the cave spider's poison).
     HurtMob {
         target: EntityUid,
         source: super::mob::DamageSource,
         amount: f32,
+        on_hit: Option<super::mob::effects::EffectInstance>,
+    },
+    /// `LivingEntity.addEffect` 对玩家：洞穴蜘蛛打中玩家后的中毒。
+    ///
+    /// `LivingEntity.addEffect` on a player: the cave spider's poison after a hit.
+    AddPlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+        amplifier: i32,
     },
     /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
     MobLevelEvent {
@@ -696,8 +710,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             target,
             source,
             amount,
+            on_hit,
         } => {
-            let _ = world.hurt_mob(target, source, amount);
+            if world.hurt_mob(target, source, amount)
+                && let Some(effect) = on_hit
+            {
+                world.give_mob_effect(target, effect);
+            }
+        }
+        Command::AddPlayerEffect {
+            target,
+            effect,
+            duration,
+            amplifier,
+        } => {
+            world.give_player_effect(
+                target,
+                super::mob::effects::EffectInstance::with_amplifier(effect, duration, amplifier),
+            );
         }
         Command::MobLevelEvent { event, pos, data } => {
             world.push_effect(crate::Effect::LevelEvent {

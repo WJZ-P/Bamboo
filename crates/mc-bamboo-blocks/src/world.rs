@@ -731,6 +731,21 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 给一头生物挂效果（`LivingEntity.addEffect`）。
+    ///
+    /// Adds an effect to a mob (`LivingEntity.addEffect`).
+    pub fn give_mob_effect(
+        &mut self,
+        target: crate::entity::EntityUid,
+        instance: crate::entity::mob::effects::EffectInstance,
+    ) {
+        self.with_entity_mut(target, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                crate::entity::mob::living::add_effect(mob, instance.clone());
+            });
+        });
+    }
+
     /// 药水箭的瞬间效果（治疗 / 伤害）在玩家身上当场结算。
     ///
     /// A tipped arrow's instantaneous effect (healing or harm) on a player.

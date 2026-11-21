@@ -52,6 +52,12 @@ pub struct Navigation {
     pub max_visited_nodes: i32,
     pub is_stuck: bool,
     pub required_path_length: f32,
+    /// `WallClimberNavigation`：路径走完后直接朝 `path_to_position` 推三维坐标。
+    ///
+    /// `WallClimberNavigation`: after the path ends, push straight at `path_to_position`.
+    pub wall_climber: bool,
+    /// `WallClimberNavigation.pathToPosition`。
+    pub path_to_position: Option<BlockPos>,
 }
 
 impl Navigation {
@@ -78,6 +84,8 @@ impl Navigation {
             max_visited_nodes: mth::floor(follow_range_base * 16.0),
             is_stuck: false,
             required_path_length: 16.0,
+            wall_climber: false,
+            path_to_position: None,
         }
     }
 
@@ -130,7 +138,19 @@ impl Navigation {
         reach: i32,
     ) -> bool {
         let path = self.create_path(view, mob, BlockPos::containing(entity_pos), reach);
-        path.is_some() && self.move_to_path(view, mob, path, speed)
+        if path.is_some() {
+            return self.move_to_path(view, mob, path, speed);
+        }
+        // `WallClimberNavigation.moveTo(Entity, speed)`：找不到路径也算成功，
+        // 记下目标方块，由 `tick` 逐个三维推。
+        // `WallClimberNavigation.moveTo(Entity, speed)`: a missing path still counts as
+        // success; remember the block and let `tick` push toward it in 3D.
+        if self.wall_climber {
+            self.path_to_position = Some(BlockPos::containing(entity_pos));
+            self.speed_modifier = speed;
+            return true;
+        }
+        false
     }
 
     /// `moveTo(Path, speed)`。
@@ -170,6 +190,11 @@ impl Navigation {
         pos: BlockPos,
         reach: i32,
     ) -> Option<Path> {
+        if self.wall_climber {
+            // `WallClimberNavigation.createPath`：先记下目标方块。
+            // `WallClimberNavigation.createPath` records the destination first.
+            self.path_to_position = Some(pos);
+        }
         if !view.is_loaded(pos) {
             return None;
         }
@@ -224,6 +249,11 @@ impl Navigation {
 
     /// `PathNavigation.tick`。返回要交给 `MoveControl.setWantedPosition` 的位置和速度。
     pub fn tick(&mut self, view: &dyn BlockView, mob: &NavMob) -> Option<(Vec3, f64)> {
+        if self.wall_climber && self.is_done() {
+            // `WallClimberNavigation.tick` 走完路径的那一支。
+            // The finished-path branch of `WallClimberNavigation.tick`.
+            return self.wall_climb_target(mob);
+        }
         self.tick += 1;
         if self.has_delayed_recomputation {
             self.recompute_path(view, mob);
@@ -259,6 +289,37 @@ impl Navigation {
 
     fn temp_mob_pos(&self, view: &dyn BlockView, mob: &NavMob) -> Vec3 {
         temp_mob_pos(view, mob, self.flags.can_float)
+    }
+
+    /// `WallClimberNavigation.tick` 的 `else` 分支：路径走完后朝目标方块推三维坐标。
+    /// 目标已经在 `width` 以内（或目标在上方且同一列已经够近）时清掉目标。
+    ///
+    /// The `else` branch of `WallClimberNavigation.tick`: push at the destination in
+    /// 3D once the path is done, and clear it when the mob is close enough.
+    fn wall_climb_target(&mut self, mob: &NavMob) -> Option<(Vec3, f64)> {
+        let destination = self.path_to_position?;
+        let width = f64::from(mob.path.width);
+        let position = mob.path.position;
+        let inside = |x: i32, y: i32, z: i32| {
+            let dx = f64::from(x) + 0.5 - position.x;
+            let dy = f64::from(y) + 0.5 - position.y;
+            let dz = f64::from(z) + 0.5 - position.z;
+            dx * dx + dy * dy + dz * dz < width * width
+        };
+        let at_destination = inside(destination.x, destination.y, destination.z);
+        let same_column = inside(destination.x, mth::floor(position.y), destination.z);
+        if at_destination || (position.y > f64::from(destination.y) && same_column) {
+            self.path_to_position = None;
+            return None;
+        }
+        Some((
+            Vec3::new(
+                f64::from(destination.x),
+                f64::from(destination.y),
+                f64::from(destination.z),
+            ),
+            self.speed_modifier,
+        ))
     }
 
     fn follow_the_path(&mut self, view: &dyn BlockView, mob: &NavMob) {

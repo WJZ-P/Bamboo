@@ -33,6 +33,7 @@ pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
+pub mod spider;
 pub(crate) mod timing;
 mod zombie_spawn;
 
@@ -63,6 +64,8 @@ pub enum MobType {
     Husk,
     Skeleton,
     Creeper,
+    Spider,
+    CaveSpider,
 }
 
 impl MobType {
@@ -78,6 +81,8 @@ impl MobType {
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
             Self::Creeper => ids::CREEPER,
+            Self::Spider => ids::SPIDER,
+            Self::CaveSpider => ids::CAVE_SPIDER,
         }
     }
 
@@ -92,6 +97,8 @@ impl MobType {
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
             Self::Creeper => "minecraft:creeper",
+            Self::Spider => "minecraft:spider",
+            Self::CaveSpider => "minecraft:cave_spider",
         }
     }
 
@@ -105,6 +112,8 @@ impl MobType {
             Self::Husk,
             Self::Skeleton,
             Self::Creeper,
+            Self::Spider,
+            Self::CaveSpider,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -122,6 +131,22 @@ impl MobType {
                 )
             }
             (Self::Creeper, _) => creeper::dimensions(),
+            (Self::Spider, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::SPIDER_EYE_HEIGHT,
+                )
+            }
+            (Self::CaveSpider, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::CAVE_SPIDER_EYE_HEIGHT,
+                )
+            }
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
@@ -138,7 +163,12 @@ impl MobType {
     pub const fn is_monster(self) -> bool {
         matches!(
             self,
-            Self::Zombie | Self::Husk | Self::Skeleton | Self::Creeper
+            Self::Zombie
+                | Self::Husk
+                | Self::Skeleton
+                | Self::Creeper
+                | Self::Spider
+                | Self::CaveSpider
         )
     }
 
@@ -148,7 +178,10 @@ impl MobType {
     /// Whether targeting follows the full vanilla `TargetGoal` rules (`mustSee` memory,
     /// mob targets, real hitboxes for melee reach). Zombies keep the earlier simplification.
     pub const fn full_target_rules(self) -> bool {
-        matches!(self, Self::Skeleton | Self::Creeper)
+        matches!(
+            self,
+            Self::Skeleton | Self::Creeper | Self::Spider | Self::CaveSpider
+        )
     }
 
     /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
@@ -164,6 +197,14 @@ impl MobType {
     /// Footsteps use the `SoundType` of the block below (the default `Entity.playStepSound`).
     pub const fn uses_block_step_sound(self) -> bool {
         matches!(self, Self::Creeper)
+    }
+
+    /// `Spider.onClimbable()` 读 `DATA_FLAGS_ID` 的第 0 位，攀爬物理因此改走实体标志。
+    ///
+    /// `Spider.onClimbable()` reads bit 0 of `DATA_FLAGS_ID`, so climbing physics
+    /// reads the entity flag instead of the block below.
+    pub const fn climbs_walls(self) -> bool {
+        matches!(self, Self::Spider | Self::CaveSpider)
     }
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
@@ -198,6 +239,8 @@ impl MobType {
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
             Self::Creeper => "minecraft:entities/creeper",
+            Self::Spider => "minecraft:entities/spider",
+            Self::CaveSpider => "minecraft:entities/cave_spider",
         }
     }
 
@@ -225,6 +268,7 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.ambient"),
         }
     }
 
@@ -236,6 +280,7 @@ impl MobType {
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
             Self::Creeper => Some("minecraft:entity.creeper.hurt"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.hurt"),
         }
     }
 
@@ -247,6 +292,7 @@ impl MobType {
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
             Self::Creeper => Some("minecraft:entity.creeper.death"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.death"),
         }
     }
 
@@ -257,6 +303,7 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.step"),
         }
     }
 
@@ -272,6 +319,8 @@ impl MobType {
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
             Self::Creeper => items::CREEPER_SPAWN_EGG,
+            Self::Spider => items::SPIDER_SPAWN_EGG,
+            Self::CaveSpider => items::CAVE_SPIDER_SPAWN_EGG,
         }
     }
 
@@ -286,6 +335,8 @@ impl MobType {
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
             Self::Creeper => "entity.minecraft.creeper",
+            Self::Spider => "entity.minecraft.spider",
+            Self::CaveSpider => "entity.minecraft.cave_spider",
         }
     }
 
@@ -305,6 +356,8 @@ impl MobType {
             Self::Husk,
             Self::Skeleton,
             Self::Creeper,
+            Self::Spider,
+            Self::CaveSpider,
         ]
         .into_iter()
         .find(|kind| kind.entity_type() == entity_type)
@@ -1107,6 +1160,10 @@ pub struct Mob {
     /// Creeper swell, fuse, powered and ignited state; default for other mobs. Relative
     /// counters only, so it moves with the entity row between islands.
     pub creeper: creeper::CreeperState,
+    /// 蜘蛛的 `DATA_FLAGS_ID` 第 0 位（`isClimbing`）；别的生物恒为缺省值。
+    ///
+    /// Bit 0 of the spider's `DATA_FLAGS_ID` (`isClimbing`); default for other mobs.
+    pub spider: spider::SpiderState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1176,10 +1233,17 @@ impl Mob {
             MobType::Chicken => chicken::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Creeper => creeper::attributes(),
+            MobType::Spider => spider::attributes(MobType::Spider),
+            MobType::CaveSpider => spider::attributes(MobType::CaveSpider),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
+        if mob_type.climbs_walls() {
+            // `Spider.createNavigation` 用 `WallClimberNavigation`。
+            // `Spider.createNavigation` builds a `WallClimberNavigation`.
+            navigation.wall_climber = true;
+        }
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
             MobType::Pig => pig::goals(&mut navigation),
@@ -1187,6 +1251,7 @@ impl Mob {
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Creeper => creeper::goals(&mut navigation),
+            MobType::Spider | MobType::CaveSpider => spider::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
@@ -1195,6 +1260,7 @@ impl Mob {
             }
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Creeper => creeper::target_goals(),
+            MobType::Spider | MobType::CaveSpider => spider::target_goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -1311,6 +1377,7 @@ impl Mob {
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
             creeper: creeper::CreeperState::default(),
+            spider: spider::SpiderState::default(),
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1409,6 +1476,10 @@ pub struct MobPublic {
     pub creeper_swell_dir: i32,
     pub creeper_powered: bool,
     pub creeper_ignited: bool,
+    /// 蜘蛛的 `DATA_FLAGS_ID`，攀爬位。
+    ///
+    /// The spider `DATA_FLAGS_ID`, with the climbing bit.
+    pub spider_flags: u8,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1463,6 +1534,7 @@ impl MobPublic {
             creeper_swell_dir: mob.creeper.swell_dir,
             creeper_powered: mob.creeper.powered,
             creeper_ignited: mob.creeper.ignited,
+            spider_flags: if mob.spider.climbing { 1 } else { 0 },
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

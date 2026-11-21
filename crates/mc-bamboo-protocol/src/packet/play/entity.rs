@@ -205,6 +205,10 @@ pub enum EntityData {
     CreeperSwellDir(i32),
     CreeperPowered(bool),
     CreeperIgnited(bool),
+    /// `Spider.DATA_FLAGS_ID`（BYTE，缺省 0，第 0 位是攀爬）。
+    ///
+    /// `Spider.DATA_FLAGS_ID` (BYTE, default 0, bit 0 is climbing).
+    SpiderFlags(u8),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -258,6 +262,7 @@ impl EntityData {
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
         }
     }
 
@@ -424,6 +429,10 @@ impl EntityData {
             Self::CreeperPowered(flag) | Self::CreeperIgnited(flag) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *flag);
+            }
+            Self::SpiderFlags(flags) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*flags);
             }
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);
