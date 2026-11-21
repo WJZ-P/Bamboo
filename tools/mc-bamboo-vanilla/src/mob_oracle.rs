@@ -1256,7 +1256,11 @@ impl Report {
                         mob.y_head_rot = yaw;
                         mob.y_body_rot = yaw;
                         mob.wool = cow.wool;
-                        mob.egg_time = cow.egg;
+                        // 鸡的蛋计时由 Java 一侧报过来（构造时抽的值）；缺省保留 Bamboo 的。
+                        // The chicken's egg timer comes from Java (drawn in its constructor).
+                        if cow.egg > 0 {
+                            mob.egg_time = cow.egg;
+                        }
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if let Some(mob) = entity.kind.mob_mut()

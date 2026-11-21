@@ -866,6 +866,27 @@ public final class MobOracle {
         return 0;
     }
 
+    /**
+     * 生物场景的品种列：羊和鸡用农场场景的格式（颜色加剪毛标记、品种加蛋计时），
+     * 其余写默认值，和 Bamboo 一侧的 `farm_variant` 一致。
+     *
+     * The variant column of mob scenes: sheep and chickens use the farm format
+     * (colour plus shear mark, variant plus egg timer); the rest keep the defaults,
+     * matching Bamboo's `farm_variant`.
+     */
+    static String caseVariant(Mob mob) {
+        if (mob instanceof Sheep || mob instanceof Chicken) {
+            return farmVariant((Animal) mob);
+        }
+        return "minecraft:temperate";
+    }
+
+    static String caseSound(Mob mob) throws Exception {
+        if (mob instanceof Sheep) return "";
+        if (mob instanceof Chicken) return farmSound((Animal) mob);
+        return "minecraft:classic";
+    }
+
     static Object readStatic(Class<?> owner, String name) {
         try {
             java.lang.reflect.Field field = owner.getDeclaredField(name);
@@ -939,6 +960,14 @@ public final class MobOracle {
             Scenes.ground(baby, 15);
             baby.mob(7, 0.5, 64.0, 0.5, 0.0F, 27L, -24000);
             scenes.add(baby);
+            // 扑鸡：狐狸盯梢、蹲下、扑跳，咬中后鸡惊慌逃跑。
+            // Pouncing a chicken: the fox stalks, crouches and leaps; the chicken panics once hurt.
+            Scene chicken = new Scene("fox_hunt_chicken").ticks(160);
+            chicken.foxHunts = true;
+            Scenes.ground(chicken, 12);
+            chicken.mob(7, 0.5, 64.0, 0.5, 0.0F, 47L, 0);
+            chicken.mob(5, 8.5, 64.0, 0.5, 0.0F, 48L, 0);
+            scenes.add(chicken);
         }
     }
 
@@ -1001,6 +1030,13 @@ public final class MobOracle {
             puppy.mob(8, 0.5, 64.0, 0.5, 0.0F, 91L, -24000);
             puppy.player(3.5, 64.0, 0.5, Items.BONE);
             scenes.add(puppy);
+            // 追羊：野狼把羊当猎物，羊受伤后惊慌逃跑。
+            // Hunting sheep: a wild wolf preys on the sheep, which panics once hurt.
+            Scene sheep = new Scene("wolf_hunt_sheep").ticks(200);
+            Scenes.ground(sheep, 12);
+            sheep.mob(8, 0.5, 64.0, 0.5, 0.0F, 53L, 0);
+            sheep.mob(4, 8.5, 64.0, 0.5, 0.0F, 54L, 0);
+            scenes.add(sheep);
         }
     }
 
@@ -4151,6 +4187,10 @@ public final class MobOracle {
                 case 8 -> EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND);
                 case 7 -> EntityTypes.FOX.create(level, EntitySpawnReason.COMMAND);
                 case 6 -> EntityTypes.RABBIT.create(level, EntitySpawnReason.COMMAND);
+                // 猎物：羊和鸡，和 Bamboo 一侧的编号一致。
+                // Prey: sheep and chickens, numbered like the Bamboo side.
+                case 5 -> EntityTypes.CHICKEN.create(level, EntitySpawnReason.COMMAND);
+                case 4 -> EntityTypes.SHEEP.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
@@ -4204,7 +4244,11 @@ public final class MobOracle {
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
             line.append(",\"kind\":").append(kind[0]);
-            line.append(",\"sleep\":").append(foxSleepCountdown(mobs.get(i))).append('}');
+            line.append(",\"sleep\":").append(foxSleepCountdown(mobs.get(i)));
+            // 鸡的蛋计时在构造时抽，Java 一侧报给 Bamboo 照填。
+            // The chicken's egg timer is drawn at construction; report it to Bamboo.
+            line.append(",\"egg\":").append(mobs.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
+            line.append('}');
         }
         line.append("],\"players\":[");
         for (int i = 0; i < players.size(); i++) {
@@ -4423,7 +4467,8 @@ public final class MobOracle {
             out.append(",\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            out.append(",\"var\":\"").append(caseVariant(mob)).append('"');
+            out.append(",\"snd\":\"").append(caseSound(mob)).append('"');
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             // 狐狸比原始的 `target` 字段：`getTarget()` 会把死掉的猎物读成空，Bamboo 存原始值。
