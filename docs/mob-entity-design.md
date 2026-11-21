@@ -822,3 +822,38 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `/summon` 和刷怪蛋、并行驱动下的逐位一致。
 - 没做：岩浆怪；水里改大小时的溅水（只保住那一次取数）；脚步声的
   `getPrimaryStepSoundBlockPos`；`push(Entity)` 打铁傀儡；附魔的 `doPostAttackEffects`。
+### 5.8 溺尸、女巫和喷溅药水（2026-11-21）
+
+- **溺尸**（`entity/mob/drowned.rs`）：`MobType::Drowned` 接进属性、目标、音效、刷怪和存档表；
+  `is_zombie()` 把僵尸、尸壳、溺尸归成一族，近战、破门、增援、日晒和 `handleAttributes`
+  继续共用。`Zombie.tick` 结尾的 `drowningTracker`（`Mob.drown_conversion`）眼睛在水里
+  600 刻后开始转化，再过 300 刻发 `Command::ConvertMob`；落地时照 `ConversionType.SINGLE`
+  搬状态（共享的是 `conversion::copy_state`），并额外跑一次 `Zombie.handleAttributes`
+  （`Command::ConvertMob.zombie_attributes`）。
+- **两栖寻路**：没有照 `AmphibiousNodeEvaluator` 做独立节点求值器；溺尸借用导航的
+  `can_float`（水节点不再被替换成水下的地面节点）加三项寻路代价覆盖（水 0、走地 6、水边 4，
+  即 `AmphibiousNodeEvaluator.prepare` 的设置）让水可以走。副作用是 `jumpInLiquid` 的上浮量
+  按浮水生物的 0.04 而不是 0.3，起点和临时位置也按浮水处理，竖直邻接节点没有实现，见
+  README 的已知限制。
+- **游泳**：`updateSwimming`（共享标志第 4 位）、`DrownedMoveControl`（`mob.swimming` /
+  `searching_for_land` / 目标高度）、`travelInWater` 的 0.01 分支、`isPushedByFluid` 为假时
+  不推水流。
+- **生成**：`SpawnPlacementTypes.IN_WATER` 放置、`checkDrownedSpawnRules` 的 1/40（
+  `#more_frequent_drowned_spawns` 1/15）和海平面 5 格、3% 副手鹦鹉螺壳、三叉戟 / 钓鱼竿
+  的 `populateDefaultEquipmentSlots`（不拿盔甲）、`handleAttributes`、`entities/drowned`
+  战利品。鹦鹉螺僵尸骑手只取随机数、不生成坐骑。
+- **女巫**（`entity/mob/witch.rs`）：`MobType::Witch` 接进各表；`Witch.aiStep` 在
+  `Monster.aiStep` 之前跑喝药逻辑和 7.5e-4 的冒烟事件，`WitchHealRaiders` 目标在没有袭击时
+  仍每刻抽一次 `nextBoolean`，`RangedAttackGoal` 用 `Goal::WitchRangedAttack` 实现。
+  喝药走 `EffectInstance`，瞬时治疗直接加血；喝药移速修饰符是瞬时的 `minecraft:drinking`。
+  同步 index 17 的 `Witch.DATA_USING_ITEM`（`EntityData::WitchUsingItem`）。
+- **喷溅药水**（`entity/splash_potion.rs`）：新的投掷物实体，物理照 `ThrowableProjectile`
+  （重力 0.05），命中后按 `ThrownSplashPotion.onHitAsPotion` 的 4/2/4 范围和
+  `1 - sqrt(d)/4` 的缩放分效果；瞬时效果对生物当场结算，其余按 `scale * duration + 0.5`
+  挂上（20 刻以内不挂）。世界事件 2002 / 2007 和 1053 / 1054。存档、同步和
+  `entity-oracle` 的快照都接上了。
+- **仓库外改动**：`mc-bamboo-protocol` 加了一个实体数据项；`mc-bamboo-storage` 的建模实体
+  清单加了溺尸和女巫。
+- **没做的**：三叉戟投掷（没有 `ThrownTrident`）、`DrownedGoToBeachGoal`、鹦鹉螺僵尸、
+  袭击系统、女巫自然生成、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
+  目标速度和目标药水效果（选药用不到）。溺尸和女巫都**没有** `mob-oracle` 场景。

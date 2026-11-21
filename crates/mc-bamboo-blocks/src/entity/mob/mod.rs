@@ -1294,6 +1294,15 @@ impl Mob {
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
+        if mob_type == MobType::Drowned {
+            // `AmphibiousNodeEvaluator.prepare` 把水当成零代价、把走地和水边调贵；
+            // `can_float` 让 `findAcceptedNode` 不再把水节点换成水下的地面节点。
+            //
+            // `AmphibiousNodeEvaluator.prepare` makes water free and walking pricier;
+            // `can_float` stops `findAcceptedNode` from replacing a water node with the
+            // ground below it.
+            navigation.flags.can_float = true;
+        }
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
             MobType::Pig => pig::goals(&mut navigation),
@@ -1389,6 +1398,13 @@ impl Mob {
             goals,
             seen: Vec::new(),
             malus: match mob_type {
+                MobType::Drowned => {
+                    let mut malus = Malus::monster();
+                    malus.set(mc_bamboo_data::PathType::Water, 0.0);
+                    malus.set(mc_bamboo_data::PathType::Walkable, 6.0);
+                    malus.set(mc_bamboo_data::PathType::WaterBorder, 4.0);
+                    malus
+                }
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
                 _ => Malus::animal(),
