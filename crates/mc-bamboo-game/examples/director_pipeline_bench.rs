@@ -248,7 +248,7 @@ fn main() {
              rss_mb={:.0},peak_rss_mb={:.0},idle_rss_mb={:.0},second_per_s={:.2},\
              cache_peak_mb={:.1},idle_entries={},idle_bytes_mb={:.1},\
              dependency_releases={},evictions={},feature_entries={},feature_mb={:.1},\
-             idle_releases={}",
+             idle_releases={},cold_entries={},cold_mb={:.1},cold_hits={}",
             options.label,
             options.structures,
             options.warmup,
@@ -306,6 +306,9 @@ fn main() {
             features.0,
             features.1 as f64 / (1024.0 * 1024.0),
             worldgen_cache::idle_releases(),
+            cache.cold_entries,
+            cache.cold_bytes as f64 / (1024.0 * 1024.0),
+            cache.cold_hits,
         );
         black_box(world.is_chunk_loaded(positions[0]));
     }

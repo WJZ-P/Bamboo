@@ -1498,6 +1498,35 @@ mod tests {
     /// `Arc`（各算各的会是不同的分配）。
     /// Threads asking for the same center at once share one computation: every
     /// caller gets the very same `Arc`.
+    /// 按依赖释放：5×5 个区块都完工，这个中心的地物结果才删；删了再要，
+    /// 现算出来的和原来逐条相同。
+    /// Dependency release: a center's feature result goes only once all 5×5
+    /// chunks are assembled; asking again recomputes identical writes.
+    #[test]
+    fn feature_run_is_released_when_its_5x5_is_assembled() {
+        let config = normal(0x0fea_7c0e);
+        let (cx, cz) = (12, 6);
+        let cached = |config: &WorldGenConfig| {
+            let key = feature_cache_key(config, cx, cz);
+            let shard = feature_shards()[feature_shard_index(&key)].lock().unwrap();
+            shard.entries.contains_key(&key)
+        };
+        let first = cached_feature_run(&config, cx, cz).unwrap();
+        let positions: Vec<ChunkPos> = (-2..=2)
+            .flat_map(|dz| (-2..=2).map(move |dx| ChunkPos::new(cx + dx, cz + dz)))
+            .collect();
+        for &pos in &positions[..24] {
+            crate::worldgen_cache::chunk_finished(&config, pos);
+        }
+        assert!(cached(&config), "one chunk of the 5x5 is not assembled");
+        crate::worldgen_cache::chunk_finished(&config, positions[24]);
+        assert!(!cached(&config), "the whole 5x5 is assembled");
+        let again = cached_feature_run(&config, cx, cz).unwrap();
+        assert!(!Arc::ptr_eq(&first, &again), "recomputed after the release");
+        assert_eq!(first.deltas, again.deltas);
+        assert_eq!(first.marks, again.marks);
+    }
+
     #[test]
     fn concurrent_feature_runs_share_one_computation() {
         let config = normal(0x0fea_7c0d);

@@ -62,6 +62,12 @@ pub const DEFAULT_FEATURE_CACHE_MB: usize = 16;
 /// Default idle-release delay in seconds; 0 disables the idle release.
 pub const DEFAULT_IDLE_SECONDS: u64 = 30;
 
+/// 配置文件里三个键允许的最大值。
+/// Largest values the three config keys accept.
+pub const MAX_TERRAIN_CACHE_MB: usize = 4096;
+pub const MAX_FEATURE_CACHE_MB: usize = 1024;
+pub const MAX_IDLE_SECONDS: u64 = 3600;
+
 /// 两份世界生成缓存的设置，对应 `bamboo.toml` 的三个键。
 ///
 /// Settings of the two worldgen caches; the three `bamboo.toml` keys.
