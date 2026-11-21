@@ -32,6 +32,7 @@ use crate::oracle::collect_log;
 
 mod egg;
 mod gen_spawn;
+mod grazing;
 mod natural_spawn;
 mod projectile;
 mod shot;
@@ -1094,6 +1095,13 @@ impl Report {
         if case.player_steps.is_some() {
             self.replay_player_hurt(case);
             return;
+        }
+        // 吃草场景先确认官方那一侧真的发生了场景想测的事。
+        // Grazing scenes first confirm the official side did what the scene is for.
+        if let Some(steps) = &case.block_steps
+            && let Some(error) = grazing::coverage_error(&case.name, &case.blocks, steps)
+        {
+            self.mismatch(error);
         }
         // 改坏确认：故意改一处生产参数，对拍必须报不一致。
         let break_test = self.break_test.as_deref();

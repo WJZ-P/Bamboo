@@ -871,8 +871,11 @@ public final class MobOracle {
                 // Short grass at the feet: `destroyBlock` eats it first, the grass block below later.
                 Scene plant = new Scene("sheep_eat_plant").ticks(300).packets();
                 ground(plant, 8);
-                // 两只幼羊各关在玻璃围住的一格里，只能反复吃同一格。
-                // Each lamb is penned into one cell by glass, so it keeps eating the same cell.
+                // 两只幼羊各从玻璃围住的一格里出发（玻璃只有一格高，幼羊可能跳出去）。
+                // Rust 侧 `grazing::coverage_error` 确认官方确实有一列先没了矮草、后没了草方块。
+                // Each lamb starts in a one-cell glass pen (one block high, so it may hop out).
+                // `grazing::coverage_error` on the Rust side confirms that one column really
+                // lost its short grass first and its grass block later.
                 for (int x : new int[] {0, 4}) {
                     plant.fill(x - 1, 64, -1, x + 1, 64, 1, Blocks.GLASS.defaultBlockState());
                     plant.fill(x, 64, 0, x, 64, 0, Blocks.SHORT_GRASS.defaultBlockState());
@@ -3355,6 +3358,8 @@ public final class MobOracle {
         var frames = new StringBuilder("[");
         /** 蛋碎的那一刻；之前是 -1。 */
         int broke = -1;
+        /** 牛记住过主人。 The cow did remember the owner. */
+        boolean remembered = false;
         for (int tick = 0; ; tick++) {
             var packets = new ArrayList<String>();
             if (tick == 0) pairArrow(world, official, egg, sync, packets);
@@ -3426,6 +3431,7 @@ public final class MobOracle {
                         .append('}');
             }
             frames.append(']');
+            remembered |= owned && cow.getLastHurtByPlayer() == owner;
             if (cow != null) {
                 frames.append(",\"cow\":").append(projectileMotion(cow))
                         .append(",\"cowState\":[").append(Float.floatToRawIntBits(cow.getHealth())).append(',')
@@ -3441,7 +3447,7 @@ public final class MobOracle {
             if (tick > 200) throw new IllegalStateException("egg never landed: " + name);
         }
         if (chicks.size() != hatch || cowHit && !owned && cow.hurtTime == 0
-                || owned && cow.getLastHurtByPlayer() != owner) {
+                || owned && (!remembered || cow.getLastHurtByPlayer() != null)) {
             throw new IllegalStateException("egg scene missed its branch: " + name + " chicks=" + chicks.size()
                     + " forced=" + forced + " egg=" + egg.position() + " seed=" + randomSeed(egg));
         }
@@ -3455,8 +3461,13 @@ public final class MobOracle {
 
     /** `egg_hit_cow_owned` 里蛋的主人站的位置，离蛋和牛都够远。 */
     private static final double[] EGG_OWNER = {-6.5, 64.0, 0.5};
-    /** `egg_hit_cow_owned` 在蛋碎之后继续比的刻数。 */
-    private static final int OWNED_TICKS = 60;
+    /**
+     * `egg_hit_cow_owned` 在蛋碎之后继续比的刻数：超过 100 刻，盖住 `lastHurtByPlayer` 记忆过期清空的那一刻。
+     *
+     * Ticks compared after the egg breaks: past 100, so the scene covers the tick where the
+     * `lastHurtByPlayer` memory runs out and is cleared.
+     */
+    private static final int OWNED_TICKS = 110;
 
     /** 第一个让蛋孵一只（或四只）的种子：`nextInt(8) == 0`，再看 `nextInt(32)`。 */
     private static long hatchSeed(boolean four) {
