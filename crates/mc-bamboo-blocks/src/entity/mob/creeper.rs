@@ -470,6 +470,7 @@ mod tests {
             held: mc_bamboo_protocol::item::ItemStack::new(item, 1),
             creative: false,
             position: Vec3::default(),
+            sneaking: false,
         };
         let mut entity = Entity::by_mob_type(MobType::Creeper, Vec3::default());
         entity.with_mob(|me, mob| {
