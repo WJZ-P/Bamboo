@@ -41,16 +41,20 @@ pub(super) use life::{
 };
 pub(super) use ranged::{ranged_attack_tick, take_did_spit};
 
-/// 马科同步给客户端的元数据：标志字节、马的花色或羊驼的毛色、有没有箱子、羊驼力量。
+/// 马科同步给客户端的元数据，加扬蹄动画进度（供骑手附着点用）。
 ///
-/// The equine metadata sent to clients: the flag byte, the horse or llama
-/// variant, whether a chest is fitted, and llama strength.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The equine metadata sent to clients, plus the rearing animation progress for
+/// the rider attachment point.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EquinePublic {
     pub flags: u8,
     pub variant: i32,
     pub chested: bool,
     pub strength: i32,
+    /// `AbstractHorse.standAnimO`：上一刻的扬蹄动画值，计算骑手附着点时用。
+    ///
+    /// `AbstractHorse.standAnimO`: previous rearing animation value for rider placement.
+    pub stand_anim_o: f32,
 }
 
 impl EquinePublic {
@@ -63,6 +67,7 @@ impl EquinePublic {
             variant: state.variant,
             chested: state.chested,
             strength: state.strength,
+            stand_anim_o: state.stand_anim_o,
         }
     }
 }
@@ -92,6 +97,11 @@ pub struct EquineState {
     pub eating_counter: i32,
     pub mouth_counter: i32,
     pub stand_counter: i32,
+    /// `AbstractHorse.standAnim` 和 `standAnimO`：扬蹄动画进度，决定骑手附着点偏移。不存档。
+    ///
+    /// `AbstractHorse.standAnim` and `standAnimO`: rearing progress for the rider offset. Not saved.
+    pub stand_anim: f32,
+    pub stand_anim_o: f32,
     pub tail_counter: i32,
     /// `AbstractHorse.gallopSoundCounter`：被骑着跑时按步数换成奔跑步声。不存档。
     ///
@@ -144,14 +154,13 @@ pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
     (facts.width * scale, facts.height * scale, eye * scale)
 }
 
-/// 成年骑手在背上的附着点 `(y, z)`，官方 `EntityTypes` 的 `passengerAttachments`：
-/// 马 1.44375、驴 1.1125、骡 1.2125、羊驼 (1.37, -0.3)。扬蹄时 `AbstractHorse`
-/// 再加的 `0.15 * standAnimO`、`-0.7 * standAnimO` 还没有建模。
+/// 成年骑手在背上的基础附着点 `(y, z)`，官方 `EntityTypes` 的 `passengerAttachments`：
+/// 马 1.44375、驴 1.1125、骡 1.2125、羊驼 (1.37, -0.3)。扬蹄偏移由 `EquinePublic::stand_anim_o`
+/// 在游戏层叠加。
 ///
-/// The attachment point `(y, z)` of an adult rider, from vanilla `EntityTypes`'
+/// The base attachment point `(y, z)` of an adult rider, from vanilla `EntityTypes`'
 /// `passengerAttachments`: horse 1.44375, donkey 1.1125, mule 1.2125, llama
-/// (1.37, -0.3). The `0.15 * standAnimO` and `-0.7 * standAnimO` that
-/// `AbstractHorse` adds while rearing are not modelled yet.
+/// (1.37, -0.3). The rearing offset is added from `EquinePublic::stand_anim_o`.
 pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
     match kind {
         MobType::Horse => (1.443_75, 0.0),

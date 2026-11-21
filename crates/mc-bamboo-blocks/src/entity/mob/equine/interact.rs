@@ -85,7 +85,7 @@ fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
     // `isHolding(GOLDEN_DANDELION)` 看两只手；请求里只有这一只手的物品。
     // `isHolding` checks both hands; the request only carries this hand's stack.
     let baby_dandelion = mob.is_baby() && req.held.item == items::GOLDEN_DANDELION;
-    if !open_inventory && !baby_dandelion && !req.held.is_empty() {
+    if !mob.is_vehicle() && !open_inventory && !baby_dandelion && !req.held.is_empty() {
         if is_food(mob.mob_type, &req.held) {
             return fed_food(me, mob, req);
         }
@@ -101,18 +101,20 @@ fn mob_interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
     abstract_horse_interact(me, mob, req)
 }
 
-/// `AbstractHorse.mobInteract`：幼崽交给 `Animal.mobInteract`（这里走不到食物那一支，
-/// 结果是 `PASS`）；驯服后潜行开物品栏；手里的东西先试 `interactLivingEntity`
-/// （鞍），再试身体护甲；最后 `doPlayerRide`。
+/// `AbstractHorse.mobInteract`：有人骑或幼崽交给 `Animal.mobInteract`；
+/// 驯服后潜行开物品栏；手里的东西先试 `interactLivingEntity`（鞍），再试身体护甲；最后 `doPlayerRide`。
 ///
-/// `AbstractHorse.mobInteract`: babies go to `Animal.mobInteract` (never with
-/// food here, so `PASS`); sneaking opens the inventory once tamed; the held stack
-/// tries `interactLivingEntity` (saddles) and then body armor; finally `doPlayerRide`.
+/// `AbstractHorse.mobInteract`: ridden mounts and babies go to `Animal.mobInteract`;
+/// sneaking opens the inventory once tamed; the held stack tries
+/// `interactLivingEntity` (saddles) and then body armor; finally `doPlayerRide`.
 fn abstract_horse_interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
 ) -> MobInteraction {
+    if mob.is_vehicle() {
+        return crate::entity::mob::interact::animal_interact(me, mob, req);
+    }
     if mob.is_baby() {
         return MobInteraction::pass();
     }
@@ -463,5 +465,60 @@ fn equip_sound(equippable: &Equippable) -> Option<&'static str> {
             .and_then(|id| mc_bamboo_data::sounds::SOUND_EVENTS.get(id))
             .map(|sound| sound.name),
         Holder::Inline(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::{Hand, Vec3};
+
+    use super::*;
+
+    fn req(held: ItemStack, sneaking: bool) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 99,
+            player_uuid: [9; 16],
+            hand: Hand::Main,
+            held,
+            creative: false,
+            position: Vec3::new(0.5, 64.0, 0.5),
+            sneaking,
+        }
+    }
+
+    /// 有人骑着的马科：别人潜行右键不开物品栏、空手不上马、拿马铠不穿、拿食物走 `Animal.mobInteract`。
+    ///
+    /// A ridden equine ignores sneak-open, empty-hand riding and body armor from
+    /// another player, and routes food through `Animal.mobInteract`.
+    #[test]
+    fn a_ridden_equine_routes_through_animal_interact() {
+        let mut entity = Entity::by_mob_type(MobType::Horse, Vec3::new(0.5, 64.0, 0.5));
+        entity
+            .with_mob(|me, mob| {
+                let state = mob.equine.as_mut().expect("horse state");
+                state.tame = true;
+                mob.passengers.push(7);
+
+                let sneak = interact(me, mob, &req(ItemStack::empty(), true));
+                assert_eq!(sneak.result, InteractionResult::Pass);
+                assert!(!sneak.open_inventory);
+
+                let armor = interact(
+                    me,
+                    mob,
+                    &req(ItemStack::new(items::IRON_HORSE_ARMOR, 1), false),
+                );
+                assert_eq!(armor.result, InteractionResult::Pass);
+                assert!(mob.equipment.get(EquipmentSlot::Body).is_empty());
+
+                let empty = interact(me, mob, &req(ItemStack::empty(), false));
+                assert_eq!(empty.result, InteractionResult::Pass);
+                assert!(!empty.ride);
+
+                let wheat = interact(me, mob, &req(ItemStack::new(items::WHEAT, 1), false));
+                assert_eq!(wheat.result, InteractionResult::SuccessServer);
+                assert_eq!(mob.in_love, 600);
+            })
+            .expect("horse row");
     }
 }

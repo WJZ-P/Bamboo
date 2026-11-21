@@ -103,9 +103,12 @@ pub(in crate::entity::mob) fn tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn
         modify_temper(mob, 5);
     }
     // `ejectPassengers`：玩家表里的骑乘关系由游戏层按乘客名单摘掉。
+    // 记下这一刻刚甩掉的骑手，避免同一刻后面的 `push_entities` 把还没挪走的骑手当成推挤来源。
     //
     // `ejectPassengers`: the game layer drops the riding relation when the
-    // passenger list no longer holds the rider.
+    // passenger list no longer holds the rider. Remember who was just ejected so
+    // `push_entities` later in this tick does not push against the unmoved rider.
+    mob.ejected_passenger = Some(rider);
     mob.passengers.clear();
     life::make_mad(me, mob);
     mob.events.push(MobEvent::EntityEvent { event: 6 });

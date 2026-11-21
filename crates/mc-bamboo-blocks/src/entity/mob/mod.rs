@@ -1254,6 +1254,12 @@ pub struct Mob {
     /// table, so the id is the player's own entity id. Vanilla `Entity.passengers`
     /// only ever holds players here: Bamboo has no mobs riding mobs yet.
     pub passengers: Vec<EntityUid>,
+    /// 这一刻刚被 `ejectPassengers` 甩下来的乘客，供同一刻的 `push_entities` 跳过
+    /// （官方甩人时同步把骑手挪到载具旁边，Bamboo 的 `riding::tick` 在实体阶段后才挪）。
+    ///
+    /// A passenger ejected this tick, skipped by `push_entities` in the same tick
+    /// (vanilla moves the rider off the mount synchronously; Bamboo does it in `riding::tick`).
+    pub(super) ejected_passenger: Option<EntityUid>,
     pub equine: Option<Box<equine::EquineState>>,
 }
 
@@ -1325,6 +1331,12 @@ impl Mob {
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
+        if mob_type == MobType::Llama {
+            // `Llama` 构造函数：`this.getNavigation().setRequiredPathLength(40.0F)`。
+            // `Llama` constructor: `this.getNavigation().setRequiredPathLength(40.0F)`.
+            navigation.required_path_length = 40.0;
+            navigation.update_max_visited_nodes(follow_range);
+        }
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
             MobType::Rabbit => rabbit::goals(&mut navigation),
@@ -1473,6 +1485,7 @@ impl Mob {
             hurt_marked: false,
             pending_breed: None,
             passengers: Vec::new(),
+            ejected_passenger: None,
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),

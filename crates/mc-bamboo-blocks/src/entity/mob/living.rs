@@ -1449,11 +1449,17 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
     });
     // `getPushableEntities` 也收玩家（旁观者除外）；玩家那一侧的推力服务端不生效，
-    // 这里只算生物自己被推开的那一半。
+    // 这里只算生物自己被推开的那一半。跳过自己的乘客和这一刻刚甩掉的骑手。
     // Players count as pushable too (not spectators); only the mob's half applies.
+    // Skip own passengers and a rider just ejected this tick.
+    let ejected = mob.ejected_passenger.take();
     let mut players = Vec::new();
     ctx.blocks().for_each_player(&mut |player| {
-        if player.alive && !player.spectator && super::avoid::player_box(player).intersects(bounds)
+        if player.alive
+            && !player.spectator
+            && !mob.passengers.contains(&player.uid)
+            && ejected != Some(player.uid)
+            && super::avoid::player_box(player).intersects(bounds)
         {
             players.push(player.position);
         }

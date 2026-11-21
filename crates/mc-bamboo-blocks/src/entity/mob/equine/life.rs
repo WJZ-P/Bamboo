@@ -293,6 +293,22 @@ pub(in crate::entity::mob) fn tick_end(mob: &mut Mob) {
             state.tail_counter = 0;
         }
     }
+    // `AbstractHorse.tick`：推进 `standAnimO` / `standAnim`，用于骑手附着点偏移。
+    // `AbstractHorse.tick`: advance `standAnimO` / `standAnim` for the rider attachment offset.
+    state.stand_anim_o = state.stand_anim;
+    if state.standing {
+        state.stand_anim += (1.0 - state.stand_anim) * 0.4 + 0.05;
+        if state.stand_anim > 1.0 {
+            state.stand_anim = 1.0;
+        }
+    } else {
+        state.stand_anim +=
+            (0.8 * state.stand_anim * state.stand_anim * state.stand_anim - state.stand_anim) * 0.6
+                - 0.05;
+        if state.stand_anim < 0.0 {
+            state.stand_anim = 0.0;
+        }
+    }
 }
 
 /// `AbstractHorse.hurtServer`：真的受了伤，再 `nextInt(3) == 0` 时扬蹄。
@@ -670,5 +686,34 @@ mod tests {
             .expect("equine row");
         let snow = BlockState(blocks::SNOW).sound_type();
         assert_eq!(heard, Some((snow.volume * 0.15, snow.pitch)));
+    }
+
+    /// 羊驼构造时把导航的 `required_path_length` 设成 40（节点上限 640），`AbstractHorse`
+    /// 扬蹄时 `standAnim` 逐刻推进、停下后回落到 0。
+    ///
+    /// Llamas configure `required_path_length = 40` (640 visited nodes), and
+    /// `AbstractHorse.standAnim` ramps up while rearing and decays back to 0.
+    #[test]
+    fn llama_path_length_and_horse_stand_anim_follow_vanilla() {
+        let llama = Mob::new(MobType::Llama);
+        assert_eq!(llama.navigation.required_path_length, 40.0);
+        assert_eq!(llama.navigation.max_visited_nodes, 640);
+
+        let mut horse = Mob::new(MobType::Horse);
+        stand_if_possible(&mut horse);
+        tick_end(&mut horse);
+        let state = horse.equine.as_ref().expect("horse state");
+        assert_eq!(state.stand_anim_o, 0.0);
+        assert!((state.stand_anim - 0.45).abs() < 1e-6);
+        tick_end(&mut horse);
+        let state = horse.equine.as_ref().expect("horse state");
+        assert!((state.stand_anim_o - 0.45).abs() < 1e-6);
+        assert!(state.stand_anim > state.stand_anim_o);
+        for _ in 0..40 {
+            tick_end(&mut horse);
+        }
+        let state = horse.equine.as_ref().expect("horse state");
+        assert!(!state.standing);
+        assert_eq!(state.stand_anim, 0.0);
     }
 }

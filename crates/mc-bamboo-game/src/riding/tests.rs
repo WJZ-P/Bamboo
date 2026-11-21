@@ -625,3 +625,31 @@ fn a_foreign_vehicle_position_far_away_is_reset_at_once() {
     server.region().links.flush();
     assert!(frames_with_id(&client.take_frames(), MoveVehicle::ID).is_empty());
 }
+
+/// 扬蹄时 `AbstractHorse.getPassengerAttachmentPoint` 按 `standAnimO` 把骑手抬高并后移；
+/// 羊驼覆写后不叠加扬蹄偏移。
+///
+/// Rearing shifts the rider up and back by `standAnimO` on horses, donkeys and
+/// mules; llamas override the attachment point without a rearing offset.
+#[test]
+fn rearing_shifts_the_passenger_offset_for_horses_only() {
+    let mut horse = Mob::new(MobType::Horse);
+    horse.equine.as_mut().expect("horse").stand_anim_o = 1.0;
+    let public = MobPublic::of(&horse, 0);
+    let offset = super::passenger_offset(&public, 0.0);
+    assert!((offset.x - 0.0).abs() < 1e-9);
+    assert!((offset.y - (1.443_75 + 0.15)).abs() < 1e-6);
+    assert!((offset.z - (-0.7)).abs() < 1e-6);
+
+    let rotated = super::passenger_offset(&public, 90.0);
+    assert!((rotated.x - 0.7).abs() < 1e-4);
+    assert!((rotated.y - (1.443_75 + 0.15)).abs() < 1e-6);
+    assert!(rotated.z.abs() < 1e-4);
+
+    let mut llama = Mob::new(MobType::Llama);
+    llama.equine.as_mut().expect("llama").stand_anim_o = 1.0;
+    let llama_public = MobPublic::of(&llama, 0);
+    let llama_offset = super::passenger_offset(&llama_public, 0.0);
+    assert!((llama_offset.y - 1.37).abs() < 1e-6);
+    assert!((llama_offset.z - (-0.3)).abs() < 1e-6);
+}

@@ -231,23 +231,30 @@ pub(crate) fn open_vehicle_inventory(region: &mut Region, id: PlayerId) {
     crate::menu::station::open_mount(region, id, vehicle);
 }
 
-/// 载具上骑手该站的位置：官方 `getPassengerAttachmentPoint` 的缺省点减去骑手的
-/// `VEHICLE` 附着点（玩家在脚底，是 0）。
+/// 载具上骑手该站的位置：官方 `AbstractHorse.getPassengerAttachmentPoint`（默认附着点加
+/// 扬蹄偏移）减去骑手的 `VEHICLE` 附着点（玩家在脚底，是 0）。羊驼覆写时不加扬蹄偏移。
 ///
-/// Where the rider sits on the vehicle: vanilla `getPassengerAttachmentPoint`'s
-/// default point minus the rider's own `VEHICLE` attachment point (the feet, zero
-/// for a player).
+/// Where the rider sits on the vehicle: vanilla `AbstractHorse.getPassengerAttachmentPoint`
+/// (the default point plus the rearing offset) minus the rider's own `VEHICLE`
+/// attachment point (the feet, zero for a player). Llamas override it without rearing.
 fn passenger_offset(mob: &mc_bamboo_blocks::entity::mob::MobPublic, yaw: f32) -> Vec3 {
     let (y, z) = mc_bamboo_blocks::entity::mob::equine::passenger_attachment(mob.mob_type);
     // `Vec3.yRot(-yRot * PI / 180)`，和官方附着点的旋转方向相同。
     //
     // `Vec3.yRot(-yRot * PI / 180)`, the same direction as the vanilla attachment point.
     let angle = -yaw * (std::f32::consts::PI / 180.0);
-    Vec3::new(
-        f64::from(z * mth::sin(f64::from(angle))),
-        f64::from(y),
-        f64::from(z * mth::cos(f64::from(angle))),
-    )
+    let sin = f64::from(mth::sin(f64::from(angle)));
+    let cos = f64::from(mth::cos(f64::from(angle)));
+    let mut offset = Vec3::new(f64::from(z) * sin, f64::from(y), f64::from(z) * cos);
+    if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Llama
+        && let Some(equine) = mob.equine
+        && equine.stand_anim_o != 0.0
+    {
+        let stand = f64::from(equine.stand_anim_o);
+        let rear_z = -0.7 * stand;
+        offset = offset.add(Vec3::new(rear_z * sin, 0.15 * stand, rear_z * cos));
+    }
+    offset
 }
 
 /// 每刻一趟：要下车的下车，其余骑手的位置跟到载具上，最后记下这一刻末的载具位置。

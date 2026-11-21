@@ -4868,7 +4868,15 @@ public final class MobOracle {
         level.playersList().addAll(players);
         // 野生动物场景要用 `getEntitiesOfClass(Player.class, ...)` 找到玩家（躲避目标）；
         // `LivingEntity.pushEntities` 也会被玩家推，所以僵尸场景同样放进实体表。
-        level.tracked.addAll(players);
+        // 骑乘对拍场景（`scene.rider >= 0`）不模拟游戏层的下马落点，所以不把骑手放进
+        // `tracked`，免得甩人那一刻 `dismountVehicle` 挪出的骑手在同一刻 `pushEntities` 里推载具。
+        // Riding scenes do not replay game-layer dismount placement, so skip the rider in
+        // `tracked` to avoid same-tick `pushEntities` against the freshly dismounted rider.
+        for (int i = 0; i < players.size(); i++) {
+            if (i != scene.rider) {
+                level.tracked.add(players.get(i));
+            }
+        }
         // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
