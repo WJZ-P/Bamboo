@@ -556,6 +556,11 @@ impl TerrainShard {
             self.consumers_done.remove(key);
             return true;
         }
+        // 按现在的路径一个键不会同时在两层；万一冷层里已有旧的一份，先连字节数
+        // 一起拿掉，计数才不会漂。
+        // A key is never in both tiers on today's paths; should a stale cold
+        // copy exist, remove it with its bytes first so the counts cannot drift.
+        self.remove_cold(key);
         let compact = CompactTerrain::encode(&chunk);
         let bytes = compact.heap_bytes();
         let stamp = self.next_cold_stamp;
@@ -657,12 +662,22 @@ pub(crate) fn release_terrain_cache() {
         for key in &keys {
             shard.remove_entry(key);
         }
+        // 只有正在算（或正从冷层解码）的键还可能用得上位图。
+        // Only keys still computing (or thawing) can still use a bitmap.
+        let TerrainShard {
+            inflight,
+            consumers_done,
+            ..
+        } = &mut *shard;
+        consumers_done.retain(|key, _| inflight.contains_key(key));
         shard.order.clear();
+        shard.order.shrink_to_fit();
         shard.cold_order.clear();
         shard.cold_order.shrink_to_fit();
         shard.cold.shrink_to_fit();
         shard.entries.shrink_to_fit();
         shard.inflight.shrink_to_fit();
+        shard.consumers_done.shrink_to_fit();
     }
 }
 

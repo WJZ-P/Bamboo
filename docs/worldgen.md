@@ -611,7 +611,7 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   世界线程（`director_host.rs` 的 `partials`）把每个区块的 CARVERS 半成品存成不可变
   `Arc<GeneratedChunk>`，发任务时按位置挂到 `ChunkWork::Generate` 上——全是 `Arc` 克隆，
   不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算；
-  这份 CARVERS 缓存是**全进程共用一份**（16 个分片），载荷预算默认 64 MiB。
+  这份 CARVERS 缓存是**全进程共用一份**（16 个分片），载荷预算默认 128 MiB（`bamboo.toml` 的 `worldgen_terrain_cache_mb`）。
   热层的值是不可变 `Arc`，命中不复制方块；按预算淘汰的条目压缩进冷层，冷命中在锁外解码。
   生成与解码在锁外，热层淘汰的压缩在分片锁内。地形是纯函数，命中、淘汰和分片顺序
   都不改变结果。`terrain` 阶段交回世界线程的也是同一个 `Arc`，`merge_generated`

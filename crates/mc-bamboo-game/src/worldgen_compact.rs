@@ -61,19 +61,26 @@ fn palette_indices(layers: &[Vec<u32>]) -> (Vec<u32>, Vec<u32>) {
     let mut palette: Vec<u32> = Vec::new();
     let mut lookup: HashMap<u32, u32> = HashMap::new();
     let mut indices = Vec::with_capacity(CELLS_PER_SECTION);
-    let mut last = (u32::MAX, 0_u32);
+    // 上一格的（状态, 下标）；用 `Option` 而不是哨兵值，任何 `u32` 状态都合法。
+    // The previous cell's (state, index); an `Option` rather than a sentinel so
+    // every `u32` state is valid.
+    let mut last: Option<(u32, u32)> = None;
     for layer in layers {
         for &state in layer {
             // 相邻格大多相同：先比上一格，省一次哈希查找。
             // Neighboring cells mostly repeat: compare with the previous one first.
-            if state != last.0 {
-                let index = *lookup.entry(state).or_insert_with(|| {
-                    palette.push(state);
-                    palette.len() as u32 - 1
-                });
-                last = (state, index);
-            }
-            indices.push(last.1);
+            let index = match last {
+                Some((previous, index)) if previous == state => index,
+                _ => {
+                    let index = *lookup.entry(state).or_insert_with(|| {
+                        palette.push(state);
+                        palette.len() as u32 - 1
+                    });
+                    last = Some((state, index));
+                    index
+                }
+            };
+            indices.push(index);
         }
     }
     (palette, indices)
@@ -203,6 +210,19 @@ mod tests {
             .collect();
         let section = encode_section(&layers);
         assert_eq!(section.bits, 12);
+        for (y, layer) in layers.iter().enumerate() {
+            assert_eq!(&decode_layer(&section, y), layer);
+        }
+    }
+
+    /// 第一格就是 `u32::MAX` 的段也要拿到自己的调色板下标。
+    /// A section whose first cell is `u32::MAX` still gets its own palette entry.
+    #[test]
+    fn a_max_state_first_cell_round_trips() {
+        let mut layers = vec![vec![7_u32; CELLS_PER_LAYER]; LAYERS_PER_SECTION];
+        layers[0][0] = u32::MAX;
+        let section = encode_section(&layers);
+        assert_eq!(section.palette, vec![u32::MAX, 7]);
         for (y, layer) in layers.iter().enumerate() {
             assert_eq!(&decode_layer(&section, y), layer);
         }

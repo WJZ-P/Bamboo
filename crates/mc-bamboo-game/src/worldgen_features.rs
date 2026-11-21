@@ -742,8 +742,10 @@ pub(crate) fn release_feature_cache() {
             shard.remove_entry(key);
         }
         shard.order.clear();
+        shard.order.shrink_to_fit();
         shard.entries.shrink_to_fit();
         shard.inflight.shrink_to_fit();
+        shard.finished.shrink_to_fit();
     }
 }
 
@@ -890,7 +892,8 @@ fn cached_feature_run(
     };
     // 只有计算方提交条目；等待方直接返回，避免重复计字节。
     // Only the computing thread commits; waiters just return.
-    let committed = commit_feature_run(&shards[index], key, &run);
+    let limit = crate::worldgen_cache::feature_byte_limit() / FEATURE_CACHE_SHARDS;
+    let committed = commit_feature_run(&shards[index], key, &slot, &run, limit);
     if committed {
         // 这个中心算完了：它读过的 3×3 地形各少一个使用者（锁外做）。
         // This center is done: its 3×3 terrain has one consumer fewer (done
@@ -900,22 +903,38 @@ fn cached_feature_run(
     Ok(run)
 }
 
-/// 把算好的地物结果放进分片并按字节上限（`bamboo.toml` 的
-/// `worldgen_feature_cache_mb`）淘汰最旧的；返回这次是不是新放进去的。
+/// 把算好的地物结果放进分片，按这一片的字节上限 `limit`（`bamboo.toml` 的
+/// `worldgen_feature_cache_mb` 均分到各片）淘汰最旧的；返回这次是不是新放进去的。
 ///
-/// Insert a computed feature result and evict the oldest past the byte limit
-/// (`worldgen_feature_cache_mb` in `bamboo.toml`); returns whether it was
-/// newly inserted.
+/// Insert a computed feature result and evict the oldest past this shard's
+/// byte limit `limit` (`worldgen_feature_cache_mb` in `bamboo.toml` split
+/// across shards); returns whether it was newly inserted.
 fn commit_feature_run(
     shard: &std::sync::Mutex<FeatureShard>,
     key: FeatureCacheKey,
+    slot: &FeatureSlot,
     run: &Arc<FeatureRun>,
+    limit: usize,
 ) -> bool {
     let Ok(mut shard) = shard.lock() else {
         return false;
     };
-    let limit = crate::worldgen_cache::feature_byte_limit() / FEATURE_CACHE_SHARDS;
-    if limit == 0 || shard.entries.contains_key(&key) {
+    if shard.entries.contains_key(&key) {
+        return false;
+    }
+    if limit == 0 {
+        // 上限为 0 不留条目：自己的占位也要拿掉，否则它带着结果一直留在
+        // `inflight` 里，既不计字节也不会被淘汰或空闲释放清掉。
+        // A zero limit keeps no entry: drop our placeholder too, or it would
+        // keep the result in `inflight` forever, uncounted and never evicted
+        // or idle-released.
+        if shard
+            .inflight
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+        {
+            shard.inflight.remove(&key);
+        }
         return false;
     }
     shard.order.push_back(key.clone());
@@ -1494,10 +1513,6 @@ mod tests {
         );
     }
 
-    /// 多条线程同时要同一个中心：只有一条真正去算，其余等它，拿到的是同一个
-    /// `Arc`（各算各的会是不同的分配）。
-    /// Threads asking for the same center at once share one computation: every
-    /// caller gets the very same `Arc`.
     /// 按依赖释放：5×5 个区块都完工，这个中心的地物结果才删；删了再要，
     /// 现算出来的和原来逐条相同。
     /// Dependency release: a center's feature result goes only once all 5×5
@@ -1527,6 +1542,50 @@ mod tests {
         assert_eq!(first.marks, again.marks);
     }
 
+    /// 上限为 0 时不留条目，计算方自己的占位也拿掉；别人的新占位不动。
+    /// A zero limit keeps no entry and drops the computer's own placeholder,
+    /// but leaves a newer placeholder from someone else alone.
+    #[test]
+    fn a_zero_limit_keeps_neither_entry_nor_placeholder() {
+        let key = feature_cache_key(&normal(0x0fea_0000), 3, -4);
+        let run = Arc::new(FeatureRun {
+            deltas: Default::default(),
+            marks: Default::default(),
+        });
+        let shard = std::sync::Mutex::new(FeatureShard::default());
+        let ours: FeatureSlot = Arc::new(OnceLock::new());
+        shard
+            .lock()
+            .unwrap()
+            .inflight
+            .insert(key.clone(), Arc::clone(&ours));
+        assert!(!commit_feature_run(&shard, key.clone(), &ours, &run, 0));
+        {
+            let shard = shard.lock().unwrap();
+            assert!(shard.entries.is_empty() && shard.inflight.is_empty());
+        }
+        let newer: FeatureSlot = Arc::new(OnceLock::new());
+        shard
+            .lock()
+            .unwrap()
+            .inflight
+            .insert(key.clone(), Arc::clone(&newer));
+        assert!(!commit_feature_run(&shard, key.clone(), &ours, &run, 0));
+        assert!(shard.lock().unwrap().inflight.contains_key(&key));
+        assert!(commit_feature_run(
+            &shard,
+            key.clone(),
+            &newer,
+            &run,
+            1 << 20
+        ));
+        assert!(shard.lock().unwrap().entries.contains_key(&key));
+    }
+
+    /// 多条线程同时要同一个中心：只有一条真正去算，其余等它，拿到的是同一个
+    /// `Arc`（各算各的会是不同的分配）。
+    /// Threads asking for the same center at once share one computation: every
+    /// caller gets the very same `Arc`.
     #[test]
     fn concurrent_feature_runs_share_one_computation() {
         let config = normal(0x0fea_7c0d);
