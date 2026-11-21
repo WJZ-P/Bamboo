@@ -36,6 +36,7 @@ pub(super) struct SpawnCase {
     left_handed: bool,
     yaw: i32,
     level_seed: i64,
+    data: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +68,7 @@ pub(super) struct InteractCase {
     swing: String,
     count: i32,
     after: [i64; 9],
+    data: String,
 }
 
 /// Java 一侧 `setupEquine` 的六种初始状态。
@@ -137,6 +139,37 @@ fn after(entity: &Entity) -> [i64; 9] {
     ]
 }
 
+/// 生产代码配对时发的 `set_entity_data`（实体 ID 固定成 1），和官方逐字节比。
+///
+/// The production pairing `set_entity_data` (entity id 1), compared byte for byte.
+fn pairing_data(entity: &Entity) -> Vec<u8> {
+    use mc_bamboo_game::entity_tracking::{EntityTracking, Snapshot};
+    let mut entity = entity.clone();
+    entity.id = 1;
+    let row = entity.split();
+    let snapshot = Snapshot::of(&row.public);
+    let mut tracking = EntityTracking::default();
+    let packets = tracking
+        .tracked_for_oracle(&snapshot)
+        .pairing_packets(&snapshot);
+    packets.get(1).cloned().unwrap_or_default()
+}
+
+impl Report {
+    fn compare_equine_data(&mut self, place: &str, official: &str, entity: &Entity) {
+        let ours = pairing_data(entity);
+        match super::base64_stub::decode(official) {
+            Ok(expected) if expected == ours => {}
+            Ok(expected) => self.mismatch(format!(
+                "{place} set_entity_data: official {}, bamboo {}",
+                super::hex(&expected),
+                super::hex(&ours)
+            )),
+            Err(error) => self.mismatch(format!("{place}: bad base64 {error}")),
+        }
+    }
+}
+
 fn state(entity: &Entity) -> State {
     let mob = entity.kind.mob().unwrap();
     let [health, jump, speed] = ATTRIBUTES.map(|id| mob.attributes.base(id).to_bits() as i64);
@@ -202,6 +235,8 @@ impl Report {
             world.random().seed(),
         );
         let expected = (case.state, case.left_handed, case.yaw, case.level_seed);
+        let place = format!("{kind:?} spawn seed {} egg {}", case.seed, case.egg);
+        self.compare_equine_data(&place, &case.data, &entity);
         if actual != expected {
             self.mismatch(format!(
                 "{kind:?} spawn seed {} egg {}: official {expected:?}, bamboo {actual:?}",
@@ -240,6 +275,11 @@ impl Report {
         let count = if outcome.shrink_held { 0 } else { 1 };
         let actual = (swing, count, after(&entity));
         let expected = (case.swing.as_str(), case.count, case.after);
+        let place = format!(
+            "equine interact kind {} setup {} item {}",
+            case.kind, case.setup, case.item
+        );
+        self.compare_equine_data(&place, &case.data, &entity);
         if actual != expected {
             self.mismatch(format!(
                 "equine interact kind {} setup {} item {} creative {} sneak {}: official {expected:?}, bamboo {actual:?}",

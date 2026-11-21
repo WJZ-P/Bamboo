@@ -145,6 +145,11 @@ pub fn spawn_egg(
         mob.y_body_rot = me.y_rot;
     });
     finalize_spawn(world, kind, &mut entity, SpawnReason::SpawnItemUse);
+    // 刷怪蛋自带 `entity_data`：官方 `saveWithoutId` → 合并 → `load`，`setHealth`
+    // 把血量夹到 `finalizeSpawn` 之后的最大血量（马科的最大血量是随机的）。
+    // The egg's `entity_data` round-trips the mob through save and load, and
+    // `setHealth` clamps to the post-`finalizeSpawn` maximum (random for equines).
+    entity.with_mob(|_, mob| living::clamp_health(mob));
     // `appendComponentsConfig`：刷怪蛋的 `custom_name` 套到实体上。
     if let Some(name) = custom_name {
         entity.with_mob(|_, mob| mob.custom_name = Some(name));

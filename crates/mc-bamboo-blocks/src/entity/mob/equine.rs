@@ -32,6 +32,29 @@ pub(super) use life::{
     Voice, after_hurt, ai_step_end, ai_step_start, is_immobile, tick_end, voice,
 };
 
+/// 马科同步给客户端的元数据：标志字节、马的花色或羊驼的毛色、有没有箱子、羊驼力量。
+///
+/// The equine metadata sent to clients: the flag byte, the horse or llama
+/// variant, whether a chest is fitted, and llama strength.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EquinePublic {
+    pub flags: u8,
+    pub variant: i32,
+    pub chested: bool,
+    pub strength: i32,
+}
+
+impl EquinePublic {
+    pub fn of(state: &EquineState) -> Self {
+        Self {
+            flags: state.flags(),
+            variant: state.variant,
+            chested: state.chested,
+            strength: state.strength,
+        }
+    }
+}
+
 /// 马科在 `Mob` 之外的状态：`AbstractHorse` 的标志字节（驯服、吃草、扬蹄、张嘴）、
 /// 脾气值和主人，箱子马的箱子，马和羊驼的花色，羊驼的力量，以及服务端的几个计时器。
 ///

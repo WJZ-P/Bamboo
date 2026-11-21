@@ -2628,7 +2628,8 @@ public final class MobOracle {
                             + ",\"state\":" + equineState(mob)
                             + ",\"leftHanded\":" + mob.isLeftHanded()
                             + ",\"yaw\":" + (egg ? Float.floatToRawIntBits(mob.getYRot()) : 0)
-                            + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+                            + ",\"levelSeed\":" + levelSeed(world)
+                            + ",\"data\":\"" + pairingData(official, mob) + "\"}\n");
                     cases++;
                 }
 
@@ -2713,7 +2714,8 @@ public final class MobOracle {
                                 + ",\"creative\":" + creative + ",\"sneak\":" + sneak + ",\"seed\":" + seed
                                 + ",\"swing\":\"" + swing + "\""
                                 + ",\"count\":" + player.getItemInHand(InteractionHand.MAIN_HAND).getCount()
-                                + ",\"after\":" + equineAfter(mob) + "}\n");
+                                + ",\"after\":" + equineAfter(mob)
+                                + ",\"data\":\"" + pairingData(official, mob) + "\"}\n");
                         cases++;
                     }
                 }
@@ -2765,6 +2767,17 @@ public final class MobOracle {
                 + "," + (saddle.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(saddle.getItem()))
                 + "," + (body.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(body.getItem()))
                 + "," + randomSeed(mob) + "]";
+    }
+
+    /**
+     * 配对时的 `set_entity_data`（`getNonDefaultValues`），实体 ID 固定成 1，base64。
+     * The pairing `set_entity_data` with entity id 1, base64.
+     */
+    private static String pairingData(Official official, Mob mob) {
+        Bytes sink = new Bytes(official.registries);
+        sink.add(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
+                1, mob.getEntityData().getNonDefaultValues()));
+        return sink.take().get(0);
     }
 
     /** `AbstractHorse.DATA_ID_FLAGS` 的字节（私有，反射读）。 */

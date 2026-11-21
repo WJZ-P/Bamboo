@@ -190,6 +190,20 @@ pub enum EntityData {
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
+    /// BYTE。`AbstractHorse.DATA_ID_FLAGS`：2 驯服、8 繁殖过、16 吃草、32 扬蹄、64 张嘴。
+    ///
+    /// BYTE. `AbstractHorse.DATA_ID_FLAGS`: tame, bred, eating, standing, open mouth.
+    HorseFlags(u8),
+    /// INT。`Horse.DATA_ID_TYPE_VARIANT`：低字节毛色，第二个字节斑纹。
+    ///
+    /// INT. `Horse.DATA_ID_TYPE_VARIANT`: coat in the low byte, markings in the next.
+    HorseVariant(i32),
+    /// BOOLEAN。`AbstractChestedHorse.DATA_ID_CHEST`。
+    HorseChest(bool),
+    /// INT。`Llama.DATA_STRENGTH_ID`。
+    LlamaStrength(i32),
+    /// INT。`Llama.DATA_VARIANT_ID`。
+    LlamaVariant(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -221,6 +235,11 @@ impl EntityData {
             Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
             Self::ArrowPierce(_) => mc_bamboo_data::entity_types::ARROW_PIERCE,
             Self::ArrowInGround(_) => mc_bamboo_data::entity_types::ARROW_IN_GROUND,
+            Self::HorseFlags(_) => mc_bamboo_data::entity_types::HORSE_FLAGS,
+            Self::HorseVariant(_) => mc_bamboo_data::entity_types::HORSE_VARIANT,
+            Self::HorseChest(_) => mc_bamboo_data::entity_types::HORSE_CHEST,
+            Self::LlamaStrength(_) => mc_bamboo_data::entity_types::LLAMA_STRENGTH,
+            Self::LlamaVariant(_) => mc_bamboo_data::entity_types::LLAMA_VARIANT,
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
@@ -242,9 +261,17 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*value as u8);
             }
-            Self::ArrowInGround(value) => {
+            Self::ArrowInGround(value) | Self::HorseChest(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 out.push(u8::from(*value));
+            }
+            Self::HorseFlags(flags) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*flags);
+            }
+            Self::HorseVariant(value) | Self::LlamaStrength(value) | Self::LlamaVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
             }
             Self::Item(stack) => {
                 write_data_header(out, 8, SERIALIZER_ITEM_STACK);

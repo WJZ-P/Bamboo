@@ -1237,6 +1237,10 @@ pub struct MobPublic {
     pub y_body_rot: f32,
     pub in_love: i32,
     pub can_parent_equine: bool,
+    /// 马科要同步的元数据；其余生物是 None。
+    ///
+    /// The synced equine metadata; None for other mobs.
+    pub equine: Option<equine::EquinePublic>,
     pub age: i32,
     pub panicking: bool,
     pub no_ai: bool,
@@ -1282,6 +1286,7 @@ impl MobPublic {
             y_body_rot: mob.y_body_rot,
             in_love: mob.in_love,
             can_parent_equine: equine::can_parent(mob),
+            equine: mob.equine.as_deref().map(equine::EquinePublic::of),
             age: mob.age,
             panicking: mob.is_panicking(),
             no_ai: mob.no_ai,

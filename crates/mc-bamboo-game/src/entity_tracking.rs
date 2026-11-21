@@ -901,6 +901,9 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    if kind.is_equine() && index >= mc_bamboo_data::entity_types::HORSE_FLAGS {
+        return equine_default_data(index, kind);
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1000,6 +1003,55 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     out
 }
 
+/// 马科自己那几项的默认值：标志 0、花色 0、没箱子、力量 0。
+///
+/// Defaults of the equine items: no flags, variant 0, no chest, strength 0.
+fn equine_default_data(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types::{HORSE_FLAGS, LLAMA_STRENGTH, LLAMA_VARIANT};
+    match index {
+        HORSE_FLAGS => EntityData::HorseFlags(0),
+        LLAMA_STRENGTH => EntityData::LlamaStrength(0),
+        LLAMA_VARIANT => EntityData::LlamaVariant(0),
+        _ if kind == MobType::Horse => EntityData::HorseVariant(0),
+        _ => EntityData::HorseChest(false),
+    }
+}
+
+/// 马科在 `AgeableMob` 之后的元数据，按 index 升序：`AbstractHorse` 的标志，
+/// 然后马的花色，或者箱子马的箱子、羊驼的力量和毛色。
+///
+/// Equine metadata after `AgeableMob`, by ascending index: the `AbstractHorse`
+/// flags, then the horse variant, or the chest, llama strength and variant.
+fn equine_non_default_data(
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+    equine: &mc_bamboo_blocks::entity::mob::equine::EquinePublic,
+) -> Vec<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    let mut out = Vec::new();
+    if equine.flags != 0 {
+        out.push(EntityData::HorseFlags(equine.flags));
+    }
+    if kind == MobType::Horse {
+        if equine.variant != 0 {
+            out.push(EntityData::HorseVariant(equine.variant));
+        }
+        return out;
+    }
+    if equine.chested {
+        out.push(EntityData::HorseChest(true));
+    }
+    if kind == MobType::Llama {
+        if equine.strength != 0 {
+            out.push(EntityData::LlamaStrength(equine.strength));
+        }
+        if equine.variant != 0 {
+            out.push(EntityData::LlamaVariant(equine.variant));
+        }
+    }
+    out
+}
+
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
@@ -1068,6 +1120,10 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.age_locked {
         out.push(EntityData::AgeLocked(true));
+    }
+    if let Some(equine) = &mob.equine {
+        out.extend(equine_non_default_data(mob.mob_type, equine));
+        return out;
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.

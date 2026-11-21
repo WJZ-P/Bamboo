@@ -82,6 +82,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
     range_checks(me, mob);
+    // `refreshDirtyAttributes` → `onAttributeUpdated(MAX_HEALTH)`：`/summon` 出来的马科
+    // 在第一刻才把血量夹到随机出来的最大血量。
+    // `refreshDirtyAttributes`: a summoned equine clamps its health on its first tick.
+    clamp_health(mob);
     // `Mob.tick`：每 5 刻按乘客和载具重设控制标志；牛没有乘客，三个都打开。
     if me.tick_count % 5 == 0 {
         mob.goals.set_control_flag(Flag::Move, true);
@@ -452,6 +456,16 @@ fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
             .mob_type
             .ambient_sound()
             .unwrap_or_else(|| mob.sound_variant.ambient()),
+    }
+}
+
+/// `onAttributeUpdated(MAX_HEALTH)` / `setHealth`：血量不超过最大血量。
+///
+/// `onAttributeUpdated(MAX_HEALTH)` / `setHealth`: keep health within the maximum.
+pub(crate) fn clamp_health(mob: &mut Mob) {
+    let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
+    if mob.health > max {
+        mob.health = max;
     }
 }
 
