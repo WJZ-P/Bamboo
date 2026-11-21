@@ -43,6 +43,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         tick_mob(me, mob, ctx);
     }
     me.kind = kind;
+    super::enderman::flush_block_goal(me, ctx);
 }
 
 /// 对一个生物跑一段外部逻辑（受伤、命令），期间 `kind` 也换成占位。
@@ -76,11 +77,21 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.y_rot_o = me.y_rot;
     mob.x_rot_o = mob.x_rot;
     me.tick_count += 1;
+    // `Creeper.tick` 在 `super.tick()` 之前推进膨胀，可能当刻爆炸。
+    // `Creeper.tick` advances the swell before `super.tick()` and may explode here.
+    if mob.mob_type == super::MobType::Creeper {
+        super::creeper::tick(me, mob, ctx);
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
     if !me.removed {
         ai_step(me, mob, ctx);
+    }
+    // `Spider.tick` 在 `super.tick()` 之后把这一刻的 `horizontalCollision` 写进攀爬标志。
+    // `Spider.tick` records this tick's `horizontalCollision` after `super.tick()`.
+    if mob.mob_type.climbs_walls() && !me.removed {
+        super::spider::tick(me, mob);
     }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
@@ -287,7 +298,11 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             width,
             height,
             max_up_step: max_up_step(mob),
-            max_fall_distance: 3,
+            max_fall_distance: if mob.mob_type == super::MobType::Creeper {
+                super::creeper::max_fall_distance(mob)
+            } else {
+                3
+            },
             malus: mob.malus,
             context: me.mob_collision_context(mob),
         },
@@ -482,13 +497,13 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
 }
 
-/// `Mob.getAmbientSound`：河豚没有叫声；海龟只有成年、在水外、站在地上时才叫。
+/// `Mob.getAmbientSound`：苦力怕和河豚没有叫声；海龟只有成年、在水外、站在地上时才叫。
 ///
-/// `Mob.getAmbientSound`: the pufferfish has none, and a turtle only calls as an adult
-/// standing on land out of the water.
+/// `Mob.getAmbientSound`: creepers and pufferfish have none, and a turtle only calls as
+/// an adult standing on land out of the water.
 fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
-        super::MobType::Pufferfish => None,
+        kind if kind.has_no_ambient_sound() => None,
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
         _ => Some(voice_of(mob, Voice::Ambient)),
     }
@@ -613,6 +628,11 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// `LivingEntity.addEffect`: adds an effect to a mob and refreshes attributes.
 pub fn add_effect(mob: &mut Mob, instance: super::effects::EffectInstance) -> bool {
+    // `LivingEntity.addEffect` 先问 `canBeAffected`；蜘蛛对中毒返回假。
+    // `LivingEntity.addEffect` asks `canBeAffected` first; spiders refuse poison.
+    if !super::spider::can_be_affected(mob, instance.effect) {
+        return false;
+    }
     let events = mob.effects.add(instance);
     if events.attributes_changed {
         mob.effects.rebuild_attributes(&mut mob.attributes);
@@ -663,6 +683,9 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         super::wolf::play_ambient_sound(me, mob, 0);
         return;
     }
+    if mob.mob_type.has_no_ambient_sound() {
+        return;
+    }
     if super::turtle::is_turtle(mob.mob_type) {
         // `Turtle.getAmbientSound`：只有成年的、在水外站在地上时才叫，其余没有声音，
         // 也不取音高的两个随机数。
@@ -699,6 +722,7 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 
 fn ambient_sound(mob: &Mob) -> &'static str {
     match mob.mob_type {
+        super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
         _ => mob
@@ -776,6 +800,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let equine = mob.mob_type.is_equine();
     if equine {
         super::equine::ai_step_start(me, mob);
+    }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx);
     if equine {
@@ -914,6 +941,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     {
         timing::span!(Push);
         push_entities(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::hurt_if_wet(me, mob, ctx);
     }
     // `Mob.aiStep` 在 `LivingEntity.aiStep` 之后跑 `BURN_IN_DAYLIGHT` → `burnUndead()`。
     // 官方用 `EntityTypeTags.BURN_IN_DAYLIGHT` + `isSunSensitive()`；尸壳不烧。
@@ -1078,6 +1108,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             mob.mover
                 .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
         }
+    }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::custom_server_ai_step(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1412,7 +1445,14 @@ pub(crate) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
 }
 
 /// `LivingEntity.onClimbable`：可攀爬的方块，或下面是同向梯子的开着的活板门。
+/// 蜘蛛改写这一条，只看自己的攀爬标志。
+///
+/// `LivingEntity.onClimbable`: a climbable block, or an open trapdoor over a matching
+/// ladder. Spiders override it to read their own climbing flag.
 pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
+    if mob.mob_type.climbs_walls() {
+        return super::spider::on_climbable(mob);
+    }
     let pos = me.block_position();
     let state = view.block_state(pos);
     if state.is_tagged(block_tags::CLIMBABLE) {
@@ -1676,6 +1716,25 @@ pub(super) fn living_hurt_server(
     if mob.is_dead_or_dying() {
         return false;
     }
+    if mob.mob_type == super::MobType::Enderman {
+        if matches!(source.kind, DamageKind::Arrow | DamageKind::Spit) {
+            super::enderman::dodge_projectile(me, mob, ctx);
+            return false;
+        }
+        let result = hurt_living(me, mob, ctx, source, amount);
+        super::enderman::after_hurt(me, mob, ctx, source);
+        return result;
+    }
+    hurt_living(me, mob, ctx, source, amount)
+}
+
+fn hurt_living(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    amount: f32,
+) -> bool {
     mob.no_action_time = 0;
     let mut amount = if amount < 0.0 { 0.0 } else { amount };
     if amount.is_nan() || amount.is_infinite() {
@@ -1809,6 +1868,11 @@ pub(crate) fn do_hurt_target(
     ctx: &mut dyn EntityCtx,
     target: crate::entity::EntityUid,
 ) {
+    // `Creeper.doHurtTarget` 直接返回真：近战目标只负责追，伤害全靠爆炸。
+    // `Creeper.doHurtTarget` just returns true: melee only chases, the blast does the damage.
+    if mob.mob_type == super::MobType::Creeper {
+        return;
+    }
     let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
     let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
     source.attacker = Some(me.id);
@@ -1835,6 +1899,20 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
+        // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
+        if hurt && let Some(effect) = super::spider::poison_instance(mob, ctx.blocks().difficulty())
+        {
+            ctx.emit(
+                Command::AddPlayerEffect {
+                    target,
+                    effect: effect.effect,
+                    duration: effect.duration,
+                    amplifier: effect.amplifier,
+                },
+                me,
+            );
+        }
         // `Zombie.doHurtTarget`：打中了、空手、自己着火时，按区域难度传染火焰：
         // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
         if hurt
@@ -1864,6 +1942,7 @@ pub(crate) fn do_hurt_target(
                 target,
                 source,
                 amount,
+                on_hit: super::spider::poison_instance(mob, ctx.blocks().difficulty()),
             },
             me,
         );

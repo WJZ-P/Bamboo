@@ -639,10 +639,28 @@ struct FeatureShard {
     inflight: HashMap<FeatureCacheKey, FeatureSlot>,
     order: std::collections::VecDeque<FeatureCacheKey>,
     bytes: usize,
+    /// 每条条目「5×5 里哪些区块已经完工」的位图，满了就删（见 `worldgen_cache`）。
+    /// Per-entry bitmap of assembled chunks in its 5×5; the entry is dropped
+    /// once it is full (see `worldgen_cache`).
+    finished: HashMap<FeatureCacheKey, u32>,
+}
+
+impl FeatureShard {
+    /// 删掉一条条目和它的占位、位图，更新字节数；删掉的结果交回调用方，
+    /// 好在放开分片锁以后再释放。
+    /// Remove an entry with its placeholder and bitmap and update the bytes;
+    /// the removed result is handed back so it can be freed after the shard
+    /// lock is released.
+    fn remove_entry(&mut self, key: &FeatureCacheKey) -> Option<Arc<FeatureRun>> {
+        let removed = self.entries.remove(key)?;
+        self.inflight.remove(key);
+        self.finished.remove(key);
+        self.bytes = self.bytes.saturating_sub(feature_run_heap_bytes(&removed));
+        Some(removed)
+    }
 }
 
 const FEATURE_CACHE_SHARDS: usize = 16;
-const FEATURE_CACHE_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 static FEATURE_CACHE: OnceLock<Vec<std::sync::Mutex<FeatureShard>>> = OnceLock::new();
 
 fn feature_shards() -> &'static [std::sync::Mutex<FeatureShard>] {
@@ -674,6 +692,86 @@ fn feature_run_heap_bytes(run: &FeatureRun) -> usize {
         .map(|marks| marks.capacity() * size_of::<(i32, i32, i32)>())
         .sum();
     deltas + marks
+}
+
+fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> FeatureCacheKey {
+    (
+        config.seed,
+        config.level_type.settings_id(),
+        cx,
+        cz,
+        config.generate_structures,
+        config.level_type.is_flat().then(|| config.flat.clone()),
+    )
+}
+
+/// `(cx, cz)` 的 5×5 里第 `bit` 个区块已经完工；25 个都完工就删掉这条地物结果。
+/// 条目不在缓存里时什么都不做。
+///
+/// Chunk `bit` of the 5×5 around `(cx, cz)` has been assembled; drop this
+/// feature result once all 25 are. Missing entries are left alone. The removed
+/// result is freed outside the lock.
+pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: i32, bit: u32) {
+    let key = feature_cache_key(config, cx, cz);
+    let Ok(mut shard) = feature_shards()[feature_shard_index(&key)].lock() else {
+        return;
+    };
+    if !shard.entries.contains_key(&key) {
+        return;
+    }
+    let done = shard.finished.entry(key.clone()).or_default();
+    *done |= 1 << bit;
+    if *done != crate::worldgen_cache::ALL_5X5 {
+        return;
+    }
+    let removed = shard.remove_entry(&key);
+    // `order` 里的旧键留给淘汰循环跳过；攒多了压一遍。
+    // The stale key in `order` is skipped by eviction; compact when many.
+    if shard.order.len() > 2 * shard.entries.len() + 64 {
+        let FeatureShard { entries, order, .. } = &mut *shard;
+        order.retain(|key| entries.contains_key(key));
+    }
+    drop(shard);
+    drop(removed);
+}
+
+/// 空闲释放：清空全部条目；正在算的占位留着，计算方算完照常提交。
+/// Idle release: drop every entry; in-flight placeholders stay so a computing
+/// thread still commits.
+pub(crate) fn release_feature_cache() {
+    for shard in feature_shards() {
+        let Ok(mut shard) = shard.lock() else {
+            continue;
+        };
+        let keys: Vec<FeatureCacheKey> = shard.entries.keys().cloned().collect();
+        // 删掉的结果攒起来，放开这一片的锁以后再释放。
+        // Collect the removed results and free them after this shard's lock is released.
+        let removed: Vec<Arc<FeatureRun>> = keys
+            .iter()
+            .filter_map(|key| shard.remove_entry(key))
+            .collect();
+        shard.order.clear();
+        shard.order.shrink_to_fit();
+        shard.entries.shrink_to_fit();
+        shard.inflight.shrink_to_fit();
+        shard.finished.shrink_to_fit();
+        drop(shard);
+        drop(removed);
+    }
+}
+
+/// 地物结果缓存现在的条目数和实测字节数（压测 / 测试用）。
+/// Current entry count and measured bytes of the feature cache (benchmarks / tests).
+#[doc(hidden)]
+pub fn feature_cache_usage() -> (usize, usize) {
+    let mut usage = (0, 0);
+    for shard in feature_shards() {
+        if let Ok(shard) = shard.lock() {
+            usage.0 += shard.entries.len();
+            usage.1 += shard.bytes;
+        }
+    }
+    usage
 }
 
 /// 测量 / 冷启动用：清掉整份地物结果缓存。
@@ -760,14 +858,8 @@ fn cached_feature_run(
 ) -> Result<Arc<FeatureRun>, String> {
     crate::worldgen_profile::count(&FEATURE_RUN_CALLS);
     crate::worldgen_profile::record_feature_center(config.seed, cx, cz);
-    let key = (
-        config.seed,
-        config.level_type.settings_id(),
-        cx,
-        cz,
-        config.generate_structures,
-        config.level_type.is_flat().then(|| config.flat.clone()),
-    );
+    crate::worldgen_cache::touch();
+    let key = feature_cache_key(config, cx, cz);
     let shards = feature_shards();
     let index = feature_shard_index(&key);
     // 锁内只查表 / 放占位；地物在锁外算。同一个中心只有一条线程真正在算，
@@ -811,27 +903,63 @@ fn cached_feature_run(
     };
     // 只有计算方提交条目；等待方直接返回，避免重复计字节。
     // Only the computing thread commits; waiters just return.
-    if let Ok(mut shard) = shards[index].lock()
-        && !shard.entries.contains_key(&key)
-    {
-        shard.order.push_back(key.clone());
-        shard.entries.insert(key, Arc::clone(&run));
-        shard.bytes += feature_run_heap_bytes(&run);
-        let target = FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS * 3 / 4;
-        if shard.bytes > FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS {
-            while shard.bytes > target {
-                let Some(oldest) = shard.order.pop_front() else {
-                    break;
-                };
-                let Some(removed) = shard.entries.remove(&oldest) else {
-                    continue;
-                };
-                shard.bytes = shard.bytes.saturating_sub(feature_run_heap_bytes(&removed));
-                shard.inflight.remove(&oldest);
-            }
-        }
+    let limit = crate::worldgen_cache::feature_byte_limit() / FEATURE_CACHE_SHARDS;
+    let committed = commit_feature_run(&shards[index], key, &slot, &run, limit);
+    if committed {
+        // 这个中心算完了：它读过的 3×3 地形各少一个使用者（锁外做）。
+        // This center is done: its 3×3 terrain has one consumer fewer (done
+        // outside the feature shard lock).
+        crate::worldgen_cache::feature_run_computed(config, cx, cz);
     }
     Ok(run)
+}
+
+/// 把算好的地物结果放进分片，按这一片的字节上限 `limit`（`bamboo.toml` 的
+/// `worldgen_feature_cache_mb` 均分到各片）淘汰最旧的；返回这次是不是新放进去的。
+///
+/// Insert a computed feature result and evict the oldest past this shard's
+/// byte limit `limit` (`worldgen_feature_cache_mb` in `bamboo.toml` split
+/// across shards); returns whether it was newly inserted.
+fn commit_feature_run(
+    shard: &std::sync::Mutex<FeatureShard>,
+    key: FeatureCacheKey,
+    slot: &FeatureSlot,
+    run: &Arc<FeatureRun>,
+    limit: usize,
+) -> bool {
+    let Ok(mut shard) = shard.lock() else {
+        return false;
+    };
+    if shard.entries.contains_key(&key) {
+        return false;
+    }
+    if limit == 0 {
+        // 上限为 0 不留条目：自己的占位也要拿掉，否则它带着结果一直留在
+        // `inflight` 里，既不计字节也不会被淘汰或空闲释放清掉。
+        // A zero limit keeps no entry: drop our placeholder too, or it would
+        // keep the result in `inflight` forever, uncounted and never evicted
+        // or idle-released.
+        if shard
+            .inflight
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+        {
+            shard.inflight.remove(&key);
+        }
+        return false;
+    }
+    shard.order.push_back(key.clone());
+    shard.entries.insert(key, Arc::clone(run));
+    shard.bytes += feature_run_heap_bytes(run);
+    if shard.bytes > limit {
+        while shard.bytes > limit * 3 / 4 {
+            let Some(oldest) = shard.order.pop_front() else {
+                break;
+            };
+            shard.remove_entry(&oldest);
+        }
+    }
+    true
 }
 
 /// 真正跑一遍 `applyBiomeDecoration`：拼视图、调纯函数、只保留 9 份写增量
@@ -1394,6 +1522,75 @@ mod tests {
             (0..9).any(|index| index != CENTER && !fresh.deltas[index].is_empty()),
             "the test center must spill into some neighbor"
         );
+    }
+
+    /// 按依赖释放：5×5 个区块都完工，这个中心的地物结果才删；删了再要，
+    /// 现算出来的和原来逐条相同。
+    /// Dependency release: a center's feature result goes only once all 5×5
+    /// chunks are assembled; asking again recomputes identical writes.
+    #[test]
+    fn feature_run_is_released_when_its_5x5_is_assembled() {
+        let config = normal(0x0fea_7c0e);
+        let (cx, cz) = (12, 6);
+        let cached = |config: &WorldGenConfig| {
+            let key = feature_cache_key(config, cx, cz);
+            let shard = feature_shards()[feature_shard_index(&key)].lock().unwrap();
+            shard.entries.contains_key(&key)
+        };
+        let first = cached_feature_run(&config, cx, cz).unwrap();
+        let positions: Vec<ChunkPos> = (-2..=2)
+            .flat_map(|dz| (-2..=2).map(move |dx| ChunkPos::new(cx + dx, cz + dz)))
+            .collect();
+        for &pos in &positions[..24] {
+            crate::worldgen_cache::chunk_finished(&config, pos);
+        }
+        assert!(cached(&config), "one chunk of the 5x5 is not assembled");
+        crate::worldgen_cache::chunk_finished(&config, positions[24]);
+        assert!(!cached(&config), "the whole 5x5 is assembled");
+        let again = cached_feature_run(&config, cx, cz).unwrap();
+        assert!(!Arc::ptr_eq(&first, &again), "recomputed after the release");
+        assert_eq!(first.deltas, again.deltas);
+        assert_eq!(first.marks, again.marks);
+    }
+
+    /// 上限为 0 时不留条目，计算方自己的占位也拿掉；别人的新占位不动。
+    /// A zero limit keeps no entry and drops the computer's own placeholder,
+    /// but leaves a newer placeholder from someone else alone.
+    #[test]
+    fn a_zero_limit_keeps_neither_entry_nor_placeholder() {
+        let key = feature_cache_key(&normal(0x0fea_0000), 3, -4);
+        let run = Arc::new(FeatureRun {
+            deltas: Default::default(),
+            marks: Default::default(),
+        });
+        let shard = std::sync::Mutex::new(FeatureShard::default());
+        let ours: FeatureSlot = Arc::new(OnceLock::new());
+        shard
+            .lock()
+            .unwrap()
+            .inflight
+            .insert(key.clone(), Arc::clone(&ours));
+        assert!(!commit_feature_run(&shard, key.clone(), &ours, &run, 0));
+        {
+            let shard = shard.lock().unwrap();
+            assert!(shard.entries.is_empty() && shard.inflight.is_empty());
+        }
+        let newer: FeatureSlot = Arc::new(OnceLock::new());
+        shard
+            .lock()
+            .unwrap()
+            .inflight
+            .insert(key.clone(), Arc::clone(&newer));
+        assert!(!commit_feature_run(&shard, key.clone(), &ours, &run, 0));
+        assert!(shard.lock().unwrap().inflight.contains_key(&key));
+        assert!(commit_feature_run(
+            &shard,
+            key.clone(),
+            &newer,
+            &run,
+            1 << 20
+        ));
+        assert!(shard.lock().unwrap().entries.contains_key(&key));
     }
 
     /// 多条线程同时要同一个中心：只有一条真正去算，其余等它，拿到的是同一个

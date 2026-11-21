@@ -495,6 +495,12 @@ public final class MobOracle {
         /** 僵尸场景：每只生物头上戴的东西（`null` 是空）和它的初始耐久损耗。 */
         Item helmet;
         int helmetDamage;
+        /** 苦力怕场景：第 0 位带电，第 1 位已点燃。 */
+        int creeperFlags;
+        /** 末影人场景：初始搬着的方块，`null` 表示空手。 */
+        BlockState carried;
+        /** 末影人注视场景：玩家的初始朝向（`setYRot`）。 */
+        float playerYaw;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
@@ -905,7 +911,30 @@ public final class MobOracle {
         if (mob instanceof Sheep || mob instanceof Chicken) {
             return farmVariant((Animal) mob);
         }
+        if (mob instanceof net.minecraft.world.entity.monster.Creeper
+                || mob instanceof net.minecraft.world.entity.monster.spider.Spider
+                || mob instanceof net.minecraft.world.entity.monster.Enderman) {
+            return hostileVariant(mob);
+        }
         return "minecraft:temperate";
+    }
+
+    /** 苦力怕、蜘蛛、末影人的状态串，和 Bamboo 一侧各自的 `describe` 同一个格式。 */
+    static String hostileVariant(Mob mob) {
+        if (mob instanceof net.minecraft.world.entity.monster.Creeper creeper) {
+            return "swell=" + getInt(net.minecraft.world.entity.monster.Creeper.class, creeper, "swell")
+                    + ",dir=" + creeper.getSwellDir()
+                    + ",powered=" + creeper.isPowered()
+                    + ",ignited=" + creeper.isIgnited();
+        }
+        if (mob instanceof net.minecraft.world.entity.monster.spider.Spider spider) {
+            return "climb=" + spider.isClimbing();
+        }
+        net.minecraft.world.entity.monster.Enderman enderman = (net.minecraft.world.entity.monster.Enderman) mob;
+        BlockState carried = enderman.getCarriedBlock();
+        return "carry=" + (carried == null ? 0 : Block.getId(carried))
+                + ",creepy=" + enderman.isCreepy()
+                + ",stared=" + enderman.hasBeenStaredAt();
     }
 
     static String caseSound(Mob mob) throws Exception {
@@ -1153,6 +1182,209 @@ public final class MobOracle {
         static final BlockState WATER = Blocks.WATER.defaultBlockState();
         static final BlockState LAVA = Blocks.LAVA.defaultBlockState();
 
+        /** 苦力怕：追玩家并爆炸、点燃、带电、摔落提前膨胀、隔墙被打、炸到真实玩家。 */
+        static void creeperScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            BlockState glass = Blocks.GLASS.defaultBlockState();
+            for (long seed : new long[] {11L, 58L}) {
+                // 基岩地面炸不动；旁边的牛见证爆炸的伤害、击退和世界随机源。
+                // Bedrock survives the blast; the cow witnesses damage, knockback and level random.
+                Scene chase = new Scene("creeper_chase_" + seed).ticks(160).difficulty(2);
+                chase.monstersBurn = false;
+                chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                chase.mob(40, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                chase.mob(0, 3.5, 64.0, 4.5, 0.0F, seed + 100L, 0);
+                chase.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(chase);
+            }
+            {
+                Scene ignited = new Scene("creeper_ignited").ticks(50).difficulty(2);
+                ignited.monstersBurn = false;
+                ignited.creeperFlags = 2;
+                ignited.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                ignited.fill(2, 64, -2, 2, 65, -1, glass);
+                ignited.fill(-3, 64, 1, -3, 64, 3, glass);
+                ignited.mob(40, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
+                ignited.mob(0, 2.5, 64.0, 2.5, 0.0F, 22L, 0);
+                ignited.mob(0, -4.5, 64.0, 2.5, 0.0F, 23L, 0);
+                // 第三头牛没有遮挡、离得够远，炸不死：血量直接反映伤害公式。
+                // The third cow is unshielded and far enough to survive: its health shows the formula.
+                ignited.mob(0, 4.5, 64.0, 3.5, 0.0F, 24L, 0);
+                scenes.add(ignited);
+                Scene powered = new Scene("creeper_powered").ticks(50).difficulty(2);
+                powered.monstersBurn = false;
+                powered.creeperFlags = 3;
+                powered.fill(-14, 63, -14, 14, 63, 14, bedrock);
+                powered.fill(5, 64, -3, 5, 66, 3, glass);
+                powered.fill(-7, 64, 0, -6, 64, 2, glass);
+                powered.mob(40, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+                powered.mob(0, 3.5, 64.0, -4.5, 0.0F, 32L, 0);
+                powered.mob(0, 8.5, 64.0, 0.5, 0.0F, 33L, 0);
+                powered.mob(0, -9.5, 64.0, -6.5, 0.0F, 34L, 0);
+                scenes.add(powered);
+                Scene fall = new Scene("creeper_fall").ticks(60).difficulty(2);
+                fall.monstersBurn = false;
+                fall.fill(-6, 63, -6, 6, 63, 6, bedrock);
+                fall.mob(40, 0.5, 70.0, 0.5, 0.0F, 41L, 0);
+                scenes.add(fall);
+                // 玻璃墙挡住视线：被打之后靠 `HurtByTargetGoal` 记仇，绕墙过来再膨胀。
+                // Glass blocks sight: retaliation targets the player, then the creeper paths around.
+                Scene wall = new Scene("creeper_wall_hurt").ticks(200).difficulty(2);
+                wall.monstersBurn = false;
+                wall.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                wall.fill(3, 64, -2, 3, 66, 2, glass);
+                wall.mob(40, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+                wall.mob(0, -3.5, 64.0, -3.5, 0.0F, 52L, 0);
+                wall.player(5.5, 64.0, 0.5, Items.AIR);
+                wall.hurts.add(new double[] {5, 0, 2.0, 0});
+                scenes.add(wall);
+                // 真实玩家：比爆炸打到玩家后的血量、受伤冷却和玩家自己收到的包。
+                // A real player: health, hurt cooldown and self packets after the blast.
+                for (int difficulty : new int[] {1, 2, 3}) {
+                    Scene blast = new Scene("creeper_blast_player_" + difficulty).ticks(80).difficulty(difficulty);
+                    blast.monstersBurn = false;
+                    blast.realPlayers = true;
+                    blast.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                    blast.mob(40, 0.5, 64.0, 0.5, 0.0F, 60L + difficulty, 0);
+                    blast.player(4.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(blast);
+                }
+            }
+        }
+
+        /** 末影人：注视激怒、白天传送、淋雨、搬方块、躲箭。 */
+        static void endermanScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            BlockState dirt = Blocks.DIRT.defaultBlockState();
+            for (boolean stare : new boolean[] {true, false}) {
+                Scene scene = new Scene(stare ? "enderman_stare" : "enderman_neutral").ticks(24).difficulty(2);
+                scene.clockStart = 18000;
+                scene.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                scene.mob(43, 0.5, 64.0, 0.5, 0.0F, 13L, 0);
+                scene.player(0.5, 64.0, stare ? -6.5 : 7.5, Items.AIR);
+                scenes.add(scene);
+            }
+            // 注视锥的边缘：偏 3 度还算盯着（`0.025 / 距离` 的锥），偏 6 度不算。
+            // The edge of the stare cone: 3 degrees still counts, 6 degrees does not.
+            for (float yaw : new float[] {3.0F, 6.0F}) {
+                Scene edge = new Scene("enderman_stare_edge_" + (int) yaw).ticks(24).difficulty(2);
+                edge.clockStart = 18000;
+                edge.playerYaw = yaw;
+                edge.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                edge.mob(43, 0.5, 64.0, 0.5, 0.0F, yaw == 3.0F ? 15L : 17L, 0);
+                edge.player(0.5, 64.0, -6.5, Items.AIR);
+                scenes.add(edge);
+            }
+            {
+                // 白天站在露天：`customServerAiStep` 反复随机传送。`tickCount >= targetChangeTime + 600`
+                // 才开始判定，所以场景要跑过 600 刻。
+                // Out in the open during the day: `customServerAiStep` teleports it. The roll
+                // only starts once `tickCount >= targetChangeTime + 600`, so run past 600 ticks.
+                Scene day = new Scene("enderman_day_teleport").ticks(1200).difficulty(2);
+                day.clockStart = 1000;
+                day.monstersBurn = true;
+                day.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                day.mob(43, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+                day.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(day);
+                // 夜里淋雨：每刻 1 点溺水伤害，偶尔传送躲雨。
+                // In the rain at night: 1 drown damage a tick and the occasional dodge.
+                Scene rain = new Scene("enderman_rain").ticks(80).difficulty(2);
+                rain.clockStart = 18000;
+                rain.raining = true;
+                rain.rain = 1.0F;
+                rain.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                rain.mob(43, 0.5, 64.0, 0.5, 0.0F, 41L, 0);
+                rain.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(rain);
+                // 箭射过来：不掉血，只传送。
+                // Hit by an arrow: no damage, it only teleports away.
+                Scene dodge = new Scene("enderman_arrow").ticks(40).difficulty(2);
+                dodge.clockStart = 18000;
+                dodge.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                dodge.mob(43, 0.5, 64.0, 0.5, 0.0F, 51L, 0);
+                dodge.player(11.5, 64.0, 0.5, Items.AIR);
+                dodge.hurts.add(new double[] {5, 0, 4.0, -1});
+                scenes.add(dodge);
+                // 地上全是泥土：捡起方块；搬着方块时再放回原处。
+                // A dirt floor: it picks a block up, then puts it back down.
+                Scene carry = new Scene("enderman_blocks").ticks(30000).difficulty(2);
+                carry.clockStart = 14000;
+                carry.monstersBurn = false;
+                carry.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                // 脚边一圈泥土：`EndermanTakeBlockGoal` 在自身高度上下 3 格采样，
+                // 只有这个高度的方块会被捡起来。
+                // A ring of dirt at foot level: the take goal samples within three blocks
+                // above the enderman and only finds these.
+                for (int[] at : new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {2, 0}, {-2, 0}}) {
+                    carry.set(at[0], 64, at[1], dirt);
+                }
+                carry.mob(43, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                carry.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(carry);
+                Scene place = new Scene("enderman_place").ticks(30000).difficulty(2);
+                place.clockStart = 14000;
+                place.monstersBurn = false;
+                place.carried = dirt;
+                // 基岩不能当垫底方块（`canPlaceBlock` 排除基岩），用石头。
+                // Bedrock cannot support a placed block; use stone.
+                place.fill(-12, 63, -12, 12, 63, 12, Blocks.STONE.defaultBlockState());
+                place.mob(43, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+                place.player(11.5, 64.0, 0.5, Items.AIR);
+                scenes.add(place);
+            }
+        }
+
+        static void spiderScenes(List<Scene> scenes) {
+            BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+            for (long seed : new long[] {13L, 91L}) {
+                // 午夜：亮度为 0，蜘蛛才会锁定玩家。
+                // Midnight, so the light level lets the spider target the player.
+                Scene chase = new Scene("spider_chase_" + seed).ticks(160).difficulty(2);
+                chase.clockStart = 18000;
+                chase.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                chase.mob(41, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                chase.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(chase);
+            }
+            {
+                // 翻墙：一整面石墙挡住视线和去路，先被打一下记仇（`SpiderTargetGoal` 要看得见），
+                // 路径只到墙脚，`WallClimberNavigation` 再朝目标方块推，蜘蛛贴墙往上爬、翻过去。
+                // 爬在墙上时 `createPath` 返回空，`MeleeAttackGoal.tick` 的三参数 `moveTo`
+                // 返回假，重算间隔加 15。
+                // Wall climbing: a full stone wall blocks sight and the way, so a hit makes
+                // the spider angry; the path ends at the wall, the wall climber pushes at the
+                // target block and the spider climbs over. While on the wall `createPath` is
+                // null, so `MeleeAttackGoal.tick`'s three-argument `moveTo` fails and adds 15.
+                Scene wall = new Scene("spider_wall").ticks(200).difficulty(2);
+                wall.clockStart = 18000;
+                wall.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                wall.fill(3, 64, -12, 3, 66, 12, Blocks.STONE.defaultBlockState());
+                wall.mob(41, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                wall.player(6.5, 64.0, 0.5, Items.AIR);
+                wall.hurts.add(new double[] {5, 0, 2.0, 0});
+                scenes.add(wall);
+            }
+            {
+                // 白天：两个蜘蛛目标都不启动，只散步。散步是 0.8 倍速，`0.3F` 的移速
+                // 在这里才和 0.3 差出一个 float ulp。
+                // Daytime: neither spider goal starts and the spider strolls. The 0.8
+                // stroll modifier is where the `0.3F` speed differs from 0.3 by a float ulp.
+                Scene day = new Scene("spider_day").ticks(160).difficulty(2);
+                day.clockStart = 6000;
+                day.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                day.mob(41, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+                day.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(day);
+                Scene cave = new Scene("cave_spider_chase").ticks(160).difficulty(3);
+                cave.clockStart = 18000;
+                cave.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                cave.mob(42, 0.5, 64.0, 0.5, 0.0F, 41L, 0);
+                cave.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(cave);
+            }
+        }
+
         /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
         static void farmScenes(List<Scene> scenes) {
             int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
@@ -1311,6 +1543,9 @@ public final class MobOracle {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
             farmScenes(scenes);
+            creeperScenes(scenes);
+            spiderScenes(scenes);
+            endermanScenes(scenes);
             {
                 Scene pig = new Scene("pig_rod_tempt").ticks(80);
                 ground(pig, 12);
@@ -2285,7 +2520,9 @@ public final class MobOracle {
         // Only scenes named `*_no_grief` turn `mobGriefing` off; every scene resets it.
         setRule(official, GameRules.MOB_GRIEFING, !scene.name.endsWith("_no_grief"));
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("rabbit_")
-                || scene.name.startsWith("fox_") || scene.name.startsWith("wolf_")) {
+                || scene.name.startsWith("fox_") || scene.name.startsWith("wolf_")
+                || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
+                || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -5361,6 +5598,11 @@ public final class MobOracle {
     /** 僵尸场景：官方 `Mob` 逐刻 tick，输出与 `CowStep` 同形的状态加僵尸专属字段。 */
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
         FakeLevel level = FakeLevel.create(official);
+        // `EntityReference` 找不到实体时会查所有维度（被炸的牛记着已经消失的苦力怕）。
+        // `EntityReference` falls back to every dimension when the entity is gone.
+        java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+        levels.put(net.minecraft.world.level.Level.OVERWORLD, level);
+        put(MinecraftServer.class, official.server, "levels", levels);
         level.blocks.putAll(scene.blocks);
         level.injectedSkyDarken = scene.skyDarken;
         level.injectedRaining = scene.raining;
@@ -5418,9 +5660,13 @@ public final class MobOracle {
             player.setId(FIRST_ID + 1024 + i);
             player.setPos(at[0], at[1], at[2]);
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
-            player.setYRot(0.0F);
-            player.setYHeadRot(0.0F);
-            player.setYBodyRot(0.0F);
+            player.setYRot(scene.playerYaw);
+            if (scene.name.startsWith("enderman_stare")) {
+                float pitch = (float) -Math.toDegrees(Math.atan2(2.55F - player.getEyeHeight(), 7.0));
+                player.setXRot(pitch);
+            }
+            player.setYHeadRot(scene.playerYaw);
+            player.setYBodyRot(scene.playerYaw);
             player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(scene.playerItems.get(i)));
             if (scene.realPlayers) {
                 player.setHealth(scene.playerHealth);
@@ -5454,6 +5700,12 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
+                // 敌对生物用 40 起的编号，避开别的分支占用的 13 以后的号。
+                // Hostile mobs number from 40 to stay clear of the ids other branches take from 13.
+                case 40 -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
+                case 41 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, level);
+                case 43 -> new net.minecraft.world.entity.monster.Enderman(EntityTypes.ENDERMAN, level);
+                case 42 -> new net.minecraft.world.entity.monster.spider.CaveSpider(EntityTypes.CAVE_SPIDER, level);
                 case 8 -> EntityTypes.WOLF.create(level, EntitySpawnReason.COMMAND);
                 case 7 -> EntityTypes.FOX.create(level, EntitySpawnReason.COMMAND);
                 case 6 -> EntityTypes.RABBIT.create(level, EntitySpawnReason.COMMAND);
@@ -5496,6 +5748,21 @@ public final class MobOracle {
                 if (scene.helmetDamage != 0) helmet.setDamageValue(scene.helmetDamage);
                 mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD, helmet);
             }
+            if (mob instanceof net.minecraft.world.entity.monster.Creeper creeper) {
+                if ((scene.creeperFlags & 1) != 0) {
+                    Field powered = net.minecraft.world.entity.monster.Creeper.class.getDeclaredField("DATA_IS_POWERED");
+                    powered.setAccessible(true);
+                    @SuppressWarnings("unchecked")
+                    net.minecraft.network.syncher.EntityDataAccessor<Boolean> accessor =
+                            (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) powered.get(null);
+                    creeper.getEntityData().set(accessor, true);
+                }
+                if ((scene.creeperFlags & 2) != 0) creeper.ignite();
+            }
+            if (mob instanceof net.minecraft.world.entity.monster.Enderman enderman
+                    && scene.carried != null) {
+                enderman.setCarriedBlock(scene.carried);
+            }
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
             mobs.add(mob);
@@ -5517,6 +5784,9 @@ public final class MobOracle {
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
+            line.append(",\"creeper\":").append(kind[0] == 40 ? scene.creeperFlags : 0);
+            line.append(",\"carried\":").append(
+                    kind[0] == 43 && scene.carried != null ? Block.getId(scene.carried) : 0);
             line.append(",\"kind\":").append(kind[0]);
             line.append(",\"sleep\":").append(foxSleepCountdown(mobs.get(i)));
             // 鸡的蛋计时在构造时抽，Java 一侧报给 Bamboo 照填。
@@ -5533,6 +5803,8 @@ public final class MobOracle {
             line.append(",\"y\":").append(Double.doubleToRawLongBits(player.getY()));
             line.append(",\"z\":").append(Double.doubleToRawLongBits(player.getZ()));
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
+            line.append(",\"yaw\":").append(Float.floatToRawIntBits(player.getYRot()));
+            line.append(",\"pitch\":").append(Float.floatToRawIntBits(player.getXRot()));
             line.append(",\"item\":").append(BuiltInRegistries.ITEM.getId(scene.playerItems.get(i)));
             line.append(",\"looting\":0}");
         }
@@ -5607,10 +5879,18 @@ public final class MobOracle {
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick && (int) hurt[1] < mobs.size()) {
                     Mob target = mobs.get((int) hurt[1]);
-                    ServerPlayer attacker = players.isEmpty() ? null : players.get((int) hurt[3]);
-                    if (attacker != null) {
-                        target.hurtServer(level, level.damageSources().playerAttack(attacker),
+                    int attackerIndex = (int) hurt[3];
+                    if (attackerIndex >= 0 && attackerIndex < players.size()) {
+                        target.hurtServer(level, level.damageSources().playerAttack(players.get(attackerIndex)),
                                 (float) hurt[2]);
+                    } else if (attackerIndex == -1) {
+                        // 没有射手的一箭：走 `IS_PROJECTILE` 那条链，末影人只传送不掉血。
+                        // An ownerless arrow: the `IS_PROJECTILE` path, where an enderman teleports unhurt.
+                        net.minecraft.world.entity.projectile.arrow.Arrow arrow =
+                                new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, level);
+                        target.hurtServer(level, level.damageSources().arrow(arrow, null), (float) hurt[2]);
+                    } else {
+                        target.hurtServer(level, level.damageSources().drown(), (float) hurt[2]);
                     }
                 }
             }

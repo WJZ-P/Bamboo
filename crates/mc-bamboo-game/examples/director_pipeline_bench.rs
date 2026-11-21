@@ -1,7 +1,16 @@
 //! 真实 Director 流水线的吞吐和阶段耗时测量（不是 `wg-perf` 的纯函数路径）。
 //!
 //! `cargo run --release -p mc-bamboo-game --example director_pipeline_bench -- \
-//!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--cold] [--label NAME]`
+//!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--cold] [--label NAME]
+//!     [--idle-secs S] [--second] [--terrain-mb M] [--feature-mb M] [--cache-idle-secs S]
+//!     [--no-dependency-release] [--no-cold-tier] [--dump-blocks PATH]`
+//!
+//! `--terrain-mb 256 --feature-mb 64 --cache-idle-secs 0 --no-dependency-release
+//! --no-cold-tier` 复现本轮改动之前的缓存行为（256 MiB / 64 MiB、不按依赖释放、
+//! 不空闲释放、不压缩），用来做前后对比。
+//!
+//! Use those five options together to emulate the original cache policy
+//! (256 MiB / 64 MiB, no dependency release, idle release or compression).
 //!
 //! 起一个 `World::new`（`normal` 世界、`Staged` 流水线、计算池），强加载一块
 //! 正方形区块，不睡节拍器地 tick 到全部交付且计算池排空。默认先在远处跑一片同样
@@ -13,16 +22,20 @@
 
 use std::{
     env,
+    fs::File,
     hint::black_box,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_game::{
-    MailBudget, World, WorldConfig,
+    Inbound, MailBudget, World, WorldConfig,
     world_options::{LevelType, WorldGenConfig},
     worldgen::{clear_terrain_cache, terrain_cache_stats},
-    worldgen_features::clear_feature_cache,
+    worldgen_cache::{self, WorldgenCacheSettings},
+    worldgen_features::{clear_feature_cache, feature_cache_usage},
     worldgen_profile,
 };
 
@@ -34,6 +47,19 @@ struct Options {
     structures: bool,
     warmup: bool,
     label: String,
+    /// 交付完以后再按 50 ms 一刻空转多少秒，量闲置内存。
+    /// Seconds to keep ticking at 50 ms after delivery, to measure idle memory.
+    idle_secs: u64,
+    /// 再强加载紧挨着的一片同样大小的区域，量边缘缓存复用后的吞吐。
+    /// Also force the adjacent square, measuring throughput with frontier reuse.
+    second: bool,
+    /// 世界生成缓存的上限和空闲释放秒数（`--terrain-mb` / `--feature-mb` /
+    /// `--cache-idle-secs`）。
+    /// Worldgen cache limits and idle-release delay.
+    cache: WorldgenCacheSettings,
+    /// 将测区的方块状态按固定顺序写盘，供缓存策略逐字节比较。
+    /// Write measured block states in fixed order for a bytewise policy comparison.
+    dump_blocks: Option<PathBuf>,
 }
 
 impl Options {
@@ -45,6 +71,10 @@ impl Options {
             structures: true,
             warmup: true,
             label: "run".to_owned(),
+            idle_secs: 0,
+            second: false,
+            cache: WorldgenCacheSettings::default(),
+            dump_blocks: None,
         };
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -64,9 +94,23 @@ impl Options {
                 "--no-structures" => options.structures = false,
                 "--cold" => options.warmup = false,
                 "--label" => options.label = value(),
+                "--idle-secs" => options.idle_secs = value().parse().expect("number"),
+                "--second" => options.second = true,
+                "--terrain-mb" => options.cache.terrain_mb = value().parse().expect("number"),
+                "--feature-mb" => options.cache.feature_mb = value().parse().expect("number"),
+                "--cache-idle-secs" => {
+                    options.cache.idle_seconds = value().parse().expect("number");
+                }
+                "--no-dependency-release" => worldgen_cache::set_dependency_release(false),
+                "--no-cold-tier" => worldgen_cache::set_cold_tier(false),
+                "--dump-blocks" => options.dump_blocks = Some(value().into()),
                 _ => panic!("unknown argument {arg}"),
             }
         }
+        assert!(
+            options.dump_blocks.is_none() || options.threads.len() == 1,
+            "--dump-blocks requires exactly one worker count"
+        );
         options
     }
 }
@@ -74,6 +118,9 @@ impl Options {
 #[path = "support/process_cpu.rs"]
 mod process_cpu;
 use process_cpu::process_cpu_ms;
+#[path = "support/process_memory.rs"]
+mod process_memory;
+use process_memory::process_memory_mb;
 
 /// 当前线程的累计 CPU 毫秒（不含等待）。
 ///
@@ -122,6 +169,16 @@ fn settle(world: &mut World, positions: &[ChunkPos], threads: usize) -> usize {
     }
 }
 
+fn dump_blocks(world: &World, positions: &[ChunkPos], path: &Path) -> std::io::Result<()> {
+    let mut out = BufWriter::new(File::create(path)?);
+    for &pos in positions {
+        for state in world.chunk_blocks_unpaced(pos).expect("delivered chunk") {
+            out.write_all(&state.to_le_bytes())?;
+        }
+    }
+    out.flush()
+}
+
 fn main() {
     let options = Options::parse();
     let total = options.side * options.side;
@@ -132,7 +189,7 @@ fn main() {
         clear_terrain_cache();
         clear_feature_cache();
         worldgen_profile::reset();
-        let (_inbox, receiver) = mc_bamboo_game::inbound_channel();
+        let (inbox, receiver) = mc_bamboo_game::inbound_channel();
         let config = WorldConfig {
             view_distance: 4,
             world_gen: WorldGenConfig {
@@ -142,6 +199,7 @@ fn main() {
                 ..WorldGenConfig::default()
             },
             chunk_worker_threads: threads,
+            worldgen_cache: options.cache,
             // 测量不限制每刻交付数，交付节奏不成为吞吐瓶颈。
             // No per-tick delivery cap: the pacing is not part of the measurement.
             mail_budget: MailBudget {
@@ -151,6 +209,19 @@ fn main() {
             ..WorldConfig::default()
         };
         let mut world = World::new(config, receiver);
+        if options.dump_blocks.is_some() {
+            // 跳过交付后的随机刻，避免墙钟时间不同引入草蔓延等变化。
+            // Disable random ticks so post-delivery grass spread cannot affect parity.
+            assert!(
+                inbox
+                    .send(Inbound::ConsoleCommand(
+                        "gamerule random_tick_speed 0".into()
+                    ))
+                    .is_ok()
+            );
+            world.tick_unpaced();
+        }
+        let (start_rss_mb, _) = process_memory_mb();
         if options.warmup {
             // 每条计算线程第一次生成时要建自己的生成器、结构状态和模板表（一次性，
             // 长跑的服务器只付一次）。先在远处跑一片同样大小的区域把线程暖起来，
@@ -169,6 +240,7 @@ fn main() {
             clear_feature_cache();
             worldgen_profile::reset();
         }
+        let (warm_rss_mb, _) = process_memory_mb();
         world.force_chunks_unpaced(&positions);
 
         let wall_started = Instant::now();
@@ -181,6 +253,29 @@ fn main() {
         let p = worldgen_profile::stats();
         worldgen_profile::disable();
         let cache = terrain_cache_stats();
+        let features = feature_cache_usage();
+        let (rss_mb, _) = process_memory_mb();
+        let second_per_s = if options.second {
+            let side = options.side as i32;
+            let next: Vec<ChunkPos> = positions
+                .iter()
+                .map(|pos| ChunkPos::new(pos.x + side, pos.z))
+                .collect();
+            world.force_chunks_unpaced(&next);
+            let started = Instant::now();
+            let count = settle(&mut world, &next, threads);
+            count as f64 / started.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
+        let idle_until = Instant::now() + Duration::from_secs(options.idle_secs);
+        while Instant::now() < idle_until {
+            world.tick_unpaced();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (idle_rss_mb, peak_rss_mb) = process_memory_mb();
+        let after = terrain_cache_stats();
+        let (idle_feature_entries, idle_feature_bytes) = feature_cache_usage();
         let ns = |v: u64| v as f64 / 1_000_000.0;
         println!(
             "{},structures={},warm={},threads={},requested={},delivered={},wall_s={:.3},\
@@ -196,7 +291,12 @@ fn main() {
              feature_run_calls={},feature_run_hits={},feature_run_misses={},feature_run_hit_rate={:.4},\
              distinct_feature_centers={},feature_centers_called_once={},feature_centers_max_calls={},\
              build_view_calls={},build_view_cells={},run_features_calls={},\
-             entries={},bytes_mb={:.1},cross_thread_duplicates={}",
+             entries={},bytes_mb={:.1},cross_thread_duplicates={},\
+             rss_mb={:.0},peak_rss_mb={:.0},idle_rss_mb={:.0},second_per_s={:.2},\
+             cache_peak_mb={:.1},idle_entries={},idle_bytes_mb={:.1},\
+             dependency_releases={},evictions={},feature_entries={},feature_mb={:.1},\
+             idle_releases={},cold_entries={},cold_mb={:.1},cold_hits={},\
+             start_rss_mb={:.0},warm_rss_mb={:.0},idle_feature_entries={},idle_feature_mb={:.1}",
             options.label,
             options.structures,
             options.warmup,
@@ -242,7 +342,29 @@ fn main() {
             cache.entries,
             cache.bytes as f64 / (1024.0 * 1024.0),
             cache.cross_thread_duplicates,
+            rss_mb,
+            peak_rss_mb,
+            idle_rss_mb,
+            second_per_s,
+            after.peak_bytes as f64 / (1024.0 * 1024.0),
+            after.entries,
+            after.bytes as f64 / (1024.0 * 1024.0),
+            cache.dependency_releases,
+            cache.evictions,
+            features.0,
+            features.1 as f64 / (1024.0 * 1024.0),
+            worldgen_cache::idle_releases(),
+            cache.cold_entries,
+            cache.cold_bytes as f64 / (1024.0 * 1024.0),
+            cache.cold_hits,
+            start_rss_mb,
+            warm_rss_mb,
+            idle_feature_entries,
+            idle_feature_bytes as f64 / (1024.0 * 1024.0),
         );
         black_box(world.is_chunk_loaded(positions[0]));
+        if let Some(path) = &options.dump_blocks {
+            dump_blocks(&world, &positions, path).expect("write chunk block states");
+        }
     }
 }

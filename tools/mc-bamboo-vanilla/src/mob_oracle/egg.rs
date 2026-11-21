@@ -127,6 +127,8 @@ impl EggCase {
                 uid: self.owner,
                 position: EGG_OWNER,
                 eye_height: 1.62,
+                look_direction: Vec3::default(),
+                gaze_disguise: false,
                 alive: true,
                 spectator: false,
                 creative: false,

@@ -846,6 +846,44 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；移动段穿过水时用共用的流体判定熄火，灭火声的音高取蛋自己的随机源；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），生成后按手中蛋的种类累加会话内使用统计，再按模式消耗；发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、穿水熄火、孵一只、孵四只、打牛、玩家扔蛋、发射器，逐刻比位置、随机源、着火状态、出站包、小鸡和牛，玩家扔蛋另比 `ITEM_USED`），存档见 `chunk-content` 的两枚蛋。
 
+## 苦力怕的实施现状（2026-11-20）
+
+苦力怕在 `entity/mob/creeper.rs`：`CreeperState`（`swell` / `maxSwell` / `explosionRadius` 和三项同步元数据）挂在 `Mob.creeper` 上，全是相对计数，随实体行搬岛，不需要时钟平移，也没有新增 `IslandPart`。`Creeper.tick` 里 `super.tick()` 之前的那段在 `living::tick_mob` 的 `base_tick` 之前调用；`SwellGoal` 是 `Goal::Swell`（每刻目标，MOVE 标志），记住的目标按原始引用查死活，不走 `getTarget()` 的可攻击过滤。近战用通用的 `Goal::MeleeAttack`，和 main 合并后由 `class` 字段（官方类名）区分 `ZombieAttackGoal` 和普通 `MeleeAttackGoal`（苦力怕、骷髅）；`Creeper.doHurtTarget` 直接返回真，不造成伤害。目标选择走骷髅那套完整的 `TargetGoal` 规则（`MobType::full_target_rules`）。
+
+爆炸是新命令 `Command::ExplodeMob`，落地在 `World::explode_mob`（`entity/explosion.rs`）：和 TNT 共用射线和 `interact_with_blocks`，另加 `hurt_living_by_explosion`（生物和玩家的伤害、生物的击退）。命令里带来源生物的 `EntityPublic`：发出者正在 tick，`me.kind` 是占位，玩家的死亡消息要靠它拿名字和 UUID。方块掉落的衰减经 `Level::explosion_block_drops_decayed` 把爆炸半径交给战利品表，由新的方块层游戏规则 `mob_explosion_drop_decay` 控制。伤害类型新增 `DamageKind::PlayerExplosion`。并行驱动里这条命令和 TNT 的 `Explode` 一样在落地阶段执行，世界随机数只在落地时取。
+
+别的生物可以复用的东西：`GoalSelector::from_goals` / `Goal::melee` / `Goal::nearest_target`（按注册顺序搭目标表）、`MobType::has_no_ambient_sound`（`getAmbientSound()` 为 null 时不取音高随机数）、`MobType::uses_block_step_sound`（走路声用方块的 `SoundType`）、`MobInteraction::damage_held`（交互后给手里的物品扣 1 点耐久）、`World::explode_mob`（任何生物引发的 `ExplosionInteraction.MOB` 爆炸）、`creeper::finalize_spawn`（只有 `Mob.finalizeSpawn` 那一层的怪物）。
+
+顺带修正：`MeleeAttackGoal.tick` 重算路径前要先 `hasLineOfSight`（`followingTargetEvenIfNotSeen` 为假时），原先漏了；隔墙被打的场景才会暴露，僵尸和骷髅的既有场景逐刻结果不变。
+
+逐刻对拍场景：`creeper_chase_*`、`creeper_ignited`、`creeper_powered`、`creeper_fall`、`creeper_wall_hurt`、`creeper_blast_player_{1,2,3}`（`mob-oracle --only creeper`）。已知限制见 README 的苦力怕一条。
+
+## 蜘蛛和洞穴蜘蛛的实施现状（2026-11-21）
+
+蜘蛛在 `entity/mob/spider.rs`：`SpiderState`（`DATA_FLAGS_ID` 的攀爬位）挂在 `Mob.spider` 上，是相对状态，随实体行搬岛。`Spider.tick` 在 `living::tick_mob` 的 `ai_step` 之后执行，把 `Entity.horizontal_collision` 写进标志；`living::on_climbable` 对 `MobType::climbs_walls()` 的种类直接读这个标志（官方 `Spider.onClimbable`），爬墙的 0.2 上升、-0.15 下滑和水平 0.15 的夹取都走原有的 `travel` 代码。导航新增 `Navigation::wall_climber` / `path_to_position`：`create_path` 记录目标方块，`tick` 在路径走完后返回目标方块的三维坐标（`WallClimberNavigation`）。`move_to_entity` 是三参数的 `moveTo(entity, reach, speed)`，走基类：没有路径就返回假、不改速度（官方只改写了两参数版本，蜘蛛的目标不调它）。
+
+目标：`Goal::LeapAtTarget` 是新的目标（JUMP + MOVE 标志，起跳改速度）；`Goal::MeleeAttack` 新增 `light_flee`（`SpiderAttackGoal` 的亮处放弃和类名）和 `follow_unseen`（`followingTargetEvenIfNotSeen=true`，`canContinueToUse` 不看路径走完，`tick` 不要求视线）。`Goal::NearestAttackableTarget` 新增 `light_gate`（`SpiderTargetGoal` 的亮处闸门，连 `nextInt` 都不取）。`living::light_dependent_magic` 是 `Entity.getLightLevelDependentMagicValue` 的共用实现。
+
+洞穴蜘蛛复用同一套目标和尺寸表，只有属性（12 点生命）和命中中毒不同：`living::do_hurt_target` 命中后按难度给目标中毒，玩家走新命令 `Command::AddPlayerEffect`，生物走 `Command::HurtMob` 的新字段 `on_hit`（伤害真的落地才挂）。`living::add_effect` 会先问 `spider::can_be_affected`，中毒对蜘蛛无效。自然生成：`check_spawn_rules` 走怪物那条黑暗分支，`spawn::SpawnGroup::Spider` 保存同一组共享的药水效果。
+
+别的生物可以复用的东西：`Command::AddPlayerEffect` / `World::give_mob_effect`（给另一个实体挂效果）、`Goal::LeapAtTarget`、`MeleeAttack` 的 `follow_unseen`、`spider::can_be_affected` 这种「按种类挡效果」的钩子。
+
+逐刻对拍场景：`spider_chase_*`（午夜追玩家）、`spider_wall`（被打后翻过一整面石墙）、`spider_day`（白天中立）、`cave_spider_chase`（`mob-oracle --only spider_` / `--only cave_spider_`），5 个场景 840 刻 0 不一致。`spider_wall` 原先从翻墙那一刻起随机源比官方多走：`move_to_entity` 曾按两参数版本在没有路径时返回真，`MeleeAttackGoal.tick` 因此少加 15 刻重算间隔、多抽 `nextInt(7)`；改回基类语义后一致（2026-11-21，改坏确认：攀爬位恒为假时第 43 刻起报不一致）。`spider_day` 原先从第 34 刻（散步启动）起位置 / 速度差约 1e-9：根源是官方 `Spider.createAttributes` 写的移速是 float `0.3F`（加宽后 0.30000001192092896），我们存的是 double 0.3，0.8 倍速散步时 `setSpeed` 的 float 差一个 ulp；改成 `f64::from(0.3_f32)` 后四个场景 0 不一致（2026-11-21）。已知限制见 README 的蜘蛛一条。
+
+## 末影人的实施现状（2026-11-21）
+
+末影人在 `entity/mob/enderman.rs`：`EndermanState`（`carried` / `creepy` / `stared_at`、`target_change_time`、怒气目标与到期刻、待落地的搬放方块）挂在 `Mob.enderman` 上，都是相对状态，随实体行搬岛。`MobType::Enderman` 在 `set_target` 上套了一层 `enderman::set_target`：写目标的同刻设 `DATA_CREEPY`、`targetChangeTime` 并加「attacking」移速修饰（+0.15 加法），清目标时全部回退；所有设目标的地方（目标选择器、`HurtByTargetGoal`、`getNearestPlayer` 路径）都走这个包装，和官方 `Enderman.setTarget` 一致。
+
+目标选择器：`Goal::EndermanFreezeWhenLookedAt`（JUMP + MOVE，`canUse` 只看 `getTarget()` 是玩家、16 格内、`isBeingStaredBy`）和 `Goal::EndermanGaze`（`EndermanLookForPlayerGoal`：`getNearestPlayer(forCombat().range(64).selector(isAngerInducing))`，agro 计时 `adjustedTickDelay(5)`，锁定时 4 格内传送、16 格外每 15 刻朝玩家传送）；`Goal::EndermanBlock { place }` 复用 `canUse` 的随机闸门和 `tick` 的三次 double，改方块走新命令 `Command::EndermanBlock`（游戏层在世界线程落地，`World::set_block_and_update` / `remove_block`）。`NearestAttackableTargetGoal<Endermite>` 用 `TargetType::Endermite`：`available()` 为假，但 `nextInt(reducedTickDelay(10))` 照取，随机源不会错开。
+
+`LivingEntity.isSensitiveToWater`：`living::animal_ai_step` 在 `pushEntities` 之后、`Mob.aiStep` 的日晒之前调 `enderman::hurt_if_wet`（1 点溺水伤害，位置用包围盒顶上的那一格，官方 `isInRain`）。`LivingEntity.hurtServer` 的投掷物分支在 `living::hurt_server` 顶部：`DamageKind::Arrow | Spit` 先连续 64 次 `teleport()` 并返回 false；其余伤害走原路径后再按「来源不是生物」1/10 概率传送。`Entity.getLightLevelDependentMagicValue` 用 `living::light_dependent_magic` 的共用实现（眼位置那一格）。
+
+存档：`carriedBlockState` / `anger_end_time` / `angry_at`；`requiresCustomPersistence` 让搬着方块的末影人不被自然清除。同步：`EntityData::EndermanCarried`（`OPTIONAL_BLOCK_STATE`，序列化器号 15）、`EndermanCreepy` / `EndermanStaredAt`（BOOLEAN），index 来自生成器。死亡掉落：实体表之外，游戏层 `mob_loot_drops` 在表求值后用一把带 `minecraft:silk_touch` 的假钻石斧再查一次方块表（`MobDeathLoot.carried`）。
+
+其他生物可以复用的：`TargetType::Endermite` 这种「类型不存在但取数照旧」的目标写法、`MobType::uses_block_step_sound`（末影人和苦力怕一样用脚下方块的 `SoundType`）、`enderman::set_target` 这种「设目标时同步专属状态」的包装。
+
+逐刻对拍场景（`mob-oracle --only enderman_`）：`enderman_stare` / `enderman_neutral`（注视与不注视）、`enderman_day_teleport`（白天露天）、`enderman_rain`（夜里淋雨）、`enderman_arrow`（箭）、`enderman_stare_edge_3` / `enderman_stare_edge_6`（注视锥的边缘，偏 3 度和 6 度）、`enderman_blocks`（脚边的泥土捡起再放下）、`enderman_place`（开局搬着泥土再放下）。9 个场景 61416 刻 0 不一致。`enderman_day_teleport` 原来只跑 200 刻，到不了 `tickCount >= targetChangeTime + 600` 的门槛，白天传送一次都没判定过；2026-11-21 改成 1200 刻，改坏确认（`nextFloat() * 30` 改成 20）第 685 刻起报不一致。这个场景里的传送尝试都落空（两边一致），传送成功后的朝向仍只在注视 / 淋雨 / 箭的场景里覆盖。方块场景把天色固定在傍晚并关掉「看得见天」，避免长场景跑到白天传送；传送后的头部 / 身体朝向差异见 README。已知限制见 README 的末影人一条。
+
 ## 鱿鱼和发光鱿鱼的实施现状
 
 鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，以后海豚、鱼类也要用的公共部分在 `entity/mob/water.rs`：
