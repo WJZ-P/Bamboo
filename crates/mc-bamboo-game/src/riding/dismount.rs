@@ -13,6 +13,7 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::blocks;
+use mc_bamboo_protocol::packet::play::HumanoidArm;
 use mc_bamboo_world::store::ChunkStore;
 
 use crate::player::Player;
@@ -142,11 +143,21 @@ pub(crate) fn dismount_location(
     // The search ceiling in `getDismountLocationInDirection`: 0.75 above the top.
     let limit = vehicle_position.y + vehicle_height + 0.75;
     let base = vehicle_position.y.floor();
-    // 主手是右手（Bamboo 没有左手玩家），官方先试 +90 再试 -90。
+    // `getDismountLocationForPassenger` 先试主手一侧、再试另一侧：
+    // 主手一侧是 `yRot + (mainArm == RIGHT ? 90 : -90)`，另一侧是
+    // `yRot + (mainArm == LEFT ? 90 : -90)`。两个方向恒为 `+90` / `-90`，
+    // 只有先后顺序随主手变。
     //
-    // The main arm is the right one (no left-handed players), so vanilla tries
-    // +90 first and -90 second.
-    for degrees in [vehicle_yaw + 90.0, vehicle_yaw - 90.0] {
+    // `getDismountLocationForPassenger` tries the main-hand side first, then the
+    // other: the main-hand side is `yRot + (mainArm == RIGHT ? 90 : -90)` and the
+    // other is `yRot + (mainArm == LEFT ? 90 : -90)`. The two directions are
+    // always `+90` / `-90`; only their order follows the main arm.
+    let first = if player.client.main_hand == HumanoidArm::Right {
+        90.0
+    } else {
+        -90.0
+    };
+    for degrees in [vehicle_yaw + first, vehicle_yaw - first] {
         let direction = escape_vector(vehicle_width, PLAYER_POSES[0].0, degrees);
         let target_x = vehicle_position.x + direction.x;
         let target_z = vehicle_position.z + direction.z;

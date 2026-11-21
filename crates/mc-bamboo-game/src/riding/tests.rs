@@ -219,8 +219,9 @@ fn sneaking_blocks_mounting() {
 /// 官方 `AbstractHorse.getDismountLocationForPassenger`：右脚一侧没地方站时换另一侧，
 /// 两边都悬空就落在载具自己的位置。
 ///
-/// Vanilla `AbstractHorse.getDismountLocationForPassenger`: try the right-hand
-/// side, then the other side, and fall back to the vehicle's own position.
+/// Vanilla `AbstractHorse.getDismountLocationForPassenger`: try the main-hand
+/// side (the default player is right-handed), then the other side, and fall
+/// back to the vehicle's own position.
 #[test]
 fn a_dismount_lands_beside_the_horse_or_on_it() {
     use mc_bamboo_core::BlockPos;
@@ -304,6 +305,62 @@ fn a_dismount_lands_beside_the_horse_or_on_it() {
         super::dismount::dismount_location(&chunks, &border, &player(), air, 1.396_484_4, 1.6, 0.0)
             .expect("the fallback is always a position");
     assert_eq!(spot, air);
+}
+
+/// 两侧都能站时，先被尝试的是主手一侧：右手玩家落在 -x，左手玩家落在 +x。
+/// 官方 `getDismountLocationForPassenger` 的主手方向是
+/// `yRot + (mainArm == RIGHT ? 90 : -90)`，另一手取反。
+///
+/// When both sides are valid the main-hand side is tried first: a right-handed
+/// rider lands on -x, a left-handed one on +x. Vanilla
+/// `getDismountLocationForPassenger` uses `yRot + (mainArm == RIGHT ? 90 : -90)`
+/// for the main-hand direction and the opposite for the other hand.
+#[test]
+fn dismount_side_follows_the_players_main_arm() {
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode, HumanoidArm};
+    use mc_bamboo_world::store::ChunkStore;
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player};
+
+    let rider = |main_hand| {
+        let info = ClientInformation {
+            main_hand,
+            ..ClientInformation::default()
+        };
+        Player::new(
+            PlayerId(1),
+            Uuid::from_u128(1),
+            "Rider".to_owned(),
+            GameMode::Survival,
+            info,
+            Vec3::new(0.5, -60.0, 0.5),
+        )
+    };
+    let border = mc_bamboo_blocks::WorldBorder::default();
+    let chunks = ChunkStore::flat();
+    let vehicle = Vec3::new(0.5, -60.0, 0.5);
+    let side = |main_hand| {
+        super::dismount::dismount_location(
+            &chunks,
+            &border,
+            &rider(main_hand),
+            vehicle,
+            1.396_484_4,
+            1.6,
+            0.0,
+        )
+        .expect("a floor exists")
+        .x
+    };
+    assert!(
+        side(HumanoidArm::Right) < 0.0,
+        "right hand first tries -x at yaw 0"
+    );
+    assert!(
+        side(HumanoidArm::Left) > 0.5,
+        "left hand first tries +x at yaw 0"
+    );
 }
 
 /// 官方 `EntityTypes` 的 `passengerAttachments`：马 1.44375，驴 1.1125，骡 1.2125，
