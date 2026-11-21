@@ -265,7 +265,10 @@ impl Goal {
             | Self::LlamaHurtByTarget { .. } => &[Flag::Target],
             Self::RestrictSun => &[],
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
-            Self::TurtleLayEgg { .. } | Self::TurtleGoHome { .. } => &[Flag::Move],
+            // `MoveToBlockGoal` 锁 MOVE + JUMP；`TurtleGoHomeGoal` 没设标志位。
+            // `MoveToBlockGoal` locks MOVE and JUMP; `TurtleGoHomeGoal` sets none.
+            Self::TurtleLayEgg { .. } => &[Flag::Move, Flag::Jump],
+            Self::TurtleGoHome { .. } => &[],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
             Self::SquidRandomMovement
