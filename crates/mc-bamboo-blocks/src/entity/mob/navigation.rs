@@ -117,6 +117,10 @@ impl Navigation {
 
     /// `GroundPathNavigation.canUpdatePath` / `WaterBoundPathNavigation.canUpdatePath`。
     fn can_update_path(&self, mob: &NavMob) -> bool {
+        if self.flags.amphibious {
+            // `AmphibiousPathNavigation.canUpdatePath` 恒真。
+            return true;
+        }
         match self.water() {
             Some(allow_breaching) => allow_breaching || mob.in_liquid,
             None => mob.path.on_ground || mob.in_liquid,
@@ -181,9 +185,10 @@ impl Navigation {
         reach: i32,
     ) -> Option<Path> {
         // `WaterBoundPathNavigation` 不覆盖 `createPath`：不查加载，也不找地面。
+        // `AmphibiousPathNavigation` 同样用基类实现。
         // `WaterBoundPathNavigation` keeps the base `createPath`: no loaded check and no
-        // surface search.
-        if self.water().is_some() {
+        // surface search. `AmphibiousPathNavigation` does the same.
+        if self.water().is_some() || self.flags.amphibious {
             return self.create_path_to(view, mob, pos, reach);
         }
         if !view.is_loaded(pos) {
@@ -269,7 +274,7 @@ impl Navigation {
         let next = self.path.as_ref()?.next_entity_pos(width);
         // `WaterBoundPathNavigation.getGroundY` 原样返回 `target.y`。
         // `WaterBoundPathNavigation.getGroundY` returns `target.y` unchanged.
-        let y = if self.water().is_some() {
+        let y = if self.water().is_some() || self.flags.amphibious {
             next.y
         } else {
             ground_y(view, next)
@@ -302,7 +307,7 @@ impl Navigation {
         // `getMaxVerticalDistanceToWaypoint`: 1 on the ground, 0.5 in water.
         let vertical = if self.flags.swim.is_some() { 0.5 } else { 1.0 };
         let close = dx < limit && dz < limit && dy < vertical;
-        let direct = self.flags.swim.is_some();
+        let direct = self.flags.swim.is_some() || (self.flags.amphibious && mob.in_liquid);
         if close
             || (can_cut_corner(path.next_node().path_type)
                 && should_target_next_node_in_direction(view, mob, path, temp, direct))
@@ -419,6 +424,10 @@ impl Navigation {
     /// The virtual `isStableDestination`: `WaterBoundPathNavigation` only wants the cell
     /// itself not to be solid-render.
     pub fn stable_destination(&self, view: &dyn BlockView, pos: BlockPos) -> bool {
+        if self.flags.amphibious {
+            // `AmphibiousPathNavigation.isStableDestination`：下面不是空气。
+            return !view.block_state(pos.below()).is_air();
+        }
         if self.water().is_some() {
             !view.block_state(pos).is_solid_render()
         } else {
@@ -430,7 +439,9 @@ impl Navigation {
 /// `GroundPathNavigation.getTempMobPos`；`WaterBoundPathNavigation` 取 `getY(0.5)`。
 fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, flags: EvaluatorFlags) -> Vec3 {
     let position = mob.path.position;
-    if flags.swim.is_some() {
+    if flags.swim.is_some() || flags.amphibious {
+        // `AmphibiousPathNavigation.getTempMobPos` 和 `WaterBoundPathNavigation` 一样取
+        // `getY(0.5)`。
         let y = position.y + f64::from(mob.path.height) * 0.5;
         return Vec3::new(position.x, y, position.z);
     }
