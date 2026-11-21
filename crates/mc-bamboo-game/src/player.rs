@@ -209,6 +209,10 @@ pub(crate) struct Player {
     /// Entity tick count, used modulo 20/10 by peaceful regeneration. Relative,
     /// so island splits and merges need no rebasing.
     pub(crate) entity_ticks: i32,
+    /// `lastHurtByMob` / `lastHurtMob` / `lastDamageSource`，狼保护主人时读。
+    ///
+    /// Combat memory read by tamed wolves guarding their owner.
+    pub(crate) combat_memory: crate::player_combat_memory::CombatMemory,
     /// `ServerPlayer.respawnConfig` 之外，死亡后一律等待客户端发来的
     /// `PERFORM_RESPAWN`：`immediate_respawn` 只影响客户端要不要显示死亡界面，
     /// 服务端不自己重生，客户端不发就一直是死的。
@@ -294,6 +298,7 @@ impl Player {
             dead: false,
             last_death_location: None,
             entity_ticks: 0,
+            combat_memory: Default::default(),
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
         }
@@ -444,6 +449,7 @@ impl Player {
             off_hand: if off.is_empty() { 0 } else { off.item },
             yaw: self.yaw,
             pitch: self.pitch,
+            combat: self.combat_memory.view(self.entity_ticks),
         }
     }
 
