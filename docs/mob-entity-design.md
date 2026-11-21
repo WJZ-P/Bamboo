@@ -353,6 +353,9 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   的扫掠（`sweep_movement`，步高取 `STEP_HEIGHT` 属性）和包里的位置比：水平差超过 0.25 格
   且旧位置没卡在方块或边界里就 `absSnapTo` 回原位并发回载具位置。实体之间的碰撞
   （`isEntityCollidingWithAnythingNew`）Bamboo 没有建模，这一步跳过。
+- 控制权：`tickPlayer` 只在载具的 `getControllingPassenger()` 是这名玩家时记 `lastVehicle`，
+  而马科要上了鞍才算有人控制。没上鞍的载具能骑、AI 照跑，`move_vehicle` 的位置不收，
+  按「离载具超过一格或离上次重置 20 刻」发回载具位置。
 - 朝向：马科 `tick_ridden` 把载具朝向设成骑手朝向、俯仰取一半，旧朝向、身体和头都对齐；
   玩家控制时 `isEffectiveAi()` 为假，AI 和 `travel` 都不跑，速度清零（和官方服务端一致）。
 - 跳跃：`START_RIDING_JUMP` → `handleStartJump`（扬蹄加 `entity.horse.jump` 声），`STOP_RIDING_JUMP` 是空的。

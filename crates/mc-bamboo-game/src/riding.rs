@@ -280,13 +280,20 @@ pub(crate) fn tick(region: &mut Region) {
             continue;
         }
         let vehicle = player.riding.vehicle.expect("刚刚筛过");
-        let Some(public) = region.entities.public_at(vehicle) else {
-            dismount(region, id);
-            continue;
-        };
-        let KindPublic::Mob(mob) = &public.kind else {
-            dismount(region, id);
-            continue;
+        let (is_passenger, position, offset) = {
+            let Some(public) = region.entities.public_at(vehicle) else {
+                dismount(region, id);
+                continue;
+            };
+            let KindPublic::Mob(mob) = &public.kind else {
+                dismount(region, id);
+                continue;
+            };
+            (
+                mob.passengers.contains(&id.0),
+                public.position,
+                passenger_offset(mob, public.yaw),
+            )
         };
         // 官方 `ejectPassengers`：载具的乘客名单里没有这名玩家了，就当场摘掉两边的关系。
         // 未驯服的马科被骑时 `RunAroundLikeCrazyGoal` 就是这样甩人的。
@@ -294,19 +301,37 @@ pub(crate) fn tick(region: &mut Region) {
         // Vanilla `ejectPassengers`: once the vehicle's passenger list no longer
         // holds this player, both sides are cleared. That is how
         // `RunAroundLikeCrazyGoal` throws the rider off an untamed equine.
-        if !mob.passengers.contains(&id.0) {
+        if !is_passenger {
             dismount(region, id);
             continue;
         }
-        let offset = passenger_offset(mob, public.yaw);
-        let target = public.position.add(offset);
-        let yaw = public.yaw;
+        let target = position.add(offset);
+        // 官方 `ServerGamePacketListenerImpl.tickPlayer` 只在载具的
+        // `getControllingPassenger()` 是这名玩家时才记 `lastVehicle`，而
+        // `AbstractHorse.getControllingPassenger` 要求上了鞍。没上鞍的载具能骑，
+        // 位置却由它自己的 AI 决定，`move_vehicle` 一律不认。
+        //
+        // Vanilla `tickPlayer` only records `lastVehicle` when the vehicle's
+        // `getControllingPassenger()` is this player, and
+        // `AbstractHorse.getControllingPassenger` needs a saddle. An unsaddled
+        // mount can be ridden but its AI owns the position; `move_vehicle` is never
+        // accepted for it.
+        let saddled = region
+            .entities
+            .with_mut(vehicle, |row| {
+                row.with_mob(|_, mob| {
+                    !mob.equipment
+                        .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+                        .is_empty()
+                })
+            })
+            .flatten()
+            .unwrap_or(false);
         if let Some(player) = region.players.get_mut(&id) {
             player.motion.fall_distance = 0.0;
-            player.riding.first_good = public.position;
-            player.riding.last_good = public.position;
-            player.riding.last_vehicle = Some(vehicle);
-            let _ = yaw;
+            player.riding.first_good = position;
+            player.riding.last_good = position;
+            player.riding.last_vehicle = saddled.then_some(vehicle);
             player.set_position(&mut region.player_grid, target);
         }
     }
@@ -342,19 +367,23 @@ pub(crate) fn on_move_vehicle(
         return;
     };
     // 只有「上一刻由这名玩家控制的那只」才收位置；其余的按官方那样把载具位置发回去。
+    // 官方在「距上次重置超过 20 刻」或「包里的位置离载具超过 1 格」时重置。
     //
-    // Only the vehicle this player controlled last tick is accepted; otherwise
-    // the vehicle position is sent back, as vanilla does.
+    // Only the vehicle this player controlled last tick is accepted; otherwise the
+    // vehicle position is sent back, as vanilla does. Vanilla resets after 20 ticks
+    // or as soon as the packet position is more than one block from the vehicle.
     if player.riding.last_vehicle != Some(vehicle) {
-        if now.saturating_sub(player.riding.last_reset_at) > 20 {
+        let snap = region.entities.public_at(vehicle).map(|public| {
+            let pitch = match &public.kind {
+                KindPublic::Mob(mob) => mob.x_rot,
+                _ => player.pitch,
+            };
+            (public.position, public.yaw, pitch)
+        });
+        let far = snap.is_some_and(|(at, _, _)| position.distance_to_sqr(at) > 1.0);
+        if far || now.saturating_sub(player.riding.last_reset_at) > 20 {
             player.riding.last_reset_at = now;
-            let mut snap = None;
-            if let Some(public) = region.entities.public_at(vehicle) {
-                snap = Some(public.position);
-            }
-            if let Some(position) = snap {
-                let yaw = player.yaw;
-                let pitch = player.pitch;
+            if let Some((position, yaw, pitch)) = snap {
                 region.links.send(
                     id,
                     &MoveVehicle {

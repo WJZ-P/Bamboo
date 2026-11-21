@@ -471,15 +471,33 @@ fn a_vehicle_move_through_a_wall_is_rejected() {
     assert_eq!(snaps.len(), 1, "one position packet");
 }
 
-/// 造一个已上马的测试场景：玩家在出生点，马就在他脚下。
+/// 造一个已上马的测试场景：玩家在出生点，上鞍的马就在他脚下，并且跑过一刻
+/// `riding::tick`（`last_vehicle` 从这一刻起才算数）。
 ///
-/// Build a mounted scene: the player at spawn with a horse under them.
+/// Build a mounted scene: the player at spawn with a saddled horse under them, after
+/// one `riding::tick` so `last_vehicle` is recorded.
 fn staged_horse() -> (
     crate::world::tests::Harness,
     crate::world::tests::Client,
     i32,
 ) {
+    staged_horse_with_saddle(true)
+}
+
+/// 同 [`staged_horse`]，`saddle` 决定马有没有鞍（没鞍的载具能骑，但控制权不在客户端）。
+///
+/// Like [`staged_horse`]; `saddle` decides whether the horse has one (an unsaddled
+/// mount can still be ridden, but the client does not control it).
+fn staged_horse_with_saddle(
+    saddle: bool,
+) -> (
+    crate::world::tests::Harness,
+    crate::world::tests::Client,
+    i32,
+) {
     use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
     use crate::world::tests::Harness;
 
@@ -488,9 +506,17 @@ fn staged_horse() -> (
     server.tick();
     let _ = client.take_frames();
     let at = server.region().players[&client.id].position();
-    let horse = Entity::by_mob_type(MobType::Horse, at);
+    let mut horse = Entity::by_mob_type(MobType::Horse, at);
+    horse.with_mob(|_, mob| {
+        if saddle {
+            mob.equipment
+                .set(EquipmentSlot::Saddle, ItemStack::new(items::SADDLE, 1));
+        }
+    });
     let uid = server.spawn_entity(horse);
     super::mount(server.region(), client.id, uid);
+    server.tick();
+    let _ = client.take_frames();
     (server, client, uid)
 }
 
@@ -525,4 +551,77 @@ fn a_vehicle_stuck_in_blocks_may_move_out() {
     super::on_move_vehicle(server.region(), client.id, target, 0.0, 0.0, true);
     let public = server.region().entities.public_at(uid).expect("horse");
     assert_eq!(public.position, target);
+}
+
+/// 没上鞍的马也能骑，但客户端不控制它：官方 `getControllingPassenger` 要求有鞍，
+/// `tickPlayer` 因此不记 `lastVehicle`，`move_vehicle` 报上来的位置一律不收。
+///
+/// An unsaddled horse can be ridden but the client does not control it: vanilla
+/// `getControllingPassenger` needs a saddle, so `tickPlayer` records no
+/// `lastVehicle` and no `move_vehicle` position is accepted.
+#[test]
+fn an_unsaddled_mount_is_not_client_controlled() {
+    let (mut server, client, uid) = staged_horse_with_saddle(false);
+    assert_eq!(
+        server.region().players[&client.id].riding.last_vehicle,
+        None
+    );
+    let at = server
+        .region()
+        .entities
+        .public_at(uid)
+        .expect("horse")
+        .position;
+    super::on_move_vehicle(
+        server.region(),
+        client.id,
+        Vec3::new(at.x + 0.5, at.y, at.z),
+        0.0,
+        0.0,
+        true,
+    );
+    let public = server.region().entities.public_at(uid).expect("horse");
+    assert_eq!(public.position, at, "the client cannot move it");
+}
+
+/// 不控制的载具被报了一个一格以外的位置时，官方立刻把载具位置发回去
+/// （`tickCount - vehiclePositionLastResetAt > 20 || distanceToSqr > 1`）。
+///
+/// A non-controlled vehicle reported more than one block away gets its position
+/// sent back at once (vanilla: `... > 20 || distanceToSqr > 1`).
+#[test]
+fn a_foreign_vehicle_position_far_away_is_reset_at_once() {
+    use mc_bamboo_protocol::packet::{ClientboundPacket, play::MoveVehicle};
+
+    use crate::world::tests::frames_with_id;
+
+    let (mut server, client, uid) = staged_horse_with_saddle(false);
+    let at = server
+        .region()
+        .entities
+        .public_at(uid)
+        .expect("horse")
+        .position;
+    super::on_move_vehicle(
+        server.region(),
+        client.id,
+        Vec3::new(at.x + 2.0, at.y, at.z),
+        0.0,
+        0.0,
+        true,
+    );
+    server.region().links.flush();
+    let frames = client.take_frames();
+    assert_eq!(frames_with_id(&frames, MoveVehicle::ID).len(), 1);
+    // 紧接着报一个一格以内的位置：离上次重置不到 20 刻，不发。
+    super::on_move_vehicle(
+        server.region(),
+        client.id,
+        Vec3::new(at.x + 0.5, at.y, at.z),
+        0.0,
+        0.0,
+        true,
+    );
+    server.region().links.flush();
+    assert!(frames_with_id(&client.take_frames(), MoveVehicle::ID).is_empty());
 }
