@@ -48,13 +48,6 @@ const ZOMBIE_CONVERTED_TO_DROWNED: i32 = 1040;
 pub(super) const DROWNED_CONVERSION_KEY: &str = "DrownedConversionTime";
 pub(super) const IN_WATER_TIME_KEY: &str = "InWaterTime";
 
-/// `SpawnPlacements` 里主世界的海平面。Bamboo 目前没有统一的 `getSeaLevel()`，
-/// 超平坦和噪声世界都用 63。
-///
-/// The overworld sea level. Bamboo has no unified `getSeaLevel()` yet; both the flat
-/// and the noise world use 63.
-pub const SEA_LEVEL: i32 = 63;
-
 /// `BiomeTags.MORE_FREQUENT_DROWNED_SPAWNS`。
 const MORE_FREQUENT_DROWNED_SPAWNS: &str = "minecraft:more_frequent_drowned_spawns";
 
@@ -157,8 +150,14 @@ pub(super) fn targets() -> GoalSelector {
             3,
             nearest(TargetType::Villager, super::goals::reduced_tick_delay(10)),
         ),
-        (3, nearest(TargetType::IronGolem, 0)),
-        (3, nearest(TargetType::Axolotl, 0)),
+        (
+            3,
+            nearest(TargetType::IronGolem, super::goals::reduced_tick_delay(10)),
+        ),
+        (
+            3,
+            nearest(TargetType::Axolotl, super::goals::reduced_tick_delay(10)),
+        ),
         (
             5,
             nearest(TargetType::Turtle, super::goals::reduced_tick_delay(10)),
@@ -403,7 +402,7 @@ pub(super) fn check_spawn_rules(world: &World, pos: BlockPos) -> bool {
     if more_frequent {
         random.next_int(15) == 0 && can_monster_spawn
     } else {
-        random.next_int(40) == 0 && pos.y < SEA_LEVEL - 5 && can_monster_spawn
+        random.next_int(40) == 0 && pos.y < world.sea_level() - 5 && can_monster_spawn
     }
 }
 

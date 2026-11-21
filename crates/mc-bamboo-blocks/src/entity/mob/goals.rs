@@ -255,9 +255,10 @@ impl Goal {
             | Self::CubeAttack { .. }
             | Self::CubeRandomDirection { .. }
             | Self::CubeKeepJumping => super::slime::flags(self),
-            Self::DrownedGoToWater { .. }
-            | Self::DrownedSwimUp { .. }
-            | Self::RandomStroll { .. } => &[Flag::Move],
+            Self::DrownedGoToWater { .. } | Self::RandomStroll { .. } => &[Flag::Move],
+            // `DrownedSwimUpGoal` 没有 `setFlags`：不锁任何标志。
+            // `DrownedSwimUpGoal` never calls `setFlags`, so it locks nothing.
+            Self::DrownedSwimUp { .. } => &[],
             Self::WitchHealRaiders { .. } => &[Flag::Target],
             Self::WitchRangedAttack { .. } => &[Flag::Move, Flag::Look],
         }
@@ -1085,7 +1086,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         // `!isPassenger()`: riding is not modelled.
         Goal::CubeKeepJumping => true,
         Goal::DrownedGoToWater { wanted, .. } => {
-            if ctx.blocks().is_bright_outside() || me.in_water {
+            // `DrownedGoToWaterGoal.canUse`：白天、不在水里、找得到水。
+            // `DrownedGoToWaterGoal.canUse`: daylight, not in water and water found.
+            if !ctx.blocks().is_bright_outside() || me.in_water {
                 return false;
             }
             let Some(found) = water_pos(me, ctx.blocks()) else {
@@ -1098,7 +1101,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::DrownedSwimUp { .. } => {
             !ctx.blocks().is_bright_outside()
                 && me.in_water
-                && me.position.y < f64::from(super::drowned::SEA_LEVEL - 2)
+                && me.position.y < f64::from(ctx.blocks().sea_level() - 2)
         }
         Goal::RandomStroll {
             interval,
@@ -1180,7 +1183,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             !*stuck
                 && !ctx.blocks().is_bright_outside()
                 && me.in_water
-                && me.position.y < f64::from(super::drowned::SEA_LEVEL - 2)
+                && me.position.y < f64::from(ctx.blocks().sea_level() - 2)
         }
         Goal::WitchHealRaiders { .. } => {
             combat_target(mob, ctx).is_some_and(|target| target_in_follow_range(me, mob, target))
@@ -1567,7 +1570,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::CubeKeepJumping => super::slime::set_wanted_movement(mob, 1.0),
         // `DrownedSwimUpGoal.tick`：离终点够近或没有路径时，朝海平面方向重新找点。
         Goal::DrownedSwimUp { speed, stuck } => {
-            let sea = f64::from(super::drowned::SEA_LEVEL);
+            let sea = f64::from(ctx.blocks().sea_level());
             if me.position.y < sea - 1.0
                 && (mob.navigation.is_done() || super::drowned::close_to_next_pos(me, mob))
             {

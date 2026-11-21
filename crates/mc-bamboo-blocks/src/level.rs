@@ -698,6 +698,14 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界最高的一层（含），`getMaxY`。
     fn max_y(&self) -> i32;
 
+    /// `Level.getSeaLevel()`：海平面。噪声主世界是 63，超平坦是 -63。
+    ///
+    /// `Level.getSeaLevel()`: the sea level. 63 for the noise overworld and -63 for
+    /// superflat.
+    fn sea_level(&self) -> i32 {
+        63
+    }
+
     /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
     fn random(&self) -> &LevelRandom;
 

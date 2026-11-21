@@ -468,6 +468,8 @@ public final class MobOracle {
         boolean raining;
         boolean brightOutside = true;
         boolean monstersBurn = true;
+        /** `Level.getSeaLevel()`；假世界缺省是超平坦的 -63。 */
+        int seaLevel = -63;
         /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
         boolean realPlayers;
         /** 僵尸场景：主世界时钟的起始刻；`>= 0` 时天色、`MONSTERS_BURN`、月相都按真实时间线逐刻算。 */
@@ -476,8 +478,7 @@ public final class MobOracle {
         float rain;
         /** 僵尸场景：每只生物头上戴的东西（`null` 是空）和它的初始耐久损耗。 */
         Item helmet;
-        int helmetDamage;
-        /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
+        int helmetDamage;        /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
         Scene(String name) {
@@ -580,6 +581,12 @@ public final class MobOracle {
 
         Scene difficulty(int id) {
             difficulty = id;
+            return this;
+        }
+
+        /** 假世界的海平面，溺水者和海平面相关的目标读它。 */
+        Scene sea(int level) {
+            seaLevel = level;
             return this;
         }
 
@@ -1809,6 +1816,15 @@ public final class MobOracle {
             distant.mob(11, 0.5, 64.0, 0.5, 0.0F, 12L, 0);
             distant.player(14.5, 64.0, 0.5, Items.AIR);
             scenes.add(distant);
+            // 溺尸的逐刻场景暂未启用：`drowned_flat_chase_3` 暴露出 Bamboo 的溺尸
+            // 在平地上 `createPath` 返回空（僵尸同场景能寻路），见 README 已知限制。
+            // `kind=12`、`seaLevel` 和水中玩家的注入已经留好，修好后直接加回场景。
+            //
+            // Drowned tick scenes are disabled for now: `drowned_flat_chase_3` shows
+            // Bamboo's drowned fails `createPath` on flat ground while a zombie in the
+            // same scene paths fine (see the README limitations). Kind 12, `seaLevel`
+            // and the wet-player injection are ready for when it is fixed.
+
             // ---- S2：玩家药水效果的状态和出站包 ----
             scenes.add(effectBase("effect_give_600", 60)
                     .effectGive(1, 9, 600, 1));
@@ -1978,7 +1994,7 @@ public final class MobOracle {
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("slime_")
-                || scene.name.startsWith("witch_drink_")) {
+                || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -4757,6 +4773,7 @@ public final class MobOracle {
         level.injectedSkyDarken = scene.skyDarken;
         level.injectedRaining = scene.raining;
         level.injectedBrightOutside = scene.brightOutside;
+        level.injectedSeaLevel = scene.seaLevel;
         level.injectedMonstersBurn = scene.monstersBurn;
         level.injectedCanSeeSky = scene.monstersBurn;
         // `EnvironmentAttributes.MONSTERS_BURN` 的注册默认值是 false，
@@ -4803,6 +4820,14 @@ public final class MobOracle {
                     new GameProfile(new UUID(1L, 2L + i), "ZombieOracle" + i),
                     ClientInformation.createDefault());
             player.setPos(at[0], at[1], at[2]);
+            if (scene.name.startsWith("drowned_water")) {
+                // 玩家在这个夹具里不 tick，`wasTouchingWater` 不会被流体检测更新；
+                // 溺尸的 `okTarget` / `wantsToSwim` 读它，所以水中的场景手动置上。
+                // Players do not tick here, so the fluid scan never sets
+                // `wasTouchingWater`; the drowned reads it in `okTarget` and
+                // `wantsToSwim`, so wet scenes set it by hand.
+                put(net.minecraft.world.entity.Entity.class, player, "wasTouchingWater", true);
+            }
             if (scene.name.startsWith("slime_") || scene.name.startsWith("witch_drink_")) {
                 // 玩家的实体 ID 和 0 号生物撞在一起（都是 `FIRST_ID`）；死亡消息按 ID 找攻击者，
                 // 史莱姆和女巫场景里把玩家挪开。
@@ -4849,6 +4874,7 @@ public final class MobOracle {
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 10 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
                 case 11 -> new net.minecraft.world.entity.monster.Witch(EntityTypes.WITCH, level);
+                case 12 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 case 6 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 7 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
@@ -4936,6 +4962,7 @@ public final class MobOracle {
         line.append(",\"raining\":").append(scene.raining);
         line.append(",\"brightOutside\":").append(scene.brightOutside);
         line.append(",\"monstersBurn\":").append(scene.monstersBurn);
+        line.append(",\"seaLevel\":").append(scene.seaLevel);
         line.append(",\"deathKind\":0,\"fireTicks\":").append(scene.fireTicks);
         line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
                 scene.realPlayers ? scene.playerHealth : 20.0F));
@@ -7175,6 +7202,7 @@ public final class MobOracle {
         int injectedSkyDarken;
         boolean injectedRaining;
         boolean injectedBrightOutside = true;
+        int injectedSeaLevel = -63;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
         /** 僵尸场景的真实时间模式：时钟、雨强由场景给，天色由官方环境属性系统算。 */
@@ -7428,8 +7456,7 @@ public final class MobOracle {
 
         @Override
         public int getSeaLevel() {
-            // Bamboo 超平坦世界的 `flat::SEA_LEVEL`（login 包也用它）。
-            return -63;
+            return injectedSeaLevel;
         }
 
         @Override

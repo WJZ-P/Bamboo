@@ -63,6 +63,12 @@ pub trait BlockView {
     fn is_in_world_bounds(&self, pos: BlockPos) -> bool;
     fn min_y(&self) -> i32;
     fn max_y(&self) -> i32;
+    /// `Level.getSeaLevel()`：溺尸上岸和海平面相关的目标读它。
+    ///
+    /// `Level.getSeaLevel()`, read by the drowned's land and sea-level goals.
+    fn sea_level(&self) -> i32 {
+        63
+    }
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32;
     fn block_game_rules(&self) -> BlockGameRules;
     /// `FlowingFluid` 的流体顶面高度。
@@ -298,6 +304,10 @@ impl BlockView for World<'_> {
 
     fn max_y(&self) -> i32 {
         World::max_y(self)
+    }
+
+    fn sea_level(&self) -> i32 {
+        World::sea_level(self)
     }
 
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {

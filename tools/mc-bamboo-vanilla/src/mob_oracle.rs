@@ -184,6 +184,12 @@ struct Case {
     bright_outside: bool,
     #[serde(default)]
     monsters_burn: bool,
+    /// 假世界的海平面，缺省是超平坦的 -63；溺尸的上浮和上岸目标读它。
+    ///
+    /// The fake world's sea level, -63 for superflat unless a scene overrides it;
+    /// the drowned's swim-up and go-to-beach goals read it.
+    #[serde(default = "minus_63")]
+    sea_level: i32,
     /// 僵尸场景：玩家走游戏层真实的受伤链路（[`mc_bamboo_game::ReplayPlayers`]）。
     #[serde(default)]
     real_players: bool,
@@ -508,6 +514,18 @@ const fn minus_one() -> i32 {
     -1
 }
 
+const fn minus_63() -> i32 {
+    -63
+}
+
+/// 敌对生物场景（僵尸一支和溺尸）注入天色、燃烧开关和海平面；其余场景沿用旧缺省。
+///
+/// Scenes that inject sky colour, the burn switch and the sea level: the zombie family
+/// and the drowned. Other scenes keep the old defaults.
+fn is_monster_scene(name: &str) -> bool {
+    name.starts_with("zombie_") || name.starts_with("drowned_")
+}
+
 #[derive(Debug, Deserialize)]
 struct End {
     cases: u32,
@@ -528,6 +546,7 @@ struct ZombieFacts {
     difficulty: i32,
     bright_outside: bool,
     monsters_burn: bool,
+    sea_level: i32,
     raining: bool,
 }
 
@@ -620,6 +639,14 @@ impl Level for MobLevel {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    /// 官方夹具的 `FakeLevel.getSeaLevel()`：缺省超平坦 -63，场景可以覆盖。
+    ///
+    /// The Java fixture's `FakeLevel.getSeaLevel()`: superflat's -63 unless the scene
+    /// overrides it.
+    fn sea_level(&self) -> i32 {
+        self.facts.sea_level
     }
 
     fn random(&self) -> &LevelRandom {
@@ -1140,12 +1167,13 @@ impl Report {
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
-                bright_outside: case.bright_outside || !case.name.starts_with("zombie_"),
-                monsters_burn: if case.name.starts_with("zombie_") {
+                bright_outside: case.bright_outside || !is_monster_scene(&case.name),
+                monsters_burn: if is_monster_scene(&case.name) {
                     case.monsters_burn
                 } else {
                     true
                 },
+                sea_level: case.sea_level,
                 raining: case.raining,
             },
             natural_spawn: None,
@@ -1224,6 +1252,7 @@ impl Report {
                 let kind = match cow.kind {
                     10 => mc_bamboo_blocks::entity::mob::MobType::Slime,
                     11 => mc_bamboo_blocks::entity::mob::MobType::Witch,
+                    12 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,

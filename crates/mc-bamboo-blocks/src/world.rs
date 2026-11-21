@@ -1028,6 +1028,13 @@ impl<'a> World<'a> {
         self.level.max_y()
     }
 
+    /// `Level.getSeaLevel()`。
+    ///
+    /// `Level.getSeaLevel()`.
+    pub fn sea_level(&self) -> i32 {
+        self.level.sea_level()
+    }
+
     /// `isInsideBuildHeight`。
     pub fn is_inside_build_height(&self, y: i32) -> bool {
         (self.min_y()..=self.max_y()).contains(&y)

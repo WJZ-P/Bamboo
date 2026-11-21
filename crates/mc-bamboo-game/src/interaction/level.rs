@@ -60,6 +60,10 @@ pub(crate) struct RegionLevel<'a> {
     ///
     /// `WorldGenLevel.getSeed()`: the world seed, read for slime chunks.
     pub(crate) world_seed: i64,
+    /// `Level.getSeaLevel()`：这一维度的海平面。超平坦是 -63，其余是 63。
+    ///
+    /// `Level.getSeaLevel()` for this dimension. -63 for superflat and 63 otherwise.
+    pub(crate) sea_level: i32,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -305,6 +309,10 @@ impl Level for RegionLevel<'_> {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    fn sea_level(&self) -> i32 {
+        self.sea_level
     }
 
     fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
