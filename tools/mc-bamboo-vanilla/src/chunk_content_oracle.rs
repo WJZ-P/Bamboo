@@ -629,7 +629,14 @@ fn run_cases(
         );
     }
     use mc_bamboo_blocks::entity::mob::MobType;
-    for kind in [MobType::Cow, MobType::Pig, MobType::Sheep, MobType::Chicken] {
+    for kind in [
+        MobType::Cow,
+        MobType::Pig,
+        MobType::Sheep,
+        MobType::Chicken,
+        MobType::Squid,
+        MobType::GlowSquid,
+    ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
         let mut extra = (0_u8, 0_i32);

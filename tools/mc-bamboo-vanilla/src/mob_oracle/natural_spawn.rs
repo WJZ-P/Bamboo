@@ -42,7 +42,18 @@ pub(super) struct Case {
     local_cap: bool,
     nearby_respawn: bool,
     halloween: bool,
+    /// 水生夹具：三层水（-64..=-62）代替草地。
+    ///
+    /// Aquatic fixture: three water layers (-64..=-62) replace the grass.
+    #[serde(default)]
+    aquatic: bool,
+    #[serde(default = "flat_sea_level")]
+    sea_level: i32,
     steps: Vec<Step>,
+}
+
+fn flat_sea_level() -> i32 {
+    -63
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -70,6 +81,7 @@ pub(super) struct Coverage {
     cows: usize,
     skeletons: usize,
     zombies: usize,
+    squid: usize,
     without_spawn: usize,
     cap_off: usize,
     per_scene: std::collections::BTreeMap<String, usize>,
@@ -95,6 +107,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::ZOMBIE || row[0] == entity_type::HUSK)
             .count();
+        self.squid += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::SQUID || row[0] == entity_type::GLOW_SQUID)
+            .count();
         if case.name == "cow_no_local_cap" {
             self.cap_off += step.spawned.len();
         }
@@ -103,12 +120,13 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} squid or glow squid, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
                 self.skeletons,
                 self.zombies,
+                self.squid,
                 self.without_spawn,
                 self.cap_off
             );
@@ -123,7 +141,11 @@ impl Coverage {
 
     pub(super) fn check(&self) -> Result<(), String> {
         if self.cases > 0
-            && (self.cows == 0 || self.skeletons == 0 || self.zombies == 0 || self.cap_off == 0)
+            && (self.cows == 0
+                || self.skeletons == 0
+                || self.zombies == 0
+                || self.squid == 0
+                || self.cap_off == 0)
         {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
@@ -162,7 +184,9 @@ impl Report {
                 -62,
                 8,
             )),
-            sea_level: -63,
+            // 改坏确认：海平面降一格，鱿鱼的「不高于海平面」就不成立。
+            // Break check: one block lower and the squid's "at or below sea level" fails.
+            sea_level: case.sea_level - i32::from(broken && case.name == "squid_ocean"),
         };
         for official in &case.steps {
             ticks.set_time(official.time);
@@ -234,12 +258,19 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     let roof = kind == MobType::Husk;
+    let aquatic = case.aquatic;
     let blocks = (-16..48)
         .flat_map(|x| {
             (-16..32).flat_map(move |z| {
                 let floor = (BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK));
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
-                std::iter::once(floor).chain(roof.then_some(glass))
+                let water =
+                    (-64..=-62).map(move |y| (BlockPos::new(x, y, z), BlockState(blocks::WATER)));
+                (!aquatic)
+                    .then_some(floor)
+                    .into_iter()
+                    .chain(roof.then_some(glass))
+                    .chain(water.filter(move |_| aquatic))
             })
         })
         .collect();

@@ -6,6 +6,11 @@
 //! 浮点按原始位比较，不留容差。
 //!
 //! Compares official cows with Bamboo's, tick by tick, bit for bit.
+//!
+//! 鱿鱼和发光鱿鱼有自己的场景（`--only squid_` / `--only glow`，见 `mob_oracle/squid.rs`）。
+//!
+//! Squid and glow squid have their own scenes (`--only squid_` / `--only glow`, see
+//! `mob_oracle/squid.rs`).
 
 use std::{
     collections::HashMap,

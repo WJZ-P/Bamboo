@@ -722,3 +722,21 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
 
 扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。
+
+## 鱿鱼和发光鱿鱼的实施现状
+
+鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，以后海豚、鱼类也要用的公共部分在 `entity/mob/water.rs`：
+
+- `water::handle_air_supply`（`AgeableWaterCreature.handleAirSupply`，在 `super.baseTick()` 之后用这一刻开始时的氧气算）、`water::surface_spawn_rules`（`checkSurfaceAgeableWaterCreatureSpawnRules`）、`water::in_water_position_ok`（`SpawnPlacementTypes.IN_WATER`）和 `water::finalize_ageable`（不带花色那一层的 `AgeableMob.finalizeSpawn` + `Mob.finalizeSpawn`）。
+- `MobType` 新增几个按类型的开关，别的水生生物加进来时只改这些函数：`is_ageable_water_creature`、`is_animal`（存档的 `InLove` / `LoveCause` 只有 `Animal` 写）、`can_breathe_under_water`、`is_pushed_by_fluid`、`emits_movement_sounds`（`MovementEmission.EVENTS` 不放脚步声、也不取游泳声的两个随机数）、`spawns_in_water`。
+- `living::hurt_server` 现在是 `hurtServer` 的虚分派入口：鱿鱼走 `squid::hurt_server`（父类成功且 `getLastHurtByMob() != null` 才返回真并喷墨，发光鱿鱼再设 100 刻变暗），其余走 `living_hurt_server`。
+- 目标：`Goal::SquidRandomMovement`（优先级 0）和 `Goal::SquidFlee`（优先级 1，每刻目标）都不占标志位，只写 `Mob.squid.movement`；`Squid.aiStep` 的尾部（`squid::ai_step`）按触手节拍把它写成速度，`travel` 只是 `move(SELF, deltaMovement)`。官方 `SquidFleeGoal.tick` 里 `fleeTo.normalize()` 的返回值被丢弃，这里同样不归一化。
+- 新的生物事件 `MobEvent::Particles`（`ServerLevel.sendParticles`）：游戏层按「玩家所在方块的中心离粒子不到 32 格」发 `level_particles`。以后别的生物的服务端粒子可以复用。
+- 发光鱿鱼的 `DATA_DARK_TICKS_REMAINING` 下标由生成器导出（`entity_types::GLOW_SQUID_DARK_TICKS`）。服务端的 `addParticle(GLOW, getRandomX, getRandomY, getRandomZ)` 不发包，但三个 `nextDouble` 照取。
+- 自然生成：`SpawnParams` 多一个 `sea_level`（`natural_spawn.rs` 按世界类型给）；`check_spawn_rules`、`spawn_placement_ok`、`is_valid_position_for_mob`（`AgeableWaterCreature.checkSpawnObstruction` 不查液体）按类型分派。`walk_target_value` 对非 `Animal` 返回 `PathfinderMob` 的缺省值 0。
+
+岛的拆合：新增的按实体状态只有 `Mob.squid`（`SquidState`：身体倾角、触手节拍、移动向量、变暗倒计时）和目标里的 `flee_ticks`，全是相对量、都在实体行上，整行搬走即可，没有改 `IslandPart` 清单和 `region/island_split.rs`。
+
+对拍：`mob-oracle --only squid_` / `--only glow`（`squid_swim`、`squid_hurt`、`squid_beached`、`squid_swim_baby`、`glow_squid_swim`、`glow_squid_hurt`，共 1666 刻）逐刻比位置、速度、朝向、随机源、氧气、身体与触手状态、移动向量、掉落、世界随机源和出站包字节（配对、同步、实体事件 19、音效、墨汁粒子、变暗元数据）；`--break-self-test squid` 把那一下伤害改成 2 点能被抓到。自然生成见 `mob-oracle --only natural_spawn` 的 `squid_ocean*` / `glow_squid_*` 夹具，存档见 `chunk-content` 的 fresh 实体对拍。
+
+已知差异：生物受伤后 `ServerEntity.sendChanges` 因 `hurtMarked` 多发的那个速度包，正式游戏路径一直没有发（`Mob.hurt_marked` 只写不读，牛和僵尸也一样）；`mob-oracle` 的鱿鱼场景在对拍里自己读并清这个标志。

@@ -468,3 +468,47 @@ pub(super) fn finalize_spawn(
 ) {
     water::finalize_ageable(entity, random, group, 0.05);
 }
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_nbt::Tag;
+
+    use super::*;
+    use crate::{archive::tag, entity::mob::nbt};
+
+    fn saved(kind: MobType, dark_ticks: i32) -> Tag {
+        let mut entity = Entity::by_mob_type(kind, Vec3::new(0.5, 62.0, 0.5));
+        entity.with_mob(|_, mob| mob.squid.dark_ticks = dark_ticks);
+        nbt::write_mob(&entity.split()).expect("a squid saves")
+    }
+
+    #[test]
+    fn glow_squid_dark_ticks_survive_a_save_and_load() {
+        let tag = saved(MobType::GlowSquid, 73);
+        assert_eq!(tag::int_or(&tag, "DarkTicksRemaining", 0), 73);
+        let row = nbt::read_mob(&tag, "minecraft:glow_squid", 7)
+            .expect("the tag loads")
+            .expect("glow squid are modelled");
+        let entity = row.into_entity();
+        assert_eq!(entity.kind.mob().expect("a mob").squid.dark_ticks, 73);
+    }
+
+    #[test]
+    fn squid_save_has_age_but_no_animal_or_glow_keys() {
+        let tag = saved(MobType::Squid, 0);
+        assert!(tag::field(&tag, "Age").is_some());
+        assert!(tag::field(&tag, "InLove").is_none());
+        assert!(tag::field(&tag, "DarkTicksRemaining").is_none());
+    }
+
+    #[test]
+    fn squid_are_water_creatures_with_ten_health() {
+        let squid = Mob::new(MobType::Squid);
+        assert_eq!(squid.health, 10.0);
+        assert!(MobType::Squid.can_breathe_under_water());
+        assert!(!MobType::Squid.is_pushed_by_fluid());
+        assert!(!MobType::GlowSquid.is_animal());
+        assert!(MobType::Cow.is_animal());
+    }
+}

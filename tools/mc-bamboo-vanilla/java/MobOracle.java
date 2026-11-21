@@ -2732,6 +2732,15 @@ public final class MobOracle {
             scenes.add(new NaturalScene("skeleton_near_" + distance, EntityTypes.SKELETON, "plains", 2, 0, 0, 11,
                     false, 8.5 - distance, 0, 289, true, false));
         }
+        // 水生夹具（名字里带 squid）：三层水代替草地。发光鱿鱼把海平面抬到 -20，
+        // 这样 -63 那一层满足「海平面下 33 格」；`_lit` 有方块光，不该刷出来。
+        // Aquatic fixtures (names containing "squid"): three water layers replace the grass.
+        // Glow squid raise the sea level to -20 so the -63 layer is 33 below it; `_lit` has
+        // block light and must not spawn.
+        scenes.add(new NaturalScene("squid_ocean", EntityTypes.SQUID, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("squid_ocean_peaceful", EntityTypes.SQUID, "ocean", 0, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("glow_squid_dark", EntityTypes.GLOW_SQUID, "plains", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("glow_squid_lit", EntityTypes.GLOW_SQUID, "plains", 2, 0, 1, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
             for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
@@ -2765,8 +2774,16 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
+        boolean aquatic = scene.name().contains("squid");
+        level.naturalSeaLevel = scene.mob() == EntityTypes.GLOW_SQUID ? -20 : -63;
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
+                if (aquatic) {
+                    for (int y = -64; y <= -62; y++) {
+                        level.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                    }
+                    continue;
+                }
                 level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
                 // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
                 // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
@@ -2851,6 +2868,8 @@ public final class MobOracle {
         row.addProperty("spawnableChunks", scene.spawnableChunks());
         row.addProperty("localCap", scene.localCap());
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
+        row.addProperty("aquatic", aquatic);
+        row.addProperty("seaLevel", level.naturalSeaLevel);
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.add("steps", steps);
         return row;
@@ -6484,8 +6503,11 @@ public final class MobOracle {
         @Override
         public int getSeaLevel() {
             // Bamboo 超平坦世界的 `flat::SEA_LEVEL`（login 包也用它）。
-            return -63;
+            return naturalSeaLevel;
         }
+
+        /** 自然生成夹具的海平面；缺省是超平坦的 -63。 */
+        int naturalSeaLevel = -63;
 
         @Override
         public long getSeed() {
