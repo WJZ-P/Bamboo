@@ -745,7 +745,7 @@ fn view_vector(x_rot: f32, y_rot: f32) -> Vec3 {
 /// `Projectile.shootFromRotation` 的方向部分。`y_offset` 是弓的 0 度。
 ///
 /// The direction half of `Projectile.shootFromRotation`.
-fn shoot_from_rotation(y_rot: f32, x_rot: f32, y_offset: f32) -> Vec3 {
+pub(crate) fn shoot_from_rotation(y_rot: f32, x_rot: f32, y_offset: f32) -> Vec3 {
     let xd = -mth::sin(f64::from(y_rot * (std::f32::consts::PI / 180.0)))
         * mth::cos(f64::from(x_rot * (std::f32::consts::PI / 180.0)));
     let yd = -mth::sin(f64::from(
@@ -795,7 +795,7 @@ fn transform_quaternion(v: Vec3, x: f32, y: f32, z: f32, w: f32) -> Vec3 {
     )
 }
 
-fn player_position(region: &Region, id: PlayerId) -> Option<Vec3> {
+pub(crate) fn player_position(region: &Region, id: PlayerId) -> Option<Vec3> {
     let player = region.players.get(&id)?;
     Some(player.position())
 }
@@ -803,7 +803,7 @@ fn player_position(region: &Region, id: PlayerId) -> Option<Vec3> {
 /// `getEyeY() - 0.1` 的箭生成位置。
 ///
 /// The spawn position, `getEyeY() - 0.1F`.
-fn player_eye(region: &Region, id: PlayerId) -> Option<Vec3> {
+pub(crate) fn player_eye(region: &Region, id: PlayerId) -> Option<Vec3> {
     let player = region.players.get(&id)?;
     let position = player.position();
     // 官方 `getEyeHeight` 是 `float`，加到 double 的 y 上再减 `0.1F`。
@@ -817,7 +817,7 @@ fn player_eye(region: &Region, id: PlayerId) -> Option<Vec3> {
     ))
 }
 
-fn player_rotation(region: &Region, id: PlayerId) -> (f32, f32) {
+pub(crate) fn player_rotation(region: &Region, id: PlayerId) -> (f32, f32) {
     region
         .players
         .get(&id)
@@ -827,7 +827,7 @@ fn player_rotation(region: &Region, id: PlayerId) -> (f32, f32) {
 /// `ServerPlayer.lastKnownClientMovement`。
 ///
 /// `ServerPlayer.lastKnownClientMovement`.
-fn player_movement(region: &Region, id: PlayerId) -> Option<Vec3> {
+pub(crate) fn player_movement(region: &Region, id: PlayerId) -> Option<Vec3> {
     region.players.get(&id).map(|player| {
         let movement = player.motion.known_movement;
         Vec3::new(
@@ -838,7 +838,7 @@ fn player_movement(region: &Region, id: PlayerId) -> Option<Vec3> {
     })
 }
 
-fn level_random_float(region: &mut Region) -> f32 {
+pub(crate) fn level_random_float(region: &mut Region) -> f32 {
     let (mut level, ticks) = region.block_level();
     let world = World::new(&mut level, ticks);
     world.random().next_float()
@@ -847,7 +847,11 @@ fn level_random_float(region: &mut Region) -> f32 {
 /// 未开菜单时同步变动的玩家物品栏槽位；否则由菜单同步。
 ///
 /// Sync changed player inventory slots unless an open menu will sync them.
-fn sync_slots(region: &mut Region, id: PlayerId, slots: impl IntoIterator<Item = usize>) {
+pub(crate) fn sync_slots(
+    region: &mut Region,
+    id: PlayerId,
+    slots: impl IntoIterator<Item = usize>,
+) {
     if region.menus.contains_key(&id) {
         return;
     }
@@ -859,7 +863,13 @@ fn sync_slots(region: &mut Region, id: PlayerId, slots: impl IntoIterator<Item =
     }
 }
 
-fn play_sound(region: &mut Region, position: Option<Vec3>, name: &str, volume: f32, pitch: f32) {
+pub(crate) fn play_sound(
+    region: &mut Region,
+    position: Option<Vec3>,
+    name: &str,
+    volume: f32,
+    pitch: f32,
+) {
     let Some(position) = position else {
         return;
     };

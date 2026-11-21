@@ -46,6 +46,7 @@ fn success(shrink: bool, req: &MobInteractRequest) -> MobInteraction {
         shrink_held: shrink && !req.creative,
         replacement: None,
         open_inventory: false,
+        shear: false,
     }
 }
 
@@ -177,6 +178,7 @@ fn fed_food(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInte
         shrink_held: !req.creative,
         replacement: None,
         open_inventory: false,
+        shear: false,
     }
 }
 

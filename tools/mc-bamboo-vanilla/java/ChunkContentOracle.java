@@ -624,7 +624,21 @@ public final class ChunkContentOracle {
          */
         private JsonObject freshCow(JsonObject request) {
             FakeLevel level = FakeLevel.create(official, 1L);
-            Entity cow = net.minecraft.world.entity.EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            net.minecraft.world.entity.EntityType<?> type = request.has("type")
+                    ? net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getValue(
+                            net.minecraft.resources.Identifier.parse(request.get("type").getAsString()))
+                    : net.minecraft.world.entity.EntityTypes.COW;
+            Entity cow = type.create(level, EntitySpawnReason.COMMAND);
+            // 羊的羊毛字节和鸡的下蛋计时照 Bamboo 一侧设，只比存盘格式。
+            // Copy the sheep wool byte and chicken egg timer from Bamboo; only the format is compared.
+            if (cow instanceof net.minecraft.world.entity.animal.sheep.Sheep sheep && request.has("wool")) {
+                int wool = request.get("wool").getAsInt();
+                sheep.setColor(net.minecraft.world.item.DyeColor.byId(wool & 15));
+                sheep.setSheared((wool & 16) != 0);
+            }
+            if (cow instanceof net.minecraft.world.entity.animal.chicken.Chicken chicken && request.has("egg")) {
+                chicken.eggTime = request.get("egg").getAsInt();
+            }
             cow.snapTo(
                     request.get("x").getAsDouble(),
                     request.get("y").getAsDouble(),

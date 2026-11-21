@@ -14,7 +14,7 @@ use crate::entity::{
     Entity,
     arrow::enchantment_level,
     ctx::{Command, EntityCtx},
-    mob::{DamageSource, MobDeathLoot, equipment::ALL_SLOTS, skeleton_drops::drop_slot},
+    mob::{DamageSource, MobDeathLoot, equipment::SLOTS, skeleton_drops::drop_slot},
 };
 
 /// `dropAllDeathLoot`：`shouldDropLoot`（成年且 `MOB_DROPS`）才掉战利品表和装备；
@@ -59,7 +59,7 @@ fn drop_worn(
     } else {
         0
     };
-    for slot in ALL_SLOTS {
+    for slot in SLOTS {
         if let Some(stack) = drop_slot(
             &mut mob.equipment,
             slot,

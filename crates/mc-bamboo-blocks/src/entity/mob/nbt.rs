@@ -319,17 +319,35 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
     }
-    if mob.mob_type == MobType::Cow {
+    // ---- Sheep / Chicken ----
+    if mob.mob_type == MobType::Sheep {
+        put(
+            &mut out,
+            "Sheared",
+            Tag::Byte(i8::from(super::sheep::is_sheared(mob))),
+        );
+        put(
+            &mut out,
+            "Color",
+            Tag::Byte(super::sheep::color(mob).id() as i8),
+        );
+    }
+    if mob.mob_type == MobType::Chicken {
+        put(&mut out, "IsChickenJockey", Tag::Byte(0));
+        put(&mut out, "EggLayTime", Tag::Int(mob.egg_time));
+    }
+    if matches!(mob.mob_type, MobType::Cow | MobType::Pig | MobType::Chicken) {
         put(
             &mut out,
             "variant",
             Tag::String(mob.variant.name().to_owned()),
         );
-        put(
-            &mut out,
-            "sound_variant",
-            Tag::String(mob.sound_variant.name().to_owned()),
-        );
+        let sound = match mob.mob_type {
+            MobType::Pig => mob.pig_sound_variant.name(),
+            MobType::Chicken => mob.chicken_sound_variant.name(),
+            _ => mob.sound_variant.name(),
+        };
+        put(&mut out, "sound_variant", Tag::String(sound.to_owned()));
     }
     super::equine::save(mob, &mut out)?;
     // ---- Zombie ----
@@ -474,13 +492,37 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
         }
-        if mob.mob_type == MobType::Cow {
-            if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
+        // ---- Sheep / Chicken ----
+        if mob.mob_type == MobType::Sheep {
+            super::sheep::set_sheared(mob, tag::bool_or(tag, "Sheared", false));
+            let color = tag::int_or(tag, "Color", 0);
+            super::sheep::set_color(mob, mc_bamboo_core::sign::DyeColor::from_id(color));
+        }
+        if mob.mob_type == MobType::Chicken {
+            // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。
+            // A missing key keeps the constructor's roll.
+            mob.egg_time = tag::int_or(tag, "EggLayTime", mob.egg_time);
+        }
+        if matches!(mob.mob_type, MobType::Cow | MobType::Pig | MobType::Chicken) {
+            if let Some(variant) = tag::string_or(tag, "variant").and_then(|name| {
+                if mob.mob_type != MobType::Cow && !name.contains(':') {
+                    CowVariant::from_name(&format!("minecraft:{name}"))
+                } else {
+                    CowVariant::from_name(name)
+                }
+            }) {
                 mob.variant = variant;
             }
-            if let Some(variant) =
-                tag::string_or(tag, "sound_variant").and_then(CowSoundVariant::from_name)
-            {
+            let sound = tag::string_or(tag, "sound_variant");
+            if mob.mob_type == MobType::Chicken {
+                if let Some(variant) = sound.and_then(super::chicken::SoundVariant::from_name) {
+                    mob.chicken_sound_variant = variant;
+                }
+            } else if mob.mob_type == MobType::Pig {
+                if let Some(variant) = sound.and_then(super::pig::SoundVariant::from_name) {
+                    mob.pig_sound_variant = variant;
+                }
+            } else if let Some(variant) = sound.and_then(CowSoundVariant::from_name) {
                 mob.sound_variant = variant;
             }
         }

@@ -920,6 +920,16 @@ pub struct ProjectileFacts {
     pub horse_chest: u8,
     pub llama_strength: u8,
     pub llama_variant: u8,
+    pub pig_boost_time: u8,
+    pub pig_variant: u8,
+    pub pig_sound_variant: u8,
+    pub pig_variant_serializer: i32,
+    pub pig_sound_variant_serializer: i32,
+    pub sheep_wool: u8,
+    pub chicken_variant: u8,
+    pub chicken_sound_variant: u8,
+    pub chicken_variant_serializer: i32,
+    pub chicken_sound_variant_serializer: i32,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
     ///
     /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.

@@ -19,11 +19,11 @@ const ATTRIBUTES: [i32; 3] = [
 ];
 type State = [i64; 6];
 
-/// 逐刻场景里的类型编号：4 马、5 驴、6 骡、7 羊驼。
+/// 逐刻场景里的类型编号：6 马、7 驴、8 骡、9 羊驼（3–5 是猪、羊、鸡）。
 ///
-/// Tick-scene kind numbers: 4 horse, 5 donkey, 6 mule, 7 llama.
+/// Tick-scene kind numbers: 6 horse, 7 donkey, 8 mule, 9 llama (3 to 5 are pig, sheep, chicken).
 pub(super) fn scene_kind(kind: i32) -> MobType {
-    KINDS[(kind - 4) as usize]
+    KINDS[(kind - 6) as usize]
 }
 
 #[derive(Debug, Deserialize)]

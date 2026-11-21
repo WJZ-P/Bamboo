@@ -87,6 +87,7 @@ fn panic() -> Goal {
 fn tempt() -> Goal {
     Goal::Tempt {
         speed: 1.25,
+        steering_item: false,
         player: None,
         calm_down: 0,
     }

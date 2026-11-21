@@ -13,6 +13,7 @@
 //! therefore live on [`Entity::dimensions`].
 
 pub mod attributes;
+pub mod chicken;
 pub mod control;
 pub mod damage;
 pub mod effects;
@@ -27,6 +28,8 @@ pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
+mod pig;
+pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
@@ -53,6 +56,9 @@ use super::{EntityUid, JavaRandom};
 pub enum MobType {
     #[default]
     Cow,
+    Pig,
+    Sheep,
+    Chicken,
     Zombie,
     Husk,
     Skeleton,
@@ -68,6 +74,9 @@ impl MobType {
         use mc_bamboo_data::registries::entity_type as ids;
         match self {
             Self::Cow => ids::COW,
+            Self::Pig => ids::PIG,
+            Self::Sheep => ids::SHEEP,
+            Self::Chicken => ids::CHICKEN,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -82,6 +91,9 @@ impl MobType {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:cow",
+            Self::Pig => "minecraft:pig",
+            Self::Sheep => "minecraft:sheep",
+            Self::Chicken => "minecraft:chicken",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -95,6 +107,9 @@ impl MobType {
     pub fn by_name(name: &str) -> Option<Self> {
         [
             Self::Cow,
+            Self::Pig,
+            Self::Sheep,
+            Self::Chicken,
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
@@ -125,6 +140,9 @@ impl MobType {
             (Self::Horse | Self::Donkey | Self::Mule | Self::Llama, _) => {
                 equine::dimensions(self, baby)
             }
+            (Self::Pig, baby) => pig::dimensions(baby),
+            (Self::Sheep, baby) => sheep::dimensions(baby),
+            (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -164,6 +182,9 @@ impl MobType {
     pub const fn loot_table(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:entities/cow",
+            Self::Pig => "minecraft:entities/pig",
+            Self::Sheep => "minecraft:entities/sheep",
+            Self::Chicken => "minecraft:entities/chicken",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -195,17 +216,18 @@ impl MobType {
     pub const fn sound_volume(self) -> f32 {
         if self.is_equine() {
             0.8
-        } else if self.is_monster() {
-            1.0
-        } else {
+        } else if matches!(self, Self::Cow) {
             0.4
+        } else {
+            1.0
         }
     }
 
     /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
@@ -218,7 +240,8 @@ impl MobType {
 
     pub const fn hurt_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Sheep => Some("minecraft:entity.sheep.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -231,7 +254,8 @@ impl MobType {
 
     pub const fn death_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Sheep => Some("minecraft:entity.sheep.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -244,7 +268,8 @@ impl MobType {
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow => None,
+            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Sheep => Some("minecraft:entity.sheep.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
@@ -260,6 +285,9 @@ impl MobType {
         use mc_bamboo_data::items;
         match self {
             Self::Cow => items::COW_SPAWN_EGG,
+            Self::Pig => items::PIG_SPAWN_EGG,
+            Self::Sheep => items::SHEEP_SPAWN_EGG,
+            Self::Chicken => items::CHICKEN_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -274,6 +302,9 @@ impl MobType {
     pub const fn translation_key(self) -> &'static str {
         match self {
             Self::Cow => "entity.minecraft.cow",
+            Self::Pig => "entity.minecraft.pig",
+            Self::Sheep => "entity.minecraft.sheep",
+            Self::Chicken => "entity.minecraft.chicken",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -482,6 +513,7 @@ pub enum DamageKind {
     ///
     /// Llama spit, `minecraft:spit`.
     Spit,
+    Thrown,
     Starve,
     Thorns,
     Magic,
@@ -512,6 +544,7 @@ impl DamageKind {
             Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
             Self::Arrow => "minecraft:arrow",
             Self::Spit => "minecraft:spit",
+            Self::Thrown => "minecraft:thrown",
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
             Self::Magic => "minecraft:magic",
@@ -562,6 +595,7 @@ impl DamageKind {
             Self::PlayerAttack => "player",
             Self::MobAttack | Self::MobAttackNoAggro | Self::Spit => "mob",
             Self::Arrow => "arrow",
+            Self::Thrown => "thrown",
             Self::Starve => "starve",
             Self::Thorns => "thorns",
             Self::Magic => "magic",
@@ -574,7 +608,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 24] = [
+        let all: [DamageKind; 25] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -594,6 +628,7 @@ impl DamageKind {
             Self::MobAttackNoAggro,
             Self::Arrow,
             Self::Spit,
+            Self::Thrown,
             Self::Starve,
             Self::Thorns,
             Self::Magic,
@@ -613,6 +648,7 @@ impl DamageKind {
                 | Self::MobAttackNoAggro
                 | Self::Arrow
                 | Self::Spit
+                | Self::Thrown
                 | Self::Thorns
         ) || matches!(self, Self::Wither)
     }
@@ -692,6 +728,7 @@ impl DamageKind {
             | Self::MobAttackNoAggro
             | Self::Arrow
             | Self::Spit
+            | Self::Thrown
             | Self::Thorns
             | Self::Explosion
             | Self::Cactus
@@ -711,6 +748,7 @@ impl DamageKind {
                 | Self::MobAttack
                 | Self::MobAttackNoAggro
                 | Self::Arrow
+                | Self::Thrown
                 | Self::Thorns
                 | Self::Cactus
                 | Self::Freeze
@@ -885,9 +923,45 @@ pub struct PlayerMobAttack {
 pub struct MobDeathLoot {
     pub victim: MobType,
     pub on_fire: bool,
+    /// 羊的 `DATA_WOOL_ID`，战利品表按颜色和是否剪过选子表。
+    ///
+    /// The sheep `DATA_WOOL_ID`; the loot table picks a sub-table by colour and shear state.
+    pub wool: u8,
     pub source: DamageSource,
     pub recent_player: Option<[u8; 16]>,
     pub recent_player_id: Option<EntityUid>,
+}
+
+/// 剪毛（`SHEARING`）或下蛋（`GIFT`）的一次战利品表求值：表名、原点、实体本身和可选的工具。
+///
+/// One shearing (`SHEARING`) or egg-laying (`GIFT`) loot roll: table, origin, the entity itself
+/// and the optional tool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityLootRequest {
+    pub table: &'static str,
+    pub kind: MobType,
+    pub origin: Vec3,
+    pub wool: u8,
+    pub variant: CowVariant,
+    pub tool: Option<mc_bamboo_protocol::item::ItemStack>,
+}
+
+impl EntityLootRequest {
+    pub(super) fn new(
+        table: &'static str,
+        me: &super::Entity,
+        mob: &Mob,
+        tool: Option<mc_bamboo_protocol::item::ItemStack>,
+    ) -> Self {
+        Self {
+            table,
+            kind: mob.mob_type,
+            origin: me.position,
+            wool: mob.wool,
+            variant: mob.variant,
+            tool,
+        }
+    }
 }
 
 impl MobDeathLoot {
@@ -896,6 +970,7 @@ impl MobDeathLoot {
         Self {
             victim: mob.mob_type,
             on_fire: me.remaining_fire_ticks > 0,
+            wool: mob.wool,
             source,
             recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
             recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
@@ -1045,6 +1120,16 @@ pub struct Mob {
     pub love_cause: Option<[u8; 16]>,
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
+    pub pig_sound_variant: pig::SoundVariant,
+    /// 羊的 `DATA_WOOL_ID`：低 4 位颜色，第 5 位已剪毛。
+    ///
+    /// The sheep `DATA_WOOL_ID`: colour in the low four bits, bit 4 when sheared.
+    pub wool: u8,
+    /// 鸡的叫声变种和下蛋倒计时 `eggTime`。
+    ///
+    /// The chicken sound variant and `eggTime` countdown.
+    pub chicken_sound_variant: chicken::SoundVariant,
+    pub egg_time: i32,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1081,6 +1166,10 @@ pub enum MobEvent {
     Hearts,
     /// `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，不是中立生物。
     MilkSound { position: Vec3 },
+    /// 玩家音源（`SoundSource.PLAYERS`）的音效，比如给羊染色。
+    ///
+    /// A sound in the player category, such as dyeing a sheep.
+    PlayerSound { sound: &'static str, position: Vec3 },
     /// `Entity.playSound`：在实体当时的位置放一个音效（已经排除了静音的情况）。
     ///
     /// `Entity.playSound` at the entity's position at the time (silent mobs excluded).
@@ -1091,6 +1180,7 @@ pub enum MobEvent {
         position: Vec3,
         /// `Monster.getSoundSource()` 是 HOSTILE，牛是 NEUTRAL。
         hostile: bool,
+        seed: Option<i64>,
     },
 }
 
@@ -1105,6 +1195,9 @@ impl Mob {
     pub fn new(mob_type: MobType) -> Self {
         let attributes = match mob_type {
             MobType::Cow => Attributes::cow(),
+            MobType::Pig => pig::attributes(),
+            MobType::Sheep => sheep::attributes(),
+            MobType::Chicken => chicken::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
             kind => equine::attributes(kind),
@@ -1113,14 +1206,19 @@ impl Mob {
         let mut navigation = Navigation::new(follow_range);
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
+            MobType::Pig => pig::goals(&mut navigation),
+            MobType::Sheep => sheep::goals(&mut navigation),
+            MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
         };
         let target_goals = match mob_type {
+            MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
+                GoalSelector::default()
+            }
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
-            MobType::Cow => GoalSelector::default(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -1194,10 +1292,10 @@ impl Mob {
             navigation,
             goals,
             seen: Vec::new(),
-            malus: if mob_type.is_monster() {
-                Malus::monster()
-            } else {
-                Malus::animal()
+            malus: match mob_type {
+                _ if mob_type.is_monster() => Malus::monster(),
+                MobType::Chicken => chicken::malus(),
+                _ => Malus::animal(),
             },
             persistence_required: false,
             left_handed: false,
@@ -1232,6 +1330,10 @@ impl Mob {
             love_cause: None,
             variant: CowVariant::Temperate,
             sound_variant: CowSoundVariant::Classic,
+            pig_sound_variant: pig::SoundVariant::Classic,
+            wool: 0,
+            chicken_sound_variant: chicken::SoundVariant::Classic,
+            egg_time: 0,
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1329,6 +1431,9 @@ pub struct MobPublic {
     pub no_gravity: bool,
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
+    pub pig_sound_variant: pig::SoundVariant,
+    pub wool: u8,
+    pub chicken_sound_variant: chicken::SoundVariant,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1379,6 +1484,9 @@ impl MobPublic {
             no_gravity: mob.no_gravity,
             variant: mob.variant,
             sound_variant: mob.sound_variant,
+            pig_sound_variant: mob.pig_sound_variant,
+            wool: mob.wool,
+            chicken_sound_variant: mob.chicken_sound_variant,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

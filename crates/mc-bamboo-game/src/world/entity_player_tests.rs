@@ -88,6 +88,7 @@ fn a_wheat_holding_player_makes_a_cow_look_and_walk_over() {
         cow,
         Goal::Tempt {
             speed: 1.25,
+            steering_item: false,
             player: None,
             calm_down: 0,
         },
@@ -126,6 +127,7 @@ fn an_empty_handed_player_does_not_tempt_a_cow() {
         cow,
         Goal::Tempt {
             speed: 1.25,
+            steering_item: false,
             player: None,
             calm_down: 0,
         },

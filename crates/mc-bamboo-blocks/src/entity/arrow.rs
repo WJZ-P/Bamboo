@@ -555,7 +555,7 @@ fn clip_entity_with_margin(
     })
 }
 
-pub(super) fn clip_including_border(
+pub(crate) fn clip_including_border(
     view: &dyn BlockView,
     from: Vec3,
     to: Vec3,
@@ -587,7 +587,7 @@ pub(super) fn clip_including_border(
     })
 }
 
-pub(super) fn resolve_owner(ctx: &dyn EntityCtx, uuid: [u8; 16]) -> Option<EntityUid> {
+pub(crate) fn resolve_owner(ctx: &dyn EntityCtx, uuid: [u8; 16]) -> Option<EntityUid> {
     let mut player = None;
     ctx.blocks().for_each_player(&mut |view| {
         if view.uuid == Some(uuid) {
@@ -603,7 +603,7 @@ pub(super) fn resolve_owner(ctx: &dyn EntityCtx, uuid: [u8; 16]) -> Option<Entit
     })
 }
 
-pub(super) fn player_box(player: &PlayerView) -> Aabb {
+pub(crate) fn player_box(player: &PlayerView) -> Aabb {
     let p = player.position;
     let half = f64::from(0.6_f32) / 2.0;
     Aabb::new(
@@ -618,7 +618,7 @@ pub(super) fn player_box(player: &PlayerView) -> Aabb {
 
 // AABB.clip 只接受线段内部的入射面交点，不把盒内起点当成命中。
 // AABB.clip only accepts entering faces strictly within the segment.
-pub(super) fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
+pub(crate) fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
     let start = [from.x, from.y, from.z];
     let d = to.subtract(from);
     let steps = [d.x, d.y, d.z];
