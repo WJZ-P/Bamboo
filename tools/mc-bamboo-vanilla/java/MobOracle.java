@@ -274,7 +274,8 @@ public final class MobOracle {
                 playShot(official, out, name);
                 cases++;
             }
-            for (String name : List.of("egg_floor", "egg_hatch_one", "egg_hatch_four", "egg_hit_cow")) {
+            for (String name : List.of("egg_floor", "egg_hatch_one", "egg_hatch_four", "egg_hit_cow",
+                    "egg_hit_cow_owned")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playEgg(official, out, name);
                 cases++;
@@ -3285,11 +3286,25 @@ public final class MobOracle {
      * the egg's random for a searched seed so the hatch draws take the wanted branch.
      */
     private static void playEgg(Official official, Writer out, String name) throws Exception {
-        boolean cowHit = name.equals("egg_hit_cow");
+        // `_owned`：蛋有玩家主人，牛开着 AI，蛋碎之后再跑 OWNED_TICKS 刻看它恐慌逃跑。
+        // `_owned`: a player owns the egg and the cow keeps its AI; run on after the
+        // egg breaks to compare the cow's panic.
+        boolean owned = name.equals("egg_hit_cow_owned");
+        boolean cowHit = name.startsWith("egg_hit_cow");
         boolean four = name.equals("egg_hatch_four");
         int hatch = four ? 4 : (name.equals("egg_hatch_one") || cowHit) ? 1 : 0;
         FakeLevel world = FakeLevel.create(official);
         ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        ServerPlayer owner = null;
+        if (owned) {
+            // 在重设实体号之前建主人，蛋、牛和小鸡的编号和没有主人的场景一样。
+            // Create the owner before the id reset so the egg, cow and chick keep their ids.
+            owner = new ServerPlayer(official.server, world, new GameProfile(new UUID(1L, 2L), "Oracle0"),
+                    ClientInformation.createDefault());
+            owner.setPos(EGG_OWNER[0], EGG_OWNER[1], EGG_OWNER[2]);
+            setRandom(owner, 0x0DDB1A5E5BAD5EEDL);
+            world.playersList().add(owner);
+        }
         for (int x = -18; x <= 20; x++) {
             for (int z = -12; z <= 12; z++) {
                 world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
@@ -3306,6 +3321,9 @@ public final class MobOracle {
                 world, start[0], start[1], start[2], stack);
         setRandom(egg, world.entitySeeds.nextLong());
         egg.setUUID(Mth.createInsecureUUID(egg.getRandom()));
+        if (owned) {
+            egg.setOwner(owner);
+        }
         egg.shoot(dir[0], dir[1], dir[2], 1.5F, 1.0F);
         long forced = 0;
         if (hatch > 0) {
@@ -3323,7 +3341,7 @@ public final class MobOracle {
             cow.setYRot(yaw);
             cow.setYHeadRot(yaw);
             cow.setPos(4.5, 64.0, 0.5);
-            cow.setNoAi(true);
+            cow.setNoAi(!owned);
             world.tracked.add(cow);
         }
         Bytes events = new Bytes(official.registries);
@@ -3335,15 +3353,20 @@ public final class MobOracle {
         var sync = new java.util.LinkedHashMap<Integer, Sync>();
         var chicks = new ArrayList<Chicken>();
         var frames = new StringBuilder("[");
+        /** 蛋碎的那一刻；之前是 -1。 */
+        int broke = -1;
         for (int tick = 0; ; tick++) {
             var packets = new ArrayList<String>();
             if (tick == 0) pairArrow(world, official, egg, sync, packets);
             if (tick > 0) {
                 world.gameTime++;
-                egg.commonTick();
-                egg.tick();
+                if (broke < 0) {
+                    egg.commonTick();
+                    egg.tick();
+                }
                 packets.addAll(events.take());
-                if (egg.isRemoved()) {
+                if (egg.isRemoved() && broke < 0) {
+                    broke = tick;
                     Bytes gone = new Bytes(official.registries);
                     gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(egg.getId()));
                     packets.addAll(gone.take());
@@ -3353,6 +3376,13 @@ public final class MobOracle {
                     cow.checkDespawn();
                     cow.commonTick();
                     cow.tick();
+                }
+                // 之前几刻孵出的小鸡：蛋碎之后还继续跑的场景里，它们和牛一样逐刻 tick。
+                // Chicks hatched on earlier ticks tick like the cow in scenes that run on.
+                for (Chicken chick : chicks) {
+                    chick.checkDespawn();
+                    chick.commonTick();
+                    chick.tick();
                 }
                 for (Entity entity : world.spawned) {
                     if (entity instanceof Chicken chick) {
@@ -3364,6 +3394,7 @@ public final class MobOracle {
                         chick.setYHeadRot(random.nextFloat() * 6.2831855F);
                         chick.eggTime = random.nextInt(6000) + 6000;
                         chicks.add(chick);
+                        world.tracked.add(chick);
                     }
                 }
                 world.spawned.clear();
@@ -3398,24 +3429,34 @@ public final class MobOracle {
             if (cow != null) {
                 frames.append(",\"cow\":").append(projectileMotion(cow))
                         .append(",\"cowState\":[").append(Float.floatToRawIntBits(cow.getHealth())).append(',')
-                        .append(cow.hurtTime).append(',').append(randomSeed(cow)).append(']');
+                        .append(cow.hurtTime).append(',').append(randomSeed(cow)).append(',')
+                        .append(cow.getLastHurtByPlayer() == null ? -1 : cow.getLastHurtByPlayer().getId())
+                        .append(',').append(getInt(LivingEntity.class, cow, "lastHurtByPlayerMemoryTime"))
+                        .append(']');
             }
             frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
                     .collect(java.util.stream.Collectors.joining(",", "[", "]")));
             frames.append('}');
-            if (egg.isRemoved()) break;
+            if (broke >= 0 && tick >= broke + (owned ? OWNED_TICKS : 0)) break;
             if (tick > 200) throw new IllegalStateException("egg never landed: " + name);
         }
-        if (chicks.size() != hatch || cowHit && cow.hurtTime == 0) {
+        if (chicks.size() != hatch || cowHit && !owned && cow.hurtTime == 0
+                || owned && cow.getLastHurtByPlayer() != owner) {
             throw new IllegalStateException("egg scene missed its branch: " + name + " chicks=" + chicks.size()
                     + " forced=" + forced + " egg=" + egg.position() + " seed=" + randomSeed(egg));
         }
         out.write("{\"type\":\"egg\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"dir\":" + Arrays.toString(dir)
                 + ",\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem()) + ",\"forced\":" + forced
-                + ",\"cow\":" + cowHit + ",\"frames\":" + frames + "]}\n");
+                + ",\"cow\":" + cowHit + ",\"owner\":" + (owned ? owner.getId() : -1)
+                + ",\"frames\":" + frames + "]}\n");
         out.flush();
     }
+
+    /** `egg_hit_cow_owned` 里蛋的主人站的位置，离蛋和牛都够远。 */
+    private static final double[] EGG_OWNER = {-6.5, 64.0, 0.5};
+    /** `egg_hit_cow_owned` 在蛋碎之后继续比的刻数。 */
+    private static final int OWNED_TICKS = 60;
 
     /** 第一个让蛋孵一只（或四只）的种子：`nextInt(8) == 0`，再看 `nextInt(32)`。 */
     private static long hatchSeed(boolean four) {

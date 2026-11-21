@@ -23,8 +23,28 @@ pub(super) struct EggCase {
     item: i32,
     forced: i64,
     cow: bool,
+    /// 蛋的玩家主人的实体号；没有主人时是 -1。有主人的场景里牛开着 AI。
+    ///
+    /// The entity id of the egg's player owner, -1 without one. With an owner the
+    /// cow keeps its AI.
+    #[serde(default = "no_owner")]
+    owner: i32,
     frames: Vec<EggFrame>,
 }
+
+fn no_owner() -> i32 {
+    -1
+}
+
+/// 和 `MobOracle.EGG_OWNER` 一样的主人位置。
+///
+/// The owner's position, as in `MobOracle.EGG_OWNER`.
+const EGG_OWNER: Vec3 = Vec3::new(-6.5, 64.0, 0.5);
+
+/// 和官方一侧一样，主人的 UUID 是 (1, 2)。
+///
+/// The owner's UUID is (1, 2), like on the official side.
+const EGG_OWNER_UUID: u128 = (1 << 64) | 2;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,7 +52,10 @@ struct EggFrame {
     eggs: Vec<EggState>,
     chicks: Vec<ChickState>,
     cow: Option<[i64; 8]>,
-    cow_state: Option<[i64; 3]>,
+    /// 生命、`hurtTime`、随机源、`lastHurtByPlayer` 的实体号（没有是 -1）和它的记忆刻数。
+    ///
+    /// Health, `hurtTime`, random, the `lastHurtByPlayer` id (-1 if none) and its memory time.
+    cow_state: Option<[i64; 5]>,
     packets: Vec<String>,
 }
 
@@ -94,6 +117,22 @@ impl EggCase {
             .iter()
             .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))
             .collect();
+        if self.owner >= 0 {
+            level.players.push(PlayerView {
+                uuid: Some(EGG_OWNER_UUID.to_be_bytes()),
+                uid: self.owner,
+                position: EGG_OWNER,
+                eye_height: 1.62,
+                alive: true,
+                spectator: false,
+                creative: false,
+                sneaking: false,
+                invisible: false,
+                armor_cover: 0.0,
+                main_hand: 0,
+                off_hand: 0,
+            });
+        }
         level
     }
 
@@ -135,8 +174,8 @@ impl EggCase {
             power: 1.5,
             uncertainty: 1.0,
             source_movement: None,
-            owner: None,
-            owner_uuid: None,
+            owner: (self.owner >= 0).then_some(self.owner),
+            owner_uuid: (self.owner >= 0).then_some(EGG_OWNER_UUID.to_be_bytes()),
             item: ItemStack::new(self.item, 16),
         });
         // `egg_floor` 用自然种子，其余场景都换成搜出来的种子（可能恰好是 0）。
@@ -147,7 +186,8 @@ impl EggCase {
         }
         if self.cow {
             let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(4.5, 64.0, 0.5));
-            cow.with_mob(|_, mob| mob.no_ai = true);
+            let no_ai = self.owner < 0;
+            cow.with_mob(|_, mob| mob.no_ai = no_ai);
             world.spawn_entity(cow);
         }
         id
@@ -261,10 +301,12 @@ impl Report {
                     i64::from(mob.health.to_bits() as i32),
                     i64::from(mob.hurt_time),
                     cow.random.state(),
+                    i64::from(mob.last_hurt_by_player.unwrap_or(-1)),
+                    i64::from(mob.last_hurt_by_player_memory_time),
                 ];
                 if Some(state) != expected.cow_state {
                     self.mismatch(format!(
-                        "{label} cow health/hurtTime/seed: official {:?}, bamboo {state:?}",
+                        "{label} cow health/hurtTime/seed/hurtByPlayer/memory: official {:?}, bamboo {state:?}",
                         expected.cow_state
                     ));
                 }
