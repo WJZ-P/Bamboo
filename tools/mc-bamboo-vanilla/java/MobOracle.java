@@ -3441,6 +3441,11 @@ public final class MobOracle {
         scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        // 大脑生物：犰狳在热带草原，山羊在雪坡；`finalizeSpawn` 的取数都在世界随机源上。
+        // Brain mobs: armadillos in the savanna and goats on snowy slopes; their
+        // `finalizeSpawn` draws all come from the level random.
+        scenes.add(new NaturalScene("armadillo_day", EntityTypes.ARMADILLO, "savanna", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("goat_day", EntityTypes.GOAT, "snowy_slopes", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
             for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
