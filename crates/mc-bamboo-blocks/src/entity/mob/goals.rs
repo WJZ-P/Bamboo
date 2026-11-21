@@ -327,14 +327,6 @@ pub enum TargetType {
 }
 
 impl TargetType {
-    /// Bamboo 现在有没有这种实体；没有时对应的目标直接跳过。
-    pub const fn available(self) -> bool {
-        matches!(
-            self,
-            Self::Player | Self::GuardedPlayer | Self::AngerPlayer | Self::Fox | Self::FoxPrey
-        )
-    }
-
     /// `TargetGoal.getFollowDistance` 相对 `FOLLOW_RANGE` 的倍数。
     ///
     /// The `TargetGoal.getFollowDistance` factor on `FOLLOW_RANGE`.
@@ -834,7 +826,9 @@ impl GoalSelector {
     }
 
     /// `Zombie.addBehaviourGoals` 里的 `targetSelector`。缺实体的目标仍注册，
-    /// 但 `TargetType::available()` 为假时 `canUse` 不查世界、不取随机数。
+    /// 尚未实现的类型仍按间隔取数，但不查世界。
+    ///
+    /// Unimplemented types still draw for the interval but do not search the world.
     pub fn zombie_targets() -> Self {
         let wrap = |priority, goal| WrappedGoal {
             priority,
@@ -1502,8 +1496,6 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
                 return false;
             }
-            // 官方每个 `NearestAttackableTargetGoal` 都先取 `nextInt(interval)`；
-            // 缺实体的目标仍注册、仍取数，只是查不到目标（场景里明确无此类实体）。
             *found = match kind {
                 TargetType::FoxPrey => {
                     nearest_mob_target(me, mob, ctx, super::fox_goals::is_small_prey)
@@ -1517,8 +1509,15 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                         nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Fox)
                     }
                 }
-                _ if kind.available() => nearest_attackable(me, mob, ctx, *kind),
-                _ => None,
+                TargetType::Player | TargetType::GuardedPlayer | TargetType::AngerPlayer => {
+                    nearest_attackable(me, mob, ctx, *kind)
+                }
+                TargetType::Villager
+                | TargetType::IronGolem
+                | TargetType::Turtle
+                | TargetType::Fish
+                | TargetType::Wolf
+                | TargetType::Endermite => None,
             };
             // 找到了玩家，还要身边有幼崽才动手。
             // A player was found; a cub must be nearby as well.
@@ -3392,7 +3391,7 @@ fn nearest_attackable(
     ctx: &dyn EntityCtx,
     kind: TargetType,
 ) -> Option<EntityUid> {
-    if !kind.available() || ctx.blocks().difficulty() == 0 {
+    if ctx.blocks().difficulty() == 0 {
         return None;
     }
     let range = mob
