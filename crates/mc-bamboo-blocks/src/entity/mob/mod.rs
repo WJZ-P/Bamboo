@@ -507,14 +507,18 @@ impl MobType {
     }
 
     /// `EntityType.canSpawnFarFromPlayer()`：`EntityType.Builder` 的缺省是
-    /// `CREATURE | MISC`，牛为真、怪物为假。
+    /// `CREATURE | MISC`，牛为真、怪物和水生生物为假。
     ///
     /// `EntityType.canSpawnFarFromPlayer()`: the builder default is `CREATURE | MISC`,
-    /// so cows may spawn far from players and monsters may not.
+    /// so cows may spawn far from players and monsters and aquatic mobs may not.
     pub const fn can_spawn_far_from_player(self) -> bool {
+        use mc_bamboo_data::spawning::MobCategory;
         // 马科也是 `CREATURE`。
         // Equines are `CREATURE` as well.
-        !self.is_monster()
+        matches!(
+            self.mob_category(),
+            MobCategory::Creature | MobCategory::Misc
+        )
     }
 
     /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。

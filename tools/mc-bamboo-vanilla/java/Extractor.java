@@ -1185,6 +1185,9 @@ public final class Extractor {
         out.addProperty("fishFromBucket", entityAccessor(net.minecraft.world.entity.animal.fish.AbstractFish.class, "FROM_BUCKET").id());
         out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
         out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
+        JsonArray tropicalFishCommonVariants = new JsonArray();
+        TropicalFish.COMMON_VARIANTS.forEach(variant -> tropicalFishCommonVariants.add(variant.getPackedId()));
+        out.add("tropicalFishCommonVariants", tropicalFishCommonVariants);
         out.addProperty("pufferfishPuffState", entityAccessor(net.minecraft.world.entity.animal.fish.Pufferfish.class, "PUFF_STATE").id());
         Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
         var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");

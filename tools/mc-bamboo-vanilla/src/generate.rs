@@ -3556,6 +3556,11 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: u8 = {value};");
     }
+    let _ = writeln!(
+        out,
+        "pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &{:?};",
+        facts.tropical_fish_common_variants
+    );
     for (name, value) in [
         ("PIG_VARIANT_SERIALIZER", facts.pig_variant_serializer),
         (

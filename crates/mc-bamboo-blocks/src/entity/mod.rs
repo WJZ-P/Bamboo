@@ -24,6 +24,7 @@ mod falling;
 mod item;
 mod orb;
 mod physics;
+mod resize;
 mod tnt;
 
 use mc_bamboo_core::{Axis, BlockPos, Vec3};

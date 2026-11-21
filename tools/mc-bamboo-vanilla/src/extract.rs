@@ -930,6 +930,7 @@ pub struct ProjectileFacts {
     pub fish_from_bucket: u8,
     pub salmon_variant: u8,
     pub tropical_fish_variant: u8,
+    pub tropical_fish_common_variants: Vec<i32>,
     pub pufferfish_puff_state: u8,
     pub chicken_variant: u8,
     pub chicken_sound_variant: u8,

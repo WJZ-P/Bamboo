@@ -11,7 +11,12 @@
 //! Beached on a block they flop once.
 
 use mc_bamboo_core::Vec3;
-use mc_bamboo_data::{entity_types, registries::attribute};
+use mc_bamboo_data::{
+    component_enums::{counts, sparse},
+    entity_types::{self, TROPICAL_FISH_COMMON_VARIANTS},
+    registries::attribute,
+    tags::TAG_GROUPS,
+};
 
 use super::{
     DamageKind, DamageSource, Mob, MobType,
@@ -19,7 +24,7 @@ use super::{
     goals::reduced_tick_delay,
     goals::{Goal, GoalSelector, WrappedGoal},
     living,
-    spawn::{SpawnGroup, SpawnReason},
+    spawn::SpawnGroup,
 };
 use crate::{
     entity::{
@@ -403,7 +408,7 @@ pub(super) fn travel_in_water(
 ///
 /// `Pufferfish.tick` runs the inflate/deflate state machine before `super.tick()`, and
 /// the sting of nearby mobs after `aiStep`. It has to run before `baseTick`.
-pub(super) fn pre_tick(me: &mut Entity, mob: &mut Mob) {
+pub(super) fn pre_tick(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
     if mob.mob_type != MobType::Pufferfish {
         return;
     }
@@ -415,12 +420,12 @@ pub(super) fn pre_tick(me: &mut Entity, mob: &mut Mob) {
             let pitch = living::voice_pitch(me, mob);
             living::play_sound(me, mob, "minecraft:entity.puffer_fish.blow_up", 1.0, pitch);
             mob.fish.puff_state = 1;
-            refresh_dimensions(me, mob);
+            resize_puffer(me, mob, ctx);
         } else if mob.fish.inflate_counter > 40 && mob.fish.puff_state == 1 {
             let pitch = living::voice_pitch(me, mob);
             living::play_sound(me, mob, "minecraft:entity.puffer_fish.blow_up", 1.0, pitch);
             mob.fish.puff_state = 2;
-            refresh_dimensions(me, mob);
+            resize_puffer(me, mob, ctx);
         }
         mob.fish.inflate_counter += 1;
     } else if mob.fish.puff_state != 0 {
@@ -428,14 +433,25 @@ pub(super) fn pre_tick(me: &mut Entity, mob: &mut Mob) {
             let pitch = living::voice_pitch(me, mob);
             living::play_sound(me, mob, "minecraft:entity.puffer_fish.blow_out", 1.0, pitch);
             mob.fish.puff_state = 1;
-            refresh_dimensions(me, mob);
+            resize_puffer(me, mob, ctx);
         } else if mob.fish.deflate_timer > 100 && mob.fish.puff_state == 1 {
             let pitch = living::voice_pitch(me, mob);
             living::play_sound(me, mob, "minecraft:entity.puffer_fish.blow_out", 1.0, pitch);
             mob.fish.puff_state = 0;
-            refresh_dimensions(me, mob);
+            resize_puffer(me, mob, ctx);
         }
         mob.fish.deflate_timer += 1;
+    }
+}
+
+fn resize_puffer(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
+    let old = me.dimensions;
+    refresh_dimensions(me, mob);
+    if !me.first_tick
+        && (me.dimensions.0 > old.0 || me.dimensions.1 > old.1)
+        && let Some(position) = crate::entity::resize::fudge_position(ctx.blocks(), me, old)
+    {
+        me.position = position;
     }
 }
 
@@ -496,13 +512,26 @@ pub(super) fn puffer_touch(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityC
     }
 }
 
-/// `Pufferfish.SCARY_MOB`：不在 `#not_scary_for_pufferfish` 里的生物；玩家另算（创造模式
-/// 不算）。标签里只有河豚自己，`axolotl` / `dolphin` 等未建模的成员先按「怕」处理。
+/// `Pufferfish.SCARY_MOB`：使用官方实体类型标签；创造模式玩家由调用方排除。
 ///
-/// `Pufferfish.SCARY_MOB`: mobs outside `#not_scary_for_pufferfish`; players are handled
-/// separately. Only pufferfish are in the tag; unmodelled members count as scary.
-const fn scary_for_pufferfish(_kind: MobType) -> bool {
-    true
+/// `Pufferfish.SCARY_MOB`: use the vanilla entity-type tag; the caller excludes
+/// creative players separately.
+fn scary_for_pufferfish(kind: MobType) -> bool {
+    static EXEMPT: std::sync::OnceLock<&[i32]> = std::sync::OnceLock::new();
+    !EXEMPT
+        .get_or_init(|| {
+            TAG_GROUPS
+                .iter()
+                .find(|group| group.registry == "minecraft:entity_type")
+                .and_then(|group| {
+                    group
+                        .tags
+                        .iter()
+                        .find(|tag| tag.name == "minecraft:not_scary_for_pufferfish")
+                })
+                .map_or(&[], |tag| tag.ids)
+        })
+        .contains(&kind.entity_type())
 }
 
 /// `PufferfishPuffGoal.canUse`：2 格内有没有可瞄准的生物；`start` 把计数器置 1。
@@ -513,9 +542,22 @@ pub(super) fn puff_can_use(me: &Entity, ctx: &dyn EntityCtx) -> bool {
     let area = me.bounding_box().inflate(2.0, 2.0, 2.0);
     let mut found = false;
     ctx.for_each_other_in(area, &mut |other| {
-        // `TargetingConditions.test` 先排除目标是自己。
-        // `TargetingConditions.test` rejects the targeter itself first.
-        if other.uid != me.id && !other.removed && other.bounding_box().intersects(area) {
+        if let crate::entity::store::KindPublic::Mob(public) = &other.kind
+            && other.uid != me.id
+            && !other.removed
+            && public.health > 0.0
+            && scary_for_pufferfish(public.mob_type)
+            && other.bounding_box().intersects(area)
+        {
+            found = true;
+        }
+    });
+    ctx.blocks().for_each_player(&mut |player| {
+        if player.alive
+            && !player.spectator
+            && !player.creative
+            && crate::entity::arrow::player_box(player).intersects(area)
+        {
             found = true;
         }
     });
@@ -675,10 +717,10 @@ pub(super) fn salmon_variant_from_name(name: &str) -> Option<i32> {
 ///
 /// `Salmon.finalizeSpawn`: weighted 30 / 50 / 15 for small / medium / large, then
 /// `super.finalizeSpawn`.
-fn salmon_variant(random: &dyn RandomSource) -> i32 {
+fn salmon_variant(random: &mut crate::entity::random::JavaRandom) -> i32 {
     // `WeightedList.getRandom`：`nextInt(totalWeight)` 后按顺序减。
     // `WeightedList.getRandom`: one `nextInt(totalWeight)`, then subtract in order.
-    let roll = random.next_int(95);
+    let roll = random.next_int_bounded(95);
     if roll < 30 {
         0
     } else if roll < 80 {
@@ -707,18 +749,15 @@ pub(super) fn check_spawn_rules(
         && world
             .block_state(pos.above())
             .is(mc_bamboo_data::blocks::WATER);
-    if kind == MobType::TropicalFish && biome_allows_tropical_fish(world.biome_id(pos)) {
+    if kind == MobType::TropicalFish
+        && super::natural::biome_tag_contains(
+            "minecraft:allows_tropical_fish_spawns_at_any_height",
+            world.biome_id(pos),
+        )
+    {
         return water;
     }
     super::water::surface_spawn_rules(world, sea_level, pos)
-}
-
-/// 群系标签 `#allows_tropical_fish_spawns_at_any_height` 在这个版本里是空标签：官方
-/// 数据包里没有任何群系带它（珊瑚礁的鱼群靠结构生成）。
-///
-/// The `#allows_tropical_fish_spawns_at_any_height` tag is empty in this version.
-const fn biome_allows_tropical_fish(_biome: i32) -> bool {
-    false
 }
 
 /// `finalizeSpawn`：鲑鱼抽花纹，热带鱼抽花纹和颜色，河豚只走 `Mob` 那层。
@@ -726,9 +765,8 @@ const fn biome_allows_tropical_fish(_biome: i32) -> bool {
 /// `finalizeSpawn`: salmon roll their variant, tropical fish their pattern and colours,
 /// and the pufferfish only runs the `Mob` layer.
 pub(super) fn finalize_spawn(
+    world: &mut World,
     entity: &mut Entity,
-    random: &dyn RandomSource,
-    reason: SpawnReason,
     group: &mut Option<SpawnGroup>,
 ) {
     let kind = entity
@@ -737,17 +775,37 @@ pub(super) fn finalize_spawn(
         .map(|mob| mob.mob_type)
         .unwrap_or_default();
     if kind == MobType::Salmon {
-        let variant = salmon_variant(random);
+        let variant = salmon_variant(&mut entity.random);
         entity.with_mob(|me, mob| {
             mob.fish.variant = variant;
             refresh_dimensions(me, mob);
         });
     }
-    if kind == MobType::TropicalFish {
-        finalize_tropical(entity, random, group);
-    }
-    let _ = reason;
+    let random = world.random();
     entity.with_mob(|_, mob| super::water::finalize_mob(mob, random));
+    if is_schooling(kind) {
+        finalize_school(world, entity, group);
+    }
+    if kind == MobType::TropicalFish {
+        finalize_tropical(entity, world.random(), group);
+    }
+}
+
+/// `AbstractSchoolingFish.finalizeSpawn`：把同批后续个体连到首条鱼上。
+///
+/// `AbstractSchoolingFish.finalizeSpawn`: link subsequent members to the first fish.
+fn finalize_school(world: &mut World, entity: &mut Entity, group: &mut Option<SpawnGroup>) {
+    if let Some(SpawnGroup::FishSchool { leader, .. }) = group {
+        entity.with_mob(|_, mob| mob.fish.leader = Some(*leader));
+        world.with_entity_mut(*leader, &mut |entity| {
+            entity.with_mob(|_, mob| mob.fish.school_size += 1);
+        });
+    } else {
+        *group = Some(SpawnGroup::FishSchool {
+            leader: entity.id,
+            variant: None,
+        });
+    }
 }
 
 /// `TropicalFish.finalizeSpawn` 的花纹那一层。
@@ -758,23 +816,25 @@ fn finalize_tropical(
     random: &dyn RandomSource,
     group: &mut Option<SpawnGroup>,
 ) {
-    let shared = match group {
-        Some(SpawnGroup::TropicalFish { variant }) => Some(*variant),
-        _ => None,
+    let Some(SpawnGroup::FishSchool {
+        variant: shared, ..
+    }) = group
+    else {
+        unreachable!("tropical fish have school spawn data");
     };
-    let variant = if let Some(variant) = shared {
+    let variant = if let Some(variant) = *shared {
         variant
-    } else if random.next_float() < 0.9 {
+    } else if f64::from(random.next_float()) < 0.9 {
         // `Util.getRandom(COMMON_VARIANTS, random)`。
-        let index = random.next_int(TROPICAL_COMMON.len() as i32) as usize;
-        let variant = TROPICAL_COMMON[index];
-        *group = Some(SpawnGroup::TropicalFish { variant });
+        let index = random.next_int(TROPICAL_FISH_COMMON_VARIANTS.len() as i32) as usize;
+        let variant = TROPICAL_FISH_COMMON_VARIANTS[index];
+        *shared = Some(variant);
         variant
     } else {
         entity.with_mob(|_, mob| mob.fish.is_school = false);
-        let pattern = random.next_int(12);
-        let base = random.next_int(16);
-        let pattern_color = random.next_int(16);
+        let pattern = random.next_int(sparse::TROPICAL_FISH_PATTERN.len() as i32);
+        let base = random.next_int(counts::DYE_COLOR);
+        let pattern_color = random.next_int(counts::DYE_COLOR);
         pack_variant(pattern, base, pattern_color)
     };
     entity.with_mob(|_, mob| mob.fish.variant = variant);
@@ -792,77 +852,21 @@ pub const fn pack_variant(pattern: i32, base_color: i32, pattern_color: i32) -> 
 ///
 /// The packed `Pattern` id: `base.id | index << 8`.
 pub const fn pattern_packed_id(pattern: i32) -> i32 {
-    let (base, index) = match pattern {
-        0 => (0, 0),  // KOB
-        1 => (0, 1),  // SUNSTREAK
-        2 => (0, 2),  // SNOOPER
-        3 => (0, 3),  // DASHER
-        4 => (0, 4),  // BRINELY
-        5 => (0, 5),  // SPOTTY
-        6 => (1, 0),  // FLOPPER
-        7 => (1, 1),  // STRIPEY
-        8 => (1, 2),  // GLITTER
-        9 => (1, 3),  // BLOCKFISH
-        10 => (1, 4), // BETTY
-        _ => (1, 5),  // CLAYFISH
-    };
-    base | index << 8
+    if pattern < 0 || pattern as usize >= sparse::TROPICAL_FISH_PATTERN.len() {
+        0
+    } else {
+        sparse::TROPICAL_FISH_PATTERN[pattern as usize]
+    }
 }
 
 /// 打包 ID 反查 `Pattern`（`ByIdMap.sparse`，查不到回 KOB）。
 ///
 /// `Pattern` from a packed id (`ByIdMap.sparse`, KOB when absent).
-pub const fn pattern_from_packed(packed: i32) -> i32 {
-    match packed & 65535 {
-        0 => 0,
-        256 => 1,
-        512 => 2,
-        768 => 3,
-        1024 => 4,
-        1280 => 5,
-        1 => 6,
-        257 => 7,
-        513 => 8,
-        769 => 9,
-        1025 => 10,
-        1281 => 11,
-        _ => 0,
-    }
-}
-
-/// `TropicalFish.COMMON_VARIANTS` 的打包 ID，顺序和官方一样。
-///
-/// The packed ids of `TropicalFish.COMMON_VARIANTS` in vanilla order.
-pub const TROPICAL_COMMON: [i32; 22] = [
-    pack(7, 1, 7),   // STRIPEY orange gray
-    pack(6, 7, 7),   // FLOPPER gray gray
-    pack(6, 7, 3),   // FLOPPER gray blue
-    pack(11, 0, 7),  // CLAYFISH white gray
-    pack(1, 3, 7),   // SUNSTREAK blue gray
-    pack(0, 1, 0),   // KOB orange white
-    pack(5, 6, 3),   // SPOTTY pink light_blue
-    pack(9, 5, 4),   // BLOCKFISH purple yellow
-    pack(11, 0, 14), // CLAYFISH white red
-    pack(5, 0, 4),   // SPOTTY white yellow
-    pack(8, 0, 7),   // GLITTER white gray
-    pack(11, 0, 1),  // CLAYFISH white orange
-    pack(3, 9, 6),   // DASHER cyan pink
-    pack(4, 10, 3),  // BRINELY lime light_blue
-    pack(10, 14, 0), // BETTY red white
-    pack(2, 7, 14),  // SNOOPER gray red
-    pack(9, 14, 0),  // BLOCKFISH red white
-    pack(6, 0, 4),   // FLOPPER white yellow
-    pack(0, 14, 0),  // KOB red white
-    pack(1, 7, 0),   // SUNSTREAK gray white
-    pack(3, 9, 4),   // DASHER cyan yellow
-    pack(6, 4, 4),   // FLOPPER yellow yellow
-];
-
-/// 编译期把花纹、底色、花纹色打成一包，供 [`TROPICAL_COMMON`] 用。
-///
-/// Packs pattern and colours at compile time for [`TROPICAL_COMMON`].
-const fn pack(pattern: i32, base_color: i32, pattern_color: i32) -> i32 {
-    (pattern_packed_id(pattern) & 65535) | (base_color & 0xFF) << 16 | (pattern_color & 0xFF) << 24
+pub fn pattern_from_packed(packed: i32) -> i32 {
+    sparse::TROPICAL_FISH_PATTERN
+        .iter()
+        .position(|&id| id == packed & 65535)
+        .map_or(0, |index| index as i32)
 }
 
 #[cfg(test)]
@@ -927,11 +931,11 @@ mod tests {
     fn tropical_patterns_pack_like_vanilla() {
         // `COMMON_VARIANTS[0]`：STRIPEY 橙 / 灰。
         // `COMMON_VARIANTS[0]`: STRIPEY orange / gray.
-        assert_eq!(TROPICAL_COMMON[0], pack(7, 1, 7));
-        assert_eq!(pattern_from_packed(pack(9, 5, 4)), 9);
+        assert_eq!(TROPICAL_FISH_COMMON_VARIANTS[0], pack_variant(7, 1, 7));
+        assert_eq!(pattern_from_packed(pack_variant(9, 10, 4)), 9);
         assert_eq!(pattern_from_packed(12345), 0);
         // `packVariant` 的低 16 位是花纹，再往上是两个颜色字节。
         // `packVariant` keeps the pattern low and the two colours above.
-        assert_eq!(TROPICAL_COMMON[5], 1 << 16);
+        assert_eq!(TROPICAL_FISH_COMMON_VARIANTS[5], 1 << 16);
     }
 }

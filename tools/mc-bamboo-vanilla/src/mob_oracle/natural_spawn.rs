@@ -62,7 +62,7 @@ struct Step {
     time: i64,
     count: i32,
     world_seed: i64,
-    spawned: Vec<[i32; 8]>,
+    spawned: Vec<[i32; 9]>,
 }
 
 pub(super) struct SceneFacts {
@@ -147,6 +147,17 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        for name in [
+            "fish_cod",
+            "fish_salmon",
+            "fish_tropical",
+            "fish_tropical_lush",
+            "fish_puffer",
+        ] {
+            if self.per_scene.get(name) == Some(&0) {
+                return Err(format!("natural spawn fixture {name} produced no fish"));
+            }
+        }
         let mobs = [
             self.cows,
             self.skeletons,
@@ -154,7 +165,7 @@ impl Coverage {
             self.squid,
             self.equines,
         ];
-        if self.cases > 0 && (mobs.contains(&0) || self.cap_off == 0) {
+        if self.per_scene.contains_key("cow_day") && (mobs.contains(&0) || self.cap_off == 0) {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
             );
@@ -237,7 +248,7 @@ fn spawn_tick(
     }
 }
 
-fn spawn_row(entity: Entity) -> [i32; 8] {
+fn spawn_row(entity: Entity) -> [i32; 9] {
     let mob = entity.kind.mob().expect("natural spawns are mobs");
     [
         mob.mob_type.entity_type(),
@@ -248,6 +259,11 @@ fn spawn_row(entity: Entity) -> [i32; 8] {
         i32::from(mob.is_baby()),
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
+        if mob.mob_type == MobType::TropicalFish {
+            mob.fish.variant
+        } else {
+            0
+        },
     ]
 }
 

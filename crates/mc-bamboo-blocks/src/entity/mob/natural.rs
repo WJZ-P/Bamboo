@@ -351,7 +351,6 @@ fn spawn_category_for_position(
         let mut current = None;
         let mut group: Option<spawn::SpawnGroup> = None;
         let mut max = mth::ceil(f64::from(world.random().next_float()) * 4.0);
-        let mut group_size = 0;
         let mut step = 0;
         while step < max {
             step += 1;
@@ -395,13 +394,14 @@ fn spawn_category_for_position(
             }
             spawn::finalize_spawn_with_group(world, kind, &mut entity, &mut group);
             cluster_size += 1;
-            group_size += 1;
+            let single_tropical = kind == MobType::TropicalFish
+                && entity.kind.mob().is_some_and(|mob| !mob.fish.is_school);
             world.add_prepared_entity(entity);
             state.after_spawn(world, kind, pos);
             if cluster_size >= max_spawn_cluster_size(kind) {
                 return;
             }
-            if is_max_group_size_reached(kind, group_size) {
+            if single_tropical {
                 break;
             }
         }
@@ -833,17 +833,17 @@ pub(super) fn create_mob(world: &mut World, kind: MobType) -> Option<Entity> {
     Some(world.prepare_entity(Entity::by_mob_type(kind, Vec3::default())))
 }
 
-/// `Mob.getMaxSpawnClusterSize()`，马科覆写为 6。
+/// `Mob.getMaxSpawnClusterSize()`，按物种使用各自的簇上限。
 ///
-/// `Mob.getMaxSpawnClusterSize()`; equines override it to 6.
+/// `Mob.getMaxSpawnClusterSize()` with per-species cluster limits.
 fn max_spawn_cluster_size(kind: MobType) -> i32 {
-    if kind.is_equine() { 6 } else { 4 }
-}
-
-/// `Mob.isMaxGroupSizeReached`。
-fn is_max_group_size_reached(kind: MobType, group_size: i32) -> bool {
-    let _ = (kind, group_size);
-    false
+    if kind.is_water_animal() {
+        super::fish::max_school_size(kind)
+    } else if kind.is_equine() {
+        6
+    } else {
+        4
+    }
 }
 
 /// `ChunkMap.playerIsCloseEnoughForSpawning` 的几何条件：水平距区块中心小于 128 格。
@@ -879,7 +879,7 @@ fn nearest_player_distance_sqr(world: &World, x: f64, y: f64, z: f64) -> Option<
 }
 
 /// 群系标签查询，只有刷怪相关的两个标签用得到。
-fn biome_tag_contains(name: &str, biome: i32) -> bool {
+pub(super) fn biome_tag_contains(name: &str, biome: i32) -> bool {
     mc_bamboo_data::tags::TAG_GROUPS
         .iter()
         .filter(|group| group.registry == "minecraft:worldgen/biome")

@@ -98,11 +98,12 @@ pub enum SpawnGroup {
     /// `Llama.LlamaGroupData`: the colour id shared by the group.
     Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
-    /// `TropicalFish.TropicalFishGroupData`：一组热带鱼共用同一个花纹。
+    /// 鱼群共享领头鱼；热带鱼还共享花纹。
     ///
-    /// `TropicalFish.TropicalFishGroupData`: one tropical-fish group shares a variant.
-    TropicalFish {
-        variant: i32,
+    /// Schooling fish share a leader; tropical fish also share a variant.
+    FishSchool {
+        leader: crate::entity::EntityUid,
+        variant: Option<i32>,
     },
 }
 
@@ -315,7 +316,7 @@ fn finalize_spawn_in_group(
         return;
     }
     if super::fish::is_fish(kind) {
-        super::fish::finalize_spawn(entity, world.random(), reason, group);
+        super::fish::finalize_spawn(world, entity, group);
         return;
     }
     if kind.is_equine() {

@@ -1952,7 +1952,7 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     }
     // 不是 `Animal` 的生物用 `PathfinderMob.getWalkTargetValue` 的缺省值 0。
     // Mobs that are not `Animal`s keep the `PathfinderMob.getWalkTargetValue` default of 0.
-    if mob.mob_type.is_ageable_water_creature() {
+    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
         return 0.0;
     }
     animal_walk_target_value(view, pos)

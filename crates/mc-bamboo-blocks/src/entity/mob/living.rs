@@ -67,7 +67,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     // `Pufferfish.tick` 在 `super.tick()` 之前跑膨胀 / 收缩。
     // `Pufferfish.tick` runs the inflate/deflate machine before `super.tick()`.
-    super::fish::pre_tick(me, mob);
+    super::fish::pre_tick(me, mob, ctx);
     // `Entity.commonTick`。
     if mob.invulnerable_time > 0 {
         mob.invulnerable_time -= 1;

@@ -819,7 +819,6 @@ impl KindData {
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
             KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
             KindPublic::LlamaSpit(spit) => Self::LlamaSpit(*spit),
-            KindPublic::LlamaSpit(spit) => Self::LlamaSpit(*spit),
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
         }
     }

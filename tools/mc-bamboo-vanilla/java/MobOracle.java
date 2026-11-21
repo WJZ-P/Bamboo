@@ -312,8 +312,8 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only)) {
-                cases += playNaturalSpawns(official, out);
+            if ("natural_spawn".equals(only) || "natural_fish".equals(only)) {
+                cases += playNaturalSpawns(official, out, "natural_fish".equals(only));
             }
             if ("gen_spawn".equals(only)) {
                 cases += playGenSpawns(official, out);
@@ -2764,7 +2764,7 @@ public final class MobOracle {
             int sky, int block, int darken, boolean thunder, double playerX, int population,
             int spawnableChunks, boolean localCap, boolean nearbyRespawn) {}
 
-    private static int playNaturalSpawns(Official official, Writer out) throws Exception {
+    private static int playNaturalSpawns(Official official, Writer out, boolean fishOnly) throws Exception {
         List<NaturalScene> scenes = new ArrayList<>();
         scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("cow_night", EntityTypes.COW, "savanna", 2, 15, 0, 11, false, -32, 0, 289, true, false));
@@ -2803,8 +2803,14 @@ public final class MobOracle {
         scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_cod", EntityTypes.COD, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_salmon", EntityTypes.SALMON, "cold_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_tropical", EntityTypes.TROPICAL_FISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_tropical_lush", EntityTypes.TROPICAL_FISH, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_puffer", EntityTypes.PUFFERFISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
+            if (fishOnly && !scene.name().startsWith("fish_")) continue;
             for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
                 out.write(naturalSpawnCase(official, scene, seed) + "\n");
                 count++;
@@ -2836,8 +2842,8 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
-        boolean aquatic = scene.name().contains("squid");
-        level.naturalSeaLevel = scene.mob() == EntityTypes.GLOW_SQUID ? -20 : -63;
+        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT;
+        level.naturalSeaLevel = scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63;
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
                 if (aquatic) {
@@ -2909,6 +2915,10 @@ public final class MobOracle {
                 row.add(mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                row.add(mob instanceof net.minecraft.world.entity.animal.fish.TropicalFish fish
+                        ? new net.minecraft.world.entity.animal.fish.TropicalFish.Variant(
+                                fish.getPattern(), fish.getBaseColor(), fish.getPatternColor()).getPackedId()
+                        : 0);
                 spawned.add(row);
             }
             step.add("spawned", spawned);
