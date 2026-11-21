@@ -45,8 +45,8 @@ mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
-mod witch_throw;
 mod squid;
+mod witch_throw;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
