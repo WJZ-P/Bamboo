@@ -3238,9 +3238,12 @@ impl<'a> World<'a> {
         let Some(mut entity) = self.level.take_entity(id) else {
             return crate::entity::mob::interact::MobInteraction::pass();
         };
+        let thundering = self.is_thundering();
         let now = self.game_time();
         let outcome = entity
-            .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request, now))
+            .with_mob(|me, mob| {
+                crate::entity::mob::interact::interact(me, mob, request, now, thundering)
+            })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         let armadillo = entity
             .kind
@@ -3254,7 +3257,17 @@ impl<'a> World<'a> {
                 &request.held,
             );
         } else if outcome.shear {
-            crate::entity::mob::sheep::apply_shear(self, &mut entity, request.hand, &request.held);
+            crate::entity::mob::interact::apply_shear(
+                self,
+                &mut entity,
+                request.hand,
+                &request.held,
+            );
+        }
+        if let Some(stack) = outcome.drop_stack.clone() {
+            // `Entity.spawnAtLocation(stack)`：脚下生成一件掉落物。
+            // `Entity.spawnAtLocation(stack)`: a drop at the mob's feet.
+            self.spawn_at_location(entity.position, stack);
         }
         // 山羊的 `playEatingSound` 音高取世界随机源，一次喂食放一到两遍。
         // A goat's `playEatingSound` is pitched with the level random, once or twice per

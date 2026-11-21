@@ -343,6 +343,10 @@ fn finalize_spawn_in_group(
         super::skeleton::finalize_spawn(world, entity);
         return;
     }
+    if kind == MobType::Panda {
+        super::panda::finalize_spawn(entity, world.random(), group);
+        return;
+    }
     if matches!(kind, MobType::Zombie | MobType::Husk) {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
@@ -409,13 +413,17 @@ pub(super) fn finalize_generated(
     if matches!(
         kind,
         MobType::Cow
+            | MobType::Mooshroom
             | MobType::Pig
             | MobType::Sheep
             | MobType::Chicken
+            | MobType::PolarBear
             | MobType::Armadillo
             | MobType::Goat
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
+    } else if kind == MobType::Panda {
+        super::panda::finalize_spawn(entity, region_random, group);
     } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
         super::wild_spawn::finalize(kind, entity, biome, region_random, group);
     } else if kind.is_equine() {
@@ -438,13 +446,27 @@ pub(super) fn finalize_cow(
     group: &mut Option<SpawnGroup>,
 ) {
     let variant = cow_variant_for_biome(biome);
-    // 犰狳没有自己的 `finalizeSpawn`，直接是 `AgeableMob` 那层。
-    // Armadillos have no `finalizeSpawn` of their own and go straight to `AgeableMob`.
+    // 犰狳没有自己的 `finalizeSpawn`，直接是 `AgeableMob` 那层；山羊单独调
+    // `goat::finalize_spawn`（尖叫山羊概率）。两者都不吃 `selectVariantToSpawn` 那次取数。
+    // Armadillos have no `finalizeSpawn` of their own and go straight to `AgeableMob`;
+    // goats call `goat::finalize_spawn` (screaming-goat odds). Both skip the
+    // `selectVariantToSpawn` draw.
+    // 羊、哞菇、北极熊也没有按群系选的花纹；哞菇、北极熊各自有 `finalizeSpawn` 覆盖层。
+    // Sheep, mooshrooms and polar bears have no biome variant either; mooshrooms and
+    // polar bears have their own `finalizeSpawn` layers.
     let plain = matches!(kind, MobType::Armadillo | MobType::Goat);
     if kind == MobType::Goat {
         entity.with_mob(|_, mob| super::goat::finalize_spawn(mob, random));
     }
-    if kind != MobType::Sheep && !plain {
+    // 是否吃 `selectVariantToSpawn` 那次 `nextInt(1)`、是否写 `mob.variant`：两边各自的
+    // 排除集合取并集。
+    // Whether to draw `selectVariantToSpawn`'s `nextInt(1)` and write `mob.variant`:
+    // union of the exclusion sets from both sides.
+    let has_variant = !matches!(
+        kind,
+        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear
+    ) && !plain;
+    if has_variant {
         // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
         let _ = random.next_int(1);
@@ -457,28 +479,46 @@ pub(super) fn finalize_cow(
     let chicken_sound =
         (kind == MobType::Chicken).then(|| super::chicken::SoundVariant::pick(random));
     let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
-    let cow_sound = (!plain && !matches!(kind, MobType::Sheep | MobType::Chicken | MobType::Pig))
-        .then(|| {
-            if random.next_int(2) == 0 {
-                CowSoundVariant::Classic
-            } else {
-                CowSoundVariant::Moody
-            }
-        });
+    // 牛叫声只有牛抽；`plain`（犰狳、山羊）和哞菇、北极熊、羊、鸡、猪都不抽。
+    // Only cows draw the cow sound; `plain` (armadillo, goat), mooshrooms, polar bears,
+    // sheep, chickens and pigs do not.
+    let cow_sound = (!plain
+        && !matches!(
+            kind,
+            MobType::Sheep
+                | MobType::Chicken
+                | MobType::Pig
+                | MobType::Mooshroom
+                | MobType::PolarBear
+        ))
+    .then(|| {
+        if random.next_int(2) == 0 {
+            CowSoundVariant::Classic
+        } else {
+            CowSoundVariant::Moody
+        }
+    });
     // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
     // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
     // the mob into the group.
     // `AgeableMob.finalizeSpawn`：不是动物组数据时新建一份（官方 `groupData == null`）。
     // `AgeableMob.finalizeSpawn`: start a fresh animal group when there is none.
     if !matches!(group, Some(SpawnGroup::Ageable(_))) {
-        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(0.05)));
+        // `PolarBear.finalizeSpawn` 的同组后续成员都是幼崽。
+        // In `PolarBear.finalizeSpawn` later group members are always cubs.
+        let baby_chance = if kind == MobType::PolarBear {
+            1.0
+        } else {
+            0.05
+        };
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(baby_chance)));
     }
     let Some(SpawnGroup::Ageable(data)) = group else {
         unreachable!("刚放进去的动物组数据");
     };
     let baby = data.roll_baby(random);
     entity.with_mob(|me, mob| {
-        if kind != MobType::Sheep && !plain {
+        if has_variant {
             mob.variant = variant;
         }
         if let Some(color) = sheep_color {
@@ -493,6 +533,30 @@ pub(super) fn finalize_cow(
         if let Some(sound) = cow_sound {
             mob.sound_variant = sound;
         }
+        if baby {
+            living::set_age(me, mob, BABY_START_AGE);
+        }
+        finalize_mob(random, mob);
+    });
+}
+
+/// `AgeableMob.finalizeSpawn` 加 `Mob.finalizeSpawn` 那两层，组数据由调用方给。
+///
+/// The `AgeableMob.finalizeSpawn` and `Mob.finalizeSpawn` layers with caller group data.
+pub(super) fn finalize_ageable(
+    entity: &mut Entity,
+    random: &dyn RandomSource,
+    group: &mut Option<SpawnGroup>,
+    baby_chance: f32,
+) {
+    if !matches!(group, Some(SpawnGroup::Ageable(_))) {
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(baby_chance)));
+    }
+    let Some(SpawnGroup::Ageable(data)) = group else {
+        unreachable!("刚放进去的动物组数据");
+    };
+    let baby = data.roll_baby(random);
+    entity.with_mob(|me, mob| {
         if baby {
             living::set_age(me, mob, BABY_START_AGE);
         }

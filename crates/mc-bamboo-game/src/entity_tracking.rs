@@ -1365,8 +1365,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.left_handed {
         mob_flags |= 2;
     }
-    // `Mob.setAggressive`：近战目标跑起来时置位（狼、狐狸）。
-    // `Mob.setAggressive`, set while a melee goal runs (wolves, foxes).
+    // `Mob.setAggressive` 也写这一位，官方对所有生物都同步（狼、狐狸用近战目标时置位）。
+    // `Mob.setAggressive` writes this bit too, for every mob (set while a wolf or fox
+    // melee goal runs).
     if mob.aggressive {
         mob_flags |= 4;
     }
@@ -1473,6 +1474,16 @@ fn farm_default_data(
     use mc_bamboo_data::entity_types as facts;
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
+        (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
+            Some(EntityData::PolarBearStanding(false))
+        }
+        (MobType::Panda, facts::PANDA_UNHAPPY) => Some(EntityData::PandaUnhappy(0)),
+        (MobType::Panda, facts::PANDA_SNEEZE) => Some(EntityData::PandaSneeze(0)),
+        (MobType::Panda, facts::PANDA_EAT) => Some(EntityData::PandaEat(0)),
+        (MobType::Panda, facts::PANDA_MAIN_GENE) => Some(EntityData::PandaMainGene(0)),
+        (MobType::Panda, facts::PANDA_HIDDEN_GENE) => Some(EntityData::PandaHiddenGene(0)),
+        (MobType::Panda, facts::PANDA_FLAGS) => Some(EntityData::PandaFlags(0)),
         (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
             Some(EntityData::GlowSquidDarkTicks(0))
         }
@@ -1556,6 +1567,40 @@ fn farm_non_default_data(
         MobType::Sheep => {
             if mob.wool != 0 {
                 out.push(EntityData::SheepWool(mob.wool));
+            }
+            true
+        }
+        MobType::Mooshroom => {
+            if mob.mooshroom_brown {
+                out.push(EntityData::MooshroomType(1));
+            }
+            true
+        }
+        MobType::PolarBear => {
+            if mob.polar_bear_standing {
+                out.push(EntityData::PolarBearStanding(true));
+            }
+            true
+        }
+        MobType::Panda => {
+            let panda = &mob.panda;
+            if panda.unhappy_counter != 0 {
+                out.push(EntityData::PandaUnhappy(panda.unhappy_counter));
+            }
+            if panda.sneeze_counter != 0 {
+                out.push(EntityData::PandaSneeze(panda.sneeze_counter));
+            }
+            if panda.eat_counter != 0 {
+                out.push(EntityData::PandaEat(panda.eat_counter));
+            }
+            if panda.main_gene != 0 {
+                out.push(EntityData::PandaMainGene(panda.main_gene));
+            }
+            if panda.hidden_gene != 0 {
+                out.push(EntityData::PandaHiddenGene(panda.hidden_gene));
+            }
+            if panda.flags != 0 {
+                out.push(EntityData::PandaFlags(panda.flags));
             }
             true
         }

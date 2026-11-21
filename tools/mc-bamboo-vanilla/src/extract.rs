@@ -980,6 +980,27 @@ pub struct ProjectileFacts {
     pub goat_screaming: u8,
     pub goat_left_horn: u8,
     pub goat_right_horn: u8,
+    /// `MushroomCow.DATA_TYPE` 的元数据 index。
+    ///
+    /// The metadata index of `MushroomCow.DATA_TYPE`.
+    pub mooshroom_type: u8,
+    /// `PolarBear.DATA_STANDING_ID` 的元数据 index。
+    ///
+    /// The metadata index of `PolarBear.DATA_STANDING_ID`.
+    pub polar_bear_standing: u8,
+    /// 熊猫的六个元数据 index：计数器、基因和标志位。
+    ///
+    /// The six panda metadata indices: the counters, the genes and the flags byte.
+    pub panda_unhappy: u8,
+    pub panda_sneeze: u8,
+    pub panda_eat: u8,
+    pub panda_main_gene: u8,
+    pub panda_hidden_gene: u8,
+    pub panda_flags: u8,
+    /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
+    ///
+    /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).
+    pub stew_flowers: Vec<(i32, Vec<[i32; 2]>)>,
     pub turtle_has_egg: u8,
     pub turtle_laying_egg: u8,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。

@@ -217,6 +217,29 @@ pub enum EntityData {
     GoatScreaming(bool),
     GoatLeftHorn(bool),
     GoatRightHorn(bool),
+    /// `MushroomCow.DATA_TYPE`（INT）：0 红色，1 棕色。
+    ///
+    /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
+    MooshroomType(i32),
+    /// `PolarBear.DATA_STANDING_ID`（BOOLEAN）：站起来警告。
+    ///
+    /// `PolarBear.DATA_STANDING_ID` (BOOLEAN): standing up to warn.
+    PolarBearStanding(bool),
+    /// 熊猫的三个计数器（INT）。
+    ///
+    /// The three panda counters (INT).
+    PandaUnhappy(i32),
+    PandaSneeze(i32),
+    PandaEat(i32),
+    /// 熊猫的显性 / 隐性基因（BYTE，`Panda.Gene` 的 id）。
+    ///
+    /// The panda main and hidden genes (BYTE, a `Panda.Gene` id).
+    PandaMainGene(u8),
+    PandaHiddenGene(u8),
+    /// `Panda.DATA_ID_FLAGS`（BYTE）：2 打喷嚏、4 打滚、8 坐下、16 仰躺。
+    ///
+    /// `Panda.DATA_ID_FLAGS` (BYTE): sneezing, rolling, sitting, on its back.
+    PandaFlags(u8),
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`，INT。
     ///
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
@@ -374,6 +397,14 @@ impl EntityData {
             Self::GoatScreaming(_) => mc_bamboo_data::entity_types::GOAT_SCREAMING,
             Self::GoatLeftHorn(_) => mc_bamboo_data::entity_types::GOAT_LEFT_HORN,
             Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
+            Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
+            Self::PolarBearStanding(_) => mc_bamboo_data::entity_types::POLAR_BEAR_STANDING,
+            Self::PandaUnhappy(_) => mc_bamboo_data::entity_types::PANDA_UNHAPPY,
+            Self::PandaSneeze(_) => mc_bamboo_data::entity_types::PANDA_SNEEZE,
+            Self::PandaEat(_) => mc_bamboo_data::entity_types::PANDA_EAT,
+            Self::PandaMainGene(_) => mc_bamboo_data::entity_types::PANDA_MAIN_GENE,
+            Self::PandaHiddenGene(_) => mc_bamboo_data::entity_types::PANDA_HIDDEN_GENE,
+            Self::PandaFlags(_) => mc_bamboo_data::entity_types::PANDA_FLAGS,
             Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
             Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
             Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
@@ -613,6 +644,22 @@ impl EntityData {
                 };
                 write_data_header(out, self.index(), serializer);
                 write_varint(out, *value);
+            }
+            Self::MooshroomType(kind) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::PolarBearStanding(standing) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *standing);
+            }
+            Self::PandaUnhappy(value) | Self::PandaSneeze(value) | Self::PandaEat(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::PandaMainGene(gene) | Self::PandaHiddenGene(gene) | Self::PandaFlags(gene) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*gene);
             }
             Self::GlowSquidDarkTicks(ticks) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);

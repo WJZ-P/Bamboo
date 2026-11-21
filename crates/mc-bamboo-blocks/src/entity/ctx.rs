@@ -153,9 +153,9 @@ pub trait BlockView {
         false
     }
 
-    /// `Level.isThundering()`。默认不打雷。
+    /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
     ///
-    /// `Level.isThundering()`. No thunder by default.
+    /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
     fn is_thundering(&self) -> bool {
         false
     }
@@ -624,6 +624,10 @@ pub enum Command {
         wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
+        /// 熊猫父亲的显性 / 隐性基因（落地时父亲不在实体表里）。
+        ///
+        /// The panda father's main and hidden genes (it is not in the table when this lands).
+        father_genes: Option<(u8, u8)>,
         /// 父亲的种类和兔子品种：落地时父亲正被拆出来跑 tick，读不到。
         ///
         /// The father's type and rabbit variant; it is detached while the command lands.
@@ -822,6 +826,26 @@ pub enum Command {
         stack: ItemStack,
         delta: Vec3,
     },
+    /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
+    ///
+    /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
+    /// those that already have one.
+    AlertMobs {
+        others: Vec<EntityUid>,
+        enemy: EntityUid,
+    },
+    /// `Panda.pickUpItem`：把脚下那份吃的拿进主手。
+    ///
+    /// `Panda.pickUpItem`: take the edible stack into the main hand.
+    PickUpItem {
+        item: EntityUid,
+    },
+    /// `Panda.afterSneeze`：附近的成年熊猫原地跳一下。
+    ///
+    /// `Panda.afterSneeze`: nearby adult pandas hop.
+    JumpMobs {
+        others: Vec<EntityUid>,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -891,6 +915,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             wool,
             partner,
             position,
+            father_genes,
             kind,
             father_rabbit,
             father_fox,
@@ -911,6 +936,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 wolf: father_wolf.0,
                 tame: father_wolf.1,
                 screaming: father_screaming,
+                genes: father_genes,
             },
             world,
         ),
@@ -1013,6 +1039,26 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             let origin = request.origin;
             for stack in world.entity_loot_drops(request) {
                 world.spawn_at_location(origin, stack);
+            }
+        }
+        Command::AlertMobs { others, enemy } => {
+            super::mob::polar_bear::apply_alert(world, &others, enemy);
+        }
+        Command::PickUpItem { item } => {
+            super::mob::panda::apply_pick_up(world, item, me);
+        }
+        Command::JumpMobs { others } => {
+            for other in others {
+                world.with_entity_mut(other, &mut |entity| {
+                    let power = entity.kind.mob().map_or(0.0, |mob| {
+                        mob.attributes
+                            .value(mc_bamboo_data::registries::attribute::JUMP_STRENGTH)
+                            as f32
+                    });
+                    if power > 1.0e-5 {
+                        entity.delta.y = entity.delta.y.max(f64::from(power));
+                    }
+                });
             }
         }
         Command::EatBlock { pos, grass_below } => {

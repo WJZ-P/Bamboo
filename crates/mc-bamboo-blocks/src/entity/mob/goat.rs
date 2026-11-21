@@ -1352,6 +1352,7 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         damage_held: false,
         discard: false,
         limit_creative: true,
+        drop_stack: None,
     })
 }
 
@@ -1473,6 +1474,7 @@ mod tests {
             damage_held: false,
             discard: false,
             limit_creative: true,
+            drop_stack: None,
         };
         assert_eq!(
             eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),

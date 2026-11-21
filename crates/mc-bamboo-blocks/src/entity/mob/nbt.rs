@@ -397,6 +397,15 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Byte(i8::from(goat.right_horn)),
         );
     }
+    if mob.mob_type == MobType::Mooshroom {
+        super::mooshroom::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::PolarBear {
+        super::polar_bear::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Panda {
+        super::panda::write_nbt(mob, &mut out);
+    }
     if mob.mob_type == MobType::Chicken {
         put(&mut out, "IsChickenJockey", Tag::Byte(0));
         put(&mut out, "EggLayTime", Tag::Int(mob.egg_time));
@@ -654,6 +663,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             mob.goat.screaming = tag::bool_or(tag, "IsScreamingGoat", false);
             mob.goat.left_horn = tag::bool_or(tag, "HasLeftHorn", true);
             mob.goat.right_horn = tag::bool_or(tag, "HasRightHorn", true);
+        }
+        if mob.mob_type == MobType::Mooshroom {
+            super::mooshroom::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::PolarBear {
+            super::polar_bear::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::Panda {
+            super::panda::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Chicken {
             // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。

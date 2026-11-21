@@ -98,11 +98,29 @@ enum Line {
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     NaturalSpawn(natural_spawn::Case),
     GenSpawn(gen_spawn::Case),
+    PandaGenes(PandaGenesCase),
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
     Squid(Box<squid::SquidCase>),
     Fish(Box<fish::FishCase>),
     End(End),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PandaGenesCase {
+    father_main: u8,
+    father_hidden: u8,
+    mother_main: u8,
+    mother_hidden: u8,
+    father_seed: i64,
+    mother_seed: i64,
+    baby_seed: i64,
+    father_after: i64,
+    mother_after: i64,
+    baby_after: i64,
+    baby_main: u8,
+    baby_hidden: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,6 +410,11 @@ struct Spawn {
     seed: Option<i64>,
     #[serde(default)]
     hr: Option<i32>,
+    /// 身体朝向：幼崽是 0，哞菇剪成的牛抄哞菇的。
+    ///
+    /// Body yaw: 0 for a calf, copied from the mooshroom for a converted cow.
+    #[serde(default)]
+    yr: Option<i32>,
     #[serde(default)]
     uuid: Option<String>,
     /// 幼鸡构造时抽的 `eggTime`，同样是场景起点。
@@ -452,6 +475,16 @@ struct CowSetup {
     sensors: Vec<i64>,
     #[serde(default)]
     scute: i32,
+    /// 熊猫的显性 / 隐性基因 id。
+    ///
+    /// The panda's main and hidden gene ids.
+    #[serde(default)]
+    genes: Vec<u8>,
+    /// 熊猫主手一开始拿的物品。
+    ///
+    /// The item a panda holds at the start.
+    #[serde(default)]
+    held: i32,
     /// 末影人搬着的方块状态 ID，0 表示空手。
     ///
     /// The block state an enderman carries; 0 means empty-handed.
@@ -589,6 +622,7 @@ fn zombie_style(name: &str) -> bool {
         "wolf_",
         "armadillo_",
         "goat_",
+        "polar_bear_fight_",
         "creeper_",
         "spider_",
         "cave_spider_",
@@ -1122,6 +1156,7 @@ impl Report {
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
+                Line::PandaGenes(case) => self.replay_panda_genes(&case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
@@ -1321,22 +1356,32 @@ impl Report {
                     f64::from_bits(cow.z as u64),
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
+                // 场景编号（两侧同一套，别撞号）：1 僵尸、2 尸壳、3 猪、4 羊、5 鸡、
+                // 6 兔子、7 狐狸、8 狼、9..=12 马科、13 犰狳、14 山羊、15 熊猫、
+                // 16 北极熊、17 哞菇、40..=43 敌对生物、60 海龟，其余是牛。
+                // Scene kind ids (one shared set, no collisions): 1 zombie, 2 husk,
+                // 3 pig, 4 sheep, 5 chicken, 6 rabbit, 7 fox, 8 wolf, 9..=12 equines,
+                // 13 armadillo, 14 goat, 15 panda, 16 polar bear, 17 mooshroom,
+                // 40..=43 hostiles, 60 turtle; anything else is a cow.
                 let kind = match cow.kind {
+                    1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
+                    2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
+                    3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
+                    4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
+                    5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
+                    6 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
+                    7 => mc_bamboo_blocks::entity::mob::MobType::Fox,
+                    8 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
+                    9..=12 => equine::scene_kind(cow.kind),
+                    13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
+                    14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
+                    15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
+                    16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
+                    17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
                     43 => mc_bamboo_blocks::entity::mob::MobType::Enderman,
-                    8 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
-                    7 => mc_bamboo_blocks::entity::mob::MobType::Fox,
-                    6 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
-                    5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
-                    4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
-                    3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
-                    2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
-                    1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
-                    9..=12 => equine::scene_kind(cow.kind),
-                    13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
-                    14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
@@ -1360,7 +1405,13 @@ impl Report {
                         mob.x_rot_o = 0.0;
                         mob.y_head_rot = yaw;
                         mob.y_body_rot = yaw;
-                        mob.wool = cow.wool;
+                        if kind == mc_bamboo_blocks::entity::mob::MobType::Mooshroom {
+                            // 哞菇场景借 wool 字段选品种。
+                            // Mooshroom scenes reuse the wool field for the type.
+                            mob.mooshroom.brown = cow.wool != 0;
+                        } else {
+                            mob.wool = cow.wool;
+                        }
                         brain::setup(
                             entity.random.state(),
                             mob,
@@ -1372,6 +1423,19 @@ impl Report {
                         // The chicken's egg timer comes from Java (drawn in its constructor).
                         if cow.egg > 0 {
                             mob.egg_time = cow.egg;
+                        }
+                        if kind == mc_bamboo_blocks::entity::mob::MobType::Panda {
+                            use mc_bamboo_blocks::entity::mob::panda::Gene;
+                            let main = cow.genes.first().copied().unwrap_or(0);
+                            let hidden = cow.genes.get(1).copied().unwrap_or(0);
+                            mob.panda.main_gene = Gene::from_id(i32::from(main));
+                            mob.panda.hidden_gene = Gene::from_id(i32::from(hidden));
+                            if cow.held != 0 {
+                                mob.equipment.set(
+                                    mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+                                    ItemStack::new(cow.held, 1),
+                                );
+                            }
                         }
                         mob.creeper.powered = cow.creeper & 1 != 0;
                         mob.creeper.ignited = cow.creeper & 2 != 0;
@@ -1524,6 +1588,7 @@ impl Report {
             }
             brain::set_sprint(&mut level.players, case.sprint, index as i32);
             let mut ours_interactions = Vec::new();
+            let mut seeded_early = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
                 for &[tick, cow, kind, effect, duration, amplifier] in &case.cow_effect_actions {
@@ -1665,6 +1730,16 @@ impl Report {
                     );
                     ids.push(id);
                 }
+                // 交互里换出来的生物（哞菇剪成的牛）这一刻就会 tick：先写进官方给的场景起点。
+                // A mob created by an interaction (the cow a mooshroom turns into) ticks this
+                // very tick, so give it the official starting point first.
+                if let Some(step) = case.spawns.as_ref().and_then(|spawns| spawns.get(index)) {
+                    for setup in step.iter().filter(|spawn| spawn.kind == "cow") {
+                        if apply_born_setup(&mut world, setup.id, setup) {
+                            seeded_early.push(setup.id);
+                        }
+                    }
+                }
                 world.tick_entities();
             }
             // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
@@ -1689,37 +1764,15 @@ impl Report {
                 let Some(setup) = setup else {
                     continue;
                 };
-                let seed = setup.seed.unwrap_or(0);
-                let hr = setup
-                    .hr
-                    .map(|bits| f32::from_bits(bits as u32))
-                    .unwrap_or(0.0);
-                let uuid = setup
-                    .uuid
-                    .as_deref()
-                    .and_then(parse_uuid)
-                    .unwrap_or([0; 16]);
-                let egg = setup.egg;
+                let (hr, yr) = born_rotation(setup);
                 let uid = public.uid;
-                {
+                if !seeded_early.contains(&uid) {
                     let mut world = World::new(&mut level, &mut ticks);
-                    world.with_entity_mut(uid, &mut |entity| {
-                        entity.random = JavaRandom::from_state(seed);
-                        entity.y_rot = 0.0;
-                        if let Some(mob) = entity.kind.mob_mut() {
-                            mob.uuid = uuid;
-                            if let Some(egg) = egg {
-                                mob.egg_time = egg;
-                            }
-                            mob.y_head_rot = hr;
-                            mob.y_head_rot_o = hr;
-                            mob.y_rot_o = 0.0;
-                        }
-                    });
+                    apply_born_setup(&mut world, uid, setup);
                 }
                 // 配对快照在 `addFreshEntity` 时记下，这里同样换成场景起点的朝向。
                 // The pairing snapshot predates the override; give it the same start rotation.
-                public.yaw = 0.0;
+                public.yaw = yr;
                 if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &mut public.kind {
                     mob.y_head_rot = hr;
                 }
@@ -2562,6 +2615,7 @@ impl Report {
                         value,
                         seed: None,
                         hr: None,
+                        yr: None,
                         uuid: None,
                         egg: None,
                     })
@@ -2926,6 +2980,7 @@ fn spawn_snapshot(
                 value,
                 seed: None,
                 hr: None,
+                yr: None,
                 uuid: None,
                 egg: None,
             })
@@ -2962,6 +3017,46 @@ fn compare_interactions(
             return;
         }
     }
+}
+
+/// 新生生物的场景起点朝向：（头，身体）。
+///
+/// A born mob's starting rotation: (head, body).
+fn born_rotation(setup: &Spawn) -> (f32, f32) {
+    let angle = |bits: Option<i32>| bits.map_or(0.0, |bits| f32::from_bits(bits as u32));
+    (angle(setup.hr), angle(setup.yr))
+}
+
+/// 把官方给的构造随机数、朝向和 UUID 写进一头新生的生物；实体不在世界里时返回假。
+///
+/// Writes the official constructor random, rotation and UUID into a born mob; false when
+/// the entity is not in the world.
+fn apply_born_setup(world: &mut World, uid: i32, setup: &Spawn) -> bool {
+    let seed = setup.seed.unwrap_or(0);
+    let (hr, yr) = born_rotation(setup);
+    let uuid = setup
+        .uuid
+        .as_deref()
+        .and_then(parse_uuid)
+        .unwrap_or([0; 16]);
+    let egg = setup.egg;
+    let mut found = false;
+    world.with_entity_mut(uid, &mut |entity| {
+        let Some(mob) = entity.kind.mob_mut() else {
+            return;
+        };
+        found = true;
+        mob.uuid = uuid;
+        if let Some(egg) = egg {
+            mob.egg_time = egg;
+        }
+        mob.y_head_rot = hr;
+        mob.y_head_rot_o = hr;
+        mob.y_rot_o = yr;
+        entity.random = JavaRandom::from_state(seed);
+        entity.y_rot = yr;
+    });
+    found
 }
 
 /// 死亡掉落逐刻比对：顺序、种类、物品数量、经验值和位置都按位比。
@@ -3341,6 +3436,33 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             }
         ),
         MobType::Chicken => format!("{}|egg{}", mob.variant.name(), mob.egg_time),
+        MobType::PolarBear => format!(
+            "s{}|w{}|e{}|t{}",
+            u8::from(mob.polar_bear.standing),
+            mob.polar_bear.warning_sound_ticks,
+            mob.anger.end_time,
+            mob.anger
+                .target
+                .map_or_else(|| "-".to_owned(), |uuid| uuid_text(&uuid)),
+        ),
+        MobType::Mooshroom => format!(
+            "{}{}",
+            mob.mooshroom.type_name(),
+            if mob.mooshroom.stew_effects.is_some() {
+                "|stew"
+            } else {
+                ""
+            }
+        ),
+        MobType::Panda => format!(
+            "g{}/{}|u{}|n{}|e{}|f{}",
+            mob.panda.main_gene.id(),
+            mob.panda.hidden_gene.id(),
+            mob.panda.unhappy_counter,
+            mob.panda.sneeze_counter,
+            mob.panda.eat_counter,
+            mob.panda.flags,
+        ),
         MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
         MobType::Enderman => mob.describe_enderman(),
         MobType::Spider | MobType::CaveSpider => {
@@ -3358,7 +3480,7 @@ fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     match mob.mob_type {
         MobType::Pig => mob.pig_sound_variant.name().to_owned(),
         MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
-        MobType::Sheep => String::new(),
+        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear | MobType::Panda => String::new(),
         _ => mob.sound_variant.name().to_owned(),
     }
 }
@@ -3383,6 +3505,13 @@ fn describe_farm_animal(
                 serde_json::Value::String(color.name().to_owned()),
             );
         }
+        (MobType::Mooshroom, _) => {
+            let name = if wool == 0 { "red" } else { "brown" };
+            view.components.insert(
+                "minecraft:mooshroom/variant".to_owned(),
+                serde_json::Value::String(name.to_owned()),
+            );
+        }
         (MobType::Chicken, Some(variant)) => {
             view.components.insert(
                 "minecraft:chicken/variant".to_owned(),
@@ -3390,5 +3519,52 @@ fn describe_farm_animal(
             );
         }
         _ => {}
+    }
+}
+
+impl Report {
+    /// 熊猫基因遗传：三方随机源的取数顺序和结果。
+    ///
+    /// Panda gene inheritance: the draw order over the three random sources and the result.
+    fn replay_panda_genes(&mut self, case: &PandaGenesCase) {
+        use mc_bamboo_blocks::entity::mob::{MobType, panda};
+        self.cases += 1;
+        let mut father = JavaRandom::new(case.father_seed);
+        let mut mother = JavaRandom::new(case.mother_seed);
+        let mut baby = Entity::by_mob_type(MobType::Panda, Vec3::default());
+        baby.random = JavaRandom::new(case.baby_seed);
+        let genes = panda::offspring_genes(
+            &mut baby,
+            &mut father,
+            (
+                panda::Gene::from_id(i32::from(case.father_main)),
+                panda::Gene::from_id(i32::from(case.father_hidden)),
+            ),
+            &mut mother,
+            (
+                panda::Gene::from_id(i32::from(case.mother_main)),
+                panda::Gene::from_id(i32::from(case.mother_hidden)),
+            ),
+        );
+        let actual = (
+            genes.0.id() as u8,
+            genes.1.id() as u8,
+            father.state(),
+            mother.state(),
+            baby.random.state(),
+        );
+        let expected = (
+            case.baby_main,
+            case.baby_hidden,
+            case.father_after,
+            case.mother_after,
+            case.baby_after,
+        );
+        if actual != expected {
+            self.mismatch(format!(
+                "panda genes father {}/{} mother {}/{}: official {expected:?}, bamboo {actual:?}",
+                case.father_main, case.father_hidden, case.mother_main, case.mother_hidden
+            ));
+        }
     }
 }

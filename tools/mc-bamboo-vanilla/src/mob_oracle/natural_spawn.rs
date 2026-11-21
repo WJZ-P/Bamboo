@@ -62,7 +62,7 @@ struct Step {
     time: i64,
     count: i32,
     world_seed: i64,
-    spawned: Vec<[i32; 9]>,
+    spawned: Vec<[i32; 11]>,
 }
 
 pub(super) struct SceneFacts {
@@ -147,6 +147,13 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if let Some(&day) = self.per_scene.get("panda_day") {
+            return if day > 0 && self.per_scene.get("panda_dim") == Some(&0) {
+                Ok(())
+            } else {
+                Err("panda natural spawn fixtures must spawn at raw brightness 15 but not 8".into())
+            };
+        }
         for name in [
             "fish_cod",
             "fish_salmon",
@@ -158,6 +165,9 @@ impl Coverage {
                 return Err(format!("natural spawn fixture {name} produced no fish"));
             }
         }
+        let covered_misc = ["mooshroom_day", "polar_bear_day"]
+            .iter()
+            .all(|name| self.per_scene.get(*name).is_some_and(|&count| count > 0));
         let mobs = [
             self.cows,
             self.skeletons,
@@ -165,7 +175,8 @@ impl Coverage {
             self.squid,
             self.equines,
         ];
-        if self.per_scene.contains_key("cow_day") && (mobs.contains(&0) || self.cap_off == 0) {
+        let full = self.per_scene.contains_key("cow_day");
+        if self.cases > 0 && full && (mobs.contains(&0) || self.cap_off == 0 || !covered_misc) {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
             );
@@ -248,8 +259,13 @@ fn spawn_tick(
     }
 }
 
-fn spawn_row(entity: Entity) -> [i32; 9] {
+fn spawn_row(entity: Entity) -> [i32; 11] {
     let mob = entity.kind.mob().expect("natural spawns are mobs");
+    let [main_gene, hidden_gene] = if mob.mob_type == MobType::Panda {
+        [mob.panda.main_gene.id(), mob.panda.hidden_gene.id()]
+    } else {
+        [-1; 2]
+    };
     [
         mob.mob_type.entity_type(),
         (entity.position.x * 2.0) as i32,
@@ -259,6 +275,8 @@ fn spawn_row(entity: Entity) -> [i32; 9] {
         i32::from(mob.is_baby()),
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
+        main_gene,
+        hidden_gene,
         if mob.mob_type == MobType::TropicalFish {
             mob.fish.variant
         } else {
@@ -282,11 +300,12 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     let roof = kind == MobType::Husk;
+    let floor_state = spawn_floor(biome);
     let aquatic = case.aquatic;
     let blocks = (-16..48)
         .flat_map(|x| {
             (-16..32).flat_map(move |z| {
-                let floor = (BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK));
+                let floor = (BlockPos::new(x, -63, z), floor_state);
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
                 let water =
                     (-64..=-62).map(move |y| (BlockPos::new(x, y, z), BlockState(blocks::WATER)));
@@ -353,5 +372,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         players: vec![player],
         game: None,
         wrong_was_hurt: false,
+    })
+}
+
+pub(super) fn spawn_floor(biome: i32) -> BlockState {
+    BlockState(match biome {
+        biome::MUSHROOM_FIELDS => blocks::MYCELIUM,
+        biome::FROZEN_OCEAN => blocks::ICE,
+        _ => blocks::GRASS_BLOCK,
     })
 }
