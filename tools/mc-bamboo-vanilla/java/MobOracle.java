@@ -512,6 +512,18 @@ public final class MobOracle {
         float playerYaw;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
+        /**
+         * 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
+         *
+         * Equine scenes: this player rides mob 0; -1 means nobody rides.
+         */
+        int rider = -1;
+        /**
+         * 马科场景：0 号生物的初始脾气，-1 表示用构造时的值。
+         *
+         * Equine scenes: mob 0's starting temper; -1 keeps its constructed value.
+         */
+        int temper = -1;
 
         Scene(String name) {
             this.name = name;
@@ -545,6 +557,16 @@ public final class MobOracle {
             seeds.add(seed);
             cowAges.add(age);
             mobKinds.add(new int[] {kind});
+            return this;
+        }
+
+        Scene rider(int playerIndex) {
+            this.rider = playerIndex;
+            return this;
+        }
+
+        Scene temper(int value) {
+            this.temper = value;
             return this;
         }
 
@@ -2660,10 +2682,14 @@ public final class MobOracle {
         }
 
         /**
-         * 马科（类型 6 马、7 驴、8 骡、9 羊驼；3–5 是猪、羊、鸡）的逐刻场景，借僵尸场景的多生物路径：
-         * 吃草、扬蹄、甩尾计时和随机源，受伤扬蹄与恐慌，幼崽。
+         * 马科的逐刻场景，借僵尸场景的多生物路径：吃草、扬蹄、甩尾计时和随机源，
+         * 受伤扬蹄与恐慌，幼崽。循环里的 6–9 是马科序号，传给 mob 时加 3 换成
+         * 真实编号 9–12（9 马、10 驴、11 骡、12 羊驼；3–5 是猪、羊、鸡）。
+         *
          * Equine tick scenes on the multi-mob zombie path: grazing, rearing, timers,
-         * random draws, rearing and panic when hurt, and foals.
+         * random draws, rearing and panic when hurt, and foals. Loop values 6 to 9
+         * are equine indices; add 3 to get the mob ids 9 to 12 (9 horse, 10 donkey,
+         * 11 mule, 12 llama; 3 to 5 are pig, sheep, chicken).
          */
         private static void equineScenes(List<Scene> scenes) {
             for (int kind = 6; kind <= 9; kind++) {
@@ -2691,6 +2717,27 @@ public final class MobOracle {
                 }
                 scenes.add(hurt);
             }
+            // 没驯服的马科被人骑着：`RunAroundLikeCrazyGoal` 乱跑、甩人、涨脾气；
+            // 脾气顶满的一头在第一次抽中时当场驯服，骑手留着。
+            // An untamed equine with a rider: `RunAroundLikeCrazyGoal` bolts, throws
+            // the rider and grows the temper; a full-temper one tames on the first
+            // hit and keeps the rider.
+            for (int kind : new int[] {6, 7, 8, 9}) {
+                Scene buck = new Scene("zombie_equine_buck_" + kind).ticks(400).difficulty(2);
+                ground(buck, 12);
+                buck.mob(kind + 3, 0.5, 64.0, 0.5, 0.0F, 91L, 0);
+                buck.player(0.5, 64.0, 0.5, Items.AIR);
+                buck.rider(0);
+                scenes.add(buck);
+
+                Scene tame = new Scene("zombie_equine_tame_" + kind).ticks(400).difficulty(2);
+                ground(tame, 12);
+                tame.mob(kind + 3, 0.5, 64.0, 0.5, 0.0F, 92L, 0);
+                tame.temper(kind == 9 ? 30 : 100);
+                tame.player(0.5, 64.0, 0.5, Items.AIR);
+                tame.rider(0);
+                scenes.add(tame);
+            }
             Scene herd = new Scene("zombie_equine_herd").ticks(1200).difficulty(2);
             ground(herd, 12);
             herd.mob(9, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
@@ -2698,6 +2745,28 @@ public final class MobOracle {
             herd.mob(12, -3.5, 64.0, -2.5, 180.0F, 73L, 0);
             herd.player(4.5, 64.0, 4.5, Items.WHEAT);
             scenes.add(herd);
+            // 羊驼和野狼互动：近处（3 格，在四分之一跟随距离内）羊驼盯上野狼、野狼躲羊驼；
+            // 远处（8 格，超过四分之一跟随距离但在 24 格躲避范围内）羊驼不盯狼、野狼照躲。
+            // Llama-wolf interaction: near (3 blocks, inside quarter follow range) the llama
+            // targets the wild wolf and the wolf avoids the llama; far (8 blocks, outside
+            // quarter follow range but inside 24-block avoid range) only the wolf avoids.
+            Scene llamaWolfNear = new Scene("zombie_equine_llama_wolf_near").ticks(40).difficulty(2);
+            ground(llamaWolfNear, 12);
+            // 小围栏让野狼躲避时仍留在四分之一跟随距离（4 格）内，确保两个目标都真的触发。
+            // A small pen keeps the fleeing wolf inside quarter follow range (4 blocks) so
+            // both `WolfAvoidEntityGoal` and `LlamaAttackWolfGoal` genuinely fire.
+            llamaWolfNear.fill(-3, 64, -3, 3, 65, -3, STONE);
+            llamaWolfNear.fill(-3, 64, 3, 3, 65, 3, STONE);
+            llamaWolfNear.fill(-3, 64, -3, -3, 65, 3, STONE);
+            llamaWolfNear.fill(3, 64, -3, 3, 65, 3, STONE);
+            llamaWolfNear.mob(12, 0.5, 64.0, 0.5, 0.0F, 81L, 0);
+            llamaWolfNear.mob(8, 2.0, 64.0, 0.5, 180.0F, 82L, 0);
+            scenes.add(llamaWolfNear);
+            Scene llamaWolfFar = new Scene("zombie_equine_llama_wolf_far").ticks(120).difficulty(2);
+            ground(llamaWolfFar, 12);
+            llamaWolfFar.mob(12, 0.5, 64.0, 0.5, 0.0F, 83L, 0);
+            llamaWolfFar.mob(8, 8.5, 64.0, 0.5, 180.0F, 84L, 0);
+            scenes.add(llamaWolfFar);
         }
 
         private static int itemId(Item item) {
@@ -4424,7 +4493,7 @@ public final class MobOracle {
     private static List<Item> equineItems() {
         return List.of(Items.WHEAT, Items.SUGAR, Items.HAY_BLOCK,
             Items.APPLE, Items.CARROT, Items.RED_MUSHROOM, Items.GOLDEN_CARROT, Items.GOLDEN_APPLE,
-            Items.CHEST, Items.SADDLE, Items.IRON_HORSE_ARMOR, Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE), Items.STICK);
+            Items.CHEST, Items.SADDLE, Items.IRON_HORSE_ARMOR, Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE), Items.SHEARS, Items.STICK);
     }
 
     /**
@@ -6056,7 +6125,15 @@ public final class MobOracle {
         level.playersList().addAll(players);
         // 野生动物场景要用 `getEntitiesOfClass(Player.class, ...)` 找到玩家（躲避目标）；
         // `LivingEntity.pushEntities` 也会被玩家推，所以僵尸场景同样放进实体表。
-        level.tracked.addAll(players);
+        // 骑乘对拍场景（`scene.rider >= 0`）不模拟游戏层的下马落点，所以不把骑手放进
+        // `tracked`，免得甩人那一刻 `dismountVehicle` 挪出的骑手在同一刻 `pushEntities` 里推载具。
+        // Riding scenes do not replay game-layer dismount placement, so skip the rider in
+        // `tracked` to avoid same-tick `pushEntities` against the freshly dismounted rider.
+        for (int i = 0; i < players.size(); i++) {
+            if (i != scene.rider) {
+                level.tracked.add(players.get(i));
+            }
+        }
         // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
@@ -6107,6 +6184,10 @@ public final class MobOracle {
             } else if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
                 ageable.setAge(scene.cowAges.get(i));
             }
+            if (i == 0 && scene.temper >= 0
+                    && mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
+                horse.setTemper(scene.temper);
+            }
             if (mob instanceof net.minecraft.world.entity.animal.fox.Fox fox && scene.foxHunts) {
                 java.lang.reflect.Method hunts = fox.getClass().getDeclaredMethod("setTargetGoals");
                 hunts.setAccessible(true);
@@ -6137,9 +6218,13 @@ public final class MobOracle {
             mobs.add(mob);
             level.tracked.add(mob);
         }
+        if (scene.rider >= 0 && !players.get(scene.rider).startRiding(mobs.get(0))) {
+            throw new IllegalStateException("Rider could not mount in " + scene.name);
+        }
         StringBuilder line = new StringBuilder(1 << 18);
         line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
         line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"rider\":").append(scene.rider);
         line.append(",\"startTime\":").append(START_TIME);
         line.append(",\"blocks\":").append(blockArray(scene.blocks));
         line.append(",\"cows\":[");
@@ -6153,6 +6238,7 @@ public final class MobOracle {
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
+            line.append(",\"temper\":").append(i == 0 ? scene.temper : -1);
             line.append(",\"creeper\":").append(kind[0] == 40 ? scene.creeperFlags : 0);
             line.append(",\"carried\":").append(
                     kind[0] == 43 && scene.carried != null ? Block.getId(scene.carried) : 0);
@@ -6220,6 +6306,8 @@ public final class MobOracle {
             zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                     lastSentHealth, true);
         }
+        boolean llamaTargetedWolf = false;
+        boolean wolfAvoidedLlama = false;
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
             if (level.realSky) {
@@ -6269,6 +6357,14 @@ public final class MobOracle {
                 mob.commonTick();
                 mob.tick();
             }
+            if (scene.name.startsWith("zombie_equine_llama_wolf")) {
+                if (mobs.get(0).getTarget() == mobs.get(1)) llamaTargetedWolf = true;
+                for (WrappedGoal goal : mobs.get(1).getGoalSelector().getAvailableGoals()) {
+                    if (goal.isRunning() && "WolfAvoidEntityGoal".equals(goal.getGoal().getClass().getSimpleName())) {
+                        wolfAvoidedLlama = true;
+                    }
+                }
+            }
             level.tracked.removeIf(Entity::isRemoved);
             appendMobEvents(mobEvents, mobSink.takeRaw());
             line.append(',').append(zombieStepJson(mobs, players, level));
@@ -6276,12 +6372,38 @@ public final class MobOracle {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                         lastSentHealth, false);
             }
+            // 对拍到驯服或甩人的那一刻。后续骑手落点和玩家移动不属于这个生物目标。
+            // Compare through taming or ejection; later rider placement is outside the goal.
+            if (scene.rider >= 0
+                    && (((net.minecraft.world.entity.animal.equine.AbstractHorse) mobs.get(0)).isTamed()
+                        || !mobs.get(0).isVehicle())) {
+                break;
+            }
+        }
+        if (scene.rider >= 0) {
+            // 防止随机种子只测到跑动，却始终没触发驯服或甩人。
+            // Ensure the seed exercises taming or ejection, not just running.
+            var horse = (net.minecraft.world.entity.animal.equine.AbstractHorse) mobs.get(0);
+            var rider = players.get(scene.rider);
+            boolean tamed = scene.temper >= 0;
+            if (horse.isTamed() != tamed || (rider.getVehicle() == horse) != tamed
+                    || horse.getTemper() != (tamed ? scene.temper : 5)) {
+                throw new IllegalStateException("Expected taming or ejection never occurred in " + scene.name);
+            }
         }
         if (scene.name.startsWith("polar_bear_fight_fox")) {
             Entity expected = scene.name.endsWith("_cub") ? null : mobs.get(1);
             if (mobs.getFirst().getTarget() != expected) {
                 throw new IllegalStateException(scene.name + " did not exercise fox target selection");
             }
+        }
+        if ("zombie_equine_llama_wolf_near".equals(scene.name) && !llamaTargetedWolf) {
+            throw new IllegalStateException(scene.name + " did not exercise llama targeting: target="
+                    + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
+        }
+        if ("zombie_equine_llama_wolf_far".equals(scene.name) && (llamaTargetedWolf || !wolfAvoidedLlama)) {
+            throw new IllegalStateException(scene.name + " expected wolf avoidance without llama targeting: target="
+                    + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
         }
         line.append("]");
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
@@ -6415,6 +6537,10 @@ public final class MobOracle {
             if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
                 out.append(",\"eq\":").append(equineFlags(horse));
                 out.append(",\"tmp\":").append(horse.getTemper());
+                out.append(",\"rider_count\":").append(horse.getPassengers().size());
+                if (horse.getOwnerReference() != null) {
+                    out.append(",\"owner\":").append(jsonString(horse.getOwnerReference().getUUID().toString()));
+                }
             }
             out.append(",\"aggr\":").append(mob.isAggressive());
             out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());

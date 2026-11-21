@@ -29,26 +29,32 @@ mod life;
 mod llama;
 mod ranged;
 mod spawn;
+pub(super) mod tame;
 pub(super) use spawn::finalize_spawn;
 
 pub(super) use death::drop_on_death;
 pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets};
 pub(super) use interact::interact;
 pub(super) use life::{
-    Voice, after_hurt, ai_step_end, ai_step_start, is_immobile, land_sound, tick_end, voice,
+    Voice, after_hurt, ai_step_end, ai_step_start, handle_start_jump, is_immobile, land_sound,
+    play_step_sound, tick_end, tick_ridden, voice,
 };
 pub(super) use ranged::{ranged_attack_tick, take_did_spit};
 
-/// 马科同步给客户端的元数据：标志字节、马的花色或羊驼的毛色、有没有箱子、羊驼力量。
+/// 马科同步给客户端的元数据，加扬蹄动画进度（供骑手附着点用）。
 ///
-/// The equine metadata sent to clients: the flag byte, the horse or llama
-/// variant, whether a chest is fitted, and llama strength.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The equine metadata sent to clients, plus the rearing animation progress for
+/// the rider attachment point.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EquinePublic {
     pub flags: u8,
     pub variant: i32,
     pub chested: bool,
     pub strength: i32,
+    /// `AbstractHorse.standAnimO`：上一刻的扬蹄动画值，计算骑手附着点时用。
+    ///
+    /// `AbstractHorse.standAnimO`: previous rearing animation value for rider placement.
+    pub stand_anim_o: f32,
 }
 
 impl EquinePublic {
@@ -61,7 +67,15 @@ impl EquinePublic {
             variant: state.variant,
             chested: state.chested,
             strength: state.strength,
+            stand_anim_o: state.stand_anim_o,
         }
+    }
+
+    /// `AbstractHorse.isTamed()`：`DATA_ID_FLAGS` 的第 1 位（2）。
+    ///
+    /// `AbstractHorse.isTamed()`: bit 1 (value 2) of `DATA_ID_FLAGS`.
+    pub const fn is_tamed(self) -> bool {
+        self.flags & 2 != 0
     }
 }
 
@@ -90,7 +104,17 @@ pub struct EquineState {
     pub eating_counter: i32,
     pub mouth_counter: i32,
     pub stand_counter: i32,
+    /// `AbstractHorse.standAnim` 和 `standAnimO`：扬蹄动画进度，决定骑手附着点偏移。不存档。
+    ///
+    /// `AbstractHorse.standAnim` and `standAnimO`: rearing progress for the rider offset. Not saved.
+    pub stand_anim: f32,
+    pub stand_anim_o: f32,
     pub tail_counter: i32,
+    /// `AbstractHorse.gallopSoundCounter`：被骑着跑时按步数换成奔跑步声。不存档。
+    ///
+    /// `AbstractHorse.gallopSoundCounter`: turns walked steps into gallop sounds
+    /// while ridden. Not saved.
+    pub gallop_sound_counter: i32,
     pub variant: i32,
     pub strength: i32,
     pub chested: bool,
@@ -135,6 +159,45 @@ pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
         0.5
     };
     (facts.width * scale, facts.height * scale, eye * scale)
+}
+
+/// 成年骑手在背上的基础附着点 `(y, z)`，官方 `EntityTypes` 的 `passengerAttachments`：
+/// 马 1.44375、驴 1.1125、骡 1.2125、羊驼 (1.37, -0.3)。扬蹄偏移由 `EquinePublic::stand_anim_o`
+/// 在游戏层叠加。
+///
+/// The base attachment point `(y, z)` of an adult rider, from vanilla `EntityTypes`'
+/// `passengerAttachments`: horse 1.44375, donkey 1.1125, mule 1.2125, llama
+/// (1.37, -0.3). The rearing offset is added from `EquinePublic::stand_anim_o`.
+pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
+    match kind {
+        MobType::Horse => (1.443_75, 0.0),
+        MobType::Donkey => (1.112_5, 0.0),
+        MobType::Mule => (1.212_5, 0.0),
+        MobType::Llama => (1.37, -0.3),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// 剪下装备时的掉落偏移：`EntityAttachments.getAverage(EntityAttachment.PASSENGER)`，
+/// 未按朝向旋转。成年取 [`passenger_attachment`]，幼崽按官方 `BABY_DIMENSIONS` 的
+/// `PASSENGER` 附着点缩放。
+///
+/// The drop offset for sheared equipment, `EntityAttachments.getAverage(PASSENGER)`
+/// (unrotated): [`passenger_attachment`] for adults, and the scaled `BABY_DIMENSIONS`
+/// passenger attachment for babies.
+pub(super) fn shear_drop_offset(kind: MobType, baby: bool) -> mc_bamboo_core::Vec3 {
+    let (y, z) = if !baby {
+        passenger_attachment(kind)
+    } else {
+        let height = entity_types::FACTS[kind.entity_type() as usize].height;
+        match kind {
+            MobType::Horse => ((height - 0.125) * 0.7, 0.0),
+            MobType::Donkey | MobType::Mule => ((height + 0.031_25) * 0.5, -0.312_5 * 0.5),
+            MobType::Llama => ((height - 0.25) * 0.5, -0.3 * 0.5),
+            _ => (0.0, 0.0),
+        }
+    };
+    mc_bamboo_core::Vec3::new(0.0, f64::from(y), f64::from(z))
 }
 
 /// `createBaseHorseAttributes`，驴骡羊驼再用 `createBaseChestedHorseAttributes` 的速度和跳跃。
@@ -212,11 +275,15 @@ pub(super) fn offspring_kind(a: MobType, b: MobType) -> Option<MobType> {
     }
 }
 
-/// `AbstractHorse.canParent`（没有骑乘时载具和乘客两项恒真）。
+/// `AbstractHorse.canParent`：`!isVehicle() && !isPassenger() && isTamed() && !isBaby() &&
+/// 满血 && isInLove()`。Bamboo 的生物不会骑别的生物，`isPassenger()` 恒假。
 ///
-/// `AbstractHorse.canParent`; the vehicle and passenger checks always pass without riding.
+/// `AbstractHorse.canParent`: `!isVehicle() && !isPassenger() && isTamed() && !isBaby()
+/// && full health && isInLove()`. Bamboo mobs never ride other mobs, so
+/// `isPassenger()` is always false.
 pub(super) fn can_parent(mob: &Mob) -> bool {
-    mob.equine.as_ref().is_some_and(|state| state.tame)
+    !mob.is_vehicle()
+        && mob.equine.as_ref().is_some_and(|state| state.tame)
         && !mob.is_baby()
         && mob.health >= mob.attributes.value(attribute::MAX_HEALTH) as f32
         && mob.in_love > 0

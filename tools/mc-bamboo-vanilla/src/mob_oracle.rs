@@ -142,6 +142,11 @@ struct Case {
     blocks: Vec<[i32; 4]>,
     cows: Vec<CowSetup>,
     players: Vec<PlayerSetup>,
+    /// 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
+    ///
+    /// Equine scenes: this player rides mob 0; -1 means nobody rides.
+    #[serde(default = "minus_one")]
+    rider: i32,
     hurts: Vec<[i32; 4]>,
     #[serde(default)]
     summons: Vec<SummonSetup>,
@@ -469,6 +474,11 @@ struct CowSetup {
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
     #[serde(default)]
     egg: i32,
+    /// 马科的初始脾气，-1 表示用构造时的值。
+    ///
+    /// The equine's starting temper; -1 keeps the constructed value.
+    #[serde(default = "minus_one")]
+    temper: i32,
     /// 熊猫的显性 / 隐性基因 id。
     ///
     /// The panda's main and hidden gene ids.
@@ -590,6 +600,10 @@ struct CowStep {
     eq: i32,
     #[serde(default)]
     tmp: i32,
+    #[serde(default)]
+    rider_count: usize,
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，以及苦力怕、蜘蛛、
@@ -1276,6 +1290,8 @@ impl Report {
                     // The official players use UUID (1, 2 + index); wolves match owners by it.
                     uuid: Some(((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),
                     uid: player.id,
+                    yaw: 0.0,
+                    pitch: 0.0,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),
                         f64::from_bits(player.y as u64),
@@ -1401,6 +1417,11 @@ impl Report {
                         if cow.egg > 0 {
                             mob.egg_time = cow.egg;
                         }
+                        if cow.temper >= 0
+                            && let Some(state) = mob.equine.as_mut()
+                        {
+                            state.temper = cow.temper;
+                        }
                         if kind == mc_bamboo_blocks::entity::mob::MobType::Panda {
                             use mc_bamboo_blocks::entity::mob::panda::Gene;
                             let main = cow.genes.first().copied().unwrap_or(0);
@@ -1510,6 +1531,20 @@ impl Report {
                     });
                 }
                 ids.push(id);
+            }
+            // 骑乘场景：官方 `startRiding` 之后，0 号生物身上坐着这名玩家。
+            //
+            // Riding scene: after vanilla's `startRiding` this player sits on mob 0.
+            if case.rider >= 0
+                && let Some(&ridden) = ids.first()
+                && let Some(player) = case.players.get(case.rider as usize)
+            {
+                let rider = player.id;
+                world.with_entity_mut(ridden, &mut |entity| {
+                    if let Some(mob) = entity.kind.mob_mut() {
+                        mob.passengers.push(rider);
+                    }
+                });
             }
         }
         let Some(first) = case.steps.first() else {
@@ -2026,6 +2061,8 @@ impl Report {
                 bits64!(armor);
                 plain!(eq);
                 plain!(tmp);
+                plain!(rider_count);
+                plain!(owner);
             }
             if diffs.is_empty() {
                 continue;
@@ -3385,6 +3422,12 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .as_ref()
             .map_or(0, |state| i32::from(state.flags())),
         tmp: mob.equine.as_ref().map_or(0, |state| state.temper),
+        rider_count: mob.passengers.len(),
+        owner: mob
+            .equine
+            .as_ref()
+            .and_then(|state| state.owner.as_ref())
+            .map(uuid_text),
     }
 }
 

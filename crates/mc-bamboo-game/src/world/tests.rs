@@ -3455,6 +3455,7 @@ fn every_decoded_request_reaches_a_module_without_disconnecting() {
         PlayRequest::PlayerInput { flags: 0x21 },
         PlayRequest::PlayerCommand {
             action: PlayerCommandKind::StartSprinting,
+            data: 0,
         },
         PlayRequest::PlayerAbilities { flags: 0x02 },
         PlayRequest::Punch,
@@ -3517,6 +3518,7 @@ fn start_fall_flying_is_refused_with_the_current_flags() {
         &client,
         PlayRequest::PlayerCommand {
             action: PlayerCommandKind::StartFallFlying,
+            data: 0,
         },
     );
     server.tick();
@@ -3539,6 +3541,7 @@ fn start_fall_flying_is_refused_with_the_current_flags() {
         &client,
         PlayRequest::PlayerCommand {
             action: PlayerCommandKind::StartFallFlying,
+            data: 0,
         },
     );
     server.tick();

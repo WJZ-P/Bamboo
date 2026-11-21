@@ -1280,6 +1280,8 @@ public final class Extractor {
             out.add(row);
         }
         return out;
+    }
+
     /** 狐狸的尺寸、元数据下标和属性。 */
     private static void addFoxFacts(JsonObject out) throws ReflectiveOperationException {
         Class<?> fox = net.minecraft.world.entity.animal.fox.Fox.class;

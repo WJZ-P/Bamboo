@@ -97,6 +97,7 @@ mod profiler;
 pub mod region;
 #[cfg(feature = "oracle-samples")]
 mod replay_players;
+mod riding;
 #[cfg(feature = "oracle-samples")]
 pub use drops::replay_arrow_pickup;
 #[cfg(feature = "oracle-samples")]
