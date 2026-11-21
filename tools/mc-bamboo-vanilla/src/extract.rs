@@ -38,6 +38,7 @@ pub struct Extracted {
     pub items: Vec<ExtractedItem>,
     pub entity_types: Vec<EntityTypeFacts>,
     pub projectile_facts: ProjectileFacts,
+    pub monster_facts: MonsterFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -918,6 +919,16 @@ pub struct ProjectileFacts {
     pub effect_colors: Vec<i32>,
 }
 
+/// 敌对生物的元数据 index 和眼高；键就是生成的常量名。
+///
+/// Hostile-mob metadata indices and eye heights, keyed by constant name.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonsterFacts {
+    pub data_ids: BTreeMap<String, u8>,
+    pub eye_heights: BTreeMap<String, f32>,
+}
+
 /// 一个物品。列表里的位置就是它的注册表 ID。
 pub struct Item {
     pub name: String,
@@ -1144,6 +1155,7 @@ pub struct VersionData {
     pub items: Vec<Item>,
     pub entity_types: Vec<EntityTypeFacts>,
     pub projectile_facts: ProjectileFacts,
+    pub monster_facts: MonsterFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -1280,6 +1292,7 @@ fn read_version_data(
         items,
         entity_types: extracted.entity_types,
         projectile_facts: extracted.projectile_facts,
+        monster_facts: extracted.monster_facts,
         state_tables: extracted.state_tables,
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
