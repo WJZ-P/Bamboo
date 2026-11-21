@@ -1067,6 +1067,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             } else {
                 *unseen_ticks += 1;
             }
+
             *unseen_ticks <= reduced_tick_delay(60)
         }
         Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
@@ -1393,12 +1394,13 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 .set_look_at_default(me.position.x + *rel_x, eye, me.position.z + *rel_z);
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
-        Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
-        Goal::NearestAttackableTarget { unseen_ticks, .. } => {
-            *unseen_ticks += 1;
-            // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
-            // `unseenTicks`；本期的玩家目标恒可攻击，不改随机源。
-        }
+        // 官方 `TargetGoal` 没有 `tick()`：`unseenTicks` 只在 `canContinueToUse` 里按视线增减。
+        // Vanilla `TargetGoal` has no `tick()`: `unseenTicks` only changes in
+        // `canContinueToUse`, by line of sight.
+        Goal::Unavailable(_)
+        | Goal::HurtByTarget { .. }
+        | Goal::RestrictSun
+        | Goal::NearestAttackableTarget { .. } => {}
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1678,13 +1680,6 @@ fn nearest_look_target(
     let mut found = None;
     for player in players {
         // `notRiding(mob)`：牛不当坐骑，玩家不会骑在它身上。
-        // `Slime.addTargetingGoals` 的选择器：高度差不超过 4。
-        // The `Slime.addTargetingGoals` selector: at most 4 blocks of height difference.
-        if mob.mob_type == super::MobType::Slime
-            && !super::slime::accepts_target_height(me, player.position.y)
-        {
-            continue;
-        }
         if !targeting_test(me, mob, view, &player, range, true) {
             continue;
         }
@@ -2077,6 +2072,13 @@ fn nearest_attackable(
         // `Player.canBeSeenAsEnemy()`, so a player with the `invulnerable` ability
         // (creative) is rejected before the range and sight checks and never starts the goal.
         if player.creative {
+            continue;
+        }
+        // `Slime.addTargetingGoals` 的选择器：高度差不超过 4。
+        // The `Slime.addTargetingGoals` selector: at most 4 blocks of height difference.
+        if mob.mob_type == super::MobType::Slime
+            && !super::slime::accepts_target_height(me, player.position.y)
+        {
             continue;
         }
         if !targeting_test(me, mob, view, &player, range, true) {

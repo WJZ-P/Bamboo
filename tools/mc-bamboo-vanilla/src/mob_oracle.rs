@@ -192,6 +192,11 @@ struct Case {
     /// 每刻生物发出的 `entity_event` 和 `set_equipment`（base64，按发生顺序）。
     #[serde(default)]
     mob_event_packets: Option<Vec<Vec<String>>>,
+    /// 史莱姆场景：每刻分裂出来的小史莱姆（x、y、z、朝向的位，大小，血量的位）。
+    ///
+    /// Slime scenes: the children split off each tick (x, y, z and yaw bits, size, health bits).
+    #[serde(default)]
+    cube_splits: Option<Vec<Vec<[i64; 6]>>>,
     /// 每刻 0 号玩家的状态：血量位、受伤冷却、受伤动画、死亡、着火刻数。
     #[serde(default)]
     zombie_player_states: Option<Vec<[i64; 5]>>,
@@ -1185,6 +1190,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    6 => mc_bamboo_blocks::entity::mob::MobType::Slime,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
@@ -1209,7 +1215,21 @@ impl Report {
                         mob.egg_time = cow.egg;
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
-                    if cow.age != 0 {
+                    let slime = kind == mc_bamboo_blocks::entity::mob::MobType::Slime;
+                    if slime {
+                        // 史莱姆场景用「年龄」那一列带大小；移动控制的目标角度对齐成场景的朝向。
+                        // Slime scenes carry the size in the age column; the move control's
+                        // target angle is aligned with the scene yaw.
+                        entity.with_mob(|me, mob| {
+                            mc_bamboo_blocks::entity::mob::slime::set_size(me, mob, cow.age, true);
+                            mob.cube.move_y_rot = yaw;
+                        });
+                        entity.y_rot = yaw;
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.y_body_rot = yaw;
+                        }
+                    }
+                    if cow.age != 0 && !slime {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
                         let baby = kind.is_monster() || cow.age < 0;
@@ -1413,6 +1433,9 @@ impl Report {
                         count: after.count,
                     });
                 }
+                if case.name.starts_with("slime_") {
+                    touch_slimes(&mut world, &ids, &case.players);
+                }
                 for &[tick, cow, amount, attacker] in &case.hurts {
                     if tick as usize != index {
                         continue;
@@ -1558,6 +1581,18 @@ impl Report {
                     &ours_spawns,
                     &expected_spawns[index],
                 );
+            }
+            if let Some(expected) = &case.cube_splits
+                && let Some(expected) = expected.get(index)
+            {
+                let ours = take_cube_splits(&mut level, &mut ticks, &spawn_public);
+                if &ours != expected && self.mismatches.len() < self.show {
+                    self.mismatches.push(format!(
+                        "{} tick {index} splits: official {expected:?} bamboo {ours:?}",
+                        case.name
+                    ));
+                }
+                spawn_public.clear();
             }
             self.steps += 1;
             let mut ours = snapshot(&level, &ids);
@@ -2938,6 +2973,71 @@ fn block_hash(level: &MobLevel) -> i64 {
     hash
 }
 
+/// 史莱姆场景里 `Player.aiStep` 的 `touch(entity)`：玩家活着时，包围盒外扩 (1, 0.5, 1) 碰到的
+/// 史莱姆各调一次 `playerTouch`。玩家的包围盒是站立的 0.6 × 1.8。
+///
+/// `touch(entity)` from `Player.aiStep` for slime scenes: a living player calls `playerTouch`
+/// on each slime within its box inflated by (1, 0.5, 1). The player box is the standing
+/// 0.6 × 1.8.
+fn touch_slimes(world: &mut World, ids: &[i32], players: &[PlayerSetup]) {
+    for player in players {
+        let feet = Vec3::new(
+            f64::from_bits(player.x as u64),
+            f64::from_bits(player.y as u64),
+            f64::from_bits(player.z as u64),
+        );
+        let half = f64::from(0.6_f32) / 2.0;
+        let reach = mc_bamboo_core::Aabb::new(
+            feet.x - half,
+            feet.y,
+            feet.z - half,
+            feet.x + half,
+            feet.y + f64::from(1.8_f32),
+            feet.z + half,
+        )
+        .inflate(1.0, 0.5, 1.0);
+        for &id in ids {
+            let touching = world
+                .entity(id)
+                .is_some_and(|entity| !entity.removed && entity.bounding_box().intersects(reach));
+            if touching {
+                mc_bamboo_blocks::entity::mob::slime::player_touch(world, id, player.id);
+            }
+        }
+    }
+}
+
+/// 这一刻新生成的小史莱姆：记下和官方一侧同样的六个数，然后丢掉，不让它们继续 tick。
+///
+/// The slimes spawned this tick: record the same six numbers as the vanilla side, then
+/// discard them so they never tick.
+fn take_cube_splits(
+    level: &mut MobLevel,
+    ticks: &mut BlockTicks,
+    spawned: &[mc_bamboo_blocks::entity::EntityPublic],
+) -> Vec<[i64; 6]> {
+    let mut out = Vec::new();
+    let mut world = World::new(level, ticks);
+    for public in spawned {
+        let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
+            continue;
+        };
+        if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Slime {
+            continue;
+        }
+        out.push([
+            public.position.x.to_bits() as i64,
+            public.position.y.to_bits() as i64,
+            public.position.z.to_bits() as i64,
+            i64::from(public.yaw.to_bits() as i32),
+            i64::from(mob.cube_size),
+            i64::from(mob.health.to_bits() as i32),
+        ]);
+        world.with_entity_mut(public.uid, &mut |entity| entity.discard());
+    }
+    out
+}
+
 fn step_of(entity: &Entity, lr: i64) -> Option<CowStep> {
     let EntityKind::Mob(mob) = &entity.kind else {
         return None;
@@ -3053,6 +3153,16 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
 fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     use mc_bamboo_blocks::entity::mob::{MobType, sheep};
     match mob.mob_type {
+        // 史莱姆把自己的状态塞进这一列：大小、跳跃延迟、移动控制的目标角度、上一刻是否在地上。
+        // Slimes pack their own state here: size, jump delay, the move control's target angle
+        // and whether they were on the ground.
+        MobType::Slime => format!(
+            "slime:{}:{}:{}:{}",
+            mob.cube.size,
+            mob.cube.jump_delay,
+            mob.cube.move_y_rot.to_bits() as i32,
+            mob.cube.was_on_ground
+        ),
         MobType::Sheep => format!(
             "{}{}",
             sheep::color(mob).name(),

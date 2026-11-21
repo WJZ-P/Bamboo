@@ -24,7 +24,7 @@ use super::{
 };
 use crate::{
     entity::{
-        Entity, EntityUid, JavaRandom,
+        Entity, EntityPublic, EntityUid, JavaRandom,
         ctx::{BlockView, Command, EntityCtx},
     },
     random::LegacyRandom,
@@ -178,7 +178,7 @@ pub(crate) fn constructor_move_y_rot(y_rot: f32) -> f32 {
 /// from the size and optionally refill health. `onSyncedDataUpdated` only runs when the
 /// size really changes: yaw and body yaw snap to the head yaw, and one `nextInt(20)` is
 /// drawn in water.
-pub(crate) fn set_size(me: &mut Entity, mob: &mut Mob, size: i32, update_health: bool) {
+pub fn set_size(me: &mut Entity, mob: &mut Mob, size: i32, update_health: bool) {
     let actual = size.clamp(MIN_SIZE, MAX_SIZE);
     let changed = mob.cube.size != actual;
     mob.cube.size = actual;
@@ -467,12 +467,14 @@ pub(crate) fn apply_split(
 
 // ---- 碰到玩家 ----
 
-/// 一次碰撞伤害：伤害来源和数值。
+/// 一次碰撞伤害：伤害来源、数值和攻击者的公开快照（死亡消息要它的名字）。
 ///
-/// One touch hit: the damage source and the amount.
-pub struct TouchHit {
-    pub source: DamageSource,
-    pub amount: f32,
+/// One touch hit: the damage source, the amount and the attacker's public snapshot (the
+/// death message needs its name).
+struct TouchHit {
+    source: DamageSource,
+    amount: f32,
+    attacker: EntityPublic,
 }
 
 /// `AbstractCubeMob.playerTouch` → `dealDamage` 在 `hurtServer` 之前的判断：能造成伤害、
@@ -481,7 +483,7 @@ pub struct TouchHit {
 /// The checks of `AbstractCubeMob.playerTouch` → `dealDamage` ahead of `hurtServer`: able
 /// to deal damage, alive, in melee range and in sight. Returns the hit for the caller to
 /// run through the real player hurt path.
-pub fn touch_hit(world: &World, uid: EntityUid, player: EntityUid) -> Option<TouchHit> {
+fn touch_hit(world: &World, uid: EntityUid, player: EntityUid) -> Option<TouchHit> {
     let entity = world.entity(uid)?;
     let mob = entity.kind.mob()?;
     if mob.mob_type != MobType::Slime || !can_deal_damage(mob) || !living::is_alive(&entity, mob) {
@@ -504,13 +506,19 @@ pub fn touch_hit(world: &World, uid: EntityUid, player: EntityUid) -> Option<Tou
         return None;
     }
     let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
-    source.attacker = Some(entity.id);
-    source.direct = Some(entity.id);
+    source.attacker = Some(uid);
+    source.direct = Some(uid);
     source.attacker_uuid = Some(mob.uuid);
     source.position = Some(entity.position);
+    let amount = mob.attributes.value(attribute::ATTACK_DAMAGE) as f32;
+    // 表里取出来的副本不带可靠的 ID，公开快照的 uid 以调用方给的为准。
+    // A copy taken from the table carries no reliable id; the caller's uid is authoritative.
+    let mut attacker = entity.split().public;
+    attacker.uid = uid;
     Some(TouchHit {
         source,
-        amount: mob.attributes.value(attribute::ATTACK_DAMAGE) as f32,
+        amount,
+        attacker,
     })
 }
 
@@ -526,10 +534,26 @@ fn within_melee_range(me: &Entity, target: CombatTarget) -> bool {
         .intersects(target.hitbox())
 }
 
+/// `AbstractCubeMob.playerTouch` 的全部：判断、走玩家受伤的入口、打中了放攻击音效。
+/// 返回是否打中。
+///
+/// All of `AbstractCubeMob.playerTouch`: the checks, the player hurt path and the attack
+/// sound on a hit. Returns whether the hit landed.
+pub fn player_touch(world: &mut World, slime: EntityUid, player: EntityUid) -> bool {
+    let Some(hit) = touch_hit(world, slime, player) else {
+        return false;
+    };
+    let hurt = world.hurt_player_from_mob(player, hit.source, hit.amount, Some(&hit.attacker));
+    if hurt {
+        world.with_entity_mut(slime, &mut after_touch_hit);
+    }
+    hurt
+}
+
 /// `dealDamage` 打中之后：`playSound(SLIME_ATTACK, 1.0F, (nextFloat - nextFloat) * 0.2F + 1.0F)`。
 ///
 /// After a successful `dealDamage` hit: the attack sound with its two pitch draws.
-pub fn after_touch_hit(me: &mut Entity) {
+fn after_touch_hit(me: &mut Entity) {
     me.with_mob(|me, mob| {
         let first = me.random.next_float();
         let second = me.random.next_float();

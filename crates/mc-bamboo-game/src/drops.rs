@@ -136,30 +136,12 @@ fn slime_touch(region: &mut Region, id: PlayerId, slime: mc_bamboo_blocks::entit
     if !alive {
         return;
     }
-    let hit = {
-        let (mut level, ticks) = region.block_level();
-        let world = mc_bamboo_blocks::World::new(&mut level, ticks);
-        mc_bamboo_blocks::entity::mob::slime::touch_hit(&world, slime, id.0)
-    };
-    let Some(hit) = hit else {
-        return;
-    };
-    let (hurt, drops) = crate::player_hurt::hurt_player_by_mob(
-        &mut region.hurt_parts(),
-        id,
-        hit.source,
-        hit.amount,
-    );
-    if let Some(drops) = drops {
-        let (mut level, ticks) = region.block_level();
-        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
-        world.spawn_player_death_drops(&drops);
-    }
-    if hurt {
-        region
-            .entities
-            .with_mut(slime, mc_bamboo_blocks::entity::mob::slime::after_touch_hit);
-    }
+    // 带玩家那一半的世界：受伤当场走正式入口，和生物在自己 tick 里打人是同一条路。
+    // A world with the player half: the hit runs the real hurt path at once, the same way
+    // a mob hits from its own tick.
+    let (mut level, ticks) = region.entity_level();
+    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    mc_bamboo_blocks::entity::mob::slime::player_touch(&mut world, slime, id.0);
 }
 
 fn pickup_for(region: &mut Region, id: PlayerId) {

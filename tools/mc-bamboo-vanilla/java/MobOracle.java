@@ -931,6 +931,70 @@ public final class MobOracle {
             }
         }
 
+        /**
+         * 史莱姆场景（生物种类 6，「年龄」那一列是大小）：自己乱跳、追玩家并碰撞、最小号不伤人、
+         * 水里上浮、死后分裂、和平难度清除。
+         *
+         * Slime scenes (mob kind 6, size in the age column): idle hopping, chasing and touching
+         * a player, harmless tiny slimes, floating in water, splitting on death and the
+         * peaceful clear.
+         */
+        static void slimeScenes(List<Scene> scenes) {
+            for (int size : new int[] {1, 2, 4}) {
+                Scene hop = new Scene("slime_hop_" + size).ticks(240).difficulty(2);
+                ground(hop, 16);
+                hop.mob(6, 0.5, 64.0, 0.5, 30.0F, 101L + size, size);
+                hop.player(60.5, 64.0, 0.5, Items.AIR);
+                scenes.add(hop);
+            }
+            for (int size : new int[] {1, 2, 4}) {
+                Scene chase = new Scene("slime_chase_" + size).ticks(240).difficulty(2);
+                chase.realPlayers = true;
+                ground(chase, 16);
+                chase.mob(6, 0.5, 64.0, 0.5, 0.0F, 211L + size, size);
+                chase.player(5.5, 64.0, 2.5, Items.AIR);
+                scenes.add(chase);
+            }
+            // 两只同一刻碰到同一名玩家：第二下落在无敌帧里，不放攻击音效、不取音高。
+            // Two slimes touching one player in the same tick: the second lands in the
+            // invulnerability frames, so no attack sound and no pitch draws.
+            Scene two = new Scene("slime_two_touch").ticks(120).difficulty(3);
+            two.realPlayers = true;
+            ground(two, 16);
+            two.mob(6, 0.5, 64.0, 0.5, 0.0F, 307L, 2);
+            two.mob(6, 3.5, 64.0, 3.5, 0.0F, 311L, 4);
+            two.player(2.5, 64.0, 1.5, Items.AIR);
+            scenes.add(two);
+            // 高度差超过 4 格的玩家不会被当成目标。
+            // A player more than four blocks higher is never targeted.
+            Scene high = new Scene("slime_target_height").ticks(120).difficulty(2);
+            ground(high, 16);
+            high.fill(4, 64, 0, 4, 68, 0, STONE);
+            high.mob(6, 0.5, 64.0, 0.5, 0.0F, 401L, 2);
+            high.player(4.5, 69.0, 0.5, Items.AIR);
+            scenes.add(high);
+            Scene water = new Scene("slime_water").ticks(200).difficulty(2);
+            ground(water, 16);
+            water.fill(-3, 61, -3, 3, 63, 3, WATER);
+            water.fill(-4, 60, -4, 4, 60, 4, STONE);
+            water.mob(6, 0.5, 61.0, 0.5, 0.0F, 503L, 2);
+            water.player(60.5, 64.0, 0.5, Items.AIR);
+            scenes.add(water);
+            for (int size : new int[] {1, 2, 4}) {
+                Scene split = new Scene("slime_split_" + size).ticks(60).difficulty(2);
+                ground(split, 16);
+                split.mob(6, 0.5, 64.0, 0.5, 0.0F, 601L + size, size);
+                split.player(3.5, 64.0, 0.5, Items.AIR);
+                split.hurts.add(new double[] {5, 0, 100.0, 0});
+                scenes.add(split);
+            }
+            Scene peaceful = new Scene("slime_peaceful_clear").ticks(3).difficulty(0);
+            ground(peaceful, 16);
+            peaceful.mob(6, 0.5, 64.0, 0.5, 0.0F, 701L, 2);
+            peaceful.player(3.5, 64.0, 0.5, Items.AIR);
+            scenes.add(peaceful);
+        }
+
         static net.minecraft.world.item.Item dye(String color) {
             return BuiltInRegistries.ITEM.getValue(net.minecraft.resources.Identifier.withDefaultNamespace(color + "_dye"));
         }
@@ -1718,6 +1782,7 @@ public final class MobOracle {
                 kill.player(2.5, 64.0, 0.5, Items.AIR);
                 scenes.add(kill);
             }
+            slimeScenes(scenes);
             // ---- S2：玩家药水效果的状态和出站包 ----
             scenes.add(effectBase("effect_give_600", 60)
                     .effectGive(1, 9, 600, 1));
@@ -1844,7 +1909,7 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
-        if (scene.name.startsWith("zombie_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("slime_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -3989,6 +4054,13 @@ public final class MobOracle {
                     new GameProfile(new UUID(1L, 2L + i), "ZombieOracle" + i),
                     ClientInformation.createDefault());
             player.setPos(at[0], at[1], at[2]);
+            if (scene.name.startsWith("slime_")) {
+                // 玩家的实体 ID 和 0 号生物撞在一起（都是 `FIRST_ID`）；死亡消息按 ID 找攻击者，
+                // 史莱姆场景里把玩家挪开。
+                // The player's entity id collides with mob 0 (both `FIRST_ID`); death messages
+                // look the attacker up by id, so slime scenes move the player away.
+                player.setId(FIRST_ID + 4096 + i);
+            }
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
             player.setYRot(0.0F);
             player.setYHeadRot(0.0F);
@@ -4016,6 +4088,8 @@ public final class MobOracle {
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
         StringBuilder mobEvents = new StringBuilder("[[");
+        boolean slimeScene = scene.name.startsWith("slime_");
+        StringBuilder splits = new StringBuilder("[[]");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
         for (int i = 0; i < scene.cows.size(); i++) {
             double[] at = scene.cows.get(i);
@@ -4024,6 +4098,7 @@ public final class MobOracle {
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
                 case 2 -> new Husk(EntityTypes.HUSK, level);
+                case 6 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
@@ -4033,6 +4108,16 @@ public final class MobOracle {
             // `Mob.serverAiStep` 的 `(tickCount + id) % 2` 才能逐刻一致。
             mob.setId(FIRST_ID + i);
             mob.setUUID(new UUID(0L, i + 1));
+            if (mob instanceof net.minecraft.world.entity.monster.cubemob.Slime slime) {
+                // 史莱姆场景用「年龄」那一列带大小；`setSize` 会把朝向改成头的朝向，所以放在
+                // `snapTo` 之前。移动控制的目标角度在构造函数里按没带种子的朝向算，这里对齐成场景的朝向。
+                // Slime scenes carry the size in the age column. `setSize` snaps the yaw to the
+                // head yaw, so it runs before `snapTo`. The move control's target angle comes
+                // from the unseeded constructor facing; align it with the scene yaw.
+                slime.setSize(scene.cowAges.get(i), true);
+                putFloat(slime.getMoveControl().getClass(), slime.getMoveControl(), "yRot",
+                        scene.yaws.get(i)[0]);
+            }
             mob.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             mob.setYHeadRot(scene.yaws.get(i)[0]);
             mob.setYBodyRot(scene.yaws.get(i)[0]);
@@ -4080,7 +4165,14 @@ public final class MobOracle {
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
             line.append(",\"item\":0,\"looting\":0}");
         }
-        line.append("],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append("],\"hurts\":[");
+        for (int i = 0; i < scene.hurts.size(); i++) {
+            if (i > 0) line.append(',');
+            double[] hurt = scene.hurts.get(i);
+            line.append('[').append((int) hurt[0]).append(',').append((int) hurt[1]).append(',')
+                    .append(Float.floatToRawIntBits((float) hurt[2])).append(',').append((int) hurt[3]).append(']');
+        }
+        line.append("],\"summons\":[],\"eggs\":[]");
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -4130,11 +4222,50 @@ public final class MobOracle {
                     }
                 }
             }
+            if (slimeScene) {
+                // `Player.aiStep` 的 `touch(entity)`：玩家活着时，碰到包围盒外扩 (1, 0.5, 1) 以内的
+                // 实体就叫它的 `playerTouch`。玩家在这个场景里不 tick，这一步由对拍自己重放。
+                // `touch(entity)` from `Player.aiStep`: a living player calls `playerTouch` on
+                // every entity within its box inflated by (1, 0.5, 1). Players do not tick in
+                // this scene, so the oracle replays this step itself.
+                for (ServerPlayer player : players) {
+                    if (!(player.getHealth() > 0.0F)) continue;
+                    AABB reach = player.getBoundingBox().inflate(1.0, 0.5, 1.0);
+                    for (Mob mob : mobs) {
+                        if (!mob.isRemoved() && mob.getBoundingBox().intersects(reach)) {
+                            mob.playerTouch(player);
+                        }
+                    }
+                }
+            }
+            level.spawned.clear();
             for (Mob mob : new java.util.ArrayList<>(mobs)) {
                 if (mob.isRemoved()) continue;
                 mob.checkDespawn();
                 mob.commonTick();
                 mob.tick();
+            }
+            if (slimeScene) {
+                // 分裂出来的小史莱姆：记下数量、位置、朝向、大小和血量就丢掉，不让它们继续 tick
+                // （官方构造函数的随机源不带种子）。
+                // Split children: record count, position, facing, size and health, then discard
+                // them so they never tick (the vanilla constructor random is unseeded).
+                splits.append(",[");
+                boolean anySplit = false;
+                for (Entity fresh : level.spawned) {
+                    if (!(fresh instanceof net.minecraft.world.entity.monster.cubemob.Slime child)) continue;
+                    if (anySplit) splits.append(',');
+                    anySplit = true;
+                    splits.append('[').append(Double.doubleToRawLongBits(child.getX()))
+                            .append(',').append(Double.doubleToRawLongBits(child.getY()))
+                            .append(',').append(Double.doubleToRawLongBits(child.getZ()))
+                            .append(',').append(Float.floatToRawIntBits(child.getYRot()))
+                            .append(',').append(child.getSize())
+                            .append(',').append(Float.floatToRawIntBits(child.getHealth()))
+                            .append(']');
+                    child.discard();
+                }
+                splits.append(']');
             }
             level.tracked.removeIf(Entity::isRemoved);
             appendMobEvents(mobEvents, mobSink.takeRaw());
@@ -4145,6 +4276,9 @@ public final class MobOracle {
             }
         }
         line.append("]");
+        if (slimeScene) {
+            line.append(",\"cubeSplits\":").append(splits).append(']');
+        }
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
@@ -4245,7 +4379,20 @@ public final class MobOracle {
             out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            if (mob instanceof net.minecraft.world.entity.monster.cubemob.Slime slime) {
+                // 史莱姆把自己的状态塞进花纹那一列：大小、跳跃延迟、移动控制的目标角度、上一刻是否在地上。
+                // Slimes pack their own state into the variant column: size, jump delay, the
+                // move control's target angle and whether they were on the ground.
+                Object control = slime.getMoveControl();
+                out.append(",\"var\":\"slime:").append(slime.getSize())
+                        .append(':').append(getInt(control.getClass(), control, "jumpDelay"))
+                        .append(':').append(Float.floatToRawIntBits(getFloat(control.getClass(), control, "yRot")))
+                        .append(':').append(getBoolean(
+                                net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, slime, "wasOnGround"))
+                        .append("\",\"snd\":\"minecraft:classic\"");
+            } else {
+                out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            }
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             out.append(",\"target\":").append(mob.getTarget() == null ? -1 : mob.getTarget().getId());
@@ -5738,6 +5885,15 @@ public final class MobOracle {
             Field field = owner.getDeclaredField(name);
             field.setAccessible(true);
             return field.getFloat(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static void putFloat(Class<?> owner, Object target, String name, float value) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            UNSAFE.putFloat(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }
