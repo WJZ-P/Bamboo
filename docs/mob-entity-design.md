@@ -363,6 +363,41 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 
 其余已知差异见 README「马科的已知限制」。
 
+### 5.9 大脑 AI、犰狳、山羊（2026-11-21，分支 `brain`）
+
+**已做**（代码在 `entity/mob/brain/`、`entity/mob/armadillo.rs`、`entity/mob/goat.rs`）：
+
+| 项 | 官方 | Bamboo | 对拍 |
+|---|---|---|---|
+| 记忆 | `Brain.memories`、`ExpirableValue`、`MemorySlot` | `brain/memory.rs`：每种一个槽，过期倒数，没登记读作没有 | 逐刻比全部有值的记忆 |
+| 传感器 | `Sensor.tick`（`scanRate`、`randomlyDelayStart`）、`NearestLivingEntitySensor`、`PlayerSensor`、`NearestItemSensor`、`AdultSensor`、`HurtBySensor`、`TemptingSensor`、`MobSensor` | `brain/sensor.rs` | 起始延迟取官方报的值 |
+| 活动 | `ActivityData`、`setActiveActivityToFirstValid`、`activityRequirements` / `activityMemoriesToEraseWhenStopped` | `brain/mod.rs` | 逐刻比活动集合 |
+| 行为 | `Behavior`、`OneShot`（`BehaviorBuilder`）、`DoNothing`、`GateBehavior` / `RunOne` | `brain/behavior.rs` + `behaviors.rs` 的 `Kind`，生物专属的挂在 `Kind::Armadillo` / `Kind::Goat` | 逐刻比正在跑的行为（闸门带子行为） |
+| 存档 | `Brain.Packed` 的 `memories` | `brain/nbt.rs`，只存有编解码器的记忆 | 单元测试往返 |
+| 犰狳 | `Armadillo`、`ArmadilloAi` | `armadillo.rs` | `armadillo_*` 6 场景 |
+| 山羊 | `Goat`、`GoatAi`、`LongJumpMidJump`、`LongJumpToRandomPos`、`LongJumpUtil`、`PrepareRamNearestTarget`、`RamTarget` | `goat.rs` | `goat_*` 7 场景 |
+
+大脑放在 `Mob.brain: Option<Box<Brain>>`，跑的时候整个取出来（`Cx` 里同时拿着实体、生物、
+上下文和记忆），跑完放回。一刻里的位置照官方 `customServerAiStep`：先 `brain.tick`，再
+换活动，然后 `Animal` 那层。行为的遍历顺序见 `brain/mod.rs` 的 `order_entries`。
+
+**随机源。** 行为时长、`SetEntityLookTargetSometimes` 的间隔、长跳的候选抽签和冷却、冲撞冷却、
+山羊吃东西的音高用世界随机源；漫步、环顾、窥视、掉角用生物自己的随机源；官方不带种子的
+（`ShufflingList`、`Collections.shuffle`、`Sensor` 的静态随机源）在 Bamboo 里由出生时的随机源
+状态派生，对拍时两边按 `shuffle_seed` 重设。山羊的 `LongJumpToRandomPos` 在官方一侧换成只改
+了洗牌随机源的子类。
+
+**对拍夹具。** `goat_horn` 把所有传感器的起始延迟定成 3，场景每次跑都一样，才能在冲锋途中
+打死小牛、让山羊撞墙掉角；这个场景只跑 100 刻，因为官方一侧不 tick 掉落物（角停在原地），
+Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖出的幼崽不在比对范围里，山羊繁殖
+没有逐刻对拍。
+
+**并行模式。** `level_random_int` 在并行视图里恒为 0（行为时长取最短、长跳按列表顺序抽落点），
+冲撞命中走 `Command::RamHit`、掉角走 `Command::DropItemWithDelta`，都在落地阶段按官方顺序
+执行；大脑跟着实体走，岛拆合不需要新的按实体迁移。
+
+其余已知差异见 README「大脑生物的已知限制」。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
