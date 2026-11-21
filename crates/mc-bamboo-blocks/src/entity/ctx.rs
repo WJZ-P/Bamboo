@@ -129,6 +129,15 @@ pub trait BlockView {
         2
     }
 
+    /// `Level.getSeaLevel()`：生成器的海平面。默认是噪声主世界的 63；超平坦是 -63，
+    /// 由游戏层的只读视图按世界类型给出。
+    ///
+    /// `Level.getSeaLevel()`: the generator's sea level. Defaults to the noise
+    /// overworld's 63; superflat is -63, which the game's read-only view supplies.
+    fn sea_level(&self) -> i32 {
+        63
+    }
+
     /// `canSeeSky(pos)`：天空光是 15 就看得见天。
     fn can_see_sky(&self, _pos: BlockPos) -> bool {
         false
@@ -623,6 +632,13 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         data: i32,
     },
+    /// `TurtleLayEggGoal` 的 `level.setBlockAndUpdate` 加产蛋音效。
+    ///
+    /// `TurtleLayEggGoal`'s `level.setBlockAndUpdate` plus the egg-laying sound.
+    LayTurtleEgg {
+        pos: mc_bamboo_core::BlockPos,
+        eggs: i32,
+    },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
     /// 兔子吃掉一龄胡萝卜作物。
@@ -678,6 +694,33 @@ pub enum Command {
     },
     ArrowExtinguished {
         pitch: f32,
+    },
+    /// `Pufferfish.touch`：先 `hurtServer`，打中了才下毒并放蜇刺声。
+    ///
+    /// `Pufferfish.touch`: hurt first, and only on a hit add the poison and the sting
+    /// sound.
+    PufferSting {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+        seconds: i32,
+        position: mc_bamboo_core::Vec3,
+    },
+    /// `AbstractSchoolingFish.startFollowing`：跟随者记住领头并给领头的群计数加一。
+    ///
+    /// `AbstractSchoolingFish.startFollowing`: the follower remembers its leader and the
+    /// leader's school count goes up by one.
+    SchoolFollow {
+        leader: EntityUid,
+        follower: EntityUid,
+    },
+    /// `AbstractSchoolingFish.stopFollowing`：跟随者离开，领头群计数减一。
+    ///
+    /// `AbstractSchoolingFish.stopFollowing`: the follower leaves and the leader's count
+    /// goes down by one.
+    SchoolLeave {
+        leader: EntityUid,
+        follower: EntityUid,
     },
     /// `EatBlockGoal.tick` 在 `mobGriefing` 下的改方块：吃掉脚下的草，或把下面的草方块变成泥土。
     ///
@@ -843,6 +886,49 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ArrowExtinguished { pitch } => {
             super::arrow::play_extinguished_sound(me, world, pitch);
         }
+        Command::PufferSting {
+            target,
+            source,
+            amount,
+            seconds,
+            position,
+        } => {
+            if world.hurt_mob(target, source, amount) {
+                let poison = mc_bamboo_data::registries::mob_effect::POISON;
+                world.with_entity_mut(target, &mut |entity| {
+                    entity.with_mob(|_, mob| {
+                        super::mob::living::add_effect(
+                            mob,
+                            super::mob::effects::EffectInstance::new(poison, seconds),
+                        )
+                    });
+                });
+                world.play_sound(
+                    position,
+                    mc_bamboo_data::sound_event("minecraft:entity.puffer_fish.sting"),
+                    mc_bamboo_data::sounds::NEUTRAL,
+                    1.0,
+                    1.0,
+                    false,
+                );
+            }
+        }
+        Command::SchoolFollow { leader, follower } => {
+            world.with_entity_mut(follower, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.leader = Some(leader));
+            });
+            world.with_entity_mut(leader, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.school_size += 1);
+            });
+        }
+        Command::SchoolLeave { leader, follower } => {
+            world.with_entity_mut(follower, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.leader = None);
+            });
+            world.with_entity_mut(leader, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.school_size -= 1);
+            });
+        }
         Command::MobBlockSound {
             pos,
             sound,
@@ -858,6 +944,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 pitch,
                 false,
             );
+        }
+        Command::LayTurtleEgg { pos, eggs } => {
+            let pitch = 0.9 + world.random().next_float() * 0.2;
+            world.play_block_sound(
+                pos,
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.lay_egg"),
+                0.3,
+                pitch,
+            );
+            let block =
+                &mc_bamboo_data::blocks::BLOCKS[mc_bamboo_data::blocks::TURTLE_EGG as usize];
+            let state = crate::state::BlockState(block.default_state);
+            world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
         }
     }
 }

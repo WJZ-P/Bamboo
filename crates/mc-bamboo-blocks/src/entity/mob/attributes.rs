@@ -250,6 +250,22 @@ impl Attributes {
         self.set_base(id, base);
     }
 
+    /// `Mob.createMobAttributes()`：生物的缺省属性表。没有 `Animal` 加的 `TEMPT_RANGE`，
+    /// 血量和移动速度是注册表缺省值。
+    ///
+    /// `Mob.createMobAttributes()`: the plain mob defaults, without the `TEMPT_RANGE` that
+    /// `Animal` adds and with registry-default health and movement speed.
+    pub(super) fn mob() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut attributes = Self::cow();
+        attributes
+            .entries
+            .retain(|entry| entry.id != attribute::TEMPT_RANGE);
+        attributes.set_base(attribute::MAX_HEALTH, defaults::MAX_HEALTH);
+        attributes.set_base(attribute::MOVEMENT_SPEED, defaults::MOVEMENT_SPEED);
+        attributes
+    }
+
     pub(super) fn set_base(&mut self, id: i32, base: f64) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
             entry.base = base;

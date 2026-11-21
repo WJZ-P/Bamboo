@@ -6,6 +6,11 @@
 //! 浮点按原始位比较，不留容差。
 //!
 //! Compares official cows with Bamboo's, tick by tick, bit for bit.
+//!
+//! 鱿鱼和发光鱿鱼有自己的场景（`--only squid_` / `--only glow`，见 `mob_oracle/squid.rs`）。
+//!
+//! Squid and glow squid have their own scenes (`--only squid_` / `--only glow`, see
+//! `mob_oracle/squid.rs`).
 
 use std::{
     collections::HashMap,
@@ -32,6 +37,7 @@ use crate::oracle::collect_log;
 
 mod egg;
 mod equine;
+mod fish;
 mod gen_spawn;
 mod llama_spit;
 mod natural_spawn;
@@ -39,6 +45,7 @@ mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
+mod squid;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -92,6 +99,8 @@ enum Line {
     GenSpawn(gen_spawn::Case),
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
+    Squid(Box<squid::SquidCase>),
+    Fish(Box<fish::FishCase>),
     End(End),
 }
 
@@ -1049,6 +1058,8 @@ impl Report {
                 Line::Shot(case) => self.replay_shot(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
+                Line::Squid(case) => self.replay_squid(&case),
+                Line::Fish(case) => self.replay_fish(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -1264,6 +1275,7 @@ impl Report {
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     9..=12 => equine::scene_kind(cow.kind),
+                    60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));

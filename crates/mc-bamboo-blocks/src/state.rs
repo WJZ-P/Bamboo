@@ -217,6 +217,13 @@ impl BlockState {
         self.fact(facts::PATHFINDABLE_LAND)
     }
 
+    /// `isPathfindable(PathComputationType.WATER)`。
+    ///
+    /// `isPathfindable(PathComputationType.WATER)`.
+    pub fn is_pathfindable_water(self) -> bool {
+        self.fact(facts::PATHFINDABLE_WATER)
+    }
+
     /// `isSuffocating(level, pos)`，按空世界算。
     pub fn is_suffocating(self) -> bool {
         self.fact(facts::SUFFOCATING)
