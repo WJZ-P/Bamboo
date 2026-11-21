@@ -623,6 +623,13 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         data: i32,
     },
+    /// `TurtleLayEggGoal` 的 `level.setBlockAndUpdate` 加产蛋音效。
+    ///
+    /// `TurtleLayEggGoal`'s `level.setBlockAndUpdate` plus the egg-laying sound.
+    LayTurtleEgg {
+        pos: mc_bamboo_core::BlockPos,
+        eggs: i32,
+    },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
     /// 兔子吃掉一龄胡萝卜作物。
@@ -928,6 +935,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 pitch,
                 false,
             );
+        }
+        Command::LayTurtleEgg { pos, eggs } => {
+            let pitch = 0.9 + world.random().next_float() * 0.2;
+            world.play_block_sound(
+                pos,
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.lay_egg"),
+                0.3,
+                pitch,
+            );
+            let block =
+                &mc_bamboo_data::blocks::BLOCKS[mc_bamboo_data::blocks::TURTLE_EGG as usize];
+            let state = crate::state::BlockState(block.default_state);
+            world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
         }
     }
 }

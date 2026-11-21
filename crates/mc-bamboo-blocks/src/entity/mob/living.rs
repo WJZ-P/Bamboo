@@ -485,6 +485,18 @@ fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
     if mob.mob_type.is_equine() {
         return super::equine::voice(mob, voice);
     }
+    // 海龟的受伤和死亡音按幼年分两种，叫声只在陆地上有（见 `play_ambient_sound`）。
+    // Turtle hurt and death sounds depend on age; the ambient sound is land-only.
+    if super::turtle::is_turtle(mob.mob_type) {
+        return match voice {
+            Voice::Hurt if mob.is_baby() => "minecraft:entity.turtle.hurt_baby",
+            Voice::Hurt => "minecraft:entity.turtle.hurt",
+            Voice::Death if mob.is_baby() => "minecraft:entity.turtle.death_baby",
+            Voice::Death => "minecraft:entity.turtle.death",
+            Voice::Ambient => "minecraft:entity.turtle.ambient_land",
+            Voice::Eat | Voice::Angry => "minecraft:entity.turtle.ambient_land",
+        };
+    }
     match voice {
         Voice::Hurt => mob
             .mob_type
@@ -632,6 +644,23 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         // 刚生成的狼还没有仇恨，时刻不影响叫声。
         // A fresh wolf has no anger, so the clock does not matter.
         super::wolf::play_ambient_sound(me, mob, 0);
+        return;
+    }
+    if super::turtle::is_turtle(mob.mob_type) {
+        // `Turtle.getAmbientSound`：只有成年的、在水外站在地上时才叫，其余没有声音，
+        // 也不取音高的两个随机数。
+        // `Turtle.getAmbientSound`: only an adult on land out of water makes a sound;
+        // otherwise no sound and no pitch draws.
+        if !me.in_water && me.on_ground && !mob.is_baby() {
+            let pitch = voice_pitch(me, mob);
+            play_sound(
+                me,
+                mob,
+                "minecraft:entity.turtle.ambient_land",
+                mob.mob_type.sound_volume(),
+                pitch,
+            );
+        }
         return;
     }
     if mob.mob_type.is_equine() {
@@ -887,11 +916,25 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.forced_age_timer -= 1;
     }
     if mob.mob_type.is_ageable() && is_alive(me, mob) {
+        let was_baby = mob.is_baby();
         if mob.is_baby() && !mob.age_locked {
             set_age(me, mob, mob.age + 1);
         } else if mob.age > 0 {
             set_age(me, mob, mob.age - 1);
         }
+        // `Turtle.ageBoundaryReached`：长大成人时按 `turtle_grow` 表掉鳞甲。
+        // `Turtle.ageBoundaryReached`: a turtle that grows up drops from `turtle_grow`.
+        if was_baby
+            && !mob.is_baby()
+            && super::turtle::is_turtle(mob.mob_type)
+            && ctx.blocks().block_game_rules().mob_drops
+        {
+            let request = super::EntityLootRequest::new(super::turtle::grow_loot(), me, mob, None);
+            ctx.emit(crate::entity::ctx::Command::DropEntityLoot(request), me);
+        }
+    }
+    if super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::ai_step(me, mob, ctx);
     }
     if mob.age_lock_particle_timer > 0 {
         if mob.age_lock_particle_timer % 2 == 0 {
@@ -1386,6 +1429,12 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
     // `AbstractFish.travelInWater` replaces the whole in-water path.
     if me.in_water && super::fish::is_fish(mob.mob_type) {
         super::fish::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    // `Turtle.travelInWater` 换掉了水里的推进。
+    // `Turtle.travelInWater` replaces the in-water thrust.
+    if me.in_water && super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::travel_in_water(me, mob, ctx, input);
         return;
     }
     let falling = me.delta.y <= 0.0;
@@ -1997,6 +2046,12 @@ pub(crate) fn apply_breed(
     world: &mut crate::world::World,
 ) {
     let kind = parent.kind;
+    // `Turtle.TurtleBreedGoal`：不生成幼崽，给母亲挂一颗蛋。
+    // `Turtle.TurtleBreedGoal`: the mother gets an egg instead of a calf.
+    if super::turtle::is_turtle(kind) {
+        super::turtle::breed(me, partner, position, world);
+        return;
+    }
     let mother = world.entity(partner).and_then(|entity| {
         entity
             .kind

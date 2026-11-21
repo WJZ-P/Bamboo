@@ -642,6 +642,13 @@ pub(super) fn check_spawn_rules(
         MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
             super::fish::check_spawn_rules(world, kind, pos, sea_level)
         }
+        // `Turtle.checkTurtleSpawnRules`：海平面 +4 以下、沙子上、亮度足够。
+        // `Turtle.checkTurtleSpawnRules`: below sea level + 4, on sand and bright.
+        MobType::Turtle => {
+            pos.y < sea_level + 4
+                && world.block_state(pos.below()).is_tagged(block_tags::SAND)
+                && world.raw_brightness(pos) > 8
+        }
         // `Rabbit.checkRabbitSpawnRules`、`Fox.checkFoxSpawnRules`、`Wolf.checkWolfSpawnRules`：
         // 只是脚下的标签各不相同。
         // The three only differ in the tag of the block below.

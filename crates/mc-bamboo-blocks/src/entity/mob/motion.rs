@@ -284,9 +284,9 @@ fn movement_emission(
             stepped |= step_effects(me, mob, on_state, false, collided);
         }
         if stepped {
-            mob.next_step = (mob.move_dist as i32 + 1) as f32;
+            mob.next_step = next_step_value(mob);
         } else if me.in_water {
-            mob.next_step = (mob.move_dist as i32 + 1) as f32;
+            mob.next_step = next_step_value(mob);
             // `waterSwimSound` → `playSwimSound`：音量按速度算，音高取两个 `nextFloat`。
             // `waterSwimSound` → `playSwimSound`: the volume follows the speed and the
             // pitch draws two `nextFloat`s.
@@ -306,6 +306,17 @@ fn movement_emission(
 }
 
 /// `vibrationAndSoundEffectsFromBlock`。
+/// `Entity.nextStep()`：海龟覆写成 `moveDist + 0.15F`，其余是 `floor(moveDist) + 1`。
+///
+/// `Entity.nextStep()`: turtles override it with `moveDist + 0.15F`.
+fn next_step_value(mob: &Mob) -> f32 {
+    if super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::next_step(mob.move_dist)
+    } else {
+        (mob.move_dist as i32 + 1) as f32
+    }
+}
+
 fn step_effects(
     me: &mut Entity,
     mob: &mut Mob,
@@ -328,6 +339,7 @@ fn step_effects(
         // `AbstractCow.playStepSound` plays; `AbstractFish.playStepSound` is empty yet
         // the step still counts. `Wolf.playStepSound` uses the sound set's step sound.
         let sound = match mob.mob_type {
+            super::MobType::Turtle => super::turtle::step_sound(mob.is_baby()),
             super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Step),
             super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
             super::MobType::Chicken => super::chicken::sounds(mob)[3],

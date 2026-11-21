@@ -346,6 +346,10 @@ fn finalize_spawn_in_group(
         super::fish::finalize_spawn(world, entity, group);
         return;
     }
+    if super::turtle::is_turtle(kind) {
+        super::turtle::finalize_spawn(entity, world.random(), group);
+        return;
+    }
     if kind.is_equine() {
         super::equine::finalize_spawn(entity, world.random(), group);
         return;

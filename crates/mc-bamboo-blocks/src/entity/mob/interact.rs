@@ -163,7 +163,10 @@ pub(super) fn animal_interact(
         };
     }
     let age = mob.age;
-    if age == 0 && mob.in_love <= 0 {
+    // `Turtle.canFallInLove`：身上有蛋时不进求爱。
+    // `Turtle.canFallInLove`: no love while carrying an egg.
+    let can_fall_in_love = mob.mob_type != MobType::Turtle || !mob.turtle.has_egg;
+    if age == 0 && mob.in_love <= 0 && can_fall_in_love {
         // `Animal.setInLove(player)`：600 刻求爱、记住玩家 UUID、发爱心事件 18。
         mob.in_love = 600;
         mob.love_cause = Some(req.player_uuid);
