@@ -301,7 +301,13 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
-    if play_sound {
+    if play_sound && mob.mob_type == super::MobType::Slime {
+        // 史莱姆没有覆写 `playStepSound`：放脚下方块的脚步声，音量乘 0.15。
+        // Slimes do not override `playStepSound`: the block's own step sound at 0.15 volume.
+        let sounds = state.sound_type();
+        let name = mc_bamboo_data::sounds::SOUND_EVENTS[usize::from(sounds.step_sound)].name;
+        super::living::play_sound(me, mob, name, sounds.volume * 0.15, sounds.pitch);
+    } else if play_sound {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
         let sound = match mob.mob_type {
             super::MobType::Pig => super::pig::step_sound(mob.is_baby()),

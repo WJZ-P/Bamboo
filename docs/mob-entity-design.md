@@ -765,3 +765,60 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   改坏确认：中毒时长改成 101、受冻刻数改成 141，两个场景各自报不一致。
 - 未对拍：流浪者 / 沼骸的自然刷怪规则、死亡掉落（走骷髅同一条路径，战利品表由
   `mc-bamboo-loot` 求值）、存档 NBT 和官方的逐键比较、转化时带效果 / 名字 / 标签的搬运。
+
+## 史莱姆的实施现状（2026-11-20）
+
+史莱姆是 `AbstractCubeMob` → `Slime`：继承 `AgeableMob`（所以有 `Age` 等三个存档键和幼年 /
+年龄锁两项元数据），只实现 `Enemy`，不是 `Monster`。`MobType::is_enemy()` 把「`Monster` 一支
+加史莱姆」单独分出来，管和平难度清除、128 格消失、`MobCategory.MONSTER` 和敌对音源；
+`is_monster()` 仍只表示 `Monster` 类（亮处涨 `noActionTime`、僵尸的幼年元数据等）。
+
+- `entity/mob/slime.rs`：全部专属逻辑。`CubeState`（`Mob.cube`）放大小、`wasOnGround` 和
+  `CubeMobMoveControl` 的三个字段，都是相对量，随实体行搬岛，没有新增 `IslandPart`。
+- 尺寸：`Mob::dimensions()` / `MobPublic::dimensions()` 对史莱姆按大小算，`set_size` 同时改
+  `Entity.dimensions`、眼高、三项属性的基础值；大小真的变了才把朝向改成头的朝向
+  （`onSyncedDataUpdated`）。眼高和元数据下标（18）由生成器导出
+  （`entity_types::SLIME_EYE_HEIGHT` / `CUBE_MOB_SIZE`）。
+- 移动：`living::server_ai_step` 对史莱姆改调 `slime::move_control_tick`，`jumpFromGround` 改调
+  `slime::jump_from_ground`（竖直速度直接设成跳跃力，并要求同步一次速度）。`tick` 末尾的
+  `slime::after_tick` 做落地判断：按宽度取粒子的随机数、放落地音效。
+- 目标：`Goal::CubeFloat` / `CubeAttack` / `CubeRandomDirection` / `CubeKeepJumping`，注册顺序和
+  优先级照官方（1、4、5、2）。目标选择器是玩家（间隔 5、要看得见、高度差不超过 4）和铁傀儡
+  （缺实体，照常取数）。`TargetGoal.canContinueToUse` 的 `mustSee` 计数和骷髅共用一支。
+- 碰撞伤害：`slime::player_touch` 是 `AbstractCubeMob.playerTouch` 的全部。游戏层在
+  `drops::pickup_before_entities` 里（官方 `Player.aiStep` 的 `touch(entity)`，和捡物品同一处）
+  对玩家包围盒外扩 (1, 0.5, 1) 碰到的史莱姆各调一次，用带玩家那一半的世界当场走玩家受伤的
+  正式入口。
+- 分裂：`living::tick_death` 在第 20 刻移除之前调 `slime::split_on_remove`，数量和每只的朝向
+  取母体的随机源，随 `Command::SplitCubeMob` 落地；每只走 `/summon` 一样的构造取数，再
+  `conversion::copy_common`（`ConversionType.SPLIT_ON_DEATH` 只跑 `convertCommon`）、
+  `setSize(half, true)`、`snapTo`。和平难度不分裂（`EntityType.create` 返回空）。
+- 生成：`slime::finalize_spawn`（`AgeableMobGroupData(false)`、跟随距离加成、左撇子、
+  `setSpawnSize`）；`slime::check_spawn_rules` 是 `Slime.checkSlimeSpawnRules` 的两支，
+  `Level::world_seed()`（新增，游戏层给 `global.seed`）给史莱姆区块，
+  `sky::surface_slime_spawn_chance` 是月相时间线的那条轨道。生成盒乘
+  `spawnDimensionsScale`（4）。
+- 掉落：`MobDeathLoot.cube_size` 进战利品谓词的 `cube_mob_size`；经验等于大小。
+- **公共机制**（别的生物可以复用）：`conversion::copy_common`（`convertCommon`，带
+  `preserveCanPickUpLoot`）、`Level::world_seed()`、`MobType::is_enemy()`、
+  `CombatTarget::hitbox()`，以及按方块音效类型放脚步声的写法（`motion::step_effects`）。
+- 对拍：
+  - `mob-oracle --only slime_`：13 个场景 2063 刻 0 不一致。`slime_hop_{1,2,4}`（自己乱跳）、
+    `slime_chase_{1,2,4}`（真实玩家：找目标、追、碰撞伤害、玩家被打死时的死亡消息包）、
+    `slime_two_touch`、`slime_target_height`（高度差和视线记忆）、`slime_water`、
+    `slime_split_{1,2,4}`（分裂出来的只数、位置、朝向、大小、血量）、`slime_peaceful_clear`。
+    逐刻比位置、速度、朝向、血量、随机源、正在跑的目标、目标实体，以及大小 / 跳跃延迟 /
+    移动控制的目标角度 / `wasOnGround`。官方一侧的 `touch(entity)` 由对拍自己重放（玩家在
+    场景里不 tick）；分裂出来的小史莱姆记完就丢，不继续 tick。
+  - `mob-oracle --only natural_spawn`：新增 8 个史莱姆场景（史莱姆区块的普通 / 困难 / 和平、
+    非史莱姆区块、沼泽的满月 / 亏凸月 / 新月 / 白天），共 390 例 1560 刻 0 不一致，其中 100 只
+    史莱姆。世界种子用官方 `WorldgenRandom.seedSlimeChunk` 挑。大小不是 1 的史莱姆朝向来自
+    官方不带种子的构造随机源，两边都不比。
+  - 改坏确认：跳跃延迟 `+10` 改成 `+11`（`slime_hop_1` 第 4 刻起报不一致）、分裂的 z 偏移
+    `0.5` 改成 `0.25`（`slime_split_2` / `_4` 第 24 刻报不一致）。
+- 顺手修的一处（影响骷髅一支）：`tick_goal` 里给 `NearestAttackableTarget` 每刻多加了一次
+  `unseen_ticks`，官方 `TargetGoal` 没有 `tick()`。以前看不见目标约 30 刻就放弃，现在是 60 刻。
+- 未对拍：死亡掉落（粘液球）和经验球的生成、存档 NBT 和官方逐键比较、元数据包字节、
+  `/summon` 和刷怪蛋、并行驱动下的逐位一致。
+- 没做：岩浆怪；水里改大小时的溅水（只保住那一次取数）；脚步声的
+  `getPrimaryStepSoundBlockPos`；`push(Entity)` 打铁傀儡；附魔的 `doPostAttackEffects`。
