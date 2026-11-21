@@ -86,14 +86,14 @@ pub struct GeneratedChunk {
 // 解析好的只读 `Worldgen` 全进程共用一份（`Worldgen::shared()`）；每条计算线程只
 // 缓存按种子/设置建好的 `Generator`。`Generator` 引用共享 `Worldgen` 里的群系
 // `ParameterList`，其 R 树 `lastResult` 是「线程 + 表」各自的线程本地状态（官方是
-// `ThreadLocal`），所以查询结果仍按线程隔离；每线程一份 `Generator` 与官方每线程
-// 一个 `RandomState` 的模型一致。
+// `ThreadLocal`），所以查询历史仍按线程隔离。官方的 `RandomState` 由
+// `ChunkMap` 创建和持有，并非每条工作线程一份。
 // The parsed, read-only `Worldgen` is shared process-wide (`Worldgen::shared()`);
 // each compute thread caches only the per-seed/per-settings `Generator`s. A
 // `Generator` references the shared `Worldgen`'s biome `ParameterList`, whose
 // R-tree `lastResult` is per-(thread, table) thread-local state (vanilla:
-// `ThreadLocal`), so lookups stay thread-isolated; one `Generator` per thread
-// matches vanilla's per-thread `RandomState`.
+// `ThreadLocal`), so lookup history stays thread-isolated. Vanilla creates and
+// owns its `RandomState` in `ChunkMap`, not on each worker.
 thread_local! {
     static GENERATORS: RefCell<HashMap<(i64, &'static str), chunk::Generator<'static>>> =
         RefCell::new(HashMap::new());

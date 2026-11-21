@@ -250,13 +250,11 @@ pub(crate) fn run_features(
 }
 
 /// `worldgen.json` 的 `processor_list` 只随数据版本变，和种子、世界类型、区块坐标
-/// 都无关。解析整份 JSON（`Worldgen::load`）实测约 24 ms，若每个区块的 `features`
-/// 调用都重来一次，它会盖过地物本身。进程里缓存一份解析结果，之后只克隆这张表
-/// （每条计算线程各持一份，结构放置只读它）。
+/// 都无关。基于共享的 `Worldgen` 解析一次处理器表，结构放置直接借用该表。
 ///
 /// `processor_list` depends only on the bundled data version, not on the seed,
-/// world type or chunk position. Parsing the whole JSON costs ~24 ms, which would
-/// dwarf the features work if repeated per chunk; cache it process-wide.
+/// world type or chunk position. Parse it once from the shared `Worldgen` and
+/// borrow the resulting table during structure placement.
 fn processor_lists() -> Result<&'static ProcessorLists, String> {
     static LISTS: OnceLock<Result<ProcessorLists, String>> = OnceLock::new();
     LISTS

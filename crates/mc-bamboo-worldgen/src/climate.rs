@@ -261,7 +261,9 @@ impl<T> ParameterList<T> {
         &self.values[best]
     }
 
-    /// 清掉「上一次的结果」，换种子重新开始时用。
+    /// 清掉当前线程中这张表的「上一次的结果」，从确定的起点重新开始。
+    ///
+    /// Clear this table's previous result on the current thread to start from a fixed state.
     pub fn reset(&self) {
         LAST_RESULTS.with(|slots| {
             let mut slots = slots.borrow_mut();
@@ -598,5 +600,29 @@ mod tests {
         let first = *list.find_value(target(0, 0));
         let again = *list.find_value(target(0, 0));
         assert_eq!(first, again);
+    }
+
+    #[test]
+    fn tie_history_is_isolated_by_thread_and_table() {
+        let entries = [(point(-1000, 0), "a"), (point(1000, 0), "b")];
+        let first = ParameterList::new(entries.to_vec());
+        let second = ParameterList::new(entries.to_vec());
+        let tie = target(0, 0);
+        assert_eq!(*first.find_value(target(-1000, 0)), "a");
+        assert_eq!(*second.find_value(target(1000, 0)), "b");
+
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert_eq!(*first.find_value(target(1000, 0)), "b");
+                    assert_eq!(*first.find_value(tie), "b");
+                    first.reset();
+                })
+                .join()
+                .unwrap();
+        });
+
+        assert_eq!(*first.find_value(tie), "a");
+        assert_eq!(*second.find_value(tie), "b");
     }
 }
