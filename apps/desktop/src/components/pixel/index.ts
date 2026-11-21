@@ -5,6 +5,7 @@ export { PixelInput } from "./PixelInput";
 export { PixelSelect } from "./PixelSelect";
 export { PixelSlider } from "./PixelSlider";
 export { PixelSlot } from "./PixelSlot";
+export { PixelSplit } from "./PixelSplit";
 export { PixelSwitch } from "./PixelSwitch";
 export { PixelTextarea } from "./PixelTextarea";
 export { StatTile } from "./StatTile";

@@ -7,7 +7,8 @@ import { SunkenBox } from "./pixel";
 
 const Strip = styled.div`
   display: grid;
-  flex: none;
+  flex: 1;
+  min-height: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 `;
@@ -69,7 +70,9 @@ const LegendItem = styled.span`
 `;
 
 const ChartFrame = styled.div`
-  height: 64px;
+  /* 跟着上栏高度伸缩，最矮 40px。Grows with the top pane, at least 40px. */
+  flex: 1;
+  min-height: 40px;
   border: 2px solid ${({ theme }) => theme.chart.grid};
 `;
 
