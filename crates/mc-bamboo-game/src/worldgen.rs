@@ -493,8 +493,11 @@ struct TerrainShard {
     /// Cold tier: entries evicted from the hot tier by the byte limit are kept
     /// here compacted (~20 KiB each, see `worldgen_compact`) and decoded back
     /// into the hot tier when looked up again. A key is never in both tiers.
-    cold: HashMap<TerrainCacheKey, CompactTerrain>,
-    cold_order: std::collections::VecDeque<TerrainCacheKey>,
+    cold: HashMap<TerrainCacheKey, (u64, CompactTerrain)>,
+    // 区分同一个键反复进出冷层的不同实例。
+    // Distinguish repeated insertions of the same key into the cold tier.
+    cold_order: std::collections::VecDeque<(TerrainCacheKey, u64)>,
+    next_cold_stamp: u64,
     cold_bytes: usize,
     /// 从冷层解码回来的次数。
     /// Lookups served by decoding a cold entry.
@@ -533,7 +536,7 @@ impl TerrainShard {
     /// 把一条条目从冷层拿走，位图留着。
     /// Take an entry out of the cold tier; its bitmap stays.
     fn remove_cold(&mut self, key: &TerrainCacheKey) -> Option<CompactTerrain> {
-        let removed = self.cold.remove(key)?;
+        let (_, removed) = self.cold.remove(key)?;
         let bytes = removed.heap_bytes();
         self.cold_bytes = self.cold_bytes.saturating_sub(bytes);
         TOTAL_BYTES.fetch_sub(bytes, Ordering::Relaxed);
@@ -555,22 +558,25 @@ impl TerrainShard {
         }
         let compact = CompactTerrain::encode(&chunk);
         let bytes = compact.heap_bytes();
-        self.cold.insert(key.clone(), compact);
-        self.cold_order.push_back(key.clone());
+        let stamp = self.next_cold_stamp;
+        self.next_cold_stamp = stamp.wrapping_add(1);
+        self.cold.insert(key.clone(), (stamp, compact));
+        self.cold_order.push_back((key.clone(), stamp));
         self.cold_bytes += bytes;
         let total = TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
         PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
         while self.cold_bytes > cold_limit {
-            let Some(oldest) = self.cold_order.pop_front() else {
+            let Some((oldest, stamp)) = self.cold_order.pop_front() else {
                 break;
             };
-            // 旧键可能已经解码回热层：那时冷层里没有它，位图也不能动。
-            // A stale key may be back in the hot tier: then the cold tier does
-            // not hold it and its bitmap must stay.
-            if self.remove_cold(&oldest).is_some() {
+            // 跳过已升温的旧实例，即使同一个键后来又进了冷层。
+            // Skip promoted records even when the same key has since gone cold again.
+            if self.cold.get(&oldest).is_some_and(|entry| entry.0 == stamp) {
+                self.remove_cold(&oldest);
                 self.consumers_done.remove(&oldest);
             }
         }
+        self.compact_cold_order();
         true
     }
 
@@ -582,9 +588,13 @@ impl TerrainShard {
             let entries = &self.entries;
             self.order.retain(|key| entries.contains_key(key));
         }
+    }
+
+    fn compact_cold_order(&mut self) {
         if self.cold_order.len() > 2 * self.cold.len() + 64 {
             let cold = &self.cold;
-            self.cold_order.retain(|key| cold.contains_key(key));
+            self.cold_order
+                .retain(|(key, stamp)| cold.get(key).is_some_and(|entry| entry.0 == *stamp));
         }
     }
 }
@@ -610,6 +620,7 @@ fn mark_terrain_consumer(config: &WorldGenConfig, x: i32, z: i32, bits: u32) {
         if *done == ALL_3X3 | (ALL_3X3 << 9) && shard.remove_entry(&key) {
             shard.dependency_releases += 1;
             shard.compact_order();
+            shard.compact_cold_order();
         }
     }
 }
@@ -648,6 +659,7 @@ pub(crate) fn release_terrain_cache() {
         }
         shard.order.clear();
         shard.cold_order.clear();
+        shard.cold_order.shrink_to_fit();
         shard.cold.shrink_to_fit();
         shard.entries.shrink_to_fit();
         shard.inflight.shrink_to_fit();
@@ -1949,6 +1961,23 @@ mod tests {
             computations,
             "a thaw must not regenerate"
         );
+    }
+
+    #[test]
+    fn cold_order_discards_old_incarnations_of_the_same_key() {
+        let cfg = WorldGenConfig::default();
+        let key = terrain_cache_key(&cfg, 0, 0, false);
+        let chunk = generate_chunk(&cfg, 0, 0).unwrap();
+        let mut shard = TerrainShard::default();
+        shard
+            .cold
+            .insert(key.clone(), (70, CompactTerrain::encode(&chunk)));
+        shard
+            .cold_order
+            .extend((0..=70).map(|stamp| (key.clone(), stamp)));
+        shard.compact_cold_order();
+        assert_eq!(shard.cold_order.len(), 1);
+        assert_eq!(shard.cold_order[0], (key, 70));
     }
 
     #[test]
