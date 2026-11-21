@@ -94,5 +94,6 @@ fn chested_horse_group(group: &mut Option<SpawnGroup>) -> &mut AgeableGroupData 
     match data {
         SpawnGroup::Ageable(age) | SpawnGroup::Horse(age, _) | SpawnGroup::Llama(age, _) => age,
         SpawnGroup::Zombie(_) => unreachable!("equine with a zombie spawn group"),
+        SpawnGroup::Wild(_) => unreachable!("equine with a wild animal group"),
     }
 }

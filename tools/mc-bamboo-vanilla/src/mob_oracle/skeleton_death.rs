@@ -54,6 +54,7 @@ pub(super) fn player_view() -> PlayerView {
         armor_cover: 0.0,
         main_hand: items::DIAMOND_SWORD,
         off_hand: 0,
+        combat: Default::default(),
     }
 }
 
