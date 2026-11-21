@@ -17,6 +17,7 @@ pub mod chicken;
 pub mod control;
 pub mod damage;
 pub mod effects;
+pub mod equine;
 pub mod equipment;
 pub mod fish;
 pub mod goals;
@@ -70,6 +71,10 @@ pub enum MobType {
     Salmon,
     TropicalFish,
     Pufferfish,
+    Horse,
+    Donkey,
+    Mule,
+    Llama,
 }
 
 impl MobType {
@@ -90,6 +95,10 @@ impl MobType {
             Self::Salmon => ids::SALMON,
             Self::TropicalFish => ids::TROPICAL_FISH,
             Self::Pufferfish => ids::PUFFERFISH,
+            Self::Horse => ids::HORSE,
+            Self::Donkey => ids::DONKEY,
+            Self::Mule => ids::MULE,
+            Self::Llama => ids::LLAMA,
         }
     }
 
@@ -109,6 +118,10 @@ impl MobType {
             Self::Salmon => "minecraft:salmon",
             Self::TropicalFish => "minecraft:tropical_fish",
             Self::Pufferfish => "minecraft:pufferfish",
+            Self::Horse => "minecraft:horse",
+            Self::Donkey => "minecraft:donkey",
+            Self::Mule => "minecraft:mule",
+            Self::Llama => "minecraft:llama",
         }
     }
 
@@ -127,9 +140,17 @@ impl MobType {
             Self::Salmon,
             Self::TropicalFish,
             Self::Pufferfish,
+            Self::Horse,
+            Self::Donkey,
+            Self::Mule,
+            Self::Llama,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
+    }
+
+    pub const fn is_equine(self) -> bool {
+        matches!(self, Self::Horse | Self::Donkey | Self::Mule | Self::Llama)
     }
 
     /// 成年和幼年的（宽，高，眼高）。
@@ -142,6 +163,9 @@ impl MobType {
                     facts.height,
                     mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
                 )
+            }
+            (Self::Horse | Self::Donkey | Self::Mule | Self::Llama, _) => {
+                equine::dimensions(self, baby)
             }
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
@@ -280,6 +304,10 @@ impl MobType {
             Self::Salmon => "minecraft:entities/salmon",
             Self::TropicalFish => "minecraft:entities/tropical_fish",
             Self::Pufferfish => "minecraft:entities/pufferfish",
+            Self::Horse => "minecraft:entities/horse",
+            Self::Donkey => "minecraft:entities/donkey",
+            Self::Mule => "minecraft:entities/mule",
+            Self::Llama => "minecraft:entities/llama",
         }
     }
 
@@ -291,12 +319,20 @@ impl MobType {
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
-        if self.is_monster() { 80 } else { 120 }
+        if self.is_equine() {
+            400
+        } else if self.is_monster() {
+            80
+        } else {
+            120
+        }
     }
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
-        if matches!(self, Self::Cow | Self::Squid | Self::GlowSquid) {
+        if self.is_equine() {
+            0.8
+        } else if matches!(self, Self::Cow | Self::Squid | Self::GlowSquid) {
             0.4
         } else {
             1.0
@@ -314,6 +350,10 @@ impl MobType {
             Self::Squid | Self::GlowSquid => Some(squid::ambient_sound(self)),
             Self::Cod | Self::Salmon | Self::TropicalFish => Some(fish::ambient_sound(self)),
             Self::Pufferfish => None,
+            Self::Horse => Some("minecraft:entity.horse.ambient"),
+            Self::Donkey => Some("minecraft:entity.donkey.ambient"),
+            Self::Mule => Some("minecraft:entity.mule.ambient"),
+            Self::Llama => Some("minecraft:entity.llama.ambient"),
         }
     }
 
@@ -328,6 +368,10 @@ impl MobType {
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 Some(fish::hurt_sound(self))
             }
+            Self::Horse => Some("minecraft:entity.horse.hurt"),
+            Self::Donkey => Some("minecraft:entity.donkey.hurt"),
+            Self::Mule => Some("minecraft:entity.mule.hurt"),
+            Self::Llama => Some("minecraft:entity.llama.hurt"),
         }
     }
 
@@ -342,6 +386,10 @@ impl MobType {
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 Some(fish::death_sound(self))
             }
+            Self::Horse => Some("minecraft:entity.horse.death"),
+            Self::Donkey => Some("minecraft:entity.donkey.death"),
+            Self::Mule => Some("minecraft:entity.mule.death"),
+            Self::Llama => Some("minecraft:entity.llama.death"),
         }
     }
 
@@ -358,6 +406,10 @@ impl MobType {
             // `AbstractFish.playStepSound` 是空实现。
             // `AbstractFish.playStepSound` is empty.
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => None,
+            Self::Horse => Some("minecraft:entity.horse.step"),
+            Self::Donkey => Some("minecraft:entity.horse.step"),
+            Self::Mule => Some("minecraft:entity.horse.step"),
+            Self::Llama => Some("minecraft:entity.llama.step"),
         }
     }
 
@@ -378,6 +430,10 @@ impl MobType {
             Self::Salmon => items::SALMON_SPAWN_EGG,
             Self::TropicalFish => items::TROPICAL_FISH_SPAWN_EGG,
             Self::Pufferfish => items::PUFFERFISH_SPAWN_EGG,
+            Self::Horse => items::HORSE_SPAWN_EGG,
+            Self::Donkey => items::DONKEY_SPAWN_EGG,
+            Self::Mule => items::MULE_SPAWN_EGG,
+            Self::Llama => items::LLAMA_SPAWN_EGG,
         }
     }
 
@@ -397,6 +453,10 @@ impl MobType {
             Self::Salmon => "entity.minecraft.salmon",
             Self::TropicalFish => "entity.minecraft.tropical_fish",
             Self::Pufferfish => "entity.minecraft.pufferfish",
+            Self::Horse => "entity.minecraft.horse",
+            Self::Donkey => "entity.minecraft.donkey",
+            Self::Mule => "entity.minecraft.mule",
+            Self::Llama => "entity.minecraft.llama",
         }
     }
 
@@ -421,6 +481,10 @@ impl MobType {
             Self::Salmon,
             Self::TropicalFish,
             Self::Pufferfish,
+            Self::Horse,
+            Self::Donkey,
+            Self::Mule,
+            Self::Llama,
         ]
         .into_iter()
         .find(|kind| kind.entity_type() == entity_type)
@@ -448,7 +512,9 @@ impl MobType {
     /// `EntityType.canSpawnFarFromPlayer()`: the builder default is `CREATURE | MISC`,
     /// so cows may spawn far from players and monsters may not.
     pub const fn can_spawn_far_from_player(self) -> bool {
-        matches!(self, Self::Cow)
+        // 马科也是 `CREATURE`。
+        // Equines are `CREATURE` as well.
+        !self.is_monster()
     }
 
     /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
@@ -598,6 +664,10 @@ pub enum DamageKind {
     MobAttack,
     MobAttackNoAggro,
     Arrow,
+    /// 羊驼口水，`minecraft:spit`。
+    ///
+    /// Llama spit, `minecraft:spit`.
+    Spit,
     Thrown,
     Starve,
     Thorns,
@@ -628,6 +698,7 @@ impl DamageKind {
             Self::MobAttack => "minecraft:mob_attack",
             Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
             Self::Arrow => "minecraft:arrow",
+            Self::Spit => "minecraft:spit",
             Self::Thrown => "minecraft:thrown",
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
@@ -677,7 +748,7 @@ impl DamageKind {
             Self::Freeze => "freeze",
             Self::OutOfWorld => "outOfWorld",
             Self::PlayerAttack => "player",
-            Self::MobAttack | Self::MobAttackNoAggro => "mob",
+            Self::MobAttack | Self::MobAttackNoAggro | Self::Spit => "mob",
             Self::Arrow => "arrow",
             Self::Thrown => "thrown",
             Self::Starve => "starve",
@@ -692,7 +763,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 24] = [
+        let all: [DamageKind; 25] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -711,6 +782,7 @@ impl DamageKind {
             Self::MobAttack,
             Self::MobAttackNoAggro,
             Self::Arrow,
+            Self::Spit,
             Self::Thrown,
             Self::Starve,
             Self::Thorns,
@@ -730,6 +802,7 @@ impl DamageKind {
                 | Self::MobAttack
                 | Self::MobAttackNoAggro
                 | Self::Arrow
+                | Self::Spit
                 | Self::Thrown
                 | Self::Thorns
         ) || matches!(self, Self::Wither)
@@ -809,6 +882,7 @@ impl DamageKind {
             | Self::MobAttack
             | Self::MobAttackNoAggro
             | Self::Arrow
+            | Self::Spit
             | Self::Thrown
             | Self::Thorns
             | Self::Explosion
@@ -1225,6 +1299,7 @@ pub struct Mob {
     pub hurt_marked: bool,
     /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
     pub pending_breed: Option<EntityUid>,
+    pub equine: Option<Box<equine::EquineState>>,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -1303,6 +1378,7 @@ impl Mob {
             }
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
+            kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
@@ -1317,6 +1393,7 @@ impl Mob {
             }
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
+            kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
             // `WaterBoundPathNavigation.createPathFinder`：只有海豚允许跃出水面。
@@ -1336,6 +1413,7 @@ impl Mob {
             | MobType::Pufferfish => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
+            kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
         let mut mob = Self {
@@ -1461,6 +1539,9 @@ impl Mob {
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
+            equine: mob_type
+                .is_equine()
+                .then(|| Box::new(equine::EquineState::default())),
         };
         if mob_type == MobType::Salmon {
             // `Salmon` 的 `DATA_TYPE` 缺省是 `Variant.MEDIUM`。
@@ -1568,6 +1649,11 @@ pub struct MobPublic {
     pub y_head_rot: f32,
     pub y_body_rot: f32,
     pub in_love: i32,
+    pub can_parent_equine: bool,
+    /// 马科要同步的元数据；其余生物是 None。
+    ///
+    /// The synced equine metadata; None for other mobs.
+    pub equine: Option<equine::EquinePublic>,
     pub age: i32,
     pub panicking: bool,
     pub no_ai: bool,
@@ -1635,6 +1721,8 @@ impl MobPublic {
             y_head_rot: mob.y_head_rot,
             y_body_rot: mob.y_body_rot,
             in_love: mob.in_love,
+            can_parent_equine: equine::can_parent(mob),
+            equine: mob.equine.as_deref().map(equine::EquinePublic::of),
             age: mob.age,
             panicking: mob.is_panicking(),
             no_ai: mob.no_ai,

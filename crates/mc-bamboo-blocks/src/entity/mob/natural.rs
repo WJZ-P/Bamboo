@@ -641,9 +641,14 @@ pub(super) fn check_spawn_rules(
         MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
             super::fish::check_spawn_rules(world, kind, pos, sea_level)
         }
-        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
-            animal_spawn_rules(world, pos)
-        }
+        MobType::Cow
+        | MobType::Pig
+        | MobType::Sheep
+        | MobType::Chicken
+        | MobType::Horse
+        | MobType::Donkey
+        | MobType::Mule
+        | MobType::Llama => animal_spawn_rules(world, pos),
         MobType::Zombie | MobType::Skeleton => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
@@ -828,10 +833,11 @@ pub(super) fn create_mob(world: &mut World, kind: MobType) -> Option<Entity> {
     Some(world.prepare_entity(Entity::by_mob_type(kind, Vec3::default())))
 }
 
-/// `Mob.getMaxSpawnClusterSize()`。
+/// `Mob.getMaxSpawnClusterSize()`，马科覆写为 6。
+///
+/// `Mob.getMaxSpawnClusterSize()`; equines override it to 6.
 fn max_spawn_cluster_size(kind: MobType) -> i32 {
-    let _ = kind;
-    4
+    if kind.is_equine() { 6 } else { 4 }
 }
 
 /// `Mob.isMaxGroupSizeReached`。

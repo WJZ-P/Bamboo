@@ -124,7 +124,7 @@ fn can_equip(
 /// `Equippable.canBeEquippedBy`。允许名单空着就是谁都能穿。
 ///
 /// `Equippable.canBeEquippedBy`. An empty allow-list means every entity type.
-fn allowed(set: Option<&HolderSet>, entity_type: i32) -> bool {
+pub(crate) fn allowed(set: Option<&HolderSet>, entity_type: i32) -> bool {
     let Some(set) = set else {
         return true;
     };
