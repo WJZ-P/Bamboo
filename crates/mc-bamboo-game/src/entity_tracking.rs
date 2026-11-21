@@ -293,7 +293,9 @@ impl TrackedEntity {
         })];
         // 官方箭的 trackedDataValues 为空时不发；其它类型保留现有空表包行为。
         // Vanilla skips empty arrow metadata; other types retain their existing empty packet.
-        if !matches!(snapshot.data, KindData::Arrow(_)) || !self.last_data.is_empty() {
+        if !matches!(snapshot.data, KindData::Arrow(_) | KindData::LlamaSpit(_))
+            || !self.last_data.is_empty()
+        {
             out.push(packet_body(&SetEntityData {
                 entity_id: snapshot.id,
                 items: &self.last_data,
@@ -748,6 +750,10 @@ pub enum KindData {
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
     Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
+    /// 羊驼口水：没有自己的元数据。
+    ///
+    /// Llama spit, with no metadata of its own.
+    LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
 }
 
@@ -767,6 +773,7 @@ impl Snapshot {
             data: KindData::of(&public.kind),
             needs_sync: match &public.kind {
                 KindPublic::Arrow(arrow) => arrow.needs_sync,
+                KindPublic::LlamaSpit(spit) => spit.needs_sync,
                 KindPublic::Egg(egg) => egg.needs_sync,
                 _ => false,
             },
@@ -785,6 +792,7 @@ impl Snapshot {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
             KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
+            KindData::LlamaSpit(spit) => spit.owner.unwrap_or(0),
             KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
@@ -810,6 +818,7 @@ impl KindData {
             KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
             KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
+            KindPublic::LlamaSpit(spit) => Self::LlamaSpit(*spit),
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
         }
     }
@@ -819,7 +828,7 @@ impl KindData {
     /// Projectiles with a no-op interpolation handler: no stepped position paths, and
     /// `syncVelocity` leaves the velocity baseline alone.
     fn is_projectile(&self) -> bool {
-        matches!(self, Self::Arrow(_) | Self::Egg(_))
+        matches!(self, Self::Arrow(_) | Self::Egg(_) | Self::LlamaSpit(_))
     }
 
     /// 同步用到的那个数字。下落的方块和物品没有。
@@ -830,6 +839,7 @@ impl KindData {
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
             | Self::Arrow(_)
+            | Self::LlamaSpit(_)
             | Self::Egg(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
@@ -843,6 +853,7 @@ impl KindData {
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
             | Self::Arrow(_)
+            | Self::LlamaSpit(_)
             | Self::Egg(_) => None,
         }
     }
@@ -852,6 +863,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
             Self::Arrow(arrow) => Some(arrow.uuid),
+            Self::LlamaSpit(spit) => Some(spit.uuid),
             Self::Egg(egg) => Some(egg.uuid),
             _ => None,
         }
@@ -862,6 +874,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
             Self::Arrow(arrow) => Some(arrow.pitch),
+            Self::LlamaSpit(spit) => Some(spit.pitch),
             Self::Egg(egg) => Some(egg.x_rot),
             _ => None,
         }
@@ -891,7 +904,7 @@ impl KindData {
             Self::ExperienceOrb { value } if *value != 0 => {
                 vec![EntityData::ExperienceValue(*value)]
             }
-            Self::ExperienceOrb { .. } => Vec::new(),
+            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {
@@ -944,6 +957,9 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    if kind.is_equine() && index >= mc_bamboo_data::entity_types::HORSE_FLAGS {
+        return equine_default_data(index, kind);
+    }
     if let Some(data) = farm_default_data(index, kind) {
         return data;
     }
@@ -1059,6 +1075,55 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     out
 }
 
+/// 马科自己那几项的默认值：标志 0、花色 0、没箱子、力量 0。
+///
+/// Defaults of the equine items: no flags, variant 0, no chest, strength 0.
+fn equine_default_data(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types::{HORSE_FLAGS, LLAMA_STRENGTH, LLAMA_VARIANT};
+    match index {
+        HORSE_FLAGS => EntityData::HorseFlags(0),
+        LLAMA_STRENGTH => EntityData::LlamaStrength(0),
+        LLAMA_VARIANT => EntityData::LlamaVariant(0),
+        _ if kind == MobType::Horse => EntityData::HorseVariant(0),
+        _ => EntityData::HorseChest(false),
+    }
+}
+
+/// 马科在 `AgeableMob` 之后的元数据，按 index 升序：`AbstractHorse` 的标志，
+/// 然后马的花色，或者箱子马的箱子、羊驼的力量和毛色。
+///
+/// Equine metadata after `AgeableMob`, by ascending index: the `AbstractHorse`
+/// flags, then the horse variant, or the chest, llama strength and variant.
+fn equine_non_default_data(
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+    equine: &mc_bamboo_blocks::entity::mob::equine::EquinePublic,
+) -> Vec<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    let mut out = Vec::new();
+    if equine.flags != 0 {
+        out.push(EntityData::HorseFlags(equine.flags));
+    }
+    if kind == MobType::Horse {
+        if equine.variant != 0 {
+            out.push(EntityData::HorseVariant(equine.variant));
+        }
+        return out;
+    }
+    if equine.chested {
+        out.push(EntityData::HorseChest(true));
+    }
+    if kind == MobType::Llama {
+        if equine.strength != 0 {
+            out.push(EntityData::LlamaStrength(equine.strength));
+        }
+        if equine.variant != 0 {
+            out.push(EntityData::LlamaVariant(equine.variant));
+        }
+    }
+    out
+}
+
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
@@ -1127,6 +1192,10 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.age_locked {
         out.push(EntityData::AgeLocked(true));
+    }
+    if let Some(equine) = &mob.equine {
+        out.extend(equine_non_default_data(mob.mob_type, equine));
+        return out;
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.

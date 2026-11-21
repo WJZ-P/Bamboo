@@ -31,7 +31,9 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod egg;
+mod equine;
 mod gen_spawn;
+mod llama_spit;
 mod natural_spawn;
 mod projectile;
 mod shot;
@@ -79,6 +81,13 @@ enum Line {
     ArrowPickup(projectile::ArrowPickupCase),
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
+    EquineSpawn(equine::SpawnCase),
+    EquineGroup(equine::GroupCase),
+    EquineBreed(equine::BreedCase),
+    EquineInteract(equine::InteractCase),
+    EquineDeath(equine::DeathCase),
+    EquineSave(equine::SaveCase),
+    LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     NaturalSpawn(natural_spawn::Case),
     GenSpawn(gen_spawn::Case),
     Egg(Box<egg::EggCase>),
@@ -477,6 +486,13 @@ struct CowStep {
     hc: i32,
     #[serde(default)]
     armor: i64,
+    /// 马科场景：`DATA_ID_FLAGS` 字节和脾气值，其余生物是 0。
+    ///
+    /// Equine scenes: the `DATA_ID_FLAGS` byte and the temper; 0 for other mobs.
+    #[serde(default)]
+    eq: i32,
+    #[serde(default)]
+    tmp: i32,
 }
 
 const fn minus_one_i64() -> i64 {
@@ -993,6 +1009,13 @@ impl Report {
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
+                Line::EquineSpawn(case) => self.replay_equine_spawn(case),
+                Line::EquineGroup(case) => self.replay_equine_group(case),
+                Line::EquineBreed(case) => self.replay_equine_breed(case),
+                Line::EquineInteract(case) => self.replay_equine_interact(case),
+                Line::EquineDeath(case) => self.replay_equine_death(case),
+                Line::EquineSave(case) => self.replay_equine_save(case),
+                Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::End(end) => {
@@ -1190,6 +1213,7 @@ impl Report {
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
+                    6..=9 => equine::scene_kind(cow.kind),
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));
@@ -1388,6 +1412,7 @@ impl Report {
                             f64::from_bits(player.y as u64),
                             f64::from_bits(player.z as u64),
                         ),
+                        sneaking: false,
                     };
                     let outcome = world.interact_mob(ids[cow as usize], &request);
                     let result = if outcome.result.consumes_action() {
@@ -1773,6 +1798,8 @@ impl Report {
                 plain!(hd);
                 plain!(hc);
                 bits64!(armor);
+                plain!(eq);
+                plain!(tmp);
             }
             if diffs.is_empty() {
                 continue;
@@ -3044,6 +3071,11 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .attributes
             .value(mc_bamboo_data::registries::attribute::ARMOR)
             .to_bits() as i64,
+        eq: mob
+            .equine
+            .as_ref()
+            .map_or(0, |state| i32::from(state.flags())),
+        tmp: mob.equine.as_ref().map_or(0, |state| state.temper),
     }
 }
 

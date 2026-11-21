@@ -30,6 +30,10 @@ pub struct MobInteractRequest {
     pub creative: bool,
     /// 玩家位置，`Player.playSound` 用它当音源坐标。
     pub position: Vec3,
+    /// `isSecondaryUseActive()`：交互包里的 `usingSecondaryAction`（潜行）。
+    ///
+    /// `isSecondaryUseActive()`: the packet's `usingSecondaryAction` (sneaking).
+    pub sneaking: bool,
 }
 
 /// 交互的后果，交给调用方改物品栏和发挥手动画。
@@ -40,6 +44,11 @@ pub struct MobInteraction {
     pub shrink_held: bool,
     /// `ItemUtils.createFilledResult` 交回来的奶桶。背包满时调用方丢在地上。
     pub replacement: Option<ItemStack>,
+    /// 马科 `openCustomInventoryScreen`：调用方给这名玩家打开坐骑物品栏。
+    ///
+    /// Equine `openCustomInventoryScreen`: the caller opens the mount inventory
+    /// for this player.
+    pub open_inventory: bool,
     /// `Sheep.shear`：调用方按剪羊毛战利品表掉落，并给剪刀扣 1 点耐久。
     ///
     /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point.
@@ -53,6 +62,7 @@ impl MobInteraction {
             result: InteractionResult::Pass,
             shrink_held: false,
             replacement: None,
+            open_inventory: false,
             shear: false,
         }
     }
@@ -70,6 +80,9 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
 
 /// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
 pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+    if mob.mob_type.is_equine() {
+        return super::equine::interact(me, mob, req);
+    }
     if mob.mob_type == MobType::Cow && req.held.item == items::BUCKET && !mob.is_baby() {
         // `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，位置取交互发生处。
         mob.events.push(MobEvent::MilkSound {
@@ -79,6 +92,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
+            open_inventory: false,
             shear: false,
         };
     }
@@ -108,6 +122,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::SuccessServer,
             shrink_held: !req.creative,
             replacement: None,
+            open_inventory: false,
             shear: false,
         };
     }
@@ -122,6 +137,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: None,
+            open_inventory: false,
             shear: false,
         };
     }
