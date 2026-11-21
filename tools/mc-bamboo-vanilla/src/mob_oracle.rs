@@ -31,8 +31,8 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod equine;
-mod llama_spit;
 mod gen_spawn;
+mod llama_spit;
 mod natural_spawn;
 mod projectile;
 mod shot;
@@ -81,6 +81,7 @@ enum Line {
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     EquineSpawn(equine::SpawnCase),
+    EquineGroup(equine::GroupCase),
     EquineBreed(equine::BreedCase),
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
@@ -948,6 +949,7 @@ impl Report {
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
                 Line::EquineSpawn(case) => self.replay_equine_spawn(case),
+                Line::EquineGroup(case) => self.replay_equine_group(case),
                 Line::EquineBreed(case) => self.replay_equine_breed(case),
                 Line::EquineInteract(case) => self.replay_equine_interact(case),
                 Line::EquineDeath(case) => self.replay_equine_death(case),

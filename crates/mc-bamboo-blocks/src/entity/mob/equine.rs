@@ -17,7 +17,7 @@ use super::{
 use crate::{
     archive::{block_entity, tag},
     entity::Entity,
-    random::LegacyRandom,
+    random::RandomSource,
 };
 
 mod death;
@@ -28,6 +28,8 @@ pub mod inventory;
 mod life;
 mod llama;
 mod ranged;
+mod spawn;
+pub(super) use spawn::finalize_spawn;
 
 pub(super) use death::drop_on_death;
 pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets};
@@ -158,16 +160,10 @@ pub(super) fn attributes(kind: MobType) -> Attributes {
     attrs
 }
 
-/// `finalizeSpawn`：先花色（马）或力量和毛色（羊驼），再 `randomizeAttributes`，都用世界随机源。
+/// `AbstractHorse.randomizeAttributes`，马额外随机速度和跳跃。
 ///
-/// `finalizeSpawn`: variants first, then `randomizeAttributes`, all from the level random.
-pub(super) fn finalize_spawn(mob: &mut Mob, random: &LegacyRandom) {
-    let state = mob.equine.as_mut().expect("equine spawn state");
-    match mob.mob_type {
-        MobType::Horse => horse::finalize_spawn(state, random),
-        MobType::Llama => llama::finalize_spawn(state, random),
-        _ => {}
-    }
+/// `AbstractHorse.randomizeAttributes`, with extra speed and jump draws for horses.
+fn randomize_attributes(mob: &mut Mob, random: &dyn RandomSource) {
     let max_health = 15.0 + random.next_int(8) as f64 + random.next_int(9) as f64;
     set_base(mob, attribute::MAX_HEALTH, max_health);
     if mob.mob_type == MobType::Horse {

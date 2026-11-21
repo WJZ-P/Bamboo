@@ -2619,6 +2619,11 @@ public final class MobOracle {
             scenes.add(new NaturalScene("skeleton_near_" + distance, EntityTypes.SKELETON, "plains", 2, 0, 0, 11,
                     false, 8.5 - distance, 0, 289, true, false));
         }
+        // 马科：簇上限 6，组数据里带共享毛色和各自的幼崽概率。
+        // Equines: a cluster cap of 6 and group data with a shared coat and their own baby chance.
+        scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
             for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
@@ -2807,6 +2812,13 @@ public final class MobOracle {
             row.add(Float.floatToRawIntBits(mob.getYRot()));
             row.add(mob.isBaby() ? 1 : 0);
             row.add(mob.isLeftHanded() ? 1 : 0);
+            // 马科追加血量、跳跃、速度、花色和力量，核对区域随机源上的 `finalizeSpawn`。
+            // Equines append health, jump, speed, variant and strength for `finalizeSpawn`.
+            if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
+                for (var value : com.google.gson.JsonParser.parseString(equineState(horse)).getAsJsonArray()) {
+                    row.add(value);
+                }
+            }
             spawned.add(row);
         }
         var result = new JsonObject();
@@ -2929,6 +2941,36 @@ public final class MobOracle {
         return cases;
     }
 
+    // 同组逐只核对，确保共享毛色和幼年抽取没有改变随机源顺序。
+    // Compare each member to catch drift in group coat and baby rolls.
+    private static int playEquineGroup(
+            Official official, Writer out, FakeLevel world,
+            EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse> type,
+            int kind, long seed) throws Exception {
+        world.getRandom().setSeed(seed);
+        net.minecraft.world.entity.SpawnGroupData group = null;
+        JsonArray members = new JsonArray();
+        for (int i = 0; i < 6; i++) {
+            var mob = type.create(world, EntitySpawnReason.NATURAL);
+            mob.setPos(0.5, 64, 0.5);
+            group = mob.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.NATURAL, group);
+            JsonObject member = new JsonObject();
+            member.add("state", com.google.gson.JsonParser.parseString(equineState(mob)));
+            member.addProperty("age", mob.getAge());
+            member.addProperty("leftHanded", mob.isLeftHanded());
+            member.addProperty("levelSeed", levelSeed(world));
+            member.addProperty("data", pairingData(official, mob));
+            members.add(member);
+        }
+        JsonObject row = new JsonObject();
+        row.addProperty("type", "equineGroup");
+        row.addProperty("kind", kind);
+        row.addProperty("seed", seed);
+        row.add("members", members);
+        out.write(row + "\n");
+        return 1;
+    }
+
     private static int playEquines(Official official, Writer out) throws Exception {
         var world = FakeLevel.create(official);
         var pos = new BlockPos(0, 64, 0);
@@ -2958,6 +3000,8 @@ public final class MobOracle {
                             + ",\"data\":\"" + pairingData(official, mob) + "\"}\n");
                     cases++;
                 }
+
+                cases += playEquineGroup(official, out, world, type, typeIndex, seed);
 
                 var parent = type.create(world, EntitySpawnReason.COMMAND);
                 var partnerType = typeIndex < 2 && (sample & 1) == 1 ? types.get(1 - typeIndex) : type;

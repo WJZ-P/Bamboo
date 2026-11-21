@@ -309,7 +309,7 @@ impl Report {
     }
 }
 
-fn state(entity: &Entity) -> State {
+pub(super) fn state(entity: &Entity) -> State {
     let mob = entity.kind.mob().unwrap();
     let [health, jump, speed] = ATTRIBUTES.map(|id| mob.attributes.base(id).to_bits() as i64);
     let equine = mob.equine.as_ref().unwrap();
@@ -336,25 +336,81 @@ fn make_parent(kind: MobType, fixture: State) -> Entity {
     entity
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct GroupCase {
+    seed: i64,
+    kind: usize,
+    members: Vec<GroupMember>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupMember {
+    state: State,
+    age: i32,
+    left_handed: bool,
+    level_seed: i64,
+    data: String,
+}
+
+/// 生成场景用的空世界：只有世界随机源有意义。
+///
+/// Empty level for spawn scenes: only the level random matters.
+fn spawn_level(seed: i64) -> MobLevel {
+    MobLevel {
+        blocks: HashMap::new(),
+        random: LevelRandom::new(seed),
+        loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+        looting: Vec::new(),
+        rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+        facts: ZombieFacts::default(),
+        natural_spawn: None,
+        redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+        block_entities: BlockEntities::default(),
+        block_events: BlockEvents::default(),
+        entities: Entities::with_next_id(1),
+        players: Vec::new(),
+        game: None,
+        wrong_was_hurt: false,
+    }
+}
+
 impl Report {
+    pub(super) fn replay_equine_group(&mut self, case: GroupCase) {
+        self.cases += 1;
+        let kind = KINDS[case.kind];
+        let mut level = spawn_level(case.seed);
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut group = None;
+        for (index, member) in case.members.iter().enumerate() {
+            let mut entity = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
+            spawn::finalize_spawn_with_group(&mut world, kind, &mut entity, &mut group);
+            let mob = entity.kind.mob().unwrap();
+            let place = format!("equine group {kind:?} seed {} member {index}", case.seed);
+            let expected = (
+                member.state,
+                member.age,
+                member.left_handed,
+                member.level_seed,
+            );
+            let actual = (
+                state(&entity),
+                mob.age,
+                mob.left_handed,
+                world.random().seed(),
+            );
+            if expected != actual {
+                self.mismatch(format!("{place}: official {expected:?}, Bamboo {actual:?}"));
+            }
+            self.compare_equine_data(&place, &member.data, &entity);
+        }
+    }
+
     pub(super) fn replay_equine_spawn(&mut self, case: SpawnCase) {
         self.cases += 1;
         let kind = KINDS[case.kind];
-        let mut level = MobLevel {
-            blocks: HashMap::new(),
-            random: LevelRandom::new(case.seed),
-            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
-            looting: Vec::new(),
-            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
-            facts: ZombieFacts::default(),
-            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
-            block_entities: BlockEntities::default(),
-            block_events: BlockEvents::default(),
-            entities: Entities::with_next_id(1),
-            players: Vec::new(),
-            game: None,
-            wrong_was_hurt: false,
-        };
+        let mut level = spawn_level(case.seed);
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
         let id = if case.egg {
@@ -445,6 +501,7 @@ impl Report {
                 difficulty: 2,
                 ..ZombieFacts::default()
             },
+            natural_spawn: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),

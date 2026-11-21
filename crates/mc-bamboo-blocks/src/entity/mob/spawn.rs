@@ -57,6 +57,30 @@ pub struct AgeableGroupData {
     pub baby_spawn_chance: f32,
 }
 
+impl AgeableGroupData {
+    /// `new AgeableMobGroupData(babySpawnChance)`：会生幼崽，组里还没有成员。
+    ///
+    /// `new AgeableMobGroupData(babySpawnChance)`: babies allowed, no members yet.
+    pub(super) fn new(baby_spawn_chance: f32) -> Self {
+        Self {
+            group_size: 0,
+            should_spawn_baby: true,
+            baby_spawn_chance,
+        }
+    }
+
+    /// `AgeableMob.finalizeSpawn`：仅从第二只开始抽幼崽概率。
+    ///
+    /// `AgeableMob.finalizeSpawn`: roll for a baby only from the second member onward.
+    pub(super) fn roll_baby(&mut self, random: &dyn RandomSource) -> bool {
+        let baby = self.should_spawn_baby
+            && self.group_size > 0
+            && random.next_float() <= self.baby_spawn_chance;
+        self.group_size += 1;
+        baby
+    }
+}
+
 /// 自然生成的组数据（`SpawnGroupData`）：动物的 `AgeableMobGroupData` 和僵尸的
 /// `ZombieGroupData`。
 ///
@@ -65,6 +89,14 @@ pub struct AgeableGroupData {
 #[derive(Debug, Clone, Copy)]
 pub enum SpawnGroup {
     Ageable(AgeableGroupData),
+    /// `Horse.HorseGroupData`：同组共享的毛色编号。
+    ///
+    /// `Horse.HorseGroupData`: the coat id shared by the group.
+    Horse(AgeableGroupData, i32),
+    /// `Llama.LlamaGroupData`：同组共享的毛色编号。
+    ///
+    /// `Llama.LlamaGroupData`: the colour id shared by the group.
+    Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
 }
 
@@ -245,7 +277,7 @@ pub(crate) fn finalize_spawn(
 ///
 /// The natural-spawn entry of `finalizeSpawn`: the group data is shared by every mob
 /// of one group.
-pub(crate) fn finalize_spawn_with_group(
+pub fn finalize_spawn_with_group(
     world: &mut World,
     kind: MobType,
     entity: &mut Entity,
@@ -255,7 +287,7 @@ pub(crate) fn finalize_spawn_with_group(
 }
 
 /// `AgeableMob.getBabyStartAge()`。
-const BABY_START_AGE: i32 = -24000;
+pub(super) const BABY_START_AGE: i32 = -24000;
 
 fn finalize_spawn_in_group(
     world: &mut World,
@@ -273,23 +305,17 @@ fn finalize_spawn_in_group(
         return;
     }
     if kind.is_equine() {
-        entity.with_mob(|_, mob| {
-            super::equine::finalize_spawn(mob, world.random());
-            finalize_mob(world.random(), mob);
-        });
+        super::equine::finalize_spawn(entity, world.random(), group);
         return;
     }
     let biome = world.biome_id(entity.block_position());
     finalize_cow(entity, biome, world.random(), group);
 }
 
-/// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
-/// `WorldGenRegion.random`。牛走 [`finalize_cow`]；以后加进来的动物还没接区域随机源，
-/// 暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
+/// 牛和马科在生成期使用 `WorldGenRegion.random`；其余尚未接入区域随机源。
 ///
-/// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
-/// `WorldGenRegion.random`. Cows use [`finalize_cow`]; animals added later fall back to
-/// the level random until wired, which only affects their variants and age.
+/// Cows and equines use `WorldGenRegion.random` during generation; other kinds still
+/// fall back to the level random.
 pub(super) fn finalize_generated(
     world: &mut World,
     kind: MobType,
@@ -300,6 +326,8 @@ pub(super) fn finalize_generated(
 ) {
     if kind == MobType::Cow {
         finalize_cow(entity, biome, region_random, group);
+    } else if kind.is_equine() {
+        super::equine::finalize_spawn(entity, region_random, group);
     } else {
         finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
     }
@@ -329,19 +357,12 @@ pub(super) fn finalize_cow(
     // `AgeableMob.finalizeSpawn`：不是动物组数据时新建一份（官方 `groupData == null`）。
     // `AgeableMob.finalizeSpawn`: start a fresh animal group when there is none.
     if !matches!(group, Some(SpawnGroup::Ageable(_))) {
-        *group = Some(SpawnGroup::Ageable(AgeableGroupData {
-            group_size: 0,
-            should_spawn_baby: true,
-            baby_spawn_chance: 0.05,
-        }));
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(0.05)));
     }
     let Some(SpawnGroup::Ageable(data)) = group else {
         unreachable!("刚放进去的动物组数据");
     };
-    let baby = data.should_spawn_baby
-        && data.group_size > 0
-        && random.next_float() <= data.baby_spawn_chance;
-    data.group_size += 1;
+    let baby = data.roll_baby(random);
     entity.with_mob(|me, mob| {
         mob.variant = variant;
         mob.sound_variant = sound;
@@ -364,7 +385,10 @@ pub(super) fn finalize_mob(random: &dyn RandomSource, mob: &mut super::Mob) {
             amount,
             operation: Operation::AddMultipliedBase,
             permanent: true,
+        });
     }
+    mob.left_handed = random.next_float() < 0.05;
+}
 
 /// `cow_variant` 的生成条件：暖和冷各按一个群系标签，优先级 1；其余是温带。
 fn cow_variant_for_biome(biome: i32) -> CowVariant {

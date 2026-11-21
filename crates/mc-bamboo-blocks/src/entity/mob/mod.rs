@@ -294,9 +294,18 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
-            .into_iter()
-            .find(|kind| kind.entity_type() == entity_type)
+        [
+            Self::Cow,
+            Self::Zombie,
+            Self::Husk,
+            Self::Skeleton,
+            Self::Horse,
+            Self::Donkey,
+            Self::Mule,
+            Self::Llama,
+        ]
+        .into_iter()
+        .find(|kind| kind.entity_type() == entity_type)
     }
 
     /// `EntityType.getCategory()`。
@@ -317,7 +326,9 @@ impl MobType {
     /// `EntityType.canSpawnFarFromPlayer()`: the builder default is `CREATURE | MISC`,
     /// so cows may spawn far from players and monsters may not.
     pub const fn can_spawn_far_from_player(self) -> bool {
-        matches!(self, Self::Cow)
+        // 马科也是 `CREATURE`。
+        // Equines are `CREATURE` as well.
+        !self.is_monster()
     }
 
     /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。

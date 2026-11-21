@@ -2,16 +2,22 @@
 //!
 //! Horse-only randomization: coat and markings, and the speed and jump formulas.
 
-use super::{EquineState, JavaRandom, LegacyRandom};
+use super::{EquineState, JavaRandom, RandomSource};
 
 const COATS: i32 = 7;
 const MARKINGS: i32 = 5;
 
-/// `Horse.finalizeSpawn`：`Util.getRandom` 抽毛色和斑纹。
+/// 新马群的共享毛色。
 ///
-/// `Horse.finalizeSpawn`: draw the coat and markings.
-pub(super) fn finalize_spawn(state: &mut EquineState, random: &LegacyRandom) {
-    let coat = random.next_int(COATS);
+/// Shared coat of a new horse group.
+pub(super) fn roll_coat(random: &dyn RandomSource) -> i32 {
+    random.next_int(COATS)
+}
+
+/// 同组的斑纹仍逐只抽取。
+///
+/// Markings are still drawn for each member of the group.
+pub(super) fn apply_coat(state: &mut EquineState, coat: i32, random: &dyn RandomSource) {
     let markings = random.next_int(MARKINGS);
     state.variant = coat | (markings << 8);
 }
