@@ -20,6 +20,7 @@ use super::{
 };
 use crate::{
     entity::{Entity, EntityUid, ctx::BlockView, physics},
+    random::RandomSource,
     shape::{Aabb, CollisionContext},
     world::World,
 };
@@ -30,6 +31,8 @@ pub enum SpawnReason {
     Command,
     SpawnItemUse,
     Breeding,
+    /// `EntitySpawnReason.NATURAL`：自然生成。
+    Natural,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -41,6 +44,28 @@ pub enum SummonError {
     Failed(String),
     /// `commands.summon.failed.uuid`。
     DuplicateUuid,
+}
+
+/// `AgeableMob.AgeableMobGroupData`：一组自然生成的动物共享的组计数和幼年概率。
+///
+/// `AgeableMob.AgeableMobGroupData`: the group counter and baby odds shared by one
+/// naturally spawned group of animals.
+#[derive(Debug, Clone, Copy)]
+pub struct AgeableGroupData {
+    pub group_size: i32,
+    pub should_spawn_baby: bool,
+    pub baby_spawn_chance: f32,
+}
+
+/// 自然生成的组数据（`SpawnGroupData`）：动物的 `AgeableMobGroupData` 和僵尸的
+/// `ZombieGroupData`。
+///
+/// Spawn-group data (`SpawnGroupData`): `AgeableMobGroupData` for animals and
+/// `ZombieGroupData` for zombies.
+#[derive(Debug, Clone, Copy)]
+pub enum SpawnGroup {
+    Ageable(AgeableGroupData),
+    Zombie(super::zombie_spawn::ZombieGroupData),
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -212,13 +237,39 @@ pub(crate) fn finalize_spawn(
     entity: &mut Entity,
     reason: SpawnReason,
 ) {
-    let _ = reason;
+    let mut group = None;
+    finalize_spawn_in_group(world, kind, entity, reason, &mut group);
+}
+
+/// `finalizeSpawn` 的自然生成入口：组数据在一组的多个个体之间共享。
+///
+/// The natural-spawn entry of `finalizeSpawn`: the group data is shared by every mob
+/// of one group.
+pub(crate) fn finalize_spawn_with_group(
+    world: &mut World,
+    kind: MobType,
+    entity: &mut Entity,
+    group: &mut Option<SpawnGroup>,
+) {
+    finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
+}
+
+/// `AgeableMob.getBabyStartAge()`。
+const BABY_START_AGE: i32 = -24000;
+
+fn finalize_spawn_in_group(
+    world: &mut World,
+    kind: MobType,
+    entity: &mut Entity,
+    reason: SpawnReason,
+    group: &mut Option<SpawnGroup>,
+) {
     if kind == MobType::Skeleton {
         super::skeleton::finalize_spawn(world, entity);
         return;
     }
-    if kind.is_monster() {
-        finalize_monster(world, kind, entity);
+    if matches!(kind, MobType::Zombie | MobType::Husk) {
+        super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
     }
     if kind.is_equine() {
@@ -229,7 +280,42 @@ pub(crate) fn finalize_spawn(
         return;
     }
     let biome = world.biome_id(entity.block_position());
-    let random = world.random();
+    finalize_cow(entity, biome, world.random(), group);
+}
+
+/// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
+/// `WorldGenRegion.random`。牛走 [`finalize_cow`]；以后加进来的动物还没接区域随机源，
+/// 暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
+///
+/// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
+/// `WorldGenRegion.random`. Cows use [`finalize_cow`]; animals added later fall back to
+/// the level random until wired, which only affects their variants and age.
+pub(super) fn finalize_generated(
+    world: &mut World,
+    kind: MobType,
+    entity: &mut Entity,
+    biome: i32,
+    region_random: &dyn RandomSource,
+    group: &mut Option<SpawnGroup>,
+) {
+    if kind == MobType::Cow {
+        finalize_cow(entity, biome, region_random, group);
+    } else {
+        finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
+    }
+}
+
+/// `Cow.finalizeSpawn` 加 `AgeableMob` / `Mob` 那两层，随机源由调用方给：运行时是
+/// `Level.random`，生成期是 `WorldGenRegion.random`。
+///
+/// `Cow.finalizeSpawn` plus the `AgeableMob` / `Mob` layers with a caller-supplied
+/// random: `Level.random` at run time, `WorldGenRegion.random` during generation.
+pub(super) fn finalize_cow(
+    entity: &mut Entity,
+    biome: i32,
+    random: &dyn RandomSource,
+    group: &mut Option<SpawnGroup>,
+) {
     let variant = cow_variant_for_biome(biome);
     let _ = random.next_int(1);
     let sound = if random.next_int(2) == 0 {
@@ -237,14 +323,38 @@ pub(crate) fn finalize_spawn(
     } else {
         CowSoundVariant::Moody
     };
-    entity.with_mob(|_, mob| {
+    // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
+    // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
+    // the mob into the group.
+    // `AgeableMob.finalizeSpawn`：不是动物组数据时新建一份（官方 `groupData == null`）。
+    // `AgeableMob.finalizeSpawn`: start a fresh animal group when there is none.
+    if !matches!(group, Some(SpawnGroup::Ageable(_))) {
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData {
+            group_size: 0,
+            should_spawn_baby: true,
+            baby_spawn_chance: 0.05,
+        }));
+    }
+    let Some(SpawnGroup::Ageable(data)) = group else {
+        unreachable!("刚放进去的动物组数据");
+    };
+    let baby = data.should_spawn_baby
+        && data.group_size > 0
+        && random.next_float() <= data.baby_spawn_chance;
+    data.group_size += 1;
+    entity.with_mob(|me, mob| {
         mob.variant = variant;
         mob.sound_variant = sound;
+        if baby {
+            living::set_age(me, mob, BABY_START_AGE);
+        }
         finalize_mob(random, mob);
     });
 }
 
-fn finalize_mob(random: &crate::random::LegacyRandom, mob: &mut super::Mob) {
+pub(super) fn finalize_mob(random: &dyn RandomSource, mob: &mut super::Mob) {
+    // `Mob.finalizeSpawn`：跟随距离的随机加成和左撇子。
+    // `Mob.finalizeSpawn`: the random follow-range bonus and left-handedness.
     if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
         && range.modifier(RANDOM_SPAWN_BONUS).is_none()
     {
@@ -254,50 +364,7 @@ fn finalize_mob(random: &crate::random::LegacyRandom, mob: &mut super::Mob) {
             amount,
             operation: Operation::AddMultipliedBase,
             permanent: true,
-        });
     }
-    mob.left_handed = random.next_float() < 0.05;
-}
-
-/// `Zombie.finalizeSpawn` 的随机取数顺序（本期不生成鸡骑士/增援）：
-/// 捡物 `nextFloat < 0.55*specialMultiplier` → 幼年 `nextFloat < 0.05` →
-/// 破门 `nextFloat < 0.1` → 随机装备 `nextFloat` + `nextInt(6)`。
-fn finalize_monster(world: &mut World, kind: MobType, entity: &mut Entity) {
-    let _ = kind;
-    let random = world.random();
-    let can_pick_up_loot = random.next_float() < 0.55;
-    let baby = random.next_float() < 0.05;
-    let can_break_doors = random.next_float() < 0.1;
-    // `Monster.populateDefaultEquipmentSlots` + `Zombie.populateDefaultEquipmentSlots`。
-    let has_weapon = random.next_float() < 0.01;
-    let weapon = if has_weapon { random.next_int(6) } else { 0 };
-    entity.with_mob(|me, mob| {
-        mob.can_pick_up_loot = can_pick_up_loot;
-        if baby {
-            mob.set_zombie_baby(true);
-            let (width, height, eye) = mob.mob_type.dimensions(true);
-            me.dimensions = (width, height);
-            mob.eye_height = eye;
-        }
-        mob.can_break_doors = can_break_doors;
-        if can_break_doors {
-            mob.navigation.flags.can_open_doors = true;
-            mob.goals.insert_break_door();
-        }
-        if has_weapon {
-            // 剑 / 长矛 / 铲子；长矛会让 `SpearUseGoal` 启动，这一期不建模它。
-            let item = match weapon {
-                0 => mc_bamboo_data::items::IRON_SWORD,
-                1 => mc_bamboo_data::items::IRON_SPEAR,
-                _ => mc_bamboo_data::items::IRON_SHOVEL,
-            };
-            mob.equipment.set(
-                mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
-                mc_bamboo_protocol::item::ItemStack::new(item, 1),
-            );
-        }
-    });
-}
 
 /// `cow_variant` 的生成条件：暖和冷各按一个群系标签，优先级 1；其余是温带。
 fn cow_variant_for_biome(biome: i32) -> CowVariant {

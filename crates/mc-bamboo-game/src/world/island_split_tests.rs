@@ -157,6 +157,20 @@ pub(super) fn set_up(seed: u64, mut server: Harness) -> Scene {
         .global
         .rules_mut()
         .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
+    // 自然刷怪每刻按刷怪区块数从岛的世界随机源取数（打乱区块列表），而这个场景逐位比较
+    // 拆合前后的随机源状态。关掉 `spawn_mobs` 后刷怪阶段一个随机数都不取，比较的前提
+    // 「场景不取随机数」仍然成立（`assert_no_draws`）。
+    //
+    // Natural spawning draws from the island's world random every tick (the spawn
+    // chunk shuffle), and these scenes compare random state across splits bit for
+    // bit. With `spawn_mobs` off the spawn stage draws nothing, so the premise of
+    // `assert_no_draws` still holds.
+    server
+        .world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::SPAWN_MOBS, "false");
     server.world.publish_global();
     let centers = centers_for(seed);
     let mut next = rng(seed ^ 0x5555);

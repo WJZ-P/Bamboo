@@ -263,22 +263,7 @@ pub(super) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
         populate_armor(mob, random, difficulty, special);
         mob.equipment
             .set(EquipmentSlot::MainHand, ItemStack::new(items::BOW, 1));
-        for (slot, chance) in [
-            (EquipmentSlot::MainHand, 0.25),
-            (EquipmentSlot::Feet, 0.5),
-            (EquipmentSlot::Legs, 0.5),
-            (EquipmentSlot::Chest, 0.5),
-            (EquipmentSlot::Head, 0.5),
-        ] {
-            let stack = mob.equipment.get(slot);
-            if !stack.is_empty() && random.next_float() < chance * special {
-                let mut stack = stack.clone();
-                world
-                    .level()
-                    .enchant_mob_spawn_equipment(&mut stack, special);
-                mob.equipment.set(slot, stack);
-            }
-        }
+        enchant_spawn_equipment(world, mob, random, special);
         mob.can_pick_up_loot = random.next_float() < 0.55 * special;
         if mob.equipment.get(EquipmentSlot::Head).is_empty() && world.level().is_halloween() {
             equip_halloween_head(mob, random);
@@ -286,7 +271,37 @@ pub(super) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
     });
 }
 
-fn equip_halloween_head(mob: &mut Mob, random: &crate::random::LegacyRandom) {
+/// `Mob.populateDefaultEquipmentEnchantments`：主手 0.25，再按 `EquipmentSlot.VALUES` 的
+/// 脚、腿、胸、头各 0.5，乘特殊倍率；只给非空的槽取数。
+///
+/// `Mob.populateDefaultEquipmentEnchantments`: main hand at 0.25, then feet, legs, chest
+/// and head at 0.5 in `EquipmentSlot.VALUES` order, scaled by the special multiplier;
+/// empty slots draw nothing.
+pub(super) fn enchant_spawn_equipment(
+    world: &World<'_>,
+    mob: &mut Mob,
+    random: &crate::random::LegacyRandom,
+    special: f32,
+) {
+    for (slot, chance) in [
+        (EquipmentSlot::MainHand, 0.25),
+        (EquipmentSlot::Feet, 0.5),
+        (EquipmentSlot::Legs, 0.5),
+        (EquipmentSlot::Chest, 0.5),
+        (EquipmentSlot::Head, 0.5),
+    ] {
+        let stack = mob.equipment.get(slot);
+        if !stack.is_empty() && random.next_float() < chance * special {
+            let mut stack = stack.clone();
+            world
+                .level()
+                .enchant_mob_spawn_equipment(&mut stack, special);
+            mob.equipment.set(slot, stack);
+        }
+    }
+}
+
+pub(super) fn equip_halloween_head(mob: &mut Mob, random: &crate::random::LegacyRandom) {
     if random.next_float() < 0.25 {
         let item = if random.next_float() < 0.1 {
             items::JACK_O_LANTERN
@@ -299,7 +314,7 @@ fn equip_halloween_head(mob: &mut Mob, random: &crate::random::LegacyRandom) {
     }
 }
 
-fn populate_armor(
+pub(super) fn populate_armor(
     mob: &mut Mob,
     random: &crate::random::LegacyRandom,
     difficulty: i32,

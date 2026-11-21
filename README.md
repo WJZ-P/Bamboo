@@ -459,7 +459,7 @@ WebView2 的渲染进程不算在内。
   再放地物，区块 NBT 写 `structures` 键并能读盘恢复；`structure-pipeline` 对拍把官方 17×17 的
   `createStructures` / `createReferences` 与游戏里的同一条路径逐项比（28 行 / 2482 结构件 0 不一致，
   改坏确认会失败）。放置已对拍的 jigsaw / 矿井 / 要塞 / 海底神殿 / 林地府邸 / 雪屋 / 沉船 / 海底遗迹
-  会在游戏里写方块（含四个单件结构与废弃传送门）；`spawn` 仍不刷怪，游戏里**还没有生物**。
+  会在游戏里写方块（含四个单件结构与废弃传送门）；`spawn` 阶段的生成期刷怪见下面「生成期刷怪」一条。
   `features` 与官方的**语义差异**：官方邻居溢出的写来自各邻居区块跑到 `FEATURES` 时的 `WorldGenRegion`，
   结果取决于实际的生成先后；Bamboo 在中心这次 `features` 里用纯函数重算 8 个邻居中心写进来的增量，按
   来源中心的固定先后（C 自己最先、邻居按 `(dz,dx)`）合、同格先写的赢，邻居快照是干净的 CARVERS 地形。结果与线程
@@ -499,7 +499,58 @@ WebView2 的渲染进程不算在内。
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`。第二轮 features 接入见
   `docs/worldgen.md`、`docs/worldgen-features-plan.md`、`docs/world-model-design.md` 5.3.1 / 第 16 节）
-- 地物（`ChunkStatus.FEATURES`）阶段：纯函数已按 `docs/worldgen-features-plan.md` 的分类
+- **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
+  （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
+  `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
+  （`crates/mc-bamboo-data/src/generated/mob_spawns.rs`），不手写。已做：每刻重算计数
+  （`createState`）、全局上限 `maxInstancesPerChunk * spawnableChunkCount / 289`、
+  `spawn_mobs` / `spawn_monsters` 规则、`gameTime % 400 == 0` 才刷的持久类别、按玩家的上限
+  （`bamboo.toml` 的 `spawn_per_player_cap`，默认开）、`getRandomPosWithin` 与
+  `WORLD_SURFACE` 高度图、离玩家和出生点 24 格、`ON_GROUND` 的方块/光照/碰撞条件、
+  `Monster.isDarkEnoughToSpawn`、`PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`）、
+  `finalizeSpawn` 与按组生成（牛按 `AgeableMobGroupData` 抽幼年）。刷怪区块列表用岛自己的
+  世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
+  - **只有牛、僵尸、尸壳、骷髅会真的生成**：群系刷怪表里其它条目（羊、猪、鸡、苦力怕、蜘蛛、
+    史莱姆、末影人、女巫、蝙蝠、鱿鱼等）仍占原版权重，抽完组大小后结束这一组。官方会继续
+    尝试生成该物种、消耗后续随机数，并把实际生成的实体计入上限。所以**只有刷怪表里全是已建模
+    物种的情形**逐刻产率和官方一致（`mob-oracle --only natural_spawn`：单条目刷怪表、固定区块
+    顺序、四档难度、日 / 夜 / 雷暴 / 火把、24/32/128 格、全局与局部上限，126 例 504 刻 0 不一致）；
+    真实群系里混着未建模物种时，后续随机序列和产率仍会偏离，等这些生物合进来后自动对齐。
+  - 生成位置的实体阻挡照 `Mob.checkSpawnObstruction` 看所有 `blocksBuilding` 实体（生物、
+    TNT、下落方块和玩家）；`noCollision(AABB)` 只看方块和硬碰撞实体（Bamboo 还没有船、矿车）。
+  - 僵尸和尸壳的 `finalizeSpawn` 已按 `Zombie` / `Husk.finalizeSpawn` 完整移植（跟随距离、左撇子、
+    捡物、组内共享的幼年、鸡骑士判定、破门、盔甲与武器、附魔、万圣节头饰、`handleAttributes`、
+    尸壳的二次捡物判定）。Bamboo 还没有鸡、骆驼尸壳和焦尸：鸡骑士只取数不生成，尸壳 10% 的
+    骆驼尸壳 + 焦尸骑手只给长矛、不生成坐骑和骑手，之后的世界随机序列与官方不同。
+  - 未做：下界要塞的 `FORTRESS_ENEMIES`、结构刷怪、刷怪笼、`customSpawners`（猫、流浪商人）、
+    溺尸转化和刷怪增援。
+  - `spawnableChunkCount` 取本岛玩家周围 17×17 方形的并集，不依赖区块加载状态；旁观者由
+    `spectators_generate_chunks` 决定是否计入。官方使用维度级票据追踪器，跨岛与票据尚在
+    交付时可能不同。
+  - 刷怪列表只收已达方块 tick 等级、水平离非旁观玩家不到 128 格的区块，打乱后再检查
+    实体 tick 等级。Bamboo 以坐标顺序收集，官方为哈希顺序；无限超平坦用模拟距离近似票据等级。
+    官方在遍历刷怪区块时穿插雷击；Bamboo 保留既有的雷击/随机刻阶段，雷暴下取数顺序不同。
+  - `doMobSpawning` 为假时整段不跑、一个随机数都不取；官方这时仍会打乱刷怪区块列表。
+- **生成期刷怪（`spawnMobsForChunkGeneration`，本轮接入）**：噪声世界新生成的区块（以及盘上
+  还没到 `SPAWN` 就续跑的区块）在 Director 完工组装时按查询点群系的 `CREATURE` 刷怪表和
+  `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（生成器导出，0.1 / 0.07 / 0.04 / 0.03）刷动物，生物放进
+  区块的实体盒，随区块交付和存盘；超平坦和 `doMobSpawning` 为假时不刷，和官方一样。装饰随机源
+  （循环、选表、组大小、起点、漂移、朝向）与区域随机源（`finalizeSpawn`）分开建，查询点
+  `(minX, 319, minZ)` 的全分辨率群系和 quart 群系分别决定刷怪表和概率。`mob-oracle --only gen_spawn`
+  用官方平原表和公式地形（台阶、水、沙、树叶、草丛，四种光照）比 2000 例：装饰随机源指纹、
+  每头牛的类型、坐标、朝向，以及区域随机源同步时的幼年和左撇子，0 不一致（52 头牛、207 只其它动物）。
+  **已知差异**：
+  - 真正生成的只有牛。鸡、猪、羊、马、驴、羊驼（都用 `Animal.checkAnimalSpawnRules`）只照官方
+    模拟放置、推进装饰随机源，不生成实体，所以牛的落点仍和官方一致；它们的 `finalizeSpawn` 会
+    消耗官方的区域随机源，这一区块之后的牛的幼年 / 花色 / 叫声 / 左撇子可能不同。兔、狼、狐、山羊、
+    犰狳、北极熊、鹦鹉、熊猫、青蛙、海龟、骆驼、哞菇、炽足兽的放置规则还没翻译，抽到时停止这个
+    区块的生成期刷怪（之后的取数没法对齐）。这些生物合进来后在 `natural_gen.rs` 的放置表里接上。
+  - 刷怪在世界线程的完工组装里跑，不在计算池的 `spawn` 阶段：那一刻计算线程还拿不到最终方块
+    和光照。每个区块平均只取一两个随机数。
+  - 中心区块外的格子按空气、无光照数据读（官方 `spawn` 只要求邻居到 `biomes`）；群系按纯函数
+    重算，没有读区块里存的群系，R 树 `lastResult` 的平局可能和官方批量结果不同。对拍夹具用固定
+    群系，查询点位置（八角插值、quart y 夹进区块高度）只有单元测试，没有和官方真实世界对拍。
+  - 生成的实体 UUID 由世界种子和区块坐标派生（官方实体随机源不带种子）。- 地物（`ChunkStatus.FEATURES`）阶段：纯函数已按 `docs/worldgen-features-plan.md` 的分类
   逐类移植，接入游戏流水线由流水线分支负责。按 5.2 的分类，非植被里已按官方 26.3
   移植并对拍 0 不一致的有 `ore`（流水线里程碑）、`disk`、`underwater_magma`、
   `spring_feature`，以及洞穴和冰雪类的 `large_dripstone`、`speleothem_cluster`

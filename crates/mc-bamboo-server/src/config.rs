@@ -101,6 +101,12 @@ pub struct ServerConfig {
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
     pub chunk_worker_threads: usize,
+    /// 自然刷怪按玩家算上限（`bamboo.toml` 的 `spawn_per_player_cap`，默认开）；
+    /// 关掉只剩官方的全局上限。
+    ///
+    /// Per-player natural spawn caps (`spawn_per_player_cap` in `bamboo.toml`, on by
+    /// default); off keeps only the vanilla global cap.
+    pub spawn_per_player_cap: bool,
     /// Director 信箱每刻交付/收回区块的个数上限，0 表示不限。
     pub mail_budget: MailBudget,
     /// 岛的 tick 线程数（`bamboo.toml` 的 `island_threads`）：0 = 齐步、内联（精确模式，
@@ -186,6 +192,7 @@ impl Default for ServerConfig {
             entity_threads: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
+            spawn_per_player_cap: true,
             mail_budget: MailBudget::default(),
             island_threads: mc_bamboo_game::default_island_threads(),
             islands: mc_bamboo_game::default_islands(),

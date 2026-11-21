@@ -145,6 +145,7 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 | `auth_read_timeout_seconds` | 整数（秒） | `5` | 等 session server 回下一段字节的时限 |
 | `entity_threads` | 整数 | `0` | 实体并行线程数（实验）。0 = 精确模式，≥ 1 = 性能模式 |
 | `chunk_worker_threads` | 整数 | `0` | 区块计算池的线程数：区块的解析、生成和存盘序列化放到多少条常驻后台线程上做。0 = 在世界线程上内联做 |
+| `spawn_per_player_cap` | 布尔 | `true` | 自然刷怪按玩家算上限：每名玩家附近的同类生物不超过官方 `maxInstancesPerChunk`。`false` 只剩官方的全局上限 `maxInstancesPerChunk * 刷怪区块数 / 289` |
 | `deliveries_per_tick` | 整数 | `64` | Director 信箱每刻最多交付多少个区块；0 表示不限 |
 | `reclaims_per_tick` | 整数 | `64` | Director 信箱每刻最多收回多少个区块；0 表示不限 |
 | `island_threads` | 整数 | 逻辑核数的一半，夹在 2 到 8 之间 | 岛的 tick 线程数。0 = 齐步（精确模式，岛在世界线程上内联跑，和官方逐位一致）；≥ 1 = 分离（岛的一刻在 tick 线程上跑，和主控并行，区块交付晚一刻）。缺省值在第一次启动时按这台机器算好写进文件。见下面「岛的 tick 线程」 |

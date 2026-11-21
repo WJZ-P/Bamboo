@@ -55,6 +55,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "biomes.rs", &biomes_file(&data.biomes))?;
+    write_file(output_dir, "mob_spawns.rs", &mob_spawns_file(data)?)?;
     write_file(output_dir, "version.rs", &version_file(data))?;
     write_file(output_dir, "packets.rs", &packets_file(data))?;
     write_file(output_dir, "blocks.rs", &blocks)?;
@@ -774,6 +775,7 @@ pub mod items;
 pub mod jukebox_songs;
 pub mod light;
 pub mod loot;
+pub mod mob_spawns;
 pub mod packets;
 pub mod potions;
 pub mod recipes;
@@ -829,6 +831,178 @@ fn biomes_file(biomes: &[BiomeClimateFact]) -> String {
     }
     let _ = writeln!(out, "];");
     out
+}
+
+/// `MobCategory` 的照抄顺序，和 `mc-bamboo-data` 的 `MobCategory` 一一对应。
+const MOB_CATEGORY_ORDER: [&str; 8] = [
+    "monster",
+    "creature",
+    "ambient",
+    "axolotls",
+    "underground_water_creature",
+    "water_creature",
+    "water_ambient",
+    "misc",
+];
+
+/// 自然刷怪的上限表和每个群系的加权刷怪表，实体类型按注册表 ID 写死。
+///
+/// The natural-spawn caps and per-biome weighted spawn lists, with entity types
+/// resolved to registry ids.
+fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
+    let facts = &data.mob_spawns;
+    let names: Vec<&str> = facts.categories.iter().map(|c| c.name.as_str()).collect();
+    if names != MOB_CATEGORY_ORDER {
+        return Err(format!(
+            "MobCategory 的顺序变了: {names:?}，期望 {MOB_CATEGORY_ORDER:?}"
+        ));
+    }
+    let entity_names = registry_entries(data, ENTITY_TYPE_REGISTRY).unwrap_or(&[]);
+    let entity_id = |name: &str| -> Result<i32, String> {
+        entity_names
+            .iter()
+            .position(|entry| entry == name)
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or_else(|| format!("群里刷怪表引用了未知实体 {name}"))
+    };
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一个 `MobCategory` 的常量，下标和 `MobCategory` 的判别值一致。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobCategoryDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// `getMaxInstancesPerChunk()`。");
+    let _ = writeln!(out, "    pub max_instances: i32,");
+    let _ = writeln!(out, "    /// `isFriendly()`。");
+    let _ = writeln!(out, "    pub friendly: bool,");
+    let _ = writeln!(out, "    /// `isPersistent()`。");
+    let _ = writeln!(out, "    pub persistent: bool,");
+    let _ = writeln!(out, "    /// `getDespawnDistance()`。");
+    let _ = writeln!(out, "    pub despawn_distance: i32,");
+    let _ = writeln!(out, "    /// `getNoDespawnDistance()`。");
+    let _ = writeln!(out, "    pub no_despawn_distance: i32,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// `MobCategory.values()`，顺序就是官方的声明顺序。");
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static MOB_CATEGORIES: &[MobCategoryDef] = &[");
+    for category in &facts.categories {
+        let _ = writeln!(
+            out,
+            "    MobCategoryDef {{ name: {:?}, max_instances: {}, friendly: {}, persistent: {}, despawn_distance: {}, no_despawn_distance: {} }},",
+            category.name,
+            category.max,
+            category.friendly,
+            category.persistent,
+            category.despawn_distance,
+            category.no_despawn_distance
+        );
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+
+    let _ = writeln!(
+        out,
+        "/// 加权刷怪表里的一项（`MobSpawnSettings.SpawnerData` 加权重）。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobSpawnerDef {{");
+    let _ = writeln!(out, "    /// `minecraft:entity_type` 的注册表 ID。");
+    let _ = writeln!(out, "    pub entity_type: i32,");
+    let _ = writeln!(out, "    pub weight: i32,");
+    let _ = writeln!(out, "    /// `SpawnerData.count()` 的下界。");
+    let _ = writeln!(out, "    pub min: i32,");
+    let _ = writeln!(out, "    /// `SpawnerData.count()` 的上界。");
+    let _ = writeln!(out, "    pub max: i32,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 一个类别下的加权刷怪表。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobCategorySpawns {{");
+    let _ = writeln!(out, "    /// `MobCategory` 的下标。");
+    let _ = writeln!(out, "    pub category: u8,");
+    let _ = writeln!(out, "    pub entries: &'static [MobSpawnerDef],");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// 一个实体的刷怪代价（`MobSpawnSettings.MobSpawnCost`）。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobSpawnCostDef {{");
+    let _ = writeln!(out, "    pub entity_type: i32,");
+    let _ = writeln!(out, "    pub charge: f64,");
+    let _ = writeln!(out, "    pub energy_budget: f64,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 一个群系的刷怪设置，按群系注册名排序。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct BiomeMobSpawns {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub categories: &'static [MobCategorySpawns],");
+    let _ = writeln!(out, "    pub costs: &'static [MobSpawnCostDef],");
+    let _ = writeln!(
+        out,
+        "    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层）。"
+    );
+    let _ = writeln!(out, "    pub creature_spawn_probability: f32,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// 每个群系的刷怪设置。没有条目的群系不在这里，查不到就是空表。"
+    );
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[");
+    for (biome, settings) in &facts.biomes {
+        let _ = writeln!(out, "    BiomeMobSpawns {{");
+        let _ = writeln!(out, "        name: {biome:?},");
+        let _ = writeln!(out, "        categories: &[");
+        for category in &settings.categories {
+            let index = MOB_CATEGORY_ORDER
+                .iter()
+                .position(|name| *name == category.category)
+                .ok_or_else(|| format!("未知 MobCategory {}", category.category))?;
+            let _ = writeln!(out, "            MobCategorySpawns {{");
+            let _ = writeln!(out, "                category: {index},");
+            let _ = writeln!(out, "                entries: &[");
+            for entry in &category.entries {
+                let _ = writeln!(
+                    out,
+                    "                    MobSpawnerDef {{ entity_type: {}, weight: {}, min: {}, max: {} }},",
+                    entity_id(&entry.entity_type)?,
+                    entry.weight,
+                    entry.min,
+                    entry.max
+                );
+            }
+            let _ = writeln!(out, "                ],");
+            let _ = writeln!(out, "            }},");
+        }
+        let _ = writeln!(out, "        ],");
+        let _ = writeln!(out, "        costs: &[");
+        for cost in &settings.costs {
+            let _ = writeln!(
+                out,
+                "            MobSpawnCostDef {{ entity_type: {}, charge: {:?}, energy_budget: {:?} }},",
+                entity_id(&cost.entity_type)?,
+                cost.charge,
+                cost.energy_budget
+            );
+        }
+        let _ = writeln!(out, "        ],");
+        let _ = writeln!(
+            out,
+            "        creature_spawn_probability: f32::from_bits({:#010x}),",
+            settings.creature_spawn_probability
+        );
+        let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];");
+    Ok(out)
 }
 
 fn version_file(data: &VersionData) -> String {
