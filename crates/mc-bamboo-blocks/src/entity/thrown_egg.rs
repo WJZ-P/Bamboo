@@ -527,6 +527,39 @@ fn fudge_from_zero_size(view: &dyn BlockView, entity: &Entity) -> Option<Vec3> {
         .map(|free| free.add(Vec3::new(0.0, -0.0 / 2.0 + 1.0e-6, 0.0)))
 }
 
+/// `Entity.fudgePositionAfterSizeChange(previousDimensions)`：实体已经换成新尺寸，
+/// 在以旧中心为中心、边长为尺寸增量的盒子里找离旧中心最近的空位；找不到、而且宽高都
+/// 变大了，就按旧高度再找一次。返回新的脚底位置。
+///
+/// `Entity.fudgePositionAfterSizeChange(previousDimensions)` for an entity already at its
+/// new size: the free spot nearest the old centre inside a box whose sides are the size
+/// increase, then a second try at the old height when both dimensions grew. Returns the
+/// new feet position.
+pub(crate) fn fudge_after_size_change(
+    view: &dyn BlockView,
+    entity: &Entity,
+    (old_width, old_height): (f32, f32),
+) -> Option<Vec3> {
+    let (width, height) = entity.dimensions;
+    let old_half = f64::from(old_height) / 2.0;
+    let center = entity.position.add(Vec3::new(0.0, old_half, 0.0));
+    let width_delta = f64::from((width - old_width).max(0.0)) + 1.0e-6;
+    let height_delta = f64::from((height - old_height).max(0.0)) + 1.0e-6;
+    let context = entity.collision_context();
+    let (sx, sy) = (f64::from(width), f64::from(height));
+    let allowed = of_size(center, width_delta, height_delta, width_delta);
+    if let Some(free) = find_free_position(view, context, allowed, center, [sx, sy, sx]) {
+        return Some(free.add(Vec3::new(0.0, -sy / 2.0, 0.0)));
+    }
+    if width > old_width && height > old_height {
+        let allowed = of_size(center, width_delta, 1.0e-6, width_delta);
+        let old_sy = f64::from(old_height);
+        return find_free_position(view, context, allowed, center, [sx, old_sy, sx])
+            .map(|free| free.add(Vec3::new(0.0, -old_half + 1.0e-6, 0.0)));
+    }
+    None
+}
+
 /// `AABB.ofSize`。
 fn of_size(center: Vec3, x: f64, y: f64, z: f64) -> Aabb {
     Aabb::new(

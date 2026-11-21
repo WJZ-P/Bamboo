@@ -264,7 +264,7 @@ pub(crate) fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
 }
 
 /// `getEyeY()`。
-fn eye_y(me: &Entity, mob: &Mob) -> f64 {
+pub(crate) fn eye_y(me: &Entity, mob: &Mob) -> f64 {
     me.position.y + f64::from(mob.eye_height)
 }
 
@@ -469,6 +469,9 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
+    if mob.mob_type == super::MobType::Goat {
+        return super::goat::voice(mob, voice);
+    }
     if mob.mob_type.is_equine() {
         return super::equine::voice(mob, voice);
     }
@@ -648,6 +651,7 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 
 fn ambient_sound(mob: &Mob) -> &'static str {
     match mob.mob_type {
+        super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
         _ => mob
@@ -926,6 +930,14 @@ pub(crate) fn set_age(me: &mut Entity, mob: &mut Mob, age: i32) {
         let (width, height, eye) = mob.mob_type.dimensions(age < 0);
         me.dimensions = (width, height);
         mob.eye_height = eye;
+        if mob.mob_type == super::MobType::Goat {
+            // 山羊的尺寸还看姿势；`ageBoundaryReached` 换攻击力。
+            // Goat size also depends on the pose; `ageBoundaryReached` swaps the attack damage.
+            let (width, height, eye) = super::goat::pose_dimensions(age < 0, mob.goat.long_jumping);
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
+            super::goat::age_boundary_reached(mob);
+        }
     }
 }
 
@@ -1014,6 +1026,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // Brain-driven mobs run their brain before `super.customServerAiStep`.
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Goat {
+        super::goat::custom_server_ai_step(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1135,6 +1150,9 @@ fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
 fn max_head_y_rot(mob: &Mob) -> f32 {
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::max_head_y_rot(mob)
+    } else if mob.mob_type == super::MobType::Goat {
+        // `Goat.getMaxHeadYRot`。
+        15.0
     } else {
         MAX_HEAD_Y_ROT as f32
     }
@@ -1198,14 +1216,19 @@ fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
     if f64::from(here) == 1.0 { below } else { here }
 }
 
+/// `LivingEntity.getJumpBoostPower()`：每级 +0.1。
+///
+/// `LivingEntity.getJumpBoostPower()`: +0.1 per level.
+pub(crate) fn jump_boost_power(mob: &Mob) -> f32 {
+    mob.effects
+        .amplifier(mob_effect::JUMP_BOOST)
+        .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0))
+}
+
 /// `jumpFromGround`。
 fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
-    // `LivingEntity.getJumpBoostPower()`：每级 +0.1。
-    let boost = mob
-        .effects
-        .amplifier(mob_effect::JUMP_BOOST)
-        .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
+    let boost = jump_boost_power(mob);
     let is_rabbit = mob.mob_type == super::MobType::Rabbit;
     let multiplier = if is_rabbit {
         super::rabbit::jump_power_multiplier(me, mob)
@@ -1288,6 +1311,12 @@ fn travel_in_air(
         }
         None => movement.y - effective_gravity(me, mob),
     };
+    // `shouldDiscardFriction()`：长跳途中速度原样保留。
+    // `shouldDiscardFriction()`: a long jump keeps its velocity untouched.
+    if mob.discard_friction {
+        me.delta = Vec3::new(movement.x, y, movement.z);
+        return;
+    }
     let air_drag = mob.attributes.value(attribute::AIR_DRAG_MODIFIER) as f32;
     let horizontal_air = modified_friction(0.91, air_drag);
     let horizontal = block_friction * horizontal_air;
@@ -2059,6 +2088,9 @@ pub(crate) fn apply_breed(
             ));
         }
         super::MobType::Sheep => {}
+        // 犰狳和山羊的 `getBreedOffspring` 不取父亲的随机源。
+        // Armadillo and goat `getBreedOffspring` draw nothing from the parent's random.
+        super::MobType::Armadillo | super::MobType::Goat => {}
         _ if equine => {}
         _ => {
             // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
@@ -2068,12 +2100,14 @@ pub(crate) fn apply_breed(
     }
     let mut child_variant = parent.variant;
     let mut partner_wool = parent.wool;
+    let mut partner_screaming = false;
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
             if !from_father {
                 child_variant = mob.variant;
             }
             partner_wool = mob.wool;
+            partner_screaming = mob.goat.screaming;
             mob.in_love = 0;
             set_age(me, mob, 6000);
         });
@@ -2095,6 +2129,10 @@ pub(crate) fn apply_breed(
         0
     };
     let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
+    if kind == super::MobType::Goat {
+        let father_screaming = me.kind.mob().is_some_and(|mob| mob.goat.screaming);
+        super::goat::breed_offspring(&mut calf, father_screaming, partner_screaming, world);
+    }
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;

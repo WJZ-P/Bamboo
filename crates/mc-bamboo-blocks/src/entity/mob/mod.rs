@@ -25,6 +25,7 @@ pub mod equipment;
 pub mod fox;
 pub mod fox_goals;
 pub mod goals;
+pub mod goat;
 pub mod interact;
 pub mod living;
 pub mod motion;
@@ -80,6 +81,7 @@ pub enum MobType {
     Mule,
     Llama,
     Armadillo,
+    Goat,
 }
 
 impl MobType {
@@ -102,6 +104,7 @@ impl MobType {
             Self::Mule => ids::MULE,
             Self::Llama => ids::LLAMA,
             Self::Armadillo => ids::ARMADILLO,
+            Self::Goat => ids::GOAT,
         }
     }
 
@@ -123,6 +126,7 @@ impl MobType {
             Self::Mule => "minecraft:mule",
             Self::Llama => "minecraft:llama",
             Self::Armadillo => "minecraft:armadillo",
+            Self::Goat => "minecraft:goat",
         }
     }
 
@@ -134,6 +138,7 @@ impl MobType {
             Self::Fox => Some(item_tags::FOX_FOOD),
             Self::Wolf => Some(item_tags::WOLF_FOOD),
             Self::Armadillo => Some(item_tags::ARMADILLO_FOOD),
+            Self::Goat => Some(item_tags::GOAT_FOOD),
             _ => None,
         }
     }
@@ -167,6 +172,7 @@ impl MobType {
             Self::Mule,
             Self::Llama,
             Self::Armadillo,
+            Self::Goat,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -195,6 +201,7 @@ impl MobType {
             }
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Armadillo, baby) => armadillo::dimensions(baby),
+            (Self::Goat, baby) => goat::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
@@ -250,6 +257,7 @@ impl MobType {
             Self::Mule => "minecraft:entities/mule",
             Self::Llama => "minecraft:entities/llama",
             Self::Armadillo => "minecraft:entities/armadillo",
+            Self::Goat => "minecraft:entities/goat",
         }
     }
 
@@ -299,6 +307,7 @@ impl MobType {
             Self::Mule => Some("minecraft:entity.mule.ambient"),
             Self::Llama => Some("minecraft:entity.llama.ambient"),
             Self::Armadillo => Some("minecraft:entity.armadillo.ambient"),
+            Self::Goat => Some("minecraft:entity.goat.ambient"),
         }
     }
 
@@ -317,6 +326,7 @@ impl MobType {
             Self::Mule => Some("minecraft:entity.mule.hurt"),
             Self::Llama => Some("minecraft:entity.llama.hurt"),
             Self::Armadillo => Some("minecraft:entity.armadillo.hurt"),
+            Self::Goat => Some("minecraft:entity.goat.hurt"),
         }
     }
 
@@ -335,6 +345,7 @@ impl MobType {
             Self::Mule => Some("minecraft:entity.mule.death"),
             Self::Llama => Some("minecraft:entity.llama.death"),
             Self::Armadillo => Some("minecraft:entity.armadillo.death"),
+            Self::Goat => Some("minecraft:entity.goat.death"),
         }
     }
 
@@ -351,6 +362,7 @@ impl MobType {
             Self::Mule => Some("minecraft:entity.horse.step"),
             Self::Llama => Some("minecraft:entity.llama.step"),
             Self::Armadillo => Some("minecraft:entity.armadillo.step"),
+            Self::Goat => Some("minecraft:entity.goat.step"),
         }
     }
 
@@ -373,6 +385,7 @@ impl MobType {
             Self::Mule => items::MULE_SPAWN_EGG,
             Self::Llama => items::LLAMA_SPAWN_EGG,
             Self::Armadillo => items::ARMADILLO_SPAWN_EGG,
+            Self::Goat => items::GOAT_SPAWN_EGG,
         }
     }
 
@@ -394,6 +407,7 @@ impl MobType {
             Self::Mule => "entity.minecraft.mule",
             Self::Llama => "entity.minecraft.llama",
             Self::Armadillo => "entity.minecraft.armadillo",
+            Self::Goat => "entity.minecraft.goat",
         }
     }
 
@@ -423,6 +437,7 @@ impl MobType {
             Self::Mule,
             Self::Llama,
             Self::Armadillo,
+            Self::Goat,
         ]
         .into_iter()
         .find(|kind| kind.entity_type() == entity_type)
@@ -1251,6 +1266,14 @@ pub struct Mob {
     ///
     /// The armadillo state machine and scute timer.
     pub armadillo: armadillo::Armadillo,
+    /// 山羊的同步数据和长跳姿势。
+    ///
+    /// The goat synced data and long-jump pose.
+    pub goat: goat::Goat,
+    /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
+    ///
+    /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
+    pub discard_friction: bool,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -1318,6 +1341,7 @@ impl Mob {
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
             MobType::Armadillo => armadillo::attributes(),
+            MobType::Goat => goat::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -1332,7 +1356,7 @@ impl Mob {
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
-            MobType::Armadillo => GoalSelector::default(),
+            MobType::Armadillo | MobType::Goat => GoalSelector::default(),
             kind => equine::goals(kind, &mut navigation),
         };
         let target_goals = match mob_type {
@@ -1343,7 +1367,8 @@ impl Mob {
             | MobType::Pig
             | MobType::Sheep
             | MobType::Chicken
-            | MobType::Armadillo => GoalSelector::default(),
+            | MobType::Armadillo
+            | MobType::Goat => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             kind => equine::targets(kind),
@@ -1475,12 +1500,22 @@ impl Mob {
             pending_breed: None,
             brain: new_brain(mob_type),
             armadillo: armadillo::Armadillo::default(),
+            goat: goat::Goat::default(),
+            discard_friction: false,
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
         };
         if mob_type == MobType::Fox {
             fox::configure(&mut mob);
+        }
+        if mob_type == MobType::Goat {
+            // `Goat` 构造函数：能浮水，细雪和细雪上方都不走。
+            // The `Goat` constructor: floats, and powder snow is off limits.
+            mob.navigation.flags.can_float = true;
+            mob.malus.set(mc_bamboo_data::PathType::PowderSnow, -1.0);
+            mob.malus
+                .set(mc_bamboo_data::PathType::OnTopOfPowderSnow, -1.0);
         }
         if mob_type == MobType::Armadillo {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
@@ -1540,6 +1575,10 @@ impl Mob {
 
     /// （宽，高）。
     pub fn dimensions(&self) -> (f32, f32) {
+        if self.mob_type == MobType::Goat {
+            let (width, height, _) = goat::pose_dimensions(self.is_baby(), self.goat.long_jumping);
+            return (width, height);
+        }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)
     }
@@ -1637,6 +1676,10 @@ pub struct MobPublic {
     ///
     /// The network id of `Armadillo.ARMADILLO_STATE`.
     pub armadillo_state: i32,
+    /// 山羊的三个同步布尔值和长跳姿势。
+    ///
+    /// The goat synced booleans and its long-jump pose.
+    pub goat: goat::Goat,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1704,6 +1747,7 @@ impl MobPublic {
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
             armadillo_state: mob.armadillo.state.id(),
+            goat: mob.goat,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,
@@ -1728,6 +1772,10 @@ impl MobPublic {
     }
 
     pub fn dimensions(&self) -> (f32, f32) {
+        if self.mob_type == MobType::Goat {
+            let (width, height, _) = goat::pose_dimensions(self.baby, self.goat.long_jumping);
+            return (width, height);
+        }
         let (width, height, _) = self.mob_type.dimensions(self.baby);
         (width, height)
     }
@@ -1745,6 +1793,7 @@ impl MobPublic {
 pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
     match kind {
         MobType::Armadillo => Some(Box::new(armadillo::brain())),
+        MobType::Goat => Some(Box::new(goat::brain())),
         _ => None,
     }
 }

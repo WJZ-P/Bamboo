@@ -61,11 +61,11 @@ struct Placement {
     kind: Option<MobType>,
 }
 
-/// 用 `Animal.checkAnimalSpawnRules` 注册的七种动物，加上兔子、狼、狐狸、犰狳各自的规则。
-/// 其余种类（山羊、北极熊……）的规则还没翻译，遇到时返回 `None`。
+/// 用 `Animal.checkAnimalSpawnRules` 注册的七种动物，加上兔子、狼、狐狸、犰狳、山羊各自的规则。
+/// 其余种类（北极熊……）的规则还没翻译，遇到时返回 `None`。
 ///
 /// The seven animals registered with `Animal.checkAnimalSpawnRules`, plus the rabbit,
-/// wolf, fox and armadillo rules. Other kinds (goat, polar bear, ...) are not yet translated and
+/// wolf, fox, armadillo and goat rules. Other kinds (polar bear, ...) are not yet translated and
 /// give `None`.
 fn placement(entity: i32) -> Option<Placement> {
     let animal = [
@@ -84,6 +84,7 @@ fn placement(entity: i32) -> Option<Placement> {
         entity_type::RABBIT => (true, block_tags::RABBITS_SPAWNABLE_ON),
         entity_type::WOLF => (true, block_tags::WOLVES_SPAWNABLE_ON),
         entity_type::ARMADILLO => (true, block_tags::ARMADILLO_SPAWNABLE_ON),
+        entity_type::GOAT => (true, block_tags::GOATS_SPAWNABLE_ON),
         entity_type::FOX => (false, block_tags::FOXES_SPAWNABLE_ON),
         _ => return None,
     };

@@ -105,6 +105,12 @@ impl Node {
     }
 
     pub(super) fn seed_gates(&mut self, base: i64, index: &mut i64) {
+        // 长跳的角度洗牌和闸门一样不带种子，按同一个序号接着播种。
+        // The long-jump angle shuffle is unseeded like the gates and takes the next index.
+        if let Kind::Goat(super::super::goat::Behavior::LongJump(jump)) = &mut self.kind {
+            jump.angle_random = JavaRandom::new(super::shuffle_seed(base, *index));
+            *index += 1;
+        }
         if let Kind::Gate(gate) = &mut self.kind {
             gate.random = JavaRandom::new(super::shuffle_seed(base, *index));
             *index += 1;

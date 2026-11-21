@@ -102,6 +102,11 @@ pub fn interact(
     {
         return outcome;
     }
+    if mob.mob_type == MobType::Goat
+        && let Some(outcome) = super::goat::interact(mob, req)
+    {
+        return outcome;
+    }
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }

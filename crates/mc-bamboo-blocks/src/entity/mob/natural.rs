@@ -630,6 +630,9 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         // `Armadillo.checkArmadilloSpawnRules`。
         // `Armadillo.checkArmadilloSpawnRules`.
         MobType::Armadillo => bright_spawn_rules(world, pos, block_tags::ARMADILLO_SPAWNABLE_ON),
+        // `Goat.checkGoatSpawnRules`。
+        // `Goat.checkGoatSpawnRules`.
+        MobType::Goat => bright_spawn_rules(world, pos, block_tags::GOATS_SPAWNABLE_ON),
         MobType::Cow
         | MobType::Pig
         | MobType::Sheep

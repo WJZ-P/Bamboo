@@ -113,6 +113,10 @@ pub enum Pose {
     Swimming = 3,
     SpinAttack = 4,
     Crouching = 5,
+    /// 山羊长跳途中。
+    ///
+    /// A goat in mid long jump.
+    LongJumping = 6,
     Dying = 7,
 }
 
@@ -205,6 +209,13 @@ pub enum EntityData {
     ///
     /// `Armadillo.ARMADILLO_STATE`: the state'"'"'s network id (its own serializer, a VarInt).
     ArmadilloState(i32),
+    /// `Goat` 的三个 BOOLEAN：尖叫、左角、右角（缺省假、真、真）。
+    ///
+    /// The three `Goat` booleans: screaming, left horn and right horn (false, true and
+    /// true by default).
+    GoatScreaming(bool),
+    GoatLeftHorn(bool),
+    GoatRightHorn(bool),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -322,6 +333,9 @@ impl EntityData {
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
             Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
+            Self::GoatScreaming(_) => mc_bamboo_data::entity_types::GOAT_SCREAMING,
+            Self::GoatLeftHorn(_) => mc_bamboo_data::entity_types::GOAT_LEFT_HORN,
+            Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
         }
     }
 
@@ -393,7 +407,11 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
             }
-            Self::ArrowInGround(value) | Self::HorseChest(value) => {
+            Self::ArrowInGround(value)
+            | Self::HorseChest(value)
+            | Self::GoatScreaming(value)
+            | Self::GoatLeftHorn(value)
+            | Self::GoatRightHorn(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 out.push(u8::from(*value));
             }

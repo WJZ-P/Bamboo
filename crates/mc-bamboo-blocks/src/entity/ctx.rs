@@ -187,7 +187,6 @@ pub trait BlockView {
         0.0
     }
 
-    /// `level.random.nextBoolean()`，并行视图同上。
     /// `level.random.nextInt(bound)`：大脑行为的时长、偶尔看人的间隔用它。并行视图同上给 0。
     ///
     /// `level.random.nextInt(bound)`, for brain behaviour durations and look intervals;
@@ -196,6 +195,7 @@ pub trait BlockView {
         0
     }
 
+    /// `level.random.nextBoolean()`，并行视图同上。
     fn level_random_boolean(&self) -> bool {
         false
     }
@@ -717,6 +717,29 @@ pub enum Command {
         memory: super::mob::brain::memory::MemoryType,
         value: Option<super::mob::brain::memory::MemoryValue>,
     },
+    /// `RamTarget.tick` 撞到活体：`hurtServer(noAggroMobAttack)`，然后不管打没打中都
+    /// `knockback(strength, dx, dz)`。
+    ///
+    /// `RamTarget.tick` hitting a living entity: `hurtServer(noAggroMobAttack)`, then
+    /// `knockback(strength, dx, dz)` whether or not the hit landed.
+    RamHit {
+        target: EntityUid,
+        player: bool,
+        source: super::mob::DamageSource,
+        amount: f32,
+        strength: f64,
+        dx: f64,
+        dz: f64,
+    },
+    /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` 加 `addFreshEntity`：
+    /// 山羊掉角，速度由调用方给。
+    ///
+    /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` plus `addFreshEntity`: a goat
+    /// dropping a horn with the caller's velocity.
+    DropItemWithDelta {
+        stack: ItemStack,
+        delta: Vec3,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -857,6 +880,26 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                     }
                 });
             });
+        }
+        Command::RamHit {
+            target,
+            player,
+            source,
+            amount,
+            strength,
+            dx,
+            dz,
+        } => super::mob::goat::apply_ram_hit(
+            me,
+            world,
+            target,
+            player,
+            source,
+            amount,
+            (strength, dx, dz),
+        ),
+        Command::DropItemWithDelta { stack, delta } => {
+            world.spawn_entity(Entity::ground_item_with_delta(me.position, stack, delta));
         }
         Command::DropEntityLoot(request) => {
             let origin = request.origin;

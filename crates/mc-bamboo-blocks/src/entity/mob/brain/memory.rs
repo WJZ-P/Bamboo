@@ -45,13 +45,14 @@ pub enum MemoryType {
     LongJumpMidJump,
     RamCooldownTicks,
     RamTarget,
+    NearestVisibleAttackablePlayers,
 }
 
 impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 23;
+    pub const COUNT: usize = 24;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -80,6 +81,7 @@ impl MemoryType {
         Self::LongJumpMidJump,
         Self::RamCooldownTicks,
         Self::RamTarget,
+        Self::NearestVisibleAttackablePlayers,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -110,6 +112,7 @@ impl MemoryType {
             Self::LongJumpMidJump => "long_jump_mid_jump",
             Self::RamCooldownTicks => "ram_cooldown_ticks",
             Self::RamTarget => "ram_target",
+            Self::NearestVisibleAttackablePlayers => "nearest_visible_targetable_players",
         }
     }
 

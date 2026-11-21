@@ -45,6 +45,7 @@ use super::Mob;
 use crate::entity::{Entity, ctx::EntityCtx};
 
 pub use behavior::Cx;
+pub(in crate::entity::mob) use behaviors::current_position;
 
 /// 官方 `Activity` 里 Bamboo 用到的那几个。
 ///

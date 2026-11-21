@@ -355,7 +355,12 @@ pub(super) fn finalize_generated(
 ) {
     if matches!(
         kind,
-        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken | MobType::Armadillo
+        MobType::Cow
+            | MobType::Pig
+            | MobType::Sheep
+            | MobType::Chicken
+            | MobType::Armadillo
+            | MobType::Goat
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
     } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
@@ -382,7 +387,10 @@ pub(super) fn finalize_cow(
     let variant = cow_variant_for_biome(biome);
     // 犰狳没有自己的 `finalizeSpawn`，直接是 `AgeableMob` 那层。
     // Armadillos have no `finalizeSpawn` of their own and go straight to `AgeableMob`.
-    let plain = kind == MobType::Armadillo;
+    let plain = matches!(kind, MobType::Armadillo | MobType::Goat);
+    if kind == MobType::Goat {
+        entity.with_mob(|_, mob| super::goat::finalize_spawn(mob, random));
+    }
     if kind != MobType::Sheep && !plain {
         // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.

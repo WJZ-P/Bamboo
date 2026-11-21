@@ -30,6 +30,10 @@ pub enum SensorKind {
     NearestAdult,
     /// `MobSensor(5, Armadillo::isScaredBy, Armadillo::canStayRolledUp, DANGER_DETECTED_RECENTLY, 80)`。
     ArmadilloScareDetected,
+    /// `PlayerSensor`。
+    NearestPlayers,
+    /// `NearestItemSensor`。
+    NearestItems,
 }
 
 impl SensorKind {
@@ -59,6 +63,13 @@ impl SensorKind {
                 MemoryType::NearestVisibleLivingEntities,
             ],
             Self::ArmadilloScareDetected => &[MemoryType::NearestLivingEntities],
+            Self::NearestPlayers => &[
+                MemoryType::NearestPlayers,
+                MemoryType::NearestVisiblePlayer,
+                MemoryType::NearestVisibleAttackablePlayer,
+                MemoryType::NearestVisibleAttackablePlayers,
+            ],
+            Self::NearestItems => &[MemoryType::NearestVisibleWantedItem],
         }
     }
 }
@@ -97,6 +108,8 @@ impl Sensor {
             SensorKind::ArmadilloScareDetected => {
                 super::super::armadillo::sense_scare(cx);
             }
+            SensorKind::NearestPlayers => sense_players(cx),
+            SensorKind::NearestItems => sense_items(cx),
         }
     }
 }
@@ -117,6 +130,10 @@ pub struct LivingView {
     /// `isAlive()`: not removed and health above 0.
     pub alive: bool,
     pub spectator: bool,
+    /// 创造模式的玩家（`canBeSeenAsEnemy` 为假）。
+    ///
+    /// A creative player, for whom `canBeSeenAsEnemy` is false.
+    pub creative: bool,
     pub sprinting: bool,
     pub baby: bool,
     pub in_love: bool,
@@ -182,6 +199,7 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
         ),
         alive: player.alive,
         spectator: player.spectator,
+        creative: player.creative,
         sprinting: player.sprinting,
         baby: false,
         in_love: false,
@@ -209,6 +227,7 @@ fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) 
         ),
         alive: !removed && mob.is_alive(),
         spectator: false,
+        creative: false,
         sprinting: false,
         baby: mob.baby,
         in_love: mob.in_love > 0,
@@ -413,5 +432,95 @@ fn sense_nearest_adult(cx: &mut Cx) {
     cx.memories.set_or_erase(
         MemoryType::NearestVisibleAdult,
         adult.map(MemoryValue::Entity),
+    );
+}
+
+/// `PlayerSensor.doTick`：跟随距离内的非旁观玩家按距离排好，再依次筛出看得见的和
+/// 能当敌人的。
+///
+/// `PlayerSensor.doTick`: non-spectator players within the follow range by distance, then
+/// the visible ones and the attackable ones.
+fn sense_players(cx: &mut Cx) {
+    let range = cx.mob.attributes.value(attribute::FOLLOW_RANGE);
+    let position = cx.me.position;
+    let mut players: Vec<LivingView> = Vec::new();
+    cx.ctx.blocks().for_each_player(&mut |player| {
+        let view = player_view(player);
+        if !view.spectator && position.distance_to_sqr(view.position) < range * range {
+            players.push(view);
+        }
+    });
+    players.sort_by(|a, b| {
+        position
+            .distance_to_sqr(a.position)
+            .total_cmp(&position.distance_to_sqr(b.position))
+    });
+    let ids = |list: &[LivingView]| list.iter().map(|view| view.uid).collect::<Vec<_>>();
+    cx.memories.set(
+        MemoryType::NearestPlayers,
+        MemoryValue::Entities(ids(&players)),
+    );
+    players.retain(|view| is_entity_targetable(cx, view));
+    cx.memories.set_or_erase(
+        MemoryType::NearestVisiblePlayer,
+        players.first().map(|view| MemoryValue::Entity(view.uid)),
+    );
+    // `isEntityAttackable`：`forCombat` 多一条 `canAttack`——和平难度不打玩家，创造玩家不算敌人。
+    // `isEntityAttackable`: `forCombat` adds `canAttack` — no players on peaceful, and
+    // creative players are not enemies.
+    let peaceful = cx.ctx.blocks().difficulty() == 0;
+    players.retain(|view| !peaceful && !view.creative);
+    cx.memories.set(
+        MemoryType::NearestVisibleAttackablePlayers,
+        MemoryValue::Entities(ids(&players)),
+    );
+    cx.memories.set_or_erase(
+        MemoryType::NearestVisibleAttackablePlayer,
+        players.first().map(|view| MemoryValue::Entity(view.uid)),
+    );
+}
+
+/// `EntityTypes.ITEM` 的眼高。
+///
+/// The eye height of `EntityTypes.ITEM`.
+const ITEM_EYE_HEIGHT: f32 = 0.2125;
+
+/// `NearestItemSensor.doTick`：32×16×32 里的掉落物按距离排好，取第一个想捡
+/// （`Mob.wantsToPickUp` 缺省恒真）、32 格内、看得见的。
+///
+/// `NearestItemSensor.doTick`: dropped items within 32×16×32 by distance; the first that
+/// is wanted (`Mob.wantsToPickUp` defaults to true), within 32 blocks and in sight.
+fn sense_items(cx: &mut Cx) {
+    let area = cx.me.bounding_box().inflate(32.0, 16.0, 32.0);
+    let position = cx.me.position;
+    let mut items: Vec<(f64, EntityUid, Vec3)> = Vec::new();
+    cx.ctx.for_each_other_in(area, &mut |other| {
+        if matches!(other.kind, KindPublic::Item { .. }) && !other.removed {
+            items.push((
+                position.distance_to_sqr(other.position),
+                other.uid,
+                other.position,
+            ));
+        }
+    });
+    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let eye = Vec3::new(position.x, living::eye_y(cx.me, cx.mob), position.z);
+    let found = items.into_iter().find(|&(distance, _, at)| {
+        if distance >= 32.0 * 32.0 {
+            return false;
+        }
+        // `LivingEntity.hasLineOfSight(Entity)`：不走 `Sensing` 的缓存。
+        // `LivingEntity.hasLineOfSight(Entity)`, which bypasses the `Sensing` cache.
+        let to = Vec3::new(at.x, at.y + f64::from(ITEM_EYE_HEIGHT), at.z);
+        to.distance_to_sqr(eye).sqrt() <= 128.0
+            && cx
+                .ctx
+                .blocks()
+                .clip_collider(eye, to, cx.me.mob_collision_context(cx.mob))
+                .is_none()
+    });
+    cx.memories.set_or_erase(
+        MemoryType::NearestVisibleWantedItem,
+        found.map(|(_, uid, _)| MemoryValue::Entity(uid)),
     );
 }
