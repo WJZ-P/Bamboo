@@ -1335,6 +1335,10 @@ protocol blocks world
 cargo run -p mc-bamboo-vanilla -- generate <server.jar>
 ```
 
+`generated/` 下的注册表由生成器按官方注册顺序（报告里的 `protocol_id`）导出，不要手写或按名字排序：
+`game_event` 等表在 26.3 的官方顺序里 `entity_action` 在 `entity_place` 之后、`resonate_1..15` 在末尾，
+和字典序不同。存档里的振动事件只按名字查注册过的条目，不依赖数字 ID，顺序只影响常量取值。
+
 然后启动 Bamboo，用官方网络代码让三个客户端走一遍进服、移动、建造、聊天和开关箱子，检查收到的每个包。
 区块包里的方块和流体计数、高度图都由官方代码从解出来的方块重算，再和收到的值逐段比较：
 

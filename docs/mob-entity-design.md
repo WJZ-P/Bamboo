@@ -420,6 +420,26 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 与官方一致；`playerJumpPendingScale` / `allowStandSliding` / `getRiddenInput` 是客户端权威的
 AI 内部量，服务端不建模，无玩家可感知差异。没有改动任何马科行为代码。
 
+**与 main 合并（2026-11-21，第十一轮）。** 本轮 `main` 又前进了 19 个提交
+（`ceb0562f` 一带：苦力怕、蜘蛛、洞穴蜘蛛、末影人）。接手时分支上有一个已解决冲突、
+但未 `git add` / 未提交的在途合并；先逐文件核对 7 处冲突（`README.md`、`goals.rs`、
+`interact.rs`、`mod.rs`、`motion.rs`、`MobOracle.java`、`mob_oracle.rs`）都是按 main 结构的
+真并集：马科的 `playStepSound`（保留 `view` / `pos` 形参）、`RunAroundLikeCrazyGoal`、
+`LlamaAttackWolfGoal`、`notRiding` 乘客判断、载具 `passengers` / `start_riding_jump`、
+`MobInteraction` 的 `ride` 与 `damage_held`、骑乘 / 吐口水对拍场景，和 main 的 `Swell` /
+`Enderman*` / `Spider*` 目标、苦力怕 `after_fall`、蜘蛛网不减速、`uses_block_step_sound`
+方块脚步声、敌对生物的场景与存档字段全部共存，没有丢掉任一边。`spawn.rs` 的
+`finalize_spawn_in_group` / `finalize_generated` 按 kind 分派、`natural.rs` 的
+`check_spawn_rules` 按 kind 分支本就自动合并好。`generated/` 用合并后的生成器重新跑
+`extract`（不手合），34 个文件逐字节可复现；`game_event` 注册表因此从旧的字典序换成官方
+`protocol_id` 顺序（`entity_action` 从 15 变 21、`resonate_*` 移到末尾），但全仓只有
+`archive/passive.rs` 的 `by_name` 按名字判存在、丢弃数字 ID，无任何数字 ID 消费方，行为不变。
+补上 `PlayerView` 新增的 `look_direction` / `gaze_disguise` / `yaw` / `pitch` 到马科和蜘蛛的
+测试夹具。`cargo check --workspace --all-targets` 通过；`mob-oracle --only equine`（648 题）、
+`--only zombie_equine`（20 场景 15258 刻）、`--only llama_spit`（2 场景 322 刻）复跑全部
+0 不一致，确认合并没动马科的取数次数和顺序。本轮没有改动任何马科行为代码；剩下的差距仍
+是要动线程模型 / tick 顺序或真实客户端才能收口的部分（见汇报），按规矩停下来不自己定。
+
 其余已知差异见 README「马科的已知限制」。
 
 ---
