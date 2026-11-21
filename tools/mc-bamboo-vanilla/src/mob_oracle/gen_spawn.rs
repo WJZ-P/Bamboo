@@ -60,7 +60,9 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        if self.cases > 0 && (self.farms.len() != 4 || self.equines == 0 || self.others == 0 || self.details == 0) {
+        if self.cases > 0
+            && (self.farms.len() != 4 || self.equines == 0 || self.others == 0 || self.details == 0)
+        {
             return Err(
                 "gen spawn fixtures did not exercise all farm species, equines and unsupported animals"
                     .into(),

@@ -730,7 +730,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `nextInt(6)`、加权表 `nextInt(总权重)`、`count.sample`、离玩家/出生点 24 格、
   `ON_GROUND` 的方块/光照/碰撞条件、`noCollision`、`checkSpawnObstruction`、
   `finalizeSpawn` 与组生成。
-- **刷怪规则**：牛走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
+- **刷怪规则**：牛、猪、羊、鸡和马科走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
   僵尸走 `Monster.checkMonsterSpawnRules`（`isDarkEnoughToSpawn`：天空光 `> nextInt(32)`、
   方块光上限 0、`maxLocalRawBrightness <= nextInt(8)`，再查可生成方块），
   尸壳额外要求 `canSeeSky`。落脚块用生成器导出的状态位 `facts::VALID_SPAWN`（官方
@@ -744,15 +744,16 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   不限制为已加载区块；旁观者仅在 `spectators_generate_chunks` 开启时贡献区块。
 - **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
 - **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
-- **已知差异**：只有牛、猪、羊、鸡、僵尸、尸壳、骷髅会真的生成（猪、羊、鸡 2026-11-20 接入，
-  `mob-oracle --only natural_spawn` 的 `pig_day` / `pig_cold` / `sheep_day` / `chicken_day` /
+- **已知差异**：只有牛、猪、羊、鸡、马、驴、骡、羊驼、僵尸、尸壳、骷髅能走实体生成路径（猪、羊、鸡 2026-11-20 接入，
+  `mob-oracle --only natural_spawn` 的 `pig_temperate` / `pig_day` / `pig_cold` / `sheep_day` / `chicken_day` /
   `chicken_warm` / `chicken_cold` 和 `gen_spawn` 另比花色 / 羊毛颜色和叫声，暖、冷、温带三种
   花色都覆盖到）；表里其它生物被挑中后照常抽组大小，
   然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
   收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
-  生成期刷怪、结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。
+  结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。生成期刷怪已接入牛、猪、羊、鸡和马科；
+  装饰随机源决定放置，区域随机源用于 `finalizeSpawn`，用 `mob-oracle --only gen_spawn` 分别比对。
 - **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
   `MobCategory`，用 7 个固定种子各跑 8 次官方 `WeightedList.getRandom` + `IntProvider.sample`，
   再取一个 `nextInt(1000)` 当随机源指纹；另外把 0..15 交给官方 `Util.shuffle`。
