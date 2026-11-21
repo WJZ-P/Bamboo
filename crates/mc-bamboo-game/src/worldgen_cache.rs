@@ -50,11 +50,16 @@ use crate::world_options::WorldGenConfig;
 const MIB: usize = 1024 * 1024;
 
 /// 地形缓存默认上限（MiB），包括未压缩的热层和调色板压缩的冷层。
-/// 依据见 `docs/performance-optimizations.md` 第 23 节的实测。
+/// 依据见 `docs/performance-optimizations.md` 第 23 节的实测：64 MiB 在 17×17
+/// 区块的突发请求里要把热层容量压到工作集以下，重算约 100 个区块；128 MiB
+/// 与基线同等吞吐，峰值仍低约 180 MiB。
 ///
 /// Default terrain cache limit in MiB, including the raw hot tier and
-/// palette-compressed cold tier. See section 23 of `performance-optimizations.md`.
-pub const DEFAULT_TERRAIN_CACHE_MB: usize = 64;
+/// palette-compressed cold tier. See section 23 of `performance-optimizations.md`:
+/// at 64 MiB a 17x17 burst pushes the hot tier below the working set and
+/// recomputes about 100 chunks, while 128 MiB matches the baseline throughput
+/// with peak RSS still about 180 MiB lower.
+pub const DEFAULT_TERRAIN_CACHE_MB: usize = 128;
 /// 地物结果缓存默认上限（MiB）；更小的预算会反复计算仍被光照使用的地物。
 ///
 /// Default feature-result cache limit in MiB; smaller budgets repeatedly

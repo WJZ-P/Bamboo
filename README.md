@@ -490,6 +490,10 @@ WebView2 的渲染进程不算在内。
   回退默认预设，Bamboo 只对 `structure_overrides` 做同样的回退，同一 JSON 里的 `biome` /
   `features` / `lakes` 仍会生效。
   未对拍所有结构、群系组合或超平坦光照与续生成。
+  世界生成缓存（[配置](docs/configuration.md#世界生成缓存)）只影响速度和内存，不影响结果：官方在
+  `ChunkMap.releaseGeneration` 等真实持有引用处释放，Bamboo 用「邻域使用者完成位 + 空闲定时」近似，
+  已生成区域最外几圈可能提前释放、下次再要时现算（约 10–20 ms/区块）；空闲清理是进程级策略，
+  官方没有对应行为。默认地形 128 MiB、地物 64 MiB、空闲 30 s。
   奖励箱按官方专用服务端默认关闭。
   随机种子（`level-seed` 为空）用 `nanoTime ^ uniquifier` 近似官方 `RandomSupport`，进程内固定，
   只和官方「空种子 = 随机」的语义一致、不逐位比较。`normal` 世界的飞行压测已实跑：生成

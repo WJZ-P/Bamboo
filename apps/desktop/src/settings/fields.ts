@@ -423,7 +423,7 @@ export const FIELDS: readonly SettingField[] = [
     control: "number",
     min: 0,
     max: MAX_TERRAIN_CACHE_MB,
-    hint: "世界生成时暂存的半成品地形最多占多少内存，默认 64。缓存只影响内存和跑图速度，不影响生成结果；周围区块都生成完的条目会立刻释放。0 = 不缓存（跑图明显变慢）。",
+    hint: "世界生成时暂存的半成品地形最多占多少内存，默认 128。缓存只影响内存和跑图速度，不影响生成结果；周围区块都生成完的条目会立刻释放。0 = 不缓存（跑图明显变慢）。",
   },
   {
     key: "worldgenFeatureCacheMb",
