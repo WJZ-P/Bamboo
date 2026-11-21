@@ -31,6 +31,7 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod equine;
+mod llama_spit;
 mod projectile;
 mod shot;
 mod skeleton_death;
@@ -82,6 +83,7 @@ enum Line {
     EquineInteract(equine::InteractCase),
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
+    LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     End(End),
 }
 
@@ -911,6 +913,7 @@ impl Report {
                 Line::EquineInteract(case) => self.replay_equine_interact(case),
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
+                Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {

@@ -482,6 +482,14 @@ pub enum Command {
         hits: Vec<super::arrow::ArrowEntityHit>,
         end: Vec3,
     },
+    /// `Llama.spit` 生成口水（`Projectile.spawnProjectileUsingShoot`）。
+    ///
+    /// `Llama.spit` spawns a spit (`Projectile.spawnProjectileUsingShoot`).
+    ShootLlamaSpit(super::spit::SpitShot),
+    /// `LlamaSpit.onHitEntity`：口水打到一个实体。
+    ///
+    /// `LlamaSpit.onHitEntity`: the spit hit an entity.
+    SpitHit(super::spit::SpitHit),
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode {
         center: Vec3,
@@ -614,6 +622,8 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ArrowImpact { block, hits, end } => {
             super::arrow::impact(me, world, hits, block, end)
         }
+        Command::ShootLlamaSpit(shot) => super::spit::spawn(world, me.id, shot),
+        Command::SpitHit(hit) => super::spit::hit_entity(me, world, hit),
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);

@@ -95,12 +95,11 @@ fn tempt() -> Goal {
 /// 按官方 `addGoal` 的调用顺序建目标表；`FloatGoal` 的构造函数顺手打开导航的浮水。
 ///
 /// `RunAroundLikeCrazyGoal` 只在有人骑、没驯服时才取数，Bamboo 还没有骑乘，
-/// 所以它是不取数的占位；羊驼的商队、吐口水和回击同理（见 README 已知限制）。
+/// 所以它是不取数的占位；羊驼的商队同理（见 README 已知限制）。
 ///
 /// Build the table in vanilla `addGoal` order; `FloatGoal` also turns on floating.
 /// `RunAroundLikeCrazyGoal` only draws with an untamed rider and Bamboo has no
-/// riding yet, so it is a draw-free placeholder, like the llama caravan, spit
-/// and retaliation goals.
+/// riding yet, so it is a draw-free placeholder, like the llama caravan.
 pub(in crate::entity::mob) fn goals(kind: MobType, navigation: &mut Navigation) -> GoalSelector {
     navigation.flags.can_float = true;
     if kind == MobType::Llama {
@@ -108,7 +107,14 @@ pub(in crate::entity::mob) fn goals(kind: MobType, navigation: &mut Navigation) 
             wrap(0, Goal::Float),
             wrap(1, Goal::Unavailable("RunAroundLikeCrazyGoal")),
             wrap(2, Goal::Unavailable("LlamaFollowCaravanGoal")),
-            wrap(3, Goal::Unavailable("RangedAttackGoal")),
+            wrap(
+                3,
+                Goal::RangedAttack {
+                    target: None,
+                    attack_time: -1,
+                    see_time: 0,
+                },
+            ),
             wrap(3, panic()),
             wrap(4, breed()),
             wrap(5, tempt()),
@@ -142,17 +148,23 @@ pub(in crate::entity::mob) fn goals(kind: MobType, navigation: &mut Navigation) 
 /// 马、驴、骡没有 `targetSelector`；羊驼有回击和打狼两个。
 ///
 /// `LlamaAttackWolfGoal` 每次 `canUse` 都取 `nextInt(reducedTickDelay(16))`，
-/// 狼还没有实体也照取；回击要配合吐口水，现在是占位（`canUse` 本就不取数）。
+/// 狼还没有实体也照取；回击是 `LlamaHurtByTargetGoal`，吐过一口就停。
 ///
 /// Horses, donkeys and mules have no target goals; the llama has retaliation and
 /// wolf hunting. `LlamaAttackWolfGoal` still draws its interval with no wolves;
-/// retaliation needs spitting and is a draw-free placeholder for now.
+/// retaliation is `LlamaHurtByTargetGoal`, which stops after one spit.
 pub(in crate::entity::mob) fn targets(kind: MobType) -> GoalSelector {
     if kind != MobType::Llama {
         return GoalSelector::default();
     }
     selector(vec![
-        wrap(1, Goal::Unavailable("LlamaHurtByTargetGoal")),
+        wrap(
+            1,
+            Goal::LlamaHurtByTarget {
+                timestamp: 0,
+                unseen_ticks: 0,
+            },
+        ),
         wrap(
             2,
             Goal::NearestAttackableTarget {

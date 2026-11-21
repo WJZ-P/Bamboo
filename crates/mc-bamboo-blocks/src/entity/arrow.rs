@@ -290,7 +290,7 @@ pub struct ArrowShot {
     pub pickup: Pickup,
 }
 
-fn rotation(movement: Vec3) -> (f32, f32) {
+pub(super) fn rotation(movement: Vec3) -> (f32, f32) {
     let horizontal = (movement.x * movement.x + movement.z * movement.z).sqrt();
     let deg = |r| (r * f64::from(180.0_f32 / std::f32::consts::PI)) as f32;
     (
@@ -299,7 +299,7 @@ fn rotation(movement: Vec3) -> (f32, f32) {
     )
 }
 
-fn lerp_rotation(from: f32, to: f32) -> f32 {
+pub(super) fn lerp_rotation(from: f32, to: f32) -> f32 {
     let mut from = from;
     while to - from < -180.0 {
         from -= 360.0;
@@ -555,7 +555,7 @@ fn clip_entity_with_margin(
     })
 }
 
-fn clip_including_border(
+pub(super) fn clip_including_border(
     view: &dyn BlockView,
     from: Vec3,
     to: Vec3,
@@ -587,7 +587,7 @@ fn clip_including_border(
     })
 }
 
-fn resolve_owner(ctx: &dyn EntityCtx, uuid: [u8; 16]) -> Option<EntityUid> {
+pub(super) fn resolve_owner(ctx: &dyn EntityCtx, uuid: [u8; 16]) -> Option<EntityUid> {
     let mut player = None;
     ctx.blocks().for_each_player(&mut |view| {
         if view.uuid == Some(uuid) {
@@ -603,7 +603,7 @@ fn resolve_owner(ctx: &dyn EntityCtx, uuid: [u8; 16]) -> Option<EntityUid> {
     })
 }
 
-fn player_box(player: &PlayerView) -> Aabb {
+pub(super) fn player_box(player: &PlayerView) -> Aabb {
     let p = player.position;
     let half = f64::from(0.6_f32) / 2.0;
     Aabb::new(
@@ -618,7 +618,7 @@ fn player_box(player: &PlayerView) -> Aabb {
 
 // AABB.clip 只接受线段内部的入射面交点，不把盒内起点当成命中。
 // AABB.clip only accepts entering faces strictly within the segment.
-fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
+pub(super) fn clip_entity(bb: Aabb, from: Vec3, to: Vec3) -> Option<Vec3> {
     let start = [from.x, from.y, from.z];
     let d = to.subtract(from);
     let steps = [d.x, d.y, d.z];

@@ -646,7 +646,7 @@ impl Report {
         }
     }
 
-    fn check_projectile_motion(
+    pub(super) fn check_projectile_motion(
         &mut self,
         label: &str,
         entity: &str,
@@ -672,7 +672,7 @@ impl Report {
     }
 }
 
-fn motion(entity: &Entity, pitch: f32) -> [i64; 8] {
+pub(super) fn motion(entity: &Entity, pitch: f32) -> [i64; 8] {
     let p = entity.position;
     let v = entity.delta;
     [

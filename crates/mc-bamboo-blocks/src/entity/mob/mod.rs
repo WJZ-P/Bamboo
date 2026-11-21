@@ -426,6 +426,10 @@ pub enum DamageKind {
     MobAttack,
     MobAttackNoAggro,
     Arrow,
+    /// 羊驼口水，`minecraft:spit`。
+    ///
+    /// Llama spit, `minecraft:spit`.
+    Spit,
     Starve,
     Thorns,
     Magic,
@@ -455,6 +459,7 @@ impl DamageKind {
             Self::MobAttack => "minecraft:mob_attack",
             Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
             Self::Arrow => "minecraft:arrow",
+            Self::Spit => "minecraft:spit",
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
             Self::Magic => "minecraft:magic",
@@ -503,7 +508,7 @@ impl DamageKind {
             Self::Freeze => "freeze",
             Self::OutOfWorld => "outOfWorld",
             Self::PlayerAttack => "player",
-            Self::MobAttack | Self::MobAttackNoAggro => "mob",
+            Self::MobAttack | Self::MobAttackNoAggro | Self::Spit => "mob",
             Self::Arrow => "arrow",
             Self::Starve => "starve",
             Self::Thorns => "thorns",
@@ -517,7 +522,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 23] = [
+        let all: [DamageKind; 24] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -536,6 +541,7 @@ impl DamageKind {
             Self::MobAttack,
             Self::MobAttackNoAggro,
             Self::Arrow,
+            Self::Spit,
             Self::Starve,
             Self::Thorns,
             Self::Magic,
@@ -554,6 +560,7 @@ impl DamageKind {
                 | Self::MobAttack
                 | Self::MobAttackNoAggro
                 | Self::Arrow
+                | Self::Spit
                 | Self::Thorns
         ) || matches!(self, Self::Wither)
     }
@@ -632,6 +639,7 @@ impl DamageKind {
             | Self::MobAttack
             | Self::MobAttackNoAggro
             | Self::Arrow
+            | Self::Spit
             | Self::Thorns
             | Self::Explosion
             | Self::Cactus

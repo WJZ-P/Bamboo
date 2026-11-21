@@ -293,7 +293,9 @@ impl TrackedEntity {
         })];
         // 官方箭的 trackedDataValues 为空时不发；其它类型保留现有空表包行为。
         // Vanilla skips empty arrow metadata; other types retain their existing empty packet.
-        if !matches!(snapshot.data, KindData::Arrow(_)) || !self.last_data.is_empty() {
+        if !matches!(snapshot.data, KindData::Arrow(_) | KindData::LlamaSpit(_))
+            || !self.last_data.is_empty()
+        {
             out.push(packet_body(&SetEntityData {
                 entity_id: snapshot.id,
                 items: &self.last_data,
@@ -379,7 +381,9 @@ impl TrackedEntity {
         let mut packets = Vec::new();
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
-        if !matches!(snapshot.data, KindData::Arrow(_)) {
+        // 箭和口水用 `Entity` 默认的 `InterpolationHandler.NO_OP`，位置路径永远是线性的。
+        // Arrows and spit keep the default `InterpolationHandler.NO_OP`, so their path stays linear.
+        if !matches!(snapshot.data, KindData::Arrow(_) | KindData::LlamaSpit(_)) {
             self.ticks_since_step += 1;
         }
         if snapshot.sync_position {
@@ -745,6 +749,10 @@ pub enum KindData {
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
     Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
+    /// 羊驼口水：没有自己的元数据。
+    ///
+    /// Llama spit, with no metadata of its own.
+    LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
 }
 
 impl Snapshot {
@@ -761,7 +769,11 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
-            needs_sync: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.needs_sync),
+            needs_sync: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.needs_sync,
+                KindPublic::LlamaSpit(spit) => spit.needs_sync,
+                _ => false,
+            },
             sync_velocity: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.sync_velocity),
             sync_position: false,
             fall_flying: false,
@@ -773,6 +785,7 @@ impl Snapshot {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
             KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
+            KindData::LlamaSpit(spit) => spit.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -797,6 +810,7 @@ impl KindData {
             KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
             KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
+            KindPublic::LlamaSpit(spit) => Self::LlamaSpit(*spit),
         }
     }
 
@@ -807,7 +821,8 @@ impl KindData {
             | Self::Item(_)
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
-            | Self::Arrow(_) => None,
+            | Self::Arrow(_)
+            | Self::LlamaSpit(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -819,7 +834,8 @@ impl KindData {
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
-            | Self::Arrow(_) => None,
+            | Self::Arrow(_)
+            | Self::LlamaSpit(_) => None,
         }
     }
 
@@ -828,6 +844,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
             Self::Arrow(arrow) => Some(arrow.uuid),
+            Self::LlamaSpit(spit) => Some(spit.uuid),
             _ => None,
         }
     }
@@ -837,6 +854,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
             Self::Arrow(arrow) => Some(arrow.pitch),
+            Self::LlamaSpit(spit) => Some(spit.pitch),
             _ => None,
         }
     }
@@ -865,7 +883,7 @@ impl KindData {
             Self::ExperienceOrb { value } if *value != 0 => {
                 vec![EntityData::ExperienceValue(*value)]
             }
-            Self::ExperienceOrb { .. } => Vec::new(),
+            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) => Vec::new(),
             Self::Arrow(arrow) => {
                 let mut data = Vec::new();
                 if arrow.on_fire {

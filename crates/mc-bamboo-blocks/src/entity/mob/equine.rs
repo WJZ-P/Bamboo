@@ -27,6 +27,7 @@ mod interact;
 pub mod inventory;
 mod life;
 mod llama;
+mod ranged;
 
 pub(super) use death::drop_on_death;
 pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets};
@@ -34,6 +35,7 @@ pub(super) use interact::interact;
 pub(super) use life::{
     Voice, after_hurt, ai_step_end, ai_step_start, is_immobile, land_sound, tick_end, voice,
 };
+pub(super) use ranged::{ranged_attack_tick, take_did_spit};
 
 /// 马科同步给客户端的元数据：标志字节、马的花色或羊驼的毛色、有没有箱子、羊驼力量。
 ///
@@ -91,6 +93,11 @@ pub struct EquineState {
     pub strength: i32,
     pub chested: bool,
     pub chest_items: Vec<ItemStack>,
+    /// `Llama.didSpit`：吐完口水置真，回击目标下次判断继续时清掉。不存档。
+    ///
+    /// `Llama.didSpit`: set after a spit, cleared by the retaliation goal's
+    /// next continue check. Not saved.
+    pub did_spit: bool,
 }
 
 impl EquineState {

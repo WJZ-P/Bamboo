@@ -248,6 +248,12 @@ public final class MobOracle {
             if (only == null || "equine".startsWith(only)) {
                 cases += playEquines(official, out);
             }
+            if (only == null || "llama_spit".startsWith(only)) {
+                OracleLlama.checkAim(official);
+                playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
+                playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
+                cases += 2;
+            }
             for (String name : List.of("shot_bow_short_draw", "shot_bow_half_draw", "shot_bow_full_draw",
                     "shot_bow_moving", "shot_bow_enchanted",
                     "shot_bow_infinity", "shot_bow_tipped", "shot_bow_creative",
@@ -3499,6 +3505,219 @@ public final class MobOracle {
         sync.put(arrow.getId(), tracking);
         tracking.entity.sendPairingData(null, tracking.bytes::add);
         packets.addAll(tracking.take());
+    }
+
+    /**
+     * 羊驼吐口水的对拍用羊驼：`performRangedAttack` 照 `Llama.spit` 的顺序走，只是口水的随机源
+     * 换成 Bamboo 的岛种子源（官方实体的随机源不带种子）。瞄准的写法由 {@link #checkAim}
+     * 和官方私有 `spit` 在不确定度 0 时逐位比过。
+     * The llama for spit replays: `performRangedAttack` follows `Llama.spit`, but the
+     * spit draws from Bamboo's island seed source. {@link #checkAim} compares the aim
+     * bit for bit with the private vanilla `spit` at zero uncertainty.
+     */
+    private static final class OracleLlama extends net.minecraft.world.entity.animal.equine.Llama {
+        boolean zeroUncertainty;
+
+        OracleLlama(FakeLevel level) {
+            super(EntityTypes.LLAMA, level);
+        }
+
+        @Override
+        public float rangedAttackUncertainty(final Level level) {
+            return zeroUncertainty ? 0.0F : super.rangedAttackUncertainty(level);
+        }
+
+        static Vec3 aim(Entity llama, Entity spit, LivingEntity target) {
+            double xd = target.getX() - llama.getX();
+            double yd = target.getY(0.3333333333333333) - spit.getY();
+            double zd = target.getZ() - llama.getZ();
+            double yo = Math.sqrt(xd * xd + zd * zd) * 0.2F;
+            return new Vec3(xd, yd + yo, zd);
+        }
+
+        @Override
+        public void performRangedAttack(final LivingEntity target, final float power) {
+            FakeLevel world = (FakeLevel) level();
+            var spit = new net.minecraft.world.entity.projectile.LlamaSpit(world, this);
+            setRandom(spit, world.entitySeeds.nextLong());
+            spit.setUUID(Mth.createInsecureUUID(spit.getRandom()));
+            Vec3 aim = aim(this, spit, target);
+            net.minecraft.world.entity.projectile.Projectile.spawnProjectileUsingShoot(
+                    spit, world, ItemStack.EMPTY, aim.x, aim.y, aim.z, 1.5F, rangedAttackUncertainty(world));
+            if (!isSilent()) {
+                world.playSound(null, getX(), getY(), getZ(), net.minecraft.sounds.SoundEvents.LLAMA_SPIT,
+                        getSoundSource(), 1.0F, 1.0F + (random.nextFloat() - random.nextFloat()) * 0.2F);
+            }
+            try {
+                var didSpit = net.minecraft.world.entity.animal.equine.Llama.class
+                        .getDeclaredMethod("setDidSpit", boolean.class);
+                didSpit.setAccessible(true);
+                didSpit.invoke(this, true);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        /** 正在跑的目标名：先 `goalSelector`，再 `targetSelector`，按注册顺序。 */
+        String running() {
+            StringBuilder out = new StringBuilder();
+            for (var selector : List.of(goalSelector, targetSelector)) {
+                for (var goal : selector.getAvailableGoals()) {
+                    if (!goal.isRunning()) continue;
+                    if (!out.isEmpty()) out.append(' ');
+                    out.append(goal.getGoal().getClass().getSimpleName());
+                }
+            }
+            return out.toString();
+        }
+
+        /**
+         * 官方私有 `Llama.spit` 在不确定度 0 时的速度必须等于 `aim` 归一化乘 1.5，
+         * 否则对拍用的瞄准写法和官方不同。
+         * The private vanilla `spit` at zero uncertainty must fly along `aim`
+         * normalized and scaled by 1.5, or the replay's aim differs from vanilla.
+         */
+        static void checkAim(Official official) throws Exception {
+            FakeLevel world = FakeLevel.create(official);
+            OracleLlama llama = new OracleLlama(world);
+            llama.snapTo(0.5, 64.0, 0.5, 37.0F, 0.0F);
+            llama.setYBodyRot(37.0F);
+            llama.zeroUncertainty = true;
+            var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            target.setPos(7.25, 63.5, -3.75);
+            var spit = net.minecraft.world.entity.animal.equine.Llama.class
+                    .getDeclaredMethod("spit", LivingEntity.class);
+            spit.setAccessible(true);
+            spit.invoke(llama, target);
+            Entity shot = world.spawned.getLast();
+            Vec3 expected = aim(llama, shot, target).normalize().scale(1.5F);
+            if (!expected.equals(shot.getDeltaMovement())) {
+                throw new IllegalStateException("llama spit aim differs: " + expected + " vs " + shot.getDeltaMovement());
+            }
+        }
+    }
+
+    /**
+     * 羊驼吐口水：玩家在第 5、80 刻打羊驼一下，`LlamaHurtByTargetGoal` 让它盯上玩家，
+     * `RangedAttackGoal` 吐口水，口水逐刻飞向玩家。比羊驼和口水的位置、速度、随机源，
+     * 羊驼正在跑的目标、口水的同步包，以及玩家的血量。
+     * Llama spit: the player hits the llama on ticks 5 and 80; retaliation targets
+     * the player, the ranged goal spits, and the spit flies tick by tick. Compares
+     * llama and spit motion and random state, the llama's running goals, the spit
+     * packets and the player's health.
+     */
+    private static void playLlamaSpit(Official official, Writer out, String name, double playerX, long seed)
+            throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        world.injectedBrightOutside = false;
+        world.injectedMonstersBurn = false;
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        int playerId = FIRST_ID + 1024;
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(playerX, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        Bytes playerSink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = playerSink;
+        put(ServerPlayer.class, player, "connection", connection);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        world.nextId = FIRST_ID;
+        OracleLlama llama = new OracleLlama(world);
+        world.entitySeeds.nextLong();
+        setRandom(llama, seed);
+        llama.setUUID(new UUID(0, 1));
+        llama.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        llama.setYHeadRot(0.0F);
+        llama.setYBodyRot(0.0F);
+        world.tracked.add(llama);
+        var spits = new ArrayList<Entity>();
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        var frames = new StringBuilder("[");
+        var playerStates = new StringBuilder("[");
+        var playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
+        int ticks = 160;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var spitPackets = new ArrayList<String>();
+            if (tick > 0) {
+                world.gameTime++;
+                if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+                if (player.hurtTime > 0) player.hurtTime--;
+                if (tick == 5 || tick == 80) {
+                    llama.hurtServer(world, world.damageSources().playerAttack(player), 1.0F);
+                }
+                llama.checkDespawn();
+                llama.commonTick();
+                llama.tick();
+                for (Entity spit : spits) {
+                    if (spit.isRemoved()) continue;
+                    spit.commonTick();
+                    spit.tick();
+                    if (spit.isRemoved()) {
+                        Bytes gone = new Bytes(official.registries);
+                        gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(spit.getId()));
+                        spitPackets.addAll(gone.take());
+                        sync.remove(spit.getId());
+                    }
+                }
+                world.tracked.removeIf(Entity::isRemoved);
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.projectile.LlamaSpit spit) {
+                        spits.add(spit);
+                        world.tracked.add(spit);
+                        pairArrow(world, official, spit, sync, spitPackets);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    spitPackets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"spits\":[");
+            boolean first = true;
+            for (Entity spit : spits) {
+                if (spit.isRemoved()) continue;
+                if (!first) frames.append(',');
+                first = false;
+                frames.append("{\"id\":").append(spit.getId());
+                frames.append(",\"motion\":").append(projectileMotion(spit));
+                frames.append(",\"seed\":").append(randomSeed(spit)).append('}');
+            }
+            frames.append("],\"packets\":").append(spitPackets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append(",\"llama\":").append(projectileMotion(llama));
+            frames.append(",\"llamaSeed\":").append(randomSeed(llama));
+            frames.append(",\"llamaHealth\":").append(Float.floatToRawIntBits(llama.getHealth()));
+            frames.append(",\"goals\":").append(jsonString(llama.running()));
+            frames.append('}');
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        if (spits.size() < 2 || player.getHealth() >= 20.0F) {
+            throw new IllegalStateException("llama spit scenario did not exercise " + name
+                    + ": spits=" + spits.size() + " health=" + player.getHealth());
+        }
+        out.write("{\"type\":\"llamaSpit\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"seed\":" + seed
+                + ",\"blocks\":" + blocks + ",\"shots\":" + spits.size() + ",\"frames\":" + frames + "]"
+                + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
     }
 
     private static String projectileMotion(Entity entity) {
