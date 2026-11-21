@@ -109,7 +109,6 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
             Goal::Panic {
                 speed: 2.2,
                 target: Vec3::default(),
-                class: "RabbitPanicGoal",
             },
         ),
         (
@@ -130,21 +129,15 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
         ),
         (
             4,
-            Goal::Avoid(
-                AvoidEntity::new(AvoidClass::Player, 8.0, 2.2, 2.2).named("RabbitAvoidEntityGoal"),
-            ),
+            Goal::Avoid(AvoidEntity::new(AvoidClass::Player, 8.0, 2.2, 2.2)),
         ),
         (
             4,
-            Goal::Avoid(
-                AvoidEntity::new(AvoidClass::Wolf, 10.0, 2.2, 2.2).named("RabbitAvoidEntityGoal"),
-            ),
+            Goal::Avoid(AvoidEntity::new(AvoidClass::Wolf, 10.0, 2.2, 2.2)),
         ),
         (
             4,
-            Goal::Avoid(
-                AvoidEntity::new(AvoidClass::Monster, 4.0, 2.2, 2.2).named("RabbitAvoidEntityGoal"),
-            ),
+            Goal::Avoid(AvoidEntity::new(AvoidClass::Monster, 4.0, 2.2, 2.2)),
         ),
         (5, Goal::RabbitRaid(RaidGarden::default())),
         (
@@ -278,8 +271,10 @@ pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob) {
         // Vanilla's canJump marker is not consulted by JumpControl.tick.
         if !mob.jump.jump && mob.mover.has_wanted() && mob.rabbit.jump_delay_ticks == 0 {
             let at = next_path_position(me, mob).unwrap_or_else(|| wanted_position(mob));
-            me.y_rot = (mth::atan2(at.z - me.position.z, at.x - me.position.x) * 180.0
-                / f64::from(std::f32::consts::PI)) as f32
+            // `facePoint`：`180.0F / (float) Math.PI` 是折好的 float 常量。
+            // `facePoint`: `180.0F / (float) Math.PI` is a folded float constant.
+            me.y_rot = (mth::atan2(at.z - me.position.z, at.x - me.position.x)
+                * 57.295_776_367_187_5) as f32
                 - 90.0;
             start_jumping(me, mob);
         }

@@ -20,6 +20,7 @@ pub enum AvoidClass {
     Player,
     Wolf,
     Monster,
+    PolarBear,
 }
 
 impl AvoidClass {
@@ -29,6 +30,8 @@ impl AvoidClass {
             // 狼还没实现，先匹配不到。Wolves are not modelled yet.
             Self::Wolf => false,
             Self::Monster => kind.is_monster(),
+            // 北极熊还没实现。Polar bears are not modelled yet.
+            Self::PolarBear => false,
         }
     }
 }
@@ -42,6 +45,21 @@ struct Avoided {
     position: Vec3,
 }
 
+/// `predicateOnAvoidEntity`：缺省排除创造和旁观玩家；狐狸给的三种。
+///
+/// `predicateOnAvoidEntity`: by default no creative or spectator players;
+/// foxes pass three of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvoidFilter {
+    NoCreativeOrSpectator,
+    /// `AVOID_PLAYERS && !trusts && !isDefending`。
+    FoxPlayer,
+    /// `!wolf.isTame() && !isDefending`。
+    FoxWolf,
+    /// `!isDefending`。
+    FoxDefending,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AvoidEntity {
     class: AvoidClass,
@@ -50,7 +68,7 @@ pub struct AvoidEntity {
     sprint_speed: f64,
     to_avoid: Option<Avoided>,
     path: Option<Path>,
-    class_name: &'static str,
+    filter: AvoidFilter,
 }
 
 impl AvoidEntity {
@@ -62,20 +80,16 @@ impl AvoidEntity {
             sprint_speed,
             to_avoid: None,
             path: None,
-            class_name: "AvoidEntityGoal",
+            filter: AvoidFilter::NoCreativeOrSpectator,
         }
     }
 
-    /// 换成子类的类名（如 `RabbitAvoidEntityGoal`），对拍用。
+    /// 换掉 `predicateOnAvoidEntity`（狐狸用自己的条件）。
     ///
-    /// Use a subclass name such as `RabbitAvoidEntityGoal`, for the oracle.
-    pub const fn named(mut self, class_name: &'static str) -> Self {
-        self.class_name = class_name;
+    /// Replace `predicateOnAvoidEntity` (foxes pass their own).
+    pub const fn filtered(mut self, filter: AvoidFilter) -> Self {
+        self.filter = filter;
         self
-    }
-
-    pub const fn class_name(&self) -> &'static str {
-        self.class_name
     }
 
     /// `AvoidEntityGoal.canUse`。
@@ -206,6 +220,13 @@ impl AvoidEntity {
                 if player.creative || view.difficulty() == 0 {
                     return false;
                 }
+                // `predicateOnAvoidEntity`：狐狸不躲潜行的、信任的玩家，保护时谁都不躲。
+                // Foxes ignore sneaking or trusted players and avoid nobody while defending.
+                if self.filter == AvoidFilter::FoxPlayer
+                    && (player.sneaking || mob.fox.trusts(player.uuid) || mob.fox.is_defending())
+                {
+                    return false;
+                }
                 goals::targeting_test(me, mob, view, &player, f64::from(self.max_dist), true)
             }
             Candidate::Mob {
@@ -215,6 +236,13 @@ impl AvoidEntity {
                 alive,
             } => {
                 if !alive {
+                    return false;
+                }
+                if matches!(
+                    self.filter,
+                    AvoidFilter::FoxWolf | AvoidFilter::FoxDefending
+                ) && mob.fox.is_defending()
+                {
                     return false;
                 }
                 let max = mc_bamboo_core::mth::java_max(f64::from(self.max_dist), 2.0);
@@ -266,7 +294,7 @@ impl From<Candidate> for CandidateView {
 /// 玩家的碰撞箱：宽 0.6，站立 1.8、潜行 1.5。
 ///
 /// A player's bounding box: 0.6 wide, 1.8 tall standing and 1.5 sneaking.
-fn player_box(player: &PlayerView) -> Aabb {
+pub(super) fn player_box(player: &PlayerView) -> Aabb {
     let height = if player.sneaking {
         f64::from(1.5_f32)
     } else {

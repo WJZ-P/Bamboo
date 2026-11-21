@@ -36,13 +36,19 @@ pub enum Goal {
     RabbitPowderSnow,
     RabbitRaid(super::rabbit::RaidGarden),
     Avoid(super::avoid::AvoidEntity),
+    /// 狐狸自己的目标。
+    ///
+    /// The fox's own goals.
+    Fox(super::fox_goals::FoxGoal),
+    /// `LeapAtTargetGoal`：离目标 2 到 4 格、站在地上时扑过去。
+    ///
+    /// `LeapAtTargetGoal`: leap at a target 2 to 4 blocks away.
+    LeapAtTarget {
+        yd: f32,
+    },
     Panic {
         speed: f64,
         target: Vec3,
-        /// 官方的类名（`PanicGoal` 或子类），对拍比较运行中的目标时用。
-        ///
-        /// The vanilla class name (`PanicGoal` or a subclass), for the oracle.
-        class: &'static str,
     },
     Breed {
         speed: f64,
@@ -90,6 +96,12 @@ pub enum Goal {
         last_can_use_check: i64,
         /// `MeleeAttackGoal.canUse` 算出的路径，官方存在字段里由 `start()` 装入导航。
         start_path: Option<super::path::Path>,
+        /// `followingTargetEvenIfNotSeen`。
+        track_target: bool,
+        /// 官方的类名，对拍用。
+        ///
+        /// The vanilla class name, for the oracle.
+        class: &'static str,
     },
     Bow(super::skeleton::BowGoal),
     /// `HurtByTargetGoal`：记住上一次伤害的时间戳，把攻击者设成目标。
@@ -126,12 +138,20 @@ pub enum TargetType {
     Villager,
     IronGolem,
     Turtle,
+    /// 狐狸的 `landTargetGoal`：鸡和兔子。
+    ///
+    /// The fox `landTargetGoal`: chickens and rabbits.
+    FoxPrey,
+    /// 狐狸的 `fishTargetGoal`：成群的鱼。
+    ///
+    /// The fox `fishTargetGoal`: schooling fish.
+    Fish,
 }
 
 impl TargetType {
     /// Bamboo 现在有没有这种实体；没有时对应的目标直接跳过。
     pub const fn available(self) -> bool {
-        matches!(self, Self::Player)
+        matches!(self, Self::Player | Self::FoxPrey)
     }
 }
 
@@ -142,6 +162,8 @@ impl Goal {
             Self::Float | Self::RabbitPowderSnow => &[Flag::Jump],
             Self::RabbitRaid(_) => &[Flag::Move, Flag::Jump],
             Self::Panic { .. } | Self::Stroll { .. } | Self::Avoid(_) => &[Flag::Move],
+            Self::Fox(goal) => goal.flags(),
+            Self::LeapAtTarget { .. } => &[Flag::Jump, Flag::Move],
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
                 &[Flag::Move, Flag::Look]
             }
@@ -158,6 +180,9 @@ impl Goal {
 
     /// `requiresUpdateEveryTick`。
     pub const fn every_tick(&self) -> bool {
+        if let Self::Fox(goal) = self {
+            return goal.every_tick();
+        }
         // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
         // Float/RandomLookAround/MeleeAttack/MoveToBlock/DoorInteract 为真，
         // LookAtPlayer/RandomStroll/LookAround 的其它目标为假。
@@ -173,14 +198,24 @@ impl Goal {
         )
     }
 
+    /// `Goal.isInterruptable`：只有狐狸的扑跳不能被打断。
+    ///
+    /// `Goal.isInterruptable`: only the fox pounce refuses.
+    pub const fn interruptable(&self) -> bool {
+        match self {
+            Self::Fox(goal) => goal.interruptable(),
+            _ => true,
+        }
+    }
+
     /// 对拍和调试用的名字，官方的类名。
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Float => "FloatGoal",
             Self::RabbitPowderSnow => "ClimbOnTopOfPowderSnowGoal",
             Self::RabbitRaid(_) => "RaidGardenGoal",
-            Self::Avoid(avoid) => avoid.class_name(),
-            Self::Panic { class, .. } => class,
+            Self::Avoid(_) => "AvoidEntityGoal",
+            Self::Panic { .. } => "PanicGoal",
             Self::Breed { .. } => "BreedGoal",
             Self::Tempt { .. } => "TemptGoal",
             Self::FollowParent { .. } => "FollowParentGoal",
@@ -188,8 +223,9 @@ impl Goal {
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
-            Self::MeleeAttack { speed, .. } if *speed == 1.2 => "MeleeAttackGoal",
-            Self::MeleeAttack { .. } => "ZombieAttackGoal",
+            Self::MeleeAttack { class, .. } => class,
+            Self::Fox(goal) => goal.name(),
+            Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
             Self::NearestAttackableTarget { .. } => "NearestAttackableTargetGoal",
@@ -228,7 +264,6 @@ impl GoalSelector {
                 Goal::Panic {
                     speed: 2.0,
                     target: Vec3::default(),
-                    class: "PanicGoal",
                 },
             ),
             (
@@ -336,18 +371,7 @@ impl GoalSelector {
             look,
             look_around,
             wrap(2, Goal::Unavailable("SpearUseGoal")),
-            wrap(
-                3,
-                Goal::MeleeAttack {
-                    speed: 1.0,
-                    ticks_until_next_attack: 0,
-                    ticks_until_path_recalc: 0,
-                    pathed_target: Vec3::default(),
-                    raise_arm_ticks: 0,
-                    last_can_use_check: 0,
-                    start_path: None,
-                },
-            ),
+            wrap(3, melee_attack(1.0, false, "ZombieAttackGoal")),
             wrap(6, Goal::Unavailable("MoveThroughVillageGoal")),
             wrap(
                 7,
@@ -441,15 +465,7 @@ impl GoalSelector {
     }
 
     fn skeleton_melee() -> Goal {
-        Goal::MeleeAttack {
-            speed: 1.2,
-            ticks_until_next_attack: 0,
-            ticks_until_path_recalc: 0,
-            pathed_target: Vec3::default(),
-            raise_arm_ticks: 0,
-            last_can_use_check: 0,
-            start_path: None,
-        }
+        melee_attack(1.2, false, "MeleeAttackGoal")
     }
 
     pub(crate) fn reassess_skeleton_weapon(
@@ -562,6 +578,17 @@ impl GoalSelector {
         self.disabled[flag as usize] = !enabled;
     }
 
+    /// 正在跑的目标的官方类名：兔子和狐狸的几个目标是子类，名字按生物种类换。
+    ///
+    /// The vanilla class names of the running goals; a few rabbit and fox goals
+    /// are subclasses, renamed by mob type.
+    pub fn running_class_names(&self, kind: super::MobType) -> Vec<&'static str> {
+        self.running_names()
+            .into_iter()
+            .map(|name| subclass_name(kind, name))
+            .collect()
+    }
+
     /// 正在跑的目标名，按加入顺序。对拍用。
     pub fn running_names(&self) -> Vec<&'static str> {
         self.goals
@@ -589,9 +616,11 @@ impl GoalSelector {
         let priority = self.goals[index].priority;
         self.goals[index].goal.flags().iter().all(|flag| {
             // `NO_GOAL` 的优先级是 `Integer.MAX_VALUE`。
-            let holder =
-                self.locked[*flag as usize].map_or(i32::MAX, |holder| self.goals[holder].priority);
-            priority < holder
+            // `WrappedGoal.canBeReplacedBy`：占着的目标可打断、而且优先级更低。
+            // `WrappedGoal.canBeReplacedBy`: the holder is interruptable and lower priority.
+            self.locked[*flag as usize].is_none_or(|holder| {
+                self.goals[holder].goal.interruptable() && priority < self.goals[holder].priority
+            })
         })
     }
 
@@ -656,6 +685,40 @@ impl GoalSelector {
     }
 }
 
+/// `MeleeAttackGoal(mob, speed, followingTargetEvenIfNotSeen)` 及其子类。
+///
+/// `MeleeAttackGoal(mob, speed, followingTargetEvenIfNotSeen)` and subclasses.
+pub(super) const fn melee_attack(speed: f64, track_target: bool, class: &'static str) -> Goal {
+    Goal::MeleeAttack {
+        speed,
+        ticks_until_next_attack: 0,
+        ticks_until_path_recalc: 0,
+        pathed_target: Vec3::new(0.0, 0.0, 0.0),
+        raise_arm_ticks: 0,
+        last_can_use_check: 0,
+        start_path: None,
+        track_target,
+        class,
+    }
+}
+
+/// 兔子和狐狸把几个通用目标包成内部子类；对拍按官方的子类名比较。
+///
+/// Rabbits and foxes wrap a few shared goals in inner subclasses; the oracle
+/// compares the subclass names.
+fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
+    use super::MobType::{Fox, Rabbit};
+    match (kind, name) {
+        (Rabbit, "PanicGoal") => "RabbitPanicGoal",
+        (Rabbit, "AvoidEntityGoal") => "RabbitAvoidEntityGoal",
+        (Fox, "PanicGoal") => "FoxPanicGoal",
+        (Fox, "BreedGoal") => "FoxBreedGoal",
+        (Fox, "FollowParentGoal") => "FoxFollowParentGoal",
+        (Fox, "LookAtPlayerGoal") => "FoxLookAtPlayerGoal",
+        _ => name,
+    }
+}
+
 /// `Goal.reducedTickDelay`。
 pub(super) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
@@ -682,8 +745,12 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         // `RabbitAvoidEntityGoal`：杀手兔不躲。
         // `RabbitAvoidEntityGoal`: the killer bunny never flees.
         Goal::Avoid(avoid) => !super::rabbit::is_evil(mob) && avoid.can_use(me, mob, ctx),
+        Goal::Fox(goal) => goal.can_use(me, mob, ctx),
+        Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
-            if !should_panic(mob, ctx) {
+            // `FoxPanicGoal.shouldPanic`：保护中的狐狸不惊慌。
+            // `FoxPanicGoal.shouldPanic`: a defending fox never panics.
+            if super::fox::is_defending_fox(mob) || !should_panic(mob, ctx) {
                 return false;
             }
             if me.remaining_fire_ticks > 0
@@ -718,7 +785,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             player.is_some()
         }
         Goal::FollowParent { parent, .. } => {
-            if mob.age >= 0 {
+            if mob.age >= 0 || super::fox::is_defending_fox(mob) {
                 return false;
             }
             let area = me.bounding_box().inflate(8.0, 4.0, 8.0);
@@ -786,7 +853,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 return false;
             }
             *look_at = nearest_look_target(me, mob, ctx, f64::from(*look_distance));
-            look_at.is_some()
+            // `FoxLookAtPlayerGoal`：趴倒或者感兴趣时不看人。
+            // `FoxLookAtPlayerGoal`: no looking while faceplanted or interested.
+            look_at.is_some() && !super::fox::blocks_look(mob)
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
@@ -795,6 +864,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             start_path,
             ..
         } => {
+            // `FoxMeleeAttackGoal.canUse`：坐、睡、蹲、趴倒时先短路。
+            // `FoxMeleeAttackGoal.canUse` short-circuits first.
+            if super::fox::blocks_melee(mob) {
+                return false;
+            }
             // 官方 `lastCanUseCheck` 初值是 0：第一个满刻（1001）就允许，
             // 之后每 20 刻一次。Bamboo 之前给了一个很大的负数，语义等价，
             // 但 `gameTime - last` 用 long 减法，这里按官方改成初值 0。
@@ -837,10 +911,12 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             }
             // 官方每个 `NearestAttackableTargetGoal` 都先取 `nextInt(interval)`；
             // 缺实体的目标仍注册、仍取数，只是查不到目标（场景里明确无此类实体）。
-            *found = if kind.available() {
-                nearest_attackable(me, mob, ctx, *kind)
-            } else {
-                None
+            *found = match kind {
+                TargetType::FoxPrey => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Rabbit)
+                }
+                _ if kind.available() => nearest_attackable(me, mob, ctx, *kind),
+                _ => None,
             };
             found.is_some()
         }
@@ -906,6 +982,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
         Goal::RabbitRaid(raid) => raid.can_continue(),
         Goal::Avoid(_) => super::avoid::AvoidEntity::can_continue(mob),
+        Goal::Fox(goal) => goal.can_continue(me, mob, ctx),
+        Goal::LeapAtTarget { .. } => !me.on_ground,
         Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
         Goal::Breed {
             partner, love_time, ..
@@ -919,7 +997,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }),
         Goal::Tempt { .. } => can_use(goal, me, mob, ctx),
         Goal::FollowParent { parent, .. } => {
-            if mob.age >= 0 {
+            if mob.age >= 0 || super::fox::is_defending_fox(mob) {
                 return false;
             }
             let Some(other) = parent.and_then(|uid| ctx.other(uid)) else {
@@ -948,15 +1026,23 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             if me.position.distance_to_sqr(player.position) > limit {
                 return false;
             }
-            *look_time > 0
+            *look_time > 0 && !super::fox::blocks_look(mob)
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float => can_use(goal, me, mob, ctx),
         Goal::Unavailable(_) => false,
-        Goal::MeleeAttack { .. } => {
+        Goal::MeleeAttack { track_target, .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
-            // `!navigation.isDone()` 才继续；路径走完就停。
-            combat_target(mob, ctx).is_some() && !mob.navigation.is_done()
+            // `!navigation.isDone()` 才继续；路径走完就停。为真时只看目标在不在家附近。
+            // With `followingTargetEvenIfNotSeen` the goal only checks the home range.
+            let Some(target) = combat_target(mob, ctx) else {
+                return false;
+            };
+            if *track_target {
+                within_home(mob, BlockPos::containing(target.position))
+            } else {
+                !mob.navigation.is_done()
+            }
         }
         Goal::NearestAttackableTarget { unseen_ticks, .. }
             if mob.mob_type == super::MobType::Skeleton =>
@@ -1006,6 +1092,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::RabbitRaid(raid) => raid.start(me, mob, ctx.blocks()),
         Goal::RabbitPowderSnow => {}
         Goal::Avoid(avoid) => avoid.start(me, mob, ctx),
+        Goal::Fox(goal) => goal.start(me, mob, ctx),
+        Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target, .. } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
@@ -1014,7 +1102,12 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::FollowParent {
             time_to_recalc_path,
             ..
-        } => *time_to_recalc_path = 0,
+        } => {
+            // `FoxFollowParentGoal.start`：先 `clearStates`。
+            // `FoxFollowParentGoal.start` clears the fox states first.
+            super::fox::clear_states_if_fox(mob);
+            *time_to_recalc_path = 0;
+        }
         Goal::Stroll { speed, wanted, .. } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
@@ -1032,7 +1125,20 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *rel_z = angle.sin();
             *look_time = 20 + me.random.next_int_bounded(20);
         }
-        Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::Breed { partner, .. } => {
+            // `FoxBreedGoal.start`：两只狐狸都 `clearStates`。
+            // `FoxBreedGoal.start` clears the states of both foxes.
+            if mob.mob_type == super::MobType::Fox
+                && let Some(partner) = *partner
+            {
+                mob.fox.clear_states();
+                ctx.emit(
+                    crate::entity::ctx::Command::FoxClearStates { target: partner },
+                    me,
+                );
+            }
+        }
+        Goal::Float | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1041,6 +1147,11 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             start_path,
             ..
         } => {
+            // `FoxMeleeAttackGoal.start`：先取消感兴趣。
+            // `FoxMeleeAttackGoal.start` clears the interested flag first.
+            if mob.mob_type == super::MobType::Fox {
+                mob.fox.set(super::fox::FLAG_INTERESTED, false);
+            }
             if let Some(path) = start_path.take() {
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 mob.navigation
@@ -1119,6 +1230,8 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::Avoid(avoid) => avoid.stop(),
+        Goal::Fox(goal) => goal.stop_with_world(me, mob, ctx),
+        Goal::LeapAtTarget { .. } => {}
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
         Goal::Float
         | Goal::RabbitRaid(_)
@@ -1264,6 +1377,8 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::RabbitRaid(raid) => raid.tick(me, mob, ctx),
         Goal::RabbitPowderSnow => mob.jump.jump = true,
         Goal::Avoid(avoid) => avoid.tick(me, mob, ctx),
+        Goal::Fox(goal) => goal.tick(me, mob, ctx),
+        Goal::LeapAtTarget { .. } => {}
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
         Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
@@ -1327,10 +1442,15 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             {
                 *ticks_until_next_attack = adjusted_tick_delay(true, 20);
                 super::living::do_hurt_target(me, mob, ctx, target.uid);
+                // `FoxMeleeAttackGoal.checkAndPerformAttack`：不挥手，咬一口出声。
+                // `FoxMeleeAttackGoal.checkAndPerformAttack`: no swing, a bite sound.
+                if mob.mob_type == super::MobType::Fox {
+                    living::play_sound(me, mob, "minecraft:entity.fox.bite", 1.0, 1.0);
+                }
             }
             // `ZombieAttackGoal.tick`：`super.tick()` 之后抬手计时加一，按新的
             // `ticksUntilNextAttack` 决定举不举手。
-            if mob.mob_type != super::MobType::Skeleton {
+            if matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk) {
                 *raise_arm_ticks += 1;
                 mob.aggressive = *raise_arm_ticks >= 5
                     && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
@@ -1693,7 +1813,7 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
 
 /// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
 /// `Monster.getWalkTargetValue` 取负的光照路径代价。
-fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
+pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
     }
@@ -1906,7 +2026,7 @@ impl CombatTarget {
     }
 }
 
-fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
+pub(super) fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
     target_by_uid(mob, ctx, mob.target?)
 }
 
@@ -1918,15 +2038,19 @@ fn target_in_follow_range(me: &Entity, mob: &Mob, target: CombatTarget) -> bool 
 }
 
 fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
-    if ctx.blocks().difficulty() == 0 {
-        return None;
-    }
     let skeleton = mob.mob_type == super::MobType::Skeleton;
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
-        return (player.alive && !player.spectator && !player.creative)
+        // `LivingEntity.canAttack`：和平难度只排除玩家目标。
+        // `LivingEntity.canAttack`: peaceful only rules out player targets.
+        return (ctx.blocks().difficulty() != 0
+            && player.alive
+            && !player.spectator
+            && !player.creative)
             .then(|| CombatTarget::player(player, skeleton));
     }
-    if !skeleton {
+    // 骷髅和狐狸会把别的生物当目标。
+    // Skeletons and foxes can target other mobs.
+    if !skeleton && mob.mob_type != super::MobType::Fox {
         return None;
     }
     let other = ctx.other(uid)?;
@@ -1983,6 +2107,86 @@ fn nearest_attackable(
     found
 }
 
+/// `NearestAttackableTargetGoal.findTarget` 的生物分支：`FOLLOW_RANGE` 方盒里、
+/// 类型符合、看得见、在跟随距离内的最近一个（从眼睛高度量）。
+///
+/// The mob branch of `NearestAttackableTargetGoal.findTarget`: the nearest
+/// matching mob in sight within the follow range, measured from the eyes.
+fn nearest_mob_target(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    matches: impl Fn(super::MobType) -> bool,
+) -> Option<EntityUid> {
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+    let area = me.bounding_box().inflate(range, range, range);
+    let mut candidates = Vec::new();
+    ctx.for_each_other_in(area, &mut |other| {
+        let KindPublic::Mob(public) = &other.kind else {
+            return;
+        };
+        if other.uid == me.id || other.removed || !public.is_alive() || !matches(public.mob_type) {
+            return;
+        }
+        let (_, _, eye) = public.mob_type.dimensions(public.baby);
+        candidates.push((other.uid, other.position, eye));
+    });
+    let eye = Vec3::new(
+        me.position.x,
+        me.position.y + f64::from(mob.eye_height),
+        me.position.z,
+    );
+    let limit = mth::java_max(range, 2.0);
+    let mut best = -1.0_f64;
+    let mut found = None;
+    for (uid, position, target_eye) in candidates {
+        if me.position.distance_to_sqr(position) > limit * limit {
+            continue;
+        }
+        let target_eye = Vec3::new(position.x, position.y + f64::from(target_eye), position.z);
+        if !living::has_line_of_sight(me, mob, ctx.blocks(), uid, target_eye) {
+            continue;
+        }
+        let distance = position.distance_to_sqr(eye);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(uid);
+        }
+    }
+    found
+}
+
+/// `LeapAtTargetGoal.canUse`。
+fn leap_can_use(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
+    let Some(target) = combat_target(mob, ctx) else {
+        return false;
+    };
+    let distance = me.position.distance_to_sqr(target.position);
+    if !(4.0..=16.0).contains(&distance) {
+        return false;
+    }
+    me.on_ground && me.random.next_int_bounded(reduced_tick_delay(5)) == 0
+}
+
+/// `LeapAtTargetGoal.start`。
+fn leap_start(me: &mut Entity, mob: &Mob, ctx: &dyn EntityCtx, yd: f32) {
+    let Some(target) = combat_target(mob, ctx) else {
+        return;
+    };
+    let movement = me.delta;
+    let mut delta = Vec3::new(
+        target.position.x - me.position.x,
+        0.0,
+        target.position.z - me.position.z,
+    );
+    if delta.length_sqr() > 1.0e-7 {
+        delta = delta.normalize().scale(0.4).add(movement.scale(0.2));
+    }
+    me.delta = Vec3::new(delta.x, f64::from(yd), delta.z);
+}
+
 /// `PathfinderMob.isWithinMeleeAttackRange`：用实体交互范围算的方形距离。
 fn within_melee_range(me: &Entity, _mob: &Mob, target: CombatTarget) -> bool {
     // `Mob.DEFAULT_ATTACK_REACH = sqrt(2.04f) - 0.6f`（26.3 字节码）。
@@ -1991,12 +2195,14 @@ fn within_melee_range(me: &Entity, _mob: &Mob, target: CombatTarget) -> bool {
     let reach = 2.039_999_961_853_027_3_f64.sqrt() - f64::from(0.6_f32);
     let (width, height) = _mob.dimensions();
     let half = f64::from(width) / 2.0;
+    // `getAttackBoundingBox` 只在水平方向膨胀（`inflate(reach, 0, reach)`）。
+    // `getAttackBoundingBox` only grows horizontally (`inflate(reach, 0, reach)`).
     let ours = crate::shape::Aabb::new(
         me.position.x - half - reach,
-        me.position.y - reach,
+        me.position.y,
         me.position.z - half - reach,
         me.position.x + half + reach,
-        me.position.y + f64::from(height) + reach,
+        me.position.y + f64::from(height),
         me.position.z + half + reach,
     );
     ours.intersects(target.hitbox)

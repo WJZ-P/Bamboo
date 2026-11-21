@@ -29,6 +29,8 @@ const SERIALIZER_OPTIONAL_COMPONENT: i32 = 6;
 const SERIALIZER_ITEM_STACK: i32 = 7;
 const SERIALIZER_BOOLEAN: i32 = 8;
 const SERIALIZER_BLOCK_POS: i32 = 10;
+/// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`，注册顺序第 13 个。
+const SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE: i32 = 13;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
 /// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
 const SERIALIZER_PARTICLES: i32 = 17;
@@ -194,6 +196,16 @@ pub enum EntityData {
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
+    /// `Fox.DATA_TYPE_ID`：INT，红 0 雪 1。
+    ///
+    /// `Fox.DATA_TYPE_ID`: INT, red 0 and snow 1.
+    FoxType(i32),
+    /// `Fox.DATA_FLAGS_ID`：BYTE。
+    FoxFlags(u8),
+    /// `Fox.DATA_TRUSTED_ID_0` / `_1`：OPTIONAL_LIVING_ENTITY_REFERENCE（可空 UUID）。
+    ///
+    /// `Fox.DATA_TRUSTED_ID_0` / `_1`: an optional UUID reference.
+    FoxTrusted(u8, Option<[u8; 16]>),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -234,11 +246,33 @@ impl EntityData {
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
             Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
+            Self::FoxType(_) => mc_bamboo_data::entity_types::FOX_TYPE,
+            Self::FoxFlags(_) => mc_bamboo_data::entity_types::FOX_FLAGS,
+            Self::FoxTrusted(index, _) => *index,
         }
     }
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
+            Self::FoxType(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::FoxFlags(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value);
+            }
+            Self::FoxTrusted(_, uuid) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE,
+                );
+                out.push(u8::from(uuid.is_some()));
+                if let Some(uuid) = uuid {
+                    out.extend_from_slice(uuid);
+                }
+            }
             Self::ArrowFlags(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*value);

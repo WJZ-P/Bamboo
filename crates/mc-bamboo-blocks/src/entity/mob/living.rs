@@ -81,11 +81,19 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
     range_checks(me, mob);
+    // `LivingEntity.tick`：睡着的生物（只有狐狸）抬头角清零。
+    // `LivingEntity.tick`: a sleeping mob (only foxes) levels its head.
+    if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping() {
+        mob.x_rot = 0.0;
+    }
     // `Mob.tick`：每 5 刻按乘客和载具重设控制标志；牛没有乘客，三个都打开。
     if me.tick_count % 5 == 0 {
         mob.goals.set_control_flag(Flag::Move, true);
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
+    }
+    if mob.mob_type == super::MobType::Fox && !me.removed {
+        super::fox::tick_after(me, mob, ctx);
     }
 }
 
@@ -418,6 +426,10 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.ambient_sound_time += 1;
         if roll < time {
             mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
+            if mob.mob_type == super::MobType::Fox {
+                super::fox::play_ambient_sound(me, mob, ctx.blocks());
+                return;
+            }
             let pitch = voice_pitch(me, mob);
             let sound = mob
                 .mob_type
@@ -538,7 +550,7 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 }
 
 /// `getVoicePitch()`：两个 `nextFloat`，牛的叫声从不为空，静音时也照取。
-fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
+pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
@@ -547,6 +559,11 @@ fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
 fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
+    // `LivingEntity.isInWall`：睡着的不窒息（只有狐狸会睡）。
+    // `LivingEntity.isInWall`: sleepers never suffocate (only foxes sleep).
+    if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping() {
+        return false;
+    }
     let width = f64::from(me.dimensions.0 * 0.8);
     let eye = eye_y(me, mob);
     let bounds = mc_bamboo_core::Aabb::new(
@@ -591,6 +608,10 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.needs_sync = false;
+    let fox = mob.mob_type == super::MobType::Fox;
+    if fox {
+        super::fox::ai_step_before(me, mob, ctx);
+    }
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -709,6 +730,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
         burn_undead(me, mob, ctx);
     }
+    // `Mob.aiStep` 的捡东西那一段：这一期只给狐狸。
+    // The `Mob.aiStep` pickup loop; only foxes for now.
+    if fox {
+        super::fox::pick_up_items(me, mob, ctx);
+    }
     // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
     if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
@@ -751,6 +777,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Rabbit {
         super::rabbit::ai_step(mob);
     }
+    if fox {
+        super::fox::ai_step_after(me, mob);
+    }
 }
 
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
@@ -781,12 +810,24 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
         let mut targets = std::mem::take(&mut mob.target_goals);
         let phase = me.tick_count.wrapping_add(me.id);
+        let fox = mob.mob_type == super::MobType::Fox;
         if phase % 2 != 0 && me.tick_count > 1 {
             targets.tick_running(false, me, mob, ctx);
+            if fox {
+                super::fox::after_target_change(mob);
+            }
             goals.tick_running(false, me, mob, ctx);
         } else {
             targets.tick(me, mob, ctx);
+            // `Fox.setTarget(null)` 当场结束保护，后面的目标就看得到。
+            // `Fox.setTarget(null)` ends the defence at once for the goals after it.
+            if fox {
+                super::fox::after_target_change(mob);
+            }
             goals.tick(me, mob, ctx);
+        }
+        if fox {
+            super::fox::after_target_change(mob);
         }
         mob.target_goals = targets;
         mob.goals = goals;
@@ -802,6 +843,8 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     position: me.position,
                     kind: mob.mob_type,
                     father_rabbit: mob.rabbit.variant,
+                    father_fox: mob.fox.variant,
+                    father_love: mob.love_cause,
                 },
                 me,
             );
@@ -829,8 +872,19 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::rabbit::tick_jump_control(me, mob);
         return;
     }
-    move_control_tick(me, mob, ctx.blocks());
-    look_control_tick(me, mob);
+    if mob.mob_type == super::MobType::Fox {
+        // `FoxMoveControl.tick` 只在 `canMove` 时跑；`FoxLookControl.tick` 睡着时整个跳过。
+        // `FoxMoveControl` runs only when the fox can move; its look control skips sleep.
+        if mob.fox.can_move() {
+            move_control_tick(me, mob, ctx.blocks());
+        }
+        if !mob.fox.is_sleeping() {
+            look_control_tick(me, mob);
+        }
+    } else {
+        move_control_tick(me, mob, ctx.blocks());
+        look_control_tick(me, mob);
+    }
     // `JumpControl.tick`。
     mob.jumping = mob.jump.jump;
     mob.jump.jump = false;
@@ -899,7 +953,9 @@ fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
 
 /// `LookControl.tick`。
 fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
-    mob.x_rot = clamp_x_rot(0.0, mob.x_rot);
+    if mob.mob_type != super::MobType::Fox || super::fox::resets_x_rot(mob) {
+        mob.x_rot = clamp_x_rot(0.0, mob.x_rot);
+    }
     if mob.look.look_at_cooldown > 0 {
         mob.look.look_at_cooldown -= 1;
         if let Some(target) = look_y_rot(&mob.look, me.position.x, me.position.z) {
@@ -1587,6 +1643,11 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    // `Fox.dropAllDeathLoot`：嘴里的东西先掉，不看幼年和 `doMobLoot`。
+    // `Fox.dropAllDeathLoot` drops the mouth item first, babies and rules aside.
+    if mob.mob_type == super::MobType::Fox {
+        super::fox::drop_mouth_item(me, mob, ctx);
+    }
     let by_player = mob.last_hurt_by_player_memory_time > 0;
     if mob.mob_type == super::MobType::Skeleton {
         mob.events.push(MobEvent::Death);
@@ -1621,6 +1682,17 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
 }
 
+/// 父亲那一份繁殖数据（落地时父亲被拆出来，读不到）。
+///
+/// The father's breeding data; the father is detached when the command lands.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BreedFather {
+    pub(crate) kind: super::MobType,
+    pub(crate) rabbit: super::rabbit::Variant,
+    pub(crate) fox: super::fox::Variant,
+    pub(crate) love: Option<[u8; 16]>,
+}
+
 /// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
 /// `finalizeSpawnChildFromBreeding`。父母的年龄设成 6000、求爱清零，父亲发爱心事件，
 /// 按 `mob_drops` 生成一颗 `1 + random.nextInt(7)` 的经验球。
@@ -1631,20 +1703,38 @@ pub(crate) fn apply_breed(
     me: &mut Entity,
     partner: crate::entity::EntityUid,
     position: Vec3,
-    parent: (super::MobType, super::rabbit::Variant),
+    parent: BreedFather,
     world: &mut crate::world::World,
 ) {
-    let (kind, father) = parent;
-    let rabbit_variant = if kind == super::MobType::Rabbit {
-        let mother = world
-            .entity(partner)
-            .and_then(|entity| entity.kind.mob().map(|mob| mob.rabbit.variant))
-            .unwrap_or(father);
-        super::rabbit::offspring_variant(me, father, mother, world)
-    } else {
-        let _ = me.random.next_boolean();
-        super::rabbit::Variant::default()
-    };
+    let kind = parent.kind;
+    let mother = world.entity(partner).and_then(|entity| {
+        entity
+            .kind
+            .mob()
+            .map(|mob| (mob.rabbit.variant, mob.fox.variant, mob.love_cause))
+    });
+    let mut rabbit_variant = super::rabbit::Variant::default();
+    let mut fox = None;
+    match kind {
+        super::MobType::Rabbit => {
+            let mother = mother.map_or(parent.rabbit, |(rabbit, _, _)| rabbit);
+            rabbit_variant = super::rabbit::offspring_variant(me, parent.rabbit, mother, world);
+        }
+        super::MobType::Fox => {
+            let (variant, love) = mother.map_or((parent.fox, None), |(_, fox, love)| (fox, love));
+            fox = Some(super::fox::offspring(
+                me,
+                parent.fox,
+                variant,
+                [parent.love, love],
+            ));
+        }
+        _ => {
+            // `Cow.getBreedOffspring` 从父亲随机源取一个 `nextBoolean` 选花色。
+            // `Cow.getBreedOffspring` draws one `nextBoolean` for the colour.
+            let _ = me.random.next_boolean();
+        }
+    }
     let xp = 1 + me.random.next_int_bounded(7);
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
@@ -1659,6 +1749,9 @@ pub(crate) fn apply_breed(
     calf.y_rot = 0.0;
     calf.with_mob(|me, mob| {
         mob.rabbit.variant = rabbit_variant;
+        if let Some(fox) = fox.take() {
+            mob.fox = fox;
+        }
         set_age(me, mob, -24000);
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;
@@ -1702,6 +1795,12 @@ pub(crate) fn apply_push(
     let Some(target) = world.entity(other) else {
         return;
     };
+    // `LivingEntity.push(Entity)`：睡着的（狐狸）谁也推不动，也不把人推回去。
+    // `LivingEntity.push(Entity)`: a sleeper (a fox) is not pushed and pushes nobody back.
+    if matches!(&target.kind, EntityKind::Mob(mob) if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
+    {
+        return;
+    }
     let Some((dx, dz)) = push_amount(target.position, me.position) else {
         return;
     };

@@ -166,6 +166,11 @@ struct Case {
     bright_outside: bool,
     #[serde(default)]
     monsters_burn: bool,
+    /// 狐狸场景：像刷出来的狐狸一样带上捕猎目标（`Fox.setTargetGoals`）。
+    ///
+    /// Fox scenes: add the hunting goals like a spawned fox.
+    #[serde(default)]
+    fox_hunts: bool,
     /// 僵尸场景：玩家走游戏层真实的受伤链路（[`mc_bamboo_game::ReplayPlayers`]）。
     #[serde(default)]
     real_players: bool,
@@ -379,6 +384,11 @@ struct CowSetup {
     /// 0 牛 / 1 僵尸 / 2 尸壳；缺省按牛（旧场景）。
     #[serde(default)]
     kind: i32,
+    /// 狐狸 `SleepGoal` 构造时取的倒计时，官方那一边报过来。
+    ///
+    /// The fox `SleepGoal` countdown drawn at construction, from the official side.
+    #[serde(default)]
+    sleep: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -453,6 +463,10 @@ struct CowStep {
     armor: i64,
     #[serde(default, rename = "rabbitCarrotTicks")]
     rabbit_carrot_ticks: i32,
+    #[serde(default, rename = "foxFlags")]
+    fox_flags: i32,
+    #[serde(default, rename = "foxMouth")]
+    fox_mouth: i32,
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸和兔子、狐狸、狼。
@@ -1090,6 +1104,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    4 => mc_bamboo_blocks::entity::mob::MobType::Fox,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
@@ -1110,6 +1125,14 @@ impl Report {
                         mob.y_body_rot = yaw;
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
+                    if let Some(mob) = entity.kind.mob_mut()
+                        && kind == mc_bamboo_blocks::entity::mob::MobType::Fox
+                    {
+                        mc_bamboo_blocks::entity::mob::fox::set_sleep_countdown(mob, cow.sleep);
+                        if case.fox_hunts {
+                            mc_bamboo_blocks::entity::mob::fox::set_target_goals(mob);
+                        }
+                    }
                     if cow.age != 0 {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
@@ -1654,6 +1677,8 @@ impl Report {
             plain!(goals);
             if zombie_style(name) {
                 plain!(rabbit_carrot_ticks);
+                plain!(fox_flags);
+                plain!(fox_mouth);
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -2895,7 +2920,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         snd: mob.sound_variant.name().to_owned(),
         uuid: uuid_text(&mob.uuid),
         lr,
-        goals: mob.goals.running_names().join(" "),
+        goals: mob.goals.running_class_names(mob.mob_type).join(" "),
         path,
         target: mob.target.unwrap_or(-1),
         // Java 一侧只报僵尸的幼年元数据。
@@ -2908,6 +2933,18 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         pcd: 0,
         bh: 0,
         rabbit_carrot_ticks: mob.rabbit.more_carrot_ticks,
+        fox_flags: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
+            i32::from(mob.fox.flags)
+        } else {
+            0
+        },
+        fox_mouth: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
+            mob.equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                .item
+        } else {
+            0
+        },
         hd: {
             let head = mob
                 .equipment

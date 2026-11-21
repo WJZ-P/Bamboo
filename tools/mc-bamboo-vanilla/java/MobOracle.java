@@ -400,6 +400,8 @@ public final class MobOracle {
         int skyDarken;
         boolean raining;
         boolean brightOutside = true;
+        /// 狐狸场景：反射调 `Fox.setTargetGoals`，让它像刷出来的狐狸一样捕猎。
+        boolean foxHunts;
         boolean monstersBurn = true;
         /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
         boolean realPlayers;
@@ -780,6 +782,81 @@ public final class MobOracle {
         public void sendToTrackingPlayersFiltered(Packet<? super ClientGamePacketListener> packet,
                 java.util.function.Predicate<ServerPlayer> filter) {
             add(packet);
+        }
+    }
+
+    /** `SleepGoal.countdown` 在构造时用随机种子取，对拍时报给 Bamboo 一侧照填。 */
+    static int foxSleepCountdown(Mob mob) {
+        if (!(mob instanceof net.minecraft.world.entity.animal.fox.Fox)) return 0;
+        for (WrappedGoal goal : mob.getGoalSelector().getAvailableGoals()) {
+            if (goal.getGoal().getClass().getSimpleName().equals("SleepGoal")) {
+                return getInt(goal.getGoal().getClass(), goal.getGoal(), "countdown");
+            }
+        }
+        return 0;
+    }
+
+    static Object readStatic(Class<?> owner, String name) {
+        try {
+            java.lang.reflect.Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(null);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** 狐狸场景：白天和夜里闲逛、有遮挡的白天睡觉、躲玩家、潜行玩家、捡物品、吃浆果、追兔子。 */
+    static final class FoxScenes {
+        static void add(List<Scene> scenes) {
+            for (long seed : new long[] {3L, 31L}) {
+                Scene day = new Scene("fox_day_" + seed).ticks(600);
+                Scenes.ground(day, 15);
+                day.mob(4, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(day);
+            }
+            Scene night = new Scene("fox_night").ticks(600);
+            night.skyDarken = 11;
+            night.brightOutside = false;
+            Scenes.ground(night, 15);
+            night.mob(4, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+            scenes.add(night);
+            Scene roof = new Scene("fox_sleep_roof").ticks(400);
+            Scenes.ground(roof, 8);
+            roof.fill(-8, 66, -8, 8, 66, 8, Scenes.STONE);
+            roof.mob(4, 0.5, 64.0, 0.5, 0.0F, 21L, 0);
+            scenes.add(roof);
+            Scene flee = new Scene("fox_flee_player").ticks(200).difficulty(2);
+            Scenes.ground(flee, 15);
+            flee.mob(4, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
+            flee.player(6.5, 64.0, 0.5, Items.AIR);
+            scenes.add(flee);
+            Scene berries = new Scene("fox_berries").ticks(300);
+            Scenes.ground(berries, 10);
+            berries.set(2, 64, 0, Blocks.SWEET_BERRY_BUSH.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.SweetBerryBushBlock.AGE, 3));
+            berries.mob(4, 0.5, 64.0, 0.5, 0.0F, 25L, 0);
+            scenes.add(berries);
+            for (long seed : new long[] {41L, 43L}) {
+                // 兔子死后掉的东西 Java 一侧不进实体表，场景在狐狸去捡之前结束。
+                Scene hunt = new Scene("fox_hunt_" + seed).ticks(seed == 41L ? 270 : 115);
+                hunt.foxHunts = true;
+                Scenes.ground(hunt, 15);
+                hunt.mob(4, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                hunt.mob(3, 9.5, 64.0, 0.5, 0.0F, seed + 1, 0);
+                scenes.add(hunt);
+            }
+            Scene snow = new Scene("fox_hunt_snow").ticks(108);
+            snow.foxHunts = true;
+            Scenes.ground(snow, 12);
+            snow.fill(-12, 64, -12, 12, 64, 12, Blocks.SNOW.defaultBlockState());
+            snow.mob(4, 0.5, 64.2, 0.5, 0.0F, 45L, 0);
+            snow.mob(3, 8.5, 64.2, 0.5, 0.0F, 46L, 0);
+            scenes.add(snow);
+            Scene baby = new Scene("fox_baby").ticks(300);
+            Scenes.ground(baby, 15);
+            baby.mob(4, 0.5, 64.0, 0.5, 0.0F, 27L, -24000);
+            scenes.add(baby);
         }
     }
 
@@ -1627,6 +1704,7 @@ public final class MobOracle {
             rabbitHop.mob(3, 0.5, 64.0, 0.5, 0.0F, 42L, 0);
             scenes.add(rabbitHop);
             RabbitScenes.add(scenes);
+            FoxScenes.add(scenes);
 
             Scene rabbitRaid = new Scene("rabbit_raid").ticks(60);
             rabbitRaid.fill(-4, 63, -4, 4, 63, 4, Blocks.GRASS_BLOCK.defaultBlockState());
@@ -2971,6 +3049,7 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
+                case 4 -> EntityTypes.FOX.create(level, EntitySpawnReason.COMMAND);
                 case 3 -> EntityTypes.RABBIT.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
@@ -2989,6 +3068,11 @@ public final class MobOracle {
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.fox.Fox fox && scene.foxHunts) {
+                java.lang.reflect.Method hunts = fox.getClass().getDeclaredMethod("setTargetGoals");
+                hunts.setAccessible(true);
+                hunts.invoke(fox);
             }
             if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
                 ageable.setAge(scene.cowAges.get(i));
@@ -3019,7 +3103,8 @@ public final class MobOracle {
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
-            line.append(",\"kind\":").append(kind[0]).append('}');
+            line.append(",\"kind\":").append(kind[0]);
+            line.append(",\"sleep\":").append(foxSleepCountdown(mobs.get(i))).append('}');
         }
         line.append("],\"players\":[");
         for (int i = 0; i < players.size(); i++) {
@@ -3038,6 +3123,7 @@ public final class MobOracle {
         line.append(",\"raining\":").append(scene.raining);
         line.append(",\"brightOutside\":").append(scene.brightOutside);
         line.append(",\"monstersBurn\":").append(scene.monstersBurn);
+        line.append(",\"foxHunts\":").append(scene.foxHunts);
         line.append(",\"deathKind\":0,\"fireTicks\":").append(scene.fireTicks);
         line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
                 scene.realPlayers ? scene.playerHealth : 20.0F));
@@ -3194,6 +3280,12 @@ public final class MobOracle {
             out.append(",\"air\":").append(mob.getAirSupply());
             out.append(",\"seed\":").append(randomSeed(mob));
             out.append(",\"age\":").append(mob instanceof net.minecraft.world.entity.AgeableMob ageable ? ageable.getAge() : 0);
+            if (mob instanceof net.minecraft.world.entity.animal.fox.Fox fox) {
+                out.append(",\"foxFlags\":").append(fox.getEntityData().get(
+                        (net.minecraft.network.syncher.EntityDataAccessor<Byte>) readStatic(fox.getClass(), "DATA_FLAGS_ID")) & 0xFF);
+                out.append(",\"foxMouth\":").append(net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(
+                        fox.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND).getItem()));
+            }
             if (mob instanceof net.minecraft.world.entity.animal.rabbit.Rabbit rabbit) {
                 out.append(",\"rabbitCarrotTicks\":").append(getInt(rabbit.getClass(), rabbit, "moreCarrotTicks"));
             }
@@ -3203,7 +3295,9 @@ public final class MobOracle {
             out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
-            out.append(",\"target\":").append(mob.getTarget() == null ? -1 : mob.getTarget().getId());
+            // 狐狸比原始的 `target` 字段：`getTarget()` 会把死掉的猎物读成空，Bamboo 存原始值。
+            LivingEntity shownTarget = mob instanceof net.minecraft.world.entity.animal.fox.Fox ? mob.getTargetUnchecked() : mob.getTarget();
+            out.append(",\"target\":").append(shownTarget == null ? -1 : shownTarget.getId());
             out.append(",\"baby\":").append(mob instanceof Zombie z && z.isBaby());
             out.append(",\"aggr\":").append(mob.isAggressive());
             out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());

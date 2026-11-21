@@ -327,6 +327,18 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Int(mob.rabbit.more_carrot_ticks),
         );
     }
+    // ---- Fox.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Fox {
+        let trusted = mob.fox.trusted.iter().flatten().map(uuid_tag).collect();
+        put(&mut out, "Trusted", Tag::List(trusted));
+        let fox = &mob.fox;
+        put(&mut out, "Sleeping", Tag::Byte(i8::from(fox.is_sleeping())));
+        put(&mut out, "Type", Tag::String(fox.variant.name().to_owned()));
+        let sitting = fox.has(super::fox::FLAG_SITTING);
+        put(&mut out, "Sitting", Tag::Byte(i8::from(sitting)));
+        let crouching = fox.has(super::fox::FLAG_CROUCHING);
+        put(&mut out, "Crouching", Tag::Byte(i8::from(crouching)));
+    }
     if mob.mob_type == MobType::Cow {
         put(
             &mut out,
@@ -484,6 +496,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Rabbit {
             mob.rabbit.variant = super::rabbit::Variant::from_id(tag::int_or(tag, "RabbitType", 0));
             mob.rabbit.more_carrot_ticks = tag::int_or(tag, "MoreCarrotTicks", 0);
+        }
+        if mob.mob_type == MobType::Fox {
+            read_fox(mob, tag);
         }
         if mob.mob_type == MobType::Cow {
             if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
@@ -657,6 +672,50 @@ pub(crate) fn uuid_tag(bytes: &[u8; 16]) -> Tag {
         *word = value as i32;
     }
     Tag::IntArray(words.to_vec())
+}
+
+/// `Fox.readAdditionalSaveData`：清空信任名单再逐个加回，最后 `setTargetGoals`。
+///
+/// `Fox.readAdditionalSaveData`: refill the trusted list, then `setTargetGoals`.
+fn read_fox(mob: &mut super::Mob, tag: &Tag) {
+    mob.fox.trusted = [None, None];
+    if let Some(Tag::List(entries)) = tag::field(tag, "Trusted") {
+        for entry in entries {
+            if let Some(uuid) = uuid_words(entry) {
+                mob.fox.add_trusted(uuid);
+            }
+        }
+    }
+    let fox = &mut mob.fox;
+    fox.set(
+        super::fox::FLAG_SLEEPING,
+        tag::bool_or(tag, "Sleeping", false),
+    );
+    fox.variant = tag::string_or(tag, "Type")
+        .and_then(super::fox::Variant::from_name)
+        .unwrap_or_default();
+    fox.set(
+        super::fox::FLAG_SITTING,
+        tag::bool_or(tag, "Sitting", false),
+    );
+    fox.set(
+        super::fox::FLAG_CROUCHING,
+        tag::bool_or(tag, "Crouching", false),
+    );
+    super::fox::set_target_goals(mob);
+}
+
+fn uuid_words(tag: &Tag) -> Option<[u8; 16]> {
+    match tag {
+        Tag::IntArray(words) if words.len() == 4 => {
+            let mut out = [0u8; 16];
+            for (index, word) in words.iter().enumerate() {
+                out[index * 4..index * 4 + 4].copy_from_slice(&(*word as u32).to_be_bytes());
+            }
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 fn uuid_field(tag: &Tag, key: &str) -> Option<[u8; 16]> {

@@ -470,6 +470,12 @@ impl Entity {
             // The rabbit constructor draws a head-idle delay used only by the client.
             let _ = self.random.next_int_bounded(40);
         }
+        if mob.mob_type == mob::MobType::Fox {
+            // `Mob` 构造函数里 `registerGoals` 建 `SleepGoal`，字段初始化取一次倒计时。
+            // `registerGoals` in the `Mob` constructor draws the `SleepGoal` countdown.
+            let countdown = mob::fox::sleep_countdown(&mut self.random);
+            mob::fox::set_sleep_countdown(mob, countdown);
+        }
     }
 
     /// 对生物跑一段逻辑；不是生物时返回 `None`。

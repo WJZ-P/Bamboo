@@ -927,6 +927,17 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             {
                 EntityData::RabbitVariant(0)
             }
+            entity_types::FOX_TYPE if kind == mc_bamboo_blocks::entity::mob::MobType::Fox => {
+                EntityData::FoxType(0)
+            }
+            entity_types::FOX_FLAGS if kind == mc_bamboo_blocks::entity::mob::MobType::Fox => {
+                EntityData::FoxFlags(0)
+            }
+            entity_types::FOX_TRUSTED_0 | entity_types::FOX_TRUSTED_1
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Fox =>
+            {
+                EntityData::FoxTrusted(index, None)
+            }
             18 => EntityData::CowVariant(1),
             19 => EntityData::CowSoundVariant(0),
             // `CustomName` 是 optional component，空时写 boolean false。
@@ -1009,6 +1020,28 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     out
 }
 
+/// 狐狸自己的四项元数据，按 index 升序：品种 18、标志 19、两个信任格 20 和 21。
+///
+/// The four fox items in index order: variant, flags and two trusted slots.
+fn fox_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    let mut out = Vec::new();
+    if mob.fox_variant != 0 {
+        out.push(EntityData::FoxType(mob.fox_variant));
+    }
+    if mob.fox_flags != 0 {
+        out.push(EntityData::FoxFlags(mob.fox_flags));
+    }
+    for (index, trusted) in [entity_types::FOX_TRUSTED_0, entity_types::FOX_TRUSTED_1]
+        .into_iter()
+        .zip(mob.fox_trusted)
+    {
+        if trusted.is_some() {
+            out.push(EntityData::FoxTrusted(index, trusted));
+        }
+    }
+    out
+}
+
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
@@ -1082,6 +1115,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     // The registry defaults are temperate / classic.
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Rabbit && mob.rabbit_variant != 0 {
         out.push(EntityData::RabbitVariant(mob.rabbit_variant));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
+        out.extend(fox_non_default_data(mob));
     }
     if mob.variant.registry_id() != 1 {
         out.push(EntityData::CowVariant(mob.variant.registry_id()));

@@ -748,7 +748,9 @@ fn entity_inside(
             DamageSource::environment(DamageKind::Cactus),
             1.0,
         );
-    } else if state.is(blocks::SWEET_BERRY_BUSH) {
+    } else if state.is(blocks::SWEET_BERRY_BUSH) && mob.mob_type != super::MobType::Fox {
+        // 狐狸（和蜜蜂）不被浆果丛卡住也不扎。
+        // Foxes (and bees) are neither slowed nor pricked by berry bushes.
         me.fall_distance = 0.0;
         me.stuck_speed_multiplier = Vec3::new(f64::from(0.8_f32), 0.75, f64::from(0.8_f32));
         if state.try_get(AGE_3).unwrap_or(0) != 0 {

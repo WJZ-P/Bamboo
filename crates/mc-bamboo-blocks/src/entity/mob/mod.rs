@@ -18,6 +18,8 @@ pub mod control;
 pub mod damage;
 pub mod effects;
 pub mod equipment;
+pub mod fox;
+pub mod fox_goals;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -52,6 +54,7 @@ pub enum MobType {
     #[default]
     Cow,
     Rabbit,
+    Fox,
     Zombie,
     Husk,
     Skeleton,
@@ -64,6 +67,7 @@ impl MobType {
         match self {
             Self::Cow => ids::COW,
             Self::Rabbit => ids::RABBIT,
+            Self::Fox => ids::FOX,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -75,6 +79,7 @@ impl MobType {
         match self {
             Self::Cow => "minecraft:cow",
             Self::Rabbit => "minecraft:rabbit",
+            Self::Fox => "minecraft:fox",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -86,6 +91,7 @@ impl MobType {
         match self {
             Self::Cow => Some(item_tags::COW_FOOD),
             Self::Rabbit => Some(item_tags::RABBIT_FOOD),
+            Self::Fox => Some(item_tags::FOX_FOOD),
             _ => None,
         }
     }
@@ -106,6 +112,7 @@ impl MobType {
         [
             Self::Cow,
             Self::Rabbit,
+            Self::Fox,
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
@@ -126,6 +133,7 @@ impl MobType {
                 )
             }
             (Self::Rabbit, baby) => rabbit::dimensions(baby),
+            (Self::Fox, baby) => fox::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -166,6 +174,7 @@ impl MobType {
         match self {
             Self::Cow => "minecraft:entities/cow",
             Self::Rabbit => "minecraft:entities/rabbit",
+            Self::Fox => "minecraft:entities/fox",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -193,6 +202,7 @@ impl MobType {
         match self {
             Self::Cow => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.ambient"),
+            Self::Fox => Some("minecraft:entity.fox.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
@@ -203,6 +213,7 @@ impl MobType {
         match self {
             Self::Cow => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.hurt"),
+            Self::Fox => Some("minecraft:entity.fox.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -213,6 +224,7 @@ impl MobType {
         match self {
             Self::Cow => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.death"),
+            Self::Fox => Some("minecraft:entity.fox.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -222,7 +234,7 @@ impl MobType {
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
             Self::Cow => None,
-            Self::Rabbit => None,
+            Self::Rabbit | Self::Fox => None,
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
@@ -235,6 +247,7 @@ impl MobType {
         match self {
             Self::Cow => items::COW_SPAWN_EGG,
             Self::Rabbit => items::RABBIT_SPAWN_EGG,
+            Self::Fox => items::FOX_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -246,6 +259,7 @@ impl MobType {
         match self {
             Self::Cow => "entity.minecraft.cow",
             Self::Rabbit => "entity.minecraft.rabbit",
+            Self::Fox => "entity.minecraft.fox",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -936,6 +950,7 @@ pub struct Mob {
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
     pub rabbit: rabbit::Rabbit,
+    pub fox: fox::Fox,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
@@ -1000,6 +1015,7 @@ impl Mob {
         let attributes = match mob_type {
             MobType::Cow => Attributes::cow(),
             MobType::Rabbit => rabbit::attributes(),
+            MobType::Fox => fox::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
@@ -1008,16 +1024,18 @@ impl Mob {
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
             MobType::Rabbit => rabbit::goals(&mut navigation),
+            MobType::Fox => fox::goals(&mut navigation, 0),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
             MobType::Cow | MobType::Rabbit => GoalSelector::default(),
+            MobType::Fox => fox::target_goals(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
-        Self {
+        let mut mob = Self {
             mob_type,
             uuid: [0; 16],
             x_rot: 0.0,
@@ -1130,11 +1148,16 @@ impl Mob {
             variant: CowVariant::Temperate,
             sound_variant: CowSoundVariant::Classic,
             rabbit: rabbit::Rabbit::default(),
+            fox: fox::Fox::default(),
             events: Vec::new(),
             needs_sync: false,
             hurt_marked: false,
             pending_breed: None,
+        };
+        if mob_type == MobType::Fox {
+            fox::configure(&mut mob);
         }
+        mob
     }
 
     /// `PowderSnowBlock.canEntityWalkOnPowderSnow`：类型在 `powder_snow_walkable_mobs`
@@ -1236,6 +1259,12 @@ pub struct MobPublic {
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
     pub rabbit_variant: i32,
+    /// `Fox.DATA_TYPE_ID` / `DATA_FLAGS_ID` / 两个信任格。
+    ///
+    /// The fox variant, flags and two trusted slots.
+    pub fox_variant: i32,
+    pub fox_flags: u8,
+    pub fox_trusted: [Option<[u8; 16]>; 2],
     pub needs_sync: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
@@ -1282,6 +1311,9 @@ impl MobPublic {
             variant: mob.variant,
             sound_variant: mob.sound_variant,
             rabbit_variant: mob.rabbit.variant.id(),
+            fox_variant: mob.fox.variant.id(),
+            fox_flags: mob.fox.flags,
+            fox_trusted: mob.fox.trusted,
             needs_sync: mob.needs_sync,
             on_fire: remaining_fire_ticks > 0,
             ticks_frozen: mob.ticks_frozen,

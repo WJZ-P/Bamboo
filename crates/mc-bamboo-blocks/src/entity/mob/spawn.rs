@@ -151,6 +151,20 @@ pub fn spawn_egg(
     }
     let uid = world.add_prepared_entity(entity);
     // `Mob.playAmbientSound`：放进世界之后叫一声，用生物自己的随机源取音高。
+    if kind == MobType::Fox {
+        // `Fox.playAmbientSound` 要看天色和 16 格内的玩家，先在世界里取好。
+        // `Fox.playAmbientSound` reads the sky and nearby players, gathered first.
+        let bright = crate::entity::ctx::BlockView::is_bright_outside(&*world);
+        let mut players = Vec::new();
+        crate::entity::ctx::BlockView::for_each_player(&*world, &mut |player| {
+            players.push(*player)
+        });
+        world.with_entity_mut(uid, &mut |entity| {
+            entity
+                .with_mob(|me, mob| super::fox::play_ambient_sound_with(me, mob, bright, &players));
+        });
+        return uid;
+    }
     world.with_entity_mut(uid, &mut |entity| {
         entity.with_mob(living::play_ambient_sound);
     });
@@ -218,6 +232,13 @@ pub(crate) fn finalize_spawn(
     }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
+    if kind == MobType::Fox {
+        entity.with_mob(|_, mob| {
+            super::fox::finalize_spawn(mob, biome, random);
+            finalize_animal(mob, random);
+        });
+        return;
+    }
     if kind == MobType::Rabbit {
         entity.with_mob(|_, mob| {
             mob.rabbit.variant = super::rabbit::random_variant(biome, random);
