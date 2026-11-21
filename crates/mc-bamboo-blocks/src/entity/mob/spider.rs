@@ -121,7 +121,13 @@ pub fn goals(navigation: &mut Navigation) -> GoalSelector {
 /// The `targetSelector` half: retaliation, then the dark-only player and iron golem goals.
 pub fn target_goals(_navigation: &mut Navigation) -> GoalSelector {
     GoalSelector::from_goals(vec![
-        wrap(1, Goal::HurtByTarget { timestamp: -1 }),
+        wrap(
+            1,
+            Goal::HurtByTarget {
+                timestamp: -1,
+                unseen_ticks: 0,
+            },
+        ),
         wrap(2, Goal::spider_target(TargetType::Player)),
         wrap(3, Goal::spider_target(TargetType::IronGolem)),
     ])

@@ -111,6 +111,7 @@ import net.minecraft.world.entity.animal.cow.Cow;
 import net.minecraft.world.entity.animal.pig.Pig;
 import net.minecraft.world.entity.animal.sheep.Sheep;
 import net.minecraft.world.entity.animal.chicken.Chicken;
+import net.minecraft.world.entity.animal.polarbear.PolarBear;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
@@ -267,6 +268,9 @@ public final class MobOracle {
             if (only == null || "equine".startsWith(only)) {
                 cases += playEquines(official, out);
             }
+            if (only == null || "panda".startsWith(only)) {
+                cases += playPandaGenes(official, out);
+            }
             if (only == null || "llama_spit".startsWith(only)) {
                 OracleLlama.checkAim(official);
                 playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
@@ -318,11 +322,12 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only) || "natural_fish".equals(only)) {
-                cases += playNaturalSpawns(official, out, "natural_fish".equals(only));
+            if ("natural_spawn".equals(only) || "natural_spawn_panda".equals(only) || "natural_fish".equals(only)) {
+                cases += playNaturalSpawns(official, out,
+                        "natural_fish".equals(only), "natural_spawn_panda".equals(only));
             }
-            if ("gen_spawn".equals(only)) {
-                cases += playGenSpawns(official, out);
+            if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
+                cases += playGenSpawns(official, out, only);
             }
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
@@ -381,6 +386,10 @@ public final class MobOracle {
         final List<float[]> yaws = new ArrayList<>();
         /** 每头牛的初始 `Age`，默认 0（成年）。 */
         final List<Integer> cowAges = new ArrayList<>();
+        /** 每头熊猫的显性 / 隐性基因 id，和 `cows` 下标对齐。 */
+        final List<int[]> genes = new ArrayList<>();
+        /** 每头熊猫主手一开始拿的东西，和 `cows` 下标对齐。 */
+        final List<Item> holds = new ArrayList<>();
         final List<double[]> players = new ArrayList<>();
         final List<Item> playerItems = new ArrayList<>();
         /** 玩家主手物品的抢夺等级，0 表示没有。 */
@@ -536,6 +545,15 @@ public final class MobOracle {
             seeds.add(seed);
             cowAges.add(age);
             mobKinds.add(new int[] {kind});
+            return this;
+        }
+
+        /** 一只熊猫：显性 / 隐性基因和主手物品跟在它后面。 */
+        Scene panda(double x, double y, double z, float yaw, long seed, int age,
+                int mainGene, int hiddenGene, Item hold) {
+            cow(x, y, z, yaw, seed, age);
+            genes.add(new int[] {mainGene, hiddenGene});
+            holds.add(hold);
             return this;
         }
 
@@ -907,7 +925,7 @@ public final class MobOracle {
      * (colour plus shear mark, variant plus egg timer); the rest keep the defaults,
      * matching Bamboo's `farm_variant`.
      */
-    static String caseVariant(Mob mob) {
+    static String caseVariant(Mob mob) throws Exception {
         if (mob instanceof Sheep || mob instanceof Chicken) {
             return farmVariant((Animal) mob);
         }
@@ -1182,6 +1200,254 @@ public final class MobOracle {
         static final BlockState WATER = Blocks.WATER.defaultBlockState();
         static final BlockState LAVA = Blocks.LAVA.defaultBlockState();
 
+        /** op-misc 的生物：哞菇（接炖菜、挤奶、喂花、剪成牛、繁殖变种、幼年不能剪）。 */
+        static void miscScenes(List<Scene> scenes) {
+            int bowl = BuiltInRegistries.ITEM.getId(Items.BOWL);
+            int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
+            int wheat = BuiltInRegistries.ITEM.getId(Items.WHEAT);
+            int bucket = BuiltInRegistries.ITEM.getId(Items.BUCKET);
+            int daisy = BuiltInRegistries.ITEM.getId(Items.OXEYE_DAISY);
+            {
+                // 红色哞菇：碗接蘑菇煲、桶挤奶、花不吃（PASS）、小麦求爱，最后打死看掉落。
+                // 在尸体移除（第 60 刻）之前结束，原因同 chicken_breed。
+                Scene stew = new Scene("mooshroom_stew").ticks(58).drops().packets();
+                ground(stew, 6);
+                stew.cow(0.5, 64.0, 0.5, 0.0F, 301L);
+                stew.player(1.5, 64.0, 0.5, Items.AIR);
+                stew.interact(3, 0, 0, bowl, 0);
+                stew.interact(5, 0, 0, bucket, 0);
+                stew.interact(7, 0, 0, daisy, 0);
+                stew.interact(9, 0, 0, wheat, 0);
+                stew.interact(11, 0, 0, bowl, 1);
+                stew.hurts.add(new double[] {40, 0, 30.0, 0});
+                scenes.add(stew);
+            }
+            {
+                // 棕色哞菇吃花：第一次吃掉并记下效果，第二次只冒烟不消耗；碗先接迷之炖菜再接蘑菇煲。
+                Scene flower = new Scene("mooshroom_flower").ticks(40).drops().packets();
+                ground(flower, 6);
+                flower.wool = 1;
+                flower.cow(0.5, 64.0, 0.5, 0.0F, 302L);
+                flower.player(1.5, 64.0, 0.5, Items.AIR);
+                flower.interact(3, 0, 0, daisy, 0);
+                flower.interact(5, 0, 0, daisy, 0);
+                flower.interact(7, 0, 0, bowl, 0);
+                flower.interact(9, 0, 0, bowl, 0);
+                flower.interact(11, 0, 0, daisy, 1);
+                scenes.add(flower);
+            }
+            for (int type = 0; type < 2; type++) {
+                // 剪毛：哞菇变成牛（抄位置、朝向、速度），掉五个对应颜色的蘑菇。
+                Scene shear = new Scene(type == 0 ? "mooshroom_shear_red" : "mooshroom_shear_brown")
+                        .ticks(60).drops().packets();
+                ground(shear, 6);
+                shear.wool = type;
+                shear.cow(0.5, 64.0, 0.5, 75.0F, 303L + type);
+                shear.player(1.5, 64.0, 0.5, Items.AIR);
+                shear.interact(12, 0, 0, shears, 0);
+                scenes.add(shear);
+            }
+            for (int type = 0; type < 2; type++) {
+                // 同色繁殖：先抽 nextInt(1024) 的变异，再 nextBoolean。
+                Scene breed = new Scene(type == 0 ? "mooshroom_breed_red" : "mooshroom_breed_brown")
+                        .ticks(120).drops().packets();
+                ground(breed, 8);
+                breed.wool = type;
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 305L + type);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 307L + type);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(2, 0, 0, wheat, 0);
+                breed.interact(2, 1, 0, wheat, 0);
+                scenes.add(breed);
+            }
+            {
+                // 幼年哞菇：剪刀、碗、桶都是 PASS，小麦催熟。
+                Scene baby = new Scene("mooshroom_baby").ticks(40).packets();
+                ground(baby, 6);
+                baby.cow(0.5, 64.0, 0.5, 0.0F, 309L, -24000);
+                baby.player(1.5, 64.0, 0.5, Items.AIR);
+                baby.interact(3, 0, 0, shears, 0);
+                baby.interact(5, 0, 0, bowl, 0);
+                baby.interact(7, 0, 0, bucket, 0);
+                baby.interact(9, 0, 0, wheat, 0);
+                scenes.add(baby);
+            }
+            polarBearScenes(scenes);
+            pandaScenes(scenes);
+        }
+
+        /**
+         * 熊猫：闲逛、三种基因、坐下吃竹子、繁殖和死亡掉落。
+         *
+         * Pandas: strolling, three genes, sitting down to eat bamboo, breeding and death loot.
+         */
+        static void pandaScenes(List<Scene> scenes) {
+            int bamboo = BuiltInRegistries.ITEM.getId(Items.BAMBOO);
+            {
+                // 成年和幼崽闲逛：玩家在 20 格外，躲避和看玩家目标都看不见人。
+                Scene idle = new Scene("panda_idle").ticks(400).packets();
+                ground(idle, 24);
+                idle.panda(0.5, 64.0, 0.5, 0.0F, 501L, 0, 0, 0, Items.AIR);
+                idle.panda(3.5, 64.0, 2.5, 90.0F, 502L, 0, 0, 0, Items.AIR);
+                idle.panda(1.5, 64.0, 1.5, 180.0F, 503L, -24000, 0, 0, Items.AIR);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                // 懒惰、虚弱和棕色：站立数值、仰躺和外观都要对上。
+                Scene genes = new Scene("panda_genes").ticks(400).packets();
+                ground(genes, 24);
+                genes.panda(0.5, 64.0, 0.5, 45.0F, 504L, 0, 1, 0, Items.AIR);
+                genes.panda(3.5, 64.0, 0.5, 0.0F, 505L, 0, 5, 5, Items.AIR);
+                genes.panda(6.5, 64.0, 0.5, 0.0F, 506L, 0, 4, 4, Items.AIR);
+                genes.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(genes);
+            }
+            {
+                // 喂竹子：坐下、吃、再喂一次丢下旧的；最后打一下站起来。
+                Scene eat = new Scene("panda_bamboo").ticks(260).drops().packets();
+                eat.realPlayers = true;
+                eat.deathKind = 2;
+                ground(eat, 8);
+                eat.panda(0.5, 64.0, 0.5, 0.0F, 507L, 0, 0, 0, Items.AIR);
+                eat.player(1.5, 64.0, 0.5, Items.AIR);
+                eat.interact(3, 0, 0, bamboo, 0);
+                eat.interact(60, 0, 0, bamboo, 0);
+                eat.hurts.add(new double[] {200, 0, 1.0, 0});
+                scenes.add(eat);
+            }
+            {
+                // 繁殖：附近有竹子，两只成年熊猫进入求爱并生下幼崽。
+                Scene breed = new Scene("panda_breed").ticks(160).drops().packets();
+                ground(breed, 12);
+                breed.fill(4, 64, 4, 5, 66, 5, Blocks.BAMBOO.defaultBlockState());
+                breed.panda(0.5, 64.0, 0.5, 0.0F, 508L, 0, 0, 0, Items.AIR);
+                breed.panda(1.1, 64.0, 0.5, 0.0F, 509L, 0, 0, 0, Items.AIR);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(2, 0, 0, bamboo, 0);
+                breed.interact(2, 1, 0, bamboo, 0);
+                scenes.add(breed);
+            }
+            {
+                // 虚弱幼崽打喷嚏：1/500 起步，掉礼物并让附近成年熊猫跳一下。
+                Scene sneeze = new Scene("panda_sneeze").ticks(2000).drops().packets();
+                ground(sneeze, 12);
+                sneeze.panda(0.5, 64.0, 0.5, 0.0F, 511L, -24000, 5, 5, Items.AIR);
+                sneeze.panda(3.5, 64.0, 0.5, 0.0F, 512L, 0, 0, 0, Items.AIR);
+                sneeze.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(sneeze);
+            }
+            {
+                // 打死看掉落：竹子，经验 1–3。
+                Scene death = new Scene("panda_death").ticks(58).drops().packets();
+                ground(death, 6);
+                death.panda(0.5, 64.0, 0.5, 0.0F, 510L, 0, 0, 0, Items.AIR);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
+        }
+
+        /**
+         * 北极熊：闲逛和幼崽跟随、站起来警告、死亡掉落（含着火）、环境恐慌，以及四个打玩家的场景
+         * （`polar_bear_fight_*` 走 `playZombie`，玩家是真实的受伤链路）。
+         *
+         * Polar bears: strolling with a cub, the stand-up warning, death drops (also on
+         * fire), environmental panic, and four fight scenes (`polar_bear_fight_*` run
+         * through `playZombie` with real player damage).
+         */
+        static void polarBearScenes(List<Scene> scenes) {
+            {
+                // 成年和幼崽闲逛：玩家在 20 格外，护崽目标每次只取数、找不到人。
+                Scene idle = new Scene("polar_bear_idle").ticks(300).packets();
+                ground(idle, 24);
+                idle.cow(0.5, 64.0, 0.5, 0.0F, 401L);
+                idle.cow(5.5, 64.0, 3.5, 90.0F, 402L, -24000);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                // 玩家站在三格高的柱子上打一下：熊追到柱子边够不着，反复站起来吼。
+                Scene warn = new Scene("polar_bear_warn").ticks(200).packets();
+                ground(warn, 12);
+                warn.fill(4, 64, 0, 4, 66, 0, STONE);
+                warn.cow(0.5, 64.0, 0.5, 0.0F, 403L);
+                warn.player(4.5, 67.0, 0.5, Items.AIR);
+                warn.hurts.add(new double[] {5, 0, 1.0, 0});
+                scenes.add(warn);
+            }
+            for (int fire = 0; fire < 2; fire++) {
+                // 打死看掉落：鳕鱼或鲑鱼，着火时是熟的；经验 1–3。
+                Scene death = new Scene(fire == 0 ? "polar_bear_death" : "polar_bear_death_fire")
+                        .ticks(58).drops().packets();
+                ground(death, 6);
+                if (fire == 1) death.fire(200);
+                death.cow(0.5, 64.0, 0.5, 0.0F, 404L + fire);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
+            {
+                // 成年北极熊只怕环境伤害：被火烧一下就按 2 倍速逃。
+                Scene panic = new Scene("polar_bear_panic_fire").ticks(80).deathKind(2);
+                ground(panic, 12);
+                panic.cow(0.5, 64.0, 0.5, 0.0F, 406L);
+                panic.player(20.5, 64.0, 0.5, Items.AIR);
+                panic.hurts.add(new double[] {5, 0, 1.0, 0});
+                scenes.add(panic);
+            }
+            {
+                // 挨打后追上去站起来再咬：三口之内结束，玩家还活着。
+                Scene hurt = new Scene("polar_bear_fight_hurt").ticks(75).difficulty(2);
+                hurt.realPlayers = true;
+                ground(hurt, 12);
+                hurt.mob(13, 0.5, 64.0, 0.5, 0.0F, 411L, 0);
+                hurt.player(5.5, 64.0, 0.5, Items.AIR);
+                hurt.hurts.add(new double[] {3, 0, 1.0, 0});
+                scenes.add(hurt);
+            }
+            {
+                // 带崽的大熊主动打 10 格内的玩家。到 110 刻玩家还剩 2 点血；
+                // 再往后玩家会被咬死，官方的 `playerDied` 会消气，而假世界没有玩家死亡。
+                Scene cub = new Scene("polar_bear_fight_cub").ticks(110).difficulty(2);
+                cub.realPlayers = true;
+                ground(cub, 12);
+                cub.mob(13, 0.5, 64.0, 0.5, 0.0F, 412L, 0);
+                cub.mob(13, 2.5, 64.0, 2.5, 0.0F, 413L, -24000);
+                cub.player(7.5, 64.0, 0.5, Items.AIR);
+                scenes.add(cub);
+            }
+            {
+                // 打幼崽：幼崽自己逃，叫来 14 格外的大熊（护崽目标够不着这么远）。
+                Scene alert = new Scene("polar_bear_fight_cub_hurt").ticks(140).difficulty(2);
+                alert.realPlayers = true;
+                ground(alert, 20);
+                alert.mob(13, 0.5, 64.0, 0.5, 0.0F, 414L, 0);
+                alert.mob(13, 12.5, 64.0, 2.5, 0.0F, 415L, -24000);
+                alert.player(14.5, 64.0, 0.5, Items.AIR);
+                alert.hurts.add(new double[] {3, 1, 1.0, 0});
+                scenes.add(alert);
+            }
+            {
+                // 和平难度：挨了打也不还手。
+                Scene peaceful = new Scene("polar_bear_fight_peaceful").ticks(60).difficulty(0);
+                ground(peaceful, 12);
+                peaceful.mob(13, 0.5, 64.0, 0.5, 0.0F, 416L, 0);
+                peaceful.player(4.5, 64.0, 0.5, Items.AIR);
+                peaceful.hurts.add(new double[] {3, 0, 1.0, 0});
+                scenes.add(peaceful);
+            }
+            for (int age : new int[] {0, -24000}) {
+                // 狐狸在熊的跟随距离内、狐狸自己的躲避距离外；只比是否选中目标。
+                // The fox is within the bear's follow range but outside its own avoidance range.
+                Scene fox = new Scene(age == 0 ? "polar_bear_fight_fox" : "polar_bear_fight_fox_cub")
+                        .ticks(20).difficulty(2);
+                ground(fox, 18);
+                fox.mob(13, 0.5, 64.0, 0.5, 0.0F, 417L, age);
+                fox.mob(7, 14.5, 64.0, 0.5, 0.0F, 418L, 0);
+                scenes.add(fox);
+            }
+        }
         /** 苦力怕：追玩家并爆炸、点燃、带电、摔落提前膨胀、隔墙被打、炸到真实玩家。 */
         static void creeperScenes(List<Scene> scenes) {
             BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
@@ -1543,6 +1809,7 @@ public final class MobOracle {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
             farmScenes(scenes);
+            miscScenes(scenes);
             creeperScenes(scenes);
             spiderScenes(scenes);
             endermanScenes(scenes);
@@ -2519,10 +2786,11 @@ public final class MobOracle {
         // 只有名字以 `_no_grief` 结尾的场景关掉 `mobGriefing`，每个场景都重设一次。
         // Only scenes named `*_no_grief` turn `mobGriefing` off; every scene resets it.
         setRule(official, GameRules.MOB_GRIEFING, !scene.name.endsWith("_no_grief"));
-        if (scene.name.startsWith("zombie_") || scene.name.startsWith("rabbit_")
-                || scene.name.startsWith("fox_") || scene.name.startsWith("wolf_")
-                || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
-                || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("polar_bear_fight_")
+                || scene.name.startsWith("rabbit_") || scene.name.startsWith("fox_")
+                || scene.name.startsWith("wolf_") || scene.name.startsWith("creeper_")
+                || scene.name.startsWith("spider_") || scene.name.startsWith("cave_spider_")
+                || scene.name.startsWith("enderman_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -2709,8 +2977,26 @@ public final class MobOracle {
                 sheep.setColor(DyeColor.byId(scene.wool & 15));
                 sheep.setSheared((scene.wool & 16) != 0);
             }
+            if (cow instanceof net.minecraft.world.entity.animal.cow.MushroomCow mooshroom && scene.wool != 0) {
+                // 哞菇场景借 wool 字段选品种：非 0 是棕色。
+                // Mooshroom scenes reuse the wool field for the type: non-zero is brown.
+                Method setVariant = mooshroom.getClass().getDeclaredMethod("setVariant",
+                        net.minecraft.world.entity.animal.cow.MushroomCow.Variant.class);
+                setVariant.setAccessible(true);
+                setVariant.invoke(mooshroom, net.minecraft.world.entity.animal.cow.MushroomCow.Variant.BROWN);
+            }
             if (cow instanceof Chicken chicken && scene.eggTime >= 0) {
                 chicken.eggTime = scene.eggTime;
+            }
+            if (cow instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+                int[] geneIds = i < scene.genes.size() ? scene.genes.get(i) : new int[] {0, 0};
+                panda.setMainGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(geneIds[0]));
+                panda.setHiddenGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(geneIds[1]));
+                Item hold = i < scene.holds.size() ? scene.holds.get(i) : Items.AIR;
+                if (hold != Items.AIR) {
+                    panda.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND,
+                            new ItemStack(hold, 1));
+                }
             }
             cows.add(cow);
             level.tracked.add(cow);
@@ -2743,8 +3029,15 @@ public final class MobOracle {
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"kind\":").append(animalKind(scene.name));
             line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
-                    ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0)) : 0);
+                    ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
+                    : scene.name.startsWith("mooshroom_") ? scene.wool : 0);
             line.append(",\"egg\":").append(cows.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
+            int[] geneIds = i < scene.genes.size() ? scene.genes.get(i) : new int[] {0, 0};
+            line.append(",\"genes\":[").append(geneIds[0]).append(',').append(geneIds[1]).append(']');
+            Item hold = cows.get(i) instanceof net.minecraft.world.entity.animal.panda.Panda panda
+                    ? panda.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND).getItem()
+                    : Items.AIR;
+            line.append(",\"held\":").append(BuiltInRegistries.ITEM.getId(hold));
             line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
         line.append("],\"players\":[");
@@ -2840,6 +3133,13 @@ public final class MobOracle {
                 interactions.get(tick).add(one.toString());
                 putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
                         "instabuild", false);
+            }
+            // 交互里生成的实体（剪下来的物品、哞菇剪成的牛）在实体 tick 之前就进了世界，
+            // 真服务端里它们这一刻就会 tick，所以在这里先收一次。
+            // Entities spawned by interactions (sheared items, the cow a mooshroom turns
+            // into) join the world before the entity ticks, so collect them here first.
+            if (scene.drops && !scene.interactions.isEmpty()) {
+                collectBorn(level, official, scene.packets, cows, syncs, packets, spawns, tick);
             }
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick) {
@@ -2965,23 +3265,7 @@ public final class MobOracle {
             level.tracked.removeIf(Entity::isRemoved);
             // 实体 tick 里也会生成实体（繁殖的幼崽、死亡掉落物和经验球），在这一刻收齐。
             if (scene.drops) {
-                level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
-                for (Entity born : level.spawned) {
-                    level.reseedBorn(born);
-                    spawns.get(tick).add(spawnJson(born));
-                    if (born instanceof Animal calf) {
-                        cows.add(calf);
-                        level.tracked.add(born);
-                    }
-                    if (scene.packets) {
-                        Sync sync = new Sync(level, born, official.registries);
-                        syncs.add(sync);
-                        sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
-                        packets.get(tick).addAll(sync.take());
-                    }
-                }
-                level.spawned.clear();
-                level.newbornCows.clear();
+                collectBorn(level, official, scene.packets, cows, syncs, packets, spawns, tick);
             }
             level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(stepJson(cows));
@@ -3395,7 +3679,12 @@ public final class MobOracle {
             int sky, int block, int darken, boolean thunder, double playerX, int population,
             int spawnableChunks, boolean localCap, boolean nearbyRespawn) {}
 
-    private static int playNaturalSpawns(Official official, Writer out, boolean fishOnly) throws Exception {
+    private static int playNaturalSpawns(Official official, Writer out, boolean fishOnly, boolean pandaOnly) throws Exception {
+        if (pandaOnly) {
+            return playNaturalSpawnScenes(official, out, List.of(
+                    new NaturalScene("panda_day", EntityTypes.PANDA, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false),
+                    new NaturalScene("panda_dim", EntityTypes.PANDA, "jungle", 2, 8, 0, 0, false, -32, 0, 289, true, false)), fishOnly);
+        }
         List<NaturalScene> scenes = new ArrayList<>();
         scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("cow_night", EntityTypes.COW, "savanna", 2, 15, 0, 11, false, -32, 0, 289, true, false));
@@ -3458,11 +3747,17 @@ public final class MobOracle {
         scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("mooshroom_day", EntityTypes.MOOSHROOM, "mushroom_fields", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("polar_bear_day", EntityTypes.POLAR_BEAR, "frozen_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_cod", EntityTypes.COD, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_salmon", EntityTypes.SALMON, "cold_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_tropical", EntityTypes.TROPICAL_FISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_tropical_lush", EntityTypes.TROPICAL_FISH, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_puffer", EntityTypes.PUFFERFISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        return playNaturalSpawnScenes(official, out, scenes, fishOnly);
+    }
+
+    private static int playNaturalSpawnScenes(Official official, Writer out, List<NaturalScene> scenes, boolean fishOnly) throws Exception {
         int count = 0;
         for (var scene : scenes) {
             if (fishOnly && !scene.name().startsWith("fish_")) continue;
@@ -3472,6 +3767,16 @@ public final class MobOracle {
             }
         }
         return count;
+    }
+
+    // 与 Rust 的刷怪夹具使用相同的地面。
+    // Match the floor of the Rust spawn fixtures.
+    private static BlockState spawnFloor(String biome) {
+        return switch (biome) {
+            case "mushroom_fields" -> Blocks.MYCELIUM.defaultBlockState();
+            case "frozen_ocean" -> Blocks.ICE.defaultBlockState();
+            default -> Blocks.GRASS_BLOCK.defaultBlockState();
+        };
     }
 
     private static JsonObject naturalSpawnCase(Official official, NaturalScene scene, long seed) throws Exception {
@@ -3497,6 +3802,7 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
+        BlockState floor = spawnFloor(scene.biome());
         boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT;
         level.naturalSeaLevel = scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63;
         for (int x = -16; x < 48; x++) {
@@ -3505,9 +3811,9 @@ public final class MobOracle {
                     for (int y = -64; y <= -62; y++) {
                         level.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
                     }
-                    continue;
+                } else {
+                    level.blocks.put(BlockPos.asLong(x, -63, z), floor);
                 }
-                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
                 // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
                 // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
                 // Husk fixture: glass at -60 blocks the camel-husk spawn box (Bamboo has no
@@ -3571,6 +3877,13 @@ public final class MobOracle {
                 row.add(mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                if (mob instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+                    row.add(panda.getMainGene().getId());
+                    row.add(panda.getHiddenGene().getId());
+                } else {
+                    row.add(-1);
+                    row.add(-1);
+                }
                 row.add(mob instanceof net.minecraft.world.entity.animal.fish.TropicalFish fish
                         ? new net.minecraft.world.entity.animal.fish.TropicalFish.Variant(
                                 fish.getPattern(), fish.getBaseColor(), fish.getPatternColor()).getPackedId()
@@ -3605,13 +3918,19 @@ public final class MobOracle {
         return row;
     }
 
-    // 生成期刷怪：平原的真实刷怪表，区块 (0,0) 和一圈邻居按坐标公式铺台阶、水、沙、树叶和草丛。
-    // World-generation spawning: the real plains table over a formula terrain of steps,
-    // water, sand, leaves and short grass around chunk (0,0).
+    // 生成期刷怪：用真实群系刷怪表，地面用平地或坐标公式地形。`misc` 那一组只跑少量种子，
+    // 覆盖蘑菇岛和冰冻海洋；熊猫组单独对拍竹林。
+    // World-generation spawning over real biome spawn tables, on flat or formula terrain.
+    // The `misc` group covers mushroom fields and frozen oceans; the panda group uses bamboo jungle.
     private record GenScene(String name, int sky, int block, boolean terrain, String biome, int seeds) {}
 
-    private static int playGenSpawns(Official official, Writer out) throws Exception {
-        List<GenScene> scenes = List.of(
+    private static int playGenSpawns(Official official, Writer out, String suite) throws Exception {
+        List<GenScene> scenes = switch (suite) {
+            case "gen_spawn_panda" -> List.of(new GenScene("gen_panda", 15, 0, false, "bamboo_jungle", 128));
+            case "gen_spawn_misc" -> List.of(
+                new GenScene("gen_mooshroom", 15, 0, false, "mushroom_fields", 64),
+                new GenScene("gen_polar_bear", 15, 0, false, "frozen_ocean", 64));
+            default -> List.of(
                 new GenScene("gen_flat", 15, 0, false, "plains", 500),
                 new GenScene("gen_terrain", 15, 0, true, "plains", 500),
                 new GenScene("gen_dim", 8, 0, true, "plains", 500),
@@ -3623,6 +3942,7 @@ public final class MobOracle {
                 new GenScene("gen_taiga", 15, 0, true, "taiga", 1500),
                 new GenScene("gen_snowy_taiga", 15, 0, true, "snowy_taiga", 1500),
                 new GenScene("gen_taiga_dim", 8, 0, true, "taiga", 500));
+        };
         int count = 0;
         for (GenScene scene : scenes) {
             for (long index = 0; index < scene.seeds(); index++) {
@@ -3648,15 +3968,17 @@ public final class MobOracle {
         level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
         ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
         level.spawnDifficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        BlockState floor = spawnFloor(scene.biome());
         for (int x = -16; x < 32; x++) {
             for (int z = -16; z < 32; z++) {
-                genColumn(level, x, z, scene.terrain());
+                genColumn(level, x, z, scene.terrain(), floor);
             }
         }
         for (int cx = -1; cx <= 1; cx++) {
             for (int cz = -1; cz <= 1; cz++) {
                 net.minecraft.world.level.levelgen.Heightmap.primeHeightmaps(level.chunkSource.getChunkNow(cx, cz),
-                        java.util.Set.of(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
+                        java.util.Set.of(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                                net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING));
             }
         }
         RandomSource region = new net.minecraft.world.level.levelgen.XoroshiroRandomSource(seed * 31 + 7);
@@ -3693,6 +4015,7 @@ public final class MobOracle {
         var result = new JsonObject();
         result.addProperty("type", "genSpawn");
         result.addProperty("name", scene.name());
+        result.addProperty("biome", "minecraft:" + scene.biome());
         result.addProperty("seed", seed);
         result.addProperty("sky", scene.sky());
         result.addProperty("block", scene.block());
@@ -3706,8 +4029,8 @@ public final class MobOracle {
     }
 
     /**
-     * 兔子、狐狸、狼在 `finalizeSpawn` 里定下的东西：品种、狐狸嘴里的物品、狼的叫声。其余生物为空串。
-     * What `finalizeSpawn` decides for rabbits, foxes and wolves; empty for other mobs.
+     * `finalizeSpawn` 定下的品种、狐狸嘴里的物品、狼的叫声和熊猫的双基因。
+     * Variants, fox held items, wolf sounds and both panda genes set by `finalizeSpawn`.
      */
     private static String genSpawnDetail(Mob mob) {
         if (mob instanceof net.minecraft.world.entity.animal.rabbit.Rabbit rabbit) {
@@ -3720,16 +4043,19 @@ public final class MobOracle {
             return "wolf|" + wolf.get(DataComponents.WOLF_VARIANT).unwrapKey().orElseThrow().identifier()
                     + "|" + wolf.get(DataComponents.WOLF_SOUND_VARIANT).unwrapKey().orElseThrow().identifier();
         }
+        if (mob instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+            return "panda|" + panda.getMainGene().getId() + "|" + panda.getHiddenGene().getId();
+        }
         return "";
     }
 
     /** 和 Rust 侧 `gen_column` 同一个坐标公式。 */
-    private static void genColumn(FakeLevel level, int x, int z, boolean terrain) {
+    private static void genColumn(FakeLevel level, int x, int z, boolean terrain, BlockState floor) {
         int top = terrain ? -63 + Math.floorMod(x * 7 + z * 13, 3) : -63;
         for (int y = -63; y < top; y++) {
             level.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
         }
-        BlockState ground = Blocks.GRASS_BLOCK.defaultBlockState();
+        BlockState ground = floor;
         if (terrain && Math.floorMod(x + 2 * z, 9) == 0) {
             ground = Blocks.WATER.defaultBlockState();
         } else if (terrain && Math.floorMod(x * 3 + z * 5, 11) == 0) {
@@ -3918,10 +4244,52 @@ public final class MobOracle {
     }
 
     /**
-     * 马科存档：每种 × 三种状态（生成后驯服并装备、野生默认、幼崽），输出官方 `saveWithoutId` 的整份 SNBT。
-     * Bamboo 读进来再写出去，逐键比较马科相关的键。
-     * Equine saves: vanilla's full SNBT, which Bamboo loads and writes back for a per-key comparison.
+     * 熊猫的基因遗传：官方 `setGeneFromParents` 的取数顺序（父母各一次 `nextBoolean`，
+     * 幼崽两次 1/32 的变异）和结果，逐题和 Bamboo 的 `offspring_genes` 比。
+     *
+     * Panda gene inheritance: the draw order of `setGeneFromParents` (one parent `nextBoolean`
+     * each, two 1/32 mutations on the calf) and the resulting genes.
      */
+    private static int playPandaGenes(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        int cases = 0;
+        for (int sample = 0; sample < 512; sample++) {
+            int fatherMain = sample % 7;
+            int fatherHidden = (sample / 7) % 7;
+            int motherMain = (sample / 49) % 7;
+            int motherHidden = 6 - sample % 7;
+            long fatherSeed = 0x5EED0000L + sample * 7919L;
+            long motherSeed = 0x5EED0000L + sample * 104729L + 17;
+            long babySeed = 0x5EED0000L + sample * 15485863L + 3;
+            var father = net.minecraft.world.entity.EntityTypes.PANDA.create(world, EntitySpawnReason.COMMAND);
+            var mother = net.minecraft.world.entity.EntityTypes.PANDA.create(world, EntitySpawnReason.COMMAND);
+            var baby = net.minecraft.world.entity.EntityTypes.PANDA.create(world, EntitySpawnReason.COMMAND);
+            father.setMainGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(fatherMain));
+            father.setHiddenGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(fatherHidden));
+            mother.setMainGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(motherMain));
+            mother.setHiddenGene(net.minecraft.world.entity.animal.panda.Panda.Gene.byId(motherHidden));
+            setRandom(father, fatherSeed);
+            setRandom(mother, motherSeed);
+            setRandom(baby, babySeed);
+            baby.setGeneFromParents(father, mother);
+            out.write("{\"type\":\"pandaGenes\",\"fatherMain\":" + fatherMain
+                    + ",\"fatherHidden\":" + fatherHidden
+                    + ",\"motherMain\":" + motherMain
+                    + ",\"motherHidden\":" + motherHidden
+                    + ",\"fatherSeed\":" + fatherSeed
+                    + ",\"motherSeed\":" + motherSeed
+                    + ",\"babySeed\":" + babySeed
+                    + ",\"fatherAfter\":" + randomSeed(father)
+                    + ",\"motherAfter\":" + randomSeed(mother)
+                    + ",\"babyAfter\":" + randomSeed(baby)
+                    + ",\"babyMain\":" + baby.getMainGene().getId()
+                    + ",\"babyHidden\":" + baby.getHiddenGene().getId() + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+
     private static int playEquineSaves(Official official, Writer out,
             List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
             throws Exception {
@@ -5715,6 +6083,7 @@ public final class MobOracle {
                 case 4 -> EntityTypes.SHEEP.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
+                case 13 -> new PolarBear(EntityTypes.POLAR_BEAR, level);
                 case 9 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
@@ -5908,6 +6277,12 @@ public final class MobOracle {
                         lastSentHealth, false);
             }
         }
+        if (scene.name.startsWith("polar_bear_fight_fox")) {
+            Entity expected = scene.name.endsWith("_cub") ? null : mobs.get(1);
+            if (mobs.getFirst().getTarget() != expected) {
+                throw new IllegalStateException(scene.name + " did not exercise fox target selection");
+            }
+        }
         line.append("]");
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         if (scene.realPlayers) {
@@ -6023,8 +6398,12 @@ public final class MobOracle {
             out.append(",\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"").append(caseVariant(mob)).append('"');
-            out.append(",\"snd\":\"").append(caseSound(mob)).append('"');
+            if (mob instanceof PolarBear bear) {
+                out.append(",\"var\":\"").append(bearState(bear)).append("\",\"snd\":\"\"");
+            } else {
+                out.append(",\"var\":\"").append(caseVariant(mob)).append('"');
+                out.append(",\"snd\":\"").append(caseSound(mob)).append('"');
+            }
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             // 狐狸比原始的 `target` 字段：`getTarget()` 会把死掉的猎物读成空，Bamboo 存原始值。
@@ -7266,6 +7645,33 @@ public final class MobOracle {
     }
 
     /** 一个新生成的实体：种类、物品或经验值、位置。速度用实体自己的随机源，不比。 */
+    /**
+     * 把这一段里新进世界的实体按 ID 收齐：重新播种、记进 spawns、动物加进 cows 并建同步状态。
+     *
+     * Collects entities that joined the world since the last call, in id order: reseed,
+     * record, add animals to the cow list and create their sync state.
+     */
+    private static void collectBorn(FakeLevel level, Official official, boolean withPackets, List<Animal> cows,
+            List<Sync> syncs, List<List<String>> packets, List<List<String>> spawns, int tick) throws Exception {
+        level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
+        for (Entity born : level.spawned) {
+            level.reseedBorn(born);
+            spawns.get(tick).add(spawnJson(born));
+            if (born instanceof Animal calf) {
+                cows.add(calf);
+                level.tracked.add(born);
+            }
+            if (withPackets) {
+                Sync sync = new Sync(level, born, official.registries);
+                syncs.add(sync);
+                sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+                packets.get(tick).addAll(sync.take());
+            }
+        }
+        level.spawned.clear();
+        level.newbornCows.clear();
+    }
+
     private static String spawnJson(Entity entity) throws Exception {
         StringBuilder out = new StringBuilder("{\"id\":").append(entity.getId());
         Vec3 pos = entity.position();
@@ -7283,6 +7689,9 @@ public final class MobOracle {
             out.append(",\"kind\":\"cow\",\"value\":").append(calf.getAge());
             out.append(",\"seed\":").append(randomSeed(calf));
             out.append(",\"hr\":").append(Float.floatToRawIntBits(calf.getYHeadRot()));
+            // 身体朝向：幼崽是 0，哞菇剪成的牛抄哞菇的。
+            // Body yaw: 0 for a calf, copied from the mooshroom for a converted cow.
+            out.append(",\"yr\":").append(Float.floatToRawIntBits(calf.getYRot()));
             if (calf instanceof Chicken chick) {
                 out.append(",\"egg\":").append(chick.eggTime);
             }
@@ -7329,6 +7738,9 @@ public final class MobOracle {
         if (scene.startsWith("pig_")) return EntityTypes.PIG;
         if (scene.startsWith("sheep_")) return EntityTypes.SHEEP;
         if (scene.startsWith("chicken_")) return EntityTypes.CHICKEN;
+        if (scene.startsWith("mooshroom_")) return EntityTypes.MOOSHROOM;
+        if (scene.startsWith("polar_bear_")) return EntityTypes.POLAR_BEAR;
+        if (scene.startsWith("panda_")) return EntityTypes.PANDA;
         return EntityTypes.COW;
     }
 
@@ -7337,16 +7749,62 @@ public final class MobOracle {
         if (scene.startsWith("pig_")) return 3;
         if (scene.startsWith("sheep_")) return 4;
         if (scene.startsWith("chicken_")) return 5;
+        if (scene.startsWith("mooshroom_")) return 14;
+        if (scene.startsWith("polar_bear_")) return 13;
+        if (scene.startsWith("panda_")) return 15;
         return 0;
     }
 
+    /**
+     * 北极熊的状态列：站立标志、吼叫冷却、愤怒结束时刻和愤怒对象的 UUID。
+     *
+     * The polar bear state column: standing flag, growl cooldown, anger end time and the
+     * anger target's UUID.
+     */
+    private static String bearState(PolarBear bear) throws Exception {
+        var target = bear.getPersistentAngerTarget();
+        return "s" + (bear.isStanding() ? 1 : 0)
+                + "|w" + getInt(PolarBear.class, bear, "warningSoundTicks")
+                + "|e" + bear.getPersistentAngerEndTime()
+                + "|t" + (target == null ? "-" : target.getUUID().toString());
+    }
+
+    /**
+     * 熊猫的状态列：两个基因、三个计数器和四位旗帜。
+     *
+     * The panda state column: both genes, the three counters and the four flag bits.
+     */
+    private static String pandaState(net.minecraft.world.entity.animal.panda.Panda panda) throws Exception {
+        Field eat = net.minecraft.world.entity.animal.panda.Panda.class.getDeclaredField("EAT_COUNTER");
+        eat.setAccessible(true);
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Integer>) eat.get(null);
+        int flags = (panda.isSneezing() ? 2 : 0) | (panda.isRolling() ? 4 : 0)
+                | (panda.isSitting() ? 8 : 0) | (panda.isOnBack() ? 16 : 0);
+        return "g" + panda.getMainGene().getId() + "/" + panda.getHiddenGene().getId()
+                + "|u" + panda.getUnhappyCounter()
+                + "|n" + panda.getSneezeCounter()
+                + "|e" + panda.getEntityData().get(accessor)
+                + "|f" + flags;
+    }
+
     /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
-    private static String farmVariant(Animal animal) {
+    private static String farmVariant(Animal animal) throws Exception {
+        if (animal instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+            return pandaState(panda);
+        }
+        if (animal instanceof PolarBear bear) {
+            return bearState(bear);
+        }
         if (animal instanceof Sheep sheep) {
             return sheep.getColor().getSerializedName() + (sheep.isSheared() ? "|sheared" : "");
         }
         if (animal instanceof Chicken chicken) {
             return chicken.getVariant().unwrapKey().orElseThrow().identifier() + "|egg" + chicken.eggTime;
+        }
+        if (animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow mooshroom) {
+            Field stew = mooshroom.getClass().getDeclaredField("stewEffects");
+            stew.setAccessible(true);
+            return mooshroom.getVariant().getSerializedName() + (stew.get(mooshroom) != null ? "|stew" : "");
         }
         Holder<?> variant = animal instanceof Pig pig ? pig.getVariant() : ((Cow) animal).getVariant();
         return variant.unwrapKey().orElseThrow().identifier().toString();
@@ -7370,9 +7828,11 @@ public final class MobOracle {
         return variants;
     }
 
-    /** 叫声列；羊没有叫声变种。 */
+    /** 叫声列；羊、北极熊、哞菇和熊猫没有叫声变种。 */
     private static String farmSound(Animal animal) throws Exception {
-        if (animal instanceof Sheep) {
+        if (animal instanceof Sheep || animal instanceof PolarBear
+                || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow
+                || animal instanceof net.minecraft.world.entity.animal.panda.Panda) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");
@@ -8370,6 +8830,15 @@ public final class MobOracle {
         }
 
         /** 按幼崽 / 掉落物的构造顺序给新实体换上岛的种子源，并重放构造取数。 */
+        /** 假世界的玩家没有连接，粒子包不发（哞菇喂花 / 剪毛会走到这里）。 */
+        @Override
+        public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(T particle,
+                boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count,
+                double xDist, double yDist, double zDist, double xSpeed, double ySpeed, double zSpeed,
+                net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket.RandomizationType type) {
+            return 0;
+        }
+
         void reseedBorn(Entity entity) {
             if (!dropUuids) {
                 return;

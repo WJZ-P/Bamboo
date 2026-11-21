@@ -363,6 +363,55 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 
 其余已知差异见 README「马科的已知限制」。
 
+### 5.9 中立生物地基和北极熊（2026-11-21）
+
+- **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
+  `persistentAngerTarget` 放在 `Mob::anger`，`update` 是官方的
+  `updatePersistentAnger(level, stayAngryIfTargetPresent)`，`write_nbt` / `read_nbt` 是
+  `add/readPersistentAngerSaveData`（`anger_end_time` 恒写，`angry_at` 有才写）。
+  狼、蜜蜂、末影人、僵尸猪灵可以直接复用；`universalAnger` 规则没有建模（恒为假）。
+- **`HurtByTargetGoal.alertOthers`**：新增 `Command::AlertMobs`，落地时逐个看
+  `other.getTarget() == null` 再 `setTarget`。`alertOther` 的过滤（只有成年北极熊）
+  在发起方做。铁傀儡、僵尸猪灵、熊猫也能用。
+- **`TargetGoal` 的 `mustSee` 记忆**：`canContinueToUse` 里按
+  `unseenTicks <= reducedTickDelay(memory)` 判定，记忆 300 刻；`PolarBearAttackPlayersGoal`
+  的跟随距离折半（`getFollowDistance() * 0.5`）。
+- **共享修正（影响所有生物，对拍全部重跑）**：
+  1. 动物（非怪物）的元数据原来不写 `Mob.DATA_MOB_FLAGS_ID` 的攻击性位，
+     所以 `MeleeAttackGoal.start` 的 `setAggressive(true)` 不会同步。现在两种分支都写。
+  2. 着火显示标志原来由 `remainingFireTicks > 0` 直接推出，点燃当刻就同步；
+     官方在 `baseTick` 末尾才 `setSharedFlagOnFire`，晚一刻。现在 `Mob.visible_fire`
+     在 `baseTick` 末尾重算，`convertCommon` 照官方抄这个标志。
+- **状态**：北极熊已对拍 0 不一致（`mob-oracle --only polar_bear` 11 例 1121 刻，含成年 / 幼崽选狐两场景）。
+  `SpawnPlacementTypes.ON_GROUND` 的落脚块检查传入实体类型：冰和霜冰按官方 `Blocks`
+  的专用谓词只允许北极熊，之后仍检查 `PolarBear.checkPolarBearSpawnRules`。
+  自然生成与生成期刷怪的对拍分别覆盖蘑菇岛菌丝上的哞菇、冰冻海洋冰面上的北极熊。
+  山羊 / 青蛙 / 犰狳 / 骆驼用官方 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` / `CamelAi`），
+  Bamboo 只有 `GoalSelector`，没有 `Brain` / 传感器 / 记忆，这是下一步的公共地基。
+
+### 5.10 熊猫（2026-11-21，分支 `op-misc`）
+
+- 代码在 `entity/mob/panda.rs`。六个基因按官方显性 / 隐性规则合成七种外观，显性基因直接
+  是外观，`Brown` / `Weak` 要 `main == hidden` 才显现；`MainGene` / `HiddenGene` 存盘，
+  六个元数据（三个计数器、两个基因、一个旗帜字节）同步，index 由生成器导出。
+- 目标表照 `Panda.registerGoals` 一比一注册，包括 `PandaPanicGoal`、`PandaBreedGoal`、
+  `PandaAttackGoal`、`PandaAvoidGoal`、`PandaSitGoal`、`PandaLieOnBackGoal`、
+  `PandaSneezeGoal`、`PandaLookAtPlayerGoal`、`PandaRollGoal`、`PandaHurtByTargetGoal`。
+  对拍的 running names 按种类取官方子类名（`Goal::name_for`）。
+- 每刻在 `super.tick()` 之后处理：担心基因在雷雨坐下、不乐意计数器（29 / 14 刻叫）、
+  喷嚏计数和 `afterSneeze`、打滚、坐着清零俯仰、`handleEating` 的 80 / 100 刻和粒子取数。
+- 交互直接复刻 `Panda.mobInteract`：害怕时 PASS、仰躺时起来、竹子让成年求爱 / 幼年长大 /
+  坐下吃（换竹子丢旧的）、吃的东西进主手。捡物在 `Mob.aiStep` 的 looting 位置，只捡
+  `panda_eats_from_ground` 且主手为空时，走 `Command::PickUpItem`。
+- 繁殖的基因遗传在 `getBreedOffspring`：父母各一次 `nextBoolean`（`getOneOfGenesRandomly`
+  在父母自己的随机源上）、幼崽一次 `nextBoolean` 和两次 1/32 变异。父亲在命令落地时不在
+  实体表里，所以它的基因随 `Command::BreedAnimals` 带过来。
+- 状态：`mob-oracle --only panda` 6 个场景 3278 刻 + 512 题基因遗传 0 不一致；
+  生成期刷怪把熊猫接进 `natural_gen` 的放置表，运行时接进 `check_spawn_rules` 和
+  `finalizeSpawn`（组数据 `AgeableMobGroupData(0.2)`）。
+- 已知差异：`ITEM` / `SNEEZE` 粒子不发（取数照官方）；喷嚏让同伴跳的水中判定没有建模；
+  幼崽金蒲公英的 `Animal.mobInteract` 兜底未接。山羊 / 青蛙 / 犰狳 / 骆驼仍等 `Brain`。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
@@ -847,6 +896,35 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；移动段穿过水时用共用的流体判定熄火，灭火声的音高取蛋自己的随机源；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），生成后按手中蛋的种类累加会话内使用统计，再按模式消耗；发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、穿水熄火、孵一只、孵四只、打牛、玩家扔蛋、发射器，逐刻比位置、随机源、着火状态、出站包、小鸡和牛，玩家扔蛋另比 `ITEM_USED`），存档见 `chunk-content` 的两枚蛋。
 
+## 哞菇的实施现状（op-misc，2026-11-20）
+
+哞菇是 `MobType::Mooshroom`，属性、目标选择器、叫声全部复用牛（`AbstractCow`），自己的部分在
+`entity/mob/mooshroom.rs`：品种 / 炖菜效果 / 上一道闪电存在 `Mob.mooshroom`（跟实体行走，岛拆合不需要
+平移时钟），交互三个分支（碗、剪刀、棕色吃花）排在 `AbstractCow.mobInteract` 之前，`getWalkTargetValue`
+对菌丝给 10，生成规则是 `checkMushroomSpawnRules`。花对应的炖菜效果表 `STEW_FLOWERS` 和 `DATA_TYPE` 的
+index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
+
+剪毛走新的公共模块 `entity/mob/conversion.rs`（官方 `Mob.convertTo` + `ConversionType.SINGLE`）：先
+`prepare_entity` 构造牛（拿 ID 和种子，和官方 `EntityType.create` 同一时刻），抄状态，回调里掉蘑菇
+（`World::spawn_fresh_item`：直接 `new ItemEntity`，拾取延迟 0），牛进世界，哞菇丢弃。以后僵尸转化、
+猪被雷劈可以复用；乘客 / 载具 / 拴绳 / 队伍 / `Brain` 记忆没有建模。
+
+`MobInteraction` 多了 `replacement_limit_creative`（`createFilledResult` 的 `limitCreativeStackSize`）。游戏层
+有交回物品时不再另扣手里的物品：`createFilledResult` 自己消耗一个，原来挤奶时手里一叠桶会多扣一个。
+
+`MobType::ALL` 统一了按名字 / 注册表 ID 的查找；猪、羊、鸡、哞菇因此进入运行时自然生成和生成期刷怪
+（之前 `by_entity_type` 只列了牛和三种怪物）。`can_spawn_far_from_player` 改成按类别（`CREATURE` 为真）。
+
+对拍：`mob-oracle --only mooshroom`（接炖菜、挤奶、喂花、迷之炖菜、剪成牛红 / 棕、同色繁殖红 / 棕、幼年），
+逐刻比位置、随机源、出站包、交互结果和新生实体，7 例 498 刻 0 不一致；`chunk-content` 比新生哞菇和
+带 `Type` / `stew_effects` 的读写往返。对拍工具里「交互生成的实体」改成在实体 tick 之前收集（真服务端里
+它们这一刻就会 tick），新生生物多带一个身体朝向 `yr`。
+
+## 北极熊与熊猫的补充对拍（op-misc，2026-11-21）
+
+- 北极熊的 `NearestAttackableTargetGoal<Fox>` 在抽取间隔随机数后才过滤幼崽；成年熊扫描附近活着且可见的狐狸。`mob-oracle --only polar_bear_fight_fox` 分别比较成年和幼崽的目标与逐刻状态。狐狸反向躲熊尚未接入。
+- `mob-oracle --only natural_spawn_panda` 从原版丛林表固定熊猫条目，比较亮度 15 / 8 下逐刻的刷出数量、位置、双基因和世界随机源。
+- `mob-oracle --only gen_spawn_panda` 用竹林完整动物表，比较位置、朝向、双基因和随机源指纹。鹦鹉按官方 `ON_GROUND`、`MOTION_BLOCKING` 和 `parrots_spawnable_on` 模拟放置，但不创建实体，也不运行鹦鹉的 `finalizeSpawn`。同一区块先出现原版鹦鹉时，仍比较装饰随机源和后续已实现生物的位置；后续区域随机源和依赖它的属性不在夹具比较范围内。
 ## 苦力怕的实施现状（2026-11-20）
 
 苦力怕在 `entity/mob/creeper.rs`：`CreeperState`（`swell` / `maxSwell` / `explosionRadius` 和三项同步元数据）挂在 `Mob.creeper` 上，全是相对计数，随实体行搬岛，不需要时钟平移，也没有新增 `IslandPart`。`Creeper.tick` 里 `super.tick()` 之前的那段在 `living::tick_mob` 的 `base_tick` 之前调用；`SwellGoal` 是 `Goal::Swell`（每刻目标，MOVE 标志），记住的目标按原始引用查死活，不走 `getTarget()` 的可攻击过滤。近战用通用的 `Goal::MeleeAttack`，和 main 合并后由 `class` 字段（官方类名）区分 `ZombieAttackGoal` 和普通 `MeleeAttackGoal`（苦力怕、骷髅）；`Creeper.doHurtTarget` 直接返回真，不造成伤害。目标选择走骷髅那套完整的 `TargetGoal` 规则（`MobType::full_target_rules`）。
