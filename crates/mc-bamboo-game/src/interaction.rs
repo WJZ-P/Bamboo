@@ -1079,8 +1079,8 @@ pub(crate) fn on_interact_entity(
     hand: Hand,
     using_secondary_action: bool,
 ) {
-    // 官方把 `usingSecondaryAction` 记成潜行键；牛的交互不读这个标志。
-    let _ = using_secondary_action;
+    // 官方把 `usingSecondaryAction` 记成潜行键；马科用它判断开物品栏。
+    // Vanilla stores `usingSecondaryAction` as the sneak key; equines read it.
     // 先把玩家和目标的只读数据抄出来，`block_level()` 要独占借 `region`。
     let Some((game_mode, position, eye_height, player_uuid, main_held, off_held)) =
         region.players.get(&id).map(|player| {
@@ -1133,6 +1133,7 @@ pub(crate) fn on_interact_entity(
             held,
             creative,
             position,
+            sneaking: using_secondary_action,
         };
         let outcome = {
             let (mut level, ticks) = region.block_level();

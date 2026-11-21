@@ -1582,7 +1582,49 @@ public final class MobOracle {
             scenes.add(consumeBase("consume_enchanted_apple", 40,
                     itemId(Items.ENCHANTED_GOLDEN_APPLE), 20));
             scenes.add(consumeBase("consume_stew", 40, itemId(Items.SUSPICIOUS_STEW), 10));
+            equineScenes(scenes);
             return scenes;
+        }
+
+        /**
+         * 马科（类型 4 马、5 驴、6 骡、7 羊驼）的逐刻场景，借僵尸场景的多生物路径：
+         * 吃草、扬蹄、甩尾计时和随机源，受伤扬蹄与恐慌，幼崽。
+         * Equine tick scenes on the multi-mob zombie path: grazing, rearing, timers,
+         * random draws, rearing and panic when hurt, and foals.
+         */
+        private static void equineScenes(List<Scene> scenes) {
+            for (int kind = 4; kind <= 7; kind++) {
+                for (long seed : new long[] {11L, 4242L}) {
+                    Scene graze = new Scene("zombie_equine_graze_" + kind + "_" + seed).ticks(1500).difficulty(2);
+                    ground(graze, 12);
+                    graze.mob(kind, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                    graze.player(20.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(graze);
+                }
+            }
+            Scene foal = new Scene("zombie_equine_foal").ticks(800).difficulty(2);
+            ground(foal, 12);
+            foal.mob(4, 0.5, 64.0, 0.5, 0.0F, 31L, -24000);
+            foal.mob(7, 4.5, 64.0, 0.5, 90.0F, 32L, -24000);
+            foal.player(20.5, 64.0, 0.5, Items.AIR);
+            scenes.add(foal);
+            for (int kind : new int[] {4, 6}) {
+                Scene hurt = new Scene("zombie_equine_hurt_" + kind).ticks(400).difficulty(2);
+                ground(hurt, 12);
+                hurt.mob(kind, 0.5, 64.0, 0.5, 0.0F, 57L, 0);
+                hurt.player(3.5, 64.0, 0.5, Items.AIR);
+                for (int tick : new int[] {20, 60, 100, 140, 180}) {
+                    hurt.hurts.add(new double[] {tick, 0, 1.0, 0});
+                }
+                scenes.add(hurt);
+            }
+            Scene herd = new Scene("zombie_equine_herd").ticks(1200).difficulty(2);
+            ground(herd, 12);
+            herd.mob(4, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+            herd.mob(5, 3.5, 64.0, 2.5, 45.0F, 72L, 0);
+            herd.mob(7, -3.5, 64.0, -2.5, 180.0F, 73L, 0);
+            herd.player(4.5, 64.0, 4.5, Items.WHEAT);
+            scenes.add(herd);
         }
 
         private static int itemId(Item item) {
@@ -2614,6 +2656,15 @@ public final class MobOracle {
         return cases;
     }
 
+    /** `AbstractHorse.DATA_ID_FLAGS` 的字节（私有，反射读）。 */
+    @SuppressWarnings("unchecked")
+    private static int equineFlags(net.minecraft.world.entity.animal.equine.AbstractHorse horse) throws Exception {
+        Field field = net.minecraft.world.entity.animal.equine.AbstractHorse.class.getDeclaredField("DATA_ID_FLAGS");
+        field.setAccessible(true);
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) field.get(null);
+        return horse.getEntityData().get(accessor) & 0xFF;
+    }
+
     private static String equineState(net.minecraft.world.entity.animal.equine.AbstractHorse mob) {
         var a = net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH;
         var b = net.minecraft.world.entity.ai.attributes.Attributes.JUMP_STRENGTH;
@@ -2989,6 +3040,10 @@ public final class MobOracle {
             Mob mob = switch (kind[0]) {
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
+                case 4 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
+                case 5 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
+                case 6 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
+                case 7 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();
@@ -3004,6 +3059,8 @@ public final class MobOracle {
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
+            } else if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
+                ageable.setAge(scene.cowAges.get(i));
             }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);
@@ -3044,7 +3101,16 @@ public final class MobOracle {
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
             line.append(",\"item\":0,\"looting\":0}");
         }
-        line.append("],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        // 玩家打生物的时刻、对象、伤害量和打的人，和牛场景同一格式。
+        // When, whom, how hard and by whom players hit, as in the cow scenes.
+        line.append("],\"hurts\":[");
+        for (int i = 0; i < scene.hurts.size(); i++) {
+            if (i > 0) line.append(',');
+            double[] hurt = scene.hurts.get(i);
+            line.append('[').append((int) hurt[0]).append(',').append((int) hurt[1]).append(',')
+                    .append(Float.floatToRawIntBits((float) hurt[2])).append(',').append((int) hurt[3]).append(']');
+        }
+        line.append("],\"summons\":[],\"eggs\":[]");
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -3205,7 +3271,8 @@ public final class MobOracle {
             out.append(",\"fire\":").append(mob.getRemainingFireTicks());
             out.append(",\"air\":").append(mob.getAirSupply());
             out.append(",\"seed\":").append(randomSeed(mob));
-            out.append(",\"age\":").append(mob instanceof Cow cow ? cow.getAge() : 0);
+            out.append(",\"age\":").append(
+                    mob instanceof net.minecraft.world.entity.AgeableMob ageable ? ageable.getAge() : 0);
             out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
@@ -3213,7 +3280,11 @@ public final class MobOracle {
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             out.append(",\"target\":").append(mob.getTarget() == null ? -1 : mob.getTarget().getId());
-            out.append(",\"baby\":").append(mob instanceof Zombie z && z.isBaby());
+            out.append(",\"baby\":").append(mob.isBaby());
+            if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
+                out.append(",\"eq\":").append(equineFlags(horse));
+                out.append(",\"tmp\":").append(horse.getTemper());
+            }
             out.append(",\"aggr\":").append(mob.isAggressive());
             out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());
             out.append(",\"ph\":0");
@@ -3231,7 +3302,10 @@ public final class MobOracle {
                 if (!goal.isRunning()) continue;
                 if (!first) out.append(' ');
                 first = false;
-                out.append(goal.getGoal().getClass().getSimpleName());
+                // `AbstractHorse.MountPanicGoal` 没被生物控制时就是 `PanicGoal`，名字按后者记。
+                // `MountPanicGoal` is a plain `PanicGoal` without a mob controller.
+                String goalName = goal.getGoal().getClass().getSimpleName();
+                out.append("MountPanicGoal".equals(goalName) ? "PanicGoal" : goalName);
             }
             out.append('"');
             net.minecraft.world.level.pathfinder.Path path = mob.getNavigation().getPath();

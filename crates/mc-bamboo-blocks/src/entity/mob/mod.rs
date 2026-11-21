@@ -1034,12 +1034,13 @@ impl Mob {
             MobType::Cow => GoalSelector::cow(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
-            kind => GoalSelector::equine(kind, &mut navigation),
+            kind => equine::goals(kind, &mut navigation),
         };
         let target_goals = match mob_type {
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
-            _ => GoalSelector::default(),
+            MobType::Cow => GoalSelector::default(),
+            kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
         Self {

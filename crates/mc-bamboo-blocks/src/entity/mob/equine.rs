@@ -1,42 +1,80 @@
-//! 马科共有的属性、储存状态与繁殖继承。
+//! 马、驴、骡、羊驼（官方 `AbstractHorse` 一族）：属性、生成随机化、繁殖继承和存档。
+//! 每刻的生活在 [`life`]，目标表在 [`goals`]，右键交互在 [`interact`]。
 //!
-//! Shared equine attributes, persistent state and breeding inheritance.
+//! Horses, donkeys, mules and llamas (the vanilla `AbstractHorse` family):
+//! attributes, spawn randomization, breeding inheritance and save data. Per-tick
+//! life is in [`life`], goal tables in [`goals`], right-click in [`interact`].
 
-use mc_bamboo_data::{ItemTag, entity_types, items, registries::attribute, tags::item_tags};
+use mc_bamboo_data::{ItemTag, entity_types, registries::attribute, tags::item_tags};
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+use mc_bamboo_protocol::item::ItemStack;
 
 use super::{
     JavaRandom, Mob, MobType,
     attributes::Attributes,
-    interact::{MobInteractRequest, MobInteraction, age_up},
-    living,
     nbt::{uuid_field, uuid_tag},
 };
 use crate::{
-    InteractionResult,
     archive::{block_entity, tag},
     entity::Entity,
     random::LegacyRandom,
-    state::item_is_tagged,
 };
 
-mod donkey;
+mod goals;
 mod horse;
+mod interact;
+mod life;
 mod llama;
-mod mule;
 
+pub(super) use goals::{goals, random_stand_can_use, random_stand_start, targets};
+pub(super) use interact::interact;
+pub(super) use life::{
+    Voice, after_hurt, ai_step_end, ai_step_start, is_immobile, tick_end, voice,
+};
+
+/// 马科在 `Mob` 之外的状态：`AbstractHorse` 的标志字节（驯服、吃草、扬蹄、张嘴）、
+/// 脾气值和主人，箱子马的箱子，马和羊驼的花色，羊驼的力量，以及服务端的几个计时器。
+///
+/// Equine state beyond `Mob`: the `AbstractHorse` flag byte (tame, eating,
+/// standing, open mouth), temper and owner, the chest of chested kinds, the
+/// horse and llama variants, llama strength and the server-side timers.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EquineState {
     pub tame: bool,
     pub temper: i32,
     pub owner: Option<[u8; 16]>,
-    pub eating_haystack: bool,
+    /// `FLAG_EATING`，存档里叫 `EatingHaystack`。
+    ///
+    /// `FLAG_EATING`, saved as `EatingHaystack`.
+    pub eating: bool,
     pub bred: bool,
+    /// `FLAG_STANDING`：扬蹄。
+    ///
+    /// `FLAG_STANDING`: rearing.
+    pub standing: bool,
+    /// `FLAG_OPEN_MOUTH`。
+    pub mouth_open: bool,
+    pub eating_counter: i32,
+    pub mouth_counter: i32,
+    pub stand_counter: i32,
+    pub tail_counter: i32,
     pub variant: i32,
     pub strength: i32,
     pub chested: bool,
     pub chest_items: Vec<ItemStack>,
+}
+
+impl EquineState {
+    /// `AbstractHorse.DATA_ID_FLAGS` 的字节：2 驯服、8 繁殖过、16 吃草、32 扬蹄、64 张嘴。
+    ///
+    /// The `DATA_ID_FLAGS` byte: 2 tame, 8 bred, 16 eating, 32 standing, 64 open mouth.
+    pub fn flags(&self) -> u8 {
+        u8::from(self.tame) << 1
+            | u8::from(self.bred) << 3
+            | u8::from(self.eating) << 4
+            | u8::from(self.standing) << 5
+            | u8::from(self.mouth_open) << 6
+    }
 }
 
 pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
@@ -118,9 +156,9 @@ pub(super) fn tempt_tag(kind: MobType) -> ItemTag {
 pub(super) fn offspring_kind(a: MobType, b: MobType) -> Option<MobType> {
     match (a, b) {
         (MobType::Horse, MobType::Horse) => Some(MobType::Horse),
-        (MobType::Donkey, MobType::Donkey) => Some(donkey::PUREBRED),
+        (MobType::Donkey, MobType::Donkey) => Some(MobType::Donkey),
         (MobType::Horse, MobType::Donkey) | (MobType::Donkey, MobType::Horse) => {
-            Some(mule::CROSSBRED)
+            Some(MobType::Mule)
         }
         (MobType::Llama, MobType::Llama) => Some(MobType::Llama),
         _ => None,
@@ -209,11 +247,7 @@ pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) -> tag::Result<()> {
         return Ok(());
     };
     use tag::put;
-    put(
-        out,
-        "EatingHaystack",
-        Tag::Byte(i8::from(state.eating_haystack)),
-    );
+    put(out, "EatingHaystack", Tag::Byte(i8::from(state.eating)));
     put(out, "Bred", Tag::Byte(i8::from(state.bred)));
     put(out, "Temper", Tag::Int(state.temper));
     put(out, "Tame", Tag::Byte(i8::from(state.tame)));
@@ -222,7 +256,9 @@ pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) -> tag::Result<()> {
     }
     if mob.mob_type != MobType::Horse {
         put(out, "ChestedHorse", Tag::Byte(i8::from(state.chested)));
-        if state.chested && state.chest_items.iter().any(|stack| !stack.is_empty()) {
+        // `output.list("Items", ...)` 一建就放进去，空箱子也写一个空列表。
+        // `output.list` inserts the list at once, so an empty chest writes an empty list.
+        if state.chested {
             put(out, "Items", block_entity::items_tag(&state.chest_items)?);
         }
     }
@@ -237,7 +273,7 @@ pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) -> tag::Result<()> {
 
 pub(super) fn load(mob: &mut Mob, input: &Tag) {
     let Some(state) = &mut mob.equine else { return };
-    state.eating_haystack = tag::bool_or(input, "EatingHaystack", false);
+    state.eating = tag::bool_or(input, "EatingHaystack", false);
     state.bred = tag::bool_or(input, "Bred", false);
     state.temper = tag::int_or(input, "Temper", 0);
     state.tame = tag::bool_or(input, "Tame", false);
@@ -259,153 +295,19 @@ pub(super) fn load(mob: &mut Mob, input: &Tag) {
         state.variant = tag::int_or(input, "Variant", 0);
     }
     if mob.mob_type == MobType::Llama {
-        state.variant = if (0..4).contains(&state.variant) {
-            state.variant
-        } else {
-            0
-        };
+        // `Llama.Variant.BY_ID` 用 `OutOfBoundsStrategy.CLAMP`。
+        // `Llama.Variant.BY_ID` clamps out-of-range ids.
+        state.variant = state.variant.clamp(0, 3);
     }
 }
 
-fn chest_size(kind: MobType, strength: i32) -> usize {
+/// `AbstractMountInventoryMenu.getInventorySize(getInventoryColumns())`：三行，驴骡五列，羊驼按力量。
+///
+/// Three rows; five columns for donkeys and mules, `strength` for llamas.
+pub(super) fn chest_size(kind: MobType, strength: i32) -> usize {
     3 * if kind == MobType::Llama {
         strength.clamp(1, 5) as usize
     } else {
         5
     }
-}
-
-pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
-    if req.held.is_empty() || !living::is_alive(me, mob) {
-        return MobInteraction::pass();
-    }
-    let llama = mob.mob_type == MobType::Llama;
-    let food_tag = if llama {
-        item_tags::LLAMA_FOOD
-    } else {
-        item_tags::HORSE_FOOD
-    };
-    let (result, used) = if item_is_tagged(req.held.item, food_tag) {
-        (InteractionResult::SuccessServer, feed(me, mob, req))
-    } else if mob.equine.as_ref().is_some_and(|state| state.tame) {
-        (InteractionResult::Success, equip(me, mob, &req.held))
-    } else {
-        return MobInteraction::pass();
-    };
-    if used {
-        MobInteraction {
-            result,
-            shrink_held: !req.creative,
-            replacement: None,
-        }
-    } else {
-        MobInteraction::pass()
-    }
-}
-
-fn feed(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> bool {
-    let (heal, growth, temper, breed_food) = if mob.mob_type == MobType::Llama {
-        match req.held.item {
-            items::WHEAT => (2.0, 10, 3, false),
-            items::HAY_BLOCK => (10.0, 90, 6, true),
-            _ => return false,
-        }
-    } else {
-        match req.held.item {
-            items::WHEAT => (2.0, 20, 3, false),
-            items::SUGAR => (1.0, 30, 3, false),
-            items::HAY_BLOCK => (20.0, 180, 0, false),
-            items::APPLE | items::CARROT => (3.0, 60, 3, false),
-            items::RED_MUSHROOM => (3.0, 0, 3, false),
-            items::GOLDEN_CARROT => (4.0, 60, 5, true),
-            items::GOLDEN_APPLE | items::ENCHANTED_GOLDEN_APPLE => (10.0, 240, 10, true),
-            _ => return false,
-        }
-    };
-    let tame = mob.equine.as_ref().is_some_and(|state| state.tame);
-    let mut used = breed_food && tame && mob.age == 0 && mob.in_love <= 0;
-    if used {
-        mob.in_love = 600;
-        mob.love_cause = Some(req.player_uuid);
-        mob.events.push(super::MobEvent::Hearts);
-    }
-    let max_health = mob.attributes.value(attribute::MAX_HEALTH) as f32;
-    if mob.health < max_health && heal > 0.0 {
-        mob.health = (mob.health + heal).min(max_health);
-        used = true;
-    }
-    if mob.is_baby() && growth > 0 && !mob.age_locked {
-        // 原版服务端也会取三次粒子坐标，即使不发送这个粒子。
-        // The server draws all three particle coordinates even though it does not send this particle.
-        for _ in 0..3 {
-            me.random.next_double();
-        }
-        age_up(me, mob, growth, false);
-        used = true;
-    }
-    if let Some(state) = &mut mob.equine
-        && temper > 0
-        && (used || !tame)
-        && state.temper < 100
-    {
-        state.temper = (state.temper.saturating_add(temper)).clamp(0, 100);
-        used = true;
-    }
-    if used && !mob.silent {
-        let sound = match mob.mob_type {
-            MobType::Horse if mob.is_baby() => "minecraft:entity.horse.eat_baby",
-            MobType::Horse => "minecraft:entity.horse.eat",
-            MobType::Donkey => "minecraft:entity.donkey.eat",
-            MobType::Mule => "minecraft:entity.mule.eat",
-            MobType::Llama => "minecraft:entity.llama.eat",
-            _ => unreachable!(),
-        };
-        let pitch = 1.0 + (me.random.next_float() - me.random.next_float()) * 0.2;
-        living::play_sound(me, mob, sound, 1.0, pitch);
-    }
-    used
-}
-
-fn equip(me: &mut Entity, mob: &mut Mob, stack: &ItemStack) -> bool {
-    let Some(state) = &mut mob.equine else {
-        return false;
-    };
-    let kind = mob.mob_type;
-    if stack.item == items::CHEST && kind != MobType::Horse && !state.chested {
-        state.chested = true;
-        state.chest_items = vec![ItemStack::empty(); chest_size(kind, state.strength)];
-        let sound = match kind {
-            MobType::Donkey => donkey::CHEST_SOUND,
-            MobType::Mule => mule::CHEST_SOUND,
-            _ => "minecraft:entity.llama.chest",
-        };
-        let pitch = (me.random.next_float() - me.random.next_float()) * 0.2 + 1.0;
-        living::play_sound(me, mob, sound, 1.0, pitch);
-        return true;
-    }
-    if mob.is_baby() {
-        return false;
-    }
-    let slot = match (kind, stack.item) {
-        (MobType::Horse | MobType::Donkey | MobType::Mule, items::SADDLE) => EquipmentSlot::Saddle,
-        (
-            MobType::Horse,
-            items::LEATHER_HORSE_ARMOR
-            | items::COPPER_HORSE_ARMOR
-            | items::IRON_HORSE_ARMOR
-            | items::GOLDEN_HORSE_ARMOR
-            | items::DIAMOND_HORSE_ARMOR
-            | items::NETHERITE_HORSE_ARMOR,
-        ) => EquipmentSlot::Body,
-        _ => return false,
-    };
-    if !mob.equipment.get(slot).is_empty() {
-        return false;
-    }
-    let mut equip = stack.clone();
-    equip.count = 1;
-    mob.equipment.set(slot, equip);
-    mob.equipment
-        .set_drop_chance(slot, super::equipment::GUARANTEED_DROP_CHANCE);
-    true
 }

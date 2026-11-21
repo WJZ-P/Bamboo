@@ -30,6 +30,10 @@ pub struct MobInteractRequest {
     pub creative: bool,
     /// 玩家位置，`Player.playSound` 用它当音源坐标。
     pub position: Vec3,
+    /// `isSecondaryUseActive()`：交互包里的 `usingSecondaryAction`（潜行）。
+    ///
+    /// `isSecondaryUseActive()`: the packet's `usingSecondaryAction` (sneaking).
+    pub sneaking: bool,
 }
 
 /// 交互的后果，交给调用方改物品栏和发挥手动画。

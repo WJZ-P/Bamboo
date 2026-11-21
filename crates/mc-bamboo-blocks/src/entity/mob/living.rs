@@ -21,6 +21,7 @@ use super::{
         rotate_towards,
     },
     effects::EffectAction,
+    equine::Voice,
     goals::Flag,
     motion,
     navigation::NavMob,
@@ -86,6 +87,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(Flag::Move, true);
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
+    }
+    // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
+    // `AbstractHorse.tick` advances its timers after `super.tick()`.
+    if mob.mob_type.is_equine() {
+        super::equine::tick_end(mob);
     }
 }
 
@@ -419,13 +425,42 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if roll < time {
             mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
             let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .ambient_sound()
-                .unwrap_or_else(|| mob.sound_variant.ambient());
+            let sound = voice_of(mob, Voice::Ambient);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
     }
+}
+
+/// 叫声、受伤和死亡的声音：马科按种类和幼年分派，其余按类型，牛用声音变体。
+///
+/// Ambient, hurt and death sounds: equines by kind and age, others by type,
+/// cows by their sound variant.
+fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
+    if mob.mob_type.is_equine() {
+        return super::equine::voice(mob, voice);
+    }
+    match voice {
+        Voice::Hurt => mob
+            .mob_type
+            .hurt_sound()
+            .unwrap_or_else(|| mob.sound_variant.hurt()),
+        Voice::Death => mob
+            .mob_type
+            .death_sound()
+            .unwrap_or_else(|| mob.sound_variant.death()),
+        _ => mob
+            .mob_type
+            .ambient_sound()
+            .unwrap_or_else(|| mob.sound_variant.ambient()),
+    }
+}
+
+/// `LivingEntity.makeSound`：生物自己的音量和 `getVoicePitch` 的两次取数。
+///
+/// `LivingEntity.makeSound`: the mob's own volume and the two `getVoicePitch` draws.
+pub(crate) fn make_sound(me: &mut Entity, mob: &mut Mob, sound: &'static str) {
+    let pitch = voice_pitch(me, mob);
+    play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
 }
 
 /// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`。
@@ -532,6 +567,13 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    if mob.mob_type.is_equine() {
+        // 马科的叫声和音量（0.8）按自己的类。
+        // Equines use their own ambient sound and volume (0.8).
+        let sound = voice_of(mob, Voice::Ambient);
+        make_sound(me, mob, sound);
+        return;
+    }
     let pitch = voice_pitch(me, mob);
     play_sound(
         me,
@@ -595,6 +637,20 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let equine = mob.mob_type.is_equine();
+    if equine {
+        super::equine::ai_step_start(me, mob);
+    }
+    animal_ai_step(me, mob, ctx);
+    if equine {
+        super::equine::ai_step_end(me, mob, ctx);
+    }
+}
+
+/// `Animal.aiStep` 一路到 `LivingEntity.aiStep` 的公共部分。
+///
+/// The shared chain from `Animal.aiStep` down to `LivingEntity.aiStep`.
+fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -627,7 +683,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `applyInput`。
     mob.xxa *= 0.98;
     mob.zza *= 0.98;
-    if mob.is_dead_or_dying() {
+    // `isImmobile()`：缺省是濒死，马科另有覆写。
+    // `isImmobile()`: dying by default; equines override it.
+    if super::equine::is_immobile(mob) {
         mob.jumping = false;
         mob.xxa = 0.0;
         mob.zza = 0.0;
@@ -1371,10 +1429,7 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .death_sound()
-                .unwrap_or_else(|| mob.sound_variant.death());
+            let sound = voice_of(mob, Voice::Death);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
         die(me, mob, ctx, source);
@@ -1382,14 +1437,14 @@ pub(crate) fn hurt_server(
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = mob
-            .mob_type
-            .hurt_sound()
-            .unwrap_or_else(|| mob.sound_variant.hurt());
+        let sound = voice_of(mob, Voice::Hurt);
         play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();
+    if mob.mob_type.is_equine() {
+        super::equine::after_hurt(me, mob);
+    }
     true
 }
 
@@ -1627,9 +1682,10 @@ pub(crate) fn apply_breed(
         let _from_father = me.random.next_boolean();
         Entity::cow(position)
     };
-    let xp = if world.block_game_rules().mob_drops
-        || !calf.kind.mob().is_some_and(|mob| mob.mob_type.is_equine())
-    {
+    // `finalizeSpawnChildFromBreeding` 只在 `MOB_DROPS` 开着时取经验值。
+    // `finalizeSpawnChildFromBreeding` only draws the orb value with `MOB_DROPS` on.
+    let mob_drops = world.block_game_rules().mob_drops;
+    let xp = if mob_drops {
         1 + me.random.next_int_bounded(7)
     } else {
         0
@@ -1656,7 +1712,7 @@ pub(crate) fn apply_breed(
     world.with_entity_mut(calf_id, &mut |entity| {
         entity.y_rot = 0.0;
     });
-    if world.block_game_rules().mob_drops {
+    if mob_drops {
         // 繁殖不是 `ExperienceOrb.award`：只生成一颗球，值就是 `1 + nextInt(7)`。
         let orb = Entity::experience_orb(position, xp);
         world.spawn_entity(orb);

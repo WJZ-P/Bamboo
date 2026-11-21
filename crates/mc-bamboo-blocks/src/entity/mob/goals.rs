@@ -109,6 +109,13 @@ pub enum Goal {
     TurtleEgg {
         speed: f64,
     },
+    /// `RandomStandGoal`：马科偶尔扬蹄，`nextStand` 从 `-getAmbientStandInterval()` 往上数。
+    ///
+    /// `RandomStandGoal`: equines rear now and then; `nextStand` counts up from
+    /// `-getAmbientStandInterval()`.
+    RandomStand {
+        next_stand: i32,
+    },
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -119,6 +126,10 @@ pub enum TargetType {
     Villager,
     IronGolem,
     Turtle,
+    /// 羊驼的 `LlamaAttackWolfGoal`：没驯服的狼。
+    ///
+    /// The llama's `LlamaAttackWolfGoal`: untamed wolves.
+    Wolf,
 }
 
 impl TargetType {
@@ -139,7 +150,7 @@ impl Goal {
             }
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
-            Self::Unavailable(_) => &[],
+            Self::Unavailable(_) | Self::RandomStand { .. } => &[],
             Self::MeleeAttack { .. } | Self::Bow(_) => &[Flag::Move, Flag::Look],
             Self::HurtByTarget { .. } | Self::NearestAttackableTarget { .. } => &[Flag::Target],
             Self::RestrictSun => &[],
@@ -160,6 +171,7 @@ impl Goal {
                 | Self::MeleeAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
+                | Self::RandomStand { .. }
         )
     }
 
@@ -184,6 +196,7 @@ impl Goal {
             Self::FleeSun { .. } => "FleeSunGoal",
             Self::BreakDoor => "BreakDoorGoal",
             Self::TurtleEgg { .. } => "ZombieAttackTurtleEggGoal",
+            Self::RandomStand { .. } => "RandomStandGoal",
         }
     }
 }
@@ -280,105 +293,6 @@ impl GoalSelector {
                 .collect(),
             locked: [None; 4],
             disabled: [false; 4],
-        }
-    }
-
-    /// 马科已实现的目标，按官方注册顺序排列。
-    ///
-    /// Implemented equine goals in vanilla registration order.
-    pub(super) fn equine(kind: super::MobType, navigation: &mut Navigation) -> Self {
-        let llama = kind == super::MobType::Llama;
-        let wrap = |priority, goal| WrappedGoal {
-            priority,
-            running: false,
-            goal,
-        };
-        navigation.flags.can_float = true;
-        let float = wrap(0, Goal::Float);
-        let panic = wrap(
-            if llama { 3 } else { 1 },
-            Goal::Panic {
-                speed: 1.2,
-                target: Vec3::default(),
-            },
-        );
-        let breed = wrap(
-            if llama { 4 } else { 2 },
-            Goal::Breed {
-                speed: 1.0,
-                partner: None,
-                love_time: 0,
-            },
-        );
-        let tempt = wrap(
-            if llama { 5 } else { 3 },
-            Goal::Tempt {
-                speed: 1.25,
-                player: None,
-                calm_down: 0,
-            },
-        );
-        let follow = wrap(
-            if llama { 6 } else { 4 },
-            Goal::FollowParent {
-                speed: 1.0,
-                parent: None,
-                time_to_recalc_path: 0,
-            },
-        );
-        let stroll = wrap(
-            if llama { 7 } else { 6 },
-            Goal::Stroll {
-                speed: 0.7,
-                interval: 120,
-                probability: 0.001,
-                wanted: Vec3::default(),
-                force_trigger: false,
-            },
-        );
-        let look = wrap(
-            if llama { 8 } else { 7 },
-            Goal::LookAtPlayer {
-                look_distance: 6.0,
-                probability: 0.02,
-                look_at: None,
-                look_time: 0,
-            },
-        );
-        let random_look = wrap(
-            if llama { 9 } else { 8 },
-            Goal::RandomLookAround {
-                rel_x: 0.0,
-                rel_z: 0.0,
-                look_time: 0,
-            },
-        );
-        let goals = if llama {
-            vec![
-                float,
-                panic,
-                breed,
-                tempt,
-                follow,
-                stroll,
-                look,
-                random_look,
-            ]
-        } else {
-            vec![
-                breed,
-                follow,
-                stroll,
-                look,
-                random_look,
-                float,
-                panic,
-                tempt,
-            ]
-        };
-        Self {
-            goals,
-            ..Self::default()
         }
     }
 
@@ -742,7 +656,7 @@ impl GoalSelector {
 }
 
 /// `Goal.reducedTickDelay`。
-const fn reduced_tick_delay(ticks: i32) -> i32 {
+pub(super) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
 }
 
@@ -870,6 +784,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
+        Goal::RandomStand { next_stand } => {
+            super::equine::random_stand_can_use(me, mob, next_stand)
+        }
         Goal::MeleeAttack {
             last_can_use_check,
             start_path,
@@ -1029,7 +946,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float => can_use(goal, me, mob, ctx),
-        Goal::Unavailable(_) => false,
+        Goal::Unavailable(_) | Goal::RandomStand { .. } => false,
         Goal::MeleeAttack { .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。
@@ -1107,6 +1024,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *look_time = 20 + me.random.next_int_bounded(20);
         }
         Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::RandomStand { .. } => super::equine::random_stand_start(me, mob),
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1193,8 +1111,11 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
-        Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } | Goal::Unavailable(_) => {
-        }
+        Goal::Float
+        | Goal::Panic { .. }
+        | Goal::RandomLookAround { .. }
+        | Goal::Unavailable(_)
+        | Goal::RandomStand { .. } => {}
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
         Goal::HurtByTarget { .. } => mob.target = None,
@@ -1328,7 +1249,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 .set_look_at_default(me.position.x + *rel_x, eye, me.position.z + *rel_z);
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
-        Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
+        Goal::Unavailable(_)
+        | Goal::HurtByTarget { .. }
+        | Goal::RestrictSun
+        | Goal::RandomStand { .. } => {}
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
             *unseen_ticks += 1;
             // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新

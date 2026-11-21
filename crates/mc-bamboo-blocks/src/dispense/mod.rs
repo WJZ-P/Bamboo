@@ -21,6 +21,11 @@ mod ignite;
 mod place;
 mod wax;
 
+/// `Equippable.canBeEquippedBy`，马科右键装备也用。
+///
+/// `Equippable.canBeEquippedBy`, shared with equine right-click equipping.
+pub(crate) use equipment::allowed as equippable_allows;
+
 #[cfg(test)]
 mod tests;
 

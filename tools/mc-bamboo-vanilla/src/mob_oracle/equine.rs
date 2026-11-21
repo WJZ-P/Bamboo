@@ -19,6 +19,13 @@ const ATTRIBUTES: [i32; 3] = [
 ];
 type State = [i64; 6];
 
+/// 逐刻场景里的类型编号：4 马、5 驴、6 骡、7 羊驼。
+///
+/// Tick-scene kind numbers: 4 horse, 5 donkey, 6 mule, 7 llama.
+pub(super) fn scene_kind(kind: i32) -> MobType {
+    KINDS[(kind - 4) as usize]
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SpawnCase {
