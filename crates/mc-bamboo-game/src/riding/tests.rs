@@ -245,13 +245,39 @@ fn a_dismount_lands_beside_the_horse_or_on_it() {
     //
     // The flat floor sits at y=-61 with its top at -60; the horse stands at
     // (0.5, -60, 0.5) facing 0.
+    let border = mc_bamboo_blocks::WorldBorder::default();
     let chunks = ChunkStore::flat();
     let vehicle = Vec3::new(0.5, -60.0, 0.5);
-    let spot =
-        super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
-            .expect("a floor exists");
+    let spot = super::dismount::dismount_location(
+        &chunks,
+        &border,
+        &player(),
+        vehicle,
+        1.396_484_4,
+        1.6,
+        0.0,
+    )
+    .expect("a floor exists");
     assert!((spot.y + 60.0).abs() < 1.0e-9, "{spot:?}");
     assert!(spot.x < 0.0, "right hand side is -x at yaw 0: {spot:?}");
+
+    // 主手一侧超出世界边界时，落点换到边界内一侧（`DismountHelper.canDismountTo`）。
+    // When the main-hand side falls outside the world border, fall back to the
+    // inside side (`DismountHelper.canDismountTo`).
+    let mut tight = mc_bamboo_blocks::WorldBorder::default();
+    tight.set_center(2.0, 0.5);
+    tight.set_size(4.0);
+    let spot = super::dismount::dismount_location(
+        &chunks,
+        &tight,
+        &player(),
+        vehicle,
+        1.396_484_4,
+        1.6,
+        0.0,
+    )
+    .expect("the inside side is within the border");
+    assert!(spot.x > 0.5, "border pushes dismount to +x: {spot:?}");
 
     // 主手一侧立一堵墙，落点换到另一侧。
     // A wall on the main-hand side moves the spot to the other side.
@@ -259,16 +285,24 @@ fn a_dismount_lands_beside_the_horse_or_on_it() {
     for y in -60..=-58 {
         chunks.set_block(BlockPos::new(-1, y, 0), blocks::STONE);
     }
-    let spot =
-        super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
-            .expect("a floor exists");
+    let spot = super::dismount::dismount_location(
+        &chunks,
+        &border,
+        &player(),
+        vehicle,
+        1.396_484_4,
+        1.6,
+        0.0,
+    )
+    .expect("a floor exists");
     assert!(spot.x > 0.5, "the other side is +x: {spot:?}");
 
     // 两边都没有地：官方返回 `this.position()`。
     // No floor on either side: vanilla returns `this.position()`.
     let air = Vec3::new(0.5, 100.0, 0.5);
-    let spot = super::dismount::dismount_location(&chunks, &player(), air, 1.396_484_4, 1.6, 0.0)
-        .expect("the fallback is always a position");
+    let spot =
+        super::dismount::dismount_location(&chunks, &border, &player(), air, 1.396_484_4, 1.6, 0.0)
+            .expect("the fallback is always a position");
     assert_eq!(spot, air);
 }
 

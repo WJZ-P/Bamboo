@@ -1536,6 +1536,11 @@ pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> 
     if mob.mob_type.climbs_walls() {
         return super::spider::on_climbable(mob);
     }
+    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓。
+    // `AbstractHorse.onClimbable` is always false; equines never climb ladders or vines.
+    if mob.mob_type.is_equine() {
+        return false;
+    }
     let pos = me.block_position();
     let state = view.block_state(pos);
     if state.is_tagged(block_tags::CLIMBABLE) {

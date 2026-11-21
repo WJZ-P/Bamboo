@@ -178,6 +178,28 @@ pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
     }
 }
 
+/// 剪下装备时的掉落偏移：`EntityAttachments.getAverage(EntityAttachment.PASSENGER)`，
+/// 未按朝向旋转。成年取 [`passenger_attachment`]，幼崽按官方 `BABY_DIMENSIONS` 的
+/// `PASSENGER` 附着点缩放。
+///
+/// The drop offset for sheared equipment, `EntityAttachments.getAverage(PASSENGER)`
+/// (unrotated): [`passenger_attachment`] for adults, and the scaled `BABY_DIMENSIONS`
+/// passenger attachment for babies.
+pub(super) fn shear_drop_offset(kind: MobType, baby: bool) -> mc_bamboo_core::Vec3 {
+    let (y, z) = if !baby {
+        passenger_attachment(kind)
+    } else {
+        let height = entity_types::FACTS[kind.entity_type() as usize].height;
+        match kind {
+            MobType::Horse => ((height - 0.125) * 0.7, 0.0),
+            MobType::Donkey | MobType::Mule => ((height + 0.031_25) * 0.5, -0.312_5 * 0.5),
+            MobType::Llama => ((height - 0.25) * 0.5, -0.3 * 0.5),
+            _ => (0.0, 0.0),
+        }
+    };
+    mc_bamboo_core::Vec3::new(0.0, f64::from(y), f64::from(z))
+}
+
 /// `createBaseHorseAttributes`，驴骡羊驼再用 `createBaseChestedHorseAttributes` 的速度和跳跃。
 ///
 /// `createBaseHorseAttributes`, with the chested speed and jump for the other kinds.

@@ -72,10 +72,16 @@ pub struct MobInteraction {
     /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`: false for mooshroom stew
     /// and for bucketing a fish, so creative mode consumes the bucket too.
     pub limit_creative: bool,
-    /// `spawnAtLocation`：熊猫换手里那份竹子时丢下的旧物品。
+    /// `spawnAtLocation`：熊猫换手里那份竹子或剪下马具时丢下的物品。
     ///
-    /// `spawnAtLocation`: the old stack a panda drops when given a new one.
+    /// `spawnAtLocation`: a stack dropped on interaction (e.g. a panda swapping
+    /// bamboo or shearing worn equipment off a mount).
     pub drop_stack: Option<ItemStack>,
+    /// `spawnAtLocation` 的相对偏移（默认脚下；剪下装备用 `PASSENGER` 附着点均值）。
+    ///
+    /// Offset added to the mob's position for `drop_stack` (zero by default;
+    /// sheared equipment uses the average `PASSENGER` attachment point).
+    pub drop_offset: mc_bamboo_core::Vec3,
 }
 
 impl MobInteraction {
@@ -92,6 +98,7 @@ impl MobInteraction {
             discard: false,
             limit_creative: true,
             drop_stack: None,
+            drop_offset: mc_bamboo_core::Vec3::new(0.0, 0.0, 0.0),
         }
     }
 }

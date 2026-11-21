@@ -8,7 +8,7 @@
 //! neither works the vehicle's own position is used (`this.position()`).
 
 use mc_bamboo_blocks::{
-    BlockState,
+    BlockState, WorldBorder,
     shape::{self, Aabb, CollisionContext, EntityContext},
 };
 use mc_bamboo_core::{BlockPos, Vec3, mth};
@@ -121,6 +121,7 @@ fn pose_bounds(width: f64, height: f64, location: Vec3) -> Aabb {
 /// `None` return means the caller keeps the player where it is.
 pub(crate) fn dismount_location(
     chunks: &ChunkStore,
+    border: &WorldBorder,
     player: &Player,
     vehicle_position: Vec3,
     vehicle_width: f64,
@@ -159,7 +160,10 @@ pub(crate) fn dismount_location(
                 }
                 if floor_valid(floor) {
                     let location = Vec3::new(target_x, f64::from(y) + floor, target_z);
-                    if !collides(&mut state_at, context, pose_bounds(width, height, location)) {
+                    let bounds = pose_bounds(width, height, location);
+                    if !collides(&mut state_at, context, bounds)
+                        && border.is_within_bounds_aabb(bounds)
+                    {
                         return Some(location);
                     }
                 }

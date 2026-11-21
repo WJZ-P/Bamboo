@@ -769,4 +769,27 @@ mod tests {
         assert!(!state.standing);
         assert_eq!(state.stand_anim, 0.0);
     }
+
+    /// `AbstractHorse.onClimbable` 恒假：即使站在梯子里，马科也不会爬。
+    ///
+    /// `AbstractHorse.onClimbable` is always false, even while standing inside a ladder.
+    #[test]
+    fn equines_are_never_on_climbable() {
+        let mut level = crate::testing::TestLevel::new();
+        level.set(BlockPos::new(0, 64, 0), BlockState(blocks::LADDER));
+        let mut ticks = crate::BlockTicks::new();
+        let world = crate::World::new(&mut level, &mut ticks);
+        for kind in [
+            MobType::Horse,
+            MobType::Donkey,
+            MobType::Mule,
+            MobType::Llama,
+        ] {
+            let mut entity = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
+            let climbable = entity
+                .with_mob(|me, mob| living::on_climbable(me, mob, &world))
+                .expect("equine row");
+            assert!(!climbable, "{kind:?} should not climb ladders");
+        }
+    }
 }

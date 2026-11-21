@@ -347,7 +347,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 骑手位置：`riding::tick` 在实体阶段之后、玩家自己的 tick 之前写玩家表，位置是载具位置加
   官方 `getPassengerAttachmentPoint` 的缺省点（`EntityTypes` 的 `passengerAttachments`：
   马 1.44375、驴 1.1125、骡 1.2125、羊驼 `(1.37, -0.3)`，按载具朝向旋转；扬蹄时
-  `AbstractHorse` 附加的 `0.15 * standAnimO` / `-0.7 * standAnimO` 还没建模）。
+  `AbstractHorse` 附加的 `0.15 * standAnimO` / `-0.7 * standAnimO` 已按 `EquinePublic::stand_anim_o` 建模，羊驼覆写不叠加）。
 - 载具位置：`move_vehicle` 在世界线程处理输入时直接改载具行（`handleMoveVehicle` 的夹取、
   `wrapDegrees`、100 平方格的「移动太快」拉回、非法值断开），再用 `move(MoverType.PLAYER)`
   的扫掠（`sweep_movement`，步高取 `STEP_HEIGHT` 属性）和包里的位置比：水平差超过 0.25 格
@@ -439,6 +439,20 @@ AI 内部量，服务端不建模，无玩家可感知差异。没有改动任�
 `--only zombie_equine`（20 场景 15258 刻）、`--only llama_spit`（2 场景 322 刻）复跑全部
 0 不一致，确认合并没动马科的取数次数和顺序。本轮没有改动任何马科行为代码；剩下的差距仍
 是要动线程模型 / tick 顺序或真实客户端才能收口的部分（见汇报），按规矩停下来不自己定。
+
+**与 main 合并与马科收口（2026-11-21，第十二轮）。** 本轮先合入 `main` 新增的 19 个提交
+（`e1d69b66` 一带：哞菇、北极熊、熊猫），按 main 结构解 5 处冲突（`goals.rs` 统一
+`TargetType::follow_scale` 同时支持北极熊 `0.5` 与羊驼 `0.25`、`interact.rs` 并集保留马科与熊猫食物、
+`MobOracle.java` / `mob_oracle.rs` 并集保留马科与熊猫夹具、`README.md` 并集保留两方对拍说明），
+补修 `main` 合入的 `Extractor.java` `stewFlowers()` 缺失右花括号后重跑 `extract` 确认 `generated/`
+逐字节一致，更新马科测试夹具适配 `running_names(mob_type)` 与 `MobPublic::of(&mob)`。合并后补齐
+三处对照官方 26.3 查出的马科行为缺口：① `Entity.interact` → `Mob.attemptToShearEquipment`
+（剪刀右键按 `EquipmentSlot.VALUES` 顺序卸马铠 / 羊驼地毯 / 鞍，按 `PASSENGER` 附着点均值掉落、
+播 `shearing_sound`、扣耐久并检查绑定诅咒），`equineInteract` 加 `Items.SHEARS` 扩到 504 题；
+② `AbstractHorse.onClimbable()` 恒假（马科不再爬梯子 / 藤蔓）；③ `DismountHelper.canDismountTo`
+补世界边界检查（`border.is_within_bounds_aabb`）。另给 `LlamaAttackWolfGoal` 与 `WolfAvoidEntityGoal`
+补上两场非空跑逐刻对拍（`zombie_equine_llama_wolf_near` / `_far`）。核实 `LivingEntity.rideTick`
+确实调 `resetFallDistance()`，原疑点 15 消解。
 
 其余已知差异见 README「马科的已知限制」。
 

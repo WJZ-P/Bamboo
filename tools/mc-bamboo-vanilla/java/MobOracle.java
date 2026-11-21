@@ -2665,6 +2665,28 @@ public final class MobOracle {
             herd.mob(12, -3.5, 64.0, -2.5, 180.0F, 73L, 0);
             herd.player(4.5, 64.0, 4.5, Items.WHEAT);
             scenes.add(herd);
+            // 羊驼和野狼互动：近处（3 格，在四分之一跟随距离内）羊驼盯上野狼、野狼躲羊驼；
+            // 远处（8 格，超过四分之一跟随距离但在 24 格躲避范围内）羊驼不盯狼、野狼照躲。
+            // Llama-wolf interaction: near (3 blocks, inside quarter follow range) the llama
+            // targets the wild wolf and the wolf avoids the llama; far (8 blocks, outside
+            // quarter follow range but inside 24-block avoid range) only the wolf avoids.
+            Scene llamaWolfNear = new Scene("zombie_equine_llama_wolf_near").ticks(40).difficulty(2);
+            ground(llamaWolfNear, 12);
+            // 小围栏让野狼躲避时仍留在四分之一跟随距离（4 格）内，确保两个目标都真的触发。
+            // A small pen keeps the fleeing wolf inside quarter follow range (4 blocks) so
+            // both `WolfAvoidEntityGoal` and `LlamaAttackWolfGoal` genuinely fire.
+            llamaWolfNear.fill(-3, 64, -3, 3, 65, -3, STONE);
+            llamaWolfNear.fill(-3, 64, 3, 3, 65, 3, STONE);
+            llamaWolfNear.fill(-3, 64, -3, -3, 65, 3, STONE);
+            llamaWolfNear.fill(3, 64, -3, 3, 65, 3, STONE);
+            llamaWolfNear.mob(12, 0.5, 64.0, 0.5, 0.0F, 81L, 0);
+            llamaWolfNear.mob(8, 2.0, 64.0, 0.5, 180.0F, 82L, 0);
+            scenes.add(llamaWolfNear);
+            Scene llamaWolfFar = new Scene("zombie_equine_llama_wolf_far").ticks(120).difficulty(2);
+            ground(llamaWolfFar, 12);
+            llamaWolfFar.mob(12, 0.5, 64.0, 0.5, 0.0F, 83L, 0);
+            llamaWolfFar.mob(8, 8.5, 64.0, 0.5, 180.0F, 84L, 0);
+            scenes.add(llamaWolfFar);
         }
 
         private static int itemId(Item item) {
@@ -4359,7 +4381,7 @@ public final class MobOracle {
     private static List<Item> equineItems() {
         return List.of(Items.WHEAT, Items.SUGAR, Items.HAY_BLOCK,
             Items.APPLE, Items.CARROT, Items.RED_MUSHROOM, Items.GOLDEN_CARROT, Items.GOLDEN_APPLE,
-            Items.CHEST, Items.SADDLE, Items.IRON_HORSE_ARMOR, Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE), Items.STICK);
+            Items.CHEST, Items.SADDLE, Items.IRON_HORSE_ARMOR, Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE), Items.SHEARS, Items.STICK);
     }
 
     /**
@@ -6067,6 +6089,8 @@ public final class MobOracle {
             zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                     lastSentHealth, true);
         }
+        boolean llamaTargetedWolf = false;
+        boolean wolfAvoidedLlama = false;
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
             if (level.realSky) {
@@ -6116,6 +6140,14 @@ public final class MobOracle {
                 mob.commonTick();
                 mob.tick();
             }
+            if (scene.name.startsWith("zombie_equine_llama_wolf")) {
+                if (mobs.get(0).getTarget() == mobs.get(1)) llamaTargetedWolf = true;
+                for (WrappedGoal goal : mobs.get(1).getGoalSelector().getAvailableGoals()) {
+                    if (goal.isRunning() && "WolfAvoidEntityGoal".equals(goal.getGoal().getClass().getSimpleName())) {
+                        wolfAvoidedLlama = true;
+                    }
+                }
+            }
             level.tracked.removeIf(Entity::isRemoved);
             appendMobEvents(mobEvents, mobSink.takeRaw());
             line.append(',').append(zombieStepJson(mobs, players, level));
@@ -6147,6 +6179,14 @@ public final class MobOracle {
             if (mobs.getFirst().getTarget() != expected) {
                 throw new IllegalStateException(scene.name + " did not exercise fox target selection");
             }
+        }
+        if ("zombie_equine_llama_wolf_near".equals(scene.name) && !llamaTargetedWolf) {
+            throw new IllegalStateException(scene.name + " did not exercise llama targeting: target="
+                    + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
+        }
+        if ("zombie_equine_llama_wolf_far".equals(scene.name) && (llamaTargetedWolf || !wolfAvoidedLlama)) {
+            throw new IllegalStateException(scene.name + " expected wolf avoidance without llama targeting: target="
+                    + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
         }
         line.append("]");
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");

@@ -169,6 +169,7 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
         let (width, height, _) = mob.mob_type.dimensions(mob.baby);
         dismount::dismount_location(
             &region.chunks,
+            &region.global.world_border,
             player,
             public.position,
             f64::from(width),
