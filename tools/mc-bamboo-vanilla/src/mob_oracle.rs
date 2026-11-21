@@ -33,6 +33,7 @@ use crate::oracle::collect_log;
 mod gen_spawn;
 mod natural_spawn;
 mod projectile;
+mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
 
@@ -73,6 +74,7 @@ enum Line {
     Header(Header),
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
+    Shot(shot::ShotCase),
     ArrowPickup(projectile::ArrowPickupCase),
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
@@ -926,6 +928,7 @@ impl Report {
                 Line::Header(header) => self.check_header(&header)?,
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
+                Line::Shot(case) => self.replay_shot(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

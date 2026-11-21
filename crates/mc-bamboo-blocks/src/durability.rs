@@ -119,7 +119,7 @@ pub(crate) fn mine_block(world: &World, state: BlockState) {
 /// `hurtAndBreak(amount, player, hand)`。没有手时什么也不做。
 ///
 /// `hurtAndBreak(amount, player, hand)`. Does nothing when no hands are installed.
-pub(crate) fn hurt_hand(world: &World, hand: Hand, amount: i32) {
+pub fn hurt_hand(world: &World, hand: Hand, amount: i32) {
     edit_hand(hand, |stack, hands| {
         let infinite = hands.infinite_materials;
         hurt_stack(

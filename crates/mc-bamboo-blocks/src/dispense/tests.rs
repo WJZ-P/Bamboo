@@ -2,7 +2,7 @@
 //!
 //! Every dispense behaviour and its failure branch, including the world random seed.
 
-use mc_bamboo_core::{BlockPos, Direction};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{
     blocks, items,
     registries::{data_component_type as kinds, entity_type},
@@ -75,6 +75,7 @@ struct Shot {
     left: ItemStack,
     front: BlockState,
     primed: usize,
+    arrows: Vec<(Vec3, Vec3, bool)>,
 }
 
 fn fire_one(level: &mut TestLevel, facing: Direction, item: ItemStack) -> Shot {
@@ -96,12 +97,25 @@ fn fire_one(level: &mut TestLevel, facing: Direction, item: ItemStack) -> Shot {
         .iter()
         .filter(|entity| matches!(entity.kind, EntityKind::Tnt(_)))
         .count();
+    let arrows = level
+        .entities()
+        .iter()
+        .filter_map(|entity| match &entity.kind {
+            EntityKind::Arrow(arrow) => Some((
+                entity.position,
+                entity.delta,
+                arrow.pickup == crate::entity::arrow::Pickup::Allowed,
+            )),
+            _ => None,
+        })
+        .collect();
     Shot {
         left,
         seed,
         effects,
         front,
         primed,
+        arrows,
     }
 }
 
@@ -947,21 +961,25 @@ fn a_brush_fails_when_nothing_is_in_front() {
 }
 
 #[test]
-fn projectiles_armour_stands_spawn_eggs_and_tnt_take_the_fallback() {
+fn arrows_spawn_a_projectile_and_burn_armour_stands_and_spawn_eggs_take_the_fallback() {
+    // `ProjectileDispenseBehavior`：箭真的生成实体，位置比抛出多 0.1 的 y，
+    // 事件换成 1002，不取世界随机源。
+    //
+    // `ProjectileDispenseBehavior`: a real arrow entity 0.1 above the thrown
+    // position, event 1002, and no world random draws.
     let arrow = fire_id(&mut TestLevel::new(), Direction::East, items::ARROW);
     assert!(arrow.left.is_empty());
-    assert!(
-        level_events(&arrow.effects)
-            .iter()
-            .all(|event| event.0 != 1002)
-    );
-    assert_eq!(
-        arrow.seed,
-        seed_after(|random| {
-            slot_roll(random);
-            throw_draws(random, Direction::East);
-        })
-    );
+    assert_eq!(arrow.arrows.len(), 1);
+    let (position, delta, pickup) = arrow.arrows[0];
+    assert_eq!(position, Vec3::new(1.2, 64.6, 0.5));
+    assert!(pickup);
+    // 方向是 (1, 0, 0)，散布按箭自己的随机源取。
+    //
+    // The direction is (1, 0, 0); the spread comes from the arrow's own random.
+    assert!(delta.x > 1.0);
+    assert!(delta.y.abs() < 0.3);
+    assert_pair(&level_events(&arrow.effects), 1002, Direction::East);
+    assert_eq!(arrow.seed, seed_after(slot_roll));
 
     let stand = fire_id(&mut TestLevel::new(), Direction::East, items::ARMOR_STAND);
     assert_eq!(stand.left, ItemStack::new(items::ARMOR_STAND, 1));

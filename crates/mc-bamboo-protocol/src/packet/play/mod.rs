@@ -647,15 +647,24 @@ impl ClientboundPacket for BundleDelimiter {
     fn write_body(&self, _out: &mut Vec<u8>) {}
 }
 
-/// 统计数据。客户端只是在等回应好结束统计界面的加载状态，所以总是发空列表。
+/// 当前有变更的物品使用统计，客户端按注册表 ID 读每一项。
+///
+/// Dirty item-use statistics, encoded with registry IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AwardStats;
+pub struct AwardStats<'a> {
+    pub item_used: &'a [(i32, i32)],
+}
 
-impl ClientboundPacket for AwardStats {
+impl ClientboundPacket for AwardStats<'_> {
     const ID: i32 = clientbound::AWARD_STATS;
 
     fn write_body(&self, out: &mut Vec<u8>) {
-        write_varint(out, 0);
+        write_varint(out, self.item_used.len() as i32);
+        for &(item, value) in self.item_used {
+            write_varint(out, mc_bamboo_data::registries::stat_type::USED);
+            write_varint(out, item);
+            write_varint(out, value);
+        }
     }
 }
 
@@ -962,6 +971,6 @@ mod tests {
 
     #[test]
     fn award_stats_is_an_empty_list() {
-        assert_eq!(body(&AwardStats), hex("00"));
+        assert_eq!(body(&AwardStats { item_used: &[] }), hex("00"));
     }
 }

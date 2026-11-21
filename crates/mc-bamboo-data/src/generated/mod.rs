@@ -20,6 +20,7 @@ pub mod light;
 pub mod loot;
 pub mod mob_spawns;
 pub mod packets;
+pub mod potions;
 pub mod recipes;
 pub mod registries;
 pub mod saved_world;

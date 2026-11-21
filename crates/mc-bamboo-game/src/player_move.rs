@@ -87,6 +87,11 @@ pub(crate) struct Motion {
     received_move_packets: i32,
     known_move_packets: i32,
     received_position_this_tick: bool,
+    /// 位移箭用的是最近一次被接受的客户端位移，不是物理速度。
+    ///
+    /// The last accepted client displacement, not the physics velocity.
+    pub(crate) known_movement: Vec3,
+    received_movement_this_tick: bool,
     /// 上一个被接受的移动把这一位置成了真。
     ///
     /// Set by the last accepted move.
@@ -128,6 +133,8 @@ impl Motion {
             received_move_packets: 0,
             known_move_packets: 0,
             received_position_this_tick: false,
+            known_movement: Vec3::default(),
+            received_movement_this_tick: false,
             client_is_floating: false,
             above_ground_ticks: 0,
             client_loaded_timeout: CLIENT_LOAD_TIMEOUT,
@@ -308,6 +315,9 @@ pub(crate) fn on_accept_teleportation(
 pub(crate) fn on_client_tick_end(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
         player.motion.received_position_this_tick = false;
+        if !std::mem::take(&mut player.motion.received_movement_this_tick) {
+            player.motion.known_movement = Vec3::default();
+        }
     }
 }
 
@@ -583,6 +593,8 @@ fn apply_change(
     player.on_ground = change.on_ground;
     player.motion.client_horizontal_collision = change.horizontal_collision;
     let client_delta = change.target.subtract(start);
+    player.motion.known_movement = client_delta;
+    player.motion.received_movement_this_tick = true;
     // `ServerPlayer.checkMovementStatistics`：按客户端报告的位移算消耗的厘米数。
     // 水 / 梯子 / 游泳的判定直接从玩家当前所在格和脚下格读方块状态，
     // 和官方 `isEyeInFluid` / `isInWater` / `onClimbable` 的方块查询一致。

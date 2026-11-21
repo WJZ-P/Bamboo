@@ -171,7 +171,7 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: a dispenser fired a projectile (events 1002/1004/1018/1051) or an armour \
+                "scope: a dispenser fired an unsupported projectile (1002 without arrow loss, or 1004/1018/1051) or an armour \
                  stand or spawn egg left the dispenser. Primed TNT, other dispenser shots and \
                  crafters that crafted are all compared item by item"
             }
@@ -1043,11 +1043,11 @@ fn final_state(case: &Case, pos: BlockPos) -> Option<BlockState> {
     }
 }
 
-/// 弹射物发射用的世界事件。箭和蛋是 1002，烟花 1004，火焰弹 1018，风弹 1051。
+/// 非默认的发射事件：烟花、火焰弹、风弹。
 ///
-/// Level events used by projectile dispense. Arrows and eggs use 1002, fireworks 1004,
-/// fire charges 1018, wind charges 1051.
-const PROJECTILE_EVENTS: [i32; 4] = [1002, 1004, 1018, 1051];
+/// Non-default projectile dispense events: fireworks, fire charges, wind charges.
+const SPECIAL_PROJECTILE_EVENTS: [i32; 3] = [1004, 1018, 1051];
+const NORMAL_PROJECTILE_EVENT: i32 = 1002;
 
 /// 这一格是发射器，不是投掷器。
 ///
@@ -1120,16 +1120,42 @@ fn plays_primed_tnt(case: &Case) -> bool {
         .any(|sound| sound_name(sound.0) == Some("minecraft:entity.tnt.primed"))
 }
 
-/// 官方在发射器上放了弹射物事件，或者盔甲架、刷怪蛋从发射器里少了。
-/// 点燃的 TNT 现在生成，整题比较。同一题里如果还有弹射物、盔甲架或刷怪蛋，仍按那些原因排除。
+/// 未实现的弹射物、盔甲架和刷怪蛋仍排除；箭和点燃的 TNT 照常比较。
 ///
-/// Official played a projectile event on a dispenser, or an armour stand or spawn egg left a
-/// dispenser. Primed TNT is spawned and the case is compared. A case that also has a projectile,
-/// armour stand or spawn egg is still excluded for that reason.
+/// Keep unsupported projectiles, armour stands and spawn eggs excluded, but compare arrows and primed TNT.
 fn dispenser_dispenses(case: &Case) -> bool {
     let projectile = case.outcome.level_events.iter().any(|event| {
-        PROJECTILE_EVENTS.contains(&event.0)
-            && is_dispenser_at(case, BlockPos::new(event.1, event.2, event.3))
+        let pos = BlockPos::new(event.1, event.2, event.3);
+        if !is_dispenser_at(case, pos) {
+            return false;
+        }
+        if SPECIAL_PROJECTILE_EVENTS.contains(&event.0) {
+            return true;
+        }
+        if event.0 != NORMAL_PROJECTILE_EVENT {
+            return false;
+        }
+        let shots = case
+            .outcome
+            .level_events
+            .iter()
+            .filter(|other| {
+                (other.0, other.1, other.2, other.3) == (event.0, event.1, event.2, event.3)
+            })
+            .count() as i32;
+        let arrows_lost: i32 = [
+            "minecraft:arrow",
+            "minecraft:tipped_arrow",
+            "minecraft:spectral_arrow",
+        ]
+        .into_iter()
+        .map(|item| {
+            (stack_count(&case.contents, pos, item)
+                - stack_count(&case.outcome.contents, pos, item))
+            .max(0)
+        })
+        .sum();
+        shots > arrows_lost
     });
     if projectile {
         return true;
@@ -1144,12 +1170,13 @@ fn dispenser_dispenses(case: &Case) -> bool {
     })
 }
 
-/// 这一格的发射器发过 1000 或 1001，或者它的物品变少了。
+/// 这一格的发射器发过 1000、1001 或 1002，或者它的物品变少了。
 ///
-/// This dispenser played 1000 or 1001, or its items got smaller.
+/// This dispenser played 1000, 1001 or 1002, or its items got smaller.
 fn dispenser_shot_at(case: &Case, pos: BlockPos) -> bool {
     let event = case.outcome.level_events.iter().any(|event| {
-        (event.0 == 1000 || event.0 == 1001) && BlockPos::new(event.1, event.2, event.3) == pos
+        matches!(event.0, 1000 | 1001 | NORMAL_PROJECTILE_EVENT)
+            && BlockPos::new(event.1, event.2, event.3) == pos
     });
     event || total_at(case, pos) > total_after(case, pos)
 }
