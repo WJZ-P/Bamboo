@@ -96,5 +96,6 @@ fn chested_horse_group(group: &mut Option<SpawnGroup>) -> &mut AgeableGroupData 
         SpawnGroup::Zombie(_) => unreachable!("equine with a zombie spawn group"),
         SpawnGroup::FishSchool { .. } => unreachable!("equine with a fish spawn group"),
         SpawnGroup::Wild(_) => unreachable!("equine with a wild animal group"),
+        SpawnGroup::Axolotl { .. } => unreachable!("equine with an axolotl spawn group"),
     }
 }

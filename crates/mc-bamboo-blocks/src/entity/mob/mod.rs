@@ -14,10 +14,12 @@
 
 pub mod attributes;
 pub mod avoid;
+pub mod axolotl;
 pub mod bucketable;
 pub mod chicken;
 pub mod control;
 pub mod damage;
+pub mod dolphin;
 pub mod effects;
 pub mod equine;
 pub mod equipment;
@@ -85,6 +87,8 @@ pub enum MobType {
     TropicalFish,
     Pufferfish,
     Turtle,
+    Dolphin,
+    Axolotl,
     Horse,
     Donkey,
     Mule,
@@ -113,6 +117,8 @@ impl MobType {
             Self::TropicalFish => ids::TROPICAL_FISH,
             Self::Pufferfish => ids::PUFFERFISH,
             Self::Turtle => ids::TURTLE,
+            Self::Dolphin => ids::DOLPHIN,
+            Self::Axolotl => ids::AXOLOTL,
             Self::Horse => ids::HORSE,
             Self::Donkey => ids::DONKEY,
             Self::Mule => ids::MULE,
@@ -140,6 +146,8 @@ impl MobType {
             Self::TropicalFish => "minecraft:tropical_fish",
             Self::Pufferfish => "minecraft:pufferfish",
             Self::Turtle => "minecraft:turtle",
+            Self::Dolphin => "minecraft:dolphin",
+            Self::Axolotl => "minecraft:axolotl",
             Self::Horse => "minecraft:horse",
             Self::Donkey => "minecraft:donkey",
             Self::Mule => "minecraft:mule",
@@ -155,6 +163,7 @@ impl MobType {
             Self::Fox => Some(item_tags::FOX_FOOD),
             Self::Wolf => Some(item_tags::WOLF_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
+            Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
             _ => None,
         }
     }
@@ -190,6 +199,8 @@ impl MobType {
             Self::TropicalFish,
             Self::Pufferfish,
             Self::Turtle,
+            Self::Dolphin,
+            Self::Axolotl,
             Self::Horse,
             Self::Donkey,
             Self::Mule,
@@ -228,6 +239,8 @@ impl MobType {
                 fish::dimensions(self, 1, 0)
             }
             (Self::Turtle, baby) => turtle::dimensions(self, baby),
+            (Self::Dolphin, baby) => dolphin::dimensions(baby),
+            (Self::Axolotl, baby) => axolotl::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -255,9 +268,13 @@ impl MobType {
 
     /// `Mob.removeWhenFarAway`：牛为假，`Monster` 为真。
     pub const fn removes_when_far_away(self) -> bool {
-        // 鱿鱼不是 `Animal`，沿用 `Mob.removeWhenFarAway` 的缺省值真。
-        // Squid are not `Animal`s and keep the `Mob.removeWhenFarAway` default of true.
-        self.is_monster() || squid::is_squid(self)
+        // 鱿鱼、海豚（`AgeableWaterCreature`）和鱼（`WaterAnimal`）不是 `Animal`，沿用
+        // `Mob.removeWhenFarAway` 的缺省值真；美西螈 `removeWhenFarAway` 覆写成
+        // 「没装过桶、没命名」，新生成的也恒为真。
+        // Squid, dolphins (AgeableWaterCreature) and fish (WaterAnimal) keep the
+        // `Mob.removeWhenFarAway` default of true; a fresh axolotl also returns true
+        // (its override is `!fromBucket && !hasCustomName`).
+        self.is_monster() || squid::is_squid(self) || matches!(self, Self::Dolphin | Self::Axolotl)
     }
     /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 里已建模的水生生物。
     /// 标签里还有 `#undead`，僵尸和骷髅的溺水行为沿用旧实现，这里不改。
@@ -266,7 +283,10 @@ impl MobType {
     /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
     /// drowning keeps its earlier behaviour and is not changed here.
     pub const fn can_breathe_under_water(self) -> bool {
-        squid::is_squid(self) || fish::is_fish(self) || turtle::is_turtle(self)
+        squid::is_squid(self)
+            || fish::is_fish(self)
+            || turtle::is_turtle(self)
+            || matches!(self, Self::Axolotl)
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -286,14 +306,14 @@ impl MobType {
         !self.is_monster() && !fish::is_fish(self)
     }
 
-    /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼；以后加海豚）：离水掉氧气、
-    /// 不吃水流、生成时不查液体。
+    /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼、海豚）：不吃水流，
+    /// 生成时不查液体。海豚把 `handleAirSupply` 覆写为空实现，氧气单独处理。
     ///
-    /// Whether this is on vanilla's `AgeableWaterCreature` branch (squid and glow squid;
-    /// dolphins later): air drains out of water, currents do not push it and spawning
-    /// skips the liquid check.
+    /// Whether this is on vanilla's `AgeableWaterCreature` branch (squid, glow squid and
+    /// dolphins): currents do not push it and spawning skips the liquid check. A dolphin
+    /// overrides `handleAirSupply` to a no-op, so its air is handled separately.
     pub const fn is_ageable_water_creature(self) -> bool {
-        squid::is_squid(self)
+        squid::is_squid(self) || matches!(self, Self::Dolphin)
     }
 
     /// `Entity.isPushedByFluid()`：`AgeableWaterCreature` 覆盖成假。
@@ -321,6 +341,10 @@ impl MobType {
             fish::SWIM_SOUND
         } else if turtle::is_turtle(self) {
             "minecraft:entity.turtle.swim"
+        } else if matches!(self, Self::Dolphin) {
+            "minecraft:entity.dolphin.swim"
+        } else if matches!(self, Self::Axolotl) {
+            "minecraft:entity.axolotl.swim"
         } else {
             "minecraft:entity.generic.swim"
         }
@@ -338,7 +362,9 @@ impl MobType {
     ///
     /// Types registered as `IN_WATER` in `SpawnPlacements`.
     pub const fn spawns_in_water(self) -> bool {
-        squid::is_squid(self) || fish::is_fish(self)
+        squid::is_squid(self)
+            || fish::is_fish(self)
+            || matches!(self, Self::Dolphin | Self::Axolotl)
     }
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
@@ -366,6 +392,8 @@ impl MobType {
             Self::TropicalFish => "minecraft:entities/tropical_fish",
             Self::Pufferfish => "minecraft:entities/pufferfish",
             Self::Turtle => "minecraft:entities/turtle",
+            Self::Dolphin => "minecraft:entities/dolphin",
+            Self::Axolotl => "minecraft:entities/axolotl",
             Self::Horse => "minecraft:entities/horse",
             Self::Donkey => "minecraft:entities/donkey",
             Self::Mule => "minecraft:entities/mule",
@@ -420,6 +448,11 @@ impl MobType {
             Self::Cod | Self::Salmon | Self::TropicalFish => Some(fish::ambient_sound(self)),
             Self::Pufferfish => None,
             Self::Turtle => None,
+            // 海豚和水陆两栖的美西螈叫声看环境，见 `living::ambient_voice`。
+            // Dolphin and amphibious-axolotl ambience depend on the environment; see
+            // `living::ambient_voice`.
+            Self::Dolphin => Some("minecraft:entity.dolphin.ambient"),
+            Self::Axolotl => Some("minecraft:entity.axolotl.idle_air"),
             Self::Horse => Some("minecraft:entity.horse.ambient"),
             Self::Donkey => Some("minecraft:entity.donkey.ambient"),
             Self::Mule => Some("minecraft:entity.mule.ambient"),
@@ -442,6 +475,8 @@ impl MobType {
                 Some(fish::hurt_sound(self))
             }
             Self::Turtle => Some("minecraft:entity.turtle.hurt"),
+            Self::Dolphin => Some("minecraft:entity.dolphin.hurt"),
+            Self::Axolotl => Some("minecraft:entity.axolotl.hurt"),
             Self::Horse => Some("minecraft:entity.horse.hurt"),
             Self::Donkey => Some("minecraft:entity.donkey.hurt"),
             Self::Mule => Some("minecraft:entity.mule.hurt"),
@@ -464,6 +499,8 @@ impl MobType {
                 Some(fish::death_sound(self))
             }
             Self::Turtle => Some("minecraft:entity.turtle.death"),
+            Self::Dolphin => Some("minecraft:entity.dolphin.death"),
+            Self::Axolotl => Some("minecraft:entity.axolotl.death"),
             Self::Horse => Some("minecraft:entity.horse.death"),
             Self::Donkey => Some("minecraft:entity.donkey.death"),
             Self::Mule => Some("minecraft:entity.mule.death"),
@@ -486,6 +523,9 @@ impl MobType {
             // `AbstractFish.playStepSound` is empty.
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => None,
             Self::Turtle => Some("minecraft:entity.turtle.shamble"),
+            // 海豚和美西螈游泳时不发脚步声（`playStepSound` 不走一般路径）。
+            // Neither emits a ground step sound while swimming.
+            Self::Dolphin | Self::Axolotl => None,
             Self::Horse => Some("minecraft:entity.horse.step"),
             Self::Donkey => Some("minecraft:entity.horse.step"),
             Self::Mule => Some("minecraft:entity.horse.step"),
@@ -514,6 +554,8 @@ impl MobType {
             Self::TropicalFish => items::TROPICAL_FISH_SPAWN_EGG,
             Self::Pufferfish => items::PUFFERFISH_SPAWN_EGG,
             Self::Turtle => items::TURTLE_SPAWN_EGG,
+            Self::Dolphin => items::DOLPHIN_SPAWN_EGG,
+            Self::Axolotl => items::AXOLOTL_SPAWN_EGG,
             Self::Horse => items::HORSE_SPAWN_EGG,
             Self::Donkey => items::DONKEY_SPAWN_EGG,
             Self::Mule => items::MULE_SPAWN_EGG,
@@ -541,6 +583,8 @@ impl MobType {
             Self::TropicalFish => "entity.minecraft.tropical_fish",
             Self::Pufferfish => "entity.minecraft.pufferfish",
             Self::Turtle => "entity.minecraft.turtle",
+            Self::Dolphin => "entity.minecraft.dolphin",
+            Self::Axolotl => "entity.minecraft.axolotl",
             Self::Horse => "entity.minecraft.horse",
             Self::Donkey => "entity.minecraft.donkey",
             Self::Mule => "entity.minecraft.mule",
@@ -592,6 +636,8 @@ impl MobType {
         use mc_bamboo_data::spawning::MobCategory;
         match self {
             Self::Squid => MobCategory::WaterCreature,
+            Self::Dolphin => MobCategory::WaterCreature,
+            Self::Axolotl => MobCategory::Axolotls,
             Self::GlowSquid => MobCategory::UndergroundWaterCreature,
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 MobCategory::WaterAmbient
@@ -621,6 +667,35 @@ impl MobType {
     /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
     pub const fn fire_immune(self) -> bool {
         false
+    }
+
+    /// `LivingEntity.getMaxAirSupply()`：海豚 4800、美西螈 6000，其余 300。
+    ///
+    /// `LivingEntity.getMaxAirSupply()`: 4800 for dolphins, 6000 for axolotls, 300 otherwise.
+    pub const fn max_air_supply(self) -> i32 {
+        match self {
+            Self::Dolphin => 4800,
+            Self::Axolotl => 6000,
+            _ => 300,
+        }
+    }
+
+    /// `LivingEntity.increaseAirSupply(current)`：海豚整支覆写成直接回满，
+    /// 其余是 `min(current + 4, max)`。
+    ///
+    /// `LivingEntity.increaseAirSupply(current)`: dolphins override it to return the
+    /// maximum outright; everyone else uses `min(current + 4, max)`.
+    pub const fn increase_air_supply(self, current: i32) -> i32 {
+        if matches!(self, Self::Dolphin) {
+            self.max_air_supply()
+        } else {
+            let filled = current + 4;
+            if filled < self.max_air_supply() {
+                filled
+            } else {
+                self.max_air_supply()
+            }
+        }
     }
 }
 
@@ -773,6 +848,10 @@ pub enum DamageKind {
     Magic,
     Wither,
     Explosion,
+    /// 海豚 / 美西螈 / 鱼离水干死，`minecraft:dry_out`。
+    ///
+    /// Dolphins, axolotls and fish drying out: `minecraft:dry_out`.
+    DryOut,
 }
 
 impl DamageKind {
@@ -804,6 +883,7 @@ impl DamageKind {
             Self::Magic => "minecraft:magic",
             Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
+            Self::DryOut => "minecraft:dry_out",
         }
     }
 
@@ -855,6 +935,7 @@ impl DamageKind {
             Self::Magic => "magic",
             Self::Wither => "wither",
             Self::Explosion => "explosion",
+            Self::DryOut => "dryout",
         }
     }
 
@@ -862,7 +943,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 25] = [
+        let all: [DamageKind; 26] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -888,6 +969,7 @@ impl DamageKind {
             Self::Magic,
             Self::Wither,
             Self::Explosion,
+            Self::DryOut,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -989,7 +1071,8 @@ impl DamageKind {
             | Self::InFire
             | Self::Lava
             | Self::HotFloor
-            | Self::SweetBerryBush => TENTH,
+            | Self::SweetBerryBush
+            | Self::DryOut => TENTH,
             _ => 0.0,
         }
     }
@@ -1409,6 +1492,14 @@ pub struct Mob {
     ///
     /// Fish state; default for every other mob.
     pub fish: fish::FishState,
+    /// 海豚的专属状态，别的生物恒为缺省值。
+    ///
+    /// Dolphin state; default for every other mob.
+    pub dolphin: dolphin::DolphinState,
+    /// 美西螈的专属状态，别的生物恒为缺省值。
+    ///
+    /// Axolotl state; default for every other mob.
+    pub axolotl: axolotl::AxolotlState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
@@ -1500,6 +1591,8 @@ impl Mob {
                 fish::attributes()
             }
             MobType::Turtle => turtle::attributes(),
+            MobType::Dolphin => dolphin::attributes(),
+            MobType::Axolotl => axolotl::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
             kind => equine::attributes(kind),
@@ -1519,6 +1612,8 @@ impl Mob {
                 fish::goals(mob_type)
             }
             MobType::Turtle => turtle::goals(&mut navigation),
+            MobType::Dolphin => dolphin::goals(),
+            MobType::Axolotl => axolotl::goals(),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
@@ -1527,6 +1622,15 @@ impl Mob {
             // `WaterBoundPathNavigation.createPathFinder`：只有海豚允许跃出水面。
             // `WaterBoundPathNavigation.createPathFinder`: only dolphins may breach.
             navigation.flags.swim = Some(false);
+        }
+        if mob_type == MobType::Dolphin {
+            // `WaterBoundPathNavigation(this, level)`，`allowBreaching = true`。
+            // `WaterBoundPathNavigation(this, level)` with allowBreaching = true.
+            navigation.flags.swim = Some(true);
+        }
+        if mob_type == MobType::Axolotl {
+            // `AmphibiousPathNavigation(this, level)`。
+            navigation.flags.amphibious = true;
         }
         let target_goals = match mob_type {
             MobType::Fox => fox::target_goals(),
@@ -1541,7 +1645,9 @@ impl Mob {
             | MobType::Cod
             | MobType::Salmon
             | MobType::TropicalFish
-            | MobType::Pufferfish => GoalSelector::default(),
+            | MobType::Pufferfish
+            | MobType::Dolphin
+            | MobType::Axolotl => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             kind => equine::targets(kind),
@@ -1561,7 +1667,7 @@ impl Mob {
             in_powder_snow: false,
             was_in_powder_snow: false,
             ticks_frozen: 0,
-            air_supply: 300,
+            air_supply: mob_type.max_air_supply(),
             move_dist: 0.0,
             fly_dist: 0.0,
             next_step: 1.0,
@@ -1631,6 +1737,8 @@ impl Mob {
                     fish::malus()
                 }
                 MobType::Turtle => turtle::malus(),
+                MobType::Dolphin => dolphin::malus(),
+                MobType::Axolotl => axolotl::malus(),
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -1677,6 +1785,8 @@ impl Mob {
             squid: squid::SquidState::default(),
             turtle: turtle::TurtleState::default(),
             fish: fish::FishState::new(),
+            dolphin: dolphin::DolphinState::new(),
+            axolotl: axolotl::AxolotlState::new(),
             events: Vec::new(),
             needs_sync: false,
             hurt_marked: false,
@@ -1874,6 +1984,17 @@ pub struct MobPublic {
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub turtle_has_egg: bool,
     pub turtle_laying_egg: bool,
+    /// `Dolphin.GOT_FISH` / `MOISTNESS_LEVEL`。
+    ///
+    /// `Dolphin.GOT_FISH` / `MOISTNESS_LEVEL`.
+    pub dolphin_got_fish: bool,
+    pub dolphin_moistness: i32,
+    /// `Axolotl.DATA_VARIANT` / `DATA_PLAYING_DEAD` / `FROM_BUCKET`。
+    ///
+    /// `Axolotl.DATA_VARIANT` / `DATA_PLAYING_DEAD` / `FROM_BUCKET`.
+    pub axolotl_variant: i32,
+    pub axolotl_playing_dead: bool,
+    pub axolotl_from_bucket: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1948,6 +2069,11 @@ impl MobPublic {
             school_size: mob.fish.school_size,
             turtle_has_egg: mob.turtle.has_egg,
             turtle_laying_egg: mob.turtle.laying_egg,
+            dolphin_got_fish: mob.dolphin.got_fish,
+            dolphin_moistness: mob.dolphin.moistness,
+            axolotl_variant: mob.axolotl.variant,
+            axolotl_playing_dead: mob.axolotl.playing_dead,
+            axolotl_from_bucket: mob.axolotl.from_bucket,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

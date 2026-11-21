@@ -25,6 +25,10 @@ use crate::{entity::Entity, world::World};
 ///
 /// `SoundEvents.BUCKET_FILL_FISH`, shared by every bucketable fish.
 pub(crate) const BUCKET_FILL_FISH: &str = "minecraft:item.bucket.fill_fish";
+/// `SoundEvents.BUCKET_FILL_AXOLOTL`。
+///
+/// `SoundEvents.BUCKET_FILL_AXOLOTL`.
+pub(crate) const BUCKET_FILL_AXOLOTL: &str = "minecraft:item.bucket.fill_axolotl";
 
 /// `getBucketItemStack()`。不是可装桶的物种时是 `None`。
 ///
@@ -35,6 +39,7 @@ pub const fn bucket_item(kind: MobType) -> Option<i32> {
         MobType::Salmon => Some(items::SALMON_BUCKET),
         MobType::TropicalFish => Some(items::TROPICAL_FISH_BUCKET),
         MobType::Pufferfish => Some(items::PUFFERFISH_BUCKET),
+        MobType::Axolotl => Some(items::AXOLOTL_BUCKET),
         _ => None,
     }
 }
@@ -64,6 +69,13 @@ pub fn save_default_data(entity: &Entity, mob: &Mob) -> Vec<(String, Tag)> {
         out.push(("PersistenceRequired".to_owned(), Tag::Byte(1)));
     }
     out.push(("Health".to_owned(), Tag::Float(mob.health)));
+    // `Axolotl.saveToBucketTag`：把花色、年龄和锁定标志写进 `bucket_entity_data`。
+    // `Axolotl.saveToBucketTag`: variant, age and age-lock into `bucket_entity_data`.
+    if mob.mob_type == MobType::Axolotl {
+        out.push(("Variant".to_owned(), Tag::Int(mob.axolotl.variant)));
+        out.push(("Age".to_owned(), Tag::Int(mob.age)));
+        out.push(("AgeLocked".to_owned(), Tag::Byte(i8::from(mob.age_locked))));
+    }
     out
 }
 
@@ -72,7 +84,6 @@ pub fn save_default_data(entity: &Entity, mob: &Mob) -> Vec<(String, Tag)> {
 /// `loadDefaultDataFromBucketTag`: only the keys present change; absent keys keep their
 /// current value.
 pub fn load_default_data(entity: &mut Entity, mob: &mut Mob, tag: &Tag) {
-    let _ = entity;
     let Tag::Compound(entries) = tag else {
         return;
     };
@@ -95,6 +106,21 @@ pub fn load_default_data(entity: &mut Entity, mob: &mut Mob, tag: &Tag) {
                         as f32;
                     mob.health = health.clamp(0.0, max);
                 }
+            }
+            // `Axolotl.loadFromBucketTag`：花色、年龄和锁定标志。
+            // `Axolotl.loadFromBucketTag`: variant, age and age-lock.
+            "Variant" if mob.mob_type == MobType::Axolotl => {
+                if let Tag::Int(variant) = value {
+                    mob.axolotl.variant = *variant;
+                }
+            }
+            "Age" if mob.mob_type == MobType::Axolotl => {
+                if let Tag::Int(age) = value {
+                    crate::entity::mob::living::set_age(entity, mob, *age);
+                }
+            }
+            "AgeLocked" if mob.mob_type == MobType::Axolotl => {
+                mob.age_locked = tag_bool(value, mob.age_locked);
             }
             _ => {}
         }
@@ -240,8 +266,13 @@ fn apply_species_components(mob: &mut Mob, patch: &ComponentPatch) {
 /// consult `isSilent()`: `ServerLevel.playSound` only looks at the skipped player.
 pub fn pickup(entity: &Entity, mob: &mut Mob) -> Option<ItemStack> {
     let stack = bucket_stack(entity, mob)?;
+    let sound = if mob.mob_type == MobType::Axolotl {
+        BUCKET_FILL_AXOLOTL
+    } else {
+        BUCKET_FILL_FISH
+    };
     mob.events.push(super::MobEvent::Sound {
-        sound: BUCKET_FILL_FISH,
+        sound,
         volume: 1.0,
         pitch: 1.0,
         position: entity.position,
@@ -282,10 +313,10 @@ pub fn check_extra_content(world: &mut World, item: i32, stack: Option<&ItemStac
 ///
 /// Mob buckets whose species Bamboo does not model yet.
 const fn is_mob_bucket(item: i32) -> bool {
-    matches!(
-        item,
-        items::AXOLOTL_BUCKET | items::TADPOLE_BUCKET | items::SULFUR_CUBE_BUCKET
-    )
+    // 美西螈现已建模，走 `kind_of_bucket`；蝌蚪和硫磺立方还没建模。
+    // The axolotl is modelled now and goes through `kind_of_bucket`; the tadpole and
+    // sulfur cube are not modelled yet.
+    matches!(item, items::TADPOLE_BUCKET | items::SULFUR_CUBE_BUCKET)
 }
 
 /// `MobBucketItem.spawn` 里 `EntityType.create` 对 `level.random` 的取数，用在没建模的生物上。
@@ -317,6 +348,7 @@ pub const fn kind_of_bucket(item: i32) -> Option<MobType> {
         items::SALMON_BUCKET => Some(MobType::Salmon),
         items::TROPICAL_FISH_BUCKET => Some(MobType::TropicalFish),
         items::PUFFERFISH_BUCKET => Some(MobType::Pufferfish),
+        items::AXOLOTL_BUCKET => Some(MobType::Axolotl),
         _ => None,
     }
 }
@@ -359,7 +391,13 @@ pub fn spawn_from_bucket(
     // `postSpawnConfig` applies the components after `finalizeSpawn`.
     entity.with_mob(|me, mob| apply_bucket_stack(me, mob, stack));
     entity.with_mob(|_, mob| {
-        mob.fish.from_bucket = true;
+        // 鱼写 `fish.from_bucket`，美西螈写 `axolotl.from_bucket`。
+        // Fish set `fish.from_bucket`; the axolotl sets `axolotl.from_bucket`.
+        if kind == MobType::Axolotl {
+            mob.axolotl.from_bucket = true;
+        } else {
+            mob.fish.from_bucket = true;
+        }
         crate::entity::mob::living::clamp_health(mob);
     });
     let uid = world.add_prepared_entity(entity);

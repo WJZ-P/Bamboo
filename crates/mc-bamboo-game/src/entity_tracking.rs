@@ -972,6 +972,28 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if let Some(data) = fish_default_data(index, kind) {
         return data;
     }
+    // 海豚 / 美西螈的 18、19、20 是它们自己的元数据，不是牛的花色和叫声。
+    // A dolphin / axolotl's 18, 19, 20 are their own accessors, not cow variants.
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as water_facts;
+    match (kind, index) {
+        (MobType::Dolphin, water_facts::DOLPHIN_GOT_FISH) => {
+            return EntityData::DolphinGotFish(false);
+        }
+        (MobType::Dolphin, water_facts::DOLPHIN_MOISTNESS) => {
+            return EntityData::DolphinMoistness(2400);
+        }
+        (MobType::Axolotl, water_facts::AXOLOTL_VARIANT) => {
+            return EntityData::AxolotlVariant(0);
+        }
+        (MobType::Axolotl, water_facts::AXOLOTL_PLAYING_DEAD) => {
+            return EntityData::AxolotlPlayingDead(false);
+        }
+        (MobType::Axolotl, water_facts::AXOLOTL_FROM_BUCKET) => {
+            return EntityData::AxolotlFromBucket(false);
+        }
+        _ => {}
+    }
     // 海龟的 18、19 是「有蛋」「正在产卵」两个布尔，不是牛的花色和叫声；
     // 从 true 变回 false 时要发这两条默认值。
     // A turtle's 18 and 19 are the has-egg / laying-egg booleans, not the cow
@@ -1334,6 +1356,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if farm_non_default_data(mob, &mut out) {
         return out;
     }
+    if water_mob_non_default_data(mob, &mut out) {
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
         let variant = mob.variant.name();
         if variant != "minecraft:temperate" {
@@ -1418,6 +1443,44 @@ fn fish_default_data(
             Some(EntityData::PufferfishPuffState(0))
         }
         _ => None,
+    }
+}
+
+/// 海豚 / 美西螈偏离默认值的实体数据；不是这两种时返回假。
+///
+/// Dolphin / axolotl data that differs from the defaults; false for other kinds.
+fn water_mob_non_default_data(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    out: &mut Vec<EntityData>,
+) -> bool {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    match mob.mob_type {
+        MobType::Dolphin => {
+            if mob.dolphin_got_fish {
+                out.push(EntityData::DolphinGotFish(true));
+            }
+            // `MOISTNESS_LEVEL` 的默认 2400；只有偏离时才发。
+            // `MOISTNESS_LEVEL` defaults to 2400; only a deviation is sent.
+            if mob.dolphin_moistness != 2400 {
+                out.push(EntityData::DolphinMoistness(mob.dolphin_moistness));
+            }
+            true
+        }
+        MobType::Axolotl => {
+            // `DATA_VARIANT` 默认 0（lucy）。
+            // `DATA_VARIANT` defaults to 0 (lucy).
+            if mob.axolotl_variant != 0 {
+                out.push(EntityData::AxolotlVariant(mob.axolotl_variant));
+            }
+            if mob.axolotl_playing_dead {
+                out.push(EntityData::AxolotlPlayingDead(true));
+            }
+            if mob.axolotl_from_bucket {
+                out.push(EntityData::AxolotlFromBucket(true));
+            }
+            true
+        }
+        _ => false,
     }
 }
 

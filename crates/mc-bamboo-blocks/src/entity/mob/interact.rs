@@ -126,6 +126,24 @@ pub fn interact(
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }
+    // `Dolphin.mobInteract`：手里是 `#fishes` 时放吃鱼声，幼崽加速长大、成年记下
+    // `gotFish`，并消费一个鱼。这是它自己的 `mobInteract`，不走 `Animal.mobInteract`。
+    // `Dolphin.mobInteract`: a `#fishes` item plays the eat sound, ages a baby up or
+    // sets `gotFish`, and consumes one fish. This is its own `mobInteract`, not
+    // `Animal.mobInteract`.
+    if mob.mob_type == MobType::Dolphin
+        && !req.held.is_empty()
+        && item_is_tagged(req.held.item, mc_bamboo_data::tags::item_tags::FISHES)
+    {
+        living::play_sound(me, mob, "minecraft:entity.dolphin.eat", 1.0, 1.0);
+        super::dolphin::feed(me, mob);
+        return MobInteraction {
+            result: InteractionResult::Success,
+            shrink_held: !req.creative,
+            replacement: None,
+            ..MobInteraction::pass()
+        };
+    }
     if mob.mob_type == MobType::Cow && req.held.item == items::BUCKET && !mob.is_baby() {
         // `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，位置取交互发生处。
         mob.events.push(MobEvent::MilkSound {

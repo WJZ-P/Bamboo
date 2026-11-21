@@ -111,6 +111,16 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type.is_equine() {
         super::equine::tick_end(mob);
     }
+    // `Dolphin.tick()` 在 `super.tick()` 之后：湿度、干死、搁浅扑腾。
+    // `Dolphin.tick()` after `super.tick()`: moistness, drying out, beached flopping.
+    if mob.mob_type == super::MobType::Dolphin {
+        super::dolphin::tick(me, mob, ctx);
+    }
+    // `Axolotl.customServerAiStep` 尾部：把 PLAY_DEAD_TICKS 映射成元数据。
+    // Tail of `Axolotl.customServerAiStep`: map PLAY_DEAD_TICKS to metadata.
+    if mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::update_playing_dead(mob);
+    }
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
@@ -331,9 +341,19 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
     mob_base_tick(me, mob, ctx);
-    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
+    if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
+        // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
+        // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply` (squid and fish).
         super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    } else if mob.mob_type == super::MobType::Axolotl && !mob.no_ai {
+        // `Axolotl.baseTick` 的 `handleAirSupply`（`!isNoAi()` 才跑）。
+        // `Axolotl.baseTick`'s `handleAirSupply` (only when `!isNoAi()`).
+        super::axolotl::handle_air_supply(me, mob, ctx, pre_tick_air);
     }
+    // 海豚把 `handleAirSupply` 覆写成空实现，氧气完全由 `LivingEntity.baseTick` 算；
+    // 美西螈 `isNoAi()` 时也只剩 `LivingEntity.baseTick` 的那一层。
+    // A dolphin overrides `handleAirSupply` to a no-op, so air is entirely
+    // `LivingEntity.baseTick`; a no-AI axolotl falls back to that layer too.
 }
 
 /// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
@@ -389,11 +409,14 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。
             // 能在水下呼吸的（`canDrownInWater` 为假）走补气那一支。
             // Mobs that breathe under water take the refill branch instead.
+            // 海豚 / 美西螈的最大氧气和补气方式按类型分派（普通生物和这里完全一致）。
+            // Dolphins / axolotls override the max and refill; ordinary mobs are unchanged.
+            let max_air = mob.mob_type.max_air_supply();
             let drowns = !mob.mob_type.can_breathe_under_water();
             if drowns {
                 mob.air_supply -= 1;
-            } else if mob.air_supply < 300 {
-                mob.air_supply = (mob.air_supply + 4).min(300);
+            } else if mob.air_supply < max_air {
+                mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
             }
             if drowns && mob.air_supply <= -20 {
                 mob.air_supply = 0;
@@ -405,8 +428,8 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     2.0,
                 );
             }
-        } else if mob.air_supply < 300 {
-            mob.air_supply = (mob.air_supply + 4).min(300);
+        } else if mob.air_supply < mob.mob_type.max_air_supply() {
+            mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
         }
         mob.last_pos = Some(me.block_position());
     }
@@ -490,6 +513,14 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
         super::MobType::Pufferfish => None,
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
+        // `Dolphin.getAmbientSound`：水里 / 水外两种。
+        // `Dolphin.getAmbientSound`: water / land variants.
+        super::MobType::Dolphin => Some(super::dolphin::ambient_voice(me.in_water)),
+        // `Axolotl.getAmbientSound` 加 `playAmbientSound` 的装死判断。
+        // `Axolotl.getAmbientSound` plus `playAmbientSound`'s playing-dead gate.
+        super::MobType::Axolotl => {
+            super::axolotl::ambient_voice(mob.axolotl.playing_dead, me.in_water)
+        }
         _ => Some(voice_of(mob, Voice::Ambient)),
     }
 }
@@ -1460,6 +1491,16 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
         super::turtle::travel_in_water(me, mob, ctx, input);
         return;
     }
+    // `Dolphin.travelInWater` / `Axolotl.travelInWater` 换掉水里的推进。
+    // `Dolphin.travelInWater` / `Axolotl.travelInWater` replace the in-water thrust.
+    if me.in_water && mob.mob_type == super::MobType::Dolphin {
+        super::dolphin::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    if me.in_water && mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     let falling = me.delta.y <= 0.0;
     let old_y = me.position.y;
     let gravity = effective_gravity(me, mob);
@@ -1650,6 +1691,12 @@ pub(crate) fn hurt_server(
 ) -> bool {
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
+    }
+    // `Axolotl.hurtServer` 在父类之前做装死判定（`PLAY_DEAD_TICKS`）。
+    // `Axolotl.hurtServer` runs the play-dead roll before the superclass.
+    if mob.mob_type == super::MobType::Axolotl {
+        let has_source = source.attacker.is_some() || source.direct.is_some();
+        super::axolotl::maybe_play_dead(me, mob, amount, has_source);
     }
     living_hurt_server(me, mob, ctx, source, amount)
 }

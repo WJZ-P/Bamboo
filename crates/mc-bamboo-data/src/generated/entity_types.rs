@@ -244,6 +244,19 @@ pub const PUFFERFISH_PUFF_STATE: u8 = 17;
 // The two turtle booleans: `AgeableMob` takes 16 and 17, so the turtle starts at 18.
 pub const TURTLE_HAS_EGG: u8 = 18;
 pub const TURTLE_LAYING_EGG: u8 = 19;
+// 海豚 `Dolphin`（`AgeableWaterCreature` → `AgeableMob`）自己从 18 开始：
+// `GOT_FISH`(18)、`MOISTNESS_LEVEL`(19)。和美西螈一样，`AgeableMob` 占 16/17。
+// Dolphin (AgeableWaterCreature -> AgeableMob) starts at 18: GOT_FISH(18),
+// MOISTNESS_LEVEL(19). AgeableMob owns 16/17 for it and the axolotl alike.
+pub const DOLPHIN_GOT_FISH: u8 = 18;
+pub const DOLPHIN_MOISTNESS: u8 = 19;
+// 美西螈 `Axolotl`（`Animal` → `AgeableMob`）三个自有元数据：
+// `DATA_VARIANT`(18)、`DATA_PLAYING_DEAD`(19)、`FROM_BUCKET`(20)。
+// The axolotl (Animal -> AgeableMob) owns three: DATA_VARIANT(18),
+// DATA_PLAYING_DEAD(19), FROM_BUCKET(20).
+pub const AXOLOTL_VARIANT: u8 = 18;
+pub const AXOLOTL_PLAYING_DEAD: u8 = 19;
+pub const AXOLOTL_FROM_BUCKET: u8 = 20;
 pub const CHICKEN_VARIANT: u8 = 18;
 pub const CHICKEN_SOUND_VARIANT: u8 = 19;
 pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &[117506305, 117899265, 185008129, 117441793, 118161664, 65536, 50726144, 67764993, 234882305, 67110144, 117441025, 16778497, 101253888, 50660352, 918529, 235340288, 918273, 67108865, 917504, 459008, 67699456, 67371009];

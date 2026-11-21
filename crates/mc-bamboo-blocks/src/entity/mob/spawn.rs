@@ -113,6 +113,13 @@ pub enum SpawnGroup {
     ///
     /// Rabbits, foxes and wolves: the group size plus the shared variant.
     Wild(super::wild_spawn::WildGroup),
+    /// `Axolotl.AxolotlGroupData`：组计数加两个共享的常见花色编号。
+    ///
+    /// `Axolotl.AxolotlGroupData`: the group counter plus two shared common variant ids.
+    Axolotl {
+        types: [i32; 2],
+        group_size: i32,
+    },
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -348,6 +355,14 @@ fn finalize_spawn_in_group(
     }
     if super::turtle::is_turtle(kind) {
         super::turtle::finalize_spawn(entity, world.random(), group);
+        return;
+    }
+    if kind == MobType::Dolphin {
+        super::dolphin::finalize_spawn(entity, world.random(), group);
+        return;
+    }
+    if kind == MobType::Axolotl {
+        super::axolotl::finalize_spawn(world, entity, reason, group);
         return;
     }
     if kind.is_equine() {
