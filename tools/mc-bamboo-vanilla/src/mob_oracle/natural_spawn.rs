@@ -62,7 +62,11 @@ struct Step {
     time: i64,
     count: i32,
     world_seed: i64,
-    spawned: Vec<[i32; 9]>,
+    spawned: Vec<[i32; 11]>,
+    /// 每只刷出来的生物的花色和叫声（`MobOracle.spawnVariants`）。
+    ///
+    /// Each spawned mob's variant and sound (`MobOracle.spawnVariants`).
+    variants: Vec<Option<[String; 2]>>,
 }
 
 pub(super) struct SceneFacts {
@@ -79,6 +83,10 @@ pub(super) struct Coverage {
     cases: usize,
     pub(super) ticks: usize,
     cows: usize,
+    /// 刷出来的猪、羊、鸡（新加的农场动物）。
+    ///
+    /// Spawned pigs, sheep and chickens (the newer farm animals).
+    farm: [usize; 3],
     skeletons: usize,
     zombies: usize,
     squid: usize,
@@ -98,6 +106,13 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::COW)
             .count();
+        for (count, kind) in
+            self.farm
+                .iter_mut()
+                .zip([entity_type::PIG, entity_type::SHEEP, entity_type::CHICKEN])
+        {
+            *count += step.spawned.iter().filter(|row| row[0] == kind).count();
+        }
         self.skeletons += step
             .spawned
             .iter()
@@ -126,10 +141,11 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} squid or glow squid, {} equines, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} squid or glow squid, {} equines, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
+                self.farm,
                 self.skeletons,
                 self.zombies,
                 self.squid,
@@ -147,6 +163,13 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if let Some(&day) = self.per_scene.get("panda_day") {
+            return if day > 0 && self.per_scene.get("panda_dim") == Some(&0) {
+                Ok(())
+            } else {
+                Err("panda natural spawn fixtures must spawn at raw brightness 15 but not 8".into())
+            };
+        }
         for name in [
             "fish_cod",
             "fish_salmon",
@@ -158,6 +181,9 @@ impl Coverage {
                 return Err(format!("natural spawn fixture {name} produced no fish"));
             }
         }
+        let covered_misc = ["mooshroom_day", "polar_bear_day"]
+            .iter()
+            .all(|name| self.per_scene.get(*name).is_some_and(|&count| count > 0));
         let mobs = [
             self.cows,
             self.skeletons,
@@ -165,7 +191,11 @@ impl Coverage {
             self.squid,
             self.equines,
         ];
-        if self.per_scene.contains_key("cow_day") && (mobs.contains(&0) || self.cap_off == 0) {
+        let full = self.per_scene.contains_key("cow_day");
+        if self.cases > 0
+            && full
+            && (mobs.contains(&0) || self.farm.contains(&0) || self.cap_off == 0 || !covered_misc)
+        {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
             );
@@ -239,17 +269,27 @@ fn spawn_tick(
         natural::spawn_for_chunk(&mut world, chunk, &mut state, params, &categories);
     }
     let world_seed = world.random().seed();
-    let spawned = level.entities.iter().skip(present).map(spawn_row).collect();
+    let fresh: Vec<Entity> = level.entities.iter().skip(present).collect();
+    let variants = fresh
+        .iter()
+        .map(|entity| super::spawn_variants(entity.kind.mob().expect("natural spawns are mobs")))
+        .collect();
     Step {
         time,
         count: state.count(category),
         world_seed,
-        spawned,
+        spawned: fresh.into_iter().map(spawn_row).collect(),
+        variants,
     }
 }
 
-fn spawn_row(entity: Entity) -> [i32; 9] {
+fn spawn_row(entity: Entity) -> [i32; 11] {
     let mob = entity.kind.mob().expect("natural spawns are mobs");
+    let [main_gene, hidden_gene] = if mob.mob_type == MobType::Panda {
+        [mob.panda.main_gene.id(), mob.panda.hidden_gene.id()]
+    } else {
+        [-1; 2]
+    };
     [
         mob.mob_type.entity_type(),
         (entity.position.x * 2.0) as i32,
@@ -259,6 +299,8 @@ fn spawn_row(entity: Entity) -> [i32; 9] {
         i32::from(mob.is_baby()),
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
+        main_gene,
+        hidden_gene,
         if mob.mob_type == MobType::TropicalFish {
             mob.fish.variant
         } else {
@@ -282,11 +324,12 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     let roof = kind == MobType::Husk;
+    let floor_state = spawn_floor(biome);
     let aquatic = case.aquatic;
     let blocks = (-16..48)
         .flat_map(|x| {
             (-16..32).flat_map(move |z| {
-                let floor = (BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK));
+                let floor = (BlockPos::new(x, -63, z), floor_state);
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
                 let water =
                     (-64..=-62).map(move |y| (BlockPos::new(x, y, z), BlockState(blocks::WATER)));
@@ -300,9 +343,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .collect();
     let player = PlayerView {
         uid: 1,
+        yaw: 0.0,
+        pitch: 0.0,
         uuid: None,
         position: Vec3::new(case.player_x, -62.0, 8.5),
         eye_height: 1.62,
+        look_direction: Vec3::default(),
+        gaze_disguise: false,
         alive: true,
         spectator: false,
         creative: false,
@@ -350,5 +397,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         players: vec![player],
         game: None,
         wrong_was_hurt: false,
+    })
+}
+
+pub(super) fn spawn_floor(biome: i32) -> BlockState {
+    BlockState(match biome {
+        biome::MUSHROOM_FIELDS => blocks::MYCELIUM,
+        biome::FROZEN_OCEAN => blocks::ICE,
+        _ => blocks::GRASS_BLOCK,
     })
 }

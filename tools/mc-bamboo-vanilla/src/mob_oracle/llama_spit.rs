@@ -261,9 +261,12 @@ impl Report {
         self.check_projectile_motion(label, "llama", &expected.llama, &motion(llama, mob.x_rot));
         let goals = mob
             .goals
-            .running_names()
+            .running_names(mc_bamboo_blocks::entity::mob::MobType::Llama)
             .into_iter()
-            .chain(mob.target_goals.running_names())
+            .chain(
+                mob.target_goals
+                    .running_names(mc_bamboo_blocks::entity::mob::MobType::Llama),
+            )
             .collect::<Vec<_>>()
             .join(" ");
         let ours = (llama.random.state(), mob.health.to_bits() as i32, goals);

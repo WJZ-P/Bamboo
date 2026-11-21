@@ -4,10 +4,10 @@
 
 use mc_bamboo_blocks::entity::KindPublic;
 use mc_bamboo_core::Hand;
-use mc_bamboo_data::items;
+use mc_bamboo_data::{items, packets::play::clientbound, registries::stat_type};
 use mc_bamboo_protocol::{
     item::ItemStack,
-    packet::play::{GameMode, PlayRequest},
+    packet::play::{ClientCommandKind, GameMode, PlayRequest},
 };
 
 use super::*;
@@ -90,4 +90,49 @@ fn creative_keeps_the_egg_and_other_items_are_not_thrown() {
         player.inventory.slots[36].count, 1,
         "雪球还没有实现，不会扔出"
     );
+}
+
+#[test]
+fn egg_item_stats_are_cumulative_by_variant_and_sent_once_per_change() {
+    let (mut server, client) = settled();
+    for (step, (item, mode, expected)) in [
+        (items::EGG, GameMode::Creative, Some(1)),
+        (items::BLUE_EGG, GameMode::Survival, Some(1)),
+        (items::BROWN_EGG, GameMode::Survival, Some(1)),
+        (items::EGG, GameMode::Survival, Some(2)),
+        (items::SNOWBALL, GameMode::Survival, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        hold(&mut server, &client, ItemStack::new(item, 1), mode);
+        throw(&mut server, &client, step as i32 + 1);
+        server.tick();
+        let mut body = Vec::new();
+        if let Some(count) = expected {
+            for value in [1, stat_type::USED, item, count] {
+                mc_bamboo_protocol::codec::write_varint(&mut body, value);
+            }
+        } else {
+            body.push(0);
+        }
+        assert_eq!(request_stats(&mut server, &client), [body]);
+        assert_eq!(request_stats(&mut server, &client), [vec![0]]);
+    }
+}
+
+fn request_stats(server: &mut Harness, client: &Client) -> Vec<Vec<u8>> {
+    server.request(
+        client,
+        PlayRequest::ClientCommand {
+            action: ClientCommandKind::RequestStats,
+        },
+    );
+    server.tick();
+    client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id == clientbound::AWARD_STATS)
+        .map(|frame| frame.body)
+        .collect()
 }

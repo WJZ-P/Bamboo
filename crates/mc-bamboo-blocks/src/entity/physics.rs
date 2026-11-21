@@ -508,8 +508,13 @@ impl Entity {
                 visited.push(pos);
                 self.block_inside(state);
             }
-            if self.remaining_fire_ticks > 0 && matches!(self.kind, super::EntityKind::Arrow(_)) {
-                self.extinguish_arrow_in_water(world, pos, from, to);
+            if self.remaining_fire_ticks > 0
+                && matches!(
+                    self.kind,
+                    super::EntityKind::Arrow(_) | super::EntityKind::Egg(_)
+                )
+            {
+                self.extinguish_projectile_in_water(world, pos, from, to);
             }
             true
         };
@@ -517,7 +522,7 @@ impl Entity {
         iterations
     }
 
-    fn extinguish_arrow_in_water(
+    fn extinguish_projectile_in_water(
         &mut self,
         world: &dyn BlockView,
         pos: BlockPos,

@@ -153,9 +153,9 @@ pub trait BlockView {
         false
     }
 
-    /// `Level.isThundering()`。默认不打雷。
+    /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
     ///
-    /// `Level.isThundering()`. No thunder by default.
+    /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
     fn is_thundering(&self) -> bool {
         false
     }
@@ -222,6 +222,8 @@ pub struct PlayerView {
     pub uuid: Option<[u8; 16]>,
     pub position: Vec3,
     pub eye_height: f32,
+    pub look_direction: Vec3,
+    pub gaze_disguise: bool,
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
@@ -233,6 +235,12 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 朝向，骑乘时用作骑手的朝向（`AbstractHorse.getRiddenRotation`）。
+    ///
+    /// The facing, used as the rider's rotation while riding
+    /// (`AbstractHorse.getRiddenRotation`).
+    pub yaw: f32,
+    pub pitch: f32,
     /// 战斗记忆，被驯服的狼保护主人时读。
     ///
     /// Combat memory, read by tamed wolves guarding their owner.
@@ -451,6 +459,19 @@ pub trait EntityCtx {
     fn blocks(&self) -> &dyn BlockView;
     /// 按 ID 读别的实体的公开数据。自己已经被驱动从表里取出来，查不到是正常的。
     fn other(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 按 ID 读一名玩家（骑手）。不在本岛时返回 `None`。
+    ///
+    /// Reads one player (a rider) by id. `None` when they are not on this island.
+    fn player(&self, uid: EntityUid) -> Option<PlayerView> {
+        let mut found = None;
+        self.blocks().for_each_player(&mut |player| {
+            if player.uid == uid {
+                found = Some(*player);
+            }
+        });
+        found
+    }
+
     /// 这一刻参与 tick 的实体 ID，按 uid 升序。
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
@@ -540,6 +561,20 @@ pub enum Command {
         center: Vec3,
         radius: f32,
     },
+    /// 生物引发的爆炸（`Level.ExplosionInteraction.MOB`）：射线、伤害生物和玩家、
+    /// 按 `mobGriefing` 破坏方块。发出者就是爆炸的来源实体。
+    ///
+    /// A mob-caused explosion (`Level.ExplosionInteraction.MOB`): rays, damage to mobs and
+    /// players, and block damage under `mobGriefing`. The emitter is the source entity.
+    ExplodeMob {
+        center: Vec3,
+        radius: f32,
+        /// 来源生物这一刻的公开数据：它正在 tick，`me.kind` 是占位，死亡消息要靠它拿名字。
+        ///
+        /// The source mob's public data: it is mid-tick with a placeholder `me.kind`, and
+        /// death messages need its name.
+        source: Box<EntityPublic>,
+    },
     /// 下落方块这一刻的落地判定和后果：能不能放回去、发 1031 还是 1029、
     /// 要不要掉成物品、自己消不消失。需要 `&mut World` 的只读判定也在这里。
     ///
@@ -571,6 +606,11 @@ pub enum Command {
     ///
     /// Death loot table, separate from equipment and XP to preserve vanilla order.
     DropMobLoot(super::mob::MobDeathLoot),
+    EndermanBlock {
+        origin: BlockPos,
+        pos: BlockPos,
+        place: bool,
+    },
     AwardDeathExperience {
         amount: i32,
     },
@@ -587,6 +627,10 @@ pub enum Command {
         wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
+        /// 熊猫父亲的显性 / 隐性基因（落地时父亲不在实体表里）。
+        ///
+        /// The panda father's main and hidden genes (it is not in the table when this lands).
+        father_genes: Option<(u8, u8)>,
         /// 父亲的种类和兔子品种：落地时父亲正被拆出来跑 tick，读不到。
         ///
         /// The father's type and rabbit variant; it is detached while the command lands.
@@ -620,11 +664,25 @@ pub enum Command {
         target: EntityUid,
         ticks: i32,
     },
-    /// `Mob.doHurtTarget` 打到另一头生物。
+    /// `Mob.doHurtTarget` 打到另一头生物。`on_hit` 是命中后立刻挂上的效果
+    /// （洞穴蜘蛛的中毒），只有伤害真的落地才生效。
+    ///
+    /// `Mob.doHurtTarget` against another mob. `on_hit` is applied only if the hurt lands
+    /// (the cave spider's poison).
     HurtMob {
         target: EntityUid,
         source: super::mob::DamageSource,
         amount: f32,
+        on_hit: Option<super::mob::effects::EffectInstance>,
+    },
+    /// `LivingEntity.addEffect` 对玩家：洞穴蜘蛛打中玩家后的中毒。
+    ///
+    /// `LivingEntity.addEffect` on a player: the cave spider's poison after a hit.
+    AddPlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+        amplifier: i32,
     },
     /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
     MobLevelEvent {
@@ -692,7 +750,7 @@ pub enum Command {
         volume: f32,
         pitch: f32,
     },
-    ArrowExtinguished {
+    ProjectileExtinguished {
         pitch: f32,
     },
     /// `Pufferfish.touch`：先 `hurtServer`，打中了才下毒并放蜇刺声。
@@ -735,6 +793,26 @@ pub enum Command {
     /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
     /// the origin.
     DropEntityLoot(super::mob::EntityLootRequest),
+    /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
+    ///
+    /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
+    /// those that already have one.
+    AlertMobs {
+        others: Vec<EntityUid>,
+        enemy: EntityUid,
+    },
+    /// `Panda.pickUpItem`：把脚下那份吃的拿进主手。
+    ///
+    /// `Panda.pickUpItem`: take the edible stack into the main hand.
+    PickUpItem {
+        item: EntityUid,
+    },
+    /// `Panda.afterSneeze`：附近的成年熊猫原地跳一下。
+    ///
+    /// `Panda.afterSneeze`: nearby adult pandas hop.
+    JumpMobs {
+        others: Vec<EntityUid>,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -744,6 +822,11 @@ pub enum Command {
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
         Command::Explode { center, radius } => world.explode_tnt(center, radius),
+        Command::ExplodeMob {
+            center,
+            radius,
+            source,
+        } => world.explode_mob(&source, center, radius),
         Command::LandFallingBlock {
             data,
             entity_drops,
@@ -780,6 +863,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             from,
             self_pushable,
         } => super::mob::living::apply_push(me, other, from, self_pushable, world),
+        Command::EndermanBlock { origin, pos, place } => {
+            super::mob::enderman::apply_block_goal(me, world, origin, pos, place)
+        }
         Command::DropMobLoot(loot) => {
             for stack in world.mob_loot_drops(loot, me.position) {
                 world.spawn_at_location(me.position, stack);
@@ -796,6 +882,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             wool,
             partner,
             position,
+            father_genes,
             kind,
             father_rabbit,
             father_fox,
@@ -814,6 +901,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 love: father_love,
                 wolf: father_wolf.0,
                 tame: father_wolf.1,
+                genes: father_genes,
             },
             world,
         ),
@@ -832,8 +920,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             target,
             source,
             amount,
+            on_hit,
         } => {
-            let _ = world.hurt_mob(target, source, amount);
+            if world.hurt_mob(target, source, amount)
+                && let Some(effect) = on_hit
+            {
+                world.give_mob_effect(target, effect);
+            }
+        }
+        Command::AddPlayerEffect {
+            target,
+            effect,
+            duration,
+            amplifier,
+        } => {
+            world.give_player_effect(
+                target,
+                super::mob::effects::EffectInstance::with_amplifier(effect, duration, amplifier),
+            );
         }
         Command::MobLevelEvent { event, pos, data } => {
             world.push_effect(crate::Effect::LevelEvent {
@@ -868,6 +972,26 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 world.spawn_at_location(origin, stack);
             }
         }
+        Command::AlertMobs { others, enemy } => {
+            super::mob::polar_bear::apply_alert(world, &others, enemy);
+        }
+        Command::PickUpItem { item } => {
+            super::mob::panda::apply_pick_up(world, item, me);
+        }
+        Command::JumpMobs { others } => {
+            for other in others {
+                world.with_entity_mut(other, &mut |entity| {
+                    let power = entity.kind.mob().map_or(0.0, |mob| {
+                        mob.attributes
+                            .value(mc_bamboo_data::registries::attribute::JUMP_STRENGTH)
+                            as f32
+                    });
+                    if power > 1.0e-5 {
+                        entity.delta.y = entity.delta.y.max(f64::from(power));
+                    }
+                });
+            }
+        }
         Command::EatBlock { pos, grass_below } => {
             super::mob::living::apply_eat_block(world, pos, grass_below);
         }
@@ -883,7 +1007,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 pitch,
             );
         }
-        Command::ArrowExtinguished { pitch } => {
+        Command::ProjectileExtinguished { pitch } => {
             super::arrow::play_extinguished_sound(me, world, pitch);
         }
         Command::PufferSting {

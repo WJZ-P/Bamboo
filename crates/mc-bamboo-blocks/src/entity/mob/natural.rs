@@ -125,9 +125,9 @@ impl SpawnState {
                 continue;
             };
             // `Mob.requiresCustomPersistence()` 只认载具和拴绳，Bamboo 都没有；鱼从桶里
-            // 放出来的那种要算进来。
+            // 放出来的那种、搬着方块的末影人要算进来。
             // Vanilla `requiresCustomPersistence()` needs a vehicle or a leash; fish
-            // released from a bucket count as well.
+            // released from a bucket and endermen carrying a block count as well.
             if mob.requires_custom_persistence() {
                 continue;
             }
@@ -555,33 +555,29 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     }
     // 狐狸注册的是 `NO_RESTRICTIONS`，位置恒可用。
     // Foxes are registered with `NO_RESTRICTIONS`, which accepts every position.
-    kind == MobType::Fox || on_ground_position_ok(world, kind.fire_immune(), pos)
+    kind == MobType::Fox
+        || on_ground_position_ok(world, kind.entity_type(), kind.fire_immune(), pos)
 }
 
-/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`，只看实体类型的防火属性。
+/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`：按实体类型检查地面和空位。
 ///
-/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`, keyed only by fire immunity.
-pub(super) fn on_ground_position_ok(world: &World, fire_immune: bool, pos: BlockPos) -> bool {
+/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`: check the footing and empty space for the type.
+pub(super) fn on_ground_position_ok(
+    world: &World,
+    entity_type: i32,
+    fire_immune: bool,
+    pos: BlockPos,
+) -> bool {
     if !world.world_border().is_within_bounds_pos(pos) {
         return false;
     }
     let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
-    if !is_valid_spawn_below(world, below) {
+    if !world.block_state(below).is_valid_spawn_surface(entity_type) {
         return false;
     }
     is_valid_empty_spawn_block(world, fire_immune, pos)
         && is_valid_empty_spawn_block(world, fire_immune, above)
-}
-
-/// `BlockState.isValidSpawn`：能不能当落脚块。官方默认是「顶面 `isFaceSturdy(FULL)` 且发光
-/// 小于 14」，但树叶、玻璃、冰、雕刻南瓜这些方块整个换掉了它，所以查生成器导出的状态位。
-///
-/// `BlockState.isValidSpawn`: whether this can be a footing block. Vanilla defaults to a
-/// sturdy top face with emission below 14, but leaves, glass, ice and carved pumpkins
-/// replace that outright, so the generated per-state bit is used.
-pub(super) fn is_valid_spawn_below(world: &World, pos: BlockPos) -> bool {
-    world.block_state(pos).is_valid_spawn_surface()
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
@@ -663,7 +659,15 @@ pub(super) fn check_spawn_rules(
         | MobType::Donkey
         | MobType::Mule
         | MobType::Llama => animal_spawn_rules(world, pos),
-        MobType::Zombie | MobType::Skeleton => {
+        MobType::Mooshroom => super::mooshroom::spawn_rules(world, pos),
+        MobType::PolarBear => super::polar_bear::spawn_rules(world, pos),
+        MobType::Panda => super::panda::spawn_rules(world, pos),
+        MobType::Zombie
+        | MobType::Skeleton
+        | MobType::Creeper
+        | MobType::Spider
+        | MobType::CaveSpider
+        | MobType::Enderman => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
         MobType::Husk => {
@@ -721,7 +725,9 @@ fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
     if kind.fire_immune() {
         return true;
     }
-    is_valid_spawn_below(world, below)
+    world
+        .block_state(below)
+        .is_valid_spawn_surface(kind.entity_type())
 }
 
 /// `NaturalSpawner.isValidPositionForMob`。
@@ -935,8 +941,12 @@ mod tests {
         PlayerView {
             uuid: None,
             uid,
+            yaw: 0.0,
+            pitch: 0.0,
             position,
             eye_height: 1.62,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
             alive: true,
             spectator: false,
             creative: false,
@@ -1028,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn cows_spawn_on_open_grass_at_day() {
+    fn farm_animals_spawn_on_open_grass_at_day() {
         let mut level = TestLevel::new();
         grass_platform(&mut level);
         // 玩家在 32 格外：过了 24 格的生成距离，又足够近让人算「附近」。
@@ -1043,17 +1053,25 @@ mod tests {
             }
         }
         assert!(spawned > 0, "平原草地上应该刷出牛");
-        // 平原的 `CREATURE` 表里建模了的有牛、猪、羊、鸡；白天不会有怪物。
-        // The modelled plains creatures are cows, pigs, sheep and chickens; no
-        // monster spawns by day.
+        // 平原的 `CREATURE` 表里建模了的有牛、猪、羊、鸡，加上马科合并带进来的马和驴；
+        // 白天不会有怪物。
+        // The modelled plains creatures are cows, pigs, sheep and chickens, plus the
+        // horses and donkeys from the equine merge; no monster spawns by day.
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
+            // 平原白天的 `CREATURE` 表里建模了的只有这四种（马、驴还没有）。
+            // Of the plains daytime `CREATURE` list only these four are modelled.
             assert!(
                 matches!(
                     mob.mob_type,
-                    MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+                    MobType::Cow
+                        | MobType::Pig
+                        | MobType::Sheep
+                        | MobType::Chicken
+                        | MobType::Horse
+                        | MobType::Donkey
                 ),
-                "白天只刷出平原的动物，实际是 {:?}",
+                "白天只刷出平原的被动动物，实际是 {:?}",
                 mob.mob_type
             );
         }
@@ -1132,18 +1150,18 @@ mod tests {
 
     #[test]
     fn the_spawn_surface_follows_is_valid_spawn() {
-        let mut level = TestLevel::new();
-        level.set(BlockPos::new(0, 60, 0), BlockState(blocks::GRASS_BLOCK));
-        level.set(BlockPos::new(0, 61, 0), BlockState(blocks::OAK_LEAVES));
-        level.set(BlockPos::new(0, 62, 0), BlockState(blocks::GLASS));
-        let mut ticks = BlockTicks::new();
-        let world = World::new(&mut level, &mut ticks);
         // 草方块能当落脚块；树叶和玻璃换掉了 `isValidSpawn` 的默认实现，不能。
         // Grass is a valid footing block; leaves and glass replace the default
         // `isValidSpawn` and are not.
-        assert!(is_valid_spawn_below(&world, BlockPos::new(0, 60, 0)));
-        assert!(!is_valid_spawn_below(&world, BlockPos::new(0, 61, 0)));
-        assert!(!is_valid_spawn_below(&world, BlockPos::new(0, 62, 0)));
+        let cow = MobType::Cow.entity_type();
+        let bear = MobType::PolarBear.entity_type();
+        assert!(BlockState(blocks::GRASS_BLOCK).is_valid_spawn_surface(cow));
+        assert!(!BlockState(blocks::OAK_LEAVES).is_valid_spawn_surface(cow));
+        assert!(!BlockState(blocks::GLASS).is_valid_spawn_surface(cow));
+        for ice in [blocks::ICE, blocks::FROSTED_ICE] {
+            assert!(BlockState(ice).is_valid_spawn_surface(bear));
+            assert!(!BlockState(ice).is_valid_spawn_surface(cow));
+        }
     }
 
     #[test]
@@ -1208,6 +1226,44 @@ mod tests {
         }
         assert!(zombies, "黑暗里应该刷出僵尸");
         assert!(skeletons, "黑暗里应该刷出骷髅");
+    }
+
+    /// 苦力怕、蜘蛛和末影人走同一条怪物分支，黑暗里也会自然刷出来。
+    ///
+    /// Creepers, spiders and endermen take the same monster branch and spawn in the dark.
+    #[test]
+    fn creepers_spiders_and_endermen_spawn_in_the_dark() {
+        let mut level = TestLevel::new();
+        grass_platform(&mut level);
+        level.light = Some((0, 0));
+        level.players.push(player(1, Vec3::new(8.5, 64.0, 40.5)));
+        let params = params(289 * 4, true);
+        let chunk = ChunkPos::new(0, 0);
+        let wanted = [types::CREEPER, types::SPIDER, types::ENDERMAN];
+        let mut seen = [false; 3];
+        // 平原的末影人权重只有 10（苦力怕、蜘蛛各 100），要多跑一些刻；找齐就停。
+        // Plains endermen weigh only 10 (creepers and spiders 100), so allow many
+        // ticks; the loop stops once all three appeared.
+        for _ in 0..40000 {
+            run_tick(&mut level, chunk, &params);
+            let spawned: Vec<_> = level
+                .entities()
+                .iter_public()
+                .map(|entity| (entity.uid, entity.kind.entity_type()))
+                .collect();
+            for (uid, entity_type) in spawned {
+                if let Some(index) = wanted.iter().position(|&id| id == entity_type) {
+                    seen[index] = true;
+                }
+                // 刷出来的都清掉，怪物上限就不会被别的种类占满。
+                // Clear every spawn so other kinds never fill the monster cap.
+                level.entities_mut_for_test().remove(uid);
+            }
+            if seen.iter().all(|&found| found) {
+                break;
+            }
+        }
+        assert_eq!(seen, [true; 3], "黑暗里应该刷出苦力怕、蜘蛛和末影人");
     }
 
     #[test]

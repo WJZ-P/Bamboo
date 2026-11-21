@@ -38,6 +38,7 @@ pub struct Extracted {
     pub items: Vec<ExtractedItem>,
     pub entity_types: Vec<EntityTypeFacts>,
     pub projectile_facts: ProjectileFacts,
+    pub monster_facts: MonsterFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -971,6 +972,27 @@ pub struct ProjectileFacts {
     pub chicken_sound_variant: u8,
     pub chicken_variant_serializer: i32,
     pub chicken_sound_variant_serializer: i32,
+    /// `MushroomCow.DATA_TYPE` 的元数据 index。
+    ///
+    /// The metadata index of `MushroomCow.DATA_TYPE`.
+    pub mooshroom_type: u8,
+    /// `PolarBear.DATA_STANDING_ID` 的元数据 index。
+    ///
+    /// The metadata index of `PolarBear.DATA_STANDING_ID`.
+    pub polar_bear_standing: u8,
+    /// 熊猫的六个元数据 index：计数器、基因和标志位。
+    ///
+    /// The six panda metadata indices: the counters, the genes and the flags byte.
+    pub panda_unhappy: u8,
+    pub panda_sneeze: u8,
+    pub panda_eat: u8,
+    pub panda_main_gene: u8,
+    pub panda_hidden_gene: u8,
+    pub panda_flags: u8,
+    /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
+    ///
+    /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).
+    pub stew_flowers: Vec<(i32, Vec<[i32; 2]>)>,
     pub turtle_has_egg: u8,
     pub turtle_laying_egg: u8,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
@@ -978,6 +1000,16 @@ pub struct ProjectileFacts {
     /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.
     pub potion_effects: Vec<Vec<[i32; 3]>>,
     pub effect_colors: Vec<i32>,
+}
+
+/// 敌对生物的元数据 index 和眼高；键就是生成的常量名。
+///
+/// Hostile-mob metadata indices and eye heights, keyed by constant name.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonsterFacts {
+    pub data_ids: BTreeMap<String, u8>,
+    pub eye_heights: BTreeMap<String, f32>,
 }
 
 /// 一个物品。列表里的位置就是它的注册表 ID。
@@ -1206,6 +1238,7 @@ pub struct VersionData {
     pub items: Vec<Item>,
     pub entity_types: Vec<EntityTypeFacts>,
     pub projectile_facts: ProjectileFacts,
+    pub monster_facts: MonsterFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -1342,6 +1375,7 @@ fn read_version_data(
         items,
         entity_types: extracted.entity_types,
         projectile_facts: extracted.projectile_facts,
+        monster_facts: extracted.monster_facts,
         state_tables: extracted.state_tables,
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,

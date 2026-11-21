@@ -65,6 +65,7 @@ mod island;
 mod island_partition;
 mod island_partition_stats;
 mod island_pool;
+mod item_use_stats;
 mod lectern;
 mod light_updates;
 mod links;
@@ -96,6 +97,7 @@ mod profiler;
 pub mod region;
 #[cfg(feature = "oracle-samples")]
 mod replay_players;
+mod riding;
 #[cfg(feature = "oracle-samples")]
 pub use drops::replay_arrow_pickup;
 #[cfg(feature = "oracle-samples")]
@@ -117,6 +119,8 @@ mod world_gen_settings;
 pub mod world_options;
 mod world_state;
 pub mod worldgen;
+pub mod worldgen_cache;
+pub mod worldgen_compact;
 pub mod worldgen_features;
 pub mod worldgen_light;
 mod worldgen_mobs;

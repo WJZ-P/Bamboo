@@ -37,6 +37,7 @@ use mc_bamboo_worldgen::{Worldgen, beardifier::Beardifier, chunk};
 use crate::{
     region::{RegionColumn, RegionColumnParts},
     world_options::WorldGenConfig,
+    worldgen_compact::CompactTerrain,
 };
 
 /// 一个区块 16×16 个柱子，和 `chunk::CHUNK_WIDTH` 一致。
@@ -440,22 +441,6 @@ type TerrainCacheKey = (
     Option<crate::world_options::FlatSettings>,
 );
 
-/// 全进程共用的地形缓存上限：256 MiB。
-///
-/// 依据：一条 CARVERS 地形实测 414 720 B（384 层 × 256 个 u32 的 `blocks` 占
-/// 393 216 B，加 24 段群系、6 张高度图和 `Vec` 头）。改前的按线程缓存每条计算线程
-/// 最多 1024 条：4 线程 1.62 GiB、8 线程 3.24 GiB，进程 RSS 峰值实测 2.7 / 4.6 GiB。
-/// 256 MiB 装得下约 647 条，覆盖一片持续跑图时的 3×3 工作集，又给整台机器留出
-/// 余量；这是「所有计算线程合起来」的硬上限，不再随线程数线性增长。
-///
-/// Global terrain cache limit: 256 MiB. One CARVERS entry measures 414 720 B
-/// (393 216 B of block layers + biomes, heightmaps and Vec headers). The old
-/// per-thread 1024-entry cap reached 1.62 GiB on 4 threads and 3.24 GiB on 8,
-/// with measured process RSS peaks of 2.7 / 4.6 GiB. 256 MiB holds ~647 entries,
-/// covers a working 3x3 window, and is a hard process-wide bound independent of
-/// the worker count.
-pub const TERRAIN_CACHE_BYTE_LIMIT: usize = 256 * 1024 * 1024;
-
 /// 分片数：每片一把锁，8 条计算线程不会全堵在一把锁上。键按哈希取片。
 ///
 /// Shard count: one lock per shard, keyed by hash, so worker threads do not
@@ -497,6 +482,284 @@ struct TerrainShard {
     /// so the measurement map cannot grow without bound.
     computed_by: HashMap<TerrainCacheKey, Vec<usize>>,
     duplicate_total: u64,
+    /// 每条条目「哪些使用者已经用完」的位图：低 9 位是 3×3 个中心的地物已算完，
+    /// 接着 9 位是 3×3 个区块已完工。两组都满就删（见 `worldgen_cache`）。
+    /// Per-entry bitmap of finished consumers: the low 9 bits are the 3×3
+    /// feature runs already computed, the next 9 the 3×3 chunks already
+    /// assembled. The entry is dropped when both are full (see `worldgen_cache`).
+    consumers_done: HashMap<TerrainCacheKey, u32>,
+    /// 因为使用者都用完而删掉的条目数。
+    /// Entries dropped because every consumer was done.
+    dependency_releases: u64,
+    /// 冷层：热层按字节淘汰下来的条目压缩后放这里（一条约 20 KiB，见
+    /// `worldgen_compact`），再被查到时解码放回热层。一个键不会同时在两层。
+    /// Cold tier: entries evicted from the hot tier by the byte limit are kept
+    /// here compacted (~20 KiB each, see `worldgen_compact`) and decoded back
+    /// into the hot tier when looked up again. A key is never in both tiers.
+    cold: HashMap<TerrainCacheKey, (u64, CompactTerrain)>,
+    // 区分同一个键反复进出冷层的不同实例。
+    // Distinguish repeated insertions of the same key into the cold tier.
+    cold_order: std::collections::VecDeque<(TerrainCacheKey, u64)>,
+    next_cold_stamp: u64,
+    cold_bytes: usize,
+    /// 从冷层解码回来的次数。
+    /// Lookups served by decoding a cold entry.
+    cold_hits: u64,
+}
+
+impl TerrainShard {
+    /// 删掉一条条目和它的占位、位图、测量记录，更新字节数；`order` 里的旧键
+    /// 留给淘汰循环跳过。删掉的数据交回调用方，好在放开分片锁以后再释放。
+    /// Remove an entry with its placeholder, bitmap and measurement record and
+    /// update the byte counts; the stale key in `order` is skipped by eviction.
+    /// The removed data is handed back so the caller can free it after
+    /// releasing the shard lock.
+    fn remove_entry(&mut self, key: &TerrainCacheKey) -> Option<RemovedTerrain> {
+        let hot = self.remove_hot(key);
+        let cold = self.remove_cold(key);
+        if hot.is_none() && cold.is_none() {
+            return None;
+        }
+        self.consumers_done.remove(key);
+        Some((hot, cold))
+    }
+
+    /// 把一条条目从热层拿走（连同占位和测量记录），位图留着。
+    /// Take an entry out of the hot tier (with its placeholder and measurement
+    /// record); its bitmap stays.
+    fn remove_hot(&mut self, key: &TerrainCacheKey) -> Option<Arc<GeneratedChunk>> {
+        let removed = self.entries.remove(key)?;
+        self.inflight.remove(key);
+        let bytes = generated_chunk_heap_bytes(&removed);
+        self.bytes = self.bytes.saturating_sub(bytes);
+        TOTAL_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        if let Some(threads) = self.computed_by.remove(key) {
+            self.duplicate_total += threads.len().saturating_sub(1) as u64;
+        }
+        Some(removed)
+    }
+
+    /// 把一条条目从冷层拿走，位图留着。
+    /// Take an entry out of the cold tier; its bitmap stays.
+    fn remove_cold(&mut self, key: &TerrainCacheKey) -> Option<CompactTerrain> {
+        let (_, removed) = self.cold.remove(key)?;
+        let bytes = removed.heap_bytes();
+        self.cold_bytes = self.cold_bytes.saturating_sub(bytes);
+        TOTAL_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        Some(removed)
+    }
+
+    /// 热层超过 `hot_limit` 时按插入顺序拿走最旧的条目，清到 3/4。拿走的条目
+    /// 交回调用方，由它在锁外压缩（[`demote_unlocked`]）或释放；冷层预算为 0
+    /// 时位图跟着删。
+    ///
+    /// Past `hot_limit`, take the oldest hot entries out in insertion order
+    /// down to 3/4 of it. They are handed back so the caller compacts
+    /// ([`demote_unlocked`]) or frees them outside the lock; with a zero cold
+    /// budget their bitmaps go too.
+    fn trim_hot(
+        &mut self,
+        hot_limit: usize,
+        cold_limit: usize,
+    ) -> Vec<(TerrainCacheKey, Arc<GeneratedChunk>)> {
+        let mut evicted = Vec::new();
+        if self.bytes <= hot_limit {
+            return evicted;
+        }
+        self.trims += 1;
+        let target = hot_limit * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
+        while self.bytes > target {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            let Some(chunk) = self.remove_hot(&oldest) else {
+                continue;
+            };
+            self.evictions += 1;
+            if cold_limit == 0 {
+                self.consumers_done.remove(&oldest);
+            }
+            evicted.push((oldest, chunk));
+        }
+        evicted
+    }
+
+    /// 把锁外压缩好的一条放进冷层，冷层超了再按插入顺序丢最旧的。压缩期间
+    /// 这个键又被查过（已回到热层或正在算）就不放，热层那份为准。
+    ///
+    /// Put an entry compacted outside the lock into the cold tier, then drop the
+    /// oldest cold entries past the cold budget. If the key was looked up again
+    /// meanwhile (back in the hot tier or being computed) the hot copy wins and
+    /// this one is not stored.
+    fn insert_cold(&mut self, key: TerrainCacheKey, compact: CompactTerrain, cold_limit: usize) {
+        if self.entries.contains_key(&key) || self.inflight.contains_key(&key) {
+            return;
+        }
+        // 按现在的路径一个键不会同时在两层；万一冷层里已有旧的一份，先连字节数
+        // 一起拿掉，计数才不会漂。
+        // A key is never in both tiers on today's paths; should a stale cold
+        // copy exist, remove it with its bytes first so the counts cannot drift.
+        self.remove_cold(&key);
+        let bytes = compact.heap_bytes();
+        let stamp = self.next_cold_stamp;
+        self.next_cold_stamp = stamp.wrapping_add(1);
+        self.cold_order.push_back((key.clone(), stamp));
+        self.cold.insert(key, (stamp, compact));
+        self.cold_bytes += bytes;
+        let total = TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
+        while self.cold_bytes > cold_limit {
+            let Some((oldest, stamp)) = self.cold_order.pop_front() else {
+                break;
+            };
+            // 跳过已升温的旧实例，即使同一个键后来又进了冷层。
+            // Skip promoted records even when the same key has since gone cold again.
+            if self.cold.get(&oldest).is_some_and(|entry| entry.0 == stamp) {
+                self.remove_cold(&oldest);
+                self.consumers_done.remove(&oldest);
+            }
+        }
+        self.compact_cold_order();
+    }
+
+    /// `order` 里攒了太多已删条目的旧键时压一遍，免得只靠按依赖释放时它无限增长。
+    /// Compact `order` once stale keys of released entries pile up, so it cannot
+    /// grow without bound when entries leave by dependency release.
+    fn compact_order(&mut self) {
+        if self.order.len() > 2 * self.entries.len() + 64 {
+            let entries = &self.entries;
+            self.order.retain(|key| entries.contains_key(key));
+        }
+    }
+
+    fn compact_cold_order(&mut self) {
+        if self.cold_order.len() > 2 * self.cold.len() + 64 {
+            let cold = &self.cold;
+            self.cold_order
+                .retain(|(key, stamp)| cold.get(key).is_some_and(|entry| entry.0 == *stamp));
+        }
+    }
+}
+
+/// 从缓存删掉的一条（热层那份、冷层那份），在放开分片锁以后才释放。
+/// An entry removed from the cache (hot copy, cold copy), freed only after the
+/// shard lock is released.
+type RemovedTerrain = (Option<Arc<GeneratedChunk>>, Option<CompactTerrain>);
+
+/// 在分片锁外压缩 [`TerrainShard::trim_hot`] 拿走的条目，再短暂拿锁放进冷层；
+/// 冷层预算为 0 时只是在锁外释放它们。压缩约 150 µs 一条，放在锁外，别的线程
+/// （包括记依赖位的世界线程）就不会因为它等这把锁。
+///
+/// Compact the entries taken by [`TerrainShard::trim_hot`] outside the shard
+/// lock, then briefly relock to store them cold; with a zero cold budget they
+/// are just freed outside the lock. Compaction takes about 150 µs per entry, so
+/// doing it unlocked keeps other threads (including the world thread setting
+/// dependency bits) from waiting on this lock.
+fn demote_unlocked(
+    shard: &Mutex<TerrainShard>,
+    evicted: Vec<(TerrainCacheKey, Arc<GeneratedChunk>)>,
+    cold_limit: usize,
+) {
+    if cold_limit == 0 || evicted.is_empty() {
+        return;
+    }
+    let compacted: Vec<(TerrainCacheKey, CompactTerrain)> = evicted
+        .into_iter()
+        .map(|(key, chunk)| (key, CompactTerrain::encode(&chunk)))
+        .collect();
+    if let Ok(mut shard) = shard.lock() {
+        for (key, compact) in compacted {
+            shard.insert_cold(key, compact, cold_limit);
+        }
+    }
+}
+
+/// 给 `(x, z)` 的地形条目（带 / 不带 Beardifier 两条都算）记上使用者位，
+/// 两组位都满了就删。条目不在缓存里时什么都不做。删掉的数据在锁外释放。
+///
+/// Set consumer bits on the terrain entries at `(x, z)` (with and without a
+/// Beardifier) and drop an entry once both groups are full. Missing entries are
+/// left alone. Removed data is freed outside the lock.
+fn mark_terrain_consumer(config: &WorldGenConfig, x: i32, z: i32, bits: u32) {
+    use crate::worldgen_cache::ALL_3X3;
+    for beardified in [false, true] {
+        let key = terrain_cache_key(config, x, z, beardified);
+        let Ok(mut shard) = terrain_shards()[shard_index(&key)].lock() else {
+            continue;
+        };
+        if !shard.entries.contains_key(&key) && !shard.cold.contains_key(&key) {
+            continue;
+        }
+        let done = shard.consumers_done.entry(key.clone()).or_default();
+        *done |= bits;
+        if *done != ALL_3X3 | (ALL_3X3 << 9) {
+            continue;
+        }
+        let removed = shard.remove_entry(&key);
+        if removed.is_some() {
+            shard.dependency_releases += 1;
+            shard.compact_order();
+            shard.compact_cold_order();
+        }
+        drop(shard);
+        drop(removed);
+    }
+}
+
+/// 以 `(x, z)` 的第 `bit` 个 3×3 邻居为中心的地物已经算完。
+/// The feature run centered on 3×3 neighbor `bit` of `(x, z)` is computed.
+pub(crate) fn mark_terrain_feature_run(config: &WorldGenConfig, x: i32, z: i32, bit: u32) {
+    mark_terrain_consumer(config, x, z, 1 << bit);
+}
+
+/// `(x, z)` 的第 `bit` 个 3×3 邻居区块已经完工。
+/// 3×3 neighbor chunk `bit` of `(x, z)` has been assembled.
+pub(crate) fn mark_terrain_chunk_finished(config: &WorldGenConfig, x: i32, z: i32, bit: u32) {
+    mark_terrain_consumer(config, x, z, 1 << (bit + 9));
+}
+
+/// 空闲释放：清空全部条目，但保留测量计数（和压测用的 [`clear_terrain_cache`]
+/// 不同）。正在算的占位留着：计算方算完照常提交，等待方照常拿到结果。
+///
+/// Idle release: drop every entry but keep the measurement counters (unlike the
+/// benchmark-only [`clear_terrain_cache`]). In-flight placeholders stay, so a
+/// computing thread still commits and its waiters still get the result.
+pub(crate) fn release_terrain_cache() {
+    for shard in terrain_shards() {
+        let Ok(mut shard) = shard.lock() else {
+            continue;
+        };
+        let keys: Vec<TerrainCacheKey> = shard
+            .entries
+            .keys()
+            .chain(shard.cold.keys())
+            .cloned()
+            .collect();
+        // 删掉的数据攒起来，放开这一片的锁以后再释放。
+        // Collect the removed data and free it after this shard's lock is released.
+        let removed: Vec<RemovedTerrain> = keys
+            .iter()
+            .filter_map(|key| shard.remove_entry(key))
+            .collect();
+        // 只有正在算（或正从冷层解码）的键还可能用得上位图。
+        // Only keys still computing (or thawing) can still use a bitmap.
+        let TerrainShard {
+            inflight,
+            consumers_done,
+            ..
+        } = &mut *shard;
+        consumers_done.retain(|key, _| inflight.contains_key(key));
+        shard.order.clear();
+        shard.order.shrink_to_fit();
+        shard.cold_order.clear();
+        shard.cold_order.shrink_to_fit();
+        shard.cold.shrink_to_fit();
+        shard.entries.shrink_to_fit();
+        shard.inflight.shrink_to_fit();
+        shard.consumers_done.shrink_to_fit();
+        drop(shard);
+        drop(removed);
+    }
 }
 
 /// 全进程一份的缓存；`OnceLock` 初始化后只读，锁只护查表和插入。
@@ -535,11 +798,17 @@ fn shard_index(key: &TerrainCacheKey) -> usize {
     (hasher.finish() as usize) % TERRAIN_CACHE_SHARDS
 }
 
-/// 每片的字节预算；所有片加起来不超过 [`TERRAIN_CACHE_BYTE_LIMIT`]。
+/// 用同一次设置读取拆分热层、冷层预算；冷层占每片预算的 1/4。
 ///
-/// Per-shard byte budget; the sum across shards never exceeds the global limit.
-fn shard_byte_limit() -> usize {
-    TERRAIN_CACHE_BYTE_LIMIT / TERRAIN_CACHE_SHARDS
+/// Split hot and cold budgets from one settings read; cold gets one quarter.
+fn shard_byte_limits() -> (usize, usize) {
+    let total = crate::worldgen_cache::terrain_byte_limit() / TERRAIN_CACHE_SHARDS;
+    let cold = if crate::worldgen_cache::cold_tier_enabled() {
+        total / 4
+    } else {
+        0
+    };
+    (total - cold, cold)
 }
 
 /// 一个 `GeneratedChunk` 占的堆字节数（各 `Vec` 的 `capacity` 相加）。
@@ -582,6 +851,15 @@ pub struct TerrainCacheStats {
     pub evictions: u64,
     pub trims: u64,
     pub cross_thread_duplicates: u64,
+    /// 因为使用者都用完而提前删掉的条目数。
+    /// Entries dropped early because every consumer was done.
+    pub dependency_releases: u64,
+    /// 冷层（压缩条目）的条目数、字节数（已含在 `bytes` 里）和解码命中次数。
+    /// Cold (compacted) tier entry count, bytes (included in `bytes`) and
+    /// lookups served by decoding.
+    pub cold_entries: usize,
+    pub cold_bytes: usize,
+    pub cold_hits: u64,
 }
 
 /// 测量用的全局字节数 / 峰值（只在插入和淘汰时更新，Relaxed 足够，压测报告跑完读一次）。
@@ -605,11 +883,62 @@ pub fn terrain_lookup_counts() -> (u64, u64) {
     )
 }
 
-/// 测试专用：计算闭包里的延迟（毫秒），让并发测试能确定地造出一个等待方。
-/// Test-only delay in the computing closure so concurrency tests can reliably
-/// produce a waiter.
+/// 测试专用：并发到达计数与条件变量，让计算线程确定等到所有并发线程都拿到同一份
+/// 在途占位后再继续执行（或 panic），替代固定睡眠。
+///
+/// Test-only arrival counter and condvar so the computing thread waits until
+/// every concurrent thread has obtained the shared in-flight slot before
+/// proceeding (or panicking), replacing fixed sleeps.
 #[cfg(test)]
-static TEST_COMPUTE_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+static TEST_WAIT_ARRIVALS: OnceLock<(Mutex<(usize, usize)>, std::sync::Condvar)> = OnceLock::new();
+
+#[cfg(test)]
+fn test_wait_arrivals() -> &'static (Mutex<(usize, usize)>, std::sync::Condvar) {
+    TEST_WAIT_ARRIVALS.get_or_init(|| (Mutex::new((0, 0)), std::sync::Condvar::new()))
+}
+
+#[cfg(test)]
+fn arm_test_waiters(expected: usize) {
+    let (lock, cvar) = test_wait_arrivals();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    *state = (0, expected);
+    cvar.notify_all();
+}
+
+#[cfg(test)]
+fn note_test_arrival() {
+    let (lock, cvar) = test_wait_arrivals();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if state.1 > 0 {
+        state.0 += 1;
+        if state.0 >= state.1 {
+            cvar.notify_all();
+        }
+    }
+}
+
+#[cfg(test)]
+fn wait_for_test_arrivals() {
+    let (lock, cvar) = test_wait_arrivals();
+    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut state, wait) = cvar
+        .wait_timeout_while(
+            guard,
+            std::time::Duration::from_secs(60),
+            |&mut (arrived, expected)| expected > 0 && arrived < expected,
+        )
+        .unwrap_or_else(|e| e.into_inner());
+    let expected = state.1;
+    let arrived = state.0;
+    // 只拦第一次进入计算闭包的线程（panic 后重跑的等待方不再等）。
+    // Only hold the first computing thread; a waiter retrying after panic runs freely.
+    *state = (0, 0);
+    drop(state);
+    assert!(
+        !wait.timed_out(),
+        "concurrent test threads did not all reach the in-flight slot ({arrived}/{expected})"
+    );
+}
 /// 测试专用：让等待方拿到一个不同坐标的结果，用于改坏确认。
 /// Test-only: give waiters a result from a different coordinate (break test).
 #[cfg(test)]
@@ -663,7 +992,7 @@ thread_local! {
 /// Read the process-wide aggregate cache measurement snapshot (benchmarks / reports).
 pub fn terrain_cache_stats() -> TerrainCacheStats {
     let mut stats = TerrainCacheStats {
-        byte_limit: TERRAIN_CACHE_BYTE_LIMIT,
+        byte_limit: crate::worldgen_cache::terrain_byte_limit(),
         peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
         ..TerrainCacheStats::default()
     };
@@ -672,12 +1001,16 @@ pub fn terrain_cache_stats() -> TerrainCacheStats {
             continue;
         };
         stats.entries += shard.entries.len();
-        stats.bytes += shard.bytes;
+        stats.bytes += shard.bytes + shard.cold_bytes;
+        stats.cold_entries += shard.cold.len();
+        stats.cold_bytes += shard.cold_bytes;
+        stats.cold_hits += shard.cold_hits;
         stats.hits += shard.hits;
         stats.misses += shard.misses;
         stats.evictions += shard.evictions;
         stats.trims += shard.trims;
         stats.clears += shard.trims;
+        stats.dependency_releases += shard.dependency_releases;
         // 每个键只在一个片里；被 N 条不同线程算过就贡献 N-1 次重复计算。
         // Each key lives in exactly one shard and contributes N-1 duplicates.
         stats.cross_thread_duplicates += shard.duplicate_total
@@ -741,6 +1074,7 @@ fn cached_terrain(
     z: i32,
     beardifier: Option<&mc_bamboo_worldgen::beardifier::Beardifier>,
 ) -> Result<Arc<GeneratedChunk>, String> {
+    crate::worldgen_cache::touch();
     let key = terrain_cache_key(config, x, z, beardifier.is_some());
     let shards = terrain_shards();
     let index = shard_index(&key);
@@ -748,7 +1082,7 @@ fn cached_terrain(
     // 其他线程在同一个 OnceLock 上等它，不再各算一遍。
     // Hold the lock only for lookup / placeholder insertion; generation runs
     // outside the lock. Only one thread computes a key; the rest wait on it.
-    let slot = {
+    let (slot, mut thawed) = {
         let Ok(mut shard) = shards[index].lock() else {
             // 锁被毒化时不影响正确性：绕开缓存直接算一次。
             // A poisoned lock must not change results: bypass the cache.
@@ -766,15 +1100,29 @@ fn cached_terrain(
             let existing = Arc::clone(existing);
             shard.hits += 1;
             LOOKUP_HITS.fetch_add(1, Ordering::Relaxed);
-            existing
+            (existing, None)
         } else {
             let slot = Arc::new(OnceLock::new());
             shard.inflight.insert(key.clone(), Arc::clone(&slot));
-            shard.misses += 1;
-            LOOKUP_MISSES.fetch_add(1, Ordering::Relaxed);
-            slot
+            // 冷层里有压缩的那份：拿出来，下面在锁外解码后放回热层，算命中。
+            // A compacted copy in the cold tier: take it out, decode it outside
+            // the lock below and put it back into the hot tier; counts as a hit.
+            let thawed = shard.remove_cold(&key);
+            if thawed.is_some() {
+                shard.hits += 1;
+                shard.cold_hits += 1;
+                LOOKUP_HITS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                shard.misses += 1;
+                LOOKUP_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
+            (slot, thawed)
         }
     };
+    #[cfg(test)]
+    if test_switches_apply(config.seed) {
+        note_test_arrival();
+    }
 
     // `get_or_init` 的闭包只在第一条到达的线程上跑；它不持有分片锁，也
     // 不会再次进入地形缓存（`generate_chunk_with_beardifier` 只调纯函数
@@ -833,13 +1181,18 @@ fn cached_terrain(
     COMPUTED_FLAG.with(|flag| flag.set(false));
     let result = slot.get_or_init(|| {
         COMPUTED_FLAG.with(|flag| flag.set(true));
+        // 冷层拿出来的那份：解码就是原来的地形，不用重新生成。别的线程抢先跑了
+        // 这个闭包时它手里没有压缩的那份，会现算出同样的结果。
+        // A copy taken from the cold tier decodes to the original terrain, no
+        // regeneration needed. If another thread ran this closure first it has
+        // no compacted copy and simply generates the same result.
+        if let Some(compact) = thawed.take() {
+            return Ok(Arc::new(compact.decode()));
+        }
         #[cfg(test)]
         if test_switches_apply(config.seed) {
             TEST_COMPUTATIONS.fetch_add(1, Ordering::Relaxed);
-            let delay = TEST_COMPUTE_DELAY_MS.load(Ordering::Relaxed);
-            if delay > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(delay as u64));
-            }
+            wait_for_test_arrivals();
             if TEST_COMPUTE_PANIC.swap(false, Ordering::Relaxed) {
                 panic!("test-only terrain generation panic");
             }
@@ -917,30 +1270,16 @@ fn cached_terrain(
         }
         // 按字节封顶：超了就按插入顺序从最旧的条目开始淘汰，清到 3/4 预算。
         // 占位和条目一起淘汰；不在 `entries` 里的（正在算的）占位不能被淘汰。
+        // 淘汰下来的条目放开锁以后再压缩进冷层（或释放）。
         // Byte-bounded oldest-first eviction; placeholders without an entry
-        // (still computing) are never evicted.
-        let target =
-            shard_byte_limit() * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
-        if shard.bytes > shard_byte_limit() {
-            shard.trims += 1;
-            while shard.bytes > target {
-                let Some(oldest) = shard.order.pop_front() else {
-                    break;
-                };
-                let Some(removed) = shard.entries.remove(&oldest) else {
-                    continue;
-                };
-                shard.inflight.remove(&oldest);
-                let removed_bytes = generated_chunk_heap_bytes(&removed);
-                shard.bytes = shard.bytes.saturating_sub(removed_bytes);
-                TOTAL_BYTES.fetch_sub(removed_bytes, Ordering::Relaxed);
-                if let Some(threads) = shard.computed_by.remove(&oldest) {
-                    shard.duplicate_total += threads.len().saturating_sub(1) as u64;
-                }
-                shard.evictions += 1;
-            }
-        }
-        return Ok(Arc::clone(shard.entries.get(&key).unwrap_or(&chunk)));
+        // (still computing) are never evicted. Evicted entries are compacted
+        // into the cold tier (or freed) after the lock is released.
+        let (hot_limit, cold_limit) = shard_byte_limits();
+        let evicted = shard.trim_hot(hot_limit, cold_limit);
+        let result = Arc::clone(shard.entries.get(&key).unwrap_or(&chunk));
+        drop(shard);
+        demote_unlocked(&shards[index], evicted, cold_limit);
+        return Ok(result);
     }
     // 锁被毒化时不影响正确性：直接返回这次算出的地形，只是没进缓存。
     // A poisoned lock must not change results: return the freshly generated
@@ -1245,7 +1584,7 @@ mod tests {
         let (x, z) = (8123, -4567);
         clear_terrain_cache();
         TEST_COMPUTATIONS.store(0, Ordering::Relaxed);
-        TEST_COMPUTE_DELAY_MS.store(60, Ordering::Relaxed);
+        arm_test_waiters(4);
         TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
         let barrier = Arc::new(std::sync::Barrier::new(4));
         let results: Vec<Arc<GeneratedChunk>> = std::thread::scope(|scope| {
@@ -1261,7 +1600,7 @@ mod tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        arm_test_waiters(0);
         for chunk in &results {
             assert!(Arc::ptr_eq(&results[0], chunk));
         }
@@ -1280,7 +1619,7 @@ mod tests {
         // 改坏确认：清缓存后重来，让等待方拿到 x+1 的结果。
         // Break confirmation: repeat with waiters receiving x+1.
         clear_terrain_cache();
-        TEST_COMPUTE_DELAY_MS.store(60, Ordering::Relaxed);
+        arm_test_waiters(4);
         TEST_BREAK_WAITER.store(true, Ordering::Relaxed);
         let broken: Vec<Arc<GeneratedChunk>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
@@ -1295,7 +1634,7 @@ mod tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        arm_test_waiters(0);
         TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
         assert!(
             broken.iter().any(|chunk| !Arc::ptr_eq(&broken[0], chunk)),
@@ -1316,7 +1655,7 @@ mod tests {
         let cfg = Arc::new(normal(0x5eed_7777));
         let (x, z) = (9111, -8111);
         clear_terrain_cache();
-        TEST_COMPUTE_DELAY_MS.store(80, Ordering::Relaxed);
+        arm_test_waiters(4);
         TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
         TEST_COMPUTE_PANIC.store(true, Ordering::Relaxed);
         let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -1343,7 +1682,7 @@ mod tests {
         let mut panics = 0;
         for _ in 0..4 {
             let outcome = rx
-                .recv_timeout(std::time::Duration::from_secs(10))
+                .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("a waiter hung after the computing thread panicked");
             match outcome {
                 Ok(Ok(_)) => successes += 1,
@@ -1356,7 +1695,7 @@ mod tests {
             successes >= 1,
             "a waiter must re-run the closure and succeed"
         );
-        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        arm_test_waiters(0);
         TEST_COMPUTE_PANIC.store(false, Ordering::Relaxed);
 
         // 之后再查同一个键，必须拿到正确结果，且失败占位没有残留。
@@ -1615,22 +1954,206 @@ mod tests {
             assert_eq!(chunk.blocks, expected.blocks);
         }
         let stats = terrain_cache_stats();
-        assert_eq!(stats.byte_limit, TERRAIN_CACHE_BYTE_LIMIT);
+        // 160 条放不进热层（3/4 上限约 118 条）：淘汰下来的进冷层，上面重查时
+        // 从冷层解码回来，内容已经和现算的逐格比过。
+        // 160 entries overflow the hot tier (3/4 of the limit, ~118): evicted
+        // ones go cold and the lookups above decode them back, already compared
+        // cell by cell with fresh terrain.
         assert!(
-            stats.bytes <= TERRAIN_CACHE_BYTE_LIMIT,
+            stats.cold_hits > 0,
+            "no lookup was served from the cold tier"
+        );
+        let limit = crate::worldgen_cache::terrain_byte_limit();
+        assert_eq!(stats.byte_limit, limit);
+        assert!(
+            stats.bytes <= limit,
             "cache holds {} bytes, limit {}",
             stats.bytes,
-            TERRAIN_CACHE_BYTE_LIMIT
+            limit
         );
-        // 峰值允许比上限多一条：插入后才触发淘汰，一条约 405 KiB。
-        // The peak may exceed the limit by one entry (~405 KiB): eviction runs
-        // right after the insertion that crosses the boundary.
+        // 峰值允许每条线程比上限多一条：插入后才触发淘汰，一条约 405 KiB，
+        // 4 条线程可能同时各在一片里刚插入、还没淘汰。
+        // The peak may exceed the limit by one entry (~405 KiB) per thread:
+        // eviction runs right after the insertion that crosses the boundary and
+        // the 4 threads may each be at that point in a different shard.
         assert!(
-            stats.peak_bytes <= TERRAIN_CACHE_BYTE_LIMIT + 1024 * 1024,
+            stats.peak_bytes <= limit + 4 * 1024 * 1024,
             "cache peaked at {} bytes, limit {}",
             stats.peak_bytes,
-            TERRAIN_CACHE_BYTE_LIMIT
+            limit
         );
+    }
+
+    /// 测试用：`(x, z)` 不带 Beardifier 的地形在不在缓存里（热层或冷层）。
+    /// Test helper: whether plain terrain at `(x, z)` is cached in either tier.
+    fn terrain_is_cached(cfg: &WorldGenConfig, x: i32, z: i32) -> bool {
+        let key = terrain_cache_key(cfg, x, z, false);
+        let shard = terrain_shards()[shard_index(&key)].lock().unwrap();
+        shard.entries.contains_key(&key) || shard.cold.contains_key(&key)
+    }
+
+    /// 按依赖释放：3×3 个中心的地物都算完、3×3 个区块都完工，这条地形才删；
+    /// 少一个使用者就留着。删了以后再查，现算出来的和原来逐格相同。
+    ///
+    /// Dependency release: terrain goes only once all 3×3 feature runs are
+    /// computed and all 3×3 chunks assembled; one missing consumer keeps it.
+    /// A later lookup recomputes identical terrain.
+    #[test]
+    fn terrain_is_released_when_every_consumer_is_done() {
+        let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = normal(0x5eed_de9e);
+        let (x, z) = (21, -8);
+        let first = cached_generate_chunk(&cfg, x, z).unwrap();
+        for bit in 0..9 {
+            mark_terrain_feature_run(&cfg, x, z, bit);
+        }
+        for bit in 0..8 {
+            mark_terrain_chunk_finished(&cfg, x, z, bit);
+        }
+        assert!(terrain_is_cached(&cfg, x, z), "one consumer is not done");
+        mark_terrain_chunk_finished(&cfg, x, z, 8);
+        assert!(!terrain_is_cached(&cfg, x, z), "every consumer is done");
+        let again = cached_generate_chunk(&cfg, x, z).unwrap();
+        assert!(!Arc::ptr_eq(&first, &again), "recomputed after the release");
+        assert_eq!(first.blocks, again.blocks);
+        // 重新进缓存的条目从空位图开始，不会被旧的位带走。
+        // The re-cached entry starts from an empty bitmap.
+        mark_terrain_chunk_finished(&cfg, x, z, 8);
+        assert!(terrain_is_cached(&cfg, x, z));
+    }
+
+    /// 真实入口：区块完工 + 地物算完的通知按位置落到正确的条目上。
+    /// 以 T 为中心的 3×3 全部通知完，T 被删，隔一格的 T+2 还在。
+    ///
+    /// Real entry points: chunk-finished and feature-run notices reach the right
+    /// entries by position. After the whole 3×3 around T, T is gone and T+2 stays.
+    #[test]
+    fn consumer_notices_release_by_position() {
+        let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = normal(0x5eed_de9f);
+        let (x, z) = (-30, 17);
+        cached_generate_chunk(&cfg, x, z).unwrap();
+        cached_generate_chunk(&cfg, x + 2, z).unwrap();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                crate::worldgen_cache::feature_run_computed(&cfg, x + dx, z + dz);
+                crate::worldgen_cache::chunk_finished(&cfg, ChunkPos::new(x + dx, z + dz));
+            }
+        }
+        assert!(!terrain_is_cached(&cfg, x, z));
+        assert!(
+            terrain_is_cached(&cfg, x + 2, z),
+            "only a third of its consumers"
+        );
+    }
+
+    /// 空闲释放清空两层但保留计数；之后再查，结果和原来逐格相同。
+    /// The idle release empties both tiers but keeps counters; a later lookup
+    /// returns identical terrain.
+    #[test]
+    fn idle_release_empties_the_cache_without_changing_results() {
+        let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = normal(0x5eed_1d1e);
+        let first = cached_generate_chunk(&cfg, 4, 4).unwrap();
+        let misses = terrain_cache_stats().misses;
+        release_terrain_cache();
+        assert!(!terrain_is_cached(&cfg, 4, 4));
+        // 别的测试同时也在往缓存里放东西，所以只看自己的键和只增不减的计数。
+        // Other tests insert concurrently, so only this key and the monotonic
+        // counter are checked.
+        assert!(
+            terrain_cache_stats().misses >= misses,
+            "counters survive the release"
+        );
+        let again = cached_generate_chunk(&cfg, 4, 4).unwrap();
+        assert_eq!(first.blocks, again.blocks);
+        assert_eq!(first.heightmaps, again.heightmaps);
+    }
+
+    /// 热层淘汰下来的条目进冷层；再查时解码回热层，内容逐格相同，不算现算。
+    /// An entry evicted from the hot tier goes cold; looking it up decodes it
+    /// back into the hot tier with identical content and no recomputation.
+    #[test]
+    fn a_demoted_entry_thaws_to_the_same_terrain() {
+        let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 用并发测试的种子，才能数生成闭包真正跑了几次（`TEST_COMPUTATIONS`）。
+        // A concurrency-test seed, so real generation runs can be counted.
+        let cfg = normal(0x5eed_7777);
+        let (x, z) = (909, -909);
+        let first = cached_generate_chunk(&cfg, x, z).unwrap();
+        let computations = TEST_COMPUTATIONS.load(Ordering::Relaxed);
+        let key = terrain_cache_key(&cfg, x, z, false);
+        let shard_lock = &terrain_shards()[shard_index(&key)];
+        let chunk = shard_lock.lock().unwrap().remove_hot(&key).unwrap();
+        demote_unlocked(
+            shard_lock,
+            vec![(key.clone(), chunk)],
+            shard_byte_limits().1,
+        );
+        let before = {
+            let shard = shard_lock.lock().unwrap();
+            assert!(shard.cold.contains_key(&key) && !shard.entries.contains_key(&key));
+            assert!(!shard.inflight.contains_key(&key));
+            shard.cold_hits
+        };
+        let again = cached_generate_chunk(&cfg, x, z).unwrap();
+        assert_eq!(first.blocks, again.blocks);
+        assert_eq!(first.biomes, again.biomes);
+        assert_eq!(first.heightmaps, again.heightmaps);
+        assert_eq!(first.post_processing, again.post_processing);
+        let shard = terrain_shards()[shard_index(&key)].lock().unwrap();
+        assert!(shard.entries.contains_key(&key) && !shard.cold.contains_key(&key));
+        assert!(shard.cold_hits > before);
+        assert_eq!(
+            TEST_COMPUTATIONS.load(Ordering::Relaxed),
+            computations,
+            "a thaw must not regenerate"
+        );
+    }
+
+    /// 锁外压缩期间这个键又被查过（回到热层或正在算），冷层就不收那份，
+    /// 一个键不会同时在两层。
+    /// If the key was looked up again while it was compacted outside the lock
+    /// (back in the hot tier or being computed), the cold tier does not take
+    /// that copy, so a key is never in both tiers.
+    #[test]
+    fn a_key_looked_up_again_is_not_stored_cold() {
+        let cfg = WorldGenConfig::default();
+        let key = terrain_cache_key(&cfg, 0, 0, false);
+        let chunk = Arc::new(generate_chunk(&cfg, 0, 0).unwrap());
+        let mut shard = TerrainShard::default();
+        shard.entries.insert(key.clone(), Arc::clone(&chunk));
+        shard.insert_cold(key.clone(), CompactTerrain::encode(&chunk), usize::MAX);
+        assert!(shard.cold.is_empty() && shard.cold_bytes == 0);
+        shard.entries.clear();
+        shard
+            .inflight
+            .insert(key.clone(), Arc::new(OnceLock::new()));
+        shard.insert_cold(key.clone(), CompactTerrain::encode(&chunk), usize::MAX);
+        assert!(shard.cold.is_empty() && shard.cold_bytes == 0);
+        shard.inflight.clear();
+        shard.insert_cold(key.clone(), CompactTerrain::encode(&chunk), usize::MAX);
+        assert!(shard.cold.contains_key(&key) && shard.cold_bytes > 0);
+        // 把全局字节计数还回去，别的测试看的峰值不受影响。
+        // Give the global byte count back so other tests' peaks are unaffected.
+        shard.remove_cold(&key);
+    }
+
+    #[test]
+    fn cold_order_discards_old_incarnations_of_the_same_key() {
+        let cfg = WorldGenConfig::default();
+        let key = terrain_cache_key(&cfg, 0, 0, false);
+        let chunk = generate_chunk(&cfg, 0, 0).unwrap();
+        let mut shard = TerrainShard::default();
+        shard
+            .cold
+            .insert(key.clone(), (70, CompactTerrain::encode(&chunk)));
+        shard
+            .cold_order
+            .extend((0..=70).map(|stamp| (key.clone(), stamp)));
+        shard.compact_cold_order();
+        assert_eq!(shard.cold_order.len(), 1);
+        assert_eq!(shard.cold_order[0], (key, 70));
     }
 
     #[test]

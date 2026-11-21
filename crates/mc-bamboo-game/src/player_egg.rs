@@ -1,9 +1,10 @@
 //! 玩家右键扔鸡蛋：官方 `EggItem.use`。先用世界随机源取扔蛋声的音高，再在眼睛下方
-//! 0.1 处生成 `ThrownEgg`，按视线以力度 1.5、散布 1 射出，最后非创造模式扣一个。
+//! 0.1 处生成 `ThrownEgg`，按视线以力度 1.5、散布 1 射出，记使用统计，最后非创造模式扣一个。
 //!
 //! A player throwing an egg, vanilla `EggItem.use`: the throw sound's pitch comes
 //! from the level random first, then a `ThrownEgg` spawns 0.1 below the eyes and is
-//! shot along the view with power 1.5 and uncertainty 1; survival consumes one.
+//! shot along the view with power 1.5 and uncertainty 1. Award the use stat, then
+//! consume one unless the player has infinite materials.
 
 use mc_bamboo_blocks::{World, entity::thrown_egg::EggShot};
 use mc_bamboo_core::Hand;
@@ -28,6 +29,7 @@ pub(crate) fn throw(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
     if !matches!(stack.item, items::EGG | items::BLUE_EGG | items::BROWN_EGG) {
         return false;
     }
+    let item = stack.item;
     let (owner, owner_uuid) = (player.id.0, *player.uuid.as_bytes());
     let pitch = 0.4 / (level_random_float(region) * 0.4 + 0.8);
     play_sound(
@@ -56,6 +58,7 @@ pub(crate) fn throw(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         let mut world = World::new(&mut level, ticks);
         world.spawn_egg_shot(&shot);
     }
+    crate::item_use_stats::award(region, id, item);
     consume_one(region, id, hand);
     true
 }
@@ -80,10 +83,10 @@ fn consume_one(region: &mut Region, id: PlayerId, hand: Hand) {
 }
 
 /// 一次扔蛋重放的结果：蛋的位置 / 速度 / 朝向原始位、随机源、蛋里的物品，以及手里剩下的
-/// 数量和世界随机源。
+/// 数量和世界随机源，再加本次发出的使用统计。
 ///
 /// One throw replay: the egg's raw position / velocity / angle bits, its random, the
-/// item inside, the count left in hand and the level random.
+/// item inside, the count left in hand, the level random and the use stat.
 #[cfg(feature = "oracle-samples")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayEggThrow {
@@ -92,6 +95,7 @@ pub struct ReplayEggThrow {
     pub item: [i32; 2],
     pub left: i32,
     pub level_seed: i64,
+    pub item_used: Vec<(i32, i32)>,
 }
 
 /// 用游戏里同一个 [`throw`] 入口重放一次扔棕色鸡蛋。
@@ -139,6 +143,7 @@ pub fn replay_throw(
         return None;
     };
     let (p, v) = (entity.position, entity.delta);
+    let player = region.players.get_mut(&id)?;
     Some(ReplayEggThrow {
         motion: [
             p.x.to_bits() as i64,
@@ -152,7 +157,8 @@ pub fn replay_throw(
         ],
         seed: entity.random.state(),
         item: [egg.item.item, egg.item.count],
-        left: region.players[&id].inventory.slots[main].count,
+        left: player.inventory.slots[main].count,
         level_seed: region.random.source().seed(),
+        item_used: player.item_use_stats.take_dirty(),
     })
 }

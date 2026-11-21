@@ -17,8 +17,11 @@ pub mod avoid;
 pub mod bucketable;
 pub mod chicken;
 pub mod control;
+pub(crate) mod conversion;
+pub mod creeper;
 pub mod damage;
 pub mod effects;
+pub(crate) mod enderman;
 pub mod equine;
 pub mod equipment;
 pub mod fish;
@@ -27,18 +30,23 @@ pub mod fox_goals;
 pub mod goals;
 pub mod interact;
 pub mod living;
+pub mod mooshroom;
 pub mod motion;
 pub mod natural;
 pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
+pub mod neutral;
+pub mod panda;
 pub mod path;
 mod pig;
+pub mod polar_bear;
 pub mod rabbit;
 pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
+pub mod spider;
 pub mod squid;
 pub mod tame;
 pub(crate) mod timing;
@@ -61,6 +69,27 @@ use self::{
 };
 use super::{EntityUid, JavaRandom};
 
+/// 载具收到 `START_RIDING_JUMP`：官方 `ServerGamePacketListenerImpl.handlePlayerCommand` 里
+/// 那一支，`canJump()` 就是「上了鞍」。
+///
+/// The vehicle got `START_RIDING_JUMP`: the branch of vanilla
+/// `ServerGamePacketListenerImpl.handlePlayerCommand`, where `canJump()` means
+/// "saddled".
+pub fn start_riding_jump(entity: &mut super::Entity, mob: &mut Mob, scale: i32) -> bool {
+    if scale <= 0
+        || mob
+            .equipment
+            .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+            .is_empty()
+    {
+        return false;
+    }
+    if mob.mob_type.is_equine() {
+        self::equine::handle_start_jump(entity, mob);
+    }
+    true
+}
+
 /// 生物种类。牛走 `Animal` 一支，僵尸和尸壳走 `Monster` → `Zombie` 一支。
 ///
 /// Mob kinds. Cows use the `Animal` branch; zombies and husks the
@@ -69,15 +98,22 @@ use super::{EntityUid, JavaRandom};
 pub enum MobType {
     #[default]
     Cow,
+    Mooshroom,
     Rabbit,
     Fox,
     Wolf,
     Pig,
     Sheep,
     Chicken,
+    PolarBear,
+    Panda,
     Zombie,
     Husk,
     Skeleton,
+    Creeper,
+    Spider,
+    CaveSpider,
+    Enderman,
     Squid,
     GlowSquid,
     Cod,
@@ -92,20 +128,61 @@ pub enum MobType {
 }
 
 impl MobType {
+    /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
+    ///
+    /// Every modelled kind; lookups by name or registry id walk this list.
+    pub const ALL: [Self; 28] = [
+        Self::Cow,
+        Self::Mooshroom,
+        Self::Rabbit,
+        Self::Fox,
+        Self::Wolf,
+        Self::Pig,
+        Self::Sheep,
+        Self::Chicken,
+        Self::PolarBear,
+        Self::Panda,
+        Self::Horse,
+        Self::Donkey,
+        Self::Mule,
+        Self::Llama,
+        Self::Zombie,
+        Self::Husk,
+        Self::Skeleton,
+        Self::Creeper,
+        Self::Spider,
+        Self::CaveSpider,
+        Self::Enderman,
+        Self::Squid,
+        Self::GlowSquid,
+        Self::Cod,
+        Self::Salmon,
+        Self::TropicalFish,
+        Self::Pufferfish,
+        Self::Turtle,
+    ];
+
     /// 注册表 ID。
     pub const fn entity_type(self) -> i32 {
         use mc_bamboo_data::registries::entity_type as ids;
         match self {
             Self::Cow => ids::COW,
+            Self::Mooshroom => ids::MOOSHROOM,
             Self::Rabbit => ids::RABBIT,
             Self::Fox => ids::FOX,
             Self::Wolf => ids::WOLF,
             Self::Pig => ids::PIG,
             Self::Sheep => ids::SHEEP,
             Self::Chicken => ids::CHICKEN,
+            Self::PolarBear => ids::POLAR_BEAR,
+            Self::Panda => ids::PANDA,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
+            Self::Creeper => ids::CREEPER,
+            Self::Spider => ids::SPIDER,
+            Self::CaveSpider => ids::CAVE_SPIDER,
+            Self::Enderman => ids::ENDERMAN,
             Self::Squid => ids::SQUID,
             Self::GlowSquid => ids::GLOW_SQUID,
             Self::Cod => ids::COD,
@@ -124,15 +201,22 @@ impl MobType {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:cow",
+            Self::Mooshroom => "minecraft:mooshroom",
             Self::Rabbit => "minecraft:rabbit",
             Self::Fox => "minecraft:fox",
             Self::Wolf => "minecraft:wolf",
             Self::Pig => "minecraft:pig",
             Self::Sheep => "minecraft:sheep",
             Self::Chicken => "minecraft:chicken",
+            Self::PolarBear => "minecraft:polar_bear",
+            Self::Panda => "minecraft:panda",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
+            Self::Creeper => "minecraft:creeper",
+            Self::Spider => "minecraft:spider",
+            Self::CaveSpider => "minecraft:cave_spider",
+            Self::Enderman => "minecraft:enderman",
             Self::Squid => "minecraft:squid",
             Self::GlowSquid => "minecraft:glow_squid",
             Self::Cod => "minecraft:cod",
@@ -172,31 +256,7 @@ impl MobType {
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
-        [
-            Self::Cow,
-            Self::Rabbit,
-            Self::Fox,
-            Self::Wolf,
-            Self::Pig,
-            Self::Sheep,
-            Self::Chicken,
-            Self::Zombie,
-            Self::Husk,
-            Self::Skeleton,
-            Self::Squid,
-            Self::GlowSquid,
-            Self::Cod,
-            Self::Salmon,
-            Self::TropicalFish,
-            Self::Pufferfish,
-            Self::Turtle,
-            Self::Horse,
-            Self::Donkey,
-            Self::Mule,
-            Self::Llama,
-        ]
-        .into_iter()
-        .find(|kind| kind.name() == name)
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 
     pub const fn is_equine(self) -> bool {
@@ -214,6 +274,24 @@ impl MobType {
                     mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
                 )
             }
+            (Self::Creeper, _) => creeper::dimensions(),
+            (Self::Enderman, _) => enderman::dimensions(),
+            (Self::Spider, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::SPIDER_EYE_HEIGHT,
+                )
+            }
+            (Self::CaveSpider, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::CAVE_SPIDER_EYE_HEIGHT,
+                )
+            }
             (Self::Rabbit, baby) => rabbit::dimensions(baby),
             (Self::Fox, baby) => fox::dimensions(baby),
             (Self::Wolf, baby) => wolf::dimensions(baby),
@@ -223,6 +301,9 @@ impl MobType {
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
+            (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
+            (Self::PolarBear, baby) => polar_bear::dimensions(baby),
+            (Self::Panda, baby) => panda::dimensions(baby),
             (Self::Squid | Self::GlowSquid, baby) => squid::dimensions(self, baby),
             (Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish, _) => {
                 fish::dimensions(self, 1, 0)
@@ -239,7 +320,51 @@ impl MobType {
 
     /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
     pub const fn is_monster(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk | Self::Skeleton)
+        matches!(
+            self,
+            Self::Zombie
+                | Self::Husk
+                | Self::Skeleton
+                | Self::Creeper
+                | Self::Spider
+                | Self::CaveSpider
+                | Self::Enderman
+        )
+    }
+
+    /// 目标选择按官方 `TargetGoal` 的完整规则走（`mustSee` 的视线记忆、生物也能当目标、
+    /// 按真实碰撞箱判近战距离）。僵尸一系还是早先的简化版。
+    ///
+    /// Whether targeting follows the full vanilla `TargetGoal` rules (`mustSee` memory,
+    /// mob targets, real hitboxes for melee reach). Zombies keep the earlier simplification.
+    pub const fn full_target_rules(self) -> bool {
+        matches!(
+            self,
+            Self::Skeleton | Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman
+        )
+    }
+
+    /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
+    ///
+    /// Kinds whose `Mob.getAmbientSound()` is null: `makeSound(null)` plays nothing and
+    /// draws no pitch.
+    pub const fn has_no_ambient_sound(self) -> bool {
+        matches!(self, Self::Creeper | Self::Pufferfish)
+    }
+
+    /// 走路声用脚下方块的 `SoundType`（`Entity.playStepSound` 的缺省实现），不是生物自己的音效。
+    ///
+    /// Footsteps use the `SoundType` of the block below (the default `Entity.playStepSound`).
+    pub const fn uses_block_step_sound(self) -> bool {
+        matches!(self, Self::Creeper | Self::Enderman)
+    }
+
+    /// `Spider.onClimbable()` 读 `DATA_FLAGS_ID` 的第 0 位，攀爬物理因此改走实体标志。
+    ///
+    /// `Spider.onClimbable()` reads bit 0 of `DATA_FLAGS_ID`, so climbing physics
+    /// reads the entity flag instead of the block below.
+    pub const fn climbs_walls(self) -> bool {
+        matches!(self, Self::Spider | Self::CaveSpider)
     }
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
@@ -350,15 +475,22 @@ impl MobType {
     pub const fn loot_table(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:entities/cow",
+            Self::Mooshroom => "minecraft:entities/mooshroom",
             Self::Rabbit => "minecraft:entities/rabbit",
             Self::Fox => "minecraft:entities/fox",
             Self::Wolf => "minecraft:entities/wolf",
             Self::Pig => "minecraft:entities/pig",
             Self::Sheep => "minecraft:entities/sheep",
             Self::Chicken => "minecraft:entities/chicken",
+            Self::PolarBear => "minecraft:entities/polar_bear",
+            Self::Panda => "minecraft:entities/panda",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
+            Self::Creeper => "minecraft:entities/creeper",
+            Self::Spider => "minecraft:entities/spider",
+            Self::CaveSpider => "minecraft:entities/cave_spider",
+            Self::Enderman => "minecraft:entities/enderman",
             Self::Squid => "minecraft:entities/squid",
             Self::GlowSquid => "minecraft:entities/glow_squid",
             Self::Cod => "minecraft:entities/cod",
@@ -396,14 +528,22 @@ impl MobType {
     pub const fn sound_volume(self) -> f32 {
         if self.is_equine() {
             0.8
-        } else if matches!(self, Self::Cow | Self::Squid | Self::GlowSquid | Self::Wolf) {
+        } else if matches!(
+            self,
+            Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf
+        ) {
             0.4
         } else {
             1.0
         }
     }
 
-    /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
+    /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。幼崽叫声不同的
+    /// （猪、鸡、北极熊）返回 `None`，由 `living::ambient_sound` 按年龄分派。
+    ///
+    /// The four sounds are dispatched by class; zombies and husks have their own events.
+    /// Kinds whose cubs sound different (pigs, chickens, polar bears) return `None` and let
+    /// `living::ambient_sound` pick by age.
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
             Self::Rabbit => Some("minecraft:entity.rabbit.ambient"),
@@ -411,11 +551,19 @@ impl MobType {
             // 狼的叫声按叫声品种和幼年换，见 [`wolf::sound`]。
             // Wolf sounds depend on the sound variant and age; see [`wolf::sound`].
             Self::Wolf => Some("minecraft:entity.wolf.ambient"),
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow
+            | Self::Mooshroom
+            | Self::Pig
+            | Self::Chicken
+            | Self::Creeper
+            | Self::PolarBear
+            | Self::Panda => None,
             Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
+            Self::Enderman => Some("minecraft:entity.enderman.ambient"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.ambient"),
             Self::Squid | Self::GlowSquid => Some(squid::ambient_sound(self)),
             Self::Cod | Self::Salmon | Self::TropicalFish => Some(fish::ambient_sound(self)),
             Self::Pufferfish => None,
@@ -432,11 +580,16 @@ impl MobType {
             Self::Rabbit => Some("minecraft:entity.rabbit.hurt"),
             Self::Fox => Some("minecraft:entity.fox.hurt"),
             Self::Wolf => Some("minecraft:entity.wolf.hurt"),
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.hurt"),
+            Self::PolarBear => Some("minecraft:entity.polar_bear.hurt"),
+            Self::Panda => Some("minecraft:entity.panda.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
+            Self::Creeper => Some("minecraft:entity.creeper.hurt"),
+            Self::Enderman => Some("minecraft:entity.enderman.hurt"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.hurt"),
             Self::Squid | Self::GlowSquid => Some(squid::hurt_sound(self)),
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 Some(fish::hurt_sound(self))
@@ -454,11 +607,16 @@ impl MobType {
             Self::Rabbit => Some("minecraft:entity.rabbit.death"),
             Self::Fox => Some("minecraft:entity.fox.death"),
             Self::Wolf => Some("minecraft:entity.wolf.death"),
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Mooshroom | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.death"),
+            Self::PolarBear => Some("minecraft:entity.polar_bear.death"),
+            Self::Panda => Some("minecraft:entity.panda.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
+            Self::Creeper => Some("minecraft:entity.creeper.death"),
+            Self::Enderman => Some("minecraft:entity.enderman.death"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.death"),
             Self::Squid | Self::GlowSquid => Some(squid::death_sound(self)),
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 Some(fish::death_sound(self))
@@ -474,11 +632,19 @@ impl MobType {
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
             Self::Rabbit | Self::Fox | Self::Wolf => None,
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow
+            | Self::Mooshroom
+            | Self::Pig
+            | Self::Chicken
+            | Self::Creeper
+            | Self::Enderman => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
+            Self::PolarBear => Some("minecraft:entity.polar_bear.step"),
+            Self::Panda => Some("minecraft:entity.panda.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.step"),
             // `MovementEmission.EVENTS`：没有脚步声。
             // `MovementEmission.EVENTS`: no step sound.
             Self::Squid | Self::GlowSquid => None,
@@ -498,15 +664,22 @@ impl MobType {
         use mc_bamboo_data::items;
         match self {
             Self::Cow => items::COW_SPAWN_EGG,
+            Self::Mooshroom => items::MOOSHROOM_SPAWN_EGG,
             Self::Rabbit => items::RABBIT_SPAWN_EGG,
             Self::Fox => items::FOX_SPAWN_EGG,
             Self::Wolf => items::WOLF_SPAWN_EGG,
             Self::Pig => items::PIG_SPAWN_EGG,
             Self::Sheep => items::SHEEP_SPAWN_EGG,
             Self::Chicken => items::CHICKEN_SPAWN_EGG,
+            Self::PolarBear => items::POLAR_BEAR_SPAWN_EGG,
+            Self::Panda => items::PANDA_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
+            Self::Creeper => items::CREEPER_SPAWN_EGG,
+            Self::Spider => items::SPIDER_SPAWN_EGG,
+            Self::CaveSpider => items::CAVE_SPIDER_SPAWN_EGG,
+            Self::Enderman => items::ENDERMAN_SPAWN_EGG,
             Self::Squid => items::SQUID_SPAWN_EGG,
             Self::GlowSquid => items::GLOW_SQUID_SPAWN_EGG,
             Self::Cod => items::COD_SPAWN_EGG,
@@ -525,15 +698,22 @@ impl MobType {
     pub const fn translation_key(self) -> &'static str {
         match self {
             Self::Cow => "entity.minecraft.cow",
+            Self::Mooshroom => "entity.minecraft.mooshroom",
             Self::Rabbit => "entity.minecraft.rabbit",
             Self::Fox => "entity.minecraft.fox",
             Self::Wolf => "entity.minecraft.wolf",
             Self::Pig => "entity.minecraft.pig",
             Self::Sheep => "entity.minecraft.sheep",
             Self::Chicken => "entity.minecraft.chicken",
+            Self::PolarBear => "entity.minecraft.polar_bear",
+            Self::Panda => "entity.minecraft.panda",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
+            Self::Creeper => "entity.minecraft.creeper",
+            Self::Spider => "entity.minecraft.spider",
+            Self::CaveSpider => "entity.minecraft.cave_spider",
+            Self::Enderman => "entity.minecraft.enderman",
             Self::Squid => "entity.minecraft.squid",
             Self::GlowSquid => "entity.minecraft.glow_squid",
             Self::Cod => "entity.minecraft.cod",
@@ -558,31 +738,9 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [
-            Self::Cow,
-            Self::Zombie,
-            Self::Husk,
-            Self::Skeleton,
-            Self::Squid,
-            Self::GlowSquid,
-            Self::Cod,
-            Self::Salmon,
-            Self::TropicalFish,
-            Self::Pufferfish,
-            Self::Turtle,
-            Self::Pig,
-            Self::Sheep,
-            Self::Chicken,
-            Self::Rabbit,
-            Self::Fox,
-            Self::Wolf,
-            Self::Horse,
-            Self::Donkey,
-            Self::Mule,
-            Self::Llama,
-        ]
-        .into_iter()
-        .find(|kind| kind.entity_type() == entity_type)
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.entity_type() == entity_type)
     }
 
     /// `EntityType.getCategory()`。
@@ -621,6 +779,17 @@ impl MobType {
     /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
     pub const fn fire_immune(self) -> bool {
         false
+    }
+
+    /// `LivingEntity.getWaterSlowDown()`：缺省 0.8，北极熊覆写成 0.98。
+    ///
+    /// `LivingEntity.getWaterSlowDown()`: 0.8 by default, 0.98 for polar bears.
+    pub const fn water_slow_down(self) -> f32 {
+        if matches!(self, Self::PolarBear) {
+            0.98
+        } else {
+            0.8
+        }
     }
 }
 
@@ -773,6 +942,11 @@ pub enum DamageKind {
     Magic,
     Wither,
     Explosion,
+    /// `minecraft:player_explosion`：有直接和间接来源实体的爆炸（苦力怕炸人就是这种）。
+    ///
+    /// `minecraft:player_explosion`: an explosion with a direct and a causing entity,
+    /// which is what a creeper blast is.
+    PlayerExplosion,
 }
 
 impl DamageKind {
@@ -804,6 +978,7 @@ impl DamageKind {
             Self::Magic => "minecraft:magic",
             Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
+            Self::PlayerExplosion => "minecraft:player_explosion",
         }
     }
 
@@ -855,6 +1030,7 @@ impl DamageKind {
             Self::Magic => "magic",
             Self::Wither => "wither",
             Self::Explosion => "explosion",
+            Self::PlayerExplosion => "explosion.player",
         }
     }
 
@@ -862,7 +1038,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 25] = [
+        let all = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -888,6 +1064,7 @@ impl DamageKind {
             Self::Magic,
             Self::Wither,
             Self::Explosion,
+            Self::PlayerExplosion,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -970,7 +1147,7 @@ impl DamageKind {
     /// `DamageSource.scalesWithDifficulty()`: only `always`, or
     /// `when_caused_by_living_non_player` with a non-player living cause.
     pub const fn scales_with_difficulty(self) -> bool {
-        matches!(self, Self::Explosion)
+        matches!(self, Self::Explosion | Self::PlayerExplosion)
     }
 
     /// `DamageType.exhaustion`：受伤后累加的饥饿消耗。
@@ -985,6 +1162,7 @@ impl DamageKind {
             | Self::Thrown
             | Self::Thorns
             | Self::Explosion
+            | Self::PlayerExplosion
             | Self::Cactus
             | Self::InFire
             | Self::Lava
@@ -992,6 +1170,17 @@ impl DamageKind {
             | Self::SweetBerryBush => TENTH,
             _ => 0.0,
         }
+    }
+
+    /// `#panic_environmental_causes`（这里有的那几种；`lightning_bolt` 和 `sulfur_cube_hot` 还没有）。
+    ///
+    /// `#panic_environmental_causes` (the kinds modelled here; `lightning_bolt` and
+    /// `sulfur_cube_hot` do not exist yet).
+    pub const fn panic_environmental_causes(self) -> bool {
+        matches!(
+            self,
+            Self::Cactus | Self::Freeze | Self::HotFloor | Self::InFire | Self::Lava | Self::OnFire
+        )
     }
 
     /// `#panic_causes`。
@@ -1004,6 +1193,8 @@ impl DamageKind {
                 | Self::Arrow
                 | Self::Thrown
                 | Self::Thorns
+                | Self::Explosion
+                | Self::PlayerExplosion
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor
@@ -1190,6 +1381,11 @@ pub struct MobDeathLoot {
     pub source: DamageSource,
     pub recent_player: Option<[u8; 16]>,
     pub recent_player_id: Option<EntityUid>,
+    /// 末影人搬着的方块：`dropCustomDeathLoot` 用带精准采集的假工具掉它。
+    ///
+    /// The block an enderman carries: `dropCustomDeathLoot` drops it with a fake
+    /// silk-touch tool.
+    pub carried: Option<crate::state::BlockState>,
 }
 
 /// 剪毛（`SHEARING`）或下蛋（`GIFT`）的一次战利品表求值：表名、原点、实体本身和可选的工具。
@@ -1217,7 +1413,13 @@ impl EntityLootRequest {
             table,
             kind: mob.mob_type,
             origin: me.position,
-            wool: mob.wool,
+            // 哞菇借这个字节传品种（0 红 1 棕），羊是羊毛字节。
+            // Mooshrooms pass their type here (0 red, 1 brown); sheep pass the wool byte.
+            wool: if mob.mob_type == MobType::Mooshroom {
+                mob.mooshroom.brown as u8
+            } else {
+                mob.wool
+            },
             variant: mob.variant,
             tool,
         }
@@ -1234,6 +1436,7 @@ impl MobDeathLoot {
             source,
             recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
             recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
+            carried: mob.enderman.carried,
         }
     }
 }
@@ -1322,6 +1525,13 @@ pub struct Mob {
     pub last_pos: Option<BlockPos>,
     pub last_climbable_pos: Option<BlockPos>,
     pub fall_flying: bool,
+    /// `Entity.setSharedFlagOnFire` 写进共享标志位的那一位。每刻 `baseTick` 末尾按
+    /// `remainingFireTicks > 0` 重算，所以点燃后晚一刻才显示、熄灭当刻就消失。
+    ///
+    /// The shared-flag bit written by `Entity.setSharedFlagOnFire`. Recomputed at the end
+    /// of every `baseTick` from `remainingFireTicks > 0`, so a fresh fire shows one tick
+    /// late and an extinguished one clears at once.
+    pub visible_fire: bool,
     // ---- Mob ----
     pub ambient_sound_time: i32,
     pub look: LookControl,
@@ -1397,6 +1607,32 @@ pub struct Mob {
     /// The chicken sound variant and `eggTime` countdown.
     pub chicken_sound_variant: chicken::SoundVariant,
     pub egg_time: i32,
+    /// 哞菇的品种、存着的迷之炖菜效果和上一道闪电。
+    ///
+    /// The mooshroom type, its stored stew effects and the last lightning bolt.
+    pub mooshroom: mooshroom::Mooshroom,
+    /// 北极熊的站立标志和吼叫冷却。
+    ///
+    /// The polar bear standing flag and growl cooldown.
+    pub polar_bear: polar_bear::PolarBear,
+    /// 熊猫的基因、旗帜位和计数器。
+    ///
+    /// The panda's genes, flags and counters.
+    pub panda: panda::Panda,
+    /// 中立生物的持久愤怒（`NeutralMob`），北极熊在用。
+    ///
+    /// Persistent anger of neutral mobs (`NeutralMob`); polar bears use it.
+    pub anger: neutral::Anger,
+    /// 苦力怕的膨胀、引信、带电和点燃状态；别的生物恒为缺省值。全是相对计数，随实体行搬岛。
+    ///
+    /// Creeper swell, fuse, powered and ignited state; default for other mobs. Relative
+    /// counters only, so it moves with the entity row between islands.
+    pub creeper: creeper::CreeperState,
+    /// 蜘蛛的 `DATA_FLAGS_ID` 第 0 位（`isClimbing`）；别的生物恒为缺省值。
+    ///
+    /// Bit 0 of the spider's `DATA_FLAGS_ID` (`isClimbing`); default for other mobs.
+    pub spider: spider::SpiderState,
+    pub(crate) enderman: enderman::EndermanState,
     /// 鱿鱼 / 发光鱿鱼的专属状态，别的生物恒为缺省值。
     ///
     /// Squid and glow squid state; default for every other mob.
@@ -1419,6 +1655,19 @@ pub struct Mob {
     pub hurt_marked: bool,
     /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
     pub pending_breed: Option<EntityUid>,
+    /// 骑在它身上的玩家，按上下车顺序。玩家不在实体表里，ID 就是玩家自己的实体 ID；
+    /// 官方 `Entity.passengers` 在这里也只会有玩家，因为 Bamboo 还没有生物骑生物。
+    ///
+    /// The players riding this mob, in boarding order. Players are not in the entity
+    /// table, so the id is the player's own entity id. Vanilla `Entity.passengers`
+    /// only ever holds players here: Bamboo has no mobs riding mobs yet.
+    pub passengers: Vec<EntityUid>,
+    /// 这一刻刚被 `ejectPassengers` 甩下来的乘客，供同一刻的 `push_entities` 跳过
+    /// （官方甩人时同步把骑手挪到载具旁边，Bamboo 的 `riding::tick` 在实体阶段后才挪）。
+    ///
+    /// A passenger ejected this tick, skipped by `push_entities` in the same tick
+    /// (vanilla moves the rider off the mount synchronously; Bamboo does it in `riding::tick`).
+    pub(super) ejected_passenger: Option<EntityUid>,
     pub equine: Option<Box<equine::EquineState>>,
 }
 
@@ -1488,38 +1737,60 @@ impl Mob {
     /// 按类型构造。牛的属性/目标/导航一条不改，其它类型只换这三张表。
     pub fn new(mob_type: MobType) -> Self {
         let attributes = match mob_type {
-            MobType::Cow => Attributes::cow(),
+            MobType::Cow | MobType::Mooshroom => Attributes::cow(),
             MobType::Rabbit => rabbit::attributes(),
             MobType::Fox => fox::attributes(),
             MobType::Wolf => wolf::attributes(),
             MobType::Pig => pig::attributes(),
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
+            MobType::PolarBear => polar_bear::attributes(),
+            MobType::Panda => panda::attributes(),
             MobType::Squid | MobType::GlowSquid => squid::attributes(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::attributes()
             }
             MobType::Turtle => turtle::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
+            MobType::Creeper => creeper::attributes(),
+            MobType::Enderman => enderman::attributes(),
+            MobType::Spider => spider::attributes(MobType::Spider),
+            MobType::CaveSpider => spider::attributes(MobType::CaveSpider),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
+        if mob_type == MobType::Llama {
+            // `Llama` 构造函数：`this.getNavigation().setRequiredPathLength(40.0F)`。
+            // `Llama` constructor: `this.getNavigation().setRequiredPathLength(40.0F)`.
+            navigation.required_path_length = 40.0;
+            navigation.update_max_visited_nodes(follow_range);
+        }
+        if mob_type.climbs_walls() {
+            // `Spider.createNavigation` 用 `WallClimberNavigation`。
+            // `Spider.createNavigation` builds a `WallClimberNavigation`.
+            navigation.wall_climber = true;
+        }
         let goals = match mob_type {
-            MobType::Cow => GoalSelector::cow(&mut navigation),
+            MobType::Cow | MobType::Mooshroom => GoalSelector::cow(&mut navigation),
             MobType::Rabbit => rabbit::goals(&mut navigation),
             MobType::Fox => fox::goals(&mut navigation, 0),
             MobType::Wolf => wolf::goals(&mut navigation),
             MobType::Pig => pig::goals(&mut navigation),
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
+            MobType::PolarBear => polar_bear::goals(&mut navigation),
+            MobType::Panda => panda::goals(&mut navigation),
             MobType::Squid | MobType::GlowSquid => squid::goals(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::goals(mob_type)
             }
             MobType::Turtle => turtle::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
+            MobType::Creeper => creeper::goals(&mut navigation),
+            MobType::Enderman => enderman::goals(&mut navigation),
+            MobType::Spider | MobType::CaveSpider => spider::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
         };
@@ -1529,13 +1800,16 @@ impl Mob {
             navigation.flags.swim = Some(false);
         }
         let target_goals = match mob_type {
-            MobType::Fox => fox::target_goals(),
-            MobType::Wolf => wolf::target_goals(),
             MobType::Cow
-            | MobType::Rabbit
+            | MobType::Mooshroom
             | MobType::Pig
             | MobType::Sheep
-            | MobType::Chicken
+            | MobType::Chicken => GoalSelector::default(),
+            MobType::PolarBear => polar_bear::target_goals(),
+            MobType::Panda => panda::target_goals(),
+            MobType::Fox => fox::target_goals(),
+            MobType::Wolf => wolf::target_goals(),
+            MobType::Rabbit
             | MobType::Squid
             | MobType::GlowSquid
             | MobType::Cod
@@ -1543,6 +1817,9 @@ impl Mob {
             | MobType::TropicalFish
             | MobType::Pufferfish => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
+            MobType::Creeper => creeper::target_goals(),
+            MobType::Enderman => enderman::target_goals(),
+            MobType::Spider | MobType::CaveSpider => spider::target_goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             kind => equine::targets(kind),
         };
@@ -1609,6 +1886,7 @@ impl Mob {
             last_pos: None,
             last_climbable_pos: None,
             fall_flying: false,
+            visible_fire: false,
             ambient_sound_time: 0,
             look: LookControl::default(),
             mover: if mob_type == MobType::Rabbit {
@@ -1624,6 +1902,7 @@ impl Mob {
             malus: match mob_type {
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
+                MobType::Enderman => enderman::malus(),
                 // `AgeableWaterCreature` 构造函数：`setPathfindingMalus(WATER, 0)`。
                 // The `AgeableWaterCreature` constructor zeroes the water malus.
                 MobType::Squid | MobType::GlowSquid => squid::malus(),
@@ -1674,6 +1953,13 @@ impl Mob {
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
+            mooshroom: mooshroom::Mooshroom::default(),
+            polar_bear: polar_bear::PolarBear::default(),
+            panda: panda::Panda::default(),
+            anger: neutral::Anger::default(),
+            creeper: creeper::CreeperState::default(),
+            spider: spider::SpiderState::default(),
+            enderman: enderman::EndermanState::default(),
             squid: squid::SquidState::default(),
             turtle: turtle::TurtleState::default(),
             fish: fish::FishState::new(),
@@ -1681,6 +1967,8 @@ impl Mob {
             needs_sync: false,
             hurt_marked: false,
             pending_breed: None,
+            passengers: Vec::new(),
+            ejected_passenger: None,
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
@@ -1765,16 +2053,51 @@ impl Mob {
         self.mob_type.removes_when_far_away()
     }
 
-    /// `AbstractFish.requiresCustomPersistence`：从桶里放出来的鱼不会自然消失。
+    /// `isPersistenceRequired() || requiresCustomPersistence()`：从桶里放出来的鱼
+    /// （`AbstractFish`）和搬着方块的末影人（`Enderman`）不会自然消失。
     ///
-    /// `AbstractFish.requiresCustomPersistence`: fish from a bucket never despawn.
+    /// `isPersistenceRequired() || requiresCustomPersistence()`: fish released from a
+    /// bucket (`AbstractFish`) and endermen carrying a block (`Enderman`) never despawn.
     pub fn requires_custom_persistence(&self) -> bool {
-        self.persistence_required || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
+        self.persistence_required
+            || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
+            || self.enderman.carried.is_some()
     }
 
     /// `isDeadOrDying`。
     pub fn is_dead_or_dying(&self) -> bool {
         self.health <= 0.0 || self.dead
+    }
+
+    /// `Entity.isVehicle()`：有人骑着。
+    ///
+    /// `Entity.isVehicle()`: someone is riding.
+    pub fn is_vehicle(&self) -> bool {
+        !self.passengers.is_empty()
+    }
+
+    /// `Entity.getFirstPassenger()`：最先上车的那个。
+    ///
+    /// `Entity.getFirstPassenger()`: whoever boarded first.
+    pub fn first_passenger(&self) -> Option<EntityUid> {
+        self.passengers.first().copied()
+    }
+
+    /// `Entity.getControllingPassenger()`：上鞍的载具由第一位乘客控制。
+    /// 官方的马、猪和骆驼都是这一条；羊驼没有鞍位，所以永远不由玩家控制。
+    ///
+    /// `Entity.getControllingPassenger()`: a saddled vehicle is controlled by its
+    /// first passenger. Vanilla horses, pigs and camels follow this rule; llamas
+    /// have no saddle slot, so a player never controls one.
+    pub fn controlling_passenger(&self) -> Option<EntityUid> {
+        if self
+            .equipment
+            .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle)
+            .is_empty()
+        {
+            return None;
+        }
+        self.first_passenger()
     }
 
     /// `PathfinderMob.isPanicking`：正在跑的目标里有恐慌。
@@ -1792,6 +2115,7 @@ impl Mob {
         // `MeleeAttackGoal.lastCanUseCheck` is `gameTime` as well; cows have no such goal,
         // so rebasing it is a no-op for them.
         self.goals.rebase_clock(delta);
+        self.anger.rebase(delta);
         self.wolf.rebase(delta);
     }
 }
@@ -1853,6 +2177,31 @@ pub struct MobPublic {
     pub pig_sound_variant: pig::SoundVariant,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
+    /// `MushroomCow.DATA_TYPE`：棕色为真。
+    ///
+    /// `MushroomCow.DATA_TYPE`: true for brown.
+    pub mooshroom_brown: bool,
+    /// `PolarBear.DATA_STANDING_ID`。
+    ///
+    /// `PolarBear.DATA_STANDING_ID`.
+    pub polar_bear_standing: bool,
+    /// 熊猫的同步字段。
+    ///
+    /// The synced panda fields.
+    pub panda: panda::PandaPublic,
+    /// 苦力怕的三项同步元数据：`DATA_SWELL_DIR`、`DATA_IS_POWERED`、`DATA_IS_IGNITED`。
+    ///
+    /// The three synced creeper items: swell direction, powered and ignited.
+    pub creeper_swell_dir: i32,
+    pub creeper_powered: bool,
+    pub creeper_ignited: bool,
+    /// 蜘蛛的 `DATA_FLAGS_ID`，攀爬位。
+    ///
+    /// The spider `DATA_FLAGS_ID`, with the climbing bit.
+    pub spider_flags: u8,
+    pub enderman_carried: Option<crate::state::BlockState>,
+    pub enderman_creepy: bool,
+    pub enderman_stared_at: bool,
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`。
     pub dark_ticks: i32,
     /// 鱼的桶标记、花纹和河豚的膨胀程度。
@@ -1900,10 +2249,14 @@ pub struct MobPublic {
         mc_bamboo_protocol::packet::play::EquipmentSlot,
         mc_bamboo_protocol::item::ItemStack,
     )>,
+    /// 骑在上面的玩家，同步阶段按它决定要不要发 `set_passengers`。
+    ///
+    /// The players riding this mob; the sync layer sends `set_passengers` from it.
+    pub passengers: Vec<EntityUid>,
 }
 
 impl MobPublic {
-    pub fn of(mob: &Mob, remaining_fire_ticks: i32) -> Self {
+    pub fn of(mob: &Mob) -> Self {
         Self {
             mob_type: mob.mob_type,
             uuid: mob.uuid,
@@ -1940,6 +2293,16 @@ impl MobPublic {
             pig_sound_variant: mob.pig_sound_variant,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
+            mooshroom_brown: mob.mooshroom.brown,
+            polar_bear_standing: mob.polar_bear.standing,
+            panda: panda::PandaPublic::of(&mob.panda),
+            creeper_swell_dir: mob.creeper.swell_dir,
+            creeper_powered: mob.creeper.powered,
+            creeper_ignited: mob.creeper.ignited,
+            spider_flags: if mob.spider.climbing { 1 } else { 0 },
+            enderman_carried: mob.enderman.carried,
+            enderman_creepy: mob.enderman.creepy,
+            enderman_stared_at: mob.enderman.stared_at,
             dark_ticks: mob.squid.dark_ticks,
             fish_from_bucket: mob.fish.from_bucket,
             fish_variant: mob.fish.variant,
@@ -1948,7 +2311,7 @@ impl MobPublic {
             school_size: mob.fish.school_size,
             turtle_has_egg: mob.turtle.has_egg,
             turtle_laying_egg: mob.turtle.laying_egg,
-            on_fire: remaining_fire_ticks > 0,
+            on_fire: mob.visible_fire,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,
             air_supply: mob.air_supply,
@@ -1968,6 +2331,7 @@ impl MobPublic {
                 .filter(|(_, stack)| !stack.is_empty())
                 .map(|(slot, stack)| (slot, stack.clone()))
                 .collect(),
+            passengers: mob.passengers.clone(),
         }
     }
 
@@ -1985,7 +2349,9 @@ impl MobPublic {
     ///
     /// `Mob.isPersistenceRequired() || requiresCustomPersistence()`.
     pub fn requires_custom_persistence(&self) -> bool {
-        self.persistence_required || (fish::is_fish(self.mob_type) && self.fish_from_bucket)
+        self.persistence_required
+            || (fish::is_fish(self.mob_type) && self.fish_from_bucket)
+            || self.enderman_carried.is_some()
     }
 
     pub fn is_alive(&self) -> bool {
@@ -2047,7 +2413,7 @@ mod tests {
         assert!(!cow.is_baby());
         cow.age = -24000;
         assert!(cow.is_baby());
-        assert!(MobPublic::of(&cow, 0).baby);
+        assert!(MobPublic::of(&cow).baby);
     }
 
     /// 存档往返保留僵尸的 `IsBaby` / `CanBreakDoors`，牛的键不串类型。

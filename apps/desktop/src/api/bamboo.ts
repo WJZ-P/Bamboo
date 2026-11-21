@@ -54,6 +54,10 @@ export interface ServerSettings {
   /** 红石缓存（实验），设置页里可以开关。 */
   redstoneCache: boolean;
   chunkWorkerThreads: number;
+  /** 世界生成缓存：地形 / 地物上限（MiB）和空闲释放秒数。 */
+  worldgenTerrainCacheMb: number;
+  worldgenFeatureCacheMb: number;
+  worldgenCacheIdleSeconds: number;
   deliveriesPerTick: number;
   reclaimsPerTick: number;
   islandThreads: number;

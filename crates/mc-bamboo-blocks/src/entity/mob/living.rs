@@ -43,6 +43,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         tick_mob(me, mob, ctx);
     }
     me.kind = kind;
+    super::enderman::flush_block_goal(me, ctx);
 }
 
 /// 对一个生物跑一段外部逻辑（受伤、命令），期间 `kind` 也换成占位。
@@ -76,11 +77,21 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.y_rot_o = me.y_rot;
     mob.x_rot_o = mob.x_rot;
     me.tick_count += 1;
+    // `Creeper.tick` 在 `super.tick()` 之前推进膨胀，可能当刻爆炸。
+    // `Creeper.tick` advances the swell before `super.tick()` and may explode here.
+    if mob.mob_type == super::MobType::Creeper {
+        super::creeper::tick(me, mob, ctx);
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
     if !me.removed {
         ai_step(me, mob, ctx);
+    }
+    // `Spider.tick` 在 `super.tick()` 之后把这一刻的 `horizontalCollision` 写进攀爬标志。
+    // `Spider.tick` records this tick's `horizontalCollision` after `super.tick()`.
+    if mob.mob_type.climbs_walls() && !me.removed {
+        super::spider::tick(me, mob);
     }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
@@ -99,6 +110,17 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(Flag::Move, true);
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
+    }
+    // `PolarBear.tick` 在 `super.tick()` 之后：吼叫冷却和持久愤怒。
+    // `PolarBear.tick` after `super.tick()`: the growl cooldown and persistent anger.
+    if mob.mob_type == super::MobType::PolarBear {
+        super::polar_bear::tick_end(me, mob, ctx);
+    }
+    // `Panda.tick` 在 `super.tick()` 之后：担心基因、不乐意计数、喷嚏和打滚。
+    // `Panda.tick` after `super.tick()`: the worried gene, the unhappy counter,
+    // sneezing and rolling.
+    if mob.mob_type == super::MobType::Panda {
+        super::panda::tick_end(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Fox && !me.removed {
         super::fox::tick_after(me, mob, ctx);
@@ -287,7 +309,11 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             width,
             height,
             max_up_step: max_up_step(mob),
-            max_fall_distance: 3,
+            max_fall_distance: if mob.mob_type == super::MobType::Creeper {
+                super::creeper::max_fall_distance(mob)
+            } else {
+                3
+            },
             malus: mob.malus,
             context: me.mob_collision_context(mob),
         },
@@ -368,6 +394,9 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     me.first_tick = false;
+    // `Entity.baseTick`：服务端每刻按剩余着火刻数重写共享标志位。
+    // `Entity.baseTick`: the server rewrites the shared flag from the remaining fire ticks.
+    mob.visible_fire = me.remaining_fire_ticks > 0;
     // `LivingEntity.baseTick` 自己的部分。
     if is_alive(me, mob) {
         if is_in_wall(me, mob, ctx.blocks()) {
@@ -482,13 +511,13 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
 }
 
-/// `Mob.getAmbientSound`：河豚没有叫声；海龟只有成年、在水外、站在地上时才叫。
+/// `Mob.getAmbientSound`：苦力怕和河豚没有叫声；海龟只有成年、在水外、站在地上时才叫。
 ///
-/// `Mob.getAmbientSound`: the pufferfish has none, and a turtle only calls as an adult
-/// standing on land out of the water.
+/// `Mob.getAmbientSound`: creepers and pufferfish have none, and a turtle only calls as
+/// an adult standing on land out of the water.
 fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
-        super::MobType::Pufferfish => None,
+        kind if kind.has_no_ambient_sound() => None,
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
         _ => Some(voice_of(mob, Voice::Ambient)),
     }
@@ -613,6 +642,11 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 ///
 /// `LivingEntity.addEffect`: adds an effect to a mob and refreshes attributes.
 pub fn add_effect(mob: &mut Mob, instance: super::effects::EffectInstance) -> bool {
+    // `LivingEntity.addEffect` 先问 `canBeAffected`；蜘蛛对中毒返回假。
+    // `LivingEntity.addEffect` asks `canBeAffected` first; spiders refuse poison.
+    if !super::spider::can_be_affected(mob, instance.effect) {
+        return false;
+    }
     let events = mob.effects.add(instance);
     if events.attributes_changed {
         mob.effects.rebuild_attributes(&mut mob.attributes);
@@ -663,6 +697,9 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         super::wolf::play_ambient_sound(me, mob, 0);
         return;
     }
+    if mob.mob_type.has_no_ambient_sound() {
+        return;
+    }
     if super::turtle::is_turtle(mob.mob_type) {
         // `Turtle.getAmbientSound`：只有成年的、在水外站在地上时才叫，其余没有声音，
         // 也不取音高的两个随机数。
@@ -699,8 +736,11 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 
 fn ambient_sound(mob: &Mob) -> &'static str {
     match mob.mob_type {
+        super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
+        super::MobType::PolarBear => super::polar_bear::ambient_sound(mob.is_baby()),
+        super::MobType::Panda => super::panda::ambient_sound(&mob.panda),
         _ => mob
             .mob_type
             .ambient_sound()
@@ -777,6 +817,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if equine {
         super::equine::ai_step_start(me, mob);
     }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::ai_step(me, mob, ctx);
+    }
     animal_ai_step(me, mob, ctx);
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
@@ -831,7 +874,13 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.jumping = false;
         mob.xxa = 0.0;
         mob.zza = 0.0;
-    } else if !mob.no_ai {
+    } else if !mob.no_ai && mob.controlling_passenger().is_none() {
+        // 官方 `Mob.isEffectiveAi()` 在服务端等于「没有玩家在控制」：有人骑着上鞍的载具时
+        // AI 停摆，位置完全由客户端决定。
+        //
+        // On the server vanilla `Mob.isEffectiveAi()` means "no player is in
+        // control": AI stops while a player rides a saddled vehicle, and the
+        // client alone decides where it goes.
         server_ai_step(me, mob, ctx);
     }
     // 跳。
@@ -869,7 +918,21 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if !mob.no_ai {
         timing::span!(Travel);
-        if super::squid::is_squid(mob.mob_type) {
+        // 官方 `LivingEntity.travel`：有人控制时走 `travelRidden`，服务端不模拟载具的运动，
+        // 只跑 `tickRidden` 再把速度清零；位置由客户端的 `move_vehicle` 决定。
+        //
+        // Vanilla `LivingEntity.travel`: with a controlling passenger it goes through
+        // `travelRidden`; the server does not simulate the vehicle, it only runs
+        // `tickRidden` and zeroes the velocity. The position comes from the client's
+        // `move_vehicle` packet.
+        if let Some(rider) = mob.controlling_passenger() {
+            if let Some(view) = ctx.player(rider)
+                && mob.mob_type.is_equine()
+            {
+                super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
+            }
+            me.delta = Vec3::default();
+        } else if super::squid::is_squid(mob.mob_type) {
             // `Squid.travel`：只有 `move(SELF, deltaMovement)`。
             // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
             let movement = me.delta;
@@ -915,13 +978,44 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         timing::span!(Push);
         push_entities(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::hurt_if_wet(me, mob, ctx);
+    }
     // `Mob.aiStep` 在 `LivingEntity.aiStep` 之后跑 `BURN_IN_DAYLIGHT` → `burnUndead()`。
     // 官方用 `EntityTypeTags.BURN_IN_DAYLIGHT` + `isSunSensitive()`；尸壳不烧。
     if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
         burn_undead(me, mob, ctx);
     }
-    // `Mob.aiStep` 的捡东西那一段：这一期只给狐狸。
-    // The `Mob.aiStep` pickup loop; only foxes for now.
+    // `Mob.aiStep` 的 looting：熊猫空着手、脚下有能吃的东西时拿进主手。
+    // `Mob.aiStep` looting: an empty-handed panda takes edible items at its feet.
+    if mob.mob_type == super::MobType::Panda
+        && mob.can_pick_up_loot
+        && is_alive(me, mob)
+        && !mob.dead
+        && ctx.blocks().block_game_rules().mob_griefing
+    {
+        let mut found = None;
+        ctx.for_each_other_in(me.bounding_box().inflate(1.0, 0.0, 1.0), &mut |other| {
+            if found.is_some() || other.removed {
+                return;
+            }
+            if let KindPublic::Item {
+                stack,
+                pickup_delay,
+                ..
+            } = &other.kind
+                && !stack.is_empty()
+                && super::panda::wants_pick_up(mob, stack, *pickup_delay)
+            {
+                found = Some(other.uid);
+            }
+        });
+        if let Some(item) = found {
+            ctx.emit(crate::entity::ctx::Command::PickUpItem { item }, me);
+        }
+    }
+    // `Mob.aiStep` 的捡东西那一段：狐狸也一样。
+    // The same `Mob.aiStep` pickup loop, for foxes.
     if fox {
         super::fox::pick_up_items(me, mob, ctx);
     }
@@ -1056,9 +1150,22 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             ctx.emit(
                 Command::BreedAnimals {
                     variant: mob.variant,
-                    wool: mob.wool,
+                    // 哞菇借这个字节传自己的品种（落地时生物状态不在实体上）。
+                    // Mooshrooms pass their type in this byte: the mob state is detached
+                    // from the entity when the command lands.
+                    wool: if mob.mob_type == super::MobType::Mooshroom {
+                        mob.mooshroom.brown as u8
+                    } else {
+                        mob.wool
+                    },
                     partner,
                     position: me.position,
+                    father_genes: (mob.mob_type == super::MobType::Panda).then(|| {
+                        (
+                            mob.panda.main_gene.id() as u8,
+                            mob.panda.hidden_gene.id() as u8,
+                        )
+                    }),
                     kind: mob.mob_type,
                     father_rabbit: mob.rabbit.variant,
                     father_fox: mob.fox.variant,
@@ -1078,6 +1185,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             mob.mover
                 .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
         }
+    }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::custom_server_ai_step(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1117,6 +1227,12 @@ pub(crate) fn set_speed(mob: &mut Mob, speed: f32) {
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
 fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+    // `Panda.PandaMoveControl.tick`：做不了动作时不响应移动控制。
+    // `Panda.PandaMoveControl.tick`: no move control while an action is playing.
+    if mob.mob_type == super::MobType::Panda && !mob.panda_can_perform_action(view.is_thundering())
+    {
+        return;
+    }
     if super::fish::is_fish(mob.mob_type) {
         super::fish::move_control_tick(me, mob);
         return;
@@ -1412,7 +1528,19 @@ pub(crate) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
 }
 
 /// `LivingEntity.onClimbable`：可攀爬的方块，或下面是同向梯子的开着的活板门。
+/// 蜘蛛改写这一条，只看自己的攀爬标志。
+///
+/// `LivingEntity.onClimbable`: a climbable block, or an open trapdoor over a matching
+/// ladder. Spiders override it to read their own climbing flag.
 pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
+    if mob.mob_type.climbs_walls() {
+        return super::spider::on_climbable(mob);
+    }
+    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓。
+    // `AbstractHorse.onClimbable` is always false; equines never climb ladders or vines.
+    if mob.mob_type.is_equine() {
+        return false;
+    }
     let pos = me.block_position();
     let state = view.block_state(pos);
     if state.is_tagged(block_tags::CLIMBABLE) {
@@ -1464,7 +1592,7 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
     let old_y = me.position.y;
     let gravity = effective_gravity(me, mob);
     if me.in_water {
-        let slow = 0.8_f32;
+        let slow = mob.mob_type.water_slow_down();
         let speed = 0.02_f32;
         let mut efficiency = mob.attributes.value(attribute::WATER_MOVEMENT_EFFICIENCY) as f32;
         if !me.on_ground {
@@ -1548,11 +1676,17 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
     });
     // `getPushableEntities` 也收玩家（旁观者除外）；玩家那一侧的推力服务端不生效，
-    // 这里只算生物自己被推开的那一半。
+    // 这里只算生物自己被推开的那一半。跳过自己的乘客和这一刻刚甩掉的骑手。
     // Players count as pushable too (not spectators); only the mob's half applies.
+    // Skip own passengers and a rider just ejected this tick.
+    let ejected = mob.ejected_passenger.take();
     let mut players = Vec::new();
     ctx.blocks().for_each_player(&mut |player| {
-        if player.alive && !player.spectator && super::avoid::player_box(player).intersects(bounds)
+        if player.alive
+            && !player.spectator
+            && !mob.passengers.contains(&player.uid)
+            && ejected != Some(player.uid)
+            && super::avoid::player_box(player).intersects(bounds)
         {
             players.push(player.position);
         }
@@ -1571,7 +1705,13 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             6.0,
         );
     }
-    let pushable_self = is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks());
+    // `Entity.push(Entity)` 只有 `!entity.isVehicle()` 才推得动自己这一半；载具和它的
+    // 乘客共享 root vehicle，整对被 `isPassengerOfSameVehicle` 跳过，所以这里也不推。
+    // `Entity.push(Entity)` pushes its own half only when `!entity.isVehicle()`; a
+    // vehicle and its passenger share a root vehicle and the pair is skipped by
+    // `isPassengerOfSameVehicle`, so a ridden mob stays put.
+    let pushable_self =
+        is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks()) && !mob.is_vehicle();
     for position in players {
         if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
             me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
@@ -1648,6 +1788,11 @@ pub(crate) fn hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
+    // `Panda.hurtServer`：先站起来，再做官方的无敌和冷却判定。
+    // `Panda.hurtServer`: stand up first, then the vanilla invulnerability checks.
+    if mob.mob_type == super::MobType::Panda {
+        mob.panda.sit(false);
+    }
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }
@@ -1676,6 +1821,25 @@ pub(super) fn living_hurt_server(
     if mob.is_dead_or_dying() {
         return false;
     }
+    if mob.mob_type == super::MobType::Enderman {
+        if matches!(source.kind, DamageKind::Arrow | DamageKind::Spit) {
+            super::enderman::dodge_projectile(me, mob, ctx);
+            return false;
+        }
+        let result = hurt_living(me, mob, ctx, source, amount);
+        super::enderman::after_hurt(me, mob, ctx, source);
+        return result;
+    }
+    hurt_living(me, mob, ctx, source, amount)
+}
+
+fn hurt_living(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    amount: f32,
+) -> bool {
     mob.no_action_time = 0;
     let mut amount = if amount < 0.0 { 0.0 } else { amount };
     if amount.is_nan() || amount.is_infinite() {
@@ -1809,7 +1973,18 @@ pub(crate) fn do_hurt_target(
     ctx: &mut dyn EntityCtx,
     target: crate::entity::EntityUid,
 ) {
+    // `Creeper.doHurtTarget` 直接返回真：近战目标只负责追，伤害全靠爆炸。
+    // `Creeper.doHurtTarget` just returns true: melee only chases, the blast does the damage.
+    if mob.mob_type == super::MobType::Creeper {
+        return;
+    }
     let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
+    // `Panda.doHurtTarget`：不咬回去的好斗熊猫记下这一口，`PandaHurtByTargetGoal` 会停手。
+    // `Panda.doHurtTarget`: a non-aggressive panda records the bite so its goal stops.
+    let bites = mob.mob_type == super::MobType::Panda;
+    if bites && !mob.panda.is_aggressive() {
+        mob.panda.did_bite = true;
+    }
     let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
     source.attacker = Some(me.id);
     source.direct = Some(me.id);
@@ -1835,6 +2010,20 @@ pub(crate) fn do_hurt_target(
             whole.split().public
         };
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
+        // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
+        if hurt && let Some(effect) = super::spider::poison_instance(mob, ctx.blocks().difficulty())
+        {
+            ctx.emit(
+                Command::AddPlayerEffect {
+                    target,
+                    effect: effect.effect,
+                    duration: effect.duration,
+                    amplifier: effect.amplifier,
+                },
+                me,
+            );
+        }
         // `Zombie.doHurtTarget`：打中了、空手、自己着火时，按区域难度传染火焰：
         // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
         if hurt
@@ -1857,6 +2046,11 @@ pub(crate) fn do_hurt_target(
                 );
             }
         }
+        // `Mob.playAttackSound` 的熊猫版本：咬中才响。
+        // The panda `Mob.playAttackSound`: only on a hit.
+        if bites && hurt {
+            play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
+        }
     } else if let Some(other) = ctx.other(target) {
         let _ = other;
         ctx.emit(
@@ -1864,9 +2058,13 @@ pub(crate) fn do_hurt_target(
                 target,
                 source,
                 amount,
+                on_hit: super::spider::poison_instance(mob, ctx.blocks().difficulty()),
             },
             me,
         );
+        if bites {
+            play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
+        }
     }
 }
 
@@ -1918,14 +2116,26 @@ pub(crate) fn apply_trample_turtle_egg(
     }
 }
 
-/// 落地 [`Command::EatBlock`]：`destroyBlock(pos, false)` 吃草，或在下面的草方块上发 2001 事件、
-/// 以标志 2 换成泥土。
+/// 落地 [`Command::EatBlock`]：重查目标方块仍在原位后再 `destroyBlock(pos, false)` 吃草，
+/// 或在下面的草方块上发 2001 事件、以标志 2 换成泥土。
 ///
-/// Applies [`Command::EatBlock`]: `destroyBlock(pos, false)` for a plant, or a 2001 event and a
-/// flag-2 swap to dirt for the grass block below.
+/// Applies [`Command::EatBlock`]: re-checks the target block before running
+/// `destroyBlock(pos, false)` for a plant, or a 2001 event and a flag-2 swap to
+/// dirt for the grass block below.
 pub(crate) fn apply_eat_block(world: &mut crate::world::World, pos: BlockPos, grass_below: bool) {
     if !grass_below {
-        world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+        if world
+            .block_state(pos)
+            .is_tagged(block_tags::EDIBLE_FOR_SHEEP)
+        {
+            world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+        }
+        return;
+    }
+    if !world
+        .block_state(pos)
+        .is(mc_bamboo_data::blocks::GRASS_BLOCK)
+    {
         return;
     }
     world.push_effect(crate::Effect::Destroyed {
@@ -1998,21 +2208,6 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
 }
 
-/// 父亲那一份繁殖数据（落地时父亲被拆出来，读不到）。
-///
-/// The father's breeding data; the father is detached when the command lands.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BreedFather {
-    pub(crate) kind: super::MobType,
-    pub(crate) variant: super::CowVariant,
-    pub(crate) wool: u8,
-    pub(crate) rabbit: super::rabbit::Variant,
-    pub(crate) fox: super::fox::Variant,
-    pub(crate) love: Option<[u8; 16]>,
-    pub(crate) wolf: super::wolf::Wolf,
-    pub(crate) tame: super::tame::Tamable,
-}
-
 /// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
 /// 按槽位顺序掉装备（鞍），最后 `Animal.getBaseExperienceReward` 取 `1 + nextInt(3)`。
 ///
@@ -2055,6 +2250,27 @@ fn animal_death_drops(
     }
 }
 
+/// [`Command::BreedAnimals`] 落地时带的参数。父亲在落地时不在实体表里，所以它的熊猫基因
+/// 和各品种状态随命令带过来。
+///
+/// The parameters of a landed [`Command::BreedAnimals`]. The father is not in the table
+/// when this lands, so its panda genes and per-species state travel with the command.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BreedFather {
+    pub(crate) kind: super::MobType,
+    pub(crate) variant: super::CowVariant,
+    pub(crate) wool: u8,
+    pub(crate) rabbit: super::rabbit::Variant,
+    pub(crate) fox: super::fox::Variant,
+    pub(crate) love: Option<[u8; 16]>,
+    pub(crate) wolf: super::wolf::Wolf,
+    pub(crate) tame: super::tame::Tamable,
+    /// 熊猫父亲的显性 / 隐性基因。
+    ///
+    /// The panda father's main and hidden genes.
+    pub(crate) genes: Option<(u8, u8)>,
+}
+
 /// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
 /// `finalizeSpawnChildFromBreeding`。父母的年龄设成 6000、求爱清零，父亲发爱心事件，
 /// 按 `mob_drops` 生成一颗 `1 + random.nextInt(7)` 的经验球。
@@ -2087,6 +2303,16 @@ pub(crate) fn apply_breed(
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
     let mut wolf = None;
+    // 哞菇的品种自己抽（`getOffspringVariant`），不取牛那个 `nextBoolean`。
+    // Mooshrooms draw their own type (`getOffspringVariant`) instead of the cow `nextBoolean`.
+    let calf_brown = (kind == super::MobType::Mooshroom).then(|| {
+        let mine = parent.wool != 0;
+        let mut mate = false;
+        world.with_entity_mut(partner, &mut |entity| {
+            mate = entity.kind.mob().is_some_and(|mob| mob.mooshroom.brown);
+        });
+        super::mooshroom::offspring_brown(mine, mate, &mut me.random)
+    });
     // 马科的 `getBreedOffspring` 自己取数（属性遗传和花色），也不取 `nextBoolean`。
     // Equine `getBreedOffspring` makes its own draws instead of `nextBoolean`.
     let foal = if kind.is_equine() {
@@ -2103,6 +2329,29 @@ pub(crate) fn apply_breed(
             return;
         };
         Some(child)
+    } else {
+        None
+    };
+    // 熊猫的基因在 `getBreedOffspring` 里抽：父 / 母各抽一次 `nextBoolean`，幼崽自己抽
+    // 初始的 `nextBoolean` 和两次 1/32 的变异。
+    // Panda genes are drawn in `getBreedOffspring`: one `nextBoolean` per parent, plus the
+    // calf's own initial `nextBoolean` and two 1/32 mutations.
+    let panda_genes = if kind == super::MobType::Panda {
+        let father = parent.genes.map(|(main, hidden)| {
+            (
+                super::panda::Gene::from_id(i32::from(main)),
+                super::panda::Gene::from_id(i32::from(hidden)),
+            )
+        });
+        let mother = world.entity(partner).and_then(|entity| {
+            entity.kind.mob().map(|mob| {
+                (
+                    (mob.panda.main_gene, mob.panda.hidden_gene),
+                    entity.random.state(),
+                )
+            })
+        });
+        father.zip(mother)
     } else {
         None
     };
@@ -2131,11 +2380,15 @@ pub(crate) fn apply_breed(
                 [parent.love, love],
             ));
         }
-        super::MobType::Sheep => {}
+        // 羊按配方混色；熊猫的基因、哞菇的品种已经抽过；马科自己取完数了。这几类都不取
+        // `nextBoolean`。
+        // Sheep mix colours; panda genes and the mooshroom type are drawn; equines drew their
+        // own numbers. None of them draw `nextBoolean`.
+        super::MobType::Sheep | super::MobType::Panda | super::MobType::Mooshroom => {}
         _ if equine => {}
         _ => {
-            // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
-            // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
+            // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹。
+            // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`.
             from_father = me.random.next_boolean();
         }
     }
@@ -2159,15 +2412,42 @@ pub(crate) fn apply_breed(
             world.random(),
         )
     });
-    // `finalizeSpawnChildFromBreeding` 只在 `MOB_DROPS` 开着时取经验值。
-    // `finalizeSpawnChildFromBreeding` only draws the orb value with `MOB_DROPS` on.
+    // `finalizeSpawnChildFromBreeding` 只在 `MOB_DROPS` 开着时取经验值；它在
+    // `getBreedOffspring` 之后，所以熊猫的父母基因取数排在它前面。
+    // `finalizeSpawnChildFromBreeding` draws the orb value only with `MOB_DROPS`, and
+    // after `getBreedOffspring`, so the panda parent gene draws come first.
     let mob_drops = world.block_game_rules().mob_drops;
+    let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
+    // 熊猫幼崽要先拿到 ID 和随机种子，基因才是从它自己的随机源抽的。
+    // A panda calf takes its id and random seed first, so the genes come from its own random.
+    let panda_prepared = panda_genes.is_some();
+    if panda_prepared {
+        calf = world.prepare_entity(calf);
+        if let Some((father, (mother, mother_state))) = panda_genes {
+            let mut mother_random = crate::entity::JavaRandom::from_state(mother_state);
+            let genes = super::panda::offspring_genes(
+                &mut calf,
+                &mut me.random,
+                father,
+                &mut mother_random,
+                mother,
+            );
+            let new_state = mother_random.state();
+            world.with_entity_mut(partner, &mut |entity| {
+                entity.random = crate::entity::JavaRandom::from_state(new_state);
+            });
+            calf.with_mob(|_me, mob| {
+                mob.panda.main_gene = genes.0;
+                mob.panda.hidden_gene = genes.1;
+                super::panda::set_attributes(mob);
+            });
+        }
+    }
     let xp = if mob_drops {
         1 + me.random.next_int_bounded(7)
     } else {
         0
     };
-    let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;
@@ -2188,11 +2468,18 @@ pub(crate) fn apply_breed(
             Some(color) => super::sheep::set_color(mob, color),
             None => mob.variant = child_variant,
         }
+        if let Some(brown) = calf_brown {
+            mob.mooshroom.brown = brown;
+        }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;
         mob.y_body_rot_o = 0.0;
     });
-    let calf_id = world.spawn_entity(calf);
+    let calf_id = if panda_prepared {
+        world.add_prepared_entity(calf)
+    } else {
+        world.spawn_entity(calf)
+    };
     // `finish_mob_random` 在分配 ID 之后重取了朝向；`snapTo` 把 yRot 清成 0，
     // 但构造时的 yHeadRot 要保留。
     world.with_entity_mut(calf_id, &mut |entity| {

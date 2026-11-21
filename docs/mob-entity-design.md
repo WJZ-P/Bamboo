@@ -314,7 +314,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 |---|---|---|---|
 | 属性、生成 | `createBaseHorseAttributes`、`randomizeAttributes`、`Horse/Llama.finalizeSpawn` | `equine::attributes` / `finalize_spawn` | `equineSpawn` 64 题 |
 | 繁殖遗传 | `setOffspringAttributes`、`createOffspringAttribute`、花色 / 力量继承，马驴生骡 | `equine::offspring` | `equineBreed` 32 题 |
-| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 12 场景 14800 刻 |
+| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 20 场景 15258 刻 |
 | 目标表 | `registerGoals` + `addBehaviourGoals`、`Llama.registerGoals`、`RandomStandGoal` | `equine/goals.rs` | 同上（running names 逐刻比） |
 | 交互 | `Horse/AbstractChestedHorse/AbstractHorse.mobInteract`、`handleEating`、`Player.interactOn` 兜底 | `equine/interact.rs` | `equineInteract` 468 题 |
 | 死亡掉落 | `dropAllDeathLoot`、`dropCustomDeathLoot`、`dropEquipment` | `equine/death.rs` | `equineDeath` 40 题 |
@@ -324,6 +324,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 | 落地声 | `AbstractHorse.causeFallDamage` 的 `HORSE_LAND` | `equine::land_sound` | 单元测试；音效包不在对拍范围 |
 | 羊驼回击、吐口水 | `Llama.LlamaHurtByTargetGoal`、`RangedAttackGoal(1.25, 40, 20)`、`Llama.spit`、`LlamaSpit`、`DamageTypes.SPIT` | `goals.rs` 的 `Goal::RangedAttack` / `LlamaHurtByTarget`，`equine/ranged.rs`，口水实体 `entity/spit.rs`（存档 `archive/entity/spit.rs`） | `llama_spit_far` / `_near` 两场景各 160 刻 0 不一致（羊驼和口水的位置、速度、随机源、目标名、口水同步包、玩家血量）；`chunk-content` 两道口水存档题 |
 | `followMommy` | `AbstractHorse.followMommy`（只 `createPath` 不走） | `equine/life.rs` 的 `follow_mommy` | 单元测试；`Bred` 只能从存档来，逐刻场景没覆盖 |
+| 自然生成、生成期刷怪 | `Horse/Llama/AbstractHorse.finalizeSpawn` 的组数据（`HorseGroupData`、`LlamaGroupData` 同组共享毛色，驴骡 `AgeableMobGroupData(0.2)`）、`getMaxSpawnClusterSize() == 6`、`Animal.checkAnimalSpawnRules` | `equine/spawn.rs`，`spawn.rs` 的 `SpawnGroup::Horse` / `Llama`，`natural.rs`、`natural_gen.rs` 各加一行 | `equineGroup`（同组 6 只逐只比属性、花色、年龄、左撇子、世界随机源、配对元数据）；`natural_spawn` 的 `horse_day` / `donkey_day` / `llama_day`；`gen_spawn` 里马科的落点和区域随机源上的 `finalizeSpawn` |
 
 坐骑物品栏每次点击前从生物读回鞍、身体和箱子格，点击后把鞍位 / 身体位的每次 `setByPlayer`
 按发生顺序在生物上重放（官方 `ArmorSlot.setByPlayer` 先调一次 `onEquipItem`，装备容器的
@@ -333,35 +334,176 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 生物装备从六个人形槽扩成官方全部八个槽（加 `BODY`、`SADDLE`）。马科的全部状态都在
 `Mob.equine` 里，跟着实体走，所以岛的拆分合并不需要新的按实体迁移。
 
-**没做：骑乘。** 骑乘是牛、马、猪、骆驼共用的机制，但它要先定两件世界模型里没定的事
-（第 8.2 节明确写了「载具和它的乘客」还没实现）：
+**骑乘（2026-11-21，第五轮）。** 按上一轮查证过的形状做了，没有改阶段顺序：
 
-1. **归属**：乘客是玩家，玩家在区域的玩家表里，载具在实体表里。官方 `ServerLevel.tickPassenger`
-   在载具 tick 之后紧接着 tick 乘客（`rideTick` → `positionRider`），玩家控制时载具的位置来自
-   `ServerboundMoveVehiclePacket`（客户端权威，`handleMoveVehicle` 做移动校验）。载具和乘客要算一个
-   单位：同一个岛、同一个任务里按官方顺序跑，岛拆分时不能把它们拆开。
-2. **一刻顺序**：玩家的位置变成由载具决定（`positionRider` 在实体阶段），而现在玩家的位置只在
-   连接的移动包里更新。
+- 玩家记 `riding.vehicle` / `last_vehicle` / `first_good` / `last_good`（`crates/mc-bamboo-game/src/riding.rs`，
+  对应 `ServerGamePacketListenerImpl` 的同名字段）；载具记 `Mob.passengers`（只有玩家，按上车顺序）。
+- 上车：马科 `mobInteract` 的 `doPlayerRide` 返回 `ride` 标记，游戏层在 `on_interact_entity` 里落
+  `startRiding`（设朝向、写两边、`first_good` / `last_good` 从载具位置起算）。
+- 下车：`riding::tick` 每刻看潜行键（`Player.rideTick` 的 `wantsToStopRiding`），按
+  `AbstractHorse.getDismountLocationForPassenger`（`riding/dismount.rs`：主手一侧、另一侧、
+  站立 / 潜行 / 游泳三个姿势、`DismountHelper` 的地面高度和碰撞判定）算落点，再清掉两边的关系；
+  `Entity.removePassenger` 的 60 刻 `boardingCooldown` 在 `Riding` 里，每刻减一，`canRide` 拦下车后的立刻再上。
+- 骑手位置：`riding::tick` 在实体阶段之后、玩家自己的 tick 之前写玩家表，位置是载具位置加
+  官方 `getPassengerAttachmentPoint` 的缺省点（`EntityTypes` 的 `passengerAttachments`：
+  马 1.44375、驴 1.1125、骡 1.2125、羊驼 `(1.37, -0.3)`，按载具朝向旋转；扬蹄时
+  `AbstractHorse` 附加的 `0.15 * standAnimO` / `-0.7 * standAnimO` 已按 `EquinePublic::stand_anim_o` 建模，羊驼覆写不叠加）。
+- 载具位置：`move_vehicle` 在世界线程处理输入时直接改载具行（`handleMoveVehicle` 的夹取、
+  `wrapDegrees`、100 平方格的「移动太快」拉回、非法值断开），再用 `move(MoverType.PLAYER)`
+  的扫掠（`sweep_movement`，步高取 `STEP_HEIGHT` 属性）和包里的位置比：水平差超过 0.25 格
+  且旧位置没卡在方块或边界里就 `absSnapTo` 回原位并发回载具位置。实体之间的碰撞
+  （`isEntityCollidingWithAnythingNew`）Bamboo 没有建模，这一步跳过。
+- 控制权：`tickPlayer` 只在载具的 `getControllingPassenger()` 是这名玩家时记 `lastVehicle`，
+  而马科要上了鞍才算有人控制。没上鞍的载具能骑、AI 照跑，`move_vehicle` 的位置不收，
+  按「离载具超过一格或离上次重置 20 刻」发回载具位置。
+- 朝向：马科 `tick_ridden` 把载具朝向设成骑手朝向、俯仰取一半，旧朝向、身体和头都对齐；
+  玩家控制时 `isEffectiveAi()` 为假，AI 和 `travel` 都不跑，速度清零（和官方服务端一致）。
+- 跳跃：`START_RIDING_JUMP` → `handleStartJump`（扬蹄加 `entity.horse.jump` 声），`STOP_RIDING_JUMP` 是空的。
+- 开坐骑物品栏：`OPEN_INVENTORY` 按官方 `AbstractHorse.openCustomInventoryScreen` 的条件
+  （驯服，且骑手就是这名玩家）打开，走和潜行右键同一个 `menu::station::open_mount`。
+- 同步：`Entity.passengers` 进公开快照，像 `ServerEntity.sendChanges` 那样在名单变化时发 `set_passengers`。
 
-建议的接法（待队长定）：玩家记 `vehicle: Option<EntityUid>`，载具记 `passengers`；
-`MoveVehicle` 在世界线程处理输入时直接改载具行并做官方的移动校验；实体阶段载具 tick 完以后，
-在落地阶段按 uid 顺序给乘客玩家 `positionRider`；岛拆分把「载具 + 乘客玩家」当成不可分的一组；
-`SetPassengers` 包跟着实体同步发。马的部分（`tickRidden`、`getRiddenInput`、`executeRidersJump`、
-`RunAroundLikeCrazyGoal` 的驯服）在这之后补，猪和骆驼复用同一套。
+**还没做**：载具移动校验里实体之间的碰撞（`isEntityCollidingWithAnythingNew`），
+载具摔落伤害和 `clientVehicleIsFloating` 踢人；玩家下线时 `RootVehicle` 存进玩家档；岛拆分把
+「载具 + 骑手」当成不可分的一组。
+这几项都不改阶段顺序，但要么要改移动校验、要么要改存档和分区器，留给队长定。
 
-补充（2026-11-20 第三轮查证）：服务端上玩家控制的载具 `canSimulateMovement()` 为假，
-`travelRidden` 只跑 `tickRidden`（朝向、跳跃蓄力清零）再把速度清零，位置完全来自
-`ServerboundMoveVehiclePacket`；骑手玩家的服务端位置只在 `rideTick → positionRider` 里更新。
-所以「`positionRider`」可以做成载具在算阶段发出的一条意图命令（按 uid 顺序在落地阶段写玩家表），
-不必改阶段顺序；真正要定的只剩岛的拆分不能把载具和骑手拆到两边，以及玩家下线时载具跟着
-`RootVehicle` 存进玩家档。
+**骑乘驯服（第六轮）。** `equine/tame.rs` 在官方优先级注册 `RunAroundLikeCrazyGoal`：
+未驯服且有乘客时查找随机落点、以 1.2 倍速导航，按目标的半频 tick 抽签（每次抽
+`nextInt(25)`，命中才抽 `nextInt(maxTemper)`）。成功写入现有的 `Owner` 和 `Tame` 并发
+实体事件 7，保留乘客；失败把脾气加 5（限制在该物种范围内），清乘客名单、发怒和事件 6。
+`riding::tick` 在已有阶段中清理玩家侧的关系，已有同步路径发送乘客名单变更。
+骑乘期间，`AbstractHorse.aiStep` 跳过起始吃草的随机抽取，`LookAtPlayerGoal` 不选自己的骑手。
+对拍用 `mob-oracle` 新增的 `zombie_equine_buck_*`（甩人）和 `zombie_equine_tame_*`（当场驯服）
+场景，逐刻比位置、目标、随机源、脾气、驯服标志、骑手数量和主人 UUID，场景在甩人/驯服那一刻截断。
+`riding::passenger_offset` 改用上面查正后的成年附着点（原先误用了幼崽的值）。
 
 羊驼的口水是新的实体种类 `EntityKind::LlamaSpit`：生成走 `Command::ShootLlamaSpit`，
 命中实体走 `Command::SpitHit`（落地时按主人当时的公开状态造 `spit` 伤害来源），
 打到方块在算阶段直接 `discard`。同步层里口水和箭一样用 `InterpolationHandler.NO_OP`，
 位置路径永远是线性的。`didSpit` 在 `EquineState` 里，跟着实体走，岛拆合不需要新迁移。
 
+**脚步声。** 实体移动时，`motion::movement_emission` 调用 `equine::play_step_sound`，按
+`AbstractHorse.playStepSound` 选择方块声型、木质脚步和骑乘奔跑节拍（羊驼走自己的覆写）。仅马的
+`Horse.playGallopSound` 在奔跑声后从实体随机源取一次 `nextInt(10)`；结果为 0 时按年龄播喷气声，
+静音只抑制声音、不跳过抽取。游戏层 `riding::on_move_vehicle` 的方块扫掠仍不产生移动声音或振动。
+
+**与 main 合并（2026-11-21，第八轮）。** 把 main 的鱿鱼、鱼、桶装鱼、海龟合进分支：冲突按 main 的结构解
+（`finalize_cow(kind, …)`、`check_spawn_rules` 按 kind 分派，`generated/` 直接取 main 的重新生成结果），
+两边取并集保留 `MobInteraction` 的 `ride` / `discard` / `limit_creative`、`travelRidden` 与鱿鱼 `travel`、
+马科与水生的目标 tick、马科 `playStepSound` 与 `MovementEmission.EVENTS`（游泳声只在 `emitsSounds()` 为真时
+取两个 `nextFloat`，`play_sound` 不取数，所以马科的取数顺序不变）。`cargo check --workspace --all-targets`
+通过；`mob-oracle --only equine / llama_spit / zombie_equine / wolf_ / natural_spawn / gen_spawn` 复跑全部
+0 不一致。本轮另补上狼与羊驼的互动，见 11.7。
+
+**复核 main 合并（2026-11-21，第九轮）。** 本轮开始时 `main` 已是 HEAD 的祖先
+（`git merge main` 报 `Already up to date`），按 main 的结构核对了 `spawn.rs` 的
+`finalize_spawn_in_group` / `finalize_generated` 按 `kind.is_equine()` 分派到
+`equine::finalize_spawn`、`natural.rs` 的 `check_spawn_rules` 把马 / 驴 / 骡 / 羊驼归到
+`animal_spawn_rules`，没有重复的马科实现。`cargo check --workspace --all-targets` 通过；
+`mob-oracle --only equine`（648 题）、`--only zombie_equine`（20 场景 15258 刻）、
+`--only llama_spit`（2 场景 322 刻）复跑全部 0 不一致，确认合并没有改变马科的取数顺序。
+另补了 `START_RIDING_JUMP` 服务端门槛的单元测试（上鞍 + 正刻度才扬蹄、播跳跃声）。
+
+**与 main 合并（2026-11-21，第十轮）。** 本轮 `main` 又前进了 10 个 worldgen 缓存提交
+（`c093090f` 一带：`worldgen_cache.rs` / `worldgen_compact.rs`、缓存设置与按依赖 / 空闲回收）。
+`git merge main` 用 ort 自动合并了双方都改过的 `README.md`、`mc-bamboo-game/src/lib.rs`、
+`mc-bamboo-game/src/world.rs`，没有冲突；`cargo check --workspace --all-targets` 通过。
+`mob-oracle --only equine`（648 题）、`--only zombie_equine`（20 场景 15258 刻）、
+`--only llama_spit`（2 场景 322 刻）复跑全部 0 不一致，确认缓存改动没有碰马科的取数顺序。
+本轮把上一轮未落盘的 `START_RIDING_JUMP` 单元测试提交，并逐行核对了官方 26.3 的跳跃链：
+`ServerGamePacketListenerImpl.handlePlayerCommand` 的 `START_RIDING_JUMP` 分支只调
+`PlayerRideableJumping.handleStartJump`（即 `AbstractHorse.handleStartJump`：扬蹄 + 跳跃声，不用刻度值）；
+真正的冲量 `AbstractHorse.tickRidden` → `executeRidersJump` 受 `isLocalInstanceAuthoritative()` 约束，
+而 `Player.isClientAuthoritative()` 恒真、载具的 `isClientAuthoritative()` 随控制乘客为真，
+故服务端该值为假、冲量只在客户端算。Bamboo 服务端只做扬蹄和跳跃声、位置由 `move_vehicle` 提供，
+与官方一致；`playerJumpPendingScale` / `allowStandSliding` / `getRiddenInput` 是客户端权威的
+AI 内部量，服务端不建模，无玩家可感知差异。没有改动任何马科行为代码。
+
+**与 main 合并（2026-11-21，第十一轮）。** 本轮 `main` 又前进了 19 个提交
+（`ceb0562f` 一带：苦力怕、蜘蛛、洞穴蜘蛛、末影人）。接手时分支上有一个已解决冲突、
+但未 `git add` / 未提交的在途合并；先逐文件核对 7 处冲突（`README.md`、`goals.rs`、
+`interact.rs`、`mod.rs`、`motion.rs`、`MobOracle.java`、`mob_oracle.rs`）都是按 main 结构的
+真并集：马科的 `playStepSound`（保留 `view` / `pos` 形参）、`RunAroundLikeCrazyGoal`、
+`LlamaAttackWolfGoal`、`notRiding` 乘客判断、载具 `passengers` / `start_riding_jump`、
+`MobInteraction` 的 `ride` 与 `damage_held`、骑乘 / 吐口水对拍场景，和 main 的 `Swell` /
+`Enderman*` / `Spider*` 目标、苦力怕 `after_fall`、蜘蛛网不减速、`uses_block_step_sound`
+方块脚步声、敌对生物的场景与存档字段全部共存，没有丢掉任一边。`spawn.rs` 的
+`finalize_spawn_in_group` / `finalize_generated` 按 kind 分派、`natural.rs` 的
+`check_spawn_rules` 按 kind 分支本就自动合并好。`generated/` 用合并后的生成器重新跑
+`extract`（不手合），34 个文件逐字节可复现；`game_event` 注册表因此从旧的字典序换成官方
+`protocol_id` 顺序（`entity_action` 从 15 变 21、`resonate_*` 移到末尾），但全仓只有
+`archive/passive.rs` 的 `by_name` 按名字判存在、丢弃数字 ID，无任何数字 ID 消费方，行为不变。
+补上 `PlayerView` 新增的 `look_direction` / `gaze_disguise` / `yaw` / `pitch` 到马科和蜘蛛的
+测试夹具。`cargo check --workspace --all-targets` 通过；`mob-oracle --only equine`（648 题）、
+`--only zombie_equine`（20 场景 15258 刻）、`--only llama_spit`（2 场景 322 刻）复跑全部
+0 不一致，确认合并没动马科的取数次数和顺序。本轮没有改动任何马科行为代码；剩下的差距仍
+是要动线程模型 / tick 顺序或真实客户端才能收口的部分（见汇报），按规矩停下来不自己定。
+
+**与 main 合并与马科收口（2026-11-21，第十二轮）。** 本轮先合入 `main` 新增的 19 个提交
+（`e1d69b66` 一带：哞菇、北极熊、熊猫），按 main 结构解 5 处冲突（`goals.rs` 统一
+`TargetType::follow_scale` 同时支持北极熊 `0.5` 与羊驼 `0.25`、`interact.rs` 并集保留马科与熊猫食物、
+`MobOracle.java` / `mob_oracle.rs` 并集保留马科与熊猫夹具、`README.md` 并集保留两方对拍说明），
+补修 `main` 合入的 `Extractor.java` `stewFlowers()` 缺失右花括号后重跑 `extract` 确认 `generated/`
+逐字节一致，更新马科测试夹具适配 `running_names(mob_type)` 与 `MobPublic::of(&mob)`。合并后补齐
+三处对照官方 26.3 查出的马科行为缺口：① `Entity.interact` → `Mob.attemptToShearEquipment`
+（剪刀右键按 `EquipmentSlot.VALUES` 顺序卸马铠 / 羊驼地毯 / 鞍，按 `PASSENGER` 附着点均值掉落、
+播 `shearing_sound`、扣耐久并检查绑定诅咒），`equineInteract` 加 `Items.SHEARS` 扩到 504 题；
+② `AbstractHorse.onClimbable()` 恒假（马科不再爬梯子 / 藤蔓）；③ `DismountHelper.canDismountTo`
+补世界边界检查（`border.is_within_bounds_aabb`）。另给 `LlamaAttackWolfGoal` 与 `WolfAvoidEntityGoal`
+补上两场非空跑逐刻对拍（`zombie_equine_llama_wolf_near` / `_far`）。核实 `LivingEntity.rideTick`
+确实调 `resetFallDistance()`，原疑点 15 消解。
+
 其余已知差异见 README「马科的已知限制」。
+
+### 5.9 中立生物地基和北极熊（2026-11-21）
+
+- **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
+  `persistentAngerTarget` 放在 `Mob::anger`，`update` 是官方的
+  `updatePersistentAnger(level, stayAngryIfTargetPresent)`，`write_nbt` / `read_nbt` 是
+  `add/readPersistentAngerSaveData`（`anger_end_time` 恒写，`angry_at` 有才写）。
+  狼、蜜蜂、末影人、僵尸猪灵可以直接复用；`universalAnger` 规则没有建模（恒为假）。
+- **`HurtByTargetGoal.alertOthers`**：新增 `Command::AlertMobs`，落地时逐个看
+  `other.getTarget() == null` 再 `setTarget`。`alertOther` 的过滤（只有成年北极熊）
+  在发起方做。铁傀儡、僵尸猪灵、熊猫也能用。
+- **`TargetGoal` 的 `mustSee` 记忆**：`canContinueToUse` 里按
+  `unseenTicks <= reducedTickDelay(memory)` 判定，记忆 300 刻；`PolarBearAttackPlayersGoal`
+  的跟随距离折半（`getFollowDistance() * 0.5`）。
+- **共享修正（影响所有生物，对拍全部重跑）**：
+  1. 动物（非怪物）的元数据原来不写 `Mob.DATA_MOB_FLAGS_ID` 的攻击性位，
+     所以 `MeleeAttackGoal.start` 的 `setAggressive(true)` 不会同步。现在两种分支都写。
+  2. 着火显示标志原来由 `remainingFireTicks > 0` 直接推出，点燃当刻就同步；
+     官方在 `baseTick` 末尾才 `setSharedFlagOnFire`，晚一刻。现在 `Mob.visible_fire`
+     在 `baseTick` 末尾重算，`convertCommon` 照官方抄这个标志。
+- **状态**：北极熊已对拍 0 不一致（`mob-oracle --only polar_bear` 11 例 1121 刻，含成年 / 幼崽选狐两场景）。
+  `SpawnPlacementTypes.ON_GROUND` 的落脚块检查传入实体类型：冰和霜冰按官方 `Blocks`
+  的专用谓词只允许北极熊，之后仍检查 `PolarBear.checkPolarBearSpawnRules`。
+  自然生成与生成期刷怪的对拍分别覆盖蘑菇岛菌丝上的哞菇、冰冻海洋冰面上的北极熊。
+  山羊 / 青蛙 / 犰狳 / 骆驼用官方 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` / `CamelAi`），
+  Bamboo 只有 `GoalSelector`，没有 `Brain` / 传感器 / 记忆，这是下一步的公共地基。
+
+### 5.10 熊猫（2026-11-21，分支 `op-misc`）
+
+- 代码在 `entity/mob/panda.rs`。六个基因按官方显性 / 隐性规则合成七种外观，显性基因直接
+  是外观，`Brown` / `Weak` 要 `main == hidden` 才显现；`MainGene` / `HiddenGene` 存盘，
+  六个元数据（三个计数器、两个基因、一个旗帜字节）同步，index 由生成器导出。
+- 目标表照 `Panda.registerGoals` 一比一注册，包括 `PandaPanicGoal`、`PandaBreedGoal`、
+  `PandaAttackGoal`、`PandaAvoidGoal`、`PandaSitGoal`、`PandaLieOnBackGoal`、
+  `PandaSneezeGoal`、`PandaLookAtPlayerGoal`、`PandaRollGoal`、`PandaHurtByTargetGoal`。
+  对拍的 running names 按种类取官方子类名（`Goal::name_for`）。
+- 每刻在 `super.tick()` 之后处理：担心基因在雷雨坐下、不乐意计数器（29 / 14 刻叫）、
+  喷嚏计数和 `afterSneeze`、打滚、坐着清零俯仰、`handleEating` 的 80 / 100 刻和粒子取数。
+- 交互直接复刻 `Panda.mobInteract`：害怕时 PASS、仰躺时起来、竹子让成年求爱 / 幼年长大 /
+  坐下吃（换竹子丢旧的）、吃的东西进主手。捡物在 `Mob.aiStep` 的 looting 位置，只捡
+  `panda_eats_from_ground` 且主手为空时，走 `Command::PickUpItem`。
+- 繁殖的基因遗传在 `getBreedOffspring`：父母各一次 `nextBoolean`（`getOneOfGenesRandomly`
+  在父母自己的随机源上）、幼崽一次 `nextBoolean` 和两次 1/32 变异。父亲在命令落地时不在
+  实体表里，所以它的基因随 `Command::BreedAnimals` 带过来。
+- 状态：`mob-oracle --only panda` 6 个场景 3278 刻 + 512 题基因遗传 0 不一致；
+  生成期刷怪把熊猫接进 `natural_gen` 的放置表，运行时接进 `check_spawn_rules` 和
+  `finalizeSpawn`（组数据 `AgeableMobGroupData(0.2)`）。
+- 已知差异：`ITEM` / `SNEEZE` 粒子不发（取数照官方）；喷嚏让同伴跳的水中判定没有建模；
+  幼崽金蒲公英的 `Animal.mobInteract` 兜底未接。山羊 / 青蛙 / 犰狳 / 骆驼仍等 `Brain`。
 
 ---
 
@@ -730,7 +872,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `nextInt(6)`、加权表 `nextInt(总权重)`、`count.sample`、离玩家/出生点 24 格、
   `ON_GROUND` 的方块/光照/碰撞条件、`noCollision`、`checkSpawnObstruction`、
   `finalizeSpawn` 与组生成。
-- **刷怪规则**：牛走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
+- **刷怪规则**：牛、猪、羊、鸡和马科走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
   僵尸走 `Monster.checkMonsterSpawnRules`（`isDarkEnoughToSpawn`：天空光 `> nextInt(32)`、
   方块光上限 0、`maxLocalRawBrightness <= nextInt(8)`，再查可生成方块），
   尸壳额外要求 `canSeeSky`。落脚块用生成器导出的状态位 `facts::VALID_SPAWN`（官方
@@ -744,13 +886,18 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   不限制为已加载区块；旁观者仅在 `spectators_generate_chunks` 开启时贡献区块。
 - **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
 - **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
-- **已知差异**：（2026-11-20 第二轮起，猪、羊、鸡、兔子、狐狸、狼、骷髅也会真的生成，见 11.5。）
-  下面是这一期写下时的状态：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
+- **已知差异**：（2026-11-20 第二轮起，猪、羊、鸡、兔子、狐狸、狼、马科、骷髅也会真的生成，见 11.5。）
+  现在能走实体生成路径的有牛、猪、羊、鸡、马、驴、骡、羊驼、兔子、狐狸、狼、僵尸、尸壳、骷髅
+  （猪、羊、鸡 2026-11-20 接入，`mob-oracle --only natural_spawn` 的 `pig_temperate` / `pig_day` /
+  `pig_cold` / `sheep_day` / `chicken_day` / `chicken_warm` / `chicken_cold` 和 `gen_spawn` 另比
+  花色 / 羊毛颜色和叫声，暖、冷、温带三种花色都覆盖到）；表里其它生物被挑中后照常抽组大小，
   然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
   收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
-  生成期刷怪、结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。
+  结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。生成期刷怪已接入牛、猪、羊、鸡、马科、
+  兔子、狐狸和狼；
+  装饰随机源决定放置，区域随机源用于 `finalizeSpawn`，用 `mob-oracle --only gen_spawn` 分别比对。
 - **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
   `MobCategory`，用 7 个固定种子各跑 8 次官方 `WeightedList.getRandom` + `IntProvider.sample`，
   再取一个 `nextInt(1000)` 当随机源指纹；另外把 0..15 交给官方 `Util.shuffle`。
@@ -806,7 +953,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - **生成期刷怪**（`natural_gen.rs`）：放置表加了兔子、狼（`ON_GROUND`）和狐狸（不查落脚点），规则换成各自的标签；`finalize_generated` 用区域随机源跑 `wild_spawn::finalize`。
 - **`MobType::by_entity_type`** 以前只列了牛和三种怪物，所以猪、羊、鸡、兔子、狐狸、狼即使接好了规则也不会被自然刷出来；现在列全了。
 - **捕食关系**：`Wolf.PREY_SELECTOR` 加上羊；狐狸的猎物 / `STALKABLE_PREY` / `FoxAlertableEntitiesSelector` 加上鸡（`fox_goals::is_small_prey`）。
-- **对拍**：`mob-oracle --only gen_spawn` 的场景带上群系（平原 4 个 + 针叶林 3 个 + 雪地针叶林 1 个，共 7000 例），所有建模了的生物比类型、坐标、朝向，区域随机源同步时再比幼年、左撇子和 `genSpawnDetail`（兔子品种、狐狸品种和嘴里的物品、狼的品种和叫声）：1043 只里 34 只兔子、109 只狐狸、126 只狼，0 不一致。`--only natural_spawn` 加了猪 / 羊 / 鸡（平原）、兔子 / 狐狸 / 狼（针叶林、雪地针叶林）、森林的狼和夜里的狐狸，192 例 768 刻 0 不一致（比类型、位置、朝向、幼年、左撇子、主手物品和每刻之后的世界随机源种子）。改坏确认：把狐狸幼崽的门槛从「组里已有两只」改成一只，`gen_taiga_flat` 报出幼年不一致。
+- **对拍**：`mob-oracle --only gen_spawn` 的场景带上群系（平原 4 个 + 针叶林 3 个 + 雪地针叶林 1 个，共 7000 例），所有建模了的生物比类型、坐标、朝向，区域随机源同步时再比幼年、左撇子和 `genSpawnDetail`（兔子品种、狐狸品种和嘴里的物品、狼的品种和叫声）：1088 只里 34 只兔子、109 只狐狸、126 只狼，0 不一致。对拍还要求在区域随机源同步时，每种农场动物都至少有一对生成品种匹配（并比较适用物种的叫声）；本轮牛、猪、羊、鸡分别匹配了 156、194、232、192 只。`--only natural_spawn` 加了猪 / 羊 / 鸡（平原）、兔子 / 狐狸 / 狼（针叶林、雪地针叶林）、森林的狼和夜里的狐狸，整组 252 例 1008 刻 0 不一致（比类型、位置、朝向、幼年、左撇子、主手物品和每刻之后的世界随机源种子）。改坏确认：把狐狸幼崽的门槛从「组里已有两只」改成一只，`gen_taiga_flat` 报出幼年不一致。
 - **对拍夹具的一处修正**：僵尸式场景里玩家的实体 ID 和第一只生物都是 `FIRST_ID`。Bamboo 用同一套号认目标，`fox_sleep_wild_wolf` 里狼恨的是狐狸、却把同号的玩家认成了仇恨对象（第 13 刻随机源差一次取数）。Java 一侧玩家改成 `FIRST_ID + 1024 + 下标`，全量 `mob-oracle` 439 例 72339 刻 0 不一致。真实游戏里非玩家实体从 `FIRST_ENTITY_ID`（`1 << 24`）起发号、玩家用它下面的号，不会撞号。
 
 ### 11.6 捕食关系的逐刻对拍（第三轮）
@@ -821,6 +968,14 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - 运行时与生成期均保留牛、猪、羊、鸡、兔、狐、狼与马科规则。`finalize_cow(kind, …)` 继续分派农场动物；野生动物和马科分别维护各自的组数据，生成期统一使用区域随机源。
 - 生成期对拍同时校验野生动物的品种 / 叼物 / 叫声和马科属性；逐刻夹具给兔 / 狐 / 狼保留 6–8 号，马 / 驴 / 骡 / 羊驼使用 9–12 号。场景名称不变。
 - 此次合并没有实现狼与羊驼之间的躲避 / 主动攻击，也未扩展马科骑乘。
+- 2026-11-21 再次合并 `main`（苦力怕 / 蜘蛛 / 洞穴蜘蛛 / 末影人、水生生物、世界生成缓存）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 306 例 1224 刻；三种 `loot-oracle` 各 200 题、`chunk-content` 488 项均通过。此次合并未改动农场动物的代码与上述现状。
+- 2026-11-21 再合并 `main`（op-misc：哞菇 / 熊猫 / 北极熊）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题，生成期 `--only gen_spawn_misc` 128 例 / `--only gen_spawn_panda` 128 例均 0 不一致。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项报「官方无法载入该实体」：该用例及官方加载器与 `main` 逐字相同，是随本次合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关（详见汇报疑点清单）。此次合并只解决公共文件的冲突，未改动农场动物代码。
+- 2026-11-21 合并 `main`（`2448b76c`：compute pool / IO 线程 / 岛 / staged pipeline 的计时测试确定性，仅动 `mc-bamboo-game` 的测试与 `chunk_io.rs`，与农场动物代码零重叠）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题 0 不一致。`cargo check --workspace --all-targets` 通过。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项仍报「官方无法载入该实体」，是第十五轮合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关。此次为无文本冲突合并，未改动农场动物代码。
+- 狼躲羊驼（`Wolf.WolfAvoidEntityGoal`：未驯服的狼按羊驼 `getStrength() >= nextInt(5)` 判定躲不躲，
+  仍先跑 `super.canUse()` 取逃跑点）、羊驼打野狼（`LlamaAttackWolfGoal`：`0.25 × FOLLOW_RANGE` 内
+  看得见的最近野狼，`canContinueToUse` 同样按 0.25 倍跟随距离）和「保护主人时排除驯服的马科」
+  （`Wolf.wantsToAttack`）于 2026-11-21 接入。三条只过 `wolf_` / `zombie_equine` 等回归对拍、
+  没有专属逐刻场景。马科骑乘此后未再扩展。
 
 ## 猪的实施现状
 
@@ -839,7 +994,74 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
 
-扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。
+扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；移动段穿过水时用共用的流体判定熄火，灭火声的音高取蛋自己的随机源；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），生成后按手中蛋的种类累加会话内使用统计，再按模式消耗；发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、穿水熄火、孵一只、孵四只、打牛、玩家扔蛋、发射器，逐刻比位置、随机源、着火状态、出站包、小鸡和牛，玩家扔蛋另比 `ITEM_USED`），存档见 `chunk-content` 的两枚蛋。
+
+## 哞菇的实施现状（op-misc，2026-11-20）
+
+哞菇是 `MobType::Mooshroom`，属性、目标选择器、叫声全部复用牛（`AbstractCow`），自己的部分在
+`entity/mob/mooshroom.rs`：品种 / 炖菜效果 / 上一道闪电存在 `Mob.mooshroom`（跟实体行走，岛拆合不需要
+平移时钟），交互三个分支（碗、剪刀、棕色吃花）排在 `AbstractCow.mobInteract` 之前，`getWalkTargetValue`
+对菌丝给 10，生成规则是 `checkMushroomSpawnRules`。花对应的炖菜效果表 `STEW_FLOWERS` 和 `DATA_TYPE` 的
+index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
+
+剪毛走新的公共模块 `entity/mob/conversion.rs`（官方 `Mob.convertTo` + `ConversionType.SINGLE`）：先
+`prepare_entity` 构造牛（拿 ID 和种子，和官方 `EntityType.create` 同一时刻），抄状态，回调里掉蘑菇
+（`World::spawn_fresh_item`：直接 `new ItemEntity`，拾取延迟 0），牛进世界，哞菇丢弃。以后僵尸转化、
+猪被雷劈可以复用；乘客 / 载具 / 拴绳 / 队伍 / `Brain` 记忆没有建模。
+
+`MobInteraction` 多了 `replacement_limit_creative`（`createFilledResult` 的 `limitCreativeStackSize`）。游戏层
+有交回物品时不再另扣手里的物品：`createFilledResult` 自己消耗一个，原来挤奶时手里一叠桶会多扣一个。
+
+`MobType::ALL` 统一了按名字 / 注册表 ID 的查找；猪、羊、鸡、哞菇因此进入运行时自然生成和生成期刷怪
+（之前 `by_entity_type` 只列了牛和三种怪物）。`can_spawn_far_from_player` 改成按类别（`CREATURE` 为真）。
+
+对拍：`mob-oracle --only mooshroom`（接炖菜、挤奶、喂花、迷之炖菜、剪成牛红 / 棕、同色繁殖红 / 棕、幼年），
+逐刻比位置、随机源、出站包、交互结果和新生实体，7 例 498 刻 0 不一致；`chunk-content` 比新生哞菇和
+带 `Type` / `stew_effects` 的读写往返。对拍工具里「交互生成的实体」改成在实体 tick 之前收集（真服务端里
+它们这一刻就会 tick），新生生物多带一个身体朝向 `yr`。
+
+## 北极熊与熊猫的补充对拍（op-misc，2026-11-21）
+
+- 北极熊的 `NearestAttackableTargetGoal<Fox>` 在抽取间隔随机数后才过滤幼崽；成年熊扫描附近活着且可见的狐狸。`mob-oracle --only polar_bear_fight_fox` 分别比较成年和幼崽的目标与逐刻状态。狐狸反向躲熊尚未接入。
+- `mob-oracle --only natural_spawn_panda` 从原版丛林表固定熊猫条目，比较亮度 15 / 8 下逐刻的刷出数量、位置、双基因和世界随机源。
+- `mob-oracle --only gen_spawn_panda` 用竹林完整动物表，比较位置、朝向、双基因和随机源指纹。鹦鹉按官方 `ON_GROUND`、`MOTION_BLOCKING` 和 `parrots_spawnable_on` 模拟放置，但不创建实体，也不运行鹦鹉的 `finalizeSpawn`。同一区块先出现原版鹦鹉时，仍比较装饰随机源和后续已实现生物的位置；后续区域随机源和依赖它的属性不在夹具比较范围内。
+## 苦力怕的实施现状（2026-11-20）
+
+苦力怕在 `entity/mob/creeper.rs`：`CreeperState`（`swell` / `maxSwell` / `explosionRadius` 和三项同步元数据）挂在 `Mob.creeper` 上，全是相对计数，随实体行搬岛，不需要时钟平移，也没有新增 `IslandPart`。`Creeper.tick` 里 `super.tick()` 之前的那段在 `living::tick_mob` 的 `base_tick` 之前调用；`SwellGoal` 是 `Goal::Swell`（每刻目标，MOVE 标志），记住的目标按原始引用查死活，不走 `getTarget()` 的可攻击过滤。近战用通用的 `Goal::MeleeAttack`，和 main 合并后由 `class` 字段（官方类名）区分 `ZombieAttackGoal` 和普通 `MeleeAttackGoal`（苦力怕、骷髅）；`Creeper.doHurtTarget` 直接返回真，不造成伤害。目标选择走骷髅那套完整的 `TargetGoal` 规则（`MobType::full_target_rules`）。
+
+爆炸是新命令 `Command::ExplodeMob`，落地在 `World::explode_mob`（`entity/explosion.rs`）：和 TNT 共用射线和 `interact_with_blocks`，另加 `hurt_living_by_explosion`（生物和玩家的伤害、生物的击退）。命令里带来源生物的 `EntityPublic`：发出者正在 tick，`me.kind` 是占位，玩家的死亡消息要靠它拿名字和 UUID。方块掉落的衰减经 `Level::explosion_block_drops_decayed` 把爆炸半径交给战利品表，由新的方块层游戏规则 `mob_explosion_drop_decay` 控制。伤害类型新增 `DamageKind::PlayerExplosion`。并行驱动里这条命令和 TNT 的 `Explode` 一样在落地阶段执行，世界随机数只在落地时取。
+
+别的生物可以复用的东西：`GoalSelector::from_goals` / `Goal::melee` / `Goal::nearest_target`（按注册顺序搭目标表）、`MobType::has_no_ambient_sound`（`getAmbientSound()` 为 null 时不取音高随机数）、`MobType::uses_block_step_sound`（走路声用方块的 `SoundType`）、`MobInteraction::damage_held`（交互后给手里的物品扣 1 点耐久）、`World::explode_mob`（任何生物引发的 `ExplosionInteraction.MOB` 爆炸）、`creeper::finalize_spawn`（只有 `Mob.finalizeSpawn` 那一层的怪物）。
+
+顺带修正：`MeleeAttackGoal.tick` 重算路径前要先 `hasLineOfSight`（`followingTargetEvenIfNotSeen` 为假时），原先漏了；隔墙被打的场景才会暴露，僵尸和骷髅的既有场景逐刻结果不变。
+
+逐刻对拍场景：`creeper_chase_*`、`creeper_ignited`、`creeper_powered`、`creeper_fall`、`creeper_wall_hurt`、`creeper_blast_player_{1,2,3}`（`mob-oracle --only creeper`）。已知限制见 README 的苦力怕一条。
+
+## 蜘蛛和洞穴蜘蛛的实施现状（2026-11-21）
+
+蜘蛛在 `entity/mob/spider.rs`：`SpiderState`（`DATA_FLAGS_ID` 的攀爬位）挂在 `Mob.spider` 上，是相对状态，随实体行搬岛。`Spider.tick` 在 `living::tick_mob` 的 `ai_step` 之后执行，把 `Entity.horizontal_collision` 写进标志；`living::on_climbable` 对 `MobType::climbs_walls()` 的种类直接读这个标志（官方 `Spider.onClimbable`），爬墙的 0.2 上升、-0.15 下滑和水平 0.15 的夹取都走原有的 `travel` 代码。导航新增 `Navigation::wall_climber` / `path_to_position`：`create_path` 记录目标方块，`tick` 在路径走完后返回目标方块的三维坐标（`WallClimberNavigation`）。`move_to_entity` 是三参数的 `moveTo(entity, reach, speed)`，走基类：没有路径就返回假、不改速度（官方只改写了两参数版本，蜘蛛的目标不调它）。
+
+目标：`Goal::LeapAtTarget` 是新的目标（JUMP + MOVE 标志，起跳改速度）；`Goal::MeleeAttack` 新增 `light_flee`（`SpiderAttackGoal` 的亮处放弃和类名）和 `follow_unseen`（`followingTargetEvenIfNotSeen=true`，`canContinueToUse` 不看路径走完，`tick` 不要求视线）。`Goal::NearestAttackableTarget` 新增 `light_gate`（`SpiderTargetGoal` 的亮处闸门，连 `nextInt` 都不取）。`living::light_dependent_magic` 是 `Entity.getLightLevelDependentMagicValue` 的共用实现。
+
+洞穴蜘蛛复用同一套目标和尺寸表，只有属性（12 点生命）和命中中毒不同：`living::do_hurt_target` 命中后按难度给目标中毒，玩家走新命令 `Command::AddPlayerEffect`，生物走 `Command::HurtMob` 的新字段 `on_hit`（伤害真的落地才挂）。`living::add_effect` 会先问 `spider::can_be_affected`，中毒对蜘蛛无效。自然生成：`check_spawn_rules` 走怪物那条黑暗分支，`spawn::SpawnGroup::Spider` 保存同一组共享的药水效果。
+
+别的生物可以复用的东西：`Command::AddPlayerEffect` / `World::give_mob_effect`（给另一个实体挂效果）、`Goal::LeapAtTarget`、`MeleeAttack` 的 `follow_unseen`、`spider::can_be_affected` 这种「按种类挡效果」的钩子。
+
+逐刻对拍场景：`spider_chase_*`（午夜追玩家）、`spider_wall`（被打后翻过一整面石墙）、`spider_day`（白天中立）、`cave_spider_chase`（`mob-oracle --only spider_` / `--only cave_spider_`），5 个场景 840 刻 0 不一致。`spider_wall` 原先从翻墙那一刻起随机源比官方多走：`move_to_entity` 曾按两参数版本在没有路径时返回真，`MeleeAttackGoal.tick` 因此少加 15 刻重算间隔、多抽 `nextInt(7)`；改回基类语义后一致（2026-11-21，改坏确认：攀爬位恒为假时第 43 刻起报不一致）。`spider_day` 原先从第 34 刻（散步启动）起位置 / 速度差约 1e-9：根源是官方 `Spider.createAttributes` 写的移速是 float `0.3F`（加宽后 0.30000001192092896），我们存的是 double 0.3，0.8 倍速散步时 `setSpeed` 的 float 差一个 ulp；改成 `f64::from(0.3_f32)` 后四个场景 0 不一致（2026-11-21）。已知限制见 README 的蜘蛛一条。
+
+## 末影人的实施现状（2026-11-21）
+
+末影人在 `entity/mob/enderman.rs`：`EndermanState`（`carried` / `creepy` / `stared_at`、`target_change_time`、怒气目标与到期刻、待落地的搬放方块）挂在 `Mob.enderman` 上，都是相对状态，随实体行搬岛。`MobType::Enderman` 在 `set_target` 上套了一层 `enderman::set_target`：写目标的同刻设 `DATA_CREEPY`、`targetChangeTime` 并加「attacking」移速修饰（+0.15 加法），清目标时全部回退；所有设目标的地方（目标选择器、`HurtByTargetGoal`、`getNearestPlayer` 路径）都走这个包装，和官方 `Enderman.setTarget` 一致。
+
+目标选择器：`Goal::EndermanFreezeWhenLookedAt`（JUMP + MOVE，`canUse` 只看 `getTarget()` 是玩家、16 格内、`isBeingStaredBy`）和 `Goal::EndermanGaze`（`EndermanLookForPlayerGoal`：`getNearestPlayer(forCombat().range(64).selector(isAngerInducing))`，agro 计时 `adjustedTickDelay(5)`，锁定时 4 格内传送、16 格外每 15 刻朝玩家传送）；`Goal::EndermanBlock { place }` 复用 `canUse` 的随机闸门和 `tick` 的三次 double，改方块走新命令 `Command::EndermanBlock`（游戏层在世界线程落地，`World::set_block_and_update` / `remove_block`）。`NearestAttackableTargetGoal<Endermite>` 用 `TargetType::Endermite`：`available()` 为假，但 `nextInt(reducedTickDelay(10))` 照取，随机源不会错开。
+
+`LivingEntity.isSensitiveToWater`：`living::animal_ai_step` 在 `pushEntities` 之后、`Mob.aiStep` 的日晒之前调 `enderman::hurt_if_wet`（1 点溺水伤害，位置用包围盒顶上的那一格，官方 `isInRain`）。`LivingEntity.hurtServer` 的投掷物分支在 `living::hurt_server` 顶部：`DamageKind::Arrow | Spit` 先连续 64 次 `teleport()` 并返回 false；其余伤害走原路径后再按「来源不是生物」1/10 概率传送。`Entity.getLightLevelDependentMagicValue` 用 `living::light_dependent_magic` 的共用实现（眼位置那一格）。
+
+存档：`carriedBlockState` / `anger_end_time` / `angry_at`；`requiresCustomPersistence` 让搬着方块的末影人不被自然清除。同步：`EntityData::EndermanCarried`（`OPTIONAL_BLOCK_STATE`，序列化器号 15）、`EndermanCreepy` / `EndermanStaredAt`（BOOLEAN），index 来自生成器。死亡掉落：实体表之外，游戏层 `mob_loot_drops` 在表求值后用一把带 `minecraft:silk_touch` 的假钻石斧再查一次方块表（`MobDeathLoot.carried`）。
+
+其他生物可以复用的：`TargetType::Endermite` 这种「类型不存在但取数照旧」的目标写法、`MobType::uses_block_step_sound`（末影人和苦力怕一样用脚下方块的 `SoundType`）、`enderman::set_target` 这种「设目标时同步专属状态」的包装。
+
+逐刻对拍场景（`mob-oracle --only enderman_`）：`enderman_stare` / `enderman_neutral`（注视与不注视）、`enderman_day_teleport`（白天露天）、`enderman_rain`（夜里淋雨）、`enderman_arrow`（箭）、`enderman_stare_edge_3` / `enderman_stare_edge_6`（注视锥的边缘，偏 3 度和 6 度）、`enderman_blocks`（脚边的泥土捡起再放下）、`enderman_place`（开局搬着泥土再放下）。9 个场景 61416 刻 0 不一致。`enderman_day_teleport` 原来只跑 200 刻，到不了 `tickCount >= targetChangeTime + 600` 的门槛，白天传送一次都没判定过；2026-11-21 改成 1200 刻，改坏确认（`nextFloat() * 30` 改成 20）第 685 刻起报不一致。这个场景里的传送尝试都落空（两边一致），传送成功后的朝向仍只在注视 / 淋雨 / 箭的场景里覆盖。方块场景把天色固定在傍晚并关掉「看得见天」，避免长场景跑到白天传送；传送后的头部 / 身体朝向差异见 README。已知限制见 README 的末影人一条。
 
 ## 鱿鱼和发光鱿鱼的实施现状
 

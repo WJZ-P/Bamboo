@@ -531,6 +531,33 @@ impl DirectorHost {
         self.compute_backlog.len()
     }
 
+    /// 测试专用：池子里有在途任务时阻塞等待最多 `timeout` 收一条回执并暂存到
+    /// `early_replies`，让下一刻 `collect_compute` 原样接手；避免测试空转 `world.tick()`
+    /// 抢占计算线程。返回是否已有回执可收。
+    ///
+    /// Test only: while pool jobs are in flight, wait up to `timeout` for one
+    /// reply and buffer it in `early_replies` so the next tick's
+    /// `collect_compute` consumes it as usual, avoiding busy-spinning
+    /// `world.tick()` and starving worker threads. Returns whether a reply is ready.
+    #[cfg(test)]
+    pub(crate) fn wait_for_compute_reply(&mut self, timeout: Duration) -> bool {
+        if !self.early_replies.is_empty() {
+            return true;
+        }
+        let Some(pool) = &mut self.pool else {
+            return false;
+        };
+        if pool.in_flight() == 0 {
+            return false;
+        }
+        if let Some(reply) = pool.recv_timeout(timeout) {
+            self.early_replies.push(reply);
+            true
+        } else {
+            false
+        }
+    }
+
     /// 关服排空：等此前所有写落盘并 `sync_all`。失败要报出来，不能当成功。
     /// Drain at shutdown: wait for all writes to land and `sync_all`. A failure
     /// is logged, never silently treated as success.
@@ -681,6 +708,13 @@ impl DirectorHost {
     /// 每刻开头重置计数。交付 / 收回的预算在岛的信箱里，由岛自己重置。
     pub(crate) fn begin_tick(&mut self) {
         self.parked = 0;
+        // 世界生成缓存的空闲释放：计算池里没有任务、又够久没人查缓存时清空。
+        // 平时只是几次原子读（见 `worldgen_cache::release_if_idle`）。
+        // Idle release of the worldgen caches: emptied once the pool is idle and
+        // no lookup happened for long enough. Normally a few atomic loads.
+        if self.compute_in_flight() == 0 {
+            crate::worldgen_cache::release_if_idle();
+        }
     }
 
     /// 分区器开关：由 `region.profiler` 在世界启动时读一次环境变量决定。
@@ -2239,6 +2273,12 @@ impl DirectorHost {
                 self.partials.remove(&pos);
                 self.feature_deltas.remove(&pos);
                 self.disk_saved_after_features.remove(&pos);
+                // 这个区块的 features / light 不会再读世界生成缓存：给周围的缓存
+                // 条目记上「这个使用者完工」，使用者全完工的条目立刻释放。
+                // This chunk's features / light will not read the worldgen caches
+                // again: mark it done on the surrounding entries, which are dropped
+                // as soon as all their consumers are.
+                crate::worldgen_cache::chunk_finished(&self.world_gen_config, pos);
                 TaskResult::Assembled { column }
             }
             Task::Save { seq, column, .. } => {

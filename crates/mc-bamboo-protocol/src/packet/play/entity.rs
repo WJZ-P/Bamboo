@@ -34,6 +34,7 @@ const SERIALIZER_BLOCK_POS: i32 = 10;
 /// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`，注册顺序第 13 个。
 const SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE: i32 = 13;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
+const SERIALIZER_OPTIONAL_BLOCK_STATE: i32 = 15;
 /// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
 const SERIALIZER_PARTICLES: i32 = 17;
 const SERIALIZER_POSE: i32 = 20;
@@ -201,6 +202,29 @@ pub enum EntityData {
     /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID` as registry IDs.
     ChickenVariant(i32),
     ChickenSoundVariant(i32),
+    /// `MushroomCow.DATA_TYPE`（INT）：0 红色，1 棕色。
+    ///
+    /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
+    MooshroomType(i32),
+    /// `PolarBear.DATA_STANDING_ID`（BOOLEAN）：站起来警告。
+    ///
+    /// `PolarBear.DATA_STANDING_ID` (BOOLEAN): standing up to warn.
+    PolarBearStanding(bool),
+    /// 熊猫的三个计数器（INT）。
+    ///
+    /// The three panda counters (INT).
+    PandaUnhappy(i32),
+    PandaSneeze(i32),
+    PandaEat(i32),
+    /// 熊猫的显性 / 隐性基因（BYTE，`Panda.Gene` 的 id）。
+    ///
+    /// The panda main and hidden genes (BYTE, a `Panda.Gene` id).
+    PandaMainGene(u8),
+    PandaHiddenGene(u8),
+    /// `Panda.DATA_ID_FLAGS`（BYTE）：2 打喷嚏、4 打滚、8 坐下、16 仰躺。
+    ///
+    /// `Panda.DATA_ID_FLAGS` (BYTE): sneezing, rolling, sitting, on its back.
+    PandaFlags(u8),
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`，INT。
     ///
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
@@ -230,6 +254,19 @@ pub enum EntityData {
     SpecialType(i32),
     /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
     DrownedConverting(bool),
+    /// `Creeper.DATA_SWELL_DIR`（INT，缺省 -1）、`DATA_IS_POWERED`、`DATA_IS_IGNITED`（BOOLEAN）。
+    ///
+    /// `Creeper.DATA_SWELL_DIR` (INT, default -1), `DATA_IS_POWERED` and `DATA_IS_IGNITED`.
+    CreeperSwellDir(i32),
+    CreeperPowered(bool),
+    CreeperIgnited(bool),
+    /// `Spider.DATA_FLAGS_ID`（BYTE，缺省 0，第 0 位是攀爬）。
+    ///
+    /// `Spider.DATA_FLAGS_ID` (BYTE, default 0, bit 0 is climbing).
+    SpiderFlags(u8),
+    EndermanCarried(Option<i32>),
+    EndermanCreepy(bool),
+    EndermanStaredAt(bool),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -322,6 +359,9 @@ impl EntityData {
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
             Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
+            Self::CreeperSwellDir(_) => mc_bamboo_data::entity_types::CREEPER_SWELL_DIR,
+            Self::CreeperPowered(_) => mc_bamboo_data::entity_types::CREEPER_POWERED,
+            Self::CreeperIgnited(_) => mc_bamboo_data::entity_types::CREEPER_IGNITED,
             Self::FoxType(_) => mc_bamboo_data::entity_types::FOX_TYPE,
             Self::FoxFlags(_) => mc_bamboo_data::entity_types::FOX_FLAGS,
             Self::FoxTrusted(index, _) => *index,
@@ -338,6 +378,18 @@ impl EntityData {
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
+            Self::PolarBearStanding(_) => mc_bamboo_data::entity_types::POLAR_BEAR_STANDING,
+            Self::PandaUnhappy(_) => mc_bamboo_data::entity_types::PANDA_UNHAPPY,
+            Self::PandaSneeze(_) => mc_bamboo_data::entity_types::PANDA_SNEEZE,
+            Self::PandaEat(_) => mc_bamboo_data::entity_types::PANDA_EAT,
+            Self::PandaMainGene(_) => mc_bamboo_data::entity_types::PANDA_MAIN_GENE,
+            Self::PandaHiddenGene(_) => mc_bamboo_data::entity_types::PANDA_HIDDEN_GENE,
+            Self::PandaFlags(_) => mc_bamboo_data::entity_types::PANDA_FLAGS,
+            Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
+            Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
+            Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
+            Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
             Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
             Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
             Self::SalmonVariant(_) => mc_bamboo_data::entity_types::SALMON_VARIANT,
@@ -562,6 +614,22 @@ impl EntityData {
                 write_data_header(out, self.index(), serializer);
                 write_varint(out, *value);
             }
+            Self::MooshroomType(kind) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::PolarBearStanding(standing) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *standing);
+            }
+            Self::PandaUnhappy(value) | Self::PandaSneeze(value) | Self::PandaEat(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::PandaMainGene(gene) | Self::PandaHiddenGene(gene) | Self::PandaFlags(gene) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*gene);
+            }
             Self::GlowSquidDarkTicks(ticks) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *ticks);
@@ -583,6 +651,25 @@ impl EntityData {
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
                 write_varint(out, *kind);
+            }
+            Self::CreeperSwellDir(direction) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *direction);
+            }
+            Self::EndermanCarried(state) => {
+                write_data_header(out, self.index(), SERIALIZER_OPTIONAL_BLOCK_STATE);
+                write_varint(out, state.unwrap_or(0));
+            }
+            Self::CreeperPowered(flag)
+            | Self::CreeperIgnited(flag)
+            | Self::EndermanCreepy(flag)
+            | Self::EndermanStaredAt(flag) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *flag);
+            }
+            Self::SpiderFlags(flags) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*flags);
             }
             Self::RabbitVariant(kind) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
@@ -617,6 +704,30 @@ impl ClientboundPacket for SetEntityData<'_> {
             item.write(out);
         }
         out.push(ENTITY_DATA_END);
+    }
+}
+
+/// 载具和它的乘客，`ClientboundSetPassengersPacket`：载具的实体 ID 加一个 varint 数组，
+/// 长度在前，按乘客的上下车顺序。空数组表示没人骑。
+///
+/// A vehicle and its passengers, `ClientboundSetPassengersPacket`: the vehicle's
+/// entity id and a length-prefixed varint array in riding order. An empty array
+/// clears the vehicle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetPassengers<'a> {
+    pub vehicle: i32,
+    pub passengers: &'a [i32],
+}
+
+impl ClientboundPacket for SetPassengers<'_> {
+    const ID: i32 = clientbound::SET_PASSENGERS;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.vehicle);
+        write_varint(out, self.passengers.len() as i32);
+        for &passenger in self.passengers {
+            write_varint(out, passenger);
+        }
     }
 }
 

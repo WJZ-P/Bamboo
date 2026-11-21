@@ -374,6 +374,15 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Byte(super::sheep::color(mob).id() as i8),
         );
     }
+    if mob.mob_type == MobType::Mooshroom {
+        super::mooshroom::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::PolarBear {
+        super::polar_bear::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Panda {
+        super::panda::write_nbt(mob, &mut out);
+    }
     if mob.mob_type == MobType::Chicken {
         put(&mut out, "IsChickenJockey", Tag::Byte(0));
         put(&mut out, "EggLayTime", Tag::Int(mob.egg_time));
@@ -400,6 +409,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             "CanBreakDoors",
             Tag::Byte(i8::from(mob.can_break_doors)),
         );
+    }
+    if mob.mob_type == MobType::Creeper {
+        super::creeper::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Enderman {
+        super::enderman::write_nbt(mob, &mut out);
     }
     // ---- AbstractFish / Salmon / TropicalFish / Pufferfish ----
     if super::fish::is_fish(mob.mob_type) {
@@ -587,6 +602,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             let color = tag::int_or(tag, "Color", 0);
             super::sheep::set_color(mob, mc_bamboo_core::sign::DyeColor::from_id(color));
         }
+        if mob.mob_type == MobType::Mooshroom {
+            super::mooshroom::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::PolarBear {
+            super::polar_bear::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::Panda {
+            super::panda::read_nbt(mob, tag);
+        }
         if mob.mob_type == MobType::Chicken {
             // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。
             // A missing key keeps the constructor's roll.
@@ -649,6 +673,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.navigation.flags.can_open_doors = true;
                 mob.goals.insert_break_door();
             }
+        }
+        if mob.mob_type == MobType::Creeper {
+            super::creeper::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::Enderman {
+            super::enderman::read_nbt(mob, tag);
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries

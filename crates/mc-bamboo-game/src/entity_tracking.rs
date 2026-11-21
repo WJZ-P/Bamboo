@@ -28,7 +28,7 @@ use mc_bamboo_protocol::{
         AddEntity, AttributeModifier, AttributeOperation, AttributeSnapshot, BundleDelimiter,
         EntityData, EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot,
         PositionDelta, PositionPath, RemoveEntities, RotateHead, SetEntityData, SetEntityMotion,
-        TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
+        SetPassengers, TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
     },
 };
 use uuid::Uuid;
@@ -227,6 +227,10 @@ pub struct TrackedEntity {
     /// `ServerEntity.tickCount`，每刻加一，周期判定和强制位置同步都用。
     tick_count: i32,
     was_on_ground: bool,
+    /// 上次发出去的乘客名单。官方 `ServerEntity.lastPassengers`。
+    ///
+    /// The passenger list last sent, vanilla `ServerEntity.lastPassengers`.
+    last_passengers: Vec<i32>,
     /// 上次发出去的引信，TNT 每 tick 都变。
     last_fuse: i32,
     /// 上次发出去的物品堆。空堆是默认值，不单独发。
@@ -254,6 +258,7 @@ impl TrackedEntity {
             ticks_since_step: -1,
             tick_count: 0,
             was_on_ground: snapshot.on_ground,
+            last_passengers: snapshot.passengers.clone(),
             last_fuse: snapshot.data.fuse().unwrap_or(0),
             last_stack: snapshot
                 .data
@@ -731,6 +736,10 @@ pub struct Snapshot {
     pub sync_position: bool,
     /// `LivingEntity.isFallFlying()`：为真时即使 `trackDelta` 为假也查速度。
     pub fall_flying: bool,
+    /// 骑在上面的玩家，官方的 `Entity.getPassengers()`。
+    ///
+    /// The players riding this entity, vanilla `Entity.getPassengers()`.
+    pub passengers: Vec<i32>,
 }
 
 /// 配对和同步时要发的、按实体类型不同的元数据。
@@ -785,6 +794,10 @@ impl Snapshot {
             },
             sync_position: false,
             fall_flying: false,
+            passengers: match &public.kind {
+                KindPublic::Mob(mob) => mob.passengers.clone(),
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -997,6 +1010,30 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => {}
         }
     }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Enderman {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::ENDERMAN_CARRY_STATE => return EntityData::EndermanCarried(None),
+            facts::ENDERMAN_CREEPY => return EntityData::EndermanCreepy(false),
+            facts::ENDERMAN_STARED_AT => return EntityData::EndermanStaredAt(false),
+            _ => {}
+        }
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::CREEPER_SWELL_DIR => return EntityData::CreeperSwellDir(-1),
+            facts::CREEPER_POWERED => return EntityData::CreeperPowered(false),
+            facts::CREEPER_IGNITED => return EntityData::CreeperIgnited(false),
+            _ => {}
+        }
+    }
+    if kind.climbs_walls() {
+        use mc_bamboo_data::entity_types as facts;
+        if index == facts::SPIDER_FLAGS {
+            return EntityData::SpiderFlags(0);
+        }
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1108,6 +1145,33 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     }
     if mob.drowned_converting {
         out.push(EntityData::DrownedConverting(true));
+    }
+    if let Some(carried) = mob.enderman_carried {
+        out.push(EntityData::EndermanCarried(Some(carried.0 as i32)));
+    }
+    if mob.enderman_creepy {
+        out.push(EntityData::EndermanCreepy(true));
+    }
+    if mob.enderman_stared_at {
+        out.push(EntityData::EndermanStaredAt(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        // `Creeper.defineSynchedData`：膨胀方向缺省 -1，带电和点燃缺省 false。
+        // `Creeper.defineSynchedData`: swell direction defaults to -1, the flags to false.
+        if mob.creeper_swell_dir != -1 {
+            out.push(EntityData::CreeperSwellDir(mob.creeper_swell_dir));
+        }
+        if mob.creeper_powered {
+            out.push(EntityData::CreeperPowered(true));
+        }
+        if mob.creeper_ignited {
+            out.push(EntityData::CreeperIgnited(true));
+        }
+    }
+    if mob.mob_type.climbs_walls() && mob.spider_flags != 0 {
+        // `Spider.DATA_FLAGS_ID`：缺省 0，攀爬位是第 0 位。
+        // `Spider.DATA_FLAGS_ID`: default 0, bit 0 is climbing.
+        out.push(EntityData::SpiderFlags(mob.spider_flags));
     }
     out
 }
@@ -1296,8 +1360,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.left_handed {
         mob_flags |= 2;
     }
-    // `Mob.setAggressive`：近战目标跑起来时置位（狼、狐狸）。
-    // `Mob.setAggressive`, set while a melee goal runs (wolves, foxes).
+    // `Mob.setAggressive` 也写这一位，官方对所有生物都同步（狼、狐狸用近战目标时置位）。
+    // `Mob.setAggressive` writes this bit too, for every mob (set while a wolf or fox
+    // melee goal runs).
     if mob.aggressive {
         mob_flags |= 4;
     }
@@ -1382,6 +1447,16 @@ fn farm_default_data(
     use mc_bamboo_data::entity_types as facts;
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
+        (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
+            Some(EntityData::PolarBearStanding(false))
+        }
+        (MobType::Panda, facts::PANDA_UNHAPPY) => Some(EntityData::PandaUnhappy(0)),
+        (MobType::Panda, facts::PANDA_SNEEZE) => Some(EntityData::PandaSneeze(0)),
+        (MobType::Panda, facts::PANDA_EAT) => Some(EntityData::PandaEat(0)),
+        (MobType::Panda, facts::PANDA_MAIN_GENE) => Some(EntityData::PandaMainGene(0)),
+        (MobType::Panda, facts::PANDA_HIDDEN_GENE) => Some(EntityData::PandaHiddenGene(0)),
+        (MobType::Panda, facts::PANDA_FLAGS) => Some(EntityData::PandaFlags(0)),
         (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
             Some(EntityData::GlowSquidDarkTicks(0))
         }
@@ -1465,6 +1540,40 @@ fn farm_non_default_data(
         MobType::Sheep => {
             if mob.wool != 0 {
                 out.push(EntityData::SheepWool(mob.wool));
+            }
+            true
+        }
+        MobType::Mooshroom => {
+            if mob.mooshroom_brown {
+                out.push(EntityData::MooshroomType(1));
+            }
+            true
+        }
+        MobType::PolarBear => {
+            if mob.polar_bear_standing {
+                out.push(EntityData::PolarBearStanding(true));
+            }
+            true
+        }
+        MobType::Panda => {
+            let panda = &mob.panda;
+            if panda.unhappy_counter != 0 {
+                out.push(EntityData::PandaUnhappy(panda.unhappy_counter));
+            }
+            if panda.sneeze_counter != 0 {
+                out.push(EntityData::PandaSneeze(panda.sneeze_counter));
+            }
+            if panda.eat_counter != 0 {
+                out.push(EntityData::PandaEat(panda.eat_counter));
+            }
+            if panda.main_gene != 0 {
+                out.push(EntityData::PandaMainGene(panda.main_gene));
+            }
+            if panda.hidden_gene != 0 {
+                out.push(EntityData::PandaHiddenGene(panda.hidden_gene));
+            }
+            if panda.flags != 0 {
+                out.push(EntityData::PandaFlags(panda.flags));
             }
             true
         }
@@ -2018,6 +2127,19 @@ fn entity_uuid(id: i32) -> Uuid {
 /// Once per tick, vanilla `ServerEntity.sendChanges`. All decisions live in
 /// [`TrackedEntity::step`]; this wrapper only frames the packets and sends them.
 fn send_changes(snapshot: &Snapshot, tracked: &mut TrackedEntity, links: &mut Links) {
+    // 官方 `ServerEntity.sendChanges` 先比乘客名单，再发位置和元数据。
+    // Vanilla `ServerEntity.sendChanges` compares the passengers first, then position and metadata.
+    if snapshot.passengers != tracked.last_passengers {
+        let body = packet_body(&SetPassengers {
+            vehicle: snapshot.id,
+            passengers: &snapshot.passengers,
+        });
+        let frames = frame_from_body(&body);
+        for &viewer in &tracked.seen_by {
+            links.send_frames(viewer, &frames);
+        }
+        tracked.last_passengers.clone_from(&snapshot.passengers);
+    }
     let needs_sync = snapshot.needs_sync;
     let sync_velocity = snapshot.sync_velocity;
     let mut frames = Vec::new();

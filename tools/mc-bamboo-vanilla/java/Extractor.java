@@ -288,6 +288,7 @@ public final class Extractor {
             root.add("items", items());
             root.add("entityTypes", entityTypes());
             root.add("projectileFacts", projectileFacts());
+            root.add("monsterFacts", monsterFacts());
             root.add("stateTables", new StateTables().build());
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
@@ -1200,7 +1201,7 @@ public final class Extractor {
         out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
         out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
         JsonArray tropicalFishCommonVariants = new JsonArray();
-        TropicalFish.COMMON_VARIANTS.forEach(variant -> tropicalFishCommonVariants.add(variant.getPackedId()));
+        TropicalFish.COMMON_VARIANTS.forEach(common -> tropicalFishCommonVariants.add(common.getPackedId()));
         out.add("tropicalFishCommonVariants", tropicalFishCommonVariants);
         out.addProperty("pufferfishPuffState", entityAccessor(net.minecraft.world.entity.animal.fish.Pufferfish.class, "PUFF_STATE").id());
         out.addProperty("turtleHasEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG").id());
@@ -1212,6 +1213,16 @@ public final class Extractor {
         out.addProperty("chickenSoundVariant", chickenSound.id());
         out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
         out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
+        out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
+        out.add("stewFlowers", stewFlowers());
+        out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());
+        Class<?> panda = net.minecraft.world.entity.animal.panda.Panda.class;
+        out.addProperty("pandaUnhappy", entityAccessor(panda, "UNHAPPY_COUNTER").id());
+        out.addProperty("pandaSneeze", entityAccessor(panda, "SNEEZE_COUNTER").id());
+        out.addProperty("pandaEat", entityAccessor(panda, "EAT_COUNTER").id());
+        out.addProperty("pandaMainGene", entityAccessor(panda, "MAIN_GENE_ID").id());
+        out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
+        out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();
@@ -1238,6 +1249,35 @@ public final class Extractor {
                 effects.add(entry);
             }
             out.add(effects);
+        }
+        return out;
+    }
+
+    /**
+     * `SuspiciousEffectHolder.tryGet(item)` 不为空的物品和它的迷之炖菜效果：
+     * `[物品 ID, [[效果 ID, 刻数], ...]]`，按物品注册表顺序。棕色哞菇吃花时读它。
+     *
+     * Items with a `SuspiciousEffectHolder` and their stew effects, in item registry
+     * order: `[item id, [[effect id, ticks], ...]]`. Brown mooshrooms read it.
+     */
+    private static JsonArray stewFlowers() {
+        JsonArray out = new JsonArray();
+        for (net.minecraft.world.item.Item item : BuiltInRegistries.ITEM) {
+            var holder = net.minecraft.world.level.block.SuspiciousEffectHolder.tryGet(item);
+            if (holder == null) {
+                continue;
+            }
+            JsonArray effects = new JsonArray();
+            for (var entry : holder.getSuspiciousEffects().effects()) {
+                JsonArray pair = new JsonArray();
+                pair.add(BuiltInRegistries.MOB_EFFECT.getId(entry.effect().value()));
+                pair.add(entry.duration());
+                effects.add(pair);
+            }
+            JsonArray row = new JsonArray();
+            row.add(BuiltInRegistries.ITEM.getId(item));
+            row.add(effects);
+            out.add(row);
         }
         return out;
     }
@@ -1308,6 +1348,39 @@ public final class Extractor {
 
     private static int arrowAccessorId(String name) throws ReflectiveOperationException {
         Field field = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
+    }
+
+    // 敌对生物各自定义的元数据按类树分配后的 index，以及实体类型的眼高。
+    // 键是生成的常量名，生成器原样写成 `pub const`。
+    // Class-tree metadata indices of the hostile mobs and their eye heights.
+    // Keys are the generated constant names.
+    private static JsonObject monsterFacts() throws ReflectiveOperationException {
+        JsonObject ids = new JsonObject();
+        Class<?> creeper = net.minecraft.world.entity.monster.Creeper.class;
+        Class<?> spider = net.minecraft.world.entity.monster.spider.Spider.class;
+        Class<?> enderman = net.minecraft.world.entity.monster.Enderman.class;
+        ids.addProperty("CREEPER_SWELL_DIR", accessorId(creeper, "DATA_SWELL_DIR"));
+        ids.addProperty("CREEPER_POWERED", accessorId(creeper, "DATA_IS_POWERED"));
+        ids.addProperty("CREEPER_IGNITED", accessorId(creeper, "DATA_IS_IGNITED"));
+        ids.addProperty("SPIDER_FLAGS", accessorId(spider, "DATA_FLAGS_ID"));
+        ids.addProperty("ENDERMAN_CARRY_STATE", accessorId(enderman, "DATA_CARRY_STATE"));
+        ids.addProperty("ENDERMAN_CREEPY", accessorId(enderman, "DATA_CREEPY"));
+        ids.addProperty("ENDERMAN_STARED_AT", accessorId(enderman, "DATA_STARED_AT"));
+        JsonObject eyes = new JsonObject();
+        eyes.addProperty("CREEPER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.CREEPER.getDimensions().eyeHeight());
+        eyes.addProperty("SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.SPIDER.getDimensions().eyeHeight());
+        eyes.addProperty("CAVE_SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.CAVE_SPIDER.getDimensions().eyeHeight());
+        eyes.addProperty("ENDERMAN_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.ENDERMAN.getDimensions().eyeHeight());
+        JsonObject out = new JsonObject();
+        out.add("dataIds", ids);
+        out.add("eyeHeights", eyes);
+        return out;
+    }
+
+    private static int accessorId(Class<?> owner, String name) throws ReflectiveOperationException {
+        Field field = owner.getDeclaredField(name);
         field.setAccessible(true);
         return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
     }

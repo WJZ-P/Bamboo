@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 
-use mc_bamboo_blocks::entity::{JavaRandom, KindPublic, mob::MobType, thrown_egg::EggShot};
+use mc_bamboo_blocks::entity::{
+    FIRST_ENTITY_ID as FIRST_ID, JavaRandom, KindPublic, mob::MobType, thrown_egg::EggShot,
+};
 use mc_bamboo_protocol::{frame::packet_body, item::ItemStack, packet::play::RemoveEntities};
 
 use super::*;
@@ -21,8 +23,29 @@ pub(super) struct EggCase {
     item: i32,
     forced: i64,
     cow: bool,
+    fire_ticks: i32,
+    /// 蛋的玩家主人的实体号；没有主人时是 -1。有主人的场景里牛开着 AI。
+    ///
+    /// The entity id of the egg's player owner, -1 without one. With an owner the
+    /// cow keeps its AI.
+    #[serde(default = "no_owner")]
+    owner: i32,
     frames: Vec<EggFrame>,
 }
+
+fn no_owner() -> i32 {
+    -1
+}
+
+/// 和 `MobOracle.EGG_OWNER` 一样的主人位置。
+///
+/// The owner's position, as in `MobOracle.EGG_OWNER`.
+const EGG_OWNER: Vec3 = Vec3::new(-6.5, 64.0, 0.5);
+
+/// 和官方一侧一样，主人的 UUID 是 (1, 2)。
+///
+/// The owner's UUID is (1, 2), like on the official side.
+const EGG_OWNER_UUID: u128 = (1 << 64) | 2;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,15 +53,20 @@ struct EggFrame {
     eggs: Vec<EggState>,
     chicks: Vec<ChickState>,
     cow: Option<[i64; 8]>,
-    cow_state: Option<[i64; 3]>,
+    /// 生命、`hurtTime`、随机源、`lastHurtByPlayer` 的实体号（没有是 -1）和它的记忆刻数。
+    ///
+    /// Health, `hurtTime`, random, the `lastHurtByPlayer` id (-1 if none) and its memory time.
+    cow_state: Option<[i64; 5]>,
     packets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 struct EggState {
     id: i32,
     motion: [i64; 8],
     seed: i64,
+    on_fire: bool,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -66,16 +94,63 @@ pub(super) struct EggThrowCase {
     item: [i32; 2],
     left: i32,
     level_seed: i64,
+    item_used: Vec<(i32, i32)>,
+}
+
+/// 发射器扔蛋那一刻：蛋的运动、随机源、蛋里的物品、剩下的物品数和世界随机源。
+///
+/// A dispensed egg right after the shot: its motion, random, carried item, the stack
+/// left behind and the level random.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct EggDispenseCase {
+    name: String,
+    up: bool,
+    motion: [i64; 8],
+    seed: i64,
+    item: [i32; 2],
+    left: i32,
+    level_seed: i64,
 }
 
 impl EggCase {
     fn level(&self) -> MobLevel {
+        let mut level = Self::empty_level(self.first_id);
+        level.blocks = self
+            .blocks
+            .iter()
+            .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))
+            .collect();
+        if self.owner >= 0 {
+            level.players.push(PlayerView {
+                uuid: Some(EGG_OWNER_UUID.to_be_bytes()),
+                uid: self.owner,
+                position: EGG_OWNER,
+                eye_height: 1.62,
+                look_direction: Vec3::default(),
+                gaze_disguise: false,
+                yaw: 0.0,
+                pitch: 0.0,
+                alive: true,
+                spectator: false,
+                creative: false,
+                sneaking: false,
+                invisible: false,
+                armor_cover: 0.0,
+                main_hand: 0,
+                off_hand: 0,
+                combat: Default::default(),
+            });
+        }
+        level
+    }
+
+    /// 没有方块、世界随机源种子为 1 的普通难度假世界。
+    ///
+    /// A blockless normal-difficulty fake level whose level random is seeded with 1.
+    fn empty_level(first_id: i32) -> MobLevel {
         MobLevel {
-            blocks: self
-                .blocks
-                .iter()
-                .map(|&[x, y, z, state]| (BlockPos::new(x, y, z), BlockState(state as u32)))
-                .collect(),
+            blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             looting: Vec::new(),
@@ -87,7 +162,7 @@ impl EggCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
-            entities: Entities::with_next_id(self.first_id),
+            entities: Entities::with_next_id(first_id),
             players: Vec::new(),
             game: None,
             wrong_was_hurt: false,
@@ -102,25 +177,27 @@ impl EggCase {
     fn spawn(&self, world: &mut World<'_>) -> i32 {
         let [x, y, z] = self.start;
         let [dx, dy, dz] = self.dir;
-        let id = world.spawn_egg_shot(&EggShot {
+        let shot = EggShot {
             position: Vec3::new(x, y, z),
             direction: Vec3::new(dx, dy, dz),
             power: 1.5,
             uncertainty: 1.0,
             source_movement: None,
-            owner: None,
-            owner_uuid: None,
+            owner: (self.owner >= 0).then_some(self.owner),
+            owner_uuid: (self.owner >= 0).then_some(EGG_OWNER_UUID.to_be_bytes()),
             item: ItemStack::new(self.item, 16),
-        });
-        // `egg_floor` 用自然种子，其余场景都换成搜出来的种子（可能恰好是 0）。
-        // `egg_floor` keeps its natural seed; the others use the searched one, which may be 0.
+        };
+        let mut egg = world.prepare_entity(Entity::thrown_egg(&shot));
+        egg.shoot_egg(&shot);
+        egg.remaining_fire_ticks = self.fire_ticks;
         if self.name != "egg_floor" {
-            let forced = self.forced;
-            world.with_entity_mut(id, &mut |egg| egg.random = JavaRandom::new(forced));
+            egg.random = JavaRandom::new(self.forced);
         }
+        let id = world.add_prepared_entity(egg);
         if self.cow {
             let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(4.5, 64.0, 0.5));
-            cow.with_mob(|_, mob| mob.no_ai = true);
+            let no_ai = self.owner < 0;
+            cow.with_mob(|_, mob| mob.no_ai = no_ai);
             world.spawn_entity(cow);
         }
         id
@@ -202,6 +279,7 @@ impl Report {
                         id,
                         motion: projectile_motion(&entity, egg.x_rot),
                         seed: entity.random.state(),
+                        on_fire: entity.remaining_fire_ticks > 0,
                     }
                 })
                 .collect();
@@ -234,10 +312,12 @@ impl Report {
                     i64::from(mob.health.to_bits() as i32),
                     i64::from(mob.hurt_time),
                     cow.random.state(),
+                    i64::from(mob.last_hurt_by_player.unwrap_or(-1)),
+                    i64::from(mob.last_hurt_by_player_memory_time),
                 ];
                 if Some(state) != expected.cow_state {
                     self.mismatch(format!(
-                        "{label} cow health/hurtTime/seed: official {:?}, bamboo {state:?}",
+                        "{label} cow health/hurtTime/seed/hurtByPlayer/memory: official {:?}, bamboo {state:?}",
                         expected.cow_state
                     ));
                 }
@@ -279,6 +359,7 @@ impl Report {
             item: case.item,
             left: case.left,
             level_seed: case.level_seed,
+            item_used: case.item_used.clone(),
         };
         if ours != theirs {
             self.mismatch(format!(
@@ -288,6 +369,50 @@ impl Report {
         }
         self.steps += 1;
         println!("{}: egg thrown, {} left", case.name, ours.left);
+    }
+
+    pub(super) fn replay_egg_dispense(&mut self, case: &EggDispenseCase) {
+        self.cases += 1;
+        self.steps += 1;
+        let mut level = EggCase::empty_level(FIRST_ID);
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let facing = if case.up {
+            mc_bamboo_core::Direction::Up
+        } else {
+            mc_bamboo_core::Direction::East
+        };
+        let left = mc_bamboo_blocks::dispense::dispense_arrow_at(
+            &mut World::new(&mut level, &mut ticks),
+            BlockPos::new(0, 64, 0),
+            facing,
+            ItemStack::new(mc_bamboo_data::items::BLUE_EGG, 3),
+        );
+        let eggs: Vec<_> = level
+            .entities
+            .iter()
+            .filter_map(|entity| match &entity.kind {
+                EntityKind::Egg(egg) => Some((
+                    projectile_motion(&entity, egg.x_rot),
+                    entity.random.state(),
+                    [egg.item.item, egg.item.count],
+                )),
+                _ => None,
+            })
+            .collect();
+        let ours = (eggs, left.count, level.random.source().seed());
+        let theirs = (
+            vec![(case.motion, case.seed, case.item)],
+            case.left,
+            case.level_seed,
+        );
+        if ours != theirs {
+            self.mismatch(format!(
+                "{}: official {theirs:?}, bamboo {ours:?}",
+                case.name
+            ));
+        }
+        println!("{}: egg dispensed, {} left", case.name, left.count);
     }
 }
 
