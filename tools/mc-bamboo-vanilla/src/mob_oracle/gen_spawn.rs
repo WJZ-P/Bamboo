@@ -41,7 +41,11 @@ pub(super) struct Case {
     block: i32,
     terrain: bool,
     biome: String,
-    spawned: Vec<Vec<i64>>,
+    /// 每个样本是 `[行, 农场生物的品种与叫声]`；非农场生物的第二项为 null。
+    ///
+    /// Each sample is `[row, farm spawn variants]`; the second item is null for
+    /// mobs that are not farm animals.
+    spawned: Vec<(Vec<i64>, Option<[String; 2]>)>,
     /// 和 `spawned` 一一对应：`MobOracle.genSpawnDetail`。
     details: Vec<String>,
     random: i64,
@@ -146,7 +150,7 @@ impl Report {
         }
         let mut in_sync = true;
         let mut ours = mobs.iter();
-        for (row, detail) in case.spawned.iter().zip(&case.details) {
+        for ((row, variants), detail) in case.spawned.iter().zip(&case.details) {
             let kind = i32::try_from(row[0]).ok().and_then(MobType::by_entity_type);
             let Some(kind) = kind else {
                 self.gen_spawns.others += 1;
@@ -177,6 +181,12 @@ impl Report {
                 if ours_details[..] != row[5..] || &ours_detail != detail {
                     self.mismatch(format!(
                         "{label}: official {row:?} {detail:?}, Bamboo details {ours_details:?} {ours_detail:?}"
+                    ));
+                }
+                let ours_variants = super::spawn_variants(mob);
+                if &ours_variants != variants {
+                    self.mismatch(format!(
+                        "{label}: official spawn variants {variants:?}, Bamboo {ours_variants:?}"
                     ));
                 }
             }
