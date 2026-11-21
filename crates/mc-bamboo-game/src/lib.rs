@@ -65,6 +65,7 @@ mod island;
 mod island_partition;
 mod island_partition_stats;
 mod island_pool;
+mod item_use_stats;
 mod lectern;
 mod light_updates;
 mod links;

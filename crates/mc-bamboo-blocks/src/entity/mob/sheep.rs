@@ -356,4 +356,25 @@ mod tests {
         set_sheared(&mut mob, false);
         assert_eq!(mob.wool, 5);
     }
+
+    #[test]
+    fn eat_block_rechecks_the_live_block_before_mutating() {
+        let mut level = crate::testing::TestLevel::new();
+        let pos = mc_bamboo_core::BlockPos::new(0, 63, 0);
+        level.set(pos, crate::BlockState(mc_bamboo_data::blocks::GRASS_BLOCK));
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = crate::world::World::new(&mut level, &mut ticks);
+        super::super::living::apply_eat_block(&mut world, pos, true);
+        super::super::living::apply_eat_block(&mut world, pos, true);
+        assert_eq!(
+            world.block_state(pos),
+            crate::BlockState(mc_bamboo_data::blocks::DIRT)
+        );
+        let destroyed = world
+            .into_effects()
+            .into_iter()
+            .filter(|effect| matches!(effect, crate::Effect::Destroyed { .. }))
+            .count();
+        assert_eq!(destroyed, 1);
+    }
 }

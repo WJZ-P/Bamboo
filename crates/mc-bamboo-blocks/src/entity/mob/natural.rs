@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn cows_spawn_on_open_grass_at_day() {
+    fn farm_animals_spawn_on_open_grass_at_day() {
         let mut level = TestLevel::new();
         grass_platform(&mut level);
         // 玩家在 32 格外：过了 24 格的生成距离，又足够近让人算「附近」。
