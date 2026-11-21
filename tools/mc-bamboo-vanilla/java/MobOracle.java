@@ -481,6 +481,8 @@ public final class MobOracle {
         boolean noOtherEntities = true;
         /** 大脑场景：玩家 0 在 [起, 止) 这几刻疾跑（犰狳会被吓到），null 表示不跑。 */
         int[] sprint;
+        /** 大脑场景：所有传感器的起始延迟定成这个值，负数表示保留随机取的。 */
+        long sensorDelay = -1;
 
         Scene(String name) {
             this.name = name;
@@ -1017,6 +1019,24 @@ public final class MobOracle {
             tempt.interact(10, 0, 0, wheat, 0);
             tempt.interact(12, 1, 0, bucket, 0);
             scenes.add(tempt);
+            // 冲向小牛的途中小牛被打死（幼崽不掉东西），山羊一头撞上背后的石墙，掉一只角
+            // （第 44 刻）。传感器延迟定死，打死小牛的那一刻才对得上。只跑 100 刻：这边不
+            // tick 掉落物，掉下的角一直停在原地，Bamboo 那边的会飞出去落地，之后山羊看不看得见
+            // 它就不一样了。
+            // The calf is killed mid-charge (babies drop nothing) and the goat hits the stone
+            // wall behind it, snapping a horn on tick 44. Fixed sensor delays keep the kill on
+            // the right tick. Only 100 ticks: this side never ticks item entities, so the
+            // horn stays where it spawned while Bamboo's flies and lands, and the goat's view
+            // of it diverges later.
+            Scene horn = new Scene("goat_horn").ticks(100);
+            horn.sensorDelay = 3;
+            Scenes.ground(horn, 15);
+            horn.fill(8, 64, -2, 8, 65, 2, Scenes.STONE);
+            horn.mob(14, 0.5, 64.0, 0.5, 0.0F, 73L, 0);
+            horn.mob(0, 6.5, 64.0, 0.5, 0.0F, 79L, -24000);
+            horn.player(-13.5, 64.0, -13.5, Items.AIR);
+            horn.hurts.add(new double[] {36, 1, 100.0, 0});
+            scenes.add(horn);
         }
 
         /**
@@ -1135,6 +1155,25 @@ public final class MobOracle {
                 out.append(time.getLong(sensor));
             }
             return out.append(']').toString();
+        }
+
+        /**
+         * 把每个传感器的起始延迟都设成同一个值：这些延迟取自 `Sensor` 不带种子的静态随机源，
+         * 定下来之后场景每次跑都一样，才能把伤害安排在固定的某一刻。
+         *
+         * <p>Sets every sensor's start delay to one value. The delays come from the unseeded
+         * static random in `Sensor`; fixing them makes the scene repeatable, so a hurt can be
+         * scheduled on a known tick.
+         */
+        static void fixSensorDelays(Mob mob, long delay) throws Exception {
+            Field sensorsField = net.minecraft.world.entity.ai.Brain.class.getDeclaredField("sensors");
+            sensorsField.setAccessible(true);
+            var sensors = (java.util.Map<?, ?>) sensorsField.get(mob.getBrain());
+            Field time = net.minecraft.world.entity.ai.sensing.Sensor.class.getDeclaredField("timeToTick");
+            time.setAccessible(true);
+            for (Object sensor : sensors.values()) {
+                time.setLong(sensor, delay);
+            }
         }
 
         static int scuteTime(Mob mob) {
@@ -5207,6 +5246,9 @@ public final class MobOracle {
             // 大脑的洗牌随机源官方不带种子，两边按同一个公式从场景种子重设。
             // Vanilla shuffle randoms are unseeded; both sides reseed them from the scene seed.
             BrainOracle.reseedShuffles(mob, randomSeed(mob));
+            if (scene.sensorDelay >= 0 && !mob.getBrain().isBrainDead()) {
+                BrainOracle.fixSensorDelays(mob, scene.sensorDelay);
+            }
             if (scene.fireTicks > 0) mob.setRemainingFireTicks(scene.fireTicks);
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
