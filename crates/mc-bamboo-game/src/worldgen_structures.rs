@@ -57,11 +57,16 @@ pub struct StructureData {
 ///
 /// Cache a chunk's rich starts by `(seed, settings, x, z)`; a hit only saves time.
 type StartsCache = HashMap<(i32, i32), Arc<WorldStructureStarts>>;
-/// 每条计算线程一份 `WorldStructureState` + `SeededRouter`：`SeededRouter` 的 R 树
-/// `lastResult` 是 `Cell`，不能跨线程共享（官方是 `ThreadLocal`）。
+/// 每条计算线程一份可变工作状态：`WorldStructureState`、`SeededRouter`（密度函数采样器
+/// 缓存）、地形 / 结构 `Generator`（随机源、临时缓冲），以及按配置建好的群系 `preset`。
+/// 解析好的只读 `Worldgen` 由 `Worldgen::shared()` 全进程共用；这些字段因需 `&mut` 或
+/// 按线程缓存仍留在 `thread_local!` 里，群系 R 树的 `lastResult` 也按「线程 + 表」隔离。
 ///
-/// Per-thread `WorldStructureState` + `SeededRouter`: the router's R-tree `lastResult`
-/// is a `Cell` and cannot be shared (vanilla uses a `ThreadLocal`).
+/// Per-thread mutable working state: `WorldStructureState`, `SeededRouter` (density-function
+/// sampler caches), terrain/structure `Generator`s (RNG, scratch buffers), and the per-config
+/// biome `preset`. The parsed, read-only `Worldgen` is shared process-wide via
+/// `Worldgen::shared()`; these fields stay in `thread_local!` because they need `&mut` or are
+/// per-thread caches, and the biome R-tree `lastResult` is isolated per (thread, table).
 struct StructureThread {
     state: WorldStructureState,
     router: SeededRouter,
