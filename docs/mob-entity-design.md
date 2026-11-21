@@ -383,6 +383,11 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 打到方块在算阶段直接 `discard`。同步层里口水和箭一样用 `InterpolationHandler.NO_OP`，
 位置路径永远是线性的。`didSpit` 在 `EquineState` 里，跟着实体走，岛拆合不需要新迁移。
 
+**脚步声。** 实体移动时，`motion::movement_emission` 调用 `equine::play_step_sound`，按
+`AbstractHorse.playStepSound` 选择方块声型、木质脚步和骑乘奔跑节拍（羊驼走自己的覆写）。仅马的
+`Horse.playGallopSound` 在奔跑声后从实体随机源取一次 `nextInt(10)`；结果为 0 时按年龄播喷气声，
+静音只抑制声音、不跳过抽取。游戏层 `riding::on_move_vehicle` 的方块扫掠仍不产生移动声音或振动。
+
 其余已知差异见 README「马科的已知限制」。
 
 ---

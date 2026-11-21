@@ -83,13 +83,13 @@ pub(in crate::entity::mob) fn land_sound(me: &Entity, mob: &mut Mob, distance: f
 
 /// `AbstractHorse.playStepSound` / `Llama.playStepSound`：音量和音高取自脚下的方块
 /// 声音类型（上面盖着雪层时换成雪的声音），被骑着跑的马按 `gallopSoundCounter`
-/// 换成奔跑步声。不取随机数。
+/// 换成奔跑步声；每次奔跑步声后再抽签决定是否喷气。
 ///
 /// `AbstractHorse.playStepSound` / `Llama.playStepSound`: volume and pitch come
 /// from the sound type of the block below (a snow layer above wins), and a ridden
-/// galloping horse switches to gallop sounds on its counter. No randomness.
+/// galloping horse switches to gallop sounds, each followed by a breath roll.
 pub(in crate::entity::mob) fn play_step_sound(
-    me: &Entity,
+    me: &mut Entity,
     mob: &mut Mob,
     view: &dyn BlockView,
     pos: BlockPos,
@@ -115,9 +115,9 @@ pub(in crate::entity::mob) fn play_step_sound(
     // `AbstractChestedHorse`, which turns it off.
     if mob.is_vehicle() && mob.mob_type == MobType::Horse {
         let counter = &mut state(mob).gallop_sound_counter;
-        *counter += 1;
+        *counter = counter.wrapping_add(1);
         if *counter > 5 && *counter % 3 == 0 {
-            living::play_sound(me, mob, "minecraft:entity.horse.gallop", volume, pitch);
+            play_gallop_sound(me, mob, sound_type);
         } else if *counter <= 5 {
             living::play_sound(me, mob, "minecraft:entity.horse.step_wood", volume, pitch);
         }
@@ -132,6 +132,27 @@ pub(in crate::entity::mob) fn play_step_sound(
             "minecraft:entity.horse.step"
         };
         living::play_sound(me, mob, sound, volume, pitch);
+    }
+}
+
+/// `Horse.playGallopSound`：先播奔跑步声，再用实体随机源判定喷气声。
+///
+/// `Horse.playGallopSound`: play the gallop first, then roll for a breath on the entity RNG.
+fn play_gallop_sound(me: &mut Entity, mob: &mut Mob, sound: &mc_bamboo_data::SoundTypeDef) {
+    living::play_sound(
+        me,
+        mob,
+        "minecraft:entity.horse.gallop",
+        sound.volume * 0.15,
+        sound.pitch,
+    );
+    if me.random.next_int_bounded(10) == 0 {
+        let breath = if mob.is_baby() {
+            "minecraft:entity.baby_horse.breathe"
+        } else {
+            "minecraft:entity.horse.breathe"
+        };
+        living::play_sound(me, mob, breath, sound.volume * 0.6, sound.pitch);
     }
 }
 
@@ -501,6 +522,7 @@ mod tests {
         let mut entity = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
         entity
             .with_mob(|me, mob| {
+                me.random = crate::entity::JavaRandom::new(0);
                 if baby {
                     mob.age = -24000;
                 }
@@ -591,9 +613,38 @@ mod tests {
                 "minecraft:entity.horse.step_wood",
                 "minecraft:entity.horse.step_wood",
                 "minecraft:entity.horse.gallop",
+                "minecraft:entity.horse.breathe",
                 "minecraft:entity.horse.gallop",
             ]
         );
+    }
+
+    #[test]
+    fn a_gallop_rolls_once_even_when_the_foal_is_silent() {
+        let ground = BlockState(blocks::GRASS_BLOCK);
+        let sound_type = ground.sound_type();
+        let mut entity = Entity::by_mob_type(MobType::Horse, Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|me, mob| {
+            mob.age = -24000;
+            me.random = crate::entity::JavaRandom::new(0);
+            let mut expected_rng = me.random;
+            assert_eq!(expected_rng.next_int_bounded(10), 0);
+            play_gallop_sound(me, mob, sound_type);
+            assert_eq!(me.random, expected_rng);
+            assert!(matches!(
+                &mob.events[..],
+                [MobEvent::Sound { sound: "minecraft:entity.horse.gallop", .. },
+                 MobEvent::Sound { sound: "minecraft:entity.baby_horse.breathe", volume, pitch, .. }]
+                    if *volume == sound_type.volume * 0.6 && *pitch == sound_type.pitch
+            ));
+
+            mob.events.clear();
+            mob.silent = true;
+            me.random = crate::entity::JavaRandom::new(0);
+            play_gallop_sound(me, mob, sound_type);
+            assert_eq!(me.random, expected_rng);
+            assert!(mob.events.is_empty());
+        }).expect("equine row");
     }
 
     /// 上面盖着雪层时用雪的声音类型（`AbstractHorse.playStepSound` 的 `aboveState`）。
