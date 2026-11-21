@@ -20,6 +20,7 @@ use super::{
 };
 use crate::{
     entity::{Entity, EntityUid, ctx::BlockView, physics},
+    random::RandomSource,
     shape::{Aabb, CollisionContext},
     world::World,
 };
@@ -267,7 +268,42 @@ fn finalize_spawn_in_group(
         return;
     }
     let biome = world.biome_id(entity.block_position());
-    let random = world.random();
+    finalize_cow(entity, biome, world.random(), group);
+}
+
+/// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
+/// `WorldGenRegion.random`。牛走 [`finalize_cow`]；以后加进来的动物还没接区域随机源，
+/// 暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
+///
+/// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
+/// `WorldGenRegion.random`. Cows use [`finalize_cow`]; animals added later fall back to
+/// the level random until wired, which only affects their variants and age.
+pub(super) fn finalize_generated(
+    world: &mut World,
+    kind: MobType,
+    entity: &mut Entity,
+    biome: i32,
+    region_random: &dyn RandomSource,
+    group: &mut Option<SpawnGroup>,
+) {
+    if kind == MobType::Cow {
+        finalize_cow(entity, biome, region_random, group);
+    } else {
+        finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
+    }
+}
+
+/// `Cow.finalizeSpawn` 加 `AgeableMob` / `Mob` 那两层，随机源由调用方给：运行时是
+/// `Level.random`，生成期是 `WorldGenRegion.random`。
+///
+/// `Cow.finalizeSpawn` plus the `AgeableMob` / `Mob` layers with a caller-supplied
+/// random: `Level.random` at run time, `WorldGenRegion.random` during generation.
+pub(super) fn finalize_cow(
+    entity: &mut Entity,
+    biome: i32,
+    random: &dyn RandomSource,
+    group: &mut Option<SpawnGroup>,
+) {
     let variant = cow_variant_for_biome(biome);
     let _ = random.next_int(1);
     let sound = if random.next_int(2) == 0 {

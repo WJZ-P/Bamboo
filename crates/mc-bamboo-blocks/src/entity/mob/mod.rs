@@ -22,6 +22,7 @@ pub mod interact;
 pub mod living;
 pub mod motion;
 pub mod natural;
+pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
 pub mod path;

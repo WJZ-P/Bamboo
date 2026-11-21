@@ -511,7 +511,7 @@ fn random_spawn_mob_at(
 /// cumulative weights. An empty table or a zero total returns `None` without a draw.
 pub fn pick<'a>(
     table: &'a [MobSpawnerDef],
-    random: &crate::random::LegacyRandom,
+    random: &dyn crate::random::RandomSource,
 ) -> Option<&'a MobSpawnerDef> {
     let total: i32 = table.iter().map(|entry| entry.weight).sum();
     if total <= 0 {
@@ -530,7 +530,7 @@ pub fn pick<'a>(
 /// `IntProvider.sample`：官方刷怪表里只有常量和均匀分布。
 ///
 /// `IntProvider.sample`: the vanilla spawn tables only use constants and uniform ranges.
-pub fn sample(entry: &MobSpawnerDef, random: &crate::random::LegacyRandom) -> i32 {
+pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -> i32 {
     let span = entry.max - entry.min + 1;
     if span <= 1 {
         entry.min
@@ -543,6 +543,13 @@ pub fn sample(entry: &MobSpawnerDef, random: &crate::random::LegacyRandom) -> i3
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    on_ground_position_ok(world, kind.fire_immune(), pos)
+}
+
+/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`，只看实体类型的防火属性。
+///
+/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`, keyed only by fire immunity.
+pub(super) fn on_ground_position_ok(world: &World, fire_immune: bool, pos: BlockPos) -> bool {
     if !world.world_border().is_within_bounds_pos(pos) {
         return false;
     }
@@ -551,7 +558,8 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     if !is_valid_spawn_below(world, below) {
         return false;
     }
-    is_valid_empty_spawn_block(world, kind, pos) && is_valid_empty_spawn_block(world, kind, above)
+    is_valid_empty_spawn_block(world, fire_immune, pos)
+        && is_valid_empty_spawn_block(world, fire_immune, above)
 }
 
 /// `BlockState.isValidSpawn`：能不能当落脚块。官方默认是「顶面 `isFaceSturdy(FULL)` 且发光
@@ -560,12 +568,12 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
 /// `BlockState.isValidSpawn`: whether this can be a footing block. Vanilla defaults to a
 /// sturdy top face with emission below 14, but leaves, glass, ice and carved pumpkins
 /// replace that outright, so the generated per-state bit is used.
-fn is_valid_spawn_below(world: &World, pos: BlockPos) -> bool {
+pub(super) fn is_valid_spawn_below(world: &World, pos: BlockPos) -> bool {
     world.block_state(pos).is_valid_spawn_surface()
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
-fn is_valid_empty_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
+fn is_valid_empty_spawn_block(world: &World, fire_immune: bool, pos: BlockPos) -> bool {
     let state = world.block_state(pos);
     if state.is_collision_shape_full_block() {
         return false;
@@ -579,15 +587,16 @@ fn is_valid_empty_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bo
     if state.is_tagged(block_tags::PREVENT_MOB_SPAWNING_INSIDE) {
         return false;
     }
-    !is_block_dangerous(kind, state)
+    !is_block_dangerous(fire_immune, state)
 }
 
 /// `EntityType.isBlockDangerous`：烧着的方块、凋灵玫瑰、甜浆果丛、仙人掌、细雪。
-fn is_block_dangerous(kind: MobType, state: BlockState) -> bool {
-    if kind.fire_immune() {
-        return false;
-    }
-    is_burning_block(state)
+/// 防火的类型只是不怕烧着的方块，其余几种照样危险（`immuneTo` 名单不建模）。
+///
+/// Fire-immune types only ignore burning blocks; the rest stay dangerous (the
+/// `immuneTo` list is not modelled).
+fn is_block_dangerous(fire_immune: bool, state: BlockState) -> bool {
+    (!fire_immune && is_burning_block(state))
         || state.0 == mc_bamboo_data::blocks::WITHER_ROSE
         || state.0 == mc_bamboo_data::blocks::SWEET_BERRY_BUSH
         || state.0 == CACTUS
@@ -605,18 +614,12 @@ fn is_burning_block(state: BlockState) -> bool {
 
 /// `SpawnPlacements.checkSpawnRules`：`NATURAL` 走两条分支，动物看亮度和地面，
 /// 怪物看黑暗和可生成方块（尸壳还要看得见天）。
-fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> bool {
+pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> bool {
     if !kind.allowed_in_peaceful() && world.level().difficulty_id() == 0 {
         return false;
     }
     match kind {
-        MobType::Cow => {
-            let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
-            world
-                .block_state(below)
-                .is_tagged(block_tags::ANIMALS_SPAWNABLE_ON)
-                && world.raw_brightness(pos) > 8
-        }
+        MobType::Cow => animal_spawn_rules(world, pos),
         MobType::Zombie | MobType::Skeleton => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
@@ -628,6 +631,17 @@ fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> bool {
     }
 }
 
+/// `Animal.checkAnimalSpawnRules`：脚下在 `animals_spawnable_on` 里，且 `getRawBrightness(pos, 0) > 8`。
+///
+/// `Animal.checkAnimalSpawnRules`: the block below is `animals_spawnable_on` and
+/// `getRawBrightness(pos, 0) > 8`.
+pub(super) fn animal_spawn_rules(world: &World, pos: BlockPos) -> bool {
+    let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
+    world
+        .block_state(below)
+        .is_tagged(block_tags::ANIMALS_SPAWNABLE_ON)
+        && world.raw_brightness(pos) > 8
+}
 /// `Monster.isDarkEnoughToSpawn`。
 fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
     let random = world.random();
@@ -680,7 +694,7 @@ fn is_valid_position_for_mob(
 /// `EntityGetter.isUnobstructed(entity)`: no live `blocksBuilding` entity overlaps the box.
 /// The new mob is not in the table yet, so it cannot block itself; players are checked
 /// through `Level::is_unobstructed`.
-fn is_unobstructed_by_entities(world: &World, box_: Aabb) -> bool {
+pub(super) fn is_unobstructed_by_entities(world: &World, box_: Aabb) -> bool {
     let mut blocked = false;
     world
         .level()
@@ -707,7 +721,7 @@ fn blocks_building(kind: &KindPublic) -> bool {
 ///
 /// `PathfinderMob.checkSpawnRules`: `getWalkTargetValue(pos) >= 0`. Cows look at the
 /// block below and otherwise use the light-based path cost; monsters negate that cost.
-fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockPos) -> bool {
+pub(super) fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockPos) -> bool {
     let Some(mob) = entity.kind.mob() else {
         return true;
     };
@@ -715,7 +729,7 @@ fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockPos) -> bool
 }
 
 /// `EntityType.getSpawnAABB(x, y, z)`：以 (x, y, z) 为脚底中心的身体盒。
-fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
+pub(super) fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
     let (width, height, _) = kind.dimensions(false);
     let half = f64::from(width / 2.0);
     let x = f64::from(pos.x) + 0.5;
@@ -732,7 +746,7 @@ fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
 }
 
 /// `Level.containsAnyLiquid(AABB)`。
-fn contains_any_liquid(world: &World, box_: Aabb) -> bool {
+pub(super) fn contains_any_liquid(world: &World, box_: Aabb) -> bool {
     let min = BlockPos::new(
         box_.min(Axis::X).floor() as i32,
         box_.min(Axis::Y).floor() as i32,
@@ -779,7 +793,7 @@ pub(super) fn no_collision(world: &World, box_: Aabb) -> bool {
 }
 
 /// `EntityType.create(level, NATURAL)`：Bamboo 只构造自己建模的几种。
-fn create_mob(world: &mut World, kind: MobType) -> Option<Entity> {
+pub(super) fn create_mob(world: &mut World, kind: MobType) -> Option<Entity> {
     Some(world.prepare_entity(Entity::by_mob_type(kind, Vec3::default())))
 }
 

@@ -261,6 +261,9 @@ public final class MobOracle {
             if ("natural_spawn".equals(only)) {
                 cases += playNaturalSpawns(official, out);
             }
+            if ("gen_spawn".equals(only)) {
+                cases += playGenSpawns(official, out);
+            }
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
             }
@@ -2670,6 +2673,105 @@ public final class MobOracle {
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.add("steps", steps);
         return row;
+    }
+
+    // 生成期刷怪：平原的真实刷怪表，区块 (0,0) 和一圈邻居按坐标公式铺台阶、水、沙、树叶和草丛。
+    // World-generation spawning: the real plains table over a formula terrain of steps,
+    // water, sand, leaves and short grass around chunk (0,0).
+    private record GenScene(String name, int sky, int block, boolean terrain) {}
+
+    private static int playGenSpawns(Official official, Writer out) throws Exception {
+        List<GenScene> scenes = List.of(
+                new GenScene("gen_flat", 15, 0, false),
+                new GenScene("gen_terrain", 15, 0, true),
+                new GenScene("gen_dim", 8, 0, true),
+                new GenScene("gen_torch", 0, 9, true));
+        int count = 0;
+        for (GenScene scene : scenes) {
+            for (long index = 0; index < 500; index++) {
+                // 相邻的小种子第一下 `nextFloat` 几乎相同，打散成 64 位。
+                // Nearby small seeds share their first `nextFloat`; spread them out.
+                long seed = index * 0x9E3779B97F4A7C15L + 12345L;
+                out.write(genSpawnCase(official, scene, seed) + "\n");
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static JsonObject genSpawnCase(Official official, GenScene scene, long seed) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.COW, "plains", 2, scene.sky(), scene.block(), 0,
+                false, 0, 0, 0, false, false);
+        level.worldGenRegion = true;
+        level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+        put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> level.naturalBiome, 0L));
+        level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.spawnDifficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        for (int x = -16; x < 32; x++) {
+            for (int z = -16; z < 32; z++) {
+                genColumn(level, x, z, scene.terrain());
+            }
+        }
+        for (int cx = -1; cx <= 1; cx++) {
+            for (int cz = -1; cz <= 1; cz++) {
+                net.minecraft.world.level.levelgen.Heightmap.primeHeightmaps(level.chunkSource.getChunkNow(cx, cz),
+                        java.util.Set.of(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
+            }
+        }
+        RandomSource region = new net.minecraft.world.level.levelgen.XoroshiroRandomSource(seed * 31 + 7);
+        put(Level.class, level, "random", region);
+        net.minecraft.world.level.levelgen.WorldgenRandom random =
+                new net.minecraft.world.level.levelgen.WorldgenRandom(new net.minecraft.world.level.levelgen.LegacyRandomSource(0L));
+        random.setDecorationSeed(seed, 0, 0);
+        NaturalSpawner.spawnMobsForChunkGeneration(level, new BlockPos(0, level.getMaxY(), 0), new ChunkPos(0, 0), random);
+        JsonArray spawned = new JsonArray();
+        for (Entity entity : level.spawned) {
+            Mob mob = (Mob) entity;
+            var row = new JsonArray();
+            row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+            row.add(Double.doubleToRawLongBits(mob.getX()));
+            row.add(Double.doubleToRawLongBits(mob.getY()));
+            row.add(Double.doubleToRawLongBits(mob.getZ()));
+            row.add(Float.floatToRawIntBits(mob.getYRot()));
+            row.add(mob.isBaby() ? 1 : 0);
+            row.add(mob.isLeftHanded() ? 1 : 0);
+            spawned.add(row);
+        }
+        var result = new JsonObject();
+        result.addProperty("type", "genSpawn");
+        result.addProperty("name", scene.name());
+        result.addProperty("seed", seed);
+        result.addProperty("sky", scene.sky());
+        result.addProperty("block", scene.block());
+        result.addProperty("terrain", scene.terrain());
+        result.add("spawned", spawned);
+        result.addProperty("random", random.nextLong());
+        result.addProperty("region", region.nextLong());
+        return result;
+    }
+
+    /** 和 Rust 侧 `gen_column` 同一个坐标公式。 */
+    private static void genColumn(FakeLevel level, int x, int z, boolean terrain) {
+        int top = terrain ? -63 + Math.floorMod(x * 7 + z * 13, 3) : -63;
+        for (int y = -63; y < top; y++) {
+            level.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+        }
+        BlockState ground = Blocks.GRASS_BLOCK.defaultBlockState();
+        if (terrain && Math.floorMod(x + 2 * z, 9) == 0) {
+            ground = Blocks.WATER.defaultBlockState();
+        } else if (terrain && Math.floorMod(x * 3 + z * 5, 11) == 0) {
+            ground = Blocks.SAND.defaultBlockState();
+        }
+        level.blocks.put(BlockPos.asLong(x, top, z), ground);
+        if (terrain && Math.floorMod(5 * x + z, 13) == 0) {
+            level.blocks.put(BlockPos.asLong(x, top + 1, z), Blocks.OAK_LEAVES.defaultBlockState());
+        } else if (terrain && Math.floorMod(x - z, 4) == 0) {
+            level.blocks.put(BlockPos.asLong(x, top + 1, z), Blocks.SHORT_GRASS.defaultBlockState());
+        }
     }
 
     private static final class NaturalSpawnGenerator extends FlatLevelSource {
@@ -5253,6 +5355,7 @@ public final class MobOracle {
         List<long[]> projectileExtinguishes;
         DifficultyInstance spawnDifficulty;
         NaturalScene naturalScene;
+        boolean worldGenRegion;
         Holder<Biome> naturalBiome;
         EnvironmentAttributeSystem naturalAttributes;
 
@@ -5574,7 +5677,9 @@ public final class MobOracle {
             if (entity instanceof Cow calf && dropUuids) {
                 newbornCows.add(calf);
             }
-            if (naturalScene != null) {
+            // 生成期区域查不到实体（`WorldGenRegion.getEntities` 恒空），不进 tracked。
+            // A world-generation region sees no entities, so keep them out of tracked.
+            if (naturalScene != null && !worldGenRegion) {
                 tracked.add(entity);
             }
             spawned.add(entity);

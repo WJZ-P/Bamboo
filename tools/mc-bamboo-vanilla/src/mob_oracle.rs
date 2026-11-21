@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod gen_spawn;
 mod natural_spawn;
 mod projectile;
 mod skeleton_death;
@@ -76,6 +77,7 @@ enum Line {
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     NaturalSpawn(natural_spawn::Case),
+    GenSpawn(gen_spawn::Case),
     End(End),
 }
 
@@ -820,6 +822,7 @@ struct Report {
     steps: usize,
     skeleton_spawns: skeleton_spawn::Coverage,
     natural_spawns: natural_spawn::Coverage,
+    gen_spawns: gen_spawn::Coverage,
     mismatches: Vec<String>,
     ended: bool,
     show: usize,
@@ -885,6 +888,7 @@ fn run_with_options(mut command: Command, options: &[&str]) -> Result<(), String
         steps: 0,
         skeleton_spawns: skeleton_spawn::Coverage::default(),
         natural_spawns: natural_spawn::Coverage::default(),
+        gen_spawns: gen_spawn::Coverage::default(),
         mismatches: Vec::new(),
         ended: false,
         show,
@@ -926,6 +930,7 @@ impl Report {
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
+                Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
@@ -2293,6 +2298,10 @@ impl Report {
         }
         self.skeleton_spawns.print();
         self.natural_spawns.print();
+        self.gen_spawns.print();
+        if self.break_test.as_deref() == Some("gen_spawn") && self.gen_spawns.cases == 0 {
+            return Err("gen spawn break-self-test ran no cases".to_owned());
+        }
         if self.break_test.as_deref() == Some("natural_spawn") && self.natural_spawns.ticks == 0 {
             return Err("natural spawn break-self-test ran no natural spawn ticks".to_owned());
         }
@@ -2304,6 +2313,7 @@ impl Report {
             ));
         }
         self.natural_spawns.check()?;
+        self.gen_spawns.check()?;
         println!(
             "MOB ORACLE: {} cases, {} ticks, 0 mismatches",
             self.cases, self.steps
