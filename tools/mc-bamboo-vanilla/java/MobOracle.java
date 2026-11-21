@@ -2770,6 +2770,9 @@ public final class MobOracle {
         scenes.add(new NaturalScene("pig_cold", EntityTypes.PIG, "snowy_taiga", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("chicken_warm", EntityTypes.CHICKEN, "savanna", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("chicken_cold", EntityTypes.CHICKEN, "snowy_taiga", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        // 猪的温带花色（平原）：pig_day 在热带草原，是暖色。
+        // The temperate pig variant (plains): pig_day is in savanna, which is warm.
+        scenes.add(new NaturalScene("pig_temperate", EntityTypes.PIG, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int cap = MobCategory.CREATURE.getMaxInstancesPerChunk();
         scenes.add(new NaturalScene("cow_global_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 289, false, false));
         scenes.add(new NaturalScene("cow_local_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 578, true, false));
