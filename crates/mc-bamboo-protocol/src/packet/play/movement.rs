@@ -237,6 +237,29 @@ impl ClientboundPacket for EntityPositionSync {
     }
 }
 
+/// 服务端把载具挪回它认可的位置，`ClientboundMoveVehiclePacket`：三个 f64 坐标加两个 f32
+/// 朝向，没有着地位。
+///
+/// The server snaps the vehicle back to the position it accepts,
+/// `ClientboundMoveVehiclePacket`: three f64 coordinates and two f32 angles, no
+/// on-ground flag.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveVehicle {
+    pub position: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl ClientboundPacket for MoveVehicle {
+    const ID: i32 = clientbound::MOVE_VEHICLE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_vec3(out, self.position);
+        write_f32(out, self.yaw);
+        write_f32(out, self.pitch);
+    }
+}
+
 /// 实体的头转动了。角度是 [`pack_degrees`] 的结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RotateHead {

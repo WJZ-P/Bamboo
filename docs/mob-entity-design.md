@@ -314,7 +314,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 |---|---|---|---|
 | 属性、生成 | `createBaseHorseAttributes`、`randomizeAttributes`、`Horse/Llama.finalizeSpawn` | `equine::attributes` / `finalize_spawn` | `equineSpawn` 64 题 |
 | 繁殖遗传 | `setOffspringAttributes`、`createOffspringAttribute`、花色 / 力量继承，马驴生骡 | `equine::offspring` | `equineBreed` 32 题 |
-| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 12 场景 14800 刻 |
+| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 20 场景 15258 刻 |
 | 目标表 | `registerGoals` + `addBehaviourGoals`、`Llama.registerGoals`、`RandomStandGoal` | `equine/goals.rs` | 同上（running names 逐刻比） |
 | 交互 | `Horse/AbstractChestedHorse/AbstractHorse.mobInteract`、`handleEating`、`Player.interactOn` 兜底 | `equine/interact.rs` | `equineInteract` 468 题 |
 | 死亡掉落 | `dropAllDeathLoot`、`dropCustomDeathLoot`、`dropEquipment` | `equine/death.rs` | `equineDeath` 40 题 |
@@ -324,6 +324,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 | 落地声 | `AbstractHorse.causeFallDamage` 的 `HORSE_LAND` | `equine::land_sound` | 单元测试；音效包不在对拍范围 |
 | 羊驼回击、吐口水 | `Llama.LlamaHurtByTargetGoal`、`RangedAttackGoal(1.25, 40, 20)`、`Llama.spit`、`LlamaSpit`、`DamageTypes.SPIT` | `goals.rs` 的 `Goal::RangedAttack` / `LlamaHurtByTarget`，`equine/ranged.rs`，口水实体 `entity/spit.rs`（存档 `archive/entity/spit.rs`） | `llama_spit_far` / `_near` 两场景各 160 刻 0 不一致（羊驼和口水的位置、速度、随机源、目标名、口水同步包、玩家血量）；`chunk-content` 两道口水存档题 |
 | `followMommy` | `AbstractHorse.followMommy`（只 `createPath` 不走） | `equine/life.rs` 的 `follow_mommy` | 单元测试；`Bred` 只能从存档来，逐刻场景没覆盖 |
+| 自然生成、生成期刷怪 | `Horse/Llama/AbstractHorse.finalizeSpawn` 的组数据（`HorseGroupData`、`LlamaGroupData` 同组共享毛色，驴骡 `AgeableMobGroupData(0.2)`）、`getMaxSpawnClusterSize() == 6`、`Animal.checkAnimalSpawnRules` | `equine/spawn.rs`，`spawn.rs` 的 `SpawnGroup::Horse` / `Llama`，`natural.rs`、`natural_gen.rs` 各加一行 | `equineGroup`（同组 6 只逐只比属性、花色、年龄、左撇子、世界随机源、配对元数据）；`natural_spawn` 的 `horse_day` / `donkey_day` / `llama_day`；`gen_spawn` 里马科的落点和区域随机源上的 `finalizeSpawn` |
 
 坐骑物品栏每次点击前从生物读回鞍、身体和箱子格，点击后把鞍位 / 身体位的每次 `setByPlayer`
 按发生顺序在生物上重放（官方 `ArmorSlot.setByPlayer` 先调一次 `onEquipItem`，装备容器的
@@ -333,33 +334,125 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 生物装备从六个人形槽扩成官方全部八个槽（加 `BODY`、`SADDLE`）。马科的全部状态都在
 `Mob.equine` 里，跟着实体走，所以岛的拆分合并不需要新的按实体迁移。
 
-**没做：骑乘。** 骑乘是牛、马、猪、骆驼共用的机制，但它要先定两件世界模型里没定的事
-（第 8.2 节明确写了「载具和它的乘客」还没实现）：
+**骑乘（2026-11-21，第五轮）。** 按上一轮查证过的形状做了，没有改阶段顺序：
 
-1. **归属**：乘客是玩家，玩家在区域的玩家表里，载具在实体表里。官方 `ServerLevel.tickPassenger`
-   在载具 tick 之后紧接着 tick 乘客（`rideTick` → `positionRider`），玩家控制时载具的位置来自
-   `ServerboundMoveVehiclePacket`（客户端权威，`handleMoveVehicle` 做移动校验）。载具和乘客要算一个
-   单位：同一个岛、同一个任务里按官方顺序跑，岛拆分时不能把它们拆开。
-2. **一刻顺序**：玩家的位置变成由载具决定（`positionRider` 在实体阶段），而现在玩家的位置只在
-   连接的移动包里更新。
+- 玩家记 `riding.vehicle` / `last_vehicle` / `first_good` / `last_good`（`crates/mc-bamboo-game/src/riding.rs`，
+  对应 `ServerGamePacketListenerImpl` 的同名字段）；载具记 `Mob.passengers`（只有玩家，按上车顺序）。
+- 上车：马科 `mobInteract` 的 `doPlayerRide` 返回 `ride` 标记，游戏层在 `on_interact_entity` 里落
+  `startRiding`（设朝向、写两边、`first_good` / `last_good` 从载具位置起算）。
+- 下车：`riding::tick` 每刻看潜行键（`Player.rideTick` 的 `wantsToStopRiding`），按
+  `AbstractHorse.getDismountLocationForPassenger`（`riding/dismount.rs`：主手一侧、另一侧、
+  站立 / 潜行 / 游泳三个姿势、`DismountHelper` 的地面高度和碰撞判定）算落点，再清掉两边的关系；
+  `Entity.removePassenger` 的 60 刻 `boardingCooldown` 在 `Riding` 里，每刻减一，`canRide` 拦下车后的立刻再上。
+- 骑手位置：`riding::tick` 在实体阶段之后、玩家自己的 tick 之前写玩家表，位置是载具位置加
+  官方 `getPassengerAttachmentPoint` 的缺省点（`EntityTypes` 的 `passengerAttachments`：
+  马 1.44375、驴 1.1125、骡 1.2125、羊驼 `(1.37, -0.3)`，按载具朝向旋转；扬蹄时
+  `AbstractHorse` 附加的 `0.15 * standAnimO` / `-0.7 * standAnimO` 已按 `EquinePublic::stand_anim_o` 建模，羊驼覆写不叠加）。
+- 载具位置：`move_vehicle` 在世界线程处理输入时直接改载具行（`handleMoveVehicle` 的夹取、
+  `wrapDegrees`、100 平方格的「移动太快」拉回、非法值断开），再用 `move(MoverType.PLAYER)`
+  的扫掠（`sweep_movement`，步高取 `STEP_HEIGHT` 属性）和包里的位置比：水平差超过 0.25 格
+  且旧位置没卡在方块或边界里就 `absSnapTo` 回原位并发回载具位置。实体之间的碰撞
+  （`isEntityCollidingWithAnythingNew`）Bamboo 没有建模，这一步跳过。
+- 控制权：`tickPlayer` 只在载具的 `getControllingPassenger()` 是这名玩家时记 `lastVehicle`，
+  而马科要上了鞍才算有人控制。没上鞍的载具能骑、AI 照跑，`move_vehicle` 的位置不收，
+  按「离载具超过一格或离上次重置 20 刻」发回载具位置。
+- 朝向：马科 `tick_ridden` 把载具朝向设成骑手朝向、俯仰取一半，旧朝向、身体和头都对齐；
+  玩家控制时 `isEffectiveAi()` 为假，AI 和 `travel` 都不跑，速度清零（和官方服务端一致）。
+- 跳跃：`START_RIDING_JUMP` → `handleStartJump`（扬蹄加 `entity.horse.jump` 声），`STOP_RIDING_JUMP` 是空的。
+- 开坐骑物品栏：`OPEN_INVENTORY` 按官方 `AbstractHorse.openCustomInventoryScreen` 的条件
+  （驯服，且骑手就是这名玩家）打开，走和潜行右键同一个 `menu::station::open_mount`。
+- 同步：`Entity.passengers` 进公开快照，像 `ServerEntity.sendChanges` 那样在名单变化时发 `set_passengers`。
 
-建议的接法（待队长定）：玩家记 `vehicle: Option<EntityUid>`，载具记 `passengers`；
-`MoveVehicle` 在世界线程处理输入时直接改载具行并做官方的移动校验；实体阶段载具 tick 完以后，
-在落地阶段按 uid 顺序给乘客玩家 `positionRider`；岛拆分把「载具 + 乘客玩家」当成不可分的一组；
-`SetPassengers` 包跟着实体同步发。马的部分（`tickRidden`、`getRiddenInput`、`executeRidersJump`、
-`RunAroundLikeCrazyGoal` 的驯服）在这之后补，猪和骆驼复用同一套。
+**还没做**：载具移动校验里实体之间的碰撞（`isEntityCollidingWithAnythingNew`），
+载具摔落伤害和 `clientVehicleIsFloating` 踢人；玩家下线时 `RootVehicle` 存进玩家档；岛拆分把
+「载具 + 骑手」当成不可分的一组。
+这几项都不改阶段顺序，但要么要改移动校验、要么要改存档和分区器，留给队长定。
 
-补充（2026-11-20 第三轮查证）：服务端上玩家控制的载具 `canSimulateMovement()` 为假，
-`travelRidden` 只跑 `tickRidden`（朝向、跳跃蓄力清零）再把速度清零，位置完全来自
-`ServerboundMoveVehiclePacket`；骑手玩家的服务端位置只在 `rideTick → positionRider` 里更新。
-所以「`positionRider`」可以做成载具在算阶段发出的一条意图命令（按 uid 顺序在落地阶段写玩家表），
-不必改阶段顺序；真正要定的只剩岛的拆分不能把载具和骑手拆到两边，以及玩家下线时载具跟着
-`RootVehicle` 存进玩家档。
+**骑乘驯服（第六轮）。** `equine/tame.rs` 在官方优先级注册 `RunAroundLikeCrazyGoal`：
+未驯服且有乘客时查找随机落点、以 1.2 倍速导航，按目标的半频 tick 抽签（每次抽
+`nextInt(25)`，命中才抽 `nextInt(maxTemper)`）。成功写入现有的 `Owner` 和 `Tame` 并发
+实体事件 7，保留乘客；失败把脾气加 5（限制在该物种范围内），清乘客名单、发怒和事件 6。
+`riding::tick` 在已有阶段中清理玩家侧的关系，已有同步路径发送乘客名单变更。
+骑乘期间，`AbstractHorse.aiStep` 跳过起始吃草的随机抽取，`LookAtPlayerGoal` 不选自己的骑手。
+对拍用 `mob-oracle` 新增的 `zombie_equine_buck_*`（甩人）和 `zombie_equine_tame_*`（当场驯服）
+场景，逐刻比位置、目标、随机源、脾气、驯服标志、骑手数量和主人 UUID，场景在甩人/驯服那一刻截断。
+`riding::passenger_offset` 改用上面查正后的成年附着点（原先误用了幼崽的值）。
 
 羊驼的口水是新的实体种类 `EntityKind::LlamaSpit`：生成走 `Command::ShootLlamaSpit`，
 命中实体走 `Command::SpitHit`（落地时按主人当时的公开状态造 `spit` 伤害来源），
 打到方块在算阶段直接 `discard`。同步层里口水和箭一样用 `InterpolationHandler.NO_OP`，
 位置路径永远是线性的。`didSpit` 在 `EquineState` 里，跟着实体走，岛拆合不需要新迁移。
+
+**脚步声。** 实体移动时，`motion::movement_emission` 调用 `equine::play_step_sound`，按
+`AbstractHorse.playStepSound` 选择方块声型、木质脚步和骑乘奔跑节拍（羊驼走自己的覆写）。仅马的
+`Horse.playGallopSound` 在奔跑声后从实体随机源取一次 `nextInt(10)`；结果为 0 时按年龄播喷气声，
+静音只抑制声音、不跳过抽取。游戏层 `riding::on_move_vehicle` 的方块扫掠仍不产生移动声音或振动。
+
+**与 main 合并（2026-11-21，第八轮）。** 把 main 的鱿鱼、鱼、桶装鱼、海龟合进分支：冲突按 main 的结构解
+（`finalize_cow(kind, …)`、`check_spawn_rules` 按 kind 分派，`generated/` 直接取 main 的重新生成结果），
+两边取并集保留 `MobInteraction` 的 `ride` / `discard` / `limit_creative`、`travelRidden` 与鱿鱼 `travel`、
+马科与水生的目标 tick、马科 `playStepSound` 与 `MovementEmission.EVENTS`（游泳声只在 `emitsSounds()` 为真时
+取两个 `nextFloat`，`play_sound` 不取数，所以马科的取数顺序不变）。`cargo check --workspace --all-targets`
+通过；`mob-oracle --only equine / llama_spit / zombie_equine / wolf_ / natural_spawn / gen_spawn` 复跑全部
+0 不一致。本轮另补上狼与羊驼的互动，见 11.7。
+
+**复核 main 合并（2026-11-21，第九轮）。** 本轮开始时 `main` 已是 HEAD 的祖先
+（`git merge main` 报 `Already up to date`），按 main 的结构核对了 `spawn.rs` 的
+`finalize_spawn_in_group` / `finalize_generated` 按 `kind.is_equine()` 分派到
+`equine::finalize_spawn`、`natural.rs` 的 `check_spawn_rules` 把马 / 驴 / 骡 / 羊驼归到
+`animal_spawn_rules`，没有重复的马科实现。`cargo check --workspace --all-targets` 通过；
+`mob-oracle --only equine`（648 题）、`--only zombie_equine`（20 场景 15258 刻）、
+`--only llama_spit`（2 场景 322 刻）复跑全部 0 不一致，确认合并没有改变马科的取数顺序。
+另补了 `START_RIDING_JUMP` 服务端门槛的单元测试（上鞍 + 正刻度才扬蹄、播跳跃声）。
+
+**与 main 合并（2026-11-21，第十轮）。** 本轮 `main` 又前进了 10 个 worldgen 缓存提交
+（`c093090f` 一带：`worldgen_cache.rs` / `worldgen_compact.rs`、缓存设置与按依赖 / 空闲回收）。
+`git merge main` 用 ort 自动合并了双方都改过的 `README.md`、`mc-bamboo-game/src/lib.rs`、
+`mc-bamboo-game/src/world.rs`，没有冲突；`cargo check --workspace --all-targets` 通过。
+`mob-oracle --only equine`（648 题）、`--only zombie_equine`（20 场景 15258 刻）、
+`--only llama_spit`（2 场景 322 刻）复跑全部 0 不一致，确认缓存改动没有碰马科的取数顺序。
+本轮把上一轮未落盘的 `START_RIDING_JUMP` 单元测试提交，并逐行核对了官方 26.3 的跳跃链：
+`ServerGamePacketListenerImpl.handlePlayerCommand` 的 `START_RIDING_JUMP` 分支只调
+`PlayerRideableJumping.handleStartJump`（即 `AbstractHorse.handleStartJump`：扬蹄 + 跳跃声，不用刻度值）；
+真正的冲量 `AbstractHorse.tickRidden` → `executeRidersJump` 受 `isLocalInstanceAuthoritative()` 约束，
+而 `Player.isClientAuthoritative()` 恒真、载具的 `isClientAuthoritative()` 随控制乘客为真，
+故服务端该值为假、冲量只在客户端算。Bamboo 服务端只做扬蹄和跳跃声、位置由 `move_vehicle` 提供，
+与官方一致；`playerJumpPendingScale` / `allowStandSliding` / `getRiddenInput` 是客户端权威的
+AI 内部量，服务端不建模，无玩家可感知差异。没有改动任何马科行为代码。
+
+**与 main 合并（2026-11-21，第十一轮）。** 本轮 `main` 又前进了 19 个提交
+（`ceb0562f` 一带：苦力怕、蜘蛛、洞穴蜘蛛、末影人）。接手时分支上有一个已解决冲突、
+但未 `git add` / 未提交的在途合并；先逐文件核对 7 处冲突（`README.md`、`goals.rs`、
+`interact.rs`、`mod.rs`、`motion.rs`、`MobOracle.java`、`mob_oracle.rs`）都是按 main 结构的
+真并集：马科的 `playStepSound`（保留 `view` / `pos` 形参）、`RunAroundLikeCrazyGoal`、
+`LlamaAttackWolfGoal`、`notRiding` 乘客判断、载具 `passengers` / `start_riding_jump`、
+`MobInteraction` 的 `ride` 与 `damage_held`、骑乘 / 吐口水对拍场景，和 main 的 `Swell` /
+`Enderman*` / `Spider*` 目标、苦力怕 `after_fall`、蜘蛛网不减速、`uses_block_step_sound`
+方块脚步声、敌对生物的场景与存档字段全部共存，没有丢掉任一边。`spawn.rs` 的
+`finalize_spawn_in_group` / `finalize_generated` 按 kind 分派、`natural.rs` 的
+`check_spawn_rules` 按 kind 分支本就自动合并好。`generated/` 用合并后的生成器重新跑
+`extract`（不手合），34 个文件逐字节可复现；`game_event` 注册表因此从旧的字典序换成官方
+`protocol_id` 顺序（`entity_action` 从 15 变 21、`resonate_*` 移到末尾），但全仓只有
+`archive/passive.rs` 的 `by_name` 按名字判存在、丢弃数字 ID，无任何数字 ID 消费方，行为不变。
+补上 `PlayerView` 新增的 `look_direction` / `gaze_disguise` / `yaw` / `pitch` 到马科和蜘蛛的
+测试夹具。`cargo check --workspace --all-targets` 通过；`mob-oracle --only equine`（648 题）、
+`--only zombie_equine`（20 场景 15258 刻）、`--only llama_spit`（2 场景 322 刻）复跑全部
+0 不一致，确认合并没动马科的取数次数和顺序。本轮没有改动任何马科行为代码；剩下的差距仍
+是要动线程模型 / tick 顺序或真实客户端才能收口的部分（见汇报），按规矩停下来不自己定。
+
+**与 main 合并与马科收口（2026-11-21，第十二轮）。** 本轮先合入 `main` 新增的 19 个提交
+（`e1d69b66` 一带：哞菇、北极熊、熊猫），按 main 结构解 5 处冲突（`goals.rs` 统一
+`TargetType::follow_scale` 同时支持北极熊 `0.5` 与羊驼 `0.25`、`interact.rs` 并集保留马科与熊猫食物、
+`MobOracle.java` / `mob_oracle.rs` 并集保留马科与熊猫夹具、`README.md` 并集保留两方对拍说明），
+补修 `main` 合入的 `Extractor.java` `stewFlowers()` 缺失右花括号后重跑 `extract` 确认 `generated/`
+逐字节一致，更新马科测试夹具适配 `running_names(mob_type)` 与 `MobPublic::of(&mob)`。合并后补齐
+三处对照官方 26.3 查出的马科行为缺口：① `Entity.interact` → `Mob.attemptToShearEquipment`
+（剪刀右键按 `EquipmentSlot.VALUES` 顺序卸马铠 / 羊驼地毯 / 鞍，按 `PASSENGER` 附着点均值掉落、
+播 `shearing_sound`、扣耐久并检查绑定诅咒），`equineInteract` 加 `Items.SHEARS` 扩到 504 题；
+② `AbstractHorse.onClimbable()` 恒假（马科不再爬梯子 / 藤蔓）；③ `DismountHelper.canDismountTo`
+补世界边界检查（`border.is_within_bounds_aabb`）。另给 `LlamaAttackWolfGoal` 与 `WolfAvoidEntityGoal`
+补上两场非空跑逐刻对拍（`zombie_equine_llama_wolf_near` / `_far`）。核实 `LivingEntity.rideTick`
+确实调 `resetFallDistance()`，原疑点 15 消解。
 
 其余已知差异见 README「马科的已知限制」。
 
@@ -912,6 +1005,11 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - 2026-11-21 再次合并 `main`（苦力怕 / 蜘蛛 / 洞穴蜘蛛 / 末影人、水生生物、世界生成缓存）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 306 例 1224 刻；三种 `loot-oracle` 各 200 题、`chunk-content` 488 项均通过。此次合并未改动农场动物的代码与上述现状。
 - 2026-11-21 再合并 `main`（op-misc：哞菇 / 熊猫 / 北极熊）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题，生成期 `--only gen_spawn_misc` 128 例 / `--only gen_spawn_panda` 128 例均 0 不一致。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项报「官方无法载入该实体」：该用例及官方加载器与 `main` 逐字相同，是随本次合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关（详见汇报疑点清单）。此次合并只解决公共文件的冲突，未改动农场动物代码。
 - 2026-11-21 合并 `main`（`2448b76c`：compute pool / IO 线程 / 岛 / staged pipeline 的计时测试确定性，仅动 `mc-bamboo-game` 的测试与 `chunk_io.rs`，与农场动物代码零重叠）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题 0 不一致。`cargo check --workspace --all-targets` 通过。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项仍报「官方无法载入该实体」，是第十五轮合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关。此次为无文本冲突合并，未改动农场动物代码。
+- 狼躲羊驼（`Wolf.WolfAvoidEntityGoal`：未驯服的狼按羊驼 `getStrength() >= nextInt(5)` 判定躲不躲，
+  仍先跑 `super.canUse()` 取逃跑点）、羊驼打野狼（`LlamaAttackWolfGoal`：`0.25 × FOLLOW_RANGE` 内
+  看得见的最近野狼，`canContinueToUse` 同样按 0.25 倍跟随距离）和「保护主人时排除驯服的马科」
+  （`Wolf.wantsToAttack`）于 2026-11-21 接入。三条只过 `wolf_` / `zombie_equine` 等回归对拍、
+  没有专属逐刻场景。马科骑乘此后未再扩展。
 
 ## 猪的实施现状
 

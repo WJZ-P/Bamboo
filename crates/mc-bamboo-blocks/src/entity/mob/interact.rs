@@ -55,6 +55,10 @@ pub struct MobInteraction {
     /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point;
     /// for armadillos it is `brushOffScute`, dropping the brush loot and spending 16.
     pub shear: bool,
+    /// `AbstractHorse.doPlayerRide`：调用方把这名玩家放到这只生物身上。
+    ///
+    /// `AbstractHorse.doPlayerRide`: the caller puts this player on the mob.
+    pub ride: bool,
     /// `ItemStack.hurtAndBreak(1, player, slot)`：调用方给手里的物品扣 1 点耐久（打火石点苦力怕）。
     ///
     /// `ItemStack.hurtAndBreak(1, player, slot)`: the caller spends one durability point on
@@ -70,10 +74,16 @@ pub struct MobInteraction {
     /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`: false for mooshroom stew
     /// and for bucketing a fish, so creative mode consumes the bucket too.
     pub limit_creative: bool,
-    /// `spawnAtLocation`：熊猫换手里那份竹子时丢下的旧物品。
+    /// `spawnAtLocation`：熊猫换手里那份竹子或剪下马具时丢下的物品。
     ///
-    /// `spawnAtLocation`: the old stack a panda drops when given a new one.
+    /// `spawnAtLocation`: a stack dropped on interaction (e.g. a panda swapping
+    /// bamboo or shearing worn equipment off a mount).
     pub drop_stack: Option<ItemStack>,
+    /// `spawnAtLocation` 的相对偏移（默认脚下；剪下装备用 `PASSENGER` 附着点均值）。
+    ///
+    /// Offset added to the mob's position for `drop_stack` (zero by default;
+    /// sheared equipment uses the average `PASSENGER` attachment point).
+    pub drop_offset: mc_bamboo_core::Vec3,
 }
 
 impl MobInteraction {
@@ -85,10 +95,12 @@ impl MobInteraction {
             replacement: None,
             open_inventory: false,
             shear: false,
+            ride: false,
             damage_held: false,
             discard: false,
             limit_creative: true,
             drop_stack: None,
+            drop_offset: mc_bamboo_core::Vec3::new(0.0, 0.0, 0.0),
         }
     }
 }
@@ -102,6 +114,10 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         MobType::Pig => item_is_tagged(item, mc_bamboo_data::tags::item_tags::PIG_FOOD),
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
+        MobType::Llama => item_is_tagged(item, mc_bamboo_data::tags::item_tags::LLAMA_FOOD),
+        kind if kind.is_equine() => {
+            item_is_tagged(item, mc_bamboo_data::tags::item_tags::HORSE_FOOD)
+        }
         MobType::Panda => super::panda::is_food(item),
         _ => kind.food_tag().is_some_and(|tag| item_is_tagged(item, tag)),
     }

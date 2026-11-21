@@ -747,6 +747,7 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
                 PlayerCommandKind::OpenInventory,
                 PlayerCommandKind::StartFallFlying,
             ]),
+            data: 0,
         },
         15 => PlayRequest::PlayerAbilities {
             flags: rng.next() as u8,

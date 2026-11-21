@@ -1349,10 +1349,12 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
         open_inventory: false,
         shear: false,
+        ride: false,
         damage_held: false,
         discard: false,
         limit_creative: true,
         drop_stack: None,
+        drop_offset: Vec3::new(0.0, 0.0, 0.0),
     })
 }
 
@@ -1471,10 +1473,12 @@ mod tests {
             replacement: None,
             open_inventory: false,
             shear: false,
+            ride: false,
             damage_held: false,
             discard: false,
             limit_creative: true,
             drop_stack: None,
+            drop_offset: Vec3::new(0.0, 0.0, 0.0),
         };
         assert_eq!(
             eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),
