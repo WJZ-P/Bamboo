@@ -267,6 +267,10 @@ fn finalize_spawn_in_group(
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
     }
+    if kind == MobType::Slime {
+        super::slime::finalize_spawn(world, entity, group);
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     finalize_cow(kind, entity, biome, world.random(), group);
 }
@@ -396,7 +400,7 @@ fn cow_variant_for_biome(biome: i32) -> CowVariant {
     }
 }
 
-fn biome_tag_contains(name: &str, biome: i32) -> bool {
+pub(super) fn biome_tag_contains(name: &str, biome: i32) -> bool {
     mc_bamboo_data::tags::TAG_GROUPS
         .iter()
         .filter(|group| group.registry == "minecraft:worldgen/biome")

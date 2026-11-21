@@ -115,6 +115,30 @@ pub enum Goal {
     EatBlock {
         eat_tick: i32,
     },
+    /// `AbstractCubeMob.CubeMobFloatGoal`：在液体里按 0.8 的概率跳，并要求以 1.2 倍速移动。
+    ///
+    /// `AbstractCubeMob.CubeMobFloatGoal`: jump with probability 0.8 while in liquid and ask
+    /// for movement at 1.2 speed.
+    CubeFloat,
+    /// `AbstractCubeMob.CubeMobAttackGoal`：看向目标并朝它跳，300 刻（折半 150）后厌倦。
+    ///
+    /// `AbstractCubeMob.CubeMobAttackGoal`: face the target and hop at it, growing tired
+    /// after 300 ticks (halved to 150).
+    CubeAttack {
+        grow_tired_timer: i32,
+    },
+    /// `AbstractCubeMob.CubeMobRandomDirectionGoal`：没有目标时隔一阵随机换个方向。
+    ///
+    /// `AbstractCubeMob.CubeMobRandomDirectionGoal`: pick a random heading now and then
+    /// while there is no target.
+    CubeRandomDirection {
+        chosen_degrees: f32,
+        next_randomize_time: i32,
+    },
+    /// `AbstractCubeMob.CubeMobKeepOnJumpingGoal`：一直要求移动。
+    ///
+    /// `AbstractCubeMob.CubeMobKeepOnJumpingGoal`: keep asking for movement.
+    CubeKeepJumping,
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -152,6 +176,10 @@ impl Goal {
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
+            Self::CubeFloat
+            | Self::CubeAttack { .. }
+            | Self::CubeRandomDirection { .. }
+            | Self::CubeKeepJumping => super::slime::flags(self),
         }
     }
 
@@ -167,6 +195,8 @@ impl Goal {
                 | Self::MeleeAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
+                | Self::CubeFloat
+                | Self::CubeAttack { .. }
         )
     }
 
@@ -192,6 +222,10 @@ impl Goal {
             Self::BreakDoor => "BreakDoorGoal",
             Self::TurtleEgg { .. } => "ZombieAttackTurtleEggGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
+            Self::CubeFloat => "CubeMobFloatGoal",
+            Self::CubeAttack { .. } => "CubeMobAttackGoal",
+            Self::CubeRandomDirection { .. } => "CubeMobRandomDirectionGoal",
+            Self::CubeKeepJumping => "CubeMobKeepOnJumpingGoal",
         }
     }
 }
@@ -913,6 +947,14 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 })
         }
         Goal::EatBlock { .. } => eat_block_can_use(me, mob, ctx),
+        Goal::CubeFloat => living::is_in_liquid(me, mob),
+        Goal::CubeAttack { .. } => combat_target(mob, ctx).is_some(),
+        Goal::CubeRandomDirection { .. } => {
+            combat_target(mob, ctx).is_none() && super::slime::can_pick_direction(me, mob)
+        }
+        // `!isPassenger()`：没有骑乘。
+        // `!isPassenger()`: riding is not modelled.
+        Goal::CubeKeepJumping => true,
         Goal::BreakDoor => {
             mob.can_break_doors
                 && ctx.blocks().block_game_rules().mob_griefing
@@ -994,14 +1036,26 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             *look_time > 0
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
-        Goal::Float => can_use(goal, me, mob, ctx),
+        Goal::Float
+        | Goal::CubeFloat
+        | Goal::CubeRandomDirection { .. }
+        | Goal::CubeKeepJumping => can_use(goal, me, mob, ctx),
+        Goal::CubeAttack { grow_tired_timer } => {
+            if combat_target(mob, ctx).is_none() {
+                return false;
+            }
+            *grow_tired_timer -= 1;
+            *grow_tired_timer > 0
+        }
         Goal::Unavailable(_) => false,
         Goal::MeleeAttack { .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。
             combat_target(mob, ctx).is_some() && !mob.navigation.is_done()
         }
-        Goal::NearestAttackableTarget { unseen_ticks, .. } if mob.mob_type.is_skeleton() => {
+        Goal::NearestAttackableTarget { unseen_ticks, .. }
+            if mob.mob_type.is_skeleton() || mob.mob_type == super::MobType::Slime =>
+        {
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
@@ -1071,7 +1125,14 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *rel_z = angle.sin();
             *look_time = 20 + me.random.next_int_bounded(20);
         }
-        Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::Float
+        | Goal::Breed { .. }
+        | Goal::Tempt { .. }
+        | Goal::Unavailable(_)
+        | Goal::CubeFloat
+        | Goal::CubeRandomDirection { .. }
+        | Goal::CubeKeepJumping => {}
+        Goal::CubeAttack { grow_tired_timer } => *grow_tired_timer = reduced_tick_delay(300),
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1165,8 +1226,14 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
-        Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } | Goal::Unavailable(_) => {
-        }
+        Goal::Float
+        | Goal::Panic { .. }
+        | Goal::RandomLookAround { .. }
+        | Goal::Unavailable(_)
+        | Goal::CubeFloat
+        | Goal::CubeAttack { .. }
+        | Goal::CubeRandomDirection { .. }
+        | Goal::CubeKeepJumping => {}
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
         Goal::HurtByTarget { .. } => mob.target = None,
@@ -1203,6 +1270,30 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
         Goal::EatBlock { eat_tick } => eat_block_tick(eat_tick, me, mob, ctx),
+        Goal::CubeFloat => {
+            if me.random.next_float() < 0.8 {
+                mob.jump.jump = true;
+            }
+            super::slime::set_wanted_movement(mob, 1.2);
+        }
+        Goal::CubeAttack { .. } => {
+            let target = combat_target(mob, ctx);
+            super::slime::attack_tick(me, mob, target);
+        }
+        Goal::CubeRandomDirection {
+            chosen_degrees,
+            next_randomize_time,
+        } => {
+            *next_randomize_time -= 1;
+            if *next_randomize_time <= 0 {
+                *next_randomize_time =
+                    adjusted_tick_delay(false, 40 + me.random.next_int_bounded(60));
+                *chosen_degrees = me.random.next_int_bounded(360) as f32;
+            }
+            mob.cube.move_y_rot = *chosen_degrees;
+            mob.cube.aggressive = false;
+        }
+        Goal::CubeKeepJumping => super::slime::set_wanted_movement(mob, 1.0),
         Goal::Bow(bow) => {
             if let Some(target) = combat_target(mob, ctx) {
                 bow.tick(me, mob, ctx, target);
@@ -1587,6 +1678,13 @@ fn nearest_look_target(
     let mut found = None;
     for player in players {
         // `notRiding(mob)`：牛不当坐骑，玩家不会骑在它身上。
+        // `Slime.addTargetingGoals` 的选择器：高度差不超过 4。
+        // The `Slime.addTargetingGoals` selector: at most 4 blocks of height difference.
+        if mob.mob_type == super::MobType::Slime
+            && !super::slime::accepts_target_height(me, player.position.y)
+        {
+            continue;
+        }
         if !targeting_test(me, mob, view, &player, range, true) {
             continue;
         }
@@ -1740,6 +1838,11 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
 /// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
 /// `Monster.getWalkTargetValue` 取负的光照路径代价。
 pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
+    // 史莱姆不是 `PathfinderMob`，`Mob.checkSpawnRules` 恒真。
+    // Slimes are not `PathfinderMob`s; `Mob.checkSpawnRules` is always true.
+    if mob.mob_type == super::MobType::Slime {
+        return 0.0;
+    }
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
     }
@@ -1890,6 +1993,11 @@ impl CombatTarget {
 
     pub(crate) fn eye_y(&self) -> f64 {
         self.position.y + f64::from(self.eye)
+    }
+
+    /// `getHitbox()`。
+    pub(crate) const fn hitbox(&self) -> Aabb {
+        self.hitbox
     }
 
     pub(crate) fn eye_position(&self) -> Vec3 {

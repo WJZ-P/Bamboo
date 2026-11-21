@@ -122,6 +122,46 @@ pub(crate) fn pickup_before_entities(region: &mut Region) {
     }
 }
 
+/// `AbstractCubeMob.playerTouch`：玩家碰到史莱姆，史莱姆能打就打一下，打中了放攻击音效。
+/// 官方在 `Player.aiStep` 的 `touch(entity)` 里调，要求玩家活着。
+///
+/// `AbstractCubeMob.playerTouch`: a slime the player touches hits back when it can and plays
+/// its attack sound on a hit. Vanilla calls it from `touch(entity)` in `Player.aiStep`, for
+/// living players only.
+fn slime_touch(region: &mut Region, id: PlayerId, slime: mc_bamboo_blocks::entity::EntityUid) {
+    let alive = region
+        .players
+        .get(&id)
+        .is_some_and(|player| !player.health.is_dead_or_dying());
+    if !alive {
+        return;
+    }
+    let hit = {
+        let (mut level, ticks) = region.block_level();
+        let world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        mc_bamboo_blocks::entity::mob::slime::touch_hit(&world, slime, id.0)
+    };
+    let Some(hit) = hit else {
+        return;
+    };
+    let (hurt, drops) = crate::player_hurt::hurt_player_by_mob(
+        &mut region.hurt_parts(),
+        id,
+        hit.source,
+        hit.amount,
+    );
+    if let Some(drops) = drops {
+        let (mut level, ticks) = region.block_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        world.spawn_player_death_drops(&drops);
+    }
+    if hurt {
+        region
+            .entities
+            .with_mut(slime, mc_bamboo_blocks::entity::mob::slime::after_touch_hit);
+    }
+}
+
 fn pickup_for(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get(&id) else {
         return;
@@ -158,6 +198,12 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
         };
+        if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind {
+            if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime {
+                slime_touch(region, id, entity_id);
+            }
+            continue;
+        }
         if let mc_bamboo_blocks::entity::EntityKind::Arrow(arrow) = &entity.kind {
             if !entity.removed
                 && arrow.in_ground

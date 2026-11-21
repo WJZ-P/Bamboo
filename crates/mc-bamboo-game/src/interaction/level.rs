@@ -56,6 +56,10 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) sky_darken: i32,
     /// `getOverworldClockTime()`：主世界时钟的整数刻，`MONSTERS_BURN` 和区域难度读它。
     pub(crate) clock_ticks: i64,
+    /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。
+    ///
+    /// `WorldGenLevel.getSeed()`: the world seed, read for slime chunks.
+    pub(crate) world_seed: i64,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -393,6 +397,10 @@ impl Level for RegionLevel<'_> {
 
     fn clock_ticks(&self) -> i64 {
         self.clock_ticks
+    }
+
+    fn world_seed(&self) -> i64 {
+        self.world_seed
     }
 
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
@@ -744,6 +752,9 @@ impl Level for RegionLevel<'_> {
         victim.is_on_fire = loot.on_fire;
         victim.position = Some(loot_position(origin));
         farm_loot::describe(&mut victim, loot.victim, loot.wool, None);
+        if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
+            victim.cube_mob_size = Some(loot.cube_size);
+        }
         let view = crate::block_drops::ChunkLevel {
             chunks: self.chunks,
             weather: self.block_weather,

@@ -3539,6 +3539,16 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
     }
+    let _ = writeln!(
+        out,
+        "pub const CUBE_MOB_SIZE: u8 = {};",
+        facts.cube_mob_size
+    );
+    let _ = writeln!(
+        out,
+        "pub const SLIME_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.slime_eye_height)
+    );
     out
 }
 

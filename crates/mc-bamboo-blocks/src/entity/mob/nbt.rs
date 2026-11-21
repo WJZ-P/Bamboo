@@ -314,10 +314,23 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
+    }
+    // 史莱姆是 `AgeableMob` 但不是 `Animal`，没有求爱那两个键。
+    // Slimes are `AgeableMob`s but not `Animal`s, so they lack the two love keys.
+    if !mob.mob_type.is_monster() && mob.mob_type != MobType::Slime {
         put(&mut out, "InLove", Tag::Int(mob.in_love));
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
+    }
+    // ---- AbstractCubeMob ----
+    if mob.mob_type == MobType::Slime {
+        put(&mut out, "Size", Tag::Int(mob.cube.size - 1));
+        put(
+            &mut out,
+            "wasOnGround",
+            Tag::Byte(i8::from(mob.cube.was_on_ground)),
+        );
     }
     // ---- Skeleton / Bogged ----
     if mob.mob_type == MobType::Skeleton {
@@ -453,6 +466,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 .collect(),
             _ => Vec::new(),
         };
+        // `AbstractCubeMob.readAdditionalSaveData`：`setSize(Size + 1, false)` 在
+        // `super.readAdditionalSaveData` 之前，后面读到的 `attributes` 和 `Health` 盖在它上面。
+        // `AbstractCubeMob.readAdditionalSaveData`: `setSize(Size + 1, false)` runs ahead of
+        // `super.readAdditionalSaveData`, so the saved `attributes` and `Health` land on top.
+        if mob.mob_type == MobType::Slime {
+            let size = tag::int_or(tag, "Size", 0).saturating_add(1);
+            super::slime::set_size(me, mob, size, false);
+            mob.cube.was_on_ground = tag::bool_or(tag, "wasOnGround", false);
+        }
         // ---- LivingEntity.readAdditionalSaveData ----
         mob.absorption = tag::float_or(tag, "AbsorptionAmount", 0.0).max(0.0);
         if let Some(Tag::List(entries)) = tag::field(tag, "attributes") {

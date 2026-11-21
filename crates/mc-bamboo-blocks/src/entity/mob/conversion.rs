@@ -197,6 +197,18 @@ fn copy_state(from: &Mob, to: &mut Mob) {
     to.last_hurt_by_player_memory_time = from.last_hurt_by_player_memory_time;
     to.hurt_time = from.hurt_time;
     to.y_body_rot = from.y_body_rot;
+    copy_common(from, to, true);
+}
+
+/// `ConversionType.convertCommon`：两种转化共用的部分。`SPLIT_ON_DEATH`（史莱姆分裂）只跑
+/// 这一段。`preserve_can_pick_up_loot` 是 `ConversionParams.preserveCanPickUpLoot`。
+/// `setSharedFlagOnFire` 有意略过：着火标志由剩余火焰刻数推出来。
+///
+/// `ConversionType.convertCommon`: the part both conversion types share; `SPLIT_ON_DEATH`
+/// (slime splitting) runs only this. `preserve_can_pick_up_loot` is
+/// `ConversionParams.preserveCanPickUpLoot`. `setSharedFlagOnFire` is deliberately skipped:
+/// the fire flag derives from the remaining fire ticks.
+pub(super) fn copy_common(from: &Mob, to: &mut Mob, preserve_can_pick_up_loot: bool) {
     to.absorption = from.absorption;
     for effect in from.effects.entries() {
         living::add_effect(to, effect);
@@ -204,7 +216,9 @@ fn copy_state(from: &Mob, to: &mut Mob) {
     if from.is_baby() && to.mob_type.uses_baby_metadata() {
         to.set_zombie_baby(true);
     }
-    to.can_pick_up_loot = from.can_pick_up_loot;
+    if preserve_can_pick_up_loot {
+        to.can_pick_up_loot = from.can_pick_up_loot;
+    }
     to.left_handed = from.left_handed;
     to.no_ai = from.no_ai;
     to.persistence_required |= from.persistence_required;

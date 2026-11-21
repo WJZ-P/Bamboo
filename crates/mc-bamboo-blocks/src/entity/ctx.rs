@@ -619,6 +619,16 @@ pub enum Command {
         to: super::mob::MobType,
         level_event: i32,
     },
+    /// `AbstractCubeMob.remove`：死掉的史莱姆被移除时，按 `from` 这一刻的状态分裂出小一号的
+    /// 几只。数量和朝向已经在发出者的随机源上取好。
+    ///
+    /// `AbstractCubeMob.remove`: a dead slime splits into smaller cubes built from the state
+    /// `from` has this tick. The count and facings were already drawn on the emitter's random.
+    SplitCubeMob {
+        from: Box<super::mob::Mob>,
+        half_size: i32,
+        children: Vec<super::mob::slime::SplitChild>,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -727,6 +737,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             to,
             level_event,
         } => super::mob::conversion::apply_convert(me, &from, to, level_event, world),
+        Command::SplitCubeMob {
+            from,
+            half_size,
+            children,
+        } => super::mob::slime::apply_split(me, &from, half_size, &children, world),
         Command::TrampleTurtleEgg { pos, chance } => {
             super::mob::living::apply_trample_turtle_egg(world, pos, chance);
         }

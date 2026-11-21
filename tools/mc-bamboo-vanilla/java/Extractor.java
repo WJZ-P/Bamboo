@@ -1177,6 +1177,8 @@ public final class Extractor {
         out.addProperty("chickenSoundVariant", chickenSound.id());
         out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
         out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
+        out.addProperty("cubeMobSize", entityAccessor(net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, "ID_SIZE").id());
+        out.addProperty("slimeEyeHeight", net.minecraft.world.entity.EntityTypes.SLIME.getDimensions().eyeHeight());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();

@@ -1058,6 +1058,13 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。默认 0。
+    ///
+    /// `WorldGenLevel.getSeed()`: the world seed, read for slime chunks. Defaults to 0.
+    fn world_seed(&self) -> i64 {
+        0
+    }
+
     /// 区块的 `InhabitedTime`：区域难度读它。默认 0。
     fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
         0

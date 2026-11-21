@@ -33,6 +33,7 @@ mod pig;
 pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
+pub mod slime;
 pub mod spawn;
 pub mod stray;
 pub(crate) mod timing;
@@ -66,6 +67,7 @@ pub enum MobType {
     Skeleton,
     Stray,
     Bogged,
+    Slime,
 }
 
 impl MobType {
@@ -82,6 +84,7 @@ impl MobType {
             Self::Skeleton => ids::SKELETON,
             Self::Stray => ids::STRAY,
             Self::Bogged => ids::BOGGED,
+            Self::Slime => ids::SLIME,
         }
     }
 
@@ -97,6 +100,7 @@ impl MobType {
             Self::Skeleton => "minecraft:skeleton",
             Self::Stray => "minecraft:stray",
             Self::Bogged => "minecraft:bogged",
+            Self::Slime => "minecraft:slime",
         }
     }
 
@@ -111,6 +115,7 @@ impl MobType {
             Self::Skeleton,
             Self::Stray,
             Self::Bogged,
+            Self::Slime,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -129,6 +134,9 @@ impl MobType {
                     mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
                 )
             }
+            // 大小 1 的尺寸；别的大小看 [`Mob::dimensions`]。
+            // Size 1; other sizes go through [`Mob::dimensions`].
+            (Self::Slime, _) => slime::dimensions(1),
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
@@ -165,18 +173,28 @@ impl MobType {
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
     pub const fn allowed_in_peaceful(self) -> bool {
-        !self.is_monster()
+        !self.is_enemy()
+    }
+
+    /// `MobCategory.MONSTER` 的类型：`Monster` 一支加史莱姆（它是 `AgeableMob`，只实现
+    /// `Enemy`）。消失规则、和平难度、音源类别都按这个分。
+    ///
+    /// The `MobCategory.MONSTER` types: the `Monster` branch plus slimes (an `AgeableMob`
+    /// that only implements `Enemy`). Despawning, peaceful removal and the sound category
+    /// follow it.
+    pub const fn is_enemy(self) -> bool {
+        self.is_monster() || matches!(self, Self::Slime)
     }
 
     /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
     /// 僵尸是 `MONSTER`（128 / 32）。
     pub const fn despawn_distance(self) -> i32 {
-        if self.is_monster() { 128 } else { 32 }
+        if self.is_enemy() { 128 } else { 32 }
     }
 
     /// `Mob.removeWhenFarAway`：牛为假，`Monster` 为真。
     pub const fn removes_when_far_away(self) -> bool {
-        self.is_monster()
+        self.is_enemy()
     }
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
@@ -196,6 +214,7 @@ impl MobType {
             Self::Skeleton => "minecraft:entities/skeleton",
             Self::Stray => "minecraft:entities/stray",
             Self::Bogged => "minecraft:entities/bogged",
+            Self::Slime => "minecraft:entities/slime",
         }
     }
 
@@ -207,7 +226,7 @@ impl MobType {
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
-        if self.is_monster() { 80 } else { 120 }
+        if self.is_enemy() { 80 } else { 120 }
     }
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
@@ -218,7 +237,7 @@ impl MobType {
     /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Slime => None,
             Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
@@ -230,7 +249,7 @@ impl MobType {
 
     pub const fn hurt_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Slime => None,
             Self::Sheep => Some("minecraft:entity.sheep.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
@@ -242,7 +261,7 @@ impl MobType {
 
     pub const fn death_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Slime => None,
             Self::Sheep => Some("minecraft:entity.sheep.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
@@ -254,7 +273,7 @@ impl MobType {
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Slime => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
@@ -277,6 +296,7 @@ impl MobType {
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
             Self::Stray => items::STRAY_SPAWN_EGG,
             Self::Bogged => items::BOGGED_SPAWN_EGG,
+            Self::Slime => items::SLIME_SPAWN_EGG,
         }
     }
 
@@ -292,6 +312,7 @@ impl MobType {
             Self::Skeleton => "entity.minecraft.skeleton",
             Self::Stray => "entity.minecraft.stray",
             Self::Bogged => "entity.minecraft.bogged",
+            Self::Slime => "entity.minecraft.slime",
         }
     }
 
@@ -312,6 +333,7 @@ impl MobType {
             Self::Skeleton,
             Self::Stray,
             Self::Bogged,
+            Self::Slime,
         ]
         .into_iter()
         .find(|kind| kind.entity_type() == entity_type)
@@ -322,7 +344,7 @@ impl MobType {
     /// The vanilla `EntityType.getCategory()` of this kind.
     pub const fn mob_category(self) -> mc_bamboo_data::spawning::MobCategory {
         use mc_bamboo_data::spawning::MobCategory;
-        if self.is_monster() {
+        if self.is_enemy() {
             MobCategory::Monster
         } else {
             MobCategory::Creature
@@ -907,6 +929,10 @@ pub struct MobDeathLoot {
     ///
     /// The sheep `DATA_WOOL_ID`; the loot table picks a sub-table by colour and shear state.
     pub wool: u8,
+    /// 史莱姆的大小，战利品表的 `type_specific/cube_mob` 谓词读它。
+    ///
+    /// The slime size, read by the `type_specific/cube_mob` loot predicate.
+    pub cube_size: i32,
     pub source: DamageSource,
     pub recent_player: Option<[u8; 16]>,
     pub recent_player_id: Option<EntityUid>,
@@ -951,6 +977,7 @@ impl MobDeathLoot {
             victim: mob.mob_type,
             on_fire: me.remaining_fire_ticks > 0,
             wool: mob.wool,
+            cube_size: mob.cube.size,
             source,
             recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
             recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
@@ -1119,6 +1146,10 @@ pub struct Mob {
     ///
     /// `Bogged.DATA_SHEARED`: the mushrooms have been sheared off.
     pub bogged_sheared: bool,
+    /// 史莱姆的大小和移动控制，见 [`slime::CubeState`]。
+    ///
+    /// The slime size and move control, see [`slime::CubeState`].
+    pub cube: slime::CubeState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1188,6 +1219,7 @@ impl Mob {
             MobType::Chicken => chicken::attributes(),
             MobType::Skeleton | MobType::Stray => Attributes::skeleton(),
             MobType::Bogged => bogged::attributes(),
+            MobType::Slime => slime::attributes(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -1198,6 +1230,7 @@ impl Mob {
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton | MobType::Stray | MobType::Bogged => GoalSelector::skeleton(),
+            MobType::Slime => slime::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
@@ -1208,6 +1241,7 @@ impl Mob {
                 GoalSelector::skeleton_targets()
             }
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
+            MobType::Slime => slime::targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
         Self {
@@ -1324,6 +1358,7 @@ impl Mob {
             egg_time: 0,
             freeze_conversion: conversion::ConversionTracker::default(),
             bogged_sheared: false,
+            cube: slime::CubeState::default(),
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1362,7 +1397,11 @@ impl Mob {
 
     /// （宽，高）。
     pub fn dimensions(&self) -> (f32, f32) {
-        let (width, height, _) = self.mob_type.dimensions(self.is_baby());
+        let (width, height, _) = if self.mob_type == MobType::Slime {
+            slime::dimensions(self.cube.size)
+        } else {
+            self.mob_type.dimensions(self.is_baby())
+        };
         (width, height)
     }
 
@@ -1439,6 +1478,10 @@ pub struct MobPublic {
     /// The first boolean after `Mob` for the skeleton family: `DATA_STRAY_CONVERSION_ID`
     /// on skeletons, `DATA_SHEARED` on bogged, absent on strays.
     pub skeleton_flag: bool,
+    /// `AbstractCubeMob.ID_SIZE`；不是史莱姆时恒为 1。
+    ///
+    /// `AbstractCubeMob.ID_SIZE`; always 1 for other mobs.
+    pub cube_size: i32,
     /// `Mob.isPersistenceRequired()`：持久化的生物不参与自然刷怪的计数。
     ///
     /// `Mob.isPersistenceRequired()`: persistent mobs are left out of the spawn counts.
@@ -1492,6 +1535,7 @@ impl MobPublic {
                 MobType::Bogged => mob.bogged_sheared,
                 _ => false,
             },
+            cube_size: mob.cube.size,
             equipment: mob
                 .equipment
                 .iter()
@@ -1502,7 +1546,11 @@ impl MobPublic {
     }
 
     pub fn dimensions(&self) -> (f32, f32) {
-        let (width, height, _) = self.mob_type.dimensions(self.baby);
+        let (width, height, _) = if self.mob_type == MobType::Slime {
+            slime::dimensions(self.cube_size)
+        } else {
+            self.mob_type.dimensions(self.baby)
+        };
         (width, height)
     }
 

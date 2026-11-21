@@ -197,6 +197,10 @@ pub enum EntityData {
     ExperienceValue(i32),
     /// index 17，INT。`Zombie.DATA_SPECIAL_TYPE_ID`。
     SpecialType(i32),
+    /// `AbstractCubeMob.ID_SIZE`（INT）：史莱姆的大小。
+    ///
+    /// `AbstractCubeMob.ID_SIZE` (INT): the slime size.
+    CubeMobSize(i32),
     /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
     DrownedConverting(bool),
     ArrowFlags(u8),
@@ -247,6 +251,7 @@ impl EntityData {
             Self::PigVariant(_) => mc_bamboo_data::entity_types::PIG_VARIANT,
             Self::PigSoundVariant(_) => mc_bamboo_data::entity_types::PIG_SOUND_VARIANT,
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
+            Self::CubeMobSize(_) => mc_bamboo_data::entity_types::CUBE_MOB_SIZE,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
         }
@@ -407,6 +412,10 @@ impl EntityData {
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
                 write_varint(out, *kind);
+            }
+            Self::CubeMobSize(size) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *size);
             }
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);

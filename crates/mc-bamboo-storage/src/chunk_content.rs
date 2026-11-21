@@ -15,10 +15,11 @@ use crate::chunk_nbt::{ChunkEncodeExtra, field};
 /// 官方 `EntityStorage.storeEntities` 认识的根键。
 const ENTITY_ROOT_KEYS: [&str; 3] = ["DataVersion", "Position", "Entities"];
 /// Bamboo 建模的实体。牛走 [`crate::entity::mob::nbt`]，经验球走共通键加四个专属键。
-const MODELED_ENTITIES: [&str; 11] = [
+const MODELED_ENTITIES: [&str; 12] = [
     "minecraft:skeleton",
     "minecraft:stray",
     "minecraft:bogged",
+    "minecraft:slime",
     "minecraft:arrow",
     "minecraft:falling_block",
     "minecraft:tnt",

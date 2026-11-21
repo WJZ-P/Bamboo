@@ -477,6 +477,9 @@ impl Entity {
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
             mob.egg_time = self.random.next_int_bounded(6000) + 6000;
         }
+        if mob.mob_type == mob::MobType::Slime {
+            mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
+        }
     }
 
     /// 对生物跑一段逻辑；不是生物时返回 `None`。

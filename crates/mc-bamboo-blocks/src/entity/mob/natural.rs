@@ -655,6 +655,7 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
                 && valid_mob_spawn_block(world, kind, pos)
                 && super::stray::sees_sky_through_powder_snow(world, pos)
         }
+        MobType::Slime => super::slime::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)
                 && valid_mob_spawn_block(world, kind, pos)
@@ -762,7 +763,13 @@ pub(super) fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockP
 
 /// `EntityType.getSpawnAABB(x, y, z)`：以 (x, y, z) 为脚底中心的身体盒。
 pub(super) fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
-    let (width, height, _) = kind.dimensions(false);
+    let (mut width, mut height, _) = kind.dimensions(false);
+    // `EntityType.spawnDimensionsScale`：只有史莱姆不是 1。
+    // `EntityType.spawnDimensionsScale`: 1 for everything but slimes.
+    if kind == MobType::Slime {
+        width *= super::slime::SPAWN_DIMENSIONS_SCALE;
+        height *= super::slime::SPAWN_DIMENSIONS_SCALE;
+    }
     let half = f64::from(width / 2.0);
     let x = f64::from(pos.x) + 0.5;
     let y = f64::from(pos.y);

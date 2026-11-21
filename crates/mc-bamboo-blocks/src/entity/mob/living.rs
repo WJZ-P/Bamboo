@@ -92,6 +92,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
     }
+    // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。
+    // `AbstractCubeMob.tick`: the landing check after `super.tick()`.
+    if mob.mob_type == super::MobType::Slime {
+        super::slime::after_tick(me, mob);
+    }
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
@@ -238,12 +243,12 @@ pub(crate) fn is_in_lava(me: &Entity, mob: &Mob) -> bool {
     !me.first_tick && fluid_height(mob, fluid_tags::LAVA) > 0.0
 }
 
-fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
+pub(super) fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
     me.in_water || is_in_lava(me, mob)
 }
 
 /// `getEyeY()`。
-fn eye_y(me: &Entity, mob: &Mob) -> f64 {
+pub(super) fn eye_y(me: &Entity, mob: &Mob) -> f64 {
     me.position.y + f64::from(mob.eye_height)
 }
 
@@ -377,7 +382,7 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.damage_cooldown -= 1;
     }
     if mob.is_dead_or_dying() {
-        tick_death(me, mob);
+        tick_death(me, mob, ctx);
     }
     if mob.last_hurt_by_player_memory_time > 0 {
         mob.last_hurt_by_player_memory_time -= 1;
@@ -423,12 +428,7 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.ambient_sound_time += 1;
         if roll < time {
             mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
-            let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .ambient_sound()
-                .unwrap_or_else(|| ambient_sound(mob));
-            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+            play_ambient_sound(me, mob);
         }
     }
 }
@@ -528,21 +528,31 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
         volume,
         pitch,
         position: me.position,
-        hostile: mob.mob_type.is_monster(),
+        hostile: mob.mob_type.is_enemy(),
         seed: None,
     });
 }
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    // 史莱姆的 `getAmbientSound()` 是空：`makeSound(null)` 不放音效，也不取音高。
+    // A slime's `getAmbientSound()` is null: `makeSound(null)` plays nothing and draws no pitch.
+    if mob.mob_type == super::MobType::Slime {
+        return;
+    }
     let pitch = voice_pitch(me, mob);
-    play_sound(
-        me,
-        mob,
-        ambient_sound(mob),
-        mob.mob_type.sound_volume(),
-        pitch,
-    );
+    play_sound(me, mob, ambient_sound(mob), sound_volume(mob), pitch);
+}
+
+/// `getSoundVolume()`：史莱姆按大小算，其余按类型。
+///
+/// `getSoundVolume()`: by size for slimes, by type otherwise.
+fn sound_volume(mob: &Mob) -> f32 {
+    if mob.mob_type == super::MobType::Slime {
+        super::slime::sound_volume(mob)
+    } else {
+        mob.mob_type.sound_volume()
+    }
 }
 
 fn ambient_sound(mob: &Mob) -> &'static str {
@@ -599,10 +609,15 @@ fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
 }
 
 /// `tickDeath`：第 20 刻移除。
-fn tick_death(me: &mut Entity, mob: &mut Mob) {
+fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.death_time += 1;
     if mob.death_time >= 20 && !me.removed {
         mob.events.push(MobEvent::Poof);
+        // `AbstractCubeMob.remove`：先分裂，再 `super.remove`。
+        // `AbstractCubeMob.remove`: split first, then `super.remove`.
+        if mob.mob_type == super::MobType::Slime {
+            super::slime::split_on_remove(me, mob, ctx);
+        }
         me.discard();
     }
 }
@@ -670,7 +685,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         {
             jump_in_liquid(me, mob);
         } else if (me.on_ground || (in_water && fluid <= threshold)) && mob.no_jump_delay == 0 {
-            jump_from_ground(me, mob, ctx.blocks());
+            if mob.mob_type == super::MobType::Slime {
+                super::slime::jump_from_ground(me, mob, ctx.blocks());
+            } else {
+                jump_from_ground(me, mob, ctx.blocks());
+            }
             mob.no_jump_delay = 10;
         }
     } else {
@@ -856,7 +875,11 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.age != 0 {
         mob.in_love = 0;
     }
-    move_control_tick(me, mob, ctx.blocks());
+    if mob.mob_type == super::MobType::Slime {
+        super::slime::move_control_tick(me, mob);
+    } else {
+        move_control_tick(me, mob, ctx.blocks());
+    }
     look_control_tick(me, mob);
     // `JumpControl.tick`。
     mob.jumping = mob.jump.jump;
@@ -864,7 +887,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 }
 
 /// `Mob.setSpeed`：同时设 `zza`。
-fn set_speed(mob: &mut Mob, speed: f32) {
+pub(super) fn set_speed(mob: &mut Mob, speed: f32) {
     mob.speed = speed;
     mob.zza = speed;
 }
@@ -985,7 +1008,7 @@ fn jump_in_liquid(me: &mut Entity, mob: &Mob) {
 }
 
 /// `getBlockJumpFactor`：只有蜂蜜块是 0.5。
-fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
+pub(super) fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
     let factor = |state: crate::state::BlockState| {
         if state.is(mc_bamboo_data::blocks::HONEY_BLOCK) {
             0.5_f32
@@ -1417,9 +1440,10 @@ pub(crate) fn hurt_server(
                 .unwrap_or_else(|| match mob.mob_type {
                     super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
                     super::MobType::Chicken => super::chicken::sounds(mob)[2],
+                    super::MobType::Slime => super::slime::death_sound(mob),
                     _ => mob.sound_variant.death(),
                 });
-            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+            play_sound(me, mob, sound, sound_volume(mob), pitch);
         }
         die(me, mob, ctx, source);
     } else if full_hit {
@@ -1432,9 +1456,10 @@ pub(crate) fn hurt_server(
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[1],
+                super::MobType::Slime => super::slime::hurt_sound(mob),
                 _ => mob.sound_variant.hurt(),
             });
-        play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+        play_sound(me, mob, sound, sound_volume(mob), pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();
@@ -1642,6 +1667,22 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
+    if mob.mob_type == super::MobType::Slime {
+        // `Slime.setSize` 把 `xpReward` 设成大小；史莱姆没有装备加成。
+        // `Slime.setSize` sets `xpReward` to the size; slimes carry no equipment bonus.
+        mob.events.push(MobEvent::Death);
+        if drops {
+            ctx.emit(
+                Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+                me,
+            );
+        }
+        if by_player && drops {
+            let amount = mob.cube.size;
+            ctx.emit(Command::AwardDeathExperience { amount }, me);
+        }
+        return;
+    }
     if !mob.mob_type.is_monster() {
         mob.events.push(MobEvent::Death);
         animal_death_drops(
