@@ -130,6 +130,10 @@ pub enum KindPublic {
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
+    /// 羊驼的口水：同步要的 UUID、主人和俯仰角。
+    ///
+    /// Llama spit: the UUID, owner and pitch the sync layer needs.
+    LlamaSpit(super::spit::LlamaSpitPublic),
     /// 扔出的鸡蛋：同步要它的物品、主人和俯仰角。
     ///
     /// A thrown egg: the sync layer reads its item, owner and pitch.
@@ -149,6 +153,7 @@ impl KindPublic {
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
+            Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::Mob(mob) => mob.mob_type.entity_type(),
@@ -202,6 +207,7 @@ pub enum KindState {
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
+    LlamaSpit(Box<super::spit::LlamaSpit>),
     Egg(Box<super::thrown_egg::ThrownEgg>),
     SplashPotion(Box<super::splash_potion::SplashPotion>),
 }
@@ -318,6 +324,7 @@ impl EntityRow {
                 EntityKind::ExperienceOrb(orb)
             }
             (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
+            (KindPublic::LlamaSpit(_), KindState::LlamaSpit(spit)) => EntityKind::LlamaSpit(spit),
             (KindPublic::Egg(_), KindState::Egg(egg)) => EntityKind::Egg(egg),
             (KindPublic::SplashPotion(_), KindState::SplashPotion(potion)) => {
                 EntityKind::SplashPotion(potion)
@@ -395,6 +402,10 @@ impl Entity {
             EntityKind::Arrow(arrow) => (
                 KindPublic::Arrow(arrow.public(self.remaining_fire_ticks)),
                 KindState::Arrow(arrow),
+            ),
+            EntityKind::LlamaSpit(spit) => (
+                KindPublic::LlamaSpit(spit.public()),
+                KindState::LlamaSpit(spit),
             ),
             EntityKind::Egg(egg) => (
                 KindPublic::Egg(Box::new(egg.public(self.remaining_fire_ticks))),
@@ -909,6 +920,9 @@ impl EntityStore {
         entity.finish_mob_random();
         if let EntityKind::Arrow(arrow) = &mut entity.kind {
             arrow.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::LlamaSpit(spit) = &mut entity.kind {
+            spit.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
         if let EntityKind::Egg(egg) = &mut entity.kind {
             egg.uuid = super::mob::insecure_uuid(&mut entity.random);

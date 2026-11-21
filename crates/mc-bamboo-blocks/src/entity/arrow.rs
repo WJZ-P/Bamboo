@@ -290,7 +290,7 @@ pub struct ArrowShot {
     pub pickup: Pickup,
 }
 
-fn rotation(movement: Vec3) -> (f32, f32) {
+pub(super) fn rotation(movement: Vec3) -> (f32, f32) {
     let horizontal = (movement.x * movement.x + movement.z * movement.z).sqrt();
     let deg = |r| (r * f64::from(180.0_f32 / std::f32::consts::PI)) as f32;
     (
@@ -299,7 +299,7 @@ fn rotation(movement: Vec3) -> (f32, f32) {
     )
 }
 
-fn lerp_rotation(from: f32, to: f32) -> f32 {
+pub(super) fn lerp_rotation(from: f32, to: f32) -> f32 {
     let mut from = from;
     while to - from < -180.0 {
         from -= 360.0;

@@ -93,6 +93,7 @@ mod tests {
             hand: Hand::Main,
             held: ItemStack::new(item, 1),
             creative: false,
+            sneaking: false,
             position: Vec3::new(1.5, 64.0, 0.5),
         }
     }

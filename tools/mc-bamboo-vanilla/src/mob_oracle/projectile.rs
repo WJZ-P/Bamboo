@@ -764,7 +764,7 @@ impl Report {
         }
     }
 
-    fn check_projectile_motion(
+    pub(super) fn check_projectile_motion(
         &mut self,
         label: &str,
         entity: &str,
@@ -832,6 +832,7 @@ fn shear_shooter(world: &mut World<'_>, case: &ProjectileCase) -> (bool, Vec<[i6
         hand: mc_bamboo_core::Hand::Main,
         held: ItemStack::new(mc_bamboo_data::items::SHEARS, 1),
         creative: false,
+        sneaking: false,
         position: Vec3::new(case.player_x, 64.0, 0.5),
     };
     let outcome = world.interact_mob(case.first_id, &request);
@@ -860,7 +861,7 @@ fn shear_shooter(world: &mut World<'_>, case: &ProjectileCase) -> (bool, Vec<[i6
     (outcome.result.consumes_action(), drops)
 }
 
-fn motion(entity: &Entity, pitch: f32) -> [i64; 8] {
+pub(super) fn motion(entity: &Entity, pitch: f32) -> [i64; 8] {
     let p = entity.position;
     let v = entity.delta;
     [

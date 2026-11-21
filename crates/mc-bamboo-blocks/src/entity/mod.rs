@@ -14,6 +14,7 @@ pub mod ctx;
 pub mod mob;
 pub mod parallel;
 pub mod random;
+pub mod spit;
 pub mod splash_potion;
 pub mod store;
 pub mod thrown_egg;
@@ -205,6 +206,10 @@ pub enum EntityKind {
     Item(GroundItem),
     ExperienceOrb(ExperienceOrb),
     Arrow(Box<arrow::Arrow>),
+    /// 羊驼的口水。
+    ///
+    /// A llama's spit.
+    LlamaSpit(Box<spit::LlamaSpit>),
     /// 扔出的鸡蛋。
     ///
     /// A thrown egg.
@@ -228,6 +233,7 @@ impl EntityKind {
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
+            Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::Mob(mob) => mob.mob_type.entity_type(),
@@ -427,6 +433,7 @@ impl Entity {
             EntityKind::Item(_) => Entity::tick_item(self, ctx),
             EntityKind::ExperienceOrb(_) => orb::tick_orb(self, ctx),
             EntityKind::Arrow(_) => arrow::tick(self, ctx),
+            EntityKind::LlamaSpit(_) => spit::tick(self, ctx),
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
             EntityKind::Mob(_) => {}
