@@ -1042,21 +1042,21 @@ fn block_state(chunks: &ChunkStore, pos: BlockPos) -> BlockState {
 /// The read-only block view for player movement checks. Besides the chunk store it
 /// carries the block-entity table: `moving_piston` is a dynamic shape whose collision
 /// shape comes from the [`PistonMoving`] at that cell.
-struct PlayerBlocks<'a> {
+pub(crate) struct PlayerBlocks<'a> {
     chunks: &'a ChunkStore,
     entities: &'a BlockEntities,
 }
 
 impl PlayerBlocks<'_> {
-    fn new<'a>(chunks: &'a ChunkStore, entities: &'a BlockEntities) -> PlayerBlocks<'a> {
+    pub(crate) fn new<'a>(chunks: &'a ChunkStore, entities: &'a BlockEntities) -> PlayerBlocks<'a> {
         PlayerBlocks { chunks, entities }
     }
 
-    fn state(&self, pos: BlockPos) -> BlockState {
+    pub(crate) fn state(&self, pos: BlockPos) -> BlockState {
         block_state(self.chunks, pos)
     }
 
-    fn piston(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
+    pub(crate) fn piston(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
         let entity = self.entities.find_dyn(pos)?;
         entity
             .as_any()
@@ -1064,7 +1064,7 @@ impl PlayerBlocks<'_> {
             .map(PistonMoving::collision_shape)
     }
 
-    fn shulker(&self, pos: BlockPos) -> Option<Aabb> {
+    pub(crate) fn shulker(&self, pos: BlockPos) -> Option<Aabb> {
         let entity = self.entities.find_dyn(pos)?;
         entity
             .as_any()

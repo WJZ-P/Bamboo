@@ -13,8 +13,10 @@
 //! This module keeps that shape: [`tick`] handles dismounting and rider
 //! placement, [`on_move_vehicle`] takes the position the client reports.
 
-use mc_bamboo_blocks::entity::{EntityUid, KindPublic};
-use mc_bamboo_core::{Vec3, mth};
+use mc_bamboo_blocks::entity::{EntityUid, KindPublic, no_block_collision, sweep_movement};
+use mc_bamboo_blocks::{CollisionContext, EntityContext, world::CollisionBlocks};
+use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_data::registries::attribute;
 use mc_bamboo_protocol::packet::play::MoveVehicle;
 
 use crate::{inbound::PlayerId, region::Region};
@@ -392,18 +394,110 @@ pub(crate) fn on_move_vehicle(
         region.links.send(id, &back);
         return;
     }
+    let KindPublic::Mob(mob) = &public.kind else {
+        return;
+    };
+    // 官方 `vehicle.move(MoverType.PLAYER, 从 lastGood 到包里的位置)`：先用方块碰撞
+    // 走一遍，再和客户端报的位置比。载具的位置由客户端模拟，服务端这一步只做校验。
+    //
+    // Vanilla `vehicle.move(MoverType.PLAYER, from lastGood to the packet position)`:
+    // sweep the blocks once, then compare with the client's position. The client
+    // simulates the vehicle; the server only validates here.
+    let start = public.position;
+    let old_box = public.bounding_box();
+    let step = mob.attributes.value(attribute::STEP_HEIGHT) as f32;
+    let context = vehicle_context(start);
+    let blocks = crate::player_move::PlayerBlocks::new(&region.chunks, &region.block_entities);
+    let border = region.global.world_border.clone();
+    let swept = start.add(sweep_movement(
+        target.subtract(player.riding.last_good),
+        old_box,
+        step,
+        public.on_ground,
+        context,
+        CollisionBlocks {
+            block_at: |pos| blocks.state(pos),
+            piston_at: |pos| blocks.piston(pos),
+            shulker_at: |pos| blocks.shulker(pos),
+        },
+        &border,
+    ));
+    let x_error = target.x - swept.x;
+    let mut y_error = target.y - swept.y;
+    // 官方这个条件恒为真，竖直误差不计入 moved wrongly。
+    //
+    // This condition is always true in vanilla, so vertical error never counts as moved wrongly.
+    if y_error > -0.5 || y_error < 0.5 {
+        y_error = 0.0;
+    }
+    let z_error = target.z - swept.z;
+    let moved_wrongly = x_error * x_error + y_error * y_error + z_error * z_error;
+    // 官方 `level.noCollision(vehicle, oldAABB)` 是方块和边界都不碰。实体之间的碰撞
+    // （`isEntityCollidingWithAnythingNew`）Bamboo 没有建模，见 README 的已知限制。
+    //
+    // Vanilla `level.noCollision(vehicle, oldAABB)` means no block or border collision.
+    // Entity-entity collisions (`isEntityCollidingWithAnythingNew`) are not modelled in
+    // Bamboo; see the known limitations in the README.
+    let old_clear = no_block_collision(
+        old_box,
+        context,
+        CollisionBlocks {
+            block_at: |pos: BlockPos| blocks.state(pos),
+            piston_at: |pos| blocks.piston(pos),
+            shulker_at: |pos| blocks.shulker(pos),
+        },
+    ) && border.no_border_collision(start.x, start.z, old_box);
+    if moved_wrongly > 0.0625 && old_clear {
+        // 官方把位置拉回移动前，朝向仍用包里的，再把载具位置发回客户端。
+        //
+        // Vanilla snaps the position back to where it was before the move, keeps
+        // the packet's rotation and sends the vehicle position back.
+        let back = MoveVehicle {
+            position: start,
+            yaw: target_yaw,
+            pitch: target_pitch,
+        };
+        region.links.send(id, &back);
+        region.entities.with_mut(vehicle, |entity| {
+            set_pose(entity, start, target_yaw, target_pitch)
+        });
+        return;
+    }
     player.riding.last_good = target;
     region.entities.with_mut(vehicle, |entity| {
-        entity.position = target;
-        entity.y_rot = target_yaw;
+        set_pose(entity, target, target_yaw, target_pitch);
         entity.on_ground = on_ground;
-        entity.with_mob(|_, mob| {
-            mob.x_rot =
-                mc_bamboo_blocks::entity::mob::control::clamp_x_rot(target_pitch, mob.x_rot);
-            mob.y_body_rot = target_yaw;
-            mob.y_head_rot = target_yaw;
-        });
     });
+}
+
+/// 官方的 `absSnapTo(x, y, z, yRot, xRot)`：位置、朝向、头身朝向一起设，不改落地标记。
+///
+/// Vanilla `absSnapTo(x, y, z, yRot, xRot)`: position, rotation and head/body yaw in
+/// one go, without touching the ground flag.
+fn set_pose(entity: &mut mc_bamboo_blocks::entity::Entity, position: Vec3, yaw: f32, pitch: f32) {
+    entity.position = position;
+    entity.y_rot = yaw;
+    entity.with_mob(|_, mob| {
+        mob.x_rot = mc_bamboo_blocks::entity::mob::control::clamp_x_rot(pitch, mob.x_rot);
+        mob.y_body_rot = yaw;
+        mob.y_head_rot = yaw;
+    });
+}
+
+/// 载具的碰撞上下文：官方 `CollisionContext.of(vehicle)`。马科不会潜行，
+/// `isDescending()` 恒假；也不在 `powder_snow_walkable_mobs` 里。
+///
+/// The vehicle's collision context, vanilla `CollisionContext.of(vehicle)`. Equines
+/// never sneak, so `isDescending()` is false, and they are not powder-snow walkable.
+fn vehicle_context(position: Vec3) -> CollisionContext {
+    CollisionContext::Entity(EntityContext {
+        fall_distance: 0.0,
+        bottom: position.y,
+        falling_block: false,
+        descending: false,
+        placement: false,
+        powder_snow_walkable: false,
+    })
 }
 
 /// 官方 `containsInvalidValues`。

@@ -411,3 +411,118 @@ fn the_inventory_key_ignores_an_untamed_mount() {
     assert!(frames_with_id(&client.take_frames(), 42).is_empty());
     assert!(!server.region().menus.contains_key(&client.id));
 }
+
+/// 客户端报的载具位置要过官方 `handleMoveVehicle` 的方块校验：平地上的位移照收。
+///
+/// The client's vehicle position goes through vanilla `handleMoveVehicle`'s block
+/// check: a move over open ground is accepted.
+#[test]
+fn a_vehicle_move_over_open_ground_is_accepted() {
+    let (mut server, client, uid) = staged_horse();
+    let at = server
+        .region()
+        .entities
+        .public_at(uid)
+        .expect("horse")
+        .position;
+    let target = Vec3::new(at.x + 0.5, at.y, at.z);
+    super::on_move_vehicle(server.region(), client.id, target, 0.0, 0.0, true);
+    let public = server.region().entities.public_at(uid).expect("horse");
+    assert_eq!(public.position, target);
+}
+
+/// 穿过墙的位移被拉回：官方的 `vehicle.move` 撞在墙上，和包里的位置差超过 0.25 格，
+/// 旧位置又没卡在方块里，就 `absSnapTo` 回原位并发一包载具位置。
+///
+/// A move through a wall is rejected: vanilla `vehicle.move` stops at the wall, the
+/// gap to the packet position is over 0.25 blocks and the old spot is clear, so it
+/// snaps back and sends the vehicle position.
+#[test]
+fn a_vehicle_move_through_a_wall_is_rejected() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_protocol::packet::{ClientboundPacket, play::MoveVehicle};
+
+    use crate::world::tests::frames_with_id;
+
+    let (mut server, client, uid) = staged_horse();
+    let at = server
+        .region()
+        .entities
+        .public_at(uid)
+        .expect("horse")
+        .position;
+    let wall = (at.x + 1.5) as i32;
+    let base = at.y as i32;
+    for y in base..base + 3 {
+        for z in (at.z as i32 - 3)..(at.z as i32 + 4) {
+            server.set_block(BlockPos::new(wall, y, z), blocks::STONE);
+        }
+    }
+    let target = Vec3::new(at.x + 1.5, at.y, at.z);
+    super::on_move_vehicle(server.region(), client.id, target, 30.0, 15.0, true);
+    let public = server.region().entities.public_at(uid).expect("horse");
+    assert_eq!(public.position, at, "the wall keeps the vehicle back");
+    // 朝向仍按包里的设，位置包也带着这个朝向。
+    assert_eq!(public.yaw, 30.0);
+    server.region().links.flush();
+    let frames = client.take_frames();
+    let snaps = frames_with_id(&frames, MoveVehicle::ID);
+    assert_eq!(snaps.len(), 1, "one position packet");
+}
+
+/// 造一个已上马的测试场景：玩家在出生点，马就在他脚下。
+///
+/// Build a mounted scene: the player at spawn with a horse under them.
+fn staged_horse() -> (
+    crate::world::tests::Harness,
+    crate::world::tests::Client,
+    i32,
+) {
+    use mc_bamboo_blocks::entity::Entity;
+
+    use crate::world::tests::Harness;
+
+    let mut server = Harness::new(2);
+    let client = server.join("Rider");
+    server.tick();
+    let _ = client.take_frames();
+    let at = server.region().players[&client.id].position();
+    let horse = Entity::by_mob_type(MobType::Horse, at);
+    let uid = server.spawn_entity(horse);
+    super::mount(server.region(), client.id, uid);
+    (server, client, uid)
+}
+
+/// 载具已经卡在方块里时，撞墙的位移也不拉回：官方 `fail && level.noCollision(vehicle, oldAABB)`
+/// 的前一半是「旧位置没卡住」，卡住时放行，否则永远出不来。
+///
+/// A vehicle already stuck inside blocks is not snapped back on a blocked move: the
+/// first half of vanilla `fail && level.noCollision(vehicle, oldAABB)` is "the old
+/// spot is clear", and letting a stuck vehicle through is how it escapes.
+#[test]
+fn a_vehicle_stuck_in_blocks_may_move_out() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    let (mut server, client, uid) = staged_horse();
+    let at = server
+        .region()
+        .entities
+        .public_at(uid)
+        .expect("horse")
+        .position;
+    let here = BlockPos::new(at.x as i32, at.y as i32, at.z as i32);
+    server.set_block(here, blocks::STONE);
+    let wall = (at.x + 1.5) as i32;
+    let base = at.y as i32;
+    for y in base..base + 3 {
+        for z in (at.z as i32 - 3)..(at.z as i32 + 4) {
+            server.set_block(BlockPos::new(wall, y, z), blocks::STONE);
+        }
+    }
+    let target = Vec3::new(at.x + 1.5, at.y, at.z);
+    super::on_move_vehicle(server.region(), client.id, target, 0.0, 0.0, true);
+    let public = server.region().entities.public_at(uid).expect("horse");
+    assert_eq!(public.position, target);
+}

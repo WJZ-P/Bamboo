@@ -349,13 +349,18 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   马 1.44375、驴 1.1125、骡 1.2125、羊驼 `(1.37, -0.3)`，按载具朝向旋转；扬蹄时
   `AbstractHorse` 附加的 `0.15 * standAnimO` / `-0.7 * standAnimO` 还没建模）。
 - 载具位置：`move_vehicle` 在世界线程处理输入时直接改载具行（`handleMoveVehicle` 的夹取、
-  `wrapDegrees`、100 平方格的「移动太快」拉回、非法值断开）。
+  `wrapDegrees`、100 平方格的「移动太快」拉回、非法值断开），再用 `move(MoverType.PLAYER)`
+  的扫掠（`sweep_movement`，步高取 `STEP_HEIGHT` 属性）和包里的位置比：水平差超过 0.25 格
+  且旧位置没卡在方块或边界里就 `absSnapTo` 回原位并发回载具位置。实体之间的碰撞
+  （`isEntityCollidingWithAnythingNew`）Bamboo 没有建模，这一步跳过。
 - 朝向：马科 `tick_ridden` 把载具朝向设成骑手朝向、俯仰取一半，旧朝向、身体和头都对齐；
   玩家控制时 `isEffectiveAi()` 为假，AI 和 `travel` 都不跑，速度清零（和官方服务端一致）。
 - 跳跃：`START_RIDING_JUMP` → `handleStartJump`（扬蹄加 `entity.horse.jump` 声），`STOP_RIDING_JUMP` 是空的。
+- 开坐骑物品栏：`OPEN_INVENTORY` 按官方 `AbstractHorse.openCustomInventoryScreen` 的条件
+  （驯服，且骑手就是这名玩家）打开，走和潜行右键同一个 `menu::station::open_mount`。
 - 同步：`Entity.passengers` 进公开快照，像 `ServerEntity.sendChanges` 那样在名单变化时发 `set_passengers`。
 
-**还没做**：载具移动的官方碰撞校验（`move()`、`isEntityCollidingWithAnythingNew`、`noCollision`），
+**还没做**：载具移动校验里实体之间的碰撞（`isEntityCollidingWithAnythingNew`），
 载具摔落伤害和 `clientVehicleIsFloating` 踢人；玩家下线时 `RootVehicle` 存进玩家档；岛拆分把
 「载具 + 骑手」当成不可分的一组。
 这几项都不改阶段顺序，但要么要改移动校验、要么要改存档和分区器，留给队长定。
