@@ -850,3 +850,23 @@ fn a_zombie_pairs_with_its_equipment_and_transient_armor() {
         "the helmet's armor modifier is synced"
     );
 }
+
+/// 海龟的 18、19 变回默认时要发两条布尔，不能落到牛的花色上。
+///
+/// A turtle's 18 and 19 must fall back to the two booleans, not to the cow
+/// variants.
+#[test]
+fn turtle_metadata_defaults_are_the_two_booleans() {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as facts;
+    use mc_bamboo_protocol::packet::play::EntityData;
+
+    assert_eq!(
+        default_data_for_type(facts::TURTLE_HAS_EGG, MobType::Turtle),
+        EntityData::TurtleHasEgg(false)
+    );
+    assert_eq!(
+        default_data_for_type(facts::TURTLE_LAYING_EGG, MobType::Turtle),
+        EntityData::TurtleLayingEgg(false)
+    );
+}

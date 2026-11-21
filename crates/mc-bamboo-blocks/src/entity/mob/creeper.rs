@@ -251,10 +251,8 @@ pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest)
     MobInteraction {
         result: InteractionResult::Success,
         shrink_held: !damageable && !req.creative,
-        replacement: None,
-        shear: false,
-        open_inventory: false,
         damage_held: damageable && !req.creative,
+        ..MobInteraction::pass()
     }
 }
 

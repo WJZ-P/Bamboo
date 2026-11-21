@@ -99,6 +99,10 @@ pub mod facts {
     /// replace it outright. Asked with a cow: only the ocelot/parrot and polar-bear blocks
     /// answer per entity type.
     pub const VALID_SPAWN: u64 = 1 << 37;
+    /// `isPathfindable(PathComputationType.WATER)`，水中寻路和随机游动选点用。
+    ///
+    /// `isPathfindable(PathComputationType.WATER)`, for swim pathfinding and random swim targets.
+    pub const PATHFINDABLE_WATER: u64 = 1 << 38;
 }
 
 /// 官方 `WalkNodeEvaluator` 给寻路格子分的类别，顺序和官方 `PathType` 一致。

@@ -3233,7 +3233,16 @@ impl<'a> World<'a> {
         if outcome.damage_held {
             crate::durability::hurt_hand(self, request.hand, 1);
         }
-        self.level.put_entity(entity);
+        if outcome.discard {
+            // `Bucketable.bucketMobPickup` 的 `pickupEntity.discard()`：不 `put` 回来
+            // 就等于从表里拿掉，攒下的事件留给同步层。
+            // `pickupEntity.discard()`: leaving it out of the table removes it; keep
+            // the events it queued for the sync layer.
+            entity.discard();
+            self.level.keep_departed_mob_events(&entity);
+        } else {
+            self.level.put_entity(entity);
+        }
         outcome
     }
 

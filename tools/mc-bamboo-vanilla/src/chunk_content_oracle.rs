@@ -638,6 +638,12 @@ fn run_cases(
         MobType::Spider,
         MobType::CaveSpider,
         MobType::Enderman,
+        MobType::Squid,
+        MobType::GlowSquid,
+        MobType::Cod,
+        MobType::Salmon,
+        MobType::TropicalFish,
+        MobType::Pufferfish,
     ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
@@ -1478,7 +1484,36 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(arrow_archive_cases());
     out.extend(spit_archive_cases());
     out.extend(egg_archive_cases());
+    out.extend(fish_archive_cases());
     out
+}
+
+fn fish_archive_cases() -> [Tag; 4] {
+    use mc_bamboo_blocks::entity::mob::{MobType, fish};
+
+    [
+        MobType::Cod,
+        MobType::Salmon,
+        MobType::TropicalFish,
+        MobType::Pufferfish,
+    ]
+    .map(|kind| {
+        let mut store = mc_bamboo_blocks::EntityStore::new();
+        let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(1.5, 63.0, -2.5)));
+        store.with_mut(uid, |entity| {
+            entity.with_mob(|me, mob| {
+                mob.fish.from_bucket = true;
+                match kind {
+                    MobType::Salmon => mob.fish.variant = 2,
+                    MobType::TropicalFish => mob.fish.variant = fish::pack_variant(9, 10, 4),
+                    MobType::Pufferfish => mob.fish.puff_state = 2,
+                    _ => {}
+                }
+                fish::refresh_dimensions(me, mob);
+            });
+        });
+        write_entity(&store.get(uid).expect("fresh fish").split()).expect("fish archive")
+    })
 }
 
 /// 扔出的鸡蛋：带主人、离开主人、无重力的蓝蛋，和一枚刚生成的普通蛋。

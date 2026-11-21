@@ -186,6 +186,60 @@ pub enum Goal {
     EatBlock {
         eat_tick: i32,
     },
+    /// `Squid.SquidRandomMovementGoal`：只改鱿鱼的移动向量，不占标志位。
+    ///
+    /// `Squid.SquidRandomMovementGoal`: writes the squid movement vector, no flags.
+    SquidRandomMovement,
+    /// `Squid.SquidFleeGoal`：在水里远离最近打它的生物（每刻目标）。
+    ///
+    /// `Squid.SquidFleeGoal`: swim away from the last attacker (ticks every tick).
+    SquidFlee {
+        flee_ticks: i32,
+    },
+    /// `RandomSwimmingGoal`（鱼的 `FishSwimGoal`）：随机挑一个水里可寻路的点游过去。
+    ///
+    /// `RandomSwimmingGoal` (the fish `FishSwimGoal`): a random path-findable water spot.
+    Swim {
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+    },
+    /// `Pufferfish.PufferfishPuffGoal`：附近有生物就鼓起来。
+    ///
+    /// `Pufferfish.PufferfishPuffGoal`: puff up when something is nearby.
+    PufferfishPuff,
+    /// `FollowFlockLeaderGoal`：成群的那几种鱼跟着领头的游。
+    ///
+    /// `FollowFlockLeaderGoal`: schooling fish follow a leader.
+    FollowFlock {
+        next_start: i32,
+        time_to_recalc: i32,
+    },
+    /// `Turtle.TurtleLayEggGoal`：回到离家 9 格内，在沙子上产蛋。
+    ///
+    /// `Turtle.TurtleLayEggGoal`: lay an egg on sand within nine blocks of home.
+    TurtleLayEgg {
+        speed: f64,
+    },
+    /// `Turtle.TurtleGoHomeGoal`：往家方块走。
+    ///
+    /// `Turtle.TurtleGoHomeGoal`: swim or walk back to the home position.
+    TurtleGoHome {
+        speed: f64,
+    },
+    /// `Turtle.TurtleGoToWaterGoal`：在陆地上时往 24 格内的水走（`MoveToBlockGoal`）。
+    ///
+    /// `Turtle.TurtleGoToWaterGoal`: head for water within 24 blocks while on land.
+    TurtleGoToWater {
+        speed: f64,
+    },
+    /// `Turtle.TurtleTravelGoal`：在水里朝 512 格内的随机远点一段段游。
+    ///
+    /// `Turtle.TurtleTravelGoal`: swim leg by leg towards a random far point in water.
+    TurtleTravel {
+        speed: f64,
+        stuck: bool,
+    },
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -279,9 +333,11 @@ impl Goal {
             Self::EndermanFreeze => &[Flag::Jump, Flag::Move],
             Self::EndermanBlock { .. } => &[],
             Self::RabbitRaid(_) => &[Flag::Move, Flag::Jump],
-            Self::Panic { .. } | Self::Stroll { .. } | Self::Swell { .. } | Self::Avoid(_) => {
-                &[Flag::Move]
-            }
+            Self::Panic { .. }
+            | Self::Stroll { .. }
+            | Self::Swell { .. }
+            | Self::Avoid(_)
+            | Self::Swim { .. } => &[Flag::Move],
             Self::Fox(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
@@ -300,8 +356,16 @@ impl Goal {
             Self::LeapAtTarget { .. } => &[Flag::Jump, Flag::Move],
             Self::RestrictSun => &[],
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
+            // `MoveToBlockGoal` 锁 MOVE + JUMP；`TurtleGoHomeGoal` 没设标志位。
+            // `MoveToBlockGoal` locks MOVE and JUMP; `TurtleGoHomeGoal` sets none.
+            Self::TurtleLayEgg { .. } | Self::TurtleGoToWater { .. } => &[Flag::Move, Flag::Jump],
+            Self::TurtleGoHome { .. } | Self::TurtleTravel { .. } => &[],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
+            Self::SquidRandomMovement
+            | Self::SquidFlee { .. }
+            | Self::PufferfishPuff
+            | Self::FollowFlock { .. } => &[],
         }
     }
 
@@ -323,8 +387,11 @@ impl Goal {
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
                 | Self::Swell { .. }
+                | Self::SquidFlee { .. }
                 | Self::RandomStand { .. }
                 | Self::RangedAttack { .. }
+                | Self::TurtleLayEgg { .. }
+                | Self::TurtleGoToWater { .. }
         )
     }
 
@@ -374,6 +441,15 @@ impl Goal {
             Self::RangedAttack { .. } => "RangedAttackGoal",
             Self::LlamaHurtByTarget { .. } => "LlamaHurtByTargetGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
+            Self::SquidRandomMovement => "SquidRandomMovementGoal",
+            Self::SquidFlee { .. } => "SquidFleeGoal",
+            Self::Swim { .. } => "RandomSwimmingGoal",
+            Self::PufferfishPuff => "PufferfishPuffGoal",
+            Self::FollowFlock { .. } => "FollowFlockLeaderGoal",
+            Self::TurtleLayEgg { .. } => "TurtleLayEggGoal",
+            Self::TurtleGoHome { .. } => "TurtleGoHomeGoal",
+            Self::TurtleGoToWater { .. } => "TurtleGoToWaterGoal",
+            Self::TurtleTravel { .. } => "TurtleTravelGoal",
         }
     }
 }
@@ -1042,6 +1118,21 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if super::fox::is_defending_fox(mob) || !should_panic(mob, ctx) {
                 return false;
             }
+            if mob.mob_type == super::MobType::Turtle {
+                // `TurtlePanicGoal.canUse`：先找 7 格内的水，找不到再取随机点。
+                // `TurtlePanicGoal.canUse`: look for water within seven blocks first.
+                if let Some(water) = look_for_water(ctx.blocks(), me.block_position(), 7) {
+                    *target = Vec3::new(f64::from(water.x), f64::from(water.y), f64::from(water.z));
+                    return true;
+                }
+                return match default_random_pos(me, mob, ctx.blocks(), 5, 4) {
+                    Some(found) => {
+                        *target = found;
+                        true
+                    }
+                    None => false,
+                };
+            }
             if me.remaining_fire_ticks > 0
                 && let Some(water) = look_for_water(ctx.blocks(), me.block_position(), 5)
             {
@@ -1058,6 +1149,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::Breed { partner, .. } => {
             if mob.in_love <= 0 {
+                return false;
+            }
+            // `Turtle.TurtleBreedGoal.canUse`：身上有蛋时不求爱。
+            // `Turtle.TurtleBreedGoal.canUse`: no breeding while carrying an egg.
+            if mob.mob_type == super::MobType::Turtle && !super::turtle::can_fall_in_love(mob) {
                 return false;
             }
             *partner = free_partner(me, mob, ctx);
@@ -1110,6 +1206,14 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             force_trigger,
             ..
         } => {
+            // `Turtle.TurtleRandomStrollGoal.canUse`：水里、回家途中、身上有蛋都不逛。
+            // `Turtle.TurtleRandomStrollGoal.canUse`: no strolling in water, going home or
+            // carrying an egg.
+            if mob.mob_type == super::MobType::Turtle
+                && (me.in_water || mob.turtle.going_home || mob.turtle.has_egg)
+            {
+                return false;
+            }
             if !*force_trigger {
                 if mob.no_action_time >= 100 {
                     return false;
@@ -1134,6 +1238,25 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             *wanted = found;
             *force_trigger = false;
             true
+        }
+        Goal::Swim {
+            interval, wanted, ..
+        } => {
+            if mob.no_action_time >= 100 {
+                return false;
+            }
+            if me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0 {
+                return false;
+            }
+            let Some(found) = super::fish::random_swim_pos(me, mob, ctx.blocks()) else {
+                return false;
+            };
+            *wanted = found;
+            true
+        }
+        Goal::PufferfishPuff => super::fish::puff_can_use(me, ctx),
+        Goal::FollowFlock { next_start, .. } => {
+            super::fish::flock_can_use(next_start, me, mob, ctx)
         }
         Goal::LookAtPlayer {
             probability,
@@ -1262,6 +1385,8 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 })
         }
         Goal::EatBlock { .. } => eat_block_can_use(me, mob, ctx),
+        Goal::SquidRandomMovement => true,
+        Goal::SquidFlee { .. } => super::squid::flee_can_use(me, mob, ctx),
         Goal::BreakDoor => {
             mob.can_break_doors
                 && ctx.blocks().block_game_rules().mob_griefing
@@ -1289,6 +1414,10 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 false
             }
         }
+        Goal::TurtleLayEgg { .. } => super::turtle::lay_egg_can_use(me, mob, ctx),
+        Goal::TurtleGoHome { .. } => super::turtle::go_home_can_use(me, mob),
+        Goal::TurtleGoToWater { .. } => super::turtle::go_to_water_can_use(me, mob, ctx),
+        Goal::TurtleTravel { .. } => super::turtle::travel_can_use(me, mob),
     }
 }
 
@@ -1308,7 +1437,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
-        Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
+        Goal::Panic { .. } | Goal::Stroll { .. } | Goal::Swim { .. } => !mob.navigation.is_done(),
+        Goal::FollowFlock { .. } => super::fish::flock_can_continue(me, mob, ctx),
         Goal::Breed {
             partner, love_time, ..
         } => partner
@@ -1319,7 +1449,10 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 }
                 _ => false,
             }),
-        Goal::Tempt { .. } => can_use(goal, me, mob, ctx),
+        Goal::Tempt { .. }
+        | Goal::SquidRandomMovement
+        | Goal::SquidFlee { .. }
+        | Goal::PufferfishPuff => can_use(goal, me, mob, ctx),
         Goal::FollowParent { parent, .. } => {
             if mob.age >= 0 || super::fox::is_defending_fox(mob) {
                 return false;
@@ -1434,6 +1567,10 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                     .turtle_egg_pos
                     .is_some_and(|pos| valid_turtle_egg_target(ctx.blocks(), pos))
         }
+        Goal::TurtleLayEgg { .. } => super::turtle::lay_egg_can_continue(me, mob, ctx),
+        Goal::TurtleGoHome { .. } => super::turtle::go_home_can_continue(me, mob),
+        Goal::TurtleGoToWater { .. } => super::turtle::go_to_water_can_continue(me, mob, ctx),
+        Goal::TurtleTravel { stuck, .. } => super::turtle::travel_can_continue(mob, *stuck),
     }
 }
 
@@ -1467,6 +1604,12 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
         }
+        Goal::Swim { speed, wanted, .. } => {
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
+        }
+        Goal::PufferfishPuff => super::fish::puff_start(mob),
+        Goal::FollowFlock { time_to_recalc, .. } => *time_to_recalc = 0,
         Goal::LookAtPlayer { look_time, .. } => {
             *look_time = reduced_tick_delay(40 + me.random.next_int_bounded(40));
         }
@@ -1499,7 +1642,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.navigation.stop();
             *target = combat_target(mob, ctx).map(|found| found.uid);
         }
-        Goal::Float | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::SquidFlee { flee_ticks } => *flee_ticks = 0,
+        Goal::Float | Goal::Tempt { .. } | Goal::Unavailable(_) | Goal::SquidRandomMovement => {}
         Goal::RandomStand { .. } => super::equine::random_stand_start(me, mob),
         Goal::MeleeAttack {
             speed,
@@ -1588,6 +1732,10 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.turtle_egg_reached = false;
             mob.turtle_egg_ticks_since_reached = 0;
         }
+        Goal::TurtleLayEgg { speed } => super::turtle::lay_egg_start(me, mob, ctx, *speed),
+        Goal::TurtleGoHome { .. } => super::turtle::go_home_start(mob),
+        Goal::TurtleGoToWater { speed } => super::turtle::go_to_water_start(me, mob, ctx, *speed),
+        Goal::TurtleTravel { stuck, .. } => *stuck = super::turtle::travel_start(me, mob, ctx),
     }
 }
 
@@ -1616,6 +1764,14 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
         Goal::LeapAtTarget { .. } => {}
+        Goal::Swim { .. } => mob.navigation.stop(),
+        // `MoveToBlockGoal` 没有覆写 `stop`：不停导航。
+        // `MoveToBlockGoal` does not override `stop`, so the navigation keeps going.
+        Goal::TurtleLayEgg { .. } | Goal::TurtleGoToWater { .. } => {}
+        Goal::TurtleGoHome { .. } => super::turtle::go_home_stop(mob),
+        Goal::TurtleTravel { .. } => mob.turtle.travel_pos = None,
+        Goal::PufferfishPuff => super::fish::puff_stop(mob),
+        Goal::FollowFlock { .. } => super::fish::flock_stop(mob, ctx, me),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
         Goal::Swell { target } => *target = None,
         Goal::Float
@@ -1656,7 +1812,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.aggressive = false;
             mob.navigation.stop();
         }
-        Goal::FleeSun { .. } => {}
+        Goal::FleeSun { .. } | Goal::SquidRandomMovement | Goal::SquidFlee { .. } => {}
         Goal::BreakDoor => {
             mob.door_break_time = 0;
             mob.door_break_progress = -1;
@@ -1681,6 +1837,8 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::EndermanBlock { place } => super::enderman::sample_block(me, mob, *place),
         Goal::EatBlock { eat_tick } => eat_block_tick(eat_tick, me, mob, ctx),
         Goal::Swell { target } => swell_tick(*target, me, mob, ctx),
+        Goal::SquidRandomMovement => super::squid::random_movement_tick(me, mob),
+        Goal::SquidFlee { flee_ticks } => super::squid::flee_tick(flee_ticks, me, mob, ctx),
         Goal::Bow(bow) => {
             if let Some(target) = combat_target(mob, ctx) {
                 bow.tick(me, mob, ctx, target);
@@ -1809,6 +1967,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
+        Goal::Swim { .. } | Goal::PufferfishPuff => {}
+        Goal::FollowFlock { time_to_recalc, .. } => {
+            super::fish::flock_tick(time_to_recalc, me, mob, ctx)
+        }
         Goal::Unavailable(_)
         | Goal::HurtByTarget { .. }
         | Goal::LlamaHurtByTarget { .. }
@@ -2013,6 +2175,12 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 ctx.emit(crate::entity::ctx::Command::TurtleEggBreakSound { pos }, me);
             }
             mob.turtle_egg_ticks_since_reached += 1;
+        }
+        Goal::TurtleLayEgg { speed } => super::turtle::lay_egg_tick(me, mob, ctx, *speed),
+        Goal::TurtleGoHome { speed } => super::turtle::go_home_tick(me, mob, ctx, *speed),
+        Goal::TurtleGoToWater { speed } => super::turtle::go_to_water_tick(me, mob, ctx, *speed),
+        Goal::TurtleTravel { speed, stuck } => {
+            super::turtle::travel_tick(me, mob, ctx, *speed, stuck);
         }
     }
 }
@@ -2321,8 +2489,16 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     if mob.mob_type == super::MobType::Enderman {
         return 0.0;
     }
+    if mob.mob_type == super::MobType::Turtle {
+        return super::turtle::walk_target_value(mob, view, pos);
+    }
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
+    }
+    // 不是 `Animal` 的生物用 `PathfinderMob.getWalkTargetValue` 的缺省值 0。
+    // Mobs that are not `Animal`s keep the `PathfinderMob.getWalkTargetValue` default of 0.
+    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
+        return 0.0;
     }
     animal_walk_target_value(view, pos)
 }
@@ -2384,7 +2560,7 @@ pub(crate) fn default_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -2421,6 +2597,54 @@ pub(crate) fn default_random_pos_away(
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
             || !Navigation::is_stable_destination(view, pos)
+            || has_malus(mob, view, pos)
+        {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// 导航的 `isStableDestination`；海龟有远行目标时（`TurtlePathNavigation`）只认水格。
+///
+/// The navigation's `isStableDestination`; a turtle with a travel target
+/// (`TurtlePathNavigation`) only accepts water cells.
+fn stable_destination(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
+    if super::turtle::is_turtle(mob.mob_type) && mob.turtle.travel_pos.is_some() {
+        return view.block_state(pos).is(blocks::WATER);
+    }
+    mob.navigation.stable_destination(view, pos)
+}
+
+/// `DefaultRandomPos.getPosTowards`：在朝向 `towards` 的 ±`angle` 扇形里取点。
+///
+/// `DefaultRandomPos.getPosTowards`: sample within ±`angle` of the direction towards
+/// `towards`.
+pub(crate) fn default_random_pos_towards(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    towards: Vec3,
+    angle: f32,
+) -> Option<Vec3> {
+    let dir_x = towards.x - me.position.x;
+    let dir_z = towards.z - me.position.z;
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            f64::from(horizontal),
+            vertical,
+            dir_x,
+            dir_z,
+            f64::from(angle),
+        )?;
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos)
+            || (restricted && !within_home(mob, pos))
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -2469,7 +2693,7 @@ pub(crate) fn land_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
         {
             return None;
         }

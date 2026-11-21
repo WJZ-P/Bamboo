@@ -180,7 +180,6 @@ pub(super) fn interact_shears(mob: &Mob, req: &MobInteractRequest) -> Option<Mob
     Some(MobInteraction {
         result: InteractionResult::SuccessServer,
         shear: true,
-        damage_held: false,
         ..MobInteraction::pass()
     })
 }

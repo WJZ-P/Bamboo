@@ -962,10 +962,18 @@ pub struct ProjectileFacts {
     pub pig_variant_serializer: i32,
     pub pig_sound_variant_serializer: i32,
     pub sheep_wool: u8,
+    pub glow_squid_dark_ticks: u8,
+    pub fish_from_bucket: u8,
+    pub salmon_variant: u8,
+    pub tropical_fish_variant: u8,
+    pub tropical_fish_common_variants: Vec<i32>,
+    pub pufferfish_puff_state: u8,
     pub chicken_variant: u8,
     pub chicken_sound_variant: u8,
     pub chicken_variant_serializer: i32,
     pub chicken_sound_variant_serializer: i32,
+    pub turtle_has_egg: u8,
+    pub turtle_laying_egg: u8,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
     ///
     /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.
