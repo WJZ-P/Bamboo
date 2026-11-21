@@ -53,7 +53,12 @@ pub(super) fn attributes() -> Attributes {
     let mut table = Attributes::skeleton();
     table.set_base(attribute::MAX_HEALTH, 26.0);
     table.set_base(attribute::MOVEMENT_SPEED, 0.25);
-    table.set_base(attribute::FOLLOW_RANGE, defaults::FOLLOW_RANGE);
+    // `Mob.createMobAttributes` 的跟随距离是 16；`attribute_defaults` 里的 32 是属性自己的
+    // 缺省值，不是生物注册的值。
+    //
+    // `Mob.createMobAttributes` registers a follow range of 16; the 32 in
+    // `attribute_defaults` is the attribute's own default, not the mob's.
+    table.set_base(attribute::FOLLOW_RANGE, 16.0);
     table.set_base(attribute::ATTACK_DAMAGE, defaults::ATTACK_DAMAGE);
     table
 }
@@ -408,6 +413,7 @@ mod tests {
         let table = attributes();
         assert_eq!(table.value(attribute::MAX_HEALTH), 26.0);
         assert_eq!(table.base(attribute::MOVEMENT_SPEED), 0.25);
+        assert_eq!(table.base(attribute::FOLLOW_RANGE), 16.0);
         assert_eq!(table.value(attribute::ATTACK_DAMAGE), 2.0);
     }
 
