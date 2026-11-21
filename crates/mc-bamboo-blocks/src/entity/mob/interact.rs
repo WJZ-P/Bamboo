@@ -57,6 +57,11 @@ pub struct MobInteraction {
     ///
     /// `AbstractHorse.doPlayerRide`: the caller puts this player on the mob.
     pub ride: bool,
+    /// `ItemStack.hurtAndBreak(1, player, slot)`：调用方给手里的物品扣 1 点耐久（打火石点苦力怕）。
+    ///
+    /// `ItemStack.hurtAndBreak(1, player, slot)`: the caller spends one durability point on
+    /// the held item (flint and steel on a creeper).
+    pub damage_held: bool,
     /// `Bucketable.bucketMobPickup`：调用方把这只生物从世界里拿掉。
     ///
     /// `Bucketable.bucketMobPickup`: the caller discards the mob.
@@ -79,6 +84,7 @@ impl MobInteraction {
             open_inventory: false,
             shear: false,
             ride: false,
+            damage_held: false,
             discard: false,
             limit_creative: true,
         }
@@ -146,6 +152,9 @@ pub fn interact(
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
             ..MobInteraction::pass()
         };
+    }
+    if mob.mob_type == MobType::Creeper {
+        return super::creeper::interact(me, mob, req);
     }
     animal_interact(me, mob, req)
 }

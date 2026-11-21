@@ -175,6 +175,7 @@ pub(in crate::entity::mob) fn targets(kind: MobType) -> GoalSelector {
             2,
             Goal::NearestAttackableTarget {
                 kind: TargetType::Wolf,
+                light_gate: false,
                 interval: reduced_tick_delay(16),
                 unseen_ticks: 0,
                 found: None,

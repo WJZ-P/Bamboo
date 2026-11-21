@@ -158,6 +158,8 @@ mod tests {
             uuid: Some(RIDER_UUID),
             position: Vec3::new(1.0, 64.0, 0.5),
             eye_height: 1.62,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
             alive: true,
             spectator: false,
             creative: false,

@@ -135,6 +135,8 @@ mod bench {
                     pitch: 0.0,
                     position: Vec3::new(f64::from(px) + 16.5, 64.0, f64::from(pz) + 16.5),
                     eye_height: 1.62,
+                    look_direction: Vec3::default(),
+                    gaze_disguise: false,
                     alive: true,
                     spectator: false,
                     creative: false,

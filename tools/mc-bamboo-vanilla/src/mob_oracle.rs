@@ -434,6 +434,11 @@ struct CowSetup {
     /// The sheep's starting `DATA_WOOL_ID`.
     #[serde(default)]
     wool: u8,
+    /// 苦力怕的起始标志：第 0 位带电，第 1 位已点燃。
+    ///
+    /// Creeper start flags: bit 0 powered, bit 1 ignited.
+    #[serde(default)]
+    creeper: i32,
     /// 鸡的 `eggTime` 起点（官方在构造函数里用重设种子之前的随机源抽）。
     ///
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
@@ -444,6 +449,11 @@ struct CowSetup {
     /// The equine's starting temper; -1 keeps the constructed value.
     #[serde(default = "minus_one")]
     temper: i32,
+    /// 末影人搬着的方块状态 ID，0 表示空手。
+    ///
+    /// The block state an enderman carries; 0 means empty-handed.
+    #[serde(default)]
+    carried: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -453,6 +463,10 @@ struct PlayerSetup {
     y: i64,
     z: i64,
     eye: i32,
+    #[serde(default)]
+    yaw: i32,
+    #[serde(default)]
+    pitch: i32,
     item: i32,
     #[serde(default)]
     looting: i32,
@@ -552,13 +566,24 @@ struct CowStep {
     owner: Option<String>,
 }
 
-/// 走 Java 一侧 `playZombie` 的场景：僵尸和兔子、狐狸、狼。
+/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，以及苦力怕、蜘蛛、
+/// 洞穴蜘蛛和末影人。
 ///
-/// Scenes played by the Java `playZombie` driver: zombies and the wild animals.
+/// Scenes played by the Java `playZombie` driver: zombies, the wild animals, and
+/// creepers, spiders, cave spiders and endermen.
 fn zombie_style(name: &str) -> bool {
-    ["zombie_", "rabbit_", "fox_", "wolf_"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    [
+        "zombie_",
+        "rabbit_",
+        "fox_",
+        "wolf_",
+        "creeper_",
+        "spider_",
+        "cave_spider_",
+        "enderman_",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
 }
 
 const fn minus_one_i64() -> i64 {
@@ -809,7 +834,6 @@ impl Level for MobLevel {
             },
         }
     }
-
     fn can_see_sky(&self, _pos: BlockPos) -> bool {
         self.facts.can_see_sky
     }
@@ -1224,6 +1248,11 @@ impl Report {
                         f64::from_bits(player.z as u64),
                     ),
                     eye_height: f32::from_bits(player.eye as u32),
+                    look_direction: Vec3::view_vector(
+                        f32::from_bits(player.yaw as u32),
+                        f32::from_bits(player.pitch as u32),
+                    ),
+                    gaze_disguise: false,
                     alive: true,
                     spectator: false,
                     creative: false,
@@ -1282,6 +1311,10 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
+                    41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
+                    42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
+                    43 => mc_bamboo_blocks::entity::mob::MobType::Enderman,
                     8 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
                     7 => mc_bamboo_blocks::entity::mob::MobType::Fox,
                     6 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
@@ -1294,6 +1327,13 @@ impl Report {
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
+                // 幼年标志和破门是僵尸一系专属的起始状态。
+                // The baby flag and door breaking are zombie-only start state.
+                let zombie_kind = matches!(
+                    kind,
+                    mc_bamboo_blocks::entity::mob::MobType::Zombie
+                        | mc_bamboo_blocks::entity::mob::MobType::Husk
+                );
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));
                 world.with_entity_mut(id, &mut |entity| {
                     entity.random = JavaRandom::new(cow.seed);
@@ -1318,6 +1358,11 @@ impl Report {
                         {
                             state.temper = cow.temper;
                         }
+                        mob.creeper.powered = cow.creeper & 1 != 0;
+                        mob.creeper.ignited = cow.creeper & 2 != 0;
+                        if cow.carried != 0 {
+                            mob.set_carried_block(Some(BlockState(cow.carried as u32)));
+                        }
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if let Some(mob) = entity.kind.mob_mut()
@@ -1331,11 +1376,11 @@ impl Report {
                     if cow.age != 0 {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
-                        let baby = kind.is_monster() || cow.age < 0;
+                        let baby = zombie_kind || cow.age < 0;
                         let (width, height, eye) = kind.dimensions(baby);
                         entity.dimensions = (width, height);
                         if let Some(mob) = entity.kind.mob_mut() {
-                            if kind.is_monster() {
+                            if zombie_kind {
                                 mob.set_zombie_baby(true);
                                 mob.can_break_doors = case.difficulty == 3;
                                 if mob.can_break_doors {
@@ -1347,7 +1392,7 @@ impl Report {
                             }
                             mob.eye_height = eye;
                         }
-                    } else if kind.is_monster()
+                    } else if zombie_kind
                         && case.difficulty == 3
                         && let Some(mob) = entity.kind.mob_mut()
                     {
@@ -1551,20 +1596,32 @@ impl Report {
                     if tick as usize != index {
                         continue;
                     }
-                    let player = &case.players[attacker as usize];
-                    let position = Vec3::new(
-                        f64::from_bits(player.x as u64),
-                        f64::from_bits(player.y as u64),
-                        f64::from_bits(player.z as u64),
-                    );
-                    let source = match case.death_kind {
-                        1 => DamageSource::environment(
-                            mc_bamboo_blocks::entity::mob::DamageKind::Fall,
-                        ),
-                        2 => DamageSource::environment(
-                            mc_bamboo_blocks::entity::mob::DamageKind::OnFire,
-                        ),
-                        _ => DamageSource::player(player.id, position, false),
+                    // 负数攻击者编号是场景注入的环境 / 投掷物伤害：-1 箭，-2 溺水。
+                    // A negative attacker index injects environment or projectile damage:
+                    // -1 an arrow, -2 drowning.
+                    let source = if attacker < 0 {
+                        let kind = if attacker == -1 {
+                            mc_bamboo_blocks::entity::mob::DamageKind::Arrow
+                        } else {
+                            mc_bamboo_blocks::entity::mob::DamageKind::Drown
+                        };
+                        DamageSource::environment(kind)
+                    } else {
+                        let player = &case.players[attacker as usize];
+                        let position = Vec3::new(
+                            f64::from_bits(player.x as u64),
+                            f64::from_bits(player.y as u64),
+                            f64::from_bits(player.z as u64),
+                        );
+                        match case.death_kind {
+                            1 => DamageSource::environment(
+                                mc_bamboo_blocks::entity::mob::DamageKind::Fall,
+                            ),
+                            2 => DamageSource::environment(
+                                mc_bamboo_blocks::entity::mob::DamageKind::OnFire,
+                            ),
+                            _ => DamageSource::player(player.id, position, false),
+                        }
                     };
                     world.hurt_mob(ids[cow as usize], source, f32::from_bits(amount as u32));
                 }
@@ -3263,6 +3320,11 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             }
         ),
         MobType::Chicken => format!("{}|egg{}", mob.variant.name(), mob.egg_time),
+        MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
+        MobType::Enderman => mob.describe_enderman(),
+        MobType::Spider | MobType::CaveSpider => {
+            mc_bamboo_blocks::entity::mob::spider::describe(mob)
+        }
         _ => mob.variant.name().to_owned(),
     }
 }

@@ -201,6 +201,9 @@ fn cause_fall_damage(
             damage as f32,
         );
     }
+    if mob.mob_type == super::MobType::Creeper {
+        super::creeper::after_fall(mob, distance);
+    }
 }
 
 /// `restituteMovementAfterCollisions`：生物拿方块的整份弹性，弹性属性默认是 0。
@@ -342,11 +345,13 @@ fn step_effects(
     if play_sound && !mob.mob_type.is_water_animal() {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
         // 马科按自己的 `playStepSound`（方块声音类型、奔跑步声）走。
+        // 苦力怕和末影人走 `Entity.playStepSound`（方块 `SoundType` 的脚步声）。
         // `AbstractFish.playStepSound` 是空实现，但这一步仍算「踩过」。
         // `Wolf.playStepSound` 用叫声品种里的脚步声。
         //
         // `AbstractCow.playStepSound`: `playSound(stepSound, 0.15F, 1.0F)`.
         // Equines go through their own `playStepSound` (block sound type, gallop).
+        // Creepers and endermen use `Entity.playStepSound` (the block `SoundType` step sound).
         // `AbstractFish.playStepSound` is empty yet the step still counts.
         // `Wolf.playStepSound` uses the step sound of its sound set.
         if mob.mob_type.is_equine() {
@@ -359,7 +364,15 @@ fn step_effects(
                 super::MobType::Chicken => super::chicken::sounds(mob)[3],
                 kind => kind.step_sound().unwrap_or(mob.sound_variant.step()),
             };
-            super::living::play_sound(me, mob, sound, 0.15, 1.0);
+            if mob.mob_type.uses_block_step_sound() {
+                // `Entity.playStepSound`：方块 `SoundType` 的脚步声，音量乘 0.15。
+                // `Entity.playStepSound`: the block `SoundType` step sound at 0.15 volume.
+                let kind = state.sound_type();
+                let sound = mc_bamboo_data::SOUND_EVENTS[usize::from(kind.step_sound)].name;
+                super::living::play_sound(me, mob, sound, kind.volume * 0.15, kind.pitch);
+            } else {
+                super::living::play_sound(me, mob, sound, 0.15, 1.0);
+            }
         }
     }
     if play_sound
@@ -825,8 +838,12 @@ fn entity_inside(
             }
         }
     } else if state.is_a(BlockAncestor::WebBlock) {
-        me.fall_distance = 0.0;
-        me.stuck_speed_multiplier = Vec3::new(0.25, f64::from(0.05_f32), 0.25);
+        // `Spider.makeStuckInBlock` 对蜘蛛网直接返回：既不减速也不清摔落距离。
+        // `Spider.makeStuckInBlock` returns early for cobwebs: no slowdown, no fall reset.
+        if !mob.mob_type.climbs_walls() {
+            me.fall_distance = 0.0;
+            me.stuck_speed_multiplier = Vec3::new(0.25, f64::from(0.05_f32), 0.25);
+        }
     } else if state.is_a(BlockAncestor::PowderSnowBlock) {
         if ctx
             .blocks()

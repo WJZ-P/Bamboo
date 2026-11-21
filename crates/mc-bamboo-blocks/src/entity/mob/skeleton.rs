@@ -436,6 +436,8 @@ mod tests {
             uuid: None,
             position: Vec3::new(10.5, 64.0, 0.5),
             eye_height: 1.62,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
             alive: true,
             spectator: false,
             creative: false,

@@ -1010,6 +1010,30 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => {}
         }
     }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Enderman {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::ENDERMAN_CARRY_STATE => return EntityData::EndermanCarried(None),
+            facts::ENDERMAN_CREEPY => return EntityData::EndermanCreepy(false),
+            facts::ENDERMAN_STARED_AT => return EntityData::EndermanStaredAt(false),
+            _ => {}
+        }
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::CREEPER_SWELL_DIR => return EntityData::CreeperSwellDir(-1),
+            facts::CREEPER_POWERED => return EntityData::CreeperPowered(false),
+            facts::CREEPER_IGNITED => return EntityData::CreeperIgnited(false),
+            _ => {}
+        }
+    }
+    if kind.climbs_walls() {
+        use mc_bamboo_data::entity_types as facts;
+        if index == facts::SPIDER_FLAGS {
+            return EntityData::SpiderFlags(0);
+        }
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1121,6 +1145,33 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     }
     if mob.drowned_converting {
         out.push(EntityData::DrownedConverting(true));
+    }
+    if let Some(carried) = mob.enderman_carried {
+        out.push(EntityData::EndermanCarried(Some(carried.0 as i32)));
+    }
+    if mob.enderman_creepy {
+        out.push(EntityData::EndermanCreepy(true));
+    }
+    if mob.enderman_stared_at {
+        out.push(EntityData::EndermanStaredAt(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        // `Creeper.defineSynchedData`：膨胀方向缺省 -1，带电和点燃缺省 false。
+        // `Creeper.defineSynchedData`: swell direction defaults to -1, the flags to false.
+        if mob.creeper_swell_dir != -1 {
+            out.push(EntityData::CreeperSwellDir(mob.creeper_swell_dir));
+        }
+        if mob.creeper_powered {
+            out.push(EntityData::CreeperPowered(true));
+        }
+        if mob.creeper_ignited {
+            out.push(EntityData::CreeperIgnited(true));
+        }
+    }
+    if mob.mob_type.climbs_walls() && mob.spider_flags != 0 {
+        // `Spider.DATA_FLAGS_ID`：缺省 0，攀爬位是第 0 位。
+        // `Spider.DATA_FLAGS_ID`: default 0, bit 0 is climbing.
+        out.push(EntityData::SpiderFlags(mob.spider_flags));
     }
     out
 }
