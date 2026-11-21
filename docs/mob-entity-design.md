@@ -644,6 +644,47 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   / `cargo test -p mc-bamboo-vanilla` / `cargo check -p mc-bamboo-desktop` / 全套 `mob-oracle` /
   `natural-spawn` / `tools/probe.sh`）全部通过，数字见本轮汇报第 2 节。
 
+### 5.14 第 10 轮：合入复核与 chunk-content 北极熊存档缺陷修复（op-misc，2026-11-21）
+
+- 按队长追加先 `git merge main`，返回 `Already up to date`：`main`（`c9773f61`）是
+  `HEAD`（`3c6a9dfd`）的祖先，本轮无新冲突、无冲突解决。08:40 两处修复逐字复核仍在：
+  `MobOracle.java:954` 的 `caseVariant(Mob mob) throws Exception`、`goals.rs:1534` 的
+  显式 `TargetType::Fox` 分支（`available()` 仍已移除，只剩防回退的中英双语警示注释）。
+- **修好 `chunk-content` 长期存在的 1 处失败（关键路径「存档格式」）**：夹具
+  「polar bear with persistent anger」过去报 `official could not load this entity`
+  （`1 of 495 checks failed`）。根因不是存档格式：官方
+  `NeutralMob.readPersistentAngerSaveData` 读 `angry_at` 后会走
+  `EntityReference.getLivingEntity` → `ServerLevel.getEntityInAnyDimension` →
+  `ServerLevel.getEntities()`，而 `ChunkContentOracle.java` 的 `FakeLevel` 用 Unsafe
+  分配、没初始化 `entityManager`，`NullPointerException` 被
+  `EntityType.loadStaticEntity` 吞掉，`loadEntityRecursive` 返回 null。Bamboo 写的
+  `angry_at`（`IntArrayTag`，4 个 int）与官方 `UUIDUtil.CODEC`（`Codec.INT_STREAM`）
+  本来逐键一致；`brain` 分支疑点 20 记的「与官方 26.3 `EntityReference` 复合格式
+  不符、官方侧加载不了」是误判（用不吞异常的 `EntityType.create` 打印 cause 链定位到
+  `ServerLevel.getEntities` 的 `entityManager == null`）。
+- 修法（只动 Java 夹具 `ChunkContentOracle.java`，21 行，提交 `3a4bcc62`）：给
+  `FakeLevel` 补 `getEntityInAnyDimension` / `getPlayerInAnyDimension` 两个 override
+  返回 null，表示「查不到这个实体」；`persistentAngerTarget` 保留 UUID 并原样写回
+  `angry_at`，只有 `Mob.target` 为空，和官方找不到目标一致。修复后 `chunk-content`
+  为 **496 checks passed**（原 1/495 失败）。Bamboo 的 `neutral.rs` / `nbt.rs` 未改，
+  北极熊 `angry_at` 存档与官方逐键一致得到对拍确认。
+- **前置按最新情报重新核查**：`brain` 分支（`9b846b6b`，报告 15:22）已做完山羊 / 犰狳
+  和 Brain 框架、是当前 `main` 的直接后代、可无冲突 fast-forward 合进 main；青蛙仍
+  整块未做，brain 报告明确「单独开一整轮按 `FrogAi` 整块搬完再对拍，不要先落半截
+  实体骨架」；骆驼等 `docs/mob-entity-design.md` 5.8 骑乘定稿。故任务清单里
+  山羊 / 犰狳 / 青蛙 / 骆驼都已有专门分支或硬前置，**本轮不重做、不抢做**。
+- 剩 3 种：鹦鹉上肩等世界模型 8.2「载具和它的乘客」定案；豹猫 / 猫技术上可行
+  （`registerGoals()`，非 Brain），但按 5.12 须先动生成器 / `Extractor.java` 导出
+  `OCELOT_*` 属性与元数据 index、新建 `MobOracle.java` / `mob_oracle.rs` 逐刻场景，
+  属「须先和队长确认」的共用文件禁区。队长 09:00 追加与 brain 报告的当前节奏是
+  「把各分支整理干净、可 fast-forward、不要开半截 WIP 挡住合进 main」，单轮无人
+  值守不宜扩大这批共用文件冲突面，故**本轮不新增 `MobType`、不新增生物**。
+- 本轮全套检查（fmt / clippy / `cargo test -p mc-bamboo-blocks` /
+  `cargo test -p mc-bamboo-vanilla` / `cargo check -p mc-bamboo-desktop` / 全套
+  `mob-oracle` / `natural-spawn` / `chunk-content` / `tools/probe.sh`）在最终提交上
+  实跑，结果见本轮汇报第 2 节。请队长定夺下一步：合进 main，或单独开一整轮做
+  某一种生物。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
