@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod brain;
 mod egg;
 mod equine;
 mod gen_spawn;
@@ -221,6 +222,11 @@ struct Case {
     /// S4 吃东西场景。
     #[serde(default)]
     consume_scene: Option<ConsumeScene>,
+    /// 大脑场景：玩家 0 疾跑的 [起, 止) 刻。
+    ///
+    /// Brain scenes: the [start, end) ticks in which player 0 sprints.
+    #[serde(default)]
+    sprint: Option<[i32; 2]>,
 }
 
 /// 1c 落脚点对拍的官方答案：坐标按 f64 原始位传，随机源末态逐位比。
@@ -425,6 +431,13 @@ struct CowSetup {
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
     #[serde(default)]
     egg: i32,
+    /// 大脑传感器构造时取的起始延迟和犰狳的掉鳞甲计时（官方报过来）。
+    ///
+    /// The brain sensor start delays and armadillo scute timer drawn at construction.
+    #[serde(default)]
+    sensors: Vec<i64>,
+    #[serde(default)]
+    scute: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -527,13 +540,18 @@ struct CowStep {
     eq: i32,
     #[serde(default)]
     tmp: i32,
+    /// 大脑快照：`活动|正在跑的行为|记忆`，不跑大脑的生物是空串。
+    ///
+    /// The brain dump `activities|running|memories`; empty for goal-driven mobs.
+    #[serde(default)]
+    brain: String,
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸和兔子、狐狸、狼。
 ///
 /// Scenes played by the Java `playZombie` driver: zombies and the wild animals.
 fn zombie_style(name: &str) -> bool {
-    ["zombie_", "rabbit_", "fox_", "wolf_"]
+    ["zombie_", "rabbit_", "fox_", "wolf_", "armadillo_"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
 }
@@ -1201,6 +1219,7 @@ impl Report {
                     spectator: false,
                     creative: false,
                     sneaking: false,
+                    sprinting: false,
                     invisible: false,
                     armor_cover: 0.0,
                     main_hand: player.item,
@@ -1264,6 +1283,7 @@ impl Report {
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     9..=12 => equine::scene_kind(cow.kind),
+                    13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));
@@ -1280,6 +1300,13 @@ impl Report {
                         mob.y_head_rot = yaw;
                         mob.y_body_rot = yaw;
                         mob.wool = cow.wool;
+                        brain::setup(
+                            entity.random.state(),
+                            mob,
+                            &cow.sensors,
+                            cow.scute,
+                            break_test,
+                        );
                         // 鸡的蛋计时由 Java 一侧报过来（构造时抽的值）；缺省保留 Bamboo 的。
                         // The chicken's egg timer comes from Java (drawn in its constructor).
                         if cow.egg > 0 {
@@ -1424,6 +1451,7 @@ impl Report {
             if let Some(game) = level.game.as_mut() {
                 game.tick_cooldowns();
             }
+            brain::set_sprint(&mut level.players, case.sprint, index as i32);
             let mut ours_interactions = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
@@ -1771,6 +1799,9 @@ impl Report {
     ) {
         for (cow, expected) in official.iter().enumerate() {
             let place = format!("{name} tick {index} cow {cow}");
+            if std::env::var_os("MOB_ORACLE_BRAIN").is_some() && !expected.brain.is_empty() {
+                eprintln!("{place} official brain: {}", expected.brain);
+            }
             let Some(Some(ours)) = ours.get(cow) else {
                 if !expected.rm {
                     self.mismatch(format!("{place}: missing in bamboo"));
@@ -1848,6 +1879,7 @@ impl Report {
             plain!(var);
             plain!(snd);
             plain!(goals);
+            plain!(brain);
             if zombie_style(name) {
                 plain!(rabbit_carrot_ticks);
                 plain!(fox_flags);
@@ -3005,6 +3037,7 @@ fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
             level.entities.get(id).and_then(|entity| {
                 step_of(&entity, lr).map(|mut step| {
                     step.bh = bh;
+                    step.brain = brain::dump(level, &entity);
                     step
                 })
             })
@@ -3189,6 +3222,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .as_ref()
             .map_or(0, |state| i32::from(state.flags())),
         tmp: mob.equine.as_ref().map_or(0, |state| state.temper),
+        brain: String::new(),
     }
 }
 

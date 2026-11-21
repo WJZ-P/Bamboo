@@ -479,6 +479,8 @@ public final class MobOracle {
         int helmetDamage;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
+        /** 大脑场景：玩家 0 在 [起, 止) 这几刻疾跑（犰狳会被吓到），null 表示不跑。 */
+        int[] sprint;
 
         Scene(String name) {
             this.name = name;
@@ -903,6 +905,237 @@ public final class MobOracle {
             return field.get(null);
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * 大脑对拍：犰狳场景、洗牌随机源重设、传感器起始延迟和逐刻的大脑快照
+     * （活动、正在跑的行为、有值的记忆）。
+     *
+     * <p>Brain oracle: armadillo scenes, shuffle reseeding, sensor start delays and the
+     * per-tick brain dump (activities, running behaviours, filled memories).
+     */
+    static final class BrainOracle {
+        static void addScenes(List<Scene> scenes) {
+            int spiderEye = BuiltInRegistries.ITEM.getId(Items.SPIDER_EYE);
+            int brush = BuiltInRegistries.ITEM.getId(Items.BRUSH);
+            for (long seed : new long[] {11L, 23L}) {
+                // 闲逛：随机漫步、看哪走哪、发呆、随机环顾。
+                // Idle: strolling, walking to the look target, doing nothing, looking around.
+                Scene wander = new Scene("armadillo_wander_" + seed).ticks(600);
+                Scenes.ground(wander, 15);
+                wander.mob(13, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(wander);
+            }
+            // 疾跑的玩家吓得它缩成球、窥视，玩家停下后危险记忆过期，展开。
+            // A sprinting player scares it into a ball with peeks; once the player stops, the
+            // danger memory expires and it unrolls.
+            Scene sprint = new Scene("armadillo_scared_sprint").ticks(500);
+            Scenes.ground(sprint, 15);
+            sprint.mob(13, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+            sprint.player(4.5, 64.0, 0.5, Items.AIR);
+            sprint.sprint = new int[] {20, 300};
+            scenes.add(sprint);
+            // 被玩家打：记下危险、缩起来；缩着再挨一下伤害减半。
+            // Hit by a player: it remembers danger and rolls up; a second hit while rolled up
+            // is reduced.
+            Scene hurt = new Scene("armadillo_hurt").ticks(300);
+            Scenes.ground(hurt, 15);
+            hurt.mob(13, 0.5, 64.0, 0.5, 0.0F, 37L, 0);
+            hurt.player(2.5, 64.0, 0.5, Items.AIR);
+            hurt.hurts.add(new double[] {5, 0, 2.0, 0});
+            hurt.hurts.add(new double[] {40, 0, 3.0, 0});
+            scenes.add(hurt);
+            // 拿蜘蛛眼的玩家：跟随诱惑；幼崽跟着大人。
+            // A player holding a spider eye tempts it; the baby follows the adult.
+            Scene tempt = new Scene("armadillo_tempt").ticks(300);
+            Scenes.ground(tempt, 15);
+            tempt.mob(13, 0.5, 64.0, 0.5, 0.0F, 41L, 0);
+            tempt.mob(13, -6.5, 64.0, 0.5, 0.0F, 43L, -24000);
+            tempt.player(7.5, 64.0, 0.5, Items.SPIDER_EYE);
+            scenes.add(tempt);
+            // 刷子刷下鳞甲；喂蜘蛛眼进入求爱。
+            // Brushing a scute off, then a spider eye puts it in love.
+            Scene brushed = new Scene("armadillo_brush").ticks(120);
+            Scenes.ground(brushed, 15);
+            brushed.mob(13, 0.5, 64.0, 0.5, 0.0F, 47L, 0);
+            brushed.player(1.5, 64.0, 0.5, Items.AIR);
+            brushed.interact(3, 0, 0, brush, 0);
+            brushed.interact(10, 0, 0, spiderEye, 0);
+            scenes.add(brushed);
+        }
+
+        /** Bamboo 的 `shuffle_seed`：SplitMix64 的终混合。 */
+        static long shuffleSeed(long base, long index) {
+            long z = base + index * 0x9E3779B97F4A7C15L;
+            z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+            z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+            return z ^ (z >>> 31);
+        }
+
+        @SuppressWarnings("unchecked")
+        static java.util.Map<Integer, java.util.Map<net.minecraft.world.entity.schedule.Activity,
+                java.util.Set<net.minecraft.world.entity.ai.behavior.BehaviorControl<?>>>> behaviors(
+                net.minecraft.world.entity.ai.Brain<?> brain) throws Exception {
+            Field field = net.minecraft.world.entity.ai.Brain.class.getDeclaredField("availableBehaviorsByPriority");
+            field.setAccessible(true);
+            return (java.util.Map<Integer, java.util.Map<net.minecraft.world.entity.schedule.Activity,
+                    java.util.Set<net.minecraft.world.entity.ai.behavior.BehaviorControl<?>>>>) field.get(brain);
+        }
+
+        /** 按行为遍历顺序（先序）给每个闸门的 `ShufflingList` 换上第 k 个种子。 */
+        static void reseedShuffles(Mob mob, long base) throws Exception {
+            if (mob.getBrain().isBrainDead()) return;
+            long[] index = {0};
+            for (var byActivity : behaviors(mob.getBrain()).values()) {
+                for (var set : byActivity.values()) {
+                    for (var behavior : set) {
+                        reseed(behavior, base, index);
+                    }
+                }
+            }
+        }
+
+        static void reseed(net.minecraft.world.entity.ai.behavior.BehaviorControl<?> behavior, long base, long[] index)
+                throws Exception {
+            if (!(behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate)) return;
+            Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
+            listField.setAccessible(true);
+            var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
+            put(net.minecraft.world.entity.ai.behavior.ShufflingList.class, list, "random",
+                    RandomSource.create(shuffleSeed(base, index[0])));
+            index[0]++;
+            for (Object child : list) {
+                reseed((net.minecraft.world.entity.ai.behavior.BehaviorControl<?>) child, base, index);
+            }
+        }
+
+        /** 每个传感器构造时取的 `timeToTick`，按登记顺序。 */
+        static String sensorDelays(Mob mob) throws Exception {
+            Field sensorsField = net.minecraft.world.entity.ai.Brain.class.getDeclaredField("sensors");
+            sensorsField.setAccessible(true);
+            var sensors = (java.util.Map<?, ?>) sensorsField.get(mob.getBrain());
+            Field time = net.minecraft.world.entity.ai.sensing.Sensor.class.getDeclaredField("timeToTick");
+            time.setAccessible(true);
+            StringBuilder out = new StringBuilder("[");
+            boolean first = true;
+            for (Object sensor : sensors.values()) {
+                if (!first) out.append(',');
+                first = false;
+                out.append(time.getLong(sensor));
+            }
+            return out.append(']').toString();
+        }
+
+        static int scuteTime(Mob mob) {
+            if (!(mob instanceof net.minecraft.world.entity.animal.armadillo.Armadillo armadillo)) return 0;
+            return getInt(net.minecraft.world.entity.animal.armadillo.Armadillo.class, armadillo, "scuteTime");
+        }
+
+        /** 匿名子类按父类记名字；闸门带上正在跑的子行为。 */
+        static String behaviorName(Object behavior) throws Exception {
+            Class<?> type = behavior.getClass();
+            while (type.isAnonymousClass()) type = type.getSuperclass();
+            String name = type.getSimpleName();
+            if (behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate) {
+                Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
+                listField.setAccessible(true);
+                var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
+                StringBuilder out = new StringBuilder(name).append('[');
+                boolean first = true;
+                for (Object child : list) {
+                    var control = (net.minecraft.world.entity.ai.behavior.BehaviorControl<?>) child;
+                    if (control.getStatus() != net.minecraft.world.entity.ai.behavior.Behavior.Status.RUNNING) continue;
+                    if (!first) out.append(',');
+                    first = false;
+                    out.append(behaviorName(child));
+                }
+                return out.append(']').toString();
+            }
+            return name;
+        }
+
+        static String pos(BlockPos pos) {
+            return pos.getX() + ";" + pos.getY() + ";" + pos.getZ();
+        }
+
+        static String value(Object value) {
+            if (value instanceof Boolean || value instanceof Integer || value instanceof Long) {
+                return String.valueOf(value);
+            }
+            if (value instanceof Entity entity) return String.valueOf(entity.getId());
+            if (value instanceof net.minecraft.world.entity.ai.memory.NearestVisibleLivingEntities visible) {
+                return ids(visible.nearbyEntities());
+            }
+            if (value instanceof List<?> list) return ids(list);
+            if (value instanceof net.minecraft.world.entity.ai.memory.WalkTarget walk) {
+                return pos(walk.getTarget().currentBlockPosition()) + "/" + walk.getCloseEnoughDist()
+                        + "/" + Float.floatToRawIntBits(walk.getSpeedModifier());
+            }
+            if (value instanceof net.minecraft.world.entity.ai.behavior.PositionTracker tracker) {
+                return pos(tracker.currentBlockPosition());
+            }
+            if (value instanceof DamageSource source) return source.typeHolder().getRegisteredName();
+            if (value instanceof net.minecraft.world.level.pathfinder.Path) return "path";
+            if (value instanceof Vec3 vec) {
+                return Double.doubleToRawLongBits(vec.x) + ";" + Double.doubleToRawLongBits(vec.y) + ";"
+                        + Double.doubleToRawLongBits(vec.z);
+            }
+            return value.getClass().getSimpleName();
+        }
+
+        static String ids(List<?> list) {
+            StringBuilder out = new StringBuilder();
+            for (Object entry : list) {
+                if (out.length() > 0) out.append(';');
+                out.append(((Entity) entry).getId());
+            }
+            return out.toString();
+        }
+
+        /** `活动|正在跑的行为|记忆`；不跑大脑的生物是空串。 */
+        static String dump(Mob mob) throws Exception {
+            var brain = mob.getBrain();
+            if (brain.isBrainDead()) return "";
+            List<String> activities = new ArrayList<>();
+            for (var activity : brain.getActiveActivities()) activities.add(activity.getName());
+            java.util.Collections.sort(activities);
+            StringBuilder out = new StringBuilder(String.join(",", activities)).append('|');
+            boolean first = true;
+            for (var behavior : brain.getRunningBehaviors()) {
+                if (!first) out.append(',');
+                first = false;
+                out.append(behaviorName(behavior));
+            }
+            out.append('|');
+            java.util.TreeMap<String, String> memories = new java.util.TreeMap<>();
+            brain.forEach(new net.minecraft.world.entity.ai.Brain.Visitor() {
+                @Override
+                public <U> void acceptEmpty(final net.minecraft.world.entity.ai.memory.MemoryModuleType<U> type) {
+                }
+
+                @Override
+                public <U> void accept(final net.minecraft.world.entity.ai.memory.MemoryModuleType<U> type, final U value) {
+                    memories.put(name(type), value(value));
+                }
+
+                @Override
+                public <U> void accept(final net.minecraft.world.entity.ai.memory.MemoryModuleType<U> type, final U value,
+                        final long timeToLive) {
+                    memories.put(name(type), value(value) + "@" + timeToLive);
+                }
+            });
+            first = true;
+            for (var entry : memories.entrySet()) {
+                if (!first) out.append(' ');
+                first = false;
+                out.append(entry.getKey()).append('=').append(entry.getValue());
+            }
+            return out.toString();
+        }
+
+        static String name(net.minecraft.world.entity.ai.memory.MemoryModuleType<?> type) {
+            return BuiltInRegistries.MEMORY_MODULE_TYPE.getKey(type).getPath();
         }
     }
 
@@ -2016,6 +2249,7 @@ public final class MobOracle {
             RabbitScenes.add(scenes);
             FoxScenes.add(scenes);
             WolfScenes.add(scenes);
+            BrainOracle.addScenes(scenes);
 
             Scene rabbitRaid = new Scene("rabbit_raid").ticks(60);
             rabbitRaid.fill(-4, 63, -4, 4, 63, 4, Blocks.GRASS_BLOCK.defaultBlockState());
@@ -2153,7 +2387,8 @@ public final class MobOracle {
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("rabbit_")
-                || scene.name.startsWith("fox_") || scene.name.startsWith("wolf_")) {
+                || scene.name.startsWith("fox_") || scene.name.startsWith("wolf_")
+                || scene.name.startsWith("armadillo_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -4846,6 +5081,7 @@ public final class MobOracle {
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
                 case 12 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
+                case 13 -> EntityTypes.ARMADILLO.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();
@@ -4857,6 +5093,9 @@ public final class MobOracle {
             mob.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             mob.setYHeadRot(scene.yaws.get(i)[0]);
             mob.setYBodyRot(scene.yaws.get(i)[0]);
+            // 大脑的洗牌随机源官方不带种子，两边按同一个公式从场景种子重设。
+            // Vanilla shuffle randoms are unseeded; both sides reseed them from the scene seed.
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
             if (scene.fireTicks > 0) mob.setRemainingFireTicks(scene.fireTicks);
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
@@ -4900,6 +5139,10 @@ public final class MobOracle {
             // 鸡的蛋计时在构造时抽，Java 一侧报给 Bamboo 照填。
             // The chicken's egg timer is drawn at construction; report it to Bamboo.
             line.append(",\"egg\":").append(mobs.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
+            // 大脑传感器的起始延迟和犰狳的掉鳞甲计时在构造时用重设种子之前的随机源取。
+            // The sensor delays and the armadillo scute timer are drawn before the reseed.
+            line.append(",\"sensors\":").append(BrainOracle.sensorDelays(mobs.get(i)));
+            line.append(",\"scute\":").append(BrainOracle.scuteTime(mobs.get(i)));
             line.append('}');
         }
         line.append("],\"players\":[");
@@ -4936,6 +5179,8 @@ public final class MobOracle {
         line.append(",\"realPlayers\":").append(scene.realPlayers);
         line.append(",\"clockStart\":").append(scene.clockStart);
         line.append(",\"rain\":").append(Float.floatToRawIntBits(scene.rain));
+        line.append(",\"sprint\":").append(scene.sprint == null ? "null"
+                : "[" + scene.sprint[0] + "," + scene.sprint[1] + "]");
         line.append(",\"helmet\":").append(scene.helmet == null ? 0
                 : net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(scene.helmet));
         line.append(",\"helmetDamage\":").append(scene.helmetDamage);
@@ -4991,6 +5236,9 @@ public final class MobOracle {
                                 (float) hurt[2]);
                     }
                 }
+            }
+            if (scene.sprint != null) {
+                players.get(0).setSprinting(tick >= scene.sprint[0] && tick < scene.sprint[1]);
             }
             for (Mob mob : new java.util.ArrayList<>(mobs)) {
                 if (mob.isRemoved()) continue;
@@ -5136,6 +5384,7 @@ public final class MobOracle {
                 out.append(",\"tmp\":").append(horse.getTemper());
             }
             out.append(",\"aggr\":").append(mob.isAggressive());
+            out.append(",\"brain\":").append(jsonString(BrainOracle.dump(mob)));
             out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());
             out.append(",\"ph\":0");
             out.append(",\"pht\":0");
