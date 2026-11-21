@@ -108,9 +108,19 @@ impl Navigation {
         self.flags.can_float
     }
 
-    /// `GroundPathNavigation.canUpdatePath`。
-    fn can_update_path(mob: &NavMob) -> bool {
-        mob.path.on_ground || mob.in_liquid
+    /// `WaterBoundPathNavigation` 的 `allowBreaching`；地面导航是 `None`。
+    ///
+    /// `WaterBoundPathNavigation.allowBreaching`; `None` for ground navigation.
+    const fn water(&self) -> Option<bool> {
+        self.flags.swim
+    }
+
+    /// `GroundPathNavigation.canUpdatePath` / `WaterBoundPathNavigation.canUpdatePath`。
+    fn can_update_path(&self, mob: &NavMob) -> bool {
+        match self.water() {
+            Some(allow_breaching) => allow_breaching || mob.in_liquid,
+            None => mob.path.on_ground || mob.in_liquid,
+        }
     }
 
     /// `moveTo(x, y, z, speed)`。
@@ -170,6 +180,12 @@ impl Navigation {
         pos: BlockPos,
         reach: i32,
     ) -> Option<Path> {
+        // `WaterBoundPathNavigation` 不覆盖 `createPath`：不查加载，也不找地面。
+        // `WaterBoundPathNavigation` keeps the base `createPath`: no loaded check and no
+        // surface search.
+        if self.water().is_some() {
+            return self.create_path_to(view, mob, pos, reach);
+        }
         if !view.is_loaded(pos) {
             return None;
         }
@@ -188,7 +204,7 @@ impl Navigation {
         if mob.path.position.y < f64::from(view.min_y()) {
             return None;
         }
-        if !Self::can_update_path(mob) {
+        if !self.can_update_path(mob) {
             return None;
         }
         if let Some(path) = &self.path
@@ -232,12 +248,12 @@ impl Navigation {
             return None;
         }
         let width = mob.path.width;
-        if Self::can_update_path(mob) {
+        if self.can_update_path(mob) {
             self.follow_the_path(view, mob);
         } else if let Some(path) = &mut self.path
             && !path.is_done()
         {
-            let temp = temp_mob_pos(view, mob, self.flags.can_float);
+            let temp = temp_mob_pos(view, mob, self.flags);
             let next = path.next_entity_pos(width);
             if temp.y > next.y
                 && !mob.path.on_ground
@@ -251,14 +267,18 @@ impl Navigation {
             return None;
         }
         let next = self.path.as_ref()?.next_entity_pos(width);
-        Some((
-            Vec3::new(next.x, ground_y(view, next), next.z),
-            self.speed_modifier,
-        ))
+        // `WaterBoundPathNavigation.getGroundY` 原样返回 `target.y`。
+        // `WaterBoundPathNavigation.getGroundY` returns `target.y` unchanged.
+        let y = if self.water().is_some() {
+            next.y
+        } else {
+            ground_y(view, next)
+        };
+        Some((Vec3::new(next.x, y, next.z), self.speed_modifier))
     }
 
     fn temp_mob_pos(&self, view: &dyn BlockView, mob: &NavMob) -> Vec3 {
-        temp_mob_pos(view, mob, self.flags.can_float)
+        temp_mob_pos(view, mob, self.flags)
     }
 
     fn follow_the_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
@@ -278,10 +298,14 @@ impl Navigation {
         let dy = (position.y - f64::from(next.y)).abs();
         let dz = (position.z - (f64::from(next.z) + 0.5)).abs();
         let limit = f64::from(self.max_distance_to_waypoint);
-        let close = dx < limit && dz < limit && dy < 1.0;
+        // `getMaxVerticalDistanceToWaypoint`：地面 1，水里 0.5。
+        // `getMaxVerticalDistanceToWaypoint`: 1 on the ground, 0.5 in water.
+        let vertical = if self.flags.swim.is_some() { 0.5 } else { 1.0 };
+        let close = dx < limit && dz < limit && dy < vertical;
+        let direct = self.flags.swim.is_some();
         if close
             || (can_cut_corner(path.next_node().path_type)
-                && should_target_next_node_in_direction(path, temp))
+                && should_target_next_node_in_direction(view, mob, path, temp, direct))
         {
             path.advance();
         }
@@ -336,7 +360,7 @@ impl Navigation {
 
     /// `recomputePath`：方块变了以后的延迟重算。
     pub fn recompute_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
-        if mob.game_time - self.time_last_recompute > 20 && Self::can_update_path(mob) {
+        if mob.game_time - self.time_last_recompute > 20 && self.can_update_path(mob) {
             if let Some(target) = self.target_pos {
                 self.path = None;
                 self.path = self.create_path(view, mob, target, self.reach_range);
@@ -389,11 +413,28 @@ impl Navigation {
     pub fn is_stable_destination(view: &dyn BlockView, pos: BlockPos) -> bool {
         view.block_state(pos.below()).is_solid_render()
     }
+
+    /// `isStableDestination` 的虚分派：`WaterBoundPathNavigation` 只要求这一格不是实心渲染。
+    ///
+    /// The virtual `isStableDestination`: `WaterBoundPathNavigation` only wants the cell
+    /// itself not to be solid-render.
+    pub fn stable_destination(&self, view: &dyn BlockView, pos: BlockPos) -> bool {
+        if self.water().is_some() {
+            !view.block_state(pos).is_solid_render()
+        } else {
+            Self::is_stable_destination(view, pos)
+        }
+    }
 }
 
-/// `GroundPathNavigation.getTempMobPos`。
-fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, can_float: bool) -> Vec3 {
+/// `GroundPathNavigation.getTempMobPos`；`WaterBoundPathNavigation` 取 `getY(0.5)`。
+fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, flags: EvaluatorFlags) -> Vec3 {
     let position = mob.path.position;
+    if flags.swim.is_some() {
+        let y = position.y + f64::from(mob.path.height) * 0.5;
+        return Vec3::new(position.x, y, position.z);
+    }
+    let can_float = flags.can_float;
     Vec3::new(
         position.x,
         f64::from(surface_y(view, mob, can_float)),
@@ -456,7 +497,27 @@ fn can_cut_corner(path_type: PathType) -> bool {
         && path_type != PathType::WalkableDoor
 }
 
-fn should_target_next_node_in_direction(path: &Path, temp: Vec3) -> bool {
+/// `PathNavigation.isClearForMovementBetween(mob, start, stop, false)`：碰撞体射线不被挡。
+///
+/// `PathNavigation.isClearForMovementBetween(mob, start, stop, false)`: a collider ray
+/// that hits nothing.
+fn clear_for_movement(view: &dyn BlockView, mob: &NavMob, start: Vec3, stop: Vec3) -> bool {
+    let to = Vec3::new(stop.x, stop.y + f64::from(mob.path.height) * 0.5, stop.z);
+    view.clip_collider(start, to, mob.path.context).is_none()
+}
+
+/// `shouldTargetNextNodeInDirection`。`direct` 是这种导航有没有 `canMoveDirectly`
+/// （地面导航恒假，水中导航用 [`clear_for_movement`]）。
+///
+/// `shouldTargetNextNodeInDirection`. `direct` says whether this navigation has a
+/// `canMoveDirectly` (always false on the ground, [`clear_for_movement`] in water).
+fn should_target_next_node_in_direction(
+    view: &dyn BlockView,
+    mob: &NavMob,
+    path: &Path,
+    temp: Vec3,
+    direct: bool,
+) -> bool {
     if path.next_node_index + 1 >= path.node_count() {
         return false;
     }
@@ -470,6 +531,9 @@ fn should_target_next_node_in_direction(path: &Path, temp: Vec3) -> bool {
     let next = bottom_centre(path.next_node_pos());
     if temp.distance_to_sqr(next).partial_cmp(&(2.0 * 2.0)) != Some(std::cmp::Ordering::Less) {
         return false;
+    }
+    if direct && clear_for_movement(view, mob, temp, path.next_entity_pos(mob.path.width)) {
+        return true;
     }
     let after = bottom_centre(path.nodes[path.next_node_index + 1].pos());
     let to_next = next.subtract(temp);

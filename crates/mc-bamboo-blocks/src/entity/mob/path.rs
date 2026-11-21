@@ -110,6 +110,12 @@ pub struct EvaluatorFlags {
     pub can_open_doors: bool,
     pub can_float: bool,
     pub can_walk_over_fences: bool,
+    /// `Some(allowBreaching)` 时用 `SwimNodeEvaluator`（`WaterBoundPathNavigation`），
+    /// `None` 是 `WalkNodeEvaluator`。
+    ///
+    /// `Some(allowBreaching)` selects `SwimNodeEvaluator` (`WaterBoundPathNavigation`);
+    /// `None` is `WalkNodeEvaluator`.
+    pub swim: Option<bool>,
 }
 
 impl Default for EvaluatorFlags {
@@ -119,6 +125,7 @@ impl Default for EvaluatorFlags {
             can_open_doors: false,
             can_float: false,
             can_walk_over_fences: false,
+            swim: None,
         }
     }
 }
@@ -308,7 +315,11 @@ struct Search<'a> {
 pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
     super::timing::span!(Path);
     let mut search = Search::new(view, request.mob, request.flags);
-    let start = search.get_start();
+    let start = if request.flags.swim.is_some() {
+        search.swim_start()
+    } else {
+        search.get_start()
+    };
     let mut target = {
         let node = search.get_node(request.target.x, request.target.y, request.target.z);
         let node = search.nodes[node];
@@ -616,6 +627,9 @@ impl<'a> Search<'a> {
 
     /// `getNeighbors`：北、东、南、西，然后四个对角。
     fn get_neighbors(&mut self, parent: usize, out: &mut Vec<usize>) {
+        if let Some(allow_breaching) = self.flags.swim {
+            return self.swim_neighbors(parent, allow_breaching, out);
+        }
         let node = self.nodes[parent];
         let mut jump_size = 0;
         let above = self.cached_path_type(node.x, node.y + 1, node.z);
@@ -1177,4 +1191,134 @@ pub(crate) fn has_block_collision(
     !view
         .world_border()
         .no_border_collision(centre_x, centre_z, bounds)
+}
+
+// ---- `SwimNodeEvaluator` ----
+
+/// `Direction.values()` 的顺序：下、上、北、南、西、东。
+///
+/// The order of `Direction.values()`: down, up, north, south, west, east.
+const SWIM_DIRECTIONS: [(i32, i32, i32); 6] = [
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+    (-1, 0, 0),
+    (1, 0, 0),
+];
+
+/// `Direction.Plane.HORIZONTAL`（北、东、南、西）在 [`SWIM_DIRECTIONS`] 里的下标，
+/// 和各自 `getClockWise()` 的下标。
+///
+/// Indices into [`SWIM_DIRECTIONS`] of `Direction.Plane.HORIZONTAL` (north, east, south,
+/// west), each paired with its `getClockWise()`.
+const SWIM_DIAGONALS: [(usize, usize); 4] = [(2, 5), (5, 3), (3, 4), (4, 2)];
+
+impl Search<'_> {
+    /// `SwimNodeEvaluator.getStart`：包围盒最小角，y 加 0.5 再取整。
+    ///
+    /// `SwimNodeEvaluator.getStart`: the box's minimum corner, y floored after adding 0.5.
+    fn swim_start(&mut self) -> usize {
+        let bounds = self.mob.bounding_box();
+        self.get_node(
+            mth::floor(bounds.min_x),
+            mth::floor(bounds.min_y + 0.5),
+            mth::floor(bounds.min_z),
+        )
+    }
+
+    fn swim_open(&self, slot: Option<usize>) -> Option<usize> {
+        slot.filter(|&index| !self.nodes[index].closed)
+    }
+
+    fn swim_has_malus(&self, slot: Option<usize>) -> bool {
+        slot.is_some_and(|index| self.nodes[index].cost_malus >= 0.0)
+    }
+
+    /// `SwimNodeEvaluator.getNeighbors`：六个方向，再加两边都可走的四个水平对角。
+    ///
+    /// `SwimNodeEvaluator.getNeighbors`: the six directions, then the four horizontal
+    /// diagonals whose two sides are both passable.
+    fn swim_neighbors(&mut self, parent: usize, breaching: bool, out: &mut Vec<usize>) {
+        let node = self.nodes[parent];
+        let mut found = [None; 6];
+        for (slot, (dx, dy, dz)) in found.iter_mut().zip(SWIM_DIRECTIONS) {
+            *slot = self.swim_accepted_node(node.x + dx, node.y + dy, node.z + dz, breaching);
+            out.extend(self.swim_open(*slot));
+        }
+        for (first, second) in SWIM_DIAGONALS {
+            if !self.swim_has_malus(found[first]) || !self.swim_has_malus(found[second]) {
+                continue;
+            }
+            let x = node.x + SWIM_DIRECTIONS[first].0 + SWIM_DIRECTIONS[second].0;
+            let z = node.z + SWIM_DIRECTIONS[first].2 + SWIM_DIRECTIONS[second].2;
+            let diagonal = self.swim_accepted_node(x, node.y, z, breaching);
+            out.extend(self.swim_open(diagonal));
+        }
+    }
+
+    /// `SwimNodeEvaluator.findAcceptedNode`。没有流体的格子每被问到一次就再加 8，
+    /// 和官方一样会累加。
+    ///
+    /// `SwimNodeEvaluator.findAcceptedNode`. A fluid-less cell gains another 8 every time
+    /// it is asked for, accumulating exactly as vanilla does.
+    fn swim_accepted_node(&mut self, x: i32, y: i32, z: i32, breaching: bool) -> Option<usize> {
+        let path_type = self.swim_cached_path_type(x, y, z);
+        if !(breaching && path_type == PathType::Breach || path_type == PathType::Water) {
+            return None;
+        }
+        let cost = self.malus(path_type);
+        if cost < 0.0 {
+            return None;
+        }
+        let index = self.get_node(x, y, z);
+        let dry = self.state(BlockPos::new(x, y, z)).fluid().is_empty();
+        let node = &mut self.nodes[index];
+        node.path_type = path_type;
+        node.cost_malus = mth::java_max_f32(node.cost_malus, cost);
+        if dry {
+            node.cost_malus += 8.0;
+        }
+        Some(index)
+    }
+
+    fn swim_cached_path_type(&mut self, x: i32, y: i32, z: i32) -> PathType {
+        if let Some(&found) = self.type_cache.get(&(x, y, z)) {
+            return found;
+        }
+        let found = self.swim_path_type(x, y, z);
+        self.type_cache.insert((x, y, z), found);
+        found
+    }
+
+    /// `SwimNodeEvaluator.getPathTypeOfMob`：实体占的每一格都要是水（或可以跃出的空气），
+    /// 循环结束后再看最后一格能不能在水里寻路。
+    ///
+    /// `SwimNodeEvaluator.getPathTypeOfMob`: every cell the entity covers must be water
+    /// (or breachable air); after the loop the last visited cell decides between water
+    /// and blocked.
+    fn swim_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
+        let mut last = BlockPos::new(x, y, z);
+        for xx in x..x + self.entity_width {
+            for yy in y..y + self.entity_height {
+                for zz in z..z + self.entity_depth {
+                    last = BlockPos::new(xx, yy, zz);
+                    let state = self.state(last);
+                    let fluid = state.fluid();
+                    let below = self.state(last.below());
+                    if fluid.is_empty() && below.is_pathfindable_water() && state.is_air() {
+                        return PathType::Breach;
+                    }
+                    if !fluid.is_tagged(fluid_tags::WATER) {
+                        return PathType::Blocked;
+                    }
+                }
+            }
+        }
+        if self.state(last).is_pathfindable_water() {
+            PathType::Water
+        } else {
+            PathType::Blocked
+        }
+    }
 }

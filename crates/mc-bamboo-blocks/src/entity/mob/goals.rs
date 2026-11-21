@@ -1833,7 +1833,7 @@ pub(crate) fn default_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !mob.navigation.stable_destination(view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -1856,7 +1856,7 @@ pub(crate) fn land_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !mob.navigation.stable_destination(view, pos)
         {
             return None;
         }
