@@ -94,6 +94,18 @@ pub enum PlayRequest {
     ChunkBatchReceived {
         desired_chunks_per_tick: f32,
     },
+    /// 玩家控制的载具的位置。官方 `ServerboundMoveVehiclePacket`：骑手在车上时位置由客户端
+    /// 决定，服务端只做校验。
+    ///
+    /// The position of the vehicle a player controls. Vanilla
+    /// `ServerboundMoveVehiclePacket`: while riding, the client decides the
+    /// vehicle's position and the server only validates it.
+    MoveVehicle {
+        position: Vec3,
+        yaw: f32,
+        pitch: f32,
+        on_ground: bool,
+    },
     /// 聊天消息。签名、时间戳、盐和已读窗口都留着，校验在世界线程上做。
     ///
     /// A chat message. The signature, timestamp, salt, and seen-window stay attached;
@@ -139,6 +151,10 @@ pub enum PlayRequest {
     },
     PlayerCommand {
         action: PlayerCommandKind,
+        /// `START_RIDING_JUMP` 的跳跃蓄力刻度，其余动作为 0。
+        ///
+        /// The jump charge scale of `START_RIDING_JUMP`, 0 for the other actions.
+        data: i32,
     },
     /// 飞行状态变了。看 [`ABILITY_FLAG_FLYING`]。
     PlayerAbilities {
@@ -334,6 +350,16 @@ impl PlayRequest {
             serverbound::MOVE_PLAYER_STATUS_ONLY => Self::move_player(None, None, reader.u8()?),
             serverbound::CHUNK_BATCH_RECEIVED => Self::ChunkBatchReceived {
                 desired_chunks_per_tick: reader.f32()?,
+            },
+            // 载具移动包永远带完整的位置、朝向和着地位，和 `move_player_pos_rot` 的字段相同。
+            //
+            // A vehicle move always carries the full position, rotation and on-ground flag,
+            // the same fields as `move_player_pos_rot`.
+            serverbound::MOVE_VEHICLE => Self::MoveVehicle {
+                position: read_position(&mut reader)?,
+                yaw: reader.f32()?,
+                pitch: reader.f32()?,
+                on_ground: reader.bool()?,
             },
             serverbound::CHAT => read_chat(&mut reader)?,
             serverbound::CHAT_COMMAND => Self::ChatCommand {
@@ -566,8 +592,8 @@ fn read_player_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeErr
     reader.varint()?;
     let action = by_ordinal(&PlayerCommandKind::ALL, reader.varint()?)?;
     // 只有 START_RIDING_JUMP 用的参数。
-    reader.varint()?;
-    Ok(PlayRequest::PlayerCommand { action })
+    let data = reader.varint()?;
+    Ok(PlayRequest::PlayerCommand { action, data })
 }
 
 /// 解码 `set_creative_mode_slot`。
@@ -1295,18 +1321,50 @@ mod tests {
         assert_eq!(
             decode_body(serverbound::PLAYER_COMMAND, "07 01 00"),
             Ok(PlayRequest::PlayerCommand {
-                action: PlayerCommandKind::StartSprinting
+                action: PlayerCommandKind::StartSprinting,
+                data: 0,
             })
         );
         assert_eq!(
             decode_body(serverbound::PLAYER_COMMAND, "07 06 00"),
             Ok(PlayRequest::PlayerCommand {
-                action: PlayerCommandKind::StartFallFlying
+                action: PlayerCommandKind::StartFallFlying,
+                data: 0,
+            })
+        );
+        // 骑乘跳跃的蓄力刻度是 varint：`07 03 64` 是驯服后起跳前攒到 100。
+        //
+        // The riding jump charge is a varint: `07 03 64` is 100 while charging.
+        assert_eq!(
+            decode_body(serverbound::PLAYER_COMMAND, "07 03 64"),
+            Ok(PlayRequest::PlayerCommand {
+                action: PlayerCommandKind::StartRidingJump,
+                data: 100,
             })
         );
         assert_eq!(
             decode_body(serverbound::PLAYER_COMMAND, "07 07 00"),
             Err(DecodeError::InvalidEnum(7))
+        );
+    }
+
+    #[test]
+    fn decodes_move_vehicle() {
+        // 三个 f64 的位置、两个 f32 的朝向、一个 bool 的着地位。
+        //
+        // Three f64 coordinates, two f32 angles and one bool for on-ground.
+        assert_eq!(
+            decode_body(
+                serverbound::MOVE_VEHICLE,
+                "3f f0 00 00 00 00 00 00  40 50 00 00 00 00 00 00
+                 bf f0 00 00 00 00 00 00  42 b4 00 00  42 34 00 00  01"
+            ),
+            Ok(PlayRequest::MoveVehicle {
+                position: Vec3::new(1.0, 64.0, -1.0),
+                yaw: 90.0,
+                pitch: 45.0,
+                on_ground: true,
+            })
         );
     }
 

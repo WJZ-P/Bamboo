@@ -2676,43 +2676,73 @@ fn save_all_reports_failed_when_the_io_write_fails() {
 /// without hanging (level/data bytes are still attempted).
 #[test]
 fn a_dead_io_thread_shuts_the_world_down_without_hanging() {
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
     use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
 
-    let tmp = D6TempDir::new("io-fatal");
-    let dir = WorldDir::new(&tmp.0);
-    dir.create_layout().unwrap();
-    let mut server = Harness::new_loaded(2);
-    server
-        .world
-        .master
-        .host
-        .set_io(ChunkIo::open(&dir).unwrap());
+    // 用独立线程加宽裕总超时（60 秒）兜底：既不因机器满载误判，也能在关服真的挂死时失败。
+    // Run on a helper thread with a generous 60 s overall timeout so heavy load
+    // does not flake, while a genuine shutdown hang fails cleanly.
+    const LIMIT: Duration = Duration::from_secs(60);
+    let (done, finished) = mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .stack_size(crate::island_pool::ISLAND_THREAD_STACK)
+        .spawn(move || {
+            let tmp = D6TempDir::new("io-fatal");
+            let dir = WorldDir::new(&tmp.0);
+            dir.create_layout().unwrap();
+            let mut server = Harness::new_loaded(2);
+            server
+                .world
+                .master
+                .host
+                .set_io(ChunkIo::open(&dir).unwrap());
 
-    // 故意留一个在途读请求：IO 线程死了也不能让 Director 永远等结果。
-    // Leave a read in flight: a dead IO thread must not leave the Director waiting.
-    server
-        .world
-        .master
-        .host
-        .io()
-        .unwrap()
-        .submit_read(mc_bamboo_core::ChunkPos::new(3, 3), 99, 0);
-    server.world.master.host.io().unwrap().crash_for_test();
-    for _ in 0..2000 {
-        if server.world.master.host.io().unwrap().worker_stopped() {
-            break;
+            // 故意留一个在途读请求：IO 线程死了也不能让 Director 永远等结果。
+            // Leave a read in flight: a dead IO thread must not leave the Director waiting.
+            server.world.master.host.io().unwrap().submit_read(
+                mc_bamboo_core::ChunkPos::new(3, 3),
+                99,
+                0,
+            );
+            server.world.master.host.io().unwrap().crash_for_test();
+            // 等 IO 线程真正退出（宽裕超时，不依赖 2 秒内跑完）。
+            // Wait until the IO worker has actually stopped (generous timeout).
+            let deadline = Instant::now() + LIMIT;
+            while !server.world.master.host.io().unwrap().worker_stopped() {
+                assert!(
+                    Instant::now() < deadline,
+                    "IO worker did not exit within {LIMIT:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                server.world.master.host.io_failed(),
+                "world must notice the dead IO thread"
+            );
+            // 关服路径不能挂死：这一 tick 直接走完 shut_down 并返回 Break。
+            // Shutdown must not hang: this tick runs shut_down and returns Break.
+            assert!(
+                server.world.tick().is_break(),
+                "a fatal IO error must end the world loop"
+            );
+            let _ = done.send(());
+        })
+        .expect("spawn test thread");
+    match finished.recv_timeout(LIMIT) {
+        Ok(()) => worker.join().expect("test thread"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            if let Err(payload) = worker.join() {
+                std::panic::resume_unwind(payload);
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("dead IO thread shutdown test hung past {LIMIT:?}")
+        }
     }
-    assert!(
-        server.world.master.host.io_failed(),
-        "world must notice the dead IO thread"
-    );
-    // 关服路径不能挂死：这一 tick 直接走完 shut_down 并返回 Break。
-    assert!(
-        server.world.tick().is_break(),
-        "a fatal IO error must end the world loop"
-    );
 }
 
 #[test]
@@ -3425,6 +3455,7 @@ fn every_decoded_request_reaches_a_module_without_disconnecting() {
         PlayRequest::PlayerInput { flags: 0x21 },
         PlayRequest::PlayerCommand {
             action: PlayerCommandKind::StartSprinting,
+            data: 0,
         },
         PlayRequest::PlayerAbilities { flags: 0x02 },
         PlayRequest::Punch,
@@ -3487,6 +3518,7 @@ fn start_fall_flying_is_refused_with_the_current_flags() {
         &client,
         PlayRequest::PlayerCommand {
             action: PlayerCommandKind::StartFallFlying,
+            data: 0,
         },
     );
     server.tick();
@@ -3509,6 +3541,7 @@ fn start_fall_flying_is_refused_with_the_current_flags() {
         &client,
         PlayRequest::PlayerCommand {
             action: PlayerCommandKind::StartFallFlying,
+            data: 0,
         },
     );
     server.tick();

@@ -28,7 +28,7 @@ use mc_bamboo_protocol::{
         AddEntity, AttributeModifier, AttributeOperation, AttributeSnapshot, BundleDelimiter,
         EntityData, EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot,
         PositionDelta, PositionPath, RemoveEntities, RotateHead, SetEntityData, SetEntityMotion,
-        TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
+        SetPassengers, TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
     },
 };
 use uuid::Uuid;
@@ -227,6 +227,10 @@ pub struct TrackedEntity {
     /// `ServerEntity.tickCount`，每刻加一，周期判定和强制位置同步都用。
     tick_count: i32,
     was_on_ground: bool,
+    /// 上次发出去的乘客名单。官方 `ServerEntity.lastPassengers`。
+    ///
+    /// The passenger list last sent, vanilla `ServerEntity.lastPassengers`.
+    last_passengers: Vec<i32>,
     /// 上次发出去的引信，TNT 每 tick 都变。
     last_fuse: i32,
     /// 上次发出去的物品堆。空堆是默认值，不单独发。
@@ -254,6 +258,7 @@ impl TrackedEntity {
             ticks_since_step: -1,
             tick_count: 0,
             was_on_ground: snapshot.on_ground,
+            last_passengers: snapshot.passengers.clone(),
             last_fuse: snapshot.data.fuse().unwrap_or(0),
             last_stack: snapshot
                 .data
@@ -731,6 +736,10 @@ pub struct Snapshot {
     pub sync_position: bool,
     /// `LivingEntity.isFallFlying()`：为真时即使 `trackDelta` 为假也查速度。
     pub fall_flying: bool,
+    /// 骑在上面的玩家，官方的 `Entity.getPassengers()`。
+    ///
+    /// The players riding this entity, vanilla `Entity.getPassengers()`.
+    pub passengers: Vec<i32>,
 }
 
 /// 配对和同步时要发的、按实体类型不同的元数据。
@@ -785,6 +794,10 @@ impl Snapshot {
             },
             sync_position: false,
             fall_flying: false,
+            passengers: match &public.kind {
+                KindPublic::Mob(mob) => mob.passengers.clone(),
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -2177,6 +2190,19 @@ fn entity_uuid(id: i32) -> Uuid {
 /// Once per tick, vanilla `ServerEntity.sendChanges`. All decisions live in
 /// [`TrackedEntity::step`]; this wrapper only frames the packets and sends them.
 fn send_changes(snapshot: &Snapshot, tracked: &mut TrackedEntity, links: &mut Links) {
+    // 官方 `ServerEntity.sendChanges` 先比乘客名单，再发位置和元数据。
+    // Vanilla `ServerEntity.sendChanges` compares the passengers first, then position and metadata.
+    if snapshot.passengers != tracked.last_passengers {
+        let body = packet_body(&SetPassengers {
+            vehicle: snapshot.id,
+            passengers: &snapshot.passengers,
+        });
+        let frames = frame_from_body(&body);
+        for &viewer in &tracked.seen_by {
+            links.send_frames(viewer, &frames);
+        }
+        tracked.last_passengers.clone_from(&snapshot.passengers);
+    }
     let needs_sync = snapshot.needs_sync;
     let sync_velocity = snapshot.sync_velocity;
     let mut frames = Vec::new();

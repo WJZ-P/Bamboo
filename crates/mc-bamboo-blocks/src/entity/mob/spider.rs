@@ -398,6 +398,8 @@ mod tests {
                 armor_cover: 0.0,
                 main_hand: 0,
                 off_hand: 0,
+                yaw: 0.0,
+                pitch: 0.0,
                 combat: Default::default(),
             });
             let mut ticks = BlockTicks::new();

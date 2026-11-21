@@ -164,7 +164,7 @@ pub(crate) struct Player {
     ///
     /// A bow or crossbow in `LivingEntity.useItem`.
     pub(crate) weapon_use: Option<crate::player_weapon::WeaponUse>,
-    pub(crate) weapon_stats: crate::player_weapon::WeaponStats,
+    pub(crate) item_use_stats: crate::item_use_stats::ItemUseStats,
     /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
     pub(crate) pending_exhaustion: f32,
     /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
@@ -222,6 +222,10 @@ pub(crate) struct Player {
     /// screen. The server never respawns on its own; without a client packet
     /// the player stays dead.
     pub(crate) awaiting_respawn: bool,
+    /// 骑乘状态：骑着的载具和载具移动校验用的几个位置。
+    ///
+    /// Riding state: the vehicle and the positions its movement is checked against.
+    pub(crate) riding: crate::riding::Riding,
 }
 
 impl Player {
@@ -283,7 +287,7 @@ impl Player {
             environment: crate::player_environment::Environment::default(),
             use_item: None,
             weapon_use: None,
-            weapon_stats: Default::default(),
+            item_use_stats: Default::default(),
             pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,
@@ -296,6 +300,7 @@ impl Player {
             entity_ticks: 0,
             combat_memory: Default::default(),
             awaiting_respawn: false,
+            riding: crate::riding::Riding::default(),
         }
     }
 
@@ -453,6 +458,8 @@ impl Player {
             armor_cover: self.armor_cover(),
             main_hand: if main.is_empty() { 0 } else { main.item },
             off_hand: if off.is_empty() { 0 } else { off.item },
+            yaw: self.yaw,
+            pitch: self.pitch,
             combat: self.combat_memory.view(self.entity_ticks),
         }
     }

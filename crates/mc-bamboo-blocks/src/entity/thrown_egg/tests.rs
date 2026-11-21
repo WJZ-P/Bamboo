@@ -93,3 +93,23 @@ fn an_egg_hitting_the_floor_breaks_and_hatches_one_baby_on_top() {
     );
     assert!(chick.position.y >= 64.0 - 1.0e-7);
 }
+
+#[test]
+fn burning_egg_extinguishes_when_crossing_water_into_dry_air() {
+    let mut level = crate::testing::TestLevel::new();
+    level.set(BlockPos::new(2, 65, 0), BlockState(blocks::WATER));
+    let mut ticks = crate::BlockTicks::default();
+    let mut world = World::new(&mut level, &mut ticks);
+    let mut egg = Entity::thrown_egg(&shot(Vec3::new(0.5, 65.25, 0.5)));
+    egg.delta = Vec3::new(5.0, 0.0, 0.0);
+    egg.remaining_fire_ticks = 200;
+    let id = world.spawn_entity(egg);
+    let mut expected = world.entity(id).unwrap().random;
+    expected.next_float();
+    expected.next_float();
+    world.tick_entities();
+    let egg = world.entity(id).unwrap();
+    assert!(egg.position.x > 5.0 && !egg.in_water);
+    assert_eq!(egg.remaining_fire_ticks, 0);
+    assert_eq!(egg.random.state(), expected.state());
+}

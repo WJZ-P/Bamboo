@@ -19,6 +19,7 @@ use crate::entity::{
 pub enum AvoidClass {
     Player,
     Wolf,
+    Llama,
     Monster,
     PolarBear,
 }
@@ -28,6 +29,7 @@ impl AvoidClass {
         match self {
             Self::Player => false,
             Self::Wolf => kind == MobType::Wolf,
+            Self::Llama => kind == MobType::Llama,
             Self::Monster => kind.is_monster(),
             // 北极熊还没实现。Polar bears are not modelled yet.
             Self::PolarBear => false,
@@ -35,13 +37,15 @@ impl AvoidClass {
     }
 }
 
-/// 正在躲的那个实体：uid 和最近一次看到的位置。
+/// 正在躲的那个实体：uid、最近一次看到的位置，以及羊驼的力量（`WolfAvoidEntityGoal` 用）。
 ///
-/// The entity being avoided: its uid and last seen position.
+/// The entity being avoided: its uid, last seen position and llama strength
+/// (read by `WolfAvoidEntityGoal`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Avoided {
     uid: EntityUid,
     position: Vec3,
+    llama_strength: i32,
 }
 
 /// `predicateOnAvoidEntity`：缺省排除创造和旁观玩家；狐狸给的三种。
@@ -89,6 +93,13 @@ impl AvoidEntity {
     pub const fn filtered(mut self, filter: AvoidFilter) -> Self {
         self.filter = filter;
         self
+    }
+
+    /// 正在躲的羊驼的力量值（`Llama.getStrength`），不是羊驼或还没选中时为 0。
+    ///
+    /// The strength of the llama selected to avoid (`Llama.getStrength`), or 0.
+    pub(super) fn avoided_llama_strength(&self) -> i32 {
+        self.to_avoid.map_or(0, |avoided| avoided.llama_strength)
     }
 
     /// `AvoidEntityGoal.canUse`。
@@ -164,6 +175,7 @@ impl AvoidEntity {
                 found = Some(Avoided {
                     uid: candidate.uid,
                     position: candidate.position,
+                    llama_strength: candidate.llama_strength(),
                 });
             }
         }
@@ -195,6 +207,7 @@ impl AvoidEntity {
                     eye,
                     alive: public.is_alive(),
                     tame: public.tame_flags & super::tame::FLAG_TAME != 0,
+                    llama_strength: public.equine.map_or(0, |equine| equine.strength),
                 }
                 .into(),
             );
@@ -235,6 +248,7 @@ impl AvoidEntity {
                 eye,
                 alive,
                 tame,
+                ..
             } => {
                 if !alive {
                     return false;
@@ -271,6 +285,7 @@ enum Candidate {
         eye: f32,
         alive: bool,
         tame: bool,
+        llama_strength: i32,
     },
 }
 
@@ -282,6 +297,15 @@ struct CandidateView {
     uid: EntityUid,
     position: Vec3,
     source: Candidate,
+}
+
+impl CandidateView {
+    const fn llama_strength(self) -> i32 {
+        match self.source {
+            Candidate::Mob { llama_strength, .. } => llama_strength,
+            Candidate::Player(_) => 0,
+        }
+    }
 }
 
 impl From<Candidate> for CandidateView {

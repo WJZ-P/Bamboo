@@ -39,6 +39,7 @@ mod egg;
 mod equine;
 mod fish;
 mod gen_spawn;
+mod grazing;
 mod llama_spit;
 mod natural_spawn;
 mod projectile;
@@ -101,6 +102,7 @@ enum Line {
     PandaGenes(PandaGenesCase),
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
+    EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Fish(Box<fish::FishCase>),
     WaterMob(Box<water_mob::WaterMobCase>),
@@ -142,6 +144,11 @@ struct Case {
     blocks: Vec<[i32; 4]>,
     cows: Vec<CowSetup>,
     players: Vec<PlayerSetup>,
+    /// 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
+    ///
+    /// Equine scenes: this player rides mob 0; -1 means nobody rides.
+    #[serde(default = "minus_one")]
+    rider: i32,
     hurts: Vec<[i32; 4]>,
     #[serde(default)]
     summons: Vec<SummonSetup>,
@@ -161,6 +168,11 @@ struct Case {
     /// 每刻新生成的掉落物和经验球。
     #[serde(default)]
     spawns: Option<Vec<Vec<Spawn>>>,
+    /// 吃草场景：每刻 `blocks` 里每一格此刻的状态号，顺序相同。
+    ///
+    /// Grazing scenes: the current state id of every `blocks` cell per tick, same order.
+    #[serde(default)]
+    block_steps: Option<Vec<Vec<u32>>>,
     /// 致死伤害的种类：0 玩家攻击，1 摔落，2 着火。
     #[serde(default)]
     death_kind: i32,
@@ -464,6 +476,11 @@ struct CowSetup {
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
     #[serde(default)]
     egg: i32,
+    /// 马科的初始脾气，-1 表示用构造时的值。
+    ///
+    /// The equine's starting temper; -1 keeps the constructed value.
+    #[serde(default = "minus_one")]
+    temper: i32,
     /// 熊猫的显性 / 隐性基因 id。
     ///
     /// The panda's main and hidden gene ids.
@@ -585,6 +602,10 @@ struct CowStep {
     eq: i32,
     #[serde(default)]
     tmp: i32,
+    #[serde(default)]
+    rider_count: usize,
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，以及苦力怕、蜘蛛、
@@ -1118,6 +1139,7 @@ impl Report {
                 Line::Shot(case) => self.replay_shot(&case),
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
+                Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::WaterMob(case) => self.replay_water_mob(&case),
@@ -1227,6 +1249,13 @@ impl Report {
             self.replay_player_hurt(case);
             return;
         }
+        // 吃草场景先确认官方那一侧真的发生了场景想测的事。
+        // Grazing scenes first confirm the official side did what the scene is for.
+        if let Some(steps) = &case.block_steps
+            && let Some(error) = grazing::coverage_error(&case.name, &case.blocks, steps)
+        {
+            self.mismatch(error);
+        }
         // 改坏确认：故意改一处生产参数，对拍必须报不一致。
         let break_test = self.break_test.as_deref();
         let mut level = MobLevel {
@@ -1264,6 +1293,8 @@ impl Report {
                     // The official players use UUID (1, 2 + index); wolves match owners by it.
                     uuid: Some(((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),
                     uid: player.id,
+                    yaw: 0.0,
+                    pitch: 0.0,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),
                         f64::from_bits(player.y as u64),
@@ -1313,6 +1344,11 @@ impl Report {
             level
                 .blocks
                 .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+        }
+        if case.name.ends_with("_no_grief") {
+            // 和 `MobOracle.play` 一样按场景名关掉 `mobGriefing`。
+            // Turn `mobGriefing` off by scene name, like `MobOracle.play`.
+            level.rules.mob_griefing = false;
         }
         if matches!(break_test, Some("zombie_egg")) {
             // 改坏确认：关掉 `mobGriefing`，海龟蛋既不会被踩坏也不会被啄碎。
@@ -1383,6 +1419,11 @@ impl Report {
                         // The chicken's egg timer comes from Java (drawn in its constructor).
                         if cow.egg > 0 {
                             mob.egg_time = cow.egg;
+                        }
+                        if cow.temper >= 0
+                            && let Some(state) = mob.equine.as_mut()
+                        {
+                            state.temper = cow.temper;
                         }
                         if kind == mc_bamboo_blocks::entity::mob::MobType::Panda {
                             use mc_bamboo_blocks::entity::mob::panda::Gene;
@@ -1493,6 +1534,20 @@ impl Report {
                     });
                 }
                 ids.push(id);
+            }
+            // 骑乘场景：官方 `startRiding` 之后，0 号生物身上坐着这名玩家。
+            //
+            // Riding scene: after vanilla's `startRiding` this player sits on mob 0.
+            if case.rider >= 0
+                && let Some(&ridden) = ids.first()
+                && let Some(player) = case.players.get(case.rider as usize)
+            {
+                let rider = player.id;
+                world.with_entity_mut(ridden, &mut |entity| {
+                    if let Some(mob) = entity.kind.mob_mut() {
+                        mob.passengers.push(rider);
+                    }
+                });
             }
         }
         let Some(first) = case.steps.first() else {
@@ -1775,6 +1830,7 @@ impl Report {
                 }
             }
             self.compare(&case.name, index, &ours, expected);
+            self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
             if let Some(expected) = &case.mob_event_packets
                 && let Some(expected) = expected.get(index)
@@ -1840,6 +1896,24 @@ impl Report {
             }
             if self.mismatches.len() >= self.show {
                 return;
+            }
+        }
+    }
+
+    /// 吃草场景：这一刻场景里每一格的方块状态和官方逐格相同。
+    ///
+    /// Grazing scenes: every scene cell holds the official block state this tick.
+    fn compare_blocks(&mut self, case: &Case, level: &MobLevel, index: usize) {
+        let Some(expected) = case.block_steps.as_ref().and_then(|all| all.get(index)) else {
+            return;
+        };
+        for (&[x, y, z, _], &official) in case.blocks.iter().zip(expected) {
+            let ours = level.block_state(BlockPos::new(x, y, z)).0;
+            if ours != official {
+                self.mismatch(format!(
+                    "{} tick {index} block {x},{y},{z}: official {official} bamboo {ours}",
+                    case.name
+                ));
             }
         }
     }
@@ -1990,6 +2064,8 @@ impl Report {
                 bits64!(armor);
                 plain!(eq);
                 plain!(tmp);
+                plain!(rider_count);
+                plain!(owner);
             }
             if diffs.is_empty() {
                 continue;
@@ -3349,6 +3425,12 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .as_ref()
             .map_or(0, |state| i32::from(state.flags())),
         tmp: mob.equine.as_ref().map_or(0, |state| state.temper),
+        rider_count: mob.passengers.len(),
+        owner: mob
+            .equine
+            .as_ref()
+            .and_then(|state| state.owner.as_ref())
+            .map(uuid_text),
     }
 }
 
@@ -3402,6 +3484,22 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
         }
         _ => mob.variant.name().to_owned(),
     }
+}
+
+/// 刷怪对拍的花色 / 羊毛颜色和叫声；鸡不带下蛋计时（官方取自没播种的实体随机源），
+/// 不是农场动物时为 `None`。和 `MobOracle.spawnVariants` 对应。
+///
+/// The spawn oracles' variant or wool colour and sound; chickens omit the egg timer
+/// (vanilla draws it from an unseeded entity random), and other mobs give `None`.
+/// Mirrors `MobOracle.spawnVariants`.
+fn spawn_variants(mob: &mc_bamboo_blocks::entity::mob::Mob) -> Option<[String; 2]> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    let variant = match mob.mob_type {
+        MobType::Chicken => mob.variant.name().to_owned(),
+        MobType::Cow | MobType::Pig | MobType::Sheep => farm_variant(mob),
+        _ => return None,
+    };
+    Some([variant, farm_sound(mob)])
 }
 
 /// 对拍里的叫声列。

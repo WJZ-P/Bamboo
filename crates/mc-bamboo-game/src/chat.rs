@@ -214,7 +214,7 @@ pub(crate) fn on_client_command(region: &mut Region, id: PlayerId, action: Clien
         region.links.send(
             id,
             &AwardStats {
-                item_used: &player.weapon_stats.take_dirty(),
+                item_used: &player.item_use_stats.take_dirty(),
             },
         );
     } else if action == ClientCommandKind::PerformRespawn {

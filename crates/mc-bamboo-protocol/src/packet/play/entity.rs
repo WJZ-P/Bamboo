@@ -742,6 +742,30 @@ impl ClientboundPacket for SetEntityData<'_> {
     }
 }
 
+/// 载具和它的乘客，`ClientboundSetPassengersPacket`：载具的实体 ID 加一个 varint 数组，
+/// 长度在前，按乘客的上下车顺序。空数组表示没人骑。
+///
+/// A vehicle and its passengers, `ClientboundSetPassengersPacket`: the vehicle's
+/// entity id and a length-prefixed varint array in riding order. An empty array
+/// clears the vehicle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetPassengers<'a> {
+    pub vehicle: i32,
+    pub passengers: &'a [i32],
+}
+
+impl ClientboundPacket for SetPassengers<'_> {
+    const ID: i32 = clientbound::SET_PASSENGERS;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.vehicle);
+        write_varint(out, self.passengers.len() as i32);
+        for &passenger in self.passengers {
+            write_varint(out, passenger);
+        }
+    }
+}
+
 /// 玩家捡起地上的物品，`ClientboundTakeItemEntityPacket`。
 ///
 /// 三个 varint：物品实体、捡起它的玩家、这次拿走的数量。

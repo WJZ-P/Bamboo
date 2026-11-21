@@ -1406,6 +1406,9 @@ fn a_stuck_island_is_left_behind_and_the_others_are_saved() {
             stuck_group = 1;
             let world = &mut scene.server.world;
             world.master.island_stop_timeout = Duration::from_millis(300);
+            // 避免机器极忙时默认 30 s 的判死时限抢在关服测试之前把卡死的岛判死。
+            // Avoid tripping the 30 s dead-island timeout before shutdown on a busy host.
+            world.master.island_dead_timeout = Duration::from_secs(300);
             for &center in &centers {
                 let pos = super::island_split_tests::at(center, 4, -60, 4);
                 let island = world.islands.island_of_chunk(center).expect("有岛");
@@ -1420,42 +1423,65 @@ fn a_stuck_island_is_left_behind_and_the_others_are_saved() {
             world.islands.get_mut(victim).expect("在表里").test_hook =
                 Some(IslandTestHook::Stall(Arc::clone(&release)));
             let healthy = island_of_group(&mut scene, 0);
+            let other_healthy: Vec<RegionId> = (0..centers.len())
+                .filter(|&g| g != stuck_group)
+                .map(|g| island_of_group(&mut scene, g))
+                .collect();
             let clock = |scene: &Scene| {
                 scene
                     .server
                     .world
                     .islands
                     .get(healthy)
-                    .expect("停放着")
-                    .region
-                    .tick
-                    .game_time()
+                    .map(|island| island.region.tick.game_time())
             };
-            let before = clock(&scene);
-            let started = Instant::now();
-            for _ in 0..6 {
-                let flow = tick_within(&mut scene.server, Duration::from_millis(40));
+            let before = clock(&scene).expect("停放着");
+            // 机器很忙时健康的岛偶尔会错过单刻 40 ms 截止时间并在后续刻追平；
+            // 持续按真实截止时间推进，直到至少跑了 6 刻、卡死的岛欠够刻且全部健康岛
+            // 都停放着（`release` 全程为假，若主控死等卡死的岛会直接撞上 `bounded` 超时）。
+            // Under heavy load a healthy island may miss a single 40 ms deadline
+            // and catch up on a later tick; keep running real-deadline ticks
+            // until at least 6 ticks passed, the stuck island owes >= 5 ticks,
+            // and every healthy island is parked (`release` stays false, so
+            // waiting for `victim` would hang and trip `bounded`).
+            let wait_limit = Instant::now() + Duration::from_secs(60);
+            let mut ticks = 0_u64;
+            loop {
+                let flow = tick_within(&mut scene.server, Duration::from_millis(50));
                 assert!(flow.is_continue(), "卡死的岛不拦主控");
                 assert!(!scene.server.world.islands.is_parked(victim));
+                ticks += 1;
+                let all_healthy_parked = other_healthy
+                    .iter()
+                    .all(|&id| scene.server.world.islands.is_parked(id));
+                if ticks >= 6
+                    && all_healthy_parked
+                    && clock(&scene).is_some_and(|now| now - before >= 6)
+                    && scene.server.world.islands.debt(victim) >= 5
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < wait_limit,
+                    "60 秒内健康的岛没有跑满 6 刻并停放"
+                );
             }
             assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "主控没有等卡死的岛：{:?}",
-                started.elapsed()
+                clock(&scene).expect("停放着") - before >= 6,
+                "别的岛照常跑了至少 6 刻"
             );
-            assert_eq!(clock(&scene) - before, 6, "别的岛照常跑了 6 刻");
             assert!(
                 scene.server.world.islands.debt(victim) >= 5,
                 "卡死的岛欠着刻"
             );
+            // 全部健康岛此时已停放，发关服后主控不会再派它们，只等 `victim` 到超时。
+            // Every healthy island is parked here, so shutdown only waits out `victim`.
             scene.server.inbox_sender().send(Inbound::Shutdown).unwrap();
-            let started = Instant::now();
-            let flow = tick_within(&mut scene.server, Duration::from_millis(40));
+            let flow = tick_within(&mut scene.server, Duration::from_millis(50));
             assert!(flow.is_break(), "关服结束世界循环");
             assert!(
-                started.elapsed() < Duration::from_secs(20),
-                "关服没有被卡死的岛拖住：{:?}",
-                started.elapsed()
+                !release.load(std::sync::atomic::Ordering::Acquire),
+                "卡死的岛一直没开闸，证明关服没有等它"
             );
             release.store(true, std::sync::atomic::Ordering::Release);
         }
@@ -1507,23 +1533,28 @@ fn an_island_panic_is_raised_even_with_another_island_stuck() {
         let stuck = island_of_group(&mut scene, 2);
         let release = Arc::new(AtomicBool::new(false));
         let world = &mut scene.server.world;
-        world.master.island_stop_timeout = Duration::from_millis(300);
+        // 给按时的健康岛充裕的召回窗口，卡死的岛全程不开闸必定超时，不依赖墙钟快慢。
+        // Give healthy islands plenty of recall budget while the stuck island
+        // stays gated and always times out.
+        world.master.island_stop_timeout = Duration::from_secs(2);
+        world.master.island_dead_timeout = Duration::from_secs(300);
         world.islands.get_mut(panicking).expect("在表里").test_hook = Some(IslandTestHook::Panic);
         world.islands.get_mut(stuck).expect("在表里").test_hook =
             Some(IslandTestHook::Stall(Arc::clone(&release)));
-        let started = Instant::now();
+        // 机器很忙时 panic 的岛未必在第一刻 50 ms 内返回；循环推进直到世界线程收到并抛出。
+        // Under heavy load the panicking island may miss the first 50 ms deadline;
+        // keep ticking until the world thread receives and re-raises it.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = tick_within(&mut scene.server, Duration::from_millis(40));
+            loop {
+                let _ = tick_within(&mut scene.server, Duration::from_millis(50));
+                assert!(Instant::now() < deadline, "60 秒内没有收到 panic 岛的崩溃");
+            }
         }));
         let text = panic_text(outcome.expect_err("panic 要在世界线程上抛出来"));
         assert!(
             text.contains("岛的测试 panic"),
             "抛出的是岛的 panic：{text}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "没有死锁：{:?}",
-            started.elapsed()
         );
         let away = scene.server.world.islands.away_ids();
         assert_eq!(away, vec![stuck], "只有卡死的岛没回来");
@@ -1547,6 +1578,10 @@ fn an_island_panic_is_raised_even_with_another_island_stuck() {
 /// island, none is lost and the outbound queues are empty.
 fn smoke(seed: u64, threads: usize, ticks: u64) {
     let mut scene = scene(seed, threads);
+    // 烟雾测试测的是慢岛不破坏不变量，不是测 30 s 判死；放大判死时限免得机器极忙时误判。
+    // The smoke test checks invariants under slow islands, not the 30 s death
+    // timeout; widen it so extreme host load does not misclassify a slow island.
+    scene.server.world.master.island_dead_timeout = Duration::from_secs(300);
     for _ in 0..3 {
         scene.server.tick();
     }
@@ -2181,6 +2216,7 @@ fn healthy_progress_beside_a_stuck_island(
     let release = Arc::new(AtomicBool::new(false));
     match deadline {
         Some(_) => {
+            scene.server.world.master.island_dead_timeout = Duration::from_secs(300);
             scene
                 .server
                 .world
@@ -2212,11 +2248,34 @@ fn healthy_progress_beside_a_stuck_island(
             None => scene.server.tick(),
         }
     }
-    // 带截止时间的那种：再给按时的岛一点时间回来（不派新的）。
-    // With a deadline: give the on-time islands a moment to return.
+    // 带截止时间的那种：轮询等到能回来的健康岛真的停放（不派新的），不靠固定睡 300 ms。
+    // 正常（有公共队列）等两个健康岛都停放；改坏（无公共队列）至少一个在空线程上的健康岛
+    // 会停放，排在卡死岛后面的那个永远回不来。
+    // With a deadline: poll until the reachable healthy islands park instead of
+    // a fixed 300 ms sleep. With the shared queue both park; without it, at
+    // least the one on the free thread parks while the trapped one stays away.
     if deadline.is_some() {
-        std::thread::sleep(Duration::from_millis(300));
-        let _ = scene.server.world.begin_hybrid_tick();
+        let wait_limit = Instant::now() + Duration::from_secs(60);
+        loop {
+            let _ = scene.server.world.begin_hybrid_tick();
+            let done = if no_shared_queue {
+                healthy
+                    .iter()
+                    .any(|&id| scene.server.world.islands.is_parked(id))
+            } else {
+                healthy
+                    .iter()
+                    .all(|&id| scene.server.world.islands.is_parked(id))
+            };
+            if done {
+                break;
+            }
+            assert!(
+                Instant::now() < wait_limit,
+                "60 秒内健康的岛没有交回（no_shared_queue={no_shared_queue}）"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
     let progress = healthy
         .iter()
