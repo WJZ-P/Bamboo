@@ -863,6 +863,15 @@ pub(crate) fn sync_slots(
     }
 }
 
+/// `level.playSound(null, x, y, z, sound, PLAYERS, volume, pitch)`：发给附近所有玩家，包括射手自己。
+///
+/// 临时 `World` 只把声音记进自己的效果列表，丢掉之前要取出来发出去，否则玩家听不到。
+///
+/// `level.playSound(null, x, y, z, sound, PLAYERS, volume, pitch)`: sent to every nearby
+/// player, the shooter included.
+///
+/// The temporary `World` only records the sound in its effect list, so the effects must
+/// be drained and sent before it is dropped, or no player hears it.
 pub(crate) fn play_sound(
     region: &mut Region,
     position: Option<Vec3>,
@@ -873,14 +882,18 @@ pub(crate) fn play_sound(
     let Some(position) = position else {
         return;
     };
-    let (mut level, ticks) = region.block_level();
-    let mut world = World::new(&mut level, ticks);
-    world.play_sound(
-        position,
-        sounds::sound_event(name),
-        sounds::PLAYERS,
-        volume,
-        pitch,
-        false,
-    );
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        world.play_sound(
+            position,
+            sounds::sound_event(name),
+            sounds::PLAYERS,
+            volume,
+            pitch,
+            false,
+        );
+        world.drain_effects()
+    };
+    crate::interaction::send_effects(region, None, &effects);
 }
