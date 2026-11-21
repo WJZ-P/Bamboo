@@ -619,7 +619,9 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         return false;
     }
     match kind {
-        MobType::Cow => animal_spawn_rules(world, pos),
+        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
+            animal_spawn_rules(world, pos)
+        }
         MobType::Zombie | MobType::Skeleton => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
@@ -953,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn cows_spawn_on_open_grass_at_day() {
+    fn farm_animals_spawn_on_open_grass_at_day() {
         let mut level = TestLevel::new();
         grass_platform(&mut level);
         // 玩家在 32 格外：过了 24 格的生成距离，又足够近让人算「附近」。
@@ -967,10 +969,16 @@ mod tests {
                 break;
             }
         }
-        assert!(spawned > 0, "平原草地上应该刷出牛");
+        assert!(
+            spawned > 0,
+            "expected farm animals on a daytime grass platform"
+        );
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
-            assert_eq!(mob.mob_type, MobType::Cow, "白天只支持牛刷出来");
+            assert!(matches!(
+                mob.mob_type,
+                MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+            ));
         }
     }
 

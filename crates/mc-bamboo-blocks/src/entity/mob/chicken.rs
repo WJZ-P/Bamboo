@@ -18,7 +18,7 @@ use crate::{
         Entity,
         ctx::{Command, EntityCtx},
     },
-    random::LegacyRandom,
+    random::RandomSource,
     state::item_is_tagged,
 };
 
@@ -135,7 +135,7 @@ impl SoundVariant {
     /// `ChickenSoundVariants.pickRandomSoundVariant`：注册表里 `nextInt(size)`。
     ///
     /// `ChickenSoundVariants.pickRandomSoundVariant`: `nextInt(size)` over the registry.
-    pub(super) fn pick(random: &LegacyRandom) -> Self {
+    pub(super) fn pick(random: &dyn RandomSource) -> Self {
         let names = registry_names::CHICKEN_SOUND_VARIANT;
         Self::from_name(names[random.next_int(names.len() as i32) as usize])
             .expect("known chicken sound variant")

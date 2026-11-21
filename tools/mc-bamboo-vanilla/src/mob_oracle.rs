@@ -3067,6 +3067,22 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     }
 }
 
+/// 刷怪对拍的花色 / 羊毛颜色和叫声；鸡不带下蛋计时（官方取自没播种的实体随机源），
+/// 不是农场动物时为 `None`。和 `MobOracle.spawnVariants` 对应。
+///
+/// The spawn oracles' variant or wool colour and sound; chickens omit the egg timer
+/// (vanilla draws it from an unseeded entity random), and other mobs give `None`.
+/// Mirrors `MobOracle.spawnVariants`.
+fn spawn_variants(mob: &mc_bamboo_blocks::entity::mob::Mob) -> Option<[String; 2]> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    let variant = match mob.mob_type {
+        MobType::Chicken => mob.variant.name().to_owned(),
+        MobType::Cow | MobType::Pig | MobType::Sheep => farm_variant(mob),
+        _ => return None,
+    };
+    Some([variant, farm_sound(mob)])
+}
+
 /// 对拍里的叫声列。
 ///
 /// The oracle's sound variant column.

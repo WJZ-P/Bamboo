@@ -272,12 +272,13 @@ fn finalize_spawn_in_group(
 }
 
 /// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
-/// `WorldGenRegion.random`。牛走 [`finalize_animal`]；以后加进来的动物还没接区域随机源，
-/// 暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
+/// `WorldGenRegion.random`。牛、猪、羊、鸡走 [`finalize_animal`]；以后加进来的动物
+/// 还没接区域随机源，暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
 ///
 /// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
-/// `WorldGenRegion.random`. Cows use [`finalize_animal`]; animals added later fall back to
-/// the level random until wired, which only affects their variants and age.
+/// `WorldGenRegion.random`. Cows, pigs, sheep and chickens use [`finalize_animal`];
+/// later animals fall back to the level random until wired, which only affects their
+/// variants and age.
 pub(super) fn finalize_generated(
     world: &mut World,
     kind: MobType,
@@ -286,18 +287,22 @@ pub(super) fn finalize_generated(
     region_random: &dyn RandomSource,
     group: &mut Option<SpawnGroup>,
 ) {
-    if kind == MobType::Cow {
+    if matches!(
+        kind,
+        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+    ) {
         finalize_animal(kind, entity, biome, region_random, group);
     } else {
         finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
     }
 }
 
-/// `Cow.finalizeSpawn` 加 `AgeableMob` / `Mob` 那两层，随机源由调用方给：运行时是
-/// `Level.random`，生成期是 `WorldGenRegion.random`。
+/// 农场动物的 `finalizeSpawn` 加 `AgeableMob` / `Mob` 那两层，随机源由调用方给：
+/// 运行时是 `Level.random`，生成期是 `WorldGenRegion.random`。
 ///
-/// `Cow.finalizeSpawn` plus the `AgeableMob` / `Mob` layers with a caller-supplied
-/// random: `Level.random` at run time, `WorldGenRegion.random` during generation.
+/// Farm animals' `finalizeSpawn` plus the `AgeableMob` / `Mob` layers with a
+/// caller-supplied random: `Level.random` at run time, `WorldGenRegion.random` during
+/// generation.
 fn finalize_animal(
     kind: MobType,
     entity: &mut Entity,

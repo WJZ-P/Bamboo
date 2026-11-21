@@ -4,14 +4,14 @@
 //! `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` 刷一批动物。两个随机源分开：循环、选表、
 //! 组大小、起点、漂移和朝向取装饰种子的 `WorldgenRandom`；`finalizeSpawn` 取
 //! `WorldGenRegion.random`。所以还没建模的动物只要照官方规则模拟放置，装饰随机源的
-//! 取数就不会错开，后面真正生成的牛落点和官方一致。
+//! 取数就不会错开，后面真正生成的牛、猪、羊、鸡落点和官方一致。
 //!
 //! World-generation spawning (vanilla `NaturalSpawner.spawnMobsForChunkGeneration`).
 //! The loop, table pick, group size, start, drift and facing draw from the
 //! decoration-seeded `WorldgenRandom`; `finalizeSpawn` draws from
 //! `WorldGenRegion.random`. Simulating the placement of unmodelled animals therefore
-//! keeps the decoration random in step, so the cows that do spawn land where vanilla
-//! puts them.
+//! keeps the decoration random in step, so the cows, pigs, sheep and chickens that do
+//! spawn land where vanilla puts them.
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::{entity_types::FACTS, registries::entity_type, spawning::MobSpawnerDef};

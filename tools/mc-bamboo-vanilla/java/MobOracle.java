@@ -2706,6 +2706,9 @@ public final class MobOracle {
         scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("cow_night", EntityTypes.COW, "savanna", 2, 15, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("cow_respawn", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, true));
+        scenes.add(new NaturalScene("pig_day", EntityTypes.PIG, "savanna", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sheep_day", EntityTypes.SHEEP, "snowy_taiga", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("chicken_day", EntityTypes.CHICKEN, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int cap = MobCategory.CREATURE.getMaxInstancesPerChunk();
         scenes.add(new NaturalScene("cow_global_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 289, false, false));
         scenes.add(new NaturalScene("cow_local_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 578, true, false));
@@ -2813,6 +2816,7 @@ public final class MobOracle {
             step.addProperty("count", state.getMobCategoryCounts().getInt(category));
             step.addProperty("worldSeed", levelSeed(level));
             var spawned = new JsonArray();
+            var variants = new JsonArray();
             for (Entity entity : level.spawned) {
                 Mob mob = (Mob) entity;
                 var row = new JsonArray();
@@ -2825,8 +2829,10 @@ public final class MobOracle {
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
                 spawned.add(row);
+                variants.add(spawnVariants(mob));
             }
             step.add("spawned", spawned);
+            step.add("variants", variants);
             steps.add(step);
         }
         var row = new JsonObject();
@@ -2914,7 +2920,10 @@ public final class MobOracle {
             row.add(Float.floatToRawIntBits(mob.getYRot()));
             row.add(mob.isBaby() ? 1 : 0);
             row.add(mob.isLeftHanded() ? 1 : 0);
-            spawned.add(row);
+            var sample = new JsonArray();
+            sample.add(row);
+            sample.add(spawnVariants(mob));
+            spawned.add(sample);
         }
         var result = new JsonObject();
         result.addProperty("type", "genSpawn");
@@ -5408,6 +5417,24 @@ public final class MobOracle {
         }
         Holder<?> variant = animal instanceof Pig pig ? pig.getVariant() : ((Cow) animal).getVariant();
         return variant.unwrapKey().orElseThrow().identifier().toString();
+    }
+
+    /** 刷出来的农场动物的花色 / 羊毛颜色和叫声；别的生物为 null。鸡的下蛋计时取自实体
+     * 自己没播种的随机源，这里不比。
+     *
+     * The variant or wool colour and sound of a spawned farm animal, null otherwise. A
+     * chicken's egg timer comes from its unseeded entity random and is left out. */
+    private static com.google.gson.JsonElement spawnVariants(Mob mob) throws Exception {
+        if (!(mob instanceof Cow || mob instanceof Pig || mob instanceof Sheep || mob instanceof Chicken)) {
+            return com.google.gson.JsonNull.INSTANCE;
+        }
+        Animal animal = (Animal) mob;
+        var variants = new JsonArray();
+        variants.add(animal instanceof Chicken chicken
+                ? chicken.getVariant().unwrapKey().orElseThrow().identifier().toString()
+                : farmVariant(animal));
+        variants.add(farmSound(animal));
+        return variants;
     }
 
     /** 叫声列；羊没有叫声变种。 */

@@ -1,14 +1,11 @@
 //! 用官方平原刷怪表和公式地形重放生成期刷怪（`NaturalSpawner.spawnMobsForChunkGeneration`）。
 //!
-//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；生成的牛比类型、坐标、朝向。
-//! 牛的幼年和左撇子取区域随机源，只在这一区块前面没有生成过别的动物时比较：
-//! 别的动物在官方那边会跑自己的 `finalizeSpawn`，Bamboo 还没有它们。
+//! 比农场动物的类型、坐标、朝向和装饰随机源指纹。区域随机源和生成属性在遇到
+//! 未实现的动物前保持同步；遇到后仍比位置，因为放置使用独立的装饰随机源。
 //!
-//! Replay world-generation spawning with the official plains table over a formula
-//! terrain. The decoration random must match exactly (a fingerprint at the end);
-//! spawned cows compare type, position and facing. Baby and left-handedness come from
-//! the region random and are compared only while no other animal spawned before in the
-//! chunk, since vanilla runs those animals' `finalizeSpawn` and Bamboo has none yet.
+//! Compare farm animal types, positions, facing and decoration RNG fingerprint.
+//! Compare region RNG and spawn traits until an unsupported species consumes
+//! region draws; positions still use the independent decoration RNG.
 
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, LegacyRandom, LevelRandom, World,
@@ -21,7 +18,7 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{BlockPos, ChunkPos};
 use mc_bamboo_data::{
     blocks,
-    registries::{biome, entity_type},
+    registries::biome,
     spawning::{self, MobCategory},
 };
 use serde::Deserialize;
@@ -35,7 +32,7 @@ pub(super) struct Case {
     sky: i32,
     block: i32,
     terrain: bool,
-    spawned: Vec<[i64; 7]>,
+    spawned: Vec<([i64; 7], Option<[String; 2]>)>,
     random: i64,
     region: i64,
 }
@@ -43,7 +40,7 @@ pub(super) struct Case {
 #[derive(Default)]
 pub(super) struct Coverage {
     pub(super) cases: usize,
-    cows: usize,
+    farms: std::collections::BTreeMap<i32, usize>,
     others: usize,
     details: usize,
 }
@@ -52,15 +49,18 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {} cows, {} other animals, {} cows with finalize details compared",
-                self.cases, self.cows, self.others, self.details
+                "GEN SPAWN: {} cases, {:?} farm animals by type, {} unsupported animals, {} animals with finalize details compared",
+                self.cases, self.farms, self.others, self.details
             );
         }
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        if self.cases > 0 && (self.cows == 0 || self.others == 0 || self.details == 0) {
-            return Err("gen spawn fixtures did not exercise cows and other animals".into());
+        if self.cases > 0 && (self.farms.len() != 4 || self.others == 0 || self.details == 0) {
+            return Err(
+                "gen spawn fixtures did not exercise all farm species and unsupported animals"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -111,24 +111,26 @@ impl Report {
         let label = format!("{} seed {}", case.name, case.seed);
         let mut in_sync = true;
         let mut ours = mobs.iter();
-        for row in &case.spawned {
-            if row[0] != i64::from(entity_type::COW) {
+        for (row, variants) in &case.spawned {
+            let Some(variants) = variants else {
                 self.gen_spawns.others += 1;
                 in_sync = false;
                 continue;
-            }
-            self.gen_spawns.cows += 1;
-            let Some(cow) = ours.next() else {
-                self.mismatch(format!("{label}: official cow {row:?} missing in Bamboo"));
+            };
+            *self.gen_spawns.farms.entry(row[0] as i32).or_default() += 1;
+            let Some(animal) = ours.next() else {
+                self.mismatch(format!(
+                    "{label}: official animal {row:?} missing in Bamboo"
+                ));
                 return;
             };
-            let mob = cow.kind.mob().expect("generated mobs are mobs");
+            let mob = animal.kind.mob().expect("generated mobs are mobs");
             let place = [
                 i64::from(mob.mob_type.entity_type()),
-                cow.position.x.to_bits() as i64,
-                cow.position.y.to_bits() as i64,
-                cow.position.z.to_bits() as i64,
-                i64::from(cow.y_rot.to_bits() as i32),
+                animal.position.x.to_bits() as i64,
+                animal.position.y.to_bits() as i64,
+                animal.position.z.to_bits() as i64,
+                i64::from(animal.y_rot.to_bits() as i32),
             ];
             if place[..] != row[..5] {
                 self.mismatch(format!(
@@ -138,6 +140,12 @@ impl Report {
             if in_sync {
                 self.gen_spawns.details += 1;
                 let details = [i64::from(mob.is_baby()), i64::from(mob.left_handed)];
+                let actual = super::spawn_variants(mob);
+                if actual.as_ref() != Some(variants) {
+                    self.mismatch(format!(
+                        "{label}: official variants {variants:?}, Bamboo {actual:?}"
+                    ));
+                }
                 if details[..] != row[5..] {
                     self.mismatch(format!(
                         "{label}: official {row:?}, Bamboo details {details:?}"
@@ -147,7 +155,7 @@ impl Report {
         }
         if let Some(extra) = ours.next() {
             self.mismatch(format!(
-                "{label}: Bamboo spawned an extra cow at {:?}",
+                "{label}: Bamboo spawned an extra animal at {:?}",
                 extra.position
             ));
         }

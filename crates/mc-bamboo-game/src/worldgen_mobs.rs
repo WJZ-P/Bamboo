@@ -271,19 +271,26 @@ mod tests {
     use super::*;
     use crate::world_options::LevelType;
 
-    /// 模板柱（草方块地面、已算好光照）放在真实主世界群系上：一批区块里能刷出牛，
-    /// 每头牛都落在自己的区块、站在草上；同一区块重跑结果相同。
+    /// 模板柱（草方块地面、已算好光照）放在真实主世界群系上：一批区块里牛、猪、羊、鸡
+    /// 都能刷出来，每只都落在自己的区块、站在草上；同一区块重跑结果相同。
     ///
-    /// Template columns (grass, baked light) over real overworld biomes: some cows
-    /// spawn, each inside its own chunk on the grass, and reruns are identical.
+    /// Template columns (grass, baked light) over real overworld biomes: cows, pigs,
+    /// sheep and chickens all spawn, each inside its own chunk on the grass, and reruns
+    /// are identical.
     #[test]
-    fn cows_spawn_inside_their_chunk_and_replay_identically() {
+    fn farm_animals_spawn_inside_their_chunk_and_replay_identically() {
         let config = WorldGenConfig {
             seed: 1234,
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         };
-        let mut cows = 0;
+        let farm = [
+            entity_type::COW,
+            entity_type::PIG,
+            entity_type::SHEEP,
+            entity_type::CHICKEN,
+        ];
+        let mut counts = [0usize; 4];
         for x in 0..24 {
             for z in 0..24 {
                 // 隔开取样，避开大片海洋。
@@ -301,14 +308,26 @@ mod tests {
                 assert_eq!(rows.len(), again.len());
                 for (row, replay) in rows.iter().zip(&again) {
                     assert_eq!(row.public.position, replay.public.position);
-                    assert_eq!(row.public.kind.entity_type(), entity_type::COW);
+                    let kind = row.public.kind.entity_type();
+                    assert_eq!(kind, replay.public.kind.entity_type());
+                    let slot = farm
+                        .iter()
+                        .position(|&farm_kind| farm_kind == kind)
+                        .expect("only farm animals are modelled for generation spawns");
+                    counts[slot] += 1;
                     let at = row.public.position;
-                    assert_eq!(BlockPos::containing(at).chunk(), pos, "牛要落在本区块");
-                    cows += 1;
+                    assert_eq!(
+                        BlockPos::containing(at).chunk(),
+                        pos,
+                        "each animal lands in its own chunk"
+                    );
                 }
             }
         }
-        assert!(cows > 0, "576 个分散的区块里应该刷出牛");
+        assert!(
+            !counts.contains(&0),
+            "576 spread chunks should spawn every farm animal, got {counts:?}"
+        );
     }
 
     /// `ChunkAccess.getNoiseBiome` 把 quart y 夹进区块高度：顶上之外的查询等于最顶一层。

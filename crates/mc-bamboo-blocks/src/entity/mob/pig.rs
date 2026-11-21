@@ -16,7 +16,7 @@ use super::{
     living,
     navigation::Navigation,
 };
-use crate::{InteractionResult, entity::Entity, random::LegacyRandom};
+use crate::{InteractionResult, entity::Entity, random::RandomSource};
 
 pub(super) const fn dimensions(baby: bool) -> (f32, f32, f32) {
     if baby {
@@ -97,7 +97,7 @@ impl SoundVariant {
             .expect("pig sound variant in the registry") as i32
     }
 
-    pub(super) fn pick(random: &LegacyRandom) -> Self {
+    pub(super) fn pick(random: &dyn RandomSource) -> Self {
         let names = registry_names::PIG_SOUND_VARIANT;
         Self::from_name(names[random.next_int(names.len() as i32) as usize])
             .expect("known pig sound variant")
