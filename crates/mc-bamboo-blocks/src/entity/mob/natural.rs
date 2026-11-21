@@ -543,7 +543,9 @@ pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
-    on_ground_position_ok(world, kind.fire_immune(), pos)
+    // 狐狸注册的是 `NO_RESTRICTIONS`，位置恒可用。
+    // Foxes are registered with `NO_RESTRICTIONS`, which accepts every position.
+    kind == MobType::Fox || on_ground_position_ok(world, kind.fire_immune(), pos)
 }
 
 /// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`，只看实体类型的防火属性。
@@ -619,6 +621,12 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         return false;
     }
     match kind {
+        // `Rabbit.checkRabbitSpawnRules`、`Fox.checkFoxSpawnRules`、`Wolf.checkWolfSpawnRules`：
+        // 只是脚下的标签各不相同。
+        // The three only differ in the tag of the block below.
+        MobType::Rabbit => bright_spawn_rules(world, pos, block_tags::RABBITS_SPAWNABLE_ON),
+        MobType::Fox => bright_spawn_rules(world, pos, block_tags::FOXES_SPAWNABLE_ON),
+        MobType::Wolf => bright_spawn_rules(world, pos, block_tags::WOLVES_SPAWNABLE_ON),
         MobType::Cow
         | MobType::Pig
         | MobType::Sheep
@@ -643,12 +651,23 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
 /// `Animal.checkAnimalSpawnRules`: the block below is `animals_spawnable_on` and
 /// `getRawBrightness(pos, 0) > 8`.
 pub(super) fn animal_spawn_rules(world: &World, pos: BlockPos) -> bool {
-    let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
-    world
-        .block_state(below)
-        .is_tagged(block_tags::ANIMALS_SPAWNABLE_ON)
-        && world.raw_brightness(pos) > 8
+    bright_spawn_rules(world, pos, block_tags::ANIMALS_SPAWNABLE_ON)
 }
+
+/// 脚下的方块在 `spawnable_on` 里，且 `Animal.isBrightEnoughToSpawn`
+/// （`getRawBrightness(pos, 0) > 8`）。
+///
+/// The block below is in `spawnable_on` and `Animal.isBrightEnoughToSpawn` holds
+/// (`getRawBrightness(pos, 0) > 8`).
+pub(super) fn bright_spawn_rules(
+    world: &World,
+    pos: BlockPos,
+    spawnable_on: mc_bamboo_data::BlockTag,
+) -> bool {
+    let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
+    world.block_state(below).is_tagged(spawnable_on) && world.raw_brightness(pos) > 8
+}
+
 /// `Monster.isDarkEnoughToSpawn`。
 fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
     let random = world.random();
@@ -808,7 +827,15 @@ pub(super) fn create_mob(world: &mut World, kind: MobType) -> Option<Entity> {
 ///
 /// `Mob.getMaxSpawnClusterSize()`; equines override it to 6.
 fn max_spawn_cluster_size(kind: MobType) -> i32 {
-    if kind.is_equine() { 6 } else { 4 }
+    if kind.is_equine() {
+        6
+    } else if kind == MobType::Wolf {
+        // `Wolf.getMaxSpawnClusterSize` 是 8，其余用 `Mob` 的 4。
+        // `Wolf.getMaxSpawnClusterSize` is 8; the rest use the `Mob` default of 4.
+        8
+    } else {
+        4
+    }
 }
 
 /// `Mob.isMaxGroupSizeReached`。
@@ -880,6 +907,7 @@ mod tests {
             armor_cover: 0.0,
             main_hand: 0,
             off_hand: 0,
+            combat: Default::default(),
         }
     }
 
@@ -975,16 +1003,20 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            spawned > 0,
-            "expected farm animals on a daytime grass platform"
-        );
+        assert!(spawned > 0, "平原草地上应该刷出牛");
+        // 平原的 `CREATURE` 表里建模了的有牛、猪、羊、鸡；白天不会有怪物。
+        // The modelled plains creatures are cows, pigs, sheep and chickens; no
+        // monster spawns by day.
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
-            assert!(matches!(
-                mob.mob_type,
-                MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
-            ));
+            assert!(
+                matches!(
+                    mob.mob_type,
+                    MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+                ),
+                "白天只刷出平原的动物，实际是 {:?}",
+                mob.mob_type
+            );
         }
     }
 

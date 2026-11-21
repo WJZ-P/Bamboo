@@ -282,6 +282,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         armor_cover: 0.0,
         main_hand: 0,
         off_hand: 0,
+        combat: Default::default(),
     };
     Ok(MobLevel {
         blocks,

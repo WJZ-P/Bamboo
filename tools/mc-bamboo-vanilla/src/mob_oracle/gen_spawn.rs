@@ -1,18 +1,23 @@
-//! 用官方平原刷怪表和公式地形重放生成期刷怪（`NaturalSpawner.spawnMobsForChunkGeneration`）。
+//! 用官方的群系刷怪表（平原、针叶林、雪地针叶林）和公式地形重放生成期刷怪
+//! （`NaturalSpawner.spawnMobsForChunkGeneration`）。
 //!
-//! 比已建模动物的类型、坐标、朝向和装饰随机源指纹。区域随机源和生成属性在遇到
-//! 未实现的动物前保持同步；遇到后仍比位置，因为放置使用独立的装饰随机源。
+//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；Bamboo 建模了的生物比类型、坐标、朝向。
+//! 幼年、左撇子、兔子 / 狐狸 / 狼的品种明细和马科的属性花色取区域随机源，只在这一区块
+//! 前面没有生成过 Bamboo 没建模的动物时比较：那些动物在官方那边会跑自己的 `finalizeSpawn`。
 //!
-//! Compare modelled animal types, positions, facing and decoration RNG fingerprint.
-//! Compare region RNG and spawn traits until an unsupported species consumes
-//! region draws; positions still use the independent decoration RNG.
+//! Replay world-generation spawning with the official biome tables (plains, taiga,
+//! snowy taiga) over a formula terrain. The decoration random must match exactly (a
+//! fingerprint at the end); every mob Bamboo models compares type, position and facing.
+//! Baby, left-handedness, the rabbit / fox / wolf variant details and the equine
+//! attributes come from the region random and are compared only while no unmodelled
+//! animal spawned before in the chunk, since vanilla runs those animals' `finalizeSpawn`.
 
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, LegacyRandom, LevelRandom, World,
     entity::{
         Entities, Entity,
         mob::{
-            MobType,
+            Mob, MobType,
             natural_gen::{GenSpawn, spawn_mobs_for_chunk_generation},
         },
     },
@@ -35,7 +40,10 @@ pub(super) struct Case {
     sky: i32,
     block: i32,
     terrain: bool,
-    spawned: Vec<(Vec<i64>, Option<[String; 2]>)>,
+    biome: String,
+    spawned: Vec<Vec<i64>>,
+    /// 和 `spawned` 一一对应：`MobOracle.genSpawnDetail`。
+    details: Vec<String>,
     random: i64,
     region: i64,
 }
@@ -43,28 +51,45 @@ pub(super) struct Case {
 #[derive(Default)]
 pub(super) struct Coverage {
     pub(super) cases: usize,
-    farms: std::collections::BTreeMap<i32, usize>,
+    cows: usize,
     equines: usize,
     others: usize,
     details: usize,
+    /// 兔子、狐狸、狼各生成了多少只，以及其中的幼崽和叼着东西的狐狸。
+    /// Spawned rabbits, foxes and wolves, plus babies among them and foxes with an item.
+    wild: [usize; 3],
+    wild_babies: usize,
+    fox_items: usize,
 }
 
 impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {:?} farm animals by type, {} equines, {} unsupported animals, {} animals with finalize details compared",
-                self.cases, self.farms, self.equines, self.others, self.details
+                "GEN SPAWN: {} cases, {} cows, {} equines, {} wild animals, {} other animals, {} mobs with finalize details compared",
+                self.cases,
+                self.cows,
+                self.equines,
+                self.wild.iter().sum::<usize>(),
+                self.others,
+                self.details
+            );
+            println!(
+                "GEN SPAWN: {} rabbits, {} foxes, {} wolves, {} babies among them, {} foxes holding an item",
+                self.wild[0], self.wild[1], self.wild[2], self.wild_babies, self.fox_items
             );
         }
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        // 平原刷怪表里的物种现在都已建模，`others` 正常为 0；只要求四种农家动物和马科都出现。
-        // Every species in the plains table is modelled now, so `others` is normally 0; only
-        // require all four farm species and the equines to show up.
-        if self.cases > 0 && (self.farms.len() != 4 || self.equines == 0 || self.details == 0) {
-            return Err("gen spawn fixtures did not exercise all farm species and equines".into());
+        let missing = self.cows == 0 || self.equines == 0;
+        if self.cases > 0 && (missing || self.details == 0) {
+            return Err("gen spawn fixtures did not exercise cows and equines".into());
+        }
+        if self.cases > 0
+            && (self.wild.contains(&0) || self.wild_babies == 0 || self.fox_items == 0)
+        {
+            return Err("gen spawn fixtures did not exercise rabbits, foxes and wolves".into());
         }
         Ok(())
     }
@@ -83,7 +108,7 @@ impl Report {
         .set_decoration_seed(case.seed, 0, 0);
         let random = LegacyRandom::new(decoration);
         let region = XoroshiroRandom::from_seed(case.seed.wrapping_mul(31).wrapping_add(7));
-        let table = spawning::for_biome_id(biome::PLAINS);
+        let table = spawning::for_biome_id(biome_of(case));
         let probability = if broken && case.name == "gen_flat" {
             table.creature_spawn_probability * 2.0
         } else {
@@ -113,23 +138,31 @@ impl Report {
         region: &XoroshiroRandom,
     ) {
         let label = format!("{} seed {}", case.name, case.seed);
+        if case.spawned.len() != case.details.len() {
+            self.mismatch(format!(
+                "{label}: spawn rows and variant details differ in count"
+            ));
+            return;
+        }
         let mut in_sync = true;
         let mut ours = mobs.iter();
-        for (row, variants) in &case.spawned {
-            let Some(kind) = modelled(row[0]) else {
+        for (row, detail) in case.spawned.iter().zip(&case.details) {
+            let kind = i32::try_from(row[0]).ok().and_then(MobType::by_entity_type);
+            let Some(kind) = kind else {
                 self.gen_spawns.others += 1;
                 in_sync = false;
                 continue;
             };
-            if kind.is_equine() {
+            if kind == MobType::Cow {
+                self.gen_spawns.cows += 1;
+            } else if kind.is_equine() {
                 self.gen_spawns.equines += 1;
-            } else {
-                *self.gen_spawns.farms.entry(kind.entity_type()).or_default() += 1;
             }
             let Some(entity) = ours.next() else {
                 self.mismatch(format!("{label}: official {row:?} missing in Bamboo"));
                 return;
             };
+            let mob = entity.kind.mob().expect("generated mobs are mobs");
             let place = placement(entity);
             if place[..] != row[..5] {
                 self.mismatch(format!(
@@ -138,23 +171,19 @@ impl Report {
             }
             if in_sync {
                 self.gen_spawns.details += 1;
-                let details = details(entity);
-                let actual = entity.kind.mob().and_then(super::spawn_variants);
-                if &actual != variants {
+                self.gen_spawns.record_wild(mob);
+                let ours_details = details(entity);
+                let ours_detail = wild_detail(mob);
+                if ours_details[..] != row[5..] || &ours_detail != detail {
                     self.mismatch(format!(
-                        "{label}: official variants {variants:?}, Bamboo {actual:?}"
-                    ));
-                }
-                if details[..] != row[5..] {
-                    self.mismatch(format!(
-                        "{label}: official {row:?}, Bamboo details {details:?}"
+                        "{label}: official {row:?} {detail:?}, Bamboo details {ours_details:?} {ours_detail:?}"
                     ));
                 }
             }
         }
         if let Some(extra) = ours.next() {
             self.mismatch(format!(
-                "{label}: Bamboo spawned an extra animal at {:?}",
+                "{label}: Bamboo spawned an extra mob at {:?}",
                 extra.position
             ));
         }
@@ -171,16 +200,40 @@ impl Report {
     }
 }
 
-/// Bamboo 已经建模、会真的生成的种类。
+impl Coverage {
+    fn record_wild(&mut self, mob: &Mob) {
+        let slot = match mob.mob_type {
+            MobType::Rabbit => 0,
+            MobType::Fox => 1,
+            MobType::Wolf => 2,
+            _ => return,
+        };
+        self.wild[slot] += 1;
+        self.wild_babies += usize::from(mob.is_baby());
+        self.fox_items += usize::from(slot == 1 && mouth_item(mob) != mc_bamboo_data::items::AIR);
+    }
+}
+
+fn mouth_item(mob: &Mob) -> i32 {
+    mob.equipment
+        .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+        .item
+}
+
+/// 和 `MobOracle.genSpawnDetail` 同一个格式。
 ///
-/// Kinds Bamboo models and really spawns.
-fn modelled(entity: i64) -> Option<MobType> {
-    let kind = MobType::by_entity_type(i32::try_from(entity).ok()?)?;
-    (matches!(
-        kind,
-        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
-    ) || kind.is_equine())
-    .then_some(kind)
+/// The same format as `MobOracle.genSpawnDetail`.
+fn wild_detail(mob: &Mob) -> String {
+    match mob.mob_type {
+        MobType::Rabbit => format!("rabbit|{}", mob.rabbit.variant.id()),
+        MobType::Fox => format!("fox|{}|{}", mob.fox.variant.id(), mouth_item(mob)),
+        MobType::Wolf => format!(
+            "wolf|{}|{}",
+            mob.wolf.variant_name(),
+            mob.wolf.sound_variant_name()
+        ),
+        _ => String::new(),
+    }
 }
 
 /// 类型、坐标原始位和朝向原始位。
@@ -197,9 +250,9 @@ fn placement(entity: &Entity) -> [i64; 5] {
     ]
 }
 
-/// 幼年、左撇子；马科再加 [`super::equine::state`]。
+/// 幼年、左撇子；马科再加 `super::equine::state`。
 ///
-/// Baby and left-handedness, plus [`super::equine::state`] for equines.
+/// Baby and left-handedness, plus `super::equine::state` for equines.
 fn details(entity: &Entity) -> Vec<i64> {
     let mob = entity.kind.mob().expect("generated mobs are mobs");
     let mut details = vec![i64::from(mob.is_baby()), i64::from(mob.left_handed)];
@@ -207,6 +260,10 @@ fn details(entity: &Entity) -> Vec<i64> {
         details.extend(super::equine::state(entity));
     }
     details
+}
+
+fn biome_of(case: &Case) -> i32 {
+    biome::by_name(&case.biome).expect("known biome")
 }
 
 /// 和 `MobOracle.genColumn` 同一个坐标公式。
@@ -240,7 +297,7 @@ fn fixture(case: &Case) -> MobLevel {
     let blocks = (-16..32)
         .flat_map(|x| (-16..32).flat_map(move |z| gen_column(x, z, case.terrain)))
         .collect();
-    let entry = spawning::for_biome_id(biome::PLAINS).mobs_to_spawn(MobCategory::Creature);
+    let entry = spawning::for_biome_id(biome_of(case)).mobs_to_spawn(MobCategory::Creature);
     MobLevel {
         blocks,
         random: LevelRandom::new(0),
@@ -252,7 +309,7 @@ fn fixture(case: &Case) -> MobLevel {
             ..ZombieFacts::default()
         },
         natural_spawn: Some(SceneFacts {
-            biome: biome::PLAINS,
+            biome: biome_of(case),
             category: MobCategory::Creature,
             entry: &entry[0],
             sky: case.sky,

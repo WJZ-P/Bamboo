@@ -353,6 +353,9 @@ vs 游戏 LIGHT」的整块 oracle，重跑 `gen-light` 和 `structure-e2e`。
   `WorldGenRegion.random` 取 `worldgen_region_random` 在区块原点的源。生物进区块实体盒，
   随区块交付和存盘。超平坦、`doMobSpawning` 为假、盘上已过 `SPAWN` 的区块不刷。
   计算线程的 `spawn` 阶段仍是透传：那时还没有最终方块和光照。
+- 2026-11-20（分支 `cx-wild`）：猪、羊、鸡、兔子、狐狸、狼也真正生成了（`MobType::by_entity_type`
+  列全、放置表加上兔子 / 狼 / 狐狸的规则、组数据在 `wild_spawn.rs`）；对拍场景加了针叶林和雪地
+  针叶林，7000 例 0 不一致，见 `docs/mob-entity-design.md` 11.5。马、驴、羊驼仍只模拟放置。
 - 对拍：`mob-oracle --only gen_spawn`，官方 `NaturalSpawner.spawnMobsForChunkGeneration`
   跑在 MobOracle 的假世界上（平原真实刷怪表、公式地形、四种光照、2000 个种子），比装饰随机源
   指纹、牛的类型 / 坐标 / 朝向和区域随机源同步时的幼年与左撇子，0 不一致；`--break-self-test gen_spawn`

@@ -144,6 +144,13 @@ pub trait BlockView {
         false
     }
 
+    /// `Level.isThundering()`。默认不打雷。
+    ///
+    /// `Level.isThundering()`. No thunder by default.
+    fn is_thundering(&self) -> bool {
+        false
+    }
+
     /// `Level.isBrightOutside()`：主世界没有固定时间，天色暗于 4 才算夜里。
     ///
     /// `Level.isBrightOutside()`: the overworld has no fixed time, so night
@@ -217,6 +224,25 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 战斗记忆，被驯服的狼保护主人时读。
+    ///
+    /// Combat memory, read by tamed wolves guarding their owner.
+    pub combat: PlayerCombat,
+}
+
+/// 玩家的 `getLastHurtByMob` / `getLastHurtMob` 和两个时间戳（玩家自己的 tick 数），
+/// 以及 `getLastDamageSource(100)` 存在且不在 `#no_wolf_retaliation` 里。
+///
+/// A player's `getLastHurtByMob` / `getLastHurtMob` with their timestamps (the
+/// player's own tick count), and whether `getLastDamageSource(100)` exists and
+/// is outside `#no_wolf_retaliation`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayerCombat {
+    pub last_hurt_by_mob: Option<EntityUid>,
+    pub last_hurt_by_mob_timestamp: i32,
+    pub last_hurt_mob: Option<EntityUid>,
+    pub last_hurt_mob_timestamp: i32,
+    pub retaliation_damage: bool,
 }
 
 impl PlayerView {
@@ -358,6 +384,10 @@ impl BlockView for World<'_> {
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {
         World::is_raining_at(self, pos)
+    }
+
+    fn is_thundering(&self) -> bool {
+        World::is_thundering(self)
     }
 
     fn is_bright_outside(&self) -> bool {
@@ -544,11 +574,31 @@ pub enum Command {
     ///
     /// Reset the other parent and spawn offspring and XP; the initiating parent is on cooldown.
     BreedAnimals {
-        kind: super::mob::MobType,
         variant: super::mob::CowVariant,
         wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
+        /// 父亲的种类和兔子品种：落地时父亲正被拆出来跑 tick，读不到。
+        ///
+        /// The father's type and rabbit variant; it is detached while the command lands.
+        kind: super::mob::MobType,
+        father_rabbit: super::mob::rabbit::Variant,
+        /// 父亲的狐狸品种和求爱者：狐狸幼崽要信任两边的求爱者。
+        ///
+        /// The father's fox variant and love cause; a fox kit trusts both causes.
+        father_fox: super::mob::fox::Variant,
+        father_love: Option<[u8; 16]>,
+        /// 父亲的狼状态和驯服状态：幼崽的品种、主人和项圈色要用。
+        ///
+        /// The father's wolf and taming state, for the pup's variant, owner and collar.
+        father_wolf: Box<(super::mob::wolf::Wolf, super::mob::tame::Tamable)>,
+    },
+    /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
+    ///
+    /// `HurtByTargetGoal.alertOthers` for wolves: the others target the attacker.
+    WolfAlert {
+        others: Vec<EntityUid>,
+        target: EntityUid,
     },
     /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
     HurtPlayer {
@@ -575,7 +625,37 @@ pub enum Command {
     },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
+    /// 兔子吃掉一龄胡萝卜作物。
+    ///
+    /// A rabbit removes one growth stage from a carrot crop.
+    RabbitEatCarrots {
+        pos: mc_bamboo_core::BlockPos,
+    },
     RemoveMobBlock {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `Fox.pickUpItem` 的世界一侧：多出来的放回地上，原来叼着的吐出去，捡起的那件消失。
+    ///
+    /// The level side of `Fox.pickUpItem`: drop the extra, spit the old item
+    /// and discard the picked entity.
+    FoxPickUpItem {
+        item: EntityUid,
+        rest: Option<ItemStack>,
+        spit: Option<ItemStack>,
+        spit_at: mc_bamboo_core::Vec3,
+    },
+    /// `FoxBreedGoal.start` 对伴侣调的 `clearStates`。
+    FoxClearStates {
+        target: EntityUid,
+    },
+    /// `FoxEatBerriesGoal.pickSweetBerries` 的世界一侧。
+    FoxPickBerries {
+        pos: mc_bamboo_core::BlockPos,
+        age: i32,
+        took_one: bool,
+    },
+    /// `CaveVines.use` 被狐狸调用。
+    FoxPickGlowBerries {
         pos: mc_bamboo_core::BlockPos,
     },
     /// `TurtleEggBlock.destroyEgg` 里取世界随机数之后的部分：`nextInt(chance) == 0`
@@ -669,12 +749,34 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::orb::apply_merge(me, &others, value, world)
         }
         Command::BreedAnimals {
-            kind,
             variant,
             wool,
             partner,
             position,
-        } => super::mob::living::apply_breed(me, partner, position, world, kind, variant, wool),
+            kind,
+            father_rabbit,
+            father_fox,
+            father_love,
+            father_wolf,
+        } => super::mob::living::apply_breed(
+            me,
+            partner,
+            position,
+            super::mob::living::BreedFather {
+                kind,
+                variant,
+                wool,
+                rabbit: father_rabbit,
+                fox: father_fox,
+                love: father_love,
+                wolf: father_wolf.0,
+                tame: father_wolf.1,
+            },
+            world,
+        ),
+        Command::WolfAlert { others, target } => {
+            super::mob::wolf_goals::apply_alert(world, &others, target);
+        }
         Command::HurtPlayer {
             target,
             source,
@@ -698,6 +800,22 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 except_initiator: false,
             });
         }
+        Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
+        Command::FoxPickUpItem {
+            item,
+            rest,
+            spit,
+            spit_at,
+        } => super::mob::fox::apply_pick_up(me, world, item, rest, spit, spit_at),
+        Command::FoxClearStates { target } => {
+            world.with_entity_mut(target, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fox.clear_states());
+            });
+        }
+        Command::FoxPickBerries { pos, age, took_one } => {
+            super::mob::fox::apply_pick_berries(world, pos, age, took_one)
+        }
+        Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
         }

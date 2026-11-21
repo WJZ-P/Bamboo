@@ -309,6 +309,10 @@ fn hurt_player_damage(
         let Some(outcome) = outcome else {
             return (false, None);
         };
+        // `resolveMobResponsibleForDamage` 和 `lastDamageSource`：狼保护主人时读。
+        // `resolveMobResponsibleForDamage` and `lastDamageSource`, read by wolves.
+        let now = player.entity_ticks;
+        player.combat_memory.record_hurt(&source, now);
         // `set_entity_data` 的 `Health` 项由下一刻的派生状态阶段发出。
         player.sync.metadata_dirty = true;
         (
@@ -614,6 +618,10 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         // 官方 `Player.attack` 打中之后 `causeFoodExhaustion(0.1f)`，
         // 挥手包由 `attackVisualEffects` 发给观察者。
         if let Some(player) = region.players.get_mut(&id) {
+            // `Player.attack` 打中之后 `setLastHurtMob(target)`。
+            // `Player.attack` records `setLastHurtMob(target)` after a hit.
+            let now = player.entity_ticks;
+            player.combat_memory.record_attack(entity_id, now);
             let food = &mut player.health.food;
             food.exhaustion =
                 (food.exhaustion + 0.1).min(mc_bamboo_blocks::entity::mob::damage::MAX_EXHAUSTION);

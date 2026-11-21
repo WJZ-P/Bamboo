@@ -98,6 +98,10 @@ pub enum SpawnGroup {
     /// `Llama.LlamaGroupData`: the colour id shared by the group.
     Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    /// 兔子、狐狸、狼：组大小加共享的品种。
+    ///
+    /// Rabbits, foxes and wolves: the group size plus the shared variant.
+    Wild(super::wild_spawn::WildGroup),
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -213,6 +217,20 @@ pub fn spawn_egg(
     }
     let uid = world.add_prepared_entity(entity);
     // `Mob.playAmbientSound`：放进世界之后叫一声，用生物自己的随机源取音高。
+    if kind == MobType::Fox {
+        // `Fox.playAmbientSound` 要看天色和 16 格内的玩家，先在世界里取好。
+        // `Fox.playAmbientSound` reads the sky and nearby players, gathered first.
+        let bright = crate::entity::ctx::BlockView::is_bright_outside(&*world);
+        let mut players = Vec::new();
+        crate::entity::ctx::BlockView::for_each_player(&*world, &mut |player| {
+            players.push(*player)
+        });
+        world.with_entity_mut(uid, &mut |entity| {
+            entity
+                .with_mob(|me, mob| super::fox::play_ambient_sound_with(me, mob, bright, &players));
+        });
+        return uid;
+    }
     world.with_entity_mut(uid, &mut |entity| {
         entity.with_mob(living::play_ambient_sound);
     });
@@ -309,17 +327,24 @@ fn finalize_spawn_in_group(
         return;
     }
     let biome = world.biome_id(entity.block_position());
+    let random = world.random();
+    if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
+        super::wild_spawn::finalize(kind, entity, biome, random, group);
+        return;
+    }
     finalize_cow(kind, entity, biome, world.random(), group);
 }
 
 /// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
-/// `WorldGenRegion.random`。牛、猪、羊、鸡和马科使用这个随机源；以后加进来的动物还没接
-/// 区域随机源，暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
+/// `WorldGenRegion.random`。牛、猪、羊、鸡走 [`finalize_cow`]，马科走
+/// `equine::finalize_spawn`，兔子、狐狸、狼走 `wild_spawn::finalize`；以后加进来、
+/// 还没接区域随机源的动物暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
 ///
 /// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
-/// `WorldGenRegion.random`. Cows, pigs, sheep, chickens and equines use it; animals
-/// added later fall back to the level random until wired, which only affects their
-/// variants and age.
+/// `WorldGenRegion.random`. Cows, pigs, sheep and chickens use [`finalize_cow`];
+/// equines use `equine::finalize_spawn`; rabbits, foxes and wolves use
+/// `wild_spawn::finalize`. Animals added later fall back to the level random until
+/// wired, which only affects their variants and age.
 pub(super) fn finalize_generated(
     world: &mut World,
     kind: MobType,
@@ -333,6 +358,8 @@ pub(super) fn finalize_generated(
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
+    } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
+        super::wild_spawn::finalize(kind, entity, biome, region_random, group);
     } else if kind.is_equine() {
         super::equine::finalize_spawn(entity, region_random, group);
     } else {
@@ -437,7 +464,7 @@ fn cow_variant_for_biome(biome: i32) -> CowVariant {
     }
 }
 
-fn biome_tag_contains(name: &str, biome: i32) -> bool {
+pub(super) fn biome_tag_contains(name: &str, biome: i32) -> bool {
     mc_bamboo_data::tags::TAG_GROUPS
         .iter()
         .filter(|group| group.registry == "minecraft:worldgen/biome")
