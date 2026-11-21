@@ -966,6 +966,7 @@ pub(crate) fn breed_with(
             father_fox: mob.fox.variant,
             father_love: mob.love_cause,
             father_wolf: Box::new((mob.wolf, mob.tame)),
+            father_screaming: mob.goat.screaming,
         },
         me,
     );
@@ -1977,6 +1978,7 @@ pub(crate) struct BreedFather {
     pub(crate) love: Option<[u8; 16]>,
     pub(crate) wolf: super::wolf::Wolf,
     pub(crate) tame: super::tame::Tamable,
+    pub(crate) screaming: bool,
 }
 
 /// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
@@ -2134,8 +2136,9 @@ pub(crate) fn apply_breed(
     };
     let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
     if kind == super::MobType::Goat {
-        let father_screaming = me.kind.mob().is_some_and(|mob| mob.goat.screaming);
-        super::goat::breed_offspring(&mut calf, father_screaming, partner_screaming, world);
+        // 父亲正被拆出来跑 tick，尖叫标志由命令带过来。
+        // The father is detached for its tick; its screaming flag rides on the command.
+        super::goat::breed_offspring(&mut calf, parent.screaming, partner_screaming, world);
     }
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。

@@ -154,12 +154,16 @@ pub(crate) fn init_memories(mob: &mut Mob, next_int: &mut dyn FnMut(i32) -> i32)
         .set(MemoryType::RamCooldownTicks, MemoryValue::Int(ram));
 }
 
-/// `Goat.ageBoundaryReached`：攻击力幼年 1、成年 2。
+/// `Goat.ageBoundaryReached`：攻击力幼年 1、成年 2。`getAttribute` 会建出实例，
+/// 所以之后存盘的 `attributes` 里总有攻击力这一项。
 ///
-/// `Goat.ageBoundaryReached`: 1 attack damage for babies, 2 for adults.
+/// `Goat.ageBoundaryReached`: 1 attack damage for babies, 2 for adults. `getAttribute`
+/// instantiates the attribute, so the saved `attributes` always list it afterwards.
 pub fn age_boundary_reached(mob: &mut Mob) {
     let damage = if mob.is_baby() { 1.0 } else { 2.0 };
-    mob.attributes.set_base(attribute::ATTACK_DAMAGE, damage);
+    if let Some(instance) = mob.attributes.instance(attribute::ATTACK_DAMAGE) {
+        instance.base = damage;
+    }
 }
 
 /// `Goat.BRAIN_PROVIDER`：六个传感器，核心、闲逛、长跳、冲撞四个活动。

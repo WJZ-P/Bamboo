@@ -608,6 +608,10 @@ pub enum Command {
         ///
         /// The father's wolf and taming state, for the pup's variant, owner and collar.
         father_wolf: Box<(super::mob::wolf::Wolf, super::mob::tame::Tamable)>,
+        /// 父亲是不是尖叫山羊：山羊幼崽可能随它。
+        ///
+        /// Whether the father is a screaming goat; a kid may take after it.
+        father_screaming: bool,
     },
     /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
     ///
@@ -806,6 +810,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             father_fox,
             father_love,
             father_wolf,
+            father_screaming,
         } => super::mob::living::apply_breed(
             me,
             partner,
@@ -819,6 +824,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 love: father_love,
                 wolf: father_wolf.0,
                 tame: father_wolf.1,
+                screaming: father_screaming,
             },
             world,
         ),
