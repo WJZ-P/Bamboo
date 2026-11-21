@@ -947,6 +947,9 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if let Some(data) = farm_default_data(index, kind) {
         return data;
     }
+    if let Some(data) = fish_default_data(index, kind) {
+        return data;
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Pig {
         use mc_bamboo_data::entity_types as facts;
         match index {
@@ -1130,6 +1133,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.
+    if fish_non_default_data(mob, &mut out) {
+        return out;
+    }
     if farm_non_default_data(mob, &mut out) {
         return out;
     }
@@ -1192,6 +1198,64 @@ fn farm_default_data(
         )),
         _ => None,
     }
+}
+
+/// 鱼的默认实体数据：不在桶里、鲑鱼 medium、热带鱼 KOB 白/白、河豚不鼓。
+///
+/// Fish defaults: not from a bucket, salmon medium, tropical KOB white/white,
+/// pufferfish deflated.
+fn fish_default_data(
+    index: u8,
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+) -> Option<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as facts;
+    match (kind, index) {
+        (
+            MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish,
+            facts::FISH_FROM_BUCKET,
+        ) => Some(EntityData::FishFromBucket(false)),
+        (MobType::Salmon, facts::SALMON_VARIANT) => Some(EntityData::SalmonVariant(1)),
+        (MobType::TropicalFish, facts::TROPICAL_FISH_VARIANT) => {
+            Some(EntityData::TropicalFishVariant(0))
+        }
+        (MobType::Pufferfish, facts::PUFFERFISH_PUFF_STATE) => {
+            Some(EntityData::PufferfishPuffState(0))
+        }
+        _ => None,
+    }
+}
+
+/// 鱼偏离默认的实体数据。
+///
+/// Fish data that differs from the defaults.
+fn fish_non_default_data(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    out: &mut Vec<EntityData>,
+) -> bool {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    if !matches!(
+        mob.mob_type,
+        MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish
+    ) {
+        return false;
+    }
+    if mob.fish_from_bucket {
+        out.push(EntityData::FishFromBucket(true));
+    }
+    match mob.mob_type {
+        MobType::Salmon if mob.fish_variant != 1 => {
+            out.push(EntityData::SalmonVariant(mob.fish_variant));
+        }
+        MobType::TropicalFish if mob.fish_variant != 0 => {
+            out.push(EntityData::TropicalFishVariant(mob.fish_variant));
+        }
+        MobType::Pufferfish if mob.puff_state != 0 => {
+            out.push(EntityData::PufferfishPuffState(mob.puff_state));
+        }
+        _ => {}
+    }
+    true
 }
 
 /// 羊和鸡偏离默认的实体数据；不是这两种时返回假。

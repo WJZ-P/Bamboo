@@ -36,6 +36,7 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod egg;
+mod fish;
 mod gen_spawn;
 mod natural_spawn;
 mod projectile;
@@ -90,6 +91,7 @@ enum Line {
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
     Squid(Box<squid::SquidCase>),
+    Fish(Box<fish::FishCase>),
     End(End),
 }
 
@@ -998,6 +1000,7 @@ impl Report {
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::Squid(case) => self.replay_squid(&case),
+                Line::Fish(case) => self.replay_fish(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

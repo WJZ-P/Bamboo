@@ -124,9 +124,11 @@ impl SpawnState {
             let KindPublic::Mob(mob) = &public.kind else {
                 continue;
             };
-            // `Mob.requiresCustomPersistence()` 只认载具和拴绳，Bamboo 都没有。
-            // Vanilla `requiresCustomPersistence()` needs a vehicle or a leash; neither exists.
-            if mob.persistence_required {
+            // `Mob.requiresCustomPersistence()` 只认载具和拴绳，Bamboo 都没有；鱼从桶里
+            // 放出来的那种要算进来。
+            // Vanilla `requiresCustomPersistence()` needs a vehicle or a leash; fish
+            // released from a bucket count as well.
+            if mob.requires_custom_persistence() {
                 continue;
             }
             let kind = mob.mob_type;
@@ -636,6 +638,9 @@ pub(super) fn check_spawn_rules(
         MobType::Squid | MobType::GlowSquid => {
             super::squid::check_spawn_rules(world, kind, pos, sea_level)
         }
+        MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
+            super::fish::check_spawn_rules(world, kind, pos, sea_level)
+        }
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
             animal_spawn_rules(world, pos)
         }
@@ -697,7 +702,10 @@ fn is_valid_position_for_mob(
     nearest_player_distance_sqr: f64,
 ) -> bool {
     let despawn = f64::from(kind.mob_category().facts().despawn_distance);
-    if nearest_player_distance_sqr > despawn * despawn && kind.removes_when_far_away() {
+    // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真。
+    // A fresh fish has no bucket flag and no name, so `removeWhenFarAway` is true.
+    let removes = kind.removes_when_far_away() || super::fish::is_fish(kind);
+    if nearest_player_distance_sqr > despawn * despawn && removes {
         return false;
     }
     // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住。
@@ -705,7 +713,9 @@ fn is_valid_position_for_mob(
     // `AgeableWaterCreature.checkSpawnObstruction` 只剩 `isUnobstructed`，不查液体。
     // `AgeableWaterCreature.checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
     pathfinder_spawn_rules(world, entity, entity.block_position())
-        && (kind.is_ageable_water_creature() || !contains_any_liquid(world, entity.bounding_box()))
+        && (kind.is_ageable_water_creature()
+            || kind.is_water_animal()
+            || !contains_any_liquid(world, entity.bounding_box()))
         && is_unobstructed_by_entities(world, entity.bounding_box())
 }
 

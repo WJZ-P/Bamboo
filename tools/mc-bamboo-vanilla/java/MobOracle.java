@@ -290,6 +290,12 @@ public final class MobOracle {
                 playSquid(official, out, name);
                 cases++;
             }
+            for (String name : List.of("cod_swim", "cod_beached", "salmon_swim",
+                    "tropical_fish_swim", "pufferfish_puff")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playFish(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -3932,6 +3938,183 @@ public final class MobOracle {
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"glow\":" + glow
                 + ",\"hurt\":" + hurt + ",\"baby\":" + baby + ",\"frames\":" + frames + "]}\n");
         out.flush();
+    }
+
+    /**
+     * 鱼：逐刻比位置、速度、朝向、随机源、氧气、花纹 / 膨胀状态和尺寸、河豚蜇刺的牛，
+     * 以及出站包。`_swim` 在水池里游，`_beached` 在石头上扑腾到窒息死，`pufferfish_puff`
+     * 旁边放一头不带 AI 的牛，让河豚鼓起来蜇它。
+     *
+     * Fish: compare position, velocity, rotation, random, air, variant / puff state and
+     * size, the stung cow and the outgoing packets each tick.
+     */
+    private static void playFish(Official official, Writer out, String name) throws Exception {
+        boolean beached = name.endsWith("_beached");
+        boolean puffer = name.startsWith("pufferfish");
+        String kind = name.startsWith("cod") ? "cod"
+                : name.startsWith("salmon") ? "salmon"
+                : name.startsWith("tropical") ? "tropical_fish" : "pufferfish";
+        int ticks = beached ? 460 : 240;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                for (int y = 61; y <= 66 && !beached; y++) {
+                    world.blocks.put(BlockPos.asLong(x, y, z),
+                            wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        Bytes events = new Bytes(official.registries);
+        world.packets = events::add;
+        double[] start = beached ? new double[] {0.5, 61.0, 0.5} : new double[] {0.5, 63.0, 0.5};
+        EntityType<?> type = switch (kind) {
+            case "cod" -> EntityTypes.COD;
+            case "salmon" -> EntityTypes.SALMON;
+            case "tropical_fish" -> EntityTypes.TROPICAL_FISH;
+            default -> EntityTypes.PUFFERFISH;
+        };
+        Mob fish = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+        // 按 Bamboo 的种子源重放构造时的取数：UUID、yRot。鱼的构造函数不取别的。
+        // Replay the constructor draws from Bamboo's seed source: UUID and yRot only.
+        setRandom(fish, world.entitySeeds.nextLong());
+        RandomSource random = fish.getRandom();
+        fish.setUUID(Mth.createInsecureUUID(random));
+        float yaw = random.nextFloat() * 6.2831855F;
+        fish.setYRot(yaw);
+        fish.setYHeadRot(yaw);
+        fish.setPos(start[0], start[1], start[2]);
+        // `FollowFlockLeaderGoal` 的构造函数在实体还没有种子时抽了一次 `nextInt(200)`，
+        // 对拍两侧从同一个固定值出发，否则每次跑都不一样。
+        // The flock goal rolls `nextInt(200)` before the entity has its seed; pin it so
+        // both sides start from the same value.
+        pinFlockCountdown(fish, 100);
+        world.tracked.add(fish);
+        Cow cow = null;
+        if (puffer) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource cowRandom = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(cowRandom));
+            float cowYaw = cowRandom.nextFloat() * 6.2831855F;
+            cow.setYRot(cowYaw);
+            cow.setYHeadRot(cowYaw);
+            cow.setPos(0.9, 61.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Sync sync = new Sync(world, fish, official.registries);
+        boolean gone = false;
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) {
+                sync.entity.sendPairingData(null, sync.bytes::add);
+                packets.addAll(sync.take());
+            } else {
+                world.gameTime++;
+                for (Mob mob : cow == null ? List.<Mob>of(fish) : List.<Mob>of(fish, cow)) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+                packets.addAll(events.take());
+                if (fish.isRemoved()) {
+                    if (!gone) {
+                        Bytes removal = new Bytes(official.registries);
+                        removal.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(fish.getId()));
+                        packets.addAll(removal.take());
+                    }
+                    gone = true;
+                } else {
+                    sync.entity.sendChanges();
+                    packets.addAll(sync.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"gone\":").append(gone);
+            if (!gone) {
+                int variant = 0;
+                int puffState = 0;
+                if (fish instanceof net.minecraft.world.entity.animal.fish.Salmon salmon) {
+                    variant = salmon.getVariant().ordinal();
+                } else if (fish instanceof net.minecraft.world.entity.animal.fish.TropicalFish tropical) {
+                    variant = tropicalVariant(tropical);
+                } else if (fish instanceof net.minecraft.world.entity.animal.fish.Pufferfish pufferfish) {
+                    puffState = pufferfish.getPuffState();
+                }
+                net.minecraft.world.entity.EntityDimensions size = fish.getDimensions(fish.getPose());
+                int[] cowState = new int[] {0, 0};
+                if (cow != null && !cow.isRemoved()) {
+                    net.minecraft.world.effect.MobEffectInstance poison =
+                            cow.getEffect(net.minecraft.world.effect.MobEffects.POISON);
+                    cowState = new int[] {Float.floatToRawIntBits(cow.getHealth()),
+                            poison == null ? 0 : poison.getDuration()};
+                }
+                frames.append(",\"motion\":").append(projectileMotion(fish))
+                        .append(",\"seed\":").append(randomSeed(fish))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(fish.getHealth()), fish.getAirSupply(), fish.hurtTime,
+                                fish.deathTime, fish.getNoActionTime(), fish.onGround() ? 1 : 0,
+                                fish.isInWater() ? 1 : 0, variant, puffState}))
+                        .append(",\"dimensions\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(size.width()), Float.floatToRawIntBits(size.height()),
+                                Float.floatToRawIntBits(fish.getEyeHeight())}))
+                        .append(",\"cow\":").append(Arrays.toString(cowState));
+            }
+            frames.append(",\"drops\":[");
+            boolean first = true;
+            for (Entity entity : world.spawned) {
+                if (entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    if (!first) frames.append(',');
+                    first = false;
+                    frames.append('[').append(BuiltInRegistries.ITEM.getId(item.getItem().getItem())).append(',')
+                            .append(item.getItem().getCount()).append(']');
+                }
+            }
+            world.spawned.clear();
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append('}');
+        }
+        if (beached != gone) {
+            throw new IllegalStateException("fish scene missed its branch: " + name + " gone=" + gone);
+        }
+        out.write("{\"type\":\"fish\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"kind\":"
+                + jsonString(kind) + ",\"variant\":0,\"puffState\":0,\"cow\":" + (cow != null)
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /** 把 `FollowFlockLeaderGoal.nextStartTick` 设成一个固定值。 */
+    private static void pinFlockCountdown(Mob fish, int value) throws Exception {
+        for (var wrapped : fish.getGoalSelector().getAvailableGoals()) {
+            if (wrapped.getGoal().getClass().getName().endsWith("FollowFlockLeaderGoal")) {
+                Field field = wrapped.getGoal().getClass().getDeclaredField("nextStartTick");
+                field.setAccessible(true);
+                field.setInt(wrapped.getGoal(), value);
+                return;
+            }
+        }
+    }
+
+    /** `TropicalFish.DATA_ID_TYPE_VARIANT` 的打包值。 */
+    private static int tropicalVariant(net.minecraft.world.entity.animal.fish.TropicalFish fish) throws Exception {
+        Field field = net.minecraft.world.entity.animal.fish.TropicalFish.class
+                .getDeclaredField("DATA_ID_TYPE_VARIANT");
+        field.setAccessible(true);
+        net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
+                (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
+        return fish.getEntityData().get(accessor);
     }
 
     private static Field squidField(String name) throws Exception {

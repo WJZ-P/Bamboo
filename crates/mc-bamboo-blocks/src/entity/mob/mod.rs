@@ -18,6 +18,7 @@ pub mod control;
 pub mod damage;
 pub mod effects;
 pub mod equipment;
+pub mod fish;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -65,6 +66,10 @@ pub enum MobType {
     Skeleton,
     Squid,
     GlowSquid,
+    Cod,
+    Salmon,
+    TropicalFish,
+    Pufferfish,
 }
 
 impl MobType {
@@ -81,6 +86,10 @@ impl MobType {
             Self::Skeleton => ids::SKELETON,
             Self::Squid => ids::SQUID,
             Self::GlowSquid => ids::GLOW_SQUID,
+            Self::Cod => ids::COD,
+            Self::Salmon => ids::SALMON,
+            Self::TropicalFish => ids::TROPICAL_FISH,
+            Self::Pufferfish => ids::PUFFERFISH,
         }
     }
 
@@ -96,6 +105,10 @@ impl MobType {
             Self::Skeleton => "minecraft:skeleton",
             Self::Squid => "minecraft:squid",
             Self::GlowSquid => "minecraft:glow_squid",
+            Self::Cod => "minecraft:cod",
+            Self::Salmon => "minecraft:salmon",
+            Self::TropicalFish => "minecraft:tropical_fish",
+            Self::Pufferfish => "minecraft:pufferfish",
         }
     }
 
@@ -110,13 +123,17 @@ impl MobType {
             Self::Skeleton,
             Self::Squid,
             Self::GlowSquid,
+            Self::Cod,
+            Self::Salmon,
+            Self::TropicalFish,
+            Self::Pufferfish,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
     }
 
     /// 成年和幼年的（宽，高，眼高）。
-    pub const fn dimensions(self, baby: bool) -> (f32, f32, f32) {
+    pub fn dimensions(self, baby: bool) -> (f32, f32, f32) {
         match (self, baby) {
             (Self::Skeleton, _) => {
                 let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
@@ -130,6 +147,9 @@ impl MobType {
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Squid | Self::GlowSquid, baby) => squid::dimensions(self, baby),
+            (Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish, _) => {
+                fish::dimensions(self, 1, 0)
+            }
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -161,7 +181,6 @@ impl MobType {
         // Squid are not `Animal`s and keep the `Mob.removeWhenFarAway` default of true.
         self.is_monster() || squid::is_squid(self)
     }
-
     /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 里已建模的水生生物。
     /// 标签里还有 `#undead`，僵尸和骷髅的溺水行为沿用旧实现，这里不改。
     ///
@@ -169,7 +188,24 @@ impl MobType {
     /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
     /// drowning keeps its earlier behaviour and is not changed here.
     pub const fn can_breathe_under_water(self) -> bool {
-        squid::is_squid(self)
+        squid::is_squid(self) || fish::is_fish(self)
+    }
+
+    /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
+    /// 但不是 `AgeableMob`，没有年龄。
+    ///
+    /// Whether this is a vanilla `WaterAnimal` (fish): air supply, no fluid pushing,
+    /// no liquid check when spawning, and no age because it is not an `AgeableMob`.
+    pub const fn is_water_animal(self) -> bool {
+        fish::is_fish(self)
+    }
+
+    /// 是不是 `AgeableMob`（牛、猪、羊、鸡、鱿鱼）：写 `Age` 三个键、会随年龄长大。
+    ///
+    /// Whether this is an `AgeableMob` (cow, pig, sheep, chicken, squid): saves the three
+    /// `Age` keys and grows up.
+    pub const fn is_ageable(self) -> bool {
+        !self.is_monster() && !fish::is_fish(self)
     }
 
     /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼；以后加海豚）：离水掉氧气、
@@ -186,7 +222,7 @@ impl MobType {
     ///
     /// `Entity.isPushedByFluid()`, overridden to false by `AgeableWaterCreature`.
     pub const fn is_pushed_by_fluid(self) -> bool {
-        !self.is_ageable_water_creature()
+        !(self.is_ageable_water_creature() || self.is_water_animal())
     }
 
     /// 是不是官方 `Animal`（有求爱和喂食）：非怪物里除掉 `AgeableWaterCreature` 一支。
@@ -194,7 +230,18 @@ impl MobType {
     /// Whether this is a vanilla `Animal` (love and feeding): every non-monster except the
     /// `AgeableWaterCreature` branch.
     pub const fn is_animal(self) -> bool {
-        !self.is_monster() && !self.is_ageable_water_creature()
+        !self.is_monster() && !self.is_ageable_water_creature() && !self.is_water_animal()
+    }
+
+    /// `Entity.getSwimSound`：鱼覆盖成 `entity.fish.swim`，其余是 `entity.generic.swim`。
+    ///
+    /// `Entity.getSwimSound`: fish override it with `entity.fish.swim`.
+    pub const fn swim_sound(self) -> &'static str {
+        if self.is_water_animal() {
+            fish::SWIM_SOUND
+        } else {
+            "minecraft:entity.generic.swim"
+        }
     }
 
     /// `Entity.getMovementEmission().emitsSounds()`：鱿鱼覆盖成 `EVENTS`，移动不出声。
@@ -209,7 +256,7 @@ impl MobType {
     ///
     /// Types registered as `IN_WATER` in `SpawnPlacements`.
     pub const fn spawns_in_water(self) -> bool {
-        squid::is_squid(self)
+        squid::is_squid(self) || fish::is_fish(self)
     }
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
@@ -229,6 +276,10 @@ impl MobType {
             Self::Skeleton => "minecraft:entities/skeleton",
             Self::Squid => "minecraft:entities/squid",
             Self::GlowSquid => "minecraft:entities/glow_squid",
+            Self::Cod => "minecraft:entities/cod",
+            Self::Salmon => "minecraft:entities/salmon",
+            Self::TropicalFish => "minecraft:entities/tropical_fish",
+            Self::Pufferfish => "minecraft:entities/pufferfish",
         }
     }
 
@@ -261,6 +312,8 @@ impl MobType {
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
             Self::Squid | Self::GlowSquid => Some(squid::ambient_sound(self)),
+            Self::Cod | Self::Salmon | Self::TropicalFish => Some(fish::ambient_sound(self)),
+            Self::Pufferfish => None,
         }
     }
 
@@ -272,6 +325,9 @@ impl MobType {
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
             Self::Squid | Self::GlowSquid => Some(squid::hurt_sound(self)),
+            Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
+                Some(fish::hurt_sound(self))
+            }
         }
     }
 
@@ -283,6 +339,9 @@ impl MobType {
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
             Self::Squid | Self::GlowSquid => Some(squid::death_sound(self)),
+            Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
+                Some(fish::death_sound(self))
+            }
         }
     }
 
@@ -296,6 +355,9 @@ impl MobType {
             // `MovementEmission.EVENTS`：没有脚步声。
             // `MovementEmission.EVENTS`: no step sound.
             Self::Squid | Self::GlowSquid => None,
+            // `AbstractFish.playStepSound` 是空实现。
+            // `AbstractFish.playStepSound` is empty.
+            Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => None,
         }
     }
 
@@ -312,6 +374,10 @@ impl MobType {
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
             Self::Squid => items::SQUID_SPAWN_EGG,
             Self::GlowSquid => items::GLOW_SQUID_SPAWN_EGG,
+            Self::Cod => items::COD_SPAWN_EGG,
+            Self::Salmon => items::SALMON_SPAWN_EGG,
+            Self::TropicalFish => items::TROPICAL_FISH_SPAWN_EGG,
+            Self::Pufferfish => items::PUFFERFISH_SPAWN_EGG,
         }
     }
 
@@ -327,6 +393,10 @@ impl MobType {
             Self::Skeleton => "entity.minecraft.skeleton",
             Self::Squid => "entity.minecraft.squid",
             Self::GlowSquid => "entity.minecraft.glow_squid",
+            Self::Cod => "entity.minecraft.cod",
+            Self::Salmon => "entity.minecraft.salmon",
+            Self::TropicalFish => "entity.minecraft.tropical_fish",
+            Self::Pufferfish => "entity.minecraft.pufferfish",
         }
     }
 
@@ -347,6 +417,10 @@ impl MobType {
             Self::Skeleton,
             Self::Squid,
             Self::GlowSquid,
+            Self::Cod,
+            Self::Salmon,
+            Self::TropicalFish,
+            Self::Pufferfish,
         ]
         .into_iter()
         .find(|kind| kind.entity_type() == entity_type)
@@ -360,6 +434,9 @@ impl MobType {
         match self {
             Self::Squid => MobCategory::WaterCreature,
             Self::GlowSquid => MobCategory::UndergroundWaterCreature,
+            Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
+                MobCategory::WaterAmbient
+            }
             _ if self.is_monster() => MobCategory::Monster,
             _ => MobCategory::Creature,
         }
@@ -1138,6 +1215,10 @@ pub struct Mob {
     ///
     /// Squid and glow squid state; default for every other mob.
     pub squid: squid::SquidState,
+    /// 鱼的专属状态，别的生物恒为缺省值。
+    ///
+    /// Fish state; default for every other mob.
+    pub fish: fish::FishState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1217,6 +1298,9 @@ impl Mob {
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
             MobType::Squid | MobType::GlowSquid => squid::attributes(),
+            MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
+                fish::attributes()
+            }
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
@@ -1228,21 +1312,33 @@ impl Mob {
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Squid | MobType::GlowSquid => squid::goals(),
+            MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
+                fish::goals(mob_type)
+            }
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
+        if fish::is_fish(mob_type) {
+            // `WaterBoundPathNavigation.createPathFinder`：只有海豚允许跃出水面。
+            // `WaterBoundPathNavigation.createPathFinder`: only dolphins may breach.
+            navigation.flags.swim = Some(false);
+        }
         let target_goals = match mob_type {
             MobType::Cow
             | MobType::Pig
             | MobType::Sheep
             | MobType::Chicken
             | MobType::Squid
-            | MobType::GlowSquid => GoalSelector::default(),
+            | MobType::GlowSquid
+            | MobType::Cod
+            | MobType::Salmon
+            | MobType::TropicalFish
+            | MobType::Pufferfish => GoalSelector::default(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
-        Self {
+        let mut mob = Self {
             mob_type,
             uuid: [0; 16],
             x_rot: 0.0,
@@ -1318,6 +1414,9 @@ impl Mob {
                 // `AgeableWaterCreature` 构造函数：`setPathfindingMalus(WATER, 0)`。
                 // The `AgeableWaterCreature` constructor zeroes the water malus.
                 MobType::Squid | MobType::GlowSquid => squid::malus(),
+                MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
+                    fish::malus()
+                }
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -1358,10 +1457,17 @@ impl Mob {
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
             squid: squid::SquidState::default(),
+            fish: fish::FishState::new(),
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
+        };
+        if mob_type == MobType::Salmon {
+            // `Salmon` 的 `DATA_TYPE` 缺省是 `Variant.MEDIUM`。
+            // The `Salmon` `DATA_TYPE` default is `Variant.MEDIUM`.
+            mob.fish.variant = 1;
         }
+        mob
     }
 
     pub fn is_baby(&self) -> bool {
@@ -1396,8 +1502,30 @@ impl Mob {
 
     /// （宽，高）。
     pub fn dimensions(&self) -> (f32, f32) {
+        if fish::is_fish(self.mob_type) {
+            let (width, height, _) =
+                fish::dimensions(self.mob_type, self.fish.variant, self.fish.puff_state);
+            return (width, height);
+        }
         let (width, height, _) = self.mob_type.dimensions(self.is_baby());
         (width, height)
+    }
+
+    /// `Mob.removeWhenFarAway`。鱼覆盖成 `!fromBucket && !hasCustomName`。
+    ///
+    /// `Mob.removeWhenFarAway`; fish override it with `!fromBucket && !hasCustomName`.
+    pub fn removes_when_far_away(&self) -> bool {
+        if fish::is_fish(self.mob_type) {
+            return !self.fish.from_bucket && self.custom_name.is_none();
+        }
+        self.mob_type.removes_when_far_away()
+    }
+
+    /// `AbstractFish.requiresCustomPersistence`：从桶里放出来的鱼不会自然消失。
+    ///
+    /// `AbstractFish.requiresCustomPersistence`: fish from a bucket never despawn.
+    pub fn requires_custom_persistence(&self) -> bool {
+        self.persistence_required || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
     }
 
     /// `isDeadOrDying`。
@@ -1452,6 +1580,20 @@ pub struct MobPublic {
     pub chicken_sound_variant: chicken::SoundVariant,
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`。
     pub dark_ticks: i32,
+    /// 鱼的桶标记、花纹和河豚的膨胀程度。
+    ///
+    /// The fish bucket flag, variant and the pufferfish puff state.
+    pub fish_from_bucket: bool,
+    pub fish_variant: i32,
+    pub puff_state: i32,
+    /// `AbstractSchoolingFish.leader` 的 uid。
+    ///
+    /// The uid of `AbstractSchoolingFish.leader`.
+    pub fish_leader: Option<EntityUid>,
+    /// `AbstractSchoolingFish.schoolSize`。
+    ///
+    /// `AbstractSchoolingFish.schoolSize`.
+    pub school_size: i32,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1504,6 +1646,11 @@ impl MobPublic {
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
             dark_ticks: mob.squid.dark_ticks,
+            fish_from_bucket: mob.fish.from_bucket,
+            fish_variant: mob.fish.variant,
+            puff_state: mob.fish.puff_state,
+            fish_leader: mob.fish.leader,
+            school_size: mob.fish.school_size,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,
@@ -1528,8 +1675,20 @@ impl MobPublic {
     }
 
     pub fn dimensions(&self) -> (f32, f32) {
+        if fish::is_fish(self.mob_type) {
+            let (width, height, _) =
+                fish::dimensions(self.mob_type, self.fish_variant, self.puff_state);
+            return (width, height);
+        }
         let (width, height, _) = self.mob_type.dimensions(self.baby);
         (width, height)
+    }
+
+    /// `Mob.isPersistenceRequired() || requiresCustomPersistence()`。
+    ///
+    /// `Mob.isPersistenceRequired() || requiresCustomPersistence()`.
+    pub fn requires_custom_persistence(&self) -> bool {
+        self.persistence_required || (fish::is_fish(self.mob_type) && self.fish_from_bucket)
     }
 
     pub fn is_alive(&self) -> bool {

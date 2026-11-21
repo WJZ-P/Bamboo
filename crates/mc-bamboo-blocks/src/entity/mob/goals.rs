@@ -125,6 +125,25 @@ pub enum Goal {
     SquidFlee {
         flee_ticks: i32,
     },
+    /// `RandomSwimmingGoal`（鱼的 `FishSwimGoal`）：随机挑一个水里可寻路的点游过去。
+    ///
+    /// `RandomSwimmingGoal` (the fish `FishSwimGoal`): a random path-findable water spot.
+    Swim {
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+    },
+    /// `Pufferfish.PufferfishPuffGoal`：附近有生物就鼓起来。
+    ///
+    /// `Pufferfish.PufferfishPuffGoal`: puff up when something is nearby.
+    PufferfishPuff,
+    /// `FollowFlockLeaderGoal`：成群的那几种鱼跟着领头的游。
+    ///
+    /// `FollowFlockLeaderGoal`: schooling fish follow a leader.
+    FollowFlock {
+        next_start: i32,
+        time_to_recalc: i32,
+    },
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -149,7 +168,7 @@ impl Goal {
     pub const fn flags(&self) -> &'static [Flag] {
         match self {
             Self::Float => &[Flag::Jump],
-            Self::Panic { .. } | Self::Stroll { .. } => &[Flag::Move],
+            Self::Panic { .. } | Self::Stroll { .. } | Self::Swim { .. } => &[Flag::Move],
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
                 &[Flag::Move, Flag::Look]
             }
@@ -162,7 +181,10 @@ impl Goal {
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
-            Self::SquidRandomMovement | Self::SquidFlee { .. } => &[],
+            Self::SquidRandomMovement
+            | Self::SquidFlee { .. }
+            | Self::PufferfishPuff
+            | Self::FollowFlock { .. } => &[],
         }
     }
 
@@ -206,6 +228,9 @@ impl Goal {
             Self::EatBlock { .. } => "EatBlockGoal",
             Self::SquidRandomMovement => "SquidRandomMovementGoal",
             Self::SquidFlee { .. } => "SquidFleeGoal",
+            Self::Swim { .. } => "RandomSwimmingGoal",
+            Self::PufferfishPuff => "PufferfishPuffGoal",
+            Self::FollowFlock { .. } => "FollowFlockLeaderGoal",
         }
     }
 }
@@ -716,7 +741,7 @@ fn eat_block_tick(eat_tick: &mut i32, me: &mut Entity, mob: &mut Mob, ctx: &mut 
 }
 
 /// `Goal.reducedTickDelay`。
-const fn reduced_tick_delay(ticks: i32) -> i32 {
+pub(crate) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
 }
 
@@ -832,6 +857,25 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             *wanted = found;
             *force_trigger = false;
             true
+        }
+        Goal::Swim {
+            interval, wanted, ..
+        } => {
+            if mob.no_action_time >= 100 {
+                return false;
+            }
+            if me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0 {
+                return false;
+            }
+            let Some(found) = super::fish::random_swim_pos(me, mob, ctx.blocks()) else {
+                return false;
+            };
+            *wanted = found;
+            true
+        }
+        Goal::PufferfishPuff => super::fish::puff_can_use(me, ctx),
+        Goal::FollowFlock { next_start, .. } => {
+            super::fish::flock_can_use(next_start, me, mob, ctx)
         }
         Goal::LookAtPlayer {
             probability,
@@ -963,7 +1007,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             super::skeleton::bow_slot(mob).is_some()
                 && (combat_target(mob, ctx).is_some() || !mob.navigation.is_done())
         }
-        Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
+        Goal::Panic { .. } | Goal::Stroll { .. } | Goal::Swim { .. } => !mob.navigation.is_done(),
+        Goal::FollowFlock { .. } => super::fish::flock_can_continue(me, mob, ctx),
         Goal::Breed {
             partner, love_time, ..
         } => partner
@@ -974,9 +1019,10 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 }
                 _ => false,
             }),
-        Goal::Tempt { .. } | Goal::SquidRandomMovement | Goal::SquidFlee { .. } => {
-            can_use(goal, me, mob, ctx)
-        }
+        Goal::Tempt { .. }
+        | Goal::SquidRandomMovement
+        | Goal::SquidFlee { .. }
+        | Goal::PufferfishPuff => can_use(goal, me, mob, ctx),
         Goal::FollowParent { parent, .. } => {
             if mob.age >= 0 {
                 return false;
@@ -1076,6 +1122,12 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
         }
+        Goal::Swim { speed, wanted, .. } => {
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
+        }
+        Goal::PufferfishPuff => super::fish::puff_start(mob),
+        Goal::FollowFlock { time_to_recalc, .. } => *time_to_recalc = 0,
         Goal::LookAtPlayer { look_time, .. } => {
             *look_time = reduced_tick_delay(40 + me.random.next_int_bounded(40));
         }
@@ -1187,6 +1239,9 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
+        Goal::Swim { .. } => mob.navigation.stop(),
+        Goal::PufferfishPuff => super::fish::puff_stop(mob),
+        Goal::FollowFlock { .. } => super::fish::flock_stop(mob, ctx, me),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
         Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } | Goal::Unavailable(_) => {
         }
@@ -1327,6 +1382,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 .set_look_at_default(me.position.x + *rel_x, eye, me.position.z + *rel_z);
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
+        Goal::Swim { .. } | Goal::PufferfishPuff => {}
+        Goal::FollowFlock { time_to_recalc, .. } => {
+            super::fish::flock_tick(time_to_recalc, me, mob, ctx)
+        }
         Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
             *unseen_ticks += 1;

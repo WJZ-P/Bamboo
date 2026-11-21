@@ -195,6 +195,18 @@ pub enum EntityData {
     ///
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
     GlowSquidDarkTicks(i32),
+    /// `AbstractFish.FROM_BUCKET`，BOOLEAN，index 16。
+    ///
+    /// `AbstractFish.FROM_BUCKET`, a BOOLEAN at index 16.
+    FishFromBucket(bool),
+    /// `Salmon.DATA_TYPE` / `TropicalFish.DATA_ID_TYPE_VARIANT` / `Pufferfish.PUFF_STATE`，
+    /// 都在 index 17，INT。
+    ///
+    /// `Salmon.DATA_TYPE` / `TropicalFish.DATA_ID_TYPE_VARIANT` / `Pufferfish.PUFF_STATE`,
+    /// all at index 17 as an INT.
+    SalmonVariant(i32),
+    TropicalFishVariant(i32),
+    PufferfishPuffState(i32),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -254,6 +266,10 @@ impl EntityData {
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
             Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
+            Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
+            Self::SalmonVariant(_) => mc_bamboo_data::entity_types::SALMON_VARIANT,
+            Self::TropicalFishVariant(_) => mc_bamboo_data::entity_types::TROPICAL_FISH_VARIANT,
+            Self::PufferfishPuffState(_) => mc_bamboo_data::entity_types::PUFFERFISH_PUFF_STATE,
         }
     }
 
@@ -412,6 +428,16 @@ impl EntityData {
             Self::GlowSquidDarkTicks(ticks) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *ticks);
+            }
+            Self::FishFromBucket(from_bucket) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *from_bucket);
+            }
+            Self::SalmonVariant(value)
+            | Self::TropicalFishVariant(value)
+            | Self::PufferfishPuffState(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
             }
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);

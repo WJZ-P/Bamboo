@@ -591,6 +591,33 @@ pub enum Command {
     ArrowExtinguished {
         pitch: f32,
     },
+    /// `Pufferfish.touch`：先 `hurtServer`，打中了才下毒并放蜇刺声。
+    ///
+    /// `Pufferfish.touch`: hurt first, and only on a hit add the poison and the sting
+    /// sound.
+    PufferSting {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+        seconds: i32,
+        position: mc_bamboo_core::Vec3,
+    },
+    /// `AbstractSchoolingFish.startFollowing`：跟随者记住领头并给领头的群计数加一。
+    ///
+    /// `AbstractSchoolingFish.startFollowing`: the follower remembers its leader and the
+    /// leader's school count goes up by one.
+    SchoolFollow {
+        leader: EntityUid,
+        follower: EntityUid,
+    },
+    /// `AbstractSchoolingFish.stopFollowing`：跟随者离开，领头群计数减一。
+    ///
+    /// `AbstractSchoolingFish.stopFollowing`: the follower leaves and the leader's count
+    /// goes down by one.
+    SchoolLeave {
+        leader: EntityUid,
+        follower: EntityUid,
+    },
     /// `EatBlockGoal.tick` 在 `mobGriefing` 下的改方块：吃掉脚下的草，或把下面的草方块变成泥土。
     ///
     /// `EatBlockGoal.tick` under `mobGriefing`: eat the plant at the feet, or turn the grass
@@ -714,6 +741,49 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::ArrowExtinguished { pitch } => {
             super::arrow::play_extinguished_sound(me, world, pitch);
+        }
+        Command::PufferSting {
+            target,
+            source,
+            amount,
+            seconds,
+            position,
+        } => {
+            if world.hurt_mob(target, source, amount) {
+                let poison = mc_bamboo_data::registries::mob_effect::POISON;
+                world.with_entity_mut(target, &mut |entity| {
+                    entity.with_mob(|_, mob| {
+                        super::mob::living::add_effect(
+                            mob,
+                            super::mob::effects::EffectInstance::new(poison, seconds),
+                        )
+                    });
+                });
+                world.play_sound(
+                    position,
+                    mc_bamboo_data::sound_event("minecraft:entity.puffer_fish.sting"),
+                    mc_bamboo_data::sounds::NEUTRAL,
+                    1.0,
+                    1.0,
+                    false,
+                );
+            }
+        }
+        Command::SchoolFollow { leader, follower } => {
+            world.with_entity_mut(follower, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.leader = Some(leader));
+            });
+            world.with_entity_mut(leader, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.school_size += 1);
+            });
+        }
+        Command::SchoolLeave { leader, follower } => {
+            world.with_entity_mut(follower, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.leader = None);
+            });
+            world.with_entity_mut(leader, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.school_size -= 1);
+            });
         }
         Command::MobBlockSound {
             pos,

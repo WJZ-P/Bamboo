@@ -113,7 +113,7 @@ pub(super) fn finalize_ageable(
 ///
 /// `Mob.finalizeSpawn`: the random follow-range bonus (only when absent), then the
 /// left-handed roll.
-fn finalize_mob(mob: &mut Mob, random: &dyn RandomSource) {
+pub(super) fn finalize_mob(mob: &mut Mob, random: &dyn RandomSource) {
     if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
         && range.modifier(RANDOM_SPAWN_BONUS).is_none()
     {

@@ -740,3 +740,31 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 对拍：`mob-oracle --only squid_` / `--only glow`（`squid_swim`、`squid_hurt`、`squid_beached`、`squid_swim_baby`、`glow_squid_swim`、`glow_squid_hurt`，共 1666 刻）逐刻比位置、速度、朝向、随机源、氧气、身体与触手状态、移动向量、掉落、世界随机源和出站包字节（配对、同步、实体事件 19、音效、墨汁粒子、变暗元数据）；`--break-self-test squid` 把那一下伤害改成 2 点能被抓到。自然生成见 `mob-oracle --only natural_spawn` 的 `squid_ocean*` / `glow_squid_*` 夹具，存档见 `chunk-content` 的 fresh 实体对拍。
 
 已知差异：生物受伤后 `ServerEntity.sendChanges` 因 `hurtMarked` 多发的那个速度包，正式游戏路径一直没有发（`Mob.hurt_marked` 只写不读，牛和僵尸也一样）；`mob-oracle` 的鱿鱼场景在对拍里自己读并清这个标志。
+
+## 鱼的实施现状（2026-11-21）
+
+鳕鱼、鲑鱼、热带鱼、河豚是官方的 `WaterAnimal` → `AbstractFish` 一支，专属逻辑在
+`entity/mob/fish.rs`。它们不是 `AgeableMob`：没有年龄、求爱和繁殖，存档不写 `Age`。
+
+- 公共部分：`water::handle_air_supply` 对 `is_water_animal()` 也生效；`MobType` 加了
+  `is_water_animal` / `is_ageable`，`is_animal`、`is_pushed_by_fluid`、`spawns_in_water`、
+  `can_breathe_under_water` 都跟着这两种鱼类分支改。
+- 导航：`EvaluatorFlags.swim = Some(allowBreaching)` 选中 `SwimNodeEvaluator`
+  （六个方向 + 两边都可走的四个水平对角），`WaterBoundPathNavigation` 的
+  `canUpdatePath` / `getTempMobPos` / `getGroundY` / `isStableDestination` /
+  `getMaxVerticalDistanceToWaypoint` 都按 `flags.swim` 分派；鱼的
+  `allowBreaching` 是假（以后海豚为真）。`BlockState::is_pathfindable_water` 来自新导出的
+  `PATHFINDABLE_WATER` 状态事实。
+- 移动：`fish::move_control_tick`（`FishMoveControl`）、`fish::travel_in_water`
+  （`AbstractFish.travelInWater`）、`fish::ai_step`（离水扑腾）；`motion::movement_emission`
+  现在真的发游泳声（音量按速度、音高两个 `nextFloat`），鱼的脚步声为空但「踩过」仍成立。
+- 目标：`Goal::Swim`（`RandomSwimmingGoal` + `getRandomSwimmablePos` 的 11 次抽点）、
+  `Goal::PufferfishPuff`、`Goal::FollowFlock`（`FollowFlockLeaderGoal`，跟随时用
+  `Command::SchoolFollow` / `SchoolLeave` 改领头和群计数）。`AvoidEntityGoal`（优先级 2）未建模。
+- 河豚蜇刺走新的 `Command::PufferSting`：先 `hurtMob`，打中了才下毒并放蜇刺声。
+- 数据：`FROM_BUCKET`(16)、`SALMON_VARIANT`/`TROPICAL_FISH_VARIANT`/`PUFFERFISH_PUFF_STATE`(17)
+  由生成器导出，元数据和存档都用它们；`MobPublic` 多带鱼的花纹、膨胀和群的三个字段。
+- 对拍：`mob-oracle --only cod|salmon|tropical|puffer`。`cod_swim` / `salmon_swim` /
+  `tropical_fish_swim` 各 241 刻 **0 不一致**（位置、速度、朝向、随机源、氧气、尺寸、掉落、
+  世界随机源、出站包逐字节）；`cod_beached` 461 刻只剩溺水那一刻的两组包差一拍（4 处），
+  `pufferfish_puff` 12 处（膨胀时 y 的微小漂移）。

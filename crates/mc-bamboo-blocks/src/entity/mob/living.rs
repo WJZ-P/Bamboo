@@ -64,6 +64,9 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if me.removed {
         return;
     }
+    // `Pufferfish.tick` 在 `super.tick()` 之前跑膨胀 / 收缩。
+    // `Pufferfish.tick` runs the inflate/deflate machine before `super.tick()`.
+    super::fish::pre_tick(me, mob);
     // `Entity.commonTick`。
     if mob.invulnerable_time > 0 {
         mob.invulnerable_time -= 1;
@@ -158,7 +161,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         me.discard();
         return;
     }
-    let persistent = mob.persistence_required;
+    let persistent = mob.requires_custom_persistence();
     let mut nearest: Option<f64> = None;
     ctx.blocks().for_each_player(&mut |player| {
         if player.spectator {
@@ -177,7 +180,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let near_sqr = 32.0 * 32.0;
     // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
     // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
-    if !persistent && distance > far_sqr && mob.mob_type.removes_when_far_away() {
+    if !persistent && distance > far_sqr && mob.removes_when_far_away() {
         me.discard();
         return;
     }
@@ -187,7 +190,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         && distance > near_sqr
     {
         // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
-        if mob.mob_type.removes_when_far_away() {
+        if mob.removes_when_far_away() {
             me.discard();
         }
     } else if distance < near_sqr {
@@ -306,7 +309,7 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
     mob_base_tick(me, mob, ctx);
-    if mob.mob_type.is_ageable_water_creature() {
+    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
         super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
     }
 }
@@ -626,6 +629,9 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    // `AbstractFish.aiStep` 在 `LivingEntity.aiStep` 之前：离水扑腾一下。
+    // `AbstractFish.aiStep` runs before `LivingEntity.aiStep`: the beached flop.
+    super::fish::ai_step(me, mob);
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -751,8 +757,8 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
         burn_undead(me, mob, ctx);
     }
-    // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
-    if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
+    // `AgeableMob.aiStep`：僵尸和鱼都不在这一层，年龄/求爱都不动。
+    if mob.mob_type.is_ageable() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
             for _ in 0..3 {
                 me.random.next_double();
@@ -760,7 +766,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
         mob.forced_age_timer -= 1;
     }
-    if !mob.mob_type.is_monster() && is_alive(me, mob) {
+    if mob.mob_type.is_ageable() && is_alive(me, mob) {
         if mob.is_baby() && !mob.age_locked {
             set_age(me, mob, mob.age + 1);
         } else if mob.age > 0 {
@@ -796,6 +802,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if super::squid::is_squid(mob.mob_type) {
         super::squid::ai_step(me, mob);
     }
+    // `Pufferfish.aiStep` 的尾部：膨胀时蜇附近的生物。
+    // The tail of `Pufferfish.aiStep`: sting nearby mobs while puffed up.
+    super::fish::puffer_touch(me, mob, ctx);
 }
 
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
@@ -871,13 +880,17 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 }
 
 /// `Mob.setSpeed`：同时设 `zza`。
-fn set_speed(mob: &mut Mob, speed: f32) {
+pub(crate) fn set_speed(mob: &mut Mob, speed: f32) {
     mob.speed = speed;
     mob.zza = speed;
 }
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
 fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+    if super::fish::is_fish(mob.mob_type) {
+        super::fish::move_control_tick(me, mob);
+        return;
+    }
     match mob.mover.operation {
         Operation::MoveTo => {
             mob.mover.operation = Operation::Wait;
@@ -1130,7 +1143,7 @@ fn relative_friction_movement(
 }
 
 /// `Entity.moveRelative`。
-fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
+pub(crate) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
     let length = input.length_sqr();
     if length < 1.0e-7 {
         return;
@@ -1189,6 +1202,12 @@ fn handle_on_climbable(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView, del
 
 /// `travelInFluid`。
 fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
+    // `AbstractFish.travelInWater` 整个换掉了水里的推进。
+    // `AbstractFish.travelInWater` replaces the whole in-water path.
+    if me.in_water && super::fish::is_fish(mob.mob_type) {
+        super::fish::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     let falling = me.delta.y <= 0.0;
     let old_y = me.position.y;
     let gravity = effective_gravity(me, mob);

@@ -282,10 +282,19 @@ fn movement_emission(
             mob.next_step = (mob.move_dist as i32 + 1) as f32;
         } else if me.in_water {
             mob.next_step = (mob.move_dist as i32 + 1) as f32;
-            // `waterSwimSound` → `playSwimSound`：两个 `nextFloat`。
+            // `waterSwimSound` → `playSwimSound`：音量按速度算，音高取两个 `nextFloat`。
+            // `waterSwimSound` → `playSwimSound`: the volume follows the speed and the
+            // pitch draws two `nextFloat`s.
             if sounds {
-                me.random.next_float();
-                me.random.next_float();
+                let delta = me.delta;
+                let speed = (delta.x * delta.x * 0.2 + delta.y * delta.y + delta.z * delta.z * 0.2)
+                    .sqrt() as f32
+                    * 0.35;
+                let volume = mth::java_min_f32(1.0, speed);
+                let first = me.random.next_float();
+                let second = me.random.next_float();
+                let pitch = 1.0 + (first - second) * 0.4;
+                super::living::play_sound(me, mob, mob.mob_type.swim_sound(), volume, pitch);
             }
         }
     }
@@ -307,8 +316,11 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
-    if play_sound {
+    if play_sound && !mob.mob_type.is_water_animal() {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
+        // `AbstractFish.playStepSound` 是空实现，但这一步仍算「踩过」。
+        // `AbstractCow.playStepSound` plays; `AbstractFish.playStepSound` is empty yet
+        // the step still counts.
         let sound = match mob.mob_type {
             super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
             super::MobType::Chicken => super::chicken::sounds(mob)[3],

@@ -310,7 +310,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
     // ---- AgeableMob / Animal / Cow ----
-    if !mob.mob_type.is_monster() {
+    if mob.mob_type.is_ageable() {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
@@ -368,6 +368,24 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             "CanBreakDoors",
             Tag::Byte(i8::from(mob.can_break_doors)),
         );
+    }
+    // ---- AbstractFish / Salmon / TropicalFish / Pufferfish ----
+    if super::fish::is_fish(mob.mob_type) {
+        put(
+            &mut out,
+            "FromBucket",
+            Tag::Byte(i8::from(mob.fish.from_bucket)),
+        );
+    }
+    match mob.mob_type {
+        MobType::Salmon => put(
+            &mut out,
+            "type",
+            Tag::String(super::fish::salmon_variant_name(mob.fish.variant).to_owned()),
+        ),
+        MobType::TropicalFish => put(&mut out, "Variant", Tag::Int(mob.fish.variant)),
+        MobType::Pufferfish => put(&mut out, "PuffState", Tag::Int(mob.fish.puff_state)),
+        _ => {}
     }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
@@ -495,7 +513,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
         // ---- AgeableMob / Animal / Cow ----
-        if !mob.mob_type.is_monster() {
+        if mob.mob_type.is_ageable() {
             living::set_age(me, mob, tag::int_or(tag, "Age", 0));
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
@@ -540,6 +558,27 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             } else if let Some(variant) = sound.and_then(CowSoundVariant::from_name) {
                 mob.sound_variant = variant;
             }
+        }
+        // ---- AbstractFish / Salmon / TropicalFish / Pufferfish ----
+        if super::fish::is_fish(mob.mob_type) {
+            mob.fish.from_bucket = tag::bool_or(tag, "FromBucket", false);
+        }
+        match mob.mob_type {
+            MobType::Salmon => {
+                let variant = tag::string_or(tag, "type")
+                    .and_then(super::fish::salmon_variant_from_name)
+                    .unwrap_or(1);
+                mob.fish.variant = variant;
+                super::fish::refresh_dimensions(me, mob);
+            }
+            MobType::TropicalFish => {
+                mob.fish.variant = tag::int_or(tag, "Variant", 0);
+            }
+            MobType::Pufferfish => {
+                mob.fish.puff_state = tag::int_or(tag, "PuffState", 0).min(2);
+                super::fish::refresh_dimensions(me, mob);
+            }
+            _ => {}
         }
         // ---- Zombie ----
         if mob.mob_type.uses_baby_metadata() {

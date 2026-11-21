@@ -66,6 +66,12 @@ pub struct AgeableGroupData {
 pub enum SpawnGroup {
     Ageable(AgeableGroupData),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    /// `TropicalFish.TropicalFishGroupData`：一组热带鱼共用同一个花纹。
+    ///
+    /// `TropicalFish.TropicalFishGroupData`: one tropical-fish group shares a variant.
+    TropicalFish {
+        variant: i32,
+    },
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -269,6 +275,10 @@ fn finalize_spawn_in_group(
     }
     if super::squid::is_squid(kind) {
         super::squid::finalize_spawn(entity, world.random(), group);
+        return;
+    }
+    if super::fish::is_fish(kind) {
+        super::fish::finalize_spawn(entity, world.random(), reason, group);
         return;
     }
     let biome = world.biome_id(entity.block_position());
