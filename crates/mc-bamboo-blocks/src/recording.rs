@@ -1766,6 +1766,18 @@ impl Level for Recording<'_> {
         value
     }
 
+    fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<ItemStack> {
+        let value = self.level.explosion_block_drops_decayed(state, pos, radius);
+        self.read(Some(pos), K_DROPS, (0_u8, state.0, hash_slots(&value)));
+        self.uncacheable(Uncacheable::Random);
+        value
+    }
+
     fn block_loot_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
         let value = self.level.block_loot_drops(state, pos);
         self.read(Some(pos), K_DROPS, (1_u8, state.0, hash_slots(&value)));
