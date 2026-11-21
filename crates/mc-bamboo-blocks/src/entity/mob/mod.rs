@@ -13,11 +13,15 @@
 //! therefore live on [`Entity::dimensions`].
 
 pub mod attributes;
+pub mod avoid;
 pub mod chicken;
 pub mod control;
 pub mod damage;
 pub mod effects;
+pub mod equine;
 pub mod equipment;
+pub mod fox;
+pub mod fox_goals;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -28,11 +32,16 @@ pub mod navigation;
 pub mod nbt;
 pub mod path;
 mod pig;
+pub mod rabbit;
 pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
+pub mod tame;
 pub(crate) mod timing;
+pub mod wild_spawn;
+pub mod wolf;
+pub mod wolf_goals;
 mod zombie_spawn;
 
 use mc_bamboo_core::{BlockPos, Vec3};
@@ -55,12 +64,19 @@ use super::{EntityUid, JavaRandom};
 pub enum MobType {
     #[default]
     Cow,
+    Rabbit,
+    Fox,
+    Wolf,
     Pig,
     Sheep,
     Chicken,
     Zombie,
     Husk,
     Skeleton,
+    Horse,
+    Donkey,
+    Mule,
+    Llama,
 }
 
 impl MobType {
@@ -69,12 +85,19 @@ impl MobType {
         use mc_bamboo_data::registries::entity_type as ids;
         match self {
             Self::Cow => ids::COW,
+            Self::Rabbit => ids::RABBIT,
+            Self::Fox => ids::FOX,
+            Self::Wolf => ids::WOLF,
             Self::Pig => ids::PIG,
             Self::Sheep => ids::SHEEP,
             Self::Chicken => ids::CHICKEN,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
+            Self::Horse => ids::HORSE,
+            Self::Donkey => ids::DONKEY,
+            Self::Mule => ids::MULE,
+            Self::Llama => ids::LLAMA,
         }
     }
 
@@ -82,27 +105,68 @@ impl MobType {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:cow",
+            Self::Rabbit => "minecraft:rabbit",
+            Self::Fox => "minecraft:fox",
+            Self::Wolf => "minecraft:wolf",
             Self::Pig => "minecraft:pig",
             Self::Sheep => "minecraft:sheep",
             Self::Chicken => "minecraft:chicken",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
+            Self::Horse => "minecraft:horse",
+            Self::Donkey => "minecraft:donkey",
+            Self::Mule => "minecraft:mule",
+            Self::Llama => "minecraft:llama",
         }
+    }
+
+    pub const fn food_tag(self) -> Option<mc_bamboo_data::ItemTag> {
+        use mc_bamboo_data::tags::item_tags;
+        match self {
+            Self::Cow => Some(item_tags::COW_FOOD),
+            Self::Rabbit => Some(item_tags::RABBIT_FOOD),
+            Self::Fox => Some(item_tags::FOX_FOOD),
+            Self::Wolf => Some(item_tags::WOLF_FOOD),
+            _ => None,
+        }
+    }
+
+    /// 这个实体类型在不在某个 `minecraft:entity_type` 标签里。
+    ///
+    /// Whether this entity type is in a `minecraft:entity_type` tag.
+    pub fn in_entity_tag(self, name: &str) -> bool {
+        let id = self.entity_type();
+        mc_bamboo_data::tags::TAG_GROUPS
+            .iter()
+            .filter(|group| group.registry == "minecraft:entity_type")
+            .flat_map(|group| group.tags.iter())
+            .any(|tag| tag.name == name && tag.ids.contains(&id))
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
         [
             Self::Cow,
+            Self::Rabbit,
+            Self::Fox,
+            Self::Wolf,
             Self::Pig,
             Self::Sheep,
             Self::Chicken,
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
+            Self::Horse,
+            Self::Donkey,
+            Self::Mule,
+            Self::Llama,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
+    }
+
+    pub const fn is_equine(self) -> bool {
+        matches!(self, Self::Horse | Self::Donkey | Self::Mule | Self::Llama)
     }
 
     /// 成年和幼年的（宽，高，眼高）。
@@ -115,6 +179,12 @@ impl MobType {
                     facts.height,
                     mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
                 )
+            }
+            (Self::Rabbit, baby) => rabbit::dimensions(baby),
+            (Self::Fox, baby) => fox::dimensions(baby),
+            (Self::Wolf, baby) => wolf::dimensions(baby),
+            (Self::Horse | Self::Donkey | Self::Mule | Self::Llama, _) => {
+                equine::dimensions(self, baby)
             }
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
@@ -158,12 +228,19 @@ impl MobType {
     pub const fn loot_table(self) -> &'static str {
         match self {
             Self::Cow => "minecraft:entities/cow",
+            Self::Rabbit => "minecraft:entities/rabbit",
+            Self::Fox => "minecraft:entities/fox",
+            Self::Wolf => "minecraft:entities/wolf",
             Self::Pig => "minecraft:entities/pig",
             Self::Sheep => "minecraft:entities/sheep",
             Self::Chicken => "minecraft:entities/chicken",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
+            Self::Horse => "minecraft:entities/horse",
+            Self::Donkey => "minecraft:entities/donkey",
+            Self::Mule => "minecraft:entities/mule",
+            Self::Llama => "minecraft:entities/llama",
         }
     }
 
@@ -175,52 +252,92 @@ impl MobType {
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
-        if self.is_monster() { 80 } else { 120 }
+        if self.is_equine() {
+            400
+        } else if self.is_monster() {
+            80
+        } else {
+            120
+        }
     }
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
-        if matches!(self, Self::Cow) { 0.4 } else { 1.0 }
+        if self.is_equine() {
+            0.8
+        } else if matches!(self, Self::Cow | Self::Wolf) {
+            0.4
+        } else {
+            1.0
+        }
     }
 
     /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
+            Self::Rabbit => Some("minecraft:entity.rabbit.ambient"),
+            Self::Fox => Some("minecraft:entity.fox.ambient"),
+            // 狼的叫声按叫声品种和幼年换，见 [`wolf::sound`]。
+            // Wolf sounds depend on the sound variant and age; see [`wolf::sound`].
+            Self::Wolf => Some("minecraft:entity.wolf.ambient"),
             Self::Cow | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
+            Self::Horse => Some("minecraft:entity.horse.ambient"),
+            Self::Donkey => Some("minecraft:entity.donkey.ambient"),
+            Self::Mule => Some("minecraft:entity.mule.ambient"),
+            Self::Llama => Some("minecraft:entity.llama.ambient"),
         }
     }
 
     pub const fn hurt_sound(self) -> Option<&'static str> {
         match self {
+            Self::Rabbit => Some("minecraft:entity.rabbit.hurt"),
+            Self::Fox => Some("minecraft:entity.fox.hurt"),
+            Self::Wolf => Some("minecraft:entity.wolf.hurt"),
             Self::Cow | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
+            Self::Horse => Some("minecraft:entity.horse.hurt"),
+            Self::Donkey => Some("minecraft:entity.donkey.hurt"),
+            Self::Mule => Some("minecraft:entity.mule.hurt"),
+            Self::Llama => Some("minecraft:entity.llama.hurt"),
         }
     }
 
     pub const fn death_sound(self) -> Option<&'static str> {
         match self {
+            Self::Rabbit => Some("minecraft:entity.rabbit.death"),
+            Self::Fox => Some("minecraft:entity.fox.death"),
+            Self::Wolf => Some("minecraft:entity.wolf.death"),
             Self::Cow | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
+            Self::Horse => Some("minecraft:entity.horse.death"),
+            Self::Donkey => Some("minecraft:entity.donkey.death"),
+            Self::Mule => Some("minecraft:entity.mule.death"),
+            Self::Llama => Some("minecraft:entity.llama.death"),
         }
     }
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
+            Self::Rabbit | Self::Fox | Self::Wolf => None,
             Self::Cow | Self::Pig | Self::Chicken => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
+            Self::Horse => Some("minecraft:entity.horse.step"),
+            Self::Donkey => Some("minecraft:entity.horse.step"),
+            Self::Mule => Some("minecraft:entity.horse.step"),
+            Self::Llama => Some("minecraft:entity.llama.step"),
         }
     }
 
@@ -229,12 +346,19 @@ impl MobType {
         use mc_bamboo_data::items;
         match self {
             Self::Cow => items::COW_SPAWN_EGG,
+            Self::Rabbit => items::RABBIT_SPAWN_EGG,
+            Self::Fox => items::FOX_SPAWN_EGG,
+            Self::Wolf => items::WOLF_SPAWN_EGG,
             Self::Pig => items::PIG_SPAWN_EGG,
             Self::Sheep => items::SHEEP_SPAWN_EGG,
             Self::Chicken => items::CHICKEN_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
+            Self::Horse => items::HORSE_SPAWN_EGG,
+            Self::Donkey => items::DONKEY_SPAWN_EGG,
+            Self::Mule => items::MULE_SPAWN_EGG,
+            Self::Llama => items::LLAMA_SPAWN_EGG,
         }
     }
 
@@ -242,12 +366,19 @@ impl MobType {
     pub const fn translation_key(self) -> &'static str {
         match self {
             Self::Cow => "entity.minecraft.cow",
+            Self::Rabbit => "entity.minecraft.rabbit",
+            Self::Fox => "entity.minecraft.fox",
+            Self::Wolf => "entity.minecraft.wolf",
             Self::Pig => "entity.minecraft.pig",
             Self::Sheep => "entity.minecraft.sheep",
             Self::Chicken => "entity.minecraft.chicken",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
+            Self::Horse => "entity.minecraft.horse",
+            Self::Donkey => "entity.minecraft.donkey",
+            Self::Mule => "entity.minecraft.mule",
+            Self::Llama => "entity.minecraft.llama",
         }
     }
 
@@ -261,9 +392,24 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
-            .into_iter()
-            .find(|kind| kind.entity_type() == entity_type)
+        [
+            Self::Cow,
+            Self::Zombie,
+            Self::Husk,
+            Self::Skeleton,
+            Self::Pig,
+            Self::Sheep,
+            Self::Chicken,
+            Self::Rabbit,
+            Self::Fox,
+            Self::Wolf,
+            Self::Horse,
+            Self::Donkey,
+            Self::Mule,
+            Self::Llama,
+        ]
+        .into_iter()
+        .find(|kind| kind.entity_type() == entity_type)
     }
 
     /// `EntityType.getCategory()`。
@@ -284,7 +430,9 @@ impl MobType {
     /// `EntityType.canSpawnFarFromPlayer()`: the builder default is `CREATURE | MISC`,
     /// so cows may spawn far from players and monsters may not.
     pub const fn can_spawn_far_from_player(self) -> bool {
-        matches!(self, Self::Cow)
+        // 马科也是 `CREATURE`。
+        // Equines are `CREATURE` as well.
+        !self.is_monster()
     }
 
     /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
@@ -434,6 +582,10 @@ pub enum DamageKind {
     MobAttack,
     MobAttackNoAggro,
     Arrow,
+    /// 羊驼口水，`minecraft:spit`。
+    ///
+    /// Llama spit, `minecraft:spit`.
+    Spit,
     Thrown,
     Starve,
     Thorns,
@@ -464,6 +616,7 @@ impl DamageKind {
             Self::MobAttack => "minecraft:mob_attack",
             Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
             Self::Arrow => "minecraft:arrow",
+            Self::Spit => "minecraft:spit",
             Self::Thrown => "minecraft:thrown",
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
@@ -513,7 +666,7 @@ impl DamageKind {
             Self::Freeze => "freeze",
             Self::OutOfWorld => "outOfWorld",
             Self::PlayerAttack => "player",
-            Self::MobAttack | Self::MobAttackNoAggro => "mob",
+            Self::MobAttack | Self::MobAttackNoAggro | Self::Spit => "mob",
             Self::Arrow => "arrow",
             Self::Thrown => "thrown",
             Self::Starve => "starve",
@@ -528,7 +681,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 24] = [
+        let all: [DamageKind; 25] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -547,6 +700,7 @@ impl DamageKind {
             Self::MobAttack,
             Self::MobAttackNoAggro,
             Self::Arrow,
+            Self::Spit,
             Self::Thrown,
             Self::Starve,
             Self::Thorns,
@@ -566,6 +720,7 @@ impl DamageKind {
                 | Self::MobAttack
                 | Self::MobAttackNoAggro
                 | Self::Arrow
+                | Self::Spit
                 | Self::Thrown
                 | Self::Thorns
         ) || matches!(self, Self::Wither)
@@ -645,6 +800,7 @@ impl DamageKind {
             | Self::MobAttack
             | Self::MobAttackNoAggro
             | Self::Arrow
+            | Self::Spit
             | Self::Thrown
             | Self::Thorns
             | Self::Explosion
@@ -711,6 +867,10 @@ pub struct DamageSource {
     ///
     /// Enchantment strength for the post-hit `AbstractArrow.doKnockback`.
     pub arrow_punch: i32,
+    /// 攻击者是驯服的狼时它主人的 UUID：`resolvePlayerResponsibleForDamage` 记到主人头上。
+    ///
+    /// The owner of a tamed wolf attacker, credited as the responsible player.
+    pub owner_credit: Option<[u8; 16]>,
     pub(super) looting_level: i32,
 }
 
@@ -732,6 +892,7 @@ impl DamageSource {
             weapon: None,
             arrow_ignite_ticks: 0,
             arrow_punch: 0,
+            owner_credit: None,
             looting_level: 0,
         }
     }
@@ -813,6 +974,7 @@ impl DamageSource {
             weapon: None,
             arrow_ignite_ticks: 0,
             arrow_punch: 0,
+            owner_credit: None,
             looting_level: 0,
         }
     }
@@ -1037,6 +1199,13 @@ pub struct Mob {
     pub love_cause: Option<[u8; 16]>,
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
+    pub rabbit: rabbit::Rabbit,
+    pub fox: fox::Fox,
+    /// `TamableAnimal` 的驯服状态（只有可驯服的种类用）。
+    ///
+    /// The `TamableAnimal` state, used by tamable kinds only.
+    pub tame: tame::Tamable,
+    pub wolf: wolf::Wolf,
     pub pig_sound_variant: pig::SoundVariant,
     /// 羊的 `DATA_WOOL_ID`：低 4 位颜色，第 5 位已剪毛。
     ///
@@ -1049,10 +1218,15 @@ pub struct Mob {
     pub egg_time: i32,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
+    /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
+    ///
+    /// `Entity.needsSync`: `jumpFromGround` fired this tick, so the move packets carry velocity.
+    pub needs_sync: bool,
     /// `hurtMarked`：速度要强制同步一次。
     pub hurt_marked: bool,
     /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
     pub pending_breed: Option<EntityUid>,
+    pub equine: Option<Box<equine::EquineState>>,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -1111,31 +1285,42 @@ impl Mob {
     pub fn new(mob_type: MobType) -> Self {
         let attributes = match mob_type {
             MobType::Cow => Attributes::cow(),
+            MobType::Rabbit => rabbit::attributes(),
+            MobType::Fox => fox::attributes(),
+            MobType::Wolf => wolf::attributes(),
             MobType::Pig => pig::attributes(),
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
+            kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
+            MobType::Rabbit => rabbit::goals(&mut navigation),
+            MobType::Fox => fox::goals(&mut navigation, 0),
+            MobType::Wolf => wolf::goals(&mut navigation),
             MobType::Pig => pig::goals(&mut navigation),
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
+            kind => equine::goals(kind, &mut navigation),
         };
         let target_goals = match mob_type {
-            MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
+            MobType::Fox => fox::target_goals(),
+            MobType::Wolf => wolf::target_goals(),
+            MobType::Cow | MobType::Rabbit | MobType::Pig | MobType::Sheep | MobType::Chicken => {
                 GoalSelector::default()
             }
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
+            kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
-        Self {
+        let mut mob = Self {
             mob_type,
             uuid: [0; 16],
             x_rot: 0.0,
@@ -1199,7 +1384,11 @@ impl Mob {
             fall_flying: false,
             ambient_sound_time: 0,
             look: LookControl::default(),
-            mover: MoveControl::default(),
+            mover: if mob_type == MobType::Rabbit {
+                rabbit::initial_move_control()
+            } else {
+                MoveControl::default()
+            },
             jump: JumpControl::default(),
             body: BodyRotationControl::default(),
             navigation,
@@ -1243,14 +1432,44 @@ impl Mob {
             love_cause: None,
             variant: CowVariant::Temperate,
             sound_variant: CowSoundVariant::Classic,
+            rabbit: rabbit::Rabbit::default(),
+            fox: fox::Fox::default(),
+            tame: tame::Tamable::default(),
+            wolf: wolf::Wolf::default(),
             pig_sound_variant: pig::SoundVariant::Classic,
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
             events: Vec::new(),
+            needs_sync: false,
             hurt_marked: false,
             pending_breed: None,
+            equine: mob_type
+                .is_equine()
+                .then(|| Box::new(equine::EquineState::default())),
+        };
+        if mob_type == MobType::Fox {
+            fox::configure(&mut mob);
         }
+        if mob_type == MobType::Wolf {
+            wolf::configure(&mut mob);
+        }
+        mob
+    }
+
+    /// `PowderSnowBlock.canEntityWalkOnPowderSnow`：类型在 `powder_snow_walkable_mobs`
+    /// 里，或者脚上穿着皮革靴。
+    ///
+    /// `PowderSnowBlock.canEntityWalkOnPowderSnow`: the type is in
+    /// `powder_snow_walkable_mobs` or the feet slot holds leather boots.
+    pub fn walks_on_powder_snow(&self) -> bool {
+        self.mob_type
+            .in_entity_tag("minecraft:powder_snow_walkable_mobs")
+            || self
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Feet)
+                .item
+                == mc_bamboo_data::items::LEATHER_BOOTS
     }
 
     pub fn is_baby(&self) -> bool {
@@ -1309,6 +1528,7 @@ impl Mob {
         // `MeleeAttackGoal.lastCanUseCheck` is `gameTime` as well; cows have no such goal,
         // so rebasing it is a no-op for them.
         self.goals.rebase_clock(delta);
+        self.wolf.rebase(delta);
     }
 }
 
@@ -1329,6 +1549,11 @@ pub struct MobPublic {
     pub y_head_rot: f32,
     pub y_body_rot: f32,
     pub in_love: i32,
+    pub can_parent_equine: bool,
+    /// 马科要同步的元数据；其余生物是 None。
+    ///
+    /// The synced equine metadata; None for other mobs.
+    pub equine: Option<equine::EquinePublic>,
     pub age: i32,
     pub panicking: bool,
     pub no_ai: bool,
@@ -1336,6 +1561,31 @@ pub struct MobPublic {
     pub no_gravity: bool,
     pub variant: CowVariant,
     pub sound_variant: CowSoundVariant,
+    pub rabbit_variant: i32,
+    /// `Fox.DATA_TYPE_ID` / `DATA_FLAGS_ID` / 两个信任格。
+    ///
+    /// The fox variant, flags and two trusted slots.
+    pub fox_variant: i32,
+    pub fox_flags: u8,
+    pub fox_trusted: [Option<[u8; 16]>; 2],
+    /// `TamableAnimal.DATA_FLAGS_ID` 和主人。
+    ///
+    /// The tamable flags and owner.
+    pub tame_flags: u8,
+    pub owner: Option<[u8; 16]>,
+    /// 原始的 `target` 字段有没有值（`HurtByTargetGoal.alertOthers` 看它）。
+    ///
+    /// Whether the raw target is set; read when alerting others.
+    pub has_target: bool,
+    /// 狼的元数据：讨食、项圈、仇恨结束时刻、品种、叫声。
+    ///
+    /// The wolf metadata: interested, collar, anger end, variant, sound variant.
+    pub wolf_interested: bool,
+    pub wolf_collar: i32,
+    pub wolf_anger_end_time: i64,
+    pub wolf_variant: i32,
+    pub wolf_sound_variant: i32,
+    pub needs_sync: bool,
     pub pig_sound_variant: pig::SoundVariant,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
@@ -1380,6 +1630,8 @@ impl MobPublic {
             y_head_rot: mob.y_head_rot,
             y_body_rot: mob.y_body_rot,
             in_love: mob.in_love,
+            can_parent_equine: equine::can_parent(mob),
+            equine: mob.equine.as_deref().map(equine::EquinePublic::of),
             age: mob.age,
             panicking: mob.is_panicking(),
             no_ai: mob.no_ai,
@@ -1387,6 +1639,19 @@ impl MobPublic {
             no_gravity: mob.no_gravity,
             variant: mob.variant,
             sound_variant: mob.sound_variant,
+            rabbit_variant: mob.rabbit.variant.id(),
+            fox_variant: mob.fox.variant.id(),
+            fox_flags: mob.fox.flags,
+            fox_trusted: mob.fox.trusted,
+            tame_flags: mob.tame.flags,
+            owner: mob.tame.owner,
+            has_target: mob.target.is_some(),
+            wolf_interested: mob.wolf.interested,
+            wolf_collar: mob.wolf.collar,
+            wolf_anger_end_time: mob.wolf.anger_end_time,
+            wolf_variant: mob.wolf.variant,
+            wolf_sound_variant: mob.wolf.sound_variant,
+            needs_sync: mob.needs_sync,
             pig_sound_variant: mob.pig_sound_variant,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,

@@ -21,6 +21,7 @@ use super::{
         rotate_towards,
     },
     effects::EffectAction,
+    equine::Voice,
     goals::Flag,
     motion,
     navigation::NavMob,
@@ -81,11 +82,31 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
     range_checks(me, mob);
+    // `LivingEntity.tick`：睡着的生物（只有狐狸）抬头角清零。
+    // `LivingEntity.tick`: a sleeping mob (only foxes) levels its head.
+    if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping() {
+        mob.x_rot = 0.0;
+    }
+    // `refreshDirtyAttributes` → `onAttributeUpdated(MAX_HEALTH)`：`/summon` 出来的马科
+    // 在第一刻才把血量夹到随机出来的最大血量。
+    // `refreshDirtyAttributes`: a summoned equine clamps its health on its first tick.
+    clamp_health(mob);
     // `Mob.tick`：每 5 刻按乘客和载具重设控制标志；牛没有乘客，三个都打开。
     if me.tick_count % 5 == 0 {
         mob.goals.set_control_flag(Flag::Move, true);
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
+    }
+    if mob.mob_type == super::MobType::Fox && !me.removed {
+        super::fox::tick_after(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Wolf && !me.removed {
+        super::wolf::tick_after(me, mob, ctx);
+    }
+    // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
+    // `AbstractHorse.tick` advances its timers after `super.tick()`.
+    if mob.mob_type.is_equine() {
+        super::equine::tick_end(mob);
     }
 }
 
@@ -264,7 +285,7 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             max_up_step: max_up_step(mob),
             max_fall_distance: 3,
             malus: mob.malus,
-            context: me.collision_context(),
+            context: me.mob_collision_context(mob),
         },
         speed: mob.speed,
         in_liquid: is_in_liquid(me, mob),
@@ -418,14 +439,68 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.ambient_sound_time += 1;
         if roll < time {
             mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
+            if mob.mob_type == super::MobType::Fox {
+                super::fox::play_ambient_sound(me, mob, ctx.blocks());
+                return;
+            }
+            if mob.mob_type == super::MobType::Wolf {
+                super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
+                return;
+            }
             let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .ambient_sound()
-                .unwrap_or_else(|| ambient_sound(mob));
+            let sound = voice_of(mob, Voice::Ambient);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
     }
+}
+
+/// 叫声、受伤和死亡的声音：马科按种类和幼年分派，其余按类型，牛用声音变体。
+///
+/// Ambient, hurt and death sounds: equines by kind and age, others by type,
+/// cows by their sound variant.
+fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
+    if mob.mob_type.is_equine() {
+        return super::equine::voice(mob, voice);
+    }
+    match voice {
+        Voice::Hurt => mob
+            .mob_type
+            .hurt_sound()
+            .unwrap_or_else(|| match mob.mob_type {
+                super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Hurt),
+                super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[1],
+                _ => mob.sound_variant.hurt(),
+            }),
+        Voice::Death => mob
+            .mob_type
+            .death_sound()
+            .unwrap_or_else(|| match mob.mob_type {
+                super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Death),
+                super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[2],
+                _ => mob.sound_variant.death(),
+            }),
+        _ => ambient_sound(mob),
+    }
+}
+
+/// `onAttributeUpdated(MAX_HEALTH)` / `setHealth`：血量不超过最大血量。
+///
+/// `onAttributeUpdated(MAX_HEALTH)` / `setHealth`: keep health within the maximum.
+pub(crate) fn clamp_health(mob: &mut Mob) {
+    let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
+    if mob.health > max {
+        mob.health = max;
+    }
+}
+
+/// `LivingEntity.makeSound`：生物自己的音量和 `getVoicePitch` 的两次取数。
+///
+/// `LivingEntity.makeSound`: the mob's own volume and the two `getVoicePitch` draws.
+pub(crate) fn make_sound(me: &mut Entity, mob: &mut Mob, sound: &'static str) {
+    let pitch = voice_pitch(me, mob);
+    play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
 }
 
 /// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`。
@@ -530,6 +605,19 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    if mob.mob_type == super::MobType::Wolf {
+        // 刚生成的狼还没有仇恨，时刻不影响叫声。
+        // A fresh wolf has no anger, so the clock does not matter.
+        super::wolf::play_ambient_sound(me, mob, 0);
+        return;
+    }
+    if mob.mob_type.is_equine() {
+        // 马科的叫声和音量（0.8）按自己的类。
+        // Equines use their own ambient sound and volume (0.8).
+        let sound = voice_of(mob, Voice::Ambient);
+        make_sound(me, mob, sound);
+        return;
+    }
     let pitch = voice_pitch(me, mob);
     play_sound(
         me,
@@ -563,6 +651,11 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
 fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
+    // `LivingEntity.isInWall`：睡着的不窒息（只有狐狸会睡）。
+    // `LivingEntity.isInWall`: sleepers never suffocate (only foxes sleep).
+    if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping() {
+        return false;
+    }
     let width = f64::from(me.dimensions.0 * 0.8);
     let eye = eye_y(me, mob);
     let bounds = mc_bamboo_core::Aabb::new(
@@ -606,6 +699,26 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    mob.needs_sync = false;
+    let fox = mob.mob_type == super::MobType::Fox;
+    if fox {
+        super::fox::ai_step_before(me, mob, ctx);
+    }
+    let equine = mob.mob_type.is_equine();
+    if equine {
+        super::equine::ai_step_start(me, mob);
+    }
+    animal_ai_step(me, mob, ctx);
+    if equine {
+        super::equine::ai_step_end(me, mob, ctx);
+    }
+}
+
+/// `Animal.aiStep` 一路到 `LivingEntity.aiStep` 的公共部分。
+///
+/// The shared chain from `Animal.aiStep` down to `LivingEntity.aiStep`.
+fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let fox = mob.mob_type == super::MobType::Fox;
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -638,7 +751,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `applyInput`。
     mob.xxa *= 0.98;
     mob.zza *= 0.98;
-    if mob.is_dead_or_dying() {
+    // `isImmobile()`：缺省是濒死，马科另有覆写。
+    // `isImmobile()`: dying by default; equines override it.
+    if super::equine::is_immobile(mob) {
         mob.jumping = false;
         mob.xxa = 0.0;
         mob.zza = 0.0;
@@ -724,6 +839,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
         burn_undead(me, mob, ctx);
     }
+    // `Mob.aiStep` 的捡东西那一段：这一期只给狐狸。
+    // The `Mob.aiStep` pickup loop; only foxes for now.
+    if fox {
+        super::fox::pick_up_items(me, mob, ctx);
+    }
     // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
     if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
@@ -763,6 +883,15 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             }
         }
     }
+    if mob.mob_type == super::MobType::Rabbit {
+        super::rabbit::ai_step(mob);
+    }
+    if fox {
+        super::fox::ai_step_after(me, mob);
+    }
+    if mob.mob_type == super::MobType::Wolf {
+        super::wolf::ai_step_after(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Chicken {
         super::chicken::ai_step(me, mob, ctx);
     }
@@ -796,12 +925,24 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
         let mut targets = std::mem::take(&mut mob.target_goals);
         let phase = me.tick_count.wrapping_add(me.id);
+        let fox = mob.mob_type == super::MobType::Fox;
         if phase % 2 != 0 && me.tick_count > 1 {
             targets.tick_running(false, me, mob, ctx);
+            if fox {
+                super::fox::after_target_change(mob);
+            }
             goals.tick_running(false, me, mob, ctx);
         } else {
             targets.tick(me, mob, ctx);
+            // `Fox.setTarget(null)` 当场结束保护，后面的目标就看得到。
+            // `Fox.setTarget(null)` ends the defence at once for the goals after it.
+            if fox {
+                super::fox::after_target_change(mob);
+            }
             goals.tick(me, mob, ctx);
+        }
+        if fox {
+            super::fox::after_target_change(mob);
         }
         mob.target_goals = targets;
         mob.goals = goals;
@@ -813,11 +954,15 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             mob.events.push(MobEvent::Hearts);
             ctx.emit(
                 Command::BreedAnimals {
-                    kind: mob.mob_type,
                     variant: mob.variant,
                     wool: mob.wool,
                     partner,
                     position: me.position,
+                    kind: mob.mob_type,
+                    father_rabbit: mob.rabbit.variant,
+                    father_fox: mob.fox.variant,
+                    father_love: mob.love_cause,
+                    father_wolf: Box::new((mob.wolf, mob.tame)),
                 },
                 me,
             );
@@ -826,15 +971,38 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     timing::span!(Navigation);
     let nav = nav_mob(me, mob, ctx.blocks());
     if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
-        mob.mover
-            .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
+        if mob.mob_type == super::MobType::Rabbit {
+            super::rabbit::set_wanted(me, mob, wanted, speed);
+        } else {
+            mob.mover
+                .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
+        }
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
         mob.in_love = 0;
     }
-    move_control_tick(me, mob, ctx.blocks());
-    look_control_tick(me, mob);
+    if mob.mob_type == super::MobType::Rabbit {
+        super::rabbit::custom_server_ai_step(me, mob);
+        super::rabbit::before_move_control(me, mob);
+        move_control_tick(me, mob, ctx.blocks());
+        look_control_tick(me, mob);
+        super::rabbit::tick_jump_control(me, mob);
+        return;
+    }
+    if mob.mob_type == super::MobType::Fox {
+        // `FoxMoveControl.tick` 只在 `canMove` 时跑；`FoxLookControl.tick` 睡着时整个跳过。
+        // `FoxMoveControl` runs only when the fox can move; its look control skips sleep.
+        if mob.fox.can_move() {
+            move_control_tick(me, mob, ctx.blocks());
+        }
+        if !mob.fox.is_sleeping() {
+            look_control_tick(me, mob);
+        }
+    } else {
+        move_control_tick(me, mob, ctx.blocks());
+        look_control_tick(me, mob);
+    }
     // `JumpControl.tick`。
     mob.jumping = mob.jump.jump;
     mob.jump.jump = false;
@@ -903,7 +1071,9 @@ fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
 
 /// `LookControl.tick`。
 fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
-    mob.x_rot = clamp_x_rot(0.0, mob.x_rot);
+    if mob.mob_type != super::MobType::Fox || super::fox::resets_x_rot(mob) {
+        mob.x_rot = clamp_x_rot(0.0, mob.x_rot);
+    }
     if mob.look.look_at_cooldown > 0 {
         mob.look.look_at_cooldown -= 1;
         if let Some(target) = look_y_rot(&mob.look, me.position.x, me.position.z) {
@@ -976,22 +1146,27 @@ fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
 }
 
 /// `jumpFromGround`。
-fn jump_from_ground(me: &mut Entity, mob: &Mob, view: &dyn BlockView) {
+fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
     // `LivingEntity.getJumpBoostPower()`：每级 +0.1。
     let boost = mob
         .effects
         .amplifier(mob_effect::JUMP_BOOST)
         .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
-    let power = strength * 1.0 * block_jump_factor(me, view) + boost;
-    if power <= 1.0e-5 {
-        return;
+    let is_rabbit = mob.mob_type == super::MobType::Rabbit;
+    let multiplier = if is_rabbit {
+        super::rabbit::jump_power_multiplier(me, mob)
+    } else {
+        1.0
+    };
+    let power = strength * multiplier * block_jump_factor(me, view) + boost;
+    if power > 1.0e-5 {
+        me.delta.y = mth::java_max(f64::from(power), me.delta.y);
+        mob.needs_sync = true;
     }
-    me.delta = Vec3::new(
-        me.delta.x,
-        mth::java_max(f64::from(power), me.delta.y),
-        me.delta.z,
-    );
+    if is_rabbit {
+        super::rabbit::after_ground_jump(me, mob);
+    }
 }
 
 // ---- travel ----
@@ -1093,14 +1268,19 @@ fn relative_friction_movement(
     let movement = me.delta;
     motion::move_living(me, mob, ctx, movement);
     let mut delta = me.delta;
-    if (me.horizontal_collision || mob.jumping) && on_climbable(me, mob, ctx.blocks()) {
+    // 细雪那一支：上一刻在细雪里、又能在细雪上走的生物（兔子、狐狸）往上爬。
+    // The powder snow branch: walkers that were in powder snow climb up.
+    if (me.horizontal_collision || mob.jumping)
+        && (on_climbable(me, mob, ctx.blocks())
+            || (mob.was_in_powder_snow && mob.walks_on_powder_snow()))
+    {
         delta = Vec3::new(delta.x, 0.2, delta.z);
     }
     delta
 }
 
 /// `Entity.moveRelative`。
-fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
+pub(super) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
     let length = input.length_sqr();
     if length < 1.0e-7 {
         return;
@@ -1246,11 +1426,22 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             others.push((other.uid, other.position));
         }
     });
-    if others.is_empty() {
+    // `getPushableEntities` 也收玩家（旁观者除外）；玩家那一侧的推力服务端不生效，
+    // 这里只算生物自己被推开的那一半。
+    // Players count as pushable too (not spectators); only the mob's half applies.
+    let mut players = Vec::new();
+    ctx.blocks().for_each_player(&mut |player| {
+        if player.alive && !player.spectator && super::avoid::player_box(player).intersects(bounds)
+        {
+            players.push(player.position);
+        }
+    });
+    if others.is_empty() && players.is_empty() {
         return;
     }
     let cramming = ctx.blocks().block_game_rules().max_entity_cramming;
-    if cramming > 0 && others.len() as i32 > cramming - 1 && me.random.next_int_bounded(4) == 0 {
+    let crowd = (others.len() + players.len()) as i32;
+    if cramming > 0 && crowd > cramming - 1 && me.random.next_int_bounded(4) == 0 {
         hurt_server(
             me,
             mob,
@@ -1260,6 +1451,11 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     let pushable_self = is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks());
+    for position in players {
+        if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
+            me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+        }
+    }
     for (uid, position) in others {
         ctx.emit(
             Command::PushMob {
@@ -1311,7 +1507,7 @@ pub(crate) fn has_line_of_sight(
     let seen = if target_eye.distance_to_sqr(from).sqrt() > 128.0 {
         false
     } else {
-        view.clip_collider(from, target_eye, me.collision_context())
+        view.clip_collider(from, target_eye, me.mob_collision_context(mob))
             .is_none()
     };
     mob.seen.push((uid, seen));
@@ -1336,6 +1532,9 @@ pub(crate) fn hurt_server(
     {
         return false;
     }
+    // `Wolf.hurtServer`：没有免疫就先站起来，再走 `super.hurtServer`。
+    // `Wolf.hurtServer` stands the wolf up before `super.hurtServer`.
+    super::wolf::before_hurt(mob);
     if mob.is_dead_or_dying() {
         return false;
     }
@@ -1367,6 +1566,12 @@ pub(crate) fn hurt_server(
             mob.last_hurt_by_player = Some(attacker);
             mob.last_hurt_by_player_ref = source.attacker_uuid;
             mob.last_hurt_by_player_memory_time = 100;
+        } else if let Some(owner) = source.owner_credit {
+            // `resolvePlayerResponsibleForDamage`：驯服的狼咬的算主人的。
+            // A tamed wolf's bite is credited to its owner.
+            mob.last_hurt_by_player = None;
+            mob.last_hurt_by_player_ref = Some(owner);
+            mob.last_hurt_by_player_memory_time = 100;
         }
     }
     if full_hit {
@@ -1388,14 +1593,7 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .death_sound()
-                .unwrap_or_else(|| match mob.mob_type {
-                    super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
-                    super::MobType::Chicken => super::chicken::sounds(mob)[2],
-                    _ => mob.sound_variant.death(),
-                });
+            let sound = voice_of(mob, Voice::Death);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
         die(me, mob, ctx, source);
@@ -1403,18 +1601,14 @@ pub(crate) fn hurt_server(
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = mob
-            .mob_type
-            .hurt_sound()
-            .unwrap_or_else(|| match mob.mob_type {
-                super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
-                super::MobType::Chicken => super::chicken::sounds(mob)[1],
-                _ => mob.sound_variant.hurt(),
-            });
+        let sound = voice_of(mob, Voice::Hurt);
         play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();
+    if mob.mob_type.is_equine() {
+        super::equine::after_hurt(me, mob);
+    }
     true
 }
 
@@ -1483,6 +1677,9 @@ pub(crate) fn do_hurt_target(
     source.direct = Some(me.id);
     source.attacker_uuid = Some(mob.uuid);
     source.position = Some(me.position);
+    if super::tame::is_tamable(mob.mob_type) && mob.tame.is_tame() {
+        source.owner_credit = mob.tame.owner;
+    }
     // 玩家在 `for_each_player` 里；查不到（已离岛/死亡）就当作没打中。
     let is_player = {
         let mut found = false;
@@ -1611,10 +1808,23 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    if mob.mob_type == super::MobType::Wolf {
+        super::wolf::on_death(mob);
+    }
+    // `Fox.dropAllDeathLoot`：嘴里的东西先掉，不看幼年和 `doMobLoot`。
+    // `Fox.dropAllDeathLoot` drops the mouth item first, babies and rules aside.
+    if mob.mob_type == super::MobType::Fox {
+        super::fox::drop_mouth_item(me, mob, ctx);
+    }
     let by_player = mob.last_hurt_by_player_memory_time > 0;
     if mob.mob_type == super::MobType::Skeleton {
         mob.events.push(MobEvent::Death);
         super::skeleton_drops::drop_on_death(me, mob, ctx, source, by_player);
+        return;
+    }
+    if mob.mob_type.is_equine() {
+        mob.events.push(MobEvent::Death);
+        super::equine::drop_on_death(me, mob, ctx, source, by_player);
         return;
     }
     let adult = !mob.is_baby();
@@ -1648,6 +1858,21 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     if experience > 0 {
         ctx.emit(Command::AwardDeathExperience { amount: experience }, me);
     }
+}
+
+/// 父亲那一份繁殖数据（落地时父亲被拆出来，读不到）。
+///
+/// The father's breeding data; the father is detached when the command lands.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BreedFather {
+    pub(crate) kind: super::MobType,
+    pub(crate) variant: super::CowVariant,
+    pub(crate) wool: u8,
+    pub(crate) rabbit: super::rabbit::Variant,
+    pub(crate) fox: super::fox::Variant,
+    pub(crate) love: Option<[u8; 16]>,
+    pub(crate) wolf: super::wolf::Wolf,
+    pub(crate) tame: super::tame::Tamable,
 }
 
 /// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
@@ -1702,17 +1927,76 @@ pub(crate) fn apply_breed(
     me: &mut Entity,
     partner: crate::entity::EntityUid,
     position: Vec3,
+    parent: BreedFather,
     world: &mut crate::world::World,
-    kind: super::MobType,
-    variant: super::CowVariant,
-    wool: u8,
 ) {
-    // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
-    // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
+    let kind = parent.kind;
+    let mother = world.entity(partner).and_then(|entity| {
+        entity
+            .kind
+            .mob()
+            .map(|mob| (mob.rabbit.variant, mob.fox.variant, mob.love_cause))
+    });
+    let mother_wolf = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.wolf));
+    let mut rabbit_variant = super::rabbit::Variant::default();
+    let mut fox = None;
+    let mut wolf = None;
+    // 马科的 `getBreedOffspring` 自己取数（属性遗传和花色），也不取 `nextBoolean`。
+    // Equine `getBreedOffspring` makes its own draws instead of `nextBoolean`.
+    let foal = if kind.is_equine() {
+        let Some(first) = me.kind.mob() else {
+            return;
+        };
+        let Some(second) = world.entity(partner) else {
+            return;
+        };
+        let Some(second) = second.kind.mob() else {
+            return;
+        };
+        let Some(child) = super::equine::offspring(&mut me.random, first, second, position) else {
+            return;
+        };
+        Some(child)
+    } else {
+        None
+    };
+    let equine = foal.is_some();
     let sheep = kind == super::MobType::Sheep;
-    let from_father = sheep || me.random.next_boolean();
-    let mut child_variant = variant;
-    let mut partner_wool = wool;
+    let mut from_father = true;
+    match kind {
+        super::MobType::Wolf => {
+            wolf = Some(super::wolf::offspring(
+                me,
+                (&parent.wolf, &parent.tame),
+                mother_wolf,
+                world,
+            ));
+        }
+        super::MobType::Rabbit => {
+            let mother = mother.map_or(parent.rabbit, |(rabbit, _, _)| rabbit);
+            rabbit_variant = super::rabbit::offspring_variant(me, parent.rabbit, mother, world);
+        }
+        super::MobType::Fox => {
+            let (variant, love) = mother.map_or((parent.fox, None), |(_, fox, love)| (fox, love));
+            fox = Some(super::fox::offspring(
+                me,
+                parent.fox,
+                variant,
+                [parent.love, love],
+            ));
+        }
+        super::MobType::Sheep => {}
+        _ if equine => {}
+        _ => {
+            // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
+            // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
+            from_father = me.random.next_boolean();
+        }
+    }
+    let mut child_variant = parent.variant;
+    let mut partner_wool = parent.wool;
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
             if !from_father {
@@ -1726,17 +2010,35 @@ pub(crate) fn apply_breed(
     // 官方先构造幼崽（拿到 ID）再构造经验球；岛种子源和网络 ID 都按这个顺序。
     let lamb_color = sheep.then(|| {
         super::sheep::offspring_color(
-            mc_bamboo_core::sign::DyeColor::from_id(i32::from(wool & 15)),
+            mc_bamboo_core::sign::DyeColor::from_id(i32::from(parent.wool & 15)),
             mc_bamboo_core::sign::DyeColor::from_id(i32::from(partner_wool & 15)),
             world.random(),
         )
     });
-    let xp = 1 + me.random.next_int_bounded(7);
-    let mut calf = Entity::by_mob_type(kind, position);
+    // `finalizeSpawnChildFromBreeding` 只在 `MOB_DROPS` 开着时取经验值。
+    // `finalizeSpawnChildFromBreeding` only draws the orb value with `MOB_DROPS` on.
+    let mob_drops = world.block_game_rules().mob_drops;
+    let xp = if mob_drops {
+        1 + me.random.next_int_bounded(7)
+    } else {
+        0
+    };
+    let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;
     calf.with_mob(|me, mob| {
+        mob.rabbit.variant = rabbit_variant;
+        if let Some(fox) = fox.take() {
+            mob.fox = fox;
+        }
+        if let Some((wolf, tamable)) = wolf.take() {
+            mob.wolf = wolf;
+            mob.tame = tamable;
+            if tamable.is_tame() {
+                super::tame::set_tame(mob, true, true);
+            }
+        }
         set_age(me, mob, -24000);
         match lamb_color {
             Some(color) => super::sheep::set_color(mob, color),
@@ -1752,7 +2054,7 @@ pub(crate) fn apply_breed(
     world.with_entity_mut(calf_id, &mut |entity| {
         entity.y_rot = 0.0;
     });
-    if world.block_game_rules().mob_drops {
+    if mob_drops {
         // 繁殖不是 `ExperienceOrb.award`：只生成一颗球，值就是 `1 + nextInt(7)`。
         let orb = Entity::experience_orb(position, xp);
         world.spawn_entity(orb);
@@ -1784,6 +2086,12 @@ pub(crate) fn apply_push(
     let Some(target) = world.entity(other) else {
         return;
     };
+    // `LivingEntity.push(Entity)`：睡着的（狐狸）谁也推不动，也不把人推回去。
+    // `LivingEntity.push(Entity)`: a sleeper (a fox) is not pushed and pushes nobody back.
+    if matches!(&target.kind, EntityKind::Mob(mob) if mob.mob_type == super::MobType::Fox && mob.fox.is_sleeping())
+    {
+        return;
+    }
     let Some((dx, dz)) = push_amount(target.position, me.position) else {
         return;
     };

@@ -114,6 +114,21 @@ impl Entity {
         })
     }
 
+    /// 生物的 `CollisionContext.of(entity)`：生物在 tick 里是拆出来的，
+    /// 要单独带上能不能在细雪上走。
+    ///
+    /// `CollisionContext.of(entity)` for a mob. The mob is detached while it
+    /// ticks, so whether it walks on powder snow is passed in separately.
+    pub(crate) fn mob_collision_context(&self, mob: &super::mob::Mob) -> CollisionContext {
+        match self.collision_context() {
+            CollisionContext::Entity(mut context) => {
+                context.powder_snow_walkable = mob.walks_on_powder_snow();
+                CollisionContext::Entity(context)
+            }
+            other => other,
+        }
+    }
+
     /// `applyGravity`：每 tick 往速度里加一份重力。这两个实体都没有 `noGravity`。
     pub(crate) fn apply_gravity(&mut self) {
         self.delta = self.delta.add(Vec3::new(0.0, -GRAVITY, 0.0));

@@ -306,6 +306,63 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 这一轮没有引入半成品死亡系统；等玩家伤害 / 死亡 / 重生流程实现时，再一起接上
   `getBaseExperienceReward`、`keepInventory` 两条分支和官方对拍。
 
+### 5.8 马、驴、骡、羊驼（2026-11-20，分支 `cx-horse`）
+
+**已做**（代码在 `entity/mob/equine.rs` 和 `entity/mob/equine/`，按牛的粒度）：
+
+| 项 | 官方 | Bamboo | 对拍 |
+|---|---|---|---|
+| 属性、生成 | `createBaseHorseAttributes`、`randomizeAttributes`、`Horse/Llama.finalizeSpawn` | `equine::attributes` / `finalize_spawn` | `equineSpawn` 64 题 |
+| 繁殖遗传 | `setOffspringAttributes`、`createOffspringAttribute`、花色 / 力量继承，马驴生骡 | `equine::offspring` | `equineBreed` 32 题 |
+| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 12 场景 14800 刻 |
+| 目标表 | `registerGoals` + `addBehaviourGoals`、`Llama.registerGoals`、`RandomStandGoal` | `equine/goals.rs` | 同上（running names 逐刻比） |
+| 交互 | `Horse/AbstractChestedHorse/AbstractHorse.mobInteract`、`handleEating`、`Player.interactOn` 兜底 | `equine/interact.rs` | `equineInteract` 468 题 |
+| 死亡掉落 | `dropAllDeathLoot`、`dropCustomDeathLoot`、`dropEquipment` | `equine/death.rs` | `equineDeath` 40 题 |
+| 元数据 | `DATA_ID_FLAGS`、`DATA_ID_TYPE_VARIANT`、`DATA_ID_CHEST`、`DATA_STRENGTH_ID`、`DATA_VARIANT_ID` | `EntityData::Horse*` / `Llama*`，index 由生成器导出 | 配对 `set_entity_data` 逐字节 |
+| 存档 | `addAdditionalSaveData` / `readAdditionalSaveData` | `equine::save` / `load` | `equineSave` 12 题往返 |
+| 坐骑物品栏 | `openCustomInventoryScreen`、`ServerPlayer.openHorseInventory`、`HorseInventoryMenu`、`AbstractMountInventoryMenu.quickMoveStack` / `stillValid`、`ArmorSlot.setByPlayer` | 生物一半 `equine/inventory.rs`；菜单是工作台菜单的 `Kind::Mount`（`menu/station/mount.rs`） | 单元测试（开菜单的包、Shift 取放鞍、两次装备声、超距关闭）；没有官方逐题对拍 |
+| 落地声 | `AbstractHorse.causeFallDamage` 的 `HORSE_LAND` | `equine::land_sound` | 单元测试；音效包不在对拍范围 |
+| 羊驼回击、吐口水 | `Llama.LlamaHurtByTargetGoal`、`RangedAttackGoal(1.25, 40, 20)`、`Llama.spit`、`LlamaSpit`、`DamageTypes.SPIT` | `goals.rs` 的 `Goal::RangedAttack` / `LlamaHurtByTarget`，`equine/ranged.rs`，口水实体 `entity/spit.rs`（存档 `archive/entity/spit.rs`） | `llama_spit_far` / `_near` 两场景各 160 刻 0 不一致（羊驼和口水的位置、速度、随机源、目标名、口水同步包、玩家血量）；`chunk-content` 两道口水存档题 |
+| `followMommy` | `AbstractHorse.followMommy`（只 `createPath` 不走） | `equine/life.rs` 的 `follow_mommy` | 单元测试；`Bred` 只能从存档来，逐刻场景没覆盖 |
+
+坐骑物品栏每次点击前从生物读回鞍、身体和箱子格，点击后把鞍位 / 身体位的每次 `setByPlayer`
+按发生顺序在生物上重放（官方 `ArmorSlot.setByPlayer` 先调一次 `onEquipItem`，装备容器的
+`setItem` → `setItemSlot` 再调一次，所以穿上会出两次声、取两次 `nextLong`），箱子格整份写回。
+菜单的 `stillValid` 读实体表的公开快照（上一个实体阶段结束时的血量、箱子、位置）。
+
+生物装备从六个人形槽扩成官方全部八个槽（加 `BODY`、`SADDLE`）。马科的全部状态都在
+`Mob.equine` 里，跟着实体走，所以岛的拆分合并不需要新的按实体迁移。
+
+**没做：骑乘。** 骑乘是牛、马、猪、骆驼共用的机制，但它要先定两件世界模型里没定的事
+（第 8.2 节明确写了「载具和它的乘客」还没实现）：
+
+1. **归属**：乘客是玩家，玩家在区域的玩家表里，载具在实体表里。官方 `ServerLevel.tickPassenger`
+   在载具 tick 之后紧接着 tick 乘客（`rideTick` → `positionRider`），玩家控制时载具的位置来自
+   `ServerboundMoveVehiclePacket`（客户端权威，`handleMoveVehicle` 做移动校验）。载具和乘客要算一个
+   单位：同一个岛、同一个任务里按官方顺序跑，岛拆分时不能把它们拆开。
+2. **一刻顺序**：玩家的位置变成由载具决定（`positionRider` 在实体阶段），而现在玩家的位置只在
+   连接的移动包里更新。
+
+建议的接法（待队长定）：玩家记 `vehicle: Option<EntityUid>`，载具记 `passengers`；
+`MoveVehicle` 在世界线程处理输入时直接改载具行并做官方的移动校验；实体阶段载具 tick 完以后，
+在落地阶段按 uid 顺序给乘客玩家 `positionRider`；岛拆分把「载具 + 乘客玩家」当成不可分的一组；
+`SetPassengers` 包跟着实体同步发。马的部分（`tickRidden`、`getRiddenInput`、`executeRidersJump`、
+`RunAroundLikeCrazyGoal` 的驯服）在这之后补，猪和骆驼复用同一套。
+
+补充（2026-11-20 第三轮查证）：服务端上玩家控制的载具 `canSimulateMovement()` 为假，
+`travelRidden` 只跑 `tickRidden`（朝向、跳跃蓄力清零）再把速度清零，位置完全来自
+`ServerboundMoveVehiclePacket`；骑手玩家的服务端位置只在 `rideTick → positionRider` 里更新。
+所以「`positionRider`」可以做成载具在算阶段发出的一条意图命令（按 uid 顺序在落地阶段写玩家表），
+不必改阶段顺序；真正要定的只剩岛的拆分不能把载具和骑手拆到两边，以及玩家下线时载具跟着
+`RootVehicle` 存进玩家档。
+
+羊驼的口水是新的实体种类 `EntityKind::LlamaSpit`：生成走 `Command::ShootLlamaSpit`，
+命中实体走 `Command::SpitHit`（落地时按主人当时的公开状态造 `spit` 伤害来源），
+打到方块在算阶段直接 `discard`。同步层里口水和箭一样用 `InterpolationHandler.NO_OP`，
+位置路径永远是线性的。`didSpit` 在 `EquineState` 里，跟着实体走，岛拆合不需要新迁移。
+
+其余已知差异见 README「马科的已知限制」。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
@@ -687,7 +744,8 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   不限制为已加载区块；旁观者仅在 `spectators_generate_chunks` 开启时贡献区块。
 - **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
 - **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
-- **已知差异**：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
+- **已知差异**：（2026-11-20 第二轮起，猪、羊、鸡、兔子、狐狸、狼、骷髅也会真的生成，见 11.5。）
+  下面是这一期写下时的状态：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
   然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
@@ -703,6 +761,66 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 ## 10. 箭实体与骷髅（期 3）
 
 骷髅随敌对生物走同一对选择器。弓目标按视线记忆决定寻路或横移，并把生成箭作为实体命令落地；无弓切换到近战。箭不需要自己的岛表：所有者 UID、装备、插地状态和计时跟随 `Entities`，配对和生成快照仍随 `EntityTracking` / `SpawnSnapshots`。岛重定基只平移近战选择器的游戏时间戳，不改箭的寿命或拉弓计数。精确驱动用当前状态解析命中结果；并行驱动用快照选碰撞候选，落地时才确认伤害。支持范围与已知差异见 README 和 `zombie-skeleton-plan.md`。
+
+## 11. 兔子、狐狸和狼（cx-wild，2026-11-20）
+
+### 11.1 现状
+
+| 生物 | 状态 | 代码 | 对拍 |
+| --- | --- | --- | --- |
+| 兔子 | 已对拍 0 不一致 | `entity/mob/rabbit.rs`、`avoid.rs` | `mob-oracle --only rabbit_`：闲逛 4 个种子、躲玩家、和平难度不躲、躲僵尸、水里、幼年、细雪、啃胡萝卜，11 例 3240 刻；`loot-oracle --entity-table minecraft:entities/rabbit` 2000 例 |
+| 狐狸 | 已对拍 0 不一致 | `entity/mob/fox.rs`、`fox_goals.rs` | `mob-oracle --only fox_`：白天 2 个种子、夜里、屋顶下睡觉、躲玩家、吃浆果、幼年、捕猎兔子 2 个种子、雪层里扑跳，10 例 3493 刻；`loot-oracle --entity-table minecraft:entities/fox` 500 例 |
+| 狼 | 已对拍 0 不一致 | `entity/mob/wolf.rs`、`wolf_goals.rs`、`tame.rs`；游戏层 `player_combat_memory.rs` | `mob-oracle --only wolf_`：闲逛 2 个种子、追兔子、骨头驯服 + 染项圈 + 喂肉 + 起身 3 个种子、主人在 14 格外时跟随和瞬移 2 个种子、被打后反击并呼叫同伴（真实玩家受伤链路）、湿身抖水、幼崽讨食，11 例 3790 刻；`loot-oracle --entity-table minecraft:entities/wolf` 500 例。改坏确认：驯服概率改成 1/2 时 `wolf_tame_62` 第 2 刻报出驯服状态和实体事件包 |
+
+### 11.2 新的公共接缝
+
+- `Goal::Avoid(AvoidEntity)`：`AvoidEntityGoal`，`AvoidClass`（玩家 / 狼 / 敌对生物 / 北极熊）加 `AvoidFilter`（缺省排除创造旁观；狐狸的三种）。取点是 `DefaultRandomPos.getPosAway`（`goals::default_random_pos_away`）。
+- `Goal::Fox(FoxGoal)`：狐狸专属的目标都在这个变体里，`goals.rs` 只做分派；`Goal::LeapAtTarget`；`goals::melee_attack(speed, followingTargetEvenIfNotSeen, 类名)`。
+- `Goal::interruptable`：`WrappedGoal.canBeReplacedBy` 现在看占位目标能不能打断（狐狸扑跳不能）。
+- `GoalSelector::running_class_names(kind)`：兔子和狐狸的几个目标是内部子类，对拍按子类名比较。
+- `TargetType::FoxPrey` / `Fish`、`goals::nearest_mob_target`：`NearestAttackableTargetGoal` 的生物分支；狐狸和骷髅的 `combat_target` 可以是生物，和平难度只排除玩家目标。
+- `Mob::walks_on_powder_snow` 和 `Entity::mob_collision_context`：生物 tick 时被拆出实体，碰撞上下文单独带上能不能在细雪上走；攀爬分支加上细雪那一支。
+- `Mob.needs_sync`：所有生物 `jumpFromGround` 都设，实体同步按它发速度。
+- `Command::BreedAnimals` 带上父亲的种类、兔子/狐狸品种和求爱者：落地时父亲被拆出来读不到（以前读 `me.kind` 恒为空，繁殖整个失效，`interact_breed` 场景抓到）。
+- `BlockView::is_thundering`、`World::spawn_item_with_delay`。
+- **可驯服动物（`entity/mob/tame.rs`，给猫、鹦鹉复用）**：`Mob.tame: Tamable`（`DATA_FLAGS_ID` 的坐姿位 1 / 驯服位 4、主人 UUID、`orderedToSit`），`tame::set_tame` / `tame` / `owner` / `unable_to_move_to_owner` / `should_try_teleport_to_owner` / `try_to_teleport_to_owner`（10 次 `nextIntBetweenInclusive` 取落点，`canTeleportTo` 看路径类型、树叶和碰撞），以及 `Goal::Tame(TameGoal)` 里的 `SitWhenOrderedToGoal`、`FollowOwnerGoal`、`OwnerHurtByTargetGoal`、`OwnerHurtTargetGoal`。`TamableAnimalPanicGoal` 的瞬移挂在 `Goal::Panic` 的 tick 上（`tame::is_tamable`）。新种类只要在 `tame::is_tamable` 和 `apply_taming_side_effects` 里加一行，NBT（`Owner`、`Sitting`）、`canAttack` 排除主人、两项元数据（`TameFlags` / `TameOwner`）都是现成的。
+- **玩家战斗记忆（游戏层 `player_combat_memory.rs`）**：`Player.combat_memory` 记 `lastHurtByMob`（`#no_anger` 除外）、`lastHurtMob`（`Player.attack` 打中后）和 `getLastDamageSource(100)` 是否不在 `#no_wolf_retaliation` 里，时间戳用玩家自己的 `entity_ticks`；实体逻辑通过 `PlayerView.combat` 读。狐狸的 `DefendTrustedTargetGoal` 以后也可以接它。
+- `goals::attack_candidate`：`canAttack` 的公共部分（玩家：非和平、活着、非创造旁观、不是主人；生物：活着）。`goals::target_goal_can_continue`、`goals::max_head_x_rot`（坐着的狼 20）。
+- `DamageSource.owner_credit`：驯服的狼咬死的东西记到主人头上（`resolvePlayerResponsibleForDamage`）。
+- `Command::WolfAlert`（`HurtByTargetGoal.alertOthers`），`Command::BreedAnimals` 带上父亲的狼状态。
+- `LivingEntity.pushEntities` 现在也被重叠的玩家推开（只算生物那一半；服务端对玩家的推力不生效）。`AvoidClass::Wolf` 匹配狼：兔子、狐狸（不躲驯服的）、骷髅（`AvoidEntityGoal(Wolf, 6, 1.0, 1.2)`）都会躲狼。
+- 动物的 `MobFlags` 同步带上攻击性位（狼和狐狸的近战目标会设它）。
+
+### 11.3 拆岛 / 并岛
+
+兔子和狐狸的新状态都在 `Mob` 里随实体走（`Mob.rabbit`、`Mob.fox`、目标里的倒计时），不含绝对时钟，拆合不需要平移。狐狸的信任名单和繁殖求爱者都是 UUID。狼的 `anger_end_time` 是岛时钟上的绝对时刻，`Mob::rebase` 里随 `Wolf::rebase` 平移；主人和 `angry_at` 都是 UUID，`angry_at_uid` 找不到时按 UUID 重新匹配。玩家的战斗记忆用玩家自己的 tick 数，整行随玩家走。
+
+### 11.4 已知差异
+
+见 README「兔子的已知限制」「狐狸的已知限制」「狼的已知限制」。对拍环境另有几处：Java 一侧玩家现在在牛、僵尸和野生动物场景里都进实体表（`getEntitiesOfClass(Player)` 和 `getPushableEntities` 才找得到），排在生物前面；僵尸式场景的右键交互和玩家攻击现在两边都重放，交互之后玩家手里换回场景给的那件；兔子死后的掉落物不进 Java 实体表；狐狸的 `SleepGoal` 倒计时在官方构造时用不可复现的种子取，对拍把官方的值报给 Bamboo 照填。
+
+### 11.5 自然生成和生成期刷怪（2026-11-20 第二轮）
+
+- **刷怪规则**（`natural.rs` 的 `check_spawn_rules`）：`Rabbit.checkRabbitSpawnRules`、`Fox.checkFoxSpawnRules`、`Wolf.checkWolfSpawnRules` 都是「脚下方块在各自的标签里 + `isBrightEnoughToSpawn`（原始亮度 > 8）」，共用 `natural::bright_spawn_rules`。狐狸在 `SpawnPlacements` 里登记的是 `NO_RESTRICTIONS`（`spawn_placement_ok` 恒真），兔子和狼是 `ON_GROUND`。`Wolf.getMaxSpawnClusterSize` 是 8。
+- **组数据**（`entity/mob/wild_spawn.rs`）：`SpawnGroup::Wild(WildGroup { group_size, pack })`，`pack` 是 `Pack::Rabbit / Fox / Wolf` 带共享的品种。`RabbitGroupData`：每只都先按群系抽一次 `nextInt(100)`，有组数据时用组里的品种；幼年概率 1.0，第二只起 `nextFloat() <= 1.0` 照取、都是幼崽。`FoxGroupData`：品种跟第一只，组里已有两只时是幼崽，`AgeableMob` 那层不取数；然后 `setTargetGoals` 和嘴里的东西。`WolfPackData`：品种只在没有狼群数据时选（`nextInt(1)`），叫声每只 `nextInt(7)`，不生幼崽。最后都走 `Mob.finalizeSpawn` 那层（跟随距离、左撇子）。`/summon` 和刷怪蛋传空的组数据，行为和以前一样。
+- **生成期刷怪**（`natural_gen.rs`）：放置表加了兔子、狼（`ON_GROUND`）和狐狸（不查落脚点），规则换成各自的标签；`finalize_generated` 用区域随机源跑 `wild_spawn::finalize`。
+- **`MobType::by_entity_type`** 以前只列了牛和三种怪物，所以猪、羊、鸡、兔子、狐狸、狼即使接好了规则也不会被自然刷出来；现在列全了。
+- **捕食关系**：`Wolf.PREY_SELECTOR` 加上羊；狐狸的猎物 / `STALKABLE_PREY` / `FoxAlertableEntitiesSelector` 加上鸡（`fox_goals::is_small_prey`）。
+- **对拍**：`mob-oracle --only gen_spawn` 的场景带上群系（平原 4 个 + 针叶林 3 个 + 雪地针叶林 1 个，共 7000 例），所有建模了的生物比类型、坐标、朝向，区域随机源同步时再比幼年、左撇子和 `genSpawnDetail`（兔子品种、狐狸品种和嘴里的物品、狼的品种和叫声）：1043 只里 34 只兔子、109 只狐狸、126 只狼，0 不一致。`--only natural_spawn` 加了猪 / 羊 / 鸡（平原）、兔子 / 狐狸 / 狼（针叶林、雪地针叶林）、森林的狼和夜里的狐狸，192 例 768 刻 0 不一致（比类型、位置、朝向、幼年、左撇子、主手物品和每刻之后的世界随机源种子）。改坏确认：把狐狸幼崽的门槛从「组里已有两只」改成一只，`gen_taiga_flat` 报出幼年不一致。
+- **对拍夹具的一处修正**：僵尸式场景里玩家的实体 ID 和第一只生物都是 `FIRST_ID`。Bamboo 用同一套号认目标，`fox_sleep_wild_wolf` 里狼恨的是狐狸、却把同号的玩家认成了仇恨对象（第 13 刻随机源差一次取数）。Java 一侧玩家改成 `FIRST_ID + 1024 + 下标`，全量 `mob-oracle` 439 例 72339 刻 0 不一致。真实游戏里非玩家实体从 `FIRST_ENTITY_ID`（`1 << 24`）起发号、玩家用它下面的号，不会撞号。
+
+### 11.6 捕食关系的逐刻对拍（第三轮）
+
+- **场景**：`fox_hunt_chicken`（狐狸盯梢鸡、扑跳咬中，鸡受伤后惊慌逃跑）和 `wolf_hunt_sheep`（野狼把羊当猎物，羊挨打后逃跑）。夹具里羊是 kind 4、鸡是 kind 5，和 Rust 一侧的编号一致；`MobOracle.java` 的 `case` 分支加了这两种生物。
+- **夹具补的两列**：僵尸式场景的 `var` / `snd` 原来写死成 `minecraft:temperate` / `minecraft:classic`（牛、兔、狐、狼都吃这两个默认值）。加了羊和鸡以后改成 `caseVariant` / `caseSound`：羊报「颜色|是否剪毛」、鸡报「品种|egg计时」和叫声变种，其余仍是默认值。鸡的 `eggTime` 在构造时抽取，Java 一侧在场景起点 JSON 里报 `egg`，Bamboo 照填（缺省时保留自己的值，免得旧场景被填成 0 立刻下蛋）。
+- **改坏确认**：把 `wolf_goals::is_prey` 里的羊去掉、`fox_goals::is_small_prey` 里的鸡去掉，两个场景分别在第 60 刻和第 14 刻起报不一致；改回后 0 不一致。
+- **没做**：两只狼的繁殖场景。夹具只比场景里原有的生物，幼崽不在比对范围里；试做的一个版本从第 162 刻起位置发散（官方停在同伴旁边、Bamboo 继续走了约 0.15 格），原因没查，没提交。
+
+### 11.7 与马科合并后的现状
+
+- 运行时与生成期均保留牛、猪、羊、鸡、兔、狐、狼与马科规则。`finalize_cow(kind, …)` 继续分派农场动物；野生动物和马科分别维护各自的组数据，生成期统一使用区域随机源。
+- 生成期对拍同时校验野生动物的品种 / 叼物 / 叫声和马科属性；逐刻夹具给兔 / 狐 / 狼保留 6–8 号，马 / 驴 / 骡 / 羊驼使用 9–12 号。场景名称不变。
+- 此次合并没有实现狼与羊驼之间的躲避 / 主动攻击，也未扩展马科骑乘。
 
 ## 猪的实施现状
 

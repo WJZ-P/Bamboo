@@ -1161,6 +1161,30 @@ public final class Extractor {
         color.setAccessible(true);
         out.addProperty("arrowColor", ((net.minecraft.network.syncher.EntityDataAccessor<?>) color.get(null)).id());
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        var rabbit = net.minecraft.world.entity.EntityTypes.RABBIT.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(Rabbit.class, "BABY_DIMENSIONS", null);
+        var attributes = Rabbit.createAttributes().build();
+        var rabbitVariant = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(Rabbit.class, "DATA_TYPE_ID", null);
+        out.addProperty("rabbitEyeHeight", rabbit.eyeHeight());
+        out.addProperty("rabbitBabyWidth", baby.width());
+        out.addProperty("rabbitBabyHeight", baby.height());
+        out.addProperty("rabbitBabyEyeHeight", baby.eyeHeight());
+        out.addProperty("rabbitVariant", rabbitVariant.id());
+        out.addProperty("rabbitMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("rabbitMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("rabbitAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        addFoxFacts(out);
+        addWolfFacts(out);
+        out.addProperty("llamaEyeHeight", net.minecraft.world.entity.EntityTypes.LLAMA.getDimensions().eyeHeight());
+        out.addProperty("muleEyeHeight", net.minecraft.world.entity.EntityTypes.MULE.getDimensions().eyeHeight());
+        out.addProperty("donkeyEyeHeight", net.minecraft.world.entity.EntityTypes.DONKEY.getDimensions().eyeHeight());
+        out.addProperty("horseEyeHeight", net.minecraft.world.entity.EntityTypes.HORSE.getDimensions().eyeHeight());
+        var equine = "net.minecraft.world.entity.animal.equine.";
+        out.addProperty("horseFlags", accessorId(equine + "AbstractHorse", "DATA_ID_FLAGS"));
+        out.addProperty("horseVariant", accessorId(equine + "Horse", "DATA_ID_TYPE_VARIANT"));
+        out.addProperty("horseChest", accessorId(equine + "AbstractChestedHorse", "DATA_ID_CHEST"));
+        out.addProperty("llamaStrength", accessorId(equine + "Llama", "DATA_STRENGTH_ID"));
+        out.addProperty("llamaVariant", accessorId(equine + "Llama", "DATA_VARIANT_ID"));
         Class<?> pig = net.minecraft.world.entity.animal.pig.Pig.class;
         out.addProperty("pigBoostTime", entityAccessor(pig, "DATA_BOOST_TIME").id());
         var variant = entityAccessor(pig, "DATA_VARIANT_ID");
@@ -1205,6 +1229,64 @@ public final class Extractor {
             out.add(effects);
         }
         return out;
+    }
+
+    /** 狐狸的尺寸、元数据下标和属性。 */
+    private static void addFoxFacts(JsonObject out) throws ReflectiveOperationException {
+        Class<?> fox = net.minecraft.world.entity.animal.fox.Fox.class;
+        var adult = net.minecraft.world.entity.EntityTypes.FOX.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(fox, "BABY_DIMENSIONS", null);
+        var attributes = net.minecraft.world.entity.animal.fox.Fox.createAttributes().build();
+        out.addProperty("foxEyeHeight", adult.eyeHeight());
+        out.addProperty("foxBabyWidth", baby.width());
+        out.addProperty("foxBabyHeight", baby.height());
+        out.addProperty("foxBabyEyeHeight", baby.eyeHeight());
+        for (String[] accessor : new String[][] {
+                {"foxTrusted0", "DATA_TRUSTED_ID_0"}, {"foxTrusted1", "DATA_TRUSTED_ID_1"},
+                {"foxType", "DATA_TYPE_ID"}, {"foxFlags", "DATA_FLAGS_ID"}}) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(fox, accessor[1], null);
+            out.addProperty(accessor[0], data.id());
+        }
+        out.addProperty("foxMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("foxMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("foxAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        out.addProperty("foxSafeFallDistance", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.SAFE_FALL_DISTANCE));
+        out.addProperty("foxFollowRange", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE));
+    }
+
+    /** 狼的尺寸、元数据下标（含 `TamableAnimal` 的两项）和属性。 */
+    private static void addWolfFacts(JsonObject out) throws ReflectiveOperationException {
+        Class<?> wolf = net.minecraft.world.entity.animal.wolf.Wolf.class;
+        Class<?> tamable = net.minecraft.world.entity.TamableAnimal.class;
+        var adult = net.minecraft.world.entity.EntityTypes.WOLF.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(wolf, "BABY_DIMENSIONS", null);
+        var attributes = net.minecraft.world.entity.animal.wolf.Wolf.createAttributes().build();
+        out.addProperty("wolfEyeHeight", adult.eyeHeight());
+        out.addProperty("wolfBabyWidth", baby.width());
+        out.addProperty("wolfBabyHeight", baby.height());
+        out.addProperty("wolfBabyEyeHeight", baby.eyeHeight());
+        for (String[] accessor : new String[][] {
+                {"tameFlags", "DATA_FLAGS_ID"}, {"tameOwner", "DATA_OWNERUUID_ID"}}) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(tamable, accessor[1], null);
+            out.addProperty(accessor[0], data.id());
+        }
+        for (String[] accessor : new String[][] {
+                {"wolfInterested", "DATA_INTERESTED_ID"}, {"wolfCollar", "DATA_COLLAR_COLOR"},
+                {"wolfAngerEndTime", "DATA_ANGER_END_TIME"}, {"wolfVariant", "DATA_VARIANT_ID"},
+                {"wolfSoundVariant", "DATA_SOUND_VARIANT_ID"}}) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(wolf, accessor[1], null);
+            out.addProperty(accessor[0], data.id());
+        }
+        out.addProperty("wolfMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("wolfMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("wolfAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+    }
+
+    /** 任意类的私有 `EntityDataAccessor` 静态字段分到的 index。 */
+    private static int accessorId(String owner, String name) throws ReflectiveOperationException {
+        Field field = Class.forName(owner).getDeclaredField(name);
+        field.setAccessible(true);
+        return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
     }
 
     private static net.minecraft.network.syncher.EntityDataAccessor<?> entityAccessor(Class<?> type, String name) throws ReflectiveOperationException {

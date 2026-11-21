@@ -29,6 +29,33 @@ impl ClientboundPacket for OpenScreen<'_> {
     }
 }
 
+/// 打开坐骑（马、驴、骡、羊驼）的物品栏，官方 `ClientboundMountScreenOpenPacket`。
+///
+/// Open a mount's inventory (horse, donkey, mule, llama), vanilla
+/// `ClientboundMountScreenOpenPacket`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountScreenOpen {
+    pub container_id: i32,
+    /// 箱子的列数，没有箱子是 0。
+    ///
+    /// Chest columns, zero without a chest.
+    pub inventory_columns: i32,
+    /// 坐骑的实体 ID，写成 int 而不是 VarInt。
+    ///
+    /// The mount's entity id, written as an int rather than a VarInt.
+    pub entity_id: i32,
+}
+
+impl ClientboundPacket for MountScreenOpen {
+    const ID: i32 = clientbound::MOUNT_SCREEN_OPEN;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.container_id);
+        write_varint(out, self.inventory_columns);
+        out.extend_from_slice(&self.entity_id.to_be_bytes());
+    }
+}
+
 /// 一个菜单的全部槽位和光标上的物品。打开菜单时发一次。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContainerSetContent<'a> {
@@ -158,6 +185,20 @@ mod tests {
                  00 0f 63 6f 6e 74 61 69 6e 65 72 2e 63 68 65 73 74
                  00")
         );
+    }
+
+    /// 容器 ID 和列数是 VarInt，实体 ID 是四字节 int。
+    ///
+    /// The container id and columns are VarInts; the entity id is a four-byte int.
+    #[test]
+    fn mount_screen_open_matches_the_packet_layout() {
+        let packet = MountScreenOpen {
+            container_id: 3,
+            inventory_columns: 5,
+            entity_id: 300,
+        };
+        assert_eq!(MountScreenOpen::ID, 42);
+        assert_eq!(body(&packet), hex("03 05 00 00 01 2c"));
     }
 
     #[test]

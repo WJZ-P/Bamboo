@@ -14,6 +14,7 @@ pub mod ctx;
 pub mod mob;
 pub mod parallel;
 pub mod random;
+pub mod spit;
 pub mod store;
 pub mod thrown_egg;
 pub mod view;
@@ -204,6 +205,10 @@ pub enum EntityKind {
     Item(GroundItem),
     ExperienceOrb(ExperienceOrb),
     Arrow(Box<arrow::Arrow>),
+    /// 羊驼的口水。
+    ///
+    /// A llama's spit.
+    LlamaSpit(Box<spit::LlamaSpit>),
     /// 扔出的鸡蛋。
     ///
     /// A thrown egg.
@@ -223,6 +228,7 @@ impl EntityKind {
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
+            Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
@@ -421,6 +427,7 @@ impl Entity {
             EntityKind::Item(_) => Entity::tick_item(self, ctx),
             EntityKind::ExperienceOrb(_) => orb::tick_orb(self, ctx),
             EntityKind::Arrow(_) => arrow::tick(self, ctx),
+            EntityKind::LlamaSpit(_) => spit::tick(self, ctx),
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
@@ -472,6 +479,17 @@ impl Entity {
         mob.uuid = mob::insecure_uuid(&mut self.random);
         self.y_rot = self.random.next_float() * 6.283_185_5;
         mob.y_head_rot = self.y_rot;
+        if mob.mob_type == mob::MobType::Rabbit {
+            // 兔子构造时抽取一次头部闲置动画延迟；只在客户端使用其结果。
+            // The rabbit constructor draws a head-idle delay used only by the client.
+            let _ = self.random.next_int_bounded(40);
+        }
+        if mob.mob_type == mob::MobType::Fox {
+            // `Mob` 构造函数里 `registerGoals` 建 `SleepGoal`，字段初始化取一次倒计时。
+            // `registerGoals` in the `Mob` constructor draws the `SleepGoal` countdown.
+            let countdown = mob::fox::sleep_countdown(&mut self.random);
+            mob::fox::set_sleep_countdown(mob, countdown);
+        }
         if mob.mob_type == mob::MobType::Chicken {
             // `Chicken` 构造函数最后的 `eggTime = nextInt(6000) + 6000`。
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.

@@ -455,6 +455,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
         self.0.precipitation_facts(pos).precipitation == Precipitation::Rain
     }
 
+    fn is_thundering(&self) -> bool {
+        self.0.facts().weather.is_thundering()
+    }
+
     fn is_bright_outside(&self) -> bool {
         self.sky_darken() < 4
     }

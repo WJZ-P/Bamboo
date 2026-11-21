@@ -301,10 +301,31 @@ mod tests {
                 assert_eq!(rows.len(), again.len());
                 for (row, replay) in rows.iter().zip(&again) {
                     assert_eq!(row.public.position, replay.public.position);
-                    assert_eq!(row.public.kind.entity_type(), entity_type::COW);
+                    // 生成期刷怪现在会放所有建模了的动物，不只是牛。
+                    // Generation spawning now places every modelled animal, not only cows.
+                    let modelled = [
+                        entity_type::COW,
+                        entity_type::PIG,
+                        entity_type::SHEEP,
+                        entity_type::CHICKEN,
+                        entity_type::RABBIT,
+                        entity_type::FOX,
+                        entity_type::WOLF,
+                        entity_type::HORSE,
+                        entity_type::DONKEY,
+                        entity_type::MULE,
+                        entity_type::LLAMA,
+                    ];
+                    assert!(modelled.contains(&row.public.kind.entity_type()));
+                    assert_eq!(
+                        row.public.kind.entity_type(),
+                        replay.public.kind.entity_type()
+                    );
                     let at = row.public.position;
-                    assert_eq!(BlockPos::containing(at).chunk(), pos, "牛要落在本区块");
-                    cows += 1;
+                    assert_eq!(BlockPos::containing(at).chunk(), pos, "生物要落在本区块");
+                    if row.public.kind.entity_type() == entity_type::COW {
+                        cows += 1;
+                    }
                 }
             }
         }
