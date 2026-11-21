@@ -661,7 +661,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 骷髅随敌对生物走同一对选择器。弓目标按视线记忆决定寻路或横移，并把生成箭作为实体命令落地；无弓切换到近战。箭不需要自己的岛表：所有者 UID、装备、插地状态和计时跟随 `Entities`，配对和生成快照仍随 `EntityTracking` / `SpawnSnapshots`。岛重定基只平移近战选择器的游戏时间戳，不改箭的寿命或拉弓计数。精确驱动用当前状态解析命中结果；并行驱动用快照选碰撞候选，落地时才确认伤害。支持范围与已知差异见 README 和 `zombie-skeleton-plan.md`。
 
-## 11. 兔子和狐狸（cx-wild，2026-11-20）
+## 11. 兔子、狐狸和狼（cx-wild，2026-11-20）
 
 ### 11.1 现状
 
@@ -669,7 +669,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 | --- | --- | --- | --- |
 | 兔子 | 已对拍 0 不一致 | `entity/mob/rabbit.rs`、`avoid.rs` | `mob-oracle --only rabbit_`：闲逛 4 个种子、躲玩家、和平难度不躲、躲僵尸、水里、幼年、细雪、啃胡萝卜，11 例 3240 刻；`loot-oracle --entity-table minecraft:entities/rabbit` 2000 例 |
 | 狐狸 | 已对拍 0 不一致 | `entity/mob/fox.rs`、`fox_goals.rs` | `mob-oracle --only fox_`：白天 2 个种子、夜里、屋顶下睡觉、躲玩家、吃浆果、幼年、捕猎兔子 2 个种子、雪层里扑跳，10 例 3493 刻；`loot-oracle --entity-table minecraft:entities/fox` 500 例 |
-| 狼 | 没做 | — | — |
+| 狼 | 已对拍 0 不一致 | `entity/mob/wolf.rs`、`wolf_goals.rs`、`tame.rs`；游戏层 `player_combat_memory.rs` | `mob-oracle --only wolf_`：闲逛 2 个种子、追兔子、骨头驯服 + 染项圈 + 喂肉 + 起身 3 个种子、主人在 14 格外时跟随和瞬移 2 个种子、被打后反击并呼叫同伴（真实玩家受伤链路）、湿身抖水、幼崽讨食，11 例 3790 刻；`loot-oracle --entity-table minecraft:entities/wolf` 500 例。改坏确认：驯服概率改成 1/2 时 `wolf_tame_62` 第 2 刻报出驯服状态和实体事件包 |
 
 ### 11.2 新的公共接缝
 
@@ -682,11 +682,18 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - `Mob.needs_sync`：所有生物 `jumpFromGround` 都设，实体同步按它发速度。
 - `Command::BreedAnimals` 带上父亲的种类、兔子/狐狸品种和求爱者：落地时父亲被拆出来读不到（以前读 `me.kind` 恒为空，繁殖整个失效，`interact_breed` 场景抓到）。
 - `BlockView::is_thundering`、`World::spawn_item_with_delay`。
+- **可驯服动物（`entity/mob/tame.rs`，给猫、鹦鹉复用）**：`Mob.tame: Tamable`（`DATA_FLAGS_ID` 的坐姿位 1 / 驯服位 4、主人 UUID、`orderedToSit`），`tame::set_tame` / `tame` / `owner` / `unable_to_move_to_owner` / `should_try_teleport_to_owner` / `try_to_teleport_to_owner`（10 次 `nextIntBetweenInclusive` 取落点，`canTeleportTo` 看路径类型、树叶和碰撞），以及 `Goal::Tame(TameGoal)` 里的 `SitWhenOrderedToGoal`、`FollowOwnerGoal`、`OwnerHurtByTargetGoal`、`OwnerHurtTargetGoal`。`TamableAnimalPanicGoal` 的瞬移挂在 `Goal::Panic` 的 tick 上（`tame::is_tamable`）。新种类只要在 `tame::is_tamable` 和 `apply_taming_side_effects` 里加一行，NBT（`Owner`、`Sitting`）、`canAttack` 排除主人、两项元数据（`TameFlags` / `TameOwner`）都是现成的。
+- **玩家战斗记忆（游戏层 `player_combat_memory.rs`）**：`Player.combat_memory` 记 `lastHurtByMob`（`#no_anger` 除外）、`lastHurtMob`（`Player.attack` 打中后）和 `getLastDamageSource(100)` 是否不在 `#no_wolf_retaliation` 里，时间戳用玩家自己的 `entity_ticks`；实体逻辑通过 `PlayerView.combat` 读。狐狸的 `DefendTrustedTargetGoal` 以后也可以接它。
+- `goals::attack_candidate`：`canAttack` 的公共部分（玩家：非和平、活着、非创造旁观、不是主人；生物：活着）。`goals::target_goal_can_continue`、`goals::max_head_x_rot`（坐着的狼 20）。
+- `DamageSource.owner_credit`：驯服的狼咬死的东西记到主人头上（`resolvePlayerResponsibleForDamage`）。
+- `Command::WolfAlert`（`HurtByTargetGoal.alertOthers`），`Command::BreedAnimals` 带上父亲的狼状态。
+- `LivingEntity.pushEntities` 现在也被重叠的玩家推开（只算生物那一半；服务端对玩家的推力不生效）。`AvoidClass::Wolf` 匹配狼：兔子、狐狸（不躲驯服的）、骷髅（`AvoidEntityGoal(Wolf, 6, 1.0, 1.2)`）都会躲狼。
+- 动物的 `MobFlags` 同步带上攻击性位（狼和狐狸的近战目标会设它）。
 
 ### 11.3 拆岛 / 并岛
 
-兔子和狐狸的新状态都在 `Mob` 里随实体走（`Mob.rabbit`、`Mob.fox`、目标里的倒计时），不含绝对时钟，拆合不需要平移。狐狸的信任名单和繁殖求爱者都是 UUID。
+兔子和狐狸的新状态都在 `Mob` 里随实体走（`Mob.rabbit`、`Mob.fox`、目标里的倒计时），不含绝对时钟，拆合不需要平移。狐狸的信任名单和繁殖求爱者都是 UUID。狼的 `anger_end_time` 是岛时钟上的绝对时刻，`Mob::rebase` 里随 `Wolf::rebase` 平移；主人和 `angry_at` 都是 UUID，`angry_at_uid` 找不到时按 UUID 重新匹配。玩家的战斗记忆用玩家自己的 tick 数，整行随玩家走。
 
 ### 11.4 已知差异
 
-见 README「兔子的已知限制」「狐狸的已知限制」。对拍环境另有两处：Java 一侧玩家只在野生动物场景里进实体表（`getEntitiesOfClass(Player)` 才找得到），兔子死后的掉落物不进 Java 实体表；狐狸的 `SleepGoal` 倒计时在官方构造时用不可复现的种子取，对拍把官方的值报给 Bamboo 照填。
+见 README「兔子的已知限制」「狐狸的已知限制」「狼的已知限制」。对拍环境另有几处：Java 一侧玩家现在在牛、僵尸和野生动物场景里都进实体表（`getEntitiesOfClass(Player)` 和 `getPushableEntities` 才找得到），排在生物前面；僵尸式场景的右键交互和玩家攻击现在两边都重放，交互之后玩家手里换回场景给的那件；兔子死后的掉落物不进 Java 实体表；狐狸的 `SleepGoal` 倒计时在官方构造时用不可复现的种子取，对拍把官方的值报给 Bamboo 照填。
