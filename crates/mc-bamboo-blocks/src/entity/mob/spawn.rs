@@ -295,12 +295,14 @@ fn finalize_spawn_in_group(
 }
 
 /// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
-/// `WorldGenRegion.random`。牛走 [`finalize_cow`]；以后加进来的动物还没接区域随机源，
-/// 暂时退回世界随机源，只影响它们的花色和幼年，不影响落点。
+/// `WorldGenRegion.random`。牛、猪、羊、鸡走 [`finalize_cow`]，兔子、狐狸、狼走
+/// `wild_spawn::finalize`；以后加进来、还没接区域随机源的动物暂时退回世界随机源，
+/// 只影响它们的花色和幼年，不影响落点。
 ///
 /// World-generation `finalizeSpawn(..., CHUNK_GENERATION, groupData)` on
-/// `WorldGenRegion.random`. Cows use [`finalize_cow`]; animals added later fall back to
-/// the level random until wired, which only affects their variants and age.
+/// `WorldGenRegion.random`. Cows, pigs, sheep and chickens use [`finalize_cow`];
+/// rabbits, foxes and wolves use `wild_spawn::finalize`. Animals added later fall back
+/// to the level random until wired, which only affects their variants and age.
 pub(super) fn finalize_generated(
     world: &mut World,
     kind: MobType,

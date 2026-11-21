@@ -687,7 +687,8 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   不限制为已加载区块；旁观者仅在 `spectators_generate_chunks` 开启时贡献区块。
 - **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
 - **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
-- **已知差异**：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
+- **已知差异**：（2026-11-20 第二轮起，猪、羊、鸡、兔子、狐狸、狼、骷髅也会真的生成，见 11.5。）
+  下面是这一期写下时的状态：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
   然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
@@ -740,6 +741,16 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 ### 11.4 已知差异
 
 见 README「兔子的已知限制」「狐狸的已知限制」「狼的已知限制」。对拍环境另有几处：Java 一侧玩家现在在牛、僵尸和野生动物场景里都进实体表（`getEntitiesOfClass(Player)` 和 `getPushableEntities` 才找得到），排在生物前面；僵尸式场景的右键交互和玩家攻击现在两边都重放，交互之后玩家手里换回场景给的那件；兔子死后的掉落物不进 Java 实体表；狐狸的 `SleepGoal` 倒计时在官方构造时用不可复现的种子取，对拍把官方的值报给 Bamboo 照填。
+
+### 11.5 自然生成和生成期刷怪（2026-11-20 第二轮）
+
+- **刷怪规则**（`natural.rs` 的 `check_spawn_rules`）：`Rabbit.checkRabbitSpawnRules`、`Fox.checkFoxSpawnRules`、`Wolf.checkWolfSpawnRules` 都是「脚下方块在各自的标签里 + `isBrightEnoughToSpawn`（原始亮度 > 8）」，共用 `natural::bright_spawn_rules`。狐狸在 `SpawnPlacements` 里登记的是 `NO_RESTRICTIONS`（`spawn_placement_ok` 恒真），兔子和狼是 `ON_GROUND`。`Wolf.getMaxSpawnClusterSize` 是 8。
+- **组数据**（`entity/mob/wild_spawn.rs`）：`SpawnGroup::Wild(WildGroup { group_size, pack })`，`pack` 是 `Pack::Rabbit / Fox / Wolf` 带共享的品种。`RabbitGroupData`：每只都先按群系抽一次 `nextInt(100)`，有组数据时用组里的品种；幼年概率 1.0，第二只起 `nextFloat() <= 1.0` 照取、都是幼崽。`FoxGroupData`：品种跟第一只，组里已有两只时是幼崽，`AgeableMob` 那层不取数；然后 `setTargetGoals` 和嘴里的东西。`WolfPackData`：品种只在没有狼群数据时选（`nextInt(1)`），叫声每只 `nextInt(7)`，不生幼崽。最后都走 `Mob.finalizeSpawn` 那层（跟随距离、左撇子）。`/summon` 和刷怪蛋传空的组数据，行为和以前一样。
+- **生成期刷怪**（`natural_gen.rs`）：放置表加了兔子、狼（`ON_GROUND`）和狐狸（不查落脚点），规则换成各自的标签；`finalize_generated` 用区域随机源跑 `wild_spawn::finalize`。
+- **`MobType::by_entity_type`** 以前只列了牛和三种怪物，所以猪、羊、鸡、兔子、狐狸、狼即使接好了规则也不会被自然刷出来；现在列全了。
+- **捕食关系**：`Wolf.PREY_SELECTOR` 加上羊；狐狸的猎物 / `STALKABLE_PREY` / `FoxAlertableEntitiesSelector` 加上鸡（`fox_goals::is_small_prey`）。
+- **对拍**：`mob-oracle --only gen_spawn` 的场景带上群系（平原 4 个 + 针叶林 3 个 + 雪地针叶林 1 个，共 7000 例），所有建模了的生物比类型、坐标、朝向，区域随机源同步时再比幼年、左撇子和 `genSpawnDetail`（兔子品种、狐狸品种和嘴里的物品、狼的品种和叫声）：1043 只里 34 只兔子、109 只狐狸、126 只狼，0 不一致。`--only natural_spawn` 加了猪 / 羊 / 鸡（平原）、兔子 / 狐狸 / 狼（针叶林、雪地针叶林）、森林的狼和夜里的狐狸，192 例 768 刻 0 不一致（比类型、位置、朝向、幼年、左撇子、主手物品和每刻之后的世界随机源种子）。改坏确认：把狐狸幼崽的门槛从「组里已有两只」改成一只，`gen_taiga_flat` 报出幼年不一致。
+- **对拍夹具的一处修正**：僵尸式场景里玩家的实体 ID 和第一只生物都是 `FIRST_ID`。Bamboo 用同一套号认目标，`fox_sleep_wild_wolf` 里狼恨的是狐狸、却把同号的玩家认成了仇恨对象（第 13 刻随机源差一次取数）。Java 一侧玩家改成 `FIRST_ID + 1024 + 下标`，全量 `mob-oracle` 439 例 72339 刻 0 不一致。真实游戏里玩家和实体共用一个发号器，不会撞号。
 
 ## 猪的实施现状
 
