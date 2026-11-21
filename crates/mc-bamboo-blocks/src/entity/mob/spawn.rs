@@ -317,8 +317,15 @@ fn finalize_spawn_in_group(
         super::creeper::finalize_spawn(entity, world.random());
         return;
     }
-    if kind.climbs_walls() {
+    if kind == MobType::Spider {
         super::spider::finalize_spawn(world, entity, reason, group);
+        return;
+    }
+    // `CaveSpider.finalizeSpawn` 只把组数据原样返回，不走 `Mob.finalizeSpawn`：
+    // 不取随机数，也没有跟随距离加成和左撇子。
+    // `CaveSpider.finalizeSpawn` returns the group data unchanged without calling
+    // `Mob.finalizeSpawn`: no draws, no follow-range bonus, no left-handedness.
+    if kind == MobType::CaveSpider {
         return;
     }
     if kind.is_equine() {
