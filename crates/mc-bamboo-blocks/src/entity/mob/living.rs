@@ -470,10 +470,26 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
                 return;
             }
+            // `Entity.makeSound` 遇到空的叫声直接返回，也不取音高的两个随机数。
+            // `Entity.makeSound` returns on a null sound without drawing the pitch.
+            let Some(sound) = ambient_voice(me, mob) else {
+                return;
+            };
             let pitch = voice_pitch(me, mob);
-            let sound = voice_of(mob, Voice::Ambient);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
+    }
+}
+
+/// `Mob.getAmbientSound`：河豚没有叫声；海龟只有成年、在水外、站在地上时才叫。
+///
+/// `Mob.getAmbientSound`: the pufferfish has none, and a turtle only calls as an adult
+/// standing on land out of the water.
+fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
+    match mob.mob_type {
+        super::MobType::Pufferfish => None,
+        super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
+        _ => Some(voice_of(mob, Voice::Ambient)),
     }
 }
 

@@ -375,9 +375,12 @@ pub(super) fn ai_step(me: &mut Entity, mob: &mut Mob) {
             delta.z + f64::from(z),
         );
         me.on_ground = false;
-        // 官方这里还置 `needsSync`：Bamboo 的同步按位置和速度变化判断，跳跃本身就会变。
-        // Vanilla also sets `needsSync`; Bamboo's tracking keys off position and velocity,
-        // and the hop changes both.
+        // `needsSync`：这一刻的 `sendChanges` 不等更新周期就发速度和移动包。活着时氧气
+        // 每刻变、数据脏，看不出差别；死后倒计时那 20 刻只有它能让包当刻发出去。
+        // `needsSync`: this tick's `sendChanges` sends velocity and movement without
+        // waiting for the update interval. While alive the air supply dirties the data
+        // every tick anyway; during the 20 death ticks only this flag sends them on time.
+        mob.needs_sync = true;
         let pitch = living::voice_pitch(me, mob);
         living::play_sound(me, mob, flop_sound(mob.mob_type), 1.0, pitch);
     }

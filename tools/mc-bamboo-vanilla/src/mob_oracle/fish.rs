@@ -103,8 +103,10 @@ impl FishCase {
             mc_bamboo_blocks::entity::mob::fish::refresh_dimensions(me, mob);
         });
         let fish = world.spawn_entity(entity);
+        // 牛的位置和官方一侧的 `cow.setPos(0.9, 61.0, 0.5)` 一致。
+        // The cow stands where the official side's `cow.setPos(0.9, 61.0, 0.5)` puts it.
         let cow = self.cow.then(|| {
-            let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(1.5, 61.0, 0.5));
+            let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(0.9, 61.0, 0.5));
             cow.with_mob(|_, mob| mob.no_ai = true);
             world.spawn_entity(cow)
         });
