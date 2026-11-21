@@ -59,7 +59,7 @@ export const GROUPS = [
     id: "performance",
     section: "bamboo",
     title: "性能",
-    hint: "实体阶段和区块信箱的执行方式。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
+    hint: "实体阶段和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
   },
 ] as const;
 
