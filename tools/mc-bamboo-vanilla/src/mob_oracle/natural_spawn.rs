@@ -129,8 +129,11 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        let covered_misc = ["mooshroom_day", "polar_bear_day"]
+            .iter()
+            .all(|name| self.per_scene.get(*name).is_some_and(|&count| count > 0));
         let mobs = [self.cows, self.skeletons, self.zombies, self.equines];
-        if self.cases > 0 && (mobs.contains(&0) || self.cap_off == 0) {
+        if self.cases > 0 && (mobs.contains(&0) || self.cap_off == 0 || !covered_misc) {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
             );
@@ -239,10 +242,11 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     let roof = kind == MobType::Husk;
+    let floor_state = spawn_floor(biome);
     let blocks = (-16..48)
         .flat_map(|x| {
             (-16..32).flat_map(move |z| {
-                let floor = (BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK));
+                let floor = (BlockPos::new(x, -63, z), floor_state);
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
                 std::iter::once(floor).chain(roof.then_some(glass))
             })
@@ -299,5 +303,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         players: vec![player],
         game: None,
         wrong_was_hurt: false,
+    })
+}
+
+pub(super) fn spawn_floor(biome: i32) -> BlockState {
+    BlockState(match biome {
+        biome::MUSHROOM_FIELDS => blocks::MYCELIUM,
+        biome::FROZEN_OCEAN => blocks::ICE,
+        _ => blocks::GRASS_BLOCK,
     })
 }

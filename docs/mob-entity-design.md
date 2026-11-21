@@ -383,6 +383,9 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
      官方在 `baseTick` 末尾才 `setSharedFlagOnFire`，晚一刻。现在 `Mob.visible_fire`
      在 `baseTick` 末尾重算，`convertCommon` 照官方抄这个标志。
 - **状态**：北极熊已对拍 0 不一致（`mob-oracle --only polar_bear` 9 例 1081 刻）。
+  `SpawnPlacementTypes.ON_GROUND` 的落脚块检查传入实体类型：冰和霜冰按官方 `Blocks`
+  的专用谓词只允许北极熊，之后仍检查 `PolarBear.checkPolarBearSpawnRules`。
+  自然生成与生成期刷怪的对拍分别覆盖蘑菇岛菌丝上的哞菇、冰冻海洋冰面上的北极熊。
   山羊 / 青蛙 / 犰狳 / 骆驼用官方 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` / `CamelAi`），
   Bamboo 只有 `GoalSelector`，没有 `Brain` / 传感器 / 记忆，这是下一步的公共地基。
 

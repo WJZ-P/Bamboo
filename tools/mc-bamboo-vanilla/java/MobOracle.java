@@ -304,8 +304,8 @@ public final class MobOracle {
             if ("natural_spawn".equals(only)) {
                 cases += playNaturalSpawns(official, out);
             }
-            if ("gen_spawn".equals(only)) {
-                cases += playGenSpawns(official, out);
+            if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only)) {
+                cases += playGenSpawns(official, out, only.endsWith("_misc"));
             }
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
@@ -2288,7 +2288,7 @@ public final class MobOracle {
             line.append(",\"kind\":").append(animalKind(scene.name));
             line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
                     ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0))
-                    : animalKind(scene.name) == 6 ? scene.wool : 0);
+                    : scene.name.startsWith("mooshroom_") ? scene.wool : 0);
             line.append(",\"egg\":").append(cows.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
             line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
@@ -2949,6 +2949,8 @@ public final class MobOracle {
         scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("mooshroom_day", EntityTypes.MOOSHROOM, "mushroom_fields", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("polar_bear_day", EntityTypes.POLAR_BEAR, "frozen_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
             for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
@@ -2957,6 +2959,16 @@ public final class MobOracle {
             }
         }
         return count;
+    }
+
+    // 与 Rust 的刷怪夹具使用相同的地面。
+    // Match the floor of the Rust spawn fixtures.
+    private static BlockState spawnFloor(String biome) {
+        return switch (biome) {
+            case "mushroom_fields" -> Blocks.MYCELIUM.defaultBlockState();
+            case "frozen_ocean" -> Blocks.ICE.defaultBlockState();
+            default -> Blocks.GRASS_BLOCK.defaultBlockState();
+        };
     }
 
     private static JsonObject naturalSpawnCase(Official official, NaturalScene scene, long seed) throws Exception {
@@ -2982,9 +2994,10 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
+        BlockState floor = spawnFloor(scene.biome());
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
-                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                level.blocks.put(BlockPos.asLong(x, -63, z), floor);
                 // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
                 // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
                 // Husk fixture: glass at -60 blocks the camel-husk spawn box (Bamboo has no
@@ -3073,20 +3086,21 @@ public final class MobOracle {
         return row;
     }
 
-    // 生成期刷怪：平原的真实刷怪表，区块 (0,0) 和一圈邻居按坐标公式铺台阶、水、沙、树叶和草丛。
-    // World-generation spawning: the real plains table over a formula terrain of steps,
-    // water, sand, leaves and short grass around chunk (0,0).
-    private record GenScene(String name, int sky, int block, boolean terrain) {}
+    // 生成期刷怪：用真实群系刷怪表，地面用平地或坐标公式地形。
+    // World-generation spawning: real biome spawn tables over flat or formula terrain.
+    private record GenScene(String name, String biome, int sky, int block, boolean terrain) {}
 
-    private static int playGenSpawns(Official official, Writer out) throws Exception {
-        List<GenScene> scenes = List.of(
-                new GenScene("gen_flat", 15, 0, false),
-                new GenScene("gen_terrain", 15, 0, true),
-                new GenScene("gen_dim", 8, 0, true),
-                new GenScene("gen_torch", 0, 9, true));
+    private static int playGenSpawns(Official official, Writer out, boolean misc) throws Exception {
+        List<GenScene> scenes = misc ? List.of(
+                new GenScene("gen_mooshroom", "mushroom_fields", 15, 0, false),
+                new GenScene("gen_polar_bear", "frozen_ocean", 15, 0, false)) : List.of(
+                new GenScene("gen_flat", "plains", 15, 0, false),
+                new GenScene("gen_terrain", "plains", 15, 0, true),
+                new GenScene("gen_dim", "plains", 8, 0, true),
+                new GenScene("gen_torch", "plains", 0, 9, true));
         int count = 0;
         for (GenScene scene : scenes) {
-            for (long index = 0; index < 500; index++) {
+            for (long index = 0; index < (misc ? 64 : 500); index++) {
                 // 相邻的小种子第一下 `nextFloat` 几乎相同，打散成 64 位。
                 // Nearby small seeds share their first `nextFloat`; spread them out.
                 long seed = index * 0x9E3779B97F4A7C15L + 12345L;
@@ -3099,19 +3113,20 @@ public final class MobOracle {
 
     private static JsonObject genSpawnCase(Official official, GenScene scene, long seed) throws Exception {
         FakeLevel level = FakeLevel.create(official);
-        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.COW, "plains", 2, scene.sky(), scene.block(), 0,
+        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.COW, scene.biome(), 2, scene.sky(), scene.block(), 0,
                 false, 0, 0, 0, false, false);
         level.worldGenRegion = true;
         level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
-                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace(scene.biome())));
         put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
                 (x, y, z) -> level.naturalBiome, 0L));
         level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
         ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
         level.spawnDifficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        BlockState floor = spawnFloor(scene.biome());
         for (int x = -16; x < 32; x++) {
             for (int z = -16; z < 32; z++) {
-                genColumn(level, x, z, scene.terrain());
+                genColumn(level, x, z, scene.terrain(), floor);
             }
         }
         for (int cx = -1; cx <= 1; cx++) {
@@ -3149,6 +3164,7 @@ public final class MobOracle {
         var result = new JsonObject();
         result.addProperty("type", "genSpawn");
         result.addProperty("name", scene.name());
+        result.addProperty("biome", "minecraft:" + scene.biome());
         result.addProperty("seed", seed);
         result.addProperty("sky", scene.sky());
         result.addProperty("block", scene.block());
@@ -3160,12 +3176,12 @@ public final class MobOracle {
     }
 
     /** 和 Rust 侧 `gen_column` 同一个坐标公式。 */
-    private static void genColumn(FakeLevel level, int x, int z, boolean terrain) {
+    private static void genColumn(FakeLevel level, int x, int z, boolean terrain, BlockState floor) {
         int top = terrain ? -63 + Math.floorMod(x * 7 + z * 13, 3) : -63;
         for (int y = -63; y < top; y++) {
             level.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
         }
-        BlockState ground = Blocks.GRASS_BLOCK.defaultBlockState();
+        BlockState ground = floor;
         if (terrain && Math.floorMod(x + 2 * z, 9) == 0) {
             ground = Blocks.WATER.defaultBlockState();
         } else if (terrain && Math.floorMod(x * 3 + z * 5, 11) == 0) {

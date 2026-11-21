@@ -43,6 +43,7 @@ pub struct GenSpawn<'a> {
 /// `Animal` walk target value.
 #[derive(Debug, Clone, Copy)]
 struct Placement {
+    entity_type: i32,
     width: f32,
     height: f32,
     /// Bamboo 建模了的种类；`None` 时只模拟放置、推进随机数，不生成实体。
@@ -78,6 +79,7 @@ fn placement(entity: i32) -> Option<Placement> {
     }
     let facts = &FACTS[entity as usize];
     Some(Placement {
+        entity_type: entity,
         width: facts.width,
         height: facts.height,
         kind: MobType::by_entity_type(entity),
@@ -149,7 +151,7 @@ fn spawn_one(
         attempts += 1;
         let (x, z) = *cursor;
         let pos = BlockPos::new(x, top_non_colliding_y(world, x, z), z);
-        if natural::on_ground_position_ok(world, false, pos) {
+        if natural::on_ground_position_ok(world, placement.entity_type, false, pos) {
             let width = f64::from(placement.width);
             let fx = clamp(
                 f64::from(x),
@@ -184,11 +186,9 @@ fn spawn_one(
     }
 }
 
-/// `SpawnPlacements.checkSpawnRules`：哞菇用 `MushroomCow.checkMushroomSpawnRules`，其余是
-/// `Animal.checkAnimalSpawnRules`。
+/// `SpawnPlacements.checkSpawnRules`：已建模的动物用各自的规则。
 ///
-/// `SpawnPlacements.checkSpawnRules`: mooshrooms use `checkMushroomSpawnRules`, the rest
-/// `Animal.checkAnimalSpawnRules`.
+/// `SpawnPlacements.checkSpawnRules`: use each modelled animal's own rule.
 fn spawn_rules(world: &World, placement: Placement, pos: BlockPos) -> bool {
     match placement.kind {
         Some(kind) => natural::check_spawn_rules(world, kind, pos),

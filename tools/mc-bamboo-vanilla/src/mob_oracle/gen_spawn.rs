@@ -1,10 +1,10 @@
-//! 用官方平原刷怪表和公式地形重放生成期刷怪（`NaturalSpawner.spawnMobsForChunkGeneration`）。
+//! 用官方群系刷怪表和公式地形重放生成期刷怪（`NaturalSpawner.spawnMobsForChunkGeneration`）。
 //!
-//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；生成的牛和马科比类型、坐标、朝向。
+//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；已建模动物比类型、坐标、朝向。
 //! 幼年、左撇子和马科的属性花色取区域随机源，只在这一区块前面没有生成过 Bamboo
 //! 还没建模的动物时比较：那些动物在官方那边会跑自己的 `finalizeSpawn`。
 //!
-//! Replay world-generation spawning with the official plains table over a formula
+//! Replay world-generation spawning with official biome tables over formula
 //! terrain. The decoration random must match exactly (a fingerprint at the end);
 //! spawned modelled animals compare type, position and facing. Baby, left-handedness
 //! and equine attributes and variants come from the region random and are compared
@@ -30,11 +30,15 @@ use mc_bamboo_data::{
 };
 use serde::Deserialize;
 
-use super::{MobLevel, Report, ZombieFacts, natural_spawn::SceneFacts};
+use super::{
+    MobLevel, Report, ZombieFacts,
+    natural_spawn::{SceneFacts, spawn_floor},
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct Case {
     name: String,
+    biome: String,
     seed: i64,
     sky: i32,
     block: i32,
@@ -52,19 +56,36 @@ pub(super) struct Coverage {
     others: usize,
     simulated: usize,
     details: usize,
+    mooshrooms: usize,
+    bears: usize,
+    misc_cases: usize,
 }
 
 impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {} cows, {} equines, {} other modelled animals, {} simulated animals, {} mobs with finalize details compared",
-                self.cases, self.cows, self.equines, self.others, self.simulated, self.details
+                "GEN SPAWN: {} cases, {} cows, {} equines, {} other modelled animals, {} simulated animals, {} mooshrooms, {} polar bears, {} mobs with finalize details compared",
+                self.cases,
+                self.cows,
+                self.equines,
+                self.others,
+                self.simulated,
+                self.mooshrooms,
+                self.bears,
+                self.details
             );
         }
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if self.misc_cases > 0 {
+            return if self.mooshrooms > 0 && self.bears > 0 && self.simulated == 0 {
+                Ok(())
+            } else {
+                Err("misc world-gen fixtures did not spawn both animals".into())
+            };
+        }
         let missing = self.cows == 0 || self.equines == 0 || self.others == 0;
         if self.cases > 0 && (missing || self.details == 0) {
             return Err("gen spawn fixtures did not exercise cows and other animals".into());
@@ -78,7 +99,12 @@ impl Report {
         self.cases += 1;
         self.gen_spawns.cases += 1;
         let broken = self.break_test.as_deref() == Some("gen_spawn");
-        let mut level = fixture(case);
+        let biome_id = biome::NAMES
+            .iter()
+            .position(|name| *name == case.biome)
+            .expect("known fixture biome") as i32;
+        self.gen_spawns.misc_cases += usize::from(biome_id != biome::PLAINS);
+        let mut level = fixture(case, biome_id);
         let mut ticks = BlockTicks::new();
         let decoration = mc_bamboo_worldgen::random::WorldgenRandom::new(
             mc_bamboo_worldgen::random::Random::Legacy(LegacyRandom::new(0)),
@@ -86,7 +112,7 @@ impl Report {
         .set_decoration_seed(case.seed, 0, 0);
         let random = LegacyRandom::new(decoration);
         let region = XoroshiroRandom::from_seed(case.seed.wrapping_mul(31).wrapping_add(7));
-        let table = spawning::for_biome_id(biome::PLAINS);
+        let table = spawning::for_biome_id(biome_id);
         let probability = if broken && case.name == "gen_flat" {
             table.creature_spawn_probability * 2.0
         } else {
@@ -124,6 +150,8 @@ impl Report {
                 in_sync = false;
                 continue;
             };
+            self.gen_spawns.mooshrooms += usize::from(kind == MobType::Mooshroom);
+            self.gen_spawns.bears += usize::from(kind == MobType::PolarBear);
             if kind == MobType::Cow {
                 self.gen_spawns.cows += 1;
             } else if kind.is_equine() {
@@ -204,7 +232,7 @@ fn details(entity: &Entity) -> Vec<i64> {
 }
 
 /// 和 `MobOracle.genColumn` 同一个坐标公式。
-fn gen_column(x: i32, z: i32, terrain: bool) -> Vec<(BlockPos, BlockState)> {
+fn gen_column(x: i32, z: i32, terrain: bool, floor: BlockState) -> Vec<(BlockPos, BlockState)> {
     let top = if terrain {
         -63 + (x * 7 + z * 13).rem_euclid(3)
     } else {
@@ -214,13 +242,13 @@ fn gen_column(x: i32, z: i32, terrain: bool) -> Vec<(BlockPos, BlockState)> {
         .map(|y| (BlockPos::new(x, y, z), BlockState(blocks::STONE)))
         .collect();
     let ground = if terrain && (x + 2 * z).rem_euclid(9) == 0 {
-        blocks::WATER
+        BlockState(blocks::WATER)
     } else if terrain && (x * 3 + z * 5).rem_euclid(11) == 0 {
-        blocks::SAND
+        BlockState(blocks::SAND)
     } else {
-        blocks::GRASS_BLOCK
+        floor
     };
-    column.push((BlockPos::new(x, top, z), BlockState(ground)));
+    column.push((BlockPos::new(x, top, z), ground));
     let above = BlockPos::new(x, top + 1, z);
     if terrain && (5 * x + z).rem_euclid(13) == 0 {
         column.push((above, BlockState(blocks::OAK_LEAVES)));
@@ -230,11 +258,12 @@ fn gen_column(x: i32, z: i32, terrain: bool) -> Vec<(BlockPos, BlockState)> {
     column
 }
 
-fn fixture(case: &Case) -> MobLevel {
+fn fixture(case: &Case, biome_id: i32) -> MobLevel {
+    let floor = spawn_floor(biome_id);
     let blocks = (-16..32)
-        .flat_map(|x| (-16..32).flat_map(move |z| gen_column(x, z, case.terrain)))
+        .flat_map(|x| (-16..32).flat_map(move |z| gen_column(x, z, case.terrain, floor)))
         .collect();
-    let entry = spawning::for_biome_id(biome::PLAINS).mobs_to_spawn(MobCategory::Creature);
+    let entry = spawning::for_biome_id(biome_id).mobs_to_spawn(MobCategory::Creature);
     MobLevel {
         blocks,
         random: LevelRandom::new(0),
@@ -246,7 +275,7 @@ fn fixture(case: &Case) -> MobLevel {
             ..ZombieFacts::default()
         },
         natural_spawn: Some(SceneFacts {
-            biome: biome::PLAINS,
+            biome: biome_id,
             category: MobCategory::Creature,
             entry: &entry[0],
             sky: case.sky,

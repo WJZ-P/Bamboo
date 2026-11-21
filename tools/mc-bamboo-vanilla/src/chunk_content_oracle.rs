@@ -1648,6 +1648,16 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
         ]),
     ));
     out.push((
+        "polar bear with persistent anger".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:polar_bear".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("anger_end_time", Tag::Long(9876543210)),
+            ("angry_at", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]),
+    ));
+    out.push((
         "rich".to_owned(),
         compound(vec![
             ("id", Tag::String("minecraft:cow".to_owned())),
