@@ -266,7 +266,7 @@ impl MobType {
     /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
     /// drowning keeps its earlier behaviour and is not changed here.
     pub const fn can_breathe_under_water(self) -> bool {
-        squid::is_squid(self) || fish::is_fish(self)
+        squid::is_squid(self) || fish::is_fish(self) || turtle::is_turtle(self)
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -311,12 +311,16 @@ impl MobType {
         !self.is_monster() && !self.is_ageable_water_creature() && !self.is_water_animal()
     }
 
-    /// `Entity.getSwimSound`：鱼覆盖成 `entity.fish.swim`，其余是 `entity.generic.swim`。
+    /// `Entity.getSwimSound`：鱼覆盖成 `entity.fish.swim`，海龟是 `entity.turtle.swim`，其余是
+    /// `entity.generic.swim`。
     ///
-    /// `Entity.getSwimSound`: fish override it with `entity.fish.swim`.
+    /// `Entity.getSwimSound`: fish override it with `entity.fish.swim`, turtles with
+    /// `entity.turtle.swim`.
     pub const fn swim_sound(self) -> &'static str {
         if self.is_water_animal() {
             fish::SWIM_SOUND
+        } else if turtle::is_turtle(self) {
+            "minecraft:entity.turtle.swim"
         } else {
             "minecraft:entity.generic.swim"
         }

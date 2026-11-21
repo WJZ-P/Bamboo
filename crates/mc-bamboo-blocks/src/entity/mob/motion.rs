@@ -295,7 +295,12 @@ fn movement_emission(
                 let speed = (delta.x * delta.x * 0.2 + delta.y * delta.y + delta.z * delta.z * 0.2)
                     .sqrt() as f32
                     * 0.35;
-                let volume = mth::java_min_f32(1.0, speed);
+                let mut volume = mth::java_min_f32(1.0, speed);
+                // `Turtle.playSwimSound`：音量乘 1.5。
+                // `Turtle.playSwimSound` scales the volume by 1.5.
+                if super::turtle::is_turtle(mob.mob_type) {
+                    volume *= 1.5;
+                }
                 let first = me.random.next_float();
                 let second = me.random.next_float();
                 let pitch = 1.0 + (first - second) * 0.4;

@@ -73,6 +73,10 @@ pub struct PathMob {
     pub on_ground: bool,
     /// `isInFloatableFluid()`。
     pub in_floatable_fluid: bool,
+    /// `isInWater()`：两栖求值器在水里时换一种起点。
+    ///
+    /// `isInWater()`: the amphibious evaluator starts differently in water.
+    pub in_water: bool,
     pub width: f32,
     pub height: f32,
     /// `maxUpStep()`。
@@ -587,6 +591,17 @@ impl<'a> Search<'a> {
     /// `getStart`。
     fn get_start(&mut self) -> usize {
         let mob = self.mob;
+        // `AmphibiousNodeEvaluator.getStart`：在水里时取包围盒最小角，y 加 0.5 再取整。
+        // `AmphibiousNodeEvaluator.getStart`: in water, the box's minimum corner with y
+        // floored after adding 0.5.
+        if self.flags.amphibious && mob.in_water {
+            let bounds = mob.bounding_box();
+            return self.get_start_node(BlockPos::new(
+                mth::floor(bounds.min_x),
+                mth::floor(bounds.min_y + 0.5),
+                mth::floor(bounds.min_z),
+            ));
+        }
         let mut y = mth::floor(mob.position.y);
         let containing =
             |y: i32| BlockPos::new(mth::floor(mob.position.x), y, mth::floor(mob.position.z));

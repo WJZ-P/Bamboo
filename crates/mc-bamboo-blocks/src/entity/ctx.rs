@@ -129,6 +129,15 @@ pub trait BlockView {
         2
     }
 
+    /// `Level.getSeaLevel()`：生成器的海平面。默认是噪声主世界的 63；超平坦是 -63，
+    /// 由游戏层的只读视图按世界类型给出。
+    ///
+    /// `Level.getSeaLevel()`: the generator's sea level. Defaults to the noise
+    /// overworld's 63; superflat is -63, which the game's read-only view supplies.
+    fn sea_level(&self) -> i32 {
+        63
+    }
+
     /// `canSeeSky(pos)`：天空光是 15 就看得见天。
     fn can_see_sky(&self, _pos: BlockPos) -> bool {
         false

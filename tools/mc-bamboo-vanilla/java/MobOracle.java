@@ -1061,6 +1061,42 @@ public final class MobOracle {
         }
     }
 
+    /**
+     * 海龟场景（类型 60，借 `zombie_` 前缀走多生物路径）：沙滩上找水
+     * （`TurtleGoToWaterGoal`）、水里远行（`TurtleTravelGoal` + `TurtleMoveControl`）、幼年。
+     * 家方块是没跑 `finalizeSpawn` 的原点。
+     * Turtle scenes (kind 60, on the multi-mob path via the `zombie_` prefix): finding
+     * water from the beach, travelling in water with the turtle move control, and a
+     * baby. Home is the origin (no `finalizeSpawn`).
+     */
+    static final class TurtleScenes {
+        static final BlockState SAND = Blocks.SAND.defaultBlockState();
+
+        static void beach(Scene scene) {
+            scene.fill(-12, 62, -12, 12, 62, 12, Scenes.STONE);
+            scene.fill(-12, 63, -12, 12, 63, 12, SAND);
+            scene.fill(4, 61, -4, 10, 63, 4, Scenes.WATER);
+        }
+
+        static void add(List<Scene> scenes) {
+            for (long seed : new long[] {3L, 77L}) {
+                Scene walk = new Scene("zombie_turtle_ai_beach_" + seed).ticks(400);
+                beach(walk);
+                walk.mob(60, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(walk);
+            }
+            Scene baby = new Scene("zombie_turtle_ai_baby").ticks(300);
+            beach(baby);
+            baby.mob(60, 0.5, 64.0, 0.5, 0.0F, 21L, -24000);
+            scenes.add(baby);
+            Scene swim = new Scene("zombie_turtle_ai_swim").ticks(400);
+            swim.fill(-10, 55, -10, 10, 55, 10, Scenes.STONE);
+            swim.fill(-10, 56, -10, 10, 62, 10, Scenes.WATER);
+            swim.mob(60, 0.5, 59.0, 0.5, 0.0F, 31L, 0);
+            scenes.add(swim);
+        }
+    }
+
     /** 兔子场景：跳着闲逛、躲玩家 / 僵尸、和平难度、水里、幼年、细雪。 */
     static final class RabbitScenes {
         static void add(List<Scene> scenes) {
@@ -2037,6 +2073,7 @@ public final class MobOracle {
             rabbitRaid.mob(6, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
             scenes.add(rabbitRaid);
             equineScenes(scenes);
+            TurtleScenes.add(scenes);
             return scenes;
         }
 
@@ -5213,6 +5250,7 @@ public final class MobOracle {
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
                 case 12 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
+                case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();

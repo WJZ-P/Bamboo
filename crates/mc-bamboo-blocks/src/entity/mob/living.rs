@@ -283,6 +283,7 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             position: me.position,
             on_ground: me.on_ground,
             in_floatable_fluid: fluid_height(mob, fluid_tags::ENTITY_FLOATABLE) > 0.0,
+            in_water: me.in_water,
             width,
             height,
             max_up_step: max_up_step(mob),
@@ -1118,6 +1119,10 @@ pub(crate) fn set_speed(mob: &mut Mob, speed: f32) {
 fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     if super::fish::is_fish(mob.mob_type) {
         super::fish::move_control_tick(me, mob);
+        return;
+    }
+    if super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::move_control_tick(me, mob);
         return;
     }
     match mob.mover.operation {

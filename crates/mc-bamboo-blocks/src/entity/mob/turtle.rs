@@ -1,14 +1,14 @@
 //! 海龟：官方 `Turtle`（`Animal` 一支），两栖寻路、家方块、产卵和长大掉鳞甲。
 //!
-//! 这一期做了属性、尺寸、家方块和回家、求爱后产卵（`TurtleBreedGoal` /
-//! `TurtleLayEggGoal`）、产卵时的动画和音效、长大时按 `turtle_grow` 战利品表掉鳞甲。
-//! `TurtleGoToWaterGoal` 和 `TurtleTravelGoal` 还没建模，见 README 的已知限制。
+//! 做了属性、尺寸、家方块和回家、求爱后产卵（`TurtleBreedGoal` /
+//! `TurtleLayEggGoal`）、产卵时的动画和音效、长大时按 `turtle_grow` 战利品表掉鳞甲，
+//! 以及 `TurtleMoveControl`、找水（`TurtleGoToWaterGoal`）和远行（`TurtleTravelGoal`）。
 //!
 //! Turtles: vanilla `Turtle` on the `Animal` branch, with amphibious path finding, a home
-//! position, egg laying and the scute dropped when a baby grows up. The go-to-water and
-//! travel goals are not modelled yet; see the README's known limitations.
+//! position, egg laying, the scute dropped when a baby grows up, the turtle move control
+//! and the go-to-water and travel goals.
 
-use mc_bamboo_core::{BlockPos, LightLayer, Vec3};
+use mc_bamboo_core::{BlockPos, LightLayer, Vec3, mth};
 use mc_bamboo_data::{
     PathType, entity_types,
     registries::attribute,
@@ -18,6 +18,7 @@ use mc_bamboo_data::{
 use super::{
     Mob, MobType,
     attributes::Attributes,
+    control::{Operation, move_rotlerp},
     goals::{Goal, GoalSelector, WrappedGoal},
     living,
     path::Malus,
@@ -68,6 +69,13 @@ pub struct TurtleState {
     pub block_try_ticks: i32,
     pub block_max_stay: i32,
     pub block_ticks_since_reached: i32,
+    /// `TurtleGoToWaterGoal` 自己的 `MoveToBlockGoal` 状态：倒计时、目标水格、尝试刻数。
+    ///
+    /// The go-to-water goal's own `MoveToBlockGoal` state: countdown, target water
+    /// cell and try ticks.
+    pub water_next_start: i32,
+    pub water_pos: Option<BlockPos>,
+    pub water_try_ticks: i32,
 }
 
 impl Default for TurtleState {
@@ -86,6 +94,9 @@ impl Default for TurtleState {
             block_try_ticks: 0,
             block_max_stay: 0,
             block_ticks_since_reached: 0,
+            water_next_start: 0,
+            water_pos: None,
+            water_try_ticks: 0,
         }
     }
 }
@@ -130,10 +141,9 @@ pub(super) fn malus() -> Malus {
     malus
 }
 
-/// `Turtle.registerGoals`。`TurtleGoToWaterGoal`（3）和 `TurtleTravelGoal`（7）还没建模。
+/// `Turtle.registerGoals`。
 ///
-/// The `Turtle.registerGoals` list. The go-to-water goal (3) and the travel goal (7)
-/// are not modelled yet.
+/// The `Turtle.registerGoals` list.
 pub(super) fn goals(navigation: &mut super::navigation::Navigation) -> GoalSelector {
     navigation.flags.amphibious = true;
     let goals = vec![
@@ -162,7 +172,15 @@ pub(super) fn goals(navigation: &mut super::navigation::Navigation) -> GoalSelec
                 calm_down: 0,
             },
         ),
+        (3, Goal::TurtleGoToWater { speed: 1.0 }),
         (4, Goal::TurtleGoHome { speed: 1.0 }),
+        (
+            7,
+            Goal::TurtleTravel {
+                speed: 1.0,
+                stuck: false,
+            },
+        ),
         (
             8,
             Goal::LookAtPlayer {
@@ -235,7 +253,7 @@ pub(super) fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 }
 
 /// `Turtle.travelInWater`：`moveRelative(0.1F)`，乘 0.9 后没目标时再下沉 0.005。
-/// 回家途中离家的水平距离小于 20 格时不下沉。
+/// 回家途中离家方块中心不到 20 格（`closerToCenterThan`，三维距离）时不下沉。
 ///
 /// `Turtle.travelInWater`: `moveRelative(0.1F)`, scale by 0.9 and sink by 0.005 without
 /// a target unless it is going home and within twenty blocks of home.
@@ -249,29 +267,74 @@ pub(super) fn travel_in_water(
     let movement = me.delta;
     super::motion::move_living(me, mob, ctx, movement);
     me.delta = me.delta.scale(0.9);
-    let near_home =
-        mob.turtle.going_home && horizontal_distance(me.position, mob.turtle.home_pos) < 20.0;
+    let near_home = mob.turtle.going_home && home_closer_than(mob, me.position, 20.0);
     if mob.target.is_none() && !near_home {
         let delta = me.delta;
         me.delta = Vec3::new(delta.x, delta.y - 0.005, delta.z);
     }
 }
 
-/// `BlockPos.closerToCenterThan(position, distance)` 的水平版本（官方比较的是三维，
-/// 这里照官方用三维距离）。
+/// `Turtle.TurtleMoveControl.tick`：先按水里 / 地上压速度，再朝目标转身、把速度按
+/// 0.125 插值、按高度差补竖直速度。和 `MoveControl` 不同，它不跳也不把操作改回 `WAIT`。
 ///
-/// `BlockPos.closerToCenterThan(position, distance)`.
+/// `Turtle.TurtleMoveControl.tick`: clamp the speed for water or ground, then turn
+/// towards the target, lerp the speed by 0.125 and add vertical speed from the height
+/// difference. Unlike `MoveControl` it never jumps and never resets the operation.
+pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
+    update_speed(me, mob);
+    if mob.mover.operation != Operation::MoveTo || mob.navigation.is_done() {
+        living::set_speed(mob, 0.0);
+        return;
+    }
+    let xd = mob.mover.wanted_x - me.position.x;
+    let yd = mob.mover.wanted_y - me.position.y;
+    let zd = mob.mover.wanted_z - me.position.z;
+    let dd = (xd * xd + yd * yd + zd * zd).sqrt();
+    if dd < f64::from(1.0e-5_f32) {
+        living::set_speed(mob, 0.0);
+        return;
+    }
+    let yd = yd / dd;
+    let yaw = (mth::atan2(zd, xd) * 57.295_776_367_187_5) as f32 - 90.0;
+    me.y_rot = move_rotlerp(me.y_rot, yaw, 90.0);
+    mob.y_body_rot = me.y_rot;
+    let target =
+        (mob.mover.speed_modifier * mob.attributes.value(attribute::MOVEMENT_SPEED)) as f32;
+    living::set_speed(mob, mth::lerp_f32(0.125, mob.speed, target));
+    let delta = me.delta;
+    me.delta = Vec3::new(delta.x, delta.y + f64::from(mob.speed) * yd * 0.1, delta.z);
+}
+
+/// `TurtleMoveControl.updateSpeed`：水里每刻上浮 0.005，离家 16 格外速度减半（不低于
+/// 0.08），幼年再除以 3（不低于 0.06）；地上速度减半（不低于 0.06）。
+///
+/// `TurtleMoveControl.updateSpeed`: in water rise by 0.005 a tick, halve the speed
+/// (at least 0.08) more than 16 blocks from home and divide by three for babies (at
+/// least 0.06); on the ground halve it (at least 0.06).
+fn update_speed(me: &mut Entity, mob: &mut Mob) {
+    if me.in_water {
+        let delta = me.delta;
+        me.delta = Vec3::new(delta.x, delta.y + 0.005, delta.z);
+        if !home_closer_than(mob, me.position, 16.0) {
+            living::set_speed(mob, mth::java_max_f32(mob.speed / 2.0, 0.08));
+        }
+        if mob.is_baby() {
+            living::set_speed(mob, mth::java_max_f32(mob.speed / 3.0, 0.06));
+        }
+    } else if me.on_ground {
+        living::set_speed(mob, mth::java_max_f32(mob.speed / 2.0, 0.06));
+    }
+}
+
+/// `BlockPos.closerToCenterThan(position, distance)`：到方块中心的三维距离。
+///
+/// `BlockPos.closerToCenterThan(position, distance)`: the 3D distance to the cell
+/// centre.
 fn closer_to_center_than(pos: BlockPos, position: Vec3, distance: f64) -> bool {
     let dx = f64::from(pos.x) + 0.5 - position.x;
     let dy = f64::from(pos.y) + 0.5 - position.y;
     let dz = f64::from(pos.z) + 0.5 - position.z;
     dx * dx + dy * dy + dz * dz < distance * distance
-}
-
-fn horizontal_distance(position: Vec3, pos: BlockPos) -> f64 {
-    let dx = f64::from(pos.x) + 0.5 - position.x;
-    let dz = f64::from(pos.z) + 0.5 - position.z;
-    (dx * dx + dz * dz).sqrt()
 }
 
 /// 目标是否比给定距离更近（`closerToCenterThan`），给回家目标用。
@@ -387,34 +450,47 @@ pub(super) fn set_laying_egg(mob: &mut Mob, on: bool) {
 use super::goals::{default_random_pos_towards, reduced_tick_delay, within_home};
 use crate::entity::ctx::Command;
 
-/// `MoveToBlockGoal.findNearestBlock`：搜索半径 16、竖直 1，从脚下和上一格开始。
+/// `MoveToBlockGoal.findNearestBlock`：竖直从 `vertical_start` 起按 0、1、-1、2… 交替
+/// （不超过 `vertical_range`），每层由内向外一圈圈找；一圈里 x 在两边之间时只看 z = ±r
+/// 两格，x = ±r 两列才从 z = 0 起扫全。检查的是 `blockPosition + (x, y - 1, z)`。
 ///
-/// `MoveToBlockGoal.findNearestBlock` with search range 16 and vertical range 1.
-fn find_nearest_lay_spot(me: &Entity, mob: &Mob, view: &dyn BlockView) -> Option<BlockPos> {
+/// `MoveToBlockGoal.findNearestBlock`: y alternates 0, 1, -1, 2… from
+/// `vertical_start` up to `vertical_range`; each layer is searched ring by ring, where
+/// interior x only checks z = ±r and the x = ±r columns sweep z from 0. The checked cell
+/// is `blockPosition + (x, y - 1, z)`.
+fn find_nearest_block(
+    me: &Entity,
+    mob: &Mob,
+    (range, vertical_range, vertical_start): (i32, i32, i32),
+    valid: &dyn Fn(BlockPos) -> bool,
+) -> Option<BlockPos> {
     let centre = me.block_position();
-    for y in [0_i32, 1] {
-        for r in 0..16_i32 {
-            for x in 0..=r {
-                let xs = if x == 0 { vec![0] } else { vec![x, -x] };
-                for x in xs {
-                    let zs: Vec<i32> = if x.abs() < r && x > -r {
-                        (0..=r)
-                            .flat_map(|z| if z == 0 { vec![0] } else { vec![z, -z] })
-                            .collect()
-                    } else {
-                        vec![0]
-                    };
-                    for z in zs {
-                        let pos = centre.offset(x, y - 1, z);
-                        if within_home(mob, pos) && valid_lay_target(view, pos) {
-                            return Some(pos);
-                        }
+    let mut y = vertical_start;
+    while y <= vertical_range {
+        for r in 0..range {
+            let mut x = 0;
+            while x <= r {
+                let mut z = if x < r && x > -r { r } else { 0 };
+                while z <= r {
+                    let pos = centre.offset(x, y - 1, z);
+                    if within_home(mob, pos) && valid(pos) {
+                        return Some(pos);
                     }
+                    z = if z > 0 { -z } else { 1 - z };
                 }
+                x = if x > 0 { -x } else { 1 - x };
             }
         }
+        y = if y > 0 { -y } else { 1 - y };
     }
     None
+}
+
+/// `TurtleLayEggGoal` 的搜索：半径 16、竖直 1、从 0 起（y 依次 0、1、-1）。
+///
+/// The lay-egg search: range 16, vertical range 1, starting at 0 (y is 0, 1, -1).
+fn find_nearest_lay_spot(me: &Entity, mob: &Mob, view: &dyn BlockView) -> Option<BlockPos> {
+    find_nearest_block(me, mob, (16, 1, 0), &|pos| valid_lay_target(view, pos))
 }
 
 /// `TurtleLayEggGoal.isValidTarget`：上面是空方块，脚下是沙子。
@@ -634,6 +710,215 @@ pub(super) fn go_home_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityC
 /// `TurtleGoHomeGoal.stop`.
 pub(super) fn go_home_stop(mob: &mut Mob) {
     mob.turtle.going_home = false;
+}
+
+/// `TurtleGoToWaterGoal.canUse`：陆地上的幼年总要找水；其余要不在回家、不在水里、
+/// 没有蛋，然后才走 `MoveToBlockGoal.canUse`（倒计时、抽下次间隔、找 24 格内的水）。
+/// 构造时 `isBaby()` 恒假，所以速度总是 1.0。
+///
+/// `TurtleGoToWaterGoal.canUse`: a baby on land always looks for water; others must not
+/// be going home, in water or carrying an egg before `MoveToBlockGoal.canUse` runs
+/// (countdown, next interval, water within 24 blocks). `isBaby()` is always false at
+/// construction, so the speed is always 1.0.
+pub(super) fn go_to_water_can_use(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
+    let baby_on_land = mob.is_baby() && !me.in_water;
+    if !baby_on_land && (mob.turtle.going_home || me.in_water || mob.turtle.has_egg) {
+        return false;
+    }
+    if mob.turtle.water_next_start > 0 {
+        mob.turtle.water_next_start -= 1;
+        return false;
+    }
+    mob.turtle.water_next_start = reduced_tick_delay(200 + me.random.next_int_bounded(200));
+    let view = ctx.blocks();
+    let found = find_nearest_block(me, mob, (24, 1, -1), &|pos| is_water_block(view, pos));
+    if found.is_some() {
+        mob.turtle.water_pos = found;
+    }
+    found.is_some()
+}
+
+/// `TurtleGoToWaterGoal.isValidTarget`：这一格是水方块。
+///
+/// `TurtleGoToWaterGoal.isValidTarget`: the cell is a water block.
+fn is_water_block(view: &dyn BlockView, pos: BlockPos) -> bool {
+    view.block_state(pos).is(mc_bamboo_data::blocks::WATER)
+}
+
+/// `TurtleGoToWaterGoal.canContinueToUse`：还在陆地上、没超过 1200 个尝试刻、目标仍是水。
+///
+/// `TurtleGoToWaterGoal.canContinueToUse`: still on land, within 1200 try ticks and the
+/// target is still water.
+pub(super) fn go_to_water_can_continue(me: &Entity, mob: &Mob, ctx: &mut dyn EntityCtx) -> bool {
+    !me.in_water
+        && mob.turtle.water_try_ticks <= 1200
+        && mob
+            .turtle
+            .water_pos
+            .is_some_and(|pos| is_water_block(ctx.blocks(), pos))
+}
+
+/// `MoveToBlockGoal.start`：走到水格上面一格，清尝试刻数，再按官方抽停留上限的两个
+/// 随机数（这个目标的 `canContinueToUse` 不看它）。
+///
+/// `MoveToBlockGoal.start`: walk to the cell above the water, reset the try ticks and
+/// draw the two stay-limit numbers (this goal's `canContinueToUse` ignores them).
+pub(super) fn go_to_water_start(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    speed: f64,
+) {
+    if let Some(pos) = mob.turtle.water_pos {
+        let nav = living::nav_mob(me, mob, ctx.blocks());
+        let target = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y + 1),
+            f64::from(pos.z) + 0.5,
+        );
+        mob.navigation.move_to(ctx.blocks(), &nav, target, speed);
+    }
+    mob.turtle.water_try_ticks = 0;
+    let inner = me.random.next_int_bounded(1200);
+    me.random.next_int_bounded(inner + 1200);
+}
+
+/// `MoveToBlockGoal.tick`：没到水格上面一格的中心 1 格内就加尝试刻数，每 160 刻
+/// （`shouldRecalculatePath`）重新寻路；到了就减。
+///
+/// `MoveToBlockGoal.tick`: away from the centre of the cell above the water, count a try
+/// tick and re-path every 160 (`shouldRecalculatePath`); once there, count down.
+pub(super) fn go_to_water_tick(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    speed: f64,
+) {
+    let Some(pos) = mob.turtle.water_pos else {
+        return;
+    };
+    let target = pos.above();
+    if closer_to_center_than(target, me.position, 1.0) {
+        mob.turtle.water_try_ticks -= 1;
+        return;
+    }
+    mob.turtle.water_try_ticks += 1;
+    if mob.turtle.water_try_ticks % 160 == 0 {
+        let nav = living::nav_mob(me, mob, ctx.blocks());
+        let wanted = Vec3::new(
+            f64::from(target.x) + 0.5,
+            f64::from(target.y),
+            f64::from(target.z) + 0.5,
+        );
+        mob.navigation.move_to(ctx.blocks(), &nav, wanted, speed);
+    }
+}
+
+/// `TurtleTravelGoal.canUse`：不在回家、没有蛋、在水里。
+///
+/// `TurtleTravelGoal.canUse`: not going home, no egg, in water.
+pub(super) fn travel_can_use(me: &Entity, mob: &Mob) -> bool {
+    !mob.turtle.going_home && !mob.turtle.has_egg && me.in_water
+}
+
+/// `TurtleTravelGoal.start`：在 ±512 格、±4 层里抽一个远点（会高过海平面减一时不改高度），
+/// 记成 `travelPos`。返回新的 `stuck`（假）。
+///
+/// `TurtleTravelGoal.start`: draw a far point within ±512 blocks and ±4 layers (keeping
+/// the height when it would rise above sea level minus one) as `travelPos`. Returns the
+/// new `stuck` (false).
+pub(super) fn travel_start(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
+    let xt = me.random.next_int_bounded(1025) - 512;
+    let mut yt = me.random.next_int_bounded(9) - 4;
+    let zt = me.random.next_int_bounded(1025) - 512;
+    if f64::from(yt) + me.position.y > f64::from(ctx.blocks().sea_level() - 1) {
+        yt = 0;
+    }
+    mob.turtle.travel_pos = Some(BlockPos::containing(Vec3::new(
+        f64::from(xt) + me.position.x,
+        f64::from(yt) + me.position.y,
+        f64::from(zt) + me.position.z,
+    )));
+    false
+}
+
+/// `TurtleTravelGoal.tick`：导航空闲时朝远点取下一段（先 16/3、π/10，再 8/7、π/2），
+/// 落点周围 34 格的区块不全在就算卡住。
+///
+/// `TurtleTravelGoal.tick`: when the navigation is idle, pick the next leg towards the
+/// far point (16/3 at π/10, then 8/7 at π/2); missing chunks within 34 blocks of it
+/// count as stuck.
+pub(super) fn travel_tick(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    speed: f64,
+    stuck: &mut bool,
+) {
+    let Some(travel) = mob.turtle.travel_pos else {
+        *stuck = true;
+        return;
+    };
+    if !mob.navigation.is_done() {
+        return;
+    }
+    let target = Vec3::new(
+        f64::from(travel.x) + 0.5,
+        f64::from(travel.y),
+        f64::from(travel.z) + 0.5,
+    );
+    let next = default_random_pos_towards(
+        me,
+        mob,
+        ctx.blocks(),
+        16,
+        3,
+        target,
+        std::f32::consts::PI / 10.0,
+    )
+    .or_else(|| {
+        default_random_pos_towards(
+            me,
+            mob,
+            ctx.blocks(),
+            8,
+            7,
+            target,
+            std::f32::consts::FRAC_PI_2,
+        )
+    })
+    .filter(|next| has_chunks_around(ctx.blocks(), *next));
+    let Some(next) = next else {
+        *stuck = true;
+        return;
+    };
+    let nav = living::nav_mob(me, mob, ctx.blocks());
+    mob.navigation.move_to(ctx.blocks(), &nav, next, speed);
+}
+
+/// `LevelReader.hasChunksAt(xc - 34, zc - 34, xc + 34, zc + 34)`。
+///
+/// `LevelReader.hasChunksAt(xc - 34, zc - 34, xc + 34, zc + 34)`.
+fn has_chunks_around(view: &dyn BlockView, next: Vec3) -> bool {
+    let xc = next.x.floor() as i32;
+    let zc = next.z.floor() as i32;
+    let y = view.min_y();
+    ((xc - 34) >> 4..=(xc + 34) >> 4).all(|cx| {
+        ((zc - 34) >> 4..=(zc + 34) >> 4)
+            .all(|cz| view.is_loaded(BlockPos::new(cx << 4, y, cz << 4)))
+    })
+}
+
+/// `TurtleTravelGoal.canContinueToUse`：导航还在走、没卡住、不在回家、不在求爱、没有蛋。
+///
+/// `TurtleTravelGoal.canContinueToUse`: still navigating, not stuck, not going home,
+/// not in love and no egg.
+pub(super) fn travel_can_continue(mob: &Mob, stuck: bool) -> bool {
+    !mob.navigation.is_done()
+        && !stuck
+        && !mob.turtle.going_home
+        && mob.in_love <= 0
+        && !mob.turtle.has_egg
 }
 
 #[cfg(test)]

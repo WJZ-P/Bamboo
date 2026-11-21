@@ -222,6 +222,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             weather: global.block_weather,
             clock_ticks: global.clock.total_ticks,
             monsters_burn: mc_bamboo_blocks::sky::monsters_burn(global.clock.total_ticks),
+            sea_level: crate::natural_spawn::sea_level_of(global),
             ..ViewFacts::default()
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {

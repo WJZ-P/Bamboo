@@ -1275,6 +1275,7 @@ impl Report {
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     9..=12 => equine::scene_kind(cow.kind),
+                    60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 let id = world.spawn_entity(Entity::by_mob_type(kind, position));

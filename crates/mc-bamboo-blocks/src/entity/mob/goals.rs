@@ -207,6 +207,19 @@ pub enum Goal {
     TurtleGoHome {
         speed: f64,
     },
+    /// `Turtle.TurtleGoToWaterGoal`：在陆地上时往 24 格内的水走（`MoveToBlockGoal`）。
+    ///
+    /// `Turtle.TurtleGoToWaterGoal`: head for water within 24 blocks while on land.
+    TurtleGoToWater {
+        speed: f64,
+    },
+    /// `Turtle.TurtleTravelGoal`：在水里朝 512 格内的随机远点一段段游。
+    ///
+    /// `Turtle.TurtleTravelGoal`: swim leg by leg towards a random far point in water.
+    TurtleTravel {
+        speed: f64,
+        stuck: bool,
+    },
 }
 
 /// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
@@ -267,8 +280,8 @@ impl Goal {
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
             // `MoveToBlockGoal` 锁 MOVE + JUMP；`TurtleGoHomeGoal` 没设标志位。
             // `MoveToBlockGoal` locks MOVE and JUMP; `TurtleGoHomeGoal` sets none.
-            Self::TurtleLayEgg { .. } => &[Flag::Move, Flag::Jump],
-            Self::TurtleGoHome { .. } => &[],
+            Self::TurtleLayEgg { .. } | Self::TurtleGoToWater { .. } => &[Flag::Move, Flag::Jump],
+            Self::TurtleGoHome { .. } | Self::TurtleTravel { .. } => &[],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
             Self::SquidRandomMovement
@@ -299,6 +312,7 @@ impl Goal {
                 | Self::RandomStand { .. }
                 | Self::RangedAttack { .. }
                 | Self::TurtleLayEgg { .. }
+                | Self::TurtleGoToWater { .. }
         )
     }
 
@@ -350,6 +364,8 @@ impl Goal {
             Self::FollowFlock { .. } => "FollowFlockLeaderGoal",
             Self::TurtleLayEgg { .. } => "TurtleLayEggGoal",
             Self::TurtleGoHome { .. } => "TurtleGoHomeGoal",
+            Self::TurtleGoToWater { .. } => "TurtleGoToWaterGoal",
+            Self::TurtleTravel { .. } => "TurtleTravelGoal",
         }
     }
 }
@@ -1224,6 +1240,8 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::TurtleLayEgg { .. } => super::turtle::lay_egg_can_use(me, mob, ctx),
         Goal::TurtleGoHome { .. } => super::turtle::go_home_can_use(me, mob),
+        Goal::TurtleGoToWater { .. } => super::turtle::go_to_water_can_use(me, mob, ctx),
+        Goal::TurtleTravel { .. } => super::turtle::travel_can_use(me, mob),
     }
 }
 
@@ -1359,6 +1377,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::TurtleLayEgg { .. } => super::turtle::lay_egg_can_continue(me, mob, ctx),
         Goal::TurtleGoHome { .. } => super::turtle::go_home_can_continue(me, mob),
+        Goal::TurtleGoToWater { .. } => super::turtle::go_to_water_can_continue(me, mob, ctx),
+        Goal::TurtleTravel { stuck, .. } => super::turtle::travel_can_continue(mob, *stuck),
     }
 }
 
@@ -1513,6 +1533,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         }
         Goal::TurtleLayEgg { speed } => super::turtle::lay_egg_start(me, mob, ctx, *speed),
         Goal::TurtleGoHome { .. } => super::turtle::go_home_start(mob),
+        Goal::TurtleGoToWater { speed } => super::turtle::go_to_water_start(me, mob, ctx, *speed),
+        Goal::TurtleTravel { stuck, .. } => *stuck = super::turtle::travel_start(me, mob, ctx),
     }
 }
 
@@ -1540,8 +1562,11 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Wolf(goal) => goal.stop(mob),
         Goal::LeapAtTarget { .. } => {}
         Goal::Swim { .. } => mob.navigation.stop(),
-        Goal::TurtleLayEgg { .. } => mob.navigation.stop(),
+        // `MoveToBlockGoal` 没有覆写 `stop`：不停导航。
+        // `MoveToBlockGoal` does not override `stop`, so the navigation keeps going.
+        Goal::TurtleLayEgg { .. } | Goal::TurtleGoToWater { .. } => {}
         Goal::TurtleGoHome { .. } => super::turtle::go_home_stop(mob),
+        Goal::TurtleTravel { .. } => mob.turtle.travel_pos = None,
         Goal::PufferfishPuff => super::fish::puff_stop(mob),
         Goal::FollowFlock { .. } => super::fish::flock_stop(mob, ctx, me),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
@@ -1924,6 +1949,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::TurtleLayEgg { speed } => super::turtle::lay_egg_tick(me, mob, ctx, *speed),
         Goal::TurtleGoHome { speed } => super::turtle::go_home_tick(me, mob, ctx, *speed),
+        Goal::TurtleGoToWater { speed } => super::turtle::go_to_water_tick(me, mob, ctx, *speed),
+        Goal::TurtleTravel { speed, stuck } => {
+            super::turtle::travel_tick(me, mob, ctx, *speed, stuck);
+        }
     }
 }
 
@@ -2299,7 +2328,7 @@ pub(crate) fn default_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !mob.navigation.stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -2344,6 +2373,17 @@ pub(crate) fn default_random_pos_away(
     })
 }
 
+/// 导航的 `isStableDestination`；海龟有远行目标时（`TurtlePathNavigation`）只认水格。
+///
+/// The navigation's `isStableDestination`; a turtle with a travel target
+/// (`TurtlePathNavigation`) only accepts water cells.
+fn stable_destination(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
+    if super::turtle::is_turtle(mob.mob_type) && mob.turtle.travel_pos.is_some() {
+        return view.block_state(pos).is(blocks::WATER);
+    }
+    mob.navigation.stable_destination(view, pos)
+}
+
 /// `DefaultRandomPos.getPosTowards`：在朝向 `towards` 的 ±`angle` 扇形里取点。
 ///
 /// `DefaultRandomPos.getPosTowards`: sample within ±`angle` of the direction towards
@@ -2372,7 +2412,7 @@ pub(crate) fn default_random_pos_towards(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !mob.navigation.stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -2421,7 +2461,7 @@ pub(crate) fn land_random_pos(
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !mob.navigation.stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
         {
             return None;
         }

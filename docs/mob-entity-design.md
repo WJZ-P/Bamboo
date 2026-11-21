@@ -884,9 +884,8 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   由生成器导出，元数据和存档都用它们；`MobPublic` 多带鱼的花纹、膨胀和群的三个字段。
 - 对拍：`mob-oracle --only cod|salmon|tropical|puffer` 和 `--only natural_fish`。
   `cod_swim` / `salmon_swim` / `tropical_fish_swim` 各 241 刻 **0 不一致**（位置、速度、
-  朝向、随机源、氧气、尺寸、掉落、世界随机源、出站包逐字节）；`cod_beached` 461 刻只剩
-  溺水那一刻的两组包差一拍（4 处）；`pufferfish_puff` 从第 64 刻起实体随机源相差一个
-  `blow_up` 音效的取值（见下）。
+  朝向、随机源、氧气、尺寸、掉落、世界随机源、出站包逐字节）；`cod_beached` 461 刻、
+  `pufferfish_puff` 241 刻也都 **0 不一致**（2026-11-21 修好，原因见下）。
 - 自然生成：`natural_fish` 五个夹具（鳕鱼 / 鲑鱼 / 热带鱼 / 繁茂洞穴热带鱼 / 河豚）
   各 6 个种子 × 4 个时刻，**30 例 0 不一致**。为此修了两处公共规则：
   `MobType::can_spawn_far_from_player` 原来对所有非怪物返回真，官方只对
@@ -905,8 +904,12 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   美西螈 / 蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。
   验证：块级单元测试（组件拆分、只改有的键、存档往返）、游戏层两条（生存换桶、
   创造加桶）、发射器一条（生成的鱼 + 随机源种子）。没有 Java 逐刻对拍。
-- 已知差异：`pufferfish_puff` 里河豚从 1 鼓到 2 时 Bamboo 的音效早官方一刻（早取两个
-  `nextFloat`），第 64 刻起实体随机源就不一致；`cod_beached` 溺水瞬间两组包差一拍。
+- 2026-11-21 修掉的三处：`AbstractFish.aiStep`（离水扑腾）原来对所有动物都跑，陆地动物
+  站在地上每刻都会蹦、取实体随机数、放扑腾声并从岛的音效种子源取数（`sheep_eat` 漂移和
+  `island_command` 岛 1 随机源不一致都是它），现在只对 `is_fish` 跑；扑腾时补上
+  `needsSync`，死后倒计时那 20 刻里速度和移动包才会当刻发出（`cod_beached`）；河豚没有
+  叫声，原来回落到牛的叫声并多取两个音高随机数（`pufferfish_puff` 第 62 刻），另外对拍
+  Rust 一侧的牛位置从 1.5 改成和官方一样的 0.9。
 
 ## 海龟的实施现状（2026-11-21，分支 `op-water`）
 
@@ -924,8 +927,17 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   陆地上的叫声、`nextStep = moveDist + 0.15`）、`travelInWater` 和 `canFallInLove`
   都按官方。
 - 目标：0 `TurtlePanicGoal`（先找 7 格内的水）、1 `TurtleBreedGoal`、1
-  `TurtleLayEggGoal`、2 `TemptGoal`、4 `TurtleGoHomeGoal`、8 `LookAtPlayerGoal`、
-  9 `TurtleRandomStrollGoal`。`TurtleGoToWaterGoal` 和 `TurtleTravelGoal` 没做。
+  `TurtleLayEggGoal`、2 `TemptGoal`、3 `TurtleGoToWaterGoal`、4 `TurtleGoHomeGoal`、
+  7 `TurtleTravelGoal`、8 `LookAtPlayerGoal`、9 `TurtleRandomStrollGoal`。
+  `MoveToBlockGoal.findNearestBlock` 按官方的 y / 圈 / x / z 交替顺序写成一个通用函数，
+  产卵（半径 16，y 依次 0、1、-1）和找水（半径 24，只看 y = -1 那一层，即脚下两格）共用；
+  `MoveToBlockGoal` 没有 `stop`，停止时不停导航。远行目标读 `BlockView::sea_level`
+  （游戏层按世界类型给 63 / -63），有远行目标时 `TurtlePathNavigation.isStableDestination`
+  只认水格。
+- 移动：`TurtleMoveControl`（水里上浮 0.005，离家 16 格外速度减半、幼年再除以 3，地上
+  速度减半，0.125 插值，不跳也不回到 `WAIT`）；`AmphibiousNodeEvaluator.getStart` 在水里
+  从包围盒最小角起步（原来按走路求值器往下找地面，会穿过水下的空气一路找到世界底部）。
+  能在水下呼吸，游泳声 `entity.turtle.swim` 音量 ×1.5。
 - 繁殖：`TurtleBreedGoal.breed` 不走 `Animal.spawnChildFromBreeding`，母亲设
   `has_egg`、双方年龄 6000、掉一颗 `1 + nextInt(7)` 的经验球；`apply_breed` 里有一条
   海龟分支。喂食时 `canFallInLove` 为假（有蛋）就不进求爱。
@@ -935,6 +947,6 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   为 1.0）推进 `HATCH`，第三阶段清掉方块并生成 `EGGS` 只幼年海龟（家方块是蛋的位置）。
 - 存档和同步：`home_pos` / `has_egg` 存盘；`HAS_EGG`(18) / `LAYING_EGG`(19) 同步，
   非默认才发。长大的那一刻按 `entities/turtle_grow` 掉鳞甲（走 `EntityLootRequest`）。
-- 验证：`cargo test -p mc-bamboo-blocks --lib` 716 条通过（含 3 条海龟单元测试：
-  尺寸、属性、存档往返），`cargo clippy --workspace --all-targets -D warnings` 干净。
-  还没有 `mob-oracle` 场景，也没有自然生成夹具。
+- 验证：`mob-oracle --only zombie_turtle_ai`（类型 60，借僵尸场景的多生物路径）四个场景：
+  沙滩找水两个种子、幼年、水下远行，共 1500 刻 **0 不一致**（位置、速度、朝向、随机源、
+  氧气、运行中的目标、路径节点）。产卵、孵化、回家还没有场景，也没有自然生成夹具。
