@@ -405,6 +405,21 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 `--only llama_spit`（2 场景 322 刻）复跑全部 0 不一致，确认合并没有改变马科的取数顺序。
 另补了 `START_RIDING_JUMP` 服务端门槛的单元测试（上鞍 + 正刻度才扬蹄、播跳跃声）。
 
+**与 main 合并（2026-11-21，第十轮）。** 本轮 `main` 又前进了 10 个 worldgen 缓存提交
+（`c093090f` 一带：`worldgen_cache.rs` / `worldgen_compact.rs`、缓存设置与按依赖 / 空闲回收）。
+`git merge main` 用 ort 自动合并了双方都改过的 `README.md`、`mc-bamboo-game/src/lib.rs`、
+`mc-bamboo-game/src/world.rs`，没有冲突；`cargo check --workspace --all-targets` 通过。
+`mob-oracle --only equine`（648 题）、`--only zombie_equine`（20 场景 15258 刻）、
+`--only llama_spit`（2 场景 322 刻）复跑全部 0 不一致，确认缓存改动没有碰马科的取数顺序。
+本轮把上一轮未落盘的 `START_RIDING_JUMP` 单元测试提交，并逐行核对了官方 26.3 的跳跃链：
+`ServerGamePacketListenerImpl.handlePlayerCommand` 的 `START_RIDING_JUMP` 分支只调
+`PlayerRideableJumping.handleStartJump`（即 `AbstractHorse.handleStartJump`：扬蹄 + 跳跃声，不用刻度值）；
+真正的冲量 `AbstractHorse.tickRidden` → `executeRidersJump` 受 `isLocalInstanceAuthoritative()` 约束，
+而 `Player.isClientAuthoritative()` 恒真、载具的 `isClientAuthoritative()` 随控制乘客为真，
+故服务端该值为假、冲量只在客户端算。Bamboo 服务端只做扬蹄和跳跃声、位置由 `move_vehicle` 提供，
+与官方一致；`playerJumpPendingScale` / `allowStandSliding` / `getRiddenInput` 是客户端权威的
+AI 内部量，服务端不建模，无玩家可感知差异。没有改动任何马科行为代码。
+
 其余已知差异见 README「马科的已知限制」。
 
 ---
