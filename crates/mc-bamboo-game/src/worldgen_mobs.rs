@@ -272,10 +272,12 @@ mod tests {
     use crate::world_options::LevelType;
 
     /// 模板柱（草方块地面、已算好光照）放在真实主世界群系上：一批区块里能刷出牛，
-    /// 每头牛都落在自己的区块、站在草上；同一区块重跑结果相同。
+    /// 每只动物都落在自己的区块、站在草上；同一区块重跑结果相同。刷出来的只能是
+    /// 已经建模的种类：牛和马科。
     ///
     /// Template columns (grass, baked light) over real overworld biomes: some cows
-    /// spawn, each inside its own chunk on the grass, and reruns are identical.
+    /// spawn, every animal lands inside its own chunk on the grass, and reruns are
+    /// identical. Only modelled kinds may appear: cows and equines.
     #[test]
     fn cows_spawn_inside_their_chunk_and_replay_identically() {
         let config = WorldGenConfig {
@@ -283,6 +285,15 @@ mod tests {
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         };
+        // 生成期真的会生成的种类。
+        // The kinds world generation really spawns.
+        const GENERATED: [i32; 5] = [
+            entity_type::COW,
+            entity_type::HORSE,
+            entity_type::DONKEY,
+            entity_type::MULE,
+            entity_type::LLAMA,
+        ];
         let mut cows = 0;
         for x in 0..24 {
             for z in 0..24 {
@@ -301,10 +312,12 @@ mod tests {
                 assert_eq!(rows.len(), again.len());
                 for (row, replay) in rows.iter().zip(&again) {
                     assert_eq!(row.public.position, replay.public.position);
-                    assert_eq!(row.public.kind.entity_type(), entity_type::COW);
+                    let kind = row.public.kind.entity_type();
+                    assert_eq!(kind, replay.public.kind.entity_type());
+                    assert!(GENERATED.contains(&kind), "unexpected generated mob {kind}");
                     let at = row.public.position;
-                    assert_eq!(BlockPos::containing(at).chunk(), pos, "牛要落在本区块");
-                    cows += 1;
+                    assert_eq!(BlockPos::containing(at).chunk(), pos, "动物要落在本区块");
+                    cows += usize::from(kind == entity_type::COW);
                 }
             }
         }

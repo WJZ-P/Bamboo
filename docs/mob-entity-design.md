@@ -324,6 +324,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 | 落地声 | `AbstractHorse.causeFallDamage` 的 `HORSE_LAND` | `equine::land_sound` | 单元测试；音效包不在对拍范围 |
 | 羊驼回击、吐口水 | `Llama.LlamaHurtByTargetGoal`、`RangedAttackGoal(1.25, 40, 20)`、`Llama.spit`、`LlamaSpit`、`DamageTypes.SPIT` | `goals.rs` 的 `Goal::RangedAttack` / `LlamaHurtByTarget`，`equine/ranged.rs`，口水实体 `entity/spit.rs`（存档 `archive/entity/spit.rs`） | `llama_spit_far` / `_near` 两场景各 160 刻 0 不一致（羊驼和口水的位置、速度、随机源、目标名、口水同步包、玩家血量）；`chunk-content` 两道口水存档题 |
 | `followMommy` | `AbstractHorse.followMommy`（只 `createPath` 不走） | `equine/life.rs` 的 `follow_mommy` | 单元测试；`Bred` 只能从存档来，逐刻场景没覆盖 |
+| 自然生成、生成期刷怪 | `Horse/Llama/AbstractHorse.finalizeSpawn` 的组数据（`HorseGroupData`、`LlamaGroupData` 同组共享毛色，驴骡 `AgeableMobGroupData(0.2)`）、`getMaxSpawnClusterSize() == 6`、`Animal.checkAnimalSpawnRules` | `equine/spawn.rs`，`spawn.rs` 的 `SpawnGroup::Horse` / `Llama`，`natural.rs`、`natural_gen.rs` 各加一行 | `equineGroup`（同组 6 只逐只比属性、花色、年龄、左撇子、世界随机源、配对元数据）；`natural_spawn` 的 `horse_day` / `donkey_day` / `llama_day`；`gen_spawn` 里马科的落点和区域随机源上的 `finalizeSpawn` |
 
 坐骑物品栏每次点击前从生物读回鞍、身体和箱子格，点击后把鞍位 / 身体位的每次 `setByPlayer`
 按发生顺序在生物上重放（官方 `ArmorSlot.setByPlayer` 先调一次 `onEquipItem`，装备容器的
