@@ -124,6 +124,11 @@ struct Case {
     /// 每刻新生成的掉落物和经验球。
     #[serde(default)]
     spawns: Option<Vec<Vec<Spawn>>>,
+    /// 吃草场景：每刻 `blocks` 里每一格此刻的状态号，顺序相同。
+    ///
+    /// Grazing scenes: the current state id of every `blocks` cell per tick, same order.
+    #[serde(default)]
+    block_steps: Option<Vec<Vec<u32>>>,
     /// 致死伤害的种类：0 玩家攻击，1 摔落，2 着火。
     #[serde(default)]
     death_kind: i32,
@@ -1577,6 +1582,7 @@ impl Report {
                 }
             }
             self.compare(&case.name, index, &ours, expected);
+            self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
             if let Some(expected) = &case.mob_event_packets
                 && let Some(expected) = expected.get(index)
@@ -1642,6 +1648,24 @@ impl Report {
             }
             if self.mismatches.len() >= self.show {
                 return;
+            }
+        }
+    }
+
+    /// 吃草场景：这一刻场景里每一格的方块状态和官方逐格相同。
+    ///
+    /// Grazing scenes: every scene cell holds the official block state this tick.
+    fn compare_blocks(&mut self, case: &Case, level: &MobLevel, index: usize) {
+        let Some(expected) = case.block_steps.as_ref().and_then(|all| all.get(index)) else {
+            return;
+        };
+        for (&[x, y, z, _], &official) in case.blocks.iter().zip(expected) {
+            let ours = level.block_state(BlockPos::new(x, y, z)).0;
+            if ours != official {
+                self.mismatch(format!(
+                    "{} tick {index} block {x},{y},{z}: official {official} bamboo {ours}",
+                    case.name
+                ));
             }
         }
     }

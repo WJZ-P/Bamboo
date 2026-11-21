@@ -885,6 +885,8 @@ public final class MobOracle {
             {
                 // 关掉 `mobGriefing`：草方块不变泥土，但羊照样算吃过（长回羊毛、幼年加速）。
                 // With `mobGriefing` off the grass block stays, yet the sheep still "ate".
+                // 玻璃圈关不住幼羊：它会跳上玻璃走出去，第 135 刻在 (2, 63, -1) 上吃草。
+                // The glass ring does not hold the lamb: it hops out and grazes at (2, 63, -1) on tick 135.
                 Scene calm = new Scene("sheep_eat_no_grief").ticks(300).packets();
                 ground(calm, 8);
                 calm.fill(-1, 64, -1, 1, 64, 1, Blocks.GLASS.defaultBlockState());
@@ -2142,6 +2144,12 @@ public final class MobOracle {
         }
         line.append("],\"steps\":[");
         line.append(stepJson(cows));
+        // 吃草场景逐刻比场景方块的状态：草方块变没变泥土、矮草在不在。
+        // Grazing scenes compare the scene blocks every tick: grass to dirt, short grass gone.
+        StringBuilder blockSteps = scene.name.startsWith("sheep_eat") ? new StringBuilder("[") : null;
+        if (blockSteps != null) {
+            blockSteps.append(blockStates(scene.blocks, level));
+        }
         if (scene.playerPackets && !players.isEmpty()) {
             playerSteps.get(0).add(playerStepJson(players.get(0)));
             // 官方 `placeNewPlayer` 之后 `ServerPlayer.doTick` 的第一次调用就补
@@ -2335,6 +2343,9 @@ public final class MobOracle {
             }
             level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(stepJson(cows));
+            if (blockSteps != null) {
+                blockSteps.append(',').append(blockStates(scene.blocks, level));
+            }
             if (scene.packets) {
                 // 官方 `ChunkMap.removeEntity` 在实体被丢弃时发给所有观察者。
                 // Vanilla's `ChunkMap.removeEntity` tells every viewer when an entity is discarded.
@@ -2367,6 +2378,9 @@ public final class MobOracle {
         appendPackets(line, syncFlags);
         line.append(",\"spawns\":");
         appendSpawns(line, spawns);
+        if (blockSteps != null) {
+            line.append(",\"blockSteps\":").append(blockSteps).append(']');
+        }
         line.append(",\"deathKind\":").append(scene.deathKind);
         line.append(",\"fireTicks\":").append(scene.fireTicks);
         line.append(",\"cowEffectActions\":[");
@@ -5658,6 +5672,28 @@ public final class MobOracle {
         }
         out.append(']');
         return out.toString();
+    }
+
+    /**
+     * 场景方块此刻的状态号，顺序和 {@link #blockArray} 一样（按键排序、跳过开局的空气）。
+     *
+     * The scene blocks' current state ids, in {@link #blockArray} order (sorted keys,
+     * cells that started as air skipped).
+     */
+    private static String blockStates(Long2ObjectOpenHashMap<BlockState> initial, FakeLevel level) {
+        long[] keys = initial.keySet().toLongArray();
+        Arrays.sort(keys);
+        StringBuilder out = new StringBuilder("[");
+        boolean first = true;
+        for (long key : keys) {
+            if (initial.get(key).isAir()) {
+                continue;
+            }
+            if (!first) out.append(',');
+            first = false;
+            out.append(Block.getId(level.getBlockState(BlockPos.of(key))));
+        }
+        return out.append(']').toString();
     }
 
     private static void setRandom(Entity entity, long seed) {
