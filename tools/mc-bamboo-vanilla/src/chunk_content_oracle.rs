@@ -635,6 +635,7 @@ fn run_cases(
         MobType::Pig,
         MobType::Sheep,
         MobType::Chicken,
+        MobType::PolarBear,
     ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
