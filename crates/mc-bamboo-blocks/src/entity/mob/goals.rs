@@ -116,6 +116,14 @@ pub enum Goal {
     RandomStand {
         next_stand: i32,
     },
+    /// `RunAroundLikeCrazyGoal`：没驯服的马科被人骑着时朝 `wanted` 乱跑，偶尔抽签驯服。
+    ///
+    /// `RunAroundLikeCrazyGoal`: an untamed equine with a rider bolts towards
+    /// `wanted` and now and then rolls to be tamed.
+    RunAroundLikeCrazy {
+        speed: f64,
+        wanted: Vec3,
+    },
     /// 羊驼的 `RangedAttackGoal(this, 1.25, 40, 20.0F)`：目标存在自己身上，
     /// 目标被目标表清掉以后还能凭「活着且路没走完」继续。
     ///
@@ -174,6 +182,7 @@ impl Goal {
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
             Self::Unavailable(_) | Self::RandomStand { .. } => &[],
+            Self::RunAroundLikeCrazy { .. } => &[Flag::Move],
             Self::MeleeAttack { .. } | Self::Bow(_) | Self::RangedAttack { .. } => {
                 &[Flag::Move, Flag::Look]
             }
@@ -226,6 +235,7 @@ impl Goal {
             Self::BreakDoor => "BreakDoorGoal",
             Self::TurtleEgg { .. } => "ZombieAttackTurtleEggGoal",
             Self::RandomStand { .. } => "RandomStandGoal",
+            Self::RunAroundLikeCrazy { .. } => "RunAroundLikeCrazyGoal",
             Self::RangedAttack { .. } => "RangedAttackGoal",
             Self::LlamaHurtByTarget { .. } => "LlamaHurtByTargetGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
@@ -873,6 +883,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::RandomStand { next_stand } => {
             super::equine::random_stand_can_use(me, mob, next_stand)
         }
+        Goal::RunAroundLikeCrazy { wanted, .. } => {
+            super::equine::tame::can_use(me, mob, ctx, wanted)
+        }
         Goal::MeleeAttack {
             last_can_use_check,
             start_path,
@@ -1051,6 +1064,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float => can_use(goal, me, mob, ctx),
         Goal::Unavailable(_) | Goal::RandomStand { .. } => false,
+        Goal::RunAroundLikeCrazy { .. } => super::equine::tame::can_continue(mob),
         Goal::MeleeAttack { .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。
@@ -1142,6 +1156,9 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         }
         Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
         Goal::RandomStand { .. } => super::equine::random_stand_start(me, mob),
+        Goal::RunAroundLikeCrazy { speed, wanted } => {
+            super::equine::tame::start(me, mob, ctx, *wanted, *speed)
+        }
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1250,7 +1267,8 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::Panic { .. }
         | Goal::RandomLookAround { .. }
         | Goal::Unavailable(_)
-        | Goal::RandomStand { .. } => {}
+        | Goal::RandomStand { .. }
+        | Goal::RunAroundLikeCrazy { .. } => {}
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
         Goal::HurtByTarget { .. } | Goal::LlamaHurtByTarget { .. } => mob.target = None,
@@ -1395,6 +1413,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 .set_look_at_default(me.position.x + *rel_x, eye, me.position.z + *rel_z);
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
+        Goal::RunAroundLikeCrazy { .. } => super::equine::tame::tick(me, mob, ctx),
         Goal::Unavailable(_)
         | Goal::HurtByTarget { .. }
         | Goal::LlamaHurtByTarget { .. }
@@ -1694,8 +1713,11 @@ fn nearest_look_target(
     let mut best = -1.0_f64;
     let mut found = None;
     for player in players {
-        // `notRiding(mob)`：牛不当坐骑，玩家不会骑在它身上。
-        if !targeting_test(me, mob, view, &player, range, true) {
+        // `notRiding(mob)`：忽略骑在自己身上的玩家。
+        // `notRiding(mob)`: ignore players riding this mob.
+        if mob.passengers.contains(&player.uid)
+            || !targeting_test(me, mob, view, &player, range, true)
+        {
             continue;
         }
         let distance = player.position.distance_to_sqr(eye);

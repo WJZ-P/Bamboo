@@ -140,14 +140,7 @@ pub(crate) fn dismount(region: &mut Region, id: PlayerId) {
 /// default point minus the rider's own `VEHICLE` attachment point (the feet, zero
 /// for a player).
 fn passenger_offset(mob: &mc_bamboo_blocks::entity::mob::MobPublic, yaw: f32) -> Vec3 {
-    let height = mob.mob_type.dimensions(false).1;
-    let (y, z) = match mob.mob_type {
-        mc_bamboo_blocks::entity::mob::MobType::Horse => (height - 0.125, 0.0),
-        mc_bamboo_blocks::entity::mob::MobType::Donkey
-        | mc_bamboo_blocks::entity::mob::MobType::Mule => (height + 0.031_25, -0.3125),
-        mc_bamboo_blocks::entity::mob::MobType::Llama => (height - 0.25, -0.3),
-        _ => (height, 0.0),
-    };
+    let (y, z) = mc_bamboo_blocks::entity::mob::equine::passenger_attachment(mob.mob_type);
     // `Vec3.yRot(-yRot * PI / 180)`，和官方附着点的旋转方向相同。
     //
     // `Vec3.yRot(-yRot * PI / 180)`, the same direction as the vanilla attachment point.
@@ -190,6 +183,16 @@ pub(crate) fn tick(region: &mut Region) {
             dismount(region, id);
             continue;
         };
+        // 官方 `ejectPassengers`：载具的乘客名单里没有这名玩家了，就当场摘掉两边的关系。
+        // 未驯服的马科被骑时 `RunAroundLikeCrazyGoal` 就是这样甩人的。
+        //
+        // Vanilla `ejectPassengers`: once the vehicle's passenger list no longer
+        // holds this player, both sides are cleared. That is how
+        // `RunAroundLikeCrazyGoal` throws the rider off an untamed equine.
+        if !mob.passengers.contains(&id.0) {
+            dismount(region, id);
+            continue;
+        }
         let offset = passenger_offset(mob, public.yaw);
         let target = public.position.add(offset);
         let yaw = public.yaw;

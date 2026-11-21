@@ -353,8 +353,15 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 
 **还没做**：载具移动的官方碰撞校验（`move()`、`isEntityCollidingWithAnythingNew`、`noCollision`），
 载具摔落伤害和 `clientVehicleIsFloating` 踢人；玩家下线时 `RootVehicle` 存进玩家档；岛拆分把
-「载具 + 骑手」当成不可分的一组；`RunAroundLikeCrazyGoal`（没驯服的马甩人、靠骑乘涨脾气）。
+「载具 + 骑手」当成不可分的一组。
 这几项都不改阶段顺序，但要么要改移动校验、要么要改存档和分区器，留给队长定。
+
+**骑乘驯服（第六轮）。** `equine/tame.rs` 在官方优先级注册 `RunAroundLikeCrazyGoal`：
+未驯服且有乘客时查找随机落点、以 1.2 倍速导航，按目标的半频 tick 抽签（每次抽
+`nextInt(25)`，命中才抽 `nextInt(maxTemper)`）。成功写入现有的 `Owner` 和 `Tame` 并发
+实体事件 7，保留乘客；失败把脾气加 5（限制在该物种范围内），清乘客名单、发怒和事件 6。
+`riding::tick` 在已有阶段中清理玩家侧的关系，已有同步路径发送乘客名单变更。
+骑乘期间，`AbstractHorse.aiStep` 跳过起始吃草的随机抽取，`LookAtPlayerGoal` 不选自己的骑手。
 
 羊驼的口水是新的实体种类 `EntityKind::LlamaSpit`：生成走 `Command::ShootLlamaSpit`，
 命中实体走 `Command::SpitHit`（落地时按主人当时的公开状态造 `spit` 伤害来源），

@@ -287,7 +287,7 @@ fn handle_eating(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> bo
 /// `getMaxTemper`：马、驴、骡 100，羊驼 30。
 ///
 /// `getMaxTemper`: 100 for horses, donkeys and mules, 30 for llamas.
-const fn max_temper(kind: MobType) -> i32 {
+pub(super) const fn max_temper(kind: MobType) -> i32 {
     if matches!(kind, MobType::Llama) {
         30
     } else {

@@ -29,6 +29,7 @@ mod life;
 mod llama;
 mod ranged;
 mod spawn;
+pub(super) mod tame;
 pub(super) use spawn::finalize_spawn;
 
 pub(super) use death::drop_on_death;
@@ -136,6 +137,24 @@ pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
         0.5
     };
     (facts.width * scale, facts.height * scale, eye * scale)
+}
+
+/// 成年骑手在背上的附着点 `(y, z)`，官方 `EntityTypes` 的 `passengerAttachments`：
+/// 马 1.44375、驴 1.1125、骡 1.2125、羊驼 (1.37, -0.3)。扬蹄时 `AbstractHorse`
+/// 再加的 `0.15 * standAnimO`、`-0.7 * standAnimO` 还没有建模。
+///
+/// The attachment point `(y, z)` of an adult rider, from vanilla `EntityTypes`'
+/// `passengerAttachments`: horse 1.44375, donkey 1.1125, mule 1.2125, llama
+/// (1.37, -0.3). The `0.15 * standAnimO` and `-0.7 * standAnimO` that
+/// `AbstractHorse` adds while rearing are not modelled yet.
+pub fn passenger_attachment(kind: MobType) -> (f32, f32) {
+    match kind {
+        MobType::Horse => (1.443_75, 0.0),
+        MobType::Donkey => (1.112_5, 0.0),
+        MobType::Mule => (1.212_5, 0.0),
+        MobType::Llama => (1.37, -0.3),
+        _ => (0.0, 0.0),
+    }
 }
 
 /// `createBaseHorseAttributes`，驴骡羊驼再用 `createBaseChestedHorseAttributes` 的速度和跳跃。

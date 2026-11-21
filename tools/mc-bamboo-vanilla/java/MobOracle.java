@@ -477,6 +477,18 @@ public final class MobOracle {
         int helmetDamage;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
+        /**
+         * 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
+         *
+         * Equine scenes: this player rides mob 0; -1 means nobody rides.
+         */
+        int rider = -1;
+        /**
+         * 马科场景：0 号生物的初始脾气，-1 表示用构造时的值。
+         *
+         * Equine scenes: mob 0's starting temper; -1 keeps its constructed value.
+         */
+        int temper = -1;
 
         Scene(String name) {
             this.name = name;
@@ -510,6 +522,16 @@ public final class MobOracle {
             seeds.add(seed);
             cowAges.add(age);
             mobKinds.add(new int[] {kind});
+            return this;
+        }
+
+        Scene rider(int playerIndex) {
+            this.rider = playerIndex;
+            return this;
+        }
+
+        Scene temper(int value) {
+            this.temper = value;
             return this;
         }
 
@@ -1800,6 +1822,27 @@ public final class MobOracle {
                     hurt.hurts.add(new double[] {tick, 0, 1.0, 0});
                 }
                 scenes.add(hurt);
+            }
+            // 没驯服的马科被人骑着：`RunAroundLikeCrazyGoal` 乱跑、甩人、涨脾气；
+            // 脾气顶满的一头在第一次抽中时当场驯服，骑手留着。
+            // An untamed equine with a rider: `RunAroundLikeCrazyGoal` bolts, throws
+            // the rider and grows the temper; a full-temper one tames on the first
+            // hit and keeps the rider.
+            for (int kind : new int[] {6, 7, 8, 9}) {
+                Scene buck = new Scene("zombie_equine_buck_" + kind).ticks(400).difficulty(2);
+                ground(buck, 12);
+                buck.mob(kind, 0.5, 64.0, 0.5, 0.0F, 91L, 0);
+                buck.player(0.5, 64.0, 0.5, Items.AIR);
+                buck.rider(0);
+                scenes.add(buck);
+
+                Scene tame = new Scene("zombie_equine_tame_" + kind).ticks(400).difficulty(2);
+                ground(tame, 12);
+                tame.mob(kind, 0.5, 64.0, 0.5, 0.0F, 92L, 0);
+                tame.temper(kind == 9 ? 30 : 100);
+                tame.player(0.5, 64.0, 0.5, Items.AIR);
+                tame.rider(0);
+                scenes.add(tame);
             }
             Scene herd = new Scene("zombie_equine_herd").ticks(1200).difficulty(2);
             ground(herd, 12);
@@ -4544,6 +4587,10 @@ public final class MobOracle {
             } else if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
                 ageable.setAge(scene.cowAges.get(i));
             }
+            if (i == 0 && scene.temper >= 0
+                    && mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
+                horse.setTemper(scene.temper);
+            }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);
                 if (scene.helmetDamage != 0) helmet.setDamageValue(scene.helmetDamage);
@@ -4554,9 +4601,13 @@ public final class MobOracle {
             mobs.add(mob);
             level.tracked.add(mob);
         }
+        if (scene.rider >= 0 && !players.get(scene.rider).startRiding(mobs.get(0))) {
+            throw new IllegalStateException("Rider could not mount in " + scene.name);
+        }
         StringBuilder line = new StringBuilder(1 << 18);
         line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
         line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"rider\":").append(scene.rider);
         line.append(",\"startTime\":").append(START_TIME);
         line.append(",\"blocks\":").append(blockArray(scene.blocks));
         line.append(",\"cows\":[");
@@ -4570,6 +4621,7 @@ public final class MobOracle {
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
+            line.append(",\"temper\":").append(i == 0 ? scene.temper : -1);
             line.append(",\"kind\":").append(kind[0]).append('}');
         }
         line.append("],\"players\":[");
@@ -4654,6 +4706,24 @@ public final class MobOracle {
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                         lastSentHealth, false);
+            }
+            // 对拍到驯服或甩人的那一刻。后续骑手落点和玩家移动不属于这个生物目标。
+            // Compare through taming or ejection; later rider placement is outside the goal.
+            if (scene.rider >= 0
+                    && (((net.minecraft.world.entity.animal.equine.AbstractHorse) mobs.get(0)).isTamed()
+                        || !mobs.get(0).isVehicle())) {
+                break;
+            }
+        }
+        if (scene.rider >= 0) {
+            // 防止随机种子只测到跑动，却始终没触发驯服或甩人。
+            // Ensure the seed exercises taming or ejection, not just running.
+            var horse = (net.minecraft.world.entity.animal.equine.AbstractHorse) mobs.get(0);
+            var rider = players.get(scene.rider);
+            boolean tamed = scene.temper >= 0;
+            if (horse.isTamed() != tamed || (rider.getVehicle() == horse) != tamed
+                    || horse.getTemper() != (tamed ? scene.temper : 5)) {
+                throw new IllegalStateException("Expected taming or ejection never occurred in " + scene.name);
             }
         }
         line.append("]");
@@ -4766,6 +4836,10 @@ public final class MobOracle {
             if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
                 out.append(",\"eq\":").append(equineFlags(horse));
                 out.append(",\"tmp\":").append(horse.getTemper());
+                out.append(",\"rider_count\":").append(horse.getPassengers().size());
+                if (horse.getOwnerReference() != null) {
+                    out.append(",\"owner\":").append(jsonString(horse.getOwnerReference().getUUID().toString()));
+                }
             }
             out.append(",\"aggr\":").append(mob.isAggressive());
             out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());

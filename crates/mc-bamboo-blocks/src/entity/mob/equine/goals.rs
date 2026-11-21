@@ -93,20 +93,29 @@ fn tempt() -> Goal {
     }
 }
 
+/// `RunAroundLikeCrazyGoal(this, 1.2)`。
+///
+/// `RunAroundLikeCrazyGoal(this, 1.2)`.
+fn run_around_like_crazy() -> Goal {
+    Goal::RunAroundLikeCrazy {
+        speed: 1.2,
+        wanted: Vec3::default(),
+    }
+}
+
 /// 按官方 `addGoal` 的调用顺序建目标表；`FloatGoal` 的构造函数顺手打开导航的浮水。
 ///
-/// `RunAroundLikeCrazyGoal` 只在有人骑、没驯服时才取数，Bamboo 还没有骑乘，
-/// 所以它是不取数的占位；羊驼的商队同理（见 README 已知限制）。
+/// 羊驼的商队目标还是不取数的占位（见 README 已知限制）。
 ///
 /// Build the table in vanilla `addGoal` order; `FloatGoal` also turns on floating.
-/// `RunAroundLikeCrazyGoal` only draws with an untamed rider and Bamboo has no
-/// riding yet, so it is a draw-free placeholder, like the llama caravan.
+/// The llama caravan goal stays a draw-free placeholder (see the README known
+/// limitations).
 pub(in crate::entity::mob) fn goals(kind: MobType, navigation: &mut Navigation) -> GoalSelector {
     navigation.flags.can_float = true;
     if kind == MobType::Llama {
         return selector(vec![
             wrap(0, Goal::Float),
-            wrap(1, Goal::Unavailable("RunAroundLikeCrazyGoal")),
+            wrap(1, run_around_like_crazy()),
             wrap(2, Goal::Unavailable("LlamaFollowCaravanGoal")),
             wrap(
                 3,
@@ -126,7 +135,7 @@ pub(in crate::entity::mob) fn goals(kind: MobType, navigation: &mut Navigation) 
         ]);
     }
     selector(vec![
-        wrap(1, Goal::Unavailable("RunAroundLikeCrazyGoal")),
+        wrap(1, run_around_like_crazy()),
         wrap(2, breed()),
         wrap(4, follow_parent()),
         wrap(6, stroll()),

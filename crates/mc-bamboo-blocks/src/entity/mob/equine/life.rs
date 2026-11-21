@@ -109,12 +109,17 @@ pub(in crate::entity::mob) fn ai_step_end(me: &mut Entity, mob: &mut Mob, ctx: &
     follow_mommy(me, mob, ctx);
 }
 
-/// `AbstractHorse.aiStep` 里 `canEatGrass()` 为真（不是羊驼）的那一段。
+/// `AbstractHorse.aiStep` 里 `canEatGrass()` 为真（不是羊驼）的那一段。有人骑着时
+/// 官方在取 `nextInt(300)` 之前就短路，随机源不会多走一步。
 ///
-/// The `canEatGrass()` part of `AbstractHorse.aiStep` (everything but llamas).
+/// The `canEatGrass()` part of `AbstractHorse.aiStep` (everything but llamas). Vanilla
+/// short-circuits before drawing `nextInt(300)` while someone rides, so the random
+/// source does not advance.
 fn graze(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let below = BlockPos::containing(me.position).below();
-    if !state(mob).eating
+    let eating = state(mob).eating;
+    if !eating
+        && !mob.is_vehicle()
         && me.random.next_int_bounded(300) == 0
         && ctx.blocks().block_state(below).is(blocks::GRASS_BLOCK)
     {
