@@ -16,8 +16,9 @@ export const PixelInput = styled.input`
     color: ${({ theme }) => theme.color.panelShade};
   }
 
+  /* 照原版文本框：聚焦时整圈边框是白色高亮。Like the vanilla text field: white border on focus. */
   &:focus {
-    border-color: ${({ theme }) => theme.color.bamboo.light};
+    border-color: ${({ theme }) => theme.color.panelLight};
   }
 
   &[aria-invalid="true"] {

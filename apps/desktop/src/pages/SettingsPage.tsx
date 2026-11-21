@@ -39,7 +39,7 @@ const Grid = styled.div`
   max-width: 720px;
 `;
 
-const Field = styled.label<{ $wide?: boolean }>`
+const Field = styled.div<{ $wide?: boolean }>`
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -310,15 +310,13 @@ export function SettingsPage() {
                   <Lead>{group.hint}</Lead>
                   <Grid>
                     {FIELDS.filter((field) => field.group === group.id).map((field) => (
+                      // 不用 <label> 包整格：点提示文字时浏览器会把焦点送回输入框，点空白处取消不了聚焦。
+                      // 输入框自己带 aria-label。
+                      // Not a wrapping <label>: clicking the hints would send focus back to the
+                      // input, so clicking elsewhere in the cell could never blur it. Inputs carry
+                      // their own aria-label.
                       <Field
                         key={field.key}
-                        as={
-                          field.control === "text" ||
-                          field.control === "number" ||
-                          field.control === "select"
-                            ? "label"
-                            : "div"
-                        }
                         $wide={field.wide}
                       >
                         {field.control === "slider"
