@@ -861,6 +861,23 @@ public final class MobOracle {
                 scenes.add(eat);
             }
             {
+                // 脚下是矮草：先 `destroyBlock` 吃掉矮草长回羊毛，之后同一格再吃下面的草方块。
+                // Short grass at the feet: `destroyBlock` eats it first, the grass block below later.
+                Scene plant = new Scene("sheep_eat_plant").ticks(300).packets();
+                ground(plant, 8);
+                // 两只幼羊各关在玻璃围住的一格里，只能反复吃同一格。
+                // Each lamb is penned into one cell by glass, so it keeps eating the same cell.
+                for (int x : new int[] {0, 4}) {
+                    plant.fill(x - 1, 64, -1, x + 1, 64, 1, Blocks.GLASS.defaultBlockState());
+                    plant.fill(x, 64, 0, x, 64, 0, Blocks.SHORT_GRASS.defaultBlockState());
+                }
+                plant.wool = 16;
+                plant.cow(0.5, 64.0, 0.5, 0.0F, 71L, -24000);
+                plant.cow(4.5, 64.0, 0.5, 0.0F, 72L, -24000);
+                plant.player(6.5, 64.0, 0.5, Items.AIR);
+                scenes.add(plant);
+            }
+            {
                 // 剪毛：第一次掉羊毛，第二次已剪过只返回 CONSUME；之后被打死只掉羊肉。
                 Scene shear = new Scene("sheep_shear").ticks(60).drops().packets();
                 ground(shear, 6);
