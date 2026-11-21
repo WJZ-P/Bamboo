@@ -1583,10 +1583,15 @@ impl Mob {
             seen: Vec::new(),
             malus: match mob_type {
                 MobType::Drowned => {
+                    // 官方 `Drowned` 构造函数只把水的代价设成 0；陆地和浅水边缘的
+                    // 6 / 4 是 `AmphibiousNodeEvaluator.start()` 在搜索期间临时改的，
+                    // 搜索结束就还原，不能常驻在生物身上（`GoalUtils.hasMalus` 会读它）。
+                    //
+                    // Vanilla `Drowned` only zeroes the water cost. The 6 / 4 land and
+                    // water-border costs are set temporarily by
+                    // `AmphibiousNodeEvaluator.start()` for a search and restored on done.
                     let mut malus = Malus::monster();
                     malus.set(mc_bamboo_data::PathType::Water, 0.0);
-                    malus.set(mc_bamboo_data::PathType::Walkable, 6.0);
-                    malus.set(mc_bamboo_data::PathType::WaterBorder, 4.0);
                     malus
                 }
                 _ if mob_type.is_monster() => Malus::monster(),

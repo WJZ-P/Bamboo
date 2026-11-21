@@ -559,6 +559,18 @@ impl<'a> Search<'a> {
     // ---- `WalkNodeEvaluator` ----
 
     fn malus(&self, path_type: PathType) -> f32 {
+        // 官方 `AmphibiousNodeEvaluator.start()` 在搜索期间把陆地和浅水边缘的代价
+        // 临时改成 6 / 4，`done()` 再还原；这里只在两栖求值器里覆盖同样的两项。
+        //
+        // Vanilla `AmphibiousNodeEvaluator.start()` temporarily raises the land and
+        // water-border costs to 6 / 4 for a search and `done()` restores them.
+        if self.flags.amphibious {
+            match path_type {
+                PathType::Walkable => return 6.0,
+                PathType::WaterBorder => return 4.0,
+                _ => {}
+            }
+        }
         self.mob.malus.get(path_type)
     }
 
