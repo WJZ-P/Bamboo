@@ -719,6 +719,46 @@ mod tests {
         assert_eq!(is_slime_chunk(3, -7, 42), is_slime_chunk(3, -7, 42));
     }
 
+    /// 存档写 `Size`（大小减一）和 `wasOnGround`，带 `AgeableMob` 的三个键、不带 `Animal` 的
+    /// 求爱键；读回来大小、尺寸和血量都在。
+    ///
+    /// Saves write `Size` (size minus one) and `wasOnGround` with the three `AgeableMob`
+    /// keys and without the `Animal` love keys; loading restores size, dimensions and health.
+    #[test]
+    fn nbt_round_trip_keeps_the_size() {
+        use crate::entity::mob::nbt;
+        let mut entity = Entity::by_mob_type(MobType::Slime, Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|me, mob| {
+            set_size(me, mob, 4, true);
+            mob.health = 9.0;
+            mob.cube.was_on_ground = true;
+        });
+        let tag = nbt::write_mob(&entity.split()).expect("write slime");
+        let mc_bamboo_nbt::Tag::Compound(entries) = &tag else {
+            panic!("mob NBT is a compound");
+        };
+        let value = |key: &str| {
+            entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(value("Size"), Some(mc_bamboo_nbt::Tag::Int(3)));
+        assert_eq!(value("wasOnGround"), Some(mc_bamboo_nbt::Tag::Byte(1)));
+        assert_eq!(value("Age"), Some(mc_bamboo_nbt::Tag::Int(0)));
+        assert_eq!(value("InLove"), None);
+        let mut loaded = nbt::read_mob(&tag, "minecraft:slime", 7)
+            .expect("read slime")
+            .expect("modelled")
+            .into_entity();
+        assert_eq!(loaded.dimensions, (0.52 * 4.0, 0.52 * 4.0));
+        loaded.with_mob(|_, mob| {
+            assert_eq!((mob.cube.size, mob.health), (4, 9.0));
+            assert!(mob.cube.was_on_ground);
+            assert_eq!(mob.attributes.value(attribute::ATTACK_DAMAGE), 4.0);
+        });
+    }
+
     #[test]
     fn goals_are_registered_in_vanilla_order() {
         let mob = Mob::new(MobType::Slime);

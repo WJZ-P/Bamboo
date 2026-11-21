@@ -42,7 +42,26 @@ pub(super) struct Case {
     local_cap: bool,
     nearby_respawn: bool,
     halloween: bool,
+    /// `WorldGenLevel.getSeed()`：史莱姆区块读它。
+    ///
+    /// `WorldGenLevel.getSeed()`, read for slime chunks.
+    #[serde(default)]
+    level_seed: i64,
+    /// 草方块地面的高度；沼泽的史莱姆场景在 50 到 66 之间叠了五层。
+    ///
+    /// The grass floor heights; swamp slime scenes stack five floors from 50 to 66.
+    #[serde(default = "default_floors")]
+    floors: Vec<i32>,
+    /// 主世界时钟，月相读它。
+    ///
+    /// The overworld clock, read for the moon phase.
+    #[serde(default)]
+    clock: i64,
     steps: Vec<Step>,
+}
+
+fn default_floors() -> Vec<i32> {
+    vec![-63]
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -70,6 +89,7 @@ pub(super) struct Coverage {
     cows: usize,
     skeletons: usize,
     zombies: usize,
+    slimes: usize,
     without_spawn: usize,
     cap_off: usize,
     per_scene: std::collections::BTreeMap<String, usize>,
@@ -95,6 +115,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::ZOMBIE || row[0] == entity_type::HUSK)
             .count();
+        self.slimes += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::SLIME)
+            .count();
         if case.name == "cow_no_local_cap" {
             self.cap_off += step.spawned.len();
         }
@@ -103,12 +128,13 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} slimes, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
                 self.skeletons,
                 self.zombies,
+                self.slimes,
                 self.without_spawn,
                 self.cap_off
             );
@@ -159,7 +185,7 @@ impl Report {
             per_player_cap: case.local_cap,
             respawn_pos: Some(BlockPos::new(
                 if case.nearby_respawn { 8 } else { 10000 },
-                -62,
+                case.floors[0] + 1,
                 8,
             )),
         };
@@ -211,8 +237,21 @@ fn spawn_row(entity: Entity) -> [i32; 8] {
         (entity.position.x * 2.0) as i32,
         entity.position.y as i32,
         (entity.position.z * 2.0) as i32,
-        entity.y_rot.to_bits() as i32,
-        i32::from(mob.is_baby()),
+        // 大小不是 1 的史莱姆朝向来自构造函数的随机源，官方那边不带种子，两边都记 0。
+        // The yaw of a slime whose size is not 1 comes from the constructor random, unseeded
+        // in vanilla; both sides record 0.
+        if mob.mob_type == MobType::Slime && mob.cube.size != 1 {
+            0
+        } else {
+            entity.y_rot.to_bits() as i32
+        },
+        // 史莱姆不会是幼年，这一列改放大小。
+        // Slimes are never babies; this column carries their size instead.
+        if mob.mob_type == MobType::Slime {
+            mob.cube.size
+        } else {
+            i32::from(mob.is_baby())
+        },
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
     ]
@@ -236,16 +275,19 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     let blocks = (-16..48)
         .flat_map(|x| {
             (-16..32).flat_map(move |z| {
-                let floor = (BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK));
+                let floors = case
+                    .floors
+                    .iter()
+                    .map(move |&y| (BlockPos::new(x, y, z), BlockState(blocks::GRASS_BLOCK)));
                 let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
-                std::iter::once(floor).chain(roof.then_some(glass))
+                floors.chain(roof.then_some(glass))
             })
         })
         .collect();
     let player = PlayerView {
         uid: 1,
         uuid: None,
-        position: Vec3::new(case.player_x, -62.0, 8.5),
+        position: Vec3::new(case.player_x, f64::from(case.floors[0] + 1), 8.5),
         eye_height: 1.62,
         alive: true,
         spectator: false,
@@ -268,6 +310,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             can_see_sky: case.sky == 15,
             raining: case.thunder,
             halloween: case.halloween,
+            clock: case.clock,
+            world_seed: case.level_seed,
             ..ZombieFacts::default()
         },
         natural_spawn: Some(SceneFacts {

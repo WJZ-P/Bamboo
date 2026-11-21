@@ -502,6 +502,10 @@ struct ZombieFacts {
     halloween: bool,
     /// 主世界时钟（真实时间模式逐刻推进，否则 0）。
     clock: i64,
+    /// `WorldGenLevel.getSeed()`，史莱姆区块读它。
+    ///
+    /// `WorldGenLevel.getSeed()`, read for slime chunks.
+    world_seed: i64,
     inhabited_time: i64,
     can_see_sky: bool,
     sky_darken: i32,
@@ -739,6 +743,10 @@ impl Level for MobLevel {
 
     fn clock_ticks(&self) -> i64 {
         self.facts.clock
+    }
+
+    fn world_seed(&self) -> i64 {
+        self.facts.world_seed
     }
 
     fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
@@ -1104,6 +1112,7 @@ impl Report {
             facts: ZombieFacts {
                 halloween: false,
                 clock: 0,
+                world_seed: 0,
                 inhabited_time: 0,
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,

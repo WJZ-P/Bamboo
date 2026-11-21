@@ -2853,9 +2853,28 @@ public final class MobOracle {
             scenes.add(new NaturalScene("skeleton_near_" + distance, EntityTypes.SKELETON, "plains", 2, 0, 0, 11,
                     false, 8.5 - distance, 0, 289, true, false));
         }
+        // 史莱姆：史莱姆区块（世界种子由官方公式挑，让区块 (0,0) 是 / 不是史莱姆区块）、沼泽的满月和
+        // 新月（地面抬到 62，生成高度 63 落在 (50, 70) 里）、和平难度。
+        // Slimes: slime chunks (the world seed is picked with the vanilla formula so chunk
+        // (0,0) is or is not one), swamps at full and new moon (floor raised to 62 so the
+        // spawn height 63 lies in (50, 70)) and peaceful.
+        scenes.add(new NaturalScene("slime_chunk", EntityTypes.SLIME, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_chunk_hard", EntityTypes.SLIME, "plains", 3, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_no_chunk", EntityTypes.SLIME, "plains", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_full_moon", EntityTypes.SLIME, "swamp", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_gibbous", EntityTypes.SLIME, "swamp", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_new_moon", EntityTypes.SLIME, "swamp", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_bright", EntityTypes.SLIME, "swamp", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_chunk_peaceful", EntityTypes.SLIME, "plains", 0, 15, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
-            for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
+            // 沼泽场景的起点高度要正好落在某层地面上才有戏，多跑一些种子。
+            // Swamp scenes only get anywhere when the start height lands on a floor, so they
+            // run more seeds.
+            long[] seeds = scene.name().startsWith("slime_swamp")
+                    ? java.util.stream.LongStream.range(0, 60).toArray()
+                    : new long[] {0, 1, 2, 7, 42, 12345};
+            for (long seed : seeds) {
                 out.write(naturalSpawnCase(official, scene, seed) + "\n");
                 count++;
             }
@@ -2871,6 +2890,48 @@ public final class MobOracle {
         put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
                 (x, y, z) -> level.naturalBiome, 0L));
         level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        boolean slime = scene.name().startsWith("slime_");
+        // 沼泽场景：50 到 66 之间每隔 4 格一层地面，生成高度 51、55、59、63、67 都在 (50, 70) 里，
+        // 层间 3 格空气放得下史莱姆 2.08 高的生成盒。
+        // Swamp scenes: a floor every 4 blocks from 50 to 66, so the spawn heights 51, 55,
+        // 59, 63 and 67 all lie in (50, 70) and the 3 air blocks between floors fit the
+        // 2.08-tall slime spawn box.
+        int[] floors = scene.name().startsWith("slime_swamp") ? new int[] {50, 54, 58, 62, 66} : new int[] {-63};
+        int floorY = floors[0];
+        if (slime) {
+            // 世界种子：从 1 起找第一个让区块 (0,0) 是（`slime_no_chunk` 是「(0,0) 和 (1,0) 都不是」）
+            // 史莱姆区块的种子，用的是官方 `WorldgenRandom.seedSlimeChunk`。
+            // The world seed: the first one from 1 that makes chunk (0,0) a slime chunk (for
+            // `slime_no_chunk`: neither (0,0) nor (1,0)), found with vanilla
+            // `WorldgenRandom.seedSlimeChunk`.
+            boolean want = !scene.name().equals("slime_no_chunk");
+            long worldSeed = 1L;
+            while (true) {
+                boolean first = net.minecraft.world.level.levelgen.WorldgenRandom
+                        .seedSlimeChunk(0, 0, worldSeed, 987234911L).nextInt(10) == 0;
+                boolean second = net.minecraft.world.level.levelgen.WorldgenRandom
+                        .seedSlimeChunk(1, 0, worldSeed, 987234911L).nextInt(10) == 0;
+                if (want ? first : !first && !second) break;
+                worldSeed++;
+            }
+            level.worldSeed = worldSeed;
+            // 月相：主世界的时间线层按场景的时钟求值，`SURFACE_SLIME_SPAWN_CHANCE` 才不是缺省的 0。
+            // Moon phase: the overworld timeline layers evaluated at the scene clock, so
+            // `SURFACE_SLIME_SPAWN_CHANCE` is not just its default 0.
+            level.clock = scene.name().equals("slime_swamp_new_moon") ? 96000L
+                    : scene.name().equals("slime_swamp_gibbous") ? 24000L : 0L;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder().addStaticLayers(level);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return level.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : level.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            level.naturalAttributes = builder.build();
+        }
         level.injectedSkyDarken = scene.darken();
         level.injectedCanSeeSky = scene.sky() == 15;
         Difficulty difficulty = Difficulty.byId(scene.difficulty());
@@ -2888,7 +2949,9 @@ public final class MobOracle {
 
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
-                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                for (int floor : floors) {
+                    level.blocks.put(BlockPos.asLong(x, floor, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                }
                 // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
                 // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
                 // Husk fixture: glass at -60 blocks the camel-husk spawn box (Bamboo has no
@@ -2900,7 +2963,7 @@ public final class MobOracle {
         }
         ServerPlayer player = new ServerPlayer(official.server, level,
                 new GameProfile(new UUID(1L, 2L), "NaturalSpawnOracle"), ClientInformation.createDefault());
-        player.setPos(scene.playerX(), -62.0, 8.5);
+        player.setPos(scene.playerX(), floorY + 1.0, 8.5);
         level.playersList().add(player);
         level.tracked.add(player);
         for (int i = 0; i < scene.population(); i++) {
@@ -2947,8 +3010,18 @@ public final class MobOracle {
                 row.add((int) (mob.getX() * 2));
                 row.add((int) mob.getY());
                 row.add((int) (mob.getZ() * 2));
-                row.add(Float.floatToRawIntBits(mob.getYRot()));
-                row.add(mob.isBaby() ? 1 : 0);
+                // 大小不是 1 的史莱姆：`setSize` 把朝向改成头的朝向，那是官方构造函数用不带种子的
+                // 随机源抽的，没法比，两边都记 0。
+                // Slimes whose size is not 1: `setSize` snaps the yaw to the head yaw, which the
+                // vanilla constructor draws from an unseeded random. Not comparable; both sides
+                // record 0.
+                boolean unseededYaw = mob instanceof net.minecraft.world.entity.monster.cubemob.Slime big
+                        && big.getSize() != 1;
+                row.add(unseededYaw ? 0 : Float.floatToRawIntBits(mob.getYRot()));
+                // 史莱姆不会是幼年，这一列改放大小。
+                // Slimes are never babies; this column carries their size instead.
+                row.add(mob instanceof net.minecraft.world.entity.monster.cubemob.Slime cube ? cube.getSize()
+                        : mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
                 spawned.add(row);
@@ -2973,6 +3046,11 @@ public final class MobOracle {
         row.addProperty("localCap", scene.localCap());
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
+        row.addProperty("levelSeed", level.worldSeed);
+        var floorRows = new JsonArray();
+        for (int floor : floors) floorRows.add(floor);
+        row.add("floors", floorRows);
+        row.addProperty("clock", level.clock);
         row.add("steps", steps);
         return row;
     }
@@ -6642,8 +6720,11 @@ public final class MobOracle {
 
         @Override
         public long getSeed() {
-            return 0L;
+            return worldSeed;
         }
+
+        /** `getSeed()` 的值；只有史莱姆的自然生成场景会改。 */
+        long worldSeed;
 
         @Override
         public LevelData.RespawnData getRespawnData() {
