@@ -4297,6 +4297,10 @@ public final class MobOracle {
         egg.setUUID(Mth.createInsecureUUID(egg.getRandom()));
         net.minecraft.world.entity.projectile.Projectile.spawnProjectile(egg, level, stack,
                 e -> e.shootFromRotation(player, player.getXRot(), player.getYRot(), 0.0F, 1.5F, 1.0F));
+        var used = net.minecraft.stats.Stats.ITEM_USED.get(stack.getItem());
+        int before = player.getStats().getValue(used);
+        player.awardStat(used);
+        int awarded = player.getStats().getValue(used) - before;
         stack.consume(1, player);
         ItemStack inside = egg.getItem();
         out.write("{\"type\":\"eggThrow\",\"name\":" + jsonString(name) + ",\"yaw\":" + Float.floatToRawIntBits(yaw)
@@ -4304,6 +4308,7 @@ public final class MobOracle {
                 + ",\"motion\":" + projectileMotion(egg) + ",\"seed\":" + randomSeed(egg)
                 + ",\"item\":[" + BuiltInRegistries.ITEM.getId(inside.getItem()) + ',' + inside.getCount() + ']'
                 + ",\"left\":" + player.getInventory().getItem(player.getInventory().getSelectedSlot()).getCount()
+                + ",\"itemUsed\":[[" + BuiltInRegistries.ITEM.getId(Items.BROWN_EGG) + "," + awarded + "]]"
                 + ",\"levelSeed\":" + randomSeed(level.getRandom()) + "}\n");
         out.flush();
     }

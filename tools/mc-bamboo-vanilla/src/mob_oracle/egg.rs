@@ -91,6 +91,7 @@ pub(super) struct EggThrowCase {
     item: [i32; 2],
     left: i32,
     level_seed: i64,
+    item_used: Vec<(i32, i32)>,
 }
 
 /// 发射器扔蛋那一刻：蛋的运动、随机源、蛋里的物品、剩下的物品数和世界随机源。
@@ -349,6 +350,7 @@ impl Report {
             item: case.item,
             left: case.left,
             level_seed: case.level_seed,
+            item_used: case.item_used.clone(),
         };
         if ours != theirs {
             self.mismatch(format!(
