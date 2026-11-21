@@ -2574,12 +2574,7 @@ fn target_in_follow_range(me: &Entity, mob: &Mob, target: CombatTarget) -> bool 
     target_in_scaled_follow_range(me, mob, target, 1.0)
 }
 
-fn target_in_scaled_follow_range(
-    me: &Entity,
-    mob: &Mob,
-    target: CombatTarget,
-    scale: f64,
-) -> bool {
+fn target_in_scaled_follow_range(me: &Entity, mob: &Mob, target: CombatTarget, scale: f64) -> bool {
     let range = mob
         .attributes
         .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE)

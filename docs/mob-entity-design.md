@@ -388,6 +388,14 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 `Horse.playGallopSound` 在奔跑声后从实体随机源取一次 `nextInt(10)`；结果为 0 时按年龄播喷气声，
 静音只抑制声音、不跳过抽取。游戏层 `riding::on_move_vehicle` 的方块扫掠仍不产生移动声音或振动。
 
+**与 main 合并（2026-11-21，第八轮）。** 把 main 的鱿鱼、鱼、桶装鱼、海龟合进分支：冲突按 main 的结构解
+（`finalize_cow(kind, …)`、`check_spawn_rules` 按 kind 分派，`generated/` 直接取 main 的重新生成结果），
+两边取并集保留 `MobInteraction` 的 `ride` / `discard` / `limit_creative`、`travelRidden` 与鱿鱼 `travel`、
+马科与水生的目标 tick、马科 `playStepSound` 与 `MovementEmission.EVENTS`（游泳声只在 `emitsSounds()` 为真时
+取两个 `nextFloat`，`play_sound` 不取数，所以马科的取数顺序不变）。`cargo check --workspace --all-targets`
+通过；`mob-oracle --only equine / llama_spit / zombie_equine / wolf_ / natural_spawn / gen_spawn` 复跑全部
+0 不一致。本轮另补上狼与羊驼的互动，见 11.7。
+
 其余已知差异见 README「马科的已知限制」。
 
 ---
@@ -847,7 +855,11 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 - 运行时与生成期均保留牛、猪、羊、鸡、兔、狐、狼与马科规则。`finalize_cow(kind, …)` 继续分派农场动物；野生动物和马科分别维护各自的组数据，生成期统一使用区域随机源。
 - 生成期对拍同时校验野生动物的品种 / 叼物 / 叫声和马科属性；逐刻夹具给兔 / 狐 / 狼保留 6–8 号，马 / 驴 / 骡 / 羊驼使用 9–12 号。场景名称不变。
-- 此次合并没有实现狼与羊驼之间的躲避 / 主动攻击，也未扩展马科骑乘。
+- 狼躲羊驼（`Wolf.WolfAvoidEntityGoal`：未驯服的狼按羊驼 `getStrength() >= nextInt(5)` 判定躲不躲，
+  仍先跑 `super.canUse()` 取逃跑点）、羊驼打野狼（`LlamaAttackWolfGoal`：`0.25 × FOLLOW_RANGE` 内
+  看得见的最近野狼，`canContinueToUse` 同样按 0.25 倍跟随距离）和「保护主人时排除驯服的马科」
+  （`Wolf.wantsToAttack`）于 2026-11-21 接入。三条只过 `wolf_` / `zombie_equine` 等回归对拍、
+  没有专属逐刻场景。马科骑乘此后未再扩展。
 
 ## 猪的实施现状
 
