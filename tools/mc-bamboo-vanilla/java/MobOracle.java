@@ -1222,9 +1222,11 @@ public final class MobOracle {
                 scenes.add(edge);
             }
             {
-                // 白天站在露天：`customServerAiStep` 反复随机传送。
-                // Out in the open during the day: `customServerAiStep` teleports it.
-                Scene day = new Scene("enderman_day_teleport").ticks(200).difficulty(2);
+                // 白天站在露天：`customServerAiStep` 反复随机传送。`tickCount >= targetChangeTime + 600`
+                // 才开始判定，所以场景要跑过 600 刻。
+                // Out in the open during the day: `customServerAiStep` teleports it. The roll
+                // only starts once `tickCount >= targetChangeTime + 600`, so run past 600 ticks.
+                Scene day = new Scene("enderman_day_teleport").ticks(1200).difficulty(2);
                 day.clockStart = 1000;
                 day.monstersBurn = true;
                 day.fill(-12, 63, -12, 12, 63, 12, bedrock);
@@ -1291,12 +1293,24 @@ public final class MobOracle {
                 chase.player(7.5, 64.0, 0.5, Items.AIR);
                 scenes.add(chase);
             }
-            // 翻墙（墙挡住视线，先被打一下记仇，再翻墙）不在这里：那个场景的随机源
-            // 从翻墙那一刻起比官方多走两刻，位置 / 目标 / 路径仍然逐刻相同，
-            // 所以放在单测里验证爬墙，不放进逐刻对拍。
-            // Wall climbing (sight blocked, a hit makes the spider angry, then it climbs)
-            // is not here: Bamboo's random stream runs two ticks ahead from the climb on
-            // while positions, targets and paths still match, so a unit test covers it.
+            {
+                // 翻墙：一整面石墙挡住视线和去路，先被打一下记仇（`SpiderTargetGoal` 要看得见），
+                // 路径只到墙脚，`WallClimberNavigation` 再朝目标方块推，蜘蛛贴墙往上爬、翻过去。
+                // 爬在墙上时 `createPath` 返回空，`MeleeAttackGoal.tick` 的三参数 `moveTo`
+                // 返回假，重算间隔加 15。
+                // Wall climbing: a full stone wall blocks sight and the way, so a hit makes
+                // the spider angry; the path ends at the wall, the wall climber pushes at the
+                // target block and the spider climbs over. While on the wall `createPath` is
+                // null, so `MeleeAttackGoal.tick`'s three-argument `moveTo` fails and adds 15.
+                Scene wall = new Scene("spider_wall").ticks(200).difficulty(2);
+                wall.clockStart = 18000;
+                wall.fill(-12, 63, -12, 12, 63, 12, bedrock);
+                wall.fill(3, 64, -12, 3, 66, 12, Blocks.STONE.defaultBlockState());
+                wall.mob(41, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                wall.player(6.5, 64.0, 0.5, Items.AIR);
+                wall.hurts.add(new double[] {5, 0, 2.0, 0});
+                scenes.add(wall);
+            }
             {
                 // 白天：两个蜘蛛目标都不启动，只散步。散步是 0.8 倍速，`0.3F` 的移速
                 // 在这里才和 0.3 差出一个 float ulp。

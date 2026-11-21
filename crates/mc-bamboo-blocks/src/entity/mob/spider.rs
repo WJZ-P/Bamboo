@@ -313,11 +313,12 @@ mod tests {
         assert!(spider.effects.has(mob_effect::SPEED));
     }
 
-    /// 一面六格高的墙，目标在墙后上方：`WallClimberNavigation` 找不到路径时记下目标方块，
-    /// 蜘蛛贴墙往上爬。
+    /// 一面六格高的墙，目标在墙后上方：`WallClimberNavigation.createPath` 记下目标方块，
+    /// 路径走完（或爬在墙上算不出路径）后朝它推，蜘蛛贴墙往上爬。
     ///
-    /// A six-block wall with the goal above and behind it: without a path the
-    /// `WallClimberNavigation` remembers the destination and the spider climbs.
+    /// A six-block wall with the goal above and behind it: `WallClimberNavigation.createPath`
+    /// records the destination, and once the path is done (or none can be computed on
+    /// the wall) the spider is pushed at it and climbs.
     #[test]
     fn a_wall_climber_pushes_up_an_unreachable_wall() {
         let mut level = crate::testing::TestLevel::new();
@@ -350,10 +351,8 @@ mod tests {
         for _ in 0..120 {
             world.tick_entities();
             let mut entity = world.entity(spider).expect("spider alive");
-            // 和 `MeleeAttackGoal.tick` 一样每次重算：没有路径时
-            // `WallClimberNavigation.moveTo` 返回真并记下目标。
-            // Like `MeleeAttackGoal.tick`: without a path the wall climber remembers
-            // the destination and reports success.
+            // 和 `MeleeAttackGoal.tick` 一样每次用三参数的 `moveTo` 重算。
+            // Recompute each tick with the three-argument `moveTo`, like `MeleeAttackGoal.tick`.
             entity.with_mob(|me, mob| {
                 let nav = super::super::living::nav_mob(me, mob, &world);
                 // 返回假也算正常：路径存在但走完时官方同样返回假，

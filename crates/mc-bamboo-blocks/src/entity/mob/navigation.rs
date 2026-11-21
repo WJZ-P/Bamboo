@@ -137,20 +137,16 @@ impl Navigation {
         speed: f64,
         reach: i32,
     ) -> bool {
+        // 这是三参数的 `moveTo(entity, reach, speed)`：`WallClimberNavigation` 只改写了
+        // 两参数版本（找不到路径也返回真），三参数版本走基类，空路径就返回假、不改速度。
+        // 蜘蛛的目标（`MeleeAttackGoal.tick`）只调三参数版本；`createPath` 照样记下目标方块。
+        // This is the three-argument `moveTo(entity, reach, speed)`. `WallClimberNavigation`
+        // only overrides the two-argument form (which succeeds without a path); the
+        // three-argument form is the base one: a null path returns false and keeps the
+        // speed. Spider goals (`MeleeAttackGoal.tick`) only call this form, and
+        // `createPath` still records the destination block.
         let path = self.create_path(view, mob, BlockPos::containing(entity_pos), reach);
-        if path.is_some() {
-            return self.move_to_path(view, mob, path, speed);
-        }
-        // `WallClimberNavigation.moveTo(Entity, speed)`：找不到路径也算成功，
-        // 记下目标方块，由 `tick` 逐个三维推。
-        // `WallClimberNavigation.moveTo(Entity, speed)`: a missing path still counts as
-        // success; remember the block and let `tick` push toward it in 3D.
-        if self.wall_climber {
-            self.path_to_position = Some(BlockPos::containing(entity_pos));
-            self.speed_modifier = speed;
-            return true;
-        }
-        false
+        path.is_some() && self.move_to_path(view, mob, path, speed)
     }
 
     /// `moveTo(Path, speed)`。

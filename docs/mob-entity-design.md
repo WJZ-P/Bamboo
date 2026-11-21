@@ -843,7 +843,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 ## 苦力怕的实施现状（2026-11-20）
 
-苦力怕在 `entity/mob/creeper.rs`：`CreeperState`（`swell` / `maxSwell` / `explosionRadius` 和三项同步元数据）挂在 `Mob.creeper` 上，全是相对计数，随实体行搬岛，不需要时钟平移，也没有新增 `IslandPart`。`Creeper.tick` 里 `super.tick()` 之前的那段在 `living::tick_mob` 的 `base_tick` 之前调用；`SwellGoal` 是 `Goal::Swell`（每刻目标，MOVE 标志），记住的目标按原始引用查死活，不走 `getTarget()` 的可攻击过滤。近战用通用的 `Goal::MeleeAttack`，新加的 `raise_arms` 字段区分 `ZombieAttackGoal` 和普通 `MeleeAttackGoal`（苦力怕、骷髅）；`Creeper.doHurtTarget` 直接返回真，不造成伤害。目标选择走骷髅那套完整的 `TargetGoal` 规则（`MobType::full_target_rules`）。
+苦力怕在 `entity/mob/creeper.rs`：`CreeperState`（`swell` / `maxSwell` / `explosionRadius` 和三项同步元数据）挂在 `Mob.creeper` 上，全是相对计数，随实体行搬岛，不需要时钟平移，也没有新增 `IslandPart`。`Creeper.tick` 里 `super.tick()` 之前的那段在 `living::tick_mob` 的 `base_tick` 之前调用；`SwellGoal` 是 `Goal::Swell`（每刻目标，MOVE 标志），记住的目标按原始引用查死活，不走 `getTarget()` 的可攻击过滤。近战用通用的 `Goal::MeleeAttack`，和 main 合并后由 `class` 字段（官方类名）区分 `ZombieAttackGoal` 和普通 `MeleeAttackGoal`（苦力怕、骷髅）；`Creeper.doHurtTarget` 直接返回真，不造成伤害。目标选择走骷髅那套完整的 `TargetGoal` 规则（`MobType::full_target_rules`）。
 
 爆炸是新命令 `Command::ExplodeMob`，落地在 `World::explode_mob`（`entity/explosion.rs`）：和 TNT 共用射线和 `interact_with_blocks`，另加 `hurt_living_by_explosion`（生物和玩家的伤害、生物的击退）。命令里带来源生物的 `EntityPublic`：发出者正在 tick，`me.kind` 是占位，玩家的死亡消息要靠它拿名字和 UUID。方块掉落的衰减经 `Level::explosion_block_drops_decayed` 把爆炸半径交给战利品表，由新的方块层游戏规则 `mob_explosion_drop_decay` 控制。伤害类型新增 `DamageKind::PlayerExplosion`。并行驱动里这条命令和 TNT 的 `Explode` 一样在落地阶段执行，世界随机数只在落地时取。
 
@@ -855,7 +855,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 ## 蜘蛛和洞穴蜘蛛的实施现状（2026-11-21）
 
-蜘蛛在 `entity/mob/spider.rs`：`SpiderState`（`DATA_FLAGS_ID` 的攀爬位）挂在 `Mob.spider` 上，是相对状态，随实体行搬岛。`Spider.tick` 在 `living::tick_mob` 的 `ai_step` 之后执行，把 `Entity.horizontal_collision` 写进标志；`living::on_climbable` 对 `MobType::climbs_walls()` 的种类直接读这个标志（官方 `Spider.onClimbable`），爬墙的 0.2 上升、-0.15 下滑和水平 0.15 的夹取都走原有的 `travel` 代码。导航新增 `Navigation::wall_climber` / `path_to_position`：`create_path` 记录目标方块，`move_to_entity` 在无路径时记下目标并返回真，`tick` 在路径走完后返回目标方块的三维坐标（`WallClimberNavigation`）。
+蜘蛛在 `entity/mob/spider.rs`：`SpiderState`（`DATA_FLAGS_ID` 的攀爬位）挂在 `Mob.spider` 上，是相对状态，随实体行搬岛。`Spider.tick` 在 `living::tick_mob` 的 `ai_step` 之后执行，把 `Entity.horizontal_collision` 写进标志；`living::on_climbable` 对 `MobType::climbs_walls()` 的种类直接读这个标志（官方 `Spider.onClimbable`），爬墙的 0.2 上升、-0.15 下滑和水平 0.15 的夹取都走原有的 `travel` 代码。导航新增 `Navigation::wall_climber` / `path_to_position`：`create_path` 记录目标方块，`tick` 在路径走完后返回目标方块的三维坐标（`WallClimberNavigation`）。`move_to_entity` 是三参数的 `moveTo(entity, reach, speed)`，走基类：没有路径就返回假、不改速度（官方只改写了两参数版本，蜘蛛的目标不调它）。
 
 目标：`Goal::LeapAtTarget` 是新的目标（JUMP + MOVE 标志，起跳改速度）；`Goal::MeleeAttack` 新增 `light_flee`（`SpiderAttackGoal` 的亮处放弃和类名）和 `follow_unseen`（`followingTargetEvenIfNotSeen=true`，`canContinueToUse` 不看路径走完，`tick` 不要求视线）。`Goal::NearestAttackableTarget` 新增 `light_gate`（`SpiderTargetGoal` 的亮处闸门，连 `nextInt` 都不取）。`living::light_dependent_magic` 是 `Entity.getLightLevelDependentMagicValue` 的共用实现。
 
@@ -863,7 +863,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 别的生物可以复用的东西：`Command::AddPlayerEffect` / `World::give_mob_effect`（给另一个实体挂效果）、`Goal::LeapAtTarget`、`MeleeAttack` 的 `follow_unseen`、`spider::can_be_affected` 这种「按种类挡效果」的钩子。
 
-逐刻对拍场景：`spider_chase_*`（午夜追玩家）、`spider_day`（白天中立）、`cave_spider_chase`（`mob-oracle --only spider_` / `--only cave_spider_`）。翻墙只有单测 `a_wall_climber_pushes_up_an_unreachable_wall`：`spider_wall` 场景里翻墙那一刻起随机源比官方多走两刻，位置 / 目标 / 路径仍逐刻相同，没有进对拍。`spider_day` 从第 34 刻（散步启动）起位置 / 速度有约 1e-9 的差（朝向、路径、随机源相同），怀疑是共用移动 / 摩擦代码和官方差一个 f32 ulp，未收敛。已知限制见 README 的蜘蛛一条。
+逐刻对拍场景：`spider_chase_*`（午夜追玩家）、`spider_wall`（被打后翻过一整面石墙）、`spider_day`（白天中立）、`cave_spider_chase`（`mob-oracle --only spider_` / `--only cave_spider_`），5 个场景 840 刻 0 不一致。`spider_wall` 原先从翻墙那一刻起随机源比官方多走：`move_to_entity` 曾按两参数版本在没有路径时返回真，`MeleeAttackGoal.tick` 因此少加 15 刻重算间隔、多抽 `nextInt(7)`；改回基类语义后一致（2026-11-21，改坏确认：攀爬位恒为假时第 43 刻起报不一致）。`spider_day` 原先从第 34 刻（散步启动）起位置 / 速度差约 1e-9：根源是官方 `Spider.createAttributes` 写的移速是 float `0.3F`（加宽后 0.30000001192092896），我们存的是 double 0.3，0.8 倍速散步时 `setSpeed` 的 float 差一个 ulp；改成 `f64::from(0.3_f32)` 后四个场景 0 不一致（2026-11-21）。已知限制见 README 的蜘蛛一条。
 
 ## 末影人的实施现状（2026-11-21）
 
@@ -877,5 +877,5 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 其他生物可以复用的：`TargetType::Endermite` 这种「类型不存在但取数照旧」的目标写法、`MobType::uses_block_step_sound`（末影人和苦力怕一样用脚下方块的 `SoundType`）、`enderman::set_target` 这种「设目标时同步专属状态」的包装。
 
-逐刻对拍场景（`mob-oracle --only enderman_`）：`enderman_stare` / `enderman_neutral`（注视与不注视）、`enderman_day_teleport`（白天露天）、`enderman_rain`（夜里淋雨）、`enderman_arrow`（箭）、`enderman_stare_edge_3` / `enderman_stare_edge_6`（注视锥的边缘，偏 3 度和 6 度）、`enderman_blocks`（脚边的泥土捡起再放下）、`enderman_place`（开局搬着泥土再放下）。9 个场景 60416 刻 0 不一致。方块场景把天色固定在傍晚并关掉「看得见天」，避免长场景跑到白天传送；传送后的头部 / 身体朝向差异见 README。已知限制见 README 的末影人一条。
+逐刻对拍场景（`mob-oracle --only enderman_`）：`enderman_stare` / `enderman_neutral`（注视与不注视）、`enderman_day_teleport`（白天露天）、`enderman_rain`（夜里淋雨）、`enderman_arrow`（箭）、`enderman_stare_edge_3` / `enderman_stare_edge_6`（注视锥的边缘，偏 3 度和 6 度）、`enderman_blocks`（脚边的泥土捡起再放下）、`enderman_place`（开局搬着泥土再放下）。9 个场景 61416 刻 0 不一致。`enderman_day_teleport` 原来只跑 200 刻，到不了 `tickCount >= targetChangeTime + 600` 的门槛，白天传送一次都没判定过；2026-11-21 改成 1200 刻，改坏确认（`nextFloat() * 30` 改成 20）第 685 刻起报不一致。这个场景里的传送尝试都落空（两边一致），传送成功后的朝向仍只在注视 / 淋雨 / 箭的场景里覆盖。方块场景把天色固定在傍晚并关掉「看得见天」，避免长场景跑到白天传送；传送后的头部 / 身体朝向差异见 README。已知限制见 README 的末影人一条。
 
