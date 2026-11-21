@@ -909,6 +909,11 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Wolf
+        && let Some(data) = wolf_default_data(index)
+    {
+        return data;
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1046,6 +1051,59 @@ fn fox_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     out
 }
 
+/// 狼（含 `TamableAnimal`）各项元数据的默认值：标志 0、没有主人、不歪头、红项圈、
+/// 没有仇恨、苍白狼、经典叫声。
+///
+/// Wolf defaults, including the two `TamableAnimal` items.
+fn wolf_default_data(index: u8) -> Option<EntityData> {
+    use mc_bamboo_blocks::entity::mob::wolf;
+    Some(match index {
+        entity_types::TAME_FLAGS => EntityData::TameFlags(0),
+        entity_types::TAME_OWNER => EntityData::TameOwner(None),
+        entity_types::WOLF_INTERESTED => EntityData::WolfInterested(false),
+        entity_types::WOLF_COLLAR => EntityData::WolfCollar(WOLF_DEFAULT_COLLAR),
+        entity_types::WOLF_ANGER_END_TIME => EntityData::WolfAngerEndTime(-1),
+        entity_types::WOLF_VARIANT => EntityData::WolfVariant(wolf::default_variant()),
+        entity_types::WOLF_SOUND_VARIANT => {
+            EntityData::WolfSoundVariant(wolf::default_sound_variant())
+        }
+        _ => return None,
+    })
+}
+
+/// `Wolf.DEFAULT_COLLAR_COLOR`：`DyeColor.RED` 的 ID。
+const WOLF_DEFAULT_COLLAR: i32 = 14;
+
+/// 狼的非默认元数据，按 index 升序（18 到 24）。
+///
+/// The non-default wolf items in index order (18 to 24).
+fn wolf_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    use mc_bamboo_blocks::entity::mob::wolf;
+    let mut out = Vec::new();
+    if mob.tame_flags != 0 {
+        out.push(EntityData::TameFlags(mob.tame_flags));
+    }
+    if mob.owner.is_some() {
+        out.push(EntityData::TameOwner(mob.owner));
+    }
+    if mob.wolf_interested {
+        out.push(EntityData::WolfInterested(true));
+    }
+    if mob.wolf_collar != WOLF_DEFAULT_COLLAR {
+        out.push(EntityData::WolfCollar(mob.wolf_collar));
+    }
+    if mob.wolf_anger_end_time != -1 {
+        out.push(EntityData::WolfAngerEndTime(mob.wolf_anger_end_time));
+    }
+    if mob.wolf_variant != wolf::default_variant() {
+        out.push(EntityData::WolfVariant(mob.wolf_variant));
+    }
+    if mob.wolf_sound_variant != wolf::default_sound_variant() {
+        out.push(EntityData::WolfSoundVariant(mob.wolf_sound_variant));
+    }
+    out
+}
+
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
@@ -1106,6 +1164,11 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.left_handed {
         mob_flags |= 2;
     }
+    // `Mob.setAggressive`：近战目标跑起来时置位（狼、狐狸）。
+    // `Mob.setAggressive`, set while a melee goal runs (wolves, foxes).
+    if mob.aggressive {
+        mob_flags |= 4;
+    }
     if mob_flags != 0 {
         out.push(EntityData::MobFlags(mob_flags));
     }
@@ -1114,6 +1177,12 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.age_locked {
         out.push(EntityData::AgeLocked(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Wolf {
+        // 狼的 18、19 是驯服标志和主人，不是牛的花色和叫声。
+        // A wolf's 18 and 19 are the taming items, not the cow variants.
+        out.extend(wolf_non_default_data(mob));
+        return out;
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.

@@ -224,6 +224,25 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 战斗记忆，被驯服的狼保护主人时读。
+    ///
+    /// Combat memory, read by tamed wolves guarding their owner.
+    pub combat: PlayerCombat,
+}
+
+/// 玩家的 `getLastHurtByMob` / `getLastHurtMob` 和两个时间戳（玩家自己的 tick 数），
+/// 以及 `getLastDamageSource(100)` 存在且不在 `#no_wolf_retaliation` 里。
+///
+/// A player's `getLastHurtByMob` / `getLastHurtMob` with their timestamps (the
+/// player's own tick count), and whether `getLastDamageSource(100)` exists and
+/// is outside `#no_wolf_retaliation`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayerCombat {
+    pub last_hurt_by_mob: Option<EntityUid>,
+    pub last_hurt_by_mob_timestamp: i32,
+    pub last_hurt_mob: Option<EntityUid>,
+    pub last_hurt_mob_timestamp: i32,
+    pub retaliation_damage: bool,
 }
 
 impl PlayerView {
@@ -552,6 +571,17 @@ pub enum Command {
         /// The father's fox variant and love cause; a fox kit trusts both causes.
         father_fox: super::mob::fox::Variant,
         father_love: Option<[u8; 16]>,
+        /// 父亲的狼状态和驯服状态：幼崽的品种、主人和项圈色要用。
+        ///
+        /// The father's wolf and taming state, for the pup's variant, owner and collar.
+        father_wolf: Box<(super::mob::wolf::Wolf, super::mob::tame::Tamable)>,
+    },
+    /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
+    ///
+    /// `HurtByTargetGoal.alertOthers` for wolves: the others target the attacker.
+    WolfAlert {
+        others: Vec<EntityUid>,
+        target: EntityUid,
     },
     /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
     HurtPlayer {
@@ -692,6 +722,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             father_rabbit,
             father_fox,
             father_love,
+            father_wolf,
         } => super::mob::living::apply_breed(
             me,
             partner,
@@ -701,9 +732,14 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 rabbit: father_rabbit,
                 fox: father_fox,
                 love: father_love,
+                wolf: father_wolf.0,
+                tame: father_wolf.1,
             },
             world,
         ),
+        Command::WolfAlert { others, target } => {
+            super::mob::wolf_goals::apply_alert(world, &others, target);
+        }
         Command::HurtPlayer {
             target,
             source,

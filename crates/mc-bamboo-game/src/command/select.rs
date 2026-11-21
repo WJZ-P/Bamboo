@@ -605,6 +605,7 @@ fn plain_name_of(
         entity_type::COW => "Cow",
         entity_type::RABBIT => "Rabbit",
         entity_type::FOX => "Fox",
+        entity_type::WOLF => "Wolf",
         entity_type::ITEM => "Item",
         entity_type::FALLING_BLOCK => "Falling Block",
         entity_type::TNT => "Block of TNT",

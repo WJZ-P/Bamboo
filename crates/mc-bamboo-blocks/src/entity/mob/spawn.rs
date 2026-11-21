@@ -239,6 +239,15 @@ pub(crate) fn finalize_spawn(
         });
         return;
     }
+    if kind == MobType::Wolf {
+        // `WolfPackData` 是 `AgeableMobGroupData(false)`：不生幼崽，也不取那一次数。
+        // `WolfPackData` never spawns babies, so `AgeableMob` draws nothing.
+        entity.with_mob(|_, mob| {
+            super::wolf::finalize_spawn(mob, biome, random);
+            finalize_animal(mob, random);
+        });
+        return;
+    }
     if kind == MobType::Rabbit {
         entity.with_mob(|_, mob| {
             mob.rabbit.variant = super::rabbit::random_variant(biome, random);

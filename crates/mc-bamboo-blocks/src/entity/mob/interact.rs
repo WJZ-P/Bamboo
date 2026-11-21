@@ -53,8 +53,20 @@ impl MobInteraction {
     }
 }
 
-/// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
-pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+/// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；狼走 `Wolf.mobInteract`；
+/// 否则交给 `Animal.mobInteract`。`now` 是岛时钟（狼要看还在不在生气）。
+///
+/// `AbstractCow.mobInteract`, `Wolf.mobInteract`, or `Animal.mobInteract`.
+/// `now` is the island clock, read by the wolf's anger check.
+pub fn interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+    now: i64,
+) -> MobInteraction {
+    if mob.mob_type == super::MobType::Wolf {
+        return super::wolf::interact(me, mob, req, now);
+    }
     if mob.mob_type == super::MobType::Cow && req.held.item == items::BUCKET && !mob.is_baby() {
         // `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，位置取交互发生处。
         mob.events.push(MobEvent::MilkSound {
@@ -66,6 +78,17 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
         };
     }
+    animal_interact(me, mob, req)
+}
+
+/// `Animal.mobInteract`：吃的能让成年动物发情、让幼崽长大。
+///
+/// `Animal.mobInteract`: food puts adults in love or ages babies up.
+pub(super) fn animal_interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> MobInteraction {
     let food = !req.held.is_empty()
         && mob
             .mob_type

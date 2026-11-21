@@ -1058,6 +1058,7 @@ impl Report {
                     armor_cover: 0.0,
                     main_hand: player.item,
                     off_hand: 0,
+                    combat: Default::default(),
                 })
                 .collect(),
             game: case.real_players.then(|| {

@@ -339,6 +339,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         let crouching = fox.has(super::fox::FLAG_CROUCHING);
         put(&mut out, "Crouching", Tag::Byte(i8::from(crouching)));
     }
+    if super::tame::is_tamable(mob.mob_type) {
+        write_tame(&mut out, mob);
+    }
+    if mob.mob_type == MobType::Wolf {
+        write_wolf(&mut out, mob);
+    }
     if mob.mob_type == MobType::Cow {
         put(
             &mut out,
@@ -499,6 +505,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Fox {
             read_fox(mob, tag);
+        }
+        if super::tame::is_tamable(mob.mob_type) {
+            read_tame(mob, tag);
+        }
+        if mob.mob_type == MobType::Wolf {
+            read_wolf(mob, tag);
         }
         if mob.mob_type == MobType::Cow {
             if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
@@ -703,6 +715,75 @@ fn read_fox(mob: &mut super::Mob, tag: &Tag) {
         tag::bool_or(tag, "Crouching", false),
     );
     super::fox::set_target_goals(mob);
+}
+
+/// `TamableAnimal.addAdditionalSaveData`：`Owner`（有才写）和 `Sitting`。
+fn write_tame(out: &mut Vec<(String, Tag)>, mob: &super::Mob) {
+    if let Some(owner) = &mob.tame.owner {
+        put(out, "Owner", uuid_tag(owner));
+    }
+    put(out, "Sitting", Tag::Byte(i8::from(mob.tame.ordered_to_sit)));
+}
+
+/// `Wolf.addAdditionalSaveData`：项圈（字节 ID）、品种、持续仇恨、叫声。
+fn write_wolf(out: &mut Vec<(String, Tag)>, mob: &super::Mob) {
+    let wolf = &mob.wolf;
+    put(out, "CollarColor", Tag::Byte(wolf.collar as i8));
+    put(out, "variant", Tag::String(wolf.variant_name().to_owned()));
+    put(out, "anger_end_time", Tag::Long(wolf.anger_end_time));
+    if let Some(target) = &wolf.angry_at {
+        put(out, "angry_at", uuid_tag(target));
+    }
+    put(
+        out,
+        "sound_variant",
+        Tag::String(wolf.sound_variant_name().to_owned()),
+    );
+}
+
+/// `TamableAnimal.readAdditionalSaveData`：有主人就 `setTame(true, false)`，
+/// 没有就 `setTame(false, true)`（带副作用，狼的最大生命回到 8）；坐姿跟着 `Sitting`。
+/// 旧版按名字存的主人（`OldUsersConverter`）不转换。
+///
+/// `TamableAnimal.readAdditionalSaveData`; legacy name-based owners are not converted.
+fn read_tame(mob: &mut super::Mob, tag: &Tag) {
+    match uuid_field(tag, "Owner") {
+        Some(owner) => {
+            mob.tame.owner = Some(owner);
+            super::tame::set_tame(mob, true, false);
+        }
+        None => {
+            mob.tame.owner = None;
+            super::tame::set_tame(mob, false, true);
+        }
+    }
+    mob.tame.ordered_to_sit = tag::bool_or(tag, "Sitting", false);
+    let sitting = mob.tame.ordered_to_sit;
+    mob.tame.set_in_sitting_pose(sitting);
+}
+
+/// `Wolf.readAdditionalSaveData`。旧的 `AngerTime` 要用读盘时的游戏时刻换算，
+/// 这里拿不到，按没有仇恨处理；`angry_at` 只记 UUID，不当场设目标。
+///
+/// `Wolf.readAdditionalSaveData`. Legacy `AngerTime` needs the game time and is
+/// read as no anger; `angry_at` keeps the UUID without setting a target.
+fn read_wolf(mob: &mut super::Mob, tag: &Tag) {
+    if let Some(variant) = tag::string_or(tag, "variant").and_then(super::wolf::variant_id) {
+        mob.wolf.variant = variant;
+    }
+    mob.wolf.collar = match tag::field(tag, "CollarColor") {
+        Some(Tag::Byte(id)) if (0..16).contains(id) => i32::from(*id),
+        Some(Tag::Byte(_)) => 0,
+        _ => 14,
+    };
+    mob.wolf.anger_end_time = tag::long_or(tag, "anger_end_time", -1);
+    mob.wolf.angry_at = uuid_field(tag, "angry_at");
+    mob.wolf.angry_at_uid = None;
+    if let Some(sound) =
+        tag::string_or(tag, "sound_variant").and_then(super::wolf::sound_variant_id)
+    {
+        mob.wolf.sound_variant = sound;
+    }
 }
 
 fn uuid_words(tag: &Tag) -> Option<[u8; 16]> {

@@ -31,7 +31,10 @@ pub mod rabbit;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
+pub mod tame;
 pub(crate) mod timing;
+pub mod wolf;
+pub mod wolf_goals;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 
@@ -55,6 +58,7 @@ pub enum MobType {
     Cow,
     Rabbit,
     Fox,
+    Wolf,
     Zombie,
     Husk,
     Skeleton,
@@ -68,6 +72,7 @@ impl MobType {
             Self::Cow => ids::COW,
             Self::Rabbit => ids::RABBIT,
             Self::Fox => ids::FOX,
+            Self::Wolf => ids::WOLF,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -80,6 +85,7 @@ impl MobType {
             Self::Cow => "minecraft:cow",
             Self::Rabbit => "minecraft:rabbit",
             Self::Fox => "minecraft:fox",
+            Self::Wolf => "minecraft:wolf",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -92,6 +98,7 @@ impl MobType {
             Self::Cow => Some(item_tags::COW_FOOD),
             Self::Rabbit => Some(item_tags::RABBIT_FOOD),
             Self::Fox => Some(item_tags::FOX_FOOD),
+            Self::Wolf => Some(item_tags::WOLF_FOOD),
             _ => None,
         }
     }
@@ -113,6 +120,7 @@ impl MobType {
             Self::Cow,
             Self::Rabbit,
             Self::Fox,
+            Self::Wolf,
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
@@ -134,6 +142,7 @@ impl MobType {
             }
             (Self::Rabbit, baby) => rabbit::dimensions(baby),
             (Self::Fox, baby) => fox::dimensions(baby),
+            (Self::Wolf, baby) => wolf::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -175,6 +184,7 @@ impl MobType {
             Self::Cow => "minecraft:entities/cow",
             Self::Rabbit => "minecraft:entities/rabbit",
             Self::Fox => "minecraft:entities/fox",
+            Self::Wolf => "minecraft:entities/wolf",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -194,7 +204,11 @@ impl MobType {
 
     /// `Mob.getSoundVolume()`。牛 0.4，僵尸 1.0（`Monster` 用 `getSoundVolume` 缺省）。
     pub const fn sound_volume(self) -> f32 {
-        if matches!(self, Self::Cow) { 0.4 } else { 1.0 }
+        if matches!(self, Self::Cow | Self::Wolf) {
+            0.4
+        } else {
+            1.0
+        }
     }
 
     /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
@@ -203,6 +217,9 @@ impl MobType {
             Self::Cow => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.ambient"),
             Self::Fox => Some("minecraft:entity.fox.ambient"),
+            // 狼的叫声按叫声品种和幼年换，见 [`wolf::sound`]。
+            // Wolf sounds depend on the sound variant and age; see [`wolf::sound`].
+            Self::Wolf => Some("minecraft:entity.wolf.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
@@ -214,6 +231,7 @@ impl MobType {
             Self::Cow => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.hurt"),
             Self::Fox => Some("minecraft:entity.fox.hurt"),
+            Self::Wolf => Some("minecraft:entity.wolf.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -225,6 +243,7 @@ impl MobType {
             Self::Cow => None,
             Self::Rabbit => Some("minecraft:entity.rabbit.death"),
             Self::Fox => Some("minecraft:entity.fox.death"),
+            Self::Wolf => Some("minecraft:entity.wolf.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -234,7 +253,7 @@ impl MobType {
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
             Self::Cow => None,
-            Self::Rabbit | Self::Fox => None,
+            Self::Rabbit | Self::Fox | Self::Wolf => None,
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
@@ -248,6 +267,7 @@ impl MobType {
             Self::Cow => items::COW_SPAWN_EGG,
             Self::Rabbit => items::RABBIT_SPAWN_EGG,
             Self::Fox => items::FOX_SPAWN_EGG,
+            Self::Wolf => items::WOLF_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -260,6 +280,7 @@ impl MobType {
             Self::Cow => "entity.minecraft.cow",
             Self::Rabbit => "entity.minecraft.rabbit",
             Self::Fox => "entity.minecraft.fox",
+            Self::Wolf => "entity.minecraft.wolf",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -681,6 +702,10 @@ pub struct DamageSource {
     ///
     /// Enchantment strength for the post-hit `AbstractArrow.doKnockback`.
     pub arrow_punch: i32,
+    /// 攻击者是驯服的狼时它主人的 UUID：`resolvePlayerResponsibleForDamage` 记到主人头上。
+    ///
+    /// The owner of a tamed wolf attacker, credited as the responsible player.
+    pub owner_credit: Option<[u8; 16]>,
     pub(super) looting_level: i32,
 }
 
@@ -702,6 +727,7 @@ impl DamageSource {
             weapon: None,
             arrow_ignite_ticks: 0,
             arrow_punch: 0,
+            owner_credit: None,
             looting_level: 0,
         }
     }
@@ -783,6 +809,7 @@ impl DamageSource {
             weapon: None,
             arrow_ignite_ticks: 0,
             arrow_punch: 0,
+            owner_credit: None,
             looting_level: 0,
         }
     }
@@ -972,6 +999,11 @@ pub struct Mob {
     pub sound_variant: CowSoundVariant,
     pub rabbit: rabbit::Rabbit,
     pub fox: fox::Fox,
+    /// `TamableAnimal` 的驯服状态（只有可驯服的种类用）。
+    ///
+    /// The `TamableAnimal` state, used by tamable kinds only.
+    pub tame: tame::Tamable,
+    pub wolf: wolf::Wolf,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
@@ -1037,6 +1069,7 @@ impl Mob {
             MobType::Cow => Attributes::cow(),
             MobType::Rabbit => rabbit::attributes(),
             MobType::Fox => fox::attributes(),
+            MobType::Wolf => wolf::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
@@ -1046,12 +1079,14 @@ impl Mob {
             MobType::Cow => GoalSelector::cow(&mut navigation),
             MobType::Rabbit => rabbit::goals(&mut navigation),
             MobType::Fox => fox::goals(&mut navigation, 0),
+            MobType::Wolf => wolf::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
             MobType::Cow | MobType::Rabbit => GoalSelector::default(),
             MobType::Fox => fox::target_goals(),
+            MobType::Wolf => wolf::target_goals(),
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
@@ -1170,6 +1205,8 @@ impl Mob {
             sound_variant: CowSoundVariant::Classic,
             rabbit: rabbit::Rabbit::default(),
             fox: fox::Fox::default(),
+            tame: tame::Tamable::default(),
+            wolf: wolf::Wolf::default(),
             events: Vec::new(),
             needs_sync: false,
             hurt_marked: false,
@@ -1177,6 +1214,9 @@ impl Mob {
         };
         if mob_type == MobType::Fox {
             fox::configure(&mut mob);
+        }
+        if mob_type == MobType::Wolf {
+            wolf::configure(&mut mob);
         }
         mob
     }
@@ -1252,6 +1292,7 @@ impl Mob {
         // `MeleeAttackGoal.lastCanUseCheck` is `gameTime` as well; cows have no such goal,
         // so rebasing it is a no-op for them.
         self.goals.rebase_clock(delta);
+        self.wolf.rebase(delta);
     }
 }
 
@@ -1286,6 +1327,23 @@ pub struct MobPublic {
     pub fox_variant: i32,
     pub fox_flags: u8,
     pub fox_trusted: [Option<[u8; 16]>; 2],
+    /// `TamableAnimal.DATA_FLAGS_ID` 和主人。
+    ///
+    /// The tamable flags and owner.
+    pub tame_flags: u8,
+    pub owner: Option<[u8; 16]>,
+    /// 原始的 `target` 字段有没有值（`HurtByTargetGoal.alertOthers` 看它）。
+    ///
+    /// Whether the raw target is set; read when alerting others.
+    pub has_target: bool,
+    /// 狼的元数据：讨食、项圈、仇恨结束时刻、品种、叫声。
+    ///
+    /// The wolf metadata: interested, collar, anger end, variant, sound variant.
+    pub wolf_interested: bool,
+    pub wolf_collar: i32,
+    pub wolf_anger_end_time: i64,
+    pub wolf_variant: i32,
+    pub wolf_sound_variant: i32,
     pub needs_sync: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
@@ -1335,6 +1393,14 @@ impl MobPublic {
             fox_variant: mob.fox.variant.id(),
             fox_flags: mob.fox.flags,
             fox_trusted: mob.fox.trusted,
+            tame_flags: mob.tame.flags,
+            owner: mob.tame.owner,
+            has_target: mob.target.is_some(),
+            wolf_interested: mob.wolf.interested,
+            wolf_collar: mob.wolf.collar,
+            wolf_anger_end_time: mob.wolf.anger_end_time,
+            wolf_variant: mob.wolf.variant,
+            wolf_sound_variant: mob.wolf.sound_variant,
             needs_sync: mob.needs_sync,
             on_fire: remaining_fire_ticks > 0,
             ticks_frozen: mob.ticks_frozen,

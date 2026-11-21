@@ -95,6 +95,9 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Fox && !me.removed {
         super::fox::tick_after(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Wolf && !me.removed {
+        super::wolf::tick_after(me, mob, ctx);
+    }
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
@@ -430,6 +433,10 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::fox::play_ambient_sound(me, mob, ctx.blocks());
                 return;
             }
+            if mob.mob_type == super::MobType::Wolf {
+                super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
+                return;
+            }
             let pitch = voice_pitch(me, mob);
             let sound = mob
                 .mob_type
@@ -541,6 +548,12 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    if mob.mob_type == super::MobType::Wolf {
+        // 刚生成的狼还没有仇恨，时刻不影响叫声。
+        // A fresh wolf has no anger, so the clock does not matter.
+        super::wolf::play_ambient_sound(me, mob, 0);
+        return;
+    }
     let pitch = voice_pitch(me, mob);
     let sound = mob
         .mob_type
@@ -780,6 +793,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if fox {
         super::fox::ai_step_after(me, mob);
     }
+    if mob.mob_type == super::MobType::Wolf {
+        super::wolf::ai_step_after(me, mob, ctx);
+    }
 }
 
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
@@ -845,6 +861,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     father_rabbit: mob.rabbit.variant,
                     father_fox: mob.fox.variant,
                     father_love: mob.love_cause,
+                    father_wolf: Box::new((mob.wolf, mob.tame)),
                 },
                 me,
             );
@@ -1398,6 +1415,9 @@ pub(crate) fn hurt_server(
     {
         return false;
     }
+    // `Wolf.hurtServer`：没有免疫就先站起来，再走 `super.hurtServer`。
+    // `Wolf.hurtServer` stands the wolf up before `super.hurtServer`.
+    super::wolf::before_hurt(mob);
     if mob.is_dead_or_dying() {
         return false;
     }
@@ -1429,6 +1449,12 @@ pub(crate) fn hurt_server(
             mob.last_hurt_by_player = Some(attacker);
             mob.last_hurt_by_player_ref = source.attacker_uuid;
             mob.last_hurt_by_player_memory_time = 100;
+        } else if let Some(owner) = source.owner_credit {
+            // `resolvePlayerResponsibleForDamage`：驯服的狼咬的算主人的。
+            // A tamed wolf's bite is credited to its owner.
+            mob.last_hurt_by_player = None;
+            mob.last_hurt_by_player_ref = Some(owner);
+            mob.last_hurt_by_player_memory_time = 100;
         }
     }
     if full_hit {
@@ -1450,10 +1476,13 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .death_sound()
-                .unwrap_or_else(|| mob.sound_variant.death());
+            let sound = if mob.mob_type == super::MobType::Wolf {
+                super::wolf::sound(mob, super::wolf::Sound::Death)
+            } else {
+                mob.mob_type
+                    .death_sound()
+                    .unwrap_or_else(|| mob.sound_variant.death())
+            };
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
         die(me, mob, ctx, source);
@@ -1461,10 +1490,13 @@ pub(crate) fn hurt_server(
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = mob
-            .mob_type
-            .hurt_sound()
-            .unwrap_or_else(|| mob.sound_variant.hurt());
+        let sound = if mob.mob_type == super::MobType::Wolf {
+            super::wolf::sound(mob, super::wolf::Sound::Hurt)
+        } else {
+            mob.mob_type
+                .hurt_sound()
+                .unwrap_or_else(|| mob.sound_variant.hurt())
+        };
         play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
     }
     mob.last_damage_source = Some(source);
@@ -1537,6 +1569,9 @@ pub(crate) fn do_hurt_target(
     source.direct = Some(me.id);
     source.attacker_uuid = Some(mob.uuid);
     source.position = Some(me.position);
+    if super::tame::is_tamable(mob.mob_type) && mob.tame.is_tame() {
+        source.owner_credit = mob.tame.owner;
+    }
     // 玩家在 `for_each_player` 里；查不到（已离岛/死亡）就当作没打中。
     let is_player = {
         let mut found = false;
@@ -1643,6 +1678,9 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         return;
     }
     mob.dead = true;
+    if mob.mob_type == super::MobType::Wolf {
+        super::wolf::on_death(mob);
+    }
     // `Fox.dropAllDeathLoot`：嘴里的东西先掉，不看幼年和 `doMobLoot`。
     // `Fox.dropAllDeathLoot` drops the mouth item first, babies and rules aside.
     if mob.mob_type == super::MobType::Fox {
@@ -1691,6 +1729,8 @@ pub(crate) struct BreedFather {
     pub(crate) rabbit: super::rabbit::Variant,
     pub(crate) fox: super::fox::Variant,
     pub(crate) love: Option<[u8; 16]>,
+    pub(crate) wolf: super::wolf::Wolf,
+    pub(crate) tame: super::tame::Tamable,
 }
 
 /// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
@@ -1713,9 +1753,21 @@ pub(crate) fn apply_breed(
             .mob()
             .map(|mob| (mob.rabbit.variant, mob.fox.variant, mob.love_cause))
     });
+    let mother_wolf = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.wolf));
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
+    let mut wolf = None;
     match kind {
+        super::MobType::Wolf => {
+            wolf = Some(super::wolf::offspring(
+                me,
+                (&parent.wolf, &parent.tame),
+                mother_wolf,
+                world,
+            ));
+        }
         super::MobType::Rabbit => {
             let mother = mother.map_or(parent.rabbit, |(rabbit, _, _)| rabbit);
             rabbit_variant = super::rabbit::offspring_variant(me, parent.rabbit, mother, world);
@@ -1751,6 +1803,13 @@ pub(crate) fn apply_breed(
         mob.rabbit.variant = rabbit_variant;
         if let Some(fox) = fox.take() {
             mob.fox = fox;
+        }
+        if let Some((wolf, tamable)) = wolf.take() {
+            mob.wolf = wolf;
+            mob.tame = tamable;
+            if tamable.is_tame() {
+                super::tame::set_tame(mob, true, true);
+            }
         }
         set_age(me, mob, -24000);
         mob.y_rot_o = 0.0;

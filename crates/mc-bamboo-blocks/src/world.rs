@@ -3179,8 +3179,9 @@ impl<'a> World<'a> {
         let Some(mut entity) = self.level.take_entity(id) else {
             return crate::entity::mob::interact::MobInteraction::pass();
         };
+        let now = self.game_time();
         let outcome = entity
-            .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request))
+            .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request, now))
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         self.level.put_entity(entity);
         outcome

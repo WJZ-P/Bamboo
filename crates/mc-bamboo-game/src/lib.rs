@@ -76,6 +76,7 @@ mod outgoing;
 mod pacing;
 mod partition_stats;
 mod player;
+mod player_combat_memory;
 pub mod player_consume;
 pub mod player_death;
 pub mod player_effects;

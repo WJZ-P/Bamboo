@@ -303,7 +303,14 @@ fn step_effects(
     }
     if play_sound {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
-        super::living::play_sound(me, mob, mob.sound_variant.step(), 0.15, 1.0);
+        // `Wolf.playStepSound` 用叫声品种里的脚步声。
+        // `Wolf.playStepSound` uses the step sound of its sound set.
+        let step = if mob.mob_type == super::MobType::Wolf {
+            super::wolf::sound(mob, super::wolf::Sound::Step)
+        } else {
+            mob.sound_variant.step()
+        };
+        super::living::play_sound(me, mob, step, 0.15, 1.0);
     }
     if play_sound
         && state.is_tagged(block_tags::CRYSTAL_SOUND_BLOCKS)
