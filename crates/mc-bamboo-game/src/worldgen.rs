@@ -506,16 +506,19 @@ struct TerrainShard {
 
 impl TerrainShard {
     /// 删掉一条条目和它的占位、位图、测量记录，更新字节数；`order` 里的旧键
-    /// 留给淘汰循环跳过。
+    /// 留给淘汰循环跳过。删掉的数据交回调用方，好在放开分片锁以后再释放。
     /// Remove an entry with its placeholder, bitmap and measurement record and
     /// update the byte counts; the stale key in `order` is skipped by eviction.
-    fn remove_entry(&mut self, key: &TerrainCacheKey) -> bool {
-        let hot = self.remove_hot(key).is_some();
-        let cold = self.remove_cold(key).is_some();
-        if hot || cold {
-            self.consumers_done.remove(key);
+    /// The removed data is handed back so the caller can free it after
+    /// releasing the shard lock.
+    fn remove_entry(&mut self, key: &TerrainCacheKey) -> Option<RemovedTerrain> {
+        let hot = self.remove_hot(key);
+        let cold = self.remove_cold(key);
+        if hot.is_none() && cold.is_none() {
+            return None;
         }
-        hot || cold
+        self.consumers_done.remove(key);
+        Some((hot, cold))
     }
 
     /// 把一条条目从热层拿走（连同占位和测量记录），位图留着。
@@ -543,30 +546,62 @@ impl TerrainShard {
         Some(removed)
     }
 
-    /// 热层淘汰一条：压缩后放进冷层（冷层预算为 0 时直接丢），冷层超了再按
-    /// 插入顺序丢最旧的。返回热层里是不是真有这条。
-    /// Evict one hot entry: keep it compacted in the cold tier (or drop it when
-    /// the cold budget is 0), then drop the oldest cold entries past the cold
-    /// budget. Returns whether the hot tier held the key.
-    fn demote(&mut self, key: &TerrainCacheKey, cold_limit: usize) -> bool {
-        let Some(chunk) = self.remove_hot(key) else {
-            return false;
-        };
-        if cold_limit == 0 {
-            self.consumers_done.remove(key);
-            return true;
+    /// 热层超过 `hot_limit` 时按插入顺序拿走最旧的条目，清到 3/4。拿走的条目
+    /// 交回调用方，由它在锁外压缩（[`demote_unlocked`]）或释放；冷层预算为 0
+    /// 时位图跟着删。
+    ///
+    /// Past `hot_limit`, take the oldest hot entries out in insertion order
+    /// down to 3/4 of it. They are handed back so the caller compacts
+    /// ([`demote_unlocked`]) or frees them outside the lock; with a zero cold
+    /// budget their bitmaps go too.
+    fn trim_hot(
+        &mut self,
+        hot_limit: usize,
+        cold_limit: usize,
+    ) -> Vec<(TerrainCacheKey, Arc<GeneratedChunk>)> {
+        let mut evicted = Vec::new();
+        if self.bytes <= hot_limit {
+            return evicted;
+        }
+        self.trims += 1;
+        let target = hot_limit * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
+        while self.bytes > target {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            let Some(chunk) = self.remove_hot(&oldest) else {
+                continue;
+            };
+            self.evictions += 1;
+            if cold_limit == 0 {
+                self.consumers_done.remove(&oldest);
+            }
+            evicted.push((oldest, chunk));
+        }
+        evicted
+    }
+
+    /// 把锁外压缩好的一条放进冷层，冷层超了再按插入顺序丢最旧的。压缩期间
+    /// 这个键又被查过（已回到热层或正在算）就不放，热层那份为准。
+    ///
+    /// Put an entry compacted outside the lock into the cold tier, then drop the
+    /// oldest cold entries past the cold budget. If the key was looked up again
+    /// meanwhile (back in the hot tier or being computed) the hot copy wins and
+    /// this one is not stored.
+    fn insert_cold(&mut self, key: TerrainCacheKey, compact: CompactTerrain, cold_limit: usize) {
+        if self.entries.contains_key(&key) || self.inflight.contains_key(&key) {
+            return;
         }
         // 按现在的路径一个键不会同时在两层；万一冷层里已有旧的一份，先连字节数
         // 一起拿掉，计数才不会漂。
         // A key is never in both tiers on today's paths; should a stale cold
         // copy exist, remove it with its bytes first so the counts cannot drift.
-        self.remove_cold(key);
-        let compact = CompactTerrain::encode(&chunk);
+        self.remove_cold(&key);
         let bytes = compact.heap_bytes();
         let stamp = self.next_cold_stamp;
         self.next_cold_stamp = stamp.wrapping_add(1);
-        self.cold.insert(key.clone(), (stamp, compact));
         self.cold_order.push_back((key.clone(), stamp));
+        self.cold.insert(key, (stamp, compact));
         self.cold_bytes += bytes;
         let total = TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
         PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
@@ -582,7 +617,6 @@ impl TerrainShard {
             }
         }
         self.compact_cold_order();
-        true
     }
 
     /// `order` 里攒了太多已删条目的旧键时压一遍，免得只靠按依赖释放时它无限增长。
@@ -604,12 +638,45 @@ impl TerrainShard {
     }
 }
 
+/// 从缓存删掉的一条（热层那份、冷层那份），在放开分片锁以后才释放。
+/// An entry removed from the cache (hot copy, cold copy), freed only after the
+/// shard lock is released.
+type RemovedTerrain = (Option<Arc<GeneratedChunk>>, Option<CompactTerrain>);
+
+/// 在分片锁外压缩 [`TerrainShard::trim_hot`] 拿走的条目，再短暂拿锁放进冷层；
+/// 冷层预算为 0 时只是在锁外释放它们。压缩约 150 µs 一条，放在锁外，别的线程
+/// （包括记依赖位的世界线程）就不会因为它等这把锁。
+///
+/// Compact the entries taken by [`TerrainShard::trim_hot`] outside the shard
+/// lock, then briefly relock to store them cold; with a zero cold budget they
+/// are just freed outside the lock. Compaction takes about 150 µs per entry, so
+/// doing it unlocked keeps other threads (including the world thread setting
+/// dependency bits) from waiting on this lock.
+fn demote_unlocked(
+    shard: &Mutex<TerrainShard>,
+    evicted: Vec<(TerrainCacheKey, Arc<GeneratedChunk>)>,
+    cold_limit: usize,
+) {
+    if cold_limit == 0 || evicted.is_empty() {
+        return;
+    }
+    let compacted: Vec<(TerrainCacheKey, CompactTerrain)> = evicted
+        .into_iter()
+        .map(|(key, chunk)| (key, CompactTerrain::encode(&chunk)))
+        .collect();
+    if let Ok(mut shard) = shard.lock() {
+        for (key, compact) in compacted {
+            shard.insert_cold(key, compact, cold_limit);
+        }
+    }
+}
+
 /// 给 `(x, z)` 的地形条目（带 / 不带 Beardifier 两条都算）记上使用者位，
-/// 两组位都满了就删。条目不在缓存里时什么都不做。
+/// 两组位都满了就删。条目不在缓存里时什么都不做。删掉的数据在锁外释放。
 ///
 /// Set consumer bits on the terrain entries at `(x, z)` (with and without a
 /// Beardifier) and drop an entry once both groups are full. Missing entries are
-/// left alone.
+/// left alone. Removed data is freed outside the lock.
 fn mark_terrain_consumer(config: &WorldGenConfig, x: i32, z: i32, bits: u32) {
     use crate::worldgen_cache::ALL_3X3;
     for beardified in [false, true] {
@@ -622,11 +689,17 @@ fn mark_terrain_consumer(config: &WorldGenConfig, x: i32, z: i32, bits: u32) {
         }
         let done = shard.consumers_done.entry(key.clone()).or_default();
         *done |= bits;
-        if *done == ALL_3X3 | (ALL_3X3 << 9) && shard.remove_entry(&key) {
+        if *done != ALL_3X3 | (ALL_3X3 << 9) {
+            continue;
+        }
+        let removed = shard.remove_entry(&key);
+        if removed.is_some() {
             shard.dependency_releases += 1;
             shard.compact_order();
             shard.compact_cold_order();
         }
+        drop(shard);
+        drop(removed);
     }
 }
 
@@ -659,9 +732,12 @@ pub(crate) fn release_terrain_cache() {
             .chain(shard.cold.keys())
             .cloned()
             .collect();
-        for key in &keys {
-            shard.remove_entry(key);
-        }
+        // 删掉的数据攒起来，放开这一片的锁以后再释放。
+        // Collect the removed data and free it after this shard's lock is released.
+        let removed: Vec<RemovedTerrain> = keys
+            .iter()
+            .filter_map(|key| shard.remove_entry(key))
+            .collect();
         // 只有正在算（或正从冷层解码）的键还可能用得上位图。
         // Only keys still computing (or thawing) can still use a bitmap.
         let TerrainShard {
@@ -678,6 +754,8 @@ pub(crate) fn release_terrain_cache() {
         shard.entries.shrink_to_fit();
         shard.inflight.shrink_to_fit();
         shard.consumers_done.shrink_to_fit();
+        drop(shard);
+        drop(removed);
     }
 }
 
@@ -1137,22 +1215,16 @@ fn cached_terrain(
         }
         // 按字节封顶：超了就按插入顺序从最旧的条目开始淘汰，清到 3/4 预算。
         // 占位和条目一起淘汰；不在 `entries` 里的（正在算的）占位不能被淘汰。
+        // 淘汰下来的条目放开锁以后再压缩进冷层（或释放）。
         // Byte-bounded oldest-first eviction; placeholders without an entry
-        // (still computing) are never evicted.
+        // (still computing) are never evicted. Evicted entries are compacted
+        // into the cold tier (or freed) after the lock is released.
         let (hot_limit, cold_limit) = shard_byte_limits();
-        let target = hot_limit * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
-        if shard.bytes > hot_limit {
-            shard.trims += 1;
-            while shard.bytes > target {
-                let Some(oldest) = shard.order.pop_front() else {
-                    break;
-                };
-                if shard.demote(&oldest, cold_limit) {
-                    shard.evictions += 1;
-                }
-            }
-        }
-        return Ok(Arc::clone(shard.entries.get(&key).unwrap_or(&chunk)));
+        let evicted = shard.trim_hot(hot_limit, cold_limit);
+        let result = Arc::clone(shard.entries.get(&key).unwrap_or(&chunk));
+        drop(shard);
+        demote_unlocked(&shards[index], evicted, cold_limit);
+        return Ok(result);
     }
     // 锁被毒化时不影响正确性：直接返回这次算出的地形，只是没进缓存。
     // A poisoned lock must not change results: return the freshly generated
@@ -1956,9 +2028,15 @@ mod tests {
         let first = cached_generate_chunk(&cfg, x, z).unwrap();
         let computations = TEST_COMPUTATIONS.load(Ordering::Relaxed);
         let key = terrain_cache_key(&cfg, x, z, false);
+        let shard_lock = &terrain_shards()[shard_index(&key)];
+        let chunk = shard_lock.lock().unwrap().remove_hot(&key).unwrap();
+        demote_unlocked(
+            shard_lock,
+            vec![(key.clone(), chunk)],
+            shard_byte_limits().1,
+        );
         let before = {
-            let mut shard = terrain_shards()[shard_index(&key)].lock().unwrap();
-            assert!(shard.demote(&key, shard_byte_limits().1));
+            let shard = shard_lock.lock().unwrap();
             assert!(shard.cold.contains_key(&key) && !shard.entries.contains_key(&key));
             assert!(!shard.inflight.contains_key(&key));
             shard.cold_hits
@@ -1976,6 +2054,34 @@ mod tests {
             computations,
             "a thaw must not regenerate"
         );
+    }
+
+    /// 锁外压缩期间这个键又被查过（回到热层或正在算），冷层就不收那份，
+    /// 一个键不会同时在两层。
+    /// If the key was looked up again while it was compacted outside the lock
+    /// (back in the hot tier or being computed), the cold tier does not take
+    /// that copy, so a key is never in both tiers.
+    #[test]
+    fn a_key_looked_up_again_is_not_stored_cold() {
+        let cfg = WorldGenConfig::default();
+        let key = terrain_cache_key(&cfg, 0, 0, false);
+        let chunk = Arc::new(generate_chunk(&cfg, 0, 0).unwrap());
+        let mut shard = TerrainShard::default();
+        shard.entries.insert(key.clone(), Arc::clone(&chunk));
+        shard.insert_cold(key.clone(), CompactTerrain::encode(&chunk), usize::MAX);
+        assert!(shard.cold.is_empty() && shard.cold_bytes == 0);
+        shard.entries.clear();
+        shard
+            .inflight
+            .insert(key.clone(), Arc::new(OnceLock::new()));
+        shard.insert_cold(key.clone(), CompactTerrain::encode(&chunk), usize::MAX);
+        assert!(shard.cold.is_empty() && shard.cold_bytes == 0);
+        shard.inflight.clear();
+        shard.insert_cold(key.clone(), CompactTerrain::encode(&chunk), usize::MAX);
+        assert!(shard.cold.contains_key(&key) && shard.cold_bytes > 0);
+        // 把全局字节计数还回去，别的测试看的峰值不受影响。
+        // Give the global byte count back so other tests' peaks are unaffected.
+        shard.remove_cold(&key);
     }
 
     #[test]

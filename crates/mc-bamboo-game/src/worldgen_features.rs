@@ -646,16 +646,17 @@ struct FeatureShard {
 }
 
 impl FeatureShard {
-    /// 删掉一条条目和它的占位、位图，更新字节数。
-    /// Remove an entry with its placeholder and bitmap and update the bytes.
-    fn remove_entry(&mut self, key: &FeatureCacheKey) -> bool {
-        let Some(removed) = self.entries.remove(key) else {
-            return false;
-        };
+    /// 删掉一条条目和它的占位、位图，更新字节数；删掉的结果交回调用方，
+    /// 好在放开分片锁以后再释放。
+    /// Remove an entry with its placeholder and bitmap and update the bytes;
+    /// the removed result is handed back so it can be freed after the shard
+    /// lock is released.
+    fn remove_entry(&mut self, key: &FeatureCacheKey) -> Option<Arc<FeatureRun>> {
+        let removed = self.entries.remove(key)?;
         self.inflight.remove(key);
         self.finished.remove(key);
         self.bytes = self.bytes.saturating_sub(feature_run_heap_bytes(&removed));
-        true
+        Some(removed)
     }
 }
 
@@ -708,7 +709,8 @@ fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> FeatureCacheK
 /// 条目不在缓存里时什么都不做。
 ///
 /// Chunk `bit` of the 5×5 around `(cx, cz)` has been assembled; drop this
-/// feature result once all 25 are. Missing entries are left alone.
+/// feature result once all 25 are. Missing entries are left alone. The removed
+/// result is freed outside the lock.
 pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: i32, bit: u32) {
     let key = feature_cache_key(config, cx, cz);
     let Ok(mut shard) = feature_shards()[feature_shard_index(&key)].lock() else {
@@ -719,14 +721,18 @@ pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: 
     }
     let done = shard.finished.entry(key.clone()).or_default();
     *done |= 1 << bit;
-    if *done == crate::worldgen_cache::ALL_5X5 && shard.remove_entry(&key) {
-        // `order` 里的旧键留给淘汰循环跳过；攒多了压一遍。
-        // The stale key in `order` is skipped by eviction; compact when many.
-        if shard.order.len() > 2 * shard.entries.len() + 64 {
-            let FeatureShard { entries, order, .. } = &mut *shard;
-            order.retain(|key| entries.contains_key(key));
-        }
+    if *done != crate::worldgen_cache::ALL_5X5 {
+        return;
     }
+    let removed = shard.remove_entry(&key);
+    // `order` 里的旧键留给淘汰循环跳过；攒多了压一遍。
+    // The stale key in `order` is skipped by eviction; compact when many.
+    if shard.order.len() > 2 * shard.entries.len() + 64 {
+        let FeatureShard { entries, order, .. } = &mut *shard;
+        order.retain(|key| entries.contains_key(key));
+    }
+    drop(shard);
+    drop(removed);
 }
 
 /// 空闲释放：清空全部条目；正在算的占位留着，计算方算完照常提交。
@@ -738,14 +744,19 @@ pub(crate) fn release_feature_cache() {
             continue;
         };
         let keys: Vec<FeatureCacheKey> = shard.entries.keys().cloned().collect();
-        for key in &keys {
-            shard.remove_entry(key);
-        }
+        // 删掉的结果攒起来，放开这一片的锁以后再释放。
+        // Collect the removed results and free them after this shard's lock is released.
+        let removed: Vec<Arc<FeatureRun>> = keys
+            .iter()
+            .filter_map(|key| shard.remove_entry(key))
+            .collect();
         shard.order.clear();
         shard.order.shrink_to_fit();
         shard.entries.shrink_to_fit();
         shard.inflight.shrink_to_fit();
         shard.finished.shrink_to_fit();
+        drop(shard);
+        drop(removed);
     }
 }
 
