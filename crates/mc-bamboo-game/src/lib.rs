@@ -79,6 +79,7 @@ mod player;
 pub mod player_consume;
 pub mod player_death;
 pub mod player_effects;
+pub mod player_egg;
 pub mod player_environment;
 pub mod player_exhaustion;
 mod player_grid;

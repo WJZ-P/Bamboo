@@ -15,6 +15,7 @@ pub mod mob;
 pub mod parallel;
 pub mod random;
 pub mod store;
+pub mod thrown_egg;
 pub mod view;
 
 mod explosion;
@@ -203,6 +204,10 @@ pub enum EntityKind {
     Item(GroundItem),
     ExperienceOrb(ExperienceOrb),
     Arrow(Box<arrow::Arrow>),
+    /// 扔出的鸡蛋。
+    ///
+    /// A thrown egg.
+    Egg(Box<thrown_egg::ThrownEgg>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -218,6 +223,7 @@ impl EntityKind {
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
+            Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -415,6 +421,7 @@ impl Entity {
             EntityKind::Item(_) => Entity::tick_item(self, ctx),
             EntityKind::ExperienceOrb(_) => orb::tick_orb(self, ctx),
             EntityKind::Arrow(_) => arrow::tick(self, ctx),
+            EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }

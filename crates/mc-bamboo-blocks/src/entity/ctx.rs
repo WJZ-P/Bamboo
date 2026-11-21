@@ -482,6 +482,12 @@ pub enum Command {
         hits: Vec<super::arrow::ArrowEntityHit>,
         end: Vec3,
     },
+    /// 鸡蛋这一刻撞到东西：`ThrownEgg.onHit`（打目标、孵小鸡、碎掉）。
+    ///
+    /// The egg hit something this tick: `ThrownEgg.onHit` (hurt, hatch, break).
+    EggImpact {
+        hit: super::thrown_egg::EggHit,
+    },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode {
         center: Vec3,
@@ -631,6 +637,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ArrowImpact { block, hits, end } => {
             super::arrow::impact(me, world, hits, block, end)
         }
+        Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);

@@ -379,7 +379,7 @@ impl TrackedEntity {
         let mut packets = Vec::new();
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
-        if !matches!(snapshot.data, KindData::Arrow(_)) {
+        if !snapshot.data.is_projectile() {
             self.ticks_since_step += 1;
         }
         if snapshot.sync_position {
@@ -472,7 +472,7 @@ impl TrackedEntity {
         if sync_velocity {
             // 箭的 syncVelocity 来自 markHurt；官方这个分支不更新常规速度基线。
             // Arrow syncVelocity comes from markHurt; vanilla leaves its regular velocity baseline intact.
-            if !matches!(snapshot.data, KindData::Arrow(_)) {
+            if !snapshot.data.is_projectile() {
                 self.last_movement = snapshot.delta;
             }
             packets.push(packet_body(&SetEntityMotion {
@@ -748,6 +748,7 @@ pub enum KindData {
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
     Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
+    Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
 }
 
 impl Snapshot {
@@ -764,8 +765,16 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
-            needs_sync: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.needs_sync),
-            sync_velocity: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.sync_velocity),
+            needs_sync: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.needs_sync,
+                KindPublic::Egg(egg) => egg.needs_sync,
+                _ => false,
+            },
+            sync_velocity: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.sync_velocity,
+                KindPublic::Egg(egg) => egg.sync_velocity,
+                _ => false,
+            },
             sync_position: false,
             fall_flying: false,
         }
@@ -776,6 +785,7 @@ impl Snapshot {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
             KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
+            KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -800,7 +810,16 @@ impl KindData {
             KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
             KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
+            KindPublic::Egg(egg) => Self::Egg(egg.clone()),
         }
+    }
+
+    /// `InterpolationHandler.NO_OP` 的弹射物：位置包不带攒下的步数，`syncVelocity` 不动速度基线。
+    ///
+    /// Projectiles with a no-op interpolation handler: no stepped position paths, and
+    /// `syncVelocity` leaves the velocity baseline alone.
+    fn is_projectile(&self) -> bool {
+        matches!(self, Self::Arrow(_) | Self::Egg(_))
     }
 
     /// 同步用到的那个数字。下落的方块和物品没有。
@@ -810,7 +829,8 @@ impl KindData {
             | Self::Item(_)
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
-            | Self::Arrow(_) => None,
+            | Self::Arrow(_)
+            | Self::Egg(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -822,7 +842,8 @@ impl KindData {
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
-            | Self::Arrow(_) => None,
+            | Self::Arrow(_)
+            | Self::Egg(_) => None,
         }
     }
 
@@ -831,6 +852,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
             Self::Arrow(arrow) => Some(arrow.uuid),
+            Self::Egg(egg) => Some(egg.uuid),
             _ => None,
         }
     }
@@ -840,6 +862,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
             Self::Arrow(arrow) => Some(arrow.pitch),
+            Self::Egg(egg) => Some(egg.x_rot),
             _ => None,
         }
     }
@@ -897,6 +920,19 @@ impl KindData {
                 } else {
                     mob_non_default_data(mob)
                 }
+            }
+            Self::Egg(egg) => {
+                let mut data = Vec::new();
+                if egg.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if egg.no_gravity {
+                    data.push(EntityData::NoGravity(true));
+                }
+                // `ItemStack` 不覆写 `equals`，`setItem` 之后的值永远不是默认值。
+                // `ItemStack` has no `equals`, so the set item is never the default.
+                data.push(EntityData::Item(egg.item.clone()));
+                data
             }
         }
     }
