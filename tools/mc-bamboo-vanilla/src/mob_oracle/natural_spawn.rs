@@ -93,10 +93,10 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::COW)
             .count();
-        for (count, kind) in self
-            .farm
-            .iter_mut()
-            .zip([entity_type::PIG, entity_type::SHEEP, entity_type::CHICKEN])
+        for (count, kind) in
+            self.farm
+                .iter_mut()
+                .zip([entity_type::PIG, entity_type::SHEEP, entity_type::CHICKEN])
         {
             *count += step.spawned.iter().filter(|row| row[0] == kind).count();
         }
