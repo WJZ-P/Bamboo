@@ -1501,7 +1501,13 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                     nearest_mob_target(me, mob, ctx, super::fox_goals::is_small_prey)
                 }
                 // `NearestAttackableTargetGoal<Fox>`：北极熊找狐狸，幼崽不打。
+                // 不要把这个分支并回下面的玩家搜索：08:40 的回归就是 Fox 走了玩家分支，
+                // 出生点玩家被设成目标，愤怒结束时间和世界随机源从第 1 刻起分叉。
+                //
                 // `NearestAttackableTargetGoal<Fox>`: a polar bear looks for foxes; cubs pass.
+                // Never fold this arm back into the player search below: the 08:40 regression
+                // was Fox taking the player branch, which targeted the spawn player and diverged
+                // the anger end time and world random source from tick 1.
                 TargetType::Fox => {
                     if mob.is_baby() {
                         None

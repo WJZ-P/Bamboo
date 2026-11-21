@@ -919,6 +919,10 @@ public final class MobOracle {
      * (colour plus shear mark, variant plus egg timer); the rest keep the defaults,
      * matching Bamboo's `farm_variant`.
      */
+    // 这个方法调用了声明 throws Exception 的 farmVariant，所以自己也必须声明；去掉它整个
+    // mob-oracle 单文件源码编译不过。合并冲突解决时不要回退这一行。
+    // This method calls farmVariant, which declares throws Exception, so it must declare it too;
+    // without it the whole single-file mob-oracle source fails to compile. Do not revert this in merges.
     static String caseVariant(Mob mob) throws Exception {
         if (mob instanceof Sheep || mob instanceof Chicken) {
             return farmVariant((Animal) mob);

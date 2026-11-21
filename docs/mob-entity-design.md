@@ -412,6 +412,25 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 已知差异：`ITEM` / `SNEEZE` 粒子不发（取数照官方）；喷嚏让同伴跳的水中判定没有建模；
   幼崽金蒲公英的 `Animal.mobInteract` 兜底未接。山羊 / 青蛙 / 犰狳 / 骆驼仍等 `Brain`。
 
+### 5.11 08:40 合并回归的根因与端到端复现（op-misc，2026-11-21）
+
+- 队长 08:40 看到的两处快速检查失败，在 `op-misc` 的最终提交上均已修复并验证：
+  `MobOracle.java` 的 `caseVariant(Mob) throws Exception`（被调的 `farmVariant(Animal)` 声明了
+  `throws Exception`，单文件源码编译需要这一行）；`goals.rs` 的 `NearestAttackableTargetGoal`
+  对 `TargetType` 显式穷举，`Fox` 只搜狐狸实体，不再经 `_ if kind.available()` 兜底。
+- 根因（第 5 轮静态分析，本轮端到端复现确认）：旧代码 `available()` 把 `Fox` 也算作已实现，
+  北极熊的 Fox 目标因此落进 `nearest_attackable` 的玩家搜索。`polar_bear_idle` 出生点附近有玩家，
+  熊从第 1 刻起就有了目标、愤怒结束时间 `e1778`，并多取一次随机数，世界随机源随之分叉。
+  故意把 `Fox` 分支改回 `nearest_attackable` 后，`mob-oracle --only polar_bear` 精确复现
+  `tick 1 ... official "s0|w0|e0|t-" bamboo "s0|w0|e1778|t...0002"`，恢复后 0 不一致。
+- 现状：`git merge main` 为 Already up to date（`main` 已是 `op-misc` 的祖先，合进 main 是快进）；
+  全套 `mob-oracle` 1677 例 160485 刻 0 不一致、`natural-spawn` 1727 例 0 不一致。
+  下次合并冲突解决请保留上面两处（显式 `Fox` 分支、`throws Exception`）。
+- 其余生物：山羊 / 青蛙 / 犰狳 / 骆驼用 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` /
+  `CamelAi`），骆驼 / 鹦鹉上肩还要载具与乘客（世界模型 8.2 未定），按「建议顺序」由队长先整合
+  `brain` 分支、定案载具后再接；猫 / 鹦鹉 / 豹猫用 `tame.rs`，各一个新文件、共用文件最小追加、
+  各配逐刻对拍场景。本轮不新增 `MobType`，避免刚被撤回的合并再次扩大共用文件冲突面。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
