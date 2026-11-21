@@ -21,6 +21,7 @@ use mc_bamboo_game::{
     MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MIN_ISLAND_DEAD_SECONDS, MailBudget,
     island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
     recommended_island_threads, world_options::WorldGenConfig,
+    worldgen_cache::WorldgenCacheSettings,
 };
 use toml::{Table, Value};
 use tracing::{info, warn};
@@ -138,6 +139,9 @@ const BAMBOO_KEYS: &[&str] = &[
     "entity_threads",
     "redstone_cache",
     "chunk_worker_threads",
+    "worldgen_terrain_cache_mb",
+    "worldgen_feature_cache_mb",
+    "worldgen_cache_idle_seconds",
     "spawn_per_player_cap",
     "deliveries_per_tick",
     "reclaims_per_tick",
@@ -169,6 +173,12 @@ pub struct BambooConfig {
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
     pub chunk_worker_threads: usize,
+    /// 世界生成缓存：地形缓存上限、地物缓存上限（MiB）和空闲释放秒数。
+    /// 只影响内存和速度，不影响生成结果。
+    ///
+    /// Worldgen caches: terrain and feature limits (MiB) and the idle-release
+    /// delay. They affect memory and speed, never the generated world.
+    pub worldgen_cache: WorldgenCacheSettings,
     /// 自然刷怪按玩家算上限（默认 true）；false 只剩官方的全局上限。
     ///
     /// Per-player natural spawn caps (default true); false keeps only the
@@ -222,6 +232,7 @@ impl Default for BambooConfig {
             entity_threads: defaults.entity_threads,
             redstone_cache: defaults.redstone_cache,
             chunk_worker_threads: defaults.chunk_worker_threads,
+            worldgen_cache: defaults.worldgen_cache,
             spawn_per_player_cap: defaults.spawn_per_player_cap,
             deliveries_per_tick: defaults.mail_budget.deliveries,
             reclaims_per_tick: defaults.mail_budget.reclaims,
@@ -282,6 +293,14 @@ impl BambooConfig {
                 "# >= 1 = 交给这么多条常驻后台线程。区块内容一样，只有到达的时刻可能不同。\n",
                 "chunk_worker_threads = {}\n",
                 "\n",
+                "# 世界生成缓存（只影响内存和速度，不影响生成结果）。\n",
+                "# 地形缓存上限，单位 MiB，默认 128（0 到 4096；0 = 不缓存）。\n",
+                "worldgen_terrain_cache_mb = {}\n",
+                "# 地物结果缓存上限，单位 MiB，默认 64（0 到 1024；0 = 不缓存）。\n",
+                "worldgen_feature_cache_mb = {}\n",
+                "# 多少秒没有区块生成就清空这两份缓存，默认 30（0 到 3600；0 = 不清）。\n",
+                "worldgen_cache_idle_seconds = {}\n",
+                "\n",
                 "# 自然刷怪按玩家算上限（默认 true）：每名玩家附近的同类生物不超过官方上限；\n",
                 "# false = 只剩官方的全局上限（maxInstancesPerChunk * 刷怪区块数 / 289）。\n",
                 "spawn_per_player_cap = {}\n",
@@ -316,6 +335,9 @@ impl BambooConfig {
             self.entity_threads,
             self.redstone_cache,
             self.chunk_worker_threads,
+            self.worldgen_cache.terrain_mb,
+            self.worldgen_cache.feature_mb,
+            self.worldgen_cache.idle_seconds,
             self.spawn_per_player_cap,
             self.deliveries_per_tick,
             self.reclaims_per_tick,
@@ -376,6 +398,7 @@ impl BambooConfig {
                 0,
                 MAX_CHUNK_WORKER_THREADS,
             ),
+            worldgen_cache: worldgen_cache_from_table(table, file, defaults.worldgen_cache),
             spawn_per_player_cap: boolean(
                 table,
                 "spawn_per_player_cap",
@@ -457,6 +480,44 @@ fn boolean(table: &Table, key: &str, file: &Path, default: bool) -> bool {
             warn!(key, original = %value, file = %file.display(), used = default, "invalid Bamboo config value, using default");
             default
         }
+    }
+}
+
+/// 世界生成缓存的三个键；坏的单个键只回落自己。
+/// The three worldgen cache keys; a bad key only falls back itself.
+fn worldgen_cache_from_table(
+    table: &Table,
+    file: &Path,
+    defaults: WorldgenCacheSettings,
+) -> WorldgenCacheSettings {
+    use mc_bamboo_game::worldgen_cache::{
+        MAX_FEATURE_CACHE_MB, MAX_IDLE_SECONDS, MAX_TERRAIN_CACHE_MB,
+    };
+    WorldgenCacheSettings {
+        terrain_mb: integer(
+            table,
+            "worldgen_terrain_cache_mb",
+            file,
+            defaults.terrain_mb,
+            0,
+            MAX_TERRAIN_CACHE_MB,
+        ),
+        feature_mb: integer(
+            table,
+            "worldgen_feature_cache_mb",
+            file,
+            defaults.feature_mb,
+            0,
+            MAX_FEATURE_CACHE_MB,
+        ),
+        idle_seconds: integer(
+            table,
+            "worldgen_cache_idle_seconds",
+            file,
+            defaults.idle_seconds as usize,
+            0,
+            MAX_IDLE_SECONDS as usize,
+        ) as u64,
     }
 }
 
@@ -795,6 +856,7 @@ impl ConfigFiles {
             entity_threads: self.bamboo.entity_threads,
             redstone_cache: self.bamboo.redstone_cache,
             chunk_worker_threads: self.bamboo.chunk_worker_threads,
+            worldgen_cache: self.bamboo.worldgen_cache,
             spawn_per_player_cap: self.bamboo.spawn_per_player_cap,
             mail_budget: MailBudget {
                 deliveries: self.bamboo.deliveries_per_tick,
@@ -838,6 +900,7 @@ impl ConfigFiles {
         bamboo.entity_threads = config.entity_threads;
         bamboo.redstone_cache = config.redstone_cache;
         bamboo.chunk_worker_threads = config.chunk_worker_threads;
+        bamboo.worldgen_cache = config.worldgen_cache;
         bamboo.spawn_per_player_cap = config.spawn_per_player_cap;
         bamboo.deliveries_per_tick = config.mail_budget.deliveries;
         bamboo.reclaims_per_tick = config.mail_budget.reclaims;
@@ -981,6 +1044,21 @@ impl ConfigFiles {
                 "chunk_worker_threads",
                 self.bamboo.chunk_worker_threads as u64,
                 defaults.bamboo.chunk_worker_threads as u64,
+            ),
+            (
+                "worldgen_terrain_cache_mb",
+                self.bamboo.worldgen_cache.terrain_mb as u64,
+                defaults.bamboo.worldgen_cache.terrain_mb as u64,
+            ),
+            (
+                "worldgen_feature_cache_mb",
+                self.bamboo.worldgen_cache.feature_mb as u64,
+                defaults.bamboo.worldgen_cache.feature_mb as u64,
+            ),
+            (
+                "worldgen_cache_idle_seconds",
+                self.bamboo.worldgen_cache.idle_seconds,
+                defaults.bamboo.worldgen_cache.idle_seconds,
             ),
             (
                 "deliveries_per_tick",

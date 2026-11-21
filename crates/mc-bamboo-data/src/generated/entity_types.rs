@@ -247,12 +247,10 @@ pub const FISH_FROM_BUCKET: u8 = 16;
 pub const SALMON_VARIANT: u8 = 17;
 pub const TROPICAL_FISH_VARIANT: u8 = 17;
 pub const PUFFERFISH_PUFF_STATE: u8 = 17;
-// 海龟的两个布尔元数据下标：`AgeableMob` 用到 16、17，海龟自己从 18 开始。
-// The two turtle booleans: `AgeableMob` takes 16 and 17, so the turtle starts at 18.
-pub const TURTLE_HAS_EGG: u8 = 18;
-pub const TURTLE_LAYING_EGG: u8 = 19;
 pub const CHICKEN_VARIANT: u8 = 18;
 pub const CHICKEN_SOUND_VARIANT: u8 = 19;
+pub const TURTLE_HAS_EGG: u8 = 18;
+pub const TURTLE_LAYING_EGG: u8 = 19;
 pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &[117506305, 117899265, 185008129, 117441793, 118161664, 65536, 50726144, 67764993, 234882305, 67110144, 117441025, 16778497, 101253888, 50660352, 918529, 235340288, 918273, 67108865, 917504, 459008, 67699456, 67371009];
 pub const PIG_VARIANT_SERIALIZER: i32 = 28;
 pub const PIG_SOUND_VARIANT_SERIALIZER: i32 = 29;
@@ -279,3 +277,14 @@ pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[
     (313, &[(19, 140)]),
     (314, &[(15, 100)]),
 ];
+pub const CREEPER_IGNITED: u8 = 18;
+pub const CREEPER_POWERED: u8 = 17;
+pub const CREEPER_SWELL_DIR: u8 = 16;
+pub const ENDERMAN_CARRY_STATE: u8 = 16;
+pub const ENDERMAN_CREEPY: u8 = 17;
+pub const ENDERMAN_STARED_AT: u8 = 18;
+pub const SPIDER_FLAGS: u8 = 16;
+pub const CAVE_SPIDER_EYE_HEIGHT: f32 = 0.45;
+pub const CREEPER_EYE_HEIGHT: f32 = 1.445;
+pub const ENDERMAN_EYE_HEIGHT: f32 = 2.55;
+pub const SPIDER_EYE_HEIGHT: f32 = 0.65;

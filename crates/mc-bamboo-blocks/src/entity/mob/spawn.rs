@@ -102,6 +102,7 @@ pub enum SpawnGroup {
     /// `Llama.LlamaGroupData`: the colour id shared by the group.
     Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    Spider(SpiderGroupData),
     /// 鱼群共享领头鱼；热带鱼还共享花纹。
     ///
     /// Schooling fish share a leader; tropical fish also share a variant.
@@ -113,6 +114,14 @@ pub enum SpawnGroup {
     ///
     /// Rabbits, foxes and wolves: the group size plus the shared variant.
     Wild(super::wild_spawn::WildGroup),
+}
+
+/// `Spider.SpiderEffectsGroupData`：同一组蜘蛛共享的药水效果。
+///
+/// `Spider.SpiderEffectsGroupData`: the potion effect shared by one spider group.
+#[derive(Debug, Clone, Copy)]
+pub struct SpiderGroupData {
+    pub effect: Option<i32>,
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -340,6 +349,22 @@ fn finalize_spawn_in_group(
     }
     if matches!(kind, MobType::Zombie | MobType::Husk) {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
+        return;
+    }
+    if matches!(kind, MobType::Creeper | MobType::Enderman) {
+        super::creeper::finalize_spawn(entity, world.random());
+        return;
+    }
+    if kind == MobType::Spider {
+        super::spider::finalize_spawn(world, entity, reason, group);
+        return;
+    }
+    // `CaveSpider.finalizeSpawn` 只把组数据原样返回，连 `Mob.finalizeSpawn` 都不走：
+    // 没有跟随距离加成、没有左撇子，也没有骑士和药水效果，一个随机数都不取。
+    // `CaveSpider.finalizeSpawn` returns the group data untouched without calling
+    // `Mob.finalizeSpawn`: no follow-range bonus, no left-handedness, no jockey, no
+    // effect, and no random draws at all.
+    if kind == MobType::CaveSpider {
         return;
     }
     if super::squid::is_squid(kind) {

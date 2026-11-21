@@ -84,7 +84,7 @@ fn wrap(priority: i32, goal: Goal) -> WrappedGoal {
 /// `probability` (see [`Goal::Stroll`]).
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     navigation.flags.can_float = true;
-    GoalSelector::with_goals(vec![
+    GoalSelector::from_goals(vec![
         wrap(0, Goal::Float),
         wrap(
             1,
@@ -151,8 +151,9 @@ pub(super) fn target_goals() -> GoalSelector {
         interval,
         unseen_ticks: 0,
         found: None,
+        light_gate: false,
     };
-    GoalSelector::with_goals(vec![
+    GoalSelector::from_goals(vec![
         wrap(
             1,
             Goal::HurtByTarget {

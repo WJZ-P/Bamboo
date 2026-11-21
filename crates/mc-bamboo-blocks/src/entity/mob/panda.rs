@@ -303,7 +303,7 @@ fn wrap(priority: i32, goal: Goal) -> WrappedGoal {
 /// The `goalSelector` of `Panda.registerGoals`, in registration order.
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     navigation.flags.can_float = true;
-    GoalSelector::with_goals(vec![
+    GoalSelector::from_goals(vec![
         wrap(0, Goal::Float),
         wrap(
             2,
@@ -406,7 +406,7 @@ pub(super) const MELEE_SPEED: f64 = 1.2;
 ///
 /// The `targetSelector` of `Panda.registerGoals`.
 pub(super) fn target_goals() -> GoalSelector {
-    GoalSelector::with_goals(vec![wrap(
+    GoalSelector::from_goals(vec![wrap(
         1,
         Goal::HurtByTarget {
             timestamp: 0,

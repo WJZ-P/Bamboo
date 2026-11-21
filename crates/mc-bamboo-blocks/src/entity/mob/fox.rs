@@ -311,6 +311,7 @@ fn hunt(kind: TargetType, interval: i32) -> Goal {
         interval: super::goals::reduced_tick_delay(interval),
         unseen_ticks: 0,
         found: None,
+        light_gate: false,
     }
 }
 

@@ -573,6 +573,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         entity_threads: config.entity_threads,
         redstone_cache: config.redstone_cache,
         chunk_worker_threads: config.chunk_worker_threads,
+        worldgen_cache: config.worldgen_cache,
         spawn_per_player_cap: config.spawn_per_player_cap,
         mail_budget: config.mail_budget,
         island_threads: config.island_threads,
