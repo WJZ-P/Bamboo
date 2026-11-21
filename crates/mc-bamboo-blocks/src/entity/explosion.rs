@@ -1,3 +1,8 @@
+//! 爆炸：官方 `ServerExplosion`。TNT 只走和方块有关的那部分，生物爆炸（苦力怕）还伤生物和玩家。
+//!
+//! Explosions (`ServerExplosion`). TNT runs the block half only; mob explosions (creepers)
+//! also hurt mobs and players.
+//!
 //! TNT 的爆炸，官方 `ServerExplosion` 里和方块有关的那部分。
 //!
 //! 只走 TNT 这一条路：不伤生物、不点火。被炸掉的方块按战利品表掉物品，不给经验。
@@ -16,6 +21,12 @@ use mc_bamboo_data::BlockAncestor;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
+    entity::{
+        EntityKind, EntityPublic, KindPublic,
+        ctx::PlayerView,
+        mob::{DamageKind, DamageSource},
+    },
+    shape::{Aabb, CollisionContext},
     state::{BlockState, FluidState},
     world::World,
 };
@@ -46,10 +57,40 @@ impl World<'_> {
     /// `ClientboundExplodePacket`, not `playSound`. That packet is not in the protocol yet,
     /// so this does not emit a sound that would disagree with `playSeededSound`.
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32) {
-        let mut broken = self.calculate_exploded_positions(center, radius);
+        let broken = self.calculate_exploded_positions(center, radius);
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
         // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
         crate::entity::item::hurt_items_by_explosion(self, center, radius);
+        self.interact_with_blocks(broken, None);
+    }
+
+    /// `ServerLevel.explode(source, ..., ExplosionInteraction.MOB)`：来源是一个生物。
+    /// 射线之后先伤实体；`mobGriefing` 关着时方块不动（`BlockInteraction.KEEP`），
+    /// 开着时按 `mobExplosionDropDecay` 决定掉落带不带衰减。
+    /// `ClientboundExplodePacket`（声音、粒子、玩家击退）协议里还没有，不发。
+    ///
+    /// `ServerLevel.explode(source, ..., ExplosionInteraction.MOB)` for a mob source.
+    /// Entities are hurt after the rays; blocks stay under disabled `mobGriefing`
+    /// (`BlockInteraction.KEEP`), otherwise `mobExplosionDropDecay` picks decayed drops.
+    /// `ClientboundExplodePacket` (sound, particles, player knockback) is not in the
+    /// protocol yet and is not sent.
+    pub(crate) fn explode_mob(&mut self, source: &EntityPublic, center: Vec3, radius: f32) {
+        let rules = self.block_game_rules();
+        let broken = self.calculate_exploded_positions(center, radius);
+        crate::entity::item::hurt_items_by_explosion(self, center, radius);
+        hurt_living_by_explosion(self, source, center, radius);
+        if rules.mob_griefing {
+            let decay = rules.mob_explosion_drop_decay.then_some(radius);
+            self.interact_with_blocks(broken, decay);
+        }
+    }
+
+    /// `ServerExplosion.interactWithBlocks`：打乱、逐格破坏、最后一起弹出掉落。
+    /// `decay` 是 `DESTROY_WITH_DECAY` 下交给战利品表的爆炸半径。
+    ///
+    /// `ServerExplosion.interactWithBlocks`: shuffle, break each block, then pop the drops.
+    /// `decay` is the radius handed to loot tables under `DESTROY_WITH_DECAY`.
+    fn interact_with_blocks(&mut self, mut broken: Vec<BlockPos>, decay: Option<f32>) {
         // `Util.shuffle(toBlow, level.random)`。
         self.random().shuffle(&mut broken);
         // `interactWithBlocks`：先收齐掉落，整圈方块处理完才 `popResource`。
@@ -64,7 +105,11 @@ impl World<'_> {
             // `TntBlock.dropFromExplosion` is false. Every other block drops by default.
             let was_tnt = state.is_a(BlockAncestor::TntBlock);
             if !was_tnt {
-                for stack in self.explosion_block_drops(state, pos) {
+                let stacks = match decay {
+                    Some(radius) => self.explosion_block_drops_decayed(state, pos, radius),
+                    None => self.explosion_block_drops(state, pos),
+                };
+                for stack in stacks {
                     collect_drop(&mut drops, pos, stack);
                 }
             }
@@ -133,6 +178,147 @@ impl World<'_> {
         }
         blown.into_java_order()
     }
+}
+
+/// `ExplosionDamageCalculator.getEntityDamageAmount`。
+fn blast_damage(dist: f64, exposure: f32, double_radius: f64) -> f32 {
+    let power = (1.0 - dist) * f64::from(exposure);
+    ((power * power + power) / 2.0 * 7.0 * double_radius + 1.0) as f32
+}
+
+/// `DamageSources.explosion(direct, causing)`：两个来源实体都有时是 `player_explosion`。
+///
+/// `DamageSources.explosion(direct, causing)`: `player_explosion` when both exist.
+fn blast_source(source: &EntityPublic) -> DamageSource {
+    let mut damage = DamageSource::environment(DamageKind::PlayerExplosion);
+    damage.attacker = Some(source.uid);
+    damage.direct = Some(source.uid);
+    damage.position = Some(source.position);
+    if let KindPublic::Mob(mob) = &source.kind {
+        damage.attacker_uuid = Some(mob.uuid);
+    }
+    damage
+}
+
+/// `ServerExplosion.hurtEntities` 里生物和玩家的那部分：按距离和曝光度算伤害，
+/// 生物再按爆炸击退抗性被推开。掉落物由 [`crate::entity::item::hurt_items_by_explosion`] 处理。
+/// 官方按实体分区的遍历顺序走一遍；这里先生物（uid 升序）后玩家。
+///
+/// The mob and player part of `ServerExplosion.hurtEntities`: damage from distance and
+/// exposure, plus knockback for mobs scaled by explosion knockback resistance. Vanilla
+/// walks entity sections once; this goes mobs (ascending uid) then players.
+fn hurt_living_by_explosion(world: &mut World, source: &EntityPublic, center: Vec3, radius: f32) {
+    if radius < 1.0e-5 {
+        return;
+    }
+    let double_radius = f64::from(radius * 2.0);
+    let floor = |value: f64| f64::from(mth::floor(value));
+    let area = Aabb::new(
+        floor(center.x - double_radius - 1.0),
+        floor(center.y - double_radius - 1.0),
+        floor(center.z - double_radius - 1.0),
+        floor(center.x + double_radius + 1.0),
+        floor(center.y + double_radius + 1.0),
+        floor(center.z + double_radius + 1.0),
+    );
+    let damage = blast_source(source);
+    for id in world.entity_ids() {
+        if let Some((amount, knock)) = mob_blast(world, id, center, double_radius, area) {
+            world.hurt_mob(id, damage, amount);
+            world.with_entity_mut(id, &mut |entity| {
+                entity.delta = entity.delta.add(knock);
+                // `Entity.push(Vec3)` 置 `needsSync`：速度要同步出去。
+                // `Entity.push(Vec3)` sets `needsSync` so the velocity is sent.
+                if let Some(mob) = entity.kind.mob_mut() {
+                    mob.hurt_marked = true;
+                }
+            });
+        }
+    }
+    let mut players = Vec::new();
+    world
+        .level()
+        .for_each_player(&mut |player| players.push(*player));
+    for player in players {
+        if let Some(amount) = player_blast(world, &player, center, double_radius, area) {
+            world.hurt_player_from_mob(player.uid, damage, amount, Some(source));
+        }
+    }
+}
+
+/// 一头生物在爆炸里受的伤害和被推开的速度；不在范围里返回 `None`。
+///
+/// The damage and push one mob takes from a blast, or `None` when out of range.
+fn mob_blast(
+    world: &World,
+    id: i32,
+    center: Vec3,
+    double_radius: f64,
+    area: Aabb,
+) -> Option<(f32, Vec3)> {
+    let entity = world.entity(id)?;
+    let EntityKind::Mob(mob) = &entity.kind else {
+        return None;
+    };
+    let bounds = entity.bounding_box();
+    if entity.removed || !bounds.intersects(area) {
+        return None;
+    }
+    let dist = entity.position.distance_to_sqr(center).sqrt() / double_radius;
+    if dist > 1.0 {
+        return None;
+    }
+    let eye = Vec3::new(
+        entity.position.x,
+        entity.position.y + f64::from(mob.eye_height),
+        entity.position.z,
+    );
+    let exposure =
+        crate::entity::item::seen_percent_of(world, center, bounds, entity.collision_context());
+    let resistance = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::EXPLOSION_KNOCKBACK_RESISTANCE);
+    let push = (1.0 - dist) * f64::from(exposure) * (1.0 - resistance);
+    let knock = eye.subtract(center).normalize().scale(push);
+    Some((blast_damage(dist, exposure, double_radius), knock))
+}
+
+/// 一名玩家在爆炸里受的伤害。旁观者和死人不算（`EntitySelector.NO_SPECTATORS`）。
+/// 玩家的击退走 `ClientboundExplodePacket`，这里没有。
+///
+/// The damage one player takes. Spectators and the dead are skipped; player knockback
+/// travels in `ClientboundExplodePacket`, which is not sent.
+fn player_blast(
+    world: &World,
+    player: &PlayerView,
+    center: Vec3,
+    double_radius: f64,
+    area: Aabb,
+) -> Option<f32> {
+    if player.spectator || !player.alive {
+        return None;
+    }
+    let half = f64::from(0.6_f32) / 2.0;
+    let height = f64::from(if player.sneaking { 1.5_f32 } else { 1.8_f32 });
+    let feet = player.position;
+    let bounds = Aabb::new(
+        feet.x - half,
+        feet.y,
+        feet.z - half,
+        feet.x + half,
+        feet.y + height,
+        feet.z + half,
+    );
+    if !bounds.intersects(area) {
+        return None;
+    }
+    let dist = feet.distance_to_sqr(center).sqrt() / double_radius;
+    if dist > 1.0 {
+        return None;
+    }
+    let exposure =
+        crate::entity::item::seen_percent_of(world, center, bounds, CollisionContext::Empty);
+    Some(blast_damage(dist, exposure, double_radius))
 }
 
 /// `ServerExplosion.addOrAppendStack`：先按 16 的上限并进已有的堆，剩下的另起一堆。

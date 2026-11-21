@@ -19,9 +19,11 @@ pub mod bucketable;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
+pub mod creeper;
 pub mod damage;
 pub mod drowned;
 pub mod effects;
+pub(crate) mod enderman;
 pub mod equine;
 pub mod equipment;
 pub mod fish;
@@ -43,6 +45,7 @@ pub mod skeleton;
 mod skeleton_drops;
 pub mod slime;
 pub mod spawn;
+pub mod spider;
 pub mod squid;
 pub mod stray;
 pub mod tame;
@@ -89,6 +92,10 @@ pub enum MobType {
     Slime,
     Drowned,
     Witch,
+    Creeper,
+    Spider,
+    CaveSpider,
+    Enderman,
     Squid,
     GlowSquid,
     Cod,
@@ -122,6 +129,10 @@ impl MobType {
             Self::Slime => ids::SLIME,
             Self::Drowned => ids::DROWNED,
             Self::Witch => ids::WITCH,
+            Self::Creeper => ids::CREEPER,
+            Self::Spider => ids::SPIDER,
+            Self::CaveSpider => ids::CAVE_SPIDER,
+            Self::Enderman => ids::ENDERMAN,
             Self::Squid => ids::SQUID,
             Self::GlowSquid => ids::GLOW_SQUID,
             Self::Cod => ids::COD,
@@ -154,6 +165,10 @@ impl MobType {
             Self::Slime => "minecraft:slime",
             Self::Drowned => "minecraft:drowned",
             Self::Witch => "minecraft:witch",
+            Self::Creeper => "minecraft:creeper",
+            Self::Spider => "minecraft:spider",
+            Self::CaveSpider => "minecraft:cave_spider",
+            Self::Enderman => "minecraft:enderman",
             Self::Squid => "minecraft:squid",
             Self::GlowSquid => "minecraft:glow_squid",
             Self::Cod => "minecraft:cod",
@@ -209,6 +224,10 @@ impl MobType {
             Self::Slime,
             Self::Drowned,
             Self::Witch,
+            Self::Creeper,
+            Self::Spider,
+            Self::CaveSpider,
+            Self::Enderman,
             Self::Squid,
             Self::GlowSquid,
             Self::Cod,
@@ -240,6 +259,24 @@ impl MobType {
                     facts.width,
                     facts.height,
                     mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
+                )
+            }
+            (Self::Creeper, _) => creeper::dimensions(),
+            (Self::Enderman, _) => enderman::dimensions(),
+            (Self::Spider, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::SPIDER_EYE_HEIGHT,
+                )
+            }
+            (Self::CaveSpider, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::CAVE_SPIDER_EYE_HEIGHT,
                 )
             }
             (Self::Rabbit, baby) => rabbit::dimensions(baby),
@@ -276,7 +313,14 @@ impl MobType {
     pub const fn is_monster(self) -> bool {
         matches!(
             self,
-            Self::Zombie | Self::Husk | Self::Drowned | Self::Witch
+            Self::Zombie
+                | Self::Husk
+                | Self::Drowned
+                | Self::Witch
+                | Self::Creeper
+                | Self::Spider
+                | Self::CaveSpider
+                | Self::Enderman
         ) || self.is_skeleton()
     }
 
@@ -310,6 +354,44 @@ impl MobType {
     /// the `Skeleton.canFreeze()` override (always false).
     pub const fn can_freeze(self) -> bool {
         !matches!(self, Self::Skeleton | Self::Stray)
+    }
+
+    /// 目标选择按官方 `TargetGoal` 的完整规则走（`mustSee` 的视线记忆、生物也能当目标、
+    /// 按真实碰撞箱判近战距离）。僵尸一系还是早先的简化版。
+    ///
+    /// Whether targeting follows the full vanilla `TargetGoal` rules (`mustSee` memory,
+    /// mob targets, real hitboxes for melee reach). Zombies keep the earlier simplification.
+    pub const fn full_target_rules(self) -> bool {
+        matches!(
+            self,
+            Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman
+        ) || self.is_skeleton()
+    }
+
+    /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
+    ///
+    /// Kinds whose `Mob.getAmbientSound()` is null: `makeSound(null)` plays nothing and
+    /// draws no pitch.
+    pub const fn has_no_ambient_sound(self) -> bool {
+        matches!(self, Self::Creeper | Self::Pufferfish | Self::Slime)
+    }
+
+    /// 走路声用脚下方块的 `SoundType`（`Entity.playStepSound` 的缺省实现），不是生物自己的音效。
+    ///
+    /// Footsteps use the `SoundType` of the block below (the default `Entity.playStepSound`).
+    pub const fn uses_block_step_sound(self) -> bool {
+        matches!(
+            self,
+            Self::Creeper | Self::Enderman | Self::Witch | Self::Slime
+        )
+    }
+
+    /// `Spider.onClimbable()` 读 `DATA_FLAGS_ID` 的第 0 位，攀爬物理因此改走实体标志。
+    ///
+    /// `Spider.onClimbable()` reads bit 0 of `DATA_FLAGS_ID`, so climbing physics
+    /// reads the entity flag instead of the block below.
+    pub const fn climbs_walls(self) -> bool {
+        matches!(self, Self::Spider | Self::CaveSpider)
     }
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
@@ -445,6 +527,10 @@ impl MobType {
             Self::Slime => "minecraft:entities/slime",
             Self::Drowned => "minecraft:entities/drowned",
             Self::Witch => "minecraft:entities/witch",
+            Self::Creeper => "minecraft:entities/creeper",
+            Self::Spider => "minecraft:entities/spider",
+            Self::CaveSpider => "minecraft:entities/cave_spider",
+            Self::Enderman => "minecraft:entities/enderman",
             Self::Squid => "minecraft:entities/squid",
             Self::GlowSquid => "minecraft:entities/glow_squid",
             Self::Cod => "minecraft:entities/cod",
@@ -497,7 +583,7 @@ impl MobType {
             // 狼的叫声按叫声品种和幼年换，见 [`wolf::sound`]。
             // Wolf sounds depend on the sound variant and age; see [`wolf::sound`].
             Self::Wolf => Some("minecraft:entity.wolf.ambient"),
-            Self::Cow | Self::Pig | Self::Chicken | Self::Slime => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Slime | Self::Creeper => None,
             Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
@@ -509,6 +595,8 @@ impl MobType {
             // Drowned pick a water or land variant in [`drowned::sound`] by `isInWater`.
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.ambient"),
+            Self::Enderman => Some("minecraft:entity.enderman.ambient"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.ambient"),
             Self::Squid | Self::GlowSquid => Some(squid::ambient_sound(self)),
             Self::Cod | Self::Salmon | Self::TropicalFish => Some(fish::ambient_sound(self)),
             Self::Pufferfish => None,
@@ -534,6 +622,9 @@ impl MobType {
             Self::Bogged => Some("minecraft:entity.bogged.hurt"),
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.hurt"),
+            Self::Creeper => Some("minecraft:entity.creeper.hurt"),
+            Self::Enderman => Some("minecraft:entity.enderman.hurt"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.hurt"),
             Self::Squid | Self::GlowSquid => Some(squid::hurt_sound(self)),
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 Some(fish::hurt_sound(self))
@@ -560,6 +651,9 @@ impl MobType {
             Self::Bogged => Some("minecraft:entity.bogged.death"),
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.death"),
+            Self::Creeper => Some("minecraft:entity.creeper.death"),
+            Self::Enderman => Some("minecraft:entity.enderman.death"),
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.death"),
             Self::Squid | Self::GlowSquid => Some(squid::death_sound(self)),
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 Some(fish::death_sound(self))
@@ -575,7 +669,7 @@ impl MobType {
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
             Self::Rabbit | Self::Fox | Self::Wolf | Self::Slime => None,
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Creeper | Self::Enderman => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
@@ -587,6 +681,7 @@ impl MobType {
             //
             // A witch does not override `getStepSound`; the block's own step sound plays.
             Self::Witch => None,
+            Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.step"),
             // `MovementEmission.EVENTS`：没有脚步声。
             // `MovementEmission.EVENTS`: no step sound.
             Self::Squid | Self::GlowSquid => None,
@@ -620,6 +715,10 @@ impl MobType {
             Self::Slime => items::SLIME_SPAWN_EGG,
             Self::Drowned => items::DROWNED_SPAWN_EGG,
             Self::Witch => items::WITCH_SPAWN_EGG,
+            Self::Creeper => items::CREEPER_SPAWN_EGG,
+            Self::Spider => items::SPIDER_SPAWN_EGG,
+            Self::CaveSpider => items::CAVE_SPIDER_SPAWN_EGG,
+            Self::Enderman => items::ENDERMAN_SPAWN_EGG,
             Self::Squid => items::SQUID_SPAWN_EGG,
             Self::GlowSquid => items::GLOW_SQUID_SPAWN_EGG,
             Self::Cod => items::COD_SPAWN_EGG,
@@ -652,6 +751,10 @@ impl MobType {
             Self::Slime => "entity.minecraft.slime",
             Self::Drowned => "entity.minecraft.drowned",
             Self::Witch => "entity.minecraft.witch",
+            Self::Creeper => "entity.minecraft.creeper",
+            Self::Spider => "entity.minecraft.spider",
+            Self::CaveSpider => "entity.minecraft.cave_spider",
+            Self::Enderman => "entity.minecraft.enderman",
             Self::Squid => "entity.minecraft.squid",
             Self::GlowSquid => "entity.minecraft.glow_squid",
             Self::Cod => "entity.minecraft.cod",
@@ -681,6 +784,10 @@ impl MobType {
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
+            Self::Creeper,
+            Self::Spider,
+            Self::CaveSpider,
+            Self::Enderman,
             Self::Squid,
             Self::GlowSquid,
             Self::Cod,
@@ -912,6 +1019,11 @@ pub enum DamageKind {
     IndirectMagic,
     Wither,
     Explosion,
+    /// `minecraft:player_explosion`：有直接和间接来源实体的爆炸（苦力怕炸人就是这种）。
+    ///
+    /// `minecraft:player_explosion`: an explosion with a direct and a causing entity,
+    /// which is what a creeper blast is.
+    PlayerExplosion,
 }
 
 impl DamageKind {
@@ -944,6 +1056,7 @@ impl DamageKind {
             Self::IndirectMagic => "minecraft:indirect_magic",
             Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
+            Self::PlayerExplosion => "minecraft:player_explosion",
         }
     }
 
@@ -996,6 +1109,7 @@ impl DamageKind {
             Self::IndirectMagic => "indirectMagic",
             Self::Wither => "wither",
             Self::Explosion => "explosion",
+            Self::PlayerExplosion => "explosion.player",
         }
     }
 
@@ -1003,7 +1117,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 26] = [
+        let all = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -1030,6 +1144,7 @@ impl DamageKind {
             Self::IndirectMagic,
             Self::Wither,
             Self::Explosion,
+            Self::PlayerExplosion,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -1115,7 +1230,7 @@ impl DamageKind {
     /// `DamageSource.scalesWithDifficulty()`: only `always`, or
     /// `when_caused_by_living_non_player` with a non-player living cause.
     pub const fn scales_with_difficulty(self) -> bool {
-        matches!(self, Self::Explosion)
+        matches!(self, Self::Explosion | Self::PlayerExplosion)
     }
 
     /// `DamageType.exhaustion`：受伤后累加的饥饿消耗。
@@ -1130,6 +1245,7 @@ impl DamageKind {
             | Self::Thrown
             | Self::Thorns
             | Self::Explosion
+            | Self::PlayerExplosion
             | Self::Cactus
             | Self::InFire
             | Self::Lava
@@ -1151,6 +1267,8 @@ impl DamageKind {
                 | Self::Thorns
                 | Self::Magic
                 | Self::IndirectMagic
+                | Self::Explosion
+                | Self::PlayerExplosion
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor
@@ -1341,6 +1459,11 @@ pub struct MobDeathLoot {
     pub source: DamageSource,
     pub recent_player: Option<[u8; 16]>,
     pub recent_player_id: Option<EntityUid>,
+    /// 末影人搬着的方块：`dropCustomDeathLoot` 用带精准采集的假工具掉它。
+    ///
+    /// The block an enderman carries: `dropCustomDeathLoot` drops it with a fake
+    /// silk-touch tool.
+    pub carried: Option<crate::state::BlockState>,
 }
 
 /// 剪毛（`SHEARING`）或下蛋（`GIFT`）的一次战利品表求值：表名、原点、实体本身和可选的工具。
@@ -1386,6 +1509,7 @@ impl MobDeathLoot {
             source,
             recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
             recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
+            carried: mob.enderman.carried,
         }
     }
 }
@@ -1583,6 +1707,16 @@ pub struct Mob {
     ///
     /// The slime size and move control, see [`slime::CubeState`].
     pub cube: slime::CubeState,
+    /// 苦力怕的膨胀、引信、带电和点燃状态；别的生物恒为缺省值。全是相对计数，随实体行搬岛。
+    ///
+    /// Creeper swell, fuse, powered and ignited state; default for other mobs. Relative
+    /// counters only, so it moves with the entity row between islands.
+    pub creeper: creeper::CreeperState,
+    /// 蜘蛛的 `DATA_FLAGS_ID` 第 0 位（`isClimbing`）；别的生物恒为缺省值。
+    ///
+    /// Bit 0 of the spider's `DATA_FLAGS_ID` (`isClimbing`); default for other mobs.
+    pub spider: spider::SpiderState,
+    pub(crate) enderman: enderman::EndermanState,
     /// 鱿鱼 / 发光鱿鱼的专属状态，别的生物恒为缺省值。
     ///
     /// Squid and glow squid state; default for every other mob.
@@ -1689,6 +1823,10 @@ impl Mob {
                 fish::attributes()
             }
             MobType::Turtle => turtle::attributes(),
+            MobType::Creeper => creeper::attributes(),
+            MobType::Enderman => enderman::attributes(),
+            MobType::Spider => spider::attributes(MobType::Spider),
+            MobType::CaveSpider => spider::attributes(MobType::CaveSpider),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
             MobType::Drowned => drowned::attributes(),
             MobType::Witch => witch::attributes(),
@@ -1705,6 +1843,11 @@ impl Mob {
             // border, and land costs more (the maluses live in `Mob::malus`).
             navigation.flags.amphibious = true;
         }
+        if mob_type.climbs_walls() {
+            // `Spider.createNavigation` 用 `WallClimberNavigation`。
+            // `Spider.createNavigation` builds a `WallClimberNavigation`.
+            navigation.wall_climber = true;
+        }
         let goals = match mob_type {
             MobType::Cow => GoalSelector::cow(&mut navigation),
             MobType::Rabbit => rabbit::goals(&mut navigation),
@@ -1720,6 +1863,9 @@ impl Mob {
                 fish::goals(mob_type)
             }
             MobType::Turtle => turtle::goals(&mut navigation),
+            MobType::Creeper => creeper::goals(&mut navigation),
+            MobType::Enderman => enderman::goals(&mut navigation),
+            MobType::Spider | MobType::CaveSpider => spider::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
@@ -1747,6 +1893,9 @@ impl Mob {
             MobType::Skeleton | MobType::Stray | MobType::Bogged => {
                 GoalSelector::skeleton_targets()
             }
+            MobType::Creeper => creeper::target_goals(),
+            MobType::Enderman => enderman::target_goals(),
+            MobType::Spider | MobType::CaveSpider => spider::target_goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             MobType::Slime => slime::targets(),
             MobType::Drowned => drowned::targets(),
@@ -1843,6 +1992,7 @@ impl Mob {
                 }
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
+                MobType::Enderman => enderman::malus(),
                 // `AgeableWaterCreature` 构造函数：`setPathfindingMalus(WATER, 0)`。
                 // The `AgeableWaterCreature` constructor zeroes the water malus.
                 MobType::Squid | MobType::GlowSquid => squid::malus(),
@@ -1901,6 +2051,9 @@ impl Mob {
             witch: witch::WitchState::default(),
             witch_drinking: false,
             cube: slime::CubeState::default(),
+            creeper: creeper::CreeperState::default(),
+            spider: spider::SpiderState::default(),
+            enderman: enderman::EndermanState::default(),
             squid: squid::SquidState::default(),
             turtle: turtle::TurtleState::default(),
             fish: fish::FishState::new(),
@@ -1996,11 +2149,15 @@ impl Mob {
         self.mob_type.removes_when_far_away()
     }
 
-    /// `AbstractFish.requiresCustomPersistence`：从桶里放出来的鱼不会自然消失。
+    /// `isPersistenceRequired() || requiresCustomPersistence()`：从桶里放出来的鱼
+    /// （`AbstractFish`）和搬着方块的末影人（`Enderman`）不会自然消失。
     ///
-    /// `AbstractFish.requiresCustomPersistence`: fish from a bucket never despawn.
+    /// `isPersistenceRequired() || requiresCustomPersistence()`: fish released from a
+    /// bucket (`AbstractFish`) and endermen carrying a block (`Enderman`) never despawn.
     pub fn requires_custom_persistence(&self) -> bool {
-        self.persistence_required || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
+        self.persistence_required
+            || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
+            || self.enderman.carried.is_some()
     }
 
     /// `isDeadOrDying`。
@@ -2084,6 +2241,19 @@ pub struct MobPublic {
     pub pig_sound_variant: pig::SoundVariant,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
+    /// 苦力怕的三项同步元数据：`DATA_SWELL_DIR`、`DATA_IS_POWERED`、`DATA_IS_IGNITED`。
+    ///
+    /// The three synced creeper items: swell direction, powered and ignited.
+    pub creeper_swell_dir: i32,
+    pub creeper_powered: bool,
+    pub creeper_ignited: bool,
+    /// 蜘蛛的 `DATA_FLAGS_ID`，攀爬位。
+    ///
+    /// The spider `DATA_FLAGS_ID`, with the climbing bit.
+    pub spider_flags: u8,
+    pub enderman_carried: Option<crate::state::BlockState>,
+    pub enderman_creepy: bool,
+    pub enderman_stared_at: bool,
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`。
     pub dark_ticks: i32,
     /// 鱼的桶标记、花纹和河豚的膨胀程度。
@@ -2198,6 +2368,13 @@ impl MobPublic {
             pig_sound_variant: mob.pig_sound_variant,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
+            creeper_swell_dir: mob.creeper.swell_dir,
+            creeper_powered: mob.creeper.powered,
+            creeper_ignited: mob.creeper.ignited,
+            spider_flags: if mob.spider.climbing { 1 } else { 0 },
+            enderman_carried: mob.enderman.carried,
+            enderman_creepy: mob.enderman.creepy,
+            enderman_stared_at: mob.enderman.stared_at,
             dark_ticks: mob.squid.dark_ticks,
             fish_from_bucket: mob.fish.from_bucket,
             fish_variant: mob.fish.variant,
@@ -2257,7 +2434,9 @@ impl MobPublic {
     ///
     /// `Mob.isPersistenceRequired() || requiresCustomPersistence()`.
     pub fn requires_custom_persistence(&self) -> bool {
-        self.persistence_required || (fish::is_fish(self.mob_type) && self.fish_from_bucket)
+        self.persistence_required
+            || (fish::is_fish(self.mob_type) && self.fish_from_bucket)
+            || self.enderman_carried.is_some()
     }
 
     pub fn is_alive(&self) -> bool {

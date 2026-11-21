@@ -134,6 +134,7 @@ pub(super) fn targets() -> GoalSelector {
         interval: 5,
         unseen_ticks: 0,
         found: None,
+        light_gate: false,
     };
     selector(vec![
         (1, nearest(TargetType::Player)),

@@ -574,6 +574,8 @@ mod tests {
             delta: Vec3::default(),
             eye_height: 1.62,
             health: 20.0,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
             alive: true,
             spectator: false,
             creative: false,

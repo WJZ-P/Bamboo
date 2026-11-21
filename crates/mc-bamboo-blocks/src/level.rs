@@ -987,6 +987,21 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
+    /// `DESTROY_WITH_DECAY` 爆炸里的 `getDrops`：多一个 `EXPLOSION_RADIUS` 参数，
+    /// 战利品表的 `survives_explosion` / `explosion_decay` 按它取随机数。缺省不带半径。
+    ///
+    /// `getDrops` in a `DESTROY_WITH_DECAY` explosion: the extra `EXPLOSION_RADIUS`
+    /// parameter drives `survives_explosion` / `explosion_decay`. Default: no radius.
+    fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<ItemStack> {
+        let _ = radius;
+        self.explosion_block_drops(state, pos)
+    }
+
     /// `Block.getDrops`，`destroyBlock` 在移除方块之前按战利品表算出的每一组。
     ///
     /// 空堆也交给调用方 `popResource`：官方对每一组都取三次位置偏移。

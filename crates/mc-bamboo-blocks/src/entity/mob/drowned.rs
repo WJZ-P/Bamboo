@@ -127,7 +127,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
         ),
     ];
     let _ = navigation;
-    GoalSelector::from_goals(goals)
+    GoalSelector::from_ordered_pairs(goals)
 }
 
 /// `Drowned.addBehaviourGoals` 里的 `targetSelector`。玩家的那一条带 `okTarget` 条件，
@@ -141,8 +141,9 @@ pub(super) fn targets() -> GoalSelector {
         interval,
         unseen_ticks: 0,
         found: None,
+        light_gate: false,
     };
-    GoalSelector::from_goals(vec![
+    GoalSelector::from_ordered_pairs(vec![
         (1, Goal::HurtByTarget { timestamp: -1 }),
         (
             2,

@@ -91,6 +91,9 @@ pub(super) fn finalize_spawn(
 }
 
 /// `DifficultyInstance.getSpecialMultiplier`。
+/// `DifficultyInstance.getSpecialMultiplier`：2 以下 0，4 以上 1，中间线性。
+///
+/// `DifficultyInstance.getSpecialMultiplier`: zero below 2, one above 4, linear between.
 pub(super) fn special_multiplier(effective: f32) -> f32 {
     if effective < 2.0 {
         0.0

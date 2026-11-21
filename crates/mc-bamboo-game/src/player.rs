@@ -434,6 +434,17 @@ impl Player {
             delta: self.motion.delta,
             eye_height: self.eye_height() as f32,
             health: self.health.health,
+            look_direction: Vec3::view_vector(self.yaw, self.pitch),
+            gaze_disguise: self
+                .inventory
+                .equipment(EquipmentSlot::Head)
+                .is_some_and(|stack| {
+                    !stack.is_empty()
+                        && mc_bamboo_blocks::state::item_is_tagged(
+                            stack.item,
+                            mc_bamboo_data::tags::item_tags::GAZE_DISGUISE_EQUIPMENT,
+                        )
+                }),
             // 隐身仍按默认假处理；`armor_cover` 按四格盔甲里非空的比例算。
             // Invisibility stays false; armor cover follows the worn slots.
             alive: !self.health.is_dead_or_dying(),

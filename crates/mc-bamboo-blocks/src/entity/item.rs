@@ -1274,7 +1274,23 @@ pub(crate) fn hurt_items_by_explosion(world: &mut World, center: Vec3, radius: f
 ///
 /// `ServerExplosion.getSeenPercent`: sample the item's box and count rays that miss blocks.
 fn seen_percent(world: &dyn BlockView, center: Vec3, entity: &Entity) -> f32 {
-    let bounds = entity.bounding_box();
+    seen_percent_of(
+        world,
+        center,
+        entity.bounding_box(),
+        entity.collision_context(),
+    )
+}
+
+/// [`seen_percent`] 对任意盒子的版本：生物和玩家的爆炸曝光度也用它。
+///
+/// [`seen_percent`] over any box; mob and player blast exposure uses it too.
+pub(crate) fn seen_percent_of(
+    world: &dyn BlockView,
+    center: Vec3,
+    bounds: Aabb,
+    context: crate::shape::CollisionContext,
+) -> f32 {
     let span_x = bounds.max_x - bounds.min_x;
     let span_y = bounds.max_y - bounds.min_y;
     let span_z = bounds.max_z - bounds.min_z;
@@ -1298,10 +1314,7 @@ fn seen_percent(world: &dyn BlockView, center: Vec3, entity: &Entity) -> f32 {
                 let y = mth::lerp(yy, bounds.min_y, bounds.max_y);
                 let z = mth::lerp(zz, bounds.min_z, bounds.max_z);
                 let from = Vec3::new(x + x_offset, y, z + z_offset);
-                if world
-                    .clip_collider(from, center, entity.collision_context())
-                    .is_none()
-                {
+                if world.clip_collider(from, center, context).is_none() {
                     hits += 1;
                 }
                 count += 1;

@@ -120,7 +120,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
         ),
     ];
     navigation.flags.can_float = true;
-    GoalSelector::from_goals(goals)
+    GoalSelector::from_ordered_pairs(goals)
 }
 
 /// `Witch.registerGoals` 的 `targetSelector`：受伤反击、治疗袭击者（占位）、打玩家。
@@ -128,7 +128,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
 /// The `targetSelector` of `Witch.registerGoals`: hurt by, heal raiders (a slot), attack
 /// players.
 pub(super) fn targets() -> GoalSelector {
-    GoalSelector::from_goals(vec![
+    GoalSelector::from_ordered_pairs(vec![
         (1, Goal::HurtByTarget { timestamp: -1 }),
         (2, Goal::WitchHealRaiders { cooldown: 0 }),
         (
@@ -138,6 +138,7 @@ pub(super) fn targets() -> GoalSelector {
                 interval: super::goals::reduced_tick_delay(10),
                 unseen_ticks: 0,
                 found: None,
+                light_gate: false,
             },
         ),
     ])

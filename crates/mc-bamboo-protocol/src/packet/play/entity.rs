@@ -34,6 +34,7 @@ const SERIALIZER_BLOCK_POS: i32 = 10;
 /// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`，注册顺序第 13 个。
 const SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE: i32 = 13;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
+const SERIALIZER_OPTIONAL_BLOCK_STATE: i32 = 15;
 /// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
 const SERIALIZER_PARTICLES: i32 = 17;
 const SERIALIZER_POSE: i32 = 20;
@@ -240,6 +241,19 @@ pub enum EntityData {
     /// index 17, BOOLEAN. `Witch.DATA_USING_ITEM` (Entity 0–7, LivingEntity 8–14, Mob 15,
     /// Raider.IS_CELEBRATING 16, Witch.DATA_USING_ITEM 17).
     WitchUsingItem(bool),
+    /// `Creeper.DATA_SWELL_DIR`（INT，缺省 -1）、`DATA_IS_POWERED`、`DATA_IS_IGNITED`（BOOLEAN）。
+    ///
+    /// `Creeper.DATA_SWELL_DIR` (INT, default -1), `DATA_IS_POWERED` and `DATA_IS_IGNITED`.
+    CreeperSwellDir(i32),
+    CreeperPowered(bool),
+    CreeperIgnited(bool),
+    /// `Spider.DATA_FLAGS_ID`（BYTE，缺省 0，第 0 位是攀爬）。
+    ///
+    /// `Spider.DATA_FLAGS_ID` (BYTE, default 0, bit 0 is climbing).
+    SpiderFlags(u8),
+    EndermanCarried(Option<i32>),
+    EndermanCreepy(bool),
+    EndermanStaredAt(bool),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -335,6 +349,9 @@ impl EntityData {
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
             Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
+            Self::CreeperSwellDir(_) => mc_bamboo_data::entity_types::CREEPER_SWELL_DIR,
+            Self::CreeperPowered(_) => mc_bamboo_data::entity_types::CREEPER_POWERED,
+            Self::CreeperIgnited(_) => mc_bamboo_data::entity_types::CREEPER_IGNITED,
             Self::FoxType(_) => mc_bamboo_data::entity_types::FOX_TYPE,
             Self::FoxFlags(_) => mc_bamboo_data::entity_types::FOX_FLAGS,
             Self::FoxTrusted(index, _) => *index,
@@ -352,6 +369,10 @@ impl EntityData {
             Self::CubeMobSize(_) => mc_bamboo_data::entity_types::CUBE_MOB_SIZE,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
+            Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
+            Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
+            Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
             Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
             Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
             Self::SalmonVariant(_) => mc_bamboo_data::entity_types::SALMON_VARIANT,
@@ -597,6 +618,25 @@ impl EntityData {
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
                 write_varint(out, *kind);
+            }
+            Self::CreeperSwellDir(direction) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *direction);
+            }
+            Self::EndermanCarried(state) => {
+                write_data_header(out, self.index(), SERIALIZER_OPTIONAL_BLOCK_STATE);
+                write_varint(out, state.unwrap_or(0));
+            }
+            Self::CreeperPowered(flag)
+            | Self::CreeperIgnited(flag)
+            | Self::EndermanCreepy(flag)
+            | Self::EndermanStaredAt(flag) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *flag);
+            }
+            Self::SpiderFlags(flags) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*flags);
             }
             Self::RabbitVariant(kind) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
