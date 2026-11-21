@@ -340,10 +340,14 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   对应 `ServerGamePacketListenerImpl` 的同名字段）；载具记 `Mob.passengers`（只有玩家，按上车顺序）。
 - 上车：马科 `mobInteract` 的 `doPlayerRide` 返回 `ride` 标记，游戏层在 `on_interact_entity` 里落
   `startRiding`（设朝向、写两边、`first_good` / `last_good` 从载具位置起算）。
-- 下车：`riding::tick` 每刻看潜行键（`Player.rideTick` 的 `wantsToStopRiding`），清掉两边的关系。
+- 下车：`riding::tick` 每刻看潜行键（`Player.rideTick` 的 `wantsToStopRiding`），按
+  `AbstractHorse.getDismountLocationForPassenger`（`riding/dismount.rs`：主手一侧、另一侧、
+  站立 / 潜行 / 游泳三个姿势、`DismountHelper` 的地面高度和碰撞判定）算落点，再清掉两边的关系；
+  `Entity.removePassenger` 的 60 刻 `boardingCooldown` 在 `Riding` 里，每刻减一，`canRide` 拦下车后的立刻再上。
 - 骑手位置：`riding::tick` 在实体阶段之后、玩家自己的 tick 之前写玩家表，位置是载具位置加
-  官方 `getPassengerAttachmentPoint` 的缺省点（马 `h-0.125`、驴骡 `h+0.03125` 且后 0.3125、
-  羊驼 `h-0.25` 且后 0.3，按载具朝向旋转）。
+  官方 `getPassengerAttachmentPoint` 的缺省点（`EntityTypes` 的 `passengerAttachments`：
+  马 1.44375、驴 1.1125、骡 1.2125、羊驼 `(1.37, -0.3)`，按载具朝向旋转；扬蹄时
+  `AbstractHorse` 附加的 `0.15 * standAnimO` / `-0.7 * standAnimO` 还没建模）。
 - 载具位置：`move_vehicle` 在世界线程处理输入时直接改载具行（`handleMoveVehicle` 的夹取、
   `wrapDegrees`、100 平方格的「移动太快」拉回、非法值断开）。
 - 朝向：马科 `tick_ridden` 把载具朝向设成骑手朝向、俯仰取一半，旧朝向、身体和头都对齐；
@@ -362,6 +366,9 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 实体事件 7，保留乘客；失败把脾气加 5（限制在该物种范围内），清乘客名单、发怒和事件 6。
 `riding::tick` 在已有阶段中清理玩家侧的关系，已有同步路径发送乘客名单变更。
 骑乘期间，`AbstractHorse.aiStep` 跳过起始吃草的随机抽取，`LookAtPlayerGoal` 不选自己的骑手。
+对拍用 `mob-oracle` 新增的 `zombie_equine_buck_*`（甩人）和 `zombie_equine_tame_*`（当场驯服）
+场景，逐刻比位置、目标、随机源、脾气、驯服标志、骑手数量和主人 UUID，场景在甩人/驯服那一刻截断。
+`riding::passenger_offset` 改用上面查正后的成年附着点（原先误用了幼崽的值）。
 
 羊驼的口水是新的实体种类 `EntityKind::LlamaSpit`：生成走 `Command::ShootLlamaSpit`，
 命中实体走 `Command::SpitHit`（落地时按主人当时的公开状态造 `spit` 伤害来源），
