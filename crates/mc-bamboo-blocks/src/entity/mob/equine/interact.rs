@@ -1,12 +1,14 @@
 //! 马科的右键交互：`Horse.mobInteract` / `AbstractChestedHorse.mobInteract` →
 //! `AbstractHorse.mobInteract`，喂食的 `handleEating`，以及箱子、鞍和身体护甲的装备。
 //!
-//! 骑乘（`doPlayerRide` 里的 `startRiding`）和坐骑物品栏界面还没有，见 README 已知限制。
+//! 骑乘（`doPlayerRide` 里的 `startRiding`）还没有，见 README 已知限制。潜行右键驯服的
+//! 坐骑只在结果里要求打开物品栏，菜单由游戏层开。
 //!
 //! Equine right-click: `Horse.mobInteract` / `AbstractChestedHorse.mobInteract`
 //! → `AbstractHorse.mobInteract`, feeding through `handleEating`, and equipping
-//! chests, saddles and body armor. Riding (`startRiding`) and the mount
-//! inventory screen do not exist yet; see the README known limitations.
+//! chests, saddles and body armor. Riding (`startRiding`) does not exist yet; see
+//! the README known limitations. Sneaking on a tamed mount only asks the caller
+//! to open the inventory menu.
 
 use mc_bamboo_data::{items, registries::data_component_type as kinds, tags::item_tags};
 use mc_bamboo_protocol::{
@@ -43,6 +45,7 @@ fn success(shrink: bool, req: &MobInteractRequest) -> MobInteraction {
         result: InteractionResult::Success,
         shrink_held: shrink && !req.creative,
         replacement: None,
+        open_inventory: false,
     }
 }
 
@@ -112,9 +115,12 @@ fn abstract_horse_interact(
         return MobInteraction::pass();
     }
     if tame(mob) && req.sneaking {
-        // `openCustomInventoryScreen`：坐骑物品栏还没做，只给出官方的结果。
-        // The mount inventory screen is not built; only the vanilla result is given.
-        return success(false, req);
+        // `openCustomInventoryScreen`：驯服了就开坐骑物品栏，由调用方去开菜单。
+        // `openCustomInventoryScreen`: tamed mounts open their inventory; the caller opens the menu.
+        return MobInteraction {
+            open_inventory: super::inventory::can_open(mob),
+            ..success(false, req)
+        };
     }
     if !req.held.is_empty()
         && let Some(equippable) = equippable(&req.held)
@@ -170,6 +176,7 @@ fn fed_food(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInte
         result: InteractionResult::SuccessServer,
         shrink_held: !req.creative,
         replacement: None,
+        open_inventory: false,
     }
 }
 
@@ -315,7 +322,7 @@ fn equip_chest(me: &mut Entity, mob: &mut Mob) {
     living::play_sound(me, mob, sound, 1.0, pitch);
 }
 
-fn equippable(stack: &ItemStack) -> Option<Equippable> {
+pub(super) fn equippable(stack: &ItemStack) -> Option<Equippable> {
     match defaults::resolve(stack.item, &stack.patch(), kinds::EQUIPPABLE) {
         Some(ComponentValue::Equippable(value)) => Some(value.clone()),
         _ => None,
@@ -325,7 +332,7 @@ fn equippable(stack: &ItemStack) -> Option<Equippable> {
 /// 组件里的槽位 ID（`EquipmentSlot.id`）：6 是身体，7 是鞍；马科只用这两个。
 ///
 /// The component slot id: 6 is body and 7 is saddle, the only two equines use.
-fn slot_of(equippable: &Equippable) -> Option<EquipmentSlot> {
+pub(super) fn slot_of(equippable: &Equippable) -> Option<EquipmentSlot> {
     match equippable.slot {
         6 => Some(EquipmentSlot::Body),
         7 => Some(EquipmentSlot::Saddle),
@@ -354,7 +361,7 @@ fn can_equip(mob: &Mob, equippable: &Equippable) -> bool {
 ///
 /// `canUseSlot`: always true for horses and llamas; donkeys and mules need an
 /// alive, adult, tamed mount for the saddle slot only.
-fn can_use_slot(mob: &Mob, slot: EquipmentSlot) -> bool {
+pub(super) fn can_use_slot(mob: &Mob, slot: EquipmentSlot) -> bool {
     if matches!(mob.mob_type, MobType::Horse | MobType::Llama) || slot != EquipmentSlot::Saddle {
         return true;
     }
@@ -397,6 +404,37 @@ fn equip(
     one.count = 1;
     mob.equipment.set(slot, one);
     mob.equipment.set_drop_chance(slot, GUARANTEED_DROP_CHANCE);
+    play_equip_sound(me, mob, slot, equippable);
+}
+
+/// `LivingEntity.onEquipItem`：新旧不是同一物品同一组件、新物品的可装备组件正好指向
+/// 这一格、生物不静音时，出装备声并取 `nextLong` 当种子。`firstTick` 不建模（见疑点）。
+///
+/// `LivingEntity.onEquipItem`: when the stacks differ, the new stack's equippable
+/// component names this slot and the mob is not silent, play the equip sound with
+/// a `nextLong` seed. `firstTick` is not modelled.
+pub(super) fn on_equip_item(
+    me: &mut Entity,
+    mob: &mut Mob,
+    slot: EquipmentSlot,
+    old: &ItemStack,
+    new: &ItemStack,
+) {
+    if old.is_same_item_same_components(new) {
+        return;
+    }
+    if let Some(equippable) = equippable(new)
+        && slot_of(&equippable) == Some(slot)
+    {
+        play_equip_sound(me, mob, slot, &equippable);
+    }
+}
+
+/// `onEquipItem` 的发声部分；鞍位的声音被 `AbstractHorse.getEquipSound` 换成 `HORSE_SADDLE`。
+///
+/// The sound half of `onEquipItem`; `AbstractHorse.getEquipSound` swaps in
+/// `HORSE_SADDLE` for the saddle slot.
+fn play_equip_sound(me: &mut Entity, mob: &mut Mob, slot: EquipmentSlot, equippable: &Equippable) {
     if mob.silent {
         return;
     }

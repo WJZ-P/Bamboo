@@ -1179,6 +1179,11 @@ pub(crate) fn on_interact_entity(
         if let Some(replacement) = outcome.replacement {
             inventory::give_filled_result(region, id, try_hand, replacement, true);
         }
+        // 马科 `openCustomInventoryScreen` 在 `mobInteract` 里当场开菜单，先于挥手。
+        // Equine `openCustomInventoryScreen` opens the menu inside `mobInteract`, before the swing.
+        if outcome.open_inventory {
+            crate::menu::station::open_mount(region, id, entity_id);
+        }
         // 生物事件（爱心、挤奶音效）留在实体表里，同步阶段按官方收件人发出去。
         swing(region, id, try_hand, outcome.result);
         return;

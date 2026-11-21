@@ -24,6 +24,7 @@ mod death;
 mod goals;
 mod horse;
 mod interact;
+pub mod inventory;
 mod life;
 mod llama;
 

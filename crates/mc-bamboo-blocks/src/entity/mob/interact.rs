@@ -44,6 +44,11 @@ pub struct MobInteraction {
     pub shrink_held: bool,
     /// `ItemUtils.createFilledResult` 交回来的奶桶。背包满时调用方丢在地上。
     pub replacement: Option<ItemStack>,
+    /// 马科 `openCustomInventoryScreen`：调用方给这名玩家打开坐骑物品栏。
+    ///
+    /// Equine `openCustomInventoryScreen`: the caller opens the mount inventory
+    /// for this player.
+    pub open_inventory: bool,
 }
 
 impl MobInteraction {
@@ -53,6 +58,7 @@ impl MobInteraction {
             result: InteractionResult::Pass,
             shrink_held: false,
             replacement: None,
+            open_inventory: false,
         }
     }
 }
@@ -72,6 +78,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
+            open_inventory: false,
         };
     }
     let food = !req.held.is_empty() && item_is_tagged(req.held.item, item_tags::COW_FOOD);
@@ -88,6 +95,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::SuccessServer,
             shrink_held: !req.creative,
             replacement: None,
+            open_inventory: false,
         };
     }
     if mob.is_baby() && !mob.age_locked {
@@ -98,6 +106,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: None,
+            open_inventory: false,
         };
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。
