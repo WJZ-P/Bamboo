@@ -302,8 +302,8 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only)) {
-                cases += playNaturalSpawns(official, out);
+            if ("natural_spawn".equals(only) || "witch_spawn".equals(only)) {
+                cases += playNaturalSpawns(official, out, "witch_spawn".equals(only));
             }
             if ("gen_spawn".equals(only)) {
                 cases += playGenSpawns(official, out);
@@ -944,7 +944,7 @@ public final class MobOracle {
          * 史莱姆场景（生物种类 6，「年龄」那一列是大小）：自己乱跳、追玩家并碰撞、最小号不伤人、
          * 水里上浮、死后分裂、和平难度清除。
          *
-         * Slime scenes (mob kind 6, size in the age column): idle hopping, chasing and touching
+         * Slime scenes (mob kind 10, size in the age column): idle hopping, chasing and touching
          * a player, harmless tiny slimes, floating in water, splitting on death and the
          * peaceful clear.
          */
@@ -952,7 +952,7 @@ public final class MobOracle {
             for (int size : new int[] {1, 2, 4}) {
                 Scene hop = new Scene("slime_hop_" + size).ticks(240).difficulty(2);
                 ground(hop, 16);
-                hop.mob(6, 0.5, 64.0, 0.5, 30.0F, 101L + size, size);
+                hop.mob(10, 0.5, 64.0, 0.5, 30.0F, 101L + size, size);
                 hop.player(60.5, 64.0, 0.5, Items.AIR);
                 scenes.add(hop);
             }
@@ -960,7 +960,7 @@ public final class MobOracle {
                 Scene chase = new Scene("slime_chase_" + size).ticks(240).difficulty(2);
                 chase.realPlayers = true;
                 ground(chase, 16);
-                chase.mob(6, 0.5, 64.0, 0.5, 0.0F, 211L + size, size);
+                chase.mob(10, 0.5, 64.0, 0.5, 0.0F, 211L + size, size);
                 chase.player(5.5, 64.0, 2.5, Items.AIR);
                 scenes.add(chase);
             }
@@ -970,8 +970,8 @@ public final class MobOracle {
             Scene two = new Scene("slime_two_touch").ticks(120).difficulty(3);
             two.realPlayers = true;
             ground(two, 16);
-            two.mob(6, 0.5, 64.0, 0.5, 0.0F, 307L, 2);
-            two.mob(6, 3.5, 64.0, 3.5, 0.0F, 311L, 4);
+            two.mob(10, 0.5, 64.0, 0.5, 0.0F, 307L, 2);
+            two.mob(10, 3.5, 64.0, 3.5, 0.0F, 311L, 4);
             two.player(2.5, 64.0, 1.5, Items.AIR);
             scenes.add(two);
             // 高度差超过 4 格的玩家不会被当成目标。
@@ -979,27 +979,27 @@ public final class MobOracle {
             Scene high = new Scene("slime_target_height").ticks(120).difficulty(2);
             ground(high, 16);
             high.fill(4, 64, 0, 4, 68, 0, STONE);
-            high.mob(6, 0.5, 64.0, 0.5, 0.0F, 401L, 2);
+            high.mob(10, 0.5, 64.0, 0.5, 0.0F, 401L, 2);
             high.player(4.5, 69.0, 0.5, Items.AIR);
             scenes.add(high);
             Scene water = new Scene("slime_water").ticks(200).difficulty(2);
             ground(water, 16);
             water.fill(-3, 61, -3, 3, 63, 3, WATER);
             water.fill(-4, 60, -4, 4, 60, 4, STONE);
-            water.mob(6, 0.5, 61.0, 0.5, 0.0F, 503L, 2);
+            water.mob(10, 0.5, 61.0, 0.5, 0.0F, 503L, 2);
             water.player(60.5, 64.0, 0.5, Items.AIR);
             scenes.add(water);
             for (int size : new int[] {1, 2, 4}) {
                 Scene split = new Scene("slime_split_" + size).ticks(60).difficulty(2);
                 ground(split, 16);
-                split.mob(6, 0.5, 64.0, 0.5, 0.0F, 601L + size, size);
+                split.mob(10, 0.5, 64.0, 0.5, 0.0F, 601L + size, size);
                 split.player(3.5, 64.0, 0.5, Items.AIR);
                 split.hurts.add(new double[] {5, 0, 100.0, 0});
                 scenes.add(split);
             }
             Scene peaceful = new Scene("slime_peaceful_clear").ticks(3).difficulty(0);
             ground(peaceful, 16);
-            peaceful.mob(6, 0.5, 64.0, 0.5, 0.0F, 701L, 2);
+            peaceful.mob(10, 0.5, 64.0, 0.5, 0.0F, 701L, 2);
             peaceful.player(3.5, 64.0, 0.5, Items.AIR);
             scenes.add(peaceful);
         }
@@ -2879,7 +2879,7 @@ public final class MobOracle {
             int sky, int block, int darken, boolean thunder, double playerX, int population,
             int spawnableChunks, boolean localCap, boolean nearbyRespawn) {}
 
-    private static int playNaturalSpawns(Official official, Writer out) throws Exception {
+    private static int playNaturalSpawns(Official official, Writer out, boolean witchOnly) throws Exception {
         List<NaturalScene> scenes = new ArrayList<>();
         scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("cow_night", EntityTypes.COW, "savanna", 2, 15, 0, 11, false, -32, 0, 289, true, false));
@@ -2922,8 +2922,12 @@ public final class MobOracle {
         scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("witch_night", EntityTypes.WITCH, "plains", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("witch_torch", EntityTypes.WITCH, "plains", 2, 0, 1, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("witch_peaceful", EntityTypes.WITCH, "plains", 0, 0, 0, 11, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
+            if (witchOnly && scene.mob() != EntityTypes.WITCH) continue;
             // 沼泽场景的起点高度要正好落在某层地面上才有戏，多跑一些种子。
             // Swamp scenes only get anywhere when the start height lands on a floor, so they
             // run more seeds.
@@ -4825,7 +4829,7 @@ public final class MobOracle {
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
                 case 2 -> new Husk(EntityTypes.HUSK, level);
-                case 6 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
+                case 10 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 case 6 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 7 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);

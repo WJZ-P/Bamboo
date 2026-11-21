@@ -903,7 +903,10 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `Monster.aiStep` 之前跑喝药逻辑和 7.5e-4 的冒烟事件，`WitchHealRaiders` 目标在没有袭击时
   仍每刻抽一次 `nextBoolean`，`RangedAttackGoal` 用 `Goal::WitchRangedAttack` 实现。
   喝药走 `EffectInstance`，瞬时治疗直接加血；喝药移速修饰符是瞬时的 `minecraft:drinking`。
-  同步 index 17 的 `Witch.DATA_USING_ITEM`（`EntityData::WitchUsingItem`）。
+  同步 index 17 的 `Witch.DATA_USING_ITEM`（`EntityData::WitchUsingItem`）。自然生成是
+  `ON_GROUND` + `Monster.checkMonsterSpawnRules`；`PatrollingMonster.finalizeSpawn` 会先掷一次
+  巡逻队长概率，即使女巫不能当队长，也必须消费该随机数。
+  `mob-oracle --only witch_spawn`：平原黑暗、方块光 1、和平，18 例 72 刻 0 不一致，生成 30 只。
 - **喷溅药水**（`entity/splash_potion.rs`）：新的投掷物实体，物理照 `ThrowableProjectile`
   （重力 0.05），命中后按 `ThrownSplashPotion.onHitAsPotion` 的 4/2/4 范围和
   `1 - sqrt(d)/4` 的缩放分效果；瞬时效果对生物当场结算，其余按 `scale * duration + 0.5`
@@ -912,5 +915,5 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - **仓库外改动**：`mc-bamboo-protocol` 加了一个实体数据项；`mc-bamboo-storage` 的建模实体
   清单加了溺尸和女巫。
 - **没做的**：三叉戟投掷（没有 `ThrownTrident`）、`DrownedGoToBeachGoal`、鹦鹉螺僵尸、
-  袭击系统、女巫自然生成、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
-  目标速度和目标药水效果（选药用不到）。溺尸和女巫都**没有** `mob-oracle` 场景。
+  袭击、女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
+  目标速度和目标药水效果（选药用不到）。溺尸没有 `mob-oracle` 场景；女巫喝药和投掷未对拍。

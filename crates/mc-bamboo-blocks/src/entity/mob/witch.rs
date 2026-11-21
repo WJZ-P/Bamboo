@@ -63,6 +63,14 @@ pub(super) fn attributes() -> Attributes {
     table
 }
 
+/// `PatrollingMonster.finalizeSpawn` 先掷巡逻队长概率，再由 `Mob` 初始化；女巫不能当队长。
+///
+/// `PatrollingMonster.finalizeSpawn` rolls for a patrol leader before `Mob` initializes the mob, even though a witch cannot become a leader.
+pub(super) fn finalize_spawn(entity: &mut Entity, random: &dyn crate::random::RandomSource) {
+    let _ = random.next_float();
+    entity.with_mob(|_, mob| super::spawn::finalize_mob(random, mob));
+}
+
 /// `Witch.registerGoals`：`Raider` 的四个目标按注册顺序占位，然后是漂浮、远程、
 /// 闲逛、看玩家、随便看看。
 ///

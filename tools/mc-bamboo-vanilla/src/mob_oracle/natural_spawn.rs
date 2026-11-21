@@ -91,6 +91,7 @@ pub(super) struct Coverage {
     zombies: usize,
     slimes: usize,
     equines: usize,
+    witches: usize,
     without_spawn: usize,
     cap_off: usize,
     per_scene: std::collections::BTreeMap<String, usize>,
@@ -126,6 +127,11 @@ impl Coverage {
             .iter()
             .filter(|row| MobType::by_entity_type(row[0]).is_some_and(MobType::is_equine))
             .count();
+        self.witches += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::WITCH)
+            .count();
         if case.name == "cow_no_local_cap" {
             self.cap_off += step.spawned.len();
         }
@@ -134,7 +140,7 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} slimes, {} equines, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} slimes, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
@@ -142,6 +148,7 @@ impl Coverage {
                 self.zombies,
                 self.slimes,
                 self.equines,
+                self.witches,
                 self.without_spawn,
                 self.cap_off
             );
@@ -155,6 +162,9 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if self.per_scene.contains_key("witch_night") && self.witches == 0 {
+            return Err("natural spawn fixtures did not spawn any witches".into());
+        }
         let mobs = [
             self.cows,
             self.skeletons,
@@ -162,7 +172,7 @@ impl Coverage {
             self.slimes,
             self.equines,
         ];
-        if self.cases > 0 && (mobs.contains(&0) || self.cap_off == 0) {
+        if self.per_scene.contains_key("cow_day") && (mobs.contains(&0) || self.cap_off == 0) {
             return Err(
                 "natural spawn fixtures did not exercise every mob and the local cap bypass".into(),
             );

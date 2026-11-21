@@ -654,7 +654,7 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         | MobType::Donkey
         | MobType::Mule
         | MobType::Llama => animal_spawn_rules(world, pos),
-        MobType::Zombie | MobType::Skeleton | MobType::Bogged => {
+        MobType::Zombie | MobType::Skeleton | MobType::Bogged | MobType::Witch => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
         // `Stray.checkStraySpawnRules`：怪物规则之后再要求看得见天；找天只读方块，不取随机数。
@@ -667,10 +667,6 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         }
         MobType::Slime => super::slime::check_spawn_rules(world, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
-        // 女巫没有 `SpawnPlacements` 登记，只在袭击和女巫小屋里出现。
-        //
-        // Witches have no `SpawnPlacements` entry; they only come from raids and huts.
-        MobType::Witch => false,
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)
                 && valid_mob_spawn_block(world, kind, pos)
