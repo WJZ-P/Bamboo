@@ -467,6 +467,11 @@ AI 内部量，服务端不建模，无玩家可感知差异。没有改动任�
 故意改坏确认与自然生成接入全部复核通过；Brain 相关行为与海龟产卵 / 孵化 / 回家场景仍未做，
 见 README 已知限制。本轮未改动任何生物行为代码。
 
+**海龟产卵 / 回家逐刻场景（2026-11-21，第七轮）。** 见文末「海龟的实施现状」：新增四个
+逐刻场景、开局带蛋 / 家方块钩子、逐刻状态比较和覆盖断言，故意改坏确认有效；顺带修掉
+`Command::LayTurtleEgg` 的越界崩溃。合并状态：`main = c9773f61` 仍是 HEAD 的祖先，
+`git merge main` 报 Already up to date。全量 `mob-oracle` 1744 例 165621 刻 0 不一致。
+
 ### 5.9 中立生物地基和北极熊（2026-11-21）
 
 - **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
@@ -1183,7 +1188,16 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   非默认才发。长大的那一刻按 `entities/turtle_grow` 掉鳞甲（走 `EntityLootRequest`）。
 - 验证：`mob-oracle --only zombie_turtle_ai`（类型 60，借僵尸场景的多生物路径）四个场景：
   沙滩找水两个种子、幼年、水下远行，共 1500 刻 **0 不一致**（位置、速度、朝向、随机源、
-  氧气、运行中的目标、路径节点）。产卵、孵化、回家还没有场景，也没有自然生成夹具。
+  氧气、运行中的目标、路径节点）。产卵和回家见下一段，孵化仍只有单元测试，没有自然生成夹具。
+- 验证（2026-11-21 追加）：`mob-oracle --only zombie_turtle_egg` 四个新场景（带蛋产卵三个
+  种子、离家 12 格回家）加既有的僵尸踩蛋场景共 8 例 3220 刻 **0 不一致**。`Scene.turtleEgg`
+  开局把 `has_egg` 和家方块写进两侧；`zombieStepJson` 逐刻比带蛋 / 正在产卵 / 产卵计数 /
+  回家标志 / 家方块，方块表散列 `bh` 覆盖蛋放下那一刻；Java 侧断言每个产卵场景确实产下蛋；
+  `--break-self-test turtle_egg` 把带蛋标志取反，抓到 12 处不一致。孵化的随机刻会生成实体，
+  `oracle` 明确按 `EntityRandomTick` 排除，只有 `behaviour/misc/turtle_egg.rs` 的单元测试。
+  同时修掉 `ctx.rs` 里 `Command::LayTurtleEgg` 把状态 ID 当方块注册表下标用的越界崩溃
+  （之前从没被跑到，游戏里海龟一产卵就会 panic）。全量 `mob-oracle` 复核 1744 例 165621 刻
+  0 不一致。
 
 ## 海豚和美西螈的实施现状（2026-11-21，分支 `op-water`）
 
