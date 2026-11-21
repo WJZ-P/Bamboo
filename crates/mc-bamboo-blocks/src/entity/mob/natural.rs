@@ -1184,6 +1184,44 @@ mod tests {
         assert!(skeletons, "黑暗里应该刷出骷髅");
     }
 
+    /// 苦力怕、蜘蛛和末影人走同一条怪物分支，黑暗里也会自然刷出来。
+    ///
+    /// Creepers, spiders and endermen take the same monster branch and spawn in the dark.
+    #[test]
+    fn creepers_spiders_and_endermen_spawn_in_the_dark() {
+        let mut level = TestLevel::new();
+        grass_platform(&mut level);
+        level.light = Some((0, 0));
+        level.players.push(player(1, Vec3::new(8.5, 64.0, 40.5)));
+        let params = params(289 * 4, true);
+        let chunk = ChunkPos::new(0, 0);
+        let wanted = [types::CREEPER, types::SPIDER, types::ENDERMAN];
+        let mut seen = [false; 3];
+        // 平原的末影人权重只有 10（苦力怕、蜘蛛各 100），要多跑一些刻；找齐就停。
+        // Plains endermen weigh only 10 (creepers and spiders 100), so allow many
+        // ticks; the loop stops once all three appeared.
+        for _ in 0..40000 {
+            run_tick(&mut level, chunk, &params);
+            let spawned: Vec<_> = level
+                .entities()
+                .iter_public()
+                .map(|entity| (entity.uid, entity.kind.entity_type()))
+                .collect();
+            for (uid, entity_type) in spawned {
+                if let Some(index) = wanted.iter().position(|&id| id == entity_type) {
+                    seen[index] = true;
+                }
+                // 刷出来的都清掉，怪物上限就不会被别的种类占满。
+                // Clear every spawn so other kinds never fill the monster cap.
+                level.entities_mut_for_test().remove(uid);
+            }
+            if seen.iter().all(|&found| found) {
+                break;
+            }
+        }
+        assert_eq!(seen, [true; 3], "黑暗里应该刷出苦力怕、蜘蛛和末影人");
+    }
+
     #[test]
     fn shuffle_matches_java_fisher_yates() {
         // `java.util.Random(42)` 打乱 0..8 的结果，由 `Collections.shuffle` 的同款算法给出：
