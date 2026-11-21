@@ -1581,6 +1581,10 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
 }
 
 /// `BreedGoal.getFreePartner`：8 格内同种、在发情、不在恐慌的，取最近的。
+/// 马科按 `canMate`：双方都 `canParent`，马和驴可以互配。
+///
+/// The nearest in-love, non-panicking partner within 8 blocks; equines use
+/// `canMate`, where both must `canParent` and horses pair with donkeys.
 fn free_partner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
     if mob.mob_type.is_equine() && !super::equine::can_parent(mob) {
         return None;

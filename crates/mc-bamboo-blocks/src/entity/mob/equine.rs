@@ -47,6 +47,9 @@ pub struct EquinePublic {
 }
 
 impl EquinePublic {
+    /// 从状态里抄出要同步的那几项。
+    ///
+    /// Copy the synced fields out of the state.
     pub fn of(state: &EquineState) -> Self {
         Self {
             flags: state.flags(),
@@ -102,6 +105,9 @@ impl EquineState {
     }
 }
 
+/// 成年和幼年的（宽，高，眼高）：马的幼崽缩到 0.7，驴、骡、羊驼缩到 0.5。
+///
+/// Adult and baby (width, height, eye height): foals scale by 0.7, other kinds by 0.5.
 pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
     let facts = &entity_types::FACTS[kind.entity_type() as usize];
     let eye = match kind {
@@ -121,6 +127,9 @@ pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
     (facts.width * scale, facts.height * scale, eye * scale)
 }
 
+/// `createBaseHorseAttributes`，驴骡羊驼再用 `createBaseChestedHorseAttributes` 的速度和跳跃。
+///
+/// `createBaseHorseAttributes`, with the chested speed and jump for the other kinds.
 pub(super) fn attributes(kind: MobType) -> Attributes {
     let mut attrs = Attributes::cow();
     let (speed, jump) = if kind == MobType::Horse {
@@ -141,6 +150,9 @@ pub(super) fn attributes(kind: MobType) -> Attributes {
     attrs
 }
 
+/// `finalizeSpawn`：先花色（马）或力量和毛色（羊驼），再 `randomizeAttributes`，都用世界随机源。
+///
+/// `finalizeSpawn`: variants first, then `randomizeAttributes`, all from the level random.
 pub(super) fn finalize_spawn(mob: &mut Mob, random: &LegacyRandom) {
     let state = mob.equine.as_mut().expect("equine spawn state");
     match mob.mob_type {
@@ -170,6 +182,9 @@ fn set_base(mob: &mut Mob, id: i32, base: f64) {
     }
 }
 
+/// `TemptGoal` 认的物品标签。
+///
+/// The item tag `TemptGoal` follows.
 pub(super) fn tempt_tag(kind: MobType) -> ItemTag {
     match kind {
         MobType::Llama => item_tags::LLAMA_TEMPT_ITEMS,
@@ -178,6 +193,9 @@ pub(super) fn tempt_tag(kind: MobType) -> ItemTag {
     }
 }
 
+/// `canMate` + `getBreedOffspring` 的类型：马配驴生骡，骡不育。
+///
+/// The offspring type: horse with donkey gives a mule, mules are sterile.
 pub(super) fn offspring_kind(a: MobType, b: MobType) -> Option<MobType> {
     match (a, b) {
         (MobType::Horse, MobType::Horse) => Some(MobType::Horse),
@@ -190,6 +208,9 @@ pub(super) fn offspring_kind(a: MobType, b: MobType) -> Option<MobType> {
     }
 }
 
+/// `AbstractHorse.canParent`（没有骑乘时载具和乘客两项恒真）。
+///
+/// `AbstractHorse.canParent`; the vehicle and passenger checks always pass without riding.
 pub(super) fn can_parent(mob: &Mob) -> bool {
     mob.equine.as_ref().is_some_and(|state| state.tame)
         && !mob.is_baby()
@@ -197,6 +218,9 @@ pub(super) fn can_parent(mob: &Mob) -> bool {
         && mob.in_love > 0
 }
 
+/// 繁殖出的幼崽：马先抽花色，再按血量、跳跃、速度的顺序遗传，羊驼最后抽力量和毛色。
+///
+/// The bred baby: horse variants first, then health, jump and speed, llama strength and colour last.
 pub fn offspring(
     random: &mut JavaRandom,
     parent: &Mob,
@@ -267,6 +291,9 @@ pub fn offspring_attribute(a: f64, b: f64, min: f64, max: f64, random: &mut Java
     }
 }
 
+/// `addAdditionalSaveData` 里马科的键。
+///
+/// The equine keys of `addAdditionalSaveData`.
 pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) -> tag::Result<()> {
     let Some(state) = &mob.equine else {
         return Ok(());
@@ -296,6 +323,9 @@ pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) -> tag::Result<()> {
     Ok(())
 }
 
+/// `readAdditionalSaveData`：羊驼先读力量，箱子大小按它算。
+///
+/// `readAdditionalSaveData`: llamas read strength first because the chest size depends on it.
 pub(super) fn load(mob: &mut Mob, input: &Tag) {
     let Some(state) = &mut mob.equine else { return };
     state.eating = tag::bool_or(input, "EatingHaystack", false);
