@@ -12,12 +12,13 @@ use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 use super::{Mob, MobType, interact};
 use crate::entity::{Entity, mob::equipment::GUARANTEED_DROP_CHANCE};
 
-/// `AbstractHorse.openCustomInventoryScreen` 的条件：驯服了（没人骑；Bamboo 还没有骑乘）。
+/// `AbstractHorse.openCustomInventoryScreen` 的地面分支：没人骑且已驯服。
+/// 骑乘中按物品栏键由游戏层直接判 `hasPassenger(player) && isTamed()`。
 ///
-/// The `openCustomInventoryScreen` condition: tamed (and not ridden; Bamboo has no
-/// riding yet).
+/// The ground branch of `openCustomInventoryScreen`: not ridden and tamed.
+/// Opening while riding checks `hasPassenger(player) && isTamed()` in the game layer.
 pub fn can_open(mob: &Mob) -> bool {
-    mob.equine.as_ref().is_some_and(|state| state.tame)
+    !mob.is_vehicle() && mob.equine.as_ref().is_some_and(|state| state.tame)
 }
 
 /// `getInventoryColumns`：马 0；驴、骡有箱子时 5；羊驼有箱子时等于力量。

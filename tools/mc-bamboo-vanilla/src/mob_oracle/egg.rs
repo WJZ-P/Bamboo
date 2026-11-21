@@ -129,6 +129,8 @@ impl EggCase {
                 eye_height: 1.62,
                 look_direction: Vec3::default(),
                 gaze_disguise: false,
+                yaw: 0.0,
+                pitch: 0.0,
                 alive: true,
                 spectator: false,
                 creative: false,
