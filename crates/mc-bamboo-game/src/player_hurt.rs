@@ -13,7 +13,9 @@ use mc_bamboo_core::{Hand, Vec3};
 use mc_bamboo_data::sounds;
 use mc_bamboo_protocol::{
     frame::packet_body,
-    packet::play::{DamageEvent, HurtAnimation, PlayerCombatEnter, SetHealth, Sound},
+    packet::play::{
+        DamageEvent, HurtAnimation, PlayerCombatEnter, SetEntityMotion, SetHealth, Sound,
+    },
 };
 
 use std::collections::BTreeMap;
@@ -189,7 +191,46 @@ pub(crate) fn hurt_player_by_mob(
     if hurt && let (Some(state), Some(player)) = (random, parts.players.get_mut(&id)) {
         player.random = state;
     }
+    if hurt && source.arrow_punch > 0 {
+        apply_arrow_push(parts, id, &source);
+    }
     (hurt, drops)
+}
+
+fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
+    use mc_bamboo_blocks::entity::mob::{
+        attributes::Attribute,
+        equipment::{SLOTS, stack_modifiers},
+    };
+    use mc_bamboo_data::registries::{attribute::KNOCKBACK_RESISTANCE, attribute_defaults};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let Some(player) = parts.players.get_mut(&id) else {
+        return;
+    };
+    let mut resistance = Attribute::new(
+        KNOCKBACK_RESISTANCE,
+        attribute_defaults::KNOCKBACK_RESISTANCE,
+    );
+    for (slot, stack) in SLOTS
+        .into_iter()
+        .zip(player.equipment_stacks(&ItemStack::empty()))
+    {
+        for (kind, modifier) in stack_modifiers(stack, slot) {
+            if kind == KNOCKBACK_RESISTANCE {
+                resistance.remove_modifier(&modifier.id);
+                resistance.modifiers.push(modifier);
+            }
+        }
+    }
+    if let Some(push) = source.arrow_push(resistance.value()) {
+        player.motion.delta = player.motion.delta.add(push);
+        let packet = crate::links::encode_frames(&SetEntityMotion {
+            entity_id: id.0,
+            movement: player.motion.delta,
+        });
+        send_to_tracking_and_self(parts, id, &packet);
+    }
 }
 
 /// [`hurt_player`] 的本体：返回 `wasHurt` 和打死时要在世界里生成的掉落。

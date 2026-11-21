@@ -519,7 +519,18 @@ pub(crate) fn on_set_carried_item(region: &mut Region, id: PlayerId, slot: i16) 
         return;
     };
     match usize::try_from(slot) {
-        Ok(index) if index < HOTBAR_SIZE => player.inventory.select(index),
+        Ok(index) if index < HOTBAR_SIZE => {
+            if usize::from(player.inventory.selected) != index
+                && player
+                    .weapon_use
+                    .as_ref()
+                    .is_some_and(|active| active.hand == Hand::Main)
+            {
+                player.weapon_use = None;
+                player.sync.metadata_dirty = true;
+            }
+            player.inventory.select(index);
+        }
         _ => debug!(player = id.0, slot, "ignoring an invalid carried item slot"),
     }
 }
@@ -565,6 +576,9 @@ pub(crate) fn swap_hands(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
+    if player.weapon_use.take().is_some() {
+        player.sync.metadata_dirty = true;
+    }
     let main_hand = player.inventory.hand_slot(Hand::Main);
     if player.inventory.slots[main_hand] == player.inventory.slots[OFF_HAND] {
         return;

@@ -709,6 +709,101 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 药水箭命中玩家：`LivingEntity.addEffect`。能当场就当场，否则延后。
+    ///
+    /// A tipped arrow hitting a player: `LivingEntity.addEffect`. Applied at
+    /// once when the level can, otherwise deferred.
+    pub fn give_player_effect(
+        &mut self,
+        target: crate::entity::EntityUid,
+        instance: crate::entity::mob::effects::EffectInstance,
+    ) {
+        if !self.level.give_player_effect_now(target, &instance) {
+            self.push_effect(Effect::PlayerEffect {
+                target,
+                effect: instance.effect,
+                duration: instance.duration,
+                amplifier: instance.amplifier,
+                ambient: instance.ambient,
+                visible: instance.visible,
+                show_icon: instance.show_icon,
+            });
+        }
+    }
+
+    /// 药水箭的瞬间效果（治疗 / 伤害）在玩家身上当场结算。
+    ///
+    /// A tipped arrow's instantaneous effect (healing or harm) on a player.
+    pub fn instant_player_effect(
+        &mut self,
+        target: crate::entity::EntityUid,
+        effect: i32,
+        amplifier: i32,
+    ) {
+        self.give_player_effect(
+            target,
+            crate::entity::mob::effects::EffectInstance::with_amplifier(effect, 1, amplifier),
+        );
+    }
+
+    /// 药水箭带给生物的瞬间效果：`MobEffect.applyInstantaneousEffect`。
+    ///
+    /// An arrow's instantaneous effect on a mob: `MobEffect.applyInstantaneousEffect`.
+    pub fn apply_mob_instant_effect(&mut self, target: i32, effect: i32, amplifier: i32) {
+        use crate::entity::mob::effects::{EffectAction, effect_tick_actions};
+        for action in effect_tick_actions(effect, amplifier) {
+            match action {
+                EffectAction::Heal(amount) | EffectAction::InstantHeal(amount) => {
+                    self.with_entity_mut(target, &mut |entity| {
+                        let Some(mob) = entity.kind.mob_mut() else {
+                            return;
+                        };
+                        let max = mob.attributes.value(
+                            mc_bamboo_data::registries::attribute::MAX_HEALTH,
+                        ) as f32;
+                        if mob.health < max {
+                            mob.health = (mob.health + amount).min(max);
+                        }
+                    });
+                }
+                EffectAction::MagicDamage(amount) => {
+                    if self
+                        .level
+                        .entity_public(target)
+                        .is_some_and(|public| matches!(&public.kind, crate::entity::KindPublic::Mob(mob) if mob.health > 1.0))
+                    {
+                        self.hurt_mob(
+                            target,
+                            crate::entity::mob::DamageSource::environment(
+                                crate::entity::mob::DamageKind::Magic,
+                            ),
+                            amount,
+                        );
+                    }
+                }
+                EffectAction::InstantDamage(amount) => {
+                    self.hurt_mob(
+                        target,
+                        crate::entity::mob::DamageSource::environment(
+                            crate::entity::mob::DamageKind::Magic,
+                        ),
+                        amount,
+                    );
+                }
+                EffectAction::WitherDamage(amount) => {
+                    self.hurt_mob(
+                        target,
+                        crate::entity::mob::DamageSource::environment(
+                            crate::entity::mob::DamageKind::Wither,
+                        ),
+                        amount,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// `Player.dropEquipment` + `LivingEntity.dropExperience` 的世界部分：物品从眼高
     /// 往下 0.3 处生成、拾取延迟 40，然后按经验值拆成经验球。
     pub fn spawn_player_death_drops(&mut self, drops: &crate::level::PlayerDeathDrops) {
@@ -2942,6 +3037,22 @@ impl<'a> World<'a> {
         self.level.spawn_entity(entity)
     }
 
+    /// 生成一支射出的箭：先分配 ID 和随机种子（官方构造函数里的 UUID 取数），
+    /// 再按 `Projectile.shoot` 取散布。顺序和官方一致。
+    ///
+    /// Spawns one fired arrow: the id and random seed first (the UUID draw of the
+    /// official constructor), then the spread of `Projectile.shoot`.
+    pub fn spawn_arrow_shot(&mut self, shot: crate::entity::arrow::ArrowShot) -> i32 {
+        let mut entity = self.prepare_entity(Entity::configured_arrow(&shot));
+        entity.shoot_arrow_with_movement(
+            shot.direction,
+            shot.power,
+            shot.uncertainty,
+            shot.source_movement,
+        );
+        self.add_prepared_entity(entity)
+    }
+
     /// 构造一个实体但先不放进世界，见 [`crate::EntityStore::prepare`]。
     pub fn prepare_entity(&mut self, entity: Entity) -> Entity {
         self.level.prepare_entity(entity)
@@ -3743,6 +3854,7 @@ mod tests {
                 | Effect::OpenCommandBlock { .. }
                 | Effect::HurtPlayer { .. }
                 | Effect::IgnitePlayer { .. }
+                | Effect::PlayerEffect { .. }
                 | Effect::SleepInBed { .. } => None,
             })
             .collect()

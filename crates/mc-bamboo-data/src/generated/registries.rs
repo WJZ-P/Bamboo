@@ -998,6 +998,25 @@ pub mod menu {
     pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
+pub mod stat_type {
+    pub const TOTAL: u32 = 9;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:mined", "minecraft:crafted", "minecraft:used", "minecraft:broken", "minecraft:picked_up", "minecraft:dropped", "minecraft:killed", "minecraft:killed_by", "minecraft:custom"];
+    pub const MINED: i32 = 0;
+    pub const CRAFTED: i32 = 1;
+    pub const USED: i32 = 2;
+    pub const BROKEN: i32 = 3;
+    pub const PICKED_UP: i32 = 4;
+    pub const DROPPED: i32 = 5;
+    pub const KILLED: i32 = 6;
+    pub const KILLED_BY: i32 = 7;
+    pub const CUSTOM: i32 = 8;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
+}
+
 /// 属性的默认值，没有任何状态效果和附魔时的起点。
 pub mod attribute_defaults {
     pub const AIR_DRAG_MODIFIER: f64 = 1.0;

@@ -692,6 +692,10 @@ pub struct DamageSource {
     ///
     /// If nonzero, a flaming arrow tries to ignite the target before damage.
     pub arrow_ignite_ticks: i32,
+    /// 箭命中后 `AbstractArrow.doKnockback` 用的附魔强度。
+    ///
+    /// Enchantment strength for the post-hit `AbstractArrow.doKnockback`.
+    pub arrow_punch: i32,
     pub(super) looting_level: i32,
 }
 
@@ -712,6 +716,7 @@ impl DamageSource {
             scale_when_non_player: false,
             weapon: None,
             arrow_ignite_ticks: 0,
+            arrow_punch: 0,
             looting_level: 0,
         }
     }
@@ -725,6 +730,21 @@ impl DamageSource {
         } else {
             self.position.map(|at| (at.x - target.x, at.z - target.z))
         }
+    }
+
+    /// 不替代受伤击退：`AbstractArrow.doKnockback` 在成功命中后另加速度。
+    ///
+    /// Adds to the ordinary damage knockback; this is the separate post-hit arrow push.
+    pub fn arrow_push(&self, resistance: f64) -> Option<Vec3> {
+        if self.arrow_punch <= 0 {
+            return None;
+        }
+        let movement = self
+            .projectile_motion?
+            .multiply(1.0, 0.0, 1.0)
+            .normalize()
+            .scale(f64::from(self.arrow_punch) * 0.6 * (1.0 - resistance).max(0.0));
+        (movement.length_sqr() > 0.0).then_some(Vec3::new(movement.x, 0.1, movement.z))
     }
 
     /// 带上攻击者的 UUID。
@@ -777,6 +797,7 @@ impl DamageSource {
             scale_when_non_player: false,
             weapon: None,
             arrow_ignite_ticks: 0,
+            arrow_punch: 0,
             looting_level: 0,
         }
     }

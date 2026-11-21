@@ -204,6 +204,7 @@ pub enum EntityData {
     LlamaStrength(i32),
     /// INT。`Llama.DATA_VARIANT_ID`。
     LlamaVariant(i32),
+    ArrowColor(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -240,6 +241,7 @@ impl EntityData {
             Self::HorseChest(_) => mc_bamboo_data::entity_types::HORSE_CHEST,
             Self::LlamaStrength(_) => mc_bamboo_data::entity_types::LLAMA_STRENGTH,
             Self::LlamaVariant(_) => mc_bamboo_data::entity_types::LLAMA_VARIANT,
+            Self::ArrowColor(_) => mc_bamboo_data::entity_types::ARROW_COLOR,
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
@@ -260,6 +262,10 @@ impl EntityData {
             Self::ArrowPierce(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*value as u8);
+            }
+            Self::ArrowColor(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
             }
             Self::ArrowInGround(value) | Self::HorseChest(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
