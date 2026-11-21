@@ -543,6 +543,11 @@ pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    // 溺尸登记的是 `SpawnPlacementTypes.IN_WATER`，其余已支持的都是 `ON_GROUND`。
+    // Drowned register `SpawnPlacementTypes.IN_WATER`; the rest use `ON_GROUND`.
+    if kind == MobType::Drowned {
+        return super::drowned::placement_ok(world, pos);
+    }
     on_ground_position_ok_for(world, kind.fire_immune(), kind.immune_to(), pos)
 }
 
@@ -656,6 +661,11 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
                 && super::stray::sees_sky_through_powder_snow(world, pos)
         }
         MobType::Slime => super::slime::check_spawn_rules(world, pos),
+        MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
+        // 女巫没有 `SpawnPlacements` 登记，只在袭击和女巫小屋里出现。
+        //
+        // Witches have no `SpawnPlacements` entry; they only come from raids and huts.
+        MobType::Witch => false,
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)
                 && valid_mob_spawn_block(world, kind, pos)
@@ -676,7 +686,7 @@ pub(super) fn animal_spawn_rules(world: &World, pos: BlockPos) -> bool {
         && world.raw_brightness(pos) > 8
 }
 /// `Monster.isDarkEnoughToSpawn`。
-fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
+pub(super) fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
     let random = world.random();
     if world.brightness(LightLayer::Sky, pos) > random.next_int(32) {
         return false;

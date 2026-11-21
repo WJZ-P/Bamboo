@@ -18,6 +18,7 @@ pub mod chicken;
 pub mod control;
 pub mod conversion;
 pub mod damage;
+pub mod drowned;
 pub mod effects;
 pub mod equipment;
 pub mod goals;
@@ -37,6 +38,7 @@ pub mod slime;
 pub mod spawn;
 pub mod stray;
 pub(crate) mod timing;
+pub mod witch;
 mod zombie_spawn;
 
 use mc_bamboo_core::{BlockPos, Vec3};
@@ -68,6 +70,8 @@ pub enum MobType {
     Stray,
     Bogged,
     Slime,
+    Drowned,
+    Witch,
 }
 
 impl MobType {
@@ -85,6 +89,8 @@ impl MobType {
             Self::Stray => ids::STRAY,
             Self::Bogged => ids::BOGGED,
             Self::Slime => ids::SLIME,
+            Self::Drowned => ids::DROWNED,
+            Self::Witch => ids::WITCH,
         }
     }
 
@@ -101,6 +107,8 @@ impl MobType {
             Self::Stray => "minecraft:stray",
             Self::Bogged => "minecraft:bogged",
             Self::Slime => "minecraft:slime",
+            Self::Drowned => "minecraft:drowned",
+            Self::Witch => "minecraft:witch",
         }
     }
 
@@ -116,6 +124,8 @@ impl MobType {
             Self::Stray,
             Self::Bogged,
             Self::Slime,
+            Self::Drowned,
+            Self::Witch,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -143,15 +153,30 @@ impl MobType {
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
-            (Self::Zombie | Self::Husk, false) => (0.6, 1.95, 1.74),
+            (Self::Zombie | Self::Husk | Self::Drowned, false) => (0.6, 1.95, 1.74),
             // `Zombie.BABY_DIMENSIONS`：`scalable(0.49F, 0.98F).withEyeHeight(0.775F)`。
-            (Self::Zombie | Self::Husk, true) => (0.49, 0.98, 0.775),
+            (Self::Zombie | Self::Husk | Self::Drowned, true) => (0.49, 0.98, 0.775),
+            // `EntityTypes.WITCH`：`sized(0.6F, 1.95F).eyeHeight(1.62F)`。
+            //
+            // `EntityTypes.WITCH`: `sized(0.6F, 1.95F).eyeHeight(1.62F)`.
+            (Self::Witch, _) => (0.6, 1.95, 1.62),
         }
     }
 
     /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
     pub const fn is_monster(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk) || self.is_skeleton()
+        matches!(
+            self,
+            Self::Zombie | Self::Husk | Self::Drowned | Self::Witch
+        ) || self.is_skeleton()
+    }
+
+    /// 是不是 `Zombie` 一支：僵尸、尸壳、溺尸共用近战、破门、增援和转化逻辑。
+    ///
+    /// Whether this is a `Zombie`: zombies, husks and drowned share the melee, door
+    /// breaking, reinforcement and conversion logic.
+    pub const fn is_zombie(self) -> bool {
+        matches!(self, Self::Zombie | Self::Husk | Self::Drowned)
     }
 
     /// 是不是 `AbstractSkeleton` 一支：骷髅、流浪者、沼骸共用弓 / 近战目标和装备逻辑。
@@ -215,13 +240,15 @@ impl MobType {
             Self::Stray => "minecraft:entities/stray",
             Self::Bogged => "minecraft:entities/bogged",
             Self::Slime => "minecraft:entities/slime",
+            Self::Drowned => "minecraft:entities/drowned",
+            Self::Witch => "minecraft:entities/witch",
         }
     }
 
     /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
-    /// 尸壳不烧，僵尸烧。
+    /// 尸壳不烧，僵尸、溺尸和骷髅一支烧。
     pub const fn burns_in_daylight(self) -> bool {
-        matches!(self, Self::Zombie) || self.is_skeleton()
+        matches!(self, Self::Zombie | Self::Drowned) || self.is_skeleton()
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -244,6 +271,11 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
             Self::Stray => Some("minecraft:entity.stray.ambient"),
             Self::Bogged => Some("minecraft:entity.bogged.ambient"),
+            // 溺尸的叫声分水上、水下两种，由 [`drowned::sound`] 按 `isInWater` 选。
+            //
+            // Drowned pick a water or land variant in [`drowned::sound`] by `isInWater`.
+            Self::Drowned => None,
+            Self::Witch => Some("minecraft:entity.witch.ambient"),
         }
     }
 
@@ -256,6 +288,8 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
             Self::Stray => Some("minecraft:entity.stray.hurt"),
             Self::Bogged => Some("minecraft:entity.bogged.hurt"),
+            Self::Drowned => None,
+            Self::Witch => Some("minecraft:entity.witch.hurt"),
         }
     }
 
@@ -268,6 +302,8 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
             Self::Stray => Some("minecraft:entity.stray.death"),
             Self::Bogged => Some("minecraft:entity.bogged.death"),
+            Self::Drowned => None,
+            Self::Witch => Some("minecraft:entity.witch.death"),
         }
     }
 
@@ -280,6 +316,11 @@ impl MobType {
             Self::Skeleton => Some("minecraft:entity.skeleton.step"),
             Self::Stray => Some("minecraft:entity.stray.step"),
             Self::Bogged => Some("minecraft:entity.bogged.step"),
+            Self::Drowned => Some("minecraft:entity.drowned.step"),
+            // 女巫没覆写 `getStepSound`，走方块自己的脚步声（和史莱姆一样）。
+            //
+            // A witch does not override `getStepSound`; the block's own step sound plays.
+            Self::Witch => None,
         }
     }
 
@@ -297,6 +338,8 @@ impl MobType {
             Self::Stray => items::STRAY_SPAWN_EGG,
             Self::Bogged => items::BOGGED_SPAWN_EGG,
             Self::Slime => items::SLIME_SPAWN_EGG,
+            Self::Drowned => items::DROWNED_SPAWN_EGG,
+            Self::Witch => items::WITCH_SPAWN_EGG,
         }
     }
 
@@ -313,12 +356,14 @@ impl MobType {
             Self::Stray => "entity.minecraft.stray",
             Self::Bogged => "entity.minecraft.bogged",
             Self::Slime => "entity.minecraft.slime",
+            Self::Drowned => "entity.minecraft.drowned",
+            Self::Witch => "entity.minecraft.witch",
         }
     }
 
     /// 幼年是不是用 `Zombie.DATA_BABY_ID`（布尔元数据），而不是牛的 `age < 0`。
     pub const fn uses_baby_metadata(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk)
+        self.is_zombie()
     }
 
     /// 按 `minecraft:entity_type` 注册表 ID 找种类，Bamboo 没建模的返回 `None`。
@@ -334,6 +379,8 @@ impl MobType {
             Self::Stray,
             Self::Bogged,
             Self::Slime,
+            Self::Drowned,
+            Self::Witch,
         ]
         .into_iter()
         .find(|kind| kind.entity_type() == entity_type)
@@ -1146,6 +1193,27 @@ pub struct Mob {
     ///
     /// `Bogged.DATA_SHEARED`: the mushrooms have been sheared off.
     pub bogged_sheared: bool,
+    /// `Zombie.drowningTracker`：眼睛在水里的刻数和转化倒计时。只有相对计数。
+    ///
+    /// `Zombie.drowningTracker`: the submerged ticks and the conversion countdown, all
+    /// relative.
+    pub drown_conversion: conversion::ConversionTracker,
+    /// `Entity.isSwimming()`：共享标志第 4 位，水里游泳时不穿水流。
+    ///
+    /// `Entity.isSwimming()`: shared flag 4; a swimming mob is not pushed by currents.
+    pub swimming: bool,
+    /// `Drowned.searchingForLand`：`DrownedSwimUpGoal` 期间为真。
+    ///
+    /// `Drowned.searchingForLand`, set while `DrownedSwimUpGoal` runs.
+    pub searching_for_land: bool,
+    /// 女巫的喝药状态，见 [`witch::WitchState`]。
+    ///
+    /// The witch's drinking state, see [`witch::WitchState`].
+    pub witch: witch::WitchState,
+    /// `Witch.DATA_USING_ITEM`：喝药时为真，单独的同步布尔。
+    ///
+    /// `Witch.DATA_USING_ITEM`: true while drinking, a separate synced boolean.
+    pub witch_drinking: bool,
     /// 史莱姆的大小和移动控制，见 [`slime::CubeState`]。
     ///
     /// The slime size and move control, see [`slime::CubeState`].
@@ -1221,6 +1289,8 @@ impl Mob {
             MobType::Bogged => bogged::attributes(),
             MobType::Slime => slime::attributes(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
+            MobType::Drowned => drowned::attributes(),
+            MobType::Witch => witch::attributes(),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
@@ -1232,6 +1302,8 @@ impl Mob {
             MobType::Skeleton | MobType::Stray | MobType::Bogged => GoalSelector::skeleton(),
             MobType::Slime => slime::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
+            MobType::Drowned => drowned::goals(&mut navigation),
+            MobType::Witch => witch::goals(&mut navigation),
         };
         let target_goals = match mob_type {
             MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
@@ -1242,6 +1314,8 @@ impl Mob {
             }
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
             MobType::Slime => slime::targets(),
+            MobType::Drowned => drowned::targets(),
+            MobType::Witch => witch::targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
         Self {
@@ -1358,6 +1432,11 @@ impl Mob {
             egg_time: 0,
             freeze_conversion: conversion::ConversionTracker::default(),
             bogged_sheared: false,
+            drown_conversion: conversion::ConversionTracker::default(),
+            swimming: false,
+            searching_for_land: false,
+            witch: witch::WitchState::default(),
+            witch_drinking: false,
             cube: slime::CubeState::default(),
             events: Vec::new(),
             hurt_marked: false,
@@ -1472,6 +1551,19 @@ pub struct MobPublic {
     pub zombie_special_type: i32,
     /// `Zombie.DATA_DROWNED_CONVERSION_ID`。
     pub drowned_converting: bool,
+    /// `Witch.DATA_USING_ITEM`。
+    ///
+    /// `Witch.DATA_USING_ITEM`.
+    pub witch_using_item: bool,
+    /// `Entity.isSwimming()`：共享标志第 4 位。
+    ///
+    /// `Entity.isSwimming()`: shared flag 4.
+    pub swimming: bool,
+    /// `Entity.isInWater()`：上一刻的流体跟踪结果，别的生物判断目标是否在水里要用。
+    ///
+    /// `Entity.isInWater()` from the last fluid update; other mobs read it to decide
+    /// whether a target is in water.
+    pub in_water: bool,
     /// 骷髅一支在 `Mob` 之后的第一个布尔元数据：骷髅是 `DATA_STRAY_CONVERSION_ID`，
     /// 沼骸是 `DATA_SHEARED`，流浪者没有。
     ///
@@ -1494,7 +1586,7 @@ pub struct MobPublic {
 }
 
 impl MobPublic {
-    pub fn of(mob: &Mob, remaining_fire_ticks: i32) -> Self {
+    pub fn of(mob: &Mob, remaining_fire_ticks: i32, in_water: bool) -> Self {
         Self {
             mob_type: mob.mob_type,
             uuid: mob.uuid,
@@ -1530,6 +1622,9 @@ impl MobPublic {
             zombie_baby: mob.zombie_baby,
             zombie_special_type: mob.zombie_special_type,
             drowned_converting: mob.drowned_converting,
+            witch_using_item: mob.witch_drinking,
+            swimming: mob.swimming,
+            in_water,
             skeleton_flag: match mob.mob_type {
                 MobType::Skeleton => mob.freeze_conversion.converting,
                 MobType::Bogged => mob.bogged_sheared,
@@ -1613,7 +1708,7 @@ mod tests {
         assert!(!cow.is_baby());
         cow.age = -24000;
         assert!(cow.is_baby());
-        assert!(MobPublic::of(&cow, 0).baby);
+        assert!(MobPublic::of(&cow, 0, false).baby);
     }
 
     /// 存档往返保留僵尸的 `IsBaby` / `CanBreakDoors`，牛的键不串类型。

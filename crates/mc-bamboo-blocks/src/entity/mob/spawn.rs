@@ -263,8 +263,11 @@ fn finalize_spawn_in_group(
         super::skeleton::finalize_spawn(world, entity);
         return;
     }
-    if matches!(kind, MobType::Zombie | MobType::Husk) {
+    if kind.is_zombie() {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
+        if kind == MobType::Drowned {
+            super::drowned::after_zombie_finalize(world, entity, reason);
+        }
         return;
     }
     if kind == MobType::Slime {

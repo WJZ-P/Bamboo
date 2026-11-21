@@ -84,6 +84,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::SLIME_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Slime)
         }
+        _ if ctx.item == items::DROWNED_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Drowned)
+        }
+        _ if ctx.item == items::WITCH_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Witch)
+        }
         _ => default_use_on(world, item, ctx),
     }
 }

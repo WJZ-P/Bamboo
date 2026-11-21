@@ -136,6 +136,7 @@ pub(super) fn tick_freezing(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             from: Box::new(mob.clone()),
             to: MobType::Stray,
             level_event: SKELETON_CONVERTED_TO_STRAY,
+            zombie_attributes: false,
         },
         me,
     );
@@ -155,6 +156,7 @@ pub(crate) fn apply_convert(
     from: &Mob,
     to: MobType,
     level_event: i32,
+    zombie_attributes: bool,
     world: &mut World,
 ) {
     // `EntityType.create`：构造函数取种子、UUID 和朝向，和 `/summon` 同一条路。
@@ -167,6 +169,19 @@ pub(crate) fn apply_convert(
     entity.fall_distance = me.fall_distance;
     entity.on_ground = me.on_ground;
     entity.with_mob(|_, mob| copy_state(from, mob));
+    if zombie_attributes {
+        // 僵尸的 `postConversionStep`：`converted.handleAttributes(specialMultiplier,
+        // CONVERSION)`，取新实体自己的随机源。
+        //
+        // The zombie `postConversionStep`: `converted.handleAttributes(specialMultiplier,
+        // CONVERSION)` on the new entity's own random.
+        let special = super::zombie_spawn::special_multiplier(
+            crate::entity::ctx::BlockView::effective_difficulty(world, entity.block_position()),
+        );
+        entity.with_mob(|me, mob| {
+            super::zombie_spawn::handle_attributes(mob, &mut me.random, special);
+        });
+    }
     let pos = entity.block_position();
     world.add_prepared_entity(entity);
     if !from.silent {

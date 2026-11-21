@@ -492,6 +492,18 @@ pub enum Command {
     EggImpact {
         hit: super::thrown_egg::EggHit,
     },
+    /// 扔出的药水这一刻撞到东西：`AbstractThrownPotion.onHit`。
+    ///
+    /// The splash potion hit something this tick: `AbstractThrownPotion.onHit`.
+    SplashPotionImpact {
+        hit: super::splash_potion::SplashHit,
+    },
+    /// 女巫扔一瓶药水：`Projectile.spawnProjectileUsingShoot`。
+    ///
+    /// The witch throws one potion: `Projectile.spawnProjectileUsingShoot`.
+    ThrowSplashPotion {
+        shot: Box<super::splash_potion::SplashShot>,
+    },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode {
         center: Vec3,
@@ -618,6 +630,11 @@ pub enum Command {
         from: Box<super::mob::Mob>,
         to: super::mob::MobType,
         level_event: i32,
+        /// 新生物要不要跑 `Zombie.handleAttributes`（僵尸变溺尸的 `postConversionStep`）。
+        ///
+        /// Whether the new mob runs `Zombie.handleAttributes`, the zombie's
+        /// `postConversionStep`.
+        zombie_attributes: bool,
     },
     /// `AbstractCubeMob.remove`：死掉的史莱姆被移除时，按 `from` 这一刻的状态分裂出小一号的
     /// 几只。数量和朝向已经在发出者的随机源上取好。
@@ -670,6 +687,10 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::arrow::impact(me, world, hits, block, end)
         }
         Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
+        Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
+        Command::ThrowSplashPotion { shot } => {
+            world.spawn_splash_shot(&shot);
+        }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
@@ -736,7 +757,15 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             from,
             to,
             level_event,
-        } => super::mob::conversion::apply_convert(me, &from, to, level_event, world),
+            zombie_attributes,
+        } => super::mob::conversion::apply_convert(
+            me,
+            &from,
+            to,
+            level_event,
+            zombie_attributes,
+            world,
+        ),
         Command::SplitCubeMob {
             from,
             half_size,

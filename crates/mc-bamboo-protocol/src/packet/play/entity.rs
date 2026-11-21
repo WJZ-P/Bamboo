@@ -203,6 +203,12 @@ pub enum EntityData {
     CubeMobSize(i32),
     /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
     DrownedConverting(bool),
+    /// index 17，BOOLEAN。`Witch.DATA_USING_ITEM`（`Entity` 0–7、`LivingEntity` 8–14、
+    /// `Mob` 15、`Raider.IS_CELEBRATING` 16、`Witch.DATA_USING_ITEM` 17）。
+    ///
+    /// index 17, BOOLEAN. `Witch.DATA_USING_ITEM` (Entity 0–7, LivingEntity 8–14, Mob 15,
+    /// Raider.IS_CELEBRATING 16, Witch.DATA_USING_ITEM 17).
+    WitchUsingItem(bool),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -244,7 +250,10 @@ impl EntityData {
             Self::EffectAmbience(_) => 11,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,
-            Self::ModelCustomisation(_) | Self::AgeLocked(_) | Self::SpecialType(_) => 17,
+            Self::ModelCustomisation(_)
+            | Self::AgeLocked(_)
+            | Self::SpecialType(_)
+            | Self::WitchUsingItem(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
             Self::CowSoundVariant(_) => 19,
             Self::PigBoostTime(_) => mc_bamboo_data::entity_types::PIG_BOOST_TIME,
@@ -420,6 +429,10 @@ impl EntityData {
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);
                 write_bool(out, *converting);
+            }
+            Self::WitchUsingItem(using) => {
+                write_data_header(out, 17, SERIALIZER_BOOLEAN);
+                write_bool(out, *using);
             }
         }
     }

@@ -386,6 +386,18 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             "CanBreakDoors",
             Tag::Byte(i8::from(mob.can_break_doors)),
         );
+        // `Zombie.addAdditionalSaveData` 的 `drowningTracker`：`isAfflicted` 是存档这一刻的
+        // `isEyeInFluid(WATER)`。
+        //
+        // The `drowningTracker` part of `Zombie.addAdditionalSaveData`: `isAfflicted` is
+        // `isEyeInFluid(WATER)` at save time.
+        let afflicted = living::eye_in_fluid(mob, mc_bamboo_data::tags::fluid_tags::WATER);
+        mob.drown_conversion.write(
+            &mut out,
+            super::drowned::DROWNED_CONVERSION_KEY,
+            super::drowned::IN_WATER_TIME_KEY,
+            afflicted,
+        );
     }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
@@ -586,6 +598,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.navigation.flags.can_open_doors = true;
                 mob.goals.insert_break_door();
             }
+            mob.drown_conversion.read(
+                tag,
+                super::drowned::DROWNED_CONVERSION_KEY,
+                super::drowned::IN_WATER_TIME_KEY,
+            );
+            mob.drowned_converting = mob.drown_conversion.converting;
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries

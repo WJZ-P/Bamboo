@@ -70,8 +70,15 @@ pub(super) fn finalize_spawn(
             }
         }
         set_can_break_doors(mob, random.next_float() < special * 0.1);
-        skeleton::populate_armor(mob, random, difficulty, special);
-        populate_weapon(mob, random, difficulty);
+        // 溺尸的 `populateDefaultEquipmentSlots` 不调用 `super`：没有盔甲，只有三叉戟 / 钓鱼竿。
+        // Drowned override `populateDefaultEquipmentSlots` without `super`: no armour, only
+        // the trident or fishing rod.
+        if kind == MobType::Drowned {
+            super::drowned::populate_equipment(mob, random);
+        } else {
+            skeleton::populate_armor(mob, random, difficulty, special);
+            populate_weapon(mob, random, difficulty);
+        }
         skeleton::enchant_spawn_equipment(world, mob, random, special);
         if mob.equipment.get(EquipmentSlot::Head).is_empty() && world.level().is_halloween() {
             skeleton::equip_halloween_head(mob, random);
@@ -84,7 +91,7 @@ pub(super) fn finalize_spawn(
 }
 
 /// `DifficultyInstance.getSpecialMultiplier`。
-fn special_multiplier(effective: f32) -> f32 {
+pub(super) fn special_multiplier(effective: f32) -> f32 {
     if effective < 2.0 {
         0.0
     } else if effective > 4.0 {
@@ -185,7 +192,7 @@ fn populate_weapon(mob: &mut Mob, random: &LegacyRandom, difficulty: i32) {
 ///
 /// `Zombie.handleAttributes`: reinforcement chance, knockback resistance, follow range
 /// and the leader bonus, all from the entity's own random.
-fn handle_attributes(mob: &mut Mob, random: &mut JavaRandom, special: f32) {
+pub(super) fn handle_attributes(mob: &mut Mob, random: &mut JavaRandom, special: f32) {
     if let Some(chance) = mob.attributes.instance(attribute::SPAWN_REINFORCEMENTS) {
         chance.base = random.next_double() * f64::from(0.1_f32);
     }

@@ -12,6 +12,7 @@ use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
 mod arrow;
 mod egg;
+mod splash_potion;
 
 use super::tag::{self, Error, Result, put};
 use crate::{
@@ -57,6 +58,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
         crate::entity::KindPublic::Arrow(arrow) => arrow.variant.entity_type(),
         crate::entity::KindPublic::Egg(_) => kinds::EGG,
+        crate::entity::KindPublic::SplashPotion(_) => kinds::SPLASH_POTION,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -78,6 +80,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             Tag::Float(match &public.kind {
                 crate::entity::KindPublic::Arrow(arrow) => arrow.pitch,
                 crate::entity::KindPublic::Egg(egg) => egg.x_rot,
+                crate::entity::KindPublic::SplashPotion(potion) => potion.x_rot,
                 _ => 0.0,
             }),
         ]),
@@ -96,6 +99,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     let uuid = match &public.kind {
         crate::entity::KindPublic::Arrow(arrow) => uuid_tag(&arrow.uuid),
         crate::entity::KindPublic::Egg(egg) => uuid_tag(&egg.uuid),
+        crate::entity::KindPublic::SplashPotion(potion) => uuid_tag(&potion.uuid),
         _ => entity_uuid_tag(public.uid),
     };
     put(&mut out, "UUID", uuid);
@@ -145,6 +149,12 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 return Err(Error::new("mismatched egg entity halves"));
             };
             egg::write(saved, &mut out)?;
+        }
+        crate::entity::KindPublic::SplashPotion(_) => {
+            let crate::entity::KindState::SplashPotion(saved) = &state.kind else {
+                return Err(Error::new("mismatched splash potion entity halves"));
+            };
+            splash_potion::write(saved, &mut out)?;
         }
         crate::entity::KindPublic::ExperienceOrb { value } => {
             let crate::entity::KindState::ExperienceOrb(saved) = &state.kind else {
@@ -212,6 +222,9 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], true)))
             }
             "minecraft:egg" => EntityKind::Egg(Box::new(egg::read(tag, rotation[1]))),
+            "minecraft:splash_potion" => {
+                EntityKind::SplashPotion(Box::new(splash_potion::read(tag, rotation[1])))
+            }
             "minecraft:falling_block" => {
                 let block = match tag::field(tag, "BlockState") {
                     Some(value) => tag::decode_block_state(value)?,

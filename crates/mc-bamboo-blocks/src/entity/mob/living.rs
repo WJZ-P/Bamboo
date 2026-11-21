@@ -80,8 +80,19 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
+    // `Drowned.updateSwimming()` 在 `Entity.baseTick` 里，紧跟流体跟踪之后。
+    // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
+    if mob.mob_type == super::MobType::Drowned {
+        let target_in_water = super::goals::current_target_in_water(mob, ctx);
+        super::drowned::update_swimming(mob, target_in_water);
+    }
     if !me.removed {
         ai_step(me, mob, ctx);
+    }
+    // `Zombie.tick` 结尾的 `drowningTracker.tick()`，在 `super.tick()` 之后。
+    // The `drowningTracker.tick()` at the end of `Zombie.tick`, after `super.tick()`.
+    if mob.mob_type == super::MobType::Zombie {
+        super::drowned::tick_drowning(me, mob, ctx);
     }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
@@ -541,7 +552,13 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         return;
     }
     let pitch = voice_pitch(me, mob);
-    play_sound(me, mob, ambient_sound(mob), sound_volume(mob), pitch);
+    play_sound(
+        me,
+        mob,
+        ambient_sound(mob, me.in_water),
+        sound_volume(mob),
+        pitch,
+    );
 }
 
 /// `getSoundVolume()`：史莱姆按大小算，其余按类型。
@@ -555,10 +572,11 @@ fn sound_volume(mob: &Mob) -> f32 {
     }
 }
 
-fn ambient_sound(mob: &Mob) -> &'static str {
+fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
     match mob.mob_type {
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
+        super::MobType::Drowned => super::drowned::ambient_sound(in_water),
         _ => mob
             .mob_type
             .ambient_sound()
@@ -626,6 +644,13 @@ fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    // `Witch.aiStep` 的喝药段在 `super.aiStep()`（`Monster.aiStep` 的亮度）之前。
+    //
+    // The potion part of `Witch.aiStep` runs before `super.aiStep()`, which is the
+    // `Monster.aiStep` light handling.
+    if mob.mob_type == super::MobType::Witch {
+        super::witch::ai_step(me, mob, ctx);
+    }
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -877,6 +902,10 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Drowned {
+        let target = super::goals::current_combat_target(mob, ctx);
+        let target_in_water = super::goals::current_target_in_water(mob, ctx);
+        super::drowned::move_control_tick(me, mob, ctx.blocks(), target, target_in_water);
     } else {
         move_control_tick(me, mob, ctx.blocks());
     }
@@ -893,7 +922,7 @@ pub(super) fn set_speed(mob: &mut Mob, speed: f32) {
 }
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
-fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     match mob.mover.operation {
         Operation::MoveTo => {
             mob.mover.operation = Operation::Wait;
@@ -1047,7 +1076,18 @@ fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) 
     let in_liquid = is_in_liquid(me, mob);
     let levitation = mob.effects.amplifier(mob_effect::LEVITATION);
     if in_liquid {
-        travel_in_fluid(me, mob, ctx, input);
+        // `Drowned.travelInWater` 覆写只在眼睛也进水、且想游的时候接管。
+        // The `Drowned.travelInWater` override only takes over with the eyes under water
+        // while it wants to swim.
+        let drowned_swims = if mob.mob_type == super::MobType::Drowned {
+            let target_in_water = super::goals::current_target_in_water(mob, ctx);
+            super::drowned::travel_in_water(me, mob, ctx, input, target_in_water)
+        } else {
+            false
+        };
+        if !drowned_swims {
+            travel_in_fluid(me, mob, ctx, input);
+        }
     } else {
         travel_in_air(me, mob, ctx, input, levitation);
     }
@@ -1146,7 +1186,7 @@ fn relative_friction_movement(
 }
 
 /// `Entity.moveRelative`。
-fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
+pub(crate) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
     let length = input.length_sqr();
     if length < 1.0e-7 {
         return;
@@ -1434,6 +1474,7 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
+            let in_water = me.in_water;
             let sound = mob
                 .mob_type
                 .death_sound()
@@ -1441,6 +1482,7 @@ pub(crate) fn hurt_server(
                     super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
                     super::MobType::Chicken => super::chicken::sounds(mob)[2],
                     super::MobType::Slime => super::slime::death_sound(mob),
+                    super::MobType::Drowned => super::drowned::death_sound(in_water),
                     _ => mob.sound_variant.death(),
                 });
             play_sound(me, mob, sound, sound_volume(mob), pitch);
@@ -1450,6 +1492,7 @@ pub(crate) fn hurt_server(
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
+        let in_water = me.in_water;
         let sound = mob
             .mob_type
             .hurt_sound()
@@ -1457,6 +1500,7 @@ pub(crate) fn hurt_server(
                 super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[1],
                 super::MobType::Slime => super::slime::hurt_sound(mob),
+                super::MobType::Drowned => super::drowned::hurt_sound(in_water),
                 _ => mob.sound_variant.hurt(),
             });
         play_sound(me, mob, sound, sound_volume(mob), pitch);
@@ -1480,6 +1524,15 @@ fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f
     }
     if amount <= 0.0 {
         amount = 0.0;
+    }
+    // `LivingEntity.getDamageAfterMagicAbsorb`：女巫覆写了它（魔法 / 荆棘只吃 15%，
+    // 自己打自己伤害为 0）。抗性效果和附魔减伤这一期没建模。
+    //
+    // `LivingEntity.getDamageAfterMagicAbsorb`: the witch override (magic and thorns deal
+    // only 15%, self-inflicted damage is zero). Resistance and enchantment reduction are
+    // not modelled yet.
+    if mob.mob_type == super::MobType::Witch {
+        amount = super::witch::damage_after_magic_absorb(source, amount, me.id);
     }
     let before = amount;
     amount = mth::java_max_f32(amount - mob.absorption, 0.0);
@@ -1551,7 +1604,7 @@ pub(crate) fn do_hurt_target(
         // `Zombie.doHurtTarget`：打中了、空手、自己着火时，按区域难度传染火焰：
         // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
         if hurt
-            && matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk)
+            && mob.mob_type.is_zombie()
             && mob
                 .equipment
                 .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
