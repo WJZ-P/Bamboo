@@ -249,6 +249,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.PositionPath;
 import net.minecraft.world.entity.player.Abilities;
@@ -3218,10 +3219,8 @@ public final class Probe {
         /** 最近一次出现的物品实体。 */
         int lastItemId = -1;
         int lastCowId = -1;
-        // 自然生成的马、驴、骡、羊驼：配对时会带属性包（血量、速度、跳跃都是随机的）。
-        // Naturally spawned horses, donkeys, mules and llamas: pairing sends their
-        // attributes, since health, speed and jump are randomized.
-        final Set<Integer> equineIds = new HashSet<>();
+        /** 世界里自然刷出来的生物（牛以外的也算）。它们的属性和元数据包不算进玩家相关的检查。 */
+        final Set<Integer> mobIds = new HashSet<>();
         int cowAdds;
         int cowAttributes;
         int cowData;
@@ -4047,7 +4046,11 @@ public final class Probe {
         }
 
         private void onEntityData(ClientboundSetEntityDataPacket packet) {
-            entityDataPackets += 1;
+            // 只数非生物实体的元数据包：自然刷出的动物随时会发自己的元数据。
+            // Count only non-mob entity data: naturally spawned animals send their own at any time.
+            if (!mobIds.contains(packet.id())) {
+                entityDataPackets += 1;
+            }
             if (packet.id() == lastCowId) {
                 cowData += 1;
             }
@@ -4083,7 +4086,7 @@ public final class Probe {
                                 snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));
                 return;
             }
-            if (equineIds.contains(packet.getEntityId())) {
+            if (mobIds.contains(packet.getEntityId())) {
                 return;
             }
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
@@ -4186,13 +4189,14 @@ public final class Probe {
             boolean tnt = packet.getType() == EntityTypes.TNT;
             boolean item = packet.getType() == EntityTypes.ITEM;
             boolean cow = packet.getType() == EntityTypes.COW;
-            boolean equine = packet.getType() == EntityTypes.HORSE || packet.getType() == EntityTypes.DONKEY
-                    || packet.getType() == EntityTypes.MULE || packet.getType() == EntityTypes.LLAMA;
-            if (equine) {
-                equineIds.add(packet.getId());
+            // 生成期和自然刷怪会带来各种动物和怪物，类别不是 MISC 的都算生物。
+            // Generation-time and natural spawning bring all kinds of mobs: anything outside MISC.
+            boolean mob = packet.getType().getCategory() != MobCategory.MISC;
+            if (mob) {
+                mobIds.add(packet.getId());
             }
-            check("entity: only players, falling blocks, primed tnt, items, cows and equines are added",
-                    player || falling || tnt || item || cow || equine);
+            check("entity: only players, falling blocks, primed tnt, items and mobs are added",
+                    player || falling || tnt || item || mob);
             if (cow) {
                 lastCowId = packet.getId();
                 cowAdds += 1;
