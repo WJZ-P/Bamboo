@@ -2,15 +2,15 @@
 //! （`NaturalSpawner.spawnMobsForChunkGeneration`）。
 //!
 //! 装饰随机源的取数必须完全一致（结束时比一次指纹）；Bamboo 建模了的生物比类型、坐标、朝向。
-//! 幼年、左撇子和兔子 / 狐狸 / 狼的品种明细取区域随机源，只在这一区块前面没有生成过
-//! Bamboo 没建模的动物（马、驴）时比较：那些动物在官方那边会跑自己的 `finalizeSpawn`。
+//! 幼年、左撇子、兔子 / 狐狸 / 狼的品种明细和马科的属性花色取区域随机源，只在这一区块
+//! 前面没有生成过 Bamboo 没建模的动物时比较：那些动物在官方那边会跑自己的 `finalizeSpawn`。
 //!
 //! Replay world-generation spawning with the official biome tables (plains, taiga,
 //! snowy taiga) over a formula terrain. The decoration random must match exactly (a
 //! fingerprint at the end); every mob Bamboo models compares type, position and facing.
-//! Baby, left-handedness and the rabbit / fox / wolf variant details come from the
-//! region random and are compared only while no unmodelled animal (horse, donkey)
-//! spawned before in the chunk, since vanilla runs those animals' `finalizeSpawn`.
+//! Baby, left-handedness, the rabbit / fox / wolf variant details and the equine
+//! attributes come from the region random and are compared only while no unmodelled
+//! animal spawned before in the chunk, since vanilla runs those animals' `finalizeSpawn`.
 
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, LegacyRandom, LevelRandom, World,
@@ -41,7 +41,7 @@ pub(super) struct Case {
     block: i32,
     terrain: bool,
     biome: String,
-    spawned: Vec<[i64; 7]>,
+    spawned: Vec<Vec<i64>>,
     /// 和 `spawned` 一一对应：`MobOracle.genSpawnDetail`。
     details: Vec<String>,
     random: i64,
@@ -52,6 +52,7 @@ pub(super) struct Case {
 pub(super) struct Coverage {
     pub(super) cases: usize,
     cows: usize,
+    equines: usize,
     others: usize,
     details: usize,
     /// 兔子、狐狸、狼各生成了多少只，以及其中的幼崽和叼着东西的狐狸。
@@ -65,8 +66,13 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {} modelled mobs, {} unmodelled animals, {} mobs with finalize details compared",
-                self.cases, self.cows, self.others, self.details
+                "GEN SPAWN: {} cases, {} cows, {} equines, {} wild animals, {} other animals, {} mobs with finalize details compared",
+                self.cases,
+                self.cows,
+                self.equines,
+                self.wild.iter().sum::<usize>(),
+                self.others,
+                self.details
             );
             println!(
                 "GEN SPAWN: {} rabbits, {} foxes, {} wolves, {} babies among them, {} foxes holding an item",
@@ -76,8 +82,9 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        if self.cases > 0 && (self.cows == 0 || self.others == 0 || self.details == 0) {
-            return Err("gen spawn fixtures did not exercise cows and other animals".into());
+        let missing = self.cows == 0 || self.equines == 0;
+        if self.cases > 0 && (missing || self.details == 0) {
+            return Err("gen spawn fixtures did not exercise cows and equines".into());
         }
         if self.cases > 0
             && (self.wild.contains(&0) || self.wild_babies == 0 || self.fox_items == 0)
@@ -134,25 +141,23 @@ impl Report {
         let mut in_sync = true;
         let mut ours = mobs.iter();
         for (row, detail) in case.spawned.iter().zip(&case.details) {
-            let modelled = i32::try_from(row[0]).ok().and_then(MobType::by_entity_type);
-            if modelled.is_none() {
+            let kind = i32::try_from(row[0]).ok().and_then(MobType::by_entity_type);
+            let Some(kind) = kind else {
                 self.gen_spawns.others += 1;
                 in_sync = false;
                 continue;
+            };
+            if kind == MobType::Cow {
+                self.gen_spawns.cows += 1;
+            } else if kind.is_equine() {
+                self.gen_spawns.equines += 1;
             }
-            self.gen_spawns.cows += 1;
             let Some(entity) = ours.next() else {
-                self.mismatch(format!("{label}: official mob {row:?} missing in Bamboo"));
+                self.mismatch(format!("{label}: official {row:?} missing in Bamboo"));
                 return;
             };
             let mob = entity.kind.mob().expect("generated mobs are mobs");
-            let place = [
-                i64::from(mob.mob_type.entity_type()),
-                entity.position.x.to_bits() as i64,
-                entity.position.y.to_bits() as i64,
-                entity.position.z.to_bits() as i64,
-                i64::from(entity.y_rot.to_bits() as i32),
-            ];
+            let place = placement(entity);
             if place[..] != row[..5] {
                 self.mismatch(format!(
                     "{label}: official {row:?}, Bamboo placement {place:?}"
@@ -161,11 +166,11 @@ impl Report {
             if in_sync {
                 self.gen_spawns.details += 1;
                 self.gen_spawns.record_wild(mob);
-                let details = [i64::from(mob.is_baby()), i64::from(mob.left_handed)];
+                let ours_details = details(entity);
                 let ours_detail = wild_detail(mob);
-                if details[..] != row[5..] || &ours_detail != detail {
+                if ours_details[..] != row[5..] || &ours_detail != detail {
                     self.mismatch(format!(
-                        "{label}: official {row:?} {detail:?}, Bamboo details {details:?} {ours_detail:?}"
+                        "{label}: official {row:?} {detail:?}, Bamboo details {ours_details:?} {ours_detail:?}"
                     ));
                 }
             }
@@ -225,9 +230,34 @@ fn wild_detail(mob: &Mob) -> String {
     }
 }
 
-fn biome_of(case: &Case) -> i32 {
-    biome::by_name(&case.biome).expect("known biome")
+/// 类型、坐标原始位和朝向原始位。
+///
+/// Type, raw coordinate bits and raw yaw bits.
+fn placement(entity: &Entity) -> [i64; 5] {
+    let mob = entity.kind.mob().expect("generated mobs are mobs");
+    [
+        i64::from(mob.mob_type.entity_type()),
+        entity.position.x.to_bits() as i64,
+        entity.position.y.to_bits() as i64,
+        entity.position.z.to_bits() as i64,
+        i64::from(entity.y_rot.to_bits() as i32),
+    ]
 }
+
+/// 幼年、左撇子；马科再加 `super::equine::state`。
+///
+/// Baby and left-handedness, plus `super::equine::state` for equines.
+fn details(entity: &Entity) -> Vec<i64> {
+    let mob = entity.kind.mob().expect("generated mobs are mobs");
+    let mut details = vec![i64::from(mob.is_baby()), i64::from(mob.left_handed)];
+    if mob.mob_type.is_equine() {
+        details.extend(super::equine::state(entity));
+    }
+    details
+}
+
+fn biome_of(case: &Case) -> i32 {
+    biome::by_name(&case.biome).expect("known biome")}
 
 /// 和 `MobOracle.genColumn` 同一个坐标公式。
 fn gen_column(x: i32, z: i32, terrain: bool) -> Vec<(BlockPos, BlockState)> {

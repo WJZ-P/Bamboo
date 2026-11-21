@@ -311,11 +311,21 @@ mod tests {
                         entity_type::RABBIT,
                         entity_type::FOX,
                         entity_type::WOLF,
+                        entity_type::HORSE,
+                        entity_type::DONKEY,
+                        entity_type::MULE,
+                        entity_type::LLAMA,
                     ];
                     assert!(modelled.contains(&row.public.kind.entity_type()));
+                    assert_eq!(
+                        row.public.kind.entity_type(),
+                        replay.public.kind.entity_type()
+                    );
                     let at = row.public.position;
-                    assert_eq!(BlockPos::containing(at).chunk(), pos, "牛要落在本区块");
-                    cows += 1;
+                    assert_eq!(BlockPos::containing(at).chunk(), pos, "生物要落在本区块");
+                    if row.public.kind.entity_type() == entity_type::COW {
+                        cows += 1;
+                    }
                 }
             }
         }

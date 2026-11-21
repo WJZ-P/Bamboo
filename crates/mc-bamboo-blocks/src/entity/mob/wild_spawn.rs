@@ -52,7 +52,7 @@ pub(super) fn finalize(
         MobType::Wolf => finalize_wolf(entity, biome, random, group),
         _ => unreachable!("只有兔子、狐狸、狼走这里"),
     }
-    entity.with_mob(|_, mob| spawn::finalize_animal(mob, random));
+    entity.with_mob(|_, mob| spawn::finalize_mob(random, mob));
 }
 
 /// 取出同种的组数据（没有就用 `fresh` 新建），把这一只计进去

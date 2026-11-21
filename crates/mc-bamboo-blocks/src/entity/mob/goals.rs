@@ -136,6 +136,30 @@ pub enum Goal {
     TurtleEgg {
         speed: f64,
     },
+    /// `RandomStandGoal`：马科偶尔扬蹄，`nextStand` 从 `-getAmbientStandInterval()` 往上数。
+    ///
+    /// `RandomStandGoal`: equines rear now and then; `nextStand` counts up from
+    /// `-getAmbientStandInterval()`.
+    RandomStand {
+        next_stand: i32,
+    },
+    /// 羊驼的 `RangedAttackGoal(this, 1.25, 40, 20.0F)`：目标存在自己身上，
+    /// 目标被目标表清掉以后还能凭「活着且路没走完」继续。
+    ///
+    /// The llama's `RangedAttackGoal(this, 1.25, 40, 20.0F)`. It keeps its own
+    /// target, so it may continue after the target selector clears the mob's.
+    RangedAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
+        see_time: i32,
+    },
+    /// `Llama.LlamaHurtByTargetGoal`：`HurtByTargetGoal`，吐过口水就停。
+    ///
+    /// `Llama.LlamaHurtByTargetGoal`: a `HurtByTargetGoal` that stops after a spit.
+    LlamaHurtByTarget {
+        timestamp: i32,
+        unseen_ticks: i32,
+    },
     /// `EatBlockGoal`：羊低头吃草的 40 刻（非每刻目标，折半成 20）。
     ///
     /// `EatBlockGoal`: the sheep's grazing animation (40 ticks, halved to 20).
@@ -160,6 +184,10 @@ pub enum TargetType {
     ///
     /// The fox `fishTargetGoal`: schooling fish.
     Fish,
+    /// 羊驼的 `LlamaAttackWolfGoal`：没驯服的狼。
+    ///
+    /// The llama's `LlamaAttackWolfGoal`: untamed wolves.
+    Wolf,
 }
 
 impl TargetType {
@@ -185,9 +213,13 @@ impl Goal {
             }
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
-            Self::Unavailable(_) => &[],
-            Self::MeleeAttack { .. } | Self::Bow(_) => &[Flag::Move, Flag::Look],
-            Self::HurtByTarget { .. } | Self::NearestAttackableTarget { .. } => &[Flag::Target],
+            Self::Unavailable(_) | Self::RandomStand { .. } => &[],
+            Self::MeleeAttack { .. } | Self::Bow(_) | Self::RangedAttack { .. } => {
+                &[Flag::Move, Flag::Look]
+            }
+            Self::HurtByTarget { .. }
+            | Self::NearestAttackableTarget { .. }
+            | Self::LlamaHurtByTarget { .. } => &[Flag::Target],
             Self::RestrictSun => &[],
             Self::FleeSun { .. } | Self::TurtleEgg { .. } => &[Flag::Move],
             Self::BreakDoor => &[Flag::Move],
@@ -212,6 +244,8 @@ impl Goal {
                 | Self::MeleeAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
+                | Self::RandomStand { .. }
+                | Self::RangedAttack { .. }
         )
     }
 
@@ -252,6 +286,9 @@ impl Goal {
             Self::FleeSun { .. } => "FleeSunGoal",
             Self::BreakDoor => "BreakDoorGoal",
             Self::TurtleEgg { .. } => "ZombieAttackTurtleEggGoal",
+            Self::RandomStand { .. } => "RandomStandGoal",
+            Self::RangedAttack { .. } => "RangedAttackGoal",
+            Self::LlamaHurtByTarget { .. } => "LlamaHurtByTargetGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
         }
     }
@@ -944,6 +981,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
+        Goal::RandomStand { next_stand } => {
+            super::equine::random_stand_can_use(me, mob, next_stand)
+        }
         Goal::MeleeAttack {
             last_can_use_check,
             start_path,
@@ -982,6 +1022,23 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                     mob.mob_type != super::MobType::Skeleton
                         || target_by_uid(mob, ctx, uid).is_some()
                 })
+        }
+        // `HurtByTargetGoal.canUse`：时间戳变了，并且 `canAttack(lastHurtByMob, HURT_BY_TARGETING)`。
+        // `HurtByTargetGoal.canUse`: a new timestamp and an attackable last attacker.
+        Goal::LlamaHurtByTarget { timestamp, .. } => {
+            mob.last_hurt_by_mob_timestamp != *timestamp
+                && mob
+                    .last_hurt_by_mob
+                    .is_some_and(|uid| target_by_uid(mob, ctx, uid).is_some())
+        }
+        // `RangedAttackGoal.canUse`：`getTarget()` 不为空且活着，记进自己的字段。
+        // `RangedAttackGoal.canUse`: a living `getTarget()`, remembered in the goal.
+        Goal::RangedAttack { target, .. } => {
+            let alive = mob.target.filter(|&uid| alive_target(ctx, uid).is_some());
+            if alive.is_some() {
+                *target = alive;
+            }
+            alive.is_some()
         }
         Goal::NearestAttackableTarget {
             kind,
@@ -1118,7 +1175,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float => can_use(goal, me, mob, ctx),
-        Goal::Unavailable(_) => false,
+        Goal::Unavailable(_) | Goal::RandomStand { .. } => false,
         Goal::MeleeAttack { track_target, .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。为真时只看目标在不在家附近。
@@ -1147,6 +1204,18 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 *unseen_ticks += 1;
             }
             *unseen_ticks <= reduced_tick_delay(60)
+        }
+        Goal::RangedAttack { target, .. } => {
+            let stored = *target;
+            can_use(goal, me, mob, ctx)
+                || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
+                    && !mob.navigation.is_done())
+        }
+        Goal::LlamaHurtByTarget { unseen_ticks, .. } => {
+            if super::equine::take_did_spit(mob) {
+                return false;
+            }
+            target_can_continue_seen(me, mob, ctx, unseen_ticks, reduced_tick_delay(300))
         }
         Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
             // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
@@ -1230,6 +1299,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             }
         }
         Goal::Float | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::RandomStand { .. } => super::equine::random_stand_start(me, mob),
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1259,6 +1329,17 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *timestamp = mob.last_hurt_by_mob_timestamp;
             mob.target = mob.last_hurt_by_mob;
         }
+        // `HurtByTargetGoal.start` 再 `TargetGoal.start`：`unseenTicks` 清零。
+        // `HurtByTargetGoal.start`, then `TargetGoal.start` clears `unseenTicks`.
+        Goal::LlamaHurtByTarget {
+            timestamp,
+            unseen_ticks,
+        } => {
+            *timestamp = mob.last_hurt_by_mob_timestamp;
+            mob.target = mob.last_hurt_by_mob;
+            *unseen_ticks = 0;
+        }
+        Goal::RangedAttack { .. } => {}
         Goal::NearestAttackableTarget {
             found,
             unseen_ticks,
@@ -1338,10 +1419,20 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::RabbitPowderSnow
         | Goal::Panic { .. }
         | Goal::RandomLookAround { .. }
-        | Goal::Unavailable(_) => {}
+        | Goal::Unavailable(_)
+        | Goal::RandomStand { .. } => {}
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
-        Goal::HurtByTarget { .. } => mob.target = None,
+        Goal::HurtByTarget { .. } | Goal::LlamaHurtByTarget { .. } => mob.target = None,
+        Goal::RangedAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            *target = None;
+            *see_time = 0;
+            *attack_time = -1;
+        }
         Goal::NearestAttackableTarget { found, .. } => {
             mob.target = None;
             *found = None;
@@ -1504,7 +1595,22 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
-        Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
+        Goal::Unavailable(_)
+        | Goal::HurtByTarget { .. }
+        | Goal::LlamaHurtByTarget { .. }
+        | Goal::RestrictSun
+        | Goal::RandomStand { .. } => {}
+        Goal::RangedAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            // 官方隔刻也照样 tick，不再查目标活不活。
+            // Vanilla ticks on off ticks too without re-checking that the target lives.
+            if let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) {
+                super::equine::ranged_attack_tick(me, mob, ctx, target, attack_time, see_time);
+            }
+        }
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
             *unseen_ticks += 1;
             // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
@@ -1847,6 +1953,8 @@ fn nearest_tempting_player(
         let follows = [player.main_hand, player.off_hand].into_iter().any(|item| {
             if steering_item {
                 item == mc_bamboo_data::items::CARROT_ON_A_STICK
+            } else if mob.mob_type.is_equine() {
+                crate::state::item_is_tagged(item, super::equine::tempt_tag(mob.mob_type))
             } else {
                 super::interact::is_food(mob.mob_type, item)
             }
@@ -1867,7 +1975,15 @@ fn nearest_tempting_player(
 }
 
 /// `BreedGoal.getFreePartner`：8 格内同种、在发情、不在恐慌的，取最近的。
+/// 马科按 `canMate`：双方都 `canParent`，马和驴可以互配。
+///
+/// `BreedGoal.getFreePartner`: the nearest in-love, non-panicking partner within
+/// 8 blocks. Equines use `canMate`, where both must `canParent` and horses pair
+/// with donkeys.
 fn free_partner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    if mob.mob_type.is_equine() && !super::equine::can_parent(mob) {
+        return None;
+    }
     let area = me.bounding_box().inflate(8.0, 8.0, 8.0);
     let mut best = f64::MAX;
     let mut found = None;
@@ -1875,8 +1991,14 @@ fn free_partner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<EntityUid
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };
-        if other.uid == me.id
-            || public.mob_type != mob.mob_type
+        let compatible = if mob.mob_type.is_equine() {
+            public.can_parent_equine
+                && super::equine::offspring_kind(mob.mob_type, public.mob_type).is_some()
+        } else {
+            public.mob_type == mob.mob_type
+        };
+        if !compatible
+            || other.uid == me.id
             || public.in_love <= 0
             || public.panicking
             || !public.is_alive()
@@ -2216,11 +2338,14 @@ pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
 }
 
 fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
-    // 骷髅、狐狸和狼会把别的生物当目标。
-    // Skeletons, foxes and wolves can target other mobs.
+    // 骷髅、狐狸、狼和羊驼会把别的生物当目标。
+    // Skeletons, foxes, wolves and llamas can target other mobs.
     let mobs_allowed = matches!(
         mob.mob_type,
-        super::MobType::Skeleton | super::MobType::Fox | super::MobType::Wolf
+        super::MobType::Skeleton
+            | super::MobType::Fox
+            | super::MobType::Wolf
+            | super::MobType::Llama
     );
     if !mobs_allowed && player_by_uid(ctx.blocks(), uid).is_none() {
         return None;
@@ -2238,7 +2363,9 @@ pub(super) fn attack_candidate(
     ctx: &dyn EntityCtx,
     uid: EntityUid,
 ) -> Option<CombatTarget> {
-    let skeleton = mob.mob_type == super::MobType::Skeleton;
+    // 骷髅和羊驼按精确的玩家碰撞箱算，其余生物用一个近似的。
+    // Skeletons and llamas use the exact player box; other mobs use an approximation.
+    let exact_player_box = matches!(mob.mob_type, super::MobType::Skeleton | super::MobType::Llama);
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
         // `LivingEntity.canAttack`：和平难度只排除玩家目标。
         // `LivingEntity.canAttack`: peaceful only rules out player targets.
@@ -2247,23 +2374,74 @@ pub(super) fn attack_candidate(
             && !player.spectator
             && !player.creative
             && !super::tame::refuses_target(mob, player.uuid))
-        .then(|| CombatTarget::player(player, skeleton));
+        .then(|| CombatTarget::player(player, exact_player_box));
     }
+    let (target, alive) = mob_target_view(ctx, uid)?;
+    alive.then_some(target)
+}
+
+/// 别的生物当目标时的样子，和它活没活着（没被移除且血量大于 0）。
+///
+/// Another mob seen as a target, and whether it is alive (not removed, health above 0).
+fn mob_target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget, bool)> {
     let other = ctx.other(uid)?;
     let KindPublic::Mob(target) = &other.kind else {
         return None;
     };
-    if other.removed || !target.is_alive() {
-        return None;
-    }
     let (_, _, eye) = target.mob_type.dimensions(target.baby);
-    Some(CombatTarget {
+    let view = CombatTarget {
         uid,
         position: other.position,
         eye,
         height: f64::from(target.dimensions().1),
         hitbox: other.bounding_box(),
-    })
+    };
+    Some((view, !other.removed && target.is_alive()))
+}
+
+/// `RangedAttackGoal` 的目标：不看难度、创造模式，只要找得到；第二项是 `isAlive()`。
+///
+/// The `RangedAttackGoal` target: no difficulty or creative filter, just
+/// found; the flag is `isAlive()`.
+pub(super) fn target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget, bool)> {
+    if let Some(player) = player_by_uid(ctx.blocks(), uid) {
+        return Some((CombatTarget::player(player, true), player.alive));
+    }
+    mob_target_view(ctx, uid)
+}
+
+/// `TargetGoal.canContinueToUse`，`mustSee` 为真：打得了、在跟随距离内、看不见的刻数没超过
+/// `limit`。`HurtByTargetGoal.start` 把 `unseenMemoryTicks` 设成 300，所以 `limit` 是它折半。
+///
+/// `TargetGoal.canContinueToUse` with `mustSee`: attackable, within follow
+/// range, and unseen for no more than `limit` ticks (half of the 300 that
+/// `HurtByTargetGoal.start` sets).
+fn target_can_continue_seen(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    unseen_ticks: &mut i32,
+    limit: i32,
+) -> bool {
+    let Some(target) = combat_target(mob, ctx) else {
+        return false;
+    };
+    if !target_in_follow_range(me, mob, target) {
+        return false;
+    }
+    if living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position()) {
+        *unseen_ticks = 0;
+    } else {
+        *unseen_ticks += 1;
+        if *unseen_ticks > limit {
+            return false;
+        }
+    }
+    true
+}
+
+fn alive_target(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
+    target_view(ctx, uid).and_then(|(target, alive)| alive.then_some(target))
 }
 
 /// `NearestAttackableTargetGoal.findTarget` 的玩家分支：按 `FOLLOW_RANGE`

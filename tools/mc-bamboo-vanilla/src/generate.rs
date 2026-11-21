@@ -3512,6 +3512,35 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const SKELETON_EYE_HEIGHT: f32 = {};",
         float_literal(facts.skeleton_eye_height)
     );
+    let _ = writeln!(
+        out,
+        "pub const LLAMA_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.llama_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const MULE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.mule_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const DONKEY_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.donkey_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const HORSE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.horse_eye_height)
+    );
+    for (name, id) in [
+        ("HORSE_FLAGS", facts.horse_flags),
+        ("HORSE_VARIANT", facts.horse_variant),
+        ("HORSE_CHEST", facts.horse_chest),
+        ("LLAMA_STRENGTH", facts.llama_strength),
+        ("LLAMA_VARIANT", facts.llama_variant),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {id};");
+    }
     for (name, value) in [
         ("EYE_HEIGHT", facts.rabbit_eye_height),
         ("BABY_WIDTH", facts.rabbit_baby_width),

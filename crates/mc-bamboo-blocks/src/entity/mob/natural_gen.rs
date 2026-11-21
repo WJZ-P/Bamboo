@@ -74,6 +74,7 @@ fn placement(entity: i32) -> Option<Placement> {
         entity_type::DONKEY,
         entity_type::HORSE,
         entity_type::LLAMA,
+        entity_type::MULE,
         entity_type::PIG,
         entity_type::SHEEP,
     ]

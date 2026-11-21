@@ -1,11 +1,12 @@
 //! 生物的装备：`LivingEntity.equipment`（`EntityEquipment`）、`Mob.dropChances`
 //! （`DropChances`）和 `LivingEntity.lastEquipmentItems`（`detectEquipmentUpdates` 的比较基准）。
 //!
-//! 只建模六个人形槽（主手、副手、脚、腿、胸、头），顺序是官方 `EquipmentSlot` 的 ordinal，
-//! 和协议里的 [`EquipmentSlot`] 一致。`BODY` / `SADDLE` 是马和狼的槽，这里的生物用不到。
+//! 八个槽都建模（主手、副手、脚、腿、胸、头、身体、鞍），顺序是官方 `EquipmentSlot` 的
+//! ordinal，和协议里的 [`EquipmentSlot`] 一致。身体和鞍是马科用的。
 //!
-//! Mob equipment: the six humanoid slots in vanilla `EquipmentSlot` ordinal order, the
-//! drop chances and the last-sent copies `detectEquipmentUpdates` compares against.
+//! Mob equipment: all eight slots in vanilla `EquipmentSlot` ordinal order (body
+//! and saddle are for equines), the drop chances and the last-sent copies
+//! `detectEquipmentUpdates` compares against.
 
 use mc_bamboo_data::registries::data_component_type as kinds;
 use mc_bamboo_nbt::Tag;
