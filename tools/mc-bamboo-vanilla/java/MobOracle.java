@@ -302,6 +302,18 @@ public final class MobOracle {
                 playEggThrow(official, out, name);
                 cases++;
             }
+            for (String name : List.of("squid_swim", "squid_hurt", "squid_beached", "squid_swim_baby",
+                    "glow_squid_swim", "glow_squid_hurt")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playSquid(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("cod_swim", "cod_beached", "salmon_swim",
+                    "tropical_fish_swim", "pufferfish_puff")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playFish(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -309,7 +321,8 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only) || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
+            if ("natural_spawn".equals(only) || "natural_fish".equals(only)
+                    || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
                     || "stray_spawn".equals(only) || "bogged_spawn".equals(only)) {
                 cases += playNaturalSpawns(official, out, only);
             }
@@ -1063,6 +1076,42 @@ public final class MobOracle {
             sheep.mob(8, 0.5, 64.0, 0.5, 0.0F, 53L, 0);
             sheep.mob(4, 8.5, 64.0, 0.5, 0.0F, 54L, 0);
             scenes.add(sheep);
+        }
+    }
+
+    /**
+     * 海龟场景（类型 60，借 `zombie_` 前缀走多生物路径）：沙滩上找水
+     * （`TurtleGoToWaterGoal`）、水里远行（`TurtleTravelGoal` + `TurtleMoveControl`）、幼年。
+     * 家方块是没跑 `finalizeSpawn` 的原点。
+     * Turtle scenes (kind 60, on the multi-mob path via the `zombie_` prefix): finding
+     * water from the beach, travelling in water with the turtle move control, and a
+     * baby. Home is the origin (no `finalizeSpawn`).
+     */
+    static final class TurtleScenes {
+        static final BlockState SAND = Blocks.SAND.defaultBlockState();
+
+        static void beach(Scene scene) {
+            scene.fill(-12, 62, -12, 12, 62, 12, Scenes.STONE);
+            scene.fill(-12, 63, -12, 12, 63, 12, SAND);
+            scene.fill(4, 61, -4, 10, 63, 4, Scenes.WATER);
+        }
+
+        static void add(List<Scene> scenes) {
+            for (long seed : new long[] {3L, 77L}) {
+                Scene walk = new Scene("zombie_turtle_ai_beach_" + seed).ticks(400);
+                beach(walk);
+                walk.mob(60, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(walk);
+            }
+            Scene baby = new Scene("zombie_turtle_ai_baby").ticks(300);
+            beach(baby);
+            baby.mob(60, 0.5, 64.0, 0.5, 0.0F, 21L, -24000);
+            scenes.add(baby);
+            Scene swim = new Scene("zombie_turtle_ai_swim").ticks(400);
+            swim.fill(-10, 55, -10, 10, 55, 10, Scenes.STONE);
+            swim.fill(-10, 56, -10, 10, 62, 10, Scenes.WATER);
+            swim.mob(60, 0.5, 59.0, 0.5, 0.0F, 31L, 0);
+            scenes.add(swim);
         }
     }
 
@@ -2150,6 +2199,7 @@ public final class MobOracle {
             rabbitRaid.mob(6, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
             scenes.add(rabbitRaid);
             equineScenes(scenes);
+            TurtleScenes.add(scenes);
             return scenes;
         }
 
@@ -3252,6 +3302,15 @@ public final class MobOracle {
         scenes.add(new NaturalScene("slime_swamp_new_moon", EntityTypes.SLIME, "swamp", 2, 15, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("slime_swamp_bright", EntityTypes.SLIME, "swamp", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("slime_chunk_peaceful", EntityTypes.SLIME, "plains", 0, 15, 0, 0, false, -32, 0, 289, true, false));
+        // 水生夹具（名字里带 squid）：三层水代替草地。发光鱿鱼把海平面抬到 -20，
+        // 这样 -63 那一层满足「海平面下 33 格」；`_lit` 有方块光，不该刷出来。
+        // Aquatic fixtures (names containing "squid"): three water layers replace the grass.
+        // Glow squid raise the sea level to -20 so the -63 layer is 33 below it; `_lit` has
+        // block light and must not spawn.
+        scenes.add(new NaturalScene("squid_ocean", EntityTypes.SQUID, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("squid_ocean_peaceful", EntityTypes.SQUID, "ocean", 0, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("glow_squid_dark", EntityTypes.GLOW_SQUID, "plains", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("glow_squid_lit", EntityTypes.GLOW_SQUID, "plains", 2, 0, 1, 0, false, -32, 0, 289, true, false));
         // 马科：簇上限 6，组数据里带共享毛色和各自的幼崽概率。
         // Equines: a cluster cap of 6 and group data with a shared coat and their own baby chance.
         scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
@@ -3274,8 +3333,15 @@ public final class MobOracle {
         scenes.add(new NaturalScene("stray_peaceful", EntityTypes.STRAY, "snowy_plains", 0, 15, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("bogged_night", EntityTypes.BOGGED, "swamp", 2, 0, 0, 11, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("bogged_peaceful", EntityTypes.BOGGED, "swamp", 0, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_cod", EntityTypes.COD, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_salmon", EntityTypes.SALMON, "cold_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_tropical", EntityTypes.TROPICAL_FISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_tropical_lush", EntityTypes.TROPICAL_FISH, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fish_puffer", EntityTypes.PUFFERFISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
+        boolean fishOnly = "natural_fish".equals(only);
         for (var scene : scenes) {
+            if (fishOnly && !scene.name().startsWith("fish_")) continue;
             if ("witch_spawn".equals(only) && scene.mob() != EntityTypes.WITCH) continue;
             if ("drowned_spawn".equals(only) && scene.mob() != EntityTypes.DROWNED) continue;
             if ("stray_spawn".equals(only) && scene.mob() != EntityTypes.STRAY) continue;
@@ -3315,7 +3381,6 @@ public final class MobOracle {
         int[] floors = scene.name().startsWith("slime_swamp") ? new int[] {50, 54, 58, 62, 66} : new int[] {-63};
         int floorY = floors[0];
         int waterDepth = scene.mob() == EntityTypes.DROWNED ? 6 : 0;
-        level.injectedSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51 : -63;
         if (slime) {
             // 世界种子：从 1 起找第一个让区块 (0,0) 是（`slime_no_chunk` 是「(0,0) 和 (1,0) 都不是」）
             // 史莱姆区块的种子，用的是官方 `WorldgenRandom.seedSlimeChunk`。
@@ -3365,6 +3430,9 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
+        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT;
+        level.naturalSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51
+                : (scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63);
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
                 for (int floor : floors) {
@@ -3373,6 +3441,13 @@ public final class MobOracle {
                 for (int dy = 1; dy <= waterDepth; dy++) {
                     level.blocks.put(BlockPos.asLong(x, floorY + dy, z), Blocks.WATER.defaultBlockState());
                 }
+                if (aquatic) {
+                    for (int y = -64; y <= -62; y++) {
+                        level.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                    }
+                    continue;
+                }
+                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
                 // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
                 // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
                 // Husk fixture: glass at -60 blocks the camel-husk spawn box (Bamboo has no
@@ -3445,7 +3520,12 @@ public final class MobOracle {
                         : mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
-                row.add(mob.getType() == EntityTypes.DROWNED ? BuiltInRegistries.ITEM.getId(mob.getOffhandItem().getItem()) : 0);
+                row.add(mob.getType() == EntityTypes.DROWNED
+                        ? BuiltInRegistries.ITEM.getId(mob.getOffhandItem().getItem())
+                        : (mob instanceof net.minecraft.world.entity.animal.fish.TropicalFish fish
+                                ? new net.minecraft.world.entity.animal.fish.TropicalFish.Variant(
+                                        fish.getPattern(), fish.getBaseColor(), fish.getPatternColor()).getPackedId()
+                                : 0));
                 spawned.add(row);
             }
             step.add("spawned", spawned);
@@ -3467,10 +3547,11 @@ public final class MobOracle {
         row.addProperty("spawnableChunks", scene.spawnableChunks());
         row.addProperty("localCap", scene.localCap());
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
+        row.addProperty("aquatic", aquatic);
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.addProperty("levelSeed", level.worldSeed);
         row.addProperty("waterDepth", waterDepth);
-        row.addProperty("seaLevel", level.injectedSeaLevel);
+        row.addProperty("seaLevel", level.getSeaLevel());
         var floorRows = new JsonArray();
         for (int floor : floors) floorRows.add(floor);
         row.add("floors", floorRows);
@@ -4894,6 +4975,332 @@ public final class MobOracle {
                 + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
     }
 
+    /**
+     * 鱿鱼 / 发光鱿鱼：逐刻比位置、速度、随机源、氧气、身体和触手的状态、目标写下的移动向量，
+     * 以及出站包（配对、同步、实体事件 19、音效、墨汁粒子、掉落）。`_swim` 在水池里游，
+     * `_hurt` 第 10 刻被旁边的牛打一下（喷墨、逃跑、发光鱿鱼变暗），`_beached` 在石头上窒息到死。
+     *
+     * Squid and glow squid: compare position, velocity, random, air, body and tentacle
+     * state, the goal-written movement vector and the outgoing packets each tick.
+     * `_swim` swims in a pool, `_hurt` is hit by a cow on tick 10 (ink, fleeing, a dark
+     * glow squid) and `_beached` suffocates on stone until it dies.
+     */
+    private static void playSquid(Official official, Writer out, String name) throws Exception {
+        boolean glow = name.startsWith("glow_squid");
+        boolean beached = name.endsWith("_beached");
+        boolean hurt = name.endsWith("_hurt");
+        boolean baby = name.endsWith("_baby");
+        int ticks = beached ? 460 : 240;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                for (int y = 61; y <= 66 && !beached; y++) {
+                    world.blocks.put(BlockPos.asLong(x, y, z),
+                            wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        world.particlePackets = true;
+        Bytes events = new Bytes(official.registries);
+        world.packets = events::add;
+        double[] start = beached ? new double[] {0.5, 61.0, 0.5} : new double[] {0.5, 63.0, 0.5};
+        net.minecraft.world.entity.animal.squid.Squid squid = (glow ? EntityTypes.GLOW_SQUID : EntityTypes.SQUID)
+                .create(world, EntitySpawnReason.COMMAND);
+        // 按 Bamboo 的种子源重放构造时的取数：UUID、yRot、触手速度。
+        // Replay the constructor draws from Bamboo's seed source: UUID, yRot, tentacle speed.
+        setRandom(squid, world.entitySeeds.nextLong());
+        RandomSource random = squid.getRandom();
+        squid.setUUID(Mth.createInsecureUUID(random));
+        float yaw = random.nextFloat() * 6.2831855F;
+        squid.setYRot(yaw);
+        squid.setYHeadRot(yaw);
+        squidField("tentacleSpeed").setFloat(squid, 1.0F / (random.nextFloat() + 1.0F) * 0.2F);
+        squid.setPos(start[0], start[1], start[2]);
+        if (baby) squid.setAge(-24000);
+        world.tracked.add(squid);
+        Cow cow = null;
+        if (hurt) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource cowRandom = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(cowRandom));
+            float cowYaw = cowRandom.nextFloat() * 6.2831855F;
+            cow.setYRot(cowYaw);
+            cow.setYHeadRot(cowYaw);
+            cow.setPos(3.5, 61.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Sync sync = new Sync(world, squid, official.registries);
+        boolean gone = false;
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) {
+                sync.entity.sendPairingData(null, sync.bytes::add);
+                packets.addAll(sync.take());
+            } else {
+                world.gameTime++;
+                if (hurt && tick == 10) {
+                    squid.hurtServer(world, world.damageSources().mobAttack(cow), 1.0F);
+                }
+                for (Mob mob : cow == null ? List.<Mob>of(squid) : List.<Mob>of(squid, cow)) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+                packets.addAll(events.take());
+                if (squid.isRemoved()) {
+                    if (!gone) {
+                        Bytes removal = new Bytes(official.registries);
+                        removal.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(squid.getId()));
+                        packets.addAll(removal.take());
+                    }
+                    gone = true;
+                } else {
+                    sync.entity.sendChanges();
+                    packets.addAll(sync.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"gone\":").append(gone);
+            if (!gone) {
+                Vec3 movement = (Vec3) squidField("movementVector").get(squid);
+                frames.append(",\"motion\":").append(projectileMotion(squid))
+                        .append(",\"seed\":").append(randomSeed(squid))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(squid.getHealth()), squid.getAirSupply(), squid.hurtTime,
+                                squid.deathTime, squid.getNoActionTime(), squid.getAge(),
+                                squid instanceof net.minecraft.world.entity.animal.squid.GlowSquid glowing
+                                        ? glowing.getDarkTicksRemaining() : 0,
+                                squid.onGround() ? 1 : 0, squid.isInWater() ? 1 : 0}))
+                        .append(",\"body\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(squid.xBodyRot), Float.floatToRawIntBits(squid.zBodyRot),
+                                Float.floatToRawIntBits(squid.tentacleMovement),
+                                Float.floatToRawIntBits(squid.tentacleAngle),
+                                Float.floatToRawIntBits(squidField("tentacleSpeed").getFloat(squid)),
+                                Float.floatToRawIntBits(squidField("rotateSpeed").getFloat(squid)),
+                                Float.floatToRawIntBits(squid.yBodyRot), Float.floatToRawIntBits(squid.getYHeadRot())}))
+                        .append(",\"movement\":").append(Arrays.toString(new long[] {
+                                Double.doubleToRawLongBits(movement.x), Double.doubleToRawLongBits(movement.y),
+                                Double.doubleToRawLongBits(movement.z)}));
+            }
+            frames.append(",\"drops\":[");
+            boolean first = true;
+            for (Entity entity : world.spawned) {
+                if (entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    if (!first) frames.append(',');
+                    first = false;
+                    frames.append('[').append(BuiltInRegistries.ITEM.getId(item.getItem().getItem())).append(',')
+                            .append(item.getItem().getCount()).append(']');
+                }
+            }
+            world.spawned.clear();
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append('}');
+        }
+        if (beached != gone) {
+            throw new IllegalStateException("squid scene missed its branch: " + name + " gone=" + gone);
+        }
+        out.write("{\"type\":\"squid\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"glow\":" + glow
+                + ",\"hurt\":" + hurt + ",\"baby\":" + baby + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /**
+     * 鱼：逐刻比位置、速度、朝向、随机源、氧气、花纹 / 膨胀状态和尺寸、河豚蜇刺的牛，
+     * 以及出站包。`_swim` 在水池里游，`_beached` 在石头上扑腾到窒息死，`pufferfish_puff`
+     * 旁边放一头不带 AI 的牛，让河豚鼓起来蜇它。
+     *
+     * Fish: compare position, velocity, rotation, random, air, variant / puff state and
+     * size, the stung cow and the outgoing packets each tick.
+     */
+    private static void playFish(Official official, Writer out, String name) throws Exception {
+        boolean beached = name.endsWith("_beached");
+        boolean puffer = name.startsWith("pufferfish");
+        String kind = name.startsWith("cod") ? "cod"
+                : name.startsWith("salmon") ? "salmon"
+                : name.startsWith("tropical") ? "tropical_fish" : "pufferfish";
+        int ticks = beached ? 460 : 240;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                for (int y = 61; y <= 66 && !beached; y++) {
+                    world.blocks.put(BlockPos.asLong(x, y, z),
+                            wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        Bytes events = new Bytes(official.registries);
+        world.packets = events::add;
+        double[] start = beached ? new double[] {0.5, 61.0, 0.5} : new double[] {0.5, 63.0, 0.5};
+        EntityType<?> type = switch (kind) {
+            case "cod" -> EntityTypes.COD;
+            case "salmon" -> EntityTypes.SALMON;
+            case "tropical_fish" -> EntityTypes.TROPICAL_FISH;
+            default -> EntityTypes.PUFFERFISH;
+        };
+        Mob fish = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+        // 按 Bamboo 的种子源重放构造时的取数：UUID、yRot。鱼的构造函数不取别的。
+        // Replay the constructor draws from Bamboo's seed source: UUID and yRot only.
+        setRandom(fish, world.entitySeeds.nextLong());
+        RandomSource random = fish.getRandom();
+        fish.setUUID(Mth.createInsecureUUID(random));
+        float yaw = random.nextFloat() * 6.2831855F;
+        fish.setYRot(yaw);
+        fish.setYHeadRot(yaw);
+        fish.setPos(start[0], start[1], start[2]);
+        // `FollowFlockLeaderGoal` 的构造函数在实体还没有种子时抽了一次 `nextInt(200)`，
+        // 对拍两侧从同一个固定值出发，否则每次跑都不一样。
+        // The flock goal rolls `nextInt(200)` before the entity has its seed; pin it so
+        // both sides start from the same value.
+        pinFlockCountdown(fish, 100);
+        world.tracked.add(fish);
+        Cow cow = null;
+        if (puffer) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource cowRandom = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(cowRandom));
+            float cowYaw = cowRandom.nextFloat() * 6.2831855F;
+            cow.setYRot(cowYaw);
+            cow.setYHeadRot(cowYaw);
+            cow.setPos(0.9, 61.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Sync sync = new Sync(world, fish, official.registries);
+        boolean gone = false;
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) {
+                sync.entity.sendPairingData(null, sync.bytes::add);
+                packets.addAll(sync.take());
+            } else {
+                world.gameTime++;
+                for (Mob mob : cow == null ? List.<Mob>of(fish) : List.<Mob>of(fish, cow)) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+                packets.addAll(events.take());
+                if (fish.isRemoved()) {
+                    if (!gone) {
+                        Bytes removal = new Bytes(official.registries);
+                        removal.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(fish.getId()));
+                        packets.addAll(removal.take());
+                    }
+                    gone = true;
+                } else {
+                    sync.entity.sendChanges();
+                    packets.addAll(sync.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"gone\":").append(gone);
+            if (!gone) {
+                int variant = 0;
+                int puffState = 0;
+                if (fish instanceof net.minecraft.world.entity.animal.fish.Salmon salmon) {
+                    variant = salmon.getVariant().ordinal();
+                } else if (fish instanceof net.minecraft.world.entity.animal.fish.TropicalFish tropical) {
+                    variant = tropicalVariant(tropical);
+                } else if (fish instanceof net.minecraft.world.entity.animal.fish.Pufferfish pufferfish) {
+                    puffState = pufferfish.getPuffState();
+                }
+                net.minecraft.world.entity.EntityDimensions size = fish.getDimensions(fish.getPose());
+                int[] cowState = new int[] {0, 0};
+                if (cow != null && !cow.isRemoved()) {
+                    net.minecraft.world.effect.MobEffectInstance poison =
+                            cow.getEffect(net.minecraft.world.effect.MobEffects.POISON);
+                    cowState = new int[] {Float.floatToRawIntBits(cow.getHealth()),
+                            poison == null ? 0 : poison.getDuration()};
+                }
+                frames.append(",\"motion\":").append(projectileMotion(fish))
+                        .append(",\"seed\":").append(randomSeed(fish))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(fish.getHealth()), fish.getAirSupply(), fish.hurtTime,
+                                fish.deathTime, fish.getNoActionTime(), fish.onGround() ? 1 : 0,
+                                fish.isInWater() ? 1 : 0, variant, puffState}))
+                        .append(",\"dimensions\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(size.width()), Float.floatToRawIntBits(size.height()),
+                                Float.floatToRawIntBits(fish.getEyeHeight())}))
+                        .append(",\"cow\":").append(Arrays.toString(cowState));
+            }
+            frames.append(",\"drops\":[");
+            boolean first = true;
+            for (Entity entity : world.spawned) {
+                if (entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+                    if (!first) frames.append(',');
+                    first = false;
+                    frames.append('[').append(BuiltInRegistries.ITEM.getId(item.getItem().getItem())).append(',')
+                            .append(item.getItem().getCount()).append(']');
+                }
+            }
+            world.spawned.clear();
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append('}');
+        }
+        if (beached != gone) {
+            throw new IllegalStateException("fish scene missed its branch: " + name + " gone=" + gone);
+        }
+        out.write("{\"type\":\"fish\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start) + ",\"kind\":"
+                + jsonString(kind) + ",\"variant\":0,\"puffState\":0,\"cow\":" + (cow != null)
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /** 把 `FollowFlockLeaderGoal.nextStartTick` 设成一个固定值。 */
+    private static void pinFlockCountdown(Mob fish, int value) throws Exception {
+        for (var wrapped : fish.getGoalSelector().getAvailableGoals()) {
+            if (wrapped.getGoal().getClass().getName().endsWith("FollowFlockLeaderGoal")) {
+                Field field = wrapped.getGoal().getClass().getDeclaredField("nextStartTick");
+                field.setAccessible(true);
+                field.setInt(wrapped.getGoal(), value);
+                return;
+            }
+        }
+    }
+
+    /** `TropicalFish.DATA_ID_TYPE_VARIANT` 的打包值。 */
+    private static int tropicalVariant(net.minecraft.world.entity.animal.fish.TropicalFish fish) throws Exception {
+        Field field = net.minecraft.world.entity.animal.fish.TropicalFish.class
+                .getDeclaredField("DATA_ID_TYPE_VARIANT");
+        field.setAccessible(true);
+        net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
+                (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
+        return fish.getEntityData().get(accessor);
+    }
+
+    private static Field squidField(String name) throws Exception {
+        Field field = net.minecraft.world.entity.animal.squid.Squid.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field;
+    }
+
     private static void pairArrow(FakeLevel world, Official official, Entity arrow,
             java.util.Map<Integer, Sync> sync, List<String> packets) {
         Sync tracking = new Sync(world, arrow, official.registries);
@@ -5504,6 +5911,7 @@ public final class MobOracle {
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
                 case 12 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
+                case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();
@@ -8142,8 +8550,14 @@ public final class MobOracle {
 
         @Override
         public int getSeaLevel() {
-            return injectedSeaLevel;
+            // 自然生成夹具按场景给海平面；其余场景用注入值，默认是超平坦的 -63。
+            // Natural-spawn fixtures supply a per-scene sea level; other scenes use the
+            // injected value, which defaults to superflat's -63.
+            return naturalSeaLevel == null ? injectedSeaLevel : naturalSeaLevel;
         }
+
+        /** 自然生成夹具的海平面；不设（`allocate` 不跑字段初始值）就是超平坦的 -63。 */
+        Integer naturalSeaLevel;
 
         @Override
         public long getSeed() {
@@ -8368,8 +8782,15 @@ public final class MobOracle {
         @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(
                 T particle, double x, double y, double z, int count, double xd, double yd, double zd, double speed) {
+            if (particlePackets && packets != null) {
+                packets.accept(new net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket(
+                        particle, false, false, x, y, z, (float) xd, (float) yd, (float) zd, (float) speed, count));
+            }
             return 0;
         }
+
+        /** 鱿鱼场景：把 `sendParticles` 的粒子包也记进包序列。 */
+        boolean particlePackets;
 
         /** 实体事件、伤害事件和音效都记进同一刻的包序列。 */
         java.util.function.Consumer<Packet<? super ClientGamePacketListener>> packets;

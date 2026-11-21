@@ -25,6 +25,7 @@ mod falling;
 mod item;
 mod orb;
 mod physics;
+mod resize;
 mod tnt;
 
 use mc_bamboo_core::{Axis, BlockPos, Vec3};
@@ -504,6 +505,11 @@ impl Entity {
         }
         if mob.mob_type == mob::MobType::Slime {
             mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
+        }
+        if mob::squid::is_squid(mob.mob_type) {
+            // `Squid` 构造函数最后的 `tentacleSpeed`，取一次 `nextFloat`。
+            // The `Squid` constructor's trailing `tentacleSpeed`, one `nextFloat`.
+            mob.squid.tentacle_speed = mob::squid::roll_tentacle_speed(&mut self.random);
         }
     }
 

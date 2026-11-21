@@ -33,6 +33,10 @@ pub enum SpawnReason {
     Breeding,
     /// `EntitySpawnReason.NATURAL`：自然生成。
     Natural,
+    /// `EntitySpawnReason.BUCKET`：从桶里放出来。
+    ///
+    /// `EntitySpawnReason.BUCKET`: placed from a bucket.
+    Bucket,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -98,6 +102,13 @@ pub enum SpawnGroup {
     /// `Llama.LlamaGroupData`: the colour id shared by the group.
     Llama(AgeableGroupData, i32),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    /// 鱼群共享领头鱼；热带鱼还共享花纹。
+    ///
+    /// Schooling fish share a leader; tropical fish also share a variant.
+    FishSchool {
+        leader: crate::entity::EntityUid,
+        variant: Option<i32>,
+    },
     /// 兔子、狐狸、狼：组大小加共享的品种。
     ///
     /// Rabbits, foxes and wolves: the group size plus the shared variant.
@@ -239,7 +250,12 @@ pub fn spawn_egg(
 
 /// `EntityType.getYOffset`：脚下那一格（`offset_more` 时再往下一格）的碰撞形状，
 /// 让站在上一格的实体沿 Y 往下扫 1（或 2）格。
-fn spawn_y_offset(view: &dyn BlockView, pos: BlockPos, offset_more: bool, moving: Aabb) -> f64 {
+pub(crate) fn spawn_y_offset(
+    view: &dyn BlockView,
+    pos: BlockPos,
+    offset_more: bool,
+    moving: Aabb,
+) -> f64 {
     let min_y = if offset_more {
         f64::from(pos.y) - 1.0
     } else {
@@ -327,6 +343,18 @@ fn finalize_spawn_in_group(
     }
     if kind == MobType::Slime {
         super::slime::finalize_spawn(world, entity, group);
+        return;
+    }
+    if super::squid::is_squid(kind) {
+        super::squid::finalize_spawn(entity, world.random(), group);
+        return;
+    }
+    if super::fish::is_fish(kind) {
+        super::fish::finalize_spawn(world, entity, group);
+        return;
+    }
+    if super::turtle::is_turtle(kind) {
+        super::turtle::finalize_spawn(entity, world.random(), group);
         return;
     }
     if kind.is_equine() {

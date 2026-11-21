@@ -52,18 +52,29 @@ pub(super) struct Case {
     /// The grass floor heights; swamp slime scenes stack five floors from 50 to 66.
     #[serde(default = "default_floors")]
     floors: Vec<i32>,
+    #[serde(default)]
     water_depth: i32,
+    #[serde(default = "flat_sea_level")]
     sea_level: i32,
     /// 主世界时钟，月相读它。
     ///
     /// The overworld clock, read for the moon phase.
     #[serde(default)]
     clock: i64,
+    /// 水生夹具：三层水（-64..=-62）代替草地。
+    ///
+    /// Aquatic fixture: three water layers (-64..=-62) replace the grass.
+    #[serde(default)]
+    aquatic: bool,
     steps: Vec<Step>,
 }
 
 fn default_floors() -> Vec<i32> {
     vec![-63]
+}
+
+fn flat_sea_level() -> i32 {
+    -63
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -92,6 +103,7 @@ pub(super) struct Coverage {
     skeletons: usize,
     zombies: usize,
     slimes: usize,
+    squid: usize,
     equines: usize,
     witches: usize,
     without_spawn: usize,
@@ -124,6 +136,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::SLIME)
             .count();
+        self.squid += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::SQUID || row[0] == entity_type::GLOW_SQUID)
+            .count();
         self.equines += step
             .spawned
             .iter()
@@ -142,13 +159,14 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} slimes, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {} skeletons, {} zombies or husks, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
                 self.skeletons,
                 self.zombies,
                 self.slimes,
+                self.squid,
                 self.equines,
                 self.witches,
                 self.without_spawn,
@@ -190,11 +208,23 @@ impl Coverage {
                 ));
             }
         }
+        for name in [
+            "fish_cod",
+            "fish_salmon",
+            "fish_tropical",
+            "fish_tropical_lush",
+            "fish_puffer",
+        ] {
+            if self.per_scene.get(name) == Some(&0) {
+                return Err(format!("natural spawn fixture {name} produced no fish"));
+            }
+        }
         let mobs = [
             self.cows,
             self.skeletons,
             self.zombies,
             self.slimes,
+            self.squid,
             self.equines,
         ];
         if self.per_scene.contains_key("cow_day") && (mobs.contains(&0) || self.cap_off == 0) {
@@ -235,6 +265,9 @@ impl Report {
                 case.floors[0] + 1,
                 8,
             )),
+            // 改坏确认：海平面降一格，鱿鱼的「不高于海平面」就不成立。
+            // Break check: one block lower and the squid's "at or below sea level" fails.
+            sea_level: case.sea_level - i32::from(broken && case.name == "squid_ocean"),
         };
         for official in &case.steps {
             ticks.set_time(official.time);
@@ -303,6 +336,8 @@ fn spawn_row(entity: Entity) -> [i32; 9] {
         mob.equipment.get(EquipmentSlot::MainHand).item,
         if mob.mob_type == MobType::Drowned {
             mob.equipment.get(EquipmentSlot::OffHand).item
+        } else if mob.mob_type == MobType::TropicalFish {
+            mob.fish.variant
         } else {
             0
         },
@@ -324,21 +359,31 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     let roof = kind == MobType::Husk;
+    let aquatic = case.aquatic;
     let blocks = (-16..48)
         .flat_map(|x| {
             (-16..32).flat_map(move |z| {
-                let floors = case
-                    .floors
-                    .iter()
-                    .map(move |&y| (BlockPos::new(x, y, z), BlockState(blocks::GRASS_BLOCK)));
-                let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
-                let water = (1..=case.water_depth).map(move |dy| {
-                    (
+                let mut column = Vec::new();
+                for &y in &case.floors {
+                    column.push((BlockPos::new(x, y, z), BlockState(blocks::GRASS_BLOCK)));
+                }
+                for dy in 1..=case.water_depth {
+                    column.push((
                         BlockPos::new(x, case.floors[0] + dy, z),
                         BlockState(blocks::WATER),
-                    )
-                });
-                floors.chain(water).chain(roof.then_some(glass))
+                    ));
+                }
+                if aquatic {
+                    for y in -64..=-62 {
+                        column.push((BlockPos::new(x, y, z), BlockState(blocks::WATER)));
+                    }
+                } else {
+                    column.push((BlockPos::new(x, -63, z), BlockState(blocks::GRASS_BLOCK)));
+                    if roof {
+                        column.push((BlockPos::new(x, -60, z), BlockState(blocks::GLASS)));
+                    }
+                }
+                column
             })
         })
         .collect();

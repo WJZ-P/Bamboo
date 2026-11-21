@@ -249,6 +249,7 @@ public final class Extractor {
      * <p>用牛来问，因为只有豹猫/鹦鹉和北极熊的方块会按实体类型分别回答；这三种 Bamboo 都不生成。
      */
     private static final long FACT_VALID_SPAWN = 1L << 37;
+    private static final long FACT_PATHFINDABLE_WATER = 1L << 38;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
     /** 26.3 主世界多噪声预设 `collectPossibleBiomes().distinct()` 的数量。 */
@@ -1194,6 +1195,16 @@ public final class Extractor {
         out.addProperty("pigVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(variant.serializer()));
         out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
         out.addProperty("sheepWool", entityAccessor(net.minecraft.world.entity.animal.sheep.Sheep.class, "DATA_WOOL_ID").id());
+        out.addProperty("glowSquidDarkTicks", entityAccessor(net.minecraft.world.entity.animal.squid.GlowSquid.class, "DATA_DARK_TICKS_REMAINING").id());
+        out.addProperty("fishFromBucket", entityAccessor(net.minecraft.world.entity.animal.fish.AbstractFish.class, "FROM_BUCKET").id());
+        out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
+        out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
+        JsonArray tropicalFishCommonVariants = new JsonArray();
+        TropicalFish.COMMON_VARIANTS.forEach(commonVariant -> tropicalFishCommonVariants.add(commonVariant.getPackedId()));
+        out.add("tropicalFishCommonVariants", tropicalFishCommonVariants);
+        out.addProperty("pufferfishPuffState", entityAccessor(net.minecraft.world.entity.animal.fish.Pufferfish.class, "PUFF_STATE").id());
+        out.addProperty("turtleHasEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG").id());
+        out.addProperty("turtleLayingEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "LAYING_EGG").id());
         Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
         var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
         var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");
@@ -2286,6 +2297,8 @@ public final class Extractor {
             facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.LAND)
                     ? FACT_PATHFINDABLE_LAND : 0;
             facts |= state.isSuffocating(EMPTY, pos) ? FACT_SUFFOCATING : 0;
+            facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.WATER)
+                    ? FACT_PATHFINDABLE_WATER : 0;
             facts |= state.isValidSpawn(EMPTY, pos, EntityTypes.COW) ? FACT_VALID_SPAWN : 0;
             return facts;
         }
