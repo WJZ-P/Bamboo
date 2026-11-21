@@ -379,7 +379,7 @@ impl TrackedEntity {
         let mut packets = Vec::new();
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
-        if !matches!(snapshot.data, KindData::Arrow(_)) {
+        if !snapshot.data.is_projectile() {
             self.ticks_since_step += 1;
         }
         if snapshot.sync_position {
@@ -440,6 +440,9 @@ impl TrackedEntity {
                     items.push(item);
                 }
             }
+            // `packDirty` 按 ID 顺序遍历，补进来的脏项也要排进去。
+            // `packDirty` walks the IDs in order, including the forced items.
+            items.sort_by_key(EntityData::index);
             self.last_data = data;
             if !items.is_empty() {
                 packets.push(packet_body(&SetEntityData {
@@ -469,7 +472,7 @@ impl TrackedEntity {
         if sync_velocity {
             // 箭的 syncVelocity 来自 markHurt；官方这个分支不更新常规速度基线。
             // Arrow syncVelocity comes from markHurt; vanilla leaves its regular velocity baseline intact.
-            if !matches!(snapshot.data, KindData::Arrow(_)) {
+            if !snapshot.data.is_projectile() {
                 self.last_movement = snapshot.delta;
             }
             packets.push(packet_body(&SetEntityMotion {
@@ -745,6 +748,7 @@ pub enum KindData {
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
     Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
+    Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
 }
 
 impl Snapshot {
@@ -761,8 +765,16 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
-            needs_sync: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.needs_sync),
-            sync_velocity: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.sync_velocity),
+            needs_sync: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.needs_sync,
+                KindPublic::Egg(egg) => egg.needs_sync,
+                _ => false,
+            },
+            sync_velocity: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.sync_velocity,
+                KindPublic::Egg(egg) => egg.sync_velocity,
+                _ => false,
+            },
             sync_position: false,
             fall_flying: false,
         }
@@ -773,6 +785,7 @@ impl Snapshot {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
             KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
+            KindData::Egg(egg) => egg.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -797,7 +810,16 @@ impl KindData {
             KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
             KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
+            KindPublic::Egg(egg) => Self::Egg(egg.clone()),
         }
+    }
+
+    /// `InterpolationHandler.NO_OP` 的弹射物：位置包不带攒下的步数，`syncVelocity` 不动速度基线。
+    ///
+    /// Projectiles with a no-op interpolation handler: no stepped position paths, and
+    /// `syncVelocity` leaves the velocity baseline alone.
+    fn is_projectile(&self) -> bool {
+        matches!(self, Self::Arrow(_) | Self::Egg(_))
     }
 
     /// 同步用到的那个数字。下落的方块和物品没有。
@@ -807,7 +829,8 @@ impl KindData {
             | Self::Item(_)
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
-            | Self::Arrow(_) => None,
+            | Self::Arrow(_)
+            | Self::Egg(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -819,7 +842,8 @@ impl KindData {
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
             | Self::Mob(_)
-            | Self::Arrow(_) => None,
+            | Self::Arrow(_)
+            | Self::Egg(_) => None,
         }
     }
 
@@ -828,6 +852,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
             Self::Arrow(arrow) => Some(arrow.uuid),
+            Self::Egg(egg) => Some(egg.uuid),
             _ => None,
         }
     }
@@ -837,6 +862,7 @@ impl KindData {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
             Self::Arrow(arrow) => Some(arrow.pitch),
+            Self::Egg(egg) => Some(egg.x_rot),
             _ => None,
         }
     }
@@ -895,6 +921,19 @@ impl KindData {
                     mob_non_default_data(mob)
                 }
             }
+            Self::Egg(egg) => {
+                let mut data = Vec::new();
+                if egg.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if egg.no_gravity {
+                    data.push(EntityData::NoGravity(true));
+                }
+                // `ItemStack` 不覆写 `equals`，`setItem` 之后的值永远不是默认值。
+                // `ItemStack` has no `equals`, so the set item is never the default.
+                data.push(EntityData::Item(egg.item.clone()));
+                data
+            }
         }
     }
 }
@@ -905,6 +944,22 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    if let Some(data) = farm_default_data(index, kind) {
+        return data;
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Pig {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::PIG_BOOST_TIME => return EntityData::PigBoostTime(0),
+            facts::PIG_VARIANT => {
+                return EntityData::PigVariant(pig_variant_id("minecraft:temperate"));
+            }
+            facts::PIG_SOUND_VARIANT => {
+                return EntityData::PigSoundVariant(pig_sound_variant_default());
+            }
+            _ => {}
+        }
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1075,13 +1130,124 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.
-    if mob.variant.registry_id() != 1 {
-        out.push(EntityData::CowVariant(mob.variant.registry_id()));
+    if farm_non_default_data(mob, &mut out) {
+        return out;
     }
-    if mob.sound_variant.registry_id() != 0 {
-        out.push(EntityData::CowSoundVariant(mob.sound_variant.registry_id()));
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
+        let variant = mob.variant.name();
+        if variant != "minecraft:temperate" {
+            out.push(EntityData::PigVariant(pig_variant_id(variant)));
+        }
+        let sound = mob.pig_sound_variant.registry_id();
+        if sound != pig_sound_variant_default() {
+            out.push(EntityData::PigSoundVariant(sound));
+        }
+    } else {
+        if mob.variant.registry_id() != 1 {
+            out.push(EntityData::CowVariant(mob.variant.registry_id()));
+        }
+        if mob.sound_variant.registry_id() != 0 {
+            out.push(EntityData::CowSoundVariant(mob.sound_variant.registry_id()));
+        }
     }
     out
+}
+
+/// 玩家音源的音效包（挤奶、染色、剪毛）。
+///
+/// A player-category sound packet (milking, dyeing, shearing).
+fn player_sound(sound: &str, position: mc_bamboo_core::Vec3, seed: i64) -> EventPacket {
+    EventPacket::Sound(mc_bamboo_protocol::packet::play::Sound {
+        sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
+        inline: None,
+        source: mc_bamboo_data::sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    })
+}
+
+/// 羊和鸡的默认实体数据：羊毛 0，鸡 temperate / classic。
+///
+/// Sheep and chicken defaults: wool 0, chicken temperate / classic.
+fn farm_default_data(
+    index: u8,
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+) -> Option<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as facts;
+    match (kind, index) {
+        (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
+            registry_index(chicken_variants(), "minecraft:temperate"),
+        )),
+        (MobType::Chicken, facts::CHICKEN_SOUND_VARIANT) => Some(EntityData::ChickenSoundVariant(
+            registry_index(chicken_sound_variants(), "minecraft:classic"),
+        )),
+        _ => None,
+    }
+}
+
+/// 羊和鸡偏离默认的实体数据；不是这两种时返回假。
+///
+/// Sheep and chicken data that differs from the defaults; false for other kinds.
+fn farm_non_default_data(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    out: &mut Vec<EntityData>,
+) -> bool {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    match mob.mob_type {
+        MobType::Sheep => {
+            if mob.wool != 0 {
+                out.push(EntityData::SheepWool(mob.wool));
+            }
+            true
+        }
+        MobType::Chicken => {
+            let variant = registry_index(chicken_variants(), mob.variant.name());
+            if variant != registry_index(chicken_variants(), "minecraft:temperate") {
+                out.push(EntityData::ChickenVariant(variant));
+            }
+            let sound = mob.chicken_sound_variant.registry_id();
+            if sound != registry_index(chicken_sound_variants(), "minecraft:classic") {
+                out.push(EntityData::ChickenSoundVariant(sound));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn chicken_variants() -> &'static [&'static str] {
+    mc_bamboo_data::component_registries::registry_names::CHICKEN_VARIANT
+}
+
+fn chicken_sound_variants() -> &'static [&'static str] {
+    mc_bamboo_data::component_registries::registry_names::CHICKEN_SOUND_VARIANT
+}
+
+fn registry_index(names: &[&str], name: &str) -> i32 {
+    names
+        .iter()
+        .position(|entry| *entry == name)
+        .expect("variant in the registry") as i32
+}
+
+fn pig_variant_id(name: &str) -> i32 {
+    mc_bamboo_data::component_registries::registry_names::PIG_VARIANT
+        .iter()
+        .position(|entry| *entry == name)
+        .expect("pig variant in the registry") as i32
+}
+
+fn pig_sound_variant_default() -> i32 {
+    mc_bamboo_data::component_registries::registry_names::PIG_SOUND_VARIANT
+        .iter()
+        .position(|entry| *entry == "minecraft:classic")
+        .expect("classic pig sound variant in the registry") as i32
 }
 
 /// 把这一刻的生物事件换成「包 ID + 包体」字节，按事件发生顺序。
@@ -1167,19 +1333,10 @@ fn event_packet(
                 None => EventPacket::Nothing,
             }
         }
-        MobEvent::MilkSound { position } => EventPacket::Sound(Sound {
-            sound: i32::from(mc_bamboo_data::sounds::sound_event(
-                "minecraft:entity.cow.milk",
-            )),
-            inline: None,
-            source: mc_bamboo_data::sounds::PLAYERS,
-            x: position.x,
-            y: position.y,
-            z: position.z,
-            volume: 1.0,
-            pitch: 1.0,
-            seed: sound_seed(),
-        }),
+        MobEvent::MilkSound { position } => {
+            player_sound("minecraft:entity.cow.milk", *position, sound_seed())
+        }
+        MobEvent::PlayerSound { sound, position } => player_sound(sound, *position, sound_seed()),
         MobEvent::Damage {
             kind,
             attacker,
@@ -1200,6 +1357,7 @@ fn event_packet(
             pitch,
             position,
             hostile,
+            seed,
         } => EventPacket::Sound(Sound {
             sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
             inline: None,
@@ -1213,7 +1371,7 @@ fn event_packet(
             z: position.z,
             volume: *volume,
             pitch: *pitch,
-            seed: sound_seed(),
+            seed: seed.unwrap_or_else(sound_seed),
         }),
     }
 }

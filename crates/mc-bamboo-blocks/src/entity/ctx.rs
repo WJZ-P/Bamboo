@@ -482,6 +482,12 @@ pub enum Command {
         hits: Vec<super::arrow::ArrowEntityHit>,
         end: Vec3,
     },
+    /// 鸡蛋这一刻撞到东西：`ThrownEgg.onHit`（打目标、孵小鸡、碎掉）。
+    ///
+    /// The egg hit something this tick: `ThrownEgg.onHit` (hurt, hatch, break).
+    EggImpact {
+        hit: super::thrown_egg::EggHit,
+    },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode {
         center: Vec3,
@@ -526,9 +532,13 @@ pub enum Command {
         others: Vec<EntityUid>,
         value: i32,
     },
-    /// `BreedGoal.breed` → `Animal.spawnChildFromBreeding`：给伴侣设冷却、生小牛和经验球。
-    /// 父亲自己那一份状态已经在 `serverAiStep` 里改好（年龄递减还在后面）。
-    BreedCows {
+    /// 给伴侣设冷却，生成幼崽和经验球；发起繁殖的亲本已进入冷却。
+    ///
+    /// Reset the other parent and spawn offspring and XP; the initiating parent is on cooldown.
+    BreedAnimals {
+        kind: super::mob::MobType,
+        variant: super::mob::CowVariant,
+        wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
     },
@@ -581,6 +591,19 @@ pub enum Command {
     ArrowExtinguished {
         pitch: f32,
     },
+    /// `EatBlockGoal.tick` 在 `mobGriefing` 下的改方块：吃掉脚下的草，或把下面的草方块变成泥土。
+    ///
+    /// `EatBlockGoal.tick` under `mobGriefing`: eat the plant at the feet, or turn the grass
+    /// block below into dirt.
+    EatBlock {
+        pos: mc_bamboo_core::BlockPos,
+        grass_below: bool,
+    },
+    /// `dropFromGiftLootTable(.., spawnAtLocation)`：鸡下蛋这类礼物表，掉在原点。
+    ///
+    /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
+    /// the origin.
+    DropEntityLoot(super::mob::EntityLootRequest),
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -614,6 +637,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ArrowImpact { block, hits, end } => {
             super::arrow::impact(me, world, hits, block, end)
         }
+        Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
@@ -634,9 +658,13 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::MergeExperienceOrbs { others, value } => {
             super::orb::apply_merge(me, &others, value, world)
         }
-        Command::BreedCows { partner, position } => {
-            super::mob::living::apply_breed(me, partner, position, world)
-        }
+        Command::BreedAnimals {
+            kind,
+            variant,
+            wool,
+            partner,
+            position,
+        } => super::mob::living::apply_breed(me, partner, position, world, kind, variant, wool),
         Command::HurtPlayer {
             target,
             source,
@@ -662,6 +690,15 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::DropEntityLoot(request) => {
+            let origin = request.origin;
+            for stack in world.entity_loot_drops(request) {
+                world.spawn_at_location(origin, stack);
+            }
+        }
+        Command::EatBlock { pos, grass_below } => {
+            super::mob::living::apply_eat_block(world, pos, grass_below);
         }
         Command::TrampleTurtleEgg { pos, chance } => {
             super::mob::living::apply_trample_turtle_egg(world, pos, chance);

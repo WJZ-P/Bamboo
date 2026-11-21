@@ -95,14 +95,18 @@ pub fn stack_modifiers(stack: &ItemStack, slot: EquipmentSlot) -> Vec<(i32, Modi
     out
 }
 
-/// 六个槽，按官方 ordinal。
-pub const SLOTS: [EquipmentSlot; 6] = [
+/// 全部八个槽，按官方 ordinal（含身体和鞍）。
+///
+/// All eight slots in vanilla ordinal order, including body and saddle.
+pub const SLOTS: [EquipmentSlot; 8] = [
     EquipmentSlot::MainHand,
     EquipmentSlot::OffHand,
     EquipmentSlot::Feet,
     EquipmentSlot::Legs,
     EquipmentSlot::Chest,
     EquipmentSlot::Head,
+    EquipmentSlot::Body,
+    EquipmentSlot::Saddle,
 ];
 
 /// `DropChances.DEFAULT_EQUIPMENT_DROP_CHANCE`。
@@ -146,17 +150,17 @@ fn index(slot: EquipmentSlot) -> Option<usize> {
 /// 一个生物的装备、掉落几率和上次同步出去的装备。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobEquipment {
-    items: [ItemStack; 6],
-    drop_chances: [f32; 6],
+    items: [ItemStack; SLOTS.len()],
+    drop_chances: [f32; SLOTS.len()],
     /// `lastEquipmentItems`：上次 `detectEquipmentUpdates` 记下的副本，初始全空。
-    last_sent: [ItemStack; 6],
+    last_sent: [ItemStack; SLOTS.len()],
 }
 
 impl Default for MobEquipment {
     fn default() -> Self {
         Self {
             items: std::array::from_fn(|_| ItemStack::empty()),
-            drop_chances: [DEFAULT_DROP_CHANCE; 6],
+            drop_chances: [DEFAULT_DROP_CHANCE; SLOTS.len()],
             last_sent: std::array::from_fn(|_| ItemStack::empty()),
         }
     }
@@ -179,7 +183,9 @@ impl MobEquipment {
         }
     }
 
-    /// 六个槽和其中的物品，按官方 ordinal。
+    /// 八个槽和其中的物品，按官方 ordinal。
+    ///
+    /// The eight slots and their items, in vanilla ordinal order.
     pub fn iter(&self) -> impl Iterator<Item = (EquipmentSlot, &ItemStack)> {
         SLOTS.iter().copied().zip(self.items.iter())
     }

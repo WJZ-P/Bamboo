@@ -87,7 +87,7 @@ pub(super) fn read(input: &Tag, pitch: f32, spectral: bool) -> Arrow {
     arrow
 }
 
-fn uuid_from(input: &Tag, key: &str) -> Option<[u8; 16]> {
+pub(super) fn uuid_from(input: &Tag, key: &str) -> Option<[u8; 16]> {
     let Tag::IntArray(words) = tag::field(input, key)? else {
         return None;
     };

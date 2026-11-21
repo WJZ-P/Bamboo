@@ -268,7 +268,7 @@ fn finalize_spawn_in_group(
         return;
     }
     let biome = world.biome_id(entity.block_position());
-    finalize_cow(entity, biome, world.random(), group);
+    finalize_cow(kind, entity, biome, world.random(), group);
 }
 
 /// 生成期的 `finalizeSpawn(..., CHUNK_GENERATION, groupData)`：随机源是
@@ -286,8 +286,11 @@ pub(super) fn finalize_generated(
     region_random: &dyn RandomSource,
     group: &mut Option<SpawnGroup>,
 ) {
-    if kind == MobType::Cow {
-        finalize_cow(entity, biome, region_random, group);
+    if matches!(
+        kind,
+        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+    ) {
+        finalize_cow(kind, entity, biome, region_random, group);
     } else {
         finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
     }
@@ -299,18 +302,34 @@ pub(super) fn finalize_generated(
 /// `Cow.finalizeSpawn` plus the `AgeableMob` / `Mob` layers with a caller-supplied
 /// random: `Level.random` at run time, `WorldGenRegion.random` during generation.
 pub(super) fn finalize_cow(
+    kind: MobType,
     entity: &mut Entity,
     biome: i32,
     random: &dyn RandomSource,
     group: &mut Option<SpawnGroup>,
 ) {
     let variant = cow_variant_for_biome(biome);
-    let _ = random.next_int(1);
-    let sound = if random.next_int(2) == 0 {
-        CowSoundVariant::Classic
-    } else {
-        CowSoundVariant::Moody
-    };
+    if kind != MobType::Sheep {
+        // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
+        // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
+        let _ = random.next_int(1);
+    }
+    // 各物种自己那层 `finalizeSpawn` 的取数：羊的毛色、鸡 / 猪 / 牛的叫声，都在
+    // `AgeableMob` 那层之前。
+    // Each species' own `finalizeSpawn` draws (sheep colour, chicken / pig / cow sound)
+    // come before the `AgeableMob` layer.
+    let sheep_color = (kind == MobType::Sheep).then(|| super::sheep::spawn_color(variant, random));
+    let chicken_sound =
+        (kind == MobType::Chicken).then(|| super::chicken::SoundVariant::pick(random));
+    let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
+    let cow_sound =
+        (!matches!(kind, MobType::Sheep | MobType::Chicken | MobType::Pig)).then(|| {
+            if random.next_int(2) == 0 {
+                CowSoundVariant::Classic
+            } else {
+                CowSoundVariant::Moody
+            }
+        });
     // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
     // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
     // the mob into the group.
@@ -331,8 +350,21 @@ pub(super) fn finalize_cow(
         && random.next_float() <= data.baby_spawn_chance;
     data.group_size += 1;
     entity.with_mob(|me, mob| {
-        mob.variant = variant;
-        mob.sound_variant = sound;
+        if kind != MobType::Sheep {
+            mob.variant = variant;
+        }
+        if let Some(color) = sheep_color {
+            super::sheep::set_color(mob, color);
+        }
+        if let Some(sound) = chicken_sound {
+            mob.chicken_sound_variant = sound;
+        }
+        if let Some(sound) = pig_sound {
+            mob.pig_sound_variant = sound;
+        }
+        if let Some(sound) = cow_sound {
+            mob.sound_variant = sound;
+        }
         if baby {
             living::set_age(me, mob, BABY_START_AGE);
         }

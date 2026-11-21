@@ -3512,6 +3512,33 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const SKELETON_EYE_HEIGHT: f32 = {};",
         float_literal(facts.skeleton_eye_height)
     );
+    for (name, value) in [
+        ("PIG_BOOST_TIME", facts.pig_boost_time),
+        ("PIG_VARIANT", facts.pig_variant),
+        ("PIG_SOUND_VARIANT", facts.pig_sound_variant),
+        ("SHEEP_WOOL", facts.sheep_wool),
+        ("CHICKEN_VARIANT", facts.chicken_variant),
+        ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("PIG_VARIANT_SERIALIZER", facts.pig_variant_serializer),
+        (
+            "PIG_SOUND_VARIANT_SERIALIZER",
+            facts.pig_sound_variant_serializer,
+        ),
+        (
+            "CHICKEN_VARIANT_SERIALIZER",
+            facts.chicken_variant_serializer,
+        ),
+        (
+            "CHICKEN_SOUND_VARIANT_SERIALIZER",
+            facts.chicken_sound_variant_serializer,
+        ),
+    ] {
+        let _ = writeln!(out, "pub const {name}: i32 = {value};");
+    }
     out
 }
 

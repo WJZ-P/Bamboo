@@ -1161,6 +1161,22 @@ public final class Extractor {
         color.setAccessible(true);
         out.addProperty("arrowColor", ((net.minecraft.network.syncher.EntityDataAccessor<?>) color.get(null)).id());
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        Class<?> pig = net.minecraft.world.entity.animal.pig.Pig.class;
+        out.addProperty("pigBoostTime", entityAccessor(pig, "DATA_BOOST_TIME").id());
+        var variant = entityAccessor(pig, "DATA_VARIANT_ID");
+        var sound = entityAccessor(pig, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("pigVariant", variant.id());
+        out.addProperty("pigSoundVariant", sound.id());
+        out.addProperty("pigVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(variant.serializer()));
+        out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
+        out.addProperty("sheepWool", entityAccessor(net.minecraft.world.entity.animal.sheep.Sheep.class, "DATA_WOOL_ID").id());
+        Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
+        var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
+        var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("chickenVariant", chickenVariant.id());
+        out.addProperty("chickenSoundVariant", chickenSound.id());
+        out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
+        out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();
@@ -1189,6 +1205,12 @@ public final class Extractor {
             out.add(effects);
         }
         return out;
+    }
+
+    private static net.minecraft.network.syncher.EntityDataAccessor<?> entityAccessor(Class<?> type, String name) throws ReflectiveOperationException {
+        Field field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
     }
 
     private static int arrowAccessorId(String name) throws ReflectiveOperationException {
