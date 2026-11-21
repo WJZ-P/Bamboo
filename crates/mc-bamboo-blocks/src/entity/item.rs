@@ -1168,10 +1168,11 @@ impl World<'_> {
     }
 
     /// `new ItemEntity(level, x, y, z, stack)` 加 `setPickUpDelay(delay)`：
-    /// 速度照常随机，位置不偏移。
+    /// 速度照常随机，位置不偏移。`delay` 为 0 时就是构造后的默认值（哞菇剪下来的蘑菇）。
     ///
     /// `new ItemEntity(level, x, y, z, stack)` with `setPickUpDelay(delay)`:
-    /// random velocity, no position offset.
+    /// random velocity, no position offset. A delay of 0 is the constructor default
+    /// (sheared mooshroom mushrooms).
     pub(crate) fn spawn_item_with_delay(
         &mut self,
         position: Vec3,

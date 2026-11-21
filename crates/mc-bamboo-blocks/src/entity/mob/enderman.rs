@@ -102,7 +102,13 @@ pub(super) fn goals(nav: &mut Navigation) -> GoalSelector {
 pub(super) fn target_goals() -> GoalSelector {
     GoalSelector::from_goals(vec![
         wrap(1, Goal::EndermanGaze(GazeGoal::default())),
-        wrap(2, Goal::HurtByTarget { timestamp: -1 }),
+        wrap(
+            2,
+            Goal::HurtByTarget {
+                timestamp: -1,
+                unseen_ticks: 0,
+            },
+        ),
         // 末影螨还不存在，但这个目标仍注册、仍按 `reducedTickDelay(10)` 取数。
         // Endermites are not modelled, but the goal still registers and rolls its interval.
         wrap(

@@ -295,7 +295,7 @@ mod tests {
                         goals.tick(me, mob, &mut ctx);
                     }
                     mob.goals = goals;
-                    for name in mob.goals.running_names() {
+                    for name in mob.goals.running_names(mob.mob_type) {
                         if !seen.contains(&name) {
                             seen.push(name);
                         }

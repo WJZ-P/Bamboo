@@ -28,6 +28,16 @@ pub(super) fn describe(
                 Value::String(color.name().to_owned()),
             );
         }
+        MobType::Mooshroom => {
+            // 剪毛表按 `mooshroom/variant` 组件选红 / 棕子表；品种借 `wool` 字节传过来。
+            // The shearing table picks by the `mooshroom/variant` component; the type
+            // arrives in the `wool` byte.
+            let name = if wool == 0 { "red" } else { "brown" };
+            view.components.insert(
+                "minecraft:mooshroom/variant".to_owned(),
+                Value::String(name.to_owned()),
+            );
+        }
         MobType::Chicken => {
             if let Some(variant) = variant {
                 view.components.insert(
