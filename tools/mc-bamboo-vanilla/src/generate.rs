@@ -3363,7 +3363,41 @@ fn entity_types_file(data: &VersionData) -> String {
         let _ = writeln!(out, "pub const RABBIT_{name}: f64 = {value:?};");
     }
     fox_facts(&mut out, facts);
+    wolf_facts(&mut out, facts);
     out
+}
+
+/// 狼的尺寸、元数据下标（含 `TamableAnimal` 的两项）和属性。
+///
+/// The wolf dimensions, metadata indices (with the two `TamableAnimal` ones)
+/// and attributes.
+fn wolf_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    for (name, value) in [
+        ("WOLF_EYE_HEIGHT", facts.wolf_eye_height),
+        ("WOLF_BABY_WIDTH", facts.wolf_baby_width),
+        ("WOLF_BABY_HEIGHT", facts.wolf_baby_height),
+        ("WOLF_BABY_EYE_HEIGHT", facts.wolf_baby_eye_height),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("TAME_FLAGS", facts.tame_flags),
+        ("TAME_OWNER", facts.tame_owner),
+        ("WOLF_INTERESTED", facts.wolf_interested),
+        ("WOLF_COLLAR", facts.wolf_collar),
+        ("WOLF_ANGER_END_TIME", facts.wolf_anger_end_time),
+        ("WOLF_VARIANT", facts.wolf_variant),
+        ("WOLF_SOUND_VARIANT", facts.wolf_sound_variant),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("WOLF_MAX_HEALTH", facts.wolf_max_health),
+        ("WOLF_MOVEMENT_SPEED", facts.wolf_movement_speed),
+        ("WOLF_ATTACK_DAMAGE", facts.wolf_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
 }
 
 /// 狐狸的尺寸、元数据下标和属性。

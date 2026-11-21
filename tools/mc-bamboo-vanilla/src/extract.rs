@@ -862,6 +862,20 @@ pub struct ProjectileFacts {
     pub fox_attack_damage: f64,
     pub fox_safe_fall_distance: f64,
     pub fox_follow_range: f64,
+    pub wolf_eye_height: f32,
+    pub wolf_baby_width: f32,
+    pub wolf_baby_height: f32,
+    pub wolf_baby_eye_height: f32,
+    pub tame_flags: u8,
+    pub tame_owner: u8,
+    pub wolf_interested: u8,
+    pub wolf_collar: u8,
+    pub wolf_anger_end_time: u8,
+    pub wolf_variant: u8,
+    pub wolf_sound_variant: u8,
+    pub wolf_max_health: f64,
+    pub wolf_movement_speed: f64,
+    pub wolf_attack_damage: f64,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
     ///
     /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.
