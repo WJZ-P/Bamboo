@@ -355,6 +355,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         };
         put(&mut out, "sound_variant", Tag::String(sound.to_owned()));
     }
+    super::equine::save(mob, &mut out)?;
     // ---- Zombie ----
     if mob.mob_type.uses_baby_metadata() {
         put(&mut out, "IsBaby", Tag::Byte(i8::from(mob.zombie_baby)));
@@ -537,6 +538,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.sound_variant = variant;
             }
         }
+        super::equine::load(mob, tag);
         // ---- Zombie ----
         if mob.mob_type.uses_baby_metadata() {
             let baby = tag::bool_or(tag, "IsBaby", false);

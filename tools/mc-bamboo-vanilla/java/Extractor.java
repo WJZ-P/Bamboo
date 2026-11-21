@@ -1161,6 +1161,16 @@ public final class Extractor {
         color.setAccessible(true);
         out.addProperty("arrowColor", ((net.minecraft.network.syncher.EntityDataAccessor<?>) color.get(null)).id());
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        out.addProperty("llamaEyeHeight", net.minecraft.world.entity.EntityTypes.LLAMA.getDimensions().eyeHeight());
+        out.addProperty("muleEyeHeight", net.minecraft.world.entity.EntityTypes.MULE.getDimensions().eyeHeight());
+        out.addProperty("donkeyEyeHeight", net.minecraft.world.entity.EntityTypes.DONKEY.getDimensions().eyeHeight());
+        out.addProperty("horseEyeHeight", net.minecraft.world.entity.EntityTypes.HORSE.getDimensions().eyeHeight());
+        var equine = "net.minecraft.world.entity.animal.equine.";
+        out.addProperty("horseFlags", accessorId(equine + "AbstractHorse", "DATA_ID_FLAGS"));
+        out.addProperty("horseVariant", accessorId(equine + "Horse", "DATA_ID_TYPE_VARIANT"));
+        out.addProperty("horseChest", accessorId(equine + "AbstractChestedHorse", "DATA_ID_CHEST"));
+        out.addProperty("llamaStrength", accessorId(equine + "Llama", "DATA_STRENGTH_ID"));
+        out.addProperty("llamaVariant", accessorId(equine + "Llama", "DATA_VARIANT_ID"));
         Class<?> pig = net.minecraft.world.entity.animal.pig.Pig.class;
         out.addProperty("pigBoostTime", entityAccessor(pig, "DATA_BOOST_TIME").id());
         var variant = entityAccessor(pig, "DATA_VARIANT_ID");
@@ -1237,6 +1247,13 @@ public final class Extractor {
             out.add(row);
         }
         return out;
+    }
+
+    /** 任意类的私有 `EntityDataAccessor` 静态字段分到的 index。 */
+    private static int accessorId(String owner, String name) throws ReflectiveOperationException {
+        Field field = Class.forName(owner).getDeclaredField(name);
+        field.setAccessible(true);
+        return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
     }
 
     private static net.minecraft.network.syncher.EntityDataAccessor<?> entityAccessor(Class<?> type, String name) throws ReflectiveOperationException {

@@ -1,20 +1,24 @@
 //! 用官方平原刷怪表和公式地形重放生成期刷怪（`NaturalSpawner.spawnMobsForChunkGeneration`）。
 //!
-//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；生成的牛比类型、坐标、朝向。
-//! 牛的幼年和左撇子取区域随机源，只在这一区块前面没有生成过别的动物时比较：
-//! 别的动物在官方那边会跑自己的 `finalizeSpawn`，Bamboo 还没有它们。
+//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；生成的牛和马科比类型、坐标、朝向。
+//! 幼年、左撇子和马科的属性花色取区域随机源，只在这一区块前面没有生成过 Bamboo
+//! 还没建模的动物时比较：那些动物在官方那边会跑自己的 `finalizeSpawn`。
 //!
 //! Replay world-generation spawning with the official plains table over a formula
 //! terrain. The decoration random must match exactly (a fingerprint at the end);
-//! spawned cows compare type, position and facing. Baby and left-handedness come from
-//! the region random and are compared only while no other animal spawned before in the
-//! chunk, since vanilla runs those animals' `finalizeSpawn` and Bamboo has none yet.
+//! spawned modelled animals compare type, position and facing. Baby, left-handedness
+//! and equine attributes and variants come from the region random and are compared
+//! only while no animal Bamboo does not model yet spawned before in the chunk, since
+//! vanilla runs those animals' `finalizeSpawn`.
 
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, LegacyRandom, LevelRandom, World,
     entity::{
         Entities, Entity,
-        mob::natural_gen::{GenSpawn, spawn_mobs_for_chunk_generation},
+        mob::{
+            MobType,
+            natural_gen::{GenSpawn, spawn_mobs_for_chunk_generation},
+        },
     },
     random::{RandomSource, XoroshiroRandom},
 };
@@ -35,7 +39,7 @@ pub(super) struct Case {
     sky: i32,
     block: i32,
     terrain: bool,
-    spawned: Vec<[i64; 7]>,
+    spawned: Vec<Vec<i64>>,
     random: i64,
     region: i64,
 }
@@ -44,7 +48,9 @@ pub(super) struct Case {
 pub(super) struct Coverage {
     pub(super) cases: usize,
     cows: usize,
+    equines: usize,
     others: usize,
+    simulated: usize,
     details: usize,
 }
 
@@ -52,14 +58,15 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {} modelled animals, {} simulated animals, {} with finalize details compared",
-                self.cases, self.cows, self.others, self.details
+                "GEN SPAWN: {} cases, {} cows, {} equines, {} other modelled animals, {} simulated animals, {} mobs with finalize details compared",
+                self.cases, self.cows, self.equines, self.others, self.simulated, self.details
             );
         }
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
-        if self.cases > 0 && (self.cows == 0 || self.others == 0 || self.details == 0) {
+        let missing = self.cows == 0 || self.equines == 0 || self.others == 0;
+        if self.cases > 0 && (missing || self.details == 0) {
             return Err("gen spawn fixtures did not exercise cows and other animals".into());
         }
         Ok(())
@@ -112,31 +119,23 @@ impl Report {
         let mut in_sync = true;
         let mut ours = mobs.iter();
         for row in &case.spawned {
-            // 已建模的动物逐只比；马、驴这些只模拟放置的会消耗官方的区域随机源，之后不再比细节。
-            // Modelled animals are compared one by one; simulated ones (horse, donkey) consume
-            // the official region random, so details stop being compared after them.
-            let modelled = i32::try_from(row[0])
-                .ok()
-                .and_then(mc_bamboo_blocks::entity::mob::MobType::by_entity_type)
-                .is_some();
-            if !modelled {
-                self.gen_spawns.others += 1;
+            let Some(kind) = modelled(row[0]) else {
+                self.gen_spawns.simulated += 1;
                 in_sync = false;
                 continue;
+            };
+            if kind == MobType::Cow {
+                self.gen_spawns.cows += 1;
+            } else if kind.is_equine() {
+                self.gen_spawns.equines += 1;
+            } else {
+                self.gen_spawns.others += 1;
             }
-            self.gen_spawns.cows += 1;
-            let Some(cow) = ours.next() else {
-                self.mismatch(format!("{label}: official cow {row:?} missing in Bamboo"));
+            let Some(entity) = ours.next() else {
+                self.mismatch(format!("{label}: official {row:?} missing in Bamboo"));
                 return;
             };
-            let mob = cow.kind.mob().expect("generated mobs are mobs");
-            let place = [
-                i64::from(mob.mob_type.entity_type()),
-                cow.position.x.to_bits() as i64,
-                cow.position.y.to_bits() as i64,
-                cow.position.z.to_bits() as i64,
-                i64::from(cow.y_rot.to_bits() as i32),
-            ];
+            let place = placement(entity);
             if place[..] != row[..5] {
                 self.mismatch(format!(
                     "{label}: official {row:?}, Bamboo placement {place:?}"
@@ -144,7 +143,7 @@ impl Report {
             }
             if in_sync {
                 self.gen_spawns.details += 1;
-                let details = [i64::from(mob.is_baby()), i64::from(mob.left_handed)];
+                let details = details(entity);
                 if details[..] != row[5..] {
                     self.mismatch(format!(
                         "{label}: official {row:?}, Bamboo details {details:?}"
@@ -154,7 +153,7 @@ impl Report {
         }
         if let Some(extra) = ours.next() {
             self.mismatch(format!(
-                "{label}: Bamboo spawned an extra cow at {:?}",
+                "{label}: Bamboo spawned an extra mob at {:?}",
                 extra.position
             ));
         }
@@ -169,6 +168,39 @@ impl Report {
             self.mismatch(format!("{label}: region random drifted"));
         }
     }
+}
+
+/// Bamboo 已经建模、会真的生成的种类。
+///
+/// Kinds Bamboo models and really spawns.
+fn modelled(entity: i64) -> Option<MobType> {
+    MobType::by_entity_type(i32::try_from(entity).ok()?).filter(|kind| !kind.is_monster())
+}
+
+/// 类型、坐标原始位和朝向原始位。
+///
+/// Type, raw coordinate bits and raw yaw bits.
+fn placement(entity: &Entity) -> [i64; 5] {
+    let mob = entity.kind.mob().expect("generated mobs are mobs");
+    [
+        i64::from(mob.mob_type.entity_type()),
+        entity.position.x.to_bits() as i64,
+        entity.position.y.to_bits() as i64,
+        entity.position.z.to_bits() as i64,
+        i64::from(entity.y_rot.to_bits() as i32),
+    ]
+}
+
+/// 幼年、左撇子；马科再加 [`super::equine::state`]。
+///
+/// Baby and left-handedness, plus [`super::equine::state`] for equines.
+fn details(entity: &Entity) -> Vec<i64> {
+    let mob = entity.kind.mob().expect("generated mobs are mobs");
+    let mut details = vec![i64::from(mob.is_baby()), i64::from(mob.left_handed)];
+    if mob.mob_type.is_equine() {
+        details.extend(super::equine::state(entity));
+    }
+    details
 }
 
 /// 和 `MobOracle.genColumn` 同一个坐标公式。

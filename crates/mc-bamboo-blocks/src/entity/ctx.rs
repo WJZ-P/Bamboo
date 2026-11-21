@@ -482,6 +482,14 @@ pub enum Command {
         hits: Vec<super::arrow::ArrowEntityHit>,
         end: Vec3,
     },
+    /// `Llama.spit` 生成口水（`Projectile.spawnProjectileUsingShoot`）。
+    ///
+    /// `Llama.spit` spawns a spit (`Projectile.spawnProjectileUsingShoot`).
+    ShootLlamaSpit(super::spit::SpitShot),
+    /// `LlamaSpit.onHitEntity`：口水打到一个实体。
+    ///
+    /// `LlamaSpit.onHitEntity`: the spit hit an entity.
+    SpitHit(super::spit::SpitHit),
     /// 鸡蛋这一刻撞到东西：`ThrownEgg.onHit`（打目标、孵小鸡、碎掉）。
     ///
     /// The egg hit something this tick: `ThrownEgg.onHit` (hurt, hatch, break).
@@ -645,6 +653,8 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ArrowImpact { block, hits, end } => {
             super::arrow::impact(me, world, hits, block, end)
         }
+        Command::ShootLlamaSpit(shot) => super::spit::spawn(world, me.id, shot),
+        Command::SpitHit(hit) => super::spit::hit_entity(me, world, hit),
         Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {

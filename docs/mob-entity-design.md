@@ -306,7 +306,64 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 这一轮没有引入半成品死亡系统；等玩家伤害 / 死亡 / 重生流程实现时，再一起接上
   `getBaseExperienceReward`、`keepInventory` 两条分支和官方对拍。
 
-### 5.8 中立生物地基和北极熊（2026-11-21）
+### 5.8 马、驴、骡、羊驼（2026-11-20，分支 `cx-horse`）
+
+**已做**（代码在 `entity/mob/equine.rs` 和 `entity/mob/equine/`，按牛的粒度）：
+
+| 项 | 官方 | Bamboo | 对拍 |
+|---|---|---|---|
+| 属性、生成 | `createBaseHorseAttributes`、`randomizeAttributes`、`Horse/Llama.finalizeSpawn` | `equine::attributes` / `finalize_spawn` | `equineSpawn` 64 题 |
+| 繁殖遗传 | `setOffspringAttributes`、`createOffspringAttribute`、花色 / 力量继承，马驴生骡 | `equine::offspring` | `equineBreed` 32 题 |
+| 每刻生活 | `AbstractHorse.aiStep` / `tick` / `hurtServer` / `isImmobile` | `equine/life.rs` | `zombie_equine_*` 12 场景 14800 刻 |
+| 目标表 | `registerGoals` + `addBehaviourGoals`、`Llama.registerGoals`、`RandomStandGoal` | `equine/goals.rs` | 同上（running names 逐刻比） |
+| 交互 | `Horse/AbstractChestedHorse/AbstractHorse.mobInteract`、`handleEating`、`Player.interactOn` 兜底 | `equine/interact.rs` | `equineInteract` 468 题 |
+| 死亡掉落 | `dropAllDeathLoot`、`dropCustomDeathLoot`、`dropEquipment` | `equine/death.rs` | `equineDeath` 40 题 |
+| 元数据 | `DATA_ID_FLAGS`、`DATA_ID_TYPE_VARIANT`、`DATA_ID_CHEST`、`DATA_STRENGTH_ID`、`DATA_VARIANT_ID` | `EntityData::Horse*` / `Llama*`，index 由生成器导出 | 配对 `set_entity_data` 逐字节 |
+| 存档 | `addAdditionalSaveData` / `readAdditionalSaveData` | `equine::save` / `load` | `equineSave` 12 题往返 |
+| 坐骑物品栏 | `openCustomInventoryScreen`、`ServerPlayer.openHorseInventory`、`HorseInventoryMenu`、`AbstractMountInventoryMenu.quickMoveStack` / `stillValid`、`ArmorSlot.setByPlayer` | 生物一半 `equine/inventory.rs`；菜单是工作台菜单的 `Kind::Mount`（`menu/station/mount.rs`） | 单元测试（开菜单的包、Shift 取放鞍、两次装备声、超距关闭）；没有官方逐题对拍 |
+| 落地声 | `AbstractHorse.causeFallDamage` 的 `HORSE_LAND` | `equine::land_sound` | 单元测试；音效包不在对拍范围 |
+| 羊驼回击、吐口水 | `Llama.LlamaHurtByTargetGoal`、`RangedAttackGoal(1.25, 40, 20)`、`Llama.spit`、`LlamaSpit`、`DamageTypes.SPIT` | `goals.rs` 的 `Goal::RangedAttack` / `LlamaHurtByTarget`，`equine/ranged.rs`，口水实体 `entity/spit.rs`（存档 `archive/entity/spit.rs`） | `llama_spit_far` / `_near` 两场景各 160 刻 0 不一致（羊驼和口水的位置、速度、随机源、目标名、口水同步包、玩家血量）；`chunk-content` 两道口水存档题 |
+| `followMommy` | `AbstractHorse.followMommy`（只 `createPath` 不走） | `equine/life.rs` 的 `follow_mommy` | 单元测试；`Bred` 只能从存档来，逐刻场景没覆盖 |
+
+坐骑物品栏每次点击前从生物读回鞍、身体和箱子格，点击后把鞍位 / 身体位的每次 `setByPlayer`
+按发生顺序在生物上重放（官方 `ArmorSlot.setByPlayer` 先调一次 `onEquipItem`，装备容器的
+`setItem` → `setItemSlot` 再调一次，所以穿上会出两次声、取两次 `nextLong`），箱子格整份写回。
+菜单的 `stillValid` 读实体表的公开快照（上一个实体阶段结束时的血量、箱子、位置）。
+
+生物装备从六个人形槽扩成官方全部八个槽（加 `BODY`、`SADDLE`）。马科的全部状态都在
+`Mob.equine` 里，跟着实体走，所以岛的拆分合并不需要新的按实体迁移。
+
+**没做：骑乘。** 骑乘是牛、马、猪、骆驼共用的机制，但它要先定两件世界模型里没定的事
+（第 8.2 节明确写了「载具和它的乘客」还没实现）：
+
+1. **归属**：乘客是玩家，玩家在区域的玩家表里，载具在实体表里。官方 `ServerLevel.tickPassenger`
+   在载具 tick 之后紧接着 tick 乘客（`rideTick` → `positionRider`），玩家控制时载具的位置来自
+   `ServerboundMoveVehiclePacket`（客户端权威，`handleMoveVehicle` 做移动校验）。载具和乘客要算一个
+   单位：同一个岛、同一个任务里按官方顺序跑，岛拆分时不能把它们拆开。
+2. **一刻顺序**：玩家的位置变成由载具决定（`positionRider` 在实体阶段），而现在玩家的位置只在
+   连接的移动包里更新。
+
+建议的接法（待队长定）：玩家记 `vehicle: Option<EntityUid>`，载具记 `passengers`；
+`MoveVehicle` 在世界线程处理输入时直接改载具行并做官方的移动校验；实体阶段载具 tick 完以后，
+在落地阶段按 uid 顺序给乘客玩家 `positionRider`；岛拆分把「载具 + 乘客玩家」当成不可分的一组；
+`SetPassengers` 包跟着实体同步发。马的部分（`tickRidden`、`getRiddenInput`、`executeRidersJump`、
+`RunAroundLikeCrazyGoal` 的驯服）在这之后补，猪和骆驼复用同一套。
+
+补充（2026-11-20 第三轮查证）：服务端上玩家控制的载具 `canSimulateMovement()` 为假，
+`travelRidden` 只跑 `tickRidden`（朝向、跳跃蓄力清零）再把速度清零，位置完全来自
+`ServerboundMoveVehiclePacket`；骑手玩家的服务端位置只在 `rideTick → positionRider` 里更新。
+所以「`positionRider`」可以做成载具在算阶段发出的一条意图命令（按 uid 顺序在落地阶段写玩家表），
+不必改阶段顺序；真正要定的只剩岛的拆分不能把载具和骑手拆到两边，以及玩家下线时载具跟着
+`RootVehicle` 存进玩家档。
+
+羊驼的口水是新的实体种类 `EntityKind::LlamaSpit`：生成走 `Command::ShootLlamaSpit`，
+命中实体走 `Command::SpitHit`（落地时按主人当时的公开状态造 `spit` 伤害来源），
+打到方块在算阶段直接 `discard`。同步层里口水和箭一样用 `InterpolationHandler.NO_OP`，
+位置路径永远是线性的。`didSpit` 在 `EquineState` 里，跟着实体走，岛拆合不需要新迁移。
+
+其余已知差异见 README「马科的已知限制」。
+
+### 5.9 中立生物地基和北极熊（2026-11-21）
 
 - **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
   `persistentAngerTarget` 放在 `Mob::anger`，`update` 是官方的

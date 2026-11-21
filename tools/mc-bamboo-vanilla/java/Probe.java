@@ -1230,14 +1230,14 @@ public final class Probe {
                     () -> Byte.valueOf((byte) 0).equals(dataValue(observer, actor, METADATA_SHARED_FLAGS)));
 
             // 滑翔被拒绝：只有自己收到一个不带滑翔位的 0 号。
-            int observerData = observer.actorDataPackets;
-            int ownData = actor.actorDataPackets;
+            int observerData = observer.entityDataPackets;
+            int ownData = actor.entityDataPackets;
             actor.send(actor.playerCommand(ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
-            await("metadata: fall flying is refused to the sender", () -> actor.actorDataPackets > ownData);
+            await("metadata: fall flying is refused to the sender", () -> actor.entityDataPackets > ownData);
             check("metadata: the refusal clears the fall flying flag",
                     Byte.valueOf((byte) 0).equals(dataValue(actor, actor, METADATA_SHARED_FLAGS)));
             pumpFor(SETTLE_MILLIS);
-            check("metadata: the refusal stays private", observer.actorDataPackets == observerData);
+            check("metadata: the refusal stays private", observer.entityDataPackets == observerData);
 
             actor.send(actor.clientInformation(NO_HAT_SKIN_PARTS, actor.arm));
             await("metadata: " + observer.player + " sees the new skin parts",
@@ -3213,7 +3213,7 @@ public final class Probe {
         int entityDataPackets;
         /** 只有关于 `actor` 自己的元数据包；自然刷怪不会打乱它。 */
         /** Only metadata packets about the actor; natural spawns cannot disturb it. */
-        int actorDataPackets;
+        int entityDataPackets;
         int heldSlot = -1;
         /** 最近一次捡起动画里的物品实体和玩家。 */
         int takenItem = -1;
@@ -3222,6 +3222,8 @@ public final class Probe {
         /** 最近一次出现的物品实体。 */
         int lastItemId = -1;
         int lastCowId = -1;
+        /** 世界里自然刷出来的生物（牛以外的也算）。它们的属性和元数据包不算进玩家相关的检查。 */
+        final Set<Integer> mobIds = new HashSet<>();
         int cowAdds;
         int cowAttributes;
         int cowData;
@@ -4047,9 +4049,10 @@ public final class Probe {
         }
 
         private void onEntityData(ClientboundSetEntityDataPacket packet) {
-            entityDataPackets += 1;
-            if (packet.id() == entityId) {
-                actorDataPackets += 1;
+            // 只数非生物实体的元数据包：自然刷出的动物随时会发自己的元数据。
+            // Count only non-mob entity data: naturally spawned animals send their own at any time.
+            if (!mobIds.contains(packet.id())) {
+                entityDataPackets += 1;
             }
             if (packet.id() == lastCowId) {
                 cowData += 1;
@@ -4088,6 +4091,9 @@ public final class Probe {
                 check("cow: attributes carry the cow's movement speed",
                         packet.getValues().stream().anyMatch(snapshot ->
                                 snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));
+                return;
+            }
+            if (mobIds.contains(packet.getEntityId())) {
                 return;
             }
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
@@ -4190,11 +4196,14 @@ public final class Probe {
             boolean tnt = packet.getType() == EntityTypes.TNT;
             boolean item = packet.getType() == EntityTypes.ITEM;
             boolean cow = packet.getType() == EntityTypes.COW;
-            // 平原上自然生成的动物（不只牛）也会被加进来。
-            // Naturally spawned animals (not only cows) are added as well.
-            boolean creature = packet.getType().getCategory() == MobCategory.CREATURE;
-            check("entity: only players, falling blocks, primed tnt, items and creatures are added",
-                    player || falling || tnt || item || creature);
+            // 生成期和自然刷怪会带来各种动物和怪物，类别不是 MISC 的都算生物。
+            // Generation-time and natural spawning bring all kinds of mobs: anything outside MISC.
+            boolean mob = packet.getType().getCategory() != MobCategory.MISC;
+            if (mob) {
+                mobIds.add(packet.getId());
+            }
+            check("entity: only players, falling blocks, primed tnt, items and mobs are added",
+                    player || falling || tnt || item || mob);
             if (cow) {
                 lastCowId = packet.getId();
                 cowAdds += 1;

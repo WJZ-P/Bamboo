@@ -1115,8 +1115,8 @@ pub(crate) fn on_interact_entity(
     hand: Hand,
     using_secondary_action: bool,
 ) {
-    // 官方把 `usingSecondaryAction` 记成潜行键；牛的交互不读这个标志。
-    let _ = using_secondary_action;
+    // 官方把 `usingSecondaryAction` 记成潜行键；马科用它判断开物品栏。
+    // Vanilla stores `usingSecondaryAction` as the sneak key; equines read it.
     // 先把玩家和目标的只读数据抄出来，`block_level()` 要独占借 `region`。
     let Some((game_mode, position, eye_height, player_uuid, main_held, off_held)) =
         region.players.get(&id).map(|player| {
@@ -1169,6 +1169,7 @@ pub(crate) fn on_interact_entity(
             held,
             creative,
             position,
+            sneaking: using_secondary_action,
         };
         // 剪刀在交互里扣耐久，所以交互期间把玩家的手交给方块逻辑。
         // Shears lose durability inside the interaction, so lend the hands to block logic.
@@ -1193,6 +1194,11 @@ pub(crate) fn on_interact_entity(
                 replacement,
                 outcome.replacement_limit_creative,
             );
+        }
+        // 马科 `openCustomInventoryScreen` 在 `mobInteract` 里当场开菜单，先于挥手。
+        // Equine `openCustomInventoryScreen` opens the menu inside `mobInteract`, before the swing.
+        if outcome.open_inventory {
+            crate::menu::station::open_mount(region, id, entity_id);
         }
         // 生物事件（爱心、挤奶音效）留在实体表里，同步阶段按官方收件人发出去。
         swing(region, id, try_hand, outcome.result);

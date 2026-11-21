@@ -49,10 +49,10 @@ struct Placement {
     kind: Option<MobType>,
 }
 
-/// 用 `Animal.checkAnimalSpawnRules` 注册、放置方式和高度图都一样的七种动物。
+/// 用 `Animal.checkAnimalSpawnRules` 注册、放置方式和高度图都一样的动物。
 /// 其余种类（兔、狼、狐、山羊……）的规则还没翻译，遇到时返回 `None`。
 ///
-/// The seven animals registered with `Animal.checkAnimalSpawnRules` and the same
+/// Animals registered with `Animal.checkAnimalSpawnRules` and the same
 /// placement and heightmap. Other kinds (rabbit, wolf, fox, goat, ...) are not yet
 /// translated and give `None`.
 fn placement(entity: i32) -> Option<Placement> {
@@ -62,6 +62,7 @@ fn placement(entity: i32) -> Option<Placement> {
         entity_type::DONKEY,
         entity_type::HORSE,
         entity_type::LLAMA,
+        entity_type::MULE,
         // 哞菇的放置方式和高度图一样，规则换成 `checkMushroomSpawnRules`（见 [`spawn_rules`]）。
         // Mooshrooms share the placement and heightmap; [`spawn_rules`] swaps the rule.
         entity_type::MOOSHROOM,

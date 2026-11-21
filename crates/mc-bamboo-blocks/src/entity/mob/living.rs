@@ -21,6 +21,7 @@ use super::{
         rotate_towards,
     },
     effects::EffectAction,
+    equine::Voice,
     goals::Flag,
     motion,
     navigation::NavMob,
@@ -81,6 +82,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
     body_rotation_tick(me, mob);
     range_checks(me, mob);
+    // `refreshDirtyAttributes` → `onAttributeUpdated(MAX_HEALTH)`：`/summon` 出来的马科
+    // 在第一刻才把血量夹到随机出来的最大血量。
+    // `refreshDirtyAttributes`: a summoned equine clamps its health on its first tick.
+    clamp_health(mob);
     // `Mob.tick`：每 5 刻按乘客和载具重设控制标志；牛没有乘客，三个都打开。
     if me.tick_count % 5 == 0 {
         mob.goals.set_control_flag(Flag::Move, true);
@@ -91,6 +96,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `PolarBear.tick` after `super.tick()`: the growl cooldown and persistent anger.
     if mob.mob_type == super::MobType::PolarBear {
         super::polar_bear::tick_end(me, mob, ctx);
+    }
+    // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
+    // `AbstractHorse.tick` advances its timers after `super.tick()`.
+    if mob.mob_type.is_equine() {
+        super::equine::tick_end(mob);
     }
 }
 
@@ -427,13 +437,57 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if roll < time {
             mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
             let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .ambient_sound()
-                .unwrap_or_else(|| ambient_sound(mob));
+            let sound = voice_of(mob, Voice::Ambient);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
     }
+}
+
+/// 叫声、受伤和死亡的声音：马科按种类和幼年分派，其余按类型，牛用声音变体。
+///
+/// Ambient, hurt and death sounds: equines by kind and age, others by type,
+/// cows by their sound variant.
+fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
+    if mob.mob_type.is_equine() {
+        return super::equine::voice(mob, voice);
+    }
+    match voice {
+        Voice::Hurt => mob
+            .mob_type
+            .hurt_sound()
+            .unwrap_or_else(|| match mob.mob_type {
+                super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[1],
+                _ => mob.sound_variant.hurt(),
+            }),
+        Voice::Death => mob
+            .mob_type
+            .death_sound()
+            .unwrap_or_else(|| match mob.mob_type {
+                super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[2],
+                _ => mob.sound_variant.death(),
+            }),
+        _ => ambient_sound(mob),
+    }
+}
+
+/// `onAttributeUpdated(MAX_HEALTH)` / `setHealth`：血量不超过最大血量。
+///
+/// `onAttributeUpdated(MAX_HEALTH)` / `setHealth`: keep health within the maximum.
+pub(crate) fn clamp_health(mob: &mut Mob) {
+    let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
+    if mob.health > max {
+        mob.health = max;
+    }
+}
+
+/// `LivingEntity.makeSound`：生物自己的音量和 `getVoicePitch` 的两次取数。
+///
+/// `LivingEntity.makeSound`: the mob's own volume and the two `getVoicePitch` draws.
+pub(crate) fn make_sound(me: &mut Entity, mob: &mut Mob, sound: &'static str) {
+    let pitch = voice_pitch(me, mob);
+    play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
 }
 
 /// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`。
@@ -538,6 +592,13 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    if mob.mob_type.is_equine() {
+        // 马科的叫声和音量（0.8）按自己的类。
+        // Equines use their own ambient sound and volume (0.8).
+        let sound = voice_of(mob, Voice::Ambient);
+        make_sound(me, mob, sound);
+        return;
+    }
     let pitch = voice_pitch(me, mob);
     play_sound(
         me,
@@ -615,6 +676,20 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let equine = mob.mob_type.is_equine();
+    if equine {
+        super::equine::ai_step_start(me, mob);
+    }
+    animal_ai_step(me, mob, ctx);
+    if equine {
+        super::equine::ai_step_end(me, mob, ctx);
+    }
+}
+
+/// `Animal.aiStep` 一路到 `LivingEntity.aiStep` 的公共部分。
+///
+/// The shared chain from `Animal.aiStep` down to `LivingEntity.aiStep`.
+fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -647,7 +722,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `applyInput`。
     mob.xxa *= 0.98;
     mob.zza *= 0.98;
-    if mob.is_dead_or_dying() {
+    // `isImmobile()`：缺省是濒死，马科另有覆写。
+    // `isImmobile()`: dying by default; equines override it.
+    if super::equine::is_immobile(mob) {
         mob.jumping = false;
         mob.xxa = 0.0;
         mob.zza = 0.0;
@@ -1404,14 +1481,7 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .death_sound()
-                .unwrap_or_else(|| match mob.mob_type {
-                    super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
-                    super::MobType::Chicken => super::chicken::sounds(mob)[2],
-                    _ => mob.sound_variant.death(),
-                });
+            let sound = voice_of(mob, Voice::Death);
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
         }
         die(me, mob, ctx, source);
@@ -1419,18 +1489,14 @@ pub(crate) fn hurt_server(
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = mob
-            .mob_type
-            .hurt_sound()
-            .unwrap_or_else(|| match mob.mob_type {
-                super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
-                super::MobType::Chicken => super::chicken::sounds(mob)[1],
-                _ => mob.sound_variant.hurt(),
-            });
+        let sound = voice_of(mob, Voice::Hurt);
         play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();
+    if mob.mob_type.is_equine() {
+        super::equine::after_hurt(me, mob);
+    }
     true
 }
 
@@ -1633,6 +1699,11 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         super::skeleton_drops::drop_on_death(me, mob, ctx, source, by_player);
         return;
     }
+    if mob.mob_type.is_equine() {
+        mob.events.push(MobEvent::Death);
+        super::equine::drop_on_death(me, mob, ctx, source, by_player);
+        return;
+    }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
     if !mob.mob_type.is_monster() {
@@ -1724,7 +1795,9 @@ pub(crate) fn apply_breed(
     wool: u8,
 ) {
     // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
+    // 马科的 `getBreedOffspring` 自己取数（属性遗传和花色），也不取这个 `nextBoolean`。
     // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
+    // Equine `getBreedOffspring` makes its own draws (inherited attributes and coat) instead.
     let sheep = kind == super::MobType::Sheep;
     // 哞菇的品种自己抽（`getOffspringVariant`），不取牛那个 `nextBoolean`。
     // Mooshrooms draw their own type (`getOffspringVariant`) instead of the cow `nextBoolean`.
@@ -1736,7 +1809,22 @@ pub(crate) fn apply_breed(
         });
         super::mooshroom::offspring_brown(mine, mate, &mut me.random)
     });
-    let from_father = sheep || calf_brown.is_some() || me.random.next_boolean();
+    let foal = if let Some(first) = me.kind.mob().filter(|mob| mob.mob_type.is_equine()) {
+        let Some(second) = world.entity(partner) else {
+            return;
+        };
+        let Some(second) = second.kind.mob() else {
+            return;
+        };
+        let Some(child) = super::equine::offspring(&mut me.random, first, second, position) else {
+            return;
+        };
+        Some(child)
+    } else {
+        None
+    };
+    let equine = foal.is_some();
+    let from_father = sheep || equine || calf_brown.is_some() || me.random.next_boolean();
     let mut child_variant = variant;
     let mut partner_wool = wool;
     world.with_entity_mut(partner, &mut |entity| {
@@ -1757,8 +1845,15 @@ pub(crate) fn apply_breed(
             world.random(),
         )
     });
-    let xp = 1 + me.random.next_int_bounded(7);
-    let mut calf = Entity::by_mob_type(kind, position);
+    // `finalizeSpawnChildFromBreeding` 只在 `MOB_DROPS` 开着时取经验值。
+    // `finalizeSpawnChildFromBreeding` only draws the orb value with `MOB_DROPS` on.
+    let mob_drops = world.block_game_rules().mob_drops;
+    let xp = if mob_drops {
+        1 + me.random.next_int_bounded(7)
+    } else {
+        0
+    };
+    let mut calf = foal.unwrap_or_else(|| Entity::by_mob_type(kind, position));
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;
@@ -1781,7 +1876,7 @@ pub(crate) fn apply_breed(
     world.with_entity_mut(calf_id, &mut |entity| {
         entity.y_rot = 0.0;
     });
-    if world.block_game_rules().mob_drops {
+    if mob_drops {
         // 繁殖不是 `ExperienceOrb.award`：只生成一颗球，值就是 `1 + nextInt(7)`。
         let orb = Entity::experience_orb(position, xp);
         world.spawn_entity(orb);
