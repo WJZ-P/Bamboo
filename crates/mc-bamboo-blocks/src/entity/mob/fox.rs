@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn clearing_states_keeps_pouncing() {
         let mut fox = Fox {
-            flags: 0xff & !2,
+            flags: 0b1111_1101,
             ..Fox::default()
         };
         fox.clear_states();
