@@ -532,6 +532,7 @@ pub enum Command {
     BreedAnimals {
         kind: super::mob::MobType,
         variant: super::mob::CowVariant,
+        wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
     },
@@ -584,6 +585,19 @@ pub enum Command {
     ArrowExtinguished {
         pitch: f32,
     },
+    /// `EatBlockGoal.tick` 在 `mobGriefing` 下的改方块：吃掉脚下的草，或把下面的草方块变成泥土。
+    ///
+    /// `EatBlockGoal.tick` under `mobGriefing`: eat the plant at the feet, or turn the grass
+    /// block below into dirt.
+    EatBlock {
+        pos: mc_bamboo_core::BlockPos,
+        grass_below: bool,
+    },
+    /// `dropFromGiftLootTable(.., spawnAtLocation)`：鸡下蛋这类礼物表，掉在原点。
+    ///
+    /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
+    /// the origin.
+    DropEntityLoot(super::mob::EntityLootRequest),
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -640,9 +654,10 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::BreedAnimals {
             kind,
             variant,
+            wool,
             partner,
             position,
-        } => super::mob::living::apply_breed(me, partner, position, world, kind, variant),
+        } => super::mob::living::apply_breed(me, partner, position, world, kind, variant, wool),
         Command::HurtPlayer {
             target,
             source,
@@ -668,6 +683,15 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::DropEntityLoot(request) => {
+            let origin = request.origin;
+            for stack in world.entity_loot_drops(request) {
+                world.spawn_at_location(origin, stack);
+            }
+        }
+        Command::EatBlock { pos, grass_below } => {
+            super::mob::living::apply_eat_block(world, pos, grass_below);
         }
         Command::TrampleTurtleEgg { pos, chance } => {
             super::mob::living::apply_trample_turtle_egg(world, pos, chance);

@@ -102,8 +102,12 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.WrappedGoal;
 import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.animal.cow.Cow;
 import net.minecraft.world.entity.animal.pig.Pig;
+import net.minecraft.world.entity.animal.sheep.Sheep;
+import net.minecraft.world.entity.animal.chicken.Chicken;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.monster.zombie.Husk;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
@@ -329,6 +333,10 @@ public final class MobOracle {
         final List<int[]> interactions = new ArrayList<>();
         /** 玩家受伤场景：`getDifficulty()` 的值，缺省 NORMAL。 */
         int difficulty = 2;
+        /** 羊的 `DATA_WOOL_ID` 起点（颜色 | 16 已剪毛）。 */
+        int wool;
+        /** 鸡的 `eggTime` 起点；负数表示保留构造函数抽的值。 */
+        int eggTime = -1;
         /** 玩家受伤场景：逐刻的动作，见 `PlayerAction`。 */
         final List<PlayerAction> playerActions = new ArrayList<>();
         /** 玩家受伤场景：起始装备（四件盔甲 + 主手），按物品 ID。 */
@@ -792,6 +800,93 @@ public final class MobOracle {
         static final BlockState WATER = Blocks.WATER.defaultBlockState();
         static final BlockState LAVA = Blocks.LAVA.defaultBlockState();
 
+        /** 羊和鸡：吃草长毛、剪毛、染色、混色繁殖、死亡掉落、下蛋、缓慢下落和种子繁殖。 */
+        static void farmScenes(List<Scene> scenes) {
+            int shears = BuiltInRegistries.ITEM.getId(Items.SHEARS);
+            int wheat = BuiltInRegistries.ITEM.getId(Items.WHEAT);
+            {
+                // 剪过毛的幼羊和成年羊站在草方块上：幼年 1/25 的概率低头吃草，草变泥土、长回羊毛。
+                Scene eat = new Scene("sheep_eat").ticks(300).packets();
+                ground(eat, 8);
+                eat.wool = 16;
+                eat.cow(0.5, 64.0, 0.5, 0.0F, 71L, -24000);
+                eat.cow(3.5, 64.0, 0.5, 0.0F, 72L);
+                eat.player(6.5, 64.0, 0.5, Items.AIR);
+                scenes.add(eat);
+            }
+            {
+                // 剪毛：第一次掉羊毛，第二次已剪过只返回 CONSUME；之后被打死只掉羊肉。
+                Scene shear = new Scene("sheep_shear").ticks(60).drops().packets();
+                ground(shear, 6);
+                shear.cow(0.5, 64.0, 0.5, 0.0F, 73L);
+                shear.player(1.5, 64.0, 0.5, Items.AIR);
+                shear.interact(3, 0, 0, shears, 0);
+                shear.interact(6, 0, 0, shears, 0);
+                shear.hurts.add(new double[] {30, 0, 30.0, 0});
+                scenes.add(shear);
+            }
+            {
+                // 染色后被打死：按颜色的子战利品表掉对应羊毛。
+                Scene dye = new Scene("sheep_dye_death").ticks(40).drops().packets();
+                ground(dye, 6);
+                dye.cow(0.5, 64.0, 0.5, 0.0F, 74L);
+                dye.player(1.5, 64.0, 0.5, Items.AIR);
+                dye.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(dye("lime")), 0);
+                dye.interact(5, 0, 0, BuiltInRegistries.ITEM.getId(dye("lime")), 0);
+                dye.hurts.add(new double[] {20, 0, 30.0, 0});
+                scenes.add(dye);
+            }
+            String[][] pairs = {{"red", "yellow"}, {"black", "red"}};
+            for (String[] pair : pairs) {
+                // 繁殖混色：红 + 黄有配方（橙色），黑 + 红没有，按世界随机源选一方。
+                Scene breed = new Scene("sheep_breed_" + pair[0] + "_" + pair[1]).ticks(120).drops().packets();
+                ground(breed, 8);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 75L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 76L);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(1, 0, 0, BuiltInRegistries.ITEM.getId(dye(pair[0])), 0);
+                breed.interact(1, 1, 0, BuiltInRegistries.ITEM.getId(dye(pair[1])), 0);
+                breed.interact(2, 0, 0, wheat, 0);
+                breed.interact(2, 1, 0, wheat, 0);
+                scenes.add(breed);
+            }
+            {
+                // 下蛋：计时设成 20，到点按礼物表掉蛋、放下蛋声并重抽计时。
+                Scene lay = new Scene("chicken_lay").ticks(80).drops().packets();
+                ground(lay, 6);
+                lay.eggTime = 20;
+                lay.cow(0.5, 64.0, 0.5, 0.0F, 81L);
+                lay.player(3.5, 64.0, 0.5, Items.AIR);
+                scenes.add(lay);
+            }
+            {
+                // 缓慢下落：从 8 格高处落下，空中纵向速度每刻乘 0.6。
+                Scene fall = new Scene("chicken_fall").ticks(60).packets();
+                ground(fall, 6);
+                fall.cow(0.5, 72.0, 0.5, 0.0F, 82L);
+                fall.player(3.5, 64.0, 0.5, Items.AIR);
+                scenes.add(fall);
+            }
+            {
+                // 用种子繁殖，再打死一只：小鸡的构造计时、经验球和鸡的掉落。
+                // 在尸体移除（第 120 刻）之前结束：假世界在本刻末才清掉已移除的实体，真服务端当场就清。
+                Scene breed = new Scene("chicken_breed").ticks(115).drops().packets();
+                ground(breed, 8);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 83L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 84L);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                int seeds = BuiltInRegistries.ITEM.getId(Items.WHEAT_SEEDS);
+                breed.interact(2, 0, 0, seeds, 0);
+                breed.interact(2, 1, 0, seeds, 0);
+                breed.hurts.add(new double[] {100, 1, 30.0, 0});
+                scenes.add(breed);
+            }
+        }
+
+        static net.minecraft.world.item.Item dye(String color) {
+            return BuiltInRegistries.ITEM.getValue(net.minecraft.resources.Identifier.withDefaultNamespace(color + "_dye"));
+        }
+
         static void ground(Scene scene, int radius) {
             scene.fill(-radius, 62, -radius, radius, 62, radius, DIRT);
             scene.fill(-radius, 63, -radius, radius, 63, radius, GRASS);
@@ -800,6 +895,7 @@ public final class MobOracle {
         static List<Scene> all() {
             List<Scene> scenes = new ArrayList<>();
             long[] seeds = {1L, 42L, 9001L, -7L};
+            farmScenes(scenes);
             {
                 Scene pig = new Scene("pig_rod_tempt").ticks(80);
                 ground(pig, 12);
@@ -1863,8 +1959,7 @@ public final class MobOracle {
             }
         }
         for (int i = 0; i < scene.cows.size(); i++) {
-            Animal cow = (scene.name.startsWith("pig_") ? EntityTypes.PIG : EntityTypes.COW)
-                    .create(level, EntitySpawnReason.COMMAND);
+            Animal cow = animalType(scene.name).create(level, EntitySpawnReason.COMMAND);
             double[] at = scene.cows.get(i);
             // Bamboo 生成这头牛时从种子源取过一个数，随后被场景的种子盖掉；这里照样消耗一个。
             // Bamboo draws one seed when spawning it before the scene seed overrides it.
@@ -1881,6 +1976,13 @@ public final class MobOracle {
             int age = scene.cowAges.get(i);
             if (age != 0) {
                 cow.setAge(age);
+            }
+            if (cow instanceof Sheep sheep) {
+                sheep.setColor(DyeColor.byId(scene.wool & 15));
+                sheep.setSheared((scene.wool & 16) != 0);
+            }
+            if (cow instanceof Chicken chicken && scene.eggTime >= 0) {
+                chicken.eggTime = scene.eggTime;
             }
             cows.add(cow);
             level.tracked.add(cow);
@@ -1911,7 +2013,10 @@ public final class MobOracle {
             line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
-            line.append(",\"kind\":").append(scene.name.startsWith("pig_") ? 3 : 0);
+            line.append(",\"kind\":").append(animalKind(scene.name));
+            line.append(",\"wool\":").append(cows.get(i) instanceof Sheep sheep
+                    ? (sheep.getColor().getId() | (sheep.isSheared() ? 16 : 0)) : 0);
+            line.append(",\"egg\":").append(cows.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
             line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
         line.append("],\"players\":[");
@@ -1987,6 +2092,12 @@ public final class MobOracle {
                         new ItemStack(net.minecraft.world.item.Item.byId(action[3])));
                 // 官方 `Player.interactOn` 是这条链的入口；牛只看手里这一堆。
                 net.minecraft.world.InteractionResult result = target.mobInteract(actor, InteractionHand.MAIN_HAND);
+                ItemStack inHand = actor.getItemInHand(InteractionHand.MAIN_HAND);
+                if (!result.consumesAction() && !inHand.isEmpty()) {
+                    // `interactOn` 的下一步：物品自己的 `interactLivingEntity`（染料给羊染色）。
+                    // The next `interactOn` step: the item's `interactLivingEntity` (dye on sheep).
+                    result = inHand.interactLivingEntity(actor, target, InteractionHand.MAIN_HAND);
+                }
                 ItemStack held = actor.getItemInHand(InteractionHand.MAIN_HAND);
                 StringBuilder one = new StringBuilder("{\"result\":\"");
                 one.append(result.getClass().getSimpleName()).append('"');
@@ -4419,6 +4530,9 @@ public final class MobOracle {
             out.append(",\"kind\":\"cow\",\"value\":").append(calf.getAge());
             out.append(",\"seed\":").append(randomSeed(calf));
             out.append(",\"hr\":").append(Float.floatToRawIntBits(calf.getYHeadRot()));
+            if (calf instanceof Chicken chick) {
+                out.append(",\"egg\":").append(chick.eggTime);
+            }
             out.append(",\"uuid\":\"").append(calf.getUUID()).append('"');
         } else {
             out.append(",\"kind\":\"other\"");
@@ -4457,6 +4571,45 @@ public final class MobOracle {
         return out.append('}').toString();
     }
 
+    /** 场景名前缀决定动物种类：pig_ / sheep_ / chicken_，其余是牛。 */
+    private static EntityType<? extends Animal> animalType(String scene) {
+        if (scene.startsWith("pig_")) return EntityTypes.PIG;
+        if (scene.startsWith("sheep_")) return EntityTypes.SHEEP;
+        if (scene.startsWith("chicken_")) return EntityTypes.CHICKEN;
+        return EntityTypes.COW;
+    }
+
+    /** 和 Bamboo 一侧 `CowSetup.kind` 的编号一致。 */
+    private static int animalKind(String scene) {
+        if (scene.startsWith("pig_")) return 3;
+        if (scene.startsWith("sheep_")) return 4;
+        if (scene.startsWith("chicken_")) return 5;
+        return 0;
+    }
+
+    /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
+    private static String farmVariant(Animal animal) {
+        if (animal instanceof Sheep sheep) {
+            return sheep.getColor().getSerializedName() + (sheep.isSheared() ? "|sheared" : "");
+        }
+        if (animal instanceof Chicken chicken) {
+            return chicken.getVariant().unwrapKey().orElseThrow().identifier() + "|egg" + chicken.eggTime;
+        }
+        Holder<?> variant = animal instanceof Pig pig ? pig.getVariant() : ((Cow) animal).getVariant();
+        return variant.unwrapKey().orElseThrow().identifier().toString();
+    }
+
+    /** 叫声列；羊没有叫声变种。 */
+    private static String farmSound(Animal animal) throws Exception {
+        if (animal instanceof Sheep) {
+            return "";
+        }
+        Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");
+        sound.setAccessible(true);
+        Holder<?> soundVariant = (Holder<?>) sound.invoke(animal);
+        return soundVariant.unwrapKey().orElseThrow().identifier().toString();
+    }
+
     private static String stepJson(List<Animal> cows) throws Exception {
         StringBuilder out = new StringBuilder(512);
         out.append('[');
@@ -4491,11 +4644,8 @@ public final class MobOracle {
             out.append(",\"lh\":").append(cow.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     cow.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            out.append(",\"var\":\"").append((cow instanceof Pig pig ? pig.getVariant() : ((Cow)cow).getVariant()).unwrapKey().orElseThrow().identifier()).append('"');
-            Method sound = cow.getClass().getDeclaredMethod("getSoundVariant");
-            sound.setAccessible(true);
-            Holder<?> soundVariant = (Holder<?>) sound.invoke(cow);
-            out.append(",\"snd\":\"").append(soundVariant.unwrapKey().orElseThrow().identifier()).append('"');
+            out.append(",\"var\":\"").append(farmVariant(cow)).append('"');
+            out.append(",\"snd\":\"").append(farmSound(cow)).append('"');
             out.append(",\"uuid\":\"").append(cow.getUUID()).append('"');
             out.append(",\"lr\":").append(levelSeed(cow.level()));
             out.append(",\"goals\":\"");

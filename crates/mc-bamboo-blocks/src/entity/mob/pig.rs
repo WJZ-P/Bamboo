@@ -184,7 +184,8 @@ pub(super) fn equip_saddle(
     }
     MobInteraction {
         result: InteractionResult::Success,
-        shrink_held: true,
+        shrink_held: !req.creative,
         replacement: None,
+        shear: false,
     }
 }

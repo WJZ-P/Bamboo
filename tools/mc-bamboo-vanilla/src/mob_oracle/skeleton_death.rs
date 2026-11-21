@@ -179,7 +179,12 @@ impl Report {
             mob.random.state(),
             world.random().seed(),
         );
-        let remaining = SLOTS.map(|slot| mob.kind.mob().unwrap().equipment.get(slot).item);
+        // 官方一侧只列六个人形槽；身体和鞍槽骷髅用不到。
+        // Vanilla lists the six humanoid slots; skeletons never use body or saddle.
+        let remaining: Vec<i32> = SLOTS[..6]
+            .iter()
+            .map(|slot| mob.kind.mob().unwrap().equipment.get(*slot).item)
+            .collect();
         let spawned: Vec<_> = level
             .entities
             .take_spawn_snapshots()

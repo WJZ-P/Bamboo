@@ -219,10 +219,20 @@ pub(crate) fn finalize_spawn(
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
     let variant = cow_variant_for_biome(biome);
-    let _ = random.next_int(1);
+    if kind != MobType::Sheep {
+        // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
+        // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
+        let _ = random.next_int(1);
+    }
     entity.with_mob(|_, mob| {
-        mob.variant = variant;
-        if kind == MobType::Pig {
+        if kind != MobType::Sheep {
+            mob.variant = variant;
+        }
+        if kind == MobType::Sheep {
+            super::sheep::set_color(mob, super::sheep::spawn_color(variant, random));
+        } else if kind == MobType::Chicken {
+            mob.chicken_sound_variant = super::chicken::SoundVariant::pick(random);
+        } else if kind == MobType::Pig {
             mob.pig_sound_variant = super::pig::SoundVariant::pick(random);
         } else {
             mob.sound_variant = if random.next_int(2) == 0 {

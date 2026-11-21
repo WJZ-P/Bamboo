@@ -3350,7 +3350,10 @@ fn entity_types_file(data: &VersionData) -> String {
             "PIG_SOUND_VARIANT_SERIALIZER",
             facts.pig_sound_variant_serializer,
         ),
-        ("CHICKEN_VARIANT_SERIALIZER", facts.chicken_variant_serializer),
+        (
+            "CHICKEN_VARIANT_SERIALIZER",
+            facts.chicken_variant_serializer,
+        ),
         (
             "CHICKEN_SOUND_VARIANT_SERIALIZER",
             facts.chicken_sound_variant_serializer,

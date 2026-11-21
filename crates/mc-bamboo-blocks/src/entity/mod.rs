@@ -465,6 +465,11 @@ impl Entity {
         mob.uuid = mob::insecure_uuid(&mut self.random);
         self.y_rot = self.random.next_float() * 6.283_185_5;
         mob.y_head_rot = self.y_rot;
+        if mob.mob_type == mob::MobType::Chicken {
+            // `Chicken` 构造函数最后的 `eggTime = nextInt(6000) + 6000`。
+            // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
+            mob.egg_time = self.random.next_int_bounded(6000) + 6000;
+        }
     }
 
     /// 对生物跑一段逻辑；不是生物时返回 `None`。

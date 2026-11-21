@@ -977,6 +977,19 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
+    /// `dropFromShearingLootTable` / `dropFromGiftLootTable`：原点和实体本身（剪毛时还有工具）。
+    /// 缺省没有掉落。
+    ///
+    /// `dropFromShearingLootTable` / `dropFromGiftLootTable`: origin and this entity, plus the
+    /// tool when shearing. No drops by default.
+    fn entity_loot_drops(
+        &mut self,
+        request: crate::entity::mob::EntityLootRequest,
+    ) -> Vec<ItemStack> {
+        let _ = request;
+        Vec::new()
+    }
+
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
 

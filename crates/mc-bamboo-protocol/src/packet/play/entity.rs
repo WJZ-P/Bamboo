@@ -182,6 +182,15 @@ pub enum EntityData {
     PigBoostTime(i32),
     PigVariant(i32),
     PigSoundVariant(i32),
+    /// `Sheep.DATA_WOOL_ID`（BYTE）：低 4 位颜色，第 5 位已剪毛。
+    ///
+    /// `Sheep.DATA_WOOL_ID` (BYTE): colour in the low four bits, bit 4 when sheared.
+    SheepWool(u8),
+    /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID`，注册表 ID。
+    ///
+    /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID` as registry IDs.
+    ChickenVariant(i32),
+    ChickenSoundVariant(i32),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -235,6 +244,9 @@ impl EntityData {
             Self::PigBoostTime(_) => mc_bamboo_data::entity_types::PIG_BOOST_TIME,
             Self::PigVariant(_) => mc_bamboo_data::entity_types::PIG_VARIANT,
             Self::PigSoundVariant(_) => mc_bamboo_data::entity_types::PIG_SOUND_VARIANT,
+            Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
+            Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
+            Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
         }
     }
 
@@ -368,6 +380,20 @@ impl EntityData {
                     Self::PigVariant(_) => facts::PIG_VARIANT_SERIALIZER,
                     Self::PigSoundVariant(_) => facts::PIG_SOUND_VARIANT_SERIALIZER,
                     _ => SERIALIZER_INT,
+                };
+                write_data_header(out, self.index(), serializer);
+                write_varint(out, *value);
+            }
+            Self::SheepWool(wool) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*wool);
+            }
+            Self::ChickenVariant(value) | Self::ChickenSoundVariant(value) => {
+                use mc_bamboo_data::entity_types as facts;
+                let serializer = if matches!(self, Self::ChickenVariant(_)) {
+                    facts::CHICKEN_VARIANT_SERIALIZER
+                } else {
+                    facts::CHICKEN_SOUND_VARIANT_SERIALIZER
                 };
                 write_data_header(out, self.index(), serializer);
                 write_varint(out, *value);

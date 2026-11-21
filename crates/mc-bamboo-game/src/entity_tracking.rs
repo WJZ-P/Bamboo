@@ -440,6 +440,9 @@ impl TrackedEntity {
                     items.push(item);
                 }
             }
+            // `packDirty` 按 ID 顺序遍历，补进来的脏项也要排进去。
+            // `packDirty` walks the IDs in order, including the forced items.
+            items.sort_by_key(EntityData::index);
             self.last_data = data;
             if !items.is_empty() {
                 packets.push(packet_body(&SetEntityData {
@@ -901,6 +904,9 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    if let Some(data) = farm_default_data(index, kind) {
+        return data;
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Pig {
         use mc_bamboo_data::entity_types as facts;
         match index {
@@ -1084,6 +1090,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.
+    if farm_non_default_data(mob, &mut out) {
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
         let variant = mob.variant.name();
         if variant != "minecraft:temperate" {
@@ -1102,6 +1111,89 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
     }
     out
+}
+
+/// 玩家音源的音效包（挤奶、染色、剪毛）。
+///
+/// A player-category sound packet (milking, dyeing, shearing).
+fn player_sound(sound: &str, position: mc_bamboo_core::Vec3, seed: i64) -> EventPacket {
+    EventPacket::Sound(mc_bamboo_protocol::packet::play::Sound {
+        sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
+        inline: None,
+        source: mc_bamboo_data::sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    })
+}
+
+/// 羊和鸡的默认实体数据：羊毛 0，鸡 temperate / classic。
+///
+/// Sheep and chicken defaults: wool 0, chicken temperate / classic.
+fn farm_default_data(
+    index: u8,
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+) -> Option<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as facts;
+    match (kind, index) {
+        (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
+            registry_index(chicken_variants(), "minecraft:temperate"),
+        )),
+        (MobType::Chicken, facts::CHICKEN_SOUND_VARIANT) => Some(EntityData::ChickenSoundVariant(
+            registry_index(chicken_sound_variants(), "minecraft:classic"),
+        )),
+        _ => None,
+    }
+}
+
+/// 羊和鸡偏离默认的实体数据；不是这两种时返回假。
+///
+/// Sheep and chicken data that differs from the defaults; false for other kinds.
+fn farm_non_default_data(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    out: &mut Vec<EntityData>,
+) -> bool {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    match mob.mob_type {
+        MobType::Sheep => {
+            if mob.wool != 0 {
+                out.push(EntityData::SheepWool(mob.wool));
+            }
+            true
+        }
+        MobType::Chicken => {
+            let variant = registry_index(chicken_variants(), mob.variant.name());
+            if variant != registry_index(chicken_variants(), "minecraft:temperate") {
+                out.push(EntityData::ChickenVariant(variant));
+            }
+            let sound = mob.chicken_sound_variant.registry_id();
+            if sound != registry_index(chicken_sound_variants(), "minecraft:classic") {
+                out.push(EntityData::ChickenSoundVariant(sound));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn chicken_variants() -> &'static [&'static str] {
+    mc_bamboo_data::component_registries::registry_names::CHICKEN_VARIANT
+}
+
+fn chicken_sound_variants() -> &'static [&'static str] {
+    mc_bamboo_data::component_registries::registry_names::CHICKEN_SOUND_VARIANT
+}
+
+fn registry_index(names: &[&str], name: &str) -> i32 {
+    names
+        .iter()
+        .position(|entry| *entry == name)
+        .expect("variant in the registry") as i32
 }
 
 fn pig_variant_id(name: &str) -> i32 {
@@ -1201,19 +1293,10 @@ fn event_packet(
                 None => EventPacket::Nothing,
             }
         }
-        MobEvent::MilkSound { position } => EventPacket::Sound(Sound {
-            sound: i32::from(mc_bamboo_data::sounds::sound_event(
-                "minecraft:entity.cow.milk",
-            )),
-            inline: None,
-            source: mc_bamboo_data::sounds::PLAYERS,
-            x: position.x,
-            y: position.y,
-            z: position.z,
-            volume: 1.0,
-            pitch: 1.0,
-            seed: sound_seed(),
-        }),
+        MobEvent::MilkSound { position } => {
+            player_sound("minecraft:entity.cow.milk", *position, sound_seed())
+        }
+        MobEvent::PlayerSound { sound, position } => player_sound(sound, *position, sound_seed()),
         MobEvent::Damage {
             kind,
             attacker,

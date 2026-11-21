@@ -303,10 +303,10 @@ fn step_effects(
     }
     if play_sound {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
-        let sound = if mob.mob_type == super::MobType::Pig {
-            super::pig::step_sound(mob.is_baby())
-        } else {
-            mob.sound_variant.step()
+        let sound = match mob.mob_type {
+            super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
+            super::MobType::Chicken => super::chicken::sounds(mob)[3],
+            kind => kind.step_sound().unwrap_or(mob.sound_variant.step()),
         };
         super::living::play_sound(me, mob, sound, 0.15, 1.0);
     }

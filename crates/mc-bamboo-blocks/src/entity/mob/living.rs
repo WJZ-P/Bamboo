@@ -535,11 +535,7 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         me,
         mob,
         ambient_sound(mob),
-        if mob.mob_type == super::MobType::Pig {
-            1.0
-        } else {
-            0.4
-        },
+        mob.mob_type.sound_volume(),
         pitch,
     );
 }
@@ -547,7 +543,11 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 fn ambient_sound(mob: &Mob) -> &'static str {
     match mob.mob_type {
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
-        _ => mob.sound_variant.ambient(),
+        super::MobType::Chicken => super::chicken::sounds(mob)[0],
+        _ => mob
+            .mob_type
+            .ambient_sound()
+            .unwrap_or(mob.sound_variant.ambient()),
     }
 }
 
@@ -763,6 +763,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             }
         }
     }
+    if mob.mob_type == super::MobType::Chicken {
+        super::chicken::ai_step(me, mob, ctx);
+    }
 }
 
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
@@ -812,6 +815,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 Command::BreedAnimals {
                     kind: mob.mob_type,
                     variant: mob.variant,
+                    wool: mob.wool,
                     partner,
                     position: me.position,
                 },
@@ -1389,6 +1393,7 @@ pub(crate) fn hurt_server(
                 .death_sound()
                 .unwrap_or_else(|| match mob.mob_type {
                     super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
+                    super::MobType::Chicken => super::chicken::sounds(mob)[2],
                     _ => mob.sound_variant.death(),
                 });
             play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
@@ -1403,6 +1408,7 @@ pub(crate) fn hurt_server(
             .hurt_sound()
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[1],
                 _ => mob.sound_variant.hurt(),
             });
         play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
@@ -1577,6 +1583,28 @@ pub(crate) fn apply_trample_turtle_egg(
     }
 }
 
+/// 落地 [`Command::EatBlock`]：`destroyBlock(pos, false)` 吃草，或在下面的草方块上发 2001 事件、
+/// 以标志 2 换成泥土。
+///
+/// Applies [`Command::EatBlock`]: `destroyBlock(pos, false)` for a plant, or a 2001 event and a
+/// flag-2 swap to dirt for the grass block below.
+pub(crate) fn apply_eat_block(world: &mut crate::world::World, pos: BlockPos, grass_below: bool) {
+    if !grass_below {
+        world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
+        return;
+    }
+    world.push_effect(crate::Effect::Destroyed {
+        pos,
+        state: crate::state::BlockState(mc_bamboo_data::blocks::GRASS_BLOCK),
+        except_initiator: false,
+    });
+    world.set_block(
+        pos,
+        crate::state::BlockState(mc_bamboo_data::blocks::DIRT),
+        2,
+    );
+}
+
 /// `LivingEntity.die`：掉落交给 [`Command::DropMobLoot`]，经验只在被玩家打过时掉。
 fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSource) {
     if me.removed || mob.dead {
@@ -1677,30 +1705,42 @@ pub(crate) fn apply_breed(
     world: &mut crate::world::World,
     kind: super::MobType,
     variant: super::CowVariant,
+    wool: u8,
 ) {
-    // 繁殖先用父亲的随机源选花纹，再取经验值。
-    // Breeding chooses the coat before drawing XP from the parent's random source.
-    let from_father = me.random.next_boolean();
+    // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹；羊不取这个数，颜色按配方混合。
+    // Cows, pigs and chickens pick the coat with the parent's `nextBoolean`; sheep mix colours.
+    let sheep = kind == super::MobType::Sheep;
+    let from_father = sheep || me.random.next_boolean();
     let mut child_variant = variant;
-    let xp = 1 + me.random.next_int_bounded(7);
+    let mut partner_wool = wool;
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
             if !from_father {
                 child_variant = mob.variant;
             }
+            partner_wool = mob.wool;
             mob.in_love = 0;
             set_age(me, mob, 6000);
         });
     });
     // 官方先构造幼崽（拿到 ID）再构造经验球；岛种子源和网络 ID 都按这个顺序。
+    let lamb_color = sheep.then(|| {
+        super::sheep::offspring_color(
+            mc_bamboo_core::sign::DyeColor::from_id(i32::from(wool & 15)),
+            mc_bamboo_core::sign::DyeColor::from_id(i32::from(partner_wool & 15)),
+            world.random(),
+        )
+    });
+    let xp = 1 + me.random.next_int_bounded(7);
     let mut calf = Entity::by_mob_type(kind, position);
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;
     calf.with_mob(|me, mob| {
         set_age(me, mob, -24000);
-        if kind == super::MobType::Pig {
-            mob.variant = child_variant;
+        match lamb_color {
+            Some(color) => super::sheep::set_color(mob, color),
+            None => mob.variant = child_variant,
         }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;

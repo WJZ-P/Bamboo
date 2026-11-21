@@ -1134,11 +1134,13 @@ pub(crate) fn on_interact_entity(
             creative,
             position,
         };
-        let outcome = {
+        // 剪刀在交互里扣耐久，所以交互期间把玩家的手交给方块逻辑。
+        // Shears lose durability inside the interaction, so lend the hands to block logic.
+        let outcome = crate::durability::run(region, id, try_hand, |region| {
             let (mut level, ticks) = region.block_level();
             let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
             world.interact_mob(entity_id, &request)
-        };
+        });
         if !outcome.result.consumes_action() {
             continue;
         }
