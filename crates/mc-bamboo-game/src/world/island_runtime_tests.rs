@@ -1075,10 +1075,11 @@ fn a_panicking_island_is_raised_after_every_island_is_back() {
 /// after a shutdown request it gives up past the timeout and the loop ends.
 #[test]
 fn a_stuck_island_never_deadlocks_the_master() {
-    with_stack(|| {
+    super::island_hybrid_tests::bounded(|| {
         let mut scene = set_up(8, Harness::new_islands(2, 4));
         let world = &mut scene.server.world;
         world.master.island_stop_timeout = Duration::from_millis(300);
+        world.master.island_dead_timeout = Duration::from_secs(300);
         let victim = world
             .islands
             .ids()
@@ -1086,20 +1087,27 @@ fn a_stuck_island_never_deadlocks_the_master() {
             .find(|&id| id != HOME_REGION)
             .expect("有别的岛");
         let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         world.islands.get_mut(victim).expect("在表里").test_hook =
-            Some(crate::island::IslandTestHook::Stall(Arc::clone(&release)));
+            Some(crate::island::IslandTestHook::StallNotifying {
+                entered: entered_tx,
+                release: Arc::clone(&release),
+            });
         let sender = scene.server.inbox_sender();
+        // 等卡住的岛真的在 tick 线程上进入卡顿后再发关服，不靠固定睡眠竞态。
+        // Wait until the stuck island actually enters the stall on its worker
+        // thread before sending Shutdown, avoiding a fixed-sleep race.
         let stopper = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
+            entered_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("卡住的岛 60 秒内应进入卡顿点");
             sender.send(crate::inbound::Inbound::Shutdown).unwrap();
         });
-        let started = std::time::Instant::now();
         let flow = scene.server.world.tick();
         assert!(flow.is_break(), "关服请求之后世界循环结束");
         assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "没有死锁：{:?}",
-            started.elapsed()
+            !release.load(std::sync::atomic::Ordering::Acquire),
+            "卡住的岛一直没开闸，证明没有死等它"
         );
         release.store(true, std::sync::atomic::Ordering::Release);
         stopper.join().unwrap();
