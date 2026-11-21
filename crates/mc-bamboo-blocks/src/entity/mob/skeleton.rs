@@ -518,6 +518,47 @@ mod tests {
     };
 
     #[test]
+    fn bogged_shoot_on_the_slower_interval_and_tip_their_arrows() {
+        use mc_bamboo_data::registries::{data_component_type::POTION_CONTENTS, mob_effect};
+        use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+        let interval = |kind, difficulty| BowGoal::for_kind(kind, difficulty).interval;
+        assert_eq!(interval(MobType::Bogged, 3), 50);
+        assert_eq!(interval(MobType::Bogged, 2), 70);
+        assert_eq!(interval(MobType::Stray, 3), 20);
+        assert_eq!(interval(MobType::Stray, 1), 40);
+        assert_eq!(arrow_effect(MobType::Skeleton), None);
+        for (kind, effect, duration) in [
+            (MobType::Stray, mob_effect::SLOWNESS, 600),
+            (MobType::Bogged, mob_effect::POISON, 100),
+        ] {
+            let mut stack = ItemStack::new(items::ARROW, 1);
+            let (id, ticks) = arrow_effect(kind).unwrap();
+            add_arrow_effect(&mut stack, id, ticks);
+            let patch = stack.patch();
+            let Some(ComponentValue::PotionContents {
+                potion,
+                custom_effects,
+                ..
+            }) = defaults::resolve(stack.item, &patch, POTION_CONTENTS)
+            else {
+                panic!("the arrow has no potion contents");
+            };
+            assert_eq!(*potion, None);
+            assert_eq!(custom_effects.len(), 1);
+            let details = &custom_effects[0].details;
+            assert_eq!(
+                (
+                    custom_effects[0].effect,
+                    details.duration,
+                    details.amplifier
+                ),
+                (effect, duration, 0)
+            );
+            assert!(details.show_particles && details.show_icon && !details.ambient);
+        }
+    }
+    #[test]
     fn draw_takes_twenty_ticks_in_addition_to_difficulty_cooldown() {
         assert_eq!(BowGoal::new(3).interval, 20);
         assert_eq!(BowGoal::new(2).interval, 40);

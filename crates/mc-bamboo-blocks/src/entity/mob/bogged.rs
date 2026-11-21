@@ -75,3 +75,70 @@ pub(crate) fn apply_shear(world: &mut World, entity: &mut Entity, hand: Hand, to
     entity.with_mob(|_, mob| mob.bogged_sheared = true);
     crate::durability::hurt_hand(world, hand, 1);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        BlockTicks,
+        archive::tag,
+        entity::mob::{MobType, nbt, spawn::summon_mob},
+    };
+    use mc_bamboo_nbt::Tag;
+
+    fn request(item: i32) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 7,
+            player_uuid: [7; 16],
+            hand: Hand::Main,
+            held: ItemStack::new(item, 1),
+            creative: false,
+            position: Vec3::new(1.5, 64.0, 0.5),
+        }
+    }
+
+    #[test]
+    fn only_shears_on_an_unsheared_bogged_consume_the_action() {
+        let mut mob = Mob::new(MobType::Bogged);
+        assert_eq!(mob.health, 16.0);
+        let shear = interact(&mob, &request(items::SHEARS));
+        assert_eq!(shear.result, InteractionResult::Success);
+        assert!(shear.shear);
+        assert_eq!(
+            interact(&mob, &request(items::WHEAT)),
+            MobInteraction::pass()
+        );
+        mob.bogged_sheared = true;
+        assert_eq!(
+            interact(&mob, &request(items::SHEARS)),
+            MobInteraction::pass()
+        );
+    }
+
+    #[test]
+    fn shearing_sets_the_flag_and_the_flag_round_trips_through_nbt() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let position = Vec3::new(0.5, 64.0, 0.5);
+        let uid = summon_mob(&mut world, MobType::Bogged, position, None).unwrap();
+        assert!(world.interact_mob(uid, &request(items::SHEARS)).shear);
+        let entity = world.entity(uid).unwrap();
+        assert!(entity.kind.mob().unwrap().bogged_sheared);
+        let saved = nbt::write_mob(&entity.split()).unwrap();
+        assert!(tag::bool_or(&saved, "sheared", false));
+        assert!(!world.interact_mob(uid, &request(items::SHEARS)).shear);
+
+        let loaded = Tag::Compound(vec![("sheared".to_owned(), Tag::Byte(1))]);
+        let uid = summon_mob(&mut world, MobType::Bogged, position, Some(&loaded)).unwrap();
+        assert!(
+            world
+                .entity(uid)
+                .unwrap()
+                .kind
+                .mob()
+                .unwrap()
+                .bogged_sheared
+        );
+    }
+}

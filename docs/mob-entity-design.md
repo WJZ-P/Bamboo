@@ -722,3 +722,46 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 生物装备扩成官方全部八个槽（含身体和鞍），动物死亡统一走「战利品表 → 按槽掉装备 → `Animal` 经验」。逐刻对拍场景：`pig_*`、`sheep_*`、`chicken_*`（`mob-oracle --only`），存档格式见 `chunk-content` 的 fresh 实体对拍。
 
 扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、孵一只、孵四只、打牛、玩家扔蛋，逐刻比位置、随机源、出站包、小鸡和牛），存档见 `chunk-content` 的两枚蛋。
+
+## 流浪者和沼骸的实施现状（2026-11-20）
+
+两者都是 `AbstractSkeleton`：`MobType::is_skeleton()` 把骷髅原有的分支（弓 / 近战目标的重选、
+死亡掉落、`finalizeSpawn`、日晒）一起放开，专属部分各一个文件。
+
+- `entity/mob/stray.rs`：箭的效果（缓慢 600 刻）和 `Stray.checkStraySpawnRules` 的找天。
+  `MobType::immune_to()` 是 `EntityType.Builder.immuneTo` 的方块标签，自然刷怪的
+  `isBlockDangerous` 先查它，所以流浪者能刷在细雪里。
+- `entity/mob/bogged.rs`：生命 16、射击间隔 70 / 50、箭的效果（中毒 100 刻）、剪蘑菇。
+  剪蘑菇和羊共用 `MobInteraction::shear` 与 `World::interact_mob`，按生物种类分派到
+  `bogged::apply_shear`；`Bogged.DATA_SHEARED` 存在 `Mob.bogged_sheared`。
+- 箭的效果随 `Command::ShootMobArrow { effect }` 带到落地阶段，`skeleton::add_arrow_effect`
+  照 `Arrow.addEffect` 写进拾取物品的 `potion_contents` 自定义效果；命中后的效果、箭的颜色
+  都从这个组件算，不需要箭上另加字段。
+- **公共机制：生物转化**（`entity/mob/conversion.rs`，别的生物可以直接复用）。
+  `ConversionTracker` 是官方同名类的计数（受影响计时、转化倒计时、同步布尔）和存读盘；
+  `Command::ConvertMob { from, to, level_event }` 落地 `Mob.convertTo(type,
+  ConversionParams.single(..))`：新实体走和 `/summon` 一样的构造取数，再按
+  `ConversionType.SINGLE.convert` + `convertCommon` 搬状态。发起者在自己的 tick 里 `discard`，
+  这一刻剩下的 `baseTick` 照跑、`aiStep` 不跑（官方 `LivingEntity.tick` 的 `isRemoved` 判断）。
+  僵尸溺水变溺尸在官方是同一个 `ConversionTracker`，接的时候只需要新的受影响条件和参数。
+- `LivingEntity.canFreeze()`：`living::can_freeze` 看盔甲槽的 `#freeze_immune_wearables` 和
+  类型（骷髅覆写成假，流浪者在 `#freeze_immune_entity_types`）。细雪的 `FREEZE` 效果在
+  不能冻时只置「在细雪里」，`aiStep` 照常每刻减 2、不受冻伤。
+- 元数据：骷髅的 `DATA_STRAY_CONVERSION_ID` 和沼骸的 `DATA_SHEARED` 都是 index 16 的
+  BOOLEAN，同步层复用 `EntityData::Baby`（字节相同），由 `MobPublic.skeleton_flag` 给值。
+- **岛的拆合**：新增的 `Mob.freeze_conversion`（两个相对计数 + 一个布尔）和
+  `Mob.bogged_sheared` 都在实体行上，不含绝对时刻，整行搬走即可；`ConvertMob` 在同一刻内
+  落地，不跨刻。没有新增 `IslandPart`，没有改 `region/island_split.rs`。
+- 顺手修的一处：`NearestAttackableTargetGoal` 找玩家时没有排除能力里 `invulnerable` 的玩家
+  （官方 `TargetingConditions.test` → `canAttack` → `Player.canBeSeenAsEnemy`）。以前目标
+  选择器会为创造模式玩家启动并锁住 `TARGET` 标志（攻击目标另有过滤，所以不会真的打），
+  随机源的取数次数因此和官方错开；现在在测距离和视线之前就跳过。
+- 对拍（`mob-oracle --only projectile`，37 个场景 1346 刻 0 不一致）新增 5 个场景：
+  `stray_bow_normal`、`bogged_bow_normal`、`bogged_bow_hard`（逐刻比射手和箭的位置 / 速度 /
+  随机源、箭的配对包字节（含颜色）、玩家血量和玩家身上的效果）、`skeleton_freeze`（细雪井里
+  450 刻：转化标志、冻结刻数、转化后的实体类型 / 编号 / 血量 / 主手、1048 号世界事件）、
+  `bogged_shear`（两次剪刀右键：结果、掉落物的物品 / 位置 / 速度、已剪标志）。官方一侧让
+  真的 `Stray.getArrow` / `Bogged.getArrow` 造箭，再把它加的效果搬到带种子的箭上。
+  改坏确认：中毒时长改成 101、受冻刻数改成 141，两个场景各自报不一致。
+- 未对拍：流浪者 / 沼骸的自然刷怪规则、死亡掉落（走骷髅同一条路径，战利品表由
+  `mc-bamboo-loot` 求值）、存档 NBT 和官方的逐键比较、转化时带效果 / 名字 / 标签的搬运。

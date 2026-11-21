@@ -32,3 +32,29 @@ pub(super) fn sees_sky_through_powder_snow(world: &World, pos: BlockPos) -> bool
         .level()
         .can_see_sky(BlockPos::new(check.x, check.y - 1, check.z))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        BlockTicks,
+        entity::mob::{MobType, skeleton::bow_slot, spawn::summon_mob},
+    };
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::EquipmentSlot;
+
+    #[test]
+    fn summoned_strays_carry_a_bow_and_never_freeze() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = summon_mob(&mut world, MobType::Stray, Vec3::new(0.5, 64.0, 0.5), None).unwrap();
+        let entity = world.entity(uid).unwrap();
+        let mob = entity.kind.mob().unwrap();
+        assert_eq!(bow_slot(mob), Some(EquipmentSlot::MainHand));
+        assert_eq!(mob.health, 20.0);
+        assert!(!MobType::Stray.can_freeze());
+        assert!(!MobType::Skeleton.can_freeze());
+        assert!(MobType::Bogged.can_freeze());
+    }
+}
