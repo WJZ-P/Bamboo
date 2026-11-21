@@ -69,6 +69,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "item_damage.rs", &item_damage)?;
     write_file(output_dir, "items.rs", &items)?;
     write_file(output_dir, "jukebox_songs.rs", &jukebox_songs_file(data))?;
+    write_file(output_dir, "potions.rs", &potions_file(data))?;
     write_file(output_dir, "recipes.rs", &recipes)?;
     write_file(output_dir, "light.rs", &light)?;
     write_file(output_dir, "states.rs", &states)?;
@@ -774,6 +775,7 @@ pub mod jukebox_songs;
 pub mod light;
 pub mod loot;
 pub mod packets;
+pub mod potions;
 pub mod recipes;
 pub mod registries;
 pub mod saved_world;
@@ -3264,6 +3266,7 @@ fn registries_file(data: &VersionData) -> String {
     write_registry_ids(&mut out, data, "mob_effect", MOB_EFFECT_REGISTRY);
     write_registry_ids(&mut out, data, "banner_pattern", BANNER_PATTERN_REGISTRY);
     write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
+    write_registry_ids(&mut out, data, "stat_type", "minecraft:stat_type");
 
     let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
     let _ = writeln!(out, "pub mod attribute_defaults {{");
@@ -3329,6 +3332,7 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const ARROW_IN_GROUND: u8 = {};",
         facts.arrow_in_ground
     );
+    let _ = writeln!(out, "pub const ARROW_COLOR: u8 = {};", facts.arrow_color);
     let _ = writeln!(
         out,
         "pub const SKELETON_EYE_HEIGHT: f32 = {};",
@@ -3361,6 +3365,50 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
     }
+    out
+}
+
+/// 药水注册表每条药水的效果，下标是 `minecraft:potion` 的注册表 ID。
+///
+/// The effects of each potion, indexed by the `minecraft:potion` registry id.
+fn potions_file(data: &VersionData) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一条药水效果：(`minecraft:mob_effect` ID、刻数、等级)。"
+    );
+    let _ = writeln!(out, "pub static EFFECTS: &[&[(i32, i32, i32)]] = &[");
+    for effects in &data.projectile_facts.potion_effects {
+        let _ = write!(out, "    &[");
+        for (index, [effect, duration, amplifier]) in effects.iter().enumerate() {
+            if index != 0 {
+                let _ = write!(out, ", ");
+            }
+            let _ = write!(out, "({effect}, {duration}, {amplifier})");
+        }
+        let _ = writeln!(out, "],");
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 药水 ID 对应的效果；越界时返回 `None`。");
+    let _ = writeln!(
+        out,
+        "pub fn effects(potion: i32) -> Option<&'static [(i32, i32, i32)]> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    usize::try_from(potion).ok().and_then(|id| EFFECTS.get(id)).copied()"
+    );
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 状态效果注册表中各条目的 RGB 色值。");
+    let _ = writeln!(out, "///");
+    let _ = writeln!(out, "/// RGB colours indexed by mob-effect registry ID.");
+    let _ = writeln!(
+        out,
+        "pub static EFFECT_COLORS: &[i32] = &{:?};",
+        data.projectile_facts.effect_colors
+    );
     out
 }
 

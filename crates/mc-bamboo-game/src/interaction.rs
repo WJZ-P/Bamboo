@@ -431,7 +431,10 @@ pub(crate) fn on_player_action(
         PlayerActionKind::DropAllItems => crate::drops::drop_held(region, id, true),
         PlayerActionKind::DropItem => crate::drops::drop_held(region, id, false),
         PlayerActionKind::SwapItemWithOffhand => inventory::swap_hands(region, id),
-        PlayerActionKind::ReleaseUseItem => crate::player_consume::release(region, id),
+        PlayerActionKind::ReleaseUseItem => {
+            crate::player_consume::release(region, id);
+            crate::player_weapon::release(region, id);
+        }
         PlayerActionKind::Stab => {}
     }
 }
@@ -673,6 +676,27 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::inbound::PlayerId(target),
                     ticks,
                 );
+            }
+            Effect::PlayerEffect {
+                target,
+                effect,
+                duration,
+                amplifier,
+                ambient,
+                visible,
+                show_icon,
+            } => {
+                let id = crate::inbound::PlayerId(target);
+                if mc_bamboo_blocks::entity::mob::effects::is_instantaneous(effect) {
+                    crate::player_effects::apply_instantaneous(region, id, effect, amplifier);
+                } else {
+                    let mut instance =
+                        mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_flags(
+                            effect, duration, amplifier, ambient, visible,
+                        );
+                    instance.show_icon = show_icon;
+                    crate::player_effects::give(region, id, instance);
+                }
             }
             Effect::SleepInBed {
                 pos,
@@ -1039,6 +1063,12 @@ pub(crate) fn on_use_item(
     // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
     let actor = actor_of(player);
     if crate::player_consume::start(region, id, hand) {
+        return;
+    }
+    // `BowItem.use` / `CrossbowItem.use`：拉弓、装填，或者射出手里已经装好的弩。
+    //
+    // `BowItem.use` / `CrossbowItem.use`: draw, load, or fire a charged crossbow.
+    if crate::player_weapon::start(region, id, hand) {
         return;
     }
 

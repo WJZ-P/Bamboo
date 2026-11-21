@@ -1141,6 +1141,9 @@ public final class Extractor {
         out.addProperty("arrowFlags", arrowAccessorId("ID_FLAGS"));
         out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
         out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
+        Field color = net.minecraft.world.entity.projectile.arrow.Arrow.class.getDeclaredField("ID_EFFECT_COLOR");
+        color.setAccessible(true);
+        out.addProperty("arrowColor", ((net.minecraft.network.syncher.EntityDataAccessor<?>) color.get(null)).id());
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
         Class<?> pig = net.minecraft.world.entity.animal.pig.Pig.class;
         out.addProperty("pigBoostTime", entityAccessor(pig, "DATA_BOOST_TIME").id());
@@ -1158,6 +1161,33 @@ public final class Extractor {
         out.addProperty("chickenSoundVariant", chickenSound.id());
         out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
         out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
+        out.add("potionEffects", potionEffects());
+        var effectRegistry = BuiltInRegistries.MOB_EFFECT;
+        JsonArray colors = new JsonArray();
+        for (int id = 0; id < effectRegistry.size(); id++) {
+            colors.add(effectRegistry.byId(id).getColor());
+        }
+        out.add("effectColors", colors);
+        return out;
+    }
+
+    /**
+     * 药水注册表每条药水自带的效果列表，顺序就是注册表 ID。
+     * `PotionContents.forEachEffect` 和药水箭的 `doPostHurtEffects` 都读它。
+     */
+    private static JsonArray potionEffects() {
+        JsonArray out = new JsonArray();
+        for (net.minecraft.world.item.alchemy.Potion potion : BuiltInRegistries.POTION) {
+            JsonArray effects = new JsonArray();
+            for (net.minecraft.world.effect.MobEffectInstance effect : potion.getEffects()) {
+                JsonArray entry = new JsonArray();
+                entry.add(BuiltInRegistries.MOB_EFFECT.getId(effect.getEffect().value()));
+                entry.add(effect.getDuration());
+                entry.add(effect.getAmplifier());
+                effects.add(entry);
+            }
+            out.add(effects);
+        }
         return out;
     }
 

@@ -2700,3 +2700,6 @@ fn a_cow_spawn_egg_places_a_cow_and_consumes_the_egg() {
         "世界里应该有一头牛"
     );
 }
+
+#[path = "weapon_tests.rs"]
+mod weapon_tests;

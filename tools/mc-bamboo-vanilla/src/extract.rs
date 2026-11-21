@@ -839,6 +839,7 @@ pub struct ProjectileFacts {
     pub arrow_flags: u8,
     pub arrow_pierce: u8,
     pub arrow_in_ground: u8,
+    pub arrow_color: u8,
     pub skeleton_eye_height: f32,
     pub pig_boost_time: u8,
     pub pig_variant: u8,
@@ -850,6 +851,11 @@ pub struct ProjectileFacts {
     pub chicken_sound_variant: u8,
     pub chicken_variant_serializer: i32,
     pub chicken_sound_variant_serializer: i32,
+    /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
+    ///
+    /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.
+    pub potion_effects: Vec<Vec<[i32; 3]>>,
+    pub effect_colors: Vec<i32>,
 }
 
 /// 一个物品。列表里的位置就是它的注册表 ID。

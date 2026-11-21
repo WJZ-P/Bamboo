@@ -113,9 +113,16 @@ import net.minecraft.world.entity.monster.zombie.Husk;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.flag.FeatureFlags;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponents;import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.alchemy.PotionContents;
+import net.minecraft.world.item.alchemy.Potions;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
@@ -238,10 +245,20 @@ public final class MobOracle {
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
-                    "arrow_water_crossing", "arrow_water_after_pierce",
+                    "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
                     "skeleton_bow_normal", "skeleton_bow_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("shot_bow_short_draw", "shot_bow_half_draw", "shot_bow_full_draw",
+                    "shot_bow_moving", "shot_bow_enchanted",
+                    "shot_bow_infinity", "shot_bow_tipped", "shot_bow_creative",
+                    "shot_crossbow_load", "shot_crossbow_multishot",
+                    "shot_crossbow_quick_charge", "shot_crossbow_angled_multishot",
+                    "shot_crossbow_piercing", "shot_dispenser_arrow", "shot_dispenser_arrow_up")) {
+                if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
+                playShot(official, out, name);
                 cases++;
             }
             if ("skeleton_spawn".equals(only)
@@ -2728,7 +2745,227 @@ public final class MobOracle {
                 + ",\"enchantments\":" + enchantments + "}";
     }
 
+    /**
+     * 玩家弓、弩和发射器射箭。只比射出那一刻的箭和物品栏；飞行由 projectile 场景覆盖。
+     *
+     * Player bows, crossbows and dispensers: compare the arrows and inventory
+     * right after the shot. Flight is covered by the projectile scenes.
+     */
+    private static void playShot(Official official, Writer out, String name) throws Exception {
+        boolean dispenser = name.startsWith("shot_dispenser");
+        boolean crossbow = name.startsWith("shot_crossbow");
+        boolean creative = name.contains("creative");
+        boolean multishot = name.contains("multishot");
+        boolean quick = name.contains("quick_charge");
+        boolean infinity = name.contains("infinity");
+        boolean tipped = name.contains("tipped");
+        boolean angled = name.contains("angled") || name.contains("moving");
+        boolean moving = name.contains("moving") || name.contains("angled");
+        float yaw = angled ? 37.0F : 0.0F;
+        float pitch = angled ? -42.0F : 0.0F;
+        int hold = crossbow ? (quick ? 15 : 25)
+                : (name.contains("short_draw") ? 2 : name.contains("half_draw") ? 10 : 20);
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+
+        ServerPlayer player = null;
+        int ammoCount;
+        int ammoItem;
+        int damage = 0;
+        long playerSeed = 0;
+        if (dispenser) {
+            Direction facing = name.endsWith("_up") ? Direction.UP : Direction.EAST;
+            BlockPos pos = new BlockPos(0, 64, 0);
+            net.minecraft.core.dispenser.BlockSource source = new net.minecraft.core.dispenser.BlockSource(
+                    level, pos,
+                    Blocks.DISPENSER.defaultBlockState().setValue(
+                            net.minecraft.world.level.block.DispenserBlock.FACING, facing),
+                    null);
+            ItemStack stack = new ItemStack(Items.ARROW, 1);
+            var arrow = (net.minecraft.world.entity.projectile.arrow.Arrow)
+                    ((net.minecraft.world.item.ArrowItem) Items.ARROW)
+                            .asProjectile(level, net.minecraft.world.level.block.DispenserBlock
+                                    .getDispensePosition(source, 0.7, new Vec3(0.0, 0.1, 0.0)),
+                                    stack, facing);
+            setRandom(arrow, level.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            net.minecraft.world.entity.projectile.Projectile.spawnProjectile(
+                    arrow, level, stack, a -> a.shoot(facing.getStepX(), facing.getStepY(), facing.getStepZ(), 1.1F, 6.0F));
+            stack.shrink(1);
+            ammoCount = stack.getCount();
+            ammoItem = BuiltInRegistries.ITEM.getId(stack.getItem());
+        } else {
+            player = new ServerPlayer(official.server, level,
+                    new GameProfile(new UUID(1L, 2L), "ShotOracle"), ClientInformation.createDefault());
+            player.setId(FIRST_ID + 1024);
+            player.setPos(0.5, 64.0, 0.5);
+            setRandom(player, ENTITY_RANDOM_SEED);
+            player.setYRot(yaw);
+            player.setXRot(pitch);
+            if (moving) player.setKnownMovement(new Vec3(0.125, -0.25, 0.0625));
+            player.setYHeadRot(yaw);
+            player.setYBodyRot(0.0F);
+            player.getAbilities().instabuild = creative;
+            level.playersList().add(player);
+
+            ItemStack weapon = new ItemStack(crossbow ? Items.CROSSBOW : Items.BOW);
+            ItemStack ammo = new ItemStack(tipped ? Items.TIPPED_ARROW : Items.ARROW, 5);
+            if (tipped) {
+                ammo.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.POISON));
+            }
+            if (infinity) enchant(official, weapon, Enchantments.INFINITY, 1);
+            if (multishot) enchant(official, weapon, Enchantments.MULTISHOT, 1);
+            if (quick) enchant(official, weapon, Enchantments.QUICK_CHARGE, 2);
+            if (name.contains("piercing")) enchant(official, weapon, Enchantments.PIERCING, 3);
+            if (name.contains("enchanted")) {
+                enchant(official, weapon, Enchantments.POWER, 3);
+                enchant(official, weapon, Enchantments.PUNCH, 2);
+                enchant(official, weapon, Enchantments.FLAME, 1);
+                enchant(official, weapon, Enchantments.UNBREAKING, 2);
+            }
+            player.getInventory().setItem(player.getInventory().getSelectedSlot(), weapon);
+            player.getInventory().setItem(1, ammo);
+
+            player.startUsingItem(InteractionHand.MAIN_HAND);
+            putInt(net.minecraft.world.entity.LivingEntity.class, player, "useItemRemaining", 72000 - hold);
+            // 未注册的 `Item` 子类要临时解冻物品注册表才能构造。
+            //
+            // An unregistered `Item` subclass needs the item registry temporarily unfrozen.
+            unfreezeItems();
+            try {
+                if (crossbow) {
+                    SeedCrossbow item = new SeedCrossbow(new Item.Properties().durability(465).setId(net.minecraft.resources.ResourceKey.create(Registries.ITEM, net.minecraft.resources.Identifier.withDefaultNamespace("crossbow"))), level.entitySeeds);
+                    item.onUseTick(level, player, weapon, 72000 - hold);
+                    player.stopUsingItem();
+                    item.use(level, player, InteractionHand.MAIN_HAND);
+                } else {
+                    SeedBow item = new SeedBow(new Item.Properties().durability(384).setId(net.minecraft.resources.ResourceKey.create(Registries.ITEM, net.minecraft.resources.Identifier.withDefaultNamespace("bow"))), level.entitySeeds);
+                    item.releaseUsing(weapon, level, player, 72000 - hold);
+                }
+            } finally {
+                freezeItems();
+            }
+            ItemStack left = player.getInventory().getItem(1);
+            ammoCount = left.getCount();
+            ammoItem = BuiltInRegistries.ITEM.getId(left.getItem());
+            damage = player.getItemInHand(InteractionHand.MAIN_HAND)
+                    .getOrDefault(DataComponents.DAMAGE, 0);
+            playerSeed = randomSeed(player);
+        }
+
+        JsonArray arrows = new JsonArray();
+        for (Entity entity : level.spawned) {
+            if (!(entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow)) {
+                continue;
+            }
+            Vec3 pos = arrow.position();
+            Vec3 delta = arrow.getDeltaMovement();
+            ItemStack pickup = arrow.getPickupItemStackOrigin();
+            JsonObject entry = new JsonObject();
+            entry.addProperty("x", Double.doubleToRawLongBits(pos.x));
+            entry.addProperty("y", Double.doubleToRawLongBits(pos.y));
+            entry.addProperty("z", Double.doubleToRawLongBits(pos.z));
+            entry.addProperty("dx", Double.doubleToRawLongBits(delta.x));
+            entry.addProperty("dy", Double.doubleToRawLongBits(delta.y));
+            entry.addProperty("dz", Double.doubleToRawLongBits(delta.z));
+            entry.addProperty("yaw", Float.floatToRawIntBits(arrow.getYRot()));
+            entry.addProperty("pitch", Float.floatToRawIntBits(arrow.getXRot()));
+            entry.addProperty("crit", arrow.isCritArrow());
+            entry.addProperty("pierce", arrow.getPierceLevel());
+            entry.addProperty("fire", arrow.getRemainingFireTicks());
+            entry.addProperty("pickup", arrow.pickup.ordinal());
+            entry.addProperty("item", BuiltInRegistries.ITEM.getId(pickup.getItem()));
+            entry.addProperty("count", pickup.getCount());
+            arrows.add(entry);
+        }
+        StringBuilder line = new StringBuilder(4096);
+        line.append("{\"type\":\"shot\",\"name\":").append(jsonString(name));
+        line.append(",\"hold\":").append(hold);
+        line.append(",\"yaw\":").append(Float.floatToRawIntBits(yaw));
+        line.append(",\"pitch\":").append(Float.floatToRawIntBits(pitch));
+        line.append(",\"arrows\":").append(arrows);
+        line.append(",\"ammo\":").append(ammoCount);
+        line.append(",\"ammoItem\":").append(ammoItem);
+        line.append(",\"damage\":").append(damage);
+        line.append(",\"playerSeed\":").append(playerSeed);
+        line.append(",\"levelSeed\":").append(randomSeed(level.getRandom()));
+        line.append("}\n");
+        out.write(line.toString());
+        out.flush();
+    }
+
+    /** 射出的箭用场景的实体种子源，和 Bamboo 的 `EntityStore::prepare` 对齐。 */
+    static class SeedBow extends BowItem {        private final RandomSource seeds;
+
+        SeedBow(Item.Properties properties, RandomSource seeds) {
+            super(properties);
+            this.seeds = seeds;
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.Projectile createProjectile(
+                Level level, net.minecraft.world.entity.LivingEntity shooter, ItemStack weapon,
+                ItemStack projectile, boolean crit) {
+            var entity = super.createProjectile(level, shooter, weapon, projectile, crit);
+            long seed = this.seeds.nextLong();
+            setRandom(entity, seed);
+            entity.setUUID(Mth.createInsecureUUID(entity.getRandom()));
+            return entity;
+        }
+    }
+
+    /** 弩同上。 */
+    static class SeedCrossbow extends CrossbowItem {
+        private final RandomSource seeds;
+
+        SeedCrossbow(Item.Properties properties, RandomSource seeds) {
+            super(properties);
+            this.seeds = seeds;
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.Projectile createProjectile(
+                Level level, net.minecraft.world.entity.LivingEntity shooter, ItemStack weapon,
+                ItemStack projectile, boolean crit) {
+            var entity = super.createProjectile(level, shooter, weapon, projectile, crit);
+            long seed = this.seeds.nextLong();
+            setRandom(entity, seed);
+            entity.setUUID(Mth.createInsecureUUID(entity.getRandom()));
+            return entity;
+        }
+    }
+
+    private static void unfreezeItems() throws Exception {
+        Field frozen = net.minecraft.core.MappedRegistry.class.getDeclaredField("frozen");
+        frozen.setAccessible(true);
+        frozen.setBoolean(BuiltInRegistries.ITEM, false);
+        Field holders = net.minecraft.core.MappedRegistry.class
+                .getDeclaredField("unregisteredIntrusiveHolders");
+        holders.setAccessible(true);
+        holders.set(BuiltInRegistries.ITEM, new java.util.IdentityHashMap<>());
+    }
+
+    private static void freezeItems() throws Exception {
+        Field frozen = net.minecraft.core.MappedRegistry.class.getDeclaredField("frozen");
+        frozen.setAccessible(true);
+        frozen.setBoolean(BuiltInRegistries.ITEM, true);
+    }
+
+    private static void enchant(Official official, ItemStack stack,
+            net.minecraft.resources.ResourceKey<net.minecraft.world.item.enchantment.Enchantment> key,
+            int level) throws Exception {
+        var registry = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+        stack.enchant(registry.getOrThrow(key), level);
+    }
+
     private static void playProjectile(Official official, Writer out, String name) throws Exception {
+        boolean enchanted = name.equals("arrow_power_punch_hit");
+        boolean tipped = name.equals("arrow_tipped_hit");
+        boolean spectral = name.equals("arrow_spectral_hit");
+        boolean effectHit = tipped || spectral;
         boolean skeleton = name.startsWith("skeleton_");
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
@@ -2739,7 +2976,10 @@ public final class MobOracle {
         boolean water = name.startsWith("arrow_water_");
         boolean waterTail = name.equals("arrow_water_after_pierce");
         boolean rejected = name.endsWith("_rejected");
-        boolean hasWall = wall || noGravity || despawn || waterTail;
+        // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
+        // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
+        boolean fade = name.equals("arrow_tipped_fade");
+        boolean hasWall = wall || noGravity || despawn || waterTail || fade;
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -2766,7 +3006,7 @@ public final class MobOracle {
         ServerPlayer player = new ServerPlayer(official.server, world,
                 new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
         player.setId(playerId);
-        double playerX = skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
+        double playerX = effectHit ? 18.5 : skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
         player.setPos(playerX, 64.0, 0.5);
         setRandom(player, ENTITY_RANDOM_SEED);
         player.setYRot(0.0F);
@@ -2802,7 +3042,23 @@ public final class MobOracle {
             shooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.BOW));
             world.tracked.add(shooter);
         } else {
-            var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+            net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow;
+            if (enchanted) {
+                ItemStack bow = new ItemStack(Items.BOW);
+                enchant(official, bow, Enchantments.POWER, 3);
+                enchant(official, bow, Enchantments.PUNCH, 2);
+                arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(
+                        world, 0.5, 65.5, 0.5, new ItemStack(Items.ARROW), bow);
+            } else if (spectral) {
+                arrow = new net.minecraft.world.entity.projectile.arrow.SpectralArrow(EntityTypes.SPECTRAL_ARROW, world);
+            } else {
+                arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+            }
+            if (tipped || fade) {
+                ItemStack ammo = new ItemStack(Items.TIPPED_ARROW);
+                ammo.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.POISON));
+                arrow.getSlot(0).set(ammo);
+            }
             setRandom(arrow, world.entitySeeds.nextLong());
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
             arrow.setPos(0.5, water ? 65.25 : piercing ? 65.0 : 65.5, 0.5);
@@ -2829,13 +3085,32 @@ public final class MobOracle {
             }
         }
 
+        Cow effectTarget = null;
+        if (effectHit) {
+            effectTarget = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            effectTarget.setPos(6.5, 64.0, 0.5);
+            effectTarget.setNoAi(true);
+            world.tracked.add(effectTarget);
+        }
+        var effectType = spectral ? MobEffects.GLOWING : MobEffects.POISON;
+
         var frames = new StringBuilder("[");
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = skeleton ? 105 : (piercing || water) ? 3 : 26;
+        int ticks = (effectHit || enchanted) ? 4 : skeleton ? 105 : (piercing || water) ? 3 : 26;
         int embeds = 0;
         int extinguishes = 0;
+        Bytes arrowEvents = new Bytes(official.registries);
+        int[] puffs = {0};
+        if (fade) {
+            world.packets = packet -> {
+                if (packet instanceof net.minecraft.network.protocol.game.ClientboundEntityEventPacket) {
+                    arrowEvents.add(packet);
+                    puffs[0]++;
+                }
+            };
+        }
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
             if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
@@ -2848,6 +3123,9 @@ public final class MobOracle {
                 if (despawn && tick == 6) {
                     putInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "life", 1198);
                 }
+                if (fade && tick == 6) {
+                    putInt(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "inGroundTime", 597);
+                }
                 if (player.damageCooldownTime > 0) player.damageCooldownTime--;
                 if (player.hurtTime > 0) player.hurtTime--;
                 if (shooter != null) {
@@ -2859,6 +3137,7 @@ public final class MobOracle {
                     if (arrow.isRemoved()) continue;
                     arrow.commonTick();
                     arrow.tick();
+                    arrowPackets.addAll(arrowEvents.take());
                     if (arrow.isRemoved()) {
                         Bytes gone = new Bytes(official.registries);
                         gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(arrow.getId()));
@@ -2866,6 +3145,7 @@ public final class MobOracle {
                         sync.remove(arrow.getId());
                     }
                 }
+                if (effectTarget != null) effectTarget.tick();
                 world.tracked.removeIf(Entity::isRemoved);
                 for (Entity entity : world.spawned) {
                     if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
@@ -2916,6 +3196,19 @@ public final class MobOracle {
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.projectileExtinguishes.clear();
             }
+            if (enchanted) {
+                Vec3 delta = player.getDeltaMovement();
+                frames.append(",\"playerMotion\":[")
+                        .append(Double.doubleToRawLongBits(delta.x)).append(',')
+                        .append(Double.doubleToRawLongBits(delta.y)).append(',')
+                        .append(Double.doubleToRawLongBits(delta.z)).append(']');
+            }
+            if (effectTarget != null) {
+                var effect = effectTarget.getEffect(effectType);
+                frames.append(",\"effectTarget\":[")
+                        .append(Float.floatToRawIntBits(effectTarget.getHealth()))
+                        .append(',').append(effect == null ? -1 : effect.getDuration()).append(']');
+            }
             if (piercing) {
                 frames.append(",\"targets\":").append(Arrays.toString(targets.stream()
                         .mapToInt(target -> Float.floatToRawIntBits(target.getHealth())).toArray()));
@@ -2923,9 +3216,16 @@ public final class MobOracle {
             frames.append('}');
             zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
         }
+        if (enchanted && (player.getHealth() >= 16.0F || player.getDeltaMovement().x <= 1.2)) {
+            throw new IllegalStateException("projectile scenario missed powered damage or Punch");
+        }
+        if (effectTarget != null && !effectTarget.hasEffect(effectType)) {
+            throw new IllegalStateException("projectile scenario missed " + name);
+        }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
                 || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
-                || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())) {
+                || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
+                || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
         }
         if (flame && (player.getTicksFrozen() != 0
@@ -4709,7 +5009,10 @@ public final class MobOracle {
     }
 
     private static long randomSeed(Entity entity) throws Exception {
-        RandomSource random = entity.getRandom();
+        return randomSeed(entity.getRandom());
+    }
+
+    private static long randomSeed(RandomSource random) throws Exception {
         Field field = random.getClass().getDeclaredField("seed");
         field.setAccessible(true);
         return ((AtomicLong) field.get(random)).get();

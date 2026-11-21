@@ -185,6 +185,7 @@ pub static FACTS: &[EntityTypeFacts] = &[
 pub const ARROW_FLAGS: u8 = 8;
 pub const ARROW_PIERCE: u8 = 9;
 pub const ARROW_IN_GROUND: u8 = 10;
+pub const ARROW_COLOR: u8 = 11;
 pub const SKELETON_EYE_HEIGHT: f32 = 1.74;
 pub const PIG_BOOST_TIME: u8 = 18;
 pub const PIG_VARIANT: u8 = 19;

@@ -42,6 +42,10 @@ use crate::{
 pub(super) struct Shot {
     pub stack: ItemStack,
     pub success: Option<bool>,
+    /// `overrideDispenseEvent`；`None` 用默认的 1000 / 1001。
+    ///
+    /// `overrideDispenseEvent`; `None` keeps the default 1000 / 1001.
+    pub event: Option<i32>,
 }
 
 impl Shot {
@@ -49,6 +53,7 @@ impl Shot {
         Self {
             stack,
             success: None,
+            event: None,
         }
     }
 
@@ -56,6 +61,18 @@ impl Shot {
         Self {
             stack,
             success: Some(success),
+            event: None,
+        }
+    }
+
+    /// 带 `overrideDispenseEvent` 的成功行为，弹射物用 1002。
+    ///
+    /// A successful behaviour with `overrideDispenseEvent`; projectiles use 1002.
+    pub(super) fn with_event(stack: ItemStack, event: i32) -> Self {
+        Self {
+            stack,
+            success: None,
+            event: Some(event),
         }
     }
 }
@@ -90,15 +107,28 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
     set_changed(world, pos);
 }
 
+/// `ProjectileDispenseBehavior.execute` 的箭分支，给 oracle 直接调用。
+///
+/// The arrow branch of `ProjectileDispenseBehavior.execute`, callable by oracles.
+pub fn dispense_arrow_at(
+    world: &mut World,
+    pos: BlockPos,
+    facing: Direction,
+    stack: ItemStack,
+) -> ItemStack {
+    let shot = entity::execute(world, pos, facing, stack);
+    shot.stack
+}
+
 /// `DefaultDispenseItemBehavior.dispense` 末尾的声音和冒烟。可选行为失败时声音是 1001，冒烟照样有。
 ///
 /// The sound and smoke at the end of `DefaultDispenseItemBehavior.dispense`. An optional
 /// behaviour that failed uses 1001. The smoke still plays.
 fn finish(world: &mut World, pos: BlockPos, facing: Direction, shot: Shot) -> ItemStack {
-    let sound = match shot.success {
+    let sound = shot.event.unwrap_or(match shot.success {
         Some(false) => 1001,
         _ => 1000,
-    };
+    });
     world.level_event(sound, pos, 0);
     world.level_event(2000, pos, facing.id());
     shot.stack

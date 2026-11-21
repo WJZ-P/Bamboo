@@ -217,7 +217,7 @@ impl EntityKind {
             Self::Tnt(_) => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
-            Self::Arrow(_) => mc_bamboo_data::registries::entity_type::ARROW,
+            Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }

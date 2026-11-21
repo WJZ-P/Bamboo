@@ -54,7 +54,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::Tnt { .. } => kinds::TNT,
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
-        crate::entity::KindPublic::Arrow(_) => kinds::ARROW,
+        crate::entity::KindPublic::Arrow(arrow) => arrow.variant.entity_type(),
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -197,7 +197,10 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         // `split` 不读尺寸，拼回来时按 `kind` 重算。
         dimensions: (0.0, 0.0),
         kind: match id {
-            "minecraft:arrow" => EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1]))),
+            "minecraft:arrow" => EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], false))),
+            "minecraft:spectral_arrow" => {
+                EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], true)))
+            }
             "minecraft:falling_block" => {
                 let block = match tag::field(tag, "BlockState") {
                     Some(value) => tag::decode_block_state(value)?,

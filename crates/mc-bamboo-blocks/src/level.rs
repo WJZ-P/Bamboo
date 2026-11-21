@@ -1068,6 +1068,20 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// 精确驱动当场给玩家挂一个状态效果（药水箭命中）。`false` 表示不能当场做，
+    /// 调用方改成延后的 [`Effect::PlayerEffect`]。
+    ///
+    /// Applies a potion effect to a player at once in the precise driver.
+    /// `false` means this level cannot, and the caller falls back to a deferred
+    /// [`Effect::PlayerEffect`].
+    fn give_player_effect_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _instance: &crate::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        false
+    }
+
     /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
     /// 水平 ±8、竖直 ±5 的盒，`getEntitiesOfClass(Monster.class, box,
     /// m -> m.isPreventingPlayerRest(level, player))` 非空。
@@ -2095,6 +2109,19 @@ pub enum Effect {
     },
     /// `Zombie.doHurtTarget` 的着火传染打到玩家：`igniteForTicks(ticks)`。
     IgnitePlayer { target: EntityUid, ticks: i32 },
+    /// 药水箭 / 光灵箭命中玩家：`LivingEntity.addEffect`。瞬间效果由游戏层当场结算。
+    ///
+    /// A tipped or spectral arrow hit a player: `LivingEntity.addEffect`.
+    /// The game layer settles instantaneous effects at once.
+    PlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+        amplifier: i32,
+        ambient: bool,
+        visible: bool,
+        show_icon: bool,
+    },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///
