@@ -746,6 +746,21 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 给一头生物挂效果（`LivingEntity.addEffect`）。
+    ///
+    /// Adds an effect to a mob (`LivingEntity.addEffect`).
+    pub fn give_mob_effect(
+        &mut self,
+        target: crate::entity::EntityUid,
+        instance: crate::entity::mob::effects::EffectInstance,
+    ) {
+        self.with_entity_mut(target, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                crate::entity::mob::living::add_effect(mob, instance.clone());
+            });
+        });
+    }
+
     /// 药水箭的瞬间效果（治疗 / 伤害）在玩家身上当场结算。
     ///
     /// A tipped arrow's instantaneous effect (healing or harm) on a player.
@@ -2017,6 +2032,19 @@ impl<'a> World<'a> {
         self.level.explosion_block_drops(state, pos)
     }
 
+    /// `DESTROY_WITH_DECAY` 的爆炸掉落：战利品参数带上爆炸半径。
+    ///
+    /// Explosion drops under `DESTROY_WITH_DECAY`: the loot parameters carry the radius.
+    pub(crate) fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.note_access(pos, true);
+        self.level.explosion_block_drops_decayed(state, pos, radius)
+    }
+
     /// 生物死时的战利品，见 [`Level::mob_loot_drops`]。
     pub(crate) fn mob_loot_drops(
         &mut self,
@@ -3234,6 +3262,9 @@ impl<'a> World<'a> {
         for _ in 0..crate::entity::mob::goat::eating_sounds(&entity, request, &outcome) {
             let roll = self.random().next_float();
             entity.with_mob(|me, mob| crate::entity::mob::goat::play_eating_sound(me, mob, roll));
+        }
+        if outcome.damage_held {
+            crate::durability::hurt_hand(self, request.hand, 1);
         }
         if outcome.discard {
             // `Bucketable.bucketMobPickup` 的 `pickupEntity.discard()`：不 `put` 回来

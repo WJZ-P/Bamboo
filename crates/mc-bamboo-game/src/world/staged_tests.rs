@@ -4,14 +4,14 @@
 //! `worldgen.rs` / `gen-world` 测过纯函数；这一条把两者接起来，确认计算池线程上
 //! 调 `OverworldGenerator`、世界线程按回执交付的盒子里是噪声地形而不是超平坦模板，
 //! 并且生成期光照（`light` 阶段算出的天空光 + 方块光、`isLightOn=true`）真的落进
-//! 交付盒子，1 线程和 4 线程逐格相同。
+//! 交付盒子，1、2、4、8 线程逐格相同。
 //!
 //! End-to-end: a `normal` world delivers real terrain through the Director's
 //! `Staged` pipeline + compute pool. `director/tests.rs` covers the state
 //! machine and `worldgen.rs`/`gen-world` cover the pure functions; this wires
 //! them together and checks the delivered box is noise terrain, that the
 //! generation-time sky + block light (`isLightOn=true`) is baked in, and that
-//! 1-thread and 4-thread results are cell-by-cell identical.
+//! 1-, 2-, 4- and 8-thread results are cell-by-cell identical.
 
 use std::{
     collections::BTreeMap,
@@ -199,45 +199,47 @@ fn generated_cells_with_seed(
     out
 }
 
-/// 验收：1 线程和 4 线程的计算池生成同一片 normal 世界区块，逐格方块、天空光、
+/// 验收：1、2、4、8 线程的计算池生成同一片 normal 世界区块，逐格方块、天空光、
 /// 方块光都完全相同。`features` 的邻居写增量按 `TaskId` 顺序追加、完工按来源中心的
 /// 固定先后合并，`light` 阶段的生成期光照是从只读快照算出的纯函数，两者都与线程
 /// 调度无关。
 ///
-/// Acceptance: 1-thread and 4-thread compute pools produce byte-identical
+/// Acceptance: 1-, 2-, 4- and 8-thread compute pools produce byte-identical
 /// blocks AND sky/block light for the same area. Feature deltas merge in
 /// `TaskId` order and are merged in a fixed source order; generation-time light is a pure
 /// function of the read-only snapshots, so neither depends on scheduling.
 #[test]
-fn one_and_four_threads_generate_identical_feature_blocks() {
+fn worker_counts_generate_identical_feature_blocks() {
     let positions: Vec<ChunkPos> = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))
         .collect();
     let one = generated_cells(1, &positions);
-    let four = generated_cells(4, &positions);
     assert_eq!(one.len(), 9);
-    assert_eq!(
-        one.keys().collect::<Vec<_>>(),
-        four.keys().collect::<Vec<_>>()
-    );
-    for (pos, a) in &one {
-        let b = four.get(pos).expect("both runs delivered the same chunks");
-        assert_eq!(
-            a.blocks, b.blocks,
-            "chunk {pos:?} blocks differ across threads"
+    for threads in [2, 4, 8] {
+        let other = generated_cells(threads, &positions);
+        assert!(
+            one.keys().eq(other.keys()),
+            "loaded chunks differ with {threads} workers"
         );
-        assert_eq!(
-            a.sky, b.sky,
-            "chunk {pos:?} sky light differs across threads"
-        );
-        assert_eq!(
-            a.block, b.block,
-            "chunk {pos:?} block light differs across threads"
-        );
-        assert_eq!(
-            a.light_on, b.light_on,
-            "chunk {pos:?} isLightOn differs across threads"
-        );
+        for (pos, a) in &one {
+            let b = &other[pos];
+            assert_eq!(
+                a.blocks, b.blocks,
+                "chunk {pos:?} blocks differ with {threads} workers"
+            );
+            assert_eq!(
+                a.sky, b.sky,
+                "chunk {pos:?} sky light differs with {threads} workers"
+            );
+            assert_eq!(
+                a.block, b.block,
+                "chunk {pos:?} block light differs with {threads} workers"
+            );
+            assert_eq!(
+                a.light_on, b.light_on,
+                "chunk {pos:?} isLightOn differs with {threads} workers"
+            );
+        }
     }
 }
 

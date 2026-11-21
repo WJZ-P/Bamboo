@@ -125,9 +125,9 @@ impl SpawnState {
                 continue;
             };
             // `Mob.requiresCustomPersistence()` 只认载具和拴绳，Bamboo 都没有；鱼从桶里
-            // 放出来的那种要算进来。
+            // 放出来的那种、搬着方块的末影人要算进来。
             // Vanilla `requiresCustomPersistence()` needs a vehicle or a leash; fish
-            // released from a bucket count as well.
+            // released from a bucket and endermen carrying a block count as well.
             if mob.requires_custom_persistence() {
                 continue;
             }
@@ -669,7 +669,12 @@ pub(super) fn check_spawn_rules(
         | MobType::Donkey
         | MobType::Mule
         | MobType::Llama => animal_spawn_rules(world, pos),
-        MobType::Zombie | MobType::Skeleton => {
+        MobType::Zombie
+        | MobType::Skeleton
+        | MobType::Creeper
+        | MobType::Spider
+        | MobType::CaveSpider
+        | MobType::Enderman => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
         MobType::Husk => {
@@ -943,6 +948,8 @@ mod tests {
             uid,
             position,
             eye_height: 1.62,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
             alive: true,
             spectator: false,
             creative: false,
@@ -1050,17 +1057,23 @@ mod tests {
             }
         }
         assert!(spawned > 0, "平原草地上应该刷出牛");
-        // 平原的 `CREATURE` 表里建模了的有牛、猪、羊、鸡；白天不会有怪物。
-        // The modelled plains creatures are cows, pigs, sheep and chickens; no
-        // monster spawns by day.
+        // 平原的 `CREATURE` 表里建模了的有牛、猪、羊、鸡，加上马科合并带进来的马和驴；
+        // 白天不会有怪物。
+        // The modelled plains creatures are cows, pigs, sheep and chickens, plus the
+        // horses and donkeys from the equine merge; no monster spawns by day.
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
             assert!(
                 matches!(
                     mob.mob_type,
-                    MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+                    MobType::Cow
+                        | MobType::Pig
+                        | MobType::Sheep
+                        | MobType::Chicken
+                        | MobType::Horse
+                        | MobType::Donkey
                 ),
-                "白天只刷出平原的动物，实际是 {:?}",
+                "白天只刷出平原的被动动物，实际是 {:?}",
                 mob.mob_type
             );
         }
@@ -1215,6 +1228,44 @@ mod tests {
         }
         assert!(zombies, "黑暗里应该刷出僵尸");
         assert!(skeletons, "黑暗里应该刷出骷髅");
+    }
+
+    /// 苦力怕、蜘蛛和末影人走同一条怪物分支，黑暗里也会自然刷出来。
+    ///
+    /// Creepers, spiders and endermen take the same monster branch and spawn in the dark.
+    #[test]
+    fn creepers_spiders_and_endermen_spawn_in_the_dark() {
+        let mut level = TestLevel::new();
+        grass_platform(&mut level);
+        level.light = Some((0, 0));
+        level.players.push(player(1, Vec3::new(8.5, 64.0, 40.5)));
+        let params = params(289 * 4, true);
+        let chunk = ChunkPos::new(0, 0);
+        let wanted = [types::CREEPER, types::SPIDER, types::ENDERMAN];
+        let mut seen = [false; 3];
+        // 平原的末影人权重只有 10（苦力怕、蜘蛛各 100），要多跑一些刻；找齐就停。
+        // Plains endermen weigh only 10 (creepers and spiders 100), so allow many
+        // ticks; the loop stops once all three appeared.
+        for _ in 0..40000 {
+            run_tick(&mut level, chunk, &params);
+            let spawned: Vec<_> = level
+                .entities()
+                .iter_public()
+                .map(|entity| (entity.uid, entity.kind.entity_type()))
+                .collect();
+            for (uid, entity_type) in spawned {
+                if let Some(index) = wanted.iter().position(|&id| id == entity_type) {
+                    seen[index] = true;
+                }
+                // 刷出来的都清掉，怪物上限就不会被别的种类占满。
+                // Clear every spawn so other kinds never fill the monster cap.
+                level.entities_mut_for_test().remove(uid);
+            }
+            if seen.iter().all(|&found| found) {
+                break;
+            }
+        }
+        assert_eq!(seen, [true; 3], "黑暗里应该刷出苦力怕、蜘蛛和末影人");
     }
 
     #[test]

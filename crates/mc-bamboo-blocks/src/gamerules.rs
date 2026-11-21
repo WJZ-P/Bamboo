@@ -52,6 +52,11 @@ pub struct BlockGameRules {
     pub mob_griefing: bool,
     /// `GameRules.MOB_DROPS`：生物死时掉不掉战利品和经验。
     pub mob_drops: bool,
+    /// `GameRules.MOB_EXPLOSION_DROP_DECAY`：生物爆炸炸掉的方块按 1/半径 的概率才掉落。
+    ///
+    /// `GameRules.MOB_EXPLOSION_DROP_DECAY`: blocks broken by a mob explosion drop with
+    /// probability 1/radius.
+    pub mob_explosion_drop_decay: bool,
     /// `GameRules.MAX_ENTITY_CRAMMING`：`pushEntities` 的挤压上限。
     pub max_entity_cramming: i32,
 }
@@ -78,6 +83,7 @@ impl BlockGameRules {
             spawn_monsters: bool_default(gamerules::SPAWN_MONSTERS),
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),
+            mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
             max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),
         }
     }
@@ -164,6 +170,7 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "spawn_mobs" => rules.spawn_mobs = value,
         "mob_griefing" => rules.mob_griefing = value,
         "mob_drops" => rules.mob_drops = value,
+        "mob_explosion_drop_decay" => rules.mob_explosion_drop_decay = value,
         _ => {}
     }
 }

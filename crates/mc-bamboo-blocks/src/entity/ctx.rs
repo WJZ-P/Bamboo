@@ -230,6 +230,8 @@ pub struct PlayerView {
     pub uuid: Option<[u8; 16]>,
     pub position: Vec3,
     pub eye_height: f32,
+    pub look_direction: Vec3,
+    pub gaze_disguise: bool,
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
@@ -556,6 +558,20 @@ pub enum Command {
         center: Vec3,
         radius: f32,
     },
+    /// 生物引发的爆炸（`Level.ExplosionInteraction.MOB`）：射线、伤害生物和玩家、
+    /// 按 `mobGriefing` 破坏方块。发出者就是爆炸的来源实体。
+    ///
+    /// A mob-caused explosion (`Level.ExplosionInteraction.MOB`): rays, damage to mobs and
+    /// players, and block damage under `mobGriefing`. The emitter is the source entity.
+    ExplodeMob {
+        center: Vec3,
+        radius: f32,
+        /// 来源生物这一刻的公开数据：它正在 tick，`me.kind` 是占位，死亡消息要靠它拿名字。
+        ///
+        /// The source mob's public data: it is mid-tick with a placeholder `me.kind`, and
+        /// death messages need its name.
+        source: Box<EntityPublic>,
+    },
     /// 下落方块这一刻的落地判定和后果：能不能放回去、发 1031 还是 1029、
     /// 要不要掉成物品、自己消不消失。需要 `&mut World` 的只读判定也在这里。
     ///
@@ -587,6 +603,11 @@ pub enum Command {
     ///
     /// Death loot table, separate from equipment and XP to preserve vanilla order.
     DropMobLoot(super::mob::MobDeathLoot),
+    EndermanBlock {
+        origin: BlockPos,
+        pos: BlockPos,
+        place: bool,
+    },
     AwardDeathExperience {
         amount: i32,
     },
@@ -640,11 +661,25 @@ pub enum Command {
         target: EntityUid,
         ticks: i32,
     },
-    /// `Mob.doHurtTarget` 打到另一头生物。
+    /// `Mob.doHurtTarget` 打到另一头生物。`on_hit` 是命中后立刻挂上的效果
+    /// （洞穴蜘蛛的中毒），只有伤害真的落地才生效。
+    ///
+    /// `Mob.doHurtTarget` against another mob. `on_hit` is applied only if the hurt lands
+    /// (the cave spider's poison).
     HurtMob {
         target: EntityUid,
         source: super::mob::DamageSource,
         amount: f32,
+        on_hit: Option<super::mob::effects::EffectInstance>,
+    },
+    /// `LivingEntity.addEffect` 对玩家：洞穴蜘蛛打中玩家后的中毒。
+    ///
+    /// `LivingEntity.addEffect` on a player: the cave spider's poison after a hit.
+    AddPlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+        amplifier: i32,
     },
     /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
     MobLevelEvent {
@@ -796,6 +831,11 @@ pub enum Command {
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
         Command::Explode { center, radius } => world.explode_tnt(center, radius),
+        Command::ExplodeMob {
+            center,
+            radius,
+            source,
+        } => world.explode_mob(&source, center, radius),
         Command::LandFallingBlock {
             data,
             entity_drops,
@@ -832,6 +872,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             from,
             self_pushable,
         } => super::mob::living::apply_push(me, other, from, self_pushable, world),
+        Command::EndermanBlock { origin, pos, place } => {
+            super::mob::enderman::apply_block_goal(me, world, origin, pos, place)
+        }
         Command::DropMobLoot(loot) => {
             for stack in world.mob_loot_drops(loot, me.position) {
                 world.spawn_at_location(me.position, stack);
@@ -886,8 +929,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             target,
             source,
             amount,
+            on_hit,
         } => {
-            let _ = world.hurt_mob(target, source, amount);
+            if world.hurt_mob(target, source, amount)
+                && let Some(effect) = on_hit
+            {
+                world.give_mob_effect(target, effect);
+            }
+        }
+        Command::AddPlayerEffect {
+            target,
+            effect,
+            duration,
+            amplifier,
+        } => {
+            world.give_player_effect(
+                target,
+                super::mob::effects::EffectInstance::with_amplifier(effect, duration, amplifier),
+            );
         }
         Command::MobLevelEvent { event, pos, data } => {
             world.push_effect(crate::Effect::LevelEvent {

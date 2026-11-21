@@ -1349,6 +1349,7 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
         open_inventory: false,
         shear: false,
+        damage_held: false,
         discard: false,
         limit_creative: true,
     })
@@ -1469,6 +1470,7 @@ mod tests {
             replacement: None,
             open_inventory: false,
             shear: false,
+            damage_held: false,
             discard: false,
             limit_creative: true,
         };

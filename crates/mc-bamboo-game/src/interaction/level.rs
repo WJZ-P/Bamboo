@@ -697,9 +697,36 @@ impl Level for RegionLevel<'_> {
             self.loot_sequences,
             self.random.source(),
             self.block_weather,
-            state,
-            pos,
-            block_entity,
+            crate::block_drops::ExplodedBlock {
+                state,
+                pos,
+                block_entity,
+                explosion_radius: None,
+            },
+        )
+    }
+
+    /// 生物爆炸在 `mobExplosionDropDecay` 下的 `getDrops`：带爆炸半径。
+    ///
+    /// `getDrops` for a mob explosion under `mobExplosionDropDecay`, with the radius.
+    fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<ItemStack> {
+        let block_entity = crate::block_drops::collect_block_entity(self.containers, pos);
+        crate::block_drops::explosion_loot(
+            self.chunks,
+            self.loot_sequences,
+            self.random.source(),
+            self.block_weather,
+            crate::block_drops::ExplodedBlock {
+                state,
+                pos,
+                block_entity,
+                explosion_radius: Some(radius),
+            },
         )
     }
 
@@ -711,9 +738,12 @@ impl Level for RegionLevel<'_> {
             self.loot_sequences,
             self.random.source(),
             self.block_weather,
-            state,
-            pos,
-            block_entity,
+            crate::block_drops::ExplodedBlock {
+                state,
+                pos,
+                block_entity,
+                explosion_radius: None,
+            },
         )
     }
 
@@ -789,7 +819,7 @@ impl Level for RegionLevel<'_> {
             luck: 0.0,
             level: Some(&view),
         };
-        match mc_bamboo_loot::entity_death_drops(
+        let mut stacks = match mc_bamboo_loot::entity_death_drops(
             loot.victim.loot_table(),
             &params,
             0,
@@ -801,7 +831,42 @@ impl Level for RegionLevel<'_> {
                 tracing::debug!(%error, "skipping mob drops: the loot table needs missing data");
                 Vec::new()
             }
+        };
+        // `Enderman.dropCustomDeathLoot`：搬着的方块用一把带精准采集的假钻石斧查方块表。
+        // `Enderman.dropCustomDeathLoot`: the carried block's table is rolled with a fake
+        // silk-touch diamond axe.
+        if let Some(carried) = loot.carried {
+            let mut tool = mc_bamboo_loot::LootStack::new(mc_bamboo_data::items::DIAMOND_AXE, 1);
+            if let Some(silk_touch) = mc_bamboo_loot::enchantment_id("minecraft:silk_touch") {
+                tool.enchant(silk_touch, 1);
+            }
+            let at = mc_bamboo_core::BlockPos::containing(origin);
+            let view = crate::block_drops::ChunkLevel {
+                chunks: self.chunks,
+                weather: self.block_weather,
+            };
+            let block = mc_bamboo_loot::BlockDropParams {
+                state: carried,
+                pos: (at.x, at.y, at.z),
+                level: &view,
+                block_entity: None,
+                breaker: None,
+                tool: Some(tool),
+                explosion_radius: None,
+                luck: 0.0,
+            };
+            match mc_bamboo_loot::block_drops(
+                &block,
+                Some(self.loot_sequences),
+                self.random.source(),
+            ) {
+                Ok(drops) => stacks.extend(drops.iter().map(crate::loot_stacks::loot_stack)),
+                Err(error) => {
+                    tracing::debug!(%error, "skipping the carried block's drops");
+                }
+            }
         }
+        stacks
     }
 
     fn entity_loot_drops(
