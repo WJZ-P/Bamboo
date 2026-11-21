@@ -264,6 +264,15 @@ public final class MobOracle {
                 playProjectile(official, out, name);
                 cases++;
             }
+            if (only == null || "equine".startsWith(only)) {
+                cases += playEquines(official, out);
+            }
+            if (only == null || "llama_spit".startsWith(only)) {
+                OracleLlama.checkAim(official);
+                playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
+                playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
+                cases += 2;
+            }
             for (String name : List.of("shot_bow_short_draw", "shot_bow_half_draw", "shot_bow_full_draw",
                     "shot_bow_moving", "shot_bow_enchanted",
                     "shot_bow_infinity", "shot_bow_tipped", "shot_bow_creative",
@@ -1868,7 +1877,49 @@ public final class MobOracle {
             scenes.add(consumeBase("consume_enchanted_apple", 40,
                     itemId(Items.ENCHANTED_GOLDEN_APPLE), 20));
             scenes.add(consumeBase("consume_stew", 40, itemId(Items.SUSPICIOUS_STEW), 10));
+            equineScenes(scenes);
             return scenes;
+        }
+
+        /**
+         * 马科（类型 6 马、7 驴、8 骡、9 羊驼；3–5 是猪、羊、鸡）的逐刻场景，借僵尸场景的多生物路径：
+         * 吃草、扬蹄、甩尾计时和随机源，受伤扬蹄与恐慌，幼崽。
+         * Equine tick scenes on the multi-mob zombie path: grazing, rearing, timers,
+         * random draws, rearing and panic when hurt, and foals.
+         */
+        private static void equineScenes(List<Scene> scenes) {
+            for (int kind = 6; kind <= 9; kind++) {
+                for (long seed : new long[] {11L, 4242L}) {
+                    Scene graze = new Scene("zombie_equine_graze_" + kind + "_" + seed).ticks(1500).difficulty(2);
+                    ground(graze, 12);
+                    graze.mob(kind, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                    graze.player(20.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(graze);
+                }
+            }
+            Scene foal = new Scene("zombie_equine_foal").ticks(800).difficulty(2);
+            ground(foal, 12);
+            foal.mob(6, 0.5, 64.0, 0.5, 0.0F, 31L, -24000);
+            foal.mob(9, 4.5, 64.0, 0.5, 90.0F, 32L, -24000);
+            foal.player(20.5, 64.0, 0.5, Items.AIR);
+            scenes.add(foal);
+            for (int kind : new int[] {6, 8}) {
+                Scene hurt = new Scene("zombie_equine_hurt_" + kind).ticks(400).difficulty(2);
+                ground(hurt, 12);
+                hurt.mob(kind, 0.5, 64.0, 0.5, 0.0F, 57L, 0);
+                hurt.player(3.5, 64.0, 0.5, Items.AIR);
+                for (int tick : new int[] {20, 60, 100, 140, 180}) {
+                    hurt.hurts.add(new double[] {tick, 0, 1.0, 0});
+                }
+                scenes.add(hurt);
+            }
+            Scene herd = new Scene("zombie_equine_herd").ticks(1200).difficulty(2);
+            ground(herd, 12);
+            herd.mob(6, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+            herd.mob(7, 3.5, 64.0, 2.5, 45.0F, 72L, 0);
+            herd.mob(9, -3.5, 64.0, -2.5, 180.0F, 73L, 0);
+            herd.player(4.5, 64.0, 4.5, Items.WHEAT);
+            scenes.add(herd);
         }
 
         private static int itemId(Item item) {
@@ -2839,6 +2890,11 @@ public final class MobOracle {
             scenes.add(new NaturalScene("skeleton_near_" + distance, EntityTypes.SKELETON, "plains", 2, 0, 0, 11,
                     false, 8.5 - distance, 0, 289, true, false));
         }
+        // 马科：簇上限 6，组数据里带共享毛色和各自的幼崽概率。
+        // Equines: a cluster cap of 6 and group data with a shared coat and their own baby chance.
+        scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         int count = 0;
         for (var scene : scenes) {
             for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
@@ -3027,6 +3083,13 @@ public final class MobOracle {
             row.add(Float.floatToRawIntBits(mob.getYRot()));
             row.add(mob.isBaby() ? 1 : 0);
             row.add(mob.isLeftHanded() ? 1 : 0);
+            // 马科追加血量、跳跃、速度、花色和力量，核对区域随机源上的 `finalizeSpawn`。
+            // Equines append health, jump, speed, variant and strength for `finalizeSpawn`.
+            if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
+                for (var value : com.google.gson.JsonParser.parseString(equineState(horse)).getAsJsonArray()) {
+                    row.add(value);
+                }
+            }
             spawned.add(row);
         }
         var result = new JsonObject();
@@ -3147,6 +3210,379 @@ public final class MobOracle {
             throw new IllegalStateException("skeleton_halloween needs both holiday items and an ordinary helmet");
         }
         return cases;
+    }
+
+    // 同组逐只核对，确保共享毛色和幼年抽取没有改变随机源顺序。
+    // Compare each member to catch drift in group coat and baby rolls.
+    private static int playEquineGroup(
+            Official official, Writer out, FakeLevel world,
+            EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse> type,
+            int kind, long seed) throws Exception {
+        world.getRandom().setSeed(seed);
+        net.minecraft.world.entity.SpawnGroupData group = null;
+        JsonArray members = new JsonArray();
+        for (int i = 0; i < 6; i++) {
+            var mob = type.create(world, EntitySpawnReason.NATURAL);
+            mob.setPos(0.5, 64, 0.5);
+            group = mob.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.NATURAL, group);
+            JsonObject member = new JsonObject();
+            member.add("state", com.google.gson.JsonParser.parseString(equineState(mob)));
+            member.addProperty("age", mob.getAge());
+            member.addProperty("leftHanded", mob.isLeftHanded());
+            member.addProperty("levelSeed", levelSeed(world));
+            member.addProperty("data", pairingData(official, mob));
+            members.add(member);
+        }
+        JsonObject row = new JsonObject();
+        row.addProperty("type", "equineGroup");
+        row.addProperty("kind", kind);
+        row.addProperty("seed", seed);
+        row.add("members", members);
+        out.write(row + "\n");
+        return 1;
+    }
+
+    private static int playEquines(Official official, Writer out) throws Exception {
+        var world = FakeLevel.create(official);
+        var pos = new BlockPos(0, 64, 0);
+        var types = List.of(EntityTypes.HORSE, EntityTypes.DONKEY, EntityTypes.MULE, EntityTypes.LLAMA);
+        var eggs = List.of(Items.HORSE_SPAWN_EGG, Items.DONKEY_SPAWN_EGG, Items.MULE_SPAWN_EGG, Items.LLAMA_SPAWN_EGG);
+        int cases = 0;
+        for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+            var type = types.get(typeIndex);
+            for (int sample = 0; sample < 8; sample++) {
+                long seed = 20261120L + sample * 104729L;
+                for (boolean egg : new boolean[] {false, true}) {
+                    world.getRandom().setSeed(seed);
+                    var reason = egg ? EntitySpawnReason.SPAWN_ITEM_USE : EntitySpawnReason.COMMAND;
+                    var mob = egg
+                            ? type.spawn(world, new ItemStack(eggs.get(typeIndex)), null, pos, reason, true, false)
+                            : type.create(world, reason);
+                    if (!egg) {
+                        mob.setPos(0.5, 64, 0.5);
+                        mob.finalizeSpawn(world, world.spawnDifficulty, reason, null);
+                    }
+                    out.write("{\"type\":\"equineSpawn\",\"seed\":" + seed
+                            + ",\"kind\":" + typeIndex + ",\"egg\":" + egg
+                            + ",\"state\":" + equineState(mob)
+                            + ",\"leftHanded\":" + mob.isLeftHanded()
+                            + ",\"yaw\":" + (egg ? Float.floatToRawIntBits(mob.getYRot()) : 0)
+                            + ",\"levelSeed\":" + levelSeed(world)
+                            + ",\"data\":\"" + pairingData(official, mob) + "\"}\n");
+                    cases++;
+                }
+
+                cases += playEquineGroup(official, out, world, type, typeIndex, seed);
+
+                var parent = type.create(world, EntitySpawnReason.COMMAND);
+                var partnerType = typeIndex < 2 && (sample & 1) == 1 ? types.get(1 - typeIndex) : type;
+                var partner = partnerType.create(world, EntitySpawnReason.COMMAND);
+                world.getRandom().setSeed(seed);
+                parent.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+                partner.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+                setRandom(parent, seed);
+                long parentSeed = randomSeed(parent);
+                var child = typeIndex == 2 ? null : parent.getBreedOffspring(world, partner);
+                if (typeIndex == 2) {
+                    if (parent.canMate(partner)) throw new IllegalStateException("Mules unexpectedly fertile");
+                }
+                out.write("{\"type\":\"equineBreed\",\"seed\":" + seed
+                        + ",\"kind\":" + typeIndex + ",\"partner\":" + types.indexOf(partnerType)
+                        + ",\"parentSeed\":" + parentSeed + ",\"afterSeed\":" + randomSeed(parent)
+                        + ",\"parentState\":" + equineState(parent) + ",\"partnerState\":" + equineState(partner)
+                        + ",\"child\":" + (child == null ? "null" : equineState((net.minecraft.world.entity.animal.equine.AbstractHorse) child))
+                        + ",\"childKind\":" + (child == null ? -1 : types.indexOf(child.getType())) + "}\n");
+                cases++;
+            }
+        }
+        return cases + playEquineInteractions(official, out, world, types) + playEquineDeaths(official, out, types)
+                + playEquineSaves(official, out, types);
+    }
+
+    /**
+     * 马科存档：每种 × 三种状态（生成后驯服并装备、野生默认、幼崽），输出官方 `saveWithoutId` 的整份 SNBT。
+     * Bamboo 读进来再写出去，逐键比较马科相关的键。
+     * Equine saves: vanilla's full SNBT, which Bamboo loads and writes back for a per-key comparison.
+     */
+    private static int playEquineSaves(Official official, Writer out,
+            List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
+            throws Exception {
+        int cases = 0;
+        for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+            for (int setup = 0; setup < 3; setup++) {
+                FakeLevel world = FakeLevel.create(official);
+                world.getRandom().setSeed(4400L + typeIndex * 10L + setup);
+                net.minecraft.world.entity.animal.equine.AbstractHorse mob =
+                        types.get(typeIndex).create(world, EntitySpawnReason.COMMAND);
+                mob.setPos(0.5, 64.0, 0.5);
+                mob.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+                if (setup == 0) {
+                    mob.setTamed(true);
+                    mob.setTemper(42);
+                    mob.setOwner(skeletonDeathPlayer(official, world, 0));
+                    mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+                    mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.SADDLE, 2.0F);
+                    if (mob instanceof net.minecraft.world.entity.animal.equine.Horse) {
+                        mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(Items.GOLDEN_HORSE_ARMOR));
+                        mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.BODY, 2.0F);
+                    }
+                    if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse) {
+                        mob.getSlot(499).set(new ItemStack(Items.CHEST));
+                        mob.getSlot(501).set(new ItemStack(Items.EMERALD, 7));
+                    }
+                }
+                if (setup == 2) {
+                    mob.setAge(-12000);
+                }
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                mob.saveWithoutId(output);
+                // 读回一份再存：官方读档时 `setHealth` 也把血量夹到上限，和 Bamboo 读档后再存同一口径。
+                // Load it back and save again; vanilla's load clamps the health just like Bamboo's.
+                var copy = types.get(typeIndex).create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"equineSave\",\"kind\":" + typeIndex + ",\"setup\":" + setup
+                        + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    /**
+     * 马科死亡掉落：每种 × 五种模式 × 两个种子。0 玩家击杀、1 摔死、2 关掉 MOB_DROPS、
+     * 3 幼崽、4 抢夺 III。成年的带鞍、马铠或地毯，箱子马带箱子和两格物品。
+     * Equine death drops: kind × mode × seed, with saddles, body armor, chests and contents.
+     */
+    private static int playEquineDeaths(Official official, Writer out,
+            List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
+            throws Exception {
+        int cases = 0;
+        boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
+        try {
+            for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+                for (int mode = 0; mode < 5; mode++) {
+                    for (int sample = 0; sample < 2; sample++) {
+                        long seed = 7700L + typeIndex * 100L + mode * 10L + sample;
+                        boolean drops = mode != 2;
+                        boolean playerKill = mode == 0 || mode == 2 || mode == 4;
+                        int looting = mode == 4 ? 3 : 0;
+                        FakeLevel world = FakeLevel.create(official);
+                        setRule(official, GameRules.MOB_DROPS, drops);
+                        official.server.sequences = new RandomSequences();
+                        net.minecraft.world.entity.animal.equine.AbstractHorse mob =
+                                types.get(typeIndex).create(world, EntitySpawnReason.COMMAND);
+                        mob.setPos(0.5, 64.0, 0.5);
+                        setRandom(mob, seed);
+                        mob.setTamed(true);
+                        if (mode == 3) mob.setAge(-24000);
+                        boolean llama = mob instanceof net.minecraft.world.entity.animal.equine.Llama;
+                        if (!llama && mode != 3) {
+                            mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+                            mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.SADDLE, 2.0F);
+                        }
+                        Item body = mob instanceof net.minecraft.world.entity.animal.equine.Horse ? Items.IRON_HORSE_ARMOR
+                                : llama ? Items.CARPET.pick(net.minecraft.world.item.DyeColor.RED) : null;
+                        if (body != null && mode != 3) {
+                            mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(body));
+                            mob.setDropChance(net.minecraft.world.entity.EquipmentSlot.BODY, 2.0F);
+                        }
+                        if (llama) {
+                            java.lang.reflect.Method strength = net.minecraft.world.entity.animal.equine.Llama.class
+                                    .getDeclaredMethod("setStrength", int.class);
+                            strength.setAccessible(true);
+                            strength.invoke(mob, 3);
+                        }
+                        if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse) {
+                            mob.getSlot(499).set(new ItemStack(Items.CHEST));
+                            mob.getSlot(500).set(new ItemStack(Items.DIAMOND, 3));
+                            mob.getSlot(502).set(new ItemStack(Items.WHEAT, 10));
+                        }
+                        ServerPlayer player = playerKill ? skeletonDeathPlayer(official, world, looting) : null;
+                        var source = playerKill ? world.damageSources().playerAttack(player) : world.damageSources().fall();
+                        if (!mob.hurtServer(world, source, 100.0F) || !mob.isDeadOrDying()) {
+                            throw new IllegalStateException("equine_death did not kill the mob");
+                        }
+                        List<String> spawned = new ArrayList<>();
+                        for (Entity entity : world.spawned) {
+                            switch (entity) {
+                                case net.minecraft.world.entity.item.ItemEntity item -> {
+                                    var stack = item.getItem();
+                                    spawned.add("{\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
+                                            + ",\"count\":" + stack.getCount() + ",\"damage\":" + stack.getDamageValue() + ",\"xp\":0}");
+                                }
+                                case net.minecraft.world.entity.ExperienceOrb orb ->
+                                    spawned.add("{\"item\":0,\"count\":0,\"damage\":0,\"xp\":" + orb.getValue() + "}");
+                                default -> throw new IllegalStateException("unexpected equine death spawn: " + entity);
+                            }
+                        }
+                        out.write("{\"type\":\"equineDeath\",\"kind\":" + typeIndex + ",\"mode\":" + mode
+                                + ",\"seed\":" + seed + ",\"spawned\":[" + String.join(",", spawned)
+                                + "],\"mobSeed\":" + randomSeed(mob) + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+                        cases++;
+                    }
+                }
+            }
+        } finally {
+            setRule(official, GameRules.MOB_DROPS, previousMobDrops);
+        }
+        return cases;
+    }
+
+    /** 交互对拍用的物品，按顺序编号。 */
+    private static List<Item> equineItems() {
+        return List.of(Items.WHEAT, Items.SUGAR, Items.HAY_BLOCK,
+            Items.APPLE, Items.CARROT, Items.RED_MUSHROOM, Items.GOLDEN_CARROT, Items.GOLDEN_APPLE,
+            Items.CHEST, Items.SADDLE, Items.IRON_HORSE_ARMOR, Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE), Items.STICK);
+    }
+
+    /**
+     * 马科右键：每种马科 × 六种初始状态 × 每件物品，走官方 `Player.interactOn`，
+     * 比结果、手里剩几个、马的标志字节、脾气、血量、求爱、年龄、箱子、鞍、身体和随机源。
+     * 驯服的成年个体潜行会开物品栏（要连接），不出这一题。
+     * Equine right-click through `Player.interactOn`, compared on the result, the held
+     * count and the mount's state. Sneaking on a tamed adult opens a screen and is skipped.
+     */
+    private static int playEquineInteractions(Official official, Writer out, FakeLevel world,
+            List<? extends net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.animal.equine.AbstractHorse>> types)
+            throws Exception {
+        int cases = 0;
+        List<Item> EQUINE_ITEMS = equineItems();
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+            for (int setup = 0; setup < 6; setup++) {
+                for (int itemIndex = 0; itemIndex < EQUINE_ITEMS.size(); itemIndex++) {
+                    for (int mode = 0; mode < 2; mode++) {
+                        boolean creative = mode == 1 && setup == 2;
+                        boolean sneak = mode == 1 && setup >= 4;
+                        if (mode == 1 && !creative && !sneak) continue;
+                        long seed = 9001L + typeIndex * 1000L + setup * 100L + itemIndex * 3L + mode;
+                        net.minecraft.world.entity.animal.equine.AbstractHorse mob =
+                                types.get(typeIndex).create(world, EntitySpawnReason.COMMAND);
+                        setRandom(mob, seed);
+                        setupEquine(mob, setup);
+                        ServerPlayer player = new ServerPlayer(official.server, world, profile,
+                                ClientInformation.createDefault());
+                        player.setPos(1.5, 64.0, 0.5);
+                        // `doPlayerRide` 会 `startRiding`，`ServerPlayer` 要一个能收包的连接。
+                        // `doPlayerRide` starts riding, which needs a connection that takes packets.
+                        ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+                        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+                        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                                connection, "server", official.server);
+                        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+                        ((RecordingListener) connection).bytes = new Bytes(official.registries);
+                        put(ServerPlayer.class, player, "connection", connection);
+                        putBoolean(net.minecraft.world.entity.player.Abilities.class, player.getAbilities(),
+                                "instabuild", creative);
+                        player.setShiftKeyDown(sneak);
+                        player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(EQUINE_ITEMS.get(itemIndex)));
+                        var result = player.interactOn(mob, InteractionHand.MAIN_HAND, mob.position());
+                        String swing = result instanceof net.minecraft.world.InteractionResult.Success success
+                                ? success.swingSource().name() : "PASS";
+                        out.write("{\"type\":\"equineInteract\",\"kind\":" + typeIndex + ",\"setup\":" + setup
+                                + ",\"item\":" + BuiltInRegistries.ITEM.getId(EQUINE_ITEMS.get(itemIndex))
+                                + ",\"creative\":" + creative + ",\"sneak\":" + sneak + ",\"seed\":" + seed
+                                + ",\"swing\":\"" + swing + "\""
+                                + ",\"count\":" + player.getItemInHand(InteractionHand.MAIN_HAND).getCount()
+                                + ",\"after\":" + equineAfter(mob)
+                                + ",\"data\":\"" + pairingData(official, mob) + "\"}\n");
+                        cases++;
+                    }
+                }
+            }
+        }
+        return cases;
+    }
+
+    /** 六种初始状态：0 野生满血、1 野生残血高脾气、2 驯服满血、3 驯服残血带鞍带护甲带箱子、4 驯服幼崽残血、5 野生幼崽。 */
+    private static void setupEquine(net.minecraft.world.entity.animal.equine.AbstractHorse mob, int setup) {
+        boolean llama = mob instanceof net.minecraft.world.entity.animal.equine.Llama;
+        mob.setTamed(setup >= 2 && setup <= 4);
+        if (setup == 1) {
+            mob.setTemper(llama ? 28 : 95);
+        }
+        if (setup == 1 || setup == 3 || setup == 4) {
+            mob.setHealth(10.0F);
+        }
+        if (setup >= 4) {
+            mob.setAge(-24000);
+        }
+        if (setup == 3) {
+            if (!llama) {
+                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE, new ItemStack(Items.SADDLE));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.equine.Horse) {
+                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(Items.IRON_HORSE_ARMOR));
+            }
+            if (llama) {
+                mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.BODY, new ItemStack(Items.CARPET.pick(net.minecraft.world.item.DyeColor.WHITE)));
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse chested) {
+                chested.setChest(true);
+            }
+        }
+        // 已经在世界里跑过的生物：`onEquipItem` 只在 `!firstTick` 时出声取数。
+        // A mob that has already ticked: `onEquipItem` only plays and draws after the first tick.
+        putBoolean(Entity.class, mob, "firstTick", false);
+    }
+
+    /** 交互之后：标志字节、脾气、血量位、求爱、年龄、箱子、鞍、身体、随机源。 */
+    private static String equineAfter(net.minecraft.world.entity.animal.equine.AbstractHorse mob) throws Exception {
+        boolean chest = mob instanceof net.minecraft.world.entity.animal.equine.AbstractChestedHorse chested
+                && chested.hasChest();
+        var saddle = mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.SADDLE);
+        var body = mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.BODY);
+        return "[" + equineFlags(mob) + "," + mob.getTemper() + "," + Float.floatToRawIntBits(mob.getHealth())
+                + "," + mob.getInLoveTime() + "," + mob.getAge() + "," + (chest ? 1 : 0)
+                + "," + (saddle.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(saddle.getItem()))
+                + "," + (body.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(body.getItem()))
+                + "," + randomSeed(mob) + "]";
+    }
+
+    /**
+     * 配对时的 `set_entity_data`（`getNonDefaultValues`），实体 ID 固定成 1，base64。
+     * The pairing `set_entity_data` with entity id 1, base64.
+     */
+    private static String pairingData(Official official, Mob mob) {
+        Bytes sink = new Bytes(official.registries);
+        sink.add(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
+                1, mob.getEntityData().getNonDefaultValues()));
+        return sink.take().get(0);
+    }
+
+    /** `AbstractHorse.DATA_ID_FLAGS` 的字节（私有，反射读）。 */
+    @SuppressWarnings("unchecked")
+    private static int equineFlags(net.minecraft.world.entity.animal.equine.AbstractHorse horse) throws Exception {
+        Field field = net.minecraft.world.entity.animal.equine.AbstractHorse.class.getDeclaredField("DATA_ID_FLAGS");
+        field.setAccessible(true);
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) field.get(null);
+        return horse.getEntityData().get(accessor) & 0xFF;
+    }
+
+    private static String equineState(net.minecraft.world.entity.animal.equine.AbstractHorse mob) {
+        var a = net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH;
+        var b = net.minecraft.world.entity.ai.attributes.Attributes.JUMP_STRENGTH;
+        var c = net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED;
+        int variant = 0;
+        int strength = 0;
+        if (mob instanceof net.minecraft.world.entity.animal.equine.Horse horse) {
+            variant = horse.getVariant().getId() | (horse.getMarkings().getId() << 8);
+        } else if (mob instanceof net.minecraft.world.entity.animal.equine.Llama llama) {
+            variant = llama.getVariant().getId();
+            strength = llama.getStrength();
+        }
+        return "[" + Double.doubleToRawLongBits(mob.getAttributeBaseValue(a))
+                + "," + Double.doubleToRawLongBits(mob.getAttributeBaseValue(b))
+                + "," + Double.doubleToRawLongBits(mob.getAttributeBaseValue(c))
+                + "," + variant + "," + strength
+                + "," + Float.floatToRawIntBits(mob.getEyeHeight()) + "]";
     }
 
     private static Mob skeletonSpawn(FakeLevel world, BlockPos pos, boolean egg) {
@@ -3887,6 +4323,219 @@ public final class MobOracle {
         packets.addAll(tracking.take());
     }
 
+    /**
+     * 羊驼吐口水的对拍用羊驼：`performRangedAttack` 照 `Llama.spit` 的顺序走，只是口水的随机源
+     * 换成 Bamboo 的岛种子源（官方实体的随机源不带种子）。瞄准的写法由 {@link #checkAim}
+     * 和官方私有 `spit` 在不确定度 0 时逐位比过。
+     * The llama for spit replays: `performRangedAttack` follows `Llama.spit`, but the
+     * spit draws from Bamboo's island seed source. {@link #checkAim} compares the aim
+     * bit for bit with the private vanilla `spit` at zero uncertainty.
+     */
+    private static final class OracleLlama extends net.minecraft.world.entity.animal.equine.Llama {
+        boolean zeroUncertainty;
+
+        OracleLlama(FakeLevel level) {
+            super(EntityTypes.LLAMA, level);
+        }
+
+        @Override
+        public float rangedAttackUncertainty(final Level level) {
+            return zeroUncertainty ? 0.0F : super.rangedAttackUncertainty(level);
+        }
+
+        static Vec3 aim(Entity llama, Entity spit, LivingEntity target) {
+            double xd = target.getX() - llama.getX();
+            double yd = target.getY(0.3333333333333333) - spit.getY();
+            double zd = target.getZ() - llama.getZ();
+            double yo = Math.sqrt(xd * xd + zd * zd) * 0.2F;
+            return new Vec3(xd, yd + yo, zd);
+        }
+
+        @Override
+        public void performRangedAttack(final LivingEntity target, final float power) {
+            FakeLevel world = (FakeLevel) level();
+            var spit = new net.minecraft.world.entity.projectile.LlamaSpit(world, this);
+            setRandom(spit, world.entitySeeds.nextLong());
+            spit.setUUID(Mth.createInsecureUUID(spit.getRandom()));
+            Vec3 aim = aim(this, spit, target);
+            net.minecraft.world.entity.projectile.Projectile.spawnProjectileUsingShoot(
+                    spit, world, ItemStack.EMPTY, aim.x, aim.y, aim.z, 1.5F, rangedAttackUncertainty(world));
+            if (!isSilent()) {
+                world.playSound(null, getX(), getY(), getZ(), net.minecraft.sounds.SoundEvents.LLAMA_SPIT,
+                        getSoundSource(), 1.0F, 1.0F + (random.nextFloat() - random.nextFloat()) * 0.2F);
+            }
+            try {
+                var didSpit = net.minecraft.world.entity.animal.equine.Llama.class
+                        .getDeclaredMethod("setDidSpit", boolean.class);
+                didSpit.setAccessible(true);
+                didSpit.invoke(this, true);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        /** 正在跑的目标名：先 `goalSelector`，再 `targetSelector`，按注册顺序。 */
+        String running() {
+            StringBuilder out = new StringBuilder();
+            for (var selector : List.of(goalSelector, targetSelector)) {
+                for (var goal : selector.getAvailableGoals()) {
+                    if (!goal.isRunning()) continue;
+                    if (!out.isEmpty()) out.append(' ');
+                    out.append(goal.getGoal().getClass().getSimpleName());
+                }
+            }
+            return out.toString();
+        }
+
+        /**
+         * 官方私有 `Llama.spit` 在不确定度 0 时的速度必须等于 `aim` 归一化乘 1.5，
+         * 否则对拍用的瞄准写法和官方不同。
+         * The private vanilla `spit` at zero uncertainty must fly along `aim`
+         * normalized and scaled by 1.5, or the replay's aim differs from vanilla.
+         */
+        static void checkAim(Official official) throws Exception {
+            FakeLevel world = FakeLevel.create(official);
+            OracleLlama llama = new OracleLlama(world);
+            llama.snapTo(0.5, 64.0, 0.5, 37.0F, 0.0F);
+            llama.setYBodyRot(37.0F);
+            llama.zeroUncertainty = true;
+            var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            target.setPos(7.25, 63.5, -3.75);
+            var spit = net.minecraft.world.entity.animal.equine.Llama.class
+                    .getDeclaredMethod("spit", LivingEntity.class);
+            spit.setAccessible(true);
+            spit.invoke(llama, target);
+            Entity shot = world.spawned.getLast();
+            Vec3 expected = aim(llama, shot, target).normalize().scale(1.5F);
+            if (!expected.equals(shot.getDeltaMovement())) {
+                throw new IllegalStateException("llama spit aim differs: " + expected + " vs " + shot.getDeltaMovement());
+            }
+        }
+    }
+
+    /**
+     * 羊驼吐口水：玩家在第 5、80 刻打羊驼一下，`LlamaHurtByTargetGoal` 让它盯上玩家，
+     * `RangedAttackGoal` 吐口水，口水逐刻飞向玩家。比羊驼和口水的位置、速度、随机源，
+     * 羊驼正在跑的目标、口水的同步包，以及玩家的血量。
+     * Llama spit: the player hits the llama on ticks 5 and 80; retaliation targets
+     * the player, the ranged goal spits, and the spit flies tick by tick. Compares
+     * llama and spit motion and random state, the llama's running goals, the spit
+     * packets and the player's health.
+     */
+    private static void playLlamaSpit(Official official, Writer out, String name, double playerX, long seed)
+            throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        world.injectedBrightOutside = false;
+        world.injectedMonstersBurn = false;
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        int playerId = FIRST_ID + 1024;
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(playerX, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        Bytes playerSink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = playerSink;
+        put(ServerPlayer.class, player, "connection", connection);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        world.nextId = FIRST_ID;
+        OracleLlama llama = new OracleLlama(world);
+        world.entitySeeds.nextLong();
+        setRandom(llama, seed);
+        llama.setUUID(new UUID(0, 1));
+        llama.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        llama.setYHeadRot(0.0F);
+        llama.setYBodyRot(0.0F);
+        world.tracked.add(llama);
+        var spits = new ArrayList<Entity>();
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        var frames = new StringBuilder("[");
+        var playerStates = new StringBuilder("[");
+        var playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
+        int ticks = 160;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var spitPackets = new ArrayList<String>();
+            if (tick > 0) {
+                world.gameTime++;
+                if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+                if (player.hurtTime > 0) player.hurtTime--;
+                if (tick == 5 || tick == 80) {
+                    llama.hurtServer(world, world.damageSources().playerAttack(player), 1.0F);
+                }
+                llama.checkDespawn();
+                llama.commonTick();
+                llama.tick();
+                for (Entity spit : spits) {
+                    if (spit.isRemoved()) continue;
+                    spit.commonTick();
+                    spit.tick();
+                    if (spit.isRemoved()) {
+                        Bytes gone = new Bytes(official.registries);
+                        gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(spit.getId()));
+                        spitPackets.addAll(gone.take());
+                        sync.remove(spit.getId());
+                    }
+                }
+                world.tracked.removeIf(Entity::isRemoved);
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.projectile.LlamaSpit spit) {
+                        spits.add(spit);
+                        world.tracked.add(spit);
+                        pairArrow(world, official, spit, sync, spitPackets);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    spitPackets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            frames.append("{\"spits\":[");
+            boolean first = true;
+            for (Entity spit : spits) {
+                if (spit.isRemoved()) continue;
+                if (!first) frames.append(',');
+                first = false;
+                frames.append("{\"id\":").append(spit.getId());
+                frames.append(",\"motion\":").append(projectileMotion(spit));
+                frames.append(",\"seed\":").append(randomSeed(spit)).append('}');
+            }
+            frames.append("],\"packets\":").append(spitPackets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append(",\"llama\":").append(projectileMotion(llama));
+            frames.append(",\"llamaSeed\":").append(randomSeed(llama));
+            frames.append(",\"llamaHealth\":").append(Float.floatToRawIntBits(llama.getHealth()));
+            frames.append(",\"goals\":").append(jsonString(llama.running()));
+            frames.append('}');
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        if (spits.size() < 2 || player.getHealth() >= 20.0F) {
+            throw new IllegalStateException("llama spit scenario did not exercise " + name
+                    + ": spits=" + spits.size() + " health=" + player.getHealth());
+        }
+        out.write("{\"type\":\"llamaSpit\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX + ",\"seed\":" + seed
+                + ",\"blocks\":" + blocks + ",\"shots\":" + spits.size() + ",\"frames\":" + frames + "]"
+                + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
     private static String projectileMotion(Entity entity) {
         Vec3 pos = entity.position();
         Vec3 v = entity.getDeltaMovement();
@@ -4007,6 +4656,10 @@ public final class MobOracle {
                 case 12 -> new net.minecraft.world.entity.monster.spider.CaveSpider(EntityTypes.CAVE_SPIDER, level);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
+                case 6 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
+                case 7 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
+                case 8 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
+                case 9 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
             level.entitySeeds.nextLong();
@@ -4022,6 +4675,8 @@ public final class MobOracle {
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
+            } else if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
+                ageable.setAge(scene.cowAges.get(i));
             }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);
@@ -4074,6 +4729,8 @@ public final class MobOracle {
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
             line.append(",\"item\":0,\"looting\":0}");
         }
+        // 玩家打生物的时刻、对象、伤害量和打的人，和牛场景同一格式。
+        // When, whom, how hard and by whom players hit, as in the cow scenes.
         line.append("],\"hurts\":[");
         for (int i = 0; i < scene.hurts.size(); i++) {
             if (i > 0) line.append(',');
@@ -4242,7 +4899,8 @@ public final class MobOracle {
             out.append(",\"fire\":").append(mob.getRemainingFireTicks());
             out.append(",\"air\":").append(mob.getAirSupply());
             out.append(",\"seed\":").append(randomSeed(mob));
-            out.append(",\"age\":").append(mob instanceof Cow cow ? cow.getAge() : 0);
+            out.append(",\"age\":").append(
+                    mob instanceof net.minecraft.world.entity.AgeableMob ageable ? ageable.getAge() : 0);
             out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
@@ -4265,7 +4923,11 @@ public final class MobOracle {
             out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
             out.append(",\"lr\":").append(lr);
             out.append(",\"target\":").append(mob.getTarget() == null ? -1 : mob.getTarget().getId());
-            out.append(",\"baby\":").append(mob instanceof Zombie z && z.isBaby());
+            out.append(",\"baby\":").append(mob.isBaby());
+            if (mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
+                out.append(",\"eq\":").append(equineFlags(horse));
+                out.append(",\"tmp\":").append(horse.getTemper());
+            }
             out.append(",\"aggr\":").append(mob.isAggressive());
             out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());
             out.append(",\"ph\":0");
@@ -4283,7 +4945,10 @@ public final class MobOracle {
                 if (!goal.isRunning()) continue;
                 if (!first) out.append(' ');
                 first = false;
-                out.append(goal.getGoal().getClass().getSimpleName());
+                // `AbstractHorse.MountPanicGoal` 没被生物控制时就是 `PanicGoal`，名字按后者记。
+                // `MountPanicGoal` is a plain `PanicGoal` without a mob controller.
+                String goalName = goal.getGoal().getClass().getSimpleName();
+                out.append("MountPanicGoal".equals(goalName) ? "PanicGoal" : goalName);
             }
             out.append('"');
             net.minecraft.world.level.pathfinder.Path path = mob.getNavigation().getPath();

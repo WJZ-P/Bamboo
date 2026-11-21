@@ -533,7 +533,7 @@ fn run_cases(
             );
             if matches!(&tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
                 key == "id"
-                    && matches!(value, Tag::String(id) if id == "minecraft:arrow" || id == "minecraft:egg")
+                    && matches!(value, Tag::String(id) if id == "minecraft:arrow" || id == "minecraft:egg" || id == "minecraft:llama_spit")
             })) && let Some(row) = rebuilt
             {
                 let saved = write_entity(&row).map_err(|error| error.to_string())?;
@@ -1475,6 +1475,7 @@ fn entity_cases() -> Vec<Tag> {
     with_uuid.push(("UUID".to_owned(), uuid));
     out.push(Tag::Compound(with_uuid));
     out.extend(arrow_archive_cases());
+    out.extend(spit_archive_cases());
     out.extend(egg_archive_cases());
     out
 }
@@ -1555,6 +1556,37 @@ fn arrow_archive_cases() -> [Tag; 2] {
     arrow.pickup = Pickup::Allowed;
 
     [flight, embedded].map(|entity| write_entity(&entity.split()).unwrap())
+}
+
+/// 羊驼口水的两道存档题：飞行中、带主人且已离开主人的，和刚造出来什么都没设的。
+///
+/// Two llama spit save cases: one in flight with an owner it has left, and a bare new one.
+fn spit_archive_cases() -> [Tag; 2] {
+    let mut flight = Entity::new(
+        EntityKind::LlamaSpit(Box::default()),
+        Vec3::new(1.5, 65.25, -2.0),
+    );
+    flight.id = 26;
+    flight.delta = Vec3::new(1.2, -0.06, 0.4);
+    flight.y_rot = 71.5;
+    let EntityKind::LlamaSpit(spit) = &mut flight.kind else {
+        unreachable!()
+    };
+    spit.uuid = 26_u128.to_be_bytes();
+    spit.owner_uuid = Some(17_u128.to_be_bytes());
+    spit.pitch = -3.5;
+    spit.left_owner = true;
+    spit.has_been_shot = true;
+
+    let mut bare = Entity::new(
+        EntityKind::LlamaSpit(Box::default()),
+        Vec3::new(1.5, 64.25, -2.0),
+    );
+    bare.id = 27;
+    if let EntityKind::LlamaSpit(spit) = &mut bare.kind {
+        spit.uuid = 27_u128.to_be_bytes();
+    }
+    [flight, bare].map(|entity| write_entity(&entity.split()).unwrap())
 }
 
 /// 一段最小合法的区块 NBT，只为检查 `block_entities` 的键能原样通过官方 parse/write。

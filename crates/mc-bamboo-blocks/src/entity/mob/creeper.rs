@@ -253,6 +253,7 @@ pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest)
         shrink_held: !damageable && !req.creative,
         replacement: None,
         shear: false,
+        open_inventory: false,
         damage_held: damageable && !req.creative,
     }
 }
