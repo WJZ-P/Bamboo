@@ -21,6 +21,9 @@ export const theme = {
     /** 物品栏格子。 */
     slot: "#8b8b8b",
 
+    /** 输入框、下拉框、文本框的底色：深灰，比纯黑柔和。Input, select and textarea background. */
+    field: "#2b2b2b",
+
     bamboo: { base: "#3c8527", light: "#5eac44", dark: "#225313", shadow: "#1a3b11" },
     stone: { base: "#555555", light: "#777777", dark: "#333333", shadow: "#000000" },
     redstone: { base: "#a32424", light: "#d14a4a", dark: "#6b1212", shadow: "#3f0000" },
@@ -47,9 +50,14 @@ export const theme = {
   },
   font: {
     family: `"Fusion Pixel", "Microsoft YaHei UI", monospace`,
-    /** 字体的原生点阵是 12px，取它的整数倍显示最清晰。 */
-    small: "12px",
-    body: "12px",
+    /**
+     * 字体的原生点阵是 12px，整数倍最清晰；但 12px 在设置页这类大段文字里太小，用户要求放大，
+     * 所以正文和小字取 16px（边缘略软，换可读性）。
+     * The font's native grid is 12px and integer multiples are sharpest, but 12px is too
+     * small for long text such as the settings page, so body and small text use 16px.
+     */
+    small: "16px",
+    body: "16px",
     /** 侧边栏导航。不是 12 的整数倍，边缘会略虚，但大小最合适。 */
     nav: "18px",
     title: "24px",
