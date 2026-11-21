@@ -936,13 +936,13 @@ public final class MobOracle {
                 // 幼羊和剪过毛的羊：剪刀只返回 CONSUME、染料返回 PASS，羊毛字节都不动。
                 // A lamb and a sheared sheep: shears only return CONSUME and dye returns PASS,
                 // and the wool byte stays put either way.
-                Scene lamb = new Scene("sheep_shear_baby").ticks(20);
+                Scene lamb = new Scene("sheep_shear_baby").ticks(20).packets();
                 ground(lamb, 6);
                 lamb.cow(0.5, 64.0, 0.5, 0.0F, 77L, -24000);
                 lamb.player(1.5, 64.0, 0.5, Items.AIR);
                 lamb.interact(3, 0, 0, shears, 0);
                 scenes.add(lamb);
-                Scene sheared = new Scene("sheep_dye_sheared").ticks(20);
+                Scene sheared = new Scene("sheep_dye_sheared").ticks(20).packets();
                 ground(sheared, 6);
                 sheared.wool = 16;
                 sheared.cow(0.5, 64.0, 0.5, 0.0F, 78L);
@@ -952,7 +952,7 @@ public final class MobOracle {
                 // 幼羊能染色：`DyeItem` 没有幼年分支，羊毛字节照改、染料照扣。
                 // A lamb can be dyed: `DyeItem` has no baby branch, so the wool byte changes
                 // and the dye is consumed.
-                Scene lambDye = new Scene("sheep_dye_baby").ticks(20);
+                Scene lambDye = new Scene("sheep_dye_baby").ticks(20).packets();
                 ground(lambDye, 6);
                 lambDye.cow(0.5, 64.0, 0.5, 0.0F, 79L, -24000);
                 lambDye.player(1.5, 64.0, 0.5, Items.AIR);
