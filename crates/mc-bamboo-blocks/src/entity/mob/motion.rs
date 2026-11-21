@@ -49,7 +49,7 @@ pub(crate) fn move_living(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCt
             me.bounding_box(),
             living::max_up_step(mob),
             me.on_ground,
-            me.collision_context(),
+            me.mob_collision_context(mob),
             world::CollisionBlocks {
                 block_at: |pos| view.block_state(pos),
                 piston_at: |pos| view.moving_piston_shape(pos),
@@ -321,7 +321,7 @@ fn step_effects(
 /// `Entity.isFree(box)`：没有碰撞，也没有液体。
 pub(crate) fn is_free(me: &Entity, mob: &Mob, view: &dyn BlockView, bounds: Aabb) -> bool {
     let _ = mob;
-    if super::path::has_block_collision(view, bounds, me.collision_context(), |pos| {
+    if super::path::has_block_collision(view, bounds, me.mob_collision_context(mob), |pos| {
         view.block_state(pos)
     }) {
         return false;
@@ -680,7 +680,7 @@ fn inside_between(
         if state.is_air() {
             continue;
         }
-        let inside = shape::entity_inside_boxes(state, pos, entity_context(me));
+        let inside = shape::entity_inside_boxes(state, pos, entity_context(me, mob));
         let from_box = me.make_bounding_box_at(from);
         let in_block = shape::is_unit_cube(&inside)
             || from_box.collided_along_vector(to.subtract(from), &world_boxes(&inside, pos));
@@ -720,14 +720,14 @@ fn inside_between(
     last + 1
 }
 
-fn entity_context(me: &Entity) -> shape::EntityContext {
+fn entity_context(me: &Entity, mob: &Mob) -> shape::EntityContext {
     shape::EntityContext {
         fall_distance: me.fall_distance,
         bottom: me.position.y,
         falling_block: false,
         descending: false,
         placement: false,
-        powder_snow_walkable: false,
+        powder_snow_walkable: mob.walks_on_powder_snow(),
     }
 }
 

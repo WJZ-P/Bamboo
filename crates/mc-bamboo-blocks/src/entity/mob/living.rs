@@ -264,7 +264,7 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             max_up_step: max_up_step(mob),
             max_fall_distance: 3,
             malus: mob.malus,
-            context: me.collision_context(),
+            context: me.mob_collision_context(mob),
         },
         speed: mob.speed,
         in_liquid: is_in_liquid(me, mob),
@@ -590,7 +590,7 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    mob.rabbit.needs_sync = false;
+    mob.needs_sync = false;
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -800,6 +800,8 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 Command::BreedAnimals {
                     partner,
                     position: me.position,
+                    kind: mob.mob_type,
+                    father_rabbit: mob.rabbit.variant,
                 },
                 me,
             );
@@ -986,9 +988,7 @@ fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let power = strength * multiplier * block_jump_factor(me, view) + boost;
     if power > 1.0e-5 {
         me.delta.y = mth::java_max(f64::from(power), me.delta.y);
-        if is_rabbit {
-            mob.rabbit.needs_sync = true;
-        }
+        mob.needs_sync = true;
     }
     if is_rabbit {
         super::rabbit::after_ground_jump(me, mob);
@@ -1094,7 +1094,12 @@ fn relative_friction_movement(
     let movement = me.delta;
     motion::move_living(me, mob, ctx, movement);
     let mut delta = me.delta;
-    if (me.horizontal_collision || mob.jumping) && on_climbable(me, mob, ctx.blocks()) {
+    // 细雪那一支：上一刻在细雪里、又能在细雪上走的生物（兔子、狐狸）往上爬。
+    // The powder snow branch: walkers that were in powder snow climb up.
+    if (me.horizontal_collision || mob.jumping)
+        && (on_climbable(me, mob, ctx.blocks())
+            || (mob.was_in_powder_snow && mob.walks_on_powder_snow()))
+    {
         delta = Vec3::new(delta.x, 0.2, delta.z);
     }
     delta
@@ -1312,7 +1317,7 @@ pub(crate) fn has_line_of_sight(
     let seen = if target_eye.distance_to_sqr(from).sqrt() > 128.0 {
         false
     } else {
-        view.clip_collider(from, target_eye, me.collision_context())
+        view.clip_collider(from, target_eye, me.mob_collision_context(mob))
             .is_none()
     };
     mob.seen.push((uid, seen));
@@ -1626,18 +1631,15 @@ pub(crate) fn apply_breed(
     me: &mut Entity,
     partner: crate::entity::EntityUid,
     position: Vec3,
+    parent: (super::MobType, super::rabbit::Variant),
     world: &mut crate::world::World,
 ) {
-    let Some(parent) = me.kind.mob() else { return };
-    let kind = parent.mob_type;
+    let (kind, father) = parent;
     let rabbit_variant = if kind == super::MobType::Rabbit {
-        let father = parent.rabbit.variant;
-        let mut mother = father;
-        world.with_entity_mut(partner, &mut |entity| {
-            if let Some(mob) = entity.kind.mob() {
-                mother = mob.rabbit.variant;
-            }
-        });
+        let mother = world
+            .entity(partner)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.rabbit.variant))
+            .unwrap_or(father);
         super::rabbit::offspring_variant(me, father, mother, world)
     } else {
         let _ = me.random.next_boolean();

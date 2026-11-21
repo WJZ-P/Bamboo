@@ -455,6 +455,15 @@ struct CowStep {
     rabbit_carrot_ticks: i32,
 }
 
+/// 走 Java 一侧 `playZombie` 的场景：僵尸和兔子、狐狸、狼。
+///
+/// Scenes played by the Java `playZombie` driver: zombies and the wild animals.
+fn zombie_style(name: &str) -> bool {
+    ["zombie_", "rabbit_", "fox_", "wolf_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
 const fn minus_one_i64() -> i64 {
     -1
 }
@@ -1000,8 +1009,8 @@ impl Report {
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
-                bright_outside: case.bright_outside || !case.name.starts_with("zombie_"),
-                monsters_burn: if case.name.starts_with("zombie_") {
+                bright_outside: case.bright_outside || !zombie_style(&case.name),
+                monsters_burn: if zombie_style(&case.name) {
                     case.monsters_burn
                 } else {
                     true
@@ -1643,7 +1652,8 @@ impl Report {
             plain!(var);
             plain!(snd);
             plain!(goals);
-            if name.starts_with("zombie_") {
+            if zombie_style(name) {
+                plain!(rabbit_carrot_ticks);
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -2888,7 +2898,9 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         goals: mob.goals.running_names().join(" "),
         path,
         target: mob.target.unwrap_or(-1),
-        baby: mob.is_baby(),
+        // Java 一侧只报僵尸的幼年元数据。
+        // The Java side only reports the zombie baby metadata.
+        baby: mob.mob_type.uses_baby_metadata() && mob.is_baby(),
         aggr: mob.aggressive,
         doors: mob.can_break_doors,
         ph: 0,

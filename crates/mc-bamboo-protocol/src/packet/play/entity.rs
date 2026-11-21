@@ -361,8 +361,12 @@ impl EntityData {
                 write_data_header(out, 19, SERIALIZER_COW_SOUND_VARIANT);
                 write_varint(out, *variant);
             }
-            Self::SpecialType(kind) | Self::RabbitVariant(kind) => {
+            Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::RabbitVariant(kind) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *kind);
             }
             Self::DrownedConverting(converting) => {

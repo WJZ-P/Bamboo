@@ -531,6 +531,11 @@ pub enum Command {
     BreedAnimals {
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
+        /// 父亲的种类和兔子品种：落地时父亲正被拆出来跑 tick，读不到。
+        ///
+        /// The father's type and rabbit variant; it is detached while the command lands.
+        kind: super::mob::MobType,
+        father_rabbit: super::mob::rabbit::Variant,
     },
     /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
     HurtPlayer {
@@ -640,9 +645,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::MergeExperienceOrbs { others, value } => {
             super::orb::apply_merge(me, &others, value, world)
         }
-        Command::BreedAnimals { partner, position } => {
-            super::mob::living::apply_breed(me, partner, position, world)
-        }
+        Command::BreedAnimals {
+            partner,
+            position,
+            kind,
+            father_rabbit,
+        } => super::mob::living::apply_breed(me, partner, position, (kind, father_rabbit), world),
         Command::HurtPlayer {
             target,
             source,

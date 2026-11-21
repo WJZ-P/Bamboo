@@ -13,6 +13,7 @@
 //! therefore live on [`Entity::dimensions`].
 
 pub mod attributes;
+pub mod avoid;
 pub mod control;
 pub mod damage;
 pub mod effects;
@@ -87,6 +88,18 @@ impl MobType {
             Self::Rabbit => Some(item_tags::RABBIT_FOOD),
             _ => None,
         }
+    }
+
+    /// 这个实体类型在不在某个 `minecraft:entity_type` 标签里。
+    ///
+    /// Whether this entity type is in a `minecraft:entity_type` tag.
+    pub fn in_entity_tag(self, name: &str) -> bool {
+        let id = self.entity_type();
+        mc_bamboo_data::tags::TAG_GROUPS
+            .iter()
+            .filter(|group| group.registry == "minecraft:entity_type")
+            .flat_map(|group| group.tags.iter())
+            .any(|tag| tag.name == name && tag.ids.contains(&id))
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
@@ -925,6 +938,10 @@ pub struct Mob {
     pub rabbit: rabbit::Rabbit,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
+    /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
+    ///
+    /// `Entity.needsSync`: `jumpFromGround` fired this tick, so the move packets carry velocity.
+    pub needs_sync: bool,
     /// `hurtMarked`：速度要强制同步一次。
     pub hurt_marked: bool,
     /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
@@ -1064,7 +1081,11 @@ impl Mob {
             fall_flying: false,
             ambient_sound_time: 0,
             look: LookControl::default(),
-            mover: MoveControl::default(),
+            mover: if mob_type == MobType::Rabbit {
+                rabbit::initial_move_control()
+            } else {
+                MoveControl::default()
+            },
             jump: JumpControl::default(),
             body: BodyRotationControl::default(),
             navigation,
@@ -1110,9 +1131,25 @@ impl Mob {
             sound_variant: CowSoundVariant::Classic,
             rabbit: rabbit::Rabbit::default(),
             events: Vec::new(),
+            needs_sync: false,
             hurt_marked: false,
             pending_breed: None,
         }
+    }
+
+    /// `PowderSnowBlock.canEntityWalkOnPowderSnow`：类型在 `powder_snow_walkable_mobs`
+    /// 里，或者脚上穿着皮革靴。
+    ///
+    /// `PowderSnowBlock.canEntityWalkOnPowderSnow`: the type is in
+    /// `powder_snow_walkable_mobs` or the feet slot holds leather boots.
+    pub fn walks_on_powder_snow(&self) -> bool {
+        self.mob_type
+            .in_entity_tag("minecraft:powder_snow_walkable_mobs")
+            || self
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::Feet)
+                .item
+                == mc_bamboo_data::items::LEATHER_BOOTS
     }
 
     pub fn is_baby(&self) -> bool {
@@ -1245,7 +1282,7 @@ impl MobPublic {
             variant: mob.variant,
             sound_variant: mob.sound_variant,
             rabbit_variant: mob.rabbit.variant.id(),
-            needs_sync: mob.rabbit.needs_sync,
+            needs_sync: mob.needs_sync,
             on_fire: remaining_fire_ticks > 0,
             ticks_frozen: mob.ticks_frozen,
             air_supply: mob.air_supply,

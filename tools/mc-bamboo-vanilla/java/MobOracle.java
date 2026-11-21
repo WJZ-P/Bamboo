@@ -783,6 +783,49 @@ public final class MobOracle {
         }
     }
 
+    /** 兔子场景：跳着闲逛、躲玩家 / 僵尸、和平难度、水里、幼年、细雪。 */
+    static final class RabbitScenes {
+        static void add(List<Scene> scenes) {
+            for (long seed : new long[] {7L, 99L, 2024L}) {
+                Scene hop = new Scene("rabbit_hop_" + seed).ticks(600);
+                Scenes.ground(hop, 15);
+                hop.mob(3, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(hop);
+            }
+            Scene flee = new Scene("rabbit_flee_player").ticks(200).difficulty(2);
+            Scenes.ground(flee, 15);
+            flee.mob(3, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
+            flee.player(4.5, 64.0, 0.5, Items.AIR);
+            scenes.add(flee);
+            Scene calm = new Scene("rabbit_peaceful_player").ticks(120).difficulty(0);
+            Scenes.ground(calm, 15);
+            calm.mob(3, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
+            calm.player(4.5, 64.0, 0.5, Items.AIR);
+            scenes.add(calm);
+            Scene zombie = new Scene("rabbit_flee_zombie").ticks(100).difficulty(2);
+            zombie.monstersBurn = false;
+            Scenes.ground(zombie, 15);
+            zombie.mob(3, 0.5, 64.0, 0.5, 0.0F, 6L, 0);
+            zombie.mob(1, 3.5, 64.0, 0.5, 0.0F, 8L, 0);
+            zombie.player(14.5, 64.0, 0.5, Items.AIR);
+            scenes.add(zombie);
+            Scene water = new Scene("rabbit_water").ticks(200);
+            Scenes.ground(water, 10);
+            water.fill(-3, 62, -3, 3, 63, 3, Scenes.WATER);
+            water.mob(3, 0.5, 63.2, 0.5, 0.0F, 11L, 0);
+            scenes.add(water);
+            Scene baby = new Scene("rabbit_baby").ticks(400);
+            Scenes.ground(baby, 15);
+            baby.mob(3, 0.5, 64.0, 0.5, 0.0F, 13L, -24000);
+            scenes.add(baby);
+            Scene snow = new Scene("rabbit_powder_snow").ticks(120);
+            Scenes.ground(snow, 10);
+            snow.fill(-1, 64, -1, 1, 64, 1, Blocks.POWDER_SNOW.defaultBlockState());
+            snow.mob(3, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
+            scenes.add(snow);
+        }
+    }
+
     static final class Scenes {
         static final BlockState GRASS = Blocks.GRASS_BLOCK.defaultBlockState();
         static final BlockState DIRT = Blocks.DIRT.defaultBlockState();
@@ -1583,6 +1626,7 @@ public final class MobOracle {
             rabbitHop.fill(-15, 63, -15, 15, 63, 15, Blocks.GRASS_BLOCK.defaultBlockState());
             rabbitHop.mob(3, 0.5, 64.0, 0.5, 0.0F, 42L, 0);
             scenes.add(rabbitHop);
+            RabbitScenes.add(scenes);
 
             Scene rabbitRaid = new Scene("rabbit_raid").ticks(60);
             rabbitRaid.fill(-4, 63, -4, 4, 63, 4, Blocks.GRASS_BLOCK.defaultBlockState());
@@ -1677,7 +1721,8 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
-        if (scene.name.startsWith("zombie_") || scene.name.startsWith("rabbit_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("rabbit_")
+                || scene.name.startsWith("fox_") || scene.name.startsWith("wolf_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -2913,6 +2958,8 @@ public final class MobOracle {
             zombieSinks.add(sink);
         }
         level.playersList().addAll(players);
+        // 野生动物场景要用 `getEntitiesOfClass(Player.class, ...)` 找到玩家（躲避目标）。
+        if (!scene.name.startsWith("zombie_")) level.tracked.addAll(players);
         // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
@@ -2942,6 +2989,9 @@ public final class MobOracle {
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
+            }
+            if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
+                ageable.setAge(scene.cowAges.get(i));
             }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);

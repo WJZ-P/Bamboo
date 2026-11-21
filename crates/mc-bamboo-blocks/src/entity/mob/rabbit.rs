@@ -11,6 +11,7 @@ use mc_bamboo_data::{
 use super::{
     Mob, MobEvent, MobType,
     attributes::{Attribute, Attributes},
+    avoid::{AvoidClass, AvoidEntity},
     control::Operation,
     goals::{Goal, GoalSelector, WrappedGoal, reduced_tick_delay, within_home},
     living,
@@ -63,7 +64,6 @@ impl Variant {
 pub struct Rabbit {
     pub variant: Variant,
     pub more_carrot_ticks: i32,
-    pub(super) needs_sync: bool,
     jump_ticks: i32,
     jump_duration: i32,
     was_on_ground: bool,
@@ -109,6 +109,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
             Goal::Panic {
                 speed: 2.2,
                 target: Vec3::default(),
+                class: "RabbitPanicGoal",
             },
         ),
         (
@@ -126,6 +127,24 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 player: None,
                 calm_down: 0,
             },
+        ),
+        (
+            4,
+            Goal::Avoid(
+                AvoidEntity::new(AvoidClass::Player, 8.0, 2.2, 2.2).named("RabbitAvoidEntityGoal"),
+            ),
+        ),
+        (
+            4,
+            Goal::Avoid(
+                AvoidEntity::new(AvoidClass::Wolf, 10.0, 2.2, 2.2).named("RabbitAvoidEntityGoal"),
+            ),
+        ),
+        (
+            4,
+            Goal::Avoid(
+                AvoidEntity::new(AvoidClass::Monster, 4.0, 2.2, 2.2).named("RabbitAvoidEntityGoal"),
+            ),
         ),
         (5, Goal::RabbitRaid(RaidGarden::default())),
         (
@@ -156,6 +175,11 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     })
     .collect();
     selector
+}
+
+/// `getVariant() == EVIL`。
+pub(super) fn is_evil(mob: &Mob) -> bool {
+    mob.mob_type == MobType::Rabbit && mob.rabbit.variant == Variant::Evil
 }
 
 pub(super) fn random_variant(biome: i32, random: &crate::random::LegacyRandom) -> Variant {
@@ -192,6 +216,18 @@ pub(super) fn offspring_variant(
     } else {
         father
     }
+}
+
+/// 构造函数里的 `setSpeedModifier(0.0)`：想去的点还是原点，但操作已经是 `MOVE_TO`，
+/// 第一刻 `MoveControl.tick` 会朝原点转身。
+///
+/// The constructor's `setSpeedModifier(0.0)`: the wanted point stays at the
+/// origin but the operation becomes `MOVE_TO`, so the first `MoveControl.tick`
+/// turns the rabbit towards the origin.
+pub(super) fn initial_move_control() -> super::control::MoveControl {
+    let mut mover = super::control::MoveControl::default();
+    mover.set_wanted_position(0.0, 0.0, 0.0, 0.0);
+    mover
 }
 
 pub(super) fn set_wanted(me: &Entity, mob: &mut Mob, wanted: Vec3, speed: f64) {
@@ -329,55 +365,99 @@ pub(super) fn can_climb_powder_snow(me: &Entity, mob: &Mob, view: &dyn BlockView
         .is_empty()
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+/// `Rabbit.RaidGardenGoal`（`MoveToBlockGoal` 的子类，速度 0.7F，水平 16 格）。
+///
+/// `block_pos` 在目标结束后也保留，和官方的 `blockPos` 字段一样。
+///
+/// `Rabbit.RaidGardenGoal` (a `MoveToBlockGoal` with speed 0.7F and a
+/// horizontal range of 16). `block_pos` survives the goal stopping, like the
+/// vanilla `blockPos` field.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RaidGarden {
     next_start_tick: i32,
     try_ticks: i32,
-    target: Option<BlockPos>,
+    block_pos: BlockPos,
+    reached_target: bool,
+    wants_to_raid: bool,
+    can_raid: bool,
+}
+
+impl Default for RaidGarden {
+    fn default() -> Self {
+        Self {
+            next_start_tick: 0,
+            try_ticks: 0,
+            block_pos: BlockPos::new(0, 0, 0),
+            reached_target: false,
+            wants_to_raid: false,
+            can_raid: false,
+        }
+    }
 }
 
 impl RaidGarden {
+    /// `RaidGardenGoal.canUse` → `MoveToBlockGoal.canUse`。
     pub(super) fn can_use(&mut self, me: &mut Entity, mob: &Mob, view: &dyn BlockView) -> bool {
+        if self.next_start_tick <= 0 {
+            if !view.block_game_rules().mob_griefing {
+                return false;
+            }
+            self.can_raid = false;
+            self.wants_to_raid = mob.rabbit.more_carrot_ticks <= 0;
+        }
         if self.next_start_tick > 0 {
             self.next_start_tick -= 1;
             return false;
         }
-        if !view.block_game_rules().mob_griefing {
+        self.next_start_tick = reduced_tick_delay(200 + me.random.next_int_bounded(200));
+        if !self.wants_to_raid {
             return false;
         }
-        self.next_start_tick = reduced_tick_delay(200 + me.random.next_int_bounded(200));
-        self.target = if mob.rabbit.more_carrot_ticks <= 0 {
-            garden_target(me.block_position(), mob, view)
-        } else {
-            None
-        };
-        self.target.is_some()
+        match garden_target(me.block_position(), mob, view) {
+            Some(pos) => {
+                self.block_pos = pos;
+                self.can_raid = true;
+                true
+            }
+            None => false,
+        }
     }
 
+    /// `RaidGardenGoal.canContinueToUse`：`canRaid` 为真时 `isValidTarget` 必然为假，
+    /// 所以这个目标从不续跑，下一个整刻就停。
+    ///
+    /// `RaidGardenGoal.canContinueToUse`: `isValidTarget` is always false while
+    /// `canRaid` holds, so the goal never continues past the next full tick.
+    pub(super) const fn can_continue(&self) -> bool {
+        false
+    }
+
+    /// `MoveToBlockGoal.start`。
     pub(super) fn start(&mut self, me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
-        if let Some(pos) = self.target {
-            move_to_crop(me, mob, view, pos);
-        }
+        move_to_crop(me, mob, view, self.block_pos);
         self.try_ticks = 0;
-        // isValidTarget 要求 !canRaid，因此下一次续跑检查会直接失败。
-        // isValidTarget requires !canRaid, so continuation fails before maxStayTicks matters.
         let bound = me.random.next_int_bounded(1200) + 1200;
+        // `maxStayTicks` 只在续跑检查里用，而这个目标从不续跑。
+        // `maxStayTicks` only feeds the continuation check, which never passes.
         let _ = me.random.next_int_bounded(bound);
     }
 
+    /// `RaidGardenGoal.tick` → `MoveToBlockGoal.tick`。
     pub(super) fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-        let Some(pos) = self.target else { return };
-        let crop = pos.above();
+        let crop = self.block_pos.above();
         let centre = Vec3::new(
             f64::from(crop.x) + 0.5,
             f64::from(crop.y) + 0.5,
             f64::from(crop.z) + 0.5,
         );
-        let reached = me.position.distance_to_sqr(centre) < 1.0;
-        if !reached {
+        if me.position.distance_to_sqr(centre) < 1.0 {
+            self.reached_target = true;
+            self.try_ticks -= 1;
+        } else {
+            self.reached_target = false;
             self.try_ticks += 1;
             if self.try_ticks % 40 == 0 {
-                move_to_crop(me, mob, ctx.blocks(), pos);
+                move_to_crop(me, mob, ctx.blocks(), self.block_pos);
             }
         }
         mob.look.set_look_at(
@@ -387,12 +467,12 @@ impl RaidGarden {
             10.0,
             super::control::MAX_HEAD_X_ROT as f32,
         );
-        if reached {
-            if ctx.blocks().block_state(crop).is(blocks::CARROTS) {
+        if self.reached_target {
+            if self.can_raid && ctx.blocks().block_state(crop).is(blocks::CARROTS) {
                 ctx.emit(Command::RabbitEatCarrots { pos: crop }, me);
                 mob.rabbit.more_carrot_ticks = 40;
             }
-            self.target = None;
+            self.can_raid = false;
             self.next_start_tick = 10;
         }
     }
@@ -444,7 +524,10 @@ pub(crate) fn eat_carrots(world: &mut World, pos: BlockPos) {
     let age = state.get(AGE_7);
     if age == 0 {
         world.set_block(pos, BlockState::AIR, UPDATE_CLIENTS);
-    } else if world.set_block(pos, state.with(AGE_7, age - 1), UPDATE_CLIENTS) {
+    } else {
+        // 官方不看 `setBlock` 的返回值，`2001` 照发。
+        // Vanilla ignores the `setBlock` result and always sends `2001`.
+        let _ = world.set_block(pos, state.with(AGE_7, age - 1), UPDATE_CLIENTS);
         world.push_effect(crate::Effect::LevelEvent {
             event: 2001,
             pos,

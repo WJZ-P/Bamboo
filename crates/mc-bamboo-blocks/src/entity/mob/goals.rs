@@ -35,9 +35,14 @@ pub enum Goal {
     Float,
     RabbitPowderSnow,
     RabbitRaid(super::rabbit::RaidGarden),
+    Avoid(super::avoid::AvoidEntity),
     Panic {
         speed: f64,
         target: Vec3,
+        /// 官方的类名（`PanicGoal` 或子类），对拍比较运行中的目标时用。
+        ///
+        /// The vanilla class name (`PanicGoal` or a subclass), for the oracle.
+        class: &'static str,
     },
     Breed {
         speed: f64,
@@ -136,7 +141,7 @@ impl Goal {
         match self {
             Self::Float | Self::RabbitPowderSnow => &[Flag::Jump],
             Self::RabbitRaid(_) => &[Flag::Move, Flag::Jump],
-            Self::Panic { .. } | Self::Stroll { .. } => &[Flag::Move],
+            Self::Panic { .. } | Self::Stroll { .. } | Self::Avoid(_) => &[Flag::Move],
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
                 &[Flag::Move, Flag::Look]
             }
@@ -174,7 +179,8 @@ impl Goal {
             Self::Float => "FloatGoal",
             Self::RabbitPowderSnow => "ClimbOnTopOfPowderSnowGoal",
             Self::RabbitRaid(_) => "RaidGardenGoal",
-            Self::Panic { .. } => "PanicGoal",
+            Self::Avoid(avoid) => avoid.class_name(),
+            Self::Panic { class, .. } => class,
             Self::Breed { .. } => "BreedGoal",
             Self::Tempt { .. } => "TemptGoal",
             Self::FollowParent { .. } => "FollowParentGoal",
@@ -222,6 +228,7 @@ impl GoalSelector {
                 Goal::Panic {
                     speed: 2.0,
                     target: Vec3::default(),
+                    class: "PanicGoal",
                 },
             ),
             (
@@ -672,6 +679,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Float => float_can_use(me, mob),
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
         Goal::RabbitRaid(raid) => raid.can_use(me, mob, ctx.blocks()),
+        // `RabbitAvoidEntityGoal`：杀手兔不躲。
+        // `RabbitAvoidEntityGoal`: the killer bunny never flees.
+        Goal::Avoid(avoid) => !super::rabbit::is_evil(mob) && avoid.can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
             if !should_panic(mob, ctx) {
                 return false;
@@ -894,7 +904,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 && (combat_target(mob, ctx).is_some() || !mob.navigation.is_done())
         }
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
-        Goal::RabbitRaid(_) => false,
+        Goal::RabbitRaid(raid) => raid.can_continue(),
+        Goal::Avoid(_) => super::avoid::AvoidEntity::can_continue(mob),
         Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
         Goal::Breed {
             partner, love_time, ..
@@ -994,8 +1005,9 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
     match goal {
         Goal::RabbitRaid(raid) => raid.start(me, mob, ctx.blocks()),
         Goal::RabbitPowderSnow => {}
+        Goal::Avoid(avoid) => avoid.start(me, mob, ctx),
         Goal::Bow(_) => mob.aggressive = true,
-        Goal::Panic { speed, target } => {
+        Goal::Panic { speed, target, .. } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *target, *speed);
         }
@@ -1106,6 +1118,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
+        Goal::Avoid(avoid) => avoid.stop(),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
         Goal::Float
         | Goal::RabbitRaid(_)
@@ -1250,6 +1263,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::RabbitRaid(raid) => raid.tick(me, mob, ctx),
         Goal::RabbitPowderSnow => mob.jump.jump = true,
+        Goal::Avoid(avoid) => avoid.tick(me, mob, ctx),
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
         Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
@@ -1483,7 +1497,7 @@ pub(crate) fn player_by_uid(view: &dyn BlockView, uid: EntityUid) -> Option<Play
 }
 
 /// `TargetingConditions.test` 里和玩家有关的部分，`range` 为 0 时不看距离。
-fn targeting_test(
+pub(super) fn targeting_test(
     me: &Entity,
     mob: &mut Mob,
     view: &dyn BlockView,
@@ -1743,6 +1757,68 @@ pub(crate) fn default_random_pos(
         }
         Some(pos)
     })
+}
+
+/// `DefaultRandomPos.getPosAway`：在背离 `avoid` 的 ±90° 扇形里取点。
+///
+/// `DefaultRandomPos.getPosAway`: sample within ±90° of the direction away
+/// from `avoid`.
+pub(crate) fn default_random_pos_away(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    avoid: Vec3,
+) -> Option<Vec3> {
+    let away_x = me.position.x - avoid.x;
+    let away_z = me.position.z - avoid.z;
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            f64::from(horizontal),
+            vertical,
+            away_x,
+            away_z,
+            f64::from(std::f32::consts::FRAC_PI_2),
+        )?;
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos)
+            || (restricted && !within_home(mob, pos))
+            || !Navigation::is_stable_destination(view, pos)
+            || has_malus(mob, view, pos)
+        {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `RandomPos.generateRandomDirectionWithinRadians`，最小水平距离 0、飞行高度 0。
+///
+/// `RandomPos.generateRandomDirectionWithinRadians` with a minimum horizontal
+/// distance of 0 and a flying height of 0.
+fn random_direction_within_radians(
+    me: &mut Entity,
+    max_horizontal: f64,
+    vertical: i32,
+    dir_x: f64,
+    dir_z: f64,
+    max_radians: f64,
+) -> Option<BlockPos> {
+    let centre = mth::atan2(dir_z, dir_x) - f64::from(std::f32::consts::FRAC_PI_2);
+    let spread = f64::from(2.0_f32 * me.random.next_float() - 1.0);
+    let yaw = centre + spread * max_radians;
+    let sqrt_two = f64::from(2.0_f32.sqrt());
+    let distance = mth::lerp(me.random.next_double().sqrt(), 0.0, max_horizontal) * sqrt_two;
+    let x = -distance * yaw.sin();
+    let z = distance * yaw.cos();
+    if x.abs() > max_horizontal || z.abs() > max_horizontal {
+        return None;
+    }
+    let y = me.random.next_int_bounded(2 * vertical + 1) - vertical;
+    Some(BlockPos::containing(Vec3::new(x, f64::from(y), z)))
 }
 
 /// `LandRandomPos.getPos`。
