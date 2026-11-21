@@ -327,6 +327,22 @@ impl RegionColumn {
         self.entities = source.entities;
     }
 
+    /// 生成期刷怪的结果放进这个盒子（官方 `ProtoChunk.addEntity`）。和读盘的行一样，
+    /// 放进岛时重新取号、取种子；已有的实体和保留条目原样保留。
+    ///
+    /// Add world-generation spawns to this box (vanilla `ProtoChunk.addEntity`). Like
+    /// rows read from disk, they take fresh ids and seeds when the box joins an island;
+    /// existing entities and preserved entries stay.
+    pub fn add_generated_entities(&mut self, rows: Vec<EntityRow>) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut all = self.entities.rows().to_vec();
+        all.extend(rows);
+        let preserved = self.entities.preserved().to_vec();
+        self.entities = ChunkEntities::from_parts(all, preserved);
+    }
+
     /// 存档编码用的只读部件视图。
     pub fn parts(&self) -> RegionColumnView<'_> {
         RegionColumnView {

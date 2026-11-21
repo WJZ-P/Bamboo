@@ -3432,6 +3432,13 @@ impl Master {
         // 没接 SaveSession（测试 / oracle）时保持匀速写盘开启；接了就照 `noSave`。
         let saves_enabled = self.save.as_ref().is_none_or(|save| save.auto_save());
         self.host.set_saves_enabled(saves_enabled);
+        // 生成期刷怪读游戏规则 `SPAWN_MOBS`。
+        // World-generation spawning reads the `SPAWN_MOBS` rule.
+        let spawn_mobs = self
+            .global
+            .rules()
+            .bool(mc_bamboo_data::gamerules::SPAWN_MOBS);
+        self.host.set_spawn_mobs(spawn_mobs);
         self.host.tick(island, self.director_tick);
     }
 
