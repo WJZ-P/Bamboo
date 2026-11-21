@@ -877,6 +877,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - 此次合并没有实现狼与羊驼之间的躲避 / 主动攻击，也未扩展马科骑乘。
 - 2026-11-21 再次合并 `main`（苦力怕 / 蜘蛛 / 洞穴蜘蛛 / 末影人、水生生物、世界生成缓存）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 306 例 1224 刻；三种 `loot-oracle` 各 200 题、`chunk-content` 488 项均通过。此次合并未改动农场动物的代码与上述现状。
 - 2026-11-21 再合并 `main`（op-misc：哞菇 / 熊猫 / 北极熊）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题，生成期 `--only gen_spawn_misc` 128 例 / `--only gen_spawn_panda` 128 例均 0 不一致。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项报「官方无法载入该实体」：该用例及官方加载器与 `main` 逐字相同，是随本次合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关（详见汇报疑点清单）。此次合并只解决公共文件的冲突，未改动农场动物代码。
+- 2026-11-21 合并 `main`（`2448b76c`：compute pool / IO 线程 / 岛 / staged pipeline 的计时测试确定性，仅动 `mc-bamboo-game` 的测试与 `chunk_io.rs`，与农场动物代码零重叠）后复核农场动物仍 0 不一致：`mob-oracle --only pig` 5 例 348 刻、`--only sheep` 10 例 1300 刻、`--only chicken` 3 例 255 刻、`--only egg` 11 例 149 刻、`--only natural_spawn` 318 例 1272 刻、`--only gen_spawn` 7000 例；三种 `loot-oracle` 各 200 题 0 不一致。`cargo check --workspace --all-targets` 通过。`chunk-content` 495 项里农场动物与牛的存档用例全通过，仅 `polar bear with persistent anger` 一项仍报「官方无法载入该实体」，是第十五轮合并带入的 op-misc 北极熊夹具历史问题，与农场动物无关。此次为无文本冲突合并，未改动农场动物代码。
 
 ## 猪的实施现状
 
