@@ -955,7 +955,12 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `Search` 里照 `AmphibiousNodeEvaluator`：水里贴着 `BLOCKED` 的格子算 `WATER_BORDER`
   （代价 4），水里多出上下两个竖直水邻格（`isVerticalNeighborValid` 只收 `WATER`），
   求值器起点在水中换成碰撞盒最小角、`isAmphibious` 让 `findAcceptedNode` 不再把水节点
-  换成水下地面。三项代价覆盖（水 0、走地 6、水边 4）留在 `Mob::malus`。
+  换成水下地面。代价覆盖照官方只在一次搜索期间生效：`Drowned` 身上只有水 0；
+  `AmphibiousNodeEvaluator.start()` 搜索期间把走地改 6、水边改 4，`done()` 还原
+  （Bamboo 在求值器的 `malus` 里按 `EvaluatorFlags::amphibious` 覆盖这两项）。
+  2026-11-21 的 `main` 合并后这条被发现曾把三项都常驻在 `Mob::malus` 上，导致
+  `GoalUtils.hasMalus` 拒绝所有草地落点、溺尸打完架后一直无法随机漫游；改成搜索期覆盖后
+  `drowned_flat_chase_3` 从 9 处不一致回到 0。
   上次报告里「平地上 `createPath` 返回空」是误判：白天 `Drowned.okTarget` 本来就不选玩家，
   夜间场景下原来的僵尸近战逻辑能正常寻路；真正缺的是 `AmphibiousPathNavigation.canUpdatePath`
   恒真和 `Drowned.closeToNextPos` 量的是终点格子的角而不是格心，两处都已修。
