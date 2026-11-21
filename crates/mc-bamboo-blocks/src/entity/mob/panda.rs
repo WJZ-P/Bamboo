@@ -320,7 +320,10 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 love_time: 0,
             },
         ),
-        wrap(3, goals::melee_attack(super::panda::MELEE_SPEED)),
+        wrap(
+            3,
+            goals::melee_attack(super::panda::MELEE_SPEED, false, "PandaAttackGoal"),
+        ),
         wrap(
             4,
             Goal::Tempt {

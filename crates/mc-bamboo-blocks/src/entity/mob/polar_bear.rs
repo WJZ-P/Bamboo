@@ -88,7 +88,10 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     navigation.flags.can_float = true;
     GoalSelector::with_goals(vec![
         wrap(0, Goal::Float),
-        wrap(1, goals::melee_attack(MELEE_SPEED)),
+        wrap(
+            1,
+            goals::melee_attack(MELEE_SPEED, true, "PolarBearMeleeAttackGoal"),
+        ),
         wrap(
             1,
             Goal::Panic {

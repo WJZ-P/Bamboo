@@ -35,27 +35,31 @@ pub struct GenSpawn<'a> {
     pub region_random: &'a dyn RandomSource,
 }
 
-/// 没建模的动物要模拟的放置事实：`SpawnPlacements` 的 `ON_GROUND` +
-/// `MOTION_BLOCKING_NO_LEAVES` + `Animal.checkAnimalSpawnRules`，`Animal` 的默认走路代价。
+/// 生成期刷怪要用的放置事实：`SpawnPlacements` 登记的放置方式和刷怪规则
+/// （高度图都是 `MOTION_BLOCKING_NO_LEAVES`），以及身体尺寸。
 ///
-/// Placement facts simulated for unmodelled animals: `ON_GROUND`,
-/// `MOTION_BLOCKING_NO_LEAVES`, `Animal.checkAnimalSpawnRules` and the default
-/// `Animal` walk target value.
+/// Placement facts for generation spawning: the placement type and spawn rule
+/// registered in `SpawnPlacements` (always the `MOTION_BLOCKING_NO_LEAVES`
+/// heightmap) and the body size.
 #[derive(Debug, Clone, Copy)]
 struct Placement {
     entity_type: i32,
     width: f32,
     height: f32,
+    /// `ON_GROUND` 为真；狐狸的 `NO_RESTRICTIONS` 为假，位置恒可用。
+    ///
+    /// True for `ON_GROUND`; false for the fox's `NO_RESTRICTIONS`.
+    on_ground: bool,
     /// Bamboo 建模了的种类；`None` 时只模拟放置、推进随机数，不生成实体。
     kind: Option<MobType>,
 }
 
-/// 用 `Animal.checkAnimalSpawnRules` 注册、放置方式和高度图都一样的动物。
-/// 其余种类（兔、狼、狐、山羊……）的规则还没翻译，遇到时返回 `None`。
+/// 用 `Animal.checkAnimalSpawnRules` 注册的七种动物，加上兔子、狼、狐狸各自的规则。
+/// 其余种类（山羊、北极熊……）的规则还没翻译，遇到时返回 `None`。
 ///
-/// Animals registered with `Animal.checkAnimalSpawnRules` and the same
-/// placement and heightmap. Other kinds (rabbit, wolf, fox, goat, ...) are not yet
-/// translated and give `None`.
+/// The seven animals registered with `Animal.checkAnimalSpawnRules`, plus the rabbit,
+/// wolf and fox rules. Other kinds (goat, polar bear, ...) are not yet translated and
+/// give `None`.
 fn placement(entity: i32) -> Option<Placement> {
     let animal = [
         entity_type::CHICKEN,
@@ -77,18 +81,22 @@ fn placement(entity: i32) -> Option<Placement> {
         entity_type::SHEEP,
     ]
     .contains(&entity);
-    if !animal {
-        return None;
-    }
+    let on_ground = match entity {
+        _ if animal => true,
+        entity_type::RABBIT => true,
+        entity_type::WOLF => true,
+        entity_type::FOX => false,
+        _ => return None,
+    };
     let facts = &FACTS[entity as usize];
     Some(Placement {
         entity_type: entity,
         width: facts.width,
         height: facts.height,
+        on_ground,
         kind: MobType::by_entity_type(entity),
     })
 }
-
 /// `NaturalSpawner.spawnMobsForChunkGeneration`（`SPAWN_MOBS` 由调用方查）。返回生成的生物，
 /// 调用方把它们放进区块的实体盒。遇到规则没翻译的种类就停止这个区块，后面的取数无法对齐。
 ///
@@ -154,7 +162,9 @@ fn spawn_one(
         attempts += 1;
         let (x, z) = *cursor;
         let pos = BlockPos::new(x, top_non_colliding_y(world, x, z), z);
-        if natural::on_ground_position_ok(world, placement.entity_type, false, pos) {
+        if !placement.on_ground
+            || natural::on_ground_position_ok(world, placement.entity_type, false, pos)
+        {
             let width = f64::from(placement.width);
             let fx = clamp(
                 f64::from(x),

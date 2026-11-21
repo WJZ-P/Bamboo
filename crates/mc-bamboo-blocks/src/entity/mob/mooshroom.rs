@@ -251,7 +251,7 @@ pub(crate) fn apply_shear(world: &mut World, entity: &mut Entity, hand: Hand, to
         for _ in 0..drop.count {
             let mut single = drop.clone();
             single.count = 1;
-            world.spawn_fresh_item(at, single);
+            world.spawn_item_with_delay(at, single, 0);
         }
     }
     world.add_prepared_entity(cow);

@@ -442,6 +442,7 @@ mod tests {
             armor_cover: 0.0,
             main_hand: 0,
             off_hand: 0,
+            combat: Default::default(),
         };
         shooter.with_mob(|shooter, mob| {
             mob.equipment

@@ -3196,9 +3196,10 @@ impl<'a> World<'a> {
             return crate::entity::mob::interact::MobInteraction::pass();
         };
         let thundering = self.is_thundering();
+        let now = self.game_time();
         let outcome = entity
             .with_mob(|me, mob| {
-                crate::entity::mob::interact::interact(me, mob, request, thundering)
+                crate::entity::mob::interact::interact(me, mob, request, now, thundering)
             })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         if outcome.shear {

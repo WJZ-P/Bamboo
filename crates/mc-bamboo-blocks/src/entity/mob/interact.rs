@@ -80,22 +80,32 @@ impl MobInteraction {
     }
 }
 
+/// `Animal.isFood`：各种动物认的食物。
+///
+/// `Animal.isFood` per species.
 pub(super) fn is_food(kind: MobType, item: i32) -> bool {
     match kind {
         MobType::Cow | MobType::Mooshroom => item_is_tagged(item, item_tags::COW_FOOD),
-        MobType::Pig => item_is_tagged(item, item_tags::PIG_FOOD),
+        MobType::Pig => item_is_tagged(item, mc_bamboo_data::tags::item_tags::PIG_FOOD),
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
         MobType::Panda => super::panda::is_food(item),
-        _ => false,
+        _ => kind.food_tag().is_some_and(|tag| item_is_tagged(item, tag)),
     }
 }
 
-/// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
+/// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；狼走 `Wolf.mobInteract`；
+/// 马科走 `equine::interact`；否则交给 `Animal.mobInteract`。`now` 是岛时钟
+/// （狼要看还在不在生气），`thundering` 给熊猫的害怕判定用。
+///
+/// `AbstractCow.mobInteract`, `Wolf.mobInteract`, `equine::interact`, or
+/// `Animal.mobInteract`. `now` is the island clock, read by the wolf's anger check;
+/// `thundering` feeds the panda's scared check.
 pub fn interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
+    now: i64,
     thundering: bool,
 ) -> MobInteraction {
     if mob.mob_type == MobType::Panda
@@ -103,6 +113,9 @@ pub fn interact(
             super::panda::interact(me, mob, req, super::panda::is_scared(mob, thundering))
     {
         return outcome;
+    }
+    if mob.mob_type == super::MobType::Wolf {
+        return super::wolf::interact(me, mob, req, now);
     }
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
@@ -127,6 +140,17 @@ pub fn interact(
             ..MobInteraction::pass()
         };
     }
+    animal_interact(me, mob, req)
+}
+
+/// `Animal.mobInteract`：吃的能让成年动物发情、让幼崽长大。
+///
+/// `Animal.mobInteract`: food puts adults in love or ages babies up.
+pub(super) fn animal_interact(
+    me: &mut Entity,
+    mob: &mut Mob,
+    req: &MobInteractRequest,
+) -> MobInteraction {
     if mob.mob_type == MobType::Sheep
         && let Some(outcome) = sheep::interact_shears(mob, req)
     {
