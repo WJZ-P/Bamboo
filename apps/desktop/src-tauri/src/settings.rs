@@ -331,6 +331,9 @@ impl ServerSettings {
             entity_threads: self.entity_threads as usize,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
+            // 桌面界面不暴露这一项，按官方/缺省开。
+            // The desktop UI does not expose this knob; keep the default (on).
+            spawn_per_player_cap: defaults.spawn_per_player_cap,
             mail_budget: mc_bamboo_game::MailBudget {
                 deliveries: self.deliveries_per_tick as usize,
                 reclaims: self.reclaims_per_tick as usize,

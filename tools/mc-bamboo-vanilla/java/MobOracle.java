@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicLong;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import java.util.function.Consumer;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
@@ -97,6 +99,8 @@ import net.minecraft.world.level.GameType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
@@ -122,6 +126,15 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.attribute.EnvironmentAttributes;
+import net.minecraft.world.level.biome.MobSpawnSettings;
+import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.LocalMobCapCalculator;
+import net.minecraft.world.level.NaturalSpawner;
+import net.minecraft.world.level.StructureManager;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.util.random.WeightedList;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -261,6 +274,12 @@ public final class MobOracle {
             }
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
+            }
+            if ("natural_spawn".equals(only)) {
+                cases += playNaturalSpawns(official, out);
+            }
+            if ("gen_spawn".equals(only)) {
+                cases += playGenSpawns(official, out);
             }
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
@@ -2515,6 +2534,290 @@ public final class MobOracle {
             return playSkeletonSpawns(official, out, true);
         } finally {
             UNSAFE.putObject(base, offset, old);
+        }
+    }
+
+    // 固定官方群系表中的一个条目；不改它的权重、组大小或官方生成逻辑。
+    // Pin one entry from the official biome table without changing its weight, count or spawning code.
+    private record NaturalScene(String name, EntityType<? extends Mob> mob, String biome, int difficulty,
+            int sky, int block, int darken, boolean thunder, double playerX, int population,
+            int spawnableChunks, boolean localCap, boolean nearbyRespawn) {}
+
+    private static int playNaturalSpawns(Official official, Writer out) throws Exception {
+        List<NaturalScene> scenes = new ArrayList<>();
+        scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("cow_night", EntityTypes.COW, "savanna", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("cow_respawn", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, true));
+        int cap = MobCategory.CREATURE.getMaxInstancesPerChunk();
+        scenes.add(new NaturalScene("cow_global_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 289, false, false));
+        scenes.add(new NaturalScene("cow_local_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 578, true, false));
+        scenes.add(new NaturalScene("cow_no_local_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 578, false, false));
+        for (Difficulty difficulty : Difficulty.values()) {
+            scenes.add(new NaturalScene("skeleton_night_" + difficulty.getId(), EntityTypes.SKELETON, "plains",
+                    difficulty.getId(), 15, 0, 11, false, -32, 0, 289, true, false));
+        }
+        for (Difficulty difficulty : Difficulty.values()) {
+            scenes.add(new NaturalScene("zombie_night_" + difficulty.getId(), EntityTypes.ZOMBIE, "plains",
+                    difficulty.getId(), 15, 0, 11, false, -32, 0, 289, true, false));
+        }
+        scenes.add(new NaturalScene("husk_night", EntityTypes.HUSK, "desert", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("skeleton_day", EntityTypes.SKELETON, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("skeleton_torch", EntityTypes.SKELETON, "plains", 2, 0, 1, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("skeleton_thunder", EntityTypes.SKELETON, "desert", 3, 15, 0, 10, true, -32, 0, 289, true, false));
+        for (int distance : new int[] {24, 32, 128}) {
+            scenes.add(new NaturalScene("skeleton_near_" + distance, EntityTypes.SKELETON, "plains", 2, 0, 0, 11,
+                    false, 8.5 - distance, 0, 289, true, false));
+        }
+        int count = 0;
+        for (var scene : scenes) {
+            for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
+                out.write(naturalSpawnCase(official, scene, seed) + "\n");
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static JsonObject naturalSpawnCase(Official official, NaturalScene scene, long seed) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.naturalScene = scene;
+        level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace(scene.biome())));
+        put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> level.naturalBiome, 0L));
+        level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        level.injectedSkyDarken = scene.darken();
+        level.injectedCanSeeSky = scene.sky() == 15;
+        Difficulty difficulty = Difficulty.byId(scene.difficulty());
+        ((TickingLevelData) level.levelData).difficulty = difficulty;
+        level.spawnDifficulty = new DifficultyInstance(difficulty, 0L, 0L, 0.0F);
+        MobCategory category = scene.mob().getCategory();
+        MobSpawnSettings settings = level.naturalBiome.value().getAttributes()
+                .applyModifier(EnvironmentAttributes.NATURAL_MOB_SPAWNS, MobSpawnSettings.EMPTY);
+        var entry = settings.getMobsToSpawn(category).unwrap().stream()
+                .filter(row -> row.value().type() == scene.mob()).findFirst().orElseThrow();
+        var generator = allocate(NaturalSpawnGenerator.class);
+        generator.category = category;
+        generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
+        level.chunkSource.naturalGenerator = generator;
+
+        for (int x = -16; x < 48; x++) {
+            for (int z = -16; z < 32; z++) {
+                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
+                // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
+                // Husk fixture: glass at -60 blocks the camel-husk spawn box (Bamboo has no
+                // camel husk or parched) and is no spawn surface; the 1.95-tall husk still fits.
+                if (scene.mob() == EntityTypes.HUSK) {
+                    level.blocks.put(BlockPos.asLong(x, -60, z), Blocks.GLASS.defaultBlockState());
+                }
+            }
+        }
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "NaturalSpawnOracle"), ClientInformation.createDefault());
+        player.setPos(scene.playerX(), -62.0, 8.5);
+        level.playersList().add(player);
+        level.tracked.add(player);
+        for (int i = 0; i < scene.population(); i++) {
+            Mob mob = scene.mob().create(level, EntitySpawnReason.NATURAL);
+            mob.snapTo(8.5, -45.0, 8.5, 0.0F, 0.0F);
+            level.tracked.add(mob);
+        }
+        level.getRandom().setSeed(seed);
+        var map = allocate(NaturalSpawnChunkMap.class);
+        map.player = player;
+        List<LevelChunk> chunks = List.of(level.chunkSource.getChunkNow(0, 0), level.chunkSource.getChunkNow(1, 0));
+        for (var chunk : chunks) {
+            net.minecraft.world.level.levelgen.Heightmap.primeHeightmaps(chunk,
+                    java.util.Set.of(net.minecraft.world.level.levelgen.Heightmap.Types.WORLD_SURFACE));
+        }
+        JsonArray steps = new JsonArray();
+        for (long time : new long[] {400, 401, 800, 1200}) {
+            level.gameTime = time;
+            level.spawned.clear();
+            // 每刻重算；本夹具关掉局部上限时只旁路 `canSpawn`，全局上限仍走原版。
+            // Recount each tick; the local-cap-off fixture bypasses only canSpawn.
+            var local = new LocalMobCapCalculator(map) {
+                @Override
+                public boolean canSpawn(MobCategory category, ChunkPos pos) {
+                    return !scene.localCap() || super.canSpawn(category, pos);
+                }
+            };
+            var state = NaturalSpawner.createState(scene.spawnableChunks(), level,
+                    (key, consumer) -> consumer.accept(level.chunkSource.getChunkNow(ChunkPos.getX(key), ChunkPos.getZ(key))), local);
+            var categories = NaturalSpawner.getFilteredSpawningCategories(state, category == MobCategory.MONSTER, time % 400 == 0);
+            categories = categories.stream().filter(c -> c == category).toList();
+            for (var chunk : chunks) {
+                NaturalSpawner.spawnForChunk(level, chunk, state, categories);
+            }
+            var step = new JsonObject();
+            step.addProperty("time", time);
+            step.addProperty("count", state.getMobCategoryCounts().getInt(category));
+            step.addProperty("worldSeed", levelSeed(level));
+            var spawned = new JsonArray();
+            for (Entity entity : level.spawned) {
+                Mob mob = (Mob) entity;
+                var row = new JsonArray();
+                row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                row.add((int) (mob.getX() * 2));
+                row.add((int) mob.getY());
+                row.add((int) (mob.getZ() * 2));
+                row.add(Float.floatToRawIntBits(mob.getYRot()));
+                row.add(mob.isBaby() ? 1 : 0);
+                row.add(mob.isLeftHanded() ? 1 : 0);
+                row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                spawned.add(row);
+            }
+            step.add("spawned", spawned);
+            steps.add(step);
+        }
+        var row = new JsonObject();
+        row.addProperty("type", "naturalSpawn");
+        row.addProperty("name", scene.name());
+        row.addProperty("entityType", BuiltInRegistries.ENTITY_TYPE.getId(scene.mob()));
+        row.addProperty("biome", "minecraft:" + scene.biome());
+        row.addProperty("seed", seed);
+        row.addProperty("difficulty", scene.difficulty());
+        row.addProperty("sky", scene.sky());
+        row.addProperty("block", scene.block());
+        row.addProperty("darken", scene.darken());
+        row.addProperty("thunder", scene.thunder());
+        row.addProperty("playerX", scene.playerX());
+        row.addProperty("population", scene.population());
+        row.addProperty("spawnableChunks", scene.spawnableChunks());
+        row.addProperty("localCap", scene.localCap());
+        row.addProperty("nearbyRespawn", scene.nearbyRespawn());
+        row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
+        row.add("steps", steps);
+        return row;
+    }
+
+    // 生成期刷怪：平原的真实刷怪表，区块 (0,0) 和一圈邻居按坐标公式铺台阶、水、沙、树叶和草丛。
+    // World-generation spawning: the real plains table over a formula terrain of steps,
+    // water, sand, leaves and short grass around chunk (0,0).
+    private record GenScene(String name, int sky, int block, boolean terrain) {}
+
+    private static int playGenSpawns(Official official, Writer out) throws Exception {
+        List<GenScene> scenes = List.of(
+                new GenScene("gen_flat", 15, 0, false),
+                new GenScene("gen_terrain", 15, 0, true),
+                new GenScene("gen_dim", 8, 0, true),
+                new GenScene("gen_torch", 0, 9, true));
+        int count = 0;
+        for (GenScene scene : scenes) {
+            for (long index = 0; index < 500; index++) {
+                // 相邻的小种子第一下 `nextFloat` 几乎相同，打散成 64 位。
+                // Nearby small seeds share their first `nextFloat`; spread them out.
+                long seed = index * 0x9E3779B97F4A7C15L + 12345L;
+                out.write(genSpawnCase(official, scene, seed) + "\n");
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static JsonObject genSpawnCase(Official official, GenScene scene, long seed) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.COW, "plains", 2, scene.sky(), scene.block(), 0,
+                false, 0, 0, 0, false, false);
+        level.worldGenRegion = true;
+        level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+        put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> level.naturalBiome, 0L));
+        level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        level.spawnDifficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        for (int x = -16; x < 32; x++) {
+            for (int z = -16; z < 32; z++) {
+                genColumn(level, x, z, scene.terrain());
+            }
+        }
+        for (int cx = -1; cx <= 1; cx++) {
+            for (int cz = -1; cz <= 1; cz++) {
+                net.minecraft.world.level.levelgen.Heightmap.primeHeightmaps(level.chunkSource.getChunkNow(cx, cz),
+                        java.util.Set.of(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
+            }
+        }
+        RandomSource region = new net.minecraft.world.level.levelgen.XoroshiroRandomSource(seed * 31 + 7);
+        put(Level.class, level, "random", region);
+        net.minecraft.world.level.levelgen.WorldgenRandom random =
+                new net.minecraft.world.level.levelgen.WorldgenRandom(new net.minecraft.world.level.levelgen.LegacyRandomSource(0L));
+        random.setDecorationSeed(seed, 0, 0);
+        NaturalSpawner.spawnMobsForChunkGeneration(level, new BlockPos(0, level.getMaxY(), 0), new ChunkPos(0, 0), random);
+        JsonArray spawned = new JsonArray();
+        for (Entity entity : level.spawned) {
+            Mob mob = (Mob) entity;
+            var row = new JsonArray();
+            row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+            row.add(Double.doubleToRawLongBits(mob.getX()));
+            row.add(Double.doubleToRawLongBits(mob.getY()));
+            row.add(Double.doubleToRawLongBits(mob.getZ()));
+            row.add(Float.floatToRawIntBits(mob.getYRot()));
+            row.add(mob.isBaby() ? 1 : 0);
+            row.add(mob.isLeftHanded() ? 1 : 0);
+            spawned.add(row);
+        }
+        var result = new JsonObject();
+        result.addProperty("type", "genSpawn");
+        result.addProperty("name", scene.name());
+        result.addProperty("seed", seed);
+        result.addProperty("sky", scene.sky());
+        result.addProperty("block", scene.block());
+        result.addProperty("terrain", scene.terrain());
+        result.add("spawned", spawned);
+        result.addProperty("random", random.nextLong());
+        result.addProperty("region", region.nextLong());
+        return result;
+    }
+
+    /** 和 Rust 侧 `gen_column` 同一个坐标公式。 */
+    private static void genColumn(FakeLevel level, int x, int z, boolean terrain) {
+        int top = terrain ? -63 + Math.floorMod(x * 7 + z * 13, 3) : -63;
+        for (int y = -63; y < top; y++) {
+            level.blocks.put(BlockPos.asLong(x, y, z), Blocks.STONE.defaultBlockState());
+        }
+        BlockState ground = Blocks.GRASS_BLOCK.defaultBlockState();
+        if (terrain && Math.floorMod(x + 2 * z, 9) == 0) {
+            ground = Blocks.WATER.defaultBlockState();
+        } else if (terrain && Math.floorMod(x * 3 + z * 5, 11) == 0) {
+            ground = Blocks.SAND.defaultBlockState();
+        }
+        level.blocks.put(BlockPos.asLong(x, top, z), ground);
+        if (terrain && Math.floorMod(5 * x + z, 13) == 0) {
+            level.blocks.put(BlockPos.asLong(x, top + 1, z), Blocks.OAK_LEAVES.defaultBlockState());
+        } else if (terrain && Math.floorMod(x - z, 4) == 0) {
+            level.blocks.put(BlockPos.asLong(x, top + 1, z), Blocks.SHORT_GRASS.defaultBlockState());
+        }
+    }
+
+    private static final class NaturalSpawnGenerator extends FlatLevelSource {
+        MobCategory category;
+        WeightedList<MobSpawnSettings.SpawnerData> table;
+
+        private NaturalSpawnGenerator() {
+            super(null);
+        }
+
+        @Override
+        public WeightedList<MobSpawnSettings.SpawnerData> getMobsAt(
+                Level level, StructureManager structures, MobCategory category, BlockPos pos) {
+            return this.category == category ? table : WeightedList.of();
+        }
+    }
+
+    private static final class NaturalSpawnChunkMap extends ChunkMap {
+        ServerPlayer player;
+
+        private NaturalSpawnChunkMap() {
+            super(null, null, null, null, null, null, null, null, null, null, 0, false);
+        }
+
+        @Override
+        public List<ServerPlayer> getPlayersCloseForSpawning(ChunkPos pos) {
+            double dx = player.getX() - pos.getMiddleBlockX();
+            double dz = player.getZ() - pos.getMiddleBlockZ();
+            return dx * dx + dz * dz < 128 * 128 ? List.of(player) : List.of();
         }
     }
 
@@ -5303,11 +5606,17 @@ public final class MobOracle {
     /** 区块缓存：寻路和地面搜索走 {@code getChunkNow}，交给假世界的区块表。 */
     private static final class Chunks extends ServerChunkCache {
         FakeLevel level;
+        ChunkGenerator naturalGenerator;
         /** 实体事件和音效走这里，和同步包一起记进同一刻的字节流。 */
         java.util.function.Consumer<Packet<? super ClientGamePacketListener>> events;
 
         private Chunks() {
             super(null, null, null, null, null, null, 0, 0, false, null);
+        }
+
+        @Override
+        public ChunkGenerator getGenerator() {
+            return naturalGenerator == null ? super.getGenerator() : naturalGenerator;
         }
 
         @Override
@@ -5348,6 +5657,10 @@ public final class MobOracle {
     private static final class FakeLevel extends ServerLevel {
         List<long[]> projectileExtinguishes;
         DifficultyInstance spawnDifficulty;
+        NaturalScene naturalScene;
+        boolean worldGenRegion;
+        Holder<Biome> naturalBiome;
+        EnvironmentAttributeSystem naturalAttributes;
 
         private Official official;
         private Long2ObjectOpenHashMap<BlockState> blocks;
@@ -5446,13 +5759,37 @@ public final class MobOracle {
 
         @Override
         public int getMaxLocalRawBrightness(BlockPos pos) {
-            return realSky ? getMaxLocalRawBrightness(pos, getSkyDarken()) : 15;
+            return naturalScene != null || realSky ? getMaxLocalRawBrightness(pos, getSkyDarken()) : 15;
         }
 
         /** 真实时间模式：天空光 15、方块光 0，按官方 `max(block, sky - darken)`。 */
         @Override
         public int getMaxLocalRawBrightness(BlockPos pos, int darken) {
+            if (naturalScene != null) {
+                return getRawBrightness(pos, darken);
+            }
             return realSky ? Math.max(0, 15 - darken) : 15;
+        }
+
+        @Override
+        public int getBrightness(LightLayer layer, BlockPos pos) {
+            if (naturalScene != null) {
+                return layer == LightLayer.SKY ? naturalScene.sky() : naturalScene.block();
+            }
+            return super.getBrightness(layer, pos);
+        }
+
+        @Override
+        public int getRawBrightness(BlockPos pos, int darken) {
+            if (naturalScene != null) {
+                return Math.max(naturalScene.sky() - darken, naturalScene.block());
+            }
+            return super.getRawBrightness(pos, darken);
+        }
+
+        @Override
+        public boolean isThundering() {
+            return naturalScene == null ? super.isThundering() : naturalScene.thunder();
         }
 
         @Override
@@ -5520,7 +5857,7 @@ public final class MobOracle {
         /** 官方 `MONSTERS_BURN` 由静态环境属性系统给出；僵尸场景按用例开关。 */
         @Override
         public EnvironmentAttributeSystem environmentAttributes() {
-            return official.attributes;
+            return naturalAttributes == null ? official.attributes : naturalAttributes;
         }
 
         private net.minecraft.server.waypoints.ServerWaypointManager waypoints;
@@ -5537,6 +5874,11 @@ public final class MobOracle {
         @Override
         public boolean isPositionEntityTicking(BlockPos pos) {
             return true;
+        }
+
+        @Override
+        public boolean canSpawnEntitiesInChunk(ChunkPos pos) {
+            return naturalScene == null ? super.canSpawnEntitiesInChunk(pos) : getWorldBorder().isWithinBounds(pos);
         }
 
         @Override
@@ -5602,6 +5944,10 @@ public final class MobOracle {
 
         @Override
         public LevelData.RespawnData getRespawnData() {
+            if (naturalScene != null) {
+                var pos = naturalScene.nearbyRespawn() ? new BlockPos(8, -62, 8) : new BlockPos(10000, -62, 8);
+                return LevelData.RespawnData.of(Level.OVERWORLD, pos, 0.0F, 0.0F);
+            }
             // Bamboo 的默认世界出生点 `DEFAULT_SPAWN_POS = (8, 0, 8)`。
             return LevelData.RespawnData.of(Level.OVERWORLD, new BlockPos(8, 0, 8), 0.0F, 0.0F);
         }
@@ -5633,6 +5979,11 @@ public final class MobOracle {
             }
             if (entity instanceof Cow calf && dropUuids) {
                 newbornCows.add(calf);
+            }
+            // 生成期区域查不到实体（`WorldGenRegion.getEntities` 恒空），不进 tracked。
+            // A world-generation region sees no entities, so keep them out of tracked.
+            if (naturalScene != null && !worldGenRegion) {
+                tracked.add(entity);
             }
             spawned.add(entity);
             return true;
@@ -5769,7 +6120,7 @@ public final class MobOracle {
 
         @Override
         public Holder<Biome> getBiome(BlockPos pos) {
-            return official.plains;
+            return naturalBiome == null ? official.plains : naturalBiome;
         }
 
         @Override

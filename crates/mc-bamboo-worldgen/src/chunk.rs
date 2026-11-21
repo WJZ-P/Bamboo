@@ -910,6 +910,44 @@ impl<'a> Generator<'a> {
         Ok(names)
     }
 
+    /// `WorldGenRegion` 上的 `BiomeManager.getBiome(x, y, z)`：八角插值选出 quart 角，
+    /// 再按 `ChunkAccess.getNoiseBiome` 把 quart y 夹进区块高度去查。生成期刷怪用它。
+    ///
+    /// `BiomeManager.getBiome(x, y, z)` on a `WorldGenRegion`: pick the quart corner,
+    /// then clamp its quart y into the chunk height as `ChunkAccess.getNoiseBiome` does.
+    /// Used by world-generation spawning.
+    pub fn region_biome(&self, x: i32, y: i32, z: i32) -> u32 {
+        let zoom = crate::biome_manager::obfuscate_seed(self.seed);
+        let (quart_x, quart_y, quart_z) = crate::biome_manager::fiddled_corner(zoom, x, y, z);
+        self.region_noise_biome(quart_x, quart_y, quart_z)
+    }
+
+    /// `ChunkAccess.getNoiseBiome(quartX, quartY, quartZ)`：quart y 夹进区块高度再问群系源。
+    ///
+    /// `ChunkAccess.getNoiseBiome(quartX, quartY, quartZ)`: clamp the quart y into the
+    /// chunk height, then ask the biome source.
+    pub fn region_noise_biome(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> u32 {
+        let min = self.settings.min_y >> 2;
+        let max = ((self.settings.min_y + self.settings.height) >> 2) - 1;
+        let quart_y = quart_y.clamp(min, max);
+        let mut context = Context::new(self.cache_count);
+        crate::biome_manager::BiomeManager::new(self.biomes, self.seed).noise_biome(
+            &self.router,
+            &mut context,
+            quart_x,
+            quart_y,
+            quart_z,
+        )
+    }
+
+    /// `WorldGenRegion.random`：`worldgen_region_random` 在中心区块世界原点（y = 0）取的源。
+    ///
+    /// `WorldGenRegion.random`: the `worldgen_region_random` source at the center chunk's
+    /// world origin (y = 0).
+    pub fn region_random_at(&self, chunk_x: i32, chunk_z: i32) -> crate::random::Random {
+        self.region_random.at(chunk_x * 16, 0, chunk_z * 16)
+    }
+
     /// 清掉群系参数表 R 树的 `lastResult`。结构起点判定里的单点群系查询会改写它，
     /// 计算池各区块到达顺序不定；地形生成前先清掉才能与调度无关。
     ///

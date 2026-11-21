@@ -657,6 +657,49 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   长矛与穿村行为按字节码保留注册项但本期不建模，写进已知差异。
 - 正式游戏的白天燃烧端到端测试等 `day-night` 合入后补；本期不在正式世界计算天色。
 
+### 9.4 期 4：自然生成（2026-11-20）
+
+- **数据**：生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性（overlay 到空表上）导出
+  每个群系的加权刷怪表与 `spawn_cost`，以及 `MobCategory.values()` 的上限表
+  （`Extractor.java` 的 `mobSpawns`；`mc-bamboo-data/src/generated/mob_spawns.rs`）。
+  条目顺序就是 `WeightedList.unwrap()` 的顺序，`SpawnerData.count()` 展开成 `min` / `max`
+  （官方刷怪表里只有常量和均匀分布，别的类型在提取时直接报错）。
+- **`NaturalSpawner`**（`mc-bamboo-blocks/src/entity/mob/natural.rs`）：
+  `SpawnState::create` 每刻从本岛实体表重算（跳过持久化生物、按类别计数、刷怪代价、
+  每名玩家附近的计数），`filtered_categories` 按全局上限
+  （`maxInstancesPerChunk * spawnableChunkCount / 289`）、`spawn_mobs` / `spawn_monsters`
+  和 `gameTime % 400 == 0` 的持久类别过滤；`spawn_for_chunk` → `spawn_category_for_chunk`
+  → `spawn_category_for_position`：3 组、初始步数 `ceil(nextFloat * 4)`、每步四次
+  `nextInt(6)`、加权表 `nextInt(总权重)`、`count.sample`、离玩家/出生点 24 格、
+  `ON_GROUND` 的方块/光照/碰撞条件、`noCollision`、`checkSpawnObstruction`、
+  `finalizeSpawn` 与组生成。
+- **刷怪规则**：牛走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
+  僵尸走 `Monster.checkMonsterSpawnRules`（`isDarkEnoughToSpawn`：天空光 `> nextInt(32)`、
+  方块光上限 0、`maxLocalRawBrightness <= nextInt(8)`，再查可生成方块），
+  尸壳额外要求 `canSeeSky`。落脚块用生成器导出的状态位 `facts::VALID_SPAWN`（官方
+  `BlockState.isValidSpawn`，用牛问：默认是顶面 `isFaceSturdy(FULL)` 且发光 < 14，树叶、玻璃、
+  冰、雕刻南瓜等整个换掉），生成实体还要过 `isValidPositionForMob`：
+  `PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`，牛看草方块/亮度，怪物取负的
+  光照代价）、`checkSpawnObstruction`（不泡液体、没有实体挡路）。
+- **接入**：`crates/mc-bamboo-game/src/natural_spawn.rs` 在 `run_island_simulation` 里
+  随机刻之前跑。先收集可 tick 方块且水平距非旁观玩家不到 128 格的候选区块，用
+  `Region.random` 打乱，再检查实体 tick 等级。全局上限使用本岛玩家周围 17×17 方形的并集，
+  不限制为已加载区块；旁观者仅在 `spectators_generate_chunks` 开启时贡献区块。
+- **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
+- **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
+- **已知差异**：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
+  然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
+  僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
+  官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
+  收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
+  生成期刷怪、结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。
+- **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
+  `MobCategory`，用 7 个固定种子各跑 8 次官方 `WeightedList.getRandom` + `IntProvider.sample`，
+  再取一个 `nextInt(1000)` 当随机源指纹；另外把 0..15 交给官方 `Util.shuffle`。
+  也直接调用官方 `getRandomPosWithin`（含空列和非平面高度表）与
+  `ChunkMap.euclideanDistanceSquared`，比较起点、后续随机指纹与 128 格区块距离条件。
+  **没有对拍完整刷怪链路**：`spawnCategoryForPosition` 的方块/光照/距离判定与
+  `finalizeSpawn` 仍未做端到端比较。
 ## 10. 箭实体与骷髅（期 3）
 
 骷髅随敌对生物走同一对选择器。弓目标按视线记忆决定寻路或横移，并把生成箭作为实体命令落地；无弓切换到近战。箭不需要自己的岛表：所有者 UID、装备、插地状态和计时跟随 `Entities`，配对和生成快照仍随 `EntityTracking` / `SpawnSnapshots`。岛重定基只平移近战选择器的游戏时间戳，不改箭的寿命或拉弓计数。精确驱动用当前状态解析命中结果；并行驱动用快照选碰撞候选，落地时才确认伤害。支持范围与已知差异见 README 和 `zombie-skeleton-plan.md`。

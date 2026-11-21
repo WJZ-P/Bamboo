@@ -555,6 +555,7 @@ impl Region {
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 *self.redstone_cache.config(),
             ),
+            spawn_per_player_cap: self.spawn_per_player_cap,
             loot_sequences,
             sound_seed_generator,
             entities,
@@ -713,6 +714,7 @@ impl Region {
             block_events,
             random,
             redstone_cache: _,
+            spawn_per_player_cap: _,
             loot_sequences,
             sound_seed_generator,
             entities,

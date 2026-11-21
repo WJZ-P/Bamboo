@@ -55,6 +55,11 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.VarInt;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.util.StringRepresentable;
+import net.minecraft.util.random.Weighted;
+import net.minecraft.util.random.WeightedList;
+import net.minecraft.util.valueproviders.ConstantInt;
+import net.minecraft.util.valueproviders.IntProvider;
+import net.minecraft.util.valueproviders.UniformInt;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.RegistryOps;
@@ -80,11 +85,14 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.animal.axolotl.Axolotl;
@@ -153,6 +161,7 @@ import net.minecraft.world.level.biome.BiomeGenerationSettings;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.biome.FeatureSorter;
+import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
@@ -234,6 +243,12 @@ public final class Extractor {
     private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
     private static final long FACT_PATHFINDABLE_LAND = 1L << 35;
     private static final long FACT_SUFFOCATING = 1L << 36;
+    /**
+     * {@code BlockBehaviour.BlockStateBase.isValidSpawn}：这个状态能不能当生物的落脚块。
+     *
+     * <p>用牛来问，因为只有豹猫/鹦鹉和北极熊的方块会按实体类型分别回答；这三种 Bamboo 都不生成。
+     */
+    private static final long FACT_VALID_SPAWN = 1L << 37;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
     /** 26.3 主世界多噪声预设 `collectPossibleBiomes().distinct()` 的数量。 */
@@ -291,6 +306,7 @@ public final class Extractor {
             root.add("componentEnums", componentEnums());
             root.add("jukeboxSongs", jukeboxSongs(layers.compositeAccess()));
             root.add("worldgen", worldgen(layers.compositeAccess()));
+            root.add("mobSpawns", mobSpawns(layers.compositeAccess()));
             root.add("gameRules", gameRules());
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
             JsonArray itemComponents = new JsonArray();
@@ -1565,6 +1581,104 @@ public final class Extractor {
         return result;
     }
 
+    /**
+     * 自然刷怪要用的数据：`MobCategory` 的上限表，以及每个群系的 `Biome.getMobSettings()`
+     * （按类别的加权刷怪表和刷怪代价）。
+     *
+     * <p>`SpawnerData.count()` 在官方生成器里只有常量与均匀分布两种，这里显式展开成
+     * `min` / `max`；出现别的 `IntProvider` 直接报错，逼着换版本时重新核对。
+     * 条目顺序就是 `WeightedList.unwrap()` 的顺序，Rust 侧按同一顺序累加权重取随机项。
+     *
+     * <p>Natural spawning data: the `MobCategory` caps and every biome's
+     * `Biome.getMobSettings()` (weighted spawn lists per category plus spawn costs).
+     * `SpawnerData.count()` is only a constant or a uniform range in the vanilla
+     * generator, so it is flattened to `min` / `max`; any other `IntProvider` fails
+     * loudly. Entry order is `WeightedList.unwrap()` order, which the Rust side uses
+     * to walk the cumulative weights.
+     */
+    private static JsonObject mobSpawns(RegistryAccess registries) {
+        JsonObject result = new JsonObject();
+        JsonArray categories = new JsonArray();
+        for (MobCategory category : MobCategory.values()) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", category.getName());
+            entry.addProperty("max", category.getMaxInstancesPerChunk());
+            entry.addProperty("friendly", category.isFriendly());
+            entry.addProperty("persistent", category.isPersistent());
+            entry.addProperty("despawnDistance", category.getDespawnDistance());
+            entry.addProperty("noDespawnDistance", category.getNoDespawnDistance());
+            categories.add(entry);
+        }
+        result.add("categories", categories);
+
+        JsonObject biomes = new JsonObject();
+        Registry<Biome> biomeRegistry = registries.lookupOrThrow(Registries.BIOME);
+        for (Identifier name : biomeRegistry.keySet().stream().sorted().toList()) {
+            // 26.3 的刷怪设置是群系的环境属性 `NATURAL_MOB_SPAWNS`，按 overlay 叠在空表上。
+            // 26.3 keeps spawn settings in the positional biome attribute
+            // `NATURAL_MOB_SPAWNS`; overlay them onto the empty table.
+            MobSpawnSettings settings = biomeRegistry.getValue(name).getAttributes()
+                    .applyModifier(EnvironmentAttributes.NATURAL_MOB_SPAWNS, MobSpawnSettings.EMPTY);
+            JsonObject biome = new JsonObject();
+            JsonArray byCategory = new JsonArray();
+            for (MobCategory category : MobCategory.values()) {
+                WeightedList<MobSpawnSettings.SpawnerData> spawns = settings.getMobsToSpawn(category);
+                if (spawns.isEmpty()) {
+                    continue;
+                }
+                JsonObject row = new JsonObject();
+                row.addProperty("category", category.getName());
+                JsonArray entries = new JsonArray();
+                for (Weighted<MobSpawnSettings.SpawnerData> weighted : spawns.unwrap()) {
+                    MobSpawnSettings.SpawnerData data = weighted.value();
+                    JsonObject spawn = new JsonObject();
+                    spawn.addProperty("type", BuiltInRegistries.ENTITY_TYPE.getKey(data.type()).toString());
+                    spawn.addProperty("weight", weighted.weight());
+                    IntProvider count = data.count();
+                    if (count instanceof ConstantInt constant) {
+                        spawn.addProperty("min", constant.value());
+                        spawn.addProperty("max", constant.value());
+                    } else if (count instanceof UniformInt uniform) {
+                        spawn.addProperty("min", uniform.minInclusive());
+                        spawn.addProperty("max", uniform.maxInclusive());
+                    } else {
+                        throw new IllegalStateException("unsupported spawn count " + count);
+                    }
+                    entries.add(spawn);
+                }
+                row.add("entries", entries);
+                byCategory.add(row);
+            }
+            biome.add("categories", byCategory);
+
+            JsonArray costs = new JsonArray();
+            Map<String, MobSpawnSettings.MobSpawnCost> costsByName = new TreeMap<>();
+            settings.allSpawnCosts().forEach((type, cost) ->
+                    costsByName.put(BuiltInRegistries.ENTITY_TYPE.getKey(type).toString(), cost));
+            for (Map.Entry<String, MobSpawnSettings.MobSpawnCost> cost : costsByName.entrySet()) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("type", cost.getKey());
+                entry.addProperty("charge", cost.getValue().charge());
+                entry.addProperty("energyBudget", cost.getValue().energyBudget());
+                costs.add(entry);
+            }
+            biome.add("costs", costs);
+            // 生成期刷怪的概率：先过主世界维度层，再过群系层（`EnvironmentAttributeSystem` 的顺序）。
+            // World-generation creature odds: overworld dimension layer, then the biome layer.
+            float creatureProbability = biomeRegistry.getValue(name).getAttributes().applyModifier(
+                    EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
+                    registries.lookupOrThrow(Registries.DIMENSION_TYPE)
+                            .getValue(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD)
+                            .attributes()
+                            .applyModifier(EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
+                                    EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY.defaultValue()));
+            biome.addProperty("creatureSpawnProbability", Integer.toUnsignedLong(Float.floatToRawIntBits(creatureProbability)));
+            biomes.add(name.toString(), biome);
+        }
+        result.add("biomes", biomes);
+        return result;
+    }
+
     /** 每个群系的 `BiomeGenerationSettings.getCarvers()`，顺序就是官方的迭代顺序。 */
     private static JsonObject biomeCarvers(RegistryAccess registries) {
         Registry<Biome> biomes = registries.lookupOrThrow(Registries.BIOME);
@@ -2066,6 +2180,7 @@ public final class Extractor {
             facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.LAND)
                     ? FACT_PATHFINDABLE_LAND : 0;
             facts |= state.isSuffocating(EMPTY, pos) ? FACT_SUFFOCATING : 0;
+            facts |= state.isValidSpawn(EMPTY, pos, EntityTypes.COW) ? FACT_VALID_SPAWN : 0;
             return facts;
         }
 

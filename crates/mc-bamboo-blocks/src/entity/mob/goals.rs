@@ -1654,10 +1654,17 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
 
 /// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
 /// `Monster.getWalkTargetValue` 取负的光照路径代价。
-fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
+pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
     }
+    animal_walk_target_value(view, pos)
+}
+
+/// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度算路径代价。
+///
+/// `Animal.getWalkTargetValue`: 10 on a grass block, otherwise the light-based path cost.
+pub(super) fn animal_walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
     if view.block_state(pos.below()).is(blocks::GRASS_BLOCK) {
         return 10.0;
     }

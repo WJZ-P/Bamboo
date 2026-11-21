@@ -93,6 +93,76 @@ pub struct Extracted {
     /// 群系的气候设置，按注册表 ID。由单独的提取器写进 `biomes.json`。
     #[serde(default)]
     pub biomes: Vec<BiomeClimateFact>,
+    /// 自然刷怪的数据：`MobCategory` 上限表和每个群系的 `MobSpawnSettings`。
+    ///
+    /// Natural-spawn data: the `MobCategory` caps and every biome's `MobSpawnSettings`.
+    #[serde(default)]
+    pub mob_spawns: MobSpawnFacts,
+}
+
+/// `MobCategory` 的上限表和每个群系的刷怪设置。
+///
+/// The `MobCategory` caps and per-biome spawn settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MobSpawnFacts {
+    /// 按官方 `MobCategory.values()` 的顺序。
+    pub categories: Vec<MobCategoryFact>,
+    /// 群系注册名 → 刷怪设置，按名字排序。
+    pub biomes: BTreeMap<String, BiomeMobSpawnFact>,
+}
+
+/// 一个 `MobCategory` 的常量。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobCategoryFact {
+    pub name: String,
+    pub max: i32,
+    pub friendly: bool,
+    pub persistent: bool,
+    pub despawn_distance: i32,
+    pub no_despawn_distance: i32,
+}
+
+/// 一个群系的 `MobSpawnSettings`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct BiomeMobSpawnFact {
+    /// 只包含有刷怪条目的类别，按 `MobCategory.values()` 的顺序。
+    pub categories: Vec<CategorySpawnsFact>,
+    /// `getMobSpawnCost` 的表，按实体类型名排序。
+    pub costs: Vec<MobSpawnCostFact>,
+    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` 的 float 原始位（主世界维度层叠群系层）。
+    ///
+    /// Raw float bits of `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` (overworld dimension
+    /// layer, then the biome layer).
+    #[serde(rename = "creatureSpawnProbability")]
+    pub creature_spawn_probability: u32,
+}
+
+/// 一个类别下的一张加权刷怪表。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CategorySpawnsFact {
+    pub category: String,
+    pub entries: Vec<MobSpawnEntryFact>,
+}
+
+/// 加权表里的一项。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MobSpawnEntryFact {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub weight: i32,
+    pub min: i32,
+    pub max: i32,
+}
+
+/// 一个实体的刷怪代价。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobSpawnCostFact {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub charge: f64,
+    pub energy_budget: f64,
 }
 
 /// 一个群系的气候设置。字段和 `BiomeClimateExtractor.java` 的 JSON 对应。
@@ -1124,6 +1194,10 @@ pub struct VersionData {
     pub game_rules: Vec<GameRuleFact>,
     /// 群系的气候设置，按 `minecraft:worldgen/biome` 注册表 ID。
     pub biomes: Vec<BiomeClimateFact>,
+    /// 自然刷怪的上限表和每个群系的刷怪设置。
+    ///
+    /// Natural-spawn caps and per-biome spawn settings.
+    pub mob_spawns: MobSpawnFacts,
     /// 官方 codec 编出的超平坦 `world_gen_settings.dat` 内容。
     pub saved_world: SavedWorldFact,
 }
@@ -1235,6 +1309,7 @@ fn read_version_data(
         worldgen: extracted.worldgen,
         game_rules: extracted.game_rules,
         biomes: extracted.biomes,
+        mob_spawns: extracted.mob_spawns,
         saved_world,
     })
 }
