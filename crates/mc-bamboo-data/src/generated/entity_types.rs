@@ -235,6 +235,13 @@ pub const PIG_BOOST_TIME: u8 = 18;
 pub const PIG_VARIANT: u8 = 19;
 pub const PIG_SOUND_VARIANT: u8 = 20;
 pub const SHEEP_WOOL: u8 = 18;
+pub const POLAR_BEAR_STANDING: u8 = 18;
+pub const PANDA_UNHAPPY: u8 = 18;
+pub const PANDA_SNEEZE: u8 = 19;
+pub const PANDA_EAT: u8 = 20;
+pub const PANDA_MAIN_GENE: u8 = 21;
+pub const PANDA_HIDDEN_GENE: u8 = 22;
+pub const PANDA_FLAGS: u8 = 23;
 pub const GLOW_SQUID_DARK_TICKS: u8 = 18;
 pub const FISH_FROM_BUCKET: u8 = 16;
 pub const SALMON_VARIANT: u8 = 17;
@@ -249,6 +256,27 @@ pub const PIG_VARIANT_SERIALIZER: i32 = 28;
 pub const PIG_SOUND_VARIANT_SERIALIZER: i32 = 29;
 pub const CHICKEN_VARIANT_SERIALIZER: i32 = 30;
 pub const CHICKEN_SOUND_VARIANT_SERIALIZER: i32 = 31;
+pub const MOOSHROOM_TYPE: u8 = 18;
+/// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。
+pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[
+    (298, &[(22, 7)]),
+    (299, &[(22, 7)]),
+    (300, &[(14, 220)]),
+    (301, &[(8, 140)]),
+    (302, &[(15, 100)]),
+    (303, &[(22, 7)]),
+    (304, &[(11, 60)]),
+    (305, &[(14, 220)]),
+    (306, &[(17, 140)]),
+    (307, &[(17, 140)]),
+    (308, &[(17, 140)]),
+    (309, &[(17, 140)]),
+    (310, &[(9, 140)]),
+    (311, &[(7, 100)]),
+    (312, &[(18, 220)]),
+    (313, &[(19, 140)]),
+    (314, &[(15, 100)]),
+];
 pub const CREEPER_IGNITED: u8 = 18;
 pub const CREEPER_POWERED: u8 = 17;
 pub const CREEPER_SWELL_DIR: u8 = 16;

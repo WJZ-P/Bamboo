@@ -144,7 +144,13 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
 pub(super) fn target_goals() -> GoalSelector {
     GoalSelector::from_goals(vec![
         wrap(1, Goal::nearest_target(TargetType::Player)),
-        wrap(2, Goal::HurtByTarget { timestamp: -1 }),
+        wrap(
+            2,
+            Goal::HurtByTarget {
+                timestamp: -1,
+                unseen_ticks: 0,
+            },
+        ),
     ])
 }
 

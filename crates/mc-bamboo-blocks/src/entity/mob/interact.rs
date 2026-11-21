@@ -10,10 +10,10 @@
 //! player's inventory. The live path and the oracle share this function.
 
 use mc_bamboo_core::{Hand, Vec3};
-use mc_bamboo_data::items;
+use mc_bamboo_data::{items, tags::item_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
-use super::{Mob, MobEvent, MobType, chicken, living, pig, sheep};
+use super::{Mob, MobEvent, MobType, chicken, living, mooshroom, pig, sheep};
 use crate::entity::Entity;
 use crate::{InteractionResult, state::item_is_tagged};
 
@@ -62,12 +62,16 @@ pub struct MobInteraction {
     ///
     /// `Bucketable.bucketMobPickup`: the caller discards the mob.
     pub discard: bool,
-    /// `ItemUtils.createFilledResult` 的 `limitCreativeStackSize`。鱼桶拾起传假：
+    /// `ItemUtils.createFilledResult` 的 `limitCreativeStackSize`。哞菇炖菜和鱼桶拾起传假：
     /// 创造模式也消耗手里的水桶。
     ///
-    /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`. Bucketing passes false:
-    /// creative mode consumes the water bucket too.
+    /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`: false for mooshroom stew
+    /// and for bucketing a fish, so creative mode consumes the bucket too.
     pub limit_creative: bool,
+    /// `spawnAtLocation`：熊猫换手里那份竹子时丢下的旧物品。
+    ///
+    /// `spawnAtLocation`: the old stack a panda drops when given a new one.
+    pub drop_stack: Option<ItemStack>,
 }
 
 impl MobInteraction {
@@ -82,6 +86,7 @@ impl MobInteraction {
             damage_held: false,
             discard: false,
             limit_creative: true,
+            drop_stack: None,
         }
     }
 }
@@ -91,25 +96,35 @@ impl MobInteraction {
 /// `Animal.isFood` per species.
 pub(super) fn is_food(kind: MobType, item: i32) -> bool {
     match kind {
+        MobType::Cow | MobType::Mooshroom => item_is_tagged(item, item_tags::COW_FOOD),
         MobType::Pig => item_is_tagged(item, mc_bamboo_data::tags::item_tags::PIG_FOOD),
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
+        MobType::Panda => super::panda::is_food(item),
         _ => kind.food_tag().is_some_and(|tag| item_is_tagged(item, tag)),
     }
 }
 
 /// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；狼走 `Wolf.mobInteract`；
 /// 马科走 `equine::interact`；否则交给 `Animal.mobInteract`。`now` 是岛时钟
-/// （狼要看还在不在生气）。
+/// （狼要看还在不在生气），`thundering` 给熊猫的害怕判定用。
 ///
 /// `AbstractCow.mobInteract`, `Wolf.mobInteract`, `equine::interact`, or
-/// `Animal.mobInteract`. `now` is the island clock, read by the wolf's anger check.
+/// `Animal.mobInteract`. `now` is the island clock, read by the wolf's anger check;
+/// `thundering` feeds the panda's scared check.
 pub fn interact(
     me: &mut Entity,
     mob: &mut Mob,
     req: &MobInteractRequest,
     now: i64,
+    thundering: bool,
 ) -> MobInteraction {
+    if mob.mob_type == MobType::Panda
+        && let Some(outcome) =
+            super::panda::interact(me, mob, req, super::panda::is_scared(mob, thundering))
+    {
+        return outcome;
+    }
     // `AbstractFish.mobInteract`：先试 `Bucketable.bucketMobPickup`，成功就换桶并丢弃
     // 这只生物；失败才走 `super.mobInteract`（对鱼是 `PASS`）。
     // `AbstractFish.mobInteract`: try `Bucketable.bucketMobPickup` first, then fall
@@ -132,7 +147,15 @@ pub fn interact(
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }
-    if mob.mob_type == MobType::Cow && req.held.item == items::BUCKET && !mob.is_baby() {
+    if mob.mob_type == MobType::Mooshroom
+        && let Some(outcome) = mooshroom::interact(me, mob, req)
+    {
+        return outcome;
+    }
+    if matches!(mob.mob_type, MobType::Cow | MobType::Mooshroom)
+        && req.held.item == items::BUCKET
+        && !mob.is_baby()
+    {
         // `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，位置取交互发生处。
         mob.events.push(MobEvent::MilkSound {
             position: req.position,
@@ -206,6 +229,22 @@ pub(super) fn animal_interact(
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。
     MobInteraction::pass()
+}
+
+/// `Shearable.shear` 的落地：按种类分给羊或哞菇。
+///
+/// Applies `Shearable.shear` for the sheep or the mooshroom.
+pub(crate) fn apply_shear(
+    world: &mut crate::world::World,
+    entity: &mut Entity,
+    hand: Hand,
+    tool: &ItemStack,
+) {
+    match entity.kind.mob().map(|mob| mob.mob_type) {
+        Some(MobType::Sheep) => sheep::apply_shear(world, entity, hand, tool),
+        Some(MobType::Mooshroom) => mooshroom::apply_shear(world, entity, hand, tool),
+        _ => {}
+    }
 }
 
 /// `AgeableMob.ageUp(int, boolean)`：跨过 0 时换尺寸，forcedAge 和粒子计时一起推进。

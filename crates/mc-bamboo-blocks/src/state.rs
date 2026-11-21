@@ -229,14 +229,19 @@ impl BlockState {
         self.fact(facts::SUFFOCATING)
     }
 
-    /// `isValidSpawn(level, pos, type)`：生物能不能把这个状态当落脚块。按空世界、牛来算，
-    /// 因为只有豹猫/鹦鹉和北极熊的方块按实体类型分别回答（Bamboo 不生成它们）。
+    /// `isValidSpawn(level, pos, type)`：普通落脚块用按空世界、牛导出的状态位。
+    /// 冰和霜冰只允许北极熊；豹猫、鹦鹉的特例尚未接入。
     ///
-    /// `isValidSpawn(level, pos, type)`: whether a mob may stand on this state. Read with
-    /// an empty world and a cow; only the ocelot/parrot and polar-bear blocks answer per
-    /// entity type, and Bamboo spawns neither.
-    pub fn is_valid_spawn_surface(self) -> bool {
-        self.fact(facts::VALID_SPAWN)
+    /// `isValidSpawn(level, pos, type)`: ordinary footing uses the state bit exported
+    /// for a cow in an empty world. Ice and frosted ice admit only polar bears;
+    /// the ocelot and parrot exceptions are not wired yet.
+    pub fn is_valid_spawn_surface(self, entity_type: i32) -> bool {
+        match self.block().default_state {
+            mc_bamboo_data::blocks::ICE | mc_bamboo_data::blocks::FROSTED_ICE => {
+                entity_type == mc_bamboo_data::registries::entity_type::POLAR_BEAR
+            }
+            _ => self.fact(facts::VALID_SPAWN),
+        }
     }
 
     /// `isSignalSource`。
