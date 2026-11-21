@@ -373,7 +373,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 | 传感器 | `Sensor.tick`（`scanRate`、`randomlyDelayStart`）、`NearestLivingEntitySensor`、`PlayerSensor`、`NearestItemSensor`、`AdultSensor`、`HurtBySensor`、`TemptingSensor`、`MobSensor` | `brain/sensor.rs` | 起始延迟取官方报的值 |
 | 活动 | `ActivityData`、`setActiveActivityToFirstValid`、`activityRequirements` / `activityMemoriesToEraseWhenStopped` | `brain/mod.rs` | 逐刻比活动集合 |
 | 行为 | `Behavior`、`OneShot`（`BehaviorBuilder`）、`DoNothing`、`GateBehavior` / `RunOne` | `brain/behavior.rs` + `behaviors.rs` 的 `Kind`，生物专属的挂在 `Kind::Armadillo` / `Kind::Goat` | 逐刻比正在跑的行为（闸门带子行为） |
-| 存档 | `Brain.Packed` 的 `memories` | `brain/nbt.rs`，只存有编解码器的记忆 | 单元测试往返 |
+| 存档 | `Brain.Packed` 的 `memories`、`Goat` / `Armadillo` 的 `add/readAdditionalSaveData` | `brain/nbt.rs`（只存有编解码器的记忆）、`mob/nbt.rs` | 单元测试往返；`chunk-content` 山羊 / 犰狳重存三题、新造山羊一题 |
 | 犰狳 | `Armadillo`、`ArmadilloAi` | `armadillo.rs` | `armadillo_*` 6 场景 |
 | 山羊 | `Goat`、`GoatAi`、`LongJumpMidJump`、`LongJumpToRandomPos`、`LongJumpUtil`、`PrepareRamNearestTarget`、`RamTarget` | `goat.rs` | `goat_*` 7 场景 |
 
