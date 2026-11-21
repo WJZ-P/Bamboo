@@ -93,8 +93,8 @@ fn chested_horse_group(group: &mut Option<SpawnGroup>) -> &mut AgeableGroupData 
     let data = group.get_or_insert_with(|| SpawnGroup::Ageable(AgeableGroupData::new(0.2)));
     match data {
         SpawnGroup::Ageable(age) | SpawnGroup::Horse(age, _) | SpawnGroup::Llama(age, _) => age,
-        SpawnGroup::Zombie(_) | SpawnGroup::Spider(_) => {
-            unreachable!("equine with a hostile spawn group")
+        SpawnGroup::Zombie(_) | SpawnGroup::Spider(_) | SpawnGroup::Wild(_) => {
+            unreachable!("equine with a non-equine spawn group")
         }
     }
 }

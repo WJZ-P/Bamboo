@@ -1167,6 +1167,23 @@ impl World<'_> {
         Some(self.spawn_dropped_item(position, stack, true, 10))
     }
 
+    /// `new ItemEntity(level, x, y, z, stack)` 加 `setPickUpDelay(delay)`：
+    /// 速度照常随机，位置不偏移。
+    ///
+    /// `new ItemEntity(level, x, y, z, stack)` with `setPickUpDelay(delay)`:
+    /// random velocity, no position offset.
+    pub(crate) fn spawn_item_with_delay(
+        &mut self,
+        position: Vec3,
+        stack: ItemStack,
+        pickup_delay: i32,
+    ) -> Option<i32> {
+        if stack.is_empty() {
+            return None;
+        }
+        Some(self.spawn_dropped_item(position, stack, true, pickup_delay))
+    }
+
     fn spawn_dropped_item(
         &mut self,
         position: Vec3,

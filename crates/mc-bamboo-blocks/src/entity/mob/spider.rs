@@ -80,13 +80,7 @@ pub fn goals(navigation: &mut Navigation) -> GoalSelector {
     GoalSelector::from_goals(vec![
         wrap(1, Goal::Float),
         wrap(2, Goal::Unavailable("AvoidEntityGoal")),
-        wrap(
-            3,
-            Goal::LeapAtTarget {
-                yd: 0.4,
-                target: None,
-            },
-        ),
+        wrap(3, Goal::LeapAtTarget { yd: 0.4 }),
         wrap(4, Goal::spider_melee(1.0)),
         wrap(
             5,
@@ -392,6 +386,7 @@ mod tests {
                 armor_cover: 0.0,
                 main_hand: 0,
                 off_hand: 0,
+                combat: Default::default(),
             });
             let mut ticks = BlockTicks::new();
             let mut world = World::new(&mut level, &mut ticks);

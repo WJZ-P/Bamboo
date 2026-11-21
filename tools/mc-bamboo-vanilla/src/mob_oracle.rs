@@ -184,6 +184,11 @@ struct Case {
     bright_outside: bool,
     #[serde(default)]
     monsters_burn: bool,
+    /// 狐狸场景：像刷出来的狐狸一样带上捕猎目标（`Fox.setTargetGoals`）。
+    ///
+    /// Fox scenes: add the hunting goals like a spawned fox.
+    #[serde(default)]
+    fox_hunts: bool,
     /// 僵尸场景：玩家走游戏层真实的受伤链路（[`mc_bamboo_game::ReplayPlayers`]）。
     #[serde(default)]
     real_players: bool,
@@ -399,11 +404,17 @@ struct CowSetup {
     seed: i64,
     #[serde(default)]
     age: i32,
-    /// 0 牛 / 1 僵尸 / 2 尸壳 / 3 猪 / 4 羊 / 5 鸡；缺省按牛（旧场景）。
+    /// 0 牛 / 1 僵尸 / 2 尸壳 / 3 猪 / 4 羊 / 5 鸡 / 6 兔 / 7 狐 / 8 狼；缺省按牛（旧场景）。
     ///
-    /// 0 cow / 1 zombie / 2 husk / 3 pig / 4 sheep / 5 chicken; cow when absent.
+    /// 0 cow / 1 zombie / 2 husk / 3 pig / 4 sheep / 5 chicken / 6 rabbit / 7 fox / 8 wolf;
+    /// cow when absent.
     #[serde(default)]
     kind: i32,
+    /// 狐狸 `SleepGoal` 构造时取的倒计时，官方那一边报过来。
+    ///
+    /// The fox `SleepGoal` countdown drawn at construction, from the official side.
+    #[serde(default)]
+    sleep: i32,
     /// 羊的 `DATA_WOOL_ID` 起点。
     ///
     /// The sheep's starting `DATA_WOOL_ID`.
@@ -500,6 +511,29 @@ struct CowStep {
     hc: i32,
     #[serde(default)]
     armor: i64,
+    #[serde(default, rename = "rabbitCarrotTicks")]
+    rabbit_carrot_ticks: i32,
+    #[serde(default, rename = "foxFlags")]
+    fox_flags: i32,
+    #[serde(default, rename = "foxMouth")]
+    fox_mouth: i32,
+    /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
+    ///
+    /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
+    #[serde(default, rename = "wolfTame")]
+    wolf_tame: i32,
+    #[serde(default, rename = "wolfSit")]
+    wolf_sit: bool,
+    #[serde(default, rename = "wolfOwned")]
+    wolf_owned: bool,
+    #[serde(default, rename = "wolfAnger")]
+    wolf_anger: i64,
+    #[serde(default, rename = "wolfBeg")]
+    wolf_beg: bool,
+    #[serde(default, rename = "wolfCollar")]
+    wolf_collar: i32,
+    #[serde(default, rename = "wolfMaxHp")]
+    wolf_max_hp: i64,
     /// 马科场景：`DATA_ID_FLAGS` 字节和脾气值，其余生物是 0。
     ///
     /// Equine scenes: the `DATA_ID_FLAGS` byte and the temper; 0 for other mobs.
@@ -509,15 +543,24 @@ struct CowStep {
     tmp: i32,
 }
 
-/// 走敌对生物那条对拍路径的场景（Java 一侧的 `playZombie`）。
+/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，以及苦力怕、蜘蛛、
+/// 洞穴蜘蛛和末影人。
 ///
-/// Scenes replayed on the hostile-mob path (`playZombie` on the Java side).
-fn monster_scene(name: &str) -> bool {
-    name.starts_with("zombie_")
-        || name.starts_with("creeper_")
-        || name.starts_with("spider_")
-        || name.starts_with("cave_spider_")
-        || name.starts_with("enderman_")
+/// Scenes played by the Java `playZombie` driver: zombies, the wild animals, and
+/// creepers, spiders, cave spiders and endermen.
+fn zombie_style(name: &str) -> bool {
+    [
+        "zombie_",
+        "rabbit_",
+        "fox_",
+        "wolf_",
+        "creeper_",
+        "spider_",
+        "cave_spider_",
+        "enderman_",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
 }
 
 const fn minus_one_i64() -> i64 {
@@ -1150,8 +1193,8 @@ impl Report {
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
-                bright_outside: case.bright_outside || !monster_scene(&case.name),
-                monsters_burn: if monster_scene(&case.name) {
+                bright_outside: case.bright_outside || !zombie_style(&case.name),
+                monsters_burn: if zombie_style(&case.name) {
                     case.monsters_burn
                 } else {
                     true
@@ -1166,8 +1209,11 @@ impl Report {
             players: case
                 .players
                 .iter()
-                .map(|player| PlayerView {
-                    uuid: None,
+                .enumerate()
+                .map(|(index, player)| PlayerView {
+                    // 官方一侧的玩家 UUID 是 (1, 2 + 下标)；狼认主人要用它。
+                    // The official players use UUID (1, 2 + index); wolves match owners by it.
+                    uuid: Some(((1_u128 << 64) | (2 + index as u128)).to_be_bytes()),
                     uid: player.id,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),
@@ -1188,6 +1234,7 @@ impl Report {
                     armor_cover: 0.0,
                     main_hand: player.item,
                     off_hand: 0,
+                    combat: Default::default(),
                 })
                 .collect(),
             game: case.real_players.then(|| {
@@ -1237,16 +1284,19 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
-                    10 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
-                    11 => mc_bamboo_blocks::entity::mob::MobType::Spider,
-                    12 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
-                    13 => mc_bamboo_blocks::entity::mob::MobType::Enderman,
+                    40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
+                    41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
+                    42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
+                    43 => mc_bamboo_blocks::entity::mob::MobType::Enderman,
+                    8 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
+                    7 => mc_bamboo_blocks::entity::mob::MobType::Fox,
+                    6 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
                     5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
                     4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
                     3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
-                    6..=9 => equine::scene_kind(cow.kind),
+                    9..=12 => equine::scene_kind(cow.kind),
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
                 // 幼年标志和破门是僵尸一系专属的起始状态。
@@ -1270,7 +1320,11 @@ impl Report {
                         mob.y_head_rot = yaw;
                         mob.y_body_rot = yaw;
                         mob.wool = cow.wool;
-                        mob.egg_time = cow.egg;
+                        // 鸡的蛋计时由 Java 一侧报过来（构造时抽的值）；缺省保留 Bamboo 的。
+                        // The chicken's egg timer comes from Java (drawn in its constructor).
+                        if cow.egg > 0 {
+                            mob.egg_time = cow.egg;
+                        }
                         mob.creeper.powered = cow.creeper & 1 != 0;
                         mob.creeper.ignited = cow.creeper & 2 != 0;
                         if cow.carried != 0 {
@@ -1278,6 +1332,14 @@ impl Report {
                         }
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
+                    if let Some(mob) = entity.kind.mob_mut()
+                        && kind == mc_bamboo_blocks::entity::mob::MobType::Fox
+                    {
+                        mc_bamboo_blocks::entity::mob::fox::set_sleep_countdown(mob, cow.sleep);
+                        if case.fox_hunts {
+                            mc_bamboo_blocks::entity::mob::fox::set_target_goals(mob);
+                        }
+                    }
                     if cow.age != 0 {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
@@ -1843,7 +1905,17 @@ impl Report {
             plain!(var);
             plain!(snd);
             plain!(goals);
-            if monster_scene(name) {
+            if zombie_style(name) {
+                plain!(rabbit_carrot_ticks);
+                plain!(fox_flags);
+                plain!(fox_mouth);
+                plain!(wolf_tame);
+                plain!(wolf_sit);
+                plain!(wolf_owned);
+                plain!(wolf_anger);
+                plain!(wolf_beg);
+                plain!(wolf_collar);
+                plain!(wolf_max_hp);
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -3058,6 +3130,10 @@ fn uuid_text(bytes: &[u8; 16]) -> String {
     )
 }
 
+fn is_wolf(mob: &Mob) -> bool {
+    mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Wolf
+}
+
 fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
     let path = mob.navigation.path.as_ref().map(|path| {
         let mut values = vec![path.next_node_index as i32];
@@ -3099,16 +3175,53 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         snd: farm_sound(mob),
         uuid: uuid_text(&mob.uuid),
         lr,
-        goals: mob.goals.running_names().join(" "),
+        goals: mob.goals.running_class_names(mob.mob_type).join(" "),
         path,
         target: mob.target.unwrap_or(-1),
-        baby: mob.is_baby(),
+        // 僵尸式场景额外比较僵尸和马科的幼年标志；其他动物比较 age。
+        // Zombie-style scenes compare the baby flag for zombies and equines; other animals use age.
+        baby: (mob.mob_type.uses_baby_metadata() || mob.mob_type.is_equine()) && mob.is_baby(),
         aggr: mob.aggressive,
         doors: mob.can_break_doors,
         ph: 0,
         pht: 0,
         pcd: 0,
         bh: 0,
+        rabbit_carrot_ticks: mob.rabbit.more_carrot_ticks,
+        fox_flags: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
+            i32::from(mob.fox.flags)
+        } else {
+            0
+        },
+        fox_mouth: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
+            mob.equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                .item
+        } else {
+            0
+        },
+        wolf_tame: if is_wolf(mob) {
+            i32::from(mob.tame.flags)
+        } else {
+            0
+        },
+        wolf_sit: is_wolf(mob) && mob.tame.ordered_to_sit,
+        wolf_owned: is_wolf(mob) && mob.tame.owner.is_some(),
+        wolf_anger: if is_wolf(mob) {
+            mob.wolf.anger_end_time
+        } else {
+            0
+        },
+        wolf_beg: is_wolf(mob) && mob.wolf.interested,
+        wolf_collar: if is_wolf(mob) { mob.wolf.collar } else { 0 },
+        wolf_max_hp: if is_wolf(mob) {
+            let max = mob
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::MAX_HEALTH);
+            i64::from((max as f32).to_bits())
+        } else {
+            0
+        },
         hd: {
             let head = mob
                 .equipment
