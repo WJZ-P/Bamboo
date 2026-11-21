@@ -33,6 +33,10 @@ pub enum SpawnReason {
     Breeding,
     /// `EntitySpawnReason.NATURAL`：自然生成。
     Natural,
+    /// `EntitySpawnReason.BUCKET`：从桶里放出来。
+    ///
+    /// `EntitySpawnReason.BUCKET`: placed from a bucket.
+    Bucket,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -228,7 +232,12 @@ pub fn spawn_egg(
 
 /// `EntityType.getYOffset`：脚下那一格（`offset_more` 时再往下一格）的碰撞形状，
 /// 让站在上一格的实体沿 Y 往下扫 1（或 2）格。
-fn spawn_y_offset(view: &dyn BlockView, pos: BlockPos, offset_more: bool, moving: Aabb) -> f64 {
+pub(crate) fn spawn_y_offset(
+    view: &dyn BlockView,
+    pos: BlockPos,
+    offset_more: bool,
+    moving: Aabb,
+) -> f64 {
     let min_y = if offset_more {
         f64::from(pos.y) - 1.0
     } else {

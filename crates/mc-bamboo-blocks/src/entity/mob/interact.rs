@@ -53,6 +53,16 @@ pub struct MobInteraction {
     ///
     /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point.
     pub shear: bool,
+    /// `Bucketable.bucketMobPickup`：调用方把这只生物从世界里拿掉。
+    ///
+    /// `Bucketable.bucketMobPickup`: the caller discards the mob.
+    pub discard: bool,
+    /// `ItemUtils.createFilledResult` 的 `limitCreativeStackSize`。鱼桶拾起传假：
+    /// 创造模式也消耗手里的水桶。
+    ///
+    /// `limitCreativeStackSize` of `ItemUtils.createFilledResult`. Bucketing passes false:
+    /// creative mode consumes the water bucket too.
+    pub limit_creative: bool,
 }
 
 impl MobInteraction {
@@ -64,6 +74,8 @@ impl MobInteraction {
             replacement: None,
             open_inventory: false,
             shear: false,
+            discard: false,
+            limit_creative: true,
         }
     }
 }
@@ -80,6 +92,22 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
 
 /// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
 pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+    // `AbstractFish.mobInteract`：先试 `Bucketable.bucketMobPickup`，成功就换桶并丢弃
+    // 这只生物；失败才走 `super.mobInteract`（对鱼是 `PASS`）。
+    // `AbstractFish.mobInteract`: try `Bucketable.bucketMobPickup` first, then fall
+    // back to `super.mobInteract` (which is `PASS` for fish).
+    if req.held.item == items::WATER_BUCKET
+        && living::is_alive(me, mob)
+        && let Some(bucket) = super::bucketable::pickup(me, mob)
+    {
+        return MobInteraction {
+            result: InteractionResult::Success,
+            replacement: Some(bucket),
+            discard: true,
+            limit_creative: false,
+            ..MobInteraction::pass()
+        };
+    }
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }
@@ -92,8 +120,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
-            open_inventory: false,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     if mob.mob_type == MobType::Sheep
@@ -122,8 +149,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::SuccessServer,
             shrink_held: !req.creative,
             replacement: None,
-            open_inventory: false,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     if mob.is_baby() && !mob.age_locked {
@@ -137,8 +163,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             result: InteractionResult::Success,
             shrink_held: !req.creative,
             replacement: None,
-            open_inventory: false,
-            shear: false,
+            ..MobInteraction::pass()
         };
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。

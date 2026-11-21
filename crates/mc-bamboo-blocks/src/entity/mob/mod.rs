@@ -13,6 +13,7 @@
 //! therefore live on [`Entity::dimensions`].
 
 pub mod attributes;
+pub mod bucketable;
 pub mod chicken;
 pub mod control;
 pub mod damage;

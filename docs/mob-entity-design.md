@@ -833,6 +833,16 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `isValidSpawnPostitionForType`）；`goals::walk_target_value` 对 `is_water_animal()`
   也返回 0，因为鱼不是 `Animal`，`PathfinderMob.getWalkTargetValue` 的缺省就是 0
   （原来落到 `Animal` 的亮度权重，繁茂洞穴里是负数，滤掉全部候选）。
+- 桶装（`Bucketable`）：`entity/mob/bucketable.rs` 负责
+  `saveDefaultDataToBucketTag` / `loadDefaultDataFromBucketTag`（`bucket_entity_data`
+  组件）、鱼桶物品、`bucketMobPickup` 和 `MobBucketItem.spawn`。水桶右键活鱼按
+  `AbstractFish.mobInteract` → `Bucketable.bucketMobPickup` 换桶并 `discard()`；
+  倒鱼桶先走 `BucketItem.emptyContents` 放水，再 `checkExtraContent` 在落点生成
+  `FromBucket = true` 的鱼（朝向取 `level.random`，`finalizeSpawn` 用 `BUCKET` 原因，
+  之后套组件并 `loadFromBucketTag`），发射器倒鱼桶也生成。鲑鱼存 `salmon/size`，
+  热带鱼存 `tropical_fish/pattern` / `base_color` / `pattern_color`，其余只有默认数据。
+  美西螈 / 蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。
+  验证：块级单元测试（组件拆分、只改有的键、存档往返）、游戏层两条（生存换桶、
+  创造加桶）、发射器一条（生成的鱼 + 随机源种子）。没有 Java 逐刻对拍。
 - 已知差异：`pufferfish_puff` 里河豚从 1 鼓到 2 时 Bamboo 的音效早官方一刻（早取两个
   `nextFloat`），第 64 刻起实体随机源就不一致；`cod_beached` 溺水瞬间两组包差一拍。
-  桶装鱼（`Bucketable` 的拾起 / 释放）还没接，`FromBucket` 只做存档和「不自然消失」。

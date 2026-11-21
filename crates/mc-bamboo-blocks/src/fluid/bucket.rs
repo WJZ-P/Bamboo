@@ -87,6 +87,7 @@ pub(crate) fn use_bucket(
     actor: &Actor,
     hand: mc_bamboo_core::Hand,
     bucket: Bucket,
+    stack: Option<&mc_bamboo_protocol::item::ItemStack>,
 ) -> InteractionResult {
     let (from, to) = actor.view_segment();
     let Some(hit) = world.clip(from, to, bucket.clip_fluid(), actor.main_hand) else {
@@ -114,6 +115,18 @@ pub(crate) fn use_bucket(
         place_pos,
         Some(hit),
     ) {
+        // `checkExtraContent`：水倒成功后把桶里的生物放出来，位置是外层的 `placePos`
+        // （官方即使在水落进旁边那格时也用外层坐标）。
+        // `checkExtraContent`: the mob comes out after a successful pour, at the outer
+        // `placePos` even when the water itself landed beside it.
+        if bucket.mob {
+            crate::entity::mob::bucketable::check_extra_content(
+                world,
+                actor.item_in(hand),
+                stack,
+                place_pos,
+            );
+        }
         // 装着流体的桶倒成功才交还空桶。只有生物、没有流体的桶不在这里消耗。
         // A bucket that held fluid hands an empty one back. A mob-only bucket is not consumed here.
         if bucket.content.is_some() {
@@ -190,11 +203,22 @@ fn play_empty_sound(world: &mut World, pos: BlockPos, bucket: Bucket, except_pla
 /// `DispenserBlock` 里满桶的 `emptyContents(null, level, target, null)`。
 ///
 /// `emptyContents(null, level, target, null)` from a dispenser's filled-bucket behaviour.
-pub(crate) fn empty_from_dispenser(world: &mut World, item_id: i32, pos: BlockPos) -> bool {
+pub(crate) fn empty_from_dispenser(
+    world: &mut World,
+    item_id: i32,
+    stack: &mc_bamboo_protocol::item::ItemStack,
+    pos: BlockPos,
+) -> bool {
     let Some(bucket) = Bucket::of(item_id) else {
         return false;
     };
-    empty_contents(world, false, false, false, bucket, pos, None)
+    let placed = empty_contents(world, false, false, false, bucket, pos, None);
+    // `DispenseItemBehavior` 在倒成功之后调 `checkExtraContent`。
+    // The dispense behaviour calls `checkExtraContent` after a successful pour.
+    if placed && bucket.mob {
+        crate::entity::mob::bucketable::check_extra_content(world, item_id, Some(stack), pos);
+    }
+    placed
 }
 
 /// `emptyContents`：把桶里的东西倒在 `pos`。`hit` 是视线的结果，倒不进去时改倒在它的面外面一格，

@@ -186,7 +186,6 @@ pub(super) fn equip_saddle(
         result: InteractionResult::Success,
         shrink_held: !req.creative,
         replacement: None,
-        open_inventory: false,
-        shear: false,
+        ..MobInteraction::pass()
     }
 }
