@@ -456,6 +456,17 @@ AI 内部量，服务端不建模，无玩家可感知差异。没有改动任�
 
 其余已知差异见 README「马科的已知限制」。
 
+**与 main 合并（2026-11-21，14:35 追加，op-water）。** `main`（`c9773f61`：马科骑乘 / 农场动物
+收尾、哞菇 / 北极熊 / 熊猫、苦力怕组、缓存与计时测试）合进分支，唯一冲突是 `README.md`：按 main
+结构保留新版羊 / 鸡条目，保留 op-water 的鱿鱼限制句与「海豚 / 美西螈」条目，删掉块内重复的弓条目，
+自然生成夹具说明取并集、数字改成 330 例 1320 刻。`generated/` 重跑 `extract`：`entity_types.rs`
+由生成器重排并去掉分支手写的 6 行注释（常量值不变），`registries.rs` 逐字节一致；`mob-oracle`
+场景编号两边无新增重复。复核：`cargo check --workspace --all-targets` 通过、全量 `mob-oracle`
+1740 例 163321 刻 0 不一致、`--only natural_spawn` 330 例 1320 刻、`natural-spawn` 1727 例、
+`island_command` 4 passed、`--break-self-test water_mob` 抓到 12 处不一致。海豚 / 美西螈逐刻场景、
+故意改坏确认与自然生成接入全部复核通过；Brain 相关行为与海龟产卵 / 孵化 / 回家场景仍未做，
+见 README 已知限制。本轮未改动任何生物行为代码。
+
 ### 5.9 中立生物地基和北极熊（2026-11-21）
 
 - **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
