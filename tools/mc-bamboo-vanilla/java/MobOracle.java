@@ -6503,11 +6503,11 @@ public final class MobOracle {
         @Override
         public int getSeaLevel() {
             // Bamboo 超平坦世界的 `flat::SEA_LEVEL`（login 包也用它）。
-            return naturalSeaLevel;
+            return naturalSeaLevel == null ? -63 : naturalSeaLevel;
         }
 
-        /** 自然生成夹具的海平面；缺省是超平坦的 -63。 */
-        int naturalSeaLevel = -63;
+        /** 自然生成夹具的海平面；不设（`allocate` 不跑字段初始值）就是超平坦的 -63。 */
+        Integer naturalSeaLevel;
 
         @Override
         public long getSeed() {
