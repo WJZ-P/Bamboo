@@ -267,6 +267,10 @@ fn finalize_spawn_in_group(
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
     }
+    if kind == MobType::Creeper {
+        super::creeper::finalize_spawn(entity, world.random());
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     finalize_cow(kind, entity, biome, world.random(), group);
 }

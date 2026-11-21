@@ -358,6 +358,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Byte(i8::from(mob.can_break_doors)),
         );
     }
+    if mob.mob_type == MobType::Creeper {
+        super::creeper::write_nbt(mob, &mut out);
+    }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
         out.push((key.clone(), value.clone()));
@@ -537,6 +540,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.navigation.flags.can_open_doors = true;
                 mob.goals.insert_break_door();
             }
+        }
+        if mob.mob_type == MobType::Creeper {
+            super::creeper::read_nbt(mob, tag);
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries

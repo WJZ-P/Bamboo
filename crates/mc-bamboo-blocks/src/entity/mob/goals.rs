@@ -83,6 +83,17 @@ pub enum Goal {
         last_can_use_check: i64,
         /// `MeleeAttackGoal.canUse` 算出的路径，官方存在字段里由 `start()` 装入导航。
         start_path: Option<super::path::Path>,
+        /// 是不是 `ZombieAttackGoal`：每刻按抬手计时改 `aggressive`。普通的 `MeleeAttackGoal` 为假。
+        ///
+        /// Whether this is `ZombieAttackGoal`, which drives `aggressive` from its arm timer.
+        raise_arms: bool,
+    },
+    /// `SwellGoal`：苦力怕靠近目标时把膨胀方向设成 1，看不见或离远了设回 -1。
+    ///
+    /// `SwellGoal`: sets the creeper's swell direction to 1 near its target and back to
+    /// -1 when the target is far or out of sight.
+    Swell {
+        target: Option<EntityUid>,
     },
     Bow(super::skeleton::BowGoal),
     /// `HurtByTargetGoal`：记住上一次伤害的时间戳，把攻击者设成目标。
@@ -135,11 +146,39 @@ impl TargetType {
 }
 
 impl Goal {
+    /// `MeleeAttackGoal(mob, speed, false)`；`raise_arms` 为真时是 `ZombieAttackGoal`。
+    ///
+    /// `MeleeAttackGoal(mob, speed, false)`, or `ZombieAttackGoal` with `raise_arms`.
+    pub(super) fn melee(speed: f64, raise_arms: bool) -> Self {
+        Self::MeleeAttack {
+            speed,
+            ticks_until_next_attack: 0,
+            ticks_until_path_recalc: 0,
+            pathed_target: Vec3::default(),
+            raise_arm_ticks: 0,
+            last_can_use_check: 0,
+            start_path: None,
+            raise_arms,
+        }
+    }
+
+    /// `NearestAttackableTargetGoal(mob, type, true)`：缺省间隔 `reducedTickDelay(10)`。
+    ///
+    /// `NearestAttackableTargetGoal(mob, type, true)` with the default interval.
+    pub(super) fn nearest_target(kind: TargetType) -> Self {
+        Self::NearestAttackableTarget {
+            kind,
+            interval: reduced_tick_delay(10),
+            unseen_ticks: 0,
+            found: None,
+        }
+    }
+
     /// 构造函数里 `setFlags` 设的标志。
     pub const fn flags(&self) -> &'static [Flag] {
         match self {
             Self::Float => &[Flag::Jump],
-            Self::Panic { .. } | Self::Stroll { .. } => &[Flag::Move],
+            Self::Panic { .. } | Self::Stroll { .. } | Self::Swell { .. } => &[Flag::Move],
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
                 &[Flag::Move, Flag::Look]
             }
@@ -167,6 +206,7 @@ impl Goal {
                 | Self::MeleeAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
+                | Self::Swell { .. }
         )
     }
 
@@ -182,8 +222,11 @@ impl Goal {
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
-            Self::MeleeAttack { speed, .. } if *speed == 1.2 => "MeleeAttackGoal",
+            Self::MeleeAttack {
+                raise_arms: false, ..
+            } => "MeleeAttackGoal",
             Self::MeleeAttack { .. } => "ZombieAttackGoal",
+            Self::Swell { .. } => "SwellGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
             Self::NearestAttackableTarget { .. } => "NearestAttackableTargetGoal",
@@ -213,6 +256,16 @@ pub struct GoalSelector {
 }
 
 impl GoalSelector {
+    /// 按注册顺序给出目标的选择器，别的生物模块用它搭自己的表。
+    ///
+    /// A selector over goals in registration order, for the per-mob modules.
+    pub(super) fn from_goals(goals: Vec<WrappedGoal>) -> Self {
+        Self {
+            goals,
+            ..Self::default()
+        }
+    }
+
     /// `AbstractCow.registerGoals`。`FloatGoal` 的构造函数顺手打开导航的浮水。
     pub fn cow(navigation: &mut Navigation) -> Self {
         navigation.flags.can_float = true;
@@ -341,6 +394,7 @@ impl GoalSelector {
                     raise_arm_ticks: 0,
                     last_can_use_check: 0,
                     start_path: None,
+                    raise_arms: true,
                 },
             ),
             wrap(6, Goal::Unavailable("MoveThroughVillageGoal")),
@@ -444,6 +498,7 @@ impl GoalSelector {
             raise_arm_ticks: 0,
             last_can_use_check: 0,
             start_path: None,
+            raise_arms: false,
         }
     }
 
@@ -701,6 +756,56 @@ fn eat_block_tick(eat_tick: &mut i32, me: &mut Entity, mob: &mut Mob, ctx: &mut 
     super::sheep::ate(me, mob);
 }
 
+/// `SwellGoal.canUse`：已经在膨胀，或者目标活着且不到 3 格。
+///
+/// `SwellGoal.canUse`: already swelling, or a live target closer than 3 blocks.
+fn swell_can_use(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
+    mob.creeper.swell_dir > 0
+        || combat_target(mob, ctx)
+            .is_some_and(|target| me.position.distance_to_sqr(target.position) < 9.0)
+}
+
+/// `SwellGoal.tick`：记住的目标没了、超过 7 格或看不见就收缩，否则膨胀。
+/// 记住的目标按原始引用查（只看死活），不走 `getTarget()` 的可攻击过滤。
+///
+/// `SwellGoal.tick`: shrink when the remembered target is gone, beyond 7 blocks or out
+/// of sight, otherwise swell. The remembered target is a raw reference (alive or not),
+/// not filtered like `getTarget()`.
+fn swell_tick(target: Option<EntityUid>, me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
+    let seen = target
+        .and_then(|uid| raw_target(ctx, uid))
+        .is_some_and(|(uid, position, eye)| {
+            me.position.distance_to_sqr(position) <= 49.0
+                && living::has_line_of_sight(me, mob, ctx.blocks(), uid, eye)
+        });
+    mob.creeper.swell_dir = if seen { 1 } else { -1 };
+}
+
+/// 按 uid 找一个还活着的玩家或生物：（uid，位置，眼睛位置）。
+///
+/// A living player or mob by uid: (uid, position, eye position).
+fn raw_target(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(EntityUid, Vec3, Vec3)> {
+    if let Some(player) = player_by_uid(ctx.blocks(), uid) {
+        return player
+            .alive
+            .then(|| (uid, player.position, player.eye_position()));
+    }
+    let other = ctx.other(uid)?;
+    let KindPublic::Mob(target) = &other.kind else {
+        return None;
+    };
+    if !target.is_alive() {
+        return None;
+    }
+    let (_, _, eye) = target.mob_type.dimensions(target.baby);
+    let eye = Vec3::new(
+        other.position.x,
+        other.position.y + f64::from(eye),
+        other.position.z,
+    );
+    Some((uid, other.position, eye))
+}
+
 /// `Goal.reducedTickDelay`。
 const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
@@ -833,6 +938,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
+        Goal::Swell { .. } => swell_can_use(me, mob, ctx),
         Goal::MeleeAttack {
             last_can_use_check,
             start_path,
@@ -863,8 +969,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    mob.mob_type != super::MobType::Skeleton
-                        || target_by_uid(mob, ctx, uid).is_some()
+                    !mob.mob_type.full_target_rules() || target_by_uid(mob, ctx, uid).is_some()
                 })
         }
         Goal::NearestAttackableTarget {
@@ -992,16 +1097,14 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             *look_time > 0
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
-        Goal::Float => can_use(goal, me, mob, ctx),
+        Goal::Float | Goal::Swell { .. } => can_use(goal, me, mob, ctx),
         Goal::Unavailable(_) => false,
         Goal::MeleeAttack { .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。
             combat_target(mob, ctx).is_some() && !mob.navigation.is_done()
         }
-        Goal::NearestAttackableTarget { unseen_ticks, .. }
-            if mob.mob_type == super::MobType::Skeleton =>
-        {
+        Goal::NearestAttackableTarget { unseen_ticks, .. } if mob.mob_type.full_target_rules() => {
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
@@ -1072,6 +1175,12 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *look_time = 20 + me.random.next_int_bounded(20);
         }
         Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } | Goal::Unavailable(_) => {}
+        Goal::Swell { target } => {
+            // `SwellGoal.start`：停下导航，记住这一刻的目标。
+            // `SwellGoal.start`: stop navigating and remember the current target.
+            mob.navigation.stop();
+            *target = combat_target(mob, ctx).map(|found| found.uid);
+        }
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1165,6 +1274,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
+        Goal::Swell { target } => *target = None,
         Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } | Goal::Unavailable(_) => {
         }
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
@@ -1203,6 +1313,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
         Goal::EatBlock { eat_tick } => eat_block_tick(eat_tick, me, mob, ctx),
+        Goal::Swell { target } => swell_tick(*target, me, mob, ctx),
         Goal::Bow(bow) => {
             if let Some(target) = combat_target(mob, ctx) {
                 bow.tick(me, mob, ctx, target);
@@ -1314,6 +1425,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             ticks_until_path_recalc,
             pathed_target,
             raise_arm_ticks,
+            raise_arms,
             ..
         } => {
             let Some(target) = combat_target(mob, ctx) else {
@@ -1367,7 +1479,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
             // `ZombieAttackGoal.tick`：`super.tick()` 之后抬手计时加一，按新的
             // `ticksUntilNextAttack` 决定举不举手。
-            if mob.mob_type != super::MobType::Skeleton {
+            if *raise_arms {
                 *raise_arm_ticks += 1;
                 mob.aggressive = *raise_arm_ticks >= 5
                     && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
@@ -1912,7 +2024,7 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
     if ctx.blocks().difficulty() == 0 {
         return None;
     }
-    let skeleton = mob.mob_type == super::MobType::Skeleton;
+    let skeleton = mob.mob_type.full_target_rules();
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
         return (player.alive && !player.spectator && !player.creative)
             .then(|| CombatTarget::player(player, skeleton));

@@ -199,6 +199,12 @@ pub enum EntityData {
     SpecialType(i32),
     /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
     DrownedConverting(bool),
+    /// `Creeper.DATA_SWELL_DIR`（INT，缺省 -1）、`DATA_IS_POWERED`、`DATA_IS_IGNITED`（BOOLEAN）。
+    ///
+    /// `Creeper.DATA_SWELL_DIR` (INT, default -1), `DATA_IS_POWERED` and `DATA_IS_IGNITED`.
+    CreeperSwellDir(i32),
+    CreeperPowered(bool),
+    CreeperIgnited(bool),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -243,6 +249,9 @@ impl EntityData {
             Self::ModelCustomisation(_) | Self::AgeLocked(_) | Self::SpecialType(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
             Self::CowSoundVariant(_) => 19,
+            Self::CreeperSwellDir(_) => mc_bamboo_data::entity_types::CREEPER_SWELL_DIR,
+            Self::CreeperPowered(_) => mc_bamboo_data::entity_types::CREEPER_POWERED,
+            Self::CreeperIgnited(_) => mc_bamboo_data::entity_types::CREEPER_IGNITED,
             Self::PigBoostTime(_) => mc_bamboo_data::entity_types::PIG_BOOST_TIME,
             Self::PigVariant(_) => mc_bamboo_data::entity_types::PIG_VARIANT,
             Self::PigSoundVariant(_) => mc_bamboo_data::entity_types::PIG_SOUND_VARIANT,
@@ -407,6 +416,14 @@ impl EntityData {
             Self::SpecialType(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
                 write_varint(out, *kind);
+            }
+            Self::CreeperSwellDir(direction) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *direction);
+            }
+            Self::CreeperPowered(flag) | Self::CreeperIgnited(flag) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *flag);
             }
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);

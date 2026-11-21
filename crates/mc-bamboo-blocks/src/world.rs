@@ -2002,6 +2002,19 @@ impl<'a> World<'a> {
         self.level.explosion_block_drops(state, pos)
     }
 
+    /// `DESTROY_WITH_DECAY` 的爆炸掉落：战利品参数带上爆炸半径。
+    ///
+    /// Explosion drops under `DESTROY_WITH_DECAY`: the loot parameters carry the radius.
+    pub(crate) fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.note_access(pos, true);
+        self.level.explosion_block_drops_decayed(state, pos, radius)
+    }
+
     /// 生物死时的战利品，见 [`Level::mob_loot_drops`]。
     pub(crate) fn mob_loot_drops(
         &mut self,
@@ -3200,6 +3213,9 @@ impl<'a> World<'a> {
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         if outcome.shear {
             crate::entity::mob::sheep::apply_shear(self, &mut entity, request.hand, &request.held);
+        }
+        if outcome.damage_held {
+            crate::durability::hurt_hand(self, request.hand, 1);
         }
         self.level.put_entity(entity);
         outcome

@@ -674,6 +674,29 @@ impl Level for RegionLevel<'_> {
             state,
             pos,
             block_entity,
+            None,
+        )
+    }
+
+    /// 生物爆炸在 `mobExplosionDropDecay` 下的 `getDrops`：带爆炸半径。
+    ///
+    /// `getDrops` for a mob explosion under `mobExplosionDropDecay`, with the radius.
+    fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<ItemStack> {
+        let block_entity = crate::block_drops::collect_block_entity(self.containers, pos);
+        crate::block_drops::explosion_loot(
+            self.chunks,
+            self.loot_sequences,
+            self.random.source(),
+            self.block_weather,
+            state,
+            pos,
+            block_entity,
+            Some(radius),
         )
     }
 
@@ -688,6 +711,7 @@ impl Level for RegionLevel<'_> {
             state,
             pos,
             block_entity,
+            None,
         )
     }
 

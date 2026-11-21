@@ -44,6 +44,11 @@ pub struct MobInteraction {
     ///
     /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point.
     pub shear: bool,
+    /// `ItemStack.hurtAndBreak(1, player, slot)`：调用方给手里的物品扣 1 点耐久（打火石点苦力怕）。
+    ///
+    /// `ItemStack.hurtAndBreak(1, player, slot)`: the caller spends one durability point on
+    /// the held item (flint and steel on a creeper).
+    pub damage_held: bool,
 }
 
 impl MobInteraction {
@@ -54,6 +59,7 @@ impl MobInteraction {
             shrink_held: false,
             replacement: None,
             shear: false,
+            damage_held: false,
         }
     }
 }
@@ -80,7 +86,11 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             shrink_held: !req.creative,
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
             shear: false,
+            damage_held: false,
         };
+    }
+    if mob.mob_type == MobType::Creeper {
+        return super::creeper::interact(me, mob, req);
     }
     if mob.mob_type == MobType::Sheep
         && let Some(outcome) = sheep::interact_shears(mob, req)
@@ -109,6 +119,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             shrink_held: !req.creative,
             replacement: None,
             shear: false,
+            damage_held: false,
         };
     }
     if mob.is_baby() && !mob.age_locked {
@@ -123,6 +134,7 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             shrink_held: !req.creative,
             replacement: None,
             shear: false,
+            damage_held: false,
         };
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。

@@ -72,6 +72,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.y_rot_o = me.y_rot;
     mob.x_rot_o = mob.x_rot;
     me.tick_count += 1;
+    // `Creeper.tick` 在 `super.tick()` 之前推进膨胀，可能当刻爆炸。
+    // `Creeper.tick` advances the swell before `super.tick()` and may explode here.
+    if mob.mob_type == super::MobType::Creeper {
+        super::creeper::tick(me, mob, ctx);
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
@@ -262,7 +267,11 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
             width,
             height,
             max_up_step: max_up_step(mob),
-            max_fall_distance: 3,
+            max_fall_distance: if mob.mob_type == super::MobType::Creeper {
+                super::creeper::max_fall_distance(mob)
+            } else {
+                3
+            },
             malus: mob.malus,
             context: me.collision_context(),
         },
@@ -418,12 +427,16 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.ambient_sound_time += 1;
         if roll < time {
             mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
-            let pitch = voice_pitch(me, mob);
-            let sound = mob
-                .mob_type
-                .ambient_sound()
-                .unwrap_or_else(|| ambient_sound(mob));
-            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+            // `makeSound(null)`：没有环境音的种类不出声，也不取音高。
+            // `makeSound(null)`: kinds without an ambient sound play nothing and draw no pitch.
+            if !mob.mob_type.has_no_ambient_sound() {
+                let pitch = voice_pitch(me, mob);
+                let sound = mob
+                    .mob_type
+                    .ambient_sound()
+                    .unwrap_or_else(|| ambient_sound(mob));
+                play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+            }
         }
     }
 }
@@ -530,6 +543,9 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    if mob.mob_type.has_no_ambient_sound() {
+        return;
+    }
     let pitch = voice_pitch(me, mob);
     play_sound(
         me,
@@ -1477,6 +1493,11 @@ pub(crate) fn do_hurt_target(
     ctx: &mut dyn EntityCtx,
     target: crate::entity::EntityUid,
 ) {
+    // `Creeper.doHurtTarget` 直接返回真：近战目标只负责追，伤害全靠爆炸。
+    // `Creeper.doHurtTarget` just returns true: melee only chases, the blast does the damage.
+    if mob.mob_type == super::MobType::Creeper {
+        return;
+    }
     let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
     let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
     source.attacker = Some(me.id);

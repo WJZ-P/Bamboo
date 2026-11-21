@@ -960,6 +960,15 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => {}
         }
     }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::CREEPER_SWELL_DIR => return EntityData::CreeperSwellDir(-1),
+            facts::CREEPER_POWERED => return EntityData::CreeperPowered(false),
+            facts::CREEPER_IGNITED => return EntityData::CreeperIgnited(false),
+            _ => {}
+        }
+    }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
@@ -1055,6 +1064,19 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     }
     if mob.drowned_converting {
         out.push(EntityData::DrownedConverting(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        // `Creeper.defineSynchedData`：膨胀方向缺省 -1，带电和点燃缺省 false。
+        // `Creeper.defineSynchedData`: swell direction defaults to -1, the flags to false.
+        if mob.creeper_swell_dir != -1 {
+            out.push(EntityData::CreeperSwellDir(mob.creeper_swell_dir));
+        }
+        if mob.creeper_powered {
+            out.push(EntityData::CreeperPowered(true));
+        }
+        if mob.creeper_ignited {
+            out.push(EntityData::CreeperIgnited(true));
+        }
     }
     out
 }

@@ -493,6 +493,20 @@ pub enum Command {
         center: Vec3,
         radius: f32,
     },
+    /// 生物引发的爆炸（`Level.ExplosionInteraction.MOB`）：射线、伤害生物和玩家、
+    /// 按 `mobGriefing` 破坏方块。发出者就是爆炸的来源实体。
+    ///
+    /// A mob-caused explosion (`Level.ExplosionInteraction.MOB`): rays, damage to mobs and
+    /// players, and block damage under `mobGriefing`. The emitter is the source entity.
+    ExplodeMob {
+        center: Vec3,
+        radius: f32,
+        /// 来源生物这一刻的公开数据：它正在 tick，`me.kind` 是占位，死亡消息要靠它拿名字。
+        ///
+        /// The source mob's public data: it is mid-tick with a placeholder `me.kind`, and
+        /// death messages need its name.
+        source: Box<EntityPublic>,
+    },
     /// 下落方块这一刻的落地判定和后果：能不能放回去、发 1031 还是 1029、
     /// 要不要掉成物品、自己消不消失。需要 `&mut World` 的只读判定也在这里。
     ///
@@ -613,6 +627,11 @@ pub enum Command {
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
         Command::Explode { center, radius } => world.explode_tnt(center, radius),
+        Command::ExplodeMob {
+            center,
+            radius,
+            source,
+        } => world.explode_mob(&source, center, radius),
         Command::LandFallingBlock {
             data,
             entity_drops,

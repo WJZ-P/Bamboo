@@ -15,6 +15,7 @@
 pub mod attributes;
 pub mod chicken;
 pub mod control;
+pub mod creeper;
 pub mod damage;
 pub mod effects;
 pub mod equipment;
@@ -61,6 +62,7 @@ pub enum MobType {
     Zombie,
     Husk,
     Skeleton,
+    Creeper,
 }
 
 impl MobType {
@@ -75,6 +77,7 @@ impl MobType {
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
+            Self::Creeper => ids::CREEPER,
         }
     }
 
@@ -88,6 +91,7 @@ impl MobType {
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
+            Self::Creeper => "minecraft:creeper",
         }
     }
 
@@ -100,6 +104,7 @@ impl MobType {
             Self::Zombie,
             Self::Husk,
             Self::Skeleton,
+            Self::Creeper,
         ]
         .into_iter()
         .find(|kind| kind.name() == name)
@@ -116,6 +121,7 @@ impl MobType {
                     mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
                 )
             }
+            (Self::Creeper, _) => creeper::dimensions(),
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
@@ -130,7 +136,34 @@ impl MobType {
 
     /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
     pub const fn is_monster(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk | Self::Skeleton)
+        matches!(
+            self,
+            Self::Zombie | Self::Husk | Self::Skeleton | Self::Creeper
+        )
+    }
+
+    /// 目标选择按官方 `TargetGoal` 的完整规则走（`mustSee` 的视线记忆、生物也能当目标、
+    /// 按真实碰撞箱判近战距离）。僵尸一系还是早先的简化版。
+    ///
+    /// Whether targeting follows the full vanilla `TargetGoal` rules (`mustSee` memory,
+    /// mob targets, real hitboxes for melee reach). Zombies keep the earlier simplification.
+    pub const fn full_target_rules(self) -> bool {
+        matches!(self, Self::Skeleton | Self::Creeper)
+    }
+
+    /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
+    ///
+    /// Kinds whose `Mob.getAmbientSound()` is null: `makeSound(null)` plays nothing and
+    /// draws no pitch.
+    pub const fn has_no_ambient_sound(self) -> bool {
+        matches!(self, Self::Creeper)
+    }
+
+    /// 走路声用脚下方块的 `SoundType`（`Entity.playStepSound` 的缺省实现），不是生物自己的音效。
+    ///
+    /// Footsteps use the `SoundType` of the block below (the default `Entity.playStepSound`).
+    pub const fn uses_block_step_sound(self) -> bool {
+        matches!(self, Self::Creeper)
     }
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
@@ -164,6 +197,7 @@ impl MobType {
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
+            Self::Creeper => "minecraft:entities/creeper",
         }
     }
 
@@ -186,7 +220,7 @@ impl MobType {
     /// 四种音效按官方类分派，僵尸和尸壳各有自己的事件名。
     pub const fn ambient_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Creeper => None,
             Self::Sheep => Some("minecraft:entity.sheep.ambient"),
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
@@ -201,6 +235,7 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
+            Self::Creeper => Some("minecraft:entity.creeper.hurt"),
         }
     }
 
@@ -211,12 +246,13 @@ impl MobType {
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
+            Self::Creeper => Some("minecraft:entity.creeper.death"),
         }
     }
 
     pub const fn step_sound(self) -> Option<&'static str> {
         match self {
-            Self::Cow | Self::Pig | Self::Chicken => None,
+            Self::Cow | Self::Pig | Self::Chicken | Self::Creeper => None,
             Self::Sheep => Some("minecraft:entity.sheep.step"),
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
@@ -235,6 +271,7 @@ impl MobType {
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
+            Self::Creeper => items::CREEPER_SPAWN_EGG,
         }
     }
 
@@ -248,6 +285,7 @@ impl MobType {
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
+            Self::Creeper => "entity.minecraft.creeper",
         }
     }
 
@@ -261,9 +299,15 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
-            .into_iter()
-            .find(|kind| kind.entity_type() == entity_type)
+        [
+            Self::Cow,
+            Self::Zombie,
+            Self::Husk,
+            Self::Skeleton,
+            Self::Creeper,
+        ]
+        .into_iter()
+        .find(|kind| kind.entity_type() == entity_type)
     }
 
     /// `EntityType.getCategory()`。
@@ -440,6 +484,11 @@ pub enum DamageKind {
     Magic,
     Wither,
     Explosion,
+    /// `minecraft:player_explosion`：有直接和间接来源实体的爆炸（苦力怕炸人就是这种）。
+    ///
+    /// `minecraft:player_explosion`: an explosion with a direct and a causing entity,
+    /// which is what a creeper blast is.
+    PlayerExplosion,
 }
 
 impl DamageKind {
@@ -470,6 +519,7 @@ impl DamageKind {
             Self::Magic => "minecraft:magic",
             Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
+            Self::PlayerExplosion => "minecraft:player_explosion",
         }
     }
 
@@ -521,6 +571,7 @@ impl DamageKind {
             Self::Magic => "magic",
             Self::Wither => "wither",
             Self::Explosion => "explosion",
+            Self::PlayerExplosion => "explosion.player",
         }
     }
 
@@ -528,7 +579,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 24] = [
+        let all: [DamageKind; 25] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -553,6 +604,7 @@ impl DamageKind {
             Self::Magic,
             Self::Wither,
             Self::Explosion,
+            Self::PlayerExplosion,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -634,7 +686,7 @@ impl DamageKind {
     /// `DamageSource.scalesWithDifficulty()`: only `always`, or
     /// `when_caused_by_living_non_player` with a non-player living cause.
     pub const fn scales_with_difficulty(self) -> bool {
-        matches!(self, Self::Explosion)
+        matches!(self, Self::Explosion | Self::PlayerExplosion)
     }
 
     /// `DamageType.exhaustion`：受伤后累加的饥饿消耗。
@@ -648,6 +700,7 @@ impl DamageKind {
             | Self::Thrown
             | Self::Thorns
             | Self::Explosion
+            | Self::PlayerExplosion
             | Self::Cactus
             | Self::InFire
             | Self::Lava
@@ -667,6 +720,8 @@ impl DamageKind {
                 | Self::Arrow
                 | Self::Thrown
                 | Self::Thorns
+                | Self::Explosion
+                | Self::PlayerExplosion
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor
@@ -1047,6 +1102,11 @@ pub struct Mob {
     /// The chicken sound variant and `eggTime` countdown.
     pub chicken_sound_variant: chicken::SoundVariant,
     pub egg_time: i32,
+    /// 苦力怕的膨胀、引信、带电和点燃状态；别的生物恒为缺省值。全是相对计数，随实体行搬岛。
+    ///
+    /// Creeper swell, fuse, powered and ignited state; default for other mobs. Relative
+    /// counters only, so it moves with the entity row between islands.
+    pub creeper: creeper::CreeperState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
@@ -1115,6 +1175,7 @@ impl Mob {
             MobType::Sheep => sheep::attributes(),
             MobType::Chicken => chicken::attributes(),
             MobType::Skeleton => Attributes::skeleton(),
+            MobType::Creeper => creeper::attributes(),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -1125,6 +1186,7 @@ impl Mob {
             MobType::Sheep => sheep::goals(&mut navigation),
             MobType::Chicken => chicken::goals(&mut navigation),
             MobType::Skeleton => GoalSelector::skeleton(),
+            MobType::Creeper => creeper::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
         let target_goals = match mob_type {
@@ -1132,6 +1194,7 @@ impl Mob {
                 GoalSelector::default()
             }
             MobType::Skeleton => GoalSelector::skeleton_targets(),
+            MobType::Creeper => creeper::target_goals(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -1247,6 +1310,7 @@ impl Mob {
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
+            creeper: creeper::CreeperState::default(),
             events: Vec::new(),
             hurt_marked: false,
             pending_breed: None,
@@ -1339,6 +1403,12 @@ pub struct MobPublic {
     pub pig_sound_variant: pig::SoundVariant,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
+    /// 苦力怕的三项同步元数据：`DATA_SWELL_DIR`、`DATA_IS_POWERED`、`DATA_IS_IGNITED`。
+    ///
+    /// The three synced creeper items: swell direction, powered and ignited.
+    pub creeper_swell_dir: i32,
+    pub creeper_powered: bool,
+    pub creeper_ignited: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -1390,6 +1460,9 @@ impl MobPublic {
             pig_sound_variant: mob.pig_sound_variant,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
+            creeper_swell_dir: mob.creeper.swell_dir,
+            creeper_powered: mob.creeper.powered,
+            creeper_ignited: mob.creeper.ignited,
             on_fire: remaining_fire_ticks > 0,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,

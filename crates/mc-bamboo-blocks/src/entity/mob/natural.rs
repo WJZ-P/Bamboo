@@ -622,7 +622,7 @@ pub(super) fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> 
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken => {
             animal_spawn_rules(world, pos)
         }
-        MobType::Zombie | MobType::Skeleton => {
+        MobType::Zombie | MobType::Skeleton | MobType::Creeper => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
         MobType::Husk => {

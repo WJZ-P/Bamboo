@@ -187,5 +187,6 @@ pub(super) fn equip_saddle(
         shrink_held: !req.creative,
         replacement: None,
         shear: false,
+        damage_held: false,
     }
 }

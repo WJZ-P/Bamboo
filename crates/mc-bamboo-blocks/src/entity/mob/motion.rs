@@ -196,6 +196,9 @@ fn cause_fall_damage(
             damage as f32,
         );
     }
+    if mob.mob_type == super::MobType::Creeper {
+        super::creeper::after_fall(mob, distance);
+    }
 }
 
 /// `restituteMovementAfterCollisions`：生物拿方块的整份弹性，弹性属性默认是 0。
@@ -308,7 +311,15 @@ fn step_effects(
             super::MobType::Chicken => super::chicken::sounds(mob)[3],
             kind => kind.step_sound().unwrap_or(mob.sound_variant.step()),
         };
-        super::living::play_sound(me, mob, sound, 0.15, 1.0);
+        if mob.mob_type.uses_block_step_sound() {
+            // `Entity.playStepSound`：方块 `SoundType` 的脚步声，音量乘 0.15。
+            // `Entity.playStepSound`: the block `SoundType` step sound at 0.15 volume.
+            let kind = state.sound_type();
+            let sound = mc_bamboo_data::SOUND_EVENTS[usize::from(kind.step_sound)].name;
+            super::living::play_sound(me, mob, sound, kind.volume * 0.15, kind.pitch);
+        } else {
+            super::living::play_sound(me, mob, sound, 0.15, 1.0);
+        }
     }
     if play_sound
         && state.is_tagged(block_tags::CRYSTAL_SOUND_BLOCKS)
