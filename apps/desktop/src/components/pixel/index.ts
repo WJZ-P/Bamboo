@@ -1,4 +1,5 @@
 export { PixelButton } from "./PixelButton";
+export { CollapsibleGroup, GroupTitle, PixelCollapsible } from "./PixelCollapsible";
 export { PanelTitle, PixelPanel, SunkenBox } from "./PixelPanel";
 export { PixelInput } from "./PixelInput";
 export { PixelSelect } from "./PixelSelect";
