@@ -94,7 +94,12 @@ fn dismounting_starts_the_boarding_cooldown() {
     super::mount(&mut region, id, horse);
     super::dismount(&mut region, id);
     assert_eq!(
-        region.players.get(&id).expect("player").riding.boarding_cooldown,
+        region
+            .players
+            .get(&id)
+            .expect("player")
+            .riding
+            .boarding_cooldown,
         60
     );
 
@@ -108,7 +113,12 @@ fn dismounting_starts_the_boarding_cooldown() {
         super::tick(&mut region);
     }
     assert_eq!(
-        region.players.get(&id).expect("player").riding.boarding_cooldown,
+        region
+            .players
+            .get(&id)
+            .expect("player")
+            .riding
+            .boarding_cooldown,
         0
     );
     super::mount(&mut region, id, horse);
@@ -144,7 +154,12 @@ fn sneaking_blocks_mounting() {
         MobType::Horse,
         Vec3::new(0.5, 64.0, 0.5),
     ));
-    region.players.get_mut(&id).expect("player").sync.shift_key_down = true;
+    region
+        .players
+        .get_mut(&id)
+        .expect("player")
+        .sync
+        .shift_key_down = true;
     super::mount(&mut region, id, horse);
     assert_eq!(
         region.players.get(&id).expect("player").riding.vehicle,
@@ -183,8 +198,9 @@ fn a_dismount_lands_beside_the_horse_or_on_it() {
     // (0.5, -60, 0.5) facing 0.
     let chunks = ChunkStore::flat();
     let vehicle = Vec3::new(0.5, -60.0, 0.5);
-    let spot = super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
-        .expect("a floor exists");
+    let spot =
+        super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
+            .expect("a floor exists");
     assert!((spot.y + 60.0).abs() < 1.0e-9, "{spot:?}");
     assert!(spot.x < 0.0, "right hand side is -x at yaw 0: {spot:?}");
 
@@ -194,8 +210,9 @@ fn a_dismount_lands_beside_the_horse_or_on_it() {
     for y in -60..=-58 {
         chunks.set_block(BlockPos::new(-1, y, 0), blocks::STONE);
     }
-    let spot = super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
-        .expect("a floor exists");
+    let spot =
+        super::dismount::dismount_location(&chunks, &player(), vehicle, 1.396_484_4, 1.6, 0.0)
+            .expect("a floor exists");
     assert!(spot.x > 0.5, "the other side is +x: {spot:?}");
 
     // 两边都没有地：官方返回 `this.position()`。
