@@ -21,7 +21,7 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{BlockPos, ChunkPos};
 use mc_bamboo_data::{
     blocks,
-    registries::{biome, entity_type},
+    registries::biome,
     spawning::{self, MobCategory},
 };
 use serde::Deserialize;
@@ -52,7 +52,7 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {} cows, {} other animals, {} cows with finalize details compared",
+                "GEN SPAWN: {} cases, {} modelled animals, {} simulated animals, {} with finalize details compared",
                 self.cases, self.cows, self.others, self.details
             );
         }
@@ -112,7 +112,14 @@ impl Report {
         let mut in_sync = true;
         let mut ours = mobs.iter();
         for row in &case.spawned {
-            if row[0] != i64::from(entity_type::COW) {
+            // 已建模的动物逐只比；马、驴这些只模拟放置的会消耗官方的区域随机源，之后不再比细节。
+            // Modelled animals are compared one by one; simulated ones (horse, donkey) consume
+            // the official region random, so details stop being compared after them.
+            let modelled = i32::try_from(row[0])
+                .ok()
+                .and_then(mc_bamboo_blocks::entity::mob::MobType::by_entity_type)
+                .is_some();
+            if !modelled {
                 self.gen_spawns.others += 1;
                 in_sync = false;
                 continue;
