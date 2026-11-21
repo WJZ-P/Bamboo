@@ -66,6 +66,10 @@ pub struct AgeableGroupData {
 pub enum SpawnGroup {
     Ageable(AgeableGroupData),
     Zombie(super::zombie_spawn::ZombieGroupData),
+    /// 兔子、狐狸、狼：组大小加共享的品种。
+    ///
+    /// Rabbits, foxes and wolves: the group size plus the shared variant.
+    Wild(super::wild_spawn::WildGroup),
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -264,7 +268,7 @@ pub(crate) fn finalize_spawn_with_group(
 }
 
 /// `AgeableMob.getBabyStartAge()`。
-const BABY_START_AGE: i32 = -24000;
+pub(super) const BABY_START_AGE: i32 = -24000;
 
 fn finalize_spawn_in_group(
     world: &mut World,
@@ -283,27 +287,8 @@ fn finalize_spawn_in_group(
     }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
-    if kind == MobType::Fox {
-        entity.with_mob(|_, mob| {
-            super::fox::finalize_spawn(mob, biome, random);
-            finalize_animal(mob, random);
-        });
-        return;
-    }
-    if kind == MobType::Wolf {
-        // `WolfPackData` 是 `AgeableMobGroupData(false)`：不生幼崽，也不取那一次数。
-        // `WolfPackData` never spawns babies, so `AgeableMob` draws nothing.
-        entity.with_mob(|_, mob| {
-            super::wolf::finalize_spawn(mob, biome, random);
-            finalize_animal(mob, random);
-        });
-        return;
-    }
-    if kind == MobType::Rabbit {
-        entity.with_mob(|_, mob| {
-            mob.rabbit.variant = super::rabbit::random_variant(biome, random);
-            finalize_animal(mob, random);
-        });
+    if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
+        super::wild_spawn::finalize(kind, entity, biome, random, group);
         return;
     }
     finalize_cow(kind, entity, biome, world.random(), group);
@@ -329,6 +314,8 @@ pub(super) fn finalize_generated(
         MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
+    } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
+        super::wild_spawn::finalize(kind, entity, biome, region_random, group);
     } else {
         finalize_spawn_in_group(world, kind, entity, SpawnReason::Natural, group);
     }
@@ -410,7 +397,7 @@ pub(super) fn finalize_cow(
     });
 }
 
-fn finalize_animal(mob: &mut super::Mob, random: &dyn RandomSource) {
+pub(super) fn finalize_animal(mob: &mut super::Mob, random: &dyn RandomSource) {
     if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
         && range.modifier(RANDOM_SPAWN_BONUS).is_none()
     {

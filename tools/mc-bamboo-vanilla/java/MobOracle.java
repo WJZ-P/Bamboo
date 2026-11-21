@@ -2936,6 +2936,19 @@ public final class MobOracle {
         scenes.add(new NaturalScene("cow_global_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 289, false, false));
         scenes.add(new NaturalScene("cow_local_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 578, true, false));
         scenes.add(new NaturalScene("cow_no_local_cap", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, cap, 578, false, false));
+        // 猪、羊、鸡用平原的表；兔子、狐狸、狼用针叶林的表，雪地针叶林换品种，森林是另一种狼。
+        // Pigs, sheep and chickens use the plains table; rabbits, foxes and wolves the taiga
+        // one, snowy taiga for the other variants and forest for another wolf.
+        scenes.add(new NaturalScene("pig_day", EntityTypes.PIG, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("sheep_day", EntityTypes.SHEEP, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("chicken_day", EntityTypes.CHICKEN, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        for (String biome : new String[] {"taiga", "snowy_taiga"}) {
+            scenes.add(new NaturalScene("rabbit_" + biome, EntityTypes.RABBIT, biome, 2, 15, 0, 0, false, -32, 0, 289, true, false));
+            scenes.add(new NaturalScene("fox_" + biome, EntityTypes.FOX, biome, 2, 15, 0, 0, false, -32, 0, 289, true, false));
+            scenes.add(new NaturalScene("wolf_" + biome, EntityTypes.WOLF, biome, 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        }
+        scenes.add(new NaturalScene("wolf_forest", EntityTypes.WOLF, "forest", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("fox_dark", EntityTypes.FOX, "taiga", 2, 15, 0, 11, false, -32, 0, 289, true, false));
         for (Difficulty difficulty : Difficulty.values()) {
             scenes.add(new NaturalScene("skeleton_night_" + difficulty.getId(), EntityTypes.SKELETON, "plains",
                     difficulty.getId(), 15, 0, 11, false, -32, 0, 289, true, false));
@@ -3079,17 +3092,24 @@ public final class MobOracle {
     // 生成期刷怪：平原的真实刷怪表，区块 (0,0) 和一圈邻居按坐标公式铺台阶、水、沙、树叶和草丛。
     // World-generation spawning: the real plains table over a formula terrain of steps,
     // water, sand, leaves and short grass around chunk (0,0).
-    private record GenScene(String name, int sky, int block, boolean terrain) {}
+    private record GenScene(String name, int sky, int block, boolean terrain, String biome, int seeds) {}
 
     private static int playGenSpawns(Official official, Writer out) throws Exception {
         List<GenScene> scenes = List.of(
-                new GenScene("gen_flat", 15, 0, false),
-                new GenScene("gen_terrain", 15, 0, true),
-                new GenScene("gen_dim", 8, 0, true),
-                new GenScene("gen_torch", 0, 9, true));
+                new GenScene("gen_flat", 15, 0, false, "plains", 500),
+                new GenScene("gen_terrain", 15, 0, true, "plains", 500),
+                new GenScene("gen_dim", 8, 0, true, "plains", 500),
+                new GenScene("gen_torch", 0, 9, true, "plains", 500),
+                // 针叶林的表里有狼、兔子、狐狸；雪地针叶林换成白兔、雪狐和灰狼。
+                // The taiga table has wolves, rabbits and foxes; snowy taiga switches
+                // them to white rabbits, snow foxes and ashen wolves.
+                new GenScene("gen_taiga_flat", 15, 0, false, "taiga", 1500),
+                new GenScene("gen_taiga", 15, 0, true, "taiga", 1500),
+                new GenScene("gen_snowy_taiga", 15, 0, true, "snowy_taiga", 1500),
+                new GenScene("gen_taiga_dim", 8, 0, true, "taiga", 500));
         int count = 0;
         for (GenScene scene : scenes) {
-            for (long index = 0; index < 500; index++) {
+            for (long index = 0; index < scene.seeds(); index++) {
                 // 相邻的小种子第一下 `nextFloat` 几乎相同，打散成 64 位。
                 // Nearby small seeds share their first `nextFloat`; spread them out.
                 long seed = index * 0x9E3779B97F4A7C15L + 12345L;
@@ -3102,11 +3122,11 @@ public final class MobOracle {
 
     private static JsonObject genSpawnCase(Official official, GenScene scene, long seed) throws Exception {
         FakeLevel level = FakeLevel.create(official);
-        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.COW, "plains", 2, scene.sky(), scene.block(), 0,
+        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.COW, scene.biome(), 2, scene.sky(), scene.block(), 0,
                 false, 0, 0, 0, false, false);
         level.worldGenRegion = true;
         level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
-                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace(scene.biome())));
         put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
                 (x, y, z) -> level.naturalBiome, 0L));
         level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
@@ -3130,8 +3150,10 @@ public final class MobOracle {
         random.setDecorationSeed(seed, 0, 0);
         NaturalSpawner.spawnMobsForChunkGeneration(level, new BlockPos(0, level.getMaxY(), 0), new ChunkPos(0, 0), random);
         JsonArray spawned = new JsonArray();
+        JsonArray details = new JsonArray();
         for (Entity entity : level.spawned) {
             Mob mob = (Mob) entity;
+            details.add(genSpawnDetail(mob));
             var row = new JsonArray();
             row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
             row.add(Double.doubleToRawLongBits(mob.getX()));
@@ -3149,10 +3171,30 @@ public final class MobOracle {
         result.addProperty("sky", scene.sky());
         result.addProperty("block", scene.block());
         result.addProperty("terrain", scene.terrain());
+        result.addProperty("biome", "minecraft:" + scene.biome());
         result.add("spawned", spawned);
+        result.add("details", details);
         result.addProperty("random", random.nextLong());
         result.addProperty("region", region.nextLong());
         return result;
+    }
+
+    /**
+     * 兔子、狐狸、狼在 `finalizeSpawn` 里定下的东西：品种、狐狸嘴里的物品、狼的叫声。其余生物为空串。
+     * What `finalizeSpawn` decides for rabbits, foxes and wolves; empty for other mobs.
+     */
+    private static String genSpawnDetail(Mob mob) {
+        if (mob instanceof net.minecraft.world.entity.animal.rabbit.Rabbit rabbit) {
+            return "rabbit|" + rabbit.getVariant().id();
+        }
+        if (mob instanceof net.minecraft.world.entity.animal.fox.Fox fox) {
+            return "fox|" + fox.getVariant().getId() + "|" + BuiltInRegistries.ITEM.getId(fox.getMainHandItem().getItem());
+        }
+        if (mob instanceof net.minecraft.world.entity.animal.wolf.Wolf wolf) {
+            return "wolf|" + wolf.get(DataComponents.WOLF_VARIANT).unwrapKey().orElseThrow().identifier()
+                    + "|" + wolf.get(DataComponents.WOLF_SOUND_VARIANT).unwrapKey().orElseThrow().identifier();
+        }
+        return "";
     }
 
     /** 和 Rust 侧 `gen_column` 同一个坐标公式。 */

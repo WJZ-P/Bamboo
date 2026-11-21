@@ -176,7 +176,7 @@ pub(super) fn is_evil(mob: &Mob) -> bool {
     mob.mob_type == MobType::Rabbit && mob.rabbit.variant == Variant::Evil
 }
 
-pub(super) fn random_variant(biome: i32, random: &crate::random::LegacyRandom) -> Variant {
+pub(super) fn random_variant(biome: i32, random: &dyn crate::random::RandomSource) -> Variant {
     let roll = random.next_int(100);
     if super::spawn::biome_tag_contains("minecraft:spawns_white_rabbits", biome) {
         if roll < 80 {

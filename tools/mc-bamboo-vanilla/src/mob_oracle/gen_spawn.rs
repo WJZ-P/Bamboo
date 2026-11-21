@@ -1,27 +1,32 @@
-//! 用官方平原刷怪表和公式地形重放生成期刷怪（`NaturalSpawner.spawnMobsForChunkGeneration`）。
+//! 用官方的群系刷怪表（平原、针叶林、雪地针叶林）和公式地形重放生成期刷怪
+//! （`NaturalSpawner.spawnMobsForChunkGeneration`）。
 //!
-//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；生成的牛比类型、坐标、朝向。
-//! 牛的幼年和左撇子取区域随机源，只在这一区块前面没有生成过别的动物时比较：
-//! 别的动物在官方那边会跑自己的 `finalizeSpawn`，Bamboo 还没有它们。
+//! 装饰随机源的取数必须完全一致（结束时比一次指纹）；Bamboo 建模了的生物比类型、坐标、朝向。
+//! 幼年、左撇子和兔子 / 狐狸 / 狼的品种明细取区域随机源，只在这一区块前面没有生成过
+//! Bamboo 没建模的动物（马、驴）时比较：那些动物在官方那边会跑自己的 `finalizeSpawn`。
 //!
-//! Replay world-generation spawning with the official plains table over a formula
-//! terrain. The decoration random must match exactly (a fingerprint at the end);
-//! spawned cows compare type, position and facing. Baby and left-handedness come from
-//! the region random and are compared only while no other animal spawned before in the
-//! chunk, since vanilla runs those animals' `finalizeSpawn` and Bamboo has none yet.
+//! Replay world-generation spawning with the official biome tables (plains, taiga,
+//! snowy taiga) over a formula terrain. The decoration random must match exactly (a
+//! fingerprint at the end); every mob Bamboo models compares type, position and facing.
+//! Baby, left-handedness and the rabbit / fox / wolf variant details come from the
+//! region random and are compared only while no unmodelled animal (horse, donkey)
+//! spawned before in the chunk, since vanilla runs those animals' `finalizeSpawn`.
 
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, LegacyRandom, LevelRandom, World,
     entity::{
         Entities, Entity,
-        mob::natural_gen::{GenSpawn, spawn_mobs_for_chunk_generation},
+        mob::{
+            Mob, MobType,
+            natural_gen::{GenSpawn, spawn_mobs_for_chunk_generation},
+        },
     },
     random::{RandomSource, XoroshiroRandom},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos};
 use mc_bamboo_data::{
     blocks,
-    registries::{biome, entity_type},
+    registries::biome,
     spawning::{self, MobCategory},
 };
 use serde::Deserialize;
@@ -35,7 +40,10 @@ pub(super) struct Case {
     sky: i32,
     block: i32,
     terrain: bool,
+    biome: String,
     spawned: Vec<[i64; 7]>,
+    /// 和 `spawned` 一一对应：`MobOracle.genSpawnDetail`。
+    details: Vec<String>,
     random: i64,
     region: i64,
 }
@@ -46,14 +54,23 @@ pub(super) struct Coverage {
     cows: usize,
     others: usize,
     details: usize,
+    /// 兔子、狐狸、狼各生成了多少只，以及其中的幼崽和叼着东西的狐狸。
+    /// Spawned rabbits, foxes and wolves, plus babies among them and foxes with an item.
+    wild: [usize; 3],
+    wild_babies: usize,
+    fox_items: usize,
 }
 
 impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "GEN SPAWN: {} cases, {} cows, {} other animals, {} cows with finalize details compared",
+                "GEN SPAWN: {} cases, {} modelled mobs, {} unmodelled animals, {} mobs with finalize details compared",
                 self.cases, self.cows, self.others, self.details
+            );
+            println!(
+                "GEN SPAWN: {} rabbits, {} foxes, {} wolves, {} babies among them, {} foxes holding an item",
+                self.wild[0], self.wild[1], self.wild[2], self.wild_babies, self.fox_items
             );
         }
     }
@@ -61,6 +78,11 @@ impl Coverage {
     pub(super) fn check(&self) -> Result<(), String> {
         if self.cases > 0 && (self.cows == 0 || self.others == 0 || self.details == 0) {
             return Err("gen spawn fixtures did not exercise cows and other animals".into());
+        }
+        if self.cases > 0
+            && (self.wild.contains(&0) || self.wild_babies == 0 || self.fox_items == 0)
+        {
+            return Err("gen spawn fixtures did not exercise rabbits, foxes and wolves".into());
         }
         Ok(())
     }
@@ -79,7 +101,7 @@ impl Report {
         .set_decoration_seed(case.seed, 0, 0);
         let random = LegacyRandom::new(decoration);
         let region = XoroshiroRandom::from_seed(case.seed.wrapping_mul(31).wrapping_add(7));
-        let table = spawning::for_biome_id(biome::PLAINS);
+        let table = spawning::for_biome_id(biome_of(case));
         let probability = if broken && case.name == "gen_flat" {
             table.creature_spawn_probability * 2.0
         } else {
@@ -111,24 +133,25 @@ impl Report {
         let label = format!("{} seed {}", case.name, case.seed);
         let mut in_sync = true;
         let mut ours = mobs.iter();
-        for row in &case.spawned {
-            if row[0] != i64::from(entity_type::COW) {
+        for (row, detail) in case.spawned.iter().zip(&case.details) {
+            let modelled = i32::try_from(row[0]).ok().and_then(MobType::by_entity_type);
+            if modelled.is_none() {
                 self.gen_spawns.others += 1;
                 in_sync = false;
                 continue;
             }
             self.gen_spawns.cows += 1;
-            let Some(cow) = ours.next() else {
-                self.mismatch(format!("{label}: official cow {row:?} missing in Bamboo"));
+            let Some(entity) = ours.next() else {
+                self.mismatch(format!("{label}: official mob {row:?} missing in Bamboo"));
                 return;
             };
-            let mob = cow.kind.mob().expect("generated mobs are mobs");
+            let mob = entity.kind.mob().expect("generated mobs are mobs");
             let place = [
                 i64::from(mob.mob_type.entity_type()),
-                cow.position.x.to_bits() as i64,
-                cow.position.y.to_bits() as i64,
-                cow.position.z.to_bits() as i64,
-                i64::from(cow.y_rot.to_bits() as i32),
+                entity.position.x.to_bits() as i64,
+                entity.position.y.to_bits() as i64,
+                entity.position.z.to_bits() as i64,
+                i64::from(entity.y_rot.to_bits() as i32),
             ];
             if place[..] != row[..5] {
                 self.mismatch(format!(
@@ -137,17 +160,19 @@ impl Report {
             }
             if in_sync {
                 self.gen_spawns.details += 1;
+                self.gen_spawns.record_wild(mob);
                 let details = [i64::from(mob.is_baby()), i64::from(mob.left_handed)];
-                if details[..] != row[5..] {
+                let ours_detail = wild_detail(mob);
+                if details[..] != row[5..] || &ours_detail != detail {
                     self.mismatch(format!(
-                        "{label}: official {row:?}, Bamboo details {details:?}"
+                        "{label}: official {row:?} {detail:?}, Bamboo details {details:?} {ours_detail:?}"
                     ));
                 }
             }
         }
         if let Some(extra) = ours.next() {
             self.mismatch(format!(
-                "{label}: Bamboo spawned an extra cow at {:?}",
+                "{label}: Bamboo spawned an extra mob at {:?}",
                 extra.position
             ));
         }
@@ -162,6 +187,46 @@ impl Report {
             self.mismatch(format!("{label}: region random drifted"));
         }
     }
+}
+
+impl Coverage {
+    fn record_wild(&mut self, mob: &Mob) {
+        let slot = match mob.mob_type {
+            MobType::Rabbit => 0,
+            MobType::Fox => 1,
+            MobType::Wolf => 2,
+            _ => return,
+        };
+        self.wild[slot] += 1;
+        self.wild_babies += usize::from(mob.is_baby());
+        self.fox_items += usize::from(slot == 1 && mouth_item(mob) != mc_bamboo_data::items::AIR);
+    }
+}
+
+fn mouth_item(mob: &Mob) -> i32 {
+    mob.equipment
+        .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+        .item
+}
+
+/// 和 `MobOracle.genSpawnDetail` 同一个格式。
+///
+/// The same format as `MobOracle.genSpawnDetail`.
+fn wild_detail(mob: &Mob) -> String {
+    match mob.mob_type {
+        MobType::Rabbit => format!("rabbit|{}", mob.rabbit.variant.id()),
+        MobType::Fox => format!("fox|{}|{}", mob.fox.variant.id(), mouth_item(mob)),
+        MobType::Wolf => format!(
+            "wolf|{}|{}",
+            mob.wolf.variant_name(),
+            mob.wolf.sound_variant_name()
+        ),
+        _ => String::new(),
+    }
+}
+
+fn biome_of(case: &Case) -> i32 {
+    biome::by_name(&case.biome).expect("known biome")
 }
 
 /// 和 `MobOracle.genColumn` 同一个坐标公式。
@@ -195,7 +260,7 @@ fn fixture(case: &Case) -> MobLevel {
     let blocks = (-16..32)
         .flat_map(|x| (-16..32).flat_map(move |z| gen_column(x, z, case.terrain)))
         .collect();
-    let entry = spawning::for_biome_id(biome::PLAINS).mobs_to_spawn(MobCategory::Creature);
+    let entry = spawning::for_biome_id(biome_of(case)).mobs_to_spawn(MobCategory::Creature);
     MobLevel {
         blocks,
         random: LevelRandom::new(0),
@@ -207,7 +272,7 @@ fn fixture(case: &Case) -> MobLevel {
             ..ZombieFacts::default()
         },
         natural_spawn: Some(SceneFacts {
-            biome: biome::PLAINS,
+            biome: biome_of(case),
             category: MobCategory::Creature,
             entry: &entry[0],
             sky: case.sky,

@@ -341,8 +341,17 @@ pub fn set_target_goals(mob: &mut Mob) {
 ///
 /// `Fox.finalizeSpawn`: biome variant, `setTargetGoals`, then the mouth item
 /// from the level random source.
-pub(super) fn finalize_spawn(mob: &mut Mob, biome: i32, random: &crate::random::LegacyRandom) {
-    mob.fox.variant = Variant::by_biome(biome);
+///
+/// 品种由调用方给：自然生成的一组共用第一只的品种（`FoxGroupData`）。
+///
+/// The caller supplies the variant: a naturally spawned group shares the first
+/// fox's variant (`FoxGroupData`).
+pub(super) fn finalize_spawn(
+    mob: &mut Mob,
+    variant: Variant,
+    random: &dyn crate::random::RandomSource,
+) {
+    mob.fox.variant = variant;
     set_target_goals(mob);
     if random.next_float() < 0.2 {
         let odds = random.next_float();

@@ -30,14 +30,15 @@ pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
-pub mod rabbit;
 mod pig;
+pub mod rabbit;
 pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
 pub mod tame;
 pub(crate) mod timing;
+pub mod wild_spawn;
 pub mod wolf;
 pub mod wolf_goals;
 mod zombie_spawn;
@@ -331,9 +332,20 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
-            .into_iter()
-            .find(|kind| kind.entity_type() == entity_type)
+        [
+            Self::Cow,
+            Self::Zombie,
+            Self::Husk,
+            Self::Skeleton,
+            Self::Pig,
+            Self::Sheep,
+            Self::Chicken,
+            Self::Rabbit,
+            Self::Fox,
+            Self::Wolf,
+        ]
+        .into_iter()
+        .find(|kind| kind.entity_type() == entity_type)
     }
 
     /// `EntityType.getCategory()`。
@@ -354,7 +366,7 @@ impl MobType {
     /// `EntityType.canSpawnFarFromPlayer()`: the builder default is `CREATURE | MISC`,
     /// so cows may spawn far from players and monsters may not.
     pub const fn can_spawn_far_from_player(self) -> bool {
-        matches!(self, Self::Cow)
+        !self.is_monster()
     }
 
     /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
@@ -1223,11 +1235,9 @@ impl Mob {
         let target_goals = match mob_type {
             MobType::Fox => fox::target_goals(),
             MobType::Wolf => wolf::target_goals(),
-            MobType::Cow
-            | MobType::Rabbit
-            | MobType::Pig
-            | MobType::Sheep
-            | MobType::Chicken => GoalSelector::default(),
+            MobType::Cow | MobType::Rabbit | MobType::Pig | MobType::Sheep | MobType::Chicken => {
+                GoalSelector::default()
+            }
             MobType::Skeleton => GoalSelector::skeleton_targets(),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };

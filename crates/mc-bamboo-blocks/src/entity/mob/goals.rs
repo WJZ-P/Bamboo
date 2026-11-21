@@ -998,7 +998,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             // 缺实体的目标仍注册、仍取数，只是查不到目标（场景里明确无此类实体）。
             *found = match kind {
                 TargetType::FoxPrey => {
-                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Rabbit)
+                    nearest_mob_target(me, mob, ctx, super::fox_goals::is_small_prey)
                 }
                 _ if kind.available() => nearest_attackable(me, mob, ctx, *kind),
                 _ => None,

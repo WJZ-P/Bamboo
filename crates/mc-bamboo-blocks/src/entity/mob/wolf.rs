@@ -330,11 +330,25 @@ pub(super) fn apply_taming_side_effects(mob: &mut Mob) {
 ///
 /// The part of `Wolf.finalizeSpawn` before `super`: the biome variant and a
 /// random sound variant, both from the level random.
-pub(super) fn finalize_spawn(mob: &mut Mob, biome: i32, random: &crate::random::LegacyRandom) {
-    let variant = spawn_variant(biome);
-    let _ = random.next_int(1);
-    mob.wolf.variant = id_of(variant_names(), variant);
+///
+/// `pack` 是狼群共用的品种（`WolfPackData`）；有它就不再选、也不取那一次数。
+/// 返回这只狼的品种，给调用方记进狼群数据。
+///
+/// `pack` is the variant shared by the pack (`WolfPackData`); with it nothing is
+/// selected or drawn. Returns the variant for the caller to keep as pack data.
+pub(super) fn finalize_spawn(
+    mob: &mut Mob,
+    pack: Option<i32>,
+    biome: i32,
+    random: &dyn crate::random::RandomSource,
+) -> i32 {
+    let variant = pack.unwrap_or_else(|| {
+        let _ = random.next_int(1);
+        id_of(variant_names(), spawn_variant(biome))
+    });
+    mob.wolf.variant = variant;
     mob.wolf.sound_variant = random_sound_variant(|bound| random.next_int(bound));
+    variant
 }
 
 /// `wolf_variant` 的生成条件：八种各认一个群系或群系标签（优先级 1），其余是苍白狼。

@@ -66,9 +66,7 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         MobType::Pig => item_is_tagged(item, mc_bamboo_data::tags::item_tags::PIG_FOOD),
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
-        _ => kind
-            .food_tag()
-            .is_some_and(|tag| item_is_tagged(item, tag)),
+        _ => kind.food_tag().is_some_and(|tag| item_is_tagged(item, tag)),
     }
 }
 

@@ -325,9 +325,11 @@ fn find_target(
     }
 }
 
-/// `Wolf.PREY_SELECTOR`：羊、兔子、狐狸（羊在 cx-farm）。
+/// `Wolf.PREY_SELECTOR`：羊、兔子、狐狸。
+///
+/// `Wolf.PREY_SELECTOR`: sheep, rabbits and foxes.
 fn is_prey(kind: MobType) -> bool {
-    matches!(kind, MobType::Rabbit | MobType::Fox)
+    matches!(kind, MobType::Sheep | MobType::Rabbit | MobType::Fox)
 }
 
 /// `level.getNearestPlayer(conditions.selector(isAngryAt), mob, x, eyeY, z)`。

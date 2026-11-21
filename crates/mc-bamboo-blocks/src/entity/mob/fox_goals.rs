@@ -335,12 +335,19 @@ fn float_can_use(me: &Entity, mob: &Mob) -> bool {
 
 // ---- 盯梢和扑跳 ----
 
+/// `target instanceof Chicken || target instanceof Rabbit`：狐狸的猎物，也是会惊动它的小动物。
+///
+/// `target instanceof Chicken || target instanceof Rabbit`: fox prey, which also alerts a fox.
+pub(super) fn is_small_prey(kind: MobType) -> bool {
+    matches!(kind, MobType::Chicken | MobType::Rabbit)
+}
+
 /// 当前目标和它是不是兔子 / 鸡（`STALKABLE_PREY`）。
 fn prey(mob: &Mob, ctx: &dyn EntityCtx) -> Option<(CombatTarget, bool)> {
     let target = goals::combat_target(mob, ctx)?;
-    let stalkable = ctx.other(target.uid).is_some_and(|other| {
-        matches!(&other.kind, KindPublic::Mob(public) if public.mob_type == MobType::Rabbit)
-    });
+    let stalkable = ctx.other(target.uid).is_some_and(
+        |other| matches!(&other.kind, KindPublic::Mob(public) if is_small_prey(public.mob_type)),
+    );
     Some((target, stalkable))
 }
 
@@ -570,7 +577,7 @@ fn alertable(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> bool {
 fn alertable_mob(fox: &super::fox::Fox, target: &super::MobPublic) -> bool {
     match target.mob_type {
         MobType::Fox => false,
-        MobType::Rabbit => true,
+        kind if is_small_prey(kind) => true,
         kind if kind.is_monster() => true,
         kind if super::tame::is_tamable(kind) => target.tame_flags & super::tame::FLAG_TAME == 0,
         _ => !fox.trusts(Some(target.uuid)),
@@ -871,6 +878,7 @@ mod tests {
             (MobType::Cow, false),
             (MobType::Fox, false),
             (MobType::Rabbit, true),
+            (MobType::Chicken, true),
             (MobType::Zombie, true),
             (MobType::Wolf, true),
         ] {
