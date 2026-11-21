@@ -875,6 +875,18 @@ pub trait Level: LevelSideState + LevelEntities {
         mc_bamboo_data::registries::biome::PLAINS
     }
 
+    /// `ChunkGenerator.getMobsAt` 的加权表。默认取群系表；对拍场景可以固定候选表。
+    ///
+    /// The weighted table from `ChunkGenerator.getMobsAt`. Defaults to the biome table;
+    /// oracle scenes can supply a fixed candidate table.
+    fn natural_spawn_table(
+        &self,
+        pos: BlockPos,
+        category: mc_bamboo_data::spawning::MobCategory,
+    ) -> &'static [mc_bamboo_data::spawning::MobSpawnerDef] {
+        mc_bamboo_data::spawning::for_biome_id(self.biome_id(pos)).mobs_to_spawn(category)
+    }
+
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///
     /// 双箱已经按官方 `CompoundContainer` 的顺序合并成一张表。这一格不是容器方块时

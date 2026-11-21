@@ -29,6 +29,7 @@ pub mod skeleton;
 mod skeleton_drops;
 pub mod spawn;
 pub(crate) mod timing;
+mod zombie_spawn;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 

@@ -56,12 +56,15 @@ pub struct AgeableGroupData {
     pub baby_spawn_chance: f32,
 }
 
-/// 自然生成的组数据（`SpawnGroupData`）。Bamboo 只建模动物这一种。
+/// 自然生成的组数据（`SpawnGroupData`）：动物的 `AgeableMobGroupData` 和僵尸的
+/// `ZombieGroupData`。
 ///
-/// Spawn-group data (`SpawnGroupData`). Only the animal variant is modelled.
+/// Spawn-group data (`SpawnGroupData`): `AgeableMobGroupData` for animals and
+/// `ZombieGroupData` for zombies.
 #[derive(Debug, Clone, Copy)]
 pub enum SpawnGroup {
     Ageable(AgeableGroupData),
+    Zombie(super::zombie_spawn::ZombieGroupData),
 }
 
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
@@ -255,13 +258,12 @@ fn finalize_spawn_in_group(
     reason: SpawnReason,
     group: &mut Option<SpawnGroup>,
 ) {
-    let _ = reason;
     if kind == MobType::Skeleton {
         super::skeleton::finalize_spawn(world, entity);
         return;
     }
-    if kind.is_monster() {
-        finalize_monster(world, kind, entity);
+    if matches!(kind, MobType::Zombie | MobType::Husk) {
+        super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         return;
     }
     let biome = world.biome_id(entity.block_position());
@@ -276,12 +278,18 @@ fn finalize_spawn_in_group(
     // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
     // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
     // the mob into the group.
-    let data = group.get_or_insert(SpawnGroup::Ageable(AgeableGroupData {
-        group_size: 0,
-        should_spawn_baby: true,
-        baby_spawn_chance: 0.05,
-    }));
-    let SpawnGroup::Ageable(data) = data;
+    // `AgeableMob.finalizeSpawn`：不是动物组数据时新建一份（官方 `groupData == null`）。
+    // `AgeableMob.finalizeSpawn`: start a fresh animal group when there is none.
+    if !matches!(group, Some(SpawnGroup::Ageable(_))) {
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData {
+            group_size: 0,
+            should_spawn_baby: true,
+            baby_spawn_chance: 0.05,
+        }));
+    }
+    let Some(SpawnGroup::Ageable(data)) = group else {
+        unreachable!("刚放进去的动物组数据");
+    };
     let baby = data.should_spawn_baby
         && data.group_size > 0
         && random.next_float() <= data.baby_spawn_chance;
@@ -306,46 +314,6 @@ fn finalize_spawn_in_group(
             });
         }
         mob.left_handed = random.next_float() < 0.05;
-    });
-}
-
-/// `Zombie.finalizeSpawn` 的随机取数顺序（本期不生成鸡骑士/增援）：
-/// 捡物 `nextFloat < 0.55*specialMultiplier` → 幼年 `nextFloat < 0.05` →
-/// 破门 `nextFloat < 0.1` → 随机装备 `nextFloat` + `nextInt(6)`。
-fn finalize_monster(world: &mut World, kind: MobType, entity: &mut Entity) {
-    let _ = kind;
-    let random = world.random();
-    let can_pick_up_loot = random.next_float() < 0.55;
-    let baby = random.next_float() < 0.05;
-    let can_break_doors = random.next_float() < 0.1;
-    // `Monster.populateDefaultEquipmentSlots` + `Zombie.populateDefaultEquipmentSlots`。
-    let has_weapon = random.next_float() < 0.01;
-    let weapon = if has_weapon { random.next_int(6) } else { 0 };
-    entity.with_mob(|me, mob| {
-        mob.can_pick_up_loot = can_pick_up_loot;
-        if baby {
-            mob.set_zombie_baby(true);
-            let (width, height, eye) = mob.mob_type.dimensions(true);
-            me.dimensions = (width, height);
-            mob.eye_height = eye;
-        }
-        mob.can_break_doors = can_break_doors;
-        if can_break_doors {
-            mob.navigation.flags.can_open_doors = true;
-            mob.goals.insert_break_door();
-        }
-        if has_weapon {
-            // 剑 / 长矛 / 铲子；长矛会让 `SpearUseGoal` 启动，这一期不建模它。
-            let item = match weapon {
-                0 => mc_bamboo_data::items::IRON_SWORD,
-                1 => mc_bamboo_data::items::IRON_SPEAR,
-                _ => mc_bamboo_data::items::IRON_SHOVEL,
-            };
-            mob.equipment.set(
-                mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
-                mc_bamboo_protocol::item::ItemStack::new(item, 1),
-            );
-        }
     });
 }
 

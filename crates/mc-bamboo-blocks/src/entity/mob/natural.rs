@@ -475,7 +475,7 @@ fn can_spawn_mob_at(
 
 /// `NaturalSpawner.mobsAt`（下界要塞那一支不建模）。
 fn mobs_at(world: &World, category: MobCategory, pos: BlockPos) -> &'static [MobSpawnerDef] {
-    settings_at(world, pos).mobs_to_spawn(category)
+    world.level().natural_spawn_table(pos, category)
 }
 
 /// `level.environmentAttributes().getValue(NATURAL_MOB_SPAWNS, pos)`：主世界就是群系的表。
@@ -667,14 +667,39 @@ fn is_valid_position_for_mob(
     if nearest_player_distance_sqr > despawn * despawn && kind.removes_when_far_away() {
         return false;
     }
-    // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住（Bamboo 的
-    // `is_unobstructed` 只看玩家）。
-    //
-    // `Mob.checkSpawnObstruction`: no liquid in the box and nothing in the way
-    // (Bamboo's check only knows players).
+    // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住。
+    // `Mob.checkSpawnObstruction`: no liquid in the box and nothing in the way.
     pathfinder_spawn_rules(world, entity, entity.block_position())
         && !contains_any_liquid(world, entity.bounding_box())
-        && world.level().is_unobstructed(&[entity.bounding_box()])
+        && is_unobstructed_by_entities(world, entity.bounding_box())
+}
+
+/// `EntityGetter.isUnobstructed(entity)`：盒子里没有未移除、`blocksBuilding` 的实体。
+/// 新实体还没进表，不会挡住自己；玩家由 `Level::is_unobstructed` 负责。
+///
+/// `EntityGetter.isUnobstructed(entity)`: no live `blocksBuilding` entity overlaps the box.
+/// The new mob is not in the table yet, so it cannot block itself; players are checked
+/// through `Level::is_unobstructed`.
+fn is_unobstructed_by_entities(world: &World, box_: Aabb) -> bool {
+    let mut blocked = false;
+    world
+        .level()
+        .entities_table()
+        .for_each_in(box_, &mut |public| {
+            blocked |= !public.removed && blocks_building(&public.kind);
+        });
+    !blocked && world.level().is_unobstructed(&[box_])
+}
+
+/// `Entity.blocksBuilding`：生物（`LivingEntity`）、TNT 和下落方块为真；物品、经验球、箭为假。
+///
+/// `Entity.blocksBuilding`: true for living entities, primed TNT and falling blocks;
+/// false for items, experience orbs and arrows.
+fn blocks_building(kind: &KindPublic) -> bool {
+    matches!(
+        kind,
+        KindPublic::Mob(_) | KindPublic::Tnt { .. } | KindPublic::FallingBlock { .. }
+    )
 }
 
 /// `PathfinderMob.checkSpawnRules`：`getWalkTargetValue(pos) >= 0`。牛看脚下是不是草方块，
@@ -730,12 +755,27 @@ fn contains_any_liquid(world: &World, box_: Aabb) -> bool {
     false
 }
 
-/// `Level.noCollision(AABB)`：方块和实体都不能挡。
-fn no_collision(world: &World, box_: Aabb) -> bool {
-    world
+/// `CollisionGetter.noCollision(AABB)`：没有方块碰撞，也没有 `canBeCollidedWith` 的硬碰撞实体
+/// （船、矿车、潜影贝）。玩家和生物不算硬碰撞体；来源为空时不查世界边界。
+///
+/// `CollisionGetter.noCollision(AABB)`: no block collision and no hard-colliding entity
+/// (boats, minecarts, shulkers). Players and mobs are not hard colliders; a null source
+/// skips the world border.
+pub(super) fn no_collision(world: &World, box_: Aabb) -> bool {
+    if !world
         .block_collisions(box_, CollisionContext::Empty)
         .is_empty()
-        && world.level().is_unobstructed(&[box_])
+    {
+        return false;
+    }
+    let mut blocked = false;
+    world.level().entities_table().for_each_in(
+        box_.inflate(1.0e-7, 1.0e-7, 1.0e-7),
+        &mut |public| {
+            blocked |= crate::entity::store::is_hard_colliding(public);
+        },
+    );
+    !blocked
 }
 
 /// `EntityType.create(level, NATURAL)`：Bamboo 只构造自己建模的几种。

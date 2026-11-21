@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod natural_spawn;
 mod projectile;
 mod skeleton_death;
 mod skeleton_spawn;
@@ -74,6 +75,7 @@ enum Line {
     ArrowPickup(projectile::ArrowPickupCase),
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
+    NaturalSpawn(natural_spawn::Case),
     End(End),
 }
 
@@ -491,6 +493,7 @@ struct MobLevel {
     rules: mc_bamboo_blocks::BlockGameRules,
     /// 僵尸场景注入的天色 / 天气 / 环境属性；旧场景恒为缺省。
     facts: ZombieFacts,
+    natural_spawn: Option<natural_spawn::SceneFacts>,
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
@@ -588,8 +591,30 @@ impl Level for MobLevel {
 
     fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
         match layer {
-            LightLayer::Sky => 15,
-            LightLayer::Block => 0,
+            LightLayer::Sky => self.natural_spawn.as_ref().map_or(15, |scene| scene.sky),
+            LightLayer::Block => self.natural_spawn.as_ref().map_or(0, |scene| scene.block),
+        }
+    }
+
+    fn biome_id(&self, _pos: BlockPos) -> i32 {
+        self.natural_spawn
+            .as_ref()
+            .map_or(mc_bamboo_data::registries::biome::PLAINS, |scene| {
+                scene.biome
+            })
+    }
+
+    fn natural_spawn_table(
+        &self,
+        pos: BlockPos,
+        category: mc_bamboo_data::spawning::MobCategory,
+    ) -> &'static [mc_bamboo_data::spawning::MobSpawnerDef] {
+        match &self.natural_spawn {
+            Some(scene) if category == scene.category => std::slice::from_ref(scene.entry),
+            Some(_) => &[],
+            None => {
+                mc_bamboo_data::spawning::for_biome_id(self.biome_id(pos)).mobs_to_spawn(category)
+            }
         }
     }
 
@@ -667,7 +692,15 @@ impl Level for MobLevel {
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
         mc_bamboo_blocks::BlockWeather {
             rain_level: if self.facts.raining { 1.0 } else { 0.0 },
-            thunder_level: 0.0,
+            thunder_level: if self
+                .natural_spawn
+                .as_ref()
+                .is_some_and(|scene| scene.thunder)
+            {
+                1.0
+            } else {
+                0.0
+            },
         }
     }
 
@@ -786,6 +819,7 @@ struct Report {
     cases: u32,
     steps: usize,
     skeleton_spawns: skeleton_spawn::Coverage,
+    natural_spawns: natural_spawn::Coverage,
     mismatches: Vec<String>,
     ended: bool,
     show: usize,
@@ -850,6 +884,7 @@ fn run_with_options(mut command: Command, options: &[&str]) -> Result<(), String
         cases: 0,
         steps: 0,
         skeleton_spawns: skeleton_spawn::Coverage::default(),
+        natural_spawns: natural_spawn::Coverage::default(),
         mismatches: Vec::new(),
         ended: false,
         show,
@@ -890,6 +925,7 @@ impl Report {
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
+                Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
@@ -1006,6 +1042,7 @@ impl Report {
                 },
                 raining: case.raining,
             },
+            natural_spawn: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
@@ -2255,6 +2292,10 @@ impl Report {
             return Err("mob oracle stopped before the end line".to_owned());
         }
         self.skeleton_spawns.print();
+        self.natural_spawns.print();
+        if self.break_test.as_deref() == Some("natural_spawn") && self.natural_spawns.ticks == 0 {
+            return Err("natural spawn break-self-test ran no natural spawn ticks".to_owned());
+        }
         if !self.mismatches.is_empty() {
             return Err(format!(
                 "mob oracle: {} mismatches\n{}",
@@ -2262,6 +2303,7 @@ impl Report {
                 self.mismatches.join("\n")
             ));
         }
+        self.natural_spawns.check()?;
         println!(
             "MOB ORACLE: {} cases, {} ticks, 0 mismatches",
             self.cases, self.steps
