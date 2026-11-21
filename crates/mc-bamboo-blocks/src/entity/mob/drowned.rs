@@ -144,7 +144,13 @@ pub(super) fn targets() -> GoalSelector {
         light_gate: false,
     };
     GoalSelector::from_ordered_pairs(vec![
-        (1, Goal::HurtByTarget { timestamp: -1 }),
+        (
+            1,
+            Goal::HurtByTarget {
+                timestamp: -1,
+                unseen_ticks: 0,
+            },
+        ),
         (
             2,
             nearest(TargetType::Player, super::goals::reduced_tick_delay(10)),

@@ -129,7 +129,13 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
 /// players.
 pub(super) fn targets() -> GoalSelector {
     GoalSelector::from_ordered_pairs(vec![
-        (1, Goal::HurtByTarget { timestamp: -1 }),
+        (
+            1,
+            Goal::HurtByTarget {
+                timestamp: -1,
+                unseen_ticks: 0,
+            },
+        ),
         (2, Goal::WitchHealRaiders { cooldown: 0 }),
         (
             3,

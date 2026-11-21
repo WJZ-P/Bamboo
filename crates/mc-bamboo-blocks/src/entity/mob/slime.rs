@@ -668,7 +668,11 @@ pub(super) fn check_spawn_rules(world: &World, pos: BlockPos) -> bool {
 
 /// `Mob.checkMobSpawnRules`（`NATURAL` 不是刷怪笼）：脚下的方块 `isValidSpawn`。
 fn valid_spawn_block(world: &World, pos: BlockPos) -> bool {
-    super::natural::is_valid_spawn_below(world, BlockPos::new(pos.x, pos.y - 1, pos.z))
+    // 冰和霜冰只允许北极熊当落脚块，史莱姆按普通状态位判断。
+    // Ice and frosted ice are footing only for polar bears; slimes use the ordinary bit.
+    world
+        .block_state(BlockPos::new(pos.x, pos.y - 1, pos.z))
+        .is_valid_spawn_surface(MobType::Slime.entity_type())
 }
 
 /// `EntityType.getSpawnAABB` 用的 `spawnDimensionsScale(4.0F)`。

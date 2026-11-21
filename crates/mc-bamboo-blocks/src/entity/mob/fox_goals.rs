@@ -865,9 +865,9 @@ mod tests {
     fn fox_is_alerted_by_wild_but_not_tamed_wolves() {
         let fox = super::super::fox::Fox::default();
         let mut wolf = Mob::new(MobType::Wolf);
-        assert!(alertable_mob(&fox, &MobPublic::of(&wolf, 0, false)));
+        assert!(alertable_mob(&fox, &MobPublic::of(&wolf, false)));
         tame::set_tame(&mut wolf, true, false);
-        assert!(!alertable_mob(&fox, &MobPublic::of(&wolf, 0, false)));
+        assert!(!alertable_mob(&fox, &MobPublic::of(&wolf, false)));
     }
 
     #[test]
@@ -884,7 +884,7 @@ mod tests {
         ] {
             let mut mob = Mob::new(kind);
             mob.uuid = [1; 16];
-            assert_eq!(alertable_mob(&fox, &MobPublic::of(&mob, 0, false)), alerts);
+            assert_eq!(alertable_mob(&fox, &MobPublic::of(&mob, false)), alerts);
         }
     }
 }

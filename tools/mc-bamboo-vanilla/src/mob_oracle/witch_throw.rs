@@ -358,9 +358,12 @@ impl Report {
         self.check_projectile_motion(label, "witch", &expected.witch, &motion(witch, mob.x_rot));
         let goals = mob
             .goals
-            .running_names()
+            .running_names(mc_bamboo_blocks::entity::mob::MobType::Witch)
             .into_iter()
-            .chain(mob.target_goals.running_names())
+            .chain(
+                mob.target_goals
+                    .running_names(mc_bamboo_blocks::entity::mob::MobType::Witch),
+            )
             .collect::<Vec<_>>()
             .join(" ");
         let ours = (witch.random.state(), mob.health.to_bits() as i32, goals);

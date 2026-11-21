@@ -343,6 +343,10 @@ fn finalize_spawn_in_group(
         super::skeleton::finalize_spawn(world, entity);
         return;
     }
+    if kind == MobType::Panda {
+        super::panda::finalize_spawn(entity, world.random(), group);
+        return;
+    }
     if kind.is_zombie() {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         if kind == MobType::Drowned {
@@ -419,9 +423,16 @@ pub(super) fn finalize_generated(
 ) {
     if matches!(
         kind,
-        MobType::Cow | MobType::Pig | MobType::Sheep | MobType::Chicken
+        MobType::Cow
+            | MobType::Mooshroom
+            | MobType::Pig
+            | MobType::Sheep
+            | MobType::Chicken
+            | MobType::PolarBear
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
+    } else if kind == MobType::Panda {
+        super::panda::finalize_spawn(entity, region_random, group);
     } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
         super::wild_spawn::finalize(kind, entity, biome, region_random, group);
     } else if kind.is_equine() {
@@ -444,7 +455,16 @@ pub(super) fn finalize_cow(
     group: &mut Option<SpawnGroup>,
 ) {
     let variant = cow_variant_for_biome(biome);
-    if kind != MobType::Sheep {
+    // 羊和哞菇没有按群系选的花纹；哞菇没有自己的 `finalizeSpawn`，也不抽叫声。
+    // Sheep and mooshrooms have no biome variant; mooshrooms have no `finalizeSpawn` of
+    // their own and draw no sound either.
+    // 北极熊也一样：`PolarBear.finalizeSpawn` 只把组里的幼年概率换成 1。
+    // Polar bears too: `PolarBear.finalizeSpawn` only raises the group's baby odds to 1.
+    let has_variant = !matches!(
+        kind,
+        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear
+    );
+    if has_variant {
         // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
         let _ = random.next_int(1);
@@ -457,28 +477,38 @@ pub(super) fn finalize_cow(
     let chicken_sound =
         (kind == MobType::Chicken).then(|| super::chicken::SoundVariant::pick(random));
     let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
-    let cow_sound =
-        (!matches!(kind, MobType::Sheep | MobType::Chicken | MobType::Pig)).then(|| {
-            if random.next_int(2) == 0 {
-                CowSoundVariant::Classic
-            } else {
-                CowSoundVariant::Moody
-            }
-        });
+    let cow_sound = (!matches!(
+        kind,
+        MobType::Sheep | MobType::Chicken | MobType::Pig | MobType::Mooshroom | MobType::PolarBear
+    ))
+    .then(|| {
+        if random.next_int(2) == 0 {
+            CowSoundVariant::Classic
+        } else {
+            CowSoundVariant::Moody
+        }
+    });
     // `AgeableMob.finalizeSpawn`：组里第二只起按概率变小，然后把组计数加一。
     // `AgeableMob.finalizeSpawn`: from the second mob on, roll for a baby, then count
     // the mob into the group.
     // `AgeableMob.finalizeSpawn`：不是动物组数据时新建一份（官方 `groupData == null`）。
     // `AgeableMob.finalizeSpawn`: start a fresh animal group when there is none.
     if !matches!(group, Some(SpawnGroup::Ageable(_))) {
-        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(0.05)));
+        // `PolarBear.finalizeSpawn` 的同组后续成员都是幼崽。
+        // In `PolarBear.finalizeSpawn` later group members are always cubs.
+        let baby_chance = if kind == MobType::PolarBear {
+            1.0
+        } else {
+            0.05
+        };
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(baby_chance)));
     }
     let Some(SpawnGroup::Ageable(data)) = group else {
         unreachable!("刚放进去的动物组数据");
     };
     let baby = data.roll_baby(random);
     entity.with_mob(|me, mob| {
-        if kind != MobType::Sheep {
+        if has_variant {
             mob.variant = variant;
         }
         if let Some(color) = sheep_color {
@@ -493,6 +523,30 @@ pub(super) fn finalize_cow(
         if let Some(sound) = cow_sound {
             mob.sound_variant = sound;
         }
+        if baby {
+            living::set_age(me, mob, BABY_START_AGE);
+        }
+        finalize_mob(random, mob);
+    });
+}
+
+/// `AgeableMob.finalizeSpawn` 加 `Mob.finalizeSpawn` 那两层，组数据由调用方给。
+///
+/// The `AgeableMob.finalizeSpawn` and `Mob.finalizeSpawn` layers with caller group data.
+pub(super) fn finalize_ageable(
+    entity: &mut Entity,
+    random: &dyn RandomSource,
+    group: &mut Option<SpawnGroup>,
+    baby_chance: f32,
+) {
+    if !matches!(group, Some(SpawnGroup::Ageable(_))) {
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::new(baby_chance)));
+    }
+    let Some(SpawnGroup::Ageable(data)) = group else {
+        unreachable!("刚放进去的动物组数据");
+    };
+    let baby = data.roll_baby(random);
+    entity.with_mob(|me, mob| {
         if baby {
             living::set_age(me, mob, BABY_START_AGE);
         }

@@ -1215,6 +1215,16 @@ public final class Extractor {
         out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
         out.addProperty("cubeMobSize", entityAccessor(net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, "ID_SIZE").id());
         out.addProperty("slimeEyeHeight", net.minecraft.world.entity.EntityTypes.SLIME.getDimensions().eyeHeight());
+        out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
+        out.add("stewFlowers", stewFlowers());
+        out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());
+        Class<?> panda = net.minecraft.world.entity.animal.panda.Panda.class;
+        out.addProperty("pandaUnhappy", entityAccessor(panda, "UNHAPPY_COUNTER").id());
+        out.addProperty("pandaSneeze", entityAccessor(panda, "SNEEZE_COUNTER").id());
+        out.addProperty("pandaEat", entityAccessor(panda, "EAT_COUNTER").id());
+        out.addProperty("pandaMainGene", entityAccessor(panda, "MAIN_GENE_ID").id());
+        out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
+        out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();
@@ -1241,6 +1251,35 @@ public final class Extractor {
                 effects.add(entry);
             }
             out.add(effects);
+        }
+        return out;
+    }
+
+    /**
+     * `SuspiciousEffectHolder.tryGet(item)` 不为空的物品和它的迷之炖菜效果：
+     * `[物品 ID, [[效果 ID, 刻数], ...]]`，按物品注册表顺序。棕色哞菇吃花时读它。
+     *
+     * Items with a `SuspiciousEffectHolder` and their stew effects, in item registry
+     * order: `[item id, [[effect id, ticks], ...]]`. Brown mooshrooms read it.
+     */
+    private static JsonArray stewFlowers() {
+        JsonArray out = new JsonArray();
+        for (net.minecraft.world.item.Item item : BuiltInRegistries.ITEM) {
+            var holder = net.minecraft.world.level.block.SuspiciousEffectHolder.tryGet(item);
+            if (holder == null) {
+                continue;
+            }
+            JsonArray effects = new JsonArray();
+            for (var entry : holder.getSuspiciousEffects().effects()) {
+                JsonArray pair = new JsonArray();
+                pair.add(BuiltInRegistries.MOB_EFFECT.getId(entry.effect().value()));
+                pair.add(entry.duration());
+                effects.add(pair);
+            }
+            JsonArray row = new JsonArray();
+            row.add(BuiltInRegistries.ITEM.getId(item));
+            row.add(effects);
+            out.add(row);
         }
         return out;
     }

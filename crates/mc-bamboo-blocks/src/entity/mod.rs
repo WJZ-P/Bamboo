@@ -471,7 +471,15 @@ impl Entity {
 
     /// 按注册表类型构造生物；未知类型返回 `None`，调用方按命令失败处理。
     pub fn by_mob_type(kind: mob::MobType, position: Vec3) -> Self {
-        Self::new(EntityKind::Mob(Box::new(mob::Mob::new(kind))), position)
+        let mut entity = Self::new(EntityKind::Mob(Box::new(mob::Mob::new(kind))), position);
+        // `Panda` 构造函数：成年时打开捡物。
+        // The `Panda` constructor enables loot pickup for adults.
+        if kind == mob::MobType::Panda
+            && let Some(mob) = entity.kind.mob_mut()
+        {
+            mob.can_pick_up_loot = true;
+        }
+        entity
     }
 
     fn mob_of(kind: mob::MobType, position: Vec3) -> Self {

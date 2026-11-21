@@ -561,14 +561,26 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     // 狐狸注册的是 `NO_RESTRICTIONS`，位置恒可用。
     // Foxes are registered with `NO_RESTRICTIONS`, which accepts every position.
     kind == MobType::Fox
-        || on_ground_position_ok_for(world, kind.fire_immune(), kind.immune_to(), pos)
+        || on_ground_position_ok_for(
+            world,
+            kind.entity_type(),
+            kind.fire_immune(),
+            kind.immune_to(),
+            pos,
+        )
 }
 
-/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`，只看实体类型的防火属性。
+/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`：按实体类型检查地面和空位。
 ///
-/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`, keyed only by fire immunity.
-pub(super) fn on_ground_position_ok(world: &World, fire_immune: bool, pos: BlockPos) -> bool {
-    on_ground_position_ok_for(world, fire_immune, None, pos)
+/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`: check the footing and empty
+/// space for the type.
+pub(super) fn on_ground_position_ok(
+    world: &World,
+    entity_type: i32,
+    fire_immune: bool,
+    pos: BlockPos,
+) -> bool {
+    on_ground_position_ok_for(world, entity_type, fire_immune, None, pos)
 }
 
 /// 同上，另带 `EntityType.immuneTo` 的方块标签。
@@ -576,6 +588,7 @@ pub(super) fn on_ground_position_ok(world: &World, fire_immune: bool, pos: Block
 /// As above, with the `EntityType.immuneTo` block tag.
 fn on_ground_position_ok_for(
     world: &World,
+    entity_type: i32,
     fire_immune: bool,
     immune_to: Option<mc_bamboo_data::BlockTag>,
     pos: BlockPos,
@@ -585,21 +598,11 @@ fn on_ground_position_ok_for(
     }
     let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
-    if !is_valid_spawn_below(world, below) {
+    if !world.block_state(below).is_valid_spawn_surface(entity_type) {
         return false;
     }
     is_valid_empty_spawn_block(world, fire_immune, immune_to, pos)
         && is_valid_empty_spawn_block(world, fire_immune, immune_to, above)
-}
-
-/// `BlockState.isValidSpawn`：能不能当落脚块。官方默认是「顶面 `isFaceSturdy(FULL)` 且发光
-/// 小于 14」，但树叶、玻璃、冰、雕刻南瓜这些方块整个换掉了它，所以查生成器导出的状态位。
-///
-/// `BlockState.isValidSpawn`: whether this can be a footing block. Vanilla defaults to a
-/// sturdy top face with emission below 14, but leaves, glass, ice and carved pumpkins
-/// replace that outright, so the generated per-state bit is used.
-pub(super) fn is_valid_spawn_below(world: &World, pos: BlockPos) -> bool {
-    world.block_state(pos).is_valid_spawn_surface()
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
@@ -691,6 +694,9 @@ pub(super) fn check_spawn_rules(
         | MobType::Donkey
         | MobType::Mule
         | MobType::Llama => animal_spawn_rules(world, pos),
+        MobType::Mooshroom => super::mooshroom::spawn_rules(world, pos),
+        MobType::PolarBear => super::polar_bear::spawn_rules(world, pos),
+        MobType::Panda => super::panda::spawn_rules(world, pos),
         MobType::Zombie
         | MobType::Skeleton
         | MobType::Bogged
@@ -766,7 +772,9 @@ fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
     if kind.fire_immune() {
         return true;
     }
-    is_valid_spawn_below(world, below)
+    world
+        .block_state(below)
+        .is_valid_spawn_surface(kind.entity_type())
 }
 
 /// `NaturalSpawner.isValidPositionForMob`。
@@ -1109,6 +1117,8 @@ mod tests {
         // horses and donkeys from the equine merge; no monster spawns by day.
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
+            // 平原白天的 `CREATURE` 表里建模了的只有这四种（马、驴还没有）。
+            // Of the plains daytime `CREATURE` list only these four are modelled.
             assert!(
                 matches!(
                     mob.mob_type,
@@ -1198,18 +1208,18 @@ mod tests {
 
     #[test]
     fn the_spawn_surface_follows_is_valid_spawn() {
-        let mut level = TestLevel::new();
-        level.set(BlockPos::new(0, 60, 0), BlockState(blocks::GRASS_BLOCK));
-        level.set(BlockPos::new(0, 61, 0), BlockState(blocks::OAK_LEAVES));
-        level.set(BlockPos::new(0, 62, 0), BlockState(blocks::GLASS));
-        let mut ticks = BlockTicks::new();
-        let world = World::new(&mut level, &mut ticks);
         // 草方块能当落脚块；树叶和玻璃换掉了 `isValidSpawn` 的默认实现，不能。
         // Grass is a valid footing block; leaves and glass replace the default
         // `isValidSpawn` and are not.
-        assert!(is_valid_spawn_below(&world, BlockPos::new(0, 60, 0)));
-        assert!(!is_valid_spawn_below(&world, BlockPos::new(0, 61, 0)));
-        assert!(!is_valid_spawn_below(&world, BlockPos::new(0, 62, 0)));
+        let cow = MobType::Cow.entity_type();
+        let bear = MobType::PolarBear.entity_type();
+        assert!(BlockState(blocks::GRASS_BLOCK).is_valid_spawn_surface(cow));
+        assert!(!BlockState(blocks::OAK_LEAVES).is_valid_spawn_surface(cow));
+        assert!(!BlockState(blocks::GLASS).is_valid_spawn_surface(cow));
+        for ice in [blocks::ICE, blocks::FROSTED_ICE] {
+            assert!(BlockState(ice).is_valid_spawn_surface(bear));
+            assert!(!BlockState(ice).is_valid_spawn_surface(cow));
+        }
     }
 
     #[test]

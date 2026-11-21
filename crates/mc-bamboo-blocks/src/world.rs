@@ -3240,18 +3240,25 @@ impl<'a> World<'a> {
         let Some(mut entity) = self.level.take_entity(id) else {
             return crate::entity::mob::interact::MobInteraction::pass();
         };
+        let thundering = self.is_thundering();
         let now = self.game_time();
         let outcome = entity
-            .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request, now))
+            .with_mob(|me, mob| {
+                crate::entity::mob::interact::interact(me, mob, request, now, thundering)
+            })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
         if outcome.shear {
-            let shear = match entity.kind.mob().map(|mob| mob.mob_type) {
-                Some(crate::entity::mob::MobType::Bogged) => {
-                    crate::entity::mob::bogged::apply_shear
-                }
-                _ => crate::entity::mob::sheep::apply_shear,
-            };
-            shear(self, &mut entity, request.hand, &request.held);
+            crate::entity::mob::interact::apply_shear(
+                self,
+                &mut entity,
+                request.hand,
+                &request.held,
+            );
+        }
+        if let Some(stack) = outcome.drop_stack.clone() {
+            // `Entity.spawnAtLocation(stack)`：脚下生成一件掉落物。
+            // `Entity.spawnAtLocation(stack)`: a drop at the mob's feet.
+            self.spawn_at_location(entity.position, stack);
         }
         if outcome.damage_held {
             crate::durability::hurt_hand(self, request.hand, 1);

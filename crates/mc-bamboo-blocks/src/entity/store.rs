@@ -416,11 +416,7 @@ impl Entity {
                 KindState::SplashPotion(potion),
             ),
             EntityKind::Mob(mob) => (
-                KindPublic::Mob(Box::new(super::mob::MobPublic::of(
-                    &mob,
-                    self.remaining_fire_ticks,
-                    self.in_water,
-                ))),
+                KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
                 KindState::Mob(mob),
             ),
         };
