@@ -306,6 +306,29 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 这一轮没有引入半成品死亡系统；等玩家伤害 / 死亡 / 重生流程实现时，再一起接上
   `getBaseExperienceReward`、`keepInventory` 两条分支和官方对拍。
 
+### 5.8 中立生物地基和北极熊（2026-11-21）
+
+- **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
+  `persistentAngerTarget` 放在 `Mob::anger`，`update` 是官方的
+  `updatePersistentAnger(level, stayAngryIfTargetPresent)`，`write_nbt` / `read_nbt` 是
+  `add/readPersistentAngerSaveData`（`anger_end_time` 恒写，`angry_at` 有才写）。
+  狼、蜜蜂、末影人、僵尸猪灵可以直接复用；`universalAnger` 规则没有建模（恒为假）。
+- **`HurtByTargetGoal.alertOthers`**：新增 `Command::AlertMobs`，落地时逐个看
+  `other.getTarget() == null` 再 `setTarget`。`alertOther` 的过滤（只有成年北极熊）
+  在发起方做。铁傀儡、僵尸猪灵、熊猫也能用。
+- **`TargetGoal` 的 `mustSee` 记忆**：`canContinueToUse` 里按
+  `unseenTicks <= reducedTickDelay(memory)` 判定，记忆 300 刻；`PolarBearAttackPlayersGoal`
+  的跟随距离折半（`getFollowDistance() * 0.5`）。
+- **共享修正（影响所有生物，对拍全部重跑）**：
+  1. 动物（非怪物）的元数据原来不写 `Mob.DATA_MOB_FLAGS_ID` 的攻击性位，
+     所以 `MeleeAttackGoal.start` 的 `setAggressive(true)` 不会同步。现在两种分支都写。
+  2. 着火显示标志原来由 `remainingFireTicks > 0` 直接推出，点燃当刻就同步；
+     官方在 `baseTick` 末尾才 `setSharedFlagOnFire`，晚一刻。现在 `Mob.visible_fire`
+     在 `baseTick` 末尾重算，`convertCommon` 照官方抄这个标志。
+- **状态**：北极熊已对拍 0 不一致（`mob-oracle --only polar_bear` 9 例 1081 刻）。
+  山羊 / 青蛙 / 犰狳 / 骆驼用官方 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` / `CamelAi`），
+  Bamboo 只有 `GoalSelector`，没有 `Brain` / 传感器 / 记忆，这是下一步的公共地基。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
