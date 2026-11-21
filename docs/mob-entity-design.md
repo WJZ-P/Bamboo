@@ -891,7 +891,14 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `can_float`（水节点不再被替换成水下的地面节点）加三项寻路代价覆盖（水 0、走地 6、水边 4，
   即 `AmphibiousNodeEvaluator.prepare` 的设置）让水可以走。副作用是 `jumpInLiquid` 的上浮量
   按浮水生物的 0.04 而不是 0.3，起点和临时位置也按浮水处理，竖直邻接节点没有实现，见
-  README 的已知限制。
+  README 的已知限制。2026-11-21 加 `mob-oracle` 场景时发现：**溺尸在平地上
+  `createPath` 返回空**，而同一场景的僵尸能寻路；把 `can_float` 关掉、换成怪物默认
+  malus 都仍然返回空，还没有定位。修好之前溺尸没有可用的逐刻场景。
+- **海平面**：`Level::sea_level()` 和 `BlockView::sea_level()` 取代溺尸文件里手写的 63；
+  游戏层按 `WorldGenConfig.level_type` 给噪声世界 63、超平坦 -63，`mob-oracle` 的假世界
+  跟官方的 `-63` 一致，场景可以用 `Scene.sea` 覆盖。`DrownedGoToWaterGoal` 的白天判断
+  （`!isBrightOutside`）、`DrownedSwimUpGoal` 不锁标志位、铁傀儡 / 美西螈目标的
+  `nextInt(reducedTickDelay(10))` 已照官方改正。
 - **游泳**：`updateSwimming`（共享标志第 4 位）、`DrownedMoveControl`（`mob.swimming` /
   `searching_for_land` / 目标高度）、`travelInWater` 的 0.01 分支、`isPushedByFluid` 为假时
   不推水流。
@@ -918,6 +925,8 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   清单加了溺尸和女巫。
 - **没做的**：三叉戟投掷（没有 `ThrownTrident`）、`DrownedGoToBeachGoal`、鹦鹉螺僵尸、
   袭击、女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`、按距离缩放的治疗和伤害、
-  目标速度和目标药水效果（选药用不到）。溺尸没有 `mob-oracle` 场景；女巫的抗火、自愈、水下呼吸和速度由
+  目标速度和目标药水效果（选药用不到）。溺尸没有启用的 `mob-oracle` 场景：`kind=12`、
+  `seaLevel` 和水中玩家的注入都在 `MobOracle.java` 里留好了，但被上面那个
+  `createPath` 空路径的问题挡住，场景暂时从 `Scenes.all()` 拿掉；女巫的抗火、自愈、水下呼吸和速度由
   `mob-oracle --only witch_drink` 逐刻比较位置、血量、效果时长、喝药状态和随机源
   （3 例、268 刻、0 不一致）；投掷仍未对拍。
