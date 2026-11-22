@@ -45,6 +45,7 @@ pub mod navigation;
 pub mod nbt;
 pub mod neutral;
 pub mod panda;
+pub mod patrol;
 pub mod path;
 mod pig;
 pub mod pillager;

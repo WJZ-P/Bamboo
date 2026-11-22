@@ -127,6 +127,98 @@ pub fn for_biome_id(id: i32) -> MobSpawnSettings {
     })
 }
 
+/// `StructureSpawnOverride.BoundingBoxType`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnOverrideBox {
+    /// `STRUCTURE`：整个 `StructureStart` 的包围盒。
+    ///
+    /// `STRUCTURE`: the whole `StructureStart` bounding box.
+    Structure,
+    /// `PIECE`：位置要落在某个结构件的包围盒里。
+    ///
+    /// `PIECE`: the position must fall inside a structure piece's box.
+    Piece,
+}
+
+/// 官方 `Structure.spawnOverrides()` 的一项：某结构在某一类里替换群系表的加权列表。
+/// `Structures.bootstrap` 里前哨站、女巫小屋、海底神殿、下界要塞等都注册了覆盖；
+/// 这里先收会刷已建模生物的两种，其余结构以后按同一张表追加即可。
+///
+/// One entry of vanilla `Structure.spawnOverrides()`: a structure replaces the biome
+/// table for one category. `Structures.bootstrap` registers overrides for outposts,
+/// swamp huts, ocean monuments, fortresses and more; the two that spawn modelled
+/// mobs are here, and future structures append to the same table.
+#[derive(Debug, Clone, Copy)]
+pub struct StructureSpawnOverride {
+    /// 结构的注册名，例如 `minecraft:pillager_outpost`。
+    ///
+    /// The structure's registry name, e.g. `minecraft:pillager_outpost`.
+    pub structure: &'static str,
+    pub bounding: SpawnOverrideBox,
+    pub category: MobCategory,
+    /// `StructureSpawnOverride.spawns()` 的加权表。
+    ///
+    /// The weighted `StructureSpawnOverride.spawns()` list.
+    pub spawns: &'static [MobSpawnerDef],
+}
+
+/// `WeightedList.of(SpawnerData(ENTITY, ConstantInt(1)))`：默认权重 1、数量恒 1。
+const fn one(entity_type: i32) -> MobSpawnerDef {
+    MobSpawnerDef {
+        entity_type,
+        weight: 1,
+        min: 1,
+        max: 1,
+    }
+}
+
+/// 前哨站 `MONSTER` 的覆盖表（`STRUCTURE` 盒，只有掠夺者）。
+const OUTPOST_MONSTERS: &[MobSpawnerDef] = &[one(registries::entity_type::PILLAGER)];
+/// 女巫小屋 `MONSTER` / `CREATURE` 的覆盖表（`PIECE` 盒，女巫 / 猫）。
+const HUT_MONSTERS: &[MobSpawnerDef] = &[one(registries::entity_type::WITCH)];
+const HUT_CREATURES: &[MobSpawnerDef] = &[one(registries::entity_type::CAT)];
+
+/// 所有结构刷怪覆盖，按 `structure` 和 `category` 查。[`structure_spawn_override`]
+/// 是唯一的入口，新增结构只要往这张表追加一行。
+///
+/// Every structure spawn override, looked up by `structure` and `category`.
+/// [`structure_spawn_override`] is the single entry point; adding a structure is
+/// one more row here.
+pub const STRUCTURE_SPAWN_OVERRIDES: &[StructureSpawnOverride] = &[
+    StructureSpawnOverride {
+        structure: "minecraft:pillager_outpost",
+        bounding: SpawnOverrideBox::Structure,
+        category: MobCategory::Monster,
+        spawns: OUTPOST_MONSTERS,
+    },
+    StructureSpawnOverride {
+        structure: "minecraft:swamp_hut",
+        bounding: SpawnOverrideBox::Piece,
+        category: MobCategory::Monster,
+        spawns: HUT_MONSTERS,
+    },
+    StructureSpawnOverride {
+        structure: "minecraft:swamp_hut",
+        bounding: SpawnOverrideBox::Piece,
+        category: MobCategory::Creature,
+        spawns: HUT_CREATURES,
+    },
+];
+
+/// 按结构名和类别取覆盖表；没有覆盖的结构返回 `None`（调用方回退到群系表）。
+///
+/// The override list for a structure and category, or `None` when the structure has
+/// no override (the caller then falls back to the biome table).
+pub fn structure_spawn_override(
+    structure: &str,
+    category: MobCategory,
+) -> Option<&'static [MobSpawnerDef]> {
+    STRUCTURE_SPAWN_OVERRIDES
+        .iter()
+        .find(|row| row.structure == structure && row.category == category)
+        .map(|row| row.spawns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

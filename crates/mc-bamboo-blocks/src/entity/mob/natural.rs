@@ -478,9 +478,19 @@ fn can_spawn_mob_at(
     })
 }
 
-/// `NaturalSpawner.mobsAt`（下界要塞那一支不建模）。
+/// `ChunkGenerator.getMobsAt`：`NaturalSpawner.mobsAt` 先查结构刷怪覆盖（前哨站、
+/// 女巫小屋等），落在结构覆盖盒里时用结构的怪物表，否则用群系表。下界要塞那一支
+/// 不建模。覆盖表是静态数据，查表和取权重走的是同一条链。
+///
+/// `ChunkGenerator.getMobsAt`: `NaturalSpawner.mobsAt` consults the structure spawn
+/// override first (outposts, swamp huts, ...); inside an override box the structure's
+/// monster list replaces the biome table. The nether-fortress branch is not modelled.
+/// The override table is static data, so drawing and support checks share one list.
 fn mobs_at(world: &World, category: MobCategory, pos: BlockPos) -> &'static [MobSpawnerDef] {
-    world.level().natural_spawn_table(pos, category)
+    world
+        .level()
+        .structure_spawn_override(pos, category)
+        .unwrap_or_else(|| world.level().natural_spawn_table(pos, category))
 }
 
 /// `level.environmentAttributes().getValue(NATURAL_MOB_SPAWNS, pos)`：主世界就是群系的表。
@@ -603,6 +613,15 @@ fn on_ground_position_ok_for(
     }
     is_valid_empty_spawn_block(world, fire_immune, immune_to, pos)
         && is_valid_empty_spawn_block(world, fire_immune, immune_to, above)
+}
+
+/// `NaturalSpawner.isValidEmptySpawnBlock`，给掠夺者巡逻队的落点判定用。
+/// 掠夺者不防火、没有 `immuneTo` 标签，两种参数都是默认分支。
+///
+/// `NaturalSpawner.isValidEmptySpawnBlock` for a patrol landing spot. Pillagers
+/// are not fire-immune and have no `immuneTo` tag, so both flags take the default.
+pub(super) fn patrol_spawn_block_ok(world: &World, pos: BlockPos) -> bool {
+    is_valid_empty_spawn_block(world, false, MobType::Pillager.immune_to(), pos)
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
