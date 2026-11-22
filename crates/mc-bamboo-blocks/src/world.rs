@@ -3360,6 +3360,18 @@ impl<'a> World<'a> {
         self.level.with_just_spawned(id, f)
     }
 
+    /// 就地改一个已经在 tick 列表里的实体（正在 tick 的那一个不在里面）。
+    ///
+    /// Mutates an entity already in the tick list in place (not the one ticking now).
+    pub fn with_listed_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        f(&mut entity);
+        self.level.put_entity(entity);
+        true
+    }
+
     /// 已经在 tick 列表里的实体。正在 tick 的那一个不在里面。
     ///
     /// An entity already in the tick list. The one currently ticking is not in it.

@@ -35,6 +35,7 @@ pub const fn bucket_item(kind: MobType) -> Option<i32> {
         MobType::Salmon => Some(items::SALMON_BUCKET),
         MobType::TropicalFish => Some(items::TROPICAL_FISH_BUCKET),
         MobType::Pufferfish => Some(items::PUFFERFISH_BUCKET),
+        MobType::Tadpole => Some(items::TADPOLE_BUCKET),
         _ => None,
     }
 }
@@ -64,6 +65,12 @@ pub fn save_default_data(entity: &Entity, mob: &Mob) -> Vec<(String, Tag)> {
         out.push(("PersistenceRequired".to_owned(), Tag::Byte(1)));
     }
     out.push(("Health".to_owned(), Tag::Float(mob.health)));
+    if mob.mob_type == MobType::Tadpole {
+        // `Tadpole.saveToBucketTag`：再追加年龄和锁。
+        // `Tadpole.saveToBucketTag` appends the age and the lock.
+        out.push(("Age".to_owned(), Tag::Int(mob.tadpole_age)));
+        out.push(("AgeLocked".to_owned(), Tag::Byte(i8::from(mob.age_locked))));
+    }
     out
 }
 
@@ -95,6 +102,15 @@ pub fn load_default_data(entity: &mut Entity, mob: &mut Mob, tag: &Tag) {
                         as f32;
                     mob.health = health.clamp(0.0, max);
                 }
+            }
+            // `Tadpole.loadFromBucketTag`。
+            "Age" if mob.mob_type == MobType::Tadpole => {
+                if let Tag::Int(age) = value {
+                    mob.tadpole_age = *age;
+                }
+            }
+            "AgeLocked" if mob.mob_type == MobType::Tadpole => {
+                mob.age_locked = tag_bool(value, false);
             }
             _ => {}
         }
@@ -241,7 +257,12 @@ fn apply_species_components(mob: &mut Mob, patch: &ComponentPatch) {
 pub fn pickup(entity: &Entity, mob: &mut Mob) -> Option<ItemStack> {
     let stack = bucket_stack(entity, mob)?;
     mob.events.push(super::MobEvent::Sound {
-        sound: BUCKET_FILL_FISH,
+        // `Tadpole.getPickupSound`。
+        sound: if mob.mob_type == MobType::Tadpole {
+            "minecraft:item.bucket.fill_tadpole"
+        } else {
+            BUCKET_FILL_FISH
+        },
         volume: 1.0,
         pitch: 1.0,
         position: entity.position,
@@ -256,9 +277,9 @@ pub fn pickup(entity: &Entity, mob: &mut Mob) -> Option<ItemStack> {
 /// `MobBucketItem.checkExtraContent`: spawn on the server only.
 pub fn check_extra_content(world: &mut World, item: i32, stack: Option<&ItemStack>, pos: BlockPos) {
     let Some(kind) = kind_of_bucket(item) else {
-        // 还没建模的生物桶（蝌蚪、美西螈、硫磺立方）不生成实体，但官方
+        // 还没建模的生物桶（美西螈、硫磺立方）不生成实体，但官方
         // `EntityType.create` 对 `level.random` 的取数照取。
-        // Buckets of unmodelled mobs (tadpole, axolotl, sulfur cube) spawn no entity,
+        // Buckets of unmodelled mobs (axolotl, sulfur cube) spawn no entity,
         // but vanilla's `EntityType.create` still draws from `level.random`.
         if is_mob_bucket(item) {
             unmodelled_spawn_draws(world, item);
@@ -282,10 +303,7 @@ pub fn check_extra_content(world: &mut World, item: i32, stack: Option<&ItemStac
 ///
 /// Mob buckets whose species Bamboo does not model yet.
 const fn is_mob_bucket(item: i32) -> bool {
-    matches!(
-        item,
-        items::AXOLOTL_BUCKET | items::TADPOLE_BUCKET | items::SULFUR_CUBE_BUCKET
-    )
+    matches!(item, items::AXOLOTL_BUCKET | items::SULFUR_CUBE_BUCKET)
 }
 
 /// `MobBucketItem.spawn` 里 `EntityType.create` 对 `level.random` 的取数，用在没建模的生物上。
@@ -317,6 +335,7 @@ pub const fn kind_of_bucket(item: i32) -> Option<MobType> {
         items::SALMON_BUCKET => Some(MobType::Salmon),
         items::TROPICAL_FISH_BUCKET => Some(MobType::TropicalFish),
         items::PUFFERFISH_BUCKET => Some(MobType::Pufferfish),
+        items::TADPOLE_BUCKET => Some(MobType::Tadpole),
         _ => None,
     }
 }

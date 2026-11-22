@@ -72,6 +72,14 @@ pub(super) fn dump(level: &MobLevel, entity: &Entity) -> String {
         .filled()
         .map(|(kind, value, ttl)| {
             let mut text = value_text(level, value);
+            // `Unit` 值的记忆（在水里、怀孕）Java 一侧打印类名；路径记忆也用这个变体。
+            // Java prints the class name for `Unit` memories (in water, pregnant); the
+            // path memory shares the variant.
+            if matches!(value, MemoryValue::Unit)
+                && kind != mc_bamboo_blocks::entity::mob::brain::memory::MemoryType::Path
+            {
+                text = "Unit".to_owned();
+            }
             if let Some(ttl) = ttl {
                 text.push_str(&format!("@{ttl}"));
             }

@@ -982,6 +982,13 @@ pub struct ProjectileFacts {
     pub goat_screaming: u8,
     pub goat_left_horn: u8,
     pub goat_right_horn: u8,
+    /// `Frog.DATA_VARIANT_ID` 和 `DATA_TONGUE_TARGET_ID` 的下标和序列化器。
+    ///
+    /// The indices and serializers of `Frog.DATA_VARIANT_ID` and `DATA_TONGUE_TARGET_ID`.
+    pub frog_variant: u8,
+    pub frog_variant_serializer: i32,
+    pub frog_tongue_target: u8,
+    pub frog_tongue_target_serializer: i32,
     /// `MushroomCow.DATA_TYPE` 的元数据 index。
     ///
     /// The metadata index of `MushroomCow.DATA_TYPE`.

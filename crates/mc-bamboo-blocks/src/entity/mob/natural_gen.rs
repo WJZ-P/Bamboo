@@ -87,7 +87,7 @@ fn placement(entity: i32) -> Option<Placement> {
     let on_ground = match entity {
         _ if animal => true,
         entity_type::RABBIT | entity_type::WOLF | entity_type::PARROT => true,
-        entity_type::ARMADILLO | entity_type::GOAT => true,
+        entity_type::ARMADILLO | entity_type::GOAT | entity_type::FROG => true,
         entity_type::FOX => false,
         _ => return None,
     };

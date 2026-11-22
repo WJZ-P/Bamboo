@@ -31,6 +31,7 @@ pub mod equipment;
 pub mod fish;
 pub mod fox;
 pub mod fox_goals;
+pub mod frog;
 pub mod goals;
 pub mod goat;
 pub mod interact;
@@ -55,6 +56,7 @@ pub mod spawn;
 pub mod spider;
 pub mod squid;
 pub mod stray;
+pub mod tadpole;
 pub mod tame;
 pub(crate) mod timing;
 pub mod turtle;
@@ -140,13 +142,15 @@ pub enum MobType {
     Llama,
     Armadillo,
     Goat,
+    Frog,
+    Tadpole,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 37] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -182,6 +186,8 @@ impl MobType {
         Self::Turtle,
         Self::Armadillo,
         Self::Goat,
+        Self::Frog,
+        Self::Tadpole,
     ];
 
     /// 注册表 ID。
@@ -223,6 +229,8 @@ impl MobType {
             Self::Llama => ids::LLAMA,
             Self::Armadillo => ids::ARMADILLO,
             Self::Goat => ids::GOAT,
+            Self::Frog => ids::FROG,
+            Self::Tadpole => ids::TADPOLE,
         }
     }
 
@@ -264,6 +272,8 @@ impl MobType {
             Self::Llama => "minecraft:llama",
             Self::Armadillo => "minecraft:armadillo",
             Self::Goat => "minecraft:goat",
+            Self::Frog => "minecraft:frog",
+            Self::Tadpole => "minecraft:tadpole",
         }
     }
 
@@ -276,6 +286,7 @@ impl MobType {
             Self::Wolf => Some(item_tags::WOLF_FOOD),
             Self::Armadillo => Some(item_tags::ARMADILLO_FOOD),
             Self::Goat => Some(item_tags::GOAT_FOOD),
+            Self::Frog | Self::Tadpole => Some(item_tags::FROG_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             _ => None,
         }
@@ -344,6 +355,8 @@ impl MobType {
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Armadillo, baby) => armadillo::dimensions(baby),
             (Self::Goat, baby) => goat::dimensions(baby),
+            (Self::Frog, baby) => frog::dimensions(baby),
+            (Self::Tadpole, _) => tadpole::dimensions(),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
@@ -431,7 +444,10 @@ impl MobType {
     /// Kinds whose `Mob.getAmbientSound()` is null: `makeSound(null)` plays nothing and
     /// draws no pitch.
     pub const fn has_no_ambient_sound(self) -> bool {
-        matches!(self, Self::Creeper | Self::Pufferfish | Self::Slime)
+        matches!(
+            self,
+            Self::Creeper | Self::Pufferfish | Self::Slime | Self::Tadpole
+        )
     }
 
     /// 走路声用脚下方块的 `SoundType`（`Entity.playStepSound` 的缺省实现），不是生物自己的音效。
@@ -487,7 +503,10 @@ impl MobType {
     /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
     /// drowning keeps its earlier behaviour and is not changed here.
     pub const fn can_breathe_under_water(self) -> bool {
-        squid::is_squid(self) || fish::is_fish(self) || turtle::is_turtle(self)
+        squid::is_squid(self)
+            || fish::is_fish(self)
+            || turtle::is_turtle(self)
+            || matches!(self, Self::Frog)
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -507,6 +526,16 @@ impl MobType {
         !self.is_monster() && !fish::is_fish(self)
     }
 
+    /// `AgeableMob.canBeABaby()`：青蛙覆盖成假。它的年龄照样能被设成负数（组里后来的
+    /// 成员按概率 `setAge(-24000)`），但不算幼年、不长大，`Age` 三个键也不存。
+    ///
+    /// `AgeableMob.canBeABaby()`, overridden to false by frogs. Their age can still go
+    /// negative (later group members roll `setAge(-24000)`), but they are not babies, never
+    /// grow up and do not save the three `Age` keys.
+    pub const fn can_be_a_baby(self) -> bool {
+        !matches!(self, Self::Frog)
+    }
+
     /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼；以后加海豚）：离水掉氧气、
     /// 不吃水流、生成时不查液体。
     ///
@@ -521,7 +550,10 @@ impl MobType {
     ///
     /// `Entity.isPushedByFluid()`, overridden to false by `AgeableWaterCreature`.
     pub const fn is_pushed_by_fluid(self) -> bool {
-        !(self.is_ageable_water_creature() || self.is_water_animal() || turtle::is_turtle(self))
+        !(self.is_ageable_water_creature()
+            || self.is_water_animal()
+            || turtle::is_turtle(self)
+            || matches!(self, Self::Frog))
     }
 
     /// 是不是官方 `Animal`（有求爱和喂食）：非怪物里除掉 `AgeableWaterCreature` 一支。
@@ -605,6 +637,8 @@ impl MobType {
             Self::Llama => "minecraft:entities/llama",
             Self::Armadillo => "minecraft:entities/armadillo",
             Self::Goat => "minecraft:entities/goat",
+            Self::Frog => "minecraft:entities/frog",
+            Self::Tadpole => "minecraft:entities/tadpole",
         }
     }
 
@@ -685,6 +719,8 @@ impl MobType {
             Self::Llama => Some("minecraft:entity.llama.ambient"),
             Self::Armadillo => Some("minecraft:entity.armadillo.ambient"),
             Self::Goat => Some("minecraft:entity.goat.ambient"),
+            Self::Frog => Some("minecraft:entity.frog.ambient"),
+            Self::Tadpole => None,
         }
     }
 
@@ -718,6 +754,8 @@ impl MobType {
             Self::Llama => Some("minecraft:entity.llama.hurt"),
             Self::Armadillo => Some("minecraft:entity.armadillo.hurt"),
             Self::Goat => Some("minecraft:entity.goat.hurt"),
+            Self::Frog => Some("minecraft:entity.frog.hurt"),
+            Self::Tadpole => Some("minecraft:entity.tadpole.hurt"),
         }
     }
 
@@ -751,6 +789,8 @@ impl MobType {
             Self::Llama => Some("minecraft:entity.llama.death"),
             Self::Armadillo => Some("minecraft:entity.armadillo.death"),
             Self::Goat => Some("minecraft:entity.goat.death"),
+            Self::Frog => Some("minecraft:entity.frog.death"),
+            Self::Tadpole => Some("minecraft:entity.tadpole.death"),
         }
     }
 
@@ -790,6 +830,8 @@ impl MobType {
             Self::Llama => Some("minecraft:entity.llama.step"),
             Self::Armadillo => Some("minecraft:entity.armadillo.step"),
             Self::Goat => Some("minecraft:entity.goat.step"),
+            Self::Frog => Some("minecraft:entity.frog.step"),
+            Self::Tadpole => None,
         }
     }
 
@@ -832,6 +874,8 @@ impl MobType {
             Self::Llama => items::LLAMA_SPAWN_EGG,
             Self::Armadillo => items::ARMADILLO_SPAWN_EGG,
             Self::Goat => items::GOAT_SPAWN_EGG,
+            Self::Frog => items::FROG_SPAWN_EGG,
+            Self::Tadpole => items::TADPOLE_SPAWN_EGG,
         }
     }
 
@@ -873,6 +917,8 @@ impl MobType {
             Self::Llama => "entity.minecraft.llama",
             Self::Armadillo => "entity.minecraft.armadillo",
             Self::Goat => "entity.minecraft.goat",
+            Self::Frog => "entity.minecraft.frog",
+            Self::Tadpole => "entity.minecraft.tadpole",
         }
     }
 
@@ -1424,6 +1470,13 @@ pub struct DamageSource {
     /// The owner of a tamed wolf attacker, credited as the responsible player.
     pub owner_credit: Option<[u8; 16]>,
     pub(super) looting_level: i32,
+    /// 攻击者的实体类型（注册表 ID）。打人的生物自己正在 tick、不在实体表里，战利品表的
+    /// `source_entity` 条件（青蛙吃史莱姆）查不到它，就靠这个。
+    ///
+    /// The attacker's entity type (registry id). A mob that attacks while ticking is not
+    /// in the entity table, so loot `source_entity` conditions (a frog eating a slime)
+    /// fall back to this.
+    pub attacker_type: Option<i32>,
 }
 
 impl DamageSource {
@@ -1446,6 +1499,7 @@ impl DamageSource {
             arrow_punch: 0,
             owner_credit: None,
             looting_level: 0,
+            attacker_type: None,
         }
     }
 
@@ -1528,6 +1582,7 @@ impl DamageSource {
             arrow_punch: 0,
             owner_credit: None,
             looting_level: 0,
+            attacker_type: None,
         }
     }
 
@@ -1900,6 +1955,15 @@ pub struct Mob {
     ///
     /// The goat synced data and long-jump pose.
     pub goat: goat::Goat,
+    /// 青蛙的品种、姿势和伸舌头的目标。
+    ///
+    /// The frog's variant, pose and tongue target.
+    pub frog: frog::Frog,
+    /// `Tadpole.age`：到 24000 变成青蛙。蝌蚪不是 `AgeableMob`，和 `age` 是两回事。
+    ///
+    /// `Tadpole.age`: a frog at 24000. Tadpoles are not `AgeableMob`s, so this is
+    /// separate from `age`.
+    pub tadpole_age: i32,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
@@ -1998,6 +2062,8 @@ impl Mob {
             MobType::Witch => witch::attributes(),
             MobType::Armadillo => armadillo::attributes(),
             MobType::Goat => goat::attributes(),
+            MobType::Frog => frog::attributes(),
+            MobType::Tadpole => tadpole::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2045,7 +2111,11 @@ impl Mob {
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
-            MobType::Armadillo | MobType::Goat => GoalSelector::default(),
+            MobType::Armadillo | MobType::Goat | MobType::Frog => GoalSelector::default(),
+            // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
+            // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
+            // alongside the brain.
+            MobType::Tadpole => fish::goals(mob_type),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -2060,7 +2130,9 @@ impl Mob {
             | MobType::Sheep
             | MobType::Chicken
             | MobType::Armadillo
-            | MobType::Goat => GoalSelector::default(),
+            | MobType::Goat
+            | MobType::Frog
+            | MobType::Tadpole => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Fox => fox::target_goals(),
@@ -2183,6 +2255,7 @@ impl Mob {
                     fish::malus()
                 }
                 MobType::Turtle => turtle::malus(),
+                MobType::Tadpole => fish::malus(),
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -2251,6 +2324,8 @@ impl Mob {
             brain: new_brain(mob_type),
             armadillo: armadillo::Armadillo::default(),
             goat: goat::Goat::default(),
+            frog: frog::Frog::default(),
+            tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,
@@ -2273,6 +2348,15 @@ impl Mob {
             mob.malus.set(mc_bamboo_data::PathType::PowderSnow, -1.0);
             mob.malus
                 .set(mc_bamboo_data::PathType::OnTopOfPowderSnow, -1.0);
+        }
+        if mob_type == MobType::Frog {
+            frog::configure(&mut mob);
+        }
+        if mob_type == MobType::Tadpole {
+            // `Tadpole.fromBucket()` 恒真（`setFromBucket` 是空的）：永远不会自然消失。
+            // `Tadpole.fromBucket()` is always true (`setFromBucket` does nothing), so
+            // tadpoles never despawn.
+            mob.fish.from_bucket = true;
         }
         if mob_type == MobType::Armadillo {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
@@ -2300,11 +2384,25 @@ impl Mob {
                 == mc_bamboo_data::items::LEATHER_BOOTS
     }
 
+    /// `Mob.getPathfindingMalus`。两栖寻路跑过一次以后水的代价是 0：
+    /// `AmphibiousNodeEvaluator.prepare` 改了它，`done` 没有改回来。
+    ///
+    /// `Mob.getPathfindingMalus`. Water costs 0 once an amphibious search has run:
+    /// `AmphibiousNodeEvaluator.prepare` changes it and `done` never restores it.
+    pub fn pathfinding_malus(&self, path_type: mc_bamboo_data::PathType) -> f32 {
+        if path_type == mc_bamboo_data::PathType::Water && self.navigation.cleared_water_malus {
+            0.0
+        } else {
+            self.malus.get(path_type)
+        }
+    }
+
     pub fn is_baby(&self) -> bool {
         if self.mob_type.uses_baby_metadata() {
             self.zombie_baby
         } else {
-            self.age < 0
+            // `AgeableMob.isBaby`：`canBeABaby() && getAge() < 0`。
+            self.mob_type.can_be_a_baby() && self.age < 0
         }
     }
 
@@ -2540,6 +2638,10 @@ pub struct MobPublic {
     ///
     /// `AbstractSchoolingFish.schoolSize`.
     pub school_size: i32,
+    /// 青蛙的品种、姿势和舌头目标。
+    ///
+    /// The frog's variant, pose and tongue target.
+    pub frog: frog::Frog,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`。
     ///
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
@@ -2655,7 +2757,10 @@ impl MobPublic {
             enderman_creepy: mob.enderman.creepy,
             enderman_stared_at: mob.enderman.stared_at,
             dark_ticks: mob.squid.dark_ticks,
-            fish_from_bucket: mob.fish.from_bucket,
+            frog: mob.frog,
+            // 蝌蚪的 `FROM_BUCKET` 同步数据从来不写，一直是假。
+            // A tadpole never writes its synced `FROM_BUCKET`, which stays false.
+            fish_from_bucket: mob.fish.from_bucket && mob.mob_type != MobType::Tadpole,
             fish_variant: mob.fish.variant,
             puff_state: mob.fish.puff_state,
             fish_leader: mob.fish.leader,
@@ -2737,6 +2842,8 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
     match kind {
         MobType::Armadillo => Some(Box::new(armadillo::brain())),
         MobType::Goat => Some(Box::new(goat::brain())),
+        MobType::Frog => Some(Box::new(frog::brain())),
+        MobType::Tadpole => Some(Box::new(tadpole::brain())),
         _ => None,
     }
 }
