@@ -652,8 +652,11 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 - **发包**：`world.play_sound` 把攻击音效记进同一个 `World` 的效果列表，落地后
   一次 `send_effects` 发出（弓箭曾踩过「生成了效果却没发出去」的坑）；
   `ClientboundAnimatePacket`、`LevelParticles`（`DAMAGE_INDICATOR` / `SWEEP_ATTACK`）、
-  `swing_animation` 都走 `links`。`a_critical_attack_emits_its_packets` 单测确认
-  动画 / 音效 / 粒子真的发到客户端。
+  `swing_animation` 都走 `links`。`a_critical_attack_emits_its_packets`、
+  `a_sweep_attack_emits_its_sound_and_particle`、
+  `an_enchanted_attack_emits_the_magic_critical_animation` 和
+  `a_weak_attack_emits_its_sound` 单测按注册表 ID / 动作字节确认暴击 / 附魔暴击
+  动画、横扫 / 伤害指示粒子和 strong / weak / crit / sweep 音效真的发到客户端。
 - **PVP**：`pvp` 为真时按 `ServerPlayer.canHarmPlayer`（`isPvpAllowed` + 队伍，
   Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。额外击退 /
   火焰附加 / 横扫波及的玩家这几项目标在实体表里的操作（`knockback_mob` /

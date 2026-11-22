@@ -217,8 +217,11 @@ WebView2 的渲染进程不算在内。
   对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比牛的血量 / 击退速度 / 着火 /
   受伤时间 / 是否移除和 `damage_event` 包，0 不一致；`--break-self-test attack_charge` 能抓到
   故意改坏的充能值，`--break-self-test sweep_effects` 能抓到漏掉的横扫后附魔效果）；
-  `a_critical_attack_emits_its_packets` 和 `a_sweep_ignites_swept_targets_with_fire_aspect`
-  单测确认暴击动画 / 攻击音效 / 伤害指示粒子真的发到客户端、横扫目标也着火。
+  `a_critical_attack_emits_its_packets`、`a_sweep_ignites_swept_targets_with_fire_aspect`、
+  `a_sweep_attack_emits_its_sound_and_particle`、
+  `an_enchanted_attack_emits_the_magic_critical_animation` 和 `a_weak_attack_emits_its_sound`
+  单测按音效 / 粒子注册表 ID 和动画动作字节，确认暴击 / 附魔暴击动画、横扫 / 伤害
+  指示粒子、strong / weak / crit / sweep 音效真的发到客户端、横扫目标也着火且掉血。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
   `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、

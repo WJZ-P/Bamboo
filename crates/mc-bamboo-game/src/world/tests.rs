@@ -4322,3 +4322,224 @@ fn a_sweep_ignites_swept_targets_with_fire_aspect() {
     assert!(fire(main) > 0, "the main target must be ignited");
     assert!(fire(swept) > 0, "the swept target must be ignited too");
 }
+
+/// 某类包里每条帧的首个 VarInt：音效注册表 ID 加一，或粒子 ID。
+///
+/// The first VarInt of each frame with the given packet id: a sound registry
+/// id plus one, or a particle id.
+fn first_varints(frames: &[Frame], packet_id: i32) -> Vec<i32> {
+    frames
+        .iter()
+        .filter(|frame| frame.id == packet_id)
+        .filter_map(|frame| Reader::new(&frame.body).varint().ok())
+        .collect()
+}
+
+/// `ClientboundAnimatePacket` 帧里的动作字节（在实体 ID 的 VarInt 之后）。
+///
+/// The action byte of each `ClientboundAnimatePacket` frame, after the entity
+/// id VarInt.
+fn animate_actions(frames: &[Frame]) -> Vec<u8> {
+    frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::ANIMATE)
+        .filter_map(|frame| frame.body.last().copied())
+        .collect()
+}
+
+/// 音效包里的注册表 ID（`Sound.write_body` 发的是 `id + 1`）。
+///
+/// Sound registry ids from the sound packets (`Sound.write_body` sends `id + 1`).
+fn sound_event_ids(frames: &[Frame]) -> Vec<i32> {
+    first_varints(frames, clientbound::SOUND)
+        .into_iter()
+        .map(|id| id - 1)
+        .collect()
+}
+
+/// 满充能剑横扫：`PLAYER_ATTACK_SWEEP` 音效和 `SWEEP_ATTACK` 粒子都真的发到
+/// 客户端，横扫命中的第二头牛也掉血。弓箭曾出过「生成了效果却没发出去」的问题，
+/// 这里按音效注册表 ID 和粒子 ID 精确断言，避免只查包类型漏掉漏发。
+///
+/// A full-strength sword sweep sends its `PLAYER_ATTACK_SWEEP` sound and
+/// `SWEEP_ATTACK` particle to clients and damages the nearby cow. The bow path
+/// once recorded effects without delivering them, so assert on specific sound
+/// and particle ids instead of only packet types.
+#[test]
+fn a_sweep_attack_emits_its_sound_and_particle() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{items, registries::particle_type, sounds};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    // 主目标和横扫目标相邻，都落在主目标 inflate(1, 0.25, 1) 盒内、离玩家 < 3 格。
+    //
+    // The main and swept targets sit next to each other, inside the swept box
+    // and within 3 blocks of the player.
+    let main = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let swept = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.5,
+        position.y,
+        position.z,
+    )));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        let weapon = ItemStack::new(items::DIAMOND_SWORD, 1);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: main });
+    server.tick();
+    let frames = client.take_frames();
+
+    let sweep_sound = i32::from(sounds::sound_event("minecraft:entity.player.attack.sweep"));
+    assert!(
+        sound_event_ids(&frames).contains(&sweep_sound),
+        "the sweep attack sound must reach the client"
+    );
+    assert!(
+        first_varints(&frames, clientbound::LEVEL_PARTICLES).contains(&particle_type::SWEEP_ATTACK),
+        "the sweep attack particle must reach the client"
+    );
+    let swept_health = server
+        .world
+        .islands
+        .region
+        .entities
+        .public_at(swept)
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
+            _ => None,
+        });
+    assert!(
+        swept_health.is_some_and(|health| health < 10.0),
+        "the swept cow must take damage"
+    );
+}
+
+/// 附魔加成 > 0 的满充能攻击发 `MAGIC_CRITICAL_HIT` 动画；这一击不是下落暴击，
+/// 所以不发 `CRITICAL_HIT`。两种动作按 `ClientboundAnimatePacket` 的字节值区分。
+///
+/// A full-strength hit with a positive enchantment boost sends the
+/// `MAGIC_CRITICAL_HIT` animation; it is not a falling critical, so no
+/// `CRITICAL_HIT`. The two actions are told apart by their animate byte values.
+#[test]
+fn an_enchanted_attack_emits_the_magic_critical_animation() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{items, registries::data_component_type};
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry},
+        item::ItemStack,
+        packet::play::Animate,
+    };
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let sharpness = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == "minecraft:sharpness")
+        })
+        .expect("sharpness exists") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(sharpness, 3)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    let weapon = ItemStack {
+        item: items::DIAMOND_SWORD,
+        count: 1,
+        added,
+        removed,
+    };
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let actions = animate_actions(&client.take_frames());
+    assert!(
+        actions.contains(&Animate::MAGIC_CRITICAL_HIT),
+        "the magic-critical animation must reach the client"
+    );
+    assert!(
+        !actions.contains(&Animate::CRITICAL_HIT),
+        "a non-critical attack must not send the critical animation"
+    );
+}
+
+/// 非满充能空手攻击发 `PLAYER_ATTACK_WEAK` 音效，不发 strong / crit / sweep 音效。
+///
+/// A non-full-strength empty-hand attack sends the `PLAYER_ATTACK_WEAK` sound,
+/// not the strong / crit / sweep sounds.
+#[test]
+fn a_weak_attack_emits_its_sound() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::sounds;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 0;
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let ids = sound_event_ids(&client.take_frames());
+    let sound = |name| i32::from(sounds::sound_event(name));
+    assert!(
+        ids.contains(&sound("minecraft:entity.player.attack.weak")),
+        "the weak attack sound must reach the client"
+    );
+    for absent in [
+        "minecraft:entity.player.attack.strong",
+        "minecraft:entity.player.attack.crit",
+        "minecraft:entity.player.attack.sweep",
+    ] {
+        assert!(
+            !ids.contains(&sound(absent)),
+            "the {absent} sound must not be sent"
+        );
+    }
+}
