@@ -2544,3 +2544,53 @@ structure state」9.43 MB。逐个分配点看，其中只有约 1.7 MB 是群�
 偏小；真实收益约 6 MB，但拆共享只读程序与可变上下文仍要证明求值顺序不变，风险高。
 
 产物在 `W:/data/bamboo-agents/reports/op-memprof-data/s10-profile/`、`s10-plain/`。
+
+### 20.6 续：一份编译好的 `Generator` + 丢掉 `SeededRouter` 的重写记忆（2026-11-22）
+
+§20.5 留下的 7.9 MB 主要是每条结构线程各编译一份的密度函数。这一轮先量清单个实例的
+保留量（计数分配器、`Worldgen::shared()` 之后取差值，种子 20261121、`minecraft:overworld`）：
+
+| 对象 | 建成后还活着的堆 |
+|---|---:|
+| 一个 `SeededRouter`（改动前） | **1,464,588 B（≈1.43 MB）** |
+| 同上，清掉编译期重写记忆后 | **149,886 B（≈146 KB）** |
+| 一个 `chunk::Generator`（`with_settings` 之后） | **242,766 B（≈237 KB）** |
+
+两处浪费：
+
+1. `Compiler::rewritten` / `keep_alive` 是 `DfRewriteRule.SLICE_UNIFORM_AXES` 的记忆，
+   只在 `compile` 期间有用，`SeededRouter` 却把它一直留着，等于用地址把**整份密度函数图**
+   钉在内存里。官方 `RandomState` 编译完也不留这份中间结果。
+2. 每条计算线程都建一个 `Generator`，结构线程再多建一个同配置的；`ChunkMap` 在官方是
+   一个 `RandomState` 给所有工作线程用。
+
+改动：
+
+- `Compiler::release_rewrites()` 清掉 `rewritten` / `keep_alive` / `caches`（并 `shrink_to_fit`）。
+  `SeededRouter::new` 编译完八个路由采样器后立刻调用。`rewritten` 和 `keep_alive` 一起清，
+  原始节点被释放后地址可能复用，但记忆已空，不会命中旧条目；`caches` 清掉后重新编译同一个
+  `cache` 节点会取新编号，编号只要求在同一 `Context` 里自洽（`SeededRouter` 的上下文是
+  `EMPTY_UNCACHED`，不用格子）。
+- `Worldgen::shared_generator(settings_id, seed)`：全进程按 `(设置, 种子)` 缓存
+  `Arc<chunk::Generator<'static>>`，地形线程（`with_generator` 的线程本地缓存改为存 `Arc`）
+  和结构线程（`StructureThread.generator` 改为 `Arc`）共用同一份。平坦世界要先覆盖常数列，
+  仍按线程各建一份，不进这张表。
+- 为了让 `Generator` 能跨线程共享，`material::System` 里的 `bands_random: Random`
+  （`Cell` 不可 `Sync`）挪到 `prepare` 的局部变量——它只在造陶土色带时用一次，各个
+  `Random` 实例相互独立，取数顺序不变。
+
+实测（`s11-profile`，`SETTLE=60 ONLINE=45 AFTER=25`，经 heavy 锁）：`left` 快照
+「worldgen per thread: template pools and structure state」**7.84 → 1.54 MB**，
+「worldgen per thread: generators」**1.16 → 0.00 MB（只剩 1 块）**，`shared Worldgen`
+8.64 MB（s10 8.41，噪声内）。`startup` tracked live 11.9 MB（s10 的 `startup` 抓早了，
+不可比）。`plain`（`s11-plain`）：起服后空载 38.9 / 一人在线 349.2 / 离开后 20 s 105.4 MB
+（私有提交 22.9 / 332.4 / 90.7），和 s10 的 38.8 / 338.6 / 106.9 差在忙机器 ±10–20 MB 的
+噪声里——本轮省下的约 7 MB 在进程级读数上看不出来，**以分配点实测和归属表为准**。
+
+对拍：`chunkgen --through features --seeds 1 --chunks 4` 3545088 项、
+`structures`（9280 放置 / 9744 选择）、`structure-rings`（864 项）全 0 不一致；
+`cargo test -p mc-bamboo-worldgen --lib` 356 passed。新增单测
+`compile_after_releasing_rewrites_matches_a_fresh_compiler`、
+`shared_generator_is_one_per_settings_and_seed`、`threads_share_one_generator`。
+
+产物在 `W:/data/bamboo-agents/reports/op-memprof-data/s11-profile/`、`s11-plain/`。

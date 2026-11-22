@@ -1732,7 +1732,8 @@ structures (Compound)
   Beardifier 和存档编码使用，旧 `structure-save` / `structure-load` 对拍不改。
   `WorldStructureState` 按种子持有 `possibleStructureSets` 过滤、要塞环位置、
   jigsaw 配置与模板池；自 2026-11-22（`op-memprof`）起按 `(seed, settings, flat)`
-  全进程共享一份 `Arc`，`SeededRouter` 仍是每线程一份。
+  全进程共享一份 `Arc`，`SeededRouter` 仍是每线程一份（编译完只留约 146 KB 采样器，
+  见 `docs/profiling.md` §20.6），结构线程的 `Generator` 与地形线程共用同一份。
 * **游戏侧 `worldgen_structures.rs`**：两阶段纯函数重算 + 线程本地缓存，
   `GenerateOutput.structures` 把 `starts` + `References` 标签交给世界线程，
   `Task::Assemble` 装进 `ChunkArchiveMeta.structures`。读盘标签优先恢复起点，

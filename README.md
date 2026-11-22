@@ -614,7 +614,20 @@ WebView2 的渲染进程不算在内。
   structure state」9.43 → 7.90–8.52 MB，结果逐字节不变（`chunkgen --through features` 3545088 项、
   `structure-rings` / `structures` / `structure-validity` 全 0 不一致）。见
   `docs/profiling.md` §20.5。剩下这 7.9 MB 里约 6 MB 是**每条计算线程各编译一份**的密度函数
-  采样器（`SeededRouter`），拆成共享只读程序 + 可变上下文仍属高风险项，未做。
+  采样器（`SeededRouter`），见下一条。
+- **一份编译好的生成器 + 丢掉路由的重写记忆**（`op-memprof` 续，2026-11-22）：用计数分配器
+  实测，一个 `SeededRouter` 建成后留下 ≈1.43 MB，其中 ≈1.28 MB 是 `Compiler` 的
+  `SLICE_UNIFORM_AXES` 重写记忆（用地址钉住整份密度函数图），编译完就没用了；
+  一个 `chunk::Generator` ≈237 KB，而每条计算线程原本一个、结构线程再一个。现在
+  `SeededRouter::new` 编译完立刻 `Compiler::release_rewrites()`，`Worldgen::shared_generator`
+  按 `(设置, 种子)` 全进程缓存一份 `Arc<chunk::Generator>`，地形线程和结构线程共用（平坦世界
+  要先覆盖常数列，仍按线程各建一份）。为了让生成器能跨线程共享，`material::System` 的
+  陶土色带随机源改成 `prepare` 的局部变量（只在那里用一次，取数顺序不变）。实测同一
+  `left` 快照「template pools and structure state」7.84 → 1.54 MB、「generators」
+  1.16 → 0 MB，合计约 **−7 MB 常驻**；进程级读数在忙机器噪声里看不出来。结果逐字节不变：
+  `chunkgen --through features` 3545088 项、`structures`、`structure-rings` 全 0 不一致，
+  见 `docs/profiling.md` §20.6。**已知限制**：共享生成器按 `(设置, 种子)` 常驻不回收；
+  `SeededRouter` 自身仍有每线程一份采样器（约 146 KB），可以再共享但收益小。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
