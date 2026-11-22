@@ -387,6 +387,11 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
         && block_mining::is_correct_for_drops(broken.0, snapshot.actor.main_hand)
     {
         crate::block_drops::drop_broken_block(region, broken, pos, snapshot.id, block_entity);
+        // `Block.playerDestroy` 里方块自己的那一步，官方在战利品之后调。
+        // The block's own step of `Block.playerDestroy`; vanilla runs it after the loot.
+        let (mut level, ticks) = region.block_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        mc_bamboo_blocks::player_destroy(&mut world, pos, broken);
     }
     true
 }
