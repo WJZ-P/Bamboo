@@ -4502,6 +4502,71 @@ fn a_sweep_attack_emits_its_sound_and_particle() {
     );
 }
 
+/// 横扫候选按主目标**整个碰撞盒** `inflate(1, 0.25, 1)` 与候选碰撞盒相交判定，
+/// 不是按位置点：牛宽 0.9，第二头牛在 z+1.5 处位置已超出旧窗口（0.45 + 1 = 1.45），
+/// 但两个碰撞盒仍然相交，官方会扫到它。
+///
+/// Sweep candidates are the mobs whose collision box intersects the main target's
+/// whole box inflated by (1, 0.25, 1), not a position test: a cow 0.9 wide at
+/// z+1.5 is outside the old window (0.45 + 1 = 1.45) by position, yet the two
+/// boxes still intersect, so vanilla sweeps it.
+#[test]
+fn sweep_uses_the_target_collision_box() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let main = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let edge = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z + 1.5,
+    )));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        let weapon = ItemStack::new(items::DIAMOND_SWORD, 1);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: main });
+    server.tick();
+    let health = |server: &Harness, id: i32| {
+        server
+            .world
+            .islands
+            .region
+            .entities
+            .public_at(id)
+            .and_then(|public| match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
+                _ => None,
+            })
+    };
+    assert!(
+        health(&server, main).is_some_and(|hp| hp < 10.0),
+        "the main cow is hit"
+    );
+    assert!(
+        health(&server, edge).is_some_and(|hp| hp < 10.0),
+        "a cow whose box touches the inflated box is swept"
+    );
+}
+
 /// 附魔加成 > 0 的满充能攻击发 `MAGIC_CRITICAL_HIT` 动画；这一击不是下落暴击，
 /// 所以不发 `CRITICAL_HIT`。两种动作按 `ClientboundAnimatePacket` 的字节值区分。
 ///

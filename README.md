@@ -248,7 +248,8 @@ WebView2 的渲染进程不算在内。
   （`mainHandItem.isItemEnabled(enabledFeatures())` 的 feature flag 没查）；这一层完全
   没进 `mob-oracle`（夹具直接调 `Player.attack`），由
   `attack_reach_uses_the_entity_interaction_range` 等单测守住；
-  横扫候选盒按主目标位置近似 `inflate(1, 0.25, 1)`，不含玩家和队伍判定；
+  横扫候选按主目标的整个碰撞盒 `inflate(1, 0.25, 1)` 与候选碰撞盒相交判定（不是位置
+  点），但仍不含玩家（玩家不在实体表）和队伍判定；
   `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 只累加 `ADD_VALUE` 修饰符、横扫阈值把 `getSpeed()`
   写死成 0.1，带乘法修饰符或速度药水时可能不同；受害者装备附魔（荆棘）和
   `autoSpinAttack` 的武器来源都未建模。

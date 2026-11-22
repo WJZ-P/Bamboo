@@ -651,7 +651,8 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 - **暴击 / 横扫 / 击退**：`s > 0.9` 且下落、不着地、没失明、没骑乘、非疾跑时
   `× 1.5`，发 `ClientboundAnimatePacket`(1) 和 `player.attack.crit`；附魔加成 > 0
   再发 (2)。拿剑、着地、移动够慢、满充能且非暴击非疾跑时横扫，附魔
-  `sweeping_edge` 给 `SWEEPING_DAMAGE_RATIO = L/(L+1)`。疾跑 / `knockback` /
+  `sweeping_edge` 给 `SWEEPING_DAMAGE_RATIO = L/(L+1)`（候选是碰撞盒与主目标
+  整个盒子 `inflate(1, 0.25, 1)` 相交的其它生物，且离玩家 < 3 格）。疾跑 / `knockback` /
   `attack_knockback` 的额外击退走 `World::knockback_mob`，同时把攻击者水平速度
   `× 0.6` 并 `setSprinting(false)`。
 - **附魔与效果**：锋利 `1 + 0.5×(L−1)`、亡灵 / 节肢 `2.5×L`（按生成的实体类型
@@ -686,7 +687,7 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   够距判定按官方 `isWithinAttackRange`（实体交互距离 + 武器 `attack_range` 组件 +
   整个 AABB + 世界边界）实现，但没有 `mob-oracle` 场景（夹具直接调 `Player.attack`），
   由 `attack_reach_uses_the_entity_interaction_range` 单测守住；`isItemEnabled`
-  feature flag、横扫候选盒近似，以及属性
+  feature flag、横扫不含玩家 / 队伍，以及属性
   修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
   「玩家近战攻击的已知限制」。
 

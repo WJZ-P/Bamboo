@@ -1029,11 +1029,13 @@ fn damp_attacker(region: &mut Region, id: PlayerId) {
     }
 }
 
-/// `Player.doSweepAttack` 的候选：主目标盒子 inflate(1, 0.25, 1) 里、
-/// 距玩家小于 3 格的其它生物（玩家本人不算）。返回 (实体 ID, 实体类型)。
+/// `Player.doSweepAttack` 的候选：主目标的整个碰撞盒 inflate(1, 0.25, 1) 与
+/// 候选自己的碰撞盒相交、距玩家小于 3 格的其它生物（玩家本人不算）。
+/// 返回 (实体 ID, 实体类型)。
 ///
-/// `Player.doSweepAttack` candidates: other mobs in the main target's
-/// inflate(1, 0.25, 1) box and within 3 blocks of the player.
+/// `Player.doSweepAttack` candidates: other mobs whose own collision box
+/// intersects the main target's box inflated by (1, 0.25, 1) and that are
+/// within 3 blocks of the player.
 fn collect_sweep_targets(
     region: &Region,
     attacker: PlayerId,
@@ -1041,19 +1043,24 @@ fn collect_sweep_targets(
     target: &TargetInfo,
     player_position: Vec3,
 ) -> Vec<(i32, i32)> {
-    let (width, height) = target.dimensions;
-    let half = f64::from(width) * 0.5;
+    let area = entity_bounds(target.position, target.dimensions).inflate(1.0, 0.25, 1.0);
     region
         .entities
         .iter_public()
         .filter(|public| {
+            let bounds = entity_bounds(public.position, public.kind.dimensions());
             matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
                 && !public.removed
                 && public.uid != main_target
                 && public.uid != attacker.0
-                && (public.position.x - target.position.x).abs() <= half + 1.0
-                && (public.position.z - target.position.z).abs() <= half + 1.0
-                && (public.position.y - target.position.y).abs() <= f64::from(height) + 0.25
+                && area.intersects_coords(
+                    bounds.min_x,
+                    bounds.min_y,
+                    bounds.min_z,
+                    bounds.max_x,
+                    bounds.max_y,
+                    bounds.max_z,
+                )
                 && (public.position.x - player_position.x).powi(2)
                     + (public.position.y - player_position.y).powi(2)
                     + (public.position.z - player_position.z).powi(2)
