@@ -213,6 +213,21 @@ struct Case {
     player_steps: Option<Vec<Vec<String>>>,
     #[serde(default)]
     player_packets: Option<Vec<Vec<String>>>,
+    /// 攻击场景：玩家 `attackStrengthTicker` 初值、疾跑 / 下落 / 着地状态、
+    /// 主手附魔，以及横扫用的额外牛位置。
+    ///
+    /// Attack scenes: initial `attackStrengthTicker`, sprint / fall / ground,
+    /// main-hand enchantments and extra cows for sweeping.
+    #[serde(default)]
+    attack_charge: i32,
+    #[serde(default)]
+    attack_sprint: bool,
+    #[serde(default)]
+    attack_fall: i64,
+    #[serde(default)]
+    attack_ground: bool,
+    #[serde(default)]
+    attack_enchants: Vec<(String, i32)>,
     /// 1b 玩家生命场景的规则与动作。
     #[serde(default)]
     life: Option<LifeSetup>,
@@ -656,12 +671,12 @@ struct CowStep {
     owner: Option<String>,
 }
 
-/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊，以及苦力怕、
-/// 蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
+/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊、青蛙、蝌蚪、
+/// 骆驼，以及苦力怕、蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
 ///
 /// Scenes played by the Java `playZombie` driver: zombies, the wild animals,
-/// armadillos and goats, plus creepers, spiders, cave spiders, endermen, slimes,
-/// witches and drowned.
+/// armadillos, goats, frogs, tadpoles and camels, plus creepers, spiders, cave spiders,
+/// endermen, slimes, witches and drowned.
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
@@ -672,6 +687,7 @@ fn zombie_style(name: &str) -> bool {
         "goat_",
         "frog_",
         "tadpole_",
+        "camel_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
@@ -1502,11 +1518,13 @@ impl Report {
                 let yaw = f32::from_bits(cow.yaw as u32);
                 // 场景编号（两侧同一套，别撞号）：1 僵尸、2 尸壳、3 猪、4 羊、5 鸡、
                 // 6 兔子、7 狐狸、8 狼、9..=12 马科、13 犰狳、14 山羊、15 熊猫、
-                // 16 北极熊、17 哞菇、40..=43 敌对生物、60 海龟，其余是牛。
+                // 16 北极熊、17 哞菇、18 青蛙、19 蝌蚪、20 骆驼、
+                // 40..=43 敌对生物、60 海龟，其余是牛。
                 // Scene kind ids (one shared set, no collisions): 1 zombie, 2 husk,
                 // 3 pig, 4 sheep, 5 chicken, 6 rabbit, 7 fox, 8 wolf, 9..=12 equines,
                 // 13 armadillo, 14 goat, 15 panda, 16 polar bear, 17 mooshroom,
-                // 40..=43 hostiles, 60 turtle; anything else is a cow.
+                // 18 frog, 19 tadpole, 20 camel, 40..=43 hostiles, 60 turtle;
+                // anything else is a cow.
                 let kind = match cow.kind {
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
@@ -1521,9 +1539,12 @@ impl Report {
                     14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
                     18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
+                    20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
+                    21 => mc_bamboo_blocks::entity::mob::MobType::Ocelot,
+                    22 => mc_bamboo_blocks::entity::mob::MobType::Cat,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
@@ -1816,7 +1837,11 @@ impl Report {
                     let mut uuid = [0u8; 16];
                     uuid[..8].copy_from_slice(&1_u64.to_be_bytes());
                     uuid[8..].copy_from_slice(&(2_u64 + player_index as u64).to_be_bytes());
-                    let held = mc_bamboo_protocol::item::ItemStack::new(item, 1);
+                    let held = if item == 0 {
+                        mc_bamboo_protocol::item::ItemStack::empty()
+                    } else {
+                        mc_bamboo_protocol::item::ItemStack::new(item, 1)
+                    };
                     let request = mc_bamboo_blocks::entity::mob::interact::MobInteractRequest {
                         player_uid: player.id,
                         player_uuid: uuid,
@@ -2399,10 +2424,34 @@ impl Report {
             actions,
             no_cooldown: false,
             no_knockback: false,
+            attack_charge: case.attack_charge,
+            attack_sprint: case.attack_sprint,
+            attack_fall: f64::from_bits(case.attack_fall as u64),
+            attack_ground: case.attack_ground,
+            attack_enchants: case.attack_enchants.clone(),
+            extra_cow_positions: case
+                .cows
+                .iter()
+                .skip(1)
+                .map(|cow| {
+                    (
+                        f64::from_bits(cow.x as u64),
+                        f64::from_bits(cow.y as u64),
+                        f64::from_bits(cow.z as u64),
+                    )
+                })
+                .collect(),
         };
-        // 五处故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
-        // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）。
-        // 每一项都让对拍的逐刻状态或包字节失败，证明比较没有放松。
+        // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
+        // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
+        // 少算一刻，以及去掉武器上的火焰附加（模拟漏掉攻击后附魔效果，
+        // 横扫目标的 fire 即刻不一致）。每一项都让逐刻状态或包字节失败，
+        // 证明比较没有放松。
+        //
+        // Deliberate breakage: difficulty, armor, protection, invulnerability,
+        // knockback, an attack charge off by one tick, and dropping Fire Aspect
+        // from the weapon (a stand-in for missing post-attack effects, so the
+        // swept target's fire ticks diverge).
         match self.break_test.as_deref() {
             Some("difficulty") => scene.difficulty = 2,
             Some("armor") => scene.equipment = [0; 6],
@@ -2414,9 +2463,59 @@ impl Report {
                 }
                 scene.no_knockback = true;
             }
+            Some("attack_charge") => scene.attack_charge = scene.attack_charge.saturating_sub(1),
+            Some("sweep_effects") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:fire_aspect"),
             _ => {}
         }
-        let (steps, packets) = replay_player_hurt(&scene);
+        let output = replay_player_hurt(&scene);
+        let (steps, packets, cow_states) = (output.steps, output.packets, output.cow_states);
+        // 攻击场景逐刻比牛的血量、击退速度、着火刻数、受伤时间和是否被移除。
+        //
+        // Attack scenes compare each cow's health, knockback velocity, fire
+        // ticks, hurt time and removal per tick.
+        if scene.attack_cow {
+            for (tick, expected) in case.steps.iter().enumerate() {
+                let Some(ours) = cow_states.get(tick) else {
+                    self.mismatch(format!("{} tick {tick}: no Bamboo cow state", case.name));
+                    continue;
+                };
+                if ours.len() != expected.len() {
+                    self.mismatch(format!(
+                        "{} tick {tick} cows: official {} Bamboo {}",
+                        case.name,
+                        expected.len(),
+                        ours.len()
+                    ));
+                    continue;
+                }
+                for (index, (ours, official)) in ours.iter().zip(expected).enumerate() {
+                    let fields: [(&str, i64, i64); 6] = [
+                        ("hp", i64::from(ours.hp), i64::from(official.hp)),
+                        ("dx", ours.dx, official.dx),
+                        ("dy", ours.dy, official.dy),
+                        ("dz", ours.dz, official.dz),
+                        ("fire", i64::from(ours.fire), i64::from(official.fire)),
+                        ("ht", i64::from(ours.hurt_time), i64::from(official.ht)),
+                    ];
+                    for (field, a, b) in fields {
+                        if a != b {
+                            self.mismatch(format!(
+                                "{} tick {tick} cow {index} {field}: official {b} Bamboo {a}",
+                                case.name
+                            ));
+                        }
+                    }
+                    if ours.removed != official.rm {
+                        self.mismatch(format!(
+                            "{} tick {tick} cow {index} removed: official {} Bamboo {}",
+                            case.name, official.rm, ours.removed
+                        ));
+                    }
+                }
+            }
+        }
         for (tick, expected) in expected_steps.iter().enumerate() {
             self.steps += 1;
             let Some(ours) = steps.get(tick) else {
@@ -2477,8 +2576,15 @@ impl Report {
                 &official_self,
             );
             // 牛的同步包留在 `packets` 里，这一期只比玩家受伤产生的包。
-            // 左键打牛场景里牛自己也会发出带种子的环境音/受伤音，那只牛的行为
-            // 不在 1a 的比对范围里，所以这一场景只比 `damage_event`。
+            // 攻击场景里牛自己也会发出带种子的环境音/受伤音；官方假世界也不捕获
+            // crit 动画 / 粒子 / 挥手 / 耐久槽这些包，所以跟踪包只比 `damage_event`。
+            // 牛的血量 / 击退速度 / 着火 / 受伤时间由上面的 `cow_states` 逐刻比。
+            //
+            // Attack scenes also emit seeded cow sounds, and the official fake
+            // world does not capture crit animations / particles / swing /
+            // durability-slot packets, so tracking comparison keeps only
+            // `damage_event`. Cow health / knockback / fire / hurt time are
+            // compared above via `cow_states`.
             let tracking: Vec<String> = official_tracking
                 .iter()
                 .filter(|text| {
@@ -2487,7 +2593,7 @@ impl Report {
                         .is_some_and(|bytes| is_tracking_hurt_packet(&bytes))
                 })
                 .filter(|text| {
-                    !case.name.ends_with("attack_cow")
+                    !is_attack_scene(&case.name)
                         || base64_stub::decode(text)
                             .ok()
                             .and_then(|bytes| packet_id(&bytes))
@@ -2498,7 +2604,7 @@ impl Report {
             let ours_tracking: Vec<Vec<u8>> = ours_tracking
                 .into_iter()
                 .filter(|bytes| {
-                    !case.name.ends_with("attack_cow")
+                    !is_attack_scene(&case.name)
                         || packet_id(bytes)
                             == Some(mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT)
                 })
@@ -3092,6 +3198,14 @@ fn packet_id(bytes: &[u8]) -> Option<i32> {
         shift += 7;
     }
     None
+}
+
+/// 玩家近战攻击场景：跟踪包只比 `damage_event`，牛的状态另由 `cow_states` 比。
+///
+/// Player melee-attack scenes: tracking comparison keeps only `damage_event`;
+/// cow state is compared separately via `cow_states`.
+fn is_attack_scene(name: &str) -> bool {
+    name.ends_with("attack_cow") || name.starts_with("player_attack_")
 }
 
 /// 只发给玩家自己的包：`player_combat_enter` / `hurt_animation` / `set_health`。
@@ -3839,6 +3953,27 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             mob.panda.eat_counter,
             mob.panda.flags,
         ),
+        MobType::Ocelot => format!(
+            "t{}|c{}|s{}",
+            u8::from(mob.ocelot.trusting),
+            u8::from(mob.ocelot.crouching),
+            u8::from(mob.sprinting),
+        ),
+        MobType::Cat => format!(
+            "t{}|o{}|p{}|l{}|r{}|c{}|v{}|cr{}|s{}|u{}",
+            u8::from(mob.tame.is_tame()),
+            u8::from(mob.tame.ordered_to_sit),
+            u8::from(mob.tame.in_sitting_pose()),
+            u8::from(mob.cat.lying),
+            u8::from(mob.cat.relax_state_one),
+            mob.cat.collar,
+            mob.cat.variant_name(),
+            u8::from(mob.cat.crouching),
+            u8::from(mob.sprinting),
+            mob.tame
+                .owner
+                .map_or_else(|| "-".to_owned(), |uuid| uuid_text(&uuid)),
+        ),
         MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
         MobType::Enderman => mob.describe_enderman(),
         MobType::Spider | MobType::CaveSpider => {
@@ -3886,7 +4021,12 @@ fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     match mob.mob_type {
         MobType::Pig => mob.pig_sound_variant.name().to_owned(),
         MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
-        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear | MobType::Panda => String::new(),
+        MobType::Cat => mob.cat.sound_variant_name().to_owned(),
+        MobType::Sheep
+        | MobType::Mooshroom
+        | MobType::PolarBear
+        | MobType::Panda
+        | MobType::Ocelot => String::new(),
         _ => mob.sound_variant.name().to_owned(),
     }
 }

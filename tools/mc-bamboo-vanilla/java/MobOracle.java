@@ -544,6 +544,23 @@ public final class MobOracle {
         int[] sprint;
         /** 大脑场景：所有传感器的起始延迟定成这个值，负数表示保留随机取的。 */
         long sensorDelay = -1;
+        /** 攻击场景：`Player.attackStrengthTicker` 的初值。 */
+        int attackCharge;
+        /** 攻击场景：玩家是否疾跑 / 下落距离 / 是否着地。 */
+        boolean attackSprint;
+        double attackFall;
+        boolean attackGround;
+        /** 攻击场景：主手武器上的附魔，成对存 (名字, 等级)。 */
+        final List<String[]> attackEnchants = new ArrayList<>();
+        /**
+         * 攻击场景：跳过每刻的 `cow.tick()`，这样牛的击退速度和 hurtTime 不被
+         * 重力 / AI / 计时衰减污染，可以和 Bamboo 的受伤重放逐位比。
+         *
+         * Attack scenes: skip the per-tick `cow.tick()` so cow knockback velocity
+         * and hurtTime are not polluted by gravity / AI / timer decay and can be
+         * compared bit-for-bit against Bamboo's hurt replay.
+         */
+        boolean noCowTick;
         /**
          * 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
          *
@@ -845,6 +862,22 @@ public final class MobOracle {
             playerActions.get(playerActions.size() - 1).cow = cow;
             return this;
         }
+
+        /** 攻击场景：设好攻击那一刻的充能、疾跑、下落和着地状态。 */
+        Scene attackSetup(int charge, boolean sprint, double fall, boolean ground) {
+            attackCharge = charge;
+            attackSprint = sprint;
+            attackFall = fall;
+            attackGround = ground;
+            noCowTick = true;
+            return this;
+        }
+
+        /** 攻击场景：主手武器加一条附魔。 */
+        Scene attackEnchant(String name, int level) {
+            attackEnchants.add(new String[] {name, Integer.toString(level)});
+            return this;
+        }
     }
 
     /** 玩家受伤场景的一个动作：打玩家或者左键打牛。 */
@@ -985,8 +1018,14 @@ public final class MobOracle {
      * (colour plus shear mark, variant plus egg timer); the rest keep the defaults,
      * matching Bamboo's `farm_variant`.
      */
+    // 这个方法调用了声明 throws Exception 的 farmVariant，所以自己也必须声明；去掉它整个
+    // mob-oracle 单文件源码编译不过。合并冲突解决时不要回退这一行。
+    // This method calls farmVariant, which declares throws Exception, so it must declare it too;
+    // without it the whole single-file mob-oracle source fails to compile. Do not revert this in merges.
     static String caseVariant(Mob mob) throws Exception {
-        if (mob instanceof Sheep || mob instanceof Chicken) {
+        if (mob instanceof Sheep || mob instanceof Chicken
+                || mob instanceof net.minecraft.world.entity.animal.feline.Ocelot
+                || mob instanceof net.minecraft.world.entity.animal.feline.Cat) {
             return farmVariant((Animal) mob);
         }
         if (mob instanceof net.minecraft.world.entity.monster.Creeper
@@ -1016,8 +1055,12 @@ public final class MobOracle {
     }
 
     static String caseSound(Mob mob) throws Exception {
-        if (mob instanceof Sheep) return "";
-        if (mob instanceof Chicken) return farmSound((Animal) mob);
+        if (mob instanceof Sheep
+                || mob instanceof net.minecraft.world.entity.animal.feline.Ocelot) return "";
+        if (mob instanceof Chicken
+                || mob instanceof net.minecraft.world.entity.animal.feline.Cat) {
+            return farmSound((Animal) mob);
+        }
         return "minecraft:classic";
     }
 
@@ -1088,6 +1131,7 @@ public final class MobOracle {
             scenes.add(brushed);
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
+            CamelScenes.add(scenes);
         }
 
         /**
@@ -1434,6 +1478,53 @@ public final class MobOracle {
 
         static String name(net.minecraft.world.entity.ai.memory.MemoryModuleType<?> type) {
             return BuiltInRegistries.MEMORY_MODULE_TYPE.getKey(type).getPath();
+        }
+    }
+
+    /**
+     * 骆驼场景：brain 驱动的闲逛、随机坐下 / 站起、被诱惑、受惊。
+     *
+     * <p>Camel scenes: brain-driven idling, random sitting / standing, temptation and panic.
+     *
+     * <p>场景里的骆驼不走 `finalizeSpawn`，`LAST_POSE_CHANGE_TICK` 保持 0，
+     * 两侧按同一套 `gameTime`（`START_TIME`）算出的 `getPoseTime()` 一致。
+     *
+     * <p>Scene camels skip `finalizeSpawn`, so `LAST_POSE_CHANGE_TICK` stays 0 and both sides
+     * agree on `getPoseTime()` from the same `gameTime` (`START_TIME`).
+     */
+    static final class CamelScenes {
+        static void add(List<Scene> scenes) {
+            for (long seed : new long[] {11L, 23L}) {
+                // 平地闲逛：随机漫步、看哪走哪、发呆、随机环顾、随机坐下 / 站起。
+                // Flat-ground idling: strolling, walking to the look target, doing nothing,
+                // looking around, and random sitting / standing.
+                Scene wander = new Scene("camel_wander_" + seed).ticks(600);
+                Scenes.ground(wander, 15);
+                wander.mob(20, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(wander);
+            }
+            // 时间拉长，多跑几轮坐下 / 站起和 40 / 52 刻的姿势过渡。
+            // A longer run to exercise several sit / stand pose transitions (40 / 52 ticks).
+            Scene sit = new Scene("camel_sit_stand").ticks(900);
+            Scenes.ground(sit, 15);
+            sit.mob(20, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+            scenes.add(sit);
+            // 拿仙人掌的玩家：跟随诱惑；幼崽跟着大人。
+            // A player holding cactus tempts it; the baby follows the adult.
+            Scene tempt = new Scene("camel_tempt").ticks(300);
+            Scenes.ground(tempt, 15);
+            tempt.mob(20, 0.5, 64.0, 0.5, 0.0F, 37L, 0);
+            tempt.mob(20, -6.5, 64.0, 0.5, 0.0F, 41L, -24000);
+            tempt.player(7.5, 64.0, 0.5, Items.CACTUS);
+            scenes.add(tempt);
+            // 被玩家打：`CamelPanic.start` 先 `standUpInstantly()` 再逃。
+            // Hit by a player: `CamelPanic.start` calls `standUpInstantly()` before fleeing.
+            Scene hurt = new Scene("camel_hurt").ticks(300);
+            Scenes.ground(hurt, 15);
+            hurt.mob(20, 0.5, 64.0, 0.5, 0.0F, 43L, 0);
+            hurt.player(2.5, 64.0, 0.5, Items.AIR);
+            hurt.hurts.add(new double[] {5, 0, 2.0, 0});
+            scenes.add(hurt);
         }
     }
 
@@ -2116,6 +2207,202 @@ public final class MobOracle {
             }
             polarBearScenes(scenes);
             pandaScenes(scenes);
+            ocelotScenes(scenes);
+            catScenes(scenes);
+        }
+
+        /**
+         * 猫：闲逛（野猫叫声）、远离玩家、持鱼吸引/驯服/染项圈/受伤回血/坐站、
+         * 繁殖（花色继承与项圈混色）、躺床与坐点燃熔炉、捕猎兔子与幼年海龟、死亡掉落。
+         *
+         * Cats: strolling (stray ambient), avoiding untamed players, tempting/taming/dyeing/
+         * healing/sitting, breeding (variant inheritance and mixed collar), lying on beds and
+         * sitting on lit furnaces, hunting rabbits and baby turtles, and death loot.
+         */
+        static void catScenes(List<Scene> scenes) {
+            int cod = BuiltInRegistries.ITEM.getId(Items.COD);
+            int air = BuiltInRegistries.ITEM.getId(Items.AIR);
+            int blueDye = BuiltInRegistries.ITEM.getId(Items.DYE.blue());
+            {
+                Scene idle = new Scene("cat_idle").ticks(300).packets();
+                ground(idle, 24);
+                idle.cow(0.5, 64.0, 0.5, 0.0F, 621L);
+                idle.cow(3.5, 64.0, 2.5, 90.0F, 622L, -24000);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                Scene avoid = new Scene("cat_avoid_player").ticks(120).packets();
+                ground(avoid, 24);
+                avoid.cow(0.5, 64.0, 0.5, 0.0F, 623L);
+                avoid.player(4.5, 64.0, 0.5, Items.AIR);
+                scenes.add(avoid);
+            }
+            {
+                Scene tame = new Scene("cat_tempt_tame").ticks(140).packets();
+                ground(tame, 16);
+                tame.cow(0.5, 64.0, 0.5, 0.0F, 624L);
+                tame.player(2.5, 64.0, 0.5, Items.COD);
+                for (int t = 4; t <= 16; t += 2) {
+                    tame.interact(t, 0, 0, cod, 0);
+                }
+                tame.interact(30, 0, 0, blueDye, 0);
+                tame.hurts.add(new double[] {40, 0, 2.0, 0});
+                tame.interact(80, 0, 0, cod, 0);
+                tame.interact(90, 0, 0, air, 0);
+                scenes.add(tame);
+            }
+            {
+                Scene breed = new Scene("cat_breed").ticks(150).drops().packets();
+                ground(breed, 10);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 625L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 626L);
+                breed.player(2.5, 64.0, 0.5, Items.AIR);
+                for (int t = 2; t <= 16; t += 2) {
+                    breed.interact(t, 0, 0, cod, 0);
+                    breed.interact(t, 1, 0, cod, 0);
+                }
+                breed.interact(20, 0, 0, blueDye, 0);
+                breed.interact(24, 0, 0, air, 0);
+                breed.interact(24, 1, 0, air, 0);
+                breed.interact(28, 0, 0, cod, 0);
+                breed.interact(28, 1, 0, cod, 0);
+                scenes.add(breed);
+            }
+            {
+                Scene lie = new Scene("cat_lie_bed").ticks(260).packets();
+                ground(lie, 12);
+                lie.set(2, 64, 0, Blocks.BED.red().defaultBlockState());
+                lie.set(2, 64, -1, Blocks.BED.red().defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.BED_PART,
+                                net.minecraft.world.level.block.state.properties.BedPart.HEAD));
+                lie.cow(0.5, 64.0, 0.5, 0.0F, 627L);
+                lie.player(2.5, 64.0, 2.5, Items.AIR);
+                for (int t = 2; t <= 16; t += 2) {
+                    lie.interact(t, 0, 0, cod, 0);
+                }
+                lie.interact(20, 0, 0, air, 0);
+                scenes.add(lie);
+            }
+            {
+                Scene sit = new Scene("cat_sit_furnace").ticks(260).packets();
+                ground(sit, 12);
+                sit.set(2, 64, 0, Blocks.FURNACE.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.LIT, true));
+                sit.cow(0.5, 64.0, 0.5, 0.0F, 628L);
+                sit.player(2.5, 64.0, 2.5, Items.AIR);
+                for (int t = 2; t <= 16; t += 2) {
+                    sit.interact(t, 0, 0, cod, 0);
+                }
+                sit.interact(20, 0, 0, air, 0);
+                scenes.add(sit);
+            }
+            {
+                Scene death = new Scene("cat_death").ticks(58).drops().packets();
+                ground(death, 6);
+                death.cow(0.5, 64.0, 0.5, 0.0F, 629L);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
+            {
+                Scene huntRabbit = new Scene("cat_hunt_rabbit").ticks(160).difficulty(2);
+                ground(huntRabbit, 18);
+                huntRabbit.mob(22, 0.5, 64.0, 0.5, 0.0F, 630L, 0);
+                huntRabbit.mob(6, 6.5, 64.0, 0.5, 0.0F, 631L, 0);
+                scenes.add(huntRabbit);
+            }
+            {
+                Scene huntTurtle = new Scene("cat_hunt_turtle").ticks(160).difficulty(2);
+                ground(huntTurtle, 18);
+                huntTurtle.mob(22, 0.5, 64.0, 0.5, 0.0F, 632L, 0);
+                huntTurtle.mob(60, 3.5, 64.0, 0.5, 0.0F, 633L, 0);
+                huntTurtle.mob(60, 6.5, 64.0, 0.5, 0.0F, 634L, -24000);
+                scenes.add(huntTurtle);
+            }
+        }
+
+        /**
+         * 豹猫：闲逛、远离玩家（含疾跑加成）、持鱼吸引与信任（1/3 + 粒子取数）、
+         * 繁殖、扑杀鸡和陆地幼年海龟、死亡掉落。
+         *
+         * Ocelots: strolling, avoiding untrusted players (with sprint modifier), tempting
+         * and trusting (1/3 roll + particle draws), breeding, hunting chickens and baby
+         * turtles on land, and death loot.
+         */
+        static void ocelotScenes(List<Scene> scenes) {
+            int cod = BuiltInRegistries.ITEM.getId(Items.COD);
+            {
+                Scene idle = new Scene("ocelot_idle").ticks(300).packets();
+                ground(idle, 24);
+                idle.cow(0.5, 64.0, 0.5, 0.0F, 601L);
+                idle.cow(3.5, 64.0, 2.5, 90.0F, 602L, -24000);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                // 未信任的豹猫看到空手玩家立刻疾跑逃开。
+                // An untrusted ocelot sprints away from an empty-handed player.
+                Scene avoid = new Scene("ocelot_avoid_player").ticks(120).packets();
+                ground(avoid, 24);
+                avoid.cow(0.5, 64.0, 0.5, 0.0F, 603L);
+                avoid.player(4.5, 64.0, 0.5, Items.AIR);
+                scenes.add(avoid);
+            }
+            {
+                // 玩家原地持生鳕鱼吸引豹猫靠近，多次右键触发失败（事件 40）与信任（事件 41）。
+                // A stationary player holds raw cod to tempt the ocelot, then interacts repeatedly
+                // to exercise both failure (event 40) and trusting (event 41).
+                Scene trust = new Scene("ocelot_tempt_trust").ticks(120).packets();
+                ground(trust, 16);
+                trust.cow(0.5, 64.0, 0.5, 0.0F, 604L);
+                trust.player(2.5, 64.0, 0.5, Items.COD);
+                for (int t = 6; t <= 18; t += 2) {
+                    trust.interact(t, 0, 0, cod, 0);
+                }
+                scenes.add(trust);
+            }
+            {
+                // 繁殖：玩家空手（诱惑目标未跑），直接右键生鳕鱼进入求爱生小豹猫。
+                // Breeding: player holds air so tempt is not running; feeding cod breeds a kitten.
+                Scene breed = new Scene("ocelot_breed").ticks(120).drops().packets();
+                ground(breed, 10);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 605L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 606L);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(2, 0, 0, cod, 0);
+                breed.interact(2, 1, 0, cod, 0);
+                scenes.add(breed);
+            }
+            {
+                // 死亡掉落与经验。
+                // Death drops and experience.
+                Scene death = new Scene("ocelot_death").ticks(58).drops().packets();
+                ground(death, 6);
+                death.cow(0.5, 64.0, 0.5, 0.0F, 607L);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
+            {
+                // 捕猎鸡：潜行接近 -> 4 格内冲刺 -> 扑跳 -> 攻击。
+                // Hunting a chicken: crouch -> sprint inside 4 blocks -> leap -> attack.
+                Scene huntChicken = new Scene("ocelot_hunt_chicken").ticks(160).difficulty(2);
+                ground(huntChicken, 18);
+                huntChicken.mob(21, 0.5, 64.0, 0.5, 0.0F, 608L, 0);
+                huntChicken.mob(5, 6.5, 64.0, 0.5, 0.0F, 609L, 0);
+                scenes.add(huntChicken);
+            }
+            {
+                // 捕猎陆地幼年海龟：忽略更近的成年海龟，选中幼年海龟。
+                // Hunting a baby turtle on land: ignores a closer adult turtle and targets the baby.
+                Scene huntTurtle = new Scene("ocelot_hunt_turtle").ticks(160).difficulty(2);
+                ground(huntTurtle, 18);
+                huntTurtle.mob(21, 0.5, 64.0, 0.5, 0.0F, 610L, 0);
+                huntTurtle.mob(60, 3.5, 64.0, 0.5, 0.0F, 611L, 0);
+                huntTurtle.mob(60, 6.5, 64.0, 0.5, 0.0F, 612L, -24000);
+                scenes.add(huntTurtle);
+            }
         }
 
         /**
@@ -3149,8 +3436,91 @@ public final class MobOracle {
                 cow.cow(2.5, 64.0, 0.5, 0.0F, 91L);
                 cow.equipment(new int[] {0, 0, 0, 0,
                         BuiltInRegistries.ITEM.getId(Items.DIAMOND_SWORD)}, new int[] {0, 0, 0, 0});
-                cow.attack(1, 0);
+                cow.attackSetup(0, false, 0.0, false).attack(1, 0);
                 scenes.add(cow);
+            }
+            // ---- 玩家近战攻击：不同充能、下落暴击、疾跑击退、横扫、附魔 ----
+            // 每例都逐刻比牛的血量 / 击退速度 / 着火刻数和出站包。
+            {
+                int sword = BuiltInRegistries.ITEM.getId(Items.DIAMOND_SWORD);
+                // 空手 delay=5：ticker 0/2/4/5/20 覆盖从 0.1 到满充能。
+                for (int charge : new int[] {0, 2, 4, 5, 20}) {
+                    Scene s = new Scene("player_attack_charge" + charge).ticks(6)
+                            .playerPackets().packets();
+                    ground(s, 4);
+                    s.player(0.5, 64.0, 0.5, Items.AIR);
+                    s.cow(2.5, 64.0, 0.5, 0.0F, 200L + charge);
+                    s.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                    s.attackSetup(charge, false, 0.0, false).attack(1, 0);
+                    scenes.add(s);
+                }
+                // 满充能剑 + 下落：暴击 ×1.5。
+                Scene crit = new Scene("player_attack_critical").ticks(6)
+                        .playerPackets().packets();
+                ground(crit, 4);
+                crit.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                crit.cow(2.5, 64.0, 0.5, 0.0F, 210L);
+                crit.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                crit.attackSetup(20, false, 1.0, false).attack(1, 0);
+                scenes.add(crit);
+                // 满充能剑 + 疾跑：额外击退、取消疾跑。
+                Scene sprint = new Scene("player_attack_sprint").ticks(6)
+                        .playerPackets().packets();
+                ground(sprint, 4);
+                sprint.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sprint.cow(2.5, 64.0, 0.5, 0.0F, 211L);
+                sprint.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sprint.attackSetup(20, true, 0.0, true).attack(1, 0);
+                scenes.add(sprint);
+                // 满充能剑 + 着地 + 两头牛：横扫（无 sweeping_edge，比例 0）。
+                Scene sweep = new Scene("player_attack_sweep").ticks(6)
+                        .playerPackets().packets();
+                ground(sweep, 4);
+                sweep.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sweep.cow(2.5, 64.0, 0.5, 0.0F, 212L);
+                sweep.cow(3.0, 64.0, 0.5, 0.0F, 213L);
+                sweep.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sweep.attackSetup(20, false, 0.0, true).attack(1, 0);
+                scenes.add(sweep);
+                // 横扫附魔 III：第二头牛吃到 0.75 × baseDamage 的横扫伤害。
+                Scene sweeping = new Scene("player_attack_sweeping_edge").ticks(6)
+                        .playerPackets().packets();
+                ground(sweeping, 4);
+                sweeping.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sweeping.cow(2.5, 64.0, 0.5, 0.0F, 214L);
+                sweeping.cow(3.0, 64.0, 0.5, 0.0F, 215L);
+                sweeping.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sweeping.attackEnchant("minecraft:sweeping_edge", 3)
+                        .attackSetup(20, false, 0.0, true).attack(1, 0);
+                scenes.add(sweeping);
+                // 满充能剑 + 火焰附加 II + 两头牛：`doSweepAttack` 对每个打中的 nearby 也调
+                // `doPostAttackEffects`，所以第二头牛（横扫目标）也要着火。
+                // Full sword + Fire Aspect II + two cows: `doSweepAttack` also calls
+                // `doPostAttackEffects` on each hurt nearby, so the swept cow ignites too.
+                Scene sweepFire = new Scene("player_attack_sweep_fire_aspect").ticks(6)
+                        .playerPackets().packets();
+                ground(sweepFire, 4);
+                sweepFire.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sweepFire.cow(2.5, 64.0, 0.5, 0.0F, 216L);
+                sweepFire.cow(3.0, 64.0, 0.5, 0.0F, 217L);
+                sweepFire.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sweepFire.attackEnchant("minecraft:fire_aspect", 2)
+                        .attackSetup(20, false, 0.0, true).attack(1, 0);
+                scenes.add(sweepFire);
+                // 锋利 III / 火焰附加 II / 击退 II：伤害加成、着火刻数、额外击退。
+                String[] names = {"sharpness", "fire_aspect", "knockback"};
+                int[] levels = {3, 2, 2};
+                for (int i = 0; i < names.length; i++) {
+                    Scene s = new Scene("player_attack_enchant_" + names[i]).ticks(6)
+                            .playerPackets().packets();
+                    ground(s, 4);
+                    s.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                    s.cow(2.5, 64.0, 0.5, 0.0F, 220L + i);
+                    s.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                    s.attackEnchant("minecraft:" + names[i], levels[i])
+                            .attackSetup(20, false, 0.0, true).attack(1, 0);
+                    scenes.add(s);
+                }
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。
@@ -3786,10 +4156,12 @@ public final class MobOracle {
         // Only scenes named `*_no_grief` turn `mobGriefing` off; every scene resets it.
         setRule(official, GameRules.MOB_GRIEFING, !scene.name.endsWith("_no_grief"));
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("polar_bear_fight_")
+                || scene.name.startsWith("ocelot_hunt_") || scene.name.startsWith("cat_hunt_")
                 || scene.name.startsWith("rabbit_") || scene.name.startsWith("fox_")
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
                 || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
+                || scene.name.startsWith("camel_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
@@ -4005,6 +4377,9 @@ public final class MobOracle {
             level.tracked.add(cow);
         }
         if (scene.packets) {
+            // 玩家初始化时 `detectEquipmentUpdates` 发出的装备包不属于生物场景第 1 刻。
+            // Drop player setup equipment packets emitted by `detectEquipmentUpdates` before tick 1.
+            events.take();
             // 先给每头牛建 ServerEntity；配对包在 tick 0 由 `sendPairingData` 发出。
             // Create a ServerEntity per cow; sendPairingData emits the tick-0 packets.
             for (Animal cow : cows) {
@@ -4136,6 +4511,10 @@ public final class MobOracle {
                 interactions.get(tick).add(one.toString());
                 putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
                         "instabuild", false);
+                // 交互完换回场景给的那件，Bamboo 一侧的玩家视图手里一直是它。
+                // Restore the scene's held item after interaction to match Bamboo's player view.
+                actor.setItemInHand(InteractionHand.MAIN_HAND,
+                        new ItemStack(scene.playerItems.get(action[2])));
             }
             // 交互里生成的实体（剪下来的物品、哞菇剪成的牛）在实体 tick 之前就进了世界，
             // 真服务端里它们这一刻就会 tick，所以在这里先收一次。
@@ -4198,8 +4577,39 @@ public final class MobOracle {
                         players.get(0).hurtServer(level, source, action.amount);
                     } else {
                         // 官方 `ServerGamePacketListenerImpl.handleAttack` 的伤害入口。
+                        // `Player.attack` 开头读 `attackStrengthTicker` 算充能，
+                        // 之后 `onAttack()` 清零，所以要在调用前设好。
+                        ServerPlayer attacker = players.get(0);
+                        putInt(net.minecraft.world.entity.LivingEntity.class, attacker,
+                                "attackStrengthTicker", scene.attackCharge);
+                        attacker.setSprinting(scene.attackSprint);
+                        attacker.fallDistance = scene.attackFall;
+                        putBoolean(net.minecraft.world.entity.Entity.class, attacker,
+                                "onGround", scene.attackGround);
+                        if (!scene.attackEnchants.isEmpty()) {
+                            ItemStack weapon = attacker.getMainHandItem().copy();
+                            net.minecraft.world.item.enchantment.ItemEnchantments.Mutable enchants =
+                                    new net.minecraft.world.item.enchantment.ItemEnchantments.Mutable(
+                                            weapon.getOrDefault(DataComponents.ENCHANTMENTS,
+                                                    net.minecraft.world.item.enchantment.ItemEnchantments.EMPTY));
+                            for (String[] pair : scene.attackEnchants) {
+                                var holder = official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                                        .getOrThrow(ResourceKey.create(Registries.ENCHANTMENT,
+                                                Identifier.parse(pair[0])));
+                                enchants.set(holder, Integer.parseInt(pair[1]));
+                            }
+                            weapon.set(DataComponents.ENCHANTMENTS, enchants.toImmutable());
+                            attacker.setItemInHand(InteractionHand.MAIN_HAND, weapon);
+                            // 附魔的 `ATTRIBUTES` 效果（sweeping_edge 的
+                            // SWEEPING_DAMAGE_RATIO）由 `detectEquipmentUpdates`
+                            // 刷进属性表，官方换装备后的那一 tick 就会跑。
+                            java.lang.reflect.Method detect = LivingEntity.class
+                                    .getDeclaredMethod("detectEquipmentUpdates");
+                            detect.setAccessible(true);
+                            detect.invoke(attacker);
+                        }
                         Animal target = cows.get(action.cow);
-                        players.get(0).attack(target);
+                        attacker.attack(target);
                     }
                 }
                 // 只推进 1a 建模的三处：`ServerPlayer.tick` 递减 damageCooldownTime，
@@ -4258,7 +4668,7 @@ public final class MobOracle {
                 }
             }
             for (Animal cow : new ArrayList<>(cows)) {
-                if (cow.isRemoved()) {
+                if (cow.isRemoved() || scene.noCowTick) {
                     continue;
                 }
                 cow.checkDespawn();
@@ -4373,6 +4783,18 @@ public final class MobOracle {
         appendPackets(line, playerSteps);
         line.append(",\"playerPackets\":");
         appendPackets(line, playerPackets);
+        // 攻击场景：把充能 / 疾跑 / 下落 / 着地和主手附魔报给 Bamboo 一侧照填。
+        line.append(",\"attackCharge\":").append(scene.attackCharge);
+        line.append(",\"attackSprint\":").append(scene.attackSprint);
+        line.append(",\"attackFall\":").append(Double.doubleToRawLongBits(scene.attackFall));
+        line.append(",\"attackGround\":").append(scene.attackGround);
+        line.append(",\"attackEnchants\":[");
+        for (int i = 0; i < scene.attackEnchants.size(); i++) {
+            if (i > 0) line.append(',');
+            String[] pair = scene.attackEnchants.get(i);
+            line.append('[').append(jsonString(pair[0])).append(',').append(pair[1]).append(']');
+        }
+        line.append(']');
         line.append("}\n");
         out.write(line.toString());
         out.flush();
@@ -4899,6 +5321,9 @@ public final class MobOracle {
         scenes.add(new NaturalScene("frog_dim", EntityTypes.FROG, "swamp", 2, 8, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("mooshroom_day", EntityTypes.MOOSHROOM, "mushroom_fields", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("polar_bear_day", EntityTypes.POLAR_BEAR, "frozen_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("ocelot_jungle", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("ocelot_jungle_leaves", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("ocelot_below_sea", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_cod", EntityTypes.COD, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_salmon", EntityTypes.SALMON, "cold_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_tropical", EntityTypes.TROPICAL_FISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
@@ -5255,7 +5680,9 @@ public final class MobOracle {
         Difficulty difficulty = Difficulty.byId(scene.difficulty());
         ((TickingLevelData) level.levelData).difficulty = difficulty;
         level.spawnDifficulty = new DifficultyInstance(difficulty, 0L, 0L, 0.0F);
-        MobCategory category = scene.mob().getCategory();
+        MobCategory category = scene.mob() == EntityTypes.OCELOT
+                ? MobCategory.MONSTER
+                : scene.mob().getCategory();
         MobSpawnSettings settings = level.naturalBiome.value().getAttributes()
                 .applyModifier(EnvironmentAttributes.NATURAL_MOB_SPAWNS, MobSpawnSettings.EMPTY);
         var entry = settings.getMobsToSpawn(category).unwrap().stream()
@@ -5265,9 +5692,12 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
-        BlockState floorState = spawnFloor(scene.biome());
+        BlockState floorState = scene.name().equals("ocelot_jungle_leaves")
+                ? Blocks.OAK_LEAVES.defaultBlockState()
+                : spawnFloor(scene.biome());
         boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT;
         level.naturalSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51
+                : scene.name().equals("ocelot_below_sea") ? -60
                 : (scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63);
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
@@ -7954,11 +8384,13 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
-                // 编号两套合并：13 犰狳、14 山羊、16 北极熊（15 熊猫、17 哞菇走按名字的
-                // 动物路径），敌对生物用 40 起避开它们；其余 1..12 是僵尸 / 动物 / 马科。
-                // Merged id sets: 13 armadillo, 14 goat, 16 polar bear (15 panda and 17 mooshroom
-                // use the name-based animal path); hostiles start at 40 to stay clear, and 1..12
-                // are the zombies, animals and equines.
+                // 编号两套合并：13 犰狳、14 山羊、16 北极熊、18 青蛙、19 蝌蚪、20 骆驼
+                // （15 熊猫、17 哞菇走按名字的动物路径），敌对生物用 40 起避开它们；
+                // 其余 1..12 是僵尸 / 动物 / 马科。
+                // Merged id sets: 13 armadillo, 14 goat, 16 polar bear, 18 frog, 19 tadpole,
+                // 20 camel (15 panda and 17 mooshroom use the name-based animal path);
+                // hostiles start at 40 to stay clear, and 1..12 are the zombies, animals
+                // and equines.
                 case 40 -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
                 case 41 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, level);
                 case 43 -> new net.minecraft.world.entity.monster.Enderman(EntityTypes.ENDERMAN, level);
@@ -7985,6 +8417,9 @@ public final class MobOracle {
                 case 14 -> EntityTypes.GOAT.create(level, EntitySpawnReason.COMMAND);
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
+                case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                case 21 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
+                case 22 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
                 case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
@@ -9837,6 +10272,8 @@ public final class MobOracle {
         if (scene.startsWith("mooshroom_")) return EntityTypes.MOOSHROOM;
         if (scene.startsWith("polar_bear_")) return EntityTypes.POLAR_BEAR;
         if (scene.startsWith("panda_")) return EntityTypes.PANDA;
+        if (scene.startsWith("ocelot_")) return EntityTypes.OCELOT;
+        if (scene.startsWith("cat_")) return EntityTypes.CAT;
         return EntityTypes.COW;
     }
 
@@ -9852,6 +10289,8 @@ public final class MobOracle {
         if (scene.startsWith("mooshroom_")) return 17;
         if (scene.startsWith("polar_bear_")) return 16;
         if (scene.startsWith("panda_")) return 15;
+        if (scene.startsWith("ocelot_")) return 21;
+        if (scene.startsWith("cat_")) return 22;
         return 0;
     }
 
@@ -9887,8 +10326,55 @@ public final class MobOracle {
                 + "|f" + flags;
     }
 
+    /**
+     * 豹猫的状态列：信任、潜行姿势、疾跑标志。
+     *
+     * The ocelot state column: trusting, crouching pose and sprinting flag.
+     */
+    private static String ocelotState(net.minecraft.world.entity.animal.feline.Ocelot ocelot) throws Exception {
+        Field field = net.minecraft.world.entity.animal.feline.Ocelot.class.getDeclaredField("DATA_TRUSTING");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) field.get(null);
+        boolean trusting = ocelot.getEntityData().get(accessor);
+        boolean crouching = ocelot.getPose() == net.minecraft.world.entity.Pose.CROUCHING;
+        return "t" + (trusting ? 1 : 0)
+                + "|c" + (crouching ? 1 : 0)
+                + "|s" + (ocelot.isSprinting() ? 1 : 0);
+    }
+
+    /**
+     * 猫的状态列：驯服、命令坐下、坐姿、躺卧、放松状态、项圈颜色、花色、潜行、疾跑和主人 UUID。
+     *
+     * The cat state column: tamed, ordered-to-sit, sitting pose, lying, relax state one,
+     * collar colour, coat variant, crouching, sprinting and owner UUID.
+     */
+    @SuppressWarnings("unchecked")
+    private static String catState(net.minecraft.world.entity.animal.feline.Cat cat) {
+        var owner = cat.getOwnerReference();
+        boolean relax = cat.getEntityData().get(
+                (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) readStatic(
+                        net.minecraft.world.entity.animal.feline.Cat.class, "RELAX_STATE_ONE"));
+        return "t" + (cat.isTame() ? 1 : 0)
+                + "|o" + (cat.isOrderedToSit() ? 1 : 0)
+                + "|p" + (cat.isInSittingPose() ? 1 : 0)
+                + "|l" + (cat.isLying() ? 1 : 0)
+                + "|r" + (relax ? 1 : 0)
+                + "|c" + cat.getCollarColor().getId()
+                + "|v" + cat.getVariant().unwrapKey().orElseThrow().identifier()
+                + "|cr" + (cat.getPose() == net.minecraft.world.entity.Pose.CROUCHING ? 1 : 0)
+                + "|s" + (cat.isSprinting() ? 1 : 0)
+                + "|u" + (owner == null ? "-" : owner.getUUID().toString());
+    }
+
     /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
     private static String farmVariant(Animal animal) throws Exception {
+        if (animal instanceof net.minecraft.world.entity.animal.feline.Cat cat) {
+            return catState(cat);
+        }
+        if (animal instanceof net.minecraft.world.entity.animal.feline.Ocelot ocelot) {
+            return ocelotState(ocelot);
+        }
         if (animal instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
             return pandaState(panda);
         }
@@ -9941,7 +10427,8 @@ public final class MobOracle {
     private static String farmSound(Animal animal) throws Exception {
         if (animal instanceof Sheep || animal instanceof PolarBear
                 || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow
-                || animal instanceof net.minecraft.world.entity.animal.panda.Panda) {
+                || animal instanceof net.minecraft.world.entity.animal.panda.Panda
+                || animal instanceof net.minecraft.world.entity.animal.feline.Ocelot) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");

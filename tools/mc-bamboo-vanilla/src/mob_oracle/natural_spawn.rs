@@ -287,7 +287,11 @@ impl Report {
                 world.spawn_entity(Entity::by_mob_type(kind, Vec3::new(8.5, -45.0, 8.5)));
             }
         }
-        let category = kind.mob_category();
+        let category = if kind == MobType::Ocelot {
+            MobCategory::Monster
+        } else {
+            kind.mob_category()
+        };
         let params = SpawnParams {
             spawnable_chunk_count: case.spawnable_chunks,
             spawn_enemies: category == MobCategory::Monster,
@@ -398,7 +402,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .position(|name| *name == case.biome)
         .ok_or_else(|| format!("unknown natural spawn fixture biome {}", case.biome))?
         as i32;
-    let category = kind.mob_category();
+    // 豹猫实体类别是 `Creature`，但在丛林刷怪表里排在 `Monster` 槽位。
+    // Ocelots have category `Creature` yet live in the `Monster` table of jungle biomes.
+    let category = if kind == MobType::Ocelot {
+        MobCategory::Monster
+    } else {
+        kind.mob_category()
+    };
     let entry = spawning::for_biome_id(biome)
         .mobs_to_spawn(category)
         .iter()
@@ -407,7 +417,11 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
     let roof = kind == MobType::Husk;
-    let floor_state = spawn_floor(biome);
+    let floor_state = if case.name == "ocelot_jungle_leaves" {
+        BlockState(blocks::OAK_LEAVES)
+    } else {
+        spawn_floor(biome)
+    };
     let aquatic = case.aquatic;
     let floors = case.floors.clone();
     let water_depth = case.water_depth;

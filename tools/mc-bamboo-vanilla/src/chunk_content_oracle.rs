@@ -639,6 +639,8 @@ fn run_cases(
         MobType::Frog,
         MobType::Tadpole,
         MobType::PolarBear,
+        MobType::Ocelot,
+        MobType::Cat,
         MobType::Creeper,
         MobType::Spider,
         MobType::CaveSpider,
@@ -1702,6 +1704,19 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
         ]),
     ));
     out.push((
+        "cat tamed rich".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:cat".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("variant", Tag::String("minecraft:calico".to_owned())),
+            ("sound_variant", Tag::String("minecraft:royal".to_owned())),
+            ("CollarColor", Tag::Byte(11)),
+            ("Sitting", Tag::Byte(1)),
+            ("Owner", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]),
+    ));
+    out.push((
         "rich".to_owned(),
         compound(vec![
             ("id", Tag::String("minecraft:cow".to_owned())),
@@ -1967,6 +1982,26 @@ fn brain_resave_cases() -> Vec<(String, Tag)> {
                 ("HasRightHorn", Tag::Byte(1)),
                 ("Age", Tag::Int(-600)),
                 ("Brain", goat_memories),
+            ]),
+        ),
+        // 骆驼：`LastPoseTick` 负数表示坐着，正数表示上次换姿势的 `gameTime`。
+        // Camels: a negative `LastPoseTick` means sitting; a positive one is the
+        // `gameTime` of the last pose change.
+        (
+            "camel_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:camel".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "camel_sitting".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:camel".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("LastPoseTick", Tag::Long(-1000)),
             ]),
         ),
         (

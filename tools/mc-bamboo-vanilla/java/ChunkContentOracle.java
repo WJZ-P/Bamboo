@@ -346,6 +346,27 @@ public final class ChunkContentOracle {
             return source;
         }
 
+        // 官方 NeutralMob.readPersistentAngerSaveData 会顺着 angry_at 的 UUID 走
+        // EntityReference.getLivingEntity，最终落到 ServerLevel.getEntities()；
+        // FakeLevel 没有 entityManager，那一步会空指针，让整只实体加载失败。
+        // 这里按「查不到这个实体」返回 null：persistentAngerTarget 仍保留 UUID 并原样
+        // 写回 angry_at，只有 Mob.target 是空，和官方找不到目标时一致。
+        //
+        // Vanilla NeutralMob.readPersistentAngerSaveData resolves the angry_at UUID
+        // through EntityReference.getLivingEntity down to ServerLevel.getEntities();
+        // FakeLevel has no entityManager, so that call throws and drops the entity.
+        // Returning null models "entity not found": the persistent target keeps its
+        // UUID and is written back to angry_at, only Mob.target stays empty.
+        @Override
+        public net.minecraft.world.entity.Entity getEntityInAnyDimension(java.util.UUID uuid) {
+            return null;
+        }
+
+        @Override
+        public net.minecraft.world.entity.player.Player getPlayerInAnyDimension(java.util.UUID uuid) {
+            return null;
+        }
+
         @Override
         public int getNextEntityId() {
             return nextId++;

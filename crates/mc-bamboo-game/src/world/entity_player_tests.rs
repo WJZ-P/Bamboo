@@ -91,6 +91,7 @@ fn a_wheat_holding_player_makes_a_cow_look_and_walk_over() {
             steering_item: false,
             player: None,
             calm_down: 0,
+            scare: None,
         },
     );
     for _ in 0..30 {
@@ -130,6 +131,7 @@ fn an_empty_handed_player_does_not_tempt_a_cow() {
             steering_item: false,
             player: None,
             calm_down: 0,
+            scare: None,
         },
     );
     for _ in 0..30 {

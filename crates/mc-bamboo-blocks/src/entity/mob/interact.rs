@@ -115,6 +115,9 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
         MobType::Llama => item_is_tagged(item, mc_bamboo_data::tags::item_tags::LLAMA_FOOD),
+        // `Camel.isFood` 认 `#camel_food`（仙人掌），不走马科的 `horse_food`。
+        // `Camel.isFood` uses `#camel_food` (cactus), not the equine `horse_food`.
+        MobType::Camel => item_is_tagged(item, item_tags::CAMEL_FOOD),
         kind if kind.is_equine() => {
             item_is_tagged(item, mc_bamboo_data::tags::item_tags::HORSE_FOOD)
         }
@@ -168,6 +171,9 @@ pub fn interact(
     if mob.mob_type == super::MobType::Wolf {
         return super::wolf::interact(me, mob, req, now);
     }
+    if mob.mob_type == MobType::Cat {
+        return super::cat::interact(me, mob, req);
+    }
     if mob.mob_type == MobType::Armadillo
         && let Some(outcome) = super::armadillo::interact(me, mob, req)
     {
@@ -183,6 +189,11 @@ pub fn interact(
     }
     if mob.mob_type == MobType::Mooshroom
         && let Some(outcome) = mooshroom::interact(me, mob, req)
+    {
+        return outcome;
+    }
+    if mob.mob_type == MobType::Ocelot
+        && let Some(outcome) = super::ocelot::interact(me, mob, req)
     {
         return outcome;
     }
@@ -270,6 +281,7 @@ pub(super) fn animal_interact(
 fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
     match mob.mob_type {
         MobType::Pig => pig::play_eating_sound(me, mob),
+        MobType::Cat => super::cat::play_eating_sound(me, mob),
         MobType::Armadillo => living::make_sound(me, mob, "minecraft:entity.armadillo.eat"),
         // `Frog.playEatingSound`：`level.playSound(null, this, FROG_EAT, NEUTRAL, 2.0F, 1.0F)`，
         // 不看 `isSilent`、不取音高。

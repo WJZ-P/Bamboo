@@ -3367,6 +3367,13 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     lectern::tick(region);
     chat::tick_spam_throttlers(region);
     crate::drops::tick_drop_throttle(region);
+    // `Player.aiStep`：攻击冷却计数每刻加一，主手换物品时清零。
+    // 放在玩家 tick 开头，和官方实体 tick 在 `ServerPlayer.doTick` 之前一致。
+    //
+    // `Player.aiStep`: increment the attack-cooldown ticker each tick and reset
+    // it on a main-hand item swap. Runs at the start of the player tick, like
+    // vanilla's entity tick before `ServerPlayer.doTick`.
+    crate::player_attack::tick(region);
     // 官方 `ServerPlayer.doTick` 里 `set_health` 在 `set_experience` 之前。
     // 伤害冷却递减、按需补 `set_health`。
     //
