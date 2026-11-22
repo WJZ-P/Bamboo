@@ -5206,6 +5206,10 @@ public final class MobOracle {
         scenes.add(new NaturalScene("ocelot_jungle", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("ocelot_jungle_leaves", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("ocelot_below_sea", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        // 鹦鹉：丛林白天刷，亮度不够时不刷。
+        // Parrots spawn in jungles by day and not in dim light.
+        scenes.add(new NaturalScene("parrot_jungle", EntityTypes.PARROT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("parrot_jungle_dim", EntityTypes.PARROT, "jungle", 2, 8, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_cod", EntityTypes.COD, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_salmon", EntityTypes.SALMON, "cold_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_tropical", EntityTypes.TROPICAL_FISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
@@ -5483,6 +5487,7 @@ public final class MobOracle {
                 // The swamp table has sheep, pigs, chickens, cows and frogs; mangrove
                 // swamps only have (warm) frogs.
                 new GenScene("gen_swamp", 15, 0, true, "swamp", 300),
+                new GenScene("gen_parrot", 15, 0, true, "jungle", 300),
                 new GenScene("gen_mangrove_swamp", 15, 0, false, "mangrove_swamp", 300));
             default -> List.of(
                 new GenScene("gen_flat", 15, 0, false, "plains", 500),

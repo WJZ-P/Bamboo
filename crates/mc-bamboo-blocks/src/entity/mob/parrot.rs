@@ -91,10 +91,7 @@ pub const MOB_SOUNDS: [(&str, &str); 42] = [
         "minecraft:guardian",
         "minecraft:entity.parrot.imitate.guardian",
     ),
-    (
-        "minecraft:happy_ghast",
-        "minecraft:entity.generic.extinguish_fire",
-    ),
+    ("minecraft:happy_ghast", "minecraft:intentionally_empty"),
     ("minecraft:hoglin", "minecraft:entity.parrot.imitate.hoglin"),
     ("minecraft:husk", "minecraft:entity.parrot.imitate.husk"),
     (
@@ -885,6 +882,25 @@ mod tests {
         assert_eq!(attrs.value(attribute::MOVEMENT_SPEED), f64::from(0.2_f32));
         assert_eq!(attrs.value(attribute::ATTACK_DAMAGE), 3.0);
         assert_eq!(Parrot::default().variant_name(), "red_blue");
+    }
+
+    #[test]
+    fn imitation_table_matches_the_exported_size() {
+        // 生成器从官方 `MOB_SOUND_MAP` 导出条目数，缺一条就会让 `nextInt` 的边界不同。
+        // The generator exports the vanilla `MOB_SOUND_MAP` size; a missing entry would
+        // change the `nextInt` bound.
+        assert_eq!(
+            MOB_SOUNDS.len() as i32,
+            mc_bamboo_data::entity_types::PARROT_SOUND_MAP_SIZE
+        );
+        assert_eq!(
+            imitated_sound(MobType::Zombie),
+            "minecraft:entity.parrot.imitate.zombie"
+        );
+        assert_eq!(
+            imitated_sound(MobType::Cow),
+            "minecraft:entity.parrot.ambient"
+        );
     }
 
     #[test]
