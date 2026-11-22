@@ -1490,8 +1490,10 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   拿 `#fishes` 右键走自己的 `mobInteract`：幼年 `ageUp`、成年 `gotFish`，消费一条鱼。
 - 美西螈：五花色，`finalizeSpawn` 抽两个常见花色编号组成 `AxolotlGroupData`、再抽一个给这一只，
   一组第三只起是幼年、`BUCKET` 原因直接返回；`hurtServer` 前按官方短路判定把
-  `PLAY_DEAD_TICKS` 设 200，`customServerAiStep` 映射成 `playingDead` 元数据，装死时不叫；
-  两栖寻路（`AmphibiousPathNavigation`）、`travelInWater` 没有重力项、不吃水流。
+  `PLAY_DEAD_TICKS` 设 200，`customServerAiStep` 照 `ValidatePlayDead.create` 每刻递减、
+  到 0 后下一刻把 `playingDead` 元数据复位，装死一开始按 `PlayDead.start` 加 200 刻等级 0 的
+  `REGENERATION`，装死时不叫；两栖寻路（`AmphibiousPathNavigation`）、`travelInWater` 没有
+  重力项、不吃水流。
 - 装桶 / 存档 / 同步：`Bucketable`（鲑鱼 / 热带鱼的花纹组件之外）为美西螈写
   `bucket_entity_data` 的 `Variant` / `Age` / `AgeLocked`，倒桶 / 发射器按 `MobBucketItem.spawn`
   放出 `FromBucket = true` 的美西螈；`GotFish` / `Moistness`、`Variant` / `FromBucket` 进存档
@@ -1512,9 +1514,11 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
 - 已知限制：海豚 `registerGoals` 的十四个目标和 `HurtByTargetGoal` 都按官方优先级登记成
   `Unavailable`（`canUse` 恒假、不取随机数），因为 Brain、`findNearestMapStructure`、物品实体、
   船 / 鹦鹉螺、守卫者这些设施还没接——引路去宝藏、给玩家 `DOLPHINS_GRACE`、跃水、捡物、近战
-  都不发生，`gotFish` 目前只靠喂鱼设置；美西螈 Brain 的传感器 / 记忆 / 活动、装死回血、
-  攻击水生怪物、繁殖（1/1200 蓝色）没建模，`PLAY_DEAD_TICKS` 设 200 后没有 Brain 逐刻递减，
-  `playingDead` 不会自己复位；拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
+  都不发生，`gotFish` 目前只靠喂鱼设置；美西螈 Brain 的传感器 / 记忆 / 活动、
+  攻击水生怪物、繁殖（1/1200 蓝色）没建模。装死倒计时与 `REGENERATION` 已按官方两条
+  behavior 移植，但挂在 `customServerAiStep` 尾部而非 Brain 行为里，且逐刻对拍夹具开 `NoAI`
+  不触发，只有 `axolotl.rs` 的单元测试覆盖（200 刻递减、效果只加一次、NoAI 不动），没有和官方
+  逐刻对拍；拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
   死亡掉落的逐题 loot-oracle 都没做。逐刻对拍开 `NoAI`，没覆盖 AI / 受伤 / 繁殖 / 死亡路径。
 
 ## 与 main 合并后的现状（op-hostile2，2026-11-21）
@@ -1614,3 +1618,38 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 
 全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
 **686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+
+## 与 main 五次合并及装死回血（op-water，2026-11-21，第十轮）
+
+按队长 14:35 追加先 `git merge main`（`33980ce0`，含女巫 / 史莱姆 / 溺尸 / 流浪者 / 沼骸、
+桌面构建脚本、投掷物与药水）。8 个文本冲突按 main 的结构取并集：`MobType` 枚举自动合并成
+37 种（本分支的海豚 / 美西螈 + main 的五个敌对），`ALL` 长度改 37，`attributes` / `goals` /
+`target_goals` 三张表并入海豚 / 美西螈、去掉重复的 `Skeleton` arm，`removes_when_far_away`
+改用 main 的 `is_enemy()` 并保留水生分支，`living.rs` 的水下呼吸合并 main 的溺尸 /
+`WATER_BREATHING` 与本分支的 `max_air_supply` / `increase_air_supply` 分派，`natural.rs` 的
+`checkSpawnObstruction` 保留美西螈分支。`generated/entity_types.rs` 用 `extract` 重跑后逐字节
+一致；`mob-oracle` 场景编号表（1–17 / 40–43 / 50–52 / 60）两边不重复，水生走独立驱动。
+Java 侧 `playNaturalSpawnScenes` 并入本分支的海豚 / 美西螈夹具（`dolphin_ocean` /
+`axolotl_lush`、`clayFloor`），Rust 侧 `natural_spawn.rs` 保留 main 的 `floors` / `water_depth`
+并注入 `clay_floor`。
+
+合并后 `mob-oracle --only natural_spawn` 一度报 9 处 `axolotl_lush` 不一致：main 把 spawned
+数组扩成 12 列、美西螈花色放在最后一列（index 11），本分支的 `spawn_row` 仍按 11 列布局放在
+index 8。按官方夹具把 `spawn_row` 的 index 8 去掉美西螈分支、index 11 补上 `Axolotl` 后，
+698 例 2792 刻 0 不一致。
+
+本轮新写一处生物行为：美西螈装死按官方 `ValidatePlayDead.create` 每刻递减
+`PLAY_DEAD_TICKS`、到 0 后下一刻复位 `playingDead`，装死一开始按 `PlayDead.start` 加
+200 刻等级 0 的 `REGENERATION`（`axolotl.rs` 的 `update_playing_dead`，复用已有的
+`living::add_effect` 与效果系统）。这段不取随机数、不动 tick 顺序、`NoAI` 对拍夹具不触发，
+新增一个单元测试覆盖 200 刻倒计时 / 效果只加一次 / NoAI 不动，没有和官方逐刻对拍。
+全量 `mob-oracle` 复核 **1784 例 174697 刻 0 不一致**，`--only natural_spawn` 698 例 2792 刻、
+`natural-spawn` 1727 例、`--only dolphin` 3 例 603 刻、`--only axolotl` 4 例 804 刻、
+`--only sheep_eat` 3 例 900 刻全部 0 不一致，`--break-self-test water_mob` 故意改坏抓到
+12 处（RC=1）。
+
+剩余已知限制：海豚十四个目标和 `HurtByTargetGoal` 仍是 `Unavailable`（引路、恩惠、跃水、
+捡物、近战都不发生），美西螈 Brain 的传感器 / 记忆 / 活动、攻击水生怪物、繁殖（1/1200 蓝色）
+没建模，装死只有单元测试没有逐刻对拍。正确接 Brain 需要改 `living.rs` 的
+`custom_server_ai_step` / tick 顺序与对拍夹具（开 `NoAI=false`），按任务书「超出已定设计又必须
+改动 tick 顺序的部分停下来写进汇报」留给队长决定。

@@ -1,19 +1,23 @@
 //! 美西螈：官方 `Axolotl`（`Animal` 一支，`Bucketable`）。
 //!
-//! 美西螈用 Brain（`AxolotlAi`）驱动，没有 `goalSelector`。本轮把 Brain 相关的
-//! 行为（传感器、记忆、活动、近战、装死以外的移动）留作已知限制，只实现玩家能直接
-//! 感知的部分：五个花色及生成时的抽取、装桶标记、在水里/离水的氧气与干死、
-//! 装死状态、水里外不同的叫声、两栖寻路起点和 `travelInWater`。
+//! 美西螈用 Brain（`AxolotlAi`）驱动，没有 `goalSelector`。Brain 的传感器、记忆、
+//! 活动、近战和装死以外的移动仍留作已知限制；玩家能直接感知的部分照官方实现：
+//! 五个花色及生成时的抽取、装桶标记、在水里/离水的氧气与干死、装死状态
+//! （`ValidatePlayDead` 逐刻递减、`PlayDead` 的 200 刻 `REGENERATION`）、
+//! 水里外不同的叫声、两栖寻路起点和 `travelInWater`。
 //!
-//! The axolotl is Brain-driven (`AxolotlAi`) and has no `goalSelector`. This round
-//! leaves the Brain behaviours (sensors, memories, activities, melee, play-dead-driven
-//! movement) as a documented limitation and models only what players directly see:
-//! the five variants and their spawn rolls, the bucket flag, in/out-of-water air and
-//! drying out, the playing-dead flag, water/land ambience, amphibious pathfinding and
-//! `travelInWater`.
+//! The axolotl is Brain-driven (`AxolotlAi`) and has no `goalSelector`. Brain
+//! sensors, memories, activities, melee and play-dead-driven movement remain a
+//! documented limitation; what players directly see follows vanilla: the five
+//! variants and their spawn rolls, the bucket flag, in/out-of-water air and drying
+//! out, playing dead (the `ValidatePlayDead` countdown and `PlayDead`'s 200-tick
+//! `REGENERATION`), water/land ambience, amphibious pathfinding and `travelInWater`.
 
 use mc_bamboo_core::Vec3;
-use mc_bamboo_data::{entity_types, registries::attribute};
+use mc_bamboo_data::{
+    entity_types,
+    registries::{attribute, mob_effect},
+};
 
 use super::{
     DamageKind, DamageSource, Mob, MobType,
@@ -250,13 +254,34 @@ pub(super) fn maybe_play_dead(me: &mut Entity, mob: &mut Mob, damage: f32, has_s
     }
 }
 
-/// `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 映射成元数据 `playingDead`。
+/// `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 映射成元数据 `playingDead`，
+/// 照 `ValidatePlayDead.create` 逐刻递减；装死一开始照 `PlayDead.start` 加
+/// 200 刻、等级 0 的 `REGENERATION`。
 ///
 /// The tail of `Axolotl.customServerAiStep`: map `PLAY_DEAD_TICKS` to the `playingDead`
-/// metadata.
+/// metadata and count it down like `ValidatePlayDead.create`; add the 200-tick,
+/// level-0 `REGENERATION` of `PlayDead.start` when playing dead begins.
 pub(super) fn update_playing_dead(mob: &mut Mob) {
-    if !mob.no_ai {
-        mob.axolotl.playing_dead = mob.axolotl.play_dead_ticks > 0;
+    if mob.no_ai {
+        return;
+    }
+    let was_playing_dead = mob.axolotl.playing_dead;
+    let ticks = mob.axolotl.play_dead_ticks;
+    mob.axolotl.playing_dead = ticks > 0;
+    if ticks == 0 {
+        return;
+    }
+    // `ValidatePlayDead.create`：每刻记忆减一，到 0 后由下一刻清掉标志。
+    // `ValidatePlayDead.create`: decrement the memory each tick; the flag clears
+    // on the tick after it reaches zero.
+    mob.axolotl.play_dead_ticks = ticks - 1;
+    if !was_playing_dead {
+        // `PlayDead.start`：装死开始时给 200 刻的 REGENERATION。
+        // `PlayDead.start`: give 200 ticks of REGENERATION when play-dead starts.
+        living::add_effect(
+            mob,
+            super::effects::EffectInstance::new(mob_effect::REGENERATION, 200),
+        );
     }
 }
 
@@ -299,5 +324,34 @@ mod tests {
             mc_bamboo_data::spawning::MobCategory::Axolotls
         );
         assert_eq!(MobType::Axolotl.increase_air_supply(10), 14);
+    }
+
+    #[test]
+    fn playing_dead_counts_down_and_grants_regeneration() {
+        let mut mob = Mob::new(MobType::Axolotl);
+        mob.axolotl.play_dead_ticks = 200;
+        // 第一刻：置标志、记忆减一、加上 200 刻的 REGENERATION。
+        // First tick: set the flag, decrement the memory, add 200-tick REGENERATION.
+        update_playing_dead(&mut mob);
+        assert!(mob.axolotl.playing_dead);
+        assert_eq!(mob.axolotl.play_dead_ticks, 199);
+        assert!(mob.effects.has(mob_effect::REGENERATION));
+        // 再跑 200 刻：记忆归零，标志在最后一刻复位（和官方 `ValidatePlayDead` 一样）。
+        // Run 200 more ticks: the memory reaches zero and the flag clears on the last
+        // one, just like vanilla `ValidatePlayDead`.
+        for _ in 0..200 {
+            update_playing_dead(&mut mob);
+        }
+        assert_eq!(mob.axolotl.play_dead_ticks, 0);
+        assert!(!mob.axolotl.playing_dead);
+        // NoAI 的对拍夹具不推进装死。
+        // NoAI oracle fixtures leave play-dead untouched.
+        let mut frozen = Mob::new(MobType::Axolotl);
+        frozen.no_ai = true;
+        frozen.axolotl.play_dead_ticks = 200;
+        update_playing_dead(&mut frozen);
+        assert_eq!(frozen.axolotl.play_dead_ticks, 200);
+        assert!(!frozen.axolotl.playing_dead);
+        assert!(!frozen.effects.has(mob_effect::REGENERATION));
     }
 }
