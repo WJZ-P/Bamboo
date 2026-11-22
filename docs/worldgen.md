@@ -818,7 +818,7 @@ main 上 CPU 随线程数涨，是地物结果缓存按线程各存一份、同�
 现在全进程共享（每个中心一次）。地形缓存现算数等于 13×13 下界，`build_view` 的耗时
 几乎全是替别人算地形。仍剩的一份重复是每个交付区块自己的 features 任务又跑一遍本中心
 地物（约 6 ms），去掉它的设计在 `performance-optimizations.md` 18.6，等确认。另外每条计算线程第一次用时要建自己的
-`Worldgen` / `Generator` / 结构状态，约 1 s CPU，长跑服务器只付一次。
+`Generator` / `SeededRouter`（`Worldgen`、结构状态和群系表已全进程共享），约 1 s CPU，长跑服务器只付一次。
 
 ### 分阶段、分高度带的耗时（`wg-perf`）
 

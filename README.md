@@ -578,7 +578,8 @@ WebView2 的渲染进程不算在内。
   `lastResult` 仍是线程本地。结果逐字节不变：`structures`、`structure-rings`、
   `chunkgen --through features` 全 0 不一致；同口径重测气候树 6.85 → 1.71 MB、结构状态类
   15.74 → 10.56 MB，约 −10.9 MB 常驻，`plain` 离开后工作集 157 → 145 MB，见
-  `docs/profiling.md` §20.2。
+  `docs/profiling.md` §20.2。**已知限制**：共享缓存按 `(seed, settings, flat)` 常驻不回收，
+  进程内换种子 / 平坦设置会累积多份（改动前每线程缓存同样不回收，只是每份副本更多）。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
