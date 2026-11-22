@@ -57,16 +57,24 @@ pub struct StructureData {
 ///
 /// Cache a chunk's rich starts by `(seed, settings, x, z)`; a hit only saves time.
 type StartsCache = HashMap<(i32, i32), Arc<WorldStructureStarts>>;
-/// 每条计算线程一份 `WorldStructureState` + `SeededRouter`：`SeededRouter` 的 R 树
-/// `lastResult` 是 `Cell`，不能跨线程共享（官方是 `ThreadLocal`）。
+/// 每条计算线程一份可变工作状态：`WorldStructureState`、`SeededRouter`（密度函数采样器
+/// 缓存）、地形 / 结构 `Generator`（随机源、临时缓冲），以及按配置建好的群系 `preset`。
+/// 解析好的只读 `Worldgen` 由 `Worldgen::shared()` 全进程共用；这些字段因需 `&mut` 或
+/// 按线程缓存仍留在 `thread_local!` 里，群系 R 树的 `lastResult` 也按「线程 + 表」隔离。
 ///
-/// Per-thread `WorldStructureState` + `SeededRouter`: the router's R-tree `lastResult`
-/// is a `Cell` and cannot be shared (vanilla uses a `ThreadLocal`).
+/// Per-thread mutable working state: `WorldStructureState`, `SeededRouter` (density-function
+/// sampler caches), terrain/structure `Generator`s (RNG, scratch buffers), and the per-config
+/// biome `preset`. The parsed, read-only `Worldgen` is shared process-wide via
+/// `Worldgen::shared()`; these fields stay in `thread_local!` because they need `&mut` or are
+/// per-thread caches, and the biome R-tree `lastResult` is isolated per (thread, table).
 struct StructureThread {
     state: WorldStructureState,
     router: SeededRouter,
-    /// 每线程一份：`ParameterList` 的 R 树 `lastResult` 是 `Cell`，不能跨线程共享。
-    /// Per-thread: the parameter list's R-tree `lastResult` is a `Cell`.
+    /// 每线程一份：平坦世界要换成单点群系表；R 树 `lastResult` 现在是「线程 + 表」
+    /// 的线程本地状态，实例本身只读，可全进程共享（这里仍按线程各建一份）。
+    /// Per-thread: flat worlds replace it with a single-point biome table; the
+    /// R-tree `lastResult` is now per-(thread, table) thread-local state and the
+    /// instance itself is read-only and shareable (still built once per thread here).
     preset: MultiNoiseBiomeSource,
     settings: &'static mc_bamboo_worldgen::settings::Settings,
     generator: chunk::Generator<'static>,
@@ -164,7 +172,7 @@ fn with_thread<T>(
         let key = thread_key(config);
         let mut cache = cache.borrow_mut();
         if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key.clone()) {
-            let worldgen: &'static Worldgen = Box::leak(Box::new(Worldgen::load()?));
+            let worldgen = Worldgen::shared()?;
             let settings = worldgen
                 .settings(settings_id)
                 .ok_or("missing noise settings")?;
@@ -261,11 +269,15 @@ pub fn structure_names(config: &WorldGenConfig) -> Vec<String> {
     with_thread(config, |thread| Ok(thread.state.structures.names())).unwrap_or_default()
 }
 
-/// 清掉游戏地形生成器（与结构阶段共用同一个按线程泄漏的 `Worldgen`）的群系
-/// R 树状态，让结构阶段的单点查询不影响随后地形的成批 quart 群系判定。
+/// 清掉游戏地形生成器的群系 R 树状态，让结构阶段的单点查询不影响随后地形的
+/// 成批 quart 群系判定。地形与结构生成器现在引用全进程共用的同一份 `Worldgen`，
+/// 其 `lastResult` 按「线程 + 表」隔离，这条仍在当前线程把起点清到确定状态。
 ///
 /// Clear the game terrain generator's biome R-tree state so structure-stage
 /// single-point queries cannot affect the following batch quart biome lookups.
+/// Terrain and structure generators now reference the same process-wide
+/// `Worldgen`, whose `lastResult` is isolated per (thread, table); this still
+/// resets the current thread to a fixed start.
 pub fn reset_generator_biome_state(config: &WorldGenConfig) -> Result<(), String> {
     crate::worldgen::with_generator(config, |generator| {
         generator.reset_biome_state();
