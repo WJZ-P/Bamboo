@@ -692,6 +692,15 @@ pub(super) fn check_spawn_rules(
         MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
             super::fish::check_spawn_rules(world, kind, pos, sea_level)
         }
+        // `Dolphin` 用 `checkSurfaceAgeableWaterCreatureSpawnRules`（和鱿鱼同源）。
+        // The dolphin uses `checkSurfaceAgeableWaterCreatureSpawnRules` (same as squid).
+        MobType::Dolphin => super::dolphin::check_spawn_rules(world, sea_level, pos),
+        // `Axolotl.checkAxolotlSpawnRules`：脚下是 `axolotls_spawnable_on`（黏土）。
+        // `Axolotl.checkAxolotlSpawnRules`: the block below is in
+        // `axolotls_spawnable_on` (clay).
+        MobType::Axolotl => world
+            .block_state(pos.below())
+            .is_tagged(block_tags::AXOLOTLS_SPAWNABLE_ON),
         // `Turtle.checkTurtleSpawnRules`：海平面 +4 以下、沙子上、亮度足够。
         // `Turtle.checkTurtleSpawnRules`: below sea level + 4, on sand and bright.
         MobType::Turtle => {
@@ -856,6 +865,9 @@ fn is_valid_position_for_mob(
         && (kind == MobType::Drowned
             || kind.is_ageable_water_creature()
             || kind.is_water_animal()
+            // 美西螈的 `checkSpawnObstruction` 也只剩 `isUnobstructed`，不查液体。
+            // The axolotl's `checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
+            || kind == MobType::Axolotl
             || !contains_any_liquid(world, bounds))
         && is_unobstructed_by_entities(world, bounds)
 }

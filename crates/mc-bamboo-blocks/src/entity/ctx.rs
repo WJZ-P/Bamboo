@@ -748,6 +748,10 @@ pub enum Command {
         ///
         /// Whether the father is a screaming goat; a kid may take after it.
         father_screaming: bool,
+        /// 父亲的美西螈花色（落地时父亲不在实体表里）。
+        ///
+        /// The axolotl father's variant (it is not in the table when this lands).
+        father_axolotl: i32,
     },
     /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
     ///
@@ -1104,6 +1108,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             father_wolf,
             father_cat,
             father_screaming,
+            father_axolotl,
         } => super::mob::living::apply_breed(
             me,
             partner,
@@ -1120,6 +1125,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 cat: father_cat,
                 screaming: father_screaming,
                 genes: father_genes,
+                axolotl: father_axolotl,
             },
             world,
         ),
@@ -1360,8 +1366,8 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 0.3,
                 pitch,
             );
-            // 方块常量就是缺省状态的 ID（原先拿它当注册表下标，会越界）。
-            // Block constants are default state ids (indexing the registry with one overflowed).
+            // `blocks::TURTLE_EGG` 已经是默认状态 ID，不是方块注册表下标。
+            // `blocks::TURTLE_EGG` is already the default state id, not a block registry index.
             let state = crate::state::BlockState(mc_bamboo_data::blocks::TURTLE_EGG);
             world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
         }

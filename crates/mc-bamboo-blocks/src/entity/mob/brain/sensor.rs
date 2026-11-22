@@ -46,6 +46,10 @@ pub enum SensorKind {
     ///
     /// `IsInWaterSensor`.
     IsInWater,
+    /// `AxolotlAttackablesSensor`（`NearestVisibleLivingEntitySensor` 子类）。
+    ///
+    /// `AxolotlAttackablesSensor` (a `NearestVisibleLivingEntitySensor` subclass).
+    AxolotlAttackables,
 }
 
 impl SensorKind {
@@ -94,6 +98,34 @@ impl SensorKind {
             ],
             Self::FrogTemptations => &[MemoryType::TemptingPlayer],
             Self::IsInWater => &[MemoryType::IsInWater],
+            // `AxolotlAttackablesSensor.requires()` = 视线表 + `NEAREST_ATTACKABLE`
+            // + `HAS_HUNTING_COOLDOWN`。
+            //
+            // `AxolotlAttackablesSensor.requires()` = the visible-entity table +
+            // `NEAREST_ATTACKABLE` + `HAS_HUNTING_COOLDOWN`.
+            Self::AxolotlAttackables => &[
+                MemoryType::NearestVisibleLivingEntities,
+                MemoryType::NearestAttackable,
+                MemoryType::HuntingCooldown,
+            ],
+        }
+    }
+
+    /// 官方传感器类的简单类名，对拍时和 Java 的 `getSimpleName()` 一致。
+    ///
+    /// The vanilla sensor class's simple name, matching Java's `getSimpleName()`.
+    pub const fn class_name(self) -> &'static str {
+        match self {
+            Self::NearestLivingEntities => "NearestLivingEntitySensor",
+            Self::HurtBy => "HurtBySensor",
+            Self::FoodTemptations | Self::FrogTemptations => "TemptingSensor",
+            Self::NearestAdult => "AdultSensor",
+            Self::ArmadilloScareDetected => "MobSensor",
+            Self::NearestPlayers => "PlayerSensor",
+            Self::NearestItems => "NearestItemSensor",
+            Self::FrogAttackables => "FrogAttackablesSensor",
+            Self::IsInWater => "IsInWaterSensor",
+            Self::AxolotlAttackables => "AxolotlAttackablesSensor",
         }
     }
 }
@@ -142,6 +174,7 @@ impl Sensor {
             // the frog's `isFood` is `#frog_food`, the same table this lookup uses.
             SensorKind::FrogTemptations => sense_temptations(cx),
             SensorKind::IsInWater => super::super::frog::sense_is_in_water(cx),
+            SensorKind::AxolotlAttackables => super::super::axolotl::sense_attackables(cx),
         }
     }
 }

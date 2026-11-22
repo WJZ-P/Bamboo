@@ -174,6 +174,16 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type.is_equine() {
         super::equine::tick_end(mob);
     }
+    // `Dolphin.tick()` 在 `super.tick()` 之后：湿度、干死、搁浅扑腾。
+    // `Dolphin.tick()` after `super.tick()`: moistness, drying out, beached flopping.
+    if mob.mob_type == super::MobType::Dolphin {
+        super::dolphin::tick(me, mob, ctx);
+    }
+    // `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 记忆映射成元数据。
+    // Tail of `Axolotl.customServerAiStep`: map the PLAY_DEAD_TICKS memory to metadata.
+    if mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::sync_playing_dead(mob);
+    }
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
@@ -398,9 +408,19 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
     mob_base_tick(me, mob, ctx);
-    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
+    if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
+        // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
+        // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply` (squid and fish).
         super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    } else if mob.mob_type == super::MobType::Axolotl && !mob.no_ai {
+        // `Axolotl.baseTick` 的 `handleAirSupply`（`!isNoAi()` 才跑）。
+        // `Axolotl.baseTick`'s `handleAirSupply` (only when `!isNoAi()`).
+        super::axolotl::handle_air_supply(me, mob, ctx, pre_tick_air);
     }
+    // 海豚把 `handleAirSupply` 覆写成空实现，氧气完全由 `LivingEntity.baseTick` 算；
+    // 美西螈 `isNoAi()` 时也只剩 `LivingEntity.baseTick` 的那一层。
+    // A dolphin overrides `handleAirSupply` to a no-op, so air is entirely
+    // `LivingEntity.baseTick`; a no-AI axolotl falls back to that layer too.
 }
 
 /// `Entity.spawnSprintParticle`：服务端虽然不发粒子，但仍消耗两次 `random.nextDouble()`。
@@ -495,19 +515,20 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         {
             // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。溺尸在
             // `#can_breathe_under_water` 里，水生生物和水呼吸效果同理不消耗空气，
-            // 反而按官方补气。
-            //
+            // 反而按官方补气；海豚 / 美西螈的最大氧气和补气方式按类型分派。
             // A cow cannot breathe underwater and has no effect; `OXYGEN_BONUS` is zero so
             // there is no draw. The drowned is in `#can_breathe_under_water`, and aquatic
-            // mobs and the water-breathing effect refill air as vanilla does.
+            // mobs and the water-breathing effect refill air as vanilla does; dolphins and
+            // axolotls override the max and refill by kind.
             let can_breathe = mob.mob_type == super::MobType::Drowned
                 || mob.mob_type.can_breathe_under_water()
                 || mob
                     .effects
                     .has(mc_bamboo_data::registries::mob_effect::WATER_BREATHING);
+            let max_air = mob.mob_type.max_air_supply();
             if can_breathe {
-                if mob.air_supply < 300 {
-                    mob.air_supply = (mob.air_supply + 4).min(300);
+                if mob.air_supply < max_air {
+                    mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
                 }
             } else {
                 mob.air_supply -= 1;
@@ -522,8 +543,8 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     );
                 }
             }
-        } else if mob.air_supply < 300 {
-            mob.air_supply = (mob.air_supply + 4).min(300);
+        } else if mob.air_supply < mob.mob_type.max_air_supply() {
+            mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
         }
         mob.last_pos = Some(me.block_position());
     }
@@ -616,6 +637,14 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
         kind if kind.has_no_ambient_sound() => None,
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
+        // `Dolphin.getAmbientSound`：水里 / 水外两种。
+        // `Dolphin.getAmbientSound`: water / land variants.
+        super::MobType::Dolphin => Some(super::dolphin::ambient_voice(me.in_water)),
+        // `Axolotl.getAmbientSound` 加 `playAmbientSound` 的装死判断。
+        // `Axolotl.getAmbientSound` plus `playAmbientSound`'s playing-dead gate.
+        super::MobType::Axolotl => {
+            super::axolotl::ambient_voice(mob.axolotl.playing_dead, me.in_water)
+        }
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -1347,6 +1376,7 @@ pub(crate) fn breed_with(
             father_wolf: Box::new((mob.wolf, mob.tame)),
             father_cat: mob.cat,
             father_screaming: mob.goat.screaming,
+            father_axolotl: mob.axolotl.variant,
         },
         me,
     );
@@ -1420,6 +1450,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Camel {
         super::camel::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
     }
@@ -1468,6 +1501,18 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let target_in_water = super::goals::current_target_in_water(mob, ctx);
         super::drowned::move_control_tick(me, mob, ctx.blocks(), target, target_in_water);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Axolotl {
+        // `AxolotlMoveControl` / `AxolotlLookControl`：装死时两支都停。
+        // `AxolotlMoveControl` / `AxolotlLookControl`: both stop while playing dead.
+        super::axolotl::move_control_tick(me, mob);
+        super::axolotl::look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Dolphin {
+        // 海豚的 `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` 与
+        // `SmoothSwimmingLookControl(this, 10)`。
+        // The dolphin's `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` and
+        // `SmoothSwimmingLookControl(this, 10)`.
+        super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
+        super::smooth_swim::look_tick(me, mob, 10.0);
     } else {
         if mob.mob_type == super::MobType::Camel {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
@@ -1962,6 +2007,16 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
         super::turtle::travel_in_water(me, mob, ctx, input);
         return;
     }
+    // `Dolphin.travelInWater` / `Axolotl.travelInWater` 换掉水里的推进。
+    // `Dolphin.travelInWater` / `Axolotl.travelInWater` replace the in-water thrust.
+    if me.in_water && mob.mob_type == super::MobType::Dolphin {
+        super::dolphin::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    if me.in_water && mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     let falling = me.delta.y <= 0.0;
     let old_y = me.position.y;
     let gravity = effective_gravity(me, mob);
@@ -2176,6 +2231,12 @@ pub(crate) fn hurt_server(
     };
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
+    }
+    // `Axolotl.hurtServer` 在父类之前做装死判定（`PLAY_DEAD_TICKS`）。
+    // `Axolotl.hurtServer` runs the play-dead roll before the superclass.
+    if mob.mob_type == super::MobType::Axolotl {
+        let has_source = source.attacker.is_some() || source.direct.is_some();
+        super::axolotl::maybe_play_dead(me, mob, amount, has_source);
     }
     living_hurt_server(me, mob, ctx, source, amount)
 }
@@ -2659,6 +2720,10 @@ pub(crate) struct BreedFather {
     ///
     /// The panda father's main and hidden genes.
     pub(crate) genes: Option<(u8, u8)>,
+    /// 美西螈父亲的花色。
+    ///
+    /// The axolotl father's variant.
+    pub(crate) axolotl: i32,
 }
 /// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
 /// 按槽位顺序掉装备（鞍），最后 `Animal.getBaseExperienceReward` 取 `1 + nextInt(3)`。
@@ -2740,6 +2805,9 @@ pub(crate) fn apply_breed(
     let mother_cat = world
         .entity(partner)
         .and_then(|entity| entity.kind.mob().map(|mob| mob.cat));
+    let mother_axolotl = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.axolotl.variant));
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
     let mut wolf = None;
@@ -2799,6 +2867,7 @@ pub(crate) fn apply_breed(
     let equine = foal.is_some();
     let sheep = kind == super::MobType::Sheep;
     let mut from_father = true;
+    let mut axolotl_variant = None;
     match kind {
         super::MobType::Wolf => {
             wolf = Some(super::wolf::offspring(
@@ -2839,6 +2908,16 @@ pub(crate) fn apply_breed(
         | super::MobType::Ocelot
         | super::MobType::Armadillo
         | super::MobType::Goat => {}
+        // 美西螈先赌 1/1200 的稀有蓝，没中才用 `nextBoolean` 取父母之一。
+        // The axolotl rolls 1/1200 for the rare blue first, then one `nextBoolean`
+        // picks a parent.
+        super::MobType::Axolotl => {
+            axolotl_variant = Some(super::axolotl::offspring_variant(
+                &mut me.random,
+                parent.axolotl,
+                mother_axolotl.unwrap_or(super::axolotl::DEFAULT_VARIANT),
+            ));
+        }
         _ if equine => {}
         _ => {
             // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹。
@@ -2938,6 +3017,12 @@ pub(crate) fn apply_breed(
         }
         if let Some(brown) = calf_brown {
             mob.mooshroom.brown = brown;
+        }
+        if let Some(variant) = axolotl_variant {
+            mob.axolotl.variant = variant;
+            // `Axolotl.getBreedOffspring` 的 `baby.setPersistenceRequired()`。
+            // `baby.setPersistenceRequired()` from `Axolotl.getBreedOffspring`.
+            mob.persistence_required = true;
         }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;

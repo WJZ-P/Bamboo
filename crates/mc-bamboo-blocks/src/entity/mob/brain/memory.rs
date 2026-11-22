@@ -63,13 +63,24 @@ pub enum MemoryType {
     /// `FrogAttackablesSensor.requires()` (`UNREACHABLE_TONGUE_TARGETS`): vanilla uses
     /// `register("unreachable_tongue_targets")` with no codec, so it is not saved.
     UnreachableTongueTargets,
+    /// 美西螈的记忆：装死倒计时（`register("play_dead_ticks", Codec.INT)`，进存档）、
+    /// 捕猎冷却（`register("has_hunting_cooldown", Unit.CODEC)`，进存档）和近战冷却
+    /// （`register("attack_cooling_down", Unit.CODEC)`）。追加在末尾，不改既有下标。
+    ///
+    /// The axolotl's memories: the play-dead countdown (`register("play_dead_ticks",
+    /// Codec.INT)`, saved), the hunting cooldown (`register("has_hunting_cooldown",
+    /// Unit.CODEC)`, saved) and the melee cooldown (`register("attack_cooling_down",
+    /// Unit.CODEC)`). Appended last so the existing indices stay put.
+    PlayDeadTicks,
+    HuntingCooldown,
+    AttackCoolingDown,
 }
 
 impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 29;
+    pub const COUNT: usize = 32;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -104,6 +115,9 @@ impl MemoryType {
         Self::NearestAttackable,
         Self::AttackTarget,
         Self::UnreachableTongueTargets,
+        Self::PlayDeadTicks,
+        Self::HuntingCooldown,
+        Self::AttackCoolingDown,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -140,6 +154,9 @@ impl MemoryType {
             Self::NearestAttackable => "nearest_attackable",
             Self::AttackTarget => "attack_target",
             Self::UnreachableTongueTargets => "unreachable_tongue_targets",
+            Self::PlayDeadTicks => "play_dead_ticks",
+            Self::HuntingCooldown => "has_hunting_cooldown",
+            Self::AttackCoolingDown => "attack_cooling_down",
         }
     }
 
@@ -165,6 +182,8 @@ impl MemoryType {
                 | Self::RamCooldownTicks
                 | Self::IsInWater
                 | Self::IsPregnant
+                | Self::PlayDeadTicks
+                | Self::HuntingCooldown
         )
     }
 
@@ -181,6 +200,19 @@ pub enum MemoryStatus {
     ValuePresent,
     ValueAbsent,
     Registered,
+}
+
+impl MemoryStatus {
+    /// 官方枚举名的蛇形写法，对拍时两边一致。
+    ///
+    /// The snake_case form of the vanilla enum name; both sides print the same.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ValuePresent => "value_present",
+            Self::ValueAbsent => "value_absent",
+            Self::Registered => "registered",
+        }
+    }
 }
 
 /// `PositionTracker`：一个方块位置，或者跟着一个实体（玩家或生物）。
