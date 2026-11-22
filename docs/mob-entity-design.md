@@ -2008,7 +2008,11 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 - 存档：`Inventory`（5 格 `InventoryCarrier` 列表）、`PatrolLeader`、`Patrolling`、`patrol_target`，
   `Raider` 的 `Wave` / `CanJoinRaid` / `RaidId` 只作为数据保留；读档后照官方
   `setCanPickUpLoot(true)`。
-- **袭击不在范围内**：四个 `Raider` 目标占注册位但不启动，`Raid`、不祥之瓶、村庄英雄、
+- 掉落：走 `entities/pillager`；队长的灾厄旗帜让 `type_specific/raider` 的 `is_captain` 为真，
+  掉一瓶不祥之瓶（`set_ominous_bottle_amplifier` 的 0–4 级），普通掠夺者不掉。
+  `loot-oracle --entity-table minecraft:entities/pillager` 4000 例（一半队长）0 不一致；夹具没有
+  袭击管理器，`FakeLevel.getRaidAt` 返回空，`has_raid` 恒假。
+- **袭击不在范围内**：四个 `Raider` 目标占注册位但不启动，`Raid`、不祥之瓶的袭击用法、村庄英雄、
   袭击者治疗目标都没有。写进 12.5。
 
 ### 12.3 `PatrolSpawner`
@@ -2075,7 +2079,10 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
   `can_patrol_spawn_at` 覆盖。
 - **自然刷怪的群系表**：`RegionLevel` 没有实现 `biome_id`（沿用默认平原），这是既有限制；
   结构覆盖优先于群系表，所以不影响本次的覆盖功能。
-- **袭击**：`Wave` / `RaidId` / `CanJoinRaid` 只存数据；不祥旗帜只作为头盔物品，不触发袭击。
+- **袭击**：`Wave` / `RaidId` / `CanJoinRaid` 只存数据；不祥旗帜只作为头盔物品，不触发袭击
+  （队长照常掉不祥之瓶，但瓶子不能用）。
+- **音效只做实现、未进对拍**：`mob-oracle` 只比 `entity_event` 和 `set_equipment` 包，音效包
+  不比；掠夺者 / 女巫的环境、受伤、死亡、弩装填与射击音效由代码路径保证，没有逐声音比对。
 
 ### 12.6 与 main 合并后的现状（2026-11-22）
 
@@ -2089,10 +2096,13 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 - `living.rs` / `mod.rs` 的消失判定：main 的 `removes_when_far_away(tickCount)`（豹猫、猫按
   tick 数）和本分支的 `removes_when_far_away_at(distSqr)`（`PatrollingMonster` 按 128 格）
   合成一个 `removes_when_far_away_at(distance_sqr, tick_count)`，`removes_when_far_away(tick)`
-  传 `f64::INFINITY`；两者判定顺序不变（先袭击者、再鱼、再豹猫 / 猫、最后按类别）。
+  传 `f64::INFINITY`；自然生成的位置判定（`natural.rs` 的 `is_valid_position_for_mob`）现在直接
+  把最近玩家距离传给 `removes_when_far_away_at`。两者判定顺序不变（先袭击者、再鱼、再豹猫 / 猫、
+  最后按类别）。
 - 豹猫的自然生成（`natural.rs` 的 `is_valid_position_for_mob` 新增 `sea_level` 参数和豹猫遮挡
   判定）和合并后的 `mobs_at` 结构覆盖共存，掠夺者不参与群系自然刷怪，互不影响。
 
-合并后重跑（提交 `34a9d8f4`）：全量 `mob-oracle` 1845 例 / 189446 刻 0 不一致；
+合并后在最终提交上重跑：全量 `mob-oracle` 1845 例 / 189446 刻 0 不一致；
 `--only natural_spawn` 722 例 / 2888 刻 0 不一致；`--only pillager` 8 例 1653 刻、
-`--only patrol` 5 例、`--only structure_spawn` 1 例均 0 不一致。
+`--only patrol` 5 例、`--only structure_spawn` 1 例均 0 不一致；`chunk-content` 523 项、
+`loot-oracle --entity-table minecraft:entities/pillager` 4000 例均 0 不一致。
