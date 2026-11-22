@@ -507,12 +507,12 @@ impl MobType {
         matches!(
             self,
             Self::Creeper
-            | Self::Enderman
-            | Self::Witch
-            | Self::Slime
-            | Self::Pillager
-            | Self::Ocelot
-            | Self::Cat
+                | Self::Enderman
+                | Self::Witch
+                | Self::Slime
+                | Self::Pillager
+                | Self::Ocelot
+                | Self::Cat
         )
     }
 
