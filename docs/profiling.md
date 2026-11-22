@@ -2426,3 +2426,21 @@ tracked live 103.4 → 76.7 MB、`plain` 离开后工作集 181.0 → 157.3 MB�
 --break-self-test` 报 4 处证明比较器有效。产物在
 `W:/data/bamboo-agents/reports/op-memprof-data/s6-profile/` 与 `s6-plain/`，明细表与推荐见
 `W:/data/bamboo-agents/reports/op-memprof.md`。
+
+### 20.2 续：结构状态与群系表全进程共享（2026-11-22）
+
+地物注册表共享之后，剩下按线程线性增长的常驻项是 `StructureThread` 里的
+`WorldStructureState`（结构集、结构 / jigsaw 注册表、模板池、要塞环位置）和群系
+`ParameterList`。两者构造完就只读，群系 R 树的 `lastResult` 本来就在线程本地（按「线程 +
+表」索引），所以按 `(seed, settings, flat)` 在全进程缓存一份 `Arc`：首个线程用一条临时
+`SeededRouter` 建好，其余线程直接克隆。建状态的输入与改动前每线程那份完全相同，要塞环
+位置、群系吸附、结构放置都不变。
+
+同口径重测（种子 20261121、视距 8）：归属表里 `biome climate search tree copy`
+6.85 → 1.71 MB、`template pools and structure state` 15.74 → 10.56 MB（在线）/ 14.91 →
+9.19 MB（离开后）；后者仍含每条线程 `SeededRouter::new` 编译密度函数的分配（按函数名
+规则串进了这一类），真正共享的结构状态只占 0.98 MB。两项合计约 −10.9 MB 常驻，
+`plain` 离开后工作集 157.3 → 145.0 MB、在线 216.6 → 212.4 MB（机器噪声 ±10–20 MB，
+以归属表为准）。对拍 `structures`（9744 次选择比较）、`structure-rings`（864 次环 /
+群系吸附）、`chunkgen --through features` 全 0 不一致。产物在
+`W:/data/bamboo-agents/reports/op-memprof-data/s7-profile/` 与 `s7-plain/`。

@@ -572,6 +572,13 @@ WebView2 的渲染进程不算在内。
   同口径重测该归属 25.14 → 0 MB、共享 `Worldgen` 22.02 → 24.93 MB（吸收唯一一份），净常驻约
   −22 MB；不带分析器的 release 服务端玩家离开后工作集 181 → 157 MB，见
   `W:/data/bamboo-agents/reports/op-memprof.md` 与 `docs/profiling.md` §20.1。
+- **结构状态与群系表全进程共享**（`op-memprof` 续，2026-11-22）：每条计算线程原先各自解析
+  一份 `WorldStructureState`（结构集、结构 / jigsaw 注册表、模板池、要塞环位置）和一份群系
+  `ParameterList`。两者构造后只读，现按 `(seed, settings, flat)` 全进程缓存一份 `Arc`，R 树
+  `lastResult` 仍是线程本地。结果逐字节不变：`structures`、`structure-rings`、
+  `chunkgen --through features` 全 0 不一致；同口径重测气候树 6.85 → 1.71 MB、结构状态类
+  15.74 → 10.56 MB，约 −10.9 MB 常驻，`plain` 离开后工作集 157 → 145 MB，见
+  `docs/profiling.md` §20.2。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
