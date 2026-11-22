@@ -16,11 +16,32 @@ const RULES: &[(&str, &[&str])] = &[
         &["structure::template::"],
     ),
     (
-        "worldgen: template pools and per-thread structure state",
+        "worldgen data: shared Worldgen (raw JSON, noise settings, density, biomes)",
+        &["Worldgen::parse", "Worldgen::load", "Worldgen::shared"],
+    ),
+    (
+        "worldgen per thread: feature registry copy (cloned JSON)",
+        &["feature::registry::Registry::parse"],
+    ),
+    (
+        "worldgen per thread: biome climate search tree copy",
+        &["climate::bucketize", "climate::build"],
+    ),
+    (
+        "worldgen per thread: template pools and structure state",
         &[
             "TemplatePools::parse",
             "WorldStructureState",
             "worldgen_structures::with_thread",
+        ],
+    ),
+    (
+        "worldgen per thread: generators (seeded noises, compiled samplers)",
+        &[
+            "Generator::with_settings",
+            "sampler::Compiler",
+            "NoiseStackBuilder",
+            "SeededRouter",
         ],
     ),
     (
@@ -43,28 +64,8 @@ const RULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "worldgen data: biome climate search tree",
-        &["climate::bucketize", "climate::build"],
-    ),
-    (
-        "worldgen data: feature registry",
-        &["feature::registry::Registry::parse"],
-    ),
-    (
-        "worldgen data: shared Worldgen (noise settings, density, biomes, raw JSON)",
-        &["Worldgen::parse", "Worldgen::load", "Worldgen::shared"],
-    ),
-    (
-        "worldgen: per-thread generators (seeded noises, compiled samplers)",
-        &[
-            "Generator::with_settings",
-            "worldgen::with_generator",
-            "sampler::Compiler",
-            "NoiseStackBuilder",
-            "SeededRouter",
-            "mc_bamboo_worldgen::",
-            "mc_bamboo_game::worldgen",
-        ],
+        "worldgen: other (in-flight generation, small tables)",
+        &["mc_bamboo_worldgen::", "mc_bamboo_game::worldgen"],
     ),
     (
         "chunk packets: encoded and compressed frames",

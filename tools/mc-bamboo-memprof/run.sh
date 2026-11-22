@@ -23,7 +23,8 @@
 #   SETTLE     起服后等多少秒再取空载读数（默认 20）
 #   ONLINE     玩家在线多少秒（默认 90；在线读数在离开前 10 秒取）
 #   AFTER      玩家离开后等多少秒（默认 120）
-#   BAMBOO_TOML  追加进 bamboo.toml 的内容（可选）
+#   BAMBOO_TOML  写进 bamboo.toml 的内容（可选）
+#   BIN        二进制所在目录（默认 target/release）
 set -u
 
 TREE=$(cd "$(dirname "$0")/../.." && pwd)
@@ -34,7 +35,7 @@ VIEW=${VIEW:-8}
 SETTLE=${SETTLE:-20}
 ONLINE=${ONLINE:-90}
 AFTER=${AFTER:-120}
-BIN="$TREE/target/release"
+BIN=${BIN:-"$TREE/target/release"}
 SERVER_DIR="$OUT/server-$MODE"
 CONTROL="$OUT/control"
 
@@ -86,6 +87,11 @@ sleep "$AFTER"
 reading left
 
 if [ "$MODE" != plain ]; then
+    # 实验：压实堆之后再取一份，看空闲块里有多少能退还给系统。
+    # Experiment: one more reading after compacting the heaps.
+    echo compact > "$CONTROL/cmd"
+    sleep 5
+    reading compacted
     echo quit > "$CONTROL/cmd"
     wait "$SERVER"
     for name in startup online left; do

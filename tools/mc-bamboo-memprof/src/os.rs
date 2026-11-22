@@ -91,6 +91,8 @@ mod imp {
     pub fn symbolize(_address: usize) -> Vec<String> {
         Vec::new()
     }
+
+    pub fn compact_heaps() {}
 }
 
 #[cfg(windows)]
@@ -194,6 +196,7 @@ mod imp {
         fn HeapLock(heap: Handle) -> i32;
         fn HeapUnlock(heap: Handle) -> i32;
         fn HeapWalk(heap: Handle, entry: *mut ProcessHeapEntry) -> i32;
+        fn HeapCompact(heap: Handle, flags: u32) -> usize;
         fn RtlCaptureStackBackTrace(
             skip: u32,
             capture: u32,
@@ -286,6 +289,17 @@ mod imp {
             walk_heap(*heap, &mut totals);
         }
         totals
+    }
+
+    /// 让每个堆合并相邻的空闲块、把整页空闲的内存退还给系统。
+    ///
+    /// Asks every heap to coalesce free blocks and decommit fully free pages.
+    pub fn compact_heaps() {
+        let mut handles = [ptr::null_mut(); 64];
+        let count = unsafe { GetProcessHeaps(handles.len() as u32, handles.as_mut_ptr()) } as usize;
+        for heap in &handles[..count.min(handles.len())] {
+            unsafe { HeapCompact(*heap, 0) };
+        }
     }
 
     fn walk_heap(heap: Handle, totals: &mut HeapTotals) {
@@ -500,5 +514,6 @@ mod imp {
 }
 
 pub use imp::{
-    address_space, capture_stack, process_memory, reserve_zeroed, symbolize, walk_heaps,
+    address_space, capture_stack, compact_heaps, process_memory, reserve_zeroed, symbolize,
+    walk_heaps,
 };

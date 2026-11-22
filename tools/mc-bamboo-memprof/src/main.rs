@@ -5,6 +5,7 @@
 //!     和命令行版 bamboo 一样读配置、起服，但全局分配器换成记账分配器。
 //!     每 200 ms 看一眼 <control>/cmd 文件，内容是一行命令：
 //!       snap <名字>   写 <名字>.os.txt（进程、堆、地址空间读数）和 <名字>.raw（各分配点）
+//!       compact       对每个堆调 HeapCompact（实验：看空闲块能退还多少）
 //!       quit          把所有栈帧地址解析成函数名写进 symbols.txt，然后退出进程
 //! bamboo-memprof report <快照.raw> <symbols.txt> [--top N] [--stacks N] [--owner 名字]
 //!     按归属汇总一份快照；--owner 只看某一类里最大的分配点。
@@ -113,6 +114,10 @@ fn control_loop(control: &Path) {
         let mut words = text.split_whitespace();
         let outcome = match (words.next(), words.next()) {
             (Some("snap"), Some(label)) => snapshot(control, label),
+            (Some("compact"), _) => {
+                os::compact_heaps();
+                Ok(())
+            }
             (Some("quit"), _) => {
                 let outcome = write_symbols(&control.join("symbols.txt"));
                 info!(?outcome, "memprof wrote symbols and exits");
