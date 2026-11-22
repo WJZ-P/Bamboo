@@ -264,6 +264,29 @@ pub(super) fn travel_in_water(
     me.delta = me.delta.scale(0.9);
 }
 
+/// `Axolotl.AxolotlMoveControl`：`SmoothSwimmingMoveControl(this, 85, 10, 0.1F, 0.5F, false)`，
+/// 装死时整个跳过（`AxolotlMoveControl.tick` 的覆写）。
+///
+/// `Axolotl.AxolotlMoveControl`: `SmoothSwimmingMoveControl(this, 85, 10, 0.1F, 0.5F,
+/// false)`, skipped entirely while playing dead (the `AxolotlMoveControl.tick` override).
+pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
+    if mob.axolotl.playing_dead {
+        return;
+    }
+    super::smooth_swim::move_tick(me, mob, &super::smooth_swim::AXOLOTL);
+}
+
+/// `Axolotl.AxolotlLookControl`：`SmoothSwimmingLookControl(this, 20)`，装死时不转视角。
+///
+/// `Axolotl.AxolotlLookControl`: `SmoothSwimmingLookControl(this, 20)`, which does not
+/// look around while playing dead.
+pub(super) fn look_control_tick(me: &Entity, mob: &mut Mob) {
+    if mob.axolotl.playing_dead {
+        return;
+    }
+    super::smooth_swim::look_tick(me, mob, 20.0);
+}
+
 /// `Axolotl.hurtServer` 的装死判定（在 `super.hurtServer` 之前）：
 /// 用实体随机源做短路求值，命中就把 `PLAY_DEAD_TICKS` 记忆设成 200。
 ///

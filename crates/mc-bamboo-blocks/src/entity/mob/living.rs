@@ -1492,6 +1492,18 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let target_in_water = super::goals::current_target_in_water(mob, ctx);
         super::drowned::move_control_tick(me, mob, ctx.blocks(), target, target_in_water);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Axolotl {
+        // `AxolotlMoveControl` / `AxolotlLookControl`：装死时两支都停。
+        // `AxolotlMoveControl` / `AxolotlLookControl`: both stop while playing dead.
+        super::axolotl::move_control_tick(me, mob);
+        super::axolotl::look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Dolphin {
+        // 海豚的 `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` 与
+        // `SmoothSwimmingLookControl(this, 10)`。
+        // The dolphin's `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` and
+        // `SmoothSwimmingLookControl(this, 10)`.
+        super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
+        super::smooth_swim::look_tick(me, mob, 10.0);
     } else {
         if mob.mob_type == super::MobType::Camel {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。

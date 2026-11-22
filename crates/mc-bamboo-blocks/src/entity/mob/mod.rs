@@ -58,6 +58,7 @@ pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod slime;
+pub mod smooth_swim;
 pub mod spawn;
 pub mod spider;
 pub mod squid;
