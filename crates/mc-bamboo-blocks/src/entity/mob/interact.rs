@@ -264,6 +264,15 @@ pub(super) fn animal_interact(
     // `Turtle.canFallInLove`：身上有蛋时不进求爱。
     // `Turtle.canFallInLove`: no love while carrying an egg.
     let can_fall_in_love = mob.mob_type != MobType::Turtle || !mob.turtle.has_egg;
+    // `Axolotl.usePlayerItem`：热带鱼桶喂完换成水桶（创造模式手里不变）。
+    // `Axolotl.usePlayerItem`: the tropical fish bucket turns into a water bucket
+    // (creative keeps the bucket).
+    let (shrink_held, replacement) =
+        if mob.mob_type == MobType::Axolotl && req.held.item == items::TROPICAL_FISH_BUCKET {
+            (false, Some(ItemStack::new(items::WATER_BUCKET, 1)))
+        } else {
+            (!req.creative, None)
+        };
     if age == 0 && mob.in_love <= 0 && can_fall_in_love {
         // `Animal.setInLove(player)`：600 刻求爱、记住玩家 UUID、发爱心事件 18。
         mob.in_love = 600;
@@ -272,8 +281,8 @@ pub(super) fn animal_interact(
         play_eating_sound(me, mob);
         return MobInteraction {
             result: InteractionResult::SuccessServer,
-            shrink_held: !req.creative,
-            replacement: None,
+            shrink_held,
+            replacement,
             ..MobInteraction::pass()
         };
     }
@@ -284,8 +293,8 @@ pub(super) fn animal_interact(
         play_eating_sound(me, mob);
         return MobInteraction {
             result: InteractionResult::Success,
-            shrink_held: !req.creative,
-            replacement: None,
+            shrink_held,
+            replacement,
             ..MobInteraction::pass()
         };
     }
@@ -348,5 +357,53 @@ pub fn age_up(me: &mut Entity, mob: &mut Mob, seconds: i32, force: bool) {
     }
     if mob.age == 0 {
         living::set_age(me, mob, mob.forced_age);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(item: i32) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [0; 16],
+            hand: Hand::Main,
+            held: ItemStack::new(item, 1),
+            creative: false,
+            position: Vec3::default(),
+            sneaking: false,
+        }
+    }
+
+    /// `Axolotl.usePlayerItem`：热带鱼桶喂完交回一个水桶，不单纯扣掉。
+    ///
+    /// `Axolotl.usePlayerItem`: feeding with a tropical fish bucket hands back a
+    /// water bucket instead of consuming the bucket outright.
+    #[test]
+    fn an_axolotl_fed_a_tropical_fish_bucket_gets_a_water_bucket_back() {
+        let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
+        let outcome = entity
+            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH_BUCKET), 0, false))
+            .expect("an axolotl mob");
+        assert_eq!(outcome.result, InteractionResult::SuccessServer);
+        assert!(!outcome.shrink_held);
+        assert_eq!(
+            outcome.replacement.expect("a water bucket").item,
+            items::WATER_BUCKET
+        );
+        assert_eq!(entity.kind.mob().expect("a mob").in_love, 600);
+    }
+
+    /// 别的食物照旧只扣一个。
+    ///
+    /// Other foods still just shrink the held stack.
+    #[test]
+    fn an_axolotl_fed_something_else_just_shrinks_the_stack() {
+        let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
+        let outcome = entity
+            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH), 0, false))
+            .expect("an axolotl mob");
+        assert_eq!(outcome.result, InteractionResult::Pass);
     }
 }

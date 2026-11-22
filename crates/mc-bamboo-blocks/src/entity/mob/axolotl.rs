@@ -41,6 +41,11 @@ use crate::{
 /// `Axolotl.Variant`: 0 lucy, 1 wild, 2 gold, 3 cyan, 4 blue (the rare one).
 pub(super) const COMMON_VARIANTS: [i32; 4] = [0, 1, 2, 3];
 pub(super) const DEFAULT_VARIANT: i32 = 0;
+const RARE_VARIANT: i32 = 4;
+/// `Axolotl.RARE_VARIANT_CHANCE`。
+///
+/// `Axolotl.RARE_VARIANT_CHANCE`.
+const RARE_VARIANT_CHANCE: i32 = 1200;
 
 /// 美西螈的专属状态：花色和装桶标记。装死倒计时是大脑记忆 `PLAY_DEAD_TICKS`。
 ///
@@ -163,6 +168,31 @@ pub(super) fn finalize_spawn(
             types,
             group_size: 1,
         });
+    }
+}
+
+/// `Axolotl.getBreedOffspring` 的花色（幼崽构造之后）：先 `nextInt(1200)` 赌稀有的
+/// 蓝色，命中时 `getRareSpawnVariant` 再从只含蓝色的名单里抽一次（`nextInt(1)`）；
+/// 没命中就用 `nextBoolean` 取父亲或母亲的花色。两条路径都恰好取两次随机数。
+///
+/// The variant part of `Axolotl.getBreedOffspring` (after the baby is constructed):
+/// `nextInt(1200)` rolls for the rare blue, whose `getRareSpawnVariant` draws once more
+/// from the one-entry rare list (`nextInt(1)`); otherwise one `nextBoolean` picks a
+/// parent's variant. Both paths draw exactly twice.
+pub(super) fn offspring_variant(
+    random: &mut crate::entity::JavaRandom,
+    mine: i32,
+    partner: i32,
+) -> i32 {
+    if random.next_int_bounded(RARE_VARIANT_CHANCE) == 0 {
+        // `Util.getRandom` 对单元素数组仍走 `nextInt(length)`。
+        // `Util.getRandom` still calls `nextInt(length)` for a one-entry array.
+        let _ = random.next_int_bounded(1);
+        RARE_VARIANT
+    } else if random.next_boolean() {
+        mine
+    } else {
+        partner
     }
 }
 
@@ -393,5 +423,40 @@ mod tests {
             Some(&MemoryValue::Bool(true))
         );
         assert_eq!(loaded.memories.get(MemoryType::AttackCoolingDown), None);
+    }
+
+    #[test]
+    fn offspring_variant_draws_once_for_the_roll_and_once_for_the_parent() {
+        // 种子挑一个 `nextInt(1200)` 不为 0 的，走普通路径。
+        // A seed whose `nextInt(1200)` is not zero takes the common path.
+        let seed = 0x5EED_5EED;
+        let mut random = crate::entity::JavaRandom::new(seed);
+        let mut reference = crate::entity::JavaRandom::new(seed);
+        let variant = offspring_variant(&mut random, 1, 3);
+        let roll = reference.next_int_bounded(RARE_VARIANT_CHANCE);
+        assert_ne!(roll, 0);
+        let expected = if reference.next_boolean() { 1 } else { 3 };
+        assert_eq!(variant, expected);
+        assert_eq!(random.state(), reference.state(), "exactly two draws");
+    }
+
+    #[test]
+    fn a_rare_roll_takes_the_one_entry_rare_list() {
+        // 找一个 `nextInt(1200) == 0` 的种子。
+        // Find a seed whose `nextInt(1200)` returns zero.
+        let seed = (0..100_000)
+            .find(|seed| {
+                let mut random = crate::entity::JavaRandom::new(*seed);
+                random.next_int_bounded(RARE_VARIANT_CHANCE) == 0
+            })
+            .expect("a rare roll exists in the first 100000 seeds");
+        let mut random = crate::entity::JavaRandom::new(seed);
+        let mut reference = crate::entity::JavaRandom::new(seed);
+        assert_eq!(offspring_variant(&mut random, 1, 3), RARE_VARIANT);
+        assert_eq!(reference.next_int_bounded(RARE_VARIANT_CHANCE), 0);
+        // `Variant.getRareSpawnVariant` 从单元素名单里再抽一次。
+        // `Variant.getRareSpawnVariant` draws once from the one-entry list.
+        assert_eq!(reference.next_int_bounded(1), 0);
+        assert_eq!(random.state(), reference.state(), "exactly two draws");
     }
 }

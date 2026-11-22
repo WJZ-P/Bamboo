@@ -18,7 +18,10 @@ use mc_bamboo_protocol::{
     item::ItemStack,
 };
 
-use super::{Mob, MobType};
+use super::{
+    Mob, MobType,
+    brain::memory::{MemoryType, MemoryValue},
+};
 use crate::{entity::Entity, world::World};
 
 /// `SoundEvents.BUCKET_FILL_FISH`：所有可装桶的鱼共用。
@@ -76,6 +79,23 @@ pub fn save_default_data(entity: &Entity, mob: &Mob) -> Vec<(String, Tag)> {
         out.push(("Variant".to_owned(), Tag::Int(mob.axolotl.variant)));
         out.push(("Age".to_owned(), Tag::Int(mob.age)));
         out.push(("AgeLocked".to_owned(), Tag::Byte(i8::from(mob.age_locked))));
+        // `Axolotl.saveToBucketTag`：有捕猎冷却时写剩余刻数（`getTimeUntilExpiry`）；
+        // `loadFromBucketTag` 把它当成同样的时长恢复。
+        //
+        // `Axolotl.saveToBucketTag`: with a hunting cooldown, store the remaining ticks
+        // (`getTimeUntilExpiry`); `loadFromBucketTag` restores it as the same duration.
+        if let Some(brain) = mob.brain.as_ref()
+            && brain.memories.has(MemoryType::HuntingCooldown)
+        {
+            out.push((
+                "HuntingCooldown".to_owned(),
+                Tag::Long(
+                    brain
+                        .memories
+                        .time_until_expiry(MemoryType::HuntingCooldown),
+                ),
+            ));
+        }
     }
     // `Tadpole.saveToBucketTag`：再追加年龄和锁。
     // `Tadpole.saveToBucketTag` appends the age and the lock.
@@ -128,6 +148,17 @@ pub fn load_default_data(entity: &mut Entity, mob: &mut Mob, tag: &Tag) {
             }
             "AgeLocked" if mob.mob_type == MobType::Axolotl => {
                 mob.age_locked = tag_bool(value, mob.age_locked);
+            }
+            "HuntingCooldown" if mob.mob_type == MobType::Axolotl => {
+                if let Tag::Long(ticks) = value
+                    && let Some(brain) = mob.brain.as_mut()
+                {
+                    brain.memories.set_with_ttl(
+                        MemoryType::HuntingCooldown,
+                        MemoryValue::Bool(true),
+                        *ticks,
+                    );
+                }
             }
             // `Tadpole.loadFromBucketTag`。
             "Age" if mob.mob_type == MobType::Tadpole => {
@@ -516,6 +547,43 @@ mod tests {
         let mob = entity.kind.mob().expect("a mob");
         assert_eq!(mob.health, 1.0);
         assert!(!mob.no_ai);
+    }
+
+    #[test]
+    fn an_axolotl_bucket_carries_the_remaining_hunting_cooldown() {
+        let mut entity = fish(MobType::Axolotl);
+        entity.with_mob(|_, mob| {
+            mob.axolotl.variant = 2;
+            mob.brain
+                .as_mut()
+                .expect("an axolotl has a brain")
+                .memories
+                .set_with_ttl(MemoryType::HuntingCooldown, MemoryValue::Bool(true), 1234);
+        });
+        let stack = entity
+            .with_mob(|me, mob| bucket_stack(me, mob))
+            .flatten()
+            .expect("an axolotl is bucketable");
+        let patch = ComponentPatch::from_opaque(&stack).expect("the patch decodes");
+        let Some(ComponentValue::BucketEntityData(entries)) = patch.get(kinds::BUCKET_ENTITY_DATA)
+        else {
+            panic!("the bucket carries entity data");
+        };
+        assert!(entries.contains(&("Variant".to_owned(), Tag::Int(2))));
+        assert!(entries.contains(&("HuntingCooldown".to_owned(), Tag::Long(1234))));
+        // 放回时按同一个时长恢复，不是绝对时刻。
+        // Putting it back restores the same duration, not an absolute time.
+        let mut restored = fish(MobType::Axolotl);
+        restored.with_mob(|me, mob| apply_bucket_stack(me, mob, &stack));
+        let mob = restored.kind.mob().expect("a mob");
+        let brain = mob.brain.as_ref().expect("an axolotl has a brain");
+        assert!(brain.memories.has(MemoryType::HuntingCooldown));
+        assert_eq!(
+            brain
+                .memories
+                .time_until_expiry(MemoryType::HuntingCooldown),
+            1234
+        );
     }
 
     #[test]

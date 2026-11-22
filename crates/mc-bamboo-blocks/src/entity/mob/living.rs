@@ -1367,6 +1367,7 @@ pub(crate) fn breed_with(
             father_wolf: Box::new((mob.wolf, mob.tame)),
             father_cat: mob.cat,
             father_screaming: mob.goat.screaming,
+            father_axolotl: mob.axolotl.variant,
         },
         me,
     );
@@ -2698,6 +2699,10 @@ pub(crate) struct BreedFather {
     ///
     /// The panda father's main and hidden genes.
     pub(crate) genes: Option<(u8, u8)>,
+    /// 美西螈父亲的花色。
+    ///
+    /// The axolotl father's variant.
+    pub(crate) axolotl: i32,
 }
 /// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
 /// 按槽位顺序掉装备（鞍），最后 `Animal.getBaseExperienceReward` 取 `1 + nextInt(3)`。
@@ -2779,6 +2784,9 @@ pub(crate) fn apply_breed(
     let mother_cat = world
         .entity(partner)
         .and_then(|entity| entity.kind.mob().map(|mob| mob.cat));
+    let mother_axolotl = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.axolotl.variant));
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
     let mut wolf = None;
@@ -2838,6 +2846,7 @@ pub(crate) fn apply_breed(
     let equine = foal.is_some();
     let sheep = kind == super::MobType::Sheep;
     let mut from_father = true;
+    let mut axolotl_variant = None;
     match kind {
         super::MobType::Wolf => {
             wolf = Some(super::wolf::offspring(
@@ -2878,6 +2887,16 @@ pub(crate) fn apply_breed(
         | super::MobType::Ocelot
         | super::MobType::Armadillo
         | super::MobType::Goat => {}
+        // 美西螈先赌 1/1200 的稀有蓝，没中才用 `nextBoolean` 取父母之一。
+        // The axolotl rolls 1/1200 for the rare blue first, then one `nextBoolean`
+        // picks a parent.
+        super::MobType::Axolotl => {
+            axolotl_variant = Some(super::axolotl::offspring_variant(
+                &mut me.random,
+                parent.axolotl,
+                mother_axolotl.unwrap_or(super::axolotl::DEFAULT_VARIANT),
+            ));
+        }
         _ if equine => {}
         _ => {
             // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹。
@@ -2977,6 +2996,9 @@ pub(crate) fn apply_breed(
         }
         if let Some(brown) = calf_brown {
             mob.mooshroom.brown = brown;
+        }
+        if let Some(variant) = axolotl_variant {
+            mob.axolotl.variant = variant;
         }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;

@@ -725,6 +725,10 @@ pub enum Command {
         ///
         /// Whether the father is a screaming goat; a kid may take after it.
         father_screaming: bool,
+        /// 父亲的美西螈花色（落地时父亲不在实体表里）。
+        ///
+        /// The axolotl father's variant (it is not in the table when this lands).
+        father_axolotl: i32,
     },
     /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
     ///
@@ -1068,6 +1072,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             father_wolf,
             father_cat,
             father_screaming,
+            father_axolotl,
         } => super::mob::living::apply_breed(
             me,
             partner,
@@ -1084,6 +1089,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 cat: father_cat,
                 screaming: father_screaming,
                 genes: father_genes,
+                axolotl: father_axolotl,
             },
             world,
         ),
