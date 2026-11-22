@@ -416,6 +416,15 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::String(mob.frog.variant.key().to_owned()),
         );
     }
+    if mob.mob_type == MobType::Camel {
+        // `Camel.addAdditionalSaveData`：`output.putLong("LastPoseTick", entityData.get(LAST_POSE_CHANGE_TICK))`。
+        // `Camel.addAdditionalSaveData`: writes the synced pose tick as `LastPoseTick`.
+        put(
+            &mut out,
+            "LastPoseTick",
+            Tag::Long(mob.camel.last_pose_change_tick),
+        );
+    }
     if mob.mob_type == MobType::Goat {
         // `Goat.addAdditionalSaveData`。
         // `Goat.addAdditionalSaveData`.
@@ -737,6 +746,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             {
                 mob.frog.variant = variant;
             }
+        }
+        if mob.mob_type == MobType::Camel {
+            // `Camel.readAdditionalSaveData`：读 `LastPoseTick`（缺省 0），负数设成坐姿。
+            // `Camel.readAdditionalSaveData`: read `LastPoseTick` (default 0), negative
+            // means sitting.
+            super::camel::read_pose(mob, tag::long_or(tag, "LastPoseTick", 0));
         }
         if mob.mob_type == MobType::Goat {
             // `Goat.readAdditionalSaveData`：缺省不尖叫、两只角都在。

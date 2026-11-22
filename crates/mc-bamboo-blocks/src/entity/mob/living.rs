@@ -110,7 +110,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::spider::tick(me, mob);
     }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
-    body_rotation_tick(me, mob);
+    body_rotation_tick(me, mob, ctx.blocks().game_time());
     range_checks(me, mob);
     // `LivingEntity.tick`：睡着的生物（只有狐狸）抬头角清零。
     // `LivingEntity.tick`: a sleeping mob (only foxes) levels its head.
@@ -153,6 +153,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Armadillo.tick` clamps the head and counts `inStateTicks` after `super.tick()`.
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::tick_after(mob);
+    }
+    // `Camel.tick` 在 `super.tick()` 之后：冲刺、冷却、夹头、坐在水里站起。
+    // `Camel.tick` after `super.tick()`: dash, cooldown, head clamp, stand up in water.
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::tick_after(me, mob, ctx);
     }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
     // `AbstractHorse.tick` advances its timers after `super.tick()`.
@@ -1352,6 +1357,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Tadpole {
         super::tadpole::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
     }
@@ -1395,6 +1403,11 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::drowned::move_control_tick(me, mob, ctx.blocks(), target, target_in_water);
         look_control_tick(me, mob);
     } else {
+        if mob.mob_type == super::MobType::Camel {
+            // `CamelMoveControl.tick` 在 `super.tick()` 之前。
+            // `CamelMoveControl.tick` runs before `super.tick()`.
+            super::camel::before_move_control(me, mob, ctx.blocks().game_time());
+        }
         move_control_tick(me, mob, ctx.blocks());
         look_control_tick(me, mob);
     }
@@ -1532,16 +1545,23 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type == super::MobType::Frog {
         // `Frog.getMaxHeadYRot`。
         5.0
+    } else if mob.mob_type == super::MobType::Camel {
+        // `Camel.getMaxHeadYRot()`。
+        super::camel::max_head_y_rot()
     } else {
         MAX_HEAD_Y_ROT as f32
     }
 }
 
-/// `BodyRotationControl.clientTick`；犰狳受惊时整个跳过。
+/// `BodyRotationControl.clientTick`；犰狳受惊、骆驼 `refuseToMove()` 时整个跳过。
 ///
-/// `BodyRotationControl.clientTick`; skipped entirely for a scared armadillo.
-fn body_rotation_tick(me: &Entity, mob: &mut Mob) {
+/// `BodyRotationControl.clientTick`; skipped entirely for a scared armadillo and
+/// for a camel that `refuseToMove()` (`CamelBodyRotationControl`).
+fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
     if super::armadillo::is_scared(mob) {
+        return;
+    }
+    if mob.mob_type == super::MobType::Camel && super::camel::refuse_to_move(mob, time) {
         return;
     }
     let dx = me.position.x - me.old_position.x;
@@ -1627,7 +1647,13 @@ fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
 // ---- travel ----
 
 /// `LivingEntity.travel`。
-fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
+fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, mut input: Vec3) {
+    // `Camel.travel`：`refuseToMove && onGround` 时把水平速度和输入清零，再跑 `super.travel`。
+    // `Camel.travel`: zero horizontal velocity / input while refusing on ground, then
+    // `super.travel`.
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::travel(me, mob, ctx.blocks().game_time(), &mut input);
+    }
     let in_liquid = is_in_liquid(me, mob);
     let levitation = mob.effects.amplifier(mob_effect::LEVITATION);
     if in_liquid {
@@ -2115,14 +2141,14 @@ fn hurt_living(
             return false;
         }
         actually_hurt(me, mob, source, amount - mob.last_hurt);
-        after_actually_hurt(me, mob, &source);
+        after_actually_hurt(me, mob, &source, ctx.blocks().game_time());
         mob.last_hurt = amount;
         false
     } else {
         mob.last_hurt = amount;
         mob.damage_cooldown = 20;
         actually_hurt(me, mob, source, amount);
-        after_actually_hurt(me, mob, &source);
+        after_actually_hurt(me, mob, &source, ctx.blocks().game_time());
         mob.hurt_duration = 10;
         mob.hurt_time = mob.hurt_duration;
         true
@@ -2188,9 +2214,16 @@ fn hurt_living(
 /// 物种覆写的 `actuallyHurt` 在 `super` 之后的那部分。
 ///
 /// The part of species `actuallyHurt` overrides after `super`.
-fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource) {
+fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, time: i64) {
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::after_actually_hurt(me, mob, source);
+    }
+    // `Camel.actuallyHurt` 在 `super` 之前 `standUpInstantly()`；纯状态改动、不取随机数，
+    // 放在 `super` 之后对可观察状态等价。
+    // `Camel.actuallyHurt` calls `standUpInstantly()` before `super`; a pure state change
+    // with no random draw, so after `super` is equivalent for observable state.
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::after_actually_hurt(mob, time);
     }
 }
 

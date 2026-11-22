@@ -695,6 +695,9 @@ pub(super) fn check_spawn_rules(
         // `Frog.checkFrogSpawnRules`。
         // `Frog.checkFrogSpawnRules`.
         MobType::Frog => bright_spawn_rules(world, pos, block_tags::FROGS_SPAWNABLE_ON),
+        // `Camel.checkCamelSpawnRules`：`#camels_spawnable_on` + 亮度。
+        // `Camel.checkCamelSpawnRules`: `#camels_spawnable_on` plus brightness.
+        MobType::Camel => bright_spawn_rules(world, pos, block_tags::CAMELS_SPAWNABLE_ON),
         // 蝌蚪没有登记 `SpawnPlacements`：没有规则，恒真。
         // Tadpoles have no `SpawnPlacements` entry: no rule, always true.
         MobType::Tadpole => true,
