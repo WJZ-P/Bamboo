@@ -70,6 +70,26 @@ use crate::{
 /// `worldgen` 数据里一条多噪声预设的 13 个定点数：六个区间加一个 `offset`。
 const PRESET_PARAMETER_COUNT: usize = 13;
 
+/// 启服、加载世界时还会读的顶层注册表。`Generator` 编译含水层 / 地表规则 / 雕刻器、
+/// 出生点搜索、结构流水线和拼图模板池、处理阀都从这里取 JSON；其余表解析完就没人读。
+///
+/// Top-level registries still read at startup and world load: `Generator` compiles the
+/// aquifer, surface rules and carvers from them, and spawn search, the structure
+/// pipeline and template pools, and processor lists read them too. Everything else is
+/// dead once parsing finishes.
+const RUNTIME_TABLES: [&str; 10] = [
+    "noise_settings",
+    "density_function",
+    "material_rule",
+    "material_condition",
+    "carver",
+    "biome_carvers",
+    "structure_set",
+    "structure",
+    "template_pool",
+    "processor_list",
+];
+
 /// 官方数据包里世界生成那几个注册表，解析好的样子。
 #[derive(Debug)]
 pub struct Worldgen {
@@ -83,7 +103,15 @@ pub struct Worldgen {
     /// The read-only feature registry, fixed at parse time and shared process-wide
     /// via `Worldgen::shared()`.
     features: Registry,
-    /// 地表规则和雕刻器要用的原始注册表，官方 codec 的 JSON。
+    /// 启服、加载世界时还会读的顶层注册表，官方 codec 的 JSON 原样保留。
+    ///
+    /// 只留 [`RUNTIME_TABLES`] 那几个：解析完就没人再读的（多噪声预设、地物三表、
+    /// `features_per_step`、`block_state_provider`、`end_biomes`、`noise`）不再常驻。
+    ///
+    /// The top-level registries still read at startup and world load, kept as the
+    /// official codec JSON. Only [`RUNTIME_TABLES`] survive here; tables nobody reads
+    /// after parsing (multi-noise presets, the three feature tables,
+    /// `features_per_step`, `block_state_provider`, `end_biomes`, `noise`) are dropped.
     raw: serde_json::Map<String, Value>,
 }
 
@@ -191,6 +219,19 @@ impl Worldgen {
         // parse it once here (the four feature keys were shape-checked above).
         let features = Registry::parse(root)?;
 
+        // 这里只复制启服后还会读的表，别把整份 JSON 都留着：`multi_noise_presets`、
+        // 地物三表、`features_per_step` 等解析完就没人再读，常驻下来白白占几 MB。
+        // Copy only the tables still read after startup instead of the whole document:
+        // the presets, the feature tables and `features_per_step` are dead once
+        // parsing finishes and would otherwise sit in memory for nothing.
+        let mut raw = serde_json::Map::with_capacity(RUNTIME_TABLES.len());
+        for name in RUNTIME_TABLES {
+            let value = root
+                .get(name)
+                .ok_or_else(|| format!("missing worldgen table {name}"))?;
+            raw.insert(name.to_owned(), value.clone());
+        }
+
         Ok(Self {
             noises,
             functions,
@@ -198,7 +239,7 @@ impl Worldgen {
             presets,
             end_biomes,
             features,
-            raw: root.clone(),
+            raw,
         })
     }
 
@@ -228,7 +269,9 @@ impl Worldgen {
         &self.end_biomes
     }
 
-    /// 导出数据里还没解析成 Rust 结构的原始注册表。
+    /// 导出数据里启服后还会读的原始注册表，只有 [`RUNTIME_TABLES`] 那几张。
+    ///
+    /// The raw registries still read after startup: only the [`RUNTIME_TABLES`] ones.
     pub fn raw(&self) -> &serde_json::Map<String, Value> {
         &self.raw
     }
@@ -321,6 +364,32 @@ mod tests {
         assert!(worldgen.preset("minecraft:overworld").is_some());
         assert!(worldgen.preset("minecraft:nether").is_some());
         assert_eq!(worldgen.end_biomes().end, "minecraft:the_end");
+    }
+
+    /// `raw` 只留启服后还会读的表，别又把整份 JSON 带回来。
+    ///
+    /// `raw` must keep only the tables still read after startup; the rest would
+    /// otherwise be resident for the whole process for nothing.
+    #[test]
+    fn raw_keeps_only_the_runtime_tables() {
+        let worldgen = worldgen();
+        let raw = worldgen.raw();
+        for name in RUNTIME_TABLES {
+            assert!(raw.contains_key(name), "{name} should be kept");
+        }
+        for name in [
+            "multi_noise_presets",
+            "feature",
+            "placed_feature",
+            "biome_features",
+            "features_per_step",
+            "block_state_provider",
+            "end_biomes",
+            "noise",
+        ] {
+            assert!(!raw.contains_key(name), "{name} should be dropped");
+        }
+        assert_eq!(raw.len(), RUNTIME_TABLES.len());
     }
 
     /// 六条 17 位有效数字的噪声振幅必须和官方运行时的 double 逐位相同。
