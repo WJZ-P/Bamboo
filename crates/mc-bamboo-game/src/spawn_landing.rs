@@ -88,7 +88,7 @@ pub(crate) fn noise_sea_level(level_type: LevelType) -> i32 {
     let Some(id) = level_type.settings_id() else {
         return mc_bamboo_world::flat::SEA_LEVEL;
     };
-    mc_bamboo_worldgen::Worldgen::load()
+    mc_bamboo_worldgen::Worldgen::shared()
         .ok()
         .and_then(|worldgen| worldgen.settings(id).map(|settings| settings.sea_level))
         .unwrap_or(63)

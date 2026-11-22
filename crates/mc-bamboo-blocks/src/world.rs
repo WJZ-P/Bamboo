@@ -702,6 +702,21 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 山羊冲撞把玩家撞开（`LivingEntity.knockback`）：只有精确驱动能当场做。
+    ///
+    /// A goat ram knocking a player back (`LivingEntity.knockback`); only the precise
+    /// driver can apply it.
+    pub fn knock_back_player(
+        &mut self,
+        target: crate::entity::EntityUid,
+        strength: f64,
+        direction: (f64, f64),
+    ) {
+        let _ = self
+            .level
+            .knock_back_player_now(target, strength, direction);
+    }
+
     /// 生物给玩家点火（`Entity.igniteForTicks`）：能当场就当场，否则记成延后的效果。
     pub fn ignite_player_from_mob(&mut self, target: crate::entity::EntityUid, ticks: i32) {
         if !self.level.ignite_player_now(target, ticks) {
@@ -3247,7 +3262,18 @@ impl<'a> World<'a> {
                 crate::entity::mob::interact::interact(me, mob, request, now, thundering)
             })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
-        if outcome.shear {
+        let armadillo = entity
+            .kind
+            .mob()
+            .is_some_and(|mob| mob.mob_type == crate::entity::mob::MobType::Armadillo);
+        if outcome.shear && armadillo {
+            crate::entity::mob::armadillo::apply_brush(
+                self,
+                &mut entity,
+                request.hand,
+                &request.held,
+            );
+        } else if outcome.shear {
             crate::entity::mob::interact::apply_shear(
                 self,
                 &mut entity,
@@ -3259,6 +3285,13 @@ impl<'a> World<'a> {
             // `Entity.spawnAtLocation(stack, offset)`：按偏移生成一件掉落物。
             // `Entity.spawnAtLocation(stack, offset)`: drop at the mob plus offset.
             self.spawn_at_location(entity.position.add(outcome.drop_offset), stack);
+        }
+        // 山羊的 `playEatingSound` 音高取世界随机源，一次喂食放一到两遍。
+        // A goat's `playEatingSound` is pitched with the level random, once or twice per
+        // feeding.
+        for _ in 0..crate::entity::mob::goat::eating_sounds(&entity, request, &outcome) {
+            let roll = self.random().next_float();
+            entity.with_mob(|me, mob| crate::entity::mob::goat::play_eating_sound(me, mob, roll));
         }
         if outcome.damage_held {
             crate::durability::hurt_hand(self, request.hand, 1);

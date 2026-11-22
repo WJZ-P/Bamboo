@@ -1215,6 +1215,13 @@ public final class Extractor {
         out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
         out.addProperty("cubeMobSize", entityAccessor(net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, "ID_SIZE").id());
         out.addProperty("slimeEyeHeight", net.minecraft.world.entity.EntityTypes.SLIME.getDimensions().eyeHeight());
+        var armadilloState = entityAccessor(net.minecraft.world.entity.animal.armadillo.Armadillo.class, "ARMADILLO_STATE");
+        out.addProperty("armadilloState", armadilloState.id());
+        out.addProperty("armadilloStateSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(armadilloState.serializer()));
+        Class<?> goat = net.minecraft.world.entity.animal.goat.Goat.class;
+        out.addProperty("goatScreaming", entityAccessor(goat, "DATA_IS_SCREAMING_GOAT").id());
+        out.addProperty("goatLeftHorn", entityAccessor(goat, "DATA_HAS_LEFT_HORN").id());
+        out.addProperty("goatRightHorn", entityAccessor(goat, "DATA_HAS_RIGHT_HORN").id());
         out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
         out.add("stewFlowers", stewFlowers());
         out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());

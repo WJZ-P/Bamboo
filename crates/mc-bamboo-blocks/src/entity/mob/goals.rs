@@ -3031,7 +3031,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 // ---- 目标用到的查询 ----
 
 /// `FloatGoal.canUse`。
-fn float_can_use(me: &Entity, mob: &Mob) -> bool {
+pub(super) fn float_can_use(me: &Entity, mob: &Mob) -> bool {
     living::fluid_height(mob, fluid_tags::ENTITY_FLOATABLE) > living::fluid_jump_threshold(mob)
         || living::is_in_lava(me, mob)
 }
@@ -3086,7 +3086,7 @@ fn target_still_seen(
 }
 
 /// 一种伤害在不在某个 `minecraft:damage_type` 标签里。
-fn damage_type_tagged(tag: &str, kind: super::DamageKind) -> bool {
+pub(super) fn damage_type_tagged(tag: &str, kind: super::DamageKind) -> bool {
     let Some(id) = mc_bamboo_data::damage_type_id(kind.name()) else {
         return false;
     };
@@ -3098,7 +3098,11 @@ fn damage_type_tagged(tag: &str, kind: super::DamageKind) -> bool {
 }
 
 /// `PanicGoal.lookForWater`：脚下没有碰撞时，按曼哈顿距离找最近的水。
-fn look_for_water(view: &dyn BlockView, centre: BlockPos, range: i32) -> Option<BlockPos> {
+pub(super) fn look_for_water(
+    view: &dyn BlockView,
+    centre: BlockPos,
+    range: i32,
+) -> Option<BlockPos> {
     let state = view.block_state(centre);
     if !shape::collision_boxes(state, centre, CollisionContext::Empty).is_empty() {
         return None;
@@ -3211,7 +3215,7 @@ fn nearest_look_target(
 }
 
 /// `TemptGoal.canUse` 里的 `getNearestPlayer(targetingConditions.range(TEMPT_RANGE), mob)`。
-fn nearest_tempting_player(
+pub(super) fn nearest_tempting_player(
     me: &Entity,
     mob: &mut Mob,
     ctx: &dyn EntityCtx,

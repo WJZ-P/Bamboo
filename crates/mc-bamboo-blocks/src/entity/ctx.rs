@@ -196,6 +196,14 @@ pub trait BlockView {
         0.0
     }
 
+    /// `level.random.nextInt(bound)`：大脑行为的时长、偶尔看人的间隔用它。并行视图同上给 0。
+    ///
+    /// `level.random.nextInt(bound)`, for brain behaviour durations and look intervals;
+    /// 0 on parallel views as above.
+    fn level_random_int(&self, _bound: i32) -> i32 {
+        0
+    }
+
     /// `level.random.nextBoolean()`，并行视图同上。
     fn level_random_boolean(&self) -> bool {
         false
@@ -261,6 +269,10 @@ pub struct PlayerView {
     pub creative: bool,
     /// `isDiscrete()`，也就是潜行。
     pub sneaking: bool,
+    /// `isSprinting()`：犰狳会被疾跑的玩家吓到。
+    ///
+    /// `isSprinting()`; sprinting players scare armadillos.
+    pub sprinting: bool,
     pub invisible: bool,
     /// `getArmorCoverPercentage()`，隐身时才用。
     pub armor_cover: f32,
@@ -472,6 +484,10 @@ impl BlockView for World<'_> {
 
     fn level_random_float(&self) -> f32 {
         self.random().next_float()
+    }
+
+    fn level_random_int(&self, bound: i32) -> i32 {
+        self.random().next_int(bound)
     }
 
     fn level_random_boolean(&self) -> bool {
@@ -701,6 +717,10 @@ pub enum Command {
         ///
         /// The father's wolf and taming state, for the pup's variant, owner and collar.
         father_wolf: Box<(super::mob::wolf::Wolf, super::mob::tame::Tamable)>,
+        /// 父亲是不是尖叫山羊：山羊幼崽可能随它。
+        ///
+        /// Whether the father is a screaming goat; a kid may take after it.
+        father_screaming: bool,
     },
     /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
     ///
@@ -875,6 +895,38 @@ pub enum Command {
         half_size: i32,
         children: Vec<super::mob::slime::SplitChild>,
     },
+    /// 改另一只跑大脑的生物的记忆（`AnimalMakeLove` 给伴侣设繁殖、走路和看的目标）。
+    ///
+    /// Writes another brain-driven mob's memory (`AnimalMakeLove` setting the partner's
+    /// breed, walk and look targets).
+    SetBrainMemory {
+        target: EntityUid,
+        memory: super::mob::brain::memory::MemoryType,
+        value: Option<super::mob::brain::memory::MemoryValue>,
+    },
+    /// `RamTarget.tick` 撞到活体：`hurtServer(noAggroMobAttack)`，然后不管打没打中都
+    /// `knockback(strength, dx, dz)`。
+    ///
+    /// `RamTarget.tick` hitting a living entity: `hurtServer(noAggroMobAttack)`, then
+    /// `knockback(strength, dx, dz)` whether or not the hit landed.
+    RamHit {
+        target: EntityUid,
+        player: bool,
+        source: super::mob::DamageSource,
+        amount: f32,
+        strength: f64,
+        dx: f64,
+        dz: f64,
+    },
+    /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` 加 `addFreshEntity`：
+    /// 山羊掉角，速度由调用方给。
+    ///
+    /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` plus `addFreshEntity`: a goat
+    /// dropping a horn with the caller's velocity.
+    DropItemWithDelta {
+        stack: ItemStack,
+        delta: Vec3,
+    },
     /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
     ///
     /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
@@ -981,6 +1033,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             father_fox,
             father_love,
             father_wolf,
+            father_screaming,
         } => super::mob::living::apply_breed(
             me,
             partner,
@@ -994,6 +1047,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 love: father_love,
                 wolf: father_wolf.0,
                 tame: father_wolf.1,
+                screaming: father_screaming,
                 genes: father_genes,
             },
             world,
@@ -1058,6 +1112,40 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::SetBrainMemory {
+            target,
+            memory,
+            value,
+        } => {
+            let mut value = value;
+            world.with_entity_mut(target, &mut |entity| {
+                entity.with_mob(|_, mob| {
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.memories.set_or_erase(memory, value.take());
+                    }
+                });
+            });
+        }
+        Command::RamHit {
+            target,
+            player,
+            source,
+            amount,
+            strength,
+            dx,
+            dz,
+        } => super::mob::goat::apply_ram_hit(
+            me,
+            world,
+            target,
+            player,
+            source,
+            amount,
+            (strength, dx, dz),
+        ),
+        Command::DropItemWithDelta { stack, delta } => {
+            world.spawn_entity(Entity::ground_item_with_delta(me.position, stack, delta));
         }
         Command::DropEntityLoot(request) => {
             let origin = request.origin;

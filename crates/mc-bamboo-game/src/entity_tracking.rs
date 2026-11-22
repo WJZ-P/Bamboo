@@ -1000,6 +1000,20 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     if kind.is_equine() && index >= mc_bamboo_data::entity_types::HORSE_FLAGS {
         return equine_default_data(index, kind);
     }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Armadillo
+        && index == mc_bamboo_data::entity_types::ARMADILLO_STATE
+    {
+        return EntityData::ArmadilloState(0);
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Goat {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::GOAT_SCREAMING => return EntityData::GoatScreaming(false),
+            facts::GOAT_LEFT_HORN => return EntityData::GoatLeftHorn(true),
+            facts::GOAT_RIGHT_HORN => return EntityData::GoatRightHorn(true),
+            _ => {}
+        }
+    }
     if let Some(data) = farm_default_data(index, kind) {
         return data;
     }
@@ -1367,6 +1381,10 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::Dying,
         ));
+    } else if mob.goat.long_jumping {
+        out.push(EntityData::Pose(
+            mc_bamboo_protocol::packet::play::Pose::LongJumping,
+        ));
     }
     if mob.air_supply != 300 {
         out.push(EntityData::AirSupply(mob.air_supply));
@@ -1431,6 +1449,28 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
         out.extend(fox_non_default_data(mob));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Armadillo {
+        // 犰狳只有 `ARMADILLO_STATE` 一项，缺省 `IDLE`（0）。
+        // Armadillos only add `ARMADILLO_STATE`, `IDLE` (0) by default.
+        if mob.armadillo_state != 0 {
+            out.push(EntityData::ArmadilloState(mob.armadillo_state));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Goat {
+        // 山羊的 18、19、20 是尖叫和两只角，缺省假、真、真。
+        // A goat's 18, 19 and 20 are screaming and the two horns: false, true, true.
+        if mob.goat.screaming {
+            out.push(EntityData::GoatScreaming(true));
+        }
+        if !mob.goat.left_horn {
+            out.push(EntityData::GoatLeftHorn(false));
+        }
+        if !mob.goat.right_horn {
+            out.push(EntityData::GoatRightHorn(false));
+        }
+        return out;
     }
     if fish_non_default_data(mob, &mut out) {
         return out;

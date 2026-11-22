@@ -55,9 +55,14 @@ struct Placement {
     kind: Option<MobType>,
 }
 
-/// 查已翻译的生成期放置规则；鹦鹉只模拟放置，不生成实体。
+/// 查已翻译的生成期放置规则：用 `Animal.checkAnimalSpawnRules` 的动物，加上兔子、狼、
+/// 狐狸、犰狳、山羊、哞菇、熊猫、北极熊各自的规则；鹦鹉只模拟放置、不生成实体。
+/// 具体的脚下方块标签在 [`natural::check_spawn_rules`] 里按 `MobType` 分派。
 ///
-/// Look up translated world-generation placement rules; parrots are simulated, not spawned.
+/// Look up translated world-generation placement rules: the animals registered with
+/// `Animal.checkAnimalSpawnRules`, plus the rabbit, wolf, fox, armadillo, goat, mooshroom,
+/// panda and polar bear rules. Parrots are simulated, not spawned. The block-below tag is
+/// dispatched by `MobType` in [`natural::check_spawn_rules`].
 fn placement(entity: i32) -> Option<Placement> {
     let animal = [
         entity_type::CHICKEN,
@@ -82,6 +87,7 @@ fn placement(entity: i32) -> Option<Placement> {
     let on_ground = match entity {
         _ if animal => true,
         entity_type::RABBIT | entity_type::WOLF | entity_type::PARROT => true,
+        entity_type::ARMADILLO | entity_type::GOAT => true,
         entity_type::FOX => false,
         _ => return None,
     };

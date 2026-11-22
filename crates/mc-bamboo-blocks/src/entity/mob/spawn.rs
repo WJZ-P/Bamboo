@@ -429,6 +429,8 @@ pub(super) fn finalize_generated(
             | MobType::Sheep
             | MobType::Chicken
             | MobType::PolarBear
+            | MobType::Armadillo
+            | MobType::Goat
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
     } else if kind == MobType::Panda {
@@ -455,15 +457,26 @@ pub(super) fn finalize_cow(
     group: &mut Option<SpawnGroup>,
 ) {
     let variant = cow_variant_for_biome(biome);
-    // 羊和哞菇没有按群系选的花纹；哞菇没有自己的 `finalizeSpawn`，也不抽叫声。
-    // Sheep and mooshrooms have no biome variant; mooshrooms have no `finalizeSpawn` of
-    // their own and draw no sound either.
-    // 北极熊也一样：`PolarBear.finalizeSpawn` 只把组里的幼年概率换成 1。
-    // Polar bears too: `PolarBear.finalizeSpawn` only raises the group's baby odds to 1.
+    // 犰狳没有自己的 `finalizeSpawn`，直接是 `AgeableMob` 那层；山羊单独调
+    // `goat::finalize_spawn`（尖叫山羊概率）。两者都不吃 `selectVariantToSpawn` 那次取数。
+    // Armadillos have no `finalizeSpawn` of their own and go straight to `AgeableMob`;
+    // goats call `goat::finalize_spawn` (screaming-goat odds). Both skip the
+    // `selectVariantToSpawn` draw.
+    // 羊、哞菇、北极熊也没有按群系选的花纹；哞菇、北极熊各自有 `finalizeSpawn` 覆盖层。
+    // Sheep, mooshrooms and polar bears have no biome variant either; mooshrooms and
+    // polar bears have their own `finalizeSpawn` layers.
+    let plain = matches!(kind, MobType::Armadillo | MobType::Goat);
+    if kind == MobType::Goat {
+        entity.with_mob(|_, mob| super::goat::finalize_spawn(mob, random));
+    }
+    // 是否吃 `selectVariantToSpawn` 那次 `nextInt(1)`、是否写 `mob.variant`：两边各自的
+    // 排除集合取并集。
+    // Whether to draw `selectVariantToSpawn`'s `nextInt(1)` and write `mob.variant`:
+    // union of the exclusion sets from both sides.
     let has_variant = !matches!(
         kind,
         MobType::Sheep | MobType::Mooshroom | MobType::PolarBear
-    );
+    ) && !plain;
     if has_variant {
         // `VariantUtils.selectVariantToSpawn`：唯一的最高优先级候选也取一次 `nextInt(1)`。
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
@@ -477,10 +490,18 @@ pub(super) fn finalize_cow(
     let chicken_sound =
         (kind == MobType::Chicken).then(|| super::chicken::SoundVariant::pick(random));
     let pig_sound = (kind == MobType::Pig).then(|| super::pig::SoundVariant::pick(random));
-    let cow_sound = (!matches!(
-        kind,
-        MobType::Sheep | MobType::Chicken | MobType::Pig | MobType::Mooshroom | MobType::PolarBear
-    ))
+    // 牛叫声只有牛抽；`plain`（犰狳、山羊）和哞菇、北极熊、羊、鸡、猪都不抽。
+    // Only cows draw the cow sound; `plain` (armadillo, goat), mooshrooms, polar bears,
+    // sheep, chickens and pigs do not.
+    let cow_sound = (!plain
+        && !matches!(
+            kind,
+            MobType::Sheep
+                | MobType::Chicken
+                | MobType::Pig
+                | MobType::Mooshroom
+                | MobType::PolarBear
+        ))
     .then(|| {
         if random.next_int(2) == 0 {
             CowSoundVariant::Classic

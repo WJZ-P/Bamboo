@@ -189,9 +189,14 @@ fn cause_fall_damage(
         super::equine::land_sound(me, mob, distance);
     }
     let power = distance + 1.0e-6 - mob.attributes.value(attribute::SAFE_FALL_DISTANCE);
-    let damage = mth::floor(
+    let mut damage = mth::floor(
         power * f64::from(multiplier) * mob.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER),
     );
+    if mob.mob_type == super::MobType::Goat {
+        // `Goat.calculateFallDamage`：少算 10 点。
+        // `Goat.calculateFallDamage`: ten points less.
+        damage -= 10;
+    }
     if damage > 0 {
         living::hurt_server(
             me,
