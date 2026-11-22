@@ -26,6 +26,11 @@
 #   AFTER      玩家离开后等多少秒（默认 120）
 #   BAMBOO_TOML  写进 bamboo.toml 的内容（可选）
 #   TRIM       plain 模式下设为 1：离开后再量一次强制换出工作集（EmptyWorkingSet）后的读数
+#   PATTERN    假玩家的移动方式（stand|walk|fly|wander|roam，默认 stand）；
+#              改成会走动的 pattern 才能给缓存施加压力、量吞吐
+#              Bot movement pattern (stand|walk|fly|wander|roam, default stand);
+#              a moving pattern is what puts pressure on the caches and lets us
+#              measure throughput.
 #   BIN        二进制所在目录（默认 target/release）
 set -u
 
@@ -37,6 +42,7 @@ VIEW=${VIEW:-8}
 SETTLE=${SETTLE:-20}
 ONLINE=${ONLINE:-90}
 AFTER=${AFTER:-120}
+PATTERN=${PATTERN:-stand}
 BIN=${BIN:-"$TREE/target/release"}
 SERVER_DIR="$OUT/server-$MODE"
 CONTROL="$OUT/control"
@@ -80,8 +86,8 @@ reading() {
 [ "$MODE" = plain ] && : > "$OUT/plain.txt"
 sleep "$SETTLE"
 reading startup
-"$BIN/bamboo-loadtest.exe" --addr "127.0.0.1:$PORT" --bots 1 --pattern stand \
-    --duration "$ONLINE" > "$OUT/bot-$MODE.log" 2>&1 &
+"$BIN/bamboo-loadtest.exe" --addr "127.0.0.1:$PORT" --bots 1 --pattern "$PATTERN" \
+    --duration "$ONLINE" --json "$OUT/bot-$MODE.json" > "$OUT/bot-$MODE.log" 2>&1 &
 BOT=$!
 sleep $((ONLINE - 10))
 reading online
