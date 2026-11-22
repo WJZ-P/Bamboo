@@ -600,10 +600,11 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 - 出站包：`set_health`、`damage_event`、`hurt_animation`、`player_combat_enter`、
   受伤音效，以及 `set_entity_data` 里的真实血量。`/damage <target> <amount> [type]
   [at|by [from]]` 接在 `SCOPES` 的 `World` 范围里；`serverbound::ATTACK` 能打非玩家
-  实体，伤害按手持物品的 `attribute_modifiers`。
+  实体，伤害按手持物品的 `attribute_modifiers`。近战攻击的完整链路见 6.4。
 - 对拍：`mob-oracle` 原 52 场景加 36 个 `player_hurt_*` 场景，逐刻比血量 / 吸收 /
   无敌帧 / 冷却 / 饥饿 / 速度 / 随机源 / 包字节；`player-data` 增加生命和饥饿的
   非默认往返用例；五处故意改坏（难度缩放、护甲、保护附魔、无敌帧、击退）都能抓到。
+  op-combat 再加 12 个 `player_attack_*` 近战场景（见 6.4）。
 
 ### 6.2 新增的按玩家字段（岛拆合逐个说明）
 
@@ -625,6 +626,8 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 | `health.hurt_dir` | `f32` | 否 | 整行搬 |
 | `health_sync`（`lastSentHealth` 等三个判据） | 数值快照 | 否 | 整行搬 |
 | `in_combat` | `bool` | 否 | 整行搬 |
+| `attack_strength_ticker`（6.4） | `i32` 相对计数 | 否 | 整行搬，不需平移 |
+| `last_main_hand_item`（6.4） | `ItemStack` | 否 | 整行搬 |
 
 这一期**刻意不建** `last_damage_stamp`（官方存的是 `Level.getGameTime()` 的绝对值），
 它只在 1b 拼死亡消息时需要。届时要么存相对倒计时，要么登记进 `ClockParts` 的
@@ -638,11 +641,14 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   武器、无药水效果。
 - **饥饿**：1a 时四个字段只按官方缺省值存读档、不 tick；1b 起按下节实现完整的
   `FoodData.tick` / 和平回血 / 饥饿掉血（见第 7 节）。
-- **攻击**：左键只对非玩家实体造成一次 `player_attack`；无攻击冷却、无暴击、
-  无横扫、无附魔伤害加成、无 `minimum_attack_charge` 校验、无物品耐久 / 音效。
-  PVP（打玩家）未做：官方 `Player.canHarmPlayer` 的队伍判定缺失，目前明确忽略。
-  旁观者和非法目标按官方 `handleAttack` 忽略（非法目标官方会断开连接，Bamboo 目前
-  只忽略，见下一条）。
+- **攻击（op-combat，2026-11-21 起已合入，见 6.4）**：`handleAttack` → `Player.attack`
+  的完整链路已经做了：冷却 / 暴击 / 横扫 / 额外击退 / 伤害附魔 / 火焰附加 / 耐久 /
+  粒子 / 音效 / 动画 / PVP 开关。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
+  `getAttackDamageBonus` / `PIERCING_WEAPON` 的武器行为、`onClimbable` / `isInWater`
+  的暴击前置（`isPassenger` / `isMobilityRestricted` 已按 `riding.vehicle` / `EffectMap`
+  判）、节肢杀手缓慢时长的随机源、`Stats.DAMAGE_DEALT` 的落盘、
+  以及 `mob-oracle` 对攻击音效 / 粒子 / 动画包的逐字节比对（官方假世界不捕获）。
+  旁观者和非法目标仍按官方 `handleAttack` 忽略（官方会断开连接，Bamboo 只忽略）。
 - **死亡**：1a 时血量可以降到 0 但不触发死亡；1b 起按下节实现完整死亡 / 掉落 /
   重生流程，`/kill` 也不再报错（见第 7 节）。
 - **玩家受伤音效**：`DamageType.effects` 的六种变体和 `thorns` 的第二声已按官方发；
@@ -655,6 +661,61 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `SourceView` 和 `World` 的读数一致。
 - **服务器连接层**：`serverbound::ATTACK` 的畸形包按官方会断开，Bamboo 目前
   只在解码层报 `TrailingBytes`，连接层是否断开由通用解码路径决定。
+
+### 6.4 玩家近战攻击（op-combat，2026-11-21）
+
+`crates/mc-bamboo-game/src/player_attack.rs` 照官方 26.3
+`ServerGamePacketListenerImpl.handleAttack` → `Player.attack` →
+`ServerPlayer.crit` / `magicCrit` / `getEnchantedDamage` 翻译，入口仍是
+`player_hurt::on_attack`（`world.rs` 的 `serverbound::ATTACK` 与对拍重放共用）。
+`on_attack` 拆成 `resolve_target` / `plan_attack` / `land_attack` / `finish_hit`
+四步，中间产物放在 `AttackPlan`。
+
+- **冷却**：`Player.attackStrengthTicker`（新增按玩家字段，见 6.2）每刻在玩家 tick
+  开头 `+1`；`handlePunch`（挥空）、`onAttack`（每次攻击）、主手物品换成不同物品 /
+  组件时清零。`getCurrentItemAttackStrengthDelay = 1 / ATTACK_SPEED × 20`，
+  `s = clamp((ticker + 0.5) / delay, 0, 1)`。基础伤害 `× (0.2 + s² × 0.8)`，
+  附魔加成 `× s`。玩家 `ATTACK_DAMAGE` 基值是 `Player.createAttributes()` 的 1.0，
+  **不是**属性注册表缺省的 2.0（对拍抓到过这个差）。
+- **暴击 / 横扫 / 击退**：`s > 0.9` 且下落、不着地、没失明、没骑乘、非疾跑时
+  `× 1.5`，发 `ClientboundAnimatePacket`(1) 和 `player.attack.crit`；附魔加成 > 0
+  再发 (2)。拿剑、着地、移动够慢、满充能且非暴击非疾跑时横扫，附魔
+  `sweeping_edge` 给 `SWEEPING_DAMAGE_RATIO = L/(L+1)`。疾跑 / `knockback` /
+  `attack_knockback` 的额外击退走 `World::knockback_mob`，同时把攻击者水平速度
+  `× 0.6` 并 `setSprinting(false)`。
+- **附魔与效果**：锋利 `1 + 0.5×(L−1)`、亡灵 / 节肢 `2.5×L`（按生成的实体类型
+  标签判定），火焰附加 `4×L` 秒点燃、节肢杀手挂缓慢 IV（`doSweepAttack` 对每个横扫
+  命中的 nearby 也调一次 `doPostAttackEffects`）；`hurtEnemy` 扣 1 点耐久；
+  打中加 0.1 饥饿消耗、记 `lastHurtMob`。26.3 的数据驱动附魔表由生成器导出，
+  这里只按 `Enchantments.java` 的 `AddValue` / `Fraction` 公式算。
+- **发包**：`world.play_sound` 把攻击音效记进同一个 `World` 的效果列表，落地后
+  一次 `send_effects` 发出（弓箭曾踩过「生成了效果却没发出去」的坑）；
+  `ClientboundAnimatePacket`、`LevelParticles`（`DAMAGE_INDICATOR` / `SWEEP_ATTACK`）、
+  `swing_animation` 都走 `links`。`a_critical_attack_emits_its_packets`、
+  `a_sweep_attack_emits_its_sound_and_particle`、
+  `an_enchanted_attack_emits_the_magic_critical_animation`、`a_weak_attack_emits_its_sound`、
+  `a_full_strength_attack_emits_the_strong_sound` 和
+  `damage_indicator_particles_follow_the_damage_threshold` 单测按注册表 ID / 动作字节
+  确认暴击 / 附魔暴击动画、横扫 / 伤害指示粒子（含 `actualDamage > 2` 门槛）和
+  strong / weak / sweep 音效真的发到客户端；`crit` / `knockback` / `nodamage` 音效仍
+  只按包类型松散覆盖或未精确断言（见 README 已知限制）。
+- **PVP**：`pvp` 为真时按 `ServerPlayer.canHarmPlayer`（`isPvpAllowed` + 队伍，
+  Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。额外击退 /
+  火焰附加 / 横扫波及的玩家这几项目标在实体表里的操作（`knockback_mob` /
+  `ignite_mob` / 候选收集）对玩家不生效，玩家不在实体表里；见 README 已知限制。
+- **对拍**：`mob-oracle --only player_attack` 13 个场景（充能 0/2/4/5/20、下落暴击、
+  疾跑击退、横扫、`sweeping_edge`、横扫 + 火焰附加、锋利 / 火焰附加 / 击退）共 91 刻，
+  逐刻比每头牛的血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除和 `damage_event` 包，
+  0 不一致；`--break-self-test attack_charge` 故意把充能少算一刻，牛的血量立刻不一致；
+  `--break-self-test sweep_effects` 去掉武器上的火焰附加，横扫目标的着火刻数立刻不一致。
+  单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火。
+  攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度；假世界也不
+  捕获 crit 动画 / 粒子 / 挥手 / 耐久槽包，这些由单测覆盖（见 6.3 与 README）。
+  够距判定（`within_block_interaction_range` + 方块点 vs 官方 `isWithinAttackRange` +
+  AABB + 武器距离 + 世界边界）、横扫候选盒近似、`baseDamage > 0 || magicBoost > 0`
+  门槛，以及属性修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
+  「玩家近战攻击的已知限制」；够距这一层没有 `mob-oracle` 场景（夹具直接调
+  `Player.attack`）。
 
 ---
 

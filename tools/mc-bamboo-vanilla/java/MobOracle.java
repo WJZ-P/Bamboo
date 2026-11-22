@@ -529,6 +529,23 @@ public final class MobOracle {
         int[] sprint;
         /** 大脑场景：所有传感器的起始延迟定成这个值，负数表示保留随机取的。 */
         long sensorDelay = -1;
+        /** 攻击场景：`Player.attackStrengthTicker` 的初值。 */
+        int attackCharge;
+        /** 攻击场景：玩家是否疾跑 / 下落距离 / 是否着地。 */
+        boolean attackSprint;
+        double attackFall;
+        boolean attackGround;
+        /** 攻击场景：主手武器上的附魔，成对存 (名字, 等级)。 */
+        final List<String[]> attackEnchants = new ArrayList<>();
+        /**
+         * 攻击场景：跳过每刻的 `cow.tick()`，这样牛的击退速度和 hurtTime 不被
+         * 重力 / AI / 计时衰减污染，可以和 Bamboo 的受伤重放逐位比。
+         *
+         * Attack scenes: skip the per-tick `cow.tick()` so cow knockback velocity
+         * and hurtTime are not polluted by gravity / AI / timer decay and can be
+         * compared bit-for-bit against Bamboo's hurt replay.
+         */
+        boolean noCowTick;
         /**
          * 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
          *
@@ -828,6 +845,22 @@ public final class MobOracle {
         Scene attack(int tick, int cow) {
             playerActions.add(new PlayerAction(tick, 1, null, 0.0F, null, false));
             playerActions.get(playerActions.size() - 1).cow = cow;
+            return this;
+        }
+
+        /** 攻击场景：设好攻击那一刻的充能、疾跑、下落和着地状态。 */
+        Scene attackSetup(int charge, boolean sprint, double fall, boolean ground) {
+            attackCharge = charge;
+            attackSprint = sprint;
+            attackFall = fall;
+            attackGround = ground;
+            noCowTick = true;
+            return this;
+        }
+
+        /** 攻击场景：主手武器加一条附魔。 */
+        Scene attackEnchant(String name, int level) {
+            attackEnchants.add(new String[] {name, Integer.toString(level)});
             return this;
         }
     }
@@ -3061,8 +3094,91 @@ public final class MobOracle {
                 cow.cow(2.5, 64.0, 0.5, 0.0F, 91L);
                 cow.equipment(new int[] {0, 0, 0, 0,
                         BuiltInRegistries.ITEM.getId(Items.DIAMOND_SWORD)}, new int[] {0, 0, 0, 0});
-                cow.attack(1, 0);
+                cow.attackSetup(0, false, 0.0, false).attack(1, 0);
                 scenes.add(cow);
+            }
+            // ---- 玩家近战攻击：不同充能、下落暴击、疾跑击退、横扫、附魔 ----
+            // 每例都逐刻比牛的血量 / 击退速度 / 着火刻数和出站包。
+            {
+                int sword = BuiltInRegistries.ITEM.getId(Items.DIAMOND_SWORD);
+                // 空手 delay=5：ticker 0/2/4/5/20 覆盖从 0.1 到满充能。
+                for (int charge : new int[] {0, 2, 4, 5, 20}) {
+                    Scene s = new Scene("player_attack_charge" + charge).ticks(6)
+                            .playerPackets().packets();
+                    ground(s, 4);
+                    s.player(0.5, 64.0, 0.5, Items.AIR);
+                    s.cow(2.5, 64.0, 0.5, 0.0F, 200L + charge);
+                    s.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                    s.attackSetup(charge, false, 0.0, false).attack(1, 0);
+                    scenes.add(s);
+                }
+                // 满充能剑 + 下落：暴击 ×1.5。
+                Scene crit = new Scene("player_attack_critical").ticks(6)
+                        .playerPackets().packets();
+                ground(crit, 4);
+                crit.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                crit.cow(2.5, 64.0, 0.5, 0.0F, 210L);
+                crit.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                crit.attackSetup(20, false, 1.0, false).attack(1, 0);
+                scenes.add(crit);
+                // 满充能剑 + 疾跑：额外击退、取消疾跑。
+                Scene sprint = new Scene("player_attack_sprint").ticks(6)
+                        .playerPackets().packets();
+                ground(sprint, 4);
+                sprint.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sprint.cow(2.5, 64.0, 0.5, 0.0F, 211L);
+                sprint.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sprint.attackSetup(20, true, 0.0, true).attack(1, 0);
+                scenes.add(sprint);
+                // 满充能剑 + 着地 + 两头牛：横扫（无 sweeping_edge，比例 0）。
+                Scene sweep = new Scene("player_attack_sweep").ticks(6)
+                        .playerPackets().packets();
+                ground(sweep, 4);
+                sweep.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sweep.cow(2.5, 64.0, 0.5, 0.0F, 212L);
+                sweep.cow(3.0, 64.0, 0.5, 0.0F, 213L);
+                sweep.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sweep.attackSetup(20, false, 0.0, true).attack(1, 0);
+                scenes.add(sweep);
+                // 横扫附魔 III：第二头牛吃到 0.75 × baseDamage 的横扫伤害。
+                Scene sweeping = new Scene("player_attack_sweeping_edge").ticks(6)
+                        .playerPackets().packets();
+                ground(sweeping, 4);
+                sweeping.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sweeping.cow(2.5, 64.0, 0.5, 0.0F, 214L);
+                sweeping.cow(3.0, 64.0, 0.5, 0.0F, 215L);
+                sweeping.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sweeping.attackEnchant("minecraft:sweeping_edge", 3)
+                        .attackSetup(20, false, 0.0, true).attack(1, 0);
+                scenes.add(sweeping);
+                // 满充能剑 + 火焰附加 II + 两头牛：`doSweepAttack` 对每个打中的 nearby 也调
+                // `doPostAttackEffects`，所以第二头牛（横扫目标）也要着火。
+                // Full sword + Fire Aspect II + two cows: `doSweepAttack` also calls
+                // `doPostAttackEffects` on each hurt nearby, so the swept cow ignites too.
+                Scene sweepFire = new Scene("player_attack_sweep_fire_aspect").ticks(6)
+                        .playerPackets().packets();
+                ground(sweepFire, 4);
+                sweepFire.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sweepFire.cow(2.5, 64.0, 0.5, 0.0F, 216L);
+                sweepFire.cow(3.0, 64.0, 0.5, 0.0F, 217L);
+                sweepFire.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sweepFire.attackEnchant("minecraft:fire_aspect", 2)
+                        .attackSetup(20, false, 0.0, true).attack(1, 0);
+                scenes.add(sweepFire);
+                // 锋利 III / 火焰附加 II / 击退 II：伤害加成、着火刻数、额外击退。
+                String[] names = {"sharpness", "fire_aspect", "knockback"};
+                int[] levels = {3, 2, 2};
+                for (int i = 0; i < names.length; i++) {
+                    Scene s = new Scene("player_attack_enchant_" + names[i]).ticks(6)
+                            .playerPackets().packets();
+                    ground(s, 4);
+                    s.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                    s.cow(2.5, 64.0, 0.5, 0.0F, 220L + i);
+                    s.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                    s.attackEnchant("minecraft:" + names[i], levels[i])
+                            .attackSetup(20, false, 0.0, true).attack(1, 0);
+                    scenes.add(s);
+                }
             }
             // ---- 1b：死亡、掉落、重生与回血 ----
             // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。
@@ -4109,8 +4225,39 @@ public final class MobOracle {
                         players.get(0).hurtServer(level, source, action.amount);
                     } else {
                         // 官方 `ServerGamePacketListenerImpl.handleAttack` 的伤害入口。
+                        // `Player.attack` 开头读 `attackStrengthTicker` 算充能，
+                        // 之后 `onAttack()` 清零，所以要在调用前设好。
+                        ServerPlayer attacker = players.get(0);
+                        putInt(net.minecraft.world.entity.LivingEntity.class, attacker,
+                                "attackStrengthTicker", scene.attackCharge);
+                        attacker.setSprinting(scene.attackSprint);
+                        attacker.fallDistance = scene.attackFall;
+                        putBoolean(net.minecraft.world.entity.Entity.class, attacker,
+                                "onGround", scene.attackGround);
+                        if (!scene.attackEnchants.isEmpty()) {
+                            ItemStack weapon = attacker.getMainHandItem().copy();
+                            net.minecraft.world.item.enchantment.ItemEnchantments.Mutable enchants =
+                                    new net.minecraft.world.item.enchantment.ItemEnchantments.Mutable(
+                                            weapon.getOrDefault(DataComponents.ENCHANTMENTS,
+                                                    net.minecraft.world.item.enchantment.ItemEnchantments.EMPTY));
+                            for (String[] pair : scene.attackEnchants) {
+                                var holder = official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                                        .getOrThrow(ResourceKey.create(Registries.ENCHANTMENT,
+                                                Identifier.parse(pair[0])));
+                                enchants.set(holder, Integer.parseInt(pair[1]));
+                            }
+                            weapon.set(DataComponents.ENCHANTMENTS, enchants.toImmutable());
+                            attacker.setItemInHand(InteractionHand.MAIN_HAND, weapon);
+                            // 附魔的 `ATTRIBUTES` 效果（sweeping_edge 的
+                            // SWEEPING_DAMAGE_RATIO）由 `detectEquipmentUpdates`
+                            // 刷进属性表，官方换装备后的那一 tick 就会跑。
+                            java.lang.reflect.Method detect = LivingEntity.class
+                                    .getDeclaredMethod("detectEquipmentUpdates");
+                            detect.setAccessible(true);
+                            detect.invoke(attacker);
+                        }
                         Animal target = cows.get(action.cow);
-                        players.get(0).attack(target);
+                        attacker.attack(target);
                     }
                 }
                 // 只推进 1a 建模的三处：`ServerPlayer.tick` 递减 damageCooldownTime，
@@ -4169,7 +4316,7 @@ public final class MobOracle {
                 }
             }
             for (Animal cow : new ArrayList<>(cows)) {
-                if (cow.isRemoved()) {
+                if (cow.isRemoved() || scene.noCowTick) {
                     continue;
                 }
                 cow.checkDespawn();
@@ -4284,6 +4431,18 @@ public final class MobOracle {
         appendPackets(line, playerSteps);
         line.append(",\"playerPackets\":");
         appendPackets(line, playerPackets);
+        // 攻击场景：把充能 / 疾跑 / 下落 / 着地和主手附魔报给 Bamboo 一侧照填。
+        line.append(",\"attackCharge\":").append(scene.attackCharge);
+        line.append(",\"attackSprint\":").append(scene.attackSprint);
+        line.append(",\"attackFall\":").append(Double.doubleToRawLongBits(scene.attackFall));
+        line.append(",\"attackGround\":").append(scene.attackGround);
+        line.append(",\"attackEnchants\":[");
+        for (int i = 0; i < scene.attackEnchants.size(); i++) {
+            if (i > 0) line.append(',');
+            String[] pair = scene.attackEnchants.get(i);
+            line.append('[').append(jsonString(pair[0])).append(',').append(pair[1]).append(']');
+        }
+        line.append(']');
         line.append("}\n");
         out.write(line.toString());
         out.flush();
