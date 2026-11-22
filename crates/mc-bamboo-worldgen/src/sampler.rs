@@ -1783,6 +1783,27 @@ impl Compiler {
         self.next_cache_id
     }
 
+    /// 丢掉编译期的重写记忆，只留采样器还在引用的噪声。
+    ///
+    /// 清掉 `rewritten` 和 `keep_alive` 之后，原本被 `keep_alive` 钉住的原始节点会被
+    /// 释放，地址可以被复用；`rewritten` 已经一起清空，不会拿旧地址命中错误的条目。
+    /// `caches` 也清掉：之后再编译同一个 `cache` 节点会取一个新的编号，编号只要求
+    /// 在同一个 `Context` 里自洽。
+    ///
+    /// Drop the compile-time rewrite memo, keeping only the noises the samplers still
+    /// use. Clearing `keep_alive` together with `rewritten` lets the pinned original
+    /// nodes be freed (their addresses may be reused) without stale memo hits. `caches`
+    /// is cleared too: recompiling the same `cache` node afterwards takes a fresh id,
+    /// and ids only have to be consistent within one `Context`.
+    pub fn release_rewrites(&mut self) {
+        self.rewritten.clear();
+        self.rewritten.shrink_to_fit();
+        self.keep_alive.clear();
+        self.keep_alive.shrink_to_fit();
+        self.caches.clear();
+        self.caches.shrink_to_fit();
+    }
+
     /// `DensityFunctionCompiler.getSampler(function)`：先照官方重写一遍，再编译。
     ///
     /// 官方编译前跑 `DfRewriteRule.SLICE_UNIFORM_AXES`，把用不到某个轴的子树包进 `slice`。

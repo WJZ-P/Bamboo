@@ -57,7 +57,7 @@ pub mod volume;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use serde_json::Value;
@@ -125,6 +125,15 @@ pub struct Worldgen {
     /// `features_per_step`, `block_state_provider`, `end_biomes`, `noise`) are dropped,
     /// and `template_pool` lives in [`Worldgen::template_pools`].
     raw: serde_json::Map<String, Value>,
+    /// 按 (设置, 种子) 共享的生成器。编译结果是只读的，官方的 `RandomState` 也由
+    /// `ChunkMap` 建一份给所有工作线程用，所以全进程只留一份；平坦世界要在建好之后
+    /// 覆盖常数列，仍按线程各建一份，不进这张表。
+    ///
+    /// Generators shared per (settings, seed). The compiled result is read-only and
+    /// vanilla's `RandomState` is also a single `ChunkMap`-owned instance used by every
+    /// worker, so one per process is enough. Flat worlds override the constant columns
+    /// after construction and stay per-thread, outside this table.
+    generators: Mutex<HashMap<(String, i64), Arc<chunk::Generator<'static>>>>,
 }
 
 impl Worldgen {
@@ -260,6 +269,7 @@ impl Worldgen {
             features,
             pools,
             raw,
+            generators: Mutex::new(HashMap::new()),
         })
     }
 
@@ -310,6 +320,40 @@ impl Worldgen {
     pub fn template_pools(&self) -> &Arc<TemplatePools> {
         &self.pools
     }
+
+    /// 取一份 (设置, 种子) 共用的生成器，第一次调用时编译。
+    ///
+    /// 只有 `Worldgen::shared()` 那份能给出 `'static` 生命周期。编译结果是只读的：
+    /// 每条线程的可变状态（`Context`、群系 R 树 `lastResult`）都在调用点按线程持有，
+    /// 所以多个工作线程可以同时用同一份生成器。
+    ///
+    /// One generator per (settings, seed), compiled on first use. Only the
+    /// `Worldgen::shared()` instance can hand out a `'static` lifetime. The compiled
+    /// result is read-only: per-thread mutable state (`Context`, the biome R-tree
+    /// `lastResult`) lives at the call sites, so several workers can use one generator
+    /// at the same time.
+    pub fn shared_generator(
+        &'static self,
+        settings_id: &str,
+        seed: i64,
+    ) -> Result<Arc<chunk::Generator<'static>>, String> {
+        let key = (settings_id.to_owned(), seed);
+        let mut cache = self
+            .generators
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(found) = cache.get(&key) {
+            return Ok(Arc::clone(found));
+        }
+        let generator = Arc::new(chunk::Generator::with_settings(
+            self,
+            settings_id,
+            chunk::OVERWORLD_PRESET,
+            seed,
+        )?);
+        cache.insert(key, Arc::clone(&generator));
+        Ok(generator)
+    }
 }
 
 fn object_field<'a>(
@@ -356,6 +400,7 @@ mod tests {
     use super::*;
     use crate::{
         climate::TargetPoint,
+        sampler::{Compiler, Context, Path},
         settings::{RouterOutput, SeededRouter},
     };
 
@@ -693,6 +738,55 @@ mod tests {
             let ours = router.sample(output, x, y, z);
             assert_eq!(ours.to_bits() as i32, expected, "{settings} {output:?}");
         }
+    }
+
+    /// 丢掉编译期的重写记忆之后，`SeededRouter::compile` 仍然编译出同样的采样器。
+    ///
+    /// After dropping the compile-time rewrite memo, `SeededRouter::compile` still
+    /// produces the same sampler.
+    #[test]
+    fn compile_after_releasing_rewrites_matches_a_fresh_compiler() {
+        let worldgen = worldgen();
+        let settings = worldgen.settings("minecraft:overworld").expect("有主世界");
+        let function = worldgen
+            .functions()
+            .get("minecraft:overworld/offset")
+            .expect("有这一条")
+            .clone();
+
+        let mut router = SeededRouter::new(settings, 5);
+        let sampler = router.compile(&function);
+        let mut fresh = Compiler::new(5, settings.legacy_random_source);
+        let reference = fresh.compile(&function);
+        let mut context = Context::uncached();
+        for (x, y, z) in [(0, 0, 0), (123, -64, -456), (-1_000_003, 320, 999_999)] {
+            let ours = router.sample_with(&sampler, Path::Point, x, y, z);
+            let official = reference.sample(&mut context, Path::Point, x, y, z);
+            assert_eq!(ours.to_bits(), official.to_bits(), "at {x} {y} {z}");
+        }
+    }
+
+    /// 同一个 (设置, 种子) 只编译一份生成器，换一个种子才编译新的。
+    ///
+    /// One generator per (settings, seed); a different seed compiles a new one.
+    #[test]
+    fn shared_generator_is_one_per_settings_and_seed() {
+        let worldgen = Worldgen::shared().expect("共享数据");
+        let first = worldgen
+            .shared_generator("minecraft:overworld", 7)
+            .expect("能建生成器");
+        let again = worldgen
+            .shared_generator("minecraft:overworld", 7)
+            .expect("能建生成器");
+        assert!(Arc::ptr_eq(&first, &again));
+        let other_seed = worldgen
+            .shared_generator("minecraft:overworld", 8)
+            .expect("能建生成器");
+        assert!(!Arc::ptr_eq(&first, &other_seed));
+        let other_settings = worldgen
+            .shared_generator("minecraft:large_biomes", 7)
+            .expect("能建生成器");
+        assert!(!Arc::ptr_eq(&first, &other_settings));
     }
 
     /// 群系在几个已知的 quart 坐标上和官方一样。

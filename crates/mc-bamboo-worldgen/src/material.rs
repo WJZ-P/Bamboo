@@ -281,7 +281,13 @@ impl MaterialRules {
                 Ok(Arc::new(parameters.create(&positional.from_hash_of(id))))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        self.clay_bands = generate_bands(&system.bands_random);
+        // 陶土色带的随机源只在这一次准备里用；`Random` 带 `Cell`，留在 `System` 里
+        // 会让整份规则变成非 `Sync`，没法在全进程共用。
+        // The clay-band random is used only during this one preparation; `Random`
+        // holds `Cell`s, and keeping it in `System` would make the whole rule set
+        // non-`Sync` and impossible to share process-wide.
+        let bands_random = positional.from_hash_of("minecraft:clay_bands");
+        self.clay_bands = generate_bands(&bands_random);
         self.system = Some(system);
         Ok(())
     }
@@ -934,7 +940,6 @@ struct System {
     iceberg_pillar_roof: NoiseInstance,
     iceberg_surface: NoiseInstance,
     positional: PositionalFactory,
-    bands_random: Random,
 }
 
 impl System {
@@ -960,7 +965,6 @@ impl System {
             iceberg_pillar_roof: make("minecraft:iceberg_pillar_roof")?,
             iceberg_surface: make("minecraft:iceberg_surface")?,
             positional,
-            bands_random: positional.from_hash_of("minecraft:clay_bands"),
         })
     }
 }

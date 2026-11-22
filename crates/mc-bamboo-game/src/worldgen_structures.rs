@@ -77,7 +77,11 @@ struct StructureThread {
     /// `lastResult` stays thread-local per (thread, table).
     preset: Arc<MultiNoiseBiomeSource>,
     settings: &'static mc_bamboo_worldgen::settings::Settings,
-    generator: chunk::Generator<'static>,
+    /// 正常世界共用 `Worldgen::shared_generator` 那一份；平坦世界要覆盖常数列，
+    /// 按线程各留一份。
+    /// Normal worlds share the single `Worldgen::shared_generator` instance; flat
+    /// worlds override the constant columns and keep one per thread.
+    generator: std::sync::Arc<chunk::Generator<'static>>,
     starts: StartsCache,
     /// 每个中心区块的引用结果，纯函数缓存：`features` / `terrain` / 对拍入口
     /// 会反复问同一个中心，重算 17×17 起点很贵。
@@ -283,20 +287,29 @@ fn with_thread<T>(
                 .ok_or("missing noise settings")?;
             let shared = shared_structure(config, settings)?;
             let fixed = flat_biome(config)?;
-            let mut generator = chunk::Generator::with_settings(
-                worldgen,
-                settings_id,
-                "minecraft:overworld",
-                config.seed,
-            )?;
-            if let Some(biome) = fixed {
+            let generator = if let Some(biome) = fixed {
+                // 平坦世界要先覆盖常数列，建好之后不再改，仍按线程各一份。
+                // A flat world overrides the constant columns after construction and
+                // never changes again, so it stays per thread.
+                let mut generator = chunk::Generator::with_settings(
+                    worldgen,
+                    settings_id,
+                    "minecraft:overworld",
+                    config.seed,
+                )?;
                 generator.set_flat_columns(
                     biome,
                     mc_bamboo_world::MIN_Y,
                     mc_bamboo_world::WORLD_HEIGHT,
                     &config.flat.layers,
                 );
-            }
+                std::sync::Arc::new(generator)
+            } else {
+                // 只读编译结果全进程一份，和地形生成器共用同一个实例。
+                // The read-only compiled result is process-wide, shared with the
+                // terrain generator.
+                worldgen.shared_generator(settings_id, config.seed)?
+            };
             entry.insert(StructureThread {
                 state: shared.state,
                 router: SeededRouter::new(settings, config.seed),
@@ -1149,5 +1162,34 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(local, remote);
+    }
+
+    /// 同配置的两条线程必须共用同一份编译好的 `Generator`，和地形生成器也共用同一份。
+    ///
+    /// Two threads with the same config must share the one compiled `Generator`, and
+    /// the terrain generator must share it too.
+    #[test]
+    fn threads_share_one_generator() {
+        let config = normal(88);
+        let local = with_thread(
+            &config,
+            |thread| Ok(Arc::as_ptr(&thread.generator) as usize),
+        )
+        .unwrap();
+        let other_config = config.clone();
+        let remote = std::thread::spawn(move || {
+            with_thread(&other_config, |thread| {
+                Ok(Arc::as_ptr(&thread.generator) as usize)
+            })
+            .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(local, remote);
+        let terrain = crate::worldgen::with_generator(&config, |generator| {
+            Ok(generator as *const chunk::Generator<'static> as usize)
+        })
+        .unwrap();
+        assert_eq!(local, terrain);
     }
 }
