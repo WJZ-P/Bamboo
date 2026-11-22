@@ -55,7 +55,7 @@ pub mod spline;
 pub mod structure;
 pub mod volume;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use serde_json::Value;
 
@@ -85,6 +85,22 @@ impl Worldgen {
     /// 读 `mc-bamboo-data` 里嵌着的那份官方数据。
     pub fn load() -> Result<Self, String> {
         Self::parse(mc_bamboo_data::worldgen::WORLDGEN)
+    }
+
+    /// 全进程共用一份解析好的 `Worldgen`：`OnceLock` 保证只解析一次，之后每条生成
+    /// 线程拿到同一个 `&'static Worldgen`。生成数据是只读的；每线程可变的 R 树
+    /// `lastResult` 等状态不在这里（见 [`crate::climate::ParameterList`]）。
+    ///
+    /// One parsed `Worldgen` shared by the whole process: the `OnceLock` parses it
+    /// once and every generation thread then gets the same `&'static` reference. The
+    /// generation data is read-only; per-thread mutable state such as the R-tree
+    /// `lastResult` is not stored here (see [`crate::climate::ParameterList`]).
+    pub fn shared() -> Result<&'static Worldgen, String> {
+        static SHARED: OnceLock<Result<Worldgen, String>> = OnceLock::new();
+        SHARED
+            .get_or_init(Worldgen::load)
+            .as_ref()
+            .map_err(String::clone)
     }
 
     /// 从一份 JSON 文本解析，测试和工具用。

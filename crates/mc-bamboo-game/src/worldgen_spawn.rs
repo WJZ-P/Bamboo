@@ -58,9 +58,9 @@ pub(crate) fn select_spawn(config: &WorldGenConfig) -> Option<SpawnSelection> {
         return None;
     }
     let settings_id = config.level_type.settings_id()?;
-    let worldgen = mc_bamboo_worldgen::Worldgen::load().ok()?;
+    let worldgen = mc_bamboo_worldgen::Worldgen::shared().ok()?;
     let origin =
-        mc_bamboo_worldgen::spawn::spawn_origin(&worldgen, settings_id, config.seed).ok()?;
+        mc_bamboo_worldgen::spawn::spawn_origin(worldgen, settings_id, config.seed).ok()?;
     let (cx, cz) = origin;
 
     // 官方先给一个暂定出生点；`getSpawnHeight` 是基类默认 64（>= minY，不触发
