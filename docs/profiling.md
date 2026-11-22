@@ -2507,3 +2507,40 @@ JSON 与逐状态解析被去掉，模板外形 +1.52 MB 提前到启服）。`s
 
 产物在 `W:/data/bamboo-agents/reports/op-memprof-data/s9-profile/`、`s9-plain2/`、
 `s9-plain-halved/`。
+
+### 20.5 续：sin 表与结构群系 R 树去重（2026-11-22）
+
+§20.4 之后在线快照里最大的一项不再是 `Worldgen`，而是归属表上的「template pools and
+structure state」9.43 MB。逐个分配点看，其中只有约 1.7 MB 是群系 R 树，其余是**每条计算
+线程各编译一份**的密度函数 / 噪声采样器（`SeededRouter::new`，见 §3 的 #10）；另外
+`mc_bamboo_core`、`carver`、`feature::ores`、`feature::dripstone_utils`、`mc-bamboo-loot`
+各自建了一张 65536 项的 `Mth.sin` 表（各 256 KB）。
+
+这一轮做两件小改动，结果逐字节不变：
+
+- `Mth.sin` / `cos` 只保留 `mc_bamboo_core::mth` 那一张表，其余四处改成调用它。
+  省 4 × 256 KB。
+- `ParameterList` 的 `root` / `points` / `values` 改成 `Arc`，新增 `ParameterList::fork()`
+  与 `MultiNoiseBiomeSource::fork()`：新实例共用 R 树和条目，只换一个 `lastResult` 槽的
+  编号。`shared_structure` 里普通世界不再从条目重建一棵 R 树，而是 fork `Worldgen` 里的
+  预置；平坦世界仍建自己的单点表。官方每份 `ParameterList` 的 `ThreadLocal lastResult`
+  是独立的，槽必须分开，否则平局时上一次结果会改变搜索起点。
+
+实测（`s10-profile`，种子 20261121、视距 8、经 heavy 锁）：同一 `online` 快照
+「template pools and structure state」9.43 → **7.90 MB（−1.53 MB）**，`climate::bucketize`
+只剩 `Worldgen` 里的 1.66 MB，`shared_structure` 的 0.99 MB 也消失。`plain`（`s10-plain`）
+读数：起服后空载 38.8 MB、一人在线 338.6 MB、离开后 20 s 106.9 MB（工作集；私有提交
+22.9 / 324.0 / 95.2）。进程级差 2 MB 上下，落在忙机器的噪声里，以归属表为准。
+
+对拍（都在 `structure-rings` / `structures` / `structure-validity` 官方代码上）：
+`chunkgen --through features --seeds 1 --chunks 4` 3545088 项 0 不一致；
+`structure-rings` 864 项、`structures` 9744 项选择 / 9280 项放置、`structure-validity`
+2716 项，全 0 不一致。
+
+**注意**：归属表把「因为调用栈里出现 `worldgen_structures::with_thread`」的分配都归到
+「template pools and structure state」，所以剩下这 7.9 MB 的绝大部分其实是**每线程**
+编译的密度函数（`density::*` 3.06、`noise::*` 1.53、`spline` 0.41、`Compiler::compile_node`
+0.34……），不是模板池。之前把 #10 估成 0.23–1.16 MB 是按「generators」那一行读的，
+偏小；真实收益约 6 MB，但拆共享只读程序与可变上下文仍要证明求值顺序不变，风险高。
+
+产物在 `W:/data/bamboo-agents/reports/op-memprof-data/s10-profile/`、`s10-plain/`。

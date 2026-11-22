@@ -605,6 +605,16 @@ WebView2 的渲染进程不算在内。
   128 MB 地形 + 64 MB 地物两份缓存），再强制 `EmptyWorkingSet` 只降到 2.2 MB 而私有提交仍是
   90.1 MB（纯换出页面，不是真正归还）。所以用户看到的「离开后掉不下来」有一部分是读数早于
   空闲释放；两份缓存的 MB 上限就是在线峰值的硬上限，可在 `bamboo.toml` 调小。
+- **sin 表与结构群系 R 树去重**（`op-memprof` 续，2026-11-22）：`Mth.sin` 的 65536 项表
+  原在 `mc-bamboo-core`、`carver`、`feature::ores`、`feature::dripstone_utils` 和
+  `mc-bamboo-loot` 各建一份（各 256 KB），现在只留 `mc-bamboo-core::mth` 那一张。
+  `ParameterList` 的 R 树 / 参数点 / 值改为 `Arc` 共享，新增 `fork()`：结构线程不再从条目
+  重建一棵群系 R 树，而是 fork `Worldgen` 里的预置，只换 `lastResult` 槽的编号（官方每份
+  `ParameterList` 的 `ThreadLocal lastResult` 本来就独立）。同一在线快照「template pools and
+  structure state」9.43 → 7.90 MB，结果逐字节不变（`chunkgen --through features` 3545088 项、
+  `structure-rings` / `structures` / `structure-validity` 全 0 不一致）。见
+  `docs/profiling.md` §20.5。剩下这 7.9 MB 里约 6 MB 是**每条计算线程各编译一份**的密度函数
+  采样器（`SeededRouter`），拆成共享只读程序 + 可变上下文仍属高风险项，未做。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
@@ -1390,7 +1400,7 @@ protocol blocks world
 `chunkgen` / `worldgen` / `gen-world` oracle 用其余的数学并逐格对拍。它依赖 `data`
 （官方导出的世界生成数据和群系气候表）和 `blocks`（里面有官方的 `LegacyRandomSource`）。
 `loot` 算方块掉落、实体死亡和箱子填充，由 `game` 在挖掘、爆炸、`destroyBlock`、`/loot` 和容器第一次读写时调用；
-它依赖 `data`（嵌入的战利品表 JSON）和 `blocks`（随机源、方块状态）。
+它依赖 `data`（嵌入的战利品表 JSON）、`blocks`（随机源、方块状态）和 `core`（`Mth.sin` 的查找表）。
 
 ## 线程模型
 
