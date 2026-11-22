@@ -33,7 +33,8 @@ pnpm install
 pnpm start
 ```
 
-打包用 `pnpm tauri build`。
+打包用 `pnpm tauri build`（生成 MSI 和 NSIS 安装包）。只要免安装的单个程序时用 `pnpm portable`
+（即 `tauri build --no-bundle`），产物是 `target/release/bamboo-desktop.exe`，不生成安装包。
 
 桌面端有总览、控制台、玩家和设置四个页面。设置页分成「官方设置」和「Bamboo 优化设置」
 两个分区，读写 APP 数据目录 `server/` 下的 `server.properties` 和 `bamboo.toml`，
