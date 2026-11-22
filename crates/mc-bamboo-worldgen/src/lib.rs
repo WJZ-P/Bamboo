@@ -55,7 +55,10 @@ pub mod spline;
 pub mod structure;
 pub mod volume;
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use serde_json::Value;
 
@@ -65,6 +68,7 @@ use crate::{
     density::{FunctionRegistry, NoiseRegistry},
     feature::registry::Registry,
     settings::Settings,
+    structure::jigsaw::TemplatePools,
 };
 
 /// `worldgen` 数据里一条多噪声预设的 13 个定点数：六个区间加一个 `offset`。
@@ -77,7 +81,7 @@ const PRESET_PARAMETER_COUNT: usize = 13;
 /// aquifer, surface rules and carvers from them, and spawn search, the structure
 /// pipeline and template pools, and processor lists read them too. Everything else is
 /// dead once parsing finishes.
-const RUNTIME_TABLES: [&str; 10] = [
+const RUNTIME_TABLES: [&str; 9] = [
     "noise_settings",
     "density_function",
     "material_rule",
@@ -86,7 +90,6 @@ const RUNTIME_TABLES: [&str; 10] = [
     "biome_carvers",
     "structure_set",
     "structure",
-    "template_pool",
     "processor_list",
 ];
 
@@ -103,6 +106,13 @@ pub struct Worldgen {
     /// The read-only feature registry, fixed at parse time and shared process-wide
     /// via `Worldgen::shared()`.
     features: Registry,
+    /// 解析好的拼图模板池：只和数据版本有关，和种子、世界类型、区块坐标都无关。
+    /// 官方每世界一份 `StructureTemplatePool` 注册表，这里和地物注册表一样全进程共用。
+    ///
+    /// The parsed jigsaw template pools: they depend only on the data version, not on
+    /// the seed, world type or chunk position. Vanilla keeps one registry per world;
+    /// here it is shared process-wide like the feature registry.
+    pools: Arc<TemplatePools>,
     /// 启服、加载世界时还会读的顶层注册表，官方 codec 的 JSON 原样保留。
     ///
     /// 只留 [`RUNTIME_TABLES`] 那几个：解析完就没人再读的（多噪声预设、地物三表、
@@ -219,6 +229,13 @@ impl Worldgen {
         // parse it once here (the four feature keys were shape-checked above).
         let features = Registry::parse(root)?;
 
+        // 模板池同理：和种子无关，解析一次放进 `Worldgen`，`raw` 里就不再留这份 JSON。
+        // Template pools likewise depend only on the data version; parse them once into
+        // `Worldgen` and drop the JSON from `raw`.
+        let pools = Arc::new(TemplatePools::parse(
+            root.get("template_pool").ok_or("missing template_pool")?,
+        )?);
+
         // 这里只复制启服后还会读的表，别把整份 JSON 都留着：`multi_noise_presets`、
         // 地物三表、`features_per_step` 等解析完就没人再读，常驻下来白白占几 MB。
         // Copy only the tables still read after startup instead of the whole document:
@@ -239,6 +256,7 @@ impl Worldgen {
             presets,
             end_biomes,
             features,
+            pools,
             raw,
         })
     }
@@ -281,6 +299,14 @@ impl Worldgen {
     /// The process-wide shared, read-only feature registry.
     pub fn features(&self) -> &Registry {
         &self.features
+    }
+
+    /// 全进程共用的拼图模板池；结构状态克隆 `Arc` 即可，不再各自解析。
+    ///
+    /// The process-wide jigsaw template pools; a structure state clones the `Arc`
+    /// instead of parsing its own copy.
+    pub fn template_pools(&self) -> &Arc<TemplatePools> {
+        &self.pools
     }
 }
 
@@ -386,10 +412,14 @@ mod tests {
             "block_state_provider",
             "end_biomes",
             "noise",
+            "template_pool",
         ] {
             assert!(!raw.contains_key(name), "{name} should be dropped");
         }
         assert_eq!(raw.len(), RUNTIME_TABLES.len());
+        // 模板池转成了 `Worldgen::template_pools()`，不再以 JSON 常驻。
+        // Template pools now live in `Worldgen::template_pools()`, not as JSON.
+        assert_eq!(worldgen.template_pools().len(), 245);
     }
 
     /// 六条 17 位有效数字的噪声振幅必须和官方运行时的 double 逐位相同。

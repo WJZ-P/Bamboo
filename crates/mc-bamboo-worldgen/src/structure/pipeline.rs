@@ -14,7 +14,10 @@
 //! `as_sparse()`. Placement reads the rich model; references, the Beardifier and save
 //! encoding read the projection.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use mc_bamboo_data::BIOME_CLIMATES;
 use serde_json::Value;
@@ -211,7 +214,7 @@ pub struct WorldStructureState {
     pub sets: crate::structure::StructureState,
     pub structures: Structures,
     pub jigsaw: JigsawStructures,
-    pub pools: TemplatePools,
+    pub pools: Arc<TemplatePools>,
     pub seed: i64,
     flat_order: Option<Vec<String>>,
 }
@@ -325,7 +328,9 @@ impl WorldStructureState {
             sets,
             structures,
             jigsaw: JigsawStructures::parse(raw.get("structure").ok_or("missing structure")?)?,
-            pools: TemplatePools::parse(raw.get("template_pool").ok_or("missing template_pool")?)?,
+            // 模板池和种子无关，直接用 `Worldgen` 里全进程共享的那份。
+            // Template pools do not depend on the seed; reuse the `Worldgen` copy.
+            pools: worldgen.template_pools().clone(),
             seed,
             flat_order,
         })
