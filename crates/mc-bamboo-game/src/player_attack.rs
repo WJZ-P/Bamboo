@@ -106,7 +106,11 @@ fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
 /// `getAttributeValue(Attributes.ATTACK_SPEED)`: the default plus the main-hand
 /// weapon's `attribute_modifiers` (`ADD_VALUE`, main-hand slots).
 fn attack_speed(held: &ItemStack) -> f64 {
-    attribute_value(held, attribute::ATTACK_SPEED, attribute_defaults::ATTACK_SPEED)
+    attribute_value(
+        held,
+        attribute::ATTACK_SPEED,
+        attribute_defaults::ATTACK_SPEED,
+    )
 }
 
 /// `getAttributeValue(Attributes.ATTACK_KNOCKBACK)`。
@@ -277,7 +281,13 @@ fn can_critical(player: &Player, target_is_living: bool) -> bool {
 ///
 /// `Player.isSweepAttack`: full strength, non-critical, non-sprint, on ground,
 /// slow enough, and holding a sword.
-fn is_sweep_attack(player: &Player, held: &ItemStack, full: bool, crit: bool, sprint: bool) -> bool {
+fn is_sweep_attack(
+    player: &Player,
+    held: &ItemStack,
+    full: bool,
+    crit: bool,
+    sprint: bool,
+) -> bool {
     if !full || crit || sprint || !player.on_ground {
         return false;
     }
@@ -325,34 +335,36 @@ fn send_animate(region: &mut Region, attacker: PlayerId, target: i32, action: u8
     region.links.send_frames(attacker, &frames);
 }
 
+/// 一次 `ServerLevel.sendParticles` 的参数。
+///
+/// One `ServerLevel.sendParticles` request.
+struct ParticleSpec {
+    particle: i32,
+    position: Vec3,
+    spread: (f32, f32, f32),
+    speed: f32,
+    count: i32,
+}
+
 /// `ServerLevel.sendParticles`：32 格内（按玩家所在方块中心算）每个玩家一个包。
 ///
 /// `ServerLevel.sendParticles`: one packet per player within 32 blocks, measured
 /// from the centre of the player's block.
-fn send_particles(
-    region: &mut Region,
-    position: Vec3,
-    particle: i32,
-    x_dist: f32,
-    y_dist: f32,
-    z_dist: f32,
-    speed: f32,
-    count: i32,
-) {
+fn send_particles(region: &mut Region, spec: ParticleSpec) {
     let mut options = Vec::new();
-    write_varint(&mut options, particle);
+    write_varint(&mut options, spec.particle);
     let packet = LevelParticles {
         options: &options,
         override_limiter: false,
         always_show: false,
-        x: position.x,
-        y: position.y,
-        z: position.z,
-        x_dist,
-        y_dist,
-        z_dist,
-        max_speed: speed,
-        count,
+        x: spec.position.x,
+        y: spec.position.y,
+        z: spec.position.z,
+        x_dist: spec.spread.0,
+        y_dist: spec.spread.1,
+        z_dist: spec.spread.2,
+        max_speed: spec.speed,
+        count: spec.count,
         randomization: Randomization::Default,
     };
     let viewers: Vec<PlayerId> = region
@@ -365,9 +377,9 @@ fn send_particles(
                 f64::from(block.y) + 0.5,
                 f64::from(block.z) + 0.5,
             );
-            let dx = center.x - position.x;
-            let dy = center.y - position.y;
-            let dz = center.z - position.z;
+            let dx = center.x - spec.position.x;
+            let dy = center.y - spec.position.y;
+            let dz = center.z - spec.position.z;
             dx * dx + dy * dy + dz * dz < 32.0 * 32.0
         })
         .map(|player| player.id)
@@ -439,7 +451,7 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         ) {
             return;
         }
-        Some(mob_target(&public))
+        Some(mob_target(public))
     } else if let Some(other) = region.players.get(&PlayerId(entity_id)) {
         // `ServerPlayer.canHarmPlayer`：PVP 规则 + 队伍，Bamboo 没有队伍。
         //
@@ -511,7 +523,13 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         base_damage *= CRIT_MULTIPLIER;
     }
     let total_damage = base_damage + magic_boost;
-    let sweep = is_sweep_attack(&region.players[&id], &held, full, critical, knockback_attack);
+    let sweep = is_sweep_attack(
+        &region.players[&id],
+        &held,
+        full,
+        critical,
+        knockback_attack,
+    );
     // 横扫的候选来自实体表，要在借用 `block_level()` 之前取好。
     //
     // Sweep candidates come from the entity store, collected before `block_level()`.
@@ -549,16 +567,14 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         if hit {
             apply_extra_knockback(&mut world, entity_id, &held, knockback_attack, yaw);
             if sweep {
-                do_sweep(
-                    &mut world,
-                    id,
-                    &sweep_targets,
-                    &held,
+                let spec = SweepSpec {
+                    held: &held,
                     base_damage,
                     s,
-                    position,
+                    player_position: position,
                     yaw,
-                );
+                };
+                do_sweep(&mut world, id, &sweep_targets, &spec);
             }
             // `attackVisualEffects`：暴击音 + CRITICAL_HIT 动画，或 strong/weak 音；
             // 附魔加成 > 0 时再发 MAGIC_CRITICAL_HIT 动画。
@@ -616,30 +632,30 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         let player_center = player_center_y(region, id);
         send_particles(
             region,
-            Vec3::new(
-                position.x + f64::from(dx),
-                player_center,
-                position.z + f64::from(dz),
-            ),
-            particle_type::SWEEP_ATTACK,
-            dx,
-            0.0,
-            dz,
-            0.0,
-            0,
+            ParticleSpec {
+                particle: particle_type::SWEEP_ATTACK,
+                position: Vec3::new(
+                    position.x + f64::from(dx),
+                    player_center,
+                    position.z + f64::from(dz),
+                ),
+                spread: (dx, 0.0, dz),
+                speed: 0.0,
+                count: 0,
+            },
         );
     }
     if actual_damage > 2.0 {
         let count = (actual_damage * 0.5) as i32;
         send_particles(
             region,
-            indicator,
-            particle_type::DAMAGE_INDICATOR,
-            0.1,
-            0.0,
-            0.1,
-            0.2,
-            count,
+            ParticleSpec {
+                particle: particle_type::DAMAGE_INDICATOR,
+                position: indicator,
+                spread: (0.1, 0.0, 0.1),
+                speed: 0.2,
+                count,
+            },
         );
     }
 
@@ -690,9 +706,10 @@ fn hurt_player_target(
 
 fn damage_taken(region: &Region, entity_id: i32, old_health: f32) -> f32 {
     if player_target(region, entity_id) {
-        return region.players.get(&PlayerId(entity_id)).map_or(0.0, |p| {
-            (old_health - p.health.health).max(0.0)
-        });
+        return region
+            .players
+            .get(&PlayerId(entity_id))
+            .map_or(0.0, |p| (old_health - p.health.health).max(0.0));
     }
     region
         .entities
@@ -742,12 +759,7 @@ fn apply_extra_knockback(
     let radians = f64::from(yaw * (std::f32::consts::PI / 180.0));
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
-    world.knockback_mob(
-        entity_id,
-        f64::from(amount),
-        f64::from(dx),
-        f64::from(dz),
-    );
+    world.knockback_mob(entity_id, f64::from(amount), f64::from(dx), f64::from(dz));
 }
 
 /// `Player.doSweepAttack` 的候选：主目标盒子 inflate(1, 0.25, 1) 里、
@@ -789,35 +801,37 @@ fn collect_sweep_targets(
 ///
 /// `Player.doSweepAttack`: hit each candidate with
 /// `getEnchantedDamage(1 + ratio × baseDamage) × s`, then knock back 0.4.
-fn do_sweep(
-    world: &mut World<'_>,
-    attacker: PlayerId,
-    nearby: &[(i32, i32)],
-    held: &ItemStack,
+/// `do_sweep` 的固定参数。
+///
+/// The fixed parameters of `do_sweep`.
+struct SweepSpec<'a> {
+    held: &'a ItemStack,
     base_damage: f32,
     s: f32,
     player_position: Vec3,
     yaw: f32,
+}
+
+fn do_sweep(
+    world: &mut World<'_>,
+    attacker: PlayerId,
+    nearby: &[(i32, i32)],
+    spec: &SweepSpec<'_>,
 ) {
-    let sweep_base = 1.0 + sweeping_ratio(held) * base_damage;
-    let radians = f64::from(yaw * (std::f32::consts::PI / 180.0));
+    let sweep_base = 1.0 + sweeping_ratio(spec.held) * spec.base_damage;
+    let radians = f64::from(spec.yaw * (std::f32::consts::PI / 180.0));
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
     for &(id, entity_type) in nearby {
-        let enchanted = (sweep_base + damage_bonus(held, entity_type)) * s;
-        let mut source = DamageSource::player(attacker.0, player_position, false);
-        if !held.is_empty()
-            && let Ok(weapon) = u16::try_from(held.item)
+        let enchanted = (sweep_base + damage_bonus(spec.held, entity_type)) * spec.s;
+        let mut source = DamageSource::player(attacker.0, spec.player_position, false);
+        if !spec.held.is_empty()
+            && let Ok(weapon) = u16::try_from(spec.held.item)
         {
             source = source.with_weapon(weapon);
         }
         if world.hurt_mob(id, source, enchanted) {
-            world.knockback_mob(
-                id,
-                f64::from(0.4_f32),
-                f64::from(dx),
-                f64::from(dz),
-            );
+            world.knockback_mob(id, f64::from(0.4_f32), f64::from(dx), f64::from(dz));
         }
     }
 }
@@ -919,7 +933,11 @@ mod tests {
         let zombie = mc_bamboo_data::registries::entity_type::ZOMBIE;
         let spider = mc_bamboo_data::registries::entity_type::SPIDER;
 
-        let sharp = enchanted(mc_bamboo_data::items::DIAMOND_SWORD, "minecraft:sharpness", 3);
+        let sharp = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:sharpness",
+            3,
+        );
         assert_eq!(damage_bonus(&sharp, cow), 2.0);
         assert_eq!(damage_bonus(&sharp, zombie), 2.0);
 
@@ -938,7 +956,11 @@ mod tests {
 
     #[test]
     fn knockback_and_sweeping_use_the_generated_formulas() {
-        let knock = enchanted(mc_bamboo_data::items::DIAMOND_SWORD, "minecraft:knockback", 2);
+        let knock = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:knockback",
+            2,
+        );
         assert_eq!(attack_knockback_amount(&knock), 1.0);
         let sweeping = enchanted(
             mc_bamboo_data::items::DIAMOND_SWORD,
@@ -946,7 +968,10 @@ mod tests {
             3,
         );
         assert_eq!(sweeping_ratio(&sweeping), 0.75);
-        assert_eq!(sweeping_ratio(&stack(mc_bamboo_data::items::DIAMOND_SWORD)), 0.0);
+        assert_eq!(
+            sweeping_ratio(&stack(mc_bamboo_data::items::DIAMOND_SWORD)),
+            0.0
+        );
     }
 
     #[test]
