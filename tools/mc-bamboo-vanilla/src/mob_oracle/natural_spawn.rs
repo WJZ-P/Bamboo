@@ -493,6 +493,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         creative: false,
         sneaking: false,
         sprinting: false,
+        swimming: false,
         invisible: false,
         armor_cover: 0.0,
         main_hand: 0,
