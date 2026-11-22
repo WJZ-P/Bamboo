@@ -1172,6 +1172,27 @@ fn parse_aquifer(
 mod tests {
     use super::*;
 
+    /// 直接从 `Worldgen::raw` 取 `noise_settings` 必须和「整份文档重新解析一遍」
+    /// 得到的那一条逐项相同；这是去掉那次全量解析后的回归保护。
+    ///
+    /// Taking `noise_settings` from `Worldgen::raw` must equal the entry obtained by
+    /// re-parsing the whole document; this guards the removed full parse.
+    #[test]
+    fn settings_match_a_fresh_full_parse() {
+        let worldgen = Worldgen::load().expect("能读数据");
+        let root: Value =
+            serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).expect("worldgen json parses");
+        for id in worldgen.settings_ids() {
+            let fast = parse_settings(&worldgen, id).expect("settings in raw");
+            let fresh = root
+                .get("noise_settings")
+                .and_then(|value| value.get(id))
+                .and_then(Value::as_object)
+                .expect("settings in the document");
+            assert_eq!(&fast, fresh, "{id} 的 noise_settings 不一致");
+        }
+    }
+
     #[test]
     fn overworld_biomes_are_a_whole_chunk() {
         let worldgen = Worldgen::load().expect("能读数据");

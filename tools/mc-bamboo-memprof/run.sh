@@ -25,6 +25,7 @@
 #   ONLINE     玩家在线多少秒（默认 90；在线读数在离开前 10 秒取）
 #   AFTER      玩家离开后等多少秒（默认 120）
 #   BAMBOO_TOML  写进 bamboo.toml 的内容（可选）
+#   TRIM       plain 模式下设为 1：离开后再量一次强制换出工作集（EmptyWorkingSet）后的读数
 #   BIN        二进制所在目录（默认 target/release）
 set -u
 
@@ -87,6 +88,23 @@ reading online
 wait "$BOT"
 sleep "$AFTER"
 reading left
+
+if [ "$MODE" = plain ] && [ "${TRIM:-0}" != 0 ]; then
+    # 实验：玩家离开后把工作集强制换出，看用户看到的那部分内存能回收多少。
+    # 只动本脚本自己起的那个进程。这次实验不改产品代码，只量收益。
+    # 先隔 3 秒再读一次 `settled`，把「空闲缓存自己释放」和「强制换出」分开。
+    # Experiment: force the working set out after the player leaves, to measure how
+    # much of the memory the user sees can be reclaimed. Only touches the process this
+    # script started; no product code changes, this is just a measurement. Read
+    # `settled` three seconds later first, to separate the idle caches' own release
+    # from the forced trim.
+    sleep 3
+    reading settled
+    powershell -NoProfile -Command "Add-Type -Name W -Namespace P -MemberDefinition '[DllImport(\"psapi.dll\")] public static extern bool EmptyWorkingSet(IntPtr h);'; \$p = Get-Process -Id $WINPID; [P.W]::EmptyWorkingSet(\$p.Handle) | Out-Null" \
+        | tee -a "$OUT/plain.txt"
+    sleep 3
+    reading trimmed
+fi
 
 if [ "$MODE" != plain ]; then
     # 实验：压实堆之后再取一份，看空闲块里有多少能退还给系统。
