@@ -128,6 +128,10 @@ pub enum Kind {
     ///
     /// Goat-only behaviours.
     Goat(super::super::goat::Behavior),
+    /// 青蛙专属行为。
+    ///
+    /// Frog-only behaviours.
+    Frog(super::super::frog::Behavior),
 }
 
 /// `MoveToTargetSink` 的字段。`path` 只记有没有：官方比的是对象身份，只影响要不要重写
@@ -236,6 +240,7 @@ impl Kind {
             Self::Gate(_) => Class::Gate,
             Self::Armadillo(behavior) => behavior.class(),
             Self::Goat(behavior) => behavior.class(),
+            Self::Frog(behavior) => behavior.class(),
         }
     }
 
@@ -264,6 +269,7 @@ impl Kind {
             Self::Gate(gate) => &gate.entry,
             Self::Armadillo(behavior) => behavior.required(),
             Self::Goat(behavior) => behavior.required(),
+            Self::Frog(behavior) => behavior.required(),
         }
     }
 
@@ -295,6 +301,7 @@ impl Kind {
             Self::Gate(gate) => gate.name(),
             Self::Armadillo(behavior) => behavior.name(),
             Self::Goat(behavior) => behavior.name(),
+            Self::Frog(behavior) => behavior.name(),
         }
     }
 
@@ -336,6 +343,7 @@ impl Kind {
             }
             Self::Armadillo(behavior) => behavior.extra_start(cx),
             Self::Goat(behavior) => behavior.extra_start(cx),
+            Self::Frog(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -409,6 +417,7 @@ impl Kind {
             }
             Self::Armadillo(behavior) => behavior.start(cx),
             Self::Goat(behavior) => behavior.start(cx),
+            Self::Frog(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -440,6 +449,7 @@ impl Kind {
             }
             Self::Armadillo(behavior) => behavior.can_still_use(cx),
             Self::Goat(behavior) => behavior.can_still_use(cx),
+            Self::Frog(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -540,6 +550,7 @@ impl Kind {
             }
             Self::Armadillo(behavior) => behavior.tick(cx),
             Self::Goat(behavior) => behavior.tick(cx),
+            Self::Frog(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -567,6 +578,7 @@ impl Kind {
             }
             Self::Armadillo(behavior) => behavior.stop(cx),
             Self::Goat(behavior) => behavior.stop(cx),
+            Self::Frog(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -675,6 +687,7 @@ impl Kind {
             }
             Self::TriggerIf(trigger) => trigger.matches(cx.me.on_ground, cx.me.in_water),
             Self::Armadillo(behavior) => behavior.trigger(cx),
+            Self::Frog(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }

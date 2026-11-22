@@ -29,6 +29,7 @@ pub mod equipment;
 pub mod fish;
 pub mod fox;
 pub mod fox_goals;
+pub mod frog;
 pub mod goals;
 pub mod goat;
 pub mod interact;
@@ -1719,6 +1720,10 @@ pub struct Mob {
     ///
     /// The goat synced data and long-jump pose.
     pub goat: goat::Goat,
+    /// 青蛙的品种、姿势和伸舌头的目标。
+    ///
+    /// The frog's variant, pose and tongue target.
+    pub frog: frog::Frog,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
@@ -2029,6 +2034,7 @@ impl Mob {
             brain: new_brain(mob_type),
             armadillo: armadillo::Armadillo::default(),
             goat: goat::Goat::default(),
+            frog: frog::Frog::default(),
             discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,

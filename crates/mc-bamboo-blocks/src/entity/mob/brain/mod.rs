@@ -372,6 +372,14 @@ impl Brain {
         }
     }
 
+    /// 行为表里出现过的活动（去重前，按遍历顺序）。测试 / 对拍用。
+    ///
+    /// The activities present in the behaviour table (before dedup, in iteration
+    /// order), for tests / oracles.
+    pub fn table_activities(&self) -> Vec<Activity> {
+        self.entries.iter().map(|entry| entry.activity).collect()
+    }
+
     /// 对拍用：排过序的活动名。
     ///
     /// For oracles: the sorted activity names.
