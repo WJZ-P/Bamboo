@@ -114,6 +114,10 @@ pub enum Pose {
     Swimming = 3,
     SpinAttack = 4,
     Crouching = 5,
+    /// 山羊长跳途中。
+    ///
+    /// A goat in mid long jump.
+    LongJumping = 6,
     Dying = 7,
 }
 
@@ -202,6 +206,17 @@ pub enum EntityData {
     /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID` as registry IDs.
     ChickenVariant(i32),
     ChickenSoundVariant(i32),
+    /// `Armadillo.ARMADILLO_STATE`：状态的网络 ID（`ARMADILLO_STATE` 序列化器，VarInt）。
+    ///
+    /// `Armadillo.ARMADILLO_STATE`: the state'"'"'s network id (its own serializer, a VarInt).
+    ArmadilloState(i32),
+    /// `Goat` 的三个 BOOLEAN：尖叫、左角、右角（缺省假、真、真）。
+    ///
+    /// The three `Goat` booleans: screaming, left horn and right horn (false, true and
+    /// true by default).
+    GoatScreaming(bool),
+    GoatLeftHorn(bool),
+    GoatRightHorn(bool),
     /// `MushroomCow.DATA_TYPE`（INT）：0 红色，1 棕色。
     ///
     /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
@@ -398,6 +413,10 @@ impl EntityData {
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
+            Self::GoatScreaming(_) => mc_bamboo_data::entity_types::GOAT_SCREAMING,
+            Self::GoatLeftHorn(_) => mc_bamboo_data::entity_types::GOAT_LEFT_HORN,
+            Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
             Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
             Self::PolarBearStanding(_) => mc_bamboo_data::entity_types::POLAR_BEAR_STANDING,
             Self::PandaUnhappy(_) => mc_bamboo_data::entity_types::PANDA_UNHAPPY,
@@ -493,7 +512,11 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
             }
-            Self::ArrowInGround(value) | Self::HorseChest(value) => {
+            Self::ArrowInGround(value)
+            | Self::HorseChest(value)
+            | Self::GoatScreaming(value)
+            | Self::GoatLeftHorn(value)
+            | Self::GoatRightHorn(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 out.push(u8::from(*value));
             }
@@ -628,6 +651,14 @@ impl EntityData {
             Self::SheepWool(wool) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*wool);
+            }
+            Self::ArmadilloState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::ARMADILLO_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
             }
             Self::ChickenVariant(value) | Self::ChickenSoundVariant(value) => {
                 use mc_bamboo_data::entity_types as facts;

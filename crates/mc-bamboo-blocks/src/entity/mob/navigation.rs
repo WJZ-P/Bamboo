@@ -210,13 +210,32 @@ impl Navigation {
         // `WaterBoundPathNavigation` keeps the base `createPath`: no loaded check and no
         // surface search. `AmphibiousPathNavigation` does the same.
         if self.water().is_some() || self.flags.amphibious {
-            return self.create_path_to(view, mob, pos, reach);
+            let max_path_length = self.max_path_length(mob.follow_range);
+            return self.create_path_to(view, mob, pos, reach, max_path_length);
         }
         if !view.is_loaded(pos) {
             return None;
         }
         let pos = find_surface_position(view, pos);
-        self.create_path_to(view, mob, pos, reach)
+        let max_path_length = self.max_path_length(mob.follow_range);
+        self.create_path_to(view, mob, pos, reach, max_path_length)
+    }
+
+    /// `PathNavigation.createPath(BlockPos, reachRange, maxPathLength)`：`GroundPathNavigation`
+    /// 没有覆写这一个，所以不找地表，路径长度上限由调用方给（长跳用 8）。
+    ///
+    /// `PathNavigation.createPath(BlockPos, reachRange, maxPathLength)`, which
+    /// `GroundPathNavigation` does not override: no surface search, and the caller gives
+    /// the path length cap (8 for long jumps).
+    pub fn create_path_within(
+        &mut self,
+        view: &dyn BlockView,
+        mob: &NavMob,
+        pos: BlockPos,
+        reach: i32,
+        max_path_length: f32,
+    ) -> Option<Path> {
+        self.create_path_to(view, mob, pos, reach, max_path_length)
     }
 
     /// `PathNavigation.createPath(Set, regionOffset, offsetUpward, reach, maxPathLength)`。
@@ -226,6 +245,7 @@ impl Navigation {
         mob: &NavMob,
         pos: BlockPos,
         reach: i32,
+        max_path_length: f32,
     ) -> Option<Path> {
         if mob.path.position.y < f64::from(view.min_y()) {
             return None;
@@ -243,7 +263,7 @@ impl Navigation {
             mob: mob.path,
             flags: self.flags,
             target: pos,
-            max_distance_from_start: self.max_path_length(mob.follow_range),
+            max_distance_from_start: max_path_length,
             reach_range: reach,
             max_visited_nodes: self.max_visited_nodes,
             max_visited_nodes_multiplier: self.max_visited_nodes_multiplier,

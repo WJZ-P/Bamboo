@@ -12,9 +12,11 @@
 //! out of `Entity.kind` so it can be borrowed apart from the entity; sizes
 //! therefore live on [`Entity::dimensions`].
 
+pub mod armadillo;
 pub mod attributes;
 pub mod avoid;
 pub mod axolotl;
+pub mod brain;
 pub mod bucketable;
 pub mod chicken;
 pub mod control;
@@ -30,6 +32,7 @@ pub mod fish;
 pub mod fox;
 pub mod fox_goals;
 pub mod goals;
+pub mod goat;
 pub mod interact;
 pub mod living;
 pub mod mooshroom;
@@ -129,13 +132,15 @@ pub enum MobType {
     Donkey,
     Mule,
     Llama,
+    Armadillo,
+    Goat,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 32] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -166,6 +171,8 @@ impl MobType {
         Self::Turtle,
         Self::Dolphin,
         Self::Axolotl,
+        Self::Armadillo,
+        Self::Goat,
     ];
 
     /// 注册表 ID。
@@ -202,6 +209,8 @@ impl MobType {
             Self::Donkey => ids::DONKEY,
             Self::Mule => ids::MULE,
             Self::Llama => ids::LLAMA,
+            Self::Armadillo => ids::ARMADILLO,
+            Self::Goat => ids::GOAT,
         }
     }
 
@@ -238,6 +247,8 @@ impl MobType {
             Self::Donkey => "minecraft:donkey",
             Self::Mule => "minecraft:mule",
             Self::Llama => "minecraft:llama",
+            Self::Armadillo => "minecraft:armadillo",
+            Self::Goat => "minecraft:goat",
         }
     }
 
@@ -248,6 +259,8 @@ impl MobType {
             Self::Rabbit => Some(item_tags::RABBIT_FOOD),
             Self::Fox => Some(item_tags::FOX_FOOD),
             Self::Wolf => Some(item_tags::WOLF_FOOD),
+            Self::Armadillo => Some(item_tags::ARMADILLO_FOOD),
+            Self::Goat => Some(item_tags::GOAT_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
             _ => None,
@@ -310,6 +323,8 @@ impl MobType {
                 equine::dimensions(self, baby)
             }
             (Self::Pig, baby) => pig::dimensions(baby),
+            (Self::Armadillo, baby) => armadillo::dimensions(baby),
+            (Self::Goat, baby) => goat::dimensions(baby),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
@@ -530,6 +545,8 @@ impl MobType {
             Self::Donkey => "minecraft:entities/donkey",
             Self::Mule => "minecraft:entities/mule",
             Self::Llama => "minecraft:entities/llama",
+            Self::Armadillo => "minecraft:entities/armadillo",
+            Self::Goat => "minecraft:entities/goat",
         }
     }
 
@@ -605,6 +622,8 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.donkey.ambient"),
             Self::Mule => Some("minecraft:entity.mule.ambient"),
             Self::Llama => Some("minecraft:entity.llama.ambient"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.ambient"),
+            Self::Goat => Some("minecraft:entity.goat.ambient"),
         }
     }
 
@@ -634,6 +653,8 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.donkey.hurt"),
             Self::Mule => Some("minecraft:entity.mule.hurt"),
             Self::Llama => Some("minecraft:entity.llama.hurt"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.hurt"),
+            Self::Goat => Some("minecraft:entity.goat.hurt"),
         }
     }
 
@@ -663,6 +684,8 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.donkey.death"),
             Self::Mule => Some("minecraft:entity.mule.death"),
             Self::Llama => Some("minecraft:entity.llama.death"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.death"),
+            Self::Goat => Some("minecraft:entity.goat.death"),
         }
     }
 
@@ -696,6 +719,8 @@ impl MobType {
             Self::Donkey => Some("minecraft:entity.horse.step"),
             Self::Mule => Some("minecraft:entity.horse.step"),
             Self::Llama => Some("minecraft:entity.llama.step"),
+            Self::Armadillo => Some("minecraft:entity.armadillo.step"),
+            Self::Goat => Some("minecraft:entity.goat.step"),
         }
     }
 
@@ -733,6 +758,8 @@ impl MobType {
             Self::Donkey => items::DONKEY_SPAWN_EGG,
             Self::Mule => items::MULE_SPAWN_EGG,
             Self::Llama => items::LLAMA_SPAWN_EGG,
+            Self::Armadillo => items::ARMADILLO_SPAWN_EGG,
+            Self::Goat => items::GOAT_SPAWN_EGG,
         }
     }
 
@@ -769,6 +796,8 @@ impl MobType {
             Self::Donkey => "entity.minecraft.donkey",
             Self::Mule => "entity.minecraft.mule",
             Self::Llama => "entity.minecraft.llama",
+            Self::Armadillo => "entity.minecraft.armadillo",
+            Self::Goat => "entity.minecraft.goat",
         }
     }
 
@@ -1255,6 +1284,13 @@ impl DamageKind {
         }
     }
 
+    /// `#no_anger`：挨打的不记 `lastHurtByMob`。
+    ///
+    /// `#no_anger`: the victim does not record `lastHurtByMob`.
+    pub const fn no_anger(self) -> bool {
+        matches!(self, Self::MobAttackNoAggro)
+    }
+
     /// `#panic_environmental_causes`（这里有的那几种；`lightning_bolt` 和 `sulfur_cube_hot` 还没有）。
     ///
     /// `#panic_environmental_causes` (the kinds modelled here; `lightning_bolt` and
@@ -1266,16 +1302,18 @@ impl DamageKind {
         )
     }
 
-    /// `#panic_causes`。
+    /// `#panic_causes`。没有 `mob_attack_no_aggro`（山羊冲撞不吓人）和 `thorns`。
+    ///
+    /// `#panic_causes`, which lists neither `mob_attack_no_aggro` (goat rams) nor `thorns`.
     pub const fn panic_causes(self) -> bool {
         matches!(
             self,
             Self::PlayerAttack
                 | Self::MobAttack
-                | Self::MobAttackNoAggro
                 | Self::Arrow
                 | Self::Thrown
-                | Self::Thorns
+                | Self::Magic
+                | Self::Wither
                 | Self::Explosion
                 | Self::PlayerExplosion
                 | Self::Cactus
@@ -1760,6 +1798,22 @@ pub struct Mob {
     /// (vanilla moves the rider off the mount synchronously; Bamboo does it in `riding::tick`).
     pub(super) ejected_passenger: Option<EntityUid>,
     pub equine: Option<Box<equine::EquineState>>,
+    /// 跑大脑的生物（犰狳）的 `Brain`；用目标选择器的生物是 `None`。
+    ///
+    /// The `Brain` of brain-driven mobs (armadillos); `None` for goal-driven mobs.
+    pub brain: Option<Box<brain::Brain>>,
+    /// 犰狳的状态机和掉鳞甲计时。
+    ///
+    /// The armadillo state machine and scute timer.
+    pub armadillo: armadillo::Armadillo,
+    /// 山羊的同步数据和长跳姿势。
+    ///
+    /// The goat synced data and long-jump pose.
+    pub goat: goat::Goat,
+    /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
+    ///
+    /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
+    pub discard_friction: bool,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -1850,6 +1904,8 @@ impl Mob {
             MobType::Spider => spider::attributes(MobType::Spider),
             MobType::CaveSpider => spider::attributes(MobType::CaveSpider),
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
+            MobType::Armadillo => armadillo::attributes(),
+            MobType::Goat => goat::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -1887,6 +1943,7 @@ impl Mob {
             MobType::Enderman => enderman::goals(&mut navigation),
             MobType::Spider | MobType::CaveSpider => spider::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
+            MobType::Armadillo | MobType::Goat => GoalSelector::default(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -1908,7 +1965,9 @@ impl Mob {
             | MobType::Mooshroom
             | MobType::Pig
             | MobType::Sheep
-            | MobType::Chicken => GoalSelector::default(),
+            | MobType::Chicken
+            | MobType::Armadillo
+            | MobType::Goat => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Fox => fox::target_goals(),
@@ -2077,6 +2136,10 @@ impl Mob {
             needs_sync: false,
             hurt_marked: false,
             pending_breed: None,
+            brain: new_brain(mob_type),
+            armadillo: armadillo::Armadillo::default(),
+            goat: goat::Goat::default(),
+            discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,
             equine: mob_type
@@ -2090,6 +2153,19 @@ impl Mob {
         }
         if mob_type == MobType::Fox {
             fox::configure(&mut mob);
+        }
+        if mob_type == MobType::Goat {
+            // `Goat` 构造函数：能浮水，细雪和细雪上方都不走。
+            // The `Goat` constructor: floats, and powder snow is off limits.
+            mob.navigation.flags.can_float = true;
+            mob.malus.set(mc_bamboo_data::PathType::PowderSnow, -1.0);
+            mob.malus
+                .set(mc_bamboo_data::PathType::OnTopOfPowderSnow, -1.0);
+        }
+        if mob_type == MobType::Armadillo {
+            // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
+            // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
+            mob.navigation.flags.can_float = true;
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -2144,6 +2220,10 @@ impl Mob {
 
     /// （宽，高）。
     pub fn dimensions(&self) -> (f32, f32) {
+        if self.mob_type == MobType::Goat {
+            let (width, height, _) = goat::pose_dimensions(self.is_baby(), self.goat.long_jumping);
+            return (width, height);
+        }
         if fish::is_fish(self.mob_type) {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish.variant, self.fish.puff_state);
@@ -2210,8 +2290,16 @@ impl Mob {
         self.first_passenger()
     }
 
-    /// `PathfinderMob.isPanicking`：正在跑的目标里有恐慌。
+    /// `PathfinderMob.isPanicking`：大脑里有 `IS_PANICKING` 记忆，或者正在跑的目标里有恐慌。
+    ///
+    /// `PathfinderMob.isPanicking`: an `IS_PANICKING` memory in the brain, or a running
+    /// panic goal.
     pub fn is_panicking(&self) -> bool {
+        if let Some(brain) = &self.brain
+            && brain.memories.has(brain::memory::MemoryType::IsPanicking)
+        {
+            return true;
+        }
         self.goals.is_panicking()
     }
 
@@ -2287,6 +2375,14 @@ pub struct MobPublic {
     pub pig_sound_variant: pig::SoundVariant,
     pub wool: u8,
     pub chicken_sound_variant: chicken::SoundVariant,
+    /// `Armadillo.ARMADILLO_STATE` 的网络 ID。
+    ///
+    /// The network id of `Armadillo.ARMADILLO_STATE`.
+    pub armadillo_state: i32,
+    /// 山羊的三个同步布尔值和长跳姿势。
+    ///
+    /// The goat synced booleans and its long-jump pose.
+    pub goat: goat::Goat,
     /// `MushroomCow.DATA_TYPE`：棕色为真。
     ///
     /// `MushroomCow.DATA_TYPE`: true for brown.
@@ -2414,6 +2510,8 @@ impl MobPublic {
             pig_sound_variant: mob.pig_sound_variant,
             wool: mob.wool,
             chicken_sound_variant: mob.chicken_sound_variant,
+            armadillo_state: mob.armadillo.state.id(),
+            goat: mob.goat,
             mooshroom_brown: mob.mooshroom.brown,
             polar_bear_standing: mob.polar_bear.standing,
             panda: panda::PandaPublic::of(&mob.panda),
@@ -2462,6 +2560,10 @@ impl MobPublic {
     }
 
     pub fn dimensions(&self) -> (f32, f32) {
+        if self.mob_type == MobType::Goat {
+            let (width, height, _) = goat::pose_dimensions(self.baby, self.goat.long_jumping);
+            return (width, height);
+        }
         if fish::is_fish(self.mob_type) {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish_variant, self.puff_state);
@@ -2482,6 +2584,19 @@ impl MobPublic {
 
     pub fn is_alive(&self) -> bool {
         self.health > 0.0
+    }
+}
+
+/// `makeBrain(Brain.Packed.EMPTY)`：跑大脑的种类建一个新大脑（传感器延迟还没取），
+/// 用目标选择器的种类是 `None`。
+///
+/// `makeBrain(Brain.Packed.EMPTY)`: a fresh brain for brain-driven kinds (sensor delays
+/// not drawn yet), `None` for goal-driven kinds.
+pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
+    match kind {
+        MobType::Armadillo => Some(Box::new(armadillo::brain())),
+        MobType::Goat => Some(Box::new(goat::brain())),
+        _ => None,
     }
 }
 

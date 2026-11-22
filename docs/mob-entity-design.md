@@ -472,7 +472,64 @@ AI 内部量，服务端不建模，无玩家可感知差异。没有改动任�
 `Command::LayTurtleEgg` 的越界崩溃。合并状态：`main = c9773f61` 仍是 HEAD 的祖先，
 `git merge main` 报 Already up to date。全量 `mob-oracle` 1744 例 165621 刻 0 不一致。
 
-### 5.9 中立生物地基和北极熊（2026-11-21）
+**与 main 合并（2026-11-21，14:35 追加，第八轮，op-water）。** 本轮 `main` 已前进到
+`650625b5`（Brain AI 框架、犰狳、山羊），比分支多 20 个提交，按「每轮先 merge main」执行。
+三处冲突都按 main 结构解并集：① `entity/mob/mod.rs` 保留两边的 `axolotl` / `brain` 模块声明，
+`MobType::ALL` 收下 Dolphin / Axolotl / Armadillo / Goat 四项、长度由 30 改成 32（合并后枚举
+共 32 个变体）；② 本文件按 main 把 5.9 定为「大脑 AI、犰狳、山羊」、5.10 定为「中立生物地基和
+北极熊」，去掉分支重复的 5.9 标题，保留两段 op-water 记录；③ `MobOracle.java` 的
+`cowSetupJson` 同时 append 海龟的 `turtleEgg` / `turtleHome` 和大脑的 `sensors` / `scute`，
+`zombieStepJson` 同时保留海龟与山羊两个 `instanceof` 状态块（补回各自闭合括号）。
+`generated/` 用合并后的生成器重跑 `extract`，`entity_types.rs` 与自动合并结果逐字节一致。
+`mob-oracle` 场景编号两边不重复：水生生物走 `squid` / `fish` / `water_mob` 独立驱动，不与
+cow-kind 表里犰狳 13 / 山羊 14 / 海龟 60 撞号；Rust `CowSetup` / `CowStep` 两侧字段自动合并齐全。
+合并把工作区检出成 CRLF、而仓库是 LF，逐文件转回 LF 后 diff 只剩真实内容改动。
+复核：`cargo check --workspace --all-targets`、`cargo fmt --check`、
+`cargo clippy --workspace --all-targets -- -D warnings` 全通过；全量 `mob-oracle`
+1757 例 170741 刻 0 不一致（brain 新增 13 场景 5120 刻正好对上），`--only dolphin`
+3 场景 603 刻、`--only axolotl` 4 场景 804 刻、`--break-self-test water_mob` 抓到 12 处不一致，
+`natural-spawn` 1727 例 0 不一致；`natural.rs` / `spawn.rs` 的水生生成规则接入经核对未被覆盖。
+`island_command` 4 passed、`mc-bamboo-blocks` 779 passed、`mc-bamboo-vanilla` 101 + 8 passed、
+`cargo check -p mc-bamboo-desktop` 通过、联机探针 769/769。05:00 两处回归（sheep_eat 位置、
+岛 1 随机源）的修复在 `9f210652` 已在 main，本轮全量对拍与 `island_command` 复核未复发。
+本轮未改动任何生物行为代码，只做合并、行尾规范化和文档。
+
+### 5.9 大脑 AI、犰狳、山羊（2026-11-21，分支 `brain`）
+
+**已做**（代码在 `entity/mob/brain/`、`entity/mob/armadillo.rs`、`entity/mob/goat.rs`）：
+
+| 项 | 官方 | Bamboo | 对拍 |
+|---|---|---|---|
+| 记忆 | `Brain.memories`、`ExpirableValue`、`MemorySlot` | `brain/memory.rs`：每种一个槽，过期倒数，没登记读作没有 | 逐刻比全部有值的记忆 |
+| 传感器 | `Sensor.tick`（`scanRate`、`randomlyDelayStart`）、`NearestLivingEntitySensor`、`PlayerSensor`、`NearestItemSensor`、`AdultSensor`、`HurtBySensor`、`TemptingSensor`、`MobSensor` | `brain/sensor.rs` | 起始延迟取官方报的值 |
+| 活动 | `ActivityData`、`setActiveActivityToFirstValid`、`activityRequirements` / `activityMemoriesToEraseWhenStopped` | `brain/mod.rs` | 逐刻比活动集合 |
+| 行为 | `Behavior`、`OneShot`（`BehaviorBuilder`）、`DoNothing`、`GateBehavior` / `RunOne` | `brain/behavior.rs` + `behaviors.rs` 的 `Kind`，生物专属的挂在 `Kind::Armadillo` / `Kind::Goat` | 逐刻比正在跑的行为（闸门带子行为） |
+| 存档 | `Brain.Packed` 的 `memories`、`Goat` / `Armadillo` 的 `add/readAdditionalSaveData` | `brain/nbt.rs`（只存有编解码器的记忆）、`mob/nbt.rs` | 单元测试往返；`chunk-content` 山羊 / 犰狳重存三题、新造山羊一题 |
+| 犰狳 | `Armadillo`、`ArmadilloAi` | `armadillo.rs` | `armadillo_*` 6 场景 |
+| 山羊 | `Goat`、`GoatAi`、`LongJumpMidJump`、`LongJumpToRandomPos`、`LongJumpUtil`、`PrepareRamNearestTarget`、`RamTarget` | `goat.rs` | `goat_*` 7 场景 |
+
+大脑放在 `Mob.brain: Option<Box<Brain>>`，跑的时候整个取出来（`Cx` 里同时拿着实体、生物、
+上下文和记忆），跑完放回。一刻里的位置照官方 `customServerAiStep`：先 `brain.tick`，再
+换活动，然后 `Animal` 那层。行为的遍历顺序见 `brain/mod.rs` 的 `order_entries`。
+
+**随机源。** 行为时长、`SetEntityLookTargetSometimes` 的间隔、长跳的候选抽签和冷却、冲撞冷却、
+山羊吃东西的音高用世界随机源；漫步、环顾、窥视、掉角用生物自己的随机源；官方不带种子的
+（`ShufflingList`、`Collections.shuffle`、`Sensor` 的静态随机源）在 Bamboo 里由出生时的随机源
+状态派生，对拍时两边按 `shuffle_seed` 重设。山羊的 `LongJumpToRandomPos` 在官方一侧换成只改
+了洗牌随机源的子类。
+
+**对拍夹具。** `goat_horn` 把所有传感器的起始延迟定成 3，场景每次跑都一样，才能在冲锋途中
+打死小牛、让山羊撞墙掉角；这个场景只跑 100 刻，因为官方一侧不 tick 掉落物（角停在原地），
+Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖出的幼崽不在比对范围里，山羊繁殖
+没有逐刻对拍。
+
+**并行模式。** `level_random_int` 在并行视图里恒为 0（行为时长取最短、长跳按列表顺序抽落点），
+冲撞命中走 `Command::RamHit`、掉角走 `Command::DropItemWithDelta`，都在落地阶段按官方顺序
+执行；大脑跟着实体走，岛拆合不需要新的按实体迁移。
+
+其余已知差异见 README「大脑生物的已知限制」。
+
+### 5.10 中立生物地基和北极熊（2026-11-21）
 
 - **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
   `persistentAngerTarget` 放在 `Mob::anger`，`update` 是官方的
@@ -495,10 +552,10 @@ AI 内部量，服务端不建模，无玩家可感知差异。没有改动任�
   `SpawnPlacementTypes.ON_GROUND` 的落脚块检查传入实体类型：冰和霜冰按官方 `Blocks`
   的专用谓词只允许北极熊，之后仍检查 `PolarBear.checkPolarBearSpawnRules`。
   自然生成与生成期刷怪的对拍分别覆盖蘑菇岛菌丝上的哞菇、冰冻海洋冰面上的北极熊。
-  山羊 / 青蛙 / 犰狳 / 骆驼用官方 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` / `CamelAi`），
-  Bamboo 只有 `GoalSelector`，没有 `Brain` / 传感器 / 记忆，这是下一步的公共地基。
+  山羊 / 青蛙 / 犰狳 / 骆驼用官方 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` / `CamelAi`）；
+  犰狳、山羊的 `Brain` 已在 5.9 落地，青蛙、骆驼仍等这套地基。
 
-### 5.10 熊猫（2026-11-21，分支 `op-misc`）
+### 5.11 熊猫（2026-11-21，分支 `op-misc`）
 
 - 代码在 `entity/mob/panda.rs`。六个基因按官方显性 / 隐性规则合成七种外观，显性基因直接
   是外观，`Brown` / `Weak` 要 `main == hidden` 才显现；`MainGene` / `HiddenGene` 存盘，
@@ -519,7 +576,7 @@ AI 内部量，服务端不建模，无玩家可感知差异。没有改动任�
   生成期刷怪把熊猫接进 `natural_gen` 的放置表，运行时接进 `check_spawn_rules` 和
   `finalizeSpawn`（组数据 `AgeableMobGroupData(0.2)`）。
 - 已知差异：`ITEM` / `SNEEZE` 粒子不发（取数照官方）；喷嚏让同伴跳的水中判定没有建模；
-  幼崽金蒲公英的 `Animal.mobInteract` 兜底未接。山羊 / 青蛙 / 犰狳 / 骆驼仍等 `Brain`。
+  幼崽金蒲公英的 `Animal.mobInteract` 兜底未接。青蛙、骆驼仍等 `Brain`（犰狳、山羊见 5.9）。
 
 ---
 

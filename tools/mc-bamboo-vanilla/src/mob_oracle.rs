@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod brain;
 mod egg;
 mod equine;
 mod fish;
@@ -262,6 +263,11 @@ struct Case {
     /// S4 吃东西场景。
     #[serde(default)]
     consume_scene: Option<ConsumeScene>,
+    /// 大脑场景：玩家 0 疾跑的 [起, 止) 刻。
+    ///
+    /// Brain scenes: the [start, end) ticks in which player 0 sprints.
+    #[serde(default)]
+    sprint: Option<[i32; 2]>,
 }
 
 /// 1c 落脚点对拍的官方答案：坐标按 f64 原始位传，随机源末态逐位比。
@@ -476,6 +482,13 @@ struct CowSetup {
     /// The chicken's starting `eggTime` (vanilla rolls it before the scene reseed).
     #[serde(default)]
     egg: i32,
+    /// 大脑传感器构造时取的起始延迟和犰狳的掉鳞甲计时（官方报过来）。
+    ///
+    /// The brain sensor start delays and armadillo scute timer drawn at construction.
+    #[serde(default)]
+    sensors: Vec<i64>,
+    #[serde(default)]
+    scute: i32,
     /// 马科的初始脾气，-1 表示用构造时的值。
     ///
     /// The equine's starting temper; -1 keeps the constructed value.
@@ -588,6 +601,12 @@ struct CowStep {
     fox_flags: i32,
     #[serde(default, rename = "foxMouth")]
     fox_mouth: i32,
+    /// 山羊：尖叫、左角、右角、长跳姿势各一位；其余生物是 0。
+    ///
+    /// Goats: screaming, left horn, right horn and the long-jump pose, one bit each; 0
+    /// for other mobs.
+    #[serde(default)]
+    goat: i32,
     /// 狼：驯服标志、坐下命令、有没有主人、仇恨结束时刻、讨食、项圈、最大生命（位）。
     ///
     /// Wolves: tame flags, sit order, owner, anger end, begging, collar, max health bits.
@@ -612,6 +631,11 @@ struct CowStep {
     eq: i32,
     #[serde(default)]
     tmp: i32,
+    /// 大脑快照：`活动|正在跑的行为|记忆`，不跑大脑的生物是空串。
+    ///
+    /// The brain dump `activities|running|memories`; empty for goal-driven mobs.
+    #[serde(default)]
+    brain: String,
     #[serde(default)]
     rider_count: usize,
     #[serde(default)]
@@ -636,17 +660,19 @@ struct CowStep {
     turtle_home_z: i32,
 }
 
-/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，以及苦力怕、蜘蛛、
-/// 洞穴蜘蛛和末影人。
+/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊，以及苦力怕、
+/// 蜘蛛、洞穴蜘蛛和末影人。
 ///
-/// Scenes played by the Java `playZombie` driver: zombies, the wild animals, and
-/// creepers, spiders, cave spiders and endermen.
+/// Scenes played by the Java `playZombie` driver: zombies, the wild animals,
+/// armadillos and goats, plus creepers, spiders, cave spiders and endermen.
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
         "rabbit_",
         "fox_",
         "wolf_",
+        "armadillo_",
+        "goat_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
@@ -1338,6 +1364,7 @@ impl Report {
                     spectator: false,
                     creative: false,
                     sneaking: false,
+                    sprinting: false,
                     invisible: false,
                     armor_cover: 0.0,
                     main_hand: player.item,
@@ -1396,23 +1423,32 @@ impl Report {
                     f64::from_bits(cow.z as u64),
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
+                // 场景编号（两侧同一套，别撞号）：1 僵尸、2 尸壳、3 猪、4 羊、5 鸡、
+                // 6 兔子、7 狐狸、8 狼、9..=12 马科、13 犰狳、14 山羊、15 熊猫、
+                // 16 北极熊、17 哞菇、40..=43 敌对生物、60 海龟，其余是牛。
+                // Scene kind ids (one shared set, no collisions): 1 zombie, 2 husk,
+                // 3 pig, 4 sheep, 5 chicken, 6 rabbit, 7 fox, 8 wolf, 9..=12 equines,
+                // 13 armadillo, 14 goat, 15 panda, 16 polar bear, 17 mooshroom,
+                // 40..=43 hostiles, 60 turtle; anything else is a cow.
                 let kind = match cow.kind {
+                    1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
+                    2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
+                    3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
+                    4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
+                    5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
+                    6 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
+                    7 => mc_bamboo_blocks::entity::mob::MobType::Fox,
+                    8 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
+                    9..=12 => equine::scene_kind(cow.kind),
+                    13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
+                    14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
+                    15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
+                    16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
+                    17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
                     43 => mc_bamboo_blocks::entity::mob::MobType::Enderman,
-                    8 => mc_bamboo_blocks::entity::mob::MobType::Wolf,
-                    7 => mc_bamboo_blocks::entity::mob::MobType::Fox,
-                    6 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
-                    15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
-                    13 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
-                    14 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
-                    5 => mc_bamboo_blocks::entity::mob::MobType::Chicken,
-                    4 => mc_bamboo_blocks::entity::mob::MobType::Sheep,
-                    3 => mc_bamboo_blocks::entity::mob::MobType::Pig,
-                    2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
-                    1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
-                    9..=12 => equine::scene_kind(cow.kind),
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
@@ -1443,6 +1479,13 @@ impl Report {
                         } else {
                             mob.wool = cow.wool;
                         }
+                        brain::setup(
+                            entity.random.state(),
+                            mob,
+                            &cow.sensors,
+                            cow.scute,
+                            break_test,
+                        );
                         // 鸡的蛋计时由 Java 一侧报过来（构造时抽的值）；缺省保留 Bamboo 的。
                         // The chicken's egg timer comes from Java (drawn in its constructor).
                         if cow.egg > 0 {
@@ -1513,6 +1556,11 @@ impl Report {
                                 }
                             } else {
                                 mob.age = cow.age;
+                            }
+                            if kind == mc_bamboo_blocks::entity::mob::MobType::Goat {
+                                // `setAge` 跨过 0 时 `Goat.ageBoundaryReached` 换攻击力。
+                                // Crossing zero in `setAge` runs `Goat.ageBoundaryReached`.
+                                mc_bamboo_blocks::entity::mob::goat::age_boundary_reached(mob);
                             }
                             mob.eye_height = eye;
                         }
@@ -1640,6 +1688,7 @@ impl Report {
             if let Some(game) = level.game.as_mut() {
                 game.tick_cooldowns();
             }
+            brain::set_sprint(&mut level.players, case.sprint, index as i32);
             let mut ours_interactions = Vec::new();
             let mut seeded_early = Vec::new();
             {
@@ -2007,6 +2056,9 @@ impl Report {
     ) {
         for (cow, expected) in official.iter().enumerate() {
             let place = format!("{name} tick {index} cow {cow}");
+            if std::env::var_os("MOB_ORACLE_BRAIN").is_some() && !expected.brain.is_empty() {
+                eprintln!("{place} official brain: {}", expected.brain);
+            }
             let Some(Some(ours)) = ours.get(cow) else {
                 if !expected.rm {
                     self.mismatch(format!("{place}: missing in bamboo"));
@@ -2084,10 +2136,12 @@ impl Report {
             plain!(var);
             plain!(snd);
             plain!(goals);
+            plain!(brain);
             if zombie_style(name) {
                 plain!(rabbit_carrot_ticks);
                 plain!(fox_flags);
                 plain!(fox_mouth);
+                plain!(goat);
                 plain!(wolf_tame);
                 plain!(wolf_sit);
                 plain!(wolf_owned);
@@ -3292,6 +3346,7 @@ fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
             level.entities.get(id).and_then(|entity| {
                 step_of(&entity, lr).map(|mut step| {
                     step.bh = bh;
+                    step.brain = brain::dump(level, &entity);
                     step
                 })
             })
@@ -3430,6 +3485,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         } else {
             0
         },
+        goat: goat_flags(mob),
         wolf_tame: if is_wolf(mob) {
             i32::from(mob.tame.flags)
         } else {
@@ -3476,6 +3532,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .as_ref()
             .map_or(0, |state| i32::from(state.flags())),
         tmp: mob.equine.as_ref().map_or(0, |state| state.temper),
+        brain: String::new(),
         rider_count: mob.passengers.len(),
         owner: mob
             .equine
@@ -3490,6 +3547,20 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         turtle_home_y: mob.turtle.home_pos.y,
         turtle_home_z: mob.turtle.home_pos.z,
     }
+}
+
+/// 山羊的四个标志位，和 Java 一侧 `zombieStepJson` 的 `goat` 一致。
+///
+/// The goat's four flag bits, matching `goat` in the Java `zombieStepJson`.
+fn goat_flags(mob: &mc_bamboo_blocks::entity::mob::Mob) -> i32 {
+    if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Goat {
+        return 0;
+    }
+    let goat = mob.goat;
+    i32::from(goat.screaming)
+        | i32::from(goat.left_horn) << 1
+        | i32::from(goat.right_horn) << 2
+        | i32::from(goat.long_jumping) << 3
 }
 
 /// 对拍里的花纹列：羊是颜色加剪毛标记，鸡还带下蛋计时。

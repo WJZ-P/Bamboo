@@ -3586,6 +3586,10 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PUFFERFISH_PUFF_STATE", facts.pufferfish_puff_state),
         ("CHICKEN_VARIANT", facts.chicken_variant),
         ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
+        ("ARMADILLO_STATE", facts.armadillo_state),
+        ("GOAT_SCREAMING", facts.goat_screaming),
+        ("GOAT_LEFT_HORN", facts.goat_left_horn),
+        ("GOAT_RIGHT_HORN", facts.goat_right_horn),
         ("TURTLE_HAS_EGG", facts.turtle_has_egg),
         ("TURTLE_LAYING_EGG", facts.turtle_laying_egg),
         ("DOLPHIN_GOT_FISH", facts.dolphin_got_fish),
@@ -3614,6 +3618,10 @@ fn entity_types_file(data: &VersionData) -> String {
         (
             "CHICKEN_SOUND_VARIANT_SERIALIZER",
             facts.chicken_sound_variant_serializer,
+        ),
+        (
+            "ARMADILLO_STATE_SERIALIZER",
+            facts.armadillo_state_serializer,
         ),
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");

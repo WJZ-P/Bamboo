@@ -972,6 +972,14 @@ pub struct ProjectileFacts {
     pub chicken_sound_variant: u8,
     pub chicken_variant_serializer: i32,
     pub chicken_sound_variant_serializer: i32,
+    /// `Armadillo.ARMADILLO_STATE` 的下标和序列化器、山羊的三个布尔元数据。
+    ///
+    /// The `Armadillo.ARMADILLO_STATE` index and serializer, and the goat's three booleans.
+    pub armadillo_state: u8,
+    pub armadillo_state_serializer: i32,
+    pub goat_screaming: u8,
+    pub goat_left_horn: u8,
+    pub goat_right_horn: u8,
     /// `MushroomCow.DATA_TYPE` 的元数据 index。
     ///
     /// The metadata index of `MushroomCow.DATA_TYPE`.

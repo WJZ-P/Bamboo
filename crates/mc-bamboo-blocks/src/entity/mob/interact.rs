@@ -49,9 +49,11 @@ pub struct MobInteraction {
     /// Equine `openCustomInventoryScreen`: the caller opens the mount inventory
     /// for this player.
     pub open_inventory: bool,
-    /// `Sheep.shear`：调用方按剪羊毛战利品表掉落，并给剪刀扣 1 点耐久。
+    /// `Sheep.shear`：调用方按剪羊毛战利品表掉落，并给剪刀扣 1 点耐久；对犰狳是
+    /// `brushOffScute`，按刷子战利品表掉落并扣 16 点耐久。
     ///
-    /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point.
+    /// `Sheep.shear`: the caller drops the shearing loot and spends one durability point;
+    /// for armadillos it is `brushOffScute`, dropping the brush loot and spending 16.
     pub shear: bool,
     /// `AbstractHorse.doPlayerRide`：调用方把这名玩家放到这只生物身上。
     ///
@@ -160,6 +162,16 @@ pub fn interact(
     if mob.mob_type == super::MobType::Wolf {
         return super::wolf::interact(me, mob, req, now);
     }
+    if mob.mob_type == MobType::Armadillo
+        && let Some(outcome) = super::armadillo::interact(me, mob, req)
+    {
+        return outcome;
+    }
+    if mob.mob_type == MobType::Goat
+        && let Some(outcome) = super::goat::interact(mob, req)
+    {
+        return outcome;
+    }
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }
@@ -237,9 +249,7 @@ pub(super) fn animal_interact(
         mob.in_love = 600;
         mob.love_cause = Some(req.player_uuid);
         mob.events.push(MobEvent::Hearts);
-        if mob.mob_type == MobType::Pig {
-            pig::play_eating_sound(me, mob);
-        }
+        play_eating_sound(me, mob);
         return MobInteraction {
             result: InteractionResult::SuccessServer,
             shrink_held: !req.creative,
@@ -251,9 +261,7 @@ pub(super) fn animal_interact(
         // `getSpeedUpSecondsWhenFeeding(-age)`：int 除法先算，再乘 0.1F 截成 int。
         let seconds = (((-age) / 20) as f32 * 0.1_f32) as i32;
         age_up(me, mob, seconds, true);
-        if mob.mob_type == MobType::Pig {
-            pig::play_eating_sound(me, mob);
-        }
+        play_eating_sound(me, mob);
         return MobInteraction {
             result: InteractionResult::Success,
             shrink_held: !req.creative,
@@ -263,6 +271,17 @@ pub(super) fn animal_interact(
     }
     // 官方只有客户端这一支返回 `CONSUME`，服务端返回 `PASS`。
     MobInteraction::pass()
+}
+
+/// `Animal.playEatingSound`：缺省不出声，猪和犰狳各有自己的。
+///
+/// `Animal.playEatingSound`: silent by default; pigs and armadillos have their own.
+fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
+    match mob.mob_type {
+        MobType::Pig => pig::play_eating_sound(me, mob),
+        MobType::Armadillo => living::make_sound(me, mob, "minecraft:entity.armadillo.eat"),
+        _ => {}
+    }
 }
 
 /// `Shearable.shear` 的落地：按种类分给羊或哞菇。

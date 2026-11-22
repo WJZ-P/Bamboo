@@ -40,11 +40,6 @@ const PASSTHROUGH: &[&str] = &[
     "current_explosion_impact_pos",
 ];
 
-/// `Brain.Packed.CODEC` 写一头牛的空大脑。
-fn empty_brain() -> Tag {
-    Tag::Compound(vec![("memories".to_owned(), Tag::Compound(Vec::new()))])
-}
-
 /// `MobEffectInstance.CODEC` 的一项：`id` 加 `Details` 的六个字段（可递归的
 /// `hidden_effect`）。官方 `optionalFieldOf` 在等于缺省值时省键：
 /// `amplifier` 用 UNSIGNED_BYTE 编（BYTE 标签）、`duration` 用 INT、
@@ -254,7 +249,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "active_effects", effects_tag(&mob.effects));
     }
     put(&mut out, "FallFlying", Tag::Byte(i8::from(mob.fall_flying)));
-    put(&mut out, "Brain", empty_brain());
+    put(
+        &mut out,
+        "Brain",
+        super::brain::nbt::write(mob.brain.as_deref()),
+    );
     if let Some(uuid) = &mob.last_hurt_by_player_ref {
         put(&mut out, "last_hurt_by_player", uuid_tag(uuid));
         put(
@@ -374,6 +373,30 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Byte(super::sheep::color(mob).id() as i8),
         );
     }
+    if mob.mob_type == MobType::Armadillo {
+        put(
+            &mut out,
+            "state",
+            Tag::String(mob.armadillo.state.name().to_owned()),
+        );
+        put(&mut out, "scute_time", Tag::Int(mob.armadillo.scute_time));
+    }
+    if mob.mob_type == MobType::Goat {
+        // `Goat.addAdditionalSaveData`。
+        // `Goat.addAdditionalSaveData`.
+        let goat = mob.goat;
+        put(
+            &mut out,
+            "IsScreamingGoat",
+            Tag::Byte(i8::from(goat.screaming)),
+        );
+        put(&mut out, "HasLeftHorn", Tag::Byte(i8::from(goat.left_horn)));
+        put(
+            &mut out,
+            "HasRightHorn",
+            Tag::Byte(i8::from(goat.right_horn)),
+        );
+    }
     if mob.mob_type == MobType::Mooshroom {
         super::mooshroom::write_nbt(mob, &mut out);
     }
@@ -469,6 +492,19 @@ pub fn read_mob(tag: &Tag, id: &str, uid: i32) -> Result<Option<EntityRow>> {
     // 读盘的实体不是新建的：构造时的随机数（UUID、朝向）不取，缺 `UUID` 时全零。
     // A loaded entity is not freshly built: the constructor draws are skipped.
     load_into(&mut entity, tag)?;
+    entity.with_mob(|_, mob| {
+        // 读盘的生物随机源在放进世界时才定：大脑的洗牌种子和传感器延迟改用 UUID 算，
+        // 不取任何随机源（官方这两样本来就不可复现）。
+        // A loaded mob's random is set when it joins the world, so the brain's shuffle
+        // seeds and sensor delays come from the UUID without drawing (vanilla's are not
+        // reproducible anyway).
+        if let Some(brain) = mob.brain.as_mut() {
+            let seed = i64::from_be_bytes(mob.uuid[..8].try_into().unwrap_or_default())
+                ^ i64::from_be_bytes(mob.uuid[8..].try_into().unwrap_or_default());
+            brain.seed_shuffles(seed);
+            brain.randomly_delay_start(&mut crate::entity::JavaRandom::new(seed));
+        }
+    });
     Ok(Some(entity.split()))
 }
 
@@ -504,7 +540,11 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.x_rot = rotation[1];
         mob.y_rot_o = me.y_rot;
         mob.x_rot_o = mob.x_rot;
-        mob.y_head_rot = me.y_rot;
+        mob.y_head_rot = if mob.mob_type == MobType::Goat {
+            super::goat::clamped_head_rot(mob.y_body_rot, me.y_rot)
+        } else {
+            me.y_rot
+        };
         mob.y_head_rot_o = me.y_rot;
         mob.y_body_rot = me.y_rot;
         mob.y_body_rot_o = me.y_rot;
@@ -574,6 +614,18 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             };
             (pos, radius)
         });
+        // `LivingEntity.readAdditionalSaveData`：有 `Brain` 键就 `makeBrain(packed)`，
+        // 传感器的起始延迟再从生物随机源取一遍。
+        // `LivingEntity.readAdditionalSaveData`: a `Brain` key rebuilds the brain, drawing
+        // the sensors' start delays from the mob's random again.
+        if let Some(saved) = tag::field(tag, "Brain")
+            && let Some(mut brain) = super::new_brain(mob.mob_type)
+        {
+            brain.seed_shuffles(me.random.state());
+            brain.randomly_delay_start(&mut me.random);
+            super::brain::nbt::read(&mut brain, saved);
+            mob.brain = Some(brain);
+        }
         mob.left_handed = tag::bool_or(tag, "LeftHanded", false);
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
@@ -619,6 +671,16 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             super::sheep::set_sheared(mob, tag::bool_or(tag, "Sheared", false));
             let color = tag::int_or(tag, "Color", 0);
             super::sheep::set_color(mob, mc_bamboo_core::sign::DyeColor::from_id(color));
+        }
+        if mob.mob_type == MobType::Armadillo {
+            read_armadillo(mob, tag);
+        }
+        if mob.mob_type == MobType::Goat {
+            // `Goat.readAdditionalSaveData`：缺省不尖叫、两只角都在。
+            // `Goat.readAdditionalSaveData`: not screaming and both horns by default.
+            mob.goat.screaming = tag::bool_or(tag, "IsScreamingGoat", false);
+            mob.goat.left_horn = tag::bool_or(tag, "HasLeftHorn", true);
+            mob.goat.right_horn = tag::bool_or(tag, "HasRightHorn", true);
         }
         if mob.mob_type == MobType::Mooshroom {
             super::mooshroom::read_nbt(mob, tag);
@@ -860,6 +922,21 @@ pub(crate) fn uuid_tag(bytes: &[u8; 16]) -> Tag {
 /// `Fox.readAdditionalSaveData`：清空信任名单再逐个加回，最后 `setTargetGoals`。
 ///
 /// `Fox.readAdditionalSaveData`: refill the trusted list, then `setTargetGoals`.
+/// `Armadillo.readAdditionalSaveData`：`state` 缺省 `idle`，`scute_time` 没有时保留构造时抽的值。
+///
+/// `Armadillo.readAdditionalSaveData`: `state` defaults to `idle`; a missing
+/// `scute_time` keeps the constructor's roll.
+fn read_armadillo(mob: &mut super::Mob, tag: &Tag) {
+    let state = tag::string_or(tag, "state")
+        .and_then(super::armadillo::State::from_name)
+        .unwrap_or_default();
+    if mob.armadillo.state != state {
+        mob.armadillo.state = state;
+        mob.armadillo.in_state_ticks = 0;
+    }
+    mob.armadillo.scute_time = tag::int_or(tag, "scute_time", mob.armadillo.scute_time);
+}
+
 fn read_fox(mob: &mut super::Mob, tag: &Tag) {
     mob.fox.trusted = [None, None];
     if let Some(Tag::List(entries)) = tag::field(tag, "Trusted") {

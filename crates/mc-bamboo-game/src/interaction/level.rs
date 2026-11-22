@@ -422,6 +422,32 @@ impl Level for RegionLevel<'_> {
         Some(mc_bamboo_blocks::PlayerHurtNow { hurt, death_drops })
     }
 
+    /// 精确驱动里山羊把玩家撞开：和受伤入口同一组借用，当场改速度、发速度包。
+    ///
+    /// A goat ramming a player in the precise driver: same borrows as the hurt hook, the
+    /// velocity changes and is sent at once.
+    fn knock_back_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        strength: f64,
+        direction: (f64, f64),
+    ) -> bool {
+        let Some(side) = self.player_side.as_mut() else {
+            return false;
+        };
+        let mut parts = crate::player_hurt::HurtParts {
+            players: &mut *self.players,
+            links: &mut *side.links,
+            sound_seeds: side.sound_seeds,
+            entities: &*self.entities,
+            difficulty: self.difficulty as i32,
+            rules: side.rules,
+            attacker: None,
+        };
+        crate::player_hurt::knock_back_player(&mut parts, PlayerId(target), strength, direction);
+        true
+    }
+
     fn ignite_player_now(
         &mut self,
         target: mc_bamboo_blocks::entity::EntityUid,
