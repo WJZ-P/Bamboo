@@ -4543,3 +4543,102 @@ fn a_weak_attack_emits_its_sound() {
         );
     }
 }
+
+/// 满充能空手攻击（够距、非暴击、非疾跑，空手不会横扫）发
+/// `PLAYER_ATTACK_STRONG` 音效，不发 weak / crit / sweep 音效。按音效注册表 ID
+/// 精确断言，补上 `a_weak_attack_emits_its_sound` 没覆盖到的 strong 分支。
+///
+/// A full-strength empty-hand attack (in range, non-critical, non-sprint; an
+/// empty hand never sweeps) sends `PLAYER_ATTACK_STRONG`, not weak / crit /
+/// sweep. Assert by sound registry id to cover the strong branch that
+/// `a_weak_attack_emits_its_sound` leaves out.
+#[test]
+fn a_full_strength_attack_emits_the_strong_sound() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::sounds;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let ids = sound_event_ids(&client.take_frames());
+    let sound = |name| i32::from(sounds::sound_event(name));
+    assert!(
+        ids.contains(&sound("minecraft:entity.player.attack.strong")),
+        "the strong attack sound must reach the client"
+    );
+    for absent in [
+        "minecraft:entity.player.attack.weak",
+        "minecraft:entity.player.attack.crit",
+        "minecraft:entity.player.attack.sweep",
+    ] {
+        assert!(
+            !ids.contains(&sound(absent)),
+            "the {absent} sound must not be sent"
+        );
+    }
+}
+
+/// 官方 `damageStatsAndHearts` 只在实际伤害大于 2 时发 `DAMAGE_INDICATOR`
+/// 粒子：空手满充能（1 点）不发，钻石剑满充能（7 点）发。按粒子 ID 精确断言，
+/// 补上此前只按包类型松散覆盖的伤害指示粒子和它的伤害门槛。
+///
+/// Vanilla `damageStatsAndHearts` sends `DAMAGE_INDICATOR` particles only when
+/// actual damage exceeds 2: a full-strength empty hand (1 point) sends none,
+/// a full-strength diamond sword (7 points) does. Assert by particle id to
+/// cover the damage-indicator branch and its threshold, previously checked
+/// only by packet type.
+#[test]
+fn damage_indicator_particles_follow_the_damage_threshold() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::{items, registries::particle_type};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let particle_ids = |weapon: Option<i32>| {
+        let mut server = Harness::new(8);
+        let client = server.join("Kitten");
+        server.tick();
+        client.take_frames();
+        let region = &mut server.world.islands.region;
+        let position = region.players.get(&client.id).unwrap().position();
+        let cow = region.entities.spawn(Entity::cow(position));
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            if let Some(item) = weapon {
+                let slot = player.inventory.hand_slot(Hand::Main);
+                let stack = ItemStack::new(item, 1);
+                player.inventory.slots[slot] = stack.clone();
+                player.last_main_hand_item = stack;
+            }
+            player.attack_strength_ticker = 100;
+            player.on_ground = true;
+            player.motion.fall_distance = 0.0;
+        }
+        server.request(&client, PlayRequest::Attack { entity_id: cow });
+        server.tick();
+        first_varints(&client.take_frames(), clientbound::LEVEL_PARTICLES)
+    };
+
+    let empty = particle_ids(None);
+    assert!(
+        !empty.contains(&particle_type::DAMAGE_INDICATOR),
+        "1 point of damage must not emit damage-indicator particles"
+    );
+    let sword = particle_ids(Some(items::DIAMOND_SWORD));
+    assert!(
+        sword.contains(&particle_type::DAMAGE_INDICATOR),
+        "7 points of damage must emit damage-indicator particles"
+    );
+}

@@ -219,9 +219,13 @@ WebView2 的渲染进程不算在内。
   故意改坏的充能值，`--break-self-test sweep_effects` 能抓到漏掉的横扫后附魔效果）；
   `a_critical_attack_emits_its_packets`、`a_sweep_ignites_swept_targets_with_fire_aspect`、
   `a_sweep_attack_emits_its_sound_and_particle`、
-  `an_enchanted_attack_emits_the_magic_critical_animation` 和 `a_weak_attack_emits_its_sound`
+  `an_enchanted_attack_emits_the_magic_critical_animation`、`a_weak_attack_emits_its_sound`、
+  `a_full_strength_attack_emits_the_strong_sound` 和
+  `damage_indicator_particles_follow_the_damage_threshold`
   单测按音效 / 粒子注册表 ID 和动画动作字节，确认暴击 / 附魔暴击动画、横扫 / 伤害
-  指示粒子、strong / weak / crit / sweep 音效真的发到客户端、横扫目标也着火且掉血。
+  指示粒子（含 `damageStatsAndHearts` 的 `actualDamage > 2` 门槛）、strong / weak /
+  sweep 音效真的发到客户端、横扫目标也着火且掉血；`crit` / `knockback` / `nodamage`
+  音效仍只由 `a_critical_attack_emits_its_packets` 按包类型松散覆盖或尚未精确断言。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
   `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
@@ -231,7 +235,8 @@ WebView2 的渲染进程不算在内。
   统计不写原版 `stats/<UUID>.json`；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
   （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画 /
   挥手 / 耐久槽包在 `mob-oracle` 里不逐字节比（官方假世界不捕获这些包，且带种子的音效
-  顺序受两套发包路径影响），由上面的单测确认它们确实发出；攻击场景的对拍夹具跳过
+  顺序受两套发包路径影响），由上面的单测确认它们确实发出（`crit` / `knockback` /
+  `nodamage` 音效仍只按包类型松散覆盖或未按 ID 精确断言）；攻击场景的对拍夹具跳过
   `cow.tick()`，否则官方一侧的重力 / AI 会污染击退速度，逐位比较不可行；PVP 只对另一名
   玩家结算伤害和受伤链路，额外击退（`causeExtraKnockback`）、火焰附加点燃和横扫波及的
   玩家都走实体表（`knockback_mob` / `ignite_mob` / 候选收集），而玩家不在实体表里，

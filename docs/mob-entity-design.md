@@ -654,9 +654,12 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `ClientboundAnimatePacket`、`LevelParticles`（`DAMAGE_INDICATOR` / `SWEEP_ATTACK`）、
   `swing_animation` 都走 `links`。`a_critical_attack_emits_its_packets`、
   `a_sweep_attack_emits_its_sound_and_particle`、
-  `an_enchanted_attack_emits_the_magic_critical_animation` 和
-  `a_weak_attack_emits_its_sound` 单测按注册表 ID / 动作字节确认暴击 / 附魔暴击
-  动画、横扫 / 伤害指示粒子和 strong / weak / crit / sweep 音效真的发到客户端。
+  `an_enchanted_attack_emits_the_magic_critical_animation`、`a_weak_attack_emits_its_sound`、
+  `a_full_strength_attack_emits_the_strong_sound` 和
+  `damage_indicator_particles_follow_the_damage_threshold` 单测按注册表 ID / 动作字节
+  确认暴击 / 附魔暴击动画、横扫 / 伤害指示粒子（含 `actualDamage > 2` 门槛）和
+  strong / weak / sweep 音效真的发到客户端；`crit` / `knockback` / `nodamage` 音效仍
+  只按包类型松散覆盖或未精确断言（见 README 已知限制）。
 - **PVP**：`pvp` 为真时按 `ServerPlayer.canHarmPlayer`（`isPvpAllowed` + 队伍，
   Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。额外击退 /
   火焰附加 / 横扫波及的玩家这几项目标在实体表里的操作（`knockback_mob` /
