@@ -149,6 +149,9 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Wolf && !me.removed {
         super::wolf::tick_after(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Cat && !me.removed {
+        super::cat::tick_after(me, mob);
+    }
     // `Armadillo.tick` 在 `super.tick()` 之后夹头、数 `inStateTicks`。
     // `Armadillo.tick` clamps the head and counts `inStateTicks` after `super.tick()`.
     if mob.mob_type == super::MobType::Armadillo {
@@ -254,7 +257,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let near_sqr = 32.0 * 32.0;
     // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
     // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
-    if !persistent && distance > far_sqr && mob.removes_when_far_away() {
+    if !persistent && distance > far_sqr && mob.removes_when_far_away(me.tick_count) {
         me.discard();
         return;
     }
@@ -264,7 +267,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         && distance > near_sqr
     {
         // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
-        if mob.removes_when_far_away() {
+        if mob.removes_when_far_away(me.tick_count) {
             me.discard();
         }
     } else if distance < near_sqr {
@@ -393,9 +396,46 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
 }
 
+/// `Entity.spawnSprintParticle`：服务端虽然不发粒子，但仍消耗两次 `random.nextDouble()`。
+///
+/// `Entity.spawnSprintParticle`: the server does not emit particles, yet still draws two `random.nextDouble()`s.
+fn spawn_sprint_particle(me: &mut Entity, view: &dyn BlockView) {
+    use mc_bamboo_data::blocks;
+    let state = view.block_state(me.on_pos(view, 0.2));
+    if state.is_air()
+        || matches!(
+            state.block_id() as u32,
+            blocks::BARRIER
+                | blocks::BUBBLE_COLUMN
+                | blocks::END_GATEWAY
+                | blocks::END_PORTAL
+                | blocks::LIGHT
+                | blocks::WATER
+                | blocks::LAVA
+                | blocks::MOVING_PISTON
+                | blocks::STRUCTURE_VOID
+        )
+    {
+        return;
+    }
+    me.random.next_double();
+    me.random.next_double();
+}
+
 /// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
 fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`。
+    // 冲刺且不在水/岩浆里、不潜行、活着时，脚下方块可见就消耗两次 `nextDouble`（粒子位置）。
+    // While sprinting out of water/lava, uncrouched and alive, a visible block below draws two `nextDouble`s.
+    if mob.sprinting
+        && !me.in_water
+        && !mob.ocelot.crouching
+        && !mob.cat.crouching
+        && !is_in_lava(me, mob)
+        && is_alive(me, mob)
+    {
+        spawn_sprint_particle(me, ctx.blocks());
+    }
     mob.was_in_powder_snow = mob.in_powder_snow;
     mob.in_powder_snow = false;
     mob.was_eye_in_water = eye_in_fluid(mob, fluid_tags::WATER);
@@ -541,6 +581,10 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
                 return;
             }
+            if mob.mob_type == super::MobType::Cat {
+                super::cat::play_ambient_sound(me, mob);
+                return;
+            }
             // 受惊的犰狳没有叫声：`makeSound` 不跑，也不取音高。
             // A scared armadillo has no ambient sound, so no pitch draws either.
             if super::armadillo::is_scared(mob) {
@@ -601,6 +645,7 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
             .hurt_sound()
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Hurt),
+                super::MobType::Cat => super::cat::sound(mob, super::cat::Sound::Hurt),
                 super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[1],
                 super::MobType::Slime => super::slime::hurt_sound(mob),
@@ -612,6 +657,7 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
             .death_sound()
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Death),
+                super::MobType::Cat => super::cat::sound(mob, super::cat::Sound::Death),
                 super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[2],
                 super::MobType::Slime => super::slime::death_sound(mob),
@@ -772,6 +818,10 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         // 刚生成的狼还没有仇恨，时刻不影响叫声。
         // A fresh wolf has no anger, so the clock does not matter.
         super::wolf::play_ambient_sound(me, mob, 0);
+        return;
+    }
+    if mob.mob_type == super::MobType::Cat {
+        super::cat::play_ambient_sound(me, mob);
         return;
     }
     if mob.mob_type.has_no_ambient_sound() {
@@ -1286,6 +1336,7 @@ pub(crate) fn breed_with(
             father_fox: mob.fox.variant,
             father_love: mob.love_cause,
             father_wolf: Box::new((mob.wolf, mob.tame)),
+            father_cat: mob.cat,
             father_screaming: mob.goat.screaming,
         },
         me,
@@ -1362,6 +1413,12 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Ocelot {
+        super::ocelot::custom_server_ai_step(mob);
+    }
+    if mob.mob_type == super::MobType::Cat {
+        super::cat::custom_server_ai_step(mob);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1624,6 +1681,29 @@ pub(crate) fn jump_boost_power(mob: &Mob) -> f32 {
         .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0))
 }
 
+/// `LivingEntity.setSprinting`：更新共享疾跑标志并在 `MOVEMENT_SPEED` 上增删
+/// `minecraft:sprinting`（+0.3F，`ADD_MULTIPLIED_TOTAL`，临时修饰符）。
+///
+/// `LivingEntity.setSprinting`: update the shared sprinting flag and add/remove the
+/// transient `minecraft:sprinting` (+0.3F, `ADD_MULTIPLIED_TOTAL`) speed modifier.
+pub(super) fn set_sprinting(mob: &mut Mob, sprinting: bool) {
+    mob.sprinting = sprinting;
+    if let Some(speed) = mob.attributes.instance(attribute::MOVEMENT_SPEED) {
+        let removed = speed.remove_modifier("minecraft:sprinting");
+        if sprinting {
+            speed.modifiers.push(super::attributes::Modifier {
+                id: "minecraft:sprinting".to_owned(),
+                amount: f64::from(0.3_f32),
+                operation: super::attributes::Operation::AddMultipliedTotal,
+                permanent: false,
+            });
+        }
+        if removed || sprinting {
+            speed.touch_sync();
+        }
+    }
+}
+
 /// `jumpFromGround`。
 fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
@@ -1637,6 +1717,12 @@ fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let power = strength * multiplier * block_jump_factor(me, view) + boost;
     if power > 1.0e-5 {
         me.delta.y = mth::java_max(f64::from(power), me.delta.y);
+        if mob.sprinting {
+            let angle = me.y_rot * (std::f32::consts::PI / 180.0);
+            let sin = f64::from(mth::sin(f64::from(angle)));
+            let cos = f64::from(mth::cos(f64::from(angle)));
+            me.delta = me.delta.add(Vec3::new(-sin * 0.2, 0.0, cos * 0.2));
+        }
         mob.needs_sync = true;
     }
     if is_rabbit {
@@ -2555,6 +2641,7 @@ pub(crate) struct BreedFather {
     pub(crate) love: Option<[u8; 16]>,
     pub(crate) wolf: super::wolf::Wolf,
     pub(crate) tame: super::tame::Tamable,
+    pub(crate) cat: super::cat::Cat,
     /// 山羊父亲是否尖叫。
     ///
     /// Whether the goat father is screaming.
@@ -2641,9 +2728,13 @@ pub(crate) fn apply_breed(
     let mother_wolf = world
         .entity(partner)
         .and_then(|entity| entity.kind.mob().map(|mob| mob.wolf));
+    let mother_cat = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.cat));
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
     let mut wolf = None;
+    let mut cat = None;
     // 哞菇的品种自己抽（`getOffspringVariant`），不取牛那个 `nextBoolean`。
     // Mooshrooms draw their own type (`getOffspringVariant`) instead of the cow `nextBoolean`.
     let calf_brown = (kind == super::MobType::Mooshroom).then(|| {
@@ -2708,6 +2799,14 @@ pub(crate) fn apply_breed(
                 world,
             ));
         }
+        super::MobType::Cat => {
+            cat = Some(super::cat::offspring(
+                me,
+                (&parent.cat, &parent.tame),
+                mother_cat,
+                world,
+            ));
+        }
         super::MobType::Rabbit => {
             let mother = mother.map_or(parent.rabbit, |(rabbit, _, _)| rabbit);
             rabbit_variant = super::rabbit::offspring_variant(me, parent.rabbit, mother, world);
@@ -2728,6 +2827,7 @@ pub(crate) fn apply_breed(
         super::MobType::Sheep
         | super::MobType::Panda
         | super::MobType::Mooshroom
+        | super::MobType::Ocelot
         | super::MobType::Armadillo
         | super::MobType::Goat => {}
         _ if equine => {}
@@ -2810,6 +2910,13 @@ pub(crate) fn apply_breed(
         }
         if let Some((wolf, tamable)) = wolf.take() {
             mob.wolf = wolf;
+            mob.tame = tamable;
+            if tamable.is_tame() {
+                super::tame::set_tame(mob, true, true);
+            }
+        }
+        if let Some((cat, tamable)) = cat.take() {
+            mob.cat = cat;
             mob.tame = tamable;
             if tamable.is_tame() {
                 super::tame::set_tame(mob, true, true);

@@ -639,6 +639,8 @@ fn run_cases(
         MobType::Frog,
         MobType::Tadpole,
         MobType::PolarBear,
+        MobType::Ocelot,
+        MobType::Cat,
         MobType::Creeper,
         MobType::Spider,
         MobType::CaveSpider,
@@ -1697,6 +1699,19 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("UUID", uuid.clone()),
             ("anger_end_time", Tag::Long(9876543210)),
             ("angry_at", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]),
+    ));
+    out.push((
+        "cat tamed rich".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:cat".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("variant", Tag::String("minecraft:calico".to_owned())),
+            ("sound_variant", Tag::String("minecraft:royal".to_owned())),
+            ("CollarColor", Tag::Byte(11)),
+            ("Sitting", Tag::Byte(1)),
+            ("Owner", Tag::IntArray(vec![1, 2, 3, 4])),
         ]),
     ));
     out.push((

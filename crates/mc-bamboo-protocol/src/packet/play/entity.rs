@@ -40,6 +40,11 @@ const SERIALIZER_PARTICLES: i32 = 17;
 const SERIALIZER_POSE: i32 = 20;
 /// `EntityDataSerializers.COW_VARIANT`，注册顺序里的第 24 个。
 ///
+/// `EntityDataSerializers.CAT_VARIANT` / `CAT_SOUND_VARIANT`（21、22 号注册）。
+///
+/// `EntityDataSerializers.CAT_VARIANT` and `CAT_SOUND_VARIANT` (serializer ids 21 and 22).
+const SERIALIZER_CAT_VARIANT: i32 = 21;
+const SERIALIZER_CAT_SOUND_VARIANT: i32 = 22;
 /// `EntityDataSerializers.COW_VARIANT`, the 24th `registerSerializer` call.
 const SERIALIZER_COW_VARIANT: i32 = 23;
 const SERIALIZER_COW_SOUND_VARIANT: i32 = 24;
@@ -309,6 +314,30 @@ pub enum EntityData {
     EndermanCarried(Option<i32>),
     EndermanCreepy(bool),
     EndermanStaredAt(bool),
+    /// `Ocelot.DATA_TRUSTING`：BOOLEAN。
+    ///
+    /// `Ocelot.DATA_TRUSTING`: BOOLEAN.
+    OcelotTrusting(bool),
+    /// `Cat.DATA_VARIANT_ID`：`cat_variant` 注册表 ID。
+    ///
+    /// `Cat.DATA_VARIANT_ID`: `cat_variant` registry id.
+    CatVariant(i32),
+    /// `Cat.IS_LYING`：BOOLEAN。
+    ///
+    /// `Cat.IS_LYING`: BOOLEAN.
+    CatIsLying(bool),
+    /// `Cat.RELAX_STATE_ONE`：BOOLEAN。
+    ///
+    /// `Cat.RELAX_STATE_ONE`: BOOLEAN.
+    CatRelaxStateOne(bool),
+    /// `Cat.DATA_COLLAR_COLOR`：INT（`DyeColor` ID）。
+    ///
+    /// `Cat.DATA_COLLAR_COLOR`: INT (`DyeColor` id).
+    CatCollar(i32),
+    /// `Cat.DATA_SOUND_VARIANT_ID`：`cat_sound_variant` 注册表 ID。
+    ///
+    /// `Cat.DATA_SOUND_VARIANT_ID`: `cat_sound_variant` registry id.
+    CatSoundVariant(i32),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -438,6 +467,12 @@ impl EntityData {
             Self::PandaMainGene(_) => mc_bamboo_data::entity_types::PANDA_MAIN_GENE,
             Self::PandaHiddenGene(_) => mc_bamboo_data::entity_types::PANDA_HIDDEN_GENE,
             Self::PandaFlags(_) => mc_bamboo_data::entity_types::PANDA_FLAGS,
+            Self::OcelotTrusting(_) => mc_bamboo_data::entity_types::OCELOT_TRUSTING,
+            Self::CatVariant(_) => mc_bamboo_data::entity_types::CAT_VARIANT,
+            Self::CatIsLying(_) => mc_bamboo_data::entity_types::CAT_IS_LYING,
+            Self::CatRelaxStateOne(_) => mc_bamboo_data::entity_types::CAT_RELAX_STATE_ONE,
+            Self::CatCollar(_) => mc_bamboo_data::entity_types::CAT_COLLAR,
+            Self::CatSoundVariant(_) => mc_bamboo_data::entity_types::CAT_SOUND_VARIANT,
             Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
             Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
             Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
@@ -703,6 +738,26 @@ impl EntityData {
             Self::PolarBearStanding(standing) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *standing);
+            }
+            Self::OcelotTrusting(trusting) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *trusting);
+            }
+            Self::CatVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_CAT_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::CatIsLying(value) | Self::CatRelaxStateOne(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::CatCollar(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::CatSoundVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_CAT_SOUND_VARIANT);
+                write_varint(out, *value);
             }
             Self::PandaUnhappy(value) | Self::PandaSneeze(value) | Self::PandaEat(value) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);

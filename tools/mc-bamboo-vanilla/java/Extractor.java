@@ -1239,6 +1239,13 @@ public final class Extractor {
         out.addProperty("pandaMainGene", entityAccessor(panda, "MAIN_GENE_ID").id());
         out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
         out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
+        out.addProperty("ocelotTrusting", entityAccessor(net.minecraft.world.entity.animal.feline.Ocelot.class, "DATA_TRUSTING").id());
+        Class<?> cat = net.minecraft.world.entity.animal.feline.Cat.class;
+        out.addProperty("catVariant", entityAccessor(cat, "DATA_VARIANT_ID").id());
+        out.addProperty("catIsLying", entityAccessor(cat, "IS_LYING").id());
+        out.addProperty("catRelaxStateOne", entityAccessor(cat, "RELAX_STATE_ONE").id());
+        out.addProperty("catCollar", entityAccessor(cat, "DATA_COLLAR_COLOR").id());
+        out.addProperty("catSoundVariant", entityAccessor(cat, "DATA_SOUND_VARIANT_ID").id());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();

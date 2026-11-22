@@ -717,6 +717,10 @@ pub enum Command {
         ///
         /// The father's wolf and taming state, for the pup's variant, owner and collar.
         father_wolf: Box<(super::mob::wolf::Wolf, super::mob::tame::Tamable)>,
+        /// 猫父亲的状态（落地时父亲正被拆出来跑 tick）。
+        ///
+        /// The cat father's state (detached while the command lands).
+        father_cat: super::mob::cat::Cat,
         /// 父亲是不是尖叫山羊：山羊幼崽可能随它。
         ///
         /// Whether the father is a screaming goat; a kid may take after it.
@@ -1062,6 +1066,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             father_fox,
             father_love,
             father_wolf,
+            father_cat,
             father_screaming,
         } => super::mob::living::apply_breed(
             me,
@@ -1076,6 +1081,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 love: father_love,
                 wolf: father_wolf.0,
                 tame: father_wolf.1,
+                cat: father_cat,
                 screaming: father_screaming,
                 genes: father_genes,
             },
