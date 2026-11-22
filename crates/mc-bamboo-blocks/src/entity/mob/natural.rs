@@ -832,10 +832,12 @@ fn is_valid_position_for_mob(
     // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真；新生成的豹猫 `tickCount == 0`，为假。
     // A fresh fish has no bucket flag or name (`removeWhenFarAway` is true); a fresh ocelot
     // has `tickCount == 0` (false).
-    let removes = entity
-        .kind
-        .mob()
-        .is_some_and(|mob| mob.removes_when_far_away(entity.tick_count));
+    // 官方把最近玩家距离传给 `removeWhenFarAway(distSqr)`；巡逻中的袭击者按它判定 128 格。
+    // Vanilla passes the nearest-player distance to `removeWhenFarAway(distSqr)`; a
+    // patrolling raider tests the 128-block threshold against it.
+    let removes = entity.kind.mob().is_some_and(|mob| {
+        mob.removes_when_far_away_at(nearest_player_distance_sqr, entity.tick_count)
+    });
     if nearest_player_distance_sqr > despawn * despawn && removes {
         return false;
     }

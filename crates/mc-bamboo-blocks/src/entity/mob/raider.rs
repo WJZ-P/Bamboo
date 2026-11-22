@@ -243,8 +243,11 @@ pub(crate) fn no_leaves_height(
 ) -> i32 {
     for y in (min_y..=max_y).rev() {
         let state = state_at(BlockPos::new(x, y, z));
-        if (state.is_tagged(block_tags::BLOCKS_MOTION_IN_HEIGHTMAP) || !state.fluid().is_empty())
-            && !state.is_a(mc_bamboo_data::BlockAncestor::LeavesBlock)
+        // `MOTION_BLOCKING_NO_LEAVES` 的谓词就是这条标签加流体，标签里已经排除了树叶。
+        // The `MOTION_BLOCKING_NO_LEAVES` predicate is this tag plus fluids; the tag
+        // already excludes leaves.
+        if state.is_tagged(block_tags::BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES)
+            || !state.fluid().is_empty()
         {
             return y + 1;
         }
