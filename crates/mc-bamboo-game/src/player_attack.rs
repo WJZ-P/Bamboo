@@ -415,6 +415,38 @@ fn mob_target(public: &mc_bamboo_blocks::entity::EntityPublic) -> TargetInfo {
     }
 }
 
+/// `handleAttack` 交给 `plan_attack` 的原始输入。
+///
+/// The raw inputs `handleAttack` hands to `plan_attack`.
+struct AttackRequest {
+    id: PlayerId,
+    entity_id: i32,
+    held: ItemStack,
+    ticker: i32,
+    position: Vec3,
+    yaw: f32,
+}
+
+/// 一次攻击算好的所有量，交给落地和发包两个阶段用。
+///
+/// Everything computed for one attack, shared by the landing and delivery phases.
+struct AttackPlan {
+    held: ItemStack,
+    position: Vec3,
+    yaw: f32,
+    s: f32,
+    base_damage: f32,
+    magic_boost: f32,
+    total_damage: f32,
+    full: bool,
+    critical: bool,
+    knockback_attack: bool,
+    sweep: bool,
+    source: DamageSource,
+    knockback_sound: Option<&'static str>,
+    sweep_targets: Vec<(i32, i32)>,
+}
+
 /// `ServerGamePacketListenerImpl.handleAttack` + `Player.attack` 的入口。
 ///
 /// Entry point for `ServerGamePacketListenerImpl.handleAttack` + `Player.attack`.
@@ -430,203 +462,268 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     let yaw = player.yaw;
     let held = player.inventory.held(Hand::Main).clone();
     let ticker = player.attack_strength_ticker;
-
-    // `handleAttack` 的够距判定；`PIERCING_WEAPON` 和 `MINIMUM_ATTACK_CHARGE`
-    // 也在这一层挡下。非法目标（掉落物 / 经验球 / 自己 / 不可攻击的箭）官方
-    // 断开连接，这里只忽略。
-    //
-    // `handleAttack`'s reach gate, plus `PIERCING_WEAPON` and
-    // `MINIMUM_ATTACK_CHARGE`. Vanilla disconnects on invalid targets; we ignore.
     let reach = interaction::interaction_range(player.game_mode);
-    let target = if let Some(public) = region.entities.public_at(entity_id) {
+    let Some(target) = resolve_target(region, id, entity_id, position, eye_height, reach) else {
+        return;
+    };
+    let request = AttackRequest {
+        id,
+        entity_id,
+        held,
+        ticker,
+        position,
+        yaw,
+    };
+    let Some(plan) = plan_attack(region, &target, &request) else {
+        return;
+    };
+    let (was_hurt, actual_damage) = land_attack(region, id, entity_id, &target, &plan);
+    if was_hurt {
+        finish_hit(region, id, entity_id, &target, &plan, actual_damage);
+    }
+}
+
+/// `handleAttack` 的目标解析：够距、可攻击、PVP 开关和自己不能打自己。
+/// 非法目标（掉落物 / 经验球 / 不可攻击的箭）官方断开连接，这里只忽略。
+///
+/// `handleAttack` target resolution: reach, attackable, PVP rule, no self-hits.
+/// Vanilla disconnects on invalid targets; we ignore them.
+fn resolve_target(
+    region: &Region,
+    attacker: PlayerId,
+    entity_id: i32,
+    position: Vec3,
+    eye_height: f64,
+    reach: f64,
+) -> Option<TargetInfo> {
+    if let Some(public) = region.entities.public_at(entity_id) {
         if public.removed || !is_attackable(&public.kind) {
-            return;
+            return None;
         }
-        if !interaction::within_block_interaction_range(
+        let in_range = interaction::within_block_interaction_range(
             position,
             eye_height,
             reach,
             BlockPos::containing(public.position),
             3.0,
-        ) {
-            return;
-        }
-        Some(mob_target(public))
-    } else if let Some(other) = region.players.get(&PlayerId(entity_id)) {
-        // `ServerPlayer.canHarmPlayer`：PVP 规则 + 队伍，Bamboo 没有队伍。
-        //
-        // `ServerPlayer.canHarmPlayer`: the PVP rule plus teams; Bamboo has no teams.
-        if !region.global.rules.bool(gamerules::PVP) {
-            return;
-        }
-        if !interaction::within_block_interaction_range(
-            position,
-            eye_height,
-            reach,
-            BlockPos::containing(other.position()),
-            3.0,
-        ) {
-            return;
-        }
-        Some(TargetInfo {
-            position: other.position(),
-            entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
-            is_living: true,
-            health: other.health.health,
-            dimensions: (0.6, 1.8),
-        })
-    } else {
-        return;
-    };
-    let Some(target) = target else {
-        return;
-    };
-    let delay = strength_delay(&held);
-    if has_piercing_weapon(&held) || cannot_attack_with_item(ticker, &held, delay) {
-        return;
+        );
+        return in_range.then(|| mob_target(public));
     }
-
-    // `Player.attack` 的伤害算式：`s`、`baseDamage`、`magicBoost`，
-    // 全部在 `onAttack()` 重置冷却之前读 `ticker`。
+    let other = region.players.get(&PlayerId(entity_id))?;
+    // `ServerPlayer.canHarmPlayer`：PVP 规则 + 队伍，Bamboo 没有队伍。
     //
-    // `Player.attack`'s damage maths: `s`, `baseDamage` and `magicBoost` all
-    // read `ticker` before `onAttack()` resets it.
-    let s = strength_scale(ticker, delay);
-    let base_damage_0 = player_health::PlayerHealth::attack_damage(&held);
-    let magic_boost = s * damage_bonus(&held, target.entity_type);
-    let mut base_damage = base_damage_0 * (BASE_SCALE_MIN + s * s * BASE_SCALE_SPAN);
-
-    if let Some(player) = region.players.get_mut(&id) {
-        player.attack_strength_ticker = 0;
+    // `ServerPlayer.canHarmPlayer`: the PVP rule plus teams; Bamboo has no teams.
+    if entity_id == attacker.0 || !region.global.rules.bool(gamerules::PVP) {
+        return None;
     }
+    let in_range = interaction::within_block_interaction_range(
+        position,
+        eye_height,
+        reach,
+        BlockPos::containing(other.position()),
+        3.0,
+    );
+    in_range.then(|| TargetInfo {
+        position: other.position(),
+        entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
+        is_living: true,
+        health: other.health.health,
+        dimensions: (0.6, 1.8),
+    })
+}
 
+/// `Player.attack` 的伤害算式：`s`、`baseDamage`、`magicBoost`、暴击 / 横扫 /
+/// 疾跑判定，以及 `onAttack()` 重置冷却。`PIERCING_WEAPON` 和
+/// `MINIMUM_ATTACK_CHARGE` 也在这一层挡下。
+///
+/// `Player.attack`'s damage maths: `s`, `baseDamage`, `magicBoost`, the crit /
+/// sweep / sprint decisions and `onAttack()` resetting the cooldown.
+/// `PIERCING_WEAPON` and `MINIMUM_ATTACK_CHARGE` gate here too.
+fn plan_attack(
+    region: &mut Region,
+    target: &TargetInfo,
+    req: &AttackRequest,
+) -> Option<AttackPlan> {
+    let (id, entity_id, held, ticker, position, yaw) = (
+        req.id,
+        req.entity_id,
+        &req.held,
+        req.ticker,
+        req.position,
+        req.yaw,
+    );
+    let delay = strength_delay(held);
+    if has_piercing_weapon(held) || cannot_attack_with_item(ticker, held, delay) {
+        return None;
+    }
+    let s = strength_scale(ticker, delay);
     // 长矛 / 重锤的 `Item.getAttackDamageBonus` 在 26.3 里默认返回 0，
     // 其余物品（含剑）都不加，这里按官方缺省跳过。
     //
     // `Item.getAttackDamageBonus` defaults to 0 in 26.3; swords add nothing.
-    let _ = &mut base_damage;
-
+    let base_damage_0 = player_health::PlayerHealth::attack_damage(held);
+    let magic_boost = s * damage_bonus(held, target.entity_type);
+    let mut base_damage = base_damage_0 * (BASE_SCALE_MIN + s * s * BASE_SCALE_SPAN);
+    // `onAttack()` → `resetOnlyAttackStrengthTicker()`。
+    if let Some(player) = region.players.get_mut(&id) {
+        player.attack_strength_ticker = 0;
+    }
+    let player = &region.players[&id];
     let full = s > FULL_STRENGTH;
-    let sprinting = region
-        .players
-        .get(&id)
-        .is_some_and(|player| player.sync.is_sprinting());
+    let sprinting = player.sync.is_sprinting();
     let knockback_attack = sprinting && full;
-
     // 疾跑满充能的 `PLAYER_ATTACK_KNOCKBACK` 音效在伤害之前播。
     //
     // The full-strength sprint `PLAYER_ATTACK_KNOCKBACK` sound precedes damage.
     let knockback_sound = knockback_attack.then_some("minecraft:entity.player.attack.knockback");
-
-    let critical = full && can_critical(&region.players[&id], target.is_living);
+    let critical = full && can_critical(player, target.is_living);
     if critical {
         base_damage *= CRIT_MULTIPLIER;
     }
     let total_damage = base_damage + magic_boost;
-    let sweep = is_sweep_attack(
-        &region.players[&id],
-        &held,
-        full,
-        critical,
-        knockback_attack,
-    );
+    let sweep = is_sweep_attack(player, held, full, critical, knockback_attack);
     // 横扫的候选来自实体表，要在借用 `block_level()` 之前取好。
     //
     // Sweep candidates come from the entity store, collected before `block_level()`.
     let sweep_targets = if sweep {
-        collect_sweep_targets(region, id, entity_id, &target, position)
+        collect_sweep_targets(region, id, entity_id, target, position)
     } else {
         Vec::new()
     };
-
     let mut source = DamageSource::player(id.0, position, player_is_creative(region, id));
     if !held.is_empty()
         && let Ok(weapon) = u16::try_from(held.item)
     {
         source = source.with_weapon(weapon);
     }
-    let hits_player = player_target(region, entity_id);
+    Some(AttackPlan {
+        held: held.clone(),
+        position,
+        yaw,
+        s,
+        base_damage,
+        magic_boost,
+        total_damage,
+        full,
+        critical,
+        knockback_attack,
+        sweep,
+        source,
+        knockback_sound,
+        sweep_targets,
+    })
+}
 
-    // 一次 `World` 里按官方顺序做完 `hurtOrSimulate`、额外击退、横扫、攻击后效果，
-    // 再把所有效果（含攻击音效）一次 `send_effects` 发出去。
-    //
-    // One `World` runs `hurtOrSimulate`, extra knockback, sweeping and post-attack
-    // effects in vanilla order; all effects (attack sounds included) are then
-    // delivered by a single `send_effects`.
-    let (was_hurt, actual_damage) = {
+/// 一次 `World` 里按官方顺序做完 `hurtOrSimulate`、额外击退、横扫、攻击后效果，
+/// 再把所有效果（含攻击音效）一次 `send_effects` 发出去。
+///
+/// One `World` runs `hurtOrSimulate`, extra knockback, sweeping and post-attack
+/// effects in vanilla order; all effects (attack sounds included) are then
+/// delivered by a single `send_effects`.
+fn land_attack(
+    region: &mut Region,
+    id: PlayerId,
+    entity_id: i32,
+    target: &TargetInfo,
+    plan: &AttackPlan,
+) -> (bool, f32) {
+    let hits_player = player_target(region, entity_id);
+    let hit = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
-        if let Some(name) = knockback_sound {
-            push_sound(&mut world, position, name);
+        if let Some(name) = plan.knockback_sound {
+            push_sound(&mut world, plan.position, name);
         }
         let hit = if hits_player {
-            hurt_player_target(&mut world, entity_id, source, total_damage)
+            hurt_player_target(&mut world, entity_id, plan.source, plan.total_damage)
         } else {
-            world.hurt_mob(entity_id, source, total_damage)
+            world.hurt_mob(entity_id, plan.source, plan.total_damage)
         };
         if hit {
-            apply_extra_knockback(&mut world, entity_id, &held, knockback_attack, yaw);
-            if sweep {
+            apply_extra_knockback(
+                &mut world,
+                entity_id,
+                &plan.held,
+                plan.knockback_attack,
+                plan.yaw,
+            );
+            if plan.sweep {
                 let spec = SweepSpec {
-                    held: &held,
-                    base_damage,
-                    s,
-                    player_position: position,
-                    yaw,
+                    held: &plan.held,
+                    base_damage: plan.base_damage,
+                    s: plan.s,
+                    player_position: plan.position,
+                    yaw: plan.yaw,
                 };
-                do_sweep(&mut world, id, &sweep_targets, &spec);
+                do_sweep(&mut world, id, &plan.sweep_targets, &spec);
             }
             // `attackVisualEffects`：暴击音 + CRITICAL_HIT 动画，或 strong/weak 音；
             // 附魔加成 > 0 时再发 MAGIC_CRITICAL_HIT 动画。
             //
             // `attackVisualEffects`: crit sound + animation, or strong/weak sound;
             // a positive magic boost also sends the MAGIC_CRITICAL_HIT animation.
-            if critical {
-                push_sound(&mut world, position, "minecraft:entity.player.attack.crit");
-            } else if !sweep {
+            if plan.critical {
                 push_sound(
                     &mut world,
-                    position,
-                    if full {
+                    plan.position,
+                    "minecraft:entity.player.attack.crit",
+                );
+            } else if !plan.sweep {
+                push_sound(
+                    &mut world,
+                    plan.position,
+                    if plan.full {
                         "minecraft:entity.player.attack.strong"
                     } else {
                         "minecraft:entity.player.attack.weak"
                     },
                 );
             }
-            if sweep {
-                push_sound(&mut world, position, "minecraft:entity.player.attack.sweep");
+            if plan.sweep {
+                push_sound(
+                    &mut world,
+                    plan.position,
+                    "minecraft:entity.player.attack.sweep",
+                );
             }
-            post_attack_effects(&mut world, entity_id, &held, target.entity_type);
+            post_attack_effects(&mut world, entity_id, &plan.held, target.entity_type);
         } else {
             push_sound(
                 &mut world,
-                position,
+                plan.position,
                 "minecraft:entity.player.attack.nodamage",
             );
         }
         let effects = world.drain_effects();
         interaction::send_effects(region, Some(id), &effects);
-        (hit, damage_taken(region, entity_id, target.health))
+        hit
     };
+    (hit, damage_taken(region, entity_id, target.health))
+}
 
-    if !was_hurt {
-        return;
-    }
-
-    // `ServerPlayer.crit` / `magicCrit` 的动画包，以及横扫 / 伤害指示粒子。
-    //
-    // `ServerPlayer.crit` / `magicCrit` animations and sweep / damage particles.
-    if critical {
+/// 命中之后：暴击 / 附魔暴击动画、横扫 / 伤害指示粒子、武器耐久、
+/// `lastHurtMob`、饥饿消耗和挥手。
+///
+/// After a hit: crit / magic-crit animations, sweep / damage-indicator particles,
+/// weapon durability, `lastHurtMob`, exhaustion and the swing.
+fn finish_hit(
+    region: &mut Region,
+    id: PlayerId,
+    entity_id: i32,
+    target: &TargetInfo,
+    plan: &AttackPlan,
+    actual_damage: f32,
+) {
+    if plan.critical {
         send_animate(region, id, entity_id, Animate::CRITICAL_HIT);
     }
-    if magic_boost > 0.0 {
+    if plan.magic_boost > 0.0 {
         send_animate(region, id, entity_id, Animate::MAGIC_CRITICAL_HIT);
     }
     let center_y = target.position.y + f64::from(target.dimensions.1) * 0.5;
     let indicator = Vec3::new(target.position.x, center_y, target.position.z);
-    if sweep {
-        let radians = f64::from(yaw * (std::f32::consts::PI / 180.0));
+    if plan.sweep {
+        let radians = f64::from(plan.yaw * (std::f32::consts::PI / 180.0));
         let dx = -mth::sin(radians);
         let dz = mth::cos(radians);
         let player_center = player_center_y(region, id);
@@ -635,9 +732,9 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
             ParticleSpec {
                 particle: particle_type::SWEEP_ATTACK,
                 position: Vec3::new(
-                    position.x + f64::from(dx),
+                    plan.position.x + f64::from(dx),
                     player_center,
-                    position.z + f64::from(dz),
+                    plan.position.z + f64::from(dz),
                 ),
                 spread: (dx, 0.0, dz),
                 speed: 0.0,
@@ -658,7 +755,6 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
             },
         );
     }
-
     // `itemAttackInteraction`：主手武器 `hurtEnemy` 扣 1 点耐久。
     //
     // `itemAttackInteraction`: `hurtEnemy` spends one durability point.
@@ -667,8 +763,7 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         let world = World::new(&mut level, ticks);
         mc_bamboo_blocks::durability::hurt_hand(&world, Hand::Main, 1);
     });
-
-    // 打中之后记 `lastHurtMob`，加 0.1 饥饿消耗（走 pending，tick 末尾 flush），挥手。
+    // 打中之后记 `lastHurtMob`，加 0.1 饥饿消耗（pending，tick 末尾 flush），挥手。
     //
     // After a hit: record `lastHurtMob`, add 0.1 exhaustion (pending, flushed
     // at tick end) and swing.
