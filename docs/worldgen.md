@@ -594,7 +594,9 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   一份，保留随机源、临时缓冲等按线程可变的工作状态。群系 R 树的 `lastResult`
   （官方 `Climate.RTree` 是实例上的 `ThreadLocal`）从 `ParameterList` 里的 `Cell`
   改成按「线程 + 表」隔离的线程本地状态，共享数据因此是 `Sync` 的只读数据，结果
-  逐字节不变（见 `docs/performance-optimizations.md` 第 24 节）。生成的方块/群系按
+  逐字节不变（见 `docs/performance-optimizations.md` 第 24 节）。`op-memprof` 的堆实测又把
+  结构模板从「每条线程常驻全量解析」改成全进程外形表 + 有界按需解析（在线约 318 → 4 MB，
+  见 `W:/data/bamboo-agents/reports/op-memprof.md`），生成结果逐字节不变。生成的方块/群系按
   官方 `PalettedContainer` 下标写进 24 个 `SectionParts`，组装成
   `ChunkColumn` / `RegionColumn`。
 * 存档：`data/minecraft/world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 写出

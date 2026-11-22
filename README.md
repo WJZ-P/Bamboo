@@ -546,6 +546,24 @@ WebView2 的渲染进程不算在内。
   `docs/performance-optimizations.md` 第 24 节）。**已知限制**：数据随编译嵌入、进程内只有一份，
   将来支持运行时换数据包或同进程多份生成数据时 `shared()` 要按实例索引；解析失败的错误会被
   `OnceLock` 缓存到进程结束（当前内嵌数据恒能解析）。
+- **内存构成实测与结构模板压缩**（`op-memprof`，2026-11-21）：新增堆分析器
+  `tools/mc-bamboo-memprof` —— 记账全局分配器按调用栈统计还活着的字节，再按归属汇总，
+  另读 Windows 进程工作集、私有提交、堆与地址空间、线程栈；`run.sh` 固定种子 20261121、
+  视距 8，在「起服后空载 / 一名假玩家在线 / 玩家离开后」三个时刻各取一份读数。实测最大头是
+  **解析后的结构模板 NBT**：在线约 318 MB、玩家离开后仍约 318 MB 不释放（官方
+  `StructureTemplateManager` 的 `structureRepository` 也是全量常驻，Bamboo 原先还按线程各留一份）。
+  两项原型已落地：① 拼装阶段只留「尺寸 + 拼图方块」的全进程共用外形表，整份模板按需解析进
+  **有上限**的线程本地缓存（`crates/mc-bamboo-worldgen/src/structure/template.rs` 的
+  `TemplateShape`）；② 缓存的压缩区块帧 `shrink_to_fit` 掉按未压缩长度预留的多余容量
+  （`crates/mc-bamboo-game/src/outgoing.rs`）。同一固定种子、不带分析器的 release 服务端实测
+  在线工作集 588 → 260 MB、玩家离开后 505 → 201 MB；`jigsaw templates` / `jigsaws` / `pieces`
+  与 `gen-world` 结构位置 0 不一致。**已知限制**：有界模板缓存是**故意和官方不同**的——官方
+  `getOrCreate` 的 `structureRepository` 从不清空，Bamboo 攒到 `CACHE_BLOCK_BUDGET` 个方块项
+  就整表清空、下次重新解析（模板不可变、可重解析，结果逐字节不变，只多花一点 CPU）；全进程
+  外形表用一把 `Mutex`，多生成线程同时查外形会短暂争用，没测吞吐影响。堆分析器自身每块多一个
+  ≥8 字节的头、另占 76 MB 站点表，进程级读数偏大，真实读数一律以不带分析器的 `bamboo` 为准；
+  归属规则是按函数名匹配的启发式，改函数命名或内联会串类；只在 Windows 上有 PDB / `HeapCompact`
+  实现。`HeapCompact` 压实实验显示空闲堆块不会退还给系统，故没有改分配器。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
@@ -1306,6 +1324,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、战利品表、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
 | `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、战利品表、世界边界和世界生成 |
+| `tools/mc-bamboo-memprof` | 堆内存分析器：用记账全局分配器按调用栈统计还活着的字节、按归属汇总，实测空载 / 一人在线 / 玩家离开后的进程内存构成（`run.sh` 起服取样，Windows + PDB 符号解析） |
 
 依赖方向是单向的：
 

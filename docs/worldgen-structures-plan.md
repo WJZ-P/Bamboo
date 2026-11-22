@@ -958,6 +958,18 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
 * **当前状态（合并 main 之后）**：神殿 32 查询 298 万个位置、府邸 32 查询 380 万个位置，
   0 不一致，每次调用的写入次数也全部相同；`structure-templated-place` 334 查询仍 0。
 
+* **内存现状补记（2026-11-21，`op-memprof`）**：`tools/mc-bamboo-memprof` 实测结构模板是
+  一人在线时最大的常驻项（约 318 MB，玩家离开后仍不释放）。原因是算 `template_pool` 高度时
+  把 1511 个模板全部按方块解析，并留在每条生成线程的 `thread_local` 缓存里。现已改成
+  `TemplateShape`：全进程一张只含「尺寸 + 拼图方块」的外形表常驻，整份模板只在真正要摆方块时
+  按需解析进**有上限**的线程本地缓存；`PoolElement::get_size` / `get_bounding_box` /
+  `get_shuffled_jigsaw_blocks` 与林地府邸改用外形。`getRandomPalette` 按
+  `Mth.getSeed(pos)` 选 palette 的逻辑不变、不消耗世界生成随机源，`jigsaw templates` /
+  `jigsaws` / `pieces` 与 `gen-world` 结构位置仍 0 不一致。**已知限制**：有界缓存攒满后整表
+  清空、下次重新解析，官方 `StructureTemplateManager.getOrCreate` 的 `structureRepository`
+  从不清空；这只多花 CPU、不改结果。外形表用一把全进程 `Mutex`，多生成线程同时查外形会
+  短暂争用，未测吞吐影响。
+
 ## 1. 官方 26.3 的结构生成全景
 
 `ChunkStatus` 顺序（`docs/worldgen.md`）：`empty` → `structure_starts` →
