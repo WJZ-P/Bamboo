@@ -18,6 +18,7 @@ pub mod avoid;
 pub mod bogged;
 pub mod brain;
 pub mod bucketable;
+pub mod camel;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
@@ -144,13 +145,14 @@ pub enum MobType {
     Goat,
     Frog,
     Tadpole,
+    Camel,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -188,6 +190,7 @@ impl MobType {
         Self::Goat,
         Self::Frog,
         Self::Tadpole,
+        Self::Camel,
     ];
 
     /// 注册表 ID。
@@ -231,6 +234,7 @@ impl MobType {
             Self::Goat => ids::GOAT,
             Self::Frog => ids::FROG,
             Self::Tadpole => ids::TADPOLE,
+            Self::Camel => ids::CAMEL,
         }
     }
 
@@ -274,6 +278,7 @@ impl MobType {
             Self::Goat => "minecraft:goat",
             Self::Frog => "minecraft:frog",
             Self::Tadpole => "minecraft:tadpole",
+            Self::Camel => "minecraft:camel",
         }
     }
 
@@ -287,6 +292,7 @@ impl MobType {
             Self::Armadillo => Some(item_tags::ARMADILLO_FOOD),
             Self::Goat => Some(item_tags::GOAT_FOOD),
             Self::Frog | Self::Tadpole => Some(item_tags::FROG_FOOD),
+            Self::Camel => Some(item_tags::CAMEL_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             _ => None,
         }
@@ -309,7 +315,10 @@ impl MobType {
     }
 
     pub const fn is_equine(self) -> bool {
-        matches!(self, Self::Horse | Self::Donkey | Self::Mule | Self::Llama)
+        matches!(
+            self,
+            Self::Horse | Self::Donkey | Self::Mule | Self::Llama | Self::Camel
+        )
     }
 
     /// 成年和幼年的（宽，高，眼高）。
@@ -357,6 +366,9 @@ impl MobType {
             (Self::Goat, baby) => goat::dimensions(baby),
             (Self::Frog, baby) => frog::dimensions(baby),
             (Self::Tadpole, _) => tadpole::dimensions(),
+            // 坐姿尺寸在 `Mob::dimensions` 里按 `camel.pose` 覆盖。
+            // Sitting dimensions are overridden by `Mob::dimensions` from `camel.pose`.
+            (Self::Camel, baby) => camel::dimensions(baby, false),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
@@ -639,6 +651,7 @@ impl MobType {
             Self::Goat => "minecraft:entities/goat",
             Self::Frog => "minecraft:entities/frog",
             Self::Tadpole => "minecraft:entities/tadpole",
+            Self::Camel => "minecraft:entities/camel",
         }
     }
 
@@ -721,6 +734,7 @@ impl MobType {
             Self::Goat => Some("minecraft:entity.goat.ambient"),
             Self::Frog => Some("minecraft:entity.frog.ambient"),
             Self::Tadpole => None,
+            Self::Camel => Some("minecraft:entity.camel.ambient"),
         }
     }
 
@@ -756,6 +770,7 @@ impl MobType {
             Self::Goat => Some("minecraft:entity.goat.hurt"),
             Self::Frog => Some("minecraft:entity.frog.hurt"),
             Self::Tadpole => Some("minecraft:entity.tadpole.hurt"),
+            Self::Camel => Some("minecraft:entity.camel.hurt"),
         }
     }
 
@@ -791,6 +806,7 @@ impl MobType {
             Self::Goat => Some("minecraft:entity.goat.death"),
             Self::Frog => Some("minecraft:entity.frog.death"),
             Self::Tadpole => Some("minecraft:entity.tadpole.death"),
+            Self::Camel => Some("minecraft:entity.camel.death"),
         }
     }
 
@@ -832,6 +848,7 @@ impl MobType {
             Self::Goat => Some("minecraft:entity.goat.step"),
             Self::Frog => Some("minecraft:entity.frog.step"),
             Self::Tadpole => None,
+            Self::Camel => Some("minecraft:entity.camel.step"),
         }
     }
 
@@ -876,6 +893,7 @@ impl MobType {
             Self::Goat => items::GOAT_SPAWN_EGG,
             Self::Frog => items::FROG_SPAWN_EGG,
             Self::Tadpole => items::TADPOLE_SPAWN_EGG,
+            Self::Camel => items::CAMEL_SPAWN_EGG,
         }
     }
 
@@ -919,6 +937,7 @@ impl MobType {
             Self::Goat => "entity.minecraft.goat",
             Self::Frog => "entity.minecraft.frog",
             Self::Tadpole => "entity.minecraft.tadpole",
+            Self::Camel => "entity.minecraft.camel",
         }
     }
 
@@ -1959,6 +1978,10 @@ pub struct Mob {
     ///
     /// The frog's variant, pose and tongue target.
     pub frog: frog::Frog,
+    /// 骆驼的姿势状态机同步值和冲刺计时。
+    ///
+    /// The camel's pose state machine synced values and dash timer.
+    pub camel: camel::Camel,
     /// `Tadpole.age`：到 24000 变成青蛙。蝌蚪不是 `AgeableMob`，和 `age` 是两回事。
     ///
     /// `Tadpole.age`: a frog at 24000. Tadpoles are not `AgeableMob`s, so this is
@@ -2064,6 +2087,7 @@ impl Mob {
             MobType::Goat => goat::attributes(),
             MobType::Frog => frog::attributes(),
             MobType::Tadpole => tadpole::attributes(),
+            MobType::Camel => camel::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2111,7 +2135,11 @@ impl Mob {
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
-            MobType::Armadillo | MobType::Goat | MobType::Frog => GoalSelector::default(),
+            // 骆驼 `registerGoals()` 是空的（不要 `equine::goals`）。
+            // The camel's `registerGoals()` is empty (no `equine::goals`).
+            MobType::Armadillo | MobType::Goat | MobType::Frog | MobType::Camel => {
+                GoalSelector::default()
+            }
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -2132,7 +2160,8 @@ impl Mob {
             | MobType::Armadillo
             | MobType::Goat
             | MobType::Frog
-            | MobType::Tadpole => GoalSelector::default(),
+            | MobType::Tadpole
+            | MobType::Camel => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Fox => fox::target_goals(),
@@ -2325,6 +2354,7 @@ impl Mob {
             armadillo: armadillo::Armadillo::default(),
             goat: goat::Goat::default(),
             frog: frog::Frog::default(),
+            camel: camel::Camel::default(),
             tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
@@ -2362,6 +2392,9 @@ impl Mob {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
             // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
             mob.navigation.flags.can_float = true;
+        }
+        if mob_type == MobType::Camel {
+            camel::configure(&mut mob);
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -2436,6 +2469,11 @@ impl Mob {
         }
         if self.mob_type == MobType::Goat {
             let (width, height, _) = goat::pose_dimensions(self.is_baby(), self.goat.long_jumping);
+            return (width, height);
+        }
+        if self.mob_type == MobType::Camel {
+            let sitting = self.camel.pose == camel::Pose::Sitting;
+            let (width, height, _) = camel::dimensions(self.is_baby(), sitting);
             return (width, height);
         }
         if fish::is_fish(self.mob_type) {
@@ -2642,6 +2680,10 @@ pub struct MobPublic {
     ///
     /// The frog's variant, pose and tongue target.
     pub frog: frog::Frog,
+    /// 骆驼的 `DASH` / `LAST_POSE_CHANGE_TICK` / 姿势。
+    ///
+    /// The camel's `DASH` / `LAST_POSE_CHANGE_TICK` / pose.
+    pub camel: camel::Camel,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`。
     ///
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
@@ -2758,6 +2800,7 @@ impl MobPublic {
             enderman_stared_at: mob.enderman.stared_at,
             dark_ticks: mob.squid.dark_ticks,
             frog: mob.frog,
+            camel: mob.camel,
             // 蝌蚪的 `FROM_BUCKET` 同步数据从来不写，一直是假。
             // A tadpole never writes its synced `FROM_BUCKET`, which stays false.
             fish_from_bucket: mob.fish.from_bucket && mob.mob_type != MobType::Tadpole,
@@ -2810,6 +2853,11 @@ impl MobPublic {
             let (width, height, _) = goat::pose_dimensions(self.baby, self.goat.long_jumping);
             return (width, height);
         }
+        if self.mob_type == MobType::Camel {
+            let sitting = self.camel.pose == camel::Pose::Sitting;
+            let (width, height, _) = camel::dimensions(self.baby, sitting);
+            return (width, height);
+        }
         if fish::is_fish(self.mob_type) {
             let (width, height, _) =
                 fish::dimensions(self.mob_type, self.fish_variant, self.puff_state);
@@ -2844,6 +2892,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Goat => Some(Box::new(goat::brain())),
         MobType::Frog => Some(Box::new(frog::brain())),
         MobType::Tadpole => Some(Box::new(tadpole::brain())),
+        MobType::Camel => Some(Box::new(camel::brain())),
         _ => None,
     }
 }

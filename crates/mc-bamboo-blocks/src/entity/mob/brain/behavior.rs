@@ -13,7 +13,7 @@ use super::{
 };
 use crate::entity::{Entity, JavaRandom, ctx::EntityCtx};
 
-pub use super::behaviors::{Kind, MoveToTargetSink, Trigger};
+pub use super::behaviors::{BodyPredicate, Kind, MoveToTargetSink, Trigger};
 
 /// 行为跑一刻时能碰到的一切：自己（实体和生物，大脑已经取出来）、上下文、记忆、
 /// 世界时钟（`level.getGameTime()`，也就是行为的 `timestamp`）。
