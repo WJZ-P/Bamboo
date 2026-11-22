@@ -914,11 +914,6 @@ fn collect_sweep_targets(
         .collect()
 }
 
-/// `Player.doSweepAttack`：给候选生物各打 `getEnchantedDamage(1 + ratio ×
-/// baseDamage) × s` 点，命中后按攻击者朝向追加 0.4 击退。
-///
-/// `Player.doSweepAttack`: hit each candidate with
-/// `getEnchantedDamage(1 + ratio × baseDamage) × s`, then knock back 0.4.
 /// `do_sweep` 的固定参数。
 ///
 /// The fixed parameters of `do_sweep`.
@@ -930,6 +925,14 @@ struct SweepSpec<'a> {
     yaw: f32,
 }
 
+/// `Player.doSweepAttack`：给候选生物各打 `getEnchantedDamage(1 + ratio ×
+/// baseDamage) × s` 点，命中后按攻击者朝向追加 0.4 击退，再补一次攻击后附魔
+/// 效果（火焰附加 / 节肢杀手）。
+///
+/// `Player.doSweepAttack`: hit each candidate with
+/// `getEnchantedDamage(1 + ratio × baseDamage) × s`, knock back 0.4 along the
+/// attacker's facing, then apply the post-attack enchantment effects
+/// (Fire Aspect / Bane of Arthropods) to that target too.
 fn do_sweep(
     world: &mut World<'_>,
     attacker: PlayerId,
@@ -950,6 +953,9 @@ fn do_sweep(
         }
         if world.hurt_mob(id, source, enchanted) {
             world.knockback_mob(id, f64::from(0.4_f32), f64::from(dx), f64::from(dz));
+            // 官方 `doSweepAttack` 对每个打中的 nearby 也调一次 `doPostAttackEffects`。
+            // Vanilla `doSweepAttack` also calls `doPostAttackEffects` on each hurt nearby.
+            post_attack_effects(world, id, spec.held, entity_type);
         }
     }
 }
