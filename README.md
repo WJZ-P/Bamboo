@@ -209,14 +209,16 @@ WebView2 的渲染进程不算在内。
   挥空 / 攻击 / 换主手物品重置冷却；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
   `MAGIC_CRITICAL_HIT` 动画）；拿剑、在地上、满充能、非暴击非疾跑时的横扫（打主目标
   `inflate(1, 0.25, 1)` 里 3 格内的生物，`sweeping_edge` 按 `L/(L+1)` 加成，发 `SWEEP_ATTACK`
-  粒子）；疾跑 / `knockback` 附魔 / `attack_knockback` 的额外击退并取消疾跑；锋利 / 亡灵杀手 /
+  粒子，横扫命中的生物也照 `doPostAttackEffects` 吃火焰附加 / 节肢杀手效果）；疾跑 /
+  `knockback` 附魔 / `attack_knockback` 的额外击退并取消疾跑；锋利 / 亡灵杀手 /
   节肢杀手（及节肢杀手的缓慢）、火焰附加、武器耐久、伤害指示粒子和
   `player.attack.strong / weak / crit / sweep / knockback / nodamage` 音效都真的发到客户端。
   PVP 按 `server.properties` 的 `pvp` 开关和官方 `canHarmPlayer` 处理（Bamboo 没有队伍）。
-  对拍：`mob-oracle --only player_attack`（12 场景 84 刻，逐刻比牛的血量 / 击退速度 / 着火 /
+  对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比牛的血量 / 击退速度 / 着火 /
   受伤时间 / 是否移除和 `damage_event` 包，0 不一致；`--break-self-test attack_charge` 能抓到
-  故意改坏的充能值）；`a_critical_attack_emits_its_packets` 单测确认暴击动画、攻击音效和
-  伤害指示粒子真的发到客户端。
+  故意改坏的充能值，`--break-self-test sweep_effects` 能抓到漏掉的横扫后附魔效果）；
+  `a_critical_attack_emits_its_packets` 和 `a_sweep_ignites_swept_targets_with_fire_aspect`
+  单测确认暴击动画 / 攻击音效 / 伤害指示粒子真的发到客户端、横扫目标也着火。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
   `onClimbable` / `isInWater` / `isPassenger` 按缺省值（Bamboo 没有梯子/水里/载具状态），

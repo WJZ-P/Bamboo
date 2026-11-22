@@ -644,7 +644,8 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `attack_knockback` 的额外击退走 `World::knockback_mob`，同时把攻击者水平速度
   `× 0.6` 并 `setSprinting(false)`。
 - **附魔与效果**：锋利 `1 + 0.5×(L−1)`、亡灵 / 节肢 `2.5×L`（按生成的实体类型
-  标签判定），火焰附加 `4×L` 秒点燃，节肢杀手挂缓慢 IV；`hurtEnemy` 扣 1 点耐久；
+  标签判定），火焰附加 `4×L` 秒点燃、节肢杀手挂缓慢 IV（`doSweepAttack` 对每个横扫
+  命中的 nearby 也调一次 `doPostAttackEffects`）；`hurtEnemy` 扣 1 点耐久；
   打中加 0.1 饥饿消耗、记 `lastHurtMob`。26.3 的数据驱动附魔表由生成器导出，
   这里只按 `Enchantments.java` 的 `AddValue` / `Fraction` 公式算。
 - **发包**：`world.play_sound` 把攻击音效记进同一个 `World` 的效果列表，落地后
@@ -656,10 +657,12 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。额外击退 /
   火焰附加 / 横扫波及的玩家这几项目标在实体表里的操作（`knockback_mob` /
   `ignite_mob` / 候选收集）对玩家不生效，玩家不在实体表里；见 README 已知限制。
-- **对拍**：`mob-oracle --only player_attack` 12 个场景（充能 0/2/4/5/20、下落暴击、
-  疾跑击退、横扫、`sweeping_edge`、锋利 / 火焰附加 / 击退）共 84 刻，逐刻比每头牛的
-  血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除和 `damage_event` 包，0 不一致；
-  `--break-self-test attack_charge` 故意把充能少算一刻，牛的血量立刻不一致。
+- **对拍**：`mob-oracle --only player_attack` 13 个场景（充能 0/2/4/5/20、下落暴击、
+  疾跑击退、横扫、`sweeping_edge`、横扫 + 火焰附加、锋利 / 火焰附加 / 击退）共 91 刻，
+  逐刻比每头牛的血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除和 `damage_event` 包，
+  0 不一致；`--break-self-test attack_charge` 故意把充能少算一刻，牛的血量立刻不一致；
+  `--break-self-test sweep_effects` 去掉武器上的火焰附加，横扫目标的着火刻数立刻不一致。
+  单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火。
   攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度；假世界也不
   捕获 crit 动画 / 粒子 / 挥手 / 耐久槽包，这些由单测覆盖（见 6.3 与 README）。
 
