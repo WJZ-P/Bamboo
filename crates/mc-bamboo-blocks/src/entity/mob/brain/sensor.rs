@@ -34,6 +34,18 @@ pub enum SensorKind {
     NearestPlayers,
     /// `NearestItemSensor`。
     NearestItems,
+    /// `FrogAttackablesSensor`（`NearestVisibleLivingEntitySensor` 子类）。
+    ///
+    /// `FrogAttackablesSensor` (a `NearestVisibleLivingEntitySensor` subclass).
+    FrogAttackables,
+    /// `TemptingSensor(FrogAi.getTemptations())`，即 `SensorType.FROG_TEMPTATIONS`。
+    ///
+    /// `TemptingSensor(FrogAi.getTemptations())`, i.e. `SensorType.FROG_TEMPTATIONS`.
+    FrogTemptations,
+    /// `IsInWaterSensor`。
+    ///
+    /// `IsInWaterSensor`.
+    IsInWater,
 }
 
 impl SensorKind {
@@ -70,6 +82,18 @@ impl SensorKind {
                 MemoryType::NearestVisibleAttackablePlayers,
             ],
             Self::NearestItems => &[MemoryType::NearestVisibleWantedItem],
+            // `FrogAttackablesSensor.requires()` = 视线表 + `NEAREST_ATTACKABLE`
+            // + `UNREACHABLE_TONGUE_TARGETS`（`Sets.union(super.requires(), ...)`）。
+            //
+            // `FrogAttackablesSensor.requires()` = the visible-entity table +
+            // `NEAREST_ATTACKABLE` + `UNREACHABLE_TONGUE_TARGETS`.
+            Self::FrogAttackables => &[
+                MemoryType::NearestVisibleLivingEntities,
+                MemoryType::NearestAttackable,
+                MemoryType::UnreachableTongueTargets,
+            ],
+            Self::FrogTemptations => &[MemoryType::TemptingPlayer],
+            Self::IsInWater => &[MemoryType::IsInWater],
         }
     }
 }
@@ -110,6 +134,14 @@ impl Sensor {
             }
             SensorKind::NearestPlayers => sense_players(cx),
             SensorKind::NearestItems => sense_items(cx),
+            SensorKind::FrogAttackables => super::super::frog::sense_attackables(cx),
+            // `FROG_TEMPTATIONS` 和 `TemptingSensor.forAnimal()` 同形：青蛙的
+            // `isFood` 就是 `#frog_food`，`goals::nearest_tempting_player` 走同一张表。
+            //
+            // `FROG_TEMPTATIONS` has the same shape as `TemptingSensor.forAnimal()`:
+            // the frog's `isFood` is `#frog_food`, the same table this lookup uses.
+            SensorKind::FrogTemptations => sense_temptations(cx),
+            SensorKind::IsInWater => super::super::frog::sense_is_in_water(cx),
         }
     }
 }

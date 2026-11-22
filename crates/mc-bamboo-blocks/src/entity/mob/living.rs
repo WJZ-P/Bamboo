@@ -1156,6 +1156,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if super::turtle::is_turtle(mob.mob_type) {
         super::turtle::ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Tadpole {
+        super::tadpole::ai_step(me, mob, ctx);
+    }
     if mob.age_lock_particle_timer > 0 {
         if mob.age_lock_particle_timer % 2 == 0 {
             for _ in 0..3 {
@@ -1343,6 +1346,12 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Goat {
         super::goat::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Frog {
+        super::frog::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Tadpole {
+        super::tadpole::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
     }
@@ -1370,6 +1379,16 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Tadpole {
+        move_control_tick(me, mob, ctx.blocks());
+        super::tadpole::look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Frog {
+        // `Frog.FrogLookControl.resetXRotOnTick`：舌头有目标时不把俯仰归零。
+        // `Frog.FrogLookControl.resetXRotOnTick`: the pitch is kept while the tongue has
+        // a target.
+        let keep_x_rot = super::frog::has_tongue_target(mob, ctx);
+        super::frog::move_control_tick(me, mob);
+        look_control_tick_with(me, mob, !keep_x_rot);
     } else if mob.mob_type == super::MobType::Drowned {
         let target = super::goals::current_combat_target(mob, ctx);
         let target_in_water = super::goals::current_target_in_water(mob, ctx);
@@ -1382,6 +1401,17 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `JumpControl.tick`。
     mob.jumping = mob.jump.jump;
     mob.jump.jump = false;
+}
+
+/// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。
+///
+/// `Mob.getHeadRotSpeed()`: 35 for frogs, 10 otherwise.
+pub(crate) fn head_rot_speed(mob: &Mob) -> f32 {
+    if mob.mob_type == super::MobType::Frog {
+        35.0
+    } else {
+        control::HEAD_ROT_SPEED as f32
+    }
 }
 
 /// `Mob.setSpeed`：同时设 `zza`。
@@ -1461,7 +1491,15 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
 
 /// `LookControl.tick`。
 fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
-    if mob.mob_type != super::MobType::Fox || super::fox::resets_x_rot(mob) {
+    let reset_x_rot = mob.mob_type != super::MobType::Fox || super::fox::resets_x_rot(mob);
+    look_control_tick_with(me, mob, reset_x_rot);
+}
+
+/// `LookControl.tick`，`resetXRotOnTick()` 的结果由调用方给。
+///
+/// `LookControl.tick` with the caller's `resetXRotOnTick()`.
+fn look_control_tick_with(me: &mut Entity, mob: &mut Mob, reset_x_rot: bool) {
+    if reset_x_rot {
         mob.x_rot = clamp_x_rot(0.0, mob.x_rot);
     }
     if mob.look.look_at_cooldown > 0 {
@@ -1491,6 +1529,9 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type == super::MobType::Goat {
         // `Goat.getMaxHeadYRot`。
         15.0
+    } else if mob.mob_type == super::MobType::Frog {
+        // `Frog.getMaxHeadYRot`。
+        5.0
     } else {
         MAX_HEAD_Y_ROT as f32
     }
@@ -1786,6 +1827,12 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
     // `AbstractFish.travelInWater` replaces the whole in-water path.
     if me.in_water && super::fish::is_fish(mob.mob_type) {
         super::fish::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    // `Frog.travelInWater` 换掉了水里的推进。
+    // `Frog.travelInWater` replaces the in-water thrust.
+    if me.in_water && mob.mob_type == super::MobType::Frog {
+        super::frog::travel_in_water(me, mob, ctx, input);
         return;
     }
     // `Turtle.travelInWater` 换掉了水里的推进。
@@ -2437,14 +2484,10 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     if !mob.mob_type.is_monster() {
         mob.events.push(MobEvent::Death);
-        animal_death_drops(
-            me,
-            mob,
-            ctx,
-            source,
-            by_player && adult && drops,
-            adult && drops,
-        );
+        // `Tadpole.shouldDropExperience` 为假：不掉经验，也不取那次随机数。
+        // `Tadpole.shouldDropExperience` is false: no experience and no draw for it.
+        let experience = by_player && adult && drops && mob.mob_type != super::MobType::Tadpole;
+        animal_death_drops(me, mob, ctx, source, experience, adult && drops);
         return;
     }
     // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
@@ -2548,6 +2591,12 @@ pub(crate) fn apply_breed(
     // `Turtle.TurtleBreedGoal`: the mother gets an egg instead of a calf.
     if super::turtle::is_turtle(kind) {
         super::turtle::breed(me, partner, position, world);
+        return;
+    }
+    // `Frog.spawnChildFromBreeding`：只有 `finalizeSpawnChildFromBreeding` 那一半。
+    // `Frog.spawnChildFromBreeding`: only the `finalizeSpawnChildFromBreeding` half.
+    if kind == super::MobType::Frog {
+        super::frog::breed(me, partner, position, world);
         return;
     }
     let mother = world.entity(partner).and_then(|entity| {

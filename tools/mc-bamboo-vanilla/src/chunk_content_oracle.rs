@@ -636,6 +636,8 @@ fn run_cases(
         MobType::Sheep,
         MobType::Chicken,
         MobType::Goat,
+        MobType::Frog,
+        MobType::Tadpole,
         MobType::PolarBear,
         MobType::Creeper,
         MobType::Spider,
@@ -1885,7 +1887,61 @@ fn brain_resave_cases() -> Vec<(String, Tag)> {
             ),
         ]),
     )]);
+    let frog_memories = compound(vec![(
+        "memories",
+        compound(vec![
+            ("minecraft:is_pregnant", memory(compound(vec![]), None)),
+            ("minecraft:is_in_water", memory(compound(vec![]), None)),
+            (
+                "minecraft:long_jump_cooling_down",
+                memory(Tag::Int(77), None),
+            ),
+        ]),
+    )]);
     vec![
+        // 青蛙：品种存带命名空间的名字；`canBeABaby` 为假，`Age` 三个键不读也不写。
+        // Frogs: the variant is saved namespaced; `canBeABaby` is false, so the three
+        // `Age` keys are neither read nor written.
+        (
+            "frog_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:frog".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "frog_warm_pregnant".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:frog".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("variant", Tag::String("minecraft:warm".to_owned())),
+                ("Age", Tag::Int(-600)),
+                ("Brain", frog_memories),
+            ]),
+        ),
+        // 蝌蚪：自己的 `Age` 和 `AgeLocked`；`FromBucket` 写出来恒为真。
+        // Tadpoles: their own `Age` and `AgeLocked`; `FromBucket` always saves as true.
+        (
+            "tadpole_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:tadpole".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "tadpole_aged_locked".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:tadpole".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("Age", Tag::Int(12345)),
+                ("AgeLocked", Tag::Byte(1)),
+                ("FromBucket", Tag::Byte(0)),
+            ]),
+        ),
         (
             "goat_bare".to_owned(),
             compound(vec![
