@@ -440,7 +440,12 @@ struct AttackPlan {
     total_damage: f32,
     full: bool,
     critical: bool,
-    knockback_attack: bool,
+    /// `causeExtraKnockback` 的力道：`getKnockback + (疾跑 ? 0.5 : 0)`。
+    /// 大于 0 时才推目标、衰减攻击者速度并取消疾跑。
+    ///
+    /// `causeExtraKnockback`'s strength: `getKnockback + (sprint ? 0.5 : 0)`.
+    /// Only positive values push the target, damp the attacker and stop sprint.
+    extra_knockback: f32,
     sweep: bool,
     source: DamageSource,
     knockback_sound: Option<&'static str>,
@@ -576,6 +581,13 @@ fn plan_attack(
     //
     // The full-strength sprint `PLAYER_ATTACK_KNOCKBACK` sound precedes damage.
     let knockback_sound = knockback_attack.then_some("minecraft:entity.player.attack.knockback");
+    // `getKnockback(target, damageSource) + (knockbackAttack ? 0.5 : 0)`：
+    // `Player.attack` 把它传给 `causeExtraKnockback`，这里先算好给落地阶段用。
+    //
+    // `getKnockback(target, damageSource) + (knockbackAttack ? 0.5 : 0)`:
+    // `Player.attack` passes it to `causeExtraKnockback`; computed here for the
+    // landing phase.
+    let extra_knockback = attack_knockback_amount(held) + if knockback_attack { 0.5 } else { 0.0 };
     let critical = full && can_critical(player, target.is_living);
     if critical {
         base_damage *= CRIT_MULTIPLIER;
@@ -606,7 +618,7 @@ fn plan_attack(
         total_damage,
         full,
         critical,
-        knockback_attack,
+        extra_knockback,
         sweep,
         source,
         knockback_sound,
@@ -640,13 +652,7 @@ fn land_attack(
             world.hurt_mob(entity_id, plan.source, plan.total_damage)
         };
         if hit {
-            apply_extra_knockback(
-                &mut world,
-                entity_id,
-                &plan.held,
-                plan.knockback_attack,
-                plan.yaw,
-            );
+            apply_extra_knockback(&mut world, entity_id, plan.extra_knockback, plan.yaw);
             if plan.sweep {
                 let spec = SweepSpec {
                     held: &plan.held,
@@ -701,11 +707,12 @@ fn land_attack(
     (hit, damage_taken(region, entity_id, target.health))
 }
 
-/// 命中之后：暴击 / 附魔暴击动画、横扫 / 伤害指示粒子、武器耐久、
-/// `lastHurtMob`、饥饿消耗和挥手。
+/// 命中之后：衰减攻击者速度 / 取消疾跑、暴击 / 附魔暴击动画、横扫 / 伤害指示
+/// 粒子、武器耐久、`lastHurtMob`、饥饿消耗和挥手。
 ///
-/// After a hit: crit / magic-crit animations, sweep / damage-indicator particles,
-/// weapon durability, `lastHurtMob`, exhaustion and the swing.
+/// After a hit: attacker velocity damp / sprint cancel, crit / magic-crit
+/// animations, sweep / damage-indicator particles, weapon durability,
+/// `lastHurtMob`, exhaustion and the swing.
 fn finish_hit(
     region: &mut Region,
     id: PlayerId,
@@ -714,6 +721,15 @@ fn finish_hit(
     plan: &AttackPlan,
     actual_damage: f32,
 ) {
+    // `Player.causeExtraKnockback` 在命中之后衰减攻击者速度并取消疾跑，
+    // 力道大于 0 才做；它和伤害、横扫、动画的先后顺序不影响后面读到的状态。
+    //
+    // `Player.causeExtraKnockback` damps the attacker and stops sprint after a
+    // landed hit, only when its strength is positive; its exact position among
+    // damage, sweep and animations does not change any state read afterwards.
+    if plan.extra_knockback > 0.0 {
+        damp_attacker(region, id);
+    }
     if plan.critical {
         send_animate(region, id, entity_id, Animate::CRITICAL_HIT);
     }
@@ -833,21 +849,16 @@ fn is_attackable(kind: &mc_bamboo_blocks::entity::KindPublic) -> bool {
     matches!(kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
 }
 
-/// `Player.causeExtraKnockback`：默认受伤击退之外的第二下击退，用攻击者朝向，
-/// 力道是 `getKnockback + (疾跑 ? 0.5 : 0)`；顺带把攻击者水平速度 ×0.6、
-/// 取消疾跑。
+/// `Player.causeExtraKnockback` 对生物目标的那一下 `LivingEntity.knockback`：
+/// 默认受伤击退之外的第二下，用攻击者朝向，力道是已经算好的
+/// `getKnockback + (疾跑 ? 0.5 : 0)`。攻击者自己的速度衰减和取消疾跑见
+/// [`damp_attacker`]，在命中之后单独落地。
 ///
-/// `Player.causeExtraKnockback`: the second knockback, along the attacker's
-/// facing, with `getKnockback + (sprint ? 0.5 : 0)`; also damps the attacker's
-/// horizontal velocity and stops sprinting.
-fn apply_extra_knockback(
-    world: &mut World<'_>,
-    entity_id: i32,
-    held: &ItemStack,
-    sprint: bool,
-    yaw: f32,
-) {
-    let amount = attack_knockback_amount(held) + if sprint { 0.5 } else { 0.0 };
+/// The `LivingEntity.knockback` that `Player.causeExtraKnockback` applies to a
+/// mob target: a second push along the attacker's facing with the precomputed
+/// `getKnockback + (sprint ? 0.5 : 0)`. The attacker's own velocity damp and
+/// sprint cancellation land separately in [`damp_attacker`] after the hit.
+fn apply_extra_knockback(world: &mut World<'_>, entity_id: i32, amount: f32, yaw: f32) {
     if amount <= 0.0 {
         return;
     }
@@ -855,6 +866,18 @@ fn apply_extra_knockback(
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
     world.knockback_mob(entity_id, f64::from(amount), f64::from(dx), f64::from(dz));
+}
+
+/// `Player.causeExtraKnockback` 的收尾：`setDeltaMovement(×0.6, 1.0, ×0.6)`
+/// 和 `setSprinting(false)`，只在 `knockbackAmount > 0` 的命中之后做。
+///
+/// The tail of `Player.causeExtraKnockback`: `setDeltaMovement(×0.6, 1.0, ×0.6)`
+/// and `setSprinting(false)`, done only after a hit whose knockback is positive.
+fn damp_attacker(region: &mut Region, id: PlayerId) {
+    entity_sync::set_sprinting(region, id, false);
+    if let Some(player) = region.players.get_mut(&id) {
+        player.motion.delta = player.motion.delta.multiply(0.6, 1.0, 0.6);
+    }
 }
 
 /// `Player.doSweepAttack` 的候选：主目标盒子 inflate(1, 0.25, 1) 里、
@@ -1101,5 +1124,37 @@ mod tests {
         region.players.get_mut(&id).unwrap().attack_strength_ticker = 12;
         on_punch(&mut region, id);
         assert_eq!(region.players[&id].attack_strength_ticker, 0);
+    }
+
+    /// 官方 `Player.causeExtraKnockback` 在 `knockbackAmount > 0` 的命中之后
+    /// 把攻击者水平速度 ×0.6 并 `setSprinting(false)`。
+    ///
+    /// Vanilla `Player.causeExtraKnockback` damps the attacker's horizontal
+    /// velocity by 0.6 and calls `setSprinting(false)` after a hit whose
+    /// `knockbackAmount > 0`.
+    #[test]
+    fn extra_knockback_damps_the_attacker_and_stops_sprint() {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.motion.delta = Vec3::new(1.0, 0.0, -0.5);
+        region.insert_player(player);
+        entity_sync::set_sprinting(&mut region, id, true);
+        assert!(region.players[&id].sync.is_sprinting());
+
+        damp_attacker(&mut region, id);
+
+        let player = &region.players[&id];
+        assert!(!player.sync.is_sprinting(), "sprint must be cancelled");
+        assert!((player.motion.delta.x - 0.6).abs() < 1.0e-9);
+        assert_eq!(player.motion.delta.y, 0.0);
+        assert!((player.motion.delta.z + 0.3).abs() < 1.0e-9);
     }
 }
