@@ -695,6 +695,8 @@ fn zombie_style(name: &str) -> bool {
         "wolf_",
         "armadillo_",
         "goat_",
+        "frog_",
+        "tadpole_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
@@ -1059,7 +1061,17 @@ impl Level for MobLevel {
             Some(view)
         };
         let source = loot.source;
-        let attacker = source.attacker.and_then(player);
+        if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
+            victim.cube_mob_size = Some(loot.cube_size);
+        }
+        // 生物打死生物：攻击者按伤害来源带的类型建。
+        // A mob killing a mob: the attacker comes from the type carried by the source.
+        let typed = source.attacker_type.map(|kind| {
+            let mut view = EntityView::new(kind);
+            view.is_living = true;
+            view
+        });
+        let attacker = source.attacker.and_then(player).or(typed);
         let direct = source.direct.and_then(player).or_else(|| {
             source
                 .projectile_motion
@@ -1521,6 +1533,8 @@ impl Report {
                     9..=12 => equine::scene_kind(cow.kind),
                     13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
                     14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
+                    18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
+                    19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -1636,7 +1650,13 @@ impl Report {
                             mob.y_body_rot = yaw;
                         }
                     }
-                    if cow.age != 0 && !slime {
+                    let tadpole = kind == mc_bamboo_blocks::entity::mob::MobType::Tadpole;
+                    if tadpole {
+                        // 蝌蚪的「年龄」那一列是它自己的 `Tadpole.age`。
+                        // For tadpoles the age column is their own `Tadpole.age`.
+                        entity.with_mob(|_, mob| mob.tadpole_age = cow.age);
+                    }
+                    if cow.age != 0 && !slime && !tadpole {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
                         let baby = zombie_kind || cow.age < 0;
@@ -3474,6 +3494,17 @@ fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
             level.entities.get(id).and_then(|entity| {
                 step_of(&entity, lr).map(|mut step| {
                     step.bh = bh;
+                    // `Frog.getTongueTarget()`：目标已经不在世界里时是空的。
+                    // `Frog.getTongueTarget()` is empty once the target has left the world.
+                    let frog = entity.kind.mob().is_some_and(|mob| {
+                        mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog
+                    });
+                    if frog
+                        && step.goat >> 4 != 0
+                        && level.entities.get((step.goat >> 4) - 1).is_none()
+                    {
+                        step.goat &= 15;
+                    }
                     step.brain = brain::dump(level, &entity);
                     step
                 })
@@ -3643,7 +3674,13 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         fire: entity.remaining_fire_ticks,
         air: mob.air_supply,
         seed: entity.random.state(),
-        age: mob.age,
+        age: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Tadpole {
+            // 蝌蚪：自己的年龄，锁住时再加 `1 << 20`。
+            // Tadpoles: their own age, plus `1 << 20` while locked.
+            mob.tadpole_age + if mob.age_locked { 1 << 20 } else { 0 }
+        } else {
+            mob.age
+        },
         love: mob.in_love,
         lh: mob.left_handed,
         fr: mob
@@ -3747,6 +3784,19 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
 ///
 /// The goat's four flag bits, matching `goat` in the Java `zombieStepJson`.
 fn goat_flags(mob: &mc_bamboo_blocks::entity::mob::Mob) -> i32 {
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        // 青蛙借这一列：姿势占低 4 位，舌头目标的实体 ID 加一放在高位。
+        // Frogs borrow this column: the pose in the low four bits and the tongue
+        // target's entity id plus one above them.
+        use mc_bamboo_blocks::entity::mob::frog::Pose;
+        let pose = match mob.frog.pose {
+            Pose::Standing => 0,
+            Pose::Croaking => 1,
+            Pose::LongJumping => 2,
+            Pose::UsingTongue => 3,
+        };
+        return pose | mob.frog.tongue_target.map_or(0, |uid| uid + 1) << 4;
+    }
     if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Goat {
         return 0;
     }
@@ -3840,6 +3890,20 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
 /// Mirrors `MobOracle.spawnVariants`.
 fn spawn_variants(mob: &mc_bamboo_blocks::entity::mob::Mob) -> Option<[String; 2]> {
     use mc_bamboo_blocks::entity::mob::MobType;
+    if mob.mob_type == MobType::Frog {
+        // 青蛙：品种和 `FrogAi.initMemories` 抽的长跳冷却。
+        // Frogs: the variant and the long-jump cooldown `FrogAi.initMemories` drew.
+        let cooldown = mob
+            .brain
+            .as_deref()
+            .and_then(|brain| {
+                brain.memories.int(
+                    mc_bamboo_blocks::entity::mob::brain::memory::MemoryType::LongJumpCooldownTicks,
+                )
+            })
+            .unwrap_or(-1);
+        return Some([mob.frog.variant.key().to_owned(), cooldown.to_string()]);
+    }
     let variant = match mob.mob_type {
         MobType::Chicken => mob.variant.name().to_owned(),
         MobType::Cow | MobType::Pig | MobType::Sheep => farm_variant(mob),

@@ -159,6 +159,12 @@ pub fn interact(
             ..MobInteraction::pass()
         };
     }
+    if mob.mob_type == MobType::Tadpole {
+        // 蝌蚪不是 `Animal`：自己的两支都不中就是 `Mob.mobInteract` 的 `PASS`。
+        // Tadpoles are not `Animal`s: when neither of their own branches applies the
+        // result is the `PASS` of `Mob.mobInteract`.
+        return super::tadpole::interact(me, mob, req).unwrap_or_else(MobInteraction::pass);
+    }
     if mob.mob_type == super::MobType::Wolf {
         return super::wolf::interact(me, mob, req, now);
     }
@@ -276,13 +282,25 @@ pub(super) fn animal_interact(
     MobInteraction::pass()
 }
 
-/// `Animal.playEatingSound`：缺省不出声，猪和犰狳各有自己的。
+/// `Animal.playEatingSound`：缺省不出声，猪、犰狳和青蛙各有自己的。
 ///
-/// `Animal.playEatingSound`: silent by default; pigs and armadillos have their own.
+/// `Animal.playEatingSound`: silent by default; pigs, armadillos and frogs have their own.
 fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
     match mob.mob_type {
         MobType::Pig => pig::play_eating_sound(me, mob),
         MobType::Armadillo => living::make_sound(me, mob, "minecraft:entity.armadillo.eat"),
+        // `Frog.playEatingSound`：`level.playSound(null, this, FROG_EAT, NEUTRAL, 2.0F, 1.0F)`，
+        // 不看 `isSilent`、不取音高。
+        // `Frog.playEatingSound`: `level.playSound(null, this, FROG_EAT, NEUTRAL, 2.0F,
+        // 1.0F)`, ignoring `isSilent` and drawing no pitch.
+        MobType::Frog => mob.events.push(MobEvent::Sound {
+            sound: "minecraft:entity.frog.eat",
+            volume: 2.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: false,
+            seed: None,
+        }),
         _ => {}
     }
 }

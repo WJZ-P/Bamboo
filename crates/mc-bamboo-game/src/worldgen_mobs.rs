@@ -317,6 +317,7 @@ mod tests {
                         entity_type::LLAMA,
                         entity_type::ARMADILLO,
                         entity_type::GOAT,
+                        entity_type::FROG,
                     ];
                     assert!(modelled.contains(&row.public.kind.entity_type()));
                     assert_eq!(

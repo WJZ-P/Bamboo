@@ -46,13 +46,30 @@ pub enum MemoryType {
     RamCooldownTicks,
     RamTarget,
     NearestVisibleAttackablePlayers,
+    /// 青蛙的记忆。`is_in_water` / `is_pregnant` 带 `Unit.CODEC`（进存档），
+    /// `nearest_attackable` / `attack_target` / `unreachable_tongue_targets` 没编解码器
+    /// （不进存档）。追加在末尾，不改既有种类的下标和 `filled()` 顺序。
+    ///
+    /// The frog's memories. `is_in_water` / `is_pregnant` carry a `Unit.CODEC` (saved);
+    /// `nearest_attackable` / `attack_target` / `unreachable_tongue_targets` have no codec
+    /// (not saved). Appended last so the existing types keep their indices and `filled()` order.
+    IsInWater,
+    IsPregnant,
+    NearestAttackable,
+    AttackTarget,
+    /// `FrogAttackablesSensor.requires()`（`UNREACHABLE_TONGUE_TARGETS`）：官方用
+    /// `register("unreachable_tongue_targets")`，没有编解码器，不进存档。
+    ///
+    /// `FrogAttackablesSensor.requires()` (`UNREACHABLE_TONGUE_TARGETS`): vanilla uses
+    /// `register("unreachable_tongue_targets")` with no codec, so it is not saved.
+    UnreachableTongueTargets,
 }
 
 impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 29;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -82,6 +99,11 @@ impl MemoryType {
         Self::RamCooldownTicks,
         Self::RamTarget,
         Self::NearestVisibleAttackablePlayers,
+        Self::IsInWater,
+        Self::IsPregnant,
+        Self::NearestAttackable,
+        Self::AttackTarget,
+        Self::UnreachableTongueTargets,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -113,6 +135,11 @@ impl MemoryType {
             Self::RamCooldownTicks => "ram_cooldown_ticks",
             Self::RamTarget => "ram_target",
             Self::NearestVisibleAttackablePlayers => "nearest_visible_targetable_players",
+            Self::IsInWater => "is_in_water",
+            Self::IsPregnant => "is_pregnant",
+            Self::NearestAttackable => "nearest_attackable",
+            Self::AttackTarget => "attack_target",
+            Self::UnreachableTongueTargets => "unreachable_tongue_targets",
         }
     }
 
@@ -136,6 +163,8 @@ impl MemoryType {
                 | Self::DangerDetectedRecently
                 | Self::LongJumpCooldownTicks
                 | Self::RamCooldownTicks
+                | Self::IsInWater
+                | Self::IsPregnant
         )
     }
 
@@ -546,5 +575,37 @@ mod tests {
             MemoryValue::Entities(Vec::new()),
         );
         assert!(!memories.has(MemoryType::NearestLivingEntities));
+    }
+
+    /// 青蛙新增的记忆追加在枚举末尾，既有种类下标不变；`is_in_water` / `is_pregnant`
+    /// 带 `Unit.CODEC` 进存档，另三个不进存档（官方 `MemoryModuleType.canSerialize`）。
+    ///
+    /// The frog memories append at the end so existing indices stay put; `is_in_water` /
+    /// `is_pregnant` carry a `Unit.CODEC` and are saved, the other three are not (vanilla
+    /// `MemoryModuleType.canSerialize`).
+    #[test]
+    fn frog_memories_append_and_serialize_like_vanilla() {
+        assert_eq!(MemoryType::ALL.len(), MemoryType::COUNT);
+        assert_eq!(MemoryType::IsInWater.name(), "is_in_water");
+        assert_eq!(MemoryType::IsPregnant.name(), "is_pregnant");
+        assert_eq!(MemoryType::NearestAttackable.name(), "nearest_attackable");
+        assert_eq!(MemoryType::AttackTarget.name(), "attack_target");
+        assert_eq!(
+            MemoryType::UnreachableTongueTargets.name(),
+            "unreachable_tongue_targets"
+        );
+        assert!(MemoryType::IsInWater.serializable());
+        assert!(MemoryType::IsPregnant.serializable());
+        assert!(!MemoryType::NearestAttackable.serializable());
+        assert!(!MemoryType::AttackTarget.serializable());
+        assert!(!MemoryType::UnreachableTongueTargets.serializable());
+        assert_eq!(
+            MemoryType::by_name("minecraft:attack_target"),
+            Some(MemoryType::AttackTarget)
+        );
+        assert_eq!(
+            MemoryType::by_name("minecraft:unreachable_tongue_targets"),
+            Some(MemoryType::UnreachableTongueTargets)
+        );
     }
 }

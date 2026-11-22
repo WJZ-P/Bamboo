@@ -309,7 +309,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
     // ---- AgeableMob / Animal / Cow ----
-    if mob.mob_type.is_ageable() {
+    if mob.mob_type.is_ageable() && mob.mob_type.can_be_a_baby() {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
@@ -407,6 +407,15 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         );
         put(&mut out, "scute_time", Tag::Int(mob.armadillo.scute_time));
     }
+    if mob.mob_type == MobType::Frog {
+        // `Frog.addAdditionalSaveData`：`VariantUtils.writeVariant`。
+        // `Frog.addAdditionalSaveData`: `VariantUtils.writeVariant`.
+        put(
+            &mut out,
+            "variant",
+            Tag::String(mob.frog.variant.key().to_owned()),
+        );
+    }
     if mob.mob_type == MobType::Goat {
         // `Goat.addAdditionalSaveData`。
         // `Goat.addAdditionalSaveData`.
@@ -484,6 +493,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             "FromBucket",
             Tag::Byte(i8::from(mob.fish.from_bucket)),
         );
+    }
+    if mob.mob_type == MobType::Tadpole {
+        // `Tadpole.addAdditionalSaveData`。
+        put(&mut out, "Age", Tag::Int(mob.tadpole_age));
+        put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
     }
     match mob.mob_type {
         MobType::Salmon => put(
@@ -677,7 +691,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
         // ---- AgeableMob / Animal / Cow ----
-        if mob.mob_type.is_ageable() {
+        if mob.mob_type.is_ageable() && mob.mob_type.can_be_a_baby() {
             living::set_age(me, mob, tag::int_or(tag, "Age", 0));
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
@@ -733,6 +747,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Armadillo {
             read_armadillo(mob, tag);
         }
+        if mob.mob_type == MobType::Frog {
+            // `Frog.readAdditionalSaveData`：读不出品种就保留原来的。
+            // `Frog.readAdditionalSaveData`: an unreadable variant keeps the current one.
+            if let Some(variant) =
+                tag::string_or(tag, "variant").and_then(super::frog::Variant::from_name)
+            {
+                mob.frog.variant = variant;
+            }
+        }
         if mob.mob_type == MobType::Goat {
             // `Goat.readAdditionalSaveData`：缺省不尖叫、两只角都在。
             // `Goat.readAdditionalSaveData`: not screaming and both horns by default.
@@ -778,7 +801,14 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             }
         }
         // ---- AbstractFish / Salmon / TropicalFish / Pufferfish ----
-        if super::fish::is_fish(mob.mob_type) {
+        if mob.mob_type == MobType::Tadpole {
+            // `Tadpole.readAdditionalSaveData`；`setFromBucket` 是空的，桶标志不读。存档里
+            // 年龄已经到了的，下一刻长一刻时就变。
+            // `Tadpole.readAdditionalSaveData`; `setFromBucket` is empty, so the bucket flag
+            // is not read. A saved age already past the limit converts on the next tick.
+            mob.tadpole_age = tag::int_or(tag, "Age", 0);
+            mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
+        } else if super::fish::is_fish(mob.mob_type) {
             mob.fish.from_bucket = tag::bool_or(tag, "FromBucket", false);
         }
         if mob.mob_type == MobType::Dolphin {

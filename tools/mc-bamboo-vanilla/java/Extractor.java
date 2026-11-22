@@ -1228,6 +1228,13 @@ public final class Extractor {
         out.addProperty("goatScreaming", entityAccessor(goat, "DATA_IS_SCREAMING_GOAT").id());
         out.addProperty("goatLeftHorn", entityAccessor(goat, "DATA_HAS_LEFT_HORN").id());
         out.addProperty("goatRightHorn", entityAccessor(goat, "DATA_HAS_RIGHT_HORN").id());
+        Class<?> frog = net.minecraft.world.entity.animal.frog.Frog.class;
+        var frogVariant = entityAccessor(frog, "DATA_VARIANT_ID");
+        var frogTongue = entityAccessor(frog, "DATA_TONGUE_TARGET_ID");
+        out.addProperty("frogVariant", frogVariant.id());
+        out.addProperty("frogVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(frogVariant.serializer()));
+        out.addProperty("frogTongueTarget", frogTongue.id());
+        out.addProperty("frogTongueTargetSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(frogTongue.serializer()));
         out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
         out.add("stewFlowers", stewFlowers());
         out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());

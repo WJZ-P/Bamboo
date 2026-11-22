@@ -40,6 +40,7 @@ pub const fn bucket_item(kind: MobType) -> Option<i32> {
         MobType::TropicalFish => Some(items::TROPICAL_FISH_BUCKET),
         MobType::Pufferfish => Some(items::PUFFERFISH_BUCKET),
         MobType::Axolotl => Some(items::AXOLOTL_BUCKET),
+        MobType::Tadpole => Some(items::TADPOLE_BUCKET),
         _ => None,
     }
 }
@@ -74,6 +75,12 @@ pub fn save_default_data(entity: &Entity, mob: &Mob) -> Vec<(String, Tag)> {
     if mob.mob_type == MobType::Axolotl {
         out.push(("Variant".to_owned(), Tag::Int(mob.axolotl.variant)));
         out.push(("Age".to_owned(), Tag::Int(mob.age)));
+        out.push(("AgeLocked".to_owned(), Tag::Byte(i8::from(mob.age_locked))));
+    }
+    // `Tadpole.saveToBucketTag`：再追加年龄和锁。
+    // `Tadpole.saveToBucketTag` appends the age and the lock.
+    if mob.mob_type == MobType::Tadpole {
+        out.push(("Age".to_owned(), Tag::Int(mob.tadpole_age)));
         out.push(("AgeLocked".to_owned(), Tag::Byte(i8::from(mob.age_locked))));
     }
     out
@@ -121,6 +128,15 @@ pub fn load_default_data(entity: &mut Entity, mob: &mut Mob, tag: &Tag) {
             }
             "AgeLocked" if mob.mob_type == MobType::Axolotl => {
                 mob.age_locked = tag_bool(value, mob.age_locked);
+            }
+            // `Tadpole.loadFromBucketTag`。
+            "Age" if mob.mob_type == MobType::Tadpole => {
+                if let Tag::Int(age) = value {
+                    mob.tadpole_age = *age;
+                }
+            }
+            "AgeLocked" if mob.mob_type == MobType::Tadpole => {
+                mob.age_locked = tag_bool(value, false);
             }
             _ => {}
         }
@@ -266,10 +282,12 @@ fn apply_species_components(mob: &mut Mob, patch: &ComponentPatch) {
 /// consult `isSilent()`: `ServerLevel.playSound` only looks at the skipped player.
 pub fn pickup(entity: &Entity, mob: &mut Mob) -> Option<ItemStack> {
     let stack = bucket_stack(entity, mob)?;
-    let sound = if mob.mob_type == MobType::Axolotl {
-        BUCKET_FILL_AXOLOTL
-    } else {
-        BUCKET_FILL_FISH
+    // `Tadpole.getPickupSound` 和其它可装桶物种的拾取音效。
+    // `Tadpole.getPickupSound` and the pickup sound for every other bucketable species.
+    let sound = match mob.mob_type {
+        MobType::Axolotl => BUCKET_FILL_AXOLOTL,
+        MobType::Tadpole => "minecraft:item.bucket.fill_tadpole",
+        _ => BUCKET_FILL_FISH,
     };
     mob.events.push(super::MobEvent::Sound {
         sound,
@@ -287,12 +305,12 @@ pub fn pickup(entity: &Entity, mob: &mut Mob) -> Option<ItemStack> {
 /// `MobBucketItem.checkExtraContent`: spawn on the server only.
 pub fn check_extra_content(world: &mut World, item: i32, stack: Option<&ItemStack>, pos: BlockPos) {
     let Some(kind) = kind_of_bucket(item) else {
-        // 还没建模的生物桶（蝌蚪、硫磺立方）不生成实体，但官方
-        // `EntityType.create` 对 `level.random` 的取数照取。美西螈现已建模，走
-        // `kind_of_bucket` 那一路，不进这里。
-        // Buckets of unmodelled mobs (tadpole, sulfur cube) spawn no entity, but
-        // vanilla's `EntityType.create` still draws from `level.random`. The axolotl
-        // is modelled now and goes through `kind_of_bucket`, not this branch.
+        // 还没建模的生物桶（只剩硫磺立方）不生成实体，但官方
+        // `EntityType.create` 对 `level.random` 的取数照取。美西螈和蝌蚪现已建模，
+        // 都走 `kind_of_bucket` 那一路，不进这里。
+        // Buckets of unmodelled mobs (only the sulfur cube left) spawn no entity, but
+        // vanilla's `EntityType.create` still draws from `level.random`. The axolotl and
+        // the tadpole are modelled now and both go through `kind_of_bucket`, not here.
         if is_mob_bucket(item) {
             unmodelled_spawn_draws(world, item);
         }
@@ -315,10 +333,10 @@ pub fn check_extra_content(world: &mut World, item: i32, stack: Option<&ItemStac
 ///
 /// Mob buckets whose species Bamboo does not model yet.
 const fn is_mob_bucket(item: i32) -> bool {
-    // 美西螈现已建模，走 `kind_of_bucket`；蝌蚪和硫磺立方还没建模。
-    // The axolotl is modelled now and goes through `kind_of_bucket`; the tadpole and
-    // sulfur cube are not modelled yet.
-    matches!(item, items::TADPOLE_BUCKET | items::SULFUR_CUBE_BUCKET)
+    // 美西螈和蝌蚪都现已建模，走 `kind_of_bucket`；只剩硫磺立方还没建模。
+    // The axolotl and the tadpole are modelled now and go through `kind_of_bucket`;
+    // only the sulfur cube is not modelled yet.
+    matches!(item, items::SULFUR_CUBE_BUCKET)
 }
 
 /// `MobBucketItem.spawn` 里 `EntityType.create` 对 `level.random` 的取数，用在没建模的生物上。
@@ -351,6 +369,7 @@ pub const fn kind_of_bucket(item: i32) -> Option<MobType> {
         items::TROPICAL_FISH_BUCKET => Some(MobType::TropicalFish),
         items::PUFFERFISH_BUCKET => Some(MobType::Pufferfish),
         items::AXOLOTL_BUCKET => Some(MobType::Axolotl),
+        items::TADPOLE_BUCKET => Some(MobType::Tadpole),
         _ => None,
     }
 }

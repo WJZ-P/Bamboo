@@ -548,6 +548,44 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 
 其余已知差异见 README「大脑生物的已知限制」。
 
+### 5.10 青蛙和蝌蚪（2026-11-21，分支 `brain`）
+
+**已做**（代码在 `entity/mob/frog.rs`、`entity/mob/tadpole.rs`、`behaviour/misc/frogspawn.rs`、
+`mc-bamboo-core/src/jmath.rs`）：
+
+| 部分 | 官方 | Bamboo | 验证 |
+|---|---|---|---|
+| 青蛙大脑 | `Frog`、`FrogAi`、`Croak`、`TryFindLand`、`TryFindLandNearLiquid`、`TryLaySpawnOnFluidNearLand`、`StartAttacking`、`StopAttackingIfTargetInvalid`、`ShootTongue`、`RandomStroll.swim` | `frog::Behavior`（挂在 `Kind::Frog`） | `frog_*` 16 场景 |
+| 长跳 | `LongJumpToRandomPos`、`LongJumpToPreferredBlock`、`LongJumpMidJump`、`LongJumpUtil` | `goat::JumpSpec` + `goat::LongJump`（山羊和青蛙共用） | `frog_lily_*`、`frog_long_jump`、`goat_long_jump` |
+| 传感器 | `FrogAttackablesSensor`、`IsInWaterSensor`、`TemptingSensor(FROG_TEMPTATIONS)` | `SensorKind::FrogAttackables` / `IsInWater` / `FrogTemptations` | 同上 |
+| 移动和寻路 | `SmoothSwimmingMoveControl`、`SmoothSwimmingLookControl`、`Frog.FrogPathNavigation` / `FrogNodeEvaluator`、`Frog.travelInWater` | `frog::move_control_tick`、`tadpole::look_control_tick`、`EvaluatorFlags.frog` | `frog_pool_*`、`frog_deep_*`、`tadpole_swim_*` |
+| 蝌蚪 | `Tadpole`、`TadpoleAi`、`AbstractFish` 的三个目标 | `tadpole.rs` + `fish.rs`（`is_fish` 含蝌蚪） | `tadpole_*` 8 场景 |
+| 蛙卵 | `FrogspawnBlock.tick` / `spawnTadpoles` | `behaviour/misc/frogspawn.rs` | 单元测试 |
+| 存档和同步 | `VariantUtils.writeVariant`、`Tadpole.add/readAdditionalSaveData`、`DATA_VARIANT_ID` / `DATA_TONGUE_TARGET_ID` | `mob/nbt.rs`、`entity_tracking.rs`（下标和序列化器由生成器导出） | `chunk-content` 4 个重存用例 |
+
+**几处照官方的怪行为。**
+- `AmphibiousNodeEvaluator.prepare` 把生物的水代价设成 0，`done` 只还原 `WALKABLE` 和
+  `WATER_BORDER`：青蛙构造时设的水代价 4 在第一次寻路之后就一直是 0。Bamboo 在
+  `Navigation.cleared_water_malus` 记这件事，`Mob::pathfinding_malus` 读它
+  （随机落点的 `GoalUtils.hasMalus`、长跳落点判定都走这里）。
+- 蝌蚪没有覆盖 `AbstractFish.registerGoals`，目标选择器和大脑同时在跑；拿着粘液球的玩家
+  一边被大脑跟随、一边被 `AvoidEntityGoal` 躲开。
+- 青蛙 `canBeABaby` 为假，但 `AgeableMob.finalizeSpawn` 照样可能 `setAge(-24000)`：
+  `Mob::is_baby` 对青蛙恒假，年龄不涨也不存。
+- `ShootTongue.eatEntity` 打死猎物后当场 `remove(KILLED)`：猎物只标记丢弃，轮到它时
+  tick 循环把它拿掉、这一刻攒下的事件（死亡动画）照样发出去；同一刻青蛙的
+  `getTongueTarget()` 已经是空的，俯仰归零。
+
+**随机源。** 长跳抽落点、行为时长、产卵后蛙卵的孵化延迟、品种和长跳冷却用世界随机源；
+`LongJumpToPreferredBlock.start` 的「这次挑不挑偏好方块」、漫步落点、喂蝌蚪的粒子位置
+用生物自己的随机源；角度洗牌和闸门洗牌按 `shuffle_seed` 派生（和山羊同一套序号）。
+
+**对拍夹具的三处改动。** 假世界的 `getEntity(int)` 不再返回已移除的实体（真实的
+`ServerLevel` 在 `setRemoved` 的回调里就把它从查找表里拿掉）；假世界的 `setBlock` 不跑
+`onPlace`，蛙卵的孵化延迟在那里补抽一次；大脑快照里跟踪已移除实体的记忆记成 `?`。
+
+**没做**：骆驼（`Camel` / `CamelAi`，见汇报里的排期）；岩浆怪和蛙明灯掉落；蛙卵被下落的
+方块砸碎。
 ### 5.10 中立生物地基和北极熊（2026-11-21）
 
 - **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
@@ -1683,3 +1721,66 @@ finalizeSpawn 水生分派在合并后完整保留。
 Brain 行为里，只有单元测试、`NoAI` 夹具不触发，没有和官方逐刻对拍；海豚恩惠 / 引路、美西螈
 攻击 / 繁殖仍是已知限制。按生物列状态：鱿鱼 / 发光鱿鱼、鳕鱼 / 鲑鱼 / 热带鱼 / 河豚、桶装鱼、
 海龟、海豚、美西螈十类主体全部「已逐刻对拍 0 不一致」；Brain 驱动的特有行为为「已知限制 / 未做」。
+
+## 第十二轮：合并 main（青蛙 / 蝌蚪 / Brain）后复核（op-water，2026-11-21）
+
+本轮按「每轮开始先 `git merge main`」与 14:35 追加，先 `git merge main` 把 main 从
+`33980ce0` 追到 `4ad4370c`（10 个提交：青蛙 / 蝌蚪 / 蛙卵、完整 Brain 框架层、便携桌面构建
+脚本、缓存改造、山羊长跳共用等）。合并基点仍是 `33980ce0`。本轮**不新写生物行为代码**，
+只解冲突、重生成 generated、按 main 结构对齐现状、复核；理由见本轮汇报第 4 节（第十一轮
+已把可独立实现的水生生物主体做完并逐刻对拍，剩下的都依赖 Brain / tick 顺序，按任务书停下
+汇报）。合并带来的青蛙 / 蝌蚪行为是 main 已完成且自带对拍的内容，不属本分支新写。
+
+**冲突（5 个文件，按 main 结构 + 两边内容并入）**：
+- `README.md`、`docs/mob-entity-design.md`：两边各自累计的「现状」段落。`MobType::ALL`
+  由 37 种合成 39 种（本分支海豚 / 美西螈 + main 青蛙 / 蝌蚪），`--only natural_spawn`
+  数字按实测更新；设计文档并入 main 新增的「5.10 青蛙和蝌蚪」节（HEAD 该处为空）。main
+  自身有两个 5.10 编号（青蛙蝌蚪、中立生物地基和北极熊），按「按 main 结构」原样保留，
+  未自行重编号。
+- `entity/mob/bucketable.rs`（7 处）：HEAD 建模美西螈桶、main 建模蝌蚪桶，两边都保留 ——
+  `bucket_item` / `kind_of_bucket` 同时收 `AXOLOTL_BUCKET` / `TADPOLE_BUCKET`，
+  `save_default_data` / `load_default_data` 各写各的物种块（花色 / 年龄 / 锁定标志），
+  `pickup` 音效合成三路 match（美西螈 `fill_axolotl`、蝌蚪 `fill_tadpole`、其余 `fill_fish`）。
+  `is_mob_bucket` 合并后只剩 `SULFUR_CUBE_BUCKET`：美西螈和蝌蚪都已建模，都走
+  `kind_of_bucket` → `spawn_from_bucket`，不再进「未建模仍取随机数」的分支。
+- `entity/mob/mod.rs`（3 处）：`can_breathe_under_water` 同时保留 Axolotl 与 Frog；保留
+  main 新增的 `can_be_a_baby`（青蛙恒假）并保留本分支海豚感知的 `is_ageable_water_creature`
+  注释；malus 分派同时保留 Dolphin / Axolotl / Tadpole 三条。
+- `entity/ctx.rs`：海龟蛋注释两边二选一，行为无关。
+- **自动合并的一处真 bug**：两边都把 `MobType::ALL` 从 35 扩到 37（各加 2 种、加在不同位置），
+  git 把 4 个元素都留下、长度声明却停在 `[Self; 37]`。改成 `[Self; 39]` 后
+  `cargo check --workspace --all-targets` 才通过。`entity_type()` / `generated/entity_types.rs`
+  的按 kind match 自动合并后已覆盖全部 39 种。
+
+**场景编号不冲突**：水生生物走名字路由（`squid` / `fish` / `water_mob` 独立驱动，不占
+`cow.kind` 数字表），main 的青蛙 18 / 蝌蚪 19 只进那张数字表；两边编号无交集。全量
+`mob-oracle` 1808 例 0 不一致间接验证。`extract`（JDK 26）重新生成 generated/ 成功
+（1511 结构模板 / 169 丛林神殿指令 / 协议 777），逐字节幂等、工作区无新增改动。
+
+**最终提交上实测**（java 对拍与探针走 `node W:/data/bamboo-agents/tools/heavy.js` 共享锁，
+前台跑）：`cargo fmt --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings`
+干净（0 warning、未加 allow）；`cargo check --workspace --all-targets` 通过；
+`cargo check -p mc-bamboo-desktop` 通过；`cargo test -p mc-bamboo-blocks`
+**808 passed / 0 failed / 6 ignored**（223.71s，比第十一轮 795 / 412s 更快，main 缓存改造生效）；
+`cargo test -p mc-bamboo-vanilla` 101 + 8 passed；
+`cargo test -p mc-bamboo-game --lib island_command` 4 passed（05:00 回归 2 未复发）。
+工作区全量 `cargo test --no-fail-fast` 被 cargo shim 按 `verify-scope.md` 拦下（RC=2），
+没有绕过。java 侧：全量 `mob-oracle` **1808 例 186057 刻 0 不一致**（含全部青蛙 / 蝌蚪场景
+与本分支全部水生场景）；`natural-spawn` 1727 例 0 不一致；`--only natural_spawn`
+**716 例 2864 刻 0 不一致**（含 frog_day / frog_warm / dolphin_ocean / axolotl_lush）；
+`--only dolphin` 3 例 603 刻、`--only axolotl` 4 例 804 刻、`--only squid` 4 例 1184 刻、
+`--only sheep_eat` 3 例 900 刻（05:00 回归 1 未复发）全部 0 不一致；
+`--break-self-test water_mob` 故意改坏抓到 gotFish 位扰动（RC=1，每轮最多一次）；
+官方 `tools/probe.sh`（JDK 26，端口 26337）**769/769 checks passed**，`WORLD-DIR` 全过、
+正常关服、level.dat / 6 玩家数据 / 4 区域文件都在。`natural.rs` 的 check_spawn_rules 与
+`spawn.rs` 的 finalizeSpawn 水生分派（squid / fish / turtle / dolphin / axolotl）合并后完整保留。
+
+**05:00 两处回归根因（复核，未复发）**：回归 1 `sheep_eat` 是鱼类「离水着地扑腾」被无条件
+套到陆地生物，修复在 `9f210652`（`living.rs` 用 `super::fish::is_fish` 门控）；回归 2
+`island_command` seed 40 是拆 / 并岛随机源没从世界种子确定性派生，修复在 `d74cf013`。
+本轮没有改流体 / 移动 / 碰撞 / 世界随机源代码，全量对拍与两个专项检查都在最终提交上通过。
+
+疑点与按生物列状态沿用第十一轮，本轮未改动生物行为代码：装死倒计时 / `REGENERATION` 仍挂
+`customServerAiStep` 尾部、只有单元测试、无官方逐刻对拍；海豚恩惠 / 引路、美西螈攻击 /
+繁殖、桶装鱼 / 海龟蛋孵化逐刻场景仍是已知限制；桶装鱼、海龟蛋孵化的主体仍是
+「已写未验证（无逐刻场景）」。详见本轮汇报。

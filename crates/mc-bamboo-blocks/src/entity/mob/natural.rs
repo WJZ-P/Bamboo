@@ -701,6 +701,12 @@ pub(super) fn check_spawn_rules(
         // `Goat.checkGoatSpawnRules`。
         // `Goat.checkGoatSpawnRules`.
         MobType::Goat => bright_spawn_rules(world, pos, block_tags::GOATS_SPAWNABLE_ON),
+        // `Frog.checkFrogSpawnRules`。
+        // `Frog.checkFrogSpawnRules`.
+        MobType::Frog => bright_spawn_rules(world, pos, block_tags::FROGS_SPAWNABLE_ON),
+        // 蝌蚪没有登记 `SpawnPlacements`：没有规则，恒真。
+        // Tadpoles have no `SpawnPlacements` entry: no rule, always true.
+        MobType::Tadpole => true,
         MobType::Cow
         | MobType::Pig
         | MobType::Sheep

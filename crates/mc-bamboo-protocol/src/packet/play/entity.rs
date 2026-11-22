@@ -119,6 +119,14 @@ pub enum Pose {
     /// A goat in mid long jump.
     LongJumping = 6,
     Dying = 7,
+    /// 青蛙蹲叫。
+    ///
+    /// A croaking frog.
+    Croaking = 8,
+    /// 青蛙伸舌头。
+    ///
+    /// A frog using its tongue.
+    UsingTongue = 9,
 }
 
 /// 玩家实体或物品实体的一项元数据。
@@ -217,6 +225,15 @@ pub enum EntityData {
     GoatScreaming(bool),
     GoatLeftHorn(bool),
     GoatRightHorn(bool),
+    /// `Frog.DATA_VARIANT_ID`：`frog_variant` 注册表里的网络 ID。
+    ///
+    /// `Frog.DATA_VARIANT_ID`: the network id in the `frog_variant` registry.
+    FrogVariant(i32),
+    /// `Frog.DATA_TONGUE_TARGET_ID`（`OPTIONAL_UNSIGNED_INT`）：舌头目标的实体 ID。
+    ///
+    /// `Frog.DATA_TONGUE_TARGET_ID` (`OPTIONAL_UNSIGNED_INT`): the tongue target's
+    /// entity id.
+    FrogTongueTarget(Option<i32>),
     /// `MushroomCow.DATA_TYPE`（INT）：0 红色，1 棕色。
     ///
     /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
@@ -431,6 +448,8 @@ impl EntityData {
             Self::GoatScreaming(_) => mc_bamboo_data::entity_types::GOAT_SCREAMING,
             Self::GoatLeftHorn(_) => mc_bamboo_data::entity_types::GOAT_LEFT_HORN,
             Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
+            Self::FrogVariant(_) => mc_bamboo_data::entity_types::FROG_VARIANT,
+            Self::FrogTongueTarget(_) => mc_bamboo_data::entity_types::FROG_TONGUE_TARGET,
             Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
             Self::PolarBearStanding(_) => mc_bamboo_data::entity_types::POLAR_BEAR_STANDING,
             Self::PandaUnhappy(_) => mc_bamboo_data::entity_types::PANDA_UNHAPPY,
@@ -665,6 +684,24 @@ impl EntityData {
             Self::SheepWool(wool) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*wool);
+            }
+            Self::FrogVariant(variant) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::FROG_VARIANT_SERIALIZER,
+                );
+                write_varint(out, *variant);
+            }
+            // `ByteBufCodecs.OPTIONAL_VAR_INT`：空是 0，否则是值加一。
+            // `ByteBufCodecs.OPTIONAL_VAR_INT`: 0 when empty, otherwise the value plus one.
+            Self::FrogTongueTarget(target) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::FROG_TONGUE_TARGET_SERIALIZER,
+                );
+                write_varint(out, target.map_or(0, |id| id + 1));
             }
             Self::ArmadilloState(state) => {
                 write_data_header(

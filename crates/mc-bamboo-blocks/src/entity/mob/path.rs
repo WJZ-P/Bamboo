@@ -126,6 +126,13 @@ pub struct EvaluatorFlags {
     /// `AmphibiousNodeEvaluator`: a `WalkNodeEvaluator` that treats water as walkable and
     /// also accepts vertical neighbours. Turtles and axolotls use it.
     pub amphibious: bool,
+    /// `Frog.FrogNodeEvaluator`（`AmphibiousNodeEvaluator(true)` 的子类）：水里的起点不加
+    /// 0.5，脚下是 `#frog_prefer_jump_to` 的格子算 `OPEN`，深水邻居每次加一点代价。
+    ///
+    /// `Frog.FrogNodeEvaluator` (a subclass of `AmphibiousNodeEvaluator(true)`): the
+    /// in-water start skips the 0.5, cells above `#frog_prefer_jump_to` count as `OPEN`
+    /// and deep-water neighbours get one more cost each time.
+    pub frog: bool,
 }
 
 impl Default for EvaluatorFlags {
@@ -137,6 +144,7 @@ impl Default for EvaluatorFlags {
             can_walk_over_fences: false,
             swim: None,
             amphibious: false,
+            frog: false,
         }
     }
 }
@@ -598,7 +606,7 @@ impl<'a> Search<'a> {
             let bounds = mob.bounding_box();
             return self.get_start_node(BlockPos::new(
                 mth::floor(bounds.min_x),
-                mth::floor(bounds.min_y + 0.5),
+                mth::floor(bounds.min_y + if self.flags.frog { 0.0 } else { 0.5 }),
                 mth::floor(bounds.min_z),
             ));
         }
@@ -738,6 +746,18 @@ impl<'a> Search<'a> {
             }
             if self.is_vertical_neighbor_valid(down, parent) && here != PathType::Trapdoor {
                 out.push(down.expect("刚检查过"));
+            }
+        }
+        if self.flags.frog {
+            // `prefersShallowSwimming`：海平面下 10 格以外的水邻居，每被列出一次代价加一。
+            // `prefersShallowSwimming`: a water neighbour more than ten blocks below sea
+            // level costs one more every time it is listed.
+            let deep = self.view.sea_level() - 10;
+            for &index in out.iter() {
+                let node = &mut self.nodes[index];
+                if node.path_type == PathType::Water && node.y < deep {
+                    node.cost_malus += 1.0;
+                }
             }
         }
     }
@@ -1018,7 +1038,16 @@ impl<'a> Search<'a> {
             for j in 0..self.entity_height {
                 for k in 0..self.entity_depth {
                     let mut path_type = self.path_type_static(BlockPos::new(i + x, j + y, k + z));
-                    if self.flags.amphibious && path_type == PathType::Water {
+                    // `FrogNodeEvaluator.getPathType`：脚下是偏好落点时直接算 `OPEN`。
+                    // `FrogNodeEvaluator.getPathType`: `OPEN` above a preferred jump block.
+                    let lily = self.flags.frog
+                        && self
+                            .state(BlockPos::new(i + x, j + y - 1, k + z))
+                            .is_tagged(mc_bamboo_data::tags::block_tags::FROG_PREFER_JUMP_TO);
+                    if lily {
+                        path_type = PathType::Open;
+                    }
+                    if !lily && self.flags.amphibious && path_type == PathType::Water {
                         // `AmphibiousNodeEvaluator.getPathType`：水贴着任意一个
                         // `BLOCKED` 邻居时算 `WATER_BORDER`。
                         // Water next to any `BLOCKED` cell becomes `WATER_BORDER`.

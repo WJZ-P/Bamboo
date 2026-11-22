@@ -1005,6 +1005,17 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     {
         return EntityData::ArmadilloState(0);
     }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::FROG_VARIANT => {
+                let variant = mc_bamboo_blocks::entity::mob::frog::Variant::default();
+                return EntityData::FrogVariant(variant.network_id());
+            }
+            facts::FROG_TONGUE_TARGET => return EntityData::FrogTongueTarget(None),
+            _ => {}
+        }
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Goat {
         use mc_bamboo_data::entity_types as facts;
         match index {
@@ -1407,6 +1418,15 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::LongJumping,
         ));
+    } else if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        use mc_bamboo_blocks::entity::mob::frog::Pose as FrogPose;
+        use mc_bamboo_protocol::packet::play::Pose;
+        match mob.frog.pose {
+            FrogPose::Standing => {}
+            FrogPose::Croaking => out.push(EntityData::Pose(Pose::Croaking)),
+            FrogPose::LongJumping => out.push(EntityData::Pose(Pose::LongJumping)),
+            FrogPose::UsingTongue => out.push(EntityData::Pose(Pose::UsingTongue)),
+        }
     }
     if mob.air_supply != 300 {
         out.push(EntityData::AirSupply(mob.air_supply));
@@ -1478,6 +1498,24 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         if mob.armadillo_state != 0 {
             out.push(EntityData::ArmadilloState(mob.armadillo_state));
         }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        // 青蛙多两项：品种（缺省温带）和舌头目标（缺省空）。
+        // Frogs add two: the variant (temperate by default) and the tongue target (empty
+        // by default).
+        if mob.frog.variant != mc_bamboo_blocks::entity::mob::frog::Variant::default() {
+            out.push(EntityData::FrogVariant(mob.frog.variant.network_id()));
+        }
+        if mob.frog.tongue_target.is_some() {
+            out.push(EntityData::FrogTongueTarget(mob.frog.tongue_target));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Tadpole {
+        // 蝌蚪只有鱼的 `FROM_BUCKET`（从来不写）和自己的 `AGE_LOCKED`（上面已经放了）。
+        // Tadpoles only have the fish `FROM_BUCKET` (never written) and their own
+        // `AGE_LOCKED`, pushed above.
         return out;
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Goat {
