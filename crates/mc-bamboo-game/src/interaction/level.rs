@@ -836,8 +836,23 @@ impl Level for RegionLevel<'_> {
             (source.direct == Some(uid) && source.projectile_motion.is_some())
                 .then(|| mc_bamboo_loot::EntityView::new(entity_type::ARROW))
         };
-        let attacker = source.attacker.and_then(actor);
-        let direct = source.direct.and_then(actor);
+        // 打人的生物正在 tick 时不在实体表里，按伤害来源带的类型补一个。
+        // A mob attacking mid-tick is not in the table; rebuild it from the source's type.
+        let typed = |found: Option<mc_bamboo_loot::EntityView>| {
+            found.or_else(|| {
+                source.attacker_type.map(|kind| {
+                    let mut view = mc_bamboo_loot::EntityView::new(kind);
+                    view.is_living = true;
+                    view
+                })
+            })
+        };
+        let attacker = typed(source.attacker.and_then(actor));
+        let direct = if source.direct == source.attacker {
+            typed(source.direct.and_then(actor))
+        } else {
+            source.direct.and_then(actor)
+        };
         let last_player = match loot.recent_player {
             Some(uuid) => self
                 .players

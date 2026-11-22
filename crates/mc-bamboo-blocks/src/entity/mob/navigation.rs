@@ -45,6 +45,11 @@ pub struct Navigation {
     /// 绝对时刻（岛的时钟），合并时要平移。
     pub time_last_recompute: i64,
     pub flags: EvaluatorFlags,
+    /// 两栖求值器已经跑过一次：生物的 `PathType.WATER` 代价从此是 0。
+    ///
+    /// The amphibious evaluator has run once: the mob's `PathType.WATER` malus is 0
+    /// from then on.
+    pub cleared_water_malus: bool,
     pub target_pos: Option<BlockPos>,
     pub reach_range: i32,
     pub max_visited_nodes_multiplier: f32,
@@ -78,6 +83,7 @@ impl Navigation {
             has_delayed_recomputation: false,
             time_last_recompute: 0,
             flags: EvaluatorFlags::default(),
+            cleared_water_malus: false,
             target_pos: None,
             reach_range: 0,
             max_visited_nodes_multiplier: 1.0,
@@ -268,6 +274,14 @@ impl Navigation {
             max_visited_nodes: self.max_visited_nodes,
             max_visited_nodes_multiplier: self.max_visited_nodes_multiplier,
         };
+        // `AmphibiousNodeEvaluator.prepare` 把生物的水代价设成 0，`done` 只还原另外两种，
+        // 所以第一次寻路之后水代价就一直是 0（见 [`Mob::pathfinding_malus`]）。
+        // `AmphibiousNodeEvaluator.prepare` zeroes the mob's water malus and `done` only
+        // restores the other two, so it stays 0 after the first search (see
+        // [`Mob::pathfinding_malus`]).
+        if self.flags.amphibious {
+            self.cleared_water_malus = true;
+        }
         let path = find_path(view, &request);
         if let Some(path) = &path {
             self.target_pos = Some(path.target);
@@ -387,6 +401,9 @@ impl Navigation {
         let direct = self.flags.swim.is_some() || (self.flags.amphibious && mob.in_liquid);
         if close
             || (can_cut_corner(path.next_node().path_type)
+                // `Frog.FrogPathNavigation.canCutCorner`：水边不抄近路。
+                // `Frog.FrogPathNavigation.canCutCorner`: no shortcuts at the water border.
+                && !(self.flags.frog && path.next_node().path_type == PathType::WaterBorder)
                 && should_target_next_node_in_direction(view, mob, path, temp, direct))
         {
             path.advance();

@@ -3481,7 +3481,7 @@ fn outside_limits(view: &dyn BlockView, pos: BlockPos) -> bool {
 }
 
 fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
-    mob.malus.get(static_path_type(view, pos)) != 0.0
+    mob.pathfinding_malus(static_path_type(view, pos)) != 0.0
 }
 
 /// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；

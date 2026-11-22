@@ -1072,6 +1072,7 @@ public final class MobOracle {
             brushed.interact(10, 0, 0, spiderEye, 0);
             scenes.add(brushed);
             addGoatScenes(scenes);
+            FrogScenes.add(scenes);
         }
 
         /**
@@ -1221,6 +1222,13 @@ public final class MobOracle {
                             replaced = true;
                             continue;
                         }
+                        if (mob instanceof net.minecraft.world.entity.animal.frog.Frog
+                                && behavior instanceof net.minecraft.world.entity.ai.behavior.LongJumpToRandomPos<?>) {
+                            kept.add(FrogScenes.seededLongJump(shuffleSeed(base, index[0])));
+                            index[0]++;
+                            replaced = true;
+                            continue;
+                        }
                         reseed(behavior, base, index);
                         kept.add(behavior);
                     }
@@ -1314,6 +1322,20 @@ public final class MobOracle {
             return pos.getX() + ";" + pos.getY() + ";" + pos.getZ();
         }
 
+        /**
+         * 跟踪的实体已经从世界里移除时记成 `?`：Bamboo 一侧那时已经读不到它的位置。
+         *
+         * <p>A tracker whose entity has left the world prints `?`: the Bamboo side can no
+         * longer read its position then.
+         */
+        static String trackerPos(net.minecraft.world.entity.ai.behavior.PositionTracker tracker) {
+            if (tracker instanceof net.minecraft.world.entity.ai.behavior.EntityTracker entity
+                    && entity.getEntity().isRemoved()) {
+                return "?";
+            }
+            return pos(tracker.currentBlockPosition());
+        }
+
         static String value(Object value) {
             if (value instanceof Boolean || value instanceof Integer || value instanceof Long) {
                 return String.valueOf(value);
@@ -1324,11 +1346,11 @@ public final class MobOracle {
             }
             if (value instanceof List<?> list) return ids(list);
             if (value instanceof net.minecraft.world.entity.ai.memory.WalkTarget walk) {
-                return pos(walk.getTarget().currentBlockPosition()) + "/" + walk.getCloseEnoughDist()
+                return trackerPos(walk.getTarget()) + "/" + walk.getCloseEnoughDist()
                         + "/" + Float.floatToRawIntBits(walk.getSpeedModifier());
             }
             if (value instanceof net.minecraft.world.entity.ai.behavior.PositionTracker tracker) {
-                return pos(tracker.currentBlockPosition());
+                return trackerPos(tracker);
             }
             if (value instanceof DamageSource source) return source.typeHolder().getRegisteredName();
             if (value instanceof net.minecraft.world.level.pathfinder.Path) return "path";
@@ -1343,6 +1365,12 @@ public final class MobOracle {
             StringBuilder out = new StringBuilder();
             for (Object entry : list) {
                 if (out.length() > 0) out.append(';');
+                // 够不到的舌头目标记的是 UUID；场景里的生物 UUID 是 (0, 下标 + 1)。
+                // Unreachable tongue targets are UUIDs; scene mobs use (0, index + 1).
+                if (entry instanceof UUID uuid) {
+                    out.append(FIRST_ID + uuid.getLeastSignificantBits() - 1);
+                    continue;
+                }
                 out.append(((Entity) entry).getId());
             }
             return out.toString();
@@ -1391,6 +1419,169 @@ public final class MobOracle {
 
         static String name(net.minecraft.world.entity.ai.memory.MemoryModuleType<?> type) {
             return BuiltInRegistries.MEMORY_MODULE_TYPE.getKey(type).getPath();
+        }
+    }
+
+    /**
+     * 青蛙场景和它的对拍辅助。
+     *
+     * <p>Frog scenes and their oracle helpers.
+     */
+    static final class FrogScenes {
+        static void add(List<Scene> scenes) {
+            for (long seed : new long[] {11L, 23L}) {
+                // 平地：闲逛、蹲叫，长跳的候选都走得到。
+                // Flat ground: strolling and croaking; every long-jump candidate is walkable.
+                Scene wander = new Scene("frog_wander_" + seed).ticks(600);
+                Scenes.ground(wander, 15);
+                wander.mob(18, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(wander);
+            }
+            BlockState lily = Blocks.LILY_PAD.defaultBlockState();
+            int slimeBall = BuiltInRegistries.ITEM.getId(Items.SLIME_BALL);
+            for (long seed : new long[] {31L, 37L, 41L}) {
+                // 池塘上的睡莲：长跳偏好落点；睡莲上面那格寻路时算 `OPEN`。
+                // Lily pads on a pond: preferred long-jump landings, and the cell above a
+                // lily pad path-finds as `OPEN`.
+                Scene pond = new Scene("frog_lily_" + seed).ticks(800);
+                Scenes.ground(pond, 15);
+                pond.fill(2, 62, -5, 9, 63, 5, Scenes.WATER);
+                pond.fill(2, 61, -5, 9, 61, 5, Scenes.STONE);
+                for (int[] at : new int[][] {{3, 0}, {4, -2}, {5, 1}, {6, 3}, {7, -1}, {8, 2}, {4, 4}, {6, -4}}) {
+                    pond.set(at[0], 64, at[1], lily);
+                }
+                pond.mob(18, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(pond);
+            }
+            // 三格高的石台只能跳上去；另一边是两格高的台阶。
+            // A three-block ledge that needs a jump, and a two-block step on the other side.
+            Scene ledge = new Scene("frog_long_jump").ticks(600);
+            Scenes.ground(ledge, 15);
+            ledge.fill(3, 64, -3, 8, 65, 3, Scenes.STONE);
+            ledge.fill(-6, 64, -3, -3, 64, 3, Scenes.STONE);
+            ledge.mob(18, 0.5, 64.0, 0.5, 0.0F, 29L, 0);
+            scenes.add(ledge);
+            for (long seed : new long[] {43L, 47L}) {
+                // 小水池里：游泳活动、找陆地上岸。
+                // In a small pool: the swim activity, then finding land.
+                Scene pool = new Scene("frog_pool_" + seed).ticks(600);
+                Scenes.ground(pool, 15);
+                pool.fill(-3, 60, -3, 3, 63, 3, Scenes.WATER);
+                pool.fill(-4, 59, -4, 4, 59, 4, Scenes.STONE);
+                pool.mob(18, 0.5, 61.0, 0.5, 0.0F, seed, 0);
+                scenes.add(pool);
+                // 大水域：8 格内没有陆地，只能游。
+                // Open water: no land within 8 blocks, so it only swims.
+                Scene deep = new Scene("frog_deep_" + seed).ticks(600);
+                deep.fill(-14, 55, -14, 14, 55, 14, Scenes.STONE);
+                deep.fill(-14, 56, -14, 14, 63, 14, Scenes.WATER);
+                deep.mob(18, 0.5, 60.0, 0.5, 0.0F, seed, 0);
+                scenes.add(deep);
+            }
+            for (long seed : new long[] {53L, 59L}) {
+                // 小史莱姆：走近、伸舌头拉过来、吃掉（掉一个粘液球）。
+                // A tiny slime: approach, tongue it in and eat it (one slime ball drops).
+                Scene eat = new Scene("frog_tongue_" + seed).ticks(300).difficulty(2).drops();
+                Scenes.ground(eat, 15);
+                eat.mob(18, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                eat.mob(50, 5.5, 64.0, 1.5, 0.0F, seed + 100, 1);
+                scenes.add(eat);
+            }
+            // 大小 2 的史莱姆不吃；玻璃罩里的小史莱姆看得见、走不到，记进够不到的名单。
+            // A size-2 slime is not food; a tiny slime under glass is visible but
+            // unreachable and ends up on the unreachable list.
+            Scene caged = new Scene("frog_tongue_unreachable").ticks(400).difficulty(2);
+            Scenes.ground(caged, 15);
+            BlockState glass = Blocks.GLASS.defaultBlockState();
+            caged.fill(4, 64, -1, 6, 66, 1, glass);
+            caged.set(5, 64, 0, Blocks.AIR.defaultBlockState());
+            caged.set(5, 65, 0, Blocks.AIR.defaultBlockState());
+            caged.mob(18, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+            caged.mob(50, 5.5, 64.0, 0.5, 0.0F, 161L, 1);
+            caged.mob(50, -6.5, 64.0, -4.5, 0.0F, 163L, 2);
+            scenes.add(caged);
+            // 拿粘液球的玩家引诱；两只都喂了以后繁殖，怀孕的那只去水边产卵。
+            // A player with a slime ball tempts them; once both are fed they breed and
+            // the pregnant one lays frogspawn at the water's edge.
+            Scene breed = new Scene("frog_breed").ticks(900);
+            Scenes.ground(breed, 15);
+            breed.fill(4, 63, -3, 9, 63, 3, Scenes.WATER);
+            breed.mob(18, 0.5, 64.0, 0.5, 0.0F, 67L, 0);
+            breed.mob(18, -1.5, 64.0, 1.5, 0.0F, 71L, 0);
+            breed.player(-0.5, 64.0, 3.5, Items.SLIME_BALL);
+            breed.interact(30, 0, 0, slimeBall, 0);
+            breed.interact(32, 1, 0, slimeBall, 0);
+            scenes.add(breed);
+            // 挨打：惊慌逃跑；从高处掉下来：摔落伤害少算 5 点。
+            // Hurt: panic; dropped from a height: five points less fall damage.
+            Scene hurt = new Scene("frog_hurt").ticks(300);
+            Scenes.ground(hurt, 15);
+            hurt.mob(18, 0.5, 64.0, 0.5, 0.0F, 73L, 0);
+            hurt.mob(18, 2.5, 76.0, 2.5, 0.0F, 79L, 0);
+            hurt.player(2.5, 64.0, 0.5, Items.AIR);
+            hurt.hurts.add(new double[] {40, 0, 2.0, 0});
+            scenes.add(hurt);
+        }
+
+        /**
+         * 姿势占低 4 位（0 站立、1 蹲叫、2 长跳、3 伸舌头，其余 15），舌头目标的实体 ID 加一
+         * 放在高位；没有目标是 0。
+         *
+         * <p>The pose in the low four bits (0 standing, 1 croaking, 2 long jumping, 3 using
+         * the tongue, 15 otherwise) and the tongue target's entity id plus one above them;
+         * no target is 0.
+         */
+        static int flags(net.minecraft.world.entity.animal.frog.Frog frog) {
+            int pose = switch (frog.getPose()) {
+                case STANDING -> 0;
+                case CROAKING -> 1;
+                case LONG_JUMPING -> 2;
+                case USING_TONGUE -> 3;
+                default -> 15;
+            };
+            int target = frog.getTongueTarget().map(entity -> entity.getId() + 1).orElse(0);
+            return pose | target << 4;
+        }
+
+        /**
+         * 和山羊一样，只把 `Collections.shuffle` 换成带种子的随机源；落点判定仍调官方
+         * `FrogAi.isAcceptableLandingSpot`。
+         *
+         * <p>As for goats, only `Collections.shuffle` gets a seeded random; landing spots
+         * still go through vanilla `FrogAi.isAcceptableLandingSpot`.
+         */
+        static net.minecraft.world.entity.ai.behavior.LongJumpToPreferredBlock<net.minecraft.world.entity.animal.frog.Frog>
+                seededLongJump(long seed) throws Exception {
+            java.util.Random random = new java.util.Random(seed);
+            java.lang.reflect.Method landing = net.minecraft.world.entity.animal.frog.FrogAi.class
+                    .getDeclaredMethod("isAcceptableLandingSpot", Mob.class, BlockPos.class);
+            landing.setAccessible(true);
+            return new net.minecraft.world.entity.ai.behavior.LongJumpToPreferredBlock<>(
+                    net.minecraft.util.valueproviders.UniformInt.of(100, 140), 2, 4, 3.5714288F,
+                    frog -> net.minecraft.sounds.SoundEvents.FROG_LONG_JUMP,
+                    net.minecraft.tags.BlockTags.FROG_PREFER_JUMP_TO, 0.5F,
+                    (frog, pos) -> {
+                        try {
+                            return (Boolean) landing.invoke(null, frog, pos);
+                        } catch (ReflectiveOperationException e) {
+                            throw new IllegalStateException(e);
+                        }
+                    }) {
+                @Override
+                protected Vec3 calculateOptimalJumpVector(final Mob body, final Vec3 targetPos) {
+                    List<Integer> angles = new ArrayList<>(List.of(65, 70, 75, 80));
+                    java.util.Collections.shuffle(angles, random);
+                    float maxJumpVelocity = (float) (body.getAttributeValue(
+                            net.minecraft.world.entity.ai.attributes.Attributes.JUMP_STRENGTH)
+                            * this.maxJumpVelocityMultiplier);
+                    for (int angle : angles) {
+                        java.util.Optional<Vec3> vector = net.minecraft.world.entity.ai.behavior.LongJumpUtil
+                                .calculateJumpVectorForAngle(body, targetPos, maxJumpVelocity, angle, true);
+                        if (vector.isPresent()) return vector.get();
+                    }
+                    return null;
+                }
+            };
         }
     }
 
@@ -3369,6 +3560,7 @@ public final class MobOracle {
                 || scene.name.startsWith("rabbit_") || scene.name.startsWith("fox_")
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
+                || scene.name.startsWith("frog_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
@@ -4423,6 +4615,11 @@ public final class MobOracle {
         // `finalizeSpawn` draws all come from the level random.
         scenes.add(new NaturalScene("armadillo_day", EntityTypes.ARMADILLO, "savanna", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("goat_day", EntityTypes.GOAT, "snowy_slopes", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        // 青蛙：沼泽是温带品种，红树林沼泽是暖色；亮度不够时不生成。
+        // Frogs: temperate in swamps and warm in mangrove swamps; none in dim light.
+        scenes.add(new NaturalScene("frog_day", EntityTypes.FROG, "swamp", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("frog_warm", EntityTypes.FROG, "mangrove_swamp", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("frog_dim", EntityTypes.FROG, "swamp", 2, 8, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("mooshroom_day", EntityTypes.MOOSHROOM, "mushroom_fields", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("polar_bear_day", EntityTypes.POLAR_BEAR, "frozen_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_cod", EntityTypes.COD, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
@@ -7224,6 +7421,7 @@ public final class MobOracle {
                 case 12 -> EntityTypes.LLAMA.create(level, EntitySpawnReason.COMMAND);
                 case 13 -> EntityTypes.ARMADILLO.create(level, EntitySpawnReason.COMMAND);
                 case 14 -> EntityTypes.GOAT.create(level, EntitySpawnReason.COMMAND);
+                case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
@@ -7670,6 +7868,9 @@ public final class MobOracle {
                         | (goat.hasRightHorn() ? 4 : 0)
                         | (goat.getPose() == net.minecraft.world.entity.Pose.LONG_JUMPING ? 8 : 0);
                 out.append(",\"goat\":").append(flags);
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.frog.Frog frog) {
+                out.append(",\"goat\":").append(FrogScenes.flags(frog));
             }
             out.append(",\"love\":").append(mob instanceof net.minecraft.world.entity.animal.Animal animal
                     ? getInt(net.minecraft.world.entity.animal.Animal.class, animal, "inLove") : 0);
@@ -9135,6 +9336,15 @@ public final class MobOracle {
      * The variant or wool colour and sound of a spawned farm animal, null otherwise. A
      * chicken's egg timer comes from its unseeded entity random and is left out. */
     private static com.google.gson.JsonElement spawnVariants(Mob mob) throws Exception {
+        if (mob instanceof net.minecraft.world.entity.animal.frog.Frog frog) {
+            // 青蛙：按群系选的品种，和 `FrogAi.initMemories` 抽的长跳冷却。
+            // Frogs: the biome variant and the long-jump cooldown `FrogAi.initMemories` drew.
+            var frogVariants = new JsonArray();
+            frogVariants.add(frog.getVariant().unwrapKey().orElseThrow().identifier().toString());
+            frogVariants.add(String.valueOf(frog.getBrain().getMemory(
+                    net.minecraft.world.entity.ai.memory.MemoryModuleType.LONG_JUMP_COOLDOWN_TICKS).orElse(-1)));
+            return frogVariants;
+        }
         if (!(mob instanceof Cow || mob instanceof Pig || mob instanceof Sheep || mob instanceof Chicken)) {
             return com.google.gson.JsonNull.INSTANCE;
         }
@@ -10015,6 +10225,12 @@ public final class MobOracle {
          *  依赖区块缓存，这里直接写表即可。 */
         @Override
         public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
+            // 假世界不跑 `onPlace`；蛙卵的 `onPlace` 用世界随机源抽孵化延迟，这里照样抽一次。
+            // The fake level skips `onPlace`; frogspawn's draws its hatch delay from the
+            // level random there, so draw it here as well.
+            if (state.is(Blocks.FROGSPAWN)) {
+                getRandom().nextInt(3600, 12000);
+            }
             blocks.put(pos.asLong(), state);
             chunkCache.clear();
             return true;
@@ -10441,7 +10657,12 @@ public final class MobOracle {
         @Override
         public Entity get(int id) {
             for (Entity entity : entities) {
-                if (entity.getId() == id) {
+                // 真实的 `ServerLevel` 在 `setRemoved` 的回调里就把实体从查找表里拿掉了，
+                // 同一刻之后按 ID 已经查不到（青蛙吃掉猎物后舌头目标立刻为空）。
+                // A real `ServerLevel` drops the entity from its lookup inside the
+                // `setRemoved` callback, so later id lookups in that tick already miss it
+                // (a frog's tongue target is empty right after it eats its prey).
+                if (entity.getId() == id && !entity.isRemoved()) {
                     return entity;
                 }
             }

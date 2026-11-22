@@ -478,7 +478,16 @@ impl Kind {
                 if let Some(target) = cx.memories.look_target()
                     && let Some(at) = current_position(cx, target)
                 {
-                    cx.mob.look.set_look_at_default(at.x, at.y, at.z);
+                    // `setLookAt(pos)` 用 `getHeadRotSpeed()` 和 `getMaxHeadXRot()`。
+                    // `setLookAt(pos)` uses `getHeadRotSpeed()` and `getMaxHeadXRot()`.
+                    let speed = living::head_rot_speed(cx.mob);
+                    cx.mob.look.set_look_at(
+                        at.x,
+                        at.y,
+                        at.z,
+                        speed,
+                        super::super::control::MAX_HEAD_X_ROT as f32,
+                    );
                 }
             }
             Self::MoveToTargetSink(sink) => move_sink_tick(sink, cx),
@@ -503,6 +512,11 @@ impl Kind {
                 if cx.me.position.distance_to_sqr(view.position) < 9.0 && cx.time >= *spawn_child_at
                 {
                     living::breed_with(cx.me, cx.mob, cx.ctx, partner);
+                    // `Frog.spawnChildFromBreeding`：不生幼崽，自己记成怀孕。
+                    // `Frog.spawnChildFromBreeding`: no child; the frog becomes pregnant.
+                    if cx.mob.mob_type == MobType::Frog {
+                        cx.memories.set(IsPregnant, MemoryValue::Unit);
+                    }
                     cx.memories.erase(BreedTarget);
                     sensor::set_partner_memory(cx, partner, BreedTarget, None);
                 }

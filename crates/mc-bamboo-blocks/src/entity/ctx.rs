@@ -918,6 +918,27 @@ pub enum Command {
         dx: f64,
         dz: f64,
     },
+    /// `TryLaySpawnOnFluidNearLand`：`setBlockAndUpdate(pos, FROGSPAWN)`。
+    ///
+    /// `TryLaySpawnOnFluidNearLand`: `setBlockAndUpdate(pos, FROGSPAWN)`.
+    LayFrogspawn {
+        pos: BlockPos,
+    },
+    /// `ShootTongue.tick` 伸舌头的那一刻：`target.setDeltaMovement(delta)`。
+    ///
+    /// The tongue shot of `ShootTongue.tick`: `target.setDeltaMovement(delta)`.
+    SetMobDelta {
+        target: EntityUid,
+        delta: Vec3,
+    },
+    /// `ShootTongue.eatEntity`：`doHurtTarget`，打死了当场 `remove(KILLED)`。
+    ///
+    /// `ShootTongue.eatEntity`: `doHurtTarget`, then `remove(KILLED)` at once on a kill.
+    FrogEat {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
     /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` 加 `addFreshEntity`：
     /// 山羊掉角，速度由调用方给。
     ///
@@ -1268,6 +1289,18 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 false,
             );
         }
+        Command::LayFrogspawn { pos } => {
+            let state = crate::state::BlockState(mc_bamboo_data::blocks::FROGSPAWN);
+            world.set_block(pos, state, 3);
+        }
+        Command::SetMobDelta { target, delta } => {
+            world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
+        }
+        Command::FrogEat {
+            target,
+            source,
+            amount,
+        } => super::mob::frog::apply_eat(world, target, source, amount),
         Command::LayTurtleEgg { pos, eggs } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;
             world.play_block_sound(
@@ -1276,9 +1309,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 0.3,
                 pitch,
             );
-            let block =
-                &mc_bamboo_data::blocks::BLOCKS[mc_bamboo_data::blocks::TURTLE_EGG as usize];
-            let state = crate::state::BlockState(block.default_state);
+            // 方块常量就是缺省状态的 ID（原先拿它当注册表下标，会越界）。
+            // Block constants are default state ids (indexing the registry with one overflowed).
+            let state = crate::state::BlockState(mc_bamboo_data::blocks::TURTLE_EGG);
             world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
         }
     }

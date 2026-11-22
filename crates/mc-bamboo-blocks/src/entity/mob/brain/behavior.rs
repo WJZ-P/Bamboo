@@ -111,6 +111,10 @@ impl Node {
             jump.angle_random = JavaRandom::new(super::shuffle_seed(base, *index));
             *index += 1;
         }
+        if let Kind::Frog(super::super::frog::Behavior::LongJump(jump)) = &mut self.kind {
+            jump.angle_random = JavaRandom::new(super::shuffle_seed(base, *index));
+            *index += 1;
+        }
         if let Kind::Gate(gate) = &mut self.kind {
             gate.random = JavaRandom::new(super::shuffle_seed(base, *index));
             *index += 1;

@@ -197,6 +197,11 @@ fn cause_fall_damage(
         // `Goat.calculateFallDamage`: ten points less.
         damage -= 10;
     }
+    if mob.mob_type == super::MobType::Frog {
+        // `Frog.calculateFallDamage`：少算 5 点。
+        // `Frog.calculateFallDamage`: five points less.
+        damage -= 5;
+    }
     if damage > 0 {
         living::hurt_server(
             me,

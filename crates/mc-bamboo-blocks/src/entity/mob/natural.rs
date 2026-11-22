@@ -692,6 +692,9 @@ pub(super) fn check_spawn_rules(
         // `Goat.checkGoatSpawnRules`。
         // `Goat.checkGoatSpawnRules`.
         MobType::Goat => bright_spawn_rules(world, pos, block_tags::GOATS_SPAWNABLE_ON),
+        // `Frog.checkFrogSpawnRules`。
+        // `Frog.checkFrogSpawnRules`.
+        MobType::Frog => bright_spawn_rules(world, pos, block_tags::FROGS_SPAWNABLE_ON),
         MobType::Cow
         | MobType::Pig
         | MobType::Sheep

@@ -674,7 +674,20 @@ pub(super) fn random_swim_pos(
     mob: &mut Mob,
     view: &dyn crate::entity::ctx::BlockView,
 ) -> Option<Vec3> {
-    let mut target = super::goals::default_random_pos(me, mob, view, 10, 7);
+    random_swimmable_pos(me, mob, view, 10, 7)
+}
+
+/// `BehaviorUtils.getRandomSwimmablePos(body, maxHorizontalDistance, maxVerticalDistance)`。
+///
+/// `BehaviorUtils.getRandomSwimmablePos(body, maxHorizontalDistance, maxVerticalDistance)`.
+pub(super) fn random_swimmable_pos(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+    horizontal: i32,
+    vertical: i32,
+) -> Option<Vec3> {
+    let mut target = super::goals::default_random_pos(me, mob, view, horizontal, vertical);
     let mut count = 0;
     while let Some(pos) = target {
         if view
@@ -687,7 +700,7 @@ pub(super) fn random_swim_pos(
             break;
         }
         count += 1;
-        target = super::goals::default_random_pos(me, mob, view, 10, 7);
+        target = super::goals::default_random_pos(me, mob, view, horizontal, vertical);
     }
     target
 }
