@@ -63,6 +63,7 @@ use crate::{
     biome::{MultiNoiseBiomeSource, TheEndBiomeSource},
     climate::{ParameterList, ParameterPoint},
     density::{FunctionRegistry, NoiseRegistry},
+    feature::registry::Registry,
     settings::Settings,
 };
 
@@ -77,6 +78,11 @@ pub struct Worldgen {
     settings: HashMap<String, Settings>,
     presets: HashMap<String, MultiNoiseBiomeSource>,
     end_biomes: TheEndBiomeSource,
+    /// 只读地物注册表，解析期定好，随 `Worldgen::shared()` 全进程共用一份。
+    ///
+    /// The read-only feature registry, fixed at parse time and shared process-wide
+    /// via `Worldgen::shared()`.
+    features: Registry,
     /// 地表规则和雕刻器要用的原始注册表，官方 codec 的 JSON。
     raw: serde_json::Map<String, Value>,
 }
@@ -180,12 +186,18 @@ impl Worldgen {
             barrens: end_biome("barrens")?,
         };
 
+        // 地物注册表只读，随 Worldgen 全进程共用一份，这里只解析一次（四条键上面已校验）。
+        // The feature registry is read-only and shared process-wide with Worldgen;
+        // parse it once here (the four feature keys were shape-checked above).
+        let features = Registry::parse(root)?;
+
         Ok(Self {
             noises,
             functions,
             settings,
             presets,
             end_biomes,
+            features,
             raw: root.clone(),
         })
     }
@@ -219,6 +231,13 @@ impl Worldgen {
     /// 导出数据里还没解析成 Rust 结构的原始注册表。
     pub fn raw(&self) -> &serde_json::Map<String, Value> {
         &self.raw
+    }
+
+    /// 全进程共用的只读地物注册表。
+    ///
+    /// The process-wide shared, read-only feature registry.
+    pub fn features(&self) -> &Registry {
+        &self.features
     }
 }
 
