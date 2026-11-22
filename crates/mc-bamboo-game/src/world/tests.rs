@@ -422,6 +422,27 @@ impl Harness {
             .global
             .rules_mut()
             .assign(mc_bamboo_data::gamerules::RESPAWN_RADIUS, "0");
+        // 合成的超平坦测试世界里每个区块都隐式存在、没有真实的区块交付和实体 tick 票，
+        // 而官方 `Slime.checkSlimeSpawnRules` 在 y<40 的史莱姆区块不看亮度就能刷出史莱姆；
+        // 这类环境刷怪会给实体跟踪、跨岛逐字节比较、弩箭等无关单测塞进额外的实体和包。
+        // 这些单测断言的是各自的子系统，环境刷怪只是噪声，按官方规则 `SPAWN_MOBS` 关掉；
+        // 生成期刷怪和运行时自然刷怪另有专门的单测与 `mob-oracle --only natural_spawn` 对拍，
+        // 后者用的是独立的 `MobLevel` 夹具，不受这里影响。
+        //
+        // Every chunk implicitly exists in the synthetic superflat test world, with no
+        // real chunk delivery or entity-ticking tickets, yet vanilla
+        // `Slime.checkSlimeSpawnRules` spawns slimes in slime chunks below y=40 regardless
+        // of light. Such ambient spawns would inject extra entities and packets into unrelated
+        // unit tests (entity tracking, cross-island byte comparisons, crossbows). Those tests
+        // assert their own subsystems, so disable ambient spawning via the official
+        // `SPAWN_MOBS` rule. Generation-time and runtime natural spawning have dedicated
+        // unit tests and the `mob-oracle --only natural_spawn` comparison, which uses a
+        // separate `MobLevel` fixture and is unaffected here.
+        let _ = world
+            .master
+            .global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::SPAWN_MOBS, "false");
         world.publish_global();
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
         world.islands.region.random = LevelRandom::new(0);

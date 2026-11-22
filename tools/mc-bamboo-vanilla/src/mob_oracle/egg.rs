@@ -126,7 +126,9 @@ impl EggCase {
                 uuid: Some(EGG_OWNER_UUID.to_be_bytes()),
                 uid: self.owner,
                 position: EGG_OWNER,
+                delta: Vec3::default(),
                 eye_height: 1.62,
+                health: 20.0,
                 look_direction: Vec3::default(),
                 gaze_disguise: false,
                 yaw: 0.0,
@@ -143,6 +145,7 @@ impl EggCase {
                 main_hand: 0,
                 off_hand: 0,
                 combat: Default::default(),
+                effects: Default::default(),
             });
         }
         level

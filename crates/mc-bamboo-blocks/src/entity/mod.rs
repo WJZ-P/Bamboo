@@ -15,6 +15,7 @@ pub mod mob;
 pub mod parallel;
 pub mod random;
 pub mod spit;
+pub mod splash_potion;
 pub mod store;
 pub mod thrown_egg;
 pub mod view;
@@ -214,6 +215,10 @@ pub enum EntityKind {
     ///
     /// A thrown egg.
     Egg(Box<thrown_egg::ThrownEgg>),
+    /// 扔出的喷溅药水。
+    ///
+    /// A thrown splash potion.
+    SplashPotion(Box<splash_potion::SplashPotion>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -231,6 +236,7 @@ impl EntityKind {
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
+            Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -430,6 +436,7 @@ impl Entity {
             EntityKind::Arrow(_) => arrow::tick(self, ctx),
             EntityKind::LlamaSpit(_) => spit::tick(self, ctx),
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
+            EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }
@@ -503,6 +510,9 @@ impl Entity {
             // `Chicken` 构造函数最后的 `eggTime = nextInt(6000) + 6000`。
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
             mob.egg_time = self.random.next_int_bounded(6000) + 6000;
+        }
+        if mob.mob_type == mob::MobType::Slime {
+            mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
         }
         if let Some(brain) = mob.brain.as_mut() {
             // `LivingEntity` 构造函数最后的 `makeBrain`：每个传感器一次 `nextInt(scanRate)`。

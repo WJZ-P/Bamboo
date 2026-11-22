@@ -171,7 +171,7 @@ impl World<'_> {
 /// The target angles of `Projectile.shoot` / `updateRotation`. The decompiled
 /// `180.0F / (float) PI` is the folded float constant `57.295776F`, so the double is
 /// multiplied by that constant and then narrowed.
-fn rotation(movement: Vec3) -> (f32, f32) {
+pub(super) fn rotation(movement: Vec3) -> (f32, f32) {
     let horizontal = (movement.x * movement.x + movement.z * movement.z).sqrt();
     let degrees = |radians: f64| (radians * f64::from(180.0_f32 / std::f32::consts::PI)) as f32;
     (
@@ -181,7 +181,7 @@ fn rotation(movement: Vec3) -> (f32, f32) {
 }
 
 /// `Projectile.lerpRotation`。
-fn lerp_rotation(from: f32, to: f32) -> f32 {
+pub(super) fn lerp_rotation(from: f32, to: f32) -> f32 {
     let mut from = from;
     while to - from < -180.0 {
         from -= 360.0;

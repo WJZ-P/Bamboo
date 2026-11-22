@@ -110,6 +110,46 @@ impl ReplayPlayers {
         }
     }
 
+    /// 生物 / 喷溅药水给玩家挂一个非瞬时状态效果。
+    ///
+    /// Applies a non-instant status effect to a replay player.
+    pub fn give_effect(
+        &mut self,
+        target: EntityUid,
+        instance: mc_bamboo_blocks::entity::mob::effects::EffectInstance,
+    ) {
+        crate::player_effects::give(&mut self.region, PlayerId(target), instance);
+    }
+
+    /// 喷溅药水按距离缩放给玩家回血。
+    ///
+    /// Heals a replay player by a distance-scaled amount.
+    pub fn heal(&mut self, target: EntityUid, amount: f32) {
+        if let Some(player) = self.region.players.get_mut(&PlayerId(target))
+            && player.health.health > 0.0
+        {
+            let max = crate::player_effects::max_health(player);
+            player.health.health = (player.health.health + amount).min(max);
+        }
+    }
+
+    /// 玩家当前生效的效果列表：`[效果 ID, 剩余时长, 等级]`（按 ID 升序）。
+    ///
+    /// Active effects on a replay player as `[effect_id, duration, amplifier]` sorted by id.
+    pub fn effects(&self, target: EntityUid) -> Vec<[i32; 3]> {
+        self.region
+            .players
+            .get(&PlayerId(target))
+            .map_or_else(Vec::new, |player| {
+                player
+                    .effects
+                    .entries()
+                    .iter()
+                    .map(|effect| [effect.effect, effect.duration, effect.amplifier])
+                    .collect()
+            })
+    }
+
     /// 每刻推进受伤冷却和受伤动画（`ServerPlayer.tick` / `LivingEntity.baseTick` 的那两项）。
     pub fn tick_cooldowns(&mut self) {
         for player in self.region.players.values_mut() {

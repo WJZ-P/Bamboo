@@ -22,20 +22,42 @@ use crate::{inbound::PlayerId, player::Player, region::Region};
 ///
 /// One effect application; flags come from the caller.
 pub(crate) fn give(region: &mut Region, id: PlayerId, instance: EffectInstance) -> bool {
-    let Some(player) = region.players.get_mut(&id) else {
+    give_in(&mut region.players, &mut region.links, id, instance)
+}
+
+/// 不借用整张 `Region` 的施加入口，供精确驱动的 `RegionLevel` 当场落地药水效果。
+///
+/// Variant of [`give`] taking split player/link borrows so the precise driver's
+/// `RegionLevel` can apply effects immediately.
+pub(crate) fn give_in(
+    players: &mut std::collections::BTreeMap<PlayerId, Player>,
+    links: &mut crate::links::Links,
+    id: PlayerId,
+    instance: EffectInstance,
+) -> bool {
+    let Some(player) = players.get_mut(&id) else {
         return false;
     };
     let events = player.effects.add(instance);
     let changed = !events.changes.is_empty();
-    send_changes(region, id, &events.changes);
+    send_changes_in(players, links, id, &events.changes);
     for tick in &events.actions {
-        apply_action(region, id, tick.effect, tick.action);
+        if let EffectAction::Absorption(amount) = tick.action
+            && let Some(player) = players.get_mut(&id)
+        {
+            player.health.absorption = player.health.absorption.max(amount);
+        }
     }
-    if events.metadata_dirty {
-        mark_metadata_dirty(region, id);
+    if events.metadata_dirty
+        && let Some(player) = players.get_mut(&id)
+    {
+        player.sync.metadata_dirty = true;
     }
-    if events.attributes_changed {
-        refresh_limits(region, id);
+    if events.attributes_changed
+        && let Some(player) = players.get_mut(&id)
+    {
+        let max = max_health(player);
+        player.health.health = player.health.health.min(max);
     }
     changed
 }
@@ -101,10 +123,19 @@ pub(crate) fn apply_instantaneous(region: &mut Region, id: PlayerId, effect: i32
 ///
 /// The `ServerPlayer` effect packets; additions blend, updates do not.
 fn send_changes(region: &mut Region, id: PlayerId, changes: &[EffectChange]) {
+    send_changes_in(&region.players, &mut region.links, id, changes);
+}
+
+fn send_changes_in(
+    players: &std::collections::BTreeMap<PlayerId, Player>,
+    links: &mut crate::links::Links,
+    id: PlayerId,
+    changes: &[EffectChange],
+) {
     for &change in changes {
         match change {
             EffectChange::Removed(effect) => {
-                region.links.send(
+                links.send(
                     id,
                     &RemoveMobEffect {
                         entity_id: id.0,
@@ -113,14 +144,13 @@ fn send_changes(region: &mut Region, id: PlayerId, changes: &[EffectChange]) {
                 );
             }
             EffectChange::Added(effect) | EffectChange::Updated(effect) => {
-                let Some(instance) = region
-                    .players
+                let Some(instance) = players
                     .get(&id)
                     .and_then(|player| player.effects.get(effect))
                 else {
                     continue;
                 };
-                region.links.send(
+                links.send(
                     id,
                     &UpdateMobEffect {
                         entity_id: id.0,

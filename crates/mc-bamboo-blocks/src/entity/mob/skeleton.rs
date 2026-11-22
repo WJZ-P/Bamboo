@@ -2,7 +2,7 @@ use mc_bamboo_core::{Vec3, mth};
 use mc_bamboo_data::{items, registries::attribute};
 use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
-use super::{Mob, control, goals::CombatTarget, living};
+use super::{Mob, MobType, control, goals::CombatTarget, living};
 use crate::{
     World,
     entity::{
@@ -29,9 +29,26 @@ pub struct BowGoal {
 }
 
 impl BowGoal {
+    #[cfg(test)]
     pub(crate) fn new(difficulty: i32) -> Self {
+        Self::for_kind(MobType::Skeleton, difficulty)
+    }
+
+    /// `AbstractSkeleton.reassessWeaponGoal`：困难用 `getHardAttackInterval()`，其余用
+    /// `getAttackInterval()`；沼骸把两者覆写成 50 / 70。
+    ///
+    /// `AbstractSkeleton.reassessWeaponGoal`: `getHardAttackInterval()` on hard and
+    /// `getAttackInterval()` otherwise; bogged override them to 50 / 70.
+    pub(crate) fn for_kind(kind: MobType, difficulty: i32) -> Self {
+        let (hard, normal) = match kind {
+            MobType::Bogged => (
+                super::bogged::HARD_ATTACK_INTERVAL,
+                super::bogged::ATTACK_INTERVAL,
+            ),
+            _ => (20, 40),
+        };
         Self {
-            interval: if difficulty == 3 { 20 } else { 40 },
+            interval: if difficulty == 3 { hard } else { normal },
             attack_time: -1,
             see_time: 0,
             strafing_time: -1,
@@ -179,6 +196,7 @@ fn shoot(
             owner_uuid: mob.uuid,
             weapon: mob.equipment.get(slot).clone(),
             difficulty,
+            effect: arrow_effect(mob.mob_type),
         },
         me,
     );
@@ -186,18 +204,94 @@ fn shoot(
     living::play_sound(me, mob, "minecraft:entity.skeleton.shoot", 1.0, pitch);
 }
 
+/// `Stray.getArrow` / `Bogged.getArrow` 给箭加的效果：（效果 ID，时长），等级 0。
+///
+/// The effect `Stray.getArrow` / `Bogged.getArrow` add to the arrow: (effect id,
+/// duration) at amplifier 0.
+const fn arrow_effect(kind: MobType) -> Option<(i32, i32)> {
+    match kind {
+        MobType::Stray => Some(super::stray::ARROW_EFFECT),
+        MobType::Bogged => Some(super::bogged::ARROW_EFFECT),
+        _ => None,
+    }
+}
+
+/// `Arrow.addEffect`：`getPotionContents().withEffectAdded(effect)` 写回拾取物品的
+/// `potion_contents`，效果用 `MobEffectInstance(effect, duration)` 的缺省值（等级 0、
+/// 显示粒子和图标）。箭的颜色从这个组件算。
+///
+/// `Arrow.addEffect`: `getPotionContents().withEffectAdded(effect)` written back to the
+/// pickup item's `potion_contents`, with `MobEffectInstance(effect, duration)` defaults
+/// (amplifier 0, particles and icon shown). The arrow colour derives from the component.
+fn add_arrow_effect(pickup_item: &mut ItemStack, effect: i32, duration: i32) {
+    use mc_bamboo_data::registries::data_component_type::POTION_CONTENTS;
+    use mc_bamboo_protocol::components::{
+        ComponentValue, PatchEntry, defaults,
+        value::{EffectDetails, MobEffectInstance},
+    };
+    let mut patch = pickup_item.patch();
+    let (potion, custom_color, mut custom_effects, custom_name) =
+        match defaults::resolve(pickup_item.item, &patch, POTION_CONTENTS) {
+            Some(ComponentValue::PotionContents {
+                potion,
+                custom_color,
+                custom_effects,
+                custom_name,
+            }) => (
+                *potion,
+                *custom_color,
+                custom_effects.clone(),
+                custom_name.clone(),
+            ),
+            _ => (None, None, Vec::new(), None),
+        };
+    custom_effects.push(MobEffectInstance {
+        effect,
+        details: EffectDetails {
+            amplifier: 0,
+            duration,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+            hidden_effect: None,
+        },
+    });
+    patch.put(
+        POTION_CONTENTS,
+        PatchEntry::Set(ComponentValue::PotionContents {
+            potion,
+            custom_color,
+            custom_effects,
+            custom_name,
+        }),
+    );
+    (pickup_item.added, pickup_item.removed) = patch.to_opaque();
+}
+
+/// [`Command::ShootMobArrow`] 带的一次射击。
+///
+/// One shot carried by [`Command::ShootMobArrow`].
+pub(crate) struct MobArrowShot {
+    pub position: Vec3,
+    pub direction: Vec3,
+    pub owner_uuid: [u8; 16],
+    pub weapon: ItemStack,
+    pub difficulty: i32,
+    pub effect: Option<(i32, i32)>,
+}
+
 /// ProjectileUtil.getMobArrow：箭用自身随机源算伤害和散布，不用射手的随机源。
 ///
 /// ProjectileUtil.getMobArrow uses the newly constructed arrow's RNG for damage and spread.
-pub(crate) fn spawn_arrow(
-    world: &mut World<'_>,
-    position: Vec3,
-    direction: Vec3,
-    owner: EntityUid,
-    owner_uuid: [u8; 16],
-    weapon: ItemStack,
-    difficulty: i32,
-) {
+pub(crate) fn spawn_arrow(world: &mut World<'_>, owner: EntityUid, shot: MobArrowShot) {
+    let MobArrowShot {
+        position,
+        direction,
+        owner_uuid,
+        weapon,
+        difficulty,
+        effect,
+    } = shot;
     let mut entity = world.prepare_entity(Entity::arrow(position));
     let EntityKind::Arrow(arrow) = &mut entity.kind else {
         unreachable!()
@@ -209,6 +303,9 @@ pub(crate) fn spawn_arrow(
         entity.remaining_fire_ticks = 2000;
     }
     arrow.weapon = Some(weapon);
+    if let Some((effect, duration)) = effect {
+        add_arrow_effect(&mut arrow.pickup_item, effect, duration);
+    }
     arrow.base_damage = 2.0
         + entity
             .random
@@ -421,6 +518,47 @@ mod tests {
     };
 
     #[test]
+    fn bogged_shoot_on_the_slower_interval_and_tip_their_arrows() {
+        use mc_bamboo_data::registries::{data_component_type::POTION_CONTENTS, mob_effect};
+        use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+        let interval = |kind, difficulty| BowGoal::for_kind(kind, difficulty).interval;
+        assert_eq!(interval(MobType::Bogged, 3), 50);
+        assert_eq!(interval(MobType::Bogged, 2), 70);
+        assert_eq!(interval(MobType::Stray, 3), 20);
+        assert_eq!(interval(MobType::Stray, 1), 40);
+        assert_eq!(arrow_effect(MobType::Skeleton), None);
+        for (kind, effect, duration) in [
+            (MobType::Stray, mob_effect::SLOWNESS, 600),
+            (MobType::Bogged, mob_effect::POISON, 100),
+        ] {
+            let mut stack = ItemStack::new(items::ARROW, 1);
+            let (id, ticks) = arrow_effect(kind).unwrap();
+            add_arrow_effect(&mut stack, id, ticks);
+            let patch = stack.patch();
+            let Some(ComponentValue::PotionContents {
+                potion,
+                custom_effects,
+                ..
+            }) = defaults::resolve(stack.item, &patch, POTION_CONTENTS)
+            else {
+                panic!("the arrow has no potion contents");
+            };
+            assert_eq!(*potion, None);
+            assert_eq!(custom_effects.len(), 1);
+            let details = &custom_effects[0].details;
+            assert_eq!(
+                (
+                    custom_effects[0].effect,
+                    details.duration,
+                    details.amplifier
+                ),
+                (effect, duration, 0)
+            );
+            assert!(details.show_particles && details.show_icon && !details.ambient);
+        }
+    }
+    #[test]
     fn draw_takes_twenty_ticks_in_addition_to_difficulty_cooldown() {
         assert_eq!(BowGoal::new(3).interval, 20);
         assert_eq!(BowGoal::new(2).interval, 40);
@@ -435,7 +573,9 @@ mod tests {
             pitch: 0.0,
             uuid: None,
             position: Vec3::new(10.5, 64.0, 0.5),
+            delta: Vec3::default(),
             eye_height: 1.62,
+            health: 20.0,
             look_direction: Vec3::default(),
             gaze_disguise: false,
             alive: true,
@@ -448,6 +588,7 @@ mod tests {
             main_hand: 0,
             off_hand: 0,
             combat: Default::default(),
+            effects: Default::default(),
         };
         shooter.with_mob(|shooter, mob| {
             mob.equipment

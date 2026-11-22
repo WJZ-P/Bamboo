@@ -764,6 +764,7 @@ pub enum KindData {
     /// Llama spit, with no metadata of its own.
     LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
+    SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
 }
 
 impl Snapshot {
@@ -785,11 +786,13 @@ impl Snapshot {
                 KindPublic::Mob(mob) => mob.needs_sync,
                 KindPublic::LlamaSpit(spit) => spit.needs_sync,
                 KindPublic::Egg(egg) => egg.needs_sync,
+                KindPublic::SplashPotion(potion) => potion.needs_sync,
                 _ => false,
             },
             sync_velocity: match &public.kind {
                 KindPublic::Arrow(arrow) => arrow.sync_velocity,
                 KindPublic::Egg(egg) => egg.sync_velocity,
+                KindPublic::SplashPotion(potion) => potion.sync_velocity,
                 _ => false,
             },
             sync_position: false,
@@ -808,6 +811,7 @@ impl Snapshot {
             KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
             KindData::LlamaSpit(spit) => spit.owner.unwrap_or(0),
             KindData::Egg(egg) => egg.owner.unwrap_or(0),
+            KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -834,6 +838,7 @@ impl KindData {
             KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
             KindPublic::LlamaSpit(spit) => Self::LlamaSpit(*spit),
             KindPublic::Egg(egg) => Self::Egg(egg.clone()),
+            KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
         }
     }
 
@@ -842,7 +847,10 @@ impl KindData {
     /// Projectiles with a no-op interpolation handler: no stepped position paths, and
     /// `syncVelocity` leaves the velocity baseline alone.
     fn is_projectile(&self) -> bool {
-        matches!(self, Self::Arrow(_) | Self::Egg(_) | Self::LlamaSpit(_))
+        matches!(
+            self,
+            Self::Arrow(_) | Self::Egg(_) | Self::LlamaSpit(_) | Self::SplashPotion(_)
+        )
     }
 
     /// 同步用到的那个数字。下落的方块和物品没有。
@@ -854,7 +862,8 @@ impl KindData {
             | Self::Mob(_)
             | Self::Arrow(_)
             | Self::LlamaSpit(_)
-            | Self::Egg(_) => None,
+            | Self::Egg(_)
+            | Self::SplashPotion(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -868,7 +877,8 @@ impl KindData {
             | Self::Mob(_)
             | Self::Arrow(_)
             | Self::LlamaSpit(_)
-            | Self::Egg(_) => None,
+            | Self::Egg(_)
+            | Self::SplashPotion(_) => None,
         }
     }
 
@@ -879,6 +889,7 @@ impl KindData {
             Self::Arrow(arrow) => Some(arrow.uuid),
             Self::LlamaSpit(spit) => Some(spit.uuid),
             Self::Egg(egg) => Some(egg.uuid),
+            Self::SplashPotion(potion) => Some(potion.uuid),
             _ => None,
         }
     }
@@ -890,6 +901,7 @@ impl KindData {
             Self::Arrow(arrow) => Some(arrow.pitch),
             Self::LlamaSpit(spit) => Some(spit.pitch),
             Self::Egg(egg) => Some(egg.x_rot),
+            Self::SplashPotion(potion) => Some(potion.x_rot),
             _ => None,
         }
     }
@@ -956,9 +968,18 @@ impl KindData {
                 if egg.no_gravity {
                     data.push(EntityData::NoGravity(true));
                 }
-                // `ItemStack` 不覆写 `equals`，`setItem` 之后的值永远不是默认值。
-                // `ItemStack` has no `equals`, so the set item is never the default.
                 data.push(EntityData::Item(egg.item.clone()));
+                data
+            }
+            Self::SplashPotion(potion) => {
+                let mut data = Vec::new();
+                if potion.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if potion.no_gravity {
+                    data.push(EntityData::NoGravity(true));
+                }
+                data.push(EntityData::Item(potion.item.clone()));
                 data
             }
         }
@@ -1050,6 +1071,12 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
     }
     match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
+        // 女巫的 index 17 是 `DATA_USING_ITEM`（BOOLEAN），不是僵尸的特殊类型。
+        //
+        // The witch's index 17 is `DATA_USING_ITEM` (a boolean), not the zombie special type.
+        (17, true) if kind == mc_bamboo_blocks::entity::mob::MobType::Witch => {
+            EntityData::WitchUsingItem(false)
+        }
         (17, true) => EntityData::SpecialType(0),
         (18, true) => EntityData::DrownedConverting(false),
         _ => match index {
@@ -1109,6 +1136,11 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     if mob.glowing {
         flags |= 1 << 6;
     }
+    // `Entity.FLAG_SWIMMING` = 1<<4。
+    // `Entity.FLAG_SWIMMING` is 1<<4.
+    if mob.swimming {
+        flags |= 1 << 4;
+    }
     let mut out = Vec::new();
     if flags != 0 {
         out.push(EntityData::SharedFlags(flags));
@@ -1151,7 +1183,11 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     if mob_flags != 0 {
         out.push(EntityData::MobFlags(mob_flags));
     }
-    if mob.zombie_baby {
+    // 骷髅的 `DATA_STRAY_CONVERSION_ID` 和沼骸的 `DATA_SHEARED` 都是 index 16 的 BOOLEAN，
+    // 和这里的 `Baby` 字节完全相同；变回假时走 `default_data_for_type` 的 16 号缺省。
+    // `Skeleton.DATA_STRAY_CONVERSION_ID` and `Bogged.DATA_SHEARED` are index-16 booleans,
+    // byte-identical to `Baby`; the reset goes through `default_data_for_type`.
+    if mob.zombie_baby || mob.skeleton_flag {
         out.push(EntityData::Baby(true));
     }
     if mob.zombie_special_type != 0 {
@@ -1159,6 +1195,9 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     }
     if mob.drowned_converting {
         out.push(EntityData::DrownedConverting(true));
+    }
+    if mob.witch_using_item {
+        out.push(EntityData::WitchUsingItem(true));
     }
     if let Some(carried) = mob.enderman_carried {
         out.push(EntityData::EndermanCarried(Some(carried.0 as i32)));
@@ -1487,6 +1526,7 @@ fn farm_default_data(
     use mc_bamboo_data::entity_types as facts;
     match (kind, index) {
         (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::Slime, facts::CUBE_MOB_SIZE) => Some(EntityData::CubeMobSize(1)),
         (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
         (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
             Some(EntityData::PolarBearStanding(false))
@@ -1580,6 +1620,14 @@ fn farm_non_default_data(
         MobType::Sheep => {
             if mob.wool != 0 {
                 out.push(EntityData::SheepWool(mob.wool));
+            }
+            true
+        }
+        // `AbstractCubeMob.ID_SIZE` 缺省是 1。
+        // `AbstractCubeMob.ID_SIZE` defaults to 1.
+        MobType::Slime => {
+            if mob.cube_size != 1 {
+                out.push(EntityData::CubeMobSize(mob.cube_size));
             }
             true
         }
