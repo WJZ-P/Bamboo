@@ -2021,6 +2021,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-memprof"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-server",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mc-bamboo-nbt"
 version = "0.0.0"
 dependencies = [
