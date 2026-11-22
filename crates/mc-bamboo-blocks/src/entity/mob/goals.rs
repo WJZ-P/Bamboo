@@ -1697,9 +1697,15 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Player | TargetType::GuardedPlayer | TargetType::AngerPlayer => {
                     nearest_attackable(me, mob, ctx, *kind)
                 }
+                // 这些目标在官方仍注册、仍按间隔取数，但 Bamboo 没有对应实体可搜，返回 None。
+                // 美西螈是 main 追加的占位变体（溺尸的目标），同样只保留取数、不查世界。
+                // Vanilla registers these goals and still draws the interval, but Bamboo has no
+                // matching entity to search, so they return None. The axolotl is a placeholder
+                // variant added on main (a drowned target); it keeps the draw but skips the search.
                 TargetType::Villager
                 | TargetType::IronGolem
                 | TargetType::Turtle
+                | TargetType::Axolotl
                 | TargetType::Fish
                 | TargetType::Endermite => None,
             };
