@@ -715,7 +715,7 @@ fn stop_riding_jump(region: &mut Region, id: PlayerId) {
     let _ = region.entities.public_at(vehicle);
 }
 
-fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) {
+pub(crate) fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) {
     if let Some(player) = region.players.get_mut(&id) {
         player
             .sync

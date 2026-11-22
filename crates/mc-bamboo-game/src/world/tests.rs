@@ -4170,7 +4170,8 @@ fn damage_command_hurts_a_player_and_sends_health_packets() {
     );
 }
 
-/// 左键打牛：一次 `player_attack` 伤害，空手伤害是 2。
+/// 左键打牛：满充能空手一次 `player_attack` 伤害是 1（玩家的
+/// `ATTACK_DAMAGE` 基值 1.0 × 满充能系数 1.0）。
 #[test]
 fn left_click_attack_hurts_a_cow() {
     use mc_bamboo_blocks::entity::Entity;
@@ -4183,6 +4184,11 @@ fn left_click_attack_hurts_a_cow() {
     // 牛放在玩家身边，够距判定才会通过。
     let position = region.players.get(&client.id).unwrap().position();
     let cow = region.entities.spawn(Entity::cow(position));
+    region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 100;
     server.request(&client, PlayRequest::Attack { entity_id: cow });
     server.tick();
     let health = server
@@ -4195,5 +4201,51 @@ fn left_click_attack_hurts_a_cow() {
             mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
             _ => None,
         });
-    assert_eq!(health, Some(8.0), "空手一次攻击扣 2 点");
+    assert_eq!(health, Some(9.0), "满充能空手一次攻击扣 1 点");
+}
+
+/// 满充能下落暴击：暴击动画、攻击音效和伤害指示粒子都真的发到客户端，
+/// 不是只生成效果就丢掉。
+///
+/// A full-strength falling critical sends its critical animation, attack sound
+/// and damage-indicator particles to clients, not just into an internal queue.
+#[test]
+fn a_critical_attack_emits_its_packets() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::{items, packets::play::clientbound};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = ItemStack::new(items::DIAMOND_SWORD, 1);
+        player.attack_strength_ticker = 100;
+        player.motion.fall_distance = 2.0;
+        player.on_ground = false;
+        player.last_main_hand_item = player.inventory.held(Hand::Main).clone();
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let frames = client.take_frames();
+    let has = |id: i32| frames.iter().any(|frame| frame.id == id);
+    assert!(
+        has(clientbound::ANIMATE),
+        "CRITICAL_HIT animation must reach the client"
+    );
+    assert!(
+        has(clientbound::SOUND),
+        "the attack sound must reach the client"
+    );
+    assert!(
+        has(clientbound::LEVEL_PARTICLES),
+        "damage-indicator particles must reach the client"
+    );
 }
