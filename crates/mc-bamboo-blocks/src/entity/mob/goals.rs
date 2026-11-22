@@ -48,6 +48,10 @@ pub enum Goal {
     ///
     /// The wolf's own goals.
     Wolf(super::wolf_goals::WolfGoal),
+    /// 掠夺者一支的目标：巡逻、守阵、弩、看别的生物。
+    ///
+    /// The raider-branch goals: patrol, hold ground, crossbow and watching other mobs.
+    Raider(super::raider::RaiderGoal),
     /// `LeapAtTargetGoal`：离目标 2 到 4 格、站在地上时扑过去。
     ///
     /// `LeapAtTargetGoal`: leap at a target 2 to 4 blocks away.
@@ -511,6 +515,7 @@ impl Goal {
             Self::Fox(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
+            Self::Raider(goal) => goal.flags(),
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
                 &[Flag::Move, Flag::Look]
             }
@@ -560,6 +565,9 @@ impl Goal {
     /// `requiresUpdateEveryTick`。
     pub const fn every_tick(&self) -> bool {
         if let Self::Fox(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Raider(goal) = self {
             return goal.every_tick();
         }
         // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
@@ -622,6 +630,7 @@ impl Goal {
             Self::Fox(goal) => goal.name(),
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
+            Self::Raider(goal) => goal.name(),
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
@@ -1382,6 +1391,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Fox(goal) => goal.can_use(me, mob, ctx),
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
+        Goal::Raider(goal) => goal.can_use(me, mob, ctx),
         Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
             // `FoxPanicGoal.shouldPanic`：保护中的狐狸不惊慌。
@@ -1622,17 +1632,18 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    if mob.mob_type == super::MobType::Witch {
-                        // `new HurtByTargetGoal(this, Raider.class)`：女巫不报复自己或别的袭击者。
+                    if mob.mob_type.is_raider() {
+                        // `new HurtByTargetGoal(this, Raider.class)`：女巫和掠夺者不报复自己或别的
+                        // 袭击者。
                         //
-                        // `new HurtByTargetGoal(this, Raider.class)`: witches ignore themselves
-                        // and other raiders.
+                        // `new HurtByTargetGoal(this, Raider.class)`: witches and pillagers ignore
+                        // themselves and other raiders.
                         uid != me.id
                             && !ctx.other(uid).is_some_and(|other| {
                                 matches!(
                                     &other.kind,
                                     KindPublic::Mob(other_mob)
-                                        if other_mob.mob_type == super::MobType::Witch
+                                        if other_mob.mob_type.is_raider()
                                 )
                             })
                             && target_by_uid(mob, ctx, uid).is_some()
@@ -1909,6 +1920,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Fox(goal) => goal.can_continue(me, mob, ctx),
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Raider(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
         // `Drowned.DrownedAttackGoal.canContinueToUse`：僵尸的近战条件加 `okTarget`。
         Goal::RandomStroll { .. } | Goal::DrownedGoToWater { .. } => !mob.navigation.is_done(),
@@ -2064,6 +2076,24 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // does not arise for polar bears.
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
         }
+        // 掠夺者的两类目标都是 `mustSee`：受伤反击记 300 刻，找玩家记 60 刻。弩的目标
+        // `stop()` 会 `setTarget(null)`，`TargetGoal.canContinueToUse` 再从 `targetMob` 捡回来。
+        // Both pillager target goals are `mustSee`: 300 ticks of memory for hurt-by, 60 for
+        // players. The crossbow goal's `stop()` clears the target and
+        // `TargetGoal.canContinueToUse` restores it from `targetMob`.
+        Goal::HurtByTarget { unseen_ticks, .. } if mob.mob_type == super::MobType::Pillager => {
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
+        }
+        Goal::NearestAttackableTarget {
+            unseen_ticks,
+            found,
+            ..
+        } if mob.mob_type == super::MobType::Pillager => {
+            if mob.target.is_none() {
+                mob.target = *found;
+            }
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 60)
+        }
         Goal::NearestAttackableTarget { unseen_ticks, .. }
             if mob.mob_type.full_target_rules() || mob.mob_type == super::MobType::Slime =>
         {
@@ -2154,6 +2184,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Fox(goal) => goal.start(me, mob, ctx),
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
+        Goal::Raider(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target, .. } => {
@@ -2306,6 +2337,11 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             if mob.mob_type == super::MobType::Panda {
                 super::panda::alert_pandas(me, mob, ctx);
             }
+            // `Pillager` 的 `HurtByTargetGoal(this, Raider.class).setAlertOthers()`。
+            // The pillager's `HurtByTargetGoal(this, Raider.class).setAlertOthers()`.
+            if mob.mob_type == super::MobType::Pillager {
+                super::raider::alert_same_kind(me, mob, ctx);
+            }
         }
         // `HurtByTargetGoal.start` 再 `TargetGoal.start`：`unseenTicks` 清零。
         // `HurtByTargetGoal.start`, then `TargetGoal.start` clears `unseenTicks`.
@@ -2409,6 +2445,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Fox(goal) => goal.stop_with_world(me, mob, ctx),
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
+        Goal::Raider(goal) => goal.stop(me, mob, ctx),
         Goal::LeapAtTarget { .. } => {}
         Goal::Swim { .. } => mob.navigation.stop(),
         // `MoveToBlockGoal` 没有覆写 `stop`：不停导航。
@@ -2774,6 +2811,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Fox(goal) => goal.tick(me, mob, ctx),
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
+        Goal::Raider(goal) => goal.tick(me, mob, ctx),
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
         // `TamableAnimalPanicGoal.tick` teleports to a distant owner first.
         Goal::Panic { .. } if super::tame::is_tamable(mob.mob_type) => {
@@ -3497,7 +3535,7 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     // Slimes are not `PathfinderMob`s; `Mob.checkSpawnRules` is always true.
     if matches!(
         mob.mob_type,
-        super::MobType::Slime | super::MobType::Enderman
+        super::MobType::Slime | super::MobType::Enderman | super::MobType::Pillager
     ) {
         return 0.0;
     }
@@ -3953,7 +3991,7 @@ fn mob_target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget,
         height: f64::from(target.dimensions().1),
         health: target.health,
         effects: target.effects,
-        is_raider: target.mob_type == super::MobType::Witch,
+        is_raider: target.mob_type.is_raider(),
         width: target.dimensions().0,
         hitbox: other.bounding_box(),
     };

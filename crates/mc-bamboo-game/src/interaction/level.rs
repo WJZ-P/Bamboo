@@ -871,6 +871,11 @@ impl Level for RegionLevel<'_> {
         if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
             victim.cube_mob_size = Some(loot.cube_size);
         }
+        // `type_specific/raider`：没有袭击，`has_raid` 恒假；队长由生物一侧算好带过来。
+        // `type_specific/raider`: no raids, so `has_raid` stays false; the mob side
+        // supplies the captain flag.
+        victim.is_raider = loot.victim.is_raider();
+        victim.is_captain = loot.captain;
         let view = crate::block_drops::ChunkLevel {
             chunks: self.chunks,
             weather: self.block_weather,

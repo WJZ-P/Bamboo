@@ -37,6 +37,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.BUCKET`: placed from a bucket.
     Bucket,
+    /// `EntitySpawnReason.PATROL`：`PatrolSpawner` 刷出来的巡逻队。
+    ///
+    /// `EntitySpawnReason.PATROL`: a patrol from `PatrolSpawner`.
+    Patrol,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -392,6 +396,10 @@ fn finalize_spawn_in_group(
     }
     if kind == MobType::Witch {
         super::witch::finalize_spawn(entity, world.random());
+        return;
+    }
+    if kind == MobType::Pillager {
+        super::pillager::finalize_spawn(world, entity, reason);
         return;
     }
     let biome = world.biome_id(entity.block_position());

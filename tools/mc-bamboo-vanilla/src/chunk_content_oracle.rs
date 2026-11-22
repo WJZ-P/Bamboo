@@ -649,6 +649,8 @@ fn run_cases(
         MobType::Salmon,
         MobType::TropicalFish,
         MobType::Pufferfish,
+        MobType::Witch,
+        MobType::Pillager,
     ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));

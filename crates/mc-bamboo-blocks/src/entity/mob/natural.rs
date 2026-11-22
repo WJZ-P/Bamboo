@@ -727,6 +727,13 @@ pub(super) fn check_spawn_rules(
                 && valid_mob_spawn_block(world, kind, pos)
                 && super::stray::sees_sky_through_powder_snow(world, pos)
         }
+        // `PatrollingMonster.checkPatrollingMonsterSpawnRules`：方块光大于 8 不刷，其余走
+        // `checkAnyLightMonsterSpawnRules`（不看天色，只看脚下能不能站；和平难度在函数开头
+        // 已经挡掉）。
+        // `PatrollingMonster.checkPatrollingMonsterSpawnRules`: no spawn above block light
+        // 8, otherwise `checkAnyLightMonsterSpawnRules` (no darkness test, only the footing;
+        // peaceful is rejected at the top of this function).
+        MobType::Pillager => super::pillager::check_spawn_rules(world, pos),
         MobType::Slime => super::slime::check_spawn_rules(world, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
@@ -779,7 +786,7 @@ pub(super) fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
 }
 
 /// `Mob.checkMobSpawnRules` 里的 `isValidSpawn`，`NATURAL` 不是刷怪笼。
-fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
+pub(super) fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     if kind.fire_immune() {
         return true;
@@ -945,6 +952,10 @@ fn max_spawn_cluster_size(kind: MobType) -> i32 {
         // `Wolf.getMaxSpawnClusterSize` 是 8，其余用 `Mob` 的 4。
         // `Wolf.getMaxSpawnClusterSize` is 8; the rest use the `Mob` default of 4.
         8
+    } else if kind == MobType::Pillager {
+        // `Pillager.getMaxSpawnClusterSize` 是 1。
+        // `Pillager.getMaxSpawnClusterSize` is 1.
+        1
     } else {
         4
     }

@@ -628,6 +628,29 @@ pub enum Command {
     ThrowSplashPotion {
         shot: Box<super::splash_potion::SplashShot>,
     },
+    /// 生物的弩 `CrossbowItem.performShooting`：装着的箭逐支生成、射出。
+    ///
+    /// A mob's crossbow `CrossbowItem.performShooting`: spawn and shoot each loaded arrow.
+    ShootCrossbow {
+        shots: Vec<super::arrow::ArrowShot>,
+    },
+    /// `Raider.HoldGroundAttackGoal` 的喊话：同伴 `setTarget(target)`，`stop` 那次还
+    /// `setAggressive(true)`。
+    ///
+    /// The shout of `Raider.HoldGroundAttackGoal`: allies `setTarget(target)`, and the
+    /// `stop` call also does `setAggressive(true)`.
+    RaiderShout {
+        others: Vec<EntityUid>,
+        target: EntityUid,
+        aggressive: bool,
+    },
+    /// `LongDistancePatrolGoal` 的队长给同伴 `setPatrolTarget(pathTarget)`。
+    ///
+    /// A patrol leader's `setPatrolTarget(pathTarget)` on its companions.
+    SetPatrolTarget {
+        others: Vec<EntityUid>,
+        target: BlockPos,
+    },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode {
         center: Vec3,
@@ -1027,6 +1050,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);
+        }
+        Command::ShootCrossbow { shots } => {
+            for shot in shots {
+                world.spawn_arrow_shot(shot);
+            }
+        }
+        Command::RaiderShout {
+            others,
+            target,
+            aggressive,
+        } => super::mob::raider::apply_shout(world, &others, target, aggressive),
+        Command::SetPatrolTarget { others, target } => {
+            super::mob::raider::apply_patrol_target(world, &others, target);
         }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {

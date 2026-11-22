@@ -43,6 +43,7 @@ mod gen_spawn;
 mod grazing;
 mod llama_spit;
 mod natural_spawn;
+mod pillager;
 mod projectile;
 mod shot;
 mod skeleton_death;
@@ -674,6 +675,7 @@ fn zombie_style(name: &str) -> bool {
         "enderman_",
         "slime_",
         "witch_drink_",
+        "pillager_",
         "drowned_",
     ]
     .iter()
@@ -1034,6 +1036,11 @@ impl Level for MobLevel {
         if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
             victim.cube_mob_size = Some(loot.cube_size);
         }
+        // `type_specific/raider`：没有袭击，`has_raid` 恒假；队长由生物一侧算好带过来。
+        // `type_specific/raider`: no raids, so `has_raid` stays false; the mob side
+        // supplies the captain flag.
+        victim.is_raider = loot.victim.is_raider();
+        victim.is_captain = loot.captain;
         // 生物打死生物：攻击者按伤害来源带的类型建。
         // A mob killing a mob: the attacker comes from the type carried by the source.
         let typed = source.attacker_type.map(|kind| {
@@ -1514,6 +1521,7 @@ impl Report {
                     50 => mc_bamboo_blocks::entity::mob::MobType::Slime,
                     51 => mc_bamboo_blocks::entity::mob::MobType::Witch,
                     52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
+                    53 => mc_bamboo_blocks::entity::mob::MobType::Pillager,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
@@ -1574,6 +1582,7 @@ impl Report {
                                 );
                             }
                         }
+                        pillager::setup(&case.name, index, mob);
                         mob.creeper.powered = cow.creeper & 1 != 0;
                         mob.creeper.ignited = cow.creeper & 2 != 0;
                         if cow.carried != 0 {
@@ -3775,6 +3784,7 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
                 duration(mob_effect::SPEED)
             )
         }
+        MobType::Pillager => pillager::state(mob),
         MobType::Sheep => format!(
             "{}{}",
             sheep::color(mob).name(),

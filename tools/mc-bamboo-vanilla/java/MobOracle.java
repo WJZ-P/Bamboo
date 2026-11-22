@@ -262,7 +262,8 @@ public final class MobOracle {
                     "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
                     "skeleton_bow_normal", "skeleton_bow_hard",
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
-                    "skeleton_freeze", "bogged_shear")) {
+                    "skeleton_freeze", "bogged_shear",
+                    "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -1427,6 +1428,127 @@ public final class MobOracle {
      *
      * <p>Frog scenes and their oracle helpers.
      */
+    /**
+     * 掠夺者的场景：闲逛和看别的生物、巡逻队（队长带路、队员跟随）、巡逻途中对峙和进攻。
+     * 射箭的场景在 `playProjectile` 里（箭要带种子）。
+     *
+     * Pillager scenes: strolling and watching other mobs, a patrol (leader ahead, followers
+     * behind), and the stand-off and attack of a patrol. Shooting scenes live in
+     * `playProjectile`, where arrows are seeded.
+     */
+    static final class PillagerScenes {
+        /** 巡逻队长的远处目标。 The patrol leader's far target. */
+        static final BlockPos PATROL_TARGET = new BlockPos(180, 64, 60);
+
+        static void add(List<Scene> scenes) {
+            // 玩家在 20 格外的石墙后面：看不见所以不当目标，但 32 格内有人，`noActionTime`
+            // 每刻归零，闲逛目标不会被 100 刻的门槛挡住。
+            // The player stands 20 blocks away behind a stone wall: unseen and never
+            // targeted, but within 32 blocks, so `noActionTime` resets every tick and the
+            // stroll goal is not gated by its 100-tick limit.
+            Scene idle = new Scene("pillager_idle").ticks(400).difficulty(2);
+            Scenes.ground(idle, 24);
+            idle.fill(17, 64, -6, 17, 67, 6, Blocks.STONE.defaultBlockState());
+            idle.mob(53, 0.5, 64.0, 0.5, 0.0F, 7101L, 0);
+            idle.mob(53, 4.5, 64.0, 2.5, 90.0F, 7102L, 0);
+            idle.mob(0, -3.5, 64.0, -2.5, 180.0F, 7103L, 0);
+            idle.player(20.5, 64.0, 0.5, Items.AIR);
+            scenes.add(idle);
+            // 巡逻队：0 号是队长，带着远处的巡逻目标；另外两只只有「在巡逻」，等队长给目标。
+            // A patrol: mob 0 leads with a far patrol target; the other two are merely
+            // patrolling and wait for the leader's target.
+            Scene patrol = new Scene("pillager_patrol").ticks(420).difficulty(2);
+            Scenes.ground(patrol, 40);
+            patrol.mob(53, 0.5, 64.0, 0.5, 0.0F, 7201L, 0);
+            patrol.mob(53, 2.5, 64.0, -1.5, 0.0F, 7202L, 0);
+            patrol.mob(53, -1.5, 64.0, 1.5, 0.0F, 7203L, 0);
+            scenes.add(patrol);
+            // 没有同伴的队长：第一次巡逻 tick 就不再巡逻。
+            // A leader without companions stops patrolling on its first patrol tick.
+            Scene alone = new Scene("pillager_patrol_alone").ticks(60).difficulty(2);
+            Scenes.ground(alone, 16);
+            alone.mob(53, 0.5, 64.0, 0.5, 0.0F, 7301L, 0);
+            scenes.add(alone);
+            // 巡逻途中看见 14 格外的玩家：原地对峙（`HoldGroundAttackGoal`），不进攻。
+            // A patrol sees a player 14 blocks away: it holds its ground and does not attack.
+            Scene far = new Scene("pillager_hold_far").ticks(160).difficulty(2);
+            Scenes.ground(far, 24);
+            far.mob(53, 0.5, 64.0, 0.5, 0.0F, 7401L, 0);
+            far.mob(53, 1.5, 64.0, 3.5, 0.0F, 7402L, 0);
+            far.player(14.5, 64.0, 0.5, Items.AIR);
+            scenes.add(far);
+            // 玩家在 7 格内：对峙一刻就转进攻，喊同伴，然后给弩装填。场景在第一箭之前结束
+            // （没带种子的箭不能逐刻比）。
+            // A player within 7 blocks: one tick of stand-off, then the attack, the shout
+            // and loading the crossbow. The scene ends before the first shot (an unseeded
+            // arrow cannot be compared tick by tick).
+            Scene near = new Scene("pillager_hold_near").ticks(40).difficulty(2);
+            Scenes.ground(near, 24);
+            near.mob(53, 0.5, 64.0, 0.5, 0.0F, 7501L, 0);
+            near.mob(53, 1.5, 64.0, 3.5, 0.0F, 7502L, 0);
+            near.player(7.5, 64.0, 0.5, Items.AIR);
+            scenes.add(near);
+        }
+
+        /**
+         * 场景开头给掠夺者的起始状态：主手一把弩，巡逻场景再设队长和巡逻标志。
+         *
+         * Start state: a crossbow in the main hand; patrol scenes also set the leader and
+         * the patrolling flag.
+         */
+        static void setup(Scene scene, int index, Mob mob) throws Exception {
+            if (!(mob instanceof net.minecraft.world.entity.monster.illager.Pillager pillager)) return;
+            pillager.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, new ItemStack(Items.CROSSBOW));
+            if (scene.name.startsWith("pillager_patrol") || scene.name.startsWith("pillager_hold")) {
+                if (index == 0) {
+                    pillager.setPatrolLeader(true);
+                    pillager.setPatrolTarget(PATROL_TARGET);
+                } else {
+                    putBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, pillager, "patrolling", true);
+                }
+            }
+        }
+
+        /**
+         * 逐刻状态：巡逻、队长、巡逻目标、装填标志、是否在用物品、已用刻数、弩里的箭数。
+         *
+         * Per-tick state: patrolling, leader, patrol target, charging flag, using item,
+         * ticks used and the number of loaded arrows.
+         */
+        static String state(net.minecraft.world.entity.monster.illager.Pillager pillager) throws Exception {
+            BlockPos target = pillager.getPatrolTarget();
+            var charged = pillager.getMainHandItem().getOrDefault(DataComponents.CHARGED_PROJECTILES,
+                    net.minecraft.world.item.component.ChargedProjectiles.EMPTY);
+            return "pillager:" + getBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, pillager, "patrolling")
+                    + ':' + pillager.isPatrolLeader()
+                    + ':' + (target == null ? "-" : target.getX() + "," + target.getY() + "," + target.getZ())
+                    + ':' + pillager.isChargingCrossbow()
+                    + ':' + pillager.isUsingItem()
+                    + ':' + pillager.getTicksUsingItem()
+                    + ':' + charged.itemCopies().count();
+        }
+
+        /**
+         * 场景结束时确认真的走到了要测的分支。
+         *
+         * After a scene, confirm it reached the branch it is meant to cover.
+         */
+        static void check(Scene scene, List<Mob> mobs) throws Exception {
+            if (!scene.name.startsWith("pillager_")) return;
+            var first = (net.minecraft.world.entity.monster.illager.Pillager) mobs.getFirst();
+            boolean patrolling = getBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, first, "patrolling");
+            boolean ok = switch (scene.name) {
+                case "pillager_patrol" -> patrolling && first.getX() > 12.0
+                        && ((net.minecraft.world.entity.monster.illager.Pillager) mobs.get(1)).hasPatrolTarget();
+                case "pillager_patrol_alone" -> !patrolling;
+                case "pillager_hold_far" -> patrolling && first.getTarget() != null && !first.isAggressive();
+                case "pillager_hold_near" -> first.isAggressive()
+                        && net.minecraft.world.item.CrossbowItem.isCharged(first.getMainHandItem());
+                default -> true;
+            };
+            if (!ok) throw new IllegalStateException("pillager scenario did not exercise " + scene.name);
+        }
+    }
     static final class FrogScenes {
         static void add(List<Scene> scenes) {
             for (long seed : new long[] {11L, 23L}) {
@@ -3370,6 +3492,7 @@ public final class MobOracle {
                 scenes.add(kill);
             }
             slimeScenes(scenes);
+            PillagerScenes.add(scenes);
             Scene witch = new Scene("witch_drink_fire").ticks(140).difficulty(2).fire(200);
             ground(witch, 16);
             witch.mob(51, 0.5, 64.0, 0.5, 0.0F, 503L, 0);
@@ -3655,7 +3778,8 @@ public final class MobOracle {
                 || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
-                || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
+                || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
+                || scene.name.startsWith("pillager_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -4376,6 +4500,51 @@ public final class MobOracle {
         return arrow;
     }
 
+    /**
+     * 射箭对拍用的掠夺者：`performRangedAttack` 照 `CrossbowAttackMob.performCrossbowAttack`
+     * 原样走，只是 `performShooting` 用一把带种子的 `CrossbowItem`（`SeedCrossbow`），让箭的
+     * 随机源和 UUID 可重放。装填、射击向量、耐久、音效都是官方代码。
+     *
+     * The pillager for shooting replays: `performRangedAttack` follows
+     * `CrossbowAttackMob.performCrossbowAttack` verbatim except that `performShooting`
+     * runs on a seeded `CrossbowItem` (`SeedCrossbow`), so arrow randoms and UUIDs replay.
+     * Loading, the shot vector, durability and sounds are vanilla code.
+     */
+    private static final class OraclePillager extends net.minecraft.world.entity.monster.illager.Pillager {
+        private SeedCrossbow crossbow;
+
+        private OraclePillager(FakeLevel level) {
+            super(EntityTypes.PILLAGER, level);
+        }
+
+        static OraclePillager create(FakeLevel level) throws Exception {
+            OraclePillager pillager = new OraclePillager(level);
+            // 未注册的 `Item` 子类要临时解冻物品注册表才能构造。
+            // An unregistered `Item` subclass needs the item registry temporarily unfrozen.
+            unfreezeItems();
+            try {
+                pillager.crossbow = new SeedCrossbow(new Item.Properties().durability(465)
+                        .setId(net.minecraft.resources.ResourceKey.create(Registries.ITEM,
+                                net.minecraft.resources.Identifier.withDefaultNamespace("crossbow"))),
+                        level.entitySeeds);
+            } finally {
+                freezeItems();
+            }
+            return pillager;
+        }
+
+        @Override
+        public void performRangedAttack(LivingEntity target, float power) {
+            InteractionHand hand = net.minecraft.world.entity.projectile.ProjectileUtil
+                    .getWeaponHoldingHand(this, Items.CROSSBOW);
+            ItemStack used = this.getItemInHand(hand);
+            if (used.getItem() instanceof CrossbowItem) {
+                this.crossbow.performShooting(this.level(), this, hand, used, 1.6F,
+                        this.rangedAttackUncertainty(this.level()), this.getTarget());
+            }
+            this.onCrossbowAttackPerformed();
+        }
+    }
     private static final class OracleStray extends net.minecraft.world.entity.monster.skeleton.Stray {
         OracleStray(FakeLevel level) {
             super(EntityTypes.STRAY, level);
@@ -4404,7 +4573,9 @@ public final class MobOracle {
     private static String skeletonKinState(Mob shooter) {
         boolean flag = shooter instanceof net.minecraft.world.entity.monster.skeleton.Skeleton skeleton
                 ? skeleton.isShaking()
-                : shooter instanceof net.minecraft.world.entity.monster.skeleton.Bogged bogged && bogged.isSheared();
+                : shooter instanceof net.minecraft.world.entity.monster.illager.Pillager pillager
+                        ? pillager.isChargingCrossbow()
+                        : shooter instanceof net.minecraft.world.entity.monster.skeleton.Bogged bogged && bogged.isSheared();
         return "[" + shooter.getId() + "," + BuiltInRegistries.ENTITY_TYPE.getId(shooter.getType())
                 + "," + (flag ? 1 : 0) + "," + shooter.getTicksFrozen()
                 + "," + Float.floatToRawIntBits(shooter.getHealth())
@@ -6185,7 +6356,13 @@ public final class MobOracle {
         boolean freeze = name.equals("skeleton_freeze");
         boolean shear = name.equals("bogged_shear");
         boolean passive = freeze || shear;
-        boolean skeleton = name.startsWith("skeleton_") || stray || bogged;
+        // 掠夺者用弩：`pillager_crossbow_multishot` 的弩带多重射击和穿透。射手这一支的分支
+        // （地面、玩家位置、逐刻的射手状态）和骷髅共用。
+        // Pillagers use a crossbow; `pillager_crossbow_multishot` adds Multishot and
+        // Piercing. The shooter branches (ground, player position, per-tick shooter state)
+        // are shared with the skeletons.
+        boolean pillager = name.startsWith("pillager_crossbow");
+        boolean skeleton = name.startsWith("skeleton_") || stray || bogged || pillager;
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
@@ -6269,14 +6446,20 @@ public final class MobOracle {
         var arrows = new ArrayList<net.minecraft.world.entity.projectile.arrow.AbstractArrow>();
         var sync = new java.util.LinkedHashMap<Integer, Sync>();
         if (skeleton) {
-            shooter = stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
+            shooter = pillager ? OraclePillager.create(world)
+                    : stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
             world.entitySeeds.nextLong();
             setRandom(shooter, 42L);
             shooter.setUUID(new UUID(0, 1));
             shooter.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
             shooter.setYHeadRot(0.0F);
             shooter.setYBodyRot(0.0F);
-            shooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.BOW));
+            ItemStack weapon = new ItemStack(pillager ? Items.CROSSBOW : Items.BOW);
+            if (name.equals("pillager_crossbow_multishot")) {
+                enchant(official, weapon, Enchantments.MULTISHOT, 1);
+                enchant(official, weapon, Enchantments.PIERCING, 1);
+            }
+            shooter.setItemInHand(InteractionHand.MAIN_HAND, weapon);
             world.tracked.add(shooter);
         } else {
             net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow;
@@ -6335,7 +6518,7 @@ public final class MobOracle {
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : skeleton ? 105
+        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : pillager ? 190 : skeleton ? 105
                 : (piercing || water) ? 3 : 26;
         int conversions = 0;
         int sheared = 0;
@@ -6467,6 +6650,18 @@ public final class MobOracle {
                 frames.append(",\"aggressive\":").append(shooter.isAggressive());
                 frames.append(",\"drawing\":").append(shooter.isUsingItem());
                 frames.append(",\"kin\":").append(skeletonKinState(shooter));
+                if (pillager) {
+                    // 装填完成的音效从世界随机源取音高；弩里的箭数和耐久损耗也逐刻比。
+                    // The loading-end sound draws its pitch from the level random; the
+                    // loaded arrow count and the crossbow damage are compared per tick too.
+                    ItemStack held = shooter.getMainHandItem();
+                    frames.append(",\"levelSeed\":").append(levelSeed(world));
+                    frames.append(",\"crossbow\":[").append(held.getOrDefault(DataComponents.CHARGED_PROJECTILES,
+                                    net.minecraft.world.item.component.ChargedProjectiles.EMPTY).itemCopies().count())
+                            .append(',').append(held.getDamageValue())
+                            .append(',').append(shooter.getTicksUsingItem())
+                            .append(',').append(shooter.getNoActionTime()).append(']');
+                }
                 frames.append(",\"levelEvents\":").append(world.levelEvents.stream().map(Arrays::toString)
                         .collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.levelEvents.clear();
@@ -7512,6 +7707,7 @@ public final class MobOracle {
                 case 50 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
                 case 51 -> new net.minecraft.world.entity.monster.Witch(EntityTypes.WITCH, level);
                 case 52 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, level);
+                case 53 -> new net.minecraft.world.entity.monster.illager.Pillager(EntityTypes.PILLAGER, level);
                 case 9 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
@@ -7595,6 +7791,7 @@ public final class MobOracle {
                     && scene.carried != null) {
                 enderman.setCarriedBlock(scene.carried);
             }
+            PillagerScenes.setup(scene, i, mob);
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
             mobs.add(mob);
@@ -7843,6 +8040,7 @@ public final class MobOracle {
                     + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
         }
         line.append("]");
+        PillagerScenes.check(scene, mobs);
         if (scene.name.equals("witch_drink_fire")) {
             Mob witch = mobs.getFirst();
             if (!witch.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE) || witch.getHealth() != 26.0F) {
@@ -8011,6 +8209,8 @@ public final class MobOracle {
                         .append(':').append(breathing == null ? 0 : breathing.getDuration())
                         .append(':').append(speed == null ? 0 : speed.getDuration())
                         .append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.illager.Pillager pillager) {
+                out.append(",\"var\":\"").append(PillagerScenes.state(pillager)).append("\",\"snd\":\"minecraft:classic\"");
             } else if (mob instanceof PolarBear bear) {
                 out.append(",\"var\":\"").append(bearState(bear)).append("\",\"snd\":\"\"");
             } else {
@@ -10410,6 +10610,14 @@ public final class MobOracle {
                             .setBlockState(pos.getX() & 15, pos.getY() & 15, pos.getZ() & 15, state, false);
                 }
             });
+            // 方块是直接写进区段的，高度图没跟着更新；巡逻目标（`LongDistancePatrolGoal`）读
+            // `MOTION_BLOCKING_NO_LEAVES`，这里用官方的 `primeHeightmaps` 按区段内容补算这一张。
+            // 其余高度图保持原样，不影响别的场景。
+            // Blocks are written straight into the sections, so heightmaps are stale. The
+            // patrol goal reads `MOTION_BLOCKING_NO_LEAVES`; prime that one map from the
+            // sections with vanilla's `primeHeightmaps`. The other maps stay untouched so
+            // no other scene changes.
+            Heightmap.primeHeightmaps(chunk, java.util.EnumSet.of(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
             chunkCache.put(key, chunk);
             return chunk;
         }
