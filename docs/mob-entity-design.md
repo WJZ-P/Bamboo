@@ -2025,3 +2025,38 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 - 客户端专用的表现不在服务端：`Phantom.tick` 的扇翅音效和 `MYCELIUM` 粒子、`isFlapping()` 的相位、`shouldRenderAtSqrDistance` 恒真都只影响客户端；Bamboo 只发官方的服务端音效 / 世界事件。
 - 俯冲时玩家那一侧的推挤只做生物自己的一半（和其他生物一样）：玩家的速度变化和 `needsSync` 不结算，伤害走游戏层的 `hurt_player`。对拍里玩家是不受伤的替身，所以没有逐刻比玩家血量。
 - 刷怪器按玩家顺序取数：官方按 `ServerLevel.players` 的加入顺序遍历，Bamboo 的 `region.players` 是按 `PlayerId` 排序的 `BTreeMap`；正常情况下两者一致，玩家退出重进后 `PlayerId` 可能和加入顺序不同，多个玩家同时满足条件时刷怪落点 / 数量可能和官方不同。
+
+## 官方联机探针在掉刻机器上的校准（cl-ambient，2026-11-22）
+
+上一轮把蝙蝠 / 幻翼合进 main 时，`tools/probe.sh` 报了一次
+`play: a later position packet is a correction the probe expected`（768/769），
+重跑又变成 698/712 连带 container / durability / falling / crafting / loom 全挂。
+根因不在生物，也不在实体跟踪，而是**探针世界跑在 Idle 优先级下、世界线程持续掉刻**：
+
+- 服务端日志每次失败前都刷 `Can't keep up! Running 20xx ms behind, skipping 40+ ticks`
+  （`MAX_CATCH_UP` 是 2 秒，`crates/mc-bamboo-game/src/world.rs`），即这一段时间每几秒丢掉
+  约 40 刻。
+- 掉刻期间玩家自己的 `first_good` 不刷新。探针搭 40 格柱子时每 3 格发一次绝对位置包，
+  八个包落进同一个 tick，第 8 个的偏移正好 24 格（576 > `100 * deltaPackets`），
+  Bamboo 报 `moved too quickly! 0,24,0` 并把玩家拉回。失败日志里的纠正坐标
+  x / z 恒等于柱子的列、y 正好高 24 格，与这条路径完全吻合。
+- 官方 `ServerGamePacketListenerImpl.handleMovePlayer` 的速度检查和 `teleport`
+  回拉是同一套逻辑（`movedDist - expectedDist > 100 * deltaPackets`），
+  Bamboo 的 `player_move.rs` 与 main 逐字节相同（`git diff main..HEAD` 为空），
+  所以这是「原版在这种情况下也会拉回」，不是实现差异。
+
+因此改的是探针的校准，不是服务端：
+
+- `movement` 段仍然严格断言「没有理由就不该有位置纠正」；段末把
+  `toleratingPullbacks` 打开，之后脚本化的长距离移动（`stepTowards`、爬柱子
+  `climbAndPlace`）遇到这种纠正只记数不判失败，并从服务端给的位置重算下一步。
+- `walkAndWait` 每走一步等观察者看到（最多 1 秒），免得掉刻时五步并成一个增量包，
+  `movement: walking uses deltas` 数不满。
+- 音效检查只数 `SoundSource.BLOCKS`：超平坦正午的自然刷怪会刷出史莱姆 / 牛等，
+  它们的环境音以前会把 `sound: the placer hears nothing` 顶掉。
+- `damage_event`（受击实体周围看得到的人也收，`ServerLevel.broadcastDamageEvent`）
+  补进 M2 的包白名单，main 的近战攻击开始发这个包后探针没跟着加。
+
+验证：两次完整 `tools/probe.sh`（同一次运行里分别有 3 次和 8 次 `Can't keep up`）
+都是 769/769、关服与世界目录检查通过；故意在爬柱子时插八个连续位置包制造
+`moved too quickly!`，位置纠正不再判失败。
