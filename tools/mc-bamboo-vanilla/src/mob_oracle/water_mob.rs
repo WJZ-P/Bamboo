@@ -23,6 +23,7 @@
 //! but their registration order and flags must match vanilla — this is the checkable
 //! part of replacing the placeholder goals with real implementations.
 
+use mc_bamboo_blocks::entity::JavaRandom;
 use mc_bamboo_blocks::entity::mob::MobType;
 use mc_bamboo_blocks::entity::mob::brain::Brain;
 use mc_bamboo_blocks::entity::mob::goals::GoalSelector;
@@ -396,5 +397,46 @@ impl Report {
             }
         }
         println!("{}: {} ticks", case.name, case.frames.len());
+    }
+}
+
+/// 一题美西螈繁殖：官方 `Axolotl.getBreedOffspring` 给出的花色，以及取数之后父亲随机源
+/// 的状态（两条分支都恰好两次取数）。
+///
+/// One axolotl breeding case: the variant from vanilla `Axolotl.getBreedOffspring` and the
+/// father's random state afterwards (both branches draw exactly twice).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AxolotlBreedCase {
+    seed: i64,
+    before_seed: i64,
+    father_variant: i32,
+    mother_variant: i32,
+    baby_variant: i32,
+    after_seed: i64,
+}
+
+impl Report {
+    pub(super) fn replay_axolotl_breed(&mut self, case: &AxolotlBreedCase) {
+        self.cases += 1;
+        let broken = self.break_test.as_deref() == Some("axolotl_breed");
+        let mut random = JavaRandom::from_state(case.before_seed);
+        let mut variant = mc_bamboo_blocks::entity::mob::axolotl::offspring_variant(
+            &mut random,
+            case.father_variant,
+            case.mother_variant,
+        );
+        if broken {
+            variant = (variant + 1) % 5;
+        }
+        let ours = (variant, random.state());
+        let expected = (case.baby_variant, case.after_seed);
+        if ours != expected {
+            self.mismatch(format!(
+                "axolotl breed seed {}: official {:?}, bamboo {ours:?}",
+                case.seed, expected
+            ));
+        }
+        self.steps += 1;
     }
 }

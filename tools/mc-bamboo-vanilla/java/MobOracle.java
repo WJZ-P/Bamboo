@@ -273,6 +273,9 @@ public final class MobOracle {
             if (only == null || "panda".startsWith(only)) {
                 cases += playPandaGenes(official, out);
             }
+            if (only == null || "axolotl_breed".startsWith(only)) {
+                cases += playAxolotlBreeds(official, out);
+            }
             if (only == null || "llama_spit".startsWith(only)) {
                 OracleLlama.checkAim(official);
                 playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
@@ -7337,6 +7340,69 @@ public final class MobOracle {
     }
 
     /**
+     * `Axolotl.setVariant` 是私有的，用它的 `DATA_VARIANT` 访问器直接写。
+     *
+     * <p>`Axolotl.setVariant` is private; write its `DATA_VARIANT` accessor directly.
+     */
+    @SuppressWarnings("unchecked")
+    private static void setAxolotlVariant(Mob mob, int variant) throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.animal.axolotl.Axolotl.class
+                .getDeclaredField("DATA_VARIANT");
+        field.setAccessible(true);
+        net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
+                (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
+        mob.getEntityData().set(accessor, variant);
+    }
+
+    /**
+     * 美西螈的繁殖花色：官方 `Axolotl.getBreedOffspring`（先构造幼崽，再 `nextInt(1200)`
+     * 赌稀有的蓝色；没中时 `nextBoolean` 取父母之一）的结果和父亲随机源之后的状态。
+     * 稀有种子由扫描提前找好，保证覆盖那一条分支。
+     *
+     * <p>Axolotl breeding variants: the result of `Axolotl.getBreedOffspring` (construct the
+     * baby, roll `nextInt(1200)` for the rare blue, otherwise one `nextBoolean` picks a
+     * parent) plus the father's random state afterwards. Rare seeds are pre-scanned so the
+     * branch is covered.
+     */
+    private static int playAxolotlBreeds(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        int cases = 0;
+        int[][] pairs = {{0, 0}, {1, 3}, {3, 1}, {2, 4}, {0, 2}};
+        java.util.List<Long> seeds = new java.util.ArrayList<>();
+        for (int sample = 0; sample < 40; sample++) {
+            seeds.add(20261122L + sample * 104729L);
+        }
+        RandomSource probe = RandomSource.create(0L);
+        for (long candidate = 0; candidate < 10_000_000L && seeds.size() < 43; candidate++) {
+            probe.setSeed(candidate);
+            if (probe.nextInt(1200) == 0) {
+                seeds.add(candidate);
+            }
+        }
+        for (int sample = 0; sample < seeds.size(); sample++) {
+            long seed = seeds.get(sample);
+            int[] pair = pairs[sample % pairs.length];
+            var father = EntityTypes.AXOLOTL.create(world, EntitySpawnReason.BREEDING);
+            var mother = EntityTypes.AXOLOTL.create(world, EntitySpawnReason.BREEDING);
+            setAxolotlVariant(father, pair[0]);
+            setAxolotlVariant(mother, pair[1]);
+            setRandom(father, seed);
+            long beforeSeed = randomSeed(father);
+            var baby = father.getBreedOffspring(world, mother);
+            out.write("{\"type\":\"axolotlBreed\",\"seed\":" + seed
+                    + ",\"beforeSeed\":" + beforeSeed
+                    + ",\"fatherVariant\":" + pair[0]
+                    + ",\"motherVariant\":" + pair[1]
+                    + ",\"babyVariant\":"
+                    + (baby == null ? -1
+                            : ((net.minecraft.world.entity.animal.axolotl.Axolotl) baby).getVariant().getId())
+                    + ",\"afterSeed\":" + randomSeed(father) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /**
      * 海豚和美西螈：逐刻比位置、速度、朝向、随机源、氧气、年龄、着地 / 在水里、
      * 各自的元数据状态（gotFish / moistness / variant / playingDead / fromBucket）和尺寸。
      *
@@ -7390,13 +7456,7 @@ public final class MobOracle {
         if (!dolphin) {
             // `Axolotl.setVariant` 是私有的，用它的 `DATA_VARIANT` 访问器直接写。
             // `Axolotl.setVariant` is private; write its `DATA_VARIANT` accessor directly.
-            java.lang.reflect.Field field = net.minecraft.world.entity.animal.axolotl.Axolotl.class
-                    .getDeclaredField("DATA_VARIANT");
-            field.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
-                    (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
-            mob.getEntityData().set(accessor, variant);
+            setAxolotlVariant(mob, variant);
         }
         world.tracked.add(mob);
         net.minecraft.world.entity.animal.dolphin.Dolphin dolphinMob =

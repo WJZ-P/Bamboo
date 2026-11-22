@@ -179,11 +179,7 @@ pub(super) fn finalize_spawn(
 /// `nextInt(1200)` rolls for the rare blue, whose `getRareSpawnVariant` draws once more
 /// from the one-entry rare list (`nextInt(1)`); otherwise one `nextBoolean` picks a
 /// parent's variant. Both paths draw exactly twice.
-pub(super) fn offspring_variant(
-    random: &mut crate::entity::JavaRandom,
-    mine: i32,
-    partner: i32,
-) -> i32 {
+pub fn offspring_variant(random: &mut crate::entity::JavaRandom, mine: i32, partner: i32) -> i32 {
     if random.next_int_bounded(RARE_VARIANT_CHANCE) == 0 {
         // `Util.getRandom` 对单元素数组仍走 `nextInt(length)`。
         // `Util.getRandom` still calls `nextInt(length)` for a one-entry array.

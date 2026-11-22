@@ -109,6 +109,7 @@ enum Line {
     Squid(Box<squid::SquidCase>),
     Fish(Box<fish::FishCase>),
     WaterMob(Box<water_mob::WaterMobCase>),
+    AxolotlBreed(water_mob::AxolotlBreedCase),
     End(End),
 }
 
@@ -1298,6 +1299,7 @@ impl Report {
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::WaterMob(case) => self.replay_water_mob(&case),
+                Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
