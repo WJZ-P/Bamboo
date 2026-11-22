@@ -9,7 +9,7 @@
 //! food / regeneration countdowns. Health reaching zero runs the death flow.
 
 use mc_bamboo_blocks::entity::{JavaRandom, mob::DamageSource};
-use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_core::Vec3;
 use mc_bamboo_data::sounds;
 use mc_bamboo_protocol::{
     frame::packet_body,
@@ -617,68 +617,15 @@ fn knockback(
     player.motion.delta = Vec3::new(delta.x / 2.0 - push_x, dy, delta.z / 2.0 - push_z);
 }
 
-/// 官方 `ServerGamePacketListenerImpl.handleAttack` 的最小版本：
-/// 旁观者、够不到、目标不是生物时忽略；打玩家按官方 `Player.canHarmPlayer`
-/// 的 PVP 缺失处理，明确忽略并记一条日志（1b 之后再做完整 PVP）。
+/// 官方 `ServerGamePacketListenerImpl.handleAttack` → `Player.attack` 的入口。
+/// 完整逻辑（冷却、暴击、横扫、击退、附魔、粒子、音效、动画、PVP）在
+/// [`crate::player_attack`]，这里只保留原来的公共接缝。
+///
+/// Entry point for `ServerGamePacketListenerImpl.handleAttack` → `Player.attack`.
+/// The full logic (cooldown, crit, sweep, knockback, enchantments, particles,
+/// sounds, animations, PVP) lives in [`crate::player_attack`]; this is the seam.
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
-    let Some(player) = region.players.get(&id) else {
-        return;
-    };
-    if player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Spectator {
-        return;
-    }
-    let Some(target) = region.entities.public_at(entity_id) else {
-        return;
-    };
-    if target.removed || !matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
-        return;
-    }
-    // 够距：和右键交互同一套判定，官方 `isWithinAttackRange` 的简化版。
-    let position = player.position();
-    let eye_height = player.eye_height();
-    let reach = crate::interaction::interaction_range(player.game_mode);
-    if !crate::interaction::within_block_interaction_range(
-        position,
-        eye_height,
-        reach,
-        mc_bamboo_core::BlockPos::containing(target.position),
-        3.0,
-    ) {
-        return;
-    }
-    let held = player.inventory.held(Hand::Main).clone();
-    // `Player.attack` 命中实体：0.1 点饥饿消耗。
-    crate::player_exhaustion::add_in(region, id, crate::player_exhaustion::ATTACK);
-    let amount = crate::player_health::PlayerHealth::attack_damage(&held);
-    let mut source = DamageSource::player(id.0, position, false);
-    if !held.is_empty()
-        && let Ok(weapon) = u16::try_from(held.item)
-    {
-        source = source.with_weapon(weapon);
-    }
-    let ok = {
-        let (mut level, ticks) = region.block_level();
-        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
-        let ok = world.hurt_mob(entity_id, source, amount);
-        let effects = world.into_effects();
-        crate::interaction::send_effects(region, Some(id), &effects);
-        ok
-    };
-    if ok {
-        // 官方 `Player.attack` 打中之后 `causeFoodExhaustion(0.1f)`，
-        // 挥手包由 `attackVisualEffects` 发给观察者。
-        if let Some(player) = region.players.get_mut(&id) {
-            // `Player.attack` 打中之后 `setLastHurtMob(target)`。
-            // `Player.attack` records `setLastHurtMob(target)` after a hit.
-            let now = player.entity_ticks;
-            player.combat_memory.record_attack(entity_id, now);
-            let food = &mut player.health.food;
-            food.exhaustion =
-                (food.exhaustion + 0.1).min(mc_bamboo_blocks::entity::mob::damage::MAX_EXHAUSTION);
-            player.health_sync = HealthSync::of(player);
-        }
-        crate::entity_sync::broadcast_swing(region, id, Hand::Main);
-    }
+    crate::player_attack::on_attack(region, id, entity_id);
 }
 
 #[cfg(test)]

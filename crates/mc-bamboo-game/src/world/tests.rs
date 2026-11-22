@@ -4170,7 +4170,8 @@ fn damage_command_hurts_a_player_and_sends_health_packets() {
     );
 }
 
-/// 左键打牛：一次 `player_attack` 伤害，空手伤害是 2。
+/// 左键打牛：满充能空手一次 `player_attack` 伤害是 1（玩家的
+/// `ATTACK_DAMAGE` 基值 1.0 × 满充能系数 1.0）。
 #[test]
 fn left_click_attack_hurts_a_cow() {
     use mc_bamboo_blocks::entity::Entity;
@@ -4183,6 +4184,11 @@ fn left_click_attack_hurts_a_cow() {
     // 牛放在玩家身边，够距判定才会通过。
     let position = region.players.get(&client.id).unwrap().position();
     let cow = region.entities.spawn(Entity::cow(position));
+    region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 100;
     server.request(&client, PlayRequest::Attack { entity_id: cow });
     server.tick();
     let health = server
@@ -4195,5 +4201,444 @@ fn left_click_attack_hurts_a_cow() {
             mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
             _ => None,
         });
-    assert_eq!(health, Some(8.0), "空手一次攻击扣 2 点");
+    assert_eq!(health, Some(9.0), "满充能空手一次攻击扣 1 点");
+}
+
+/// 满充能下落暴击：暴击动画、攻击音效和伤害指示粒子都真的发到客户端，
+/// 不是只生成效果就丢掉。
+///
+/// A full-strength falling critical sends its critical animation, attack sound
+/// and damage-indicator particles to clients, not just into an internal queue.
+#[test]
+fn a_critical_attack_emits_its_packets() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::{items, packets::play::clientbound};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = ItemStack::new(items::DIAMOND_SWORD, 1);
+        player.attack_strength_ticker = 100;
+        player.motion.fall_distance = 2.0;
+        player.on_ground = false;
+        player.last_main_hand_item = player.inventory.held(Hand::Main).clone();
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let frames = client.take_frames();
+    let has = |id: i32| frames.iter().any(|frame| frame.id == id);
+    assert!(
+        has(clientbound::ANIMATE),
+        "CRITICAL_HIT animation must reach the client"
+    );
+    assert!(
+        has(clientbound::SOUND),
+        "the attack sound must reach the client"
+    );
+    assert!(
+        has(clientbound::LEVEL_PARTICLES),
+        "damage-indicator particles must reach the client"
+    );
+}
+
+/// 满充能剑横扫时，火焰附加按官方 `doSweepAttack` 对横扫命中的目标也生效，
+/// 不只点燃主目标。
+///
+/// A full-strength sword sweep with Fire Aspect ignites swept targets too, not
+/// just the main target, per vanilla `doSweepAttack`.
+#[test]
+fn a_sweep_ignites_swept_targets_with_fire_aspect() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    // 主目标和横扫目标相邻，都落在主目标 inflate(1, 0.25, 1) 盒内、离玩家 < 3 格。
+    // The main and swept targets sit next to each other, inside the swept box
+    // and within 3 blocks of the player.
+    let main = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let swept = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.5,
+        position.y,
+        position.z,
+    )));
+    let fire_aspect = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == "minecraft:fire_aspect")
+        })
+        .expect("fire_aspect exists") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(fire_aspect, 2)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    let weapon = ItemStack {
+        item: mc_bamboo_data::items::DIAMOND_SWORD,
+        count: 1,
+        added,
+        removed,
+    };
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: main });
+    server.tick();
+    let entities = &server.world.islands.region.entities;
+    let fire = |uid: i32| {
+        entities
+            .get(uid)
+            .map_or(0, |entity| entity.remaining_fire_ticks)
+    };
+    assert!(fire(main) > 0, "the main target must be ignited");
+    assert!(fire(swept) > 0, "the swept target must be ignited too");
+}
+
+/// 某类包里每条帧的首个 VarInt：音效注册表 ID 加一，或粒子 ID。
+///
+/// The first VarInt of each frame with the given packet id: a sound registry
+/// id plus one, or a particle id.
+fn first_varints(frames: &[Frame], packet_id: i32) -> Vec<i32> {
+    frames
+        .iter()
+        .filter(|frame| frame.id == packet_id)
+        .filter_map(|frame| Reader::new(&frame.body).varint().ok())
+        .collect()
+}
+
+/// `ClientboundAnimatePacket` 帧里的动作字节（在实体 ID 的 VarInt 之后）。
+///
+/// The action byte of each `ClientboundAnimatePacket` frame, after the entity
+/// id VarInt.
+fn animate_actions(frames: &[Frame]) -> Vec<u8> {
+    frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::ANIMATE)
+        .filter_map(|frame| frame.body.last().copied())
+        .collect()
+}
+
+/// 音效包里的注册表 ID（`Sound.write_body` 发的是 `id + 1`）。
+///
+/// Sound registry ids from the sound packets (`Sound.write_body` sends `id + 1`).
+fn sound_event_ids(frames: &[Frame]) -> Vec<i32> {
+    first_varints(frames, clientbound::SOUND)
+        .into_iter()
+        .map(|id| id - 1)
+        .collect()
+}
+
+/// 满充能剑横扫：`PLAYER_ATTACK_SWEEP` 音效和 `SWEEP_ATTACK` 粒子都真的发到
+/// 客户端，横扫命中的第二头牛也掉血。弓箭曾出过「生成了效果却没发出去」的问题，
+/// 这里按音效注册表 ID 和粒子 ID 精确断言，避免只查包类型漏掉漏发。
+///
+/// A full-strength sword sweep sends its `PLAYER_ATTACK_SWEEP` sound and
+/// `SWEEP_ATTACK` particle to clients and damages the nearby cow. The bow path
+/// once recorded effects without delivering them, so assert on specific sound
+/// and particle ids instead of only packet types.
+#[test]
+fn a_sweep_attack_emits_its_sound_and_particle() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{items, registries::particle_type, sounds};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    // 主目标和横扫目标相邻，都落在主目标 inflate(1, 0.25, 1) 盒内、离玩家 < 3 格。
+    //
+    // The main and swept targets sit next to each other, inside the swept box
+    // and within 3 blocks of the player.
+    let main = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let swept = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.5,
+        position.y,
+        position.z,
+    )));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        let weapon = ItemStack::new(items::DIAMOND_SWORD, 1);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: main });
+    server.tick();
+    let frames = client.take_frames();
+
+    let sweep_sound = i32::from(sounds::sound_event("minecraft:entity.player.attack.sweep"));
+    assert!(
+        sound_event_ids(&frames).contains(&sweep_sound),
+        "the sweep attack sound must reach the client"
+    );
+    assert!(
+        first_varints(&frames, clientbound::LEVEL_PARTICLES).contains(&particle_type::SWEEP_ATTACK),
+        "the sweep attack particle must reach the client"
+    );
+    let swept_health = server
+        .world
+        .islands
+        .region
+        .entities
+        .public_at(swept)
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
+            _ => None,
+        });
+    assert!(
+        swept_health.is_some_and(|health| health < 10.0),
+        "the swept cow must take damage"
+    );
+}
+
+/// 附魔加成 > 0 的满充能攻击发 `MAGIC_CRITICAL_HIT` 动画；这一击不是下落暴击，
+/// 所以不发 `CRITICAL_HIT`。两种动作按 `ClientboundAnimatePacket` 的字节值区分。
+///
+/// A full-strength hit with a positive enchantment boost sends the
+/// `MAGIC_CRITICAL_HIT` animation; it is not a falling critical, so no
+/// `CRITICAL_HIT`. The two actions are told apart by their animate byte values.
+#[test]
+fn an_enchanted_attack_emits_the_magic_critical_animation() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{items, registries::data_component_type};
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry},
+        item::ItemStack,
+        packet::play::Animate,
+    };
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let sharpness = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == "minecraft:sharpness")
+        })
+        .expect("sharpness exists") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(sharpness, 3)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    let weapon = ItemStack {
+        item: items::DIAMOND_SWORD,
+        count: 1,
+        added,
+        removed,
+    };
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let actions = animate_actions(&client.take_frames());
+    assert!(
+        actions.contains(&Animate::MAGIC_CRITICAL_HIT),
+        "the magic-critical animation must reach the client"
+    );
+    assert!(
+        !actions.contains(&Animate::CRITICAL_HIT),
+        "a non-critical attack must not send the critical animation"
+    );
+}
+
+/// 非满充能空手攻击发 `PLAYER_ATTACK_WEAK` 音效，不发 strong / crit / sweep 音效。
+///
+/// A non-full-strength empty-hand attack sends the `PLAYER_ATTACK_WEAK` sound,
+/// not the strong / crit / sweep sounds.
+#[test]
+fn a_weak_attack_emits_its_sound() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::sounds;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 0;
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let ids = sound_event_ids(&client.take_frames());
+    let sound = |name| i32::from(sounds::sound_event(name));
+    assert!(
+        ids.contains(&sound("minecraft:entity.player.attack.weak")),
+        "the weak attack sound must reach the client"
+    );
+    for absent in [
+        "minecraft:entity.player.attack.strong",
+        "minecraft:entity.player.attack.crit",
+        "minecraft:entity.player.attack.sweep",
+    ] {
+        assert!(
+            !ids.contains(&sound(absent)),
+            "the {absent} sound must not be sent"
+        );
+    }
+}
+
+/// 满充能空手攻击（够距、非暴击、非疾跑，空手不会横扫）发
+/// `PLAYER_ATTACK_STRONG` 音效，不发 weak / crit / sweep 音效。按音效注册表 ID
+/// 精确断言，补上 `a_weak_attack_emits_its_sound` 没覆盖到的 strong 分支。
+///
+/// A full-strength empty-hand attack (in range, non-critical, non-sprint; an
+/// empty hand never sweeps) sends `PLAYER_ATTACK_STRONG`, not weak / crit /
+/// sweep. Assert by sound registry id to cover the strong branch that
+/// `a_weak_attack_emits_its_sound` leaves out.
+#[test]
+fn a_full_strength_attack_emits_the_strong_sound() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::sounds;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let ids = sound_event_ids(&client.take_frames());
+    let sound = |name| i32::from(sounds::sound_event(name));
+    assert!(
+        ids.contains(&sound("minecraft:entity.player.attack.strong")),
+        "the strong attack sound must reach the client"
+    );
+    for absent in [
+        "minecraft:entity.player.attack.weak",
+        "minecraft:entity.player.attack.crit",
+        "minecraft:entity.player.attack.sweep",
+    ] {
+        assert!(
+            !ids.contains(&sound(absent)),
+            "the {absent} sound must not be sent"
+        );
+    }
+}
+
+/// 官方 `damageStatsAndHearts` 只在实际伤害大于 2 时发 `DAMAGE_INDICATOR`
+/// 粒子：空手满充能（1 点）不发，钻石剑满充能（7 点）发。按粒子 ID 精确断言，
+/// 补上此前只按包类型松散覆盖的伤害指示粒子和它的伤害门槛。
+///
+/// Vanilla `damageStatsAndHearts` sends `DAMAGE_INDICATOR` particles only when
+/// actual damage exceeds 2: a full-strength empty hand (1 point) sends none,
+/// a full-strength diamond sword (7 points) does. Assert by particle id to
+/// cover the damage-indicator branch and its threshold, previously checked
+/// only by packet type.
+#[test]
+fn damage_indicator_particles_follow_the_damage_threshold() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::{items, registries::particle_type};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let particle_ids = |weapon: Option<i32>| {
+        let mut server = Harness::new(8);
+        let client = server.join("Kitten");
+        server.tick();
+        client.take_frames();
+        let region = &mut server.world.islands.region;
+        let position = region.players.get(&client.id).unwrap().position();
+        let cow = region.entities.spawn(Entity::cow(position));
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            if let Some(item) = weapon {
+                let slot = player.inventory.hand_slot(Hand::Main);
+                let stack = ItemStack::new(item, 1);
+                player.inventory.slots[slot] = stack.clone();
+                player.last_main_hand_item = stack;
+            }
+            player.attack_strength_ticker = 100;
+            player.on_ground = true;
+            player.motion.fall_distance = 0.0;
+        }
+        server.request(&client, PlayRequest::Attack { entity_id: cow });
+        server.tick();
+        first_varints(&client.take_frames(), clientbound::LEVEL_PARTICLES)
+    };
+
+    let empty = particle_ids(None);
+    assert!(
+        !empty.contains(&particle_type::DAMAGE_INDICATOR),
+        "1 point of damage must not emit damage-indicator particles"
+    );
+    let sword = particle_ids(Some(items::DIAMOND_SWORD));
+    assert!(
+        sword.contains(&particle_type::DAMAGE_INDICATOR),
+        "7 points of damage must emit damage-indicator particles"
+    );
 }

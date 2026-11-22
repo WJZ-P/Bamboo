@@ -3338,6 +3338,40 @@ impl<'a> World<'a> {
         found
     }
 
+    /// `Player.causeExtraKnockback` 对生物目标调的 `LivingEntity.knockback`。
+    /// 方向和力道由攻击者给；这是受伤默认击退之外的第二下击退。
+    ///
+    /// The `LivingEntity.knockback` that `Player.causeExtraKnockback` applies to a
+    /// mob target, with the attacker's direction and strength. This is the second
+    /// knockback, on top of the default one inside `hurtServer`.
+    pub fn knockback_mob(&mut self, id: i32, strength: f64, dx: f64, dz: f64) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        let found = entity
+            .with_mob(|me, mob| {
+                crate::entity::mob::living::knockback(me, mob, strength, dx, dz);
+            })
+            .is_some();
+        self.level.put_entity(entity);
+        found
+    }
+
+    /// `Entity.igniteForTicks`：火焰附加把目标点着的刻数，只在比现有着火更久时覆盖。
+    ///
+    /// `Entity.igniteForTicks`: Fire Aspect's ignite ticks, applied only when longer
+    /// than the mob's current remaining fire.
+    pub fn ignite_mob(&mut self, id: i32, ticks: i32) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        if ticks > entity.remaining_fire_ticks {
+            entity.remaining_fire_ticks = ticks;
+        }
+        self.level.put_entity(entity);
+        true
+    }
+
     /// `LivingEntity.removeEffect` / `removeAllEffects`：`None` 表示清全部。
     ///
     /// `LivingEntity.removeEffect` / `removeAllEffects`; `None` clears all.

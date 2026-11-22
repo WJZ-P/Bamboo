@@ -1015,6 +1015,35 @@ impl ClientboundPacket for SwingAnimation {
     }
 }
 
+/// 官方 `ClientboundAnimatePacket`：VarInt 实体 ID + 一个字节的动作。
+/// 26.3 把挥手挪到了 `swing_animation`，这里只剩暴击的两种动作：
+/// `CRITICAL_HIT = 1`、`MAGIC_CRITICAL_HIT = 2`，`WAKE_UP = 0` 不用。
+///
+/// Vanilla `ClientboundAnimatePacket`: a VarInt entity id and one action byte.
+/// 26.3 moved swinging to `swing_animation`; only the two critical-hit actions
+/// remain here: `CRITICAL_HIT = 1` and `MAGIC_CRITICAL_HIT = 2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Animate {
+    pub entity_id: i32,
+    pub action: u8,
+}
+
+impl Animate {
+    /// `ClientboundAnimatePacket.CRITICAL_HIT`。
+    pub const CRITICAL_HIT: u8 = 1;
+    /// `ClientboundAnimatePacket.MAGIC_CRITICAL_HIT`。
+    pub const MAGIC_CRITICAL_HIT: u8 = 2;
+}
+
+impl ClientboundPacket for Animate {
+    const ID: i32 = clientbound::ANIMATE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.entity_id);
+        out.push(self.action);
+    }
+}
+
 /// 官方 `ClientboundUpdateMobEffectPacket`：VarInt 实体 ID、效果 Holder(VarInt)、
 /// VarInt 等级、VarInt 剩余刻数、一个字节的标志位
 /// （ambient 1 / visible 2 / showIcon 4 / blend 8）。
@@ -1322,6 +1351,22 @@ mod tests {
             body(&SwingAnimation::default_swing(5, Hand::Main)),
             hex("05 00 01 06")
         );
+    }
+
+    #[test]
+    fn animate_packet_matches_official_bytes() {
+        let crit = Animate {
+            entity_id: ENTITY,
+            action: Animate::CRITICAL_HIT,
+        };
+        assert_eq!(body(&crit), hex("07 01"));
+        assert_eq!(frame(&crit), hex("03 02 07 01"));
+
+        let magic = Animate {
+            entity_id: ENTITY,
+            action: Animate::MAGIC_CRITICAL_HIT,
+        };
+        assert_eq!(body(&magic), hex("07 02"));
     }
 
     #[test]

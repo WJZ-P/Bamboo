@@ -207,6 +207,54 @@ WebView2 的渲染进程不算在内。
 - **青蛙和蝌蚪的已知限制**：岩浆怪还没有，所以青蛙吃岩浆怪掉蛙明灯这条走不到（史莱姆掉一个粘液球的条件靠伤害来源带的攻击者类型，没有逐刻对拍掉落物）。长跳向量里的 `Math.sin` / `Math.cos` 用正确舍入的值：JVM 的英特尔桩代码大约每 800 次有一次差一个末位（`mc-bamboo-core` 的 `jmath`，`Math.atan2` 是 fdlibm 的逐位移植）。蛙卵被下落的方块砸碎（`entityInside`）没做；孵化没有接方块行为对拍（`Rule::TimerTick`），只有单元测试。长成青蛙之后的那只青蛙不在对拍夹具里（只比变的那一刻的移除、世界随机源和大脑）。青蛙 `age` 是负数时客户端同步的 `DATA_BABY_ID` 官方为真、Bamboo 为假（客户端对青蛙不看这一位）。行为放的声音（`level.playSound(null, body, ...)`）音源类别统一按中立发，官方产卵声是 `BLOCKS`。骆驼还没做。
 - **大脑生物的已知限制**：`RunOne` 和山羊长跳角度的洗牌在官方用不带种子的随机源（`ShufflingList` 的 `generateUniqueSeed`、`Collections` 的静态 `Random`），Bamboo 按出生时生物随机源的状态和序号算种子，对拍两边按同一公式重设；传感器起始延迟官方取 `Sensor` 的静态随机源，Bamboo 取不到同一串数，对拍按官方报的值设。官方几个静态 `TargetingConditions` 的距离跟着「最后一个扫描的传感器」的跟随距离变，Bamboo 每个生物用自己的跟随距离。并行（性能）模式下世界随机源读作 0：行为时长取最短、长跳按列表顺序抽落点。山羊冲撞的目标检测把玩家排在生物后面（官方按实体分区的顺序）；盾牌格挡减半（`applyItemBlocking`）和被撞者的 `doPostAttackEffects`（荆棘等）没做；长跳的 `noCollision` 不看船、潜影贝这类硬碰撞实体（Bamboo 还没有）；盔甲架不存在，`mobGriefing` 那一条不起作用。`Goat.setYHeadRot` 的 ±15 度夹角只在读档时做（传送没做）。山羊繁殖没有逐刻对拍（夹具只比场景原有的生物）。
 
+- **玩家左键近战攻击**按官方 26.3 `ServerGamePacketListenerImpl.handleAttack` → `Player.attack` →
+  `ServerPlayer.crit` / `magicCrit` / `getEnchantedDamage` 完整实现：攻击冷却（基础伤害
+  `×(0.2 + s² × 0.8)`、附魔加成 `× s`）、`ATTACK_SPEED` 属性与 `getCurrentItemAttackStrengthDelay`、
+  挥空 / 攻击 / 换主手物品重置冷却；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
+  `MAGIC_CRITICAL_HIT` 动画）；拿剑、在地上、满充能、非暴击非疾跑时的横扫（打主目标
+  `inflate(1, 0.25, 1)` 里 3 格内的生物，`sweeping_edge` 按 `L/(L+1)` 加成，发 `SWEEP_ATTACK`
+  粒子，横扫命中的生物也照 `doPostAttackEffects` 吃火焰附加 / 节肢杀手效果）；疾跑 /
+  `knockback` 附魔 / `attack_knockback` 的额外击退并取消疾跑；锋利 / 亡灵杀手 /
+  节肢杀手（及节肢杀手的缓慢）、火焰附加、武器耐久、伤害指示粒子和
+  `player.attack.strong / weak / crit / sweep / knockback / nodamage` 音效都真的发到客户端。
+  PVP 按 `server.properties` 的 `pvp` 开关和官方 `canHarmPlayer` 处理（Bamboo 没有队伍）。
+  对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比牛的血量 / 击退速度 / 着火 /
+  受伤时间 / 是否移除和 `damage_event` 包，0 不一致；`--break-self-test attack_charge` 能抓到
+  故意改坏的充能值，`--break-self-test sweep_effects` 能抓到漏掉的横扫后附魔效果）；
+  `a_critical_attack_emits_its_packets`、`a_sweep_ignites_swept_targets_with_fire_aspect`、
+  `a_sweep_attack_emits_its_sound_and_particle`、
+  `an_enchanted_attack_emits_the_magic_critical_animation`、`a_weak_attack_emits_its_sound`、
+  `a_full_strength_attack_emits_the_strong_sound` 和
+  `damage_indicator_particles_follow_the_damage_threshold`
+  单测按音效 / 粒子注册表 ID 和动画动作字节，确认暴击 / 附魔暴击动画、横扫 / 伤害
+  指示粒子（含 `damageStatsAndHearts` 的 `actualDamage > 2` 门槛）、strong / weak /
+  sweep 音效真的发到客户端、横扫目标也着火且掉血；`crit` / `knockback` / `nodamage`
+  音效仍只由 `a_critical_attack_emits_its_packets` 按包类型松散覆盖或尚未精确断言。
+- **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
+  （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
+  `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
+  骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
+  节肢杀手的缓慢时长恒用最短 30 刻，官方从**生物自己的随机源**
+  在 `[30, 30 + 10×(L−1)]` 刻取值，Bamboo 没把该随机源暴露给攻击路径；`Stats.DAMAGE_DEALT`
+  统计不写原版 `stats/<UUID>.json`；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
+  （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画 /
+  挥手 / 耐久槽包在 `mob-oracle` 里不逐字节比（官方假世界不捕获这些包，且带种子的音效
+  顺序受两套发包路径影响），由上面的单测确认它们确实发出（`crit` / `knockback` /
+  `nodamage` 音效仍只按包类型松散覆盖或未按 ID 精确断言）；攻击场景的对拍夹具跳过
+  `cow.tick()`，否则官方一侧的重力 / AI 会污染击退速度，逐位比较不可行；PVP 只对另一名
+  玩家结算伤害和受伤链路，额外击退（`causeExtraKnockback`）、火焰附加点燃和横扫波及的
+  玩家都走实体表（`knockback_mob` / `ignite_mob` / 候选收集），而玩家不在实体表里，
+  故这几项对玩家目标不生效（官方 `Player.attack` / `doSweepAttack` 对所有
+  `LivingEntity` 一视同仁）。够距用 `within_block_interaction_range` 加目标所在方块点，
+  官方 `handleAttack` 用 `isWithinAttackRange`（实体交互距离 + 武器攻击距离 + 整个 AABB）
+  并查世界边界和 feature flag，这一层完全没进 `mob-oracle`（夹具直接调 `Player.attack`）；
+  横扫候选盒按主目标位置近似 `inflate(1, 0.25, 1)`，不含玩家和队伍判定；官方
+  `Player.attack` 在 `baseDamage <= 0 && magicBoost <= 0` 时整段跳过（连 `nodamage` 音都不发），
+  Bamboo 没有这道门槛（正常路径 `ATTACK_DAMAGE` 基值 1.0 使 `baseDamage ≥ 0.2`，不触发）；
+  `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 只累加 `ADD_VALUE` 修饰符、横扫阈值把 `getSpeed()`
+  写死成 0.1，带乘法修饰符或速度药水时可能不同；受害者装备附魔（荆棘）和
+  `autoSpinAttack` 的武器来源都未建模。
+
 - 多名玩家进入同一个世界；新世界默认 `normal`（噪声地形，见上面世界生成一节），
   `level-type=flat` 用超平坦；登录模式由服务器目录里的 `online-mode` 决定（官方默认正版验证）。
 - 默认按官方 `server.properties` 的 `online-mode=true` 走正版验证；官方未实现的键原样保留、
