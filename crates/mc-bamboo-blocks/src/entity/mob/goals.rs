@@ -4082,7 +4082,12 @@ fn land_toward_direction(
     direction: BlockPos,
 ) -> Option<BlockPos> {
     let pos = toward_direction(me, mob, max_distance, direction);
-    if outside_limits(view, pos) || (restricted && !within_home(mob, pos)) {
+    if outside_limits(view, pos)
+        || (restricted && !within_home(mob, pos))
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`：官方的第三个判定。
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`, vanilla's third check.
+        || !stable_destination(mob, view, pos)
+    {
         return None;
     }
     Some(pos)

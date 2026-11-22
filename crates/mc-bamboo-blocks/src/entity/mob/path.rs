@@ -1511,11 +1511,15 @@ impl Search<'_> {
 
 impl Search<'_> {
     /// `FlyNodeEvaluator.getStart`：不在水里时 `floor(y + 0.5)`；起点不可用就看包围盒四角。
-    /// 小体型生物官方的十个随机候选要取实体随机数，鹦鹉的包围盒半径大于 1，走不到那一条。
+    /// 官方在小体型（`getSize() < 1.0`）时还会用实体随机源抽十个候选，鹦鹉的
+    /// `getSize()` 是 0.633，本该走那一条；寻路请求里没有实体随机源，这里只试四角，
+    /// 官方那三次一组取数没有复现（见 README 已知限制）。
     ///
     /// `FlyNodeEvaluator.getStart`: `floor(y + 0.5)` out of water, falling back to the
-    /// box corners. The ten random candidates for small mobs draw from the entity random;
-    /// parrots are bigger than that and never take that branch.
+    /// box corners. Vanilla also samples ten candidates from the entity random for small
+    /// mobs (`getSize() < 1.0`); a parrot's `getSize()` is 0.633, so it should take that
+    /// branch, but the path request has no entity random and only the four corners are
+    /// tried here (see the README known limits).
     fn fly_start(&mut self) -> usize {
         let mob = self.mob;
         let start_y = if self.flags.can_float && mob.in_water {

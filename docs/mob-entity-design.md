@@ -964,8 +964,8 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   - `path.rs` 新增 `EvaluatorFlags.fly` 与 `FlyNodeEvaluator` 的逐位移植（`fly_start` / `fly_probe` /
     `fly_neighbors` / `fly_path_type`）：六轴 + 单轴斜向 + 水平对角 + 八个斜向角，探测顺序照官方；
     `WALKABLE` 节点代价加一；`OPEN` 格的下方规则（`FIRE` / `DAMAGING` / `COCOA` / `FENCE` / 其余转
-    `WALKABLE`）和 `checkNeighbourBlocks` 保留传入类型。小体型生物的十个随机起点候选没有接（鹦鹉走不到，
-    见汇报）。
+    `WALKABLE`）和 `checkNeighbourBlocks` 保留传入类型。小体型生物的十个随机起点候选没有接（鹦鹉的
+    `getSize()` 是 0.633、本该走那条，见 §5.21）。
   - `navigation.rs`：飞行导航的 `canUpdatePath`（不是乘客恒真）、`createPath` 跳过加载与地表检查、
     `tick` 的 `getGroundY` 跳过、`getTempMobPos` 用实体坐标、`stable_destination` 用实心近似；
     `canMoveDirectly` 的「流体也算阻挡」目前只挡源方块水（已知差异）。
@@ -989,9 +989,23 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   （新增 `gen_parrot`）。
 - **已知限制与交接**：上肩只做到 `LandOnOwnersShoulderGoal` 运行（冷却、主人旁观者、没命令坐下），
   玩家 `ShoulderEntityLeft` / `Right` 存档与同步未建模，所以两箱相交时不 `discard()`；`FollowMobGoal`
-  占位；`MOB_SOUND_MAP` 的 `HashMap` 迭代顺序按名字排序近似；悬停落点比官方少一次实体随机取数
-  （落点与轨迹一致、随机源状态从那一刻差一步，`parrot_hover` 临时场景复现过，未定位）；玩家的飞行 /
-  水里 / 细雪状态没进 `PlayerView`；拴绳未建模。
+  占位；`MOB_SOUND_MAP` 的 `HashMap` 迭代顺序按名字排序近似；悬停落点的随机源错位已在 §5.21 定位并修掉；
+  玩家的飞行 / 水里 / 细雪状态没进 `PlayerView`；拴绳未建模。
+
+
+### 5.21 第 17 轮：补上 `LandRandomPos.generateRandomPosTowardDirection` 的 `isNotStable`（op-misc，2026-11-22）
+
+- **根因**：`goals.rs` 的 `land_toward_direction` 只做了官方的「越界」和「离家」两个判定，少了第三个
+  `!GoalUtils.isNotStable(mob.getNavigation(), pos)`。悬浮落点（`HoverRandomPos`）、陆地落点
+  （`LandRandomPos.getPos`）和 `DefaultRandomPos` 都走这个函数，所以官方会丢掉一批「目标格站不住」的候选，
+  Bamboo 却接受，10 次抽点的接受序列因此不同，从选中落点那一刻起实体随机源就错位两次。
+- **修复**：补上 `!stable_destination(mob, view, pos)`（飞行导航里是 `FlyingPathNavigation.isStableDestination`
+  的实心方块近似，见 README 已知差异）。
+- **验证**：`mob-oracle --only parrot` 4 例 860 刻仍 0 不一致；一个临时的无树桩 400 刻悬停场景（平坦地面、
+  种子 906、未进对拍表）从 308 处不一致降到 3 处，随机源逐刻一致；残留 3 处（第 245–247 刻）只有 `xr` / `hr`，
+  官方那几刻 `LookAtPlayerGoal` 已在看玩家、Bamboo 还没开始，随机源相同，原因未查到。
+- **仍没做**：`FlyNodeEvaluator.getStart` 小体型生物（`getSize() < 1.0`）的十个随机起点候选——寻路请求里没有
+  实体随机源，只试包围盒四角；鹦鹉的 `getSize()` 是 0.633，理论上会走那条，只在起点格代价为负时触发。
 
 ---
 
