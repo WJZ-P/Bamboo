@@ -647,22 +647,34 @@ impl ClientboundPacket for BundleDelimiter {
     fn write_body(&self, _out: &mut Vec<u8>) {}
 }
 
-/// 当前有变更的物品使用统计，客户端按注册表 ID 读每一项。
+/// `ClientboundAwardStatsPacket`：有变更的统计累计值，按 (统计类型, ID, 值) 编码。
+/// 物品使用走 `minecraft:used`，近战伤害走 `minecraft:custom` 的 `damage_dealt`。
+/// 官方用哈希映射，条目顺序不定；这里先物品后自定义，客户端一样按映射应用。
 ///
-/// Dirty item-use statistics, encoded with registry IDs.
+/// `ClientboundAwardStatsPacket`: changed cumulative stats as (type, id, value).
+/// Item usage uses `minecraft:used`; melee damage uses `damage_dealt` under
+/// `minecraft:custom`. Vanilla iterates a hash map (order unspecified); we send
+/// item stats first and the custom stat last, which the client applies as a map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AwardStats<'a> {
     pub item_used: &'a [(i32, i32)],
+    pub damage_dealt: Option<i32>,
 }
 
 impl ClientboundPacket for AwardStats<'_> {
     const ID: i32 = clientbound::AWARD_STATS;
 
     fn write_body(&self, out: &mut Vec<u8>) {
-        write_varint(out, self.item_used.len() as i32);
+        let extra = i32::from(self.damage_dealt.is_some());
+        write_varint(out, self.item_used.len() as i32 + extra);
         for &(item, value) in self.item_used {
             write_varint(out, mc_bamboo_data::registries::stat_type::USED);
             write_varint(out, item);
+            write_varint(out, value);
+        }
+        if let Some(value) = self.damage_dealt {
+            write_varint(out, mc_bamboo_data::registries::stat_type::CUSTOM);
+            write_varint(out, mc_bamboo_data::registries::custom_stat::DAMAGE_DEALT);
             write_varint(out, value);
         }
     }
@@ -971,6 +983,26 @@ mod tests {
 
     #[test]
     fn award_stats_is_an_empty_list() {
-        assert_eq!(body(&AwardStats { item_used: &[] }), hex("00"));
+        assert_eq!(
+            body(&AwardStats {
+                item_used: &[],
+                damage_dealt: None,
+            }),
+            hex("00")
+        );
+    }
+
+    /// `minecraft:custom` 是 stat_type 8，`minecraft:damage_dealt` 是 custom_stat 25。
+    /// 带一个物品使用统计时前面先发 `minecraft:used`（2）。
+    ///
+    /// `minecraft:custom` is stat_type 8 and `minecraft:damage_dealt` is
+    /// custom_stat 25; a dirty item-use stat (type 2) is written before it.
+    #[test]
+    fn award_stats_encodes_the_damage_dealt_custom_stat() {
+        let packet = AwardStats {
+            item_used: &[(7, 3)],
+            damage_dealt: Some(42),
+        };
+        assert_eq!(body(&packet), hex("02 02 07 03 08 19 2a"));
     }
 }

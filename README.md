@@ -219,7 +219,10 @@ WebView2 的渲染进程不算在内。
   额外击退还照 `Player.causeExtraKnockback` 末尾的 `ServerPlayer.syncVelocity` 分支，
   速度包发出去之后恢复受击前的服务端速度。横扫伤害源沿用主攻击的
   `damageSource`（含 `isCreativePlayer` 标记），创造模式攻击者也能绕过被横扫目标的
-  受伤无敌帧。
+  受伤无敌帧。`Player.damageStatsAndHearts` 的
+  `awardStat(Stats.DAMAGE_DEALT, Math.round(实际伤害 × 10))` 在会话内累计，
+  `RequestStats` 时作为 `minecraft:custom` 统计发到客户端（`custom_stat` 的注册表 ID
+  由生成器从 `registries.json` 导出）。
   对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比每头牛的血量 / 击退速度 /
   着火 / 受伤时间 / 是否移除、**每头牛自己的随机源状态**，以及出站效果包
   `damage_event` / `sound` / `level_particles` / `animate` / `entity_event`，0 不一致；
@@ -233,15 +236,19 @@ WebView2 的渲染进程不算在内。
   单测按音效 / 粒子注册表 ID 和动画动作字节，确认暴击 / 附魔暴击动画、横扫 / 伤害
   指示粒子（含 `damageStatsAndHearts` 的 `actualDamage > 2` 门槛）、strong / weak /
   sweep 音效真的发到客户端、横扫目标也着火且掉血；`melee_attack_hits_another_player`
-  覆盖玩家互打的伤害、火焰附加、速度恢复和横扫波及第三名玩家。`nodamage` 音效仍没有
-  对拍场景覆盖。
+  覆盖玩家互打的伤害、火焰附加、速度恢复和横扫波及第三名玩家。
+  `melee_hit_awards_damage_dealt_on_request_stats` 走完整 `on_attack` → `RequestStats`，
+  配合协议层 `award_stats_encodes_the_damage_dealt_custom_stat` 逐字节比 `award_stats` 包，
+  确认近战命中真的把 `DAMAGE_DEALT` 发到客户端（故意把累计值改成 0，前者立刻失败）。
+  `nodamage` 音效仍没有对拍场景覆盖。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
   `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
   骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
   节肢杀手的缓慢时长按 `ApplyMobEffect` 从**受害者自己的随机源**取三次
   （`nextInt(1)`、时长、等级），落在 `[30, 30 + 10×(L−1)]` 刻、等级恒为 3；`Stats.DAMAGE_DEALT`
-  统计不写原版 `stats/<UUID>.json`；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
+  按官方 `awardStat` 在会话内累计、在 `RequestStats` 时作为 `minecraft:custom` 统计发给客户端，
+  但不写原版 `stats/<UUID>.json`（也不更新统计计分板目标）；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
   （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画
   包已经在 `mob-oracle` 里逐字节比，但**音效包末尾 8 字节的随机种子不比**：官方每发一个
   音效就当场从世界随机源取种子，Bamboo 把一拍的效果攒到末尾统一发，取数顺序因此不同，

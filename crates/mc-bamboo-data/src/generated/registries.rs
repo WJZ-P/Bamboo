@@ -1015,6 +1015,94 @@ pub mod stat_type {
     pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
+pub mod custom_stat {
+    pub const TOTAL: u32 = 78;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:leave_game", "minecraft:play_time", "minecraft:total_world_time", "minecraft:time_since_death", "minecraft:time_since_rest", "minecraft:sneak_time", "minecraft:walk_one_cm", "minecraft:crouch_one_cm", "minecraft:sprint_one_cm", "minecraft:walk_on_water_one_cm", "minecraft:fall_one_cm", "minecraft:climb_one_cm", "minecraft:fly_one_cm", "minecraft:walk_under_water_one_cm", "minecraft:minecart_one_cm", "minecraft:boat_one_cm", "minecraft:pig_one_cm", "minecraft:happy_ghast_one_cm", "minecraft:horse_one_cm", "minecraft:aviate_one_cm", "minecraft:swim_one_cm", "minecraft:strider_one_cm", "minecraft:nautilus_one_cm", "minecraft:jump", "minecraft:drop", "minecraft:damage_dealt", "minecraft:damage_dealt_absorbed", "minecraft:damage_dealt_resisted", "minecraft:damage_taken", "minecraft:damage_blocked_by_shield", "minecraft:damage_absorbed", "minecraft:damage_resisted", "minecraft:deaths", "minecraft:mob_kills", "minecraft:animals_bred", "minecraft:player_kills", "minecraft:fish_caught", "minecraft:talked_to_villager", "minecraft:traded_with_villager", "minecraft:eat_cake_slice", "minecraft:fill_cauldron", "minecraft:use_cauldron", "minecraft:clean_armor", "minecraft:clean_banner", "minecraft:clean_shulker_box", "minecraft:interact_with_brewingstand", "minecraft:interact_with_beacon", "minecraft:inspect_dropper", "minecraft:inspect_hopper", "minecraft:inspect_dispenser", "minecraft:play_noteblock", "minecraft:tune_noteblock", "minecraft:pot_flower", "minecraft:trigger_trapped_chest", "minecraft:open_enderchest", "minecraft:enchant_item", "minecraft:play_record", "minecraft:interact_with_furnace", "minecraft:interact_with_crafting_table", "minecraft:open_chest", "minecraft:sleep_in_bed", "minecraft:sleep_in_straw_bed", "minecraft:open_shulker_box", "minecraft:open_barrel", "minecraft:interact_with_blast_furnace", "minecraft:interact_with_smoker", "minecraft:interact_with_lectern", "minecraft:interact_with_campfire", "minecraft:interact_with_cartography_table", "minecraft:interact_with_loom", "minecraft:interact_with_stonecutter", "minecraft:bell_ring", "minecraft:raid_trigger", "minecraft:raid_win", "minecraft:interact_with_anvil", "minecraft:interact_with_grindstone", "minecraft:target_hit", "minecraft:interact_with_smithing_table"];
+    pub const LEAVE_GAME: i32 = 0;
+    pub const PLAY_TIME: i32 = 1;
+    pub const TOTAL_WORLD_TIME: i32 = 2;
+    pub const TIME_SINCE_DEATH: i32 = 3;
+    pub const TIME_SINCE_REST: i32 = 4;
+    pub const SNEAK_TIME: i32 = 5;
+    pub const WALK_ONE_CM: i32 = 6;
+    pub const CROUCH_ONE_CM: i32 = 7;
+    pub const SPRINT_ONE_CM: i32 = 8;
+    pub const WALK_ON_WATER_ONE_CM: i32 = 9;
+    pub const FALL_ONE_CM: i32 = 10;
+    pub const CLIMB_ONE_CM: i32 = 11;
+    pub const FLY_ONE_CM: i32 = 12;
+    pub const WALK_UNDER_WATER_ONE_CM: i32 = 13;
+    pub const MINECART_ONE_CM: i32 = 14;
+    pub const BOAT_ONE_CM: i32 = 15;
+    pub const PIG_ONE_CM: i32 = 16;
+    pub const HAPPY_GHAST_ONE_CM: i32 = 17;
+    pub const HORSE_ONE_CM: i32 = 18;
+    pub const AVIATE_ONE_CM: i32 = 19;
+    pub const SWIM_ONE_CM: i32 = 20;
+    pub const STRIDER_ONE_CM: i32 = 21;
+    pub const NAUTILUS_ONE_CM: i32 = 22;
+    pub const JUMP: i32 = 23;
+    pub const DROP: i32 = 24;
+    pub const DAMAGE_DEALT: i32 = 25;
+    pub const DAMAGE_DEALT_ABSORBED: i32 = 26;
+    pub const DAMAGE_DEALT_RESISTED: i32 = 27;
+    pub const DAMAGE_TAKEN: i32 = 28;
+    pub const DAMAGE_BLOCKED_BY_SHIELD: i32 = 29;
+    pub const DAMAGE_ABSORBED: i32 = 30;
+    pub const DAMAGE_RESISTED: i32 = 31;
+    pub const DEATHS: i32 = 32;
+    pub const MOB_KILLS: i32 = 33;
+    pub const ANIMALS_BRED: i32 = 34;
+    pub const PLAYER_KILLS: i32 = 35;
+    pub const FISH_CAUGHT: i32 = 36;
+    pub const TALKED_TO_VILLAGER: i32 = 37;
+    pub const TRADED_WITH_VILLAGER: i32 = 38;
+    pub const EAT_CAKE_SLICE: i32 = 39;
+    pub const FILL_CAULDRON: i32 = 40;
+    pub const USE_CAULDRON: i32 = 41;
+    pub const CLEAN_ARMOR: i32 = 42;
+    pub const CLEAN_BANNER: i32 = 43;
+    pub const CLEAN_SHULKER_BOX: i32 = 44;
+    pub const INTERACT_WITH_BREWINGSTAND: i32 = 45;
+    pub const INTERACT_WITH_BEACON: i32 = 46;
+    pub const INSPECT_DROPPER: i32 = 47;
+    pub const INSPECT_HOPPER: i32 = 48;
+    pub const INSPECT_DISPENSER: i32 = 49;
+    pub const PLAY_NOTEBLOCK: i32 = 50;
+    pub const TUNE_NOTEBLOCK: i32 = 51;
+    pub const POT_FLOWER: i32 = 52;
+    pub const TRIGGER_TRAPPED_CHEST: i32 = 53;
+    pub const OPEN_ENDERCHEST: i32 = 54;
+    pub const ENCHANT_ITEM: i32 = 55;
+    pub const PLAY_RECORD: i32 = 56;
+    pub const INTERACT_WITH_FURNACE: i32 = 57;
+    pub const INTERACT_WITH_CRAFTING_TABLE: i32 = 58;
+    pub const OPEN_CHEST: i32 = 59;
+    pub const SLEEP_IN_BED: i32 = 60;
+    pub const SLEEP_IN_STRAW_BED: i32 = 61;
+    pub const OPEN_SHULKER_BOX: i32 = 62;
+    pub const OPEN_BARREL: i32 = 63;
+    pub const INTERACT_WITH_BLAST_FURNACE: i32 = 64;
+    pub const INTERACT_WITH_SMOKER: i32 = 65;
+    pub const INTERACT_WITH_LECTERN: i32 = 66;
+    pub const INTERACT_WITH_CAMPFIRE: i32 = 67;
+    pub const INTERACT_WITH_CARTOGRAPHY_TABLE: i32 = 68;
+    pub const INTERACT_WITH_LOOM: i32 = 69;
+    pub const INTERACT_WITH_STONECUTTER: i32 = 70;
+    pub const BELL_RING: i32 = 71;
+    pub const RAID_TRIGGER: i32 = 72;
+    pub const RAID_WIN: i32 = 73;
+    pub const INTERACT_WITH_ANVIL: i32 = 74;
+    pub const INTERACT_WITH_GRINDSTONE: i32 = 75;
+    pub const TARGET_HIT: i32 = 76;
+    pub const INTERACT_WITH_SMITHING_TABLE: i32 = 77;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
+}
+
 /// 属性的默认值，没有任何状态效果和附魔时的起点。
 pub mod attribute_defaults {
     pub const AIR_DRAG_MODIFIER: f64 = 1.0;

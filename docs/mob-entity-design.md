@@ -604,11 +604,13 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `FoodData.tick` / 和平回血 / 饥饿掉血（见第 7 节）。
 - **攻击（op-combat，2026-11-21 起已合入，见 6.4）**：`handleAttack` → `Player.attack`
   的完整链路已经做了：冷却 / 暴击 / 横扫 / 额外击退 / 伤害附魔 / 火焰附加 / 耐久 /
-  粒子 / 音效 / 动画 / PVP。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
+  粒子 / 音效 / 动画 / PVP，以及 `Stats.DAMAGE_DEALT` 的会话内累计和 `RequestStats`
+  发包。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
   `getAttackDamageBonus` / `PIERCING_WEAPON` 的武器行为、`onClimbable` / `isInWater`
   的暴击前置（`isPassenger` / `isMobilityRestricted` 已按 `riding.vehicle` / `EffectMap`
-  判）、`Stats.DAMAGE_DEALT` 的落盘，以及 `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 的
-  乘法修饰符和 `getSpeed()`。攻击音效 / 粒子 / 动画包已经进 `mob-oracle` 逐字节比
+  判）、`Stats.DAMAGE_DEALT` 写原版 `stats/<UUID>.json` 与统计计分板，以及
+  `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 的乘法修饰符和 `getSpeed()`。
+  攻击音效 / 粒子 / 动画包已经进 `mob-oracle` 逐字节比
   （见 6.4），暴击音（`player_attack_critical`）和疾跑击退音（`player_attack_sprint`）
   都在其中；`nodamage` 音效仍没有场景覆盖。
   旁观者和非法目标仍按官方 `handleAttack` 忽略（官方会断开连接，Bamboo 只忽略）。
@@ -674,6 +676,16 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   确认暴击 / 附魔暴击动画、横扫 / 伤害指示粒子（含 `actualDamage > 2` 门槛）和
   strong / weak / sweep 音效真的发到客户端；`crit` / `knockback` / `nodamage` 音效仍
   只按包类型松散覆盖或未精确断言（见 README 已知限制）。
+- **统计**：`Player.damageStatsAndHearts` 的
+  `awardStat(Stats.DAMAGE_DEALT, Math.round(actualDamage × 10))` 在 `finish_hit` 里按
+  实际伤害累计（值为 0 也照官方标脏），`ClientCommandKind::RequestStats` 时
+  `ServerStatsCounter.sendStats` 把累计值当 `minecraft:custom` /
+  `minecraft:damage_dealt` 写进 `award_stats` 包；和 `ITEM_USED` 一样只在会话内累计，
+  不写 `stats/<UUID>.json`、不更新统计计分板。`custom_stat` 的注册表 ID 由生成器
+  从 `registries.json` 导出。`award_stats_encodes_the_damage_dealt_custom_stat`
+  （逐字节）和 `melee_hit_awards_damage_dealt_on_request_stats`
+  （走完整 `on_attack` → `RequestStats`）两条单测守住；故意把累计值改成 0，
+  后者立刻失败。
 - **PVP**：`pvp` 为真时按 `ServerPlayer.canHarmPlayer`（`isPvpAllowed` + 队伍，
   Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`。额外击退、火焰附加点燃
   和横扫波及的玩家都按官方对 `LivingEntity` 一视同仁处理：玩家分支走

@@ -4884,3 +4884,79 @@ fn damage_indicator_particles_follow_the_damage_threshold() {
         "7 points of damage must emit damage-indicator particles"
     );
 }
+
+/// 官方 `Player.damageStatsAndHearts` 给攻击者记 `DAMAGE_DEALT`；客户端发
+/// `RequestStats` 时，`ServerStatsCounter.sendStats` 把这个累计值作为
+/// `minecraft:custom` 统计发出去。值按 `Math.round(实际伤害 × 10)` 算。
+///
+/// Vanilla `Player.damageStatsAndHearts` awards `DAMAGE_DEALT` to the attacker;
+/// `RequestStats` makes `ServerStatsCounter.sendStats` send that cumulative
+/// value as a `minecraft:custom` stat. The value is `Math.round(actual damage × 10)`.
+#[test]
+fn melee_hit_awards_damage_dealt_on_request_stats() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::{items, packets::play::clientbound};
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::AwardStats};
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let (cow, health_before) = {
+        let region = &mut server.world.islands.region;
+        let position = region.players.get(&client.id).unwrap().position();
+        let cow = region.entities.spawn(Entity::cow(position));
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            let slot = player.inventory.hand_slot(Hand::Main);
+            let stack = ItemStack::new(items::DIAMOND_SWORD, 1);
+            player.inventory.slots[slot] = stack.clone();
+            player.last_main_hand_item = stack;
+            player.attack_strength_ticker = 100;
+            player.on_ground = true;
+            player.motion.fall_distance = 0.0;
+        }
+        let health = region
+            .entities
+            .get(cow)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+            .expect("cow");
+        (cow, health)
+    };
+
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    client.take_frames();
+
+    let health_after = server
+        .world
+        .islands
+        .region
+        .entities
+        .get(cow)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+        .expect("cow");
+    let actual_damage = health_before - health_after;
+    let expected = (actual_damage * 10.0).round() as i32;
+    assert!(expected > 0, "the sword hit must damage the cow");
+
+    server.request(
+        &client,
+        PlayRequest::ClientCommand {
+            action: ClientCommandKind::RequestStats,
+        },
+    );
+    server.tick();
+    let frames = client.take_frames();
+    let stats = frames_with_id(&frames, clientbound::AWARD_STATS);
+    assert_eq!(stats.len(), 1, "RequestStats must answer the requester");
+    let expected_body = body_of(encode_frames(&AwardStats {
+        item_used: &[],
+        damage_dealt: Some(expected),
+    }));
+    assert_eq!(
+        stats[0].body, expected_body,
+        "DAMAGE_DEALT must be sent as a minecraft:custom stat"
+    );
+}

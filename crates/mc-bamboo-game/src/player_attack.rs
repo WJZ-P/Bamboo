@@ -34,8 +34,8 @@ use mc_bamboo_protocol::{
 };
 
 use crate::{
-    durability, entity_sync, inbound::PlayerId, interaction, links::encode_frames, player::Player,
-    player_exhaustion, player_health, player_hurt, region::Region,
+    durability, entity_sync, inbound::PlayerId, interaction, item_use_stats, links::encode_frames,
+    player::Player, player_exhaustion, player_health, player_hurt, region::Region,
 };
 
 /// `getAttackStrengthScale(0.5F)` 的容差，官方 `Player.attack` 里恒为 0.5。
@@ -896,11 +896,11 @@ fn land_attack(
 }
 
 /// 命中之后：衰减攻击者速度 / 取消疾跑、暴击 / 附魔暴击动画、横扫 / 伤害指示
-/// 粒子、武器耐久、`lastHurtMob`、饥饿消耗和挥手。
+/// 粒子、`DAMAGE_DEALT` 统计、武器耐久、`lastHurtMob`、饥饿消耗和挥手。
 ///
 /// After a hit: attacker velocity damp / sprint cancel, crit / magic-crit
-/// animations, sweep / damage-indicator particles, weapon durability,
-/// `lastHurtMob`, exhaustion and the swing.
+/// animations, sweep / damage-indicator particles, the `DAMAGE_DEALT` stat,
+/// weapon durability, `lastHurtMob`, exhaustion and the swing.
 fn finish_hit(
     region: &mut Region,
     id: PlayerId,
@@ -946,6 +946,13 @@ fn finish_hit(
             },
         );
     }
+    // `Player.damageStatsAndHearts`：先 `awardStat(DAMAGE_DEALT, round(实际伤害 × 10))`，
+    // 再按 `actualDamage > 2` 发伤害指示粒子。统计只在会话内累计（不写 stats 文件）。
+    //
+    // `Player.damageStatsAndHearts`: first `awardStat(DAMAGE_DEALT, round(actual
+    // damage × 10))`, then the damage-indicator particles when `actualDamage > 2`.
+    // The stat accumulates for this session only (no stats file).
+    item_use_stats::award_damage_dealt(region, id, (actual_damage * 10.0).round() as i32);
     if actual_damage > 2.0 {
         let count = (actual_damage * 0.5) as i32;
         send_particles(
