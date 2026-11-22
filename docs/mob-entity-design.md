@@ -1543,16 +1543,23 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   `checkAxolotlSpawnRules`（脚下 `axolotls_spawnable_on` 黏土）；`spawn.rs` 的 `finalizeSpawn`
   走 `dolphin::finalize_spawn` / `axolotl::finalize_spawn`，组数据 `SpawnGroup::Axolotl`；
   `MobType::mob_category` 给海豚 `WaterCreature`、美西螈 `Axolotls`。
-- 验证：`mob-oracle --only dolphin`（3 场景 603 刻）/ `--only axolotl`（4 场景 804 刻），
+- 验证：`mob-oracle --only dolphin`（4 场景 804 刻）/ `--only axolotl`（4 场景 804 刻），
   两边都设 `NoAI`、给同一个显式实体随机源种子、不重放构造取数，逐刻比位置、速度、朝向、
   随机源、氧气、年龄、着地 / 在水里、各自元数据、尺寸和世界随机源，**0 不一致**；
-  `--break-self-test water_mob` 把 `got_fish` / `playing_dead` 改坏能在第 0 刻被抓到。
+  海豚场景还逐字比官方 `goalSelector` 注册表（14 个目标的优先级、类名、标志位掩码，
+  `DolphinJumpGoal` 继承 `JumpGoal` 锁 MOVE|JUMP）；
+  `--break-self-test water_mob` 把 `got_fish` / `playing_dead` 改坏能在第 0 刻被抓到，
+  `--break-self-test dolphin_goals` 清空海豚目标注册表也会被抓到。
   `mob-oracle --only natural_spawn` 的 `dolphin_ocean` / `axolotl_lush` 夹具（后者把底层水换成黏土）
   各刷出 37 / 40 只，0 不一致；`natural-spawn`（全部）1727 例 0 不一致。
-- 已知限制：海豚 `registerGoals` 的十四个目标和 `HurtByTargetGoal` 都按官方优先级登记成
-  `Unavailable`（`canUse` 恒假、不取随机数），因为 Brain、`findNearestMapStructure`、物品实体、
-  船 / 鹦鹉螺、守卫者这些设施还没接——引路去宝藏、给玩家 `DOLPHINS_GRACE`、跃水、捡物、近战
-  都不发生，`gotFish` 目前只靠喂鱼设置；美西螈 Brain 的传感器 / 记忆 / 活动、
+- 已知限制：海豚 `registerGoals` 的十四个目标和 `HurtByTargetGoal` 已建成真目标
+  （`dolphin.rs` / `dolphin_goals.rs`，优先级 / 类名 / 标志位 / 次序照官方；
+  `canUse` / `canContinueToUse` / `start` / `tick` 按官方翻译），不再是 `Unavailable` 占位。
+  但 `findNearestMapStructure`、船 / 鹦鹉螺、掉落物实体、游泳玩家、`DOLPHINS_GRACE`
+  这些设施还没接，依赖它们的分支按 `fox_goals` 做法保住取数次数与顺序后返回假——引路去宝藏、
+  给玩家 `DOLPHINS_GRACE`、捡物、躲守卫者仍不发生。**goalSelector 没有逐刻对拍**：夹具开
+  `NoAI`，只核对注册表与 NoAI 分支，真跑目标所需的导航 / 移动控制 / `DefaultRandomPos`
+  落点 / 标志位锁定保真没逐刻验证，跃水与呼吸换气也未和官方逐刻比较；美西螈 Brain 的传感器 / 记忆 / 活动、
   攻击水生怪物、繁殖（1/1200 蓝色）没建模。装死倒计时与 `REGENERATION` 已按官方两条
   behavior 移植，但挂在 `customServerAiStep` 尾部而非 Brain 行为里，且逐刻对拍夹具开 `NoAI`
   不触发，只有 `axolotl.rs` 的单元测试覆盖（200 刻递减、效果只加一次、NoAI 不动），没有和官方

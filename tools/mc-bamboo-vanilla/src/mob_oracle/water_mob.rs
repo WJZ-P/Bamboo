@@ -13,8 +13,18 @@
 //! draws; vanilla's goalSelector / Brain does not run, so only `baseTick` (air and
 //! ambient-sound draws) and the NoAI branches of `Dolphin.tick()` /
 //! `Axolotl.baseTick()` remain, comparable bit for bit.
+//!
+//! 场景还逐字核对官方 `goalSelector` 的注册表（优先级、类名、标志位掩码）：目标不在
+//! NoAI 夹具里逐刻跑，但注册次序和标志位必须和官方一致，这是「把占位目标换成真实现」
+//! 的可核对部分。
+//!
+//! Each case also checks the official `goalSelector` registry (priority, class name,
+//! flag mask) character for character. The goals are not ticked in this NoAI fixture,
+//! but their registration order and flags must match vanilla — this is the checkable
+//! part of replacing the placeholder goals with real implementations.
 
 use mc_bamboo_blocks::entity::mob::MobType;
+use mc_bamboo_blocks::entity::mob::goals::GoalSelector;
 
 use super::*;
 
@@ -33,6 +43,11 @@ pub(super) struct WaterMobCase {
     dolphin: bool,
     baby: bool,
     variant: i32,
+    /// 官方 `goalSelector` 注册表：优先级、类名、标志位掩码。
+    ///
+    /// The official `goalSelector` registry: priority, class name, flag mask.
+    #[serde(default)]
+    registered: Vec<(i32, String, i32)>,
     frames: Vec<WaterMobFrame>,
 }
 
@@ -104,7 +119,7 @@ impl WaterMobCase {
     ///
     /// Build the mob like the official side, then set the explicit seed (no constructor
     /// draws replayed).
-    fn spawn(&self, world: &mut World<'_>, broken: bool) -> i32 {
+    fn spawn(&self, world: &mut World<'_>, broken: bool, broken_goals: bool) -> i32 {
         let [x, y, z] = self.start;
         let kind = self.mob_type();
         let entity = Entity::by_mob_type(kind, Vec3::new(x, y, z));
@@ -121,6 +136,12 @@ impl WaterMobCase {
                 mob.y_head_rot = 0.0;
                 mob.y_body_rot = 0.0;
                 mob.no_ai = true;
+                // 改坏确认：把注册表清空，官方仍登记着十四个目标，逐刻比较应报错。
+                // Break check: clear the registry; vanilla still registers fourteen
+                // goals, so the comparison must fail.
+                if broken_goals {
+                    mob.goals.goals.clear();
+                }
                 if self.baby {
                     let (width, height, eye) = kind.dimensions(true);
                     entity.dimensions = (width, height);
@@ -190,14 +211,57 @@ fn water_mob_state(entity: &Entity, dolphin: bool) -> WaterMobState {
     }
 }
 
+/// 官方 `goalSelector` 注册表的每一行：优先级、类名、标志位掩码。
+/// `Flag` 的枚举序和官方 `Goal.Flag` 一致，掩码两边逐位相同。
+///
+/// Each row of the official `goalSelector` registry: priority, class name, flag mask.
+/// `Flag`'s ordinal order matches vanilla `Goal.Flag`, so the masks are bit-equal.
+fn goal_rows(selector: &GoalSelector) -> Vec<(i32, String, i32)> {
+    selector
+        .goals
+        .iter()
+        .map(|wrapped| {
+            let flags = wrapped
+                .goal
+                .flags()
+                .iter()
+                .map(|flag| 1_i32 << (*flag as i32))
+                .sum();
+            (wrapped.priority, wrapped.goal.name().to_owned(), flags)
+        })
+        .collect()
+}
+
 impl Report {
     pub(super) fn replay_water_mob(&mut self, case: &WaterMobCase) {
         self.cases += 1;
         let broken = self.break_test.as_deref() == Some("water_mob");
+        let broken_goals = self.break_test.as_deref() == Some("dolphin_goals");
         let mut level = case.level();
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
-        let id = case.spawn(&mut World::new(&mut level, &mut ticks), broken);
+        let id = case.spawn(
+            &mut World::new(&mut level, &mut ticks),
+            broken,
+            broken_goals,
+        );
+        let ours_registered = level
+            .entities
+            .get(id)
+            .map(|entity| {
+                entity
+                    .kind
+                    .mob()
+                    .map(|mob| goal_rows(&mob.goals))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if ours_registered != case.registered {
+            self.mismatch(format!(
+                "{} registered goals: official {:?}, bamboo {ours_registered:?}",
+                case.name, case.registered
+            ));
+        }
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick != 0 {
                 ticks.set_time(1000 + tick as i64);

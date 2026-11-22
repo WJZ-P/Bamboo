@@ -325,6 +325,7 @@ public final class MobOracle {
                 cases++;
             }
             for (String name : List.of("dolphin_water", "dolphin_land", "dolphin_baby",
+                    "dolphin_goals",
                     "axolotl_water", "axolotl_land", "axolotl_variant", "axolotl_baby")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playWaterMob(official, out, name);
@@ -7006,8 +7007,30 @@ public final class MobOracle {
         out.write("{\"type\":\"waterMob\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start)
                 + ",\"dolphin\":" + dolphin + ",\"baby\":" + baby + ",\"variant\":" + variant
+                + ",\"registered\":" + registeredGoals(mob.getGoalSelector())
                 + ",\"frames\":" + frames + "]}\n");
         out.flush();
+    }
+
+    /** `goalSelector` 注册表：每个目标的优先级、官方类名、标志位掩码，和 Bamboo 一侧逐字相同。 */
+    /** The `goalSelector` registry: priority, vanilla class name and flag mask of each goal, character for character like the Bamboo side. */
+    private static String registeredGoals(net.minecraft.world.entity.ai.goal.GoalSelector selector) {
+        StringBuilder out = new StringBuilder("[");
+        boolean first = true;
+        for (WrappedGoal wrapped : selector.getAvailableGoals()) {
+            if (!first) out.append(',');
+            first = false;
+            int flags = 0;
+            // `Goal.Flag` 的枚举序是 MOVE / LOOK / JUMP / TARGET，和 Bamboo 的 `Flag` 一致。
+            // `Goal.Flag`'s ordinal order MOVE / LOOK / JUMP / TARGET matches Bamboo's `Flag`.
+            for (var flag : wrapped.getFlags()) {
+                flags |= 1 << flag.ordinal();
+            }
+            out.append('[').append(wrapped.getPriority()).append(',')
+                    .append(jsonString(wrapped.getGoal().getClass().getSimpleName())).append(',')
+                    .append(flags).append(']');
+        }
+        return out.append(']').toString();
     }
 
     /** 把 `FollowFlockLeaderGoal.nextStartTick` 设成一个固定值。 */

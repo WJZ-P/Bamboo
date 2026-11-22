@@ -100,46 +100,88 @@ pub(super) fn malus() -> Malus {
     malus
 }
 
-/// `Dolphin.registerGoals` 的优先级和标志位。
+/// `Dolphin.registerGoals` 的十四个目标：优先级、标志位和注册次序照官方。
+/// 通用目标直接复用 `goals.rs` 的变体，海豚专属的放进 `dolphin_goals` 模块。
+/// 结构定位、船 / 鹦鹉螺、掉落物、玩家效果这些仓库没接的设施，`canUse` 照官方
+/// 保住取数次数与顺序、缺少设施时走到返回的那一支（见 `dolphin_goals` 的说明
+/// 和 README 已知差异）。
 ///
-/// 这一期把这些目标登记成 `Unavailable`：官方行为（呼吸、找水、引路、跃水、
-/// 捡物、跟船、躲守卫者）需要 Brain / 结构 / 物品实体 / 船等本仓库还没接的设施，
-/// 与其自己发明一套，不如保留注册次序、优先级和 `running names`，`canUse` 恒假、
-/// 不取随机数。海豚落水后的漂浮由 `Dolphin.tick()` 和 `travel_in_water` 负责。
-///
-/// `Dolphin.registerGoals` priorities. These goals are registered as `Unavailable`
-/// this round: their official behaviour (breathing, finding water, treasure leading,
-/// jumping, item play, following boats, avoiding guardians) needs Brain / structures /
-/// item entities / boats that are not wired here. Rather than invent behaviour we keep
-/// the registration order, priorities and `running names`, with `canUse` always false
-/// and no random draws. Water drifting is handled by `Dolphin.tick()` and
-/// `travel_in_water`.
+/// `Dolphin.registerGoals`'s fourteen goals: priorities, flags and registration order
+/// follow vanilla. Shared goals reuse the variants in `goals.rs`; the dolphin-specific
+/// ones live in the `dolphin_goals` module. For structures, boats / nautiluses, item
+/// entities and player effects that are not wired here, `canUse` keeps vanilla's random
+/// draw count and order and takes the return-false branch (see `dolphin_goals` and the
+/// README known differences).
 pub(super) fn goals() -> GoalSelector {
-    let registered: &[(i32, &str)] = &[
-        (0, "BreathAirGoal"),
-        (0, "TryFindLiquidGoal"),
-        (1, "DolphinSwimToTreasureGoal"),
-        (2, "DolphinSwimWithPlayerGoal"),
-        (4, "RandomSwimmingGoal"),
-        (4, "RandomLookAroundGoal"),
-        (5, "LookAtPlayerGoal"),
-        (5, "DolphinJumpGoal"),
-        (6, "MeleeAttackGoal"),
-        (7, "MoveToItemGoal"),
-        (8, "PlayWithItemsGoal"),
-        (8, "FollowPlayerRiddenEntityGoal"),
-        (8, "FollowPlayerRiddenEntityGoal"),
-        (9, "AvoidEntityGoal"),
+    use super::dolphin_goals::DolphinGoal as D;
+    let registered = vec![
+        (0, Goal::Dolphin(D::BreathAir)),
+        (0, Goal::Dolphin(D::TryFindLiquid)),
+        (1, Goal::Dolphin(D::SwimToTreasure { stuck: false })),
+        (2, Goal::Dolphin(D::SwimWithPlayer)),
+        (
+            4,
+            Goal::Swim {
+                speed: 1.0,
+                interval: 10,
+                wanted: Vec3::default(),
+            },
+        ),
+        (
+            4,
+            Goal::RandomLookAround {
+                rel_x: 0.0,
+                rel_z: 0.0,
+                look_time: 0,
+            },
+        ),
+        (
+            5,
+            Goal::LookAtPlayer {
+                look_distance: 6.0,
+                probability: 0.02,
+                look_at: None,
+                look_time: 0,
+            },
+        ),
+        (5, Goal::Dolphin(D::Jump { breached: false })),
+        (6, super::goals::melee_attack(1.2, true, "MeleeAttackGoal")),
+        (7, Goal::Dolphin(D::MoveToItem { cooldown: 0 })),
+        (8, Goal::Dolphin(D::PlayWithItems)),
+        (8, Goal::Dolphin(D::FollowRidden)),
+        (8, Goal::Dolphin(D::FollowRidden)),
+        (9, Goal::Dolphin(D::AvoidGuardian)),
     ];
     let mut selector = GoalSelector::default();
     selector.goals = registered
-        .iter()
-        .map(|&(priority, name)| WrappedGoal {
+        .into_iter()
+        .map(|(priority, goal)| WrappedGoal {
             priority,
             running: false,
-            goal: Goal::Unavailable(name),
+            goal,
         })
         .collect();
+    selector
+}
+
+/// `Dolphin.registerGoals` 的 `targetSelector`：`HurtByTargetGoal(this,
+/// Guardian.class).setAlertOthers()`，优先级 1。夹具里没有伤害，`canUse`
+/// 直接短路、不取随机数；`setAlertOthers` 只在挨打时起作用。
+///
+/// The `targetSelector` of `Dolphin.registerGoals`:
+/// `HurtByTargetGoal(this, Guardian.class).setAlertOthers()` at priority 1. With
+/// no hurt in the fixture, `canUse` short-circuits without drawing; `setAlertOthers`
+/// only matters when the dolphin is hurt.
+pub(super) fn target_goals() -> GoalSelector {
+    let mut selector = GoalSelector::default();
+    selector.goals = vec![WrappedGoal {
+        priority: 1,
+        running: false,
+        goal: Goal::HurtByTarget {
+            timestamp: -1,
+            unseen_ticks: 0,
+        },
+    }];
     selector
 }
 

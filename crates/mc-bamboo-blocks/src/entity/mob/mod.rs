@@ -25,6 +25,7 @@ pub mod conversion;
 pub mod creeper;
 pub mod damage;
 pub mod dolphin;
+pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
 pub(crate) mod enderman;
@@ -2248,8 +2249,8 @@ impl Mob {
             | MobType::Salmon
             | MobType::TropicalFish
             | MobType::Pufferfish
-            | MobType::Dolphin
             | MobType::Axolotl => GoalSelector::default(),
+            MobType::Dolphin => dolphin::target_goals(),
             MobType::Skeleton | MobType::Stray | MobType::Bogged => {
                 GoalSelector::skeleton_targets()
             }
