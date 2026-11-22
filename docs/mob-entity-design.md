@@ -1536,3 +1536,25 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 
 全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
 **686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+
+## 蝙蝠的实施现状（cl-ambient，2026-11-22）
+
+官方 `Bat`（`AmbientCreature` → `Mob`，不是 `PathfinderMob`）。代码在 `entity/mob/bat.rs`，状态是 `Mob.bat`（`BatState`：`DATA_ID_FLAGS` 整个字节和不存档的 `targetPosition`）。
+
+- **属性和事实**：6 点血，尺寸 0.5×0.9、眼高 0.45；`MobCategory.AMBIENT`（消失距离 128，`removeWhenFarAway` 为真，和平难度照样存在）；叫声间隔用 `Mob` 的缺省值 80，音量 0.1，`getVoicePitch()` 乘 0.95（叫声、受伤、死亡三种声音都乘）；倒挂时 `getAmbientSound` 先取 `nextInt(4)`，不是 0 就不叫、也不取音高。
+- **AI**：两个目标选择器都是空的。`customServerAiStep`（在 `Mob.serverAiStep` 里导航之后、移动控制之前）：倒挂时头上不是导体就起飞；否则 1/200 把头转到 `nextInt(360)`，4 格内有看得见的玩家（`forNonCombat().range(4.0)`，带潜行 / 隐身的可见度和视线）就起飞；起飞时发世界事件 1025（静音的不发）。飞行时目标方块不是空气或落到世界底就丢掉，没有目标、1/30、或离目标中心不到 2 格时重抽（x 两次 `nextInt(7)`、y 一次 `nextInt(6)`、z 两次），朝目标加速并转身，1/100 且头上是导体时倒挂。`MoveControl` 处于 `WAIT`，所以官方写的 `zza = 0.5F` 当刻就被清零。
+- **`tick` 尾部**：倒挂时速度清零、`setPosRaw` 到这一格顶部下面一个身高；飞行时竖直速度乘 0.6（`double` 常量）。物理还是普通的 `LivingEntity.travel`（有重力）。
+- **覆写成空的几个方法**：`pushEntities` / `doPush` / `isPushable`（`MobType::is_pushable`：蝙蝠不推别人，别人的推挤名单也不收它）、`checkFallDamage`（`MobType::ignores_fall_damage_check`：摔落距离不累计也不清零）、`getMovementEmission` 是 `EVENTS`（没有脚步声）。
+- **受伤**：`Bat.hurtServer` 没有免疫就先醒过来再走父类。蝙蝠的实体类型是 `dontTrackDeltas`，速度包只在 `needsSync` 时发；`LivingEntity.knockback` 置的 `needsSync` 现在记在 `Mob.knockback_sync` 里，下一刻开头并进 `needs_sync`（受伤常常发生在生物自己的一刻之外）。
+- **生成**：`SpawnPlacements` 登记 `ON_GROUND` + `Bat.checkBatSpawnRules`：在 `WORLD_SURFACE` 高度图之下、世界随机源 `nextBoolean` 为假、`getMaxLocalRawBrightness` 不超过 `nextInt(4)`、脚下在 `#bats_spawnable_on` 里，再加 `Mob.checkMobSpawnRules`。`finalizeSpawn` 只有 `Mob` 那一层（跟随距离加成和左撇子）。蝙蝠不是 `PathfinderMob`，`checkSpawnRules` 恒真。**26.3 的 `checkBatSpawnRules` 里已经没有万圣节的亮度窗口，也不再和海平面比较**（任务说明里的这两条是旧版本的规则），所以这里没有实现它们。
+- **存档和同步**：`BatFlags`（BYTE）；元数据 `BAT_FLAGS`（下标由生成器导出，现在是 16）。可用 `/summon` 和刷怪蛋生成。
+
+岛的拆合：新增的按实体状态是 `Mob.bat`（标志字节和一个绝对方块坐标的飞行目标，目标不存档、随实体整行搬）和 `Mob.knockback_sync`（一个布尔），都不带时钟，拆合时不用平移。
+
+对拍：`mob-oracle --only bat`（`bat_open` 没有天花板第一刻起飞、`bat_wake` 倒挂着等玩家走近、`bat_hurt` 被牛打醒再打死、`bat_low` 在两格高的洞里飞到重新倒挂再被玩家吵醒，共 4 例 2424 刻）逐刻比位置、速度、朝向、随机源、血量、标志位、飞行目标、摔落距离、`zza`、世界事件、世界随机源和出站包，0 不一致；故意改坏（玩家晚一刻走近）能抓到。`mob-oracle --only bat_spawn`（`bat_dark`、`bat_dim`、`bat_open`、`bat_peaceful`，24 例 96 刻）0 不一致，`--break-self-test natural_spawn` 把 `bat_dim` 的方块光改成 15 能抓到。
+
+已知差异：
+
+- 官方 `setPosRaw` 不刷新碰撞箱，开始倒挂的那一刻到下一刻 `travel` 里的 `move` 之间，碰撞箱还停在原来的高度（最多低 0.1 格）；Bamboo 的碰撞箱始终跟着位置。只影响这一小段里的流体检测和被打飞时的碰撞。
+- 击退发生在生物自己这一刻的 `aiStep` 之后时（别的生物的攻击命令落地），`needsSync` 晚一刻生效；只有蝙蝠（不跟踪速度）看得出来，表现是击退的速度包晚一刻。真实联机里生物的 `hurtMarked` 速度包本来就还没有接到同步层（既有差异）。
+- 拴绳（`canBeLeashed` 为假）和压力板 / 绊线（`isIgnoringBlockTriggers` 为真）：Bamboo 的生物本来就没有拴绳，也不触发这两种方块，所以没有要做的。

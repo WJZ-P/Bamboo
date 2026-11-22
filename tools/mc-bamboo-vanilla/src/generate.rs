@@ -3580,6 +3580,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
         ("PANDA_FLAGS", facts.panda_flags),
         ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
+        ("BAT_FLAGS", facts.bat_flags),
+        ("PHANTOM_SIZE", facts.phantom_size),
         ("FISH_FROM_BUCKET", facts.fish_from_bucket),
         ("SALMON_VARIANT", facts.salmon_variant),
         ("TROPICAL_FISH_VARIANT", facts.tropical_fish_variant),

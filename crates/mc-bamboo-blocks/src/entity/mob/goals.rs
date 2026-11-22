@@ -3497,7 +3497,7 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     // Slimes are not `PathfinderMob`s; `Mob.checkSpawnRules` is always true.
     if matches!(
         mob.mob_type,
-        super::MobType::Slime | super::MobType::Enderman
+        super::MobType::Slime | super::MobType::Enderman | super::MobType::Bat
     ) {
         return 0.0;
     }

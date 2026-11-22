@@ -126,6 +126,11 @@ fn check_fall_damage(
     state: BlockState,
     pos: BlockPos,
 ) {
+    // `Bat.checkFallDamage` 是空的：不累计、不清零摔落距离，也不补那次流体更新。
+    // `Bat.checkFallDamage` is empty: no fall distance bookkeeping and no fluid update.
+    if mob.mob_type.ignores_fall_damage_check() {
+        return;
+    }
     if !me.in_water {
         update_fluid_interaction(me, mob, ctx.blocks());
     }

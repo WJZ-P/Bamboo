@@ -224,6 +224,15 @@ impl Coverage {
                 ));
             }
         }
+        // 蝙蝠：有顶的暗场景必须刷，没顶的必须不刷。
+        // Bats: the roofed dark scene must spawn and the open one must not.
+        if let Some(&dark) = self.per_scene.get("bat_dark")
+            && (dark == 0 || self.per_scene.get("bat_open") != Some(&0))
+        {
+            return Err(
+                "bat natural spawn fixtures must spawn under a roof but not in the open".into(),
+            );
+        }
         // 熊猫单独的一组：亮场景必须刷、暗场景必须不刷。
         // The panda-only group: the bright scene must spawn and the dim one must not.
         if let Some(&day) = self.per_scene.get("panda_day") {
@@ -406,8 +415,15 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .ok_or_else(|| format!("{} has no spawn entry for {}", case.biome, case.entity_type))?;
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
-    let roof = kind == MobType::Husk;
-    let floor_state = spawn_floor(biome);
+    // 蝙蝠夹具：石头地面，除了 `_open` 都有同样的玻璃顶。
+    // The bat fixture: a stone floor, and the same glass roof except in `_open`.
+    let bat = kind == MobType::Bat;
+    let roof = kind == MobType::Husk || (bat && !case.name.ends_with("_open"));
+    let floor_state = if bat {
+        BlockState(blocks::STONE)
+    } else {
+        spawn_floor(biome)
+    };
     let aquatic = case.aquatic;
     let floors = case.floors.clone();
     let water_depth = case.water_depth;
@@ -495,7 +511,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             block: if broken
                 && matches!(
                     case.name.as_str(),
-                    "skeleton_night_2" | "drowned_shallow_river"
+                    "skeleton_night_2" | "drowned_shallow_river" | "bat_dim"
                 ) {
                 15
             } else {

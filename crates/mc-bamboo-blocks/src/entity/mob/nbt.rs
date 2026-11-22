@@ -355,6 +355,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::Int(mob.squid.dark_ticks),
         );
     }
+    // ---- Bat.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Bat {
+        put(&mut out, "BatFlags", Tag::Byte(mob.bat.flags as i8));
+    }
     // ---- Turtle.addAdditionalSaveData ----
     if mob.mob_type == MobType::Turtle {
         put(&mut out, "home_pos", block_pos_tag(mob.turtle.home_pos));
@@ -695,6 +699,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);
+        }
+        if mob.mob_type == MobType::Bat {
+            mob.bat.flags = tag::byte_or(tag, "BatFlags", 0) as u8;
         }
         // `Turtle.readAdditionalSaveData`：先读自己的家方块，再交给父类。
         // `Turtle.readAdditionalSaveData`: the home first, then the superclass.

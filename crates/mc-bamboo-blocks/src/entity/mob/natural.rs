@@ -728,6 +728,7 @@ pub(super) fn check_spawn_rules(
                 && super::stray::sees_sky_through_powder_snow(world, pos)
         }
         MobType::Slime => super::slime::check_spawn_rules(world, pos),
+        MobType::Bat => super::bat::check_spawn_rules(world, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)

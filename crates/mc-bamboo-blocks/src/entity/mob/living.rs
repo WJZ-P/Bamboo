@@ -154,6 +154,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::tick_after(mob);
     }
+    // `Bat.tick` 在 `super.tick()` 之后：倒挂时钉住位置，飞行时竖直速度乘 0.6。
+    // `Bat.tick` after `super.tick()`: pin a hanging bat, damp a flying bat's vertical speed.
+    if mob.mob_type == super::MobType::Bat {
+        super::bat::tick_after(me, mob);
+    }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
     // `AbstractHorse.tick` advances its timers after `super.tick()`.
     if mob.mob_type.is_equine() {
@@ -541,6 +546,12 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             if super::armadillo::is_scared(mob) {
                 return;
             }
+            // `Bat.getAmbientSound`：倒挂时四次里三次不叫，不叫就不取音高。
+            // `Bat.getAmbientSound`: a hanging bat stays quiet three times in four and
+            // then draws no pitch.
+            if mob.mob_type == super::MobType::Bat && super::bat::ambient_is_muted(me, mob) {
+                return;
+            }
             // `Entity.makeSound` 遇到空的叫声直接返回，也不取音高的两个随机数。
             // `Entity.makeSound` returns on a null sound without drawing the pitch.
             let Some(sound) = ambient_voice(me, mob) else {
@@ -772,6 +783,9 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     if mob.mob_type.has_no_ambient_sound() {
         return;
     }
+    if mob.mob_type == super::MobType::Bat && super::bat::ambient_is_muted(me, mob) {
+        return;
+    }
     if super::turtle::is_turtle(mob.mob_type) {
         // `Turtle.getAmbientSound`：只有成年的、在水外站在地上时才叫，其余没有声音，
         // 也不取音高的两个随机数。
@@ -845,7 +859,14 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
-    (first - second) * 0.2 + base
+    let pitch = (first - second) * 0.2 + base;
+    if mob.mob_type == super::MobType::Bat {
+        // `Bat.getVoicePitch()`：`super.getVoicePitch() * 0.95F`。
+        // `Bat.getVoicePitch()`: `super.getVoicePitch() * 0.95F`.
+        pitch * 0.95
+    } else {
+        pitch
+    }
 }
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
@@ -903,7 +924,7 @@ fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    mob.needs_sync = false;
+    mob.needs_sync = std::mem::take(&mut mob.knockback_sync);
     // `Witch.aiStep` 的喝药段在 `super.aiStep()`（`Monster.aiStep` 的亮度）之前。
     //
     // The potion part of `Witch.aiStep` runs before `super.aiStep()`, which is the
@@ -1354,6 +1375,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Bat {
+        super::bat::custom_server_ai_step(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1916,14 +1940,22 @@ fn jump_out_of_fluid(me: &mut Entity, mob: &Mob, view: &dyn BlockView, old_y: f6
 
 // ---- 推挤 ----
 
-/// `LivingEntity.pushEntities`：身边的生物互相推开。
+/// `LivingEntity.pushEntities`：身边的生物互相推开。蝙蝠把它覆写成空的，别人的
+/// `EntitySelector.pushableBy` 也因为 `isPushable()` 为假而跳过蝙蝠。
+///
+/// `LivingEntity.pushEntities`: nearby mobs shove each other apart. Bats override it with
+/// an empty body, and `EntitySelector.pushableBy` skips them as `isPushable()` is false.
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if !mob.mob_type.is_pushable() {
+        return;
+    }
     let bounds = me.bounding_box();
     let mut others = Vec::new();
     ctx.for_each_other_in(bounds, &mut |other| {
         if let KindPublic::Mob(public) = &other.kind
             && !other.removed
             && public.is_alive()
+            && public.mob_type.is_pushable()
         {
             others.push((other.uid, other.position));
         }
@@ -2056,7 +2088,21 @@ pub(crate) fn hurt_server(
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }
+    if mob.mob_type == super::MobType::Bat {
+        return super::bat::hurt_server(me, mob, ctx, source, amount);
+    }
     living_hurt_server(me, mob, ctx, source, amount)
+}
+
+/// `isInvulnerableTo` 里已建模的部分：已移除，或无敌且伤害不能穿透。
+///
+/// The modelled part of `isInvulnerableTo`: removed, or invulnerable to a source that
+/// does not bypass it.
+pub(super) fn is_invulnerable_to(me: &Entity, mob: &Mob, source: &DamageSource) -> bool {
+    me.removed
+        || ((mob.invulnerable || mob.invulnerable_time > 0)
+            && !source.kind.bypasses_invulnerability()
+            && !source.creative_player)
 }
 
 /// `LivingEntity.hurtServer`。
@@ -2067,12 +2113,7 @@ pub(super) fn living_hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
-    // `isInvulnerableTo`。
-    if me.removed
-        || ((mob.invulnerable || mob.invulnerable_time > 0)
-            && !source.kind.bypasses_invulnerability()
-            && !source.creative_player)
-    {
+    if is_invulnerable_to(me, mob, &source) {
         return false;
     }
     // `Wolf.hurtServer`：没有免疫就先站起来，再走 `super.hurtServer`。
@@ -2229,11 +2270,14 @@ fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f
 }
 
 /// `LivingEntity.knockback`。
-pub(crate) fn knockback(me: &mut Entity, mob: &Mob, strength: f64, dx: f64, dz: f64) {
+pub(crate) fn knockback(me: &mut Entity, mob: &mut Mob, strength: f64, dx: f64, dz: f64) {
     let strength = strength * (1.0 - mob.attributes.value(attribute::KNOCKBACK_RESISTANCE));
     if strength <= 0.0 {
         return;
     }
+    // 官方在这里置 `needsSync`，留到下一次 `sendChanges`。
+    // Vanilla sets `needsSync` here and keeps it until the next `sendChanges`.
+    mob.knockback_sync = true;
     let (mut dx, mut dz) = (dx, dz);
     let delta = me.delta;
     while dx * dx + dz * dz < f64::from(1.0e-5_f32) {
