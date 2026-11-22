@@ -9001,6 +9001,15 @@ public final class MobOracle {
             if (calf instanceof Chicken chick) {
                 out.append(",\"egg\":").append(chick.eggTime);
             }
+            if (calf instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+                // `Panda.getBreedOffspring` 用幼崽没播种的随机源做两次 1/32 变异，比 `reseedBorn` 更早；
+                // 作为场景起点交给 Bamboo（基因遗传本身由 `playPandaGenes` 单独用种子对拍）。
+                // `Panda.getBreedOffspring` rolls the two 1/32 mutations on the calf's unseeded
+                // random before `reseedBorn`; pass the resulting genes as the scene start
+                // (gene inheritance itself is compared deterministically by `playPandaGenes`).
+                out.append(",\"genes\":[").append(panda.getMainGene().getId())
+                        .append(',').append(panda.getHiddenGene().getId()).append(']');
+            }
             out.append(",\"uuid\":\"").append(calf.getUUID()).append('"');
         } else {
             out.append(",\"kind\":\"other\"");
@@ -9836,7 +9845,7 @@ public final class MobOracle {
         int injectedSkyDarken;
         boolean injectedRaining;
         boolean injectedBrightOutside = true;
-        int injectedSeaLevel = -63;
+        int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
         /** 僵尸场景的真实时间模式：时钟、雨强由场景给，天色由官方环境属性系统算。 */
@@ -9884,6 +9893,9 @@ public final class MobOracle {
             level.levelData = new TickingLevelData(level);
             level.nextId = 1;
             level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            // `allocate` 不跑字段初始值，显式给超平坦默认海平面 -63。
+            // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
+            level.injectedSeaLevel = -63;
             return level;
         }
 

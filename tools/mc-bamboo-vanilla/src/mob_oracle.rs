@@ -447,6 +447,12 @@ struct Spawn {
     /// A chick's constructor `eggTime`, also a scene starting point.
     #[serde(default)]
     egg: Option<i32>,
+    /// 新生熊猫在 `getBreedOffspring` 用没播种的随机源抽出的双基因，作为场景起点。
+    ///
+    /// A newborn panda's genes rolled on its unseeded random in `getBreedOffspring`,
+    /// passed as a scene starting point.
+    #[serde(default)]
+    genes: Option<[u8; 2]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -646,10 +652,11 @@ struct CowStep {
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊，以及苦力怕、
-/// 蜘蛛、洞穴蜘蛛和末影人。
+/// 蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
 ///
 /// Scenes played by the Java `playZombie` driver: zombies, the wild animals,
-/// armadillos and goats, plus creepers, spiders, cave spiders and endermen.
+/// armadillos and goats, plus creepers, spiders, cave spiders, endermen, slimes,
+/// witches and drowned.
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
@@ -663,6 +670,9 @@ fn zombie_style(name: &str) -> bool {
         "spider_",
         "cave_spider_",
         "enderman_",
+        "slime_",
+        "witch_drink_",
+        "drowned_",
     ]
     .iter()
     .any(|prefix| name.starts_with(prefix))
@@ -678,14 +688,6 @@ const fn minus_one() -> i32 {
 
 const fn minus_63() -> i32 {
     -63
-}
-
-/// 敌对生物场景（僵尸一支和溺尸）注入天色、燃烧开关和海平面；其余场景沿用旧缺省。
-///
-/// Scenes that inject sky colour, the burn switch and the sea level: the zombie family
-/// and the drowned. Other scenes keep the old defaults.
-fn is_monster_scene(name: &str) -> bool {
-    name.starts_with("zombie_") || name.starts_with("drowned_")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1367,8 +1369,8 @@ impl Report {
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
-                bright_outside: case.bright_outside || !is_monster_scene(&case.name),
-                monsters_burn: if is_monster_scene(&case.name) {
+                bright_outside: case.bright_outside || !zombie_style(&case.name),
+                monsters_burn: if zombie_style(&case.name) {
                     case.monsters_burn
                 } else {
                     true
@@ -1927,6 +1929,10 @@ impl Report {
                 public.yaw = yr;
                 if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &mut public.kind {
                     mob.y_head_rot = hr;
+                    if let Some([main, hidden]) = setup.genes {
+                        mob.panda.main_gene = main;
+                        mob.panda.hidden_gene = hidden;
+                    }
                 }
             }
             // 场景开始时就存在的牛在 tick 0 已经建过同步状态，这里只处理
@@ -2808,6 +2814,7 @@ impl Report {
                         yr: None,
                         uuid: None,
                         egg: None,
+                        genes: None,
                     })
                     .collect();
                 // 只比数量 / 种类 / 物品 / 经验值，不比实体 ID 和速度随机源。
@@ -3173,6 +3180,7 @@ fn spawn_snapshot(
                 yr: None,
                 uuid: None,
                 egg: None,
+                genes: None,
             })
         })
         .collect()
@@ -3239,6 +3247,12 @@ fn apply_born_setup(world: &mut World, uid: i32, setup: &Spawn) -> bool {
         mob.uuid = uuid;
         if let Some(egg) = egg {
             mob.egg_time = egg;
+        }
+        if let Some([main, hidden]) = setup.genes {
+            use mc_bamboo_blocks::entity::mob::panda;
+            mob.panda.main_gene = panda::Gene::from_id(i32::from(main));
+            mob.panda.hidden_gene = panda::Gene::from_id(i32::from(hidden));
+            panda::set_attributes(mob);
         }
         mob.y_head_rot = hr;
         mob.y_head_rot_o = hr;
