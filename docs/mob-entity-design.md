@@ -658,7 +658,10 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `sweeping_edge` 给 `SWEEPING_DAMAGE_RATIO = L/(L+1)`（候选是碰撞盒与主目标
   整个盒子 `inflate(1, 0.25, 1)` 相交的其它生物，且离玩家 < 3 格）。疾跑 / `knockback` /
   `attack_knockback` 的额外击退走 `World::knockback_mob`，同时把攻击者水平速度
-  `× 0.6` 并 `setSprinting(false)`。
+  `× 0.6` 并 `setSprinting(false)`。暴击 / 横扫两处前置判定由
+  `can_critical_requires_every_modelled_precondition` /
+  `is_sweep_attack_requires_full_charge_ground_and_a_sword` 单测逐条守住（去掉
+  `onGround` 门控两条都会失败）。
 - **附魔与效果**：锋利 `1 + 0.5×(L−1)`、亡灵 / 节肢 `2.5×L`（按生成的实体类型
   标签判定），火焰附加 `4×L` 秒点燃、节肢杀手挂缓慢 IV（`doSweepAttack` 对每个横扫
   命中的 nearby 也调一次 `doPostAttackEffects`；缓慢时长按 `ApplyMobEffect` 从受害者

@@ -240,6 +240,9 @@ WebView2 的渲染进程不算在内。
   `melee_hit_awards_damage_dealt_on_request_stats` 走完整 `on_attack` → `RequestStats`，
   配合协议层 `award_stats_encodes_the_damage_dealt_custom_stat` 逐字节比 `award_stats` 包，
   确认近战命中真的把 `DAMAGE_DEALT` 发到客户端（故意把累计值改成 0，前者立刻失败）。
+  `can_critical_requires_every_modelled_precondition` /
+  `is_sweep_attack_requires_full_charge_ground_and_a_sword` 逐条锁住暴击 / 横扫的
+  官方前置判定（去掉 `onGround` 门控两条都失败）。
   `nodamage` 音效仍没有对拍场景覆盖。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里

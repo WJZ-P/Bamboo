@@ -1288,13 +1288,19 @@ fn post_attack_effects(
 }
 
 /// `ApplyMobEffect` 给节肢杀手挂的缓慢 IV：三次取数都用受害者自己的随机源，
-/// 顺序是 `getRandomElement`（单元素 `HolderSet` 也消费一次 `nextInt(1)`）、
-/// 时长、等级。时长 `[1.5, 1.5 + 0.5×(L−1)]` 秒 ×20 取整，等级 `[3, 3]`。
+/// 顺序是 `getRandomElement`、时长、等级。单元素 `HolderSet` 也消费一次
+/// `nextInt(1)`，已由 `HolderSet.Direct.getRandomElement` → `Util.getRandomSafe`
+/// → `Util.getRandom`（`list.get(random.nextInt(list.size()))`）确认，不是推断；
+/// 时长、等级各取一次 `Mth.randomBetween` 的 `nextFloat`。时长
+/// `[1.5, 1.5 + 0.5×(L−1)]` 秒 ×20 取整，等级 `[3, 3]`。
 ///
 /// The Slowness IV `ApplyMobEffect` applies for Bane of Arthropods: three draws
-/// from the victim's own random, in vanilla order — `getRandomElement` (a
-/// single-element `HolderSet` still consumes `nextInt(1)`), duration, amplifier.
-/// Duration is `[1.5, 1.5 + 0.5×(L−1)]` seconds ×20, rounded; amplifier is 3.
+/// from the victim's own random, in vanilla order — `getRandomElement`, duration,
+/// amplifier. A single-element `HolderSet` still consumes `nextInt(1)`, confirmed
+/// by `HolderSet.Direct.getRandomElement` → `Util.getRandomSafe` →
+/// `Util.getRandom` (`list.get(random.nextInt(list.size()))`), not inferred; the
+/// duration and amplifier each take one `Mth.randomBetween` `nextFloat`. Duration
+/// is `[1.5, 1.5 + 0.5×(L−1)]` seconds ×20, rounded; amplifier is 3.
 fn bane_slowness(random: &mut JavaRandom, level: i32) -> (i32, i32) {
     let min_seconds = 1.5_f32;
     let max_seconds = 1.5 + 0.5 * (level - 1) as f32;
@@ -1336,6 +1342,133 @@ mod tests {
             added,
             removed,
         }
+    }
+
+    /// 官方 `Player.canCriticalAttack` 的六个已建模前置：下落中、不着地、无失明
+    /// （`isMobilityRestricted`）、非疾跑（`isSprinting`）、无载具（`isPassenger`）、
+    /// 目标是生物。`onClimbable` / `isInWater` 是 README 已知限制里按缺省值处理的
+    /// 两项，这里单独说明、不写进断言。
+    ///
+    /// Vanilla `Player.canCriticalAttack`'s six modelled preconditions: falling,
+    /// off ground, no blindness (`isMobilityRestricted`), not sprinting
+    /// (`isSprinting`), no vehicle (`isPassenger`), living target. `onClimbable` /
+    /// `isInWater` are the two README-known-limit defaults, noted but not asserted.
+    #[test]
+    fn can_critical_requires_every_modelled_precondition() {
+        use mc_bamboo_blocks::entity::mob::effects::{EffectInstance, EffectMap};
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.motion.fall_distance = 1.0;
+        player.on_ground = false;
+        region.insert_player(player);
+        let crit = |region: &Region, living: bool| can_critical(&region.players[&id], living);
+
+        // 全部前置满足才算暴击；目标不是生物则否。
+        // All preconditions met means crit; a non-living target cannot be crit.
+        assert!(crit(&region, true));
+        assert!(!crit(&region, false));
+
+        // 着地（`onGround`）。
+        // On ground.
+        region.players.get_mut(&id).unwrap().on_ground = true;
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().on_ground = false;
+
+        // 没有下落（fallDistance）。
+        // Not falling.
+        region.players.get_mut(&id).unwrap().motion.fall_distance = 0.0;
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().motion.fall_distance = 1.0;
+
+        // 失明（hasEffect(BLINDNESS)）。
+        // Blindness.
+        region
+            .players
+            .get_mut(&id)
+            .unwrap()
+            .effects
+            .add(EffectInstance::with_amplifier(
+                mob_effect::BLINDNESS,
+                600,
+                0,
+            ));
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().effects = EffectMap::new();
+
+        // 疾跑（isSprinting）。
+        // Sprinting.
+        entity_sync::set_sprinting(&mut region, id, true);
+        assert!(!crit(&region, true));
+        entity_sync::set_sprinting(&mut region, id, false);
+
+        // 骑乘（isPassenger）。
+        // Riding a vehicle.
+        region.players.get_mut(&id).unwrap().riding.vehicle = Some(7);
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().riding.vehicle = None;
+        assert!(crit(&region, true));
+    }
+
+    /// 官方 `Player.isSweepAttack` 的前置：满充能、非暴击、非疾跑、着地、水平
+    /// 移动够慢、拿剑。`getSpeed()` 这里按 README 已知限制写死基值 0.1，所以
+    /// 阈值 `0.1 × 2.5` 的平方 = 0.0625。
+    ///
+    /// Vanilla `Player.isSweepAttack`'s gates: full strength, non-critical,
+    /// non-sprint, on ground, slow horizontal movement, holding a sword.
+    /// `getSpeed()` is the README-known-limit 0.1 base, so the threshold is
+    /// `(0.1 × 2.5)² = 0.0625`.
+    #[test]
+    fn is_sweep_attack_requires_full_charge_ground_and_a_sword() {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.on_ground = true;
+        player.motion.known_movement = Vec3::new(0.0, 0.0, 0.0);
+        region.insert_player(player);
+        let sword = stack(mc_bamboo_data::items::DIAMOND_SWORD);
+        let axe = stack(mc_bamboo_data::items::DIAMOND_AXE);
+        let sweep = |region: &Region, held: &ItemStack, full, crit, sprint| {
+            is_sweep_attack(&region.players[&id], held, full, crit, sprint)
+        };
+
+        // 满充能、着地、拿剑、静止 → 横扫。
+        // Full strength, on ground, sword, still → sweep.
+        assert!(sweep(&region, &sword, true, false, false));
+        // 非满充能 / 暴击 / 疾跑 / 不是剑 → 不横扫。
+        // Not full / critical / sprinting / not a sword → no sweep.
+        assert!(!sweep(&region, &sword, false, false, false));
+        assert!(!sweep(&region, &sword, true, true, false));
+        assert!(!sweep(&region, &sword, true, false, true));
+        assert!(!sweep(&region, &axe, true, false, false));
+
+        // 离地 → 不横扫。
+        // Off ground → no sweep.
+        region.players.get_mut(&id).unwrap().on_ground = false;
+        assert!(!sweep(&region, &sword, true, false, false));
+        region.players.get_mut(&id).unwrap().on_ground = true;
+
+        // 水平速度 ≥ (0.1×2.5)² = 0.0625 → 不横扫；慢于它 → 横扫。
+        // Horizontal speed ≥ (0.1×2.5)² = 0.0625 → no sweep; slower → sweep.
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.3, 0.0, 0.0);
+        assert!(!sweep(&region, &sword, true, false, false));
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.2, 0.0, 0.0);
+        assert!(sweep(&region, &sword, true, false, false));
     }
 
     #[test]
