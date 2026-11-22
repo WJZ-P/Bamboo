@@ -2527,7 +2527,7 @@ structure state」9.43 MB。逐个分配点看，其中只有约 1.7 MB 是群�
   是独立的，槽必须分开，否则平局时上一次结果会改变搜索起点。
 
 实测（`s10-profile`，种子 20261121、视距 8、经 heavy 锁）：同一 `online` 快照
-「template pools and structure state」9.43 → **7.90 MB（−1.53 MB）**，`climate::bucketize`
+「template pools and structure state」9.43 → **7.90–8.52 MB（−0.9 到 −1.5 MB）**，`climate::bucketize`
 只剩 `Worldgen` 里的 1.66 MB，`shared_structure` 的 0.99 MB 也消失。`plain`（`s10-plain`）
 读数：起服后空载 38.8 MB、一人在线 338.6 MB、离开后 20 s 106.9 MB（工作集；私有提交
 22.9 / 324.0 / 95.2）。进程级差 2 MB 上下，落在忙机器的噪声里，以归属表为准。

@@ -611,7 +611,7 @@ WebView2 的渲染进程不算在内。
   `ParameterList` 的 R 树 / 参数点 / 值改为 `Arc` 共享，新增 `fork()`：结构线程不再从条目
   重建一棵群系 R 树，而是 fork `Worldgen` 里的预置，只换 `lastResult` 槽的编号（官方每份
   `ParameterList` 的 `ThreadLocal lastResult` 本来就独立）。同一在线快照「template pools and
-  structure state」9.43 → 7.90 MB，结果逐字节不变（`chunkgen --through features` 3545088 项、
+  structure state」9.43 → 7.90–8.52 MB，结果逐字节不变（`chunkgen --through features` 3545088 项、
   `structure-rings` / `structures` / `structure-validity` 全 0 不一致）。见
   `docs/profiling.md` §20.5。剩下这 7.9 MB 里约 6 MB 是**每条计算线程各编译一份**的密度函数
   采样器（`SeededRouter`），拆成共享只读程序 + 可变上下文仍属高风险项，未做。
