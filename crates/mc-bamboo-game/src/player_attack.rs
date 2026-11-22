@@ -555,14 +555,24 @@ fn resolve_target(
     {
         return None;
     }
+    let bounds = other.bounding_box();
     range
-        .is_in_range(eye, other.bounding_box(), ATTACK_RANGE_BUFFER, creative)
+        .is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, creative)
         .then(|| TargetInfo {
             position: other.position(),
             entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
             is_living: true,
             health: other.health.health,
-            dimensions: (0.6, 1.8),
+            // 蹲下时玩家只有 1.5 高，横扫盒和伤害指示粒子都读这个尺寸，
+            // 所以从真正的包围盒取，不能写死站立尺寸。
+            //
+            // A crouching player is only 1.5 tall; both the sweep box and the
+            // damage-indicator particle read this size, so take it from the real
+            // bounding box instead of hard-coding the standing size.
+            dimensions: (
+                (bounds.max_x - bounds.min_x) as f32,
+                (bounds.max_y - bounds.min_y) as f32,
+            ),
         })
 }
 
