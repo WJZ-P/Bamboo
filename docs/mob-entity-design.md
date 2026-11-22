@@ -760,6 +760,60 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   fast-forward，青蛙按 brain 报告须整块一轮，其余有硬前置。请队长定夺下一步：
   (A) 把合并提交 fast-forward 合进 main；(B) 单独开一整轮按 5.12 规格做豹猫或青蛙。
 
+### 5.16 第 12 轮：再次合并 main、全套复核、查实 panda_breed 偶发不一致的根因（op-misc，2026-11-21）
+
+- 接手时 `HEAD=f694ca4f`、`main=54ee195a`（第 11 轮结束时 main 又前进了 8 个 `op-wgmem`
+  世界生成内存优化提交：`worldgen.rs` / `climate.rs` / `worldgen_spawn.rs` 等，不碰三处修复文件、
+  设计文档、`natural.rs` / `spawn.rs` / `mod.rs`）。按 04:30 / 08:40「最优先」先 `git merge main`，
+  产生双亲合并 `e74eefab`；`git merge-base --is-ancestor main HEAD` 为 0，自此 main 又是 HEAD
+  的祖先，合回 main 是无冲突 fast-forward。合并只带进 10 个 worldgen / README / 性能文档文件，
+  无内容冲突、无需按 kind 手工解决。
+- 三处 08:40 / 第 10 轮修复逐字复核仍在：`MobOracle.java:958` 的
+  `caseVariant(Mob mob) throws Exception`、`goals.rs:1534` 的显式 `TargetType::Fox` 分支
+  （`available()` 已移除）、`ChunkContentOracle.java:361,366` 的 `FakeLevel` 两个 override。
+- 全套检查在最终提交上实跑、全部通过（数字见本轮汇报第 2 节）：`cargo fmt --check` 0 /
+  `cargo clippy --workspace --all-targets -- -D warnings` 0 警告 /
+  `cargo check --workspace --all-targets` 0 / `cargo check -p mc-bamboo-desktop` 0 /
+  `cargo test -p mc-bamboo-blocks` 775 通过 0 失败 6 忽略 /
+  `cargo test -p mc-bamboo-vanilla` 101 单元 + 8 集成 = 109 通过 0 失败 /
+  `cargo build -p mc-bamboo-vanilla`（worldgen 合并后重链）0 /
+  全套 `mob-oracle` 1746 例 167034 刻 0 不一致 / `--only polar_bear` 11 例 1121 刻 0 /
+  `natural-spawn` 1727 例 0 / `chunk-content` 503 项通过 /
+  `tools/probe.sh` 769/769（`JAVA` 设成 JDK 26）。
+- **查实第 11 轮疑点 1 的根因，并推翻其「并行干扰」结论**：`panda_breed` 约 6% 的偶发
+  12 处不一致不是并行 java / 高负载干扰，而是官方夹具自身的随机不确定性。官方
+  `Panda.getBreedOffspring`（`net.minecraft.world.entity.animal.panda.Panda`）先
+  `EntityTypes.PANDA.create` 造幼崽，`Entity` 的 `random` 字段是无种子的
+  `RandomSource.create()`（`RandomSource.create()` → `RandomSupport.generateUniqueSeed()`，
+  即 `SEED_UNIQUIFIER.updateAndGet(...) ^ System.nanoTime()`，含墙钟），随后
+  `baby.setGeneFromParents(this, partner)` 从这个幼崽自己的 `Entity.random` 抽两次
+  `nextInt(32) == 0` 的变异；夹具的 `reseedBorn`（`MobOracle.java:9394`）要等到这一刻
+  `collectBorn` 才把幼崽随机源换成确定性的岛种子，晚于基因抽取；`spawnJson`（`:8223`）
+  对新生幼崽也不序列化基因。于是官方一侧的幼崽主 / 隐基因带约 2×(1/32)≈6% 的墙钟
+  变异，而 Bamboo 侧 `panda::offspring_genes` 用确定性种子重放、几乎不触发变异，
+  两边在 `var: g5/0` 与 `g0/0` 上分叉，连带元数据同步包字节数 18 vs 15。
+  验证：在持有全机 heavy 锁、无并行 java 的干净负载下连跑
+  `mob-oracle --only panda` 12 次，第 11 次复现出逐字相同的 `tick 60 ... g5/0`↔`g0/0`
+  与 12 处不一致，其余 11 次全 0——与两次 1/32 变异、约 6% 的概率吻合；第 11 轮把它判成
+  「并行重活干扰」是误判。Bamboo 的基因遗传本身是对的：独立的 `playPandaGenes`
+  512 题（显式 `setRandom(baby, babySeed)` 后再 `setGeneFromParents`）逐题 0 不一致。
+- **故意不改夹具、写进本轮汇报疑点 1 请队长核实**：干净修法要么在官方幼崽构造时
+  （`getBreedOffspring` 之前）就把 `Entity.random` 换成确定性种子（要钩官方实体构造、
+  动 `MobOracle.java` 共用夹具），要么把新生幼崽的基因像 `seed` / `uuid` / 朝向一样当成
+  「场景起点」交给 Bamboo（要给 `Spawn` 加字段并改动 `panda_breed` 比对了什么，可能
+  「改掉测试的本意」）。两者都是动共用文件 / 改对拍语义的取舍，无人值守单轮不宜自己定；
+  且这约 6% 的抖动是官方夹具、不是玩家可感知的行为差异，写进 README 已知限制会误导，
+  故只记在本节与汇报疑点 1，附最小修法建议供队长定夺。
+- 第 11 轮疑点 2（probe 767/769 的 `durability: the break event is 47`，实体事件到达顺序的
+  时序断言）本轮 `tools/probe.sh` 一次即 769/769，未复现；仍是高负载下的偶发时序，不改代码。
+- 两个 `### 5.11` 与 5.12~5.14 的错乱交叉引用（第 11 轮疑点 3）本轮仍未自行重编号，
+  留给队长统一处理（理由同 5.15）。
+- 本轮不新增 `MobType`、不新增生物：剩余五种（青蛙 / 骆驼 / 鹦鹉 / 豹猫 / 猫）各有硬前置
+  （Brain 整块一轮、载具 / 世界模型 8.2 未定案、新增 `MobType` 撞 `natural-spawn` 关键路径
+  与 `Extractor.java` / generated 共用文件禁区「须先和队长确认」），无人值守单轮无法确认、
+  也不宜在可 fast-forward 的干净树上开半截 WIP。请队长二选一：(A) 把 `e74eefab` 直接
+  fast-forward 合进 main；(B) 单独开一整轮按 5.12 / brain 规格做一种（豹猫共用面最小）。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
