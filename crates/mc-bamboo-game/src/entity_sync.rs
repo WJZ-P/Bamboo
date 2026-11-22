@@ -625,9 +625,14 @@ pub(crate) fn broadcast_swing_with_self(region: &mut Region, id: PlayerId, hand:
     region.links.send_frames(id, &frames);
 }
 
-/// `punch`：给观察者发 `swing_animation`。`entities.md` 第 9 节。
+/// `punch`：给观察者发 `swing_animation`，并按官方 `handlePunch` 重置攻击冷却。
+/// `entities.md` 第 9 节。
+///
+/// `punch`: broadcast `swing_animation` and reset the attack cooldown as
+/// `ServerGamePacketListenerImpl.handlePunch` does.
 pub(crate) fn on_punch(region: &mut Region, id: PlayerId) {
     broadcast_swing(region, id, Hand::Main);
+    crate::player_attack::on_punch(region, id);
 }
 
 /// `player_input`：潜行。姿势由派生状态算出来，和标志位落在同一个 `set_entity_data` 里。

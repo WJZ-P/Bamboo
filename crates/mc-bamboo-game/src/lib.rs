@@ -78,6 +78,7 @@ mod outgoing;
 mod pacing;
 mod partition_stats;
 mod player;
+mod player_attack;
 mod player_combat_memory;
 pub mod player_consume;
 pub mod player_death;
@@ -1066,6 +1067,12 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
     let mut steps = Vec::new();
     let mut packets = Vec::new();
     player_hurt::tick(&mut region);
+    // 官方 `causeFoodExhaustion` 当场写 FoodData；Bamboo 的攻击走 pending，
+    // 对拍里在取快照前 flush，才和官方逐刻的 exhaustion 一致。
+    //
+    // Vanilla writes FoodData immediately; Bamboo's attack uses pending. Flush
+    // before the snapshot so the per-tick exhaustion matches in the oracle.
+    crate::player_exhaustion::flush(&mut region);
     let target = region.players.get(&id).expect("玩家");
     steps.push(PlayerHurtStep::of(target));
     region.links.flush();
@@ -1137,6 +1144,7 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
             }
         }
         player_hurt::tick(&mut region);
+        crate::player_exhaustion::flush(&mut region);
         let target = region.players.get(&id).expect("玩家");
         steps.push(PlayerHurtStep::of(target));
         region.links.flush();
