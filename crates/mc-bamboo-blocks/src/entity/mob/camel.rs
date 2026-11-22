@@ -26,7 +26,7 @@ use super::{
     attributes::Attributes,
     brain::{
         Activity, ActivityData, Brain, Cx,
-        behavior::{Class, Gate, Kind, MoveToTargetSink},
+        behavior::{Class, Gate, Kind, MoveToTargetSink, Speed},
         memory::{MemoryStatus, MemoryStatus::ValueAbsent, MemoryType},
         sensor::SensorKind,
     },
@@ -410,7 +410,7 @@ fn idle_activity() -> ActivityData {
                     vec![
                         (
                             Kind::FollowTemptation {
-                                speed: 2.5,
+                                speed: Speed::fixed(2.5),
                                 close_adult: 3.5,
                                 close_baby: 2.5,
                             },
@@ -422,7 +422,7 @@ fn idle_activity() -> ActivityData {
                                 Kind::BabyFollowAdult {
                                     min: 5,
                                     max: 16,
-                                    speed: 2.5,
+                                    speed: Speed::fixed(2.5),
                                 },
                             ),
                             1,
@@ -456,7 +456,7 @@ fn idle_activity() -> ActivityData {
                             Kind::trigger_if(
                                 super::brain::behavior::BodyPredicate::CamelNotRefuseToMove,
                                 Kind::WalkTargetFromLook {
-                                    speed: 2.0,
+                                    speed: Speed::fixed(2.0),
                                     close_enough: 3,
                                 },
                             ),

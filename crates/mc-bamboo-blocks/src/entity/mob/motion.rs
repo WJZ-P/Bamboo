@@ -159,8 +159,9 @@ fn fall_on(
     distance: f64,
 ) {
     if state.is(blocks::TURTLE_EGG) {
-        // `TurtleEggBlock.fallOn`：僵尸一系（含尸壳）落上去不踩蛋，其它生物 1/3。
-        if !mob.mob_type.is_monster() {
+        // `TurtleEggBlock.fallOn`：`instanceof Zombie` 才不踩，其他生物 1/3。
+        // `TurtleEggBlock.fallOn`: only `instanceof Zombie` is exempt, others 1 in 3.
+        if !mob.mob_type.is_zombie() {
             destroy_turtle_egg(me, ctx, pos, 3);
         }
         cause_fall_damage(me, mob, ctx, distance, 1.0);
@@ -621,7 +622,19 @@ fn step_on(
 
 /// `TurtleEggBlock.destroyEgg`：生物（非海龟、蝙蝠、玩家）要 `mobGriefing`；
 /// 之后的世界随机数和改方块在命令落地时做。
+///
+/// `TurtleEggBlock.destroyEgg`: mobs other than turtles, bats and players need
+/// `mobGriefing`; the world-random draw and the block change land with the command.
 fn destroy_turtle_egg(me: &mut Entity, ctx: &mut dyn EntityCtx, pos: BlockPos, chance: i32) {
+    // `canDestroyEgg`：海龟在自家蛋上走过不踩（蝙蝠没有建模）。
+    // `canDestroyEgg`: a turtle walking over its own eggs does nothing (bats are not modelled).
+    if me
+        .kind
+        .mob()
+        .is_some_and(|mob| mob.mob_type == super::MobType::Turtle)
+    {
+        return;
+    }
     if !ctx.blocks().block_game_rules().mob_griefing {
         return;
     }

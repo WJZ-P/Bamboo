@@ -23,7 +23,7 @@ use super::{
     attributes::{Attribute, Attributes},
     brain::{
         Activity, ActivityData, Brain, Cx,
-        behavior::{Class, Gate, Kind, MoveToTargetSink},
+        behavior::{Class, Gate, Kind, MoveToTargetSink, Speed},
         memory::{
             MemoryStatus::{self, Registered, ValueAbsent, ValuePresent},
             MemoryType, MemoryValue, PositionTracker, WalkTarget,
@@ -234,7 +234,7 @@ fn idle_activity() -> ActivityData {
             (
                 1,
                 Kind::FollowTemptation {
-                    speed: 1.25,
+                    speed: Speed::fixed(1.25),
                     close_adult: 2.5,
                     close_baby: 2.5,
                 },
@@ -244,7 +244,7 @@ fn idle_activity() -> ActivityData {
                 Kind::BabyFollowAdult {
                     min: 5,
                     max: 16,
-                    speed: 1.25,
+                    speed: Speed::fixed(1.25),
                 },
             ),
             (
@@ -255,7 +255,7 @@ fn idle_activity() -> ActivityData {
                         (Kind::RandomStroll { speed: 1.0 }, 2),
                         (
                             Kind::WalkTargetFromLook {
-                                speed: 1.0,
+                                speed: Speed::fixed(1.0),
                                 close_enough: 3,
                             },
                             2,

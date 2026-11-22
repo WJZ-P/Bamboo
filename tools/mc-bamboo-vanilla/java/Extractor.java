@@ -1206,6 +1206,12 @@ public final class Extractor {
         out.addProperty("pufferfishPuffState", entityAccessor(net.minecraft.world.entity.animal.fish.Pufferfish.class, "PUFF_STATE").id());
         out.addProperty("turtleHasEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG").id());
         out.addProperty("turtleLayingEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "LAYING_EGG").id());
+        out.addProperty("dolphinGotFish", entityAccessor(net.minecraft.world.entity.animal.dolphin.Dolphin.class, "GOT_FISH").id());
+        out.addProperty("dolphinMoistness", entityAccessor(net.minecraft.world.entity.animal.dolphin.Dolphin.class, "MOISTNESS_LEVEL").id());
+        Class<?> axolotl = net.minecraft.world.entity.animal.axolotl.Axolotl.class;
+        out.addProperty("axolotlVariant", entityAccessor(axolotl, "DATA_VARIANT").id());
+        out.addProperty("axolotlPlayingDead", entityAccessor(axolotl, "DATA_PLAYING_DEAD").id());
+        out.addProperty("axolotlFromBucket", entityAccessor(axolotl, "FROM_BUCKET").id());
         Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
         var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
         var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");

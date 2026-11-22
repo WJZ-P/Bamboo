@@ -1032,6 +1032,16 @@ pub struct ProjectileFacts {
     pub stew_flowers: Vec<(i32, Vec<[i32; 2]>)>,
     pub turtle_has_egg: u8,
     pub turtle_laying_egg: u8,
+    #[serde(default)]
+    pub dolphin_got_fish: u8,
+    #[serde(default)]
+    pub dolphin_moistness: u8,
+    #[serde(default)]
+    pub axolotl_variant: u8,
+    #[serde(default)]
+    pub axolotl_playing_dead: u8,
+    #[serde(default)]
+    pub axolotl_from_bucket: u8,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
     ///
     /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.

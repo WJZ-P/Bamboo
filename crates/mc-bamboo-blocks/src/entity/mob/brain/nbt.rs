@@ -79,7 +79,9 @@ pub fn read(brain: &mut Brain, saved: &Tag) {
 
 fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
     match kind {
-        MemoryType::IsPanicking | MemoryType::DangerDetectedRecently => match raw {
+        MemoryType::IsPanicking
+        | MemoryType::DangerDetectedRecently
+        | MemoryType::HuntingCooldown => match raw {
             Tag::Byte(value) => Some(MemoryValue::Bool(*value != 0)),
             _ => None,
         },
