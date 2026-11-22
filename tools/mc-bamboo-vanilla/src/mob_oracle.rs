@@ -208,6 +208,21 @@ struct Case {
     player_steps: Option<Vec<Vec<String>>>,
     #[serde(default)]
     player_packets: Option<Vec<Vec<String>>>,
+    /// 攻击场景：玩家 `attackStrengthTicker` 初值、疾跑 / 下落 / 着地状态、
+    /// 主手附魔，以及横扫用的额外牛位置。
+    ///
+    /// Attack scenes: initial `attackStrengthTicker`, sprint / fall / ground,
+    /// main-hand enchantments and extra cows for sweeping.
+    #[serde(default)]
+    attack_charge: i32,
+    #[serde(default)]
+    attack_sprint: bool,
+    #[serde(default)]
+    attack_fall: i64,
+    #[serde(default)]
+    attack_ground: bool,
+    #[serde(default)]
+    attack_enchants: Vec<(String, i32)>,
     /// 1b 玩家生命场景的规则与动作。
     #[serde(default)]
     life: Option<LifeSetup>,
@@ -2390,10 +2405,34 @@ impl Report {
             actions,
             no_cooldown: false,
             no_knockback: false,
+            attack_charge: case.attack_charge,
+            attack_sprint: case.attack_sprint,
+            attack_fall: f64::from_bits(case.attack_fall as u64),
+            attack_ground: case.attack_ground,
+            attack_enchants: case.attack_enchants.clone(),
+            extra_cow_positions: case
+                .cows
+                .iter()
+                .skip(1)
+                .map(|cow| {
+                    (
+                        f64::from_bits(cow.x as u64),
+                        f64::from_bits(cow.y as u64),
+                        f64::from_bits(cow.z as u64),
+                    )
+                })
+                .collect(),
         };
-        // 五处故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
-        // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）。
-        // 每一项都让对拍的逐刻状态或包字节失败，证明比较没有放松。
+        // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
+        // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
+        // 少算一刻，以及去掉武器上的火焰附加（模拟漏掉攻击后附魔效果，
+        // 横扫目标的 fire 即刻不一致）。每一项都让逐刻状态或包字节失败，
+        // 证明比较没有放松。
+        //
+        // Deliberate breakage: difficulty, armor, protection, invulnerability,
+        // knockback, an attack charge off by one tick, and dropping Fire Aspect
+        // from the weapon (a stand-in for missing post-attack effects, so the
+        // swept target's fire ticks diverge).
         match self.break_test.as_deref() {
             Some("difficulty") => scene.difficulty = 2,
             Some("armor") => scene.equipment = [0; 6],
@@ -2405,9 +2444,59 @@ impl Report {
                 }
                 scene.no_knockback = true;
             }
+            Some("attack_charge") => scene.attack_charge = scene.attack_charge.saturating_sub(1),
+            Some("sweep_effects") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:fire_aspect"),
             _ => {}
         }
-        let (steps, packets) = replay_player_hurt(&scene);
+        let output = replay_player_hurt(&scene);
+        let (steps, packets, cow_states) = (output.steps, output.packets, output.cow_states);
+        // 攻击场景逐刻比牛的血量、击退速度、着火刻数、受伤时间和是否被移除。
+        //
+        // Attack scenes compare each cow's health, knockback velocity, fire
+        // ticks, hurt time and removal per tick.
+        if scene.attack_cow {
+            for (tick, expected) in case.steps.iter().enumerate() {
+                let Some(ours) = cow_states.get(tick) else {
+                    self.mismatch(format!("{} tick {tick}: no Bamboo cow state", case.name));
+                    continue;
+                };
+                if ours.len() != expected.len() {
+                    self.mismatch(format!(
+                        "{} tick {tick} cows: official {} Bamboo {}",
+                        case.name,
+                        expected.len(),
+                        ours.len()
+                    ));
+                    continue;
+                }
+                for (index, (ours, official)) in ours.iter().zip(expected).enumerate() {
+                    let fields: [(&str, i64, i64); 6] = [
+                        ("hp", i64::from(ours.hp), i64::from(official.hp)),
+                        ("dx", ours.dx, official.dx),
+                        ("dy", ours.dy, official.dy),
+                        ("dz", ours.dz, official.dz),
+                        ("fire", i64::from(ours.fire), i64::from(official.fire)),
+                        ("ht", i64::from(ours.hurt_time), i64::from(official.ht)),
+                    ];
+                    for (field, a, b) in fields {
+                        if a != b {
+                            self.mismatch(format!(
+                                "{} tick {tick} cow {index} {field}: official {b} Bamboo {a}",
+                                case.name
+                            ));
+                        }
+                    }
+                    if ours.removed != official.rm {
+                        self.mismatch(format!(
+                            "{} tick {tick} cow {index} removed: official {} Bamboo {}",
+                            case.name, official.rm, ours.removed
+                        ));
+                    }
+                }
+            }
+        }
         for (tick, expected) in expected_steps.iter().enumerate() {
             self.steps += 1;
             let Some(ours) = steps.get(tick) else {
@@ -2468,8 +2557,15 @@ impl Report {
                 &official_self,
             );
             // 牛的同步包留在 `packets` 里，这一期只比玩家受伤产生的包。
-            // 左键打牛场景里牛自己也会发出带种子的环境音/受伤音，那只牛的行为
-            // 不在 1a 的比对范围里，所以这一场景只比 `damage_event`。
+            // 攻击场景里牛自己也会发出带种子的环境音/受伤音；官方假世界也不捕获
+            // crit 动画 / 粒子 / 挥手 / 耐久槽这些包，所以跟踪包只比 `damage_event`。
+            // 牛的血量 / 击退速度 / 着火 / 受伤时间由上面的 `cow_states` 逐刻比。
+            //
+            // Attack scenes also emit seeded cow sounds, and the official fake
+            // world does not capture crit animations / particles / swing /
+            // durability-slot packets, so tracking comparison keeps only
+            // `damage_event`. Cow health / knockback / fire / hurt time are
+            // compared above via `cow_states`.
             let tracking: Vec<String> = official_tracking
                 .iter()
                 .filter(|text| {
@@ -2478,7 +2574,7 @@ impl Report {
                         .is_some_and(|bytes| is_tracking_hurt_packet(&bytes))
                 })
                 .filter(|text| {
-                    !case.name.ends_with("attack_cow")
+                    !is_attack_scene(&case.name)
                         || base64_stub::decode(text)
                             .ok()
                             .and_then(|bytes| packet_id(&bytes))
@@ -2489,7 +2585,7 @@ impl Report {
             let ours_tracking: Vec<Vec<u8>> = ours_tracking
                 .into_iter()
                 .filter(|bytes| {
-                    !case.name.ends_with("attack_cow")
+                    !is_attack_scene(&case.name)
                         || packet_id(bytes)
                             == Some(mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT)
                 })
@@ -3076,6 +3172,14 @@ fn packet_id(bytes: &[u8]) -> Option<i32> {
         shift += 7;
     }
     None
+}
+
+/// 玩家近战攻击场景：跟踪包只比 `damage_event`，牛的状态另由 `cow_states` 比。
+///
+/// Player melee-attack scenes: tracking comparison keeps only `damage_event`;
+/// cow state is compared separately via `cow_states`.
+fn is_attack_scene(name: &str) -> bool {
+    name.ends_with("attack_cow") || name.starts_with("player_attack_")
 }
 
 /// 只发给玩家自己的包：`player_combat_enter` / `hurt_animation` / `set_health`。
