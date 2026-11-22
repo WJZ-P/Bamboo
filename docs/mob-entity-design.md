@@ -2017,12 +2017,35 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   `NoAI`，只核对注册表与 NoAI 分支，真跑目标所需的导航 / 移动控制 / `DefaultRandomPos`
   落点 / 标志位锁定保真没逐刻验证，跃水与呼吸换气也未和官方逐刻比较；美西螈大脑的
   传感器 / 记忆 / 四个活动与捕猎、游泳、装死已按官方接线，但**行为没有逐 tick 对拍**
-  （夹具开 `NoAI`，Brain 不跑），只有结构表与单元测试覆盖；繁殖没做（`getBreedOffspring`
-  的 1/1200 蓝色与父母花色继承）、`Axolotl.onStopAttacking` 的再生回调、
-  `swingForAttack` 挥手动画、`AxolotlLookControl` / `AxolotlMoveControl` 的
-  `SmoothSwimming*` 参数（85 / 10 / 0.1 / 0.5）没建模；
+  （夹具开 `NoAI`，Brain 不跑），只有结构表与单元测试覆盖；繁殖已按官方实现（见下一小节），
+  `Axolotl.onStopAttacking` 的再生回调、
+  `swingForAttack` 挥手动画没建模（`AxolotlLookControl` / `AxolotlMoveControl` 已按
+  `SmoothSwimming*` 参数接上，见下一小节）；
   拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
   死亡掉落的逐题 loot-oracle 都没做。逐刻对拍开 `NoAI`，没覆盖 AI / 受伤 / 繁殖 / 死亡路径。
+
+### 第 14 轮补完：繁殖、桶、控制与踩蛋（2026-11-22）
+
+- 繁殖：`Axolotl.getBreedOffspring` 的花色在 `axolotl::offspring_variant`。先
+  `nextInt(1200)`；命中时 `Variant.getRareSpawnVariant` 从单元素名单再抽一次
+  `nextInt(1)`，否则一次 `nextBoolean` 取父亲或母亲。两条分支都恰好两次取数。父亲花色
+  随 `Command::BreedAnimals` 新增的 `father_axolotl` 落到 `apply_breed`（命令落地时父亲
+  不在实体表里），幼崽的年龄和尺寸走通用 `set_age`。
+- 桶：`Axolotl.saveToBucketTag` 的 `HuntingCooldown = brain.getTimeUntilExpiry(...)`
+  （剩余刻）写进 `bucket_entity_data`，`loadFromBucketTag` 用同一个数作时长恢复。Bamboo
+  的记忆 TTL 本来就是相对刻，语义一致。
+- 喂食：`Axolotl.usePlayerItem` 把热带鱼桶换成水桶（创造模式手里不变）。
+- 移动 / 视角：新模块 `entity/mob/smooth_swim.rs` 收 `SmoothSwimmingMoveControl` /
+  `SmoothSwimmingLookControl`，青蛙、蝌蚪、鱼、海豚、美西螈共用。美西螈
+  `(85, 10, 0.1, 0.5, false)`，装死时移动和视角都停；海豚 `(85, 10, 0.02, 0.1, true)`
+  与 `SmoothSwimmingLookControl(10)`（之前海豚落到通用 `MoveControl`）。
+- 海龟蛋：`fallOn` 只豁免僵尸一系（原来错误地豁免所有怪物），`destroyEgg` 排除海龟。
+- 验证：`mob-oracle --only axolotl` 47 例 847 刻 0 不一致（含 43 例繁殖花色，
+  `--break-self-test axolotl_breed` 故意改坏能被抓到）；`--only zombie_turtle_egg`
+  8 例 3220 刻 0 不一致；`--only frog` 16 例 9000 刻、`--only tadpole` 8 例 2360 刻、
+  `--only salmon` 1 例 241 刻 0 不一致，确认共用控制重构没改行为。
+- 仍未做：美西螈 AI 的逐 tick 对拍、`onStopAttacking` 的玩家再生、`swingForAttack`、
+  拴绳、海龟蛋的玩家破坏与 `getShape`。
 
 ## 与 main 合并后的现状（op-hostile2，2026-11-21）
 
