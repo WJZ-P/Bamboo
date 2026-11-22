@@ -504,6 +504,18 @@ impl Entity {
             // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
             mob.egg_time = self.random.next_int_bounded(6000) + 6000;
         }
+        if let Some(brain) = mob.brain.as_mut() {
+            // `LivingEntity` 构造函数最后的 `makeBrain`：每个传感器一次 `nextInt(scanRate)`。
+            // The `makeBrain` at the end of the `LivingEntity` constructor: one
+            // `nextInt(scanRate)` per sensor.
+            brain.seed_shuffles(self.random.state());
+            brain.randomly_delay_start(&mut self.random);
+        }
+        if mob.mob_type == mob::MobType::Armadillo {
+            // `Armadillo` 构造函数最后的 `scuteTime = pickNextScuteDropTime()`。
+            // The `Armadillo` constructor's trailing `scuteTime = pickNextScuteDropTime()`.
+            mob.armadillo.scute_time = self.random.next_int_bounded(6000) + 6000;
+        }
         if mob::squid::is_squid(mob.mob_type) {
             // `Squid` 构造函数最后的 `tentacleSpeed`，取一次 `nextFloat`。
             // The `Squid` constructor's trailing `tentacleSpeed`, one `nextFloat`.

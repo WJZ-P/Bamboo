@@ -197,7 +197,10 @@ pub(crate) fn hurt_player_by_mob(
     (hurt, drops)
 }
 
-fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
+/// 玩家的击退抗性：属性缺省值加上装备的修饰符。
+///
+/// The player's knockback resistance: the default plus equipment modifiers.
+fn knockback_resistance(player: &Player) -> f64 {
     use mc_bamboo_blocks::entity::mob::{
         attributes::Attribute,
         equipment::{SLOTS, stack_modifiers},
@@ -205,9 +208,6 @@ fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSour
     use mc_bamboo_data::registries::{attribute::KNOCKBACK_RESISTANCE, attribute_defaults};
     use mc_bamboo_protocol::item::ItemStack;
 
-    let Some(player) = parts.players.get_mut(&id) else {
-        return;
-    };
     let mut resistance = Attribute::new(
         KNOCKBACK_RESISTANCE,
         attribute_defaults::KNOCKBACK_RESISTANCE,
@@ -223,7 +223,57 @@ fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSour
             }
         }
     }
-    if let Some(push) = source.arrow_push(resistance.value()) {
+    resistance.value()
+}
+
+/// 山羊冲撞的 `LivingEntity.knockback(strength, dx, dz)`：不管这一下打没打中都推，
+/// 方向和力道由山羊给；推完把速度发给看得见的人和自己。
+///
+/// A goat ram's `LivingEntity.knockback(strength, dx, dz)`, applied whether or not the
+/// hit landed, with the goat's direction and strength; the new velocity goes to the
+/// trackers and the player.
+pub(crate) fn knock_back_player(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    strength: f64,
+    (mut dx, mut dz): (f64, f64),
+) {
+    let Some(player) = parts.players.get_mut(&id) else {
+        return;
+    };
+    let strength = strength * (1.0 - knockback_resistance(player));
+    if strength <= 0.0 {
+        return;
+    }
+    while dx * dx + dz * dz < f64::from(1.0e-5_f32) {
+        dx = (player.random.next_double() - player.random.next_double()) * 0.01;
+        dz = (player.random.next_double() - player.random.next_double()) * 0.01;
+    }
+    let length = (dx * dx + dz * dz).sqrt();
+    let delta = player.motion.delta;
+    let dy = if player.on_ground {
+        0.4_f64.min(delta.y / 2.0 + strength)
+    } else {
+        delta.y
+    };
+    player.motion.delta = Vec3::new(
+        delta.x / 2.0 - dx / length * strength,
+        dy,
+        delta.z / 2.0 - dz / length * strength,
+    );
+    let packet = crate::links::encode_frames(&SetEntityMotion {
+        entity_id: id.0,
+        movement: player.motion.delta,
+    });
+    send_to_tracking_and_self(parts, id, &packet);
+}
+
+fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
+    let Some(player) = parts.players.get_mut(&id) else {
+        return;
+    };
+    let resistance = knockback_resistance(player);
+    if let Some(push) = source.arrow_push(resistance) {
         player.motion.delta = player.motion.delta.add(push);
         let packet = crate::links::encode_frames(&SetEntityMotion {
             entity_id: id.0,

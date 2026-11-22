@@ -54,6 +54,7 @@ pub(super) fn player_view() -> PlayerView {
         spectator: false,
         creative: false,
         sneaking: false,
+        sprinting: false,
         invisible: false,
         armor_cover: 0.0,
         main_hand: items::DIAMOND_SWORD,

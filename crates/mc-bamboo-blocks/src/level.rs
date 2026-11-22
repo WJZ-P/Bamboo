@@ -1104,6 +1104,20 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
+    /// 精确驱动当场给玩家一次 `LivingEntity.knockback(strength, dx, dz)`（山羊冲撞）。
+    /// `false` 表示这一层做不到，这次击退就没有了。
+    ///
+    /// Applies one `LivingEntity.knockback(strength, dx, dz)` to a player at once in the
+    /// precise driver (a goat ram). `false` means this level cannot, and the push is lost.
+    fn knock_back_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _strength: f64,
+        _direction: (f64, f64),
+    ) -> bool {
+        false
+    }
+
     /// 精确驱动当场给玩家点火（`Entity.igniteForSeconds`）。`false` 表示不能当场做，
     /// 调用方改成延后的 [`Effect::IgnitePlayer`]。
     fn ignite_player_now(&mut self, _target: crate::entity::EntityUid, _ticks: i32) -> bool {
