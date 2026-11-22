@@ -430,9 +430,11 @@ fn update_activity(brain: &mut Brain) {
         Activity::Idle,
     ]);
     if was_fighting && !brain.is_active(Activity::Fight) {
+        // `setMemoryWithExpiry(HAS_HUNTING_COOLDOWN, true, 2400L)`：`Codec.BOOL`，存盘时是布尔。
+        // `setMemoryWithExpiry(HAS_HUNTING_COOLDOWN, true, 2400L)`: `Codec.BOOL`, saved as a bool.
         brain
             .memories
-            .set_with_ttl(MemoryType::HuntingCooldown, MemoryValue::Unit, 2400);
+            .set_with_ttl(MemoryType::HuntingCooldown, MemoryValue::Bool(true), 2400);
     }
 }
 

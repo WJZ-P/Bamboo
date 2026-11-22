@@ -363,4 +363,35 @@ mod tests {
         sync_playing_dead(&mut frozen);
         assert!(!frozen.axolotl.playing_dead);
     }
+
+    /// `PLAY_DEAD_TICKS`（`Codec.INT`）和 `HAS_HUNTING_COOLDOWN`（`Codec.BOOL`）进存档，
+    /// `ATTACK_COOLING_DOWN` 没有编解码器、不写。
+    ///
+    /// `PLAY_DEAD_TICKS` (`Codec.INT`) and `HAS_HUNTING_COOLDOWN` (`Codec.BOOL`) are saved;
+    /// `ATTACK_COOLING_DOWN` has no codec and is skipped.
+    #[test]
+    fn play_dead_and_hunting_memories_round_trip() {
+        let mut brain = super::brain();
+        brain
+            .memories
+            .set(MemoryType::PlayDeadTicks, MemoryValue::Int(150));
+        brain
+            .memories
+            .set_with_ttl(MemoryType::HuntingCooldown, MemoryValue::Bool(true), 2400);
+        brain
+            .memories
+            .set_with_ttl(MemoryType::AttackCoolingDown, MemoryValue::Bool(true), 20);
+        let saved = crate::entity::mob::brain::nbt::write(Some(&brain));
+        let mut loaded = super::brain();
+        crate::entity::mob::brain::nbt::read(&mut loaded, &saved);
+        assert_eq!(
+            loaded.memories.get(MemoryType::PlayDeadTicks),
+            Some(&MemoryValue::Int(150))
+        );
+        assert_eq!(
+            loaded.memories.get(MemoryType::HuntingCooldown),
+            Some(&MemoryValue::Bool(true))
+        );
+        assert_eq!(loaded.memories.get(MemoryType::AttackCoolingDown), None);
+    }
 }

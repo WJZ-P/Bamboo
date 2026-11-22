@@ -184,7 +184,6 @@ impl MemoryType {
                 | Self::IsPregnant
                 | Self::PlayDeadTicks
                 | Self::HuntingCooldown
-                | Self::AttackCoolingDown
         )
     }
 
