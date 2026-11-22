@@ -1089,10 +1089,15 @@ fn parse_settings(
     worldgen: &Worldgen,
     settings_id: &str,
 ) -> Result<serde_json::Map<String, Value>, String> {
-    let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN)
-        .map_err(|error| format!("bad worldgen data: {error}"))?;
-    let _ = worldgen;
-    root.get("noise_settings")
+    // `noise_settings` 已经在 `Worldgen::raw` 里，直接取这一条。原先这里把整份
+    // `worldgen.json`（4.4 MB）重新解析一遍只为一个几 KB 的对象，每条生成线程建
+    // `Generator` 时都要付一次，起服时线程数一多就是几十次全量解析。
+    // `noise_settings` already lives in `Worldgen::raw`; take just that entry. This used
+    // to re-parse the whole `worldgen.json` (4.4 MB) for a few KB object on every
+    // `Generator` built per generation thread, i.e. dozens of full parses at startup.
+    worldgen
+        .raw()
+        .get("noise_settings")
         .and_then(|value| value.get(settings_id))
         .and_then(Value::as_object)
         .cloned()
