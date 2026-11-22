@@ -2820,6 +2820,20 @@ public final class MobOracle {
                 sweeping.attackEnchant("minecraft:sweeping_edge", 3)
                         .attackSetup(20, false, 0.0, true).attack(1, 0);
                 scenes.add(sweeping);
+                // 满充能剑 + 火焰附加 II + 两头牛：`doSweepAttack` 对每个打中的 nearby 也调
+                // `doPostAttackEffects`，所以第二头牛（横扫目标）也要着火。
+                // Full sword + Fire Aspect II + two cows: `doSweepAttack` also calls
+                // `doPostAttackEffects` on each hurt nearby, so the swept cow ignites too.
+                Scene sweepFire = new Scene("player_attack_sweep_fire_aspect").ticks(6)
+                        .playerPackets().packets();
+                ground(sweepFire, 4);
+                sweepFire.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                sweepFire.cow(2.5, 64.0, 0.5, 0.0F, 216L);
+                sweepFire.cow(3.0, 64.0, 0.5, 0.0F, 217L);
+                sweepFire.equipment(new int[] {0, 0, 0, 0, sword}, new int[] {0, 0, 0, 0});
+                sweepFire.attackEnchant("minecraft:fire_aspect", 2)
+                        .attackSetup(20, false, 0.0, true).attack(1, 0);
+                scenes.add(sweepFire);
                 // 锋利 III / 火焰附加 II / 击退 II：伤害加成、着火刻数、额外击退。
                 String[] names = {"sharpness", "fire_aspect", "knockback"};
                 int[] levels = {3, 2, 2};

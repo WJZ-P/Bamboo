@@ -2394,11 +2394,15 @@ impl Report {
                 .collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
-        // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置），以及攻击充能值
-        // 少算一刻。每一项都让逐刻状态或包字节失败，证明比较没有放松。
+        // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
+        // 少算一刻，以及去掉武器上的火焰附加（模拟漏掉攻击后附魔效果，
+        // 横扫目标的 fire 即刻不一致）。每一项都让逐刻状态或包字节失败，
+        // 证明比较没有放松。
         //
         // Deliberate breakage: difficulty, armor, protection, invulnerability,
-        // knockback, and an attack charge off by one tick.
+        // knockback, an attack charge off by one tick, and dropping Fire Aspect
+        // from the weapon (a stand-in for missing post-attack effects, so the
+        // swept target's fire ticks diverge).
         match self.break_test.as_deref() {
             Some("difficulty") => scene.difficulty = 2,
             Some("armor") => scene.equipment = [0; 6],
@@ -2411,6 +2415,9 @@ impl Report {
                 scene.no_knockback = true;
             }
             Some("attack_charge") => scene.attack_charge = scene.attack_charge.saturating_sub(1),
+            Some("sweep_effects") => scene
+                .attack_enchants
+                .retain(|(name, _)| name != "minecraft:fire_aspect"),
             _ => {}
         }
         let output = replay_player_hurt(&scene);

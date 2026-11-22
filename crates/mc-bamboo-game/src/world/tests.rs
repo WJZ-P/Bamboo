@@ -4249,3 +4249,76 @@ fn a_critical_attack_emits_its_packets() {
         "damage-indicator particles must reach the client"
     );
 }
+
+/// 满充能剑横扫时，火焰附加按官方 `doSweepAttack` 对横扫命中的目标也生效，
+/// 不只点燃主目标。
+///
+/// A full-strength sword sweep with Fire Aspect ignites swept targets too, not
+/// just the main target, per vanilla `doSweepAttack`.
+#[test]
+fn a_sweep_ignites_swept_targets_with_fire_aspect() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    // 主目标和横扫目标相邻，都落在主目标 inflate(1, 0.25, 1) 盒内、离玩家 < 3 格。
+    // The main and swept targets sit next to each other, inside the swept box
+    // and within 3 blocks of the player.
+    let main = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let swept = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.5,
+        position.y,
+        position.z,
+    )));
+    let fire_aspect = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == "minecraft:fire_aspect")
+        })
+        .expect("fire_aspect exists") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(fire_aspect, 2)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    let weapon = ItemStack {
+        item: mc_bamboo_data::items::DIAMOND_SWORD,
+        count: 1,
+        added,
+        removed,
+    };
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: main });
+    server.tick();
+    let entities = &server.world.islands.region.entities;
+    let fire = |uid: i32| {
+        entities
+            .get(uid)
+            .map_or(0, |entity| entity.remaining_fire_ticks)
+    };
+    assert!(fire(main) > 0, "the main target must be ignited");
+    assert!(fire(swept) > 0, "the swept target must be ignited too");
+}
