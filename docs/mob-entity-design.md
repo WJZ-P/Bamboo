@@ -565,7 +565,7 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 - 对拍：`mob-oracle` 原 52 场景加 36 个 `player_hurt_*` 场景，逐刻比血量 / 吸收 /
   无敌帧 / 冷却 / 饥饿 / 速度 / 随机源 / 包字节；`player-data` 增加生命和饥饿的
   非默认往返用例；五处故意改坏（难度缩放、护甲、保护附魔、无敌帧、击退）都能抓到。
-  op-combat 再加 12 个 `player_attack_*` 近战场景（见 6.4）。
+  op-combat 再加 13 个 `player_attack_*` 近战场景（见 6.4）。
 
 ### 6.2 新增的按玩家字段（岛拆合逐个说明）
 
@@ -604,11 +604,13 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `FoodData.tick` / 和平回血 / 饥饿掉血（见第 7 节）。
 - **攻击（op-combat，2026-11-21 起已合入，见 6.4）**：`handleAttack` → `Player.attack`
   的完整链路已经做了：冷却 / 暴击 / 横扫 / 额外击退 / 伤害附魔 / 火焰附加 / 耐久 /
-  粒子 / 音效 / 动画 / PVP 开关。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
+  粒子 / 音效 / 动画 / PVP。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
   `getAttackDamageBonus` / `PIERCING_WEAPON` 的武器行为、`onClimbable` / `isInWater`
   的暴击前置（`isPassenger` / `isMobilityRestricted` 已按 `riding.vehicle` / `EffectMap`
-  判）、节肢杀手缓慢时长的随机源、`Stats.DAMAGE_DEALT` 的落盘、
-  以及 `mob-oracle` 对攻击音效 / 粒子 / 动画包的逐字节比对（官方假世界不捕获）。
+  判）、`Stats.DAMAGE_DEALT` 的落盘，以及 `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 的
+  乘法修饰符和 `getSpeed()`。攻击音效 / 粒子 / 动画包已经进 `mob-oracle` 逐字节比
+  （见 6.4），暴击音（`player_attack_critical`）和疾跑击退音（`player_attack_sprint`）
+  都在其中；`nodamage` 音效仍没有场景覆盖。
   旁观者和非法目标仍按官方 `handleAttack` 忽略（官方会断开连接，Bamboo 只忽略）。
 - **死亡**：1a 时血量可以降到 0 但不触发死亡；1b 起按下节实现完整死亡 / 掉落 /
   重生流程，`/kill` 也不再报错（见第 7 节）。
@@ -673,21 +675,39 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   strong / weak / sweep 音效真的发到客户端；`crit` / `knockback` / `nodamage` 音效仍
   只按包类型松散覆盖或未精确断言（见 README 已知限制）。
 - **PVP**：`pvp` 为真时按 `ServerPlayer.canHarmPlayer`（`isPvpAllowed` + 队伍，
-  Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。额外击退 /
-  火焰附加 / 横扫波及的玩家这几项目标在实体表里的操作（`knockback_mob` /
-  `ignite_mob` / 候选收集）对玩家不生效，玩家不在实体表里；见 README 已知限制。
+  Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`。额外击退、火焰附加点燃
+  和横扫波及的玩家都按官方对 `LivingEntity` 一视同仁处理：玩家分支走
+  `World::knock_back_player` / `ignite_player_from_mob`，横扫候选把 `region.players`
+  也收进来（排在生物之后，官方按实体分区顺序）。玩家目标的额外击退还照官方
+  `Player.causeExtraKnockback` 末尾的 `ServerPlayer.syncVelocity` 分支：速度包发出去
+  之后把服务端速度改回 `hurtOrSimulate` 之前的值。
 - **对拍**：`mob-oracle --only player_attack` 13 个场景（充能 0/2/4/5/20、下落暴击、
   疾跑击退、横扫、`sweeping_edge`、横扫 + 火焰附加、锋利 / 火焰附加 / 击退）共 91 刻，
-  逐刻比每头牛的血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除和 `damage_event` 包，
-  0 不一致；`--break-self-test attack_charge` 故意把充能少算一刻，牛的血量立刻不一致；
+  0 不一致。逐刻比四组东西：
+  1. 每头牛的血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除；
+  2. **每头牛自己的随机源状态**（官方 `stepJson` 的 `seed`）：受伤音高的两次取数和
+     节肢杀手的缓慢都读它，多取或少取一次都会立刻不一致（把 `voice_pitch` 改成
+     只取一次，第 1 刻就报差）；
+  3. 玩家自己的状态和随机源（原有）；
+  4. **出站效果包**：`damage_event`、`sound`、`level_particles`、`animate`、
+     `entity_event`。官方夹具的收集器是整个服务端一份流、每个广播包记一次；
+     Bamboo 每个收件人一份，所以按包取两名收件人里的最大份数再逐字节比（Bamboo
+     把一拍的效果攒到末尾统一发、官方当场发，因此按包排序后做多重集比较）。
+     音效包末尾 8 字节的随机种子不参与比较：官方每个音效当场从世界随机源取种子，
+     取数顺序跟着发送顺序走，Bamboo 攒批后顺序不同；客户端只用它给音高加扰动。
+     这一层抓到过横扫粒子 y 的舍入差（`Entity.getY(0.5)` 是
+     `position.y + getBbHeight() * 0.5`，`getBbHeight` 是 float，`1.8F * 0.5`
+     的舍入必须保留）。
+  改坏自检：`--break-self-test attack_charge` 故意把充能少算一刻，牛的血量立刻不一致；
   `--break-self-test sweep_effects` 去掉武器上的火焰附加，横扫目标的着火刻数立刻不一致。
-  单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火。
-  攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度；假世界也不
-  捕获 crit 动画 / 粒子 / 挥手 / 耐久槽包，这些由单测覆盖（见 6.3 与 README）。
-  够距判定按官方 `isWithinAttackRange`（实体交互距离 + 武器 `attack_range` 组件 +
-  整个 AABB + 世界边界）实现，但没有 `mob-oracle` 场景（夹具直接调 `Player.attack`），
+  单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火，
+  `melee_attack_hits_another_player` 覆盖玩家互打（伤害 / 火焰附加 / 速度包后恢复
+  受击前速度 / 横扫波及第三名玩家）。
+  攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度。够距判定按官方
+  `isWithinAttackRange`（实体交互距离 + 武器 `attack_range` 组件 + 整个 AABB +
+  世界边界）实现，但没有 `mob-oracle` 场景（夹具直接调 `Player.attack`），
   由 `attack_reach_uses_the_entity_interaction_range` 单测守住；`isItemEnabled`
-  feature flag、横扫不含玩家 / 队伍，以及属性
+  feature flag、横扫候选的玩家顺序和队伍判定，以及属性
   修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
   「玩家近战攻击的已知限制」。
 
