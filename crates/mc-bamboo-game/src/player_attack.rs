@@ -14,7 +14,7 @@ use mc_bamboo_blocks::{
     World,
     entity::mob::{DamageSource, effects::EffectInstance},
 };
-use mc_bamboo_core::{BlockPos, Hand, Vec3, mth};
+use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3, mth};
 use mc_bamboo_data::{
     gamerules,
     registries::{
@@ -63,6 +63,17 @@ const CHARGE_TOLERANCE: f32 = 5.0;
 /// `Abilities.getWalkingSpeed()` default, i.e. the player's `MOVEMENT_SPEED`
 /// base. The registry default 0.7 is for other mobs; `Player` overrides it to 0.1.
 const PLAYER_WALKING_SPEED: f32 = 0.1;
+/// `handleAttack` 传给 `isWithinAttackRange(mainHandItem, targetBounds, 3.0)` 的缓冲区。
+///
+/// The buffer `handleAttack` passes to
+/// `isWithinAttackRange(mainHandItem, targetBounds, 3.0)`.
+const ATTACK_RANGE_BUFFER: f64 = 3.0;
+/// `Player.CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER_VALUE`：创造模式的
+/// `ServerPlayer` 给 `ENTITY_INTERACTION_RANGE` 加的临时修饰符。
+///
+/// `Player.CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER_VALUE`: the transient
+/// modifier creative `ServerPlayer`s add to `ENTITY_INTERACTION_RANGE`.
+const CREATIVE_ENTITY_INTERACTION_RANGE: f32 = 2.0;
 
 /// `Player.aiStep`：每刻把 `attackStrengthTicker` 加一；主手物品有任何变化
 /// （数量 / 组件）就刷新缓存，但只有换成另一种物品（官方 `isSameItem`，只比
@@ -471,8 +482,9 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     let yaw = player.yaw;
     let held = player.inventory.held(Hand::Main).clone();
     let ticker = player.attack_strength_ticker;
-    let reach = interaction::interaction_range(player.game_mode);
-    let Some(target) = resolve_target(region, id, entity_id, position, eye_height, reach) else {
+    let game_mode = player.game_mode;
+    let eye = Vec3::new(position.x, position.y + eye_height, position.z);
+    let Some(target) = resolve_target(region, id, entity_id, eye, game_mode, &held) else {
         return;
     };
     let request = AttackRequest {
@@ -492,31 +504,39 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     }
 }
 
-/// `handleAttack` 的目标解析：够距、可攻击、PVP 开关和自己不能打自己。
+/// `handleAttack` 的目标解析：世界边界、够距、可攻击、PVP 开关和自己不能打自己。
 /// 非法目标（掉落物 / 经验球 / 不可攻击的箭）官方断开连接，这里只忽略。
 ///
-/// `handleAttack` target resolution: reach, attackable, PVP rule, no self-hits.
-/// Vanilla disconnects on invalid targets; we ignore them.
+/// `handleAttack` target resolution: world border, reach, attackable, PVP rule,
+/// no self-hits. Vanilla disconnects on invalid targets; we ignore them.
 fn resolve_target(
     region: &Region,
     attacker: PlayerId,
     entity_id: i32,
-    position: Vec3,
-    eye_height: f64,
-    reach: f64,
+    eye: Vec3,
+    game_mode: GameMode,
+    held: &ItemStack,
 ) -> Option<TargetInfo> {
+    let range = attack_range(held, game_mode);
+    let creative = game_mode == GameMode::Creative;
     if let Some(public) = region.entities.public_at(entity_id) {
         if public.removed || !is_attackable(&public.kind) {
             return None;
         }
-        let in_range = interaction::within_block_interaction_range(
-            position,
-            eye_height,
-            reach,
-            BlockPos::containing(public.position),
-            3.0,
-        );
-        return in_range.then(|| mob_target(public));
+        // `level.getWorldBorder().isWithinBounds(target.blockPosition())`。
+        //
+        // `level.getWorldBorder().isWithinBounds(target.blockPosition())`.
+        if !region
+            .global
+            .world_border
+            .is_within_bounds_pos(BlockPos::containing(public.position))
+        {
+            return None;
+        }
+        let bounds = entity_bounds(public.position, public.kind.dimensions());
+        return range
+            .is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, creative)
+            .then(|| mob_target(public));
     }
     let other = region.players.get(&PlayerId(entity_id))?;
     // `ServerPlayer.canHarmPlayer`：PVP 规则 + 队伍，Bamboo 没有队伍。
@@ -525,20 +545,131 @@ fn resolve_target(
     if entity_id == attacker.0 || !region.global.rules.bool(gamerules::PVP) {
         return None;
     }
-    let in_range = interaction::within_block_interaction_range(
-        position,
-        eye_height,
-        reach,
-        BlockPos::containing(other.position()),
-        3.0,
-    );
-    in_range.then(|| TargetInfo {
-        position: other.position(),
-        entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
-        is_living: true,
-        health: other.health.health,
-        dimensions: (0.6, 1.8),
-    })
+    if !region
+        .global
+        .world_border
+        .is_within_bounds_pos(BlockPos::containing(other.position()))
+    {
+        return None;
+    }
+    range
+        .is_in_range(eye, other.bounding_box(), ATTACK_RANGE_BUFFER, creative)
+        .then(|| TargetInfo {
+            position: other.position(),
+            entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
+            is_living: true,
+            health: other.health.health,
+            dimensions: (0.6, 1.8),
+        })
+}
+
+/// 官方 `AttackRange` 里玩家攻击者读得到的几项。`mob_factor` 只对非玩家
+/// 攻击者生效，玩家攻击永远走 `min/minCreative` / `max/maxCreative`。
+///
+/// The `AttackRange` fields a player attacker reads. `mob_factor` only applies
+/// to non-player attackers, so players always use `min/minCreative` and
+/// `max/maxCreative`.
+#[derive(Debug, Clone, Copy)]
+struct AttackRange {
+    min_reach: f32,
+    max_reach: f32,
+    min_creative_reach: f32,
+    max_creative_reach: f32,
+    hitbox_margin: f32,
+}
+
+impl AttackRange {
+    /// `AttackRange.defaultFor(livingEntity)`：`maxReach` 和 `maxCreativeReach`
+    /// 取 `ENTITY_INTERACTION_RANGE`，其余全 0。
+    ///
+    /// `AttackRange.defaultFor(livingEntity)`: `maxReach` and `maxCreativeReach`
+    /// take `ENTITY_INTERACTION_RANGE`, everything else is 0.
+    fn default_for(entity_interaction_range: f32) -> Self {
+        Self {
+            min_reach: 0.0,
+            max_reach: entity_interaction_range,
+            min_creative_reach: 0.0,
+            max_creative_reach: entity_interaction_range,
+            hitbox_margin: 0.0,
+        }
+    }
+
+    /// `AttackRange.isInRange(attacker, AABB, extraBuffer)`：眼睛到目标碰撞盒的
+    /// 距离落在 `[min − margin − buffer, max + margin + buffer]` 闭区间内。
+    ///
+    /// `AttackRange.isInRange(attacker, AABB, extraBuffer)`: the eye-to-box
+    /// distance lies in the closed `[min − margin − buffer, max + margin + buffer]`.
+    fn is_in_range(self, eye: Vec3, bounds: Aabb, buffer: f64, creative: bool) -> bool {
+        let (min, max) = if creative {
+            (self.min_creative_reach, self.max_creative_reach)
+        } else {
+            (self.min_reach, self.max_reach)
+        };
+        let distance = bounds.distance_to_sqr(eye).sqrt();
+        let margin = f64::from(self.hitbox_margin);
+        distance >= f64::from(min) - margin - buffer && distance <= f64::from(max) + margin + buffer
+    }
+}
+
+/// `LivingEntity.getAttackRangeWith(weaponItem)`：武器带 `ATTACK_RANGE` 组件
+/// 就用它，否则 `AttackRange.defaultFor`。
+///
+/// `LivingEntity.getAttackRangeWith(weaponItem)`: use the weapon's `ATTACK_RANGE`
+/// component when present, otherwise `AttackRange.defaultFor`.
+fn attack_range(held: &ItemStack, game_mode: GameMode) -> AttackRange {
+    if !held.is_empty()
+        && let Ok(patch) = ComponentPatch::from_opaque(held)
+        && let Some(ComponentValue::AttackRange {
+            min_reach,
+            max_reach,
+            min_creative_reach,
+            max_creative_reach,
+            hitbox_margin,
+            ..
+        }) = defaults::resolve(held.item, &patch, kinds::ATTACK_RANGE)
+    {
+        return AttackRange {
+            min_reach: *min_reach,
+            max_reach: *max_reach,
+            min_creative_reach: *min_creative_reach,
+            max_creative_reach: *max_creative_reach,
+            hitbox_margin: *hitbox_margin,
+        };
+    }
+    AttackRange::default_for(entity_interaction_range(game_mode))
+}
+
+/// `getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE)`：注册表缺省 3.0，
+/// 创造模式的 `ServerPlayer` 再叠加 2.0 的临时修饰符。玩家的这个属性没有
+/// 来自物品的修饰符。
+///
+/// `getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE)`: registry default
+/// 3.0 plus the 2.0 creative transient modifier. No item adds to it for players.
+fn entity_interaction_range(game_mode: GameMode) -> f32 {
+    let base = attribute_defaults::ENTITY_INTERACTION_RANGE as f32;
+    if game_mode == GameMode::Creative {
+        base + CREATIVE_ENTITY_INTERACTION_RANGE
+    } else {
+        base
+    }
+}
+
+/// 目标实体的碰撞盒，官方 `Entity.makeBoundingBox(position)`：以脚底位置为中心、
+/// 宽 `width` 高 `height`。
+///
+/// The target's collision box, vanilla `Entity.makeBoundingBox(position)`: a
+/// `width × height` box centred on the feet position.
+fn entity_bounds(position: Vec3, dimensions: (f32, f32)) -> Aabb {
+    let half = f64::from(dimensions.0 / 2.0);
+    let height = f64::from(dimensions.1);
+    Aabb::new(
+        position.x - half,
+        position.y,
+        position.z - half,
+        position.x + half,
+        position.y + height,
+        position.z + half,
+    )
 }
 
 /// `Player.attack` 的伤害算式：`s`、`baseDamage`、`magicBoost`、暴击 / 横扫 /
@@ -1230,5 +1361,72 @@ mod tests {
         assert!((player.motion.delta.x - 0.6).abs() < 1.0e-9);
         assert_eq!(player.motion.delta.y, 0.0);
         assert!((player.motion.delta.z + 0.3).abs() < 1.0e-9);
+    }
+
+    /// `getAttributeValue(ENTITY_INTERACTION_RANGE)`：生存 3.0，创造再 +2.0。
+    /// 攻击距离用它算，不是方块交互的 4.5。
+    ///
+    /// `getAttributeValue(ENTITY_INTERACTION_RANGE)`: 3.0 in survival and 3.0 +
+    /// 2.0 in creative. Attack reach uses it, not the 4.5 block-interaction one.
+    #[test]
+    fn entity_interaction_range_follows_the_creative_modifier() {
+        assert_eq!(entity_interaction_range(GameMode::Survival), 3.0);
+        assert_eq!(entity_interaction_range(GameMode::Creative), 5.0);
+        assert_eq!(entity_interaction_range(GameMode::Adventure), 3.0);
+    }
+
+    /// 没有 `ATTACK_RANGE` 组件的武器走 `AttackRange.defaultFor`：上限是实体
+    /// 交互距离、缓冲 3.0，闭区间；创造模式用 `maxCreativeReach`。
+    ///
+    /// A weapon without an `ATTACK_RANGE` component uses
+    /// `AttackRange.defaultFor`: the eye-to-box distance must lie in the closed
+    /// `[−3.0, max + 3.0]` window, and creative uses `maxCreativeReach`.
+    #[test]
+    fn default_attack_range_uses_the_entity_interaction_range() {
+        let empty = ItemStack::empty();
+        let range = attack_range(&empty, GameMode::Survival);
+        assert_eq!(range.max_reach, 3.0);
+        assert_eq!(range.max_creative_reach, 3.0);
+        assert_eq!(range.hitbox_margin, 0.0);
+
+        // 眼睛高度 1.62、牛盒 0.9×1.4：D=6.4 时距离约 5.96（命中），
+        // D=6.5 时约 6.06（超出 6.0）。
+        //
+        // Eye at 1.62 and a 0.9×1.4 cow box: D=6.4 gives about 5.96 (hit),
+        // D=6.5 gives about 6.06 (past the 6.0 limit).
+        let eye = Vec3::new(0.5, 65.62, 0.5);
+        let near = entity_bounds(Vec3::new(6.9, 64.0, 0.5), (0.9, 1.4));
+        let far = entity_bounds(Vec3::new(7.0, 64.0, 0.5), (0.9, 1.4));
+        assert!(range.is_in_range(eye, near, ATTACK_RANGE_BUFFER, false));
+        assert!(!range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, false));
+
+        // 创造模式上限 8.0：同一头牛在生存打不到，创造打得到。
+        //
+        // Creative max is 8.0, so the same cow is out of survival reach but
+        // inside creative reach.
+        let creative_range = attack_range(&empty, GameMode::Creative);
+        assert!(creative_range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, true));
+    }
+
+    /// 边界是闭区间：距离正好等于上限时仍然算命中（`isInRange` 用 `<=`）。
+    ///
+    /// The bounds are closed: a distance exactly at the limit still hits
+    /// (`isInRange` uses `<=`).
+    #[test]
+    fn attack_range_bounds_are_inclusive() {
+        let range = AttackRange {
+            min_reach: 0.0,
+            max_reach: 6.0,
+            min_creative_reach: 0.0,
+            max_creative_reach: 6.0,
+            hitbox_margin: 0.0,
+        };
+        let eye = Vec3::new(0.5, 64.0, 0.5);
+        // 盒子从 x=6.5 起，眼睛到盒子的距离正好 6.0。
+        // The box starts at x=6.5, so the eye-to-box distance is exactly 6.0.
+        let bounds = Aabb::new(6.5, 63.5, 0.0, 7.0, 65.0, 1.0);
+        assert!(range.is_in_range(eye, bounds, 0.0, false));
+        let past = Aabb::new(6.500_001, 63.5, 0.0, 7.0, 65.0, 1.0);
+        assert!(!range.is_in_range(eye, past, 0.0, false));
     }
 }

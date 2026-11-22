@@ -4204,6 +4204,77 @@ fn left_click_attack_hurts_a_cow() {
     assert_eq!(health, Some(9.0), "满充能空手一次攻击扣 1 点");
 }
 
+/// `handleAttack` 的够距是「实体交互距离（生存 3.0）＋ 3.0 缓冲」，量的是眼睛到
+/// 目标碰撞盒的距离，闭区间。牛盒 0.9×1.4、眼睛高 1.62：D=6.4 命中、D=6.5 不中；
+/// 旧的方块交互距离（4.5 + 3.0）会把 6.5 也判成命中。
+///
+/// `handleAttack`'s reach is the entity interaction range (3.0 in survival) plus
+/// a 3.0 buffer, measured from the eye to the target's collision box as a closed
+/// interval. With a 0.9×1.4 cow and a 1.62 eye height, D=6.4 hits and D=6.5
+/// misses; the old block-interaction reach (4.5 + 3.0) would accept 6.5.
+#[test]
+fn attack_reach_uses_the_entity_interaction_range() {
+    use mc_bamboo_blocks::entity::Entity;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    // 生存模式的攻击距离是 3.0 + 3.0；创造模式是 5.0 + 3.0。
+    //
+    // Survival attack reach is 3.0 + 3.0; creative is 5.0 + 3.0.
+    region.players.get_mut(&client.id).unwrap().game_mode = GameMode::Survival;
+    let position = region.players.get(&client.id).unwrap().position();
+    let near = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 6.4,
+        position.y,
+        position.z,
+    )));
+    let far = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x - 6.5,
+        position.y,
+        position.z,
+    )));
+    region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 100;
+
+    // 近处那头打得中。
+    // The near cow is hit.
+    server.request(&client, PlayRequest::Attack { entity_id: near });
+    server.tick();
+    let health = |server: &Harness, id: i32| {
+        server
+            .world
+            .islands
+            .region
+            .entities
+            .public_at(id)
+            .and_then(|public| match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
+                _ => None,
+            })
+    };
+    assert_eq!(health(&server, near), Some(9.0));
+
+    // 远处那头超出 6.0，攻击被丢弃。
+    // The far cow is past 6.0, so the attack is dropped.
+    server
+        .world
+        .islands
+        .region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 100;
+    server.request(&client, PlayRequest::Attack { entity_id: far });
+    server.tick();
+    assert_eq!(health(&server, far), Some(10.0));
+}
+
 /// 满充能下落暴击：暴击动画、攻击音效和伤害指示粒子都真的发到客户端，
 /// 不是只生成效果就丢掉。
 ///

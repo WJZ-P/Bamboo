@@ -632,6 +632,12 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 `on_attack` 拆成 `resolve_target` / `plan_attack` / `land_attack` / `finish_hit`
 四步，中间产物放在 `AttackPlan`。
 
+- **够距**：按 `handleAttack` 的 `isWithinAttackRange(mainHandItem, targetBounds, 3.0)`：
+  `AttackRange.defaultFor` 取 `ENTITY_INTERACTION_RANGE`（生存 3.0，创造再 +2.0），
+  武器带 `attack_range` 组件时用组件；量眼睛到目标**整个碰撞盒**的距离，只有落在
+  `[min − margin − 3, max + margin + 3]` 闭区间才算够距，并查
+  `worldBorder.isWithinBounds(target.blockPosition())`。
+  `attack_reach_uses_the_entity_interaction_range` 单测守 D=6.4 命中 / D=6.5 落空。
 - **冷却**：`Player.attackStrengthTicker`（新增按玩家字段，见 6.2）每刻在玩家 tick
   开头 `+1`；`handlePunch`（挥空）、`onAttack`（每次攻击）清零，主手换成**另一种物品**
   才在 `aiStep` 清零——判据是官方 `ItemStack.isSameItem`，只比物品 ID；耐久 / 附魔 /
@@ -675,11 +681,12 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火。
   攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度；假世界也不
   捕获 crit 动画 / 粒子 / 挥手 / 耐久槽包，这些由单测覆盖（见 6.3 与 README）。
-  够距判定（`within_block_interaction_range` + 方块点 vs 官方 `isWithinAttackRange` +
-  AABB + 武器距离 + 世界边界）、横扫候选盒近似、`baseDamage > 0 || magicBoost > 0`
-  门槛，以及属性修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
-  「玩家近战攻击的已知限制」；够距这一层没有 `mob-oracle` 场景（夹具直接调
-  `Player.attack`）。
+  够距判定按官方 `isWithinAttackRange`（实体交互距离 + 武器 `attack_range` 组件 +
+  整个 AABB + 世界边界）实现，但没有 `mob-oracle` 场景（夹具直接调 `Player.attack`），
+  由 `attack_reach_uses_the_entity_interaction_range` 单测守住；`isItemEnabled`
+  feature flag、横扫候选盒近似、`baseDamage > 0 || magicBoost > 0` 门槛，以及属性
+  修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
+  「玩家近战攻击的已知限制」。
 
 ---
 

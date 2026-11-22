@@ -242,9 +242,12 @@ WebView2 的渲染进程不算在内。
   玩家结算伤害和受伤链路，额外击退（`causeExtraKnockback`）、火焰附加点燃和横扫波及的
   玩家都走实体表（`knockback_mob` / `ignite_mob` / 候选收集），而玩家不在实体表里，
   故这几项对玩家目标不生效（官方 `Player.attack` / `doSweepAttack` 对所有
-  `LivingEntity` 一视同仁）。够距用 `within_block_interaction_range` 加目标所在方块点，
-  官方 `handleAttack` 用 `isWithinAttackRange`（实体交互距离 + 武器攻击距离 + 整个 AABB）
-  并查世界边界和 feature flag，这一层完全没进 `mob-oracle`（夹具直接调 `Player.attack`）；
+  `LivingEntity` 一视同仁）。够距按官方 `handleAttack` 的
+  `isWithinAttackRange`：实体交互距离（生存 3.0 / 创造 5.0，武器带 `attack_range`
+  组件时读组件）配 3.0 缓冲，量眼睛到目标整个碰撞盒的闭区间距离，并查世界边界
+  （`mainHandItem.isItemEnabled(enabledFeatures())` 的 feature flag 没查）；这一层完全
+  没进 `mob-oracle`（夹具直接调 `Player.attack`），由
+  `attack_reach_uses_the_entity_interaction_range` 等单测守住；
   横扫候选盒按主目标位置近似 `inflate(1, 0.25, 1)`，不含玩家和队伍判定；官方
   `Player.attack` 在 `baseDamage <= 0 && magicBoost <= 0` 时整段跳过（连 `nodamage` 音都不发），
   Bamboo 没有这道门槛（正常路径 `ATTACK_DAMAGE` 基值 1.0 使 `baseDamage ≥ 0.2`，不触发）；
