@@ -2473,3 +2473,37 @@ mc-bamboo-worldgen --lib` 355 passed。产物在
 
 `template_pool`（紧凑 481 KB）仍留在 `raw` 里，因为结构流水线每次建状态都要解析一份；
 把它也改成进程级 `OnceLock` 就能再省约 2 MB，但会动结构状态的建法，本轮没做。
+
+### 20.4 续：去掉重复全量解析，模板池进程级常驻（2026-11-22）
+
+§20.3 把 `raw` 收到 10 张表之后，`chunk::parse_settings` 仍在**每条生成线程**建 `Generator`
+时把整份 `worldgen.json`（4.4 MB）重新解析一遍，只为取一个几 KB 的 `noise_settings` 条目；
+`feature::fossil::chain` 每次放置化石也会解析两遍；`feature::noise_state::holder_registry()`
+没有调用者，却各自保留一条全量解析路径。现在：`parse_settings` 直接取 `Worldgen::raw()`
+里的 `noise_settings[settings_id]`，`fossil::chain` 取 `raw` 里的 `processor_list`，
+`holder_registry()` 删除（`Registry` 已持有同一张表）。数据同源，结果逐字节不变，新增单测
+`chunk::tests::settings_match_a_fresh_full_parse` 把「取自 `raw`」与「重新解析整份文档」
+逐项比较。
+
+模板池同理：`template_pool` 只随数据版本变，和种子、世界类型、区块坐标无关。现在在
+`Worldgen::parse` 里解析一次，存 `Worldgen::template_pools()`，`WorldStructureState.pools`
+改为 `Arc<TemplatePools>`（同一份 `Arc` 跨线程 / 跨种子克隆），`RUNTIME_TABLES` 从 10 张
+收到 9 张。因为 `TemplatePool::parse` 会预计算 `max_size`（官方懒算，这里提前算是为了保持
+`Sync`，见 `pool.rs` 字段注释），模板外形会比改动前更早加载：空服多约 1.5 MB，有玩家时
+本来就要加载，净效果仍是常驻减少。
+
+实测（种子 20261121、视距 8、经 heavy 锁串行）：`startup` 快照 tracked live 13.5 → 11.9 MB，
+`worldgen data: shared Worldgen` 11.50 → 8.41 MB（**−3.09 MB**，其中 `template_pool` 的
+JSON 与逐状态解析被去掉，模板外形 +1.52 MB 提前到启服）。`startup` 峰值 41.4 MB（上一轮
+33.0 MB，含提前加载的外形与机器波动）。对拍 `chunkgen --through features`（1 chunk /
+1536 群系格 / 884736 方块 / 886272 项）与 `jigsaw pools`（2205 池 / 19994 件）全 0 不一致。
+
+同一轮 `plain`（不带分析器）另量了「玩家离开后到底能回收多少」——假玩家 30 s、离开 20 s：
+工作集 296.7 MB / 私有提交 283.7 MB；3 s 后 104.2 / 90.1 MB（默认 30 s 空闲释放清掉
+128 MB 地形 + 64 MB 地物两份缓存）；随后外部调用 `EmptyWorkingSet`：工作集 2.2 MB，
+私有提交仍是 90.1 MB——**只是换出页面，没有归还**。`run.sh` 的 `TRIM=1` 会做这个实验。
+另一次把两份缓存上限减半（64 / 32 MB）的读数在线 303.0 MB，默认上限那次 332.2 MB，
+但两次是不同运行、机器负载不同，只能当旁证；硬上限就是两份缓存的 MB 预算。
+
+产物在 `W:/data/bamboo-agents/reports/op-memprof-data/s9-profile/`、`s9-plain2/`、
+`s9-plain-halved/`。

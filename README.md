@@ -588,7 +588,23 @@ WebView2 的渲染进程不算在内。
   保留没人读的键：`chunkgen --through features`、`structures` 全 0 不一致。同一快照
   `shared Worldgen` 24.93 → 11.50 MB（−13.43 MB 常驻）；不带分析器的 release 服务端
   54.6 / 212.4 / 145.0 → 38.9 / 192.5 / 128.3 MB（空载 / 在线 / 离开后，忙机器 ±10–20 MB），
-  见 `docs/profiling.md` §20.3。
+  见 `docs/profiling.md` §20.3。模板池后来进一步改成进程级常驻，`RUNTIME_TABLES` 收到 9 张，
+  见下一条。
+- **不再重复全量解析世界生成数据 + 模板池进程级常驻**（`op-memprof` 续，2026-11-22）：
+  `chunk::Generator::with_settings` 原先通过 `parse_settings` **重新解析整份 `worldgen.json`**
+  （4.4 MB）只为取一个几 KB 的 `noise_settings` 条目，每条生成线程各付一次；
+  `feature::fossil::chain` 每次放化石也要解析两遍。现在都直接取 `Worldgen::raw()` 里已有的
+  `noise_settings` / `processor_list`，无调用者的 `feature::noise_state::holder_registry()`
+  一并删掉。拼图模板池 `template_pool` 只随数据版本变，解析一次存进 `Worldgen::template_pools()`，
+  `WorldStructureState` 克隆 `Arc`，`raw` 从 10 张收到 9 张。结果逐字节不变：`chunkgen
+  --through features`（886272 项）、`jigsaw pools`（2205 池 / 19994 件）全 0 不一致。同一快照
+  `startup` 的 tracked live 13.5 → 11.9 MB、`shared Worldgen` 11.50 → 8.41 MB（−3.09 MB）。
+  **已知限制**：`TemplatePools::parse` 在启服时就预计算 `max_size`，因而会提前加载模板外形；
+  空服比改动前多约 1.5 MB（有玩家时本来就会加载），见 `docs/profiling.md` §20.4。另实测
+  「玩家离开后」：离开 20 s 时工作集 296.7 MB，3 s 后 104.2 MB（默认 30 s 空闲释放清掉
+  128 MB 地形 + 64 MB 地物两份缓存），再强制 `EmptyWorkingSet` 只降到 2.2 MB 而私有提交仍是
+  90.1 MB（纯换出页面，不是真正归还）。所以用户看到的「离开后掉不下来」有一部分是读数早于
+  空闲释放；两份缓存的 MB 上限就是在线峰值的硬上限，可在 `bamboo.toml` 调小。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出

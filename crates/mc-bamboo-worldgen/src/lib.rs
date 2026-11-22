@@ -75,12 +75,12 @@ use crate::{
 const PRESET_PARAMETER_COUNT: usize = 13;
 
 /// 启服、加载世界时还会读的顶层注册表。`Generator` 编译含水层 / 地表规则 / 雕刻器、
-/// 出生点搜索、结构流水线和拼图模板池、处理阀都从这里取 JSON；其余表解析完就没人读。
+/// 出生点搜索、结构流水线和处理阀都从这里取 JSON；其余表解析完就没人读。
 ///
 /// Top-level registries still read at startup and world load: `Generator` compiles the
 /// aquifer, surface rules and carvers from them, and spawn search, the structure
-/// pipeline and template pools, and processor lists read them too. Everything else is
-/// dead once parsing finishes.
+/// pipeline and processor lists read them too. Everything else is dead once parsing
+/// finishes.
 const RUNTIME_TABLES: [&str; 9] = [
     "noise_settings",
     "density_function",
@@ -116,12 +116,14 @@ pub struct Worldgen {
     /// 启服、加载世界时还会读的顶层注册表，官方 codec 的 JSON 原样保留。
     ///
     /// 只留 [`RUNTIME_TABLES`] 那几个：解析完就没人再读的（多噪声预设、地物三表、
-    /// `features_per_step`、`block_state_provider`、`end_biomes`、`noise`）不再常驻。
+    /// `features_per_step`、`block_state_provider`、`end_biomes`、`noise`）不再常驻，
+    /// `template_pool` 改由 [`Worldgen::template_pools`] 提供。
     ///
     /// The top-level registries still read at startup and world load, kept as the
     /// official codec JSON. Only [`RUNTIME_TABLES`] survive here; tables nobody reads
     /// after parsing (multi-noise presets, the three feature tables,
-    /// `features_per_step`, `block_state_provider`, `end_biomes`, `noise`) are dropped.
+    /// `features_per_step`, `block_state_provider`, `end_biomes`, `noise`) are dropped,
+    /// and `template_pool` lives in [`Worldgen::template_pools`].
     raw: serde_json::Map<String, Value>,
 }
 
