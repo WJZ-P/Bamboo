@@ -1006,6 +1006,10 @@ pub struct ProjectileFacts {
     pub panda_main_gene: u8,
     pub panda_hidden_gene: u8,
     pub panda_flags: u8,
+    /// `Ocelot.DATA_TRUSTING` 的元数据 index。
+    ///
+    /// The metadata index of `Ocelot.DATA_TRUSTING`.
+    pub ocelot_trusting: u8,
     /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
     ///
     /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).

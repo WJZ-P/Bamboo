@@ -639,6 +639,7 @@ fn run_cases(
         MobType::Frog,
         MobType::Tadpole,
         MobType::PolarBear,
+        MobType::Ocelot,
         MobType::Creeper,
         MobType::Spider,
         MobType::CaveSpider,

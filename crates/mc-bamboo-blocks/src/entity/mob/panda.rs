@@ -331,6 +331,7 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 speed: 1.0,
                 player: None,
                 calm_down: 0,
+                scare: None,
             },
         ),
         wrap(

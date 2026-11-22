@@ -68,6 +68,18 @@ pub enum Goal {
         speed: f64,
         player: Option<EntityUid>,
         calm_down: i32,
+        /// `TemptGoal.canScare` 的状态：豹猫 / 猫对未信任或未驯服的玩家受惊。
+        ///
+        /// State for `TemptGoal.canScare`: ocelots and cats are scared by sudden movement.
+        scare: Option<TemptScare>,
+    },
+    /// `OcelotAttackGoal`：豹猫和猫按距离切换潜行 / 冲刺并每 20 刻扑击。
+    ///
+    /// `OcelotAttackGoal`: ocelots and cats switch crouch / sprint by distance and strike
+    /// every 20 ticks.
+    OcelotAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
     },
     FollowParent {
         speed: f64,
@@ -362,6 +374,18 @@ pub enum Goal {
     },
 }
 
+/// `TemptGoal.canScare` 记录的玩家上次位置与朝向。
+///
+/// The last player position and rotation remembered by `TemptGoal.canScare`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TemptScare {
+    pub px: f64,
+    pub py: f64,
+    pub pz: f64,
+    pub p_rot_x: f64,
+    pub p_rot_y: f64,
+}
+
 /// [`Goal::AvoidEntity`] 躲的是哪一类。
 ///
 /// What a [`Goal::AvoidEntity`] runs from.
@@ -412,6 +436,14 @@ pub enum TargetType {
     ///
     /// The enderman's `NearestAttackableTargetGoal<Endermite>`; endermites are not modelled.
     Endermite,
+    /// 豹猫的 `NearestAttackableTargetGoal<Chicken>`。
+    ///
+    /// The ocelot's `NearestAttackableTargetGoal<Chicken>`.
+    Chicken,
+    /// 豹猫 / 猫的 `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`。
+    ///
+    /// The ocelot / cat `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`.
+    BabyTurtleOnLand,
 }
 
 impl TargetType {
@@ -503,9 +535,10 @@ impl Goal {
             Self::Fox(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
-            Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
-                &[Flag::Move, Flag::Look]
-            }
+            Self::Breed { .. }
+            | Self::Tempt { .. }
+            | Self::OcelotAttack { .. }
+            | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
             Self::Unavailable(_) | Self::RandomStand { .. } => &[],
@@ -564,6 +597,7 @@ impl Goal {
                 | Self::RabbitRaid(_)
                 | Self::RandomLookAround { .. }
                 | Self::MeleeAttack { .. }
+                | Self::OcelotAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
                 | Self::CubeFloat
@@ -603,6 +637,7 @@ impl Goal {
             Self::Panic { .. } => "PanicGoal",
             Self::Breed { .. } => "BreedGoal",
             Self::Tempt { .. } => "TemptGoal",
+            Self::OcelotAttack { .. } => "OcelotAttackGoal",
             Self::FollowParent { .. } => "FollowParentGoal",
             Self::Stroll { probability, .. } if *probability < 0.0 => "RandomStrollGoal",
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
@@ -750,6 +785,7 @@ impl GoalSelector {
                     steering_item: false,
                     player: None,
                     calm_down: 0,
+                    scare: None,
                 },
             ),
             (
@@ -1057,8 +1093,29 @@ impl GoalSelector {
 
     /// `setCanBreakDoors(false)` 时官方 `removeGoal(BreakDoorGoal)`。
     pub fn remove_break_door(&mut self) {
-        self.goals
-            .retain(|wrapped| !matches!(wrapped.goal, Goal::BreakDoor));
+        self.remove_goals(|goal| matches!(goal, Goal::BreakDoor));
+    }
+
+    /// `GoalSelector.removeAllGoals`：删掉匹配的目标，并同步清掉或平移 `locked` 下标。
+    ///
+    /// `GoalSelector.removeAllGoals`: drop matching goals and update `locked` indices.
+    pub(super) fn remove_goals(&mut self, predicate: impl Fn(&Goal) -> bool) {
+        let mut new_indices = Vec::with_capacity(self.goals.len());
+        let mut next = 0usize;
+        let mut kept = Vec::with_capacity(self.goals.len());
+        for wrapped in self.goals.drain(..) {
+            if predicate(&wrapped.goal) {
+                new_indices.push(None);
+            } else {
+                new_indices.push(Some(next));
+                next += 1;
+                kept.push(wrapped);
+            }
+        }
+        self.goals = kept;
+        for slot in &mut self.locked {
+            *slot = slot.and_then(|index| new_indices.get(index).copied().flatten());
+        }
     }
 
     /// 对拍的改坏确认用：把目标按优先级排序（官方按注册顺序）。
@@ -1210,10 +1267,13 @@ pub(super) const fn melee_attack(speed: f64, track_target: bool, class: &'static
 /// Rabbits and foxes wrap a few shared goals in inner subclasses; the oracle
 /// compares the subclass names.
 fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
-    use super::MobType::{Fox, Rabbit, Tadpole, Wolf};
+    use super::MobType::{Fox, Ocelot, Rabbit, Tadpole, Turtle, Wolf};
     match (kind, name) {
         // `AbstractFish.FishSwimGoal`。
         (Tadpole, "RandomSwimmingGoal") => "FishSwimGoal",
+        (Turtle, "PanicGoal") => "TurtlePanicGoal",
+        (Turtle, "BreedGoal") => "TurtleBreedGoal",
+        (Turtle, "RandomStrollGoal") => "TurtleRandomStrollGoal",
         (Wolf, "PanicGoal") => "TamableAnimalPanicGoal",
         (Rabbit, "PanicGoal") => "RabbitPanicGoal",
         (Rabbit, "AvoidEntityGoal") => "RabbitAvoidEntityGoal",
@@ -1221,6 +1281,8 @@ fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
         (Fox, "BreedGoal") => "FoxBreedGoal",
         (Fox, "FollowParentGoal") => "FoxFollowParentGoal",
         (Fox, "LookAtPlayerGoal") => "FoxLookAtPlayerGoal",
+        (Ocelot, "TemptGoal") => "OcelotTemptGoal",
+        (Ocelot, "AvoidEntityGoal") => "OcelotAvoidEntityGoal",
         _ => name,
     }
 }
@@ -1300,6 +1362,30 @@ fn swell_tick(target: Option<EntityUid>, me: &Entity, mob: &mut Mob, ctx: &dyn E
     mob.creeper.swell_dir = if seen { 1 } else { -1 };
 }
 
+/// 按 uid 找一个生物或玩家的位置和眼睛位置（不管死活，给 `OcelotAttackGoal.tick` 用）。
+///
+/// Position and eye position of a mob or player by uid regardless of alive state
+/// (used by `OcelotAttackGoal.tick`).
+pub(super) fn entity_look_target(
+    ctx: &dyn EntityCtx,
+    uid: EntityUid,
+) -> Option<(EntityUid, Vec3, Vec3)> {
+    if let Some(player) = player_by_uid(ctx.blocks(), uid) {
+        return Some((uid, player.position, player.eye_position()));
+    }
+    let other = ctx.other(uid)?;
+    let KindPublic::Mob(target) = &other.kind else {
+        return None;
+    };
+    let (_, _, eye) = target.mob_type.dimensions(target.baby);
+    let eye = Vec3::new(
+        other.position.x,
+        other.position.y + f64::from(eye),
+        other.position.z,
+    );
+    Some((uid, other.position, eye))
+}
+
 /// 按 uid 找一个还活着的玩家或生物：（uid，位置，眼睛位置）。
 ///
 /// A living player or mob by uid: (uid, position, eye position).
@@ -1370,9 +1456,21 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
         Goal::RabbitRaid(raid) => raid.can_use(me, mob, ctx.blocks()),
-        // `RabbitAvoidEntityGoal`：杀手兔不躲。
-        // `RabbitAvoidEntityGoal`: the killer bunny never flees.
-        Goal::Avoid(avoid) => !super::rabbit::is_evil(mob) && avoid.can_use(me, mob, ctx),
+        // `RabbitAvoidEntityGoal`：杀手兔不躲；`OcelotAvoidEntityGoal`：信任的豹猫不躲。
+        // `RabbitAvoidEntityGoal`: the killer bunny never flees; `OcelotAvoidEntityGoal`:
+        // trusting ocelots never flee.
+        Goal::Avoid(avoid) => {
+            !super::rabbit::is_evil(mob)
+                && !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+                && avoid.can_use(me, mob, ctx)
+        }
+        Goal::OcelotAttack { target, .. } => {
+            let best = mob.target.filter(|&uid| raw_target(ctx, uid).is_some());
+            if best.is_some() {
+                *target = best;
+            }
+            best.is_some()
+        }
         Goal::Fox(goal) => goal.can_use(me, mob, ctx),
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
@@ -1696,6 +1794,12 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                         nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Fox)
                     }
                 }
+                TargetType::Chicken => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Chicken)
+                }
+                TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
+                    public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
+                }),
                 TargetType::Player | TargetType::GuardedPlayer | TargetType::AngerPlayer => {
                     nearest_attackable(me, mob, ctx, *kind)
                 }
@@ -1915,7 +2019,19 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
         Goal::RabbitRaid(raid) => raid.can_continue(),
-        Goal::Avoid(_) => super::avoid::AvoidEntity::can_continue(mob),
+        Goal::Avoid(_) => {
+            !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+                && super::avoid::AvoidEntity::can_continue(mob)
+        }
+        Goal::OcelotAttack { target, .. } => {
+            let Some((_, pos, _)) = target.and_then(|uid| raw_target(ctx, uid)) else {
+                return false;
+            };
+            if me.position.distance_to_sqr(pos) > 225.0 {
+                return false;
+            }
+            !mob.navigation.is_done() || can_use(goal, me, mob, ctx)
+        }
         Goal::Fox(goal) => goal.can_continue(me, mob, ctx),
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
@@ -1974,10 +2090,39 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 }
                 _ => false,
             }),
-        Goal::Tempt { .. }
-        | Goal::SquidRandomMovement
-        | Goal::SquidFlee { .. }
-        | Goal::PufferfishPuff => can_use(goal, me, mob, ctx),
+        Goal::Tempt { player, scare, .. } => {
+            // `TemptGoal.canContinueToUse`：会受惊且距离 < 6 格时，玩家位移或转头超过阈值就惊跑。
+            // `TemptGoal.canContinueToUse`: when scareable within 6 blocks, player movement
+            // or rotation past the threshold stops the tempt.
+            if let Some(scare) = scare.as_mut()
+                && !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+            {
+                let Some(found) = player.and_then(|uid| player_by_uid(ctx.blocks(), uid)) else {
+                    return false;
+                };
+                if me.position.distance_to_sqr(found.position) < 36.0 {
+                    let prev = Vec3::new(scare.px, scare.py, scare.pz);
+                    if found.position.distance_to_sqr(prev) > 0.010_000_000_000_000_002 {
+                        return false;
+                    }
+                    if (f64::from(found.pitch) - scare.p_rot_x).abs() > 5.0
+                        || (f64::from(found.yaw) - scare.p_rot_y).abs() > 5.0
+                    {
+                        return false;
+                    }
+                } else {
+                    scare.px = found.position.x;
+                    scare.py = found.position.y;
+                    scare.pz = found.position.z;
+                }
+                scare.p_rot_x = f64::from(found.pitch);
+                scare.p_rot_y = f64::from(found.yaw);
+            }
+            can_use(goal, me, mob, ctx)
+        }
+        Goal::SquidRandomMovement | Goal::SquidFlee { .. } | Goal::PufferfishPuff => {
+            can_use(goal, me, mob, ctx)
+        }
         Goal::FollowParent { parent, .. } => {
             if mob.age >= 0 || super::fox::is_defending_fox(mob) {
                 return false;
@@ -2253,8 +2398,17 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
                 );
             }
         }
+        Goal::Tempt { player, scare, .. } => {
+            if let Some(scare) = scare.as_mut()
+                && let Some(found) = player.and_then(|uid| player_by_uid(ctx.blocks(), uid))
+            {
+                scare.px = found.position.x;
+                scare.py = found.position.y;
+                scare.pz = found.position.z;
+            }
+        }
         Goal::Float
-        | Goal::Tempt { .. }
+        | Goal::OcelotAttack { .. }
         | Goal::Unavailable(_)
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
@@ -2412,6 +2566,10 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             *player = None;
             mob.navigation.stop();
             *calm_down = reduced_tick_delay(100);
+        }
+        Goal::OcelotAttack { target, .. } => {
+            *target = None;
+            mob.navigation.stop();
         }
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
@@ -2726,6 +2884,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                     .move_to_entity(ctx.blocks(), &nav, player.position, *speed, 1);
             }
         }
+        Goal::OcelotAttack {
+            target,
+            attack_time,
+        } => super::ocelot::attack_tick(*target, attack_time, me, mob, ctx),
         Goal::FollowParent {
             speed,
             parent,
@@ -3896,9 +4058,9 @@ pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
 }
 
 fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
-    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼、羊驼和女巫会把别的生物当目标。
-    // Skeletons, creepers, spiders, endermen, polar bears, foxes, wolves, llamas and
-    // witches can target other mobs.
+    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼、羊驼、女巫和豹猫会把别的生物当目标。
+    // Skeletons, creepers, spiders, endermen, polar bears, foxes, wolves, llamas,
+    // witches and ocelots can target other mobs.
     let mobs_allowed = mob.mob_type.full_target_rules()
         || matches!(
             mob.mob_type,
@@ -3907,6 +4069,7 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
                 | super::MobType::Wolf
                 | super::MobType::Llama
                 | super::MobType::Witch
+                | super::MobType::Ocelot
         );
     if !mobs_allowed && player_by_uid(ctx.blocks(), uid).is_none() {
         return None;
@@ -4257,6 +4420,18 @@ pub(super) fn nearest_mob_target(
     ctx: &dyn EntityCtx,
     matches: impl Fn(super::MobType) -> bool,
 ) -> Option<EntityUid> {
+    nearest_mob_target_with(me, mob, ctx, |public| matches(public.mob_type))
+}
+
+/// 按完整 [`super::MobPublic`] 谓词找最近的可攻击生物目标。
+///
+/// Find the nearest attackable mob target matching a full [`super::MobPublic`] predicate.
+pub(super) fn nearest_mob_target_with(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    matches: impl Fn(&super::MobPublic) -> bool,
+) -> Option<EntityUid> {
     let range = mob
         .attributes
         .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -4266,7 +4441,7 @@ pub(super) fn nearest_mob_target(
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };
-        if other.uid == me.id || other.removed || !public.is_alive() || !matches(public.mob_type) {
+        if other.uid == me.id || other.removed || !public.is_alive() || !matches(public) {
             return;
         }
         let (_, _, eye) = public.mob_type.dimensions(public.baby);

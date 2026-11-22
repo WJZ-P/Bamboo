@@ -309,6 +309,10 @@ pub enum EntityData {
     EndermanCarried(Option<i32>),
     EndermanCreepy(bool),
     EndermanStaredAt(bool),
+    /// `Ocelot.DATA_TRUSTING`：BOOLEAN。
+    ///
+    /// `Ocelot.DATA_TRUSTING`: BOOLEAN.
+    OcelotTrusting(bool),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -438,6 +442,7 @@ impl EntityData {
             Self::PandaMainGene(_) => mc_bamboo_data::entity_types::PANDA_MAIN_GENE,
             Self::PandaHiddenGene(_) => mc_bamboo_data::entity_types::PANDA_HIDDEN_GENE,
             Self::PandaFlags(_) => mc_bamboo_data::entity_types::PANDA_FLAGS,
+            Self::OcelotTrusting(_) => mc_bamboo_data::entity_types::OCELOT_TRUSTING,
             Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
             Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
             Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
@@ -703,6 +708,10 @@ impl EntityData {
             Self::PolarBearStanding(standing) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *standing);
+            }
+            Self::OcelotTrusting(trusting) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *trusting);
             }
             Self::PandaUnhappy(value) | Self::PandaSneeze(value) | Self::PandaEat(value) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);

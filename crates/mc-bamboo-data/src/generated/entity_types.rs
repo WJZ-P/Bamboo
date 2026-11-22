@@ -242,6 +242,7 @@ pub const PANDA_EAT: u8 = 20;
 pub const PANDA_MAIN_GENE: u8 = 21;
 pub const PANDA_HIDDEN_GENE: u8 = 22;
 pub const PANDA_FLAGS: u8 = 23;
+pub const OCELOT_TRUSTING: u8 = 18;
 pub const GLOW_SQUID_DARK_TICKS: u8 = 18;
 pub const FISH_FROM_BUCKET: u8 = 16;
 pub const SALMON_VARIANT: u8 = 17;

@@ -186,6 +186,11 @@ pub fn interact(
     {
         return outcome;
     }
+    if mob.mob_type == MobType::Ocelot
+        && let Some(outcome) = super::ocelot::interact(me, mob, req)
+    {
+        return outcome;
+    }
     if matches!(mob.mob_type, MobType::Cow | MobType::Mooshroom)
         && req.held.item == items::BUCKET
         && !mob.is_baby()
