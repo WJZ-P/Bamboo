@@ -26,7 +26,7 @@ use super::{
     attributes::{Attribute, Attributes},
     brain::{
         Activity, ActivityData, Brain, Cx,
-        behavior::{Class, Gate, Kind, MoveToTargetSink, Trigger},
+        behavior::{Class, Gate, Kind, MoveToTargetSink, Speed, Trigger},
         memory::{
             MemoryStatus::{self, Registered, ValueAbsent, ValuePresent},
             MemoryType::{self, *},
@@ -479,7 +479,7 @@ fn acceptable_landing_spot(cx: &Cx, target: BlockPos) -> bool {
 /// `BlockPos.withinBoxByManhattanDistance(origin, reach, reach, reach)`: nearest first by
 /// Manhattan distance; within a shell x and y ascend and z comes positive first, then
 /// mirrored. Stops when `visit` returns true.
-fn within_box_by_manhattan(
+pub(super) fn within_box_by_manhattan(
     origin: BlockPos,
     reach: i32,
     visit: &mut dyn FnMut(BlockPos) -> bool,
@@ -701,7 +701,7 @@ const SWIM_TIERS: [(i32, i32); 6] = [(1, 1), (3, 3), (5, 5), (6, 5), (7, 7), (10
 /// `RandomStroll.getTargetSwimPos`: draw a swimmable spot in the smallest tier, then
 /// stretch that direction tier by tier; the first tier that leaves the water (or finds
 /// nothing) falls back to the previous one.
-fn target_swim_pos(cx: &mut Cx) -> Option<Vec3> {
+pub(super) fn target_swim_pos(cx: &mut Cx) -> Option<Vec3> {
     let mut fallback: Option<Vec3> = None;
     let mut target = None;
     for (horizontal, vertical) in SWIM_TIERS {
@@ -987,7 +987,7 @@ fn look_at_player_sometimes() -> Kind {
 
 fn follow_temptation() -> Kind {
     Kind::FollowTemptation {
-        speed: 1.25,
+        speed: Speed::fixed(1.25),
         close_adult: 2.5,
         close_baby: 2.5,
     }
@@ -995,7 +995,7 @@ fn follow_temptation() -> Kind {
 
 fn walk_target_from_look(speed: f32) -> Kind {
     Kind::WalkTargetFromLook {
-        speed,
+        speed: Speed::fixed(speed),
         close_enough: 3,
     }
 }

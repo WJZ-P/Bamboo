@@ -63,6 +63,11 @@ pub enum Activity {
     Swim,
     LaySpawn,
     Tongue,
+    /// 美西螈的装死和战斗活动（`Activity.PLAY_DEAD / FIGHT`）。
+    ///
+    /// The axolotl's play-dead and fight activities (`Activity.PLAY_DEAD / FIGHT`).
+    PlayDead,
+    Fight,
 }
 
 impl Activity {
@@ -79,6 +84,8 @@ impl Activity {
             Self::Swim => "swim",
             Self::LaySpawn => "lay_spawn",
             Self::Tongue => "tongue",
+            Self::PlayDead => "play_dead",
+            Self::Fight => "fight",
         }
     }
 
@@ -398,6 +405,76 @@ impl Brain {
             .iter()
             .filter(|entry| entry.node.status == Status::Running)
             .map(|entry| entry.node.debug_name())
+            .collect()
+    }
+
+    /// 对拍用：传感器表（类名、扫描间隔、`requires()` 的记忆名）。
+    ///
+    /// For oracles: the sensor table (class name, scan rate, the `requires()` memories).
+    pub fn sensor_table(&self) -> Vec<(&'static str, i32, Vec<&'static str>)> {
+        self.sensors
+            .iter()
+            .map(|sensor| {
+                let mut memories: Vec<&'static str> = sensor
+                    .kind
+                    .requires()
+                    .iter()
+                    .map(|kind| kind.name())
+                    .collect();
+                memories.sort_unstable();
+                (sensor.kind.class_name(), sensor.kind.scan_rate(), memories)
+            })
+            .collect()
+    }
+
+    /// 对拍用：行为表（优先级、活动名、类名），按官方遍历顺序；闸门带装载顺序的子行为名。
+    ///
+    /// For oracles: the behaviour table (priority, activity name, class name) in the
+    /// vanilla iteration order; gates list their children's names in load order.
+    pub fn behavior_table(&self) -> Vec<(i32, &'static str, String)> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.priority,
+                    entry.activity.name(),
+                    entry.node.table_name(),
+                )
+            })
+            .collect()
+    }
+
+    /// 对拍用：活动的进入条件（活动名、记忆名与状态名）；没有条件的活动不出现。
+    ///
+    /// For oracles: the activity entry conditions (activity name, memory name and
+    /// status); activities without conditions are omitted.
+    pub fn requirement_table(&self) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+        self.requirements
+            .iter()
+            .filter(|(_, conditions)| !conditions.is_empty())
+            .map(|(activity, conditions)| {
+                let mut rows: Vec<(&'static str, &'static str)> = conditions
+                    .iter()
+                    .map(|&(memory, status)| (memory.name(), status.name()))
+                    .collect();
+                rows.sort_unstable();
+                (activity.name(), rows)
+            })
+            .collect()
+    }
+
+    /// 对拍用：活动退出时清的记忆（活动名、记忆名）。
+    ///
+    /// For oracles: the memories erased when an activity stops (activity, memory name).
+    pub fn erase_table(&self) -> Vec<(&'static str, Vec<&'static str>)> {
+        self.erase_when_stopped
+            .iter()
+            .map(|(activity, memories)| {
+                let mut names: Vec<&'static str> =
+                    memories.iter().map(|kind| kind.name()).collect();
+                names.sort_unstable();
+                (activity.name(), names)
+            })
             .collect()
     }
 }

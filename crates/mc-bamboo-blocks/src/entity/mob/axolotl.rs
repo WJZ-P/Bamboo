@@ -14,14 +14,17 @@
 //! `REGENERATION`), water/land ambience, amphibious pathfinding and `travelInWater`.
 
 use mc_bamboo_core::Vec3;
-use mc_bamboo_data::{
-    entity_types,
-    registries::{attribute, mob_effect},
-};
+use mc_bamboo_data::{entity_types, registries::attribute};
+
+mod ai;
+
+pub use ai::Behavior;
+pub(super) use ai::{custom_server_ai_step, sense_attackables};
 
 use super::{
     DamageKind, DamageSource, Mob, MobType,
     attributes::Attributes,
+    brain::{Brain, memory::MemoryType, memory::MemoryValue},
     goals::GoalSelector,
     living, motion,
     path::Malus,
@@ -39,18 +42,15 @@ use crate::{
 pub(super) const COMMON_VARIANTS: [i32; 4] = [0, 1, 2, 3];
 pub(super) const DEFAULT_VARIANT: i32 = 0;
 
-/// 美西螈的专属状态：花色、装死和装桶标记。
+/// 美西螈的专属状态：花色和装桶标记。装死倒计时是大脑记忆 `PLAY_DEAD_TICKS`。
 ///
-/// Axolotl-only state: variant, playing dead and from-bucket flags.
+/// Axolotl-only state: variant and the from-bucket flag. The play-dead countdown is the
+/// `PLAY_DEAD_TICKS` brain memory.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AxolotlState {
     pub variant: i32,
     pub playing_dead: bool,
     pub from_bucket: bool,
-    /// `MemoryModuleType.PLAY_DEAD_TICKS`（Brain 记忆，装死倒计时）。
-    ///
-    /// `MemoryModuleType.PLAY_DEAD_TICKS` (Brain memory, the play-dead countdown).
-    pub play_dead_ticks: i32,
 }
 
 impl AxolotlState {
@@ -59,7 +59,6 @@ impl AxolotlState {
             variant: DEFAULT_VARIANT,
             playing_dead: false,
             from_bucket: false,
-            play_dead_ticks: 0,
         }
     }
 }
@@ -236,10 +235,11 @@ pub(super) fn travel_in_water(
 }
 
 /// `Axolotl.hurtServer` 的装死判定（在 `super.hurtServer` 之前）：
-/// 用实体随机源做短路求值，命中就把 `PLAY_DEAD_TICKS` 设成 200。
+/// 用实体随机源做短路求值，命中就把 `PLAY_DEAD_TICKS` 记忆设成 200。
 ///
 /// The play-dead check of `Axolotl.hurtServer` (before `super.hurtServer`): a
-/// short-circuit roll on the entity random; on a hit it sets `PLAY_DEAD_TICKS` to 200.
+/// short-circuit roll on the entity random; on a hit it sets the `PLAY_DEAD_TICKS`
+/// memory to 200.
 pub(super) fn maybe_play_dead(me: &mut Entity, mob: &mut Mob, damage: f32, has_source: bool) {
     if mob.no_ai {
         return;
@@ -249,40 +249,45 @@ pub(super) fn maybe_play_dead(me: &mut Entity, mob: &mut Mob, damage: f32, has_s
     }
     let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
     let low = (me.random.next_int_bounded(3) as f32) < damage || mob.health / max < 0.5;
-    if low && damage < mob.health && me.in_water && has_source && !mob.axolotl.playing_dead {
-        mob.axolotl.play_dead_ticks = 200;
+    if low
+        && damage < mob.health
+        && me.in_water
+        && has_source
+        && !mob.axolotl.playing_dead
+        && let Some(brain) = mob.brain.as_mut()
+    {
+        brain
+            .memories
+            .set(MemoryType::PlayDeadTicks, MemoryValue::Int(200));
     }
 }
 
-/// `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 映射成元数据 `playingDead`，
-/// 照 `ValidatePlayDead.create` 逐刻递减；装死一开始照 `PlayDead.start` 加
-/// 200 刻、等级 0 的 `REGENERATION`。
+/// `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 记忆映射成元数据
+/// `playingDead`（`playDeadTicks.isPresent() && playDeadTicks.get() > 0`）。
 ///
-/// The tail of `Axolotl.customServerAiStep`: map `PLAY_DEAD_TICKS` to the `playingDead`
-/// metadata and count it down like `ValidatePlayDead.create`; add the 200-tick,
-/// level-0 `REGENERATION` of `PlayDead.start` when playing dead begins.
-pub(super) fn update_playing_dead(mob: &mut Mob) {
+/// The tail of `Axolotl.customServerAiStep`: map the `PLAY_DEAD_TICKS` memory to the
+/// `playingDead` metadata (`playDeadTicks.isPresent() && playDeadTicks.get() > 0`).
+pub(super) fn sync_playing_dead(mob: &mut Mob) {
     if mob.no_ai {
         return;
     }
-    let was_playing_dead = mob.axolotl.playing_dead;
-    let ticks = mob.axolotl.play_dead_ticks;
+    let ticks = mob
+        .brain
+        .as_ref()
+        .and_then(|brain| brain.memories.get(MemoryType::PlayDeadTicks))
+        .and_then(|value| match value {
+            MemoryValue::Int(ticks) => Some(*ticks),
+            _ => None,
+        })
+        .unwrap_or(0);
     mob.axolotl.playing_dead = ticks > 0;
-    if ticks == 0 {
-        return;
-    }
-    // `ValidatePlayDead.create`：每刻记忆减一，到 0 后由下一刻清掉标志。
-    // `ValidatePlayDead.create`: decrement the memory each tick; the flag clears
-    // on the tick after it reaches zero.
-    mob.axolotl.play_dead_ticks = ticks - 1;
-    if !was_playing_dead {
-        // `PlayDead.start`：装死开始时给 200 刻的 REGENERATION。
-        // `PlayDead.start`: give 200 ticks of REGENERATION when play-dead starts.
-        living::add_effect(
-            mob,
-            super::effects::EffectInstance::new(mob_effect::REGENERATION, 200),
-        );
-    }
+}
+
+/// `Axolotl.BRAIN_PROVIDER`。
+///
+/// `Axolotl.BRAIN_PROVIDER`.
+pub(super) fn brain() -> Brain {
+    ai::brain()
 }
 
 #[cfg(test)]
@@ -327,31 +332,35 @@ mod tests {
     }
 
     #[test]
-    fn playing_dead_counts_down_and_grants_regeneration() {
+    fn playing_dead_metadata_follows_the_brain_memory() {
         let mut mob = Mob::new(MobType::Axolotl);
-        mob.axolotl.play_dead_ticks = 200;
-        // 第一刻：置标志、记忆减一、加上 200 刻的 REGENERATION。
-        // First tick: set the flag, decrement the memory, add 200-tick REGENERATION.
-        update_playing_dead(&mut mob);
+        let brain = mob.brain.as_mut().expect("an axolotl has a brain");
+        brain
+            .memories
+            .set(MemoryType::PlayDeadTicks, MemoryValue::Int(200));
+        // 记忆大于 0 时元数据是装死；`ValidatePlayDead` 减到 0 之后复位。
+        // The metadata reads playing-dead while the memory is above zero and clears once
+        // `ValidatePlayDead` brings it to zero.
+        sync_playing_dead(&mut mob);
         assert!(mob.axolotl.playing_dead);
-        assert_eq!(mob.axolotl.play_dead_ticks, 199);
-        assert!(mob.effects.has(mob_effect::REGENERATION));
-        // 再跑 200 刻：记忆归零，标志在最后一刻复位（和官方 `ValidatePlayDead` 一样）。
-        // Run 200 more ticks: the memory reaches zero and the flag clears on the last
-        // one, just like vanilla `ValidatePlayDead`.
-        for _ in 0..200 {
-            update_playing_dead(&mut mob);
-        }
-        assert_eq!(mob.axolotl.play_dead_ticks, 0);
+        mob.brain
+            .as_mut()
+            .expect("a brain")
+            .memories
+            .set(MemoryType::PlayDeadTicks, MemoryValue::Int(0));
+        sync_playing_dead(&mut mob);
         assert!(!mob.axolotl.playing_dead);
-        // NoAI 的对拍夹具不推进装死。
-        // NoAI oracle fixtures leave play-dead untouched.
+        // NoAI 的对拍夹具不动元数据。
+        // NoAI oracle fixtures leave the metadata alone.
         let mut frozen = Mob::new(MobType::Axolotl);
         frozen.no_ai = true;
-        frozen.axolotl.play_dead_ticks = 200;
-        update_playing_dead(&mut frozen);
-        assert_eq!(frozen.axolotl.play_dead_ticks, 200);
+        frozen
+            .brain
+            .as_mut()
+            .expect("a brain")
+            .memories
+            .set(MemoryType::PlayDeadTicks, MemoryValue::Int(200));
+        sync_playing_dead(&mut frozen);
         assert!(!frozen.axolotl.playing_dead);
-        assert!(!frozen.effects.has(mob_effect::REGENERATION));
     }
 }

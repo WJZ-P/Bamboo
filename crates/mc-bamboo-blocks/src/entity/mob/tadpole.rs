@@ -17,7 +17,7 @@ use super::{
     attributes::Attributes,
     brain::{
         Activity, ActivityData, Brain,
-        behavior::{Gate, Kind, MoveToTargetSink, Trigger},
+        behavior::{Gate, Kind, MoveToTargetSink, Speed, Trigger},
         memory::{MemoryStatus::ValueAbsent, MemoryType},
         sensor::SensorKind,
     },
@@ -114,7 +114,7 @@ fn idle_activity() -> ActivityData {
             (
                 1,
                 Kind::FollowTemptation {
-                    speed: 1.25,
+                    speed: Speed::fixed(1.25),
                     close_adult: 2.5,
                     close_baby: 2.5,
                 },
@@ -127,7 +127,7 @@ fn idle_activity() -> ActivityData {
                         (Kind::Frog(frog::Behavior::SwimStroll { speed: 0.5 }), 2),
                         (
                             Kind::WalkTargetFromLook {
-                                speed: 0.5,
+                                speed: Speed::fixed(0.5),
                                 close_enough: 3,
                             },
                             3,

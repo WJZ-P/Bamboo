@@ -1945,15 +1945,17 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   （之前从没被跑到，游戏里海龟一产卵就会 panic）。全量 `mob-oracle` 复核 1744 例 165621 刻
   0 不一致。
 
-## 海豚和美西螈的实施现状（2026-11-21，分支 `op-water`）
+## 海豚和美西螈的实施现状（2026-11-21/22，分支 `op-water`）
 
 海豚是官方 `Dolphin`（`AgeableWaterCreature` = `AgeableMob` 但不是 `Animal`），美西螈是
 `Animal` + `Bucketable`、官方用 Brain（`AxolotlAi`）驱动。两者专属逻辑各自在
-`entity/mob/dolphin.rs` / `entity/mob/axolotl.rs`，共用的水面刷怪规则、`AgeableMob`
-组数据那一层在 `entity/mob/water.rs`。
+`entity/mob/dolphin.rs` / `entity/mob/axolotl.rs`，美西螈的大脑在
+`entity/mob/axolotl/ai.rs`，共用的水面刷怪规则、`AgeableMob` 组数据那一层在
+`entity/mob/water.rs`。
 
 - 实体：`Mob.dolphin`（`got_fish` / `moistness` / `treasure_pos` / `stuck`）、
-  `Mob.axolotl`（`variant` / `playing_dead` / `from_bucket` / `play_dead_ticks`）。
+  `Mob.axolotl`（`variant` / `playing_dead` / `from_bucket`；装死倒计时是大脑记忆
+  `PLAY_DEAD_TICKS`，不再放实体状态里）。
   属性、尺寸（幼年 `BABY_DIMENSIONS`）、`WATER` 的 `PathfindingMalus`、音效、战利品表
   `entities/dolphin` / `entities/axolotl`、刷怪蛋、`/summon` 的 `by_entity_type` 都按官方。
 - 氧气：海豚覆写 `handleAirSupply` 为空（氧气走 `LivingEntity.baseTick`）、`increaseAirSupply`
@@ -1966,11 +1968,23 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   `travelInWater` 是 `moveRelative` + `move(SELF)` + ×0.9、无攻击目标每刻下沉 0.005。
   拿 `#fishes` 右键走自己的 `mobInteract`：幼年 `ageUp`、成年 `gotFish`，消费一条鱼。
 - 美西螈：五花色，`finalizeSpawn` 抽两个常见花色编号组成 `AxolotlGroupData`、再抽一个给这一只，
-  一组第三只起是幼年、`BUCKET` 原因直接返回；`hurtServer` 前按官方短路判定把
-  `PLAY_DEAD_TICKS` 设 200，`customServerAiStep` 照 `ValidatePlayDead.create` 每刻递减、
-  到 0 后下一刻把 `playingDead` 元数据复位，装死一开始按 `PlayDead.start` 加 200 刻等级 0 的
-  `REGENERATION`，装死时不叫；两栖寻路（`AmphibiousPathNavigation`）、`travelInWater` 没有
+  一组第三只起是幼年、`BUCKET` 原因直接返回；`hurtServer` 前按官方短路判定写
+  `PLAY_DEAD_TICKS = 200`；两栖寻路（`AmphibiousPathNavigation`）、`travelInWater` 没有
   重力项、不吃水流。
+- 美西螈大脑（`axolotl/ai.rs`）：`Axolotl.BRAIN_PROVIDER` 的五个传感器（顺序照官方）和
+  `AxolotlAi.getActivities()` 的四个活动 `core` / `idle` / `fight` / `play_dead`，
+  优先级、行为表、进入条件、退出时清的记忆照官方（`mob-oracle` 逐字比这张表）。
+  捕猎：`AxolotlAttackablesSensor`（8 格、在水里、`#axolotl_always_hostiles` 或没有
+  `HAS_HUNTING_COOLDOWN` 时的 `#axolotl_hunt_targets`）→ `StartAttacking` → `FIGHT`
+  （`StopAttackingIfTargetInvalid`、`SetWalkTargetFromAttackTargetIfTargetOutOfReach`、
+  `MeleeAttack(20)`、繁殖时清 `ATTACK_TARGET`）→ `Mob.doHurtTarget`；`updateActivity`
+  从 `FIGHT` 退出时记 2400 刻捕猎冷却。游泳：`TryFindLiquid(6, 0.15,
+  #axolotl_tries_to_find)`、`RandomStroll.swim(0.5)`、`SetWalkTargetFromLookTarget`
+  （水 / 陆要和自己在不在水里一致），速度按 `getSpeedModifier` 0.5 / 0.15、追击与跟随成年
+  0.6 / 0.15。装死：`PlayDead`（200 刻，开始时清 `WALK_TARGET` / `LOOK_TARGET`、加 200 刻
+  等级 0 的 `REGENERATION`）和 `ValidatePlayDead.create`（每刻递减，到 0 清
+  `PLAY_DEAD_TICKS` 与 `HURT_BY_ENTITY`）；`customServerAiStep` 尾部只把记忆映射成
+  `playingDead` 元数据。
 - 装桶 / 存档 / 同步：`Bucketable`（鲑鱼 / 热带鱼的花纹组件之外）为美西螈写
   `bucket_entity_data` 的 `Variant` / `Age` / `AgeLocked`，倒桶 / 发射器按 `MobBucketItem.spawn`
   放出 `FromBucket = true` 的美西螈；`GotFish` / `Moistness`、`Variant` / `FromBucket` 进存档
@@ -1986,9 +2000,12 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   两边都设 `NoAI`、给同一个显式实体随机源种子、不重放构造取数，逐刻比位置、速度、朝向、
   随机源、氧气、年龄、着地 / 在水里、各自元数据、尺寸和世界随机源，**0 不一致**；
   海豚场景还逐字比官方 `goalSelector` 注册表（14 个目标的优先级、类名、标志位掩码，
-  `DolphinJumpGoal` 继承 `JumpGoal` 锁 MOVE|JUMP）；
+  `DolphinJumpGoal` 继承 `JumpGoal` 锁 MOVE|JUMP）；美西螈场景逐字比大脑结构表（传感器
+  类名 / 扫描间隔 / `requires()`、行为表的优先级 / 活动 / 类名与官方遍历顺序、活动进入条件、
+  退出时清的记忆），4 个场景全等；
   `--break-self-test water_mob` 把 `got_fish` / `playing_dead` 改坏能在第 0 刻被抓到，
-  `--break-self-test dolphin_goals` 清空海豚目标注册表也会被抓到。
+  `--break-self-test dolphin_goals` 清空海豚目标注册表、`--break-self-test axolotl_brain`
+  加一个假传感器也会被抓到。
   `mob-oracle --only natural_spawn` 的 `dolphin_ocean` / `axolotl_lush` 夹具（后者把底层水换成黏土）
   各刷出 37 / 40 只，0 不一致；`natural-spawn`（全部）1727 例 0 不一致。
 - 已知限制：海豚 `registerGoals` 的十四个目标和 `HurtByTargetGoal` 已建成真目标
@@ -1998,11 +2015,13 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   这些设施还没接，依赖它们的分支按 `fox_goals` 做法保住取数次数与顺序后返回假——引路去宝藏、
   给玩家 `DOLPHINS_GRACE`、捡物、躲守卫者仍不发生。**goalSelector 没有逐刻对拍**：夹具开
   `NoAI`，只核对注册表与 NoAI 分支，真跑目标所需的导航 / 移动控制 / `DefaultRandomPos`
-  落点 / 标志位锁定保真没逐刻验证，跃水与呼吸换气也未和官方逐刻比较；美西螈 Brain 的传感器 / 记忆 / 活动、
-  攻击水生怪物、繁殖（1/1200 蓝色）没建模。装死倒计时与 `REGENERATION` 已按官方两条
-  behavior 移植，但挂在 `customServerAiStep` 尾部而非 Brain 行为里，且逐刻对拍夹具开 `NoAI`
-  不触发，只有 `axolotl.rs` 的单元测试覆盖（200 刻递减、效果只加一次、NoAI 不动），没有和官方
-  逐刻对拍；拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
+  落点 / 标志位锁定保真没逐刻验证，跃水与呼吸换气也未和官方逐刻比较；美西螈大脑的
+  传感器 / 记忆 / 四个活动与捕猎、游泳、装死已按官方接线，但**行为没有逐 tick 对拍**
+  （夹具开 `NoAI`，Brain 不跑），只有结构表与单元测试覆盖；繁殖没做（`getBreedOffspring`
+  的 1/1200 蓝色与父母花色继承）、`Axolotl.onStopAttacking` 的再生回调、
+  `swingForAttack` 挥手动画、`AxolotlLookControl` / `AxolotlMoveControl` 的
+  `SmoothSwimming*` 参数（85 / 10 / 0.1 / 0.5）没建模；
+  拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
   死亡掉落的逐题 loot-oracle 都没做。逐刻对拍开 `NoAI`，没覆盖 AI / 受伤 / 繁殖 / 死亡路径。
 
 ## 与 main 合并后的现状（op-hostile2，2026-11-21）

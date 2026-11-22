@@ -47,8 +47,7 @@ impl Trigger {
     }
 }
 
-/// `BehaviorBuilder.triggerIf(predicate, oneShot)` 里的实体谓词。官方是
-/// `sequence(triggerIf(predicate), oneShot)`：两个 `OneShot` 串起来，谓词成立才跑后面那个，
+/// `BehaviorBuilder.triggerIf(predicate, oneShot)` 里的实体谓词。官方是/// `sequence(triggerIf(predicate), oneShot)`：两个 `OneShot` 串起来，谓词成立才跑后面那个，
 /// 整条仍是 `OneShot`（对拍类名 `OneShot`），必需记忆取后面那个的。骆驼用
 /// `Predicate.not(Camel::refuseToMove)`。
 ///
@@ -67,6 +66,42 @@ impl BodyPredicate {
     fn matches(self, cx: &Cx) -> bool {
         match self {
             Self::CamelNotRefuseToMove => !super::super::camel::refuse_to_move(cx.mob, cx.time),
+        }
+    }
+}
+
+/// 速度修正：固定值，或按「在水里 / 在陆上」分别取值（美西螈的
+/// `AxolotlAi::getSpeedModifier` 一族）。
+///
+/// A speed modifier: a constant, or one value in water and another on land (the
+/// axolotl's `AxolotlAi::getSpeedModifier` family).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Speed {
+    Fixed(f32),
+    WaterOrLand { water: f32, land: f32 },
+}
+
+impl Speed {
+    /// 固定值。
+    ///
+    /// A constant speed modifier.
+    pub const fn fixed(value: f32) -> Self {
+        Self::Fixed(value)
+    }
+
+    /// 这一刻的速度修正。
+    ///
+    /// The speed modifier for this tick.
+    pub const fn value(self, in_water: bool) -> f32 {
+        match self {
+            Self::Fixed(value) => value,
+            Self::WaterOrLand { water, land } => {
+                if in_water {
+                    water
+                } else {
+                    land
+                }
+            }
         }
     }
 }
@@ -118,12 +153,12 @@ pub enum Kind {
     /// `FollowTemptation(speed, closeEnough)`: `close_baby` / `close_adult` are the stop
     /// distances by age (armadillo 1 / 2, others 2.5 / 2.5).
     FollowTemptation {
-        speed: f32,
+        speed: Speed,
         close_adult: f64,
         close_baby: f64,
     },
     /// `BabyFollowAdult.create(UniformInt(min, max), speed)`。
-    BabyFollowAdult { min: i32, max: i32, speed: f32 },
+    BabyFollowAdult { min: i32, max: i32, speed: Speed },
     /// `RandomLookAround(UniformInt(min, max), maxYaw, minPitch, maxPitch)`。
     RandomLookAround {
         min_interval: i32,
@@ -135,7 +170,7 @@ pub enum Kind {
     /// `RandomStroll.stroll(speed)`。
     RandomStroll { speed: f32 },
     /// `SetWalkTargetFromLookTarget.create(speed, closeEnough)`。
-    WalkTargetFromLook { speed: f32, close_enough: i32 },
+    WalkTargetFromLook { speed: Speed, close_enough: i32 },
     /// `DoNothing(min, max)`。
     DoNothing { min: i32, max: i32 },
     /// `BehaviorBuilder.triggerIf(predicate)`：声明式一次性触发（青蛙的着地 / 在水里）。
@@ -168,6 +203,10 @@ pub enum Kind {
     ///
     /// Frog-only behaviours.
     Frog(super::super::frog::Behavior),
+    /// 美西螈专属行为。
+    ///
+    /// Axolotl-only behaviours.
+    Axolotl(super::super::axolotl::Behavior),
 }
 
 impl Kind {
@@ -293,6 +332,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.class(),
             Self::Goat(behavior) => behavior.class(),
             Self::Frog(behavior) => behavior.class(),
+            Self::Axolotl(behavior) => behavior.class(),
         }
     }
 
@@ -326,6 +366,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.required(),
             Self::Goat(behavior) => behavior.required(),
             Self::Frog(behavior) => behavior.required(),
+            Self::Axolotl(behavior) => behavior.required(),
         }
     }
 
@@ -364,6 +405,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.name(),
             Self::Goat(behavior) => behavior.name(),
             Self::Frog(behavior) => behavior.name(),
+            Self::Axolotl(behavior) => behavior.name(),
         }
     }
 
@@ -412,6 +454,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.extra_start(cx),
             Self::Goat(behavior) => behavior.extra_start(cx),
             Self::Frog(behavior) => behavior.extra_start(cx),
+            Self::Axolotl(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -492,6 +535,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.start(cx),
             Self::Goat(behavior) => behavior.start(cx),
             Self::Frog(behavior) => behavior.start(cx),
+            Self::Axolotl(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -525,6 +569,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.can_still_use(cx),
             Self::Goat(behavior) => behavior.can_still_use(cx),
             Self::Frog(behavior) => behavior.can_still_use(cx),
+            Self::Axolotl(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -631,7 +676,7 @@ impl Kind {
                                 track_eye: false,
                                 target_eye: false,
                             },
-                            speed: *speed,
+                            speed: speed.value(cx.me.in_water),
                             close_enough: 2,
                         }),
                     );
@@ -641,6 +686,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.tick(cx),
             Self::Goat(behavior) => behavior.tick(cx),
             Self::Frog(behavior) => behavior.tick(cx),
+            Self::Axolotl(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -670,6 +716,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.stop(cx),
             Self::Goat(behavior) => behavior.stop(cx),
             Self::Frog(behavior) => behavior.stop(cx),
+            Self::Axolotl(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -734,7 +781,7 @@ impl Kind {
                             track_eye: false,
                             target_eye: false,
                         },
-                        speed: *speed,
+                        speed: speed.value(cx.me.in_water),
                         close_enough: *min - 1,
                     };
                     cx.memories.set(
@@ -770,7 +817,7 @@ impl Kind {
                     WalkTarget,
                     MemoryValue::Walk(WalkTarget {
                         target,
-                        speed: *speed,
+                        speed: speed.value(cx.me.in_water),
                         close_enough: *close_enough,
                     }),
                 );
@@ -786,6 +833,7 @@ impl Kind {
             Self::Camel(behavior) => behavior.trigger(cx),
             Self::Armadillo(behavior) => behavior.trigger(cx),
             Self::Frog(behavior) => behavior.trigger(cx),
+            Self::Axolotl(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }

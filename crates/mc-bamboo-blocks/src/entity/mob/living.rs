@@ -172,10 +172,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Dolphin {
         super::dolphin::tick(me, mob, ctx);
     }
-    // `Axolotl.customServerAiStep` 尾部：把 PLAY_DEAD_TICKS 映射成元数据。
-    // Tail of `Axolotl.customServerAiStep`: map PLAY_DEAD_TICKS to metadata.
+    // `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 记忆映射成元数据。
+    // Tail of `Axolotl.customServerAiStep`: map the PLAY_DEAD_TICKS memory to metadata.
     if mob.mob_type == super::MobType::Axolotl {
-        super::axolotl::update_playing_dead(mob);
+        super::axolotl::sync_playing_dead(mob);
     }
 }
 
@@ -1439,6 +1439,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if mob.mob_type == super::MobType::Camel {
         super::camel::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);

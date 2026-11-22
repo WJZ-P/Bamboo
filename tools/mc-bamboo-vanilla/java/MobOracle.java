@@ -7438,8 +7438,128 @@ public final class MobOracle {
                 + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start)
                 + ",\"dolphin\":" + dolphin + ",\"baby\":" + baby + ",\"variant\":" + variant
                 + ",\"registered\":" + registeredGoals(mob.getGoalSelector())
+                + (dolphin ? "" : ",\"brain\":" + brainTable(mob))
                 + ",\"frames\":" + frames + "]}\n");
         out.flush();
+    }
+
+    /**
+     * 大脑的结构表：传感器（类名、扫描间隔、`requires()` 的记忆）、行为表（优先级、活动名、
+     * 类名，按官方遍历顺序）、活动进入条件和退出时清的记忆。和 Bamboo 一侧逐字相同。
+     *
+     * <p>The brain's structural table: sensors (class name, scan rate, `requires()` memories),
+     * the behaviour table (priority, activity name, class name in vanilla iteration order),
+     * the activity requirements and the memories erased when an activity stops. Character
+     * for character like the Bamboo side.
+     */
+    private static String brainTable(Mob mob) throws Exception {
+        var brain = mob.getBrain();
+        Class<?> brainType = net.minecraft.world.entity.ai.Brain.class;
+        Field sensorsField = brainType.getDeclaredField("sensors");
+        sensorsField.setAccessible(true);
+        var sensors = (java.util.Map<?, ?>) sensorsField.get(brain);
+        Field scanRateField = net.minecraft.world.entity.ai.sensing.Sensor.class.getDeclaredField("scanRate");
+        scanRateField.setAccessible(true);
+        StringBuilder out = new StringBuilder("{\"sensors\":[");
+        boolean first = true;
+        for (Object value : sensors.values()) {
+            var sensor = (net.minecraft.world.entity.ai.sensing.Sensor<?>) value;
+            if (!first) out.append(',');
+            first = false;
+            String memories = sensor.requires().stream().map(BrainOracle::name).sorted()
+                    .map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+            out.append('[').append(jsonString(sensor.getClass().getSimpleName())).append(',')
+                    .append(scanRateField.getInt(sensor)).append(',').append(memories).append(']');
+        }
+        out.append("],\"behaviors\":[");
+        Field prioritiesField = brainType.getDeclaredField("availableBehaviorsByPriority");
+        prioritiesField.setAccessible(true);
+        var priorities = (java.util.TreeMap<Integer, java.util.Map<?, ?>>) prioritiesField.get(brain);
+        first = true;
+        for (var entry : priorities.entrySet()) {
+            for (var activityEntry : entry.getValue().entrySet()) {
+                var activity = (net.minecraft.world.entity.schedule.Activity) activityEntry.getKey();
+                for (Object behavior : (java.util.Set<?>) activityEntry.getValue()) {
+                    if (!first) out.append(',');
+                    first = false;
+                    out.append('[').append(entry.getKey()).append(',')
+                            .append(jsonString(activity.getName())).append(',')
+                            .append(jsonString(tableBehaviorName(behavior))).append(']');
+                }
+            }
+        }
+        out.append("],\"requirements\":[");
+        Field requirementsField = brainType.getDeclaredField("activityRequirements");
+        requirementsField.setAccessible(true);
+        var requirements = new java.util.TreeMap<String, String>();
+        for (var entry : ((java.util.Map<?, ?>) requirementsField.get(brain)).entrySet()) {
+            var activity = (net.minecraft.world.entity.schedule.Activity) entry.getKey();
+            @SuppressWarnings("unchecked")
+            var conditions = (java.util.Set<com.mojang.datafixers.util.Pair<
+                    net.minecraft.world.entity.ai.memory.MemoryModuleType<?>,
+                    net.minecraft.world.entity.ai.memory.MemoryStatus>>) entry.getValue();
+            if (conditions.isEmpty()) continue;
+            String rows = conditions.stream()
+                    .map(pair -> new String[] {BrainOracle.name(pair.getFirst()),
+                            pair.getSecond().name().toLowerCase(java.util.Locale.ROOT)})
+                    .sorted((a, b) -> a[0].equals(b[0]) ? a[1].compareTo(b[1]) : a[0].compareTo(b[0]))
+                    .map(row -> "[" + jsonString(row[0]) + "," + jsonString(row[1]) + "]")
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+            requirements.put(activity.getName(), rows);
+        }
+        first = true;
+        for (var entry : requirements.entrySet()) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(jsonString(entry.getKey())).append(',').append(entry.getValue()).append(']');
+        }
+        out.append("],\"erase\":[");
+        Field eraseField = brainType.getDeclaredField("activityMemoriesToEraseWhenStopped");
+        eraseField.setAccessible(true);
+        var erased = new java.util.TreeMap<String, String>();
+        for (var entry : ((java.util.Map<?, ?>) eraseField.get(brain)).entrySet()) {
+            var activity = (net.minecraft.world.entity.schedule.Activity) entry.getKey();
+            @SuppressWarnings("unchecked")
+            var memories = (java.util.Set<net.minecraft.world.entity.ai.memory.MemoryModuleType<?>>) entry.getValue();
+            String rows = memories.stream().map(BrainOracle::name).sorted()
+                    .map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+            erased.put(activity.getName(), rows);
+        }
+        first = true;
+        for (var entry : erased.entrySet()) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(jsonString(entry.getKey())).append(',').append(entry.getValue()).append(']');
+        }
+        return out.append("]}").toString();
+    }
+
+    /**
+     * 结构表里的类名：匿名子类按父类记，闸门带上装载顺序的全部子行为。
+     *
+     * <p>The class name for the structural table: anonymous subclasses use the parent and
+     * gates list every child in load order.
+     */
+    private static String tableBehaviorName(Object behavior) throws Exception {
+        Class<?> type = behavior.getClass();
+        while (type.isAnonymousClass()) type = type.getSuperclass();
+        String name = type.getSimpleName();
+        if (behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate) {
+            Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
+            listField.setAccessible(true);
+            var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
+            StringBuilder out = new StringBuilder(name).append('[');
+            boolean first = true;
+            for (Object child : list) {
+                if (!first) out.append(',');
+                first = false;
+                out.append(tableBehaviorName(child));
+            }
+            return out.append(']').toString();
+        }
+        return name;
     }
 
     /** `goalSelector` 注册表：每个目标的优先级、官方类名、标志位掩码，和 Bamboo 一侧逐字相同。 */

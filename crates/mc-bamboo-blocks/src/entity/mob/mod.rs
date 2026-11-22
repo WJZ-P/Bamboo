@@ -3094,6 +3094,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Frog => Some(Box::new(frog::brain())),
         MobType::Tadpole => Some(Box::new(tadpole::brain())),
         MobType::Camel => Some(Box::new(camel::brain())),
+        MobType::Axolotl => Some(Box::new(axolotl::brain())),
         _ => None,
     }
 }

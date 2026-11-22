@@ -24,6 +24,7 @@
 //! part of replacing the placeholder goals with real implementations.
 
 use mc_bamboo_blocks::entity::mob::MobType;
+use mc_bamboo_blocks::entity::mob::brain::Brain;
 use mc_bamboo_blocks::entity::mob::goals::GoalSelector;
 
 use super::*;
@@ -48,7 +49,24 @@ pub(super) struct WaterMobCase {
     /// The official `goalSelector` registry: priority, class name, flag mask.
     #[serde(default)]
     registered: Vec<(i32, String, i32)>,
+    /// 官方大脑的结构表（海豚没有）。
+    ///
+    /// The official brain's structural table (absent for the dolphin).
+    #[serde(default)]
+    brain: Option<BrainTable>,
     frames: Vec<WaterMobFrame>,
+}
+
+/// 大脑的结构表：传感器、行为表、活动进入条件和退出时清的记忆。
+///
+/// The brain's structural table: sensors, the behaviour table, the activity requirements
+/// and the memories erased on stop.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+struct BrainTable {
+    sensors: Vec<(String, i32, Vec<String>)>,
+    behaviors: Vec<(i32, String, String)>,
+    requirements: Vec<(String, Vec<(String, String)>)>,
+    erase: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,11 +250,70 @@ fn goal_rows(selector: &GoalSelector) -> Vec<(i32, String, i32)> {
         .collect()
 }
 
+/// 大脑的结构表：传感器顺序、行为表顺序、活动进入条件和退出时清的记忆（活动按名字排）。
+/// 改坏确认：加一个假的传感器，比较必须报错。
+///
+/// The brain's structural table: sensor order, behaviour table order, activity
+/// requirements and the memories erased on stop (activities sorted by name). Break test:
+/// a fake sensor is appended, so the comparison must fail.
+fn brain_table(brain: &Brain, broken: bool) -> BrainTable {
+    let mut sensors: Vec<(String, i32, Vec<String>)> = brain
+        .sensor_table()
+        .into_iter()
+        .map(|(name, rate, memories)| {
+            (
+                name.to_owned(),
+                rate,
+                memories.into_iter().map(str::to_owned).collect(),
+            )
+        })
+        .collect();
+    if broken {
+        sensors.push(("BrokenSensor".to_owned(), 0, Vec::new()));
+    }
+    let behaviors = brain
+        .behavior_table()
+        .into_iter()
+        .map(|(priority, activity, name)| (priority, activity.to_owned(), name))
+        .collect();
+    let mut requirements: Vec<(String, Vec<(String, String)>)> = brain
+        .requirement_table()
+        .into_iter()
+        .map(|(activity, rows)| {
+            (
+                activity.to_owned(),
+                rows.into_iter()
+                    .map(|(memory, status)| (memory.to_owned(), status.to_owned()))
+                    .collect(),
+            )
+        })
+        .collect();
+    requirements.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut erase: Vec<(String, Vec<String>)> = brain
+        .erase_table()
+        .into_iter()
+        .map(|(activity, memories)| {
+            (
+                activity.to_owned(),
+                memories.into_iter().map(str::to_owned).collect(),
+            )
+        })
+        .collect();
+    erase.sort_by(|a, b| a.0.cmp(&b.0));
+    BrainTable {
+        sensors,
+        behaviors,
+        requirements,
+        erase,
+    }
+}
+
 impl Report {
     pub(super) fn replay_water_mob(&mut self, case: &WaterMobCase) {
         self.cases += 1;
         let broken = self.break_test.as_deref() == Some("water_mob");
         let broken_goals = self.break_test.as_deref() == Some("dolphin_goals");
+        let broken_brain = self.break_test.as_deref() == Some("axolotl_brain");
         let mut level = case.level();
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
@@ -261,6 +338,26 @@ impl Report {
                 "{} registered goals: official {:?}, bamboo {ours_registered:?}",
                 case.name, case.registered
             ));
+        }
+        if let Some(expected) = &case.brain {
+            let ours = level
+                .entities
+                .get(id)
+                .map(|entity| {
+                    entity
+                        .kind
+                        .mob()
+                        .and_then(|mob| mob.brain.as_deref())
+                        .map(|brain| brain_table(brain, broken_brain))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            if ours != *expected {
+                self.mismatch(format!(
+                    "{} brain table: official {expected:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
         }
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick != 0 {
