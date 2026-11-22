@@ -86,6 +86,31 @@ struct ProjectileFrame {
     ///
     /// Extinguish sounds this tick: raw x/y/z bits, volume, pitch, and source ordinal.
     extinguished: Option<Vec<[i64; 6]>>,
+    /// 骷髅一支的射手：实体 ID、类型、index 16 的布尔、冻结刻数、血量位、主手物品。
+    ///
+    /// The skeleton-family shooter: id, type, the index-16 boolean, frozen ticks, health
+    /// bits and main-hand item.
+    kin: Option<[i64; 6]>,
+    /// 本刻的 `levelEvent`：事件号、坐标、数据。
+    ///
+    /// This tick's `levelEvent` calls: event, position and data.
+    level_events: Option<Vec<[i32; 5]>>,
+    /// 玩家身上的效果：效果 ID、时长、等级（官方一侧的玩家不 tick）。
+    ///
+    /// Effects on the player: id, duration, amplifier (the official player is not ticked).
+    player_effects: Option<Vec<[i32; 3]>>,
+    shearing: Option<Shearing>,
+}
+
+/// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
+/// 官方一侧另外输出剪刀的损耗 `damage`，这里不读。
+///
+/// One shears right-click: whether it consumed the action and the dropped item entities
+/// (item, count, raw position and velocity bits). The official `damage` field is not read.
+#[derive(Debug, Deserialize)]
+struct Shearing {
+    consumed: bool,
+    drops: Vec<[i64; 8]>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -170,6 +195,30 @@ impl ProjectileCase {
         }
     }
 
+    /// 射手的种类，按场景名前缀。
+    ///
+    /// The shooter kind, from the scene name prefix.
+    fn shooter_kind(&self) -> MobType {
+        if self.name.starts_with("stray_") {
+            MobType::Stray
+        } else if self.name.starts_with("bogged_") {
+            MobType::Bogged
+        } else {
+            MobType::Skeleton
+        }
+    }
+
+    fn shears(&self) -> bool {
+        self.name == "bogged_shear"
+    }
+
+    /// 玩家无敌、不会被当成目标的场景。
+    ///
+    /// Scenes whose player is invulnerable and never targeted.
+    fn passive(&self) -> bool {
+        self.shears() || self.name == "skeleton_freeze"
+    }
+
     fn overlaps_flight(&self) -> bool {
         self.name == "arrow_block_overlaps_flight"
     }
@@ -225,7 +274,7 @@ impl ProjectileCase {
     fn spawn(&self, world: &mut World<'_>, mutate: bool, break_pierce: bool) {
         if self.skeleton {
             let mut skeleton = world.prepare_entity(Entity::by_mob_type(
-                MobType::Skeleton,
+                self.shooter_kind(),
                 Vec3::new(0.5, 64.0, 0.5),
             ));
             skeleton.random = JavaRandom::new(42);
@@ -335,7 +384,7 @@ impl Report {
         }
         level.game.as_mut().unwrap().set_arrow_target(
             case.player_id,
-            case.name.ends_with("_rejected"),
+            case.name.ends_with("_rejected") || case.passive(),
             case.flaming().then_some([37, 80]),
         );
         let mut ticks = BlockTicks::default();
@@ -350,11 +399,13 @@ impl Report {
         let mut shots = 0;
         let mut embeds = 0;
         let mut packet_count = 0;
+        let mut player_effects = std::collections::BTreeMap::new();
         let extinguish_sound = i32::from(mc_bamboo_data::sounds::sound_event(
             "minecraft:entity.generic.extinguish_fire",
         ));
         for (tick, expected) in case.frames.iter().enumerate() {
             let mut extinguished = Vec::new();
+            let mut level_events = Vec::new();
             if tick != 0 {
                 if (case.flaming() || case.water()) && tick == 1 {
                     level
@@ -394,8 +445,33 @@ impl Report {
                 level.game.as_mut().unwrap().tick_cooldowns();
                 ticks.set_time(1000 + tick as i64);
                 let mut world = World::new(&mut level, &mut ticks);
+                if case.shears() && (tick == 3 || tick == 6) {
+                    let ours = shear_shooter(&mut world, case);
+                    self.check_shearing(&case.name, tick, expected.shearing.as_ref(), &ours);
+                }
                 world.tick_entities();
-                extinguished.extend(world.drain_effects().iter().filter_map(|effect| {
+                let effects = world.drain_effects();
+                for effect in &effects {
+                    match effect {
+                        mc_bamboo_blocks::Effect::LevelEvent {
+                            event, pos, data, ..
+                        } => level_events.push([*event, pos.x, pos.y, pos.z, *data]),
+                        mc_bamboo_blocks::Effect::PlayerEffect {
+                            effect,
+                            duration,
+                            amplifier,
+                            ..
+                        } => {
+                            // 官方一侧的玩家不 tick，同一种效果再来一次不会更长，保留第一次的。
+                            // The official player is not ticked, so a repeat never lasts longer.
+                            player_effects
+                                .entry(*effect)
+                                .or_insert([*effect, *duration, *amplifier]);
+                        }
+                        _ => {}
+                    }
+                }
+                extinguished.extend(effects.iter().filter_map(|effect| {
                     let mc_bamboo_blocks::Effect::Sound {
                         sound,
                         source,
@@ -553,9 +629,38 @@ impl Report {
                     "{label} extinguish sounds: official {expected_effects:?}, bamboo {extinguished:?}"
                 ));
             }
+            if let Some(theirs) = &expected.level_events
+                && *theirs != level_events
+            {
+                self.mismatch(format!(
+                    "{label} level events: official {theirs:?}, bamboo {level_events:?}"
+                ));
+            }
+            if let Some(theirs) = &expected.player_effects {
+                let mut ours = level.game.as_ref().unwrap().effects(case.player_id);
+                if ours.is_empty() && !player_effects.is_empty() {
+                    ours = player_effects.values().copied().collect();
+                }
+                if *theirs != ours {
+                    self.mismatch(format!(
+                        "{label} player effects: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
             if let Some(expected_motion) = expected.shooter {
-                let shooter = level.entities.get(case.first_id).unwrap();
+                // 转化之后射手换成新生成的那只：取表里编号最大的生物。
+                // After a conversion the shooter is the new mob: the highest mob id.
+                let shooter_id = shooter_id(&level).unwrap_or(case.first_id);
+                let shooter = level.entities.get(shooter_id).unwrap();
                 let mob = shooter.kind.mob().unwrap();
+                if let Some(theirs) = expected.kin {
+                    let ours = kin_state(shooter_id, mob);
+                    if ours != theirs {
+                        self.mismatch(format!(
+                            "{label} shooter id/type/flag/frozen/health/hand: official {theirs:?}, bamboo {ours:?}"
+                        ));
+                    }
+                }
                 self.check_projectile_motion(
                     &label,
                     "shooter",
@@ -623,6 +728,21 @@ impl Report {
         );
     }
 
+    fn check_shearing(
+        &mut self,
+        name: &str,
+        tick: usize,
+        expected: Option<&Shearing>,
+        ours: &(bool, Vec<[i64; 8]>),
+    ) {
+        let theirs = expected.map(|shearing| (shearing.consumed, shearing.drops.clone()));
+        if theirs.as_ref() != Some(ours) {
+            self.mismatch(format!(
+                "{name} tick {tick} shearing consumed/drops: official {theirs:?}, bamboo {ours:?}"
+            ));
+        }
+    }
+
     fn check_arrow_frames(&mut self, label: &str, expected: &[ArrowFrame], actual: &[ArrowFrame]) {
         if expected.len() != actual.len() {
             self.mismatch(format!(
@@ -671,6 +791,77 @@ impl Report {
             ));
         }
     }
+}
+
+/// 表里编号最大的活生物。
+///
+/// The highest id among the live mobs in the table.
+fn shooter_id(level: &MobLevel) -> Option<i32> {
+    level.entities.ids().into_iter().rfind(|&id| {
+        level
+            .entities
+            .public_at(id)
+            .is_some_and(|public| !public.removed && matches!(public.kind, KindPublic::Mob(_)))
+    })
+}
+
+fn kin_state(id: i32, mob: &mc_bamboo_blocks::entity::mob::Mob) -> [i64; 6] {
+    let flag = match mob.mob_type {
+        MobType::Skeleton => mob.freeze_conversion.converting,
+        MobType::Bogged => mob.bogged_sheared,
+        _ => false,
+    };
+    let hand = mob.equipment.get(EquipmentSlot::MainHand);
+    [
+        i64::from(id),
+        i64::from(mob.mob_type.entity_type()),
+        i64::from(flag),
+        i64::from(mob.ticks_frozen),
+        i64::from(mob.health.to_bits() as i32),
+        i64::from(if hand.is_empty() { 0 } else { hand.item }),
+    ]
+}
+
+/// 玩家拿剪刀右键射手，返回是否消耗动作和这次新掉出来的物品实体。
+///
+/// The player right-clicks the shooter with shears; returns whether the action was
+/// consumed and the item entities this dropped.
+fn shear_shooter(world: &mut World<'_>, case: &ProjectileCase) -> (bool, Vec<[i64; 8]>) {
+    use mc_bamboo_blocks::entity::mob::interact::MobInteractRequest;
+    let before: BTreeSet<_> = world.entity_ids().into_iter().collect();
+    let request = MobInteractRequest {
+        player_uid: case.player_id,
+        player_uuid: ((1_u128 << 64) | 2).to_be_bytes(),
+        hand: mc_bamboo_core::Hand::Main,
+        held: ItemStack::new(mc_bamboo_data::items::SHEARS, 1),
+        creative: false,
+        sneaking: false,
+        position: Vec3::new(case.player_x, 64.0, 0.5),
+    };
+    let outcome = world.interact_mob(case.first_id, &request);
+    let drops = world
+        .entity_ids()
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .filter_map(|id| {
+            let entity = world.entity(id)?;
+            let EntityKind::Item(item) = &entity.kind else {
+                return None;
+            };
+            let (p, v) = (entity.position, entity.delta);
+            Some([
+                i64::from(item.stack.item),
+                i64::from(item.stack.count),
+                p.x.to_bits() as i64,
+                p.y.to_bits() as i64,
+                p.z.to_bits() as i64,
+                v.x.to_bits() as i64,
+                v.y.to_bits() as i64,
+                v.z.to_bits() as i64,
+            ])
+        })
+        .collect();
+    (outcome.result.consumes_action(), drops)
 }
 
 pub(super) fn motion(entity: &Entity, pitch: f32) -> [i64; 8] {

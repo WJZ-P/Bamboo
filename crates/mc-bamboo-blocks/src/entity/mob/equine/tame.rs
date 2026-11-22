@@ -157,7 +157,9 @@ mod tests {
             uid: RIDER,
             uuid: Some(RIDER_UUID),
             position: Vec3::new(1.0, 64.0, 0.5),
+            delta: Vec3::default(),
             eye_height: 1.62,
+            health: 20.0,
             look_direction: Vec3::default(),
             gaze_disguise: false,
             alive: true,
@@ -172,6 +174,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             combat: Default::default(),
+            effects: Default::default(),
         }
     }
 

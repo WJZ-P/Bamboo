@@ -698,6 +698,14 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界最高的一层（含），`getMaxY`。
     fn max_y(&self) -> i32;
 
+    /// `Level.getSeaLevel()`：海平面。噪声主世界是 63，超平坦是 -63。
+    ///
+    /// `Level.getSeaLevel()`: the sea level. 63 for the noise overworld and -63 for
+    /// superflat.
+    fn sea_level(&self) -> i32 {
+        63
+    }
+
     /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
     fn random(&self) -> &LevelRandom;
 
@@ -1073,6 +1081,13 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。默认 0。
+    ///
+    /// `WorldGenLevel.getSeed()`: the world seed, read for slime chunks. Defaults to 0.
+    fn world_seed(&self) -> i64 {
+        0
+    }
+
     /// 区块的 `InhabitedTime`：区域难度读它。默认 0。
     fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
         0
@@ -1135,6 +1150,15 @@ pub trait Level: LevelSideState + LevelEntities {
         _target: crate::entity::EntityUid,
         _instance: &crate::entity::mob::effects::EffectInstance,
     ) -> bool {
+        false
+    }
+
+    /// 精确驱动当场治疗一名玩家（喷溅治疗药水）。`false` 表示不能当场做，
+    /// 调用方改成延后的 [`Effect::HealPlayer`]。
+    ///
+    /// Heals a player at once in the precise driver (splash healing potion).
+    /// `false` means this level cannot, and the caller falls back to [`Effect::HealPlayer`].
+    fn heal_player_now(&mut self, _target: crate::entity::EntityUid, _amount: f32) -> bool {
         false
     }
 
@@ -2178,6 +2202,10 @@ pub enum Effect {
         visible: bool,
         show_icon: bool,
     },
+    /// 喷溅治疗药水按距离缩放给玩家回血：`LivingEntity.heal(amount)`。
+    ///
+    /// A splash healing potion heals a player by a distance-scaled amount.
+    HealPlayer { target: EntityUid, amount: f32 },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

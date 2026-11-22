@@ -347,7 +347,13 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
-    if play_sound && !mob.mob_type.is_water_animal() {
+    if play_sound && mob.mob_type == super::MobType::Slime {
+        // 史莱姆没有覆写 `playStepSound`：放脚下方块的脚步声，音量乘 0.15。
+        // Slimes do not override `playStepSound`: the block's own step sound at 0.15 volume.
+        let sounds = state.sound_type();
+        let name = mc_bamboo_data::sounds::SOUND_EVENTS[usize::from(sounds.step_sound)].name;
+        super::living::play_sound(me, mob, name, sounds.volume * 0.15, sounds.pitch);
+    } else if play_sound && !mob.mob_type.is_water_animal() {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
         // 马科按自己的 `playStepSound`（方块声音类型、奔跑步声）走。
         // 苦力怕和末影人走 `Entity.playStepSound`（方块 `SoundType` 的脚步声）。
@@ -607,7 +613,11 @@ fn run_action(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, action: A
     match action {
         Action::Effect(EffectType::Freeze) => {
             mob.in_powder_snow = true;
-            mob.ticks_frozen = (mob.ticks_frozen + 1).min(140);
+            // `InsideBlockEffectType.FREEZE`：`canFreeze()` 为假时只记「在细雪里」。
+            // `InsideBlockEffectType.FREEZE`: without `canFreeze()` only the flag is set.
+            if super::living::can_freeze(mob) {
+                mob.ticks_frozen = (mob.ticks_frozen + 1).min(140);
+            }
         }
         Action::Effect(EffectType::ClearFreeze) => mob.ticks_frozen = 0,
         Action::Effect(EffectType::FireIgnite) => {

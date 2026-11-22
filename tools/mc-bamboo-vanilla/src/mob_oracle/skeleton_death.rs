@@ -47,7 +47,9 @@ pub(super) fn player_view() -> PlayerView {
         pitch: 0.0,
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         position: Vec3::new(2.5, 64.0, 0.5),
+        delta: Vec3::default(),
         eye_height: 1.62,
+        health: 20.0,
         look_direction: Vec3::default(),
         gaze_disguise: false,
         alive: true,
@@ -60,6 +62,7 @@ pub(super) fn player_view() -> PlayerView {
         main_hand: items::DIAMOND_SWORD,
         off_hand: 0,
         combat: Default::default(),
+        effects: Default::default(),
     }
 }
 

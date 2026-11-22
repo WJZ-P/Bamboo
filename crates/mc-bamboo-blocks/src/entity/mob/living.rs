@@ -77,6 +77,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.y_rot_o = me.y_rot;
     mob.x_rot_o = mob.x_rot;
     me.tick_count += 1;
+    // `Skeleton.tick`：`freezingTracker.tick()` 在 `super.tick()` 之前。
+    // `Skeleton.tick`: `freezingTracker.tick()` runs ahead of `super.tick()`.
+    if mob.mob_type == super::MobType::Skeleton {
+        super::conversion::tick_freezing(me, mob, ctx);
+    }
     // `Creeper.tick` 在 `super.tick()` 之前推进膨胀，可能当刻爆炸。
     // `Creeper.tick` advances the swell before `super.tick()` and may explode here.
     if mob.mob_type == super::MobType::Creeper {
@@ -85,8 +90,19 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
+    // `Drowned.updateSwimming()` 在 `Entity.baseTick` 里，紧跟流体跟踪之后。
+    // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
+    if mob.mob_type == super::MobType::Drowned {
+        let target_in_water = super::goals::current_target_in_water(mob, ctx);
+        super::drowned::update_swimming(me, mob, target_in_water);
+    }
     if !me.removed {
         ai_step(me, mob, ctx);
+    }
+    // `Zombie.tick` 结尾的 `drowningTracker.tick()`，在 `super.tick()` 之后。
+    // The `drowningTracker.tick()` at the end of `Zombie.tick`, after `super.tick()`.
+    if mob.mob_type == super::MobType::Zombie {
+        super::drowned::tick_drowning(me, mob, ctx);
     }
     // `Spider.tick` 在 `super.tick()` 之后把这一刻的 `horizontalCollision` 写进攀爬标志。
     // `Spider.tick` records this tick's `horizontalCollision` after `super.tick()`.
@@ -110,6 +126,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.goals.set_control_flag(Flag::Move, true);
         mob.goals.set_control_flag(Flag::Jump, true);
         mob.goals.set_control_flag(Flag::Look, true);
+    }
+    // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。
+    // `AbstractCubeMob.tick`: the landing check after `super.tick()`.
+    if mob.mob_type == super::MobType::Slime {
+        super::slime::after_tick(me, mob);
     }
     // `PolarBear.tick` 在 `super.tick()` 之后：吼叫冷却和持久愤怒。
     // `PolarBear.tick` after `super.tick()`: the growl cooldown and persistent anger.
@@ -420,24 +441,34 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 .block_state(eye)
                 .is(mc_bamboo_data::blocks::BUBBLE_COLUMN)
         {
-            // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。
-            // 能在水下呼吸的（`canDrownInWater` 为假）走补气那一支。
-            // Mobs that breathe under water take the refill branch instead.
-            let drowns = !mob.mob_type.can_breathe_under_water();
-            if drowns {
+            // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。溺尸在
+            // `#can_breathe_under_water` 里，水生生物和水呼吸效果同理不消耗空气，
+            // 反而按官方补气。
+            //
+            // A cow cannot breathe underwater and has no effect; `OXYGEN_BONUS` is zero so
+            // there is no draw. The drowned is in `#can_breathe_under_water`, and aquatic
+            // mobs and the water-breathing effect refill air as vanilla does.
+            let can_breathe = mob.mob_type == super::MobType::Drowned
+                || mob.mob_type.can_breathe_under_water()
+                || mob
+                    .effects
+                    .has(mc_bamboo_data::registries::mob_effect::WATER_BREATHING);
+            if can_breathe {
+                if mob.air_supply < 300 {
+                    mob.air_supply = (mob.air_supply + 4).min(300);
+                }
+            } else {
                 mob.air_supply -= 1;
-            } else if mob.air_supply < 300 {
-                mob.air_supply = (mob.air_supply + 4).min(300);
-            }
-            if drowns && mob.air_supply <= -20 {
-                mob.air_supply = 0;
-                hurt_server(
-                    me,
-                    mob,
-                    ctx,
-                    DamageSource::environment(DamageKind::Drown),
-                    2.0,
-                );
+                if mob.air_supply <= -20 {
+                    mob.air_supply = 0;
+                    hurt_server(
+                        me,
+                        mob,
+                        ctx,
+                        DamageSource::environment(DamageKind::Drown),
+                        2.0,
+                    );
+                }
             }
         } else if mob.air_supply < 300 {
             mob.air_supply = (mob.air_supply + 4).min(300);
@@ -451,7 +482,7 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.damage_cooldown -= 1;
     }
     if mob.is_dead_or_dying() {
-        tick_death(me, mob);
+        tick_death(me, mob, ctx);
     }
     if mob.last_hurt_by_player_memory_time > 0 {
         mob.last_hurt_by_player_memory_time -= 1;
@@ -529,7 +560,7 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
         kind if kind.has_no_ambient_sound() => None,
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
-        _ => Some(voice_of(mob, Voice::Ambient)),
+        _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
 
@@ -537,7 +568,7 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 ///
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
-fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
+fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
     if mob.mob_type == super::MobType::Goat {
         return super::goat::voice(mob, voice);
     }
@@ -567,6 +598,8 @@ fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Hurt),
                 super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[1],
+                super::MobType::Slime => super::slime::hurt_sound(mob),
+                super::MobType::Drowned => super::drowned::hurt_sound(in_water),
                 _ => mob.sound_variant.hurt(),
             }),
         Voice::Death => mob
@@ -576,9 +609,11 @@ fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Death),
                 super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[2],
+                super::MobType::Slime => super::slime::death_sound(mob),
+                super::MobType::Drowned => super::drowned::death_sound(in_water),
                 _ => mob.sound_variant.death(),
             }),
-        _ => ambient_sound(mob),
+        _ => ambient_sound(mob, in_water),
     }
 }
 
@@ -654,13 +689,29 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
 }
 
-/// `LivingEntity.addEffect`：给一头生物挂一个效果，刷新属性。
+/// `LivingEntity.canBeAffected`：按生物标签筛掉免疫的状态效果。
 ///
-/// `LivingEntity.addEffect`: adds an effect to a mob and refreshes attributes.
+/// `LivingEntity.canBeAffected`: filters out effects the mob type is immune to.
+pub fn can_be_affected(kind: super::MobType, effect: i32) -> bool {
+    if kind.in_entity_tag("minecraft:immune_to_infested") {
+        return effect != mob_effect::INFESTED;
+    }
+    if kind.in_entity_tag("minecraft:immune_to_oozing") {
+        return effect != mob_effect::OOZING;
+    }
+    if kind.in_entity_tag("minecraft:ignores_poison_and_regen") {
+        return effect != mob_effect::REGENERATION && effect != mob_effect::POISON;
+    }
+    true
+}
+
+/// `LivingEntity.addEffect`：先检查免疫标签，再给生物挂上效果并刷新属性。
+///
+/// `LivingEntity.addEffect`: checks `canBeAffected`, adds the effect and refreshes attributes.
 pub fn add_effect(mob: &mut Mob, instance: super::effects::EffectInstance) -> bool {
-    // `LivingEntity.addEffect` 先问 `canBeAffected`；蜘蛛对中毒返回假。
-    // `LivingEntity.addEffect` asks `canBeAffected` first; spiders refuse poison.
-    if !super::spider::can_be_affected(mob, instance.effect) {
+    if !can_be_affected(mob.mob_type, instance.effect)
+        || !super::spider::can_be_affected(mob, instance.effect)
+    {
         return false;
     }
     let events = mob.effects.add(instance);
@@ -700,7 +751,7 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
         volume,
         pitch,
         position: me.position,
-        hostile: mob.mob_type.is_monster(),
+        hostile: mob.mob_type.is_enemy(),
         seed: None,
     });
 }
@@ -741,26 +792,43 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     if mob.mob_type.is_equine() {
         // 马科的叫声和音量（0.8）按自己的类。
         // Equines use their own ambient sound and volume (0.8).
-        let sound = voice_of(mob, Voice::Ambient);
+        let sound = voice_of(mob, Voice::Ambient, me.in_water);
         make_sound(me, mob, sound);
+        return;
+    }
+    // 史莱姆的 `getAmbientSound()` 是空：`makeSound(null)` 不放音效，也不取音高。
+    // A slime's `getAmbientSound()` is null: `makeSound(null)` plays nothing and draws no pitch.
+    if mob.mob_type == super::MobType::Slime {
         return;
     }
     let pitch = voice_pitch(me, mob);
     play_sound(
         me,
         mob,
-        ambient_sound(mob),
-        mob.mob_type.sound_volume(),
+        ambient_sound(mob, me.in_water),
+        sound_volume(mob),
         pitch,
     );
 }
 
-fn ambient_sound(mob: &Mob) -> &'static str {
+/// `getSoundVolume()`：史莱姆按大小算，其余按类型。
+///
+/// `getSoundVolume()`: by size for slimes, by type otherwise.
+fn sound_volume(mob: &Mob) -> f32 {
+    if mob.mob_type == super::MobType::Slime {
+        super::slime::sound_volume(mob)
+    } else {
+        mob.mob_type.sound_volume()
+    }
+}
+
+fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
     match mob.mob_type {
         super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
+        super::MobType::Drowned => super::drowned::ambient_sound(in_water),
         super::MobType::PolarBear => super::polar_bear::ambient_sound(mob.is_baby()),
         super::MobType::Panda => super::panda::ambient_sound(&mob.panda),
         _ => mob
@@ -818,10 +886,15 @@ fn is_in_wall(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
 }
 
 /// `tickDeath`：第 20 刻移除。
-fn tick_death(me: &mut Entity, mob: &mut Mob) {
+fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.death_time += 1;
     if mob.death_time >= 20 && !me.removed {
         mob.events.push(MobEvent::Poof);
+        // `AbstractCubeMob.remove`：先分裂，再 `super.remove`。
+        // `AbstractCubeMob.remove`: split first, then `super.remove`.
+        if mob.mob_type == super::MobType::Slime {
+            super::slime::split_on_remove(me, mob, ctx);
+        }
         me.discard();
     }
 }
@@ -831,6 +904,13 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.needs_sync = false;
+    // `Witch.aiStep` 的喝药段在 `super.aiStep()`（`Monster.aiStep` 的亮度）之前。
+    //
+    // The potion part of `Witch.aiStep` runs before `super.aiStep()`, which is the
+    // `Monster.aiStep` light handling.
+    if mob.mob_type == super::MobType::Witch {
+        super::witch::ai_step(me, mob, ctx);
+    }
     let fox = mob.mob_type == super::MobType::Fox;
     if fox {
         super::fox::ai_step_before(me, mob, ctx);
@@ -925,7 +1005,11 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         {
             jump_in_liquid(me, mob);
         } else if (me.on_ground || (in_water && fluid <= threshold)) && mob.no_jump_delay == 0 {
-            jump_from_ground(me, mob, ctx.blocks());
+            if mob.mob_type == super::MobType::Slime {
+                super::slime::jump_from_ground(me, mob, ctx.blocks());
+            } else {
+                jump_from_ground(me, mob, ctx.blocks());
+            }
             mob.no_jump_delay = 10;
         }
     } else {
@@ -968,7 +1052,8 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         motion::apply_effects_from_blocks(me, mob, ctx);
     }
     // 冻结。
-    if !mob.in_powder_snow {
+    let can_freeze = can_freeze(mob);
+    if !mob.in_powder_snow || !can_freeze {
         mob.ticks_frozen = (mob.ticks_frozen - 2).max(0);
     }
     if let Some(speed) = mob.attributes.instance(attribute::MOVEMENT_SPEED) {
@@ -987,7 +1072,7 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             });
         }
     }
-    if me.tick_count % 40 == 0 && mob.ticks_frozen >= 140 {
+    if me.tick_count % 40 == 0 && mob.ticks_frozen >= 140 && can_freeze {
         hurt_server(
             me,
             mob,
@@ -1114,6 +1199,23 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     super::fish::puffer_touch(me, mob, ctx);
 }
 
+/// `LivingEntity.canFreeze()`：盔甲槽里有 `#freeze_immune_wearables` 就不会冻，否则看类型
+/// （[`super::MobType::can_freeze`]）。生物没有旁观模式。
+///
+/// `LivingEntity.canFreeze()`: any `#freeze_immune_wearables` armour piece prevents freezing;
+/// otherwise the type decides ([`super::MobType::can_freeze`]). Mobs are never spectators.
+pub(crate) fn can_freeze(mob: &Mob) -> bool {
+    use mc_bamboo_data::tags::item_tags::FREEZE_IMMUNE_WEARABLES;
+    use mc_bamboo_protocol::packet::play::EquipmentSlot::{Body, Chest, Feet, Head, Legs};
+    // `EquipmentSlotGroup.ARMOR`：四件人形盔甲加身体槽。
+    // `EquipmentSlotGroup.ARMOR`: the four humanoid armour slots plus the body slot.
+    let immune = [Feet, Legs, Chest, Head, Body].into_iter().any(|slot| {
+        let stack = mob.equipment.get(slot);
+        !stack.is_empty() && crate::state::item_is_tagged(stack.item, FREEZE_IMMUNE_WEARABLES)
+    });
+    !immune && mob.mob_type.can_freeze()
+}
+
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
 const POWDER_SNOW_SLOW: &str = "minecraft:powder_snow";
 
@@ -1191,7 +1293,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
         // `tickCount` 是实体自己的 tick 数；`id` 用网络实体 ID。
         let mut goals = std::mem::take(&mut mob.goals);
-        if mob.mob_type == super::MobType::Skeleton {
+        if mob.mob_type.is_skeleton() {
             goals.reassess_skeleton_weapon(me, mob, ctx);
         }
         let mut targets = std::mem::take(&mut mob.target_goals);
@@ -1265,6 +1367,14 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if !mob.fox.is_sleeping() {
             look_control_tick(me, mob);
         }
+    } else if mob.mob_type == super::MobType::Slime {
+        super::slime::move_control_tick(me, mob);
+        look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Drowned {
+        let target = super::goals::current_combat_target(mob, ctx);
+        let target_in_water = super::goals::current_target_in_water(mob, ctx);
+        super::drowned::move_control_tick(me, mob, ctx.blocks(), target, target_in_water);
+        look_control_tick(me, mob);
     } else {
         move_control_tick(me, mob, ctx.blocks());
         look_control_tick(me, mob);
@@ -1281,7 +1391,7 @@ pub(crate) fn set_speed(mob: &mut Mob, speed: f32) {
 }
 
 /// `MoveControl.tick`（牛不横移，`STRAFE` 走不到）。
-fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
+pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     // `Panda.PandaMoveControl.tick`：做不了动作时不响应移动控制。
     // `Panda.PandaMoveControl.tick`: no move control while an action is playing.
     if mob.mob_type == super::MobType::Panda && !mob.panda_can_perform_action(view.is_thundering())
@@ -1431,7 +1541,7 @@ fn jump_in_liquid(me: &mut Entity, mob: &Mob) {
 }
 
 /// `getBlockJumpFactor`：只有蜂蜜块是 0.5。
-fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
+pub(super) fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
     let factor = |state: crate::state::BlockState| {
         if state.is(mc_bamboo_data::blocks::HONEY_BLOCK) {
             0.5_f32
@@ -1480,7 +1590,18 @@ fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) 
     let in_liquid = is_in_liquid(me, mob);
     let levitation = mob.effects.amplifier(mob_effect::LEVITATION);
     if in_liquid {
-        travel_in_fluid(me, mob, ctx, input);
+        // `Drowned.travelInWater` 覆写只在眼睛也进水、且想游的时候接管。
+        // The `Drowned.travelInWater` override only takes over with the eyes under water
+        // while it wants to swim.
+        let drowned_swims = if mob.mob_type == super::MobType::Drowned {
+            let target_in_water = super::goals::current_target_in_water(mob, ctx);
+            super::drowned::travel_in_water(me, mob, ctx, input, target_in_water)
+        } else {
+            false
+        };
+        if !drowned_swims {
+            travel_in_fluid(me, mob, ctx, input);
+        }
     } else {
         travel_in_air(me, mob, ctx, input, levitation);
     }
@@ -1932,6 +2053,11 @@ fn hurt_living(
     source: DamageSource,
     amount: f32,
 ) -> bool {
+    // 抗火在受伤冷却、音效及攻击者归因之前拒绝火焰伤害。
+    // Fire Resistance rejects fire damage before cooldowns, sounds, or attacker bookkeeping.
+    if source.kind.is_fire() && mob.effects.has(mob_effect::FIRE_RESISTANCE) {
+        return false;
+    }
     mob.no_action_time = 0;
     let mut amount = if amount < 0.0 { 0.0 } else { amount };
     if amount.is_nan() || amount.is_infinite() {
@@ -1993,16 +2119,16 @@ fn hurt_living(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            let sound = voice_of(mob, Voice::Death);
-            play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+            let sound = voice_of(mob, Voice::Death, me.in_water);
+            play_sound(me, mob, sound, sound_volume(mob), pitch);
         }
         die(me, mob, ctx, source);
     } else if full_hit {
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -mob.mob_type.ambient_sound_interval();
         let pitch = voice_pitch(me, mob);
-        let sound = voice_of(mob, Voice::Hurt);
-        play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
+        let sound = voice_of(mob, Voice::Hurt, me.in_water);
+        play_sound(me, mob, sound, sound_volume(mob), pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();
@@ -2035,6 +2161,15 @@ fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f
     }
     if amount <= 0.0 {
         amount = 0.0;
+    }
+    // `LivingEntity.getDamageAfterMagicAbsorb`：女巫覆写了它（魔法 / 荆棘只吃 15%，
+    // 自己打自己伤害为 0）。抗性效果和附魔减伤这一期没建模。
+    //
+    // `LivingEntity.getDamageAfterMagicAbsorb`: the witch override (magic and thorns deal
+    // only 15%, self-inflicted damage is zero). Resistance and enchantment reduction are
+    // not modelled yet.
+    if mob.mob_type == super::MobType::Witch {
+        amount = super::witch::damage_after_magic_absorb(source, amount, me.id);
     }
     let before = amount;
     amount = mth::java_max_f32(amount - mob.absorption, 0.0);
@@ -2134,7 +2269,7 @@ pub(crate) fn do_hurt_target(
         // `Zombie.doHurtTarget`：打中了、空手、自己着火时，按区域难度传染火焰：
         // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
         if hurt
-            && matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk)
+            && mob.mob_type.is_zombie()
             && mob
                 .equipment
                 .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
@@ -2272,7 +2407,7 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         super::fox::drop_mouth_item(me, mob, ctx);
     }
     let by_player = mob.last_hurt_by_player_memory_time > 0;
-    if mob.mob_type == super::MobType::Skeleton {
+    if mob.mob_type.is_skeleton() {
         mob.events.push(MobEvent::Death);
         super::skeleton_drops::drop_on_death(me, mob, ctx, source, by_player);
         return;
@@ -2284,6 +2419,22 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
+    if mob.mob_type == super::MobType::Slime {
+        // `Slime.setSize` 把 `xpReward` 设成大小；史莱姆没有装备加成。
+        // `Slime.setSize` sets `xpReward` to the size; slimes carry no equipment bonus.
+        mob.events.push(MobEvent::Death);
+        if drops {
+            ctx.emit(
+                Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+                me,
+            );
+        }
+        if by_player && drops {
+            let amount = mob.cube.size;
+            ctx.emit(Command::AwardDeathExperience { amount }, me);
+        }
+        return;
+    }
     if !mob.mob_type.is_monster() {
         mob.events.push(MobEvent::Death);
         animal_death_drops(
