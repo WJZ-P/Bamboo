@@ -128,6 +128,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Wolf && !me.removed {
         super::wolf::tick_after(me, mob, ctx);
     }
+    // `Armadillo.tick` 在 `super.tick()` 之后夹头、数 `inStateTicks`。
+    // `Armadillo.tick` clamps the head and counts `inStateTicks` after `super.tick()`.
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::tick_after(mob);
+    }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
     // `AbstractHorse.tick` advances its timers after `super.tick()`.
     if mob.mob_type.is_equine() {
@@ -279,12 +284,12 @@ pub(crate) fn is_in_lava(me: &Entity, mob: &Mob) -> bool {
     !me.first_tick && fluid_height(mob, fluid_tags::LAVA) > 0.0
 }
 
-fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
+pub(crate) fn is_in_liquid(me: &Entity, mob: &Mob) -> bool {
     me.in_water || is_in_lava(me, mob)
 }
 
 /// `getEyeY()`。
-fn eye_y(me: &Entity, mob: &Mob) -> f64 {
+pub(crate) fn eye_y(me: &Entity, mob: &Mob) -> f64 {
     me.position.y + f64::from(mob.eye_height)
 }
 
@@ -500,6 +505,11 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
                 return;
             }
+            // 受惊的犰狳没有叫声：`makeSound` 不跑，也不取音高。
+            // A scared armadillo has no ambient sound, so no pitch draws either.
+            if super::armadillo::is_scared(mob) {
+                return;
+            }
             // `Entity.makeSound` 遇到空的叫声直接返回，也不取音高的两个随机数。
             // `Entity.makeSound` returns on a null sound without drawing the pitch.
             let Some(sound) = ambient_voice(me, mob) else {
@@ -528,6 +538,9 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
+    if mob.mob_type == super::MobType::Goat {
+        return super::goat::voice(mob, voice);
+    }
     if mob.mob_type.is_equine() {
         return super::equine::voice(mob, voice);
     }
@@ -544,6 +557,9 @@ fn voice_of(mob: &Mob, voice: Voice) -> &'static str {
         };
     }
     match voice {
+        Voice::Hurt if super::armadillo::is_scared(mob) => {
+            "minecraft:entity.armadillo.hurt_reduced"
+        }
         Voice::Hurt => mob
             .mob_type
             .hurt_sound()
@@ -691,6 +707,11 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    // `Armadillo.getAmbientSound` 受惊时是 `null`：`makeSound` 不跑，也不取音高。
+    // A scared armadillo has no ambient sound, so `makeSound` and its pitch draws are skipped.
+    if super::armadillo::is_scared(mob) {
+        return;
+    }
     if mob.mob_type == super::MobType::Wolf {
         // 刚生成的狼还没有仇恨，时刻不影响叫声。
         // A fresh wolf has no anger, so the clock does not matter.
@@ -736,6 +757,7 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
 
 fn ambient_sound(mob: &Mob) -> &'static str {
     match mob.mob_type {
+        super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
         super::MobType::Pig => mob.pig_sound_variant.ambient(mob.is_baby()),
         super::MobType::Chicken => super::chicken::sounds(mob)[0],
@@ -1103,7 +1125,61 @@ pub(crate) fn set_age(me: &mut Entity, mob: &mut Mob, age: i32) {
         let (width, height, eye) = mob.mob_type.dimensions(age < 0);
         me.dimensions = (width, height);
         mob.eye_height = eye;
+        if mob.mob_type == super::MobType::Goat {
+            // 山羊的尺寸还看姿势；`ageBoundaryReached` 换攻击力。
+            // Goat size also depends on the pose; `ageBoundaryReached` swaps the attack damage.
+            let (width, height, eye) = super::goat::pose_dimensions(age < 0, mob.goat.long_jumping);
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
+            super::goat::age_boundary_reached(mob);
+        }
     }
+}
+
+/// `Animal.spawnChildFromBreeding` 的父亲一侧：年龄设成 6000、清掉求爱、发爱心，
+/// 伴侣、幼崽和经验球交给命令落地。
+///
+/// The father's side of `Animal.spawnChildFromBreeding`: age 6000, love reset, hearts;
+/// the partner, offspring and orb are applied by a command.
+pub(crate) fn breed_with(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    partner: crate::entity::EntityUid,
+) {
+    mob.in_love = 0;
+    set_age(me, mob, 6000);
+    mob.events.push(MobEvent::Hearts);
+    ctx.emit(
+        Command::BreedAnimals {
+            variant: mob.variant,
+            // 哞菇借这个字节传自己的品种（落地时生物状态不在实体上）。
+            // Mooshrooms pass their type in this byte: the mob state is detached
+            // from the entity when the command lands.
+            wool: if mob.mob_type == super::MobType::Mooshroom {
+                mob.mooshroom.brown as u8
+            } else {
+                mob.wool
+            },
+            partner,
+            position: me.position,
+            // 熊猫父亲的基因（落地时父亲不在实体表里）。
+            // The panda father's genes (it is not in the table when this lands).
+            father_genes: (mob.mob_type == super::MobType::Panda).then(|| {
+                (
+                    mob.panda.main_gene.id() as u8,
+                    mob.panda.hidden_gene.id() as u8,
+                )
+            }),
+            kind: mob.mob_type,
+            father_rabbit: mob.rabbit.variant,
+            father_fox: mob.fox.variant,
+            father_love: mob.love_cause,
+            father_wolf: Box::new((mob.wolf, mob.tame)),
+            father_screaming: mob.goat.screaming,
+        },
+        me,
+    );
 }
 
 /// `Mob.serverAiStep`。
@@ -1144,36 +1220,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `BreedGoal.breed` 就在这一刻发生：父亲的年龄先设成 6000，
         // 后面 `aiStep` 会照官方再减一；伴侣和幼崽交给命令落地。
         if let Some(partner) = mob.pending_breed.take() {
-            mob.in_love = 0;
-            set_age(me, mob, 6000);
-            mob.events.push(MobEvent::Hearts);
-            ctx.emit(
-                Command::BreedAnimals {
-                    variant: mob.variant,
-                    // 哞菇借这个字节传自己的品种（落地时生物状态不在实体上）。
-                    // Mooshrooms pass their type in this byte: the mob state is detached
-                    // from the entity when the command lands.
-                    wool: if mob.mob_type == super::MobType::Mooshroom {
-                        mob.mooshroom.brown as u8
-                    } else {
-                        mob.wool
-                    },
-                    partner,
-                    position: me.position,
-                    father_genes: (mob.mob_type == super::MobType::Panda).then(|| {
-                        (
-                            mob.panda.main_gene.id() as u8,
-                            mob.panda.hidden_gene.id() as u8,
-                        )
-                    }),
-                    kind: mob.mob_type,
-                    father_rabbit: mob.rabbit.variant,
-                    father_fox: mob.fox.variant,
-                    father_love: mob.love_cause,
-                    father_wolf: Box::new((mob.wolf, mob.tame)),
-                },
-                me,
-            );
+            breed_with(me, mob, ctx, partner);
         }
     }
     timing::span!(Navigation);
@@ -1185,6 +1232,14 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             mob.mover
                 .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
         }
+    }
+    // 跑大脑的生物在 `super.customServerAiStep` 之前跑大脑。
+    // Brain-driven mobs run their brain before `super.customServerAiStep`.
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Goat {
+        super::goat::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
@@ -1313,15 +1368,34 @@ fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
     }
     if !mob.navigation.is_done() {
         mob.y_head_rot =
-            mth::rotate_if_necessary(mob.y_head_rot, mob.y_body_rot, MAX_HEAD_Y_ROT as f32);
+            mth::rotate_if_necessary(mob.y_head_rot, mob.y_body_rot, max_head_y_rot(mob));
     }
 }
 
-/// `BodyRotationControl.clientTick`。
+/// `Mob.getMaxHeadYRot()`：犰狳受惊时 0、平时 32，其余 75。
+///
+/// `Mob.getMaxHeadYRot()`: 0 for a scared armadillo, 32 otherwise; 75 for the rest.
+fn max_head_y_rot(mob: &Mob) -> f32 {
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::max_head_y_rot(mob)
+    } else if mob.mob_type == super::MobType::Goat {
+        // `Goat.getMaxHeadYRot`。
+        15.0
+    } else {
+        MAX_HEAD_Y_ROT as f32
+    }
+}
+
+/// `BodyRotationControl.clientTick`；犰狳受惊时整个跳过。
+///
+/// `BodyRotationControl.clientTick`; skipped entirely for a scared armadillo.
 fn body_rotation_tick(me: &Entity, mob: &mut Mob) {
+    if super::armadillo::is_scared(mob) {
+        return;
+    }
     let dx = me.position.x - me.old_position.x;
     let dz = me.position.z - me.old_position.z;
-    let max = MAX_HEAD_Y_ROT as f32;
+    let max = max_head_y_rot(mob);
     if dx * dx + dz * dz > 2.500_000_277_905_201e-7 {
         mob.y_body_rot = me.y_rot;
         mob.y_head_rot = mth::rotate_if_necessary(mob.y_head_rot, mob.y_body_rot, max);
@@ -1370,14 +1444,19 @@ fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
     if f64::from(here) == 1.0 { below } else { here }
 }
 
+/// `LivingEntity.getJumpBoostPower()`：每级 +0.1。
+///
+/// `LivingEntity.getJumpBoostPower()`: +0.1 per level.
+pub(crate) fn jump_boost_power(mob: &Mob) -> f32 {
+    mob.effects
+        .amplifier(mob_effect::JUMP_BOOST)
+        .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0))
+}
+
 /// `jumpFromGround`。
 fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
-    // `LivingEntity.getJumpBoostPower()`：每级 +0.1。
-    let boost = mob
-        .effects
-        .amplifier(mob_effect::JUMP_BOOST)
-        .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
+    let boost = jump_boost_power(mob);
     let is_rabbit = mob.mob_type == super::MobType::Rabbit;
     let multiplier = if is_rabbit {
         super::rabbit::jump_power_multiplier(me, mob)
@@ -1460,6 +1539,12 @@ fn travel_in_air(
         }
         None => movement.y - effective_gravity(me, mob),
     };
+    // `shouldDiscardFriction()`：长跳途中速度原样保留。
+    // `shouldDiscardFriction()`: a long jump keeps its velocity untouched.
+    if mob.discard_friction {
+        me.delta = Vec3::new(movement.x, y, movement.z);
+        return;
+    }
     let air_drag = mob.attributes.value(attribute::AIR_DRAG_MODIFIER) as f32;
     let horizontal_air = modified_friction(0.91, air_drag);
     let horizontal = block_friction * horizontal_air;
@@ -1793,6 +1878,13 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Panda {
         mob.panda.sit(false);
     }
+    // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
+    // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.
+    let amount = if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::reduce_damage(mob, amount)
+    } else {
+        amount
+    };
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }
@@ -1850,20 +1942,26 @@ fn hurt_living(
             return false;
         }
         actually_hurt(me, mob, source, amount - mob.last_hurt);
+        after_actually_hurt(me, mob, &source);
         mob.last_hurt = amount;
         false
     } else {
         mob.last_hurt = amount;
         mob.damage_cooldown = 20;
         actually_hurt(me, mob, source, amount);
+        after_actually_hurt(me, mob, &source);
         mob.hurt_duration = 10;
         mob.hurt_time = mob.hurt_duration;
         true
     };
     if let Some(attacker) = source.attacker {
-        mob.last_hurt_by_mob = Some(attacker);
-        mob.last_hurt_by_mob_ref = source.attacker_uuid;
-        mob.last_hurt_by_mob_timestamp = me.tick_count;
+        // `resolveMobResponsibleForDamage`：`#no_anger`（山羊冲撞）不记仇。
+        // `resolveMobResponsibleForDamage`: `#no_anger` (a goat ram) leaves no grudge.
+        if !source.kind.no_anger() {
+            mob.last_hurt_by_mob = Some(attacker);
+            mob.last_hurt_by_mob_ref = source.attacker_uuid;
+            mob.last_hurt_by_mob_timestamp = me.tick_count;
+        }
         if source.attacker_is_player {
             mob.last_hurt_by_player = Some(attacker);
             mob.last_hurt_by_player_ref = source.attacker_uuid;
@@ -1912,6 +2010,15 @@ fn hurt_living(
         super::equine::after_hurt(me, mob);
     }
     true
+}
+
+/// 物种覆写的 `actuallyHurt` 在 `super` 之后的那部分。
+///
+/// The part of species `actuallyHurt` overrides after `super`.
+fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource) {
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::after_actually_hurt(me, mob, source);
+    }
 }
 
 /// `Animal.actuallyHurt` → `LivingEntity.actuallyHurt`。没有护甲、效果和吸收。
@@ -2208,6 +2315,28 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
 }
 
+/// 父亲那一份繁殖数据（落地时父亲被拆出来，读不到）。
+///
+/// The father's breeding data; the father is detached when the command lands.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BreedFather {
+    pub(crate) kind: super::MobType,
+    pub(crate) variant: super::CowVariant,
+    pub(crate) wool: u8,
+    pub(crate) rabbit: super::rabbit::Variant,
+    pub(crate) fox: super::fox::Variant,
+    pub(crate) love: Option<[u8; 16]>,
+    pub(crate) wolf: super::wolf::Wolf,
+    pub(crate) tame: super::tame::Tamable,
+    /// 山羊父亲是否尖叫。
+    ///
+    /// Whether the goat father is screaming.
+    pub(crate) screaming: bool,
+    /// 熊猫父亲的显性 / 隐性基因。
+    ///
+    /// The panda father's main and hidden genes.
+    pub(crate) genes: Option<(u8, u8)>,
+}
 /// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
 /// 按槽位顺序掉装备（鞍），最后 `Animal.getBaseExperienceReward` 取 `1 + nextInt(3)`。
 ///
@@ -2248,27 +2377,6 @@ fn animal_death_drops(
         let amount = 1 + me.random.next_int_bounded(3);
         ctx.emit(Command::AwardDeathExperience { amount }, me);
     }
-}
-
-/// [`Command::BreedAnimals`] 落地时带的参数。父亲在落地时不在实体表里，所以它的熊猫基因
-/// 和各品种状态随命令带过来。
-///
-/// The parameters of a landed [`Command::BreedAnimals`]. The father is not in the table
-/// when this lands, so its panda genes and per-species state travel with the command.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BreedFather {
-    pub(crate) kind: super::MobType,
-    pub(crate) variant: super::CowVariant,
-    pub(crate) wool: u8,
-    pub(crate) rabbit: super::rabbit::Variant,
-    pub(crate) fox: super::fox::Variant,
-    pub(crate) love: Option<[u8; 16]>,
-    pub(crate) wolf: super::wolf::Wolf,
-    pub(crate) tame: super::tame::Tamable,
-    /// 熊猫父亲的显性 / 隐性基因。
-    ///
-    /// The panda father's main and hidden genes.
-    pub(crate) genes: Option<(u8, u8)>,
 }
 
 /// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
@@ -2380,11 +2488,15 @@ pub(crate) fn apply_breed(
                 [parent.love, love],
             ));
         }
-        // 羊按配方混色；熊猫的基因、哞菇的品种已经抽过；马科自己取完数了。这几类都不取
-        // `nextBoolean`。
-        // Sheep mix colours; panda genes and the mooshroom type are drawn; equines drew their
-        // own numbers. None of them draw `nextBoolean`.
-        super::MobType::Sheep | super::MobType::Panda | super::MobType::Mooshroom => {}
+        // 这些种类都不取父亲的 `nextBoolean`：羊按配方混色，熊猫 / 哞菇 / 犰狳 / 山羊
+        // 的品种或基因在别处抽。
+        // None of these draw the father's `nextBoolean`: sheep mix colours, and the
+        // panda / mooshroom / armadillo / goat traits are drawn elsewhere.
+        super::MobType::Sheep
+        | super::MobType::Panda
+        | super::MobType::Mooshroom
+        | super::MobType::Armadillo
+        | super::MobType::Goat => {}
         _ if equine => {}
         _ => {
             // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹。
@@ -2394,12 +2506,14 @@ pub(crate) fn apply_breed(
     }
     let mut child_variant = parent.variant;
     let mut partner_wool = parent.wool;
+    let mut partner_screaming = false;
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
             if !from_father {
                 child_variant = mob.variant;
             }
             partner_wool = mob.wool;
+            partner_screaming = mob.goat.screaming;
             mob.in_love = 0;
             set_age(me, mob, 6000);
         });
@@ -2448,6 +2562,11 @@ pub(crate) fn apply_breed(
     } else {
         0
     };
+    if kind == super::MobType::Goat {
+        // 父亲正被拆出来跑 tick，尖叫标志由命令带过来。
+        // The father is detached for its tick; its screaming flag rides on the command.
+        super::goat::breed_offspring(&mut calf, parent.screaming, partner_screaming, world);
+    }
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;

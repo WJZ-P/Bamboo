@@ -135,6 +135,9 @@ impl EggCase {
                 spectator: false,
                 creative: false,
                 sneaking: false,
+                // 投掷者站着扔蛋，没有疾跑；犰狳才读这个标志。
+                // The thrower stands still, not sprinting; only armadillos read this flag.
+                sprinting: false,
                 invisible: false,
                 armor_cover: 0.0,
                 main_hand: 0,
