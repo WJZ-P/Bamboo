@@ -198,7 +198,12 @@ fn spawn_member(world: &mut World, pos: BlockPos, leader: bool) -> bool {
         0.0,
         0.0,
     );
-    spawn::finalize_spawn(world, MobType::Pillager, &mut entity, spawn::SpawnReason::Patrol);
+    spawn::finalize_spawn(
+        world,
+        MobType::Pillager,
+        &mut entity,
+        spawn::SpawnReason::Patrol,
+    );
     world.add_prepared_entity(entity);
     true
 }
@@ -288,7 +293,7 @@ mod tests {
     fn a_patrol_is_a_leader_with_followers() {
         let mut chosen = None;
         for seed in 1..2000_i64 {
-            if run(seed, F, false).0.entities().len() > 0 {
+            if !run(seed, F, false).0.entities().is_empty() {
                 chosen = Some(seed);
                 break;
             }
@@ -309,7 +314,10 @@ mod tests {
         for entity in entities.iter() {
             let mob = entity.kind.mob().expect("patrol members are pillagers");
             assert_eq!(mob.mob_type.entity_type(), entity_type::PILLAGER);
-            assert_eq!(mob.equipment.get(EquipmentSlot::MainHand).item, items::CROSSBOW);
+            assert_eq!(
+                mob.equipment.get(EquipmentSlot::MainHand).item,
+                items::CROSSBOW
+            );
             assert!(mob.raider.patrolling);
             assert!(mob.raider.can_join_raid);
             if mob.raider.patrol_leader {
@@ -331,12 +339,21 @@ mod tests {
     #[test]
     fn gated_ticks_spawn_nothing_and_draw_nothing() {
         for facts in [
-            PatrolFacts { spawn_enemies: false, spawn_patrols: true },
-            PatrolFacts { spawn_enemies: true, spawn_patrols: false },
+            PatrolFacts {
+                spawn_enemies: false,
+                spawn_patrols: true,
+            },
+            PatrolFacts {
+                spawn_enemies: true,
+                spawn_patrols: false,
+            },
         ] {
             let (level, spawner) = run(7, facts, false);
             assert_eq!(level.entities().len(), 0);
-            assert_eq!(level.random.source().seed(), crate::LevelRandom::new(7).source().seed());
+            assert_eq!(
+                level.random.source().seed(),
+                crate::LevelRandom::new(7).source().seed()
+            );
             assert_eq!(spawner.next_tick, 0);
         }
     }
@@ -359,7 +376,10 @@ mod tests {
     fn the_timer_counts_down_between_attempts() {
         let (_, mut spawner) = run(3, F, false);
         let armed = spawner.next_tick;
-        assert!((11999..=13199).contains(&armed), "12000 + r - 1, got {armed}");
+        assert!(
+            (11999..=13199).contains(&armed),
+            "12000 + r - 1, got {armed}"
+        );
         let (mut level, mut ticks) = level(3);
         let before = level.random.source().seed();
         {
@@ -367,7 +387,11 @@ mod tests {
             tick(&mut world, &mut spawner, F);
         }
         assert_eq!(spawner.next_tick, armed - 1);
-        assert_eq!(level.random.source().seed(), before, "a plain countdown draws nothing");
+        assert_eq!(
+            level.random.source().seed(),
+            before,
+            "a plain countdown draws nothing"
+        );
     }
 
     /// 早期世界时间线和蘑菇岛都关掉巡逻队。
@@ -376,7 +400,10 @@ mod tests {
         assert!(!can_patrol_spawn_at(0, biome::PLAINS));
         assert!(!can_patrol_spawn_at(EARLY_GAME_END - 1, biome::PLAINS));
         assert!(can_patrol_spawn_at(EARLY_GAME_END, biome::PLAINS));
-        assert!(!can_patrol_spawn_at(EARLY_GAME_END + 1, biome::MUSHROOM_FIELDS));
+        assert!(!can_patrol_spawn_at(
+            EARLY_GAME_END + 1,
+            biome::MUSHROOM_FIELDS
+        ));
     }
 
     /// `nextTick` 为正时整段跳过，连玩家表都不看。

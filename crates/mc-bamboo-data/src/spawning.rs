@@ -213,10 +213,20 @@ pub fn structure_spawn_override(
     structure: &str,
     category: MobCategory,
 ) -> Option<&'static [MobSpawnerDef]> {
+    structure_spawn_override_row(structure, category).map(|row| row.spawns)
+}
+
+/// 同 [`structure_spawn_override`]，但要整行，调用方还读 `bounding` 决定用哪个盒。
+///
+/// Like [`structure_spawn_override`], but the whole row, so the caller can read
+/// `bounding` and pick the box.
+pub fn structure_spawn_override_row(
+    structure: &str,
+    category: MobCategory,
+) -> Option<&'static StructureSpawnOverride> {
     STRUCTURE_SPAWN_OVERRIDES
         .iter()
         .find(|row| row.structure == structure && row.category == category)
-        .map(|row| row.spawns)
 }
 
 #[cfg(test)]

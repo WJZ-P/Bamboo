@@ -3326,6 +3326,11 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // Vanilla `chunkSource.tick` spawns before the random ticks; keep that order.
     crate::natural_spawn::tick(region);
     interaction::run_random_ticks(region);
+    // 官方 `tickChunks` 在自然刷怪和随机刻之后跑 `tickCustomSpawners`。
+    //
+    // Vanilla `tickChunks` runs `tickCustomSpawners` after natural spawning and the
+    // random ticks.
+    crate::patrol_spawn::tick(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
     region.profiler.begin_partition_phase();

@@ -141,6 +141,14 @@ import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.world.level.levelgen.PatrolSpawner;
+import net.minecraft.world.level.levelgen.WorldOptions;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.BuiltinStructures;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructurePiece;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.pieces.PiecesContainer;
 import net.minecraft.util.random.WeightedList;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
@@ -340,6 +348,12 @@ public final class MobOracle {
             }
             if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
                 cases += playGenSpawns(official, out, only);
+            }
+            if ("patrol_spawn".equals(only) || "patrol".equals(only)) {
+                cases += playPatrolSpawns(official, out, only);
+            }
+            if (only == null || "structure_spawn".equals(only)) {
+                cases += playStructureSpawns(official, out, only);
             }
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
@@ -4920,6 +4934,157 @@ public final class MobOracle {
         return count;
     }
 
+    // ---- 结构刷怪覆盖（`ChunkGenerator.getMobsAt`）----
+
+    /**
+     * 手工搭两个结构起点（前哨站 + 女巫小屋），用真的 `StructureManager` 和
+     * `ChunkGenerator.getMobsAt` 求若干位置的刷怪表，逐条和 Bamboo 的
+     * `resolve_override` 比。起点布局是固定的，不消耗随机数。
+     *
+     * Hand-build two structure starts (an outpost and a swamp hut) and ask the real
+     * `StructureManager` / `ChunkGenerator.getMobsAt` for the spawn list at several
+     * positions, comparing each with Bamboo's `resolve_override`. The layout is fixed and
+     * draws no random numbers.
+     */
+    private static int playStructureSpawns(Official official, Writer out, String only) throws Exception {
+        if (only != null && !"structure_spawn".startsWith(only)) return 0;
+        out.write(structureSpawnCase(official) + "\n");
+        return 1;
+    }
+
+    /** 一个没有行为的空结构件，只有包围盒。`PiecesContainer` 只读这个盒。 */
+    private static StructurePiece stubPiece(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        return new StubPiece(new BoundingBox(minX, minY, minZ, maxX, maxY, maxZ));
+    }
+
+    /** 只带包围盒的结构件：`StructureStart` / `PiecesContainer` 只读它。 */
+    private static final class StubPiece extends StructurePiece {
+        StubPiece(BoundingBox box) {
+            super(null, 0, box);
+        }
+
+        @Override
+        protected void addAdditionalSaveData(
+                net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext context,
+                net.minecraft.nbt.CompoundTag tag) {}
+
+        @Override
+        public void postProcess(net.minecraft.world.level.WorldGenLevel level, StructureManager structureManager,
+                ChunkGenerator generator, net.minecraft.util.RandomSource random, BoundingBox chunkBB,
+                ChunkPos chunkPos, BlockPos referencePos) {}
+    }
+
+    /** 走官方 `ChunkGenerator.getMobsAt` 的生成器：只借它的结构覆盖分支。 */
+    private static final class StructureSpawnGenerator extends FlatLevelSource {
+        private StructureSpawnGenerator() {
+            super(null);
+        }
+    }
+
+    private static JsonObject structureSpawnCase(Official official) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        // 和 `NaturalSpawnGenerator` 一样跳过构造器：`getMobsAt` 不读任何生成器字段。
+        // Skip the constructor like `NaturalSpawnGenerator`; `getMobsAt` reads no fields.
+        level.chunkSource.naturalGenerator = allocate(StructureSpawnGenerator.class);
+        level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+        put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> level.naturalBiome, 0L));
+        level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        level.injectedCanSeeSky = true;
+        WorldOptions options = new WorldOptions(0L, true, false);
+        StructureManager manager = new StructureManager(level, options, null);
+        put(ServerLevel.class, level, "structureManager", manager);
+
+        var outpost = official.registries.lookupOrThrow(Registries.STRUCTURE)
+                .getOrThrow(BuiltinStructures.PILLAGER_OUTPOST).value();
+        var hut = official.registries.lookupOrThrow(Registries.STRUCTURE)
+                .getOrThrow(BuiltinStructures.SWAMP_HUT).value();
+        // 前哨站：两件之间留出空档，覆盖「整个起点盒命中但不在任何结构件里」那一支。
+        // Outpost: a gap between two pieces covers "inside the start box but in no piece".
+        StructurePiece outpostA = stubPiece(0, 60, 0, 2, 70, 2);
+        StructurePiece outpostB = stubPiece(10, 60, 0, 12, 70, 2);
+        StructurePiece hutPiece = stubPiece(2, 60, 20, 8, 70, 28);
+        StructureStart outpostStart = new StructureStart(outpost, new ChunkPos(0, 0), 0,
+                new PiecesContainer(List.of(outpostA, outpostB)));
+        StructureStart hutStart = new StructureStart(hut, new ChunkPos(0, 1), 0,
+                new PiecesContainer(List.of(hutPiece)));
+        LevelChunk chunk00 = (LevelChunk) level.getChunk(0, 0, ChunkStatus.FULL, false);
+        chunk00.setStartForStructure(outpost, outpostStart);
+        chunk00.addReferenceForStructure(outpost, ChunkPos.pack(0, 0));
+        LevelChunk chunk01 = (LevelChunk) level.getChunk(0, 1, ChunkStatus.FULL, false);
+        chunk01.setStartForStructure(hut, hutStart);
+        chunk01.addReferenceForStructure(hut, ChunkPos.pack(0, 1));
+
+        ChunkGenerator generator = level.getChunkSource().getGenerator();
+        JsonArray queries = new JsonArray();
+        // 前哨站：空档里（STRUCTURE 盒命中）、空档外、以及 CREATURE 类别不覆盖。
+        // Outpost: in the gap (a STRUCTURE-box hit), outside it, and CREATURE has no override.
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 6, 65, 1);
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 6, 65, 15);
+        addStructureQuery(queries, level, manager, generator, MobCategory.CREATURE, 6, 65, 1);
+        // 女巫小屋：结构件里是 PIECE 命中，件外回退群系表；CREATURE 覆盖成猫。
+        // Swamp hut: a piece hit, outside the piece falls back, CREATURE yields the cat.
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 5, 65, 24);
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 5, 65, 17);
+        addStructureQuery(queries, level, manager, generator, MobCategory.CREATURE, 5, 65, 24);
+
+        var row = new JsonObject();
+        row.addProperty("type", "structureSpawn");
+        row.addProperty("name", "structure_spawn");
+        row.addProperty("biome", "minecraft:plains");
+        JsonArray starts = new JsonArray();
+        starts.add(structureStartJson("minecraft:pillager_outpost", true, outpostStart));
+        starts.add(structureStartJson("minecraft:swamp_hut", false, hutStart));
+        row.add("starts", starts);
+        row.add("queries", queries);
+        return row;
+    }
+
+    private static JsonObject structureStartJson(String structure, boolean adaptation, StructureStart start) {
+        var row = new JsonObject();
+        row.addProperty("structure", structure);
+        row.addProperty("adaptation", adaptation);
+        JsonArray pieces = new JsonArray();
+        for (StructurePiece piece : start.getPieces()) {
+            BoundingBox box = piece.getBoundingBox();
+            var entry = new JsonArray();
+            entry.add(box.minX());
+            entry.add(box.minY());
+            entry.add(box.minZ());
+            entry.add(box.maxX());
+            entry.add(box.maxY());
+            entry.add(box.maxZ());
+            pieces.add(entry);
+        }
+        row.add("pieces", pieces);
+        return row;
+    }
+
+    private static void addStructureQuery(JsonArray queries, FakeLevel level, StructureManager manager,
+            ChunkGenerator generator, MobCategory category, int x, int y, int z) throws Exception {
+        BlockPos pos = new BlockPos(x, y, z);
+        var list = generator.getMobsAt(level, manager, category, pos);
+        var row = new JsonObject();
+        row.addProperty("category", category.getName());
+        var at = new JsonArray();
+        at.add(x);
+        at.add(y);
+        at.add(z);
+        row.add("pos", at);
+        JsonArray expected = new JsonArray();
+        for (var entry : list.unwrap()) {
+            var item = new JsonArray();
+            item.add(BuiltInRegistries.ENTITY_TYPE.getId(entry.value().type()));
+            item.add(entry.weight());
+            item.add(entry.value().count().minInclusive());
+            item.add(entry.value().count().maxInclusive());
+            expected.add(item);
+        }
+        row.add("expected", expected);
+        queries.add(row);
+    }
+
     // 与 Rust 的刷怪夹具使用相同的地面。
     // Match the floor of the Rust spawn fixtures.
     private static BlockState spawnFloor(String biome) {
@@ -4928,6 +5093,110 @@ public final class MobOracle {
             case "frozen_ocean" -> Blocks.ICE.defaultBlockState();
             default -> Blocks.GRASS_BLOCK.defaultBlockState();
         };
+    }
+
+    // ---- 掠夺者巡逻队（`PatrolSpawner`）----
+
+    /**
+     * 一个巡逻队场景：平地、一名玩家、世界随机源的种子和跑多少刻。
+     * `spawnEnemies` 对应 `tick(level, spawnEnemies)`，`spawnPatrols` 是游戏规则。
+     *
+     * A patrol scene: flat ground, one player, the world random seed and a tick count.
+     * `spawnEnemies` is the `tick(level, spawnEnemies)` argument, `spawnPatrols` the rule.
+     */
+    private record PatrolScene(String name, long seed, int ticks, int difficulty,
+            boolean bright, boolean spawnEnemies, boolean spawnPatrols) {}
+
+    private static int playPatrolSpawns(Official official, Writer out, String only) throws Exception {
+        List<PatrolScene> scenes = List.of(
+                new PatrolScene("patrol_day", 1L, 260000, 2, true, true, true),
+                new PatrolScene("patrol_day_hard", 7L, 260000, 3, true, true, true),
+                new PatrolScene("patrol_night", 2L, 26000, 2, false, true, true),
+                new PatrolScene("patrol_gamerule_off", 3L, 26000, 2, true, true, false),
+                new PatrolScene("patrol_no_enemies", 4L, 26000, 2, true, false, true));
+        int count = 0;
+        for (var scene : scenes) {
+            if (only != null && !scene.name().startsWith(only)) continue;
+            out.write(patrolSpawnCase(official, scene) + "\n");
+            count++;
+        }
+        return count;
+    }
+
+    private static JsonObject patrolSpawnCase(Official official, PatrolScene scene) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        // 和自然生成夹具一样的地面与亮度语义：`naturalScene` 给方块光 0、天空光 15。
+        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.PILLAGER, "plains",
+                scene.difficulty(), 15, 0, scene.bright() ? 0 : 11, false, 0.5, 0, 289, true, false);
+        level.injectedBrightOutside = scene.bright();
+        level.spawnDifficulty = new DifficultyInstance(Difficulty.byId(scene.difficulty()), 0L, 0L, 0.0F);
+        // 环境属性系统要一条能回答群系的 `BiomeManager`，否则群系层取不到值。
+        // The environment-attribute system needs a `BiomeManager` to answer biome lookups.
+        level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+        put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> level.naturalBiome, 0L));
+        level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        for (int x = -64; x < 64; x++) {
+            for (int z = -64; z < 64; z++) {
+                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+            }
+        }
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "PatrolSpawnOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, -62.0, 0.5);
+        level.playersList().add(player);
+        level.getRandom().setSeed(scene.seed());
+        setRule(official, GameRules.SPAWN_PATROLS, scene.spawnPatrols());
+        PatrolSpawner spawner = new PatrolSpawner();
+        JsonArray steps = new JsonArray();
+        for (int tick = 0; tick < scene.ticks(); tick++) {
+            level.gameTime = tick;
+            level.spawned.clear();
+            spawner.tick(level, scene.spawnEnemies());
+            if (level.spawned.isEmpty()) continue;
+            var step = new JsonObject();
+            step.addProperty("tick", tick);
+            step.addProperty("worldSeed", levelSeed(level));
+            JsonArray spawned = new JsonArray();
+            for (Entity entity : level.spawned) {
+                var mob = (net.minecraft.world.entity.monster.PatrollingMonster) entity;
+                var row = new JsonArray();
+                row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                row.add((int) (mob.getX() * 2));
+                row.add((int) mob.getY());
+                row.add((int) (mob.getZ() * 2));
+                // `LivingEntity` 构造器用不带种子的实体随机源抽了初始朝向，两边没法比，
+                // 都记 0，和自然生成夹具里史莱姆的朝向一样。
+                // `LivingEntity`'s constructor draws the initial yaw from the unseeded entity
+                // random; not comparable, so both sides record 0 like the slime yaw.
+                row.add(0);
+                row.add(mob.isPatrolLeader() ? 1 : 0);
+                row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                row.add(BuiltInRegistries.ITEM.getId(
+                        mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).getItem()));
+                row.add(getBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, mob, "patrolling") ? 1 : 0);
+                row.add(mob.getPatrolTarget() != null ? 1 : 0);
+                row.add(mob.isLeftHanded() ? 1 : 0);
+                spawned.add(row);
+            }
+            step.add("spawned", spawned);
+            steps.add(step);
+        }
+        setRule(official, GameRules.SPAWN_PATROLS, true);
+        var row = new JsonObject();
+        row.addProperty("type", "patrolSpawn");
+        row.addProperty("name", scene.name());
+        row.addProperty("seed", scene.seed());
+        row.addProperty("ticks", scene.ticks());
+        row.addProperty("difficulty", scene.difficulty());
+        row.addProperty("bright", scene.bright());
+        row.addProperty("spawnEnemies", scene.spawnEnemies());
+        row.addProperty("spawnPatrols", scene.spawnPatrols());
+        row.addProperty("endWorldSeed", levelSeed(level));
+        row.addProperty("endNextTick", getInt(PatrolSpawner.class, spawner, "nextTick"));
+        row.add("steps", steps);
+        return row;
     }
 
     private static JsonObject naturalSpawnCase(Official official, NaturalScene scene, long seed) throws Exception {
