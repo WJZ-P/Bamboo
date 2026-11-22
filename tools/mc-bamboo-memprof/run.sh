@@ -20,6 +20,7 @@
 #
 # 环境变量 / environment:
 #   VIEW       server.properties 的 view-distance（默认 8）
+#   SEED       level-seed（默认 20261121；种子固定，几次读数才可比）
 #   SETTLE     起服后等多少秒再取空载读数（默认 20）
 #   ONLINE     玩家在线多少秒（默认 90；在线读数在离开前 10 秒取）
 #   AFTER      玩家离开后等多少秒（默认 120）
@@ -41,7 +42,8 @@ CONTROL="$OUT/control"
 
 rm -rf "$SERVER_DIR"
 mkdir -p "$SERVER_DIR" "$CONTROL"
-printf 'view-distance=%s\nonline-mode=false\nserver-port=%s\n' "$VIEW" "$PORT" \
+printf 'view-distance=%s\nonline-mode=false\nserver-port=%s\nlevel-seed=%s\n' \
+    "$VIEW" "$PORT" "${SEED:-20261121}" \
     > "$SERVER_DIR/server.properties"
 if [ -n "${BAMBOO_TOML:-}" ]; then
     printf '%s\n' "$BAMBOO_TOML" > "$SERVER_DIR/bamboo.toml"
