@@ -11,12 +11,16 @@ use mc_bamboo_blocks::{
     entity::{ENTITY_RANDOM_SEED, Entity, JavaRandom},
 };
 use mc_bamboo_core::{Vec3, mth};
-use mc_bamboo_protocol::{item::ItemStack, packet::play::GameMode};
+use mc_bamboo_protocol::{
+    item::ItemStack,
+    packet::play::{GameEvent, GameMode},
+};
 
 use crate::{
     entity_tracking,
     inbound::PlayerId,
     inventory::{self, Inventory},
+    links,
     player::Player,
     region::Region,
 };
@@ -144,6 +148,48 @@ fn slime_touch(region: &mut Region, id: PlayerId, slime: mc_bamboo_blocks::entit
     mc_bamboo_blocks::entity::mob::slime::player_touch(&mut world, slime, id.0);
 }
 
+/// `Pufferfish.playerTouch`：玩家碰到膨胀的河豚时受伤、中毒，没被静音时再给这名玩家
+/// 发一次 `PUFFER_FISH_STING` 游戏事件（客户端播蜇刺声）。官方在 `Player.aiStep` 的
+/// `touch(entity)` 里调，没有近战范围判定。
+///
+/// `Pufferfish.playerTouch`: hurt and poison a player touching an inflated pufferfish,
+/// then send the `PUFFER_FISH_STING` game event to that player unless silenced. Vanilla
+/// calls it from `touch(entity)` in `Player.aiStep` with no melee-range check.
+fn puffer_touch(
+    region: &mut Region,
+    id: PlayerId,
+    fish: mc_bamboo_blocks::entity::EntityUid,
+    silent: bool,
+) {
+    let alive = region
+        .players
+        .get(&id)
+        .is_some_and(|player| !player.health.is_dead_or_dying());
+    if !alive {
+        return;
+    }
+    let seconds = {
+        let (mut level, ticks) = region.entity_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        mc_bamboo_blocks::entity::mob::fish::puffer_player_hit(&mut world, fish, id.0)
+    };
+    let Some(seconds) = seconds else {
+        return;
+    };
+    // 官方顺序：先发游戏事件，再 `addEffect`。
+    // Vanilla order: the game event first, then `addEffect`.
+    if !silent {
+        let frames = links::encode_frames(&GameEvent {
+            event: GameEvent::PUFFER_FISH_STING,
+            param: 0.0,
+        });
+        region.links.send_frames(id, &frames);
+    }
+    let (mut level, ticks) = region.entity_level();
+    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    mc_bamboo_blocks::entity::mob::fish::puffer_player_poison(&mut world, id.0, seconds);
+}
+
 fn pickup_for(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get(&id) else {
         return;
@@ -181,8 +227,19 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
             continue;
         };
         if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind {
-            if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime {
+            let mob_type = mob.mob_type;
+            let silent = mob.silent;
+            // 官方 `Player.aiStep` 只碰 `!isRemoved()` 的实体；已经打上移除标记的还留在
+            // 这一拍的名单里。
+            // Vanilla `Player.aiStep` only touches entities with `!isRemoved()`; a
+            // discarded entity still sits in this tick's list.
+            if entity.removed {
+                continue;
+            }
+            if mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime {
                 slime_touch(region, id, entity_id);
+            } else if mob_type == mc_bamboo_blocks::entity::mob::MobType::Pufferfish {
+                puffer_touch(region, id, entity_id, silent);
             }
             continue;
         }
@@ -407,6 +464,73 @@ mod tests {
         assert_eq!(
             replay_arrow_pickup(2, Pickup::Allowed, true, 0, true, Some(63)),
             (true, 64, 2),
+        );
+    }
+
+    /// 膨胀到最高一档的河豚：玩家碰到它时掉血并中毒 120 刻。测试区域的难度是简单，
+    /// `MobAttack` 按难度缩放：3 点变成 `3 / 2 + 1 = 2.5`。
+    ///
+    /// A pufferfish at the top puff state: a touching player loses health and gets 120
+    /// ticks of poison. The test region is on easy difficulty, so `MobAttack` scales:
+    /// 3 becomes `3 / 2 + 1 = 2.5`.
+    #[test]
+    fn a_puffed_pufferfish_hurts_and_poisons_a_touching_player() {
+        let id = PlayerId(101);
+        let mut region = Region::new(2, 20, false);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        region.insert_player(Player::new(
+            id,
+            Uuid::nil(),
+            "PufferTest".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            at,
+        ));
+        let mut fish = Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::Pufferfish,
+            Vec3::new(0.9, 64.0, 0.5),
+        );
+        fish.with_mob(|_, mob| {
+            mob.fish.puff_state = 2;
+            mob.uuid = [7; 16];
+        })
+        .expect("a pufferfish is a mob");
+        region.entities.spawn(fish);
+        pickup_before_entities(&mut region);
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 17.5);
+        assert!(
+            player
+                .effects
+                .has(mc_bamboo_data::registries::mob_effect::POISON)
+        );
+    }
+
+    #[test]
+    fn a_deflated_pufferfish_does_not_hurt_a_touching_player() {
+        let id = PlayerId(102);
+        let mut region = Region::new(2, 20, false);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        region.insert_player(Player::new(
+            id,
+            Uuid::nil(),
+            "PufferTest".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            at,
+        ));
+        let fish = Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::Pufferfish,
+            Vec3::new(0.9, 64.0, 0.5),
+        );
+        region.entities.spawn(fish);
+        pickup_before_entities(&mut region);
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 20.0);
+        assert!(
+            !player
+                .effects
+                .has(mc_bamboo_data::registries::mob_effect::POISON)
         );
     }
 
