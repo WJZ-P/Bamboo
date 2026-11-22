@@ -2076,3 +2076,23 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 - **自然刷怪的群系表**：`RegionLevel` 没有实现 `biome_id`（沿用默认平原），这是既有限制；
   结构覆盖优先于群系表，所以不影响本次的覆盖功能。
 - **袭击**：`Wave` / `RaidId` / `CanJoinRaid` 只存数据；不祥旗帜只作为头盔物品，不触发袭击。
+
+### 12.6 与 main 合并后的现状（2026-11-22）
+
+`387abe13` 把 main（骆驼、玩家近战、豹猫和猫）合进来，冲突都在公共注册点上：
+
+- `goals.rs`：`Goal::Raider` 和 `Goal::Cat` 两个新变体、各自的 `flags` / `name` / `every_tick` /
+  `can_use` / `can_continue` / `start` / `stop` / `tick` 分支两边都保留；`OcelotAttack` 的
+  `Move + Look` 标志和掠夺者的分支并列。
+- `mod.rs`：`MobType::ALL` 变成 41 项（原 38 项加豹猫、猫）；`uses_block_step_sound` 同时含
+  `Pillager`、`Ocelot`、`Cat`；骆驼的空 `registerGoals` 和掠夺者的目标并存。
+- `living.rs` / `mod.rs` 的消失判定：main 的 `removes_when_far_away(tickCount)`（豹猫、猫按
+  tick 数）和本分支的 `removes_when_far_away_at(distSqr)`（`PatrollingMonster` 按 128 格）
+  合成一个 `removes_when_far_away_at(distance_sqr, tick_count)`，`removes_when_far_away(tick)`
+  传 `f64::INFINITY`；两者判定顺序不变（先袭击者、再鱼、再豹猫 / 猫、最后按类别）。
+- 豹猫的自然生成（`natural.rs` 的 `is_valid_position_for_mob` 新增 `sea_level` 参数和豹猫遮挡
+  判定）和合并后的 `mobs_at` 结构覆盖共存，掠夺者不参与群系自然刷怪，互不影响。
+
+合并后重跑（提交 `34a9d8f4`）：全量 `mob-oracle` 1845 例 / 189446 刻 0 不一致；
+`--only natural_spawn` 722 例 / 2888 刻 0 不一致；`--only pillager` 8 例 1653 刻、
+`--only patrol` 5 例、`--only structure_spawn` 1 例均 0 不一致。
