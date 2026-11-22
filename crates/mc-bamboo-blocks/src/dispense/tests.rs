@@ -394,8 +394,11 @@ fn a_fish_bucket_pours_water_and_spawns_its_fish() {
         1
     );
 
-    // 美西螈还没建模，只按官方的次数取数。
-    // The axolotl is not modelled; only its vanilla draw count is taken.
+    // 美西螈现已建模、会放出实体；`BUCKET` 原因下 `finalizeSpawn` 直接返回，
+    // 世界随机源只取朝向那一次 `nextFloat`，所以这里的种子和官方一致。
+    // The axolotl is modelled now and is spawned; its `finalizeSpawn` returns early
+    // for the `BUCKET` reason, so the world random draws only the one yaw `nextFloat`
+    // and the seed still matches vanilla.
     let axolotl = fire_id(&mut TestLevel::new(), Direction::Up, items::AXOLOTL_BUCKET);
     assert!(axolotl.front.is(blocks::WATER));
     assert_eq!(

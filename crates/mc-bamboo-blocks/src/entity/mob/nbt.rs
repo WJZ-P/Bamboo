@@ -522,6 +522,24 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         ),
         MobType::TropicalFish => put(&mut out, "Variant", Tag::Int(mob.fish.variant)),
         MobType::Pufferfish => put(&mut out, "PuffState", Tag::Int(mob.fish.puff_state)),
+        // `Dolphin.addAdditionalSaveData`: GotFish / Moistness.
+        MobType::Dolphin => {
+            put(
+                &mut out,
+                "GotFish",
+                Tag::Byte(i8::from(mob.dolphin.got_fish)),
+            );
+            put(&mut out, "Moistness", Tag::Int(mob.dolphin.moistness));
+        }
+        // `Axolotl.addAdditionalSaveData`: Variant (int codec) / FromBucket.
+        MobType::Axolotl => {
+            put(&mut out, "Variant", Tag::Int(mob.axolotl.variant));
+            put(
+                &mut out,
+                "FromBucket",
+                Tag::Byte(i8::from(mob.axolotl.from_bucket)),
+            );
+        }
         _ => {}
     }
     for (key, value) in &mob.passthrough {
@@ -597,7 +615,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.y_head_rot_o = me.y_rot;
         mob.y_body_rot = me.y_rot;
         mob.y_body_rot_o = me.y_rot;
-        mob.air_supply = tag::int_or(tag, "Air", 300);
+        mob.air_supply = tag::int_or(tag, "Air", mob.mob_type.max_air_supply());
         mob.invulnerable = tag::bool_or(tag, "Invulnerable", false);
         mob.invulnerable_time = tag::int_or(tag, "invulnerable_time", 0);
         mob.portal_cooldown = tag::int_or(tag, "PortalCooldown", 0);
@@ -819,6 +837,14 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
         } else if super::fish::is_fish(mob.mob_type) {
             mob.fish.from_bucket = tag::bool_or(tag, "FromBucket", false);
+        }
+        if mob.mob_type == MobType::Dolphin {
+            mob.dolphin.got_fish = tag::bool_or(tag, "GotFish", false);
+            mob.dolphin.moistness = tag::int_or(tag, "Moistness", super::dolphin::TOTAL_MOISTNESS);
+        }
+        if mob.mob_type == MobType::Axolotl {
+            mob.axolotl.variant = tag::int_or(tag, "Variant", super::axolotl::DEFAULT_VARIANT);
+            mob.axolotl.from_bucket = tag::bool_or(tag, "FromBucket", false);
         }
         match mob.mob_type {
             MobType::Salmon => {

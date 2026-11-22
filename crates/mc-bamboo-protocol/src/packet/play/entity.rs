@@ -283,6 +283,26 @@ pub enum EntityData {
     /// `Turtle.HAS_EGG` / `Turtle.LAYING_EGG`, BOOLEANs.
     TurtleHasEgg(bool),
     TurtleLayingEgg(bool),
+    /// `Dolphin.GOT_FISH`，BOOLEAN，index 18。
+    ///
+    /// `Dolphin.GOT_FISH`, a BOOLEAN at index 18.
+    DolphinGotFish(bool),
+    /// `Dolphin.MOISTNESS_LEVEL`，INT，index 19。
+    ///
+    /// `Dolphin.MOISTNESS_LEVEL`, an INT at index 19.
+    DolphinMoistness(i32),
+    /// `Axolotl.DATA_VARIANT`，INT，index 18。
+    ///
+    /// `Axolotl.DATA_VARIANT`, an INT at index 18.
+    AxolotlVariant(i32),
+    /// `Axolotl.DATA_PLAYING_DEAD`，BOOLEAN，index 19。
+    ///
+    /// `Axolotl.DATA_PLAYING_DEAD`, a BOOLEAN at index 19.
+    AxolotlPlayingDead(bool),
+    /// `Axolotl.FROM_BUCKET`，BOOLEAN，index 20。
+    ///
+    /// `Axolotl.FROM_BUCKET`, a BOOLEAN at index 20.
+    AxolotlFromBucket(bool),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -484,6 +504,11 @@ impl EntityData {
             Self::PufferfishPuffState(_) => mc_bamboo_data::entity_types::PUFFERFISH_PUFF_STATE,
             Self::TurtleHasEgg(_) => mc_bamboo_data::entity_types::TURTLE_HAS_EGG,
             Self::TurtleLayingEgg(_) => mc_bamboo_data::entity_types::TURTLE_LAYING_EGG,
+            Self::DolphinGotFish(_) => mc_bamboo_data::entity_types::DOLPHIN_GOT_FISH,
+            Self::DolphinMoistness(_) => mc_bamboo_data::entity_types::DOLPHIN_MOISTNESS,
+            Self::AxolotlVariant(_) => mc_bamboo_data::entity_types::AXOLOTL_VARIANT,
+            Self::AxolotlPlayingDead(_) => mc_bamboo_data::entity_types::AXOLOTL_PLAYING_DEAD,
+            Self::AxolotlFromBucket(_) => mc_bamboo_data::entity_types::AXOLOTL_FROM_BUCKET,
         }
     }
 
@@ -778,6 +803,16 @@ impl EntityData {
             Self::TurtleHasEgg(value) | Self::TurtleLayingEgg(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
                 write_bool(out, *value);
+            }
+            Self::DolphinGotFish(value)
+            | Self::AxolotlPlayingDead(value)
+            | Self::AxolotlFromBucket(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::DolphinMoistness(value) | Self::AxolotlVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
             }
             Self::SalmonVariant(value)
             | Self::TropicalFishVariant(value)

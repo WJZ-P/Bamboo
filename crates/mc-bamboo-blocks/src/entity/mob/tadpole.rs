@@ -9,7 +9,7 @@
 //! `SmoothSwimmingMoveControl` and its look control `SmoothSwimmingLookControl`. At an age
 //! of 24000 ticks it turns into a frog.
 
-use mc_bamboo_core::{Vec3, mth};
+use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{items, registries::attribute};
 
 use super::{
@@ -17,11 +17,10 @@ use super::{
     attributes::Attributes,
     brain::{
         Activity, ActivityData, Brain,
-        behavior::{Gate, Kind, MoveToTargetSink, Trigger},
+        behavior::{Gate, Kind, MoveToTargetSink, Speed, Trigger},
         memory::{MemoryStatus::ValueAbsent, MemoryType},
         sensor::SensorKind,
     },
-    control::rotate_towards,
     frog,
     interact::{MobInteractRequest, MobInteraction},
     living, spawn,
@@ -114,7 +113,7 @@ fn idle_activity() -> ActivityData {
             (
                 1,
                 Kind::FollowTemptation {
-                    speed: 1.25,
+                    speed: Speed::fixed(1.25),
                     close_adult: 2.5,
                     close_baby: 2.5,
                 },
@@ -127,7 +126,7 @@ fn idle_activity() -> ActivityData {
                         (Kind::Frog(frog::Behavior::SwimStroll { speed: 0.5 }), 2),
                         (
                             Kind::WalkTargetFromLook {
-                                speed: 0.5,
+                                speed: Speed::fixed(0.5),
                                 close_enough: 3,
                             },
                             3,
@@ -152,40 +151,11 @@ pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dy
     }
 }
 
-/// `SmoothSwimmingLookControl(mob, 10).tick`：有看的目标时头朝目标再偏 20 度、俯仰偏
-/// 10 度；没有时路走完了才把俯仰慢慢归零，头转回身体的方向。头偏出身体 10 度以上时身体
-/// 每刻跟 4 度。
+/// `SmoothSwimmingLookControl(mob, 10).tick`。
 ///
-/// `SmoothSwimmingLookControl(mob, 10).tick`: with a look target the head turns to it plus
-/// 20 degrees and the pitch plus 10; without one the pitch eases back to zero once the
-/// path is done and the head returns to the body. A head more than 10 degrees off pulls
-/// the body along by 4 degrees a tick.
+/// `SmoothSwimmingLookControl(mob, 10).tick`.
 pub(super) fn look_control_tick(me: &Entity, mob: &mut Mob) {
-    const MAX_Y_ROT_FROM_CENTER: f32 = 10.0;
-    if mob.look.look_at_cooldown > 0 {
-        mob.look.look_at_cooldown -= 1;
-        if let Some(target) = super::control::look_y_rot(&mob.look, me.position.x, me.position.z) {
-            mob.y_head_rot =
-                rotate_towards(mob.y_head_rot, target + 20.0, mob.look.y_max_rot_speed);
-        }
-        let eye_y = me.position.y + f64::from(mob.eye_height);
-        if let Some(target) =
-            super::control::look_x_rot(&mob.look, me.position.x, eye_y, me.position.z)
-        {
-            mob.x_rot = rotate_towards(mob.x_rot, target + 10.0, mob.look.x_max_rot_angle);
-        }
-    } else {
-        if mob.navigation.is_done() {
-            mob.x_rot = rotate_towards(mob.x_rot, 0.0, 5.0);
-        }
-        mob.y_head_rot = rotate_towards(mob.y_head_rot, mob.y_body_rot, mob.look.y_max_rot_speed);
-    }
-    let head_diff_body = mth::wrap_degrees(mob.y_head_rot - mob.y_body_rot);
-    if head_diff_body < -MAX_Y_ROT_FROM_CENTER {
-        mob.y_body_rot -= 4.0;
-    } else if head_diff_body > MAX_Y_ROT_FROM_CENTER {
-        mob.y_body_rot += 4.0;
-    }
+    super::smooth_swim::look_tick(me, mob, 10.0);
 }
 
 /// `Tadpole.aiStep` 里 `super.aiStep()` 之后的部分：没锁年龄就长一刻。

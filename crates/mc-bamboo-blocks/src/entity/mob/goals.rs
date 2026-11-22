@@ -48,6 +48,11 @@ pub enum Goal {
     ///
     /// The wolf's own goals.
     Wolf(super::wolf_goals::WolfGoal),
+    /// 海豚自己的目标（呼吸、找水、引路、跃水、玩物品、跟船）。
+    ///
+    /// The dolphin's own goals (breathing, finding water, treasure leading, jumping,
+    /// item play, following boats).
+    Dolphin(super::dolphin_goals::DolphinGoal),
     /// 猫自己的目标。
     ///
     /// The cat's own goals.
@@ -539,6 +544,7 @@ impl Goal {
             Self::Fox(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
+            Self::Dolphin(goal) => goal.flags(),
             Self::Cat(goal) => goal.flags(),
             Self::Breed { .. }
             | Self::Tempt { .. }
@@ -627,6 +633,7 @@ impl Goal {
     pub const fn interruptable(&self) -> bool {
         match self {
             Self::Fox(goal) => goal.interruptable(),
+            Self::Dolphin(goal) => goal.interruptable(),
             _ => true,
         }
     }
@@ -657,6 +664,7 @@ impl Goal {
             Self::Fox(goal) => goal.name(),
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
+            Self::Dolphin(goal) => goal.name(),
             Self::Cat(goal) => goal.name(),
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
@@ -1486,6 +1494,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Fox(goal) => goal.can_use(me, mob, ctx),
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.can_use(me, mob, ctx),
         Goal::Cat(goal) => goal.can_use(me, mob, ctx),
         Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
@@ -2049,6 +2058,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Fox(goal) => goal.can_continue(me, mob, ctx),
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.can_continue(me, mob, ctx),
         Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
         // `Drowned.DrownedAttackGoal.canContinueToUse`：僵尸的近战条件加 `okTarget`。
@@ -2324,6 +2334,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Fox(goal) => goal.start(me, mob, ctx),
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.start(me, mob, ctx),
         Goal::Cat(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
@@ -2593,6 +2604,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Fox(goal) => goal.stop_with_world(me, mob, ctx),
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
+        Goal::Dolphin(goal) => goal.stop(me, mob, ctx),
         Goal::Cat(goal) => goal.stop(mob),
         Goal::LeapAtTarget { .. } => {}
         Goal::Swim { .. } => mob.navigation.stop(),
@@ -2963,6 +2975,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Fox(goal) => goal.tick(me, mob, ctx),
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.tick(me, mob, ctx),
         Goal::Cat(goal) => goal.tick(me, mob, ctx),
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
         // `TamableAnimalPanicGoal.tick` teleports to a distant owner first.
@@ -3707,9 +3720,14 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     if mob.mob_type == super::MobType::Mooshroom {
         return super::mooshroom::walk_target_value(view, pos);
     }
-    // 不是 `Animal` 的生物用 `PathfinderMob.getWalkTargetValue` 的缺省值 0。
-    // Mobs that are not `Animal`s keep the `PathfinderMob.getWalkTargetValue` default of 0.
-    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
+    // 不是 `Animal` 的生物、以及把 `getWalkTargetValue` 覆写成 0 的美西螈，用
+    // `PathfinderMob.getWalkTargetValue` 的缺省值 0。
+    // Mobs that are not `Animal`s, plus the axolotl that overrides
+    // `getWalkTargetValue` to 0, keep the `PathfinderMob` default of 0.
+    if mob.mob_type.is_ageable_water_creature()
+        || mob.mob_type.is_water_animal()
+        || mob.mob_type == super::MobType::Axolotl
+    {
         return 0.0;
     }
     animal_walk_target_value(view, pos)
