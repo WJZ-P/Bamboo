@@ -711,6 +711,17 @@ fn plan_attack(
     if let Some(player) = region.players.get_mut(&id) {
         player.attack_strength_ticker = 0;
     }
+    // `Player.attack` 在 `baseDamage > 0 || magicBoost > 0` 之外整段跳过：不 hurt、
+    // 不发包，连 `nodamage` 音都不播。正常路径 `ATTACK_DAMAGE` 基值 1.0 让
+    // `baseDamage >= 0.2`，这道门槛只在伤害被减到 0 时生效。
+    //
+    // `Player.attack` skips everything outside `baseDamage > 0 || magicBoost > 0`:
+    // no hurt, no packets, not even the `nodamage` sound. The base
+    // `ATTACK_DAMAGE` of 1.0 keeps `baseDamage >= 0.2`, so this only matters when
+    // damage is reduced to zero.
+    if base_damage <= 0.0 && magic_boost <= 0.0 {
+        return None;
+    }
     let player = &region.players[&id];
     let full = s > FULL_STRENGTH;
     let sprinting = player.sync.is_sprinting();

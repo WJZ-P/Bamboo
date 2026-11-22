@@ -646,7 +646,8 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   单测守住这条语义。`getCurrentItemAttackStrengthDelay = 1 / ATTACK_SPEED × 20`，
   `s = clamp((ticker + 0.5) / delay, 0, 1)`。基础伤害 `× (0.2 + s² × 0.8)`，
   附魔加成 `× s`。玩家 `ATTACK_DAMAGE` 基值是 `Player.createAttributes()` 的 1.0，
-  **不是**属性注册表缺省的 2.0（对拍抓到过这个差）。
+  **不是**属性注册表缺省的 2.0（对拍抓到过这个差）。`baseDamage > 0 || magicBoost > 0`
+  之外官方整段跳过（连 `nodamage` 音都不发），Bamboo 在 `onAttack()` 重置冷却之后同样返回。
 - **暴击 / 横扫 / 击退**：`s > 0.9` 且下落、不着地、没失明、没骑乘、非疾跑时
   `× 1.5`，发 `ClientboundAnimatePacket`(1) 和 `player.attack.crit`；附魔加成 > 0
   再发 (2)。拿剑、着地、移动够慢、满充能且非暴击非疾跑时横扫，附魔
@@ -685,7 +686,7 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   够距判定按官方 `isWithinAttackRange`（实体交互距离 + 武器 `attack_range` 组件 +
   整个 AABB + 世界边界）实现，但没有 `mob-oracle` 场景（夹具直接调 `Player.attack`），
   由 `attack_reach_uses_the_entity_interaction_range` 单测守住；`isItemEnabled`
-  feature flag、横扫候选盒近似、`baseDamage > 0 || magicBoost > 0` 门槛，以及属性
+  feature flag、横扫候选盒近似，以及属性
   修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
   「玩家近战攻击的已知限制」。
 
