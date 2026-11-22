@@ -1653,3 +1653,33 @@ index 8。按官方夹具把 `spawn_row` 的 index 8 去掉美西螈分支、ind
 没建模，装死只有单元测试没有逐刻对拍。正确接 Brain 需要改 `living.rs` 的
 `custom_server_ai_step` / tick 顺序与对拍夹具（开 `NoAI=false`），按任务书「超出已定设计又必须
 改动 tick 顺序的部分停下来写进汇报」留给队长决定。
+
+## 第十一轮复核（op-water，2026-11-21）
+
+第十轮（合并 `33980ce0` + 装死回血）提交后没有写汇报，本轮把记录补齐并在最终提交
+`7975682d` 上跑完完成标准。当前 `main = 33980ce0`，`git merge main` 返回
+`Already up to date`（领先 16、落后 0，合并基点就是 main HEAD），14:35 追加要求的合并已由
+`219d8cb6` 提交，本轮无需再合。本轮不改动任何生物行为代码：任务书原文第 1 段剩下的海豚恩惠 /
+引路、美西螈攻击 / 繁殖、桶装鱼与海龟蛋孵化逐刻场景都依赖 Brain 框架、结构定位、物品实体或
+「会生成实体的随机刻」对拍设施，按「超出已定设计又必须改动 tick 顺序的部分停下来写进汇报」
+留给队长决定，避免再次触发 05:00 那类回归。
+
+最终提交上实测（java 对拍与探针按新规走 `node W:/data/bamboo-agents/tools/heavy.js`，同一时间
+只跑一条重活）：`cargo fmt --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings`
+干净（0 warning、未加 allow）；`cargo check --workspace --all-targets` 通过；
+`cargo check -p mc-bamboo-desktop` 通过；`cargo test -p mc-bamboo-blocks` 795 passed / 0 failed /
+6 ignored；`cargo test -p mc-bamboo-vanilla` 101 + 8 passed；
+`cargo test -p mc-bamboo-game --lib island_command` 4 passed（05:00 回归 2 未复发）。
+工作区全量 `cargo test --no-fail-fast` 被 cargo shim 按 `verify-scope.md` 拦下（RC=2），没有绕过，
+按提示改跑各 `-p` 测试，全量由队长合并时统一跑。java 侧：全量 `mob-oracle` **1784 例 174697 刻
+0 不一致**；`--only dolphin` 3 例 603 刻、`--only axolotl` 4 例 804 刻、`--only squid` 4 例 1184 刻、
+`--only sheep_eat` 3 例 900 刻（05:00 回归 1 未复发）、`--only natural_spawn` 698 例 2792 刻全部
+0 不一致；`--break-self-test water_mob` 故意改坏抓到 12 处（RC=1）；`natural-spawn` 1727 例
+0 不一致；官方 `tools/probe.sh`（JDK 26）一次 766/770（重锁排队期间时序抖动）、换端口重跑
+**769/769**，`WORLD-DIR` 全过、正常关服。`natural.rs` 的 check_spawn_rules / `spawn.rs` 的
+finalizeSpawn 水生分派在合并后完整保留。
+
+疑点（详见本轮汇报）：装死倒计时 / `REGENERATION` 一段仍挂在 `customServerAiStep` 尾部而不是
+Brain 行为里，只有单元测试、`NoAI` 夹具不触发，没有和官方逐刻对拍；海豚恩惠 / 引路、美西螈
+攻击 / 繁殖仍是已知限制。按生物列状态：鱿鱼 / 发光鱿鱼、鳕鱼 / 鲑鱼 / 热带鱼 / 河豚、桶装鱼、
+海龟、海豚、美西螈十类主体全部「已逐刻对拍 0 不一致」；Brain 驱动的特有行为为「已知限制 / 未做」。
