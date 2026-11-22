@@ -472,14 +472,6 @@ WebView2 的渲染进程不算在内。
   边界状态写进官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`
   （`export_settings` / `restore`，`restore` 传存档里的游戏时间），启动时读回，编码和官方
   `WorldBorder.Settings.CODEC` 对拍。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
-- **重生包的超平坦海平面**：Bamboo 超平坦世界把重生包（`ClientboundRespawnPacket`）的
-  `sea_level` 写成 -63（`level_flags()`，噪声世界是 63），官方离线逐刻夹具的假
-  `ServerLevel` 给 0；不带 `--only` 的全量 `mob-oracle` 因此在 12 个 `player_death_*`
-  玩家死亡 / 重生场景报 12 处不一致，差异只在这一字段（main 合入死亡消息场景后由 6 处增至
-  12 处）。这是夹具与超平坦世界的既有差异（base 的重生包已带该字段），与敌对生物无关；
-  按前缀的针对性 `mob-oracle` 全部 0 不一致，官方联机探针通过。按 `verify-scope.md` 这属
-  非关键路径，不追；全量结果不算通过。改它会动到 `natural_spawn::sea_level_of`（刷怪 /
-  产率关键路径，当前 674 例 2696 刻 0 不一致），故保留。
 - **世界生成（本轮接入）的已知限制**：`biomes` / `terrain` 阶段接了真生成，`possibleBiomes`、雕刻器的
   `carverBiome` 分支和 `WorldGenRegion` 的 `uncachedBiomeResolver` 已按真实服务端路径逐方块对拍 0 不一致，
   六张高度图逐列、存档里四张 FINAL 高度图位流逐字对拍 0 不一致（见 `docs/worldgen.md`）。
@@ -564,7 +556,7 @@ WebView2 的渲染进程不算在内。
   `Monster.isDarkEnoughToSpawn`、`PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`）、
   `finalizeSpawn` 与按组生成（牛按 `AgeableMobGroupData` 抽幼年；马按 `HorseGroupData`、羊驼按 `LlamaGroupData` 同组共享毛色，驴和骡的幼年概率是 0.2；马科的 `getMaxSpawnClusterSize` 是 6）。刷怪区块列表用岛自己的
   世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
-  - **只有已建模的生物会真的生成**（`MobType::ALL` 的 33 种：牛、哞菇、猪、羊、鸡、北极熊、熊猫、马、驴、骡、羊驼、兔子、狐狸、狼、僵尸、尸壳、骷髅、流浪者、沼骸、史莱姆、溺尸、女巫、苦力怕、蜘蛛、洞穴蜘蛛、末影人、鱿鱼、发光鱿鱼、鳕鱼、鲑鱼、热带鱼、河豚、海龟）：群系刷怪表里其它条目（蝙蝠、海豚等）仍占原版权重，抽完组大小后结束这一组。官方会继续尝试生成该物种、消耗后续随机数，并把实际生成的实体计入上限；所以**只有刷怪表里全是已建模物种的情形**逐刻产率和官方一致。`ON_GROUND` 按实体类型检查落脚块，冰和霜冰只允许北极熊通过此层，北极熊自己的群系与亮度规则仍须通过。已对拍的刷怪路径（`mob-oracle --only natural_spawn`，当前 674 例 2696 刻 0 不一致）覆盖单条目刷怪表、固定区块顺序、四档难度、日 / 夜 / 雷暴 / 火把、24/32/128 格、全局与局部上限、史莱姆区块和沼泽月相、流浪者找天和沼骸的雪地 / 沼泽群系表、鱿鱼 / 发光鱿鱼 / 鱼类的水体夹具；猪和鸡各有温带 / 暖 / 冷三种花色的白天场景（`pig_temperate`、`pig_day`、`pig_cold`、`chicken_day`、`chicken_warm`、`chicken_cold`），另比每只的花色 / 羊毛颜色和叫声，鸡的 `eggTime` 取自实体自己没播种的随机源不比，另有马、驴、羊驼各一个白天场景。水生生物的海平面由游戏层按世界类型给（超平坦 -63，噪声世界读设置，进程内只解析一次）。真实群系里混着未建模物种时，后续随机序列和产率仍会偏离，等这些生物合进来后自动对齐。
+  - **只有已建模的生物会真的生成**（`MobType::ALL` 的 35 种：牛、哞菇、猪、羊、鸡、北极熊、熊猫、马、驴、骡、羊驼、兔子、狐狸、狼、犰狳、山羊、僵尸、尸壳、骷髅、流浪者、沼骸、史莱姆、溺尸、女巫、苦力怕、蜘蛛、洞穴蜘蛛、末影人、鱿鱼、发光鱿鱼、鳕鱼、鲑鱼、热带鱼、河豚、海龟）：群系刷怪表里其它条目（蝙蝠、海豚等）仍占原版权重，抽完组大小后结束这一组。官方会继续尝试生成该物种、消耗后续随机数，并把实际生成的实体计入上限；所以**只有刷怪表里全是已建模物种的情形**逐刻产率和官方一致。`ON_GROUND` 按实体类型检查落脚块，冰和霜冰只允许北极熊通过此层，北极熊自己的群系与亮度规则仍须通过。已对拍的刷怪路径（`mob-oracle --only natural_spawn`，当前 686 例 2744 刻 0 不一致）覆盖单条目刷怪表、固定区块顺序、四档难度、日 / 夜 / 雷暴 / 火把、24/32/128 格、全局与局部上限、史莱姆区块和沼泽月相、流浪者找天和沼骸的雪地 / 沼泽群系表、犰狳与山羊、鱿鱼 / 发光鱿鱼 / 鱼类的水体夹具；猪和鸡各有温带 / 暖 / 冷三种花色的白天场景（`pig_temperate`、`pig_day`、`pig_cold`、`chicken_day`、`chicken_warm`、`chicken_cold`），另比每只的花色 / 羊毛颜色和叫声，鸡的 `eggTime` 取自实体自己没播种的随机源不比，另有马、驴、羊驼各一个白天场景。水生生物的海平面由游戏层按世界类型给（超平坦 -63，噪声世界读设置，进程内只解析一次）。真实群系里混着未建模物种时，后续随机序列和产率仍会偏离，等这些生物合进来后自动对齐。
   - 生成位置的实体阻挡照 `Mob.checkSpawnObstruction` 看所有 `blocksBuilding` 实体（生物、
     TNT、下落方块和玩家）；`noCollision(AABB)` 只看方块和硬碰撞实体（Bamboo 还没有船、矿车）。
   - 僵尸和尸壳的 `finalizeSpawn` 已按 `Zombie` / `Husk.finalizeSpawn` 完整移植（跟随距离、左撇子、

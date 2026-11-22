@@ -1470,3 +1470,30 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 `projectile`）全部 0 不一致，`loot-oracle --entity-table minecraft:entities/drowned`
 64 题 0 不一致；故意改坏 `natural_spawn` 一次能抓到不一致。全量 `mob-oracle` 的
 `player_death_*` 重生包 `sea_level` 既有差异仍在，按 `verify-scope.md` 属非关键路径，不追。
+
+### 与 main 四次合并及全量 `mob-oracle` 0 不一致（op-hostile2，2026-11-21）
+
+按队长 16:40 要求 `git merge main`（`54ee195a`，含 Brain AI 框架、犰狳、山羊与全进程共享世界生成数据），
+解决 9 个文件冲突：`MobType::ALL` 扩至 35 种，`DamageKind::panic_causes` 按官方 `DamageTypeTagsProvider`
+去掉 `Thorns`、保留 `IndirectMagic` 与 `Wither`，`MobOracle` 的场景生物编号把史莱姆 / 女巫 / 溺尸移至
+50 / 51 / 52（避开 main 的 13 犰狳 / 14 山羊 / 16 北极熊 / 17 哞菇），`generated/entity_types.rs`
+由 `extract` 重新生成。
+
+随后查清并修掉全量 `mob-oracle` 的三处根因：
+
+1. **`player_death_*` 全部重生包 `sea_level`（官方 0 vs Bamboo -63）**：根因是本分支提交 `503956d7`
+   把 `FakeLevel.getSeaLevel()` 从 `return -63;` 改成 `return injectedSeaLevel;`，但 `FakeLevel.create`
+   通过 `Unsafe.allocateInstance` 分配对象，不执行字段初始化 `int injectedSeaLevel = -63;`，导致未走
+   `playZombie` 的 `playLife` 场景里 `injectedSeaLevel` 保持 0。在 `FakeLevel.create` 显式赋
+   `level.injectedSeaLevel = -63;` 后，全部 `player_death_*` 场景 0 不一致（移除 README 对应旧限制条目）。
+2. **`rabbit_flee_zombie` 第 1 刻随机源分叉**：本分支早先合并把 `mob_oracle.rs` 里 `bright_outside` /
+   `monsters_burn` 的判断误留成 `is_monster_scene`（仅匹配 `zombie_` / `drowned_`）而非 main 的
+   `zombie_style`，导致 `rabbit_flee_zombie` 里的 `monstersBurn=false` 未生效、僵尸白天着火。把
+   `slime_` / `witch_drink_` / `drowned_` 并入 `zombie_style` 并统一使用它后消除。
+3. **`panda_breed` 约 6.15% 间歇性不一致（main 提交 `901b97a8` 既有）**：官方 `Panda.getBreedOffspring`
+   在 `addFreshEntity` / `reseedBorn` 之前就用新生幼崽没播种的随机源掷两次 1/32 基因变异。照幼鸡
+   `eggTime` 的做法，在 `spawnJson` 传出新生熊猫的 `genes`，由 `apply_born_setup` 与配对快照同步
+   （基因遗传本身仍由 `playPandaGenes` 用确定性种子单独对拍）。
+
+全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
+**686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
