@@ -605,8 +605,9 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 - **攻击（op-combat，2026-11-21 起已合入，见 6.4）**：`handleAttack` → `Player.attack`
   的完整链路已经做了：冷却 / 暴击 / 横扫 / 额外击退 / 伤害附魔 / 火焰附加 / 耐久 /
   粒子 / 音效 / 动画 / PVP 开关。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
-  `getAttackDamageBonus` / `PIERCING_WEAPON` 的武器行为、`onClimbable` / `isInWater` /
-  `isPassenger` 的暴击前置、节肢杀手缓慢时长的随机源、`Stats.DAMAGE_DEALT` 的落盘、
+  `getAttackDamageBonus` / `PIERCING_WEAPON` 的武器行为、`onClimbable` / `isInWater`
+  的暴击前置（`isPassenger` / `isMobilityRestricted` 已按 `riding.vehicle` / `EffectMap`
+  判）、节肢杀手缓慢时长的随机源、`Stats.DAMAGE_DEALT` 的落盘、
   以及 `mob-oracle` 对攻击音效 / 粒子 / 动画包的逐字节比对（官方假世界不捕获）。
   旁观者和非法目标仍按官方 `handleAttack` 忽略（官方会断开连接，Bamboo 只忽略）。
 - **死亡**：1a 时血量可以降到 0 但不触发死亡；1b 起按下节实现完整死亡 / 掉落 /
@@ -665,6 +666,11 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火。
   攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度；假世界也不
   捕获 crit 动画 / 粒子 / 挥手 / 耐久槽包，这些由单测覆盖（见 6.3 与 README）。
+  够距判定（`within_block_interaction_range` + 方块点 vs 官方 `isWithinAttackRange` +
+  AABB + 武器距离 + 世界边界）、横扫候选盒近似、`baseDamage > 0 || magicBoost > 0`
+  门槛，以及属性修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
+  「玩家近战攻击的已知限制」；够距这一层没有 `mob-oracle` 场景（夹具直接调
+  `Player.attack`）。
 
 ---
 

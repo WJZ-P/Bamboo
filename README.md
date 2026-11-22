@@ -221,8 +221,9 @@ WebView2 的渲染进程不算在内。
   单测确认暴击动画 / 攻击音效 / 伤害指示粒子真的发到客户端、横扫目标也着火。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
-  `onClimbable` / `isInWater` / `isPassenger` 按缺省值（Bamboo 没有梯子/水里/载具状态），
-  失明用 `EffectMap` 判；节肢杀手的缓慢时长恒用最短 30 刻，官方从**生物自己的随机源**
+  `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
+  骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
+  节肢杀手的缓慢时长恒用最短 30 刻，官方从**生物自己的随机源**
   在 `[30, 30 + 10×(L−1)]` 刻取值，Bamboo 没把该随机源暴露给攻击路径；`Stats.DAMAGE_DEALT`
   统计不写原版 `stats/<UUID>.json`；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
   （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画 /
@@ -232,7 +233,15 @@ WebView2 的渲染进程不算在内。
   玩家结算伤害和受伤链路，额外击退（`causeExtraKnockback`）、火焰附加点燃和横扫波及的
   玩家都走实体表（`knockback_mob` / `ignite_mob` / 候选收集），而玩家不在实体表里，
   故这几项对玩家目标不生效（官方 `Player.attack` / `doSweepAttack` 对所有
-  `LivingEntity` 一视同仁）。
+  `LivingEntity` 一视同仁）。够距用 `within_block_interaction_range` 加目标所在方块点，
+  官方 `handleAttack` 用 `isWithinAttackRange`（实体交互距离 + 武器攻击距离 + 整个 AABB）
+  并查世界边界和 feature flag，这一层完全没进 `mob-oracle`（夹具直接调 `Player.attack`）；
+  横扫候选盒按主目标位置近似 `inflate(1, 0.25, 1)`，不含玩家和队伍判定；官方
+  `Player.attack` 在 `baseDamage <= 0 && magicBoost <= 0` 时整段跳过（连 `nodamage` 音都不发），
+  Bamboo 没有这道门槛（正常路径 `ATTACK_DAMAGE` 基值 1.0 使 `baseDamage ≥ 0.2`，不触发）；
+  `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 只累加 `ADD_VALUE` 修饰符、横扫阈值把 `getSpeed()`
+  写死成 0.1，带乘法修饰符或速度药水时可能不同；受害者装备附魔（荆棘）和
+  `autoSpinAttack` 的武器来源都未建模。
 
 - 多名玩家进入同一个世界；新世界默认 `normal`（噪声地形，见上面世界生成一节），
   `level-type=flat` 用超平坦；登录模式由服务器目录里的 `online-mode` 决定（官方默认正版验证）。
