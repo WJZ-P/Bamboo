@@ -3527,6 +3527,8 @@ public final class MobOracle {
         }
         level.blocks.putAll(scene.blocks);
         level.dropUuids = scene.drops;
+        // 攻击场景也要粒子包：暴击 / 横扫 / 伤害指示都靠 `sendParticles` 发出去。
+        level.particlePackets = scene.name.startsWith("player_attack_");
         level.nextId = FIRST_ID;
         ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
         List<ServerPlayer> players = new ArrayList<>();

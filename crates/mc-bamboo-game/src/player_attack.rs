@@ -985,8 +985,15 @@ fn player_center_y(region: &Region, id: PlayerId) -> f64 {
     let Some(player) = region.players.get(&id) else {
         return 0.0;
     };
+    // `Entity.getY(0.5)` = `position.y + getBbHeight() * 0.5`：`getBbHeight` 是
+    // float，这一点 `1.8F * 0.5` 的舍入必须保留，否则高度少一位、粒子位置对不上。
+    //
+    // `Entity.getY(0.5)` is `position.y + getBbHeight() * 0.5`; `getBbHeight` is
+    // a float, so the rounding of `1.8F * 0.5` must be kept or the particle
+    // position differs in the last bits.
     let box3d = player.bounding_box();
-    (box3d.min_y + box3d.max_y) * 0.5
+    let height = (box3d.max_y - box3d.min_y) as f32;
+    player.position().y + f64::from(height * 0.5)
 }
 
 /// `Entity.isAttackable()` 的简化版：只让生物和玩家挨打；掉落物、经验球、
