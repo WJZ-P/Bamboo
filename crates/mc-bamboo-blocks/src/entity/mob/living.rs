@@ -3011,6 +3011,9 @@ pub(crate) fn apply_breed(
         }
         if let Some(variant) = axolotl_variant {
             mob.axolotl.variant = variant;
+            // `Axolotl.getBreedOffspring` 的 `baby.setPersistenceRequired()`。
+            // `baby.setPersistenceRequired()` from `Axolotl.getBreedOffspring`.
+            mob.persistence_required = true;
         }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;

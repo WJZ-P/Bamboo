@@ -536,11 +536,12 @@ impl MobType {
     /// `Animal`s and keep the default of true.
     pub const fn removes_when_far_away(self) -> bool {
         // 鱿鱼、海豚（`AgeableWaterCreature`）和鱼（`WaterAnimal`）不是 `Animal`，沿用
-        // `Mob.removeWhenFarAway` 的缺省值真；美西螈 `removeWhenFarAway` 覆写成
-        // 「没装过桶、没命名」，新生成的也恒为真；敌对生物按 `is_enemy` 判定。
+        // `Mob.removeWhenFarAway` 的缺省值真；美西螈由 `Mob::removes_when_far_away` 单判
+        // （装过桶或起了名就不消失）；敌对生物按 `is_enemy` 判定。
         // Squid, dolphins (AgeableWaterCreature) and fish (WaterAnimal) keep the
-        // `Mob.removeWhenFarAway` default of true; a fresh axolotl also returns true
-        // (its override is `!fromBucket && !hasCustomName`); enemies follow `is_enemy`.
+        // `Mob.removeWhenFarAway` default of true; the axolotl is handled in
+        // `Mob::removes_when_far_away` (never once bucketed or named); enemies follow
+        // `is_enemy`.
         self.is_enemy() || squid::is_squid(self) || matches!(self, Self::Dolphin | Self::Axolotl)
     }
     /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 里已建模的水生生物。
@@ -2655,6 +2656,11 @@ impl Mob {
         if fish::is_fish(self.mob_type) {
             return !self.fish.from_bucket && self.custom_name.is_none();
         }
+        if self.mob_type == MobType::Axolotl {
+            // `Axolotl.removeWhenFarAway`：装过桶或起了名就不消失。
+            // `Axolotl.removeWhenFarAway`: never once bucketed or named.
+            return !self.axolotl.from_bucket && self.custom_name.is_none();
+        }
         if self.mob_type == MobType::Ocelot {
             return ocelot::removes_when_far_away(self, tick_count);
         }
@@ -2665,13 +2671,15 @@ impl Mob {
     }
 
     /// `isPersistenceRequired() || requiresCustomPersistence()`：从桶里放出来的鱼
-    /// （`AbstractFish`）和搬着方块的末影人（`Enderman`）不会自然消失。
+    /// （`AbstractFish`）、装过桶的美西螈和搬着方块的末影人（`Enderman`）不会自然消失。
     ///
     /// `isPersistenceRequired() || requiresCustomPersistence()`: fish released from a
-    /// bucket (`AbstractFish`) and endermen carrying a block (`Enderman`) never despawn.
+    /// bucket (`AbstractFish`), bucketed axolotls and endermen carrying a block
+    /// (`Enderman`) never despawn.
     pub fn requires_custom_persistence(&self) -> bool {
         self.persistence_required
             || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
+            || (self.mob_type == MobType::Axolotl && self.axolotl.from_bucket)
             || self.enderman.carried.is_some()
     }
 

@@ -445,6 +445,21 @@ mod tests {
     }
 
     #[test]
+    fn a_bucketed_or_named_axolotl_never_despawns() {
+        // `Axolotl.removeWhenFarAway` / `requiresCustomPersistence`。
+        // `Axolotl.removeWhenFarAway` / `requiresCustomPersistence`.
+        let mut mob = Mob::new(MobType::Axolotl);
+        assert!(mob.removes_when_far_away(0));
+        assert!(!mob.requires_custom_persistence());
+        mob.axolotl.from_bucket = true;
+        assert!(!mob.removes_when_far_away(0));
+        assert!(mob.requires_custom_persistence());
+        let mut named = Mob::new(MobType::Axolotl);
+        named.custom_name = Some(mc_bamboo_nbt::Tag::String("Axel".to_owned()));
+        assert!(!named.removes_when_far_away(0));
+    }
+
+    #[test]
     fn offspring_variant_draws_once_for_the_roll_and_once_for_the_parent() {
         // 种子挑一个 `nextInt(1200)` 不为 0 的，走普通路径。
         // A seed whose `nextInt(1200)` is not zero takes the common path.
