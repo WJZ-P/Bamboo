@@ -2285,7 +2285,8 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 两次合并后在 HEAD 上重跑：全量 `mob-oracle` 1900 例 / 193397 刻 0 不一致；
 `--only natural_spawn` 734 例 / 2936 刻 0 不一致；`--only gen_spawn` 7000 例 0 不一致；
 `--only pillager` 8 例 1653 刻、`--only patrol` 5 例、`--only structure_spawn` 1 例均 0 不一致；
-`chunk-content` 523 项、`loot-oracle --entity-table minecraft:entities/pillager` 4000 例均 0 不一致。
+`loot-oracle --entity-table minecraft:entities/pillager` 本轮抽了 400 例（一半队长）0 不一致，
+合并前的 4000 例 0 不一致；`chunk-content` 523 项也是合并前的结果（本轮未重跑）。
 
 ## 与 main 五次合并及装死回血（op-water，2026-11-21，第十轮）
 
