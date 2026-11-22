@@ -217,7 +217,9 @@ WebView2 的渲染进程不算在内。
   PVP 按 `server.properties` 的 `pvp` 开关和官方 `canHarmPlayer` 处理（Bamboo 没有队伍）；
   玩家目标的额外击退、火焰附加点燃、横扫波及都按官方对 `LivingEntity` 一视同仁，
   额外击退还照 `Player.causeExtraKnockback` 末尾的 `ServerPlayer.syncVelocity` 分支，
-  速度包发出去之后恢复受击前的服务端速度。
+  速度包发出去之后恢复受击前的服务端速度。横扫伤害源沿用主攻击的
+  `damageSource`（含 `isCreativePlayer` 标记），创造模式攻击者也能绕过被横扫目标的
+  受伤无敌帧。
   对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比每头牛的血量 / 击退速度 /
   着火 / 受伤时间 / 是否移除、**每头牛自己的随机源状态**，以及出站效果包
   `damage_event` / `sound` / `level_particles` / `animate` / `entity_event`，0 不一致；

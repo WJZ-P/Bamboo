@@ -834,6 +834,7 @@ fn land_attack(
                     base_damage: plan.base_damage,
                     s: plan.s,
                     player_position: plan.position,
+                    creative: plan.source.creative_player,
                     yaw: plan.yaw,
                 };
                 do_sweep(&mut world, id, &plan.sweep_targets, &spec);
@@ -1180,6 +1181,15 @@ struct SweepSpec<'a> {
     base_damage: f32,
     s: f32,
     player_position: Vec3,
+    /// 官方 `doSweepAttack` 复用 `Player.attack` 的同一个 `damageSource`，
+    /// 其 `isCreativePlayer()` 动态取攻击者能力；这里把主攻击那一份的
+    /// `creative_player` 透传过来，创造模式攻击者才能绕过目标的受伤无敌帧。
+    ///
+    /// Vanilla `doSweepAttack` reuses the same `damageSource` from `Player.attack`,
+    /// whose `isCreativePlayer()` reads the attacker's abilities dynamically; pass
+    /// the main attack's `creative_player` through so a creative attacker bypasses
+    /// the target's temporary invulnerability here too.
+    creative: bool,
     yaw: f32,
 }
 
@@ -1203,7 +1213,7 @@ fn do_sweep(
     let dz = -mth::cos(radians);
     for target in nearby {
         let enchanted = (sweep_base + damage_bonus(spec.held, target.entity_type)) * spec.s;
-        let mut source = DamageSource::player(attacker.0, spec.player_position, false);
+        let mut source = DamageSource::player(attacker.0, spec.player_position, spec.creative);
         if !spec.held.is_empty()
             && let Ok(weapon) = u16::try_from(spec.held.item)
         {
@@ -1522,6 +1532,67 @@ mod tests {
             .expect("Bane of Arthropods applies Slowness");
         assert_eq!(effect.amplifier, 3);
         assert!((30..50).contains(&effect.duration), "{}", effect.duration);
+    }
+
+    /// 创造模式攻击者横扫时，官方 `doSweepAttack` 复用的 `damageSource` 带着
+    /// `isCreativePlayer()`，能绕过被横扫目标的临时无敌帧。横扫来源如果写死成
+    /// 非创造，带无敌帧的第二头牛就漏了伤害。
+    ///
+    /// A creative attacker's sweep reuses the `damageSource` from `Player.attack`,
+    /// whose `isCreativePlayer()` bypasses the swept target's temporary
+    /// invulnerability. Hard-coding the sweep source as non-creative would drop
+    /// the damage on an invulnerable second cow.
+    #[test]
+    fn creative_sweep_bypasses_swept_target_invulnerability() {
+        use mc_bamboo_blocks::entity::Entity;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Creative,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.attack_strength_ticker = 100;
+        region.insert_player(player);
+        let sword = stack(mc_bamboo_data::items::DIAMOND_SWORD);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = sword.clone();
+        region.players.get_mut(&id).unwrap().last_main_hand_item = sword;
+        let main = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(2.5, 64.0, 0.5)));
+        let swept = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(3.0, 64.0, 0.5)));
+        // 临时无敌帧：只有 `creative_player` 为真的伤害源能打进去。
+        // Temporary invulnerability: only a `creative_player` source gets through.
+        region.entities.with_mut(swept, |entity| {
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.invulnerable_time = 10;
+            }
+        });
+        let cow_health = |region: &Region, uid: i32| {
+            region
+                .entities
+                .get(uid)
+                .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+                .unwrap_or(0.0)
+        };
+        let before = cow_health(&region, swept);
+
+        on_attack(&mut region, id, main);
+
+        let after = cow_health(&region, swept);
+        assert!(
+            after < before,
+            "a creative sweep must bypass the swept target's invulnerability"
+        );
     }
 
     #[test]
