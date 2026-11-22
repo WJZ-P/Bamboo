@@ -22,6 +22,31 @@ use super::{
 };
 use crate::entity::EntityUid;
 
+/// `BehaviorBuilder.triggerIf(predicate)` 的实体谓词：青蛙用 `Entity::onGround` /
+/// `Entity::isInWater`。声明式 `OneShot`，`getRequiredMemories()` 是空集、不取随机数，
+/// 谓词成立就在同一刻启动又停下（`OneShot.triggerOrStop`）。匿名子类在对拍里记父类
+/// `OneShot`，和其余声明式行为一致。
+///
+/// The entity predicate of `BehaviorBuilder.triggerIf(predicate)`: frogs use
+/// `Entity::onGround` / `Entity::isInWater`. A declarative `OneShot` with an empty
+/// `getRequiredMemories()` and no random draw; when the predicate holds it starts and
+/// stops within the same tick. Its anonymous subclass dumps as the parent `OneShot` in
+/// the oracle, like the other declarative behaviours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trigger {
+    OnGround,
+    InWater,
+}
+
+impl Trigger {
+    fn matches(self, on_ground: bool, in_water: bool) -> bool {
+        match self {
+            Self::OnGround => on_ground,
+            Self::InWater => in_water,
+        }
+    }
+}
+
 /// 一个具体行为和它自己的字段。
 ///
 /// One concrete behaviour and its own fields.
@@ -88,6 +113,11 @@ pub enum Kind {
     WalkTargetFromLook { speed: f32, close_enough: i32 },
     /// `DoNothing(min, max)`。
     DoNothing { min: i32, max: i32 },
+    /// `BehaviorBuilder.triggerIf(predicate)`：声明式一次性触发（青蛙的着地 / 在水里）。
+    ///
+    /// `BehaviorBuilder.triggerIf(predicate)`: a declarative one-shot trigger (the frog's
+    /// on-ground / in-water predicates).
+    TriggerIf(Trigger),
     /// `GateBehavior` / `RunOne`。
     Gate(Box<Gate>),
     /// 犰狳自己的行为。
@@ -197,7 +227,8 @@ impl Kind {
             Self::LookAtPlayerSometimes { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
-            | Self::WalkTargetFromLook { .. } => Class::OneShot,
+            | Self::WalkTargetFromLook { .. }
+            | Self::TriggerIf(_) => Class::OneShot,
             Self::DoNothing { min, max } => Class::DoNothing {
                 min: *min,
                 max: *max,
@@ -213,7 +244,7 @@ impl Kind {
     /// `getRequiredMemories()` with each entry status.
     pub(super) fn required(&self) -> &[(MemoryType, MemoryStatus)] {
         match self {
-            Self::Swim { .. } | Self::DoNothing { .. } => &[],
+            Self::Swim { .. } | Self::DoNothing { .. } | Self::TriggerIf(_) => &[],
             Self::AnimalPanic { .. } => PANIC_REQUIRED,
             Self::LookAtTargetSink { .. } => LOOK_SINK_REQUIRED,
             Self::MoveToTargetSink(_) => MOVE_SINK_REQUIRED,
@@ -255,7 +286,8 @@ impl Kind {
             Self::LookAtPlayerSometimes { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
-            | Self::WalkTargetFromLook { .. } => "OneShot",
+            | Self::WalkTargetFromLook { .. }
+            | Self::TriggerIf(_) => "OneShot",
             Self::MakeLove { .. } => "AnimalMakeLove",
             Self::FollowTemptation { .. } => "FollowTemptation",
             Self::RandomLookAround { .. } => "RandomLookAround",
@@ -641,6 +673,7 @@ impl Kind {
                 );
                 true
             }
+            Self::TriggerIf(trigger) => trigger.matches(cx.me.on_ground, cx.me.in_water),
             Self::Armadillo(behavior) => behavior.trigger(cx),
             _ => false,
         }
@@ -947,4 +980,30 @@ fn lock_gaze_and_walk_to_each_other(cx: &mut Cx, partner: EntityUid, speed: f32,
     cx.memories.set(WalkTarget, walk_to(partner));
     sensor::set_partner_memory(cx, partner, LookTarget, Some(look_at(me)));
     sensor::set_partner_memory(cx, partner, WalkTarget, Some(walk_to(me)));
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::entity::mob::brain::behavior::Class;
+
+    use super::*;
+
+    /// `BehaviorBuilder.triggerIf` 的两个谓词和官方 `Entity::onGround` / `isInWater`
+    /// 对应；声明式行为是 `OneShot`、没有必需记忆、对拍类名 `OneShot`。
+    ///
+    /// The two `BehaviorBuilder.triggerIf` predicates match vanilla `Entity::onGround` /
+    /// `isInWater`; the declarative behaviour is a `OneShot` with no required memories and
+    /// dumps as `OneShot`.
+    #[test]
+    fn trigger_if_predicates_match_vanilla() {
+        assert!(Trigger::OnGround.matches(true, false));
+        assert!(!Trigger::OnGround.matches(false, true));
+        assert!(Trigger::InWater.matches(false, true));
+        assert!(!Trigger::InWater.matches(true, false));
+
+        let kind = Kind::TriggerIf(Trigger::OnGround);
+        assert!(matches!(kind.class(), Class::OneShot));
+        assert!(kind.required().is_empty());
+        assert_eq!(kind.name(), "OneShot");
+    }
 }

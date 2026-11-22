@@ -57,6 +57,12 @@ pub enum Activity {
     Panic,
     LongJump,
     Ram,
+    /// 青蛙的游泳、产卵、卷舌活动（`Activity.SWIM / LAY_SPAWN / TONGUE`）。
+    ///
+    /// The frog's swim, lay-spawn and tongue activities (`Activity.SWIM / LAY_SPAWN / TONGUE`).
+    Swim,
+    LaySpawn,
+    Tongue,
 }
 
 impl Activity {
@@ -70,6 +76,9 @@ impl Activity {
             Self::Panic => "panic",
             Self::LongJump => "long_jump",
             Self::Ram => "ram",
+            Self::Swim => "swim",
+            Self::LaySpawn => "lay_spawn",
+            Self::Tongue => "tongue",
         }
     }
 
@@ -450,13 +459,23 @@ mod tests {
     use super::*;
 
     /// 官方 `"core".hashCode()` 等几个值，和桶序：16 个桶时 idle、core、panic 的顺序。
+    /// 新增的青蛙活动也按官方注册名逐个核过 `String.hashCode()`。
     ///
-    /// Vanilla `String.hashCode` values and the bucket order with 16 buckets.
+    /// Vanilla `String.hashCode` values and the bucket order with 16 buckets. The new
+    /// frog activities are checked against the vanilla registry names too.
     #[test]
     fn activity_hashes_match_java() {
         assert_eq!(Activity::Core.java_hash(), 3_059_615);
         assert_eq!(Activity::Idle.java_hash(), 3_227_604);
         assert_eq!(Activity::Panic.java_hash(), 106_433_143);
+        assert_eq!(Activity::LongJump.java_hash(), 127_833_105);
+        assert_eq!(Activity::Ram.java_hash(), 112_670);
+        assert_eq!(Activity::Swim.java_hash(), 3_543_688);
+        assert_eq!(Activity::LaySpawn.java_hash(), -1_834_472_160);
+        assert_eq!(Activity::Tongue.java_hash(), -868_095_228);
+        assert_eq!(Activity::Swim.name(), "swim");
+        assert_eq!(Activity::LaySpawn.name(), "lay_spawn");
+        assert_eq!(Activity::Tongue.name(), "tongue");
         assert_eq!(hash_map_capacity(12), 16);
         assert_eq!(hash_map_capacity(13), 32);
     }
@@ -468,5 +487,30 @@ mod tests {
     fn shuffle_seeds_differ_per_gate() {
         assert_eq!(shuffle_seed(7, 0), shuffle_seed(7, 0));
         assert_ne!(shuffle_seed(7, 0), shuffle_seed(7, 1));
+    }
+
+    /// 青蛙用到的新活动能进 `order_entries` 的桶序、按优先级排好，初始活动仍是
+    /// core + idle。六个活动时青蛙也会走同一套排序机制。
+    ///
+    /// The new frog activities enter `order_entries`' bucket order, sort by priority and
+    /// leave the initial activity at core + idle. The frog's six activities reuse the
+    /// same ordering mechanism.
+    #[test]
+    fn frog_activities_sort_into_the_brain_table() {
+        let nothing = Kind::DoNothing { min: 30, max: 60 };
+        let brain = Brain::new(
+            &[],
+            vec![
+                ActivityData::with_priorities(Activity::Swim, vec![(1, nothing.clone())]),
+                ActivityData::sequential(Activity::Core, 0, vec![nothing.clone()]),
+                ActivityData::sequential(Activity::Idle, 0, vec![nothing]),
+            ],
+        );
+        assert_eq!(brain.active_names(), vec!["core", "idle"]);
+        let activities: Vec<Activity> = brain.entries.iter().map(|entry| entry.activity).collect();
+        assert_eq!(activities.len(), 3);
+        // 优先级 0 的 core/idle 排在优先级 1 的 swim 之前。
+        // Priority-0 core/idle precede priority-1 swim.
+        assert_eq!(activities.last(), Some(&Activity::Swim));
     }
 }

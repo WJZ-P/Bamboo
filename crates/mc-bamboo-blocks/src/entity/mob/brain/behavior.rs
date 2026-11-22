@@ -13,7 +13,7 @@ use super::{
 };
 use crate::entity::{Entity, JavaRandom, ctx::EntityCtx};
 
-pub use super::behaviors::{Kind, MoveToTargetSink};
+pub use super::behaviors::{Kind, MoveToTargetSink, Trigger};
 
 /// 行为跑一刻时能碰到的一切：自己（实体和生物，大脑已经取出来）、上下文、记忆、
 /// 世界时钟（`level.getGameTime()`，也就是行为的 `timestamp`）。
@@ -284,11 +284,36 @@ impl Gate {
     ///
     /// `new RunOne(entryCondition, weightedBehaviors)`: shuffled, run one, erases nothing.
     pub fn run_one(entry: Vec<(MemoryType, MemoryStatus)>, children: Vec<(Kind, i32)>) -> Self {
+        Self::new_gate(entry, Vec::new(), true, true, children)
+    }
+
+    /// `new GateBehavior(ORDERED, TRY_ALL, ...)`：不洗牌、按登记顺序尝试启动全部停着的
+    /// 子行为（青蛙 `SWIM` 活动用）。和 `RunOne` 共用 `start_children` 骨架，只是两个策略
+    /// 开关不同；`OrderPolicy.ORDERED` 是空操作，`RunningPolicy.TRY_ALL` 对每个都 `tryStart`。
+    ///
+    /// `new GateBehavior(ORDERED, TRY_ALL, ...)`: unshuffled, tries to start every stopped
+    /// child in registration order (the frog `SWIM` activity). It shares `start_children`
+    /// with `RunOne`; only the two policy flags differ. `OrderPolicy.ORDERED` is a no-op,
+    /// `RunningPolicy.TRY_ALL` calls `tryStart` on each one.
+    pub fn ordered_try_all(
+        entry: Vec<(MemoryType, MemoryStatus)>,
+        children: Vec<(Kind, i32)>,
+    ) -> Self {
+        Self::new_gate(entry, Vec::new(), false, false, children)
+    }
+
+    fn new_gate(
+        entry: Vec<(MemoryType, MemoryStatus)>,
+        exit_erased: Vec<MemoryType>,
+        shuffled: bool,
+        run_one: bool,
+        children: Vec<(Kind, i32)>,
+    ) -> Self {
         Self {
             entry,
-            exit_erased: Vec::new(),
-            shuffled: true,
-            run_one: true,
+            exit_erased,
+            shuffled,
+            run_one,
             children: children
                 .into_iter()
                 .map(|(kind, weight)| GateChild {
@@ -340,5 +365,34 @@ impl Gate {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `RunOne` 洗牌、只跑一个、对拍类名 `RunOne`；`ORDERED + TRY_ALL` 的 `GateBehavior`
+    /// 不洗牌、不提前停、类名 `GateBehavior`。两个策略开关正好对应官方两个枚举。
+    ///
+    /// `RunOne` shuffles, runs one and dumps as `RunOne`; the `ORDERED + TRY_ALL`
+    /// `GateBehavior` neither shuffles nor stops early and dumps as `GateBehavior`. The
+    /// two flags map one-to-one onto vanilla's two enums.
+    #[test]
+    fn gate_policies_match_vanilla() {
+        let children = vec![
+            (Kind::DoNothing { min: 30, max: 60 }, 1),
+            (Kind::DoNothing { min: 30, max: 60 }, 1),
+        ];
+        let run_one = Gate::run_one(Vec::new(), children.clone());
+        assert!(run_one.shuffled);
+        assert!(run_one.run_one);
+        assert_eq!(run_one.name(), "RunOne");
+
+        let ordered = Gate::ordered_try_all(Vec::new(), children);
+        assert!(!ordered.shuffled);
+        assert!(!ordered.run_one);
+        assert_eq!(ordered.name(), "GateBehavior");
+        assert_eq!(ordered.children.len(), 2);
     }
 }
