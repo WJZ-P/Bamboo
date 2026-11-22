@@ -206,7 +206,8 @@ WebView2 的渲染进程不算在内。
 - **玩家左键近战攻击**按官方 26.3 `ServerGamePacketListenerImpl.handleAttack` → `Player.attack` →
   `ServerPlayer.crit` / `magicCrit` / `getEnchantedDamage` 完整实现：攻击冷却（基础伤害
   `×(0.2 + s² × 0.8)`、附魔加成 `× s`）、`ATTACK_SPEED` 属性与 `getCurrentItemAttackStrengthDelay`、
-  挥空 / 攻击 / 换主手物品重置冷却；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
+  挥空 / 攻击 / 换主手物品重置冷却（换物品按官方 `isSameItem` 只比物品 ID，耐久 / 附魔 /
+  数量这类组件变化只刷新缓存、不清冷却）；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
   `MAGIC_CRITICAL_HIT` 动画）；拿剑、在地上、满充能、非暴击非疾跑时的横扫（打主目标
   `inflate(1, 0.25, 1)` 里 3 格内的生物，`sweeping_edge` 按 `L/(L+1)` 加成，发 `SWEEP_ATTACK`
   粒子，横扫命中的生物也照 `doPostAttackEffects` 吃火焰附加 / 节肢杀手效果）；疾跑 /

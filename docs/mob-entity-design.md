@@ -633,8 +633,11 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 四步，中间产物放在 `AttackPlan`。
 
 - **冷却**：`Player.attackStrengthTicker`（新增按玩家字段，见 6.2）每刻在玩家 tick
-  开头 `+1`；`handlePunch`（挥空）、`onAttack`（每次攻击）、主手物品换成不同物品 /
-  组件时清零。`getCurrentItemAttackStrengthDelay = 1 / ATTACK_SPEED × 20`，
+  开头 `+1`；`handlePunch`（挥空）、`onAttack`（每次攻击）清零，主手换成**另一种物品**
+  才在 `aiStep` 清零——判据是官方 `ItemStack.isSameItem`，只比物品 ID；耐久 / 附魔 /
+  数量这类组件变化只刷新 `lastItemInMainHand` 缓存、不清冷却（否则攻击扣完耐久，
+  下一刻会把自己的冷却清掉）。`component_only_changes_keep_the_attack_cooldown`
+  单测守住这条语义。`getCurrentItemAttackStrengthDelay = 1 / ATTACK_SPEED × 20`，
   `s = clamp((ticker + 0.5) / delay, 0, 1)`。基础伤害 `× (0.2 + s² × 0.8)`，
   附魔加成 `× s`。玩家 `ATTACK_DAMAGE` 基值是 `Player.createAttributes()` 的 1.0，
   **不是**属性注册表缺省的 2.0（对拍抓到过这个差）。

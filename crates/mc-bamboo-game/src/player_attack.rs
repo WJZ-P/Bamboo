@@ -64,17 +64,28 @@ const CHARGE_TOLERANCE: f32 = 5.0;
 /// base. The registry default 0.7 is for other mobs; `Player` overrides it to 0.1.
 const PLAYER_WALKING_SPEED: f32 = 0.1;
 
-/// `Player.aiStep`：每刻把 `attackStrengthTicker` 加一；主手物品换了（且物品
-/// 本身或组件不同）就 `resetAttackStrengthTicker`。
+/// `Player.aiStep`：每刻把 `attackStrengthTicker` 加一；主手物品有任何变化
+/// （数量 / 组件）就刷新缓存，但只有换成另一种物品（官方 `isSameItem`，只比
+/// 物品 ID）才 `resetAttackStrengthTicker`。攻击命中扣耐久改的是组件，不该清冷却。
 ///
-/// `Player.aiStep`: increment `attackStrengthTicker` each tick, and reset it when
-/// the main-hand item changes (item or components differ).
+/// `Player.aiStep`: increment `attackStrengthTicker` each tick and refresh the
+/// cache on any main-hand change (count / components), but call
+/// `resetAttackStrengthTicker` only when the item itself changes (vanilla
+/// `isSameItem`, item id only). A durability hit only changes components and
+/// must not clear the cooldown.
 pub(crate) fn tick(region: &mut Region) {
     for player in region.players.values_mut() {
         player.attack_strength_ticker = player.attack_strength_ticker.wrapping_add(1);
         let held = player.inventory.held(Hand::Main).clone();
         if held != player.last_main_hand_item {
-            if !same_item(&held, &player.last_main_hand_item) {
+            // 外层的 `!=` 检测物品堆的任意变化以刷新缓存；内层 `isSameItem` 只比
+            // 物品 ID，决定是否重置冷却。组件 / 耐久 / 数量变化走到这里都不重置。
+            //
+            // The outer `!=` detects any stack change to refresh the cache; the
+            // inner `isSameItem` compares the item id and decides whether to
+            // reset. Component / durability / count changes land here without
+            // resetting the cooldown.
+            if !held.is_same_item(&player.last_main_hand_item) {
                 player.attack_strength_ticker = 0;
             }
             player.last_main_hand_item = held;
@@ -91,13 +102,6 @@ pub(crate) fn on_punch(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
         player.attack_strength_ticker = 0;
     }
-}
-
-/// `ItemStack.isSameItem`：物品 ID 加组件相同（数量不算）。
-///
-/// `ItemStack.isSameItem`: same item id and components, ignoring count.
-fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
-    a.item == b.item && a.added == b.added && a.removed == b.removed
 }
 
 /// `getAttributeValue(Attributes.ATTACK_SPEED)`：缺省值加主手武器的
@@ -1129,6 +1133,70 @@ mod tests {
 
         region.players.get_mut(&id).unwrap().attack_strength_ticker = 12;
         on_punch(&mut region, id);
+        assert_eq!(region.players[&id].attack_strength_ticker, 0);
+    }
+
+    /// 官方 `Player.aiStep` 的内层判据是 `ItemStack.isSameItem`，只比物品 ID：
+    /// 攻击扣耐久（写 `DAMAGE` 组件）、附魔组件变化都只刷新缓存，不清冷却；
+    /// 换成另一种物品才清。这条测试锁住「同物品不同组件」不重置冷却，
+    /// 否则每次攻击扣完耐久，下一刻冷却就被自己清掉。
+    ///
+    /// Vanilla `Player.aiStep`'s inner check is `ItemStack.isSameItem`, item id
+    /// only: a durability hit (writing the `DAMAGE` component) or an enchantment
+    /// change only refreshes the cache, while swapping the item resets the
+    /// cooldown. This guards that a component-only change keeps the cooldown,
+    /// so an attack cannot clear its own charge on the next tick.
+    #[test]
+    fn component_only_changes_keep_the_attack_cooldown() {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+
+        // 主手放剑、缓存对齐到同一把剑，模拟 `aiStep` 已经同步过；ticker 给 7。
+        // Put a sword in hand and align the cache to the same stack, as if
+        // `aiStep` already synced it; start the ticker at 7.
+        let bare = stack(mc_bamboo_data::items::DIAMOND_SWORD);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = bare.clone();
+        region.players.get_mut(&id).unwrap().last_main_hand_item = bare.clone();
+        region.players.get_mut(&id).unwrap().attack_strength_ticker = 7;
+
+        // 耐久：攻击扣 5 点耐久写入 `DAMAGE` 组件，物品 ID 不变。
+        // Durability: a 5-point hit writes the `DAMAGE` component; item id unchanged.
+        let mut damaged = bare.clone();
+        mc_bamboo_blocks::durability::set_damage_for_oracle(&mut damaged, 5);
+        assert!(damaged.is_same_item(&bare), "same sword id");
+        assert_ne!(damaged, bare, "a durability hit changes the components");
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = damaged.clone();
+        tick(&mut region);
+        assert_eq!(region.players[&id].attack_strength_ticker, 8);
+
+        // 附魔：换成带锋利的同一把剑，仍是同物品不同组件。
+        // Enchantment: the same sword with Sharpness, still same item, new components.
+        let sharp = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:sharpness",
+            1,
+        );
+        assert!(sharp.is_same_item(&damaged));
+        assert_ne!(sharp, damaged);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = sharp;
+        tick(&mut region);
+        assert_eq!(region.players[&id].attack_strength_ticker, 9);
+
+        // 换成另一种物品才真的重置冷却。
+        // Only swapping to a different item resets the cooldown.
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] =
+            stack(mc_bamboo_data::items::DIAMOND_AXE);
+        tick(&mut region);
         assert_eq!(region.players[&id].attack_strength_ticker, 0);
     }
 
