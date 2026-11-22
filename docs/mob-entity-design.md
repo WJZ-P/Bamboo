@@ -719,6 +719,47 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   实跑，结果见本轮汇报第 2 节。请队长定夺下一步：合进 main，或单独开一整轮做
   某一种生物。
 
+### 5.15 第 11 轮：合并含 Brain / 山羊 / 犰狳的 main 并全套复核（op-misc，2026-11-21）
+
+- 接手时 `HEAD=2d5ac486`、`main=c9773f61`。本轮按 04:30 / 08:40「先 `git merge main`」执行时，
+  `main` 已被别的队员推进到 `650625b5`（"Merge the Brain AI framework with armadillos and
+  goats"），合并**不是 no-op**：产生双亲合并 `56060028`，带入 47 文件 / 6797 行
+  （`entity/mob/brain/`、`goat.rs`、`armadillo.rs`、`MobType::ALL` 28→30、`natural.rs` /
+  `spawn.rs` 按 kind 分发、`MobOracle.java` +450 行、`chunk_content_oracle.rs` 等）。
+  自此 `main` 是 `HEAD` 的祖先，合回 main 是无冲突 fast-forward。
+- 08:40 两处修复 + 第 10 轮 chunk-content 修复在自动合并后逐字复核仍在：
+  `MobOracle.java:958` 的 `caseVariant(Mob mob) throws Exception`（main 给该文件 +450 行、
+  行号漂移，签名与双语警示注释都保留）、`goals.rs:1534` 的显式 `TargetType::Fox` 分支与
+  `impl TargetType` 开头的防回退注释（`available()` 仍已移除）、`ChunkContentOracle.java:361,366`
+  的 `FakeLevel` 两个 override。`goals.rs` 本次只把 `float_can_use` / `damage_type_tagged` /
+  `look_for_water` / `nearest_tempting_player` 改成 `pub(super)` 供 Brain 复用，目标匹配未动。
+- 全套检查在最终提交上实跑、全部通过（数字见本轮汇报第 2 节）：fmt / clippy `-D warnings` /
+  `cargo check --workspace --all-targets` / `cargo check -p mc-bamboo-desktop` /
+  `cargo test -p mc-bamboo-blocks` 775 通过 / `cargo test -p mc-bamboo-vanilla` 109 通过 /
+  全套 `mob-oracle` 1746 例 167034 刻 0 不一致（含 `polar_bear_idle`，回归未复现）/
+  `--only polar_bear` 11 例 1121 刻 0 / `natural-spawn` 1727 例 0 / `chunk-content` 503 项 /
+  `tools/probe.sh` 769/769。
+- **前置状态更新**：Brain 框架（5.9）、山羊、犰狳已随 main 落地，任务清单里这三种不再是
+  「没做」；青蛙的硬前置「缺 Brain」已解除，只剩「整块一轮按 `FrogAi` 搬完再对拍」的时间约束
+  （brain 报告明确不要先落半截实体骨架）；骆驼仍等 5.8 骑乘 / 世界模型 8.2 载具；
+  鹦鹉上肩仍等 8.2；豹猫 / 猫仍须新增 `MobType`。
+- **更正 5.12 的前置判断**：5.12 说「做豹猫须先动生成器 / `Extractor.java` 导出 `OCELOT_*`
+  属性」——属性一项不准确。`panda.rs` 的 `attributes()` 把 20.0 / 0.15 / 6.0 手写在新文件里
+  （照官方 `Panda.createAttributes`），`entity_types.rs` 的 `FACTS[ocelot]`（`:114`，0.6×0.7）
+  已由生成器导出、可直接读；元数据 `DATA_TRUSTING` 的 index 才需要 `Extractor.java` 的
+  `entityAccessor(Ocelot.class, "DATA_TRUSTING").id()` 一行（brain 已把这条导出链路用在
+  `ARMADILLO_STATE` / `GOAT_*`）。故剩余硬约束不是「属性导出」，而是新增 `MobType` 碰
+  `natural-spawn` / `check_spawn_rules` 关键路径、新建 Java/Rust 逐刻场景、动 `Extractor.java` /
+  generated 共用文件前的确认。
+- **合并带来的文档编号遗留（报告队长，不自行重编号）**：main 把 5.9 改成「大脑 AI」、
+  原 5.9→5.10、原 5.10（熊猫）→5.11，但 op-misc 特有的 `5.11 08:40 根因`、`5.12`、`5.13`、
+  `5.14` 未随之重排，当前文件有两个 `### 5.11`（熊猫、08:40 根因），且 5.12~5.14 里
+  「5.9 / 5.10 / 5.11 已确认」「按 5.11 顺序」「更正 5.11 一处」等交叉引用在新编号下语义
+  已错乱。重编号会大改这个共用文件、并与并行队员再冲突，留给队长统一处理。
+- 本轮不新增 `MobType`、不新增生物：单轮无人值守的核心任务是合并与全套复核，树已可
+  fast-forward，青蛙按 brain 报告须整块一轮，其余有硬前置。请队长定夺下一步：
+  (A) 把合并提交 fast-forward 合进 main；(B) 单独开一整轮按 5.12 规格做豹猫或青蛙。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
