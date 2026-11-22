@@ -2288,6 +2288,16 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 `loot-oracle --entity-table minecraft:entities/pillager` 本轮抽了 400 例（一半队长）0 不一致，
 合并前的 4000 例 0 不一致；`chunk-content` 523 项也是合并前的结果（本轮未重跑）。
 
+第三次复核在 `31fb619b` 上补跑官方联机探针（`JAVA` 为 JDK 26，经 `heavy.js` 共享锁）：
+`PROBE RESULT 769/769 checks passed`，正常关服，`level.dat` / 玩家数据 6 个 / 区域文件 4 个都在，
+`WORLD-DIR` 全过。为确认新增的每刻巡逻队刷怪器没有拖慢世界线程，同一份命令在 main
+（`eaf77080`）上带 `BAMBOO_PROFILE=10` 做了一次对照：2 名玩家在线时 `tick_total` 平均
+20.7–23.8 ms（86–96 只实体，`entities` 阶段 13.3–17.7 ms），本分支 21.3–24.2 ms
+（86 只实体，`entities` 阶段 14.4 ms），两者同一水平；探针世界时钟没到 120000 刻，
+`PatrolSpawner` 每刻只做计时递减和两次布尔闸门，整个自定义刷怪器在 `random_ticks` 阶段内。
+main 那次报 `769/770`，多出来的一项 `play: M2 sends handleDamageEvent` 失败：同一份
+`Probe.java` 下本分支没收到该包，是探针在 M2 旁观者身上观测到伤害事件的时序抖动，与本次改动无关。
+
 ## 与 main 五次合并及装死回血（op-water，2026-11-21，第十轮）
 
 按队长 14:35 追加先 `git merge main`（`33980ce0`，含女巫 / 史莱姆 / 溺尸 / 流浪者 / 沼骸、
