@@ -513,4 +513,60 @@ mod tests {
         // Priority-0 core/idle precede priority-1 swim.
         assert_eq!(activities.last(), Some(&Activity::Swim));
     }
+
+    /// 官方 `Brain`（`Brain.java:78-93, 350-366`）只从 `memoryTypes`、`Sensor.requires()`
+    /// 和行为的 `getRequiredMemories()` 登记记忆，活动 `.when()` 条件本身不登记；
+    /// `checkMemory`（`Brain.java:242-249`）对未登记种类连 `VALUE_ABSENT` 都返回 false。
+    /// 所以青蛙活动条件引用的 `IS_IN_WATER / IS_PREGNANT / LONG_JUMP_MID_JUMP` 等记忆
+    /// 必须由某个传感器 / 行为登记，忠实照搬它们的 `requires()` / `required()` 即可，
+    /// `Brain::new` 无需为活动条件改动（旧汇报疑点 5）。这条测试把语义锁住。
+    ///
+    /// Vanilla `Brain` registers memories only from `memoryTypes`, `Sensor.requires()`
+    /// and behaviours' `getRequiredMemories()`; activity `.when()` conditions register
+    /// nothing, and `checkMemory` returns false for unregistered types even for
+    /// `VALUE_ABSENT`. Frog activity-condition memories must therefore be required by
+    /// some sensor/behaviour; faithful `requires()`/`required()` porting suffices and
+    /// `Brain::new` needs no change. This test locks that semantics (old report doubt 5).
+    #[test]
+    fn frog_activity_conditions_need_registered_memories_like_vanilla() {
+        let mut memories = Memories::default();
+        // 未登记的记忆：与官方 `checkMemory` 一致，连 VALUE_ABSENT 都不满足。
+        // An unregistered memory: even VALUE_ABSENT fails, as in vanilla checkMemory.
+        assert!(!memories.check(MemoryType::LongJumpMidJump, MemoryStatus::ValueAbsent));
+        assert!(!memories.check(MemoryType::LongJumpMidJump, MemoryStatus::ValuePresent));
+        memories.register(MemoryType::LongJumpMidJump);
+        assert!(memories.check(MemoryType::LongJumpMidJump, MemoryStatus::ValueAbsent));
+        assert!(memories.check(MemoryType::LongJumpMidJump, MemoryStatus::Registered));
+
+        // `LookTarget` 由 `LookAtTargetSink` 的 `required()` 登记，`IsInWater` 没人登记。
+        // `LookTarget` is registered by `LookAtTargetSink::required()`; `IsInWater` is not.
+        let brain = Brain::new(
+            &[],
+            vec![
+                ActivityData::sequential(
+                    Activity::Core,
+                    0,
+                    vec![Kind::LookAtTargetSink { min: 45, max: 90 }],
+                ),
+                ActivityData::sequential(
+                    Activity::Idle,
+                    0,
+                    vec![Kind::DoNothing { min: 30, max: 60 }],
+                )
+                .when(vec![(MemoryType::LookTarget, MemoryStatus::ValueAbsent)]),
+                ActivityData::sequential(
+                    Activity::Swim,
+                    0,
+                    vec![Kind::DoNothing { min: 30, max: 60 }],
+                )
+                .when(vec![(MemoryType::IsInWater, MemoryStatus::ValuePresent)]),
+            ],
+        );
+        assert!(brain.memories.is_registered(MemoryType::LookTarget));
+        assert!(!brain.memories.is_registered(MemoryType::IsInWater));
+        // 登记过的空槽满足 VALUE_ABSENT；未登记的条件记忆让活动永远选不中。
+        // A registered empty slot satisfies VALUE_ABSENT; an unregistered one never does.
+        assert!(brain.requirements_met(Activity::Idle));
+        assert!(!brain.requirements_met(Activity::Swim));
+    }
 }
