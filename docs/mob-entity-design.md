@@ -1401,3 +1401,38 @@ witch_spawn、drowned_spawn、witch_drink、witch_throw、slime_、drowned_、pr
 和 main 的杂项（polar_bear_、panda_、mooshroom_）全部 0 不一致。全量 `mob-oracle` 剩
 12 处 `player_death_*` 不一致，全是上述重生包 `sea_level` 既有差异（main 新增死亡消息
 场景后由 6 处增至 12 处），按 `verify-scope.md` 属非关键路径，不追。
+
+### 与 main 三次合并后的现状（op-hostile2，2026-11-21 本轮）
+
+按队长 14:35 的要求再 `git merge main`，这次 main 到 `c9773f61`（马科骑乘、羊驼吐口水、
+狼躲羊驼、剩余马科工作、扔鸡蛋孵小鸡、农场动物收尾、计时测试修复）。5 个文本冲突都按
+main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/鸡/马/驴/骡/羊驼/僵尸/
+尸壳/骷髅/流浪者/沼骸/史莱姆/溺尸/女巫；`goals.rs` 的 `stop()` 把 main 的
+`RunAroundLikeCrazy` 并进本分支的 Cube/Drowned/Witch 一组（去掉重复的 `RandomStand`）；
+`mod.rs` 的 `create_navigation` 并列保留本分支溺尸两栖导航和 main 羊驼
+`required_path_length`；`MobOracle.java` 的 `play()` 前缀并集和 `spawnVariants` 的
+`zombie_equine_llama_wolf` 标志块、`natural_spawn.rs` 的 `Step` 取 12 列 `spawned` +
+`variants` 字段（打印串补 `farm`/`slimes`/`witches`）。`generated/` 用 `extract` 重新生成：
+`registries.rs` 的 `game_event` 已是 main 修好的官方注册序（无需再还原），`entity_types.rs`
+保持本分支的 `CUBE_MOB_SIZE` / `SLIME_EYE_HEIGHT`。语义编译冲突补齐 main 新增字段：
+`egg.rs` / `equine/tame.rs` 的 `PlayerView` 补 `delta`/`health`/`effects`，
+`riding/tests.rs` 的 `MobPublic::of` 补 `in_water` 实参。
+
+另修一个本分支既有（非本轮合并引入）的失败：史莱姆按官方
+`Slime.checkSlimeSpawnRules`（`ServerLevel implements WorldGenLevel`，y<40 的史莱姆区块
+不看亮度就能刷）接进运行时自然刷怪后，合成超平坦测试世界里每个区块都隐式存在、没有
+真实的区块交付和实体 tick 票，环境刷出的史莱姆会污染实体跟踪、跨岛逐字节比较、弩箭等
+9 个无关单测（纯 `main` 全绿、本分支合并前的 `e2243b4c` 已失败）。生产逻辑不动，按该
+文件既有两处 `SPAWN_MOBS=false` 的约定，在 `Harness::build_with` 给合成测试世界默认关掉
+`spawn_mobs`；`mob-oracle --only natural_spawn` 用的是独立的 `MobLevel` 夹具，不受影响。
+`cargo test -p mc-bamboo-game --lib` 修后 1256 过 / 0 失败 / 13 忽略。
+
+本轮检查：`cargo fmt --check`、clippy `--workspace --all-targets -- -D warnings`、
+`cargo check --workspace --all-targets`、`cargo check -p mc-bamboo-desktop` 全过；
+`cargo test -p mc-bamboo-game --lib` 1256 过 / 0 失败、`cargo test -p mc-bamboo-blocks
+--lib` 780 过 / 0 失败 / 6 忽略、`cargo test -p mc-bamboo-vanilla` 101 + 8 过 / 0 失败；
+官方联机探针 769/769。五种生物各前缀针对性 `mob-oracle`（`natural_spawn` 674 例 2696 刻、
+`stray_spawn`、`bogged_spawn`、`witch_drink`、`witch_throw`、`slime_`、`drowned_`、
+`projectile`）全部 0 不一致，`loot-oracle --entity-table minecraft:entities/drowned`
+64 题 0 不一致；故意改坏 `natural_spawn` 一次能抓到不一致。全量 `mob-oracle` 的
+`player_death_*` 重生包 `sea_level` 既有差异仍在，按 `verify-scope.md` 属非关键路径，不追。
