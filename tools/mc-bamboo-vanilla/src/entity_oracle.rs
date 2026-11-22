@@ -930,6 +930,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
         EntityKind::Arrow(_) => ("arrow".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::LlamaSpit(_) => ("llama_spit".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::Egg(_) => ("egg".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::SplashPotion(_) => ("splash_potion".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::Mob(_) => ("mob".to_owned(), -1, -1, -1, 0, -1, -1, -1),
         EntityKind::ExperienceOrb(data) => (
             "experience_orb".to_owned(),

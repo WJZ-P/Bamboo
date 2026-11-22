@@ -122,6 +122,28 @@ pub(crate) fn pickup_before_entities(region: &mut Region) {
     }
 }
 
+/// `AbstractCubeMob.playerTouch`：玩家碰到史莱姆，史莱姆能打就打一下，打中了放攻击音效。
+/// 官方在 `Player.aiStep` 的 `touch(entity)` 里调，要求玩家活着。
+///
+/// `AbstractCubeMob.playerTouch`: a slime the player touches hits back when it can and plays
+/// its attack sound on a hit. Vanilla calls it from `touch(entity)` in `Player.aiStep`, for
+/// living players only.
+fn slime_touch(region: &mut Region, id: PlayerId, slime: mc_bamboo_blocks::entity::EntityUid) {
+    let alive = region
+        .players
+        .get(&id)
+        .is_some_and(|player| !player.health.is_dead_or_dying());
+    if !alive {
+        return;
+    }
+    // 带玩家那一半的世界：受伤当场走正式入口，和生物在自己 tick 里打人是同一条路。
+    // A world with the player half: the hit runs the real hurt path at once, the same way
+    // a mob hits from its own tick.
+    let (mut level, ticks) = region.entity_level();
+    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    mc_bamboo_blocks::entity::mob::slime::player_touch(&mut world, slime, id.0);
+}
+
 fn pickup_for(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get(&id) else {
         return;
@@ -158,6 +180,12 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
         };
+        if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind {
+            if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime {
+                slime_touch(region, id, entity_id);
+            }
+            continue;
+        }
         if let mc_bamboo_blocks::entity::EntityKind::Arrow(arrow) = &entity.kind {
             if !entity.removed
                 && arrow.in_ground

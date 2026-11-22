@@ -836,7 +836,7 @@ fn apply_post_hurt_effects(me: &Entity, world: &mut World<'_>, target: EntityUid
                 duration,
             )]
         }
-        ArrowVariant::Normal => potion_effect_instances(arrow),
+        ArrowVariant::Normal => potion_effect_instances(&arrow.pickup_item),
     };
     for effect in effects {
         if crate::entity::mob::effects::is_instantaneous(effect.effect) {
@@ -864,19 +864,28 @@ fn apply_post_hurt_effects(me: &Entity, world: &mut World<'_>, target: EntityUid
 ///
 /// `PotionContents.getColor`: custom colour or a weighted mean of visible effects.
 fn potion_color(arrow: &Arrow) -> i32 {
-    use mc_bamboo_data::registries::data_component_type::POTION_CONTENTS;
-    use mc_bamboo_protocol::components::{ComponentValue, defaults};
-
     if arrow.variant != ArrowVariant::Normal || arrow.pickup_item.added.is_empty() {
         return -1;
     }
-    let patch = arrow.pickup_item.patch();
+    potion_color_of(&arrow.pickup_item)
+}
+
+/// `PotionContents.getColor()`：自定义色，或按等级对可见效果求加权平均。喷溅药水和药水箭
+/// 共用。
+///
+/// `PotionContents.getColor()`: the custom colour, or a weighted mean of the visible
+/// effects. Splash potions and tipped arrows share it.
+pub(crate) fn potion_color_of(stack: &mc_bamboo_protocol::item::ItemStack) -> i32 {
+    use mc_bamboo_data::registries::data_component_type::POTION_CONTENTS;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let patch = stack.patch();
     let Some(ComponentValue::PotionContents {
         potion,
         custom_color,
         custom_effects,
         custom_name,
-    }) = defaults::resolve(arrow.pickup_item.item, &patch, POTION_CONTENTS)
+    }) = defaults::resolve(stack.item, &patch, POTION_CONTENTS)
     else {
         return -1;
     };
@@ -888,7 +897,7 @@ fn potion_color(arrow: &Arrow) -> i32 {
     }
     let mut totals = [0; 3];
     let mut weight = 0;
-    for effect in potion_effect_instances(arrow)
+    for effect in potion_effect_instances(stack)
         .into_iter()
         .filter(|effect| effect.visible)
     {
@@ -909,25 +918,107 @@ fn potion_color(arrow: &Arrow) -> i32 {
     (0xff00_0000_u32 as i32) | (r << 16) | (g << 8) | b
 }
 
-fn potion_effect_instances(arrow: &Arrow) -> Vec<crate::entity::mob::effects::EffectInstance> {
+/// `Potion.hasInstantEffects()`：基础药水里有没有瞬时效果。
+///
+/// `Potion.hasInstantEffects()`: whether the base potion has an instantaneous effect.
+pub(crate) fn potion_has_instant(stack: &mc_bamboo_protocol::item::ItemStack) -> bool {
+    use mc_bamboo_data::registries::data_component_type::POTION_CONTENTS;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let patch = stack.patch();
+    let Some(ComponentValue::PotionContents {
+        potion: Some(potion),
+        ..
+    }) = defaults::resolve(stack.item, &patch, POTION_CONTENTS)
+    else {
+        return false;
+    };
+    mc_bamboo_data::potions::effects(*potion).is_some_and(|effects| {
+        effects.iter().any(|&(effect, _, _)| {
+            effect == mc_bamboo_data::registries::mob_effect::INSTANT_HEALTH
+                || effect == mc_bamboo_data::registries::mob_effect::INSTANT_DAMAGE
+        })
+    })
+}
+
+/// `PotionContents.getColor()`：没有药水组件时返回 `BASE_POTION_COLOR`（-13083194），
+/// 供喷溅药水的世界事件使用。
+///
+/// `PotionContents.getColor()`: returns `BASE_POTION_COLOR` (-13083194) when empty,
+/// for splash potion level events.
+pub(crate) fn potion_contents_color(stack: &mc_bamboo_protocol::item::ItemStack) -> i32 {
+    let color = potion_color_of(stack);
+    if color == -1 { -13_083_194 } else { color }
+}
+
+/// `PotionContents.getAllEffects()` 与 `POTION_DURATION_SCALE`：返回未缩放的原始效果和
+/// 持续时间倍率，供 `ThrownSplashPotion.onHitAsPotion` 一次缩放并四舍五入。
+///
+/// `PotionContents.getAllEffects()` plus `POTION_DURATION_SCALE`: returns the unscaled
+/// effects and the duration scale so `ThrownSplashPotion.onHitAsPotion` scales once.
+pub(crate) fn potion_raw_effects_and_scale(
+    stack: &mc_bamboo_protocol::item::ItemStack,
+) -> (Vec<crate::entity::mob::effects::EffectInstance>, f32) {
     use crate::entity::mob::effects::EffectInstance;
     use mc_bamboo_data::registries::data_component_type as kinds;
     use mc_bamboo_protocol::components::{ComponentValue, defaults};
 
-    let patch = arrow.pickup_item.patch();
+    let patch = stack.patch();
     let Some(ComponentValue::PotionContents {
         potion,
         custom_effects,
         ..
-    }) = defaults::resolve(arrow.pickup_item.item, &patch, kinds::POTION_CONTENTS)
+    }) = defaults::resolve(stack.item, &patch, kinds::POTION_CONTENTS)
+    else {
+        return (Vec::new(), 1.0);
+    };
+    let scale = match defaults::resolve(stack.item, &patch, kinds::POTION_DURATION_SCALE) {
+        Some(ComponentValue::PotionDurationScale(scale)) => *scale,
+        _ => 1.0,
+    };
+    let mut out = Vec::new();
+    if let Some(potion) = potion
+        && let Some(effects) = mc_bamboo_data::potions::effects(*potion)
+    {
+        for &(effect, duration, amplifier) in effects {
+            out.push(EffectInstance::with_amplifier(effect, duration, amplifier));
+        }
+    }
+    for instance in custom_effects {
+        let details = &instance.details;
+        let mut effect = EffectInstance::with_flags(
+            instance.effect,
+            details.duration,
+            details.amplifier,
+            details.ambient,
+            details.show_particles,
+        );
+        effect.show_icon = details.show_icon;
+        out.push(effect);
+    }
+    (out, scale)
+}
+
+pub(crate) fn potion_effect_instances(
+    stack: &mc_bamboo_protocol::item::ItemStack,
+) -> Vec<crate::entity::mob::effects::EffectInstance> {
+    use crate::entity::mob::effects::EffectInstance;
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let patch = stack.patch();
+    let Some(ComponentValue::PotionContents {
+        potion,
+        custom_effects,
+        ..
+    }) = defaults::resolve(stack.item, &patch, kinds::POTION_CONTENTS)
     else {
         return Vec::new();
     };
-    let scale =
-        match defaults::resolve(arrow.pickup_item.item, &patch, kinds::POTION_DURATION_SCALE) {
-            Some(ComponentValue::PotionDurationScale(scale)) => *scale,
-            _ => 1.0,
-        };
+    let scale = match defaults::resolve(stack.item, &patch, kinds::POTION_DURATION_SCALE) {
+        Some(ComponentValue::PotionDurationScale(scale)) => *scale,
+        _ => 1.0,
+    };
     let mut out = Vec::new();
     if let Some(potion) = potion
         && let Some(effects) = mc_bamboo_data::potions::effects(*potion)

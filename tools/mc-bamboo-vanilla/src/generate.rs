@@ -3621,6 +3621,16 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
     }
+    let _ = writeln!(
+        out,
+        "pub const CUBE_MOB_SIZE: u8 = {};",
+        facts.cube_mob_size
+    );
+    let _ = writeln!(
+        out,
+        "pub const SLIME_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.slime_eye_height)
+    );
     mooshroom_facts(&mut out, facts);
     // 敌对生物自己定义的元数据 index 和眼高，按常量名排序。
     // Hostile-mob metadata indices and eye heights, sorted by constant name.

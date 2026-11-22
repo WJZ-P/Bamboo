@@ -972,6 +972,8 @@ pub struct ProjectileFacts {
     pub chicken_sound_variant: u8,
     pub chicken_variant_serializer: i32,
     pub chicken_sound_variant_serializer: i32,
+    pub cube_mob_size: u8,
+    pub slime_eye_height: f32,
     /// `Armadillo.ARMADILLO_STATE` 的下标和序列化器、山羊的三个布尔元数据。
     ///
     /// The `Armadillo.ARMADILLO_STATE` index and serializer, and the goat's three booleans.

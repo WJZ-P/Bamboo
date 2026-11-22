@@ -138,6 +138,10 @@ pub enum KindPublic {
     ///
     /// A thrown egg: the sync layer reads its item, owner and pitch.
     Egg(Box<super::thrown_egg::EggPublic>),
+    /// 扔出的喷溅药水。
+    ///
+    /// A thrown splash potion.
+    SplashPotion(Box<super::splash_potion::SplashPotionPublic>),
 }
 
 impl KindPublic {
@@ -151,6 +155,7 @@ impl KindPublic {
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
+            Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -204,6 +209,7 @@ pub enum KindState {
     Arrow(Box<super::arrow::Arrow>),
     LlamaSpit(Box<super::spit::LlamaSpit>),
     Egg(Box<super::thrown_egg::ThrownEgg>),
+    SplashPotion(Box<super::splash_potion::SplashPotion>),
 }
 
 /// `FallingBlockEntity` 里别人不读的字段。
@@ -320,6 +326,9 @@ impl EntityRow {
             (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
             (KindPublic::LlamaSpit(_), KindState::LlamaSpit(spit)) => EntityKind::LlamaSpit(spit),
             (KindPublic::Egg(_), KindState::Egg(egg)) => EntityKind::Egg(egg),
+            (KindPublic::SplashPotion(_), KindState::SplashPotion(potion)) => {
+                EntityKind::SplashPotion(potion)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -402,8 +411,12 @@ impl Entity {
                 KindPublic::Egg(Box::new(egg.public(self.remaining_fire_ticks))),
                 KindState::Egg(egg),
             ),
+            EntityKind::SplashPotion(potion) => (
+                KindPublic::SplashPotion(Box::new(potion.public(self.remaining_fire_ticks))),
+                KindState::SplashPotion(potion),
+            ),
             EntityKind::Mob(mob) => (
-                KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob))),
+                KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
                 KindState::Mob(mob),
             ),
         };
@@ -909,6 +922,9 @@ impl EntityStore {
         }
         if let EntityKind::Egg(egg) = &mut entity.kind {
             egg.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::SplashPotion(potion) = &mut entity.kind {
+            potion.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
         entity
     }

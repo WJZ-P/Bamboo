@@ -436,7 +436,9 @@ impl Player {
             uid: id.0,
             uuid: Some(*self.uuid.as_bytes()),
             position: self.position,
+            delta: self.motion.delta,
             eye_height: self.eye_height() as f32,
+            health: self.health.health,
             look_direction: Vec3::view_vector(self.yaw, self.pitch),
             gaze_disguise: self
                 .inventory
@@ -448,8 +450,8 @@ impl Player {
                             mc_bamboo_data::tags::item_tags::GAZE_DISGUISE_EQUIPMENT,
                         )
                 }),
-            // 药水效果还没有；`armor_cover` 按四格盔甲里非空的比例算。
-            // Potion effects are not modelled; armor cover follows the worn slots.
+            // 隐身仍按默认假处理；`armor_cover` 按四格盔甲里非空的比例算。
+            // Invisibility stays false; armor cover follows the worn slots.
             alive: !self.health.is_dead_or_dying(),
             spectator: self.game_mode == GameMode::Spectator,
             creative: self.game_mode == GameMode::Creative,
@@ -462,6 +464,7 @@ impl Player {
             yaw: self.yaw,
             pitch: self.pitch,
             combat: self.combat_memory.view(self.entity_ticks),
+            effects: mc_bamboo_blocks::entity::ctx::TargetEffects::from_map(&self.effects),
         }
     }
 

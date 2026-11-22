@@ -1160,6 +1160,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             //
             // Potion-arrow effects on players are not part of a block case.
             | Effect::PlayerEffect { .. }
+            | Effect::HealPlayer { .. }
             | Effect::SleepInBed { .. } => None,
         })
         .collect()
@@ -1276,6 +1277,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::HurtPlayer { .. }
             | Effect::IgnitePlayer { .. }
             | Effect::PlayerEffect { .. }
+            | Effect::HealPlayer { .. }
             | Effect::SleepInBed { .. } => {}
         }
     }

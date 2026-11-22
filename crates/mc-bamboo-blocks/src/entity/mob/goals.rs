@@ -17,6 +17,7 @@ use crate::{
         ctx::{BlockView, EntityCtx, PlayerView},
     },
     shape::{self, CollisionContext},
+    state::SupportType,
 };
 
 /// `Goal.Flag`，按枚举顺序。
@@ -203,6 +204,81 @@ pub enum Goal {
     EatBlock {
         eat_tick: i32,
     },
+    /// `AbstractCubeMob.CubeMobFloatGoal`：在液体里按 0.8 的概率跳，并要求以 1.2 倍速移动。
+    ///
+    /// `AbstractCubeMob.CubeMobFloatGoal`: jump with probability 0.8 while in liquid and ask
+    /// for movement at 1.2 speed.
+    CubeFloat,
+    /// `AbstractCubeMob.CubeMobAttackGoal`：看向目标并朝它跳，300 刻（折半 150）后厌倦。
+    ///
+    /// `AbstractCubeMob.CubeMobAttackGoal`: face the target and hop at it, growing tired
+    /// after 300 ticks (halved to 150).
+    CubeAttack {
+        grow_tired_timer: i32,
+    },
+    /// `AbstractCubeMob.CubeMobRandomDirectionGoal`：没有目标时隔一阵随机换个方向。
+    ///
+    /// `AbstractCubeMob.CubeMobRandomDirectionGoal`: pick a random heading now and then
+    /// while there is no target.
+    CubeRandomDirection {
+        chosen_degrees: f32,
+        next_randomize_time: i32,
+    },
+    /// `AbstractCubeMob.CubeMobKeepOnJumpingGoal`：一直要求移动。
+    ///
+    /// `AbstractCubeMob.CubeMobKeepOnJumpingGoal`: keep asking for movement.
+    CubeKeepJumping,
+    /// `Drowned.DrownedGoToWaterGoal`：天亮时上岸的溺尸往回找水。
+    ///
+    /// `Drowned.DrownedGoToWaterGoal`: a drowned on land heads back to water in daylight.
+    DrownedGoToWater {
+        speed: f64,
+        wanted: Vec3,
+    },
+    /// `Drowned.DrownedSwimUpGoal`：夜里在水下时朝海平面游。
+    ///
+    /// `Drowned.DrownedSwimUpGoal`: swim up towards sea level at night.
+    DrownedSwimUp {
+        speed: f64,
+        stuck: bool,
+    },
+    /// `Drowned.DrownedGoToBeachGoal`（`MoveToBlockGoal`）：夜里泡在近海面水里时找岸边。
+    ///
+    /// `Drowned.DrownedGoToBeachGoal` (`MoveToBlockGoal`): at night, a drowned in water near
+    /// the surface looks for a beach.
+    DrownedGoToBeach {
+        speed: f64,
+        next_start_tick: i32,
+        try_ticks: i32,
+        max_stay_ticks: i32,
+        block_pos: Option<BlockPos>,
+        reached_target: bool,
+    },
+    /// `RandomStrollGoal`（不避水）：`DefaultRandomPos.getPos(mob, 10, 7)`。
+    ///
+    /// `RandomStrollGoal` (not water avoiding): `DefaultRandomPos.getPos(mob, 10, 7)`.
+    RandomStroll {
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+        force_trigger: bool,
+    },
+    /// `NearestHealableRaiderTargetGoal`：Bamboo 没有袭击，但官方每刻照样抽一个
+    /// `nextBoolean`，这里保住这次取数。
+    ///
+    /// `NearestHealableRaiderTargetGoal`: there are no raids, but vanilla still draws one
+    /// `nextBoolean` each check, so the draw is kept.
+    WitchHealRaiders {
+        cooldown: i32,
+    },
+    /// `RangedAttackGoal`：女巫每 60 刻投一瓶喷溅药水，射程 10 格。
+    ///
+    /// `RangedAttackGoal`: the witch throws a splash potion every 60 ticks within 10 blocks.
+    WitchRangedAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
+        see_time: i32,
+    },
     /// `PandaSitGoal`：拿着能吃的东西时坐下。
     ///
     /// `PandaSitGoal`: sit down while holding something edible.
@@ -303,6 +379,10 @@ pub enum TargetType {
     Villager,
     IronGolem,
     Turtle,
+    /// `Drowned` 的美西螈目标；Bamboo 没有这个实体，只占着顺序。
+    ///
+    /// The drowned's axolotl target; absent in Bamboo, kept for ordering.
+    Axolotl,
     /// 狐狸（北极熊的猎物）。
     ///
     /// Foxes (polar bear prey).
@@ -453,6 +533,20 @@ impl Goal {
             Self::TurtleGoHome { .. } | Self::TurtleTravel { .. } => &[],
             Self::BreakDoor => &[Flag::Move],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
+            Self::CubeFloat
+            | Self::CubeAttack { .. }
+            | Self::CubeRandomDirection { .. }
+            | Self::CubeKeepJumping => super::slime::flags(self),
+            Self::DrownedGoToWater { .. } | Self::RandomStroll { .. } => &[Flag::Move],
+            // `MoveToBlockGoal` 同时锁 MOVE 和 JUMP。
+            //
+            // `MoveToBlockGoal` locks MOVE and JUMP.
+            Self::DrownedGoToBeach { .. } => &[Flag::Move, Flag::Jump],
+            // `DrownedSwimUpGoal` 没有 `setFlags`：不锁任何标志。
+            // `DrownedSwimUpGoal` never calls `setFlags`, so it locks nothing.
+            Self::DrownedSwimUp { .. } => &[],
+            Self::WitchHealRaiders { .. } => &[Flag::Target],
+            Self::WitchRangedAttack { .. } => &[Flag::Move, Flag::Look],
             Self::PandaSit | Self::AvoidEntity { .. } => &[Flag::Move],
             Self::PandaRoll => &[Flag::Move, Flag::Look, Flag::Jump],
             Self::PandaLieOnBack | Self::PandaSneeze => &[],
@@ -480,6 +574,10 @@ impl Goal {
                 | Self::MeleeAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
+                | Self::CubeFloat
+                | Self::CubeAttack { .. }
+                | Self::WitchRangedAttack { .. }
+                | Self::DrownedGoToBeach { .. }
                 | Self::Swell { .. }
                 | Self::SquidFlee { .. }
                 | Self::RandomStand { .. }
@@ -541,6 +639,16 @@ impl Goal {
             Self::RangedAttack { .. } => "RangedAttackGoal",
             Self::LlamaHurtByTarget { .. } => "LlamaHurtByTargetGoal",
             Self::EatBlock { .. } => "EatBlockGoal",
+            Self::CubeFloat => "CubeMobFloatGoal",
+            Self::CubeAttack { .. } => "CubeMobAttackGoal",
+            Self::CubeRandomDirection { .. } => "CubeMobRandomDirectionGoal",
+            Self::CubeKeepJumping => "CubeMobKeepOnJumpingGoal",
+            Self::DrownedGoToWater { .. } => "DrownedGoToWaterGoal",
+            Self::DrownedSwimUp { .. } => "DrownedSwimUpGoal",
+            Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
+            Self::RandomStroll { .. } => "RandomStrollGoal",
+            Self::WitchHealRaiders { .. } => "NearestHealableRaiderTargetGoal",
+            Self::WitchRangedAttack { .. } => "RangedAttackGoal",
             Self::PandaSit => "PandaSitGoal",
             Self::PandaLieOnBack => "PandaLieOnBackGoal",
             Self::PandaSneeze => "PandaSneezeGoal",
@@ -595,6 +703,24 @@ pub struct GoalSelector {
 }
 
 impl GoalSelector {
+    /// 按 `(优先级, 目标)` 建一个选择器，调用顺序就是官方的 `addGoal` 顺序。
+    ///
+    /// Builds a selector from `(priority, goal)` pairs in vanilla `addGoal` order.
+    pub(super) fn from_ordered_pairs(goals: Vec<(i32, Goal)>) -> Self {
+        Self {
+            goals: goals
+                .into_iter()
+                .map(|(priority, goal)| WrappedGoal {
+                    priority,
+                    running: false,
+                    goal,
+                })
+                .collect(),
+            locked: [None; 4],
+            disabled: [false; 4],
+        }
+    }
+
     /// 按注册顺序给出目标的选择器，别的生物模块用它搭自己的表。
     ///
     /// A selector over goals in registration order, for the per-mob modules.
@@ -846,7 +972,10 @@ impl GoalSelector {
             }
         }
         self.goals[index].goal = if has_bow {
-            Goal::Bow(super::skeleton::BowGoal::new(ctx.blocks().difficulty()))
+            Goal::Bow(super::skeleton::BowGoal::for_kind(
+                mob.mob_type,
+                ctx.blocks().difficulty(),
+            ))
         } else {
             Self::skeleton_melee()
         };
@@ -966,6 +1095,16 @@ impl GoalSelector {
             .filter(|wrapped| wrapped.running)
             .map(|wrapped| wrapped.goal.name_for(mob_type))
             .collect()
+    }
+
+    /// 正在跑的目标的官方类名：兔子和狐狸的几个目标是子类，名字按生物种类换。
+    /// 别的目标自带 `class`（如溺尸的近战目标是 `Drowned.DrownedAttackGoal`）。
+    ///
+    /// The vanilla class names of the running goals: a few rabbit and fox goals are
+    /// subclasses renamed by mob type; other goals carry their own `class` (the
+    /// drowned's melee goal is `Drowned.DrownedAttackGoal`).
+    pub fn running_names_of(&self, mob: &Mob) -> Vec<&'static str> {
+        self.running_class_names(mob.mob_type)
     }
 
     pub fn is_panicking(&self) -> bool {
@@ -1191,7 +1330,7 @@ fn raw_target(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(EntityUid, Vec3, V
 }
 
 /// `Goal.reducedTickDelay`。
-pub(super) const fn reduced_tick_delay(ticks: i32) -> i32 {
+pub(crate) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
 }
 
@@ -1481,8 +1620,25 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    !(mob.mob_type.full_target_rules() || mob.mob_type == super::MobType::PolarBear)
-                        || target_by_uid(mob, ctx, uid).is_some()
+                    if mob.mob_type == super::MobType::Witch {
+                        // `new HurtByTargetGoal(this, Raider.class)`：女巫不报复自己或别的袭击者。
+                        //
+                        // `new HurtByTargetGoal(this, Raider.class)`: witches ignore themselves
+                        // and other raiders.
+                        uid != me.id
+                            && !ctx.other(uid).is_some_and(|other| {
+                                matches!(
+                                    &other.kind,
+                                    KindPublic::Mob(other_mob)
+                                        if other_mob.mob_type == super::MobType::Witch
+                                )
+                            })
+                            && target_by_uid(mob, ctx, uid).is_some()
+                    } else {
+                        !(mob.mob_type.full_target_rules()
+                            || mob.mob_type == super::MobType::PolarBear)
+                            || target_by_uid(mob, ctx, uid).is_some()
+                    }
                 })
         }
         // `HurtByTargetGoal.canUse`：时间戳变了，并且 `canAttack(lastHurtByMob, HURT_BY_TARGETING)`。
@@ -1577,6 +1733,92 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 })
         }
         Goal::EatBlock { .. } => eat_block_can_use(me, mob, ctx),
+        Goal::CubeFloat => living::is_in_liquid(me, mob),
+        Goal::CubeAttack { .. } => combat_target(mob, ctx).is_some(),
+        Goal::CubeRandomDirection { .. } => {
+            combat_target(mob, ctx).is_none() && super::slime::can_pick_direction(me, mob)
+        }
+        // `!isPassenger()`：没有骑乘。
+        // `!isPassenger()`: riding is not modelled.
+        Goal::CubeKeepJumping => true,
+        Goal::DrownedGoToWater { wanted, .. } => {
+            // `DrownedGoToWaterGoal.canUse`：白天、不在水里、找得到水。
+            // `DrownedGoToWaterGoal.canUse`: daylight, not in water and water found.
+            if !ctx.blocks().is_bright_outside() || me.in_water {
+                return false;
+            }
+            let Some(found) = water_pos(me, ctx.blocks()) else {
+                return false;
+            };
+            *wanted = found;
+            true
+        }
+        // `DrownedSwimUpGoal.canUse`：夜里、在水里、低于海平面 2 格。
+        Goal::DrownedSwimUp { .. } => {
+            !ctx.blocks().is_bright_outside()
+                && me.in_water
+                && me.position.y < f64::from(ctx.blocks().sea_level() - 2)
+        }
+        // `DrownedGoToBeachGoal.canUse`：先走 `MoveToBlockGoal.canUse`（倒计时、取
+        // `nextInt(200)`、找岸边），再看天色、是否泡水和海平面。
+        //
+        // `DrownedGoToBeachGoal.canUse`: `MoveToBlockGoal.canUse` first (countdown,
+        // `nextInt(200)`, search), then the sky, water and sea level checks.
+        Goal::DrownedGoToBeach {
+            next_start_tick,
+            block_pos,
+            ..
+        } => {
+            if *next_start_tick > 0 {
+                *next_start_tick -= 1;
+                return false;
+            }
+            *next_start_tick = reduced_tick_delay(200 + me.random.next_int_bounded(200));
+            let Some(found) = find_beach_target(me, mob, ctx, 8, 2) else {
+                return false;
+            };
+            *block_pos = Some(found);
+            !ctx.blocks().is_bright_outside()
+                && me.in_water
+                && me.position.y >= f64::from(ctx.blocks().sea_level() - 3)
+        }
+        Goal::RandomStroll {
+            interval,
+            wanted,
+            force_trigger,
+            ..
+        } => {
+            if !*force_trigger {
+                if mob.no_action_time >= 100 {
+                    return false;
+                }
+                if me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0 {
+                    return false;
+                }
+            }
+            let Some(found) = default_random_pos(me, mob, ctx.blocks(), 10, 7) else {
+                return false;
+            };
+            *wanted = found;
+            *force_trigger = false;
+            true
+        }
+        // `NearestHealableRaiderTargetGoal.canUse`：冷却后先抽一个 `nextBoolean`，
+        // 再问 `hasActiveRaid()`。Bamboo 没有袭击，所以恒假，但取数保留。
+        Goal::WitchHealRaiders { cooldown } => {
+            if *cooldown > 0 {
+                return false;
+            }
+            let _rolled = me.random.next_boolean();
+            false
+        }
+        Goal::WitchRangedAttack { target, .. } => {
+            let alive = mob.target.filter(|&uid| alive_target(ctx, uid).is_some());
+            if alive.is_some() {
+                *target = alive;
+            }
+            alive.is_some()
+        }
         Goal::SquidRandomMovement => true,
         Goal::SquidFlee { .. } => super::squid::flee_can_use(me, mob, ctx),
         Goal::BreakDoor => {
@@ -1666,6 +1908,39 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
+        // `Drowned.DrownedAttackGoal.canContinueToUse`：僵尸的近战条件加 `okTarget`。
+        Goal::RandomStroll { .. } | Goal::DrownedGoToWater { .. } => !mob.navigation.is_done(),
+        Goal::DrownedSwimUp { stuck, .. } => {
+            !*stuck
+                && !ctx.blocks().is_bright_outside()
+                && me.in_water
+                && me.position.y < f64::from(ctx.blocks().sea_level() - 2)
+        }
+        // `MoveToBlockGoal.canContinueToUse`：尝试次数没超限，目标格仍然合格。
+        //
+        // `MoveToBlockGoal.canContinueToUse`: within the try limits and the target still valid.
+        Goal::DrownedGoToBeach {
+            try_ticks,
+            max_stay_ticks,
+            block_pos,
+            ..
+        } => {
+            *try_ticks >= -*max_stay_ticks
+                && *try_ticks <= 1200
+                && block_pos.is_some_and(|pos| beach_target_valid(ctx.blocks(), pos))
+        }
+        Goal::WitchHealRaiders { .. } => {
+            combat_target(mob, ctx).is_some_and(|target| target_in_follow_range(me, mob, target))
+        }
+        // `RangedAttackGoal.canContinueToUse`：`canUse` 或目标还活着且导航没完。
+        //
+        // `RangedAttackGoal.canContinueToUse`: `canUse` or the stored target is alive while navigating.
+        Goal::WitchRangedAttack { target, .. } => {
+            let stored = *target;
+            can_use(goal, me, mob, ctx)
+                || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
+                    && !mob.navigation.is_done())
+        }
         Goal::Panic { .. } => {
             // `PandaPanicGoal.canContinueToUse`：坐下时停下导航。
             // `PandaPanicGoal.canContinueToUse`: sitting stops the navigation.
@@ -1724,7 +1999,18 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             *look_time > 0 && !super::fox::blocks_look(mob)
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
-        Goal::Float | Goal::Swell { .. } => can_use(goal, me, mob, ctx),
+        Goal::Float
+        | Goal::Swell { .. }
+        | Goal::CubeFloat
+        | Goal::CubeRandomDirection { .. }
+        | Goal::CubeKeepJumping => can_use(goal, me, mob, ctx),
+        Goal::CubeAttack { grow_tired_timer } => {
+            if combat_target(mob, ctx).is_none() {
+                return false;
+            }
+            *grow_tired_timer -= 1;
+            *grow_tired_timer > 0
+        }
         Goal::Unavailable(_) | Goal::RandomStand { .. } => false,
         Goal::RunAroundLikeCrazy { .. } => super::equine::tame::can_continue(mob),
         Goal::MeleeAttack {
@@ -1749,6 +2035,14 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
+            if mob.mob_type == super::MobType::Drowned
+                && !super::drowned::ok_target(
+                    ctx,
+                    Some((target.position, combat_target_in_water(ctx, &target))),
+                )
+            {
+                return false;
+            }
             if *track_target {
                 within_home(mob, BlockPos::containing(target.position))
             } else {
@@ -1768,7 +2062,9 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // does not arise for polar bears.
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
         }
-        Goal::NearestAttackableTarget { unseen_ticks, .. } if mob.mob_type.full_target_rules() => {
+        Goal::NearestAttackableTarget { unseen_ticks, .. }
+            if mob.mob_type.full_target_rules() || mob.mob_type == super::MobType::Slime =>
+        {
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
@@ -1780,6 +2076,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             } else {
                 *unseen_ticks += 1;
             }
+
             *unseen_ticks <= reduced_tick_delay(60)
         }
         Goal::RangedAttack { target, .. } => {
@@ -1874,6 +2171,44 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
         }
+        Goal::RandomStroll { speed, wanted, .. } | Goal::DrownedGoToWater { speed, wanted } => {
+            let nav = living::nav_mob(me, mob, ctx.blocks());
+            mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
+        }
+        // `DrownedSwimUpGoal.start` 打开「正在找陆地」。
+        Goal::DrownedSwimUp { stuck, .. } => {
+            mob.searching_for_land = true;
+            *stuck = false;
+        }
+        // `DrownedGoToBeachGoal.start`：先关掉「正在找陆地」，再走 `MoveToBlockGoal.start`。
+        //
+        // `DrownedGoToBeachGoal.start`: clear "searching for land", then `MoveToBlockGoal.start`.
+        Goal::DrownedGoToBeach {
+            speed,
+            try_ticks,
+            max_stay_ticks,
+            block_pos,
+            ..
+        } => {
+            mob.searching_for_land = false;
+            if let Some(pos) = *block_pos {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation.move_to(
+                    ctx.blocks(),
+                    &nav,
+                    Vec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y + 1),
+                        f64::from(pos.z) + 0.5,
+                    ),
+                    *speed,
+                );
+            }
+            *try_ticks = 0;
+            let inner = me.random.next_int_bounded(1200);
+            *max_stay_ticks = me.random.next_int_bounded(inner + 1200) + 1200;
+        }
+        Goal::WitchHealRaiders { cooldown } => *cooldown = reduced_tick_delay(200),
         Goal::Swim { speed, wanted, .. } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
@@ -1906,6 +2241,15 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
                 );
             }
         }
+        Goal::Float
+        | Goal::Tempt { .. }
+        | Goal::Unavailable(_)
+        | Goal::CubeFloat
+        | Goal::CubeRandomDirection { .. }
+        | Goal::CubeKeepJumping
+        | Goal::WitchRangedAttack { .. }
+        | Goal::SquidRandomMovement => {}
+        Goal::CubeAttack { grow_tired_timer } => *grow_tired_timer = reduced_tick_delay(300),
         Goal::Swell { target } => {
             // `SwellGoal.start`：停下导航，记住这一刻的目标。
             // `SwellGoal.start`: stop navigating and remember the current target.
@@ -1913,7 +2257,6 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *target = combat_target(mob, ctx).map(|found| found.uid);
         }
         Goal::SquidFlee { flee_ticks } => *flee_ticks = 0,
-        Goal::Float | Goal::Tempt { .. } | Goal::Unavailable(_) | Goal::SquidRandomMovement => {}
         Goal::RandomStand { .. } => super::equine::random_stand_start(me, mob),
         Goal::RunAroundLikeCrazy { speed, wanted } => {
             super::equine::tame::start(me, mob, ctx, *wanted, *speed)
@@ -2081,8 +2424,32 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::Panic { .. }
         | Goal::RandomLookAround { .. }
         | Goal::Unavailable(_)
+        | Goal::CubeFloat
+        | Goal::CubeAttack { .. }
+        | Goal::CubeRandomDirection { .. }
+        | Goal::CubeKeepJumping
+        | Goal::DrownedGoToWater { .. }
+        | Goal::RandomStroll { .. }
         | Goal::RandomStand { .. }
+        | Goal::WitchHealRaiders { .. }
         | Goal::RunAroundLikeCrazy { .. } => {}
+        // `DrownedSwimUpGoal.stop` 关掉「正在找陆地」。
+        Goal::DrownedSwimUp { .. } => mob.searching_for_land = false,
+        // `DrownedGoToBeachGoal.stop` 只调 `super.stop()`，而 `MoveToBlockGoal` 没有覆写
+        // `stop`，所以官方这一步什么都不做。
+        //
+        // `DrownedGoToBeachGoal.stop` only calls `super.stop()`, and `MoveToBlockGoal` does
+        // not override `stop`, so vanilla does nothing here.
+        Goal::DrownedGoToBeach { .. } => {}
+        Goal::WitchRangedAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            *target = None;
+            *see_time = 0;
+            *attack_time = -1;
+        }
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
         Goal::HurtByTarget { .. } | Goal::LlamaHurtByTarget { .. } => {
@@ -2148,6 +2515,139 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::EndermanBlock { place } => super::enderman::sample_block(me, mob, *place),
         Goal::EatBlock { eat_tick } => eat_block_tick(eat_tick, me, mob, ctx),
+        Goal::CubeFloat => {
+            if me.random.next_float() < 0.8 {
+                mob.jump.jump = true;
+            }
+            super::slime::set_wanted_movement(mob, 1.2);
+        }
+        Goal::CubeAttack { .. } => {
+            let target = combat_target(mob, ctx);
+            super::slime::attack_tick(me, mob, target);
+        }
+        Goal::CubeRandomDirection {
+            chosen_degrees,
+            next_randomize_time,
+        } => {
+            *next_randomize_time -= 1;
+            if *next_randomize_time <= 0 {
+                *next_randomize_time =
+                    adjusted_tick_delay(false, 40 + me.random.next_int_bounded(60));
+                *chosen_degrees = me.random.next_int_bounded(360) as f32;
+            }
+            mob.cube.move_y_rot = *chosen_degrees;
+            mob.cube.aggressive = false;
+        }
+        Goal::CubeKeepJumping => super::slime::set_wanted_movement(mob, 1.0),
+        // `DrownedSwimUpGoal.tick`：离终点够近或没有路径时，朝海平面方向重新找点。
+        Goal::DrownedSwimUp { speed, stuck } => {
+            let sea = f64::from(ctx.blocks().sea_level());
+            if me.position.y < sea - 1.0
+                && (mob.navigation.is_done() || super::drowned::close_to_next_pos(me, mob))
+            {
+                let towards = Vec3::new(me.position.x, sea - 1.0, me.position.z);
+                let Some(next) = pos_towards(
+                    me,
+                    mob,
+                    ctx.blocks(),
+                    4,
+                    8,
+                    towards,
+                    std::f64::consts::FRAC_PI_2,
+                ) else {
+                    *stuck = true;
+                    return;
+                };
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation.move_to(ctx.blocks(), &nav, next, *speed);
+            }
+        }
+        // `MoveToBlockGoal.tick`：走到目标块上方，够不到就计一次尝试，每 40 次重算路径。
+        //
+        // `MoveToBlockGoal.tick`: step onto the block above the target; count a try when it
+        // is out of reach and recompute the path every forty.
+        Goal::DrownedGoToBeach {
+            speed,
+            try_ticks,
+            block_pos,
+            reached_target,
+            ..
+        } => {
+            let Some(pos) = *block_pos else {
+                return;
+            };
+            let above = BlockPos::new(pos.x, pos.y + 1, pos.z);
+            let dx = f64::from(above.x) + 0.5 - me.position.x;
+            let dy = f64::from(above.y) + 0.5 - me.position.y;
+            let dz = f64::from(above.z) + 0.5 - me.position.z;
+            if dx * dx + dy * dy + dz * dz >= 1.0 {
+                *reached_target = false;
+                *try_ticks += 1;
+                if *try_ticks % 40 == 0 {
+                    let nav = living::nav_mob(me, mob, ctx.blocks());
+                    mob.navigation.move_to(
+                        ctx.blocks(),
+                        &nav,
+                        Vec3::new(
+                            f64::from(above.x) + 0.5,
+                            f64::from(above.y),
+                            f64::from(above.z) + 0.5,
+                        ),
+                        *speed,
+                    );
+                }
+            } else {
+                *reached_target = true;
+                *try_ticks -= 1;
+            }
+        }
+        // `RangedAttackGoal.tick`：视线、距离、导航、注视，再按 60 刻的间隔攻击。
+        //
+        // `RangedAttackGoal.tick`: line of sight, distance, navigation, look, then attack every 60 ticks.
+        Goal::WitchRangedAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) else {
+                return;
+            };
+            let dist_sqr = me.position.distance_to_sqr(target.position);
+            let has_los =
+                living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position());
+            if has_los {
+                *see_time += 1;
+            } else {
+                *see_time = 0;
+            }
+            let radius = 10.0_f64;
+            if dist_sqr <= radius * radius && *see_time >= 5 {
+                mob.navigation.stop();
+            } else {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation
+                    .move_to_entity(ctx.blocks(), &nav, target.position, 1.0, 1);
+            }
+            let eye = target.eye_position();
+            mob.look
+                .set_look_at(target.position.x, eye.y, target.position.z, 30.0, 30.0);
+            *attack_time -= 1;
+            if *attack_time == 0 {
+                if !has_los {
+                    return;
+                }
+                let dist = (dist_sqr.sqrt() / radius) as f32;
+                let power = mth::clamp_f32(dist, 0.1, 1.0);
+                super::witch::perform_ranged_attack(me, mob, ctx, target, power);
+                // `attackIntervalMin == attackIntervalMax == 60`。
+                // `attackIntervalMin == attackIntervalMax == 60`.
+                *attack_time = 60;
+            } else if *attack_time < 0 {
+                // `Mth.floor(Mth.lerp(d, 60, 60))` 恒等于 60。
+                // `Mth.floor(Mth.lerp(d, 60, 60))` is always 60.
+                *attack_time = 60;
+            }
+        }
         Goal::Swell { target } => swell_tick(*target, me, mob, ctx),
         Goal::SquidRandomMovement => super::squid::random_movement_tick(me, mob),
         Goal::SquidFlee { flee_ticks } => super::squid::flee_tick(flee_ticks, me, mob, ctx),
@@ -2161,6 +2661,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 mob.jump.jump = true;
             }
         }
+        // 没有每刻逻辑的目标（`tick()` 是空方法）。
+        Goal::DrownedGoToWater { .. }
+        | Goal::RandomStroll { .. }
+        | Goal::WitchHealRaiders { .. } => {}
         Goal::Breed {
             speed,
             partner,
@@ -2289,7 +2793,11 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::LlamaHurtByTarget { .. }
         | Goal::LeapAtTarget { .. }
         | Goal::RestrictSun
-        | Goal::RandomStand { .. } => {}
+        | Goal::RandomStand { .. }
+        // `TargetGoal` 没有 `tick`：`unseenTicks` 只在 `canContinueToUse` 里按视线刷新。
+        // `TargetGoal` has no `tick`: `unseenTicks` is only refreshed by line of sight in
+        // `canContinueToUse`, so ticking the target goal here is a no-op.
+        | Goal::NearestAttackableTarget { .. } => {}
         Goal::RangedAttack {
             target,
             attack_time,
@@ -2300,15 +2808,6 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             if let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) {
                 super::equine::ranged_attack_tick(me, mob, ctx, target, attack_time, see_time);
             }
-        }
-        Goal::NearestAttackableTarget { .. } if mob.mob_type == super::MobType::PolarBear => {
-            // 北极熊的 `unseenTicks` 只在 `canContinueToUse` 里记（见 `target_still_seen`）。
-            // Polar bears count `unseenTicks` in `canContinueToUse` only (`target_still_seen`).
-        }
-        Goal::NearestAttackableTarget { unseen_ticks, .. } => {
-            *unseen_ticks += 1;
-            // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
-            // `unseenTicks`；本期的玩家目标恒可攻击，不改随机源。
         }
         Goal::MeleeAttack {
             speed,
@@ -2396,7 +2895,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
             // `ZombieAttackGoal.tick`：`super.tick()` 之后抬手计时加一，按新的
             // `ticksUntilNextAttack` 决定举不举手。
-            if matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk) {
+            if matches!(
+                mob.mob_type,
+                super::MobType::Zombie | super::MobType::Husk | super::MobType::Drowned
+            ) {
                 *raise_arm_ticks += 1;
                 mob.aggressive = *raise_arm_ticks >= 5
                     && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
@@ -2985,7 +3487,12 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
 /// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
 /// `Monster.getWalkTargetValue` 取负的光照路径代价。
 pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
-    if mob.mob_type == super::MobType::Enderman {
+    // 史莱姆不是 `PathfinderMob`，`Mob.checkSpawnRules` 恒真。
+    // Slimes are not `PathfinderMob`s; `Mob.checkSpawnRules` is always true.
+    if matches!(
+        mob.mob_type,
+        super::MobType::Slime | super::MobType::Enderman
+    ) {
         return 0.0;
     }
     if mob.mob_type == super::MobType::Turtle {
@@ -3066,6 +3573,44 @@ pub(crate) fn default_random_pos(
     let restricted = mob_restricted(me, mob, f64::from(horizontal));
     pick_best(mob, view, || {
         let direction = random_direction(me, horizontal, vertical);
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos)
+            || (restricted && !within_home(mob, pos))
+            || !stable_destination(mob, view, pos)
+            || has_malus(mob, view, pos)
+        {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `DefaultRandomPos.getPosTowards`：和 `getPos` 一样取 10 次，只是方向限制在朝目标
+/// `max_radians` 的扇形里。
+///
+/// `DefaultRandomPos.getPosTowards`: the same ten rolls as `getPos`, with the direction
+/// restricted to a fan of `max_radians` around the target.
+pub(crate) fn pos_towards(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    towards: Vec3,
+    max_radians: f64,
+) -> Option<Vec3> {
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    let dir_x = towards.x - me.position.x;
+    let dir_z = towards.z - me.position.z;
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians_flat(
+            me,
+            f64::from(horizontal),
+            vertical,
+            dir_x,
+            dir_z,
+            max_radians,
+        )?;
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
@@ -3175,11 +3720,13 @@ fn random_direction_within_radians_flat(
     dir_z: f64,
     max_radians: f64,
 ) -> Option<BlockPos> {
+    // 官方在 f32 里算扇形偏移和 π/2，再提升成 f64；SQRT_OF_TWO 是双精度常量。
+    // Vanilla computes the fan offset and π/2 in f32, then widens; SQRT_OF_TWO is a double.
     let centre = mth::atan2(dir_z, dir_x) - f64::from(std::f32::consts::FRAC_PI_2);
     let spread = f64::from(2.0_f32 * me.random.next_float() - 1.0);
     let yaw = centre + spread * max_radians;
-    let sqrt_two = f64::from(2.0_f32.sqrt());
-    let distance = mth::lerp(me.random.next_double().sqrt(), 0.0, max_horizontal) * sqrt_two;
+    let distance =
+        mth::lerp(me.random.next_double().sqrt(), 0.0, max_horizontal) * std::f64::consts::SQRT_2;
     let x = -distance * yaw.sin();
     let z = distance * yaw.cos();
     if x.abs() > max_horizontal || z.abs() > max_horizontal {
@@ -3231,8 +3778,12 @@ pub(crate) fn land_random_pos(
 pub(crate) struct CombatTarget {
     pub(crate) uid: EntityUid,
     pub(crate) position: Vec3,
+    pub(crate) delta: Vec3,
     eye: f32,
     pub(crate) height: f64,
+    pub(crate) health: f32,
+    pub(crate) effects: crate::entity::ctx::TargetEffects,
+    pub(crate) is_raider: bool,
     /// `getBbWidth()`。
     pub(crate) width: f32,
     hitbox: Aabb,
@@ -3254,8 +3805,12 @@ impl CombatTarget {
         Self {
             uid: view.uid,
             position: feet,
+            delta: view.delta,
             eye: view.eye_height,
             height,
+            health: view.health,
+            effects: view.effects,
+            is_raider: false,
             width: 0.6,
             hitbox: Aabb::new(
                 feet.x - half,
@@ -3274,6 +3829,11 @@ impl CombatTarget {
 
     pub(crate) fn eye_y(&self) -> f64 {
         self.position.y + f64::from(self.eye)
+    }
+
+    /// `getHitbox()`。
+    pub(crate) const fn hitbox(&self) -> Aabb {
+        self.hitbox
     }
 
     pub(crate) fn eye_position(&self) -> Vec3 {
@@ -3316,9 +3876,9 @@ pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
 }
 
 fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
-    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼和羊驼会把别的生物当目标。
-    // Skeletons, creepers, spiders, endermen, polar bears, foxes, wolves and llamas
-    // can target other mobs.
+    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼、羊驼和女巫会把别的生物当目标。
+    // Skeletons, creepers, spiders, endermen, polar bears, foxes, wolves, llamas and
+    // witches can target other mobs.
     let mobs_allowed = mob.mob_type.full_target_rules()
         || matches!(
             mob.mob_type,
@@ -3326,6 +3886,7 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
                 | super::MobType::Fox
                 | super::MobType::Wolf
                 | super::MobType::Llama
+                | super::MobType::Witch
         );
     if !mobs_allowed && player_by_uid(ctx.blocks(), uid).is_none() {
         return None;
@@ -3377,8 +3938,12 @@ fn mob_target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget,
     let view = CombatTarget {
         uid,
         position: other.position,
+        delta: other.delta,
         eye,
         height: f64::from(target.dimensions().1),
+        health: target.health,
+        effects: target.effects,
+        is_raider: target.mob_type == super::MobType::Witch,
         width: target.dimensions().0,
         hitbox: other.bounding_box(),
     };
@@ -3432,6 +3997,113 @@ fn alive_target(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
 
 /// `NearestAttackableTargetGoal.findTarget` 的玩家分支：按 `FOLLOW_RANGE`
 /// 找最近、看得见、非创造/旁观且在战斗条件下能被打的目标。
+/// 当前目标的快照；没有目标或目标不在本岛时为 `None`。
+///
+/// The current target's snapshot; `None` without a target or when it is on another island.
+pub(crate) fn current_combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
+    combat_target(mob, ctx)
+}
+
+/// 当前目标是不是在水里；没有目标时为假。
+///
+/// Whether the current target is in water; false without a target.
+pub(crate) fn current_target_in_water(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
+    combat_target(mob, ctx).is_some_and(|target| combat_target_in_water(ctx, &target))
+}
+
+/// 目标是不是在水里。生物读 `MobPublic.in_water`（上一刻的流体跟踪），玩家没有这个字段，
+/// 按脚下那一格是不是水判断。
+///
+/// Whether the target is in water. Mobs read `MobPublic.in_water` (last tick's fluid
+/// tracking); players have no such field, so the block under their feet decides.
+fn combat_target_in_water(ctx: &dyn EntityCtx, target: &CombatTarget) -> bool {
+    let view = ctx.blocks();
+    if let Some(other) = ctx.other(target.uid) {
+        return match &other.kind {
+            KindPublic::Mob(mob) => mob.in_water,
+            _ => view
+                .fluid_state(BlockPos::containing(other.position))
+                .is_tagged(fluid_tags::WATER),
+        };
+    }
+    let mut found = false;
+    view.for_each_player(&mut |player| {
+        if player.uid == target.uid {
+            found = view
+                .fluid_state(BlockPos::containing(player.position))
+                .is_tagged(fluid_tags::WATER);
+        }
+    });
+    found
+}
+
+/// `Drowned.DrownedGoToWaterGoal.getWaterPos`：10 次随机偏移，找水方块。
+///
+/// `Drowned.DrownedGoToWaterGoal.getWaterPos`: ten random offsets, looking for water.
+fn water_pos(me: &mut Entity, view: &dyn BlockView) -> Option<Vec3> {
+    let base = me.block_position();
+    for _ in 0..10 {
+        let pos = BlockPos::new(
+            base.x + me.random.next_int_bounded(20) - 10,
+            base.y + 2 - me.random.next_int_bounded(8),
+            base.z + me.random.next_int_bounded(20) - 10,
+        );
+        if view.block_state(pos).is(mc_bamboo_data::blocks::WATER) {
+            return Some(Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y),
+                f64::from(pos.z) + 0.5,
+            ));
+        }
+    }
+    None
+}
+
+/// `MoveToBlockGoal.findNearestBlock` 的扫描顺序：纵向 0、1、-1、2、-2，再按半径
+/// 0..R 和方环。`isWithinHome` 对没有家的生物恒真。
+///
+/// The `MoveToBlockGoal.findNearestBlock` scan order: vertical 0, 1, -1, 2, -2, then
+/// radius 0..R around a square ring. `isWithinHome` is always true without a home.
+fn find_beach_target(
+    me: &Entity,
+    _mob: &Mob,
+    ctx: &dyn EntityCtx,
+    search_range: i32,
+    vertical_range: i32,
+) -> Option<BlockPos> {
+    let view = ctx.blocks();
+    let mob_pos = me.block_position();
+    let mut y = 0;
+    while y <= vertical_range {
+        for r in 0..search_range {
+            let mut x = 0;
+            while x <= r {
+                let mut z = if x < r && x > -r { r } else { 0 };
+                while z <= r {
+                    let pos = BlockPos::new(mob_pos.x + x, mob_pos.y + y - 1, mob_pos.z + z);
+                    if beach_target_valid(view, pos) {
+                        return Some(pos);
+                    }
+                    z = if z > 0 { -z } else { 1 - z };
+                }
+                x = if x > 0 { -x } else { 1 - x };
+            }
+        }
+        y = if y > 0 { -y } else { 1 - y };
+    }
+    let _ = view;
+    None
+}
+
+/// `DrownedGoToBeachGoal.isValidTarget`：上面两格空、脚下这格能站。
+///
+/// `DrownedGoToBeachGoal.isValidTarget`: two empty blocks above and a standable floor.
+fn beach_target_valid(view: &dyn BlockView, pos: BlockPos) -> bool {
+    view.block_state(pos.above()).is_air()
+        && view.block_state(pos.above().above()).is_air()
+        && view.is_face_sturdy(pos, mc_bamboo_core::Direction::Up, SupportType::Full)
+}
+
 fn nearest_attackable(
     me: &Entity,
     mob: &mut Mob,
@@ -3457,6 +4129,15 @@ fn nearest_attackable(
     let mut best = f64::MAX;
     let mut found = None;
     for player in players {
+        // 战斗用的 `TargetingConditions.test`：`targeter.canAttack(target)` 要求
+        // `Player.canBeSeenAsEnemy()`，能力里 `invulnerable` 的玩家（创造模式）在测距离和
+        // 视线之前就被排除，目标选择器不会为他启动。
+        // Combat `TargetingConditions.test`: `targeter.canAttack(target)` needs
+        // `Player.canBeSeenAsEnemy()`, so a player with the `invulnerable` ability
+        // (creative) is rejected before the range and sight checks and never starts the goal.
+        if player.creative {
+            continue;
+        }
         // 选择器（`isAngryAt`）在 `TargetingConditions.test` 里先于距离和视线。
         // The selector (`isAngryAt`) runs before range and sight in `TargetingConditions.test`.
         if kind == TargetType::AngerPlayer
@@ -3464,10 +4145,22 @@ fn nearest_attackable(
         {
             continue;
         }
-        // `Player.canBeSeenAsEnemy`：创造模式的玩家不会被选中。僵尸和骷髅的旧行为不动。
-        // `Player.canBeSeenAsEnemy`: creative players are never picked. Zombies and
-        // skeletons keep their previous behaviour.
-        if kind != TargetType::Player && player.creative {
+        // `Slime.addTargetingGoals` 的选择器：高度差不超过 4。
+        // The `Slime.addTargetingGoals` selector: at most 4 blocks of height difference.
+        if mob.mob_type == super::MobType::Slime
+            && !super::slime::accepts_target_height(me, player.position.y)
+        {
+            continue;
+        }
+        // `Drowned.okTarget` 是玩家那条目标的子选择器：白天只打在水里的玩家。
+        //
+        // The drowned's `okTarget` subselector: outside daylight it only targets wet players.
+        if mob.mob_type == super::MobType::Drowned
+            && view.is_bright_outside()
+            && !view
+                .fluid_state(BlockPos::containing(player.position))
+                .is_tagged(fluid_tags::WATER)
+        {
             continue;
         }
         if !targeting_test(me, mob, view, &player, range, true) {
