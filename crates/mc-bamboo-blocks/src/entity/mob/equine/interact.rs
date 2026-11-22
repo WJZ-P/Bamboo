@@ -212,14 +212,16 @@ fn do_player_ride(mob: &mut Mob) {
     }
 }
 
-/// `isFood`：马、驴、骡看 `horse_food`，羊驼看 `llama_food`。
+/// `isFood`：马、驴、骡看 `horse_food`，羊驼看 `llama_food`，骆驼看 `camel_food`
+/// （仙人掌，`Camel.isFood`）。
 ///
-/// `isFood`: `horse_food` for horses, donkeys and mules, `llama_food` for llamas.
+/// `isFood`: `horse_food` for horses, donkeys and mules, `llama_food` for llamas,
+/// `camel_food` (cactus) for camels per `Camel.isFood`.
 fn is_food(kind: MobType, stack: &ItemStack) -> bool {
-    let tag = if kind == MobType::Llama {
-        item_tags::LLAMA_FOOD
-    } else {
-        item_tags::HORSE_FOOD
+    let tag = match kind {
+        MobType::Llama => item_tags::LLAMA_FOOD,
+        MobType::Camel => item_tags::CAMEL_FOOD,
+        _ => item_tags::HORSE_FOOD,
     };
     item_is_tagged(stack.item, tag)
 }

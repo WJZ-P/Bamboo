@@ -651,12 +651,12 @@ struct CowStep {
     owner: Option<String>,
 }
 
-/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊，以及苦力怕、
-/// 蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
+/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊、青蛙、蝌蚪、
+/// 骆驼，以及苦力怕、蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
 ///
 /// Scenes played by the Java `playZombie` driver: zombies, the wild animals,
-/// armadillos and goats, plus creepers, spiders, cave spiders, endermen, slimes,
-/// witches and drowned.
+/// armadillos, goats, frogs, tadpoles and camels, plus creepers, spiders, cave spiders,
+/// endermen, slimes, witches and drowned.
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
@@ -667,6 +667,7 @@ fn zombie_style(name: &str) -> bool {
         "goat_",
         "frog_",
         "tadpole_",
+        "camel_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
@@ -1485,11 +1486,13 @@ impl Report {
                 let yaw = f32::from_bits(cow.yaw as u32);
                 // 场景编号（两侧同一套，别撞号）：1 僵尸、2 尸壳、3 猪、4 羊、5 鸡、
                 // 6 兔子、7 狐狸、8 狼、9..=12 马科、13 犰狳、14 山羊、15 熊猫、
-                // 16 北极熊、17 哞菇、40..=43 敌对生物、60 海龟，其余是牛。
+                // 16 北极熊、17 哞菇、18 青蛙、19 蝌蚪、20 骆驼、
+                // 40..=43 敌对生物、60 海龟，其余是牛。
                 // Scene kind ids (one shared set, no collisions): 1 zombie, 2 husk,
                 // 3 pig, 4 sheep, 5 chicken, 6 rabbit, 7 fox, 8 wolf, 9..=12 equines,
                 // 13 armadillo, 14 goat, 15 panda, 16 polar bear, 17 mooshroom,
-                // 40..=43 hostiles, 60 turtle; anything else is a cow.
+                // 18 frog, 19 tadpole, 20 camel, 40..=43 hostiles, 60 turtle;
+                // anything else is a cow.
                 let kind = match cow.kind {
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
@@ -1504,11 +1507,12 @@ impl Report {
                     14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
                     18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
                     19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
+                    20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
-                    20 => mc_bamboo_blocks::entity::mob::MobType::Ocelot,
-                    21 => mc_bamboo_blocks::entity::mob::MobType::Cat,
+                    21 => mc_bamboo_blocks::entity::mob::MobType::Ocelot,
+                    22 => mc_bamboo_blocks::entity::mob::MobType::Cat,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,

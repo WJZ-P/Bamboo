@@ -288,6 +288,7 @@ fn core_activity() -> ActivityData {
                 speed: 2.0,
                 environmental: true,
                 armadillo: true,
+                camel: false,
             },
             Kind::LookAtTargetSink { min: 45, max: 90 },
             Kind::MoveToTargetSink(MoveToTargetSink::new(true)),

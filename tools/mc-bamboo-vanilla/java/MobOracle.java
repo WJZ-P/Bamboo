@@ -1083,6 +1083,7 @@ public final class MobOracle {
             scenes.add(brushed);
             addGoatScenes(scenes);
             FrogScenes.add(scenes);
+            CamelScenes.add(scenes);
         }
 
         /**
@@ -1429,6 +1430,53 @@ public final class MobOracle {
 
         static String name(net.minecraft.world.entity.ai.memory.MemoryModuleType<?> type) {
             return BuiltInRegistries.MEMORY_MODULE_TYPE.getKey(type).getPath();
+        }
+    }
+
+    /**
+     * 骆驼场景：brain 驱动的闲逛、随机坐下 / 站起、被诱惑、受惊。
+     *
+     * <p>Camel scenes: brain-driven idling, random sitting / standing, temptation and panic.
+     *
+     * <p>场景里的骆驼不走 `finalizeSpawn`，`LAST_POSE_CHANGE_TICK` 保持 0，
+     * 两侧按同一套 `gameTime`（`START_TIME`）算出的 `getPoseTime()` 一致。
+     *
+     * <p>Scene camels skip `finalizeSpawn`, so `LAST_POSE_CHANGE_TICK` stays 0 and both sides
+     * agree on `getPoseTime()` from the same `gameTime` (`START_TIME`).
+     */
+    static final class CamelScenes {
+        static void add(List<Scene> scenes) {
+            for (long seed : new long[] {11L, 23L}) {
+                // 平地闲逛：随机漫步、看哪走哪、发呆、随机环顾、随机坐下 / 站起。
+                // Flat-ground idling: strolling, walking to the look target, doing nothing,
+                // looking around, and random sitting / standing.
+                Scene wander = new Scene("camel_wander_" + seed).ticks(600);
+                Scenes.ground(wander, 15);
+                wander.mob(20, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                scenes.add(wander);
+            }
+            // 时间拉长，多跑几轮坐下 / 站起和 40 / 52 刻的姿势过渡。
+            // A longer run to exercise several sit / stand pose transitions (40 / 52 ticks).
+            Scene sit = new Scene("camel_sit_stand").ticks(900);
+            Scenes.ground(sit, 15);
+            sit.mob(20, 0.5, 64.0, 0.5, 0.0F, 31L, 0);
+            scenes.add(sit);
+            // 拿仙人掌的玩家：跟随诱惑；幼崽跟着大人。
+            // A player holding cactus tempts it; the baby follows the adult.
+            Scene tempt = new Scene("camel_tempt").ticks(300);
+            Scenes.ground(tempt, 15);
+            tempt.mob(20, 0.5, 64.0, 0.5, 0.0F, 37L, 0);
+            tempt.mob(20, -6.5, 64.0, 0.5, 0.0F, 41L, -24000);
+            tempt.player(7.5, 64.0, 0.5, Items.CACTUS);
+            scenes.add(tempt);
+            // 被玩家打：`CamelPanic.start` 先 `standUpInstantly()` 再逃。
+            // Hit by a player: `CamelPanic.start` calls `standUpInstantly()` before fleeing.
+            Scene hurt = new Scene("camel_hurt").ticks(300);
+            Scenes.ground(hurt, 15);
+            hurt.mob(20, 0.5, 64.0, 0.5, 0.0F, 43L, 0);
+            hurt.player(2.5, 64.0, 0.5, Items.AIR);
+            hurt.hurts.add(new double[] {5, 0, 2.0, 0});
+            scenes.add(hurt);
         }
     }
 
@@ -2091,14 +2139,14 @@ public final class MobOracle {
             {
                 Scene huntRabbit = new Scene("cat_hunt_rabbit").ticks(160).difficulty(2);
                 ground(huntRabbit, 18);
-                huntRabbit.mob(21, 0.5, 64.0, 0.5, 0.0F, 630L, 0);
+                huntRabbit.mob(22, 0.5, 64.0, 0.5, 0.0F, 630L, 0);
                 huntRabbit.mob(6, 6.5, 64.0, 0.5, 0.0F, 631L, 0);
                 scenes.add(huntRabbit);
             }
             {
                 Scene huntTurtle = new Scene("cat_hunt_turtle").ticks(160).difficulty(2);
                 ground(huntTurtle, 18);
-                huntTurtle.mob(21, 0.5, 64.0, 0.5, 0.0F, 632L, 0);
+                huntTurtle.mob(22, 0.5, 64.0, 0.5, 0.0F, 632L, 0);
                 huntTurtle.mob(60, 3.5, 64.0, 0.5, 0.0F, 633L, 0);
                 huntTurtle.mob(60, 6.5, 64.0, 0.5, 0.0F, 634L, -24000);
                 scenes.add(huntTurtle);
@@ -2172,7 +2220,7 @@ public final class MobOracle {
                 // Hunting a chicken: crouch -> sprint inside 4 blocks -> leap -> attack.
                 Scene huntChicken = new Scene("ocelot_hunt_chicken").ticks(160).difficulty(2);
                 ground(huntChicken, 18);
-                huntChicken.mob(20, 0.5, 64.0, 0.5, 0.0F, 608L, 0);
+                huntChicken.mob(21, 0.5, 64.0, 0.5, 0.0F, 608L, 0);
                 huntChicken.mob(5, 6.5, 64.0, 0.5, 0.0F, 609L, 0);
                 scenes.add(huntChicken);
             }
@@ -2181,7 +2229,7 @@ public final class MobOracle {
                 // Hunting a baby turtle on land: ignores a closer adult turtle and targets the baby.
                 Scene huntTurtle = new Scene("ocelot_hunt_turtle").ticks(160).difficulty(2);
                 ground(huntTurtle, 18);
-                huntTurtle.mob(20, 0.5, 64.0, 0.5, 0.0F, 610L, 0);
+                huntTurtle.mob(21, 0.5, 64.0, 0.5, 0.0F, 610L, 0);
                 huntTurtle.mob(60, 3.5, 64.0, 0.5, 0.0F, 611L, 0);
                 huntTurtle.mob(60, 6.5, 64.0, 0.5, 0.0F, 612L, -24000);
                 scenes.add(huntTurtle);
@@ -3860,6 +3908,7 @@ public final class MobOracle {
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
                 || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
+                || scene.name.startsWith("camel_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
@@ -7712,11 +7761,13 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
-                // 编号两套合并：13 犰狳、14 山羊、16 北极熊（15 熊猫、17 哞菇走按名字的
-                // 动物路径），敌对生物用 40 起避开它们；其余 1..12 是僵尸 / 动物 / 马科。
-                // Merged id sets: 13 armadillo, 14 goat, 16 polar bear (15 panda and 17 mooshroom
-                // use the name-based animal path); hostiles start at 40 to stay clear, and 1..12
-                // are the zombies, animals and equines.
+                // 编号两套合并：13 犰狳、14 山羊、16 北极熊、18 青蛙、19 蝌蚪、20 骆驼
+                // （15 熊猫、17 哞菇走按名字的动物路径），敌对生物用 40 起避开它们；
+                // 其余 1..12 是僵尸 / 动物 / 马科。
+                // Merged id sets: 13 armadillo, 14 goat, 16 polar bear, 18 frog, 19 tadpole,
+                // 20 camel (15 panda and 17 mooshroom use the name-based animal path);
+                // hostiles start at 40 to stay clear, and 1..12 are the zombies, animals
+                // and equines.
                 case 40 -> new net.minecraft.world.entity.monster.Creeper(EntityTypes.CREEPER, level);
                 case 41 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, level);
                 case 43 -> new net.minecraft.world.entity.monster.Enderman(EntityTypes.ENDERMAN, level);
@@ -7742,8 +7793,9 @@ public final class MobOracle {
                 case 14 -> EntityTypes.GOAT.create(level, EntitySpawnReason.COMMAND);
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
-                case 20 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
-                case 21 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
+                case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                case 21 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
+                case 22 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
                 case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
@@ -9609,8 +9661,8 @@ public final class MobOracle {
         if (scene.startsWith("mooshroom_")) return 17;
         if (scene.startsWith("polar_bear_")) return 16;
         if (scene.startsWith("panda_")) return 15;
-        if (scene.startsWith("ocelot_")) return 20;
-        if (scene.startsWith("cat_")) return 21;
+        if (scene.startsWith("ocelot_")) return 21;
+        if (scene.startsWith("cat_")) return 22;
         return 0;
     }
 

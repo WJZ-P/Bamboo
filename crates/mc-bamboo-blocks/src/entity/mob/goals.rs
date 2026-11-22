@@ -3428,6 +3428,12 @@ pub(super) fn nearest_tempting_player(
         let follows = [player.main_hand, player.off_hand].into_iter().any(|item| {
             if steering_item {
                 item == mc_bamboo_data::items::CARROT_ON_A_STICK
+            } else if mob.mob_type == super::MobType::Camel {
+                // 骆驼是马科，但 `TemptingSensor` 用 `Camel.isFood`（`#camel_food`），
+                // 不是马科的 `TemptGoal` 那张表。
+                // The camel is equine, but `TemptingSensor` uses `Camel.isFood`
+                // (`#camel_food`), not the equine `TemptGoal` table.
+                super::interact::is_food(mob.mob_type, item)
             } else if mob.mob_type.is_equine() {
                 crate::state::item_is_tagged(item, super::equine::tempt_tag(mob.mob_type))
             } else {
