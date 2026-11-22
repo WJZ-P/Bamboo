@@ -2014,6 +2014,7 @@ name = "mc-bamboo-loot"
 version = "0.0.0"
 dependencies = [
  "mc-bamboo-blocks",
+ "mc-bamboo-core",
  "mc-bamboo-data",
  "md-5",
  "serde_json",

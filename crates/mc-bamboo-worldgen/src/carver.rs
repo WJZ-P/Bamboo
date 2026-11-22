@@ -28,31 +28,17 @@ use crate::{
 /// `WorldCarver.getRange()`：洞穴和峡谷都是 4（17×17 个区块）。
 const RANGE: i32 = 4;
 /// `SingleThreadedRandomSource` 的种子常量。
-/// `Mth.SIN_SCALE` 和查找表长度。
-const SIN_SCALE: f64 = 10_430.378_350_470_453;
-const SIN_MASK: i64 = 65_535;
-use std::sync::OnceLock;
-
-static SIN_TABLE: OnceLock<Vec<f32>> = OnceLock::new();
-
-fn sin_table() -> &'static [f32] {
-    SIN_TABLE.get_or_init(|| {
-        (0..65_536)
-            .map(|index| (index as f64 / SIN_SCALE).sin() as f32)
-            .collect()
-    })
-}
-
-/// 官方 `Mth.sin(double)` 和 `cos(double)`：65536 项的查找表。
+/// 官方 `Mth.sin(double)` 和 `cos(double)` 的 65536 项查找表由 `mc_bamboo_core` 提供，
+/// 全进程只留一份。
+///
+/// The 65536-entry `Mth.sin(double)` / `cos(double)` lookup table comes from
+/// `mc_bamboo_core`, so the process keeps a single copy.
 pub(crate) fn mth_sin(value: f64) -> f32 {
-    let index = ((value * SIN_SCALE) as i64) & SIN_MASK;
-    sin_table()[index as usize]
+    mc_bamboo_core::mth::sin(value)
 }
 
 pub(crate) fn mth_cos(value: f64) -> f32 {
-    // 官方先加 16384.0（double）再 d2i，负数时和「先截断再加」差一位。
-    let index = ((value * SIN_SCALE + 16_384.0) as i64) & SIN_MASK;
-    sin_table()[index as usize]
+    mc_bamboo_core::mth::cos(value)
 }
 
 /// `generateCarvers` 用到的全部配置，按种子无关，可以放进 `Generator`。

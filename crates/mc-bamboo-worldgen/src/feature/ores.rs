@@ -6,6 +6,8 @@
 //! 的边界；`doPlace` 用 `BitSet` 形状 + 逐点 `nextDouble()`，最后按
 //! `targets` 顺序找第一个 `RuleTest` 命中的状态写进区块。
 
+use mc_bamboo_core::mth::sin as mth_sin;
+
 use crate::random::WorldgenRandom;
 
 use super::{
@@ -13,20 +15,6 @@ use super::{
     rule_test::RuleTest,
     world::{FeatureWorld, HeightmapKind},
 };
-
-/// `Mth.sin(double)`：65536 项查找表，`OreFeature.doPlace` 用。
-fn mth_sin(value: f64) -> f32 {
-    const SCALE: f64 = 10_430.378_350_470_453;
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        (0..65_536)
-            .map(|i| (i as f64 / SCALE).sin() as f32)
-            .collect()
-    });
-    let index = ((value * SCALE) as i64) & 65_535;
-    table[index as usize]
-}
 
 /// `OreFeature.place`。
 pub fn place(

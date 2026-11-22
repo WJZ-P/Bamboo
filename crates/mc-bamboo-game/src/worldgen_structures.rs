@@ -204,18 +204,22 @@ fn shared_structure(
         return Ok(shared.clone());
     }
     let worldgen = Worldgen::shared()?;
-    let entries: Vec<(ParameterPoint, String)> = worldgen
-        .preset("minecraft:overworld")
-        .ok_or("missing overworld preset")?
-        .parameters()
-        .entries()
-        .map(|(point, name)| (*point, name.clone()))
-        .collect();
     let fixed = flat_biome(config)?;
-    let entries = fixed.map_or(entries, |biome| {
-        vec![(ParameterPoint::from_quantized([0; 13]), biome.to_owned())]
-    });
-    let preset = MultiNoiseBiomeSource::new(ParameterList::new(entries));
+    let preset = match fixed {
+        // 平坦世界只有一条群系，需要自己的一张单点表。
+        // A flat world has a single biome and needs its own one-entry table.
+        Some(biome) => MultiNoiseBiomeSource::new(ParameterList::new(vec![(
+            ParameterPoint::from_quantized([0; 13]),
+            biome.to_owned(),
+        )])),
+        // 普通世界用 `Worldgen` 里那份预置的副本：R 树和参数点共用，`lastResult` 槽独立。
+        // Normal worlds fork the preset held by `Worldgen`: the R-tree and points are
+        // shared, only the `lastResult` slot is new.
+        None => worldgen
+            .preset("minecraft:overworld")
+            .ok_or("missing overworld preset")?
+            .fork(),
+    };
     let mut router = SeededRouter::new(settings, config.seed);
     let state = {
         let mut resolver = mc_bamboo_worldgen::structure::rings::BiomeResolver {

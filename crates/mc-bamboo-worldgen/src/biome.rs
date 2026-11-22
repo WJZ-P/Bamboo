@@ -33,6 +33,17 @@ impl MultiNoiseBiomeSource {
         self.biome(target)
     }
 
+    /// 另建一份实例：参数表共用，`lastResult` 槽独立。官方每个 `MultiNoiseBiomeSource`
+    /// 的 R 树状态都是自己的实例。
+    ///
+    /// A second instance sharing the parameter table with its own `lastResult` slot.
+    /// Vanilla keeps R-tree state per `MultiNoiseBiomeSource` instance.
+    pub fn fork(&self) -> Self {
+        Self {
+            parameters: self.parameters.fork(),
+        }
+    }
+
     /// 清掉 R 树的「上一次结果」。
     pub fn reset(&self) {
         self.parameters.reset();

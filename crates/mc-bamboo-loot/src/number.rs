@@ -7,8 +7,7 @@
 //!
 //! 取随机数的顺序和官方一致：聚合按 `inputs` 顺序、离散按 `cases` 顺序。
 
-use std::sync::OnceLock;
-
+use mc_bamboo_core::mth::{cos as mth_cos, sin as mth_sin};
 use mc_bamboo_data::loot;
 use serde_json::Value;
 
@@ -591,26 +590,6 @@ fn java_round(value: f32) -> i32 {
 
 fn mth_sqrt(value: f32) -> f32 {
     value.sqrt()
-}
-
-/// 官方 `Mth.sin(double)` 用的 65536 项查表。
-fn sin_table() -> &'static [f32] {
-    static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        (0..65_536)
-            .map(|index| (f64::from(index) / 10_430.378_350_470_453).sin() as f32)
-            .collect()
-    })
-}
-
-fn mth_sin(value: f64) -> f32 {
-    let index = ((value * 10_430.378_350_470_453) as i64 & 65_535) as usize;
-    sin_table()[index]
-}
-
-fn mth_cos(value: f64) -> f32 {
-    let index = ((value * 10_430.378_350_470_453 + 16_384.0) as i64 & 65_535) as usize;
-    sin_table()[index]
 }
 
 /// 解析整数提供器。字符串是按名字引用的提供器，数字是常量。
