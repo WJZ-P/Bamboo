@@ -203,6 +203,31 @@ WebView2 的渲染进程不算在内。
 - **山羊**：`/summon`、刷怪蛋、自然刷怪和生成期刷怪（`#goats_spawnable_on`）；`finalizeSpawn` 用世界随机源（生成期用区域随机源）定长跳和冲撞冷却、2% 尖叫山羊、成年 10% 少一只角；核心、闲逛、长跳、冲撞四个活动：长跳在周围 11×11×11 里按距离平方加权抽落点（走得到的不跳）、四个角度洗牌、逐段检查碰撞、起跳 40 刻后跳出、落地减速；冲撞找最近的可冲撞目标（不是山羊、在世界边界内、能当敌人、看得见），在目标东南西北 4–7 格找走得到的起跑点、低头 20 刻后以 3 倍速冲过去，撞到活体打 `mob_attack_no_aggro` 伤害再按速度和药水击退（玩家也会被撞开），撞到 `#snaps_goat_horn` 方块掉一只角（角的乐器按 UUID 的 `hashCode` 选）；空桶挤奶，小麦繁殖（幼崽 2% 或随父母一方尖叫），摔落伤害少 10 点，长跳姿势同步并缩小碰撞箱；三个同步布尔值和 `IsScreamingGoat` / `HasLeftHorn` / `HasRightHorn` 存盘（`chunk-content` 重存对拍过，含大脑记忆）。`mob-oracle --only goat_` 7 个场景逐刻 0 不一致（闲逛、石台长跳、撞牛、撞玩家、诱惑和挤奶、撞墙掉角）。
 - **大脑生物的已知限制**：`RunOne` 和山羊长跳角度的洗牌在官方用不带种子的随机源（`ShufflingList` 的 `generateUniqueSeed`、`Collections` 的静态 `Random`），Bamboo 按出生时生物随机源的状态和序号算种子，对拍两边按同一公式重设；传感器起始延迟官方取 `Sensor` 的静态随机源，Bamboo 取不到同一串数，对拍按官方报的值设。官方几个静态 `TargetingConditions` 的距离跟着「最后一个扫描的传感器」的跟随距离变，Bamboo 每个生物用自己的跟随距离。并行（性能）模式下世界随机源读作 0：行为时长取最短、长跳按列表顺序抽落点。山羊冲撞的目标检测把玩家排在生物后面（官方按实体分区的顺序）；盾牌格挡减半（`applyItemBlocking`）和被撞者的 `doPostAttackEffects`（荆棘等）没做；长跳的 `noCollision` 不看船、潜影贝这类硬碰撞实体（Bamboo 还没有）；盔甲架不存在，`mobGriefing` 那一条不起作用。`Goat.setYHeadRot` 的 ±15 度夹角只在读档时做（传送没做）。山羊繁殖没有逐刻对拍（夹具只比场景原有的生物）。
 
+- **玩家左键近战攻击**按官方 26.3 `ServerGamePacketListenerImpl.handleAttack` → `Player.attack` →
+  `ServerPlayer.crit` / `magicCrit` / `getEnchantedDamage` 完整实现：攻击冷却（基础伤害
+  `×(0.2 + s² × 0.8)`、附魔加成 `× s`）、`ATTACK_SPEED` 属性与 `getCurrentItemAttackStrengthDelay`、
+  挥空 / 攻击 / 换主手物品重置冷却；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
+  `MAGIC_CRITICAL_HIT` 动画）；拿剑、在地上、满充能、非暴击非疾跑时的横扫（打主目标
+  `inflate(1, 0.25, 1)` 里 3 格内的生物，`sweeping_edge` 按 `L/(L+1)` 加成，发 `SWEEP_ATTACK`
+  粒子）；疾跑 / `knockback` 附魔 / `attack_knockback` 的额外击退并取消疾跑；锋利 / 亡灵杀手 /
+  节肢杀手（及节肢杀手的缓慢）、火焰附加、武器耐久、伤害指示粒子和
+  `player.attack.strong / weak / crit / sweep / knockback / nodamage` 音效都真的发到客户端。
+  PVP 按 `server.properties` 的 `pvp` 开关和官方 `canHarmPlayer` 处理（Bamboo 没有队伍）。
+  对拍：`mob-oracle --only player_attack`（12 场景 84 刻，逐刻比牛的血量 / 击退速度 / 着火 /
+  受伤时间 / 是否移除和 `damage_event` 包，0 不一致；`--break-self-test attack_charge` 能抓到
+  故意改坏的充能值）；`a_critical_attack_emits_its_packets` 单测确认暴击动画、攻击音效和
+  伤害指示粒子真的发到客户端。
+- **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
+  （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
+  `onClimbable` / `isInWater` / `isPassenger` 按缺省值（Bamboo 没有梯子/水里/载具状态），
+  失明用 `EffectMap` 判；节肢杀手的缓慢时长恒用最短 30 刻，官方从**生物自己的随机源**
+  在 `[30, 30 + 10×(L−1)]` 刻取值，Bamboo 没把该随机源暴露给攻击路径；`Stats.DAMAGE_DEALT`
+  统计不写原版 `stats/<UUID>.json`；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
+  （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画 /
+  挥手 / 耐久槽包在 `mob-oracle` 里不逐字节比（官方假世界不捕获这些包，且带种子的音效
+  顺序受两套发包路径影响），由上面的单测确认它们确实发出；攻击场景的对拍夹具跳过
+  `cow.tick()`，否则官方一侧的重力 / AI 会污染击退速度，逐位比较不可行。
+
 - 多名玩家进入同一个世界；新世界默认 `normal`（噪声地形，见上面世界生成一节），
   `level-type=flat` 用超平坦；登录模式由服务器目录里的 `online-mode` 决定（官方默认正版验证）。
 - 默认按官方 `server.properties` 的 `online-mode=true` 走正版验证；官方未实现的键原样保留、
