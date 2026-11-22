@@ -143,6 +143,24 @@ pub trait BlockView {
         false
     }
 
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：这一列挡运动的最高方块上面一格，整列
+    /// 都不挡时是世界底部下面一格。缺省实现逐格读方块；有真实高度图的视图覆盖它。
+    ///
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`: one above the highest
+    /// motion-blocking block of the column, or one below the world bottom when nothing
+    /// blocks. The default reads blocks one by one; views with a real heightmap override it.
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        for y in (self.min_y()..=self.max_y()).rev() {
+            let state = self.block_state(BlockPos::new(pos.x, y, pos.z));
+            if state.is_tagged(mc_bamboo_data::tags::block_tags::BLOCKS_MOTION_IN_HEIGHTMAP)
+                || !state.fluid().is_empty()
+            {
+                return y + 1;
+            }
+        }
+        self.min_y() - 1
+    }
+
     /// `getMaxLocalRawBrightness(pos, skyDarken)`：方块光和减去天色后的天空光里亮的那个。
     fn max_local_raw_brightness(&self, _pos: BlockPos, _darken: i32) -> i32 {
         0
@@ -393,6 +411,10 @@ impl BlockView for World<'_> {
 
     fn sea_level(&self) -> i32 {
         World::sea_level(self)
+    }
+
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        self.level().heightmap_y(pos)
     }
 
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {

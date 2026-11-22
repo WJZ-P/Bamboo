@@ -329,6 +329,17 @@ public final class MobOracle {
                 playFish(official, out, name);
                 cases++;
             }
+            for (String name : List.of("phantom_spawn_night", "phantom_spawn_rested",
+                    "phantom_spawn_day", "phantom_spawn_off")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playPhantomSpawn(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("phantom_hunt", "phantom_burn")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playPhantom(official, out, name);
+                cases++;
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -7074,6 +7085,297 @@ public final class MobOracle {
         out.flush();
     }
 
+    /**
+     * Phantom spawner: drive the official `PhantomSpawner.tick` in the fake
+     * `ServerLevel`, one JSON frame per tick with the phantoms it added (block
+     * position, size, anchor), the level random seed and the spawner's
+     * `nextTick`. `forces` rewinds `nextTick` on chosen ticks so several spawn
+     * attempts fit in a short scene; the Bamboo side applies the same values.
+     */
+    private static void playPhantomSpawn(Official official, Writer out, String name) throws Exception {
+        boolean rested = name.endsWith("_rested");
+        boolean day = name.endsWith("_day");
+        boolean off = name.endsWith("_off");
+        int ticks = 12;
+        int stat = rested ? 1 : 200000;
+        int[] forceTicks = {2, 4, 6, 8, 10};
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        // `NORMAL` with a zero clock / local time / moon brightness gives 1.5, the
+        // same effective difficulty Bamboo computes from clock=0, difficulty=2.
+        world.spawnDifficulty = new net.minecraft.world.DifficultyInstance(
+                Difficulty.NORMAL, 0L, 0L, 0.0F);
+        world.injectedSkyDarken = day ? 0 : 11;
+        world.injectedCanSeeSky = true;
+        world.injectedSeaLevel = -63;
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+
+        // Two players at different columns. All fake players share one
+        // `ServerStatsCounter`, so they carry the same TIME_SINCE_REST value.
+        double[][] defs = {{8.5, 64.0, 8.5}, {-7.5, 72.0, 3.5}};
+        var playersJson = new StringBuilder("[");
+        for (int i = 0; i < defs.length; i++) {
+            ServerPlayer player = new ServerPlayer(official.server, world,
+                    new GameProfile(new UUID(3L, i + 1L), "PhantomOracle" + i),
+                    ClientInformation.createDefault());
+            player.setId(FIRST_ID + 1024 + i);
+            player.setPos(defs[i][0], defs[i][1], defs[i][2]);
+            world.playersList().add(player);
+            if (i > 0) playersJson.append(',');
+            playersJson.append("{\"position\":").append(Arrays.toString(defs[i]))
+                    .append(",\"spectator\":false,\"timeSinceRest\":").append(stat).append('}');
+        }
+        playersJson.append(']');
+        stats.setValue(world.playersList().get(0),
+                net.minecraft.stats.Stats.CUSTOM.get(net.minecraft.stats.Stats.TIME_SINCE_REST), stat);
+
+        boolean spawnMobs = !off;
+        boolean spawnMonsters = true;
+        // `spawn_phantoms` stays at its vanilla default (true) in official.gameRules.
+        var spawner = new net.minecraft.world.level.levelgen.PhantomSpawner();
+        Field nextTickField = net.minecraft.world.level.levelgen.PhantomSpawner.class
+                .getDeclaredField("nextTick");
+        nextTickField.setAccessible(true);
+        Field anchorField = net.minecraft.world.entity.monster.Phantom.class
+                .getDeclaredField("anchorPoint");
+        anchorField.setAccessible(true);
+
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            for (int force : forceTicks) {
+                if (force == tick) nextTickField.setInt(spawner, 1);
+            }
+            if (spawnMobs) spawner.tick(world, spawnMonsters);
+            if (tick > 0) frames.append(',');
+            frames.append("{\"spawns\":[");
+            boolean first = true;
+            for (Entity entity : world.spawned) {
+                if (entity instanceof net.minecraft.world.entity.monster.Phantom phantom) {
+                    BlockPos bp = phantom.blockPosition();
+                    BlockPos ap = (BlockPos) anchorField.get(phantom);
+                    if (!first) frames.append(',');
+                    first = false;
+                    frames.append('[').append(bp.getX()).append(',').append(bp.getY()).append(',')
+                            .append(bp.getZ()).append(',').append(phantom.getPhantomSize()).append(',')
+                            .append(ap.getX()).append(',').append(ap.getY()).append(',')
+                            .append(ap.getZ()).append(']');
+                }
+            }
+            world.spawned.clear();
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()))
+                    .append(",\"nextTick\":").append(nextTickField.getInt(spawner)).append('}');
+        }
+        frames.append(']');
+
+        out.write("{\"type\":\"phantomSpawn\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                + ",\"skyDarken\":" + world.injectedSkyDarken
+                + ",\"seaLevel\":" + world.getSeaLevel()
+                + ",\"canSeeSky\":" + world.injectedCanSeeSky
+                + ",\"hasSkyLight\":" + world.dimensionType().hasSkyLight()
+                + ",\"clockTicks\":0"
+                + ",\"spawnMobs\":" + spawnMobs + ",\"spawnMonsters\":" + spawnMonsters
+                + ",\"spawnPhantoms\":true,\"players\":" + playersJson
+                + ",\"forces\":" + Arrays.toString(forceTicks)
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
+    /**
+     * Phantom target that takes no damage. The sweep still lands (the goal only checks
+     * the inflated box), but the player never sends its own hurt animation or health
+     * packets, which this fixture does not model on the Bamboo side.
+     */
+    private static final class PhantomTarget extends ServerPlayer {
+        PhantomTarget(MinecraftServer server, ServerLevel level, GameProfile profile,
+                ClientInformation information) {
+            super(server, level, profile, information);
+        }
+
+        @Override
+        public boolean hurtServer(ServerLevel level, net.minecraft.world.damagesource.DamageSource source,
+                float damage) {
+            return false;
+        }
+    }
+
+    /**
+     * Phantom AI: run the official `Phantom` in the fake level, tick by tick. The
+     * phantom circles its anchor, swoops when the strategy goal says so, bites a player
+     * (the {@link PhantomTarget} never takes damage) and, in the burn scene, catches
+     * fire in daylight. One JSON frame per tick with position, motion, rotations, size,
+     * attack phase, target, anchor, move target, fire ticks, the level random seed,
+     * the level events and the outgoing packets.
+     */
+    private static void playPhantom(Official official, Writer out, String name) throws Exception {
+        boolean burn = name.endsWith("_burn");
+        int ticks = 240;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        world.spawnDifficulty = new DifficultyInstance(Difficulty.NORMAL, 0L, 0L, 0.0F);
+        world.injectedSkyDarken = burn ? 0 : 11;
+        world.injectedCanSeeSky = burn;
+        world.injectedBrightOutside = burn;
+        world.injectedMonstersBurn = burn;
+        world.injectedSeaLevel = -63;
+        for (int x = -24; x <= 24; x++) {
+            for (int z = -24; z <= 24; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        EnvironmentAttributeSystem previousAttributes = official.attributes;
+        // `EnvironmentAttributes.MONSTERS_BURN` is a constant here, so both sides read
+        // the same boolean; FakeLevel has no overworld timeline layer of its own.
+        official.attributes = EnvironmentAttributeSystem.builder()
+                .addStaticLayers(world)
+                .addConstantLayer(EnvironmentAttributes.MONSTERS_BURN, v -> burn)
+                .build();
+        try {
+            String blocks = blockArray(world.blocks);
+            world.nextId = FIRST_ID;
+            world.spawned = new ArrayList<>();
+            world.levelEvents = new ArrayList<>();
+            Bytes events = new Bytes(official.registries);
+            world.packets = events::add;
+            double[] start = new double[] {0.5, 72.0, 0.5};
+            int[] anchor = {0, 77, 0};
+            net.minecraft.world.entity.monster.Phantom phantom =
+                    EntityTypes.PHANTOM.create(world, EntitySpawnReason.COMMAND);
+            // Replay the constructor draws from Bamboo's entity seed source: UUID, yRot.
+            setRandom(phantom, world.entitySeeds.nextLong());
+            RandomSource random = phantom.getRandom();
+            phantom.setUUID(Mth.createInsecureUUID(random));
+            float yaw = random.nextFloat() * 6.2831855F;
+            phantom.setYRot(yaw);
+            phantom.setYHeadRot(yaw);
+            phantom.setPos(start[0], start[1], start[2]);
+            Field anchorField = net.minecraft.world.entity.monster.Phantom.class
+                    .getDeclaredField("anchorPoint");
+            anchorField.setAccessible(true);
+            anchorField.set(phantom, new BlockPos(anchor[0], anchor[1], anchor[2]));
+            Field moveTargetField = net.minecraft.world.entity.monster.Phantom.class
+                    .getDeclaredField("moveTargetPoint");
+            moveTargetField.setAccessible(true);
+            Field phaseField = net.minecraft.world.entity.monster.Phantom.class
+                    .getDeclaredField("attackPhase");
+            phaseField.setAccessible(true);
+            world.tracked.add(phantom);
+            int playerId = FIRST_ID + 1024;
+            double[] playerPos = new double[] {0.5, 61.0, 0.5};
+            ServerPlayer player = null;
+            if (!burn) {
+                player = new PhantomTarget(official.server, world,
+                        new GameProfile(new UUID(1L, 2L), "PhantomOracle"),
+                        ClientInformation.createDefault());
+                player.setId(playerId);
+                player.setPos(playerPos[0], playerPos[1], playerPos[2]);
+                world.playersList().add(player);
+                world.tracked.add(player);
+            }
+            Sync sync = new Sync(world, phantom, official.registries);
+            boolean gone = false;
+            boolean sawTarget = false;
+            boolean swooped = false;
+            boolean burned = false;
+            boolean bit = false;
+            var frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                var packets = new ArrayList<String>();
+                if (tick == 0) {
+                    sync.entity.sendPairingData(null, sync.bytes::add);
+                    packets.addAll(sync.take());
+                } else {
+                    world.gameTime++;
+                    if (!phantom.isRemoved()) {
+                        phantom.checkDespawn();
+                        phantom.commonTick();
+                        phantom.tick();
+                    }
+                    packets.addAll(events.take());
+                    if (phantom.isRemoved()) {
+                        if (!gone) {
+                            Bytes removal = new Bytes(official.registries);
+                            removal.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(
+                                    phantom.getId()));
+                            packets.addAll(removal.take());
+                        }
+                        gone = true;
+                    } else {
+                        sync.entity.sendChanges();
+                        packets.addAll(sync.take());
+                    }
+                    frames.append(',');
+                }
+                frames.append("{\"gone\":").append(gone);
+                if (!gone) {
+                    Entity target = phantom.getTarget();
+                    BlockPos anchorNow = (BlockPos) anchorField.get(phantom);
+                    Vec3 move = (Vec3) moveTargetField.get(phantom);
+                    int swoop = phaseField.get(phantom).toString().equals("SWOOP") ? 1 : 0;
+                    sawTarget |= target != null;
+                    swooped |= swoop == 1;
+                    burned |= phantom.getRemainingFireTicks() > 0;
+                    frames.append(",\"motion\":").append(projectileMotion(phantom))
+                            .append(",\"body\":").append(Arrays.toString(new int[] {
+                                    Float.floatToRawIntBits(phantom.yBodyRot),
+                                    Float.floatToRawIntBits(phantom.getYHeadRot())}))
+                            .append(",\"size\":").append(phantom.getPhantomSize())
+                            .append(",\"seed\":").append(randomSeed(phantom))
+                            .append(",\"state\":").append(Arrays.toString(new long[] {
+                                    Float.floatToRawIntBits(phantom.getHealth()), phantom.hurtTime,
+                                    phantom.deathTime, phantom.getNoActionTime(), swoop,
+                                    phantom.onGround() ? 1 : 0, phantom.getRemainingFireTicks()}))
+                            .append(",\"target\":").append(target == null ? "[0,0]"
+                                    : Arrays.toString(new int[] {1, target.getId()}))
+                            .append(",\"anchor\":").append(anchorNow == null ? "[0,0,0,0]"
+                                    : Arrays.toString(new int[] {1, anchorNow.getX(),
+                                            anchorNow.getY(), anchorNow.getZ()}))
+                            .append(",\"move\":").append(Arrays.toString(new long[] {
+                                    Double.doubleToRawLongBits(move.x),
+                                    Double.doubleToRawLongBits(move.y),
+                                    Double.doubleToRawLongBits(move.z)}));
+                }
+                frames.append(",\"levelSeed\":").append(randomSeed(world.getRandom()));
+                frames.append(",\"levelEvents\":").append(world.levelEvents.stream().map(Arrays::toString)
+                        .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                for (int[] event : world.levelEvents) {
+                    if (event[0] == 1039) bit = true;
+                }
+                world.levelEvents.clear();
+                frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                        .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                frames.append('}');
+            }
+            frames.append(']');
+            // 每个场景都要真的走到自己那条分支，否则对拍等于没比。
+            // Every scene must reach its own branch, or the comparison proves nothing.
+            boolean reached = burn ? burned : sawTarget && swooped && bit;
+            if (!reached) {
+                throw new IllegalStateException("phantom scene missed its branch: " + name
+                        + " target=" + sawTarget + " swoop=" + swooped + " bit=" + bit
+                        + " burned=" + burned);
+            }
+            out.write("{\"type\":\"phantom\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                    + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start)
+                    + ",\"anchor\":" + Arrays.toString(anchor)
+                    + ",\"hasPlayer\":" + (player != null) + ",\"playerId\":" + playerId
+                    + ",\"playerPos\":" + Arrays.toString(playerPos)
+                    + ",\"skyDarken\":" + world.injectedSkyDarken
+                    + ",\"canSeeSky\":" + world.injectedCanSeeSky
+                    + ",\"monstersBurn\":" + burn
+                    + ",\"brightOutside\":" + burn
+                    + ",\"seaLevel\":" + world.getSeaLevel()
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+        } finally {
+            official.attributes = previousAttributes;
+        }
+    }
+
     private static Field squidField(String name) throws Exception {
         Field field = net.minecraft.world.entity.animal.squid.Squid.class.getDeclaredField(name);
         field.setAccessible(true);
@@ -10641,6 +10943,25 @@ public final class MobOracle {
             // Natural-spawn fixtures supply a per-scene sea level; other scenes use the
             // injected value, which defaults to superflat's -63.
             return naturalSeaLevel == null ? injectedSeaLevel : naturalSeaLevel;
+        }
+
+        /**
+         * `getHeightmapPos(MOTION_BLOCKING, pos)`：假世界没有真的区块高度图，按方块表
+         * 现算，和 Bamboo 的 `Level::heightmap_y` 默认实现一致。
+         */
+        @Override
+        public BlockPos getHeightmapPos(Heightmap.Types type, BlockPos pos) {
+            if (type != Heightmap.Types.MOTION_BLOCKING) {
+                return super.getHeightmapPos(type, pos);
+            }
+            for (int y = getMaxY(); y >= getMinY(); y--) {
+                BlockState state = getBlockState(new BlockPos(pos.getX(), y, pos.getZ()));
+                if (state.is(net.minecraft.tags.BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP)
+                        || !state.getFluidState().isEmpty()) {
+                    return new BlockPos(pos.getX(), y + 1, pos.getZ());
+                }
+            }
+            return new BlockPos(pos.getX(), getMinY() - 1, pos.getZ());
         }
 
         /** 自然生成夹具的海平面；不设（`allocate` 不跑字段初始值）就是超平坦的 -63。 */

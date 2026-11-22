@@ -1059,6 +1059,8 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
             }
             me.delta = Vec3::default();
+        } else if mob.mob_type == super::MobType::Phantom {
+            super::phantom::travel(me, mob, ctx, input);
         } else if super::squid::is_squid(mob.mob_type) {
             // `Squid.travel`：只有 `move(SELF, deltaMovement)`。
             // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
@@ -1403,6 +1405,10 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Phantom {
+        // `PhantomLookControl.tick` 是空的。
+        // `PhantomLookControl.tick` is empty.
+        super::phantom::move_control_tick(me, mob);
     } else if mob.mob_type == super::MobType::Tadpole {
         move_control_tick(me, mob, ctx.blocks());
         super::tadpole::look_control_tick(me, mob);
@@ -1566,6 +1572,10 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
 /// `BodyRotationControl.clientTick`; skipped entirely for a scared armadillo.
 fn body_rotation_tick(me: &Entity, mob: &mut Mob) {
     if super::armadillo::is_scared(mob) {
+        return;
+    }
+    if mob.mob_type == super::MobType::Phantom {
+        super::phantom::body_rotation_tick(me, mob);
         return;
     }
     let dx = me.position.x - me.old_position.x;
@@ -1807,9 +1817,10 @@ pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> 
     if mob.mob_type.climbs_walls() {
         return super::spider::on_climbable(mob);
     }
-    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓。
+    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓；`Phantom.onClimbable` 也恒假。
     // `AbstractHorse.onClimbable` is always false; equines never climb ladders or vines.
-    if mob.mob_type.is_equine() {
+    // `Phantom.onClimbable` is always false as well.
+    if mob.mob_type.is_equine() || mob.mob_type == super::MobType::Phantom {
         return false;
     }
     let pos = me.block_position();
@@ -2000,6 +2011,9 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     for position in players {
         if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
             me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+            // `Entity.push(Entity)` 推开自己那一半时也置 `needsSync`。
+            // The self half of `Entity.push(Entity)` also sets `needsSync`.
+            mob.needs_sync = true;
         }
     }
     for (uid, position) in others {
@@ -2526,11 +2540,18 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         }
         return;
     }
-    if !mob.mob_type.is_monster() {
+    // 幻翼不是 `Monster`，但经验是构造函数里固定的 5，走下面怪物那一支。
+    // Phantoms are not `Monster`s, yet their fixed 5 experience takes the monster branch.
+    if !mob.mob_type.is_monster() && mob.mob_type != super::MobType::Phantom {
         mob.events.push(MobEvent::Death);
-        // `Tadpole.shouldDropExperience` 为假：不掉经验，也不取那次随机数。
-        // `Tadpole.shouldDropExperience` is false: no experience and no draw for it.
-        let experience = by_player && adult && drops && mob.mob_type != super::MobType::Tadpole;
+        // `Tadpole.shouldDropExperience` 为假：不掉经验，也不取那次随机数。蝙蝠的
+        // `xpReward` 是 0，`Mob.getBaseExperienceReward` 不取随机数。
+        // `Tadpole.shouldDropExperience` is false: no experience and no draw for it. A
+        // bat's `xpReward` is 0 and `Mob.getBaseExperienceReward` draws nothing.
+        let experience = by_player
+            && adult
+            && drops
+            && !matches!(mob.mob_type, super::MobType::Tadpole | super::MobType::Bat);
         animal_death_drops(me, mob, ctx, source, experience, adult && drops);
         return;
     }
@@ -2894,9 +2915,13 @@ pub(crate) fn apply_push(
     if other_pushable {
         world.with_entity_mut(other, &mut |entity| {
             entity.delta = entity.delta.add(Vec3::new(-dx, 0.0, -dz));
+            // 被推开的一方和 `Entity.push(Entity)` 一样置 `needsSync`。
+            // The pushed side sets `needsSync` as in `Entity.push(Entity)`.
+            entity.with_mob(|_, mob| mob.needs_sync = true);
         });
     }
     if self_pushable {
         me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+        me.with_mob(|_, mob| mob.needs_sync = true);
     }
 }

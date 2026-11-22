@@ -65,7 +65,7 @@ struct BatState {
     fall: i64,
 }
 
-fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
+pub(super) fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
     PlayerView {
         uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),
         uid,

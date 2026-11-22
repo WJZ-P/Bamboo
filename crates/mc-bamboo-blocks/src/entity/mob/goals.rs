@@ -40,6 +40,10 @@ pub enum Goal {
     ///
     /// The fox's own goals.
     Fox(super::fox_goals::FoxGoal),
+    /// 幻翼自己的目标。
+    ///
+    /// The phantom's own goals.
+    Phantom(super::phantom::PhantomGoal),
     /// 可驯服动物共用的目标（坐下、跟随主人、保护主人）。
     ///
     /// The shared tamable-animal goals.
@@ -509,6 +513,7 @@ impl Goal {
             | Self::Avoid(_)
             | Self::Swim { .. } => &[Flag::Move],
             Self::Fox(goal) => goal.flags(),
+            Self::Phantom(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
@@ -620,6 +625,7 @@ impl Goal {
             Self::MeleeAttack { class, .. } => class,
             Self::Swell { .. } => "SwellGoal",
             Self::Fox(goal) => goal.name(),
+            Self::Phantom(goal) => goal.name(),
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
@@ -1380,6 +1386,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         // `RabbitAvoidEntityGoal`: the killer bunny never flees.
         Goal::Avoid(avoid) => !super::rabbit::is_evil(mob) && avoid.can_use(me, mob, ctx),
         Goal::Fox(goal) => goal.can_use(me, mob, ctx),
+        Goal::Phantom(goal) => goal.can_use(me, mob, ctx),
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
         Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
@@ -1907,6 +1914,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::RabbitRaid(raid) => raid.can_continue(),
         Goal::Avoid(_) => super::avoid::AvoidEntity::can_continue(mob),
         Goal::Fox(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Phantom(goal) => goal.can_continue(me, mob, ctx),
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
@@ -2152,6 +2160,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::RabbitPowderSnow => {}
         Goal::Avoid(avoid) => avoid.start(me, mob, ctx),
         Goal::Fox(goal) => goal.start(me, mob, ctx),
+        Goal::Phantom(goal) => goal.start(me, mob, ctx),
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
@@ -2407,6 +2416,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::Avoid(avoid) => avoid.stop(),
         Goal::Fox(goal) => goal.stop_with_world(me, mob, ctx),
+        Goal::Phantom(goal) => goal.stop(me, mob, ctx),
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
         Goal::LeapAtTarget { .. } => {}
@@ -2772,6 +2782,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::RabbitPowderSnow => mob.jump.jump = true,
         Goal::Avoid(avoid) => avoid.tick(me, mob, ctx),
         Goal::Fox(goal) => goal.tick(me, mob, ctx),
+        Goal::Phantom(goal) => goal.tick(me, mob, ctx),
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
@@ -3497,7 +3508,10 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     // Slimes are not `PathfinderMob`s; `Mob.checkSpawnRules` is always true.
     if matches!(
         mob.mob_type,
-        super::MobType::Slime | super::MobType::Enderman | super::MobType::Bat
+        super::MobType::Slime
+            | super::MobType::Enderman
+            | super::MobType::Bat
+            | super::MobType::Phantom
     ) {
         return 0.0;
     }

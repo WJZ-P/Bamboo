@@ -77,6 +77,7 @@ mod natural_spawn;
 mod outgoing;
 mod pacing;
 mod partition_stats;
+mod phantom_spawn;
 mod player;
 mod player_combat_memory;
 pub mod player_consume;

@@ -44,6 +44,7 @@ mod gen_spawn;
 mod grazing;
 mod llama_spit;
 mod natural_spawn;
+mod phantom;
 mod projectile;
 mod shot;
 mod skeleton_death;
@@ -109,6 +110,8 @@ enum Line {
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
     Fish(Box<fish::FishCase>),
+    PhantomSpawn(Box<phantom::PhantomSpawnCase>),
+    Phantom(Box<phantom::PhantomCase>),
     End(End),
 }
 
@@ -1254,6 +1257,8 @@ impl Report {
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
                 Line::Fish(case) => self.replay_fish(&case),
+                Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
+                Line::Phantom(case) => self.replay_phantom(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),

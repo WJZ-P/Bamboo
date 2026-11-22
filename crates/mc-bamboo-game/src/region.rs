@@ -337,6 +337,10 @@ pub(crate) struct Region {
     pub(crate) dirty: dirty::Dirty,
     /// 官方 `ServerLevel.sleepStatus`：多少活跃玩家、多少人在睡觉。
     pub(crate) sleep: crate::sleep::SleepStatus,
+    /// `PhantomSpawner.nextTick`：自定义刷怪器每刻的倒数，跨刻保留。
+    ///
+    /// `PhantomSpawner.nextTick`: the custom spawner's countdown, kept across ticks.
+    pub(crate) phantom_spawner: mc_bamboo_blocks::entity::mob::phantom_spawner::PhantomSpawner,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -475,6 +479,7 @@ impl Region {
             partitioning: crate::region::partition::Partitioning::default(),
             dirty: dirty::Dirty::default(),
             sleep: crate::sleep::SleepStatus::default(),
+            phantom_spawner: Default::default(),
         }
     }
 

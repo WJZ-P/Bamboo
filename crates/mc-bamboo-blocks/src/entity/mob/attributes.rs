@@ -266,6 +266,23 @@ impl Attributes {
         attributes
     }
 
+    /// `Monster.createMonsterAttributes()`：`Mob` 的缺省属性加攻击力（注册表缺省值 2）。
+    ///
+    /// `Monster.createMonsterAttributes()`: the mob defaults plus attack damage at its
+    /// registry default of 2.
+    pub(super) fn monster() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut attributes = Self::mob();
+        if attributes.get(attribute::ATTACK_DAMAGE).is_none() {
+            attributes.entries.push(Attribute::new(
+                attribute::ATTACK_DAMAGE,
+                defaults::ATTACK_DAMAGE,
+            ));
+        }
+        attributes.set_base(attribute::ATTACK_DAMAGE, defaults::ATTACK_DAMAGE);
+        attributes
+    }
+
     pub(super) fn set_base(&mut self, id: i32, base: f64) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
             entry.base = base;
