@@ -853,6 +853,39 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   全套复核、保持可 fast-forward 的干净树」，剩余五种的前置沿用 5.16；两个 `### 5.11` 与
   5.12~5.14 的错乱交叉引用仍未自行重编号，留给队长统一处理（理由同 5.15 / 5.16）。
 
+### 5.18 第 14 轮：独立复核 08:40 撤回合并的修复、新增 MobType 注册表守卫（op-misc，2026-11-21）
+
+- 接手时 `HEAD=c188de3a`（第 13 轮报告）、`main=33980ce0`。本轮开头复核：`main` 仍是
+  `HEAD` 的祖先（`git merge-base --is-ancestor` = 0、`HEAD..main` 为空），`git merge main`
+  返回 `Already up to date`（本轮 main 未再前进）。按 04:30 / 08:40「先 `git merge main`」
+  执行、无需合并提交；`git status --short` 干净，合回 main 仍是 fast-forward。
+- **08:40 两处修复本轮逐字复核、仍在本分支**（未重做，均为历史提交）：
+  `MobOracle.java:977` 的 `caseVariant(Mob mob) throws Exception`（被调
+  `farmVariant(Animal) throws Exception`，单文件源码编译要求这一行）、`goals.rs:1690` 的显式
+  `TargetType::Fox` 分支（北极熊 Fox 目标只搜狐狸、不落回 `nearest_attackable` 玩家搜索；
+  `available()` 仍已彻底移除、`impl TargetType` 开头的防回退双语警示注释在）。因 op-misc 已是
+  main 的 fast-forward 后代，队长把 op-misc 合进 main 不再需要冲突解决，这两处修复不会被
+  静默回退——这正是 08:40「撤回合并」的根因（5.11 / 5.17）已被消除的机制。
+- **本轮实质代码改动：`mod.rs` tests 模块新增 1 个回归测试**
+  `mob_type_registry_ids_round_trip`（26 行、中英双语注释）。断言 `MobType::ALL` 每种的
+  `entity_type()` 两两不同、且 `by_entity_type(id)` 能反查回自己。这是给「剩余五种生物各要
+  新增 `MobType`」做的前置守卫：漏进 `ALL` 或撞了已有注册表 ID 会静默把官方刷怪表条目
+  映射错（或漏映射）、直接分叉 `natural-spawn` 关键路径。不改任何游戏行为、不碰生成器。
+- **本轮不新增 `MobType`、不新增生物**（沿用 5.15 / 5.16 / 5.17 判断）：剩余五种
+  （青蛙 / 骆驼 / 鹦鹉 / 豹猫 / 猫）都需要 `Extractor.java` 导出的实体数据访问器 index
+  （`generated/entity_types.rs` 已有这五种的尺寸 facts，但 `pub const` 访问器常量里没有
+  它们的 `DATA_*`；`Extractor.java` 只为已做生物导出 `entityAccessor(...).id()`）——按 5.12 /
+  5.15「动生成器 / 元数据 index 前先和队长确认」，无人值守单轮无法确认。青蛙另须按 brain
+  报告整块一轮搬完 `FrogAi`；骆驼 / 鹦鹉上肩须等世界模型 8.2「载具和它的乘客」定案（涉
+  tick 顺序 / 岛拆分，按架构规矩停下写汇报、不自己定）；豹猫 / 猫新增 `MobType` 会一次改到
+  ~35 处穷举 match、14 个共用文件并碰 `natural-spawn` / `check_spawn_rules` 关键路径，还要
+  新建 Java / Rust 逐刻场景，与并行队员冲突面大。故本轮只做复核 + 一个安全守卫。
+- 两个 `### 5.11` 与 5.12~5.14 的错乱交叉引用仍未自行重编号，留给队长统一处理（理由同
+  5.15 / 5.16 / 5.17）。
+- 全套完成标准检查在最终提交上重跑，逐项数字与结果见本轮汇报 `reports/op-misc.md` 第 2 节。
+- 交接：请队长二选一 —— (A) 把本轮提交 fast-forward 合进 main；(B) 先确认 `Extractor.java`
+  的 `DATA_*` 导出、再单独开一整轮按 5.12 规格做豹猫（共用面最小）或按 brain 规格整块做青蛙。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
