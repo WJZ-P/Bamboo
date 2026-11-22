@@ -814,6 +814,45 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   也不宜在可 fast-forward 的干净树上开半截 WIP。请队长二选一：(A) 把 `e74eefab` 直接
   fast-forward 合进 main；(B) 单独开一整轮按 5.12 / brain 规格做一种（豹猫共用面最小）。
 
+### 5.17 第 13 轮：合并 33980ce0、修复合并引入的编译中断、全套复核（op-misc，2026-11-21）
+
+- 接手时 `HEAD=3cf0a9fa`（第 12 轮报告）、`main=33980ce0`。第 12 轮明确「会话中途不再追
+  合并 33980ce0」：main 相对 `merge-base=54ee195a` 又前进了 41 个提交（op-hostile2 的女巫 /
+  史莱姆 / 溺尸 / 流浪者 / 沼骸、便携 desktop 构建脚本、四次 main 合并与「full mob-oracle
+  fix」）。本轮按 04:30 / 08:40「最优先」把这该 main 合进来：`2042107b` 是 ort 自动合并、
+  无内容冲突、双亲；`goals.rs` / `MobOracle.java` / 本文档三个共用文件自动合并，无需按 kind
+  手工解决。合并后 `git merge-base --is-ancestor main HEAD` = 0，合回 main 是 fast-forward。
+- **本轮实质的代码修复：合并引入的编译中断**。main 的 op-water 工作给 `TargetType` 加了
+  `Axolotl` 变体（`drowned.rs:168` 的溺尸目标占位，官方 `NearestAttackableTargetGoal<Axolotl>`，
+  Bamboo 没有该实体），而 op-misc 的 08:40 修复把 `Goals::canUse` 的 `match kind` 改成显式穷举，
+  两者合到一起后 `cargo build -p mc-bamboo-vanilla` 报 `E0004: &mut TargetType::Axolotl not
+  covered`。修法（`a44a6c3d`，`goals.rs` 6 行、中英双语注释）：把 `Axolotl` 并进 `=> None`
+  那一支，语义和 main 的 `available()` 不含 Axolotl → `_ => None` 一致——仍按间隔取
+  `nextInt(interval)`、不查世界。`nearest_attackable` 只有显式
+  Player / GuardedPlayer / AngerPlayer 一个调用方，op-misc 去掉 `!kind.available()` 守卫安全。
+- 三处 08:40 / 第 10 轮修复在合并态逐字复核仍在：`MobOracle.java:977` 的
+  `caseVariant(Mob mob) throws Exception`（被调 `farmVariant(Animal) throws Exception`，
+  单文件源码编译需要这一行）、`goals.rs:1690` 的显式 `TargetType::Fox` 分支（`available()`
+  仍已彻底移除、`impl TargetType` 开头的防回退双语警示注释在）、`ChunkContentOracle.java`
+  的 `FakeLevel` 两个 override（`getSeaLevel` / `getPlayerInAnyDimension`）。
+- **08:40 撤回合并的根因（沿用 5.11，本轮在合并态复核）**：一次冲突解决把两处修复静默回退——
+  `caseVariant` 丢了 `throws Exception`（整个 `mob-oracle` 编译不过）、`Fox` 显式分支被 main
+  旧的 `_ if kind.available() => nearest_attackable` 兜底取代（旧 `available()` 把 Fox 也算
+  已实现，北极熊的 Fox 目标落进玩家搜索，出生点玩家被设成目标、愤怒结束时间 `e1778`、从第 1
+  刻起多取一次随机数，世界随机源随之分叉，即 `polar_bear_idle` 的 12 处不一致）。当前 main
+  （`e83ce946` / `6037f3d2` 一带）已自带这两处修复：`goals.rs` 的显式 Fox 分支在 `available()`
+  兜底之前、`MobOracle.java` 的 `caseVariant` 带 `throws Exception`。故本轮干净的 ort 合并
+  两者都在，`polar_bear_idle`（`mob-oracle --only polar_bear` 11 例 1121 刻）未复现回归。
+- 全套检查在最终提交上实跑、全部通过（数字见本轮汇报第 2 节）：`cargo fmt --check` /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo check --workspace --all-targets`
+  / `cargo check -p mc-bamboo-desktop` / `cargo test -p mc-bamboo-blocks` 790 通过 0 失败
+  6 忽略 / `cargo test -p mc-bamboo-vanilla` 101 单元 + 8 集成 = 109 通过 / 全套 `mob-oracle`
+  1773 例 170990 刻 0 不一致 / `--only polar_bear` 11 例 1121 刻 0 / `natural-spawn`
+  1727 例 0 / `chunk-content` 503 项通过 / `tools/probe.sh` 769/769（`JAVA` 设成 JDK 26）。
+- 本轮不新增 `MobType`、不新增生物：核心任务是「合并当前 main、修复合并引入的编译中断、
+  全套复核、保持可 fast-forward 的干净树」，剩余五种的前置沿用 5.16；两个 `### 5.11` 与
+  5.12~5.14 的错乱交叉引用仍未自行重编号，留给队长统一处理（理由同 5.15 / 5.16）。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
