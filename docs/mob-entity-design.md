@@ -925,6 +925,37 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 - 交接：请队长二选一 —— (A) 把本轮提交 fast-forward 合进 main；(B) 先确认 `Extractor.java`
   的 `DATA_*` 导出、再单独开一整轮按 5.12 规格做豹猫（共用面最小）或按 brain 规格整块做青蛙。
 
+### 5.19 第 15 轮：合并青蛙与骆驼 main、实现豹猫与猫并通过逐刻与存档对拍（op-misc，2026-11-22）
+
+- **合并 main**：先后合并 `4ad4370c`（青蛙 / 蝌蚪 / Brain）与 `c72e9b0d`（骆驼 / Brain 姿势机），
+  合并后 `main` 为 `HEAD` 祖先，合回 `main` 为无冲突 fast-forward。合并骆驼时因 `main` 占用了
+  `MobOracle` 场景编号 `20`（`MobType::Camel`），将豹猫与猫的场景编号顺延为 `21` / `22`，避免碰撞；
+  `MobType::ALL` 扩至 40 种并由 `mob_type_registry_ids_round_trip` 守卫。
+- **实现豹猫（`ocelot.rs`，提交 `3b9c3c27`）**：
+  - 生成器导出 `OCELOT_TRUSTING = 18`；属性 10 / 0.3F / 3.0，成年 0.6×0.7、幼崽 0.3×0.35（眼高 0.34375）；
+    `Trusting` 存盘与同步。
+  - 新增 `LivingEntity.setSprinting` 瞬态速度修饰符（`+0.3F` `AddMultipliedTotal`）、`Attribute.sync_version`
+    脏计数（每次 `setSprinting(true)` 按官方 `AttributeInstance.setDirty()` 触发下一次同步包）和
+    `Entity.spawnSprintParticle` 服务端 `2 × nextDouble()` 随机取数。
+  - 完整目标链（`Float` / `OcelotAvoidEntityGoal` / `OcelotTemptGoal` / `LeapAtTarget` / `OcelotAttackGoal` /
+    `Breed` / `WaterAvoidingRandomStroll` / `LookAtPlayer`，捕杀 `Chicken` 与陆地幼年 `Turtle`）、信任交互
+    （1/3 + 7 组高斯取数 + 事件 40/41）、丛林/竹林 `MONSTER` 自然刷怪（`checkOcelotSpawnRules` 2/3 与
+    `checkSpawnObstruction` 要求海平面以上、草方块或树叶且无液体）。
+  - 顺手修了两处既有的海龟缺陷（`ocelot_hunt_turtle` 暴露）：`turtle.rs` 眼高从 `height` 改为
+    `height * 0.85`（成年 0.34、幼年 0.102，对齐 `EntityTypes.TURTLE`），`TurtleRandomStrollGoal` 改用
+    `PLAIN_STROLL` 并补全 `TurtleRandomStrollGoal` / `TurtlePanicGoal` / `TurtleBreedGoal` 的 `subclass_name`。
+- **实现猫（`cat.rs`，提交 `ab1a863e`）**：
+  - 生成器导出 5 个索引（`CAT_VARIANT` / `CAT_IS_LYING` / `CAT_RELAX_STATE_ONE` / `CAT_COLLAR` /
+    `CAT_SOUND_VARIANT`），协议层补 `SERIALIZER_CAT_VARIANT = 21` 与 `SERIALIZER_CAT_SOUND_VARIANT = 22`。
+  - 复用 `tame.rs` 可驯服框架与 `wolf::mixed_dye` / `nutrition_of`；实现 11 种花色、2 种叫声变体 × 9 槽位
+    （含幼猫 `entity.baby_cat.*`）、月相选花色（满月 `>= 0.9` 允许 `all_black`）、驯服 / 染项圈 / 喂鱼回血 /
+    求爱繁殖（不重抽 `sound_variant`）/ 切换坐站、`CatTemptGoal` / `CatLieOnBlockGoal` / `CatSitOnBlockGoal` /
+    捕杀兔子与陆地幼年海龟、以及 `interact.rs::play_eating_sound` 对猫吃食声的分派。
+- **未实现与交接**：本分支 10 种动物至此已完成 9 种（哞菇、山羊、北极熊、熊猫、青蛙/蝌蚪、犰狳、骆驼、
+  豹猫、猫），仅剩 **鹦鹉（Parrot）**（需飞行导航 `FlyingPathNavigation` + 玩家肩膀乘骑 `ShoulderRidingEntity`
+  与世界模型 8.2 乘客方案）。猫的村庄 `CatSpawner`、沼泽小屋猫、睡觉主人的 `CatRelaxOnOwnerGoal`/晨间礼物、
+  `CatSitOnBlockGoal` 箱子开合人数判定以及苦力怕躲避豹猫/猫的 `AvoidEntityGoal` 均已记入 README 已知限制与汇报。
+
 ---
 
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
