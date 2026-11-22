@@ -3306,6 +3306,19 @@ impl<'a> World<'a> {
         } else {
             self.level.put_entity(entity);
         }
+        if let Some(amount) = outcome.self_hurt {
+            // 鹦鹉吃曲奇：`hurtServer(playerAttack, Float.MAX_VALUE)`。
+            // A parrot eating a cookie: `hurtServer(playerAttack, Float.MAX_VALUE)`.
+            self.hurt_mob(
+                id,
+                crate::entity::mob::DamageSource::player(
+                    request.player_uid,
+                    request.position,
+                    request.creative,
+                ),
+                amount,
+            );
+        }
         outcome
     }
 

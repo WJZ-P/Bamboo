@@ -3585,6 +3585,7 @@ fn entity_types_file(data: &VersionData) -> String {
         ("CAT_RELAX_STATE_ONE", facts.cat_relax_state_one),
         ("CAT_COLLAR", facts.cat_collar),
         ("CAT_SOUND_VARIANT", facts.cat_sound_variant),
+        ("PARROT_VARIANT", facts.parrot_variant),
         ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
         ("FISH_FROM_BUCKET", facts.fish_from_bucket),
         ("SALMON_VARIANT", facts.salmon_variant),
@@ -3603,6 +3604,11 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: u8 = {value};");
     }
+    let _ = writeln!(
+        out,
+        "pub const PARROT_SOUND_MAP_SIZE: i32 = {};",
+        facts.parrot_sound_map_size
+    );
     let _ = writeln!(
         out,
         "pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &{:?};",

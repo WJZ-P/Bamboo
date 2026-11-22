@@ -52,6 +52,10 @@ pub enum Goal {
     ///
     /// The cat's own goals.
     Cat(super::cat::CatGoal),
+    /// 鹦鹉自己的目标。
+    ///
+    /// The parrot's own goals.
+    Parrot(super::parrot::ParrotGoal),
     /// `LeapAtTargetGoal`：离目标 2 到 4 格、站在地上时扑过去。
     ///
     /// `LeapAtTargetGoal`: leap at a target 2 to 4 blocks away.
@@ -540,6 +544,7 @@ impl Goal {
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
             Self::Cat(goal) => goal.flags(),
+            Self::Parrot(goal) => goal.flags(),
             Self::Breed { .. }
             | Self::Tempt { .. }
             | Self::OcelotAttack { .. }
@@ -593,6 +598,9 @@ impl Goal {
             return goal.every_tick();
         }
         if let Self::Cat(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Parrot(goal) = self {
             return goal.every_tick();
         }
         // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
@@ -658,6 +666,7 @@ impl Goal {
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
             Self::Cat(goal) => goal.name(),
+            Self::Parrot(goal) => goal.name(),
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
@@ -1276,14 +1285,14 @@ pub(super) const fn melee_attack(speed: f64, track_target: bool, class: &'static
 /// Rabbits and foxes wrap a few shared goals in inner subclasses; the oracle
 /// compares the subclass names.
 fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
-    use super::MobType::{Cat, Fox, Ocelot, Rabbit, Tadpole, Turtle, Wolf};
+    use super::MobType::{Cat, Fox, Ocelot, Parrot, Rabbit, Tadpole, Turtle, Wolf};
     match (kind, name) {
         // `AbstractFish.FishSwimGoal`。
         (Tadpole, "RandomSwimmingGoal") => "FishSwimGoal",
         (Turtle, "PanicGoal") => "TurtlePanicGoal",
         (Turtle, "BreedGoal") => "TurtleBreedGoal",
         (Turtle, "RandomStrollGoal") => "TurtleRandomStrollGoal",
-        (Wolf | Cat, "PanicGoal") => "TamableAnimalPanicGoal",
+        (Wolf | Cat | Parrot, "PanicGoal") => "TamableAnimalPanicGoal",
         (Rabbit, "PanicGoal") => "RabbitPanicGoal",
         (Rabbit, "AvoidEntityGoal") => "RabbitAvoidEntityGoal",
         (Fox, "PanicGoal") => "FoxPanicGoal",
@@ -1487,6 +1496,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
         Goal::Cat(goal) => goal.can_use(me, mob, ctx),
+        Goal::Parrot(goal) => goal.can_use(me, mob, ctx),
         Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
             // `FoxPanicGoal.shouldPanic`：保护中的狐狸不惊慌。
@@ -2050,6 +2060,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
         Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Parrot(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
         // `Drowned.DrownedAttackGoal.canContinueToUse`：僵尸的近战条件加 `okTarget`。
         Goal::RandomStroll { .. } | Goal::DrownedGoToWater { .. } => !mob.navigation.is_done(),
@@ -2325,6 +2336,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
         Goal::Cat(goal) => goal.start(me, mob, ctx),
+        Goal::Parrot(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target, .. } => {
@@ -2594,6 +2606,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
         Goal::Cat(goal) => goal.stop(mob),
+        Goal::Parrot(goal) => goal.stop(mob),
         Goal::LeapAtTarget { .. } => {}
         Goal::Swim { .. } => mob.navigation.stop(),
         // `MoveToBlockGoal` 没有覆写 `stop`：不停导航。
@@ -2964,6 +2977,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
         Goal::Cat(goal) => goal.tick(me, mob, ctx),
+        Goal::Parrot(goal) => goal.tick(me, mob, ctx),
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
         // `TamableAnimalPanicGoal.tick` teleports to a distant owner first.
         Goal::Panic { .. } if super::tame::is_tamable(mob.mob_type) => {
@@ -3543,9 +3557,12 @@ fn random_direction_within_radians(
     max_radians: f64,
 ) -> Option<BlockPos> {
     let centre = mth::atan2(z_dir, x_dir) as f64 - f64::from(std::f32::consts::FRAC_PI_2);
-    let radians = centre + (2.0 * f64::from(me.random.next_float()) - 1.0) * max_radians;
+    // 扇形的偏移在 f32 里算完再提升成 f64，和官方一致。
+    // The fan offset is computed in f32 and then widened to f64, as vanilla does.
+    let spread = f64::from(2.0_f32 * me.random.next_float() - 1.0);
+    let radians = centre + spread * max_radians;
     let dist = mth::lerp(me.random.next_double().sqrt(), horizontal.0, horizontal.1)
-        * std::f64::consts::SQRT_2;
+        * f64::from(std::f32::consts::SQRT_2);
     let x = -dist * radians.sin();
     let z = dist * radians.cos();
     if x.abs() > horizontal.1 || z.abs() > horizontal.1 {
@@ -3932,8 +3949,8 @@ fn random_direction_within_radians_flat(
     let centre = mth::atan2(dir_z, dir_x) - f64::from(std::f32::consts::FRAC_PI_2);
     let spread = f64::from(2.0_f32 * me.random.next_float() - 1.0);
     let yaw = centre + spread * max_radians;
-    let distance =
-        mth::lerp(me.random.next_double().sqrt(), 0.0, max_horizontal) * std::f64::consts::SQRT_2;
+    let distance = mth::lerp(me.random.next_double().sqrt(), 0.0, max_horizontal)
+        * f64::from(std::f32::consts::SQRT_2);
     let x = -distance * yaw.sin();
     let z = distance * yaw.cos();
     if x.abs() > max_horizontal || z.abs() > max_horizontal {
@@ -3974,6 +3991,133 @@ pub(crate) fn land_random_pos(
         }
         Some(moved)
     })
+}
+
+/// `HoverRandomPos.getPos`：朝视线方向找一个能悬停的高度。
+///
+/// `HoverRandomPos.getPos`: hover a few blocks above the ground towards the facing.
+#[expect(clippy::too_many_arguments, reason = "官方方法就是这几个参数")]
+pub(crate) fn hover_random_pos(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    x_dir: f64,
+    z_dir: f64,
+    max_radians: f64,
+    hover_max_height: i32,
+    hover_min_height: i32,
+) -> Option<Vec3> {
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            0,
+            x_dir,
+            z_dir,
+            max_radians,
+        )?;
+        let pos =
+            land_toward_direction(me, mob, view, f64::from(horizontal), restricted, direction)?;
+        let above = me
+            .random
+            .next_int_bounded(hover_max_height - hover_min_height + 1)
+            + hover_min_height;
+        let pos = move_up_to_above_solid(view, pos, above);
+        if view.fluid_state(pos).is_tagged(fluid_tags::WATER) || has_malus(mob, view, pos) {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `AirAndWaterRandomPos.getPos`：朝视线方向找空中或水里的落点。
+///
+/// `AirAndWaterRandomPos.getPos`: an air or water spot towards the facing.
+#[expect(clippy::too_many_arguments, reason = "官方方法就是这几个参数")]
+pub(crate) fn air_and_water_random_pos(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    flying_height: i32,
+    x_dir: f64,
+    z_dir: f64,
+    max_radians: f64,
+) -> Option<Vec3> {
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            flying_height,
+            x_dir,
+            z_dir,
+            max_radians,
+        )?;
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos) || (restricted && !within_home(mob, pos)) {
+            return None;
+        }
+        let pos = move_up_out_of_solid(view, pos);
+        if has_malus(mob, view, pos) {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `LandRandomPos.generateRandomPosTowardDirection`。
+fn land_toward_direction(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    max_distance: f64,
+    restricted: bool,
+    direction: BlockPos,
+) -> Option<BlockPos> {
+    let pos = toward_direction(me, mob, max_distance, direction);
+    if outside_limits(view, pos) || (restricted && !within_home(mob, pos)) {
+        return None;
+    }
+    Some(pos)
+}
+
+/// `RandomPos.moveUpOutOfSolid`。
+fn move_up_out_of_solid(view: &dyn BlockView, pos: BlockPos) -> BlockPos {
+    if !view.block_state(pos).is_solid() {
+        return pos;
+    }
+    let mut moved = pos.above();
+    while moved.y <= view.max_y() && view.block_state(moved).is_solid() {
+        moved = moved.above();
+    }
+    moved
+}
+
+/// `RandomPos.moveUpToAboveSolid`。
+fn move_up_to_above_solid(view: &dyn BlockView, pos: BlockPos, above_solid: i32) -> BlockPos {
+    if !view.block_state(pos).is_solid() {
+        return pos;
+    }
+    let mut moved = pos.above();
+    while moved.y <= view.max_y() && view.block_state(moved).is_solid() {
+        moved = moved.above();
+    }
+    let first_non_solid = moved.y;
+    while moved.y <= view.max_y() && moved.y - first_non_solid < above_solid {
+        moved = moved.above();
+        if view.block_state(moved).is_solid() {
+            moved = moved.below();
+            break;
+        }
+    }
+    moved
 }
 
 // ---- 敌对目标的查询 ----

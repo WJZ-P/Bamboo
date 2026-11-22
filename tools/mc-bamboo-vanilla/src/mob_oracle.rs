@@ -1528,6 +1528,7 @@ impl Report {
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
                     21 => mc_bamboo_blocks::entity::mob::MobType::Ocelot,
                     22 => mc_bamboo_blocks::entity::mob::MobType::Cat,
+                    23 => mc_bamboo_blocks::entity::mob::MobType::Parrot,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
@@ -3947,6 +3948,14 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
                 .owner
                 .map_or_else(|| "-".to_owned(), |uuid| uuid_text(&uuid)),
         ),
+        MobType::Parrot => format!(
+            "t{}|o{}|s{}|v{}|r{}",
+            u8::from(mob.tame.is_tame()),
+            u8::from(mob.tame.ordered_to_sit),
+            u8::from(mob.tame.in_sitting_pose()),
+            mob.parrot.variant,
+            mob.parrot.ride_cooldown,
+        ),
         MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
         MobType::Enderman => mob.describe_enderman(),
         MobType::Spider | MobType::CaveSpider => {
@@ -3995,6 +4004,7 @@ fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
         MobType::Pig => mob.pig_sound_variant.name().to_owned(),
         MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
         MobType::Cat => mob.cat.sound_variant_name().to_owned(),
+        MobType::Parrot => String::new(),
         MobType::Sheep
         | MobType::Mooshroom
         | MobType::PolarBear

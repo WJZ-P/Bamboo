@@ -84,6 +84,11 @@ pub struct MobInteraction {
     /// Offset added to the mob's position for `drop_stack` (zero by default;
     /// sheared equipment uses the average `PASSENGER` attachment point).
     pub drop_offset: mc_bamboo_core::Vec3,
+    /// 交互里对自己造成的伤害（鹦鹉吃曲奇）：调用方在实体放回世界后按玩家攻击结算。
+    ///
+    /// Damage the interaction deals to the mob itself (a parrot eating a cookie): the
+    /// caller resolves it as a player attack once the mob is back in the world.
+    pub self_hurt: Option<f32>,
 }
 
 impl MobInteraction {
@@ -101,6 +106,7 @@ impl MobInteraction {
             limit_creative: true,
             drop_stack: None,
             drop_offset: mc_bamboo_core::Vec3::new(0.0, 0.0, 0.0),
+            self_hurt: None,
         }
     }
 }
@@ -173,6 +179,9 @@ pub fn interact(
     }
     if mob.mob_type == MobType::Cat {
         return super::cat::interact(me, mob, req);
+    }
+    if mob.mob_type == MobType::Parrot {
+        return super::parrot::interact(me, mob, req);
     }
     if mob.mob_type == MobType::Armadillo
         && let Some(outcome) = super::armadillo::interact(me, mob, req)

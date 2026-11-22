@@ -1018,6 +1018,14 @@ public final class MobOracle {
                 || mob instanceof net.minecraft.world.entity.monster.Enderman) {
             return hostileVariant(mob);
         }
+        if (mob instanceof net.minecraft.world.entity.animal.parrot.Parrot parrot) {
+            return "t" + (parrot.isTame() ? 1 : 0)
+                    + "|o" + (parrot.isOrderedToSit() ? 1 : 0)
+                    + "|s" + (parrot.isInSittingPose() ? 1 : 0)
+                    + "|v" + parrot.getVariant().getId()
+                    + "|r" + getInt(net.minecraft.world.entity.animal.parrot.ShoulderRidingEntity.class,
+                            parrot, "rideCooldownCounter");
+        }
         return "minecraft:temperate";
     }
 
@@ -1046,6 +1054,7 @@ public final class MobOracle {
                 || mob instanceof net.minecraft.world.entity.animal.feline.Cat) {
             return farmSound((Animal) mob);
         }
+        if (mob instanceof net.minecraft.world.entity.animal.parrot.Parrot) return "";
         return "minecraft:classic";
     }
 
@@ -2073,6 +2082,7 @@ public final class MobOracle {
             pandaScenes(scenes);
             ocelotScenes(scenes);
             catScenes(scenes);
+            parrotScenes(scenes);
         }
 
         /**
@@ -2183,6 +2193,63 @@ public final class MobOracle {
                 huntTurtle.mob(60, 3.5, 64.0, 0.5, 0.0F, 633L, 0);
                 huntTurtle.mob(60, 6.5, 64.0, 0.5, 0.0F, 634L, -24000);
                 scenes.add(huntTurtle);
+            }
+        }
+
+        /**
+         * 鹦鹉：飞行闲逛并在树桩上停留、吃种子驯服与坐站、吃曲奇中毒死亡、
+         * 模仿附近的僵尸叫。
+         *
+         * Parrots: flying strolling and perching on a log, taming with seeds and the
+         * sit toggle, dying from a cookie, and imitating a nearby zombie.
+         */
+        static void parrotScenes(List<Scene> scenes) {
+            int seeds = BuiltInRegistries.ITEM.getId(Items.WHEAT_SEEDS);
+            int cookie = BuiltInRegistries.ITEM.getId(Items.COOKIE);
+            int air = BuiltInRegistries.ITEM.getId(Items.AIR);
+            {
+                Scene idle = new Scene("parrot_idle").ticks(400).packets();
+                ground(idle, 24);
+                // 一段树桩：下面的原木和树叶都算能停，上方两格必须是空的。
+                // A tree stump: logs and leaves count as a perch; the two cells above must be air.
+                idle.set(2, 64, 0, Blocks.OAK_LOG.defaultBlockState());
+                idle.set(3, 64, 0, Blocks.OAK_LEAVES.defaultBlockState());
+                idle.mob(23, 0.5, 64.0, 0.5, 0.0F, 901L, 0);
+                idle.player(10.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                Scene tame = new Scene("parrot_tame").ticks(100).packets();
+                ground(tame, 12);
+                tame.mob(23, 0.5, 64.0, 0.5, 0.0F, 902L, 0);
+                tame.player(1.5, 64.0, 0.5, Items.WHEAT_SEEDS);
+                for (int t = 2; t <= 40; t += 2) {
+                    tame.interact(t, 0, 0, seeds, 0);
+                }
+                tame.interact(60, 0, 0, air, 0);
+                tame.interact(80, 0, 0, air, 0);
+                scenes.add(tame);
+            }
+            {
+                Scene eat = new Scene("parrot_cookie").ticks(60).drops().packets();
+                ground(eat, 8);
+                eat.mob(23, 0.5, 64.0, 0.5, 0.0F, 903L, 0);
+                eat.player(1.5, 64.0, 0.5, Items.COOKIE);
+                eat.interact(4, 0, 0, cookie, 0);
+                scenes.add(eat);
+            }
+            {
+                Scene imitate = new Scene("parrot_imitate").ticks(300).packets();
+                ground(imitate, 16);
+                // 树桩让第一次闲逛落到确定的目标上，剩下只比模仿叫声。
+                // The stump makes the first stroll land on a deterministic target; the
+                // rest of the scene only compares imitated sounds.
+                imitate.set(2, 64, 0, Blocks.OAK_LOG.defaultBlockState());
+                imitate.set(3, 64, 0, Blocks.OAK_LEAVES.defaultBlockState());
+                imitate.mob(23, 0.5, 64.0, 0.5, 0.0F, 904L, 0);
+                imitate.mob(1, 5.5, 64.0, 0.5, 0.0F, 905L, 0);
+                imitate.player(12.5, 64.0, 8.5, Items.AIR);
+                scenes.add(imitate);
             }
         }
 
@@ -7955,6 +8022,7 @@ public final class MobOracle {
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
                 case 21 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
                 case 22 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
+                case 23 -> EntityTypes.PARROT.create(level, EntitySpawnReason.COMMAND);
                 case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
@@ -9805,6 +9873,7 @@ public final class MobOracle {
         if (scene.startsWith("panda_")) return EntityTypes.PANDA;
         if (scene.startsWith("ocelot_")) return EntityTypes.OCELOT;
         if (scene.startsWith("cat_")) return EntityTypes.CAT;
+        if (scene.startsWith("parrot_")) return EntityTypes.PARROT;
         return EntityTypes.COW;
     }
 
@@ -9822,6 +9891,7 @@ public final class MobOracle {
         if (scene.startsWith("panda_")) return 15;
         if (scene.startsWith("ocelot_")) return 21;
         if (scene.startsWith("cat_")) return 22;
+        if (scene.startsWith("parrot_")) return 23;
         return 0;
     }
 
@@ -9900,6 +9970,14 @@ public final class MobOracle {
 
     /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
     private static String farmVariant(Animal animal) throws Exception {
+        if (animal instanceof net.minecraft.world.entity.animal.parrot.Parrot parrot) {
+            return "t" + (parrot.isTame() ? 1 : 0)
+                    + "|o" + (parrot.isOrderedToSit() ? 1 : 0)
+                    + "|s" + (parrot.isInSittingPose() ? 1 : 0)
+                    + "|v" + parrot.getVariant().getId()
+                    + "|r" + getInt(net.minecraft.world.entity.animal.parrot.ShoulderRidingEntity.class,
+                            parrot, "rideCooldownCounter");
+        }
         if (animal instanceof net.minecraft.world.entity.animal.feline.Cat cat) {
             return catState(cat);
         }
@@ -9959,7 +10037,8 @@ public final class MobOracle {
         if (animal instanceof Sheep || animal instanceof PolarBear
                 || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow
                 || animal instanceof net.minecraft.world.entity.animal.panda.Panda
-                || animal instanceof net.minecraft.world.entity.animal.feline.Ocelot) {
+                || animal instanceof net.minecraft.world.entity.animal.feline.Ocelot
+                || animal instanceof net.minecraft.world.entity.animal.parrot.Parrot) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");

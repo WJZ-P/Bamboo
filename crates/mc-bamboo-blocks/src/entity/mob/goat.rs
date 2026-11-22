@@ -1455,6 +1455,7 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         limit_creative: true,
         drop_stack: None,
         drop_offset: Vec3::new(0.0, 0.0, 0.0),
+        self_hurt: None,
     })
 }
 
@@ -1579,6 +1580,7 @@ mod tests {
             limit_creative: true,
             drop_stack: None,
             drop_offset: Vec3::new(0.0, 0.0, 0.0),
+            self_hurt: None,
         };
         assert_eq!(
             eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),

@@ -714,6 +714,9 @@ pub(super) fn check_spawn_rules(
         MobType::PolarBear => super::polar_bear::spawn_rules(world, pos),
         MobType::Panda => super::panda::spawn_rules(world, pos),
         MobType::Ocelot => super::ocelot::spawn_rules(world.random()),
+        // `Parrot.checkParrotSpawnRules`：`#parrots_spawnable_on` 加亮度。
+        // `Parrot.checkParrotSpawnRules`: `#parrots_spawnable_on` plus brightness.
+        MobType::Parrot => super::parrot::spawn_rules(world, pos),
         MobType::Zombie
         | MobType::Skeleton
         | MobType::Bogged

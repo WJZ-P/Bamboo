@@ -126,6 +126,13 @@ fn check_fall_damage(
     state: BlockState,
     pos: BlockPos,
 ) {
+    // `Parrot.checkFallDamage` 是空实现：鹦鹉从任何时候摔下来都不掉血，也不跑
+    // `LivingEntity` 那一套落地处理。
+    // `Parrot.checkFallDamage` is empty: parrots never take fall damage and skip the
+    // whole `LivingEntity` landing path.
+    if mob.mob_type == super::MobType::Parrot {
+        return;
+    }
     if !me.in_water {
         update_fluid_interaction(me, mob, ctx.blocks());
     }
@@ -319,6 +326,13 @@ fn movement_emission(
                 let pitch = 1.0 + (first - second) * 0.4;
                 super::living::play_sound(me, mob, mob.mob_type.swim_sound(), volume, pitch);
             }
+        }
+    } else if on_state.is_air() && mob.mob_type == super::MobType::Parrot {
+        // `Parrot.isFlapping()` 加 `onFlap()`：脚下是空气时按飞行距离放翅膀声。
+        // `Parrot.isFlapping()` and `onFlap()`: above air, play the wing sound per distance.
+        if mob.fly_dist > mob.parrot.next_flap {
+            super::living::play_sound(me, mob, "minecraft:entity.parrot.fly", 0.15, 1.0);
+            mob.parrot.next_flap = mob.fly_dist + mob.parrot.flap_speed / 2.0;
         }
     }
 }
