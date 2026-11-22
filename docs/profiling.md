@@ -2444,3 +2444,32 @@ tracked live 103.4 → 76.7 MB、`plain` 离开后工作集 181.0 → 157.3 MB�
 以归属表为准）。对拍 `structures`（9744 次选择比较）、`structure-rings`（864 次环 /
 群系吸附）、`chunkgen --through features` 全 0 不一致。产物在
 `W:/data/bamboo-agents/reports/op-memprof-data/s7-profile/` 与 `s7-plain/`。
+
+### 20.3 续：`Worldgen` 只留启服后还会读的注册表（2026-11-22）
+
+共享 `Worldgen` 是 24.93 MB 的常量项，其中最大的一块是 `raw: serde_json::Map`——解析时
+把整份 `worldgen.json` 深拷了一份留着。逐个核对启服后还会调用 `Worldgen::raw()` 的地方
+（`chunk::Generator::with_settings` 编译含水层 / 地表规则 / 雕刻器，`spawn::spawn_origin`
+取出生点目标，`structure::pipeline` 建结构状态，游戏侧的 `processor_lists`），只有 10 张
+顶层表会被读到：`noise_settings`、`density_function`、`material_rule`、`material_condition`、
+`carver`、`biome_carvers`、`structure_set`、`structure`、`template_pool`、`processor_list`。
+其余（`multi_noise_presets` 862 KB、`feature` 183 KB、`placed_feature` 117 KB、
+`biome_features` 79 KB、`features_per_step`、`block_state_provider`、`end_biomes`、`noise`，
+按紧凑 JSON 计约占 63%）在解析完成后就没人再读。
+
+改动只在 `Worldgen::parse`：按 `RUNTIME_TABLES` 那 10 个键从顶层对象复制，其余丢弃；
+`raw()` 的语义随之变成「启服后还会读的原始注册表」，新增单测 `raw_keeps_only_the_runtime_tables`
+盯住键集合。**结果逐字节不变**，因为删掉的键没有任何读路径；`feature/flat.rs` 里那条测试
+原来用 `data.raw()` 重解析一份 `Registry`，改为直接用 `Worldgen::features()`（少一次全量解析，
+测试意图不变）。
+
+实测（种子 20261121、视距 8，经机器级 heavy 锁串行）：同一 `startup` 快照里
+`worldgen data: shared Worldgen` 24.93 → 11.50 MB（103248 块），**−13.43 MB 常驻**；不带
+分析器的 release 服务端空载 / 在线 / 离开后 54.6 / 212.4 / 145.0 → 38.9 / 192.5 / 128.3 MB
+（忙机器 ±10–20 MB，进程总量只作旁证，精确值以归属表为准）。对拍 `chunkgen --through
+features`（886272 项）与 `structures`（9744 次选择比较）全 0 不一致，`cargo test -p
+mc-bamboo-worldgen --lib` 355 passed。产物在
+`W:/data/bamboo-agents/reports/op-memprof-data/s8-profile/` 与 `s8-plain/`。
+
+`template_pool`（紧凑 481 KB）仍留在 `raw` 里，因为结构流水线每次建状态都要解析一份；
+把它也改成进程级 `OnceLock` 就能再省约 2 MB，但会动结构状态的建法，本轮没做。

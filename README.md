@@ -580,6 +580,15 @@ WebView2 的渲染进程不算在内。
   15.74 → 10.56 MB，约 −10.9 MB 常驻，`plain` 离开后工作集 157 → 145 MB，见
   `docs/profiling.md` §20.2。**已知限制**：共享缓存按 `(seed, settings, flat)` 常驻不回收，
   进程内换种子 / 平坦设置会累积多份（改动前每线程缓存同样不回收，只是每份副本更多）。
+- **`Worldgen` 只留启服后还会读的注册表**（`op-memprof` 续，2026-11-22）：`Worldgen::raw` 原先
+  克隆整份 `worldgen.json`。启服后只有 10 张顶层表会被读（噪声设置、密度函数、地表规则 / 条件、
+  雕刻器、结构集 / 结构、模板池、处理阀），多噪声预设、地物三张表、`features_per_step`、
+  `block_state_provider`、`end_biomes`、`noise` 解析完就没人再读；现在只复制那 10 张
+  （`crates/mc-bamboo-worldgen/src/lib.rs` 的 `RUNTIME_TABLES`）。结果逐字节不变——只是不再
+  保留没人读的键：`chunkgen --through features`、`structures` 全 0 不一致。同一快照
+  `shared Worldgen` 24.93 → 11.50 MB（−13.43 MB 常驻）；不带分析器的 release 服务端
+  54.6 / 212.4 / 145.0 → 38.9 / 192.5 / 128.3 MB（空载 / 在线 / 离开后，忙机器 ±10–20 MB），
+  见 `docs/profiling.md` §20.3。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
