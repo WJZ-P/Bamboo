@@ -4394,6 +4394,112 @@ fn a_sweep_ignites_swept_targets_with_fire_aspect() {
     assert!(fire(swept) > 0, "the swept target must be ignited too");
 }
 
+/// 玩家互打（`pvp` 为真）：伤害落在另一名玩家身上，火焰附加点燃它，额外击退
+/// 把速度包发过去，而服务端速度照官方 `ServerPlayer.syncVelocity` 分支改回受击
+/// 前的值；横扫也把旁边的玩家算进候选。
+///
+/// Player-versus-player with `pvp` on: the hit lands on the other player, Fire
+/// Aspect ignites them, the extra knockback sends them a velocity packet, and
+/// the server-side velocity is put back as vanilla's `ServerPlayer.syncVelocity`
+/// branch does. Sweeping counts nearby players too.
+#[test]
+fn melee_attack_hits_another_player() {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    let mut server = Harness::new(8);
+    let attacker = server.join("Kitten");
+    let victim = server.join("Puppy");
+    let bystander = server.join("Bunny");
+    server.tick();
+    attacker.take_frames();
+    victim.take_frames();
+    bystander.take_frames();
+    let region = &mut server.world.islands.region;
+    assert!(
+        region.global.rules.bool(mc_bamboo_data::gamerules::PVP),
+        "pvp defaults to true"
+    );
+    let base = region.players.get(&attacker.id).unwrap().position();
+    {
+        let (players, grid) = (&mut region.players, &mut region.player_grid);
+        for id in [attacker.id, victim.id, bystander.id] {
+            let player = players.get_mut(&id).unwrap();
+            player.game_mode = GameMode::Survival;
+            player.health.health = 20.0;
+        }
+        players
+            .get_mut(&attacker.id)
+            .unwrap()
+            .set_position(grid, base);
+        players
+            .get_mut(&victim.id)
+            .unwrap()
+            .set_position(grid, Vec3::new(base.x + 2.0, base.y, base.z));
+        players
+            .get_mut(&bystander.id)
+            .unwrap()
+            .set_position(grid, Vec3::new(base.x + 2.5, base.y, base.z));
+    }
+    let fire_aspect = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == "minecraft:fire_aspect")
+        })
+        .expect("fire_aspect exists") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(fire_aspect, 2)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    let weapon = ItemStack {
+        item: mc_bamboo_data::items::DIAMOND_SWORD,
+        count: 1,
+        added,
+        removed,
+    };
+    let victim_delta = {
+        let player = region.players.get_mut(&attacker.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+        region.players.get(&victim.id).unwrap().motion.delta
+    };
+    server.request(
+        &attacker,
+        PlayRequest::Attack {
+            entity_id: victim.id.0,
+        },
+    );
+    server.tick();
+    let region = &server.world.islands.region;
+    let target = region.players.get(&victim.id).expect("victim");
+    assert!(target.health.health < 20.0, "the victim must take damage");
+    assert!(
+        target.environment.remaining_fire_ticks > 0,
+        "Fire Aspect must ignite the player victim"
+    );
+    // 官方把速度包发出去之后恢复受击前的速度。
+    // Vanilla restores the pre-hit velocity after sending the packet.
+    assert_eq!(
+        target.motion.delta, victim_delta,
+        "the server keeps the pre-hit velocity for a player target"
+    );
+    let swept = region.players.get(&bystander.id).expect("bystander");
+    assert!(
+        swept.health.health < 20.0,
+        "the swept player must take damage"
+    );
+}
+
 /// 某类包里每条帧的首个 VarInt：音效注册表 ID 加一，或粒子 ID。
 ///
 /// The first VarInt of each frame with the given packet id: a sound registry

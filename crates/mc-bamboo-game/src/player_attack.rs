@@ -467,7 +467,7 @@ struct AttackPlan {
     sweep: bool,
     source: DamageSource,
     knockback_sound: Option<&'static str>,
-    sweep_targets: Vec<(i32, i32)>,
+    sweep_targets: Vec<SweepTarget>,
 }
 
 /// `ServerGamePacketListenerImpl.handleAttack` + `Player.attack` 的入口。
@@ -789,6 +789,16 @@ fn land_attack(
     plan: &AttackPlan,
 ) -> (bool, f32) {
     let hits_player = player_target(region, entity_id);
+    // 官方在 `hurtOrSimulate` 之前记下目标的旧速度，最后用
+    // `ServerPlayer.syncVelocity` 那一支把服务端速度改回去，只把新速度发给客户端。
+    //
+    // Vanilla captures the target's old velocity before `hurtOrSimulate` and,
+    // through the `ServerPlayer.syncVelocity` branch, puts the server-side
+    // velocity back afterwards; only the client is told the new one.
+    let old_target_movement = hits_player
+        .then(|| region.players.get(&PlayerId(entity_id)))
+        .flatten()
+        .map(|player| player.motion.delta);
     let hit = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
@@ -801,7 +811,13 @@ fn land_attack(
             world.hurt_mob(entity_id, plan.source, plan.total_damage)
         };
         if hit {
-            apply_extra_knockback(&mut world, entity_id, plan.extra_knockback, plan.yaw);
+            apply_extra_knockback(
+                &mut world,
+                entity_id,
+                plan.extra_knockback,
+                plan.yaw,
+                hits_player,
+            );
             if plan.sweep {
                 let spec = SweepSpec {
                     held: &plan.held,
@@ -841,7 +857,13 @@ fn land_attack(
                     "minecraft:entity.player.attack.sweep",
                 );
             }
-            post_attack_effects(&mut world, entity_id, &plan.held, target.entity_type);
+            post_attack_effects(
+                &mut world,
+                entity_id,
+                &plan.held,
+                target.entity_type,
+                hits_player,
+            );
         } else {
             push_sound(
                 &mut world,
@@ -853,6 +875,12 @@ fn land_attack(
         interaction::send_effects(region, Some(id), &effects);
         hit
     };
+    if hit
+        && let Some(old) = old_target_movement
+        && let Some(player) = region.players.get_mut(&PlayerId(entity_id))
+    {
+        player.motion.delta = old;
+    }
     (hit, damage_taken(region, entity_id, target.health))
 }
 
@@ -1014,14 +1042,24 @@ fn is_attackable(kind: &mc_bamboo_blocks::entity::KindPublic) -> bool {
 /// mob target: a second push along the attacker's facing with the precomputed
 /// `getKnockback + (sprint ? 0.5 : 0)`. The attacker's own velocity damp and
 /// sprint cancellation land separately in [`damp_attacker`] after the hit.
-fn apply_extra_knockback(world: &mut World<'_>, entity_id: i32, amount: f32, yaw: f32) {
+fn apply_extra_knockback(
+    world: &mut World<'_>,
+    entity_id: i32,
+    amount: f32,
+    yaw: f32,
+    is_player: bool,
+) {
     if amount <= 0.0 {
         return;
     }
     let radians = f64::from(yaw * (std::f32::consts::PI / 180.0));
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
-    world.knockback_mob(entity_id, f64::from(amount), f64::from(dx), f64::from(dz));
+    if is_player {
+        world.knock_back_player(entity_id, f64::from(amount), (f64::from(dx), f64::from(dz)));
+    } else {
+        world.knockback_mob(entity_id, f64::from(amount), f64::from(dx), f64::from(dz));
+    }
 }
 
 /// `Player.causeExtraKnockback` 的收尾：`setDeltaMovement(×0.6, 1.0, ×0.6)`
@@ -1036,22 +1074,39 @@ fn damp_attacker(region: &mut Region, id: PlayerId) {
     }
 }
 
-/// `Player.doSweepAttack` 的候选：主目标的整个碰撞盒 inflate(1, 0.25, 1) 与
-/// 候选自己的碰撞盒相交、距玩家小于 3 格的其它生物（玩家本人不算）。
-/// 返回 (实体 ID, 实体类型)。
+/// 横扫的一个候选。
 ///
-/// `Player.doSweepAttack` candidates: other mobs whose own collision box
-/// intersects the main target's box inflated by (1, 0.25, 1) and that are
-/// within 3 blocks of the player.
+/// One sweeping candidate.
+struct SweepTarget {
+    id: i32,
+    entity_type: i32,
+    is_player: bool,
+}
+
+/// `Player.doSweepAttack` 的候选：主目标的整个碰撞盒 inflate(1, 0.25, 1) 与
+/// 候选自己的碰撞盒相交、距玩家小于 3 格的其它 `LivingEntity`（玩家也算，
+/// 攻击者和主目标不算）。玩家排在生物的后面，因为玩家不在实体表里。
+///
+/// `Player.doSweepAttack` candidates: other `LivingEntity`s whose own collision
+/// box intersects the main target's box inflated by (1, 0.25, 1) and that are
+/// within 3 blocks of the player (players included, the attacker and the main
+/// target excluded). Players come after mobs because they are not in the entity
+/// store.
 fn collect_sweep_targets(
     region: &Region,
     attacker: PlayerId,
     main_target: i32,
     target: &TargetInfo,
     player_position: Vec3,
-) -> Vec<(i32, i32)> {
+) -> Vec<SweepTarget> {
     let area = entity_bounds(target.position, target.dimensions).inflate(1.0, 0.25, 1.0);
-    region
+    let within_reach = |position: Vec3| {
+        (position.x - player_position.x).powi(2)
+            + (position.y - player_position.y).powi(2)
+            + (position.z - player_position.z).powi(2)
+            < 9.0
+    };
+    let mut out: Vec<SweepTarget> = region
         .entities
         .iter_public()
         .filter(|public| {
@@ -1068,13 +1123,43 @@ fn collect_sweep_targets(
                     bounds.max_y,
                     bounds.max_z,
                 )
-                && (public.position.x - player_position.x).powi(2)
-                    + (public.position.y - player_position.y).powi(2)
-                    + (public.position.z - player_position.z).powi(2)
-                    < 9.0
+                && within_reach(public.position)
         })
-        .map(|public| (public.uid, public.kind.entity_type()))
-        .collect()
+        .map(|public| SweepTarget {
+            id: public.uid,
+            entity_type: public.kind.entity_type(),
+            is_player: false,
+        })
+        .collect();
+    // `getEntitiesOfClass(LivingEntity.class, ...)` 也包含玩家。官方没有队伍，
+    // 所以除了攻击者本人没有别的排除。
+    //
+    // `getEntitiesOfClass(LivingEntity.class, ...)` includes players too. There
+    // are no teams, so nothing but the attacker itself is excluded.
+    for player in region.players.values() {
+        let bounds = player.bounding_box();
+        let position = player.position();
+        if player.id == attacker
+            || player.id.0 == main_target
+            || !area.intersects_coords(
+                bounds.min_x,
+                bounds.min_y,
+                bounds.min_z,
+                bounds.max_x,
+                bounds.max_y,
+                bounds.max_z,
+            )
+            || !within_reach(position)
+        {
+            continue;
+        }
+        out.push(SweepTarget {
+            id: player.id.0,
+            entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
+            is_player: true,
+        });
+    }
+    out
 }
 
 /// `do_sweep` 的固定参数。
@@ -1099,26 +1184,45 @@ struct SweepSpec<'a> {
 fn do_sweep(
     world: &mut World<'_>,
     attacker: PlayerId,
-    nearby: &[(i32, i32)],
+    nearby: &[SweepTarget],
     spec: &SweepSpec<'_>,
 ) {
     let sweep_base = 1.0 + sweeping_ratio(spec.held) * spec.base_damage;
     let radians = f64::from(spec.yaw * (std::f32::consts::PI / 180.0));
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
-    for &(id, entity_type) in nearby {
-        let enchanted = (sweep_base + damage_bonus(spec.held, entity_type)) * spec.s;
+    for target in nearby {
+        let enchanted = (sweep_base + damage_bonus(spec.held, target.entity_type)) * spec.s;
         let mut source = DamageSource::player(attacker.0, spec.player_position, false);
         if !spec.held.is_empty()
             && let Ok(weapon) = u16::try_from(spec.held.item)
         {
             source = source.with_weapon(weapon);
         }
-        if world.hurt_mob(id, source, enchanted) {
-            world.knockback_mob(id, f64::from(0.4_f32), f64::from(dx), f64::from(dz));
+        let hurt = if target.is_player {
+            world.hurt_player_from_mob(target.id, source, enchanted, None)
+        } else {
+            world.hurt_mob(target.id, source, enchanted)
+        };
+        if hurt {
+            if target.is_player {
+                world.knock_back_player(
+                    target.id,
+                    f64::from(0.4_f32),
+                    (f64::from(dx), f64::from(dz)),
+                );
+            } else {
+                world.knockback_mob(target.id, f64::from(0.4_f32), f64::from(dx), f64::from(dz));
+            }
             // 官方 `doSweepAttack` 对每个打中的 nearby 也调一次 `doPostAttackEffects`。
             // Vanilla `doSweepAttack` also calls `doPostAttackEffects` on each hurt nearby.
-            post_attack_effects(world, id, spec.held, entity_type);
+            post_attack_effects(
+                world,
+                target.id,
+                spec.held,
+                target.entity_type,
+                target.is_player,
+            );
         }
     }
 }
@@ -1128,11 +1232,21 @@ fn do_sweep(
 ///
 /// `EnchantmentHelper.doPostAttackEffectsWithItemSource`: Fire Aspect ignites
 /// the target and Bane of Arthropods applies Slowness IV to arthropods.
-fn post_attack_effects(world: &mut World<'_>, entity_id: i32, held: &ItemStack, entity_type: i32) {
+fn post_attack_effects(
+    world: &mut World<'_>,
+    entity_id: i32,
+    held: &ItemStack,
+    entity_type: i32,
+    is_player: bool,
+) {
     let fire = enchantment_level(held, "minecraft:fire_aspect");
     if fire > 0 {
         // `Ignite(LevelBasedValue.perLevel(4.0F))` → 4×等级 秒 → ×20 刻。
-        world.ignite_mob(entity_id, fire * 80);
+        if is_player {
+            world.ignite_player_from_mob(entity_id, fire * 80);
+        } else {
+            world.ignite_mob(entity_id, fire * 80);
+        }
     }
     let bane = enchantment_level(held, "minecraft:bane_of_arthropods");
     if bane > 0 && entity_in_tag("minecraft:sensitive_to_bane_of_arthropods", entity_type) {
@@ -1332,6 +1446,7 @@ mod tests {
                 spider,
                 &sword,
                 mc_bamboo_data::registries::entity_type::SPIDER,
+                false,
             );
         }
 
