@@ -164,6 +164,17 @@ pub(crate) struct Player {
     ///
     /// A bow or crossbow in `LivingEntity.useItem`.
     pub(crate) weapon_use: Option<crate::player_weapon::WeaponUse>,
+    /// 官方 `Player.attackStrengthTicker`：`aiStep` 每刻加一，攻击 / 挥空 / 换物品清零。
+    /// 相对计数，随玩家整行搬，不需要时钟平移。
+    ///
+    /// Vanilla `Player.attackStrengthTicker`: incremented every `aiStep` tick and
+    /// reset on attack, air swing or item swap. A relative counter needing no rebasing.
+    pub(crate) attack_strength_ticker: i32,
+    /// 官方 `Player.lastItemInMainHand`：主手物品变了才检查要不要重置冷却。
+    ///
+    /// Vanilla `Player.lastItemInMainHand`: the previous main-hand stack, used to
+    /// detect the item swap that resets the attack cooldown.
+    pub(crate) last_main_hand_item: ItemStack,
     pub(crate) item_use_stats: crate::item_use_stats::ItemUseStats,
     /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
     pub(crate) pending_exhaustion: f32,
@@ -293,6 +304,8 @@ impl Player {
             environment: crate::player_environment::Environment::default(),
             use_item: None,
             weapon_use: None,
+            attack_strength_ticker: 0,
+            last_main_hand_item: ItemStack::empty(),
             item_use_stats: Default::default(),
             pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,

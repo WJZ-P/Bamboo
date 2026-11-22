@@ -9,7 +9,7 @@ use mc_bamboo_core::{Aabb, Vec3, mth};
 use mc_bamboo_data::registries::attribute;
 
 use super::{
-    super::{MobPublic as KindPublicMob, MobType, goals, living},
+    super::{MobPublic as KindPublicMob, MobType, camel, goals, living},
     behavior::Cx,
     memory::{MemoryType, MemoryValue, NearestVisible},
 };
@@ -243,12 +243,22 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
 fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) -> LivingView {
     let (width, height) = mob.dimensions();
     let half = f64::from(width) / 2.0;
+    // 骆驼坐下时 `getEyeHeight()` 跟着姿势变（2.275 → 0.845），看它的幼崽的
+    // `LookControl` 读的就是这个动态眼高，不能用按种类算出来的静态值。
+    // A sitting camel's `getEyeHeight()` follows the pose (2.275 → 0.845); a
+    // watching baby's `LookControl` reads that live eye height, not a static
+    // per-species value.
+    let eye_height = if mob.mob_type == MobType::Camel {
+        camel::dimensions(mob.baby, mob.camel.pose == camel::Pose::Sitting).2
+    } else {
+        mob.mob_type.dimensions(mob.baby).2
+    };
     LivingView {
         uid,
         player: false,
         mob_type: Some(mob.mob_type),
         position,
-        eye_height: mob.mob_type.dimensions(mob.baby).2,
+        eye_height,
         bounding_box: Aabb::new(
             position.x - half,
             position.y,

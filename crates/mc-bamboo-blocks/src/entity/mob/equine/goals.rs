@@ -90,6 +90,7 @@ fn tempt() -> Goal {
         steering_item: false,
         player: None,
         calm_down: 0,
+        scare: None,
     }
 }
 

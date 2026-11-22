@@ -296,7 +296,11 @@ impl Report {
                 world.spawn_entity(Entity::by_mob_type(kind, Vec3::new(8.5, -45.0, 8.5)));
             }
         }
-        let category = kind.mob_category();
+        let category = if kind == MobType::Ocelot {
+            MobCategory::Monster
+        } else {
+            kind.mob_category()
+        };
         let params = SpawnParams {
             spawnable_chunk_count: case.spawnable_chunks,
             spawn_enemies: category == MobCategory::Monster,
@@ -407,7 +411,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .position(|name| *name == case.biome)
         .ok_or_else(|| format!("unknown natural spawn fixture biome {}", case.biome))?
         as i32;
-    let category = kind.mob_category();
+    // 豹猫实体类别是 `Creature`，但在丛林刷怪表里排在 `Monster` 槽位。
+    // Ocelots have category `Creature` yet live in the `Monster` table of jungle biomes.
+    let category = if kind == MobType::Ocelot {
+        MobCategory::Monster
+    } else {
+        kind.mob_category()
+    };
     let entry = spawning::for_biome_id(biome)
         .mobs_to_spawn(category)
         .iter()
@@ -421,6 +431,8 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     let roof = kind == MobType::Husk || (bat && !case.name.ends_with("_open"));
     let floor_state = if bat {
         BlockState(blocks::STONE)
+    } else if case.name == "ocelot_jungle_leaves" {
+        BlockState(blocks::OAK_LEAVES)
     } else {
         spawn_floor(biome)
     };

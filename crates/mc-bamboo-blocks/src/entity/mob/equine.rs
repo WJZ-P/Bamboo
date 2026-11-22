@@ -373,11 +373,22 @@ pub(super) fn save(mob: &Mob, out: &mut Vec<(String, Tag)>) -> tag::Result<()> {
     put(out, "EatingHaystack", Tag::Byte(i8::from(state.eating)));
     put(out, "Bred", Tag::Byte(i8::from(state.bred)));
     put(out, "Temper", Tag::Int(state.temper));
-    put(out, "Tame", Tag::Byte(i8::from(state.tame)));
+    // `AbstractHorse.addAdditionalSaveData` 存的是 `isTamed()`（可被覆写的方法），
+    // 不是 flag 位；`Camel.isTamed()` 恒真，所以骆驼永远写 `Tame=1`。
+    // `AbstractHorse.addAdditionalSaveData` saves `isTamed()` (an overridable
+    // method), not the flag bit; `Camel.isTamed()` is always true, so a camel
+    // always writes `Tame=1`.
+    let tamed = mob.mob_type == MobType::Camel || state.tame;
+    put(out, "Tame", Tag::Byte(i8::from(tamed)));
     if let Some(owner) = &state.owner {
         put(out, "Owner", uuid_tag(owner));
     }
-    if mob.mob_type != MobType::Horse {
+    // 马、驴、骡、羊驼在子类 `addAdditionalSaveData` 里补箱子 / 花色 / 力量键；
+    // `Camel` 没有覆盖，只有上面的基类键。
+    // Horses, donkeys, mules and llamas add chest / variant / strength keys in
+    // subclass `addAdditionalSaveData`; `Camel` does not override it, so it keeps
+    // only the base keys above.
+    if !matches!(mob.mob_type, MobType::Horse | MobType::Camel) {
         put(out, "ChestedHorse", Tag::Byte(i8::from(state.chested)));
         // `output.list("Items", ...)` 一建就放进去，空箱子也写一个空列表。
         // `output.list` inserts the list at once, so an empty chest writes an empty list.
