@@ -564,6 +564,14 @@ WebView2 的渲染进程不算在内。
   ≥8 字节的头、另占 76 MB 站点表，进程级读数偏大，真实读数一律以不带分析器的 `bamboo` 为准；
   归属规则是按函数名匹配的启发式，改函数命名或内联会串类；只在 Windows 上有 PDB / `HeapCompact`
   实现。`HeapCompact` 压实实验显示空闲堆块不会退还给系统，故没有改分配器。
+- **地物注册表全进程共享**（`op-memprof` 续，2026-11-22）：堆实测里优化后最大的常驻项是
+  每条生成线程各 `parse` 一份的只读 `feature::registry::Registry`（在线 / 离开后约 25 MB 常驻）。
+  现把它解析进 `Worldgen`（已由 `Worldgen::shared()` 全进程共用一份），`chunk::Generator` 改为
+  借用 `&'a Registry`，去掉每线程副本。结果逐字节不变：`gen-world --through features`
+  （3538944 方块）、`chunkgen`、`structures`、`structure-rings`、`jigsaw templates` 全 0 不一致。
+  同口径重测该归属 25.14 → 0 MB、共享 `Worldgen` 22.02 → 24.93 MB（吸收唯一一份），净常驻约
+  −22 MB；不带分析器的 release 服务端玩家离开后工作集 181 → 157 MB，见
+  `W:/data/bamboo-agents/reports/op-memprof.md` 与 `docs/profiling.md` §20.1。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出

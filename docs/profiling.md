@@ -2409,3 +2409,20 @@ release 构建，机器负载 89–185（另有子代理在编译），绝对值
 **口径限制**：归属是按函数名匹配的启发式，改函数命名或编译内联会把分配串到别的类；站点表
 满到 3/4 后新调用栈都记进 0 号「溢出」分配点；递归解析只保留最里 10 层和最外 22 层；
 只在 Windows 上有 PDB 与 `HeapCompact` 实现。
+
+### 20.1 续：地物注册表全进程共享（2026-11-22）
+
+两项原型之后，按归属表剩下最大的常驻项是「每条生成线程各 `parse` 一份只读
+`feature::registry::Registry`」（在线 / 离开后约 25 MB 常驻，随线程数线性增长）。`Registry`
+全是 `&self` 取值、无内部可变状态、`step_index` 在解析期定好，故把它解析进 `Worldgen`
+（`Worldgen::shared()` 已全进程一份），`chunk::Generator` 借用 `&'a Registry` 而不再各持一份：
+不改世界线程所有权、不改 tick 顺序、不改世界随机源取数次数与地物 index 顺序，结果逐字节不变。
+同口径（种子 20261121、视距 8）重测：该归属 25.14 → 0 MB（三个快照都不再出现），共享
+`Worldgen` 22.02 → 24.93 MB（吸收唯一一份 registry），净常驻约 −22 MB；`profile` 离开后
+tracked live 103.4 → 76.7 MB、`plain` 离开后工作集 181.0 → 157.3 MB、在线 249.0 → 216.6 MB
+（在线降幅还含地形 / 地物写缓存的运行间波动，离开后 −23.7 MB 与去重 ≈22 MB 基本吻合）。
+对拍 `gen-world --through features`（3538944 方块 / 3545088 项）、`gen-world`、`chunkgen`、
+`structures`、`structure-rings`、`jigsaw templates` 全 0 不一致，`gen-world --through features
+--break-self-test` 报 4 处证明比较器有效。产物在
+`W:/data/bamboo-agents/reports/op-memprof-data/s6-profile/` 与 `s6-plain/`，明细表与推荐见
+`W:/data/bamboo-agents/reports/op-memprof.md`。

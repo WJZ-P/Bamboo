@@ -596,7 +596,10 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   改成按「线程 + 表」隔离的线程本地状态，共享数据因此是 `Sync` 的只读数据，结果
   逐字节不变（见 `docs/performance-optimizations.md` 第 24 节）。`op-memprof` 的堆实测又把
   结构模板从「每条线程常驻全量解析」改成全进程外形表 + 有界按需解析（在线约 318 → 4 MB，
-  见 `W:/data/bamboo-agents/reports/op-memprof.md`），生成结果逐字节不变。生成的方块/群系按
+  见 `W:/data/bamboo-agents/reports/op-memprof.md`），生成结果逐字节不变。只读地物注册表
+  `feature::registry::Registry` 原本也每条 `Generator` 各 `parse` 一份（约 25 MB 常驻），
+  `op-memprof` 续把它解析进 `Worldgen` 一并全进程共享、`Generator` 改为借用，
+  `gen-world --through features` 逐字节 0 不一致（见 `docs/profiling.md` §20.1）。生成的方块/群系按
   官方 `PalettedContainer` 下标写进 24 个 `SectionParts`，组装成
   `ChunkColumn` / `RegionColumn`。
 * 存档：`data/minecraft/world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 写出
