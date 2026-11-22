@@ -653,7 +653,9 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `swing_animation` 都走 `links`。`a_critical_attack_emits_its_packets` 单测确认
   动画 / 音效 / 粒子真的发到客户端。
 - **PVP**：`pvp` 为真时按 `ServerPlayer.canHarmPlayer`（`isPvpAllowed` + 队伍，
-  Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。
+  Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。额外击退 /
+  火焰附加 / 横扫波及的玩家这几项目标在实体表里的操作（`knockback_mob` /
+  `ignite_mob` / 候选收集）对玩家不生效，玩家不在实体表里；见 README 已知限制。
 - **对拍**：`mob-oracle --only player_attack` 12 个场景（充能 0/2/4/5/20、下落暴击、
   疾跑击退、横扫、`sweeping_edge`、锋利 / 火焰附加 / 击退）共 84 刻，逐刻比每头牛的
   血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除和 `damage_event` 包，0 不一致；
