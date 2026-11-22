@@ -548,6 +548,11 @@ pub fn sample(entry: &MobSpawnerDef, random: &dyn crate::random::RandomSource) -
 ///
 /// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    // 溺尸登记的是 `SpawnPlacementTypes.IN_WATER`，其余已支持的都是 `ON_GROUND`。
+    // Drowned register `SpawnPlacementTypes.IN_WATER`; the rest use `ON_GROUND`.
+    if kind == MobType::Drowned {
+        return super::drowned::placement_ok(world, pos);
+    }
     // 水生生物登记的是 `SpawnPlacementTypes.IN_WATER`。
     // Aquatic mobs are registered with `SpawnPlacementTypes.IN_WATER`.
     if kind.spawns_in_water() {
@@ -556,16 +561,36 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     // 狐狸注册的是 `NO_RESTRICTIONS`，位置恒可用。
     // Foxes are registered with `NO_RESTRICTIONS`, which accepts every position.
     kind == MobType::Fox
-        || on_ground_position_ok(world, kind.entity_type(), kind.fire_immune(), pos)
+        || on_ground_position_ok_for(
+            world,
+            kind.entity_type(),
+            kind.fire_immune(),
+            kind.immune_to(),
+            pos,
+        )
 }
 
 /// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`：按实体类型检查地面和空位。
 ///
-/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`: check the footing and empty space for the type.
+/// `SpawnPlacementTypes.ON_GROUND.isSpawnPositionOk`: check the footing and empty
+/// space for the type.
 pub(super) fn on_ground_position_ok(
     world: &World,
     entity_type: i32,
     fire_immune: bool,
+    pos: BlockPos,
+) -> bool {
+    on_ground_position_ok_for(world, entity_type, fire_immune, None, pos)
+}
+
+/// 同上，另带 `EntityType.immuneTo` 的方块标签。
+///
+/// As above, with the `EntityType.immuneTo` block tag.
+fn on_ground_position_ok_for(
+    world: &World,
+    entity_type: i32,
+    fire_immune: bool,
+    immune_to: Option<mc_bamboo_data::BlockTag>,
     pos: BlockPos,
 ) -> bool {
     if !world.world_border().is_within_bounds_pos(pos) {
@@ -576,12 +601,17 @@ pub(super) fn on_ground_position_ok(
     if !world.block_state(below).is_valid_spawn_surface(entity_type) {
         return false;
     }
-    is_valid_empty_spawn_block(world, fire_immune, pos)
-        && is_valid_empty_spawn_block(world, fire_immune, above)
+    is_valid_empty_spawn_block(world, fire_immune, immune_to, pos)
+        && is_valid_empty_spawn_block(world, fire_immune, immune_to, above)
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
-fn is_valid_empty_spawn_block(world: &World, fire_immune: bool, pos: BlockPos) -> bool {
+fn is_valid_empty_spawn_block(
+    world: &World,
+    fire_immune: bool,
+    immune_to: Option<mc_bamboo_data::BlockTag>,
+    pos: BlockPos,
+) -> bool {
     let state = world.block_state(pos);
     if state.is_collision_shape_full_block() {
         return false;
@@ -595,14 +625,19 @@ fn is_valid_empty_spawn_block(world: &World, fire_immune: bool, pos: BlockPos) -
     if state.is_tagged(block_tags::PREVENT_MOB_SPAWNING_INSIDE) {
         return false;
     }
+    // `EntityType.isBlockDangerous` 开头的 `immuneTo`：标签里的方块直接不算危险。
+    // The `immuneTo` check at the head of `EntityType.isBlockDangerous`.
+    if immune_to.is_some_and(|tag| state.is_tagged(tag)) {
+        return true;
+    }
     !is_block_dangerous(fire_immune, state)
 }
 
 /// `EntityType.isBlockDangerous`：烧着的方块、凋灵玫瑰、甜浆果丛、仙人掌、细雪。
-/// 防火的类型只是不怕烧着的方块，其余几种照样危险（`immuneTo` 名单不建模）。
+/// 防火的类型只是不怕烧着的方块，其余几种照样危险；`immuneTo` 标签由调用方先查。
 ///
-/// Fire-immune types only ignore burning blocks; the rest stay dangerous (the
-/// `immuneTo` list is not modelled).
+/// Fire-immune types only ignore burning blocks; the rest stay dangerous. The caller
+/// checks the `immuneTo` tag first.
 fn is_block_dangerous(fire_immune: bool, state: BlockState) -> bool {
     (!fire_immune && is_burning_block(state))
         || state.0 == mc_bamboo_data::blocks::WITHER_ROSE
@@ -679,12 +714,24 @@ pub(super) fn check_spawn_rules(
         MobType::Panda => super::panda::spawn_rules(world, pos),
         MobType::Zombie
         | MobType::Skeleton
+        | MobType::Bogged
+        | MobType::Witch
         | MobType::Creeper
         | MobType::Spider
         | MobType::CaveSpider
         | MobType::Enderman => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
+        // `Stray.checkStraySpawnRules`：怪物规则之后再要求看得见天；找天只读方块，不取随机数。
+        // `Stray.checkStraySpawnRules`: the monster rules, then open sky; the sky search
+        // only reads blocks and draws nothing.
+        MobType::Stray => {
+            is_dark_enough_to_spawn(world, pos)
+                && valid_mob_spawn_block(world, kind, pos)
+                && super::stray::sees_sky_through_powder_snow(world, pos)
+        }
+        MobType::Slime => super::slime::check_spawn_rules(world, pos),
+        MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)
                 && valid_mob_spawn_block(world, kind, pos)
@@ -716,7 +763,7 @@ pub(super) fn bright_spawn_rules(
 }
 
 /// `Monster.isDarkEnoughToSpawn`。
-fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
+pub(super) fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
     let random = world.random();
     if world.brightness(LightLayer::Sky, pos) > random.next_int(32) {
         return false;
@@ -759,18 +806,22 @@ fn is_valid_position_for_mob(
     if nearest_player_distance_sqr > despawn * despawn && removes {
         return false;
     }
-    // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住。
-    // `Mob.checkSpawnObstruction`: no liquid in the box and nothing in the way.
-    // `AgeableWaterCreature.checkSpawnObstruction` 只剩 `isUnobstructed`，不查液体。
-    // `AgeableWaterCreature.checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
+    // `Drowned.checkSpawnObstruction` 只检查实体遮挡；水生生物（`AgeableWaterCreature`
+    // 和 `WaterAnimal`）也只剩 `isUnobstructed`，不查液体；其余生物还检查盒内液体。
+    //
+    // `Drowned.checkSpawnObstruction` checks only entity obstruction; aquatic mobs
+    // (`AgeableWaterCreature` and `WaterAnimal`) likewise keep `isUnobstructed` alone,
+    // while ordinary mobs also reject liquid in the box.
+    let bounds = entity.bounding_box();
     pathfinder_spawn_rules(world, entity, entity.block_position())
-        && (kind.is_ageable_water_creature()
+        && (kind == MobType::Drowned
+            || kind.is_ageable_water_creature()
             || kind.is_water_animal()
             // 美西螈的 `checkSpawnObstruction` 也只剩 `isUnobstructed`，不查液体。
             // The axolotl's `checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
             || kind == MobType::Axolotl
-            || !contains_any_liquid(world, entity.bounding_box()))
-        && is_unobstructed_by_entities(world, entity.bounding_box())
+            || !contains_any_liquid(world, bounds))
+        && is_unobstructed_by_entities(world, bounds)
 }
 
 /// `EntityGetter.isUnobstructed(entity)`：盒子里没有未移除、`blocksBuilding` 的实体。
@@ -815,7 +866,13 @@ pub(super) fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockP
 
 /// `EntityType.getSpawnAABB(x, y, z)`：以 (x, y, z) 为脚底中心的身体盒。
 pub(super) fn spawn_aabb(kind: MobType, pos: BlockPos) -> Aabb {
-    let (width, height, _) = kind.dimensions(false);
+    let (mut width, mut height, _) = kind.dimensions(false);
+    // `EntityType.spawnDimensionsScale`：只有史莱姆不是 1。
+    // `EntityType.spawnDimensionsScale`: 1 for everything but slimes.
+    if kind == MobType::Slime {
+        width *= super::slime::SPAWN_DIMENSIONS_SCALE;
+        height *= super::slime::SPAWN_DIMENSIONS_SCALE;
+    }
     let half = f64::from(width / 2.0);
     let x = f64::from(pos.x) + 0.5;
     let y = f64::from(pos.y);
@@ -962,7 +1019,9 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             position,
+            delta: Vec3::default(),
             eye_height: 1.62,
+            health: 20.0,
             look_direction: Vec3::default(),
             gaze_disguise: false,
             alive: true,
@@ -975,6 +1034,7 @@ mod tests {
             main_hand: 0,
             off_hand: 0,
             combat: Default::default(),
+            effects: Default::default(),
         }
     }
 

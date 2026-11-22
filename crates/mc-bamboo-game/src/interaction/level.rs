@@ -56,6 +56,14 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) sky_darken: i32,
     /// `getOverworldClockTime()`：主世界时钟的整数刻，`MONSTERS_BURN` 和区域难度读它。
     pub(crate) clock_ticks: i64,
+    /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。
+    ///
+    /// `WorldGenLevel.getSeed()`: the world seed, read for slime chunks.
+    pub(crate) world_seed: i64,
+    /// `Level.getSeaLevel()`：这一维度的海平面。超平坦是 -63，其余是 63。
+    ///
+    /// `Level.getSeaLevel()` for this dimension. -63 for superflat and 63 otherwise.
+    pub(crate) sea_level: i32,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -303,6 +311,10 @@ impl Level for RegionLevel<'_> {
         MAX_Y
     }
 
+    fn sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
     fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
         use mc_bamboo_protocol::components::{ComponentValue, PatchEntry};
         let levels = mc_bamboo_loot::mob_spawn_enchantments(
@@ -395,6 +407,10 @@ impl Level for RegionLevel<'_> {
         self.clock_ticks
     }
 
+    fn world_seed(&self) -> i64 {
+        self.world_seed
+    }
+
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
         self.chunks.chunk(chunk).archive().inhabited_time
     }
@@ -458,6 +474,43 @@ impl Level for RegionLevel<'_> {
         }
         if let Some(player) = self.players.get_mut(&PlayerId(target)) {
             crate::player_environment::ignite_player(player, ticks);
+        }
+        true
+    }
+
+    fn give_player_effect_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        let Some(side) = self.player_side.as_mut() else {
+            return false;
+        };
+        if mc_bamboo_blocks::entity::mob::effects::is_instantaneous(instance.effect) {
+            return false;
+        }
+        crate::player_effects::give_in(
+            self.players,
+            side.links,
+            PlayerId(target),
+            instance.clone(),
+        );
+        true
+    }
+
+    fn heal_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        amount: f32,
+    ) -> bool {
+        if self.player_side.is_none() {
+            return false;
+        }
+        if let Some(player) = self.players.get_mut(&PlayerId(target))
+            && player.health.health > 0.0
+        {
+            let max = crate::player_effects::max_health(player);
+            player.health.health = (player.health.health + amount).min(max);
         }
         true
     }
@@ -800,6 +853,9 @@ impl Level for RegionLevel<'_> {
         victim.is_on_fire = loot.on_fire;
         victim.position = Some(loot_position(origin));
         farm_loot::describe(&mut victim, loot.victim, loot.wool, None);
+        if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
+            victim.cube_mob_size = Some(loot.cube_size);
+        }
         let view = crate::block_drops::ChunkLevel {
             chunks: self.chunks,
             weather: self.block_weather,

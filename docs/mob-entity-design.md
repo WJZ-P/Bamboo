@@ -1088,6 +1088,199 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 
 扔出的鸡蛋在 `entity/thrown_egg.rs`，是新的实体种类 `EntityKind::Egg`（不是生物）：`ThrowableProjectile.tick` 先重力后阻力，沿速度找方块（含世界边界）和实体命中；移动段穿过水时用共用的流体判定熄火，灭火声的音高取蛋自己的随机源；命中经 `Command::EggImpact` 落地，打目标 0 点 `thrown` 伤害（新增 `DamageKind::Thrown`），再用蛋自己的随机源 `nextInt(8)` / `nextInt(32)` 孵一或四只小鸡。小鸡构造（种子、UUID、朝向、`eggTime`）在 `prepare_entity` 里取，`snapTo` 后照 `fudgePositionAfterSizeChange` 从零尺寸找空位（`findFreePosition` 用盒子切格子求最近点）。实体事件 3 走生物事件通道，蛋当刻消失时由 `keep_departed_mob_events` 留给同步层（并行驱动在命令落地后也会留）。玩家入口是游戏层 `player_egg.rs`（`EggItem.use`），生成后按手中蛋的种类累加会话内使用统计，再按模式消耗；发射器在 `dispense/entity.rs`。对拍：`mob-oracle --only egg`（飞行、穿水熄火、孵一只、孵四只、打牛、玩家扔蛋、发射器，逐刻比位置、随机源、着火状态、出站包、小鸡和牛，玩家扔蛋另比 `ITEM_USED`），存档见 `chunk-content` 的两枚蛋。
 
+## 流浪者和沼骸的实施现状（2026-11-20）
+
+两者都是 `AbstractSkeleton`：`MobType::is_skeleton()` 把骷髅原有的分支（弓 / 近战目标的重选、
+死亡掉落、`finalizeSpawn`、日晒）一起放开，专属部分各一个文件。
+
+- `entity/mob/stray.rs`：箭的效果（缓慢 600 刻）和 `Stray.checkStraySpawnRules` 的找天。
+  `MobType::immune_to()` 是 `EntityType.Builder.immuneTo` 的方块标签，自然刷怪的
+  `isBlockDangerous` 先查它，所以流浪者能刷在细雪里。
+- `entity/mob/bogged.rs`：生命 16、射击间隔 70 / 50、箭的效果（中毒 100 刻）、剪蘑菇。
+  剪蘑菇和羊共用 `MobInteraction::shear` 与 `World::interact_mob`，按生物种类分派到
+  `bogged::apply_shear`；`Bogged.DATA_SHEARED` 存在 `Mob.bogged_sheared`。
+- 箭的效果随 `Command::ShootMobArrow { effect }` 带到落地阶段，`skeleton::add_arrow_effect`
+  照 `Arrow.addEffect` 写进拾取物品的 `potion_contents` 自定义效果；命中后的效果、箭的颜色
+  都从这个组件算，不需要箭上另加字段。
+- **公共机制：生物转化**（`entity/mob/conversion.rs`，别的生物可以直接复用）。
+  `ConversionTracker` 是官方同名类的计数（受影响计时、转化倒计时、同步布尔）和存读盘；
+  `Command::ConvertMob { from, to, level_event }` 落地 `Mob.convertTo(type,
+  ConversionParams.single(..))`：新实体走和 `/summon` 一样的构造取数，再按
+  `ConversionType.SINGLE.convert` + `convertCommon` 搬状态。发起者在自己的 tick 里 `discard`，
+  这一刻剩下的 `baseTick` 照跑、`aiStep` 不跑（官方 `LivingEntity.tick` 的 `isRemoved` 判断）。
+  僵尸溺水变溺尸在官方是同一个 `ConversionTracker`，接的时候只需要新的受影响条件和参数。
+- `LivingEntity.canFreeze()`：`living::can_freeze` 看盔甲槽的 `#freeze_immune_wearables` 和
+  类型（骷髅覆写成假，流浪者在 `#freeze_immune_entity_types`）。细雪的 `FREEZE` 效果在
+  不能冻时只置「在细雪里」，`aiStep` 照常每刻减 2、不受冻伤。
+- 元数据：骷髅的 `DATA_STRAY_CONVERSION_ID` 和沼骸的 `DATA_SHEARED` 都是 index 16 的
+  BOOLEAN，同步层复用 `EntityData::Baby`（字节相同），由 `MobPublic.skeleton_flag` 给值。
+- **岛的拆合**：新增的 `Mob.freeze_conversion`（两个相对计数 + 一个布尔）和
+  `Mob.bogged_sheared` 都在实体行上，不含绝对时刻，整行搬走即可；`ConvertMob` 在同一刻内
+  落地，不跨刻。没有新增 `IslandPart`，没有改 `region/island_split.rs`。
+- 顺手修的一处：`NearestAttackableTargetGoal` 找玩家时没有排除能力里 `invulnerable` 的玩家
+  （官方 `TargetingConditions.test` → `canAttack` → `Player.canBeSeenAsEnemy`）。以前目标
+  选择器会为创造模式玩家启动并锁住 `TARGET` 标志（攻击目标另有过滤，所以不会真的打），
+  随机源的取数次数因此和官方错开；现在在测距离和视线之前就跳过。
+- 对拍（`mob-oracle --only projectile`，37 个场景 1346 刻 0 不一致）新增 5 个场景：
+  `stray_bow_normal`、`bogged_bow_normal`、`bogged_bow_hard`（逐刻比射手和箭的位置 / 速度 /
+  随机源、箭的配对包字节（含颜色）、玩家血量和玩家身上的效果）、`skeleton_freeze`（细雪井里
+  450 刻：转化标志、冻结刻数、转化后的实体类型 / 编号 / 血量 / 主手、1048 号世界事件）、
+  `bogged_shear`（两次剪刀右键：结果、掉落物的物品 / 位置 / 速度、已剪标志）。官方一侧让
+  真的 `Stray.getArrow` / `Bogged.getArrow` 造箭，再把它加的效果搬到带种子的箭上。
+  改坏确认：中毒时长改成 101、受冻刻数改成 141，两个场景各自报不一致。
+- 自然刷怪对拍（2026-11-21）：`mob-oracle --only stray_spawn`（28 例 112 刻 0 不一致；
+  `stray_night` 雪地针叶林找天正例刷 90 只，`stray_no_sky` 无天、`stray_peaceful` 和平各 0 只）
+  和 `--only bogged_spawn`（12 例 48 刻 0 不一致；`bogged_night` 沼泽正例 48 只、
+  `bogged_peaceful` 0 只）。夹具把 `sky=15` 注入成 `canSeeSky`，逐刻比类型、位置、朝向、
+  幼年、左撇子、主手和每刻世界随机源种子；`Stray.checkStraySpawnRules` 的「从上一格起跳过
+  连续细雪再找天」已和官方字节码核对（26.3 的 `Stray.java` 用 `do..while` 上抬一格，等价）。
+  改坏确认：`--only stray_spawn --break-self-test natural_spawn` 把 Bamboo 正例的找天判据拿掉，
+  官方仍刷而 Bamboo 不刷，报 4 处不一致。并入 `--only natural_spawn` 后 566 例 2264 刻
+  0 不一致，原有牛 / 马科 / 史莱姆 / 溺尸 / 女巫场景无回归。夹具的 `canSeeSky` 是注入常量，
+  细雪上方连续跳过的那一支无法单独区分，仍记在已知限制。
+- 未对拍：死亡掉落（走骷髅同一条路径，战利品表由 `mc-bamboo-loot` 求值）、存档 NBT 和
+  官方的逐键比较、转化时带效果 / 名字 / 标签的搬运。
+
+## 史莱姆的实施现状（2026-11-20）
+
+史莱姆是 `AbstractCubeMob` → `Slime`：继承 `AgeableMob`（所以有 `Age` 等三个存档键和幼年 /
+年龄锁两项元数据），只实现 `Enemy`，不是 `Monster`。`MobType::is_enemy()` 把「`Monster` 一支
+加史莱姆」单独分出来，管和平难度清除、128 格消失、`MobCategory.MONSTER` 和敌对音源；
+`is_monster()` 仍只表示 `Monster` 类（亮处涨 `noActionTime`、僵尸的幼年元数据等）。
+
+- `entity/mob/slime.rs`：全部专属逻辑。`CubeState`（`Mob.cube`）放大小、`wasOnGround` 和
+  `CubeMobMoveControl` 的三个字段，都是相对量，随实体行搬岛，没有新增 `IslandPart`。
+- 尺寸：`Mob::dimensions()` / `MobPublic::dimensions()` 对史莱姆按大小算，`set_size` 同时改
+  `Entity.dimensions`、眼高、三项属性的基础值；大小真的变了才把朝向改成头的朝向
+  （`onSyncedDataUpdated`）。眼高和元数据下标（18）由生成器导出
+  （`entity_types::SLIME_EYE_HEIGHT` / `CUBE_MOB_SIZE`）。
+- 移动：`living::server_ai_step` 对史莱姆改调 `slime::move_control_tick`，`jumpFromGround` 改调
+  `slime::jump_from_ground`（竖直速度直接设成跳跃力，并要求同步一次速度）。`tick` 末尾的
+  `slime::after_tick` 做落地判断：按宽度取粒子的随机数、放落地音效。
+- 目标：`Goal::CubeFloat` / `CubeAttack` / `CubeRandomDirection` / `CubeKeepJumping`，注册顺序和
+  优先级照官方（1、4、5、2）。目标选择器是玩家（间隔 5、要看得见、高度差不超过 4）和铁傀儡
+  （缺实体，照常取数）。`TargetGoal.canContinueToUse` 的 `mustSee` 计数和骷髅共用一支。
+- 碰撞伤害：`slime::player_touch` 是 `AbstractCubeMob.playerTouch` 的全部。游戏层在
+  `drops::pickup_before_entities` 里（官方 `Player.aiStep` 的 `touch(entity)`，和捡物品同一处）
+  对玩家包围盒外扩 (1, 0.5, 1) 碰到的史莱姆各调一次，用带玩家那一半的世界当场走玩家受伤的
+  正式入口。
+- 分裂：`living::tick_death` 在第 20 刻移除之前调 `slime::split_on_remove`，数量和每只的朝向
+  取母体的随机源，随 `Command::SplitCubeMob` 落地；每只走 `/summon` 一样的构造取数，再
+  `conversion::copy_common`（`ConversionType.SPLIT_ON_DEATH` 只跑 `convertCommon`）、
+  `setSize(half, true)`、`snapTo`。和平难度不分裂（`EntityType.create` 返回空）。
+- 生成：`slime::finalize_spawn`（`AgeableMobGroupData(false)`、跟随距离加成、左撇子、
+  `setSpawnSize`）；`slime::check_spawn_rules` 是 `Slime.checkSlimeSpawnRules` 的两支，
+  `Level::world_seed()`（新增，游戏层给 `global.seed`）给史莱姆区块，
+  `sky::surface_slime_spawn_chance` 是月相时间线的那条轨道。生成盒乘
+  `spawnDimensionsScale`（4）。
+- 掉落：`MobDeathLoot.cube_size` 进战利品谓词的 `cube_mob_size`；经验等于大小。
+- **公共机制**（别的生物可以复用）：`conversion::copy_common`（`convertCommon`，带
+  `preserveCanPickUpLoot`）、`Level::world_seed()`、`MobType::is_enemy()`、
+  `CombatTarget::hitbox()`，以及按方块音效类型放脚步声的写法（`motion::step_effects`）。
+- 对拍：
+  - `mob-oracle --only slime_`：13 个场景 2063 刻 0 不一致。`slime_hop_{1,2,4}`（自己乱跳）、
+    `slime_chase_{1,2,4}`（真实玩家：找目标、追、碰撞伤害、玩家被打死时的死亡消息包）、
+    `slime_two_touch`、`slime_target_height`（高度差和视线记忆）、`slime_water`、
+    `slime_split_{1,2,4}`（分裂出来的只数、位置、朝向、大小、血量）、`slime_peaceful_clear`。
+    逐刻比位置、速度、朝向、血量、随机源、正在跑的目标、目标实体，以及大小 / 跳跃延迟 /
+    移动控制的目标角度 / `wasOnGround`。官方一侧的 `touch(entity)` 由对拍自己重放（玩家在
+    场景里不 tick）；分裂出来的小史莱姆记完就丢，不继续 tick。
+  - `mob-oracle --only natural_spawn`：新增 8 个史莱姆场景（史莱姆区块的普通 / 困难 / 和平、
+    非史莱姆区块、沼泽的满月 / 亏凸月 / 新月 / 白天），共 390 例 1560 刻 0 不一致，其中 100 只
+    史莱姆。世界种子用官方 `WorldgenRandom.seedSlimeChunk` 挑。大小不是 1 的史莱姆朝向来自
+    官方不带种子的构造随机源，两边都不比。
+  - 改坏确认：跳跃延迟 `+10` 改成 `+11`（`slime_hop_1` 第 4 刻起报不一致）、分裂的 z 偏移
+    `0.5` 改成 `0.25`（`slime_split_2` / `_4` 第 24 刻报不一致）。
+- 顺手修的一处（影响骷髅一支）：`tick_goal` 里给 `NearestAttackableTarget` 每刻多加了一次
+  `unseen_ticks`，官方 `TargetGoal` 没有 `tick()`。以前看不见目标约 30 刻就放弃，现在是 60 刻。
+- 未对拍：死亡掉落（粘液球）和经验球的生成、存档 NBT 和官方逐键比较、元数据包字节、
+  `/summon` 和刷怪蛋、并行驱动下的逐位一致。
+- 没做：岩浆怪；水里改大小时的溅水（只保住那一次取数）；脚步声的
+  `getPrimaryStepSoundBlockPos`；`push(Entity)` 打铁傀儡；附魔的 `doPostAttackEffects`。
+### 5.8 溺尸、女巫和喷溅药水（2026-11-21）
+
+- **溺尸**（`entity/mob/drowned.rs`）：`MobType::Drowned` 接进属性、目标、音效、刷怪和存档表；
+  `is_zombie()` 把僵尸、尸壳、溺尸归成一族，近战、破门、增援、日晒和 `handleAttributes`
+  继续共用。`Zombie.tick` 结尾的 `drowningTracker`（`Mob.drown_conversion`）眼睛在水里
+  600 刻后开始转化，再过 300 刻发 `Command::ConvertMob`；落地时照 `ConversionType.SINGLE`
+  搬状态（共享的是 `conversion::copy_state`），并额外跑一次 `Zombie.handleAttributes`
+  （`Command::ConvertMob.zombie_attributes`）。
+- **两栖寻路**（2026-11-21 重做）：`Navigation` 加了 `EvaluatorFlags::amphibious`，溺尸走
+  `AmphibiousPathNavigation` 的规则：`canUpdatePath` 恒真、`getTempMobPos` 取身体中间、
+  `getGroundY` 原样返回节点高度、`isStableDestination` 只要求脚下不是空气、
+  `setCanFloat` 不生效（所以 `jumpInLiquid` 是 0.3 而不是浮水生物的 0.04）。
+  `Search` 里照 `AmphibiousNodeEvaluator`：水里贴着 `BLOCKED` 的格子算 `WATER_BORDER`
+  （代价 4），水里多出上下两个竖直水邻格（`isVerticalNeighborValid` 只收 `WATER`），
+  求值器起点在水中换成碰撞盒最小角、`isAmphibious` 让 `findAcceptedNode` 不再把水节点
+  换成水下地面。代价覆盖照官方只在一次搜索期间生效：`Drowned` 身上只有水 0；
+  `AmphibiousNodeEvaluator.start()` 搜索期间把走地改 6、水边改 4，`done()` 还原
+  （Bamboo 在求值器的 `malus` 里按 `EvaluatorFlags::amphibious` 覆盖这两项）。
+  2026-11-21 的 `main` 合并后这条被发现曾把三项都常驻在 `Mob::malus` 上，导致
+  `GoalUtils.hasMalus` 拒绝所有草地落点、溺尸打完架后一直无法随机漫游；改成搜索期覆盖后
+  `drowned_flat_chase_3` 从 9 处不一致回到 0。
+  上次报告里「平地上 `createPath` 返回空」是误判：白天 `Drowned.okTarget` 本来就不选玩家，
+  夜间场景下原来的僵尸近战逻辑能正常寻路；真正缺的是 `AmphibiousPathNavigation.canUpdatePath`
+  恒真和 `Drowned.closeToNextPos` 量的是终点格子的角而不是格心，两处都已修。
+  `DrownedGoToBeachGoal`（`MoveToBlockGoal`）也补上了：倒计时取 `nextInt(200)`、
+  方环搜索岸边、`start` 两次 `nextInt(1200)`、`tick` 每 40 刻重算。
+  `PathNavigation.shouldTargetNextNodeInDirection` 在几何折角检查前，照官方对液体中的两栖
+  生物作一次忽略流体的碰撞射线：从临时位置（身体中点）到当前路径节点的身体中点，
+  无阻挡即可推进节点。
+- **溺尸对拍**：`mob-oracle --only drowned_`（平地追击 120 刻、水中追击 40 刻、上浮 40 刻）
+  3 例 200 刻 0 不一致，逐刻比较位置、速度、路径节点及索引、游泳标志和随机源。
+  尚未覆盖跨水面、流动水和上岸。
+- **海平面**：`Level::sea_level()` 和 `BlockView::sea_level()` 取代溺尸文件里手写的 63；
+  游戏层按 `WorldGenConfig.level_type` 给噪声世界 63、超平坦 -63，`mob-oracle` 的假世界
+  跟官方的 `-63` 一致，场景可以用 `Scene.sea` 覆盖。`DrownedGoToWaterGoal` 的白天判断
+  （`!isBrightOutside`）、`DrownedSwimUpGoal` 不锁标志位、铁傀儡 / 美西螈目标的
+  `nextInt(reducedTickDelay(10))` 已照官方改正。
+- **游泳**：`updateSwimming`（共享标志第 4 位）、`DrownedMoveControl`（`mob.swimming` /
+  `searching_for_land` / 目标高度）、`travelInWater` 的 0.01 分支、`isPushedByFluid` 为假时
+  不推水流。`updateSwimming` 和 `travelInWater` 读 `Entity.isUnderWater` 的缓存眼部状态
+  和当前身体入水状态，而不是本刻扫描到的眼部状态；`DrownedMoveControl` 保持用 `f32`
+  插值速度，再按 Java 数值提升规则用 `f64` 计算位移增量。
+- **生成**：`SpawnPlacementTypes.IN_WATER` 放置、`checkDrownedSpawnRules` 的 1/40（
+  `#more_frequent_drowned_spawns` 1/15）和海平面 5 格、3% 副手鹦鹉螺壳、三叉戟 / 钓鱼竿
+  的 `populateDefaultEquipmentSlots`（不拿盔甲）、`handleAttributes`、`entities/drowned`
+  战利品。照 `Drowned.checkSpawnObstruction`，实例生成阶段检查实体遮挡但不因碰撞盒内有液体而拒绝。
+  `mob-oracle --only drowned_spawn`：固定区块 (0,0) 与 (1,0)，4 种水域／光照条件，
+  34 例 136 刻 0 不一致。深海生成 2 只、浅河 13 只；浅海和强光浅河为 0。比较
+  类型、位置、朝向、幼年、左撇子、双手装备和每刻世界随机源。未覆盖真实混合刷怪表；
+  鹦鹉螺僵尸骑手只取触发随机数、不生成坐骑。
+- **溺尸战利品表对拍**：`loot-oracle --entity-table minecraft:entities/drowned --cases 64 --seed 3`，
+  64 题实际比较，0 排除、0 不一致；只验证表求值与随机源后继值，不涵盖装备掉落和死亡流程。
+  离线夹具提供 `ServerLevel.getSeaLevel`，供构造函数注册上浮目标时调用。
+- **女巫**（`entity/mob/witch.rs`）：`MobType::Witch` 接进各表；`Witch.aiStep` 在
+  `Monster.aiStep` 之前跑喝药逻辑和 7.5e-4 的冒烟事件，`WitchHealRaiders` 目标在没有袭击时
+  仍每刻抽一次 `nextBoolean`，`RangedAttackGoal` 用 `Goal::WitchRangedAttack` 实现。
+  喝完用 `PotionContents` 加效果（读取物品的持续时间倍率）；瞬时治疗进入效果表，在效果刻回血。
+  `LivingEntity.hurtServer` 会先拒绝抗火生物收到的火焰伤害，不改受伤冷却或攻击者归因。
+  喝药移速修饰符是瞬时的 `minecraft:drinking`；入水的 `FloatGoal` 会打开导航的浮水标志。
+  同步 index 17 的 `Witch.DATA_USING_ITEM`（`EntityData::WitchUsingItem`）。自然生成是
+  `ON_GROUND` + `Monster.checkMonsterSpawnRules`；`PatrollingMonster.finalizeSpawn` 会先掷一次
+  巡逻队长概率，即使女巫不能当队长，也必须消费该随机数。
+  `mob-oracle --only witch_spawn`：平原黑暗、方块光 1、和平，18 例 72 刻 0 不一致，生成 30 只。
+  `Witch.performRangedAttack` 的选药五支（袭击者按血量给治疗 / 再生、缓慢、剧毒、虚弱、瞬间伤害，
+  短路顺序和官方一致，只有虚弱一支取 `nextFloat`）和按目标速度的提前量照官方实现；
+  `Witch.getDamageAfterMagicAbsorb` 现在也把 `indirectMagic` 算进 15% 抗性；
+  `mob-oracle --only witch_throw` 逐刻对拍（3 例 553 刻 0 不一致）。
+- **喷溅药水**（`entity/splash_potion.rs`）：新的投掷物实体，物理照 `ThrowableProjectile`
+  （重力 0.05）。命中后按 `ThrownSplashPotion.onHitAsPotion` 的 4 格水平 / 2 格竖直范围、
+  `computeMargin`（`clamp((tickCount - 2) / 20, 0, 0.3)`）和距离缩放分效果：瞬时治疗 / 伤害按
+  `(int)(scale * base + 0.5)` 取整并对 `#inverted_healing_and_harm` 的亡灵反转，其余按
+  `scale * duration * durationScale + 0.5` 挂上（20 刻以内不挂），跳过带免疫标签的效果。命中实体
+  不打额外的 0 点 `thrown` 伤害，改用 `DamageSources.indirectMagic` 做击退；世界事件
+  2002 / 2007（有无瞬间效果）和 1053 / 1054。选药、提前量、亡灵反转、时长取整和等级事件都和官方
+  逐刻对拍（`mob-oracle --only witch_throw`：3 例 553 刻 0 不一致）；存档、同步和
+  `entity-oracle` 的快照都接上了。
+- **仓库外改动**：`mc-bamboo-protocol` 加了一个实体数据项；`mc-bamboo-storage` 的建模实体
+  清单加了溺尸和女巫。
+- **没做的**：三叉戟投掷（没有 `ThrownTrident`）、鹦鹉僵尸（僵尸骑鹦鹉螺）、袭击、
+  女巫小屋刷怪、喷溅药水的灭火 / 美西螈 / `onHitBlock`（营火 / 蜡烛）、滞留药水云、
+  喷溅水瓶对末影人的伤害。溺尸的对拍及未覆盖的水面、上岸边界见上文和 README。女巫四种自饮药水由
+  `mob-oracle --only witch_drink` 逐刻比较位置、血量、效果时长、喝药状态和随机源
+  （3 例、268 刻、0 不一致）；投掷由 `mob-oracle --only witch_throw` 逐刻对拍
+  （3 例 553 刻 0 不一致）。
 ## 哞菇的实施现状（op-misc，2026-11-20）
 
 哞菇是 `MobType::Mooshroom`，属性、目标选择器、叫声全部复用牛（`AbstractCow`），自己的部分在
@@ -1323,3 +1516,101 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   攻击水生怪物、繁殖（1/1200 蓝色）没建模，`PLAY_DEAD_TICKS` 设 200 后没有 Brain 逐刻递减，
   `playingDead` 不会自己复位；拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
   死亡掉落的逐题 loot-oracle 都没做。逐刻对拍开 `NoAI`，没覆盖 AI / 受伤 / 繁殖 / 死亡路径。
+
+## 与 main 合并后的现状（op-hostile2，2026-11-21）
+
+按队长 04:30 的要求先 `git merge main`（`ceb0562f`，op-hostile 的苦力怕 / 蜘蛛 /
+洞穴蜘蛛 / 末影人和世界生成缓存）。公共文件按两边并集解：`generated/entity_types.rs`
+用 `extract` 重新生成，和并集逐字节一致；`drowned.rs` / `slime.rs` / `witch.rs` 的
+`NearestAttackableTarget` 补上 main 新增的 `light_gate: false`，`spider.rs` 测试补齐
+`PlayerView` 新字段，`mod.rs` 合并重复的 `ambient_sound` 分支。合并后
+`cargo check --workspace --all-targets`、clippy、单测、五种生物各前缀的针对性
+`mob-oracle`（含 `--only natural_spawn` 620 例 2480 刻）、`loot-oracle` 和官方联机探针
+（769/769）都通过。全量 `mob-oracle` 仍有 6 处 `player_death_*` 不一致，是超平坦世界
+重生包 `sea_level` 给 -63、官方离线夹具给 0 的既有差异（base 已带该字段），与生物无关，
+见 README 已知限制；按 `verify-scope.md` 属非关键路径，不追。
+
+### 与 main 二次合并后的现状（op-hostile2，2026-11-21 本轮）
+
+main 又合进了马驴骡羊驼、兔狐狼、水生（鱿鱼、鱼、海龟）和杂项（哞菇、北极熊、熊猫），
+本轮 `git merge main`（`e1d69b66`）。公共文件按 main 的结构解冲突：`MobType` 改用
+`Self::ALL`（扩到 33 种，含本分支的流浪者 / 沼骸 / 史莱姆 / 溺尸 / 女巫），
+`spawn.rs` 的 `finalize_spawn_in_group` 按 `is_skeleton()` / `is_zombie()` 加 Panda 分支，
+`natural.rs` 的 `ON_GROUND` 落脚检查合成一个 `entity_type` + `immune_to` 的入口，
+`generated/entity_types.rs` 用 `extract` 重新生成（和并集逐字节一致，
+`registries.rs` 的 `game_event` 注册序漂移照旧还原）。两处真分叉按官方字节码定：
+① `MobPublic::of` 保留 `in_water` 入参（女巫 / 溺尸 AI 读公开视图），`on_fire` 改用
+`Mob.visible_fire`（`Entity.baseTick` 才写共享标志，tick 0 仍为假，官方 `Entity.baseTick`），
+`unseenTicks` 只在 `canContinueToUse` 里按视线刷新（`TargetGoal` 没有 `tick`），去掉了
+main 在 `tick_goal` 里多加的一次自增——`slime_target_height` 有石柱挡视线时会累积发散；
+② `mob-oracle` 的 `cow.kind` 是全局命名空间，两分支都占了 13/14/15，本分支的史莱姆 /
+女巫 / 溺尸改到 16/17/18，main 的北极熊 / 哞菇 / 熊猫保留 13/14/15，Java 侧
+`MobOracle.java` 的 `.mob()` 场景号和 switch 一起改。合并后 `cargo check --workspace
+--all-targets`、clippy `-- -D warnings`、`cargo fmt --check` 都通过；`mob-oracle` 按前缀
+针对性对拍：本分支五种生物（natural_spawn 632 例 2528 刻、stray_spawn、bogged_spawn、
+witch_spawn、drowned_spawn、witch_drink、witch_throw、slime_、drowned_、projectile）
+和 main 的杂项（polar_bear_、panda_、mooshroom_）全部 0 不一致。全量 `mob-oracle` 剩
+12 处 `player_death_*` 不一致，全是上述重生包 `sea_level` 既有差异（main 新增死亡消息
+场景后由 6 处增至 12 处），按 `verify-scope.md` 属非关键路径，不追。
+
+### 与 main 三次合并后的现状（op-hostile2，2026-11-21 本轮）
+
+按队长 14:35 的要求再 `git merge main`，这次 main 到 `c9773f61`（马科骑乘、羊驼吐口水、
+狼躲羊驼、剩余马科工作、扔鸡蛋孵小鸡、农场动物收尾、计时测试修复）。5 个文本冲突都按
+main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/鸡/马/驴/骡/羊驼/僵尸/
+尸壳/骷髅/流浪者/沼骸/史莱姆/溺尸/女巫；`goals.rs` 的 `stop()` 把 main 的
+`RunAroundLikeCrazy` 并进本分支的 Cube/Drowned/Witch 一组（去掉重复的 `RandomStand`）；
+`mod.rs` 的 `create_navigation` 并列保留本分支溺尸两栖导航和 main 羊驼
+`required_path_length`；`MobOracle.java` 的 `play()` 前缀并集和 `spawnVariants` 的
+`zombie_equine_llama_wolf` 标志块、`natural_spawn.rs` 的 `Step` 取 12 列 `spawned` +
+`variants` 字段（打印串补 `farm`/`slimes`/`witches`）。`generated/` 用 `extract` 重新生成：
+`registries.rs` 的 `game_event` 已是 main 修好的官方注册序（无需再还原），`entity_types.rs`
+保持本分支的 `CUBE_MOB_SIZE` / `SLIME_EYE_HEIGHT`。语义编译冲突补齐 main 新增字段：
+`egg.rs` / `equine/tame.rs` 的 `PlayerView` 补 `delta`/`health`/`effects`，
+`riding/tests.rs` 的 `MobPublic::of` 补 `in_water` 实参。
+
+另修一个本分支既有（非本轮合并引入）的失败：史莱姆按官方
+`Slime.checkSlimeSpawnRules`（`ServerLevel implements WorldGenLevel`，y<40 的史莱姆区块
+不看亮度就能刷）接进运行时自然刷怪后，合成超平坦测试世界里每个区块都隐式存在、没有
+真实的区块交付和实体 tick 票，环境刷出的史莱姆会污染实体跟踪、跨岛逐字节比较、弩箭等
+9 个无关单测（纯 `main` 全绿、本分支合并前的 `e2243b4c` 已失败）。生产逻辑不动，按该
+文件既有两处 `SPAWN_MOBS=false` 的约定，在 `Harness::build_with` 给合成测试世界默认关掉
+`spawn_mobs`；`mob-oracle --only natural_spawn` 用的是独立的 `MobLevel` 夹具，不受影响。
+`cargo test -p mc-bamboo-game --lib` 修后 1256 过 / 0 失败 / 13 忽略。
+
+本轮检查：`cargo fmt --check`、clippy `--workspace --all-targets -- -D warnings`、
+`cargo check --workspace --all-targets`、`cargo check -p mc-bamboo-desktop` 全过；
+`cargo test -p mc-bamboo-game --lib` 1256 过 / 0 失败、`cargo test -p mc-bamboo-blocks
+--lib` 780 过 / 0 失败 / 6 忽略、`cargo test -p mc-bamboo-vanilla` 101 + 8 过 / 0 失败；
+官方联机探针 769/769。五种生物各前缀针对性 `mob-oracle`（`natural_spawn` 674 例 2696 刻、
+`stray_spawn`、`bogged_spawn`、`witch_drink`、`witch_throw`、`slime_`、`drowned_`、
+`projectile`）全部 0 不一致，`loot-oracle --entity-table minecraft:entities/drowned`
+64 题 0 不一致；故意改坏 `natural_spawn` 一次能抓到不一致。全量 `mob-oracle` 的
+`player_death_*` 重生包 `sea_level` 既有差异仍在，按 `verify-scope.md` 属非关键路径，不追。
+
+### 与 main 四次合并及全量 `mob-oracle` 0 不一致（op-hostile2，2026-11-21）
+
+按队长 16:40 要求 `git merge main`（`54ee195a`，含 Brain AI 框架、犰狳、山羊与全进程共享世界生成数据），
+解决 9 个文件冲突：`MobType::ALL` 扩至 35 种，`DamageKind::panic_causes` 按官方 `DamageTypeTagsProvider`
+去掉 `Thorns`、保留 `IndirectMagic` 与 `Wither`，`MobOracle` 的场景生物编号把史莱姆 / 女巫 / 溺尸移至
+50 / 51 / 52（避开 main 的 13 犰狳 / 14 山羊 / 16 北极熊 / 17 哞菇），`generated/entity_types.rs`
+由 `extract` 重新生成。
+
+随后查清并修掉全量 `mob-oracle` 的三处根因：
+
+1. **`player_death_*` 全部重生包 `sea_level`（官方 0 vs Bamboo -63）**：根因是本分支提交 `503956d7`
+   把 `FakeLevel.getSeaLevel()` 从 `return -63;` 改成 `return injectedSeaLevel;`，但 `FakeLevel.create`
+   通过 `Unsafe.allocateInstance` 分配对象，不执行字段初始化 `int injectedSeaLevel = -63;`，导致未走
+   `playZombie` 的 `playLife` 场景里 `injectedSeaLevel` 保持 0。在 `FakeLevel.create` 显式赋
+   `level.injectedSeaLevel = -63;` 后，全部 `player_death_*` 场景 0 不一致（移除 README 对应旧限制条目）。
+2. **`rabbit_flee_zombie` 第 1 刻随机源分叉**：本分支早先合并把 `mob_oracle.rs` 里 `bright_outside` /
+   `monsters_burn` 的判断误留成 `is_monster_scene`（仅匹配 `zombie_` / `drowned_`）而非 main 的
+   `zombie_style`，导致 `rabbit_flee_zombie` 里的 `monstersBurn=false` 未生效、僵尸白天着火。把
+   `slime_` / `witch_drink_` / `drowned_` 并入 `zombie_style` 并统一使用它后消除。
+3. **`panda_breed` 约 6.15% 间歇性不一致（main 提交 `901b97a8` 既有）**：官方 `Panda.getBreedOffspring`
+   在 `addFreshEntity` / `reseedBorn` 之前就用新生幼崽没播种的随机源掷两次 1/32 基因变异。照幼鸡
+   `eggTime` 的做法，在 `spawnJson` 传出新生熊猫的 `genes`，由 `apply_born_setup` 与配对快照同步
+   （基因遗传本身仍由 `playPandaGenes` 用确定性种子单独对拍）。
+
+全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
+**686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。

@@ -129,6 +129,21 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::HUSK_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Husk)
         }
+        _ if ctx.item == items::STRAY_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Stray)
+        }
+        _ if ctx.item == items::BOGGED_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Bogged)
+        }
+        _ if ctx.item == items::SLIME_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Slime)
+        }
+        _ if ctx.item == items::DROWNED_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Drowned)
+        }
+        _ if ctx.item == items::WITCH_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Witch)
+        }
         _ if ctx.item == items::SPIDER_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Spider)
         }

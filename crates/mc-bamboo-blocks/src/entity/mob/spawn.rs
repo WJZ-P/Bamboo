@@ -346,7 +346,7 @@ fn finalize_spawn_in_group(
     reason: SpawnReason,
     group: &mut Option<SpawnGroup>,
 ) {
-    if kind == MobType::Skeleton {
+    if kind.is_skeleton() {
         super::skeleton::finalize_spawn(world, entity);
         return;
     }
@@ -354,8 +354,15 @@ fn finalize_spawn_in_group(
         super::panda::finalize_spawn(entity, world.random(), group);
         return;
     }
-    if matches!(kind, MobType::Zombie | MobType::Husk) {
+    if kind.is_zombie() {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
+        if kind == MobType::Drowned {
+            super::drowned::after_zombie_finalize(world, entity, reason);
+        }
+        return;
+    }
+    if kind == MobType::Slime {
+        super::slime::finalize_spawn(world, entity, group);
         return;
     }
     if matches!(kind, MobType::Creeper | MobType::Enderman) {
@@ -396,6 +403,10 @@ fn finalize_spawn_in_group(
     }
     if kind.is_equine() {
         super::equine::finalize_spawn(entity, world.random(), group);
+        return;
+    }
+    if kind == MobType::Witch {
+        super::witch::finalize_spawn(entity, world.random());
         return;
     }
     let biome = world.biome_id(entity.block_position());

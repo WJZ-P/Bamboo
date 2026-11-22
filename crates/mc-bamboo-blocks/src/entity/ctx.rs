@@ -221,6 +221,30 @@ pub trait BlockView {
     }
 }
 
+/// 生物选药或决策时要看的目标药水效果（女巫的 `performRangedAttack` 读这三项）。
+///
+/// Target potion effects inspected by mob AI (`Witch.performRangedAttack` reads these three).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetEffects {
+    pub slowness: bool,
+    pub poison: bool,
+    pub weakness: bool,
+}
+
+impl TargetEffects {
+    /// 从效果表提取这三项标志。
+    ///
+    /// Extracts the three flags from an active effect map.
+    pub fn from_map(effects: &super::mob::effects::EffectMap) -> Self {
+        use mc_bamboo_data::registries::mob_effect;
+        Self {
+            slowness: effects.has(mob_effect::SLOWNESS),
+            poison: effects.has(mob_effect::POISON),
+            weakness: effects.has(mob_effect::WEAKNESS),
+        }
+    }
+}
+
 /// 生物看得见的一个玩家。
 ///
 /// A player as seen by mobs.
@@ -229,7 +253,15 @@ pub struct PlayerView {
     pub uid: EntityUid,
     pub uuid: Option<[u8; 16]>,
     pub position: Vec3,
+    /// `Entity.getDeltaMovement()`，女巫计算投掷提前量时读它。
+    ///
+    /// `Entity.getDeltaMovement()`, read by witches to lead thrown potions.
+    pub delta: Vec3,
     pub eye_height: f32,
+    /// `LivingEntity.getHealth()`，女巫选毒药还是伤害药水时读它。
+    ///
+    /// `LivingEntity.getHealth()`, read by witches when picking poison vs harming.
+    pub health: f32,
     pub look_direction: Vec3,
     pub gaze_disguise: bool,
     pub alive: bool,
@@ -257,6 +289,10 @@ pub struct PlayerView {
     ///
     /// Combat memory, read by tamed wolves guarding their owner.
     pub combat: PlayerCombat,
+    /// 目标身上的缓慢 / 中毒 / 虚弱状态，女巫选药时读它。
+    ///
+    /// Whether the target has slowness, poison or weakness, read by witches.
+    pub effects: TargetEffects,
 }
 
 /// 玩家的 `getLastHurtByMob` / `getLastHurtMob` 和两个时间戳（玩家自己的 tick 数），
@@ -353,6 +389,10 @@ impl BlockView for World<'_> {
 
     fn max_y(&self) -> i32 {
         World::max_y(self)
+    }
+
+    fn sea_level(&self) -> i32 {
+        World::sea_level(self)
     }
 
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
@@ -552,6 +592,10 @@ pub enum Command {
         owner_uuid: [u8; 16],
         weapon: ItemStack,
         difficulty: i32,
+        /// `Stray.getArrow` / `Bogged.getArrow` 加的效果：（效果 ID，时长）。
+        ///
+        /// The effect added by `Stray.getArrow` / `Bogged.getArrow`: (effect id, duration).
+        effect: Option<(i32, i32)>,
     },
     ArrowImpact {
         block: Option<BlockHit>,
@@ -571,6 +615,18 @@ pub enum Command {
     /// The egg hit something this tick: `ThrownEgg.onHit` (hurt, hatch, break).
     EggImpact {
         hit: super::thrown_egg::EggHit,
+    },
+    /// 扔出的药水这一刻撞到东西：`AbstractThrownPotion.onHit`。
+    ///
+    /// The splash potion hit something this tick: `AbstractThrownPotion.onHit`.
+    SplashPotionImpact {
+        hit: super::splash_potion::SplashHit,
+    },
+    /// 女巫扔一瓶药水：`Projectile.spawnProjectileUsingShoot`。
+    ///
+    /// The witch throws one potion: `Projectile.spawnProjectileUsingShoot`.
+    ThrowSplashPotion {
+        shot: Box<super::splash_potion::SplashShot>,
     },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode {
@@ -813,6 +869,32 @@ pub enum Command {
     /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
     /// the origin.
     DropEntityLoot(super::mob::EntityLootRequest),
+    /// `Mob.convertTo(type, ConversionParams.single(..))`：按 `from` 这一刻的状态造出目标
+    /// 生物；发出者自己随后 `discard`。`level_event` 是转化音效的世界事件。
+    ///
+    /// `Mob.convertTo(type, ConversionParams.single(..))`: create the target from the state
+    /// `from` has this tick; the emitter discards itself. `level_event` is the conversion
+    /// sound.
+    ConvertMob {
+        from: Box<super::mob::Mob>,
+        to: super::mob::MobType,
+        level_event: i32,
+        /// 新生物要不要跑 `Zombie.handleAttributes`（僵尸变溺尸的 `postConversionStep`）。
+        ///
+        /// Whether the new mob runs `Zombie.handleAttributes`, the zombie's
+        /// `postConversionStep`.
+        zombie_attributes: bool,
+    },
+    /// `AbstractCubeMob.remove`：死掉的史莱姆被移除时，按 `from` 这一刻的状态分裂出小一号的
+    /// 几只。数量和朝向已经在发出者的随机源上取好。
+    ///
+    /// `AbstractCubeMob.remove`: a dead slime splits into smaller cubes built from the state
+    /// `from` has this tick. The count and facings were already drawn on the emitter's random.
+    SplitCubeMob {
+        from: Box<super::mob::Mob>,
+        half_size: i32,
+        children: Vec<super::mob::slime::SplitChild>,
+    },
     /// 改另一只跑大脑的生物的记忆（`AnimalMakeLove` 给伴侣设繁殖、走路和看的目标）。
     ///
     /// Writes another brain-driven mob's memory (`AnimalMakeLove` setting the partner's
@@ -895,10 +977,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             owner_uuid,
             weapon,
             difficulty,
+            effect,
         } => {
-            super::mob::skeleton::spawn_arrow(
-                world, position, direction, me.id, owner_uuid, weapon, difficulty,
-            );
+            let shot = super::mob::skeleton::MobArrowShot {
+                position,
+                direction,
+                owner_uuid,
+                weapon,
+                difficulty,
+                effect,
+            };
+            super::mob::skeleton::spawn_arrow(world, me.id, shot);
         }
         Command::ArrowImpact { block, hits, end } => {
             super::arrow::impact(me, world, hits, block, end)
@@ -906,6 +995,10 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ShootLlamaSpit(shot) => super::spit::spawn(world, me.id, shot),
         Command::SpitHit(hit) => super::spit::hit_entity(me, world, hit),
         Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
+        Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
+        Command::ThrowSplashPotion { shot } => {
+            world.spawn_splash_shot(&shot);
+        }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
@@ -1083,6 +1176,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::EatBlock { pos, grass_below } => {
             super::mob::living::apply_eat_block(world, pos, grass_below);
         }
+        Command::ConvertMob {
+            from,
+            to,
+            level_event,
+            zombie_attributes,
+        } => super::mob::conversion::apply_convert(
+            me,
+            &from,
+            to,
+            level_event,
+            zombie_attributes,
+            world,
+        ),
+        Command::SplitCubeMob {
+            from,
+            half_size,
+            children,
+        } => super::mob::slime::apply_split(me, &from, half_size, &children, world),
         Command::TrampleTurtleEgg { pos, chance } => {
             super::mob::living::apply_trample_turtle_egg(world, pos, chance);
         }

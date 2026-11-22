@@ -287,8 +287,18 @@ pub enum EntityData {
     ExperienceValue(i32),
     /// index 17，INT。`Zombie.DATA_SPECIAL_TYPE_ID`。
     SpecialType(i32),
+    /// `AbstractCubeMob.ID_SIZE`（INT）：史莱姆的大小。
+    ///
+    /// `AbstractCubeMob.ID_SIZE` (INT): the slime size.
+    CubeMobSize(i32),
     /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
     DrownedConverting(bool),
+    /// index 17，BOOLEAN。`Witch.DATA_USING_ITEM`（`Entity` 0–7、`LivingEntity` 8–14、
+    /// `Mob` 15、`Raider.IS_CELEBRATING` 16、`Witch.DATA_USING_ITEM` 17）。
+    ///
+    /// index 17, BOOLEAN. `Witch.DATA_USING_ITEM` (Entity 0–7, LivingEntity 8–14, Mob 15,
+    /// Raider.IS_CELEBRATING 16, Witch.DATA_USING_ITEM 17).
+    WitchUsingItem(bool),
     /// `Creeper.DATA_SWELL_DIR`（INT，缺省 -1）、`DATA_IS_POWERED`、`DATA_IS_IGNITED`（BOOLEAN）。
     ///
     /// `Creeper.DATA_SWELL_DIR` (INT, default -1), `DATA_IS_POWERED` and `DATA_IS_IGNITED`.
@@ -390,7 +400,10 @@ impl EntityData {
             Self::EffectAmbience(_) => 11,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,
-            Self::ModelCustomisation(_) | Self::AgeLocked(_) | Self::SpecialType(_) => 17,
+            Self::ModelCustomisation(_)
+            | Self::AgeLocked(_)
+            | Self::SpecialType(_)
+            | Self::WitchUsingItem(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
             Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
@@ -411,6 +424,7 @@ impl EntityData {
             Self::PigVariant(_) => mc_bamboo_data::entity_types::PIG_VARIANT,
             Self::PigSoundVariant(_) => mc_bamboo_data::entity_types::PIG_SOUND_VARIANT,
             Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
+            Self::CubeMobSize(_) => mc_bamboo_data::entity_types::CUBE_MOB_SIZE,
             Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
             Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
             Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
@@ -741,9 +755,17 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *kind);
             }
+            Self::CubeMobSize(size) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *size);
+            }
             Self::DrownedConverting(converting) => {
                 write_data_header(out, 18, SERIALIZER_BOOLEAN);
                 write_bool(out, *converting);
+            }
+            Self::WitchUsingItem(using) => {
+                write_data_header(out, 17, SERIALIZER_BOOLEAN);
+                write_bool(out, *using);
             }
         }
     }

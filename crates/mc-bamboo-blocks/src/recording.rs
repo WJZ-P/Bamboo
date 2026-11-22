@@ -763,6 +763,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::SleepInBed { .. } => 19,
         Effect::IgnitePlayer { .. } => 21,
         Effect::PlayerEffect { .. } => 22,
+        Effect::HealPlayer { .. } => 23,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -889,6 +890,10 @@ fn hash_effect(effect: &Effect) -> u64 {
             ambient.hash(&mut hasher);
             visible.hash(&mut hasher);
             show_icon.hash(&mut hasher);
+        }
+        Effect::HealPlayer { target, amount } => {
+            target.hash(&mut hasher);
+            amount.to_bits().hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

@@ -314,13 +314,39 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
     }
-    // 鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
-    // Squid are `AgeableMob`s but not `Animal`s and have no love keys.
-    if mob.mob_type.is_animal() {
+    // 史莱姆和鱿鱼一支是 `AgeableMob` 但不是 `Animal`，没有求爱的两个键。
+    // Slimes and the squid branch are `AgeableMob`s but not `Animal`s, so they
+    // lack the two love keys.
+    if mob.mob_type.is_animal() && mob.mob_type != MobType::Slime {
         put(&mut out, "InLove", Tag::Int(mob.in_love));
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
+    }
+    // ---- AbstractCubeMob ----
+    if mob.mob_type == MobType::Slime {
+        put(&mut out, "Size", Tag::Int(mob.cube.size - 1));
+        put(
+            &mut out,
+            "wasOnGround",
+            Tag::Byte(i8::from(mob.cube.was_on_ground)),
+        );
+    }
+    // ---- Skeleton / Bogged ----
+    if mob.mob_type == MobType::Skeleton {
+        // `ConversionTracker.addAdditionalSaveData`：`isAfflicted` 是存档这一刻的
+        // `isInPowderSnow`。
+        // `ConversionTracker.addAdditionalSaveData`: `isAfflicted` is `isInPowderSnow` at
+        // save time.
+        mob.freeze_conversion.write(
+            &mut out,
+            super::conversion::STRAY_CONVERSION_KEY,
+            super::conversion::FREEZING_KEY,
+            mob.in_powder_snow,
+        );
+    }
+    if mob.mob_type == MobType::Bogged {
+        put(&mut out, "sheared", Tag::Byte(i8::from(mob.bogged_sheared)));
     }
     if mob.mob_type == MobType::GlowSquid {
         put(
@@ -431,6 +457,18 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             &mut out,
             "CanBreakDoors",
             Tag::Byte(i8::from(mob.can_break_doors)),
+        );
+        // `Zombie.addAdditionalSaveData` 的 `drowningTracker`：`isAfflicted` 是存档这一刻的
+        // `isEyeInFluid(WATER)`。
+        //
+        // The `drowningTracker` part of `Zombie.addAdditionalSaveData`: `isAfflicted` is
+        // `isEyeInFluid(WATER)` at save time.
+        let afflicted = living::eye_in_fluid(mob, mc_bamboo_data::tags::fluid_tags::WATER);
+        mob.drown_conversion.write(
+            &mut out,
+            super::drowned::DROWNED_CONVERSION_KEY,
+            super::drowned::IN_WATER_TIME_KEY,
+            afflicted,
         );
     }
     if mob.mob_type == MobType::Creeper {
@@ -571,6 +609,15 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 .collect(),
             _ => Vec::new(),
         };
+        // `AbstractCubeMob.readAdditionalSaveData`：`setSize(Size + 1, false)` 在
+        // `super.readAdditionalSaveData` 之前，后面读到的 `attributes` 和 `Health` 盖在它上面。
+        // `AbstractCubeMob.readAdditionalSaveData`: `setSize(Size + 1, false)` runs ahead of
+        // `super.readAdditionalSaveData`, so the saved `attributes` and `Health` land on top.
+        if mob.mob_type == MobType::Slime {
+            let size = tag::int_or(tag, "Size", 0).saturating_add(1);
+            super::slime::set_size(me, mob, size, false);
+            mob.cube.was_on_ground = tag::bool_or(tag, "wasOnGround", false);
+        }
         // ---- LivingEntity.readAdditionalSaveData ----
         mob.absorption = tag::float_or(tag, "AbsorptionAmount", 0.0).max(0.0);
         if let Some(Tag::List(entries)) = tag::field(tag, "attributes") {
@@ -638,6 +685,17 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type.is_animal() {
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
+        }
+        // ---- Skeleton / Bogged ----
+        if mob.mob_type == MobType::Skeleton {
+            mob.freeze_conversion.read(
+                tag,
+                super::conversion::STRAY_CONVERSION_KEY,
+                super::conversion::FREEZING_KEY,
+            );
+        }
+        if mob.mob_type == MobType::Bogged {
+            mob.bogged_sheared = tag::bool_or(tag, "sheared", false);
         }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);
@@ -761,6 +819,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.navigation.flags.can_open_doors = true;
                 mob.goals.insert_break_door();
             }
+            mob.drown_conversion.read(
+                tag,
+                super::drowned::DROWNED_CONVERSION_KEY,
+                super::drowned::IN_WATER_TIME_KEY,
+            );
+            mob.drowned_converting = mob.drown_conversion.converting;
         }
         if mob.mob_type == MobType::Creeper {
             super::creeper::read_nbt(mob, tag);

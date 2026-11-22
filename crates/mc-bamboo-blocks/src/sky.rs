@@ -114,6 +114,16 @@ pub fn moon_brightness(total_ticks: i64) -> f32 {
     MOON_BRIGHTNESS_PER_PHASE[phase as usize]
 }
 
+/// `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE` 在主世界的值：缺省 0，`minecraft:moon`
+/// 时间线用 `maximum` 叠上「月亮亮度 × 0.5」（常数缓动，每个月相一档）。
+///
+/// The overworld value of `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE`: default 0,
+/// raised by the `minecraft:moon` timeline (`maximum` modifier, constant easing) to half the
+/// moon brightness of the current phase.
+pub fn surface_slime_spawn_chance(total_ticks: i64) -> f32 {
+    moon_brightness(total_ticks) * 0.5
+}
+
 /// `DifficultyInstance.calculateDifficulty`：区域难度。`difficulty` 是难度 ID，
 /// `clock_ticks` 是主世界时钟，`inhabited` 是区块的 `InhabitedTime`。
 /// 每一步都是 f32 运算，和官方一致。

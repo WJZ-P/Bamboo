@@ -387,9 +387,11 @@ mod tests {
                 uid: 900,
                 uuid: None,
                 position: Vec3::new(0.5, 64.0, 5.5),
+                delta: Vec3::default(),
                 eye_height: 1.62,
                 look_direction: Vec3::default(),
                 gaze_disguise: false,
+                health: 20.0,
                 alive: true,
                 spectator: false,
                 creative: false,
@@ -402,6 +404,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 combat: Default::default(),
+                effects: Default::default(),
             });
             let mut ticks = BlockTicks::new();
             let mut world = World::new(&mut level, &mut ticks);

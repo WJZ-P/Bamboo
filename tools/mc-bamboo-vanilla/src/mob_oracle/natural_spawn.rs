@@ -42,6 +42,25 @@ pub(super) struct Case {
     local_cap: bool,
     nearby_respawn: bool,
     halloween: bool,
+    /// `WorldGenLevel.getSeed()`：史莱姆区块读它。
+    ///
+    /// `WorldGenLevel.getSeed()`, read for slime chunks.
+    #[serde(default)]
+    level_seed: i64,
+    /// 草方块地面的高度；沼泽的史莱姆场景在 50 到 66 之间叠了五层。
+    ///
+    /// The grass floor heights; swamp slime scenes stack five floors from 50 to 66.
+    #[serde(default = "default_floors")]
+    floors: Vec<i32>,
+    #[serde(default)]
+    water_depth: i32,
+    #[serde(default = "flat_sea_level")]
+    sea_level: i32,
+    /// 主世界时钟，月相读它。
+    ///
+    /// The overworld clock, read for the moon phase.
+    #[serde(default)]
+    clock: i64,
     /// 水生夹具：三层水（-64..=-62）代替草地。
     ///
     /// Aquatic fixture: three water layers (-64..=-62) replace the grass.
@@ -52,9 +71,11 @@ pub(super) struct Case {
     /// Axolotl fixture: the bottom of the three "water" layers is clay.
     #[serde(default)]
     clay_floor: bool,
-    #[serde(default = "flat_sea_level")]
-    sea_level: i32,
     steps: Vec<Step>,
+}
+
+fn default_floors() -> Vec<i32> {
+    vec![-63]
 }
 
 fn flat_sea_level() -> i32 {
@@ -67,7 +88,7 @@ struct Step {
     time: i64,
     count: i32,
     world_seed: i64,
-    spawned: Vec<[i32; 11]>,
+    spawned: Vec<[i32; 12]>,
     /// 每只刷出来的生物的花色和叫声（`MobOracle.spawnVariants`）。
     ///
     /// Each spawned mob's variant and sound (`MobOracle.spawnVariants`).
@@ -94,8 +115,10 @@ pub(super) struct Coverage {
     farm: [usize; 3],
     skeletons: usize,
     zombies: usize,
+    slimes: usize,
     squid: usize,
     equines: usize,
+    witches: usize,
     without_spawn: usize,
     cap_off: usize,
     per_scene: std::collections::BTreeMap<String, usize>,
@@ -128,6 +151,11 @@ impl Coverage {
             .iter()
             .filter(|row| row[0] == entity_type::ZOMBIE || row[0] == entity_type::HUSK)
             .count();
+        self.slimes += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::SLIME)
+            .count();
         self.squid += step
             .spawned
             .iter()
@@ -138,6 +166,11 @@ impl Coverage {
             .iter()
             .filter(|row| MobType::by_entity_type(row[0]).is_some_and(MobType::is_equine))
             .count();
+        self.witches += step
+            .spawned
+            .iter()
+            .filter(|row| row[0] == entity_type::WITCH)
+            .count();
         if case.name == "cow_no_local_cap" {
             self.cap_off += step.spawned.len();
         }
@@ -146,15 +179,17 @@ impl Coverage {
     pub(super) fn print(&self) {
         if self.cases > 0 {
             println!(
-                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} squid or glow squid, {} equines, {} empty ticks, {} spawns with local cap bypassed",
+                "NATURAL SPAWN: {} cases, {} ticks, {} cows, {:?} pigs/sheep/chickens, {} skeletons, {} zombies or husks, {} slimes, {} squid or glow squid, {} equines, {} witches, {} empty ticks, {} spawns with local cap bypassed",
                 self.cases,
                 self.ticks,
                 self.cows,
                 self.farm,
                 self.skeletons,
                 self.zombies,
+                self.slimes,
                 self.squid,
                 self.equines,
+                self.witches,
                 self.without_spawn,
                 self.cap_off
             );
@@ -168,6 +203,34 @@ impl Coverage {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        if let Some(&deep) = self.per_scene.get("drowned_deep_ocean")
+            && (deep == 0
+                || self
+                    .per_scene
+                    .get("drowned_shallow_river")
+                    .copied()
+                    .unwrap_or(0)
+                    == 0)
+        {
+            return Err("natural spawn fixtures did not spawn drowned in ocean and river".into());
+        }
+        if self.per_scene.contains_key("witch_night") && self.witches == 0 {
+            return Err("natural spawn fixtures did not spawn any witches".into());
+        }
+        // 流浪者和沼骸的正例必须真的刷出生物，否则找天 / 黑暗规则没被覆盖。
+        // The stray and bogged positive scenes must really spawn, or the sky / darkness
+        // rules went untested.
+        for (scene, creature) in [("stray_night", "strays"), ("bogged_night", "bogged")] {
+            if let Some(&count) = self.per_scene.get(scene)
+                && count == 0
+            {
+                return Err(format!(
+                    "natural spawn fixture {scene} did not spawn any {creature}"
+                ));
+            }
+        }
+        // 熊猫单独的一组：亮场景必须刷、暗场景必须不刷。
+        // The panda-only group: the bright scene must spawn and the dim one must not.
         if let Some(&day) = self.per_scene.get("panda_day") {
             return if day > 0 && self.per_scene.get("panda_dim") == Some(&0) {
                 Ok(())
@@ -195,6 +258,7 @@ impl Coverage {
             self.cows,
             self.skeletons,
             self.zombies,
+            self.slimes,
             self.squid,
             self.equines,
         ];
@@ -237,7 +301,7 @@ impl Report {
             per_player_cap: case.local_cap,
             respawn_pos: Some(BlockPos::new(
                 if case.nearby_respawn { 8 } else { 10000 },
-                -62,
+                case.floors[0] + 1,
                 8,
             )),
             // 改坏确认：海平面降一格，鱿鱼的「不高于海平面」就不成立。
@@ -290,25 +354,51 @@ fn spawn_tick(
     }
 }
 
-fn spawn_row(entity: Entity) -> [i32; 11] {
+fn spawn_row(entity: Entity) -> [i32; 12] {
     let mob = entity.kind.mob().expect("natural spawns are mobs");
     let [main_gene, hidden_gene] = if mob.mob_type == MobType::Panda {
         [mob.panda.main_gene.id(), mob.panda.hidden_gene.id()]
     } else {
         [-1; 2]
     };
+    let tropical = mob.mob_type == MobType::TropicalFish;
     [
         mob.mob_type.entity_type(),
         (entity.position.x * 2.0) as i32,
         entity.position.y as i32,
         (entity.position.z * 2.0) as i32,
-        entity.y_rot.to_bits() as i32,
-        i32::from(mob.is_baby()),
+        // 大小不是 1 的史莱姆朝向来自构造函数的随机源，官方那边不带种子，两边都记 0。
+        // The yaw of a slime whose size is not 1 comes from the constructor random, unseeded
+        // in vanilla; both sides record 0.
+        if mob.mob_type == MobType::Slime && mob.cube.size != 1 {
+            0
+        } else {
+            entity.y_rot.to_bits() as i32
+        },
+        // 史莱姆不会是幼年，这一列改放大小。
+        // Slimes are never babies; this column carries their size instead.
+        if mob.mob_type == MobType::Slime {
+            mob.cube.size
+        } else {
+            i32::from(mob.is_baby())
+        },
         i32::from(mob.left_handed),
         mob.equipment.get(EquipmentSlot::MainHand).item,
+        // 溺尸记副手；热带鱼记花纹；其余为 0。
+        // Drowned carry the offhand item; tropical fish carry their variant; else 0.
+        if mob.mob_type == MobType::Drowned {
+            mob.equipment.get(EquipmentSlot::OffHand).item
+        } else if tropical {
+            mob.fish.variant
+        } else {
+            0
+        },
         main_gene,
         hidden_gene,
-        if mob.mob_type == MobType::TropicalFish {
+        // 热带鱼花纹和美西螈花色共用最后一列（官方夹具的 12 列布局）。
+        // Tropical fish patterns and axolotl variants share the last column
+        // (the vanilla fixture's 12-column layout).
+        if tropical {
             mob.fish.variant
         } else if mob.mob_type == MobType::Axolotl {
             mob.axolotl.variant
@@ -335,24 +425,41 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
     let roof = kind == MobType::Husk;
     let floor_state = spawn_floor(biome);
     let aquatic = case.aquatic;
+    let floors = case.floors.clone();
+    let water_depth = case.water_depth;
     let blocks = (-16..48)
         .flat_map(|x| {
+            let floors = floors.clone();
             (-16..32).flat_map(move |z| {
-                let floor = (BlockPos::new(x, -63, z), floor_state);
-                let glass = (BlockPos::new(x, -60, z), BlockState(blocks::GLASS));
-                let water = (-64..=-62).map(move |y| {
-                    let state = if case.clay_floor && y == -64 {
-                        blocks::CLAY
-                    } else {
-                        blocks::WATER
-                    };
-                    (BlockPos::new(x, y, z), BlockState(state))
-                });
-                (!aquatic)
-                    .then_some(floor)
-                    .into_iter()
-                    .chain(roof.then_some(glass))
-                    .chain(water.filter(move |_| aquatic))
+                let mut column = Vec::new();
+                for &y in &floors {
+                    column.push((BlockPos::new(x, y, z), BlockState(blocks::GRASS_BLOCK)));
+                }
+                for dy in 1..=water_depth {
+                    column.push((
+                        BlockPos::new(x, floors[0] + dy, z),
+                        BlockState(blocks::WATER),
+                    ));
+                }
+                if aquatic {
+                    for y in -64..=-62 {
+                        // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才通过。
+                        // The axolotl fixture swaps the bottom water layer for clay so
+                        // `checkAxolotlSpawnRules` passes.
+                        let state = if case.clay_floor && y == -64 {
+                            blocks::CLAY
+                        } else {
+                            blocks::WATER
+                        };
+                        column.push((BlockPos::new(x, y, z), BlockState(state)));
+                    }
+                } else {
+                    column.push((BlockPos::new(x, -63, z), floor_state));
+                    if roof {
+                        column.push((BlockPos::new(x, -60, z), BlockState(blocks::GLASS)));
+                    }
+                }
+                column
             })
         })
         .collect();
@@ -361,8 +468,10 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         yaw: 0.0,
         pitch: 0.0,
         uuid: None,
-        position: Vec3::new(case.player_x, -62.0, 8.5),
+        position: Vec3::new(case.player_x, f64::from(case.floors[0] + 1), 8.5),
+        delta: Vec3::default(),
         eye_height: 1.62,
+        health: 20.0,
         look_direction: Vec3::default(),
         gaze_disguise: false,
         alive: true,
@@ -375,6 +484,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         main_hand: 0,
         off_hand: 0,
         combat: Default::default(),
+        effects: Default::default(),
     };
     Ok(MobLevel {
         blocks,
@@ -385,9 +495,16 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         facts: ZombieFacts {
             difficulty: case.difficulty,
             sky_darken: case.darken,
-            can_see_sky: case.sky == 15,
+            // 改坏自检：把流浪者正例的找天判据拿掉，官方仍刷、Bamboo 不刷，
+            // 用来证明流浪者夹具确实覆盖 `Stray.checkStraySpawnRules` 的找天一支。
+            // Break-self-test: drop the stray positive scene's open-sky fact, so vanilla
+            // still spawns and Bamboo does not — proving the fixture covers the sky gate.
+            can_see_sky: case.sky == 15 && !(broken && case.name == "stray_night"),
             raining: case.thunder,
             halloween: case.halloween,
+            clock: case.clock,
+            world_seed: case.level_seed,
+            sea_level: case.sea_level,
             ..ZombieFacts::default()
         },
         natural_spawn: Some(SceneFacts {
@@ -399,7 +516,11 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             } else {
                 case.sky
             },
-            block: if broken && case.name == "skeleton_night_2" {
+            block: if broken
+                && matches!(
+                    case.name.as_str(),
+                    "skeleton_night_2" | "drowned_shallow_river"
+                ) {
                 15
             } else {
                 case.block

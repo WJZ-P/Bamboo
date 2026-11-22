@@ -49,6 +49,7 @@ mod skeleton_death;
 mod skeleton_spawn;
 mod squid;
 mod water_mob;
+mod witch_throw;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -98,6 +99,7 @@ enum Line {
     EquineDeath(equine::DeathCase),
     EquineSave(equine::SaveCase),
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
+    WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
     GenSpawn(gen_spawn::Case),
     PandaGenes(PandaGenesCase),
@@ -226,6 +228,12 @@ struct Case {
     bright_outside: bool,
     #[serde(default)]
     monsters_burn: bool,
+    /// 假世界的海平面，缺省是超平坦的 -63；溺尸的上浮和上岸目标读它。
+    ///
+    /// The fake world's sea level, -63 for superflat unless a scene overrides it;
+    /// the drowned's swim-up and go-to-beach goals read it.
+    #[serde(default = "minus_63")]
+    sea_level: i32,
     /// 狐狸场景：像刷出来的狐狸一样带上捕猎目标（`Fox.setTargetGoals`）。
     ///
     /// Fox scenes: add the hunting goals like a spawned fox.
@@ -248,6 +256,11 @@ struct Case {
     /// 每刻生物发出的 `entity_event` 和 `set_equipment`（base64，按发生顺序）。
     #[serde(default)]
     mob_event_packets: Option<Vec<Vec<String>>>,
+    /// 史莱姆场景：每刻分裂出来的小史莱姆（x、y、z、朝向的位，大小，血量的位）。
+    ///
+    /// Slime scenes: the children split off each tick (x, y, z and yaw bits, size, health bits).
+    #[serde(default)]
+    cube_splits: Option<Vec<Vec<[i64; 6]>>>,
     /// 每刻 0 号玩家的状态：血量位、受伤冷却、受伤动画、死亡、着火刻数。
     #[serde(default)]
     zombie_player_states: Option<Vec<[i64; 5]>>,
@@ -436,6 +449,12 @@ struct Spawn {
     /// A chick's constructor `eggTime`, also a scene starting point.
     #[serde(default)]
     egg: Option<i32>,
+    /// 新生熊猫在 `getBreedOffspring` 用没播种的随机源抽出的双基因，作为场景起点。
+    ///
+    /// A newborn panda's genes rolled on its unseeded random in `getBreedOffspring`,
+    /// passed as a scene starting point.
+    #[serde(default)]
+    genes: Option<[u8; 2]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -553,6 +572,8 @@ struct CowStep {
     g: bool,
     rm: bool,
     w: bool,
+    #[serde(default)]
+    swimming: bool,
     fd: i64,
     nat: i32,
     ht: i32,
@@ -661,10 +682,11 @@ struct CowStep {
 }
 
 /// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊，以及苦力怕、
-/// 蜘蛛、洞穴蜘蛛和末影人。
+/// 蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
 ///
 /// Scenes played by the Java `playZombie` driver: zombies, the wild animals,
-/// armadillos and goats, plus creepers, spiders, cave spiders and endermen.
+/// armadillos and goats, plus creepers, spiders, cave spiders, endermen, slimes,
+/// witches and drowned.
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
@@ -678,6 +700,9 @@ fn zombie_style(name: &str) -> bool {
         "spider_",
         "cave_spider_",
         "enderman_",
+        "slime_",
+        "witch_drink_",
+        "drowned_",
     ]
     .iter()
     .any(|prefix| name.starts_with(prefix))
@@ -691,6 +716,10 @@ const fn minus_one() -> i32 {
     -1
 }
 
+const fn minus_63() -> i32 {
+    -63
+}
+
 #[derive(Debug, Deserialize)]
 struct End {
     cases: u32,
@@ -701,12 +730,17 @@ struct ZombieFacts {
     halloween: bool,
     /// 主世界时钟（真实时间模式逐刻推进，否则 0）。
     clock: i64,
+    /// `WorldGenLevel.getSeed()`，史莱姆区块读它。
+    ///
+    /// `WorldGenLevel.getSeed()`, read for slime chunks.
+    world_seed: i64,
     inhabited_time: i64,
     can_see_sky: bool,
     sky_darken: i32,
     difficulty: i32,
     bright_outside: bool,
     monsters_burn: bool,
+    sea_level: i32,
     raining: bool,
 }
 
@@ -799,6 +833,14 @@ impl Level for MobLevel {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    /// 官方夹具的 `FakeLevel.getSeaLevel()`：缺省超平坦 -63，场景可以覆盖。
+    ///
+    /// The Java fixture's `FakeLevel.getSeaLevel()`: superflat's -63 unless the scene
+    /// overrides it.
+    fn sea_level(&self) -> i32 {
+        self.facts.sea_level
     }
 
     fn random(&self) -> &LevelRandom {
@@ -901,6 +943,33 @@ impl Level for MobLevel {
         true
     }
 
+    fn give_player_effect_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        instance: &mc_bamboo_blocks::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        if mc_bamboo_blocks::entity::mob::effects::is_instantaneous(instance.effect) {
+            return false;
+        }
+        game.give_effect(target, instance.clone());
+        true
+    }
+
+    fn heal_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        amount: f32,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.heal(target, amount);
+        true
+    }
+
     fn sky_darken(&self) -> i32 {
         self.facts.sky_darken
     }
@@ -937,6 +1006,10 @@ impl Level for MobLevel {
 
     fn clock_ticks(&self) -> i64 {
         self.facts.clock
+    }
+
+    fn world_seed(&self) -> i64 {
+        self.facts.world_seed
     }
 
     fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
@@ -1207,6 +1280,7 @@ impl Report {
                 Line::EquineDeath(case) => self.replay_equine_death(case),
                 Line::EquineSave(case) => self.replay_equine_save(case),
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
+                Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::PandaGenes(case) => self.replay_panda_genes(&case),
@@ -1321,6 +1395,7 @@ impl Report {
             facts: ZombieFacts {
                 halloween: false,
                 clock: 0,
+                world_seed: 0,
                 inhabited_time: 0,
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
@@ -1331,6 +1406,7 @@ impl Report {
                 } else {
                     true
                 },
+                sea_level: case.sea_level,
                 raining: case.raining,
             },
             natural_spawn: None,
@@ -1354,7 +1430,9 @@ impl Report {
                         f64::from_bits(player.y as u64),
                         f64::from_bits(player.z as u64),
                     ),
+                    delta: Vec3::default(),
                     eye_height: f32::from_bits(player.eye as u32),
+                    health: 20.0,
                     look_direction: Vec3::view_vector(
                         f32::from_bits(player.yaw as u32),
                         f32::from_bits(player.pitch as u32),
@@ -1370,6 +1448,7 @@ impl Report {
                     main_hand: player.item,
                     off_hand: 0,
                     combat: Default::default(),
+                    effects: Default::default(),
                 })
                 .collect(),
             game: case.real_players.then(|| {
@@ -1449,6 +1528,9 @@ impl Report {
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
                     43 => mc_bamboo_blocks::entity::mob::MobType::Enderman,
+                    50 => mc_bamboo_blocks::entity::mob::MobType::Slime,
+                    51 => mc_bamboo_blocks::entity::mob::MobType::Witch,
+                    52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
@@ -1540,7 +1622,21 @@ impl Report {
                             mc_bamboo_blocks::entity::mob::fox::set_target_goals(mob);
                         }
                     }
-                    if cow.age != 0 {
+                    let slime = kind == mc_bamboo_blocks::entity::mob::MobType::Slime;
+                    if slime {
+                        // 史莱姆场景用「年龄」那一列带大小；移动控制的目标角度对齐成场景的朝向。
+                        // Slime scenes carry the size in the age column; the move control's
+                        // target angle is aligned with the scene yaw.
+                        entity.with_mob(|me, mob| {
+                            mc_bamboo_blocks::entity::mob::slime::set_size(me, mob, cow.age, true);
+                            mob.cube.move_y_rot = yaw;
+                        });
+                        entity.y_rot = yaw;
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.y_body_rot = yaw;
+                        }
+                    }
+                    if cow.age != 0 && !slime {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
                         let baby = zombie_kind || cow.age < 0;
@@ -1766,6 +1862,9 @@ impl Report {
                         count: after.count,
                     });
                 }
+                if case.name.starts_with("slime_") {
+                    touch_slimes(&mut world, &ids, &case.players);
+                }
                 for &[tick, cow, amount, attacker] in &case.hurts {
                     if tick as usize != index {
                         continue;
@@ -1877,6 +1976,10 @@ impl Report {
                 public.yaw = yr;
                 if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &mut public.kind {
                     mob.y_head_rot = hr;
+                    if let Some([main, hidden]) = setup.genes {
+                        mob.panda.main_gene = main;
+                        mob.panda.hidden_gene = hidden;
+                    }
                 }
             }
             // 场景开始时就存在的牛在 tick 0 已经建过同步状态，这里只处理
@@ -1911,6 +2014,18 @@ impl Report {
                     &ours_spawns,
                     &expected_spawns[index],
                 );
+            }
+            if let Some(expected) = &case.cube_splits
+                && let Some(expected) = expected.get(index)
+            {
+                let ours = take_cube_splits(&mut level, &mut ticks, &spawn_public);
+                if &ours != expected && self.mismatches.len() < self.show {
+                    self.mismatches.push(format!(
+                        "{} tick {index} splits: official {expected:?} bamboo {ours:?}",
+                        case.name
+                    ));
+                }
+                spawn_public.clear();
             }
             self.steps += 1;
             let mut ours = snapshot(&level, &ids);
@@ -2119,6 +2234,9 @@ impl Report {
             plain!(g);
             plain!(rm);
             plain!(w);
+            if name.starts_with("drowned_") {
+                plain!(swimming);
+            }
             bits64!(fd);
             plain!(nat);
             plain!(ht);
@@ -2149,6 +2267,8 @@ impl Report {
                 plain!(wolf_beg);
                 plain!(wolf_collar);
                 plain!(wolf_max_hp);
+            }
+            if name.starts_with("zombie_") || name.starts_with("drowned_") {
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -2748,6 +2868,7 @@ impl Report {
                         yr: None,
                         uuid: None,
                         egg: None,
+                        genes: None,
                     })
                     .collect();
                 // 只比数量 / 种类 / 物品 / 经验值，不比实体 ID 和速度随机源。
@@ -3113,6 +3234,7 @@ fn spawn_snapshot(
                 yr: None,
                 uuid: None,
                 egg: None,
+                genes: None,
             })
         })
         .collect()
@@ -3179,6 +3301,12 @@ fn apply_born_setup(world: &mut World, uid: i32, setup: &Spawn) -> bool {
         mob.uuid = uuid;
         if let Some(egg) = egg {
             mob.egg_time = egg;
+        }
+        if let Some([main, hidden]) = setup.genes {
+            use mc_bamboo_blocks::entity::mob::panda;
+            mob.panda.main_gene = panda::Gene::from_id(i32::from(main));
+            mob.panda.hidden_gene = panda::Gene::from_id(i32::from(hidden));
+            panda::set_attributes(mob);
         }
         mob.y_head_rot = hr;
         mob.y_head_rot_o = hr;
@@ -3379,6 +3507,71 @@ fn block_hash(level: &MobLevel) -> i64 {
     hash
 }
 
+/// 史莱姆场景里 `Player.aiStep` 的 `touch(entity)`：玩家活着时，包围盒外扩 (1, 0.5, 1) 碰到的
+/// 史莱姆各调一次 `playerTouch`。玩家的包围盒是站立的 0.6 × 1.8。
+///
+/// `touch(entity)` from `Player.aiStep` for slime scenes: a living player calls `playerTouch`
+/// on each slime within its box inflated by (1, 0.5, 1). The player box is the standing
+/// 0.6 × 1.8.
+fn touch_slimes(world: &mut World, ids: &[i32], players: &[PlayerSetup]) {
+    for player in players {
+        let feet = Vec3::new(
+            f64::from_bits(player.x as u64),
+            f64::from_bits(player.y as u64),
+            f64::from_bits(player.z as u64),
+        );
+        let half = f64::from(0.6_f32) / 2.0;
+        let reach = mc_bamboo_core::Aabb::new(
+            feet.x - half,
+            feet.y,
+            feet.z - half,
+            feet.x + half,
+            feet.y + f64::from(1.8_f32),
+            feet.z + half,
+        )
+        .inflate(1.0, 0.5, 1.0);
+        for &id in ids {
+            let touching = world
+                .entity(id)
+                .is_some_and(|entity| !entity.removed && entity.bounding_box().intersects(reach));
+            if touching {
+                mc_bamboo_blocks::entity::mob::slime::player_touch(world, id, player.id);
+            }
+        }
+    }
+}
+
+/// 这一刻新生成的小史莱姆：记下和官方一侧同样的六个数，然后丢掉，不让它们继续 tick。
+///
+/// The slimes spawned this tick: record the same six numbers as the vanilla side, then
+/// discard them so they never tick.
+fn take_cube_splits(
+    level: &mut MobLevel,
+    ticks: &mut BlockTicks,
+    spawned: &[mc_bamboo_blocks::entity::EntityPublic],
+) -> Vec<[i64; 6]> {
+    let mut out = Vec::new();
+    let mut world = World::new(level, ticks);
+    for public in spawned {
+        let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind else {
+            continue;
+        };
+        if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Slime {
+            continue;
+        }
+        out.push([
+            public.position.x.to_bits() as i64,
+            public.position.y.to_bits() as i64,
+            public.position.z.to_bits() as i64,
+            i64::from(public.yaw.to_bits() as i32),
+            i64::from(mob.cube_size),
+            i64::from(mob.health.to_bits() as i32),
+        ]);
+        world.with_entity_mut(public.uid, &mut |entity| entity.discard());
+    }
+    out
+}
+
 fn step_of(entity: &Entity, lr: i64) -> Option<CowStep> {
     let EntityKind::Mob(mob) = &entity.kind else {
         return None;
@@ -3442,6 +3635,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         g: entity.on_ground,
         rm: entity.removed,
         w: entity.in_water,
+        swimming: mob.swimming,
         fd: entity.fall_distance.to_bits() as i64,
         nat: mob.no_action_time,
         ht: mob.hurt_time,
@@ -3460,7 +3654,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         snd: farm_sound(mob),
         uuid: uuid_text(&mob.uuid),
         lr,
-        goals: mob.goals.running_class_names(mob.mob_type).join(" "),
+        goals: mob.goals.running_names_of(mob).join(" "),
         path,
         target: mob.target.unwrap_or(-1),
         // 僵尸式场景额外比较僵尸和马科的幼年标志；其他动物比较 age。
@@ -3569,6 +3763,29 @@ fn goat_flags(mob: &mc_bamboo_blocks::entity::mob::Mob) -> i32 {
 fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     use mc_bamboo_blocks::entity::mob::{MobType, sheep};
     match mob.mob_type {
+        // 史莱姆把自己的状态塞进这一列：大小、跳跃延迟、移动控制的目标角度、上一刻是否在地上。
+        // Slimes pack their own state here: size, jump delay, the move control's target angle
+        // and whether they were on the ground.
+        MobType::Slime => format!(
+            "slime:{}:{}:{}:{}",
+            mob.cube.size,
+            mob.cube.jump_delay,
+            mob.cube.move_y_rot.to_bits() as i32,
+            mob.cube.was_on_ground
+        ),
+        MobType::Witch => {
+            use mc_bamboo_data::registries::mob_effect;
+            let duration = |effect| mob.effects.get(effect).map_or(0, |entry| entry.duration);
+            format!(
+                "witch:{}:{}:{}:{}:{}:{}",
+                mob.witch_drinking,
+                mob.witch.using_time,
+                duration(mob_effect::FIRE_RESISTANCE),
+                duration(mob_effect::INSTANT_HEALTH),
+                duration(mob_effect::WATER_BREATHING),
+                duration(mob_effect::SPEED)
+            )
+        }
         MobType::Sheep => format!(
             "{}{}",
             sheep::color(mob).name(),

@@ -260,7 +260,9 @@ public final class MobOracle {
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
                     "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
-                    "skeleton_bow_normal", "skeleton_bow_hard")) {
+                    "skeleton_bow_normal", "skeleton_bow_hard",
+                    "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
+                    "skeleton_freeze", "bogged_shear")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -276,6 +278,13 @@ public final class MobOracle {
                 playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
                 playLlamaSpit(official, out, "llama_spit_near", 3.5, 4207L);
                 cases += 2;
+            }
+            if (only == null || "witch_throw".startsWith(only)) {
+                OracleWitch.checkAim(official);
+                playWitchThrow(official, out, "witch_throw_far", 9.5, 20.0F, 73L, 220, false);
+                playWitchThrow(official, out, "witch_throw_near", 2.5, 7.0F, 419L, 220, false);
+                playWitchThrow(official, out, "witch_throw_undead", 6.5, 7.0F, 911L, 110, true);
+                cases += 3;
             }
             for (String name : List.of("shot_bow_short_draw", "shot_bow_half_draw", "shot_bow_full_draw",
                     "shot_bow_moving", "shot_bow_enchanted",
@@ -328,9 +337,11 @@ public final class MobOracle {
             if ("skeleton_halloween".equals(only)) {
                 cases += playHalloweenSpawns(official, out);
             }
-            if ("natural_spawn".equals(only) || "natural_spawn_panda".equals(only) || "natural_fish".equals(only)) {
-                cases += playNaturalSpawns(official, out,
-                        "natural_fish".equals(only), "natural_spawn_panda".equals(only));
+            if ("natural_spawn".equals(only) || "natural_spawn_panda".equals(only)
+                    || "natural_fish".equals(only)
+                    || "witch_spawn".equals(only) || "drowned_spawn".equals(only)
+                    || "stray_spawn".equals(only) || "bogged_spawn".equals(only)) {
+                cases += playNaturalSpawns(official, out, only);
             }
             if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
                 cases += playGenSpawns(official, out, only);
@@ -506,6 +517,8 @@ public final class MobOracle {
         /// 狐狸场景：反射调 `Fox.setTargetGoals`，让它像刷出来的狐狸一样捕猎。
         boolean foxHunts;
         boolean monstersBurn = true;
+        /** `Level.getSeaLevel()`；假世界缺省是超平坦的 -63。 */
+        int seaLevel = -63;
         /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
         boolean realPlayers;
         /** 僵尸场景：主世界时钟的起始刻；`>= 0` 时天色、`MONSTERS_BURN`、月相都按真实时间线逐刻算。 */
@@ -668,6 +681,12 @@ public final class MobOracle {
 
         Scene difficulty(int id) {
             difficulty = id;
+            return this;
+        }
+
+        /** 假世界的海平面，溺水者和海平面相关的目标读它。 */
+        Scene sea(int level) {
+            seaLevel = level;
             return this;
         }
 
@@ -2240,6 +2259,70 @@ public final class MobOracle {
             }
         }
 
+        /**
+         * 史莱姆场景（生物种类 6，「年龄」那一列是大小）：自己乱跳、追玩家并碰撞、最小号不伤人、
+         * 水里上浮、死后分裂、和平难度清除。
+         *
+         * Slime scenes (mob kind 50, size in the age column): idle hopping, chasing and touching
+         * a player, harmless tiny slimes, floating in water, splitting on death and the
+         * peaceful clear.
+         */
+        static void slimeScenes(List<Scene> scenes) {
+            for (int size : new int[] {1, 2, 4}) {
+                Scene hop = new Scene("slime_hop_" + size).ticks(240).difficulty(2);
+                ground(hop, 16);
+                hop.mob(50, 0.5, 64.0, 0.5, 30.0F, 101L + size, size);
+                hop.player(60.5, 64.0, 0.5, Items.AIR);
+                scenes.add(hop);
+            }
+            for (int size : new int[] {1, 2, 4}) {
+                Scene chase = new Scene("slime_chase_" + size).ticks(240).difficulty(2);
+                chase.realPlayers = true;
+                ground(chase, 16);
+                chase.mob(50, 0.5, 64.0, 0.5, 0.0F, 211L + size, size);
+                chase.player(5.5, 64.0, 2.5, Items.AIR);
+                scenes.add(chase);
+            }
+            // 两只同一刻碰到同一名玩家：第二下落在无敌帧里，不放攻击音效、不取音高。
+            // Two slimes touching one player in the same tick: the second lands in the
+            // invulnerability frames, so no attack sound and no pitch draws.
+            Scene two = new Scene("slime_two_touch").ticks(120).difficulty(3);
+            two.realPlayers = true;
+            ground(two, 16);
+            two.mob(50, 0.5, 64.0, 0.5, 0.0F, 307L, 2);
+            two.mob(50, 3.5, 64.0, 3.5, 0.0F, 311L, 4);
+            two.player(2.5, 64.0, 1.5, Items.AIR);
+            scenes.add(two);
+            // 高度差超过 4 格的玩家不会被当成目标。
+            // A player more than four blocks higher is never targeted.
+            Scene high = new Scene("slime_target_height").ticks(120).difficulty(2);
+            ground(high, 16);
+            high.fill(4, 64, 0, 4, 68, 0, STONE);
+            high.mob(50, 0.5, 64.0, 0.5, 0.0F, 401L, 2);
+            high.player(4.5, 69.0, 0.5, Items.AIR);
+            scenes.add(high);
+            Scene water = new Scene("slime_water").ticks(200).difficulty(2);
+            ground(water, 16);
+            water.fill(-3, 61, -3, 3, 63, 3, WATER);
+            water.fill(-4, 60, -4, 4, 60, 4, STONE);
+            water.mob(50, 0.5, 61.0, 0.5, 0.0F, 503L, 2);
+            water.player(60.5, 64.0, 0.5, Items.AIR);
+            scenes.add(water);
+            for (int size : new int[] {1, 2, 4}) {
+                Scene split = new Scene("slime_split_" + size).ticks(60).difficulty(2);
+                ground(split, 16);
+                split.mob(50, 0.5, 64.0, 0.5, 0.0F, 601L + size, size);
+                split.player(3.5, 64.0, 0.5, Items.AIR);
+                split.hurts.add(new double[] {5, 0, 100.0, 0});
+                scenes.add(split);
+            }
+            Scene peaceful = new Scene("slime_peaceful_clear").ticks(3).difficulty(0);
+            ground(peaceful, 16);
+            peaceful.mob(50, 0.5, 64.0, 0.5, 0.0F, 701L, 2);
+            peaceful.player(3.5, 64.0, 0.5, Items.AIR);
+            scenes.add(peaceful);
+        }
+
         static net.minecraft.world.item.Item dye(String color) {
             return BuiltInRegistries.ITEM.getValue(net.minecraft.resources.Identifier.withDefaultNamespace(color + "_dye"));
         }
@@ -3043,6 +3126,50 @@ public final class MobOracle {
                 kill.player(2.5, 64.0, 0.5, Items.AIR);
                 scenes.add(kill);
             }
+            slimeScenes(scenes);
+            Scene witch = new Scene("witch_drink_fire").ticks(140).difficulty(2).fire(200);
+            ground(witch, 16);
+            witch.mob(51, 0.5, 64.0, 0.5, 0.0F, 503L, 0);
+            witch.player(60.5, 64.0, 0.5, Items.AIR);
+            scenes.add(witch);
+            Scene submerged = new Scene("witch_drink_water").ticks(80).difficulty(2);
+            ground(submerged, 16);
+            submerged.fill(-3, 58, -3, 3, 63, 3, WATER);
+            submerged.fill(-4, 57, -4, 4, 57, 4, STONE);
+            submerged.mob(51, 0.5, 58.0, 0.5, 0.0F, 503L, 0);
+            submerged.player(60.5, 64.0, 0.5, Items.AIR);
+            scenes.add(submerged);
+            Scene distant = new Scene("witch_drink_speed").ticks(48).difficulty(2);
+            ground(distant, 16);
+            distant.mob(51, 0.5, 64.0, 0.5, 0.0F, 12L, 0);
+            distant.player(14.5, 64.0, 0.5, Items.AIR);
+            scenes.add(distant);
+            // 溺尸：夜里才把玩家当目标（`okTarget`）。平地上追 120 刻，覆盖两栖导航、
+            // `DrownedGoToBeachGoal` 的 `nextInt(200)` 和近战。
+            //
+            // Drowned only target players at night (`okTarget`). The flat chase runs 120
+            // ticks and covers the amphibious navigation, `DrownedGoToBeachGoal`'s
+            // `nextInt(200)` and melee.
+            Scene drownedFlat = new Scene("drowned_flat_chase_3").ticks(120).difficulty(2);
+            drownedFlat.brightOutside = false;
+            drownedFlat.skyDarken = 11;
+            drownedFlat.monstersBurn = false;
+            ground(drownedFlat, 12);
+            drownedFlat.mob(52, 0.5, 64.0, 0.5, 0.0F, 3L, 0);
+            drownedFlat.player(6.5, 64.0, 0.5, Items.AIR);
+            scenes.add(drownedFlat);
+            for (boolean chase : new boolean[] {true, false}) {
+                String name = chase ? "drowned_water_chase_3" : "drowned_swim_up_3";
+                Scene swim = new Scene(name).ticks(40).difficulty(2).sea(70);
+                swim.brightOutside = false;
+                swim.skyDarken = 11;
+                swim.monstersBurn = false;
+                ground(swim, 12);
+                swim.fill(-12, 64, -12, 12, 69, 12, WATER);
+                swim.mob(52, 0.5, 64.0, 0.5, 0.0F, 3L, 0);
+                swim.player(chase ? 6.5 : 60.5, 64.0, 0.5, Items.AIR);
+                scenes.add(swim);
+            }
             // ---- S2：玩家药水效果的状态和出站包 ----
             scenes.add(effectBase("effect_give_600", 60)
                     .effectGive(1, 9, 600, 1));
@@ -3281,9 +3408,10 @@ public final class MobOracle {
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("polar_bear_fight_")
                 || scene.name.startsWith("rabbit_") || scene.name.startsWith("fox_")
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
-                || scene.name.startsWith("goat_") || scene.name.startsWith("creeper_")
-                || scene.name.startsWith("spider_") || scene.name.startsWith("cave_spider_")
-                || scene.name.startsWith("enderman_")) {
+                || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
+                || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
+                || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
+                || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -3979,6 +4107,66 @@ public final class MobOracle {
         }
     }
 
+    // 流浪者 / 沼骸：先让官方的 `getArrow` 造一支箭（带它加的药水效果），再换成带种子的箭，
+    // 把官方那支箭上的 `potion_contents` 自定义效果原样搬过去。丢掉的那支箭把实体 ID 还回去。
+    // Strays and bogged: let vanilla `getArrow` build its arrow (with the effect it adds),
+    // then swap in a seeded arrow carrying the same custom `potion_contents` effects. The
+    // discarded arrow returns its entity id.
+    private static net.minecraft.world.entity.projectile.arrow.AbstractArrow seededArrow(
+            Mob shooter, ItemStack projectile, float power, ItemStack weapon,
+            java.util.function.Supplier<net.minecraft.world.entity.projectile.arrow.AbstractArrow> vanilla) {
+        FakeLevel world = (FakeLevel) shooter.level();
+        int id = world.nextId;
+        var official = vanilla.get();
+        world.nextId = id;
+        var arrow = ((net.minecraft.world.item.ArrowItem) Items.ARROW).createArrow(world, projectile, shooter, weapon);
+        setRandom(arrow, world.entitySeeds.nextLong());
+        arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+        arrow.setBaseDamageFromMob(power);
+        var contents = official.getPickupItemStackOrigin().get(DataComponents.POTION_CONTENTS);
+        if (contents != null && arrow instanceof net.minecraft.world.entity.projectile.arrow.Arrow tipped) {
+            for (var effect : contents.customEffects()) {
+                tipped.addEffect(new net.minecraft.world.effect.MobEffectInstance(effect));
+            }
+        }
+        return arrow;
+    }
+
+    private static final class OracleStray extends net.minecraft.world.entity.monster.skeleton.Stray {
+        OracleStray(FakeLevel level) {
+            super(EntityTypes.STRAY, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            return seededArrow(this, projectile, power, weapon, () -> super.getArrow(projectile, power, weapon));
+        }
+    }
+
+    private static final class OracleBogged extends net.minecraft.world.entity.monster.skeleton.Bogged {
+        OracleBogged(FakeLevel level) {
+            super(EntityTypes.BOGGED, level);
+        }
+
+        @Override
+        protected net.minecraft.world.entity.projectile.arrow.AbstractArrow getArrow(
+                ItemStack projectile, float power, ItemStack weapon) {
+            return seededArrow(this, projectile, power, weapon, () -> super.getArrow(projectile, power, weapon));
+        }
+    }
+
+    /** 骷髅一支的逐刻状态：实体 ID、类型、index 16 的布尔（转化中 / 已剪）、冻结刻数、血量、主手物品。 */
+    private static String skeletonKinState(Mob shooter) {
+        boolean flag = shooter instanceof net.minecraft.world.entity.monster.skeleton.Skeleton skeleton
+                ? skeleton.isShaking()
+                : shooter instanceof net.minecraft.world.entity.monster.skeleton.Bogged bogged && bogged.isSheared();
+        return "[" + shooter.getId() + "," + BuiltInRegistries.ENTITY_TYPE.getId(shooter.getType())
+                + "," + (flag ? 1 : 0) + "," + shooter.getTicksFrozen()
+                + "," + Float.floatToRawIntBits(shooter.getHealth())
+                + "," + BuiltInRegistries.ITEM.getId(shooter.getMainHandItem().getItem()) + "]";
+    }
+
     private static int playSkeletonDeaths(Official official, Writer out) throws Exception {
         final int samples = 38;
         boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
@@ -4172,11 +4360,11 @@ public final class MobOracle {
             int sky, int block, int darken, boolean thunder, double playerX, int population,
             int spawnableChunks, boolean localCap, boolean nearbyRespawn) {}
 
-    private static int playNaturalSpawns(Official official, Writer out, boolean fishOnly, boolean pandaOnly) throws Exception {
-        if (pandaOnly) {
+    private static int playNaturalSpawns(Official official, Writer out, String only) throws Exception {
+        if ("natural_spawn_panda".equals(only)) {
             return playNaturalSpawnScenes(official, out, List.of(
                     new NaturalScene("panda_day", EntityTypes.PANDA, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false),
-                    new NaturalScene("panda_dim", EntityTypes.PANDA, "jungle", 2, 8, 0, 0, false, -32, 0, 289, true, false)), fishOnly);
+                    new NaturalScene("panda_dim", EntityTypes.PANDA, "jungle", 2, 8, 0, 0, false, -32, 0, 289, true, false)), only);
         }
         List<NaturalScene> scenes = new ArrayList<>();
         scenes.add(new NaturalScene("cow_day", EntityTypes.COW, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
@@ -4226,6 +4414,19 @@ public final class MobOracle {
             scenes.add(new NaturalScene("skeleton_near_" + distance, EntityTypes.SKELETON, "plains", 2, 0, 0, 11,
                     false, 8.5 - distance, 0, 289, true, false));
         }
+        // 史莱姆：史莱姆区块（世界种子由官方公式挑，让区块 (0,0) 是 / 不是史莱姆区块）、沼泽的满月和
+        // 新月（地面抬到 62，生成高度 63 落在 (50, 70) 里）、和平难度。
+        // Slimes: slime chunks (the world seed is picked with the vanilla formula so chunk
+        // (0,0) is or is not one), swamps at full and new moon (floor raised to 62 so the
+        // spawn height 63 lies in (50, 70)) and peaceful.
+        scenes.add(new NaturalScene("slime_chunk", EntityTypes.SLIME, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_chunk_hard", EntityTypes.SLIME, "plains", 3, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_no_chunk", EntityTypes.SLIME, "plains", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_full_moon", EntityTypes.SLIME, "swamp", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_gibbous", EntityTypes.SLIME, "swamp", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_new_moon", EntityTypes.SLIME, "swamp", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_swamp_bright", EntityTypes.SLIME, "swamp", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("slime_chunk_peaceful", EntityTypes.SLIME, "plains", 0, 15, 0, 0, false, -32, 0, 289, true, false));
         // 水生夹具（名字里带 squid）：三层水代替草地。发光鱿鱼把海平面抬到 -20，
         // 这样 -63 那一层满足「海平面下 33 格」；`_lit` 有方块光，不该刷出来。
         // Aquatic fixtures (names containing "squid"): three water layers replace the grass.
@@ -4240,6 +4441,23 @@ public final class MobOracle {
         scenes.add(new NaturalScene("horse_day", EntityTypes.HORSE, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("donkey_day", EntityTypes.DONKEY, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("llama_day", EntityTypes.LLAMA, "windswept_hills", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("witch_night", EntityTypes.WITCH, "plains", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("witch_torch", EntityTypes.WITCH, "plains", 2, 0, 1, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("witch_peaceful", EntityTypes.WITCH, "plains", 0, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_deep_ocean", EntityTypes.DROWNED, "deep_ocean", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_shallow_ocean", EntityTypes.DROWNED, "deep_ocean", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_shallow_river", EntityTypes.DROWNED, "river", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("drowned_lit_river", EntityTypes.DROWNED, "river", 2, 0, 15, 11, false, -32, 0, 289, true, false));
+        // 流浪者只在雪地群系刷怪表里，要求看得见天（夹具把 sky=15 当作看得见天）；
+        // 沼骸在沼泽表里，走普通怪物规则，和平难度不刷。
+        // Strays appear only in the snowy biome table and need open sky (sky=15 means
+        // canSeeSky in this fixture); bogged are in the swamp table with the ordinary
+        // monster rule, and peaceful clears them.
+        scenes.add(new NaturalScene("stray_night", EntityTypes.STRAY, "snowy_plains", 2, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("stray_no_sky", EntityTypes.STRAY, "snowy_plains", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("stray_peaceful", EntityTypes.STRAY, "snowy_plains", 0, 15, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("bogged_night", EntityTypes.BOGGED, "swamp", 2, 0, 0, 11, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("bogged_peaceful", EntityTypes.BOGGED, "swamp", 0, 0, 0, 11, false, -32, 0, 289, true, false));
         // 大脑生物：犰狳在热带草原，山羊在雪坡；`finalizeSpawn` 的取数都在世界随机源上。
         // Brain mobs: armadillos in the savanna and goats on snowy slopes; their
         // `finalizeSpawn` draws all come from the level random.
@@ -4257,14 +4475,29 @@ public final class MobOracle {
         // need clay below.
         scenes.add(new NaturalScene("dolphin_ocean", EntityTypes.DOLPHIN, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("axolotl_lush", EntityTypes.AXOLOTL, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
-        return playNaturalSpawnScenes(official, out, scenes, fishOnly);
+        return playNaturalSpawnScenes(official, out, scenes, only);
     }
 
-    private static int playNaturalSpawnScenes(Official official, Writer out, List<NaturalScene> scenes, boolean fishOnly) throws Exception {
+    private static int playNaturalSpawnScenes(Official official, Writer out, List<NaturalScene> scenes, String only) throws Exception {
         int count = 0;
+        boolean fishOnly = "natural_fish".equals(only);
         for (var scene : scenes) {
             if (fishOnly && !scene.name().startsWith("fish_")) continue;
-            for (long seed : new long[] {0, 1, 2, 7, 42, 12345}) {
+            if ("witch_spawn".equals(only) && scene.mob() != EntityTypes.WITCH) continue;
+            if ("drowned_spawn".equals(only) && scene.mob() != EntityTypes.DROWNED) continue;
+            if ("stray_spawn".equals(only) && scene.mob() != EntityTypes.STRAY) continue;
+            if ("bogged_spawn".equals(only) && scene.mob() != EntityTypes.BOGGED) continue;
+            // 沼泽场景的起点高度要正好落在某层地面上才有戏；浅河和雪地流浪者
+            // 有光 / 找天的门槛，命中概率低，多跑一些种子。
+            // Swamp scenes only get anywhere when the start height lands on a floor; the
+            // shallow-river and snowy-stray scenes have light / sky gates, so they run more seeds.
+            long[] seeds = scene.name().startsWith("slime_swamp")
+                    ? java.util.stream.LongStream.range(0, 60).toArray()
+                    : scene.name().equals("drowned_shallow_river")
+                            || scene.name().equals("stray_night")
+                            ? java.util.stream.LongStream.range(0, 16).toArray()
+                            : new long[] {0, 1, 2, 7, 42, 12345};
+            for (long seed : seeds) {
                 out.write(naturalSpawnCase(official, scene, seed) + "\n");
                 count++;
             }
@@ -4290,6 +4523,49 @@ public final class MobOracle {
         put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
                 (x, y, z) -> level.naturalBiome, 0L));
         level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        boolean slime = scene.name().startsWith("slime_");
+        // 沼泽场景：50 到 66 之间每隔 4 格一层地面，生成高度 51、55、59、63、67 都在 (50, 70) 里，
+        // 层间 3 格空气放得下史莱姆 2.08 高的生成盒。
+        // Swamp scenes: a floor every 4 blocks from 50 to 66, so the spawn heights 51, 55,
+        // 59, 63 and 67 all lie in (50, 70) and the 3 air blocks between floors fit the
+        // 2.08-tall slime spawn box.
+        int[] floors = scene.name().startsWith("slime_swamp") ? new int[] {50, 54, 58, 62, 66} : new int[] {-63};
+        int floorY = floors[0];
+        int waterDepth = scene.mob() == EntityTypes.DROWNED ? 6 : 0;
+        if (slime) {
+            // 世界种子：从 1 起找第一个让区块 (0,0) 是（`slime_no_chunk` 是「(0,0) 和 (1,0) 都不是」）
+            // 史莱姆区块的种子，用的是官方 `WorldgenRandom.seedSlimeChunk`。
+            // The world seed: the first one from 1 that makes chunk (0,0) a slime chunk (for
+            // `slime_no_chunk`: neither (0,0) nor (1,0)), found with vanilla
+            // `WorldgenRandom.seedSlimeChunk`.
+            boolean want = !scene.name().equals("slime_no_chunk");
+            long worldSeed = 1L;
+            while (true) {
+                boolean first = net.minecraft.world.level.levelgen.WorldgenRandom
+                        .seedSlimeChunk(0, 0, worldSeed, 987234911L).nextInt(10) == 0;
+                boolean second = net.minecraft.world.level.levelgen.WorldgenRandom
+                        .seedSlimeChunk(1, 0, worldSeed, 987234911L).nextInt(10) == 0;
+                if (want ? first : !first && !second) break;
+                worldSeed++;
+            }
+            level.worldSeed = worldSeed;
+            // 月相：主世界的时间线层按场景的时钟求值，`SURFACE_SLIME_SPAWN_CHANCE` 才不是缺省的 0。
+            // Moon phase: the overworld timeline layers evaluated at the scene clock, so
+            // `SURFACE_SLIME_SPAWN_CHANCE` is not just its default 0.
+            level.clock = scene.name().equals("slime_swamp_new_moon") ? 96000L
+                    : scene.name().equals("slime_swamp_gibbous") ? 24000L : 0L;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder().addStaticLayers(level);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return level.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : level.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            level.naturalAttributes = builder.build();
+        }
         level.injectedSkyDarken = scene.darken();
         level.injectedCanSeeSky = scene.sky() == 15;
         Difficulty difficulty = Difficulty.byId(scene.difficulty());
@@ -4305,16 +4581,23 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
-        BlockState floor = spawnFloor(scene.biome());
+        BlockState floorState = spawnFloor(scene.biome());
         boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT
                 || category == MobCategory.WATER_CREATURE || category == MobCategory.AXOLOTLS;
         // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才会通过。
         // The axolotl fixture swaps the bottom water layer for clay so
         // `checkAxolotlSpawnRules` passes.
         boolean clayFloor = scene.mob() == EntityTypes.AXOLOTL;
-        level.naturalSeaLevel = scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63;
+        level.naturalSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51
+                : (scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63);
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
+                for (int floor : floors) {
+                    level.blocks.put(BlockPos.asLong(x, floor, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                }
+                for (int dy = 1; dy <= waterDepth; dy++) {
+                    level.blocks.put(BlockPos.asLong(x, floorY + dy, z), Blocks.WATER.defaultBlockState());
+                }
                 if (aquatic) {
                     for (int y = -64; y <= -62; y++) {
                         net.minecraft.world.level.block.state.BlockState state = clayFloor && y == -64
@@ -4322,7 +4605,7 @@ public final class MobOracle {
                         level.blocks.put(BlockPos.asLong(x, y, z), state);
                     }
                 } else {
-                    level.blocks.put(BlockPos.asLong(x, -63, z), floor);
+                    level.blocks.put(BlockPos.asLong(x, -63, z), floorState);
                 }
                 // 尸壳夹具：-60 层玻璃挡住骆驼尸壳的生成盒（Bamboo 没有骆驼尸壳和焦尸），
                 // 玻璃顶上也不能生成；尸壳本身 1.95 高，仍能站在 -62。
@@ -4335,7 +4618,7 @@ public final class MobOracle {
         }
         ServerPlayer player = new ServerPlayer(official.server, level,
                 new GameProfile(new UUID(1L, 2L), "NaturalSpawnOracle"), ClientInformation.createDefault());
-        player.setPos(scene.playerX(), -62.0, 8.5);
+        player.setPos(scene.playerX(), floorY + 1.0, 8.5);
         level.playersList().add(player);
         level.tracked.add(player);
         for (int i = 0; i < scene.population(); i++) {
@@ -4383,10 +4666,26 @@ public final class MobOracle {
                 row.add((int) (mob.getX() * 2));
                 row.add((int) mob.getY());
                 row.add((int) (mob.getZ() * 2));
-                row.add(Float.floatToRawIntBits(mob.getYRot()));
-                row.add(mob.isBaby() ? 1 : 0);
+                // 大小不是 1 的史莱姆：`setSize` 把朝向改成头的朝向，那是官方构造函数用不带种子的
+                // 随机源抽的，没法比，两边都记 0。
+                // Slimes whose size is not 1: `setSize` snaps the yaw to the head yaw, which the
+                // vanilla constructor draws from an unseeded random. Not comparable; both sides
+                // record 0.
+                boolean unseededYaw = mob instanceof net.minecraft.world.entity.monster.cubemob.Slime big
+                        && big.getSize() != 1;
+                row.add(unseededYaw ? 0 : Float.floatToRawIntBits(mob.getYRot()));
+                // 史莱姆不会是幼年，这一列改放大小。
+                // Slimes are never babies; this column carries their size instead.
+                row.add(mob instanceof net.minecraft.world.entity.monster.cubemob.Slime cube ? cube.getSize()
+                        : mob.isBaby() ? 1 : 0);
                 row.add(mob.isLeftHanded() ? 1 : 0);
                 row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                row.add(mob.getType() == EntityTypes.DROWNED
+                        ? BuiltInRegistries.ITEM.getId(mob.getOffhandItem().getItem())
+                        : (mob instanceof net.minecraft.world.entity.animal.fish.TropicalFish fish
+                                ? new net.minecraft.world.entity.animal.fish.TropicalFish.Variant(
+                                        fish.getPattern(), fish.getBaseColor(), fish.getPatternColor()).getPackedId()
+                                : 0));
                 if (mob instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
                     row.add(panda.getMainGene().getId());
                     row.add(panda.getHiddenGene().getId());
@@ -4424,8 +4723,14 @@ public final class MobOracle {
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
         row.addProperty("aquatic", aquatic);
         row.addProperty("clayFloor", clayFloor);
-        row.addProperty("seaLevel", level.naturalSeaLevel);
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
+        row.addProperty("levelSeed", level.worldSeed);
+        row.addProperty("waterDepth", waterDepth);
+        row.addProperty("seaLevel", level.getSeaLevel());
+        var floorRows = new JsonArray();
+        for (int floor : floors) floorRows.add(floor);
+        row.add("floors", floorRows);
+        row.addProperty("clock", level.clock);
         row.add("steps", steps);
         return row;
     }
@@ -5629,7 +5934,18 @@ public final class MobOracle {
         boolean tipped = name.equals("arrow_tipped_hit");
         boolean spectral = name.equals("arrow_spectral_hit");
         boolean effectHit = tipped || spectral;
-        boolean skeleton = name.startsWith("skeleton_");
+        // 骷髅一支的射手场景：流浪者 / 沼骸射带效果的箭；`skeleton_freeze` 把骷髅关在细雪里
+        // 等它变成流浪者；`bogged_shear` 用剪刀右键两次。后两个场景的玩家无敌，不会被当成目标。
+        // Skeleton-family shooter scenes: strays and bogged shoot tipped arrows;
+        // `skeleton_freeze` pens a skeleton in powder snow until it becomes a stray;
+        // `bogged_shear` right-clicks twice with shears. The last two use an invulnerable
+        // player that is never targeted.
+        boolean stray = name.startsWith("stray_");
+        boolean bogged = name.startsWith("bogged_");
+        boolean freeze = name.equals("skeleton_freeze");
+        boolean shear = name.equals("bogged_shear");
+        boolean passive = freeze || shear;
+        boolean skeleton = name.startsWith("skeleton_") || stray || bogged;
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
@@ -5664,6 +5980,24 @@ public final class MobOracle {
             world.blocks.put(BlockPos.asLong(waterTail ? 4 : 3, 65, 0), Blocks.WATER.defaultBlockState());
             world.projectileExtinguishes = new ArrayList<>();
         }
+        if (freeze) {
+            // 一格细雪井：四周两格高的石头，骷髅走不出去。
+            // A one-block powder-snow well walled by stone two blocks high.
+            for (int x = -1; x <= 1; x++) {
+                for (int z = -1; z <= 1; z++) {
+                    for (int y = 64; y <= 65; y++) {
+                        world.blocks.put(BlockPos.asLong(x, y, z), (x == 0 && z == 0 ? Blocks.POWDER_SNOW : Blocks.STONE)
+                                .defaultBlockState());
+                    }
+                }
+            }
+        }
+        if (skeleton) {
+            world.levelEvents = new ArrayList<>();
+            // 剪蘑菇的战利品表从干净的随机序列开始，和 Bamboo 一侧每个 case 新建一份对应。
+            // The shearing table starts from fresh random sequences, like a fresh Bamboo case.
+            official.server.sequences = new RandomSequences();
+        }
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
         ServerPlayer player = new ServerPlayer(official.server, world,
@@ -5679,7 +6013,7 @@ public final class MobOracle {
             player.setRemainingFireTicks(37);
             player.setTicksFrozen(80);
         }
-        player.getAbilities().invulnerable = rejected;
+        player.getAbilities().invulnerable = rejected || passive;
         Bytes playerSink = new Bytes(official.registries);
         RecordingListener connection = allocate(RecordingListener.class);
         put(ServerGamePacketListenerImpl.class, connection, "player", player);
@@ -5695,7 +6029,7 @@ public final class MobOracle {
         var arrows = new ArrayList<net.minecraft.world.entity.projectile.arrow.AbstractArrow>();
         var sync = new java.util.LinkedHashMap<Integer, Sync>();
         if (skeleton) {
-            shooter = new OracleSkeleton(world);
+            shooter = stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
             world.entitySeeds.nextLong();
             setRandom(shooter, 42L);
             shooter.setUUID(new UUID(0, 1));
@@ -5761,7 +6095,10 @@ public final class MobOracle {
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = (effectHit || enchanted) ? 4 : skeleton ? 105 : (piercing || water) ? 3 : 26;
+        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : skeleton ? 105
+                : (piercing || water) ? 3 : 26;
+        int conversions = 0;
+        int sheared = 0;
         int embeds = 0;
         int extinguishes = 0;
         Bytes arrowEvents = new Bytes(official.registries);
@@ -5776,9 +6113,38 @@ public final class MobOracle {
         }
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
+            // 剪蘑菇那一刻的结果：是否消耗动作、剪刀耐久损耗、掉出来的物品实体。
+            // The shearing result of this tick: consumed, shears damage and the dropped items.
+            String shearing = null;
             if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
             if (tick > 0) {
                 world.gameTime++;
+                if (shear && (tick == 3 || tick == 6)) {
+                    ItemStack shears = new ItemStack(Items.SHEARS);
+                    player.setItemInHand(InteractionHand.MAIN_HAND, shears);
+                    var result = shooter.interact(player, InteractionHand.MAIN_HAND, shooter.position());
+                    var drops = new ArrayList<String>();
+                    // 掉落物和别的场景一样换上岛的种子源，速度由物品实体自己的随机源重放。
+                    // Dropped items get the island seed source like the other scenes; their
+                    // velocity is replayed from the item's own random.
+                    world.dropUuids = true;
+                    for (Entity entity : world.spawned) {
+                        world.reseedBorn(entity);
+                        var item = (net.minecraft.world.entity.item.ItemEntity) entity;
+                        Vec3 at = item.position();
+                        Vec3 v = item.getDeltaMovement();
+                        drops.add(Arrays.toString(new long[] {
+                                BuiltInRegistries.ITEM.getId(item.getItem().getItem()), item.getItem().getCount(),
+                                Double.doubleToRawLongBits(at.x), Double.doubleToRawLongBits(at.y),
+                                Double.doubleToRawLongBits(at.z), Double.doubleToRawLongBits(v.x),
+                                Double.doubleToRawLongBits(v.y), Double.doubleToRawLongBits(v.z)}));
+                    }
+                    if (result.consumesAction()) sheared++;
+                    shearing = "{\"consumed\":" + result.consumesAction() + ",\"damage\":" + shears.getDamageValue()
+                            + ",\"drops\":[" + String.join(",", drops) + "]}";
+                    world.spawned.clear();
+                    player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+                }
                 if ((flame || water) && tick == 1) arrows.getFirst().setRemainingFireTicks(200);
                 if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
                 if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
@@ -5816,6 +6182,18 @@ public final class MobOracle {
                         world.tracked.add(arrow);
                         pairArrow(world, official, arrow, sync, arrowPackets);
                     }
+                    if (entity instanceof net.minecraft.world.entity.monster.skeleton.Stray converted) {
+                        // `Mob.convertTo` 造出来的流浪者：换成岛的种子源并重放构造函数的取数
+                        // （UUID、朝向），头的朝向是构造函数抽的那个角度。
+                        // The stray made by `Mob.convertTo`: reseed it from the island source and
+                        // replay the constructor draws (UUID, facing); the head keeps that angle.
+                        setRandom(converted, world.entitySeeds.nextLong());
+                        converted.setUUID(Mth.createInsecureUUID(converted.getRandom()));
+                        converted.setYHeadRot(converted.getRandom().nextFloat() * (float) (Math.PI * 2));
+                        shooter = converted;
+                        world.tracked.add(converted);
+                        conversions++;
+                    }
                 }
                 world.spawned.clear();
                 for (Sync tracking : sync.values()) {
@@ -5848,6 +6226,18 @@ public final class MobOracle {
                 frames.append(",\"shooterSeed\":").append(randomSeed(shooter));
                 frames.append(",\"aggressive\":").append(shooter.isAggressive());
                 frames.append(",\"drawing\":").append(shooter.isUsingItem());
+                frames.append(",\"kin\":").append(skeletonKinState(shooter));
+                frames.append(",\"levelEvents\":").append(world.levelEvents.stream().map(Arrays::toString)
+                        .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                world.levelEvents.clear();
+                // 玩家身上现有的效果（玩家不 tick，时长不变）：效果 ID、时长、等级。
+                // Effects on the (unticked) player: effect id, duration, amplifier.
+                frames.append(",\"playerEffects\":").append(player.getActiveEffects().stream()
+                        .map(effect -> new int[] {BuiltInRegistries.MOB_EFFECT.getId(effect.getEffect().value()),
+                                effect.getDuration(), effect.getAmplifier()})
+                        .sorted(java.util.Comparator.comparingInt(row -> row[0]))
+                        .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                if (shearing != null) frames.append(",\"shearing\":").append(shearing);
             }
             if (flame || water) {
                 frames.append(",\"playerThermal\":[").append(player.getRemainingFireTicks())
@@ -5886,7 +6276,12 @@ public final class MobOracle {
             throw new IllegalStateException("projectile scenario missed " + name);
         }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
-                || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
+                || hasWall && embeds == 0 || overlap && embeds != ticks - 1
+                || skeleton && !passive && arrows.size() < 2
+                || freeze && (conversions != 1 || shooter.getType() != EntityTypes.STRAY
+                        || !shooter.getMainHandItem().is(Items.BOW))
+                || shear && (sheared != 1 || !((net.minecraft.world.entity.monster.skeleton.Bogged) shooter).isSheared())
+                || stray && !player.hasEffect(MobEffects.SLOWNESS) || bogged && !shear && !player.hasEffect(MobEffects.POISON)
                 || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())
                 || fade && (puffs[0] != 1 || ((net.minecraft.world.entity.projectile.arrow.Arrow) arrows.getFirst()).getColor() != -1)) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
@@ -6570,6 +6965,255 @@ public final class MobOracle {
                 + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
     }
 
+    /**
+     * 女巫投掷喷溅药水的对拍用女巫：直接跑原版 `Witch.performRangedAttack` 选药与消费女巫随机源，
+     * 只把新生成喷溅药水的无种子随机源换成 Bamboo 的岛种子源并重放 `shoot`。
+     * The witch for splash-potion replays: runs vanilla `Witch.performRangedAttack` for potion
+     * selection and witch RNG draws, then swaps only the newly spawned potion's unseeded random
+     * for Bamboo's island seed source and replays `shoot`.
+     */
+    private static final class OracleWitch extends net.minecraft.world.entity.monster.Witch {
+        boolean zeroUncertainty;
+
+        OracleWitch(FakeLevel level) {
+            super(EntityTypes.WITCH, level);
+        }
+
+        @Override
+        public float rangedAttackUncertainty(final Level level) {
+            return zeroUncertainty ? 0.0F : super.rangedAttackUncertainty(level);
+        }
+
+        @Override
+        public void performRangedAttack(final LivingEntity target, final float power) {
+            FakeLevel world = (FakeLevel) level();
+            int before = world.spawned.size();
+            Vec3 targetMovement = target.getDeltaMovement();
+            double xd = target.getX() + targetMovement.x - getX();
+            double yd = target.getEyeY() - 1.1F - getY();
+            double zd = target.getZ() + targetMovement.z - getZ();
+            double dist = Math.sqrt(xd * xd + zd * zd);
+            super.performRangedAttack(target, power);
+            if (!zeroUncertainty && world.spawned.size() > before
+                    && world.spawned.getLast() instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownSplashPotion potion) {
+                setRandom(potion, world.entitySeeds.nextLong());
+                potion.setUUID(Mth.createInsecureUUID(potion.getRandom()));
+                potion.shoot(xd, yd + dist * 0.2, zd, dist <= 2.0 ? 0.45F : 0.75F, rangedAttackUncertainty(world));
+            }
+        }
+
+        String running() {
+            StringBuilder out = new StringBuilder();
+            for (var selector : List.of(goalSelector, targetSelector)) {
+                for (var goal : selector.getAvailableGoals()) {
+                    if (!goal.isRunning()) continue;
+                    if (!out.isEmpty()) out.append(' ');
+                    out.append(goal.getGoal().getClass().getSimpleName());
+                }
+            }
+            return out.toString();
+        }
+
+        static void checkAim(Official official) throws Exception {
+            FakeLevel world = FakeLevel.create(official);
+            OracleWitch witch = new OracleWitch(world);
+            witch.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            witch.zeroUncertainty = true;
+            var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            target.setPos(7.25, 64.0, -3.75);
+            target.setDeltaMovement(0.15, 0.0, -0.08);
+            witch.performRangedAttack(target, 1.0F);
+            Entity shot = world.spawned.getLast();
+            Vec3 move = target.getDeltaMovement();
+            double xd = target.getX() + move.x - witch.getX();
+            double yd = target.getEyeY() - 1.1F - witch.getY();
+            double zd = target.getZ() + move.z - witch.getZ();
+            double dist = Math.sqrt(xd * xd + zd * zd);
+            Vec3 expected = new Vec3(xd, yd + dist * 0.2, zd).normalize().scale(dist <= 2.0 ? 0.45F : 0.75F);
+            if (!expected.equals(shot.getDeltaMovement())) {
+                throw new IllegalStateException("witch splash aim differs: " + expected + " vs " + shot.getDeltaMovement());
+            }
+        }
+    }
+
+    /**
+     * 女巫投掷喷溅药水的逐刻对拍：覆盖远距缓慢 / 剧毒 / 伤害、近距虚弱 / 伤害与自溅免伤、
+     * 以及同范围溅射活体（牛受伤惊慌）与亡灵（僵尸反向治疗）。
+     * Tick-by-tick witch splash-potion replay covering far slowness/poison/harming, near
+     * weakness/harming + self-splash resistance, and AoE hitting both living and undead mobs.
+     */
+    private static void playWitchThrow(Official official, Writer out, String name, double playerX,
+            float playerHealth, long seed, int ticks, boolean withExtras) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        world.injectedBrightOutside = false;
+        world.injectedMonstersBurn = false;
+        world.levelEvents = new ArrayList<>();
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -18; x <= 20; x++) {
+            for (int z = -12; z <= 12; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        int playerId = FIRST_ID + 1024;
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "WitchOracle"), ClientInformation.createDefault());
+        player.setId(playerId);
+        player.setPos(playerX, 64.0, 0.5);
+        player.setHealth(playerHealth);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        Bytes playerSink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = playerSink;
+        put(ServerPlayer.class, player, "connection", connection);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        world.nextId = FIRST_ID;
+        OracleWitch witch = new OracleWitch(world);
+        world.entitySeeds.nextLong();
+        setRandom(witch, seed);
+        witch.setUUID(new UUID(0, 1));
+        witch.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        witch.setYHeadRot(0.0F);
+        witch.setYBodyRot(0.0F);
+        world.tracked.add(witch);
+        var extras = new ArrayList<Mob>();
+        if (withExtras) {
+            var cow = new net.minecraft.world.entity.animal.cow.Cow(EntityTypes.COW, world);
+            world.entitySeeds.nextLong();
+            setRandom(cow, 77L);
+            cow.setUUID(new UUID(0, 2));
+            cow.snapTo(playerX, 64.0, 2.0, 0.0F, 0.0F);
+            cow.setYHeadRot(0.0F);
+            cow.setYBodyRot(0.0F);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+            extras.add(cow);
+
+            var zombie = new net.minecraft.world.entity.monster.zombie.Zombie(EntityTypes.ZOMBIE, world);
+            world.entitySeeds.nextLong();
+            setRandom(zombie, 88L);
+            zombie.setUUID(new UUID(0, 3));
+            zombie.snapTo(playerX, 64.0, -1.0, 0.0F, 0.0F);
+            zombie.setYHeadRot(0.0F);
+            zombie.setYBodyRot(0.0F);
+            zombie.setHealth(10.0F);
+            zombie.setNoAi(true);
+            world.tracked.add(zombie);
+            extras.add(zombie);
+        }
+        var potions = new ArrayList<Entity>();
+        var sync = new java.util.LinkedHashMap<Integer, Sync>();
+        var frames = new StringBuilder("[");
+        var playerStates = new StringBuilder("[");
+        var playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
+        int totalEvents = 0;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var potionPackets = new ArrayList<String>();
+            if (tick > 0) {
+                world.gameTime++;
+                if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+                if (player.hurtTime > 0) player.hurtTime--;
+                witch.checkDespawn();
+                witch.commonTick();
+                witch.tick();
+                for (Mob extra : extras) {
+                    if (extra.isRemoved()) continue;
+                    extra.checkDespawn();
+                    extra.commonTick();
+                    extra.tick();
+                }
+                for (Entity potion : potions) {
+                    if (potion.isRemoved()) continue;
+                    potion.commonTick();
+                    potion.tick();
+                    if (potion.isRemoved()) {
+                        Bytes gone = new Bytes(official.registries);
+                        gone.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(potion.getId()));
+                        potionPackets.addAll(gone.take());
+                        sync.remove(potion.getId());
+                    }
+                }
+                world.tracked.removeIf(Entity::isRemoved);
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownSplashPotion potion) {
+                        potions.add(potion);
+                        world.tracked.add(potion);
+                        pairArrow(world, official, potion, sync, potionPackets);
+                    }
+                }
+                world.spawned.clear();
+                for (Sync tracking : sync.values()) {
+                    tracking.entity.sendChanges();
+                    potionPackets.addAll(tracking.take());
+                }
+                frames.append(',');
+            }
+            totalEvents += world.levelEvents.size();
+            frames.append("{\"potions\":[");
+            boolean first = true;
+            for (Entity potion : potions) {
+                if (potion.isRemoved()) continue;
+                if (!first) frames.append(',');
+                first = false;
+                frames.append("{\"id\":").append(potion.getId());
+                frames.append(",\"motion\":").append(projectileMotion(potion));
+                frames.append(",\"seed\":").append(randomSeed(potion)).append('}');
+            }
+            frames.append("],\"packets\":").append(potionPackets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append(",\"levelEvents\":").append(world.levelEvents.stream().map(Arrays::toString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            world.levelEvents.clear();
+            frames.append(",\"witch\":").append(projectileMotion(witch));
+            frames.append(",\"witchSeed\":").append(randomSeed(witch));
+            frames.append(",\"witchHealth\":").append(Float.floatToRawIntBits(witch.getHealth()));
+            frames.append(",\"goals\":").append(jsonString(witch.running()));
+            frames.append(",\"playerEffects\":").append(activeEffectsJson(player));
+            frames.append(",\"extras\":[");
+            for (int i = 0; i < extras.size(); i++) {
+                if (i > 0) frames.append(',');
+                Mob extra = extras.get(i);
+                frames.append("{\"id\":").append(extra.getId())
+                        .append(",\"health\":").append(Float.floatToRawIntBits(extra.getHealth()))
+                        .append(",\"effects\":").append(activeEffectsJson(extra))
+                        .append('}');
+            }
+            frames.append("]}");
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        if (potions.isEmpty() || totalEvents == 0) {
+            throw new IllegalStateException("witch throw scenario did not exercise " + name
+                    + ": potions=" + potions.size() + " events=" + totalEvents);
+        }
+        out.write("{\"type\":\"witchThrow\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"playerId\":" + playerId + ",\"playerX\":" + playerX
+                + ",\"playerHealth\":" + Float.floatToRawIntBits(playerHealth)
+                + ",\"seed\":" + seed + ",\"withExtras\":" + withExtras
+                + ",\"blocks\":" + blocks + ",\"shots\":" + potions.size() + ",\"frames\":" + frames + "]"
+                + ",\"playerStates\":" + playerStates + "],\"playerPackets\":" + playerPackets + "]}\n");
+    }
+
+    private static String activeEffectsJson(LivingEntity entity) {
+        return entity.getActiveEffects().stream()
+                .map(effect -> new int[] {
+                        BuiltInRegistries.MOB_EFFECT.getId(effect.getEffect().value()),
+                        effect.getDuration(),
+                        effect.getAmplifier(),
+                })
+                .sorted(java.util.Comparator.comparingInt(row -> row[0]))
+                .map(Arrays::toString)
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+    }
+
     private static String projectileMotion(Entity entity) {
         Vec3 pos = entity.position();
         Vec3 v = entity.getDeltaMovement();
@@ -6592,6 +7236,7 @@ public final class MobOracle {
         level.injectedSkyDarken = scene.skyDarken;
         level.injectedRaining = scene.raining;
         level.injectedBrightOutside = scene.brightOutside;
+        level.injectedSeaLevel = scene.seaLevel;
         level.injectedMonstersBurn = scene.monstersBurn;
         level.injectedCanSeeSky = scene.monstersBurn;
         // `EnvironmentAttributes.MONSTERS_BURN` 的注册默认值是 false，
@@ -6644,6 +7289,21 @@ public final class MobOracle {
             // anger at the player.
             player.setId(FIRST_ID + 1024 + i);
             player.setPos(at[0], at[1], at[2]);
+            if (scene.name.startsWith("drowned_water")) {
+                // 玩家在这个夹具里不 tick，`wasTouchingWater` 不会被流体检测更新；
+                // 溺尸的 `okTarget` / `wantsToSwim` 读它，所以水中的场景手动置上。
+                // Players do not tick here, so the fluid scan never sets
+                // `wasTouchingWater`; the drowned reads it in `okTarget` and
+                // `wantsToSwim`, so wet scenes set it by hand.
+                put(net.minecraft.world.entity.Entity.class, player, "wasTouchingWater", true);
+            }
+            if (scene.name.startsWith("slime_") || scene.name.startsWith("witch_drink_")) {
+                // 玩家的实体 ID 和 0 号生物撞在一起（都是 `FIRST_ID`）；死亡消息按 ID 找攻击者，
+                // 史莱姆和女巫场景里把玩家挪开。
+                // The player's entity id collides with mob 0 (both `FIRST_ID`); death messages
+                // look the attacker up by id, so slime and witch scenes reassign the player ids.
+                player.setId(FIRST_ID + 4096 + i);
+            }
             setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
             player.setYRot(scene.playerYaw);
             if (scene.name.startsWith("enderman_stare")) {
@@ -6686,6 +7346,8 @@ public final class MobOracle {
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
         StringBuilder mobEvents = new StringBuilder("[[");
+        boolean slimeScene = scene.name.startsWith("slime_");
+        StringBuilder splits = new StringBuilder("[[]");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
         for (int i = 0; i < scene.cows.size(); i++) {
             double[] at = scene.cows.get(i);
@@ -6712,6 +7374,9 @@ public final class MobOracle {
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 case 16 -> new PolarBear(EntityTypes.POLAR_BEAR, level);
+                case 50 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
+                case 51 -> new net.minecraft.world.entity.monster.Witch(EntityTypes.WITCH, level);
+                case 52 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, level);
                 case 9 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
@@ -6727,6 +7392,16 @@ public final class MobOracle {
             // `Mob.serverAiStep` 的 `(tickCount + id) % 2` 才能逐刻一致。
             mob.setId(FIRST_ID + i);
             mob.setUUID(new UUID(0L, i + 1));
+            if (mob instanceof net.minecraft.world.entity.monster.cubemob.Slime slime) {
+                // 史莱姆场景用「年龄」那一列带大小；`setSize` 会把朝向改成头的朝向，所以放在
+                // `snapTo` 之前。移动控制的目标角度在构造函数里按没带种子的朝向算，这里对齐成场景的朝向。
+                // Slime scenes carry the size in the age column. `setSize` snaps the yaw to the
+                // head yaw, so it runs before `snapTo`. The move control's target angle comes
+                // from the unseeded constructor facing; align it with the scene yaw.
+                slime.setSize(scene.cowAges.get(i), true);
+                putFloat(slime.getMoveControl().getClass(), slime.getMoveControl(), "yRot",
+                        scene.yaws.get(i)[0]);
+            }
             mob.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             mob.setYHeadRot(scene.yaws.get(i)[0]);
             mob.setYBodyRot(scene.yaws.get(i)[0]);
@@ -6740,7 +7415,13 @@ public final class MobOracle {
             if (mob instanceof Zombie zombie) {
                 zombie.setBaby(scene.cowAges.get(i) != 0);
                 zombie.setCanBreakDoors(scene.difficulty == 3);
-            } else if (mob instanceof net.minecraft.world.entity.AgeableMob ageable && scene.cowAges.get(i) != 0) {
+            } else if (mob instanceof net.minecraft.world.entity.AgeableMob ageable
+                    && !(mob instanceof net.minecraft.world.entity.monster.cubemob.AbstractCubeMob)
+                    && scene.cowAges.get(i) != 0) {
+                // 史莱姆把「年龄」那一列当大小，构造函数里的 age 仍是 0，和官方一致；
+                // 不能把这个值再写进 `AgeableMob.age`。
+                // Slimes use the age column as their size and keep `age` at 0 like vanilla,
+                // so do not copy the value into `AgeableMob.age`.
                 ageable.setAge(scene.cowAges.get(i));
             }
             if (i == 0 && scene.temper >= 0
@@ -6857,6 +7538,7 @@ public final class MobOracle {
         line.append(",\"raining\":").append(scene.raining);
         line.append(",\"brightOutside\":").append(scene.brightOutside);
         line.append(",\"monstersBurn\":").append(scene.monstersBurn);
+        line.append(",\"seaLevel\":").append(scene.seaLevel);
         line.append(",\"foxHunts\":").append(scene.foxHunts);
         line.append(",\"deathKind\":0,\"fireTicks\":").append(scene.fireTicks);
         line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
@@ -6932,6 +7614,23 @@ public final class MobOracle {
                     }
                 }
             }
+            if (slimeScene) {
+                // `Player.aiStep` 的 `touch(entity)`：玩家活着时，碰到包围盒外扩 (1, 0.5, 1) 以内的
+                // 实体就叫它的 `playerTouch`。玩家在这个场景里不 tick，这一步由对拍自己重放。
+                // `touch(entity)` from `Player.aiStep`: a living player calls `playerTouch` on
+                // every entity within its box inflated by (1, 0.5, 1). Players do not tick in
+                // this scene, so the oracle replays this step itself.
+                for (ServerPlayer player : players) {
+                    if (!(player.getHealth() > 0.0F)) continue;
+                    AABB reach = player.getBoundingBox().inflate(1.0, 0.5, 1.0);
+                    for (Mob mob : mobs) {
+                        if (!mob.isRemoved() && mob.getBoundingBox().intersects(reach)) {
+                            mob.playerTouch(player);
+                        }
+                    }
+                }
+            }
+            level.spawned.clear();
             if (scene.sprint != null) {
                 players.get(0).setSprinting(tick >= scene.sprint[0] && tick < scene.sprint[1]);
             }
@@ -6940,6 +7639,28 @@ public final class MobOracle {
                 mob.checkDespawn();
                 mob.commonTick();
                 mob.tick();
+            }
+            if (slimeScene) {
+                // 分裂出来的小史莱姆：记下数量、位置、朝向、大小和血量就丢掉，不让它们继续 tick
+                // （官方构造函数的随机源不带种子）。
+                // Split children: record count, position, facing, size and health, then discard
+                // them so they never tick (the vanilla constructor random is unseeded).
+                splits.append(",[");
+                boolean anySplit = false;
+                for (Entity fresh : level.spawned) {
+                    if (!(fresh instanceof net.minecraft.world.entity.monster.cubemob.Slime child)) continue;
+                    if (anySplit) splits.append(',');
+                    anySplit = true;
+                    splits.append('[').append(Double.doubleToRawLongBits(child.getX()))
+                            .append(',').append(Double.doubleToRawLongBits(child.getY()))
+                            .append(',').append(Double.doubleToRawLongBits(child.getZ()))
+                            .append(',').append(Float.floatToRawIntBits(child.getYRot()))
+                            .append(',').append(child.getSize())
+                            .append(',').append(Float.floatToRawIntBits(child.getHealth()))
+                            .append(']');
+                    child.discard();
+                }
+                splits.append(']');
             }
             if (scene.name.startsWith("zombie_equine_llama_wolf")) {
                 if (mobs.get(0).getTarget() == mobs.get(1)) llamaTargetedWolf = true;
@@ -7005,6 +7726,23 @@ public final class MobOracle {
             }
         }
         line.append("]");
+        if (scene.name.equals("witch_drink_fire")) {
+            Mob witch = mobs.getFirst();
+            if (!witch.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE) || witch.getHealth() != 26.0F) {
+                throw new IllegalStateException("fire scene must drink fire resistance and heal");
+            }
+        }
+        if (scene.name.equals("witch_drink_water")
+                && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING)) {
+            throw new IllegalStateException("water scene must drink water breathing");
+        }
+        if (scene.name.equals("witch_drink_speed")
+                && !mobs.getFirst().hasEffect(net.minecraft.world.effect.MobEffects.SPEED)) {
+            throw new IllegalStateException("distant target scene must drink swiftness");
+        }
+        if (slimeScene) {
+            line.append(",\"cubeSplits\":").append(splits).append(']');
+        }
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
@@ -7094,6 +7832,7 @@ public final class MobOracle {
             out.append(",\"g\":").append(mob.onGround());
             out.append(",\"rm\":").append(mob.isRemoved());
             out.append(",\"w\":").append(mob.isInWater());
+            out.append(",\"swimming\":").append(mob.isSwimming());
             out.append(",\"fd\":").append(Double.doubleToRawLongBits(mob.fallDistance));
             out.append(",\"nat\":").append(mob.getNoActionTime());
             out.append(",\"ht\":").append(mob.hurtTime);
@@ -7141,7 +7880,30 @@ public final class MobOracle {
             out.append(",\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
-            if (mob instanceof PolarBear bear) {
+            if (mob instanceof net.minecraft.world.entity.monster.cubemob.Slime slime) {
+                // 史莱姆把自己的状态塞进花纹那一列：大小、跳跃延迟、移动控制的目标角度、上一刻是否在地上。
+                // Slimes pack their own state into the variant column: size, jump delay, the
+                // move control's target angle and whether they were on the ground.
+                Object control = slime.getMoveControl();
+                out.append(",\"var\":\"slime:").append(slime.getSize())
+                        .append(':').append(getInt(control.getClass(), control, "jumpDelay"))
+                        .append(':').append(Float.floatToRawIntBits(getFloat(control.getClass(), control, "yRot")))
+                        .append(':').append(getBoolean(
+                                net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, slime, "wasOnGround"))
+                        .append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.Witch witch) {
+                var fireResistance = witch.getEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE);
+                var healing = witch.getEffect(net.minecraft.world.effect.MobEffects.INSTANT_HEALTH);
+                var breathing = witch.getEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING);
+                var speed = witch.getEffect(net.minecraft.world.effect.MobEffects.SPEED);
+                out.append(",\"var\":\"witch:").append(witch.isDrinkingPotion())
+                        .append(':').append(getInt(witch.getClass(), witch, "usingTime"))
+                        .append(':').append(fireResistance == null ? 0 : fireResistance.getDuration())
+                        .append(':').append(healing == null ? 0 : healing.getDuration())
+                        .append(':').append(breathing == null ? 0 : breathing.getDuration())
+                        .append(':').append(speed == null ? 0 : speed.getDuration())
+                        .append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof PolarBear bear) {
                 out.append(",\"var\":\"").append(bearState(bear)).append("\",\"snd\":\"\"");
             } else {
                 out.append(",\"var\":\"").append(caseVariant(mob)).append('"');
@@ -8443,6 +9205,15 @@ public final class MobOracle {
             if (calf instanceof Chicken chick) {
                 out.append(",\"egg\":").append(chick.eggTime);
             }
+            if (calf instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
+                // `Panda.getBreedOffspring` 用幼崽没播种的随机源做两次 1/32 变异，比 `reseedBorn` 更早；
+                // 作为场景起点交给 Bamboo（基因遗传本身由 `playPandaGenes` 单独用种子对拍）。
+                // `Panda.getBreedOffspring` rolls the two 1/32 mutations on the calf's unseeded
+                // random before `reseedBorn`; pass the resulting genes as the scene start
+                // (gene inheritance itself is compared deterministically by `playPandaGenes`).
+                out.append(",\"genes\":[").append(panda.getMainGene().getId())
+                        .append(',').append(panda.getHiddenGene().getId()).append(']');
+            }
             out.append(",\"uuid\":\"").append(calf.getUUID()).append('"');
         } else {
             out.append(",\"kind\":\"other\"");
@@ -8780,6 +9551,15 @@ public final class MobOracle {
             Field field = owner.getDeclaredField(name);
             field.setAccessible(true);
             return field.getFloat(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static void putFloat(Class<?> owner, Object target, String name, float value) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            UNSAFE.putFloat(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }
@@ -9269,6 +10049,7 @@ public final class MobOracle {
         int injectedSkyDarken;
         boolean injectedRaining;
         boolean injectedBrightOutside = true;
+        int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
         /** 僵尸场景的真实时间模式：时钟、雨强由场景给，天色由官方环境属性系统算。 */
@@ -9316,6 +10097,9 @@ public final class MobOracle {
             level.levelData = new TickingLevelData(level);
             level.nextId = 1;
             level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            // `allocate` 不跑字段初始值，显式给超平坦默认海平面 -63。
+            // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
+            level.injectedSeaLevel = -63;
             return level;
         }
 
@@ -9348,7 +10132,14 @@ public final class MobOracle {
 
         @Override
         public int getMaxLocalRawBrightness(BlockPos pos) {
-            return naturalScene != null || realSky ? getMaxLocalRawBrightness(pos, getSkyDarken()) : 15;
+            // 注入的天色要真的参与亮度：官方 `Level.getMaxLocalRawBrightness(pos)` 走
+            // `getSkyDarken()`，这里不能固定 15，否则夜里的场景对怪物来说还是白天。
+            //
+            // The injected sky darken must take part: vanilla's one-arg call uses
+            // `getSkyDarken()`, so a fixed 15 would keep night scenes bright for monsters.
+            return naturalScene != null || realSky
+                    ? getMaxLocalRawBrightness(pos, getSkyDarken())
+                    : Math.max(0, 15 - injectedSkyDarken);
         }
 
         /** 真实时间模式：天空光 15、方块光 0，按官方 `max(block, sky - darken)`。 */
@@ -9522,8 +10313,10 @@ public final class MobOracle {
 
         @Override
         public int getSeaLevel() {
-            // Bamboo 超平坦世界的 `flat::SEA_LEVEL`（login 包也用它）。
-            return naturalSeaLevel == null ? -63 : naturalSeaLevel;
+            // 自然生成夹具按场景给海平面；其余场景用注入值，默认是超平坦的 -63。
+            // Natural-spawn fixtures supply a per-scene sea level; other scenes use the
+            // injected value, which defaults to superflat's -63.
+            return naturalSeaLevel == null ? injectedSeaLevel : naturalSeaLevel;
         }
 
         /** 自然生成夹具的海平面；不设（`allocate` 不跑字段初始值）就是超平坦的 -63。 */
@@ -9531,8 +10324,11 @@ public final class MobOracle {
 
         @Override
         public long getSeed() {
-            return 0L;
+            return worldSeed;
         }
+
+        /** `getSeed()` 的值；只有史莱姆的自然生成场景会改。 */
+        long worldSeed;
 
         @Override
         public LevelData.RespawnData getRespawnData() {
@@ -9746,7 +10542,14 @@ public final class MobOracle {
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}
 
         @Override
-        public void levelEvent(Entity source, int type, BlockPos pos, int data) {}
+        public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            if (levelEvents != null) {
+                levelEvents.add(new int[] {type, pos.getX(), pos.getY(), pos.getZ(), data});
+            }
+        }
+
+        /** 非空时记下这一刻的 `levelEvent`（转化音效）。 */
+        List<int[]> levelEvents;
 
         @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(

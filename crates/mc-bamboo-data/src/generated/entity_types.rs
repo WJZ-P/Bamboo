@@ -266,6 +266,8 @@ pub const PIG_SOUND_VARIANT_SERIALIZER: i32 = 29;
 pub const CHICKEN_VARIANT_SERIALIZER: i32 = 30;
 pub const CHICKEN_SOUND_VARIANT_SERIALIZER: i32 = 31;
 pub const ARMADILLO_STATE_SERIALIZER: i32 = 36;
+pub const CUBE_MOB_SIZE: u8 = 18;
+pub const SLIME_EYE_HEIGHT: f32 = 0.325;
 pub const MOOSHROOM_TYPE: u8 = 18;
 /// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。
 pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[

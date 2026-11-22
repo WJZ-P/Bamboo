@@ -232,6 +232,9 @@ pub(super) fn animal_interact(
     {
         return outcome;
     }
+    if mob.mob_type == MobType::Bogged {
+        return super::bogged::interact(mob, req);
+    }
     let food = !req.held.is_empty() && is_food(mob.mob_type, req.held.item);
     if !food {
         return match mob.mob_type {
@@ -296,6 +299,7 @@ pub(crate) fn apply_shear(
     match entity.kind.mob().map(|mob| mob.mob_type) {
         Some(MobType::Sheep) => sheep::apply_shear(world, entity, hand, tool),
         Some(MobType::Mooshroom) => mooshroom::apply_shear(world, entity, hand, tool),
+        Some(MobType::Bogged) => super::bogged::apply_shear(world, entity, hand, tool),
         _ => {}
     }
 }
