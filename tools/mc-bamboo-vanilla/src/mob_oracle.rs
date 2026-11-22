@@ -1557,6 +1557,8 @@ impl Report {
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
+                    21 => mc_bamboo_blocks::entity::mob::MobType::Ocelot,
+                    22 => mc_bamboo_blocks::entity::mob::MobType::Cat,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
@@ -1863,7 +1865,11 @@ impl Report {
                     let mut uuid = [0u8; 16];
                     uuid[..8].copy_from_slice(&1_u64.to_be_bytes());
                     uuid[8..].copy_from_slice(&(2_u64 + player_index as u64).to_be_bytes());
-                    let held = mc_bamboo_protocol::item::ItemStack::new(item, 1);
+                    let held = if item == 0 {
+                        mc_bamboo_protocol::item::ItemStack::empty()
+                    } else {
+                        mc_bamboo_protocol::item::ItemStack::new(item, 1)
+                    };
                     let request = mc_bamboo_blocks::entity::mob::interact::MobInteractRequest {
                         player_uid: player.id,
                         player_uuid: uuid,
@@ -3981,6 +3987,27 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             mob.panda.eat_counter,
             mob.panda.flags,
         ),
+        MobType::Ocelot => format!(
+            "t{}|c{}|s{}",
+            u8::from(mob.ocelot.trusting),
+            u8::from(mob.ocelot.crouching),
+            u8::from(mob.sprinting),
+        ),
+        MobType::Cat => format!(
+            "t{}|o{}|p{}|l{}|r{}|c{}|v{}|cr{}|s{}|u{}",
+            u8::from(mob.tame.is_tame()),
+            u8::from(mob.tame.ordered_to_sit),
+            u8::from(mob.tame.in_sitting_pose()),
+            u8::from(mob.cat.lying),
+            u8::from(mob.cat.relax_state_one),
+            mob.cat.collar,
+            mob.cat.variant_name(),
+            u8::from(mob.cat.crouching),
+            u8::from(mob.sprinting),
+            mob.tame
+                .owner
+                .map_or_else(|| "-".to_owned(), |uuid| uuid_text(&uuid)),
+        ),
         MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
         MobType::Enderman => mob.describe_enderman(),
         MobType::Spider | MobType::CaveSpider => {
@@ -4028,7 +4055,12 @@ fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     match mob.mob_type {
         MobType::Pig => mob.pig_sound_variant.name().to_owned(),
         MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
-        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear | MobType::Panda => String::new(),
+        MobType::Cat => mob.cat.sound_variant_name().to_owned(),
+        MobType::Sheep
+        | MobType::Mooshroom
+        | MobType::PolarBear
+        | MobType::Panda
+        | MobType::Ocelot => String::new(),
         _ => mob.sound_variant.name().to_owned(),
     }
 }

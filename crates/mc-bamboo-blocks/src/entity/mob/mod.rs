@@ -20,6 +20,7 @@ pub mod bogged;
 pub mod brain;
 pub mod bucketable;
 pub mod camel;
+pub mod cat;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
@@ -47,6 +48,7 @@ pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
 pub mod neutral;
+pub mod ocelot;
 pub mod panda;
 pub mod path;
 mod pig;
@@ -121,6 +123,8 @@ pub enum MobType {
     Chicken,
     PolarBear,
     Panda,
+    Ocelot,
+    Cat,
     Zombie,
     Husk,
     Skeleton,
@@ -157,7 +161,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 42] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -168,6 +172,8 @@ impl MobType {
         Self::Chicken,
         Self::PolarBear,
         Self::Panda,
+        Self::Ocelot,
+        Self::Cat,
         Self::Horse,
         Self::Donkey,
         Self::Mule,
@@ -214,6 +220,8 @@ impl MobType {
             Self::Chicken => ids::CHICKEN,
             Self::PolarBear => ids::POLAR_BEAR,
             Self::Panda => ids::PANDA,
+            Self::Ocelot => ids::OCELOT,
+            Self::Cat => ids::CAT,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -260,6 +268,8 @@ impl MobType {
             Self::Chicken => "minecraft:chicken",
             Self::PolarBear => "minecraft:polar_bear",
             Self::Panda => "minecraft:panda",
+            Self::Ocelot => "minecraft:ocelot",
+            Self::Cat => "minecraft:cat",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -306,6 +316,8 @@ impl MobType {
             Self::Camel => Some(item_tags::CAMEL_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
+            Self::Ocelot => Some(item_tags::OCELOT_FOOD),
+            Self::Cat => Some(item_tags::CAT_FOOD),
             _ => None,
         }
     }
@@ -386,6 +398,8 @@ impl MobType {
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
             (Self::PolarBear, baby) => polar_bear::dimensions(baby),
             (Self::Panda, baby) => panda::dimensions(baby),
+            (Self::Ocelot, baby) => ocelot::dimensions(baby),
+            (Self::Cat, baby) => cat::dimensions(baby),
             (Self::Squid | Self::GlowSquid, baby) => squid::dimensions(self, baby),
             (Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish, _) => {
                 fish::dimensions(self, 1, 0)
@@ -482,7 +496,7 @@ impl MobType {
     pub const fn uses_block_step_sound(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Enderman | Self::Witch | Self::Slime
+            Self::Creeper | Self::Enderman | Self::Witch | Self::Slime | Self::Ocelot | Self::Cat
         )
     }
 
@@ -651,6 +665,8 @@ impl MobType {
             Self::Chicken => "minecraft:entities/chicken",
             Self::PolarBear => "minecraft:entities/polar_bear",
             Self::Panda => "minecraft:entities/panda",
+            Self::Ocelot => "minecraft:entities/ocelot",
+            Self::Cat => "minecraft:entities/cat",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -692,7 +708,9 @@ impl MobType {
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
-        if self.is_equine() {
+        if matches!(self, Self::Ocelot) {
+            900
+        } else if self.is_equine() {
             400
         } else if self.is_enemy() {
             80
@@ -768,6 +786,8 @@ impl MobType {
             Self::Goat => Some("minecraft:entity.goat.ambient"),
             Self::Frog => Some("minecraft:entity.frog.ambient"),
             Self::Tadpole => None,
+            Self::Ocelot => Some("minecraft:entity.ocelot.ambient"),
+            Self::Cat => Some("minecraft:entity.cat.stray_ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
         }
     }
@@ -781,6 +801,8 @@ impl MobType {
             Self::Sheep => Some("minecraft:entity.sheep.hurt"),
             Self::PolarBear => Some("minecraft:entity.polar_bear.hurt"),
             Self::Panda => Some("minecraft:entity.panda.hurt"),
+            Self::Ocelot => Some("minecraft:entity.ocelot.hurt"),
+            Self::Cat => None,
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -819,6 +841,8 @@ impl MobType {
             Self::Sheep => Some("minecraft:entity.sheep.death"),
             Self::PolarBear => Some("minecraft:entity.polar_bear.death"),
             Self::Panda => Some("minecraft:entity.panda.death"),
+            Self::Ocelot => Some("minecraft:entity.ocelot.death"),
+            Self::Cat => None,
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -888,7 +912,7 @@ impl MobType {
             Self::Armadillo => Some("minecraft:entity.armadillo.step"),
             Self::Goat => Some("minecraft:entity.goat.step"),
             Self::Frog => Some("minecraft:entity.frog.step"),
-            Self::Tadpole => None,
+            Self::Tadpole | Self::Ocelot | Self::Cat => None,
             Self::Camel => Some("minecraft:entity.camel.step"),
         }
     }
@@ -907,6 +931,8 @@ impl MobType {
             Self::Chicken => items::CHICKEN_SPAWN_EGG,
             Self::PolarBear => items::POLAR_BEAR_SPAWN_EGG,
             Self::Panda => items::PANDA_SPAWN_EGG,
+            Self::Ocelot => items::OCELOT_SPAWN_EGG,
+            Self::Cat => items::CAT_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -953,6 +979,8 @@ impl MobType {
             Self::Chicken => "entity.minecraft.chicken",
             Self::PolarBear => "entity.minecraft.polar_bear",
             Self::Panda => "entity.minecraft.panda",
+            Self::Ocelot => "entity.minecraft.ocelot",
+            Self::Cat => "entity.minecraft.cat",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -1996,6 +2024,18 @@ pub struct Mob {
     ///
     /// The panda's genes, flags and counters.
     pub panda: panda::Panda,
+    /// `Entity.isSprinting()`：共享标志第 3 位，同时在 `MOVEMENT_SPEED` 上挂 0.3F 临时加成。
+    ///
+    /// `Entity.isSprinting()`: shared flag 3, paired with the 0.3F transient speed modifier.
+    pub sprinting: bool,
+    /// 豹猫的信任标志和潜行姿势。
+    ///
+    /// The ocelot's trusting flag and crouching pose.
+    pub ocelot: ocelot::Ocelot,
+    /// 猫的花色、叫声变体、项圈颜色、躺卧和潜行状态。
+    ///
+    /// The cat's coat/sound variants, collar colour, lying and crouching state.
+    pub cat: cat::Cat,
     /// 中立生物的持久愤怒（`NeutralMob`），北极熊在用。
     ///
     /// Persistent anger of neutral mobs (`NeutralMob`); polar bears use it.
@@ -2163,6 +2203,8 @@ impl Mob {
             MobType::Slime => slime::attributes(),
             MobType::PolarBear => polar_bear::attributes(),
             MobType::Panda => panda::attributes(),
+            MobType::Ocelot => ocelot::attributes(),
+            MobType::Cat => cat::attributes(),
             MobType::Squid | MobType::GlowSquid => squid::attributes(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::attributes()
@@ -2218,6 +2260,8 @@ impl Mob {
             MobType::Slime => slime::goals(&mut navigation),
             MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Panda => panda::goals(&mut navigation),
+            MobType::Ocelot => ocelot::goals(&mut navigation),
+            MobType::Cat => cat::goals(&mut navigation),
             MobType::Squid | MobType::GlowSquid => squid::goals(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::goals(mob_type)
@@ -2269,6 +2313,8 @@ impl Mob {
             | MobType::Camel => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
+            MobType::Ocelot => ocelot::target_goals(),
+            MobType::Cat => cat::target_goals(),
             MobType::Fox => fox::target_goals(),
             MobType::Wolf => wolf::target_goals(),
             MobType::Rabbit
@@ -2448,6 +2494,9 @@ impl Mob {
             mooshroom: mooshroom::Mooshroom::default(),
             polar_bear: polar_bear::PolarBear::default(),
             panda: panda::Panda::default(),
+            sprinting: false,
+            ocelot: ocelot::Ocelot::default(),
+            cat: cat::Cat::default(),
             anger: neutral::Anger::default(),
             creeper: creeper::CreeperState::default(),
             spider: spider::SpiderState::default(),
@@ -2596,12 +2645,20 @@ impl Mob {
         (width, height)
     }
 
-    /// `Mob.removeWhenFarAway`。鱼覆盖成 `!fromBucket && !hasCustomName`。
+    /// `Mob.removeWhenFarAway`。鱼覆盖成 `!fromBucket && !hasCustomName`；
+    /// 豹猫覆盖成 `!isTrusting && tickCount > 2400`。
     ///
-    /// `Mob.removeWhenFarAway`; fish override it with `!fromBucket && !hasCustomName`.
-    pub fn removes_when_far_away(&self) -> bool {
+    /// `Mob.removeWhenFarAway`; fish override it with `!fromBucket && !hasCustomName`,
+    /// and ocelots with `!isTrusting && tickCount > 2400`.
+    pub fn removes_when_far_away(&self, tick_count: i32) -> bool {
         if fish::is_fish(self.mob_type) {
             return !self.fish.from_bucket && self.custom_name.is_none();
+        }
+        if self.mob_type == MobType::Ocelot {
+            return ocelot::removes_when_far_away(self, tick_count);
+        }
+        if self.mob_type == MobType::Cat {
+            return cat::removes_when_far_away(self, tick_count);
         }
         self.mob_type.removes_when_far_away()
     }
@@ -2758,6 +2815,19 @@ pub struct MobPublic {
     ///
     /// The synced panda fields.
     pub panda: panda::PandaPublic,
+    /// `Entity.isSprinting()`：共享标志第 3 位。
+    ///
+    /// `Entity.isSprinting()`: shared flag 3.
+    pub sprinting: bool,
+    /// `Ocelot.DATA_TRUSTING` 与潜行姿势。
+    ///
+    /// `Ocelot.DATA_TRUSTING` and the crouching pose.
+    pub ocelot_trusting: bool,
+    pub ocelot_crouching: bool,
+    /// 猫的同步状态。
+    ///
+    /// Synced state of a cat.
+    pub cat: cat::Cat,
     /// 苦力怕的三项同步元数据：`DATA_SWELL_DIR`、`DATA_IS_POWERED`、`DATA_IS_IGNITED`。
     ///
     /// The three synced creeper items: swell direction, powered and ignited.
@@ -2913,6 +2983,10 @@ impl MobPublic {
             mooshroom_brown: mob.mooshroom.brown,
             polar_bear_standing: mob.polar_bear.standing,
             panda: panda::PandaPublic::of(&mob.panda),
+            sprinting: mob.sprinting,
+            ocelot_trusting: mob.ocelot.trusting,
+            ocelot_crouching: mob.ocelot.crouching,
+            cat: mob.cat,
             creeper_swell_dir: mob.creeper.swell_dir,
             creeper_powered: mob.creeper.powered,
             creeper_ignited: mob.creeper.ignited,
@@ -3108,5 +3182,31 @@ mod tests {
             assert!(mob.can_break_doors);
             assert_eq!(mob.mob_type, MobType::Zombie);
         });
+    }
+
+    /// 每种 `MobType` 的注册表 ID 必须两两不同，且能从 `by_entity_type` 反查回自己。
+    /// 新增生物时若漏进 `ALL` 或撞了已有 ID，官方刷怪表条目会被映射错（或漏映射），
+    /// `natural-spawn` 关键路径随即分叉。
+    ///
+    /// Every `MobType` must have a distinct registry id that resolves back to
+    /// itself via `by_entity_type`. When a kind is added, omitting it from `ALL`
+    /// or reusing an existing id mismaps (or drops) a vanilla spawn-table entry
+    /// and diverges the `natural-spawn` critical path.
+    #[test]
+    fn mob_type_registry_ids_round_trip() {
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in MobType::ALL {
+            let id = kind.entity_type();
+            assert!(
+                seen.insert(id),
+                "duplicate entity_type id {id} for {kind:?}"
+            );
+            assert_eq!(
+                MobType::by_entity_type(id),
+                Some(kind),
+                "by_entity_type({id}) does not resolve to {kind:?}"
+            );
+        }
+        assert_eq!(seen.len(), MobType::ALL.len());
     }
 }

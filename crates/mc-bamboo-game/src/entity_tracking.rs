@@ -51,8 +51,10 @@ const FORCED_TELEPORT_PERIOD: u32 = 400;
 /// 跟踪范围按区块算，一格区块 16 格。
 const BLOCKS_PER_CHUNK: i32 = 16;
 
-/// `update_attributes` 上一次发过的属性状态（ID、基础值、永久修饰符）。
-type AttributeState = (i32, f64, Vec<(String, f64, i32)>);
+/// `update_attributes` 上一次发过的属性状态（ID、基础值、修饰符、脏代数）。
+///
+/// Last synced state for `update_attributes` (id, base, modifiers, dirty generation).
+type AttributeState = (i32, f64, Vec<(String, f64, i32)>, u64);
 
 /// 一个世界里全部被跟踪的实体。
 #[derive(Debug, Default)]
@@ -601,7 +603,7 @@ impl TrackedEntity {
                     (modifier.id.clone(), modifier.amount, operation)
                 })
                 .collect();
-            current.push((entry.id, entry.base, modifiers));
+            current.push((entry.id, entry.base, modifiers, entry.sync_version));
         }
         if current == self.last_attributes {
             return Vec::new();
@@ -610,7 +612,10 @@ impl TrackedEntity {
             .iter()
             .filter(|entry| {
                 !self.last_attributes.iter().any(|previous| {
-                    previous.0 == entry.0 && previous.1 == entry.1 && previous.2 == entry.2
+                    previous.0 == entry.0
+                        && previous.1 == entry.1
+                        && previous.2 == entry.2
+                        && previous.3 == entry.3
                 })
             })
             .map(|entry| entry.0)
@@ -621,7 +626,7 @@ impl TrackedEntity {
         }
         let mut snapshots = Vec::new();
         let mut modifiers: Vec<Vec<AttributeModifier<'_>>> = Vec::new();
-        for (id, base, list) in &current {
+        for (id, base, list, _) in &current {
             if !changed.contains(id) {
                 continue;
             }
@@ -1398,14 +1403,13 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.on_fire {
         flags |= 1;
     }
+    if mob.sprinting {
+        flags |= ENTITY_FLAG_SPRINTING;
+    }
     if mob.glowing {
         flags |= 1 << 6;
     }
-    let _ = (
-        ENTITY_FLAG_FALL_FLYING,
-        ENTITY_FLAG_SHIFT_KEY_DOWN,
-        ENTITY_FLAG_SPRINTING,
-    );
+    let _ = (ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN);
     let mut out = Vec::new();
     if flags != 0 {
         out.push(EntityData::SharedFlags(flags));
@@ -1417,6 +1421,10 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     } else if mob.goat.long_jumping {
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::LongJumping,
+        ));
+    } else if mob.ocelot_crouching || mob.cat.crouching {
+        out.push(EntityData::Pose(
+            mc_bamboo_protocol::packet::play::Pose::Crouching,
         ));
     } else if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
         use mc_bamboo_blocks::entity::mob::frog::Pose as FrogPose;
@@ -1600,6 +1608,20 @@ fn farm_default_data(
         (MobType::Panda, facts::PANDA_MAIN_GENE) => Some(EntityData::PandaMainGene(0)),
         (MobType::Panda, facts::PANDA_HIDDEN_GENE) => Some(EntityData::PandaHiddenGene(0)),
         (MobType::Panda, facts::PANDA_FLAGS) => Some(EntityData::PandaFlags(0)),
+        (MobType::Ocelot, facts::OCELOT_TRUSTING) => Some(EntityData::OcelotTrusting(false)),
+        (MobType::Cat, facts::TAME_FLAGS) => Some(EntityData::TameFlags(0)),
+        (MobType::Cat, facts::TAME_OWNER) => Some(EntityData::TameOwner(None)),
+        (MobType::Cat, facts::CAT_VARIANT) => Some(EntityData::CatVariant(
+            mc_bamboo_blocks::entity::mob::cat::default_variant(),
+        )),
+        (MobType::Cat, facts::CAT_IS_LYING) => Some(EntityData::CatIsLying(false)),
+        (MobType::Cat, facts::CAT_RELAX_STATE_ONE) => Some(EntityData::CatRelaxStateOne(false)),
+        (MobType::Cat, facts::CAT_COLLAR) => Some(EntityData::CatCollar(
+            mc_bamboo_blocks::entity::mob::cat::DEFAULT_COLLAR,
+        )),
+        (MobType::Cat, facts::CAT_SOUND_VARIANT) => Some(EntityData::CatSoundVariant(
+            mc_bamboo_blocks::entity::mob::cat::default_sound_variant(),
+        )),
         (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
             Some(EntityData::GlowSquidDarkTicks(0))
         }
@@ -1763,6 +1785,37 @@ fn farm_non_default_data(
             }
             if panda.flags != 0 {
                 out.push(EntityData::PandaFlags(panda.flags));
+            }
+            true
+        }
+        MobType::Ocelot => {
+            if mob.ocelot_trusting {
+                out.push(EntityData::OcelotTrusting(true));
+            }
+            true
+        }
+        MobType::Cat => {
+            use mc_bamboo_blocks::entity::mob::cat;
+            if mob.tame_flags != 0 {
+                out.push(EntityData::TameFlags(mob.tame_flags));
+            }
+            if mob.owner.is_some() {
+                out.push(EntityData::TameOwner(mob.owner));
+            }
+            if mob.cat.variant != cat::default_variant() {
+                out.push(EntityData::CatVariant(mob.cat.variant));
+            }
+            if mob.cat.lying {
+                out.push(EntityData::CatIsLying(true));
+            }
+            if mob.cat.relax_state_one {
+                out.push(EntityData::CatRelaxStateOne(true));
+            }
+            if mob.cat.collar != cat::DEFAULT_COLLAR {
+                out.push(EntityData::CatCollar(mob.cat.collar));
+            }
+            if mob.cat.sound_variant != cat::default_sound_variant() {
+                out.push(EntityData::CatSoundVariant(mob.cat.sound_variant));
             }
             true
         }

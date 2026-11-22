@@ -1024,8 +1024,14 @@ public final class MobOracle {
      * (colour plus shear mark, variant plus egg timer); the rest keep the defaults,
      * matching Bamboo's `farm_variant`.
      */
+    // 这个方法调用了声明 throws Exception 的 farmVariant，所以自己也必须声明；去掉它整个
+    // mob-oracle 单文件源码编译不过。合并冲突解决时不要回退这一行。
+    // This method calls farmVariant, which declares throws Exception, so it must declare it too;
+    // without it the whole single-file mob-oracle source fails to compile. Do not revert this in merges.
     static String caseVariant(Mob mob) throws Exception {
-        if (mob instanceof Sheep || mob instanceof Chicken) {
+        if (mob instanceof Sheep || mob instanceof Chicken
+                || mob instanceof net.minecraft.world.entity.animal.feline.Ocelot
+                || mob instanceof net.minecraft.world.entity.animal.feline.Cat) {
             return farmVariant((Animal) mob);
         }
         if (mob instanceof net.minecraft.world.entity.monster.Creeper
@@ -1055,8 +1061,12 @@ public final class MobOracle {
     }
 
     static String caseSound(Mob mob) throws Exception {
-        if (mob instanceof Sheep) return "";
-        if (mob instanceof Chicken) return farmSound((Animal) mob);
+        if (mob instanceof Sheep
+                || mob instanceof net.minecraft.world.entity.animal.feline.Ocelot) return "";
+        if (mob instanceof Chicken
+                || mob instanceof net.minecraft.world.entity.animal.feline.Cat) {
+            return farmSound((Animal) mob);
+        }
         return "minecraft:classic";
     }
 
@@ -2102,6 +2112,202 @@ public final class MobOracle {
             }
             polarBearScenes(scenes);
             pandaScenes(scenes);
+            ocelotScenes(scenes);
+            catScenes(scenes);
+        }
+
+        /**
+         * 猫：闲逛（野猫叫声）、远离玩家、持鱼吸引/驯服/染项圈/受伤回血/坐站、
+         * 繁殖（花色继承与项圈混色）、躺床与坐点燃熔炉、捕猎兔子与幼年海龟、死亡掉落。
+         *
+         * Cats: strolling (stray ambient), avoiding untamed players, tempting/taming/dyeing/
+         * healing/sitting, breeding (variant inheritance and mixed collar), lying on beds and
+         * sitting on lit furnaces, hunting rabbits and baby turtles, and death loot.
+         */
+        static void catScenes(List<Scene> scenes) {
+            int cod = BuiltInRegistries.ITEM.getId(Items.COD);
+            int air = BuiltInRegistries.ITEM.getId(Items.AIR);
+            int blueDye = BuiltInRegistries.ITEM.getId(Items.DYE.blue());
+            {
+                Scene idle = new Scene("cat_idle").ticks(300).packets();
+                ground(idle, 24);
+                idle.cow(0.5, 64.0, 0.5, 0.0F, 621L);
+                idle.cow(3.5, 64.0, 2.5, 90.0F, 622L, -24000);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                Scene avoid = new Scene("cat_avoid_player").ticks(120).packets();
+                ground(avoid, 24);
+                avoid.cow(0.5, 64.0, 0.5, 0.0F, 623L);
+                avoid.player(4.5, 64.0, 0.5, Items.AIR);
+                scenes.add(avoid);
+            }
+            {
+                Scene tame = new Scene("cat_tempt_tame").ticks(140).packets();
+                ground(tame, 16);
+                tame.cow(0.5, 64.0, 0.5, 0.0F, 624L);
+                tame.player(2.5, 64.0, 0.5, Items.COD);
+                for (int t = 4; t <= 16; t += 2) {
+                    tame.interact(t, 0, 0, cod, 0);
+                }
+                tame.interact(30, 0, 0, blueDye, 0);
+                tame.hurts.add(new double[] {40, 0, 2.0, 0});
+                tame.interact(80, 0, 0, cod, 0);
+                tame.interact(90, 0, 0, air, 0);
+                scenes.add(tame);
+            }
+            {
+                Scene breed = new Scene("cat_breed").ticks(150).drops().packets();
+                ground(breed, 10);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 625L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 626L);
+                breed.player(2.5, 64.0, 0.5, Items.AIR);
+                for (int t = 2; t <= 16; t += 2) {
+                    breed.interact(t, 0, 0, cod, 0);
+                    breed.interact(t, 1, 0, cod, 0);
+                }
+                breed.interact(20, 0, 0, blueDye, 0);
+                breed.interact(24, 0, 0, air, 0);
+                breed.interact(24, 1, 0, air, 0);
+                breed.interact(28, 0, 0, cod, 0);
+                breed.interact(28, 1, 0, cod, 0);
+                scenes.add(breed);
+            }
+            {
+                Scene lie = new Scene("cat_lie_bed").ticks(260).packets();
+                ground(lie, 12);
+                lie.set(2, 64, 0, Blocks.BED.red().defaultBlockState());
+                lie.set(2, 64, -1, Blocks.BED.red().defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.BED_PART,
+                                net.minecraft.world.level.block.state.properties.BedPart.HEAD));
+                lie.cow(0.5, 64.0, 0.5, 0.0F, 627L);
+                lie.player(2.5, 64.0, 2.5, Items.AIR);
+                for (int t = 2; t <= 16; t += 2) {
+                    lie.interact(t, 0, 0, cod, 0);
+                }
+                lie.interact(20, 0, 0, air, 0);
+                scenes.add(lie);
+            }
+            {
+                Scene sit = new Scene("cat_sit_furnace").ticks(260).packets();
+                ground(sit, 12);
+                sit.set(2, 64, 0, Blocks.FURNACE.defaultBlockState()
+                        .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.LIT, true));
+                sit.cow(0.5, 64.0, 0.5, 0.0F, 628L);
+                sit.player(2.5, 64.0, 2.5, Items.AIR);
+                for (int t = 2; t <= 16; t += 2) {
+                    sit.interact(t, 0, 0, cod, 0);
+                }
+                sit.interact(20, 0, 0, air, 0);
+                scenes.add(sit);
+            }
+            {
+                Scene death = new Scene("cat_death").ticks(58).drops().packets();
+                ground(death, 6);
+                death.cow(0.5, 64.0, 0.5, 0.0F, 629L);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
+            {
+                Scene huntRabbit = new Scene("cat_hunt_rabbit").ticks(160).difficulty(2);
+                ground(huntRabbit, 18);
+                huntRabbit.mob(22, 0.5, 64.0, 0.5, 0.0F, 630L, 0);
+                huntRabbit.mob(6, 6.5, 64.0, 0.5, 0.0F, 631L, 0);
+                scenes.add(huntRabbit);
+            }
+            {
+                Scene huntTurtle = new Scene("cat_hunt_turtle").ticks(160).difficulty(2);
+                ground(huntTurtle, 18);
+                huntTurtle.mob(22, 0.5, 64.0, 0.5, 0.0F, 632L, 0);
+                huntTurtle.mob(60, 3.5, 64.0, 0.5, 0.0F, 633L, 0);
+                huntTurtle.mob(60, 6.5, 64.0, 0.5, 0.0F, 634L, -24000);
+                scenes.add(huntTurtle);
+            }
+        }
+
+        /**
+         * 豹猫：闲逛、远离玩家（含疾跑加成）、持鱼吸引与信任（1/3 + 粒子取数）、
+         * 繁殖、扑杀鸡和陆地幼年海龟、死亡掉落。
+         *
+         * Ocelots: strolling, avoiding untrusted players (with sprint modifier), tempting
+         * and trusting (1/3 roll + particle draws), breeding, hunting chickens and baby
+         * turtles on land, and death loot.
+         */
+        static void ocelotScenes(List<Scene> scenes) {
+            int cod = BuiltInRegistries.ITEM.getId(Items.COD);
+            {
+                Scene idle = new Scene("ocelot_idle").ticks(300).packets();
+                ground(idle, 24);
+                idle.cow(0.5, 64.0, 0.5, 0.0F, 601L);
+                idle.cow(3.5, 64.0, 2.5, 90.0F, 602L, -24000);
+                idle.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+            }
+            {
+                // 未信任的豹猫看到空手玩家立刻疾跑逃开。
+                // An untrusted ocelot sprints away from an empty-handed player.
+                Scene avoid = new Scene("ocelot_avoid_player").ticks(120).packets();
+                ground(avoid, 24);
+                avoid.cow(0.5, 64.0, 0.5, 0.0F, 603L);
+                avoid.player(4.5, 64.0, 0.5, Items.AIR);
+                scenes.add(avoid);
+            }
+            {
+                // 玩家原地持生鳕鱼吸引豹猫靠近，多次右键触发失败（事件 40）与信任（事件 41）。
+                // A stationary player holds raw cod to tempt the ocelot, then interacts repeatedly
+                // to exercise both failure (event 40) and trusting (event 41).
+                Scene trust = new Scene("ocelot_tempt_trust").ticks(120).packets();
+                ground(trust, 16);
+                trust.cow(0.5, 64.0, 0.5, 0.0F, 604L);
+                trust.player(2.5, 64.0, 0.5, Items.COD);
+                for (int t = 6; t <= 18; t += 2) {
+                    trust.interact(t, 0, 0, cod, 0);
+                }
+                scenes.add(trust);
+            }
+            {
+                // 繁殖：玩家空手（诱惑目标未跑），直接右键生鳕鱼进入求爱生小豹猫。
+                // Breeding: player holds air so tempt is not running; feeding cod breeds a kitten.
+                Scene breed = new Scene("ocelot_breed").ticks(120).drops().packets();
+                ground(breed, 10);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 605L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 606L);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(2, 0, 0, cod, 0);
+                breed.interact(2, 1, 0, cod, 0);
+                scenes.add(breed);
+            }
+            {
+                // 死亡掉落与经验。
+                // Death drops and experience.
+                Scene death = new Scene("ocelot_death").ticks(58).drops().packets();
+                ground(death, 6);
+                death.cow(0.5, 64.0, 0.5, 0.0F, 607L);
+                death.player(20.5, 64.0, 0.5, Items.AIR);
+                death.hurts.add(new double[] {5, 0, 40.0, 0});
+                scenes.add(death);
+            }
+            {
+                // 捕猎鸡：潜行接近 -> 4 格内冲刺 -> 扑跳 -> 攻击。
+                // Hunting a chicken: crouch -> sprint inside 4 blocks -> leap -> attack.
+                Scene huntChicken = new Scene("ocelot_hunt_chicken").ticks(160).difficulty(2);
+                ground(huntChicken, 18);
+                huntChicken.mob(21, 0.5, 64.0, 0.5, 0.0F, 608L, 0);
+                huntChicken.mob(5, 6.5, 64.0, 0.5, 0.0F, 609L, 0);
+                scenes.add(huntChicken);
+            }
+            {
+                // 捕猎陆地幼年海龟：忽略更近的成年海龟，选中幼年海龟。
+                // Hunting a baby turtle on land: ignores a closer adult turtle and targets the baby.
+                Scene huntTurtle = new Scene("ocelot_hunt_turtle").ticks(160).difficulty(2);
+                ground(huntTurtle, 18);
+                huntTurtle.mob(21, 0.5, 64.0, 0.5, 0.0F, 610L, 0);
+                huntTurtle.mob(60, 3.5, 64.0, 0.5, 0.0F, 611L, 0);
+                huntTurtle.mob(60, 6.5, 64.0, 0.5, 0.0F, 612L, -24000);
+                scenes.add(huntTurtle);
+            }
         }
 
         /**
@@ -3854,6 +4060,7 @@ public final class MobOracle {
         // Only scenes named `*_no_grief` turn `mobGriefing` off; every scene resets it.
         setRule(official, GameRules.MOB_GRIEFING, !scene.name.endsWith("_no_grief"));
         if (scene.name.startsWith("zombie_") || scene.name.startsWith("polar_bear_fight_")
+                || scene.name.startsWith("ocelot_hunt_") || scene.name.startsWith("cat_hunt_")
                 || scene.name.startsWith("rabbit_") || scene.name.startsWith("fox_")
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
@@ -4073,6 +4280,9 @@ public final class MobOracle {
             level.tracked.add(cow);
         }
         if (scene.packets) {
+            // 玩家初始化时 `detectEquipmentUpdates` 发出的装备包不属于生物场景第 1 刻。
+            // Drop player setup equipment packets emitted by `detectEquipmentUpdates` before tick 1.
+            events.take();
             // 先给每头牛建 ServerEntity；配对包在 tick 0 由 `sendPairingData` 发出。
             // Create a ServerEntity per cow; sendPairingData emits the tick-0 packets.
             for (Animal cow : cows) {
@@ -4204,6 +4414,10 @@ public final class MobOracle {
                 interactions.get(tick).add(one.toString());
                 putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
                         "instabuild", false);
+                // 交互完换回场景给的那件，Bamboo 一侧的玩家视图手里一直是它。
+                // Restore the scene's held item after interaction to match Bamboo's player view.
+                actor.setItemInHand(InteractionHand.MAIN_HAND,
+                        new ItemStack(scene.playerItems.get(action[2])));
             }
             // 交互里生成的实体（剪下来的物品、哞菇剪成的牛）在实体 tick 之前就进了世界，
             // 真服务端里它们这一刻就会 tick，所以在这里先收一次。
@@ -4963,6 +5177,9 @@ public final class MobOracle {
         scenes.add(new NaturalScene("frog_dim", EntityTypes.FROG, "swamp", 2, 8, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("mooshroom_day", EntityTypes.MOOSHROOM, "mushroom_fields", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("polar_bear_day", EntityTypes.POLAR_BEAR, "frozen_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("ocelot_jungle", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("ocelot_jungle_leaves", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("ocelot_below_sea", EntityTypes.OCELOT, "jungle", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_cod", EntityTypes.COD, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_salmon", EntityTypes.SALMON, "cold_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("fish_tropical", EntityTypes.TROPICAL_FISH, "warm_ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
@@ -5069,7 +5286,9 @@ public final class MobOracle {
         Difficulty difficulty = Difficulty.byId(scene.difficulty());
         ((TickingLevelData) level.levelData).difficulty = difficulty;
         level.spawnDifficulty = new DifficultyInstance(difficulty, 0L, 0L, 0.0F);
-        MobCategory category = scene.mob().getCategory();
+        MobCategory category = scene.mob() == EntityTypes.OCELOT
+                ? MobCategory.MONSTER
+                : scene.mob().getCategory();
         MobSpawnSettings settings = level.naturalBiome.value().getAttributes()
                 .applyModifier(EnvironmentAttributes.NATURAL_MOB_SPAWNS, MobSpawnSettings.EMPTY);
         var entry = settings.getMobsToSpawn(category).unwrap().stream()
@@ -5079,7 +5298,9 @@ public final class MobOracle {
         generator.table = WeightedList.<MobSpawnSettings.SpawnerData>builder().add(entry.value(), entry.weight()).build();
         level.chunkSource.naturalGenerator = generator;
 
-        BlockState floorState = spawnFloor(scene.biome());
+        BlockState floorState = scene.name().equals("ocelot_jungle_leaves")
+                ? Blocks.OAK_LEAVES.defaultBlockState()
+                : spawnFloor(scene.biome());
         boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT
                 || category == MobCategory.WATER_CREATURE || category == MobCategory.AXOLOTLS;
         // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才会通过。
@@ -5087,6 +5308,7 @@ public final class MobOracle {
         // `checkAxolotlSpawnRules` passes.
         boolean clayFloor = scene.mob() == EntityTypes.AXOLOTL;
         level.naturalSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51
+                : scene.name().equals("ocelot_below_sea") ? -60
                 : (scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63);
         for (int x = -16; x < 48; x++) {
             for (int z = -16; z < 32; z++) {
@@ -7913,6 +8135,8 @@ public final class MobOracle {
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
                 case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 20 -> EntityTypes.CAMEL.create(level, EntitySpawnReason.COMMAND);
+                case 21 -> EntityTypes.OCELOT.create(level, EntitySpawnReason.COMMAND);
+                case 22 -> EntityTypes.CAT.create(level, EntitySpawnReason.COMMAND);
                 case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
@@ -9806,6 +10030,8 @@ public final class MobOracle {
         if (scene.startsWith("mooshroom_")) return EntityTypes.MOOSHROOM;
         if (scene.startsWith("polar_bear_")) return EntityTypes.POLAR_BEAR;
         if (scene.startsWith("panda_")) return EntityTypes.PANDA;
+        if (scene.startsWith("ocelot_")) return EntityTypes.OCELOT;
+        if (scene.startsWith("cat_")) return EntityTypes.CAT;
         return EntityTypes.COW;
     }
 
@@ -9821,6 +10047,8 @@ public final class MobOracle {
         if (scene.startsWith("mooshroom_")) return 17;
         if (scene.startsWith("polar_bear_")) return 16;
         if (scene.startsWith("panda_")) return 15;
+        if (scene.startsWith("ocelot_")) return 21;
+        if (scene.startsWith("cat_")) return 22;
         return 0;
     }
 
@@ -9856,8 +10084,55 @@ public final class MobOracle {
                 + "|f" + flags;
     }
 
+    /**
+     * 豹猫的状态列：信任、潜行姿势、疾跑标志。
+     *
+     * The ocelot state column: trusting, crouching pose and sprinting flag.
+     */
+    private static String ocelotState(net.minecraft.world.entity.animal.feline.Ocelot ocelot) throws Exception {
+        Field field = net.minecraft.world.entity.animal.feline.Ocelot.class.getDeclaredField("DATA_TRUSTING");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) field.get(null);
+        boolean trusting = ocelot.getEntityData().get(accessor);
+        boolean crouching = ocelot.getPose() == net.minecraft.world.entity.Pose.CROUCHING;
+        return "t" + (trusting ? 1 : 0)
+                + "|c" + (crouching ? 1 : 0)
+                + "|s" + (ocelot.isSprinting() ? 1 : 0);
+    }
+
+    /**
+     * 猫的状态列：驯服、命令坐下、坐姿、躺卧、放松状态、项圈颜色、花色、潜行、疾跑和主人 UUID。
+     *
+     * The cat state column: tamed, ordered-to-sit, sitting pose, lying, relax state one,
+     * collar colour, coat variant, crouching, sprinting and owner UUID.
+     */
+    @SuppressWarnings("unchecked")
+    private static String catState(net.minecraft.world.entity.animal.feline.Cat cat) {
+        var owner = cat.getOwnerReference();
+        boolean relax = cat.getEntityData().get(
+                (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) readStatic(
+                        net.minecraft.world.entity.animal.feline.Cat.class, "RELAX_STATE_ONE"));
+        return "t" + (cat.isTame() ? 1 : 0)
+                + "|o" + (cat.isOrderedToSit() ? 1 : 0)
+                + "|p" + (cat.isInSittingPose() ? 1 : 0)
+                + "|l" + (cat.isLying() ? 1 : 0)
+                + "|r" + (relax ? 1 : 0)
+                + "|c" + cat.getCollarColor().getId()
+                + "|v" + cat.getVariant().unwrapKey().orElseThrow().identifier()
+                + "|cr" + (cat.getPose() == net.minecraft.world.entity.Pose.CROUCHING ? 1 : 0)
+                + "|s" + (cat.isSprinting() ? 1 : 0)
+                + "|u" + (owner == null ? "-" : owner.getUUID().toString());
+    }
+
     /** 花纹列：羊是颜色加剪毛标记，鸡再带下蛋计时。 */
     private static String farmVariant(Animal animal) throws Exception {
+        if (animal instanceof net.minecraft.world.entity.animal.feline.Cat cat) {
+            return catState(cat);
+        }
+        if (animal instanceof net.minecraft.world.entity.animal.feline.Ocelot ocelot) {
+            return ocelotState(ocelot);
+        }
         if (animal instanceof net.minecraft.world.entity.animal.panda.Panda panda) {
             return pandaState(panda);
         }
@@ -9910,7 +10185,8 @@ public final class MobOracle {
     private static String farmSound(Animal animal) throws Exception {
         if (animal instanceof Sheep || animal instanceof PolarBear
                 || animal instanceof net.minecraft.world.entity.animal.cow.MushroomCow
-                || animal instanceof net.minecraft.world.entity.animal.panda.Panda) {
+                || animal instanceof net.minecraft.world.entity.animal.panda.Panda
+                || animal instanceof net.minecraft.world.entity.animal.feline.Ocelot) {
             return "";
         }
         Method sound = animal.getClass().getDeclaredMethod("getSoundVariant");

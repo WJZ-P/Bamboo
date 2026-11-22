@@ -107,12 +107,13 @@ impl Default for TurtleState {
 /// `Turtle.BABY_DIMENSIONS` at 0.3 scale.
 pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
     let facts = &entity_types::FACTS[kind.entity_type() as usize];
+    let eye = facts.height * 0.85;
     if baby {
         let width = facts.width * BABY_SCALE;
         let height = facts.height * BABY_SCALE;
-        (width, height, height)
+        (width, height, eye * BABY_SCALE)
     } else {
-        (facts.width, facts.height, facts.height)
+        (facts.width, facts.height, eye)
     }
 }
 
@@ -170,6 +171,7 @@ pub(super) fn goals(navigation: &mut super::navigation::Navigation) -> GoalSelec
                 steering_item: false,
                 player: None,
                 calm_down: 0,
+                scare: None,
             },
         ),
         (3, Goal::TurtleGoToWater { speed: 1.0 }),
@@ -195,7 +197,7 @@ pub(super) fn goals(navigation: &mut super::navigation::Navigation) -> GoalSelec
             Goal::Stroll {
                 speed: 1.0,
                 interval: 100,
-                probability: 0.001,
+                probability: super::goals::PLAIN_STROLL,
                 wanted: Vec3::default(),
                 force_trigger: false,
             },
@@ -929,11 +931,13 @@ mod tests {
 
     #[test]
     fn turtle_dimensions_scale_babies() {
-        assert_eq!(dimensions(MobType::Turtle, false), (1.2, 0.4, 0.4));
+        let (width, height, eye) = dimensions(MobType::Turtle, false);
+        assert_eq!((width, height), (1.2, 0.4));
+        assert!((eye - 0.34).abs() < 1.0e-6);
         let (width, height, eye) = dimensions(MobType::Turtle, true);
         assert!((width - 0.36).abs() < 1.0e-6);
         assert!((height - 0.12).abs() < 1.0e-6);
-        assert_eq!(height, eye);
+        assert!((eye - 0.102).abs() < 1.0e-6);
     }
 
     #[test]

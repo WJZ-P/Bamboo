@@ -230,15 +230,19 @@ impl BlockState {
     }
 
     /// `isValidSpawn(level, pos, type)`：普通落脚块用按空世界、牛导出的状态位。
-    /// 冰和霜冰只允许北极熊；豹猫、鹦鹉的特例尚未接入。
+    /// 冰和霜冰只允许北极熊；树叶只允许豹猫和鹦鹉（`Blocks::ocelotOrParrot`）。
     ///
     /// `isValidSpawn(level, pos, type)`: ordinary footing uses the state bit exported
     /// for a cow in an empty world. Ice and frosted ice admit only polar bears;
-    /// the ocelot and parrot exceptions are not wired yet.
+    /// leaves admit only ocelots and parrots (`Blocks::ocelotOrParrot`).
     pub fn is_valid_spawn_surface(self, entity_type: i32) -> bool {
+        use mc_bamboo_data::registries::entity_type as ids;
+        if self.is_tagged(mc_bamboo_data::tags::block_tags::LEAVES) {
+            return matches!(entity_type, ids::OCELOT | ids::PARROT);
+        }
         match self.block().default_state {
             mc_bamboo_data::blocks::ICE | mc_bamboo_data::blocks::FROSTED_ICE => {
-                entity_type == mc_bamboo_data::registries::entity_type::POLAR_BEAR
+                entity_type == ids::POLAR_BEAR
             }
             _ => self.fact(facts::VALID_SPAWN),
         }

@@ -389,7 +389,7 @@ fn spawn_category_for_position(
             };
             let yaw = world.random().next_float() * 360.0;
             spawn::snap_to(&mut entity, Vec3::new(xx, f64::from(y_start), zz), yaw, 0.0);
-            if !is_valid_position_for_mob(world, &entity, kind, nearest) {
+            if !is_valid_position_for_mob(world, &entity, kind, nearest, params.sea_level) {
                 continue;
             }
             spawn::finalize_spawn_with_group(world, kind, &mut entity, &mut group);
@@ -717,10 +717,12 @@ pub(super) fn check_spawn_rules(
         | MobType::Horse
         | MobType::Donkey
         | MobType::Mule
-        | MobType::Llama => animal_spawn_rules(world, pos),
+        | MobType::Llama
+        | MobType::Cat => animal_spawn_rules(world, pos),
         MobType::Mooshroom => super::mooshroom::spawn_rules(world, pos),
         MobType::PolarBear => super::polar_bear::spawn_rules(world, pos),
         MobType::Panda => super::panda::spawn_rules(world, pos),
+        MobType::Ocelot => super::ocelot::spawn_rules(world.random()),
         MobType::Zombie
         | MobType::Skeleton
         | MobType::Bogged
@@ -807,13 +809,22 @@ fn is_valid_position_for_mob(
     entity: &Entity,
     kind: MobType,
     nearest_player_distance_sqr: f64,
+    sea_level: i32,
 ) -> bool {
     let despawn = f64::from(kind.mob_category().facts().despawn_distance);
-    // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真。
-    // A fresh fish has no bucket flag and no name, so `removeWhenFarAway` is true.
-    let removes = kind.removes_when_far_away() || super::fish::is_fish(kind);
+    // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真；新生成的豹猫 `tickCount == 0`，为假。
+    // A fresh fish has no bucket flag or name (`removeWhenFarAway` is true); a fresh ocelot
+    // has `tickCount == 0` (false).
+    let removes = entity
+        .kind
+        .mob()
+        .is_some_and(|mob| mob.removes_when_far_away(entity.tick_count));
     if nearest_player_distance_sqr > despawn * despawn && removes {
         return false;
+    }
+    if kind == MobType::Ocelot {
+        return pathfinder_spawn_rules(world, entity, entity.block_position())
+            && super::ocelot::check_spawn_obstruction(world, entity, sea_level);
     }
     // `Drowned.checkSpawnObstruction` 只检查实体遮挡；水生生物（`AgeableWaterCreature`
     // 和 `WaterAnimal`）也只剩 `isUnobstructed`，不查液体；其余生物还检查盒内液体。
