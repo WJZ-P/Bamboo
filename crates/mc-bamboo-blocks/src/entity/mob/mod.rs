@@ -18,6 +18,7 @@ pub mod avoid;
 pub mod bogged;
 pub mod brain;
 pub mod bucketable;
+pub mod cat;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
@@ -119,6 +120,7 @@ pub enum MobType {
     PolarBear,
     Panda,
     Ocelot,
+    Cat,
     Zombie,
     Husk,
     Skeleton,
@@ -152,7 +154,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 39] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -164,6 +166,7 @@ impl MobType {
         Self::PolarBear,
         Self::Panda,
         Self::Ocelot,
+        Self::Cat,
         Self::Horse,
         Self::Donkey,
         Self::Mule,
@@ -208,6 +211,7 @@ impl MobType {
             Self::PolarBear => ids::POLAR_BEAR,
             Self::Panda => ids::PANDA,
             Self::Ocelot => ids::OCELOT,
+            Self::Cat => ids::CAT,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -252,6 +256,7 @@ impl MobType {
             Self::PolarBear => "minecraft:polar_bear",
             Self::Panda => "minecraft:panda",
             Self::Ocelot => "minecraft:ocelot",
+            Self::Cat => "minecraft:cat",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -294,6 +299,7 @@ impl MobType {
             Self::Frog | Self::Tadpole => Some(item_tags::FROG_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Ocelot => Some(item_tags::OCELOT_FOOD),
+            Self::Cat => Some(item_tags::CAT_FOOD),
             _ => None,
         }
     }
@@ -369,6 +375,7 @@ impl MobType {
             (Self::PolarBear, baby) => polar_bear::dimensions(baby),
             (Self::Panda, baby) => panda::dimensions(baby),
             (Self::Ocelot, baby) => ocelot::dimensions(baby),
+            (Self::Cat, baby) => cat::dimensions(baby),
             (Self::Squid | Self::GlowSquid, baby) => squid::dimensions(self, baby),
             (Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish, _) => {
                 fish::dimensions(self, 1, 0)
@@ -463,7 +470,7 @@ impl MobType {
     pub const fn uses_block_step_sound(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Enderman | Self::Witch | Self::Slime | Self::Ocelot
+            Self::Creeper | Self::Enderman | Self::Witch | Self::Slime | Self::Ocelot | Self::Cat
         )
     }
 
@@ -620,6 +627,7 @@ impl MobType {
             Self::PolarBear => "minecraft:entities/polar_bear",
             Self::Panda => "minecraft:entities/panda",
             Self::Ocelot => "minecraft:entities/ocelot",
+            Self::Cat => "minecraft:entities/cat",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -732,6 +740,7 @@ impl MobType {
             Self::Frog => Some("minecraft:entity.frog.ambient"),
             Self::Tadpole => None,
             Self::Ocelot => Some("minecraft:entity.ocelot.ambient"),
+            Self::Cat => Some("minecraft:entity.cat.stray_ambient"),
         }
     }
 
@@ -745,6 +754,7 @@ impl MobType {
             Self::PolarBear => Some("minecraft:entity.polar_bear.hurt"),
             Self::Panda => Some("minecraft:entity.panda.hurt"),
             Self::Ocelot => Some("minecraft:entity.ocelot.hurt"),
+            Self::Cat => None,
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -781,6 +791,7 @@ impl MobType {
             Self::PolarBear => Some("minecraft:entity.polar_bear.death"),
             Self::Panda => Some("minecraft:entity.panda.death"),
             Self::Ocelot => Some("minecraft:entity.ocelot.death"),
+            Self::Cat => None,
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -844,7 +855,7 @@ impl MobType {
             Self::Armadillo => Some("minecraft:entity.armadillo.step"),
             Self::Goat => Some("minecraft:entity.goat.step"),
             Self::Frog => Some("minecraft:entity.frog.step"),
-            Self::Tadpole | Self::Ocelot => None,
+            Self::Tadpole | Self::Ocelot | Self::Cat => None,
         }
     }
 
@@ -863,6 +874,7 @@ impl MobType {
             Self::PolarBear => items::POLAR_BEAR_SPAWN_EGG,
             Self::Panda => items::PANDA_SPAWN_EGG,
             Self::Ocelot => items::OCELOT_SPAWN_EGG,
+            Self::Cat => items::CAT_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -907,6 +919,7 @@ impl MobType {
             Self::PolarBear => "entity.minecraft.polar_bear",
             Self::Panda => "entity.minecraft.panda",
             Self::Ocelot => "entity.minecraft.ocelot",
+            Self::Cat => "entity.minecraft.cat",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -1916,6 +1929,10 @@ pub struct Mob {
     ///
     /// The ocelot's trusting flag and crouching pose.
     pub ocelot: ocelot::Ocelot,
+    /// 猫的花色、叫声变体、项圈颜色、躺卧和潜行状态。
+    ///
+    /// The cat's coat/sound variants, collar colour, lying and crouching state.
+    pub cat: cat::Cat,
     /// 中立生物的持久愤怒（`NeutralMob`），北极熊在用。
     ///
     /// Persistent anger of neutral mobs (`NeutralMob`); polar bears use it.
@@ -2072,6 +2089,7 @@ impl Mob {
             MobType::PolarBear => polar_bear::attributes(),
             MobType::Panda => panda::attributes(),
             MobType::Ocelot => ocelot::attributes(),
+            MobType::Cat => cat::attributes(),
             MobType::Squid | MobType::GlowSquid => squid::attributes(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::attributes()
@@ -2125,6 +2143,7 @@ impl Mob {
             MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Panda => panda::goals(&mut navigation),
             MobType::Ocelot => ocelot::goals(&mut navigation),
+            MobType::Cat => cat::goals(&mut navigation),
             MobType::Squid | MobType::GlowSquid => squid::goals(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::goals(mob_type)
@@ -2161,6 +2180,7 @@ impl Mob {
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
+            MobType::Cat => cat::target_goals(),
             MobType::Fox => fox::target_goals(),
             MobType::Wolf => wolf::target_goals(),
             MobType::Rabbit
@@ -2338,6 +2358,7 @@ impl Mob {
             panda: panda::Panda::default(),
             sprinting: false,
             ocelot: ocelot::Ocelot::default(),
+            cat: cat::Cat::default(),
             anger: neutral::Anger::default(),
             creeper: creeper::CreeperState::default(),
             spider: spider::SpiderState::default(),
@@ -2486,6 +2507,9 @@ impl Mob {
         }
         if self.mob_type == MobType::Ocelot {
             return ocelot::removes_when_far_away(self, tick_count);
+        }
+        if self.mob_type == MobType::Cat {
+            return cat::removes_when_far_away(self, tick_count);
         }
         self.mob_type.removes_when_far_away()
     }
@@ -2651,6 +2675,10 @@ pub struct MobPublic {
     /// `Ocelot.DATA_TRUSTING` and the crouching pose.
     pub ocelot_trusting: bool,
     pub ocelot_crouching: bool,
+    /// 猫的同步状态。
+    ///
+    /// Synced state of a cat.
+    pub cat: cat::Cat,
     /// 苦力怕的三项同步元数据：`DATA_SWELL_DIR`、`DATA_IS_POWERED`、`DATA_IS_IGNITED`。
     ///
     /// The three synced creeper items: swell direction, powered and ignited.
@@ -2794,6 +2822,7 @@ impl MobPublic {
             sprinting: mob.sprinting,
             ocelot_trusting: mob.ocelot.trusting,
             ocelot_crouching: mob.ocelot.crouching,
+            cat: mob.cat,
             creeper_swell_dir: mob.creeper.swell_dir,
             creeper_powered: mob.creeper.powered,
             creeper_ignited: mob.creeper.ignited,

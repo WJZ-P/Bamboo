@@ -1010,6 +1010,14 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `Ocelot.DATA_TRUSTING`.
     pub ocelot_trusting: u8,
+    /// `Cat` 五个元数据访问器 index。
+    ///
+    /// The five metadata accessor indices of `Cat`.
+    pub cat_variant: u8,
+    pub cat_is_lying: u8,
+    pub cat_relax_state_one: u8,
+    pub cat_collar: u8,
+    pub cat_sound_variant: u8,
     /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
     ///
     /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).

@@ -168,6 +168,9 @@ pub fn interact(
     if mob.mob_type == super::MobType::Wolf {
         return super::wolf::interact(me, mob, req, now);
     }
+    if mob.mob_type == MobType::Cat {
+        return super::cat::interact(me, mob, req);
+    }
     if mob.mob_type == MobType::Armadillo
         && let Some(outcome) = super::armadillo::interact(me, mob, req)
     {
@@ -275,6 +278,7 @@ pub(super) fn animal_interact(
 fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
     match mob.mob_type {
         MobType::Pig => pig::play_eating_sound(me, mob),
+        MobType::Cat => super::cat::play_eating_sound(me, mob),
         MobType::Armadillo => living::make_sound(me, mob, "minecraft:entity.armadillo.eat"),
         // `Frog.playEatingSound`：`level.playSound(null, this, FROG_EAT, NEUTRAL, 2.0F, 1.0F)`，
         // 不看 `isSilent`、不取音高。

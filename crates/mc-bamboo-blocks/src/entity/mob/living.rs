@@ -149,6 +149,9 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Wolf && !me.removed {
         super::wolf::tick_after(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Cat && !me.removed {
+        super::cat::tick_after(me, mob);
+    }
     // `Armadillo.tick` 在 `super.tick()` 之后夹头、数 `inStateTicks`。
     // `Armadillo.tick` clamps the head and counts `inStateTicks` after `super.tick()`.
     if mob.mob_type == super::MobType::Armadillo {
@@ -422,6 +425,7 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.sprinting
         && !me.in_water
         && !mob.ocelot.crouching
+        && !mob.cat.crouching
         && !is_in_lava(me, mob)
         && is_alive(me, mob)
     {
@@ -572,6 +576,10 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
                 return;
             }
+            if mob.mob_type == super::MobType::Cat {
+                super::cat::play_ambient_sound(me, mob);
+                return;
+            }
             // 受惊的犰狳没有叫声：`makeSound` 不跑，也不取音高。
             // A scared armadillo has no ambient sound, so no pitch draws either.
             if super::armadillo::is_scared(mob) {
@@ -632,6 +640,7 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
             .hurt_sound()
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Hurt),
+                super::MobType::Cat => super::cat::sound(mob, super::cat::Sound::Hurt),
                 super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[1],
                 super::MobType::Slime => super::slime::hurt_sound(mob),
@@ -643,6 +652,7 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
             .death_sound()
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Death),
+                super::MobType::Cat => super::cat::sound(mob, super::cat::Sound::Death),
                 super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[2],
                 super::MobType::Slime => super::slime::death_sound(mob),
@@ -803,6 +813,10 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         // 刚生成的狼还没有仇恨，时刻不影响叫声。
         // A fresh wolf has no anger, so the clock does not matter.
         super::wolf::play_ambient_sound(me, mob, 0);
+        return;
+    }
+    if mob.mob_type == super::MobType::Cat {
+        super::cat::play_ambient_sound(me, mob);
         return;
     }
     if mob.mob_type.has_no_ambient_sound() {
@@ -1317,6 +1331,7 @@ pub(crate) fn breed_with(
             father_fox: mob.fox.variant,
             father_love: mob.love_cause,
             father_wolf: Box::new((mob.wolf, mob.tame)),
+            father_cat: mob.cat,
             father_screaming: mob.goat.screaming,
         },
         me,
@@ -1393,6 +1408,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if mob.mob_type == super::MobType::Ocelot {
         super::ocelot::custom_server_ai_step(mob);
+    }
+    if mob.mob_type == super::MobType::Cat {
+        super::cat::custom_server_ai_step(mob);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -2590,6 +2608,7 @@ pub(crate) struct BreedFather {
     pub(crate) love: Option<[u8; 16]>,
     pub(crate) wolf: super::wolf::Wolf,
     pub(crate) tame: super::tame::Tamable,
+    pub(crate) cat: super::cat::Cat,
     /// 山羊父亲是否尖叫。
     ///
     /// Whether the goat father is screaming.
@@ -2676,9 +2695,13 @@ pub(crate) fn apply_breed(
     let mother_wolf = world
         .entity(partner)
         .and_then(|entity| entity.kind.mob().map(|mob| mob.wolf));
+    let mother_cat = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.cat));
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
     let mut wolf = None;
+    let mut cat = None;
     // 哞菇的品种自己抽（`getOffspringVariant`），不取牛那个 `nextBoolean`。
     // Mooshrooms draw their own type (`getOffspringVariant`) instead of the cow `nextBoolean`.
     let calf_brown = (kind == super::MobType::Mooshroom).then(|| {
@@ -2740,6 +2763,14 @@ pub(crate) fn apply_breed(
                 me,
                 (&parent.wolf, &parent.tame),
                 mother_wolf,
+                world,
+            ));
+        }
+        super::MobType::Cat => {
+            cat = Some(super::cat::offspring(
+                me,
+                (&parent.cat, &parent.tame),
+                mother_cat,
                 world,
             ));
         }
@@ -2846,6 +2877,13 @@ pub(crate) fn apply_breed(
         }
         if let Some((wolf, tamable)) = wolf.take() {
             mob.wolf = wolf;
+            mob.tame = tamable;
+            if tamable.is_tame() {
+                super::tame::set_tame(mob, true, true);
+            }
+        }
+        if let Some((cat, tamable)) = cat.take() {
+            mob.cat = cat;
             mob.tame = tamable;
             if tamable.is_tame() {
                 super::tame::set_tame(mob, true, true);

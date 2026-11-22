@@ -1400,7 +1400,7 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::LongJumping,
         ));
-    } else if mob.ocelot_crouching {
+    } else if mob.ocelot_crouching || mob.cat.crouching {
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::Crouching,
         ));
@@ -1584,6 +1584,19 @@ fn farm_default_data(
         (MobType::Panda, facts::PANDA_HIDDEN_GENE) => Some(EntityData::PandaHiddenGene(0)),
         (MobType::Panda, facts::PANDA_FLAGS) => Some(EntityData::PandaFlags(0)),
         (MobType::Ocelot, facts::OCELOT_TRUSTING) => Some(EntityData::OcelotTrusting(false)),
+        (MobType::Cat, facts::TAME_FLAGS) => Some(EntityData::TameFlags(0)),
+        (MobType::Cat, facts::TAME_OWNER) => Some(EntityData::TameOwner(None)),
+        (MobType::Cat, facts::CAT_VARIANT) => Some(EntityData::CatVariant(
+            mc_bamboo_blocks::entity::mob::cat::default_variant(),
+        )),
+        (MobType::Cat, facts::CAT_IS_LYING) => Some(EntityData::CatIsLying(false)),
+        (MobType::Cat, facts::CAT_RELAX_STATE_ONE) => Some(EntityData::CatRelaxStateOne(false)),
+        (MobType::Cat, facts::CAT_COLLAR) => Some(EntityData::CatCollar(
+            mc_bamboo_blocks::entity::mob::cat::DEFAULT_COLLAR,
+        )),
+        (MobType::Cat, facts::CAT_SOUND_VARIANT) => Some(EntityData::CatSoundVariant(
+            mc_bamboo_blocks::entity::mob::cat::default_sound_variant(),
+        )),
         (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
             Some(EntityData::GlowSquidDarkTicks(0))
         }
@@ -1715,6 +1728,31 @@ fn farm_non_default_data(
         MobType::Ocelot => {
             if mob.ocelot_trusting {
                 out.push(EntityData::OcelotTrusting(true));
+            }
+            true
+        }
+        MobType::Cat => {
+            use mc_bamboo_blocks::entity::mob::cat;
+            if mob.tame_flags != 0 {
+                out.push(EntityData::TameFlags(mob.tame_flags));
+            }
+            if mob.owner.is_some() {
+                out.push(EntityData::TameOwner(mob.owner));
+            }
+            if mob.cat.variant != cat::default_variant() {
+                out.push(EntityData::CatVariant(mob.cat.variant));
+            }
+            if mob.cat.lying {
+                out.push(EntityData::CatIsLying(true));
+            }
+            if mob.cat.relax_state_one {
+                out.push(EntityData::CatRelaxStateOne(true));
+            }
+            if mob.cat.collar != cat::DEFAULT_COLLAR {
+                out.push(EntityData::CatCollar(mob.cat.collar));
+            }
+            if mob.cat.sound_variant != cat::default_sound_variant() {
+                out.push(EntityData::CatSoundVariant(mob.cat.sound_variant));
             }
             true
         }

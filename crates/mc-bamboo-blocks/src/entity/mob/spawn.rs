@@ -351,6 +351,11 @@ fn finalize_spawn_in_group(
         super::ocelot::finalize_spawn(entity, world.random(), group);
         return;
     }
+    if kind == MobType::Cat {
+        let moon = crate::sky::moon_brightness(world.level().clock_ticks());
+        super::cat::finalize_spawn(entity, world.random(), moon, group);
+        return;
+    }
     if kind.is_zombie() {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         if kind == MobType::Drowned {
@@ -442,6 +447,9 @@ pub(super) fn finalize_generated(
         super::panda::finalize_spawn(entity, region_random, group);
     } else if kind == MobType::Ocelot {
         super::ocelot::finalize_spawn(entity, region_random, group);
+    } else if kind == MobType::Cat {
+        let moon = crate::sky::moon_brightness(world.level().clock_ticks());
+        super::cat::finalize_spawn(entity, region_random, moon, group);
     } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
         super::wild_spawn::finalize(kind, entity, biome, region_random, group);
     } else if kind.is_equine() {

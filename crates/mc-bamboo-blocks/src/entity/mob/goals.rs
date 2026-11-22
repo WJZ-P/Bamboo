@@ -48,6 +48,10 @@ pub enum Goal {
     ///
     /// The wolf's own goals.
     Wolf(super::wolf_goals::WolfGoal),
+    /// 猫自己的目标。
+    ///
+    /// The cat's own goals.
+    Cat(super::cat::CatGoal),
     /// `LeapAtTargetGoal`：离目标 2 到 4 格、站在地上时扑过去。
     ///
     /// `LeapAtTargetGoal`: leap at a target 2 to 4 blocks away.
@@ -535,6 +539,7 @@ impl Goal {
             Self::Fox(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
+            Self::Cat(goal) => goal.flags(),
             Self::Breed { .. }
             | Self::Tempt { .. }
             | Self::OcelotAttack { .. }
@@ -585,6 +590,9 @@ impl Goal {
     /// `requiresUpdateEveryTick`。
     pub const fn every_tick(&self) -> bool {
         if let Self::Fox(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Cat(goal) = self {
             return goal.every_tick();
         }
         // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
@@ -649,6 +657,7 @@ impl Goal {
             Self::Fox(goal) => goal.name(),
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
+            Self::Cat(goal) => goal.name(),
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
@@ -1267,14 +1276,14 @@ pub(super) const fn melee_attack(speed: f64, track_target: bool, class: &'static
 /// Rabbits and foxes wrap a few shared goals in inner subclasses; the oracle
 /// compares the subclass names.
 fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
-    use super::MobType::{Fox, Ocelot, Rabbit, Tadpole, Turtle, Wolf};
+    use super::MobType::{Cat, Fox, Ocelot, Rabbit, Tadpole, Turtle, Wolf};
     match (kind, name) {
         // `AbstractFish.FishSwimGoal`。
         (Tadpole, "RandomSwimmingGoal") => "FishSwimGoal",
         (Turtle, "PanicGoal") => "TurtlePanicGoal",
         (Turtle, "BreedGoal") => "TurtleBreedGoal",
         (Turtle, "RandomStrollGoal") => "TurtleRandomStrollGoal",
-        (Wolf, "PanicGoal") => "TamableAnimalPanicGoal",
+        (Wolf | Cat, "PanicGoal") => "TamableAnimalPanicGoal",
         (Rabbit, "PanicGoal") => "RabbitPanicGoal",
         (Rabbit, "AvoidEntityGoal") => "RabbitAvoidEntityGoal",
         (Fox, "PanicGoal") => "FoxPanicGoal",
@@ -1283,6 +1292,7 @@ fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
         (Fox, "LookAtPlayerGoal") => "FoxLookAtPlayerGoal",
         (Ocelot, "TemptGoal") => "OcelotTemptGoal",
         (Ocelot, "AvoidEntityGoal") => "OcelotAvoidEntityGoal",
+        (Cat, "AvoidEntityGoal") => "CatAvoidEntityGoal",
         _ => name,
     }
 }
@@ -1456,12 +1466,14 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
         Goal::RabbitRaid(raid) => raid.can_use(me, mob, ctx.blocks()),
-        // `RabbitAvoidEntityGoal`：杀手兔不躲；`OcelotAvoidEntityGoal`：信任的豹猫不躲。
+        // `RabbitAvoidEntityGoal`：杀手兔不躲；`OcelotAvoidEntityGoal`：信任的豹猫不躲；
+        // `CatAvoidEntityGoal`：驯服的猫不躲。
         // `RabbitAvoidEntityGoal`: the killer bunny never flees; `OcelotAvoidEntityGoal`:
-        // trusting ocelots never flee.
+        // trusting ocelots never flee; `CatAvoidEntityGoal`: tamed cats never flee.
         Goal::Avoid(avoid) => {
             !super::rabbit::is_evil(mob)
                 && !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+                && !(mob.mob_type == super::MobType::Cat && mob.tame.is_tame())
                 && avoid.can_use(me, mob, ctx)
         }
         Goal::OcelotAttack { target, .. } => {
@@ -1474,6 +1486,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Fox(goal) => goal.can_use(me, mob, ctx),
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
+        Goal::Cat(goal) => goal.can_use(me, mob, ctx),
         Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
             // `FoxPanicGoal.shouldPanic`：保护中的狐狸不惊慌。
@@ -2021,6 +2034,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::RabbitRaid(raid) => raid.can_continue(),
         Goal::Avoid(_) => {
             !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+                && !(mob.mob_type == super::MobType::Cat && mob.tame.is_tame())
                 && super::avoid::AvoidEntity::can_continue(mob)
         }
         Goal::OcelotAttack { target, .. } => {
@@ -2035,6 +2049,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Fox(goal) => goal.can_continue(me, mob, ctx),
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
         // `Drowned.DrownedAttackGoal.canContinueToUse`：僵尸的近战条件加 `okTarget`。
         Goal::RandomStroll { .. } | Goal::DrownedGoToWater { .. } => !mob.navigation.is_done(),
@@ -2309,6 +2324,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Fox(goal) => goal.start(me, mob, ctx),
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
+        Goal::Cat(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target, .. } => {
@@ -2577,6 +2593,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Fox(goal) => goal.stop_with_world(me, mob, ctx),
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
+        Goal::Cat(goal) => goal.stop(mob),
         Goal::LeapAtTarget { .. } => {}
         Goal::Swim { .. } => mob.navigation.stop(),
         // `MoveToBlockGoal` 没有覆写 `stop`：不停导航。
@@ -2946,6 +2963,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Fox(goal) => goal.tick(me, mob, ctx),
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
+        Goal::Cat(goal) => goal.tick(me, mob, ctx),
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
         // `TamableAnimalPanicGoal.tick` teleports to a distant owner first.
         Goal::Panic { .. } if super::tame::is_tamable(mob.mob_type) => {
@@ -3460,6 +3478,7 @@ fn free_partner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<EntityUid
             || public.panicking
             || !public.is_alive()
             || !super::wolf::can_mate(mob, public)
+            || !super::cat::can_mate(mob, public)
         {
             return;
         }
@@ -4070,6 +4089,7 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
                 | super::MobType::Llama
                 | super::MobType::Witch
                 | super::MobType::Ocelot
+                | super::MobType::Cat
         );
     if !mobs_allowed && player_by_uid(ctx.blocks(), uid).is_none() {
         return None;
