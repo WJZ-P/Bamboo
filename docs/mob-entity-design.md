@@ -494,6 +494,25 @@ cow-kind 表里犰狳 13 / 山羊 14 / 海龟 60 撞号；Rust `CowSetup` / `Cow
 岛 1 随机源）的修复在 `9f210652` 已在 main，本轮全量对拍与 `island_command` 复核未复发。
 本轮未改动任何生物行为代码，只做合并、行尾规范化和文档。
 
+**与 main 合并（2026-11-21，第九轮，op-water）。** 起始 `HEAD = 6f85fff8`（第八轮），
+`main = 54ee195a`：比合并基点 `650625b5` 多 8 个提交（`fceb0a89` 一带，op-wgmem 的
+「一份共享 Worldgen 数据集」，改 `worldgen` / `climate` / 生成线程与文档），与
+`mc-bamboo-blocks` 的水生生物代码不重叠。按「每轮先 merge main」执行，`git merge main`
+自动合并、无冲突（只 `README.md` 自动并入 main 的 9 行条目，水生条目原样保留）。`generated/`
+用合并后的生成器重跑 `extract`（JDK 26），`git status` 干净、逐字节幂等；`mob-oracle`
+场景编号两边不重复（cow-kind 表 1..=17 / 40..=43 / 60，水生走 squid / fish / water_mob
+独立驱动）。复核全通过：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo check --workspace --all-targets`、全量 `mob-oracle` 1757 例 170741 刻 0 不一致、
+`--only dolphin` 3 场景 603 刻、`--only axolotl` 4 场景 804 刻、`--only sheep_eat` 3 场景 900 刻、
+`--only natural_spawn` 342 例、`natural-spawn` 1727 例、`--break-self-test water_mob` 抓到 12 处、
+`island_command` 4 passed、`mc-bamboo-blocks` 779 passed、`mc-bamboo-vanilla` 101 + 8 passed、
+`cargo check -p mc-bamboo-desktop`、联机探针 769/769。05:00 两处回归（sheep_eat 位置、岛 1
+随机源，修复在 `9f210652`）复核未复发；09:30 追加的海豚 / 美西螈逐刻对拍、故意改坏确认与
+自然生成接入全部复核仍 0 不一致。本轮未改动任何生物行为代码，只做合并与文档；Brain 驱动的
+剩余已知限制（引路 / 恩惠 / 装死回血 / 攻击水生怪物 / 繁殖）需动 `living.rs` 的 tick 顺序与
+目标分派，按「超出已定设计、需改线程模型或 tick 顺序的部分停下来写汇报，不要自己定」留给
+队长定夺，见 README 已知限制与本轮汇报。
+
 ### 5.9 大脑 AI、犰狳、山羊（2026-11-21，分支 `brain`）
 
 **已做**（代码在 `entity/mob/brain/`、`entity/mob/armadillo.rs`、`entity/mob/goat.rs`）：
