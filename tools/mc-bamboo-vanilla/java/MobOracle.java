@@ -349,7 +349,7 @@ public final class MobOracle {
             if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
                 cases += playGenSpawns(official, out, only);
             }
-            if ("patrol_spawn".equals(only) || "patrol".equals(only)) {
+            if (only == null || "patrol_spawn".equals(only) || "patrol".equals(only)) {
                 cases += playPatrolSpawns(official, out, only);
             }
             if (only == null || "structure_spawn".equals(only)) {

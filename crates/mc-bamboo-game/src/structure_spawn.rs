@@ -31,7 +31,7 @@ pub(crate) fn override_at(
     pos: BlockPos,
     category: MobCategory,
 ) -> Option<&'static [MobSpawnerDef]> {
-    if !config.generate_structures {
+    if !config.generate_structures || !spawning::has_structure_spawn_override(category) {
         return None;
     }
     let chunk = pos.chunk();

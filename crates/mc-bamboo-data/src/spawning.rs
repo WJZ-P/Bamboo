@@ -229,6 +229,16 @@ pub fn structure_spawn_override_row(
         .find(|row| row.structure == structure && row.category == category)
 }
 
+/// 这个类别有没有任何结构覆盖。没有时查询方可以省掉整条结构链。
+///
+/// Whether any structure overrides this category; if not, the caller can skip the
+/// whole structure lookup.
+pub fn has_structure_spawn_override(category: MobCategory) -> bool {
+    STRUCTURE_SPAWN_OVERRIDES
+        .iter()
+        .any(|row| row.category == category)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

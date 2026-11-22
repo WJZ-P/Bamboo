@@ -1535,8 +1535,8 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
    `eggTime` 的做法，在 `spawnJson` 传出新生熊猫的 `genes`，由 `apply_born_setup` 与配对快照同步
    （基因遗传本身仍由 `playPandaGenes` 用确定性种子单独对拍）。
 
-全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
-**686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+全量 `mob-oracle`（不带 `--only`）实测 **1811 例、184009 刻、0 不一致**；`--only natural_spawn`
+**704 例、2816 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
 
 ## 12. 掠夺者、巡逻队与结构刷怪覆盖（cl-pillager，2026-11-22）
 
