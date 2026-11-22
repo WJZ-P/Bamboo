@@ -12,7 +12,10 @@
 
 use mc_bamboo_blocks::{
     World,
-    entity::mob::{DamageSource, effects::EffectInstance},
+    entity::{
+        JavaRandom,
+        mob::{DamageSource, effects::EffectInstance},
+    },
 };
 use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3, mth};
 use mc_bamboo_data::{
@@ -1108,32 +1111,36 @@ fn post_attack_effects(world: &mut World<'_>, entity_id: i32, held: &ItemStack, 
     }
     let bane = enchantment_level(held, "minecraft:bane_of_arthropods");
     if bane > 0 && entity_in_tag("minecraft:sensitive_to_bane_of_arthropods", entity_type) {
-        // `ApplyMobEffect(SLOWNESS, 1.5s, 1.5+0.5×(L−1)s, 3, 3)`：
-        // 时长在 [30, 30+10×(L−1)] 刻之间取随机，等级恒为 3（缓慢 IV）。
-        let max_ticks = 30 + 10 * (bane - 1);
-        let ticks = sweep_slowness_ticks(world, entity_id, max_ticks);
-        world.add_mob_effect(
-            entity_id,
-            EffectInstance::with_amplifier(mob_effect::SLOWNESS, ticks, 3),
-        );
+        let drawn = world.with_mob_random(entity_id, |random| bane_slowness(random, bane));
+        if let Some((ticks, amplifier)) = drawn {
+            world.add_mob_effect(
+                entity_id,
+                EffectInstance::with_amplifier(mob_effect::SLOWNESS, ticks, amplifier),
+            );
+        }
     }
 }
 
-/// `Mth.randomBetween(random, min, max) × 20` 的官方取整；随机源是目标生物自己的
-/// `getRandom()`，这里按 `[30, max]` 均匀分布取一次 `nextFloat`。
+/// `ApplyMobEffect` 给节肢杀手挂的缓慢 IV：三次取数都用受害者自己的随机源，
+/// 顺序是 `getRandomElement`（单元素 `HolderSet` 也消费一次 `nextInt(1)`）、
+/// 时长、等级。时长 `[1.5, 1.5 + 0.5×(L−1)]` 秒 ×20 取整，等级 `[3, 3]`。
 ///
-/// `Mth.randomBetween(random, min, max) × 20`, drawn from the target's own
-/// `getRandom()`; one `nextFloat` over `[30, max]`.
-fn sweep_slowness_ticks(_world: &mut World<'_>, _entity_id: i32, max_ticks: i32) -> i32 {
-    // 官方 `ApplyMobEffect` 先从 `HolderSet` 取一个元素，再各取一次随机定
-    // 时长和等级。Bamboo 没有把生物随机源暴露到这里，用最短时长（30 刻）
-    // 保守实现，见 README 已知限制。
-    //
-    // Vanilla draws from the mob's own random for duration and amplifier.
-    // Bamboo does not expose that source here, so the minimum (30 ticks) is
-    // used; see README known limits.
-    let _ = max_ticks;
-    30
+/// The Slowness IV `ApplyMobEffect` applies for Bane of Arthropods: three draws
+/// from the victim's own random, in vanilla order — `getRandomElement` (a
+/// single-element `HolderSet` still consumes `nextInt(1)`), duration, amplifier.
+/// Duration is `[1.5, 1.5 + 0.5×(L−1)]` seconds ×20, rounded; amplifier is 3.
+fn bane_slowness(random: &mut JavaRandom, level: i32) -> (i32, i32) {
+    let min_seconds = 1.5_f32;
+    let max_seconds = 1.5 + 0.5 * (level - 1) as f32;
+    let min_amplifier = 3.0_f32;
+    let max_amplifier = 3.0_f32;
+    let _ = random.next_int_bounded(1);
+    let duration = random.next_float() * (max_seconds - min_seconds) + min_seconds;
+    let amplifier = random.next_float() * (max_amplifier - min_amplifier) + min_amplifier;
+    (
+        (duration * 20.0).round() as i32,
+        amplifier.round().max(0.0) as i32,
+    )
 }
 
 #[cfg(test)]
@@ -1211,6 +1218,160 @@ mod tests {
         );
         assert_eq!(damage_bonus(&bane, spider), 5.0);
         assert_eq!(damage_bonus(&bane, zombie), 0.0);
+    }
+
+    /// 官方 `ApplyMobEffect` 对节肢杀手的三次取数全来自受害者自己的随机源，
+    /// 顺序是 `nextInt(1)`、时长、等级；等级恒为 3，L=1 时时长恒 30 刻。
+    ///
+    /// Vanilla `ApplyMobEffect` for Bane of Arthropods makes all three draws from
+    /// the victim's random in the order `nextInt(1)`, duration, amplifier. The
+    /// amplifier is always 3 and L=1 always yields 30 ticks.
+    #[test]
+    fn bane_slowness_draws_three_times_from_the_mob_random() {
+        let mut random = JavaRandom::new(12_345);
+        let mut reference = JavaRandom::new(12_345);
+        let (ticks, amplifier) = bane_slowness(&mut random, 1);
+        let _ = reference.next_int_bounded(1);
+        let _ = reference.next_float();
+        let _ = reference.next_float();
+        assert_eq!(ticks, 30, "L=1 duration is the constant 1.5s");
+        assert_eq!(amplifier, 3);
+        // 三次取数之后两个随机源的状态一致。
+        // Both sources are in the same state after the three draws.
+        assert_eq!(random.next_long(), reference.next_long());
+
+        // L=3：时长落在 [30, 50) 刻。
+        // L=3: the duration lands in [30, 50) ticks.
+        let mut random = JavaRandom::new(7);
+        let mut reference = JavaRandom::new(7);
+        let (ticks, _) = bane_slowness(&mut random, 3);
+        let _ = reference.next_int_bounded(1);
+        let duration = reference.next_float() * (2.5 - 1.5) + 1.5;
+        assert_eq!(ticks, (duration * 20.0).round() as i32);
+        assert!((30..50).contains(&ticks), "{ticks}");
+    }
+
+    /// 攻击路径确实从**受害者**的随机源取数：打完蜘蛛后它的随机源正好前进三次，
+    /// 缓慢时长与按同样三次取数算出来的一致。世界随机源不在这一步被消耗。
+    ///
+    /// The attack path really draws from the **victim's** random: after hitting a
+    /// spider its random is exactly three draws ahead and the Slowness duration
+    /// matches the same three draws. The world random is not touched here.
+    #[test]
+    fn bane_slowness_draws_from_the_victim_in_the_attack_path() {
+        use mc_bamboo_blocks::entity::mob::MobType;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            3,
+        );
+        region.players.get_mut(&id).unwrap().attack_strength_ticker = 100;
+        let spider = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+                MobType::Spider,
+                Vec3::new(2.5, 64.0, 0.5),
+            ));
+        let before = region.entities.get(spider).expect("spider").random;
+        let sword = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            3,
+        );
+        // 直接调 `land_attack` 命中后调的 `post_attack_effects`，跳过 `hurt_mob`
+        // 里受伤音高的两次取数，才能精确锁住这三次。
+        //
+        // Call the `post_attack_effects` that `land_attack` runs on a hit,
+        // skipping the two hurt-sound pitch draws inside `hurt_mob`, so the
+        // three draws can be pinned exactly.
+        let mut expected = before;
+        let (ticks, amplifier) = bane_slowness(&mut expected, 3);
+        {
+            let (mut level, block_ticks) = region.block_level();
+            let mut world = World::new(&mut level, block_ticks);
+            post_attack_effects(
+                &mut world,
+                spider,
+                &sword,
+                mc_bamboo_data::registries::entity_type::SPIDER,
+            );
+        }
+
+        let entity = region.entities.get(spider).expect("spider");
+        let effect = entity
+            .kind
+            .mob()
+            .and_then(|mob| mob.effects.get(mob_effect::SLOWNESS))
+            .expect("Bane of Arthropods applies Slowness");
+        assert_eq!(effect.duration, ticks);
+        assert_eq!(effect.amplifier, amplifier);
+        assert_eq!(
+            entity.random.state(),
+            expected.state(),
+            "the victim random advanced by exactly the three ApplyMobEffect draws"
+        );
+    }
+
+    /// 完整的 `on_attack` 走到节肢杀手：蜘蛛被挂上缓慢 IV（等级 3），时长落在
+    /// `[30, 50)` 刻。这里不复述精确取数——`hurt_mob` 的受伤音高也会消耗两次
+    /// 受害者随机数，精确值由上面那条直接调 `post_attack_effects` 的测试锁住。
+    ///
+    /// The full `on_attack` reaches Bane of Arthropods: the spider gets Slowness IV
+    /// (amplifier 3) for `[30, 50)` ticks. This does not pin the exact draw because
+    /// `hurt_mob`'s hurt-sound pitch also consumes two victim draws; the exact
+    /// values are pinned by the `post_attack_effects` test above.
+    #[test]
+    fn attack_applies_bane_slowness_to_a_spider() {
+        use mc_bamboo_blocks::entity::mob::MobType;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            3,
+        );
+        region.players.get_mut(&id).unwrap().attack_strength_ticker = 100;
+        let spider = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+                MobType::Spider,
+                Vec3::new(2.5, 64.0, 0.5),
+            ));
+
+        on_attack(&mut region, id, spider);
+
+        let entity = region.entities.get(spider).expect("spider");
+        let effect = entity
+            .kind
+            .mob()
+            .and_then(|mob| mob.effects.get(mob_effect::SLOWNESS))
+            .expect("Bane of Arthropods applies Slowness");
+        assert_eq!(effect.amplifier, 3);
+        assert!((30..50).contains(&effect.duration), "{}", effect.duration);
     }
 
     #[test]

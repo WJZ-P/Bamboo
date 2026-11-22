@@ -655,7 +655,8 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `× 0.6` 并 `setSprinting(false)`。
 - **附魔与效果**：锋利 `1 + 0.5×(L−1)`、亡灵 / 节肢 `2.5×L`（按生成的实体类型
   标签判定），火焰附加 `4×L` 秒点燃、节肢杀手挂缓慢 IV（`doSweepAttack` 对每个横扫
-  命中的 nearby 也调一次 `doPostAttackEffects`）；`hurtEnemy` 扣 1 点耐久；
+  命中的 nearby 也调一次 `doPostAttackEffects`；缓慢时长按 `ApplyMobEffect` 从受害者
+  自己的随机源取三次 `nextInt(1)` / 时长 / 等级，等级恒 3）；`hurtEnemy` 扣 1 点耐久；
   打中加 0.1 饥饿消耗、记 `lastHurtMob`。26.3 的数据驱动附魔表由生成器导出，
   这里只按 `Enchantments.java` 的 `AddValue` / `Fraction` 公式算。
 - **发包**：`world.play_sound` 把攻击音效记进同一个 `World` 的效果列表，落地后
