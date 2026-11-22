@@ -1503,6 +1503,7 @@ impl Report {
                     13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
                     14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
                     18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
+                    19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
@@ -1602,7 +1603,13 @@ impl Report {
                             mob.y_body_rot = yaw;
                         }
                     }
-                    if cow.age != 0 && !slime {
+                    let tadpole = kind == mc_bamboo_blocks::entity::mob::MobType::Tadpole;
+                    if tadpole {
+                        // 蝌蚪的「年龄」那一列是它自己的 `Tadpole.age`。
+                        // For tadpoles the age column is their own `Tadpole.age`.
+                        entity.with_mob(|_, mob| mob.tadpole_age = cow.age);
+                    }
+                    if cow.age != 0 && !slime && !tadpole {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
                         let baby = zombie_kind || cow.age < 0;
@@ -3613,7 +3620,13 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         fire: entity.remaining_fire_ticks,
         air: mob.air_supply,
         seed: entity.random.state(),
-        age: mob.age,
+        age: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Tadpole {
+            // 蝌蚪：自己的年龄，锁住时再加 `1 << 20`。
+            // Tadpoles: their own age, plus `1 << 20` while locked.
+            mob.tadpole_age + if mob.age_locked { 1 << 20 } else { 0 }
+        } else {
+            mob.age
+        },
         love: mob.in_love,
         lh: mob.left_handed,
         fr: mob

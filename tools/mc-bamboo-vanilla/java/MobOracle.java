@@ -1521,6 +1521,98 @@ public final class MobOracle {
             hurt.player(2.5, 64.0, 0.5, Items.AIR);
             hurt.hurts.add(new double[] {40, 0, 2.0, 0});
             scenes.add(hurt);
+            // 组里后来的成员按概率 `setAge(-24000)`：青蛙不算幼年、年龄不涨，喂了也不求爱。
+            // A later group member rolled `setAge(-24000)`: a frog is no baby, its age
+            // never rises and feeding does not put it in love.
+            Scene stuck = new Scene("frog_negative_age").ticks(200);
+            Scenes.ground(stuck, 15);
+            stuck.mob(18, 0.5, 64.0, 0.5, 0.0F, 83L, -24000);
+            stuck.player(2.5, 64.0, 0.5, Items.SLIME_BALL);
+            stuck.interact(20, 0, 0, slimeBall, 0);
+            scenes.add(stuck);
+            addTadpoleScenes(scenes);
+        }
+
+        /**
+         * 蝌蚪自己的 `age`，锁住年龄时再加 `1 << 20`。
+         *
+         * <p>The tadpole's own `age`, plus `1 << 20` while its age is locked.
+         */
+        static int tadpoleAge(net.minecraft.world.entity.animal.frog.Tadpole tadpole) {
+            int age = getInt(net.minecraft.world.entity.animal.frog.Tadpole.class, tadpole, "age");
+            return age + (tadpole.isAgeLocked() ? 1 << 20 : 0);
+        }
+
+        static void addTadpoleScenes(List<Scene> scenes) {
+            int slimeBall = BuiltInRegistries.ITEM.getId(Items.SLIME_BALL);
+            int dandelion = BuiltInRegistries.ITEM.getId(Items.GOLDEN_DANDELION);
+            int waterBucket = BuiltInRegistries.ITEM.getId(Items.WATER_BUCKET);
+            for (long seed : new long[] {11L, 23L}) {
+                // 水里：鱼的随机游泳目标和大脑的游泳漫步一起跑。
+                // In water: the fish swim goal and the brain's swim stroll run together.
+                Scene swim = new Scene("tadpole_swim_" + seed).ticks(600);
+                pool(swim);
+                swim.mob(19, 0.5, 60.0, 0.5, 0.0F, seed, 0);
+                scenes.add(swim);
+            }
+            // 拿粘液球的玩家：大脑要跟过去，鱼的 `AvoidEntityGoal` 要躲开；喂食催熟，
+            // 金蒲公英锁住再解开年龄。
+            // A player with a slime ball: the brain follows while the fish
+            // `AvoidEntityGoal` flees; feeding speeds growth and a golden dandelion locks
+            // and unlocks the age.
+            Scene tempt = new Scene("tadpole_tempt").ticks(400);
+            pool(tempt);
+            tempt.mob(19, 0.5, 60.0, 0.5, 0.0F, 31L, 0);
+            tempt.mob(19, -3.5, 60.0, 2.5, 0.0F, 37L, 12000);
+            tempt.player(4.5, 60.0, 0.5, Items.SLIME_BALL);
+            tempt.interact(20, 0, 0, slimeBall, 0);
+            tempt.interact(22, 1, 0, slimeBall, 0);
+            tempt.interact(40, 0, 0, dandelion, 0);
+            tempt.interact(60, 0, 0, slimeBall, 0);
+            tempt.interact(120, 0, 0, dandelion, 0);
+            scenes.add(tempt);
+            // 挨打：鱼的 `PanicGoal` 和大脑的 `AnimalPanic` 都会跑；第 200 刻被玩家打死，
+            // 蝌蚪不掉经验（也不取经验的随机数）。
+            // Hurt: both the fish `PanicGoal` and the brain's `AnimalPanic` react; killed by
+            // the player on tick 200, a tadpole drops no experience (and draws nothing for it).
+            Scene hurt = new Scene("tadpole_hurt").ticks(300);
+            pool(hurt);
+            hurt.mob(19, 0.5, 60.0, 0.5, 0.0F, 41L, 0);
+            hurt.player(14.5, 64.0, 14.5, Items.AIR);
+            hurt.hurts.add(new double[] {30, 0, 1.0, 0});
+            hurt.hurts.add(new double[] {200, 0, 20.0, 0});
+            scenes.add(hurt);
+            // 岸上：扑腾、掉氧气、干死。
+            // On land: flopping, losing air and drying out.
+            Scene land = new Scene("tadpole_flop").ticks(400);
+            Scenes.ground(land, 15);
+            land.mob(19, 0.5, 64.0, 0.5, 0.0F, 43L, 0);
+            scenes.add(land);
+            // 年龄到 24000 的那一刻变成青蛙（水里一只、岸上一只）；场景停在变的那一刻：
+            // 新青蛙这边不 tick。
+            // Turning into a frog the tick the age reaches 24000 (one in water, one on
+            // land); the scene stops on that tick because this side never ticks the new frog.
+            Scene grow = new Scene("tadpole_grow_up").ticks(10);
+            pool(grow);
+            grow.mob(19, 0.5, 60.0, 0.5, 0.0F, 47L, 23990);
+            scenes.add(grow);
+            Scene growLand = new Scene("tadpole_grow_up_land").ticks(10);
+            Scenes.ground(growLand, 15);
+            growLand.mob(19, 0.5, 64.0, 0.5, 0.0F, 53L, 23990);
+            scenes.add(growLand);
+            // 水桶装走。
+            // Scooped up with a water bucket.
+            Scene bucket = new Scene("tadpole_bucket").ticks(40);
+            pool(bucket);
+            bucket.mob(19, 0.5, 60.0, 0.5, 0.0F, 59L, 5000);
+            bucket.player(2.5, 60.0, 0.5, Items.WATER_BUCKET);
+            bucket.interact(10, 0, 0, waterBucket, 0);
+            scenes.add(bucket);
+        }
+
+        static void pool(Scene scene) {
+            scene.fill(-8, 56, -8, 8, 56, 8, Scenes.STONE);
+            scene.fill(-8, 57, -8, 8, 63, 8, Scenes.WATER);
         }
 
         /**
@@ -3560,7 +3652,7 @@ public final class MobOracle {
                 || scene.name.startsWith("rabbit_") || scene.name.startsWith("fox_")
                 || scene.name.startsWith("wolf_") || scene.name.startsWith("armadillo_")
                 || scene.name.startsWith("goat_") || scene.name.startsWith("slime_")
-                || scene.name.startsWith("frog_")
+                || scene.name.startsWith("frog_") || scene.name.startsWith("tadpole_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
                 || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
@@ -4889,7 +4981,12 @@ public final class MobOracle {
             case "gen_spawn_panda" -> List.of(new GenScene("gen_panda", 15, 0, false, "bamboo_jungle", 128));
             case "gen_spawn_misc" -> List.of(
                 new GenScene("gen_mooshroom", 15, 0, false, "mushroom_fields", 64),
-                new GenScene("gen_polar_bear", 15, 0, false, "frozen_ocean", 64));
+                new GenScene("gen_polar_bear", 15, 0, false, "frozen_ocean", 64),
+                // 沼泽的表里有羊、猪、鸡、牛和青蛙；红树林沼泽只有青蛙（暖色）。
+                // The swamp table has sheep, pigs, chickens, cows and frogs; mangrove
+                // swamps only have (warm) frogs.
+                new GenScene("gen_swamp", 15, 0, true, "swamp", 300),
+                new GenScene("gen_mangrove_swamp", 15, 0, false, "mangrove_swamp", 300));
             default -> List.of(
                 new GenScene("gen_flat", 15, 0, false, "plains", 500),
                 new GenScene("gen_terrain", 15, 0, true, "plains", 500),
@@ -7422,6 +7519,7 @@ public final class MobOracle {
                 case 13 -> EntityTypes.ARMADILLO.create(level, EntitySpawnReason.COMMAND);
                 case 14 -> EntityTypes.GOAT.create(level, EntitySpawnReason.COMMAND);
                 case 18 -> EntityTypes.FROG.create(level, EntitySpawnReason.COMMAND);
+                case 19 -> EntityTypes.TADPOLE.create(level, EntitySpawnReason.COMMAND);
                 case 60 -> EntityTypes.TURTLE.create(level, EntitySpawnReason.COMMAND);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             };
@@ -7462,6 +7560,11 @@ public final class MobOracle {
                 // Slimes use the age column as their size and keep `age` at 0 like vanilla,
                 // so do not copy the value into `AgeableMob.age`.
                 ageable.setAge(scene.cowAges.get(i));
+            } else if (mob instanceof net.minecraft.world.entity.animal.frog.Tadpole tadpole) {
+                // 蝌蚪不是 `AgeableMob`：「年龄」那一列直接写进它自己的 `age` 字段。
+                // Tadpoles are not `AgeableMob`s: the age column goes straight into their
+                // own `age` field.
+                putInt(net.minecraft.world.entity.animal.frog.Tadpole.class, tadpole, "age", scene.cowAges.get(i));
             }
             if (i == 0 && scene.temper >= 0
                     && mob instanceof net.minecraft.world.entity.animal.equine.AbstractHorse horse) {
@@ -7615,7 +7718,13 @@ public final class MobOracle {
                 ServerPlayer actor = players.get(action[2]);
                 actor.setItemInHand(InteractionHand.MAIN_HAND,
                         new ItemStack(net.minecraft.world.item.Item.byId(action[3])));
-                ((net.minecraft.world.entity.animal.Animal) mobs.get(action[1])).mobInteract(actor, InteractionHand.MAIN_HAND);
+                // 蝌蚪不是 `Animal`，它自己的 `mobInteract` 是公开的。
+                // Tadpoles are not `Animal`s; their own `mobInteract` is public.
+                if (mobs.get(action[1]) instanceof net.minecraft.world.entity.animal.frog.Tadpole tadpole) {
+                    tadpole.mobInteract(actor, InteractionHand.MAIN_HAND);
+                } else {
+                    ((net.minecraft.world.entity.animal.Animal) mobs.get(action[1])).mobInteract(actor, InteractionHand.MAIN_HAND);
+                }
                 // 交互完换回场景给的那件，Bamboo 一侧的玩家视图手里一直是它。
                 actor.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(scene.playerItems.get(action[2])));
             }
@@ -7848,7 +7957,9 @@ public final class MobOracle {
             out.append(",\"fire\":").append(mob.getRemainingFireTicks());
             out.append(",\"air\":").append(mob.getAirSupply());
             out.append(",\"seed\":").append(randomSeed(mob));
-            out.append(",\"age\":").append(mob instanceof net.minecraft.world.entity.AgeableMob ageable ? ageable.getAge() : 0);
+            out.append(",\"age\":").append(mob instanceof net.minecraft.world.entity.AgeableMob ageable ? ageable.getAge()
+                    : mob instanceof net.minecraft.world.entity.animal.frog.Tadpole tadpole
+                            ? FrogScenes.tadpoleAge(tadpole) : 0);
             if (mob instanceof net.minecraft.world.entity.animal.fox.Fox fox) {
                 out.append(",\"foxFlags\":").append(fox.getEntityData().get(
                         (net.minecraft.network.syncher.EntityDataAccessor<Byte>) readStatic(fox.getClass(), "DATA_FLAGS_ID")) & 0xFF);

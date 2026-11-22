@@ -93,6 +93,9 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::FROG_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Frog)
         }
+        _ if ctx.item == items::TADPOLE_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Tadpole)
+        }
         _ if ctx.item == items::PIG_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Pig)
         }

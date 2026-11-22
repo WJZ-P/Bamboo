@@ -918,6 +918,14 @@ pub enum Command {
         dx: f64,
         dz: f64,
     },
+    /// `Tadpole.ageUp`：`convertTo(FROG, ConversionParams.single(this, false, false), ..)`，
+    /// 按 `from` 这一刻的状态造出青蛙；发出者自己随后 `discard`。
+    ///
+    /// `Tadpole.ageUp`: `convertTo(FROG, ConversionParams.single(this, false, false), ..)`
+    /// builds the frog from the state `from` has this tick; the emitter discards itself.
+    TadpoleGrowUp {
+        from: Box<super::mob::Mob>,
+    },
     /// `TryLaySpawnOnFluidNearLand`：`setBlockAndUpdate(pos, FROGSPAWN)`。
     ///
     /// `TryLaySpawnOnFluidNearLand`: `setBlockAndUpdate(pos, FROGSPAWN)`.
@@ -1289,6 +1297,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 false,
             );
         }
+        Command::TadpoleGrowUp { from } => super::mob::tadpole::apply_grow_up(me, &from, world),
         Command::LayFrogspawn { pos } => {
             let state = crate::state::BlockState(mc_bamboo_data::blocks::FROGSPAWN);
             world.set_block(pos, state, 3);

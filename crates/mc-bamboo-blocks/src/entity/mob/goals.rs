@@ -1216,8 +1216,10 @@ pub(super) const fn melee_attack(speed: f64, track_target: bool, class: &'static
 /// Rabbits and foxes wrap a few shared goals in inner subclasses; the oracle
 /// compares the subclass names.
 fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
-    use super::MobType::{Fox, Rabbit, Wolf};
+    use super::MobType::{Fox, Rabbit, Tadpole, Wolf};
     match (kind, name) {
+        // `AbstractFish.FishSwimGoal`。
+        (Tadpole, "RandomSwimmingGoal") => "FishSwimGoal",
         (Wolf, "PanicGoal") => "TamableAnimalPanicGoal",
         (Rabbit, "PanicGoal") => "RabbitPanicGoal",
         (Rabbit, "AvoidEntityGoal") => "RabbitAvoidEntityGoal",
@@ -3380,9 +3382,13 @@ pub(super) fn away_random_pos(
             std::f64::consts::FRAC_PI_2,
         )?;
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`：问的是这只生物自己的导航，
+        // 游泳的导航认的是「不是实心方块」。
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)` asks the mob's own navigation;
+        // a swimming one accepts anything that is not a solid block.
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -3649,9 +3655,13 @@ pub(crate) fn default_random_pos_away(
             f64::from(std::f32::consts::FRAC_PI_2),
         )?;
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`：问的是这只生物自己的导航，
+        // 游泳的导航认的是「不是实心方块」。
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)` asks the mob's own navigation;
+        // a swimming one accepts anything that is not a solid block.
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;

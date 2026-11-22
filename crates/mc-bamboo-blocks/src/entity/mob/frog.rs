@@ -68,9 +68,9 @@ pub(super) fn attributes() -> Attributes {
         (attribute::MAX_HEALTH, 10.0),
         (attribute::STEP_HEIGHT, 1.0),
     ] {
-        if let Some(instance) = table.instance(id) {
-            instance.base = base;
-        }
+        // 改的是属性表的缺省值，不创建实例（实例会被存进存档）。
+        // This changes the supplier default without creating an instance (instances are saved).
+        table.set_base(id, base);
     }
     table
         .entries

@@ -490,6 +490,45 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 执行；大脑跟着实体走，岛拆合不需要新的按实体迁移。
 
 其余已知差异见 README「大脑生物的已知限制」。
+
+### 5.10 青蛙和蝌蚪（2026-11-21，分支 `brain`）
+
+**已做**（代码在 `entity/mob/frog.rs`、`entity/mob/tadpole.rs`、`behaviour/misc/frogspawn.rs`、
+`mc-bamboo-core/src/jmath.rs`）：
+
+| 部分 | 官方 | Bamboo | 验证 |
+|---|---|---|---|
+| 青蛙大脑 | `Frog`、`FrogAi`、`Croak`、`TryFindLand`、`TryFindLandNearLiquid`、`TryLaySpawnOnFluidNearLand`、`StartAttacking`、`StopAttackingIfTargetInvalid`、`ShootTongue`、`RandomStroll.swim` | `frog::Behavior`（挂在 `Kind::Frog`） | `frog_*` 16 场景 |
+| 长跳 | `LongJumpToRandomPos`、`LongJumpToPreferredBlock`、`LongJumpMidJump`、`LongJumpUtil` | `goat::JumpSpec` + `goat::LongJump`（山羊和青蛙共用） | `frog_lily_*`、`frog_long_jump`、`goat_long_jump` |
+| 传感器 | `FrogAttackablesSensor`、`IsInWaterSensor`、`TemptingSensor(FROG_TEMPTATIONS)` | `SensorKind::FrogAttackables` / `IsInWater` / `FrogTemptations` | 同上 |
+| 移动和寻路 | `SmoothSwimmingMoveControl`、`SmoothSwimmingLookControl`、`Frog.FrogPathNavigation` / `FrogNodeEvaluator`、`Frog.travelInWater` | `frog::move_control_tick`、`tadpole::look_control_tick`、`EvaluatorFlags.frog` | `frog_pool_*`、`frog_deep_*`、`tadpole_swim_*` |
+| 蝌蚪 | `Tadpole`、`TadpoleAi`、`AbstractFish` 的三个目标 | `tadpole.rs` + `fish.rs`（`is_fish` 含蝌蚪） | `tadpole_*` 8 场景 |
+| 蛙卵 | `FrogspawnBlock.tick` / `spawnTadpoles` | `behaviour/misc/frogspawn.rs` | 单元测试 |
+| 存档和同步 | `VariantUtils.writeVariant`、`Tadpole.add/readAdditionalSaveData`、`DATA_VARIANT_ID` / `DATA_TONGUE_TARGET_ID` | `mob/nbt.rs`、`entity_tracking.rs`（下标和序列化器由生成器导出） | `chunk-content` 4 个重存用例 |
+
+**几处照官方的怪行为。**
+- `AmphibiousNodeEvaluator.prepare` 把生物的水代价设成 0，`done` 只还原 `WALKABLE` 和
+  `WATER_BORDER`：青蛙构造时设的水代价 4 在第一次寻路之后就一直是 0。Bamboo 在
+  `Navigation.cleared_water_malus` 记这件事，`Mob::pathfinding_malus` 读它
+  （随机落点的 `GoalUtils.hasMalus`、长跳落点判定都走这里）。
+- 蝌蚪没有覆盖 `AbstractFish.registerGoals`，目标选择器和大脑同时在跑；拿着粘液球的玩家
+  一边被大脑跟随、一边被 `AvoidEntityGoal` 躲开。
+- 青蛙 `canBeABaby` 为假，但 `AgeableMob.finalizeSpawn` 照样可能 `setAge(-24000)`：
+  `Mob::is_baby` 对青蛙恒假，年龄不涨也不存。
+- `ShootTongue.eatEntity` 打死猎物后当场 `remove(KILLED)`：猎物只标记丢弃，轮到它时
+  tick 循环把它拿掉、这一刻攒下的事件（死亡动画）照样发出去；同一刻青蛙的
+  `getTongueTarget()` 已经是空的，俯仰归零。
+
+**随机源。** 长跳抽落点、行为时长、产卵后蛙卵的孵化延迟、品种和长跳冷却用世界随机源；
+`LongJumpToPreferredBlock.start` 的「这次挑不挑偏好方块」、漫步落点、喂蝌蚪的粒子位置
+用生物自己的随机源；角度洗牌和闸门洗牌按 `shuffle_seed` 派生（和山羊同一套序号）。
+
+**对拍夹具的三处改动。** 假世界的 `getEntity(int)` 不再返回已移除的实体（真实的
+`ServerLevel` 在 `setRemoved` 的回调里就把它从查找表里拿掉）；假世界的 `setBlock` 不跑
+`onPlace`，蛙卵的孵化延迟在那里补抽一次；大脑快照里跟踪已移除实体的记忆记成 `?`。
+
+**没做**：骆驼（`Camel` / `CamelAi`，见汇报里的排期）；岩浆怪和蛙明灯掉落；蛙卵被下落的
+方块砸碎。
 ### 5.10 中立生物地基和北极熊（2026-11-21）
 
 - **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /

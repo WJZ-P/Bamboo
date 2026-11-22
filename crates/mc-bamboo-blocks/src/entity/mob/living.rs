@@ -1156,6 +1156,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if super::turtle::is_turtle(mob.mob_type) {
         super::turtle::ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Tadpole {
+        super::tadpole::ai_step(me, mob, ctx);
+    }
     if mob.age_lock_particle_timer > 0 {
         if mob.age_lock_particle_timer % 2 == 0 {
             for _ in 0..3 {
@@ -1346,6 +1349,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Frog {
         super::frog::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Tadpole {
+        super::tadpole::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
     }
@@ -1373,6 +1379,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Tadpole {
+        move_control_tick(me, mob, ctx.blocks());
+        super::tadpole::look_control_tick(me, mob);
     } else if mob.mob_type == super::MobType::Frog {
         // `Frog.FrogLookControl.resetXRotOnTick`：舌头有目标时不把俯仰归零。
         // `Frog.FrogLookControl.resetXRotOnTick`: the pitch is kept while the tongue has
@@ -2475,14 +2484,10 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     if !mob.mob_type.is_monster() {
         mob.events.push(MobEvent::Death);
-        animal_death_drops(
-            me,
-            mob,
-            ctx,
-            source,
-            by_player && adult && drops,
-            adult && drops,
-        );
+        // `Tadpole.shouldDropExperience` 为假：不掉经验，也不取那次随机数。
+        // `Tadpole.shouldDropExperience` is false: no experience and no draw for it.
+        let experience = by_player && adult && drops && mob.mob_type != super::MobType::Tadpole;
+        animal_death_drops(me, mob, ctx, source, experience, adult && drops);
         return;
     }
     // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
