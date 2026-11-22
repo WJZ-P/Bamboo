@@ -246,8 +246,10 @@ impl PhantomGoal {
                 }
                 if me.tick_count > *cat_search_tick {
                     *cat_search_tick = me.tick_count + 20;
-                    // Bamboo 还没有猫：16 格内的猫恒为空，不会被吓跑。
-                    // Bamboo has no cats yet: the 16-block cat search is always empty.
+                    // 猫的 16 格搜索和 `cat.hiss()`：`EntityCtx` 只能替自己发声，
+                    // 没有让另一只实体发声的接口，整段先不做。
+                    // The 16-block cat search and `cat.hiss()` need another entity to
+                    // make a sound, which `EntityCtx` cannot express yet; skip it.
                     *scared_of_cat = false;
                 }
                 !*scared_of_cat
