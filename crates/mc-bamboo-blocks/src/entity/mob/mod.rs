@@ -2826,4 +2826,30 @@ mod tests {
             assert_eq!(mob.mob_type, MobType::Zombie);
         });
     }
+
+    /// 每种 `MobType` 的注册表 ID 必须两两不同，且能从 `by_entity_type` 反查回自己。
+    /// 新增生物时若漏进 `ALL` 或撞了已有 ID，官方刷怪表条目会被映射错（或漏映射），
+    /// `natural-spawn` 关键路径随即分叉。
+    ///
+    /// Every `MobType` must have a distinct registry id that resolves back to
+    /// itself via `by_entity_type`. When a kind is added, omitting it from `ALL`
+    /// or reusing an existing id mismaps (or drops) a vanilla spawn-table entry
+    /// and diverges the `natural-spawn` critical path.
+    #[test]
+    fn mob_type_registry_ids_round_trip() {
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in MobType::ALL {
+            let id = kind.entity_type();
+            assert!(
+                seen.insert(id),
+                "duplicate entity_type id {id} for {kind:?}"
+            );
+            assert_eq!(
+                MobType::by_entity_type(id),
+                Some(kind),
+                "by_entity_type({id}) does not resolve to {kind:?}"
+            );
+        }
+        assert_eq!(seen.len(), MobType::ALL.len());
+    }
 }
