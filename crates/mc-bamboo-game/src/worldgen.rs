@@ -84,15 +84,17 @@ pub struct GeneratedChunk {
     pub post_processing: Vec<(i32, i32, i32)>,
 }
 
-// 每条计算线程各缓存一份解析好的 `Worldgen` 和按种子/设置建好的 `Generator`。
-// `chunk::Generator` 里的 `ParameterList` 用 `Cell` 记 R 树的 `lastResult`
-// （官方是 `ThreadLocal`），一个实例不能跨线程共享；按线程各存一份，和官方每线程
-// 一个 `RandomState` 的模型一致。`Worldgen` 用 `Box::leak` 变成 `'static` 引用。
-// Each compute thread caches one parsed `Worldgen` and per-seed `Generator`s.
-// `chunk::Generator`'s `ParameterList` keeps the R-tree `lastResult` in a `Cell`
-// (vanilla: `ThreadLocal`), so one instance cannot be shared across threads;
-// per-thread caches match vanilla's per-thread `RandomState`. `Worldgen` is
-// leaked to a `'static` reference.
+// 解析好的只读 `Worldgen` 全进程共用一份（`Worldgen::shared()`）；每条计算线程只
+// 缓存按种子/设置建好的 `Generator`。`Generator` 引用共享 `Worldgen` 里的群系
+// `ParameterList`，其 R 树 `lastResult` 是「线程 + 表」各自的线程本地状态（官方是
+// `ThreadLocal`），所以查询历史仍按线程隔离。官方的 `RandomState` 由
+// `ChunkMap` 创建和持有，并非每条工作线程一份。
+// The parsed, read-only `Worldgen` is shared process-wide (`Worldgen::shared()`);
+// each compute thread caches only the per-seed/per-settings `Generator`s. A
+// `Generator` references the shared `Worldgen`'s biome `ParameterList`, whose
+// R-tree `lastResult` is per-(thread, table) thread-local state (vanilla:
+// `ThreadLocal`), so lookup history stays thread-isolated. Vanilla creates and
+// owns its `RandomState` in `ChunkMap`, not on each worker.
 thread_local! {
     static GENERATORS: RefCell<HashMap<(i64, &'static str), chunk::Generator<'static>>> =
         RefCell::new(HashMap::new());
@@ -119,10 +121,9 @@ pub(crate) fn with_generator<T>(
     GENERATORS.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
-            // 解析官方数据一次就泄漏成 'static：进程里只有一份，之后一直复用。
-            // Parse the official data once and leak it to 'static; reused thereafter.
-            let worldgen: &'static Worldgen =
-                Box::leak(Box::new(Worldgen::load().map_err(|e| e.to_string())?));
+            // 只读数据全进程共用一份；每线程只建自己的 `Generator`。
+            // The read-only data is shared process-wide; each thread builds its own `Generator`.
+            let worldgen = Worldgen::shared()?;
             let generator = chunk::Generator::with_settings(
                 worldgen,
                 settings_id,
@@ -134,11 +135,13 @@ pub(crate) fn with_generator<T>(
         let generator = cache.get(&key).expect("generator was just inserted");
         // 每次进入生成纯函数都清掉群系参数表的 R 树 `lastResult`：结构阶段的
         // 单点群系查询会改写它，不清的话 1/4 线程的区块到达顺序会让 quart
-        // 群系平局落到不同条目，最终方块不同。官方一条线程一个 `RandomState`，
-        // 这里按线程泄漏的 `Worldgen` 需要显式隔离。
+        // 群系平局落到不同条目，最终方块不同。`lastResult` 现在按「线程 + 表」
+        // 存在线程本地，仍要在每条线程每次生成前显式清到确定起点。
         // Clear the biome parameter list's R-tree `lastResult` on every entry:
         // structure-stage single-point queries mutate it, and without this reset
-        // chunk arrival order changes batch quart-biome tie-breaks.
+        // chunk arrival order changes batch quart-biome tie-breaks. `lastResult`
+        // now lives per (thread, table) in thread-local storage and still has to be
+        // reset to a fixed start before each generation on each thread.
         generator.reset_biome_state();
         f(generator)
     })

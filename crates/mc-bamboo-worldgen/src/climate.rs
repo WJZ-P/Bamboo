@@ -4,7 +4,10 @@
 //! 树的形状会影响平局时挑哪一个，官方的 `build` 怎么排序、怎么分桶，这里照抄。
 //! 查找还带着「上一次的结果」当初始候选，平局时上一次赢，所以这个状态也要留着。
 
-use std::cell::Cell;
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use crate::math::quart_to_block;
 
@@ -171,8 +174,26 @@ pub struct ParameterList<T> {
     points: Vec<ParameterPoint>,
     values: Vec<T>,
     root: Node,
-    /// `Climate.RTree.lastResult`：上一次找到的叶子，当下一次查找的初始候选。
-    last_result: Cell<Option<usize>>,
+    /// 该表在进程内的唯一编号，用来索引线程本地的 `lastResult` 槽。
+    ///
+    /// Process-unique id indexing this table's `lastResult` slot in thread-local storage.
+    id: usize,
+}
+
+/// 给每个 `ParameterList` 分配一个编号。R 树结构只读、可以全进程共享；官方
+/// `Climate.RTree.lastResult` 是实例上的 `ThreadLocal`，所以「上一次命中的叶子」要按
+/// 「线程 + 表」分开存，不能放进共享的只读数据里（`Cell` 会让类型变成 `!Sync`）。
+///
+/// Assign an id to each `ParameterList`. The R-tree is read-only and shareable
+/// process-wide; vanilla's `Climate.RTree.lastResult` is a `ThreadLocal` on the
+/// instance, so the last-hit leaf is kept per (thread, table) and cannot live in the
+/// shared data (a `Cell` would make the type `!Sync`).
+static NEXT_PARAMETER_LIST_ID: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    // 按编号索引的「上一次命中叶子」，每条线程一份，编号不够时按需增长。
+    // Last-hit leaf indexed by id, one per thread, grown on demand.
+    static LAST_RESULTS: RefCell<Vec<Option<usize>>> = const { RefCell::new(Vec::new()) };
 }
 
 impl<T> ParameterList<T> {
@@ -202,7 +223,7 @@ impl<T> ParameterList<T> {
             points,
             values,
             root,
-            last_result: Cell::new(None),
+            id: NEXT_PARAMETER_LIST_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -214,8 +235,15 @@ impl<T> ParameterList<T> {
     #[inline]
     pub fn find_value(&self, target: TargetPoint) -> &T {
         let array = target.to_array();
-        let leaf = search(&self.root, &array, self.last_result.get(), &self.points);
-        self.last_result.set(Some(leaf));
+        let leaf = LAST_RESULTS.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            if slots.len() <= self.id {
+                slots.resize(self.id + 1, None);
+            }
+            let leaf = search(&self.root, &array, slots[self.id], &self.points);
+            slots[self.id] = Some(leaf);
+            leaf
+        });
         &self.values[leaf]
     }
 
@@ -233,9 +261,17 @@ impl<T> ParameterList<T> {
         &self.values[best]
     }
 
-    /// 清掉「上一次的结果」，换种子重新开始时用。
+    /// 清掉当前线程中这张表的「上一次的结果」，从确定的起点重新开始。
+    ///
+    /// Clear this table's previous result on the current thread to start from a fixed state.
     pub fn reset(&self) {
-        self.last_result.set(None);
+        LAST_RESULTS.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            if slots.len() <= self.id {
+                slots.resize(self.id + 1, None);
+            }
+            slots[self.id] = None;
+        });
     }
 }
 
@@ -564,5 +600,29 @@ mod tests {
         let first = *list.find_value(target(0, 0));
         let again = *list.find_value(target(0, 0));
         assert_eq!(first, again);
+    }
+
+    #[test]
+    fn tie_history_is_isolated_by_thread_and_table() {
+        let entries = [(point(-1000, 0), "a"), (point(1000, 0), "b")];
+        let first = ParameterList::new(entries.to_vec());
+        let second = ParameterList::new(entries.to_vec());
+        let tie = target(0, 0);
+        assert_eq!(*first.find_value(target(-1000, 0)), "a");
+        assert_eq!(*second.find_value(target(1000, 0)), "b");
+
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert_eq!(*first.find_value(target(1000, 0)), "b");
+                    assert_eq!(*first.find_value(tie), "b");
+                    first.reset();
+                })
+                .join()
+                .unwrap();
+        });
+
+        assert_eq!(*first.find_value(tie), "a");
+        assert_eq!(*second.find_value(tie), "b");
     }
 }
