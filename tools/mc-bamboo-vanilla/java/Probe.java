@@ -1055,53 +1055,25 @@ public final class Probe {
             }
         }
 
-        /**
-         * 一次走 4 格朝目标靠拢。服务端 tick 落后时会把跑太快的玩家拉回，
-         * 这时从服务端给的位置重新算下一步，连续几次没有前进才放弃。
-         *
-         * Step four blocks towards the target. When the server's tick loop falls
-         * behind it rubber-bands the player; recompute from wherever it put us and
-         * only give up after several steps in a row make no progress.
-         */
         private void stepTowards(Join actor, Vec3 target) throws IOException {
             final double maxStep = 4.0;
-            int stuck = 0;
-            for (int guard = 0; guard < 64 && actor.position.distanceToSqr(target) > maxStep * maxStep; guard += 1) {
+            for (int guard = 0; guard < 32 && actor.position.distanceToSqr(target) > maxStep * maxStep; guard += 1) {
                 Vec3 before = actor.position;
                 Vec3 delta = target.subtract(before);
                 double length = Math.sqrt(before.distanceToSqr(target));
-                Vec3 next = before.add(delta.scale(maxStep / length));
-                boolean tolerated = actor.toleratingPullbacks;
-                actor.toleratingPullbacks = true;
-                actor.moveTo(next, false);
+                actor.moveTo(before.add(delta.scale(maxStep / length)), false);
                 pumpFor(TICK_MILLIS * 2);
-                actor.toleratingPullbacks = tolerated;
                 if (actor.position.distanceToSqr(target) > before.distanceToSqr(target) - 1.0) {
-                    stuck += 1;
-                    if (stuck > 4) {
-                        return;
-                    }
-                } else {
-                    stuck = 0;
+                    return;
                 }
             }
         }
 
         private void walkAndWait(Join actor, Join observer, double deltaZ) throws IOException {
             Vec3 start = actor.position;
-            Remote remote = observer.remote(actor);
             for (int step = 1; step <= WALK_STEPS; step += 1) {
-                int seen = remote.moves + remote.syncs;
                 actor.moveTo(start.add(0.0, 0.0, deltaZ * step), true);
-                // 等观察者看到这一步再走下一步：服务端 tick 落后时多步会被合进同一个 tick，
-                // 那样就数不满 WALK_STEPS 个增量包。
-                //
-                // Let the observer see this step before the next one: when the server's
-                // tick loop falls behind, several steps land in one tick and collapse into
-                // a single delta packet, so fewer than WALK_STEPS would arrive.
-                for (int tick = 0; tick < 40 && remote.moves + remote.syncs == seen; tick += 1) {
-                    pumpFor(TICK_MILLIS);
-                }
+                pumpFor(TICK_MILLIS);
             }
             Vec3 end = actor.position;
             await("movement: " + observer.player + " tracks " + actor.player + " to the real position",
@@ -1109,13 +1081,6 @@ public final class Probe {
         }
 
         private void movement(Join actor, Join observer) throws IOException {
-            // 这一段断言「服务端不会毫无理由地拉回玩家」，所以先关掉容忍；段末再打开，
-            // 后面脚本化的长距离移动（爬柱子、走到容器旁）碰上 tick 落后不算失败。
-            //
-            // This section asserts the server never rubber-bands without a reason, so
-            // tolerance is off here and turned back on at the end: later scripted bulk
-            // movement may be corrected when the server's tick loop runs behind.
-            actor.toleratingPullbacks = false;
             // 先让服务端知道这名玩家站在地上，之后 onGround 不再变。
             actor.moveTo(actor.position, true);
             await("movement: " + actor.player + " stands on the ground",
@@ -1205,7 +1170,6 @@ public final class Probe {
             actor.moveTo(home, true);
             pumpFor(SETTLE_MILLIS);
             check("movement: returning home is not pulled back", actor.pullbacks == beforeHome);
-            actor.toleratingPullbacks = true;
         }
 
         private void clearPlaced(Join actor, BlockPos at) throws IOException {
@@ -1690,30 +1654,6 @@ public final class Probe {
             await("placement: " + actor.player + " gets the ack", () -> actor.lastAck >= sequence);
         }
 
-        /**
-         * 爬三格再点上面的方块。服务端 tick 落后时会像官方一样把跑太快的玩家拉回，
-         * 那一下点击就落空了，所以被拉回就重来，最后停在目标格上。
-         *
-         * Climb three blocks and click the block above. When the server's tick loop
-         * falls behind it rubber-bands a player that outran it, exactly as vanilla
-         * does, so that click missed; retry after a correction and finish standing
-         * on the target.
-         */
-        private void climbAndPlace(Join actor, Vec3 stand, BlockPos clicked) throws IOException {
-            for (int attempt = 0; attempt < 8; attempt += 1) {
-                boolean tolerated = actor.toleratingPullbacks;
-                actor.toleratingPullbacks = true;
-                actor.moveTo(stand, false);
-                pumpFor(TICK_MILLIS);
-                useOn(actor, Items.STONE, clicked, Direction.UP, Vec3.upFromBottomCenterOf(clicked, 1.0));
-                pumpFor(TICK_MILLIS);
-                actor.toleratingPullbacks = tolerated;
-                if (near(actor.position, stand)) {
-                    return;
-                }
-            }
-        }
-
         private void inventory(Join actor, Join observer) throws IOException {
             BlockPos feet = BlockPos.containing(actor.position);
             BlockPos stone = feet.offset(-2, 0, 0);
@@ -2128,14 +2068,12 @@ public final class Probe {
             // sees a move. The player has to climb with it: creative reach cannot touch a 40-block column.
             BlockPos columnBase = feet.offset(4, -1, -4);
             actor.send(new ServerboundSetCarriedItemPacket(1));
-            Vec3 climb = new Vec3(columnBase.getX() - 1.5, 0.0, columnBase.getZ() + 0.5);
             for (int i = 0; i < 40; i++) {
                 BlockPos clicked = columnBase.above(i);
                 if (i % 3 == 0) {
-                    climbAndPlace(actor, new Vec3(climb.x, clicked.getY() + 1.0, climb.z), clicked);
-                } else {
-                    useOn(actor, Items.STONE, clicked, Direction.UP, Vec3.upFromBottomCenterOf(clicked, 1.0));
+                    actor.moveTo(new Vec3(clicked.getX() - 1.5, clicked.getY() + 1.0, clicked.getZ() + 0.5), false);
                 }
+                useOn(actor, Items.STONE, clicked, Direction.UP, Vec3.upFromBottomCenterOf(clicked, 1.0));
             }
             BlockPos support = columnBase.above(40);
             actor.moveTo(new Vec3(support.getX() - 1.5, support.getY(), support.getZ() + 0.5), false);
@@ -3219,11 +3157,6 @@ public final class Probe {
         private boolean walkCenterArrived;
         private boolean spawnAccepted;
         private boolean expectPullback;
-        // 脚本化的长距离移动期间，服务端因为 tick 落后而发来的纠正不算失败。
-        //
-        // During scripted bulk movement a correction caused by the server's tick loop
-        // falling behind is not a failure.
-        private boolean toleratingPullbacks;
         private int pullbacks;
         // 已经发出、还没收到位置包的指令传送。
         //
@@ -3956,13 +3889,6 @@ public final class Probe {
             // position packet must be a pullback the probe expected.
             if (expectedTeleports > 0) {
                 expectedTeleports -= 1;
-            } else if (toleratingPullbacks) {
-                // 服务端 tick 落后时官方也会把跑得比 tick 快的玩家拉回；脚本化的长距离
-                // 移动允许这种纠正，见 `stepTowards` / `climbAndPlace`。
-                //
-                // Vanilla rubber-bands a player that outran its tick clock, so scripted
-                // bulk movement allows the correction; see `stepTowards` / `climbAndPlace`.
-                pullbacks += 1;
             } else {
                 pullbacks += 1;
                 check("play: a later position packet is a correction the probe expected", expectPullback);

@@ -3322,16 +3322,45 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_partition_phase();
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::ScheduledTicks);
+    // TEMP-PERF
+    let t0 = std::time::Instant::now();
     // 官方 `chunkSource.tick` 先刷怪再跑随机刻，位置照它。
-    // Vanilla `chunkSource.tick` spawns before the random ticks; keep that order.
+    // Vanilla `chunkSource.tick` spawns before the random ticks; keep it that way.
     crate::natural_spawn::tick(region);
+    let t1 = std::time::Instant::now();
     interaction::run_random_ticks(region);
+    let t2 = std::time::Instant::now();
     // `ServerChunkCache.tickChunks` 在逐区块随机刻之后才调 `tickCustomSpawners`，主世界的
     // 自定义刷怪器里有 `PhantomSpawner`；世界随机源因此排在随机刻的取数之后。
     // `ServerChunkCache.tickChunks` calls `tickCustomSpawners` after the per-chunk random
     // ticks; the overworld's custom spawners include `PhantomSpawner`, so their level
     // random draws follow the random-tick draws.
     crate::phantom_spawn::tick(region);
+    let t3 = std::time::Instant::now();
+    {
+        use std::cell::Cell;
+        thread_local! {
+            static ACC: [Cell<u64>; 4] = [const { Cell::new(0) }; 4];
+        }
+        ACC.with(|acc| {
+            acc[0].set(acc[0].get() + (t1 - t0).as_nanos() as u64);
+            acc[1].set(acc[1].get() + (t2 - t1).as_nanos() as u64);
+            acc[2].set(acc[2].get() + (t3 - t2).as_nanos() as u64);
+            let n = acc[3].get() + 1;
+            acc[3].set(n);
+            if n % 200 == 0 {
+                eprintln!(
+                    "PERF natural={:.3}ms random={:.3}ms phantom={:.3}ms",
+                    acc[0].get() as f64 / 1e6 / 200.0,
+                    acc[1].get() as f64 / 1e6 / 200.0,
+                    acc[2].get() as f64 / 1e6 / 200.0,
+                );
+                for slot in acc.iter() {
+                    slot.set(0);
+                }
+            }
+        });
+    }
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
     region.profiler.begin_partition_phase();
