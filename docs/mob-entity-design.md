@@ -996,9 +996,10 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 ### 5.21 第 17 轮：补上 `LandRandomPos.generateRandomPosTowardDirection` 的 `isNotStable`（op-misc，2026-11-22）
 
 - **根因**：`goals.rs` 的 `land_toward_direction` 只做了官方的「越界」和「离家」两个判定，少了第三个
-  `!GoalUtils.isNotStable(mob.getNavigation(), pos)`。悬浮落点（`HoverRandomPos`）、陆地落点
-  （`LandRandomPos.getPos`）和 `DefaultRandomPos` 都走这个函数，所以官方会丢掉一批「目标格站不住」的候选，
-  Bamboo 却接受，10 次抽点的接受序列因此不同，从选中落点那一刻起实体随机源就错位两次。
+  `!GoalUtils.isNotStable(mob.getNavigation(), pos)`。Bamboo 里这个函数只有 `hover_random_pos` 调用
+  （`land_random_pos` 是另一份内联实现、本来就带 `stable_destination`），所以只有悬停落点缺这条判定：
+  官方会丢掉一批「目标格站不住」的候选，Bamboo 却接受，10 次抽点的接受序列因此不同，从选中落点那一刻起
+  实体随机源就错位两次。
 - **修复**：补上 `!stable_destination(mob, view, pos)`（飞行导航里是 `FlyingPathNavigation.isStableDestination`
   的实心方块近似，见 README 已知差异）。
 - **验证**：`mob-oracle --only parrot` 4 例 860 刻仍 0 不一致；一个临时的无树桩 400 刻悬停场景（平坦地面、
