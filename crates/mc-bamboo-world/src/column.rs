@@ -311,8 +311,12 @@ impl ChunkColumn {
     /// 把它丢掉、下次用模板重新生成，边界上就少一截光。所以光照必须一起比。
     /// 拿不准时返回 `false`（调用方会当成「不是原样」停放盒子）。
     pub fn is_pristine(&self, template: &ChunkColumn) -> bool {
-        let mine = ChunkColumnParts::read_from(self);
-        let theirs = ChunkColumnParts::read_from(template);
+        let mut mine = ChunkColumnParts::read_from(self);
+        let mut theirs = ChunkColumnParts::read_from(template);
+        // `InhabitedTime` 单独记在 ChunkStore 的表里，取出盒子时才写回 archive；
+        // 它不改变方块、光照或版本号，不该让「原样」判定变成假。
+        mine.archive.inhabited_time = 0;
+        theirs.archive.inhabited_time = 0;
         mine.sections == theirs.sections
             && mine.heightmaps == theirs.heightmaps
             && mine.light == theirs.light

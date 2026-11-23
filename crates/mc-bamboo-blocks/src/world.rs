@@ -4161,6 +4161,7 @@ mod tests {
                 | Effect::OpenCommandBlock { .. }
                 | Effect::HurtPlayer { .. }
                 | Effect::IgnitePlayer { .. }
+                | Effect::DestroyProgress { .. }
                 | Effect::PlayerEffect { .. }
                 | Effect::HealPlayer { .. }
                 | Effect::SleepInBed { .. } => None,

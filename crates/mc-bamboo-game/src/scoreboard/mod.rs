@@ -312,6 +312,26 @@ impl Scoreboard {
         self.membership.get(player).map(String::as_str)
     }
 
+    /// `getTeam()`：计分板名字（玩家是名字，别的实体是 UUID 字符串）所在队伍在队伍表里的
+    /// 下标。生物 AI 只拿它比较是不是同队。
+    ///
+    /// The index of the team a score holder belongs to; mob AI only compares it.
+    pub(crate) fn team_index_of(&self, holder: &str) -> Option<u32> {
+        let name = self.membership.get(holder)?;
+        self.teams
+            .iter()
+            .position(|team| &team.name == name)
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    /// 实体按 UUID 的计分板名字（`Entity.getScoreboardName` = `getStringUUID()`）所在的队伍。
+    pub(crate) fn entity_team_index(&self, uuid: &[u8; 16]) -> Option<u32> {
+        if self.membership.is_empty() {
+            return None;
+        }
+        self.team_index_of(&uuid::Uuid::from_bytes(*uuid).to_string())
+    }
+
     pub(crate) fn team_count(&self) -> usize {
         self.teams.len()
     }

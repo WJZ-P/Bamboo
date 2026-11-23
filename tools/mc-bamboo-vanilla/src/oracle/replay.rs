@@ -1235,6 +1235,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 生物对玩家的伤害意图不属于方块题，游戏层单独处理。
             | Effect::HurtPlayer { .. }
             | Effect::IgnitePlayer { .. }
+            | Effect::DestroyProgress { .. }
             // 药水箭给玩家的效果不属于方块题。
             //
             // Potion-arrow effects on players are not part of a block case.
@@ -1355,6 +1356,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::OpenCommandBlock { .. }
             | Effect::HurtPlayer { .. }
             | Effect::IgnitePlayer { .. }
+            | Effect::DestroyProgress { .. }
             | Effect::PlayerEffect { .. }
             | Effect::HealPlayer { .. }
             | Effect::SleepInBed { .. } => {}

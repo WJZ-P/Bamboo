@@ -117,6 +117,14 @@ pub trait BlockView {
     /// The players, in `ServerLevel.players()` order. Default: none.
     fn for_each_player(&self, _visit: &mut dyn FnMut(&PlayerView)) {}
 
+    /// 一个实体（按 UUID 找它的计分板名字）所在的队伍，和 [`PlayerView::team`]
+    /// 用同一套下标。默认谁都不在队伍里。
+    ///
+    /// The team of an entity looked up by UUID, indexed like [`PlayerView::team`].
+    fn entity_team(&self, _uuid: &[u8; 16]) -> Option<u32> {
+        None
+    }
+
     /// `getSkyDarken()`：昼夜和天气让天空光暗了多少。
     fn sky_darken(&self) -> i32 {
         0
@@ -331,6 +339,9 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 所在队伍（`getTeam()`）在计分板队伍表里的下标，同一刻的快照里一队一个值；
+    /// 不在队伍里是 `None`。只用来判断和生物是不是同队。
+    pub team: Option<u32>,
     /// 朝向，骑乘时用作骑手的朝向（`AbstractHorse.getRiddenRotation`）。
     ///
     /// The facing, used as the rider's rotation while riding
@@ -488,6 +499,10 @@ impl BlockView for World<'_> {
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
         self.level().for_each_player(visit);
+    }
+
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.level().entity_team(uuid)
     }
 
     fn sky_darken(&self) -> i32 {
@@ -883,15 +898,26 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         eggs: i32,
     },
+    /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
+    /// 门上裂纹，`progress` 为 -1 时清掉。
+    DestroyProgress {
+        pos: mc_bamboo_core::BlockPos,
+        progress: i32,
+    },
+    /// `BreakDoorGoal.tick` 到点：`removeBlock(pos, false)`，再 `levelEvent(1021)`
+    /// 和 `levelEvent(2001, 拆完以后这一格的状态)`。
+    BreakDoor {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
+    RemoveMobBlock {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// 兔子吃掉一龄胡萝卜作物。
     ///
     /// A rabbit removes one growth stage from a carrot crop.
     RabbitEatCarrots {
-        pos: mc_bamboo_core::BlockPos,
-    },
-    RemoveMobBlock {
         pos: mc_bamboo_core::BlockPos,
     },
     /// `SilverfishWakeUpFriendsGoal`：`Level.destroyBlock(pos, true, silverfish)`。
@@ -1302,6 +1328,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::mob::fox::apply_pick_berries(world, pos, age, took_one)
         }
         Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
+        Command::DestroyProgress { pos, progress } => {
+            world.push_effect(crate::Effect::DestroyProgress {
+                breaker: me.id,
+                pos,
+                progress,
+            });
+        }
+        Command::BreakDoor { pos } => {
+            let _ = world.remove_block(pos);
+            for (event, data) in [(1021, 0), (2001, world.block_state(pos).0 as i32)] {
+                world.push_effect(crate::Effect::LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    except_initiator: false,
+                });
+            }
+        }
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
         }

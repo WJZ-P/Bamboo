@@ -206,7 +206,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             players,
             ..
         } = &mut *region;
-        let player_views = crate::player::player_views(&*players);
+        let player_views = crate::player::player_views(&*players, &global.scoreboard);
         let block_entity_shapes = crate::entity_view::block_entity_shapes(chunks, block_entities);
         // `pickup_before_entities` 已经跑过；把实体表切进「这一刻正在 tick」的状态。
         // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
@@ -235,6 +235,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             hopper_positions,
             world_border: global.world_border.clone(),
             players: player_views,
+            scoreboard: &global.scoreboard,
         });
         let executor = ScopedThreads { threads };
         let computed = compute(&view, entities, &executor);
@@ -258,6 +259,12 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
 /// 和 `forEachBlockTickingChunk`（里面是 `tickChunk`）是两个独立的循环。Bamboo 按坐标顺序
 /// 遍历，官方按哈希顺序并打乱前者，这是已有的差异。
 pub(crate) fn run_random_ticks(region: &mut Region) {
+    // `tickSpawningChunk` 第一句是 `incrementInhabitedTime`，在 `tickThunder` 之前。
+    // 官方只在 `TickRateManager.runsNormally()` 时走到这里；Bamboo 没有暂停 / 冻结刻，恒为真。
+    // 累加只写 ChunkStore 的单独一张表，不换区块版本、不进存盘集合。
+    for chunk in crate::natural_spawn::inhabited_time_chunks(region) {
+        region.chunks.increment_inhabited_time(chunk);
+    }
     let chunks = random_ticking_chunks(region);
     // 官方 `tickSpawningChunk` 只在下雨且打雷时调 `tickThunder`；晴天一个随机数都不取。
     // 这里先按天气快照短路，避免每 tick 为每个区块建一次方块世界。
@@ -671,6 +678,11 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     world.spawn_player_death_drops(&drops);
                 }
             }
+            Effect::DestroyProgress {
+                breaker,
+                pos,
+                progress,
+            } => mining::send_destroy_progress(region, breaker, pos, progress),
             Effect::IgnitePlayer { target, ticks } => {
                 crate::player_environment::ignite_for_ticks(
                     region,

@@ -668,3 +668,50 @@ impl crate::light::LevelLight {
         self.clone().take_changes().len()
     }
 }
+
+/// `InhabitedTime` 单独记账：累加不换版本号、不进存盘集合；拆岛、合岛逐个区块跟着走、
+/// 一个不丢；取出的盒子带着累计值，放回去再读出来不变；卸载以后条目不留。
+#[test]
+fn inhabited_time_travels_with_its_chunk_without_touching_revisions() {
+    let (mut store, first, second) = two_cluster_store();
+    let all: Vec<ChunkPos> = first.iter().chain(&second).copied().collect();
+    let _ = store.take_changed_chunks();
+    let revisions: Vec<_> = all.iter().map(|&pos| store.revision(pos)).collect();
+    for (index, &pos) in all.iter().enumerate() {
+        for _ in 0..=index {
+            store.increment_inhabited_time(pos);
+        }
+    }
+    let expected: Vec<i64> = (1..=all.len() as i64).collect();
+    let read = |store: &ChunkStore, chunks: &[ChunkPos]| -> Vec<i64> {
+        chunks
+            .iter()
+            .map(|&pos| store.inhabited_time(pos))
+            .collect()
+    };
+    assert_eq!(read(&store, &all), expected);
+    let after: Vec<_> = all.iter().map(|&pos| store.revision(pos)).collect();
+    assert_eq!(after, revisions, "累加不换版本号");
+    assert!(store.take_changed_chunks().is_empty(), "累加不进存盘集合");
+
+    let moved: std::collections::BTreeSet<ChunkPos> = second.iter().copied().collect();
+    let mut island = store.split_off(&moved).expect("光照已算完");
+    assert_eq!(read(&store, &first), expected[..first.len()]);
+    assert_eq!(read(&island, &second), expected[first.len()..]);
+    for &pos in &second {
+        assert_eq!(store.inhabited_time(pos), 0, "搬走的区块不留在原表");
+    }
+    island.absorb_ok(&mut store);
+    let mut merged = island;
+    assert_eq!(read(&merged, &all), expected);
+
+    // 存盘的快照和取出的盒子都带着累计值。
+    let pos = all[0];
+    let snapshot = merged.column_clone(pos).expect("已加载");
+    assert_eq!(snapshot.chunk().archive().inhabited_time, 1);
+    let column = merged.unload(pos).expect("光照已算完");
+    assert_eq!(column.chunk().archive().inhabited_time, 1);
+    assert_eq!(merged.inhabited_time(pos), 0, "卸载以后条目不留");
+    merged.load(pos, column);
+    assert_eq!(merged.inhabited_time(pos), 1, "读盘的值放回表里");
+}

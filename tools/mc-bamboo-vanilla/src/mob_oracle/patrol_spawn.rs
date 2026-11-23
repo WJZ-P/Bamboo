@@ -199,6 +199,10 @@ fn fixture(case: &Case) -> MobLevel {
         entities: Entities::with_next_id(2),
         players: vec![player()],
         game: None,
+        inhabited: Default::default(),
+        mob_teams: Default::default(),
+        ignore_bed_monsters: false,
+        short_hunger: false,
         wrong_was_hurt: false,
     }
 }
@@ -225,6 +229,7 @@ fn player() -> PlayerView {
         armor_cover: 0.0,
         main_hand: 0,
         off_hand: 0,
+        team: None,
         combat: Default::default(),
         effects: Default::default(),
     }

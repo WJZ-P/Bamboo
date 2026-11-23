@@ -156,6 +156,7 @@ pub use island_pool::MAX_ISLAND_THREADS;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use loot_stacks::loot_stack;
 pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};
+pub use natural_spawn::spawning_chunk_candidates;
 pub use outgoing::{Outgoing, Segment, SharedFrames};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
 pub use secure_chat::ServiceProfileKeys;

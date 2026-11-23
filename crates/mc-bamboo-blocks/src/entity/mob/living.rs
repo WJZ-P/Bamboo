@@ -2730,6 +2730,27 @@ pub(crate) fn do_hurt_target(
                 );
             }
         }
+        // `Husk.doHurtTarget`：打中了、空手时给 `HUNGER`，时长 `140 * (int) f`。
+        // `LivingEntity.addEffect(new MobEffectInstance(effect, duration), mob)`：
+        // 等级 0、缺省标志，走和洞穴蜘蛛中毒同一个命令。
+        if hurt
+            && mob.mob_type == super::MobType::Husk
+            && mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                .is_empty()
+        {
+            let difficulty = ctx.blocks().effective_difficulty(me.block_position());
+            ctx.emit(
+                Command::AddPlayerEffect {
+                    target,
+                    effect: mc_bamboo_data::registries::mob_effect::HUNGER,
+                    duration: 140 * difficulty as i32,
+                    amplifier: 0,
+                },
+                me,
+            );
+        }
         // `Mob.playAttackSound` 的熊猫版本：咬中才响。
         // The panda `Mob.playAttackSound`: only on a hit.
         if bites && hurt {
