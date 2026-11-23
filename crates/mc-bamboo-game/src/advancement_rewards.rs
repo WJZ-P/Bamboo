@@ -17,9 +17,31 @@ pub(crate) fn grant(region: &mut Region, player: PlayerId, index: usize) {
         // 官方 `AdvancementRewards.grant`：直接 `giveExperiencePoints`，不发包广播反馈。
         target.give_experience_points(rewards.experience);
     }
-    // 战利品表奖励：`rewards.loot` 是 HolderSet，Bamboo 的战利品表求值入口在
-    // `mc-bamboo-loot`；目前内置进度没有 loot 奖励（导出里全是 recipes / experience），
-    // 这里保留接口，见文档已知差异。
+    // 官方 `AdvancementRewards.grant` 的战利品表奖励：用现有的
+    // `LootTable::from_name` + `get_random_items_with_seed` 求值，产物走
+    // `inventory::give_or_drop`。内置 26.3 定义里没有 loot 奖励，这条路径
+    // 由命令 / 自定义数据包触发。
+    for name in &rewards.loot {
+        let Ok(table) = mc_bamboo_loot::LootTable::from_name(name) else {
+            continue;
+        };
+        let params = mc_bamboo_loot::LootParams::new(0.0);
+        let stacks = table.get_random_items_with_seed(
+            &params,
+            0,
+            Some(&region.loot_sequences),
+            region.random.source(),
+        );
+        if let Ok(stacks) = stacks {
+            for stack in &stacks {
+                crate::inventory::give_or_drop(
+                    region,
+                    player,
+                    crate::loot_stacks::loot_stack(stack),
+                );
+            }
+        }
+    }
     if !rewards.recipes.is_empty()
         && let Some(player) = region.players.get_mut(&player)
     {

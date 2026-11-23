@@ -139,6 +139,8 @@
 mod advancement_command_oracle;
 mod advancement_oracle;
 #[cfg(feature = "oracle")]
+mod advancement_trigger_oracle;
+#[cfg(feature = "oracle")]
 mod beard;
 #[cfg(feature = "oracle")]
 mod chunk_content_oracle;
@@ -275,6 +277,9 @@ const PROBE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/Probe.java";
 const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 #[cfg(feature = "oracle")]
 const ADVANCEMENT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/AdvancementOracle.java";
+#[cfg(feature = "oracle")]
+const ADVANCEMENT_TRIGGER_ORACLE_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/AdvancementTriggerOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
 #[cfg(feature = "oracle")]
@@ -468,6 +473,9 @@ fn run() -> Result<(), String> {
         ["advancement-oracle", java, ref options @ ..] => advancement_oracle_cli(java, options),
         ["advancement-command-oracle", java, ref options @ ..] => {
             advancement_command_oracle_cli(java, options)
+        }
+        ["advancement-trigger-oracle", java, ref options @ ..] => {
+            advancement_trigger_oracle_cli(java, options)
         }
         ["light", java, ref options @ ..] => light(java, options),
         ["menu", java, ref options @ ..] => menu(java, options),
@@ -719,6 +727,19 @@ fn execute_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn execute_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn advancement_trigger_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    advancement_trigger_oracle::run(
+        official_program(java, ADVANCEMENT_TRIGGER_ORACLE_SOURCE)?,
+        options,
+    )
+}
+
+#[cfg(not(feature = "oracle"))]
+fn advancement_trigger_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

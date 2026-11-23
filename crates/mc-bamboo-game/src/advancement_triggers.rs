@@ -289,8 +289,17 @@ pub(crate) fn trigger_location(region: &mut Region, player: PlayerId) {
         return;
     };
     let pos = player.position();
-    // 群系由战利品上下文在后续阶段接入；缺省按主世界的 plains 上报。
-    let biome = "minecraft:plains";
+    // 从 `ChunkStore::biome_at` 查群系注册表 ID，再映射到完整名字。
+    let biome = region
+        .chunks
+        .biome_at(mc_bamboo_core::BlockPos::new(
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ))
+        .and_then(|id| mc_bamboo_data::BIOME_CLIMATES.get(id as usize))
+        .map(|climate| climate.name)
+        .unwrap_or("minecraft:plains");
     let payload = serde_json::json!({
         "x": pos.x,
         "y": pos.y,

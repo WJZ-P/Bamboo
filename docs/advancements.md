@@ -155,6 +155,14 @@
 「待接」的 20 种里，绝大部分事件已经在 `Region::pending_triggers` 的框架覆盖范围内
 （`record` + `drain`），补的是一个调用点，不需要另起事件系统。
 
+`advancement-trigger-oracle java` 用官方 `ServerAdvancementManager` 里
+`Criterion.CODEC` 解析出的**真实触发器实例**对 9 组固定事件输入判定，导出
+6 种触发器（`inventory_changed`、`location`、`consume_item`、`placed_block`、
+`item_used_on_block`、`tick`）共 4070 条判定，Rust 侧用同一组规则复放，
+0 不一致；`--break-self-test` 改坏一处。`loot` 奖励接了现有的
+`LootTable::get_random_items_with_seed` + `inventory::give_or_drop`；
+`location` 的群系接了 `ChunkStore::biome_at` + `BIOME_CLIMATES`。
+
 ## 已知差异
 
 - **没接上的触发器**：58 种里已接 16 种（框架能解析全部 58 种，条件字段里
@@ -175,12 +183,8 @@
   `tame_animal`、`villager_trade`、`ender_eye` 类都只解析不触发：Bamboo 没有
   对应系统，或者现有事件入口还没把事件原文传进来。
 - **`function` 奖励**：Bamboo 没有函数系统，留到第二期。内置 26.3 定义里没有 function 奖励。
-- **`loot` 奖励**：内置定义里没有 loot 奖励，接口保留但没有对拍。
-- **`location` 的群系**：目前只上报主世界 `plains`，群系 / 维度谓词要靠世界生成
-  接入后才能完整判定。
-- **触发器 oracle**：任务书要的「每个接上的触发器用官方真实触发器实例判定」没有
-  单独的对拍；目前只有 `predicate-oracle` 覆盖已有的谓词实现和命令 / 存档 / 进度树
-  对拍。
+- **触发器 oracle 覆盖**：4070 条判定只覆盖 6 种有固定事件输入的触发器；
+  其余已接触发器的官方实例判定还没有单独出题。
 - **图标组件**：见上；奖励里的配方集合目前写在进度档案里，官方的
   `recipeBook` 字段在玩家 NBT，第二期配方书会一起对齐。
 - **统计、遥测事件**：`sends_telemetry_event` 照官方编码进包，但服务端不上报遥测。
