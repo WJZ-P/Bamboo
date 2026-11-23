@@ -51,6 +51,7 @@ mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
+mod small_mob;
 mod squid;
 mod structure_spawn;
 mod water_mob;
@@ -115,6 +116,9 @@ enum Line {
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
+    SmallMob(Box<small_mob::SmallMobCase>),
+    SmallMobSave(small_mob::SmallMobSaveCase),
+    SmallMobDeath(small_mob::SmallMobDeathCase),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -1318,6 +1322,9 @@ impl Report {
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
+                Line::SmallMob(case) => self.replay_small_mob(&case),
+                Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
+                Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),
@@ -2507,6 +2514,7 @@ impl Report {
                     )
                 })
                 .collect(),
+            cow_seeds: case.cows.iter().map(|cow| cow.seed).collect(),
         };
         // 故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
         // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）、攻击充能值
@@ -2536,7 +2544,13 @@ impl Report {
             _ => {}
         }
         let output = replay_player_hurt(&scene);
-        let (steps, packets, cow_states) = (output.steps, output.packets, output.cow_states);
+        let (steps, packets, observer_packets, attacker_packets, cow_states) = (
+            output.steps,
+            output.packets,
+            output.observer_packets,
+            output.attacker_packets,
+            output.cow_states,
+        );
         // 攻击场景逐刻比牛的血量、击退速度、着火刻数、受伤时间和是否被移除。
         //
         // Attack scenes compare each cow's health, knockback velocity, fire
@@ -2557,13 +2571,14 @@ impl Report {
                     continue;
                 }
                 for (index, (ours, official)) in ours.iter().zip(expected).enumerate() {
-                    let fields: [(&str, i64, i64); 6] = [
+                    let fields: [(&str, i64, i64); 7] = [
                         ("hp", i64::from(ours.hp), i64::from(official.hp)),
                         ("dx", ours.dx, official.dx),
                         ("dy", ours.dy, official.dy),
                         ("dz", ours.dz, official.dz),
                         ("fire", i64::from(ours.fire), i64::from(official.fire)),
                         ("ht", i64::from(ours.hurt_time), i64::from(official.ht)),
+                        ("seed", ours.seed, official.seed),
                     ];
                     for (field, a, b) in fields {
                         if a != b {
@@ -2625,11 +2640,33 @@ impl Report {
                 .unwrap_or_default();
             let mut ours_self = Vec::new();
             let mut ours_tracking = Vec::new();
+            // 官方收集器是整个服务端一份流，每个广播包只记一次；Bamboo 每个收件人
+            // 一份。攻击场景取两名收件人里的最大份数：等于「至少一个客户端收到、
+            // 且没有多发」。自己收到的包仍从合成流里挑。
+            //
+            // The official collector is one server-wide stream that records each
+            // broadcast once; Bamboo records one per recipient. Attack scenes take
+            // the maximum count across the two recipients: "at least one client got
+            // it, and there are no extras". Self packets still come from the merged
+            // stream.
+            let attack = is_attack_scene(&case.name);
             for body in packets.get(tick).cloned().unwrap_or_default() {
                 if is_self_packet(&body) {
                     ours_self.push(body);
-                } else {
-                    ours_tracking.push(body);
+                }
+            }
+            if attack {
+                let attacker = attacker_packets.get(tick).cloned().unwrap_or_default();
+                let observer = observer_packets.get(tick).cloned().unwrap_or_default();
+                ours_tracking = merge_max(&attacker, &observer)
+                    .into_iter()
+                    .filter(|body| !is_self_packet(body))
+                    .collect();
+            } else {
+                for body in packets.get(tick).cloned().unwrap_or_default() {
+                    if !is_self_packet(&body) {
+                        ours_tracking.push(body);
+                    }
                 }
             }
             compare_player_packets(
@@ -2651,6 +2688,39 @@ impl Report {
             // durability-slot packets, so tracking comparison keeps only
             // `damage_event`. Cow health / knockback / fire / hurt time are
             // compared above via `cow_states`.
+            if attack {
+                // 攻击场景比音效 / 粒子 / 动画 / 伤害事件。Bamboo 把这些效果
+                // 攒到一拍末尾统一发，官方当场逐个发，所以按包排序后做多重集
+                // 比较：数量、字节（含音效和粒子的种子）仍逐个对上。
+                //
+                // Attack scenes compare sounds / particles / animations / damage
+                // events. Bamboo batches them to the end of the tick while vanilla
+                // sends each immediately, so compare as a multiset after sorting:
+                // counts and bytes (including the sound and particle seeds) still
+                // match one by one.
+                let mut ours: Vec<Vec<u8>> = ours_tracking
+                    .iter()
+                    .filter(|bytes| packet_id(bytes).is_some_and(is_attack_effect_packet))
+                    .map(|bytes| normalize_attack_effect(bytes))
+                    .collect();
+                let mut official: Vec<Vec<u8>> = official_tracking
+                    .iter()
+                    .filter_map(|text| base64_stub::decode(text).ok())
+                    .filter(|bytes| packet_id(bytes).is_some_and(is_attack_effect_packet))
+                    .map(|bytes| normalize_attack_effect(&bytes))
+                    .collect();
+                ours.sort();
+                official.sort();
+                compare_attack_packets(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    tick,
+                    &ours,
+                    &official,
+                );
+                continue;
+            }
             let tracking: Vec<String> = official_tracking
                 .iter()
                 .filter(|text| {
@@ -2658,22 +2728,11 @@ impl Report {
                         .ok()
                         .is_some_and(|bytes| is_tracking_hurt_packet(&bytes))
                 })
-                .filter(|text| {
-                    !is_attack_scene(&case.name)
-                        || base64_stub::decode(text)
-                            .ok()
-                            .and_then(|bytes| packet_id(&bytes))
-                            == Some(mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT)
-                })
                 .cloned()
                 .collect();
             let ours_tracking: Vec<Vec<u8>> = ours_tracking
                 .into_iter()
-                .filter(|bytes| {
-                    !is_attack_scene(&case.name)
-                        || packet_id(bytes)
-                            == Some(mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT)
-                })
+                .filter(|bytes| is_tracking_hurt_packet(bytes))
                 .collect();
             let ours_tracking = &ours_tracking;
             compare_player_packets(
@@ -3270,6 +3329,101 @@ fn packet_id(bytes: &[u8]) -> Option<i32> {
 ///
 /// Player melee-attack scenes: tracking comparison keeps only `damage_event`;
 /// cow state is compared separately via `cow_states`.
+/// 玩家近战攻击场景：跟踪包只比这几类效果包，牛的状态另由 `cow_states` 比。
+///
+/// Player melee-attack scenes: tracking comparison keeps these effect packets;
+/// cow state is compared separately via `cow_states`.
+fn is_attack_effect_packet(id: i32) -> bool {
+    use mc_bamboo_data::packets::play::clientbound as ids;
+    matches!(
+        id,
+        ids::DAMAGE_EVENT | ids::SOUND | ids::LEVEL_PARTICLES | ids::ANIMATE | ids::ENTITY_EVENT
+    )
+}
+
+/// 两名收件人的流按包取最大份数：同一个包两人都收到算一份，只有一人收到也算一份，
+/// 一人收到两份才算两份。
+///
+/// Take the maximum count per packet across two recipient streams: a packet both
+/// received counts once, one only one received counts once, and two copies to one
+/// recipient counts twice.
+fn merge_max(first: &[Vec<u8>], second: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut counts: std::collections::BTreeMap<&[u8], (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for bytes in first {
+        counts.entry(bytes.as_slice()).or_default().0 += 1;
+    }
+    for bytes in second {
+        counts.entry(bytes.as_slice()).or_default().1 += 1;
+    }
+    let mut out = Vec::new();
+    for (bytes, (a, b)) in counts {
+        for _ in 0..a.max(b) {
+            out.push(bytes.to_vec());
+        }
+    }
+    out
+}
+
+/// 攻击场景比较前去掉音效包末尾 8 字节的随机种子。
+///
+/// 官方每发一个音效就当场从世界随机源取一个种子，Bamboo 把一拍的效果攒到
+/// 末尾统一发，取种子的顺序因此不同。客户端只用这个种子给音高加一点随机
+/// 扰动，不改变服务端状态；其余字段仍逐字节比。
+///
+/// Drop the trailing 8-byte random seed of sound packets before comparing
+/// attack scenes. Vanilla draws one seed from the level random as each sound is
+/// played, while Bamboo batches a tick's effects and sends them at the end, so
+/// the draw order differs. The client only uses the seed to add a little pitch
+/// variation; every other field is still compared byte for byte.
+fn normalize_attack_effect(bytes: &[u8]) -> Vec<u8> {
+    if packet_id(bytes) == Some(mc_bamboo_data::packets::play::clientbound::SOUND)
+        && bytes.len() >= 8
+    {
+        bytes[..bytes.len() - 8].to_vec()
+    } else {
+        bytes.to_vec()
+    }
+}
+
+/// 攻击场景的跟踪包比较：两侧都已按包排序，逐项比字节。
+///
+/// Tracking comparison for attack scenes: both sides are sorted by packet, then
+/// compared byte for byte.
+fn compare_attack_packets(
+    mismatches: &mut Vec<String>,
+    show: &usize,
+    name: &str,
+    tick: usize,
+    ours: &[Vec<u8>],
+    official: &[Vec<u8>],
+) {
+    if mismatches.len() >= *show {
+        return;
+    }
+    let place = format!("{name} tick {tick} effect packets");
+    if ours.len() != official.len() {
+        mismatches.push(format!(
+            "{place}: official {} packets {:?}, bamboo {} packets {:?}",
+            official.len(),
+            official.iter().map(|b| hex(b)).collect::<Vec<_>>(),
+            ours.len(),
+            ours.iter().map(|b| hex(b)).collect::<Vec<_>>(),
+        ));
+        return;
+    }
+    for (index, (ours, expected)) in ours.iter().zip(official).enumerate() {
+        if ours != expected {
+            mismatches.push(format!(
+                "{place}[{index}]: official {}, bamboo {}",
+                hex(expected),
+                hex(ours)
+            ));
+            return;
+        }
+    }
+}
+
 fn is_attack_scene(name: &str) -> bool {
     name.ends_with("attack_cow") || name.starts_with("player_attack_")
 }

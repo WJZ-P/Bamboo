@@ -937,6 +937,17 @@ fn replay_effect_state(region: &region::Region, id: inbound::PlayerId, cows: &[i
 pub struct ReplayPlayerHurtOutput {
     pub steps: Vec<PlayerHurtStep>,
     pub packets: Vec<Vec<Vec<u8>>>,
+    /// 观察者一个人收到的包，按发生顺序。官方的效果包收集器也是一条单收件人
+    /// 的流，攻击场景用它逐刻比较音效 / 粒子 / 动画。
+    ///
+    /// Packets received by the observer alone, in order. The official effect
+    /// collector is a single-recipient stream too; attack scenes compare sounds
+    /// / particles / animations against it.
+    pub observer_packets: Vec<Vec<Vec<u8>>>,
+    /// 攻击者自己收到的包，按发生顺序。
+    ///
+    /// Packets the attacker received, in order.
+    pub attacker_packets: Vec<Vec<Vec<u8>>>,
     pub cow_states: Vec<Vec<CowAttackState>>,
 }
 
@@ -960,9 +971,8 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         }
         fn close(&mut self) {}
     }
-    let frames = |capture: &Capture, other: &Capture| -> Vec<Vec<u8>> {
-        let mut bytes = std::mem::take(&mut *capture.0.lock().unwrap());
-        bytes.extend(std::mem::take(&mut *other.0.lock().unwrap()));
+    let frames = |capture: &Capture| -> Vec<Vec<u8>> {
+        let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
         let mut rest = bytes.as_slice();
         let mut out = Vec::new();
         while !rest.is_empty() {
@@ -1103,6 +1113,19 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
                     .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(x, y, z))),
             );
         }
+        // 官方场景给每头牛设了固定种子；Bamboo 生成时用的是自己的随机源，
+        // 这里照官方种子重设，逐刻才能比较受害者随机源的状态。
+        //
+        // The official scene seeds every cow; Bamboo's spawn uses its own
+        // random, so reset each cow to the official seed to compare the victim
+        // random state per tick.
+        for (index, &seed) in scene.cow_seeds.iter().enumerate() {
+            if let Some(&uid) = real.get(index) {
+                region.entities.with_mut(uid, |entity| {
+                    entity.random = mc_bamboo_blocks::entity::JavaRandom::new(seed);
+                });
+            }
+        }
         (real.first().copied(), real)
     } else {
         (None, Vec::new())
@@ -1110,6 +1133,8 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
     // 初始的 `set_health` 也归到 tick 0，和官方 `doTick` 一样。
     let mut steps = Vec::new();
     let mut packets = Vec::new();
+    let mut observer_packets = Vec::new();
+    let mut attacker_packets = Vec::new();
     player_hurt::tick(&mut region);
     // 官方 `causeFoodExhaustion` 当场写 FoodData；Bamboo 的攻击走 pending，
     // 对拍里在取快照前 flush，才和官方逐刻的 exhaustion 一致。
@@ -1134,7 +1159,13 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         },
     );
     region.links.flush();
-    packets.push(frames(&capture, &observer_capture));
+    let attacker_only = frames(&capture);
+    let observer_only = frames(&observer_capture);
+    let mut merged = attacker_only.clone();
+    merged.extend(observer_only.iter().cloned());
+    packets.push(merged);
+    attacker_packets.push(attacker_only);
+    observer_packets.push(observer_only);
 
     for tick in 1..=scene.ticks {
         for action in scene.actions.iter().filter(|action| action.tick == tick) {
@@ -1194,11 +1225,19 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
         let target = region.players.get(&id).expect("玩家");
         steps.push(PlayerHurtStep::of(target));
         region.links.flush();
-        packets.push(frames(&capture, &observer_capture));
+        let attacker_only = frames(&capture);
+        let observer_only = frames(&observer_capture);
+        let mut merged = attacker_only.clone();
+        merged.extend(observer_only.iter().cloned());
+        packets.push(merged);
+        attacker_packets.push(attacker_only);
+        observer_packets.push(observer_only);
     }
     ReplayPlayerHurtOutput {
         steps,
         packets,
+        observer_packets,
+        attacker_packets,
         cow_states: cow_steps,
     }
 }
@@ -1249,6 +1288,7 @@ fn cow_states(region: &region::Region, cows: &[i32]) -> Vec<CowAttackState> {
                 fire: entity.remaining_fire_ticks,
                 hurt_time: entity.kind.mob().map_or(0, |mob| mob.hurt_time),
                 removed: entity.removed,
+                seed: entity.random.state(),
             },
             None => CowAttackState {
                 removed: true,
@@ -1728,6 +1768,11 @@ pub struct ReplayPlayerHurt {
     pub attack_ground: bool,
     pub attack_enchants: Vec<(String, i32)>,
     pub extra_cow_positions: Vec<(f64, f64, f64)>,
+    /// 每头参战牛的随机源初始状态，按位置顺序；官方场景给每头牛设了同一种子。
+    ///
+    /// Initial random state of each scene cow, in position order; the official
+    /// scene seeds every cow.
+    pub cow_seeds: Vec<i64>,
 }
 
 /// 攻击场景里每头牛的逐刻状态，全部用原始位比较。
@@ -1743,6 +1788,11 @@ pub struct CowAttackState {
     pub fire: i32,
     pub hurt_time: i32,
     pub removed: bool,
+    /// 受害者自己的随机源状态：受伤音高的两次取数、节肢杀手的缓慢全走它。
+    ///
+    /// The victim's own random state: the two hurt-pitch draws and Bane of
+    /// Arthropods' Slowness all read it.
+    pub seed: i64,
 }
 
 #[cfg(feature = "oracle-samples")]

@@ -340,6 +340,7 @@ mod tests {
             &mut world,
             MobType::Pillager,
             BlockPos::new(1, 64, 0),
+            true,
             false,
             None,
         );

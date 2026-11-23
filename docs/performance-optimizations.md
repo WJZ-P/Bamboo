@@ -2213,6 +2213,9 @@ cargo build --release -p mc-bamboo-game --example terrain_cache_bench
 ./target/release/examples/terrain_cache_bench --entry-bytes        # 单条 414720 B
 ./target/release/examples/terrain_cache_bench --chunks 58 --threads 4 --seed 2026
 ./target/release/examples/terrain_cache_bench --chunks 58 --threads 8 --seed 2026
+# 只改地形缓存上限，其余设置保持默认，用来量预算 A/B：
+./target/release/examples/terrain_cache_bench --chunks 8 --threads 2 --terrain-mb 128 --label default
+./target/release/examples/terrain_cache_bench --chunks 8 --threads 2 --terrain-mb 8 --label mb8
 ```
 
 ### 14.5 怎么确认结果没变，以及没做的事
@@ -3549,7 +3552,9 @@ CARVERS 地形和地物写增量仍是进程级的纯函数缓存。Director 在
   OnceLock<Result<Worldgen, String>>` 只解析一次，返回同一份 `&'static Worldgen`；
   `with_generator` / `with_thread` 以及 `processor_lists` / `select_spawn` /
   `noise_sea_level` 等只读调用都改用它。每条线程仍各缓存自己的 `Generator`（编译好的
-  采样器、随机源、临时缓冲），但都引用共享的 `Worldgen`。
+  采样器、随机源、临时缓冲），但都引用共享的 `Worldgen`。`op-memprof` 后续又把只读地物注册表
+  `Registry` 从每 `Generator` 各 `parse` 一份改成解析进 `Worldgen` 一份共享（见
+  `docs/profiling.md` §20.1），结果逐字节不变。
 - 唯一挡住共享的是 `Climate.ParameterList` 的 `last_result: Cell<Option<usize>>`
   （R 树 `lastResult`，官方 `Climate.RTree` 是实例上的 `ThreadLocal`，`Cell` 让
   `Worldgen` 变成 `!Sync`）。改成按「线程 + 表」隔离：`ParameterList` 持一个进程内唯一
@@ -3597,3 +3602,109 @@ release 已知失败见 24.4。合并 `main` 后本轮在合并树上的复测�
 - `compute_pool_tests::inline_and_pool_produce_identical_worlds` 单独用 `--release` 跑时
   会在 `Detached / 4 线程` 的区块 `("region", -13, -1)` 失败；这在父提交 `9f210652`
   上同样失败（分离驱动 + 存档时序，与本次改动无关），标准 debug 配置下通过。
+
+---
+
+## 25. 生物压测：一刻里时间花在哪、并行能拿到多少（设计稿第 3 步，2026-11-23）
+
+这一节只**测量、不改行为**，给 `docs/mob-entity-design.md` 5.22 留性能侧的
+数字和口径。完整场景表、每刻 p50/p95/p99、按生物类型 / 距离档 / 子系统的
+拆分和第 4 步的建议顺序都在 5.22；这里记可复现命令、方法、主要结论和限制。
+
+### 25.1 怎么复现
+
+```bash
+cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+# 单独复现一格：
+MOB_STRESS_SCENE=chase-flat MOB_STRESS_THREADS=0,8 \
+  cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+```
+
+`#[cfg(test)]` + `#[ignore]` 的手工基准在
+`crates/mc-bamboo-blocks/src/entity/mob/timing/stress.rs`；分段探针在
+`timing.rs`，正式构建里 `span!` 等宏展开成空语句、`timing::imp` 模块整个不编译，
+所以计时开关关着时是**零开销**，任何逐刻对拍结果都不变。
+`mc-bamboo-worldgen` 只是 `mc-bamboo-blocks` 的 dev-dependency，用来生成混合
+场景的真噪声地形，正式依赖图不变。
+
+七个场景：围栏牧场 500 / 2000 只（牛羊猪鸡混养 + 一名玩家）、200 只僵尸追
+绕圈走的玩家（平地 / 带墙和坑）、350 只牛挤在 1×1 / 3×3 的石墙塔里、
+两名玩家 + 真噪声地形 + 自然刷怪稳定后的混合场景。
+每场景 × `entity_threads` = 0、1、2、4、8 × 3 轮，每轮 200 刻预热 +
+300 刻测量，取三轮中位数。报告轮 05:25–05:43 的机器负载
+`uptime` **6.14 / 18.07 / 30.02 → 4.25 / 5.59 / 12.31**（同一台 14 核 M4 Pro、
+release、同一次会话，等其它子代理的编译尖峰退下去才开跑）；前几轮负载
+20–70 时绝对值偏大、p95/p99 有尖峰，只取这一轮。
+
+### 25.2 每刻耗时与并行加速（p50，墙上 ms）
+
+| 场景 | 0 | 1 | 2 | 4 | 8 | 0→8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pasture-500 | 4.398 | 4.460 | 3.287 | 2.121 | 1.996 | **2.20×** |
+| pasture-2000 | 24.583 | 28.730 | 18.631 | 13.658 | 10.602 | **2.32×** |
+| chase-flat | 4.685 | 4.812 | 3.256 | 2.388 | 1.926 | **2.43×** |
+| chase-obstacles | 4.645 | 4.743 | 3.174 | 2.151 | 1.792 | **2.59×** |
+| tower-1x1 | 85.462 | 85.010 | 82.436 | 85.603 | 85.451 | 1.00× |
+| tower-3x3 | 27.750 | 27.785 | 26.152 | 25.380 | 25.441 | 1.09× |
+| mixed-natural | 0.971 | 1.027 | 0.718 | 0.608 | 0.572 | **1.70×** |
+
+p95 / p99 见 `docs/mob-entity-design.md` 5.22.2；它们受同机噪声影响较大，
+只作同轮内的相对比较。塔场景加线程没有收益，因为落地阶段是串行的：
+1×1 的 8 线程四段是 0.080（复制）/ 1.265（算）/ 0.112（发布）/
+**84.950（应用命令）** ms/刻，3×3 是 0.061 / 1.157 / 0.091 / **24.308**。
+
+### 25.3 时间花在哪（`threads = 0`，CPU ms/刻）
+
+| 场景 | 移动+碰撞 | 推挤 | 感知/选目标 | 目标/大脑 | 导航 | A\* |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pasture-500 | 1.859 | 1.276 | 0.011 | 0.089 | 0.115 | 0.066 |
+| pasture-2000 | 8.637 | 10.121 | 0.043 | 0.509 | 0.583 | 0.264 |
+| chase-flat | 0.795 | 0.125 | 0.012 | 0.319 | 0.074 | **3.466** |
+| chase-obstacles | 0.854 | 0.148 | 0.014 | 0.297 | 0.074 | **3.176** |
+| tower-1x1 | 0.633 | **84.724** | 0.008 | 0.071 | 0.054 | 0.015 |
+| tower-3x3 | 1.784 | **25.339** | 0.008 | 0.052 | 0.049 | 0.043 |
+| mixed-natural | 0.468 | 0.009 | 0.004 | 0.076 | 0.016 | 0.009 |
+
+（还有 `other` 和 `block-effects` 两段，完整表在 5.22.3；分段是「自身时间」，
+多线程下是各线程 CPU 时间之和，可以大于墙上时间，和框架四段不能相加。）
+
+结论和上几节的直觉不同：**感知和目标决策几乎不花钱**（< 0.32 ms/刻），
+热点按场景分成三类——大牧场是移动/碰撞 + 推挤，追玩家是 A\*，刷怪塔是推挤
+命令的串行落地。这三类要三种不同的优化，不是单靠多线程能解决的。
+
+### 25.4 专门给第 4 步的数字
+
+| 量 | 数字 |
+| --- | --- |
+| 寻路请求 / 刻、展开节点 / 刻 | chase-flat 17.9 条 / 732.5 节点，chase-obstacles 15.4 条 / 704.8 节点，pasture-2000 5.1 条 / 36.6 节点 |
+| 成功 / 失败 | 这些场景的 A\* 全部返回路径（`find_path` 成功 100%）；墙和坑让 obstacles 的请求数略少（15.4 对 17.9），两种场景的 p50 接近 |
+| 可去重的请求（起点格 + 终点 + 体型 + 导航类型全同） | chase-flat **0.5 / 17.9 = 2.8%**，chase-obstacles 0.4 / 15.4 = 2.6%，其余场景 0% |
+| 离最近玩家三档 | chase-flat 131.7 / 67.2 / 1.1 只，2.510 / 2.464 / 0.070 ms；mixed-natural 18.3 / 37.2 / 38.3 只，0.129 / 0.281 / 0.271 ms |
+| 刷怪塔推挤占比 | 1×1 **98.8%**（84.724 / 85.742 ms，122 150 条 `PushMob` 命令/刻）；3×3 **92.2%**（25.339 / 27.492 ms，30 167 条/刻） |
+| `maxEntityCramming`（默认 24）触发 | 单独用默认规则跑 100 刻：1×1 30.56 次伤害判定/刻、剩 24 只；3×3 19.67 次/刻、剩 85 只 |
+
+第 4 步的建议顺序（详见 5.22.5）：① 挤压上限（塔 85.5 → 数毫秒量级，
+是唯一并行救不了的热点）；② 三档降频（混合场景 32 格外占 81% 的生物时间，
+约 0.4–0.55 ms/刻）；③ 寻路阶段（追玩家 69% 的时间在 A\*，但去重只有 2.8%，
+值钱的是批量 / 按节点预算并行 / 结果晚一刻，不是去重本身）；④ 按玩家刷怪上限
+（本轮量不出收益，稳定 92 只、0.971 ms/刻，等有多人多岛压测再做）。
+
+### 25.5 口径和已知限制
+
+- 并行算阶段的只读快照里生物自己还在，`push_entities` 的范围查询会给自己
+  发一条 `Command::PushMob`；`apply_push` 因位移为零直接返回，是空操作，
+  不改变行为。但并行模式的推挤命令数因此系统性偏高（牧场 500 精确
+  162.2 / 刻，并行 659.8 / 刻；混合 92 只 0 / 77），也是框架 `apply` 段的
+  一部分成本。本轮只记录，没有改行为。
+- 塔场景主测量把 `maxEntityCramming` 设 0（不限），否则挤压伤害会把 350 只
+  一批批打死，测不到稳定负载；默认规则下的触发次数单独量，见 25.4。
+- `Targeting` 段只包住 target 选择器；视线判定被目标 / 近战目标 tick 调用，
+  时间落在 `Goals` 段，所以「感知」实际略高于 0.004–0.030 ms。
+- 混合场景是真噪声主世界地形（`Worldgen::shared` + `Generator` 到 CARVERS，
+  种子 20261116，按 quart 群系查刷怪表），但没有地物 / 结构 / 光照 /
+  随机刻 / 计划刻 / 出包，量的是「实体 + 自然刷怪」这一段，不是整刻服务端；
+  地形只在搭场景时生成一次并缓存，不进每刻计时。
+- 这一节没有改任何生产代码路径：`timing.rs` 的新计数、按类型 / 距离档 /
+  寻路 / 推挤的探针和压测场景都只在 `cfg(test)` 下编译。因此
+  `mob-oracle`、`natural-spawn`、探针的对拍结果和 21 节的碰撞快路径数字
+  都不应该因为这一节而变化。

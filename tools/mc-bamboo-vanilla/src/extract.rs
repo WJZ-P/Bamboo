@@ -968,6 +968,17 @@ pub struct ProjectileFacts {
     pub glow_squid_dark_ticks: u8,
     pub bat_flags: u8,
     pub phantom_size: u8,
+    /// 蠹虫 / 末影螨的属性、眼高与寿命上限。
+    ///
+    /// Silverfish / endermite attributes, eye heights and the life cap.
+    pub silverfish_max_health: f64,
+    pub silverfish_movement_speed: f64,
+    pub silverfish_attack_damage: f64,
+    pub endermite_max_health: f64,
+    pub endermite_movement_speed: f64,
+    pub endermite_attack_damage: f64,
+    pub endermite_max_life: i32,
+    pub endermite_xp_reward: i32,
     pub fish_from_bucket: u8,
     pub salmon_variant: u8,
     pub tropical_fish_variant: u8,

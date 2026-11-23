@@ -6,7 +6,10 @@
 
 use std::{
     cell::RefCell,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use crate::math::quart_to_block;
@@ -171,9 +174,9 @@ fn node_distance(space: &[Parameter; PARAMETER_COUNT], target: &[i64; PARAMETER_
 /// `Climate.ParameterList`：一串（参数点，值），带一棵 R 树。
 #[derive(Debug)]
 pub struct ParameterList<T> {
-    points: Vec<ParameterPoint>,
-    values: Vec<T>,
-    root: Node,
+    points: Arc<[ParameterPoint]>,
+    values: Arc<[T]>,
+    root: Arc<Node>,
     /// 该表在进程内的唯一编号，用来索引线程本地的 `lastResult` 槽。
     ///
     /// Process-unique id indexing this table's `lastResult` slot in thread-local storage.
@@ -220,15 +223,30 @@ impl<T> ParameterList<T> {
         let leaves: Vec<Node> = (0..points.len()).map(Node::Leaf).collect();
         let root = build(leaves, &points, children_per_node);
         Self {
-            points,
-            values,
-            root,
+            points: points.into(),
+            values: values.into(),
+            root: Arc::new(root),
+            id: NEXT_PARAMETER_LIST_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    /// 另建一份实例：R 树、参数点和值都共用，只有 `lastResult` 槽（`id`）是新的。
+    /// 官方每份 `ParameterList` 的 `ThreadLocal` 都是独立的，共用槽会改变搜索起点。
+    ///
+    /// A second instance sharing the tree, points and values, with a fresh `lastResult`
+    /// slot (`id`). Vanilla gives every `ParameterList` its own `ThreadLocal`; sharing
+    /// the slot would change the search start point.
+    pub fn fork(&self) -> Self {
+        Self {
+            points: Arc::clone(&self.points),
+            values: Arc::clone(&self.values),
+            root: Arc::clone(&self.root),
             id: NEXT_PARAMETER_LIST_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&ParameterPoint, &T)> {
-        self.points.iter().zip(&self.values)
+        self.points.iter().zip(self.values.iter())
     }
 
     /// `Climate.ParameterList.findValue(target)`，走 R 树。

@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn flat_decoration_distinguishes_lakes_and_void_biome() {
         let data = crate::Worldgen::load().unwrap();
-        let registry = Registry::parse(data.raw()).unwrap();
+        let registry = data.features();
         let biome = registry.biome_id("minecraft:plains").unwrap();
         let mut flat = FlatDecoration {
             biome,
@@ -160,17 +160,17 @@ mod tests {
             layers: &[],
         };
         assert_eq!(
-            flat.features_at(&registry, 1).unwrap(),
+            flat.features_at(registry, 1).unwrap(),
             LAKES.map(|name| registry.placed_id(name).unwrap())
         );
-        assert!(flat.features_at(&registry, 9).unwrap().is_empty());
+        assert!(flat.features_at(registry, 9).unwrap().is_empty());
         flat.biome = registry.biome_id("minecraft:the_void").unwrap();
         assert_eq!(
-            flat.features_at(&registry, 10).unwrap(),
+            flat.features_at(registry, 10).unwrap(),
             [registry.placed_id("minecraft:void_start_platform").unwrap()]
         );
         flat.features = false;
-        assert!(flat.features_at(&registry, 10).unwrap().is_empty());
+        assert!(flat.features_at(registry, 10).unwrap().is_empty());
         assert!(!terrain_layer(blocks::AIR));
         assert!(terrain_layer(blocks::STONE));
     }

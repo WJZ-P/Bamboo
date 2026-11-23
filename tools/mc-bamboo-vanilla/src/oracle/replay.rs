@@ -78,6 +78,8 @@ pub struct Replayed {
     /// The internal seed of `level.random` after the case, compared bit for bit with vanilla
     /// on dispenser and crafter cases.
     pub random_seed: i64,
+    /// 这题生成的实体类型，按生成顺序。
+    pub spawned: Vec<String>,
 }
 
 /// 排着队的计划刻。
@@ -972,7 +974,36 @@ pub fn replay(
         Kind::Item => use_item(&mut level, &mut ticks, &actor, action.hand),
         Kind::Random => random_tick(&mut level, &mut ticks, target),
         Kind::Chunk => tick_chunk(&mut level, &mut ticks, target.chunk(), action.speed),
+        Kind::Explode => {
+            let centre = Vec3::new(
+                f64::from(target.x) + 0.5,
+                f64::from(target.y) + 0.5,
+                f64::from(target.z) + 0.5,
+            );
+            let mut world = mc_bamboo_blocks::World::new(&mut level, &mut ticks);
+            world.explode_tnt(centre, 1.0);
+            mc_bamboo_blocks::Outcome {
+                result: mc_bamboo_blocks::InteractionResult::Success,
+                used_without_item: false,
+                placed_at: None,
+                item_exchange: None,
+                gained: None,
+                effects: world.into_effects(),
+            }
+        }
     };
+    // `EntityType.spawn` 在 `addFreshEntityWithPassengers` 之后调 `Mob.playAmbientSound`，
+    // `Entity.playSound` 再走 `level.playSound(null, ...)`。Bamboo 的这一声记在实体行的
+    // `MobEvent::Sound` 里（游戏层每刻的同步取走发包），不在 `World.effects` 里。方块重放
+    // 要在动作之后、settle 之前把它按 `Effect::Sound` 的编码补进效果列表：官方先走完物品的
+    // `useOn` 才叫这一声，之后才轮到 settle 里的方块音效。
+    //
+    // `EntityType.spawn` calls `Mob.playAmbientSound` after adding the entity, and
+    // `Entity.playSound` goes through `level.playSound(null, ...)`. Bamboo records that
+    // sound on the entity row (`MobEvent::Sound`, drained by the tick's sync), not in
+    // `World.effects`. Add it right after the action and before `settle`: vanilla plays
+    // it after the item's `useOn` and before any settling block sounds.
+    append_mob_sounds(&mut level, &mut outcome);
     // flow 题在动作里已经走到 `game_time + steps`，后面的刻从那里接着数。
     let after_action = match action.kind {
         Kind::Flow => now + i64::from(action.steps),
@@ -1000,6 +1031,16 @@ pub fn replay(
         gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
         random_seed: level.random.source().seed(),
+        spawned: level
+            .world_entities
+            .take_spawn_snapshots()
+            .iter()
+            .map(|entity| {
+                mc_bamboo_data::registries::entity_type::name_of(entity.kind.entity_type())
+                    .unwrap_or("minecraft:unknown")
+                    .to_owned()
+            })
+            .collect(),
     })
 }
 
@@ -1054,7 +1095,7 @@ fn run_flow(
 
 fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
     match kind {
-        Kind::Tick | Kind::Flow | Kind::Random | Kind::Chunk => "ticked",
+        Kind::Tick | Kind::Flow | Kind::Random | Kind::Chunk | Kind::Explode => "ticked",
         Kind::Destroy if result == InteractionResult::Fail => "refused",
         Kind::Destroy => "destroyed",
         Kind::Place | Kind::Use | Kind::Item => match result {
@@ -1116,6 +1157,44 @@ fn contents_of(level: &OracleLevel) -> Vec<ContainerStack> {
         }
     }
     contents
+}
+
+/// 把这一拍攒在实体行上的音效翻译成 `Effect::Sound`，顺序按 uid 和事件顺序。
+///
+/// Translate this step's mob-row sounds into `Effect::Sound`, in uid and event order.
+fn append_mob_sounds(level: &mut OracleLevel, outcome: &mut Outcome) {
+    use mc_bamboo_blocks::entity::mob::MobEvent;
+    use mc_bamboo_data::sounds;
+
+    for (_, events) in level.world_entities.take_mob_events() {
+        for event in events {
+            if let MobEvent::Sound {
+                sound,
+                volume,
+                pitch,
+                position,
+                hostile,
+                ..
+            } = event
+            {
+                outcome.effects.push(Effect::Sound {
+                    sound: i32::from(sounds::sound_event(sound)),
+                    source: if hostile {
+                        sounds::HOSTILE
+                    } else {
+                        sounds::NEUTRAL
+                    },
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    volume,
+                    pitch,
+                    except_initiator: false,
+                    seed: None,
+                });
+            }
+        }
+    }
 }
 
 fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {

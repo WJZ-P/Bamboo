@@ -5,8 +5,6 @@
 //! `Column.scan`, `SpeleothemUtils` predicates/placement, and property-bearing
 //! `pointed_dripstone` block states.
 
-use std::sync::OnceLock;
-
 use mc_bamboo_data::{
     block_id_of_state, block_tag, blocks, facts, registries, state_facts, state_fluid,
 };
@@ -96,30 +94,14 @@ impl FloatProvider {
     }
 }
 
-/// `Mth.SIN_SCALE` 和 65536 项查找表，和 `carver.rs` 的实现逐位一致。
-/// `Mth.SIN_SCALE` and the 65536-entry table, bit-identical to `carver.rs`.
-const SIN_SCALE: f64 = 10_430.378_350_470_453;
-const SIN_MASK: i64 = 65_535;
-static SIN_TABLE: OnceLock<Vec<f32>> = OnceLock::new();
-
-fn sin_table() -> &'static [f32] {
-    SIN_TABLE.get_or_init(|| {
-        (0..65_536)
-            .map(|index| (index as f64 / SIN_SCALE).sin() as f32)
-            .collect()
-    })
-}
-
+/// `Mth.sin(double)` / `cos(double)`：官方 65536 项查找表，全进程只留一份。
+/// `Mth.sin(double)` / `cos(double)`: the official 65536-entry table, one copy per process.
 pub(crate) fn mth_sin(value: f64) -> f32 {
-    let index = ((value * SIN_SCALE) as i64) & SIN_MASK;
-    sin_table()[index as usize]
+    mc_bamboo_core::mth::sin(value)
 }
 
 pub(crate) fn mth_cos(value: f64) -> f32 {
-    // 官方先加 16384.0（double）再 d2i。
-    // Official adds 16384.0 (double) before the double-to-int cast.
-    let index = ((value * SIN_SCALE + 16_384.0) as i64) & SIN_MASK;
-    sin_table()[index as usize]
+    mc_bamboo_core::mth::cos(value)
 }
 
 /// `Mth.clampedMap(double/float, ...)`：inverseLerp 后 clampedLerp。

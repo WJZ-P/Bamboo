@@ -146,7 +146,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 |---|---|---|
 | 1 | 地基：方块状态的寻路类型表和碰撞形状快路径、区块段计数、附近玩家表、实体子索引 | 完成（五项见 5.1） |
 | 2 | 第一批生物，精确模式下和官方逐刻对拍：牛、僵尸、骷髅 | 第一部分（生物地基 + 寻路 + 牛的行为）完成；第二段的生成入口（`/summon`、刷怪蛋）和网络同步完成，见 5.3；死亡掉落经验、存档、交互留下一轮 |
-| 3 | 压测场景（牧场、追玩家、挤一格的刷怪塔），量移动、感知、寻路各占多少 | — |
+| 3 | 压测场景（牧场、追玩家、挤一格的刷怪塔），量移动、感知、寻路各占多少 | 完成（见 5.22；七个场景 × 五种线程数 × 三轮，只测量未改行为） |
 | 4 | 按第 3 步的数字排顺序：寻路阶段、三档降频、挤压上限、按玩家刷怪 | — |
 | 5 | 其余生物分批；村民单独一批 | — |
 
@@ -1091,7 +1091,7 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 - 对拍：`mob-oracle` 原 52 场景加 36 个 `player_hurt_*` 场景，逐刻比血量 / 吸收 /
   无敌帧 / 冷却 / 饥饿 / 速度 / 随机源 / 包字节；`player-data` 增加生命和饥饿的
   非默认往返用例；五处故意改坏（难度缩放、护甲、保护附魔、无敌帧、击退）都能抓到。
-  op-combat 再加 12 个 `player_attack_*` 近战场景（见 6.4）。
+  op-combat 再加 13 个 `player_attack_*` 近战场景（见 6.4）。
 
 ### 6.2 新增的按玩家字段（岛拆合逐个说明）
 
@@ -1130,11 +1130,15 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   `FoodData.tick` / 和平回血 / 饥饿掉血（见第 7 节）。
 - **攻击（op-combat，2026-11-21 起已合入，见 6.4）**：`handleAttack` → `Player.attack`
   的完整链路已经做了：冷却 / 暴击 / 横扫 / 额外击退 / 伤害附魔 / 火焰附加 / 耐久 /
-  粒子 / 音效 / 动画 / PVP 开关。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
+  粒子 / 音效 / 动画 / PVP，以及 `Stats.DAMAGE_DEALT` 的会话内累计和 `RequestStats`
+  发包。仍缺的部分见 6.4 和 README「玩家近战攻击的已知限制」：
   `getAttackDamageBonus` / `PIERCING_WEAPON` 的武器行为、`onClimbable` / `isInWater`
   的暴击前置（`isPassenger` / `isMobilityRestricted` 已按 `riding.vehicle` / `EffectMap`
-  判）、节肢杀手缓慢时长的随机源、`Stats.DAMAGE_DEALT` 的落盘、
-  以及 `mob-oracle` 对攻击音效 / 粒子 / 动画包的逐字节比对（官方假世界不捕获）。
+  判）、`Stats.DAMAGE_DEALT` 写原版 `stats/<UUID>.json` 与统计计分板，以及
+  `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 的乘法修饰符和 `getSpeed()`。
+  攻击音效 / 粒子 / 动画包已经进 `mob-oracle` 逐字节比
+  （见 6.4），暴击音（`player_attack_critical`）和疾跑击退音（`player_attack_sprint`）
+  都在其中；`nodamage` 音效仍没有场景覆盖。
   旁观者和非法目标仍按官方 `handleAttack` 忽略（官方会断开连接，Bamboo 只忽略）。
 - **死亡**：1a 时血量可以降到 0 但不触发死亡；1b 起按下节实现完整死亡 / 掉落 /
   重生流程，`/kill` 也不再报错（见第 7 节）。
@@ -1158,21 +1162,41 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 `on_attack` 拆成 `resolve_target` / `plan_attack` / `land_attack` / `finish_hit`
 四步，中间产物放在 `AttackPlan`。
 
+- **够距**：按 `handleAttack` 的 `isWithinAttackRange(mainHandItem, targetBounds, 3.0)`：
+  `AttackRange.defaultFor` 取 `ENTITY_INTERACTION_RANGE`（生存 3.0，创造再 +2.0），
+  武器带 `attack_range` 组件时用组件；量眼睛到目标**整个碰撞盒**的距离，只有落在
+  `[min − margin − 3, max + margin + 3]` 闭区间才算够距，并查
+  `worldBorder.isWithinBounds(target.blockPosition())`。
+  `attack_reach_uses_the_entity_interaction_range` 单测守 D=6.4 命中 / D=6.5 落空。
 - **冷却**：`Player.attackStrengthTicker`（新增按玩家字段，见 6.2）每刻在玩家 tick
-  开头 `+1`；`handlePunch`（挥空）、`onAttack`（每次攻击）、主手物品换成不同物品 /
-  组件时清零。`getCurrentItemAttackStrengthDelay = 1 / ATTACK_SPEED × 20`，
+  开头 `+1`；`handlePunch`（挥空）、`onAttack`（每次攻击）清零，主手换成**另一种物品**
+  才在 `aiStep` 清零——判据是官方 `ItemStack.isSameItem`，只比物品 ID；耐久 / 附魔 /
+  数量这类组件变化只刷新 `lastItemInMainHand` 缓存、不清冷却（否则攻击扣完耐久，
+  下一刻会把自己的冷却清掉）。`component_only_changes_keep_the_attack_cooldown`
+  单测守住这条语义。`getCurrentItemAttackStrengthDelay = 1 / ATTACK_SPEED × 20`，
   `s = clamp((ticker + 0.5) / delay, 0, 1)`。基础伤害 `× (0.2 + s² × 0.8)`，
   附魔加成 `× s`。玩家 `ATTACK_DAMAGE` 基值是 `Player.createAttributes()` 的 1.0，
-  **不是**属性注册表缺省的 2.0（对拍抓到过这个差）。
+  **不是**属性注册表缺省的 2.0（对拍抓到过这个差）。`baseDamage > 0 || magicBoost > 0`
+  之外官方整段跳过（连 `nodamage` 音都不发），Bamboo 在 `onAttack()` 重置冷却之后同样返回。
 - **暴击 / 横扫 / 击退**：`s > 0.9` 且下落、不着地、没失明、没骑乘、非疾跑时
   `× 1.5`，发 `ClientboundAnimatePacket`(1) 和 `player.attack.crit`；附魔加成 > 0
   再发 (2)。拿剑、着地、移动够慢、满充能且非暴击非疾跑时横扫，附魔
-  `sweeping_edge` 给 `SWEEPING_DAMAGE_RATIO = L/(L+1)`。疾跑 / `knockback` /
+  `sweeping_edge` 给 `SWEEPING_DAMAGE_RATIO = L/(L+1)`（候选是碰撞盒与主目标
+  整个盒子 `inflate(1, 0.25, 1)` 相交的其它生物，且离玩家 < 3 格）。疾跑 / `knockback` /
   `attack_knockback` 的额外击退走 `World::knockback_mob`，同时把攻击者水平速度
-  `× 0.6` 并 `setSprinting(false)`。
+  `× 0.6` 并 `setSprinting(false)`。暴击 / 横扫两处前置判定由
+  `can_critical_requires_every_modelled_precondition` /
+  `is_sweep_attack_requires_full_charge_ground_and_a_sword` 单测逐条守住（去掉
+  `onGround` 门控两条都会失败，速度平方按官方的 double 阈值比较）。够距的
+  `attack_range` 组件逐字段覆盖、蹲下玩家目标取真实碰撞盒尺寸，以及零伤害整段跳过
+  和 `nodamage` 音效，分别由 `a_weapon_attack_range_component_overrides_the_default` /
+  `a_crouching_player_target_keeps_its_real_collision_box` /
+  `a_zero_damage_attack_skips_the_hit_and_its_sound` /
+  `a_rejected_attack_emits_only_the_nodamage_sound` 单测守住（都做过改坏自检）。
 - **附魔与效果**：锋利 `1 + 0.5×(L−1)`、亡灵 / 节肢 `2.5×L`（按生成的实体类型
   标签判定），火焰附加 `4×L` 秒点燃、节肢杀手挂缓慢 IV（`doSweepAttack` 对每个横扫
-  命中的 nearby 也调一次 `doPostAttackEffects`）；`hurtEnemy` 扣 1 点耐久；
+  命中的 nearby 也调一次 `doPostAttackEffects`；缓慢时长按 `ApplyMobEffect` 从受害者
+  自己的随机源取三次 `nextInt(1)` / 时长 / 等级，等级恒 3）；`hurtEnemy` 扣 1 点耐久；
   打中加 0.1 饥饿消耗、记 `lastHurtMob`。26.3 的数据驱动附魔表由生成器导出，
   这里只按 `Enchantments.java` 的 `AddValue` / `Fraction` 公式算。
 - **发包**：`world.play_sound` 把攻击音效记进同一个 `World` 的效果列表，落地后
@@ -1186,23 +1210,52 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   确认暴击 / 附魔暴击动画、横扫 / 伤害指示粒子（含 `actualDamage > 2` 门槛）和
   strong / weak / sweep 音效真的发到客户端；`crit` / `knockback` / `nodamage` 音效仍
   只按包类型松散覆盖或未精确断言（见 README 已知限制）。
+- **统计**：`Player.damageStatsAndHearts` 的
+  `awardStat(Stats.DAMAGE_DEALT, Math.round(actualDamage × 10))` 在 `finish_hit` 里按
+  实际伤害累计（值为 0 也照官方标脏），`ClientCommandKind::RequestStats` 时
+  `ServerStatsCounter.sendStats` 把累计值当 `minecraft:custom` /
+  `minecraft:damage_dealt` 写进 `award_stats` 包；和 `ITEM_USED` 一样只在会话内累计，
+  不写 `stats/<UUID>.json`、不更新统计计分板。`custom_stat` 的注册表 ID 由生成器
+  从 `registries.json` 导出。`award_stats_encodes_the_damage_dealt_custom_stat`
+  （逐字节）和 `melee_hit_awards_damage_dealt_on_request_stats`
+  （走完整 `on_attack` → `RequestStats`）两条单测守住；故意把累计值改成 0，
+  后者立刻失败。
 - **PVP**：`pvp` 为真时按 `ServerPlayer.canHarmPlayer`（`isPvpAllowed` + 队伍，
-  Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`；否则忽略。额外击退 /
-  火焰附加 / 横扫波及的玩家这几项目标在实体表里的操作（`knockback_mob` /
-  `ignite_mob` / 候选收集）对玩家不生效，玩家不在实体表里；见 README 已知限制。
+  Bamboo 无队伍）打另一名玩家，走 `hurt_player_from_mob`。额外击退、火焰附加点燃
+  和横扫波及的玩家都按官方对 `LivingEntity` 一视同仁处理：玩家分支走
+  `World::knock_back_player` / `ignite_player_from_mob`，横扫候选把 `region.players`
+  也收进来（排在生物之后，官方按实体分区顺序）。玩家目标的额外击退还照官方
+  `Player.causeExtraKnockback` 末尾的 `ServerPlayer.syncVelocity` 分支：速度包发出去
+  之后把服务端速度改回 `hurtOrSimulate` 之前的值。
 - **对拍**：`mob-oracle --only player_attack` 13 个场景（充能 0/2/4/5/20、下落暴击、
   疾跑击退、横扫、`sweeping_edge`、横扫 + 火焰附加、锋利 / 火焰附加 / 击退）共 91 刻，
-  逐刻比每头牛的血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除和 `damage_event` 包，
-  0 不一致；`--break-self-test attack_charge` 故意把充能少算一刻，牛的血量立刻不一致；
+  0 不一致。逐刻比四组东西：
+  1. 每头牛的血量 / 击退速度 / 着火刻数 / 受伤时间 / 是否移除；
+  2. **每头牛自己的随机源状态**（官方 `stepJson` 的 `seed`）：受伤音高的两次取数和
+     节肢杀手的缓慢都读它，多取或少取一次都会立刻不一致（把 `voice_pitch` 改成
+     只取一次，第 1 刻就报差）；
+  3. 玩家自己的状态和随机源（原有）；
+  4. **出站效果包**：`damage_event`、`sound`、`level_particles`、`animate`、
+     `entity_event`。官方夹具的收集器是整个服务端一份流、每个广播包记一次；
+     Bamboo 每个收件人一份，所以按包取两名收件人里的最大份数再逐字节比（Bamboo
+     把一拍的效果攒到末尾统一发、官方当场发，因此按包排序后做多重集比较）。
+     音效包末尾 8 字节的随机种子不参与比较：官方每个音效当场从世界随机源取种子，
+     取数顺序跟着发送顺序走，Bamboo 攒批后顺序不同；客户端只用它给音高加扰动。
+     这一层抓到过横扫粒子 y 的舍入差（`Entity.getY(0.5)` 是
+     `position.y + getBbHeight() * 0.5`，`getBbHeight` 是 float，`1.8F * 0.5`
+     的舍入必须保留）。
+  改坏自检：`--break-self-test attack_charge` 故意把充能少算一刻，牛的血量立刻不一致；
   `--break-self-test sweep_effects` 去掉武器上的火焰附加，横扫目标的着火刻数立刻不一致。
-  单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火。
-  攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度；假世界也不
-  捕获 crit 动画 / 粒子 / 挥手 / 耐久槽包，这些由单测覆盖（见 6.3 与 README）。
-  够距判定（`within_block_interaction_range` + 方块点 vs 官方 `isWithinAttackRange` +
-  AABB + 武器距离 + 世界边界）、横扫候选盒近似、`baseDamage > 0 || magicBoost > 0`
-  门槛，以及属性修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
-  「玩家近战攻击的已知限制」；够距这一层没有 `mob-oracle` 场景（夹具直接调
-  `Player.attack`）。
+  单测 `a_sweep_ignites_swept_targets_with_fire_aspect` 覆盖横扫目标也着火，
+  `melee_attack_hits_another_player` 覆盖玩家互打（伤害 / 火焰附加 / 速度包后恢复
+  受击前速度 / 横扫波及第三名玩家）。
+  攻击场景的官方夹具跳过 `cow.tick()`，否则重力 / AI 会污染击退速度。够距判定按官方
+  `isWithinAttackRange`（实体交互距离 + 武器 `attack_range` 组件 + 整个 AABB +
+  世界边界）实现，但没有 `mob-oracle` 场景（夹具直接调 `Player.attack`），
+  由 `attack_reach_uses_the_entity_interaction_range` 单测守住；`isItemEnabled`
+  feature flag、横扫候选的玩家顺序和队伍判定，以及属性
+  修饰符 / `getSpeed()` / 受害者装备附魔等其余已知差异见 README
+  「玩家近战攻击的已知限制」。
 
 ---
 
@@ -2547,3 +2600,188 @@ Brain 行为里，只有单元测试、`NoAI` 夹具不触发，没有和官方�
 `customServerAiStep` 尾部、只有单元测试、无官方逐刻对拍；海豚恩惠 / 引路、美西螈攻击 /
 繁殖、桶装鱼 / 海龟蛋孵化逐刻场景仍是已知限制；桶装鱼、海龟蛋孵化的主体仍是
 「已写未验证（无逐刻场景）」。详见本轮汇报。
+
+### 5.22 第 3 步：生物压测——一刻里时间花在哪（2026-11-23）
+
+只测量，没有改任何游戏行为。可重复入口：
+
+```bash
+cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+```
+
+代码在 `crates/mc-bamboo-blocks/src/entity/mob/timing/stress.rs`（`#[cfg(test)]`、
+`#[ignore]`），分段探针在 `timing.rs`。`MOB_STRESS_SCENE=<名字前缀>` 和
+`MOB_STRESS_THREADS=0,1,2` 可单独复现一格。输出日志留在
+`.measure/mob-stress-report.log`。
+
+#### 5.22.1 场景和方法
+
+| 场景 | 内容 |
+| --- | --- |
+| `pasture-500` / `pasture-2000` | 平地围栏里 500 / 2000 只牛、羊、猪、鸡各四分之一，旁边站一名玩家 |
+| `chase-flat` / `chase-obstacles` | 200 只僵尸追一名绕圈走的玩家；后者加四道三格高石墙、四个 2×2 的坑 |
+| `tower-1x1` / `tower-3x3` | 350 只牛挤在 1×1 / 3×3 的石墙格里；主测量把 `maxEntityCramming` 设 0，避免挤压伤害把负载打死 |
+| `mixed-natural` | 两名玩家、真噪声主世界地形（种子 20261116，`Generator` 跑到 CARVERS，按 quart 群系查刷怪表）、开着自然刷怪；200 刻预热后实体数稳定在 92 只 |
+
+- 每个场景 × `entity_threads` = 0、1、2、4、8，各跑 **3 轮**，每轮 200 刻预热 +
+  300 刻测量；每刻记墙上时间（µs 精度）取 p50 / p95 / p99，三轮再取中位数。
+  分段时间是 `Instant` 的「自身时间」（嵌套段从外层扣掉），多算阶段线程的时间求和，
+  报的是 **CPU 毫秒/刻**，不是墙上毫秒。
+- `entity_threads = 0` 走 `World::tick_entities()`（精确驱动，官方顺序）；
+  1、2、4、8 走 `tick_entities_parallel_timed`（`ScopedThreads`），
+  同时报 `EntityStore` 框架的四段：复制公开状态（`clone`）、只读算（`compute`）、
+  发布 + 名单（`publish`）、按 uid 应用命令（`apply`）。精确驱动这四段恒为 0。
+- 探针全部在 `cfg(test)` 下：正式构建里 `span!` / `begin_mob!` / `record_path!` 等
+  宏展开成空语句，`timing::imp` 整个模块不编译，计时开关关着时零开销、
+  不改变任何逐刻对拍结果。`mc-bamboo-worldgen` 只是 `mc-bamboo-blocks` 的
+  dev-dependency，正式依赖图不变。
+- 机器：同一台 14 核 M4 Pro、release 构建、同一次会话。报告轮 05:25–05:43，
+  `uptime` 负载 **6.14 / 18.07 / 30.02（启动）→ 4.25 / 5.59 / 12.31（结束）**，
+  等其它子代理的编译尖峰退下去之后才开跑。前几轮负载 20–70 时绝对值偏大、
+  p95/p99 有明显尖峰；报告只取这一轮。p95 / p99 仍受同机噪声影响，
+  只作同轮内的相对比较。
+
+#### 5.22.2 每刻耗时（墙上 ms，p50 / p95 / p99）与并行加速
+
+| 场景 | 0 | 1 | 2 | 4 | 8 | 0→8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| pasture-500 | 4.398 / 5.001 / 5.160 | 4.460 / 4.802 / 5.353 | 3.287 / 4.150 / 4.348 | 2.121 / 2.521 / 2.746 | 1.996 / 2.184 / 2.267 | **2.20×** |
+| pasture-2000 | 24.583 / 27.560 / 29.358 | 28.730 / 32.142 / 41.837 | 18.631 / 20.275 / 24.603 | 13.658 / 14.898 / 16.113 | 10.602 / 12.709 / 13.115 | **2.32×** |
+| chase-flat | 4.685 / 8.931 / 11.078 | 4.812 / 8.819 / 10.874 | 3.256 / 6.109 / 8.616 | 2.388 / 4.412 / 5.451 | 1.926 / 3.765 / 5.098 | **2.43×** |
+| chase-obstacles | 4.645 / 9.048 / 10.549 | 4.743 / 8.768 / 11.019 | 3.174 / 6.238 / 9.150 | 2.151 / 4.496 / 6.437 | 1.792 / 3.822 / 5.656 | **2.59×** |
+| tower-1x1 | 85.462 / 89.341 / 99.054 | 85.010 / 89.196 / 97.177 | 82.436 / 86.460 / 96.431 | 85.603 / 88.582 / 92.011 | 85.451 / 90.998 / 104.974 | 1.00× |
+| tower-3x3 | 27.750 / 28.924 / 29.374 | 27.785 / 29.000 / 29.667 | 26.152 / 27.946 / 29.844 | 25.380 / 27.067 / 28.005 | 25.441 / 26.958 / 29.543 | 1.09× |
+| mixed-natural | 0.971 / 1.979 / 2.223 | 1.027 / 1.848 / 2.110 | 0.718 / 1.555 / 1.763 | 0.608 / 1.393 / 1.586 | 0.572 / 1.345 / 1.488 | **1.70×** |
+
+塔场景加线程没有收益：落地阶段 `apply` 是串行的，1×1 的 8 线程是
+0.080 + 1.265 + 0.112 + **84.950** ms，3×3 是 0.061 + 1.157 + 0.091 +
+**24.308** ms；并行只把只读算阶段从约 5 ms 压到约 1 ms。
+
+#### 5.22.3 子系统拆分（CPU ms/刻，`threads = 0`）
+
+| 场景 | 其它 | 移动+碰撞 | 方块效果 | 推挤 | 感知/选目标 | 目标/大脑 | 导航 | A\* | 框架(0) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| pasture-500 | 0.282 | **1.859** | 0.297 | **1.276** | 0.011 | 0.089 | 0.115 | 0.066 | 0 |
+| pasture-2000 | 1.436 | **8.637** | 1.417 | **10.121** | 0.043 | 0.509 | 0.583 | 0.264 | 0 |
+| chase-flat | 0.118 | 0.795 | 0.136 | 0.125 | 0.012 | 0.319 | 0.074 | **3.466** | 0 |
+| chase-obstacles | 0.122 | 0.854 | 0.137 | 0.148 | 0.014 | 0.297 | 0.074 | **3.176** | 0 |
+| tower-1x1 | 0.182 | 0.633 | 0.063 | **84.724** | 0.008 | 0.071 | 0.054 | 0.015 | 0 |
+| tower-3x3 | 0.149 | 1.784 | 0.067 | **25.339** | 0.008 | 0.052 | 0.049 | 0.043 | 0 |
+| mixed-natural | 0.078 | **0.468** | 0.048 | 0.009 | 0.004 | 0.076 | 0.016 | 0.009 | 0 |
+
+`threads = 8` 的四段框架时间（复制 / 算 / 发布 / 落地，ms/刻）：
+牧场 500 为 0.087 / 0.927 / 0.130 / 0.871，牧场 2000 为
+0.453 / 3.976 / 0.599 / 5.807，追玩家平地 0.033 / 1.735 / 0.051 / 0.267，
+刷怪塔 1×1 为 0.080 / 1.265 / 0.112 / **84.950**。
+
+按生物类型（`threads = 0`，CPU ms/刻）：牧场 500 的牛 / 羊 / 猪 / 鸡分别
+1.110 / 1.086 / 0.987 / 0.811，牧场 2000 是 6.292 / 6.253 / 5.764 / 4.701
+（每只都约 11–13 µs）；追玩家场景僵尸 5.045（含 3.466 的 A\*）；
+混合场景里最贵的是僵尸 0.196、苦力怕 0.165、骷髅 0.158、
+蜘蛛 0.083、蝙蝠 0.085，其余都 < 0.03。
+
+#### 5.22.4 给第 4 步的关键数字
+
+| 量 | 实测 |
+| --- | --- |
+| 寻路请求 / 刻，展开节点 / 刻，成功 / 失败 | chase-flat 17.9 条、732.5 节点、17.9 成功 0 失败；chase-obstacles 15.4 条、704.8 节点；牧场 2000 只 5.1 条、36.6 节点；塔和混合场景 ≤1.6 条 |
+| 起点格 + 终点 + 体型 + 导航类型相同、可去重 | chase-flat **0.5 / 17.9 = 2.8%**（全局去重口径）；chase-obstacles 0.4 / 15.4 = 2.6%；牧场 0%；塔 0% |
+| 离最近玩家 32 内 / 32–64 / 64 外的生物数与耗时 | chase-flat 131.7 / 67.2 / 1.1 只，2.510 / 2.464 / 0.070 ms；mixed-natural 18.3 / 37.2 / 38.3 只，0.129 / 0.281 / 0.271 ms；pasture-2000 1914.6 / 85.4 / 0 只，22.336 / 0.673 / 0 ms |
+| 刷怪塔的推挤占比 | 1×1：推挤 84.724 / 85.742 ms = **98.8%**，122 150 条 `PushMob` 命令 / 刻；3×3：25.339 / 27.492 = **92.2%**，30 167 条 / 刻 |
+| `maxEntityCramming` 默认规则（24）触发 | 单独用默认规则跑 100 刻：1×1 **30.56 次伤害判定 / 刻**，100 刻后只剩 24 只；3×3 **19.67 次 / 刻**，剩 85 只 |
+
+口径限制：
+
+- 并行算阶段的 `Shared` 快照里生物自己还在，`push_entities` 的范围查询会
+  给自己发一条 `Command::PushMob`（`apply_push` 因位移为零直接返回，是空操作）。
+  于是并行模式的推挤命令数系统性偏高：牧场 500 精确 162.2 / 刻，并行 659.8 / 刻；
+  混合 92 只是 0 / 77。这是并行模型的已知差异，不是计时 bug，也解释了框架
+  `apply` 段的一部分耗时；本轮只记录，没有改行为。
+- `Targeting` 段只包住 `GoalSelector` 的 target 选择器；视线判定
+  （`hasLineOfSight`）也被目标 / 近战目标的 tick 调用，时间落在 `Goals` 里，
+  所以「感知」的实际成本略高于表里 0.004–0.030 ms。
+- 分段时间是 CPU 时间之和，多线程下可以大于墙上时间；分段和之间不重叠，
+  但和框架四段是两套口径，不能相加。
+- 追玩家场景两名驱动看到的玩家位置由压测共享（每刻写入），否则并行算阶段的
+  只读视图会看到静止的玩家、寻路请求数掉到 1/8；`SourceView` 的时钟也按刻推进，
+  保证 `MeleeAttackGoal.canUse` 的 20 刻调度在两种驱动里一致。
+- 塔场景为保持 350 只稳定负载关掉了挤压伤害规则，因此主表的
+  `cramming-hits/tick = 0`；默认规则下的数字单独在上表里量。
+- 混合场景是真噪声地形但只生成到 CARVERS（没有地物和结构），光照恒定、
+  不跑随机刻 / 计划刻 / 出包，量的是「实体 + 自然刷怪」这一段，不是整刻服务端。
+
+#### 5.22.5 第 4 步的建议顺序（按这批数字排）
+
+| 顺序 | 项目 | 预计能省 | 依据 |
+| --- | --- | --- | --- |
+| 1 | **挤压上限**（每只每刻最多 8 次推挤，下推到查询里） | 1×1 塔从 85.5 ms/刻降到约 1 ms/刻的量级（推挤占 98.8%）；3×3 从 27.8 降到约 2 ms（占 92.2%）；串行的 `apply` 段 85.0 / 24.3 ms 一并消失 | 5.22.3、5.22.4：扇出是 122 150 / 30 167 条命令每刻，`threads = 8` 也只拿到 1.00× / 1.09×。这是唯一一个并行化救不了、收益又是几十毫秒的项目 |
+| 2 | **三档降频** | 混合场景 64 格外 38.3 只 / 0.271 ms、32–64 格 37.2 只 / 0.281 ms，合计 0.552 / 0.681 ms = **81%** 的生物时间；休眠档只推进计时器，降频档感知/决策每 2–4 刻一次，可省 0.4–0.55 ms/刻。牧场 2000 的 32–64 档只有 85.4 只 / 0.673 ms（3%），那里收益很小 | 5.22.4 距离档表。注意它是「按玩家距离」的收益，塔和牧场的大部分生物都在 32 格内，不能拿它解塔 |
+| 3 | **寻路阶段**（批量、去重、按节点预算并行） | 追玩家场景 A\* 3.466 / 3.176 ms/刻，占 69% / 66%；`threads = 8` 已把这部分压到 1.735 / 1.689 ms 的算阶段总量，但去重只有 2.8% / 2.6%（0.5 / 0.4 条每刻），所以「去重」本身几乎不省钱 | 5.22.2、5.22.4。真正值钱的是把 17.9 条 / 732.5 节点的搜索移出实体算阶段、按节点预算并行、结果晚一刻；去重和失败冷却（本场景 0 失败）是顺带的正确性/稳定性，不是这轮的主要收益 |
+| 4 | **按玩家刷怪上限** | 本轮**量不出收益**：混合场景稳定在 92 只、实体段 0.971 ms/刻，刷怪计数重建的主要成本在 `SpawnState::create` 扫实体表（92 只），而这一项不在分段计时里；按玩家上限改变的是实体数分布，不是单次查询的常数 | 5.22.2、5.22.3。建议第 4 步先做前三项，这一项等有多人 / 多岛压测能看出「每人附近怪更均匀」时再做；设计稿 4.6 的增量维护仍按原计划 |
+
+排序理由：先做**收益最大且并行救不了**的挤压上限，再做**覆盖面最广**的
+三档降频（唯一能省掉混合场景 81% 生物时间的手段），然后把追玩家场景的
+**A\*** 挪到独立阶段（不改变行为，但要改阶段接口，风险最高，放在有前两项
+兜底之后），最后才是本轮看不到直接收益的按玩家刷怪上限。
+
+#### 5.22.6 结论
+
+- 一刻的时间不是花在「生物 AI」上：牧场里是移动 + 碰撞和推挤各占一半，
+  追玩家里是 A\*，刷怪塔里几乎全是推挤，混合场景里是移动。
+  感知 / 选目标单独 < 0.05 ms/刻，目标 / 大脑决策 < 0.32 ms/刻。
+- 并行驱动在「很多互不干扰的实体」上有效（牧场 2.20× / 2.32×、
+  追玩家 2.43× / 2.59×），在「很多互相推挤的实体」上因串行落地阶段无效
+  （塔 1.00× / 1.09×），这和 `docs/world-model-design.md` 8.2 的模型一致。
+- 去重（2.8%）和挤压伤害判定（30.56 次/刻）是两个「看着可做、其实收益有限」的
+  数字：前者省不了几次搜索，后者是伤害不是推力，第 4 步的挤压上限要限的是
+  每条 `PushMob` 命令，不是 `maxEntityCramming` 规则本身。
+
+## 5.23 蠹虫、末影螨与虫蚀方块（silverfish，2026-11-22）
+
+**接入清单照 5.12**：`MobType` 枚举 / `ALL`（46 → 48，只追加两项）/ `entity_type()` / `name()` /
+`dimensions()` / `is_monster()` / `full_target_rules()`（末影螨）/ `emits_movement_sounds()`
+（`MovementEmission.EVENTS`）/ `xp_reward()`（末影螨 3）/ `loot_table()` / 四种音效 /
+`step_sound()` / `spawn_egg()` / `translation_key()`；`Mob::new` 的 attributes / goals /
+target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.finalizeSpawn`；
+`living.rs` 的 `tick_mob` 前置（`yBodyRot = yRot`）、`ai_step` 尾部（末影螨寿命）、
+`hurt_server` 前置（蠹虫唤醒）；`nbt.rs` 的 `Lifetime`；`natural.rs::check_spawn_rules`
+两种都只留 `valid_mob_spawn_block`（不进群系刷怪表）；`goals.rs::TargetType::Endermite`
+从占位改成真的找末影螨。新增文件 `silverfish.rs` / `endermite.rs` / `infested.rs`，
+共用位置只做最小追加、没有重排已有代码。
+
+**生成器导出**：`Extractor.java::projectileFacts()` 补两种生物的 `createAttributes()` 三个属性、
+`Endermite.MAX_LIFE` / `xpReward`；`monsterFacts()` 补两个眼高。`entity_types.rs` 由
+`extract` 重新生成，运行时不写死版本数字。`ENDERMITE_XP_REWARD = 3`（26.3 里末影螨的
+构造函数把 `Monster` 的 5 覆盖掉），眼高 0.13。
+
+**目标行为**：`SilverfishWakeUpFriendsGoal` 的 `requiresUpdateEveryTick()` 是假，倒数
+`adjustedTickDelay(20) = 10` 在非满刻每两刻减 1；扫描顺序 y(-5..5) → x(-10..10) → z(-10..10)，
+每个轴按 0, 1, -1, 2, -2 ... 的顺序。`canContinueToUse` 用 `Goal` 缺省的 `canUse()`，
+倒数到 0 立刻停；逐刻对拍第一版写成「永远真」和「每刻都跑」都从随机源 / `friends` 位看出来。
+`SilverfishMergeWithStoneGoal` 的 `canUse` 先看目标和导航是否完成，再在 `mobGriefing` 开时
+`nextInt(reducedTickDelay(10)) == 0` 抽一个 `Direction`，相对格是宿主方块才 `doMerge`；
+否则落到 `RandomStrollGoal(1.0, 10)` 的 1/5 闲逛判定。`start` 的 doMerge 分支写虫蚀状态、
+发 `spawnAnim`（实体事件 20）并 `discard()`；`canContinueToUse` 在 doMerge 时恒假。
+所有世界写入走 `Command::SilverfishBreak` / `SilverfishReveal` / `SilverfishMerge`，
+精确和并行两种驱动都能落地。
+
+**虫蚀方块**：宿主表来自 `blocks.rs` 的 `hostBlock` 字段（含 `InfestedRotatedPillarBlock`，
+`copied_onto` 抄 `axis` 属性）。`spawnAfterBreak` 在 `GameRules.BLOCK_DROPS` 开着且工具不带
+`#prevents_infested_spawns` 时生成蠹虫；玩家挖掘走 `block_drops::drop_broken_block`，
+爆炸走 `ServerExplosion.interactWithBlocks` → `World::spawn_after_break`（工具是空手），
+`Level::destroyBlock` 那条路径也接了同一个钩子。方块 oracle 的四道挖掘题（空手 / 木镐 /
+石镐精准采集 / 精准采集圆石）和三道固定爆炸题（`infested_stone` / `infested_stone_bricks` /
+`infested_deepslate`）都把 `spawned` 列表纳入比较，之前「只是记录」的字段现在受比较；
+故意把 Rust 的 `spawned` 清空能抓到 3 道爆炸题。
+
+**逐刻对拍**：`mob_oracle/small_mob.rs`（新文件）重放 7 个逐刻场景：蠹虫唤醒同伴、钻进石头、
+近战；末影螨 2400 刻寿命、`PersistenceRequired` 不老化、近战、末影人把它当目标。
+另有 4 道官方 SNBT 存档往返题和 4 道死亡掉落题。两处改坏确认：
+`--break-self-test small_mob_life` 把寿命 +1、`small_mob_hurt` 让受伤晚一刻，
+都在逐刻比较里被抓到。夹具不比出站包（配对包两侧由不同机制产生），
+位置 / 速度 / 朝向 / 随机源 / 血量 / 寿命 / 唤醒倒计时 / 方块表 / 新生成实体 /
+世界随机源全部逐位比较。
+
+**已知限制**：末影珍珠弹射物没实现，`ThrownEnderpearl.onHit` 的 5% 刷末影螨和传送都没做；
+细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
+（仓库还没有通用刷怪笼）没建模。

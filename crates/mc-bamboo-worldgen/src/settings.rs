@@ -220,6 +220,14 @@ impl SeededRouter {
         };
         // 官方的 `sampleBlockValueUncached` 用 `SamplerContext.EMPTY_UNCACHED`，`cache` 不记忆。
         let context = Context::uncached();
+        // 编译期的重写记忆（`rewritten` 和留作地址锚的原始节点）只在编译时有用，
+        // 编译完就没用了。它按整份密度函数图常驻，一条结构线程里约 1.3 MB，
+        // 丢掉后每条线程只剩采样器和它们引用的噪声（约 150 KB）。
+        // The compile-time rewrite memo (`rewritten` plus the original nodes kept only
+        // as address anchors) matters solely during compilation. Left alive it pins the
+        // whole density-function graph (~1.3 MB per structure thread); dropping it
+        // leaves only the samplers and the noises they reference (~150 KB).
+        compiler.release_rewrites();
         Self {
             compiler,
             samplers,

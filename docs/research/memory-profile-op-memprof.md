@@ -1,5 +1,11 @@
 # op-memprof：服务器内存构成实测与压缩
 
+> **2026-11-23 接手补记（合并 `origin/main` 之后）**：本文件 §0–§9 是 2026-11-22 在
+> Windows + PDB 上的原报告，数字、产物路径与验收都保持原样。本次在 **ARM macOS** 上把
+> 分支合并到 `origin/main`（`ec45c91b`），重测了四类内存数字、跑完种子地图对拍与其余验收；
+> 新数据和口径差异见 **§10**。原报告的进程级数字不能直接和 §10 横比（平台、分配器、
+> 机器负载都不同）。
+
 ## 0. 摘要、分支与提交列表
 
 分支 `op-memprof`，工作树干净、**未推送**。未动其它分支、未碰 `W:\data\GithubProjects\Bamboo`
@@ -618,3 +624,183 @@ java 对拍进程。`CARGO_BUILD_JOBS` 未改、未改优先级、未弹窗口�
 端口 26341–26343 无 LISTENING；本轮起的 `bamboo` / `bamboo-memprof` / `bamboo-loadtest`
 进程都已退出，`locks/heavy` 已释放。探针与对拍期间出现过 `[heavy-lock] waiting`，按规则
 等待，没有 kill 任何持有锁的任务。
+
+## 10. 合并 `origin/main` 之后的实测与验收（2026-11-23，ARM macOS）
+
+### 10.1 接手做了什么
+
+- **换行符**：`git grep -Il $'\r' HEAD -- crates tools docs` 在合并前返回空；再把 HEAD
+  的 1227 个 blob 逐个字节扫一遍，含 `\r` 的只有二进制图标 / 字体 /
+  `structures.bin` / `official-chunk.nbt`，`crates tools docs` 里的文本文件 **0 个 CRLF**；
+  23 个分支提交的每一棵树也单独扫过。合并 `origin/main` 后再扫工作树仍为 0，
+  因此**没有需要修正的文件，也没有单独的换行符提交**。
+- **WIP `6db45f3c` 保留并做完**：`terrain_cache_bench --terrain-mb N` 用
+  `worldgen_cache::configure` 只覆盖地形上限（`docs/performance-optimizations.md` §14.4
+  补了 A/B 命令）；`memprof/run.sh` 的 `PATTERN` 与 `--json` 对应
+  `bamboo-loadtest` 已实现的 `Pattern::parse` 和 `--json`（`docs/profiling.md` §20 补说明）。
+  二者正好补上 §2.7 明写「没测吞吐代价」的缺口：会走动的假玩家给缓存施加压力，
+  `bot-<模式>.json` 用来核对两种预算收到的区块数是否同口径。
+- **合并**：`git fetch --all` 后 `git merge origin/main`（`ec45c91b`），只有一处内容冲突
+  `crates/mc-bamboo-game/src/worldgen.rs`：分支改了共享 `Generator` 的注释，main 在同一个
+  位置加 `GeneratedBlockEntity` 别名。两边都保留。其余自动合并，main 的完工后处理、
+  生成期方块实体交付、`worldgen_compact` 冷层与分支的共享生成器 / 丢掉重写记忆 /
+  sine 表 / 结构 R 树 / 精简原始表同时存在。合并提交 `b33e6094`。
+
+### 10.2 口径（和原报告不同，务必注意）
+
+- 原报告所有进程级数字来自 **Windows**：`run.sh` 用 `/proc/<pid>/winpid`、
+  `powershell` 的 `WorkingSet64` / `PrivateMemorySize64`、`*.exe`；`memprof/src/os.rs` 在
+  非 Windows 上的 `capture_stack` / `process_memory` / `symbolize` 是空实现，所以**这台机器上
+  跑不了带归属的 `profile` 快照**。
+- 本节改用同参数的 **macOS 复现脚本**（接手时的临时脚手架，不进仓库）：固定种子
+  20261121、视距 8、离线、一名 `bamboo-loadtest` 假玩家、`SETTLE=30 ONLINE=60
+  AFTER=20`，`ps -o rss` 取瞬时 RSS，`vmmap -summary` 取 `Physical footprint (peak)`，
+  `ps -M` 数线程；二进制是 `cargo build --release -p mc-bamboo -p mc-bamboo-loadtest`。
+  **RSS 与 Windows working_set 不是同一个量**，footprint 峰值也不等于私有提交；只能
+  在同一小节内做 A/B，不能和 §2.1 的 38.9 / 349.2 / 105.4 MB 相减。
+- 计数分配器小实验沿用 §2.6 的口径（包一层 `System` 统计活字节，取「建好之后」减
+  「建之前」），种子 20261121、`minecraft:overworld`；代码是临时 example，跑完删除，
+  没进仓库。main 的对照用 `git worktree add --detach`（`ec45c91b`）单独编译，
+  不是拿旧数字代替。
+- **机器负载**：这台 ARM Mac 上同时有其它子代理在跑 cargo / 测试 / 探针，`uptime`
+  的三组负载分别是「第 1 轮跑完 52.55 / 27.38 / 24.27，第 2 轮跑之前
+  61.46 / 30.11 / 25.27、跑完 9.69 / 15.87 / 21.16，第 3 轮跑之前
+  8.98 / 15.52 / 20.97、跑完 29.63 / 37.86 / 32.84」；缓存 A/B 那次是
+  35.49 / 38.77 / 33.32 → 123.48 / 66.17 / 44.85。分配计数、缓存条目数这类整数
+  不受负载影响；进程 RSS 有 ±100 MB 级噪声，所以下面给了三轮并只把稳定的方向当结论。
+
+### 10.3 计数分配器：单个实例（合并后 vs main）
+
+在一棵干净的 `origin/main` 工作树上跑同一份临时 example（main 没有
+`shared_generator`，只量它拥有的两个对象）：
+
+| 对象 | main（`ec45c91b`） | **合并后分支** | 变化 |
+|---|---:|---:|---:|
+| `Worldgen::shared()` 解析完的活字节 | 22,831,176 B（≈21.77 MiB） | **11,917,627 B（≈11.37 MiB）** | **−10.41 MiB**（`raw` 只留运行时表 + 模板池只解析一次） |
+| 一个 `SeededRouter`（建成后） | 1,464,564 B（≈1.40 MiB） | **149,878 B（≈146 KB）** | **−1.25 MiB**（`release_rewrites`） |
+| 一个 `chunk::Generator::with_settings` | 4,149,693 B（≈3.96 MiB） | **242,758 B（≈237 KB）** | **−3.73 MiB**（不再整份重解析 `worldgen.json`；这里的差值含那次重解析提前留在活字节里的分配） |
+| `shared_generator` 第一次 / 第二次 | main 没有这个 API | **247,549 B / 0 B**，两次 `Arc` 同指针 | 每种子只编译一份 |
+
+`Worldgen::shared()` 之后的 11.37 MiB 和原报告 §2.3 的 8.64 MB 不同：平台、编译器、
+`serde_json` 内存布局不同，且这里的计数分配器把静态表以外的全部活字节都算进去；
+跨平台的常数项不可比，只能在同一次编译内比分支 / main。`SeededRouter` 的
+1,464,564 / 149,878 B 与 Windows 上的 1,464,588 / 149,886 B 只差几十字节（分配器对齐
+噪声），说明「丢掉重写记忆」这一项在合并 main 后逐字节保持原效果。
+
+按原报告 §2.6 的算法，默认 4 条计算线程时：main 是 8 份 `Generator` + 4 份
+`SeededRouter`，分支是 1 份共享 `Generator`（0.23 MiB）+ 4 份 `SeededRouter`（0.57 MiB）。
+`Generator` 的 3.96 MiB 里包含每次建生成器时全量重解析 `worldgen.json` 留下的分配
+（见 §10.8 第 2 条），若按它当作每份常驻，合计约 −46 MiB；若按不含重解析的
+242,758 B 算，合计约 −17 MiB。两个都是「把所有原型相对干净 main 一起算」的推算，
+不是某一次快照的实测差值，也不和原报告 §0 的「约 −7 MB」同口径（后者只数原型 9
+相对它自己的前一版）。**这里给区间而不给单值**，进程级读数见下一节。
+
+### 10.4 整进程峰值（plain，三轮 A/B，MB）
+
+每轮都是「分支 stand → 分支 wander → main stand → main wander」连续跑，二进制事先编好；
+四列的 `bot.json` 都是 1 名玩家、约 60 秒、329 个区块，服务端日志同样 3 次
+`Can't keep up`（`measure/` 目录留的是最后一轮），即两种二进制的生成量大致相同。
+
+| 轮次 / 时刻 | 分支 stand | 分支 wander | main stand | main wander |
+|---|---:|---:|---:|---:|
+| 1 起服后 RSS | 93.0 | 95.8 | 95.5 | 96.3 |
+| 1 在线 RSS（峰值 footprint） | **425.3**（270.5） | **446.0**（297.2） | 485.7（857.6） | 943.9（778.6） |
+| 1 离开 20 s RSS | 429.1 | 446.5 | 489.9 | 955.6 |
+| 2 起服后 RSS | 92.3 | 90.9 | 95.3 | 95.6 |
+| 2 在线 RSS（峰值 footprint） | **438.1**（287.6） | **444.8**（292.5） | 909.4（779.7） | 968.2（744.8） |
+| 2 离开 20 s RSS | 438.8 | 445.1 | 910.2 | 974.9 |
+| 3 起服后 RSS | 91.5 | 95.0 | 93.4 | 94.7 |
+| 3 在线 RSS（峰值 footprint） | **458.7**（318.5） | **357.4**（350.3） | 949.2（745.2） | 608.5（866.3） |
+| 3 离开 20 s RSS | 270.0 | 353.3 | 746.3 | 531.6 |
+
+- 起服后空载：分支 90.9–95.8，main 93.4–96.3，差 0–3 MB（在噪声里）。
+  **这不是「共享生成器省了几十 MB」的证据**：共享生成器是第一次生成时才编译的，
+  空载时还没有这份对象；原报告 §2.3 的 `startup` 11.9 MB 也是同一原因。
+- 一人在线：分支 stand 425.3 / 438.1 / 458.7，main stand 485.7 / 909.4 / 949.2；
+  分支 wander 446.0 / 444.8 / 357.4，main wander 943.9 / 968.2 / 608.5。
+  **三轮里分支都更低**，方向稳定，但幅度受负载影响很大（第 1 轮 main stand 只有
+  485.7，第 3 轮 main wander 掉到 608.5，都伴着负载突变）。`footprint (peak)` 是
+  进程 lifetime 的峰值，分支 270–350 MB、main 745–867 MB，比瞬时 RSS 稳定得多；
+  第 3 轮 main wander 的瞬时 RSS 比它的峰值低 258 MB，正是 macOS 换页 / 压缩器
+  在采样时把页面收走，不能当成稳态内存。
+- 离开 20 s：第 1、2 轮两边都还没触发 30 s 空闲释放；第 3 轮两边都触发了
+  （分支 270.0 / 353.3、main 746.3 / 531.6），和原报告 §2.2 的观察一致。
+- 线程数两边都是 29（`ps -M`），没有因为共享生成器少起线程。
+
+### 10.5 WIP 两个开关的实测（同一提交、同参数）
+
+- **缓存上限 A/B**（复现 §2.7，只改 `bamboo.toml` 的两项预算，端口 27751 / 27752，
+  `SETTLE=30 ONLINE=60 AFTER=20 PATTERN=stand`）：默认 128 + 64 的在线 RSS
+  **438.4 MB**（footprint 峰值 291.9），减半 64 + 32 是 **407.7 MB**（259.4），
+  差 **−30.7 MB / −32.5 MB**；空载 93.6 / 92.4 相同。两次 `bot.json` 都是 329 区块。
+  原报告 Windows 上是 −57.9 MB；预算差 96 MB 而实测差更小，原因是这次缓存没填满，
+  和原报告的结论一致。负载在两次之间从 35 跳到 123，这个差值只作方向参考。
+- **`terrain_cache_bench --terrain-mb`**（`--chunks 8 --threads 2 --seed 2026`，三轮交替，
+  release 二进制）：128 MiB 那组 `bytes_mb=39.6`、`entries=100`、`evictions=0`、
+  RSS 峰值 135.0–139.0 MB；8 MiB 那组 `bytes_mb=1.6`、`entries=0`、
+  `evictions=497–503`、RSS 峰值 110.6–114.7 MB。缓存确实按命令行上限封顶，
+  **约 −25 MB 峰值 / −38 MB 缓存载荷**，吞吐 61.8–69.0 对 67.9–76.2 中心/s
+  （有重算代价，机器不空闲，轮间噪声大）。这正是 WIP 想补的「预算 A/B 手段」。
+- **`PATTERN`**：上面四组进程读数里 `stand` 与 `wander` 各跑三轮；`bot-<模式>.json`
+  写出的区块数都是 329，`wander` 的服务端日志同样有 3 次 `Can't keep up`。
+  WIP 的 `--json` 让我们能确认「换 pattern 没有偷偷少生成区块」，两个开关都可用。
+
+### 10.6 种子地图一个方块都没变（全部 0 不一致）
+
+命令统一为 `cargo run --release -q -p mc-bamboo-vanilla -- <命令> java ...`，
+`java` 是本机 JDK 25.0.5+8；`target/vanilla` 是已生成好的官方数据。
+
+| 对拍 | 结果 |
+|---|---|
+| `worldgen java` | 3 seeds / 4608 noise、5364 density、288 biomes、536 temperatures，**0 mismatches** |
+| `chunkgen java` | 36 chunks，三阶段各 3,538,944 格，**0 mismatches** |
+| `chunkgen java --through features --seeds 5 --chunks 36 --salt 1` | 180 centers / 159,252,480 blocks，**0 mismatches** |
+| `gen-world java` | 3,538,944 blocks，**0 mismatches** |
+| `gen-world java --through features --all-features --seeds 6 --chunks 36 --salt 7` | 191,102,976 blocks，**0 mismatches** |
+| 同上 `--level-type large_biomes` | 191,102,976 blocks，**0 mismatches** |
+| 同上 `--level-type amplified` | 191,102,976 blocks，**0 mismatches** |
+| `gen-light java` | 786,432 cells，**0 mismatches** |
+| `light-pipeline java` | 6 scenes / 5,308,416 blocks，**0 mismatches** |
+| `light-pipeline java --structures` | 3 scenes / 2,654,208 blocks，**0 mismatches** |
+| `structures java` | 9280 放置 / 9744 选择，**0 mismatches** |
+| `structure-generation java` | 5286 字段，**0 mismatches** |
+| `structure-e2e java` | 结构件全类别，**gen-world: 0 mismatches** |
+| `structure-post-process java` | 75,062 格 / 16 entity aborts，**0 mismatches** |
+| `feature-merge java --orders isolated` | 294,912 cells，**0 differing / 0 mismatches** |
+| `feature-merge java --structures --orders isolated` | 1,081,344 cells、36 个方块实体，**0 differing / 0 mismatches** |
+| `resume-world java --seeds 1 --chunks 1 --salt 7` | 3,932,160 blocks，**0 mismatches** |
+| `resume-world java --seed 42 --chunk 17 7 --structures` | 3,932,160 blocks / 320 方块实体，**0 mismatches** |
+| `post-process java` | 10 targets / 2426 条 PostProcessing，**0 mismatches** |
+
+### 10.7 其余验收
+
+| 检查 | 结果 |
+|---|---|
+| `cargo fmt --check` | 通过 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过，0 warnings |
+| `cargo test --workspace` | 63 个 suite、**4020 passed / 0 failed / 27 ignored** |
+| `mob-oracle java` | **12 处不一致，全部是 `Mth.COS_TAB` 的 11 个下标 + ASIN/COS 表哈希**（这台 ARM Mac 的已知环境差异），其余 0 |
+| `natural-spawn java` | 1727 cases，**0 mismatches** |
+| 探针（不带环境变量，端口 27701） | **769/769**，正常关服，`WORLD-DIR RESULT` 通过 |
+| 探针 `PROBE_ISLANDS=default PROBE_ISLAND_THREADS=default`（端口 27703） | **769/769**，正常关服，`WORLD-DIR RESULT` 通过 |
+
+`mob-oracle` 的 12 处是 `0.9711961933092805` 对 `...806` 这类最后一位的浮点差异
+（下标 61/70/125/127/141/170/175/181/182/186/205）和由此导致的整表哈希不同，
+与内存压缩、世界生成都无关；这台机器的已知环境问题，按要求单独列出。
+
+### 10.8 疑点（供审查）
+
+1. macOS 没有 PDB 与 `HeapWalk`，本轮**没有**重跑按分配点的归属表；§2.3 的
+   「7.84 → 1.54 MB」仍是 Windows 原报告的数字。§10.3 的常数项用计数分配器在同一平台上
+   与干净 main 对照，可以替代一部分结论，但两者不是同一口径。
+2. §10.3 里 main 的 `Generator::with_settings` 是 4,149,693 B，比分支的 242,758 B 大
+   一个数量级，因为 main 的 `parse_settings` 会在每次建生成器时整份重解析
+   `worldgen.json`；这个数包含那次重解析提前留在活字节里的分配（计数分配器看到的是
+   净值，不是「已经释放的临时峰值」），**不能**直接当成「每条线程常驻 4 MB」。
+   原报告 §2.6 的 242,766 B 是同样「不再重复解析」之后的值。
+3. 三轮进程读数里 main 的瞬时 RSS 跨轮差 400 MB 以上，负载也从 9 跳到 61；
+   按任务要求写明了当时的负载。只有 footprint 峰值和分配计数这两类量足够稳，
+   瞬时 RSS 只作方向旁证。
+4. 交叉验证：合并后 `Generator` 的共享靠每个入口先 `reset_biome_state`（原报告
+   §5.1 第 34 条）。本轮三种 `--level-type`、`--structures`、`--orders isolated`
+   都 0 不一致，但没有新增编译期约束；这一点仍和原报告一样靠调用点保证。

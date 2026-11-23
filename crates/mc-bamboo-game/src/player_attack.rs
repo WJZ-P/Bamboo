@@ -12,9 +12,12 @@
 
 use mc_bamboo_blocks::{
     World,
-    entity::mob::{DamageSource, effects::EffectInstance},
+    entity::{
+        JavaRandom,
+        mob::{DamageSource, effects::EffectInstance},
+    },
 };
-use mc_bamboo_core::{BlockPos, Hand, Vec3, mth};
+use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3, mth};
 use mc_bamboo_data::{
     gamerules,
     registries::{
@@ -31,8 +34,8 @@ use mc_bamboo_protocol::{
 };
 
 use crate::{
-    durability, entity_sync, inbound::PlayerId, interaction, links::encode_frames, player::Player,
-    player_exhaustion, player_health, player_hurt, region::Region,
+    durability, entity_sync, inbound::PlayerId, interaction, item_use_stats, links::encode_frames,
+    player::Player, player_exhaustion, player_health, player_hurt, region::Region,
 };
 
 /// `getAttackStrengthScale(0.5F)` 的容差，官方 `Player.attack` 里恒为 0.5。
@@ -63,18 +66,40 @@ const CHARGE_TOLERANCE: f32 = 5.0;
 /// `Abilities.getWalkingSpeed()` default, i.e. the player's `MOVEMENT_SPEED`
 /// base. The registry default 0.7 is for other mobs; `Player` overrides it to 0.1.
 const PLAYER_WALKING_SPEED: f32 = 0.1;
-
-/// `Player.aiStep`：每刻把 `attackStrengthTicker` 加一；主手物品换了（且物品
-/// 本身或组件不同）就 `resetAttackStrengthTicker`。
+/// `handleAttack` 传给 `isWithinAttackRange(mainHandItem, targetBounds, 3.0)` 的缓冲区。
 ///
-/// `Player.aiStep`: increment `attackStrengthTicker` each tick, and reset it when
-/// the main-hand item changes (item or components differ).
+/// The buffer `handleAttack` passes to
+/// `isWithinAttackRange(mainHandItem, targetBounds, 3.0)`.
+const ATTACK_RANGE_BUFFER: f64 = 3.0;
+/// `Player.CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER_VALUE`：创造模式的
+/// `ServerPlayer` 给 `ENTITY_INTERACTION_RANGE` 加的临时修饰符。
+///
+/// `Player.CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER_VALUE`: the transient
+/// modifier creative `ServerPlayer`s add to `ENTITY_INTERACTION_RANGE`.
+const CREATIVE_ENTITY_INTERACTION_RANGE: f32 = 2.0;
+
+/// `Player.aiStep`：每刻把 `attackStrengthTicker` 加一；主手物品有任何变化
+/// （数量 / 组件）就刷新缓存，但只有换成另一种物品（官方 `isSameItem`，只比
+/// 物品 ID）才 `resetAttackStrengthTicker`。攻击命中扣耐久改的是组件，不该清冷却。
+///
+/// `Player.aiStep`: increment `attackStrengthTicker` each tick and refresh the
+/// cache on any main-hand change (count / components), but call
+/// `resetAttackStrengthTicker` only when the item itself changes (vanilla
+/// `isSameItem`, item id only). A durability hit only changes components and
+/// must not clear the cooldown.
 pub(crate) fn tick(region: &mut Region) {
     for player in region.players.values_mut() {
         player.attack_strength_ticker = player.attack_strength_ticker.wrapping_add(1);
         let held = player.inventory.held(Hand::Main).clone();
         if held != player.last_main_hand_item {
-            if !same_item(&held, &player.last_main_hand_item) {
+            // 外层的 `!=` 检测物品堆的任意变化以刷新缓存；内层 `isSameItem` 只比
+            // 物品 ID，决定是否重置冷却。组件 / 耐久 / 数量变化走到这里都不重置。
+            //
+            // The outer `!=` detects any stack change to refresh the cache; the
+            // inner `isSameItem` compares the item id and decides whether to
+            // reset. Component / durability / count changes land here without
+            // resetting the cooldown.
+            if !held.is_same_item(&player.last_main_hand_item) {
                 player.attack_strength_ticker = 0;
             }
             player.last_main_hand_item = held;
@@ -91,13 +116,6 @@ pub(crate) fn on_punch(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
         player.attack_strength_ticker = 0;
     }
-}
-
-/// `ItemStack.isSameItem`：物品 ID 加组件相同（数量不算）。
-///
-/// `ItemStack.isSameItem`: same item id and components, ignoring count.
-fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
-    a.item == b.item && a.added == b.added && a.removed == b.removed
 }
 
 /// `getAttributeValue(Attributes.ATTACK_SPEED)`：缺省值加主手武器的
@@ -291,10 +309,18 @@ fn is_sweep_attack(
     if !full || crit || sprint || !player.on_ground {
         return false;
     }
-    let speed = PLAYER_WALKING_SPEED;
+    // 官方 `getSpeed(): F` 先 `f2d` 再乘 2.5，`Mth.square(D)` 和
+    // `Vec3.horizontalDistanceSqr()` 都是 double；f32 里 `0.1F × 2.5` 会舍成
+    // 正好 0.25，把 0.25 格位移误判成不够慢。
+    //
+    // Vanilla's `getSpeed(): F` is widened with `f2d` before the ×2.5, and
+    // both `Mth.square(D)` and `Vec3.horizontalDistanceSqr()` are doubles.
+    // In f32 `0.1F × 2.5` rounds to exactly 0.25 and would wrongly reject a
+    // 0.25-block displacement.
+    let speed = f64::from(PLAYER_WALKING_SPEED);
     let max = speed * 2.5;
     let motion = player.motion.known_movement;
-    let horizontal = (motion.x * motion.x + motion.z * motion.z) as f32;
+    let horizontal = motion.x * motion.x + motion.z * motion.z;
     if horizontal >= max * max {
         return false;
     }
@@ -449,7 +475,7 @@ struct AttackPlan {
     sweep: bool,
     source: DamageSource,
     knockback_sound: Option<&'static str>,
-    sweep_targets: Vec<(i32, i32)>,
+    sweep_targets: Vec<SweepTarget>,
 }
 
 /// `ServerGamePacketListenerImpl.handleAttack` + `Player.attack` 的入口。
@@ -467,8 +493,9 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     let yaw = player.yaw;
     let held = player.inventory.held(Hand::Main).clone();
     let ticker = player.attack_strength_ticker;
-    let reach = interaction::interaction_range(player.game_mode);
-    let Some(target) = resolve_target(region, id, entity_id, position, eye_height, reach) else {
+    let game_mode = player.game_mode;
+    let eye = Vec3::new(position.x, position.y + eye_height, position.z);
+    let Some(target) = resolve_target(region, id, entity_id, eye, game_mode, &held) else {
         return;
     };
     let request = AttackRequest {
@@ -488,31 +515,39 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     }
 }
 
-/// `handleAttack` 的目标解析：够距、可攻击、PVP 开关和自己不能打自己。
+/// `handleAttack` 的目标解析：世界边界、够距、可攻击、PVP 开关和自己不能打自己。
 /// 非法目标（掉落物 / 经验球 / 不可攻击的箭）官方断开连接，这里只忽略。
 ///
-/// `handleAttack` target resolution: reach, attackable, PVP rule, no self-hits.
-/// Vanilla disconnects on invalid targets; we ignore them.
+/// `handleAttack` target resolution: world border, reach, attackable, PVP rule,
+/// no self-hits. Vanilla disconnects on invalid targets; we ignore them.
 fn resolve_target(
     region: &Region,
     attacker: PlayerId,
     entity_id: i32,
-    position: Vec3,
-    eye_height: f64,
-    reach: f64,
+    eye: Vec3,
+    game_mode: GameMode,
+    held: &ItemStack,
 ) -> Option<TargetInfo> {
+    let range = attack_range(held, game_mode);
+    let creative = game_mode == GameMode::Creative;
     if let Some(public) = region.entities.public_at(entity_id) {
         if public.removed || !is_attackable(&public.kind) {
             return None;
         }
-        let in_range = interaction::within_block_interaction_range(
-            position,
-            eye_height,
-            reach,
-            BlockPos::containing(public.position),
-            3.0,
-        );
-        return in_range.then(|| mob_target(public));
+        // `level.getWorldBorder().isWithinBounds(target.blockPosition())`。
+        //
+        // `level.getWorldBorder().isWithinBounds(target.blockPosition())`.
+        if !region
+            .global
+            .world_border
+            .is_within_bounds_pos(BlockPos::containing(public.position))
+        {
+            return None;
+        }
+        let bounds = entity_bounds(public.position, public.kind.dimensions());
+        return range
+            .is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, creative)
+            .then(|| mob_target(public));
     }
     let other = region.players.get(&PlayerId(entity_id))?;
     // `ServerPlayer.canHarmPlayer`：PVP 规则 + 队伍，Bamboo 没有队伍。
@@ -521,20 +556,141 @@ fn resolve_target(
     if entity_id == attacker.0 || !region.global.rules.bool(gamerules::PVP) {
         return None;
     }
-    let in_range = interaction::within_block_interaction_range(
-        position,
-        eye_height,
-        reach,
-        BlockPos::containing(other.position()),
-        3.0,
-    );
-    in_range.then(|| TargetInfo {
-        position: other.position(),
-        entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
-        is_living: true,
-        health: other.health.health,
-        dimensions: (0.6, 1.8),
-    })
+    if !region
+        .global
+        .world_border
+        .is_within_bounds_pos(BlockPos::containing(other.position()))
+    {
+        return None;
+    }
+    let bounds = other.bounding_box();
+    range
+        .is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, creative)
+        .then(|| TargetInfo {
+            position: other.position(),
+            entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
+            is_living: true,
+            health: other.health.health,
+            // 蹲下时玩家只有 1.5 高，横扫盒和伤害指示粒子都读这个尺寸，
+            // 所以从真正的包围盒取，不能写死站立尺寸。
+            //
+            // A crouching player is only 1.5 tall; both the sweep box and the
+            // damage-indicator particle read this size, so take it from the real
+            // bounding box instead of hard-coding the standing size.
+            dimensions: (
+                (bounds.max_x - bounds.min_x) as f32,
+                (bounds.max_y - bounds.min_y) as f32,
+            ),
+        })
+}
+
+/// 官方 `AttackRange` 里玩家攻击者读得到的几项。`mob_factor` 只对非玩家
+/// 攻击者生效，玩家攻击永远走 `min/minCreative` / `max/maxCreative`。
+///
+/// The `AttackRange` fields a player attacker reads. `mob_factor` only applies
+/// to non-player attackers, so players always use `min/minCreative` and
+/// `max/maxCreative`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AttackRange {
+    min_reach: f32,
+    max_reach: f32,
+    min_creative_reach: f32,
+    max_creative_reach: f32,
+    hitbox_margin: f32,
+}
+
+impl AttackRange {
+    /// `AttackRange.defaultFor(livingEntity)`：`maxReach` 和 `maxCreativeReach`
+    /// 取 `ENTITY_INTERACTION_RANGE`，其余全 0。
+    ///
+    /// `AttackRange.defaultFor(livingEntity)`: `maxReach` and `maxCreativeReach`
+    /// take `ENTITY_INTERACTION_RANGE`, everything else is 0.
+    fn default_for(entity_interaction_range: f32) -> Self {
+        Self {
+            min_reach: 0.0,
+            max_reach: entity_interaction_range,
+            min_creative_reach: 0.0,
+            max_creative_reach: entity_interaction_range,
+            hitbox_margin: 0.0,
+        }
+    }
+
+    /// `AttackRange.isInRange(attacker, AABB, extraBuffer)`：眼睛到目标碰撞盒的
+    /// 距离落在 `[min − margin − buffer, max + margin + buffer]` 闭区间内。
+    ///
+    /// `AttackRange.isInRange(attacker, AABB, extraBuffer)`: the eye-to-box
+    /// distance lies in the closed `[min − margin − buffer, max + margin + buffer]`.
+    fn is_in_range(self, eye: Vec3, bounds: Aabb, buffer: f64, creative: bool) -> bool {
+        let (min, max) = if creative {
+            (self.min_creative_reach, self.max_creative_reach)
+        } else {
+            (self.min_reach, self.max_reach)
+        };
+        let distance = bounds.distance_to_sqr(eye).sqrt();
+        let margin = f64::from(self.hitbox_margin);
+        distance >= f64::from(min) - margin - buffer && distance <= f64::from(max) + margin + buffer
+    }
+}
+
+/// `LivingEntity.getAttackRangeWith(weaponItem)`：武器带 `ATTACK_RANGE` 组件
+/// 就用它，否则 `AttackRange.defaultFor`。
+///
+/// `LivingEntity.getAttackRangeWith(weaponItem)`: use the weapon's `ATTACK_RANGE`
+/// component when present, otherwise `AttackRange.defaultFor`.
+fn attack_range(held: &ItemStack, game_mode: GameMode) -> AttackRange {
+    if !held.is_empty()
+        && let Ok(patch) = ComponentPatch::from_opaque(held)
+        && let Some(ComponentValue::AttackRange {
+            min_reach,
+            max_reach,
+            min_creative_reach,
+            max_creative_reach,
+            hitbox_margin,
+            ..
+        }) = defaults::resolve(held.item, &patch, kinds::ATTACK_RANGE)
+    {
+        return AttackRange {
+            min_reach: *min_reach,
+            max_reach: *max_reach,
+            min_creative_reach: *min_creative_reach,
+            max_creative_reach: *max_creative_reach,
+            hitbox_margin: *hitbox_margin,
+        };
+    }
+    AttackRange::default_for(entity_interaction_range(game_mode))
+}
+
+/// `getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE)`：注册表缺省 3.0，
+/// 创造模式的 `ServerPlayer` 再叠加 2.0 的临时修饰符。玩家的这个属性没有
+/// 来自物品的修饰符。
+///
+/// `getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE)`: registry default
+/// 3.0 plus the 2.0 creative transient modifier. No item adds to it for players.
+fn entity_interaction_range(game_mode: GameMode) -> f32 {
+    let base = attribute_defaults::ENTITY_INTERACTION_RANGE as f32;
+    if game_mode == GameMode::Creative {
+        base + CREATIVE_ENTITY_INTERACTION_RANGE
+    } else {
+        base
+    }
+}
+
+/// 目标实体的碰撞盒，官方 `Entity.makeBoundingBox(position)`：以脚底位置为中心、
+/// 宽 `width` 高 `height`。
+///
+/// The target's collision box, vanilla `Entity.makeBoundingBox(position)`: a
+/// `width × height` box centred on the feet position.
+fn entity_bounds(position: Vec3, dimensions: (f32, f32)) -> Aabb {
+    let half = f64::from(dimensions.0 / 2.0);
+    let height = f64::from(dimensions.1);
+    Aabb::new(
+        position.x - half,
+        position.y,
+        position.z - half,
+        position.x + half,
+        position.y + height,
+        position.z + half,
+    )
 }
 
 /// `Player.attack` 的伤害算式：`s`、`baseDamage`、`magicBoost`、暴击 / 横扫 /
@@ -572,6 +728,17 @@ fn plan_attack(
     // `onAttack()` → `resetOnlyAttackStrengthTicker()`。
     if let Some(player) = region.players.get_mut(&id) {
         player.attack_strength_ticker = 0;
+    }
+    // `Player.attack` 在 `baseDamage > 0 || magicBoost > 0` 之外整段跳过：不 hurt、
+    // 不发包，连 `nodamage` 音都不播。正常路径 `ATTACK_DAMAGE` 基值 1.0 让
+    // `baseDamage >= 0.2`，这道门槛只在伤害被减到 0 时生效。
+    //
+    // `Player.attack` skips everything outside `baseDamage > 0 || magicBoost > 0`:
+    // no hurt, no packets, not even the `nodamage` sound. The base
+    // `ATTACK_DAMAGE` of 1.0 keeps `baseDamage >= 0.2`, so this only matters when
+    // damage is reduced to zero.
+    if base_damage <= 0.0 && magic_boost <= 0.0 {
+        return None;
     }
     let player = &region.players[&id];
     let full = s > FULL_STRENGTH;
@@ -640,6 +807,16 @@ fn land_attack(
     plan: &AttackPlan,
 ) -> (bool, f32) {
     let hits_player = player_target(region, entity_id);
+    // 官方在 `hurtOrSimulate` 之前记下目标的旧速度，最后用
+    // `ServerPlayer.syncVelocity` 那一支把服务端速度改回去，只把新速度发给客户端。
+    //
+    // Vanilla captures the target's old velocity before `hurtOrSimulate` and,
+    // through the `ServerPlayer.syncVelocity` branch, puts the server-side
+    // velocity back afterwards; only the client is told the new one.
+    let old_target_movement = hits_player
+        .then(|| region.players.get(&PlayerId(entity_id)))
+        .flatten()
+        .map(|player| player.motion.delta);
     let hit = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
@@ -652,13 +829,20 @@ fn land_attack(
             world.hurt_mob(entity_id, plan.source, plan.total_damage)
         };
         if hit {
-            apply_extra_knockback(&mut world, entity_id, plan.extra_knockback, plan.yaw);
+            apply_extra_knockback(
+                &mut world,
+                entity_id,
+                plan.extra_knockback,
+                plan.yaw,
+                hits_player,
+            );
             if plan.sweep {
                 let spec = SweepSpec {
                     held: &plan.held,
                     base_damage: plan.base_damage,
                     s: plan.s,
                     player_position: plan.position,
+                    creative: plan.source.creative_player,
                     yaw: plan.yaw,
                 };
                 do_sweep(&mut world, id, &plan.sweep_targets, &spec);
@@ -692,7 +876,13 @@ fn land_attack(
                     "minecraft:entity.player.attack.sweep",
                 );
             }
-            post_attack_effects(&mut world, entity_id, &plan.held, target.entity_type);
+            post_attack_effects(
+                &mut world,
+                entity_id,
+                &plan.held,
+                target.entity_type,
+                hits_player,
+            );
         } else {
             push_sound(
                 &mut world,
@@ -704,15 +894,21 @@ fn land_attack(
         interaction::send_effects(region, Some(id), &effects);
         hit
     };
+    if hit
+        && let Some(old) = old_target_movement
+        && let Some(player) = region.players.get_mut(&PlayerId(entity_id))
+    {
+        player.motion.delta = old;
+    }
     (hit, damage_taken(region, entity_id, target.health))
 }
 
 /// 命中之后：衰减攻击者速度 / 取消疾跑、暴击 / 附魔暴击动画、横扫 / 伤害指示
-/// 粒子、武器耐久、`lastHurtMob`、饥饿消耗和挥手。
+/// 粒子、`DAMAGE_DEALT` 统计、武器耐久、`lastHurtMob`、饥饿消耗和挥手。
 ///
 /// After a hit: attacker velocity damp / sprint cancel, crit / magic-crit
-/// animations, sweep / damage-indicator particles, weapon durability,
-/// `lastHurtMob`, exhaustion and the swing.
+/// animations, sweep / damage-indicator particles, the `DAMAGE_DEALT` stat,
+/// weapon durability, `lastHurtMob`, exhaustion and the swing.
 fn finish_hit(
     region: &mut Region,
     id: PlayerId,
@@ -758,6 +954,13 @@ fn finish_hit(
             },
         );
     }
+    // `Player.damageStatsAndHearts`：先 `awardStat(DAMAGE_DEALT, round(实际伤害 × 10))`，
+    // 再按 `actualDamage > 2` 发伤害指示粒子。统计只在会话内累计（不写 stats 文件）。
+    //
+    // `Player.damageStatsAndHearts`: first `awardStat(DAMAGE_DEALT, round(actual
+    // damage × 10))`, then the damage-indicator particles when `actualDamage > 2`.
+    // The stat accumulates for this session only (no stats file).
+    item_use_stats::award_damage_dealt(region, id, (actual_damage * 10.0).round() as i32);
     if actual_damage > 2.0 {
         let count = (actual_damage * 0.5) as i32;
         send_particles(
@@ -836,8 +1039,15 @@ fn player_center_y(region: &Region, id: PlayerId) -> f64 {
     let Some(player) = region.players.get(&id) else {
         return 0.0;
     };
+    // `Entity.getY(0.5)` = `position.y + getBbHeight() * 0.5`：`getBbHeight` 是
+    // float，这一点 `1.8F * 0.5` 的舍入必须保留，否则高度少一位、粒子位置对不上。
+    //
+    // `Entity.getY(0.5)` is `position.y + getBbHeight() * 0.5`; `getBbHeight` is
+    // a float, so the rounding of `1.8F * 0.5` must be kept or the particle
+    // position differs in the last bits.
     let box3d = player.bounding_box();
-    (box3d.min_y + box3d.max_y) * 0.5
+    let height = (box3d.max_y - box3d.min_y) as f32;
+    player.position().y + f64::from(height * 0.5)
 }
 
 /// `Entity.isAttackable()` 的简化版：只让生物和玩家挨打；掉落物、经验球、
@@ -858,14 +1068,24 @@ fn is_attackable(kind: &mc_bamboo_blocks::entity::KindPublic) -> bool {
 /// mob target: a second push along the attacker's facing with the precomputed
 /// `getKnockback + (sprint ? 0.5 : 0)`. The attacker's own velocity damp and
 /// sprint cancellation land separately in [`damp_attacker`] after the hit.
-fn apply_extra_knockback(world: &mut World<'_>, entity_id: i32, amount: f32, yaw: f32) {
+fn apply_extra_knockback(
+    world: &mut World<'_>,
+    entity_id: i32,
+    amount: f32,
+    yaw: f32,
+    is_player: bool,
+) {
     if amount <= 0.0 {
         return;
     }
     let radians = f64::from(yaw * (std::f32::consts::PI / 180.0));
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
-    world.knockback_mob(entity_id, f64::from(amount), f64::from(dx), f64::from(dz));
+    if is_player {
+        world.knock_back_player(entity_id, f64::from(amount), (f64::from(dx), f64::from(dz)));
+    } else {
+        world.knockback_mob(entity_id, f64::from(amount), f64::from(dx), f64::from(dz));
+    }
 }
 
 /// `Player.causeExtraKnockback` 的收尾：`setDeltaMovement(×0.6, 1.0, ×0.6)`
@@ -880,38 +1100,92 @@ fn damp_attacker(region: &mut Region, id: PlayerId) {
     }
 }
 
-/// `Player.doSweepAttack` 的候选：主目标盒子 inflate(1, 0.25, 1) 里、
-/// 距玩家小于 3 格的其它生物（玩家本人不算）。返回 (实体 ID, 实体类型)。
+/// 横扫的一个候选。
 ///
-/// `Player.doSweepAttack` candidates: other mobs in the main target's
-/// inflate(1, 0.25, 1) box and within 3 blocks of the player.
+/// One sweeping candidate.
+struct SweepTarget {
+    id: i32,
+    entity_type: i32,
+    is_player: bool,
+}
+
+/// `Player.doSweepAttack` 的候选：主目标的整个碰撞盒 inflate(1, 0.25, 1) 与
+/// 候选自己的碰撞盒相交、距玩家小于 3 格的其它 `LivingEntity`（玩家也算，
+/// 攻击者和主目标不算）。玩家排在生物的后面，因为玩家不在实体表里。
+///
+/// `Player.doSweepAttack` candidates: other `LivingEntity`s whose own collision
+/// box intersects the main target's box inflated by (1, 0.25, 1) and that are
+/// within 3 blocks of the player (players included, the attacker and the main
+/// target excluded). Players come after mobs because they are not in the entity
+/// store.
 fn collect_sweep_targets(
     region: &Region,
     attacker: PlayerId,
     main_target: i32,
     target: &TargetInfo,
     player_position: Vec3,
-) -> Vec<(i32, i32)> {
-    let (width, height) = target.dimensions;
-    let half = f64::from(width) * 0.5;
-    region
+) -> Vec<SweepTarget> {
+    let area = entity_bounds(target.position, target.dimensions).inflate(1.0, 0.25, 1.0);
+    let within_reach = |position: Vec3| {
+        (position.x - player_position.x).powi(2)
+            + (position.y - player_position.y).powi(2)
+            + (position.z - player_position.z).powi(2)
+            < 9.0
+    };
+    let mut out: Vec<SweepTarget> = region
         .entities
         .iter_public()
         .filter(|public| {
+            let bounds = entity_bounds(public.position, public.kind.dimensions());
             matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
                 && !public.removed
                 && public.uid != main_target
                 && public.uid != attacker.0
-                && (public.position.x - target.position.x).abs() <= half + 1.0
-                && (public.position.z - target.position.z).abs() <= half + 1.0
-                && (public.position.y - target.position.y).abs() <= f64::from(height) + 0.25
-                && (public.position.x - player_position.x).powi(2)
-                    + (public.position.y - player_position.y).powi(2)
-                    + (public.position.z - player_position.z).powi(2)
-                    < 9.0
+                && area.intersects_coords(
+                    bounds.min_x,
+                    bounds.min_y,
+                    bounds.min_z,
+                    bounds.max_x,
+                    bounds.max_y,
+                    bounds.max_z,
+                )
+                && within_reach(public.position)
         })
-        .map(|public| (public.uid, public.kind.entity_type()))
-        .collect()
+        .map(|public| SweepTarget {
+            id: public.uid,
+            entity_type: public.kind.entity_type(),
+            is_player: false,
+        })
+        .collect();
+    // `getEntitiesOfClass(LivingEntity.class, ...)` 也包含玩家。官方没有队伍，
+    // 所以除了攻击者本人没有别的排除。
+    //
+    // `getEntitiesOfClass(LivingEntity.class, ...)` includes players too. There
+    // are no teams, so nothing but the attacker itself is excluded.
+    for player in region.players.values() {
+        let bounds = player.bounding_box();
+        let position = player.position();
+        if player.id == attacker
+            || player.id.0 == main_target
+            || !area.intersects_coords(
+                bounds.min_x,
+                bounds.min_y,
+                bounds.min_z,
+                bounds.max_x,
+                bounds.max_y,
+                bounds.max_z,
+            )
+            || !within_reach(position)
+        {
+            continue;
+        }
+        out.push(SweepTarget {
+            id: player.id.0,
+            entity_type: mc_bamboo_data::registries::entity_type::PLAYER,
+            is_player: true,
+        });
+    }
+    out
 }
 
 /// `do_sweep` 的固定参数。
@@ -922,6 +1196,15 @@ struct SweepSpec<'a> {
     base_damage: f32,
     s: f32,
     player_position: Vec3,
+    /// 官方 `doSweepAttack` 复用 `Player.attack` 的同一个 `damageSource`，
+    /// 其 `isCreativePlayer()` 动态取攻击者能力；这里把主攻击那一份的
+    /// `creative_player` 透传过来，创造模式攻击者才能绕过目标的受伤无敌帧。
+    ///
+    /// Vanilla `doSweepAttack` reuses the same `damageSource` from `Player.attack`,
+    /// whose `isCreativePlayer()` reads the attacker's abilities dynamically; pass
+    /// the main attack's `creative_player` through so a creative attacker bypasses
+    /// the target's temporary invulnerability here too.
+    creative: bool,
     yaw: f32,
 }
 
@@ -936,26 +1219,45 @@ struct SweepSpec<'a> {
 fn do_sweep(
     world: &mut World<'_>,
     attacker: PlayerId,
-    nearby: &[(i32, i32)],
+    nearby: &[SweepTarget],
     spec: &SweepSpec<'_>,
 ) {
     let sweep_base = 1.0 + sweeping_ratio(spec.held) * spec.base_damage;
     let radians = f64::from(spec.yaw * (std::f32::consts::PI / 180.0));
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
-    for &(id, entity_type) in nearby {
-        let enchanted = (sweep_base + damage_bonus(spec.held, entity_type)) * spec.s;
-        let mut source = DamageSource::player(attacker.0, spec.player_position, false);
+    for target in nearby {
+        let enchanted = (sweep_base + damage_bonus(spec.held, target.entity_type)) * spec.s;
+        let mut source = DamageSource::player(attacker.0, spec.player_position, spec.creative);
         if !spec.held.is_empty()
             && let Ok(weapon) = u16::try_from(spec.held.item)
         {
             source = source.with_weapon(weapon);
         }
-        if world.hurt_mob(id, source, enchanted) {
-            world.knockback_mob(id, f64::from(0.4_f32), f64::from(dx), f64::from(dz));
+        let hurt = if target.is_player {
+            world.hurt_player_from_mob(target.id, source, enchanted, None)
+        } else {
+            world.hurt_mob(target.id, source, enchanted)
+        };
+        if hurt {
+            if target.is_player {
+                world.knock_back_player(
+                    target.id,
+                    f64::from(0.4_f32),
+                    (f64::from(dx), f64::from(dz)),
+                );
+            } else {
+                world.knockback_mob(target.id, f64::from(0.4_f32), f64::from(dx), f64::from(dz));
+            }
             // 官方 `doSweepAttack` 对每个打中的 nearby 也调一次 `doPostAttackEffects`。
             // Vanilla `doSweepAttack` also calls `doPostAttackEffects` on each hurt nearby.
-            post_attack_effects(world, id, spec.held, entity_type);
+            post_attack_effects(
+                world,
+                target.id,
+                spec.held,
+                target.entity_type,
+                target.is_player,
+            );
         }
     }
 }
@@ -965,46 +1267,68 @@ fn do_sweep(
 ///
 /// `EnchantmentHelper.doPostAttackEffectsWithItemSource`: Fire Aspect ignites
 /// the target and Bane of Arthropods applies Slowness IV to arthropods.
-fn post_attack_effects(world: &mut World<'_>, entity_id: i32, held: &ItemStack, entity_type: i32) {
+fn post_attack_effects(
+    world: &mut World<'_>,
+    entity_id: i32,
+    held: &ItemStack,
+    entity_type: i32,
+    is_player: bool,
+) {
     let fire = enchantment_level(held, "minecraft:fire_aspect");
     if fire > 0 {
         // `Ignite(LevelBasedValue.perLevel(4.0F))` → 4×等级 秒 → ×20 刻。
-        world.ignite_mob(entity_id, fire * 80);
+        if is_player {
+            world.ignite_player_from_mob(entity_id, fire * 80);
+        } else {
+            world.ignite_mob(entity_id, fire * 80);
+        }
     }
     let bane = enchantment_level(held, "minecraft:bane_of_arthropods");
     if bane > 0 && entity_in_tag("minecraft:sensitive_to_bane_of_arthropods", entity_type) {
-        // `ApplyMobEffect(SLOWNESS, 1.5s, 1.5+0.5×(L−1)s, 3, 3)`：
-        // 时长在 [30, 30+10×(L−1)] 刻之间取随机，等级恒为 3（缓慢 IV）。
-        let max_ticks = 30 + 10 * (bane - 1);
-        let ticks = sweep_slowness_ticks(world, entity_id, max_ticks);
-        world.add_mob_effect(
-            entity_id,
-            EffectInstance::with_amplifier(mob_effect::SLOWNESS, ticks, 3),
-        );
+        let drawn = world.with_mob_random(entity_id, |random| bane_slowness(random, bane));
+        if let Some((ticks, amplifier)) = drawn {
+            world.add_mob_effect(
+                entity_id,
+                EffectInstance::with_amplifier(mob_effect::SLOWNESS, ticks, amplifier),
+            );
+        }
     }
 }
 
-/// `Mth.randomBetween(random, min, max) × 20` 的官方取整；随机源是目标生物自己的
-/// `getRandom()`，这里按 `[30, max]` 均匀分布取一次 `nextFloat`。
+/// `ApplyMobEffect` 给节肢杀手挂的缓慢 IV：三次取数都用受害者自己的随机源，
+/// 顺序是 `getRandomElement`、时长、等级。单元素 `HolderSet` 也消费一次
+/// `nextInt(1)`，已由 `HolderSet.Direct.getRandomElement` → `Util.getRandomSafe`
+/// → `Util.getRandom`（`list.get(random.nextInt(list.size()))`）确认，不是推断；
+/// 时长、等级各取一次 `Mth.randomBetween` 的 `nextFloat`。时长
+/// `[1.5, 1.5 + 0.5×(L−1)]` 秒 ×20 取整，等级 `[3, 3]`。
 ///
-/// `Mth.randomBetween(random, min, max) × 20`, drawn from the target's own
-/// `getRandom()`; one `nextFloat` over `[30, max]`.
-fn sweep_slowness_ticks(_world: &mut World<'_>, _entity_id: i32, max_ticks: i32) -> i32 {
-    // 官方 `ApplyMobEffect` 先从 `HolderSet` 取一个元素，再各取一次随机定
-    // 时长和等级。Bamboo 没有把生物随机源暴露到这里，用最短时长（30 刻）
-    // 保守实现，见 README 已知限制。
-    //
-    // Vanilla draws from the mob's own random for duration and amplifier.
-    // Bamboo does not expose that source here, so the minimum (30 ticks) is
-    // used; see README known limits.
-    let _ = max_ticks;
-    30
+/// The Slowness IV `ApplyMobEffect` applies for Bane of Arthropods: three draws
+/// from the victim's own random, in vanilla order — `getRandomElement`, duration,
+/// amplifier. A single-element `HolderSet` still consumes `nextInt(1)`, confirmed
+/// by `HolderSet.Direct.getRandomElement` → `Util.getRandomSafe` →
+/// `Util.getRandom` (`list.get(random.nextInt(list.size()))`), not inferred; the
+/// duration and amplifier each take one `Mth.randomBetween` `nextFloat`. Duration
+/// is `[1.5, 1.5 + 0.5×(L−1)]` seconds ×20, rounded; amplifier is 3.
+fn bane_slowness(random: &mut JavaRandom, level: i32) -> (i32, i32) {
+    let min_seconds = 1.5_f32;
+    let max_seconds = 1.5 + 0.5 * (level - 1) as f32;
+    let min_amplifier = 3.0_f32;
+    let max_amplifier = 3.0_f32;
+    let _ = random.next_int_bounded(1);
+    let duration = random.next_float() * (max_seconds - min_seconds) + min_seconds;
+    let amplifier = random.next_float() * (max_amplifier - min_amplifier) + min_amplifier;
+    (
+        (duration * 20.0).round() as i32,
+        amplifier.round().max(0.0) as i32,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    pub(crate) use crate::world::tests::frames_with_id;
 
     fn stack(item: i32) -> ItemStack {
         ItemStack::new(item, 1)
@@ -1028,6 +1352,253 @@ mod tests {
             added,
             removed,
         }
+    }
+
+    /// 官方 `Player.canCriticalAttack` 的六个已建模前置：下落中、不着地、无失明
+    /// （`isMobilityRestricted`）、非疾跑（`isSprinting`）、无载具（`isPassenger`）、
+    /// 目标是生物。`onClimbable` / `isInWater` 是 README 已知限制里按缺省值处理的
+    /// 两项，这里单独说明、不写进断言。
+    ///
+    /// Vanilla `Player.canCriticalAttack`'s six modelled preconditions: falling,
+    /// off ground, no blindness (`isMobilityRestricted`), not sprinting
+    /// (`isSprinting`), no vehicle (`isPassenger`), living target. `onClimbable` /
+    /// `isInWater` are the two README-known-limit defaults, noted but not asserted.
+    #[test]
+    fn can_critical_requires_every_modelled_precondition() {
+        use mc_bamboo_blocks::entity::mob::effects::{EffectInstance, EffectMap};
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.motion.fall_distance = 1.0;
+        player.on_ground = false;
+        region.insert_player(player);
+        let crit = |region: &Region, living: bool| can_critical(&region.players[&id], living);
+
+        // 全部前置满足才算暴击；目标不是生物则否。
+        // All preconditions met means crit; a non-living target cannot be crit.
+        assert!(crit(&region, true));
+        assert!(!crit(&region, false));
+
+        // 着地（`onGround`）。
+        // On ground.
+        region.players.get_mut(&id).unwrap().on_ground = true;
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().on_ground = false;
+
+        // 没有下落（fallDistance）。
+        // Not falling.
+        region.players.get_mut(&id).unwrap().motion.fall_distance = 0.0;
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().motion.fall_distance = 1.0;
+
+        // 失明（hasEffect(BLINDNESS)）。
+        // Blindness.
+        region
+            .players
+            .get_mut(&id)
+            .unwrap()
+            .effects
+            .add(EffectInstance::with_amplifier(
+                mob_effect::BLINDNESS,
+                600,
+                0,
+            ));
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().effects = EffectMap::new();
+
+        // 疾跑（isSprinting）。
+        // Sprinting.
+        entity_sync::set_sprinting(&mut region, id, true);
+        assert!(!crit(&region, true));
+        entity_sync::set_sprinting(&mut region, id, false);
+
+        // 骑乘（isPassenger）。
+        // Riding a vehicle.
+        region.players.get_mut(&id).unwrap().riding.vehicle = Some(7);
+        assert!(!crit(&region, true));
+        region.players.get_mut(&id).unwrap().riding.vehicle = None;
+        assert!(crit(&region, true));
+    }
+
+    /// 官方 `Player.isSweepAttack` 的前置：满充能、非暴击、非疾跑、着地、水平
+    /// 移动够慢、拿剑。`getSpeed()` 这里按 README 已知限制写死 f32 基值 0.1；
+    /// 阈值在 double 里算，约 0.0625000019。
+    ///
+    /// Vanilla `Player.isSweepAttack`'s gates: full strength, non-critical,
+    /// non-sprint, on ground, slow horizontal movement, holding a sword.
+    /// `getSpeed()` is the README-known-limit f32 0.1 base; the threshold is
+    /// computed in double and is about 0.0625000019.
+    #[test]
+    fn is_sweep_attack_requires_full_charge_ground_and_a_sword() {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.on_ground = true;
+        player.motion.known_movement = Vec3::new(0.0, 0.0, 0.0);
+        region.insert_player(player);
+        let sword = stack(mc_bamboo_data::items::DIAMOND_SWORD);
+        let axe = stack(mc_bamboo_data::items::DIAMOND_AXE);
+        let sweep = |region: &Region, held: &ItemStack, full, crit, sprint| {
+            is_sweep_attack(&region.players[&id], held, full, crit, sprint)
+        };
+
+        // 满充能、着地、拿剑、静止 → 横扫。
+        // Full strength, on ground, sword, still → sweep.
+        assert!(sweep(&region, &sword, true, false, false));
+        // 非满充能 / 暴击 / 疾跑 / 不是剑 → 不横扫。
+        // Not full / critical / sprinting / not a sword → no sweep.
+        assert!(!sweep(&region, &sword, false, false, false));
+        assert!(!sweep(&region, &sword, true, true, false));
+        assert!(!sweep(&region, &sword, true, false, true));
+        assert!(!sweep(&region, &axe, true, false, false));
+
+        // 离地 → 不横扫。
+        // Off ground → no sweep.
+        region.players.get_mut(&id).unwrap().on_ground = false;
+        assert!(!sweep(&region, &sword, true, false, false));
+        region.players.get_mut(&id).unwrap().on_ground = true;
+
+        // 水平位移平方 ≥ (0.1F×2.5)² → 不横扫；慢于它 → 横扫。
+        // Horizontal distance squared ≥ (0.1F×2.5)² → no sweep; slower → sweep.
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.3, 0.0, 0.0);
+        assert!(!sweep(&region, &sword, true, false, false));
+        // 0.25² = 0.0625 仍略小于 double 里的阈值 0.0625000019，官方会横扫；
+        // 用 f32 算阈值会把它错判成不横扫。
+        // 0.25² = 0.0625 is still just under the double threshold 0.0625000019,
+        // so vanilla sweeps; an f32 threshold would wrongly reject it.
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.25, 0.0, 0.0);
+        assert!(sweep(&region, &sword, true, false, false));
+        // 阈值本身严格排除（`dcmpg >= 0` → false）。
+        // The threshold itself is excluded (`dcmpg >= 0` → false).
+        let max = f64::from(PLAYER_WALKING_SPEED) * 2.5;
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(max, 0.0, 0.0);
+        assert!(!sweep(&region, &sword, true, false, false));
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.2, 0.0, 0.0);
+        assert!(sweep(&region, &sword, true, false, false));
+    }
+
+    /// `Player.attack` 在 `baseDamage > 0 || magicBoost > 0` 之外整段跳过：
+    /// `onAttack()` 已经把冷却清零，但既不 hurt、也不发攻击音效。武器把
+    /// `ATTACK_DAMAGE` 减到 0、又没有任何附魔加成时才会走到这里。
+    ///
+    /// Vanilla `Player.attack` skips everything outside
+    /// `baseDamage > 0 || magicBoost > 0`: `onAttack()` has already reset the
+    /// cooldown, but there is no hurt and no attack sound. A weapon that reduces
+    /// `ATTACK_DAMAGE` to zero without an enchantment boost reaches this gate.
+    #[test]
+    fn a_zero_damage_attack_skips_the_hit_and_its_sound() {
+        use mc_bamboo_data::{items, packets::play::clientbound, sounds};
+        use mc_bamboo_protocol::{codec::Reader, packet::play::PlayRequest};
+
+        use crate::world::tests::Harness;
+
+        let mut server = Harness::new(8);
+        let client = server.join("Kitten");
+        server.tick();
+        client.take_frames();
+        let region = &mut server.world.islands.region;
+        let position = region.players.get(&client.id).unwrap().position();
+        let cow = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::cow(position));
+        // 主手武器上一条 `ATTACK_DAMAGE = -1` 的 ADD_VALUE 修饰符，把玩家的
+        // 基础 1.0 减到 0。官方 `Player.createAttributes()` 的基值就是 1.0。
+        //
+        // One `ATTACK_DAMAGE = -1` ADD_VALUE modifier on the main-hand weapon
+        // cancels the player's base 1.0 from `Player.createAttributes()`.
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::ATTRIBUTE_MODIFIERS,
+            PatchEntry::Set(ComponentValue::AttributeModifiers(vec![
+                mc_bamboo_protocol::components::value::AttributeEntry {
+                    attribute: mc_bamboo_data::registries::attribute::ATTACK_DAMAGE,
+                    modifier: mc_bamboo_protocol::components::value::AttributeModifier {
+                        id: "minecraft:base_attack_damage".to_owned(),
+                        amount: -1.0,
+                        operation: 0,
+                    },
+                    slot: 1,
+                    display: mc_bamboo_protocol::components::value::AttributeDisplay::Default,
+                },
+            ])),
+        );
+        let (added, removed) = patch.to_opaque();
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            let slot = player.inventory.hand_slot(Hand::Main);
+            player.inventory.slots[slot] = ItemStack {
+                item: items::DIAMOND_SWORD,
+                count: 1,
+                added,
+                removed,
+            };
+            player.attack_strength_ticker = 100;
+            player.on_ground = true;
+            player.motion.fall_distance = 0.0;
+        }
+        let health_before = region
+            .entities
+            .get(cow)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+            .expect("cow");
+
+        server.request(&client, PlayRequest::Attack { entity_id: cow });
+        server.tick();
+        let frames = client.take_frames();
+        let ids: Vec<i32> = frames_with_id(&frames, clientbound::SOUND)
+            .iter()
+            .filter_map(|frame| Reader::new(&frame.body).varint().ok())
+            .map(|id| id - 1)
+            .collect();
+        let sound = |name| i32::from(sounds::sound_event(name));
+        for absent in [
+            "minecraft:entity.player.attack.weak",
+            "minecraft:entity.player.attack.strong",
+            "minecraft:entity.player.attack.crit",
+            "minecraft:entity.player.attack.sweep",
+            "minecraft:entity.player.attack.nodamage",
+        ] {
+            assert!(!ids.contains(&sound(absent)), "{absent} must not be sent");
+        }
+        let health_after = server
+            .world
+            .islands
+            .region
+            .entities
+            .get(cow)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+            .expect("cow");
+        assert_eq!(health_after, health_before, "no hurt without damage");
+        // `onAttack()` 仍然把冷却清零：这一刻开头的 +1 之后没有再涨。
+        // `onAttack()` still resets the cooldown: after this tick's leading +1
+        // the ticker stays at zero instead of continuing to charge.
+        assert_eq!(
+            server
+                .world
+                .islands
+                .region
+                .players
+                .get(&client.id)
+                .unwrap()
+                .attack_strength_ticker,
+            0,
+            "the skipped attack still resets the cooldown"
+        );
     }
 
     #[test]
@@ -1076,6 +1647,222 @@ mod tests {
         );
         assert_eq!(damage_bonus(&bane, spider), 5.0);
         assert_eq!(damage_bonus(&bane, zombie), 0.0);
+    }
+
+    /// 官方 `ApplyMobEffect` 对节肢杀手的三次取数全来自受害者自己的随机源，
+    /// 顺序是 `nextInt(1)`、时长、等级；等级恒为 3，L=1 时时长恒 30 刻。
+    ///
+    /// Vanilla `ApplyMobEffect` for Bane of Arthropods makes all three draws from
+    /// the victim's random in the order `nextInt(1)`, duration, amplifier. The
+    /// amplifier is always 3 and L=1 always yields 30 ticks.
+    #[test]
+    fn bane_slowness_draws_three_times_from_the_mob_random() {
+        let mut random = JavaRandom::new(12_345);
+        let mut reference = JavaRandom::new(12_345);
+        let (ticks, amplifier) = bane_slowness(&mut random, 1);
+        let _ = reference.next_int_bounded(1);
+        let _ = reference.next_float();
+        let _ = reference.next_float();
+        assert_eq!(ticks, 30, "L=1 duration is the constant 1.5s");
+        assert_eq!(amplifier, 3);
+        // 三次取数之后两个随机源的状态一致。
+        // Both sources are in the same state after the three draws.
+        assert_eq!(random.next_long(), reference.next_long());
+
+        // L=3：时长落在 [30, 50) 刻。
+        // L=3: the duration lands in [30, 50) ticks.
+        let mut random = JavaRandom::new(7);
+        let mut reference = JavaRandom::new(7);
+        let (ticks, _) = bane_slowness(&mut random, 3);
+        let _ = reference.next_int_bounded(1);
+        let duration = reference.next_float() * (2.5 - 1.5) + 1.5;
+        assert_eq!(ticks, (duration * 20.0).round() as i32);
+        assert!((30..50).contains(&ticks), "{ticks}");
+    }
+
+    /// 攻击路径确实从**受害者**的随机源取数：打完蜘蛛后它的随机源正好前进三次，
+    /// 缓慢时长与按同样三次取数算出来的一致。世界随机源不在这一步被消耗。
+    ///
+    /// The attack path really draws from the **victim's** random: after hitting a
+    /// spider its random is exactly three draws ahead and the Slowness duration
+    /// matches the same three draws. The world random is not touched here.
+    #[test]
+    fn bane_slowness_draws_from_the_victim_in_the_attack_path() {
+        use mc_bamboo_blocks::entity::mob::MobType;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            3,
+        );
+        region.players.get_mut(&id).unwrap().attack_strength_ticker = 100;
+        let spider = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+                MobType::Spider,
+                Vec3::new(2.5, 64.0, 0.5),
+            ));
+        let before = region.entities.get(spider).expect("spider").random;
+        let sword = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            3,
+        );
+        // 直接调 `land_attack` 命中后调的 `post_attack_effects`，跳过 `hurt_mob`
+        // 里受伤音高的两次取数，才能精确锁住这三次。
+        //
+        // Call the `post_attack_effects` that `land_attack` runs on a hit,
+        // skipping the two hurt-sound pitch draws inside `hurt_mob`, so the
+        // three draws can be pinned exactly.
+        let mut expected = before;
+        let (ticks, amplifier) = bane_slowness(&mut expected, 3);
+        {
+            let (mut level, block_ticks) = region.block_level();
+            let mut world = World::new(&mut level, block_ticks);
+            post_attack_effects(
+                &mut world,
+                spider,
+                &sword,
+                mc_bamboo_data::registries::entity_type::SPIDER,
+                false,
+            );
+        }
+
+        let entity = region.entities.get(spider).expect("spider");
+        let effect = entity
+            .kind
+            .mob()
+            .and_then(|mob| mob.effects.get(mob_effect::SLOWNESS))
+            .expect("Bane of Arthropods applies Slowness");
+        assert_eq!(effect.duration, ticks);
+        assert_eq!(effect.amplifier, amplifier);
+        assert_eq!(
+            entity.random.state(),
+            expected.state(),
+            "the victim random advanced by exactly the three ApplyMobEffect draws"
+        );
+    }
+
+    /// 完整的 `on_attack` 走到节肢杀手：蜘蛛被挂上缓慢 IV（等级 3），时长落在
+    /// `[30, 50)` 刻。这里不复述精确取数——`hurt_mob` 的受伤音高也会消耗两次
+    /// 受害者随机数，精确值由上面那条直接调 `post_attack_effects` 的测试锁住。
+    ///
+    /// The full `on_attack` reaches Bane of Arthropods: the spider gets Slowness IV
+    /// (amplifier 3) for `[30, 50)` ticks. This does not pin the exact draw because
+    /// `hurt_mob`'s hurt-sound pitch also consumes two victim draws; the exact
+    /// values are pinned by the `post_attack_effects` test above.
+    #[test]
+    fn attack_applies_bane_slowness_to_a_spider() {
+        use mc_bamboo_blocks::entity::mob::MobType;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:bane_of_arthropods",
+            3,
+        );
+        region.players.get_mut(&id).unwrap().attack_strength_ticker = 100;
+        let spider = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::by_mob_type(
+                MobType::Spider,
+                Vec3::new(2.5, 64.0, 0.5),
+            ));
+
+        on_attack(&mut region, id, spider);
+
+        let entity = region.entities.get(spider).expect("spider");
+        let effect = entity
+            .kind
+            .mob()
+            .and_then(|mob| mob.effects.get(mob_effect::SLOWNESS))
+            .expect("Bane of Arthropods applies Slowness");
+        assert_eq!(effect.amplifier, 3);
+        assert!((30..50).contains(&effect.duration), "{}", effect.duration);
+    }
+
+    /// 创造模式攻击者横扫时，官方 `doSweepAttack` 复用的 `damageSource` 带着
+    /// `isCreativePlayer()`，能绕过被横扫目标的临时无敌帧。横扫来源如果写死成
+    /// 非创造，带无敌帧的第二头牛就漏了伤害。
+    ///
+    /// A creative attacker's sweep reuses the `damageSource` from `Player.attack`,
+    /// whose `isCreativePlayer()` bypasses the swept target's temporary
+    /// invulnerability. Hard-coding the sweep source as non-creative would drop
+    /// the damage on an invulnerable second cow.
+    #[test]
+    fn creative_sweep_bypasses_swept_target_invulnerability() {
+        use mc_bamboo_blocks::entity::Entity;
+
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Creative,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.attack_strength_ticker = 100;
+        region.insert_player(player);
+        let sword = stack(mc_bamboo_data::items::DIAMOND_SWORD);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = sword.clone();
+        region.players.get_mut(&id).unwrap().last_main_hand_item = sword;
+        let main = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(2.5, 64.0, 0.5)));
+        let swept = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(3.0, 64.0, 0.5)));
+        // 临时无敌帧：只有 `creative_player` 为真的伤害源能打进去。
+        // Temporary invulnerability: only a `creative_player` source gets through.
+        region.entities.with_mut(swept, |entity| {
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.invulnerable_time = 10;
+            }
+        });
+        let cow_health = |region: &Region, uid: i32| {
+            region
+                .entities
+                .get(uid)
+                .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+                .unwrap_or(0.0)
+        };
+        let before = cow_health(&region, swept);
+
+        on_attack(&mut region, id, main);
+
+        let after = cow_health(&region, swept);
+        assert!(
+            after < before,
+            "a creative sweep must bypass the swept target's invulnerability"
+        );
     }
 
     #[test]
@@ -1132,6 +1919,70 @@ mod tests {
         assert_eq!(region.players[&id].attack_strength_ticker, 0);
     }
 
+    /// 官方 `Player.aiStep` 的内层判据是 `ItemStack.isSameItem`，只比物品 ID：
+    /// 攻击扣耐久（写 `DAMAGE` 组件）、附魔组件变化都只刷新缓存，不清冷却；
+    /// 换成另一种物品才清。这条测试锁住「同物品不同组件」不重置冷却，
+    /// 否则每次攻击扣完耐久，下一刻冷却就被自己清掉。
+    ///
+    /// Vanilla `Player.aiStep`'s inner check is `ItemStack.isSameItem`, item id
+    /// only: a durability hit (writing the `DAMAGE` component) or an enchantment
+    /// change only refreshes the cache, while swapping the item resets the
+    /// cooldown. This guards that a component-only change keeps the cooldown,
+    /// so an attack cannot clear its own charge on the next tick.
+    #[test]
+    fn component_only_changes_keep_the_attack_cooldown() {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        region.insert_player(player);
+        let slot = region.players[&id].inventory.hand_slot(Hand::Main);
+
+        // 主手放剑、缓存对齐到同一把剑，模拟 `aiStep` 已经同步过；ticker 给 7。
+        // Put a sword in hand and align the cache to the same stack, as if
+        // `aiStep` already synced it; start the ticker at 7.
+        let bare = stack(mc_bamboo_data::items::DIAMOND_SWORD);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = bare.clone();
+        region.players.get_mut(&id).unwrap().last_main_hand_item = bare.clone();
+        region.players.get_mut(&id).unwrap().attack_strength_ticker = 7;
+
+        // 耐久：攻击扣 5 点耐久写入 `DAMAGE` 组件，物品 ID 不变。
+        // Durability: a 5-point hit writes the `DAMAGE` component; item id unchanged.
+        let mut damaged = bare.clone();
+        mc_bamboo_blocks::durability::set_damage_for_oracle(&mut damaged, 5);
+        assert!(damaged.is_same_item(&bare), "same sword id");
+        assert_ne!(damaged, bare, "a durability hit changes the components");
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = damaged.clone();
+        tick(&mut region);
+        assert_eq!(region.players[&id].attack_strength_ticker, 8);
+
+        // 附魔：换成带锋利的同一把剑，仍是同物品不同组件。
+        // Enchantment: the same sword with Sharpness, still same item, new components.
+        let sharp = enchanted(
+            mc_bamboo_data::items::DIAMOND_SWORD,
+            "minecraft:sharpness",
+            1,
+        );
+        assert!(sharp.is_same_item(&damaged));
+        assert_ne!(sharp, damaged);
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] = sharp;
+        tick(&mut region);
+        assert_eq!(region.players[&id].attack_strength_ticker, 9);
+
+        // 换成另一种物品才真的重置冷却。
+        // Only swapping to a different item resets the cooldown.
+        region.players.get_mut(&id).unwrap().inventory.slots[slot] =
+            stack(mc_bamboo_data::items::DIAMOND_AXE);
+        tick(&mut region);
+        assert_eq!(region.players[&id].attack_strength_ticker, 0);
+    }
+
     /// 官方 `Player.causeExtraKnockback` 在 `knockbackAmount > 0` 的命中之后
     /// 把攻击者水平速度 ×0.6 并 `setSprinting(false)`。
     ///
@@ -1162,5 +2013,189 @@ mod tests {
         assert!((player.motion.delta.x - 0.6).abs() < 1.0e-9);
         assert_eq!(player.motion.delta.y, 0.0);
         assert!((player.motion.delta.z + 0.3).abs() < 1.0e-9);
+    }
+
+    /// `getAttributeValue(ENTITY_INTERACTION_RANGE)`：生存 3.0，创造再 +2.0。
+    /// 攻击距离用它算，不是方块交互的 4.5。
+    ///
+    /// `getAttributeValue(ENTITY_INTERACTION_RANGE)`: 3.0 in survival and 3.0 +
+    /// 2.0 in creative. Attack reach uses it, not the 4.5 block-interaction one.
+    #[test]
+    fn entity_interaction_range_follows_the_creative_modifier() {
+        assert_eq!(entity_interaction_range(GameMode::Survival), 3.0);
+        assert_eq!(entity_interaction_range(GameMode::Creative), 5.0);
+        assert_eq!(entity_interaction_range(GameMode::Adventure), 3.0);
+    }
+
+    /// 没有 `ATTACK_RANGE` 组件的武器走 `AttackRange.defaultFor`：上限是实体
+    /// 交互距离、缓冲 3.0，闭区间；创造模式用 `maxCreativeReach`。
+    ///
+    /// A weapon without an `ATTACK_RANGE` component uses
+    /// `AttackRange.defaultFor`: the eye-to-box distance must lie in the closed
+    /// `[−3.0, max + 3.0]` window, and creative uses `maxCreativeReach`.
+    #[test]
+    fn default_attack_range_uses_the_entity_interaction_range() {
+        let empty = ItemStack::empty();
+        let range = attack_range(&empty, GameMode::Survival);
+        assert_eq!(range.max_reach, 3.0);
+        assert_eq!(range.max_creative_reach, 3.0);
+        assert_eq!(range.hitbox_margin, 0.0);
+
+        // 眼睛高度 1.62、牛盒 0.9×1.4：D=6.4 时距离约 5.96（命中），
+        // D=6.5 时约 6.06（超出 6.0）。
+        //
+        // Eye at 1.62 and a 0.9×1.4 cow box: D=6.4 gives about 5.96 (hit),
+        // D=6.5 gives about 6.06 (past the 6.0 limit).
+        let eye = Vec3::new(0.5, 65.62, 0.5);
+        let near = entity_bounds(Vec3::new(6.9, 64.0, 0.5), (0.9, 1.4));
+        let far = entity_bounds(Vec3::new(7.0, 64.0, 0.5), (0.9, 1.4));
+        assert!(range.is_in_range(eye, near, ATTACK_RANGE_BUFFER, false));
+        assert!(!range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, false));
+
+        // 创造模式上限 8.0：同一头牛在生存打不到，创造打得到。
+        //
+        // Creative max is 8.0, so the same cow is out of survival reach but
+        // inside creative reach.
+        let creative_range = attack_range(&empty, GameMode::Creative);
+        assert!(creative_range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, true));
+    }
+
+    /// 边界是闭区间：距离正好等于上限时仍然算命中（`isInRange` 用 `<=`）。
+    ///
+    /// The bounds are closed: a distance exactly at the limit still hits
+    /// (`isInRange` uses `<=`).
+    /// `LivingEntity.getAttackRangeWith(weaponItem)`：武器上的 `ATTACK_RANGE`
+    /// 组件逐字段覆盖 `defaultFor`，玩家攻击者读 min/max（创造读 min/maxCreative），
+    /// `hitbox_margin` 同时放宽下界和上界。`mob_factor` 只对非玩家生效。
+    ///
+    /// `LivingEntity.getAttackRangeWith(weaponItem)`: an `ATTACK_RANGE`
+    /// component overrides `defaultFor` field by field. Player attackers read
+    /// min/max (creative reads min/maxCreative); `hitbox_margin` widens both
+    /// ends. `mob_factor` only applies to non-player attackers.
+    #[test]
+    fn a_weapon_attack_range_component_overrides_the_default() {
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::ATTACK_RANGE,
+            PatchEntry::Set(ComponentValue::AttackRange {
+                min_reach: 2.0,
+                max_reach: 4.0,
+                min_creative_reach: 1.0,
+                max_creative_reach: 7.0,
+                hitbox_margin: 0.5,
+                mob_factor: 0.25,
+            }),
+        );
+        let (added, removed) = patch.to_opaque();
+        let weapon = ItemStack {
+            item: mc_bamboo_data::items::DIAMOND_SWORD,
+            count: 1,
+            added,
+            removed,
+        };
+        assert_eq!(
+            attack_range(&weapon, GameMode::Survival),
+            AttackRange {
+                min_reach: 2.0,
+                max_reach: 4.0,
+                min_creative_reach: 1.0,
+                max_creative_reach: 7.0,
+                hitbox_margin: 0.5,
+            }
+        );
+        // `isInRange` 的窗口是 `[min − margin − buffer, max + margin + buffer]`：
+        // 眼睛到盒子的距离正好 3.0 时，下界 2.0 − 0.5 − 3.0 = −1.5，
+        // 上界 4.0 + 0.5 + 3.0 = 7.5，落在里面。创造模式的上界是 10.5。
+        //
+        // `isInRange` uses `[min − margin − buffer, max + margin + buffer]`.
+        let eye = Vec3::new(0.5, 64.0, 0.5);
+        let bounds = Aabb::new(3.5, 63.5, 0.0, 4.0, 65.0, 1.0);
+        let range = attack_range(&weapon, GameMode::Survival);
+        assert!(range.is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, false));
+        assert!(range.is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, true));
+        // 没有组件时同一个盒子也在范围内，但上界只有 6.0：更远的盒子只有带
+        // 组件的武器（或创造模式）够得到。
+        //
+        // Without the component the same box is still in range, but the upper
+        // limit is 6.0: a farther box needs the component or creative mode.
+        let far = Aabb::new(7.9, 63.5, 0.0, 8.4, 65.0, 1.0);
+        assert!(
+            !attack_range(&ItemStack::empty(), GameMode::Survival).is_in_range(
+                eye,
+                far,
+                ATTACK_RANGE_BUFFER,
+                false
+            )
+        );
+        assert!(range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, false));
+    }
+
+    /// `resolve_target` 对玩家目标用 `Player.bounding_box()` 的真实尺寸：
+    /// 蹲下时只有 1.5 高（站着是 1.8），横扫盒和伤害指示粒子都读这个尺寸。
+    /// 写死站立尺寸会让蹲着的受害者被当成更高的盒子。
+    ///
+    /// `resolve_target` takes the player target's size from its real
+    /// `bounding_box()`: crouching is 1.5 tall (standing 1.8), and both the
+    /// sweep box and the damage-indicator particle read it. Hard-coding the
+    /// standing height would model a crouching victim as a taller box.
+    #[test]
+    fn a_crouching_player_target_keeps_its_real_collision_box() {
+        let mut region = Region::new(2, 20, false);
+        let attacker = PlayerId(1);
+        let victim = PlayerId(2);
+        let mut a = Player::new(
+            attacker,
+            uuid::Uuid::nil(),
+            "Attacker".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        a.game_mode = GameMode::Survival;
+        region.insert_player(a);
+        let mut v = Player::new(
+            victim,
+            uuid::Uuid::nil(),
+            "Victim".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(2.5, 64.0, 0.5),
+        );
+        v.game_mode = GameMode::Survival;
+        region.insert_player(v);
+        let eye = Vec3::new(0.5, 65.62, 0.5);
+        let held = ItemStack::empty();
+        let standing = resolve_target(&region, attacker, victim.0, eye, GameMode::Survival, &held)
+            .expect("the standing victim is a valid target");
+        assert_eq!(standing.dimensions, (0.6, 1.8));
+
+        entity_sync::on_player_input(
+            &mut region,
+            victim,
+            mc_bamboo_protocol::packet::play::INPUT_FLAG_SHIFT,
+        );
+        let box3d = region.players[&victim].bounding_box();
+        assert!((box3d.max_y - box3d.min_y - 1.5).abs() < 1.0e-9);
+        let crouching = resolve_target(&region, attacker, victim.0, eye, GameMode::Survival, &held)
+            .expect("the crouching victim is a valid target");
+        assert_eq!(crouching.dimensions, (0.6, 1.5));
+    }
+
+    #[test]
+    fn attack_range_bounds_are_inclusive() {
+        let range = AttackRange {
+            min_reach: 0.0,
+            max_reach: 6.0,
+            min_creative_reach: 0.0,
+            max_creative_reach: 6.0,
+            hitbox_margin: 0.0,
+        };
+        let eye = Vec3::new(0.5, 64.0, 0.5);
+        // 盒子从 x=6.5 起，眼睛到盒子的距离正好 6.0。
+        // The box starts at x=6.5, so the eye-to-box distance is exactly 6.0.
+        let bounds = Aabb::new(6.5, 63.5, 0.0, 7.0, 65.0, 1.0);
+        assert!(range.is_in_range(eye, bounds, 0.0, false));
+        let past = Aabb::new(6.500_001, 63.5, 0.0, 7.0, 65.0, 1.0);
+        assert!(!range.is_in_range(eye, past, 0.0, false));
     }
 }

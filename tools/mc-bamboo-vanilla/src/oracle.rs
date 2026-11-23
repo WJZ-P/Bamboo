@@ -179,9 +179,9 @@ impl Rule {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
             }
             Self::EntitySound => {
-                "compare: a mob bucket is still compared; only a sound played by the mob that \
-                 bucket spawns (registry name minecraft:entity.<that entity>., and the player is \
-                 not skipped) is removed from the official list"
+                "compare: a spawn egg or mob bucket is still compared; the mob's own spawn sound \
+                 (registry name minecraft:entity.<that entity>., and the player is not skipped) \
+                 has its pitch ignored because vanilla's entity random is unseeded"
             }
             Self::BlockEntityEvent => {
                 "scope: the official outcome contains a vault block-entity sound or state event \
@@ -629,6 +629,7 @@ impl Session {
                 let out_of_scope = match skip.kind {
                     Kind::Tick => tick_exclusion(block),
                     Kind::Random => random_tick_exclusion(block),
+                    Kind::Explode => None,
                     _ => None,
                 };
                 match Rule::of_skip(&skip.reason).or(out_of_scope) {
@@ -683,17 +684,20 @@ impl Session {
             tool,
             &mine.tool_enchantments,
         ) {
-            Ok((ours, orbs, seed))
-                if ours == official && orbs == mine.xp_orbs && seed == mine.random_seed =>
+            Ok((ours, orbs, seed, spawned))
+                if ours == official
+                    && orbs == mine.xp_orbs
+                    && seed == mine.random_seed
+                    && silverfish_count(&spawned) == silverfish_count(&mine.spawned) =>
             {
                 self.report.mine_checked(block, true, "");
             }
-            Ok((ours, orbs, seed)) => self.report.mine_checked(
+            Ok((ours, orbs, seed, spawned)) => self.report.mine_checked(
                 block,
                 false,
                 &format!(
-                    "{}: drops official {official:?} bamboo {ours:?}, xp official {:?} bamboo {orbs:?}, random official {} bamboo {seed}",
-                    mine.block, mine.xp_orbs, mine.random_seed
+                    "{}: drops official {official:?} bamboo {ours:?}, xp official {:?} bamboo {orbs:?}, spawned official {:?} bamboo {spawned:?}, random official {} bamboo {seed}",
+                    mine.block, mine.xp_orbs, mine.spawned, mine.random_seed
                 ),
             ),
             Err(error) => {
@@ -820,6 +824,7 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
         Kind::Place | Kind::Use if bone_meals_a_feature_plant(case) => Some(Rule::Worldgen),
         Kind::Tick => tick_exclusion(block),
         Kind::Random => random_tick_exclusion(block),
+        Kind::Explode => None,
         _ => None,
     };
     match rule {
@@ -860,29 +865,24 @@ fn pours_a_mob_bucket(case: &Case) -> bool {
     case.action.kind == Kind::Item && case.action.item_class == "MobBucketItem"
 }
 
-/// 这一声是这只桶生成的生物自己发的，比较前从官方列表去掉。
+/// 这一声是刚生成的生物自己叫的（`Mob.playAmbientSound`）。
 ///
-/// This sound was played by the mob this bucket spawns. It is removed from the official list
-/// before comparing.
+/// The sound just-spawned mob makes through `Mob.playAmbientSound`.
 ///
-/// `MobBucketItem.spawn` 在放进世界之后只调用一次 `playAmbientSound`。那一声来自
-/// `LivingEntity.makeSound(getAmbientSound())`，再进 `Entity.playSound`：
+/// `EntityType.spawn` / `MobBucketItem.spawn` 在放进世界之后只调一次 `playAmbientSound`。
+/// 那一声来自 `LivingEntity.makeSound(getAmbientSound())`，再进 `Entity.playSound`：
 /// `level.playSound(null, getX(), getY(), getZ(), ...)`。所以同时满足才算：
-/// `MobBucketItem.spawn` calls `playAmbientSound` once after the mob is added. That goes through
-/// `LivingEntity.makeSound(getAmbientSound())` and then `Entity.playSound`:
-/// `level.playSound(null, getX(), getY(), getZ(), ...)`. All of these must hold:
-/// - `excluded == false`。`except` 是 null，不跳过玩家。桶自己的 `playEmptySound` 传入玩家，留下来照比。
-///   `excluded == false`. The except is null, so the player is not skipped. The bucket's own
-///   `playEmptySound` passes the player and stays in the comparison.
-/// - 注册表名以 `minecraft:entity.<生物路径>.` 开头。生物是生成器导出的 `MobBucketItem.type`，
-///   比如鲑鱼是 `minecraft:entity.salmon.ambient`，美西螈是 `idle_water` / `idle_air`。
-///   方块发出的 `entity.generic.extinguish_fire`、`entity.tnt.primed`、`entity.copper_golem.spawn`
-///   路径对不上，留下来照比。蝌蚪和硫磺立方的 `getAmbientSound` 是 null，没有可删的一声。
-///   The registry name starts with `minecraft:entity.<mob path>.`. The mob is the exported
-///   `MobBucketItem.type`. A salmon plays `minecraft:entity.salmon.ambient`; an axolotl plays
-///   `idle_water` or `idle_air`. Block sounds such as `entity.generic.extinguish_fire`,
-///   `entity.tnt.primed` and `entity.copper_golem.spawn` use a different path and stay comparable.
-///   A tadpole's and a sulfur cube's `getAmbientSound` is null, so there is nothing to drop.
+/// Both spawn paths call `playAmbientSound` once after adding the mob; it goes through
+/// `LivingEntity.makeSound` and `Entity.playSound`, which passes a null `except`:
+/// - `excluded == false`。桶自己的 `playEmptySound` 传入玩家，留下来照比。
+///   `excluded == false`: the bucket's own `playEmptySound` passes the player and stays.
+/// - 注册表名以 `minecraft:entity.<生物路径>.` 开头。鲑鱼是 `entity.salmon.ambient`，
+///   美西螈是 `idle_water` / `idle_air`，犰狳是 `entity.armadillo.ambient`。方块发出的
+///   `entity.generic.extinguish_fire`、`entity.tnt.primed` 路径对不上，留下来照比。
+///   蝌蚪和硫磺立方的 `getAmbientSound` 是 null，没有这一声。
+///   The name starts with `minecraft:entity.<mob path>.`. Block sounds such as
+///   `entity.generic.extinguish_fire` and `entity.tnt.primed` stay comparable; tadpoles
+///   and sulfur cubes have no ambient sound at all.
 fn spawned_mob_sound(sound: &SoundPlay, entity: &str) -> bool {
     if sound.7 {
         return false;
@@ -906,9 +906,30 @@ fn spawned_mob_sound(sound: &SoundPlay, entity: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('.'))
 }
 
-/// 这只桶生成的生物。不是生物桶时是 `None`，声音列表整份照比。
-/// The mob this bucket spawns. `None` when the case is not a mob bucket, and the sound lists
-/// are compared in full.
+/// 刚生成的生物叫了一声时，音高之外全比。
+///
+/// 官方实体的随机源是 `RandomSource.create()`，种子由 `nanoTime()` 派生，每次跑都不同；
+/// `getVoicePitch()` 从它取两次 `nextFloat`，所以这一声的音高不可确定。Bamboo 的实体随机源
+/// 由岛的种子源播种，音高确定但和官方对不上。只放宽音高一个字段，音效名、坐标、音量、
+/// 来源、是否跳过玩家都照比，保证「生成时确实叫了一声」仍然被验证。
+///
+/// Vanilla seeds each entity's random with `nanoTime()` via `RandomSource.create()`, and
+/// `getVoicePitch()` draws two floats from it, so this pitch differs on every run. Bamboo
+/// seeds entity randoms from the island's seed source. Only the pitch is relaxed: the sound,
+/// position, volume, source and excluded flag still have to match, which keeps the check
+/// that the mob really did call out on spawn.
+fn spawned_sound_matches(official: &SoundPlay, ours: &SoundPlay) -> bool {
+    official.0 == ours.0
+        && official.1 == ours.1
+        && official.2 == ours.2
+        && official.3 == ours.3
+        && official.4 == ours.4
+        && official.5 == ours.5
+        && official.7 == ours.7
+}
+
+/// 这只桶生成的生物。不是生物桶时是 `None`。
+/// The mob this bucket spawns, or `None` when this is not a mob bucket.
 fn mob_bucket_entity<'a>(case: &Case, names: &'a Names) -> Option<&'a str> {
     let from_hand = pours_a_mob_bucket(case).then(|| case.action.used_item());
     let from_dispenser = dispenser_positions(case).iter().find_map(|&pos| {
@@ -933,17 +954,45 @@ fn mob_bucket_entity<'a>(case: &Case, names: &'a Names) -> Option<&'a str> {
         .and_then(|(_, item)| item.bucket_entity)
 }
 
-/// 生物桶照常比较。官方多出来的、这只生物自己的声音去掉，顺序保留。Bamboo 不发这些声音。
-/// A mob bucket is compared as usual. That mob's own sounds are dropped from the official
-/// list, in order. Bamboo does not play them.
+/// 这题刚生成的生物：生物桶取物品上的 `type`，刷怪蛋取物品名去掉 `_spawn_egg`。
+/// `itemReached` 为假时方块吃掉了点击，官方没有生成生物，也就不放宽任何音高。
+/// 发射器发射刷怪蛋的题整题排除（`dispenser_dispenses`），不用管。
+///
+/// The mob this case spawns: the bucket's `type` component, or the spawn-egg item name.
+/// With `itemReached` false the block consumed the click and nothing spawned. Dispenser
+/// spawn-egg cases are excluded wholesale, so they need no handling here.
+fn spawned_mob_entity(case: &Case, names: &Names) -> Option<String> {
+    if let Some(entity) = mob_bucket_entity(case, names) {
+        return Some(entity.to_owned());
+    }
+    if case.action.item_class == "SpawnEggItem" && case.outcome.item_reached {
+        return case
+            .action
+            .used_item()
+            .strip_suffix("_spawn_egg")
+            .map(str::to_owned);
+    }
+    None
+}
+
+/// 有刚生成的生物时，那一声只放宽音高，其余声音照常逐条全比；两边条数也必须一样
+/// （Bamboo 现在同样收集这一声，不再从官方列表里删掉）。
+///
+/// When a mob was just spawned, only that sound's pitch is relaxed; every other sound is
+/// compared field by field, and both lists must have the same length (Bamboo now collects
+/// the spawn sound too, instead of dropping it from the official list).
 fn sounds_match(case: &Case, names: &Names, official: &[SoundPlay], ours: &[SoundPlay]) -> bool {
-    let Some(entity) = mob_bucket_entity(case, names) else {
+    let Some(entity) = spawned_mob_entity(case, names) else {
         return official == ours;
     };
-    official
-        .iter()
-        .filter(|sound| !spawned_mob_sound(sound, entity))
-        .eq(ours.iter())
+    official.len() == ours.len()
+        && official.iter().zip(ours).all(|(a, b)| {
+            if spawned_mob_sound(a, &entity) && spawned_mob_sound(b, &entity) {
+                spawned_sound_matches(a, b)
+            } else {
+                a == b
+            }
+        })
 }
 
 /// 骨粉在这些方块上能不能用、成不成功都要读树和巨型蘑菇的地物配置。只比类本身，
@@ -1302,13 +1351,14 @@ fn compare(
     let answer = &case.outcome;
     let official = comparable_ticks(&answer.ticks, names, report)?;
     let ours = in_scope_scheduled(&replayed.ticks, names)?;
-    if let Some(entity) = mob_bucket_entity(case, names) {
-        let dropped = answer
+    if let Some(entity) = spawned_mob_entity(case, names) {
+        let pitched = answer
             .sounds
             .iter()
-            .filter(|sound| spawned_mob_sound(sound, entity))
+            .zip(&replayed.sounds)
+            .filter(|(a, b)| spawned_mob_sound(a, &entity) && spawned_mob_sound(b, &entity))
             .count();
-        report.note_mob_sounds(dropped as u64);
+        report.note_mob_sounds(pitched as u64);
     }
     Ok(Mismatch {
         result: answer.result != replayed.result,
@@ -1324,8 +1374,30 @@ fn compare(
             && answer
                 .random_seed
                 .is_some_and(|seed| seed != replayed.random_seed),
+        spawned: infested_spawns(&answer.spawned) != infested_spawns(&replayed.spawned),
         panic: None,
     })
+}
+
+/// 只比较虫蚀方块刷出来的蠹虫：官方 `spawned` 里还有 Bamboo 没建模的实体
+/// （例如硫磺立方），那些和方块行为无关，不能因为它们判失败。
+///
+/// Compare only the silverfish spawned by infested blocks. Vanilla's `spawned`
+/// list also contains entities Bamboo does not model (e.g. sulfur cubes); those
+/// are unrelated to the block behaviour and must not fail the case.
+fn infested_spawns(spawned: &[String]) -> usize {
+    silverfish_count(spawned)
+}
+
+/// 经验球在 Java 侧进 `spawned`，Bamboo 只算数值不建实体；挖掘题同样只比蠹虫。
+///
+/// Experience orbs appear in Java's `spawned` while Bamboo only computes their
+/// values; mining cases also compare silverfish only.
+fn silverfish_count(spawned: &[String]) -> usize {
+    spawned
+        .iter()
+        .filter(|name| name.as_str() == "minecraft:silverfish")
+        .count()
 }
 
 /// 方块和流体是两条队列，各自比较。
@@ -1780,41 +1852,250 @@ mod tests {
         assert_eq!(Rule::of_skip("exception:NullPointerException"), None);
     }
 
+    /// 一条官方 `playSeededSound`，每个字段都能单独改。
+    fn play(
+        name: &str,
+        x: f64,
+        volume: f32,
+        pitch: f32,
+        source: sounds::SoundSource,
+        excluded: bool,
+    ) -> lines::SoundPlay {
+        lines::SoundPlay(
+            i32::from(sounds::sound_event(name)),
+            lines::Double(x),
+            lines::Double(64.0),
+            lines::Double(0.0),
+            source.id(),
+            lines::Float(volume),
+            lines::Float(pitch),
+            excluded,
+        )
+    }
+
     #[test]
-    fn a_spawned_mobs_sound_is_dropped_and_the_bucket_sound_stays() {
-        let play = |name: &str, excluded: bool| {
-            lines::SoundPlay(
-                i32::from(sounds::sound_event(name)),
-                lines::Double(0.0),
-                lines::Double(0.0),
-                lines::Double(0.0),
-                sounds::NEUTRAL.id(),
-                lines::Float(1.0),
-                lines::Float(1.0),
-                excluded,
-            )
+    fn only_the_spawned_mobs_own_sound_is_recognised() {
+        let ambient = play(
+            "minecraft:entity.armadillo.ambient",
+            0.0,
+            1.0,
+            1.0,
+            sounds::NEUTRAL,
+            false,
+        );
+        let salmon = play(
+            "minecraft:entity.salmon.ambient",
+            0.0,
+            1.0,
+            1.0,
+            sounds::NEUTRAL,
+            false,
+        );
+        let bucket = play(
+            "minecraft:item.bucket.empty_fish",
+            0.0,
+            1.0,
+            1.0,
+            sounds::NEUTRAL,
+            true,
+        );
+        let primed = play(
+            "minecraft:entity.tnt.primed",
+            0.0,
+            1.0,
+            1.0,
+            sounds::BLOCKS,
+            false,
+        );
+        let extinguish = play(
+            "minecraft:entity.generic.extinguish_fire",
+            0.0,
+            1.0,
+            1.0,
+            sounds::BLOCKS,
+            false,
+        );
+        let skipped_entity = play(
+            "minecraft:entity.armadillo.ambient",
+            0.0,
+            1.0,
+            1.0,
+            sounds::NEUTRAL,
+            true,
+        );
+        assert!(spawned_mob_sound(&ambient, "minecraft:armadillo"));
+        assert!(!spawned_mob_sound(&ambient, "minecraft:chicken"));
+        assert!(spawned_mob_sound(
+            &play(
+                "minecraft:entity.axolotl.idle_water",
+                0.0,
+                1.0,
+                1.0,
+                sounds::NEUTRAL,
+                false
+            ),
+            "minecraft:axolotl"
+        ));
+        assert!(spawned_mob_sound(&salmon, "minecraft:salmon"));
+        assert!(!spawned_mob_sound(&bucket, "minecraft:salmon"));
+        assert!(!spawned_mob_sound(&primed, "minecraft:salmon"));
+        assert!(!spawned_mob_sound(&extinguish, "minecraft:salmon"));
+        assert!(!spawned_mob_sound(&skipped_entity, "minecraft:armadillo"));
+    }
+
+    #[test]
+    fn a_spawned_mobs_sound_ignores_only_the_pitch() {
+        let entity = "minecraft:armadillo";
+        let first = play(
+            "minecraft:entity.armadillo.ambient",
+            8.5,
+            1.0,
+            1.046,
+            sounds::NEUTRAL,
+            false,
+        );
+        // 同名同坐标，只有音高不同：官方实体的随机源没播种，这一项比不了。
+        let other_pitch = play(
+            "minecraft:entity.armadillo.ambient",
+            8.5,
+            1.0,
+            0.913,
+            sounds::NEUTRAL,
+            false,
+        );
+        assert!(spawned_sound_matches(&first, &other_pitch));
+        for different in [
+            play(
+                "minecraft:entity.chicken.ambient",
+                8.5,
+                1.0,
+                1.046,
+                sounds::NEUTRAL,
+                false,
+            ),
+            play(
+                "minecraft:entity.armadillo.ambient",
+                9.5,
+                1.0,
+                1.046,
+                sounds::NEUTRAL,
+                false,
+            ),
+            play(
+                "minecraft:entity.armadillo.ambient",
+                8.5,
+                0.4,
+                1.046,
+                sounds::NEUTRAL,
+                false,
+            ),
+            play(
+                "minecraft:entity.armadillo.ambient",
+                8.5,
+                1.0,
+                1.046,
+                sounds::HOSTILE,
+                false,
+            ),
+            play(
+                "minecraft:entity.armadillo.ambient",
+                8.5,
+                1.0,
+                1.046,
+                sounds::NEUTRAL,
+                true,
+            ),
+        ] {
+            assert!(
+                !spawned_sound_matches(&first, &different),
+                "音高之外有一项不同就必须算不一致"
+            );
+        }
+        assert!(spawned_mob_sound(&first, entity));
+    }
+
+    #[test]
+    fn spawn_egg_and_bucket_cases_find_their_spawned_mob() {
+        let names = Names::new();
+        let egg = click_top(
+            "minecraft:armadillo_spawn_egg",
+            "SpawnEggItem",
+            "[[0,64,0,1]]",
+            &answer("success", "[]"),
+        );
+        let egg_case = match serde_json::from_str::<Line>(&egg).expect("题面能解析") {
+            Line::Case(case) => case,
+            _ => panic!("这是一道题"),
         };
-        let bucket = play("minecraft:item.bucket.empty_fish", true);
-        let ambient = play("minecraft:entity.salmon.ambient", false);
-        let idle = play("minecraft:entity.axolotl.idle_water", false);
-        let primed = play("minecraft:entity.tnt.primed", false);
-        let extinguish = play("minecraft:entity.generic.extinguish_fire", false);
-        let skipped_entity = play("minecraft:entity.salmon.ambient", true);
-        let salmon = "minecraft:salmon";
-        assert!(spawned_mob_sound(&ambient, salmon));
-        assert!(!spawned_mob_sound(&ambient, "minecraft:cod"));
-        assert!(spawned_mob_sound(&idle, "minecraft:axolotl"));
-        assert!(!spawned_mob_sound(&bucket, salmon));
-        assert!(!spawned_mob_sound(&primed, salmon));
-        assert!(!spawned_mob_sound(&extinguish, salmon));
-        assert!(!spawned_mob_sound(&skipped_entity, salmon));
-        let official = [bucket, extinguish, ambient, primed];
-        let kept: Vec<_> = official
-            .iter()
-            .filter(|sound| !spawned_mob_sound(sound, salmon))
-            .cloned()
-            .collect();
-        assert_eq!(kept, vec![bucket, extinguish, primed]);
+        assert_eq!(
+            spawned_mob_entity(&egg_case, &names).as_deref(),
+            Some("minecraft:armadillo")
+        );
+        // 方块吃掉点击时官方没有生成生物，不能放宽音高。
+        let refused = click_top(
+            "minecraft:armadillo_spawn_egg",
+            "SpawnEggItem",
+            "[[0,64,0,1]]",
+            &answer("success", "[]").replace("\"itemReached\":true", "\"itemReached\":false"),
+        );
+        let refused_case = match serde_json::from_str::<Line>(&refused).expect("题面能解析") {
+            Line::Case(case) => case,
+            _ => panic!("这是一道题"),
+        };
+        assert_eq!(spawned_mob_entity(&refused_case, &names), None);
+        // 不是刷怪蛋也不是生物桶时没有放宽的实体。
+        let stone = click_top(
+            "minecraft:stone",
+            "BlockItem",
+            "[[0,64,0,1]]",
+            &answer("success", "[]"),
+        );
+        let stone_case = match serde_json::from_str::<Line>(&stone).expect("题面能解析") {
+            Line::Case(case) => case,
+            _ => panic!("这是一道题"),
+        };
+        assert_eq!(spawned_mob_entity(&stone_case, &names), None);
+    }
+
+    #[test]
+    fn other_sounds_still_compare_their_pitch() {
+        let names = Names::new();
+        let scene = "[[0,64,0,1]]";
+        let wheel = play(
+            "minecraft:item.bucket.empty_fish",
+            0.5,
+            1.0,
+            1.0,
+            sounds::NEUTRAL,
+            true,
+        );
+        // `MobBucketItem.use` 是 item 题，不是方块上的 use。
+        let bucket_case = click_top(
+            "minecraft:salmon_bucket",
+            "MobBucketItem",
+            scene,
+            &answer("success", "[]"),
+        )
+        .replace(r#""kind":"use""#, r#""kind":"item""#);
+        let bucket_case = match serde_json::from_str::<Line>(&bucket_case).expect("题面能解析")
+        {
+            Line::Case(case) => case,
+            _ => panic!("这是一道题"),
+        };
+        let entity = spawned_mob_entity(&bucket_case, &names).expect("鲑鱼桶生成鲑鱼");
+        assert_eq!(entity, "minecraft:salmon");
+        let ours = [wheel];
+        // 桶自己的倒水声不是生物叫声，音高必须一样。
+        let wrong_pitch = play(
+            "minecraft:item.bucket.empty_fish",
+            0.5,
+            1.0,
+            0.75,
+            sounds::NEUTRAL,
+            true,
+        );
+        assert!(sounds_match(&bucket_case, &names, &ours, &ours));
+        assert!(!sounds_match(&bucket_case, &names, &ours, &[wrong_pitch]));
     }
 
     #[test]

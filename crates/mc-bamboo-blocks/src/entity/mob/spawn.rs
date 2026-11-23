@@ -204,27 +204,40 @@ pub fn spawn_cow_from_egg(
     offset_more: bool,
     custom_name: Option<Tag>,
 ) -> EntityUid {
-    spawn_egg(world, MobType::Cow, pos, offset_more, custom_name)
+    spawn_egg(world, MobType::Cow, pos, true, offset_more, custom_name)
 }
 
-/// `SpawnEggItem.useOn`：按刷怪蛋对应的实体类型生成。
+/// `SpawnEggItem.useOn`：按刷怪蛋对应的实体类型生成。`should_offset_y` 和 `offset_more`
+/// 由调用方按官方的两条路径给：`useOn` 是 `(true, 点上面时为真)`，对着水面 `use` 是
+/// `(false, false)`。
+///
+/// `SpawnEggItem.useOn`: spawn by the egg's entity type. The caller passes vanilla's
+/// `shouldOffsetY` / `shouldOffsetYMore` pair: `(true, clicked-face-up)` from `useOn`,
+/// `(false, false)` from `use` against a water surface.
 pub fn spawn_egg(
     world: &mut World,
     kind: MobType,
     pos: BlockPos,
+    should_offset_y: bool,
     offset_more: bool,
     custom_name: Option<Tag>,
 ) -> EntityUid {
     let mut entity = world.prepare_entity(Entity::by_mob_type(kind, Vec3::default()));
-    // `shouldOffsetY`：先摆到上一格，再按碰撞算往下落多少。
-    // Place it one block up first, then drop it onto the collisions.
+    // `shouldOffsetY`：先摆到上一格，再按碰撞算往下落多少。关掉时实体直接落在
+    // `pos.y`（对着水面用的那条路径），没有这一格的下落扫描。
+    // With `shouldOffsetY` the entity is first put one block up and dropped onto
+    // the collisions; the water-surface path places it directly at `pos.y`.
     let centre = Vec3::new(
         f64::from(pos.x) + 0.5,
         f64::from(pos.y + 1),
         f64::from(pos.z) + 0.5,
     );
     entity.position = centre;
-    let offset = spawn_y_offset(&*world, pos, offset_more, entity.bounding_box());
+    let offset = if should_offset_y {
+        spawn_y_offset(&*world, pos, offset_more, entity.bounding_box())
+    } else {
+        0.0
+    };
     let yaw = mth::wrap_degrees(world.random().next_float() * 360.0);
     snap_to(
         &mut entity,
@@ -388,7 +401,14 @@ fn finalize_spawn_in_group(
     }
     // 蝙蝠没有自己的 `finalizeSpawn`，和苦力怕一样只有 `Mob.finalizeSpawn`。
     // Bats have no `finalizeSpawn` of their own: just `Mob.finalizeSpawn`, as creepers.
-    if matches!(kind, MobType::Creeper | MobType::Enderman | MobType::Bat) {
+    if matches!(
+        kind,
+        MobType::Creeper
+            | MobType::Enderman
+            | MobType::Bat
+            | MobType::Silverfish
+            | MobType::Endermite
+    ) {
         super::creeper::finalize_spawn(entity, world.random());
         return;
     }

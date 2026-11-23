@@ -1,0 +1,19 @@
+[package]
+name = "mc-bamboo-memprof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Heap profiler for the Bamboo server: live bytes per allocation call stack, grouped by owner."
+publish = false
+
+[[bin]]
+name = "bamboo-memprof"
+path = "src/main.rs"
+
+[dependencies]
+mc-bamboo-server.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

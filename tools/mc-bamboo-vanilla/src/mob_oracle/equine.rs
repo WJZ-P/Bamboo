@@ -414,7 +414,7 @@ impl Report {
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
         let id = if case.egg {
-            spawn::spawn_egg(&mut world, kind, BlockPos::new(0, 64, 0), false, None)
+            spawn::spawn_egg(&mut world, kind, BlockPos::new(0, 64, 0), true, false, None)
         } else {
             spawn::summon_mob(&mut world, kind, Vec3::new(0.5, 64.0, 0.5), None).unwrap()
         };

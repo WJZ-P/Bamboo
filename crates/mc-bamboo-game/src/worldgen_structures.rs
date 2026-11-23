@@ -18,7 +18,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use mc_bamboo_nbt::Tag;
@@ -57,27 +57,31 @@ pub struct StructureData {
 ///
 /// Cache a chunk's rich starts by `(seed, settings, x, z)`; a hit only saves time.
 type StartsCache = HashMap<(i32, i32), Arc<WorldStructureStarts>>;
-/// 每条计算线程一份可变工作状态：`WorldStructureState`、`SeededRouter`（密度函数采样器
-/// 缓存）、地形 / 结构 `Generator`（随机源、临时缓冲），以及按配置建好的群系 `preset`。
-/// 解析好的只读 `Worldgen` 由 `Worldgen::shared()` 全进程共用；这些字段因需 `&mut` 或
+/// 每条计算线程一份可变工作状态：`SeededRouter`（密度函数采样器缓存）、地形 / 结构
+/// `Generator`（随机源、临时缓冲），以及缓存。解析好的只读 `Worldgen`、
+/// `WorldStructureState` 和群系表都由全进程一份的 `Arc` 共用；这些字段因需 `&mut` 或
 /// 按线程缓存仍留在 `thread_local!` 里，群系 R 树的 `lastResult` 也按「线程 + 表」隔离。
 ///
-/// Per-thread mutable working state: `WorldStructureState`, `SeededRouter` (density-function
-/// sampler caches), terrain/structure `Generator`s (RNG, scratch buffers), and the per-config
-/// biome `preset`. The parsed, read-only `Worldgen` is shared process-wide via
-/// `Worldgen::shared()`; these fields stay in `thread_local!` because they need `&mut` or are
+/// Per-thread mutable working state: `SeededRouter` (density-function sampler caches),
+/// terrain/structure `Generator`s (RNG, scratch buffers), and caches. The parsed,
+/// read-only `Worldgen`, `WorldStructureState` and biome table are shared process-wide
+/// behind an `Arc`; these fields stay in `thread_local!` because they need `&mut` or are
 /// per-thread caches, and the biome R-tree `lastResult` is isolated per (thread, table).
 struct StructureThread {
-    state: WorldStructureState,
+    state: Arc<WorldStructureState>,
     router: SeededRouter,
-    /// 每线程一份：平坦世界要换成单点群系表；R 树 `lastResult` 现在是「线程 + 表」
-    /// 的线程本地状态，实例本身只读，可全进程共享（这里仍按线程各建一份）。
-    /// Per-thread: flat worlds replace it with a single-point biome table; the
-    /// R-tree `lastResult` is now per-(thread, table) thread-local state and the
-    /// instance itself is read-only and shareable (still built once per thread here).
-    preset: MultiNoiseBiomeSource,
+    /// 平坦世界要换成单点群系表，正常世界用导出的气候表；两种都按 `(seed, settings,
+    /// flat)` 全进程共享，R 树 `lastResult` 是「线程 + 表」的线程本地状态。
+    /// Flat worlds swap in a single-point biome table, normal worlds use the exported
+    /// climate table; both are shared per `(seed, settings, flat)`, while the R-tree
+    /// `lastResult` stays thread-local per (thread, table).
+    preset: Arc<MultiNoiseBiomeSource>,
     settings: &'static mc_bamboo_worldgen::settings::Settings,
-    generator: chunk::Generator<'static>,
+    /// 正常世界共用 `Worldgen::shared_generator` 那一份；平坦世界要覆盖常数列，
+    /// 按线程各留一份。
+    /// Normal worlds share the single `Worldgen::shared_generator` instance; flat
+    /// worlds override the constant columns and keep one per thread.
+    generator: std::sync::Arc<chunk::Generator<'static>>,
     starts: StartsCache,
     /// 每个中心区块的引用结果，纯函数缓存：`features` / `terrain` / 对拍入口
     /// 会反复问同一个中心，重算 17×17 起点很贵。
@@ -160,6 +164,111 @@ pub fn clear_disk_structures() {
     DISK_STRUCTURES.with(|map| map.borrow_mut().clear());
 }
 
+/// 全进程按 `(seed, settings, flat)` 共享的结构阶段只读数据。
+///
+/// Process-wide read-only structure-stage data keyed by `(seed, settings, flat)`.
+#[derive(Clone)]
+struct SharedStructure {
+    state: Arc<WorldStructureState>,
+    preset: Arc<MultiNoiseBiomeSource>,
+}
+
+/// 平坦世界固定群系（按注册表 ID 查名字），正常世界返回 `None`。
+///
+/// Fixed flat-world biome (resolved from its registry id); `None` for normal worlds.
+fn flat_biome(config: &WorldGenConfig) -> Result<Option<&'static str>, String> {
+    if config.level_type.is_flat() {
+        Ok(Some(
+            *mc_bamboo_data::registries::biome::NAMES
+                .get(config.flat.biome as usize)
+                .ok_or("unknown flat biome")?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 取（必要时先建）给定配置的共享结构状态。首个调用者建好后，其余线程直接克隆 `Arc`；
+/// 建的时候用一条临时 `SeededRouter`，与改动前「每线程建一份」的输入完全相同。
+///
+/// Get (building once if needed) the shared structure state for a config. The first caller
+/// builds it with a temporary `SeededRouter`; later threads clone the `Arc`. The inputs are
+/// exactly those the old per-thread builder used.
+fn shared_structure(
+    config: &WorldGenConfig,
+    settings: &'static mc_bamboo_worldgen::settings::Settings,
+) -> Result<SharedStructure, String> {
+    static CACHE: OnceLock<Mutex<HashMap<ThreadKey, SharedStructure>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = thread_key(config);
+    let mut cache = cache
+        .lock()
+        .map_err(|_| "structure state cache poisoned".to_owned())?;
+    if let Some(shared) = cache.get(&key) {
+        return Ok(shared.clone());
+    }
+    let worldgen = Worldgen::shared()?;
+    let fixed = flat_biome(config)?;
+    let preset = match fixed {
+        // 平坦世界只有一条群系，需要自己的一张单点表。
+        // A flat world has a single biome and needs its own one-entry table.
+        Some(biome) => MultiNoiseBiomeSource::new(ParameterList::new(vec![(
+            ParameterPoint::from_quantized([0; 13]),
+            biome.to_owned(),
+        )])),
+        // 普通世界用 `Worldgen` 里那份预置的副本：R 树和参数点共用，`lastResult` 槽独立。
+        // Normal worlds fork the preset held by `Worldgen`: the R-tree and points are
+        // shared, only the `lastResult` slot is new.
+        None => worldgen
+            .preset("minecraft:overworld")
+            .ok_or("missing overworld preset")?
+            .fork(),
+    };
+    let mut router = SeededRouter::new(settings, config.seed);
+    let state = {
+        let mut resolver = mc_bamboo_worldgen::structure::rings::BiomeResolver {
+            router: &mut router,
+            source: &preset,
+        };
+        if let Some(biome) = fixed {
+            let all_sets = worldgen
+                .raw()
+                .get("structure_set")
+                .ok_or("missing structure_set")?;
+            // 内置注册表没有结构集标签；未知 holder 让 lenientOptionalFieldOf 回退到缺省。
+            // There are no builtin structure-set tags; an unknown holder falls back to absent.
+            let overrides = config.flat.structure_overrides.as_ref().and_then(|names| {
+                names
+                    .iter()
+                    .map(|name| {
+                        let name = if name.contains(':') {
+                            name.clone()
+                        } else {
+                            format!("minecraft:{name}")
+                        };
+                        all_sets.get(&name).map(|_| name)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            });
+            WorldStructureState::new_flat(
+                worldgen,
+                config.seed,
+                &mut resolver,
+                biome,
+                overrides.as_deref(),
+            )?
+        } else {
+            WorldStructureState::new(worldgen, config.seed, &mut resolver)?
+        }
+    };
+    let shared = SharedStructure {
+        state: Arc::new(state),
+        preset: Arc::new(preset),
+    };
+    cache.insert(key, shared.clone());
+    Ok(shared)
+}
+
 fn with_thread<T>(
     config: &WorldGenConfig,
     f: impl FnOnce(&mut StructureThread) -> Result<T, String>,
@@ -176,82 +285,35 @@ fn with_thread<T>(
             let settings = worldgen
                 .settings(settings_id)
                 .ok_or("missing noise settings")?;
-            let shared_preset = worldgen
-                .preset("minecraft:overworld")
-                .ok_or("missing overworld preset")?;
-            let entries: Vec<(ParameterPoint, String)> = shared_preset
-                .parameters()
-                .entries()
-                .map(|(point, name)| (*point, name.clone()))
-                .collect();
-            let fixed = if config.level_type.is_flat() {
-                Some(
-                    *mc_bamboo_data::registries::biome::NAMES
-                        .get(config.flat.biome as usize)
-                        .ok_or("unknown flat biome")?,
-                )
-            } else {
-                None
-            };
-            let entries = fixed.map_or(entries, |biome| {
-                vec![(ParameterPoint::from_quantized([0; 13]), biome.to_owned())]
-            });
-            let preset = MultiNoiseBiomeSource::new(ParameterList::new(entries));
-            let mut router = SeededRouter::new(settings, config.seed);
-            let state = {
-                let mut resolver = mc_bamboo_worldgen::structure::rings::BiomeResolver {
-                    router: &mut router,
-                    source: &preset,
-                };
-                if let Some(biome) = fixed {
-                    let all_sets = worldgen
-                        .raw()
-                        .get("structure_set")
-                        .ok_or("missing structure_set")?;
-                    // 内置注册表没有结构集标签；未知 holder 让 lenientOptionalFieldOf 回退到缺省。
-                    // There are no builtin structure-set tags; an unknown holder falls back to absent.
-                    let overrides = config.flat.structure_overrides.as_ref().and_then(|names| {
-                        names
-                            .iter()
-                            .map(|name| {
-                                let name = if name.contains(':') {
-                                    name.clone()
-                                } else {
-                                    format!("minecraft:{name}")
-                                };
-                                all_sets.get(&name).map(|_| name)
-                            })
-                            .collect::<Option<Vec<_>>>()
-                    });
-                    WorldStructureState::new_flat(
-                        worldgen,
-                        config.seed,
-                        &mut resolver,
-                        biome,
-                        overrides.as_deref(),
-                    )?
-                } else {
-                    WorldStructureState::new(worldgen, config.seed, &mut resolver)?
-                }
-            };
-            let mut generator = chunk::Generator::with_settings(
-                worldgen,
-                settings_id,
-                "minecraft:overworld",
-                config.seed,
-            )?;
-            if let Some(biome) = fixed {
+            let shared = shared_structure(config, settings)?;
+            let fixed = flat_biome(config)?;
+            let generator = if let Some(biome) = fixed {
+                // 平坦世界要先覆盖常数列，建好之后不再改，仍按线程各一份。
+                // A flat world overrides the constant columns after construction and
+                // never changes again, so it stays per thread.
+                let mut generator = chunk::Generator::with_settings(
+                    worldgen,
+                    settings_id,
+                    "minecraft:overworld",
+                    config.seed,
+                )?;
                 generator.set_flat_columns(
                     biome,
                     mc_bamboo_world::MIN_Y,
                     mc_bamboo_world::WORLD_HEIGHT,
                     &config.flat.layers,
                 );
-            }
+                std::sync::Arc::new(generator)
+            } else {
+                // 只读编译结果全进程一份，和地形生成器共用同一个实例。
+                // The read-only compiled result is process-wide, shared with the
+                // terrain generator.
+                worldgen.shared_generator(settings_id, config.seed)?
+            };
             entry.insert(StructureThread {
-                state,
-                router,
-                preset,
+                state: shared.state,
+                router: SeededRouter::new(settings, config.seed),
+                preset: shared.preset,
                 settings,
                 generator,
                 starts: HashMap::new(),
@@ -1067,5 +1129,67 @@ mod tests {
             .rev()
             .collect();
         assert_eq!(forward, backward);
+    }
+
+    /// 同配置的两条线程必须共用同一份 `WorldStructureState` 和群系表（省掉每线程副本）。
+    ///
+    /// Two threads with the same config must share one `WorldStructureState` and one
+    /// biome table (no per-thread copies).
+    #[test]
+    fn threads_share_one_structure_state() {
+        fn assert_sync_send<T: Send + Sync>() {}
+        assert_sync_send::<WorldStructureState>();
+        assert_sync_send::<MultiNoiseBiomeSource>();
+
+        let config = normal(77);
+        let local = with_thread(&config, |thread| {
+            Ok((
+                Arc::as_ptr(&thread.state) as usize,
+                Arc::as_ptr(&thread.preset) as usize,
+            ))
+        })
+        .unwrap();
+        let other_config = config.clone();
+        let remote = std::thread::spawn(move || {
+            with_thread(&other_config, |thread| {
+                Ok((
+                    Arc::as_ptr(&thread.state) as usize,
+                    Arc::as_ptr(&thread.preset) as usize,
+                ))
+            })
+            .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(local, remote);
+    }
+
+    /// 同配置的两条线程必须共用同一份编译好的 `Generator`，和地形生成器也共用同一份。
+    ///
+    /// Two threads with the same config must share the one compiled `Generator`, and
+    /// the terrain generator must share it too.
+    #[test]
+    fn threads_share_one_generator() {
+        let config = normal(88);
+        let local = with_thread(
+            &config,
+            |thread| Ok(Arc::as_ptr(&thread.generator) as usize),
+        )
+        .unwrap();
+        let other_config = config.clone();
+        let remote = std::thread::spawn(move || {
+            with_thread(&other_config, |thread| {
+                Ok(Arc::as_ptr(&thread.generator) as usize)
+            })
+            .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(local, remote);
+        let terrain = crate::worldgen::with_generator(&config, |generator| {
+            Ok(generator as *const chunk::Generator<'static> as usize)
+        })
+        .unwrap();
+        assert_eq!(local, terrain);
     }
 }

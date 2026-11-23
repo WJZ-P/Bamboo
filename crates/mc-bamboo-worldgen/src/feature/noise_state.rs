@@ -6,8 +6,6 @@
 //! They pick a block from a `NormalNoise` sampled at the placement position; the noise is
 //! built from a fixed `WorldgenRandom(LegacyRandomSource(seed))`.
 
-use std::sync::OnceLock;
-
 use serde_json::Value;
 
 use crate::{
@@ -18,20 +16,6 @@ use crate::{
 use super::state::parse_state;
 
 pub type Pos = (i32, i32, i32);
-
-/// `BLOCK_STATE_PROVIDER` 注册表（由生成器导出到 `worldgen.json`）。
-///
-/// The exported `BLOCK_STATE_PROVIDER` registry.
-pub fn holder_registry() -> &'static serde_json::Map<String, Value> {
-    static REGISTRY: OnceLock<serde_json::Map<String, Value>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
-        root.get("block_state_provider")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default()
-    })
-}
 
 /// `NormalNoise.DIRECT_CODEC` 的参数 + 固定 seed 造一份噪声。
 fn build_noise(seed: i64, value: &Value) -> Option<Noise> {

@@ -99,8 +99,11 @@ pub struct Generator<'a> {
     default_block: u32,
     default_fluid: u32,
     empty: u32,
-    /// 地物注册表，按 `Worldgen` 建一次。
-    features: crate::feature::registry::Registry,
+    /// 地物注册表，借用 `Worldgen::shared()` 里那一份只读实例。
+    ///
+    /// The feature registry, borrowed from the single read-only instance in
+    /// `Worldgen::shared()`.
+    features: &'a crate::feature::registry::Registry,
 }
 
 /// 含水层用的六条密度函数，编译顺序和 `NoiseBasedAquifer` 的构造器一样。
@@ -180,8 +183,10 @@ impl<'a> Generator<'a> {
         .map_err(|error| format!("material rules: {error}"))?;
         let carvers =
             Carvers::compile(worldgen.raw()).map_err(|error| format!("carvers: {error}"))?;
-        let features = crate::feature::registry::Registry::parse(worldgen.raw())
-            .map_err(|error| format!("features: {error}"))?;
+        // 地物注册表借用 Worldgen 里全进程共用的只读实例，不再每条生成线程各解析一份。
+        // Borrow the process-wide read-only feature registry from Worldgen instead of
+        // parsing a fresh copy on every generation thread.
+        let features = worldgen.features();
         let cache_count = compiler.cache_count();
         let positional = compiler.positional_factory();
         let mut material = material;
@@ -1045,7 +1050,7 @@ impl<'a> Generator<'a> {
         });
         let region_random = factory.at(input.center_x * 16, 0, input.center_z * 16);
         let context = crate::feature::run::FeatureContext {
-            registry: &self.features,
+            registry: self.features,
             flat,
             samplers: &self.router,
             biomes: &biomes,
@@ -1063,7 +1068,7 @@ impl<'a> Generator<'a> {
 
     /// 地物注册表，对拍报告统计用。
     pub fn feature_registry(&self) -> &crate::feature::registry::Registry {
-        &self.features
+        self.features
     }
 
     fn worldgen_noises(&self) -> &'a NoiseRegistry {
@@ -1084,10 +1089,15 @@ fn parse_settings(
     worldgen: &Worldgen,
     settings_id: &str,
 ) -> Result<serde_json::Map<String, Value>, String> {
-    let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN)
-        .map_err(|error| format!("bad worldgen data: {error}"))?;
-    let _ = worldgen;
-    root.get("noise_settings")
+    // `noise_settings` 已经在 `Worldgen::raw` 里，直接取这一条。原先这里把整份
+    // `worldgen.json`（4.4 MB）重新解析一遍只为一个几 KB 的对象，每条生成线程建
+    // `Generator` 时都要付一次，起服时线程数一多就是几十次全量解析。
+    // `noise_settings` already lives in `Worldgen::raw`; take just that entry. This used
+    // to re-parse the whole `worldgen.json` (4.4 MB) for a few KB object on every
+    // `Generator` built per generation thread, i.e. dozens of full parses at startup.
+    worldgen
+        .raw()
+        .get("noise_settings")
         .and_then(|value| value.get(settings_id))
         .and_then(Value::as_object)
         .cloned()
@@ -1162,6 +1172,27 @@ fn parse_aquifer(
 mod tests {
     use super::*;
 
+    /// 直接从 `Worldgen::raw` 取 `noise_settings` 必须和「整份文档重新解析一遍」
+    /// 得到的那一条逐项相同；这是去掉那次全量解析后的回归保护。
+    ///
+    /// Taking `noise_settings` from `Worldgen::raw` must equal the entry obtained by
+    /// re-parsing the whole document; this guards the removed full parse.
+    #[test]
+    fn settings_match_a_fresh_full_parse() {
+        let worldgen = Worldgen::load().expect("能读数据");
+        let root: Value =
+            serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).expect("worldgen json parses");
+        for id in worldgen.settings_ids() {
+            let fast = parse_settings(&worldgen, id).expect("settings in raw");
+            let fresh = root
+                .get("noise_settings")
+                .and_then(|value| value.get(id))
+                .and_then(Value::as_object)
+                .expect("settings in the document");
+            assert_eq!(&fast, fresh, "{id} 的 noise_settings 不一致");
+        }
+    }
+
     #[test]
     fn overworld_biomes_are_a_whole_chunk() {
         let worldgen = Worldgen::load().expect("能读数据");
@@ -1172,6 +1203,21 @@ mod tests {
             assert_eq!(section.len(), 64);
             assert!(section.iter().all(|id| (*id as usize) < 67));
         }
+    }
+
+    /// 两条生成线程的 `Generator` 借用同一份只读地物注册表，不再各留一份副本。
+    /// Generators on two compute threads borrow the same read-only feature registry
+    /// instead of each owning a copy.
+    #[test]
+    fn generators_share_one_feature_registry() {
+        let worldgen = Worldgen::shared().expect("shared worldgen loads");
+        let first = Generator::new(worldgen, 1).expect("first generator");
+        let second = Generator::new(worldgen, 2).expect("second generator");
+        assert!(std::ptr::eq(
+            first.feature_registry(),
+            second.feature_registry()
+        ));
+        assert!(std::ptr::eq(first.feature_registry(), worldgen.features()));
     }
 
     /// 回归：种子 -1、区块 (52,-26) 在岩浆层上边界（y=-54）应给出水，而不是深板岩。
