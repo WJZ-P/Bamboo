@@ -2,6 +2,7 @@
 //!
 //! 按主题分成几个子模块，所有公开项都从这里导出。
 
+mod advancement;
 mod block;
 mod border;
 mod chat;
@@ -18,6 +19,7 @@ mod secure;
 mod sound;
 mod title;
 
+pub use advancement::*;
 pub use block::*;
 pub use border::*;
 pub use chat::*;

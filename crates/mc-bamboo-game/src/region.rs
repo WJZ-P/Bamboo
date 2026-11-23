@@ -749,6 +749,7 @@ impl Region {
             peer_ip,
             online_at_login: _,
             player_data: _,
+            player_advancements: _,
             sink,
             inbox,
         } = request;

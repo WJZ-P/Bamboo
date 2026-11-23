@@ -243,6 +243,8 @@ pub(crate) struct Player {
     ///
     /// Riding state: the vehicle and the positions its movement is checked against.
     pub(crate) riding: crate::riding::Riding,
+    /// 官方 `ServerPlayer.getAdvancements()` 的可变状态，跟着玩家在岛之间搬动。
+    pub(crate) advancements: crate::advancements::PlayerAdvancements,
 }
 
 impl Player {
@@ -321,6 +323,7 @@ impl Player {
             combat_memory: Default::default(),
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
+            advancements: crate::advancements::PlayerAdvancements::default(),
         }
     }
 

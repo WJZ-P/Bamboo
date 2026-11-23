@@ -27,6 +27,9 @@
 //! | `pacing` | 用 `thread::sleep` 睡到下一刻 |
 
 pub mod admin;
+pub mod advancement_rewards;
+pub mod advancement_triggers;
+pub mod advancements;
 #[doc(hidden)]
 pub mod bench;
 mod block_drops;

@@ -185,6 +185,13 @@ impl Advancement {
         }
         write_bool(out, self.sends_telemetry_event);
     }
+
+    /// [`Self::write_network`] 的便捷入口。
+    pub fn write_network_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write_network(&mut out);
+        out
+    }
 }
 
 /// 树上的一个节点，官方 `AdvancementNode`。

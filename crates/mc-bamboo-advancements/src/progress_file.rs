@@ -127,6 +127,13 @@ impl AdvancementProgress {
         }
     }
 
+    /// [`Self::write_network`] 的便捷入口。
+    pub fn write_network_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write_network(&mut out);
+        out
+    }
+
     /// 官方 `AdvancementProgress.CODEC` 写出的 JSON 对象。
     /// `done` 是读档时用来自动补齐缺判据的旧字段：官方编码时按 `hasProgress()` 写。
     pub fn to_json(&self) -> Value {
