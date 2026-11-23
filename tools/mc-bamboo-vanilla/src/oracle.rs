@@ -629,6 +629,7 @@ impl Session {
                 let out_of_scope = match skip.kind {
                     Kind::Tick => tick_exclusion(block),
                     Kind::Random => random_tick_exclusion(block),
+                    Kind::Explode => None,
                     _ => None,
                 };
                 match Rule::of_skip(&skip.reason).or(out_of_scope) {
@@ -683,17 +684,20 @@ impl Session {
             tool,
             &mine.tool_enchantments,
         ) {
-            Ok((ours, orbs, seed))
-                if ours == official && orbs == mine.xp_orbs && seed == mine.random_seed =>
+            Ok((ours, orbs, seed, spawned))
+                if ours == official
+                    && orbs == mine.xp_orbs
+                    && seed == mine.random_seed
+                    && spawned == mine.spawned =>
             {
                 self.report.mine_checked(block, true, "");
             }
-            Ok((ours, orbs, seed)) => self.report.mine_checked(
+            Ok((ours, orbs, seed, spawned)) => self.report.mine_checked(
                 block,
                 false,
                 &format!(
-                    "{}: drops official {official:?} bamboo {ours:?}, xp official {:?} bamboo {orbs:?}, random official {} bamboo {seed}",
-                    mine.block, mine.xp_orbs, mine.random_seed
+                    "{}: drops official {official:?} bamboo {ours:?}, xp official {:?} bamboo {orbs:?}, spawned official {:?} bamboo {spawned:?}, random official {} bamboo {seed}",
+                    mine.block, mine.xp_orbs, mine.spawned, mine.random_seed
                 ),
             ),
             Err(error) => {
@@ -820,6 +824,7 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
         Kind::Place | Kind::Use if bone_meals_a_feature_plant(case) => Some(Rule::Worldgen),
         Kind::Tick => tick_exclusion(block),
         Kind::Random => random_tick_exclusion(block),
+        Kind::Explode => None,
         _ => None,
     };
     match rule {
@@ -1369,8 +1374,18 @@ fn compare(
             && answer
                 .random_seed
                 .is_some_and(|seed| seed != replayed.random_seed),
+        spawned: expected_spawned(&answer.spawned) != replayed.spawned,
         panic: None,
     })
+}
+
+/// 官方的 `spawned` 里只有一部分实体 Bamboo 会建出来；物品实体和蠹虫都会。
+/// 两边的顺序都是生成顺序，直接比。
+///
+/// The official `spawned` list includes items and silverfish, both of which Bamboo
+/// creates here; compare the lists in spawn order.
+fn expected_spawned(spawned: &[String]) -> Vec<String> {
+    spawned.to_vec()
 }
 
 /// 方块和流体是两条队列，各自比较。
