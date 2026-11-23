@@ -6,8 +6,8 @@
 //! cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
 //! ```
 //!
-//! 场景、口径和报告见 `docs/mob-entity-design.md` 5.9 和
-//! `docs/performance-optimizations.md` 25。这里只测量：所有地形、玩家和生物都由
+//! 场景、口径和报告见 `docs/mob-entity-design.md` 5.22 和
+//! `docs/performance-optimizations.md` 25、26。这里只测量：所有地形、玩家和生物都由
 //! 基准自己搭，走的是生产代码的同一套实体 tick 和并行驱动；计时开关关掉时
 //! 正式二进制里这些探针全是空宏。
 
