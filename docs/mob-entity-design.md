@@ -793,6 +793,14 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 跟随拿花的玩家、愤怒、带蜜、诱惑），比花蜜 / 已蜇 / 计时 / 愤怒 / 血量 /
 随机源 0 不一致；四处改坏确认都能抓到。
 
+放出蜂巢里的蜂按官方拆成两段：`emptyAllLivingFromHive(玩家本身, ...)` 的
+4 格距离 / 营火 400 刻，与 `BeehiveBlock.angerNearbyBees` 的 8/6/8 盒 +
+每只蜂一次 `world.random.nextInt(玩家数)`。剪刀 / 玻璃瓶 / 挖巢三条调用方
+各自传发起动作的玩家；挖巢顺序是先放出再激怒，取蜜顺序是先激怒再放出。
+`mob-oracle --only bee_release` 四例逐刻比目标 / 倒计时 / 世界随机源，
+少取一次随机数的改坏确认有效。`bee_ai` 场景仍用 `NoAI` 只比状态机字段，
+等正式 POI 系统合进 main 后再开任务让官方侧跑完整 AI 对拍。
+
 **已知限制**：bee_ai 场景用 `NoAI` 比状态机字段，方块扫描、飞行寻路落点、
 作物催熟结果没有与官方逐刻对拍；未加载区块的蜂巢查不到；
 `BeehiveDecorator` 的生成期 NBT 没有与官方逐题对拍。

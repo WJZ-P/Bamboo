@@ -38,6 +38,7 @@ use crate::oracle::collect_log;
 mod bat;
 mod bee;
 mod bee_ai;
+mod bee_release;
 mod brain;
 mod egg;
 mod equine;
@@ -121,6 +122,7 @@ enum Line {
     Bat(Box<bat::BatCase>),
     Bee(Box<bee::BeeCase>),
     BeeAi(Box<bee_ai::BeeAiCase>),
+    BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
     GolemAttackRoll(golem::GolemAttackRollCase),
     GolemSave(Box<golem::GolemSaveCase>),
@@ -1471,6 +1473,7 @@ impl Report {
                 Line::Bat(case) => self.replay_bat(&case),
                 Line::Bee(case) => self.replay_bee(&case),
                 Line::BeeAi(case) => self.replay_bee_ai(&case),
+                Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
                 Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
                 Line::GolemSave(case) => self.replay_golem_save(&case),

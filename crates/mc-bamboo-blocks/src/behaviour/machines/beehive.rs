@@ -83,12 +83,37 @@ impl Behaviour for Beehive {
                     true,
                 );
             }
-            // 官方 `releaseBeesAndResetHoneyLevel` 先清蜜，再 EMERGENCY 放蜂；
-            // 营火在下面时只清蜜。
+            // 官方 `BeehiveBlock.useItemOn`：营火不冒烟时先 `angerNearbyBees`
+            // （巢里有蜂才调），再 `releaseBeesAndResetHoneyLevel`；冒烟时只清蜜。
+            // `player` 是这次右键的玩家本身，不是附近玩家里挑出来的。
             if !beehive_entity::is_sedated(world, pos) {
+                let has_bees = world
+                    .with_block_entity::<beehive_entity::BeehiveEntity, _>(pos, |hive, _| {
+                        !hive.is_empty()
+                    })
+                    .unwrap_or(false);
+                if has_bees {
+                    beehive_entity::anger_nearby_bees(world, pos);
+                }
+                let actor = ctx.actor;
+                // `Actor` 只有 UUID；发起这次右键的玩家 uid 从玩家表里按 UUID 找。
+                let player = {
+                    let mut found = None;
+                    world.level().for_each_player(&mut |view| {
+                        if view.uuid == Some(actor.uuid) {
+                            found = Some(*view);
+                        }
+                    });
+                    found
+                };
                 let released: Option<()> = world
                     .with_block_entity::<beehive_entity::BeehiveEntity, _>(pos, |hive, world| {
-                        hive.release_all(world, state, beehive_entity::ReleaseStatus::Emergency);
+                        hive.release_all(
+                            world,
+                            state,
+                            beehive_entity::ReleaseStatus::Emergency,
+                            player,
+                        );
                     });
                 let _ = released;
             }

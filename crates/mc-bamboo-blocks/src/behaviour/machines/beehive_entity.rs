@@ -282,48 +282,42 @@ impl BeehiveEntity {
         }
     }
 
-    /// `emptyAllLivingFromHive`：取蜜 / 挖掉时把所有蜜蜂放出来。
-    pub fn release_all(&mut self, world: &mut World, state: BlockState, status: ReleaseStatus) {
+    /// 官方 `BeehiveBlockEntity.emptyAllLivingFromHive(player, state, status)`。
+    ///
+    /// `player` 是这次取蜜 / 挖巢的玩家本身，不在附近玩家里挑、不取随机数；
+    /// 为 `None` 时整段（除放出外）跳过。距离按**玩家到每只放出的蜂**算，
+    /// 只有 4 格内的蜂才会被设目标或设 400 刻冷却。
+    pub fn release_all(
+        &mut self,
+        world: &mut World,
+        state: BlockState,
+        status: ReleaseStatus,
+        player: Option<crate::entity::ctx::PlayerView>,
+    ) {
         let bees = std::mem::take(&mut self.bees);
-        let players = nearby_players(world, self.pos);
         let sedated = is_sedated(world, self.pos);
         let mut spawn = Vec::new();
         for occupant in bees {
-            if let Some(id) = self.release(
-                world,
-                state,
-                occupant,
-                status,
-                players.last().map(|p| p.position),
-            ) {
+            if let Some(id) = self.release(world, state, occupant, status, None) {
                 spawn.push(id);
             }
         }
-        // `emptyAllLivingFromHive`：营火冒烟时 400 刻不准进巢，否则给 4 格内
-        // 无目标的蜂设成最近的玩家（`Util.getRandom` 对多名玩家取一个，
-        // 这里按玩家表顺序取第一个；对拍夹具只放一名玩家）。
-        let close = players
-            .iter()
-            .find(|player| player.position.distance_to_sqr(center(self.pos)) <= 16.0)
-            .map(|player| (player.uid, player.uuid));
-        let now = world.game_time();
+        let Some(player) = player else {
+            return;
+        };
         for id in spawn {
             world.with_entity_mut(id, &mut |entity| {
-                let anger = crate::entity::mob::bee::anger_seconds(&mut entity.random);
+                let close = player.position.distance_to_sqr(entity.position) <= 16.0;
                 entity.with_mob(|_, mob| {
-                    if sedated {
-                        crate::entity::mob::bee::set_stay_out_of_hive(
-                            mob,
-                            entity_types::BEEHIVE_REENTER_TICKS,
-                        );
-                    } else if mob.target.is_none()
-                        && let Some((uid, uuid)) = close
-                    {
-                        mob.target = Some(uid);
-                        // 愤怒结束时刻按官方 `startPersistentAngerTimer` 从实体随机源抽。
-                        mob.anger.target = uuid;
-                        mob.anger.end_time = now + anger;
-                        mob.bee.anger_end_time = mob.anger.end_time;
+                    if close {
+                        if sedated {
+                            crate::entity::mob::bee::set_stay_out_of_hive(
+                                mob,
+                                entity_types::BEEHIVE_REENTER_TICKS,
+                            );
+                        } else {
+                            mob.target = Some(player.uid);
+                        }
                     }
                 });
             });
@@ -442,32 +436,62 @@ impl BlockEntity for BeehiveEntity {
     }
 }
 
-fn center(pos: BlockPos) -> Vec3 {
-    Vec3::new(
-        f64::from(pos.x) + 0.5,
-        f64::from(pos.y) + 0.5,
-        f64::from(pos.z) + 0.5,
-    )
-}
-
-/// 蜂巢周围 8/6/8 盒内的玩家，按 `for_each_player` 的顺序。
-fn nearby_players(world: &World, pos: BlockPos) -> Vec<crate::entity::ctx::PlayerView> {
-    let mut found = Vec::new();
-    let center = Vec3::new(
-        f64::from(pos.x) + 0.5,
-        f64::from(pos.y) + 0.5,
-        f64::from(pos.z) + 0.5,
+/// 官方 `BeehiveBlock.angerNearbyBees`：蜂巢 AABB 外扩 (8, 6, 8) 里的蜂和玩家。
+///
+/// 蜂列表、玩家列表都按实体分区顺序（这里按 uid 升序）取。玩家列表为空时
+/// 不取随机数；否则**每只无目标的蜂**都取一次世界随机源 `nextInt(玩家数)`，
+/// 哪怕只有一个玩家、哪怕这只蜂不在 4 格内。和 `emptyAllLivingFromHive`
+/// 是两段独立的逻辑，调用方按官方条件分别调用。
+pub fn anger_nearby_bees(world: &mut World, hive: BlockPos) {
+    let area = crate::shape::Aabb::new(
+        f64::from(hive.x) - 8.0,
+        f64::from(hive.y) - 6.0,
+        f64::from(hive.z) - 8.0,
+        f64::from(hive.x) + 9.0,
+        f64::from(hive.y) + 7.0,
+        f64::from(hive.z) + 9.0,
     );
-    let level: &dyn crate::Level = world.level();
-    level.for_each_player(&mut |player| {
-        let dx = player.position.x - center.x;
-        let dy = player.position.y - center.y;
-        let dz = player.position.z - center.z;
-        if dx.abs() <= 8.0 && dy.abs() <= 6.0 && dz.abs() <= 8.0 {
-            found.push(*player);
+    let mut bees = Vec::new();
+    world.level().for_each_entity_in(area, &mut |public| {
+        if matches!(&public.kind, crate::entity::KindPublic::Mob(mob) if mob.mob_type == MobType::Bee)
+        {
+            bees.push(public.uid);
         }
     });
-    found
+    if bees.is_empty() {
+        return;
+    }
+    let mut players = Vec::new();
+    world.level().for_each_player(&mut |player| {
+        if area.contains(player.position.x, player.position.y, player.position.z) {
+            players.push((player.uid, player.position));
+        }
+    });
+    if players.is_empty() {
+        return;
+    }
+    players.sort_by_key(|(uid, _)| *uid);
+    for uid in bees {
+        // 先看目标；有目标的蜂不取随机数。
+        let has_target = world
+            .level()
+            .entity_public(uid)
+            .and_then(|public| match public.kind {
+                crate::entity::KindPublic::Mob(mob) => Some(mob.has_target),
+                _ => None,
+            })
+            .unwrap_or(true);
+        if has_target {
+            continue;
+        }
+        let pick = world.random().next_int(players.len() as i32) as usize;
+        let target = players.get(pick).map(|(uid, _)| *uid);
+        if let Some(target) = target {
+            world.with_entity_mut(uid, &mut |entity| {
+                entity.with_mob(|_, mob| mob.target = Some(target));
+            });
+        }
+    }
 }
 
 /// `CampfireBlock.isSmokeyPos`：下面 1..5 格有点着的营火（或隔着虚拟柱子）时为真。
