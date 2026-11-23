@@ -857,6 +857,7 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
             "MobCategory 的顺序变了: {names:?}，期望 {MOB_CATEGORY_ORDER:?}"
         ));
     }
+    let biome_names = registry_entries(data, BIOME_REGISTRY).unwrap_or(&[]);
     let entity_names = registry_entries(data, ENTITY_TYPE_REGISTRY).unwrap_or(&[]);
     let entity_id = |name: &str| -> Result<i32, String> {
         entity_names
@@ -949,6 +950,8 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
         "    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层）。"
     );
     let _ = writeln!(out, "    pub creature_spawn_probability: f32,");
+    let _ = writeln!(out, "    /// `SNOW_GOLEM_MELTS` 在这个群系的最终值。");
+    let _ = writeln!(out, "    pub snow_golem_melts: bool,");
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
     let _ = writeln!(
@@ -999,7 +1002,27 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
             "        creature_spawn_probability: f32::from_bits({:#010x}),",
             settings.creature_spawn_probability
         );
+        let _ = writeln!(
+            out,
+            "        snow_golem_melts: {},",
+            settings.snow_golem_melt
+        );
         let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// `SNOW_GOLEM_MELTS`，下标是 `minecraft:worldgen/biome` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static SNOW_GOLEM_MELTS: &[bool] = &[");
+    for name in biome_names {
+        let melts = facts
+            .biomes
+            .get(name.as_str())
+            .is_some_and(|settings| settings.snow_golem_melt);
+        let _ = writeln!(out, "    {melts}, // {name}");
     }
     let _ = writeln!(out, "];");
     Ok(out)

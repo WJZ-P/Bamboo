@@ -312,6 +312,14 @@ pub enum Goal {
         attack_time: i32,
         see_time: i32,
     },
+    /// `SnowGolem` 的 `RangedAttackGoal(1.25, 20, 10)`：每 20 刻朝目标扔一颗雪球。
+    ///
+    /// The snow golem's `RangedAttackGoal(1.25, 20, 10)`.
+    SnowGolemRangedAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
+        see_time: i32,
+    },
     /// `PandaSitGoal`：拿着能吃的东西时坐下。
     ///
     /// `PandaSitGoal`: sit down while holding something edible.
@@ -465,6 +473,10 @@ pub enum TargetType {
     ///
     /// The ocelot / cat `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`.
     BabyTurtleOnLand,
+    /// 傀儡的敌对生物目标，选择器按种类排除苦力怕。
+    ///
+    /// A golem's hostile-mob target; the selector excludes creepers.
+    GolemPrey,
 }
 
 impl TargetType {
@@ -597,7 +609,9 @@ impl Goal {
             // `DrownedSwimUpGoal` never calls `setFlags`, so it locks nothing.
             Self::DrownedSwimUp { .. } => &[],
             Self::WitchHealRaiders { .. } => &[Flag::Target],
-            Self::WitchRangedAttack { .. } => &[Flag::Move, Flag::Look],
+            Self::WitchRangedAttack { .. } | Self::SnowGolemRangedAttack { .. } => {
+                &[Flag::Move, Flag::Look]
+            }
             Self::PandaSit | Self::AvoidEntity { .. } => &[Flag::Move],
             Self::PandaRoll => &[Flag::Move, Flag::Look, Flag::Jump],
             Self::PandaLieOnBack | Self::PandaSneeze => &[],
@@ -716,7 +730,9 @@ impl Goal {
             Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
             Self::RandomStroll { .. } => "RandomStrollGoal",
             Self::WitchHealRaiders { .. } => "NearestHealableRaiderTargetGoal",
-            Self::WitchRangedAttack { .. } => "RangedAttackGoal",
+            Self::WitchRangedAttack { .. } | Self::SnowGolemRangedAttack { .. } => {
+                "RangedAttackGoal"
+            }
             Self::PandaSit => "PandaSitGoal",
             Self::PandaLieOnBack => "PandaLieOnBackGoal",
             Self::PandaSneeze => "PandaSneezeGoal",
@@ -1847,6 +1863,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Chicken => {
                     nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Chicken)
                 }
+                TargetType::GolemPrey => nearest_mob_target(me, mob, ctx, |kind| {
+                    kind.is_enemy() && kind != super::MobType::Creeper
+                }),
                 TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
                     public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
                 }),
@@ -1978,7 +1997,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let _rolled = me.random.next_boolean();
             false
         }
-        Goal::WitchRangedAttack { target, .. } => {
+        Goal::WitchRangedAttack { target, .. } | Goal::SnowGolemRangedAttack { target, .. } => {
             let alive = mob.target.filter(|&uid| alive_target(ctx, uid).is_some());
             if alive.is_some() {
                 *target = alive;
@@ -2119,7 +2138,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         // `RangedAttackGoal.canContinueToUse`：`canUse` 或目标还活着且导航没完。
         //
         // `RangedAttackGoal.canContinueToUse`: `canUse` or the stored target is alive while navigating.
-        Goal::WitchRangedAttack { target, .. } => {
+        Goal::WitchRangedAttack { target, .. } | Goal::SnowGolemRangedAttack { target, .. } => {
             let stored = *target;
             can_use(goal, me, mob, ctx)
                 || (stored.is_some_and(|uid| alive_target(ctx, uid).is_some())
@@ -2493,6 +2512,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
         | Goal::WitchRangedAttack { .. }
+        | Goal::SnowGolemRangedAttack { .. }
         | Goal::SquidRandomMovement => {}
         Goal::CubeAttack { grow_tired_timer } => *grow_tired_timer = reduced_tick_delay(300),
         Goal::Swell { target } => {
@@ -2704,6 +2724,11 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             target,
             attack_time,
             see_time,
+        }
+        | Goal::SnowGolemRangedAttack {
+            target,
+            attack_time,
+            see_time,
         } => {
             *target = None;
             *see_time = 0;
@@ -2905,6 +2930,44 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 // `Mth.floor(Mth.lerp(d, 60, 60))` 恒等于 60。
                 // `Mth.floor(Mth.lerp(d, 60, 60))` is always 60.
                 *attack_time = 60;
+            }
+        }
+        Goal::SnowGolemRangedAttack {
+            target,
+            attack_time,
+            see_time,
+        } => {
+            let Some((target, _)) = target.and_then(|uid| target_view(ctx, uid)) else {
+                return;
+            };
+            let dist_sqr = me.position.distance_to_sqr(target.position);
+            let radius = super::snow_golem::attack_radius();
+            let has_los =
+                living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position());
+            if has_los {
+                *see_time += 1;
+            } else {
+                *see_time = 0;
+            }
+            if dist_sqr <= radius * radius && *see_time >= 5 {
+                mob.navigation.stop();
+            } else {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation
+                    .move_to_entity(ctx.blocks(), &nav, target.position, 1.25, 1);
+            }
+            let eye = target.eye_position();
+            mob.look
+                .set_look_at(target.position.x, eye.y, target.position.z, 30.0, 30.0);
+            *attack_time -= 1;
+            if *attack_time == 0 {
+                if !has_los {
+                    return;
+                }
+                super::snow_golem::perform_ranged_attack(me, mob, ctx, target);
+                *attack_time = 20;
+            } else if *attack_time < 0 {
+                *attack_time = 20;
             }
         }
         Goal::Swell { target } => swell_tick(*target, me, mob, ctx),
@@ -3154,7 +3217,11 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 )
             {
                 *ticks_until_next_attack = adjusted_tick_delay(true, 20);
-                super::living::do_hurt_target(me, mob, ctx, target.uid);
+                if mob.mob_type == super::MobType::IronGolem {
+                    super::iron_golem::do_hurt_target(me, mob, ctx, target);
+                } else {
+                    super::living::do_hurt_target(me, mob, ctx, target.uid);
+                }
                 // `FoxMeleeAttackGoal.checkAndPerformAttack`：不挥手，咬一口出声。
                 // `FoxMeleeAttackGoal.checkAndPerformAttack`: no swing, a bite sound.
                 if mob.mob_type == super::MobType::Fox {
@@ -4211,6 +4278,12 @@ pub(crate) struct CombatTarget {
     pub(crate) health: f32,
     pub(crate) effects: crate::entity::ctx::TargetEffects,
     pub(crate) is_raider: bool,
+    /// 目标的种类；玩家目标用 `Cow` 占位。
+    pub(crate) mob_type: super::MobType,
+    /// 目标是玩家（`Mob.doHurtTarget` 的玩家伤害入口）。
+    pub(crate) is_player: bool,
+    /// `KNOCKBACK_RESISTANCE`，铁傀儡把目标抛起来时用。
+    pub(crate) knockback_resistance: f64,
     /// `getBbWidth()`。
     pub(crate) width: f32,
     hitbox: Aabb,
@@ -4238,6 +4311,9 @@ impl CombatTarget {
             health: view.health,
             effects: view.effects,
             is_raider: false,
+            mob_type: super::MobType::Cow,
+            is_player: true,
+            knockback_resistance: 0.0,
             width: 0.6,
             hitbox: Aabb::new(
                 feet.x - half,
@@ -4316,6 +4392,8 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
                 | super::MobType::Witch
                 | super::MobType::Ocelot
                 | super::MobType::Cat
+                | super::MobType::IronGolem
+                | super::MobType::SnowGolem
         );
     if !mobs_allowed && player_by_uid(ctx.blocks(), uid).is_none() {
         return None;
@@ -4342,6 +4420,11 @@ pub(super) fn attack_candidate(
             super::MobType::PolarBear | super::MobType::Llama
         );
     if let Some(player) = player_by_uid(ctx.blocks(), uid) {
+        // `IronGolem.canAttack`：玩家造的不打玩家。
+        // `IronGolem.canAttack`: a player-created golem never attacks players.
+        if mob.mob_type == super::MobType::IronGolem && mob.iron_golem.is_player_created() {
+            return None;
+        }
         // `LivingEntity.canAttack`：和平难度只排除玩家目标。
         // `LivingEntity.canAttack`: peaceful only rules out player targets.
         return (ctx.blocks().difficulty() != 0
@@ -4352,7 +4435,19 @@ pub(super) fn attack_candidate(
         .then(|| CombatTarget::player(player, exact_player_box));
     }
     let (target, alive) = mob_target_view(ctx, uid)?;
-    alive.then_some(target)
+    if !alive {
+        return None;
+    }
+    // 傀儡不打苦力怕。
+    // Golems never attack creepers.
+    let is_golem = matches!(
+        mob.mob_type,
+        super::MobType::IronGolem | super::MobType::SnowGolem
+    );
+    if is_golem && target.mob_type == super::MobType::Creeper {
+        return None;
+    }
+    Some(target)
 }
 
 /// 别的生物当目标时的样子，和它活没活着（没被移除且血量大于 0）。
@@ -4373,6 +4468,11 @@ fn mob_target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget,
         health: target.health,
         effects: target.effects,
         is_raider: target.mob_type.is_raider(),
+        mob_type: target.mob_type,
+        is_player: false,
+        knockback_resistance: target
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::KNOCKBACK_RESISTANCE),
         width: target.dimensions().0,
         hitbox: other.bounding_box(),
     };

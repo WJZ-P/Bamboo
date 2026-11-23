@@ -211,6 +211,7 @@ fn egg(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) ->
         owner: None,
         owner_uuid: None,
         item: stack.clone(),
+        projectile: crate::entity::thrown_egg::ThrowableKind::Egg,
     };
     world.spawn_egg_shot(&shot);
     Shot::with_event(without_one(&stack), 1002)

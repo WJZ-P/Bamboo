@@ -137,6 +137,11 @@ pub struct BiomeMobSpawnFact {
     /// layer, then the biome layer).
     #[serde(rename = "creatureSpawnProbability")]
     pub creature_spawn_probability: u32,
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS` 在这个群系的最终值。
+    ///
+    /// The resolved `SNOW_GOLEM_MELTS` value for this biome.
+    #[serde(default, rename = "snowGolemMelt")]
+    pub snow_golem_melt: bool,
 }
 
 /// 一个类别下的一张加权刷怪表。

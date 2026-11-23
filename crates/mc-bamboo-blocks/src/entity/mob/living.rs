@@ -1055,6 +1055,14 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::ai_step(me, mob, ctx);
     }
+    // 铁傀儡与雪傀儡的 `aiStep` 在 `super.aiStep()` 之前跑自己的那一段。
+    // Golem `aiStep` overrides run their own part before `super.aiStep()`.
+    if mob.mob_type == super::MobType::IronGolem {
+        super::iron_golem::ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::SnowGolem {
+        super::snow_golem::ai_step(me, mob, ctx);
+    }
     animal_ai_step(me, mob, ctx);
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
@@ -1221,6 +1229,48 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     {
         timing::span!(Push);
         push_entities(me, mob, ctx);
+    }
+    // `LivingEntity.aiStep` 尾部：`isSensitiveToWater && isInWaterOrRain` 每刻 1 点溺水伤害。
+    // Tail of `LivingEntity.aiStep`: `isSensitiveToWater && isInWaterOrRain` deals
+    // one drown damage per tick.
+    if mob.mob_type == super::MobType::SnowGolem {
+        let blocks = ctx.blocks();
+        let feet = me.block_position();
+        let eye_top = BlockPos::containing(Vec3::new(
+            me.position.x,
+            me.bounding_box().max_y,
+            me.position.z,
+        ));
+        if me.in_water || blocks.is_raining_at(feet) || blocks.is_raining_at(eye_top) {
+            hurt_server(
+                me,
+                mob,
+                ctx,
+                DamageSource::environment(DamageKind::Drown),
+                1.0,
+            );
+        }
+    }
+    // `LivingEntity.aiStep` 尾部：`isSensitiveToWater && isInWaterOrRain` 每刻 1 点溺水伤害。
+    // Tail of `LivingEntity.aiStep`: `isSensitiveToWater && isInWaterOrRain` deals
+    // one drown damage per tick.
+    if mob.mob_type == super::MobType::SnowGolem {
+        let blocks = ctx.blocks();
+        let feet = me.block_position();
+        let eye_top = BlockPos::containing(Vec3::new(
+            me.position.x,
+            me.bounding_box().max_y,
+            me.position.z,
+        ));
+        if me.in_water || blocks.is_raining_at(feet) || blocks.is_raining_at(eye_top) {
+            hurt_server(
+                me,
+                mob,
+                ctx,
+                DamageSource::environment(DamageKind::Drown),
+                1.0,
+            );
+        }
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::hurt_if_wet(me, mob, ctx);
@@ -2173,6 +2223,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     let bounds = me.bounding_box();
     let mut others = Vec::new();
+    let mut push_others = Vec::new();
     ctx.for_each_other_in(bounds, &mut |other| {
         if let KindPublic::Mob(public) = &other.kind
             && !other.removed
@@ -2180,6 +2231,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && public.mob_type.is_pushable()
         {
             others.push((other.uid, other.position));
+            push_others.push((other.uid, public.as_ref().clone()));
         }
     });
     // `getPushableEntities` 也收玩家（旁观者除外）；玩家那一侧的推力服务端不生效，
@@ -2219,6 +2271,11 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `isPassengerOfSameVehicle`, so a ridden mob stays put.
     let pushable_self =
         is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks()) && !mob.is_vehicle();
+    for (uid, public) in &push_others {
+        if mob.mob_type == super::MobType::IronGolem {
+            super::iron_golem::do_push(me, mob, public, *uid);
+        }
+    }
     for position in players {
         if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
             me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
@@ -2315,6 +2372,9 @@ pub(crate) fn hurt_server(
     } else {
         amount
     };
+    if mob.mob_type == super::MobType::IronGolem {
+        return super::iron_golem::hurt_server(me, mob, ctx, source, amount);
+    }
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }

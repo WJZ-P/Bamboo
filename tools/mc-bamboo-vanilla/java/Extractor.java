@@ -1933,6 +1933,15 @@ public final class Extractor {
                             .applyModifier(EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
                                     EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY.defaultValue()));
             biome.addProperty("creatureSpawnProbability", Integer.toUnsignedLong(Float.floatToRawIntBits(creatureProbability)));
+            // `SNOW_GOLEM_MELTS` 叠在主世界缺省值（false）上，得到这个群系的最终值。
+            // Overlay SNOW_GOLEM_MELTS on the overworld default (false).
+            boolean melts = biomeRegistry.getValue(name).getAttributes().applyModifier(
+                    EnvironmentAttributes.SNOW_GOLEM_MELTS,
+                    registries.lookupOrThrow(Registries.DIMENSION_TYPE)
+                            .getValue(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD)
+                            .attributes()
+                            .applyModifier(EnvironmentAttributes.SNOW_GOLEM_MELTS, false));
+            biome.addProperty("snowGolemMelt", melts);
             biomes.add(name.toString(), biome);
         }
         result.add("biomes", biomes);
