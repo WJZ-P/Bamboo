@@ -114,17 +114,32 @@ pub fn by_biome_name(name: &str) -> Option<&'static BiomeMobSpawns> {
     BIOME_MOB_SPAWNS.iter().find(|biome| biome.name == name)
 }
 
+/// 按群系注册表 ID 预建的刷怪设置表，免掉每次按名字线性扫描 `BIOME_MOB_SPAWNS`。
+///
+/// Spawn settings indexed by biome registry id, avoiding a linear name scan on
+/// `BIOME_MOB_SPAWNS` per lookup.
+static BY_BIOME_ID: std::sync::LazyLock<[MobSpawnSettings; registries::biome::TOTAL as usize]> =
+    std::sync::LazyLock::new(|| {
+        std::array::from_fn(|id| {
+            let Some(name) = registries::biome::name_of(id as i32) else {
+                return EMPTY;
+            };
+            by_biome_name(name).map_or(EMPTY, |biome| MobSpawnSettings {
+                name: biome.name,
+                categories: biome.categories,
+                costs: biome.costs,
+                creature_spawn_probability: biome.creature_spawn_probability,
+            })
+        })
+    });
+
 /// 按群系注册表 ID 查刷怪设置，超过已知范围或没有条目时给空表。
+#[inline]
 pub fn for_biome_id(id: i32) -> MobSpawnSettings {
-    let Some(name) = registries::biome::name_of(id) else {
-        return EMPTY;
-    };
-    by_biome_name(name).map_or(EMPTY, |biome| MobSpawnSettings {
-        name: biome.name,
-        categories: biome.categories,
-        costs: biome.costs,
-        creature_spawn_probability: biome.creature_spawn_probability,
-    })
+    usize::try_from(id)
+        .ok()
+        .and_then(|index| BY_BIOME_ID.get(index).copied())
+        .unwrap_or(EMPTY)
 }
 
 #[cfg(test)]

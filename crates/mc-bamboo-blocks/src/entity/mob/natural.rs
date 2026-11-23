@@ -360,7 +360,8 @@ fn spawn_category_for_position(
             let pos = BlockPos::new(x, y_start, z);
             let xx = f64::from(x) + 0.5;
             let zz = f64::from(z) + 0.5;
-            let Some(nearest) = nearest_player_distance_sqr(world, xx, f64::from(y_start), zz)
+            let Some(nearest) =
+                nearest_player_distance_sqr(&state.players, xx, f64::from(y_start), zz)
             else {
                 continue;
             };
@@ -622,6 +623,9 @@ fn is_valid_empty_spawn_block(
     pos: BlockPos,
 ) -> bool {
     let state = world.block_state(pos);
+    if state.is_air() {
+        return true;
+    }
     if state.is_collision_shape_full_block() {
         return false;
     }
@@ -1010,22 +1014,21 @@ pub fn is_close_to_spawn_chunk(position: Vec3, chunk: ChunkPos) -> bool {
 }
 
 /// `Level.getNearestPlayer(x, y, z, -1.0, false)` 的距离平方：只排除旁观者，
-/// 创造模式玩家照官方一样算数。
+/// 创造模式玩家照官方一样算数。[`SpawnState`] 在这一刻开头已经滤掉旁观者存好了视图，
+/// 直接遍历切片，不在每个候选步上重新经虚调用构造玩家视图。
 ///
 /// The squared distance of `Level.getNearestPlayer(x, y, z, -1.0, false)`: only
-/// spectators are skipped, creative players count as in vanilla.
-fn nearest_player_distance_sqr(world: &World, x: f64, y: f64, z: f64) -> Option<f64> {
+/// spectators are skipped, creative players count as in vanilla. [`SpawnState`]
+/// already holds the non-spectator player views for this tick.
+fn nearest_player_distance_sqr(players: &[PlayerView], x: f64, y: f64, z: f64) -> Option<f64> {
     let mut best: Option<f64> = None;
-    world.for_each_player(&mut |player| {
-        if player.spectator {
-            return;
-        }
+    for player in players {
         let dx = player.position.x - x;
         let dy = player.position.y - y;
         let dz = player.position.z - z;
         let distance = dx * dx + dy * dy + dz * dz;
         best = Some(best.map_or(distance, |current| current.min(distance)));
-    });
+    }
     best
 }
 

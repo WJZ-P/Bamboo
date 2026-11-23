@@ -237,14 +237,16 @@ impl BlockState {
     /// leaves admit only ocelots and parrots (`Blocks::ocelotOrParrot`).
     pub fn is_valid_spawn_surface(self, entity_type: i32) -> bool {
         use mc_bamboo_data::registries::entity_type as ids;
-        if self.is_tagged(mc_bamboo_data::tags::block_tags::LEAVES) {
-            return matches!(entity_type, ids::OCELOT | ids::PARROT);
+        if self.fact(facts::VALID_SPAWN) {
+            return true;
         }
-        match self.block().default_state {
-            mc_bamboo_data::blocks::ICE | mc_bamboo_data::blocks::FROSTED_ICE => {
-                entity_type == ids::POLAR_BEAR
-            }
-            _ => self.fact(facts::VALID_SPAWN),
+        match entity_type {
+            ids::OCELOT | ids::PARROT => self.is_tagged(mc_bamboo_data::tags::block_tags::LEAVES),
+            ids::POLAR_BEAR => matches!(
+                self.block().default_state,
+                mc_bamboo_data::blocks::ICE | mc_bamboo_data::blocks::FROSTED_ICE
+            ),
+            _ => false,
         }
     }
 

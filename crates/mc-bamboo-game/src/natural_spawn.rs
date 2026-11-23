@@ -76,16 +76,18 @@ pub(crate) fn tick(region: &mut Region) {
     if categories.is_empty() || chunks.is_empty() {
         return;
     }
-    for chunk in chunks {
-        if !region.tick_levels.chunk_ticks_entities(chunk) {
-            continue;
-        }
+    let effects = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
-        natural::spawn_for_chunk(&mut world, chunk, &mut state, &params, &categories);
-        let effects = world.into_effects();
-        crate::interaction::send_effects(region, None, &effects);
-    }
+        for chunk in chunks {
+            if !world.level().chunk_ticks_entities(chunk) {
+                continue;
+            }
+            natural::spawn_for_chunk(&mut world, chunk, &mut state, &params, &categories);
+        }
+        world.into_effects()
+    };
+    crate::interaction::send_effects(region, None, &effects);
 }
 
 /// `ChunkGenerator.getSeaLevel()`：超平坦是 `FlatLevelSource` 的 -63，噪声世界读设置。
