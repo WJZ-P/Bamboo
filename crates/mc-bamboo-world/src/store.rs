@@ -317,6 +317,17 @@ impl ChunkStore {
         self.edited.get(&pos).unwrap_or(&self.template)
     }
 
+    /// 消费完工表后把已加载区块标脏，即使处理没有改变方块也要保存空表。
+    /// Persist a consumed generation table even when no block changed.
+    pub fn clear_post_processing(&mut self, pos: ChunkPos) {
+        if self.is_loaded(pos) && self.chunk(pos).archive().post_processing.is_some() {
+            self.edited
+                .chunk_mut(pos, &self.template)
+                .clear_post_processing();
+            self.mark_changed(pos);
+        }
+    }
+
     /// 这个区块的方块和光照都和模板一样，可以共用模板的编码。
     pub fn is_template(&self, pos: ChunkPos) -> bool {
         !self.edited.contains_key(&pos) && !self.light.is_materialized(pos)

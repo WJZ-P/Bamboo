@@ -56,6 +56,7 @@ mod entity_view;
 mod experience;
 mod experience_pickup;
 mod gamerules;
+pub mod generation_post_process;
 mod global;
 mod global_port;
 mod inbound;
