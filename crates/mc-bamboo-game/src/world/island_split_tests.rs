@@ -508,9 +508,13 @@ pub(super) fn fingerprint(
     for pos in region.chunks.loaded_positions() {
         // 方块和光照：版本号没变内容就没变，同一个世界里按（位置，版本号）记住算过的哈希。
         let revision = region.chunks.revision(pos);
-        let content = *hashes
-            .entry((pos, revision))
-            .or_insert_with(|| hash_of(&format!("{:?}", region.chunks.column_clone(pos))));
+        let content = *hashes.entry((pos, revision)).or_insert_with(|| {
+            // `InhabitedTime` 单独记在 ChunkStore 的表里，不进区块包、也不换版本号；
+            // 拆合前后它按区块跟着搬，比较方块和光照内容时把它抹平。
+            let mut column = region.chunks.column_clone(pos).expect("已加载");
+            column.chunk_mut().set_inhabited_time(0);
+            hash_of(&format!("{column:?}"))
+        });
         let _ = writeln!(
             out[group(pos)],
             "chunk {pos:?} pristine {} {content}",

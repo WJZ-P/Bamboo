@@ -7,10 +7,10 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, damage, data, effect,
-    enchant, execute, experience, gamerule, items, kill, loot, particle, players, playsound,
-    random, save, scoreboard, stopsound, summon, team, teleport, text, time, title, weather,
-    world_border, world_settings,
+    Action, CommandFn, Commands, IslandFn, admin, advancement, blocks, bossbar, clone, damage,
+    data, effect, enchant, execute, experience, gamerule, items, kill, loot, particle, players,
+    playsound, random, save, scoreboard, stopsound, summon, team, teleport, text, time, title,
+    weather, world_border, world_settings,
 };
 
 struct Builder {
@@ -138,6 +138,7 @@ pub(crate) fn build() -> Commands {
     register_experience(&mut builder, root);
     register_loot(&mut builder, root);
     register_weather(&mut builder, root);
+    register_advancement(&mut builder, root);
     register_worldborder(&mut builder, root);
     Commands {
         graph: builder.graph,
@@ -1951,5 +1952,35 @@ fn entities_argument() -> ArgumentType {
     ArgumentType::Entity {
         single: false,
         players_only: false,
+    }
+}
+
+/// `/advancement grant|revoke <目标> only|from|through|until|everything [进度] [判据]`。
+/// 官方 `AdvancementCommands.register` 的语法。两条动作共用同一个执行函数，
+/// 靠 `action` 参数区分；`only` / `from` / `through` / `until` 后面都跟一个进度 id，
+/// `everything` 不带进度参数。判据参数是可选的单词。
+fn register_advancement(builder: &mut Builder, root: usize) {
+    use mc_bamboo_command::ArgumentType;
+    let command = builder.literal(root, "advancement", permission::GAMEMASTERS);
+    for (action, function) in [
+        ("grant", advancement::apply as IslandFn),
+        ("revoke", advancement::revoke as IslandFn),
+    ] {
+        let node = builder.literal(command, action, 0);
+        let targets = builder.argument(node, "target", players_argument(), 0);
+        let everything = builder.literal(targets, "everything", 0);
+        builder.run_island(everything, function);
+        for mode in ["only", "from", "through", "until"] {
+            let mode_node = builder.literal(targets, mode, 0);
+            let id = builder.argument(mode_node, "advancement", ArgumentType::ResourceLocation, 0);
+            builder.run_island(id, function);
+            let with_criterion = builder.argument(
+                id,
+                "criterion",
+                ArgumentType::String(mc_bamboo_command::StringKind::SingleWord),
+                0,
+            );
+            builder.run_island(with_criterion, function);
+        }
     }
 }

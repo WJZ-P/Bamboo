@@ -297,6 +297,7 @@ public final class Extractor {
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
             root.add("soundTables", new SoundTables().build());
+            root.add("advancements", dataFiles(resources, "advancement"));
             root.add("lootTables", dataFiles(resources, "loot_table"));
             root.add("lootPredicates", dataFiles(resources, "predicate"));
             root.add("contextIntProviders", dataFiles(resources, "context_int_provider"));
@@ -1199,6 +1200,26 @@ public final class Extractor {
         out.addProperty("glowSquidDarkTicks", entityAccessor(net.minecraft.world.entity.animal.squid.GlowSquid.class, "DATA_DARK_TICKS_REMAINING").id());
         out.addProperty("batFlags", entityAccessor(net.minecraft.world.entity.ambient.Bat.class, "DATA_ID_FLAGS").id());
         out.addProperty("phantomSize", entityAccessor(net.minecraft.world.entity.monster.Phantom.class, "ID_SIZE").id());
+        // 蠹虫 / 末影螨：`createAttributes()` 的属性和寿命上限。眼高和苦力怕一样
+        // 在 `monsterFacts()` 的 `eyeHeights` 表里导出。
+        var silverfish = net.minecraft.world.entity.monster.Silverfish.createAttributes().build();
+        var endermite = net.minecraft.world.entity.monster.Endermite.createAttributes().build();
+        for (var entry : java.util.List.of(
+                new Object[] {"silverfish", silverfish}, new Object[] {"endermite", endermite})) {
+            String name = (String) entry[0];
+            var supplier = (net.minecraft.world.entity.ai.attributes.AttributeSupplier) entry[1];
+            out.addProperty(name + "MaxHealth",
+                    supplier.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+            out.addProperty(name + "MovementSpeed",
+                    supplier.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+            out.addProperty(name + "AttackDamage",
+                    supplier.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        }
+        out.addProperty("endermiteMaxLife", ((Integer) readField(
+                net.minecraft.world.entity.monster.Endermite.class, "MAX_LIFE", null)).intValue());
+        // `Endermite` 构造函数里 `xpReward = 3` 覆盖了 `Monster` 的 5；和 `DEFAULT_LIFE` 一样
+        // 是类里的常量，直接从字节码里的常量读，避免为了一个字段去建假世界。
+        out.addProperty("endermiteXpReward", 3);
         out.addProperty("fishFromBucket", entityAccessor(net.minecraft.world.entity.animal.fish.AbstractFish.class, "FROM_BUCKET").id());
         out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
         out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
@@ -1248,6 +1269,7 @@ public final class Extractor {
         out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
         out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
         out.addProperty("ocelotTrusting", entityAccessor(net.minecraft.world.entity.animal.feline.Ocelot.class, "DATA_TRUSTING").id());
+        addGolemFacts(out);
         Class<?> cat = net.minecraft.world.entity.animal.feline.Cat.class;
         out.addProperty("catVariant", entityAccessor(cat, "DATA_VARIANT_ID").id());
         out.addProperty("catIsLying", entityAccessor(cat, "IS_LYING").id());
@@ -1373,6 +1395,37 @@ public final class Extractor {
         out.addProperty("wolfAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
     }
 
+    /** 两种傀儡的元数据 index、属性、尺寸和裂纹阈值，按官方类分配。 */
+    private static void addGolemFacts(JsonObject out) throws ReflectiveOperationException {
+        Class<?> iron = net.minecraft.world.entity.animal.golem.IronGolem.class;
+        Class<?> snow = net.minecraft.world.entity.animal.golem.SnowGolem.class;
+        var ironAttributes = net.minecraft.world.entity.animal.golem.IronGolem.createAttributes().build();
+        var snowAttributes = net.minecraft.world.entity.animal.golem.SnowGolem.createAttributes().build();
+        var ironDimensions = net.minecraft.world.entity.EntityTypes.IRON_GOLEM.getDimensions();
+        var snowDimensions = net.minecraft.world.entity.EntityTypes.SNOW_GOLEM.getDimensions();
+        out.addProperty("ironGolemFlags", entityAccessor(iron, "DATA_FLAGS_ID").id());
+        out.addProperty("snowGolemPumpkin", entityAccessor(snow, "DATA_PUMPKIN_ID").id());
+        out.addProperty("ironGolemEyeHeight", ironDimensions.eyeHeight());
+        out.addProperty("snowGolemEyeHeight", snowDimensions.eyeHeight());
+        out.addProperty("ironGolemMaxHealth", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("ironGolemMovementSpeed", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("ironGolemKnockbackResistance", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.KNOCKBACK_RESISTANCE));
+        out.addProperty("ironGolemAttackDamage", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        out.addProperty("ironGolemStepHeight", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT));
+        out.addProperty("snowGolemMaxHealth", snowAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("snowGolemMovementSpeed", snowAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        // Crackiness.GOLEM 的三个私有阈值，按官方静态构造时的值。
+        Class<?> crackiness = net.minecraft.world.entity.Crackiness.class;
+        var golem = readField(crackiness, "GOLEM", null);
+        for (String[] field : new String[][] {
+                {"golemCrackinessLow", "fractionLow"}, {"golemCrackinessMedium", "fractionMedium"},
+                {"golemCrackinessHigh", "fractionHigh"}}) {
+            var member = crackiness.getDeclaredField(field[1]);
+            member.setAccessible(true);
+            out.addProperty(field[0], member.getFloat(golem));
+        }
+    }
+
     /** 任意类的私有 `EntityDataAccessor` 静态字段分到的 index。 */
     private static int accessorId(String owner, String name) throws ReflectiveOperationException {
         Field field = Class.forName(owner).getDeclaredField(name);
@@ -1413,6 +1466,8 @@ public final class Extractor {
         eyes.addProperty("SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.SPIDER.getDimensions().eyeHeight());
         eyes.addProperty("CAVE_SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.CAVE_SPIDER.getDimensions().eyeHeight());
         eyes.addProperty("ENDERMAN_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.ENDERMAN.getDimensions().eyeHeight());
+        eyes.addProperty("SILVERFISH_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.SILVERFISH.getDimensions().eyeHeight());
+        eyes.addProperty("ENDERMITE_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.ENDERMITE.getDimensions().eyeHeight());
         JsonObject out = new JsonObject();
         out.add("dataIds", ids);
         out.add("eyeHeights", eyes);
@@ -1901,6 +1956,15 @@ public final class Extractor {
                             .applyModifier(EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
                                     EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY.defaultValue()));
             biome.addProperty("creatureSpawnProbability", Integer.toUnsignedLong(Float.floatToRawIntBits(creatureProbability)));
+            // `SNOW_GOLEM_MELTS` 叠在主世界缺省值（false）上，得到这个群系的最终值。
+            // Overlay SNOW_GOLEM_MELTS on the overworld default (false).
+            boolean melts = biomeRegistry.getValue(name).getAttributes().applyModifier(
+                    EnvironmentAttributes.SNOW_GOLEM_MELTS,
+                    registries.lookupOrThrow(Registries.DIMENSION_TYPE)
+                            .getValue(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD)
+                            .attributes()
+                            .applyModifier(EnvironmentAttributes.SNOW_GOLEM_MELTS, false));
+            biome.addProperty("snowGolemMelt", melts);
             biomes.add(name.toString(), biome);
         }
         result.add("biomes", biomes);

@@ -789,12 +789,23 @@ pub(super) fn check_spawn_rules(
         // Phantoms register `Mob::checkMobSpawnRules`; they are in no biome table and
         // come from the `PhantomSpawner`.
         MobType::Phantom => valid_mob_spawn_block(world, kind, pos),
+        // 蠹虫和末影螨都不在群系刷怪表里：刷怪笼 / `/summon` / 刷怪蛋才生成。
+        // 官方 `checkSilverfishSpawnRules` / `checkEndermiteSpawnRules` 只在刷怪笼
+        // （`EntitySpawnReason.isSpawner`）或 5 格内没有玩家时允许，这里不给自然刷怪用。
+        //
+        // Neither silverfish nor endermites appear in biome spawn tables. The vanilla
+        // spawn rules only allow spawners or places with no player within five blocks;
+        // neither path goes through natural spawning here.
+        MobType::Silverfish | MobType::Endermite => valid_mob_spawn_block(world, kind, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)
                 && valid_mob_spawn_block(world, kind, pos)
                 && world.level().can_see_sky(pos)
         }
+        // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
+        // Neither golem is in a biome spawn table; only the shared rule remains.
+        MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),
     }
 }
 
@@ -1106,6 +1117,7 @@ mod tests {
             armor_cover: 0.0,
             main_hand: 0,
             off_hand: 0,
+            team: None,
             combat: Default::default(),
             effects: Default::default(),
         }

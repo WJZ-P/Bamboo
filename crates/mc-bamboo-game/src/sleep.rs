@@ -221,6 +221,13 @@ pub(crate) fn on_sleep_in_bed(
     }
     // `ServerLevel.updateSleepingPlayerList()` 在 `startSleepInBed` 末尾。
     update_sleeping_player_list(region);
+    // 睡眠成功后触发；放在玩家借用结束之后，避免和传送的可变借用冲突。
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:slept_in_bed",
+        serde_json::json!({"x": pos.x, "y": pos.y, "z": pos.z}),
+    );
 }
 
 /// `ServerLevel.updateSleepingPlayerList`：人数变了才发 `sleep.players_sleeping`。

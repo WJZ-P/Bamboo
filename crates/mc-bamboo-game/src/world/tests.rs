@@ -474,6 +474,7 @@ impl Harness {
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
             player_data: None,
+            player_advancements: None,
             sink: Box::new(sink.clone()),
             inbox: player_inbox,
         };
@@ -520,6 +521,7 @@ impl Harness {
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
             player_data,
+            player_advancements: None,
             sink: Box::new(sink.clone()),
             inbox: player_inbox,
         };
@@ -1038,6 +1040,9 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
         // then experience on the join tick because both snapshots are sentinels.
         clientbound::SET_HEALTH,
         clientbound::SET_EXPERIENCE,
+        // 官方 `ServerPlayer.doTick` 在进服这一刻发首包 `update_advancements`
+        // （`PlayerAdvancements.flushDirty`），夹在经验和区块批次之间。
+        clientbound::UPDATE_ADVANCEMENTS,
         clientbound::CHUNK_BATCH_START,
     ];
     expected.extend([clientbound::LEVEL_CHUNK_WITH_LIGHT; 9]);
@@ -2077,6 +2082,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         peer_ip: "127.0.0.1".to_owned(),
         online_at_login: 0,
         player_data: None,
+        player_advancements: None,
         sink: Box::new(sink),
         inbox: server.inbox.player_channel().1,
     };
@@ -2171,6 +2177,7 @@ fn rejoin_uses_in_flight_player_save_over_stale_disk() {
         peer_ip: "127.0.0.1".to_owned(),
         online_at_login: 0,
         player_data: Some(stale),
+        player_advancements: None,
         sink: Box::new(sink),
         inbox: server.inbox.player_channel().1,
     };
@@ -2309,6 +2316,74 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
             "a clean chunk must not be re-saved inside the cooldown"
         );
     }
+}
+
+/// `InhabitedTime` 的累加照官方不置脏（`incrementInhabitedTime` 不 `markUnsaved`）：
+/// 只累加的区块不写盘；之后改了方块再存，写进去的是累加后的值。
+#[test]
+fn inhabited_time_is_saved_only_with_another_change() {
+    use mc_bamboo_storage::{
+        anvil::{RegionCompression, RegionFile},
+        chunk_io::ChunkIo,
+        world_dir::WorldDir,
+    };
+
+    let tmp = D6TempDir::new("inhabited");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server
+        .world
+        .master
+        .host
+        .set_io(ChunkIo::open(&dir).unwrap());
+    server.world.islands.region.chunks.finish_light_updates();
+    // 先把加载时已经脏的区块存掉，从干净的状态开始。
+    server
+        .world
+        .master
+        .host
+        .snapshot_all_dirty(&mut server.world.islands.all_mut(), 1);
+    server.world.master.host.flush_io();
+    let _ = written_chunks(&server.world.master.host);
+
+    for _ in 0..5 {
+        server
+            .world
+            .islands
+            .region
+            .chunks
+            .increment_inhabited_time(pos);
+    }
+    server
+        .world
+        .master
+        .host
+        .snapshot_all_dirty(&mut server.world.islands.all_mut(), 2);
+    server.world.master.host.flush_io();
+    assert!(
+        !written_chunks(&server.world.master.host).contains(&pos),
+        "只累加 InhabitedTime 的区块不写盘"
+    );
+
+    server.set_block(BlockPos::new(3, -60, 3), blocks::STONE);
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.chunks.finish_light_updates();
+    server
+        .world
+        .master
+        .host
+        .snapshot_all_dirty(&mut server.world.islands.all_mut(), 3);
+    server.world.master.host.flush_io();
+    assert!(written_chunks(&server.world.master.host).contains(&pos));
+    let path = dir.region_dir().join("r.0.0.mca");
+    let mut region =
+        RegionFile::open(&path, dir.region_dir(), RegionCompression::Zlib).expect("区域文件能打开");
+    let bytes = region.read(pos, 32 << 20).unwrap().expect("区块在盘上");
+    let decoded = mc_bamboo_storage::chunk_nbt::decode_bytes(&bytes).expect("官方格式能解");
+    assert_eq!(decoded.inhabited_time, 5, "存进去的是累加后的值");
 }
 
 /// `save-off` 期间匀速保存整个停掉。

@@ -243,6 +243,8 @@ pub(crate) struct Player {
     ///
     /// Riding state: the vehicle and the positions its movement is checked against.
     pub(crate) riding: crate::riding::Riding,
+    /// 官方 `ServerPlayer.getAdvancements()` 的可变状态，跟着玩家在岛之间搬动。
+    pub(crate) advancements: crate::advancements::PlayerAdvancements,
 }
 
 impl Player {
@@ -321,6 +323,7 @@ impl Player {
             combat_memory: Default::default(),
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
+            advancements: crate::advancements::PlayerAdvancements::default(),
         }
     }
 
@@ -482,10 +485,23 @@ impl Player {
             armor_cover: self.armor_cover(),
             main_hand: if main.is_empty() { 0 } else { main.item },
             off_hand: if off.is_empty() { 0 } else { off.item },
+            team: None,
             yaw: self.yaw,
             pitch: self.pitch,
             combat: self.combat_memory.view(self.entity_ticks),
             effects: mc_bamboo_blocks::entity::ctx::TargetEffects::from_map(&self.effects),
+        }
+    }
+
+    /// [`view`](Self::view) 加上按名字查到的队伍。
+    pub(crate) fn view_in(
+        &self,
+        id: PlayerId,
+        board: &crate::scoreboard::Scoreboard,
+    ) -> PlayerView {
+        PlayerView {
+            team: board.team_index_of(&self.name),
+            ..self.view(id)
         }
     }
 
@@ -516,10 +532,11 @@ impl Player {
 /// leaves remove.
 pub(crate) fn player_views(
     players: &std::collections::BTreeMap<PlayerId, Player>,
+    board: &crate::scoreboard::Scoreboard,
 ) -> Vec<PlayerView> {
     players
         .iter()
-        .map(|(id, player)| player.view(*id))
+        .map(|(id, player)| player.view_in(*id, board))
         .collect()
 }
 

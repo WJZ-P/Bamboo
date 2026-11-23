@@ -49,6 +49,8 @@ pub(crate) struct ReadOnlyWorld<'a> {
     /// This island's players, copied in join order at the start of the
     /// compute phase.
     pub(crate) players: Vec<PlayerView>,
+    /// 计分板，生物按 UUID 查自己的队伍。
+    pub(crate) scoreboard: &'a crate::scoreboard::Scoreboard,
 }
 
 impl BlockSource for ReadOnlyWorld<'_> {
@@ -76,8 +78,12 @@ impl BlockSource for ReadOnlyWorld<'_> {
         self.shulker_box_shapes.get(&pos).copied()
     }
 
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.scoreboard.entity_team_index(uuid)
+    }
+
     fn inhabited_time(&self, chunk: ChunkPos) -> i64 {
-        self.chunks.chunk(chunk).archive().inhabited_time
+        self.chunks.inhabited_time(chunk)
     }
 
     fn section_has_collision(&self, section_x: i32, section_y: i32, section_z: i32) -> bool {
@@ -109,6 +115,13 @@ impl BlockSource for ReadOnlyWorld<'_> {
         self.chunks
             .heightmap_y(pos)
             .unwrap_or(mc_bamboo_world::MIN_Y - 1)
+    }
+
+    fn snow_golem_melts(&self, pos: BlockPos) -> bool {
+        mc_bamboo_data::spawning::SNOW_GOLEM_MELTS
+            .get(self.chunks.biome_at(pos).unwrap_or(0) as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn precipitation_facts(&self, pos: BlockPos) -> mc_bamboo_blocks::PrecipitationFacts {

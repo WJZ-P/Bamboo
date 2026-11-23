@@ -117,6 +117,14 @@ pub trait BlockView {
     /// The players, in `ServerLevel.players()` order. Default: none.
     fn for_each_player(&self, _visit: &mut dyn FnMut(&PlayerView)) {}
 
+    /// 一个实体（按 UUID 找它的计分板名字）所在的队伍，和 [`PlayerView::team`]
+    /// 用同一套下标。默认谁都不在队伍里。
+    ///
+    /// The team of an entity looked up by UUID, indexed like [`PlayerView::team`].
+    fn entity_team(&self, _uuid: &[u8; 16]) -> Option<u32> {
+        None
+    }
+
     /// `getSkyDarken()`：昼夜和天气让天空光暗了多少。
     fn sky_darken(&self) -> i32 {
         0
@@ -176,6 +184,36 @@ pub trait BlockView {
     /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
     fn is_thundering(&self) -> bool {
         false
+    }
+
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`：热群系和下界为真。
+    /// 没有群系表的视图按主世界缺省（假）。
+    ///
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`: true in hot biomes and the Nether.
+    /// Views without biome data use the overworld default (false).
+    fn snow_golem_melts(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `SnowLayerBlock.canSurvive`：脚下不能托住一层雪时返回假。
+    /// 默认按方块表里的碰撞形状判断，带动态方块实体的视图可覆盖。
+    ///
+    /// `SnowLayerBlock.canSurvive`: false when the block below cannot support
+    /// a snow layer. The default reads the generated collision shape table.
+    fn snow_layer_can_survive(&self, pos: BlockPos) -> bool {
+        use mc_bamboo_core::Direction;
+        let below_pos = pos.below();
+        let below = self.block_state(below_pos);
+        if below.is_tagged(mc_bamboo_data::tags::block_tags::CANNOT_SUPPORT_SNOW_LAYER) {
+            return false;
+        }
+        if below.is_tagged(mc_bamboo_data::tags::block_tags::SUPPORT_OVERRIDE_SNOW_LAYER) {
+            return true;
+        }
+        let boxes =
+            crate::shape::collision_boxes(below, below_pos, crate::shape::CollisionContext::Empty);
+        crate::shape::is_face_full(&boxes, Direction::Up)
+            || below.is(mc_bamboo_data::blocks::SNOW) && below.get(crate::state::LAYERS) == 8
     }
 
     /// `Level.isBrightOutside()`：主世界没有固定时间，天色暗于 4 才算夜里。
@@ -301,6 +339,9 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 所在队伍（`getTeam()`）在计分板队伍表里的下标，同一刻的快照里一队一个值；
+    /// 不在队伍里是 `None`。只用来判断和生物是不是同队。
+    pub team: Option<u32>,
     /// 朝向，骑乘时用作骑手的朝向（`AbstractHorse.getRiddenRotation`）。
     ///
     /// The facing, used as the rider's rotation while riding
@@ -460,6 +501,10 @@ impl BlockView for World<'_> {
         self.level().for_each_player(visit);
     }
 
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.level().entity_team(uuid)
+    }
+
     fn sky_darken(&self) -> i32 {
         self.level().sky_darken()
     }
@@ -478,11 +523,15 @@ impl BlockView for World<'_> {
     }
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {
-        World::is_raining_at(self, pos)
+        self.level().is_raining_at(pos)
     }
 
     fn is_thundering(&self) -> bool {
         World::is_thundering(self)
+    }
+
+    fn snow_golem_melts(&self, pos: BlockPos) -> bool {
+        self.level().snow_golem_melts(pos)
     }
 
     fn is_bright_outside(&self) -> bool {
@@ -687,6 +736,25 @@ pub enum Command {
     EggImpact {
         hit: super::thrown_egg::EggHit,
     },
+    /// 玩家 / 雪傀儡 / 发射器扔出的一枚 `ThrowableItemProjectile`。
+    ///
+    /// A `ThrowableItemProjectile` thrown by a player, snow golem or dispenser.
+    ThrowThrowable {
+        shot: Box<super::thrown_egg::EggShot>,
+    },
+    /// 铁傀儡命中后把目标抛起来：`setDeltaMovement(add(0, 0.4 * (1 - resistance), 0))`。
+    ///
+    /// An iron golem's hit lifts the target by `0.4 * (1 - knockback resistance)`.
+    LiftMob {
+        target: EntityUid,
+        lift: f64,
+    },
+    /// 雪傀儡脚下四角铺一层雪。
+    ///
+    /// A snow golem places a snow layer at the four cells under its feet.
+    PlaceSnowTrail {
+        cells: Vec<BlockPos>,
+    },
     /// 扔出的药水这一刻撞到东西：`AbstractThrownPotion.onHit`。
     ///
     /// The splash potion hit something this tick: `AbstractThrownPotion.onHit`.
@@ -875,15 +943,47 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         eggs: i32,
     },
+    /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
+    /// 门上裂纹，`progress` 为 -1 时清掉。
+    DestroyProgress {
+        pos: mc_bamboo_core::BlockPos,
+        progress: i32,
+    },
+    /// `BreakDoorGoal.tick` 到点：`removeBlock(pos, false)`，再 `levelEvent(1021)`
+    /// 和 `levelEvent(2001, 拆完以后这一格的状态)`。
+    BreakDoor {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
+    RemoveMobBlock {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// 兔子吃掉一龄胡萝卜作物。
     ///
     /// A rabbit removes one growth stage from a carrot crop.
     RabbitEatCarrots {
         pos: mc_bamboo_core::BlockPos,
     },
-    RemoveMobBlock {
+    /// `SilverfishWakeUpFriendsGoal`：`Level.destroyBlock(pos, true, silverfish)`。
+    /// 破坏虫蚀方块会再走 `spawnAfterBreak`，也就是又生成一只蠹虫。
+    ///
+    /// `SilverfishWakeUpFriendsGoal`'s griefing branch: destroying an infested
+    /// block runs `spawnAfterBreak` and spawns another silverfish.
+    SilverfishBreak {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `mobGriefing` 关掉时 `setBlockAndUpdate(pos, hostStateByInfested(state))`。
+    ///
+    /// With `mobGriefing` off, replace the infested block by its host state.
+    SilverfishReveal {
+        pos: mc_bamboo_core::BlockPos,
+        host: crate::BlockState,
+    },
+    /// `SilverfishMergeWithStoneGoal.start`：把宿主方块变成虫蚀方块，蠹虫消失。
+    ///
+    /// `SilverfishMergeWithStoneGoal.start`: infest the host block and remove the mob.
+    SilverfishMerge {
         pos: mc_bamboo_core::BlockPos,
     },
     /// `Fox.pickUpItem` 的世界一侧：多出来的放回地上，原来叼着的吐出去，捡起的那件消失。
@@ -1126,6 +1226,21 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ShootLlamaSpit(shot) => super::spit::spawn(world, me.id, shot),
         Command::SpitHit(hit) => super::spit::hit_entity(me, world, hit),
         Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
+        Command::ThrowThrowable { shot } => {
+            world.spawn_egg_shot(&shot);
+        }
+        Command::LiftMob { target, lift } => {
+            world.with_entity_mut(target, &mut |entity| {
+                entity.delta = entity.delta.add(mc_bamboo_core::Vec3::new(0.0, lift, 0.0));
+                entity.with_mob(|_, mob| mob.hurt_marked = true);
+            });
+        }
+        Command::PlaceSnowTrail { cells } => {
+            let snow = crate::BlockState(mc_bamboo_data::blocks::SNOW);
+            for pos in cells {
+                world.set_block_and_update(pos, snow);
+            }
+        }
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);
@@ -1258,8 +1373,44 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::mob::fox::apply_pick_berries(world, pos, age, took_one)
         }
         Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
+        Command::DestroyProgress { pos, progress } => {
+            world.push_effect(crate::Effect::DestroyProgress {
+                breaker: me.id,
+                pos,
+                progress,
+            });
+        }
+        Command::BreakDoor { pos } => {
+            let _ = world.remove_block(pos);
+            for (event, data) in [(1021, 0), (2001, world.block_state(pos).0 as i32)] {
+                world.push_effect(crate::Effect::LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    except_initiator: false,
+                });
+            }
+        }
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::SilverfishBreak { pos } => {
+            let _ = world.destroy_block(pos, true, crate::world::UPDATE_LIMIT);
+        }
+        Command::SilverfishReveal { pos, host } => {
+            let _ = world.set_block_and_update(pos, host);
+        }
+        Command::SilverfishMerge { pos } => {
+            let state = world.block_state(pos);
+            if let Some(infested) = super::mob::infested::infested_state_by_host(state) {
+                let _ = world.set_block_and_update(pos, infested);
+                // `PathfinderMob.spawnAnim` 发实体事件 20，然后 `discard()`。
+                if let Some(mob) = me.kind.mob_mut() {
+                    mob.events
+                        .push(super::mob::MobEvent::EntityEvent { event: 20 });
+                }
+                me.discard();
+            }
         }
         Command::SetBrainMemory {
             target,

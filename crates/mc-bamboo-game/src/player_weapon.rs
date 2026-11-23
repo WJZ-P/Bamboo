@@ -311,6 +311,13 @@ fn release_bow(region: &mut Region, id: PlayerId, hand: Hand, power: f32) {
 ///
 /// `CrossbowItem.performShooting`: fires the charged projectiles one by one.
 fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
+    // 官方 `ShotCrossbowTrigger` 在弩射出时触发，条件里的 `item` 是弩本身。
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:shot_crossbow",
+        serde_json::json!({"item": "minecraft:crossbow"}),
+    );
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
@@ -428,9 +435,21 @@ fn prepare_shot(
 }
 
 fn spawn_arrow(region: &mut Region, shot: ArrowShot) {
-    let (mut level, ticks) = region.block_level();
-    let mut world = World::new(&mut level, ticks);
-    world.spawn_arrow_shot(shot);
+    let shooter = shot.owner.map(crate::inbound::PlayerId);
+    {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        world.spawn_arrow_shot(shot);
+    }
+    if let Some(shooter) = shooter {
+        // 官方 `UsingItemTrigger`：玩家正在用弓 / 弩时每刻触发，箭射出这一刻也报一次。
+        crate::advancement_triggers::record(
+            region,
+            shooter,
+            "minecraft:using_item",
+            serde_json::json!({"item": "minecraft:bow"}),
+        );
+    }
 }
 
 /// 找到这份武器能用的弹药：副手、主手，再按 `Inventory` 下标扫背包。

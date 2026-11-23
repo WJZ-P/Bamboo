@@ -87,6 +87,7 @@ pub(super) fn player_view(uid: i32, [x, y, z]: [f64; 3]) -> PlayerView {
         armor_cover: 0.0,
         main_hand: 0,
         off_hand: 0,
+        team: None,
         combat: Default::default(),
         effects: Default::default(),
     }
@@ -118,6 +119,10 @@ impl BatCase {
                 Vec::new()
             },
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
         }

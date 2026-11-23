@@ -17,9 +17,40 @@ use super::mob::{CowVariant, DamageKind, DamageSource, MobType};
 use super::{Entity, EntityKind, EntityUid, KindPublic};
 use crate::World;
 
+/// `ThrowableItemProjectile` 的具体种类。
+///
+/// 鸡蛋、雪球、末影珍珠和附魔之瓶共用这里的飞行、同步和存档结构，只有 `onHit*`
+/// 的效果不同；以后那几种也接到这里，不再各起一套。
+///
+/// The concrete kind of a vanilla `ThrowableItemProjectile`. Eggs, snowballs,
+/// ender pearls and experience bottles share this flight, sync and archive
+/// structure; only `onHit*` differs. Future throwables plug in here too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThrowableKind {
+    #[default]
+    Egg,
+    Snowball,
+}
+
+impl ThrowableKind {
+    /// `add_entity` / 存档里的官方实体类型 ID。
+    pub const fn entity_type(self) -> i32 {
+        match self {
+            Self::Egg => mc_bamboo_data::registries::entity_type::EGG,
+            Self::Snowball => mc_bamboo_data::registries::entity_type::SNOWBALL,
+        }
+    }
+}
+
 /// `ThrownEgg` 自己的字段，加上 `Projectile` 里的主人和标志。
 ///
+/// 结构对应官方 `ThrowableItemProjectile`；`kind` 选 `onHit*` 的具体子类。
+/// 鸡蛋原来的行为在 [`ThrowableKind::Egg`] 下逐位不变。
+///
 /// The `ThrownEgg` fields plus the owner and flags from `Projectile`.
+/// The structure models vanilla `ThrowableItemProjectile`; `kind` picks the
+/// `onHit*` subclass. Eggs keep their exact old behaviour under
+/// [`ThrowableKind::Egg`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThrownEgg {
     pub uuid: [u8; 16],
@@ -29,6 +60,7 @@ pub struct ThrownEgg {
     ///
     /// `DATA_ITEM_STACK`: `setItem` stores a copy with count 1.
     pub item: ItemStack,
+    pub kind: ThrowableKind,
     pub x_rot: f32,
     pub no_gravity: bool,
     pub left_owner: bool,
@@ -42,13 +74,19 @@ pub struct ThrownEgg {
 }
 
 impl ThrownEgg {
-    /// `ThrowableItemProjectile.setItem(stack)`。
+    /// `ThrowableItemProjectile.setItem(stack)`。鸡蛋是缺省种类。
     pub fn new(stack: &ItemStack) -> Self {
+        Self::with_kind(stack, ThrowableKind::Egg)
+    }
+
+    /// 按投掷物子类构造；`EggShot::projectile` 决定是哪一种。
+    pub fn with_kind(stack: &ItemStack, kind: ThrowableKind) -> Self {
         Self {
             uuid: [0; 16],
             owner: None,
             owner_uuid: None,
             item: crate::container::copy_with_count(stack, 1),
+            kind,
             x_rot: 0.0,
             no_gravity: false,
             left_owner: false,
@@ -72,6 +110,7 @@ impl ThrownEgg {
             owner: self.owner,
             x_rot: self.x_rot,
             item: self.item.clone(),
+            kind: self.kind,
             on_fire: remaining_fire_ticks > 0,
             no_gravity: self.no_gravity,
             needs_sync: self.needs_sync,
@@ -89,6 +128,8 @@ pub struct EggPublic {
     pub owner: Option<EntityUid>,
     pub x_rot: f32,
     pub item: ItemStack,
+    /// `ThrowableItemProjectile` 的子类。
+    pub kind: ThrowableKind,
     pub on_fire: bool,
     pub no_gravity: bool,
     pub needs_sync: bool,
@@ -99,12 +140,14 @@ pub struct EggPublic {
 ///
 /// One throw's inputs, shared by the player's `EggItem.use` and the dispenser's
 /// `ProjectileDispenseBehavior`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EggShot {
     pub position: Vec3,
     pub direction: Vec3,
     pub power: f32,
     pub uncertainty: f32,
+    /// `ThrowableItemProjectile` 的子类；缺省鸡蛋。
+    pub projectile: ThrowableKind,
     /// `shootFromRotation` 叠加的射手已知位移；发射器为 `None`。
     ///
     /// The shooter's known movement added by `shootFromRotation`; `None` for a dispenser.
@@ -119,7 +162,7 @@ impl Entity {
     ///
     /// `new ThrownEgg(level, x, y, z, stack)` plus the owner.
     pub fn thrown_egg(shot: &EggShot) -> Self {
-        let mut egg = ThrownEgg::new(&shot.item);
+        let mut egg = ThrownEgg::with_kind(&shot.item, shot.projectile);
         egg.owner = shot.owner;
         egg.owner_uuid = shot.owner_uuid;
         Self::new(EntityKind::Egg(Box::new(egg)), shot.position)
@@ -385,11 +428,25 @@ fn base_tick(me: &mut Entity, blocks: &dyn BlockView) {
     }
 }
 
-/// `ThrownEgg.onHit`：先 `onHitEntity` 打 0 点伤害，再用鸡蛋自己的随机源决定孵几只。
+/// `ThrowableItemProjectile.onHit`：鸡蛋先打 0 点伤害再按自己的随机源孵小鸡；
+/// 雪球对烈焰人一类打 3 点、其余打 0 点，不取随机数。两者都广播事件 3 后消失。
 ///
-/// `ThrownEgg.onHit`: `onHitEntity` deals 0 damage first, then the egg's own random
-/// decides how many chicks hatch.
+/// `ThrowableItemProjectile.onHit`: eggs deal 0 damage then roll for chicks;
+/// snowballs deal 3 to blaze-like mobs and 0 otherwise without a random draw.
+/// Both broadcast entity event 3 and disappear.
 pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
+    let kind = match &me.kind {
+        EntityKind::Egg(egg) => egg.kind,
+        _ => ThrowableKind::Egg,
+    };
+    if kind == ThrowableKind::Snowball {
+        snowball_impact(me, world, hit);
+        if let EntityKind::Egg(egg) = &mut me.kind {
+            egg.cracked = true;
+        }
+        me.removed = true;
+        return;
+    }
     match hit.target {
         EggTarget::Mob(uid) => {
             world.hurt_mob(uid, damage_source(me, world), 0.0);
@@ -419,6 +476,41 @@ pub(super) fn impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
         egg.cracked = true;
     }
     me.removed = true;
+}
+
+/// `Snowball.onHitEntity`：`hurt(thrown(this, owner), blaze ? 3 : 0)`。
+/// 官方只对 `Blaze` 实例给 3 点，别的实体（含玩家）照样走 0 点受伤链路。
+///
+/// `Snowball.onHitEntity`: `hurt(thrown(this, owner), blaze ? 3 : 0)`.
+/// Only a `Blaze` instance takes 3; every other entity still goes through the
+/// 0-damage hurt path.
+fn snowball_impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
+    let (target, amount) = match hit.target {
+        EggTarget::Mob(uid) => {
+            let blaze = world
+                .level()
+                .entity_public(uid)
+                .is_some_and(|public| {
+                    matches!(&public.kind, KindPublic::Mob(mob)
+                        if mob.mob_type.entity_type() == mc_bamboo_data::registries::entity_type::BLAZE)
+                });
+            (Some((uid, false)), if blaze { 3.0 } else { 0.0 })
+        }
+        EggTarget::Player(uid) => (Some((uid, true)), 0.0),
+        EggTarget::Block | EggTarget::Other => (None, 0.0),
+    };
+    let Some((uid, is_player)) = target else {
+        return;
+    };
+    let source = damage_source(me, world);
+    if is_player {
+        let owner = source
+            .attacker
+            .and_then(|uid| world.level().entity_public(uid));
+        world.hurt_player_from_mob(uid, source, amount, owner.as_ref());
+    } else {
+        world.hurt_mob(uid, source, amount);
+    }
 }
 
 /// `damageSources().thrown(this, getOwner())`：没有主人时造成者为空，直接实体是蛋。

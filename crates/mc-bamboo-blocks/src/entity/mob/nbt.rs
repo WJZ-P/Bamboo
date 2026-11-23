@@ -373,6 +373,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Bat {
         put(&mut out, "BatFlags", Tag::Byte(mob.bat.flags as i8));
     }
+    // ---- Endermite.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Endermite {
+        put(&mut out, "Lifetime", Tag::Int(mob.endermite.life));
+    }
     // ---- Turtle.addAdditionalSaveData ----
     if mob.mob_type == MobType::Turtle {
         put(&mut out, "home_pos", block_pos_tag(mob.turtle.home_pos));
@@ -403,6 +407,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     }
     if mob.mob_type == MobType::Wolf {
         write_wolf(&mut out, mob);
+    }
+    if mob.mob_type == MobType::IronGolem {
+        super::iron_golem::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::SnowGolem {
+        super::snow_golem::write_nbt(mob, &mut out);
     }
     // ---- Sheep / Chicken ----
     if mob.mob_type == MobType::Sheep {
@@ -760,6 +770,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Bat {
             mob.bat.flags = tag::byte_or(tag, "BatFlags", 0) as u8;
         }
+        if mob.mob_type == MobType::Endermite {
+            mob.endermite.life = tag::int_or(tag, "Lifetime", 0);
+        }
         if mob.mob_type == MobType::Phantom {
             let pos = tag::int_array(tag, "anchor_pos");
             mob.phantom.anchor = (pos.len() == 3).then(|| BlockPos::new(pos[0], pos[1], pos[2]));
@@ -837,6 +850,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Parrot {
             super::parrot::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::IronGolem {
+            super::iron_golem::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::SnowGolem {
+            super::snow_golem::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Chicken {
             // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。

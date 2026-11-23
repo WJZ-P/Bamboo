@@ -65,6 +65,7 @@ pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents, Chun
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::{click_if_empty, dispense_from};
+pub use entity::mob::infested::spawn_after_break;
 pub use entity::{
     ChunkEntities, EntityIds, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
     KindPublic, KindState,
@@ -85,6 +86,7 @@ pub use level::{
     ArchiveRedstone, BedProblem, ChunkRedstone, Effect, EntityTables, LecternFacts, Level,
     LevelEntities, LevelSideState, LevelTables, Observation, PlayerDeathDrops, PlayerHurtNow,
     RedstoneEntry, RedstoneMemory, Trigger, custom_sound_name, intern_custom_sound,
+    monster_prevents_rest_in,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};

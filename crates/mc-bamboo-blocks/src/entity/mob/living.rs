@@ -78,6 +78,14 @@ pub(crate) fn with_mob<R>(
 
 fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
     timing::span!(Other);
+    // `Silverfish.tick` / `Endermite.tick` 在 `super.tick()` 之前把身体朝向设成头朝向。
+    // `Silverfish.tick` / `Endermite.tick` set the body rotation before `super.tick()`.
+    if matches!(
+        mob.mob_type,
+        super::MobType::Silverfish | super::MobType::Endermite
+    ) {
+        mob.y_body_rot = me.y_rot;
+    }
     check_despawn(me, mob, ctx);
     if me.removed {
         return;
@@ -490,7 +498,15 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`。
     // 冲刺且不在水/岩浆里、不潜行、活着时，脚下方块可见就消耗两次 `nextDouble`（粒子位置）。
     // While sprinting out of water/lava, uncrouched and alive, a visible block below draws two `nextDouble`s.
-    if mob.sprinting
+    // `IronGolem.canSpawnSprintParticle()` 完全覆写缺省实现：不看疾跑 / 潜行 / 水，
+    // 只看水平速度的平方和一次 `nextInt(5)`。
+    if mob.mob_type == super::MobType::IronGolem {
+        if me.delta.x * me.delta.x + me.delta.z * me.delta.z > 2.500_000_277_905_201e-7
+            && me.random.next_int_bounded(5) == 0
+        {
+            spawn_sprint_particle(me, ctx.blocks());
+        }
+    } else if mob.sprinting
         && !me.in_water
         && !mob.ocelot.crouching
         && !mob.cat.crouching
@@ -1072,6 +1088,19 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
         super::enderman::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx, plan);
+    // 铁傀儡与雪傀儡的 `aiStep` 先跑 `super.aiStep()`，再跑自己的那一段。
+    // Golem `aiStep` overrides run their own part after `super.aiStep()`.
+    if mob.mob_type == super::MobType::IronGolem {
+        super::iron_golem::ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::SnowGolem {
+        super::snow_golem::ai_step(me, mob, ctx);
+    }
+    // `Endermite.aiStep` 在 `super.aiStep()` 之后推进寿命。
+    // `Endermite.aiStep` advances its lifetime after `super.aiStep()`.
+    if mob.mob_type == super::MobType::Endermite {
+        super::endermite::ai_step(me, mob);
+    }
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
     }
@@ -1245,6 +1274,48 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     {
         timing::span!(Push);
         push_entities(me, mob, ctx);
+    }
+    // `LivingEntity.aiStep` 尾部：`isSensitiveToWater && isInWaterOrRain` 每刻 1 点溺水伤害。
+    // Tail of `LivingEntity.aiStep`: `isSensitiveToWater && isInWaterOrRain` deals
+    // one drown damage per tick.
+    if mob.mob_type == super::MobType::SnowGolem {
+        let blocks = ctx.blocks();
+        let feet = me.block_position();
+        let eye_top = BlockPos::containing(Vec3::new(
+            me.position.x,
+            me.bounding_box().max_y,
+            me.position.z,
+        ));
+        if me.in_water || blocks.is_raining_at(feet) || blocks.is_raining_at(eye_top) {
+            hurt_server(
+                me,
+                mob,
+                ctx,
+                DamageSource::environment(DamageKind::Drown),
+                1.0,
+            );
+        }
+    }
+    // `LivingEntity.aiStep` 尾部：`isSensitiveToWater && isInWaterOrRain` 每刻 1 点溺水伤害。
+    // Tail of `LivingEntity.aiStep`: `isSensitiveToWater && isInWaterOrRain` deals
+    // one drown damage per tick.
+    if mob.mob_type == super::MobType::SnowGolem {
+        let blocks = ctx.blocks();
+        let feet = me.block_position();
+        let eye_top = BlockPos::containing(Vec3::new(
+            me.position.x,
+            me.bounding_box().max_y,
+            me.position.z,
+        ));
+        if me.in_water || blocks.is_raining_at(feet) || blocks.is_raining_at(eye_top) {
+            hurt_server(
+                me,
+                mob,
+                ctx,
+                DamageSource::environment(DamageKind::Drown),
+                1.0,
+            );
+        }
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::hurt_if_wet(me, mob, ctx);
@@ -2223,6 +2294,11 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     };
     let bounds = me.bounding_box();
     let mut others = Vec::new();
+    // `IronGolem.doPush` 要看被推的是不是敌对生物，只有铁傀儡才记下对方的公开状态。
+    // `IronGolem.doPush` checks whether the pushed mob is an enemy, so only iron golems
+    // keep the other mob's public state.
+    let iron_golem = mob.mob_type == super::MobType::IronGolem;
+    let mut golem_pushed = Vec::new();
     // 上限下推到查询里：够数就停止枚举，塔场景不必把几百个候选全排一遍。
     ctx.pushable_others(bounds, remaining, &mut |other| {
         if let KindPublic::Mob(public) = &other.kind
@@ -2231,6 +2307,9 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && public.mob_type.is_pushable()
         {
             others.push((other.uid, other.position));
+            if iron_golem {
+                golem_pushed.push((other.uid, public.as_ref().clone()));
+            }
             return true;
         }
         false
@@ -2296,6 +2375,14 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks()) && !mob.is_vehicle();
     // 玩家排在生物后面（官方先实体后玩家）；上限只保留前面的名额。
     let mut handled = 0;
+    // `IronGolem.doPush` 在挤压伤害那次取数之后、逐个推开时取 `nextInt(20)`；
+    // 只算上限以内真正被推到的生物，上限关着时就是全部。
+    // `IronGolem.doPush` draws `nextInt(20)` after the cramming roll, once per pushed
+    // mob; with the cap only the mobs within it count, all of them when it is off.
+    let golem_limit = remaining.saturating_sub(players.len().min(remaining));
+    for (uid, public) in golem_pushed.iter().take(golem_limit) {
+        super::iron_golem::do_push(me, mob, public, *uid);
+    }
     for position in players {
         if handled >= remaining {
             break;
@@ -2401,6 +2488,14 @@ pub(crate) fn hurt_server(
     } else {
         amount
     };
+    if mob.mob_type == super::MobType::IronGolem {
+        return super::iron_golem::hurt_server(me, mob, ctx, source, amount);
+    }
+    // `Silverfish.hurtServer`：无敌判定之后先唤醒附近虫蚀方块里的同伴。
+    // `Silverfish.hurtServer`: after the invulnerability check, wake nearby friends.
+    if mob.mob_type == super::MobType::Silverfish && !is_invulnerable_to(me, mob, &source) {
+        super::silverfish::notify_hurt(mob, &source);
+    }
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }
@@ -2707,6 +2802,27 @@ pub(crate) fn do_hurt_target(
                     me,
                 );
             }
+        }
+        // `Husk.doHurtTarget`：打中了、空手时给 `HUNGER`，时长 `140 * (int) f`。
+        // `LivingEntity.addEffect(new MobEffectInstance(effect, duration), mob)`：
+        // 等级 0、缺省标志，走和洞穴蜘蛛中毒同一个命令。
+        if hurt
+            && mob.mob_type == super::MobType::Husk
+            && mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                .is_empty()
+        {
+            let difficulty = ctx.blocks().effective_difficulty(me.block_position());
+            ctx.emit(
+                Command::AddPlayerEffect {
+                    target,
+                    effect: mc_bamboo_data::registries::mob_effect::HUNGER,
+                    duration: 140 * difficulty as i32,
+                    amplifier: 0,
+                },
+                me,
+            );
         }
         // `Mob.playAttackSound` 的熊猫版本：咬中才响。
         // The panda `Mob.playAttackSound`: only on a hit.

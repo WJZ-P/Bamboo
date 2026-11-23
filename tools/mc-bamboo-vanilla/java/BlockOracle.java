@@ -161,6 +161,7 @@ import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.ExplosionDamageCalculator;
+import net.minecraft.world.level.ServerExplosion;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
@@ -759,7 +760,8 @@ public final class BlockOracle {
         FLOW("flow"),
         ITEM("item"),
         RANDOM("random"),
-        CHUNK("chunk");
+        CHUNK("chunk"),
+        EXPLODE("explode");
 
         private final String label;
 
@@ -3201,9 +3203,10 @@ public final class BlockOracle {
                 case ITEM -> buildItem(c, random);
                 case RANDOM -> buildRandom(c, random);
                 case CHUNK -> buildChunk(c, random);
+                case EXPLODE -> buildExplode(c);
             };
             // flow 和 item 题考的是流体和物品本身，不加红石电路，也不额外 settle。
-            if (kind != Kind.FLOW && kind != Kind.ITEM) {
+            if (kind != Kind.FLOW && kind != Kind.ITEM && kind != Kind.EXPLODE) {
                 addCircuit(c, random, focus);
                 if (c.settle == 0) {
                     c.settle = pickSettle(c, random);
@@ -3253,6 +3256,46 @@ public final class BlockOracle {
          * <p>随机题里活塞旁边不一定有信号，走得完整个动画的很少，所以单独出这几道。id 从 base 开始，
          * {@code --case} 也能单独重现。
          */
+        /** 三种傀儡图案：雪、铁、被挡住腿的铁，还有铜块。 */
+        List<Case> golemCases(int base) {
+            BlockPos top = new BlockPos(0, 64, 0);
+            BlockPos body = top.below();
+            List<Scenario> scenarios = List.of(
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.SNOW_BLOCK.defaultBlockState());
+                        c.put(body.below(), Blocks.SNOW_BLOCK.defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.west(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.east(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.below(), Blocks.IRON_BLOCK.defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.west(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.east(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.below(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.below().west(), Blocks.STONE.defaultBlockState());
+                        c.put(body.below().east(), Blocks.STONE.defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.COPPER_BLOCK.weathering().unaffected().defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }));
+            List<Case> cases = new ArrayList<>();
+            for (Scenario scenario : scenarios) {
+                Case c = new Case(base + cases.size(), scenario.kind(),
+                        new Subject(scenario.subject(), scenario.item()), height);
+                scenario.setup().accept(c);
+                cases.add(c);
+            }
+            return cases;
+        }
+
         List<Case> pistonCases(int base) {
             List<Scenario> scenarios = List.of(
                     new Scenario(Kind.PLACE, Blocks.PISTON, Items.REDSTONE_BLOCK, c -> {
@@ -3581,6 +3624,22 @@ public final class BlockOracle {
                     c.actor = new Vec3(4.5, 70.0, 4.5);
                     cases.add(c);
                 }
+            }
+            return cases;
+        }
+
+        /** 爆炸炸掉虫蚀方块的固定题：直接跑 ServerExplosion，不走 FakeLevel.explode（那条路 skip）。 */
+        private List<Case> explodeCases(int base) {
+            List<Case> cases = new ArrayList<>();
+            BlockPos origin = new BlockPos(0, 64, 0);
+            for (Block host : List.of(Blocks.INFESTED_STONE, Blocks.INFESTED_STONE_BRICKS, Blocks.INFESTED_DEEPSLATE)) {
+                Case c = new Case(base + cases.size(), Kind.EXPLODE, new Subject(host, null), height);
+                c.put(origin, host.defaultBlockState());
+                c.put(origin.above(), Blocks.STONE.defaultBlockState());
+                c.put(origin.below(), Blocks.STONE.defaultBlockState());
+                c.target = origin;
+                c.actor = new Vec3(4.5, 70.0, 4.5);
+                cases.add(c);
             }
             return cases;
         }
@@ -4158,6 +4217,10 @@ public final class BlockOracle {
             c.target = target;
             c.main = chance(random, 60) ? Items.AIR : chance(random, 50) ? pick(random, catalog.heldBlockItems) : pick(random, catalog.tools);
             return target;
+        }
+
+        private BlockPos buildExplode(Case c) {
+            return c.target;
         }
 
         private BlockPos buildTick(Case c, Random random) {
@@ -4807,6 +4870,8 @@ public final class BlockOracle {
         /** 显式合成器题的 id 从这里开始。 */
         private static final int CRAFTER_CASE_BASE = 3_000_000;
         private static final int DISPENSER_ARROW_CASE_BASE = 4_000_000;
+        private static final int EXPLODE_CASE_BASE = 5_000_000;
+        private static final int GOLEM_CASE_BASE = 6_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
@@ -4814,6 +4879,8 @@ public final class BlockOracle {
             List<Case> hopperCases = generator.hopperCases(HOPPER_CASE_BASE);
             List<Case> crafterCases = generator.crafterCases(CRAFTER_CASE_BASE);
             List<Case> dispenserArrowCases = generator.dispenserArrowCases(DISPENSER_ARROW_CASE_BASE);
+            List<Case> explodeCases = generator.explodeCases(EXPLODE_CASE_BASE);
+            List<Case> golemCases = generator.golemCases(GOLEM_CASE_BASE);
             boolean single = options.single >= 0;
             boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
                     : includesPistonCases();
@@ -4821,14 +4888,22 @@ public final class BlockOracle {
                     : includesHopperCases();
             boolean crafters = single ? options.single >= CRAFTER_CASE_BASE
                     && options.single < DISPENSER_ARROW_CASE_BASE : includesCrafterCases();
+            boolean explodes = single ? options.single >= EXPLODE_CASE_BASE
+                    && options.single < GOLEM_CASE_BASE
+                    : options.only == null || Subjects.matches(options.only, Blocks.INFESTED_STONE);
             boolean dispenserArrows = single ? options.single >= DISPENSER_ARROW_CASE_BASE
+                    && options.single < EXPLODE_CASE_BASE
                     : options.only == null || Subjects.matches(options.only, Blocks.DISPENSER);
+            boolean golems = single ? options.single >= GOLEM_CASE_BASE
+                    : options.only == null || Subjects.matches(options.only, Blocks.CARVED_PUMPKIN);
             List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
                     + (hoppers ? hopperCases.size() : 0)
                     + (crafters ? crafterCases.size() : 0)
                     + (dispenserArrows ? dispenserArrowCases.size() : 0)
+                    + (explodes ? explodeCases.size() : 0)
+                    + (golems ? golemCases.size() : 0)
                     + mines.size());            int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
@@ -4840,6 +4915,13 @@ public final class BlockOracle {
             }
             if (pistons) {
                 for (Case c : pistonCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
+            if (golems) {
+                for (Case c : golemCases) {
                     if (!single || c.id == options.single) {
                         runBuilt(c, statsOf(c.subject));
                     }
@@ -4861,6 +4943,13 @@ public final class BlockOracle {
             }
             if (dispenserArrows) {
                 for (Case c : dispenserArrowCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
+            if (explodes) {
+                for (Case c : explodeCases) {
                     if (!single || c.id == options.single) {
                         runBuilt(c, statsOf(c.subject));
                     }
@@ -4931,6 +5020,13 @@ public final class BlockOracle {
                     new MineSpec(Blocks.SCULK, Items.WOODEN_PICKAXE, 38L),
                     new MineSpec(Blocks.STONE, Items.WOODEN_PICKAXE, 39L,
                             new String[] {"minecraft:fortune"}, new int[] {3}),
+                    // 虫蚀方块：空手挖刷蠹虫，精准采集不刷；爆炸路径另有固定题。
+                    new MineSpec(Blocks.INFESTED_STONE, Items.AIR, 40L),
+                    new MineSpec(Blocks.INFESTED_STONE_BRICKS, Items.WOODEN_PICKAXE, 41L),
+                    new MineSpec(Blocks.INFESTED_DEEPSLATE, Items.STONE_PICKAXE, 42L,
+                            new String[] {"minecraft:silk_touch"}, new int[] {1}),
+                    new MineSpec(Blocks.INFESTED_COBBLESTONE, Items.WOODEN_PICKAXE, 43L,
+                            new String[] {"minecraft:silk_touch"}, new int[] {1}),
             };
             List<MineSpec> matched = new ArrayList<>();
             for (MineSpec spec : specs) {
@@ -4975,6 +5071,7 @@ public final class BlockOracle {
                 }
                 level.groundItems.clear();
                 level.xpOrbs.clear();
+                level.spawned.clear();
                 // `Player.hasCorrectToolForDrops`：不要求工具的方块，空手也掉。
                 if (!state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state)) {
                     Block.dropResources(state, level, pos, null, null, tool);
@@ -5003,7 +5100,11 @@ public final class BlockOracle {
                     line.append(rows.get(i));
                 }
                 line.append("],\"toolEnchantments\":").append(specToolEnchants);
-                line.append(",\"xpOrbs\":[");
+                line.append(",\"spawned\":[");
+                for (int i = 0; i < level.spawned.size(); i++) {
+                    line.append(i > 0 ? ",\"" : "\"").append(level.spawned.get(i)).append('\"');
+                }
+                line.append("],\"xpOrbs\":[");
                 for (int i = 0; i < level.xpOrbs.size(); i++) {
                     if (i > 0) {
                         line.append(',');
@@ -5197,6 +5298,12 @@ public final class BlockOracle {
                     yield "ticked";
                 }
                 case ITEM -> resultName(actor.gameMode.useItem(actor, level, actor.getItemInHand(c.hand), c.hand));
+                case EXPLODE -> {
+                    Vec3 centre = Vec3.atCenterOf(c.target);
+                    new ServerExplosion(level, null, null, null, centre, 1.0F, false,
+                            net.minecraft.world.level.Explosion.BlockInteraction.DESTROY).explode();
+                    yield "ticked";
+                }
             };
             level.settle(c.settle);
             List<String> gained = c.kind == Kind.ITEM ? gainedItems(before, inventoryOf(actor)) : List.of();

@@ -371,6 +371,10 @@ fn spawn_level(seed: i64) -> MobLevel {
         entities: Entities::with_next_id(1),
         players: Vec::new(),
         game: None,
+        inhabited: Default::default(),
+        mob_teams: Default::default(),
+        ignore_bed_monsters: false,
+        short_hunger: false,
         wrong_was_hurt: false,
     }
 }
@@ -508,6 +512,10 @@ impl Report {
             entities: Entities::with_next_id(1),
             players: vec![player],
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
         };
         let mut ticks = BlockTicks::default();

@@ -298,6 +298,12 @@ impl RequestReader<'_> {
             player_data: self.shared.config.world_dir.as_ref().and_then(|root| {
                 mc_bamboo_game::save_session::load_player_bytes(root, session.uuid.as_bytes())
             }),
+            player_advancements: self.shared.config.world_dir.as_ref().and_then(|root| {
+                mc_bamboo_game::save_session::load_player_advancements(
+                    root,
+                    session.uuid.as_bytes(),
+                )
+            }),
             sink: Box::new(outbound.clone()),
             inbox,
         };

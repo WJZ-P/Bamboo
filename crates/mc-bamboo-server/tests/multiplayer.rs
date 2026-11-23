@@ -1488,15 +1488,11 @@ async fn packets_the_server_does_not_decode_are_dropped_quietly() {
     let mark = alice.mark();
 
     // `coverage.md` 1.3：真实客户端会发、服务端可以丢弃的包，内容是什么都不算错。
-    // `container_close`、`interact` 和 `attack` 不在里面：它们现在会被解码，
-    // 坏包和官方一样让连接断开。
-    // `container_close`, `interact` and `attack` are not here: they are decoded
+    // `container_close`、`interact`、`attack` 和 `seen_advancements` 不在里面：
+    // 它们现在会被解码，坏包和官方一样让连接断开。
+    // `container_close`, `interact`, `attack` and `seen_advancements` are decoded
     // now, and a malformed one ends the connection as it does on vanilla.
-    for id in [
-        serverbound::CLIENT_TICK_END,
-        serverbound::PLAYER_LOADED,
-        serverbound::SEEN_ADVANCEMENTS,
-    ] {
+    for id in [serverbound::CLIENT_TICK_END, serverbound::PLAYER_LOADED] {
         alice
             .send(&common::frame(&[id as u8, 0xff, 0xff, 0xff]))
             .await;

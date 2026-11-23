@@ -408,6 +408,10 @@ fn fixture(case: &Case, biome_id: i32) -> MobLevel {
         entities: Entities::with_next_id(2),
         players: Vec::new(),
         game: None,
+        inhabited: Default::default(),
+        mob_teams: Default::default(),
+        ignore_bed_monsters: false,
+        short_hunger: false,
         wrong_was_hurt: false,
     }
 }

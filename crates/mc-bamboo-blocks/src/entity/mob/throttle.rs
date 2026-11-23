@@ -562,6 +562,7 @@ pub fn test_player(uid: EntityUid, position: Vec3) -> PlayerView {
         armor_cover: 0.0,
         main_hand: 0,
         off_hand: 0,
+        team: None,
         yaw: 0.0,
         pitch: 0.0,
         combat: Default::default(),

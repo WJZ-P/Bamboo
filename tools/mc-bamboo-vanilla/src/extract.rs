@@ -48,6 +48,9 @@ pub struct Extracted {
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
     pub sound_tables: SoundTables,
+    /// 进度定义原文，按完整标识符排列。
+    /// Raw advancement definitions keyed by namespaced identifier.
+    pub advancements: BTreeMap<String, String>,
     /// 数据包里的战利品表原文：带命名空间的名字 → JSON。
     ///
     /// Loot table JSON from the data pack, keyed by namespaced id.
@@ -137,6 +140,11 @@ pub struct BiomeMobSpawnFact {
     /// layer, then the biome layer).
     #[serde(rename = "creatureSpawnProbability")]
     pub creature_spawn_probability: u32,
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS` 在这个群系的最终值。
+    ///
+    /// The resolved `SNOW_GOLEM_MELTS` value for this biome.
+    #[serde(default, rename = "snowGolemMelt")]
+    pub snow_golem_melt: bool,
 }
 
 /// 一个类别下的一张加权刷怪表。
@@ -965,6 +973,17 @@ pub struct ProjectileFacts {
     pub glow_squid_dark_ticks: u8,
     pub bat_flags: u8,
     pub phantom_size: u8,
+    /// 蠹虫 / 末影螨的属性、眼高与寿命上限。
+    ///
+    /// Silverfish / endermite attributes, eye heights and the life cap.
+    pub silverfish_max_health: f64,
+    pub silverfish_movement_speed: f64,
+    pub silverfish_attack_damage: f64,
+    pub endermite_max_health: f64,
+    pub endermite_movement_speed: f64,
+    pub endermite_attack_damage: f64,
+    pub endermite_max_life: i32,
+    pub endermite_xp_reward: i32,
     pub fish_from_bucket: u8,
     pub salmon_variant: u8,
     pub tropical_fish_variant: u8,
@@ -1012,6 +1031,23 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `Ocelot.DATA_TRUSTING`.
     pub ocelot_trusting: u8,
+    /// 两种傀儡的元数据 index、属性、眼高和裂纹阈值。
+    ///
+    /// Golem metadata indices, attributes, eye heights and crackiness thresholds.
+    pub iron_golem_flags: u8,
+    pub snow_golem_pumpkin: u8,
+    pub iron_golem_eye_height: f32,
+    pub snow_golem_eye_height: f32,
+    pub iron_golem_max_health: f64,
+    pub iron_golem_movement_speed: f64,
+    pub iron_golem_knockback_resistance: f64,
+    pub iron_golem_attack_damage: f64,
+    pub iron_golem_step_height: f64,
+    pub snow_golem_max_health: f64,
+    pub snow_golem_movement_speed: f64,
+    pub golem_crackiness_low: f32,
+    pub golem_crackiness_medium: f32,
+    pub golem_crackiness_high: f32,
     /// `Cat` 五个元数据访问器 index。
     ///
     /// The five metadata accessor indices of `Cat`.
@@ -1305,6 +1341,9 @@ pub struct VersionData {
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
     pub packets: BTreeMap<String, PacketReport>,
+    /// 进度定义原文，按完整标识符排列。
+    /// Raw advancement definitions keyed by namespaced identifier.
+    pub advancements: BTreeMap<String, String>,
     /// 战利品表原文：带命名空间的名字 → JSON。
     ///
     /// Loot table JSON, keyed by namespaced id.
@@ -1440,6 +1479,7 @@ fn read_version_data(
         attribute_defaults: extracted.attribute_defaults,
         builtin_registries,
         packets,
+        advancements: extracted.advancements,
         loot_tables: extracted.loot_tables,
         loot_predicates: extracted.loot_predicates,
         context_int_providers: extracted.context_int_providers,

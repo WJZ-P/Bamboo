@@ -156,14 +156,7 @@ impl WorkerPool {
                 Err(error) => {
                     // 已经起来的线程也要收干净，不能留下空转的常驻线程。
                     for worker in &mut workers {
-                        worker
-                            .slot
-                            .stop
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        worker.slot.ready.notify_all();
-                        if let Some(handle) = worker.handle.take() {
-                            let _ = handle.join();
-                        }
+                        worker.stop_and_join();
                     }
                     return Err(error);
                 }
@@ -305,17 +298,33 @@ fn worker_loop(slot: &WorkerSlot) {
     }
 }
 
+impl Worker {
+    /// 让后台线程退出并等它结束。停止标志必须在持有信箱锁时设置、唤醒：
+    /// 后台线程是拿着锁检查 `stopped()` 再原子地放锁等待的，不拿锁设置的话，
+    /// 唤醒可能落在「检查完、还没开始等」的空当里丢掉，`join` 就永远等不到。
+    ///
+    /// Stop the worker thread and wait for it. The stop flag must be set and signalled
+    /// while holding the slot lock: the worker checks `stopped()` under the lock and
+    /// then waits, releasing it atomically, so an unlocked notify can fall between the
+    /// check and the wait, get lost, and leave `join` waiting forever.
+    fn stop_and_join(&mut self) {
+        {
+            let _guard = self.slot.lock();
+            self.slot
+                .stop
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.slot.ready.notify_all();
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Drop for WorkerPool {
     fn drop(&mut self) {
         for worker in &mut self.workers {
-            worker
-                .slot
-                .stop
-                .store(true, std::sync::atomic::Ordering::Release);
-            worker.slot.ready.notify_all();
-            if let Some(handle) = worker.handle.take() {
-                let _ = handle.join();
-            }
+            worker.stop_and_join();
         }
     }
 }

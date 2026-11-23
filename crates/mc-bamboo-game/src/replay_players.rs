@@ -25,6 +25,8 @@ pub struct ReplayPlayerSetup {
     pub health: f32,
     /// 玩家实体随机源的初始种子（`JavaRandom::new`）。
     pub seed: i64,
+    /// 创造模式（否则生存）。
+    pub creative: bool,
 }
 
 #[derive(Clone, Default)]
@@ -65,11 +67,16 @@ impl ReplayPlayers {
                 id,
                 uuid::Uuid::from_u128(setup.uuid),
                 setup.name.clone(),
-                GameMode::Survival,
+                if setup.creative {
+                    GameMode::Creative
+                } else {
+                    GameMode::Survival
+                },
                 ClientInformation::default(),
                 setup.position,
             );
             player.health.health = setup.health;
+            player.health_sync = crate::player_hurt::HealthSync::of(&player);
             player.random = mc_bamboo_blocks::entity::JavaRandom::new(setup.seed);
             let capture = Capture::default();
             region.links.add(id, Box::new(capture.clone()));
@@ -148,6 +155,32 @@ impl ReplayPlayers {
                     .map(|effect| [effect.effect, effect.duration, effect.amplifier])
                     .collect()
             })
+    }
+
+    /// 玩家阶段的 `set_health`（官方 `ServerPlayer.doTick`）：血量快照变了就补一包。
+    /// 活着的玩家被生物打中时不当场发，等这里。
+    pub fn sync_health(&mut self) {
+        let mut pending = Vec::new();
+        for (id, player) in &mut self.region.players {
+            if player.dead {
+                continue;
+            }
+            let now = crate::player_hurt::HealthSync::of(player);
+            if now != player.health_sync {
+                player.health_sync = now;
+                pending.push((
+                    *id,
+                    mc_bamboo_protocol::packet::play::SetHealth {
+                        health: now.health,
+                        food: now.food,
+                        saturation: player.health.food.saturation,
+                    },
+                ));
+            }
+        }
+        for (id, packet) in pending {
+            self.region.links.send(id, &packet);
+        }
     }
 
     /// 每刻推进受伤冷却和受伤动画（`ServerPlayer.tick` / `LivingEntity.baseTick` 的那两项）。

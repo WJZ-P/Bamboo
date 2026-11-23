@@ -139,6 +139,10 @@ pub(crate) struct HurtParts<'a> {
     pub rules: &'a GameRuleSet,
     /// 正在 tick、不在实体表里的攻击者（精确驱动里打人的生物）。
     pub attacker: Option<&'a mc_bamboo_blocks::entity::EntityPublic>,
+    /// 活着的玩家这次不当场补 `set_health`，留给同一刻随后的玩家阶段
+    /// （官方 `ServerPlayer.doTick`）。生物打人时为真：效果包（例如尸壳给的饥饿）
+    /// 必须排在 `set_health` 前面。
+    pub defer_health: bool,
 }
 
 impl Region {
@@ -152,6 +156,7 @@ impl Region {
             difficulty: self.global.difficulty as i32,
             rules: &self.global.rules,
             attacker: None,
+            defer_health: false,
         }
     }
 }
@@ -187,7 +192,9 @@ pub(crate) fn hurt_player_by_mob(
     amount: f32,
 ) -> (bool, Option<PlayerDeathDrops>) {
     let mut random = parts.players.get(&id).map(|player| player.random);
+    let defer = std::mem::replace(&mut parts.defer_health, true);
     let (hurt, drops) = hurt_player_in(parts, id, source, amount, &mut random);
+    parts.defer_health = defer;
     if hurt && let (Some(state), Some(player)) = (random, parts.players.get_mut(&id)) {
         player.random = state;
     }
@@ -438,7 +445,10 @@ fn hurt_player_damage(
     } else {
         None
     };
-    send_health(parts);
+    // 死了的玩家不再跑玩家阶段的血量同步，只能当场补。
+    if dying || !parts.defer_health {
+        send_health(parts);
+    }
     (true, drops)
 }
 

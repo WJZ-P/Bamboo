@@ -216,7 +216,7 @@ pub(crate) fn parallel_entity_ticks(
             players,
             ..
         } = &mut *region;
-        let player_views = crate::player::player_views(&*players);
+        let player_views = crate::player::player_views(&*players, &global.scoreboard);
         let block_entity_shapes = crate::entity_view::block_entity_shapes(chunks, block_entities);
         // `pickup_before_entities` 已经跑过；把实体表切进「这一刻正在 tick」的状态。
         // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
@@ -245,6 +245,7 @@ pub(crate) fn parallel_entity_ticks(
             hopper_positions,
             world_border: global.world_border.clone(),
             players: player_views,
+            scoreboard: &global.scoreboard,
         });
         let owned_pool = match pool {
             Some(_) => None,
@@ -277,6 +278,12 @@ pub(crate) fn parallel_entity_ticks(
 /// 和 `forEachBlockTickingChunk`（里面是 `tickChunk`）是两个独立的循环。Bamboo 按坐标顺序
 /// 遍历，官方按哈希顺序并打乱前者，这是已有的差异。
 pub(crate) fn run_random_ticks(region: &mut Region) {
+    // `tickSpawningChunk` 第一句是 `incrementInhabitedTime`，在 `tickThunder` 之前。
+    // 官方只在 `TickRateManager.runsNormally()` 时走到这里；Bamboo 没有暂停 / 冻结刻，恒为真。
+    // 累加只写 ChunkStore 的单独一张表，不换区块版本、不进存盘集合。
+    for chunk in crate::natural_spawn::inhabited_time_chunks(region) {
+        region.chunks.increment_inhabited_time(chunk);
+    }
     let chunks = random_ticking_chunks(region);
     // 官方 `tickSpawningChunk` 只在下雨且打雷时调 `tickThunder`；晴天一个随机数都不取。
     // 这里先按天气快照短路，避免每 tick 为每个区块建一次方块世界。
@@ -690,6 +697,11 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     world.spawn_player_death_drops(&drops);
                 }
             }
+            Effect::DestroyProgress {
+                breaker,
+                pos,
+                progress,
+            } => mining::send_destroy_progress(region, breaker, pos, progress),
             Effect::IgnitePlayer { target, ticks } => {
                 crate::player_environment::ignite_for_ticks(
                     region,
@@ -841,6 +853,26 @@ fn block_update(pos: BlockPos, state: u32) -> BlockUpdate {
 }
 
 /// `use_item_on`，官方 `handleUseItemOn` 的顺序。`blocks-inventory.md` 3.1、第 6 章。
+fn item_name(region: &Region, id: PlayerId, hand: mc_bamboo_core::Hand) -> String {
+    region
+        .players
+        .get(&id)
+        .and_then(|player| {
+            mc_bamboo_data::items::ITEMS.get(player.inventory.held(hand).item as usize)
+        })
+        .map(|item| item.name.to_owned())
+        .unwrap_or_default()
+}
+
+fn block_name(region: &Region, pos: mc_bamboo_core::BlockPos) -> String {
+    region
+        .chunks
+        .block(pos)
+        .and_then(|state| mc_bamboo_data::blocks::BLOCKS.get(state as usize))
+        .map(|block| block.name.to_owned())
+        .unwrap_or_default()
+}
+
 pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemOn) {
     if !record_sequence(region, id, packet.sequence) {
         return;
@@ -973,7 +1005,29 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         //
         // `CommandBlock.setPlacedBy`. `/setblock` does not come through here.
         crate::command_block::on_placed(region, placed);
+        // 官方 `PlacedBlockTrigger` / `ItemUsedOnLocationTrigger`：放置成功时按
+        // 放下的方块、位置与手持物品触发。
+        let block = region
+            .chunks
+            .block(placed)
+            .and_then(|state| mc_bamboo_data::blocks::BLOCKS.get(state as usize))
+            .map(|block| block.name.to_owned())
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "block": block,
+            "item": item_name(region, id, packet.hand),
+            "x": placed.x, "y": placed.y, "z": placed.z,
+        });
+        crate::advancement_triggers::record(region, id, "minecraft:placed_block", payload.clone());
+        crate::advancement_triggers::record(region, id, "minecraft:item_used_on_block", payload);
     }
+    // `DefaultBlockInteractionTrigger` / `AnyBlockInteractionTrigger`：任何右键方块。
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:any_block_use",
+        serde_json::json!({"block": block_name(region, packet.pos)}),
+    );
     send_effects(region, Some(id), &outcome.effects);
     // 炼药锅的 `createFilledResult` 和洗染料。方块逻辑只记账，物品栏在这里改。
     // A cauldron's `createFilledResult` or dye wash. Block behaviour records it; the inventory changes here.
