@@ -1024,6 +1024,42 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `Parrot.DATA_VARIANT_ID` (INT serializer).
     pub parrot_variant: u8,
+    /// 蜜蜂的两个元数据 index 和属性。
+    ///
+    /// The bee's two metadata indices and its attributes.
+    #[serde(default)]
+    pub bee_flags: u8,
+    #[serde(default)]
+    pub bee_anger_end_time: u8,
+    #[serde(default)]
+    pub bee_max_health: f64,
+    #[serde(default)]
+    pub bee_flying_speed: f64,
+    #[serde(default)]
+    pub bee_movement_speed: f64,
+    #[serde(default)]
+    pub bee_attack_damage: f64,
+    #[serde(default)]
+    pub bee_eye_height: f32,
+    #[serde(default)]
+    pub bee_ticks_per_flap: i32,
+    #[serde(default)]
+    pub bee_flap_degrees_per_tick: f32,
+    #[serde(default)]
+    pub bee_anger_min_seconds: i32,
+    #[serde(default)]
+    pub bee_anger_max_seconds: i32,
+    /// 蜂巢方块实体的常数。
+    ///
+    /// Beehive block entity constants.
+    #[serde(default)]
+    pub beehive_max_occupants: i32,
+    #[serde(default)]
+    pub beehive_min_ticks_nectarless: i32,
+    #[serde(default)]
+    pub beehive_min_ticks_nectar: i32,
+    #[serde(default)]
+    pub beehive_reenter_ticks: i32,
     /// `Parrot.MOB_SOUND_MAP` 的条目数，`getAmbient` 模仿叫声时 `nextInt` 的上界。
     ///
     /// The size of `Parrot.MOB_SOUND_MAP`, the `nextInt` bound when imitating a sound.

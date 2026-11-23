@@ -3622,6 +3622,40 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const PARROT_SOUND_MAP_SIZE: i32 = {};",
         facts.parrot_sound_map_size
     );
+    for (name, value) in [
+        ("BEE_FLAGS", facts.bee_flags),
+        ("BEE_ANGER_END_TIME", facts.bee_anger_end_time),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("BEE_EYE_HEIGHT", facts.bee_eye_height),
+        ("BEE_FLAP_DEGREES_PER_TICK", facts.bee_flap_degrees_per_tick),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("BEE_MAX_HEALTH", facts.bee_max_health),
+        ("BEE_FLYING_SPEED", facts.bee_flying_speed),
+        ("BEE_MOVEMENT_SPEED", facts.bee_movement_speed),
+        ("BEE_ATTACK_DAMAGE", facts.bee_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+    for (name, value) in [
+        ("BEE_TICKS_PER_FLAP", facts.bee_ticks_per_flap),
+        ("BEE_ANGER_MIN_SECONDS", facts.bee_anger_min_seconds),
+        ("BEE_ANGER_MAX_SECONDS", facts.bee_anger_max_seconds),
+        ("BEEHIVE_MAX_OCCUPANTS", facts.beehive_max_occupants),
+        (
+            "BEEHIVE_MIN_TICKS_NECTARLESS",
+            facts.beehive_min_ticks_nectarless,
+        ),
+        ("BEEHIVE_MIN_TICKS_NECTAR", facts.beehive_min_ticks_nectar),
+        ("BEEHIVE_REENTER_TICKS", facts.beehive_reenter_ticks),
+    ] {
+        let _ = writeln!(out, "pub const {name}: i32 = {value};");
+    }
     let _ = writeln!(
         out,
         "pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &{:?};",
