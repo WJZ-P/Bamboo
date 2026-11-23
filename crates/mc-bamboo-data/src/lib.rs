@@ -12,6 +12,9 @@ use mc_bamboo_core::Aabb;
 /// 配方表的数据结构和官方数据包导出的全部配方。
 pub mod recipe;
 
+/// 官方触发器注册表（按数字 ID）及进度定义（按名字）。
+pub const ADVANCEMENTS_JSON: &str = include_str!("generated/advancements.json");
+
 /// 自然刷怪的类别上限和每个群系的刷怪设置。
 ///
 /// Natural-spawn category caps and per-biome spawn settings.

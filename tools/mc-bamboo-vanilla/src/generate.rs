@@ -50,6 +50,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let recipes = recipes_file(data)?;
     let heightmaps = heightmaps_file(data)?;
     let sounds = sounds_file(data)?;
+    let advancements = advancement_data(data)?;
     let loot = loot_file(data)?;
     let gamerules = gamerules_file(&data.game_rules)?;
 
@@ -99,6 +100,9 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "sounds.rs", &sounds)?;
+    let path = output_dir.join("advancements.json");
+    fs::write(&path, advancements)
+        .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
     write_file(output_dir, "loot.rs", &loot)?;
     if !data.game_rules.is_empty() {
         write_file(output_dir, "gamerules.rs", &gamerules)?;
@@ -146,9 +150,8 @@ fn saved_world_file(snbt: &str) -> String {
 /// `float_roundtrip`）。默认的快路径用 `significand as f64 * 10^exp`，少数 17 位有效数字的
 /// 串会差一个最低位；下面的单元测试把官方运行时的位模式钉死，防止读报告那一步悄悄出错。
 fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
-    // `probe-online` 会把 `mc-bamboo-server` 的 serde_json `preserve_order` 特性统一进来，
-    // 那时 `Value` 的键保持 Java 报告的插入顺序，而 `--no-default-features` 下是 BTreeMap
-    // 的字母序。统一排序，两种特性配置写出的文件才逐字符一致。
+    // 世界生成用字典序固定输出，和进度定义保留的数据包键序各自独立。
+    // Sort world generation data independently of the pack's advancement member order.
     let mut canonical = data.worldgen.clone();
     canonical.sort_all_objects();
     let json = serde_json::to_string_pretty(&canonical)
@@ -857,6 +860,7 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
             "MobCategory 的顺序变了: {names:?}，期望 {MOB_CATEGORY_ORDER:?}"
         ));
     }
+    let biome_names = registry_entries(data, BIOME_REGISTRY).unwrap_or(&[]);
     let entity_names = registry_entries(data, ENTITY_TYPE_REGISTRY).unwrap_or(&[]);
     let entity_id = |name: &str| -> Result<i32, String> {
         entity_names
@@ -949,6 +953,8 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
         "    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层）。"
     );
     let _ = writeln!(out, "    pub creature_spawn_probability: f32,");
+    let _ = writeln!(out, "    /// `SNOW_GOLEM_MELTS` 在这个群系的最终值。");
+    let _ = writeln!(out, "    pub snow_golem_melts: bool,");
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
     let _ = writeln!(
@@ -999,7 +1005,27 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
             "        creature_spawn_probability: f32::from_bits({:#010x}),",
             settings.creature_spawn_probability
         );
+        let _ = writeln!(
+            out,
+            "        snow_golem_melts: {},",
+            settings.snow_golem_melt
+        );
         let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// `SNOW_GOLEM_MELTS`，下标是 `minecraft:worldgen/biome` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static SNOW_GOLEM_MELTS: &[bool] = &[");
+    for name in biome_names {
+        let melts = facts
+            .biomes
+            .get(name.as_str())
+            .is_some_and(|settings| settings.snow_golem_melt);
+        let _ = writeln!(out, "    {melts}, // {name}");
     }
     let _ = writeln!(out, "];");
     Ok(out)
@@ -3604,6 +3630,7 @@ fn entity_types_file(data: &VersionData) -> String {
     }
     fox_facts(&mut out, facts);
     wolf_facts(&mut out, facts);
+    golem_facts(&mut out, facts);
     for (name, value) in [
         ("PIG_BOOST_TIME", facts.pig_boost_time),
         ("PIG_VARIANT", facts.pig_variant),
@@ -3617,6 +3644,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
         ("PANDA_FLAGS", facts.panda_flags),
         ("OCELOT_TRUSTING", facts.ocelot_trusting),
+        ("IRON_GOLEM_FLAGS", facts.iron_golem_flags),
+        ("SNOW_GOLEM_PUMPKIN", facts.snow_golem_pumpkin),
         ("CAT_VARIANT", facts.cat_variant),
         ("CAT_IS_LYING", facts.cat_is_lying),
         ("CAT_RELAX_STATE_ONE", facts.cat_relax_state_one),
@@ -3783,6 +3812,35 @@ fn wolf_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
         ("WOLF_MAX_HEALTH", facts.wolf_max_health),
         ("WOLF_MOVEMENT_SPEED", facts.wolf_movement_speed),
         ("WOLF_ATTACK_DAMAGE", facts.wolf_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+}
+
+/// 两种傀儡的属性、眼高和 `Crackiness.GOLEM` 的裂纹阈值。
+///
+/// Golem attributes, eye heights and `Crackiness.GOLEM` thresholds.
+fn golem_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    for (name, value) in [
+        ("IRON_GOLEM_EYE_HEIGHT", facts.iron_golem_eye_height),
+        ("SNOW_GOLEM_EYE_HEIGHT", facts.snow_golem_eye_height),
+        ("GOLEM_CRACKINESS_LOW", facts.golem_crackiness_low),
+        ("GOLEM_CRACKINESS_MEDIUM", facts.golem_crackiness_medium),
+        ("GOLEM_CRACKINESS_HIGH", facts.golem_crackiness_high),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("IRON_GOLEM_MAX_HEALTH", facts.iron_golem_max_health),
+        ("IRON_GOLEM_MOVEMENT_SPEED", facts.iron_golem_movement_speed),
+        (
+            "IRON_GOLEM_KNOCKBACK_RESISTANCE",
+            facts.iron_golem_knockback_resistance,
+        ),
+        ("IRON_GOLEM_ATTACK_DAMAGE", facts.iron_golem_attack_damage),
+        ("IRON_GOLEM_STEP_HEIGHT", facts.iron_golem_step_height),
+        ("SNOW_GOLEM_MAX_HEALTH", facts.snow_golem_max_health),
+        ("SNOW_GOLEM_MOVEMENT_SPEED", facts.snow_golem_movement_speed),
     ] {
         let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
     }
@@ -4000,6 +4058,29 @@ fn tags_file(data: &VersionData) -> Result<String, String> {
     }
     let _ = writeln!(out, "];");
     Ok(out)
+}
+
+/// 注册表包括内置进度未用到的触发器。原文保留对象成员和 requirements 的顺序。
+/// The registry includes unused triggers. Preserve member and requirement order in definitions.
+fn advancement_data(data: &VersionData) -> Result<String, String> {
+    let triggers = data
+        .builtin_registries
+        .get("minecraft:trigger_type")
+        .filter(|entries| !entries.is_empty())
+        .ok_or("缺少进度触发器注册表")?;
+    if data.advancements.is_empty() {
+        return Err("没有进度定义".to_owned());
+    }
+    let mut definitions = BTreeMap::new();
+    for (id, raw) in &data.advancements {
+        let definition: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw)
+            .map_err(|error| format!("进度 {id} 不是合法的 JSON 对象：{error}"))?;
+        definitions.insert(id, definition);
+    }
+    let table = serde_json::json!({ "triggers": triggers, "advancements": definitions });
+    serde_json::to_string_pretty(&table)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| error.to_string())
 }
 
 /// 战利品表、它的条件注册表和方块到掉落表的对应，都是官方数据包里的原文。

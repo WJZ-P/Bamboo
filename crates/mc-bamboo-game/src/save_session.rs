@@ -348,6 +348,22 @@ pub fn load_player_bytes(root: &std::path::Path, uuid_bytes: &[u8; 16]) -> Optio
     mc_bamboo_storage::world_dir::read_player_bytes(&WorldDir::new(root), &uuid)
 }
 
+/// 连接层进服时读官方 `players/advancements/<uuid>.json` 的原文。
+pub fn load_player_advancements(root: &std::path::Path, uuid_bytes: &[u8; 16]) -> Option<String> {
+    let uuid = mc_bamboo_storage::world_dir::player_uuid_string(uuid_bytes);
+    mc_bamboo_storage::world_dir::read_player_advancements(&WorldDir::new(root), &uuid)
+}
+
+/// 存盘 / 退出时写进度档案，路径照 26.3 `LevelResource.PLAYER_ADVANCEMENTS_DIR`。
+pub fn save_player_advancements(
+    root: &std::path::Path,
+    uuid_bytes: &[u8; 16],
+    text: &str,
+) -> std::io::Result<()> {
+    let uuid = mc_bamboo_storage::world_dir::player_uuid_string(uuid_bytes);
+    mc_bamboo_storage::world_dir::write_player_advancements(&WorldDir::new(root), &uuid, text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

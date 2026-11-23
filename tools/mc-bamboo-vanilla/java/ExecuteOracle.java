@@ -151,6 +151,22 @@ public final class ExecuteOracle {
         "effect give @e[type=item] minecraft:speed 10",
     };
 
+    /** `/advancement` 的整条命令题：官方假世界里执行，比较返回值、反馈和进度状态。 */
+    private static final String[] ADVANCEMENT_CASES = {
+        "advancement grant @s only minecraft:story/root",
+        "advancement grant @s only minecraft:story/root crafting_table",
+        "advancement revoke @s everything ;; advancement grant @s only minecraft:story/root",
+        "advancement revoke @s everything",
+        "advancement grant @s from minecraft:story/root",
+        "advancement revoke @s until minecraft:story/upgrade_tools",
+        "advancement grant @s through minecraft:story/mine_stone",
+        "advancement revoke @s only minecraft:story/mine_stone get_stone",
+        "advancement grant @s only minecraft:story/root nope",
+        "advancement grant @s only minecraft:does_not_exist",
+        "advancement revoke @s everything ;; advancement revoke @s everything",
+        "advancement grant @s only minecraft:story/root ;; advancement revoke @s only minecraft:story/root",
+    };
+
     private ExecuteOracle() {
     }
 
@@ -159,14 +175,15 @@ public final class ExecuteOracle {
         try {
             run(args, log);
         } catch (Exception error) {
-            error.printStackTrace(log);
+            error.printStackTrace(System.err);
             System.exit(1);
         }
         System.exit(0);
     }
 
     private static void run(String[] args, PrintStream log) throws Exception {
-        if (args.length != 0) {
+        boolean advancementMode = args.length == 1 && args[0].equals("advancements");
+        if (args.length != 0 && !advancementMode) {
             throw new IllegalArgumentException("unexpected arguments");
         }
         FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
@@ -184,16 +201,98 @@ public final class ExecuteOracle {
             out.write("{\"type\":\"header\",\"version\":\"");
             out.write(SharedConstants.getCurrentVersion().id());
             out.write("\"}\n");
-            for (String line : SCENARIOS) {
-                emit(out, official, line);
+            if (advancementMode) {
+                for (String line : ADVANCEMENT_CASES) {
+                    emitAdvancement(out, official, line);
+                }
+            } else {
+                for (String line : SCENARIOS) {
+                    emit(out, official, line);
+                }
             }
             out.write("{\"type\":\"end\"}\n");
             out.flush();
         }
     }
 
+    /** 官方 `AdvancementCommands` 在假玩家上跑整条命令，输出返回值、反馈和判据状态。 */
+    private static void emitAdvancement(Writer out, Official official, String line)
+            throws Exception {
+        Scene scene = new Scene(official, true);
+        var playerAdvancements = official.server.getAdvancements();
+        // 每条题从一份干净的 `PlayerAdvancements` 开始；用 Unsafe 造一个并只填
+        // `award` / `revoke` 会读写的字段，不读存档、不发包。
+        var state = UNSAFE.allocateInstance(net.minecraft.server.PlayerAdvancements.class);
+        set(net.minecraft.server.PlayerAdvancements.class, state, "progress",
+                new java.util.LinkedHashMap<>());
+        set(net.minecraft.server.PlayerAdvancements.class, state, "visible",
+                new java.util.HashSet<>());
+        set(net.minecraft.server.PlayerAdvancements.class, state, "progressChanged",
+                new java.util.HashSet<>());
+        set(net.minecraft.server.PlayerAdvancements.class, state, "rootsToUpdate",
+                new java.util.HashSet<>());
+        set(net.minecraft.server.PlayerAdvancements.class, state, "activeTriggers",
+                new java.util.IdentityHashMap<>());
+        set(net.minecraft.server.PlayerAdvancements.class, state, "isFirstPacket", true);
+        set(net.minecraft.server.PlayerAdvancements.class, state, "tree",
+                playerAdvancements.tree());
+        set(net.minecraft.server.PlayerAdvancements.class, state, "player", scene.player);
+        // 官方 `award` 完成时的公告走 `playerList.broadcastSystemMessage`；
+        // 直接改 GameRuleMap 把这条规则关掉（不走会广播通知的 GameRules.set）。
+        var ruleMap = field(official.rules, "rules", Object.class);
+        ((net.minecraft.world.level.gamerules.GameRuleMap) ruleMap).set(
+                net.minecraft.world.level.gamerules.GameRules.SHOW_ADVANCEMENT_MESSAGES, false);
+        set(net.minecraft.server.level.ServerPlayer.class, scene.player, "advancements", state);
+        String setup = null;
+        String command = line;
+        int split = line.indexOf(" ;; ");
+        if (split >= 0) {
+            setup = line.substring(0, split);
+            command = line.substring(split + 4);
+        }
+        List<String> setupFeedback = new ArrayList<>();
+        if (setup != null) {
+            CommandSourceStack setupSource = scene.source.withSource(new Recording(setupFeedback));
+            official.commands.performCommand(
+                    official.commands.getDispatcher().parse(setup, setupSource), setup);
+        }
+        List<String> feedback = new ArrayList<>();
+        if (System.getenv("ADV_ORACLE_DEBUG") != null) {
+            setStatic(SharedConstants.class, "IS_RUNNING_IN_IDE", true);
+        }
+        CommandSourceStack measured = scene.source.withSource(new Recording(feedback));
+        int result = 0;
+        try {
+            official.commands.performCommand(
+                    official.commands.getDispatcher().parse(command, measured), command);
+            // `Commands.performCommand` 返回 void；官方的返回值是 `CommandSourceStack`
+            // 里回调记下的成功次数，用反馈条数当可比的返回值。
+            result = feedback.size();
+        } catch (Throwable error) {
+            feedback.add("throw:" + error.getClass().getSimpleName());
+            if (System.getenv("ADV_ORACLE_DEBUG") != null) {
+                error.printStackTrace(System.err);
+            }
+            result = -1;
+        }
+        @SuppressWarnings("unchecked")
+        var progress = (java.util.Map<net.minecraft.advancements.AdvancementHolder,
+                net.minecraft.advancements.AdvancementProgress>) field(state, "progress", Object.class);
+        List<String> done = new ArrayList<>();
+        for (var entry : progress.entrySet()) {
+            if (entry.getValue().isDone()) {
+                done.add(entry.getKey().id().toString());
+            }
+        }
+        java.util.Collections.sort(done);
+        out.write("{\"type\":\"advancement\",\"input\":" + quote(line)
+                + ",\"result\":" + result
+                + ",\"feedback\":" + quote(String.join("|", feedback))
+                + ",\"done\":" + quote(String.join(",", done)) + "}\n");
+    }
+
     private static void emit(Writer out, Official official, String line) throws Exception {
-        Scene scene = new Scene(official);
+        Scene scene = new Scene(official, false);
         String setup = null;
         String command = line;
         int split = line.indexOf(" ;; ");
@@ -338,8 +437,19 @@ public final class ExecuteOracle {
         final ServerScoreboard board;
         final CommandSourceStack source;
         final ServerLevel level;
+        final net.minecraft.server.level.ServerPlayer player;
 
-        Scene(Official official) throws Exception {
+        /**
+         * `forAdvancements` 为真时给假玩家补一份全是 INT 槽的 `SynchedEntityData`，只够
+         * `AdvancementRewards.grant` 读显示名。普通执行题不能装它：`effect give` 会往
+         * 实体数据里写药水粒子列表这类非 INT 的值，类型对不上就会让整条命令失败。
+         *
+         * When `forAdvancements` is true the fake player gets an all-INT `SynchedEntityData`,
+         * just enough for `AdvancementRewards.grant` to read the display name. The plain
+         * execute cases must not install it: `effect give` writes non-INT values such as
+         * the effect particle list, and the type mismatch fails the whole command.
+         */
+        Scene(Official official, boolean forAdvancements) throws Exception {
             level = allocate(FakeLevel.class);
             FakeLevel fake = (FakeLevel) level;
             fake.blocks = blocks;
@@ -381,6 +491,8 @@ public final class ExecuteOracle {
             set(ServerLevel.class, level, "chunkSource", fake.chunkSource);
 
             ServerPlayer player = allocate(ServerPlayer.class);
+            this.player = player;
+            set(net.minecraft.server.level.ServerPlayer.class, player, "server", official.server);
             // `allocate(ServerPlayer)` 不跑构造函数；`/effect` 的
             // `onEffectAdded` 会用到这些字段，逐个补最小初始化。
             var advancements = UNSAFE.allocateInstance(net.minecraft.server.PlayerAdvancements.class);
@@ -392,7 +504,36 @@ public final class ExecuteOracle {
                     new net.minecraft.world.entity.ai.attributes.AttributeMap(
                             LivingEntity.createLivingAttributes().build()));
             set(Entity.class, player, "type", EntityTypes.PLAYER);
+            // `onEffectAdded` 会遍历 `getPassengers()` 把效果发给乘客，不能是 null。
+            // `onEffectAdded` walks `getPassengers()` to send the effect to riders; it must not be null.
             set(Entity.class, player, "passengers", com.google.common.collect.ImmutableList.of());
+            // `AdvancementRewards.grant` 走到 `ServerPlayer.getDisplayName` 时会读实体数据；
+            // 补一个带空表的 `SynchedEntityData`。只在进度题里装，见构造函数说明。
+            if (forAdvancements) {
+            var dataClass = Class.forName("net.minecraft.network.syncher.SynchedEntityData$DataItem");
+            var arrayType = java.lang.reflect.Array.newInstance(dataClass, 0).getClass();
+            // 玩家实体数据的槽位从 0 开始，`ServerPlayer.getDisplayName` 读 18 号；
+            // 造足够长的数组，每项都带一个该下标的 accessor 和 null 值。
+            Object[] items = new Object[32];
+            for (int i = 0; i < items.length; i++) {
+                var accessor = new net.minecraft.network.syncher.EntityDataAccessor<>(i,
+                        net.minecraft.network.syncher.EntityDataSerializers.INT);
+                items[i] = dataClass
+                        .getDeclaredConstructor(net.minecraft.network.syncher.EntityDataAccessor.class,
+                                Object.class)
+                        .newInstance(accessor, 0);
+            }
+            Object dataItems = java.lang.reflect.Array.newInstance(dataClass, items.length);
+            for (int i = 0; i < items.length; i++) {
+                java.lang.reflect.Array.set(dataItems, i, items[i]);
+            }
+            var dataCtor = net.minecraft.network.syncher.SynchedEntityData.class
+                    .getDeclaredConstructor(net.minecraft.network.syncher.SyncedDataHolder.class,
+                            arrayType);
+            dataCtor.setAccessible(true);
+            set(Entity.class, player, "entityData", dataCtor.newInstance(player, dataItems));
+            }
+
             set(net.minecraft.world.entity.player.Player.class, player, "gameProfile",
                     new com.mojang.authlib.GameProfile(
                             java.util.UUID.fromString("00000000-0000-0000-0000-000000000001"),
@@ -403,6 +544,14 @@ public final class ExecuteOracle {
             set(ServerCommonPacketListenerImpl.class, connection, "connection",
                     new Connection(PacketFlow.CLIENTBOUND));
             set(ServerPlayer.class, player, "connection", connection);
+            set(net.minecraft.world.entity.player.Player.class, player, "inventory",
+                    new net.minecraft.world.entity.player.Inventory(player, new net.minecraft.world.entity.EntityEquipment()));
+            var inventoryMenu = UNSAFE.allocateInstance(
+                    net.minecraft.world.inventory.InventoryMenu.class);
+            set(net.minecraft.world.entity.player.Player.class, player, "inventoryMenu",
+                    inventoryMenu);
+            set(net.minecraft.world.entity.player.Player.class, player, "containerMenu",
+                    inventoryMenu);
             set(Entity.class, player, "id", 1);
             set(Entity.class, player, "level", level);
             set(Entity.class, player, "position", new Vec3(8.5, -60.0, 8.5));
@@ -526,6 +675,16 @@ public final class ExecuteOracle {
         @Override
         public ReloadableServerRegistries.Holder reloadableRegistries() {
             return managers.fullRegistries();
+        }
+
+        @Override
+        public net.minecraft.server.ServerAdvancementManager getAdvancements() {
+            return managers.getAdvancements();
+        }
+
+        @Override
+        public net.minecraft.world.item.crafting.RecipeManager getRecipeManager() {
+            return managers.getRecipeManager();
         }
 
         @Override
@@ -729,6 +888,26 @@ public final class ExecuteOracle {
         @Override
         public boolean isDifficultyLocked() {
             return false;
+        }
+    }
+
+    private static void setStatic(Class<?> owner, String name, Object value) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(null, value);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static Object field(Object owner, String name, Class<?> type) {
+        try {
+            Field field = owner.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            return type.cast(field.get(owner));
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
         }
     }
 

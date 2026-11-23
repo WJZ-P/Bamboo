@@ -1,6 +1,6 @@
-//! 玩家扔鸡蛋的端到端测试：发使用包，看世界里的蛋和物品栏。
+//! 玩家扔鸡蛋 / 雪球的端到端测试：发使用包，看世界里的投掷物和物品栏。
 //!
-//! End-to-end egg throwing: send a use packet, then inspect the egg and the inventory.
+//! End-to-end throwing: send a use packet, then inspect the projectile and the inventory.
 
 use mc_bamboo_blocks::entity::KindPublic;
 use mc_bamboo_core::Hand;
@@ -24,6 +24,7 @@ fn throw(server: &mut Harness, client: &Client, sequence: i32) {
     );
 }
 
+/// 两类 `ThrowableItemProjectile` 都在这里；`KindPublic::Egg` 是共用的公开结构。
 fn eggs(server: &mut Harness) -> Vec<(i32, ItemStack)> {
     let region = server.region();
     region
@@ -63,7 +64,7 @@ fn survival_throws_one_blue_egg_and_spends_it() {
 }
 
 #[test]
-fn creative_keeps_the_egg_and_other_items_are_not_thrown() {
+fn creative_keeps_the_egg_and_snowballs_are_thrown() {
     let (mut server, client) = settled();
     hold(
         &mut server,
@@ -85,11 +86,9 @@ fn creative_keeps_the_egg_and_other_items_are_not_thrown() {
     );
     throw(&mut server, &client, 2);
     server.tick();
+    assert_eq!(eggs(&mut server).len(), 2, "雪球也生成了投掷物");
     let player = server.region().players.get(&client.id).unwrap();
-    assert_eq!(
-        player.inventory.slots[36].count, 1,
-        "雪球还没有实现，不会扔出"
-    );
+    assert_eq!(player.inventory.slots[36].count, 0, "生存模式扣掉一个雪球");
 }
 
 #[test]
@@ -100,7 +99,7 @@ fn egg_item_stats_are_cumulative_by_variant_and_sent_once_per_change() {
         (items::BLUE_EGG, GameMode::Survival, Some(1)),
         (items::BROWN_EGG, GameMode::Survival, Some(1)),
         (items::EGG, GameMode::Survival, Some(2)),
-        (items::SNOWBALL, GameMode::Survival, None),
+        (items::SNOWBALL, GameMode::Survival, Some(1)),
     ]
     .into_iter()
     .enumerate()

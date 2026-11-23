@@ -837,3 +837,34 @@ fn the_push_cap_does_not_change_cramming_damage() {
     assert!(on_hurt > 0, "有上限时挤压伤害照样生效");
     assert_eq!(off_hurt, on_hurt, "上限不该改伤害判定的结果");
 }
+
+/// 线程池刚建好就丢掉，后台线程可能正处在「检查完停止标志、还没开始等」的空当。
+/// 停止标志要在持有信箱锁时设置并唤醒，否则唤醒会丢、`drop` 永远等不到线程退出。
+/// 反复建、派一次活、丢掉，覆盖这个空当；修之前这里会偶发卡死。
+///
+/// Dropping a freshly built pool can catch a worker between checking the stop flag
+/// and starting to wait. The stop flag must be set and signalled under the slot lock,
+/// otherwise the wakeup is lost and `drop` never sees the thread exit. Building,
+/// dispatching once and dropping in a loop covers that window; before the fix this
+/// hung intermittently.
+#[test]
+fn dropping_a_fresh_pool_never_loses_the_stop_wakeup() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for round in 0..500 {
+        let pool = WorkerPool::new("drop-test", 4).expect("起实体线程池");
+        if round % 2 == 0 {
+            let ran = AtomicUsize::new(0);
+            let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..4)
+                .map(|_| {
+                    let ran = &ran;
+                    Box::new(move || {
+                        ran.fetch_add(1, Ordering::Relaxed);
+                    }) as Box<dyn FnOnce() + Send + '_>
+                })
+                .collect();
+            pool.run(jobs);
+            assert_eq!(ran.load(Ordering::Relaxed), 4, "四份活都跑了");
+        }
+        drop(pool);
+    }
+}

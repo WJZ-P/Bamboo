@@ -1038,6 +1038,21 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             _ => {}
         }
     }
+    if matches!(
+        kind,
+        mc_bamboo_blocks::entity::mob::MobType::IronGolem
+            | mc_bamboo_blocks::entity::mob::MobType::SnowGolem
+    ) {
+        use mc_bamboo_data::entity_types as facts;
+        let default = if kind == mc_bamboo_blocks::entity::mob::MobType::SnowGolem {
+            16_u8
+        } else {
+            0
+        };
+        if index == facts::IRON_GOLEM_FLAGS {
+            return EntityData::GolemFlags(default);
+        }
+    }
     if let Some(data) = farm_default_data(index, kind) {
         return data;
     }
@@ -1567,6 +1582,21 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         // `AGE_LOCKED`, pushed above.
         return out;
     }
+    if matches!(
+        mob.mob_type,
+        mc_bamboo_blocks::entity::mob::MobType::IronGolem
+            | mc_bamboo_blocks::entity::mob::MobType::SnowGolem
+    ) {
+        let default = if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::SnowGolem {
+            16
+        } else {
+            0
+        };
+        if mob.golem_flags != default {
+            out.push(EntityData::GolemFlags(mob.golem_flags));
+        }
+        return out;
+    }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Goat {
         // 山羊的 18、19、20 是尖叫和两只角，缺省假、真、真。
         // A goat's 18, 19 and 20 are screaming and the two horns: false, true, true.
@@ -1650,6 +1680,8 @@ fn farm_default_data(
         (MobType::Panda, facts::PANDA_HIDDEN_GENE) => Some(EntityData::PandaHiddenGene(0)),
         (MobType::Panda, facts::PANDA_FLAGS) => Some(EntityData::PandaFlags(0)),
         (MobType::Ocelot, facts::OCELOT_TRUSTING) => Some(EntityData::OcelotTrusting(false)),
+        (MobType::IronGolem, facts::IRON_GOLEM_FLAGS) => Some(EntityData::GolemFlags(0)),
+        (MobType::SnowGolem, facts::SNOW_GOLEM_PUMPKIN) => Some(EntityData::GolemFlags(16)),
         (MobType::Cat, facts::TAME_FLAGS) => Some(EntityData::TameFlags(0)),
         (MobType::Cat, facts::TAME_OWNER) => Some(EntityData::TameOwner(None)),
         (MobType::Cat, facts::CAT_VARIANT) => Some(EntityData::CatVariant(

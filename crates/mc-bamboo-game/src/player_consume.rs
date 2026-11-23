@@ -181,6 +181,17 @@ pub(crate) fn complete(region: &mut Region, id: PlayerId, hand: mc_bamboo_core::
         }
     }
     crate::inventory::sync_after_consume(region, id);
+    // 官方 `ConsumeItemTrigger.trigger(ServerPlayer, ItemStack)`。
+    let name = mc_bamboo_data::items::ITEMS
+        .get(item as usize)
+        .map(|item| item.name)
+        .unwrap_or("minecraft:air");
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:consume_item",
+        serde_json::json!({"item": name}),
+    );
 }
 
 fn apply_consume_effect(region: &mut Region, id: PlayerId, effect: &ConsumeEffect) {

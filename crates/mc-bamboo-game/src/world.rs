@@ -252,6 +252,8 @@ pub struct World {
 /// together within 2 seconds (island plan 5.2, step 7).
 pub(crate) struct Master {
     pub(crate) global: Global,
+    /// 世界目录，写进度档案时用；`None` 表示不存档。
+    pub(crate) world_dir: Option<std::path::PathBuf>,
     /// 上一刻全部岛交回的睡眠计数；主控在这一刻开头、天气之后据此决定跳早。
     /// 官方 `ServerLevel.tick` 的 `areEnoughSleeping` / `areEnoughDeepSleeping`
     /// 也是在天气之后、时间推进之前读上一刻的玩家状态。
@@ -574,6 +576,7 @@ impl World {
         let mut world = Self {
             master: Master {
                 global,
+                world_dir: config.world_dir.clone(),
                 sleep: crate::sleep::SleepCounts::default(),
                 inbox,
                 refused_inboxes: Vec::new(),
@@ -2386,6 +2389,7 @@ impl World {
             spawn_chunk,
         } = *pending;
         let id = request.id;
+        let request_advancements = request.player_advancements.clone();
         self.master.hybrid.joining.remove(&id);
         let uuid = request.uuid;
         let entry = RosterEntry {
@@ -2500,6 +2504,10 @@ impl World {
         {
             restore_inventory(player, data);
             crate::player_effects::send_active(region, id);
+        }
+        // 官方 `PlayerList.placeNewPlayer` 构造 `PlayerAdvancements` 后由首 tick 发全量包。
+        if let Some(player) = region.players.get_mut(&id) {
+            player.advancements = crate::advancements::join_state(request_advancements.as_deref());
         }
         Ok(())
     }
@@ -2642,13 +2650,23 @@ impl World {
 
     /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
     fn save_one_player(&mut self, id: PlayerId) {
-        let encoded = self
+        let player = self
             .islands
             .parked()
-            .find_map(|island| island.region.players.get(&id))
-            .and_then(encode_player_save);
+            .find_map(|island| island.region.players.get(&id));
+        let Some(player) = player else {
+            return;
+        };
+        let encoded = encode_player_save(player);
+        let text = crate::advancements::encode_save(player);
         if let Some((uuid, bytes)) = encoded {
             self.master.host.submit_player_write(&uuid, bytes);
+        }
+        if let Some(root) = &self.master.world_dir
+            && let Err(error) =
+                crate::save_session::save_player_advancements(root, player.uuid.as_bytes(), &text)
+        {
+            tracing::warn!(%error, "could not save player advancements");
         }
     }
 
@@ -2665,10 +2683,36 @@ impl World {
             .flat_map(|island| island.region.players.values())
             .collect();
         players.sort_unstable_by_key(|player| player.id);
-        let encoded: Vec<(String, Vec<u8>)> =
-            players.into_iter().filter_map(encode_player_save).collect();
-        for (uuid, bytes) in encoded {
+        let encoded: Vec<([u8; 16], String, Vec<u8>)> = players
+            .into_iter()
+            .filter_map(|player| {
+                let (uuid, bytes) = encode_player_save(player)?;
+                Some((*player.uuid.as_bytes(), uuid, bytes))
+            })
+            .collect();
+        // 进度档案：官方 `PlayerAdvancements.save` 是 UTF-8 文本，不做 `_old` 轮换。
+        let advancement_text: Vec<([u8; 16], String)> = self
+            .islands
+            .parked()
+            .flat_map(|island| island.region.players.values())
+            .map(|player| {
+                (
+                    *player.uuid.as_bytes(),
+                    crate::advancements::encode_save(player),
+                )
+            })
+            .collect();
+        for (_, uuid, bytes) in encoded {
             self.master.host.submit_player_write(&uuid, bytes);
+        }
+        if let Some(root) = &self.master.world_dir {
+            for (uuid, text) in advancement_text {
+                if let Err(error) =
+                    crate::save_session::save_player_advancements(root, &uuid, &text)
+                {
+                    tracing::warn!(%error, "could not save player advancements");
+                }
+            }
         }
     }
 
@@ -3019,6 +3063,9 @@ impl World {
             }
             PlayRequest::Other(id) if id == serverbound::PLAYER_LOADED => {
                 movement::on_player_loaded(region, player);
+            }
+            PlayRequest::SeenAdvancements(seen) => {
+                crate::advancements::on_seen_advancements(region, player, &seen);
             }
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }
@@ -3548,6 +3595,8 @@ fn run_island_simulation(
     //
     // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.
     crate::experience::sync_dirty(region);
+    // 官方 `ServerPlayer.doTick`：进度触发器、首包/增量包都在玩家 tick 末尾 flush。
+    crate::advancements::tick(region);
     crate::command::admin::tick_idle(region);
     // 官方 `ServerPlayer.doTick` 的六个只读准则：岛算变了的值，主控写计分板。
     //

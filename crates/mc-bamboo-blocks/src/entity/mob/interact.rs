@@ -254,6 +254,12 @@ pub fn interact(
     if mob.mob_type == MobType::Creeper {
         return super::creeper::interact(me, mob, req);
     }
+    if mob.mob_type == MobType::IronGolem {
+        return super::iron_golem::interact(me, mob, req);
+    }
+    if mob.mob_type == MobType::SnowGolem {
+        return super::snow_golem::interact(mob, req);
+    }
     animal_interact(me, mob, req)
 }
 
@@ -360,6 +366,7 @@ pub(crate) fn apply_shear(
         Some(MobType::Sheep) => sheep::apply_shear(world, entity, hand, tool),
         Some(MobType::Mooshroom) => mooshroom::apply_shear(world, entity, hand, tool),
         Some(MobType::Bogged) => super::bogged::apply_shear(world, entity, hand, tool),
+        Some(MobType::SnowGolem) => super::snow_golem::apply_shear(world, entity, hand, tool),
         _ => {}
     }
 }

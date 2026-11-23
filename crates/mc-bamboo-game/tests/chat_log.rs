@@ -98,6 +98,7 @@ fn chat_is_logged_with_the_not_secure_tag() {
         peer_ip: "127.0.0.1".to_owned(),
         online_at_login: 0,
         player_data: None,
+        player_advancements: None,
         sink: Box::new(DiscardingSink),
         inbox: inbox.player_channel().1,
     };

@@ -22,7 +22,17 @@ use crate::{inbound::PlayerId, player::Player, region::Region};
 ///
 /// One effect application; flags come from the caller.
 pub(crate) fn give(region: &mut Region, id: PlayerId, instance: EffectInstance) -> bool {
-    give_in(&mut region.players, &mut region.links, id, instance)
+    let changed = give_in(&mut region.players, &mut region.links, id, instance);
+    if changed {
+        // 官方 `EffectsChangedTrigger.trigger(ServerPlayer)`。
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:effects_changed",
+            serde_json::json!({"effects": {}}),
+        );
+    }
+    changed
 }
 
 /// 不借用整张 `Region` 的施加入口，供精确驱动的 `RegionLevel` 当场落地药水效果。

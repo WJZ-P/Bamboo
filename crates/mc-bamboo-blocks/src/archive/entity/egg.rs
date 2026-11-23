@@ -9,7 +9,7 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
 use super::{Error, Result, put, tag, uuid_tag};
-use crate::entity::thrown_egg::ThrownEgg;
+use crate::entity::thrown_egg::{ThrowableKind, ThrownEgg};
 
 pub(super) fn write(egg: &ThrownEgg, out: &mut Vec<(String, Tag)>) -> Result<()> {
     if egg.no_gravity {
@@ -27,15 +27,19 @@ pub(super) fn write(egg: &ThrownEgg, out: &mut Vec<(String, Tag)>) -> Result<()>
     Ok(())
 }
 
-/// 读不到 `Item` 时按 `getDefaultItem()` 给一枚普通鸡蛋。
+/// 读不到 `Item` 时按 `getDefaultItem()` 给对应种类的默认物品。
 ///
-/// Without `Item`, `getDefaultItem()` gives one plain egg.
-pub(super) fn read(input: &Tag, pitch: f32) -> ThrownEgg {
+/// Without `Item`, `getDefaultItem()` gives that kind's default item.
+pub(super) fn read(input: &Tag, pitch: f32, kind: ThrowableKind) -> ThrownEgg {
+    let default = match kind {
+        ThrowableKind::Egg => items::EGG,
+        ThrowableKind::Snowball => items::SNOWBALL,
+    };
     let item = tag::field(input, "Item")
         .and_then(|value| slots::decode_item(value).ok())
         .filter(|stack| !stack.is_empty())
-        .unwrap_or_else(|| ItemStack::new(items::EGG, 1));
-    let mut egg = ThrownEgg::new(&item);
+        .unwrap_or_else(|| ItemStack::new(default, 1));
+    let mut egg = ThrownEgg::with_kind(&item, kind);
     egg.x_rot = pitch;
     egg.uuid = super::arrow::uuid_from(input, "UUID").unwrap_or([0; 16]);
     egg.owner_uuid = super::arrow::uuid_from(input, "Owner");

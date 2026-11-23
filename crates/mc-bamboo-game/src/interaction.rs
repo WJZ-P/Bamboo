@@ -853,6 +853,26 @@ fn block_update(pos: BlockPos, state: u32) -> BlockUpdate {
 }
 
 /// `use_item_on`，官方 `handleUseItemOn` 的顺序。`blocks-inventory.md` 3.1、第 6 章。
+fn item_name(region: &Region, id: PlayerId, hand: mc_bamboo_core::Hand) -> String {
+    region
+        .players
+        .get(&id)
+        .and_then(|player| {
+            mc_bamboo_data::items::ITEMS.get(player.inventory.held(hand).item as usize)
+        })
+        .map(|item| item.name.to_owned())
+        .unwrap_or_default()
+}
+
+fn block_name(region: &Region, pos: mc_bamboo_core::BlockPos) -> String {
+    region
+        .chunks
+        .block(pos)
+        .and_then(|state| mc_bamboo_data::blocks::BLOCKS.get(state as usize))
+        .map(|block| block.name.to_owned())
+        .unwrap_or_default()
+}
+
 pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemOn) {
     if !record_sequence(region, id, packet.sequence) {
         return;
@@ -985,7 +1005,29 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         //
         // `CommandBlock.setPlacedBy`. `/setblock` does not come through here.
         crate::command_block::on_placed(region, placed);
+        // 官方 `PlacedBlockTrigger` / `ItemUsedOnLocationTrigger`：放置成功时按
+        // 放下的方块、位置与手持物品触发。
+        let block = region
+            .chunks
+            .block(placed)
+            .and_then(|state| mc_bamboo_data::blocks::BLOCKS.get(state as usize))
+            .map(|block| block.name.to_owned())
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "block": block,
+            "item": item_name(region, id, packet.hand),
+            "x": placed.x, "y": placed.y, "z": placed.z,
+        });
+        crate::advancement_triggers::record(region, id, "minecraft:placed_block", payload.clone());
+        crate::advancement_triggers::record(region, id, "minecraft:item_used_on_block", payload);
     }
+    // `DefaultBlockInteractionTrigger` / `AnyBlockInteractionTrigger`：任何右键方块。
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:any_block_use",
+        serde_json::json!({"block": block_name(region, packet.pos)}),
+    );
     send_effects(region, Some(id), &outcome.effects);
     // 炼药锅的 `createFilledResult` 和洗染料。方块逻辑只记账，物品栏在这里改。
     // A cauldron's `createFilledResult` or dye wash. Block behaviour records it; the inventory changes here.

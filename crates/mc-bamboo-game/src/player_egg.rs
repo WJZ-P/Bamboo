@@ -1,12 +1,17 @@
-//! 玩家右键扔鸡蛋：官方 `EggItem.use`。先用世界随机源取扔蛋声的音高，再在眼睛下方
-//! 0.1 处生成 `ThrownEgg`，按视线以力度 1.5、散布 1 射出，记使用统计，最后非创造模式扣一个。
+//! 玩家右键扔鸡蛋或雪球：官方 `EggItem.use` / `SnowballItem.use`。先用世界随机源取
+//! 投掷声的音高，再在眼睛下方 0.1 处生成 `ThrowableItemProjectile`，按视线以力度
+//! 1.5、散布 1 射出，记使用统计，最后非创造模式扣一个。
 //!
-//! A player throwing an egg, vanilla `EggItem.use`: the throw sound's pitch comes
-//! from the level random first, then a `ThrownEgg` spawns 0.1 below the eyes and is
-//! shot along the view with power 1.5 and uncertainty 1. Award the use stat, then
-//! consume one unless the player has infinite materials.
+//! A player throwing an egg or snowball, vanilla `EggItem.use` /
+//! `SnowballItem.use`: the throw sound's pitch comes from the level random first,
+//! then a `ThrowableItemProjectile` spawns 0.1 below the eyes and is shot along
+//! the view with power 1.5 and uncertainty 1. Award the use stat, then consume
+//! one unless the player has infinite materials.
 
-use mc_bamboo_blocks::{World, entity::thrown_egg::EggShot};
+use mc_bamboo_blocks::{
+    World,
+    entity::thrown_egg::{EggShot, ThrowableKind},
+};
 use mc_bamboo_core::Hand;
 use mc_bamboo_data::items;
 use mc_bamboo_protocol::packet::play::GameMode;
@@ -26,19 +31,15 @@ pub(crate) fn throw(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         return false;
     };
     let stack = player.inventory.held(hand).clone();
-    if !matches!(stack.item, items::EGG | items::BLUE_EGG | items::BROWN_EGG) {
-        return false;
-    }
+    let (snowball, sound) = match stack.item {
+        items::EGG | items::BLUE_EGG | items::BROWN_EGG => (false, "minecraft:entity.egg.throw"),
+        items::SNOWBALL => (true, "minecraft:entity.snowball.throw"),
+        _ => return false,
+    };
     let item = stack.item;
     let (owner, owner_uuid) = (player.id.0, *player.uuid.as_bytes());
     let pitch = 0.4 / (level_random_float(region) * 0.4 + 0.8);
-    play_sound(
-        region,
-        player_position(region, id),
-        "minecraft:entity.egg.throw",
-        0.5,
-        pitch,
-    );
+    play_sound(region, player_position(region, id), sound, 0.5, pitch);
     let Some(position) = player_eye(region, id) else {
         return false;
     };
@@ -52,6 +53,11 @@ pub(crate) fn throw(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         owner: Some(owner),
         owner_uuid: Some(owner_uuid),
         item: stack,
+        projectile: if snowball {
+            ThrowableKind::Snowball
+        } else {
+            ThrowableKind::Egg
+        },
     };
     {
         let (mut level, ticks) = region.block_level();

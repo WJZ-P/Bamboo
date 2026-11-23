@@ -416,6 +416,9 @@ public final class Probe {
             "handleChunkBlocksUpdate",
             "handleCommandSuggestions",
             "handleCommands",
+            // 26.3 进度系统：首包、增量包和选中标签页。
+            "handleUpdateAdvancementsPacket",
+            "handleSelectAdvancementsTab",
             "handleContainerClose",
             "handleContainerContent",
             // 织布机选图案时官方发 `container_set_data`。

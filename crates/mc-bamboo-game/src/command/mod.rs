@@ -25,6 +25,7 @@ pub(crate) fn may_use_root(line: &str, level: u8) -> bool {
 }
 
 pub(crate) mod admin;
+pub(crate) mod advancement;
 mod blocks;
 pub(crate) mod borrow;
 mod bossbar;

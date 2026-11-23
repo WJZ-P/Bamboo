@@ -421,3 +421,19 @@ async fn client_information_sets_the_view_distance_before_the_join() {
 
     assert_eq!(client.read_chunks(81).await, 81);
 }
+
+/// 进服首包 `update_advancements` 带 `reset=true`。
+#[tokio::test]
+async fn login_sends_the_first_advancements_packet_with_reset() {
+    let server = TestServer::start(small_world()).await;
+    let alice = server.enter("Alice").await;
+    // `enter` 已经等过 chunk batch finished，进服这一刻的首包一定在日志里。
+    let frames = alice.frames();
+    let first = frames
+        .iter()
+        .find(|frame| frame.id == play::clientbound::UPDATE_ADVANCEMENTS)
+        .expect("join must send update_advancements");
+    assert_eq!(first.body[0], 1, "首包必须 reset=true");
+    assert!(first.body.len() > 1, "首包还要带 added / progress 等字段");
+    drop(server);
+}
