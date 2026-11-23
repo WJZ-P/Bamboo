@@ -1,4 +1,4 @@
-use mc_bamboo_blocks::{entity::mob::MobType, random::LegacyRandom};
+use mc_bamboo_blocks::entity::mob::MobType;
 use mc_bamboo_data::registries::{attribute, data_component_type};
 use mc_bamboo_loot::{LootStack, mob_spawn_enchantments};
 use mc_bamboo_protocol::{
@@ -92,7 +92,11 @@ impl Coverage {
     }
 }
 
-pub(super) fn enchant_equipment(stack: &mut ItemStack, special: f32, random: &LegacyRandom) {
+pub(super) fn enchant_equipment(
+    stack: &mut ItemStack,
+    special: f32,
+    random: &dyn mc_bamboo_blocks::random::RandomSource,
+) {
     let levels = mob_spawn_enchantments(&LootStack::new(stack.item, stack.count), special, random);
     if !levels.is_empty() {
         let mut patch = stack.patch();
@@ -102,6 +106,25 @@ pub(super) fn enchant_equipment(stack: &mut ItemStack, special: f32, random: &Le
         );
         (stack.added, stack.removed) = patch.to_opaque();
     }
+}
+
+/// 陷阱骑士对拍用的装备字符串：`item@id:{name@level,...}`，和 Java 夹具同格式。
+pub(super) fn equipment_string(stack: &ItemStack) -> String {
+    let mut levels: Vec<String> = match stack.patch().get(data_component_type::ENCHANTMENTS) {
+        Some(ComponentValue::Enchantments(levels)) => levels
+            .iter()
+            .map(|&(id, level)| {
+                format!(
+                    "{}@{level}",
+                    mc_bamboo_loot::enchantment_name(id).unwrap_or("?")
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    levels.sort();
+    let item = if stack.is_empty() { 0 } else { stack.item };
+    format!("{}:{{{}}}", item, levels.join(","))
 }
 
 fn equipment(stack: &ItemStack) -> Equipment {

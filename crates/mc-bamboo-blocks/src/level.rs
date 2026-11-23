@@ -508,6 +508,10 @@ pub trait LevelEntities {
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic>;
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// `getEntitiesOfClass` 的官方分区顺序（`SectionPos.asLong` 升序，段内加入顺序）。
+    ///
+    /// Vanilla `EntitySectionStorage` order for `getEntitiesOfClass`.
+    fn for_each_entity_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
     /// 同 [`Self::for_each_entity_in`]，但最多访问 `limit` 个。
     fn for_each_pushable_in(
         &self,
@@ -596,6 +600,10 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.entities_table().for_each_in(area, visit);
+    }
+
+    fn for_each_entity_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        self.entities_table().for_each_in_section_order(area, visit);
     }
 
     fn for_each_pushable_in(
@@ -737,6 +745,20 @@ pub trait Level: LevelSideState + LevelEntities {
     ///
     /// Apply the mob-spawn equipment enchantment provider from the game registry.
     fn enchant_mob_spawn_equipment(&self, _stack: &mut ItemStack, _special: f32) {}
+
+    /// 同一套附魔提供器，但用调用方给的随机源（陷阱骑士用骷髅自己的
+    /// `getRandom()`，不是 `level.random`）。默认退回世界随机源。
+    ///
+    /// Same provider with an explicit random source (trap riders use the
+    /// skeleton's own random, not the level random).
+    fn enchant_mob_spawn_equipment_from(
+        &self,
+        stack: &mut ItemStack,
+        special: f32,
+        _random: &dyn crate::random::RandomSource,
+    ) {
+        self.enchant_mob_spawn_equipment(stack, special);
+    }
 
     /// 只取一个 `next_float()`，供活塞音高这类「取数 → 算参数 → 发效果」的动作使用。
     /// 默认实现转发给 [`Self::random`]；录制包装覆盖它把这次取数记成可重放的效果。

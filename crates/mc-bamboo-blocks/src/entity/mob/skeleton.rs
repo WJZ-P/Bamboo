@@ -340,7 +340,7 @@ pub(crate) fn strafe(me: &Entity, mob: &mut Mob, view: &dyn BlockView) {
     control.operation = super::control::Operation::Wait;
 }
 
-pub(super) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
+pub(in crate::entity::mob) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
     let difficulty = BlockView::difficulty(world);
     let special = ((BlockView::effective_difficulty(world, entity.block_position()) - 2.0) / 2.0)
         .clamp(0.0, 1.0);

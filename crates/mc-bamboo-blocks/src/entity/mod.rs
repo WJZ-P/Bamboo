@@ -42,7 +42,7 @@ pub use physics::{
     TravelSegment, collide_border_only, enclosed_in_air, no_block_collision, overlaps_new_blocks,
     stuck_speed, sweep_movement,
 };
-pub use random::JavaRandom;
+pub use random::{EntityRandom, JavaRandom};
 pub use store::{
     ChunkEntities, EntityIds, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
     FallingBlockState, ItemState, KindPublic, KindState,

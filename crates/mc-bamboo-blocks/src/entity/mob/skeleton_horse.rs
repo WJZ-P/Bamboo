@@ -126,6 +126,7 @@ pub fn trap_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> Tra
         position: me.position,
         pushes,
         effective: ctx.blocks().effective_difficulty(me.block_position()),
+        rider_seeds: Vec::new(),
     }
 }
 
@@ -136,16 +137,70 @@ pub struct TrapSpawn {
     /// 三匹新骷髅马分别被推的 (dx, dz)。
     pub pushes: Vec<(f64, f64)>,
     pub effective: f32,
+    /// 对拍夹具用：给四名骑士指定的实体随机源状态；运行时为空。
+    pub rider_seeds: Vec<i64>,
+}
+
+/// `SkeletonTrapGoal.createSkeleton`：先跑 `Skeleton.finalizeSpawn`（装备生成与
+/// `populateDefaultEquipmentEnchantments` 都在世界随机源上），再把主手和头盔的
+/// `enchantments` 组件清成空、按 `MOB_SPAWN_EQUIPMENT` 提供器重抽一次。
+/// 头盔若为空就补一顶铁头盔。所有取数仍走世界随机源，和官方一致。
+///
+/// Vanilla `createSkeleton`: `finalizeSpawn`, then clear and re-enchant MAINHAND
+/// and HEAD with the `MOB_SPAWN_EQUIPMENT` provider; fill an empty head slot
+/// with an iron helmet.
+fn trap_rider(world: &mut World<'_>, position: Vec3, special: f32, seed: Option<i64>) -> Entity {
+    use mc_bamboo_protocol::packet::play::EquipmentSlot;
+    // `EntityType.create` 先分配实体 ID / 种子，再跑 `finalizeSpawn`；官方
+    // `createSkeleton` 的 `enchant` 用的是骷髅自己的随机源，所以先 `prepare`。
+    let mut rider = world.prepare_entity(Entity::by_mob_type(MobType::Skeleton, position));
+    if let Some(seed) = seed {
+        rider.random = crate::entity::JavaRandom::from_state(seed);
+    }
+    super::skeleton::finalize_spawn(world, &mut rider);
+    let difficulty = crate::entity::ctx::BlockView::difficulty(world);
+    let _ = difficulty;
+    rider.with_mob(|me, mob| {
+        mob.invulnerable_time = 60;
+        mob.persistence_required = true;
+        let head = EquipmentSlot::Head;
+        if mob.equipment.get(head).is_empty() {
+            mob.equipment.set(
+                head,
+                mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1),
+            );
+        }
+        // `enchantItemFromProvider` 用骷髅自己的 `getRandom()`，不是世界随机源。
+        let random = crate::entity::EntityRandom(std::cell::RefCell::new(me.random));
+        for slot in [EquipmentSlot::MainHand, head] {
+            let mut stack = mob.equipment.get(slot).clone();
+            // `ItemStack.set(ENCHANTMENTS, EMPTY)`：清掉 `finalizeSpawn` 可能给的附魔。
+            let mut patch = stack.patch();
+            patch.remove(mc_bamboo_data::registries::data_component_type::ENCHANTMENTS);
+            (stack.added, stack.removed) = patch.to_opaque();
+            world
+                .level()
+                .enchant_mob_spawn_equipment_from(&mut stack, special, &random);
+            mob.equipment.set(slot, stack);
+        }
+        me.random = random.0.into_inner();
+    });
+    rider
 }
 
 /// `SkeletonTrapGoal.tick` 的落地：一道视觉闪电、原马上的骷髅和三匹新的骷髅马骑士。
+/// 生成顺序照官方 `tick`：闪电 → 第一名骑士 → （马、骑士）× 3。
 pub fn spawn_trap(world: &mut World, facts: TrapSpawn) {
     let bolt = crate::entity::lightning::entity(facts.position, true);
     world.spawn_entity(bolt);
+    let special = ((facts.effective - 2.0) / 2.0).clamp(0.0, 1.0);
+    // 骑在原陷阱马上的第一名骷髅。
+    let first_seed = facts.rider_seeds.first().copied();
+    let rider = trap_rider(world, facts.position, special, first_seed);
+    world.add_prepared_entity(rider);
     for (index, (dx, dz)) in facts.pushes.iter().enumerate() {
-        let _ = index;
-        let horse_position = facts.position;
-        let mut horse = Entity::by_mob_type(MobType::SkeletonHorse, horse_position);
+        let seed = facts.rider_seeds.get(index + 1).copied();
+        let mut horse = Entity::by_mob_type(MobType::SkeletonHorse, facts.position);
         horse.with_mob(|_, mob| {
             if let Some(state) = mob.equine.as_mut() {
                 state.tame = true;
@@ -156,28 +211,9 @@ pub fn spawn_trap(world: &mut World, facts: TrapSpawn) {
         });
         horse.delta = Vec3::new(*dx, 0.0, *dz);
         world.spawn_entity(horse);
-        let mut rider = Entity::by_mob_type(MobType::Skeleton, horse_position);
-        rider.with_mob(|_, mob| {
-            mob.invulnerable_time = 60;
-            mob.persistence_required = true;
-            mob.equipment.set(
-                mc_bamboo_protocol::packet::play::EquipmentSlot::Head,
-                mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1),
-            );
-        });
-        world.spawn_entity(rider);
+        let rider = trap_rider(world, facts.position, special, seed);
+        world.add_prepared_entity(rider);
     }
-    // 骑在原陷阱马上的第一名骷髅。
-    let mut rider = Entity::by_mob_type(MobType::Skeleton, facts.position);
-    rider.with_mob(|_, mob| {
-        mob.invulnerable_time = 60;
-        mob.persistence_required = true;
-        mob.equipment.set(
-            mc_bamboo_protocol::packet::play::EquipmentSlot::Head,
-            mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1),
-        );
-    });
-    world.spawn_entity(rider);
 }
 
 /// `SkeletonHorse.setTrap`：挂上 / 摘掉优先级 1 的 `SkeletonTrapGoal`。

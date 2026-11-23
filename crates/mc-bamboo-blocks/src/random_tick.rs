@@ -117,7 +117,7 @@ pub fn tick_thunder(level: &mut dyn Level, ticks: &mut BlockTicks, chunk: ChunkP
 
 /// `ServerLevel.findLightningTargetAround`：`MOTION_BLOCKING` 高度图 → 避雷针 POI →
 /// 3 格外扩的竖直盒里随机挑一个活着的、能看见天的生活实体 → 高度图落点。
-fn lightning_target_around(world: &World, rolled: BlockPos) -> BlockPos {
+pub fn lightning_target_around(world: &World, rolled: BlockPos) -> BlockPos {
     let mut top = BlockPos::new(rolled.x, world.level().heightmap_y(rolled), rolled.z);
     if let Some(rod) = world.level().lightning_rod_near(top, LIGHTNING_ROD_RADIUS) {
         return rod;
@@ -131,16 +131,20 @@ fn lightning_target_around(world: &World, rolled: BlockPos) -> BlockPos {
         f64::from(sky_top.y + 1) + 3.0,
         f64::from(sky_top.z + 1) + 3.0,
     );
+    // `getEntitiesOfClass(LivingEntity, box, predicate)`：按实体分区顺序收候选，
+    // 之后 `nextInt(list.size())` 挑一个。只有生物（`LivingEntity`）在列表里。
     let mut candidates: Vec<BlockPos> = Vec::new();
-    world.level().for_each_entity_in(area, &mut |public| {
-        if public.removed || !matches!(public.kind, crate::entity::KindPublic::Mob(_)) {
-            return;
-        }
-        let pos = public.block_position();
-        if world.level().can_see_sky(pos) {
-            candidates.push(pos);
-        }
-    });
+    world
+        .level()
+        .for_each_entity_in_section_order(area, &mut |public| {
+            if public.removed || !matches!(public.kind, crate::entity::KindPublic::Mob(_)) {
+                return;
+            }
+            let pos = public.block_position();
+            if world.level().can_see_sky(pos) {
+                candidates.push(pos);
+            }
+        });
     if !candidates.is_empty() {
         let index = world.random().next_int(candidates.len() as i32) as usize;
         return candidates[index.min(candidates.len() - 1)];

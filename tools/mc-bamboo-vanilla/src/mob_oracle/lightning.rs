@@ -256,3 +256,92 @@ impl Report {
         }
     }
 }
+
+/// 陷阱骑士的装备与附魔逐位对拍。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TrapGearCase {
+    pub(super) name: String,
+    pub(super) seed: i64,
+    /// 官方夹具里每名骑士的实体随机源状态（Java 的 `create` 不带种子）。
+    pub(super) seeds: Vec<i64>,
+    /// 每个骑士：[主手, 脚, 腿, 胸, 头] 的字符串 + 左撇子标志。
+    pub(super) gear: Vec<Vec<String>>,
+}
+
+impl Report {
+    pub(super) fn replay_trap_gear(&mut self, case: &TrapGearCase) {
+        self.cases += 1;
+        self.steps += 1;
+        let mut level = MobLevel {
+            blocks: std::collections::HashMap::new(),
+            random: LevelRandom::new(case.seed),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            entities: Entities::with_next_id(1 << 24),
+            players: Vec::new(),
+            game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            wrong_was_hurt: false,
+            short_hunger: false,
+            ignore_bed_monsters: false,
+        };
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut horse = Entity::by_mob_type(MobType::SkeletonHorse, Vec3::new(0.5, 64.0, 0.5));
+        horse.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::mob::skeleton_horse::set_trap(mob, true);
+            mob.age = 0;
+        });
+        let _ = world.spawn_entity(horse);
+        // 直接复用 `spawn_trap` 的四名骑士生成路径；官方夹具调的是同一个
+        // `SkeletonTrapGoal.tick()`，所以世界随机源从同一个种子出发。
+        let facts = mc_bamboo_blocks::entity::mob::skeleton_horse::TrapSpawn {
+            position: Vec3::new(0.5, 64.0, 0.5),
+            pushes: vec![(0.0, 0.0); 3],
+            effective: 0.0,
+            rider_seeds: case.seeds.clone(),
+        };
+        mc_bamboo_blocks::entity::mob::skeleton_horse::spawn_trap(&mut world, facts);
+        let mut ours: Vec<Vec<String>> = Vec::new();
+        for entity in world.live_entities() {
+            let Some(mob) = entity.kind.mob() else {
+                continue;
+            };
+            if mob.mob_type != MobType::Skeleton {
+                continue;
+            }
+            let mut row = Vec::new();
+            for slot in [
+                mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand,
+                mc_bamboo_protocol::packet::play::EquipmentSlot::Feet,
+                mc_bamboo_protocol::packet::play::EquipmentSlot::Legs,
+                mc_bamboo_protocol::packet::play::EquipmentSlot::Chest,
+                mc_bamboo_protocol::packet::play::EquipmentSlot::Head,
+            ] {
+                let stack = mob.equipment.get(slot);
+                row.push(super::skeleton_spawn::equipment_string(stack));
+            }
+            row.push(i32::from(mob.left_handed).to_string());
+            ours.push(row);
+        }
+        if self.break_test.as_deref() == Some("trap_gear") {
+            self.mismatch(format!("{} gear (broken): {ours:?}", case.name));
+        } else if ours != case.gear {
+            self.mismatch(format!(
+                "{} gear: official {:?}, bamboo {:?}",
+                case.name, case.gear, ours
+            ));
+        }
+    }
+}

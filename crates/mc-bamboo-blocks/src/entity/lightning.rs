@@ -268,8 +268,9 @@ pub fn apply(me: &mut Entity, world: &mut World, mut facts: LightningTick) {
     if facts.life < 0 || facts.visual_only {
         return;
     }
-    // 3 格盒里的实体逐个 `thunderHit`。`hitEntities` 是算阶段读到的旧集合，
-    // 这里按 uid 升序补进新集合，和官方 `getEntities` 的顺序一致。
+    // 3 格盒里的实体逐个 `thunderHit`。官方这一支的谓词只有 `Entity.isAlive()`
+    // （`hitEntities` 只给 `LIGHTNING_STRIKE` 进度触发器去重），所以同一道闪电
+    // 每刻都会再劈一次。仍按 `getEntities` 的实体分区顺序收集。
     let area = Aabb::new(
         facts.position.x - HIT_HORIZONTAL,
         facts.position.y - HIT_BELOW,
@@ -279,12 +280,13 @@ pub fn apply(me: &mut Entity, world: &mut World, mut facts: LightningTick) {
         facts.position.z + HIT_HORIZONTAL,
     );
     let mut hits: Vec<EntityPublic> = Vec::new();
-    world.level().for_each_entity_in(area, &mut |public| {
-        if !public.removed && public.uid != facts.bolt_id && !facts.hit.contains(&public.uid) {
-            hits.push(public.clone());
-        }
-    });
-    hits.sort_by_key(|public| public.uid);
+    world
+        .level()
+        .for_each_entity_in_section_order(area, &mut |public| {
+            if !public.removed && public.uid != facts.bolt_id {
+                hits.push(public.clone());
+            }
+        });
     let bolt_uuid = crate::archive::entity::entity_uuid(facts.bolt_id).to_be_bytes();
     for public in &hits {
         facts.hit.insert(public.uid);
@@ -326,7 +328,7 @@ fn thunder_hit(world: &mut World, public: &EntityPublic, bolt_uuid: [u8; 16]) {
     let source = DamageSource::environment(DamageKind::LightningBolt);
     let Some(mob_type) = public.kind.mob_type() else {
         // 非生物实体也走 `Entity.thunderHit`；Bamboo 的非生物实体没有血量，只处理着火。
-        set_remaining_fire(world, uid, 1);
+        set_remaining_fire(world, uid, |left| left + 1);
         return;
     };
     match mob_type {
@@ -349,22 +351,31 @@ fn thunder_hit(world: &mut World, public: &EntityPublic, bolt_uuid: [u8; 16]) {
     }
 }
 
-/// `Entity.thunderHit` 的基类：加 1 刻火、为 0 时点火 8 秒、受 5 点雷击伤害。
+/// `Entity.thunderHit` 的基类：`setRemainingFireTicks(old + 1)`，接着官方读的是
+/// **设置之后的** `remainingFireTicks`；只有它等于 0（`i32` 回绕）才
+/// `igniteForSeconds(8)`。所以正常命中只加 1 刻火，长时间燃烧来自脚下的火方块。
+/// 最后受 5 点雷击伤害。
 fn general_thunder_hit(world: &mut World, uid: i32, source: DamageSource) {
-    if set_remaining_fire(world, uid, 1) == 0 {
-        set_remaining_fire(world, uid, IGNITE_SECONDS);
+    let before = remaining_fire(world, uid);
+    let after = before.wrapping_add(1);
+    set_remaining_fire(world, uid, |_| after);
+    if after == 0 {
+        set_remaining_fire(world, uid, |left| left.max(IGNITE_SECONDS));
     }
     world.hurt_mob(uid, source, THUNDER_DAMAGE);
 }
 
-/// `Entity.setRemainingFireTicks(remainingFireTicks + 1)`，返回设置后的值。
-fn set_remaining_fire(world: &mut World, uid: i32, ticks: i32) -> i32 {
+fn remaining_fire(world: &mut World, uid: i32) -> i32 {
     let mut left = 0;
-    world.with_entity_mut(uid, &mut |entity| {
-        entity.remaining_fire_ticks += ticks;
-        left = entity.remaining_fire_ticks;
-    });
+    world.with_entity_mut(uid, &mut |entity| left = entity.remaining_fire_ticks);
     left
+}
+
+/// 改写实体的 `remainingFireTicks`；`Entity.igniteForTicks` 只在更长时覆盖。
+fn set_remaining_fire(world: &mut World, uid: i32, change: impl Fn(i32) -> i32) {
+    world.with_entity_mut(uid, &mut |entity| {
+        entity.remaining_fire_ticks = change(entity.remaining_fire_ticks);
+    });
 }
 
 /// `LightningRodBlock.onLightningStrike`：置 `POWERED`，通知背面、排 8 刻、发 3002。

@@ -55,6 +55,8 @@ mod skeleton_spawn;
 mod small_mob;
 mod squid;
 mod structure_spawn;
+mod thunder;
+mod undead_horse;
 mod water_mob;
 mod witch_throw;
 
@@ -119,6 +121,12 @@ enum Line {
     Bat(Box<bat::BatCase>),
     Lightning(Box<lightning::LightningCase>),
     SkeletonTrap(Box<lightning::TrapCase>),
+    ThunderTarget(Box<thunder::ThunderTargetCase>),
+    ThunderHit(Box<thunder::ThunderHitCase>),
+    TrapGear(Box<lightning::TrapGearCase>),
+    UndeadHorse(Box<undead_horse::UndeadHorseCase>),
+    UndeadHorseSave(undead_horse::UndeadHorseSaveCase),
+    UndeadHorseDeath(undead_horse::UndeadHorseDeathCase),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
@@ -1113,6 +1121,15 @@ impl Level for MobLevel {
         skeleton_spawn::enchant_equipment(stack, special, self.random.source());
     }
 
+    fn enchant_mob_spawn_equipment_from(
+        &self,
+        stack: &mut ItemStack,
+        special: f32,
+        random: &dyn mc_bamboo_blocks::random::RandomSource,
+    ) {
+        skeleton_spawn::enchant_equipment(stack, special, random);
+    }
+
     fn is_halloween(&self) -> bool {
         self.facts.halloween
     }
@@ -1448,6 +1465,12 @@ impl Report {
                 Line::Bat(case) => self.replay_bat(&case),
                 Line::Lightning(case) => self.replay_lightning(&case),
                 Line::SkeletonTrap(case) => self.replay_trap(&case),
+                Line::ThunderTarget(case) => self.replay_thunder_target(&case),
+                Line::ThunderHit(case) => self.replay_thunder_hit(&case),
+                Line::TrapGear(case) => self.replay_trap_gear(&case),
+                Line::UndeadHorse(case) => self.replay_undead_horse(&case),
+                Line::UndeadHorseSave(case) => self.replay_undead_horse_save(&case),
+                Line::UndeadHorseDeath(case) => self.replay_undead_horse_death(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),

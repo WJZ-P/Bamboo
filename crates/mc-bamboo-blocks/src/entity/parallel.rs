@@ -642,12 +642,16 @@ fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
         })
         .unzip();
     // 算阶段就 `discard` 的实体不发布进表里，和精确模式「tick 过就不 put 回去」一致。
-    // 这个标记是算阶段顺手记下的，不用再对所有 uid 逐个查表。
+    // 但它这一刻发出的命令仍要落地（闪电最后一刻的引火 / `thunderHit`、命中的鸡蛋等）：
+    // 精确模式 `emit` 当场就做了，并行模式若跳过会少一次写世界。保存一份算阶段
+    // 结束时的快照，落地时按同一顺序跑命令，跑完不再放回表里。
     let mut publish_rows = Vec::with_capacity(rows.len());
     let mut publish_public = Vec::with_capacity(public.len());
     let mut publish_state = Vec::with_capacity(state.len());
+    let mut removed_entities: Vec<Option<Entity>> = (0..rows.len()).map(|_| None).collect();
     for (index, ((row, public), state)) in rows.iter().copied().zip(public).zip(state).enumerate() {
         if results[index].removed {
+            removed_entities[index] = Some(EntityRow { public, state }.into_entity());
             continue;
         }
         publish_rows.push(row);
@@ -668,13 +672,21 @@ fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
 
     let apply_start = Instant::now();
     for (index, result) in results.iter_mut().enumerate() {
-        if result.commands.commands.is_empty() || result.removed {
+        if result.commands.commands.is_empty() {
             continue;
         }
         let uid = uids[index];
-        // 前面的命令可能已经把这个实体拿掉；`take_entity` 返回 None 就整批跳过。
-        let Some(mut me) = world.entities_mut().take_entity(uid) else {
-            continue;
+        let mut me = if result.removed {
+            let Some(me) = removed_entities[index].take() else {
+                continue;
+            };
+            me
+        } else {
+            // 前面的命令可能已经把这个实体拿掉；`take_entity` 返回 None 就整批跳过。
+            let Some(me) = world.entities_mut().take_entity(uid) else {
+                continue;
+            };
+            me
         };
         for command in result.commands.commands.drain(..) {
             ctx::apply(command, &mut me, world);
@@ -683,7 +695,7 @@ fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
             // 落地时才消失的实体（命中的鸡蛋）要把这一刻的实体事件留给同步层。
             // An entity removed while applying (an egg that hit) keeps its events for sync.
             world.entities_mut().keep_departed_mob_events(&me);
-        } else {
+        } else if !result.removed {
             world.entities_mut().put_entity(me);
         }
     }

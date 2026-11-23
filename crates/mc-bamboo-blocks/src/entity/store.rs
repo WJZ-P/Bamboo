@@ -904,6 +904,47 @@ impl EntityStore {
         (uids, rows, states)
     }
 
+    /// 官方 `EntitySectionStorage` 的分区遍历顺序：`SectionPos.asLong` 升序。
+    /// 打包顺序是 `x << 42 | z << 20 | y`，所以外层 x、中层 z、内层 y；段内
+    /// `ClassInstanceMultiMap` 是加入顺序，等价 uid 升序。`getEntitiesOfClass`
+    /// 用这个顺序建列表，再由 `nextInt(list.size())` 挑一个。
+    ///
+    /// Vanilla `EntitySectionStorage` order: ascending packed `SectionPos.asLong`
+    /// (`x << 42 | z << 20 | y`), then insertion order within a section.
+    pub fn for_each_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        let (first, last) = section_range(&area);
+        // 只遍历真的登记过的段，按官方的打包键排序（负数坐标也按打包后的值）。
+        let mut keys: Vec<(i64, (i32, i32, i32))> = self
+            .grid
+            .range(first..=last)
+            .map(|(&key, _)| (section_key(key), key))
+            .collect();
+        keys.sort_by_key(|(packed, key)| (*packed, *key));
+        keys.dedup_by_key(|(packed, _)| *packed);
+        for (_, key) in keys {
+            let Some(rows) = self.grid.get(&key) else {
+                continue;
+            };
+            let mut candidates: Vec<(EntityUid, usize)> = rows
+                .iter()
+                .copied()
+                .filter_map(|row| {
+                    let entry = self.slots.get(row)?.as_ref()?;
+                    Some((entry.public.uid, row))
+                })
+                .collect();
+            candidates.sort_unstable_by_key(|(uid, _)| *uid);
+            for (_, row) in candidates {
+                let Some(entry) = self.slots.get(row).and_then(|slot| slot.as_ref()) else {
+                    continue;
+                };
+                if entry.public.bounding_box().intersects(area) {
+                    visit(&entry.public);
+                }
+            }
+        }
+    }
+
     /// 空间索引：和 `area` 相交的实体公开数据，按 uid 升序。
     pub fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.for_each_in_limited(area, usize::MAX, &mut |public| {
@@ -1757,6 +1798,13 @@ fn sections_of(bounds: Aabb) -> Vec<(i32, i32, i32)> {
         }
     }
     keys
+}
+
+/// `SectionPos.asLong(x, y, z)`：`x << 42 | z << 20 | y`（各轴按官方位宽掩码）。
+fn section_key((x, y, z): (i32, i32, i32)) -> i64 {
+    ((i64::from(x) & 0x3F_FFFF) << 42)
+        | ((i64::from(z) & 0x3F_FFFF) << 20)
+        | (i64::from(y) & 0xF_FFFF)
 }
 
 pub(crate) fn section_range(area: &Aabb) -> ((i32, i32, i32), (i32, i32, i32)) {
