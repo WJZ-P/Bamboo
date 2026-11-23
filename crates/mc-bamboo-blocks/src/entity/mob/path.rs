@@ -156,6 +156,32 @@ impl Default for EvaluatorFlags {
     }
 }
 
+impl EvaluatorFlags {
+    /// 压测去重用：把导航类型的几个开关压成一个小整数，不用给生产代码引入新类型。
+    #[cfg(test)]
+    pub(crate) fn nav_id(self) -> u16 {
+        let mut id = 0;
+        for bit in [
+            self.can_pass_doors,
+            self.can_open_doors,
+            self.can_float,
+            self.can_walk_over_fences,
+            self.amphibious,
+            self.frog,
+            self.fly,
+        ] {
+            id = id << 1 | u16::from(bit);
+        }
+        id = id << 2
+            | match self.swim {
+                None => 0,
+                Some(false) => 1,
+                Some(true) => 2,
+            };
+        id
+    }
+}
+
 /// 路径上的一个节点，官方 `Node` 的字段。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Node {
@@ -360,7 +386,24 @@ pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
             reached: false,
         }
     };
-    search.run(start, &mut target, request);
+    // 压测探针：一条进 A\* 的请求、展开了多少节点、成没成功、能不能按起点格 / 终点 /
+    // 体型 / 导航类型去重。正式构建里整段是空操作。
+    #[cfg(test)]
+    let _visited = {
+        let visited = search.run(start, &mut target, request);
+        use super::timing::imp::PathKey;
+        let start_node = search.nodes[start];
+        let key = PathKey {
+            start: (start_node.x, start_node.y, start_node.z),
+            target: (target.x, target.y, target.z),
+            size: (request.mob.width.to_bits(), request.mob.height.to_bits()),
+            nav: request.flags.nav_id(),
+        };
+        super::timing::record_path!(key, visited, target.best_node.is_some());
+        visited
+    };
+    #[cfg(not(test))]
+    let _ = search.run(start, &mut target, request);
     let best = target.best_node?;
     let mut chain = vec![search.nodes[best]];
     let mut current = search.nodes[best].came_from;
@@ -529,7 +572,8 @@ impl<'a> Search<'a> {
         mth::java_min_f32(distance, f32::MAX)
     }
 
-    fn run(&mut self, start: usize, target: &mut Target, request: &PathRequest) {
+    /// 返回这一轮从开放表里弹出的节点数，也就是 A\* 展开的节点数。
+    fn run(&mut self, start: usize, target: &mut Target, request: &PathRequest) -> u64 {
         self.nodes[start].g = 0.0;
         let h = self.best_h(start, target);
         self.nodes[start].h = h;
@@ -583,6 +627,8 @@ impl<'a> Search<'a> {
                 }
             }
         }
+        // 展开数不会为负（`i32` 是为了和官方的 `maxVisitedNodes` 比较）。
+        visited.max(0) as u64
     }
 
     // ---- `WalkNodeEvaluator` ----
