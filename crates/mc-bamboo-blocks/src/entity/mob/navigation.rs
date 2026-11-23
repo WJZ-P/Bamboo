@@ -135,6 +135,13 @@ impl Navigation {
             // `AmphibiousPathNavigation.canUpdatePath` 恒真。
             return true;
         }
+        if self.flags.fly {
+            // `FlyingPathNavigation.canUpdatePath`：会浮水且在水里，或者不是乘客。
+            // Bamboo 的生物不会骑生物，所以后一半恒真。
+            // `FlyingPathNavigation.canUpdatePath`: floating in liquid, or not a passenger.
+            // Bamboo mobs never ride mobs, so the second half is always true.
+            return (self.can_float() && mob.in_liquid) || true;
+        }
         match self.water() {
             Some(allow_breaching) => allow_breaching || mob.in_liquid,
             None => mob.path.on_ground || mob.in_liquid,
@@ -212,10 +219,10 @@ impl Navigation {
             self.path_to_position = Some(pos);
         }
         // `WaterBoundPathNavigation` 不覆盖 `createPath`：不查加载，也不找地面。
-        // `AmphibiousPathNavigation` 同样用基类实现。
+        // `AmphibiousPathNavigation` 同样用基类实现。飞行导航也一样。
         // `WaterBoundPathNavigation` keeps the base `createPath`: no loaded check and no
-        // surface search. `AmphibiousPathNavigation` does the same.
-        if self.water().is_some() || self.flags.amphibious {
+        // surface search. `AmphibiousPathNavigation` and `FlyingPathNavigation` do the same.
+        if self.water().is_some() || self.flags.amphibious || self.flags.fly {
             let max_path_length = self.max_path_length(mob.follow_range);
             return self.create_path_to(view, mob, pos, reach, max_path_length);
         }
@@ -333,8 +340,9 @@ impl Navigation {
         }
         let next = self.path.as_ref()?.next_entity_pos(width);
         // `WaterBoundPathNavigation.getGroundY` 原样返回 `target.y`。
-        // `WaterBoundPathNavigation.getGroundY` returns `target.y` unchanged.
-        let y = if self.water().is_some() || self.flags.amphibious {
+        // `WaterBoundPathNavigation.getGroundY` returns `target.y` unchanged; so does
+        // `FlyingPathNavigation`, which never calls `getGroundY` at all.
+        let y = if self.water().is_some() || self.flags.amphibious || self.flags.fly {
             next.y
         } else {
             ground_y(view, next)
@@ -398,7 +406,12 @@ impl Navigation {
         // `getMaxVerticalDistanceToWaypoint`: 1 on the ground, 0.5 in water.
         let vertical = if self.flags.swim.is_some() { 0.5 } else { 1.0 };
         let close = dx < limit && dz < limit && dy < vertical;
-        let direct = self.flags.swim.is_some() || (self.flags.amphibious && mob.in_liquid);
+        // `FlyingPathNavigation.canMoveDirectly` 也走这条，但把流体也算作阻挡；
+        // [`clear_for_movement`] 只挡源方块水，见已知差异。
+        // `FlyingPathNavigation.canMoveDirectly` also takes this path but counts fluids
+        // as blockers; [`clear_for_movement`] only sees source water (a known difference).
+        let direct =
+            self.flags.swim.is_some() || self.flags.fly || (self.flags.amphibious && mob.in_liquid);
         if close
             || (can_cut_corner(path.next_node().path_type)
                 // `Frog.FrogPathNavigation.canCutCorner`：水边不抄近路。
@@ -518,6 +531,13 @@ impl Navigation {
     /// The virtual `isStableDestination`: `WaterBoundPathNavigation` only wants the cell
     /// itself not to be solid-render.
     pub fn stable_destination(&self, view: &dyn BlockView, pos: BlockPos) -> bool {
+        if self.flags.fly {
+            // `FlyingPathNavigation.isStableDestination`：`entityCanStandOn`，这里用实心
+            // 碰撞形状近似。飞行的闲逛目标不走它。
+            // `FlyingPathNavigation.isStableDestination`: `entityCanStandOn`, approximated
+            // here with a solid collision shape. The flying wander goal does not use it.
+            return view.block_state(pos).is_solid();
+        }
         if self.flags.amphibious {
             // `AmphibiousPathNavigation.isStableDestination`：下面不是空气。
             return !view.block_state(pos.below()).is_air();
@@ -533,6 +553,11 @@ impl Navigation {
 /// `GroundPathNavigation.getTempMobPos`；`WaterBoundPathNavigation` 取 `getY(0.5)`。
 fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, flags: EvaluatorFlags) -> Vec3 {
     let position = mob.path.position;
+    if flags.fly {
+        // `FlyingPathNavigation.getTempMobPos`：直接用实体坐标。
+        // `FlyingPathNavigation.getTempMobPos`: the entity position as-is.
+        return position;
+    }
     if flags.swim.is_some() || flags.amphibious {
         // `AmphibiousPathNavigation.getTempMobPos` 和 `WaterBoundPathNavigation` 一样取
         // `getY(0.5)`。

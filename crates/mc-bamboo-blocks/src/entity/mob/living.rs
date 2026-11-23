@@ -87,8 +87,20 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Creeper {
         super::creeper::tick(me, mob, ctx);
     }
+    // `ShoulderRidingEntity.tick`：上肩冷却先加一。
+    // `ShoulderRidingEntity.tick`: the shoulder cooldown goes up first.
+    if mob.mob_type == super::MobType::Parrot {
+        mob.parrot.ride_cooldown += 1;
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
+    // `LivingEntity.tick`：`updatingUsingItem()` 紧跟 `super.tick()`，在装备比较和
+    // `aiStep` 之前。生物里只有弩走这条路。
+    // `LivingEntity.tick`: `updatingUsingItem()` right after `super.tick()`, ahead of the
+    // equipment diff and `aiStep`. Among mobs only the crossbow uses it.
+    if mob.mob_type == super::MobType::Pillager && !me.removed {
+        super::crossbow::use_tick(me, mob, ctx);
+    }
     detect_equipment_updates(mob);
     // `Drowned.updateSwimming()` 在 `Entity.baseTick` 里，紧跟流体跟踪之后。
     // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
@@ -97,7 +109,17 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::drowned::update_swimming(me, mob, target_in_water);
     }
     if !me.removed {
+        if mob.mob_type == super::MobType::Parrot {
+            // `Parrot.aiStep` 在 `super.aiStep` 之前的部分。
+            // The part of `Parrot.aiStep` before `super.aiStep`.
+            super::parrot::before_ai_step(me, mob, ctx);
+        }
         ai_step(me, mob, ctx);
+        if mob.mob_type == super::MobType::Parrot && !me.removed {
+            // `Parrot.aiStep` 结尾的 `calculateFlapping`。
+            // `calculateFlapping` at the end of `Parrot.aiStep`.
+            super::parrot::after_ai_step(me, mob);
+        }
     }
     // `Zombie.tick` 结尾的 `drowningTracker.tick()`，在 `super.tick()` 之后。
     // The `drowningTracker.tick()` at the end of `Zombie.tick`, after `super.tick()`.
@@ -156,6 +178,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Armadillo.tick` clamps the head and counts `inStateTicks` after `super.tick()`.
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::tick_after(mob);
+    }
+    // `Bat.tick` 在 `super.tick()` 之后：倒挂时钉住位置，飞行时竖直速度乘 0.6。
+    // `Bat.tick` after `super.tick()`: pin a hanging bat, damp a flying bat's vertical speed.
+    if mob.mob_type == super::MobType::Bat {
+        super::bat::tick_after(me, mob);
     }
     // `Camel.tick` 在 `super.tick()` 之后：冲刺、冷却、夹头、坐在水里站起。
     // `Camel.tick` after `super.tick()`: dash, cooldown, head clamp, stand up in water.
@@ -267,7 +294,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let near_sqr = 32.0 * 32.0;
     // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
     // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
-    if !persistent && distance > far_sqr && mob.removes_when_far_away(me.tick_count) {
+    if !persistent && distance > far_sqr && mob.removes_when_far_away_at(distance, me.tick_count) {
         me.discard();
         return;
     }
@@ -277,7 +304,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         && distance > near_sqr
     {
         // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
-        if mob.removes_when_far_away(me.tick_count) {
+        if mob.removes_when_far_away_at(distance, me.tick_count) {
             me.discard();
         }
     } else if distance < near_sqr {
@@ -606,9 +633,21 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::cat::play_ambient_sound(me, mob);
                 return;
             }
+            if mob.mob_type == super::MobType::Parrot {
+                // `Parrot.getAmbientSound` 用世界随机源挑模仿音。
+                // `Parrot.getAmbientSound` picks an imitation with the level random.
+                super::parrot::ambient_sound(me, mob, ctx);
+                return;
+            }
             // 受惊的犰狳没有叫声：`makeSound` 不跑，也不取音高。
             // A scared armadillo has no ambient sound, so no pitch draws either.
             if super::armadillo::is_scared(mob) {
+                return;
+            }
+            // `Bat.getAmbientSound`：倒挂时四次里三次不叫，不叫就不取音高。
+            // `Bat.getAmbientSound`: a hanging bat stays quiet three times in four and
+            // then draws no pitch.
+            if mob.mob_type == super::MobType::Bat && super::bat::ambient_is_muted(me, mob) {
                 return;
             }
             // `Entity.makeSound` 遇到空的叫声直接返回，也不取音高的两个随机数。
@@ -856,6 +895,9 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     if mob.mob_type.has_no_ambient_sound() {
         return;
     }
+    if mob.mob_type == super::MobType::Bat && super::bat::ambient_is_muted(me, mob) {
+        return;
+    }
     if super::turtle::is_turtle(mob.mob_type) {
         // `Turtle.getAmbientSound`：只有成年的、在水外站在地上时才叫，其余没有声音，
         // 也不取音高的两个随机数。
@@ -929,7 +971,14 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
-    (first - second) * 0.2 + base
+    let pitch = (first - second) * 0.2 + base;
+    if mob.mob_type == super::MobType::Bat {
+        // `Bat.getVoicePitch()`：`super.getVoicePitch() * 0.95F`。
+        // `Bat.getVoicePitch()`: `super.getVoicePitch() * 0.95F`.
+        pitch * 0.95
+    } else {
+        pitch
+    }
 }
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
@@ -987,7 +1036,7 @@ fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    mob.needs_sync = false;
+    mob.needs_sync = std::mem::take(&mut mob.knockback_sync);
     // `Witch.aiStep` 的喝药段在 `super.aiStep()`（`Monster.aiStep` 的亮度）之前。
     //
     // The potion part of `Witch.aiStep` runs before `super.aiStep()`, which is the
@@ -1030,7 +1079,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let eye = BlockPos::containing(Vec3::new(me.position.x, eye_y(me, mob), me.position.z));
         let raw = view.max_local_raw_brightness(eye, view.sky_darken()) as f32 / 15.0;
         let magic = raw / (4.0 - 3.0 * raw);
-        if magic > 0.5 {
+        // `Raider.updateNoActionTime` 覆写成无条件加 2，不看亮度。
+        // `Raider.updateNoActionTime` overrides it to an unconditional +2.
+        if magic > 0.5 || mob.mob_type.is_raider() {
             mob.no_action_time += 2;
         }
     }
@@ -1122,6 +1173,8 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
             }
             me.delta = Vec3::default();
+        } else if mob.mob_type == super::MobType::Phantom {
+            super::phantom::travel(me, mob, ctx, input);
         } else if super::squid::is_squid(mob.mob_type) {
             // `Squid.travel`：只有 `move(SELF, deltaMovement)`。
             // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
@@ -1447,6 +1500,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Bat {
+        super::bat::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Ocelot {
         super::ocelot::custom_server_ai_step(mob);
     }
@@ -1477,6 +1533,10 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Phantom {
+        // `PhantomLookControl.tick` 是空的。
+        // `PhantomLookControl.tick` is empty.
+        super::phantom::move_control_tick(me, mob);
     } else if mob.mob_type == super::MobType::Tadpole {
         move_control_tick(me, mob, ctx.blocks());
         super::tadpole::look_control_tick(me, mob);
@@ -1545,6 +1605,12 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
     }
     if super::fish::is_fish(mob.mob_type) {
         super::fish::move_control_tick(me, mob);
+        return;
+    }
+    if mob.mob_type == super::MobType::Parrot {
+        // `Parrot` 用 `FlyingMoveControl`。
+        // Parrots use `FlyingMoveControl`.
+        super::parrot::move_control_tick(me, mob);
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {
@@ -1661,6 +1727,10 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
 /// for a camel that `refuseToMove()` (`CamelBodyRotationControl`).
 fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
     if super::armadillo::is_scared(mob) {
+        return;
+    }
+    if mob.mob_type == super::MobType::Phantom {
+        super::phantom::body_rotation_tick(me, mob);
         return;
     }
     if mob.mob_type == super::MobType::Camel && super::camel::refuse_to_move(mob, time) {
@@ -1867,7 +1937,15 @@ fn travel_in_air(
     let air_drag = mob.attributes.value(attribute::AIR_DRAG_MODIFIER) as f32;
     let horizontal_air = modified_friction(0.91, air_drag);
     let horizontal = block_friction * horizontal_air;
-    let vertical = modified_friction(0.98, air_drag);
+    // `LivingEntity.travelInAir`：`omnidirectionalAirMover()`（鹦鹉、蜜蜂）竖直方向也用
+    // 0.91 的空气阻力，而不是 0.98。
+    // `LivingEntity.travelInAir`: an `omnidirectionalAirMover()` (parrot, bee) uses the
+    // 0.91 air drag vertically instead of 0.98.
+    let vertical = if mob.mob_type == super::MobType::Parrot {
+        horizontal_air
+    } else {
+        modified_friction(0.98, air_drag)
+    };
     me.delta = Vec3::new(
         movement.x * f64::from(horizontal),
         y * f64::from(vertical),
@@ -1940,9 +2018,10 @@ pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> 
     if mob.mob_type.climbs_walls() {
         return super::spider::on_climbable(mob);
     }
-    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓。
+    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓；`Phantom.onClimbable` 也恒假。
     // `AbstractHorse.onClimbable` is always false; equines never climb ladders or vines.
-    if mob.mob_type.is_equine() {
+    // `Phantom.onClimbable` is always false as well.
+    if mob.mob_type.is_equine() || mob.mob_type == super::MobType::Phantom {
         return false;
     }
     let pos = me.block_position();
@@ -2083,14 +2162,22 @@ fn jump_out_of_fluid(me: &mut Entity, mob: &Mob, view: &dyn BlockView, old_y: f6
 
 // ---- 推挤 ----
 
-/// `LivingEntity.pushEntities`：身边的生物互相推开。
+/// `LivingEntity.pushEntities`：身边的生物互相推开。蝙蝠把它覆写成空的，别人的
+/// `EntitySelector.pushableBy` 也因为 `isPushable()` 为假而跳过蝙蝠。
+///
+/// `LivingEntity.pushEntities`: nearby mobs shove each other apart. Bats override it with
+/// an empty body, and `EntitySelector.pushableBy` skips them as `isPushable()` is false.
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if !mob.mob_type.is_pushable() {
+        return;
+    }
     let bounds = me.bounding_box();
     let mut others = Vec::new();
     ctx.for_each_other_in(bounds, &mut |other| {
         if let KindPublic::Mob(public) = &other.kind
             && !other.removed
             && public.is_alive()
+            && public.mob_type.is_pushable()
         {
             others.push((other.uid, other.position));
         }
@@ -2135,6 +2222,9 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     for position in players {
         if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
             me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+            // `Entity.push(Entity)` 推开自己那一半时也置 `needsSync`。
+            // The self half of `Entity.push(Entity)` also sets `needsSync`.
+            mob.needs_sync = true;
         }
     }
     for (uid, position) in others {
@@ -2213,6 +2303,11 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Panda {
         mob.panda.sit(false);
     }
+    // `Parrot.hurtServer`：受伤时取消坐下命令。
+    // `Parrot.hurtServer`: damage clears the sitting order.
+    if mob.mob_type == super::MobType::Parrot {
+        mob.tame.ordered_to_sit = false;
+    }
     // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
     // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.
     let amount = if mob.mob_type == super::MobType::Armadillo {
@@ -2223,6 +2318,9 @@ pub(crate) fn hurt_server(
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }
+    if mob.mob_type == super::MobType::Bat {
+        return super::bat::hurt_server(me, mob, ctx, source, amount);
+    }
     // `Axolotl.hurtServer` 在父类之前做装死判定（`PLAY_DEAD_TICKS`）。
     // `Axolotl.hurtServer` runs the play-dead roll before the superclass.
     if mob.mob_type == super::MobType::Axolotl {
@@ -2230,6 +2328,17 @@ pub(crate) fn hurt_server(
         super::axolotl::maybe_play_dead(me, mob, amount, has_source);
     }
     living_hurt_server(me, mob, ctx, source, amount)
+}
+
+/// `isInvulnerableTo` 里已建模的部分：已移除，或无敌且伤害不能穿透。
+///
+/// The modelled part of `isInvulnerableTo`: removed, or invulnerable to a source that
+/// does not bypass it.
+pub(super) fn is_invulnerable_to(me: &Entity, mob: &Mob, source: &DamageSource) -> bool {
+    me.removed
+        || ((mob.invulnerable || mob.invulnerable_time > 0)
+            && !source.kind.bypasses_invulnerability()
+            && !source.creative_player)
 }
 
 /// `LivingEntity.hurtServer`。
@@ -2240,12 +2349,7 @@ pub(super) fn living_hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
-    // `isInvulnerableTo`。
-    if me.removed
-        || ((mob.invulnerable || mob.invulnerable_time > 0)
-            && !source.kind.bypasses_invulnerability()
-            && !source.creative_player)
-    {
+    if is_invulnerable_to(me, mob, &source) {
         return false;
     }
     // `Wolf.hurtServer`：没有免疫就先站起来，再走 `super.hurtServer`。
@@ -2409,11 +2513,14 @@ fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f
 }
 
 /// `LivingEntity.knockback`。
-pub(crate) fn knockback(me: &mut Entity, mob: &Mob, strength: f64, dx: f64, dz: f64) {
+pub(crate) fn knockback(me: &mut Entity, mob: &mut Mob, strength: f64, dx: f64, dz: f64) {
     let strength = strength * (1.0 - mob.attributes.value(attribute::KNOCKBACK_RESISTANCE));
     if strength <= 0.0 {
         return;
     }
+    // 官方在这里置 `needsSync`，留到下一次 `sendChanges`。
+    // Vanilla sets `needsSync` here and keeps it until the next `sendChanges`.
+    mob.knockback_sync = true;
     let (mut dx, mut dz) = (dx, dz);
     let delta = me.delta;
     while dx * dx + dz * dz < f64::from(1.0e-5_f32) {
@@ -2647,11 +2754,18 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         }
         return;
     }
-    if !mob.mob_type.is_monster() {
+    // 幻翼不是 `Monster`，但经验是构造函数里固定的 5，走下面怪物那一支。
+    // Phantoms are not `Monster`s, yet their fixed 5 experience takes the monster branch.
+    if !mob.mob_type.is_monster() && mob.mob_type != super::MobType::Phantom {
         mob.events.push(MobEvent::Death);
-        // `Tadpole.shouldDropExperience` 为假：不掉经验，也不取那次随机数。
-        // `Tadpole.shouldDropExperience` is false: no experience and no draw for it.
-        let experience = by_player && adult && drops && mob.mob_type != super::MobType::Tadpole;
+        // `Tadpole.shouldDropExperience` 为假：不掉经验，也不取那次随机数。蝙蝠的
+        // `xpReward` 是 0，`Mob.getBaseExperienceReward` 不取随机数。
+        // `Tadpole.shouldDropExperience` is false: no experience and no draw for it. A
+        // bat's `xpReward` is 0 and `Mob.getBaseExperienceReward` draws nothing.
+        let experience = by_player
+            && adult
+            && drops
+            && !matches!(mob.mob_type, super::MobType::Tadpole | super::MobType::Bat);
         animal_death_drops(me, mob, ctx, source, experience, adult && drops);
         return;
     }
@@ -3060,9 +3174,13 @@ pub(crate) fn apply_push(
     if other_pushable {
         world.with_entity_mut(other, &mut |entity| {
             entity.delta = entity.delta.add(Vec3::new(-dx, 0.0, -dz));
+            // 被推开的一方和 `Entity.push(Entity)` 一样置 `needsSync`。
+            // The pushed side sets `needsSync` as in `Entity.push(Entity)`.
+            entity.with_mob(|_, mob| mob.needs_sync = true);
         });
     }
     if self_pushable {
         me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+        me.with_mob(|_, mob| mob.needs_sync = true);
     }
 }

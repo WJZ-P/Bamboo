@@ -143,6 +143,24 @@ pub trait BlockView {
         false
     }
 
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：这一列挡运动的最高方块上面一格，整列
+    /// 都不挡时是世界底部下面一格。缺省实现逐格读方块；有真实高度图的视图覆盖它。
+    ///
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`: one above the highest
+    /// motion-blocking block of the column, or one below the world bottom when nothing
+    /// blocks. The default reads blocks one by one; views with a real heightmap override it.
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        for y in (self.min_y()..=self.max_y()).rev() {
+            let state = self.block_state(BlockPos::new(pos.x, y, pos.z));
+            if state.is_tagged(mc_bamboo_data::tags::block_tags::BLOCKS_MOTION_IN_HEIGHTMAP)
+                || !state.fluid().is_empty()
+            {
+                return y + 1;
+            }
+        }
+        self.min_y() - 1
+    }
+
     /// `getMaxLocalRawBrightness(pos, skyDarken)`：方块光和减去天色后的天空光里亮的那个。
     fn max_local_raw_brightness(&self, _pos: BlockPos, _darken: i32) -> i32 {
         0
@@ -399,6 +417,10 @@ impl BlockView for World<'_> {
         World::sea_level(self)
     }
 
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        self.level().heightmap_y(pos)
+    }
+
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
         World::brightness(self, layer, pos)
     }
@@ -631,6 +653,29 @@ pub enum Command {
     /// The witch throws one potion: `Projectile.spawnProjectileUsingShoot`.
     ThrowSplashPotion {
         shot: Box<super::splash_potion::SplashShot>,
+    },
+    /// 生物的弩 `CrossbowItem.performShooting`：装着的箭逐支生成、射出。
+    ///
+    /// A mob's crossbow `CrossbowItem.performShooting`: spawn and shoot each loaded arrow.
+    ShootCrossbow {
+        shots: Vec<super::arrow::ArrowShot>,
+    },
+    /// `Raider.HoldGroundAttackGoal` 的喊话：同伴 `setTarget(target)`，`stop` 那次还
+    /// `setAggressive(true)`。
+    ///
+    /// The shout of `Raider.HoldGroundAttackGoal`: allies `setTarget(target)`, and the
+    /// `stop` call also does `setAggressive(true)`.
+    RaiderShout {
+        others: Vec<EntityUid>,
+        target: EntityUid,
+        aggressive: bool,
+    },
+    /// `LongDistancePatrolGoal` 的队长给同伴 `setPatrolTarget(pathTarget)`。
+    ///
+    /// A patrol leader's `setPatrolTarget(pathTarget)` on its companions.
+    SetPatrolTarget {
+        others: Vec<EntityUid>,
+        target: BlockPos,
     },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
     Explode {
@@ -1039,6 +1084,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);
+        }
+        Command::ShootCrossbow { shots } => {
+            for shot in shots {
+                world.spawn_arrow_shot(shot);
+            }
+        }
+        Command::RaiderShout {
+            others,
+            target,
+            aggressive,
+        } => super::mob::raider::apply_shout(world, &others, target, aggressive),
+        Command::SetPatrolTarget { others, target } => {
+            super::mob::raider::apply_patrol_target(world, &others, target);
         }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {

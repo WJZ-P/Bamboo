@@ -1015,6 +1015,58 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 
 ---
 
+### 5.20 第 16 轮：实现鹦鹉、飞行导航与鹦鹉的自然刷怪（op-misc，2026-11-22）
+
+- **新基础设施**：
+  - `path.rs` 新增 `EvaluatorFlags.fly` 与 `FlyNodeEvaluator` 的逐位移植（`fly_start` / `fly_probe` /
+    `fly_neighbors` / `fly_path_type`）：六轴 + 单轴斜向 + 水平对角 + 八个斜向角，探测顺序照官方；
+    `WALKABLE` 节点代价加一；`OPEN` 格的下方规则（`FIRE` / `DAMAGING` / `COCOA` / `FENCE` / 其余转
+    `WALKABLE`）和 `checkNeighbourBlocks` 保留传入类型。小体型生物的十个随机起点候选没有接（鹦鹉的
+    `getSize()` 是 0.633、本该走那条，见 §5.21）。
+  - `navigation.rs`：飞行导航的 `canUpdatePath`（不是乘客恒真）、`createPath` 跳过加载与地表检查、
+    `tick` 的 `getGroundY` 跳过、`getTempMobPos` 用实体坐标、`stable_destination` 用实心近似；
+    `canMoveDirectly` 的「流体也算阻挡」目前只挡源方块水（已知差异）。
+  - `control` / `living.rs`：`FlyingMoveControl(10, false)`（空中用 `FLYING_SPEED`、`setNoGravity`、
+    `yya` 竖直速度）、`omnidirectionalAirMover` 的竖直 0.91 空气阻力、`Parrot.checkFallDamage` 空实现、
+    `hurtServer` 清坐姿。
+  - `goals.rs` 新增 `Goal::Parrot` 与 `hover_random_pos` / `air_and_water_random_pos`；`RandomPos`
+    家族的扇形偏移改成官方的 f32 乘法 + `Mth.SQRT_OF_TWO`（float）常量。
+  - 实体跟踪补 `DATA_EFFECT_PARTICLES` / `DATA_EFFECT_AMBIENCE_ID`（可见效果的颜色列表，ARGB 补不透明
+    alpha），曲奇中毒的死亡刻因此和官方包一致。
+- **鹦鹉（`parrot.rs`）**：属性 6 / 0.2 / 0.4 / 3、尺寸 0.5×0.9（眼高 0.765）、五种颜色
+  （`PARROT_VARIANT = 20`，`Variant` 用官方旧版整数编码存盘）、不繁殖、不能长大；`Parrot.registerGoals`
+  的 8 个目标（恐慌 / 浮水 / 看玩家 / 坐下 / 跟主人 / `ParrotWanderGoal` / `LandOnOwnersShoulderGoal` /
+  `FollowMobGoal` 占位）；种子 1/10 驯服（事件 7/6、吃食声两次 `nextFloat`）、曲奇中毒 900 刻 + 玩家攻击
+  `Float.MAX_VALUE`（`MobInteraction::self_hurt` 交给游戏层结算）、主人切换坐站；每 400 刻的世界随机源模仿
+  附近生物、每 1000 次的叫声里挑 42 条模仿音之一；`calculateFlapping` 与翅膀声；自然刷怪
+  `#parrots_spawnable_on` + 亮度 > 8；`finalizeSpawn` 抽品种 + `AgeableMobGroupData(false)`（不抽幼崽）。
+- **对拍**：`mob-oracle --only parrot` 4 例 860 刻 0 不一致（`parrot_idle` 树桩闲逛、`parrot_tame`
+  驯服与坐站、`parrot_cookie` 中毒死亡含掉落与包、`parrot_imitate` 模仿僵尸）；`natural_spawn` 734 例
+  2936 刻 0 不一致（`parrot_jungle=31`、`parrot_jungle_dim=0`）；`gen_spawn` 7000 例 0 不一致
+  （新增 `gen_parrot`）。
+- **已知限制与交接**：上肩只做到 `LandOnOwnersShoulderGoal` 运行（冷却、主人旁观者、没命令坐下），
+  玩家 `ShoulderEntityLeft` / `Right` 存档与同步未建模，所以两箱相交时不 `discard()`；`FollowMobGoal`
+  占位；`MOB_SOUND_MAP` 的 `HashMap` 迭代顺序按名字排序近似；悬停落点的随机源错位已在 §5.21 定位并修掉；
+  玩家的飞行 / 水里 / 细雪状态没进 `PlayerView`；拴绳未建模。
+
+
+### 5.21 第 17 轮：补上 `LandRandomPos.generateRandomPosTowardDirection` 的 `isNotStable`（op-misc，2026-11-22）
+
+- **根因**：`goals.rs` 的 `land_toward_direction` 只做了官方的「越界」和「离家」两个判定，少了第三个
+  `!GoalUtils.isNotStable(mob.getNavigation(), pos)`。Bamboo 里这个函数只有 `hover_random_pos` 调用
+  （`land_random_pos` 是另一份内联实现、本来就带 `stable_destination`），所以只有悬停落点缺这条判定：
+  官方会丢掉一批「目标格站不住」的候选，Bamboo 却接受，10 次抽点的接受序列因此不同，从选中落点那一刻起
+  实体随机源就错位两次。
+- **修复**：补上 `!stable_destination(mob, view, pos)`（飞行导航里是 `FlyingPathNavigation.isStableDestination`
+  的实心方块近似，见 README 已知差异）。
+- **验证**：`mob-oracle --only parrot` 4 例 860 刻仍 0 不一致；一个临时的无树桩 400 刻悬停场景（平坦地面、
+  种子 906、未进对拍表）从 308 处不一致降到 3 处，随机源逐刻一致；残留 3 处（第 245–247 刻）只有 `xr` / `hr`，
+  官方那几刻 `LookAtPlayerGoal` 已在看玩家、Bamboo 还没开始，随机源相同，原因未查到。
+- **仍没做**：`FlyNodeEvaluator.getStart` 小体型生物（`getSize() < 1.0`）的十个随机起点候选——寻路请求里没有
+  实体随机源，只试包围盒四角；鹦鹉的 `getSize()` 是 0.633，理论上会走那条，只在起点格代价为负时触发。
+
+---
+
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
 
 期 0 的公共接缝和期 1a 的「受伤与减伤」已合入。以下列出**本期范围**和**已知差异**，
@@ -1464,7 +1516,8 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
   收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
-  结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。生成期刷怪已接入牛、猪、羊、鸡、马科、
+  结构刷怪覆盖、`customSpawners`（只做了 `PatrolSpawner`）、下界要塞表未做。刷怪笼、猫和流浪商人仍未做。
+  生成期刷怪已接入牛、猪、羊、鸡、马科、
   兔子、狐狸和狼；
   装饰随机源决定放置，区域随机源用于 `finalizeSpawn`，用 `mob-oracle --only gen_spawn` 分别比对。
 - **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
@@ -2142,8 +2195,230 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
    `eggTime` 的做法，在 `spawnJson` 传出新生熊猫的 `genes`，由 `apply_born_setup` 与配对快照同步
    （基因遗传本身仍由 `playPandaGenes` 用确定性种子单独对拍）。
 
-全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
-**686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+合并后全量 `mob-oracle`（不带 `--only`）实测 **1900 例、193397 刻、0 不一致**；`--only natural_spawn`
+**734 例、2936 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+
+## 12. 掠夺者、巡逻队与结构刷怪覆盖（cl-pillager，2026-11-22）
+
+### 12.1 现状
+
+| 部分 | 状态 | 代码 | 对拍 |
+| --- | --- | --- | --- |
+| 掠夺者 | 已对拍 0 不一致 | `entity/mob/pillager.rs`、`crossbow.rs`、`raider.rs` | `mob-oracle --only pillager`：8 例 1653 刻（弩装填 / 射击 / 多重射击、巡逻、原地对峙） |
+| `PatrolSpawner` | 已对拍 0 不一致 | `entity/mob/patrol.rs`、`game/src/patrol_spawn.rs` | `mob-oracle --only patrol`：5 例 598000 刻、15 名成员，含结束时的世界随机源种子和计时器 |
+| 结构刷怪覆盖 | 已对拍 0 不一致 | `game/src/structure_spawn.rs`、`mc-bamboo-data::spawning` | `mob-oracle --only structure_spawn`：前哨站 `STRUCTURE` 盒、女巫小屋 `PIECE` 盒、类别回退，6 个查询 0 不一致 |
+
+### 12.2 掠夺者
+
+- 属性照 `Pillager.createAttributes()`：0.35 移速、24 血、5 攻击、32 跟随。
+- 目标顺序照父类链注册：`PatrollingMonster` 的 `LongDistancePatrolGoal`（4）、`Raider` 的四个
+  袭击目标（1/3/4/5，占位，`canUse` 恒假且不取随机数），然后是 `FloatGoal`、躲嘎枝（占位）、
+  `HoldGroundAttackGoal(10)`、`RangedCrossbowAttackGoal(1.0, 8)`、`RandomStrollGoal(0.6)`、
+  两个 `LookAtPlayerGoal`。目标选择器是受伤反击（会叫同伴，忽略袭击者）、玩家、村民、铁傀儡
+  （后两种没有实体，照样注册、照样取 `nextInt`）。
+- 弩：`CrossbowAttack` 复用玩家弩的状态机（装填 25 刻、随后等 20–39 刻再射、`CHARGED_PROJECTILES`
+  组件里的箭数、多重射击一次三发），箭实体复用 `entity/arrow.rs`。装填中 `isUsingItem` 与
+  `ticksUsingItem` 由 `use_item` 路径提供，射击时把箭实体射向目标。
+- 生成装备：主手弩；`nextFloat() < 0.25 * special` 时走一次随机附魔（和骷髅共用
+  `enchant_mob_spawn_equipment`）；再 `nextInt(300) == 0` 时给穿透 I。四个盔甲槽为空，官方对空槽
+  短路、不取数，这里也不取。
+- 队长：`PatrollingMonster.finalizeSpawn` 在非 PATROL 原因下 `nextFloat() < 0.06` 当队长；队长戴
+  灾厄旗帜（白旗带 `ominous_banner` 组件）、头盔掉落率 2.0。`PatrolSpawner` 的队长由刷怪器直接
+  `setPatrolLeader(true)` 并 `findPatrolTarget()`，`finalizeSpawn` 不再取那个 0.06。
+- 音效：`entity.pillager.ambient/death/hurt/celebrate`，脚步走脚下方块的 `SoundType`。
+- 存档：`Inventory`（5 格 `InventoryCarrier` 列表）、`PatrolLeader`、`Patrolling`、`patrol_target`，
+  `Raider` 的 `Wave` / `CanJoinRaid` / `RaidId` 只作为数据保留；读档后照官方
+  `setCanPickUpLoot(true)`。
+- 掉落：走 `entities/pillager`；队长的灾厄旗帜让 `type_specific/raider` 的 `is_captain` 为真，
+  掉一瓶不祥之瓶（`set_ominous_bottle_amplifier` 的 0–4 级），普通掠夺者不掉。
+  `loot-oracle --entity-table minecraft:entities/pillager` 4000 例（一半队长）0 不一致；夹具没有
+  袭击管理器，`FakeLevel.getRaidAt` 返回空，`has_raid` 恒假。
+- **袭击不在范围内**：四个 `Raider` 目标占注册位但不启动，`Raid`、不祥之瓶的袭击用法、村庄英雄、
+  袭击者治疗目标都没有。写进 12.5。
+
+### 12.3 `PatrolSpawner`
+
+- 计时器 `nextTick` 开局 0：第一刻 `-= 1` 后 `+= 12000 + nextInt(1200)`，与官方一致；每刻只做
+  减法，不取随机数。
+- 取数顺序：`nextInt(1200)` 重排 → 白天判断（`isBrightOutside`）→ `nextInt(5) == 0` →
+  `nextInt(playerCount)` 选玩家 → 旁观者跳过 → 两个方向各 `(24 + nextInt(24)) * sign(nextBoolean())`
+  → `hasChunksAt(pos ± 10)` → `CAN_PILLAGER_PATROL_SPAWN` → 组大小
+  `ceil(getEffectiveDifficulty) + 1`。每名成员先取高度图 `MOTION_BLOCKING_NO_LEAVES` 的 y，
+  队长失败则 `break`（不再取平移的两个随机数），否则每名成员之后取
+  `nextInt(5) - nextInt(5)` 平移 x/z。
+- 落点判定：`NaturalSpawner.isValidEmptySpawnBlock`（用 PILLAGER 的免疫标签）+
+  `PatrollingMonster.checkPatrollingMonsterSpawnRules`（方块光 ≤ 8、脚下是有效生成方块、
+  `PathfinderMob.checkSpawnRules`），最后 `setPos` + `finalizeSpawn(PATROL)`。
+- 接入：`game/src/patrol_spawn.rs` 在随机刻之后调用（官方 `tickChunks` 末尾的
+  `tickCustomSpawners`）。`PatrolSpawner` 每岛一份，拆岛时两边各带一份计时器副本，合并时保留
+  吸收方的。
+- 位置门槛由 `Level` 的两个钩子给：`can_pillager_patrol_spawn`（主世界时钟 ≥ 120000 且群系不是
+  蘑菇岛）和 `patrol_chunks_loaded`（`hasChunksAt` 的四个角区块都已加载）。
+- **村庄检测跳过**：Bamboo 还没有村庄和 POI，`isCloseToVillage` 这一支按任务要求不判。
+- **阵营**：`spawn_monsters` 与 `spawn_patrols` 都为真才跑；任一为假时整段不取随机数、计时器不动。
+
+### 12.4 结构刷怪覆盖
+
+- 数据：`mc-bamboo-data::spawning::STRUCTURE_SPAWN_OVERRIDES`，每行是结构名、盒类型
+  （`STRUCTURE` / `PIECE`）、类别和加权表。已收：
+  - `minecraft:pillager_outpost` / `MONSTER` / `STRUCTURE` / 掠夺者 ×1；
+  - `minecraft:swamp_hut` / `MONSTER` / `PIECE` / 女巫 ×1；
+  - `minecraft:swamp_hut` / `CREATURE` / `PIECE` / 猫 ×1。
+  官方在 `Structures.bootstrap` 里还给海底神殿注册了守卫者和两个空表，那两种生物 / 类别没有
+  建模，表先不写。
+- 查询：`game/src/structure_spawn.rs` 照 `ChunkGenerator.getMobsAt`：取位置所在区块的
+  `STRUCTURE_REFERENCES`，逐个引用区块读 `STRUCTURE_STARTS`，按盒类型判定位置（`STRUCTURE`
+  用整个起点盒，含 `terrainAdaptation` 的 12 格外扩；`PIECE` 要求落在某个结构件里）；命中就返回
+  结构表，否则回退群系表。
+- 接入：`natural.rs` 的 `mobs_at` 先问 `Level::structure_spawn_override`，测试世界默认返回
+  `None`；`RegionLevel` 用本局世界生成参数按种子重算结构起点（和交付区块时是同一份纯函数），
+  不依赖区块里的 `structures` 标签。
+- 通用性：新增结构只要往数据表加一行，`natural.rs` 的取表和支撑检查都会自动走同一条链；女巫小屋
+  就是按这个机制验证的（Rust 产出、`mob-oracle --only structure_spawn`）。
+
+### 12.5 已知缺口与偏离
+
+- **前哨站的结构件还没生成**：`jigsaw` 结构件生成仍没做（见 README 的结构一节），所以正式世界里
+  还不会出现前哨站起点，前哨站覆盖表只在前哨站结构真正生成后才生效；女巫小屋的起点已经能生成。
+  覆盖机制本身用合成起点在 `mob-oracle --only structure_spawn` 和单测里验证。
+- **村庄检测**：`PatrolSpawner.isCloseToVillage(player.blockPosition(), 2)` 跳过。
+- **结构起点用种子重算而不是读区块标签**：官方 `StructureManager` 读已加载区块的起点（必要时
+  生成引用区块）。Bamboo 在自然刷怪时按 `structure_references_stage` + `structure_starts` 重算，
+  结果对同一份纯函数相同；但如果存档里带着非本进程生成的结构标签（例如换版本后的存档），
+  这里不会读它。
+- **引用顺序**：官方 `getAllStructuresAt` 是 `Long2ObjectMap` 的哈希序，Bamboo 用 `BTreeMap`；
+  两个覆盖盒重叠时返回哪一个可能不同，目前没有任何两个结构的覆盖盒会重叠。
+- **结构查询开销**：每次自然刷怪位置都会问一次引用（线程本地缓存命中后是一次 `BTreeMap` 查找）；
+  第一次问某个区块要重算 17×17 起点。缓存按 (种子, 设置) 分线程。
+- **巡逻队的玩家顺序**：`Level::for_each_player` 按玩家 ID（`BTreeMap`）遍历，官方按加入顺序的
+  `List`；`nextInt(playerCount)` 选中的人可能不同。夹具只有一名玩家，未覆盖多玩家。
+- **实体随机源**：掠夺者构造时 `LivingEntity` 用不带种子的随机源抽初始朝向，`findPatrolTarget`
+  也用它；对拍里这两项不可比（Java 夹具把朝向记 0，巡逻目标只比是否非空），位置 / 装备 /
+  状态 / 队长 / 世界随机源全部逐位一致。正式世界里 `PatrolSpawner` 生成成员时
+  `spawn::snap_to(..., 0.0, 0.0)` 把身体朝向固定成 0，官方保留构造器的随机朝向；巡逻队长的
+  `findPatrolTarget` 仍是实体随机源（和官方一样不可复现）。
+- **`CAN_PILLAGER_PATROL_SPAWN` 的时间线**：`RegionLevel` 把主世界时钟和群系合成一个布尔；
+  对拍夹具没有时间线层，只覆盖了白天 / 黑夜和游戏规则，早期世界（< 120000 刻）和蘑菇岛由单测
+  `can_patrol_spawn_at` 覆盖。
+- **自然刷怪的群系表**：`RegionLevel` 没有实现 `biome_id`（沿用默认平原），这是既有限制；
+  结构覆盖优先于群系表，所以不影响本次的覆盖功能。
+- **袭击**：`Wave` / `RaidId` / `CanJoinRaid` 只存数据；不祥旗帜只作为头盔物品，不触发袭击
+  （队长照常掉不祥之瓶，但瓶子不能用）。
+- **音效只做实现、未进对拍**：`mob-oracle` 只比 `entity_event` 和 `set_equipment` 包，音效包
+  不比；掠夺者 / 女巫的环境、受伤、死亡、弩装填与射击音效由代码路径保证，没有逐声音比对。
+
+### 12.6 与 main 合并后的现状（2026-11-22）
+
+`387abe13` 把 main（骆驼、玩家近战、豹猫和猫）合进来，冲突都在公共注册点上：
+
+- `goals.rs`：`Goal::Raider` 和 `Goal::Cat` 两个新变体、各自的 `flags` / `name` / `every_tick` /
+  `can_use` / `can_continue` / `start` / `stop` / `tick` 分支两边都保留；`OcelotAttack` 的
+  `Move + Look` 标志和掠夺者的分支并列。
+- `mod.rs`：`MobType::ALL` 变成 41 项（原 38 项加豹猫、猫）；`uses_block_step_sound` 同时含
+  `Pillager`、`Ocelot`、`Cat`；骆驼的空 `registerGoals` 和掠夺者的目标并存。
+- `living.rs` / `mod.rs` 的消失判定：main 的 `removes_when_far_away(tickCount)`（豹猫、猫按
+  tick 数）和本分支的 `removes_when_far_away_at(distSqr)`（`PatrollingMonster` 按 128 格）
+  合成一个 `removes_when_far_away_at(distance_sqr, tick_count)`，`removes_when_far_away(tick)`
+  传 `f64::INFINITY`；自然生成的位置判定（`natural.rs` 的 `is_valid_position_for_mob`）现在直接
+  把最近玩家距离传给 `removes_when_far_away_at`。两者判定顺序不变（先袭击者、再鱼、再豹猫 / 猫、
+  最后按类别）。
+- 豹猫的自然生成（`natural.rs` 的 `is_valid_position_for_mob` 新增 `sea_level` 参数和豹猫遮挡
+  判定）和合并后的 `mobs_at` 结构覆盖共存，掠夺者不参与群系自然刷怪，互不影响。
+
+第二次合并（`eaf77080`，main 的海豚 / 美西螈 / Brain / 桶装鱼）冲突同样是「两边往同一处加东西」：
+
+- `goals.rs`：`Goal::Raider` 和 `Goal::Dolphin` 两个变体及它们的 `flags` / `name` / `can_use` /
+  `can_continue` / `start` / `stop` / `tick` 分支都保留。
+- `mod.rs`：`MobType::ALL` 变成 43 项（41 项加海豚、美西螈）；`removes_when_far_away_at` 里
+  袭击者的 128 格分支、鱼的桶标记、美西螈的桶 / 名字判定、豹猫 / 猫的 tick 判定按各自顺序并存。
+- `mob_oracle.rs`：`structure_spawn` 和 `water_mob` 两个场景模块都注册。
+- 文档：本节的 12 章和 op-water 的历史章都保留。
+
+两次合并后在 HEAD 上重跑：全量 `mob-oracle` 1900 例 / 193397 刻 0 不一致；
+`--only natural_spawn` 734 例 / 2936 刻 0 不一致；`--only gen_spawn` 7000 例 0 不一致；
+`--only pillager` 8 例 1653 刻、`--only patrol` 5 例、`--only structure_spawn` 1 例均 0 不一致；
+`loot-oracle --entity-table minecraft:entities/pillager` 本轮抽了 400 例（一半队长）0 不一致，
+合并前的 4000 例 0 不一致；`chunk-content` 523 项也是合并前的结果（本轮未重跑）。
+
+第三次复核在 `31fb619b` 上补跑官方联机探针（`JAVA` 为 JDK 26，经 `heavy.js` 共享锁）：
+`PROBE RESULT 769/769 checks passed`，正常关服，`level.dat` / 玩家数据 6 个 / 区域文件 4 个都在，
+`WORLD-DIR` 全过。为确认新增的每刻巡逻队刷怪器没有拖慢世界线程，同一份命令在 main
+（`eaf77080`）上带 `BAMBOO_PROFILE=10` 做了一次对照：2 名玩家在线时 `tick_total` 平均
+20.7–23.8 ms（86–96 只实体，`entities` 阶段 13.3–17.7 ms），本分支 21.3–24.2 ms
+（86 只实体，`entities` 阶段 14.4 ms），两者同一水平；探针世界时钟没到 120000 刻，
+`PatrolSpawner` 每刻只做计时递减和两次布尔闸门，整个自定义刷怪器在 `random_ticks` 阶段内。
+main 那次报 `769/770`，多出来的一项 `play: M2 sends handleDamageEvent` 失败：同一份
+`Probe.java` 下本分支没收到该包，是探针在 M2 旁观者身上观测到伤害事件的时序抖动，与本次改动无关。
+
+## 蝙蝠的实施现状（cl-ambient，2026-11-22）
+
+官方 `Bat`（`AmbientCreature` → `Mob`，不是 `PathfinderMob`）。代码在 `entity/mob/bat.rs`，状态是 `Mob.bat`（`BatState`：`DATA_ID_FLAGS` 整个字节和不存档的 `targetPosition`）。
+
+- **属性和事实**：6 点血，尺寸 0.5×0.9、眼高 0.45；`MobCategory.AMBIENT`（消失距离 128，`removeWhenFarAway` 为真，和平难度照样存在）；叫声间隔用 `Mob` 的缺省值 80，音量 0.1，`getVoicePitch()` 乘 0.95（叫声、受伤、死亡三种声音都乘）；倒挂时 `getAmbientSound` 先取 `nextInt(4)`，不是 0 就不叫、也不取音高。
+- **AI**：两个目标选择器都是空的。`customServerAiStep`（在 `Mob.serverAiStep` 里导航之后、移动控制之前）：倒挂时头上不是导体就起飞；否则 1/200 把头转到 `nextInt(360)`，4 格内有看得见的玩家（`forNonCombat().range(4.0)`，带潜行 / 隐身的可见度和视线）就起飞；起飞时发世界事件 1025（静音的不发）。飞行时目标方块不是空气或落到世界底就丢掉，没有目标、1/30、或离目标中心不到 2 格时重抽（x 两次 `nextInt(7)`、y 一次 `nextInt(6)`、z 两次），朝目标加速并转身，1/100 且头上是导体时倒挂。`MoveControl` 处于 `WAIT`，所以官方写的 `zza = 0.5F` 当刻就被清零。
+- **`tick` 尾部**：倒挂时速度清零、`setPosRaw` 到这一格顶部下面一个身高；飞行时竖直速度乘 0.6（`double` 常量）。物理还是普通的 `LivingEntity.travel`（有重力）。
+- **覆写成空的几个方法**：`pushEntities` / `doPush` / `isPushable`（`MobType::is_pushable`：蝙蝠不推别人，别人的推挤名单也不收它）、`checkFallDamage`（`MobType::ignores_fall_damage_check`：摔落距离不累计也不清零）、`getMovementEmission` 是 `EVENTS`（没有脚步声）。
+- **受伤**：`Bat.hurtServer` 没有免疫就先醒过来再走父类。蝙蝠的实体类型是 `dontTrackDeltas`，速度包只在 `needsSync` 时发；`LivingEntity.knockback` 置的 `needsSync` 现在记在 `Mob.knockback_sync` 里，下一刻开头并进 `needs_sync`（受伤常常发生在生物自己的一刻之外）。
+- **生成**：`SpawnPlacements` 登记 `ON_GROUND` + `Bat.checkBatSpawnRules`：在 `WORLD_SURFACE` 高度图之下、世界随机源 `nextBoolean` 为假、`getMaxLocalRawBrightness` 不超过 `nextInt(4)`、脚下在 `#bats_spawnable_on` 里，再加 `Mob.checkMobSpawnRules`。`finalizeSpawn` 只有 `Mob` 那一层（跟随距离加成和左撇子）。蝙蝠不是 `PathfinderMob`，`checkSpawnRules` 恒真。**26.3 的 `checkBatSpawnRules` 里已经没有万圣节的亮度窗口，也不再和海平面比较**（任务说明里的这两条是旧版本的规则），所以这里没有实现它们。
+- **存档和同步**：`BatFlags`（BYTE）；元数据 `BAT_FLAGS`（下标由生成器导出，现在是 16）。可用 `/summon` 和刷怪蛋生成。
+
+岛的拆合：新增的按实体状态是 `Mob.bat`（标志字节和一个绝对方块坐标的飞行目标，目标不存档、随实体整行搬）和 `Mob.knockback_sync`（一个布尔），都不带时钟，拆合时不用平移。
+
+对拍：`mob-oracle --only bat`（`bat_open` 没有天花板第一刻起飞、`bat_wake` 倒挂着等玩家走近、`bat_hurt` 被牛打醒再打死、`bat_low` 在两格高的洞里飞到重新倒挂再被玩家吵醒，共 4 例 2424 刻）逐刻比位置、速度、朝向、随机源、血量、标志位、飞行目标、摔落距离、`zza`、世界事件、世界随机源和出站包，0 不一致；故意改坏（玩家晚一刻走近）能抓到。`mob-oracle --only bat_spawn`（`bat_dark`、`bat_dim`、`bat_open`、`bat_peaceful`，24 例 96 刻）0 不一致，`--break-self-test natural_spawn` 把 `bat_dim` 的方块光改成 15 能抓到。
+
+已知差异：
+
+- 官方 `setPosRaw` 不刷新碰撞箱，开始倒挂的那一刻到下一刻 `travel` 里的 `move` 之间，碰撞箱还停在原来的高度（最多低 0.1 格）；Bamboo 的碰撞箱始终跟着位置。只影响这一小段里的流体检测和被打飞时的碰撞。
+- 击退发生在生物自己这一刻的 `aiStep` 之后时（别的生物的攻击命令落地），`needsSync` 晚一刻生效；只有蝙蝠（不跟踪速度）看得出来，表现是击退的速度包晚一刻。真实联机里生物的 `hurtMarked` 速度包本来就还没有接到同步层（既有差异）。
+- 拴绳（`canBeLeashed` 为假）和压力板 / 绊线（`isIgnoringBlockTriggers` 为真）：Bamboo 的生物本来就没有拴绳，也不触发这两种方块，所以没有要做的。
+
+## 幻翼的实施现状（cl-ambient，2026-11-22）
+
+官方 `Phantom`（`Mob implements Enemy`，既不是 `Monster` 也不是 `PathfinderMob`）。代码在 `entity/mob/phantom.rs`、`entity/mob/phantom_spawner.rs`（刷怪器），游戏层入口在 `phantom_spawn.rs`、`sleep.rs`（`TIME_SINCE_REST`）。状态是 `Mob.phantom`（`PhantomState`：大小、`moveTargetPoint`、`anchorPoint`、是否俯冲、`PhantomMoveControl.speed`）。
+
+- **属性和尺寸**：`DefaultAttributes.PHANTOM` 用 `Monster.createMonsterAttributes()`（`Mob.createMobAttributes()` 加攻击力 2）：20 点血、跟随 16、攻击力基础 2；经验 5，战利品表 `entities/phantom`，`#undead`（所以 `#can_breathe_under_water` 成立）。`getDefaultDimensions` 把基础尺寸 0.9×0.5、眼高 0.175 乘 `1 + 0.15 * size`；`size` 同步（`PHANTOM_SIZE`，下标 16），攻击力基础值在 `onSyncedDataUpdated` 里改成 `6 + size`。`setPhantomSize(0)` 在新建实体上不改变同步值，因此**不会**触发更新，大小 0 的幻翼保持 2 点攻击力；读档时 `setPhantomSize` 才会按读到的值改尺寸和攻击力。
+- **AI**（`registerGoals` 的优先级照官方）：目标选择器只有 1 `PhantomAttackPlayerTargetGoal`，`nextScanTick` 初值 `reducedTickDelay(20)`，每 60 折半后再扫。扫描范围 64 格、碰撞箱外扩 (16, 64, 16)，按 Y 从高到低排（稳定排序），用 `forCombat`（不限制距离、要活着、不旁观、非创造、非和平、有视线）。目标选择器先于行为选择器跑，两个选择器共用隔刻判断——和其他生物一样。
+  - 1 `PhantomAttackStrategyGoal`（不占标志位）：`start` 把 `nextSweepTick` 设成 `adjustedTickDelay(10)`、回到盘旋、把锚点放到目标头上 `20 + nextInt(20)` 格（低于海平面时改到 `sea_level + 1`）。每刻倒数，到 0 时转俯冲、重设锚点、按 `adjustedTickDelay((8 + nextInt(4)) * 20)` 排下一次，放 `entity.phantom.swoop`（音量 10，音高 `0.95 + nextFloat * 0.1`）。`stop` 把锚点按 `getHeightmapPos(MOTION_BLOCKING, anchor).above(10 + nextInt(20))` 抬高。
+  - 2 `PhantomSweepAttackGoal`（占 `MOVE`）：`canUse` 要求有目标和俯冲；每刻把 `moveTargetPoint` 设成目标 `getY(0.5)`，碰撞箱外扩 0.2 与目标碰撞箱相交就 `doHurtTarget`、回到盘旋、发世界事件 1039（静音的不发）；撞墙或 `wasHurtRecently` 也回到盘旋。`stop` 清目标、回盘旋。猫的 16 格搜索和 `cat.hiss()` 分支没有建模：猫本身已在 main 上，但俯冲目标的 `canContinueToUse` 里要替别的实体发声，`EntityCtx` 还没有按实体发声的接口，`isScaredOfCat` 恒假（见已知差异）。
+  - 3 `PhantomCircleAroundAnchorGoal`（占 `MOVE`）：没有目标或还在盘旋时运行；`start` 抽 `distance = 5 + nextFloat * 10`、`height = -4 + nextFloat * 9`、`clockwise = nextBoolean ? 1 : -1`；每刻按 350 / 250 / 450 折半的间隔重抽高度、距离（超过 15 回到 5 并反向）、角度（`nextFloat * 2π`），到点、目标点下方是实心方块、上方是实心方块时 `selectNext`。`selectNext` 没有锚点时用当前方块，角度加 `clockwise * 15°`，目标点 = 锚点 + (`distance * cos`, `-4 + height`, `distance * sin`)。
+- **移动和朝向**：`PhantomMoveControl.tick` 撞墙时 `yRot += 180`、速度回 0.1；否则按目标点算水平/三维距离，最多转 4°，`yBodyRot` 跟着 `yRot`，转身小于 3° 时速度往 1.8 逼近（步长 `0.005 * (1.8 / speed)`），否则往 0.2 逼近（步长 0.025）；俯仰取 `atan2(-dy, 水平距离)`，速度按朝向和俯仰分解后与当前速度混合 20%。`PhantomLookControl.tick` 是空的；`PhantomBodyRotationControl.clientTick` 让头跟上一刻的身体、身体跟 `yRot`。`travel` 是 `travelFlying(input, 0.2F)`（水 0.02/0.8、岩浆 0.02/0.5、空气 0.2/0.91），没有重力；`onClimbable` 恒假、`checkFallDamage` 空。
+- **刷怪器**：`PhantomSpawner` 在主世界每刻跑（`ServerChunkCache.tickChunks` 里自然刷怪和随机刻之后、方块事件和实体之前）。`spawnMobs && spawnMonsters && spawnPhantoms` 都开时 `nextTick--`，到 0 后先 `nextTick += (60 + nextInt(60)) * 20`，再要求 `skyDarken >= 5 || !hasSkyLight`。对每个非旁观玩家：`!hasSkyLight || y >= seaLevel && canSeeSky(feet)`，`effectiveDifficulty > nextFloat() * 3`（先取数），`Mth.clamp(TIME_SINCE_REST, 1, MAX)` 的 `nextInt(value) >= 72000`，落点 `feet.above(20 + nextInt(15)).east(-10 + nextInt(21)).south(-10 + nextInt(21))`（取数顺序 y、x、z），`NaturalSpawner.isValidEmptySpawnBlock` 通过后按 `1 + nextInt(difficulty.getId() + 1)` 生成一组；每只 `snapTo(落点, 0, 0)`，`finalizeSpawn` 把锚点设到头上 5 格、大小 0，再走 `Mob.finalizeSpawn`（跟随距离加成和左撇子各取一次世界随机数）。
+- **`TIME_SINCE_REST`**（最小实现）：`Player.time_since_rest`，不睡觉的每一刻 `wrapping_add(1)`（官方是 `StatsCounter` 的 int，`awardStat` 一样环绕）；`ServerPlayer.startSleeping` 对应 `on_sleep_in_bed` 清零；`ServerPlayer.die` 对应玩家死亡清零。刷怪器只读它，并按 `i32::MAX` 夹。**没有**写原版 `stats/<uuid>.json`，重启后从 0 重新累计（见已知差异）。
+- **存档和同步**：`anchor_pos`（`BlockPos` 数组，空时不写）和 `size`（int）；`PHANTOM_SIZE` 同步。`moveTargetPoint` / `attackPhase` / `PhantomMoveControl.speed` 不存档（官方也不存）。可用 `/summon minecraft:phantom` 和幻翼刷怪蛋生成。
+- **岛拆合**：新增按实体状态 `Mob.phantom`（绝对方块坐标的锚点、大小、不存档的目标点和阶段、速度），拆岛随实体整行搬。`PhantomSpawner.nextTick` 是岛级状态：拆岛时两边从同一个倒数继续（官方整个主世界只有一个刷怪器），并岛时吸收方保留自己的。
+
+公共接缝的修正：`Entity.push` 在官方会给自己和对方都置 `needsSync`；Bamboo 的 `push_entities` / `apply_push` 原来只改 `delta`，幻翼贴着玩家俯冲咬人时官方每刻都发移动包、Bamboo 不发，导致之后的相对位置包错位。现在两半被推开时都会置 `Mob.needs_sync`（位移本身不变），全量 `mob-oracle` 复跑 0 不一致。
+
+对拍：`mob-oracle --only phantom` 6 例 534 刻 0 不一致——`phantom_spawn_night`（11 只）、`phantom_spawn_rested` / `phantom_spawn_day` / `phantom_spawn_off`（都不生成，分别验证 `TIME_SINCE_REST`、天色、规则关）；`phantom_hunt`（有玩家，走到盘旋 → 俯冲 → 咬中 1039，240 刻）和 `phantom_burn`（无玩家、露天白天，真的着火）。逐刻比位置、速度、四个朝向、血量、`hurtTime` / `deathTime` / `noActionTime`、大小、俯冲标志、目标、锚点、`moveTargetPoint`、着火刻数、实体随机源、世界随机源、世界事件和出站包。改坏确认：`--break-self-test phantom_spawn`（刷怪器整段不跑）和 `--break-self-test phantom_ai`（出生点高一格）都能抓到。全量 `mob-oracle`（不带 `--only`）1841 例 190745 刻、`--only natural_spawn` 746 例 2984 刻，0 不一致；蝙蝠仍是 0。
+
+已知差异：
+
+- 幻翼怕猫：`PhantomSweepAttackGoal.canContinueToUse` 的 16 格猫搜索和 `cat.hiss()` 没有建模。猫现在已在 main 上，但 `EntityCtx` 只能替自己发声，没有「让另一只实体发声」的接口；把嘶声放在幻翼位置会错位，所以整段先不做，`isScaredOfCat` 恒假，俯冲不会被猫打断。
+- `TIME_SINCE_REST` 不写原版统计文件：重启后从 0 重新累计；官方从 `stats/<uuid>.json` 读回来。只影响幻翼刷怪的时间门槛（要累计 72000 刻）。
+- 刷怪器按岛保存：官方整个主世界只有一个 `PhantomSpawner`（一个 `nextTick`），Bamboo 每个岛各有一份；拆岛时两份从同一个倒数继续，并岛时保留吸收方的。多岛同时有玩家时尝试次数可能比官方多。
+- 客户端专用的表现不在服务端：`Phantom.tick` 的扇翅音效和 `MYCELIUM` 粒子、`isFlapping()` 的相位、`shouldRenderAtSqrDistance` 恒真都只影响客户端；Bamboo 只发官方的服务端音效 / 世界事件。
+- 俯冲时玩家那一侧的推挤只做生物自己的一半（和其他生物一样）：玩家的速度变化和 `needsSync` 不结算，伤害走游戏层的 `hurt_player`。对拍里玩家是不受伤的替身，所以没有逐刻比玩家血量。
+- 刷怪器按玩家顺序取数：官方按 `ServerLevel.players` 的加入顺序遍历，Bamboo 的 `region.players` 是按 `PlayerId` 排序的 `BTreeMap`；正常情况下两者一致，玩家退出重进后 `PlayerId` 可能和加入顺序不同，多个玩家同时满足条件时刷怪落点 / 数量可能和官方不同。
+
+## 官方联机探针与每刻耗时热点修复（cl-ambient，2026-11-22）
+
+把蝙蝠 / 幻翼接进自然刷怪后，`tools/probe.sh` 在 debug 构建下偶发掉刻（`Can't keep up!`），
+导致爬柱子与移动检查被 `moved too quickly` 拉回：
+
+- **实体阶段（`entities`）热点**：`EntityStore::replace_row` 原本在每次 `put_entity` / `with_entity_mut`
+  都运行 `debug_assert!(self.sub_index_matches())`，而 `sub_index_matches` 每次从头分配并重建三套
+  `BTreeMap` / `HashMap` / `BTreeSet`，对 $N$ 个实体形成每刻 $O(N^2)$ 的堆分配开销；改成零分配原地校验并移到每刻结束
+  （`end_tick` / `publish_rows`）后，单生物每刻开销从 ~121–152 µs 降到 ~26–46 µs。
+- **方块反查与碰撞热点**：`mc_bamboo_data::block_id_of_state` 从 1286 项二分查找改为编译期静态表
+  `STATE_TO_BLOCK` 的 $O(1)$ 下标访问；`collect_block_collisions_impl` 对空气和完整方块直接短路，不再走多余形状盒查询。
+- **自然刷怪阶段（`natural_spawn`）热点**：超平坦平原上 `Ambient`（蝙蝠）在地面层被 `check_spawn_rules`
+  拒绝后，每刻会在全部 ~240 个可刷怪区块跑满 3 组 × 8 步尝试。将 `spawning::for_biome_id` 改为按生物群系 ID
+  直接索引 `LazyLock` 数组、`nearest_player_distance_sqr` 直接遍历已收集的 `state.players`、
+  `BlockState::is_valid_spawn_surface` 先测 `VALID_SPAWN` 位、`ChunkStore` 高度图与群系查询合并成单次哈希查找、
+  外层循环复用 `RegionLevel` 与 `World` 后，`natural_spawn` 耗时回到与 `main` 一致的水平。
+- **`Probe.java` 保持原有严格度**：撤回对位置拉回的容忍（`toleratingPullbacks` 等），只保留两项合理校准：
+  门音效检查只数 `SoundSource.BLOCKS`（排除自然刷怪生物的环境音），以及把官方本来就会广播的 `damage_event`
+  加入包白名单。
 
 ## 与 main 五次合并及装死回血（op-water，2026-11-21，第十轮）
 

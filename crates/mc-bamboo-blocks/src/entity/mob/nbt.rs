@@ -348,12 +348,30 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Bogged {
         put(&mut out, "sheared", Tag::Byte(i8::from(mob.bogged_sheared)));
     }
+    // ---- PatrollingMonster / Raider / Pillager ----
+    if mob.mob_type.is_raider() {
+        mob.raider.save(&mut out);
+    }
+    if mob.mob_type == MobType::Pillager {
+        super::pillager::save(mob, &mut out);
+    }
     if mob.mob_type == MobType::GlowSquid {
         put(
             &mut out,
             "DarkTicksRemaining",
             Tag::Int(mob.squid.dark_ticks),
         );
+    }
+    // ---- Phantom.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Phantom {
+        if let Some(anchor) = mob.phantom.anchor {
+            put(&mut out, "anchor_pos", block_pos_tag(anchor));
+        }
+        put(&mut out, "size", Tag::Int(mob.phantom.size));
+    }
+    // ---- Bat.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Bat {
+        put(&mut out, "BatFlags", Tag::Byte(mob.bat.flags as i8));
     }
     // ---- Turtle.addAdditionalSaveData ----
     if mob.mob_type == MobType::Turtle {
@@ -455,6 +473,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     }
     if mob.mob_type == MobType::Cat {
         super::cat::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::Parrot {
+        super::parrot::write_nbt(mob, &mut out);
     }
     if mob.mob_type == MobType::Chicken {
         put(&mut out, "IsChickenJockey", Tag::Byte(0));
@@ -726,8 +747,23 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if mob.mob_type == MobType::Bogged {
             mob.bogged_sheared = tag::bool_or(tag, "sheared", false);
         }
+        // ---- PatrollingMonster / Raider / Pillager ----
+        if mob.mob_type.is_raider() {
+            mob.raider = super::raider::Raider::load(tag);
+        }
+        if mob.mob_type == MobType::Pillager {
+            super::pillager::load(mob, tag);
+        }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);
+        }
+        if mob.mob_type == MobType::Bat {
+            mob.bat.flags = tag::byte_or(tag, "BatFlags", 0) as u8;
+        }
+        if mob.mob_type == MobType::Phantom {
+            let pos = tag::int_array(tag, "anchor_pos");
+            mob.phantom.anchor = (pos.len() == 3).then(|| BlockPos::new(pos[0], pos[1], pos[2]));
+            super::phantom::set_size(me, mob, tag::int_or(tag, "size", 0));
         }
         // `Turtle.readAdditionalSaveData`：先读自己的家方块，再交给父类。
         // `Turtle.readAdditionalSaveData`: the home first, then the superclass.
@@ -798,6 +834,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Cat {
             super::cat::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::Parrot {
+            super::parrot::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Chicken {
             // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。

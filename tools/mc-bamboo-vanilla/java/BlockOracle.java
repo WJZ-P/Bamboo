@@ -501,7 +501,9 @@ public final class BlockOracle {
         FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
         // 官方日志默认写 stdout。日志框架初始化时记下 System.out，要抢在这之前换掉，否则日志会混进 JSON。
         System.setOut(log);
-        Options options = Options.parse(args);
+        // `--post-process FILE`：完工后处理对拍，和随机题无关，见 {@link #runPostProcess}。
+        String postProcess = args.length == 2 && args[0].equals("--post-process") ? args[1] : null;
+        Options options = Options.parse(postProcess != null ? new String[0] : args);
 
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -521,8 +523,134 @@ public final class BlockOracle {
                 official.blockBrightness = NIGHT_BLOCK_BRIGHTNESS;
             }
             official.applyRules(options.rules);
+            if (postProcess != null) {
+                runPostProcess(official, postProcess, out);
+                return;
+            }
             new Oracle(official, options, out, log).run();
         }
+    }
+
+    /**
+     * 完工后处理对拍：每行一题，给一块 3×3 区块（只给 `minY..=maxY` 这一段高度，其余是空气）和中心区块的
+     * `PostProcessing` 表，在假世界里对中心区块直接调官方 {@code LevelChunk.postProcessGeneration}，交回改了的格子和
+     * 排上的计划刻。
+     *
+     * <pre>
+     *     题：{"x":X,"z":Z,"minY":A,"maxY":B,"states":[...],"post":[[short,...] x 24]}
+     *        states 按 y、世界 x、世界 z 的顺序列 3×3 区块里的全局方块状态 ID（x、z 从 (X-1)*16 起各 48 格）。
+     *     答：{"type":"postprocess","x":X,"z":Z,"changes":[[x,y,z,state],...],
+     *          "ticks":[[x,y,z,"block"|"fluid",id,delay,priority],...],"draws":N}
+     * </pre>
+     *
+     * changes 按 y、x、z 排序；ticks 是处理后还排着的计划刻，按执行顺序，方块的在前，id 是注册表数字 ID，delay 相对
+     * 处理时的游戏时间。draws 是处理期间世界随机源被取了几次（0 表示结果不依赖随机数）。
+     *
+     * Post-processing oracle: per query, a 3×3 chunk area and the center's
+     * `PostProcessing` table; call vanilla {@code LevelChunk.postProcessGeneration}
+     * on the center in the fake level and report changed cells and scheduled ticks.
+     */
+    private static void runPostProcess(Official official, String path, Writer out) throws Exception {
+        int lines = 0;
+        for (String text : java.nio.file.Files.readAllLines(java.nio.file.Path.of(path))) {
+            if (text.isBlank()) {
+                continue;
+            }
+            com.google.gson.JsonObject query = com.google.gson.JsonParser.parseString(text).getAsJsonObject();
+            int chunkX = query.get("x").getAsInt();
+            int chunkZ = query.get("z").getAsInt();
+            int minY = query.get("minY").getAsInt();
+            int maxY = query.get("maxY").getAsInt();
+            JsonArray states = query.getAsJsonArray("states");
+            int baseX = (chunkX - 1) * 16;
+            int baseZ = (chunkZ - 1) * 16;
+            Long2ObjectOpenHashMap<BlockState> scene = new Long2ObjectOpenHashMap<>();
+            int index = 0;
+            for (int y = minY; y <= maxY; y++) {
+                for (int dx = 0; dx < 48; dx++) {
+                    for (int dz = 0; dz < 48; dz++) {
+                        int id = states.get(index++).getAsInt();
+                        if (id != 0) {
+                            scene.put(BlockPos.asLong(baseX + dx, y, baseZ + dz), Block.stateById(id));
+                        }
+                    }
+                }
+            }
+            OracleRandom random = new OracleRandom(OracleRandom.Mode.SEEDED, 0);
+            FakeLevel level = FakeLevel.create(official, random);
+            level.load(scene);
+            FakeChunk chunk = FakeChunk.of(level, chunkX, chunkZ);
+            JsonArray post = query.getAsJsonArray("post");
+            it.unimi.dsi.fastutil.shorts.ShortList[] lists = new it.unimi.dsi.fastutil.shorts.ShortList[post.size()];
+            for (int section = 0; section < lists.length; section++) {
+                it.unimi.dsi.fastutil.shorts.ShortArrayList list = new it.unimi.dsi.fastutil.shorts.ShortArrayList();
+                for (com.google.gson.JsonElement entry : post.get(section).getAsJsonArray()) {
+                    list.add(entry.getAsShort());
+                }
+                lists[section] = list;
+            }
+            set(ChunkAccess.class, chunk, "postProcessing", lists);
+            set(ChunkAccess.class, chunk, "pendingBlockEntities", new HashMap<BlockPos, net.minecraft.nbt.CompoundTag>());
+            set(ChunkAccess.class, chunk, "blockEntities", new HashMap<BlockPos, BlockEntity>());
+            set(ChunkAccess.class, chunk, "upgradeData", net.minecraft.world.level.chunk.UpgradeData.EMPTY);
+            set(LevelChunk.class, chunk, "level", level);
+            chunk.postProcessGeneration(level);
+
+            JsonArray changes = new JsonArray();
+            TreeSet<Long> keys = new TreeSet<>(Comparator.comparingInt((Long key) -> BlockPos.getY(key))
+                    .thenComparingInt(key -> BlockPos.getX(key)).thenComparingInt(key -> BlockPos.getZ(key)));
+            keys.addAll(scene.keySet());
+            keys.addAll(level.blocks.keySet());
+            for (long key : keys) {
+                BlockState before = scene.getOrDefault(key, Blocks.AIR.defaultBlockState());
+                BlockState after = level.blocks.getOrDefault(key, Blocks.AIR.defaultBlockState());
+                if (before == after) {
+                    continue;
+                }
+                JsonArray change = new JsonArray();
+                change.add(BlockPos.getX(key));
+                change.add(BlockPos.getY(key));
+                change.add(BlockPos.getZ(key));
+                change.add(Block.getId(after));
+                changes.add(change);
+            }
+            long now = level.getGameTime();
+            JsonArray ticks = new JsonArray();
+            for (ScheduledTick<Block> tick : level.recordedBlockTicks.pending()) {
+                ticks.add(tickRow(tick, "block", BuiltInRegistries.BLOCK.getId(tick.type()), now));
+            }
+            for (ScheduledTick<Fluid> tick : level.recordedFluidTicks.pending()) {
+                ticks.add(tickRow(tick, "fluid", BuiltInRegistries.FLUID.getId(tick.type()), now));
+            }
+            com.google.gson.JsonObject line = new com.google.gson.JsonObject();
+            line.addProperty("type", "postprocess");
+            line.addProperty("x", chunkX);
+            line.addProperty("z", chunkZ);
+            line.add("changes", changes);
+            line.add("ticks", ticks);
+            line.addProperty("draws", random.draws);
+            out.write(line.toString());
+            out.write("\n");
+            lines++;
+        }
+        com.google.gson.JsonObject end = new com.google.gson.JsonObject();
+        end.addProperty("type", "end");
+        end.addProperty("lines", lines);
+        out.write(end.toString());
+        out.write("\n");
+        out.flush();
+    }
+
+    private static JsonArray tickRow(ScheduledTick<?> tick, String kind, int id, long now) {
+        JsonArray row = new JsonArray();
+        row.add(tick.pos().getX());
+        row.add(tick.pos().getY());
+        row.add(tick.pos().getZ());
+        row.add(kind);
+        row.add(id);
+        row.add(tick.triggerTick() - now);
+        row.add(tick.priority().getValue());
+        return row;
     }
 
     private static Unsafe loadUnsafe() {

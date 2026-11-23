@@ -15,7 +15,7 @@ use crate::chunk_nbt::{ChunkEncodeExtra, field};
 /// 官方 `EntityStorage.storeEntities` 认识的根键。
 const ENTITY_ROOT_KEYS: [&str; 3] = ["DataVersion", "Position", "Entities"];
 /// Bamboo 建模的实体。牛走 [`crate::entity::mob::nbt`]，经验球走共通键加四个专属键。
-const MODELED_ENTITIES: [&str; 14] = [
+const MODELED_ENTITIES: [&str; 15] = [
     "minecraft:skeleton",
     "minecraft:stray",
     "minecraft:bogged",
@@ -30,6 +30,7 @@ const MODELED_ENTITIES: [&str; 14] = [
     "minecraft:husk",
     "minecraft:drowned",
     "minecraft:witch",
+    "minecraft:pillager",
 ];
 
 /// 区块上层内容编解码失败的原因。所有输入都当成不可信数据，不 panic。

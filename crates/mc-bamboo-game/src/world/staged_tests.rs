@@ -199,16 +199,9 @@ fn generated_cells_with_seed(
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
-    // 这里比的是生成结果。区块交付后世界还在 tick，随机刻会让草蔓延到树下的泥土上、
-    // 让够不到原木的树叶腐烂，而两次运行经过的 tick 数不同。关掉随机刻再比。
-    // This compares generation output. The world keeps ticking after delivery, and
-    // random ticks spread grass onto the dirt under trees and decay leaves out of
-    // reach of a log, while the two runs see different numbers of ticks. Turn random
-    // ticks off for the comparison.
-    disable_random_ticks(&mut world);
-    for &pos in positions {
-        world.apply_ticket(TicketOp::Forced { pos, forced: true });
-    }
+    // 在 FULL 档取生成期的逐格基准；升入 BLOCK_TICKING 会消费完工表。
+    // Compare the assembled FULL output before promotion consumes its generation marks.
+    world.load_chunks_unpaced(positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
 
     let mut last_progress = Instant::now();
     let deadline = last_progress + PIPELINE_WATCHDOG;
@@ -554,4 +547,122 @@ fn disable_random_ticks(world: &mut World) {
         .rules_mut()
         .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
     world.master.global.publish(&mut world.islands.region);
+}
+
+/// 种子 42 的世界：推到 `positions` 全部交付、计算池排空。连同收件箱的发送端一起
+/// 交回：发送端一丢，世界就当成服务端停了。
+/// A seed-42 world ticked until `positions` are delivered and the pool is idle,
+/// returned with the inbox sender: dropping it reads as a server shutdown.
+fn structured_world(positions: &[ChunkPos], level: i32) -> (World, crate::inbound::InboundSender) {
+    let (inbox, receiver) = crate::inbound::channel();
+    let config = WorldConfig {
+        view_distance: 3,
+        world_gen: WorldGenConfig {
+            seed: 42,
+            level_type: LevelType::Normal,
+            generate_structures: true,
+            ..WorldGenConfig::default()
+        },
+        chunk_worker_threads: 4,
+        mail_budget: crate::MailBudget {
+            deliveries: 0,
+            reclaims: 0,
+        },
+        ..WorldConfig::default()
+    };
+    let mut world = World::new(config, receiver);
+    world.load_chunks_unpaced(positions, level);
+    let deadline = Instant::now() + Duration::from_secs(900);
+    let mut quiet = 0;
+    while quiet < 4 {
+        let _ = world.tick();
+        let ready = positions.iter().all(|&pos| world.is_chunk_loaded(pos))
+            && world.master.host.compute_in_flight() == 0;
+        quiet = if ready { quiet + 1 } else { 0 };
+        assert!(
+            Instant::now() < deadline,
+            "structured chunks were not delivered"
+        );
+    }
+    (world, inbox)
+}
+
+/// 结构写下的方块实体跟着九中心组装进交付盒子：沙漠神殿 (-375,-22) 的四个箱子带
+/// 战利品表。以前组装只传方块，箱子没有方块实体。
+#[test]
+fn structure_chests_arrive_with_their_loot_tables() {
+    let pos = ChunkPos::new(-375, -22);
+    let (world, _inbox) = structured_world(&[pos], mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
+    let root = world
+        .chunk_nbt_unpaced(pos)
+        .expect("chunk loaded")
+        .expect("chunk encodes");
+    let mc_bamboo_nbt::Tag::Compound(entries) = &root else {
+        panic!("chunk root is not a compound");
+    };
+    let Some((_, mc_bamboo_nbt::Tag::List(entities))) =
+        entries.iter().find(|(key, _)| key == "block_entities")
+    else {
+        panic!("no block_entities list");
+    };
+    let chests: Vec<&mc_bamboo_nbt::Tag> = entities
+        .iter()
+        .filter(|tag| {
+            matches!(tag, mc_bamboo_nbt::Tag::Compound(fields) if fields.iter().any(|(key, value)| {
+                key == "id" && *value == mc_bamboo_nbt::Tag::String("minecraft:chest".to_owned())
+            }))
+        })
+        .collect();
+    assert_eq!(chests.len(), 4, "the desert pyramid has four chests");
+    for chest in chests {
+        let mc_bamboo_nbt::Tag::Compound(fields) = chest else {
+            unreachable!()
+        };
+        let table = fields.iter().find(|(key, _)| key == "LootTable");
+        assert_eq!(
+            table.map(|(_, value)| value),
+            Some(&mc_bamboo_nbt::Tag::String(
+                "minecraft:chests/desert_pyramid".to_owned()
+            )),
+            "chest {fields:?}"
+        );
+    }
+}
+
+/// 加载等级升进 `BLOCK_TICKING` 时做完工后处理：沼泽小屋 (-17,22) 的栅栏在 FULL 时
+/// 还没连，升档后连好，表清空；之前不能发给玩家。
+#[test]
+fn promotion_to_block_ticking_post_processes_the_swamp_hut() {
+    let pos = ChunkPos::new(-17, 22);
+    let fence = BlockPos::new(-271, 66, 353);
+    // 3×3 都先到 FULL：中心升档时邻居已就位，后处理不等生成。
+    // The whole 3×3 reaches FULL first so promotion does not wait on generation.
+    let ring: Vec<ChunkPos> = (-1..=1)
+        .flat_map(|dz| (-1..=1).map(move |dx| ChunkPos::new(pos.x + dx, pos.z + dz)))
+        .collect();
+    let (mut world, _inbox) = structured_world(&ring, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
+    let state = |world: &World| world.chunk_blocks_unpaced(pos).expect("delivered");
+    let index = |at: BlockPos| (((at.y - MIN_Y) * 16 + (at.x & 15)) * 16 + (at.z & 15)) as usize;
+    assert_eq!(state(&world)[index(fence)], blocks::OAK_FENCE);
+    assert!(!world.chunk_ready_to_send_unpaced(pos));
+    let (table, _) = world
+        .chunk_post_processing_unpaced(pos)
+        .expect("table")
+        .expect("table encodes");
+    assert!(table.iter().map(Vec::len).sum::<usize>() > 0);
+
+    world.load_chunks_unpaced(&[pos], mc_bamboo_world::ticket::BLOCK_TICKING_LEVEL);
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while !world.chunk_post_processed_unpaced(pos) {
+        let _ = world.tick();
+        assert!(Instant::now() < deadline, "the hut never became ticking");
+    }
+    // 只连东边：比缺省（全 false）小 16。
+    assert_eq!(state(&world)[index(fence)], blocks::OAK_FENCE - 16);
+    assert!(world.chunk_ready_to_send_unpaced(pos));
+    let (delivered, reloaded) = world
+        .chunk_post_processing_unpaced(pos)
+        .expect("table")
+        .expect("table encodes");
+    assert!(delivered.iter().chain(&reloaded).all(Vec::is_empty));
 }

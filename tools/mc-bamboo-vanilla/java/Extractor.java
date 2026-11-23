@@ -1197,6 +1197,8 @@ public final class Extractor {
         out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
         out.addProperty("sheepWool", entityAccessor(net.minecraft.world.entity.animal.sheep.Sheep.class, "DATA_WOOL_ID").id());
         out.addProperty("glowSquidDarkTicks", entityAccessor(net.minecraft.world.entity.animal.squid.GlowSquid.class, "DATA_DARK_TICKS_REMAINING").id());
+        out.addProperty("batFlags", entityAccessor(net.minecraft.world.entity.ambient.Bat.class, "DATA_ID_FLAGS").id());
+        out.addProperty("phantomSize", entityAccessor(net.minecraft.world.entity.monster.Phantom.class, "ID_SIZE").id());
         out.addProperty("fishFromBucket", entityAccessor(net.minecraft.world.entity.animal.fish.AbstractFish.class, "FROM_BUCKET").id());
         out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
         out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
@@ -1252,6 +1254,15 @@ public final class Extractor {
         out.addProperty("catRelaxStateOne", entityAccessor(cat, "RELAX_STATE_ONE").id());
         out.addProperty("catCollar", entityAccessor(cat, "DATA_COLLAR_COLOR").id());
         out.addProperty("catSoundVariant", entityAccessor(cat, "DATA_SOUND_VARIANT_ID").id());
+        // 鹦鹉的 DATA_VARIANT_ID 用 INT 序列化器，index 紧随 TamableAnimal 之后。
+        // The parrot's DATA_VARIANT_ID uses the INT serializer; its index follows TamableAnimal.
+        Class<?> parrot = net.minecraft.world.entity.animal.parrot.Parrot.class;
+        out.addProperty("parrotVariant", entityAccessor(parrot, "DATA_VARIANT_ID").id());
+        // Parrot.getAmbient 在 nextInt(1000)==0 时 nextInt(MOB_SOUND_MAP.size()) 挑模仿的音效。
+        // Parrot.getAmbient draws nextInt(MOB_SOUND_MAP.size()) to pick an imitated sound.
+        java.lang.reflect.Field soundMap = parrot.getDeclaredField("MOB_SOUND_MAP");
+        soundMap.setAccessible(true);
+        out.addProperty("parrotSoundMapSize", ((java.util.Map<?, ?>) soundMap.get(null)).size());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();

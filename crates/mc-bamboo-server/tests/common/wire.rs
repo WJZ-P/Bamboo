@@ -923,7 +923,12 @@ fn read_entity_value(reader: &mut Reader<'_>, index: u8, serializer: i32) -> Ent
         1 | 7 | 12 | 13 => 1,
         9 | 17 => 3,
         6 => 20,
-        15 => 42,
+        // 玩家的 15 是主手（`HumanoidArm`），生物的 15 是 `Mob` 的 BYTE 标志位（无 AI、
+        // 左撇子、攻击中）。测试世界会自然刷出生物，这里不知道实体类型，两种都收。
+        // Index 15 is the main arm (`HumanoidArm`) on players and the `Mob` BYTE flags
+        // (no AI, left-handed, aggressive) on mobs. The test world spawns mobs
+        // naturally and the entity type is unknown here, so accept both.
+        15 if matches!(serializer, 0 | 42) => serializer,
         // 18 以上是各种生物自己的字段，同一个 index 在不同类型上的序列化器不同：
         // 马科的 18 是 BYTE 标志位，19 是 INT 花色（马）或 BOOLEAN 箱子（驴、骡），
         // 羊驼的 20 / 21 是 INT。这里不知道实体类型，只收这三种序列化器。

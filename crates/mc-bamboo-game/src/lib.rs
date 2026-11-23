@@ -56,6 +56,7 @@ mod entity_view;
 mod experience;
 mod experience_pickup;
 mod gamerules;
+pub mod generation_post_process;
 mod global;
 mod global_port;
 mod inbound;
@@ -77,6 +78,8 @@ mod natural_spawn;
 mod outgoing;
 mod pacing;
 mod partition_stats;
+mod patrol_spawn;
+mod phantom_spawn;
 mod player;
 mod player_attack;
 mod player_combat_memory;
@@ -113,6 +116,10 @@ mod secure_chat;
 mod sign;
 mod sleep;
 pub(crate) mod spawn_landing;
+/// 结构刷怪覆盖（`ChunkGenerator.getMobsAt`）；对拍工具也用它。
+///
+/// The structure spawn override (`ChunkGenerator.getMobsAt`), also used by the oracle.
+pub mod structure_spawn;
 mod tick_levels;
 mod weather;
 mod world;

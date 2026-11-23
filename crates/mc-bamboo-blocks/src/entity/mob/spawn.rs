@@ -37,6 +37,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.BUCKET`: placed from a bucket.
     Bucket,
+    /// `EntitySpawnReason.PATROL`：`PatrolSpawner` 刷出来的巡逻队。
+    ///
+    /// `EntitySpawnReason.PATROL`: a patrol from `PatrolSpawner`.
+    Patrol,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -363,6 +367,10 @@ fn finalize_spawn_in_group(
         super::cat::finalize_spawn(entity, world.random(), moon, group);
         return;
     }
+    if kind == MobType::Parrot {
+        super::parrot::finalize_spawn(entity, world.random(), group);
+        return;
+    }
     if kind.is_zombie() {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         if kind == MobType::Drowned {
@@ -374,7 +382,13 @@ fn finalize_spawn_in_group(
         super::slime::finalize_spawn(world, entity, group);
         return;
     }
-    if matches!(kind, MobType::Creeper | MobType::Enderman) {
+    if kind == MobType::Phantom {
+        super::phantom::finalize_spawn(entity, world.random());
+        return;
+    }
+    // 蝙蝠没有自己的 `finalizeSpawn`，和苦力怕一样只有 `Mob.finalizeSpawn`。
+    // Bats have no `finalizeSpawn` of their own: just `Mob.finalizeSpawn`, as creepers.
+    if matches!(kind, MobType::Creeper | MobType::Enderman | MobType::Bat) {
         super::creeper::finalize_spawn(entity, world.random());
         return;
     }
@@ -426,6 +440,10 @@ fn finalize_spawn_in_group(
         super::witch::finalize_spawn(entity, world.random());
         return;
     }
+    if kind == MobType::Pillager {
+        super::pillager::finalize_spawn(world, entity, reason);
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
     if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
@@ -473,6 +491,8 @@ pub(super) fn finalize_generated(
     } else if kind == MobType::Cat {
         let moon = crate::sky::moon_brightness(world.level().clock_ticks());
         super::cat::finalize_spawn(entity, region_random, moon, group);
+    } else if kind == MobType::Parrot {
+        super::parrot::finalize_spawn(entity, region_random, group);
     } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
         super::wild_spawn::finalize(kind, entity, biome, region_random, group);
     } else if kind.is_equine() {

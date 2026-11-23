@@ -724,6 +724,56 @@ mod tests {
         assert_eq!(is_slime_chunk(3, -7, 42), is_slime_chunk(3, -7, 42));
     }
 
+    /// 官方 `WorldgenRandom.seedSlimeChunk(x, z, seed, 987234911L).nextInt(10) == 0` 的结果表：
+    /// 8 个世界种子（含负数和 `Long.MIN_VALUE`）乘 12 个区块坐标（含 `|x| > 46340`，让
+    /// `x*x` 的 int 溢出真的发生），由 Java 26 对官方 `server-26.3.jar` 实跑导出。每位对应
+    /// 下面 `COORDS` 同一位置的区块，补上自然刷怪场景只覆盖少数区块的缺口。
+    ///
+    /// Official `WorldgenRandom.seedSlimeChunk(x, z, seed, 987234911L).nextInt(10) == 0`
+    /// results: 8 world seeds (including negatives and `Long.MIN_VALUE`) by 12 chunk coordinates
+    /// (including `|x| > 46340` so the `x*x` int overflow really happens), exported by running
+    /// Java 26 against the official `server-26.3.jar`. Each bit matches the entry at the same
+    /// index in `COORDS`; this covers the chunk grid the natural-spawn scenes leave out.
+    #[test]
+    fn slime_chunks_match_vanilla_seed_slime_chunk() {
+        const COORDS: &[(i32, i32)] = &[
+            (0, 0),
+            (1, 0),
+            (3, -7),
+            (-17, 5),
+            (1234, -5678),
+            (-100000, 100000),
+            (46341, 0),
+            (0, 46341),
+            (-50000, 7),
+            (99999, -99999),
+            (1, 1),
+            (-1, -1),
+        ];
+        // 每行是 COORDS 逐格的命中位串，顺序与官方导出一致。
+        // Each row is the per-coordinate hit bit string in the same COORDS order, as exported.
+        const OFFICIAL: &[(i64, &str)] = &[
+            (0, "000100000000"),
+            (1, "000001000100"),
+            (42, "000001000000"),
+            (12345, "000000101000"),
+            (-1, "000000100000"),
+            (i64::MIN, "000100000000"),
+            (987234911, "100000000100"),
+            (1234567890123, "000000101000"),
+        ];
+        for &(seed, bits) in OFFICIAL {
+            assert_eq!(bits.len(), COORDS.len());
+            for (i, &(x, z)) in COORDS.iter().enumerate() {
+                assert_eq!(
+                    is_slime_chunk(x, z, seed),
+                    bits.as_bytes()[i] == b'1',
+                    "seed={seed} chunk=({x}, {z})",
+                );
+            }
+        }
+    }
+
     /// 存档写 `Size`（大小减一）和 `wasOnGround`，带 `AgeableMob` 的三个键、不带 `Animal` 的
     /// 求爱键；读回来大小、尺寸和血量都在。
     ///

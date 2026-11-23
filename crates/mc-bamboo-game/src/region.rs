@@ -265,6 +265,12 @@ pub(crate) struct Region {
     /// (`spawn_per_player_cap` in `bamboo.toml`); off keeps only the vanilla
     /// global cap.
     pub(crate) spawn_per_player_cap: bool,
+    /// `ServerLevel.customSpawners` 里的 `PatrolSpawner`。每岛一份，和官方的每维度一份
+    /// 对应，岛拆分时两边各带自己的计时器。
+    ///
+    /// The `PatrolSpawner` of `ServerLevel.customSpawners`. One per island, matching
+    /// vanilla's one per dimension; a split carries the timer with each side.
+    pub(crate) patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner,
     /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
@@ -337,6 +343,10 @@ pub(crate) struct Region {
     pub(crate) dirty: dirty::Dirty,
     /// 官方 `ServerLevel.sleepStatus`：多少活跃玩家、多少人在睡觉。
     pub(crate) sleep: crate::sleep::SleepStatus,
+    /// `PhantomSpawner.nextTick`：自定义刷怪器每刻的倒数，跨刻保留。
+    ///
+    /// `PhantomSpawner.nextTick`: the custom spawner's countdown, kept across ticks.
+    pub(crate) phantom_spawner: mc_bamboo_blocks::entity::mob::phantom_spawner::PhantomSpawner,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -453,6 +463,7 @@ impl Region {
                 mc_bamboo_blocks::cache::CacheConfig::default(),
             ),
             spawn_per_player_cap: true,
+            patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner::default(),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
@@ -475,6 +486,7 @@ impl Region {
             partitioning: crate::region::partition::Partitioning::default(),
             dirty: dirty::Dirty::default(),
             sleep: crate::sleep::SleepStatus::default(),
+            phantom_spawner: Default::default(),
         }
     }
 
@@ -682,6 +694,7 @@ impl Region {
             sky_darken: self.global.sky_darken,
             clock_ticks: self.global.clock.total_ticks,
             world_seed: self.global.seed,
+            world_gen: &self.global.world_gen,
             sea_level: if self.global.world_gen.level_type.is_flat() {
                 -63
             } else {

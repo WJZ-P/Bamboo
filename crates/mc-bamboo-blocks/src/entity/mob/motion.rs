@@ -126,6 +126,13 @@ fn check_fall_damage(
     state: BlockState,
     pos: BlockPos,
 ) {
+    // `Parrot.checkFallDamage`、`Bat.checkFallDamage` 和幻翼的都是空实现：不掉血，
+    // 不累计、不清零摔落距离，也不补那次流体更新。
+    // The parrot, bat and phantom `checkFallDamage` overrides are empty: no fall
+    // damage, no fall distance bookkeeping and no fluid update.
+    if mob.mob_type.ignores_fall_damage_check() {
+        return;
+    }
     if !me.in_water {
         update_fluid_interaction(me, mob, ctx.blocks());
     }
@@ -320,6 +327,13 @@ fn movement_emission(
                 let pitch = 1.0 + (first - second) * 0.4;
                 super::living::play_sound(me, mob, mob.mob_type.swim_sound(), volume, pitch);
             }
+        }
+    } else if on_state.is_air() && mob.mob_type == super::MobType::Parrot {
+        // `Parrot.isFlapping()` 加 `onFlap()`：脚下是空气时按飞行距离放翅膀声。
+        // `Parrot.isFlapping()` and `onFlap()`: above air, play the wing sound per distance.
+        if mob.fly_dist > mob.parrot.next_flap {
+            super::living::play_sound(me, mob, "minecraft:entity.parrot.fly", 0.15, 1.0);
+            mob.parrot.next_flap = mob.fly_dist + mob.parrot.flap_speed / 2.0;
         }
     }
 }

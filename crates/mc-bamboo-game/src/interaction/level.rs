@@ -60,6 +60,11 @@ pub(crate) struct RegionLevel<'a> {
     ///
     /// `WorldGenLevel.getSeed()`: the world seed, read for slime chunks.
     pub(crate) world_seed: i64,
+    /// 一局的世界生成参数，结构刷怪覆盖按种子重算结构起点时用。
+    ///
+    /// This session's world-generation parameters, used to recompute structure starts
+    /// for the structure spawn override.
+    pub(crate) world_gen: &'a crate::world_options::WorldGenConfig,
     /// `Level.getSeaLevel()`：这一维度的海平面。超平坦是 -63，其余是 63。
     ///
     /// `Level.getSeaLevel()` for this dimension. -63 for superflat and 63 otherwise.
@@ -409,6 +414,42 @@ impl Level for RegionLevel<'_> {
 
     fn world_seed(&self) -> i64 {
         self.world_seed
+    }
+
+    /// `ChunkGenerator.getMobsAt` 的结构分支：位置落在结构覆盖盒里就用结构的表。
+    ///
+    /// The structure branch of `ChunkGenerator.getMobsAt`: use the structure's list
+    /// inside an override box.
+    fn structure_spawn_override(
+        &self,
+        pos: BlockPos,
+        category: mc_bamboo_data::spawning::MobCategory,
+    ) -> Option<&'static [mc_bamboo_data::spawning::MobSpawnerDef]> {
+        crate::structure_spawn::override_at(self.world_gen, pos, category)
+    }
+
+    /// `EnvironmentAttributes.CAN_PILLAGER_PATROL_SPAWN`：群系属性（蘑菇岛关掉）叠加
+    /// `EARLY_GAME` 时间线（主世界时钟 120000 刻之前不刷巡逻队）。
+    ///
+    /// `EnvironmentAttributes.CAN_PILLAGER_PATROL_SPAWN`: the biome attribute (mushroom
+    /// fields disables it) combined with the `EARLY_GAME` timeline (no patrols before
+    /// overworld-clock tick 120000).
+    fn can_pillager_patrol_spawn(&self, pos: BlockPos) -> bool {
+        let biome = self.chunks.biome_at(pos).unwrap_or(0) as i32;
+        mc_bamboo_blocks::entity::mob::patrol::can_patrol_spawn_at(self.clock_ticks, biome)
+    }
+
+    /// `ServerLevel.hasChunksAt(x - margin, z - margin, x + margin, z + margin)`。
+    ///
+    /// `ServerLevel.hasChunksAt(...)` over the patrol spawn margin.
+    fn patrol_chunks_loaded(&self, center: BlockPos, margin: i32) -> bool {
+        let min_x = (center.x - margin) >> 4;
+        let max_x = (center.x + margin) >> 4;
+        let min_z = (center.z - margin) >> 4;
+        let max_z = (center.z + margin) >> 4;
+        (min_x..=max_x).all(|x| {
+            (min_z..=max_z).all(|z| self.chunks.is_loaded(mc_bamboo_core::ChunkPos::new(x, z)))
+        })
     }
 
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
@@ -871,6 +912,11 @@ impl Level for RegionLevel<'_> {
         if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
             victim.cube_mob_size = Some(loot.cube_size);
         }
+        // `type_specific/raider`：没有袭击，`has_raid` 恒假；队长由生物一侧算好带过来。
+        // `type_specific/raider`: no raids, so `has_raid` stays false; the mob side
+        // supplies the captain flag.
+        victim.is_raider = loot.victim.is_raider();
+        victim.is_captain = loot.captain;
         let view = crate::block_drops::ChunkLevel {
             chunks: self.chunks,
             weather: self.block_weather,

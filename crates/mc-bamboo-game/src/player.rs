@@ -220,6 +220,12 @@ pub(crate) struct Player {
     /// Entity tick count, used modulo 20/10 by peaceful regeneration. Relative,
     /// so island splits and merges need no rebasing.
     pub(crate) entity_ticks: i32,
+    /// `Stats.CUSTOM.get(Stats.TIME_SINCE_REST)`：没睡觉的每一刻 +1，开始睡觉清零。
+    /// 幻翼自定义刷怪器读它决定要不要在玩家头顶刷怪。
+    ///
+    /// `Stats.CUSTOM.get(Stats.TIME_SINCE_REST)`: +1 on every non-sleeping tick,
+    /// reset on sleep start. The phantom custom spawner reads it.
+    pub(crate) time_since_rest: i32,
     /// `lastHurtByMob` / `lastHurtMob` / `lastDamageSource`，狼保护主人时读。
     ///
     /// Combat memory read by tamed wolves guarding their owner.
@@ -311,6 +317,7 @@ impl Player {
             dead: false,
             last_death_location: None,
             entity_ticks: 0,
+            time_since_rest: 0,
             combat_memory: Default::default(),
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
