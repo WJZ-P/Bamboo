@@ -76,6 +76,14 @@ pub(crate) fn with_mob<R>(
 
 fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     timing::span!(Other);
+    // `Silverfish.tick` / `Endermite.tick` 在 `super.tick()` 之前把身体朝向设成头朝向。
+    // `Silverfish.tick` / `Endermite.tick` set the body rotation before `super.tick()`.
+    if matches!(
+        mob.mob_type,
+        super::MobType::Silverfish | super::MobType::Endermite
+    ) {
+        mob.y_body_rot = me.y_rot;
+    }
     check_despawn(me, mob, ctx);
     if me.removed {
         return;
@@ -1070,6 +1078,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::enderman::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx);
+    // `Endermite.aiStep` 在 `super.aiStep()` 之后推进寿命。
+    // `Endermite.aiStep` advances its lifetime after `super.aiStep()`.
+    if mob.mob_type == super::MobType::Endermite {
+        super::endermite::ai_step(me, mob);
+    }
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
     }
@@ -2337,6 +2350,11 @@ pub(crate) fn hurt_server(
     } else {
         amount
     };
+    // `Silverfish.hurtServer`：无敌判定之后先唤醒附近虫蚀方块里的同伴。
+    // `Silverfish.hurtServer`: after the invulnerability check, wake nearby friends.
+    if mob.mob_type == super::MobType::Silverfish && !is_invulnerable_to(me, mob, &source) {
+        super::silverfish::notify_hurt(mob, &source);
+    }
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }

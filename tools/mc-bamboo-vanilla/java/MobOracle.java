@@ -330,6 +330,18 @@ public final class MobOracle {
                 playSquid(official, out, name);
                 cases++;
             }
+            for (String name : List.of("silverfish_wake", "silverfish_merge", "silverfish_melee",
+                    "endermite_life", "endermite_persistent", "endermite_melee", "endermite_target")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playSmallMob(official, out, name);
+                cases++;
+            }
+            if (only == null || only.equals("small_mob_save")) {
+                cases += playSmallMobSave(official, out);
+            }
+            if (only == null || only.equals("small_mob_death")) {
+                cases += playSmallMobDeath(official, out);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -8414,6 +8426,293 @@ public final class MobOracle {
                 + ",\"playerFar\":" + Arrays.toString(playerFar) + ",\"playerNear\":" + Arrays.toString(playerNear)
                 + ",\"frames\":" + frames + "]}\n");
         out.flush();
+    }
+
+    /**
+     * 蠹虫和末影螨：逐刻比位置、速度、朝向、随机源、血量、寿命、唤醒倒计时、方块表、
+     * 新生成的实体和世界随机源。
+     *
+     * Silverfish and endermites: per-tick comparison of motion, random, health, lifetime,
+     * wake-up countdown, the block table, freshly spawned entities and the level random.
+     */
+    private static void playSmallMob(Official official, Writer out, String name) throws Exception {
+        boolean silverfish = name.startsWith("silverfish");
+        boolean wake = name.equals("silverfish_wake");
+        boolean merge = name.equals("silverfish_merge");
+        boolean melee = name.endsWith("_melee");
+        boolean life = name.equals("endermite_life");
+        boolean persistent = name.equals("endermite_persistent");
+        boolean target = name.equals("endermite_target");
+        int ticks = life || persistent ? 2410 : target ? 40 : wake ? 30 : merge ? 120 : 100;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        world.levelEvents = new ArrayList<>();
+        for (int x = -6; x <= 6; x++) {
+            for (int z = -6; z <= 6; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        if (merge) {
+            // 六个相邻格都是宿主方块：随机选到哪个方向都能钻进去。
+            world.blocks.put(BlockPos.asLong(1, 61, 0), Blocks.STONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(-1, 61, 0), Blocks.COBBLESTONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 61, 1), Blocks.STONE_BRICKS.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 61, -1), Blocks.STONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 62, 0), Blocks.DEEPSLATE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 60, 0), Blocks.STONE.defaultBlockState());
+        }
+        if (wake) {
+            world.blocks.put(BlockPos.asLong(2, 61, 0), Blocks.INFESTED_STONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(-2, 61, 0), Blocks.INFESTED_STONE_BRICKS.defaultBlockState());
+        }
+        String blocks = blockArray(world.blocks);
+        Long2ObjectOpenHashMap<BlockState> initial = new Long2ObjectOpenHashMap<>(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        world.particlePackets = true;
+        Bytes events = new Bytes(official.registries);
+        world.packets = events::add;
+        double[] start = {0.5, 61.0, 0.5};
+        EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+        Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+        setRandom(mob, world.entitySeeds.nextLong());
+        RandomSource random = mob.getRandom();
+        mob.setUUID(Mth.createInsecureUUID(random));
+        float yaw = random.nextFloat() * 6.2831855F;
+        mob.setYRot(yaw);
+        mob.setYHeadRot(yaw);
+        mob.setPos(start[0], start[1], start[2]);
+        if (persistent) {
+            Field persistence = Mob.class.getDeclaredField("persistenceRequired");
+            persistence.setAccessible(true);
+            persistence.setBoolean(mob, true);
+        }
+        world.tracked.add(mob);
+        Cow cow = null;
+        if (melee) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource cowRandom = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(cowRandom));
+            float cowYaw = cowRandom.nextFloat() * 6.2831855F;
+            cow.setYRot(cowYaw);
+            cow.setYHeadRot(cowYaw);
+            cow.setPos(3.5, 61.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Mob enderman = null;
+        if (target) {
+            enderman = EntityTypes.ENDERMAN.create(world, EntitySpawnReason.COMMAND);
+            setRandom(enderman, world.entitySeeds.nextLong());
+            RandomSource enderRandom = enderman.getRandom();
+            enderman.setUUID(Mth.createInsecureUUID(enderRandom));
+            float enderYaw = enderRandom.nextFloat() * 6.2831855F;
+            enderman.setYRot(enderYaw);
+            enderman.setYHeadRot(enderYaw);
+            enderman.setPos(4.5, 61.0, 0.5);
+            world.tracked.add(enderman);
+        }
+        Field lifeField = net.minecraft.world.entity.monster.Endermite.class.getDeclaredField("life");
+        lifeField.setAccessible(true);
+        Field friendsField = Class.forName("net.minecraft.world.entity.monster.Silverfish$SilverfishWakeUpFriendsGoal")
+                .getDeclaredField("lookForFriends");
+        friendsField.setAccessible(true);
+        Object friendsGoal = silverfish ? friendsOf(mob) : null;
+        world.spawned.clear();
+        Sync sync = new Sync(world, mob, official.registries);
+        boolean gone = false;
+        var frames = new StringBuilder("[");
+        int merged = 0;
+        int hurtTicks = 0;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) {
+                sync.entity.sendPairingData(null, sync.bytes::add);
+                packets.addAll(sync.take());
+            } else {
+                world.gameTime++;
+                world.spawned.clear();
+                if (wake && tick == 5) {
+                    mob.hurtServer(world, world.damageSources().magic(), 1.0F);
+                    hurtTicks++;
+                }
+                if (melee && tick == 60) {
+                    mob.hurtServer(world, world.damageSources().mobAttack(cow), 20.0F);
+                }
+                if (!mob.isRemoved()) {
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (enderman != null && !enderman.isRemoved()) {
+                    enderman.checkDespawn();
+                    enderman.commonTick();
+                    enderman.tick();
+                }
+                packets.addAll(events.take());
+                if (mob.isRemoved()) {
+                    if (!gone) {
+                        Bytes removal = new Bytes(official.registries);
+                        removal.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(mob.getId()));
+                        packets.addAll(removal.take());
+                    }
+                    gone = true;
+                } else {
+                    sync.entity.sendChanges();
+                    packets.addAll(sync.take());
+                }
+            }
+            frames.append(tick == 0 ? "" : ",");
+            frames.append("{\"gone\":").append(gone);
+            if (!gone) {
+                frames.append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(mob.getHealth()), mob.hurtTime, mob.deathTime,
+                                mob.getNoActionTime(), Float.floatToRawIntBits(mob.yBodyRot),
+                                Float.floatToRawIntBits(mob.getYHeadRot()), Float.floatToRawIntBits(mob.zza),
+                                mob.onGround() ? 1 : 0}))
+                        .append(",\"life\":").append(silverfish ? 0 : lifeField.getInt(mob))
+                        .append(",\"friends\":").append(friendsGoal == null ? 0 : friendsField.getInt(friendsGoal))
+                        .append(",\"target\":").append(enderman == null ? 0
+                                : (enderman.getTarget() == mob ? 1 : enderman.getTarget() == null ? 0 : 2));
+            }
+            frames.append(",\"blocks\":").append(blockStates(initial, world));
+            frames.append(",\"spawned\":[");
+            for (int i = 0; i < world.spawned.size(); i++) {
+                if (i > 0) frames.append(',');
+                frames.append(jsonString(net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE
+                        .getKey(world.spawned.get(i).getType()).toString()));
+            }
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append(",\"packets\":[]");
+            frames.append('}');
+            if (merge) {
+                for (BlockState state : world.blocks.values()) {
+                    if (state.is(Blocks.INFESTED_STONE) || state.is(Blocks.INFESTED_COBBLESTONE)
+                            || state.is(Blocks.INFESTED_STONE_BRICKS) || state.is(Blocks.INFESTED_DEEPSLATE)) {
+                        merged++;
+                        break;
+                    }
+                }
+            }
+        }
+        if (wake && hurtTicks != 1) throw new IllegalStateException(name + ": no hurt");
+        if (life && !gone) throw new IllegalStateException(name + ": lifetime did not expire");
+        if (persistent && gone) throw new IllegalStateException(name + ": persistent mob disappeared");
+        if (target && frames.indexOf("\"target\":1") < 0) {
+            throw new IllegalStateException(name + ": enderman never targeted the endermite");
+        }
+        if (merge && merged == 0) {
+            throw new IllegalStateException(name + ": silverfish never merged with stone");
+        }
+        out.write("{\"type\":\"smallMob\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                + ",\"start\":" + Arrays.toString(start)
+                + ",\"silverfish\":" + silverfish
+                + ",\"melee\":" + melee + ",\"persistent\":" + persistent
+                + ",\"enderman\":" + target + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /** 蠹虫 / 末影螨存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playSmallMobSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean silverfish : new boolean[] {true, false}) {
+            for (int life : new int[] {0, 2399}) {
+                FakeLevel world = FakeLevel.create(official);
+                EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+                Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+                setRandom(mob, world.entitySeeds.nextLong());
+                mob.setPos(1.5, 64.0, 2.5);
+                mob.setYRot(37.0F);
+                mob.setXRot(12.0F);
+                mob.setHealth(3.0F);
+                if (!silverfish) {
+                    Field field = net.minecraft.world.entity.monster.Endermite.class.getDeclaredField("life");
+                    field.setAccessible(true);
+                    field.setInt(mob, life);
+                    if (life == 2399) {
+                        mob.setPersistenceRequired();
+                    }
+                }
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                mob.saveWithoutId(output);
+                var copy = (Mob) type.create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"smallMobSave\",\"silverfish\":" + silverfish
+                        + ",\"life\":" + life
+                        + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    /** 死亡掉落：两种生物的战利品表都是空的，只比经验值和 `spawned` 里的物品。 */
+    private static int playSmallMobDeath(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean silverfish : new boolean[] {true, false}) {
+            for (boolean byPlayer : new boolean[] {true, false}) {
+                official.server.sequences = new RandomSequences();
+                FakeLevel world = FakeLevel.create(official);
+                ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+                world.spawned = new ArrayList<>();
+                EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+                Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+                setRandom(mob, world.entitySeeds.nextLong());
+                mob.setPos(0.5, 64.0, 0.5);
+                world.tracked.add(mob);
+                ServerPlayer player = null;
+                if (byPlayer) {
+                    player = new ServerPlayer(official.server, world,
+                            new GameProfile(new UUID(1L, 2L), "SmallMobDeath"), ClientInformation.createDefault());
+                    player.setId(FIRST_ID + 1024);
+                    player.setPos(2.5, 64.0, 0.5);
+                    world.playersList().add(player);
+                    world.tracked.add(player);
+                }
+                DamageSource source = byPlayer ? world.damageSources().playerAttack(player)
+                        : world.damageSources().generic();
+                mob.hurtServer(world, source, 100.0F);
+                for (int tick = 0; tick < 25; tick++) {
+                    world.gameTime++;
+                    if (!mob.isRemoved()) {
+                        mob.commonTick();
+                        mob.tick();
+                    }
+                }
+                List<String> items = new ArrayList<>();
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && !item.getItem().isEmpty()) {
+                        items.add(BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "x" + item.getItem().getCount());
+                    }
+                }
+                items.sort(String::compareTo);
+                out.write("{\"type\":\"smallMobDeath\",\"silverfish\":" + silverfish
+                        + ",\"byPlayer\":" + byPlayer
+                        + ",\"removed\":" + mob.isRemoved()
+                        + ",\"items\":" + items.stream().map(MobOracle::jsonString)
+                                .collect(java.util.stream.Collectors.joining(",", "[", "]")) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    /** `Silverfish.friendsGoal` 的私有字段。 */
+    private static Object friendsOf(Mob mob) throws Exception {
+        Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
+        field.setAccessible(true);
+        return field.get(mob);
     }
 
     /**
