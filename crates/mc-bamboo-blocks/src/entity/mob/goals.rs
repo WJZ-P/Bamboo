@@ -1548,12 +1548,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             }
             // `RandomStrollGoal.canUse` 的间隔是 10（不是折半后的 5）：
             // 官方向父类传的 10 在 `RandomStrollGoal` 内部又折半一次。
-            if !*force_trigger {
-                if mob.no_action_time >= 100
-                    || me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0
-                {
-                    return false;
-                }
+            if !*force_trigger
+                && (mob.no_action_time >= 100
+                    || me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0)
+            {
+                return false;
             }
             let Some(found) = default_random_pos(me, mob, ctx.blocks(), 10, 7) else {
                 return false;

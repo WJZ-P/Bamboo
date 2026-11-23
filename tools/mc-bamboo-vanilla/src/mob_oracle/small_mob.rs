@@ -166,7 +166,7 @@ impl Report {
                 // 改坏确认：受伤晚一刻发生，唤醒同伴的整条时间线都要错开。
                 let hurt_tick = 5 + i32::from(break_test.as_deref() == Some("small_mob_hurt"));
                 let melee_source = (case.melee && tick == 60)
-                    .then(|| cow.and_then(|cow| Some(cow_attack(&level, cow))))
+                    .then(|| cow.map(|cow| cow_attack(&level, cow)))
                     .flatten();
                 let mut world = World::new(&mut level, &mut ticks);
                 if case.name == "silverfish_wake" && tick == hurt_tick as usize {
