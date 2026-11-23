@@ -582,7 +582,7 @@ fn resolve_target(
 /// The `AttackRange` fields a player attacker reads. `mob_factor` only applies
 /// to non-player attackers, so players always use `min/minCreative` and
 /// `max/maxCreative`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct AttackRange {
     min_reach: f32,
     max_reach: f32,
@@ -1320,6 +1320,8 @@ mod tests {
     use super::*;
     use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
 
+    pub(crate) use crate::world::tests::frames_with_id;
+
     fn stack(item: i32) -> ItemStack {
         ItemStack::new(item, 1)
     }
@@ -1467,8 +1469,121 @@ mod tests {
         // Horizontal speed ≥ (0.1×2.5)² = 0.0625 → no sweep; slower → sweep.
         region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.3, 0.0, 0.0);
         assert!(!sweep(&region, &sword, true, false, false));
+        // 官方是严格 `<`：`dcmpg >= 0` 时返回 false，正好等于阈值也不横扫。
+        // Vanilla is a strict `<` (`dcmpg >= 0` returns false): equality does not sweep.
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.25, 0.0, 0.0);
+        assert!(!sweep(&region, &sword, true, false, false));
         region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.2, 0.0, 0.0);
         assert!(sweep(&region, &sword, true, false, false));
+    }
+
+    /// `Player.attack` 在 `baseDamage > 0 || magicBoost > 0` 之外整段跳过：
+    /// `onAttack()` 已经把冷却清零，但既不 hurt、也不发攻击音效。武器把
+    /// `ATTACK_DAMAGE` 减到 0、又没有任何附魔加成时才会走到这里。
+    ///
+    /// Vanilla `Player.attack` skips everything outside
+    /// `baseDamage > 0 || magicBoost > 0`: `onAttack()` has already reset the
+    /// cooldown, but there is no hurt and no attack sound. A weapon that reduces
+    /// `ATTACK_DAMAGE` to zero without an enchantment boost reaches this gate.
+    #[test]
+    fn a_zero_damage_attack_skips_the_hit_and_its_sound() {
+        use mc_bamboo_data::{items, packets::play::clientbound, sounds};
+        use mc_bamboo_protocol::{codec::Reader, packet::play::PlayRequest};
+
+        use crate::world::tests::Harness;
+
+        let mut server = Harness::new(8);
+        let client = server.join("Kitten");
+        server.tick();
+        client.take_frames();
+        let region = &mut server.world.islands.region;
+        let position = region.players.get(&client.id).unwrap().position();
+        let cow = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::cow(position));
+        // 主手武器上一条 `ATTACK_DAMAGE = -1` 的 ADD_VALUE 修饰符，把玩家的
+        // 基础 1.0 减到 0。官方 `Player.createAttributes()` 的基值就是 1.0。
+        //
+        // One `ATTACK_DAMAGE = -1` ADD_VALUE modifier on the main-hand weapon
+        // cancels the player's base 1.0 from `Player.createAttributes()`.
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::ATTRIBUTE_MODIFIERS,
+            PatchEntry::Set(ComponentValue::AttributeModifiers(vec![
+                mc_bamboo_protocol::components::value::AttributeEntry {
+                    attribute: mc_bamboo_data::registries::attribute::ATTACK_DAMAGE,
+                    modifier: mc_bamboo_protocol::components::value::AttributeModifier {
+                        id: "minecraft:base_attack_damage".to_owned(),
+                        amount: -1.0,
+                        operation: 0,
+                    },
+                    slot: 1,
+                    display: mc_bamboo_protocol::components::value::AttributeDisplay::Default,
+                },
+            ])),
+        );
+        let (added, removed) = patch.to_opaque();
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            let slot = player.inventory.hand_slot(Hand::Main);
+            player.inventory.slots[slot] = ItemStack {
+                item: items::DIAMOND_SWORD,
+                count: 1,
+                added,
+                removed,
+            };
+            player.attack_strength_ticker = 100;
+            player.on_ground = true;
+            player.motion.fall_distance = 0.0;
+        }
+        let health_before = region
+            .entities
+            .get(cow)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+            .expect("cow");
+
+        server.request(&client, PlayRequest::Attack { entity_id: cow });
+        server.tick();
+        let frames = client.take_frames();
+        let ids: Vec<i32> = frames_with_id(&frames, clientbound::SOUND)
+            .iter()
+            .filter_map(|frame| Reader::new(&frame.body).varint().ok())
+            .map(|id| id - 1)
+            .collect();
+        let sound = |name| i32::from(sounds::sound_event(name));
+        for absent in [
+            "minecraft:entity.player.attack.weak",
+            "minecraft:entity.player.attack.strong",
+            "minecraft:entity.player.attack.crit",
+            "minecraft:entity.player.attack.sweep",
+            "minecraft:entity.player.attack.nodamage",
+        ] {
+            assert!(!ids.contains(&sound(absent)), "{absent} must not be sent");
+        }
+        let health_after = server
+            .world
+            .islands
+            .region
+            .entities
+            .get(cow)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+            .expect("cow");
+        assert_eq!(health_after, health_before, "no hurt without damage");
+        // `onAttack()` 仍然把冷却清零：这一刻开头的 +1 之后没有再涨。
+        // `onAttack()` still resets the cooldown: after this tick's leading +1
+        // the ticker stays at zero instead of continuing to charge.
+        assert_eq!(
+            server
+                .world
+                .islands
+                .region
+                .players
+                .get(&client.id)
+                .unwrap()
+                .attack_strength_ticker,
+            0,
+            "the skipped attack still resets the cooldown"
+        );
     }
 
     #[test]
@@ -1934,6 +2049,123 @@ mod tests {
     ///
     /// The bounds are closed: a distance exactly at the limit still hits
     /// (`isInRange` uses `<=`).
+    /// `LivingEntity.getAttackRangeWith(weaponItem)`：武器上的 `ATTACK_RANGE`
+    /// 组件逐字段覆盖 `defaultFor`，玩家攻击者读 min/max（创造读 min/maxCreative），
+    /// `hitbox_margin` 同时放宽下界和上界。`mob_factor` 只对非玩家生效。
+    ///
+    /// `LivingEntity.getAttackRangeWith(weaponItem)`: an `ATTACK_RANGE`
+    /// component overrides `defaultFor` field by field. Player attackers read
+    /// min/max (creative reads min/maxCreative); `hitbox_margin` widens both
+    /// ends. `mob_factor` only applies to non-player attackers.
+    #[test]
+    fn a_weapon_attack_range_component_overrides_the_default() {
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::ATTACK_RANGE,
+            PatchEntry::Set(ComponentValue::AttackRange {
+                min_reach: 2.0,
+                max_reach: 4.0,
+                min_creative_reach: 1.0,
+                max_creative_reach: 7.0,
+                hitbox_margin: 0.5,
+                mob_factor: 0.25,
+            }),
+        );
+        let (added, removed) = patch.to_opaque();
+        let weapon = ItemStack {
+            item: mc_bamboo_data::items::DIAMOND_SWORD,
+            count: 1,
+            added,
+            removed,
+        };
+        assert_eq!(
+            attack_range(&weapon, GameMode::Survival),
+            AttackRange {
+                min_reach: 2.0,
+                max_reach: 4.0,
+                min_creative_reach: 1.0,
+                max_creative_reach: 7.0,
+                hitbox_margin: 0.5,
+            }
+        );
+        // `isInRange` 的窗口是 `[min − margin − buffer, max + margin + buffer]`：
+        // 眼睛到盒子的距离正好 3.0 时，下界 2.0 − 0.5 − 3.0 = −1.5，
+        // 上界 4.0 + 0.5 + 3.0 = 7.5，落在里面。创造模式的上界是 10.5。
+        //
+        // `isInRange` uses `[min − margin − buffer, max + margin + buffer]`.
+        let eye = Vec3::new(0.5, 64.0, 0.5);
+        let bounds = Aabb::new(3.5, 63.5, 0.0, 4.0, 65.0, 1.0);
+        let range = attack_range(&weapon, GameMode::Survival);
+        assert!(range.is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, false));
+        assert!(range.is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, true));
+        // 没有组件时同一个盒子也在范围内，但上界只有 6.0：更远的盒子只有带
+        // 组件的武器（或创造模式）够得到。
+        //
+        // Without the component the same box is still in range, but the upper
+        // limit is 6.0: a farther box needs the component or creative mode.
+        let far = Aabb::new(7.9, 63.5, 0.0, 8.4, 65.0, 1.0);
+        assert!(
+            !attack_range(&ItemStack::empty(), GameMode::Survival).is_in_range(
+                eye,
+                far,
+                ATTACK_RANGE_BUFFER,
+                false
+            )
+        );
+        assert!(range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, false));
+    }
+
+    /// `resolve_target` 对玩家目标用 `Player.bounding_box()` 的真实尺寸：
+    /// 蹲下时只有 1.5 高（站着是 1.8），横扫盒和伤害指示粒子都读这个尺寸。
+    /// 写死站立尺寸会让蹲着的受害者被当成更高的盒子。
+    ///
+    /// `resolve_target` takes the player target's size from its real
+    /// `bounding_box()`: crouching is 1.5 tall (standing 1.8), and both the
+    /// sweep box and the damage-indicator particle read it. Hard-coding the
+    /// standing height would model a crouching victim as a taller box.
+    #[test]
+    fn a_crouching_player_target_keeps_its_real_collision_box() {
+        let mut region = Region::new(2, 20, false);
+        let attacker = PlayerId(1);
+        let victim = PlayerId(2);
+        let mut a = Player::new(
+            attacker,
+            uuid::Uuid::nil(),
+            "Attacker".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        a.game_mode = GameMode::Survival;
+        region.insert_player(a);
+        let mut v = Player::new(
+            victim,
+            uuid::Uuid::nil(),
+            "Victim".to_owned(),
+            GameMode::Survival,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(2.5, 64.0, 0.5),
+        );
+        v.game_mode = GameMode::Survival;
+        region.insert_player(v);
+        let eye = Vec3::new(0.5, 65.62, 0.5);
+        let held = ItemStack::empty();
+        let standing = resolve_target(&region, attacker, victim.0, eye, GameMode::Survival, &held)
+            .expect("the standing victim is a valid target");
+        assert_eq!(standing.dimensions, (0.6, 1.8));
+
+        entity_sync::on_player_input(
+            &mut region,
+            victim,
+            mc_bamboo_protocol::packet::play::INPUT_FLAG_SHIFT,
+        );
+        let box3d = region.players[&victim].bounding_box();
+        assert!((box3d.max_y - box3d.min_y - 1.5).abs() < 1.0e-9);
+        let crouching = resolve_target(&region, attacker, victim.0, eye, GameMode::Survival, &held)
+            .expect("the crouching victim is a valid target");
+        assert_eq!(crouching.dimensions, (0.6, 1.5));
+    }
+
     #[test]
     fn attack_range_bounds_are_inclusive() {
         let range = AttackRange {

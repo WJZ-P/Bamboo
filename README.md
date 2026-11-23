@@ -251,8 +251,14 @@ WebView2 的渲染进程不算在内。
   确认近战命中真的把 `DAMAGE_DEALT` 发到客户端（故意把累计值改成 0，前者立刻失败）。
   `can_critical_requires_every_modelled_precondition` /
   `is_sweep_attack_requires_full_charge_ground_and_a_sword` 逐条锁住暴击 / 横扫的
-  官方前置判定（去掉 `onGround` 门控两条都失败）。
-  `nodamage` 音效仍没有对拍场景覆盖。
+  官方前置判定（去掉 `onGround` 门控两条都失败，横扫速度阈值正好相等也不横扫）。
+  `a_zero_damage_attack_skips_the_hit_and_its_sound` /
+  `a_rejected_attack_emits_only_the_nodamage_sound` 分别锁住「基础伤害与附魔加成
+  都是 0 时整段跳过」和「`hurtOrSimulate` 被无敌帧拒绝时只发 `nodamage` 音」，
+  `a_weapon_attack_range_component_overrides_the_default` 逐字段比武器
+  `attack_range` 组件，`a_crouching_player_target_keeps_its_real_collision_box`
+  锁住蹲下玩家目标的 1.5 高碰撞盒。每一条都做过改坏自检。
+  `nodamage` 音效只有单测、仍没有对拍场景覆盖。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
   `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、

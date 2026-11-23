@@ -4832,6 +4832,75 @@ fn a_full_strength_attack_emits_the_strong_sound() {
     }
 }
 
+/// 官方 `Player.attack` 在 `hurtOrSimulate` 返回 false 时只播
+/// `PLAYER_ATTACK_NODAMAGE`，不播 strong / weak / crit / sweep，也不扣血。
+/// 用一头刚受伤、还带着无敌帧的牛造出这次拒绝。对拍夹具没有这个场景，
+/// 这里按音效注册表 ID 补上。
+///
+/// Vanilla `Player.attack` plays only `PLAYER_ATTACK_NODAMAGE` when
+/// `hurtOrSimulate` returns false: no strong / weak / crit / sweep and no
+/// damage. A cow still inside its hurt invulnerability window produces the
+/// rejection. The oracle fixtures have no such scene, so pin the sound ids here.
+#[test]
+fn a_rejected_attack_emits_only_the_nodamage_sound() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::sounds;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    region.entities.with_mut_including_pending(cow, |entity| {
+        if let Some(mob) = entity.kind.mob_mut() {
+            mob.invulnerable_time = 20;
+        }
+    });
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        // 创造模式攻击者的伤害源会穿透无敌帧，这里必须是生存模式。
+        // A creative attacker's source bypasses invulnerability, so stay in survival.
+        player.game_mode = GameMode::Survival;
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let frames = client.take_frames();
+    let ids = sound_event_ids(&frames);
+    let sound = |name| i32::from(sounds::sound_event(name));
+    assert!(
+        ids.contains(&sound("minecraft:entity.player.attack.nodamage")),
+        "the nodamage sound must reach the client; sounds seen: {ids:?}"
+    );
+    for absent in [
+        "minecraft:entity.player.attack.weak",
+        "minecraft:entity.player.attack.strong",
+        "minecraft:entity.player.attack.crit",
+        "minecraft:entity.player.attack.sweep",
+    ] {
+        assert!(
+            !ids.contains(&sound(absent)),
+            "the {absent} sound must not be sent"
+        );
+    }
+    let health = server
+        .world
+        .islands
+        .region
+        .entities
+        .get(cow)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.health));
+    assert_eq!(
+        health,
+        Some(10.0),
+        "the rejected hit must not damage the cow"
+    );
+}
+
 /// 官方 `damageStatsAndHearts` 只在实际伤害大于 2 时发 `DAMAGE_INDICATOR`
 /// 粒子：空手满充能（1 点）不发，钻石剑满充能（7 点）发。按粒子 ID 精确断言，
 /// 补上此前只按包类型松散覆盖的伤害指示粒子和它的伤害门槛。

@@ -1187,7 +1187,12 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   `× 0.6` 并 `setSprinting(false)`。暴击 / 横扫两处前置判定由
   `can_critical_requires_every_modelled_precondition` /
   `is_sweep_attack_requires_full_charge_ground_and_a_sword` 单测逐条守住（去掉
-  `onGround` 门控两条都会失败）。
+  `onGround` 门控两条都会失败，速度平方正好等于阈值也不横扫）。够距的
+  `attack_range` 组件逐字段覆盖、蹲下玩家目标取真实碰撞盒尺寸，以及零伤害整段跳过
+  和 `nodamage` 音效，分别由 `a_weapon_attack_range_component_overrides_the_default` /
+  `a_crouching_player_target_keeps_its_real_collision_box` /
+  `a_zero_damage_attack_skips_the_hit_and_its_sound` /
+  `a_rejected_attack_emits_only_the_nodamage_sound` 单测守住（都做过改坏自检）。
 - **附魔与效果**：锋利 `1 + 0.5×(L−1)`、亡灵 / 节肢 `2.5×L`（按生成的实体类型
   标签判定），火焰附加 `4×L` 秒点燃、节肢杀手挂缓慢 IV（`doSweepAttack` 对每个横扫
   命中的 nearby 也调一次 `doPostAttackEffects`；缓慢时长按 `ApplyMobEffect` 从受害者
