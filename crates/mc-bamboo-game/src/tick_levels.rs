@@ -195,6 +195,13 @@ impl TickLevels {
         !self.enabled || self.ready.contains(&pos) || crate::generation_post_process::send_early()
     }
 
+    /// 测试用：直接把区块标成已做完后处理、可以发送，跳过加载档的转换。
+    /// Test only: mark a chunk as post-processed and sendable without a tier transition.
+    #[cfg(test)]
+    pub(crate) fn mark_ready_for_test(&mut self, pos: ChunkPos) {
+        self.ready.insert(pos);
+    }
+
     /// 后处理已经做完（不看改坏开关）。对拍用它判断处理发生了没有。
     /// Post-processing has run (ignores the break switch); the oracle uses it.
     pub(crate) fn prepared(&self, pos: ChunkPos) -> bool {
