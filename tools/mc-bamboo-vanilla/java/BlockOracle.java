@@ -3256,6 +3256,46 @@ public final class BlockOracle {
          * <p>随机题里活塞旁边不一定有信号，走得完整个动画的很少，所以单独出这几道。id 从 base 开始，
          * {@code --case} 也能单独重现。
          */
+        /** 三种傀儡图案：雪、铁、被挡住腿的铁，还有铜块。 */
+        List<Case> golemCases(int base) {
+            BlockPos top = new BlockPos(0, 64, 0);
+            BlockPos body = top.below();
+            List<Scenario> scenarios = List.of(
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.SNOW_BLOCK.defaultBlockState());
+                        c.put(body.below(), Blocks.SNOW_BLOCK.defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.west(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.east(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.below(), Blocks.IRON_BLOCK.defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.west(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.east(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.below(), Blocks.IRON_BLOCK.defaultBlockState());
+                        c.put(body.below().west(), Blocks.STONE.defaultBlockState());
+                        c.put(body.below().east(), Blocks.STONE.defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.CARVED_PUMPKIN, Items.CARVED_PUMPKIN, c -> {
+                        c.put(body, Blocks.COPPER_BLOCK.weathering().unaffected().defaultBlockState());
+                        placeOnTop(c, body, Items.CARVED_PUMPKIN);
+                    }));
+            List<Case> cases = new ArrayList<>();
+            for (Scenario scenario : scenarios) {
+                Case c = new Case(base + cases.size(), scenario.kind(),
+                        new Subject(scenario.subject(), scenario.item()), height);
+                scenario.setup().accept(c);
+                cases.add(c);
+            }
+            return cases;
+        }
+
         List<Case> pistonCases(int base) {
             List<Scenario> scenarios = List.of(
                     new Scenario(Kind.PLACE, Blocks.PISTON, Items.REDSTONE_BLOCK, c -> {
@@ -4831,6 +4871,7 @@ public final class BlockOracle {
         private static final int CRAFTER_CASE_BASE = 3_000_000;
         private static final int DISPENSER_ARROW_CASE_BASE = 4_000_000;
         private static final int EXPLODE_CASE_BASE = 5_000_000;
+        private static final int GOLEM_CASE_BASE = 6_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
@@ -4839,6 +4880,7 @@ public final class BlockOracle {
             List<Case> crafterCases = generator.crafterCases(CRAFTER_CASE_BASE);
             List<Case> dispenserArrowCases = generator.dispenserArrowCases(DISPENSER_ARROW_CASE_BASE);
             List<Case> explodeCases = generator.explodeCases(EXPLODE_CASE_BASE);
+            List<Case> golemCases = generator.golemCases(GOLEM_CASE_BASE);
             boolean single = options.single >= 0;
             boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
                     : includesPistonCases();
@@ -4847,9 +4889,13 @@ public final class BlockOracle {
             boolean crafters = single ? options.single >= CRAFTER_CASE_BASE
                     && options.single < DISPENSER_ARROW_CASE_BASE : includesCrafterCases();
             boolean explodes = single ? options.single >= EXPLODE_CASE_BASE
+                    && options.single < GOLEM_CASE_BASE
                     : options.only == null || Subjects.matches(options.only, Blocks.INFESTED_STONE);
             boolean dispenserArrows = single ? options.single >= DISPENSER_ARROW_CASE_BASE
+                    && options.single < EXPLODE_CASE_BASE
                     : options.only == null || Subjects.matches(options.only, Blocks.DISPENSER);
+            boolean golems = single ? options.single >= GOLEM_CASE_BASE
+                    : options.only == null || Subjects.matches(options.only, Blocks.CARVED_PUMPKIN);
             List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
@@ -4857,6 +4903,7 @@ public final class BlockOracle {
                     + (crafters ? crafterCases.size() : 0)
                     + (dispenserArrows ? dispenserArrowCases.size() : 0)
                     + (explodes ? explodeCases.size() : 0)
+                    + (golems ? golemCases.size() : 0)
                     + mines.size());            int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
@@ -4868,6 +4915,13 @@ public final class BlockOracle {
             }
             if (pistons) {
                 for (Case c : pistonCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
+            if (golems) {
+                for (Case c : golemCases) {
                     if (!single || c.id == options.single) {
                         runBuilt(c, statsOf(c.subject));
                     }

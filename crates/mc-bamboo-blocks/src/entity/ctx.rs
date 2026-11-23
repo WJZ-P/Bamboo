@@ -186,6 +186,36 @@ pub trait BlockView {
         false
     }
 
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`：热群系和下界为真。
+    /// 没有群系表的视图按主世界缺省（假）。
+    ///
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`: true in hot biomes and the Nether.
+    /// Views without biome data use the overworld default (false).
+    fn snow_golem_melts(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `SnowLayerBlock.canSurvive`：脚下不能托住一层雪时返回假。
+    /// 默认按方块表里的碰撞形状判断，带动态方块实体的视图可覆盖。
+    ///
+    /// `SnowLayerBlock.canSurvive`: false when the block below cannot support
+    /// a snow layer. The default reads the generated collision shape table.
+    fn snow_layer_can_survive(&self, pos: BlockPos) -> bool {
+        use mc_bamboo_core::Direction;
+        let below_pos = pos.below();
+        let below = self.block_state(below_pos);
+        if below.is_tagged(mc_bamboo_data::tags::block_tags::CANNOT_SUPPORT_SNOW_LAYER) {
+            return false;
+        }
+        if below.is_tagged(mc_bamboo_data::tags::block_tags::SUPPORT_OVERRIDE_SNOW_LAYER) {
+            return true;
+        }
+        let boxes =
+            crate::shape::collision_boxes(below, below_pos, crate::shape::CollisionContext::Empty);
+        crate::shape::is_face_full(&boxes, Direction::Up)
+            || below.is(mc_bamboo_data::blocks::SNOW) && below.get(crate::state::LAYERS) == 8
+    }
+
     /// `Level.isBrightOutside()`：主世界没有固定时间，天色暗于 4 才算夜里。
     ///
     /// `Level.isBrightOutside()`: the overworld has no fixed time, so night
@@ -493,11 +523,15 @@ impl BlockView for World<'_> {
     }
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {
-        World::is_raining_at(self, pos)
+        self.level().is_raining_at(pos)
     }
 
     fn is_thundering(&self) -> bool {
         World::is_thundering(self)
+    }
+
+    fn snow_golem_melts(&self, pos: BlockPos) -> bool {
+        self.level().snow_golem_melts(pos)
     }
 
     fn is_bright_outside(&self) -> bool {
@@ -674,6 +708,25 @@ pub enum Command {
     /// The egg hit something this tick: `ThrownEgg.onHit` (hurt, hatch, break).
     EggImpact {
         hit: super::thrown_egg::EggHit,
+    },
+    /// 玩家 / 雪傀儡 / 发射器扔出的一枚 `ThrowableItemProjectile`。
+    ///
+    /// A `ThrowableItemProjectile` thrown by a player, snow golem or dispenser.
+    ThrowThrowable {
+        shot: Box<super::thrown_egg::EggShot>,
+    },
+    /// 铁傀儡命中后把目标抛起来：`setDeltaMovement(add(0, 0.4 * (1 - resistance), 0))`。
+    ///
+    /// An iron golem's hit lifts the target by `0.4 * (1 - knockback resistance)`.
+    LiftMob {
+        target: EntityUid,
+        lift: f64,
+    },
+    /// 雪傀儡脚下四角铺一层雪。
+    ///
+    /// A snow golem places a snow layer at the four cells under its feet.
+    PlaceSnowTrail {
+        cells: Vec<BlockPos>,
     },
     /// 扔出的药水这一刻撞到东西：`AbstractThrownPotion.onHit`。
     ///
@@ -1146,6 +1199,21 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::ShootLlamaSpit(shot) => super::spit::spawn(world, me.id, shot),
         Command::SpitHit(hit) => super::spit::hit_entity(me, world, hit),
         Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
+        Command::ThrowThrowable { shot } => {
+            world.spawn_egg_shot(&shot);
+        }
+        Command::LiftMob { target, lift } => {
+            world.with_entity_mut(target, &mut |entity| {
+                entity.delta = entity.delta.add(mc_bamboo_core::Vec3::new(0.0, lift, 0.0));
+                entity.with_mob(|_, mob| mob.hurt_marked = true);
+            });
+        }
+        Command::PlaceSnowTrail { cells } => {
+            let snow = crate::BlockState(mc_bamboo_data::blocks::SNOW);
+            for pos in cells {
+                world.set_block_and_update(pos, snow);
+            }
+        }
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);

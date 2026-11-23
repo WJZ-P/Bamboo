@@ -152,8 +152,43 @@ fn find_at(world: &World, pattern: &[&[Cell]], origin: BlockPos) -> Option<Patte
     None
 }
 
-/// `spawnGolemInWorld`：`clearPatternBlocks` 和 `updatePatternBlocks`，中间官方在生成实体。
-fn take_pattern_blocks(world: &mut World, cells: &PatternMatch) {
+/// `EntityType.create` + `snapTo` + `addFreshEntity`：官方 `spawnGolemInWorld` 的中间段。
+/// 南瓜图案里 `getBlock(...)` 指定的格子给出脚底位置，朝向固定为 0。
+///
+/// The middle of vanilla `spawnGolemInWorld`: create the mob, snap it to the
+/// pattern cell with zero rotation, then add it to the world.
+fn spawn_golem(
+    world: &mut World,
+    kind: crate::entity::mob::MobType,
+    foot: BlockPos,
+    player_created: bool,
+) {
+    use crate::entity::{Entity, mob::iron_golem};
+    let position = Vec3::new(
+        f64::from(foot.x) + 0.5,
+        f64::from(foot.y) + 0.05,
+        f64::from(foot.z) + 0.5,
+    );
+    let mut entity = world.prepare_entity(Entity::by_mob_type(kind, position));
+    entity.with_mob(|me, mob| {
+        me.y_rot = 0.0;
+        me.old_position = position;
+        mob.x_rot = 0.0;
+        mob.y_rot_o = 0.0;
+        mob.x_rot_o = 0.0;
+        mob.y_head_rot = 0.0;
+        mob.y_body_rot = 0.0;
+        mob.y_head_rot_o = 0.0;
+        mob.y_body_rot_o = 0.0;
+        if player_created {
+            iron_golem::mark_player_created(mob);
+        }
+    });
+    world.add_prepared_entity(entity);
+}
+
+/// `CarvedPumpkinBlock.clearPatternBlocks`：每格清成空气，并按顺序发 2001 破坏事件。
+fn clear_pattern_blocks(world: &mut World, cells: &PatternMatch) {
     for &(pos, state) in cells {
         world.set_block(pos, BlockState::AIR, UPDATE_CLIENTS);
         world.push_effect(Effect::Destroyed {
@@ -162,6 +197,10 @@ fn take_pattern_blocks(world: &mut World, cells: &PatternMatch) {
             except_initiator: false,
         });
     }
+}
+
+/// `CarvedPumpkinBlock.updatePatternBlocks`：清完之后每格更新邻居。
+fn update_pattern_blocks(world: &mut World, cells: &PatternMatch) {
     for &(pos, _) in cells {
         world.update_neighbors_at(pos, BlockState::AIR.block());
     }
@@ -178,15 +217,28 @@ fn replace_copper_block_with_chest(world: &mut World, cells: &PatternMatch) {
 
 /// `trySpawnGolem`。
 fn try_spawn_golem(world: &mut World, top: BlockPos) {
-    for pattern in [SNOW_GOLEM, IRON_GOLEM] {
-        if let Some(cells) = find(world, pattern, top) {
-            take_pattern_blocks(world, &cells);
-            return;
-        }
+    use crate::entity::mob::MobType;
+    // 官方依次试雪、铁、铜三种完整图案。`getBlock(x, y, 0)` 的 y 是图案里从上往下数。
+    // Vanilla tries the snow, iron and copper full patterns in order; `y` in
+    // `getBlock(x, y, 0)` counts down from the top of the pattern.
+    if let Some(cells) = find(world, SNOW_GOLEM, top) {
+        let foot = cells[2].0;
+        clear_pattern_blocks(world, &cells);
+        spawn_golem(world, MobType::SnowGolem, foot, false);
+        update_pattern_blocks(world, &cells);
+        return;
+    }
+    if let Some(cells) = find(world, IRON_GOLEM, top) {
+        let foot = cells[5].0;
+        clear_pattern_blocks(world, &cells);
+        spawn_golem(world, MobType::IronGolem, foot, true);
+        update_pattern_blocks(world, &cells);
+        return;
     }
     if let Some(cells) = find(world, COPPER_GOLEM, top) {
-        take_pattern_blocks(world, &cells);
+        clear_pattern_blocks(world, &cells);
         replace_copper_block_with_chest(world, &cells);
+        update_pattern_blocks(world, &cells);
         // 官方生成铜傀儡后 `CopperGolem.spawn` 会报一声，位置是傀儡脚底往上 0.05 格。
         let (pumpkin_pos, _) = cells[0];
         world.play_sound(

@@ -59,7 +59,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
         crate::entity::KindPublic::Arrow(arrow) => arrow.variant.entity_type(),
         crate::entity::KindPublic::LlamaSpit(_) => kinds::LLAMA_SPIT,
-        crate::entity::KindPublic::Egg(_) => kinds::EGG,
+        crate::entity::KindPublic::Egg(egg) => egg.kind.entity_type(),
         crate::entity::KindPublic::SplashPotion(_) => kinds::SPLASH_POTION,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
@@ -232,7 +232,16 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], true)))
             }
             "minecraft:llama_spit" => EntityKind::LlamaSpit(Box::new(spit::read(tag, rotation[1]))),
-            "minecraft:egg" => EntityKind::Egg(Box::new(egg::read(tag, rotation[1]))),
+            "minecraft:egg" => EntityKind::Egg(Box::new(egg::read(
+                tag,
+                rotation[1],
+                crate::entity::thrown_egg::ThrowableKind::Egg,
+            ))),
+            "minecraft:snowball" => EntityKind::Egg(Box::new(egg::read(
+                tag,
+                rotation[1],
+                crate::entity::thrown_egg::ThrowableKind::Snowball,
+            ))),
             "minecraft:splash_potion" => {
                 EntityKind::SplashPotion(Box::new(splash_potion::read(tag, rotation[1])))
             }

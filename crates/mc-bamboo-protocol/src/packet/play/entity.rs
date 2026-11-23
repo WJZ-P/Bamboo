@@ -266,6 +266,10 @@ pub enum EntityData {
     ///
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
     GlowSquidDarkTicks(i32),
+    /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
+    ///
+    /// Both golem flag bytes share the same index and serializer.
+    GolemFlags(u8),
     /// `Bat.DATA_ID_FLAGS`，BYTE：第 0 位是倒挂。
     ///
     /// `Bat.DATA_ID_FLAGS`, a BYTE; bit 0 is resting.
@@ -511,6 +515,7 @@ impl EntityData {
             Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
             Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
             Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
+            Self::GolemFlags(_) => mc_bamboo_data::entity_types::IRON_GOLEM_FLAGS,
             Self::BatFlags(_) => mc_bamboo_data::entity_types::BAT_FLAGS,
             Self::PhantomSize(_) => mc_bamboo_data::entity_types::PHANTOM_SIZE,
             Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
@@ -810,6 +815,7 @@ impl EntityData {
             Self::PandaMainGene(gene)
             | Self::PandaHiddenGene(gene)
             | Self::PandaFlags(gene)
+            | Self::GolemFlags(gene)
             | Self::BatFlags(gene) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*gene);

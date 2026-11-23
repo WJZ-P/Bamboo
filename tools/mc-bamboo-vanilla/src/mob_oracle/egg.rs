@@ -6,7 +6,9 @@
 use std::collections::BTreeSet;
 
 use mc_bamboo_blocks::entity::{
-    FIRST_ENTITY_ID as FIRST_ID, JavaRandom, KindPublic, mob::MobType, thrown_egg::EggShot,
+    FIRST_ENTITY_ID as FIRST_ID, JavaRandom, KindPublic,
+    mob::MobType,
+    thrown_egg::{EggShot, ThrowableKind},
 };
 use mc_bamboo_protocol::{frame::packet_body, item::ItemStack, packet::play::RemoveEntities};
 
@@ -198,6 +200,7 @@ impl EggCase {
             owner: (self.owner >= 0).then_some(self.owner),
             owner_uuid: (self.owner >= 0).then_some(EGG_OWNER_UUID.to_be_bytes()),
             item: ItemStack::new(self.item, 16),
+            projectile: ThrowableKind::Egg,
         };
         let mut egg = world.prepare_entity(Entity::thrown_egg(&shot));
         egg.shoot_egg(&shot);

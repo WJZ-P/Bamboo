@@ -1268,6 +1268,7 @@ public final class Extractor {
         out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
         out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
         out.addProperty("ocelotTrusting", entityAccessor(net.minecraft.world.entity.animal.feline.Ocelot.class, "DATA_TRUSTING").id());
+        addGolemFacts(out);
         Class<?> cat = net.minecraft.world.entity.animal.feline.Cat.class;
         out.addProperty("catVariant", entityAccessor(cat, "DATA_VARIANT_ID").id());
         out.addProperty("catIsLying", entityAccessor(cat, "IS_LYING").id());
@@ -1391,6 +1392,37 @@ public final class Extractor {
         out.addProperty("wolfMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
         out.addProperty("wolfMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
         out.addProperty("wolfAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+    }
+
+    /** 两种傀儡的元数据 index、属性、尺寸和裂纹阈值，按官方类分配。 */
+    private static void addGolemFacts(JsonObject out) throws ReflectiveOperationException {
+        Class<?> iron = net.minecraft.world.entity.animal.golem.IronGolem.class;
+        Class<?> snow = net.minecraft.world.entity.animal.golem.SnowGolem.class;
+        var ironAttributes = net.minecraft.world.entity.animal.golem.IronGolem.createAttributes().build();
+        var snowAttributes = net.minecraft.world.entity.animal.golem.SnowGolem.createAttributes().build();
+        var ironDimensions = net.minecraft.world.entity.EntityTypes.IRON_GOLEM.getDimensions();
+        var snowDimensions = net.minecraft.world.entity.EntityTypes.SNOW_GOLEM.getDimensions();
+        out.addProperty("ironGolemFlags", entityAccessor(iron, "DATA_FLAGS_ID").id());
+        out.addProperty("snowGolemPumpkin", entityAccessor(snow, "DATA_PUMPKIN_ID").id());
+        out.addProperty("ironGolemEyeHeight", ironDimensions.eyeHeight());
+        out.addProperty("snowGolemEyeHeight", snowDimensions.eyeHeight());
+        out.addProperty("ironGolemMaxHealth", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("ironGolemMovementSpeed", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("ironGolemKnockbackResistance", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.KNOCKBACK_RESISTANCE));
+        out.addProperty("ironGolemAttackDamage", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        out.addProperty("ironGolemStepHeight", ironAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT));
+        out.addProperty("snowGolemMaxHealth", snowAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("snowGolemMovementSpeed", snowAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        // Crackiness.GOLEM 的三个私有阈值，按官方静态构造时的值。
+        Class<?> crackiness = net.minecraft.world.entity.Crackiness.class;
+        var golem = readField(crackiness, "GOLEM", null);
+        for (String[] field : new String[][] {
+                {"golemCrackinessLow", "fractionLow"}, {"golemCrackinessMedium", "fractionMedium"},
+                {"golemCrackinessHigh", "fractionHigh"}}) {
+            var member = crackiness.getDeclaredField(field[1]);
+            member.setAccessible(true);
+            out.addProperty(field[0], member.getFloat(golem));
+        }
     }
 
     /** 任意类的私有 `EntityDataAccessor` 静态字段分到的 index。 */
@@ -1923,6 +1955,15 @@ public final class Extractor {
                             .applyModifier(EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
                                     EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY.defaultValue()));
             biome.addProperty("creatureSpawnProbability", Integer.toUnsignedLong(Float.floatToRawIntBits(creatureProbability)));
+            // `SNOW_GOLEM_MELTS` 叠在主世界缺省值（false）上，得到这个群系的最终值。
+            // Overlay SNOW_GOLEM_MELTS on the overworld default (false).
+            boolean melts = biomeRegistry.getValue(name).getAttributes().applyModifier(
+                    EnvironmentAttributes.SNOW_GOLEM_MELTS,
+                    registries.lookupOrThrow(Registries.DIMENSION_TYPE)
+                            .getValue(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD)
+                            .attributes()
+                            .applyModifier(EnvironmentAttributes.SNOW_GOLEM_MELTS, false));
+            biome.addProperty("snowGolemMelt", melts);
             biomes.add(name.toString(), biome);
         }
         result.add("biomes", biomes);

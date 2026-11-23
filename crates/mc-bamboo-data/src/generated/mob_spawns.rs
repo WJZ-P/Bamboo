@@ -65,6 +65,8 @@ pub struct BiomeMobSpawns {
     pub costs: &'static [MobSpawnCostDef],
     /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层）。
     pub creature_spawn_probability: f32,
+    /// `SNOW_GOLEM_MELTS` 在这个群系的最终值。
+    pub snow_golem_melts: bool,
 }
 
 /// 每个群系的刷怪设置。没有条目的群系不在这里，查不到就是空表。
@@ -112,6 +114,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3cf5c28f),
+        snow_golem_melts: true,
     },
     BiomeMobSpawns {
         name: "minecraft:bamboo_jungle",
@@ -158,6 +161,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:basalt_deltas",
@@ -179,6 +183,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:beach",
@@ -218,6 +223,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:birch_forest",
@@ -260,6 +266,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:cherry_grove",
@@ -301,6 +308,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:cold_ocean",
@@ -349,6 +357,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:crimson_forest",
@@ -371,6 +380,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:dappled_forest",
@@ -415,6 +425,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:dark_forest",
@@ -457,6 +468,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:deep_cold_ocean",
@@ -505,6 +517,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:deep_dark",
@@ -513,6 +526,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:deep_frozen_ocean",
@@ -566,6 +580,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:deep_lukewarm_ocean",
@@ -616,6 +631,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:deep_ocean",
@@ -664,6 +680,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:desert",
@@ -706,6 +723,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: true,
     },
     BiomeMobSpawns {
         name: "minecraft:dripstone_caves",
@@ -740,6 +758,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:end_barrens",
@@ -754,6 +773,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:end_highlands",
@@ -768,6 +788,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:end_midlands",
@@ -782,6 +803,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:eroded_badlands",
@@ -825,6 +847,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3cf5c28f),
+        snow_golem_melts: true,
     },
     BiomeMobSpawns {
         name: "minecraft:flower_forest",
@@ -868,6 +891,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:forest",
@@ -911,6 +935,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:frozen_ocean",
@@ -964,6 +989,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:frozen_peaks",
@@ -1003,6 +1029,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:frozen_river",
@@ -1049,6 +1076,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:grove",
@@ -1090,6 +1118,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:ice_spikes",
@@ -1131,6 +1160,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3d8f5c29),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:jagged_peaks",
@@ -1170,6 +1200,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:jungle",
@@ -1216,6 +1247,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:lukewarm_ocean",
@@ -1266,6 +1298,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:lush_caves",
@@ -1311,6 +1344,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:mangrove_swamp",
@@ -1358,6 +1392,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:meadow",
@@ -1399,6 +1434,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:mushroom_fields",
@@ -1425,6 +1461,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:nether_wastes",
@@ -1449,6 +1486,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:ocean",
@@ -1497,6 +1535,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:old_growth_birch_forest",
@@ -1539,6 +1578,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:old_growth_pine_taiga",
@@ -1584,6 +1624,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:old_growth_spruce_taiga",
@@ -1629,6 +1670,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:pale_garden",
@@ -1662,6 +1704,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:plains",
@@ -1707,6 +1750,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:river",
@@ -1753,6 +1797,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:savanna",
@@ -1799,6 +1844,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: true,
     },
     BiomeMobSpawns {
         name: "minecraft:savanna_plateau",
@@ -1847,6 +1893,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: true,
     },
     BiomeMobSpawns {
         name: "minecraft:small_end_islands",
@@ -1861,6 +1908,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:snowy_beach",
@@ -1894,6 +1942,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:snowy_plains",
@@ -1936,6 +1985,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3d8f5c29),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:snowy_slopes",
@@ -1976,6 +2026,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:snowy_taiga",
@@ -2021,6 +2072,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:soul_sand_valley",
@@ -2047,6 +2099,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
             MobSpawnCostDef { entity_type: 132, charge: 0.7, energy_budget: 0.15 },
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:sparse_jungle",
@@ -2091,6 +2144,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:stony_peaks",
@@ -2124,6 +2178,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:stony_shore",
@@ -2157,6 +2212,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:sulfur_caves",
@@ -2185,6 +2241,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:sunflower_plains",
@@ -2230,6 +2287,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:swamp",
@@ -2275,6 +2333,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:taiga",
@@ -2320,6 +2379,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:the_end",
@@ -2334,6 +2394,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:the_void",
@@ -2342,6 +2403,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:warm_ocean",
@@ -2391,6 +2453,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:warped_forest",
@@ -2412,6 +2475,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
             MobSpawnCostDef { entity_type: 42, charge: 1.0, energy_budget: 0.12 },
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:windswept_forest",
@@ -2455,6 +2519,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:windswept_gravelly_hills",
@@ -2498,6 +2563,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:windswept_hills",
@@ -2541,6 +2607,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: false,
     },
     BiomeMobSpawns {
         name: "minecraft:windswept_savanna",
@@ -2587,6 +2654,7 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3dcccccd),
+        snow_golem_melts: true,
     },
     BiomeMobSpawns {
         name: "minecraft:wooded_badlands",
@@ -2631,5 +2699,78 @@ pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[
         costs: &[
         ],
         creature_spawn_probability: f32::from_bits(0x3d23d70a),
+        snow_golem_melts: true,
     },
+];
+
+/// `SNOW_GOLEM_MELTS`，下标是 `minecraft:worldgen/biome` 的注册表 ID。
+#[rustfmt::skip]
+pub static SNOW_GOLEM_MELTS: &[bool] = &[
+    true, // minecraft:badlands
+    false, // minecraft:bamboo_jungle
+    false, // minecraft:basalt_deltas
+    false, // minecraft:beach
+    false, // minecraft:birch_forest
+    false, // minecraft:cherry_grove
+    false, // minecraft:cold_ocean
+    false, // minecraft:crimson_forest
+    false, // minecraft:dappled_forest
+    false, // minecraft:dark_forest
+    false, // minecraft:deep_cold_ocean
+    false, // minecraft:deep_dark
+    false, // minecraft:deep_frozen_ocean
+    false, // minecraft:deep_lukewarm_ocean
+    false, // minecraft:deep_ocean
+    true, // minecraft:desert
+    false, // minecraft:dripstone_caves
+    false, // minecraft:end_barrens
+    false, // minecraft:end_highlands
+    false, // minecraft:end_midlands
+    true, // minecraft:eroded_badlands
+    false, // minecraft:flower_forest
+    false, // minecraft:forest
+    false, // minecraft:frozen_ocean
+    false, // minecraft:frozen_peaks
+    false, // minecraft:frozen_river
+    false, // minecraft:grove
+    false, // minecraft:ice_spikes
+    false, // minecraft:jagged_peaks
+    false, // minecraft:jungle
+    false, // minecraft:lukewarm_ocean
+    false, // minecraft:lush_caves
+    false, // minecraft:mangrove_swamp
+    false, // minecraft:meadow
+    false, // minecraft:mushroom_fields
+    false, // minecraft:nether_wastes
+    false, // minecraft:ocean
+    false, // minecraft:old_growth_birch_forest
+    false, // minecraft:old_growth_pine_taiga
+    false, // minecraft:old_growth_spruce_taiga
+    false, // minecraft:pale_garden
+    false, // minecraft:plains
+    false, // minecraft:river
+    true, // minecraft:savanna
+    true, // minecraft:savanna_plateau
+    false, // minecraft:small_end_islands
+    false, // minecraft:snowy_beach
+    false, // minecraft:snowy_plains
+    false, // minecraft:snowy_slopes
+    false, // minecraft:snowy_taiga
+    false, // minecraft:soul_sand_valley
+    false, // minecraft:sparse_jungle
+    false, // minecraft:stony_peaks
+    false, // minecraft:stony_shore
+    false, // minecraft:sulfur_caves
+    false, // minecraft:sunflower_plains
+    false, // minecraft:swamp
+    false, // minecraft:taiga
+    false, // minecraft:the_end
+    false, // minecraft:the_void
+    false, // minecraft:warm_ocean
+    false, // minecraft:warped_forest
+    false, // minecraft:windswept_forest
+    false, // minecraft:windswept_gravelly_hills
+    false, // minecraft:windswept_hills
+    true, // minecraft:windswept_savanna
+    true, // minecraft:wooded_badlands
 ];

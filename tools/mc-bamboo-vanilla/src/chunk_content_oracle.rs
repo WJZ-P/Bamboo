@@ -1529,7 +1529,7 @@ fn fish_archive_cases() -> [Tag; 4] {
 ///
 /// Thrown eggs: a blue egg with an owner, left owner and no gravity, and a fresh plain egg.
 fn egg_archive_cases() -> [Tag; 2] {
-    use mc_bamboo_blocks::entity::thrown_egg::EggShot;
+    use mc_bamboo_blocks::entity::thrown_egg::{EggShot, ThrowableKind};
     let shot = |item, position| EggShot {
         position,
         direction: Vec3::new(1.0, 0.0, 0.0),
@@ -1539,6 +1539,7 @@ fn egg_archive_cases() -> [Tag; 2] {
         owner: None,
         owner_uuid: None,
         item: ItemStack::new(item, 16),
+        projectile: ThrowableKind::Egg,
     };
     let mut blue = Entity::thrown_egg(&shot(
         mc_bamboo_data::items::BLUE_EGG,

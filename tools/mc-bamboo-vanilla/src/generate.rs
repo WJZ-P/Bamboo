@@ -857,6 +857,7 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
             "MobCategory 的顺序变了: {names:?}，期望 {MOB_CATEGORY_ORDER:?}"
         ));
     }
+    let biome_names = registry_entries(data, BIOME_REGISTRY).unwrap_or(&[]);
     let entity_names = registry_entries(data, ENTITY_TYPE_REGISTRY).unwrap_or(&[]);
     let entity_id = |name: &str| -> Result<i32, String> {
         entity_names
@@ -949,6 +950,8 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
         "    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层）。"
     );
     let _ = writeln!(out, "    pub creature_spawn_probability: f32,");
+    let _ = writeln!(out, "    /// `SNOW_GOLEM_MELTS` 在这个群系的最终值。");
+    let _ = writeln!(out, "    pub snow_golem_melts: bool,");
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
     let _ = writeln!(
@@ -999,7 +1002,27 @@ fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
             "        creature_spawn_probability: f32::from_bits({:#010x}),",
             settings.creature_spawn_probability
         );
+        let _ = writeln!(
+            out,
+            "        snow_golem_melts: {},",
+            settings.snow_golem_melt
+        );
         let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// `SNOW_GOLEM_MELTS`，下标是 `minecraft:worldgen/biome` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static SNOW_GOLEM_MELTS: &[bool] = &[");
+    for name in biome_names {
+        let melts = facts
+            .biomes
+            .get(name.as_str())
+            .is_some_and(|settings| settings.snow_golem_melt);
+        let _ = writeln!(out, "    {melts}, // {name}");
     }
     let _ = writeln!(out, "];");
     Ok(out)
@@ -3573,6 +3596,7 @@ fn entity_types_file(data: &VersionData) -> String {
     }
     fox_facts(&mut out, facts);
     wolf_facts(&mut out, facts);
+    golem_facts(&mut out, facts);
     for (name, value) in [
         ("PIG_BOOST_TIME", facts.pig_boost_time),
         ("PIG_VARIANT", facts.pig_variant),
@@ -3586,6 +3610,8 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
         ("PANDA_FLAGS", facts.panda_flags),
         ("OCELOT_TRUSTING", facts.ocelot_trusting),
+        ("IRON_GOLEM_FLAGS", facts.iron_golem_flags),
+        ("SNOW_GOLEM_PUMPKIN", facts.snow_golem_pumpkin),
         ("CAT_VARIANT", facts.cat_variant),
         ("CAT_IS_LYING", facts.cat_is_lying),
         ("CAT_RELAX_STATE_ONE", facts.cat_relax_state_one),
@@ -3752,6 +3778,35 @@ fn wolf_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
         ("WOLF_MAX_HEALTH", facts.wolf_max_health),
         ("WOLF_MOVEMENT_SPEED", facts.wolf_movement_speed),
         ("WOLF_ATTACK_DAMAGE", facts.wolf_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+}
+
+/// 两种傀儡的属性、眼高和 `Crackiness.GOLEM` 的裂纹阈值。
+///
+/// Golem attributes, eye heights and `Crackiness.GOLEM` thresholds.
+fn golem_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    for (name, value) in [
+        ("IRON_GOLEM_EYE_HEIGHT", facts.iron_golem_eye_height),
+        ("SNOW_GOLEM_EYE_HEIGHT", facts.snow_golem_eye_height),
+        ("GOLEM_CRACKINESS_LOW", facts.golem_crackiness_low),
+        ("GOLEM_CRACKINESS_MEDIUM", facts.golem_crackiness_medium),
+        ("GOLEM_CRACKINESS_HIGH", facts.golem_crackiness_high),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("IRON_GOLEM_MAX_HEALTH", facts.iron_golem_max_health),
+        ("IRON_GOLEM_MOVEMENT_SPEED", facts.iron_golem_movement_speed),
+        (
+            "IRON_GOLEM_KNOCKBACK_RESISTANCE",
+            facts.iron_golem_knockback_resistance,
+        ),
+        ("IRON_GOLEM_ATTACK_DAMAGE", facts.iron_golem_attack_damage),
+        ("IRON_GOLEM_STEP_HEIGHT", facts.iron_golem_step_height),
+        ("SNOW_GOLEM_MAX_HEALTH", facts.snow_golem_max_health),
+        ("SNOW_GOLEM_MOVEMENT_SPEED", facts.snow_golem_movement_speed),
     ] {
         let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
     }

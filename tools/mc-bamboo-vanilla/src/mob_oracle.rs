@@ -41,6 +41,7 @@ mod egg;
 mod equine;
 mod fish;
 mod gen_spawn;
+mod golem;
 mod grazing;
 mod llama_spit;
 mod natural_spawn;
@@ -116,6 +117,9 @@ enum Line {
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
+    Golem(Box<golem::GolemCase>),
+    GolemAttackRoll(golem::GolemAttackRollCase),
+    GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
@@ -805,6 +809,8 @@ struct ZombieFacts {
     monsters_burn: bool,
     sea_level: i32,
     raining: bool,
+    /// 热群系 / 下界场景注入的 `SNOW_GOLEM_MELTS`。
+    snow_golem_melts: bool,
 }
 
 /// 假世界：方块表、玩家表、世界随机源。和 `entity-oracle` 的那个同一个做法。
@@ -1078,6 +1084,14 @@ impl Level for MobLevel {
     }
     fn can_see_sky(&self, _pos: BlockPos) -> bool {
         self.facts.can_see_sky
+    }
+
+    fn is_raining_at(&self, _pos: BlockPos) -> bool {
+        self.facts.raining
+    }
+
+    fn snow_golem_melts(&self, _pos: BlockPos) -> bool {
+        self.facts.snow_golem_melts
     }
 
     fn clock_ticks(&self) -> i64 {
@@ -1443,6 +1457,9 @@ impl Report {
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
+                Line::Golem(case) => self.replay_golem(&case),
+                Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
+                Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
@@ -1582,6 +1599,7 @@ impl Report {
                 inhabited_time: 0,
                 accumulates_inhabited: case.name.starts_with("zombie_inhabited_"),
                 can_see_sky: case.monsters_burn,
+                snow_golem_melts: false,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
                 bright_outside: case.bright_outside || !zombie_style(&case.name),

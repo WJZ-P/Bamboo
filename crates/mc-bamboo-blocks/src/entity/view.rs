@@ -70,6 +70,15 @@ pub trait BlockSource: Sync {
     fn block_state(&self, pos: BlockPos) -> BlockState;
     fn facts(&self) -> ViewFacts;
 
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`：按这一格的群系回答。
+    /// 没有群系表的视图按主世界缺省（假）。
+    ///
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`, resolved for this cell's biome.
+    /// Views without a biome palette use the overworld default (false).
+    fn snow_golem_melts(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// 亮度：默认用 [`ViewFacts`] 里的常量。区块表有逐格光照时覆盖它。
     fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
         match layer {
@@ -482,6 +491,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn is_thundering(&self) -> bool {
         self.0.facts().weather.is_thundering()
+    }
+
+    fn snow_golem_melts(&self, pos: BlockPos) -> bool {
+        self.0.snow_golem_melts(pos)
     }
 
     fn is_bright_outside(&self) -> bool {
