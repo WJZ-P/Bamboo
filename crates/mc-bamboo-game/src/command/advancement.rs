@@ -26,16 +26,91 @@ enum Mode {
     Everything,
 }
 
-impl Mode {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Only => "only",
-            Self::From => "from",
-            Self::Through => "through",
-            Self::Until => "until",
-            Self::Everything => "everything",
-        }
-    }
+impl Mode {}
+
+/// 官方 26.3 `AdvancementCommands$Action` 拼出来的 24 个反馈键，按
+/// `(grant/revoke, 一名/多名玩家, criterion/one/many, success/failure)` 索引。
+fn feedback_key(
+    grant: bool,
+    one_player: bool,
+    amount: FeedbackAmount,
+    success: bool,
+) -> &'static str {
+    const KEYS: [[[[&str; 2]; 3]; 2]; 2] = [
+        // grant
+        [
+            // one player
+            [
+                [
+                    "commands.advancement.grant.one.to.criterion.failure",
+                    "commands.advancement.grant.one.to.criterion.success",
+                ],
+                [
+                    "commands.advancement.grant.one.to.one.failure",
+                    "commands.advancement.grant.one.to.one.success",
+                ],
+                [
+                    "commands.advancement.grant.one.to.many.failure",
+                    "commands.advancement.grant.one.to.many.success",
+                ],
+            ],
+            // many players
+            [
+                [
+                    "commands.advancement.grant.many.to.criterion.failure",
+                    "commands.advancement.grant.many.to.criterion.success",
+                ],
+                [
+                    "commands.advancement.grant.many.to.one.failure",
+                    "commands.advancement.grant.many.to.one.success",
+                ],
+                [
+                    "commands.advancement.grant.many.to.many.failure",
+                    "commands.advancement.grant.many.to.many.success",
+                ],
+            ],
+        ],
+        // revoke
+        [
+            [
+                [
+                    "commands.advancement.revoke.one.to.criterion.failure",
+                    "commands.advancement.revoke.one.to.criterion.success",
+                ],
+                [
+                    "commands.advancement.revoke.one.to.one.failure",
+                    "commands.advancement.revoke.one.to.one.success",
+                ],
+                [
+                    "commands.advancement.revoke.one.to.many.failure",
+                    "commands.advancement.revoke.one.to.many.success",
+                ],
+            ],
+            [
+                [
+                    "commands.advancement.revoke.many.to.criterion.failure",
+                    "commands.advancement.revoke.many.to.criterion.success",
+                ],
+                [
+                    "commands.advancement.revoke.many.to.one.failure",
+                    "commands.advancement.revoke.many.to.one.success",
+                ],
+                [
+                    "commands.advancement.revoke.many.to.many.failure",
+                    "commands.advancement.revoke.many.to.many.success",
+                ],
+            ],
+        ],
+    ];
+    KEYS[usize::from(!grant)][usize::from(!one_player)][amount as usize][usize::from(success)]
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+enum FeedbackAmount {
+    Criterion = 0,
+    One = 1,
+    Many = 2,
 }
 
 /// 选出这次命令要动的进度下标。
@@ -101,9 +176,19 @@ fn apply_inner(
         .and_then(Value::as_entity)
         .ok_or_else(|| fail("command.failed"))?;
     let targets = select::players(region, source, players::level_of(region, source), selector)?;
+    // 字面量节点不进 `parsed.arguments`，只能从解析出的节点链里找。
+    let nodes = crate::command::commands().graph.clone();
+    let literals_on_path: Vec<&str> = parsed
+        .nodes
+        .iter()
+        .filter_map(|&node| match &nodes.node(node).kind {
+            mc_bamboo_command::NodeKind::Literal(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
     let mode = ["only", "from", "through", "until", "everything"]
         .iter()
-        .find(|name| parsed.get(name).is_some())
+        .find(|name| literals_on_path.contains(name))
         .and_then(|name| match *name {
             "only" => Some(Mode::Only),
             "from" => Some(Mode::From),
@@ -157,23 +242,24 @@ fn apply_inner(
         }
         player.advancements = state;
     }
-    if count == 0 {
-        return Err(fail(if grant {
-            "commands.advancement.grant.criterion_not_found"
-        } else {
-            "commands.advancement.revoke.criterion_not_found"
-        }));
-    }
-    let key = if grant {
-        "commands.advancement.grant.success"
+    let one_player = targets.len() == 1;
+    let amount = if criterion.is_some() {
+        FeedbackAmount::Criterion
+    } else if indices.len() == 1 {
+        FeedbackAmount::One
     } else {
-        "commands.advancement.revoke.success"
+        FeedbackAmount::Many
     };
+    if count == 0 {
+        return Err(fail(feedback_key(grant, one_player, amount, false)));
+    }
+    let key = feedback_key(grant, one_player, amount, true);
+    let action = if grant { "grant" } else { "revoke" };
     let message = Component::translate(
         key,
         [
             TranslateArg::from(targets.len().to_string()),
-            TranslateArg::from(mode.name().to_owned()),
+            TranslateArg::from(action.to_owned()),
         ],
     );
     feedback::success(region, source, message, true);
