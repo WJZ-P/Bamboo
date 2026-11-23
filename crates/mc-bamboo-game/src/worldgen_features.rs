@@ -43,8 +43,8 @@ use crate::{
     region::RegionColumn,
     world_options::WorldGenConfig,
     worldgen::{
-        GeneratedChunk, build_region_column, cached_beardified_chunk, cached_generate_chunk,
-        with_generator,
+        GeneratedBlockEntity, GeneratedChunk, build_region_column, cached_beardified_chunk,
+        cached_generate_chunk, with_generator,
     },
     worldgen_profile::{
         BUILD_VIEW_CALLS, BUILD_VIEW_CELLS, BUILD_VIEW_NS, BUILD_VIEW_TERRAIN_MISSES,
@@ -73,7 +73,7 @@ pub type MarkPos = (i32, i32, i32);
 /// target itself, then neighbors in ascending slot order. Only the `features`
 /// stage produces these; `assemble_feature_column` merges by `slot` order, so
 /// the first writer of a cell determines its final state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FeatureWrites {
     /// 来源中心的 3×3 下标；`assemble_feature_column` 按它升序排先后。
     /// The source center's 3×3 index; assembly orders writers by it.
@@ -92,6 +92,13 @@ pub struct FeatureWrites {
     /// Vanilla records a mark in the chunk owning the position, so neighbor
     /// centers add to the target too.
     pub marks: Vec<MarkPos>,
+    /// 这一中心跑 `features` 时在目标区块里写下的方块实体（同一格最后一份）。
+    /// 组装时跟着赢得该格方块的来源走，见 [`merge_feature_writes`]。
+    ///
+    /// Block entities this center wrote inside the target chunk during
+    /// `features` (last one per cell). Assembly keeps the one from the source
+    /// that won the cell's block, see [`merge_feature_writes`].
+    pub block_entities: Vec<GeneratedBlockEntity>,
 }
 
 /// 按中心的固定先后合并一组写：中心自己（`CENTER`）最先，其余 8 个来源按
@@ -133,7 +140,17 @@ pub fn merge_feature_writes(
         std::collections::HashMap<(i32, i32, i32), u32>,
     > = std::collections::BTreeMap::new();
     let mut marks: std::collections::BTreeMap<u8, Vec<MarkPos>> = std::collections::BTreeMap::new();
+    let mut entities: std::collections::BTreeMap<
+        u8,
+        std::collections::HashMap<(i32, i32, i32), Tag>,
+    > = std::collections::BTreeMap::new();
     for group in groups {
+        if !group.block_entities.is_empty() {
+            entities
+                .entry(group.slot)
+                .or_default()
+                .extend(group.block_entities);
+        }
         let writes = per_slot.entry(group.slot).or_default();
         for &(x, y, z, state) in &group.deltas {
             if (MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
@@ -155,16 +172,39 @@ pub fn merge_feature_writes(
     // earlier sources overwrite later ones and the first writer survives.
     let mut order: Vec<u8> = per_slot.keys().copied().collect();
     order.sort_by_key(source_order);
-    let mut winners: std::collections::HashMap<(i32, i32, i32), u32> =
+    let mut winners: std::collections::HashMap<(i32, i32, i32), (u8, u32)> =
         std::collections::HashMap::new();
-    for slot in order.into_iter().rev() {
+    for &slot in order.iter().rev() {
         for ((x, y, z), state) in per_slot.remove(&slot).unwrap_or_default() {
-            winners.insert((x, y, z), state);
+            winners.insert((x, y, z), (slot, state));
         }
+    }
+    // 方块实体跟着赢得这一格方块的来源走：官方共享 `ProtoChunk` 里后写的方块
+    // 先丢掉旧方块实体，赢家的写也带走它自己的方块实体。没有任何来源改过方块的
+    // 格子，取先后顺序里第一个写了方块实体的来源。
+    // A block entity follows the source that won the cell's block: in vanilla's
+    // shared `ProtoChunk` a later block write drops the old block entity. Cells no
+    // source changed take the first source, in order, that wrote one.
+    let mut entity_order: Vec<u8> = entities.keys().copied().collect();
+    entity_order.sort_by_key(source_order);
+    let mut placed: std::collections::BTreeMap<(i32, i32, i32), Tag> =
+        std::collections::BTreeMap::new();
+    for slot in entity_order {
+        for (at, tag) in entities.remove(&slot).unwrap_or_default() {
+            let owns = winners.get(&at).is_none_or(|&(winner, _)| winner == slot);
+            if owns && !placed.contains_key(&at) {
+                placed.insert(at, tag);
+            }
+        }
+    }
+    if !placed.is_empty() {
+        let changed: std::collections::BTreeSet<(i32, i32, i32)> = placed.keys().copied().collect();
+        chunk.block_entities.retain(|(at, _)| !changed.contains(at));
+        chunk.block_entities.extend(placed);
     }
     let mut out: Vec<BlockDelta> = winners
         .into_iter()
-        .map(|((x, y, z), state)| (x, y, z, state))
+        .map(|((x, y, z), (_, state))| (x, y, z, state))
         .collect();
     // 每格只留一条，排序只为让落盘顺序也确定，与哈希表迭代次序无关。
     // One entry per cell; sorted so even the apply order is deterministic.
@@ -527,6 +567,7 @@ pub fn game_pipeline(
             biomes: biomes[index].clone(),
             heightmaps: Default::default(),
             post_processing: Vec::new(),
+            block_entities: Vec::new(),
         })
     });
     let (_result, stats) = run_features_filtered(
@@ -602,6 +643,9 @@ pub fn game_pipeline(
 /// eight hold the overflow into the neighbors.
 struct FeatureRun {
     deltas: [Vec<BlockDelta>; 9],
+    /// 这次运行写下的方块实体，按目标格（3×3 下标）分开。
+    /// Block entities this run wrote, split by target cell (3×3 index).
+    block_entities: [Vec<GeneratedBlockEntity>; 9],
     /// 这次运行新记的 `PostProcessing` 标记，按目标格（3×3 下标）分开，组内保持
     /// 调用顺序；不含输入地形已带的标记。
     ///
@@ -689,7 +733,14 @@ fn feature_run_heap_bytes(run: &FeatureRun) -> usize {
         .iter()
         .map(|marks| marks.capacity() * size_of::<(i32, i32, i32)>())
         .sum();
-    deltas + marks
+    // 方块实体的标签大小不好精确量，按每条 256 字节估。
+    // Block entity tags are hard to measure exactly; estimate 256 bytes each.
+    let block_entities: usize = run
+        .block_entities
+        .iter()
+        .map(|list| list.capacity() * (size_of::<GeneratedBlockEntity>() + 256))
+        .sum();
+    deltas + marks + block_entities
 }
 
 fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> FeatureCacheKey {
@@ -977,7 +1028,19 @@ fn compute_feature_run(
     let mut deltas = result.deltas;
     deltas[CENTER] = own;
     let marks = split_new_marks(cx, cz, &result.post_processing, input_marks);
-    Ok(Arc::new(FeatureRun { deltas, marks }))
+    let mut block_entities: [Vec<GeneratedBlockEntity>; 9] = std::array::from_fn(|_| Vec::new());
+    for ((x, y, z), tag) in result.block_entities {
+        let dx = (x >> 4) - cx;
+        let dz = (z >> 4) - cz;
+        if (-1..=1).contains(&dx) && (-1..=1).contains(&dz) {
+            block_entities[((dz + 1) * 3 + dx + 1) as usize].push(((x, y, z), tag));
+        }
+    }
+    Ok(Arc::new(FeatureRun {
+        deltas,
+        block_entities,
+        marks,
+    }))
 }
 
 /// 把一次运行的 `PostProcessing` 去掉输入地形带的前缀，按目标格（3×3 下标）分开。
@@ -1042,6 +1105,7 @@ pub fn feature_writes_into(
         slot: CENTER as u8,
         deltas: own.deltas[CENTER].clone(),
         marks: own.marks[CENTER].clone(),
+        block_entities: own.block_entities[CENTER].clone(),
     }];
     for dz in -1..=1 {
         for dx in -1..=1 {
@@ -1057,6 +1121,7 @@ pub fn feature_writes_into(
                 slot: slot as u8,
                 deltas: run.deltas[index].clone(),
                 marks: run.marks[index].clone(),
+                block_entities: run.block_entities[index].clone(),
             });
         }
     }
@@ -1204,6 +1269,10 @@ pub mod oracle_merge {
         /// Drop only the `PostProcessing` marks from the neighbor at
         /// `(cx+dx, cz+dz)`; its block writes stay.
         DropNeighborMarks { dx: i32, dz: i32 },
+        /// 组装时丢掉全部来源写下的方块实体（方块照旧），确认方块实体比较器会报。
+        /// Drop every source's block entities at assembly (blocks stay), so the
+        /// block entity comparison must report it.
+        DropBlockEntities,
     }
 
     /// 开关只对这一个种子生效，别的世界不受影响。
@@ -1240,6 +1309,11 @@ pub mod oracle_merge {
                 let slot = ((dz + 1) * 3 + dx + 1) as u8;
                 for group in groups.iter_mut().filter(|group| group.slot == slot) {
                     group.marks.clear();
+                }
+            }
+            MergeBreak::DropBlockEntities => {
+                for group in groups.iter_mut() {
+                    group.block_entities.clear();
                 }
             }
             MergeBreak::LargestStateWins => {
@@ -1473,6 +1547,7 @@ mod tests {
                 biomes: empty.biomes.clone(),
                 heightmaps: Default::default(),
                 post_processing: Vec::new(),
+                block_entities: Vec::new(),
             })
         });
         let view_real = std::array::from_fn(|_| {
@@ -1481,6 +1556,7 @@ mod tests {
                 biomes: real.biomes.clone(),
                 heightmaps: Default::default(),
                 post_processing: Vec::new(),
+                block_entities: Vec::new(),
             })
         });
         let a = run_features(&config, cx, cz, view_empty).unwrap();
@@ -1560,6 +1636,7 @@ mod tests {
         let run = Arc::new(FeatureRun {
             deltas: Default::default(),
             marks: Default::default(),
+            block_entities: Default::default(),
         });
         let shard = std::sync::Mutex::new(FeatureShard::default());
         let ours: FeatureSlot = Arc::new(OnceLock::new());
@@ -1661,6 +1738,7 @@ mod tests {
                     slot,
                     deltas: vec![(3, 0, 5, 100 + slot as u32), (slot as i32, 1, 6, 222)],
                     marks: Vec::new(),
+                    block_entities: Vec::new(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -1673,6 +1751,7 @@ mod tests {
             slot: CENTER as u8,
             deltas: vec![(3, 0, 5, 999)],
             marks: Vec::new(),
+            block_entities: Vec::new(),
         });
         let ca = assemble_feature_column(&terrain, &mut a).unwrap();
         let cb = assemble_feature_column(&terrain, &mut b).unwrap();
@@ -1780,11 +1859,13 @@ mod tests {
             biomes: Vec::new(),
             heightmaps: Default::default(),
             post_processing: vec![(0, 1, 0)],
+            block_entities: Vec::new(),
         };
         let group = |slot: u8, marks: Vec<(i32, i32, i32)>| FeatureWrites {
             slot,
             deltas: Vec::new(),
             marks,
+            block_entities: Vec::new(),
         };
         let groups = vec![
             group(7, vec![(7, 0, 0)]),
