@@ -133,7 +133,7 @@ fn lightning_target_around(world: &World, rolled: BlockPos) -> BlockPos {
     );
     let mut candidates: Vec<BlockPos> = Vec::new();
     world.level().for_each_entity_in(area, &mut |public| {
-        if public.removed || public.kind.entity_type() == 0 {
+        if public.removed || !matches!(public.kind, crate::entity::KindPublic::Mob(_)) {
             return;
         }
         let pos = public.block_position();
@@ -296,4 +296,32 @@ pub fn random_tick(level: &mut dyn Level, ticks: &mut BlockTicks, pos: BlockPos)
     let mut world = World::new(level, ticks);
     tick_one(&mut world, pos);
     finish(world, InteractionResult::Pass)
+}
+
+#[cfg(test)]
+mod thunder_tests {
+    use super::*;
+    use crate::{BlockTicks, testing::TestLevel};
+    use mc_bamboo_data::blocks;
+
+    /// 有避雷针时 `findLightningTargetAround` 直接返回，不取活物列表的 `nextInt`；
+    /// 雷击那一次只消耗 `nextInt(100000)`、`block_random_pos` 和 `nextDouble()`。
+    #[test]
+    fn rod_skips_the_living_entity_draw() {
+        let mut level = TestLevel::new();
+        level.set(BlockPos::new(0, 63, 0), BlockState(blocks::LIGHTNING_ROD));
+        let before = level.random().source().seed();
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut level, &mut ticks);
+        let top = BlockPos::new(0, 64, 0);
+        assert_eq!(
+            world.level().lightning_rod_near(top, LIGHTNING_ROD_RADIUS),
+            Some(BlockPos::new(0, 64, 0))
+        );
+        let _ = world.random().next_int(LIGHTNING_CHANCE);
+        let _ = world.block_random_pos(BlockPos::new(0, 0, 0), SECTION_Y_MASK);
+        let _ = world.random().next_double();
+        let expected = world.level().random().source().seed();
+        assert_ne!(before, expected);
+    }
 }
