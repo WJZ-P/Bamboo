@@ -973,6 +973,18 @@ pub fn replay(
         Kind::Random => random_tick(&mut level, &mut ticks, target),
         Kind::Chunk => tick_chunk(&mut level, &mut ticks, target.chunk(), action.speed),
     };
+    // `EntityType.spawn` 在 `addFreshEntityWithPassengers` 之后调 `Mob.playAmbientSound`，
+    // `Entity.playSound` 再走 `level.playSound(null, ...)`。Bamboo 的这一声记在实体行的
+    // `MobEvent::Sound` 里（游戏层每刻的同步取走发包），不在 `World.effects` 里。方块重放
+    // 要在动作之后、settle 之前把它按 `Effect::Sound` 的编码补进效果列表：官方先走完物品的
+    // `useOn` 才叫这一声，之后才轮到 settle 里的方块音效。
+    //
+    // `EntityType.spawn` calls `Mob.playAmbientSound` after adding the entity, and
+    // `Entity.playSound` goes through `level.playSound(null, ...)`. Bamboo records that
+    // sound on the entity row (`MobEvent::Sound`, drained by the tick's sync), not in
+    // `World.effects`. Add it right after the action and before `settle`: vanilla plays
+    // it after the item's `useOn` and before any settling block sounds.
+    append_mob_sounds(&mut level, &mut outcome);
     // flow 题在动作里已经走到 `game_time + steps`，后面的刻从那里接着数。
     let after_action = match action.kind {
         Kind::Flow => now + i64::from(action.steps),
@@ -1116,6 +1128,44 @@ fn contents_of(level: &OracleLevel) -> Vec<ContainerStack> {
         }
     }
     contents
+}
+
+/// 把这一拍攒在实体行上的音效翻译成 `Effect::Sound`，顺序按 uid 和事件顺序。
+///
+/// Translate this step's mob-row sounds into `Effect::Sound`, in uid and event order.
+fn append_mob_sounds(level: &mut OracleLevel, outcome: &mut Outcome) {
+    use mc_bamboo_blocks::entity::mob::MobEvent;
+    use mc_bamboo_data::sounds;
+
+    for (_, events) in level.world_entities.take_mob_events() {
+        for event in events {
+            if let MobEvent::Sound {
+                sound,
+                volume,
+                pitch,
+                position,
+                hostile,
+                ..
+            } = event
+            {
+                outcome.effects.push(Effect::Sound {
+                    sound: i32::from(sounds::sound_event(sound)),
+                    source: if hostile {
+                        sounds::HOSTILE
+                    } else {
+                        sounds::NEUTRAL
+                    },
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    volume,
+                    pitch,
+                    except_initiator: false,
+                    seed: None,
+                });
+            }
+        }
+    }
 }
 
 fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
