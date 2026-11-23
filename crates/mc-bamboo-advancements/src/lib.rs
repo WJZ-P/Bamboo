@@ -342,7 +342,7 @@ fn component_json_tag(value: &Value, name: &str) -> Result<mc_bamboo_nbt::Tag, T
         Value::Number(number) => number
             .as_i64()
             .map(|value| Tag::Int(value as i32))
-            .or_else(|| number.as_f64().map(|value| Tag::Double(value)))
+            .or_else(|| number.as_f64().map(Tag::Double))
             .ok_or_else(|| bad(format!("组件 {name} 的数字不合法"))),
         Value::Array(values) => Ok(Tag::List(
             values
