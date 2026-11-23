@@ -100,6 +100,14 @@ struct ProjectileFrame {
     /// Effects on the player: id, duration, amplifier (the official player is not ticked).
     player_effects: Option<Vec<[i32; 3]>>,
     shearing: Option<Shearing>,
+    /// 掠夺者场景：世界随机源的状态（装填完成音效的音高从它取）。
+    ///
+    /// Pillager scenes: the level random state (the loading-end pitch draws from it).
+    level_seed: Option<i64>,
+    /// 掠夺者场景：弩里的箭数、耐久损耗、已用刻数、`noActionTime`。
+    ///
+    /// Pillager scenes: loaded arrows, crossbow damage, ticks used and `noActionTime`.
+    crossbow: Option<[i64; 4]>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -199,12 +207,51 @@ impl ProjectileCase {
     ///
     /// The shooter kind, from the scene name prefix.
     fn shooter_kind(&self) -> MobType {
-        if self.name.starts_with("stray_") {
+        if self.name.starts_with("pillager_") {
+            MobType::Pillager
+        } else if self.name.starts_with("stray_") {
             MobType::Stray
         } else if self.name.starts_with("bogged_") {
             MobType::Bogged
         } else {
             MobType::Skeleton
+        }
+    }
+
+    /// 射手主手的武器：骷髅一支是弓，掠夺者是弩（多重射击场景带多重射击和穿透）。
+    ///
+    /// The shooter's weapon: a bow for the skeleton family, a crossbow for pillagers
+    /// (with Multishot and Piercing in the multishot scene).
+    fn shooter_weapon(&self) -> ItemStack {
+        use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+        if self.shooter_kind() != MobType::Pillager {
+            return ItemStack::new(mc_bamboo_data::items::BOW, 1);
+        }
+        let crossbow = ItemStack::new(mc_bamboo_data::items::CROSSBOW, 1);
+        if self.name != "pillager_crossbow_multishot" {
+            return crossbow;
+        }
+        let registry = mc_bamboo_data::registries::SYNCED_REGISTRIES
+            .iter()
+            .find(|registry| registry.name == "minecraft:enchantment")
+            .unwrap();
+        let levels = ["minecraft:multishot", "minecraft:piercing"]
+            .into_iter()
+            .map(|name| {
+                let id = registry.entries.iter().position(|entry| *entry == name);
+                (id.unwrap() as i32, 1)
+            })
+            .collect();
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(levels)),
+        );
+        let (added, removed) = patch.to_opaque();
+        ItemStack {
+            added,
+            removed,
+            ..crossbow
         }
     }
 
@@ -284,10 +331,8 @@ impl ProjectileCase {
             mob.y_head_rot = 0.0;
             mob.y_body_rot = 0.0;
             if !mutate {
-                mob.equipment.set(
-                    EquipmentSlot::MainHand,
-                    ItemStack::new(mc_bamboo_data::items::BOW, 1),
-                );
+                mob.equipment
+                    .set(EquipmentSlot::MainHand, self.shooter_weapon());
             }
             world.add_prepared_entity(skeleton);
         } else {
@@ -680,6 +725,29 @@ impl Report {
                 if ours != theirs {
                     self.mismatch(format!("{label} shooter seed/aggressive/drawing: official {theirs:?}, bamboo {ours:?}"));
                 }
+                if let Some(theirs) = expected.crossbow {
+                    use mc_bamboo_blocks::entity::mob::crossbow;
+                    let held = mob.equipment.get(EquipmentSlot::MainHand);
+                    let ours = [
+                        crossbow::charged_count(held) as i64,
+                        i64::from(mc_bamboo_blocks::durability::damage_of(held).unwrap_or(0)),
+                        i64::from(crossbow::ticks_using(mob)),
+                        i64::from(mob.no_action_time),
+                    ];
+                    if ours != theirs {
+                        self.mismatch(format!(
+                            "{label} crossbow loaded/damage/ticks used/noActionTime: official {theirs:?}, bamboo {ours:?}"
+                        ));
+                    }
+                }
+                if let Some(theirs) = expected.level_seed {
+                    let ours = level.random.source().seed();
+                    if ours != theirs {
+                        self.mismatch(format!(
+                            "{label} level random: official {theirs}, bamboo {ours}"
+                        ));
+                    }
+                }
             }
             compare_packet_list(
                 &mut self.mismatches,
@@ -809,6 +877,7 @@ fn kin_state(id: i32, mob: &mc_bamboo_blocks::entity::mob::Mob) -> [i64; 6] {
     let flag = match mob.mob_type {
         MobType::Skeleton => mob.freeze_conversion.converting,
         MobType::Bogged => mob.bogged_sheared,
+        MobType::Pillager => mob.crossbow.charging,
         _ => false,
     };
     let hand = mob.equipment.get(EquipmentSlot::MainHand);

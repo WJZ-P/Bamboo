@@ -52,6 +52,10 @@ pub enum Goal {
     ///
     /// The wolf's own goals.
     Wolf(super::wolf_goals::WolfGoal),
+    /// 掠夺者一支的目标：巡逻、守阵、弩、看别的生物。
+    ///
+    /// The raider-branch goals: patrol, hold ground, crossbow and watching other mobs.
+    Raider(super::raider::RaiderGoal),
     /// 海豚自己的目标（呼吸、找水、引路、跃水、玩物品、跟船）。
     ///
     /// The dolphin's own goals (breathing, finding water, treasure leading, jumping,
@@ -553,6 +557,7 @@ impl Goal {
             Self::Phantom(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
+            Self::Raider(goal) => goal.flags(),
             Self::Dolphin(goal) => goal.flags(),
             Self::Cat(goal) => goal.flags(),
             Self::Parrot(goal) => goal.flags(),
@@ -606,6 +611,9 @@ impl Goal {
     /// `requiresUpdateEveryTick`。
     pub const fn every_tick(&self) -> bool {
         if let Self::Fox(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Raider(goal) = self {
             return goal.every_tick();
         }
         if let Self::Cat(goal) = self {
@@ -678,6 +686,7 @@ impl Goal {
             Self::Phantom(goal) => goal.name(),
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
+            Self::Raider(goal) => goal.name(),
             Self::Dolphin(goal) => goal.name(),
             Self::Cat(goal) => goal.name(),
             Self::Parrot(goal) => goal.name(),
@@ -1510,6 +1519,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Phantom(goal) => goal.can_use(me, mob, ctx),
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
+        Goal::Raider(goal) => goal.can_use(me, mob, ctx),
         Goal::Dolphin(goal) => goal.can_use(me, mob, ctx),
         Goal::Cat(goal) => goal.can_use(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_use(me, mob, ctx),
@@ -1753,17 +1763,18 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    if mob.mob_type == super::MobType::Witch {
-                        // `new HurtByTargetGoal(this, Raider.class)`：女巫不报复自己或别的袭击者。
+                    if mob.mob_type.is_raider() {
+                        // `new HurtByTargetGoal(this, Raider.class)`：女巫和掠夺者不报复自己或别的
+                        // 袭击者。
                         //
-                        // `new HurtByTargetGoal(this, Raider.class)`: witches ignore themselves
-                        // and other raiders.
+                        // `new HurtByTargetGoal(this, Raider.class)`: witches and pillagers ignore
+                        // themselves and other raiders.
                         uid != me.id
                             && !ctx.other(uid).is_some_and(|other| {
                                 matches!(
                                     &other.kind,
                                     KindPublic::Mob(other_mob)
-                                        if other_mob.mob_type == super::MobType::Witch
+                                        if other_mob.mob_type.is_raider()
                                 )
                             })
                             && target_by_uid(mob, ctx, uid).is_some()
@@ -2076,6 +2087,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Phantom(goal) => goal.can_continue(me, mob, ctx),
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Raider(goal) => goal.can_continue(me, mob, ctx),
         Goal::Dolphin(goal) => goal.can_continue(me, mob, ctx),
         Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_continue(me, mob, ctx),
@@ -2263,6 +2275,24 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // does not arise for polar bears.
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
         }
+        // 掠夺者的两类目标都是 `mustSee`：受伤反击记 300 刻，找玩家记 60 刻。弩的目标
+        // `stop()` 会 `setTarget(null)`，`TargetGoal.canContinueToUse` 再从 `targetMob` 捡回来。
+        // Both pillager target goals are `mustSee`: 300 ticks of memory for hurt-by, 60 for
+        // players. The crossbow goal's `stop()` clears the target and
+        // `TargetGoal.canContinueToUse` restores it from `targetMob`.
+        Goal::HurtByTarget { unseen_ticks, .. } if mob.mob_type == super::MobType::Pillager => {
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
+        }
+        Goal::NearestAttackableTarget {
+            unseen_ticks,
+            found,
+            ..
+        } if mob.mob_type == super::MobType::Pillager => {
+            if mob.target.is_none() {
+                mob.target = *found;
+            }
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 60)
+        }
         Goal::NearestAttackableTarget { unseen_ticks, .. }
             if mob.mob_type.full_target_rules() || mob.mob_type == super::MobType::Slime =>
         {
@@ -2354,6 +2384,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Phantom(goal) => goal.start(me, mob, ctx),
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
+        Goal::Raider(goal) => goal.start(me, mob, ctx),
         Goal::Dolphin(goal) => goal.start(me, mob, ctx),
         Goal::Cat(goal) => goal.start(me, mob, ctx),
         Goal::Parrot(goal) => goal.start(me, mob, ctx),
@@ -2518,6 +2549,11 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             if mob.mob_type == super::MobType::Panda {
                 super::panda::alert_pandas(me, mob, ctx);
             }
+            // `Pillager` 的 `HurtByTargetGoal(this, Raider.class).setAlertOthers()`。
+            // The pillager's `HurtByTargetGoal(this, Raider.class).setAlertOthers()`.
+            if mob.mob_type == super::MobType::Pillager {
+                super::raider::alert_same_kind(me, mob, ctx);
+            }
         }
         // `HurtByTargetGoal.start` 再 `TargetGoal.start`：`unseenTicks` 清零。
         // `HurtByTargetGoal.start`, then `TargetGoal.start` clears `unseenTicks`.
@@ -2626,6 +2662,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Phantom(goal) => goal.stop(me, mob, ctx),
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
+        Goal::Raider(goal) => goal.stop(me, mob, ctx),
         Goal::Dolphin(goal) => goal.stop(me, mob, ctx),
         Goal::Cat(goal) => goal.stop(mob),
         Goal::Parrot(goal) => goal.stop(mob),
@@ -2999,6 +3036,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Phantom(goal) => goal.tick(me, mob, ctx),
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
+        Goal::Raider(goal) => goal.tick(me, mob, ctx),
         Goal::Dolphin(goal) => goal.tick(me, mob, ctx),
         Goal::Cat(goal) => goal.tick(me, mob, ctx),
         Goal::Parrot(goal) => goal.tick(me, mob, ctx),
@@ -3739,6 +3777,7 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
             | super::MobType::Enderman
             | super::MobType::Bat
             | super::MobType::Phantom
+            | super::MobType::Pillager
     ) {
         return 0.0;
     }
@@ -4333,7 +4372,7 @@ fn mob_target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget,
         height: f64::from(target.dimensions().1),
         health: target.health,
         effects: target.effects,
-        is_raider: target.mob_type == super::MobType::Witch,
+        is_raider: target.mob_type.is_raider(),
         width: target.dimensions().0,
         hitbox: other.bounding_box(),
     };

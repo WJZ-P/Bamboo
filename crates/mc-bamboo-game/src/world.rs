@@ -3435,12 +3435,17 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // Vanilla `chunkSource.tick` spawns before the random ticks; keep it that way.
     crate::natural_spawn::tick(region);
     interaction::run_random_ticks(region);
-    // `ServerChunkCache.tickChunks` 在逐区块随机刻之后才调 `tickCustomSpawners`，主世界的
-    // 自定义刷怪器里有 `PhantomSpawner`；世界随机源因此排在随机刻的取数之后。
-    // `ServerChunkCache.tickChunks` calls `tickCustomSpawners` after the per-chunk random
-    // ticks; the overworld's custom spawners include `PhantomSpawner`, so their level
-    // random draws follow the random-tick draws.
+    // 官方 `tickChunks` 在自然刷怪和逐区块随机刻之后调 `tickCustomSpawners`；主世界的
+    // 自定义刷怪器按 `MinecraftServer.createLevels` 里的顺序是 `PhantomSpawner`、
+    // `PatrolSpawner`（之后的猫、村庄围攻、流浪商人还没有）。世界随机源因此排在随机刻的
+    // 取数之后，幻翼又在巡逻队之前。
+    // Vanilla `tickChunks` calls `tickCustomSpawners` after natural spawning and the
+    // per-chunk random ticks. The overworld's custom spawners run in the
+    // `MinecraftServer.createLevels` order: `PhantomSpawner`, then `PatrolSpawner` (the
+    // cat, village siege and wandering trader spawners are not modelled yet), so their
+    // level random draws follow the random ticks and phantoms come before patrols.
     crate::phantom_spawn::tick(region);
+    crate::patrol_spawn::tick(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
     region.profiler.begin_partition_phase();

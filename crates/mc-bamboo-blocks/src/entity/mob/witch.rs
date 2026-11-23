@@ -71,13 +71,17 @@ pub(super) fn finalize_spawn(entity: &mut Entity, random: &dyn crate::random::Ra
     entity.with_mob(|_, mob| super::spawn::finalize_mob(random, mob));
 }
 
-/// `Witch.registerGoals`：`Raider` 的四个目标按注册顺序占位，然后是漂浮、远程、
-/// 闲逛、看玩家、随便看看。
+/// `Witch.registerGoals`：父类链先注册 `PatrollingMonster` 的巡逻目标，`Raider` 的四个目标
+/// 按注册顺序占位，然后是漂浮、远程、闲逛、看玩家、随便看看。女巫自己不会开始巡逻，
+/// 但巡逻队长会给 16 格内的 `PatrollingMonster` 设巡逻目标。
 ///
-/// `Witch.registerGoals`: the four `Raider` goals keep their slots, then float, ranged,
-/// stroll, look at player and random look.
+/// `Witch.registerGoals`: the superclass chain first registers the `PatrollingMonster`
+/// patrol goal, the four `Raider` goals keep their slots, then float, ranged, stroll,
+/// look at player and random look. A witch never starts a patrol itself, but a patrol
+/// leader hands its target to every `PatrollingMonster` within 16 blocks.
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     let goals = vec![
+        (4, Goal::Raider(super::raider::RaiderGoal::patrol())),
         (1, Goal::Unavailable("ObtainRaidLeaderBannerGoal")),
         (3, Goal::Unavailable("PathfindToRaidGoal")),
         (4, Goal::Unavailable("RaiderMoveThroughVillageGoal")),
@@ -418,6 +422,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                (4, "LongDistancePatrolGoal"),
                 (1, "ObtainRaidLeaderBannerGoal"),
                 (3, "PathfindToRaidGoal"),
                 (4, "RaiderMoveThroughVillageGoal"),

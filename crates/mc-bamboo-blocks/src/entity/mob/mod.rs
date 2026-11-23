@@ -26,6 +26,7 @@ pub mod chicken;
 pub mod control;
 pub mod conversion;
 pub mod creeper;
+pub mod crossbow;
 pub mod damage;
 pub mod dolphin;
 pub mod dolphin_goals;
@@ -53,11 +54,14 @@ pub mod ocelot;
 pub mod panda;
 pub mod parrot;
 pub mod path;
+pub mod patrol;
 pub mod phantom;
 pub mod phantom_spawner;
 mod pig;
+pub mod pillager;
 pub mod polar_bear;
 pub mod rabbit;
+pub mod raider;
 pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
@@ -139,6 +143,7 @@ pub enum MobType {
     Slime,
     Drowned,
     Witch,
+    Pillager,
     Creeper,
     Spider,
     CaveSpider,
@@ -169,7 +174,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -196,6 +201,7 @@ impl MobType {
         Self::Slime,
         Self::Drowned,
         Self::Witch,
+        Self::Pillager,
         Self::Creeper,
         Self::Spider,
         Self::CaveSpider,
@@ -242,6 +248,7 @@ impl MobType {
             Self::Slime => ids::SLIME,
             Self::Drowned => ids::DROWNED,
             Self::Witch => ids::WITCH,
+            Self::Pillager => ids::PILLAGER,
             Self::Creeper => ids::CREEPER,
             Self::Spider => ids::SPIDER,
             Self::CaveSpider => ids::CAVE_SPIDER,
@@ -293,6 +300,7 @@ impl MobType {
             Self::Slime => "minecraft:slime",
             Self::Drowned => "minecraft:drowned",
             Self::Witch => "minecraft:witch",
+            Self::Pillager => "minecraft:pillager",
             Self::Creeper => "minecraft:creeper",
             Self::Spider => "minecraft:spider",
             Self::CaveSpider => "minecraft:cave_spider",
@@ -444,6 +452,11 @@ impl MobType {
             //
             // `EntityTypes.WITCH`: `sized(0.6F, 1.95F).eyeHeight(1.62F)`.
             (Self::Witch, _) => (0.6, 1.95, 1.62),
+            // `EntityTypes.PILLAGER`：`sized(0.6F, 1.95F)`，眼高取缺省的 `height * 0.85F`。
+            //
+            // `EntityTypes.PILLAGER`: `sized(0.6F, 1.95F)` with the default eye height
+            // `height * 0.85F`.
+            (Self::Pillager, _) => (0.6, 1.95, 1.95 * 0.85),
         }
     }
 
@@ -455,11 +468,22 @@ impl MobType {
                 | Self::Husk
                 | Self::Drowned
                 | Self::Witch
+                | Self::Pillager
                 | Self::Creeper
                 | Self::Spider
                 | Self::CaveSpider
                 | Self::Enderman
         ) || self.is_skeleton()
+    }
+
+    /// 是不是官方 `Raider` 一支（`PatrollingMonster` 的全部子类）：女巫和掠夺者。它们共用
+    /// 巡逻、`noActionTime` 每刻加 2、巡逻中不按距离消失这几条规则。
+    ///
+    /// Whether this is a vanilla `Raider` (every `PatrollingMonster` subclass): witches and
+    /// pillagers. They share patrols, the unconditional `noActionTime += 2`, and the
+    /// no-distance-despawn rule while patrolling.
+    pub const fn is_raider(self) -> bool {
+        matches!(self, Self::Witch | Self::Pillager)
     }
 
     /// 是不是 `Zombie` 一支：僵尸、尸壳、溺尸共用近战、破门、增援和转化逻辑。
@@ -502,7 +526,7 @@ impl MobType {
     pub const fn full_target_rules(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman
+            Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman | Self::Pillager
         ) || self.is_skeleton()
     }
 
@@ -528,6 +552,7 @@ impl MobType {
                 | Self::Witch
                 | Self::Slime
                 | Self::Phantom
+                | Self::Pillager
                 | Self::Ocelot
                 | Self::Cat
         )
@@ -738,6 +763,7 @@ impl MobType {
             Self::Slime => "minecraft:entities/slime",
             Self::Drowned => "minecraft:entities/drowned",
             Self::Witch => "minecraft:entities/witch",
+            Self::Pillager => "minecraft:entities/pillager",
             Self::Creeper => "minecraft:entities/creeper",
             Self::Spider => "minecraft:entities/spider",
             Self::CaveSpider => "minecraft:entities/cave_spider",
@@ -837,6 +863,7 @@ impl MobType {
             // Drowned pick a water or land variant in [`drowned::sound`] by `isInWater`.
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.ambient"),
+            Self::Pillager => Some("minecraft:entity.pillager.ambient"),
             Self::Enderman => Some("minecraft:entity.enderman.ambient"),
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.ambient"),
             Self::Squid | Self::GlowSquid => Some(squid::ambient_sound(self)),
@@ -887,6 +914,7 @@ impl MobType {
             Self::Bogged => Some("minecraft:entity.bogged.hurt"),
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.hurt"),
+            Self::Pillager => Some("minecraft:entity.pillager.hurt"),
             Self::Creeper => Some("minecraft:entity.creeper.hurt"),
             Self::Enderman => Some("minecraft:entity.enderman.hurt"),
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.hurt"),
@@ -930,6 +958,7 @@ impl MobType {
             Self::Bogged => Some("minecraft:entity.bogged.death"),
             Self::Drowned => None,
             Self::Witch => Some("minecraft:entity.witch.death"),
+            Self::Pillager => Some("minecraft:entity.pillager.death"),
             Self::Creeper => Some("minecraft:entity.creeper.death"),
             Self::Enderman => Some("minecraft:entity.enderman.death"),
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.death"),
@@ -975,7 +1004,7 @@ impl MobType {
             // 女巫没覆写 `getStepSound`，走方块自己的脚步声（和史莱姆一样）。
             //
             // A witch does not override `getStepSound`; the block's own step sound plays.
-            Self::Witch => None,
+            Self::Witch | Self::Pillager => None,
             Self::Spider | Self::CaveSpider => Some("minecraft:entity.spider.step"),
             // `MovementEmission.EVENTS`：没有脚步声。
             // `MovementEmission.EVENTS`: no step sound.
@@ -1030,6 +1059,7 @@ impl MobType {
             Self::Slime => items::SLIME_SPAWN_EGG,
             Self::Drowned => items::DROWNED_SPAWN_EGG,
             Self::Witch => items::WITCH_SPAWN_EGG,
+            Self::Pillager => items::PILLAGER_SPAWN_EGG,
             Self::Creeper => items::CREEPER_SPAWN_EGG,
             Self::Spider => items::SPIDER_SPAWN_EGG,
             Self::CaveSpider => items::CAVE_SPIDER_SPAWN_EGG,
@@ -1081,6 +1111,7 @@ impl MobType {
             Self::Slime => "entity.minecraft.slime",
             Self::Drowned => "entity.minecraft.drowned",
             Self::Witch => "entity.minecraft.witch",
+            Self::Pillager => "entity.minecraft.pillager",
             Self::Creeper => "entity.minecraft.creeper",
             Self::Spider => "entity.minecraft.spider",
             Self::CaveSpider => "entity.minecraft.cave_spider",
@@ -1151,10 +1182,12 @@ impl MobType {
         use mc_bamboo_data::spawning::MobCategory;
         // 马科也是 `CREATURE`。
         // Equines are `CREATURE` as well.
+        // 掠夺者在 `EntityType.Builder` 上显式调了 `canSpawnFarFromPlayer()`。
+        // Pillagers call `canSpawnFarFromPlayer()` on their `EntityType.Builder`.
         matches!(
             self.mob_category(),
             MobCategory::Creature | MobCategory::Misc
-        )
+        ) || matches!(self, Self::Pillager)
     }
 
     /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
@@ -1851,6 +1884,11 @@ pub struct MobDeathLoot {
     /// The block an enderman carries: `dropCustomDeathLoot` drops it with a fake
     /// silk-touch tool.
     pub carried: Option<crate::state::BlockState>,
+    /// `Raider.isCaptain()`：是巡逻队长并且头上戴着灾厄旗帜。掠夺者的战利品表按它掉不祥之瓶。
+    ///
+    /// `Raider.isCaptain()`: a patrol leader wearing the ominous banner. The pillager loot
+    /// table drops the ominous bottle on it.
+    pub captain: bool,
 }
 
 /// 剪毛（`SHEARING`）或下蛋（`GIFT`）的一次战利品表求值：表名、原点、实体本身和可选的工具。
@@ -1903,6 +1941,7 @@ impl MobDeathLoot {
             recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
             recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
             carried: mob.enderman.carried,
+            captain: mob.mob_type.is_raider() && raider::is_captain(mob),
         }
     }
 }
@@ -2103,6 +2142,20 @@ pub struct Mob {
     ///
     /// `Witch.DATA_USING_ITEM`: true while drinking, a separate synced boolean.
     pub witch_drinking: bool,
+    /// `PatrollingMonster` / `Raider` 的字段，女巫和掠夺者共用，见 [`raider::Raider`]。
+    ///
+    /// The `PatrollingMonster` / `Raider` fields shared by witches and pillagers, see
+    /// [`raider::Raider`].
+    pub raider: raider::Raider,
+    /// 弩的使用状态和 `Pillager.IS_CHARGING_CROSSBOW`，见 [`crossbow::CrossbowUse`]。
+    ///
+    /// The crossbow use state and `Pillager.IS_CHARGING_CROSSBOW`, see
+    /// [`crossbow::CrossbowUse`].
+    pub crossbow: crossbow::CrossbowUse,
+    /// 掠夺者的背包，见 [`pillager::Pillager`]。
+    ///
+    /// The pillager's inventory, see [`pillager::Pillager`].
+    pub pillager: pillager::Pillager,
     /// 史莱姆的大小和移动控制，见 [`slime::CubeState`]。
     ///
     /// The slime size and move control, see [`slime::CubeState`].
@@ -2282,6 +2335,14 @@ pub enum MobEvent {
     ///
     /// A sound in the player category, such as dyeing a sheep.
     PlayerSound { sound: &'static str, position: Vec3 },
+    /// 同上，但带音量：弩的装填音效是 `SoundSource.PLAYERS`、音量 0.5。
+    ///
+    /// As above with a volume: crossbow loading sounds use `SoundSource.PLAYERS` at 0.5.
+    PlayerSoundAt {
+        sound: &'static str,
+        position: Vec3,
+        volume: f32,
+    },
     /// `Entity.playSound`：在实体当时的位置放一个音效（已经排除了静音的情况）。
     ///
     /// `Entity.playSound` at the entity's position at the time (silent mobs excluded).
@@ -2335,6 +2396,7 @@ impl Mob {
             MobType::Zombie | MobType::Husk => Attributes::zombie(),
             MobType::Drowned => drowned::attributes(),
             MobType::Witch => witch::attributes(),
+            MobType::Pillager => pillager::attributes(),
             MobType::Armadillo => armadillo::attributes(),
             MobType::Goat => goat::attributes(),
             MobType::Frog => frog::attributes(),
@@ -2394,8 +2456,10 @@ impl Mob {
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
-            // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的。
-            // Bats and camels do not override `registerGoals`: both selectors stay empty.
+            MobType::Pillager => pillager::goals(&mut navigation),
+            // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的（骆驼不要 `equine::goals`）。
+            // Bats and camels do not override `registerGoals`: both selectors stay empty
+            // (no `equine::goals` for camels).
             MobType::Armadillo | MobType::Goat | MobType::Frog | MobType::Bat | MobType::Camel => {
                 GoalSelector::default()
             }
@@ -2459,6 +2523,7 @@ impl Mob {
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),
+            MobType::Pillager => pillager::targets(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -2616,6 +2681,9 @@ impl Mob {
             searching_for_land: false,
             witch: witch::WitchState::default(),
             witch_drinking: false,
+            raider: raider::Raider::default(),
+            crossbow: crossbow::CrossbowUse::default(),
+            pillager: pillager::Pillager::default(),
             cube: slime::CubeState::default(),
             mooshroom: mooshroom::Mooshroom::default(),
             polar_bear: polar_bear::PolarBear::default(),
@@ -2793,6 +2861,18 @@ impl Mob {
     /// `Mob.removeWhenFarAway`; fish override it with `!fromBucket && !hasCustomName`,
     /// and ocelots with `!isTrusting && tickCount > 2400`.
     pub fn removes_when_far_away(&self, tick_count: i32) -> bool {
+        self.removes_when_far_away_at(f64::INFINITY, tick_count)
+    }
+
+    /// `Mob.removeWhenFarAway(distSqr)`：`PatrollingMonster` 的覆写要看距离——巡逻中的
+    /// 只有离最近玩家超过 128 格才会消失。
+    ///
+    /// `Mob.removeWhenFarAway(distSqr)`: the `PatrollingMonster` override reads the
+    /// distance — a patrolling mob only despawns beyond 128 blocks from the nearest player.
+    pub fn removes_when_far_away_at(&self, distance_sqr: f64, tick_count: i32) -> bool {
+        if self.mob_type.is_raider() {
+            return raider::removes_when_far_away(self, distance_sqr);
+        }
         if fish::is_fish(self.mob_type) {
             return !self.fish.from_bucket && self.custom_name.is_none();
         }
@@ -3064,6 +3144,8 @@ pub struct MobPublic {
     ///
     /// `Witch.DATA_USING_ITEM`.
     pub witch_using_item: bool,
+    /// `Pillager.IS_CHARGING_CROSSBOW`。
+    pub pillager_charging: bool,
     /// 目标药水效果标志（缓慢 / 中毒 / 虚弱），女巫选药时读它。
     ///
     /// Target potion effect flags (slowness, poison, weakness), read by witches.
@@ -3192,6 +3274,7 @@ impl MobPublic {
             zombie_special_type: mob.zombie_special_type,
             drowned_converting: mob.drowned_converting,
             witch_using_item: mob.witch_drinking,
+            pillager_charging: mob.crossbow.charging,
             effects: super::ctx::TargetEffects::from_map(&mob.effects),
             swimming: mob.swimming,
             in_water,

@@ -348,6 +348,13 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Bogged {
         put(&mut out, "sheared", Tag::Byte(i8::from(mob.bogged_sheared)));
     }
+    // ---- PatrollingMonster / Raider / Pillager ----
+    if mob.mob_type.is_raider() {
+        mob.raider.save(&mut out);
+    }
+    if mob.mob_type == MobType::Pillager {
+        super::pillager::save(mob, &mut out);
+    }
     if mob.mob_type == MobType::GlowSquid {
         put(
             &mut out,
@@ -739,6 +746,13 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Bogged {
             mob.bogged_sheared = tag::bool_or(tag, "sheared", false);
+        }
+        // ---- PatrollingMonster / Raider / Pillager ----
+        if mob.mob_type.is_raider() {
+            mob.raider = super::raider::Raider::load(tag);
+        }
+        if mob.mob_type == MobType::Pillager {
+            super::pillager::load(mob, tag);
         }
         if mob.mob_type == MobType::GlowSquid {
             mob.squid.dark_ticks = tag::int_or(tag, "DarkTicksRemaining", 0);

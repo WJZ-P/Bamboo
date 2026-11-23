@@ -44,12 +44,15 @@ mod gen_spawn;
 mod grazing;
 mod llama_spit;
 mod natural_spawn;
+mod patrol_spawn;
 mod phantom;
+mod pillager;
 mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
 mod squid;
+mod structure_spawn;
 mod water_mob;
 mod witch_throw;
 
@@ -103,6 +106,8 @@ enum Line {
     LlamaSpit(Box<llama_spit::LlamaSpitCase>),
     WitchThrow(Box<witch_throw::WitchThrowCase>),
     NaturalSpawn(natural_spawn::Case),
+    PatrolSpawn(patrol_spawn::Case),
+    StructureSpawn(structure_spawn::Case),
     GenSpawn(gen_spawn::Case),
     PandaGenes(PandaGenesCase),
     Egg(Box<egg::EggCase>),
@@ -726,6 +731,7 @@ fn zombie_style(name: &str) -> bool {
         "enderman_",
         "slime_",
         "witch_drink_",
+        "pillager_",
         "drowned_",
     ]
     .iter()
@@ -1086,6 +1092,11 @@ impl Level for MobLevel {
         if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
             victim.cube_mob_size = Some(loot.cube_size);
         }
+        // `type_specific/raider`：没有袭击，`has_raid` 恒假；队长由生物一侧算好带过来。
+        // `type_specific/raider`: no raids, so `has_raid` stays false; the mob side
+        // supplies the captain flag.
+        victim.is_raider = loot.victim.is_raider();
+        victim.is_captain = loot.captain;
         // 生物打死生物：攻击者按伤害来源带的类型建。
         // A mob killing a mob: the attacker comes from the type carried by the source.
         let typed = source.attacker_type.map(|kind| {
@@ -1193,6 +1204,8 @@ struct Report {
     steps: usize,
     skeleton_spawns: skeleton_spawn::Coverage,
     natural_spawns: natural_spawn::Coverage,
+    patrol_spawns: patrol_spawn::Coverage,
+    structure_spawns: structure_spawn::Coverage,
     gen_spawns: gen_spawn::Coverage,
     mismatches: Vec<String>,
     ended: bool,
@@ -1259,6 +1272,8 @@ fn run_with_options(mut command: Command, options: &[&str]) -> Result<(), String
         steps: 0,
         skeleton_spawns: skeleton_spawn::Coverage::default(),
         natural_spawns: natural_spawn::Coverage::default(),
+        patrol_spawns: patrol_spawn::Coverage::default(),
+        structure_spawns: structure_spawn::Coverage::default(),
         gen_spawns: gen_spawn::Coverage::default(),
         mismatches: Vec::new(),
         ended: false,
@@ -1320,6 +1335,8 @@ impl Report {
                 Line::LlamaSpit(case) => self.replay_llama_spit(&case),
                 Line::WitchThrow(case) => self.replay_witch_throw(&case),
                 Line::NaturalSpawn(case) => self.replay_natural_spawn(&case)?,
+                Line::PatrolSpawn(case) => self.replay_patrol_spawn(&case)?,
+                Line::StructureSpawn(case) => self.replay_structure_spawn(&case)?,
                 Line::GenSpawn(case) => self.replay_gen_spawn(&case),
                 Line::PandaGenes(case) => self.replay_panda_genes(&case),
                 Line::End(end) => {
@@ -1577,6 +1594,7 @@ impl Report {
                     50 => mc_bamboo_blocks::entity::mob::MobType::Slime,
                     51 => mc_bamboo_blocks::entity::mob::MobType::Witch,
                     52 => mc_bamboo_blocks::entity::mob::MobType::Drowned,
+                    53 => mc_bamboo_blocks::entity::mob::MobType::Pillager,
                     60 => mc_bamboo_blocks::entity::mob::MobType::Turtle,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
                 };
@@ -1637,6 +1655,7 @@ impl Report {
                                 );
                             }
                         }
+                        pillager::setup(&case.name, index, mob);
                         mob.creeper.powered = cow.creeper & 1 != 0;
                         mob.creeper.ignited = cow.creeper & 2 != 0;
                         if cow.carried != 0 {
@@ -3035,12 +3054,17 @@ impl Report {
         }
         self.skeleton_spawns.print();
         self.natural_spawns.print();
+        self.patrol_spawns.print();
+        self.structure_spawns.print();
         self.gen_spawns.print();
         if self.break_test.as_deref() == Some("gen_spawn") && self.gen_spawns.cases == 0 {
             return Err("gen spawn break-self-test ran no cases".to_owned());
         }
         if self.break_test.as_deref() == Some("natural_spawn") && self.natural_spawns.ticks == 0 {
             return Err("natural spawn break-self-test ran no natural spawn ticks".to_owned());
+        }
+        if self.break_test.as_deref() == Some("patrol_spawn") && self.patrol_spawns.ticks == 0 {
+            return Err("patrol spawn break-self-test ran no patrol ticks".to_owned());
         }
         if !self.mismatches.is_empty() {
             return Err(format!(
@@ -3050,6 +3074,8 @@ impl Report {
             ));
         }
         self.natural_spawns.check()?;
+        self.patrol_spawns.check()?;
+        self.structure_spawns.check()?;
         self.gen_spawns.check()?;
         println!(
             "MOB ORACLE: {} cases, {} ticks, 0 mismatches",
@@ -3961,6 +3987,7 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
                 duration(mob_effect::SPEED)
             )
         }
+        MobType::Pillager => pillager::state(mob),
         MobType::Sheep => format!(
             "{}{}",
             sheep::color(mob).name(),

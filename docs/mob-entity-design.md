@@ -1516,7 +1516,8 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
   收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
-  结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。生成期刷怪已接入牛、猪、羊、鸡、马科、
+  结构刷怪覆盖、`customSpawners`（只做了 `PatrolSpawner`）、下界要塞表未做。刷怪笼、猫和流浪商人仍未做。
+  生成期刷怪已接入牛、猪、羊、鸡、马科、
   兔子、狐狸和狼；
   装饰随机源决定放置，区域随机源用于 `finalizeSpawn`，用 `mob-oracle --only gen_spawn` 分别比对。
 - **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
@@ -2194,8 +2195,160 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
    `eggTime` 的做法，在 `spawnJson` 传出新生熊猫的 `genes`，由 `apply_born_setup` 与配对快照同步
    （基因遗传本身仍由 `playPandaGenes` 用确定性种子单独对拍）。
 
-全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
-**686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+合并后全量 `mob-oracle`（不带 `--only`）实测 **1900 例、193397 刻、0 不一致**；`--only natural_spawn`
+**734 例、2936 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+
+## 12. 掠夺者、巡逻队与结构刷怪覆盖（cl-pillager，2026-11-22）
+
+### 12.1 现状
+
+| 部分 | 状态 | 代码 | 对拍 |
+| --- | --- | --- | --- |
+| 掠夺者 | 已对拍 0 不一致 | `entity/mob/pillager.rs`、`crossbow.rs`、`raider.rs` | `mob-oracle --only pillager`：8 例 1653 刻（弩装填 / 射击 / 多重射击、巡逻、原地对峙） |
+| `PatrolSpawner` | 已对拍 0 不一致 | `entity/mob/patrol.rs`、`game/src/patrol_spawn.rs` | `mob-oracle --only patrol`：5 例 598000 刻、15 名成员，含结束时的世界随机源种子和计时器 |
+| 结构刷怪覆盖 | 已对拍 0 不一致 | `game/src/structure_spawn.rs`、`mc-bamboo-data::spawning` | `mob-oracle --only structure_spawn`：前哨站 `STRUCTURE` 盒、女巫小屋 `PIECE` 盒、类别回退，6 个查询 0 不一致 |
+
+### 12.2 掠夺者
+
+- 属性照 `Pillager.createAttributes()`：0.35 移速、24 血、5 攻击、32 跟随。
+- 目标顺序照父类链注册：`PatrollingMonster` 的 `LongDistancePatrolGoal`（4）、`Raider` 的四个
+  袭击目标（1/3/4/5，占位，`canUse` 恒假且不取随机数），然后是 `FloatGoal`、躲嘎枝（占位）、
+  `HoldGroundAttackGoal(10)`、`RangedCrossbowAttackGoal(1.0, 8)`、`RandomStrollGoal(0.6)`、
+  两个 `LookAtPlayerGoal`。目标选择器是受伤反击（会叫同伴，忽略袭击者）、玩家、村民、铁傀儡
+  （后两种没有实体，照样注册、照样取 `nextInt`）。
+- 弩：`CrossbowAttack` 复用玩家弩的状态机（装填 25 刻、随后等 20–39 刻再射、`CHARGED_PROJECTILES`
+  组件里的箭数、多重射击一次三发），箭实体复用 `entity/arrow.rs`。装填中 `isUsingItem` 与
+  `ticksUsingItem` 由 `use_item` 路径提供，射击时把箭实体射向目标。
+- 生成装备：主手弩；`nextFloat() < 0.25 * special` 时走一次随机附魔（和骷髅共用
+  `enchant_mob_spawn_equipment`）；再 `nextInt(300) == 0` 时给穿透 I。四个盔甲槽为空，官方对空槽
+  短路、不取数，这里也不取。
+- 队长：`PatrollingMonster.finalizeSpawn` 在非 PATROL 原因下 `nextFloat() < 0.06` 当队长；队长戴
+  灾厄旗帜（白旗带 `ominous_banner` 组件）、头盔掉落率 2.0。`PatrolSpawner` 的队长由刷怪器直接
+  `setPatrolLeader(true)` 并 `findPatrolTarget()`，`finalizeSpawn` 不再取那个 0.06。
+- 音效：`entity.pillager.ambient/death/hurt/celebrate`，脚步走脚下方块的 `SoundType`。
+- 存档：`Inventory`（5 格 `InventoryCarrier` 列表）、`PatrolLeader`、`Patrolling`、`patrol_target`，
+  `Raider` 的 `Wave` / `CanJoinRaid` / `RaidId` 只作为数据保留；读档后照官方
+  `setCanPickUpLoot(true)`。
+- 掉落：走 `entities/pillager`；队长的灾厄旗帜让 `type_specific/raider` 的 `is_captain` 为真，
+  掉一瓶不祥之瓶（`set_ominous_bottle_amplifier` 的 0–4 级），普通掠夺者不掉。
+  `loot-oracle --entity-table minecraft:entities/pillager` 4000 例（一半队长）0 不一致；夹具没有
+  袭击管理器，`FakeLevel.getRaidAt` 返回空，`has_raid` 恒假。
+- **袭击不在范围内**：四个 `Raider` 目标占注册位但不启动，`Raid`、不祥之瓶的袭击用法、村庄英雄、
+  袭击者治疗目标都没有。写进 12.5。
+
+### 12.3 `PatrolSpawner`
+
+- 计时器 `nextTick` 开局 0：第一刻 `-= 1` 后 `+= 12000 + nextInt(1200)`，与官方一致；每刻只做
+  减法，不取随机数。
+- 取数顺序：`nextInt(1200)` 重排 → 白天判断（`isBrightOutside`）→ `nextInt(5) == 0` →
+  `nextInt(playerCount)` 选玩家 → 旁观者跳过 → 两个方向各 `(24 + nextInt(24)) * sign(nextBoolean())`
+  → `hasChunksAt(pos ± 10)` → `CAN_PILLAGER_PATROL_SPAWN` → 组大小
+  `ceil(getEffectiveDifficulty) + 1`。每名成员先取高度图 `MOTION_BLOCKING_NO_LEAVES` 的 y，
+  队长失败则 `break`（不再取平移的两个随机数），否则每名成员之后取
+  `nextInt(5) - nextInt(5)` 平移 x/z。
+- 落点判定：`NaturalSpawner.isValidEmptySpawnBlock`（用 PILLAGER 的免疫标签）+
+  `PatrollingMonster.checkPatrollingMonsterSpawnRules`（方块光 ≤ 8、脚下是有效生成方块、
+  `PathfinderMob.checkSpawnRules`），最后 `setPos` + `finalizeSpawn(PATROL)`。
+- 接入：`game/src/patrol_spawn.rs` 在随机刻之后调用（官方 `tickChunks` 末尾的
+  `tickCustomSpawners`）。`PatrolSpawner` 每岛一份，拆岛时两边各带一份计时器副本，合并时保留
+  吸收方的。
+- 位置门槛由 `Level` 的两个钩子给：`can_pillager_patrol_spawn`（主世界时钟 ≥ 120000 且群系不是
+  蘑菇岛）和 `patrol_chunks_loaded`（`hasChunksAt` 的四个角区块都已加载）。
+- **村庄检测跳过**：Bamboo 还没有村庄和 POI，`isCloseToVillage` 这一支按任务要求不判。
+- **阵营**：`spawn_monsters` 与 `spawn_patrols` 都为真才跑；任一为假时整段不取随机数、计时器不动。
+
+### 12.4 结构刷怪覆盖
+
+- 数据：`mc-bamboo-data::spawning::STRUCTURE_SPAWN_OVERRIDES`，每行是结构名、盒类型
+  （`STRUCTURE` / `PIECE`）、类别和加权表。已收：
+  - `minecraft:pillager_outpost` / `MONSTER` / `STRUCTURE` / 掠夺者 ×1；
+  - `minecraft:swamp_hut` / `MONSTER` / `PIECE` / 女巫 ×1；
+  - `minecraft:swamp_hut` / `CREATURE` / `PIECE` / 猫 ×1。
+  官方在 `Structures.bootstrap` 里还给海底神殿注册了守卫者和两个空表，那两种生物 / 类别没有
+  建模，表先不写。
+- 查询：`game/src/structure_spawn.rs` 照 `ChunkGenerator.getMobsAt`：取位置所在区块的
+  `STRUCTURE_REFERENCES`，逐个引用区块读 `STRUCTURE_STARTS`，按盒类型判定位置（`STRUCTURE`
+  用整个起点盒，含 `terrainAdaptation` 的 12 格外扩；`PIECE` 要求落在某个结构件里）；命中就返回
+  结构表，否则回退群系表。
+- 接入：`natural.rs` 的 `mobs_at` 先问 `Level::structure_spawn_override`，测试世界默认返回
+  `None`；`RegionLevel` 用本局世界生成参数按种子重算结构起点（和交付区块时是同一份纯函数），
+  不依赖区块里的 `structures` 标签。
+- 通用性：新增结构只要往数据表加一行，`natural.rs` 的取表和支撑检查都会自动走同一条链；女巫小屋
+  就是按这个机制验证的（Rust 产出、`mob-oracle --only structure_spawn`）。
+
+### 12.5 已知缺口与偏离
+
+- **前哨站的结构件还没生成**：`jigsaw` 结构件生成仍没做（见 README 的结构一节），所以正式世界里
+  还不会出现前哨站起点，前哨站覆盖表只在前哨站结构真正生成后才生效；女巫小屋的起点已经能生成。
+  覆盖机制本身用合成起点在 `mob-oracle --only structure_spawn` 和单测里验证。
+- **村庄检测**：`PatrolSpawner.isCloseToVillage(player.blockPosition(), 2)` 跳过。
+- **结构起点用种子重算而不是读区块标签**：官方 `StructureManager` 读已加载区块的起点（必要时
+  生成引用区块）。Bamboo 在自然刷怪时按 `structure_references_stage` + `structure_starts` 重算，
+  结果对同一份纯函数相同；但如果存档里带着非本进程生成的结构标签（例如换版本后的存档），
+  这里不会读它。
+- **引用顺序**：官方 `getAllStructuresAt` 是 `Long2ObjectMap` 的哈希序，Bamboo 用 `BTreeMap`；
+  两个覆盖盒重叠时返回哪一个可能不同，目前没有任何两个结构的覆盖盒会重叠。
+- **结构查询开销**：每次自然刷怪位置都会问一次引用（线程本地缓存命中后是一次 `BTreeMap` 查找）；
+  第一次问某个区块要重算 17×17 起点。缓存按 (种子, 设置) 分线程。
+- **巡逻队的玩家顺序**：`Level::for_each_player` 按玩家 ID（`BTreeMap`）遍历，官方按加入顺序的
+  `List`；`nextInt(playerCount)` 选中的人可能不同。夹具只有一名玩家，未覆盖多玩家。
+- **实体随机源**：掠夺者构造时 `LivingEntity` 用不带种子的随机源抽初始朝向，`findPatrolTarget`
+  也用它；对拍里这两项不可比（Java 夹具把朝向记 0，巡逻目标只比是否非空），位置 / 装备 /
+  状态 / 队长 / 世界随机源全部逐位一致。正式世界里 `PatrolSpawner` 生成成员时
+  `spawn::snap_to(..., 0.0, 0.0)` 把身体朝向固定成 0，官方保留构造器的随机朝向；巡逻队长的
+  `findPatrolTarget` 仍是实体随机源（和官方一样不可复现）。
+- **`CAN_PILLAGER_PATROL_SPAWN` 的时间线**：`RegionLevel` 把主世界时钟和群系合成一个布尔；
+  对拍夹具没有时间线层，只覆盖了白天 / 黑夜和游戏规则，早期世界（< 120000 刻）和蘑菇岛由单测
+  `can_patrol_spawn_at` 覆盖。
+- **自然刷怪的群系表**：`RegionLevel` 没有实现 `biome_id`（沿用默认平原），这是既有限制；
+  结构覆盖优先于群系表，所以不影响本次的覆盖功能。
+- **袭击**：`Wave` / `RaidId` / `CanJoinRaid` 只存数据；不祥旗帜只作为头盔物品，不触发袭击
+  （队长照常掉不祥之瓶，但瓶子不能用）。
+- **音效只做实现、未进对拍**：`mob-oracle` 只比 `entity_event` 和 `set_equipment` 包，音效包
+  不比；掠夺者 / 女巫的环境、受伤、死亡、弩装填与射击音效由代码路径保证，没有逐声音比对。
+
+### 12.6 与 main 合并后的现状（2026-11-22）
+
+`387abe13` 把 main（骆驼、玩家近战、豹猫和猫）合进来，冲突都在公共注册点上：
+
+- `goals.rs`：`Goal::Raider` 和 `Goal::Cat` 两个新变体、各自的 `flags` / `name` / `every_tick` /
+  `can_use` / `can_continue` / `start` / `stop` / `tick` 分支两边都保留；`OcelotAttack` 的
+  `Move + Look` 标志和掠夺者的分支并列。
+- `mod.rs`：`MobType::ALL` 变成 41 项（原 38 项加豹猫、猫）；`uses_block_step_sound` 同时含
+  `Pillager`、`Ocelot`、`Cat`；骆驼的空 `registerGoals` 和掠夺者的目标并存。
+- `living.rs` / `mod.rs` 的消失判定：main 的 `removes_when_far_away(tickCount)`（豹猫、猫按
+  tick 数）和本分支的 `removes_when_far_away_at(distSqr)`（`PatrollingMonster` 按 128 格）
+  合成一个 `removes_when_far_away_at(distance_sqr, tick_count)`，`removes_when_far_away(tick)`
+  传 `f64::INFINITY`；自然生成的位置判定（`natural.rs` 的 `is_valid_position_for_mob`）现在直接
+  把最近玩家距离传给 `removes_when_far_away_at`。两者判定顺序不变（先袭击者、再鱼、再豹猫 / 猫、
+  最后按类别）。
+- 豹猫的自然生成（`natural.rs` 的 `is_valid_position_for_mob` 新增 `sea_level` 参数和豹猫遮挡
+  判定）和合并后的 `mobs_at` 结构覆盖共存，掠夺者不参与群系自然刷怪，互不影响。
+
+第二次合并（`eaf77080`，main 的海豚 / 美西螈 / Brain / 桶装鱼）冲突同样是「两边往同一处加东西」：
+
+- `goals.rs`：`Goal::Raider` 和 `Goal::Dolphin` 两个变体及它们的 `flags` / `name` / `can_use` /
+  `can_continue` / `start` / `stop` / `tick` 分支都保留。
+- `mod.rs`：`MobType::ALL` 变成 43 项（41 项加海豚、美西螈）；`removes_when_far_away_at` 里
+  袭击者的 128 格分支、鱼的桶标记、美西螈的桶 / 名字判定、豹猫 / 猫的 tick 判定按各自顺序并存。
+- `mob_oracle.rs`：`structure_spawn` 和 `water_mob` 两个场景模块都注册。
+- 文档：本节的 12 章和 op-water 的历史章都保留。
+
+两次合并后在 HEAD 上重跑：全量 `mob-oracle` 1900 例 / 193397 刻 0 不一致；
+`--only natural_spawn` 734 例 / 2936 刻 0 不一致；`--only gen_spawn` 7000 例 0 不一致；
+`--only pillager` 8 例 1653 刻、`--only patrol` 5 例、`--only structure_spawn` 1 例均 0 不一致；
+`loot-oracle --entity-table minecraft:entities/pillager` 本轮抽了 400 例（一半队长）0 不一致，
+合并前的 4000 例 0 不一致；`chunk-content` 523 项也是合并前的结果（本轮未重跑）。
+
+第三次复核在 `31fb619b` 上补跑官方联机探针（`JAVA` 为 JDK 26，经 `heavy.js` 共享锁）：
+`PROBE RESULT 769/769 checks passed`，正常关服，`level.dat` / 玩家数据 6 个 / 区域文件 4 个都在，
+`WORLD-DIR` 全过。为确认新增的每刻巡逻队刷怪器没有拖慢世界线程，同一份命令在 main
+（`eaf77080`）上带 `BAMBOO_PROFILE=10` 做了一次对照：2 名玩家在线时 `tick_total` 平均
+20.7–23.8 ms（86–96 只实体，`entities` 阶段 13.3–17.7 ms），本分支 21.3–24.2 ms
+（86 只实体，`entities` 阶段 14.4 ms），两者同一水平；探针世界时钟没到 120000 刻，
+`PatrolSpawner` 每刻只做计时递减和两次布尔闸门，整个自定义刷怪器在 `random_ticks` 阶段内。
+main 那次报 `769/770`，多出来的一项 `play: M2 sends handleDamageEvent` 失败：同一份
+`Probe.java` 下本分支没收到该包，是探针在 M2 旁观者身上观测到伤害事件的时序抖动，与本次改动无关。
 
 ## 蝙蝠的实施现状（cl-ambient，2026-11-22）
 

@@ -263,7 +263,7 @@ impl Entity {
 /// [`Entity::arrow_from_shot`] 的输入。
 ///
 /// The inputs to [`Entity::arrow_from_shot`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArrowShot {
     pub position: Vec3,
     /// 射手视线方向，`shootFromRotation` 的 `(x, y, z)`；发射器传朝向的步长。

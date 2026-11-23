@@ -85,6 +85,28 @@ impl StartPieces {
         }
     }
 
+    /// `StructureManager.structureHasPieceAt`：这个位置是否落在某个结构件里。
+    ///
+    /// `StructureManager.structureHasPieceAt`: whether a piece box contains the position.
+    pub fn has_piece_at(&self, x: i32, y: i32, z: i32) -> bool {
+        match self {
+            Self::Layout(pieces) => pieces.iter().any(|piece| {
+                piece.bb[0] <= x
+                    && x <= piece.bb[3]
+                    && piece.bb[1] <= y
+                    && y <= piece.bb[4]
+                    && piece.bb[2] <= z
+                    && z <= piece.bb[5]
+            }),
+            Self::Jigsaw(pieces) => pieces
+                .iter()
+                .any(|piece| piece.bounding_box.contains(x, y, z)),
+            Self::Sparse(pieces) => pieces
+                .iter()
+                .any(|piece| piece.bounding_box.contains(x, y, z)),
+        }
+    }
+
     /// `StructurePiece` 的基类四字段列表。jigsaw 件的 `O` 恒 -1、`GD` 恒 0
     /// （构造器不调 `setOrientation`），`id` 恒 `minecraft:jigsaw`。
     ///
@@ -153,6 +175,20 @@ impl WorldStructureStart {
             references: self.references,
             pieces: self.pieces.base_pieces(),
             terrain_adaptation: self.terrain_adaptation,
+        }
+    }
+
+    /// `StructureStart.getBoundingBox()`：结构件并集，`terrainAdaptation != NONE`
+    /// 时外扩 12（`Structure.adjustBoundingBox`）。
+    ///
+    /// `StructureStart.getBoundingBox()`: the piece union, inflated by 12 when
+    /// `terrainAdaptation != NONE` (`Structure.adjustBoundingBox`).
+    pub fn bounding_box(&self) -> BoundingBox {
+        let union = self.pieces.union();
+        if self.terrain_adaptation {
+            union.inflated_by(12)
+        } else {
+            union
         }
     }
 }

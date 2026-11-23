@@ -341,11 +341,15 @@ public final class LootOracle {
             boolean baby = random.nextBoolean();
             boolean sheared = random.nextBoolean();
             int tick = random.nextInt(40);
+            // 一半的实体给上队长身份，让袭击者的 `is_captain` 两个分支都跑到。
+            // Half the entities become captains so both branches of a raider's
+            // `is_captain` run.
+            boolean captain = (i & 1) == 0;
             boolean withAttacker = random.nextBoolean();
             int harm = random.nextInt(8);
             try {
                 CaseResult result = world.entityDrops(
-                        key, worldSeed, lootSeed, x, y, z, onGround, onFire, baby, sheared, tick, withAttacker, harm);
+                        key, worldSeed, lootSeed, x, y, z, onGround, onFire, baby, sheared, tick, captain, withAttacker, harm);
                 JsonObject line = new JsonObject();
                 line.addProperty("kind", "entity");
                 line.addProperty("table", key.identifier().toString());
@@ -664,6 +668,7 @@ public final class LootOracle {
                 boolean baby,
                 boolean sheared,
                 int tick,
+                boolean captain,
                 boolean withAttacker,
                 int harm
         ) throws Exception {
@@ -696,6 +701,16 @@ public final class LootOracle {
                 }
                 if (sheared && victim instanceof Sheep sheep) {
                     sheep.setSheared(true);
+                }
+                if (captain && victim instanceof net.minecraft.world.entity.raid.Raider raider) {
+                    // 队长判定是「巡逻队长 + 头上戴着灾厄旗帜」，构造器不会自己给。
+                    // Captaincy needs the patrol-leader flag plus the ominous banner,
+                    // which the constructor does not set.
+                    raider.setPatrolLeader(true);
+                    raider.setItemSlot(
+                            EquipmentSlot.HEAD,
+                            net.minecraft.world.entity.raid.Raid.getOminousBannerInstance(
+                                    level.registryAccess().lookupOrThrow(Registries.BANNER_PATTERN)));
                 }
             } catch (Throwable error) {
                 throw new IllegalStateException("entity setup: " + error, error);
@@ -1174,6 +1189,14 @@ public final class LootOracle {
         @Override
         public Difficulty getDifficulty() {
             return Difficulty.NORMAL;
+        }
+
+        @Override
+        public net.minecraft.world.entity.raid.Raid getRaidAt(BlockPos pos) {
+            // 夹具没有袭击管理器；`Raider.hasRaid()` 调用它，返回空表示不在袭击里。
+            // The fixture has no raid manager; `Raider.hasRaid()` calls this, and null
+            // means "not in a raid".
+            return null;
         }
 
         @Override

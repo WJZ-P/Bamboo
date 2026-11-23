@@ -895,6 +895,42 @@ pub trait Level: LevelSideState + LevelEntities {
         mc_bamboo_data::spawning::for_biome_id(self.biome_id(pos)).mobs_to_spawn(category)
     }
 
+    /// `ChunkGenerator.getMobsAt` 的结构刷怪覆盖：位置落在某结构的覆盖盒里时，用
+    /// 该结构的怪物表替换群系表（掠夺者前哨站、女巫小屋等）。没有运行时结构数据的
+    /// 实现（测试用的假世界、无结构维度）默认返回 `None`，走群系表。
+    ///
+    /// The structure spawn override of `ChunkGenerator.getMobsAt`: when a position
+    /// lies in a structure's override box, replace the biome table with the
+    /// structure's monster list (pillager outposts, swamp huts, ...). Levels with
+    /// no runtime structure data default to `None` and fall back to the biome table.
+    fn structure_spawn_override(
+        &self,
+        _pos: BlockPos,
+        _category: mc_bamboo_data::spawning::MobCategory,
+    ) -> Option<&'static [mc_bamboo_data::spawning::MobSpawnerDef]> {
+        None
+    }
+
+    /// `EnvironmentAttributes.CAN_PILLAGER_PATROL_SPAWN`：群系属性（只有蘑菇岛关掉）
+    /// 叠加「早期世界」时间线（主世界时钟 120000 刻之前不刷巡逻队）的结果。
+    /// 默认真，供没有时间线的测试世界使用。
+    ///
+    /// `EnvironmentAttributes.CAN_PILLAGER_PATROL_SPAWN`: the biome attribute (only
+    /// mushroom fields disables it) combined with the early-game timeline (no patrols
+    /// before overworld-clock tick 120000). Defaults to true for timeless test levels.
+    fn can_pillager_patrol_spawn(&self, _pos: BlockPos) -> bool {
+        true
+    }
+
+    /// `ServerLevel.hasChunksAt(...)`：巡逻队落点周围 10 格的方块是否都已加载。
+    /// 默认真，供整块都在的测试世界使用。
+    ///
+    /// `ServerLevel.hasChunksAt(...)`: whether the 10-block margin around a patrol
+    /// landing spot is loaded. Defaults to true for fully-present test levels.
+    fn patrol_chunks_loaded(&self, _center: BlockPos, _margin: i32) -> bool {
+        true
+    }
+
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///
     /// 双箱已经按官方 `CompoundContainer` 的顺序合并成一张表。这一格不是容器方块时

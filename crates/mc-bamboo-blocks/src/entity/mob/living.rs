@@ -94,6 +94,13 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
+    // `LivingEntity.tick`：`updatingUsingItem()` 紧跟 `super.tick()`，在装备比较和
+    // `aiStep` 之前。生物里只有弩走这条路。
+    // `LivingEntity.tick`: `updatingUsingItem()` right after `super.tick()`, ahead of the
+    // equipment diff and `aiStep`. Among mobs only the crossbow uses it.
+    if mob.mob_type == super::MobType::Pillager && !me.removed {
+        super::crossbow::use_tick(me, mob, ctx);
+    }
     detect_equipment_updates(mob);
     // `Drowned.updateSwimming()` 在 `Entity.baseTick` 里，紧跟流体跟踪之后。
     // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
@@ -287,7 +294,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let near_sqr = 32.0 * 32.0;
     // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
     // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
-    if !persistent && distance > far_sqr && mob.removes_when_far_away(me.tick_count) {
+    if !persistent && distance > far_sqr && mob.removes_when_far_away_at(distance, me.tick_count) {
         me.discard();
         return;
     }
@@ -297,7 +304,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         && distance > near_sqr
     {
         // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
-        if mob.removes_when_far_away(me.tick_count) {
+        if mob.removes_when_far_away_at(distance, me.tick_count) {
             me.discard();
         }
     } else if distance < near_sqr {
@@ -1072,7 +1079,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let eye = BlockPos::containing(Vec3::new(me.position.x, eye_y(me, mob), me.position.z));
         let raw = view.max_local_raw_brightness(eye, view.sky_darken()) as f32 / 15.0;
         let magic = raw / (4.0 - 3.0 * raw);
-        if magic > 0.5 {
+        // `Raider.updateNoActionTime` 覆写成无条件加 2，不看亮度。
+        // `Raider.updateNoActionTime` overrides it to an unconditional +2.
+        if magic > 0.5 || mob.mob_type.is_raider() {
             mob.no_action_time += 2;
         }
     }
