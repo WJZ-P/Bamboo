@@ -79,16 +79,75 @@
   `ok` / `trailing:<光标>` / `error`；反馈键按 26.3 `AdvancementCommands$Action` 拼出来的
   24 个键选。`--break-self-test` 同时改坏一个选择器和一条命令。
 
-## 已接上的触发器
+## 58 种触发器的接入表
 
-`tick`、`location`、`inventory_changed`、`recipe_unlocked`、`recipe_crafted`、
-`placed_block`、`item_used_on_block`、`consume_item`、`slept_in_bed`、
-`enter_block`、`filled_bucket`、`effects_changed`、`player_killed_entity`、
-`entity_killed_player`、`player_hurt_entity`、`entity_hurt_player`。
+「已接」= 有事件入口且会判定；「待接」= Bamboo 已有对应系统、这一期暂没挂事件入口；
+「不做」= Bamboo 没有对应系统（下界 / 末地 / 村庄 / 钓鱼 / 袭击等），只解析不触发。
+所有 58 种的判据 JSON 都能解析；条件字段没建模时一律判为不匹配，不白送判据。
 
-条件判定复用 `mc-bamboo-loot` 的物品 / 实体 / 位置谓词和 `mc-bamboo-protocol`
-的方块谓词；本层只做「条件字段能不能被现有谓词完整表达」的检查，不能表达的
-一律不触发，避免把没建模的判据白送给玩家。
+| 触发器 | 状态 | 入口 / 缺失 |
+| --- | --- | --- |
+| `tick` | 已接 | `advancements::tick`，26.3 每刻 |
+| `location` | 已接 | `advancements::tick`，每 20 刻 |
+| `inventory_changed` | 已接 | `inventory::give_or_drop` 等物品栏变化 |
+| `recipe_unlocked` | 已接 | 配方解锁入口（框架已挂） |
+| `recipe_crafted` | 已接 | 合成结果入口（框架已挂） |
+| `placed_block` | 已接 | `interaction::on_use_item_on` 放置成功 |
+| `item_used_on_block` | 已接 | `interaction::on_use_item_on` |
+| `any_block_use` | 已接 | `interaction::on_use_item_on` |
+| `default_block_use` | 待接 | `interaction::on_use_item_on` 里有 `useWithoutItem`，尚未区分 default |
+| `consume_item` | 已接 | `player_consume::complete` |
+| `slept_in_bed` | 已接 | `sleep::on_sleep_in_bed` |
+| `effects_changed` | 已接 | `player_effects::give` |
+| `player_hurt_entity` | 已接 | `player_attack::on_attack` |
+| `player_killed_entity` | 已接 | `player_attack::on_attack`（击杀分支） |
+| `player_interacted_with_entity` | 已接 | `player_attack::on_attack` / `interaction::on_interact_entity` |
+| `started_riding` | 已接 | `riding::mount` |
+| `shot_crossbow` | 已接 | `player_weapon::shoot_crossbow` |
+| `using_item` | 已接 | `player_weapon::spawn_arrow` |
+| `enchanted_item` | 待接 | `command::enchant` 有附魔成功入口，尚未挂事件 |
+| `tame_animal` | 待接 | `mc-bamboo-blocks::entity::mob::tame::tame` 有，尚未挂事件 |
+| `bred_animals` | 待接 | `mc-bamboo-blocks::entity::mob::living::apply_breed` 有，尚未挂事件 |
+| `entity_killed_player` | 待接 | `player_death::die_in` 有，借用被拆成 `HurtParts`，尚未挂事件 |
+| `entity_hurt_player` | 待接 | `player_hurt::hurt_player_in` 有，同上 |
+| `used_totem` | 待接 | 不死图腾判定尚未建模 |
+| `killed_by_arrow` | 待接 | 箭命中实体在 `mc-bamboo-blocks::entity::arrow` 里，尚未回传玩家 |
+| `item_durability_changed` | 待接 | `mc-bamboo-blocks::durability` 有，尚未挂事件 |
+| `fall_from_height` | 待接 | `player_hurt::hurt_player_in` 有摔落伤害，尚未分类 |
+| `thrown_item_picked_up_by_player` | 待接 | `interaction` 的掉落物拾取有，尚未挂事件 |
+| `summoned_entity` | 待接 | `command::summon` / 刷怪蛋有，尚未挂事件 |
+| `target_hit` | 待接 | 标靶方块尚未建模 |
+| `enter_block` | 待接 | `player_environment::tick_environment` 有卡墙判定，尚未挂事件 |
+| `filled_bucket` | 待接 | `inventory` 的桶交换有，尚未挂事件 |
+| `crafter_recipe_crafted` | 待接 | `mc-bamboo-blocks::crafter` 有，尚未挂事件 |
+| `impossible` | 不做 | 官方定义里没用到；永不触发 |
+| `brewed_potion` | 不做 | 酿造台出药水的玩家归因没做 |
+| `construct_beacon` | 不做 | 信标层级变化没做 |
+| `used_ender_eye` | 不做 | 末影之眼 / 要塞没做 |
+| `cured_zombie_villager` | 不做 | 村民没做 |
+| `villager_trade` | 不做 | 村民交易没做 |
+| `hero_of_the_village` | 不做 | 袭击没做 |
+| `voluntary_exile` | 不做 | 袭击没做 |
+| `levitation` | 不做 | 潜影贝 / 漂浮效果时长没做 |
+| `changed_dimension` | 不做 | 下界 / 末地维度没做 |
+| `nether_travel` | 不做 | 下界传送门没做 |
+| `fishing_rod_hooked` | 不做 | 钓鱼没做 |
+| `channeled_lightning` | 不做 | 引雷 / 闪电实体没做 |
+| `spear_mobs` | 不做 | 长矛没做 |
+| `slide_down_block` | 不做 | 蜂蜜块滑落没做 |
+| `bee_nest_destroyed` | 不做 | 蜂箱破坏的蜜蜂释放没做 |
+| `player_generates_container_loot` | 不做 | 容器第一次开箱的玩家归因没做 |
+| `thrown_item_picked_up_by_entity` | 不做 | 生物捡物品没做 |
+| `player_sheared_equipment` | 不做 | 狼铠 / 剪装备没做 |
+| `lightning_strike` | 不做 | 闪电实体没做 |
+| `ride_entity_in_lava` | 不做 | 岩浆里骑乘没做 |
+| `kill_mob_near_sculk_catalyst` | 不做 | 幽匿催发体没做 |
+| `allay_drop_item_on_block` | 不做 | 悦灵没做 |
+| `avoid_vibration` | 不做 | 幽匿感测体没做 |
+| `fall_after_explosion` | 不做 | 爆炸后摔落归因没做 |
+
+「待接」的 20 种里，绝大部分事件已经在 `Region::pending_triggers` 的框架覆盖范围内
+（`record` + `drain`），补的是一个调用点，不需要另起事件系统。
 
 ## 已知差异
 

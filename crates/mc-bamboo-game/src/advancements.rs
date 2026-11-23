@@ -442,6 +442,8 @@ pub(crate) fn tick(region: &mut Region) {
             crate::advancement_rewards::grant(region, id, index);
         }
         crate::advancement_triggers::trigger_tick(region, id);
+        // 方块侧 / 实体侧这一刻攒下的事件，统一在玩家 tick 末尾 dispatch。
+        crate::advancement_triggers::drain(region);
         if every_20 {
             crate::advancement_triggers::trigger_location(region, id);
         }

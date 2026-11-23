@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::{inbound::PlayerId, region::Region};
 
-/// 已经接上游戏事件来源的触发器。其它类型只解析、不触发，见文档。
+/// 已经接上游戏事件来源的触发器（22 种）。其余 36 种见 `docs/advancements.md` 的表。
 pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:tick",
     "minecraft:location",
@@ -30,7 +30,48 @@ pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:entity_killed_player",
     "minecraft:player_hurt_entity",
     "minecraft:entity_hurt_player",
+    "minecraft:enchanted_item",
+    "minecraft:tame_animal",
+    "minecraft:bred_animals",
+    "minecraft:used_totem",
+    "minecraft:shot_crossbow",
+    "minecraft:killed_by_arrow",
+    "minecraft:item_durability_changed",
+    "minecraft:using_item",
+    "minecraft:player_interacted_with_entity",
+    "minecraft:started_riding",
+    "minecraft:any_block_use",
+    "minecraft:default_block_use",
+    "minecraft:fall_from_height",
+    "minecraft:thrown_item_picked_up_by_player",
+    "minecraft:summoned_entity",
+    "minecraft:target_hit",
 ];
+
+/// 借用被拆开的地方（实体 tick、`HurtParts`）只压一条事件，玩家 tick 末尾统一 dispatch。
+#[derive(Debug, Clone)]
+pub struct PendingEvent {
+    pub player: PlayerId,
+    pub trigger: &'static str,
+    pub payload: Value,
+}
+
+/// 记录一条事件；不立即判定，避免和 `Region` 的可变借用冲突。
+pub(crate) fn record(region: &mut Region, player: PlayerId, trigger: &'static str, payload: Value) {
+    region.pending_triggers.push(PendingEvent {
+        player,
+        trigger,
+        payload,
+    });
+}
+
+/// 玩家 tick 里统一 dispatch 这一刻攒下的事件。
+pub(crate) fn drain(region: &mut Region) {
+    let events = std::mem::take(&mut region.pending_triggers);
+    for event in events {
+        fire(region, event.player, event.trigger, &event.payload);
+    }
+}
 
 /// 官方 `InventoryChangedTrigger`：条件里的 `items` 是一组物品谓词，玩家物品栏里
 /// 每堆都要能匹配其中一条。Bamboo 的物品堆没有战利品上下文，组件匹配按注册表 ID。
@@ -97,17 +138,35 @@ pub(crate) fn fire(region: &mut Region, id: PlayerId, trigger: &str, payload: &V
             .find(|(name, _)| *name == criterion)
             .map(|(_, value)| &value.conditions);
         let matched = conditions.is_some_and(|conditions| match trigger {
+            // 无条件的简单触发器：官方 `SimpleCriterionTrigger` 的判据没有条件字段。
             "minecraft:tick"
-            | "minecraft:slept_in_bed"
             | "minecraft:enter_block"
+            | "minecraft:used_totem"
+            | "minecraft:shot_crossbow"
+            | "minecraft:started_riding"
+            | "minecraft:any_block_use"
+            | "minecraft:default_block_use"
+            | "minecraft:killed_by_arrow"
+            | "minecraft:fall_from_height"
+            | "minecraft:target_hit"
+            | "minecraft:summoned_entity"
+            | "minecraft:thrown_item_picked_up_by_player"
+            | "minecraft:player_interacted_with_entity"
+            | "minecraft:bred_animals"
+            | "minecraft:tame_animal" => conditions.as_object().is_some_and(|map| map.is_empty()),
+            // 带 id / 位置 / 实体字段的触发器：只认本层能完整表达的字段。
+            "minecraft:slept_in_bed"
             | "minecraft:filled_bucket"
             | "minecraft:effects_changed"
-            | "minecraft:recipe_crafted" => true,
-            "minecraft:inventory_changed" => item_predicates_match(conditions, &[]),
-            "minecraft:recipe_unlocked"
+            | "minecraft:recipe_crafted"
+            | "minecraft:using_item"
+            | "minecraft:enchanted_item"
+            | "minecraft:item_durability_changed"
+            | "minecraft:recipe_unlocked"
             | "minecraft:placed_block"
             | "minecraft:item_used_on_block"
             | "minecraft:consume_item" => matches_id(conditions, payload),
+            "minecraft:inventory_changed" => item_predicates_match(conditions, &[]),
             "minecraft:location" => location_matches(conditions, payload),
             "minecraft:player_killed_entity"
             | "minecraft:entity_killed_player"

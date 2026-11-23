@@ -226,6 +226,9 @@ pub(crate) struct Region {
     /// [`Region::insert_player`].
     pub(crate) player_grid: PlayerGrid,
     pub(crate) links: Links,
+    /// 这一刻里方块侧 / 实体侧记下的进度触发事件，在玩家 tick 末尾统一 dispatch。
+    /// 借用被拆开的地方（比如 `HurtParts`）只往这里压事件，不另起一套事件系统。
+    pub(crate) pending_triggers: Vec<crate::advancement_triggers::PendingEvent>,
     pub(crate) chunks: ChunkStore,
     /// 每个已交付区块的等级档位和由此算出的 tick 集合。只从 Director 的消息更新。
     pub(crate) tick_levels: TickLevels,
@@ -445,6 +448,7 @@ impl Region {
             players: BTreeMap::new(),
             player_grid: PlayerGrid::default(),
             links: Links::default(),
+            pending_triggers: Vec::new(),
             tick_levels: TickLevels::new(chunks.is_loaded_mode()),
             chunks,
             template_body,
