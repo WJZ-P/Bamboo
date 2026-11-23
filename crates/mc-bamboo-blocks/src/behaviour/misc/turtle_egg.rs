@@ -218,7 +218,7 @@ mod tests {
                 sound,
                 pitch,
                 ..
-            } if i32::from(sound) == i32::from(mc_bamboo_data::sounds::sound_event(
+            } if sound == i32::from(mc_bamboo_data::sounds::sound_event(
                 "minecraft:entity.turtle.egg_break"
             )) && (0.9..1.1).contains(&pitch)
         )));
@@ -239,7 +239,7 @@ mod tests {
         assert!(level.get(EGG_POS).is_air());
         assert!(effects.iter().any(|effect| matches!(
             *effect,
-            crate::Effect::Sound { sound, .. } if i32::from(sound) == i32::from(
+            crate::Effect::Sound { sound, .. } if sound == i32::from(
                 mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.egg_break")
             )
         )));

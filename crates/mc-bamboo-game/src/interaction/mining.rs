@@ -1123,7 +1123,7 @@ mod tests {
         let remaining = egg.with(mc_bamboo_blocks::state::EGGS, 3);
         assert_eq!(block_at(&mut server, GROUND), Some(remaining.0));
         let frames = watcher.take_frames();
-        assert!(frames_with_id(&frames, clientbound::SOUND).len() >= 1);
+        assert!(!frames_with_id(&frames, clientbound::SOUND).is_empty());
         assert!(
             frames_with_id(&frames, clientbound::LEVEL_EVENT)
                 .iter()

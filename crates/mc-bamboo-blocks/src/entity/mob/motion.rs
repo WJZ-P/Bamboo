@@ -1302,8 +1302,8 @@ mod tests {
             },
             &mut me,
         );
-        drop(ctx);
-        drop(world);
+        // `ctx` 借着 `world`，两者都在这一段结束时离开作用域。
+        // `ctx` borrows `world`; both leave scope at the end of this block.
         assert_eq!(level.get(EGG_POS).get(EGGS), 1);
     }
 }
