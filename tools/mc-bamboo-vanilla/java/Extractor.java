@@ -1189,6 +1189,8 @@ public final class Extractor {
         out.addProperty("skeletonHorseBabyWidth", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.SkeletonHorse.class, "BABY_DIMENSIONS", null)).width());
         out.addProperty("skeletonHorseBabyHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.SkeletonHorse.class, "BABY_DIMENSIONS", null)).height());
         out.addProperty("skeletonHorseBabyEyeHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.SkeletonHorse.class, "BABY_DIMENSIONS", null)).eyeHeight());
+        out.addProperty("skeletonHorseEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON_HORSE.getDimensions().eyeHeight());
+        out.addProperty("zombieHorseEyeHeight", net.minecraft.world.entity.EntityTypes.ZOMBIE_HORSE.getDimensions().eyeHeight());
         out.addProperty("zombieHorseBabyWidth", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.ZombieHorse.class, "BABY_DIMENSIONS", null)).width());
         out.addProperty("zombieHorseBabyHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.ZombieHorse.class, "BABY_DIMENSIONS", null)).height());
         out.addProperty("zombieHorseBabyEyeHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.ZombieHorse.class, "BABY_DIMENSIONS", null)).eyeHeight());

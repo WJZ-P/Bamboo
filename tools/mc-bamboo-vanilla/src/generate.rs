@@ -3561,12 +3561,14 @@ fn entity_types_file(data: &VersionData) -> String {
             "SKELETON_HORSE_BABY_EYE_HEIGHT",
             facts.skeleton_horse_baby_eye_height,
         ),
+        ("SKELETON_HORSE_EYE_HEIGHT", facts.skeleton_horse_eye_height),
         ("ZOMBIE_HORSE_BABY_WIDTH", facts.zombie_horse_baby_width),
         ("ZOMBIE_HORSE_BABY_HEIGHT", facts.zombie_horse_baby_height),
         (
             "ZOMBIE_HORSE_BABY_EYE_HEIGHT",
             facts.zombie_horse_baby_eye_height,
         ),
+        ("ZOMBIE_HORSE_EYE_HEIGHT", facts.zombie_horse_eye_height),
     ] {
         let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
     }

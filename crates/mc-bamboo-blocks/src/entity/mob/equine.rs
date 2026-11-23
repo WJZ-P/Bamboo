@@ -149,8 +149,8 @@ pub(super) fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
         MobType::Donkey => entity_types::DONKEY_EYE_HEIGHT,
         MobType::Mule => entity_types::MULE_EYE_HEIGHT,
         MobType::Llama => entity_types::LLAMA_EYE_HEIGHT,
-        // `EntityTypes` 没给这两种另设眼高，用缺省的 `height * 0.85`。
-        MobType::SkeletonHorse | MobType::ZombieHorse => facts.height * 0.85,
+        MobType::SkeletonHorse => entity_types::SKELETON_HORSE_EYE_HEIGHT,
+        MobType::ZombieHorse => entity_types::ZOMBIE_HORSE_EYE_HEIGHT,
         _ => unreachable!(),
     };
     let scale = if !baby {
