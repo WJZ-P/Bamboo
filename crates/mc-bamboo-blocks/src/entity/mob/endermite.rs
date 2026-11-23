@@ -140,4 +140,3 @@ impl Mob {
 ///
 /// The `PORTAL` particle type id; no packet is sent server-side.
 pub const PORTAL_PARTICLE: i32 = mc_bamboo_data::registries::particle_type::PORTAL;
-

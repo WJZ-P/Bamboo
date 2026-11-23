@@ -660,7 +660,6 @@ impl Goal {
                 | Self::CubeFloat
                 | Self::CubeAttack { .. }
                 | Self::WitchRangedAttack { .. }
-                | Self::SilverfishWakeFriends { .. }
                 | Self::DrownedGoToBeach { .. }
                 | Self::Swell { .. }
                 | Self::SquidFlee { .. }
@@ -2140,10 +2139,10 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
 
 fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
-        Goal::SilverfishWakeFriends { .. } => true,
-        Goal::SilverfishMergeWithStone { do_merge, .. } => {
-            !*do_merge && !mob.navigation.is_done()
-        }
+        // `Goal.canContinueToUse` 缺省是 `canUse()`：倒数到 0 就停。
+        // `Goal.canContinueToUse` defaults to `canUse()`: stop at zero.
+        Goal::SilverfishWakeFriends { look_for_friends } => *look_for_friends > 0,
+        Goal::SilverfishMergeWithStone { do_merge, .. } => !*do_merge && !mob.navigation.is_done(),
         Goal::EndermanGaze(goal) => goal.can_continue(me, mob, ctx),
         Goal::EndermanFreeze => super::enderman::freeze_target(me, mob, ctx).is_some(),
         Goal::EndermanBlock { .. } => can_use(goal, me, mob, ctx),
@@ -2468,16 +2467,12 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         } => {
             if !*do_merge {
                 let nav = living::nav_mob(me, mob, ctx.blocks());
-                mob.navigation
-                    .move_to(ctx.blocks(), &nav, *wanted, *speed);
+                mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
                 return;
             }
-            let base = BlockPos::containing(Vec3::new(
-                me.position.x,
-                me.position.y + 0.5,
-                me.position.z,
-            ))
-            .relative(*direction);
+            let base =
+                BlockPos::containing(Vec3::new(me.position.x, me.position.y + 0.5, me.position.z))
+                    .relative(*direction);
             let state = ctx.blocks().block_state(base);
             if super::infested::is_compatible_host_block(state) {
                 ctx.emit(Command::SilverfishMerge { pos: base }, me);

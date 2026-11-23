@@ -166,12 +166,13 @@ pub(crate) fn wake_tick(me: &mut Entity, _mob: &mut Mob, ctx: &mut dyn EntityCtx
 /// The vanilla scan order: 0, 1, -1, 2, -2, ... up to ±limit.
 fn axis(limit: i32) -> impl Iterator<Item = i32> {
     let bound = limit.unsigned_abs();
-    (0..=bound).flat_map(|magnitude| {
-        if magnitude == 0 {
-            [Some(0), None]
-        } else {
-            [Some(magnitude as i32), Some(-(magnitude as i32))]
-        }
-    }).flatten()
+    (0..=bound)
+        .flat_map(|magnitude| {
+            if magnitude == 0 {
+                [Some(0), None]
+            } else {
+                [Some(magnitude as i32), Some(-(magnitude as i32))]
+            }
+        })
+        .flatten()
 }
-

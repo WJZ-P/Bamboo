@@ -1249,7 +1249,8 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 let _ = world.set_block_and_update(pos, infested);
                 // `PathfinderMob.spawnAnim` 发实体事件 20，然后 `discard()`。
                 if let Some(mob) = me.kind.mob_mut() {
-                    mob.events.push(super::mob::MobEvent::EntityEvent { event: 20 });
+                    mob.events
+                        .push(super::mob::MobEvent::EntityEvent { event: 20 });
                 }
                 me.discard();
             }

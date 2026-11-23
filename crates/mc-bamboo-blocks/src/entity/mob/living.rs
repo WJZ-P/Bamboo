@@ -64,7 +64,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     timing::span!(Other);
     // `Silverfish.tick` / `Endermite.tick` 在 `super.tick()` 之前把身体朝向设成头朝向。
     // `Silverfish.tick` / `Endermite.tick` set the body rotation before `super.tick()`.
-    if matches!(mob.mob_type, super::MobType::Silverfish | super::MobType::Endermite) {
+    if matches!(
+        mob.mob_type,
+        super::MobType::Silverfish | super::MobType::Endermite
+    ) {
         mob.y_body_rot = me.y_rot;
     }
     check_despawn(me, mob, ctx);

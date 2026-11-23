@@ -32,8 +32,8 @@ pub mod dolphin;
 pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
-pub mod endermite;
 pub(crate) mod enderman;
+pub mod endermite;
 pub mod equine;
 pub mod equipment;
 pub mod fish;
@@ -65,13 +65,13 @@ pub mod polar_bear;
 pub mod rabbit;
 pub mod raider;
 pub mod sheep;
+pub mod silverfish;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod slime;
 pub mod smooth_swim;
 pub mod spawn;
 pub mod spider;
-pub mod silverfish;
 pub mod squid;
 pub mod stray;
 pub mod tadpole;
@@ -540,7 +540,11 @@ impl MobType {
     pub const fn full_target_rules(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman | Self::Pillager
+            Self::Creeper
+                | Self::Spider
+                | Self::CaveSpider
+                | Self::Enderman
+                | Self::Pillager
                 | Self::Endermite
         ) || self.is_skeleton()
     }
@@ -715,8 +719,7 @@ impl MobType {
     /// `Entity.getMovementEmission().emitsSounds()`: squid override it to `EVENTS` and
     /// move silently.
     pub const fn emits_movement_sounds(self) -> bool {
-        !squid::is_squid(self)
-            && !matches!(self, Self::Bat | Self::Silverfish | Self::Endermite)
+        !squid::is_squid(self) && !matches!(self, Self::Bat | Self::Silverfish | Self::Endermite)
     }
 
     /// `LivingEntity.isPushable()`：蝙蝠覆写成假，不推别人也不被推。

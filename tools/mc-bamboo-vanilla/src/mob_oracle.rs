@@ -51,6 +51,7 @@ mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
+mod small_mob;
 mod squid;
 mod structure_spawn;
 mod water_mob;
@@ -115,6 +116,7 @@ enum Line {
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
+    SmallMob(Box<small_mob::SmallMobCase>),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -1318,6 +1320,7 @@ impl Report {
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
+                Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),

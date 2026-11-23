@@ -2885,11 +2885,7 @@ impl<'a> World<'a> {
             }
             // `Block.dropResources` 的 `spawnAfterBreak`：工具是空手（这条路径没有
             // 玩家），所以精准采集不会挡住虫蚀方块刷蠹虫。
-            self.spawn_after_break(
-                state,
-                pos,
-                &mc_bamboo_protocol::item::ItemStack::empty(),
-            );
+            self.spawn_after_break(state, pos, &mc_bamboo_protocol::item::ItemStack::empty());
         }
         let fluid = self.fluid_state(pos);
         self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit)

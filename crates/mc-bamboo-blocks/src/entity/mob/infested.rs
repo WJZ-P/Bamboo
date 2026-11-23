@@ -9,8 +9,7 @@
 
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{
-    BlockAncestor, FieldValue, blocks, damage_type_id, entity_types, registries::entity_type,
-    tags,
+    BlockAncestor, FieldValue, blocks, damage_type_id, entity_types, registries::entity_type, tags,
 };
 use mc_bamboo_protocol::{components::ComponentValue, item::ItemStack};
 
@@ -69,7 +68,11 @@ pub fn is_infested(state: BlockState) -> bool {
 pub fn spawn_infestation(world: &mut World<'_>, pos: BlockPos) {
     let mut entity = world.prepare_entity(Entity::by_mob_type(
         MobType::Silverfish,
-        Vec3::new(f64::from(pos.x) + 0.5, f64::from(pos.y), f64::from(pos.z) + 0.5),
+        Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y),
+            f64::from(pos.z) + 0.5,
+        ),
     ));
     // 官方 `EntityType.create` 之后 `snapTo(..., 0.0F, 0.0F)` 把构造时的随机朝向清成 0。
     // `snapTo(..., 0.0F, 0.0F)` resets the constructor's random facing to zero.
@@ -92,7 +95,12 @@ pub fn spawn_infestation(world: &mut World<'_>, pos: BlockPos) {
 ///
 /// Vanilla `InfestedBlock.spawnAfterBreak`: spawn a silverfish only when
 /// `GameRules.BLOCK_DROPS` is on and the tool lacks `prevents_infested_spawns`.
-pub fn spawn_after_break(world: &mut World<'_>, state: BlockState, pos: BlockPos, tool: &ItemStack) {
+pub fn spawn_after_break(
+    world: &mut World<'_>,
+    state: BlockState,
+    pos: BlockPos,
+    tool: &ItemStack,
+) {
     if !is_infested(state) || !world.block_game_rules().block_drops {
         return;
     }
@@ -135,7 +143,11 @@ pub fn damage_always_triggers_silverfish(kind_name: &str) -> bool {
     let Some(id) = damage_type_id(kind_name) else {
         return false;
     };
-    tag_contains("minecraft:damage_type", "minecraft:always_triggers_silverfish", id)
+    tag_contains(
+        "minecraft:damage_type",
+        "minecraft:always_triggers_silverfish",
+        id,
+    )
 }
 
 /// `EnchantmentTags.PREVENTS_INFESTED_SPAWNS` 里有没有这个附魔 ID。

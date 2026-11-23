@@ -3623,23 +3623,11 @@ fn entity_types_file(data: &VersionData) -> String {
     // heights are in `monsterFacts` alongside creepers and spiders.
     for (name, value) in [
         ("SILVERFISH_MAX_HEALTH", facts.silverfish_max_health),
-        (
-            "SILVERFISH_MOVEMENT_SPEED",
-            facts.silverfish_movement_speed,
-        ),
-        (
-            "SILVERFISH_ATTACK_DAMAGE",
-            facts.silverfish_attack_damage,
-        ),
+        ("SILVERFISH_MOVEMENT_SPEED", facts.silverfish_movement_speed),
+        ("SILVERFISH_ATTACK_DAMAGE", facts.silverfish_attack_damage),
         ("ENDERMITE_MAX_HEALTH", facts.endermite_max_health),
-        (
-            "ENDERMITE_MOVEMENT_SPEED",
-            facts.endermite_movement_speed,
-        ),
-        (
-            "ENDERMITE_ATTACK_DAMAGE",
-            facts.endermite_attack_damage,
-        ),
+        ("ENDERMITE_MOVEMENT_SPEED", facts.endermite_movement_speed),
+        ("ENDERMITE_ATTACK_DAMAGE", facts.endermite_attack_damage),
     ] {
         let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
     }
