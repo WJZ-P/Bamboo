@@ -172,6 +172,10 @@ impl ShotCase {
             entities: Entities::with_next_id(FIRST_ID),
             players: Vec::new(),
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
         };
         let mut ticks = BlockTicks::default();

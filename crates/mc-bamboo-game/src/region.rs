@@ -693,6 +693,7 @@ impl Region {
             block_weather: self.global.block_weather,
             sky_darken: self.global.sky_darken,
             clock_ticks: self.global.clock.total_ticks,
+            scoreboard: &self.global.scoreboard,
             world_seed: self.global.seed,
             world_gen: &self.global.world_gen,
             sea_level: if self.global.world_gen.level_type.is_flat() {

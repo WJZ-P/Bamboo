@@ -174,7 +174,7 @@ S1（`ChunkStorage` trait）、S2（Linear 可选项）、S4 的两线程方案�
 | `xPos` / `zPos` | `ChunkPos` |
 | `yPos` | `MIN_Y / 16` = −4 |
 | `LastUpdate` | 调用方给的 `last_update`（接进游戏后来自 `GameTime`） |
-| `InhabitedTime` | 调用方给的 `inhabited_time`（现在写 0） |
+| `InhabitedTime` | `ChunkStore` 单独那张 `inhabited` 表里的累计值，装盒子 / 拍快照时写进 `ChunkArchiveMeta.inhabited_time` |
 | `Status` | 写 `ChunkColumn` 里的 `ChunkArchiveMeta.status`（官方 `getPersistedStatus()`；完工才是 `minecraft:full`）；读任意 `Status` 并解析成 `ChunkStatus`，交给 Director 从该阶段续跑（见「外置区块和非 `full` 的 ProtoChunk」） |
 | `UpgradeData` | 不写（官方只在非空时写） |
 | `blending_data` / `below_zero_retrogen` | 不写（官方 `storeNullable` 只在非空时写） |
@@ -967,6 +967,32 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   `chunk_codec::tests::a_non_full_chunk_keeps_its_status_and_blocks`（含
   Bamboo 写出 → Bamboo 读回）、`director::tests::a_non_full_decoded_chunk_resumes_from_its_stage`、
   以及官方 codec 多阶段往返对拍 `mc-bamboo-vanilla resume-world`。
+
+### `InhabitedTime` 单独记一张表
+
+官方 `ServerChunkCache.tickChunks → collectSpawningChunks → tickSpawningChunk` 每刻给刷怪
+候选区块的 `LevelChunk.incrementInhabitedTime()` 加一，第一句就在 `tickThunder` 之前；
+`ChunkAccess.incrementInhabitedTime` / `setInhabitedTime` 都**不调** `markUnsaved`。
+候选区块要同时满足：`naturalSpawnChunkCounter`（玩家区块切比雪夫半径 8 的方形）、
+有 ticking 区块、有非旁观玩家离区块中心水平距离平方小于 16384
+（`ChunkMap.playerIsCloseEnoughForSpawning`）。Bamboo 没有暂停 / 冻结刻，
+`TickRateManager.runsNormally()` 恒为真。这套候选集合做成
+`mc-bamboo-game::spawning_chunk_candidates`，游戏和对拍共用。
+
+累加不写 `Chunk` 本体：`ChunkStore::inhabited: ChunkMap<i64>` 单独记，不换版本号
+（区块包缓存不失效）、不进 `changed` 集合（不触发匀速存档）、不把模板区块物化。
+读盘时把盒子的 `archive.inhabited_time` 填进表（`insert_column`），写盘 / 拍只读快照时
+用表里的值覆盖盒子的存档信息（`column_clone` / `take_column`）。拆岛 / 合岛
+（`split_off` / `absorb`）、取放区块束（`take_column` / `insert_column`）都跟着搬，
+`finish_unload` 删掉条目，内存不随走过的区块无限涨。区域难度通过
+`Level::inhabited_time` 读这张表（`BlockView::effective_difficulty`）。
+
+**卸载时区块不脏会怎样，照字节码**：`ChunkMap.save` 存盘前先 `tryMarkSaved`，不脏就不写。
+所以只累加过 `InhabitedTime`、没有别的改动（改方块、后处理表消费等）的区块，卸载时
+这段时间累加的值会丢，和官方一致；若区块因为别的原因脏了，写进去的是表里最新的值。
+单测：`world::tests::inhabited_time_is_saved_only_with_another_change`、
+`natural_spawn::tests::incrementing_inhabited_time_leaves_the_chunk_untouched`、
+`store::loaded_tests::inhabited_time_travels_with_its_chunk_without_touching_revisions`。
 
 ### 已知但没处理的（以后再看）
 

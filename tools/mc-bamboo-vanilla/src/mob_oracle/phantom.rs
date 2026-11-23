@@ -82,6 +82,10 @@ impl PhantomSpawnCase {
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
         }
@@ -285,6 +289,10 @@ impl PhantomCase {
                 Vec::new()
             },
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
         }

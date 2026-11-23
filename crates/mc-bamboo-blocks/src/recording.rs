@@ -764,6 +764,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::IgnitePlayer { .. } => 21,
         Effect::PlayerEffect { .. } => 22,
         Effect::HealPlayer { .. } => 23,
+        Effect::DestroyProgress { .. } => 24,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -894,6 +895,15 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::HealPlayer { target, amount } => {
             target.hash(&mut hasher);
             amount.to_bits().hash(&mut hasher);
+        }
+        Effect::DestroyProgress {
+            breaker,
+            pos,
+            progress,
+        } => {
+            breaker.hash(&mut hasher);
+            pos.hash(&mut hasher);
+            progress.hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

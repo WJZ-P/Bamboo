@@ -533,10 +533,10 @@ impl MobType {
     }
 
     /// 目标选择按官方 `TargetGoal` 的完整规则走（`mustSee` 的视线记忆、生物也能当目标、
-    /// 按真实碰撞箱判近战距离）。僵尸一系还是早先的简化版。
+    /// 按真实碰撞箱判近战距离）。
     ///
     /// Whether targeting follows the full vanilla `TargetGoal` rules (`mustSee` memory,
-    /// mob targets, real hitboxes for melee reach). Zombies keep the earlier simplification.
+    /// mob targets, real hitboxes for melee reach).
     pub const fn full_target_rules(self) -> bool {
         matches!(
             self,
@@ -547,6 +547,15 @@ impl MobType {
                 | Self::Pillager
                 | Self::Endermite
         ) || self.is_skeleton()
+    }
+
+    /// `TargetGoal.mustSee` 的视线记忆：僵尸一系和完整规则的敌对生物都要按看不见的
+    /// 刻数放弃目标；其余目标只看能不能打、在不在跟随距离内。
+    ///
+    /// Whether `TargetGoal.canContinueToUse` tracks how long the target has been unseen.
+    /// Zombies join the hostile mobs that use the full `mustSee` memory.
+    pub const fn uses_target_memory(self) -> bool {
+        self.full_target_rules() || matches!(self, Self::Slime) || self.is_zombie()
     }
 
     /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
@@ -2098,10 +2107,15 @@ pub struct Mob {
     pub using_item_flags: u8,
     /// `Zombie.canBreakDoors`；`finalizeSpawn` 按 0.1 概率置真。
     pub can_break_doors: bool,
-    /// `BreakDoorGoal` 的 240 刻进度，随实体行搬岛。
+    /// `BreakDoorGoal.breakTime`：240 刻破门计时，随实体行搬岛。
     pub door_break_time: i32,
+    /// `BreakDoorGoal.lastBreakProgress`：上次发出去的裂纹阶段，构造时 -1，之后不重置。
     pub door_break_progress: i32,
-    pub door_break_pos: Option<BlockPos>,
+    /// `DoorInteractGoal.doorPos` / `hasDoor` / `passed` / `doorOpenDirX`、`doorOpenDirZ`。
+    pub door_pos: BlockPos,
+    pub has_door: bool,
+    pub door_passed: bool,
+    pub door_open_dir: [f32; 2],
     /// 目标选择器。牛是空的，僵尸/尸壳按官方优先级注册。
     pub target_goals: GoalSelector,
     /// `Zombie.DATA_BABY_ID`：僵尸用布尔元数据，不用 `age < 0`。
@@ -2691,7 +2705,10 @@ impl Mob {
             can_break_doors: false,
             door_break_time: 0,
             door_break_progress: -1,
-            door_break_pos: None,
+            door_pos: BlockPos::new(0, 0, 0),
+            has_door: false,
+            door_passed: false,
+            door_open_dir: [0.0; 2],
             target_goals,
             zombie_baby: false,
             zombie_special_type: 0,
