@@ -93,12 +93,12 @@ impl PoiRecord {
         true
     }
 
-    /// 官方 `BlockPos.hashCode`，用于 `HashSet<PoiRecord>` 的桶序。
+    /// 官方 `Vec3i.hashCode`（`BlockPos` 没覆盖它）：`(y + z*31)*31 + x`，
+    /// 用于 `HashSet<PoiRecord>` 的桶序。
     fn java_hash(&self) -> i32 {
         self.pos
             .y
-            .wrapping_mul(31)
-            .wrapping_add(self.pos.z)
+            .wrapping_add(self.pos.z.wrapping_mul(31))
             .wrapping_mul(31)
             .wrapping_add(self.pos.x)
     }
@@ -159,6 +159,8 @@ pub struct PoiSection {
     pub valid: bool,
     records: BTreeMap<u16, PoiRecord>,
     by_type: BTreeMap<PoiType, Vec<u16>>,
+    /// 段内下标的插入顺序，用来复刻 fastutil 开放寻址的槽布局。
+    insertion: Vec<u16>,
 }
 
 impl PoiSection {
@@ -168,6 +170,7 @@ impl PoiSection {
             valid: true,
             records: BTreeMap::new(),
             by_type: BTreeMap::new(),
+            insertion: Vec::new(),
         }
     }
 
@@ -177,6 +180,7 @@ impl PoiSection {
             valid,
             records: BTreeMap::new(),
             by_type: BTreeMap::new(),
+            insertion: Vec::new(),
         };
         for record in records {
             section.insert(record);
@@ -192,10 +196,12 @@ impl PoiSection {
         self.records.is_empty()
     }
 
-    /// 全部记录，按段内下标升序（存档编码用；官方 `pack()` 走 fastutil 的桶序，
-    /// 但 NBT 比对按内容不按顺序，见 `poi-oracle`）。
+    /// 全部记录，按官方 `PoiSection.pack()` 的顺序：底层是
+    /// `Short2ObjectOpenHashMap`（`n = 32` 起步、负载 0.75），`values()` 按内部
+    /// 槽下标升序遍历；槽 = `HashCommon.mix(段内下标) & (n-1)`，碰撞线性探测。
+    /// 存档字节、查询族的段内顺序都由这个顺序决定。
     pub fn records(&self) -> impl Iterator<Item = &PoiRecord> + '_ {
-        self.records.values()
+        fastutil_record_order(&self.records, &self.insertion).into_iter()
     }
 
     pub fn get(&self, pos: BlockPos) -> Option<&PoiRecord> {
@@ -224,9 +230,11 @@ impl PoiSection {
             self.by_type
                 .entry(old.kind)
                 .and_modify(|keys| keys.retain(|&k| k != key));
+            self.insertion.retain(|&k| k != key);
         }
         self.by_type.entry(record.kind).or_default().push(key);
         self.records.insert(key, record);
+        self.insertion.push(key);
         self.sort_by_type(record_type(&self.records, key));
     }
 
@@ -242,6 +250,7 @@ impl PoiSection {
                 self.by_type.remove(&old.kind);
             }
         }
+        self.insertion.retain(|&k| k != key);
         true
     }
 
@@ -298,6 +307,7 @@ impl PoiSection {
         }
         let old: BTreeMap<u16, PoiRecord> = std::mem::take(&mut self.records);
         self.by_type.clear();
+        self.insertion.clear();
         for (pos, kind) in from_blocks {
             let key = section_relative(pos);
             let record = old
@@ -313,6 +323,82 @@ impl PoiSection {
 
 fn record_type(records: &BTreeMap<u16, PoiRecord>, key: u16) -> Option<PoiType> {
     records.get(&key).map(|record| record.kind)
+}
+
+/// 复刻 `Short2ObjectOpenHashMap.values()` 的槽序。
+///
+/// 官方无参构造是 `n = arraySize(16, 0.75) = 32`，`mask = n-1`；插入时
+/// `pos = HashCommon.mix(key) & mask`，占用则向后线性探测；`size >= maxFill`
+/// （`min(ceil(n*0.75), n-1)`）时整表按 `arraySize(size+1, f)` 扩容并重插。
+/// `key == 0` 单独记在 `containsNullKey` 里，遍历时排在数组之前。
+fn fastutil_record_order<'a>(
+    records: &'a BTreeMap<u16, PoiRecord>,
+    insertion: &[u16],
+) -> Vec<&'a PoiRecord> {
+    let mut capacity = 32usize;
+    let mut slots: Vec<Option<u16>> = vec![None; capacity];
+    let mut null_key = false;
+    let mut ordered: Vec<u16> = Vec::with_capacity(insertion.len());
+    for &key in insertion {
+        if ordered.len() + 1 > fastutil_max_fill(capacity) {
+            capacity = fastutil_array_size(ordered.len() + 1);
+            slots = vec![None; capacity];
+            null_key = false;
+            for &old in &ordered {
+                fastutil_insert(&mut slots, old, &mut null_key);
+            }
+        }
+        fastutil_insert(&mut slots, key, &mut null_key);
+        ordered.push(key);
+    }
+    let mut out = Vec::with_capacity(records.len());
+    if null_key {
+        if let Some(record) = records.get(&0) {
+            out.push(record);
+        }
+    }
+    // `pack()` 走 `values().stream()`：按内部槽下标升序遍历（`MapIterator`
+    // 的 for-each 是倒序，但 stream 的 Spliterator 是正序）。
+    for slot in slots {
+        if let Some(key) = slot
+            && key != 0
+            && let Some(record) = records.get(&key)
+        {
+            out.push(record);
+        }
+    }
+    out
+}
+
+/// `HashCommon.mix(short)`：`h = key * 0x9E3779B1; pos = (h ^ (h >>> 16)) & mask`，
+/// 冲突向后线性探测；`key == 0` 走 `containsNullKey`。
+fn fastutil_insert(slots: &mut [Option<u16>], key: u16, null_key: &mut bool) {
+    if key == 0 {
+        *null_key = true;
+        return;
+    }
+    let mixed = (i32::from(key as i16)).wrapping_mul(-1640531527_i32);
+    let spread = (mixed as u32) ^ ((mixed as u32) >> 16);
+    let mut slot = (spread as usize) & (slots.len() - 1);
+    while slots[slot].is_some() {
+        slot = (slot + 1) & (slots.len() - 1);
+    }
+    slots[slot] = Some(key);
+}
+
+fn fastutil_max_fill(n: usize) -> usize {
+    ((n * 3).div_ceil(4)).min(n - 1)
+}
+
+/// `HashCommon.arraySize(expected, 0.75)`：不大于 2³⁰ 的最小 2 的幂 ≥ ceil(expected/0.75)，
+/// 起步 2。
+fn fastutil_array_size(expected: usize) -> usize {
+    let target = (expected * 4).div_ceil(3).max(2);
+    let mut size = 2usize;
+    while size < target {
+        size *= 2;
+    }
+    size
 }
 
 /// 复刻 Java `HashSet` / `HashMap` 的遍历序：按桶下标升序，同桶保持插入序。
@@ -522,6 +608,11 @@ impl PoiStore {
     /// `get(long)`：只查内存，不触发读盘。官方 `isVillageCenter` 走这条。
     pub fn get(&self, pos: SectionPos) -> Option<&PoiSection> {
         self.sections.get(&section_key(pos))?.as_ref()
+    }
+
+    /// 只读地改一个已加载段（票数 / 存档坏数据修正用）。不标脏：调用方负责。
+    pub fn section_mut(&mut self, pos: SectionPos) -> Option<&mut PoiSection> {
+        self.sections.get_mut(&section_key(pos))?.as_mut()
     }
 
     /// `getOrCreate(long)`：没有段就造一个空段并标脏。越界返回 `None`，不 panic。
@@ -893,7 +984,11 @@ impl DistanceTracker {
             }
         }
         while let Some((key, level)) = queue.pop_front() {
-            if level >= MAX_VILLAGE_DISTANCE as u8 {
+            // 官方 `SectionTracker.checkNeighborsAfterUpdate` 在「级别下降」且
+            // `level >= levelCount - 2`（= 5）时直接返回，所以从 5 级段不再往外扩散，
+            // 6 级段实际上不会出现；`sectionsToVillage` 的最大返回值是 5。
+            // 用 `poi-oracle` 的 `VillageProbe` 实测：0..5 逐级、6 起为 7。
+            if level >= (NO_VILLAGE_LEVEL - 2) as u8 {
                 continue;
             }
             let next = level + 1;
@@ -931,6 +1026,11 @@ impl DistanceTracker {
 }
 
 impl PoiStore {
+    /// 这一段现在是不是 `DistanceTracker` 的源（`PoiManager.isVillageCenter`）。
+    pub fn is_village_center(&self, pos: SectionPos) -> bool {
+        self.get(pos).is_some_and(PoiSection::is_village_center)
+    }
+
     /// `sectionsToVillage`：重算不动点后取级别。
     pub fn sections_to_village(&self, pos: SectionPos) -> i32 {
         let mut tracker = DistanceTracker::default();
@@ -1012,6 +1112,25 @@ mod tests {
             .states
             .first()
             .unwrap()
+    }
+
+    /// 官方 `Short2ObjectOpenHashMap.values()` 的槽序（用 javap + JVM 探针核对过）。
+    #[test]
+    fn packed_record_order_matches_fastutil() {
+        let kind = poi::poi_type_id("armorer").unwrap();
+        let mut section = PoiSection::empty();
+        // 和 /tmp/FastutilProbe.java 的键集一致。
+        for (x, z) in [(1, 1), (4, 1), (10, 1), (13, 1), (1, 4), (4, 4), (7, 4)] {
+            section.add(BlockPos::new(x, -60, z), kind);
+        }
+        let packed: Vec<(i32, i32)> = section
+            .records()
+            .map(|record| (record.pos.x, record.pos.z))
+            .collect();
+        assert_eq!(
+            packed,
+            vec![(10, 1), (4, 4), (4, 1), (1, 4), (7, 4), (13, 1), (1, 1)]
+        );
     }
 
     #[test]
@@ -1105,12 +1224,12 @@ mod tests {
         let all = store.get_in_range(|_| true, center, 48, Occupancy::Any);
         assert_eq!(all.len(), 4);
         // 官方 ChunkPos.rangeClosed 的 z 外层、x 内层升序；同段内按 Java
-        // HashSet<PoiRecord> 的桶序：hash(3,-60,1) 落在 hash(1,-60,1) 之前。
+        // HashSet<PoiRecord> 的桶序（Vec3i.hashCode = (y + z*31)*31 + x）。
         let positions: Vec<_> = all
             .iter()
             .map(|record| (record.pos.x, record.pos.z))
             .collect();
-        assert_eq!(positions, vec![(3, 1), (1, 1), (17, 1), (1, 17)]);
+        assert_eq!(positions, vec![(1, 1), (3, 1), (17, 1), (1, 17)]);
         // 并列距离时 `findClosest` 取遍历序第一个。
         assert_eq!(
             store.find_closest(
@@ -1120,7 +1239,7 @@ mod tests {
                 48,
                 Occupancy::Any
             ),
-            Some(BlockPos::new(3, -60, 1))
+            Some(BlockPos::new(1, -60, 1))
         );
     }
 
@@ -1158,8 +1277,12 @@ mod tests {
         tracker.update(&store);
         assert_eq!(tracker.level(center), 0);
         assert_eq!(tracker.level(center.offset(3, -2, 1)), 3, "切比雪夫距离");
-        assert_eq!(tracker.level(center.offset(6, 0, 0)), 6);
-        assert_eq!(tracker.level(center.offset(7, 0, 0)), NO_VILLAGE_LEVEL);
+        assert_eq!(tracker.level(center.offset(5, 0, 0)), 5);
+        assert_eq!(
+            tracker.level(center.offset(6, 0, 0)),
+            NO_VILLAGE_LEVEL,
+            "官方从 5 级段起不再扩散"
+        );
         assert!(store.is_close_to_village(pos.offset(0, 0, 0), 1));
         assert!(!store.is_close_to_village(pos.offset(7 * 16, 0, 0), 1));
         assert!(!store.is_close_to_village(pos, 7), "超过 6 直接假");

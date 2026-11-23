@@ -5097,3 +5097,71 @@ fn melee_hit_awards_damage_dealt_on_request_stats() {
         "DAMAGE_DEALT must be sent as a minecraft:custom stat"
     );
 }
+
+/// 通过方块逻辑的共享写入口（`RegionLevel::write_block`，`/setblock` / `/fill` /
+/// `/clone` / 玩家放方块 / 活塞 / 爆炸都走它）放下床头时同刻登记 POI，拆掉时注销；
+/// POI 票数的变化既不换区块包 `ChunkRevision`，也不重发区块包。
+#[test]
+fn block_logic_registers_poi_without_bumping_the_chunk_revision() {
+    use mc_bamboo_blocks::{World, world::UPDATE_CLIENTS};
+    use mc_bamboo_data::poi::{POI_TYPES, poi_type_id};
+
+    let mut server = Harness::new_loaded(2);
+    let client = server.join("Admin");
+    server.tick();
+    server.ensure_loaded(&[ChunkPos::new(0, 0)]);
+    let pos = BlockPos::new(5, -59, 5);
+    let home = poi_type_id("home").unwrap();
+    let bed_head = *POI_TYPES[home as usize].states.first().unwrap();
+    let region = server.region();
+    let before = region.chunks.revision(pos.chunk());
+    assert_eq!(region.poi.get_type(pos), None);
+
+    {
+        let (mut level, ticks) = server.region().block_level();
+        let mut world = World::new(&mut level, ticks);
+        assert!(world.set_block(pos, mc_bamboo_blocks::BlockState(bed_head), UPDATE_CLIENTS));
+        let _ = world.drain_effects();
+    }
+    let region = server.region();
+    assert_eq!(region.chunks.block(pos), Some(bed_head));
+    assert_eq!(region.poi.get_type(pos), Some(home));
+    assert_eq!(region.poi.free_tickets(pos), 1);
+    // 方块本身变了，版本号当然换了；下面单独核对「只有 POI 票变了」的情况。
+    let after_block = region.chunks.revision(pos.chunk());
+    assert_ne!(before, after_block, "方块写入要换版本号");
+
+    region.poi.take(|_| true, |_, _| true, pos, 8);
+    assert_eq!(region.poi.free_tickets(pos), 0);
+    assert_eq!(
+        region.chunks.revision(pos.chunk()),
+        after_block,
+        "POI 扣票不换区块包版本号"
+    );
+    region.poi.release(pos);
+    assert_eq!(region.poi.free_tickets(pos), 1);
+    assert_eq!(
+        region.chunks.revision(pos.chunk()),
+        after_block,
+        "POI 还票不换区块包版本号"
+    );
+
+    {
+        let (mut level, ticks) = server.region().block_level();
+        let mut world = World::new(&mut level, ticks);
+        assert!(world.set_block(
+            pos,
+            mc_bamboo_blocks::BlockState(blocks::AIR),
+            UPDATE_CLIENTS
+        ));
+        let _ = world.drain_effects();
+    }
+    let region = server.region();
+    assert_eq!(region.chunks.block(pos), Some(blocks::AIR));
+    assert_eq!(region.poi.get_type(pos), None);
+    assert!(
+        region.poi.dirty_chunks().contains(&pos.chunk()),
+        "POI 变化要按区块标脏"
+    );
+    let _ = client;
+}

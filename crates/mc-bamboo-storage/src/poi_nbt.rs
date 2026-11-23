@@ -73,7 +73,7 @@ fn encode_section(section: &PoiSection) -> Tag {
 }
 
 fn encode_record(record: &PoiRecord) -> Vec<(String, Tag)> {
-    vec![
+    let mut out = vec![
         (
             "pos".to_owned(),
             Tag::IntArray(vec![record.pos.x, record.pos.y, record.pos.z]),
@@ -86,8 +86,13 @@ fn encode_record(record: &PoiRecord) -> Vec<(String, Tag)> {
                     .unwrap_or_else(|| "minecraft:unknown".to_owned()),
             ),
         ),
-        ("free_tickets".to_owned(), Tag::Int(record.free_tickets)),
-    ]
+    ];
+    // 官方 `Codec.INT.optionalFieldOf("free_tickets", 0)`：等于缺省值时不写这个键
+    // （0 票类型和扣光票的记录都省掉）。
+    if record.free_tickets != 0 {
+        out.push(("free_tickets".to_owned(), Tag::Int(record.free_tickets)));
+    }
+    out
 }
 
 /// 读回一个区块的 POI 根标签。

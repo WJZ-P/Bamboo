@@ -103,6 +103,8 @@
 //!     用官方 SerializableChunkData / RegionFile / NbtIo 检查存档编解码层
 //! mc-bamboo-vanilla player-data <java 路径> [--show N]
 //!     用官方 ItemStackWithSlot / TagValueInput / PrimaryLevelData 检查物品、玩家数据和 level.dat
+//! mc-bamboo-vanilla poi-oracle <java 路径> [--show N] [--break-self-test NAME]
+//!     用官方 `PoiManager` 对拍 POI 查询、票数、存档 NBT 与村庄距离
 //! mc-bamboo-vanilla chunk-content <java 路径> [--show N]
 //!     用官方 BlockEntity / SavedTick / Entity 检查区块上层内容的存档 NBT
 //! mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -192,6 +194,8 @@ mod oracle;
 mod path_type_oracle;
 #[cfg(feature = "oracle")]
 mod player_data_oracle;
+#[cfg(feature = "oracle")]
+mod poi_oracle;
 #[cfg(feature = "oracle")]
 mod post_process_oracle;
 #[cfg(feature = "oracle")]
@@ -360,6 +364,8 @@ const PATH_TYPE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PathTypeOrac
 #[cfg(feature = "oracle")]
 const STORAGE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StorageOracle.java";
 #[cfg(feature = "oracle")]
+const POI_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PoiOracle.java";
+#[cfg(feature = "oracle")]
 const CHUNK_CONTENT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkContentOracle.java";
 #[cfg(feature = "oracle")]
 const TICKET_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TicketOracle.java";
@@ -422,6 +428,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla path-type <java 路径> [--break-self-test] [--show N]
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla mob-oracle <java 路径> [--only 前缀] [--show N]
+      mc-bamboo-vanilla poi-oracle <java 路径> [--show N] [--break-self-test NAME]
       mc-bamboo-vanilla storage <java 路径> [--show N]
       mc-bamboo-vanilla saved-data <java 路径>
       mc-bamboo-vanilla player-data <java 路径> [--show N]
@@ -516,6 +523,7 @@ fn run() -> Result<(), String> {
         ["mob-oracle", java, ref options @ ..] => mob_oracle(java, options),
         ["path-type", java, ref options @ ..] => path_type_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
+        ["poi-oracle", java, ref options @ ..] => poi_oracle_cli(java, options),
         ["saved-data", java] => saved_data_cli(java),
         ["player-data", java, ref options @ ..] => player_data_oracle(java, options),
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
@@ -1048,6 +1056,11 @@ fn mob_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn move_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     move_oracle::run(official_program(java, MOVE_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn poi_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    poi_oracle::run(official_program(java, POI_ORACLE_SOURCE)?, options)
 }
 
 #[cfg(feature = "oracle")]
