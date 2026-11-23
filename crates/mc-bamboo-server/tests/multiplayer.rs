@@ -732,7 +732,10 @@ async fn a_move_below_the_threshold_is_not_sent_until_it_adds_up() {
     wait_for_forced_cycle(&mut bob, id).await;
     let mark = bob.mark();
     alice.move_to(8.502, -60.0, 8.5).await;
-    bob.expect_none::<MoveEntityPos>(mark, moved).await;
+    // 测试世界会自然刷出生物，只看 Alice 的移动包。
+    // The test world spawns mobs naturally; only Alice's move packets count.
+    bob.expect_none::<MoveEntityPos>(mark, |packet| packet.entity == id && moved(packet))
+        .await;
 
     alice.move_to(8.51, -60.0, 8.5).await;
     wait_until_seen_at(&bob, id, (8.51, -60.0, 8.5)).await;
