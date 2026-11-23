@@ -376,6 +376,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Bee {
         super::bee::write_nbt(mob, &mut out);
     }
+    // ---- Endermite.addAdditionalSaveData ----
+    if mob.mob_type == MobType::Endermite {
+        put(&mut out, "Lifetime", Tag::Int(mob.endermite.life));
+    }
     // ---- Turtle.addAdditionalSaveData ----
     if mob.mob_type == MobType::Turtle {
         put(&mut out, "home_pos", block_pos_tag(mob.turtle.home_pos));
@@ -765,6 +769,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Bee {
             super::bee::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::Endermite {
+            mob.endermite.life = tag::int_or(tag, "Lifetime", 0);
         }
         if mob.mob_type == MobType::Phantom {
             let pos = tag::int_array(tag, "anchor_pos");

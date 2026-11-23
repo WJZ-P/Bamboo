@@ -857,6 +857,27 @@ pub enum Command {
     RemoveMobBlock {
         pos: mc_bamboo_core::BlockPos,
     },
+    /// `SilverfishWakeUpFriendsGoal`：`Level.destroyBlock(pos, true, silverfish)`。
+    /// 破坏虫蚀方块会再走 `spawnAfterBreak`，也就是又生成一只蠹虫。
+    ///
+    /// `SilverfishWakeUpFriendsGoal`'s griefing branch: destroying an infested
+    /// block runs `spawnAfterBreak` and spawns another silverfish.
+    SilverfishBreak {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `mobGriefing` 关掉时 `setBlockAndUpdate(pos, hostStateByInfested(state))`。
+    ///
+    /// With `mobGriefing` off, replace the infested block by its host state.
+    SilverfishReveal {
+        pos: mc_bamboo_core::BlockPos,
+        host: crate::BlockState,
+    },
+    /// `SilverfishMergeWithStoneGoal.start`：把宿主方块变成虫蚀方块，蠹虫消失。
+    ///
+    /// `SilverfishMergeWithStoneGoal.start`: infest the host block and remove the mob.
+    SilverfishMerge {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `Fox.pickUpItem` 的世界一侧：多出来的放回地上，原来叼着的吐出去，捡起的那件消失。
     ///
     /// The level side of `Fox.pickUpItem`: drop the extra, spit the old item
@@ -1231,6 +1252,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::SilverfishBreak { pos } => {
+            let _ = world.destroy_block(pos, true, crate::world::UPDATE_LIMIT);
+        }
+        Command::SilverfishReveal { pos, host } => {
+            let _ = world.set_block_and_update(pos, host);
+        }
+        Command::SilverfishMerge { pos } => {
+            let state = world.block_state(pos);
+            if let Some(infested) = super::mob::infested::infested_state_by_host(state) {
+                let _ = world.set_block_and_update(pos, infested);
+                // `PathfinderMob.spawnAnim` 发实体事件 20，然后 `discard()`。
+                if let Some(mob) = me.kind.mob_mut() {
+                    mob.events
+                        .push(super::mob::MobEvent::EntityEvent { event: 20 });
+                }
+                me.discard();
+            }
         }
         Command::SetBrainMemory {
             target,

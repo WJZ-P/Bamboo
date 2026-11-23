@@ -113,6 +113,14 @@ impl World<'_> {
                     collect_drop(&mut drops, pos, stack);
                 }
             }
+            // 26.3 `BlockBehaviour.onExplosionHit` 先调 `spawnAfterBreak`：工具是空手，
+            // 虫蚀方块会刷出蠹虫；之后才是 `getDrops` 和 `setBlockAndUpdate`。
+            //
+            // 26.3 `BlockBehaviour.onExplosionHit` calls `spawnAfterBreak` first with
+            // an empty tool: infested blocks spawn a silverfish here.
+            if !was_tnt {
+                self.spawn_after_break(state, pos, &ItemStack::empty());
+            }
             // `setBlockAndUpdate` 在 `wasExploded` 之前。容器的 `dropContents` 就在这一步取数。
             // `setBlockAndUpdate` runs before `wasExploded`. Container `dropContents` draws here.
             self.set_block_and_update(pos, BlockState::AIR);

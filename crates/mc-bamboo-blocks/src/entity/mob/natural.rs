@@ -792,6 +792,14 @@ pub(super) fn check_spawn_rules(
         // 蜜蜂不在任何群系刷怪表里，也没有 `SpawnPlacements` 规则。
         // Bees are in no biome spawn table and have no `SpawnPlacements` rule.
         MobType::Bee => true,
+        // 蠹虫和末影螨都不在群系刷怪表里：刷怪笼 / `/summon` / 刷怪蛋才生成。
+        // 官方 `checkSilverfishSpawnRules` / `checkEndermiteSpawnRules` 只在刷怪笼
+        // （`EntitySpawnReason.isSpawner`）或 5 格内没有玩家时允许，这里不给自然刷怪用。
+        //
+        // Neither silverfish nor endermites appear in biome spawn tables. The vanilla
+        // spawn rules only allow spawners or places with no player within five blocks;
+        // neither path goes through natural spawning here.
+        MobType::Silverfish | MobType::Endermite => valid_mob_spawn_block(world, kind, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)

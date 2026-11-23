@@ -2765,3 +2765,53 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
 - 去重（2.8%）和挤压伤害判定（30.56 次/刻）是两个「看着可做、其实收益有限」的
   数字：前者省不了几次搜索，后者是伤害不是推力，第 4 步的挤压上限要限的是
   每条 `PushMob` 命令，不是 `maxEntityCramming` 规则本身。
+
+## 5.23 蠹虫、末影螨与虫蚀方块（silverfish，2026-11-22）
+
+**接入清单照 5.12**：`MobType` 枚举 / `ALL`（46 → 48，只追加两项）/ `entity_type()` / `name()` /
+`dimensions()` / `is_monster()` / `full_target_rules()`（末影螨）/ `emits_movement_sounds()`
+（`MovementEmission.EVENTS`）/ `xp_reward()`（末影螨 3）/ `loot_table()` / 四种音效 /
+`step_sound()` / `spawn_egg()` / `translation_key()`；`Mob::new` 的 attributes / goals /
+target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.finalizeSpawn`；
+`living.rs` 的 `tick_mob` 前置（`yBodyRot = yRot`）、`ai_step` 尾部（末影螨寿命）、
+`hurt_server` 前置（蠹虫唤醒）；`nbt.rs` 的 `Lifetime`；`natural.rs::check_spawn_rules`
+两种都只留 `valid_mob_spawn_block`（不进群系刷怪表）；`goals.rs::TargetType::Endermite`
+从占位改成真的找末影螨。新增文件 `silverfish.rs` / `endermite.rs` / `infested.rs`，
+共用位置只做最小追加、没有重排已有代码。
+
+**生成器导出**：`Extractor.java::projectileFacts()` 补两种生物的 `createAttributes()` 三个属性、
+`Endermite.MAX_LIFE` / `xpReward`；`monsterFacts()` 补两个眼高。`entity_types.rs` 由
+`extract` 重新生成，运行时不写死版本数字。`ENDERMITE_XP_REWARD = 3`（26.3 里末影螨的
+构造函数把 `Monster` 的 5 覆盖掉），眼高 0.13。
+
+**目标行为**：`SilverfishWakeUpFriendsGoal` 的 `requiresUpdateEveryTick()` 是假，倒数
+`adjustedTickDelay(20) = 10` 在非满刻每两刻减 1；扫描顺序 y(-5..5) → x(-10..10) → z(-10..10)，
+每个轴按 0, 1, -1, 2, -2 ... 的顺序。`canContinueToUse` 用 `Goal` 缺省的 `canUse()`，
+倒数到 0 立刻停；逐刻对拍第一版写成「永远真」和「每刻都跑」都从随机源 / `friends` 位看出来。
+`SilverfishMergeWithStoneGoal` 的 `canUse` 先看目标和导航是否完成，再在 `mobGriefing` 开时
+`nextInt(reducedTickDelay(10)) == 0` 抽一个 `Direction`，相对格是宿主方块才 `doMerge`；
+否则落到 `RandomStrollGoal(1.0, 10)` 的 1/5 闲逛判定。`start` 的 doMerge 分支写虫蚀状态、
+发 `spawnAnim`（实体事件 20）并 `discard()`；`canContinueToUse` 在 doMerge 时恒假。
+所有世界写入走 `Command::SilverfishBreak` / `SilverfishReveal` / `SilverfishMerge`，
+精确和并行两种驱动都能落地。
+
+**虫蚀方块**：宿主表来自 `blocks.rs` 的 `hostBlock` 字段（含 `InfestedRotatedPillarBlock`，
+`copied_onto` 抄 `axis` 属性）。`spawnAfterBreak` 在 `GameRules.BLOCK_DROPS` 开着且工具不带
+`#prevents_infested_spawns` 时生成蠹虫；玩家挖掘走 `block_drops::drop_broken_block`，
+爆炸走 `ServerExplosion.interactWithBlocks` → `World::spawn_after_break`（工具是空手），
+`Level::destroyBlock` 那条路径也接了同一个钩子。方块 oracle 的四道挖掘题（空手 / 木镐 /
+石镐精准采集 / 精准采集圆石）和三道固定爆炸题（`infested_stone` / `infested_stone_bricks` /
+`infested_deepslate`）都把 `spawned` 列表纳入比较，之前「只是记录」的字段现在受比较；
+故意把 Rust 的 `spawned` 清空能抓到 3 道爆炸题。
+
+**逐刻对拍**：`mob_oracle/small_mob.rs`（新文件）重放 7 个逐刻场景：蠹虫唤醒同伴、钻进石头、
+近战；末影螨 2400 刻寿命、`PersistenceRequired` 不老化、近战、末影人把它当目标。
+另有 4 道官方 SNBT 存档往返题和 4 道死亡掉落题。两处改坏确认：
+`--break-self-test small_mob_life` 把寿命 +1、`small_mob_hurt` 让受伤晚一刻，
+都在逐刻比较里被抓到。夹具不比出站包（配对包两侧由不同机制产生），
+位置 / 速度 / 朝向 / 随机源 / 血量 / 寿命 / 唤醒倒计时 / 方块表 / 新生成实体 /
+世界随机源全部逐位比较。
+
+**已知限制**：末影珍珠弹射物没实现，`ThrownEnderpearl.onHit` 的 5% 刷末影螨和传送都没做；
+细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
+（仓库还没有通用刷怪笼）没建模。

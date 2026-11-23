@@ -63,11 +63,23 @@ pub(crate) fn drop_broken_block(
             return;
         }
     };
+    let tool_stack = region
+        .players
+        .get(&player)
+        .map(|player| player.inventory.held(mc_bamboo_core::Hand::Main).clone())
+        .unwrap_or_else(ItemStack::empty);
     let (mut level, ticks) = region.block_level();
     let mut world = World::new(&mut level, ticks);
     for stack in stacks {
         pop_loot_stack(&mut world, pos, stack);
     }
+    // `Block.playerDestroy` → `dropResources` 的 `spawnAfterBreak`：矿石掉经验、
+    // 虫蚀方块刷蠹虫。顺序在掉落物之后，工具是主手那一件（精准采集会挡住蠹虫）。
+    //
+    // `Block.playerDestroy` → `dropResources` calls `spawnAfterBreak` after the
+    // drops: ore experience and infested-block silverfish. The tool decides
+    // whether silk touch prevents the infestation.
+    mc_bamboo_blocks::spawn_after_break(&mut world, state, pos, &tool_stack);
 }
 
 /// 官方 `BlockEntity.collectComponents`：挖之前先抄一份，方块实体在 `setBlock` 之后就没了。

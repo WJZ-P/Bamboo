@@ -37,6 +37,9 @@ pub struct Mine {
     /// 工具上的附魔 `[名字, 等级]`，`processBlockExperience` 要用。
     #[serde(default)]
     pub tool_enchantments: Vec<(String, i32)>,
+    /// 生成的实体类型（虫蚀方块刷蠹虫时有一项）。
+    #[serde(default)]
+    pub spawned: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +145,8 @@ pub enum Kind {
     Random,
     /// 一个区块的随机刻，官方的 `tickChunk`。
     Chunk,
+    /// 直接跑 `ServerExplosion.explode()`，虫蚀方块刷蠹虫。
+    Explode,
 }
 
 impl Kind {
@@ -155,6 +160,7 @@ impl Kind {
             Self::Item => "item",
             Self::Random => "random",
             Self::Chunk => "chunk",
+            Self::Explode => "explode",
         }
     }
 }
@@ -330,6 +336,9 @@ pub struct Answer {
     /// The internal seed of official `level.random` after the case. Older lines omit it.
     #[serde(default)]
     pub random_seed: Option<i64>,
+    /// 这次动作生成的实体类型，按生成顺序；虫蚀方块刷蠹虫时用它比较。
+    #[serde(default)]
+    pub spawned: Vec<String>,
 }
 
 /// 写成 IEEE 754 位的 `double`：十进制不保证往返，这些数在边界上差一位结果就变。
