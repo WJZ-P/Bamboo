@@ -970,7 +970,9 @@ impl EntityStore {
         if let EntityKind::SplashPotion(potion) = &mut entity.kind {
             potion.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
-        super::lightning::finish_spawn(&mut entity);
+        if matches!(entity.kind, super::EntityKind::LightningBolt(_)) {
+            super::lightning::finish_spawn(&mut entity);
+        }
         entity
     }
 

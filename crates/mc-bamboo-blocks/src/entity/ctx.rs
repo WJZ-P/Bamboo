@@ -24,7 +24,7 @@ use crate::{
     world::World,
 };
 
-use super::{Entity, EntityPublic, EntityUid, FallingBlock, lightning::LightningTick};
+use super::{Entity, EntityPublic, EntityUid, FallingBlock, lightning::LightningTick, mob::skeleton_horse::TrapSpawn};
 
 /// 只读的方块/碰撞视图。实体逻辑和寻路只经它读世界；并行阶段共享同一份只读快照。
 ///
@@ -652,6 +652,10 @@ pub enum Command {
     ///
     /// One lightning tick: fires, copper cleaning and entity hits.
     LightningTick(LightningTick),
+    /// 骷髅陷阱马被玩家触发：视觉闪电和四名骷髅骑士。
+    ///
+    /// A skeleton trap triggered by a player: a visual bolt and four riders.
+    SkeletonTrap(TrapSpawn),
     /// 女巫扔一瓶药水：`Projectile.spawnProjectileUsingShoot`。
     ///
     /// The witch throws one potion: `Projectile.spawnProjectileUsingShoot`.
@@ -1087,6 +1091,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::LightningTick(facts) => super::lightning::apply(me, world, facts),
+        Command::SkeletonTrap(facts) => super::mob::skeleton_horse::spawn_trap(world, facts),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);
         }

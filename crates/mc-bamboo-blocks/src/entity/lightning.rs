@@ -149,10 +149,10 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     };
     // `spawnFire` 的取数在算阶段按官方顺序展开成偏移表；落地阶段只照表放火。
     let mut random = me.random;
-    if first && command.difficulty >= FIRE_DIFFICULTY {
+    if first && command.difficulty >= FIRE_DIFFICULTY && !command.visual_only {
         command.fire_rolls = spawn_fire_offsets(me.block_position(), FIRST_FIRE_SPREADS, &mut random);
     }
-    if command.life < 0 && flashes != 0 {
+    if command.life < 0 && flashes != 0 && !bolt_visual(&me.kind) {
         // 官方在判断闪光分支前取一次 `nextInt(10)`，无论是否命中都取。
         let threshold = -random.next_int_bounded(10);
         if command.life < threshold {
@@ -214,6 +214,11 @@ impl Default for LightningTick {
             reseed: false,
         }
     }
+}
+
+/// 视觉闪电不引火、不闪光（`spawnFire` 和闪光分支都短路）。
+fn bolt_visual(kind: &EntityKind) -> bool {
+    matches!(kind, EntityKind::LightningBolt(bolt) if bolt.visual_only)
 }
 
 /// `spawnFire(n)` 的取数顺序：本格不取数，之后每次取三个 `nextInt(3)-1`。

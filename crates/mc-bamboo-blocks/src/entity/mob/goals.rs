@@ -133,6 +133,8 @@ pub enum Goal {
     /// 官方已注册、这一期还不建模的目标。保留优先级和标志位锁顺序；
     /// `canUse` 恒假、不取随机数，名字仍进对拍的 running names。
     Unavailable(&'static str),
+    /// `SkeletonTrapGoal`：陷阱马在 10 格内有活玩家时触发一次。
+    SkeletonTrap,
     /// `ZombieAttackGoal` / `MeleeAttackGoal`：追着当前目标走并在 20 刻间隔挥手。
     MeleeAttack {
         speed: f64,
@@ -567,7 +569,7 @@ impl Goal {
             | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
-            Self::Unavailable(_) | Self::RandomStand { .. } => &[],
+            Self::Unavailable(_) | Self::RandomStand { .. } | Self::SkeletonTrap => &[],
             Self::RunAroundLikeCrazy { .. } => &[Flag::Move],
             Self::MeleeAttack { .. } | Self::Bow(_) | Self::RangedAttack { .. } => {
                 &[Flag::Move, Flag::Look]
@@ -680,6 +682,7 @@ impl Goal {
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
             Self::Unavailable(name) => name,
+            Self::SkeletonTrap => "SkeletonTrapGoal",
             Self::MeleeAttack { class, .. } => class,
             Self::Swell { .. } => "SwellGoal",
             Self::Fox(goal) => goal.name(),
@@ -1714,6 +1717,8 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
+        // `SkeletonTrapGoal.canUse`: `level.hasNearbyAlivePlayer(x, y, z, 10)`。
+        Goal::SkeletonTrap => super::skeleton_horse::trap_player_near(me.position, ctx.blocks()),
         Goal::Swell { .. } => swell_can_use(me, mob, ctx),
         Goal::RandomStand { next_stand } => {
             super::equine::random_stand_can_use(me, mob, next_stand)
@@ -2224,7 +2229,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             *grow_tired_timer -= 1;
             *grow_tired_timer > 0
         }
-        Goal::Unavailable(_) | Goal::RandomStand { .. } => false,
+        Goal::Unavailable(_) | Goal::RandomStand { .. } | Goal::SkeletonTrap => false,
         Goal::RunAroundLikeCrazy { .. } => super::equine::tame::can_continue(mob),
         Goal::MeleeAttack {
             track_target,
@@ -2489,6 +2494,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Float
         | Goal::OcelotAttack { .. }
         | Goal::Unavailable(_)
+        | Goal::SkeletonTrap
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
@@ -2683,6 +2689,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::Panic { .. }
         | Goal::RandomLookAround { .. }
         | Goal::Unavailable(_)
+        | Goal::SkeletonTrap
         | Goal::CubeFloat
         | Goal::CubeAttack { .. }
         | Goal::CubeRandomDirection { .. }
@@ -3055,6 +3062,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Swim { .. } | Goal::PufferfishPuff => {}
         Goal::FollowFlock { time_to_recalc, .. } => {
             super::fish::flock_tick(time_to_recalc, me, mob, ctx)
+        }
+        Goal::SkeletonTrap => {
+            let command = super::skeleton_horse::trap_tick(me, mob, ctx);
+            ctx.emit(crate::entity::ctx::Command::SkeletonTrap(command), me);
         }
         Goal::Unavailable(_)
         | Goal::HurtByTarget { .. }

@@ -97,9 +97,7 @@ pub fn tick_thunder(level: &mut dyn Level, ticks: &mut BlockTicks, chunk: ChunkP
                     );
                     let mut horse = Entity::by_mob_type(MobType::SkeletonHorse, position);
                     horse.with_mob(|_, mob| {
-                        if let Some(state) = mob.skeleton_horse.as_mut() {
-                            state.trap = true;
-                        }
+                        crate::entity::mob::skeleton_horse::set_trap(mob, true);
                         mob.age = 0;
                     });
                     world.spawn_entity(horse);

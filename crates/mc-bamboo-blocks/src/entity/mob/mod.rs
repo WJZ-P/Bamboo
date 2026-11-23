@@ -639,7 +639,10 @@ impl MobType {
             || turtle::is_turtle(self)
             // 幻翼在 `#undead` 里，`#can_breathe_under_water` 收了整个标签。
             // Phantoms are `#undead`, which `#can_breathe_under_water` includes.
-            || matches!(self, Self::Axolotl | Self::Frog | Self::Phantom)
+            || matches!(
+                self,
+                Self::Axolotl | Self::Frog | Self::Phantom | Self::SkeletonHorse
+            )
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -1282,6 +1285,9 @@ impl MobType {
     pub const fn water_slow_down(self) -> f32 {
         if matches!(self, Self::PolarBear) {
             0.98
+        } else if matches!(self, Self::SkeletonHorse) {
+            // `SkeletonHorse.getWaterSlowDown()`。
+            0.96
         } else {
             0.8
         }
@@ -2523,7 +2529,8 @@ impl Mob {
             // alongside the brain.
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
-            MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
+            MobType::ZombieHorse => GoalSelector::default(),
+            MobType::SkeletonHorse => skeleton_horse::trap_goals(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
