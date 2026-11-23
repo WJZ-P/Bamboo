@@ -11,6 +11,7 @@
 
 pub mod arrow;
 pub mod ctx;
+pub mod lightning;
 pub mod mob;
 pub mod parallel;
 pub mod random;
@@ -219,6 +220,10 @@ pub enum EntityKind {
     ///
     /// A thrown splash potion.
     SplashPotion(Box<splash_potion::SplashPotion>),
+    /// 闪电，`LightningBolt`。
+    ///
+    /// A lightning bolt, vanilla `LightningBolt`.
+    LightningBolt(Box<lightning::LightningBolt>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -237,6 +242,7 @@ impl EntityKind {
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
+            Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -437,6 +443,7 @@ impl Entity {
             EntityKind::LlamaSpit(_) => spit::tick(self, ctx),
             EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
             EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
+            EntityKind::LightningBolt(_) => lightning::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }

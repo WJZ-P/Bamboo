@@ -127,6 +127,10 @@ pub enum KindPublic {
     ExperienceOrb {
         value: i32,
     },
+    /// 闪电：客户端要 `seed`、`life` 和闪光次数。
+    ///
+    /// A lightning bolt: the client reads its seed, life and remaining flashes.
+    LightningBolt(super::lightning::LightningBolt),
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
     Arrow(super::arrow::ArrowPublic),
@@ -156,6 +160,7 @@ impl KindPublic {
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
             Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
+            Self::LightningBolt(_) => mc_bamboo_data::registries::entity_type::LIGHTNING_BOLT,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -171,6 +176,14 @@ impl KindPublic {
 
     pub const fn is_falling_block(&self) -> bool {
         matches!(self, Self::FallingBlock { .. })
+    }
+
+    /// 这个公开种类的生物类型；不是生物时是 `None`。
+    pub const fn mob_type(&self) -> Option<super::mob::MobType> {
+        match self {
+            Self::Mob(mob) => Some(mob.mob_type),
+            _ => None,
+        }
     }
 
     /// 按类型的子索引用这个 ID；和注册表 ID 一致，以后加生物不用改索引结构。
@@ -204,6 +217,8 @@ pub enum KindState {
     Item(ItemState),
     /// 经验球自己的字段（年龄、健康、数量、跟随的玩家）。
     ExperienceOrb(super::ExperienceOrb),
+    /// 闪电的全部状态，公开的那一半就是它本身。
+    LightningBolt(super::lightning::LightningBolt),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
     Arrow(Box<super::arrow::Arrow>),
@@ -329,6 +344,9 @@ impl EntityRow {
             (KindPublic::SplashPotion(_), KindState::SplashPotion(potion)) => {
                 EntityKind::SplashPotion(potion)
             }
+            (KindPublic::LightningBolt(_), KindState::LightningBolt(bolt)) => {
+                EntityKind::LightningBolt(Box::new(bolt))
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -414,6 +432,10 @@ impl Entity {
             EntityKind::SplashPotion(potion) => (
                 KindPublic::SplashPotion(Box::new(potion.public(self.remaining_fire_ticks))),
                 KindState::SplashPotion(potion),
+            ),
+            EntityKind::LightningBolt(bolt) => (
+                KindPublic::LightningBolt((*bolt).clone()),
+                KindState::LightningBolt(*bolt),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
@@ -948,6 +970,7 @@ impl EntityStore {
         if let EntityKind::SplashPotion(potion) = &mut entity.kind {
             potion.uuid = super::mob::insecure_uuid(&mut entity.random);
         }
+        super::lightning::finish_spawn(&mut entity);
         entity
     }
 

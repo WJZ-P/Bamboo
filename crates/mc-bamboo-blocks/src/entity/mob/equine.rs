@@ -22,7 +22,7 @@ use crate::{
 
 mod death;
 mod goals;
-mod horse;
+pub(super) mod horse;
 mod interact;
 pub mod inventory;
 mod life;
@@ -142,22 +142,40 @@ impl EquineState {
 /// 成年和幼年的（宽，高，眼高）：马的幼崽缩到 0.7，驴、骡、羊驼缩到 0.5。
 ///
 /// Adult and baby (width, height, eye height): foals scale by 0.7, other kinds by 0.5.
-pub(super) const fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
+pub(super) fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
     let facts = &entity_types::FACTS[kind.entity_type() as usize];
     let eye = match kind {
         MobType::Horse => entity_types::HORSE_EYE_HEIGHT,
         MobType::Donkey => entity_types::DONKEY_EYE_HEIGHT,
         MobType::Mule => entity_types::MULE_EYE_HEIGHT,
         MobType::Llama => entity_types::LLAMA_EYE_HEIGHT,
+        // `EntityTypes` 没给这两种另设眼高，用缺省的 `height * 0.85`。
+        MobType::SkeletonHorse | MobType::ZombieHorse => facts.height * 0.85,
         _ => unreachable!(),
     };
     let scale = if !baby {
         1.0
-    } else if matches!(kind, MobType::Horse) {
+    } else if matches!(kind, MobType::Horse | MobType::SkeletonHorse | MobType::ZombieHorse) {
         0.7
     } else {
         0.5
     };
+    if baby && matches!(kind, MobType::SkeletonHorse | MobType::ZombieHorse) {
+        let (width, height, eye_height) = if kind == MobType::SkeletonHorse {
+            (
+                entity_types::SKELETON_HORSE_BABY_WIDTH,
+                entity_types::SKELETON_HORSE_BABY_HEIGHT,
+                entity_types::SKELETON_HORSE_BABY_EYE_HEIGHT,
+            )
+        } else {
+            (
+                entity_types::ZOMBIE_HORSE_BABY_WIDTH,
+                entity_types::ZOMBIE_HORSE_BABY_HEIGHT,
+                entity_types::ZOMBIE_HORSE_BABY_EYE_HEIGHT,
+            )
+        };
+        return (width, height, eye_height);
+    }
     (facts.width * scale, facts.height * scale, eye * scale)
 }
 
@@ -203,10 +221,12 @@ pub(super) fn shear_drop_offset(kind: MobType, baby: bool) -> mc_bamboo_core::Ve
 /// `createBaseHorseAttributes`，驴骡羊驼再用 `createBaseChestedHorseAttributes` 的速度和跳跃。
 ///
 /// `createBaseHorseAttributes`, with the chested speed and jump for the other kinds.
-pub(super) fn attributes(kind: MobType) -> Attributes {
+pub(in crate::entity::mob) fn attributes(kind: MobType) -> Attributes {
     let mut attrs = Attributes::cow();
     let (speed, jump) = if kind == MobType::Horse {
         (f64::from(0.225_f32), 0.7)
+    } else if kind == MobType::SkeletonHorse {
+        (entity_types::SKELETON_HORSE_MOVEMENT_SPEED, 0.7)
     } else {
         (f64::from(0.175_f32), 0.5)
     };

@@ -35,8 +35,24 @@ pub(in crate::entity::mob) fn finalize_spawn(
         // `Camel` 没有覆盖 `AbstractHorse.randomizeAttributes`（基类是空的），所以骆驼不抽属性。
         // `Camel` does not override `AbstractHorse.randomizeAttributes` (empty base), so no
         // attribute draws for camels.
-        if mob.mob_type != MobType::Camel {
-            randomize_attributes(mob, random);
+        match mob.mob_type {
+            MobType::Camel => {}
+            MobType::SkeletonHorse => {
+                crate::entity::mob::skeleton_horse::randomize_skeleton(mob, random);
+            }
+            MobType::ZombieHorse => {
+                if let Some(entry) = mob.attributes.instance(
+                    mc_bamboo_data::registries::attribute::JUMP_STRENGTH,
+                ) {
+                    entry.base = crate::entity::mob::skeleton_horse::randomize_zombie_jump(random);
+                }
+                if let Some(entry) = mob.attributes.instance(
+                    mc_bamboo_data::registries::attribute::MOVEMENT_SPEED,
+                ) {
+                    entry.base = crate::entity::mob::skeleton_horse::randomize_zombie_speed(random);
+                }
+            }
+            _ => randomize_attributes(mob, random),
         }
         if age.roll_baby(random) {
             living::set_age(me, mob, BABY_START_AGE);

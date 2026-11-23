@@ -68,11 +68,13 @@ mod skeleton_drops;
 pub mod slime;
 pub mod smooth_swim;
 pub mod spawn;
+pub mod skeleton_horse;
 pub mod spider;
 pub mod squid;
 pub mod stray;
 pub mod tadpole;
 pub mod tame;
+pub mod thunder;
 pub(crate) mod timing;
 pub mod turtle;
 mod water;
@@ -168,13 +170,17 @@ pub enum MobType {
     Bat,
     Phantom,
     Camel,
+    /// 骷髅马，`SkeletonHorse`。
+    SkeletonHorse,
+    /// 僵尸马，`ZombieHorse`。
+    ZombieHorse,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 48] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -221,6 +227,8 @@ impl MobType {
         Self::Tadpole,
         Self::Bat,
         Self::Phantom,
+        Self::SkeletonHorse,
+        Self::ZombieHorse,
     ];
 
     /// 注册表 ID。
@@ -273,6 +281,8 @@ impl MobType {
             Self::Bat => ids::BAT,
             Self::Phantom => ids::PHANTOM,
             Self::Camel => ids::CAMEL,
+            Self::SkeletonHorse => ids::SKELETON_HORSE,
+            Self::ZombieHorse => ids::ZOMBIE_HORSE,
         }
     }
 
@@ -325,6 +335,8 @@ impl MobType {
             Self::Bat => "minecraft:bat",
             Self::Phantom => "minecraft:phantom",
             Self::Camel => "minecraft:camel",
+            Self::SkeletonHorse => "minecraft:skeleton_horse",
+            Self::ZombieHorse => "minecraft:zombie_horse",
         }
     }
 
@@ -366,7 +378,13 @@ impl MobType {
     pub const fn is_equine(self) -> bool {
         matches!(
             self,
-            Self::Horse | Self::Donkey | Self::Mule | Self::Llama | Self::Camel
+            Self::Horse
+                | Self::Donkey
+                | Self::Mule
+                | Self::Llama
+                | Self::Camel
+                | Self::SkeletonHorse
+                | Self::ZombieHorse
         )
     }
 
@@ -407,9 +425,15 @@ impl MobType {
             // 大小 1 的尺寸；别的大小看 [`Mob::dimensions`]。
             // Size 1; other sizes go through [`Mob::dimensions`].
             (Self::Slime, _) => slime::dimensions(1),
-            (Self::Horse | Self::Donkey | Self::Mule | Self::Llama, _) => {
-                equine::dimensions(self, baby)
-            }
+            (
+                Self::Horse
+                | Self::Donkey
+                | Self::Mule
+                | Self::Llama
+                | Self::SkeletonHorse
+                | Self::ZombieHorse,
+                _,
+            ) => equine::dimensions(self, baby),
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Armadillo, baby) => armadillo::dimensions(baby),
             (Self::Goat, baby) => goat::dimensions(baby),
@@ -788,6 +812,8 @@ impl MobType {
             Self::Bat => "minecraft:entities/bat",
             Self::Phantom => "minecraft:entities/phantom",
             Self::Camel => "minecraft:entities/camel",
+            Self::SkeletonHorse => "minecraft:entities/skeleton_horse",
+            Self::ZombieHorse => "minecraft:entities/zombie_horse",
         }
     }
 
@@ -892,6 +918,8 @@ impl MobType {
             // [`living::play_ambient_sound`].
             Self::Parrot => Some("minecraft:entity.parrot.ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.ambient"),
+            Self::ZombieHorse => Some("minecraft:entity.zombie_horse.ambient"),
         }
     }
 
@@ -936,6 +964,8 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.hurt"),
             Self::Phantom => Some("minecraft:entity.phantom.hurt"),
             Self::Camel => Some("minecraft:entity.camel.hurt"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.hurt"),
+            Self::ZombieHorse => Some("minecraft:entity.zombie_horse.hurt"),
         }
     }
 
@@ -980,6 +1010,8 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.death"),
             Self::Phantom => Some("minecraft:entity.phantom.death"),
             Self::Camel => Some("minecraft:entity.camel.death"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.death"),
+            Self::ZombieHorse => Some("minecraft:entity.zombie_horse.death"),
         }
     }
 
@@ -1031,6 +1063,8 @@ impl MobType {
             // Phantoms keep the default `playStepSound`: the block's own step sound.
             Self::Phantom => None,
             Self::Camel => Some("minecraft:entity.camel.step"),
+            Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.step_water"),
+            Self::ZombieHorse => Some("minecraft:entity.horse.step"),
         }
     }
 
@@ -1084,6 +1118,8 @@ impl MobType {
             Self::Bat => items::BAT_SPAWN_EGG,
             Self::Phantom => items::PHANTOM_SPAWN_EGG,
             Self::Camel => items::CAMEL_SPAWN_EGG,
+            Self::SkeletonHorse => items::SKELETON_HORSE_SPAWN_EGG,
+            Self::ZombieHorse => items::ZOMBIE_HORSE_SPAWN_EGG,
         }
     }
 
@@ -1136,6 +1172,8 @@ impl MobType {
             Self::Bat => "entity.minecraft.bat",
             Self::Phantom => "entity.minecraft.phantom",
             Self::Camel => "entity.minecraft.camel",
+            Self::SkeletonHorse => "entity.minecraft.skeleton_horse",
+            Self::ZombieHorse => "entity.minecraft.zombie_horse",
         }
     }
 
@@ -1412,6 +1450,10 @@ pub enum DamageKind {
     /// `minecraft:player_explosion`: an explosion with a direct and a causing entity,
     /// which is what a creeper blast is.
     PlayerExplosion,
+    /// 雷击，`minecraft:lightning_bolt`。
+    ///
+    /// A lightning strike, `minecraft:lightning_bolt`.
+    LightningBolt,
 }
 
 impl DamageKind {
@@ -1446,6 +1488,7 @@ impl DamageKind {
             Self::Explosion => "minecraft:explosion",
             Self::DryOut => "minecraft:dry_out",
             Self::PlayerExplosion => "minecraft:player_explosion",
+            Self::LightningBolt => "minecraft:lightning_bolt",
         }
     }
 
@@ -1500,6 +1543,7 @@ impl DamageKind {
             Self::Explosion => "explosion",
             Self::DryOut => "dryout",
             Self::PlayerExplosion => "explosion.player",
+            Self::LightningBolt => "lightningBolt",
         }
     }
 
@@ -1642,7 +1686,8 @@ impl DamageKind {
             | Self::Lava
             | Self::HotFloor
             | Self::SweetBerryBush
-            | Self::DryOut => TENTH,
+            | Self::DryOut
+            | Self::LightningBolt => TENTH,
             _ => 0.0,
         }
     }
@@ -1654,14 +1699,20 @@ impl DamageKind {
         matches!(self, Self::MobAttackNoAggro)
     }
 
-    /// `#panic_environmental_causes`（这里有的那几种；`lightning_bolt` 和 `sulfur_cube_hot` 还没有）。
+    /// `#panic_environmental_causes`（这里有的那几种；`sulfur_cube_hot` 还没有）。
     ///
-    /// `#panic_environmental_causes` (the kinds modelled here; `lightning_bolt` and
-    /// `sulfur_cube_hot` do not exist yet).
+    /// `#panic_environmental_causes` (the kinds modelled here; `sulfur_cube_hot`
+    /// does not exist yet).
     pub const fn panic_environmental_causes(self) -> bool {
         matches!(
             self,
-            Self::Cactus | Self::Freeze | Self::HotFloor | Self::InFire | Self::Lava | Self::OnFire
+            Self::Cactus
+                | Self::Freeze
+                | Self::HotFloor
+                | Self::InFire
+                | Self::Lava
+                | Self::OnFire
+                | Self::LightningBolt
         )
     }
 
@@ -2262,6 +2313,8 @@ pub struct Mob {
     /// (vanilla moves the rider off the mount synchronously; Bamboo does it in `riding::tick`).
     pub(super) ejected_passenger: Option<EntityUid>,
     pub equine: Option<Box<equine::EquineState>>,
+    /// 骷髅马自己的陷阱状态。
+    pub skeleton_horse: Option<Box<skeleton_horse::SkeletonHorseState>>,
     /// 跑大脑的生物（犰狳）的 `Brain`；用目标选择器的生物是 `None`。
     ///
     /// The `Brain` of brain-driven mobs (armadillos); `None` for goal-driven mobs.
@@ -2404,6 +2457,8 @@ impl Mob {
             MobType::Bat => bat::attributes(),
             MobType::Phantom => phantom::attributes(),
             MobType::Camel => camel::attributes(),
+            MobType::SkeletonHorse => skeleton_horse::skeleton_attributes(),
+            MobType::ZombieHorse => skeleton_horse::zombie_attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2468,6 +2523,7 @@ impl Mob {
             // alongside the brain.
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
+            MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -2524,6 +2580,7 @@ impl Mob {
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),
             MobType::Pillager => pillager::targets(),
+            MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -2725,6 +2782,8 @@ impl Mob {
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
+            skeleton_horse: (mob_type == MobType::SkeletonHorse)
+                .then(|| Box::new(skeleton_horse::SkeletonHorseState::default())),
         };
         if mob_type == MobType::Salmon {
             // `Salmon` 的 `DATA_TYPE` 缺省是 `Variant.MEDIUM`。

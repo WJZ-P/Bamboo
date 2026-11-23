@@ -883,6 +883,25 @@ pub trait Level: LevelSideState + LevelEntities {
         mc_bamboo_data::registries::biome::PLAINS
     }
 
+    /// 雷击找避雷针时的 POI 替代查询：返回离 `center` 最近的露天避雷针上方一格。
+    /// 默认逐格扫已加载的区块；游戏层覆盖成按区块段调色板先筛。以后换成正式 POI 查询。
+    ///
+    /// A stand-in for the POI query used when lightning looks for a rod: return the
+    /// cell above the nearest exposed lightning rod. The default scans loaded
+    /// chunks cell by cell; the game layer narrows it down with section palettes.
+    /// A full POI index replaces this later.
+    fn lightning_rod_near(&self, center: BlockPos, radius: i32) -> Option<BlockPos> {
+        crate::lightning_rod::nearest_lightning_rod_from(self, center, radius)
+    }
+
+    /// 这个区块现在有没有加载。默认都加载；已加载模式的世界覆盖它。
+    ///
+    /// Whether this chunk is currently loaded. All chunks are loaded by default;
+    /// loaded-mode worlds override it.
+    fn chunk_is_loaded(&self, _chunk: ChunkPos) -> bool {
+        true
+    }
+
     /// `ChunkGenerator.getMobsAt` 的加权表。默认取群系表；对拍场景可以固定候选表。
     ///
     /// The weighted table from `ChunkGenerator.getMobsAt`. Defaults to the biome table;

@@ -33,6 +33,7 @@ pub mod interact;
 mod item_exchange;
 mod item_use;
 pub mod level;
+pub mod lightning_rod;
 mod machine_container;
 pub mod mining;
 pub mod placement;

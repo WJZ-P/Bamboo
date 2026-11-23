@@ -951,6 +951,17 @@ pub struct ProjectileFacts {
     pub mule_eye_height: f32,
     pub donkey_eye_height: f32,
     pub horse_eye_height: f32,
+    /// `SkeletonHorse.createAttributes` 和幼年尺寸。
+    pub skeleton_horse_max_health: f64,
+    pub skeleton_horse_movement_speed: f64,
+    pub skeleton_horse_baby_width: f32,
+    pub skeleton_horse_baby_height: f32,
+    pub skeleton_horse_baby_eye_height: f32,
+    /// `ZombieHorse.createAttributes` 和幼年尺寸。
+    pub zombie_horse_max_health: f64,
+    pub zombie_horse_baby_width: f32,
+    pub zombie_horse_baby_height: f32,
+    pub zombie_horse_baby_eye_height: f32,
     pub horse_flags: u8,
     pub horse_variant: u8,
     pub horse_chest: u8,
