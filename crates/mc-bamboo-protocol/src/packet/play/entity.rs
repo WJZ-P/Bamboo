@@ -358,6 +358,10 @@ pub enum EntityData {
     ///
     /// `Cat.DATA_SOUND_VARIANT_ID`: `cat_sound_variant` registry id.
     CatSoundVariant(i32),
+    /// `Parrot.DATA_VARIANT_ID`：INT，0..=4。
+    ///
+    /// `Parrot.DATA_VARIANT_ID`: INT, 0..=4.
+    ParrotVariant(i32),
     ArrowFlags(u8),
     ArrowPierce(i8),
     ArrowInGround(bool),
@@ -493,6 +497,7 @@ impl EntityData {
             Self::CatRelaxStateOne(_) => mc_bamboo_data::entity_types::CAT_RELAX_STATE_ONE,
             Self::CatCollar(_) => mc_bamboo_data::entity_types::CAT_COLLAR,
             Self::CatSoundVariant(_) => mc_bamboo_data::entity_types::CAT_SOUND_VARIANT,
+            Self::ParrotVariant(_) => mc_bamboo_data::entity_types::PARROT_VARIANT,
             Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
             Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
             Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
@@ -782,6 +787,10 @@ impl EntityData {
             }
             Self::CatSoundVariant(value) => {
                 write_data_header(out, self.index(), SERIALIZER_CAT_SOUND_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::ParrotVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
             }
             Self::PandaUnhappy(value) | Self::PandaSneeze(value) | Self::PandaEat(value) => {

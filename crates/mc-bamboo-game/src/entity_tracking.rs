@@ -1165,6 +1165,34 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
 /// 僵尸/尸壳的元数据。官方 `ClassTreeIdRegistry` 按类树导出：
 /// 16 `ZombieBaby`(BOOL)、17 `SpecialType`(INT)、18 `DrownedConverting`(BOOL)，
 /// 和牛的 `AgeableMob.Baby`(16) 不是同一个字段。
+/// `LivingEntity.DATA_EFFECT_PARTICLES` / `DATA_EFFECT_AMBIENCE_ID`：可见效果的颜色列表和
+/// 是否有环境效果。只发有内容的项。
+///
+/// `LivingEntity.DATA_EFFECT_PARTICLES` / `DATA_EFFECT_AMBIENCE_ID`: the visible effects'
+/// colours and whether any effect is ambient. Only non-empty values are sent.
+fn effect_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic, out: &mut Vec<EntityData>) {
+    let colors: Vec<i32> = mob
+        .status_effects
+        .iter()
+        .filter(|effect| effect.visible)
+        .map(|effect| {
+            // `DustParticleOptions` 把颜色补成不透明的 ARGB。
+            // `DustParticleOptions` makes the colour opaque ARGB.
+            mc_bamboo_data::potions::EFFECT_COLORS
+                .get(effect.effect as usize)
+                .copied()
+                .unwrap_or(0)
+                | -16_777_216
+        })
+        .collect();
+    if !colors.is_empty() {
+        out.push(EntityData::EffectParticles(colors));
+    }
+    if mob.status_effects.iter().any(|effect| effect.ambient) {
+        out.push(EntityData::EffectAmbience(true));
+    }
+}
+
 fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::Pose;
     let mut flags = 0u8;
@@ -1205,6 +1233,7 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
         out.push(EntityData::TicksFrozen(mob.ticks_frozen));
     }
     out.push(EntityData::Health(mob.health));
+    effect_data(mob, &mut out);
     if mob.using_item_flags != 0 {
         out.push(EntityData::LivingFlags(mob.using_item_flags));
     }
@@ -1457,6 +1486,7 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     // `LivingEntity` 的 `DATA_LIVING_ENTITY_FLAGS` 恒为 0，`DATA_HEALTH_ID` 默认 1。
     // The living flags are always 0 and health defaults to 1.
     out.push(EntityData::Health(mob.health));
+    effect_data(mob, &mut out);
     if mob.using_item_flags != 0 {
         out.push(EntityData::LivingFlags(mob.using_item_flags));
     }
@@ -1621,6 +1651,9 @@ fn farm_default_data(
         )),
         (MobType::Cat, facts::CAT_SOUND_VARIANT) => Some(EntityData::CatSoundVariant(
             mc_bamboo_blocks::entity::mob::cat::default_sound_variant(),
+        )),
+        (MobType::Parrot, facts::PARROT_VARIANT) => Some(EntityData::ParrotVariant(
+            mc_bamboo_blocks::entity::mob::parrot::DEFAULT_VARIANT,
         )),
         (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
             Some(EntityData::GlowSquidDarkTicks(0))
@@ -1816,6 +1849,19 @@ fn farm_non_default_data(
             }
             if mob.cat.sound_variant != cat::default_sound_variant() {
                 out.push(EntityData::CatSoundVariant(mob.cat.sound_variant));
+            }
+            true
+        }
+        MobType::Parrot => {
+            use mc_bamboo_blocks::entity::mob::parrot;
+            if mob.tame_flags != 0 {
+                out.push(EntityData::TameFlags(mob.tame_flags));
+            }
+            if mob.owner.is_some() {
+                out.push(EntityData::TameOwner(mob.owner));
+            }
+            if mob.parrot.variant != parrot::DEFAULT_VARIANT {
+                out.push(EntityData::ParrotVariant(mob.parrot.variant));
             }
             true
         }

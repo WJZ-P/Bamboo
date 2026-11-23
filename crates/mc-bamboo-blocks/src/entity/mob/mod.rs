@@ -50,6 +50,7 @@ pub mod nbt;
 pub mod neutral;
 pub mod ocelot;
 pub mod panda;
+pub mod parrot;
 pub mod path;
 mod pig;
 pub mod polar_bear;
@@ -126,6 +127,7 @@ pub enum MobType {
     Panda,
     Ocelot,
     Cat,
+    Parrot,
     Zombie,
     Husk,
     Skeleton,
@@ -162,7 +164,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -175,6 +177,7 @@ impl MobType {
         Self::Panda,
         Self::Ocelot,
         Self::Cat,
+        Self::Parrot,
         Self::Horse,
         Self::Donkey,
         Self::Mule,
@@ -223,6 +226,7 @@ impl MobType {
             Self::Panda => ids::PANDA,
             Self::Ocelot => ids::OCELOT,
             Self::Cat => ids::CAT,
+            Self::Parrot => ids::PARROT,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -271,6 +275,7 @@ impl MobType {
             Self::Panda => "minecraft:panda",
             Self::Ocelot => "minecraft:ocelot",
             Self::Cat => "minecraft:cat",
+            Self::Parrot => "minecraft:parrot",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -401,6 +406,7 @@ impl MobType {
             (Self::Panda, baby) => panda::dimensions(baby),
             (Self::Ocelot, baby) => ocelot::dimensions(baby),
             (Self::Cat, baby) => cat::dimensions(baby),
+            (Self::Parrot, _) => parrot::dimensions(),
             (Self::Squid | Self::GlowSquid, baby) => squid::dimensions(self, baby),
             (Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish, _) => {
                 fish::dimensions(self, 1, 0)
@@ -582,7 +588,7 @@ impl MobType {
     /// negative (later group members roll `setAge(-24000)`), but they are not babies, never
     /// grow up and do not save the three `Age` keys.
     pub const fn can_be_a_baby(self) -> bool {
-        !matches!(self, Self::Frog)
+        !matches!(self, Self::Frog | Self::Parrot)
     }
 
     /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼、海豚）：不吃水流，
@@ -669,6 +675,7 @@ impl MobType {
             Self::Panda => "minecraft:entities/panda",
             Self::Ocelot => "minecraft:entities/ocelot",
             Self::Cat => "minecraft:entities/cat",
+            Self::Parrot => "minecraft:entities/parrot",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -790,6 +797,10 @@ impl MobType {
             Self::Tadpole => None,
             Self::Ocelot => Some("minecraft:entity.ocelot.ambient"),
             Self::Cat => Some("minecraft:entity.cat.stray_ambient"),
+            // 鹦鹉的叫声有模仿分支，由 [`living::play_ambient_sound`] 拦截。
+            // Parrot ambient sounds have an imitation branch handled in
+            // [`living::play_ambient_sound`].
+            Self::Parrot => Some("minecraft:entity.parrot.ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
         }
     }
@@ -805,6 +816,7 @@ impl MobType {
             Self::Panda => Some("minecraft:entity.panda.hurt"),
             Self::Ocelot => Some("minecraft:entity.ocelot.hurt"),
             Self::Cat => None,
+            Self::Parrot => Some("minecraft:entity.parrot.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -845,6 +857,7 @@ impl MobType {
             Self::Panda => Some("minecraft:entity.panda.death"),
             Self::Ocelot => Some("minecraft:entity.ocelot.death"),
             Self::Cat => None,
+            Self::Parrot => Some("minecraft:entity.parrot.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -915,6 +928,7 @@ impl MobType {
             Self::Goat => Some("minecraft:entity.goat.step"),
             Self::Frog => Some("minecraft:entity.frog.step"),
             Self::Tadpole | Self::Ocelot | Self::Cat => None,
+            Self::Parrot => Some("minecraft:entity.parrot.step"),
             Self::Camel => Some("minecraft:entity.camel.step"),
         }
     }
@@ -935,6 +949,7 @@ impl MobType {
             Self::Panda => items::PANDA_SPAWN_EGG,
             Self::Ocelot => items::OCELOT_SPAWN_EGG,
             Self::Cat => items::CAT_SPAWN_EGG,
+            Self::Parrot => items::PARROT_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -983,6 +998,7 @@ impl MobType {
             Self::Panda => "entity.minecraft.panda",
             Self::Ocelot => "entity.minecraft.ocelot",
             Self::Cat => "entity.minecraft.cat",
+            Self::Parrot => "entity.minecraft.parrot",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -2038,6 +2054,10 @@ pub struct Mob {
     ///
     /// The cat's coat/sound variants, collar colour, lying and crouching state.
     pub cat: cat::Cat,
+    /// 鹦鹉的品种和扇翅状态。
+    ///
+    /// The parrot's variant and flapping state.
+    pub parrot: parrot::Parrot,
     /// 中立生物的持久愤怒（`NeutralMob`），北极熊在用。
     ///
     /// Persistent anger of neutral mobs (`NeutralMob`); polar bears use it.
@@ -2207,6 +2227,7 @@ impl Mob {
             MobType::Panda => panda::attributes(),
             MobType::Ocelot => ocelot::attributes(),
             MobType::Cat => cat::attributes(),
+            MobType::Parrot => parrot::attributes(),
             MobType::Squid | MobType::GlowSquid => squid::attributes(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::attributes()
@@ -2264,6 +2285,7 @@ impl Mob {
             MobType::Panda => panda::goals(&mut navigation),
             MobType::Ocelot => ocelot::goals(&mut navigation),
             MobType::Cat => cat::goals(&mut navigation),
+            MobType::Parrot => parrot::goals(&mut navigation),
             MobType::Squid | MobType::GlowSquid => squid::goals(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::goals(mob_type)
@@ -2317,6 +2339,7 @@ impl Mob {
             MobType::Panda => panda::target_goals(),
             MobType::Ocelot => ocelot::target_goals(),
             MobType::Cat => cat::target_goals(),
+            MobType::Parrot => GoalSelector::default(),
             MobType::Fox => fox::target_goals(),
             MobType::Wolf => wolf::target_goals(),
             MobType::Rabbit
@@ -2499,6 +2522,7 @@ impl Mob {
             sprinting: false,
             ocelot: ocelot::Ocelot::default(),
             cat: cat::Cat::default(),
+            parrot: parrot::Parrot::default(),
             anger: neutral::Anger::default(),
             creeper: creeper::CreeperState::default(),
             spider: spider::SpiderState::default(),
@@ -2557,6 +2581,9 @@ impl Mob {
         }
         if mob_type == MobType::Camel {
             camel::configure(&mut mob);
+        }
+        if mob_type == MobType::Parrot {
+            parrot::configure(&mut mob);
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -2757,6 +2784,11 @@ pub struct MobPublic {
     /// The attribute table for `update_attributes` (instantiated entries only).
     pub attributes: Attributes,
     pub health: f32,
+    /// 当前挂着的状态效果，同步 `DATA_EFFECT_PARTICLES` / `DATA_EFFECT_AMBIENCE_ID` 用。
+    ///
+    /// The active status effects, synced through `DATA_EFFECT_PARTICLES` /
+    /// `DATA_EFFECT_AMBIENCE_ID`.
+    pub status_effects: effects::EffectMap,
     pub baby: bool,
     /// `AgeableMob.AGE_LOCKED` 元数据。
     pub age_locked: bool,
@@ -2837,6 +2869,10 @@ pub struct MobPublic {
     ///
     /// Synced state of a cat.
     pub cat: cat::Cat,
+    /// 鹦鹉的同步状态。
+    ///
+    /// Synced state of a parrot.
+    pub parrot: parrot::Parrot,
     /// 苦力怕的三项同步元数据：`DATA_SWELL_DIR`、`DATA_IS_POWERED`、`DATA_IS_IGNITED`。
     ///
     /// The three synced creeper items: swell direction, powered and ignited.
@@ -2956,6 +2992,7 @@ impl MobPublic {
             uuid: mob.uuid,
             attributes: mob.attributes.clone(),
             health: mob.health,
+            status_effects: mob.effects.clone(),
             baby: mob.is_baby(),
             age_locked: mob.age_locked,
             x_rot: mob.x_rot,
@@ -2996,6 +3033,7 @@ impl MobPublic {
             ocelot_trusting: mob.ocelot.trusting,
             ocelot_crouching: mob.ocelot.crouching,
             cat: mob.cat,
+            parrot: mob.parrot.clone(),
             creeper_swell_dir: mob.creeper.swell_dir,
             creeper_powered: mob.creeper.powered,
             creeper_ignited: mob.creeper.ignited,

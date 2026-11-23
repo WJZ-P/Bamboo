@@ -87,6 +87,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Creeper {
         super::creeper::tick(me, mob, ctx);
     }
+    // `ShoulderRidingEntity.tick`：上肩冷却先加一。
+    // `ShoulderRidingEntity.tick`: the shoulder cooldown goes up first.
+    if mob.mob_type == super::MobType::Parrot {
+        mob.parrot.ride_cooldown += 1;
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
@@ -97,7 +102,17 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::drowned::update_swimming(me, mob, target_in_water);
     }
     if !me.removed {
+        if mob.mob_type == super::MobType::Parrot {
+            // `Parrot.aiStep` 在 `super.aiStep` 之前的部分。
+            // The part of `Parrot.aiStep` before `super.aiStep`.
+            super::parrot::before_ai_step(me, mob, ctx);
+        }
         ai_step(me, mob, ctx);
+        if mob.mob_type == super::MobType::Parrot && !me.removed {
+            // `Parrot.aiStep` 结尾的 `calculateFlapping`。
+            // `calculateFlapping` at the end of `Parrot.aiStep`.
+            super::parrot::after_ai_step(me, mob);
+        }
     }
     // `Zombie.tick` 结尾的 `drowningTracker.tick()`，在 `super.tick()` 之后。
     // The `drowningTracker.tick()` at the end of `Zombie.tick`, after `super.tick()`.
@@ -604,6 +619,12 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             }
             if mob.mob_type == super::MobType::Cat {
                 super::cat::play_ambient_sound(me, mob);
+                return;
+            }
+            if mob.mob_type == super::MobType::Parrot {
+                // `Parrot.getAmbientSound` 用世界随机源挑模仿音。
+                // `Parrot.getAmbientSound` picks an imitation with the level random.
+                super::parrot::ambient_sound(me, mob, ctx);
                 return;
             }
             // 受惊的犰狳没有叫声：`makeSound` 不跑，也不取音高。
@@ -1547,6 +1568,12 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         super::fish::move_control_tick(me, mob);
         return;
     }
+    if mob.mob_type == super::MobType::Parrot {
+        // `Parrot` 用 `FlyingMoveControl`。
+        // Parrots use `FlyingMoveControl`.
+        super::parrot::move_control_tick(me, mob);
+        return;
+    }
     if super::turtle::is_turtle(mob.mob_type) {
         super::turtle::move_control_tick(me, mob);
         return;
@@ -1867,7 +1894,15 @@ fn travel_in_air(
     let air_drag = mob.attributes.value(attribute::AIR_DRAG_MODIFIER) as f32;
     let horizontal_air = modified_friction(0.91, air_drag);
     let horizontal = block_friction * horizontal_air;
-    let vertical = modified_friction(0.98, air_drag);
+    // `LivingEntity.travelInAir`：`omnidirectionalAirMover()`（鹦鹉、蜜蜂）竖直方向也用
+    // 0.91 的空气阻力，而不是 0.98。
+    // `LivingEntity.travelInAir`: an `omnidirectionalAirMover()` (parrot, bee) uses the
+    // 0.91 air drag vertically instead of 0.98.
+    let vertical = if mob.mob_type == super::MobType::Parrot {
+        horizontal_air
+    } else {
+        modified_friction(0.98, air_drag)
+    };
     me.delta = Vec3::new(
         movement.x * f64::from(horizontal),
         y * f64::from(vertical),
@@ -2212,6 +2247,11 @@ pub(crate) fn hurt_server(
     // `Panda.hurtServer`: stand up first, then the vanilla invulnerability checks.
     if mob.mob_type == super::MobType::Panda {
         mob.panda.sit(false);
+    }
+    // `Parrot.hurtServer`：受伤时取消坐下命令。
+    // `Parrot.hurtServer`: damage clears the sitting order.
+    if mob.mob_type == super::MobType::Parrot {
+        mob.tame.ordered_to_sit = false;
     }
     // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
     // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.

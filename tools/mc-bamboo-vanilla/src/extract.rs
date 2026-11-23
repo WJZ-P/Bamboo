@@ -1018,6 +1018,14 @@ pub struct ProjectileFacts {
     pub cat_relax_state_one: u8,
     pub cat_collar: u8,
     pub cat_sound_variant: u8,
+    /// `Parrot.DATA_VARIANT_ID` 的元数据 index（INT 序列化器）。
+    ///
+    /// The metadata index of `Parrot.DATA_VARIANT_ID` (INT serializer).
+    pub parrot_variant: u8,
+    /// `Parrot.MOB_SOUND_MAP` 的条目数，`getAmbient` 模仿叫声时 `nextInt` 的上界。
+    ///
+    /// The size of `Parrot.MOB_SOUND_MAP`, the `nextInt` bound when imitating a sound.
+    pub parrot_sound_map_size: i32,
     /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
     ///
     /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).

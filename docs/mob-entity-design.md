@@ -1015,6 +1015,58 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 
 ---
 
+### 5.20 第 16 轮：实现鹦鹉、飞行导航与鹦鹉的自然刷怪（op-misc，2026-11-22）
+
+- **新基础设施**：
+  - `path.rs` 新增 `EvaluatorFlags.fly` 与 `FlyNodeEvaluator` 的逐位移植（`fly_start` / `fly_probe` /
+    `fly_neighbors` / `fly_path_type`）：六轴 + 单轴斜向 + 水平对角 + 八个斜向角，探测顺序照官方；
+    `WALKABLE` 节点代价加一；`OPEN` 格的下方规则（`FIRE` / `DAMAGING` / `COCOA` / `FENCE` / 其余转
+    `WALKABLE`）和 `checkNeighbourBlocks` 保留传入类型。小体型生物的十个随机起点候选没有接（鹦鹉的
+    `getSize()` 是 0.633、本该走那条，见 §5.21）。
+  - `navigation.rs`：飞行导航的 `canUpdatePath`（不是乘客恒真）、`createPath` 跳过加载与地表检查、
+    `tick` 的 `getGroundY` 跳过、`getTempMobPos` 用实体坐标、`stable_destination` 用实心近似；
+    `canMoveDirectly` 的「流体也算阻挡」目前只挡源方块水（已知差异）。
+  - `control` / `living.rs`：`FlyingMoveControl(10, false)`（空中用 `FLYING_SPEED`、`setNoGravity`、
+    `yya` 竖直速度）、`omnidirectionalAirMover` 的竖直 0.91 空气阻力、`Parrot.checkFallDamage` 空实现、
+    `hurtServer` 清坐姿。
+  - `goals.rs` 新增 `Goal::Parrot` 与 `hover_random_pos` / `air_and_water_random_pos`；`RandomPos`
+    家族的扇形偏移改成官方的 f32 乘法 + `Mth.SQRT_OF_TWO`（float）常量。
+  - 实体跟踪补 `DATA_EFFECT_PARTICLES` / `DATA_EFFECT_AMBIENCE_ID`（可见效果的颜色列表，ARGB 补不透明
+    alpha），曲奇中毒的死亡刻因此和官方包一致。
+- **鹦鹉（`parrot.rs`）**：属性 6 / 0.2 / 0.4 / 3、尺寸 0.5×0.9（眼高 0.765）、五种颜色
+  （`PARROT_VARIANT = 20`，`Variant` 用官方旧版整数编码存盘）、不繁殖、不能长大；`Parrot.registerGoals`
+  的 8 个目标（恐慌 / 浮水 / 看玩家 / 坐下 / 跟主人 / `ParrotWanderGoal` / `LandOnOwnersShoulderGoal` /
+  `FollowMobGoal` 占位）；种子 1/10 驯服（事件 7/6、吃食声两次 `nextFloat`）、曲奇中毒 900 刻 + 玩家攻击
+  `Float.MAX_VALUE`（`MobInteraction::self_hurt` 交给游戏层结算）、主人切换坐站；每 400 刻的世界随机源模仿
+  附近生物、每 1000 次的叫声里挑 42 条模仿音之一；`calculateFlapping` 与翅膀声；自然刷怪
+  `#parrots_spawnable_on` + 亮度 > 8；`finalizeSpawn` 抽品种 + `AgeableMobGroupData(false)`（不抽幼崽）。
+- **对拍**：`mob-oracle --only parrot` 4 例 860 刻 0 不一致（`parrot_idle` 树桩闲逛、`parrot_tame`
+  驯服与坐站、`parrot_cookie` 中毒死亡含掉落与包、`parrot_imitate` 模仿僵尸）；`natural_spawn` 734 例
+  2936 刻 0 不一致（`parrot_jungle=31`、`parrot_jungle_dim=0`）；`gen_spawn` 7000 例 0 不一致
+  （新增 `gen_parrot`）。
+- **已知限制与交接**：上肩只做到 `LandOnOwnersShoulderGoal` 运行（冷却、主人旁观者、没命令坐下），
+  玩家 `ShoulderEntityLeft` / `Right` 存档与同步未建模，所以两箱相交时不 `discard()`；`FollowMobGoal`
+  占位；`MOB_SOUND_MAP` 的 `HashMap` 迭代顺序按名字排序近似；悬停落点的随机源错位已在 §5.21 定位并修掉；
+  玩家的飞行 / 水里 / 细雪状态没进 `PlayerView`；拴绳未建模。
+
+
+### 5.21 第 17 轮：补上 `LandRandomPos.generateRandomPosTowardDirection` 的 `isNotStable`（op-misc，2026-11-22）
+
+- **根因**：`goals.rs` 的 `land_toward_direction` 只做了官方的「越界」和「离家」两个判定，少了第三个
+  `!GoalUtils.isNotStable(mob.getNavigation(), pos)`。Bamboo 里这个函数只有 `hover_random_pos` 调用
+  （`land_random_pos` 是另一份内联实现、本来就带 `stable_destination`），所以只有悬停落点缺这条判定：
+  官方会丢掉一批「目标格站不住」的候选，Bamboo 却接受，10 次抽点的接受序列因此不同，从选中落点那一刻起
+  实体随机源就错位两次。
+- **修复**：补上 `!stable_destination(mob, view, pos)`（飞行导航里是 `FlyingPathNavigation.isStableDestination`
+  的实心方块近似，见 README 已知差异）。
+- **验证**：`mob-oracle --only parrot` 4 例 860 刻仍 0 不一致；一个临时的无树桩 400 刻悬停场景（平坦地面、
+  种子 906、未进对拍表）从 308 处不一致降到 3 处，随机源逐刻一致；残留 3 处（第 245–247 刻）只有 `xr` / `hr`，
+  官方那几刻 `LookAtPlayerGoal` 已在看玩家、Bamboo 还没开始，随机源相同，原因未查到。
+- **仍没做**：`FlyNodeEvaluator.getStart` 小体型生物（`getSize() < 1.0`）的十个随机起点候选——寻路请求里没有
+  实体随机源，只试包围盒四角；鹦鹉的 `getSize()` 是 0.633，理论上会走那条，只在起点格代价为负时触发。
+
+---
+
 ## 6. 玩家生命期 0 + 1a（2026-11-18）
 
 期 0 的公共接缝和期 1a 的「受伤与减伤」已合入。以下列出**本期范围**和**已知差异**，

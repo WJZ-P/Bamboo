@@ -1252,6 +1252,15 @@ public final class Extractor {
         out.addProperty("catRelaxStateOne", entityAccessor(cat, "RELAX_STATE_ONE").id());
         out.addProperty("catCollar", entityAccessor(cat, "DATA_COLLAR_COLOR").id());
         out.addProperty("catSoundVariant", entityAccessor(cat, "DATA_SOUND_VARIANT_ID").id());
+        // 鹦鹉的 DATA_VARIANT_ID 用 INT 序列化器，index 紧随 TamableAnimal 之后。
+        // The parrot's DATA_VARIANT_ID uses the INT serializer; its index follows TamableAnimal.
+        Class<?> parrot = net.minecraft.world.entity.animal.parrot.Parrot.class;
+        out.addProperty("parrotVariant", entityAccessor(parrot, "DATA_VARIANT_ID").id());
+        // Parrot.getAmbient 在 nextInt(1000)==0 时 nextInt(MOB_SOUND_MAP.size()) 挑模仿的音效。
+        // Parrot.getAmbient draws nextInt(MOB_SOUND_MAP.size()) to pick an imitated sound.
+        java.lang.reflect.Field soundMap = parrot.getDeclaredField("MOB_SOUND_MAP");
+        soundMap.setAccessible(true);
+        out.addProperty("parrotSoundMapSize", ((java.util.Map<?, ?>) soundMap.get(null)).size());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();

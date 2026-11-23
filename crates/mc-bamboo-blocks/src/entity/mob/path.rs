@@ -133,6 +133,12 @@ pub struct EvaluatorFlags {
     /// in-water start skips the 0.5, cells above `#frog_prefer_jump_to` count as `OPEN`
     /// and deep-water neighbours get one more cost each time.
     pub frog: bool,
+    /// `FlyNodeEvaluator`（`FlyingPathNavigation`）：六向加十二个斜向邻居，`WALKABLE`
+    /// 格子的代价加一。鹦鹉在用。
+    ///
+    /// `FlyNodeEvaluator` (`FlyingPathNavigation`): six axis neighbours plus twelve
+    /// diagonal ones, with one extra cost on `WALKABLE` cells. Parrots use it.
+    pub fly: bool,
 }
 
 impl Default for EvaluatorFlags {
@@ -145,6 +151,7 @@ impl Default for EvaluatorFlags {
             swim: None,
             amphibious: false,
             frog: false,
+            fly: false,
         }
     }
 }
@@ -336,6 +343,8 @@ pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
     let mut search = Search::new(view, request.mob, request.flags);
     let start = if request.flags.swim.is_some() {
         search.swim_start()
+    } else if request.flags.fly {
+        search.fly_start()
     } else {
         search.get_start()
     };
@@ -669,6 +678,9 @@ impl<'a> Search<'a> {
     fn get_neighbors(&mut self, parent: usize, out: &mut Vec<usize>) {
         if let Some(allow_breaching) = self.flags.swim {
             return self.swim_neighbors(parent, allow_breaching, out);
+        }
+        if self.flags.fly {
+            return self.fly_neighbors(parent, out);
         }
         let node = self.nodes[parent];
         let mut jump_size = 0;
@@ -1034,10 +1046,21 @@ impl<'a> Search<'a> {
     fn path_type_of_mob(&self, x: i32, y: i32, z: i32) -> PathType {
         let mut types = [false; 27];
         let mut count = 0;
+        // `getPathTypeWithinMobBB` 里的每一次 `getPathType` 都是虚分派：飞行的求值器
+        // 用自己那一版，其余仍是 `getPathTypeStatic`。
+        // Every `getPathType` in `getPathTypeWithinMobBB` is virtual: the flying evaluator
+        // uses its own version, the rest keep `getPathTypeStatic`.
+        let cell_type = |pos: BlockPos| {
+            if self.flags.fly {
+                self.fly_path_type(pos)
+            } else {
+                self.path_type_static(pos)
+            }
+        };
         for i in 0..self.entity_width {
             for j in 0..self.entity_height {
                 for k in 0..self.entity_depth {
-                    let mut path_type = self.path_type_static(BlockPos::new(i + x, j + y, k + z));
+                    let mut path_type = cell_type(BlockPos::new(i + x, j + y, k + z));
                     // `FrogNodeEvaluator.getPathType`：脚下是偏好落点时直接算 `OPEN`。
                     // `FrogNodeEvaluator.getPathType`: `OPEN` above a preferred jump block.
                     let lily = self.flags.frog
@@ -1073,8 +1096,8 @@ impl<'a> Search<'a> {
                         path_type = PathType::Blocked;
                     }
                     if path_type == PathType::Rail
-                        && self.path_type_static(mob_pos) != PathType::Rail
-                        && self.path_type_static(mob_pos.below()) != PathType::Rail
+                        && cell_type(mob_pos) != PathType::Rail
+                        && cell_type(mob_pos.below()) != PathType::Rail
                     {
                         path_type = PathType::UnpassableRail;
                     }
@@ -1110,7 +1133,7 @@ impl<'a> Search<'a> {
                 best = path_type;
             }
         }
-        let centre = self.path_type_static(BlockPos::new(x, y, z));
+        let centre = cell_type(BlockPos::new(x, y, z));
         if self.entity_width > 1 {
             let lower = self.malus(centre) < best_malus;
             let danger = lower && self.malus(PathType::BigMobsCloseToDanger) < best_malus;
@@ -1128,6 +1151,39 @@ impl<'a> Search<'a> {
 
     fn path_type_static(&self, pos: BlockPos) -> PathType {
         path_type_static_with(&|pos| self.state(pos), self.min_y, pos)
+    }
+
+    /// `FlyNodeEvaluator.getPathType`：`OPEN` 格只被下方改成 `FIRE` / `DAMAGING` /
+    /// `COCOA` / `FENCE` / `WALKABLE`，保留 `OPEN` 时要按传入的类型再查一遍邻居。
+    ///
+    /// `FlyNodeEvaluator.getPathType`: an `OPEN` cell only changes to `FIRE` / `DAMAGING` /
+    /// `COCOA` / `FENCE` / `WALKABLE` from below, and the neighbour scan keeps the type it
+    /// was given.
+    fn fly_path_type(&self, pos: BlockPos) -> PathType {
+        let state_at = |pos: BlockPos| self.state(pos);
+        let mut path_type = state_path_type(state_at(pos));
+        if path_type == PathType::Open && pos.y > self.min_y {
+            let below_pos = pos.below();
+            let below = state_path_type(state_at(below_pos));
+            path_type = match below {
+                PathType::Fire | PathType::Lava => PathType::Fire,
+                PathType::Damaging => PathType::Damaging,
+                PathType::Cocoa => PathType::Cocoa,
+                // 自己站着的那格是栅栏时不算栅栏，保持 `OPEN`。
+                // A fence directly under the mob itself stays `OPEN`.
+                PathType::Fence if below_pos != self.mob.block_position() => PathType::Fence,
+                other
+                    if !matches!(other, PathType::Walkable | PathType::Open | PathType::Water) =>
+                {
+                    PathType::Walkable
+                }
+                _ => PathType::Open,
+            };
+        }
+        if matches!(path_type, PathType::Walkable | PathType::Open) {
+            path_type = check_neighbour_blocks_or(&state_at, pos, path_type);
+        }
+        path_type
     }
 }
 
@@ -1160,6 +1216,15 @@ fn path_type_static_with(
 
 /// `checkNeighbourBlocks(ctx, x, y, z, WALKABLE)`：按 x、y、z 的顺序，第一个危险的邻居说了算。
 fn check_neighbour_blocks(state_at: &dyn Fn(BlockPos) -> BlockState, pos: BlockPos) -> PathType {
+    check_neighbour_blocks_or(state_at, pos, PathType::Walkable)
+}
+
+/// `checkNeighbourBlocks(..., blockPathType)`：没有危险邻居时返回传入的类型。
+fn check_neighbour_blocks_or(
+    state_at: &dyn Fn(BlockPos) -> BlockState,
+    pos: BlockPos,
+    unchanged: PathType,
+) -> PathType {
     for dx in -1..=1 {
         for dy in -1..=1 {
             for dz in -1..=1 {
@@ -1176,7 +1241,7 @@ fn check_neighbour_blocks(state_at: &dyn Fn(BlockPos) -> BlockState, pos: BlockP
             }
         }
     }
-    PathType::Walkable
+    unchanged
 }
 
 /// Java 的 `a < b`：有 NaN 时为假。堆的上滤、下滤写成「不小于就停」。
@@ -1441,5 +1506,222 @@ impl Search<'_> {
         } else {
             PathType::Blocked
         }
+    }
+}
+
+impl Search<'_> {
+    /// `FlyNodeEvaluator.getStart`：不在水里时 `floor(y + 0.5)`；起点不可用就看包围盒四角。
+    /// 官方在小体型（`getSize() < 1.0`）时还会用实体随机源抽十个候选，鹦鹉的
+    /// `getSize()` 是 0.633，本该走那一条；寻路请求里没有实体随机源，这里只试四角，
+    /// 官方那三次一组取数没有复现（见 README 已知限制）。
+    ///
+    /// `FlyNodeEvaluator.getStart`: `floor(y + 0.5)` out of water, falling back to the
+    /// box corners. Vanilla also samples ten candidates from the entity random for small
+    /// mobs (`getSize() < 1.0`); a parrot's `getSize()` is 0.633, so it should take that
+    /// branch, but the path request has no entity random and only the four corners are
+    /// tried here (see the README known limits).
+    fn fly_start(&mut self) -> usize {
+        let mob = self.mob;
+        let start_y = if self.flags.can_float && mob.in_water {
+            let mut y = mth::floor(mob.position.y);
+            let at =
+                |y: i32| BlockPos::new(mth::floor(mob.position.x), y, mth::floor(mob.position.z));
+            while self.state(at(y)).is(blocks::WATER) {
+                y += 1;
+            }
+            y
+        } else {
+            mth::floor(mob.position.y + 0.5)
+        };
+        let start = BlockPos::new(
+            mth::floor(mob.position.x),
+            start_y,
+            mth::floor(mob.position.z),
+        );
+        if !self.fly_can_start_at(start) {
+            let bounds = mob.bounding_box();
+            let block_y = mth::floor(mob.position.y);
+            let corners = [
+                (bounds.min_x, bounds.min_z),
+                (bounds.min_x, bounds.max_z),
+                (bounds.max_x, bounds.min_z),
+                (bounds.max_x, bounds.max_z),
+            ];
+            for (x, z) in corners {
+                let pos = BlockPos::new(mth::floor(x), block_y, mth::floor(z));
+                if self.fly_can_start_at(pos) {
+                    return self.get_start_node(pos);
+                }
+            }
+        }
+        self.get_start_node(start)
+    }
+
+    /// `FlyNodeEvaluator.canStartAt`：只要求代价非负，不排除 `OPEN`。
+    ///
+    /// `FlyNodeEvaluator.canStartAt`: only a non-negative malus, `OPEN` included.
+    fn fly_can_start_at(&mut self, pos: BlockPos) -> bool {
+        let path_type = self.cached_path_type(pos.x, pos.y, pos.z);
+        self.malus(path_type) >= 0.0
+    }
+
+    fn fly_open(&self, slot: Option<usize>) -> Option<usize> {
+        slot.filter(|&index| !self.nodes[index].closed)
+    }
+
+    fn fly_has_malus(&self, slot: Option<usize>) -> bool {
+        slot.is_some_and(|index| self.nodes[index].cost_malus >= 0.0)
+    }
+
+    /// `FlyNodeEvaluator.getNeighbors`：六个轴向，再加十二个斜向；斜向要求中间经过的
+    /// 轴向邻居都有非负代价。
+    ///
+    /// `FlyNodeEvaluator.getNeighbors`: the six axis neighbours plus twelve diagonals,
+    /// each diagonal requiring the axis neighbours it passes through to have a
+    /// non-negative malus.
+    fn fly_neighbors(&mut self, parent: usize, out: &mut Vec<usize>) {
+        let node = self.nodes[parent];
+        let (x, y, z) = (node.x, node.y, node.z);
+        // 官方的探测顺序：六个轴向、四个单轴斜向、四个水平对角、八个斜向角。
+        // 每次探测都会改节点的代价，所以顺序不能变。
+        // Vanilla's probe order: six axis, four slanted, four horizontal diagonals, then
+        // eight corners. Every probe changes node costs, so the order matters.
+        let south = self.fly_probe(x, y, z + 1);
+        out.extend(self.fly_open(south));
+        let west = self.fly_probe(x - 1, y, z);
+        out.extend(self.fly_open(west));
+        let east = self.fly_probe(x + 1, y, z);
+        out.extend(self.fly_open(east));
+        let north = self.fly_probe(x, y, z - 1);
+        out.extend(self.fly_open(north));
+        let up = self.fly_probe(x, y + 1, z);
+        out.extend(self.fly_open(up));
+        let down = self.fly_probe(x, y - 1, z);
+        out.extend(self.fly_open(down));
+
+        let south_up = self.fly_probe(x, y + 1, z + 1);
+        if self.fly_has_malus(south) && self.fly_has_malus(up) {
+            out.extend(self.fly_open(south_up));
+        }
+        let west_up = self.fly_probe(x - 1, y + 1, z);
+        if self.fly_has_malus(west) && self.fly_has_malus(up) {
+            out.extend(self.fly_open(west_up));
+        }
+        let east_up = self.fly_probe(x + 1, y + 1, z);
+        if self.fly_has_malus(east) && self.fly_has_malus(up) {
+            out.extend(self.fly_open(east_up));
+        }
+        let north_up = self.fly_probe(x, y + 1, z - 1);
+        if self.fly_has_malus(north) && self.fly_has_malus(up) {
+            out.extend(self.fly_open(north_up));
+        }
+        let south_down = self.fly_probe(x, y - 1, z + 1);
+        if self.fly_has_malus(south) && self.fly_has_malus(down) {
+            out.extend(self.fly_open(south_down));
+        }
+        let west_down = self.fly_probe(x - 1, y - 1, z);
+        if self.fly_has_malus(west) && self.fly_has_malus(down) {
+            out.extend(self.fly_open(west_down));
+        }
+        let east_down = self.fly_probe(x + 1, y - 1, z);
+        if self.fly_has_malus(east) && self.fly_has_malus(down) {
+            out.extend(self.fly_open(east_down));
+        }
+        let north_down = self.fly_probe(x, y - 1, z - 1);
+        if self.fly_has_malus(north) && self.fly_has_malus(down) {
+            out.extend(self.fly_open(north_down));
+        }
+
+        let north_east = self.fly_probe(x + 1, y, z - 1);
+        if self.fly_has_malus(north) && self.fly_has_malus(east) {
+            out.extend(self.fly_open(north_east));
+        }
+        let south_east = self.fly_probe(x + 1, y, z + 1);
+        if self.fly_has_malus(south) && self.fly_has_malus(east) {
+            out.extend(self.fly_open(south_east));
+        }
+        let north_west = self.fly_probe(x - 1, y, z - 1);
+        if self.fly_has_malus(north) && self.fly_has_malus(west) {
+            out.extend(self.fly_open(north_west));
+        }
+        let south_west = self.fly_probe(x - 1, y, z + 1);
+        if self.fly_has_malus(south) && self.fly_has_malus(west) {
+            out.extend(self.fly_open(south_west));
+        }
+
+        let north_east_up = self.fly_probe(x + 1, y + 1, z - 1);
+        if self.fly_open(north_east_up).is_some()
+            && self.fly_corner_open([north_east, north, east, up, north_up, east_up])
+        {
+            out.extend(self.fly_open(north_east_up));
+        }
+        let south_east_up = self.fly_probe(x + 1, y + 1, z + 1);
+        if self.fly_open(south_east_up).is_some()
+            && self.fly_corner_open([south_east, south, east, up, south_up, east_up])
+        {
+            out.extend(self.fly_open(south_east_up));
+        }
+        let north_west_up = self.fly_probe(x - 1, y + 1, z - 1);
+        if self.fly_open(north_west_up).is_some()
+            && self.fly_corner_open([north_west, north, west, up, north_up, west_up])
+        {
+            out.extend(self.fly_open(north_west_up));
+        }
+        let south_west_up = self.fly_probe(x - 1, y + 1, z + 1);
+        if self.fly_open(south_west_up).is_some()
+            && self.fly_corner_open([south_west, south, west, up, south_up, west_up])
+        {
+            out.extend(self.fly_open(south_west_up));
+        }
+        let north_east_down = self.fly_probe(x + 1, y - 1, z - 1);
+        if self.fly_open(north_east_down).is_some()
+            && self.fly_corner_open([north_east, north, east, down, north_down, east_down])
+        {
+            out.extend(self.fly_open(north_east_down));
+        }
+        let south_east_down = self.fly_probe(x + 1, y - 1, z + 1);
+        if self.fly_open(south_east_down).is_some()
+            && self.fly_corner_open([south_east, south, east, down, south_down, east_down])
+        {
+            out.extend(self.fly_open(south_east_down));
+        }
+        let north_west_down = self.fly_probe(x - 1, y - 1, z - 1);
+        if self.fly_open(north_west_down).is_some()
+            && self.fly_corner_open([north_west, north, west, down, north_down, west_down])
+        {
+            out.extend(self.fly_open(north_west_down));
+        }
+        let south_west_down = self.fly_probe(x - 1, y - 1, z + 1);
+        if self.fly_open(south_west_down).is_some()
+            && self.fly_corner_open([south_west, south, west, down, south_down, west_down])
+        {
+            out.extend(self.fly_open(south_west_down));
+        }
+    }
+
+    /// `FlyNodeEvaluator.getNeighbors` 里的 `isOpen` 加 `hasMalus`。
+    ///
+    /// `isOpen` and `hasMalus` from `FlyNodeEvaluator.getNeighbors`.
+    fn fly_corner_open(&self, nodes: [Option<usize>; 6]) -> bool {
+        nodes.iter().all(|slot| self.fly_has_malus(*slot))
+    }
+    /// `FlyNodeEvaluator.findAcceptedNode`：代价非负就建节点，`WALKABLE` 再加一。
+    ///
+    /// `FlyNodeEvaluator.findAcceptedNode`: non-negative costs build a node, and
+    /// `WALKABLE` adds one more.
+    fn fly_probe(&mut self, x: i32, y: i32, z: i32) -> Option<usize> {
+        let path_type = self.cached_path_type(x, y, z);
+        let malus = self.malus(path_type);
+        if malus < 0.0 {
+            return None;
+        }
+        let index = self.get_node(x, y, z);
+        let node = &mut self.nodes[index];
+        node.path_type = path_type;
+        node.cost_malus = mth::java_max_f32(node.cost_malus, malus);
+        if path_type == PathType::Walkable {
+            node.cost_malus += 1.0;
+        }
+        Some(index)
     }
 }
