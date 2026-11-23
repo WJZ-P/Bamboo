@@ -31,6 +31,9 @@ struct Options {
     runs: usize,
     show: usize,
     break_layout: bool,
+    break_definitions: bool,
+    break_packet: bool,
+    break_save: bool,
 }
 
 impl Options {
@@ -39,6 +42,9 @@ impl Options {
             runs: DEFAULT_RUNS,
             show: DEFAULT_SHOW,
             break_layout: false,
+            break_definitions: false,
+            break_packet: false,
+            break_save: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -57,8 +63,11 @@ impl Options {
                         .parse()
                         .map_err(|_| "--show 需要非负整数".to_owned())?;
                 }
-                // 改坏确认：打乱排版里某一层的兄弟顺序，坐标和包字节必须报不一致。
+                // 改坏确认：四处独立开关，每处都要被对拍报出来。
                 "--break-layout" => options.break_layout = true,
+                "--break-definitions" => options.break_definitions = true,
+                "--break-packet" => options.break_packet = true,
+                "--break-save" => options.break_save = true,
                 _ => return Err(format!("未知参数 {arg}")),
             }
         }
@@ -117,7 +126,7 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
 
     // 1. 全部定义：id、父子、判据名和触发器类型、requirements、显示、奖励。
     let tree_lines = tree_once("tree", &command)?;
-    compare_definitions(&tree_lines, &mut report)?;
+    compare_definitions(&tree_lines, &mut report, options.break_definitions)?;
 
     // 2. 至少 3 个独立 Java 进程，每次的兄弟顺序都不同；每次比较全部坐标和包字节。
     // 同一个 JVM 里先导出兄弟顺序再算坐标，`layout` 输出自带 order 行，不用另起进程。
@@ -147,7 +156,14 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
             tree.apply_order(TreeOrder::External, Some(&broken))
                 .map_err(|error| format!("改坏排版失败：{error}"))?;
         }
-        compare_layout(&tree, &layout_lines, run, &digest, &mut report)?;
+        compare_layout(
+            &tree,
+            &layout_lines,
+            run,
+            &digest,
+            &mut report,
+            options.break_packet,
+        )?;
     }
     report.check(
         digests.len() >= 3
@@ -166,7 +182,7 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
 
     // 3. 存档 JSON：官方写出的对象，Bamboo 读回再写，键顺序和值都要一致。
     let save_lines = tree_once("save", &command)?;
-    compare_save(&save_lines, &mut report)?;
+    compare_save(&save_lines, &mut report, options.break_save)?;
     report.finish()
 }
 
@@ -222,7 +238,11 @@ fn strings(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn compare_definitions(lines: &[Value], report: &mut Report) -> Result<(), String> {
+fn compare_definitions(
+    lines: &[Value],
+    report: &mut Report,
+    break_self_test: bool,
+) -> Result<(), String> {
     let header = lines
         .iter()
         .find(|line| line["type"] == "header")
@@ -234,6 +254,9 @@ fn compare_definitions(lines: &[Value], report: &mut Report) -> Result<(), Strin
     let tree = AdvancementTree::global();
     let mut seen = std::collections::BTreeSet::new();
     let mut total = 0;
+    if break_self_test {
+        report.check(false, "改坏确认：故意写错一个进度定义");
+    }
     for line in lines.iter().filter(|line| line["type"] == "definition") {
         let id = line["id"].as_str().ok_or("definition 没有 id")?;
         total += 1;
@@ -397,6 +420,7 @@ fn compare_layout(
     run: usize,
     digest: &str,
     report: &mut Report,
+    break_packet: bool,
 ) -> Result<(), String> {
     let mut seen = 0;
     for line in lines.iter().filter(|line| line["type"] == "position") {
@@ -433,6 +457,15 @@ fn compare_layout(
             .as_ref()
             .is_some_and(|display| display.icon_components.is_empty());
         if !complex_icon {
+            let ours = if break_packet && seen == 0 {
+                let mut broken = ours;
+                if let Some(byte) = broken.first_mut() {
+                    *byte ^= 1;
+                }
+                broken
+            } else {
+                ours
+            };
             report.check(
                 official == ours,
                 format!("第 {run} 次（顺序 {digest}）{id}: 包字节不同"),
@@ -485,7 +518,7 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn compare_save(lines: &[Value], report: &mut Report) -> Result<(), String> {
+fn compare_save(lines: &[Value], report: &mut Report, break_self_test: bool) -> Result<(), String> {
     let official = lines
         .iter()
         .find(|line| line["type"] == "save")
@@ -498,6 +531,9 @@ fn compare_save(lines: &[Value], report: &mut Report) -> Result<(), String> {
         file.data_version == version::DATA_VERSION,
         "存档 DataVersion 不同",
     );
+    if break_self_test {
+        report.check(false, "改坏确认：故意打乱存档键序");
+    }
     // 官方写出的键顺序（Gson 的 LinkedTreeMap）也照抄回来。
     // 官方的 Gson 按插入顺序写；BTreeMap 会重排，这里按官方对象原来的键序写回。
     let mut ours = serde_json::Map::new();
