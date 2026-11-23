@@ -143,6 +143,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             super::parrot::after_ai_step(me, mob);
         }
     }
+    // `Bee.tick` 在 `super.tick()` 之后的花蜜粒子与翻滚动画。
+    if mob.mob_type == super::MobType::Bee && !me.removed {
+        super::bee_goals::nectar_particles(me, mob, ctx);
+    }
     // `Zombie.tick` 结尾的 `drowningTracker.tick()`，在 `super.tick()` 之后。
     // The `drowningTracker.tick()` at the end of `Zombie.tick`, after `super.tick()`.
     if mob.mob_type == super::MobType::Zombie {
@@ -1100,6 +1104,17 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::enderman::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx);
+    if mob.mob_type == super::MobType::Bee {
+        let mut target_close = false;
+        if let Some(uid) = mob.target {
+            ctx.blocks().for_each_player(&mut |player| {
+                if player.uid == uid && player.position.distance_to_sqr(me.position) < 4.0 {
+                    target_close = true;
+                }
+            });
+        }
+        super::bee::ai_step(mob, me.tick_count, me.in_water, target_close);
+    }
     // 铁傀儡与雪傀儡的 `aiStep` 先跑 `super.aiStep()`，再跑自己的那一段。
     // Golem `aiStep` overrides run their own part after `super.aiStep()`.
     if mob.mob_type == super::MobType::IronGolem {
@@ -1608,6 +1623,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Bat {
         super::bat::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Bee {
+        super::bee::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Ocelot {
         super::ocelot::custom_server_ai_step(mob);
     }
@@ -1715,6 +1733,11 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
     if mob.mob_type == super::MobType::Parrot {
         // `Parrot` 用 `FlyingMoveControl`。
         // Parrots use `FlyingMoveControl`.
+        super::parrot::move_control_tick(me, mob);
+        return;
+    }
+    if mob.mob_type == super::MobType::Bee {
+        // `Bee` 也用 `FlyingMoveControl`（参数 20, true 的效果在配置里）。
         super::parrot::move_control_tick(me, mob);
         return;
     }
@@ -2046,7 +2069,7 @@ fn travel_in_air(
     // 0.91 的空气阻力，而不是 0.98。
     // `LivingEntity.travelInAir`: an `omnidirectionalAirMover()` (parrot, bee) uses the
     // 0.91 air drag vertically instead of 0.98.
-    let vertical = if mob.mob_type == super::MobType::Parrot {
+    let vertical = if matches!(mob.mob_type, super::MobType::Parrot | super::MobType::Bee) {
         horizontal_air
     } else {
         modified_friction(0.98, air_drag)
@@ -2741,7 +2764,12 @@ pub(crate) fn do_hurt_target(
     if bites && !mob.panda.is_aggressive() {
         mob.panda.did_bite = true;
     }
-    let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
+    let mut source = DamageSource::environment(if mob.mob_type == super::MobType::Bee {
+        DamageKind::Sting
+    } else {
+        DamageKind::MobAttack
+    })
+    .with_non_player_cause(true);
     source.attacker = Some(me.id);
     source.direct = Some(me.id);
     source.attacker_uuid = Some(mob.uuid);
@@ -2768,8 +2796,7 @@ pub(crate) fn do_hurt_target(
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
         // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
         // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
-        if hurt && let Some(effect) = super::spider::poison_instance(mob, ctx.blocks().difficulty())
-        {
+        if hurt && let Some(effect) = super::bee::poison_instance(mob, ctx.blocks().difficulty()) {
             ctx.emit(
                 Command::AddPlayerEffect {
                     target,
@@ -2835,13 +2862,16 @@ pub(crate) fn do_hurt_target(
                 target,
                 source,
                 amount,
-                on_hit: super::spider::poison_instance(mob, ctx.blocks().difficulty()),
+                on_hit: super::bee::poison_instance(mob, ctx.blocks().difficulty()),
             },
             me,
         );
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
+    }
+    if mob.mob_type == super::MobType::Bee {
+        super::bee::after_attack(mob);
     }
 }
 

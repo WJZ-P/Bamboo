@@ -91,6 +91,9 @@ fn every_block_entity_kind_round_trips() {
                 piston.set_archive_progress(0.5);
                 Box::new(piston)
             }
+            BlockEntityKind::Beehive => {
+                Box::new(crate::behaviour::machines::beehive_entity::BeehiveEntity::new(POS))
+            }
         };
         let first = write_block_entity_additional(entity.as_ref()).expect("写出成功");
         let second = round_trip(entity, kind.name());

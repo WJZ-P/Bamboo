@@ -10,6 +10,7 @@ pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
 pub mod entity_types;
+pub mod environment;
 pub mod gamerules;
 pub mod heightmaps;
 pub mod item_components;

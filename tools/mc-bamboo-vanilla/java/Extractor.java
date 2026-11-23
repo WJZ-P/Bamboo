@@ -297,6 +297,7 @@ public final class Extractor {
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
             root.add("soundTables", new SoundTables().build());
+            root.add("timelines", dataFiles(resources, "timeline"));
             root.add("advancements", dataFiles(resources, "advancement"));
             root.add("lootTables", dataFiles(resources, "loot_table"));
             root.add("lootPredicates", dataFiles(resources, "predicate"));
@@ -1293,6 +1294,27 @@ public final class Extractor {
         // The parrot's DATA_VARIANT_ID uses the INT serializer; its index follows TamableAnimal.
         Class<?> parrot = net.minecraft.world.entity.animal.parrot.Parrot.class;
         out.addProperty("parrotVariant", entityAccessor(parrot, "DATA_VARIANT_ID").id());
+        // 蜜蜂的两个元数据 index、属性、眼高和常量都由类本身导出，别在 Rust 侧手写。
+        // Bee metadata indices, attributes, eye height and constants come from the class.
+        Class<?> bee = net.minecraft.world.entity.animal.bee.Bee.class;
+        out.addProperty("beeFlags", entityAccessor(bee, "DATA_FLAGS_ID").id());
+        out.addProperty("beeAngerEndTime", entityAccessor(bee, "DATA_ANGER_END_TIME").id());
+        var beeAttributes = net.minecraft.world.entity.animal.bee.Bee.createAttributes().build();
+        out.addProperty("beeMaxHealth", beeAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("beeFlyingSpeed", beeAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.FLYING_SPEED));
+        out.addProperty("beeMovementSpeed", beeAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("beeAttackDamage", beeAttributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        out.addProperty("beeEyeHeight", net.minecraft.world.entity.EntityTypes.BEE.getDimensions().eyeHeight());
+        out.addProperty("beeTicksPerFlap", (int) readField(bee, "TICKS_PER_FLAP", null));
+        out.addProperty("beeFlapDegreesPerTick", (float) readField(bee, "FLAP_DEGREES_PER_TICK", null));
+        var angerTime = (net.minecraft.util.valueproviders.UniformInt) readField(bee, "PERSISTENT_ANGER_TIME", null);
+        out.addProperty("beeAngerMinSeconds", angerTime.minInclusive());
+        out.addProperty("beeAngerMaxSeconds", angerTime.maxInclusive());
+        var hive = net.minecraft.world.level.block.entity.BeehiveBlockEntity.class;
+        out.addProperty("beehiveMaxOccupants", (int) readField(hive, "MAX_OCCUPANTS", null));
+        out.addProperty("beehiveMinTicksNectarless", (int) readField(hive, "MIN_OCCUPATION_TICKS_NECTARLESS", null));
+        out.addProperty("beehiveMinTicksNectar", (int) readField(hive, "MIN_OCCUPATION_TICKS_NECTAR", null));
+        out.addProperty("beehiveReenterTicks", (int) readField(hive, "MIN_TICKS_BEFORE_REENTERING_HIVE", null));
         // Parrot.getAmbient 在 nextInt(1000)==0 时 nextInt(MOB_SOUND_MAP.size()) 挑模仿的音效。
         // Parrot.getAmbient draws nextInt(MOB_SOUND_MAP.size()) to pick an imitated sound.
         java.lang.reflect.Field soundMap = parrot.getDeclaredField("MOB_SOUND_MAP");

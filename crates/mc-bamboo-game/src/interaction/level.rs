@@ -259,6 +259,59 @@ impl Level for RegionLevel<'_> {
         best.map(|(_, pos)| pos)
     }
 
+    /// 已加载区块里半径内的蜂巢 / 蜂箱：先用段调色板把没有 `beehive` /
+    /// `bee_nest` 状态的整段跳过，再逐格读状态。以后换成 POI 查询。
+    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        use mc_bamboo_data::{block_id_of_state, blocks, tags::block_tags};
+        let min_y = mc_bamboo_world::MIN_Y;
+        let max_y = min_y + mc_bamboo_world::WORLD_HEIGHT - 1;
+        let lo = BlockPos::new(center.x - radius, center.y - radius, center.z - radius);
+        let hi = BlockPos::new(center.x + radius, center.y + radius, center.z + radius);
+        let mut out = Vec::new();
+        for cx in (lo.x >> 4)..=(hi.x >> 4) {
+            for cz in (lo.z >> 4)..=(hi.z >> 4) {
+                let chunk = ChunkPos::new(cx, cz);
+                if !self.chunks.is_loaded(chunk) {
+                    continue;
+                }
+                let column = self.chunks.chunk(chunk);
+                let sy0 = lo.y.max(min_y) >> 4;
+                let sy1 = hi.y.min(max_y) >> 4;
+                for sy in sy0..=sy1 {
+                    let Some(section) = column.sections().get((sy - (min_y >> 4)) as usize) else {
+                        continue;
+                    };
+                    let hive_in_palette = |state: u32| {
+                        block_id_of_state(state).is_some_and(|id| {
+                            id == blocks::BEEHIVE as usize || id == blocks::BEE_NEST as usize
+                        })
+                    };
+                    if !section.maybe_has(hive_in_palette) {
+                        continue;
+                    }
+                    let y0 = (sy << 4).max(lo.y).max(min_y);
+                    let y1 = (sy << 4) + 15;
+                    let y1 = y1.min(hi.y).min(max_y);
+                    let x0 = (cx << 4).max(lo.x);
+                    let x1 = ((cx << 4) + 15).min(hi.x);
+                    let z0 = (cz << 4).max(lo.z);
+                    let z1 = ((cz << 4) + 15).min(hi.z);
+                    for x in x0..=x1 {
+                        for y in y0..=y1 {
+                            for z in z0..=z1 {
+                                let pos = BlockPos::new(x, y, z);
+                                if self.block_state(pos).is_tagged(block_tags::BEEHIVES) {
+                                    out.push(pos);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// 本岛的玩家。官方 `ServerLevel.players()` 不过滤旁观者和死亡状态，
     /// 具体调用方各自用 `NO_SPECTATORS` / `TargetingConditions` 过滤。
     ///

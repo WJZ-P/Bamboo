@@ -373,6 +373,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Bat {
         put(&mut out, "BatFlags", Tag::Byte(mob.bat.flags as i8));
     }
+    if mob.mob_type == MobType::Bee {
+        super::bee::write_nbt(mob, &mut out);
+    }
     // ---- Endermite.addAdditionalSaveData ----
     if mob.mob_type == MobType::Endermite {
         put(&mut out, "Lifetime", Tag::Int(mob.endermite.life));
@@ -782,6 +785,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Bat {
             mob.bat.flags = tag::byte_or(tag, "BatFlags", 0) as u8;
+        }
+        if mob.mob_type == MobType::Bee {
+            super::bee::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Endermite {
             mob.endermite.life = tag::int_or(tag, "Lifetime", 0);

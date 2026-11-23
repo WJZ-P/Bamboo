@@ -76,7 +76,18 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
     let (fields, omit) = match id {
         "minecraft:mob_spawner" => (spawner(raw), SPAWNER_OMIT),
         "minecraft:sign" | "minecraft:hanging_sign" => (sign(raw), SIGN_OMIT),
-        "minecraft:beehive" => (beehive(raw), BEEHIVE_OMIT),
+        // 蜂巢由活方块实体读写；重存走同一条 `read` → `saveAdditional` 路径，
+        // 存档格式只有一份实现。
+        // Beehives are read and written by the live block entity; resaving goes
+        // through the same `read` then `saveAdditional` path, so there is one format.
+        "minecraft:beehive" => (
+            crate::behaviour::machines::beehive_entity::BeehiveEntity::read(
+                mc_bamboo_core::BlockPos::new(0, 0, 0),
+                raw,
+            )
+            .additional(),
+            BEEHIVE_OMIT,
+        ),
         "minecraft:jigsaw" => (jigsaw(raw, state), &[][..]),
         "minecraft:end_gateway" => (end_gateway(raw), &[][..]),
         "minecraft:sculk_catalyst" => (sculk_catalyst(raw), &[][..]),
@@ -96,6 +107,10 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
     Some(Resaved::new(fields, omit))
 }
 
+/// 蜂巢的 `flower_pos` 只在有值时写。
+/// A beehive writes `flower_pos` only when it has one.
+const BEEHIVE_OMIT: &[&str] = &["flower_pos"];
+
 /// 官方认识、可选且当前状态不写的键：编码时从读盘条目里删掉，避免带上旧值。
 /// 不在这张表里的未知键按 D9 原样保留。
 /// Official optional keys that are absent in this state; unknown keys stay under D9.
@@ -110,11 +125,6 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
 /// owns only `ticks_since_song_started`; the rest come from each codec function.
 const SPAWNER_OMIT: &[&str] = &["SpawnData"];
 const SIGN_OMIT: &[&str] = &["allow_op_features"];
-const BEEHIVE_OMIT: &[&str] = &["flower_pos"];
-/// `sherds` 和 `ticks_since_song_started` 分别由游戏层组件补丁和红石表写出当前值，
-/// 本模块写读盘缺省值、游戏层再覆盖；其余内容键本模块独写。
-/// The game layer writes `sherds` (component patch) and `ticks_since_song_started`
-/// (redstone table); this module supplies disk defaults, later writes override them.
 const JUKEBOX_OMIT: &[&str] = &[];
 const DECORATED_POT_OMIT: &[&str] = &[];
 const SHULKER_BOX_OMIT: &[&str] = &[];
@@ -136,6 +146,13 @@ const TEST_INSTANCE_OMIT: &[&str] = &[];
 /// 世界生成放置、没有读盘条目时的构造器默认值。
 /// Constructor defaults for generated blocks without a disk entry.
 pub fn default_additional(id: &str) -> Option<Vec<(String, Tag)>> {
+    // 蜂巢的 `bees` 由活方块实体写；生成期放下的蜂巢没有读盘条目，官方仍无条件
+    // 写空列表。这里补构造器缺省值，避免没有实例的生成期条目漏掉这个键。
+    // A generated beehive has no disk entry; vanilla still writes the empty `bees`
+    // list, so supply the constructor default here.
+    if id == "minecraft:beehive" {
+        return Some(vec![("bees".to_owned(), Tag::List(Vec::new()))]);
+    }
     // 本模块负责的类型（含生成期无条目）都走 `resave_additional(空复合标签)`；
     // 这里只留上一轮那四种只保留存档态实体的构造器默认值。
     // Types here use `resave_additional(empty)`; only the four passive types need
@@ -378,54 +395,6 @@ fn sign(raw: &Tag) -> Vec<(String, Tag)> {
     put(&mut out, "back_text", sign_text(entry(raw, "back_text")));
     put(&mut out, "is_waxed", bool_tag(raw, "is_waxed", false));
     out
-}
-
-// ---------------------------------------------------------------------------
-// BeehiveBlockEntity
-// ---------------------------------------------------------------------------
-
-fn beehive(raw: &Tag) -> Vec<(String, Tag)> {
-    let mut out = vec![("bees".to_owned(), bee_occupants(entry(raw, "bees")))];
-    // `flower_pos` 是 storeNullable 的 BlockPos.CODEC；形状不对或没有值时不写。
-    // `flower_pos` is storeNullable; malformed or missing values are omitted.
-    if let Some(Tag::IntArray(pos)) = entry(raw, "flower_pos")
-        && pos.len() == 3
-    {
-        put(&mut out, "flower_pos", Tag::IntArray(pos.clone()));
-    }
-    out
-}
-
-/// `Occupant.CODEC`：三个必填字段；一条解不开让整个 `bees` 列表回到空列表。
-/// `entity_data` 里的实体 NBT 原样带回，不做 `TypedEntityData` 子 codec 的规范化。
-/// Three required fields; one bad entry resets the whole `bees` list to empty.
-/// `entity_data` is carried through verbatim without sub-codec normalization.
-fn bee_occupants(input: Option<&Tag>) -> Tag {
-    let Some(Tag::List(values)) = input else {
-        return Tag::List(Vec::new());
-    };
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        let Tag::Compound(_) = value else {
-            return Tag::List(Vec::new());
-        };
-        let Some(entity_data) =
-            entry(value, "entity_data").filter(|t| matches!(t, Tag::Compound(_)))
-        else {
-            return Tag::List(Vec::new());
-        };
-        let ticks = tag::java_i32(entry(value, "ticks_in_hive").unwrap_or(&Tag::Int(0)));
-        let min = tag::java_i32(entry(value, "min_ticks_in_hive").unwrap_or(&Tag::Int(0)));
-        let (Ok(ticks), Ok(min)) = (ticks, min) else {
-            return Tag::List(Vec::new());
-        };
-        let mut one = Vec::new();
-        put(&mut one, "entity_data", entity_data.clone());
-        put(&mut one, "ticks_in_hive", Tag::Int(ticks));
-        put(&mut one, "min_ticks_in_hive", Tag::Int(min));
-        out.push(Tag::Compound(one));
-    }
-    Tag::List(out)
 }
 
 // ---------------------------------------------------------------------------

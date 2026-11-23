@@ -11,7 +11,7 @@ use mc_bamboo_data::{
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    behaviour::{Behaviour, Plain, common::facing_the_player},
+    behaviour::{Behaviour, Plain, common::facing_the_player, machines::beehive_entity},
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     item_exchange::ItemExchange,
@@ -26,6 +26,13 @@ const MAX_HONEY_LEVELS: i32 = 5;
 pub(super) struct Beehive;
 
 impl Behaviour for Beehive {
+    /// `BaseEntityBlock` 的 `newBlockEntity`：放下巢时挂一个空方块实体。
+    fn on_place(&self, _state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        if !world.has_block_entity(pos) {
+            world.set_block_entity(beehive_entity::create_block_entity(pos));
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -75,6 +82,40 @@ impl Behaviour for Beehive {
                     1.0,
                     true,
                 );
+            }
+            // 官方 `BeehiveBlock.useItemOn`：营火不冒烟时先 `angerNearbyBees`
+            // （巢里有蜂才调），再 `releaseBeesAndResetHoneyLevel`；冒烟时只清蜜。
+            // `player` 是这次右键的玩家本身，不是附近玩家里挑出来的。
+            if !beehive_entity::is_sedated(world, pos) {
+                let has_bees = world
+                    .with_block_entity::<beehive_entity::BeehiveEntity, _>(pos, |hive, _| {
+                        !hive.is_empty()
+                    })
+                    .unwrap_or(false);
+                if has_bees {
+                    beehive_entity::anger_nearby_bees(world, pos);
+                }
+                let actor = ctx.actor;
+                // `Actor` 只有 UUID；发起这次右键的玩家 uid 从玩家表里按 UUID 找。
+                let player = {
+                    let mut found = None;
+                    world.level().for_each_player(&mut |view| {
+                        if view.uuid == Some(actor.uuid) {
+                            found = Some(*view);
+                        }
+                    });
+                    found
+                };
+                let released: Option<()> = world
+                    .with_block_entity::<beehive_entity::BeehiveEntity, _>(pos, |hive, world| {
+                        hive.release_all(
+                            world,
+                            state,
+                            beehive_entity::ReleaseStatus::Emergency,
+                            player,
+                        );
+                    });
+                let _ = released;
             }
             world.set_block_and_update(pos, state.with(LEVEL_HONEY, 0));
             return InteractionResult::Success;

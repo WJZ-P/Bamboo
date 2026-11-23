@@ -124,6 +124,12 @@ pub trait BlockSource: Sync {
         true
     }
 
+    /// 已加载区块的蜂巢位置，供 `BeeLocateHiveGoal` 用；默认没有（以后换成 POI 查询）。
+    /// 并行视图没有方块实体表，`beehive_full` 按未满处理。
+    fn beehives_near(&self, _center: BlockPos, _radius: i32) -> Vec<BlockPos> {
+        Vec::new()
+    }
+
     /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
     ///
     /// 和 [`crate::Level::chunk_ticks_entities`] 必须给出同样的答案：精确驱动的
@@ -467,6 +473,17 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn game_time(&self) -> i64 {
         self.0.facts().game_time
+    }
+
+    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        self.0.beehives_near(center, radius)
+    }
+
+    fn bees_stay_in_hive(&self, _pos: BlockPos) -> bool {
+        let facts = self.0.facts();
+        crate::sky::bees_stay_in_hive(facts.clock_ticks)
+            || facts.weather.rain_level > 0.0
+            || facts.weather.thunder_level > 0.0
     }
 
     fn can_see_sky(&self, pos: BlockPos) -> bool {

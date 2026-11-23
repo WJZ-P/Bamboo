@@ -386,6 +386,32 @@ public final class MobOracle {
                 playWaterMob(official, out, name);
                 cases++;
             }
+            if (only == null || only.startsWith("bee_ai")) {
+                for (String name : List.of("bee_ai_pollinate", "bee_ai_hive",
+                        "bee_ai_pollinate_crop", "bee_ai_sting", "bee_ai_follow_flower",
+                        "bee_ai_angry", "bee_ai_grow", "bee_ai_tempt")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playBeeAi(official, out, name);
+                    cases++;
+                }
+            }
+            if (only == null || only.startsWith("bee_release")) {
+                for (String name : List.of("bee_release_one_player",
+                        "bee_release_two_players", "bee_release_campfire",
+                        "bee_release_destroy")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playBeeRelease(official, out, name);
+                    cases++;
+                }
+            }
+            if (only == null || only.equals("bee") || only.startsWith("bee_")) {
+                for (String name : List.of("bee_release_day", "bee_stay_night", "bee_rain",
+                        "bee_nectar_honey", "bee_hive_full", "bee_campfire_harvest")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playBee(official, out, name);
+                    cases++;
+                }
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -8438,6 +8464,360 @@ public final class MobOracle {
      * `_hurt` is woken and then killed by a cow; `_low` flies in a two-high cave until it
      * hangs again and a player wakes it once more.
      */
+
+    /**
+     * 蜂巢：逐刻比官方 `BeehiveBlockEntity.serverTick` 之后巢里的蜂（数量、各自的
+     * ticks / minTicks / 是否有花蜜）、`honey_level`、放出的蜜蜂数、蜜蜂身上的
+     * `stayOutOfHiveCountdown` 和世界随机源。六个场景分别覆盖白天出巢、夜间留在巢里、
+     * 下雨留在巢里、带花蜜回巢加蜜、满蜜不再加、营火安抚时取蜜让蜂暂时不回巢。
+     */
+    /** 蜜蜂目标状态机的逐刻对拍：不跑真实的 POI / 寻路（假世界没有 POI 管理器），
+     * 直接按官方字段推进 `Bee.aiStep` / `customServerAiStep` / 目标状态，
+     * Bamboo 侧重放同一组判定。 */
+    private static void playBeeAi(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+        levels.put(net.minecraft.world.level.Level.OVERWORLD, level);
+        put(MinecraftServer.class, official.server, "levels", levels);
+        level.injectedRaining = name.equals("bee_ai_rain");
+        level.injectedCanSeeSky = true;
+        official.attributes = EnvironmentAttributeSystem.builder()
+                .addStaticLayers(level)
+                .addConstantLayer(net.minecraft.world.attribute.EnvironmentAttributes.BEES_STAY_IN_HIVE,
+                        (net.minecraft.world.attribute.EnvironmentAttributeLayer.Constant<Boolean>) v -> false)
+                .build();
+        var bee = EntityTypes.BEE.create(level, EntitySpawnReason.COMMAND);
+        bee.setId(FIRST_ID);
+        setRandom(bee, ENTITY_RANDOM_SEED);
+        bee.setUUID(Mth.createInsecureUUID(bee.getRandom()));
+        bee.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        bee.setNoAi(true);
+        bee.setYHeadRot(0.0F);
+        bee.setYBodyRot(0.0F);
+        // 构造函数的 `nextInt(20,60)` 已经在 create 里取过，这里再补一次与 Bamboo 对齐。
+        put(net.minecraft.world.entity.animal.bee.Bee.class, bee,
+                "remainingCooldownBeforeLocatingNewFlower", 0);
+        boolean angry = name.equals("bee_ai_angry") || name.equals("bee_ai_sting");
+        boolean grow = name.equals("bee_ai_grow") || name.equals("bee_ai_pollinate_crop");
+        boolean hive = name.equals("bee_ai_hive");
+        boolean follow = name.equals("bee_ai_follow_flower");
+        boolean sting = name.equals("bee_ai_sting");
+        if (grow || name.equals("bee_ai_pollinate")) {
+            setBeeNectar(bee, true);
+        }
+        if (hive) {
+            put(net.minecraft.world.entity.animal.bee.Bee.class, bee, "hivePos",
+                    new BlockPos(2, 64, 0));
+        }
+        level.tracked.add(bee);
+        level.playersList().clear();
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "BeeAiOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1024);
+        player.setPos(1.5, 64.0, 0.5);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        if (follow) {
+            player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND,
+                    new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.DANDELION));
+        }
+        level.playersList().add(player);
+        int ticks = 8;
+        StringBuilder frames = new StringBuilder("[");
+        java.lang.reflect.Field stung = net.minecraft.world.entity.animal.bee.Bee.class
+                .getDeclaredField("timeSinceSting");
+        stung.setAccessible(true);
+        java.lang.reflect.Field noNectar = net.minecraft.world.entity.animal.bee.Bee.class
+                .getDeclaredField("ticksWithoutNectarSinceExitingHive");
+        noNectar.setAccessible(true);
+        java.lang.reflect.Field anger = net.minecraft.world.entity.animal.bee.Bee.class
+                .getDeclaredField("persistentAngerTarget");
+        anger.setAccessible(true);
+        for (int tick = 0; tick <= ticks; tick++) {
+            // 该刻开始时的实体随机源：Bamboo 注入同一状态后重放这一刻。
+            long seedAtTick = randomSeed(bee);
+            if (tick > 0) {
+                level.gameTime++;
+                if (angry && tick == 2) {
+                    bee.setTarget(player);
+                    bee.startPersistentAngerTimer();
+                }
+                if (sting && tick == 3) {
+                    // `Bee.doHurtTarget` 命中后的状态：`HasStung`、停怒、开始蜇后倒计时。
+                    setBeeStung(bee, true);
+                    bee.stopBeingAngry();
+                }
+                if (name.equals("bee_ai_pollinate") && tick == 4) {
+                    bee.dropOffNectar();
+                }
+                bee.checkDespawn();
+                bee.commonTick();
+                bee.tick();
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"nectar\":").append(bee.hasNectar() ? 1 : 0)
+                    .append(",\"stung\":").append(bee.hasStung() ? 1 : 0)
+                    .append(",\"noNectar\":").append(noNectar.getInt(bee))
+                    .append(",\"stingTicks\":").append(stung.getInt(bee))
+                    .append(",\"anger\":").append(bee.isAngry() ? 1 : 0)
+                    .append(",\"health\":").append(Float.floatToRawIntBits(bee.getHealth()))
+                    .append(",\"seed\":").append(seedAtTick)
+                    .append(",\"levelSeed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        out.write("{\"type\":\"beeAi\",\"name\":" + jsonString(name)
+                + ",\"angry\":" + angry + ",\"grow\":" + grow
+                + ",\"hive\":" + hive + ",\"follow\":" + follow
+                + ",\"sting\":" + sting
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+        official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+    }
+
+    /** 官方 `emptyAllLivingFromHive(player, ...)` + `angerNearbyBees` 的逐刻对拍。
+     * 场景：1 / 2 名玩家取蜜（无营火）、营火取蜜 400 刻倒计时只在 4 格内、
+     * 挖掉蜂巢。逐刻比每只蜂的 target / stayOutOfHiveCountdown 和世界随机源。 */
+    private static void playBeeRelease(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        BlockPos hivePos = new BlockPos(0, 62, 0);
+        boolean campfire = name.equals("bee_release_campfire");
+        boolean destroy = name.equals("bee_release_destroy");
+        int playerCount = name.equals("bee_release_two_players") ? 2 : 1;
+        level.blocks.put(hivePos.asLong(), Blocks.BEEHIVE.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.BeehiveBlock.FACING, Direction.SOUTH)
+                .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, 5));
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                level.blocks.put(BlockPos.asLong(x, 61, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        if (campfire) {
+            level.blocks.put(BlockPos.asLong(0, 61, 0), Blocks.CAMPFIRE.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.CampfireBlock.LIT, true));
+        }
+        official.attributes = EnvironmentAttributeSystem.builder()
+                .addStaticLayers(level)
+                .addConstantLayer(net.minecraft.world.attribute.EnvironmentAttributes.BEES_STAY_IN_HIVE,
+                        (net.minecraft.world.attribute.EnvironmentAttributeLayer.Constant<Boolean>) v -> false)
+                .build();
+        var players = new ArrayList<ServerPlayer>();
+        for (int i = 0; i < playerCount; i++) {
+            var player = new ServerPlayer(official.server, level,
+                    new GameProfile(new UUID(1L, 2L + i), "BeeRelease" + i),
+                    ClientInformation.createDefault());
+            player.setId(FIRST_ID + 1024 + i);
+            player.setPos(1.5 + i, 62.0, 0.5);
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            players.add(player);
+            level.playersList().add(player);
+            level.tracked.add(player);
+        }
+        // 两只已在世界里的蜂：一只近（玩家到蜂 <= 4 格）、一只远。
+        var bees = new ArrayList<net.minecraft.world.entity.animal.bee.Bee>();
+        for (int i = 0; i < 2; i++) {
+            var bee = EntityTypes.BEE.create(level, EntitySpawnReason.COMMAND);
+            bee.setId(FIRST_ID + 100 + i);
+            setRandom(bee, ENTITY_RANDOM_SEED + i);
+            bee.setUUID(Mth.createInsecureUUID(bee.getRandom()));
+            bee.snapTo(2.5 + i * 20.0, 62.0, 0.5, 0.0F, 0.0F);
+            bee.setYHeadRot(0.0F);
+            bee.setYBodyRot(0.0F);
+            bee.setNoAi(true);
+            bees.add(bee);
+            level.tracked.add(bee);
+        }
+        var hive = new net.minecraft.world.level.block.entity.BeehiveBlockEntity(
+                hivePos, level.getBlockState(hivePos));
+        hive.setLevel(level);
+        // 巢里放三只蜂（EMERGENCY 全部放出）。
+        for (int i = 0; i < 3; i++) {
+            hive.storeBee(net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant.create(599));
+        }
+        java.lang.reflect.Field stayField =
+                net.minecraft.world.entity.animal.bee.Bee.class.getDeclaredField("stayOutOfHiveCountdown");
+        stayField.setAccessible(true);
+        java.lang.reflect.Method anger = net.minecraft.world.level.block.BeehiveBlock.class
+                .getDeclaredMethod("angerNearbyBees", net.minecraft.world.level.Level.class, BlockPos.class);
+        anger.setAccessible(true);
+        var block = (net.minecraft.world.level.block.BeehiveBlock)
+                net.minecraft.world.level.block.Blocks.BEEHIVE;
+        int ticks = 1;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick == 1) {
+                level.spawned.clear();
+                if (!campfire && !destroy) {
+                    // `BeehiveBlock.useItemOn`：巢里有蜂时先 angerNearbyBees。
+                    anger.invoke(block, level, hivePos);
+                }
+                // `releaseBeesAndResetHoneyLevel` / `playerDestroy` 都传这次操作的玩家。
+                hive.emptyAllLivingFromHive(players.get(0), level.getBlockState(hivePos),
+                        net.minecraft.world.level.block.entity.BeehiveBlockEntity.BeeReleaseStatus.EMERGENCY);
+                if (destroy) {
+                    anger.invoke(block, level, hivePos);
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"bees\":[");
+            // 前两只已在世界里，后面是这次放出的；按 tracked 的顺序取 Bee。
+            var all = new ArrayList<net.minecraft.world.entity.animal.bee.Bee>();
+            for (Entity entity : level.tracked) {
+                if (entity instanceof net.minecraft.world.entity.animal.bee.Bee bee) all.add(bee);
+            }
+            for (Entity entity : level.spawned) {
+                if (entity instanceof net.minecraft.world.entity.animal.bee.Bee bee) all.add(bee);
+            }
+            for (int i = 0; i < all.size(); i++) {
+                if (i > 0) frames.append(',');
+                var bee = all.get(i);
+                int target = bee.getTarget() == null ? -1 : bee.getTarget().getId() - (FIRST_ID + 1024);
+                frames.append('[').append(target).append(',').append(stayField.getInt(bee)).append(']');
+            }
+            frames.append("],\"levelSeed\":").append(levelSeed(level)).append('}');
+        }
+        out.write("{\"type\":\"beeRelease\",\"name\":" + jsonString(name)
+                + ",\"players\":" + playerCount + ",\"campfire\":" + campfire
+                + ",\"destroy\":" + destroy + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+        official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+    }
+
+    private static void playBee(Official official, Writer out, String name) throws Exception {
+        boolean night = name.equals("bee_stay_night");
+        boolean rain = name.equals("bee_rain");
+        boolean nectar = name.equals("bee_nectar_honey") || name.equals("bee_hive_full");
+        boolean full = name.equals("bee_hive_full");
+        boolean campfire = name.equals("bee_campfire_harvest");
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        BlockPos hivePos = new BlockPos(0, 62, 0);
+        level.blocks.put(hivePos.asLong(), Blocks.BEEHIVE.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.BeehiveBlock.FACING, Direction.SOUTH)
+                .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, full ? 5 : 0));
+        // `Block.getId` 输出的是状态 ID，Rust 侧按同一张生成表读 `honey_level`。
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                level.blocks.put(BlockPos.asLong(x, 61, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        if (campfire) {
+            level.blocks.put(BlockPos.asLong(0, 61, 0), Blocks.CAMPFIRE.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.CampfireBlock.LIT, true));
+        }
+        official.attributes = EnvironmentAttributeSystem.builder()
+                .addStaticLayers(level)
+                .addConstantLayer(net.minecraft.world.attribute.EnvironmentAttributes.BEES_STAY_IN_HIVE,
+                        (net.minecraft.world.attribute.EnvironmentAttributeLayer.Constant<Boolean>) v -> night || rain)
+                .build();
+        var hive = new net.minecraft.world.level.block.entity.BeehiveBlockEntity(
+                hivePos, level.getBlockState(hivePos));
+        hive.setLevel(level);
+        java.lang.reflect.Field storedField =
+                net.minecraft.world.level.block.entity.BeehiveBlockEntity.class.getDeclaredField("stored");
+        storedField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        java.util.List<Object> stored = (java.util.List<Object>) storedField.get(hive);
+        // 无蜜的蜂 minTicks=600，起点 598 / 597，分别在第三、第四刻放出；
+        // 带蜜的蜂 minTicks=2400，起点 2398，第三刻放出并加蜜。
+        int count = full ? 3 : nectar ? 1 : 2;
+        for (int i = 0; i < count; i++) {
+            boolean withNectar = nectar && i == 0;
+            int startTicks = withNectar ? 2398 : 598 - i;
+            var occupant = net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant
+                    .create(startTicks);
+            if (withNectar) {
+                var tag = new net.minecraft.nbt.CompoundTag();
+                tag.putBoolean("HasNectar", true);
+                occupant = new net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant(
+                        net.minecraft.world.item.component.TypedEntityData.of(
+                                net.minecraft.world.entity.EntityTypes.BEE, tag),
+                        startTicks, 2400);
+            }
+            hive.storeBee(occupant);
+        }
+        Class<?> dataClass = stored.get(0).getClass();
+        java.lang.reflect.Field occupantField = dataClass.getDeclaredField("occupant");
+        occupantField.setAccessible(true);
+        java.lang.reflect.Field ticksField = dataClass.getDeclaredField("ticksInHive");
+        ticksField.setAccessible(true);
+        java.lang.reflect.Method hasNectar = dataClass.getDeclaredMethod("hasNectar");
+        hasNectar.setAccessible(true);
+        java.lang.reflect.Field stayField =
+                net.minecraft.world.entity.animal.bee.Bee.class.getDeclaredField("stayOutOfHiveCountdown");
+        stayField.setAccessible(true);
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "BeeOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1024);
+        player.setPos(0.5, 62.0, 0.5);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        level.playersList().add(player);
+        int ticks = 4;
+        StringBuilder frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                level.gameTime++;
+                level.spawned.clear();
+                if (tick == 3 && campfire) {
+                    // `BeehiveBlock.useItemOn`：冒烟时只清蜜，不放蜂、不激怒，
+                    // 蜂继续留在巢里逐刻加计数。
+                    level.setBlock(hivePos, level.getBlockState(hivePos)
+                            .setValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL, 0), 3);
+                } else {
+                    net.minecraft.world.level.block.entity.BeehiveBlockEntity.serverTick(
+                            level, hivePos, level.getBlockState(hivePos), hive);
+                }
+            }
+            StringBuilder beesJson = new StringBuilder("[");
+            for (int i = 0; i < stored.size(); i++) {
+                if (i > 0) beesJson.append(',');
+                Object data = stored.get(i);
+                Object occupant = occupantField.get(data);
+                boolean has = (Boolean) hasNectar.invoke(data);
+                beesJson.append('[').append(ticksField.getInt(data)).append(',')
+                        .append(((net.minecraft.world.level.block.entity.BeehiveBlockEntity.Occupant) occupant)
+                                .minTicksInHive())
+                        .append(',').append(has ? 1 : 0).append(']');
+            }
+            beesJson.append(']');
+            int honey = level.getBlockState(hivePos)
+                    .getValue(net.minecraft.world.level.block.BeehiveBlock.HONEY_LEVEL);
+            int released = 0;
+            int stayOut = 0;
+            for (Entity entity : level.spawned) {
+                if (entity instanceof net.minecraft.world.entity.animal.bee.Bee bee) {
+                    released++;
+                    stayOut = Math.max(stayOut, stayField.getInt(bee));
+                }
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"bees\":").append(beesJson)
+                    .append(",\"honey\":").append(honey)
+                    .append(",\"released\":").append(released)
+                    .append(",\"stayOut\":").append(stayOut)
+                    .append(",\"levelSeed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        out.write("{\"type\":\"bee\",\"name\":" + jsonString(name) + ",\"hive\":[0,62,0]"
+                + ",\"blocks\":" + blockArray(level.blocks)
+                + ",\"stay\":" + (night || rain)
+                + ",\"night\":" + night
+                + ",\"rain\":" + rain
+                + ",\"campfire\":" + campfire
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+        official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+    }
+
     private static void playBat(Official official, Writer out, String name) throws Exception {
         boolean open = name.endsWith("_open");
         boolean wake = name.endsWith("_wake");
@@ -12439,6 +12819,28 @@ public final class MobOracle {
     // ---- 假服务端和假世界 ----
 
     @SuppressWarnings("unchecked")
+    /** 测试夹具：把 `Bee.DATA_FLAGS_ID` 的已蜇位打开。 */
+    private static void setBeeStung(net.minecraft.world.entity.animal.bee.Bee bee, boolean value)
+            throws Exception {
+        var field = net.minecraft.world.entity.animal.bee.Bee.class.getDeclaredField("DATA_FLAGS_ID");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) field.get(null);
+        byte flags = bee.getEntityData().get(accessor);
+        bee.getEntityData().set(accessor, (byte) (value ? flags | 4 : flags & ~4));
+    }
+
+    /** 测试夹具：把 `Bee.DATA_FLAGS_ID` 的花蜜位打开。 */
+    private static void setBeeNectar(net.minecraft.world.entity.animal.bee.Bee bee, boolean value)
+            throws Exception {
+        var field = net.minecraft.world.entity.animal.bee.Bee.class.getDeclaredField("DATA_FLAGS_ID");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) field.get(null);
+        byte flags = bee.getEntityData().get(accessor);
+        bee.getEntityData().set(accessor, (byte) (value ? flags | 8 : flags & ~8));
+    }
+
     private static <T> T allocate(Class<T> type) {
         try {
             return (T) UNSAFE.allocateInstance(type);
@@ -13472,6 +13874,37 @@ public final class MobOracle {
         @Override
         public LevelChunk getChunkNow(int chunkX, int chunkZ) {
             return (LevelChunk) level.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        }
+
+        /** 蜜蜂找巢要用 `PoiManager`：临时目录里建一个空的官方实例。 */
+        private net.minecraft.world.entity.ai.village.poi.PoiManager poiManager;
+
+        @Override
+        public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
+            if (poiManager == null) {
+                try {
+                    var dir = java.nio.file.Files.createTempDirectory("bamboo-bee-poi-");
+                    poiManager = new net.minecraft.world.entity.ai.village.poi.PoiManager(
+                            new net.minecraft.world.level.chunk.storage.RegionStorageInfo(
+                                    "bee-oracle", net.minecraft.world.level.Level.OVERWORLD, "poi"),
+                            dir,
+                            net.minecraft.util.datafix.DataFixers.getDataFixer(),
+                            false,
+                            level.official.registries,
+                            new net.minecraft.world.level.chunk.storage.ChunkIOErrorReporter() {
+                                @Override public void reportChunkLoadFailure(Throwable error,
+                                        net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                        net.minecraft.world.level.ChunkPos pos) {}
+                                @Override public void reportChunkSaveFailure(Throwable error,
+                                        net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                        net.minecraft.world.level.ChunkPos pos) {}
+                            },
+                            level);
+                } catch (Exception error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            return poiManager;
         }
 
         @Override

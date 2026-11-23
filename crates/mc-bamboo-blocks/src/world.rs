@@ -2035,6 +2035,21 @@ impl<'a> World<'a> {
         self.level.block_weather().is_raining()
     }
 
+    /// `PoiManager.getInRange(BEE_HOME, 20)` 的临时替代：只查已加载区块。
+    /// 以后换成 POI 查询；未加载区块的蜂巢当前为不可见。
+    pub fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        self.level.beehives_near(center, radius)
+    }
+
+    /// `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`：主世界时间线，
+    /// 再叠上 `RAIN` / `THUNDER` 两张天气层（强度大于 0 就置真）。
+    ///
+    /// Vanilla `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`: the
+    /// overworld timeline, then the rain and thunder weather layers.
+    pub fn bees_stay_in_hive(&self, _pos: BlockPos) -> bool {
+        self.level.bees_stay_in_hive()
+    }
+
     /// `Level.isThundering()`：雷暴强度和雨强的乘积超过 0.9 才算打雷。
     pub fn is_thundering(&self) -> bool {
         self.level.block_weather().is_thundering()

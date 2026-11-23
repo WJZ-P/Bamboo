@@ -48,6 +48,11 @@ pub struct Extracted {
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
     pub sound_tables: SoundTables,
+    /// 数据包里的 `timeline` 原文：带命名空间的名字 → JSON。
+    ///
+    /// Raw `timeline` JSON from the data pack, keyed by namespaced id.
+    #[serde(default)]
+    pub timelines: BTreeMap<String, String>,
     /// 进度定义原文，按完整标识符排列。
     /// Raw advancement definitions keyed by namespaced identifier.
     pub advancements: BTreeMap<String, String>,
@@ -1073,6 +1078,42 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `Parrot.DATA_VARIANT_ID` (INT serializer).
     pub parrot_variant: u8,
+    /// 蜜蜂的两个元数据 index 和属性。
+    ///
+    /// The bee's two metadata indices and its attributes.
+    #[serde(default)]
+    pub bee_flags: u8,
+    #[serde(default)]
+    pub bee_anger_end_time: u8,
+    #[serde(default)]
+    pub bee_max_health: f64,
+    #[serde(default)]
+    pub bee_flying_speed: f64,
+    #[serde(default)]
+    pub bee_movement_speed: f64,
+    #[serde(default)]
+    pub bee_attack_damage: f64,
+    #[serde(default)]
+    pub bee_eye_height: f32,
+    #[serde(default)]
+    pub bee_ticks_per_flap: i32,
+    #[serde(default)]
+    pub bee_flap_degrees_per_tick: f32,
+    #[serde(default)]
+    pub bee_anger_min_seconds: i32,
+    #[serde(default)]
+    pub bee_anger_max_seconds: i32,
+    /// 蜂巢方块实体的常数。
+    ///
+    /// Beehive block entity constants.
+    #[serde(default)]
+    pub beehive_max_occupants: i32,
+    #[serde(default)]
+    pub beehive_min_ticks_nectarless: i32,
+    #[serde(default)]
+    pub beehive_min_ticks_nectar: i32,
+    #[serde(default)]
+    pub beehive_reenter_ticks: i32,
     /// `Parrot.MOB_SOUND_MAP` 的条目数，`getAmbient` 模仿叫声时 `nextInt` 的上界。
     ///
     /// The size of `Parrot.MOB_SOUND_MAP`, the `nextInt` bound when imitating a sound.
@@ -1348,6 +1389,10 @@ pub struct VersionData {
     /// 按官方 `Heightmap.Types.values()` 的顺序。
     pub heightmaps: Vec<HeightmapType>,
     pub sound_tables: SoundTables,
+    /// 数据包里的 `timeline` 原文：带命名空间的名字 → JSON。
+    ///
+    /// Raw `timeline` JSON from the data pack, keyed by namespaced id.
+    pub timelines: BTreeMap<String, String>,
     /// 属性名字 → 默认值。
     pub attribute_defaults: BTreeMap<String, f64>,
     /// 内置注册表名 → 按 ID 排列的条目。
@@ -1492,6 +1537,7 @@ fn read_version_data(
         attribute_defaults: extracted.attribute_defaults,
         builtin_registries,
         packets,
+        timelines: extracted.timelines,
         advancements: extracted.advancements,
         loot_tables: extracted.loot_tables,
         loot_predicates: extracted.loot_predicates,
