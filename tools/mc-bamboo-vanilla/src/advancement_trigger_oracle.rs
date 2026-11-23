@@ -72,7 +72,9 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
                     .get("official")
                     .and_then(Json::as_bool)
                     .ok_or("trigger line missing official")?;
-                let mut ours = matches(&trigger, &event, &conditions);
+                let mut ours = mc_bamboo_game::advancement_triggers::matches_trigger(
+                    &trigger, &event, &conditions,
+                );
                 if options.break_self_test && cases == 0 {
                     ours = !ours;
                 }
@@ -110,67 +112,4 @@ fn text_field(value: &Json, name: &str) -> Result<String, String> {
         .and_then(Json::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("line missing {name}"))
-}
-
-/// Bamboo 侧的同一组判定规则：和 `advancement_triggers::fire` 里的条件判定一致。
-fn matches(trigger: &str, event: &str, conditions: &str) -> bool {
-    let payload = event.split_once('|').map(|(_, json)| json).unwrap_or("{}");
-    let event: Json = serde_json::from_str(payload).unwrap_or(Json::Null);
-    let conditions: Json = serde_json::from_str(conditions).unwrap_or(Json::Null);
-    let empty = serde_json::Map::new();
-    let fields = conditions.as_object().unwrap_or(&empty);
-    if trigger == "minecraft:tick" {
-        return true;
-    }
-    if trigger == "minecraft:inventory_changed" {
-        // 官方 `InventoryChangeTrigger.matches`：条件里没有 items 列表时恒真；
-        // 有列表时按物品谓词比（这里用 events 里的单个物品命中规则）。
-        if !fields.contains_key("items") {
-            return true;
-        }
-        let wanted = event["items"][0].as_str().unwrap_or("");
-        let predicate = &conditions["items"][0];
-        let names: Vec<&str> = match &predicate["items"] {
-            Json::String(text) => vec![text.as_str()],
-            Json::Array(array) => array.iter().filter_map(Json::as_str).collect(),
-            _ => Vec::new(),
-        };
-        return names.iter().any(|name| {
-            *name == wanted
-                || name.strip_prefix('#').is_some_and(|tag| {
-                    mc_bamboo_data::item_tag(tag).is_some_and(|ids| {
-                        ids.iter().any(|&id| {
-                            mc_bamboo_data::items::ITEMS
-                                .get(id as usize)
-                                .is_some_and(|item| item.name == wanted)
-                        })
-                    })
-                })
-        }) || fields.contains_key("slots");
-    }
-    if trigger == "minecraft:location" {
-        if !fields.contains_key("biome")
-            && !fields.contains_key("biomes")
-            && !fields.contains_key("position")
-        {
-            return true;
-        }
-        let wanted = event["biome"].as_str().unwrap_or("");
-        return conditions.to_string().contains(wanted)
-            || !conditions.to_string().contains("minecraft:");
-    }
-    let event_item = event["item"]
-        .as_str()
-        .or_else(|| event["block"].as_str())
-        .unwrap_or("");
-    for key in ["item", "items", "block", "blocks", "recipe", "recipes"] {
-        let Some(expected) = fields.get(key) else {
-            continue;
-        };
-        return match expected {
-            Json::String(text) => text == event_item,
-            other => other.to_string().contains(event_item),
-        };
-    }
-    !event_item.is_empty() || fields.is_empty()
 }
