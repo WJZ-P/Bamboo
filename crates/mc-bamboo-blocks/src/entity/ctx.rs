@@ -24,7 +24,10 @@ use crate::{
     world::World,
 };
 
-use super::{Entity, EntityPublic, EntityUid, FallingBlock, lightning::LightningTick, mob::skeleton_horse::TrapSpawn};
+use super::{
+    Entity, EntityPublic, EntityUid, FallingBlock, lightning::LightningTick,
+    mob::skeleton_horse::TrapSpawn,
+};
 
 /// 只读的方块/碰撞视图。实体逻辑和寻路只经它读世界；并行阶段共享同一份只读快照。
 ///

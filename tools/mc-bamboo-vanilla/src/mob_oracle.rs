@@ -42,6 +42,7 @@ mod equine;
 mod fish;
 mod gen_spawn;
 mod grazing;
+mod lightning;
 mod llama_spit;
 mod natural_spawn;
 mod patrol_spawn;
@@ -115,6 +116,8 @@ enum Line {
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
+    Lightning(Box<lightning::LightningCase>),
+    SkeletonTrap(Box<lightning::TrapCase>),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -1318,6 +1321,8 @@ impl Report {
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
+                Line::Lightning(case) => self.replay_lightning(&case),
+                Line::SkeletonTrap(case) => self.replay_trap(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),

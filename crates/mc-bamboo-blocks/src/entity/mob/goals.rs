@@ -1718,7 +1718,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
         // `SkeletonTrapGoal.canUse`: `level.hasNearbyAlivePlayer(x, y, z, 10)`。
-        Goal::SkeletonTrap => super::skeleton_horse::trap_player_near(me.position, ctx.blocks()),
+        Goal::SkeletonTrap => {
+            mob.mob_type == super::MobType::SkeletonHorse
+                && mob.skeleton_horse.as_ref().is_some_and(|state| state.trap)
+                && super::skeleton_horse::trap_player_near(me.position, ctx.blocks())
+        }
         Goal::Swell { .. } => swell_can_use(me, mob, ctx),
         Goal::RandomStand { next_stand } => {
             super::equine::random_stand_can_use(me, mob, next_stand)

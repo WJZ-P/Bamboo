@@ -10,13 +10,13 @@
 use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{entity_types, registries::attribute};
 
+use super::goals::{Goal, WrappedGoal};
 use super::{Mob, MobType, attributes::Attributes};
 use crate::{
     entity::{Entity, ctx::BlockView, ctx::EntityCtx},
     random::RandomSource,
     world::World,
 };
-use super::goals::{Goal, GoalSelector, WrappedGoal};
 
 /// `SkeletonHorse.TRAP_MAX_LIFE`，没被打断的陷阱马 18000 刻后消失。
 pub const TRAP_MAX_LIFE: i32 = 18_000;
@@ -49,10 +49,7 @@ pub(super) fn skeleton_attributes() -> Attributes {
 /// `ZombieHorse.createAttributes`：`createBaseHorseAttributes` 加血量。
 pub(super) fn zombie_attributes() -> Attributes {
     let mut attrs = super::equine::attributes(MobType::ZombieHorse);
-    attrs.set_base(
-        attribute::MAX_HEALTH,
-        entity_types::ZOMBIE_HORSE_MAX_HEALTH,
-    );
+    attrs.set_base(attribute::MAX_HEALTH, entity_types::ZOMBIE_HORSE_MAX_HEALTH);
     attrs
 }
 
@@ -110,11 +107,7 @@ pub fn trap_player_near(position: Vec3, blocks: &dyn BlockView) -> bool {
 
 /// `SkeletonTrapGoal.tick` 的算阶段：清陷阱标记、驯服、成年，然后把生成整批实体
 /// 交给落地命令（骷髅骑士和视觉闪电都要写实体表）。
-pub fn trap_tick(
-    me: &mut Entity,
-    mob: &mut Mob,
-    ctx: &mut dyn EntityCtx,
-) -> TrapSpawn {
+pub fn trap_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> TrapSpawn {
     let _ = ctx;
     if let Some(state) = mob.skeleton_horse.as_mut() {
         state.trap = false;
@@ -126,12 +119,7 @@ pub fn trap_tick(
     // 三匹新马的水平推力在官方用原陷阱马的实体随机源取两个 `triangle(0, 1.1485)`。
     let mut random = me.random;
     let pushes: Vec<(f64, f64)> = (0..3)
-        .map(|_| {
-            (
-                random.triangle(0.0, 1.1485),
-                random.triangle(0.0, 1.1485),
-            )
-        })
+        .map(|_| (random.triangle(0.0, 1.1485), random.triangle(0.0, 1.1485)))
         .collect();
     me.random = random;
     TrapSpawn {
@@ -192,15 +180,6 @@ pub fn spawn_trap(world: &mut World, facts: TrapSpawn) {
     world.spawn_entity(rider);
 }
 
-/// `SkeletonHorse.setTrap(true)` 挂上优先级 1 的 `SkeletonTrapGoal`；其它目标表为空。
-pub(super) fn trap_goals() -> GoalSelector {
-    GoalSelector::from_goals(vec![WrappedGoal {
-        priority: 1,
-        running: false,
-        goal: Goal::SkeletonTrap,
-    }])
-}
-
 /// `SkeletonHorse.setTrap`：挂上 / 摘掉优先级 1 的 `SkeletonTrapGoal`。
 pub fn set_trap(mob: &mut Mob, trap: bool) {
     if let Some(state) = mob.skeleton_horse.as_mut()
@@ -211,7 +190,9 @@ pub fn set_trap(mob: &mut Mob, trap: bool) {
     if let Some(state) = mob.skeleton_horse.as_mut() {
         state.trap = trap;
     }
-    mob.goals.goals.retain(|goal| goal.goal != Goal::SkeletonTrap);
+    mob.goals
+        .goals
+        .retain(|goal| goal.goal != Goal::SkeletonTrap);
     if trap {
         mob.goals.goals.push(WrappedGoal {
             priority: 1,

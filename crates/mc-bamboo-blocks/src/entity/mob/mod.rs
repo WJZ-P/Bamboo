@@ -65,10 +65,10 @@ pub mod raider;
 pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
+pub mod skeleton_horse;
 pub mod slime;
 pub mod smooth_swim;
 pub mod spawn;
-pub mod skeleton_horse;
 pub mod spider;
 pub mod squid;
 pub mod stray;
@@ -2530,7 +2530,17 @@ impl Mob {
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
             MobType::ZombieHorse => GoalSelector::default(),
-            MobType::SkeletonHorse => skeleton_horse::trap_goals(),
+            MobType::SkeletonHorse => {
+                // `AbstractHorse.registerGoals` 的公共表 + `SkeletonHorse.addBehaviourGoals` 空覆写；
+                // `setTrap` 再把 `SkeletonTrapGoal` 挂上。
+                let mut goals = equine::goals(MobType::SkeletonHorse, &mut navigation);
+                goals.goals.push(goals::WrappedGoal {
+                    priority: 1,
+                    running: false,
+                    goal: goals::Goal::SkeletonTrap,
+                });
+                goals
+            }
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {

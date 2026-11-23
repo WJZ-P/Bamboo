@@ -41,14 +41,16 @@ pub(in crate::entity::mob) fn finalize_spawn(
                 crate::entity::mob::skeleton_horse::randomize_skeleton(mob, random);
             }
             MobType::ZombieHorse => {
-                if let Some(entry) = mob.attributes.instance(
-                    mc_bamboo_data::registries::attribute::JUMP_STRENGTH,
-                ) {
+                if let Some(entry) = mob
+                    .attributes
+                    .instance(mc_bamboo_data::registries::attribute::JUMP_STRENGTH)
+                {
                     entry.base = crate::entity::mob::skeleton_horse::randomize_zombie_jump(random);
                 }
-                if let Some(entry) = mob.attributes.instance(
-                    mc_bamboo_data::registries::attribute::MOVEMENT_SPEED,
-                ) {
+                if let Some(entry) = mob
+                    .attributes
+                    .instance(mc_bamboo_data::registries::attribute::MOVEMENT_SPEED)
+                {
                     entry.base = crate::entity::mob::skeleton_horse::randomize_zombie_speed(random);
                 }
             }

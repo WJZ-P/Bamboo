@@ -3549,10 +3549,7 @@ fn entity_types_file(data: &VersionData) -> String {
         let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
     }
     for (name, value) in [
-        (
-            "SKELETON_HORSE_BABY_WIDTH",
-            facts.skeleton_horse_baby_width,
-        ),
+        ("SKELETON_HORSE_BABY_WIDTH", facts.skeleton_horse_baby_width),
         (
             "SKELETON_HORSE_BABY_HEIGHT",
             facts.skeleton_horse_baby_height,

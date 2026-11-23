@@ -119,10 +119,7 @@ pub fn tick_thunder(level: &mut dyn Level, ticks: &mut BlockTicks, chunk: ChunkP
 /// 3 格外扩的竖直盒里随机挑一个活着的、能看见天的生活实体 → 高度图落点。
 fn lightning_target_around(world: &World, rolled: BlockPos) -> BlockPos {
     let mut top = BlockPos::new(rolled.x, world.level().heightmap_y(rolled), rolled.z);
-    if let Some(rod) = world
-        .level()
-        .lightning_rod_near(top, LIGHTNING_ROD_RADIUS)
-    {
+    if let Some(rod) = world.level().lightning_rod_near(top, LIGHTNING_ROD_RADIUS) {
         return rod;
     }
     let sky_top = BlockPos::new(top.x, world.max_y() + 1, top.z);
@@ -157,12 +154,7 @@ fn lightning_target_around(world: &World, rolled: BlockPos) -> BlockPos {
 /// `DifficultyInstance.getEffectiveDifficulty()`：`ServerLevel.getCurrentDifficultyAt`。
 fn effective_difficulty(world: &World, _pos: BlockPos) -> f32 {
     let clock = world.level().clock_ticks();
-    sky::effective_difficulty(
-        world.difficulty_id(),
-        clock,
-        0,
-        sky::moon_brightness(clock),
-    )
+    sky::effective_difficulty(world.difficulty_id(), clock, 0, sky::moon_brightness(clock))
 }
 
 /// `tickChunk` 开头的 `tickPrecipitation`：骰子掷中时挑一格看要不要结冰、积雪。

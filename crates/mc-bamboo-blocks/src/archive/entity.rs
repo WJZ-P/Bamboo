@@ -285,11 +285,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                     },
                 })
             }
-            "minecraft:lightning_bolt" => {
-                EntityKind::LightningBolt(Box::new(
-                    crate::entity::lightning::LightningBolt::default(),
-                ))
-            }
+            "minecraft:lightning_bolt" => EntityKind::LightningBolt(Box::default()),
             "minecraft:experience_orb" => {
                 let value = i32::from(tag::short_or(tag, "Value", 0));
                 let mut orb = ExperienceOrb::new(value);

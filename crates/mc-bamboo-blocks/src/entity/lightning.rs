@@ -149,17 +149,24 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     };
     // `spawnFire` 的取数在算阶段按官方顺序展开成偏移表；落地阶段只照表放火。
     let mut random = me.random;
-    if first && command.difficulty >= FIRE_DIFFICULTY && !command.visual_only {
-        command.fire_rolls = spawn_fire_offsets(me.block_position(), FIRST_FIRE_SPREADS, &mut random);
+    if first && command.difficulty >= FIRE_DIFFICULTY {
+        // 官方 `spawnFire` 开头就按 `visualOnly` 短路，连三个 `nextInt(3)` 都不取。
+        if command.visual_only {
+            command.fire_rolls = Vec::new();
+        } else {
+            command.fire_rolls =
+                spawn_fire_offsets(me.block_position(), FIRST_FIRE_SPREADS, &mut random);
+        }
     }
-    if command.life < 0 && flashes != 0 && !bolt_visual(&me.kind) {
+    if command.life < 0 && flashes != 0 {
         // 官方在判断闪光分支前取一次 `nextInt(10)`，无论是否命中都取。
         let threshold = -random.next_int_bounded(10);
         if command.life < threshold {
             command.life = 1;
             command.flashes = flashes - 1;
             command.seed = random.next_long();
-            command.fire_rolls = spawn_fire_offsets(me.block_position(), 0, &mut random);
+            // 官方闪光时 `spawnFire(0)`，视觉闪电在里面短路，但本格仍不取数。
+            command.fire_rolls = vec![me.block_position()];
             command.reseed = true;
         }
     }
@@ -173,6 +180,8 @@ pub fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
             me.discard();
         }
     }
+    // 官方 `life < 0 && flashes == 0` 时只调 `discard()`，这一刻剩下的 `life >= 0` 分支
+    // 不走；但实体仍在假世界的 tracked 名单里（Rust 这边保留到下一刻再移除）。
     ctx.emit(Command::LightningTick(command), me);
 }
 
@@ -216,11 +225,6 @@ impl Default for LightningTick {
     }
 }
 
-/// 视觉闪电不引火、不闪光（`spawnFire` 和闪光分支都短路）。
-fn bolt_visual(kind: &EntityKind) -> bool {
-    matches!(kind, EntityKind::LightningBolt(bolt) if bolt.visual_only)
-}
-
 /// `spawnFire(n)` 的取数顺序：本格不取数，之后每次取三个 `nextInt(3)-1`。
 fn spawn_fire_offsets(origin: BlockPos, count: i32, random: &mut JavaRandom) -> Vec<BlockPos> {
     let mut out = vec![origin];
@@ -228,7 +232,14 @@ fn spawn_fire_offsets(origin: BlockPos, count: i32, random: &mut JavaRandom) -> 
         let dx = random.next_int_bounded(FIRE_OFFSET_BOUND) - 1;
         let dy = random.next_int_bounded(FIRE_OFFSET_BOUND) - 1;
         let dz = random.next_int_bounded(FIRE_OFFSET_BOUND) - 1;
-        out.push(origin.offset(dx, dy, dz));
+        // 官方 `BlockPos.offset` 在 i32 上溢出回绕；极端位置直接跳过这个候选格。
+        if let (Some(x), Some(y), Some(z)) = (
+            origin.x.checked_add(dx),
+            origin.y.checked_add(dy),
+            origin.z.checked_add(dz),
+        ) {
+            out.push(BlockPos::new(x, y, z));
+        }
     }
     out
 }
@@ -281,7 +292,9 @@ pub fn apply(me: &mut Entity, world: &mut World, mut facts: LightningTick) {
     }
     // 玩家不在世界实体表里，用只读玩家视图补上 `Entity.thunderHit`。
     let mut players: Vec<PlayerView> = Vec::new();
-    world.level().for_each_player(&mut |player| players.push(*player));
+    world
+        .level()
+        .for_each_player(&mut |player| players.push(*player));
     players.retain(|player| {
         !facts.hit.contains(&player.uid)
             && area.min_x <= player.position.x

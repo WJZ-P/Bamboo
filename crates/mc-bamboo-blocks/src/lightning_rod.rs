@@ -118,8 +118,8 @@ fn scan_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mc_bamboo_data::blocks;
     use crate::testing::TestLevel;
+    use mc_bamboo_data::blocks;
 
     #[test]
     fn nearest_tie_follows_poi_stream_order() {

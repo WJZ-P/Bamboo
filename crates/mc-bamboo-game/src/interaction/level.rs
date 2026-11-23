@@ -204,7 +204,10 @@ impl Level for RegionLevel<'_> {
                 if !self.chunks.is_loaded(chunk_pos) {
                     continue;
                 }
-                let chunk = self.chunks.edited(chunk_pos).unwrap_or_else(|| self.chunks.template());
+                let chunk = self
+                    .chunks
+                    .edited(chunk_pos)
+                    .unwrap_or_else(|| self.chunks.template());
                 let base_x = chunk_x * SECTION_SIZE;
                 let base_z = chunk_z * SECTION_SIZE;
                 for (section_index, section) in chunk.sections().iter().enumerate() {

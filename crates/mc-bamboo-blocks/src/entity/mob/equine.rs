@@ -155,7 +155,10 @@ pub(super) fn dimensions(kind: MobType, baby: bool) -> (f32, f32, f32) {
     };
     let scale = if !baby {
         1.0
-    } else if matches!(kind, MobType::Horse | MobType::SkeletonHorse | MobType::ZombieHorse) {
+    } else if matches!(
+        kind,
+        MobType::Horse | MobType::SkeletonHorse | MobType::ZombieHorse
+    ) {
         0.7
     } else {
         0.5

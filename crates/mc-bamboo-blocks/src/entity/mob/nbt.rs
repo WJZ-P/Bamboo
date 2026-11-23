@@ -820,12 +820,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.frog.variant = variant;
             }
         }
-        if mob.mob_type == MobType::SkeletonHorse {
-            if let Some(state) = mob.skeleton_horse.as_mut() {
-                let trap = tag::bool_or(tag, "SkeletonTrap", false);
-                state.trap_time = tag::int_or(tag, "SkeletonTrapTime", 0);
-                crate::entity::mob::skeleton_horse::set_trap(mob, trap);
-            }
+        if mob.mob_type == MobType::SkeletonHorse
+            && let Some(state) = mob.skeleton_horse.as_mut()
+        {
+            let trap = tag::bool_or(tag, "SkeletonTrap", false);
+            state.trap_time = tag::int_or(tag, "SkeletonTrapTime", 0);
+            crate::entity::mob::skeleton_horse::set_trap(mob, trap);
         }
         if mob.mob_type == MobType::Camel {
             // `Camel.readAdditionalSaveData`：读 `LastPoseTick`（缺省 0），负数设成坐姿。

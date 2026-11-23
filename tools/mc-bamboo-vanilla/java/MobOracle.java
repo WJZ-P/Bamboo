@@ -385,6 +385,9 @@ public final class MobOracle {
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
             }
+            if (only == null || only.startsWith("lightning") || only.startsWith("trap")) {
+                cases += playLightning(official, out, only);
+            }
             if (only == null || "skeleton_death".startsWith(only)) {
                 cases += playSkeletonDeaths(official, out);
             }
@@ -11824,6 +11827,143 @@ public final class MobOracle {
         }
     }
 
+    /** 闪电自己对拍：构造、逐刻的 life / flashes / 实体随机源，以及第一刻引火后场景方块。 */
+    private static int playLightning(Official official, Writer out, String only) throws Exception {
+        int cases = 0;
+        List<String> names = List.of("lightning_fire", "lightning_visual", "lightning_copper",
+                "lightning_rod", "trap_near", "trap_far");
+        for (String name : names) {
+            if (only != null && !name.startsWith(only)) continue;
+            boolean trap = name.startsWith("trap");
+            FakeLevel level = FakeLevel.create(official);
+            ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+            level.nextId = FIRST_ID;
+            level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.spawned = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+            // 落点在 (0.5, 64, 0.5)。草地给火一个落脚点；铜场景放一块生锈的铜。
+            for (int x = -2; x <= 2; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    blocks.put(BlockPos.asLong(x, 63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+                }
+            }
+            if (name.equals("lightning_rod")) {
+                blocks.put(BlockPos.asLong(0, 64, 0), Blocks.LIGHTNING_ROD.weathering().unaffected().defaultBlockState());
+            }
+            if (name.equals("lightning_copper")) {
+                blocks.put(BlockPos.asLong(0, 63, 0), Blocks.COPPER_BLOCK.weathering().oxidized().defaultBlockState());
+            }
+            level.blocks.putAll(blocks);
+            long[] keys = blocks.keySet().toLongArray();
+            Arrays.sort(keys);
+            StringBuilder blockJson = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) blockJson.append(',');
+                BlockPos pos = BlockPos.of(keys[i]);
+                blockJson.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',')
+                        .append(pos.getZ()).append(',').append(Block.getId(blocks.get(keys[i]))).append(']');
+            }
+            blockJson.append(']');
+            int ticks = 40;
+            Entity subject;
+            if (trap) {
+                net.minecraft.world.entity.animal.equine.SkeletonHorse horse =
+                        EntityTypes.SKELETON_HORSE.create(level, EntitySpawnReason.EVENT);
+                horse.setTrap(true);
+                horse.setAge(0);
+                horse.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+                level.entitySeeds.nextLong();
+                setRandom(horse, 7L);
+                horse.setUUID(new UUID(0L, 1L));
+                horse.setId(FIRST_ID);
+                level.tracked.add(horse);
+                subject = horse;
+            } else {
+                net.minecraft.world.entity.LightningBolt bolt =
+                        EntityTypes.LIGHTNING_BOLT.create(level, EntitySpawnReason.EVENT);
+                bolt.setVisualOnly(name.equals("lightning_visual"));
+                bolt.snapTo(0.5, 64.0, 0.5);
+                level.entitySeeds.nextLong();
+                setRandom(bolt, 7L);
+                RandomSource random = bolt.getRandom();
+                random.nextLong();
+                random.nextInt(3);
+                put(net.minecraft.world.entity.LightningBolt.class, bolt, "seed", Long.valueOf(0L));
+                putInt(net.minecraft.world.entity.LightningBolt.class, bolt, "flashes", 1);
+                putInt(net.minecraft.world.entity.LightningBolt.class, bolt, "life", 2);
+                bolt.setId(FIRST_ID);
+                level.tracked.add(bolt);
+                subject = bolt;
+            }
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= ticks; tick++) {
+                if (tick > 0) {
+                    if (name.equals("trap_near") && tick == 4) {
+                        ServerPlayer player = new ServerPlayer(official.server, level,
+                                new GameProfile(new UUID(1L, 2L), "TrapOracle"), ClientInformation.createDefault());
+                        player.setId(FIRST_ID + 2);
+                        player.setPos(2.5, 64.0, 0.5);
+                        setRandom(player, ENTITY_RANDOM_SEED);
+                        level.playersList().add(player);
+                        level.tracked.add(player);
+                    }
+                    for (Entity entity : new ArrayList<>(level.tracked)) {
+                        if (entity.isRemoved() || entity instanceof ServerPlayer) continue;
+                        entity.commonTick();
+                        entity.tick();
+                    }
+                    for (Entity born : level.spawned) {
+                        if (!(born instanceof net.minecraft.world.entity.animal.equine.SkeletonHorse)
+                                && !(born instanceof net.minecraft.world.entity.monster.skeleton.Skeleton)
+                                && !(born instanceof net.minecraft.world.entity.LightningBolt)) continue;
+                        if (!level.tracked.contains(born)) level.tracked.add(born);
+                        setRandom(born, level.entitySeeds.nextLong());
+                    }
+                    level.spawned.clear();
+                }
+                if (tick > 0) frames.append(',');
+                if (trap) {
+                    var horse = (net.minecraft.world.entity.animal.equine.SkeletonHorse) subject;
+                    long bolts = level.tracked.stream().filter(
+                            e -> e instanceof net.minecraft.world.entity.LightningBolt).count();
+                    frames.append('[').append(horse.isTrap() ? 1 : 0).append(',')
+                            .append(horse.isTamed() ? 1 : 0).append(',')
+                            .append(randomSeed(subject)).append(',')
+                            .append(level.tracked.size()).append(',').append(bolts).append(',')
+                            .append(randomSeed(level.getRandom())).append(']');
+                } else {
+                    var bolt = (net.minecraft.world.entity.LightningBolt) subject;
+                    int life = (int) getInt(net.minecraft.world.entity.LightningBolt.class, bolt, "life");
+                    int flashes = (int) getInt(net.minecraft.world.entity.LightningBolt.class, bolt, "flashes");
+                    frames.append('[').append(life).append(',').append(flashes).append(',')
+                            .append(randomSeed(subject)).append(',')
+                            .append(randomSeed(level.getRandom())).append(",0]");
+                }
+            }
+            frames.append(']');
+            StringBuilder finalBlocks = new StringBuilder("[");
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) finalBlocks.append(',');
+                finalBlocks.append(Block.getId(level.getBlockState(BlockPos.of(keys[i]))));
+            }
+            finalBlocks.append(']');
+            if (trap) {
+                out.write("{\"type\":\"skeletonTrap\",\"name\":" + jsonString(name)
+                        + ",\"firstId\":" + FIRST_ID + ",\"start\":[0.5,64.0,0.5],\"player\":"
+                        + (name.equals("trap_near") ? "[2.5,64.0,0.5]" : "null")
+                        + ",\"playerTick\":4,\"frames\":" + frames + "}\n");
+            } else {
+                out.write("{\"type\":\"lightning\",\"name\":" + jsonString(name)
+                        + ",\"firstId\":" + FIRST_ID + ",\"seed\":7,\"start\":[0.5,64.0,0.5],\"visual\":"
+                        + name.equals("lightning_visual") + ",\"blocks\":" + blockJson
+                        + ",\"frames\":" + frames + ",\"finalBlocks\":" + finalBlocks + "}\n");
+            }
+            cases++;
+        }
+        return cases;
+    }
+
     private static final class Official {
         final RegistryAccess registries;
         final Holder<DimensionType> overworld;
@@ -12636,6 +12776,12 @@ public final class MobOracle {
         @Override
         public TickRateManager tickRateManager() {
             return tickRate;
+        }
+
+        /** 假世界没有玩家地图；`canSpreadFireAround` 按 Bamboo 的恒真实现短路。 */
+        @Override
+        public boolean canSpreadFireAround(BlockPos pos) {
+            return true;
         }
 
         @Override

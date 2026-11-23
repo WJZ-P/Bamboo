@@ -208,6 +208,15 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type.is_equine() {
         super::equine::tick_end(mob);
     }
+    // `SkeletonTrapGoal.tick` 每刻都跑（Bamboo 的目标选择器有隔刻判定），
+    // 在 `Mob.tick` 结尾单独看一次 `hasNearbyAlivePlayer`；命中就发落地命令。
+    if mob.mob_type == super::MobType::SkeletonHorse
+        && mob.skeleton_horse.as_ref().is_some_and(|state| state.trap)
+        && super::skeleton_horse::trap_player_near(me.position, ctx.blocks())
+    {
+        let spawn = super::skeleton_horse::trap_tick(me, mob, ctx);
+        ctx.emit(crate::entity::ctx::Command::SkeletonTrap(spawn), me);
+    }
     // `SkeletonHorse.aiStep` 在 `super.aiStep()` 之后数陷阱时间，到 18000 刻消失。
     // `SkeletonHorse.aiStep` counts the trap lifetime after `super.aiStep()`.
     if mob.mob_type == super::MobType::SkeletonHorse {
