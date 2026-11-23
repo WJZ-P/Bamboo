@@ -167,6 +167,8 @@ WebView2 的渲染进程不算在内。
 
 ## 现在能玩什么
 
+- **进度系统（第一期）**：全服共享只读进度树（1866 个官方 26.3 定义、4045 个判据、126 个显示节点），按官方 `TreeNodePosition` 排显示坐标。玩家的判据完成情况、完成时间、监听表和可见性跟着玩家走，存到官方路径 `<世界>/players/advancements/<uuid>.json`（`DataVersion 5023`、本地时区时间串），登录读、存盘 / 退出写。进服发首包 `update_advancements`，之后发增量；`select_advancements_tab` 和客户端的 `seen_advancements` 已接。`/advancement grant|revoke <目标> only|from|through|until|everything [进度] [判据]`，经验与配方奖励、受 `minecraft:show_advancement_messages` 控制的 `chat.type.advancement.task/goal/challenge` 公告都照官方。`tick` 每刻触发、`location` 每 20 刻触发（以 26.3 字节码为准），`inventory_changed` 等 16 种触发器已接现有事件入口；其余 42 种只解析不触发。`mc-bamboo-vanilla advancement-oracle java` 用三个独立 JVM 的默认身份哈希顺序逐项对拍定义、坐标和单条包字节，`--break-layout` 是改坏确认。设计和完整已知差异见 `docs/advancements.md`；配方书是第二期。
+
 - `/summon minecraft:skeleton` 和骷髅刷怪蛋生成会射箭的骷髅；带 NBT 召唤时和官方一样不执行默认装备生成，无弓时走近战。骷髅复用敌对生物的难度、日晒、装备和战利品流程。普通箭可命中实体或插地，支撑方块失去碰撞后掉落；可拾取的箭按库存、模式和震颤时间判定，普通骷髅的箭不可拾取。箭的运动和插地状态会同步，已建模实体字段写入 Anvil 实体存档。火矢扫过水面会按 `WaterFluid.entityInside` 熄火并播放一次 `entity.generic.extinguish_fire`；穿透箭命中后会在同一刻沿剩余线段重新取候选和方块效果。
 - **流浪者和沼骸**：`/summon minecraft:stray` / `minecraft:bogged` 和各自的刷怪蛋；复用骷髅的目标、装备生成、日晒、战利品（`entities/stray` / `entities/bogged`，含玩家击杀才掉的药水箭）和存档。流浪者的箭带 600 刻缓慢，沼骸生命 16、射击间隔 70 刻（困难 50 刻）、箭带 100 刻中毒；效果写在箭的 `potion_contents` 自定义效果里，箭的颜色随之同步。沼骸可用剪刀剪下蘑菇（`shearing/bogged`，每堆在身高处掉落，`sheared` 存盘并同步）。骷髅在细雪里连续 140 刻后开始转化（同步「发抖」标志），再过 300 刻变成流浪者：装备和掉落几率、效果、名字、标签等按 `ConversionType.SINGLE` 搬过去，播放 1048 号世界事件；`StrayConversionTime` / `FreezingTime` 存盘。骷髅和流浪者不会被冻（`canFreeze`），穿 `#freeze_immune_wearables` 的生物也不会。两者都接进了自然刷怪（流浪者要求看得见天、可在细雪里生成）。敌对生物找目标时照官方跳过无敌（创造模式）玩家。已知限制：转化不搬乘客 / 载具 / 拴绳 / 队伍 / 睡觉位置（Bamboo 没有这些），着火标志位不单独搬；流浪者 / 沼骸的自然刷怪规则已用 `mob-oracle --only stray_spawn`（找天正例 90 只、无天 / 和平 0 只）和 `--only bogged_spawn`（正例 48 只、和平 0 只）端到端对拍 0 不一致，但夹具的 `canSeeSky` 是注入常量，细雪上方连续跳过的那一支没单独区分；沼骸剪蘑菇不发 `SHEAR` 游戏事件，发射器剪蘑菇未接入；骷髅一支躲狼（`AvoidEntityGoal`）、拾取地上物品、副手药水箭当弹药都未做（沿用骷髅现状）。骷髅一支「看不见目标 60 刻后放弃」的计数以前每刻多加一次（约 30 刻就放弃），已照官方改回只在 `canContinueToUse` 里计数。
 - **史莱姆**：`/summon minecraft:slime`（`Size` 是大小减一）和刷怪蛋。大小决定尺寸（0.52 × 大小）、生命上限（大小的平方）、移速（0.2 + 0.1 × 大小）、攻击力和经验（都等于大小）。用自己的移动控制一跳一跳地走：每跳之间等 `10 + nextInt(20)` 刻（追击时除以 3），没有目标时每 40–100 刻随机换个方向，在液体里上浮；不寻路。目标是 16 格内看得见、高度差不超过 4 格的玩家（和铁傀儡，Bamboo 还没有）。大小大于 1 的史莱姆碰到玩家就按近战范围和视线打一下（`AbstractCubeMob.playerTouch`），打中才放攻击音效。死后被移除时分裂成 `2 + nextInt(3)` 只小一号的（照 `ConversionType.SPLIT_ON_DEATH` 搬效果、名字、标签等），最小的一号掉 0–2 个粘液球（`entities/slime` 的 `type_specific/cube_mob` 谓词读大小）。自然生成照 `Slime.checkSlimeSpawnRules`：史莱姆区块（`WorldgenRandom.seedSlimeChunk`，读世界种子）里 y < 40 的 1/10，和 `#allows_surface_slime_spawns` 群系 y 在 (50, 70) 之间、按月相（满月 0.5 到新月 0）和亮度的地表生成；生成盒按 `spawnDimensionsScale` 放大 4 倍，生成时的大小 1 / 2 / 4 按 `setSpawnSize` 抽。存盘 `Size`、`wasOnGround` 和 `AgeableMob` 的三个键。同步大小（实体数据 index 18）。已知限制：落地 / 跳跃的挤压动画只在客户端，服务端只保住随机取数和音效；脚步声用脚下方块的（不看上面一格的雪层 / 地毯）；分裂不搬乘客 / 拴绳 / 队伍；水里改大小时的溅水音效和粒子未做；岩浆怪未做。
@@ -1364,13 +1366,14 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件、会 tick 的方块实体（按事件休眠）和触发级红石缓存，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
+| `crates/mc-bamboo-advancements` | 进度系统的纯数据层：共享只读树、官方显示排版、玩家进度和进度档案 JSON 编解码，不认识世界线程 |
 | `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘、爆炸、可替换方块的破坏和 `/loot`，箱子填充接进开箱和容器读写，实体死亡还没接进游戏 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、战利品表、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
-| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、战利品表、世界边界和世界生成 |
+| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、进度树与包字节、战利品表、世界边界和世界生成 |
 
 依赖方向是单向的：
 
