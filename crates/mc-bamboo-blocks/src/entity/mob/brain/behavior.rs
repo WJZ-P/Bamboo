@@ -13,7 +13,7 @@ use super::{
 };
 use crate::entity::{Entity, JavaRandom, ctx::EntityCtx};
 
-pub use super::behaviors::{BodyPredicate, Kind, MoveToTargetSink, Trigger};
+pub use super::behaviors::{BodyPredicate, Kind, MoveToTargetSink, Speed, Trigger};
 
 /// 行为跑一刻时能碰到的一切：自己（实体和生物，大脑已经取出来）、上下文、记忆、
 /// 世界时钟（`level.getGameTime()`，也就是行为的 `timestamp`）。
@@ -253,6 +253,24 @@ impl Node {
                     .map(|child| child.node.debug_name())
                     .collect();
                 format!("{}[{}]", gate.name(), running.join(","))
+            }
+            kind => kind.name().to_owned(),
+        }
+    }
+
+    /// 对拍输出用的静态类名：闸门带上装载顺序的全部子行为（不管在不在跑）。
+    ///
+    /// The static class name for oracle dumps; gates list every child in load order,
+    /// running or not.
+    pub fn table_name(&self) -> String {
+        match &self.kind {
+            Kind::Gate(gate) => {
+                let children: Vec<String> = gate
+                    .children
+                    .iter()
+                    .map(|child| child.node.table_name())
+                    .collect();
+                format!("{}[{}]", gate.name(), children.join(","))
             }
             kind => kind.name().to_owned(),
         }

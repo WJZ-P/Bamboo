@@ -273,6 +273,9 @@ public final class MobOracle {
             if (only == null || "panda".startsWith(only)) {
                 cases += playPandaGenes(official, out);
             }
+            if (only == null || "axolotl_breed".startsWith(only)) {
+                cases += playAxolotlBreeds(official, out);
+            }
             if (only == null || "llama_spit".startsWith(only)) {
                 OracleLlama.checkAim(official);
                 playLlamaSpit(official, out, "llama_spit_far", 9.5, 61L);
@@ -338,6 +341,13 @@ public final class MobOracle {
             for (String name : List.of("phantom_hunt", "phantom_burn")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playPhantom(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("dolphin_water", "dolphin_land", "dolphin_baby",
+                    "dolphin_goals",
+                    "axolotl_water", "axolotl_land", "axolotl_variant", "axolotl_baby")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playWaterMob(official, out, name);
                 cases++;
             }
             if ("skeleton_spawn".equals(only)
@@ -447,6 +457,11 @@ public final class MobOracle {
         int wool;
         /** 鸡的 `eggTime` 起点；负数表示保留构造函数抽的值。 */
         int eggTime = -1;
+        /// 海龟场景：开局带蛋，以及每头海龟的家方块（x, y, z）。
+        ///
+        /// Turtle scenes: start with an egg, and each turtle's home position (x, y, z).
+        boolean turtleHasEgg;
+        int[] turtleHome = {0, 0, 0};
         /** 玩家受伤场景：逐刻的动作，见 `PlayerAction`。 */
         final List<PlayerAction> playerActions = new ArrayList<>();
         /** 玩家受伤场景：起始装备（四件盔甲 + 主手），按物品 ID。 */
@@ -608,6 +623,15 @@ public final class MobOracle {
             seeds.add(seed);
             cowAges.add(age);
             mobKinds.add(new int[] {kind});
+            return this;
+        }
+
+        /// 海龟场景：开局带蛋，并把家方块设在给定位置。
+        ///
+        /// Turtle scenes: start with an egg and put the home block at the given position.
+        Scene turtleEgg(int x, int y, int z) {
+            this.turtleHasEgg = true;
+            this.turtleHome = new int[] {x, y, z};
             return this;
         }
 
@@ -1961,6 +1985,26 @@ public final class MobOracle {
             swim.fill(-10, 56, -10, 10, 62, 10, Scenes.WATER);
             swim.mob(60, 0.5, 59.0, 0.5, 0.0F, 31L, 0);
             scenes.add(swim);
+            // 带蛋的海龟：家就在脚下的沙子里，过一会儿找一块沙子产下 1–4 枚蛋。
+            // 逐刻比带蛋 / 正在产卵 / 产卵计数 / 家方块，蛋放下那一刻方块表散列 `bh` 会变。
+            // A turtle carrying an egg: home is the sand underfoot; after a while it finds
+            // a sand block and lays 1–4 eggs. Compare has-egg / laying / counter / home
+            // every tick; the block hash `bh` changes the moment the eggs appear.
+            for (long seed : new long[] {3L, 77L, 123L}) {
+                Scene lay = new Scene("zombie_turtle_egg_lay_" + seed).ticks(600);
+                beach(lay);
+                lay.mob(60, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                lay.turtleEgg(0, 63, 0);
+                scenes.add(lay);
+            }
+            // 离家 12 格、带着蛋：产卵目标够不着家，回家目标带着它往家走。
+            // Twelve blocks from home and carrying an egg: the lay-egg goal cannot reach
+            // home, so the go-home goal walks it back.
+            Scene home = new Scene("zombie_turtle_egg_go_home").ticks(500);
+            beach(home);
+            home.mob(60, 12.5, 64.0, 0.5, 0.0F, 5L, 0);
+            home.turtleEgg(0, 63, 0);
+            scenes.add(home);
         }
     }
 
@@ -5170,6 +5214,11 @@ public final class MobOracle {
         scenes.add(new NaturalScene("bat_dim", EntityTypes.BAT, "plains", 2, 0, 2, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("bat_open", EntityTypes.BAT, "plains", 2, 15, 0, 0, false, -32, 0, 289, true, false));
         scenes.add(new NaturalScene("bat_peaceful", EntityTypes.BAT, "plains", 0, 0, 0, 0, false, -32, 0, 289, true, false));
+        // 海豚（WATER_CREATURE）用和鱿鱼一样的水面规则；美西螈（AXOLOTLS）要脚下黏土。
+        // Dolphins (WATER_CREATURE) use the squid surface rules; axolotls (AXOLOTLS)
+        // need clay below.
+        scenes.add(new NaturalScene("dolphin_ocean", EntityTypes.DOLPHIN, "ocean", 2, 15, 0, 0, false, -32, 0, 289, true, false));
+        scenes.add(new NaturalScene("axolotl_lush", EntityTypes.AXOLOTL, "lush_caves", 2, 0, 0, 0, false, -32, 0, 289, true, false));
         return playNaturalSpawnScenes(official, out, scenes, only);
     }
 
@@ -5284,7 +5333,12 @@ public final class MobOracle {
                 : scene.name().equals("ocelot_jungle_leaves")
                         ? Blocks.OAK_LEAVES.defaultBlockState()
                         : spawnFloor(scene.biome());
-        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT;
+        boolean aquatic = scene.name().contains("squid") || category == MobCategory.WATER_AMBIENT
+                || category == MobCategory.WATER_CREATURE || category == MobCategory.AXOLOTLS;
+        // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才会通过。
+        // The axolotl fixture swaps the bottom water layer for clay so
+        // `checkAxolotlSpawnRules` passes.
+        boolean clayFloor = scene.mob() == EntityTypes.AXOLOTL;
         level.naturalSeaLevel = scene.name().equals("drowned_deep_ocean") ? -51
                 : scene.name().equals("ocelot_below_sea") ? -60
                 : (scene.mob() == EntityTypes.GLOW_SQUID || scene.name().equals("fish_tropical_lush") ? -20 : -63);
@@ -5298,7 +5352,9 @@ public final class MobOracle {
                 }
                 if (aquatic) {
                     for (int y = -64; y <= -62; y++) {
-                        level.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                        net.minecraft.world.level.block.state.BlockState state = clayFloor && y == -64
+                                ? Blocks.CLAY.defaultBlockState() : Blocks.WATER.defaultBlockState();
+                        level.blocks.put(BlockPos.asLong(x, y, z), state);
                     }
                 } else {
                     level.blocks.put(BlockPos.asLong(x, -63, z), floorState);
@@ -5404,7 +5460,8 @@ public final class MobOracle {
                 row.add(mob instanceof net.minecraft.world.entity.animal.fish.TropicalFish fish
                         ? new net.minecraft.world.entity.animal.fish.TropicalFish.Variant(
                                 fish.getPattern(), fish.getBaseColor(), fish.getPatternColor()).getPackedId()
-                        : 0);
+                        : mob instanceof net.minecraft.world.entity.animal.axolotl.Axolotl axolotl
+                                ? axolotl.getVariant().getId() : 0);
                 spawned.add(row);
                 variants.add(spawnVariants(mob));
             }
@@ -5429,6 +5486,7 @@ public final class MobOracle {
         row.addProperty("localCap", scene.localCap());
         row.addProperty("nearbyRespawn", scene.nearbyRespawn());
         row.addProperty("aquatic", aquatic);
+        row.addProperty("clayFloor", clayFloor);
         row.addProperty("halloween", net.minecraft.util.SpecialDates.isHalloween());
         row.addProperty("levelSeed", level.worldSeed);
         row.addProperty("waterDepth", waterDepth);
@@ -7322,6 +7380,310 @@ public final class MobOracle {
         out.flush();
     }
 
+    /**
+     * `Axolotl.setVariant` 是私有的，用它的 `DATA_VARIANT` 访问器直接写。
+     *
+     * <p>`Axolotl.setVariant` is private; write its `DATA_VARIANT` accessor directly.
+     */
+    @SuppressWarnings("unchecked")
+    private static void setAxolotlVariant(Mob mob, int variant) throws Exception {
+        java.lang.reflect.Field field = net.minecraft.world.entity.animal.axolotl.Axolotl.class
+                .getDeclaredField("DATA_VARIANT");
+        field.setAccessible(true);
+        net.minecraft.network.syncher.EntityDataAccessor<Integer> accessor =
+                (net.minecraft.network.syncher.EntityDataAccessor<Integer>) field.get(null);
+        mob.getEntityData().set(accessor, variant);
+    }
+
+    /**
+     * 美西螈的繁殖花色：官方 `Axolotl.getBreedOffspring`（先构造幼崽，再 `nextInt(1200)`
+     * 赌稀有的蓝色；没中时 `nextBoolean` 取父母之一）的结果和父亲随机源之后的状态。
+     * 稀有种子由扫描提前找好，保证覆盖那一条分支。
+     *
+     * <p>Axolotl breeding variants: the result of `Axolotl.getBreedOffspring` (construct the
+     * baby, roll `nextInt(1200)` for the rare blue, otherwise one `nextBoolean` picks a
+     * parent) plus the father's random state afterwards. Rare seeds are pre-scanned so the
+     * branch is covered.
+     */
+    private static int playAxolotlBreeds(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        int cases = 0;
+        int[][] pairs = {{0, 0}, {1, 3}, {3, 1}, {2, 4}, {0, 2}};
+        java.util.List<Long> seeds = new java.util.ArrayList<>();
+        for (int sample = 0; sample < 40; sample++) {
+            seeds.add(20261122L + sample * 104729L);
+        }
+        RandomSource probe = RandomSource.create(0L);
+        for (long candidate = 0; candidate < 10_000_000L && seeds.size() < 43; candidate++) {
+            probe.setSeed(candidate);
+            if (probe.nextInt(1200) == 0) {
+                seeds.add(candidate);
+            }
+        }
+        for (int sample = 0; sample < seeds.size(); sample++) {
+            long seed = seeds.get(sample);
+            int[] pair = pairs[sample % pairs.length];
+            var father = EntityTypes.AXOLOTL.create(world, EntitySpawnReason.BREEDING);
+            var mother = EntityTypes.AXOLOTL.create(world, EntitySpawnReason.BREEDING);
+            setAxolotlVariant(father, pair[0]);
+            setAxolotlVariant(mother, pair[1]);
+            setRandom(father, seed);
+            long beforeSeed = randomSeed(father);
+            var baby = father.getBreedOffspring(world, mother);
+            out.write("{\"type\":\"axolotlBreed\",\"seed\":" + seed
+                    + ",\"beforeSeed\":" + beforeSeed
+                    + ",\"fatherVariant\":" + pair[0]
+                    + ",\"motherVariant\":" + pair[1]
+                    + ",\"babyVariant\":"
+                    + (baby == null ? -1
+                            : ((net.minecraft.world.entity.animal.axolotl.Axolotl) baby).getVariant().getId())
+                    + ",\"afterSeed\":" + randomSeed(father) + "}\n");
+            cases++;
+        }
+        return cases;
+    }
+
+    /**
+     * 海豚和美西螈：逐刻比位置、速度、朝向、随机源、氧气、年龄、着地 / 在水里、
+     * 各自的元数据状态（gotFish / moistness / variant / playingDead / fromBucket）和尺寸。
+     *
+     * 两边都设 `NoAI`：官方的 goalSelector / Brain 不跑，只剩 `baseTick`（氧气、环境音
+     * 的两类取数）和 `Dolphin.tick()` / `Axolotl.baseTick()` 的 NoAI 分支，便于逐位对拍。
+     * 显式给两边同一个实体随机源种子、不重放构造取数，避免 Brain 传感器构造取数的差异。
+     *
+     * Dolphins and axolotls: compare position, velocity, rotation, random, air, age,
+     * on-ground / in-water, their own metadata state (gotFish / moistness / variant /
+     * playingDead / fromBucket) and size each tick.
+     *
+     * Both sides set `NoAI`: vanilla's goalSelector / Brain does not run, leaving only
+     * `baseTick` (air, ambient-sound draws) and the NoAI branches of `Dolphin.tick()` /
+     * `Axolotl.baseTick()`. Both get the same explicit entity-random seed and skip
+     * constructor draws, avoiding differences from Brain sensor construction.
+     */
+    private static void playWaterMob(Official official, Writer out, String name) throws Exception {
+        boolean dolphin = name.startsWith("dolphin");
+        boolean land = name.endsWith("_land");
+        boolean baby = name.endsWith("_baby");
+        int variant = name.endsWith("_variant") ? 3 : 0;
+        int ticks = 200;
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        for (int x = -8; x <= 8; x++) {
+            for (int z = -8; z <= 8; z++) {
+                boolean wall = Math.abs(x) == 8 || Math.abs(z) == 8;
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                if (!land) {
+                    for (int y = 61; y <= 66; y++) {
+                        world.blocks.put(BlockPos.asLong(x, y, z),
+                                wall ? Blocks.STONE.defaultBlockState() : Blocks.WATER.defaultBlockState());
+                    }
+                }
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        Mob mob = (dolphin ? EntityTypes.DOLPHIN : EntityTypes.AXOLOTL)
+                .create(world, EntitySpawnReason.COMMAND);
+        // 显式种子：两边都不重放构造取数（UUID / yRot）。
+        // Explicit seed: neither side replays the constructor draws (UUID / yRot).
+        setRandom(mob, 0x5EED_5EEDL);
+        mob.setUUID(new UUID(1L, 2L));
+        mob.setYRot(0.0F);
+        mob.setYHeadRot(0.0F);
+        double[] start = land ? new double[] {0.5, 61.0, 0.5} : new double[] {0.5, 63.0, 0.5};
+        mob.setPos(start[0], start[1], start[2]);
+        mob.setNoAi(true);
+        if (baby) ((net.minecraft.world.entity.AgeableMob) mob).setAge(-24000);
+        if (!dolphin) {
+            // `Axolotl.setVariant` 是私有的，用它的 `DATA_VARIANT` 访问器直接写。
+            // `Axolotl.setVariant` is private; write its `DATA_VARIANT` accessor directly.
+            setAxolotlVariant(mob, variant);
+        }
+        world.tracked.add(mob);
+        net.minecraft.world.entity.animal.dolphin.Dolphin dolphinMob =
+                dolphin ? (net.minecraft.world.entity.animal.dolphin.Dolphin) mob : null;
+        net.minecraft.world.entity.animal.axolotl.Axolotl axolotl =
+                dolphin ? null : (net.minecraft.world.entity.animal.axolotl.Axolotl) mob;
+        var frames = new StringBuilder("[");
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick > 0) {
+                world.gameTime++;
+                if (!mob.isRemoved()) {
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+            }
+            frames.append(tick == 0 ? "" : ",");
+            frames.append("{\"gone\":").append(mob.isRemoved());
+            if (!mob.isRemoved()) {
+                frames.append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(mob.getHealth()), mob.getAirSupply(), mob.hurtTime,
+                                mob.deathTime, mob.getNoActionTime(),
+                                ((net.minecraft.world.entity.AgeableMob) mob).getAge(),
+                                mob.onGround() ? 1 : 0, mob.isInWater() ? 1 : 0,
+                                dolphin ? (dolphinMob.gotFish() ? 1 : 0) : axolotl.getVariant().getId(),
+                                dolphin ? dolphinMob.getMoistnessLevel() : (axolotl.isPlayingDead() ? 1 : 0),
+                                dolphin ? 0 : (axolotl.fromBucket() ? 1 : 0)}))
+                        .append(",\"dimensions\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(mob.getDimensions(net.minecraft.world.entity.Pose.STANDING).width()),
+                                Float.floatToRawIntBits(mob.getDimensions(net.minecraft.world.entity.Pose.STANDING).height()),
+                                Float.floatToRawIntBits(mob.getEyeHeight())}));
+            }
+            frames.append(",\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append('}');
+        }
+        out.write("{\"type\":\"waterMob\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start)
+                + ",\"dolphin\":" + dolphin + ",\"baby\":" + baby + ",\"variant\":" + variant
+                + ",\"registered\":" + registeredGoals(mob.getGoalSelector())
+                + (dolphin ? "" : ",\"brain\":" + brainTable(mob))
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /**
+     * 大脑的结构表：传感器（类名、扫描间隔、`requires()` 的记忆）、行为表（优先级、活动名、
+     * 类名，按官方遍历顺序）、活动进入条件和退出时清的记忆。和 Bamboo 一侧逐字相同。
+     *
+     * <p>The brain's structural table: sensors (class name, scan rate, `requires()` memories),
+     * the behaviour table (priority, activity name, class name in vanilla iteration order),
+     * the activity requirements and the memories erased when an activity stops. Character
+     * for character like the Bamboo side.
+     */
+    private static String brainTable(Mob mob) throws Exception {
+        var brain = mob.getBrain();
+        Class<?> brainType = net.minecraft.world.entity.ai.Brain.class;
+        Field sensorsField = brainType.getDeclaredField("sensors");
+        sensorsField.setAccessible(true);
+        var sensors = (java.util.Map<?, ?>) sensorsField.get(brain);
+        Field scanRateField = net.minecraft.world.entity.ai.sensing.Sensor.class.getDeclaredField("scanRate");
+        scanRateField.setAccessible(true);
+        StringBuilder out = new StringBuilder("{\"sensors\":[");
+        boolean first = true;
+        for (Object value : sensors.values()) {
+            var sensor = (net.minecraft.world.entity.ai.sensing.Sensor<?>) value;
+            if (!first) out.append(',');
+            first = false;
+            String memories = sensor.requires().stream().map(BrainOracle::name).sorted()
+                    .map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+            out.append('[').append(jsonString(sensor.getClass().getSimpleName())).append(',')
+                    .append(scanRateField.getInt(sensor)).append(',').append(memories).append(']');
+        }
+        out.append("],\"behaviors\":[");
+        Field prioritiesField = brainType.getDeclaredField("availableBehaviorsByPriority");
+        prioritiesField.setAccessible(true);
+        var priorities = (java.util.TreeMap<Integer, java.util.Map<?, ?>>) prioritiesField.get(brain);
+        first = true;
+        for (var entry : priorities.entrySet()) {
+            for (var activityEntry : entry.getValue().entrySet()) {
+                var activity = (net.minecraft.world.entity.schedule.Activity) activityEntry.getKey();
+                for (Object behavior : (java.util.Set<?>) activityEntry.getValue()) {
+                    if (!first) out.append(',');
+                    first = false;
+                    out.append('[').append(entry.getKey()).append(',')
+                            .append(jsonString(activity.getName())).append(',')
+                            .append(jsonString(tableBehaviorName(behavior))).append(']');
+                }
+            }
+        }
+        out.append("],\"requirements\":[");
+        Field requirementsField = brainType.getDeclaredField("activityRequirements");
+        requirementsField.setAccessible(true);
+        var requirements = new java.util.TreeMap<String, String>();
+        for (var entry : ((java.util.Map<?, ?>) requirementsField.get(brain)).entrySet()) {
+            var activity = (net.minecraft.world.entity.schedule.Activity) entry.getKey();
+            @SuppressWarnings("unchecked")
+            var conditions = (java.util.Set<com.mojang.datafixers.util.Pair<
+                    net.minecraft.world.entity.ai.memory.MemoryModuleType<?>,
+                    net.minecraft.world.entity.ai.memory.MemoryStatus>>) entry.getValue();
+            if (conditions.isEmpty()) continue;
+            String rows = conditions.stream()
+                    .map(pair -> new String[] {BrainOracle.name(pair.getFirst()),
+                            pair.getSecond().name().toLowerCase(java.util.Locale.ROOT)})
+                    .sorted((a, b) -> a[0].equals(b[0]) ? a[1].compareTo(b[1]) : a[0].compareTo(b[0]))
+                    .map(row -> "[" + jsonString(row[0]) + "," + jsonString(row[1]) + "]")
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+            requirements.put(activity.getName(), rows);
+        }
+        first = true;
+        for (var entry : requirements.entrySet()) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(jsonString(entry.getKey())).append(',').append(entry.getValue()).append(']');
+        }
+        out.append("],\"erase\":[");
+        Field eraseField = brainType.getDeclaredField("activityMemoriesToEraseWhenStopped");
+        eraseField.setAccessible(true);
+        var erased = new java.util.TreeMap<String, String>();
+        for (var entry : ((java.util.Map<?, ?>) eraseField.get(brain)).entrySet()) {
+            var activity = (net.minecraft.world.entity.schedule.Activity) entry.getKey();
+            @SuppressWarnings("unchecked")
+            var memories = (java.util.Set<net.minecraft.world.entity.ai.memory.MemoryModuleType<?>>) entry.getValue();
+            String rows = memories.stream().map(BrainOracle::name).sorted()
+                    .map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+            erased.put(activity.getName(), rows);
+        }
+        first = true;
+        for (var entry : erased.entrySet()) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(jsonString(entry.getKey())).append(',').append(entry.getValue()).append(']');
+        }
+        return out.append("]}").toString();
+    }
+
+    /**
+     * 结构表里的类名：匿名子类按父类记，闸门带上装载顺序的全部子行为。
+     *
+     * <p>The class name for the structural table: anonymous subclasses use the parent and
+     * gates list every child in load order.
+     */
+    private static String tableBehaviorName(Object behavior) throws Exception {
+        Class<?> type = behavior.getClass();
+        while (type.isAnonymousClass()) type = type.getSuperclass();
+        String name = type.getSimpleName();
+        if (behavior instanceof net.minecraft.world.entity.ai.behavior.GateBehavior<?> gate) {
+            Field listField = net.minecraft.world.entity.ai.behavior.GateBehavior.class.getDeclaredField("behaviors");
+            listField.setAccessible(true);
+            var list = (net.minecraft.world.entity.ai.behavior.ShufflingList<?>) listField.get(gate);
+            StringBuilder out = new StringBuilder(name).append('[');
+            boolean first = true;
+            for (Object child : list) {
+                if (!first) out.append(',');
+                first = false;
+                out.append(tableBehaviorName(child));
+            }
+            return out.append(']').toString();
+        }
+        return name;
+    }
+
+    /** `goalSelector` 注册表：每个目标的优先级、官方类名、标志位掩码，和 Bamboo 一侧逐字相同。 */
+    /** The `goalSelector` registry: priority, vanilla class name and flag mask of each goal, character for character like the Bamboo side. */
+    private static String registeredGoals(net.minecraft.world.entity.ai.goal.GoalSelector selector) {
+        StringBuilder out = new StringBuilder("[");
+        boolean first = true;
+        for (WrappedGoal wrapped : selector.getAvailableGoals()) {
+            if (!first) out.append(',');
+            first = false;
+            int flags = 0;
+            // `Goal.Flag` 的枚举序是 MOVE / LOOK / JUMP / TARGET，和 Bamboo 的 `Flag` 一致。
+            // `Goal.Flag`'s ordinal order MOVE / LOOK / JUMP / TARGET matches Bamboo's `Flag`.
+            for (var flag : wrapped.getFlags()) {
+                flags |= 1 << flag.ordinal();
+            }
+            out.append('[').append(wrapped.getPriority()).append(',')
+                    .append(jsonString(wrapped.getGoal().getClass().getSimpleName())).append(',')
+                    .append(flags).append(']');
+        }
+        return out.append(']').toString();
+    }
+
     /** 把 `FollowFlockLeaderGoal.nextStartTick` 设成一个固定值。 */
     private static void pinFlockCountdown(Mob fish, int value) throws Exception {
         for (var wrapped : fish.getGoalSelector().getAvailableGoals()) {
@@ -8514,6 +8876,17 @@ public final class MobOracle {
                 hunts.setAccessible(true);
                 hunts.invoke(fox);
             }
+            if (mob instanceof net.minecraft.world.entity.animal.turtle.Turtle turtle
+                    && scene.turtleHasEgg) {
+                // `Turtle.setHasEgg` 是私有的，直接写 `HAS_EGG` 实体数据；`setHomePos` 是公开的。
+                // `Turtle.setHasEgg` is private, so write the `HAS_EGG` entity data; `setHomePos` is public.
+                turtle.setHomePos(new BlockPos(
+                        scene.turtleHome[0], scene.turtleHome[1], scene.turtleHome[2]));
+                turtle.getEntityData().set(
+                        (net.minecraft.network.syncher.EntityDataAccessor<Boolean>) readStatic(
+                                net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG"),
+                        true);
+            }
             if (scene.helmet != null) {
                 ItemStack helmet = new ItemStack(scene.helmet);
                 if (scene.helmetDamage != 0) helmet.setDamageValue(scene.helmetDamage);
@@ -8568,6 +8941,11 @@ public final class MobOracle {
             // 鸡的蛋计时在构造时抽，Java 一侧报给 Bamboo 照填。
             // The chicken's egg timer is drawn at construction; report it to Bamboo.
             line.append(",\"egg\":").append(mobs.get(i) instanceof Chicken chicken ? chicken.eggTime : 0);
+            // 海龟场景：开局带蛋标志和家方块，Bamboo 一侧照填。
+            // Turtle scenes: the starting has-egg flag and home position, mirrored by Bamboo.
+            line.append(",\"turtleEgg\":").append(scene.turtleHasEgg);
+            line.append(",\"turtleHome\":[").append(scene.turtleHome[0]).append(',')
+                    .append(scene.turtleHome[1]).append(',').append(scene.turtleHome[2]).append(']');
             // 大脑传感器的起始延迟和犰狳的掉鳞甲计时在构造时用重设种子之前的随机源取。
             // The sensor delays and the armadillo scute timer are drawn before the reseed.
             line.append(",\"sensors\":").append(BrainOracle.sensorDelays(mobs.get(i)));
@@ -8781,6 +9159,21 @@ public final class MobOracle {
             throw new IllegalStateException(scene.name + " expected wolf avoidance without llama targeting: target="
                     + llamaTargetedWolf + " avoid=" + wolfAvoidedLlama);
         }
+        if (scene.name.startsWith("zombie_turtle_egg_lay_")) {
+            // 防止种子只跑到一半没真的产卵；`bh` 逐刻比方块表，蛋放下那一刻两边都得变。
+            // Ensure the seed really lays eggs; `bh` compares the block table every tick.
+            var turtle = (net.minecraft.world.entity.animal.turtle.Turtle) mobs.getFirst();
+            boolean placed = false;
+            for (BlockState state : level.blocks.values()) {
+                if (state.is(Blocks.TURTLE_EGG)) {
+                    placed = true;
+                    break;
+                }
+            }
+            if (turtle.hasEgg() || !placed) {
+                throw new IllegalStateException(scene.name + " never laid a turtle egg");
+            }
+        }
         line.append("]");
         if (scene.name.equals("witch_drink_fire")) {
             Mob witch = mobs.getFirst();
@@ -8910,6 +9303,20 @@ public final class MobOracle {
             }
             if (mob instanceof net.minecraft.world.entity.animal.wolf.Wolf wolf) {
                 appendWolfState(out, wolf);
+            }
+            if (mob instanceof net.minecraft.world.entity.animal.turtle.Turtle turtle) {
+                // 海龟逐刻状态：带蛋、正在产卵、产卵计数、回家标志和家方块。
+                // Turtle per-tick state: carrying an egg, laying, the laying counter, going home and home.
+                out.append(",\"turtleEgg\":").append(turtle.hasEgg() ? 1 : 0);
+                out.append(",\"turtleLaying\":").append(turtle.isLayingEgg() ? 1 : 0);
+                out.append(",\"turtleLayCount\":").append(getInt(
+                        net.minecraft.world.entity.animal.turtle.Turtle.class, turtle, "layEggCounter"));
+                out.append(",\"turtleGoingHome\":").append(getBoolean(
+                        net.minecraft.world.entity.animal.turtle.Turtle.class, turtle, "goingHome"));
+                BlockPos home = turtle.getHomePos();
+                out.append(",\"turtleHomeX\":").append(home.getX());
+                out.append(",\"turtleHomeY\":").append(home.getY());
+                out.append(",\"turtleHomeZ\":").append(home.getZ());
             }
             if (mob instanceof net.minecraft.world.entity.animal.goat.Goat goat) {
                 // 尖叫、左角、右角、长跳姿势，各占一位。

@@ -66,6 +66,11 @@ pub(super) struct Case {
     /// Aquatic fixture: three water layers (-64..=-62) replace the grass.
     #[serde(default)]
     aquatic: bool,
+    /// 美西螈夹具：三层水里最底下那层是黏土。
+    ///
+    /// Axolotl fixture: the bottom of the three "water" layers is clay.
+    #[serde(default)]
+    clay_floor: bool,
     steps: Vec<Step>,
 }
 
@@ -248,9 +253,11 @@ impl Coverage {
             "fish_tropical",
             "fish_tropical_lush",
             "fish_puffer",
+            "dolphin_ocean",
+            "axolotl_lush",
         ] {
             if self.per_scene.get(name) == Some(&0) {
-                return Err(format!("natural spawn fixture {name} produced no fish"));
+                return Err(format!("natural spawn fixture {name} produced no mobs"));
             }
         }
         let covered_misc = ["mooshroom_day", "polar_bear_day"]
@@ -401,7 +408,16 @@ fn spawn_row(entity: Entity) -> [i32; 12] {
         },
         main_gene,
         hidden_gene,
-        if tropical { mob.fish.variant } else { 0 },
+        // 热带鱼花纹和美西螈花色共用最后一列（官方夹具的 12 列布局）。
+        // Tropical fish patterns and axolotl variants share the last column
+        // (the vanilla fixture's 12-column layout).
+        if tropical {
+            mob.fish.variant
+        } else if mob.mob_type == MobType::Axolotl {
+            mob.axolotl.variant
+        } else {
+            0
+        },
     ]
 }
 
@@ -455,7 +471,15 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
                 }
                 if aquatic {
                     for y in -64..=-62 {
-                        column.push((BlockPos::new(x, y, z), BlockState(blocks::WATER)));
+                        // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才通过。
+                        // The axolotl fixture swaps the bottom water layer for clay so
+                        // `checkAxolotlSpawnRules` passes.
+                        let state = if case.clay_floor && y == -64 {
+                            blocks::CLAY
+                        } else {
+                            blocks::WATER
+                        };
+                        column.push((BlockPos::new(x, y, z), BlockState(state)));
                     }
                 } else {
                     column.push((BlockPos::new(x, -63, z), floor_state));

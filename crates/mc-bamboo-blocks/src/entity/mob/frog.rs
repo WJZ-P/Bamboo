@@ -14,7 +14,7 @@
 //! `SmoothSwimmingMoveControl` and the navigation `Frog.FrogPathNavigation` (amphibious,
 //! see the `frog` flag in `path.rs`).
 
-use mc_bamboo_core::{BlockPos, Direction, Vec3, mth};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{
     PathType,
     registries::attribute,
@@ -26,7 +26,7 @@ use super::{
     attributes::{Attribute, Attributes},
     brain::{
         Activity, ActivityData, Brain, Cx,
-        behavior::{Class, Gate, Kind, MoveToTargetSink, Trigger},
+        behavior::{Class, Gate, Kind, MoveToTargetSink, Speed, Trigger},
         memory::{
             MemoryStatus::{self, Registered, ValueAbsent, ValuePresent},
             MemoryType::{self, *},
@@ -34,7 +34,6 @@ use super::{
         },
         sensor::{self, SensorKind},
     },
-    control::{self, Operation},
     goat::{self, JumpSpec, LongJump},
     living,
     path::static_path_type,
@@ -479,7 +478,7 @@ fn acceptable_landing_spot(cx: &Cx, target: BlockPos) -> bool {
 /// `BlockPos.withinBoxByManhattanDistance(origin, reach, reach, reach)`: nearest first by
 /// Manhattan distance; within a shell x and y ascend and z comes positive first, then
 /// mirrored. Stops when `visit` returns true.
-fn within_box_by_manhattan(
+pub(super) fn within_box_by_manhattan(
     origin: BlockPos,
     reach: i32,
     visit: &mut dyn FnMut(BlockPos) -> bool,
@@ -701,7 +700,7 @@ const SWIM_TIERS: [(i32, i32); 6] = [(1, 1), (3, 3), (5, 5), (6, 5), (7, 7), (10
 /// `RandomStroll.getTargetSwimPos`: draw a swimmable spot in the smallest tier, then
 /// stretch that direction tier by tier; the first tier that leaves the water (or finds
 /// nothing) falls back to the previous one.
-fn target_swim_pos(cx: &mut Cx) -> Option<Vec3> {
+pub(super) fn target_swim_pos(cx: &mut Cx) -> Option<Vec3> {
     let mut fallback: Option<Vec3> = None;
     let mut target = None;
     for (horizontal, vertical) in SWIM_TIERS {
@@ -987,7 +986,7 @@ fn look_at_player_sometimes() -> Kind {
 
 fn follow_temptation() -> Kind {
     Kind::FollowTemptation {
-        speed: 1.25,
+        speed: Speed::fixed(1.25),
         close_adult: 2.5,
         close_baby: 2.5,
     }
@@ -995,7 +994,7 @@ fn follow_temptation() -> Kind {
 
 fn walk_target_from_look(speed: f32) -> Kind {
     Kind::WalkTargetFromLook {
-        speed,
+        speed: Speed::fixed(speed),
         close_enough: 3,
     }
 }
@@ -1239,70 +1238,12 @@ pub(super) fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dy
     }
 }
 
-/// `SmoothSwimmingMoveControl.tick`（青蛙和蝌蚪都是 `(85, 10, 0.02F, 0.1F, true)`）：水里每刻
-/// 上浮 0.005；有路要走时身体每刻最多转 10 度，水里按俯仰把推进分给前进和竖直，陆地上
-/// 转身越多走得越慢。它从不把操作改回 `WAIT`。
+/// `SmoothSwimmingMoveControl.tick`（青蛙、蝌蚪和鱼都是 `(85, 10, 0.02F, 0.1F, true)`）。
 ///
-/// `SmoothSwimmingMoveControl.tick` (frogs and tadpoles both use `(85, 10, 0.02F, 0.1F,
-/// true)`): rise by 0.005 a tick in water; while following a path the body turns at most
-/// 10 degrees a tick, thrust in water is split between forward and vertical by pitch and
-/// on land turning slows it down. It never resets the operation to `WAIT`.
+/// `SmoothSwimmingMoveControl.tick` (frogs, tadpoles and fish all use `(85, 10, 0.02F,
+/// 0.1F, true)`).
 pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
-    const MAX_TURN_X: f32 = 85.0;
-    const MAX_TURN_Y: f32 = 10.0;
-    const IN_WATER_SPEED: f32 = 0.02;
-    const OUTSIDE_WATER_SPEED: f32 = 0.1;
-    if me.in_water {
-        me.delta = me.delta.add(Vec3::new(0.0, 0.005, 0.0));
-    }
-    if mob.mover.operation != Operation::MoveTo || mob.navigation.is_done() {
-        living::set_speed(mob, 0.0);
-        mob.xxa = 0.0;
-        mob.yya = 0.0;
-        mob.zza = 0.0;
-        return;
-    }
-    let xd = mob.mover.wanted_x - me.position.x;
-    let yd = mob.mover.wanted_y - me.position.y;
-    let zd = mob.mover.wanted_z - me.position.z;
-    let dd = xd * xd + yd * yd + zd * zd;
-    if dd < f64::from(2.500_000_3E-7_f32) {
-        mob.zza = 0.0;
-        return;
-    }
-    let y_rot_d = degrees(mth::atan2(zd, xd)) - 90.0;
-    me.y_rot = control::move_rotlerp(me.y_rot, y_rot_d, MAX_TURN_Y);
-    mob.y_body_rot = me.y_rot;
-    mob.y_head_rot = me.y_rot;
-    let speed = (mob.mover.speed_modifier * mob.attributes.value(attribute::MOVEMENT_SPEED)) as f32;
-    if me.in_water {
-        living::set_speed(mob, speed * IN_WATER_SPEED);
-        let horizontal = (xd * xd + zd * zd).sqrt();
-        let epsilon = f64::from(1.0E-5_f32);
-        if yd.abs() > epsilon || horizontal.abs() > epsilon {
-            let x_rot_d = -degrees(mth::atan2(yd, horizontal));
-            let x_rot_d = mth::clamp_f32(mth::wrap_degrees(x_rot_d), -MAX_TURN_X, MAX_TURN_X);
-            mob.x_rot = control::rotate_towards(mob.x_rot, x_rot_d, 5.0);
-        }
-        let radians = mob.x_rot * (std::f64::consts::PI / 180.0) as f32;
-        let cos = mth::cos(f64::from(radians));
-        let sin = mth::sin(f64::from(radians));
-        mob.zza = cos * speed;
-        mob.yya = -sin * speed;
-    } else {
-        let left_to_turn = mth::wrap_degrees(me.y_rot - y_rot_d).abs();
-        let factor = 1.0 - mth::clamp_f32((left_to_turn - 10.0) / 50.0, 0.0, 1.0);
-        living::set_speed(mob, speed * OUTSIDE_WATER_SPEED * factor);
-    }
-}
-
-/// `(float)(radians * Mth.RAD_TO_DEG)`：反编译出来是 `* 180.0F / (float)Math.PI`，字节码里是
-/// 折叠好的一个 `float` 常量。
-///
-/// `(float)(radians * Mth.RAD_TO_DEG)`: decompiled as `* 180.0F / (float)Math.PI`, but the
-/// bytecode holds one folded `float` constant.
-fn degrees(radians: f64) -> f32 {
-    (radians * 57.295_776_367_187_5) as f32
+    super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
 }
 
 /// `Frog.travelInWater`：按当前速度推进、移动、乘 0.9；不沉也不浮。

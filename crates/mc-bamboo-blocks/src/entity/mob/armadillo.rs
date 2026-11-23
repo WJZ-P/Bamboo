@@ -19,7 +19,7 @@ use super::{
     attributes::Attributes,
     brain::{
         Activity, ActivityData, Brain, Cx,
-        behavior::{Class, Gate, Kind, MoveToTargetSink},
+        behavior::{Class, Gate, Kind, MoveToTargetSink, Speed},
         memory::{
             MemoryStatus::{self, ValueAbsent, ValuePresent},
             MemoryType, MemoryValue,
@@ -328,7 +328,7 @@ fn idle_activity() -> ActivityData {
                     vec![
                         (
                             Kind::FollowTemptation {
-                                speed: 1.25,
+                                speed: Speed::fixed(1.25),
                                 close_adult: 2.0,
                                 close_baby: 1.0,
                             },
@@ -338,7 +338,7 @@ fn idle_activity() -> ActivityData {
                             Kind::BabyFollowAdult {
                                 min: 5,
                                 max: 16,
-                                speed: 1.25,
+                                speed: Speed::fixed(1.25),
                             },
                             1,
                         ),
@@ -363,7 +363,7 @@ fn idle_activity() -> ActivityData {
                         (Kind::RandomStroll { speed: 1.0 }, 1),
                         (
                             Kind::WalkTargetFromLook {
-                                speed: 1.0,
+                                speed: Speed::fixed(1.0),
                                 close_enough: 3,
                             },
                             1,
