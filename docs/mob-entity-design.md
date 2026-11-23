@@ -2735,3 +2735,32 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
 - 去重（2.8%）和挤压伤害判定（30.56 次/刻）是两个「看着可做、其实收益有限」的
   数字：前者省不了几次搜索，后者是伤害不是推力，第 4 步的挤压上限要限的是
   每条 `PushMob` 命令，不是 `maxEntityCramming` 规则本身。
+
+### 5.23 闪电、避雷针、骷髅陷阱马、骷髅马与僵尸马（2026-11-23，分支 `lightning`）
+
+按 5.12 的接入清单做的最小追加：`MobType` 从 46 增到 48（骷髅马、僵尸马），
+`EntityKind` / `KindPublic` / `KindState` / `KindData` 增一个 `LightningBolt` 变体。
+生成器 `Extractor.java` 补导出两种马的 `createAttributes` 值和 `BABY_DIMENSIONS`；
+`entity_types.rs` 由 `extract` 重生成。行为都在新文件里：
+`entity/lightning.rs`（构造 / tick / 引火 / 铜除锈 / 避雷针 / `thunderHit`）、
+`entity/mob/thunder.rs`（苦力怕和哞菇的覆盖层）、
+`entity/mob/skeleton_horse.rs`（陷阱目标、属性、存档字段）、
+`lightning_rod.rs`（POI 查询的替代实现）。
+
+`tick_thunder` 现在照字节码做完整落点选择并生成实体，取数顺序和原来一致；
+`lightning_rod_near` 是 `Level` 的默认方法，游戏层 `RegionLevel` 覆盖成
+已加载区块 + 段调色板快路径，不新增索引表、不动存档或 `ChunkStore`。
+`LightningBolt.tick` 把写世界和 `level.random` 取数收进一条 `Command::LightningTick`，
+精确与并行两种驱动共用同一份落地逻辑；`SkeletonTrapGoal` 因 Bamboo 的目标选择器
+有隔刻判定，改为在 `living::tick` 尾部每刻分派一次，落地走 `Command::SkeletonTrap`。
+
+对拍：`mob-oracle --only lightning` / `--only trap` 共 6 个场景（闪电引火、
+视觉闪电、铜除锈、避雷针、陷阱触发和不触发），逐刻比 `life` / `flashes` /
+实体随机源、世界随机源、场景方块末态、`isTrap` / `isTame`，两处
+`--break-self-test` 均能抓到不一致。全量 `mob-oracle` 只剩这台 ARM Mac 的
+12 处 `Mth.COS_TAB` 已知差异；`natural-spawn java` 1727 例 0 不一致；
+`oracle java --weather clear` 与雷暴夜晚批都 0 失败。
+
+这一轮没做的：骷髅马 / 僵尸马的逐刻、掉落和存档逐题对拍，`natural-spawn`
+新增场景，村民 / 猪的雷击转化，生物骑生物，`MOB_SPAWN_EQUIPMENT` 附魔的
+逐位对拍，`LIGHTNING_STRIKE` 游戏事件和天气层雷声。见 README 的已知限制。
