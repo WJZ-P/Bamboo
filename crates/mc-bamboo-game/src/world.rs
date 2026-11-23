@@ -61,8 +61,8 @@ pub const MAX_ENTITY_THREADS: usize = 256;
 pub const MAX_ENTITY_COLLISIONS: usize = 4096;
 /// 三档降频两个距离的合法上限（只是防配置写坏；推荐值 32 / 64）。
 pub const MAX_MOB_DISTANCE: usize = 4096;
-/// `mob_wakeups_scale` 的合法上限（只是防配置写坏）。
-pub const MAX_MOB_WAKEUPS_SCALE: usize = 16;
+/// `mob_wakeups_scale` 的合法上限，和 `mc_bamboo_blocks` 里的常量一致。
+pub const MAX_MOB_WAKEUPS_SCALE: usize = mc_bamboo_blocks::entity::mob::throttle::MAX_WAKEUPS_SCALE;
 /// 区块计算池线程数的上限。
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 

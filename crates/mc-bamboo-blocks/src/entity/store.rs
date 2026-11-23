@@ -1381,11 +1381,6 @@ impl EntityStore {
         self.wake_tokens = tokens;
     }
 
-    /// 拆岛：新实体表从满桶开始，刻号和上限跟原表一致。
-    pub fn split_wake_tokens(&self) -> super::mob::throttle::WakeTokens {
-        self.wake_tokens.split_full()
-    }
-
     /// 只对一行做一次可变借用，给 [`super::mob::throttle::plans_for_tick`] 用：
     /// 不改槽位、不动任何子索引，公开的 uid 和位置都不变。
     pub fn with_throttle_row_mut(
