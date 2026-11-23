@@ -75,6 +75,7 @@ import net.minecraft.world.RandomSequences;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.TickRateManager;
+import net.minecraft.world.attribute.EnvironmentAttributeMap;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.damagesource.DamageSource;
@@ -345,6 +346,20 @@ public final class MobOracle {
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
+                cases++;
+            }
+            if (only == null || "golem_attack_roll".startsWith(only)) {
+                cases += playGolemAttackRolls(official, out);
+            }
+            if (only == null || "golem_save".startsWith(only)) {
+                cases += playGolemSaves(official, out);
+            }
+            for (String name : List.of("golem_iron_idle", "golem_iron_attack", "golem_iron_repair",
+                    "golem_iron_death", "golem_iron_player_created", "golem_snow_idle",
+                    "golem_snow_no_grief", "golem_snow_shear", "golem_snow_wet",
+                    "golem_snow_hot", "golem_snow_shoot", "golem_snow_attack")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playGolem(official, out, name);
                 cases++;
             }
             for (String name : List.of("cod_swim", "cod_beached", "salmon_swim",
@@ -9119,6 +9134,244 @@ public final class MobOracle {
     }
 
     /**
+     * 铁傀儡 / 雪傀儡逐刻对拍：官方在假 `ServerLevel` 里生成一到两只生物，逐刻
+     * `checkDespawn` + `commonTick` + `tick`，一帧记下位置、速度、朝向、血量、随机源、
+     * 着地、目标、元数据标志、脚下雪、新生成的实体（雪球 / 掉落物）和世界随机源。
+     *
+     * Golem tick comparison: the fake level ticks the official mobs and reports
+     * per-tick motion, health, random, target, metadata, snow trail, spawned
+     * entities and the level random seed.
+     */
+    /** 两种傀儡的存档：整份 SNBT 和读回再写出的 SNBT。 */
+    private static int playGolemSaves(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (int setup = 0; setup < 4; setup++) {
+            boolean iron = setup < 2;
+            FakeLevel world = FakeLevel.create(official);
+            world.getRandom().setSeed(9100L + setup);
+            Mob mob = iron ? EntityTypes.IRON_GOLEM.create(world, EntitySpawnReason.COMMAND)
+                    : EntityTypes.SNOW_GOLEM.create(world, EntitySpawnReason.COMMAND);
+            mob.setPos(0.5, 64.0, 0.5);
+            mob.setHealth(iron ? 37.0F : 2.5F);
+            if (iron && setup == 0) {
+                ((net.minecraft.world.entity.animal.golem.IronGolem) mob).setPlayerCreated(true);
+                ((net.minecraft.world.entity.animal.golem.IronGolem) mob).setPersistentAngerEndTime(12345L);
+            }
+            if (!iron && setup == 3) {
+                ((net.minecraft.world.entity.animal.golem.SnowGolem) mob).setPumpkin(false);
+            }
+            var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            mob.saveWithoutId(output);
+            var copy = iron ? EntityTypes.IRON_GOLEM.create(world, EntitySpawnReason.LOAD)
+                    : EntityTypes.SNOW_GOLEM.create(world, EntitySpawnReason.LOAD);
+            copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+            var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                    net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+            copy.saveWithoutId(again);
+            out.write("{\"type\":\"golemSave\",\"kind\":" + (iron ? 0 : 1)
+                    + ",\"setup\":" + setup
+                    + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                    + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** `IronGolem.doHurtTarget` 的伤害抽样：僵尸护甲清零后掉血量就是原始伤害。 */
+    private static int playGolemAttackRolls(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (long seed : new long[] {1L, 2L, 3L, 17L, 41L, 1024L, 987654321L, -7L}) {
+            FakeLevel world = FakeLevel.create(official);
+            var golem = EntityTypes.IRON_GOLEM.create(world, EntitySpawnReason.COMMAND);
+            var zombie = EntityTypes.ZOMBIE.create(world, EntitySpawnReason.COMMAND);
+            setRandom(golem, seed);
+            zombie.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.ARMOR).setBaseValue(0.0);
+            zombie.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH).setBaseValue(100.0);
+            zombie.setHealth(100.0F);
+            golem.setPos(0.5, 61.0, 0.5);
+            zombie.setPos(1.5, 61.0, 0.5);
+            var method = net.minecraft.world.entity.animal.golem.IronGolem.class
+                    .getDeclaredMethod("doHurtTarget", ServerLevel.class, net.minecraft.world.entity.Entity.class);
+            method.setAccessible(true);
+            method.invoke(golem, world, zombie);
+            out.write("{\"type\":\"golemAttackRoll\",\"seed\":" + seed
+                    + ",\"afterSeed\":" + randomSeed(golem)
+                    + ",\"damage\":" + Float.floatToRawIntBits(100.0F - zombie.getHealth())
+                    + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** `mobInteract` 是 protected；夹具按官方 `Player.interactOn` 的那一步直接调用它。 */
+    private static void golemInteract(Mob golem, ServerPlayer player) throws Exception {
+        var method = golem.getClass().getDeclaredMethod("mobInteract",
+                net.minecraft.world.entity.player.Player.class, InteractionHand.class);
+        method.setAccessible(true);
+        method.invoke(golem, player, InteractionHand.MAIN_HAND);
+    }
+
+    private static void playGolem(Official official, Writer out, String name) throws Exception {
+        boolean iron = name.startsWith("golem_iron");
+        boolean attack = name.endsWith("_attack");
+        boolean repair = name.endsWith("_repair");
+        boolean shear = name.endsWith("_shear");
+        boolean wet = name.endsWith("_wet");
+        boolean hot = name.endsWith("_hot");
+        boolean shoot = name.endsWith("_shoot");
+        boolean death = name.endsWith("_death");
+        boolean noGrief = name.endsWith("_no_grief");
+        int ticks = death ? 60 : attack || shoot ? 120 : repair || shear ? 60 : 100;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        world.golemFixture = true;
+        world.injectedCanSeeSky = true;
+        world.injectedBrightOutside = true;
+        world.injectedRaining = wet;
+        boolean previousGrief = official.gameRules.get(GameRules.MOB_GRIEFING);
+        if (noGrief) setRule(official, GameRules.MOB_GRIEFING, false);
+        // 地面是石头；雨 / 水 / 热群系按场景铺方块或注入环境属性。
+        for (int x = -7; x <= 7; x++) {
+            for (int z = -7; z <= 7; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+                if (wet && !hot) {
+                    world.blocks.put(BlockPos.asLong(x, 61, z), Blocks.WATER.defaultBlockState());
+                }
+            }
+        }
+        // 群系层要一个 BiomeManager；所有场景都用平原，热群系再叠常量 `true`。
+        // The biome layer needs a BiomeManager; every scene uses plains, and the
+        // hot-biome scene overlays a constant `true`.
+        var plains = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+        put(Level.class, world, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> plains, 0L));
+        var attributeBuilder = EnvironmentAttributeMap.builder();
+        if (hot) {
+            attributeBuilder.set(net.minecraft.world.attribute.EnvironmentAttributes.SNOW_GOLEM_MELTS, true);
+        }
+        var attrs = EnvironmentAttributeSystem.builder().addStaticLayers(world)
+                .addConstantLayer(attributeBuilder.build()).build();
+        world.naturalAttributes = attrs;
+        String blocks = blockArray(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        double[] start = {0.5, 61.0, 0.5};
+        Mob golem = iron ? EntityTypes.IRON_GOLEM.create(world, EntitySpawnReason.COMMAND)
+                : EntityTypes.SNOW_GOLEM.create(world, EntitySpawnReason.COMMAND);
+        setRandom(golem, world.entitySeeds.nextLong());
+        RandomSource random = golem.getRandom();
+        golem.setUUID(Mth.createInsecureUUID(random));
+        float yaw = random.nextFloat() * 6.2831855F;
+        golem.setYRot(yaw);
+        golem.setYHeadRot(yaw);
+        golem.setYBodyRot(yaw);
+        golem.setPos(start[0], start[1], start[2]);
+        golem.setId(FIRST_ID);
+        if (iron && name.contains("player_created")) {
+            ((net.minecraft.world.entity.animal.golem.IronGolem) golem).setPlayerCreated(true);
+        }
+        world.tracked.add(golem);
+        Mob prey = null;
+        if (attack || shoot) {
+            prey = EntityTypes.ZOMBIE.create(world, EntitySpawnReason.COMMAND);
+            setRandom(prey, world.entitySeeds.nextLong());
+            RandomSource preyRandom = prey.getRandom();
+            prey.setUUID(Mth.createInsecureUUID(preyRandom));
+            preyRandom.nextFloat();
+            prey.setYRot(0.0F);
+            prey.setYHeadRot(0.0F);
+            prey.setPos(3.5, 61.0, 0.5);
+            prey.setId(FIRST_ID + 1);
+            prey.setNoAi(true);
+            world.tracked.add(prey);
+        }
+        ServerPlayer player = skeletonDeathPlayer(official, world, 0);
+        java.util.List<Mob> mobs = prey == null ? java.util.List.of(golem) : java.util.List.of(golem, prey);
+        var frames = new StringBuilder("[");
+        boolean covered = false;
+        for (int tick = 0; tick <= ticks; tick++) {
+            if (tick != 0) {
+                world.gameTime++;
+                if (repair && tick == 2) golem.hurtServer(world, world.damageSources().generic(), 40.0F);
+                if (repair && tick == 20) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_INGOT));
+                    golemInteract(golem, player);
+                }
+                if (shear && tick == 5) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SHEARS));
+                    golemInteract(golem, player);
+                }
+                if (death && tick == 2) golem.hurtServer(world, world.damageSources().genericKill(), 200.0F);
+
+                for (Mob mob : mobs) {
+                    if (mob.isRemoved()) continue;
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+
+            }
+            if (tick != 0) frames.append(',');
+            frames.append("{\"motion\":").append(projectileMotion(golem))
+                    .append(",\"state\":").append(Arrays.toString(new int[] {
+                            Float.floatToRawIntBits(golem.getHealth()), golem.hurtTime, golem.deathTime,
+                            golem.getNoActionTime(), golem.onGround() ? 1 : 0,
+                            golem.isRemoved() ? 1 : 0,
+                            golem.getEntityData().get((net.minecraft.network.syncher.EntityDataAccessor<Byte>)
+                                    readStatic(golem.getClass(), iron ? "DATA_FLAGS_ID" : "DATA_PUMPKIN_ID")) & 0xFF}))
+                    .append(",\"seed\":").append(randomSeed(golem))
+                    .append(",\"target\":").append(golem.getTarget() == null ? -1 : golem.getTarget().getId())
+                    .append(",\"prey\":").append(prey == null || prey.isRemoved() ? "null" : Arrays.toString(new long[] {
+                            Double.doubleToRawLongBits(prey.getDeltaMovement().y),
+                            Float.floatToRawIntBits(prey.getHealth()), randomSeed(prey)}))
+                    .append(",\"snow\":");
+            int snow = 0;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (world.blocks.getOrDefault(BlockPos.asLong(dx, 61, dz), Blocks.AIR.defaultBlockState())
+                            .is(Blocks.SNOW)) snow++;
+                }
+            }
+            frames.append(snow).append(",\"spawns\":[");
+            boolean first = true;
+            for (Entity spawned : world.spawned) {
+                if (!first) frames.append(',');
+                first = false;
+                int kind = BuiltInRegistries.ENTITY_TYPE.getId(spawned.getType());
+                int item = spawned instanceof net.minecraft.world.entity.item.ItemEntity drop
+                        ? BuiltInRegistries.ITEM.getId(drop.getItem().getItem()) : 0;
+                int count = spawned instanceof net.minecraft.world.entity.item.ItemEntity drop
+                        ? drop.getItem().getCount() : 1;
+                frames.append('[').append(kind).append(',').append(item).append(',')
+                        .append(count).append(']');
+            }
+            world.spawned.clear();
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom())).append('}');
+            if (prey != null && golem.getTarget() == prey) covered = true;
+            if (shear && (golem.getEntityData().get((net.minecraft.network.syncher.EntityDataAccessor<Byte>)
+                    readStatic(golem.getClass(), "DATA_PUMPKIN_ID")) & 0xFF) == 0) covered = true;
+            if ((attack || shoot || repair || wet || hot || death) && tick > 2) covered = true;
+            if (name.endsWith("_idle") || name.contains("player_created") || noGrief) covered = true;
+        }
+        if (noGrief) setRule(official, GameRules.MOB_GRIEFING, previousGrief);
+        if (!covered) throw new IllegalStateException("golem scene missed its branch: " + name);
+        out.write("{\"type\":\"golem\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start)
+                + ",\"iron\":" + iron + ",\"prey\":" + (prey != null)
+                + ",\"playerId\":" + player.getId() + ",\"raining\":" + wet
+                + ",\"hot\":" + hot + ",\"noGrief\":" + noGrief
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+
+    /**
      * Phantom spawner: drive the official `PhantomSpawner.tick` in the fake
      * `ServerLevel`, one JSON frame per tick with the phantoms it added (block
      * position, size, anchor), the level random seed and the spawner's
@@ -12999,6 +13252,8 @@ public final class MobOracle {
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
+        /** 傀儡场景没有 POI 管理器，用这个开关让村庄目标走没有村庄的真实路径。 */
+        boolean golemFixture;
         /** 僵尸场景的真实时间模式：时钟、雨强由场景给，天色由官方环境属性系统算。 */
         boolean realSky;
         long clock;
@@ -13224,6 +13479,13 @@ public final class MobOracle {
         @Override
         public EnvironmentAttributeSystem environmentAttributes() {
             return naturalAttributes == null ? official.attributes : naturalAttributes;
+        }
+
+        /** 傀儡场景没有 POI 管理器；`sectionsToVillage` 给一个「很远」的值，
+         *  这样 `isVillage` 为假、村庄段列表为空，两个村庄目标都走没有村庄的真实路径。 */
+        @Override
+        public int sectionsToVillage(net.minecraft.core.SectionPos section) {
+            return golemFixture ? Integer.MAX_VALUE : super.sectionsToVillage(section);
         }
 
         private net.minecraft.server.waypoints.ServerWaypointManager waypoints;

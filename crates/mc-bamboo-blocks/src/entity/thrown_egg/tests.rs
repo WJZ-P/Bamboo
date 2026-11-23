@@ -15,6 +15,7 @@ fn shot(position: Vec3) -> EggShot {
         owner: None,
         owner_uuid: None,
         item: ItemStack::new(items::EGG, 16),
+        projectile: ThrowableKind::Egg,
     }
 }
 

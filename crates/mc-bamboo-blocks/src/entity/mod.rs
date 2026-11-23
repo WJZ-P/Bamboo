@@ -235,7 +235,7 @@ impl EntityKind {
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
-            Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
+            Self::Egg(egg) => egg.kind.entity_type(),
             Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }

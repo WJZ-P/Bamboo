@@ -165,6 +165,13 @@ impl BlockSource for ReadOnlyWorld<'_> {
             .unwrap_or(mc_bamboo_world::MIN_Y - 1)
     }
 
+    fn snow_golem_melts(&self, pos: BlockPos) -> bool {
+        mc_bamboo_data::spawning::SNOW_GOLEM_MELTS
+            .get(self.chunks.biome_at(pos).unwrap_or(0) as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
     fn precipitation_facts(&self, pos: BlockPos) -> mc_bamboo_blocks::PrecipitationFacts {
         use mc_bamboo_worldgen::biome_temperature as biome;
         let id = self.chunks.biome_at(pos).unwrap_or(0) as i32;

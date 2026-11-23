@@ -44,8 +44,10 @@ pub mod fox_goals;
 pub mod frog;
 pub mod goals;
 pub mod goat;
+mod golem_goals;
 pub mod infested;
 pub mod interact;
+pub mod iron_golem;
 pub mod living;
 pub mod mooshroom;
 pub mod motion;
@@ -72,6 +74,7 @@ pub mod skeleton;
 mod skeleton_drops;
 pub mod slime;
 pub mod smooth_swim;
+pub mod snow_golem;
 pub mod spawn;
 pub mod spider;
 pub mod squid;
@@ -174,6 +177,8 @@ pub enum MobType {
     Phantom,
     Camel,
     Bee,
+    IronGolem,
+    SnowGolem,
     Silverfish,
     Endermite,
 }
@@ -182,7 +187,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 49] = [
+    pub const ALL: [Self; 51] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -230,6 +235,8 @@ impl MobType {
         Self::Bat,
         Self::Phantom,
         Self::Bee,
+        Self::IronGolem,
+        Self::SnowGolem,
         Self::Silverfish,
         Self::Endermite,
     ];
@@ -285,6 +292,8 @@ impl MobType {
             Self::Phantom => ids::PHANTOM,
             Self::Camel => ids::CAMEL,
             Self::Bee => ids::BEE,
+            Self::IronGolem => ids::IRON_GOLEM,
+            Self::SnowGolem => ids::SNOW_GOLEM,
             Self::Silverfish => ids::SILVERFISH,
             Self::Endermite => ids::ENDERMITE,
         }
@@ -340,6 +349,8 @@ impl MobType {
             Self::Phantom => "minecraft:phantom",
             Self::Camel => "minecraft:camel",
             Self::Bee => "minecraft:bee",
+            Self::IronGolem => "minecraft:iron_golem",
+            Self::SnowGolem => "minecraft:snow_golem",
             Self::Silverfish => "minecraft:silverfish",
             Self::Endermite => "minecraft:endermite",
         }
@@ -446,6 +457,8 @@ impl MobType {
             // Sitting dimensions are overridden by `Mob::dimensions` from `camel.pose`.
             (Self::Camel, baby) => camel::dimensions(baby, false),
             (Self::Bee, _) => bee::dimensions(),
+            (Self::IronGolem, _) => iron_golem::dimensions(),
+            (Self::SnowGolem, _) => snow_golem::dimensions(),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
@@ -573,7 +586,12 @@ impl MobType {
     pub const fn has_no_ambient_sound(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Pufferfish | Self::Slime | Self::Tadpole | Self::Bee
+            Self::Creeper
+                | Self::Pufferfish
+                | Self::Slime
+                | Self::Tadpole
+                | Self::Bee
+                | Self::IronGolem
         )
     }
 
@@ -629,6 +647,11 @@ impl MobType {
     /// `Mob.removeWhenFarAway`: false for cows, true for monsters; squid are not
     /// `Animal`s and keep the default of true.
     pub const fn removes_when_far_away(self) -> bool {
+        // `AbstractGolem.removeWhenFarAway` 恒假。
+        // `AbstractGolem.removeWhenFarAway` is always false.
+        if matches!(self, Self::IronGolem | Self::SnowGolem) {
+            return false;
+        }
         // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用
         // `Mob.removeWhenFarAway` 的缺省值真；美西螈由 `Mob::removes_when_far_away` 单判
         // （装过桶或起了名就不消失）；敌对生物按 `is_enemy` 判定。
@@ -669,7 +692,12 @@ impl MobType {
     /// Whether this is an `AgeableMob` (cow, pig, sheep, chicken, squid): saves the three
     /// `Age` keys and grows up.
     pub const fn is_ageable(self) -> bool {
-        !self.is_monster() && !fish::is_fish(self) && !matches!(self, Self::Bat | Self::Phantom)
+        !self.is_monster()
+            && !fish::is_fish(self)
+            && !matches!(
+                self,
+                Self::Bat | Self::Phantom | Self::IronGolem | Self::SnowGolem
+            )
     }
 
     /// `AgeableMob.canBeABaby()`：青蛙覆盖成假。它的年龄照样能被设成负数（组里后来的
@@ -710,7 +738,10 @@ impl MobType {
         !self.is_monster()
             && !self.is_ageable_water_creature()
             && !self.is_water_animal()
-            && !matches!(self, Self::Bat | Self::Phantom)
+            && !matches!(
+                self,
+                Self::Bat | Self::Phantom | Self::IronGolem | Self::SnowGolem
+            )
     }
 
     /// `Entity.getSwimSound`：鱼覆盖成 `entity.fish.swim`，海龟是 `entity.turtle.swim`，其余是
@@ -829,6 +860,8 @@ impl MobType {
             Self::Phantom => "minecraft:entities/phantom",
             Self::Camel => "minecraft:entities/camel",
             Self::Bee => "minecraft:entities/bee",
+            Self::IronGolem => "minecraft:entities/iron_golem",
+            Self::SnowGolem => "minecraft:entities/snow_golem",
             Self::Silverfish => "minecraft:entities/silverfish",
             Self::Endermite => "minecraft:entities/endermite",
         }
@@ -937,6 +970,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.ambient"),
             // `Bee.getAmbientSound()` 返回 null：不出环境音也不抽音高的随机数。
             Self::Bee => None,
+            Self::IronGolem => None,
+            Self::SnowGolem => Some("minecraft:entity.snow_golem.ambient"),
             Self::Silverfish => Some("minecraft:entity.silverfish.ambient"),
             Self::Endermite => Some("minecraft:entity.endermite.ambient"),
         }
@@ -984,6 +1019,8 @@ impl MobType {
             Self::Phantom => Some("minecraft:entity.phantom.hurt"),
             Self::Camel => Some("minecraft:entity.camel.hurt"),
             Self::Bee => Some("minecraft:entity.bee.hurt"),
+            Self::IronGolem => Some("minecraft:entity.iron_golem.hurt"),
+            Self::SnowGolem => Some("minecraft:entity.snow_golem.hurt"),
             Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
             Self::Endermite => Some("minecraft:entity.endermite.hurt"),
         }
@@ -1031,6 +1068,8 @@ impl MobType {
             Self::Phantom => Some("minecraft:entity.phantom.death"),
             Self::Camel => Some("minecraft:entity.camel.death"),
             Self::Bee => Some("minecraft:entity.bee.death"),
+            Self::IronGolem => Some("minecraft:entity.iron_golem.death"),
+            Self::SnowGolem => Some("minecraft:entity.snow_golem.death"),
             Self::Silverfish => Some("minecraft:entity.silverfish.death"),
             Self::Endermite => Some("minecraft:entity.endermite.death"),
         }
@@ -1086,6 +1125,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.step"),
             // `Bee.playStepSound` 是空实现。
             Self::Bee => None,
+            Self::IronGolem => Some("minecraft:entity.iron_golem.step"),
+            Self::SnowGolem => None,
             Self::Silverfish => Some("minecraft:entity.silverfish.step"),
             Self::Endermite => Some("minecraft:entity.endermite.step"),
         }
@@ -1142,6 +1183,8 @@ impl MobType {
             Self::Phantom => items::PHANTOM_SPAWN_EGG,
             Self::Camel => items::CAMEL_SPAWN_EGG,
             Self::Bee => items::BEE_SPAWN_EGG,
+            Self::IronGolem => items::IRON_GOLEM_SPAWN_EGG,
+            Self::SnowGolem => items::SNOW_GOLEM_SPAWN_EGG,
             Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
             Self::Endermite => items::ENDERMITE_SPAWN_EGG,
         }
@@ -1197,6 +1240,8 @@ impl MobType {
             Self::Phantom => "entity.minecraft.phantom",
             Self::Camel => "entity.minecraft.camel",
             Self::Bee => "entity.minecraft.bee",
+            Self::IronGolem => "entity.minecraft.iron_golem",
+            Self::SnowGolem => "entity.minecraft.snow_golem",
             Self::Silverfish => "entity.minecraft.silverfish",
             Self::Endermite => "entity.minecraft.endermite",
         }
@@ -2279,6 +2324,10 @@ pub struct Mob {
     ///
     /// Squid and glow squid state; default for every other mob.
     pub squid: squid::SquidState,
+    /// 铁傀儡的 `playerCreated` 标志和挥手动画计时。
+    pub iron_golem: iron_golem::IronGolem,
+    /// 雪傀儡的南瓜标志。
+    pub snow_golem: snow_golem::SnowGolem,
     /// 蝙蝠的标志字节和飞行目标；别的生物是缺省值。
     ///
     /// The bat flag byte and flight target; default for every other mob.
@@ -2492,6 +2541,8 @@ impl Mob {
             MobType::Phantom => phantom::attributes(),
             MobType::Camel => camel::attributes(),
             MobType::Bee => bee::attributes(),
+            MobType::IronGolem => iron_golem::attributes(),
+            MobType::SnowGolem => snow_golem::attributes(),
             MobType::Silverfish => silverfish::attributes(),
             MobType::Endermite => endermite::attributes(),
             kind => equine::attributes(kind),
@@ -2559,6 +2610,8 @@ impl Mob {
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
             MobType::Bee => bee_goals::goals(&mut navigation),
+            MobType::IronGolem => iron_golem::goals(&mut navigation),
+            MobType::SnowGolem => snow_golem::goals(&mut navigation),
             MobType::Silverfish => silverfish::goals(&mut navigation),
             MobType::Endermite => endermite::goals(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
@@ -2618,6 +2671,8 @@ impl Mob {
             MobType::Phantom => phantom::target_goals(),
             MobType::Bee => bee_goals::target_goals(),
             MobType::Pillager => pillager::targets(),
+            MobType::IronGolem => iron_golem::target_goals(),
+            MobType::SnowGolem => snow_golem::target_goals(),
             MobType::Silverfish => silverfish::targets(),
             MobType::Endermite => endermite::targets(),
             kind => equine::targets(kind),
@@ -2819,6 +2874,8 @@ impl Mob {
             frog: frog::Frog::default(),
             camel: camel::Camel::default(),
             bee: bee::Bee::default(),
+            iron_golem: iron_golem::IronGolem::default(),
+            snow_golem: snow_golem::SnowGolem::default(),
             tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
@@ -3189,6 +3246,8 @@ pub struct MobPublic {
     pub enderman_stared_at: bool,
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`。
     pub dark_ticks: i32,
+    /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
+    pub golem_flags: u8,
     /// `Bat.DATA_ID_FLAGS`。
     pub bat_flags: u8,
     /// `Phantom.ID_SIZE`。
@@ -3352,6 +3411,11 @@ impl MobPublic {
             enderman_stared_at: mob.enderman.stared_at,
             dark_ticks: mob.squid.dark_ticks,
             bat_flags: mob.bat.flags,
+            golem_flags: if mob.mob_type == MobType::IronGolem {
+                mob.iron_golem.flags
+            } else {
+                mob.snow_golem.flags
+            },
             phantom_size: mob.phantom.size,
             frog: mob.frog,
             camel: mob.camel,
