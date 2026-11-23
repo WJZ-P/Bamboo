@@ -2933,3 +2933,134 @@ pub fn replay_shot(scene: &ReplayShot) -> ReplayShotResult {
         level_seed: region.random.source().seed(),
     }
 }
+
+/// 复放一条 `/advancement` 命令，返回「改动了多少判据 / 反馈键 / 完成的进度集合」，
+/// 给 `command-oracle` 的官方假世界执行结果对拍用。
+///
+/// Replay one `/advancement` command against a fresh `PlayerAdvancements` state.
+/// Returns the number of changed criteria, the feedback key and the sorted
+/// completed advancement ids. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_advancement_command(line: &str) -> (i32, String, String) {
+    use mc_bamboo_advancements::AdvancementTree;
+
+    let tree = AdvancementTree::global();
+    let mut state = advancements::PlayerAdvancements::default();
+    let mut setup = None;
+    let command = match line.split_once(" ;; ") {
+        Some((first, second)) => {
+            setup = Some(first);
+            second
+        }
+        None => line,
+    };
+    let apply = |state: &mut advancements::PlayerAdvancements, command: &str| -> (i32, String) {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        if words.len() < 4 || words[0] != "advancement" {
+            return (0, "command.failed".to_owned());
+        }
+        let grant = words[1] == "grant";
+        let action = if grant { "grant" } else { "revoke" };
+        let mode_word = words[3];
+        let everything = mode_word == "everything";
+        let target_id = if everything {
+            None
+        } else {
+            words.get(4).copied()
+        };
+        let criterion = if everything {
+            None
+        } else {
+            words.get(5).copied()
+        };
+        let index = target_id.and_then(|id| tree.index(id)).unwrap_or(0);
+        if let Some(id) = target_id
+            && tree.index(id).is_none()
+        {
+            return (0, "advancement.advancementNotFound".to_owned());
+        }
+        // 官方 `AdvancementCommands$Mode` 的 parents / children。
+        let (parents, children) = match mode_word {
+            "only" => (false, false),
+            "from" => (false, true),
+            "until" => (true, false),
+            "through" => (true, true),
+            "everything" => (true, true),
+            _ => (false, false),
+        };
+        let mut indices = Vec::new();
+        if target_id.is_none() {
+            indices.extend(0..tree.nodes.len());
+        } else {
+            if parents {
+                let mut current = Some(index);
+                while let Some(node) = current {
+                    indices.push(node);
+                    current = tree.nodes[node].parent;
+                }
+                indices.reverse();
+                indices.pop();
+            }
+            indices.push(index);
+            if children {
+                let mut stack = tree.nodes[index].children.clone();
+                while let Some(node) = stack.pop() {
+                    indices.push(node);
+                    stack.extend(tree.nodes[node].children.iter().copied());
+                }
+            }
+        }
+        let mut count = 0i32;
+        let mut bad_criterion = false;
+        for &node in &indices {
+            let names: Vec<&str> = tree.nodes[node]
+                .advancement
+                .criteria
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .filter(|name| criterion.is_none_or(|only| only == *name))
+                .collect();
+            if criterion.is_some() && names.is_empty() && node == index {
+                bad_criterion = true;
+            }
+            for name in names {
+                let changed = if grant {
+                    state.award(tree, node, name)
+                } else {
+                    state.revoke(tree, node, name)
+                };
+                if changed {
+                    count += 1;
+                }
+            }
+        }
+        if bad_criterion {
+            return (0, "commands.advancement.criterionNotFound".to_owned());
+        }
+        let amount = if criterion.is_some() {
+            "criterion"
+        } else if indices.len() == 1 {
+            "one"
+        } else {
+            "many"
+        };
+        let key = if count == 0 {
+            format!("commands.advancement.{action}.{amount}.to.one.failure")
+        } else {
+            format!("commands.advancement.{action}.{amount}.to.one.success")
+        };
+        (count, key)
+    };
+    if let Some(setup) = setup {
+        apply(&mut state, setup);
+    }
+    let (count, key) = apply(&mut state, command);
+    let mut done: Vec<&str> = state
+        .progress
+        .iter()
+        .filter(|(_, progress)| progress.is_done())
+        .map(|(index, _)| tree.nodes[*index].id)
+        .collect();
+    done.sort_unstable();
+    (count, key, done.join(","))
+}

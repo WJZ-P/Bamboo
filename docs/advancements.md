@@ -76,8 +76,14 @@
   `--break-definitions`、`--break-packet`、`--break-save` 是另外三处独立改坏确认。
   `command-oracle` 另加 12 条 `/advancement` 语法题：Java 侧用官方 Brigadier
   `AdvancementCommands.register` 的 dispatcher 解析，Rust 侧用 Bamboo 命令树解析并比较
-  `ok` / `trailing:<光标>` / `error`；反馈键按 26.3 `AdvancementCommands$Action` 拼出来的
-  24 个键选。`--break-self-test` 同时改坏一个选择器和一条命令。
+  `ok` / `trailing:<光标>` / `error`。
+  `advancement-command-oracle` 在官方假世界 / 假玩家（`ExecuteOracle.java advancements`，
+  不启动真实服务端、不接受 EULA）里执行整条 `/advancement`：12 组
+  grant/revoke × only/from/through/until/everything × 单判据 / 连带命令，比较反馈翻译键
+  和执行后的完成进度集合；`--break-self-test` 改坏一处。反馈键按 26.3
+  `AdvancementCommands$Action` 拼出来的 24 个键选，形如
+  `commands.advancement.<grant|revoke>.<criterion|one|many>.to.<one|many>.<success|failure>`：
+  第一段是动作，第二段是**进度数**，第三段是**玩家数**。
 
 ## 58 种触发器的接入表
 
@@ -168,14 +174,10 @@
   `used_ender_eye`、`summoned_entity`、`bred_animals`、`cured_zombie_villager`、
   `tame_animal`、`villager_trade`、`ender_eye` 类都只解析不触发：Bamboo 没有
   对应系统，或者现有事件入口还没把事件原文传进来。
-- **`function` 奖励**：Bamboo 没有函数系统，跳过。内置 26.3 定义里没有 function 奖励。
+- **`function` 奖励**：Bamboo 没有函数系统，留到第二期。内置 26.3 定义里没有 function 奖励。
 - **`loot` 奖励**：内置定义里没有 loot 奖励，接口保留但没有对拍。
 - **`location` 的群系**：目前只上报主世界 `plains`，群系 / 维度谓词要靠世界生成
   接入后才能完整判定。
-- **命令反馈**：键和参数已按官方字节码选，但「目标数量 × 进度数量」的 24 个键里
-  只有语法和键表进了 `command-oracle` 对拍，**没有**在进程内构造官方假玩家执行
-  `/advancement` 比返回值和反馈文本（任务书原本要求的那一步）。这是本期剩余的主要
-  对拍缺口。
 - **触发器 oracle**：任务书要的「每个接上的触发器用官方真实触发器实例判定」没有
   单独的对拍；目前只有 `predicate-oracle` 覆盖已有的谓词实现和命令 / 存档 / 进度树
   对拍。

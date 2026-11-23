@@ -28,23 +28,32 @@ enum Mode {
 
 impl Mode {}
 
-/// 官方 26.3 `AdvancementCommands$Action` 拼出来的 24 个反馈键，按
-/// `(grant/revoke, 一名/多名玩家, criterion/one/many, success/failure)` 索引。
+/// 官方 26.3 `AdvancementCommands$Action` 拼出来的 24 个反馈键。
+/// 键形如 `commands.advancement.<action>.<进度数>.to.<玩家数>.<结果>`：
+/// 进度数是 `criterion`（单判据）/ `one`（单个进度）/ `many`，
+/// 玩家数是 `one` / `many`，结果是 `success` / `failure`。
 fn feedback_key(
     grant: bool,
     one_player: bool,
     amount: FeedbackAmount,
     success: bool,
 ) -> &'static str {
-    const KEYS: [[[[&str; 2]; 3]; 2]; 2] = [
+    const KEYS: [[[[&str; 2]; 2]; 3]; 2] = [
         // grant
         [
-            // one player
+            // criterion（单判据）
             [
                 [
-                    "commands.advancement.grant.one.to.criterion.failure",
-                    "commands.advancement.grant.one.to.criterion.success",
+                    "commands.advancement.grant.criterion.to.one.failure",
+                    "commands.advancement.grant.criterion.to.one.success",
                 ],
+                [
+                    "commands.advancement.grant.criterion.to.many.failure",
+                    "commands.advancement.grant.criterion.to.many.success",
+                ],
+            ],
+            // one（单个进度）
+            [
                 [
                     "commands.advancement.grant.one.to.one.failure",
                     "commands.advancement.grant.one.to.one.success",
@@ -54,12 +63,8 @@ fn feedback_key(
                     "commands.advancement.grant.one.to.many.success",
                 ],
             ],
-            // many players
+            // many（多个进度）
             [
-                [
-                    "commands.advancement.grant.many.to.criterion.failure",
-                    "commands.advancement.grant.many.to.criterion.success",
-                ],
                 [
                     "commands.advancement.grant.many.to.one.failure",
                     "commands.advancement.grant.many.to.one.success",
@@ -74,9 +79,15 @@ fn feedback_key(
         [
             [
                 [
-                    "commands.advancement.revoke.one.to.criterion.failure",
-                    "commands.advancement.revoke.one.to.criterion.success",
+                    "commands.advancement.revoke.criterion.to.one.failure",
+                    "commands.advancement.revoke.criterion.to.one.success",
                 ],
+                [
+                    "commands.advancement.revoke.criterion.to.many.failure",
+                    "commands.advancement.revoke.criterion.to.many.success",
+                ],
+            ],
+            [
                 [
                     "commands.advancement.revoke.one.to.one.failure",
                     "commands.advancement.revoke.one.to.one.success",
@@ -88,10 +99,6 @@ fn feedback_key(
             ],
             [
                 [
-                    "commands.advancement.revoke.many.to.criterion.failure",
-                    "commands.advancement.revoke.many.to.criterion.success",
-                ],
-                [
                     "commands.advancement.revoke.many.to.one.failure",
                     "commands.advancement.revoke.many.to.one.success",
                 ],
@@ -102,7 +109,7 @@ fn feedback_key(
             ],
         ],
     ];
-    KEYS[usize::from(!grant)][usize::from(!one_player)][amount as usize][usize::from(success)]
+    KEYS[usize::from(!grant)][amount as usize][usize::from(!one_player)][usize::from(success)]
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,12 +137,16 @@ fn selected(tree: &AdvancementTree, mode: Mode, target: usize) -> Vec<usize> {
         }
         result
     };
+    // 官方 `AdvancementCommands$Mode` 的 parents / children 两个布尔：
+    // ONLY(0,0)、FROM(0,1)、UNTIL(1,0)、THROUGH(1,1)、EVERYTHING(1,1，但根节点是树根)。
+    // parents 是「从目标向上一路到根」，children 是「从目标向下整棵子树」；
+    // EVERYTHING 从根开始，等价于整棵树。
     match mode {
         Mode::Only => vec![target],
         Mode::From => descendants(target),
         Mode::Through => {
-            let mut result = descendants(target);
-            result.extend(ancestors.iter().skip(1).copied());
+            let mut result = ancestors.iter().skip(1).rev().copied().collect::<Vec<_>>();
+            result.extend(descendants(target));
             result
         }
         Mode::Until => ancestors,
