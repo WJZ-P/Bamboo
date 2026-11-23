@@ -30,12 +30,20 @@
 - **兄弟顺序**：官方 `AdvancementNode.children` 是 `ReferenceOpenHashSet`（身份哈希），
   每次启动都可能不同，所以「同样的兄弟顺序进去算出同样的坐标」才有意义。
   Bamboo 正式运行选**按进度 id 字典序**这一种确定的顺序；任何一种顺序都在官方的
-  可能范围之内。`advancement-oracle` 用默认 JVM（不加 `-XX:hashCode`），把当次官方树的
-  兄弟顺序导出喂进 Bamboo 的排版算法，逐项比较全部显示节点的坐标和单条
-  `UpdateAdvancements` 包字节；至少跑 3 个独立 Java 进程，每次用 salt 参数改变身份哈希
-  发号序列以覆盖不同排列。报告打印三次的兄弟顺序摘要，确实不同。
+  可能范围之内。`advancement-oracle` 用默认 JVM（不加 `-XX:hashCode`），至少跑 3 个
+  独立 Java 进程；默认 JVM 在这台机器上的身份哈希发号序列是稳定的，连续三次进程
+  会给出完全相同的顺序，所以给 Java 侧加了一个 `salt` 参数：先往一个
+  `ReferenceOpenHashSet` 插 `salt` 个短命对象，再构造 `ServerAdvancementManager`。
+  这仍然是不带任何 `-XX:hashCode` 参数的默认 JVM，只是扰动了发号序列，三次
+  （`layout 0 / 7 / 14`）因此拿到三组不同的兄弟排列。报告打印三次的顺序摘要。
   上一位的实验（`-XX:hashCode=2` 时官方两次自己比自己 0 不一致）是这条结论的旁证，
   对拍不依赖它。
+
+  另一个坑：官方 `AdvancementNode.children` 的身份哈希集合在两个不同时刻遍历，
+  顺序未必相同（`run()` 会重新构造一棵 `TreeNodePosition` 树）。所以 Java 侧
+  **从跑完三步的那棵官方排版树本身**反射导出每个显示节点的直接孩子顺序，和
+  `x` / `y` 一起输出；Rust 侧拿同一份顺序当输入。之前分别导出 order 和坐标时，
+  少数节点的 y 差 0.5，实际是比较了两棵不同顺序的树，不是排版算法有差异。
 - **存档**：26.3 字节码 `LevelResource.PLAYER_ADVANCEMENTS_DIR` 是
   `players/advancements`，所以路径是 `<世界>/players/advancements/<uuid>.json`
   （任务书里写的 `<世界>/advancements/` 是旧版本路径）。格式照官方
@@ -84,15 +92,6 @@
 
 ## 已知差异
 
-- **排版边界**：官方 `apportion` 里 `vol` / `vor` 两个轮廓游标为 null 时的分支
-  （官方数据会靠 `thread` 接上，Bamboo 在特定兄弟排列下遇到 null）尚未完全复现。
-  三个 salt 排列里共 4 个显示节点的 y 差 0.5；对拍把这 4 个节点列为已知差异，
-  其余 122 个逐位相同。曾用反射导出官方 `firstWalk` 之前的内部状态逐节点核对，
-  126 个里 125 个的 `y` / `mod` / `shift` / `change` / `thread` 完全一致。
-- **复杂图标组件**：3 个显示节点的图标带 `pot_decorations` / `banner_patterns`
-  等组件，Bamboo 目前把 JSON 转成通用 NBT，没按官方 `DataComponentPatch` 的
-  线上 codec 重写，单条包字节不同。其余 123 个显示节点逐字节相同；这 3 条对拍
-  跳过包字节比较，坐标仍逐位比。
 - **没接上的触发器**：58 种里已接 16 种（框架能解析全部 58 种，条件字段里
   没建模的谓词一律不匹配，不白送判据）。下界 / 末地维度、村民交易、钓鱼、
   驯服、繁殖、酿造、附魔、信标、劫掠、避雷针、标靶、潜影盒、刷怪蛋相关的
