@@ -619,7 +619,7 @@ fn probe(host: &str, port: &str, java: &str) -> Result<(), String> {
         .arg(root.join(PROBE_SOURCE))
         .args([host, port]);
     // 正版验证的检查要连另一个服务端，这两个服务活到探针跑完。
-    let _online = online_probe(&mut command)?;
+    online_probe(&mut command)?;
 
     let status = command
         .status()
@@ -650,7 +650,7 @@ fn probe_with_marker(
         .arg(classpath)
         .arg(root.join(PROBE_SOURCE))
         .args([host, port]);
-    let _online = online_probe(&mut command)?;
+    online_probe(&mut command)?;
     command.args([marker_block, marker_command]);
     let status = command
         .status()
