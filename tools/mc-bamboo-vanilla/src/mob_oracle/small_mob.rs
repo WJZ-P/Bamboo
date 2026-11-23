@@ -279,3 +279,184 @@ impl Report {
         );
     }
 }
+
+/// 存档往返：官方 `saveWithoutId` 的 SNBT 和读回再写出的 SNBT。
+///
+/// Save round trip: vanilla's `saveWithoutId` SNBT and the reloaded copy.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SmallMobSaveCase {
+    silverfish: bool,
+    life: i32,
+    nbt: String,
+    reloaded: String,
+}
+
+/// 死亡掉落：两种生物的战利品表都是空的，比较移除状态和物品列表。
+///
+/// Death drops: both loot tables are empty; compare the removal flag and item list.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SmallMobDeathCase {
+    silverfish: bool,
+    by_player: bool,
+    removed: bool,
+    items: Vec<String>,
+}
+
+/// 复合标签的键按名字排序，便于和官方的哈希表顺序比较。
+fn canonical(tag: &mc_bamboo_nbt::Tag) -> mc_bamboo_nbt::Tag {
+    use mc_bamboo_nbt::Tag;
+    match tag {
+        Tag::Compound(entries) => {
+            let mut sorted: Vec<_> = entries
+                .iter()
+                .map(|(name, value)| (name.clone(), canonical(value)))
+                .collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            Tag::Compound(sorted)
+        }
+        Tag::List(items) => Tag::List(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
+}
+
+fn field<'a>(tag: &'a mc_bamboo_nbt::Tag, key: &str) -> Option<&'a mc_bamboo_nbt::Tag> {
+    match tag {
+        mc_bamboo_nbt::Tag::Compound(entries) => entries
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+/// 这两种生物自己要存的关键：`Lifetime`（末影螨）和共通的位置 / 朝向 / 血量 /
+/// 持久化标记。别的共通键由 `nbt` 模块既有的对拍覆盖。
+const SAVE_KEYS: &[&str] = &[
+    "Lifetime",
+    "PersistenceRequired",
+    "Health",
+    "Pos",
+    "Rotation",
+    "Invulnerable",
+    "Motion",
+];
+
+impl Report {
+    pub(super) fn replay_small_mob_save(&mut self, case: &SmallMobSaveCase) {
+        use mc_bamboo_blocks::entity::mob::nbt;
+        self.cases += 1;
+        let kind = if case.silverfish {
+            MobType::Silverfish
+        } else {
+            MobType::Endermite
+        };
+        let label = format!("{kind:?} save life {}", case.life);
+        let official = match mc_bamboo_nbt::parse_snbt(&case.nbt) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        let mut entity = Entity::by_mob_type(kind, Vec3::default());
+        if let Err(error) = nbt::load_into(&mut entity, &official) {
+            self.mismatch(format!("{label}: load failed: {error:?}"));
+            return;
+        }
+        let ours = match nbt::write_mob(&entity.split()) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: save failed: {error:?}"));
+                return;
+            }
+        };
+        let reloaded = match mc_bamboo_nbt::parse_snbt(&case.reloaded) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.mismatch(format!("{label}: reloaded SNBT does not parse: {error:?}"));
+                return;
+            }
+        };
+        for key in SAVE_KEYS {
+            let expected = field(&reloaded, key).map(canonical);
+            let actual = field(&ours, key).map(canonical);
+            if expected != actual {
+                self.mismatch(format!(
+                    "{label} {key}: official {expected:?}, bamboo {actual:?}"
+                ));
+            }
+        }
+    }
+
+    pub(super) fn replay_small_mob_death(&mut self, case: &SmallMobDeathCase) {
+        self.cases += 1;
+        let kind = if case.silverfish {
+            MobType::Silverfish
+        } else {
+            MobType::Endermite
+        };
+        let mut level = MobLevel {
+            blocks: std::collections::HashMap::new(),
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            entities: Entities::with_next_id(1 << 24),
+            players: Vec::new(),
+            game: None,
+            wrong_was_hurt: false,
+        };
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+        let mut source =
+            DamageSource::environment(mc_bamboo_blocks::entity::mob::DamageKind::Generic);
+        if case.by_player {
+            source =
+                DamageSource::environment(mc_bamboo_blocks::entity::mob::DamageKind::PlayerAttack);
+            source.attacker_is_player = true;
+        }
+        let id;
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            id = world.spawn_entity(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5)));
+            world.hurt_mob(id, source, 100.0);
+        }
+        for tick in 0..25 {
+            ticks.set_time(1001 + tick);
+            let mut world = World::new(&mut level, &mut ticks);
+            world.tick_entities();
+        }
+        let removed = level.entities.public_at(id).is_none();
+        if removed != case.removed {
+            self.mismatch(format!(
+                "{kind:?} death by_player {}: removed official {}, bamboo {removed}",
+                case.by_player, case.removed
+            ));
+        }
+        let items: Vec<String> = level
+            .entities
+            .iter()
+            .filter_map(|entity| {
+                entity
+                    .ground()
+                    .map(|ground| format!("minecraft:itemx{}", ground.stack.count))
+            })
+            .collect();
+        if items != case.items {
+            self.mismatch(format!(
+                "{kind:?} death by_player {}: items official {:?}, bamboo {items:?}",
+                case.by_player, case.items
+            ));
+        }
+    }
+}

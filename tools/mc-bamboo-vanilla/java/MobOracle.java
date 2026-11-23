@@ -336,6 +336,12 @@ public final class MobOracle {
                 playSmallMob(official, out, name);
                 cases++;
             }
+            if (only == null || only.equals("small_mob_save")) {
+                cases += playSmallMobSave(official, out);
+            }
+            if (only == null || only.equals("small_mob_death")) {
+                cases += playSmallMobDeath(official, out);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -8609,6 +8615,97 @@ public final class MobOracle {
                 + ",\"melee\":" + melee + ",\"persistent\":" + persistent
                 + ",\"enderman\":" + target + ",\"frames\":" + frames + "]}\n");
         out.flush();
+    }
+
+    /** 蠹虫 / 末影螨存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playSmallMobSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean silverfish : new boolean[] {true, false}) {
+            for (int life : new int[] {0, 2399}) {
+                FakeLevel world = FakeLevel.create(official);
+                EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+                Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+                setRandom(mob, world.entitySeeds.nextLong());
+                mob.setPos(1.5, 64.0, 2.5);
+                mob.setYRot(37.0F);
+                mob.setXRot(12.0F);
+                mob.setHealth(3.0F);
+                if (!silverfish) {
+                    Field field = net.minecraft.world.entity.monster.Endermite.class.getDeclaredField("life");
+                    field.setAccessible(true);
+                    field.setInt(mob, life);
+                    if (life == 2399) {
+                        mob.setPersistenceRequired();
+                    }
+                }
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                mob.saveWithoutId(output);
+                var copy = (Mob) type.create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"smallMobSave\",\"silverfish\":" + silverfish
+                        + ",\"life\":" + life
+                        + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    /** 死亡掉落：两种生物的战利品表都是空的，只比经验值和 `spawned` 里的物品。 */
+    private static int playSmallMobDeath(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean silverfish : new boolean[] {true, false}) {
+            for (boolean byPlayer : new boolean[] {true, false}) {
+                official.server.sequences = new RandomSequences();
+                FakeLevel world = FakeLevel.create(official);
+                ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+                world.spawned = new ArrayList<>();
+                EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+                Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+                setRandom(mob, world.entitySeeds.nextLong());
+                mob.setPos(0.5, 64.0, 0.5);
+                world.tracked.add(mob);
+                ServerPlayer player = null;
+                if (byPlayer) {
+                    player = new ServerPlayer(official.server, world,
+                            new GameProfile(new UUID(1L, 2L), "SmallMobDeath"), ClientInformation.createDefault());
+                    player.setId(FIRST_ID + 1024);
+                    player.setPos(2.5, 64.0, 0.5);
+                    world.playersList().add(player);
+                    world.tracked.add(player);
+                }
+                DamageSource source = byPlayer ? world.damageSources().playerAttack(player)
+                        : world.damageSources().generic();
+                mob.hurtServer(world, source, 100.0F);
+                for (int tick = 0; tick < 25; tick++) {
+                    world.gameTime++;
+                    if (!mob.isRemoved()) {
+                        mob.commonTick();
+                        mob.tick();
+                    }
+                }
+                List<String> items = new ArrayList<>();
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && !item.getItem().isEmpty()) {
+                        items.add(BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "x" + item.getItem().getCount());
+                    }
+                }
+                items.sort(String::compareTo);
+                out.write("{\"type\":\"smallMobDeath\",\"silverfish\":" + silverfish
+                        + ",\"byPlayer\":" + byPlayer
+                        + ",\"removed\":" + mob.isRemoved()
+                        + ",\"items\":" + items.stream().map(MobOracle::jsonString)
+                                .collect(java.util.stream.Collectors.joining(",", "[", "]")) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
     }
 
     /** `Silverfish.friendsGoal` 的私有字段。 */
