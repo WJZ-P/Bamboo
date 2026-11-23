@@ -76,6 +76,18 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
     let (fields, omit) = match id {
         "minecraft:mob_spawner" => (spawner(raw), SPAWNER_OMIT),
         "minecraft:sign" | "minecraft:hanging_sign" => (sign(raw), SIGN_OMIT),
+        // 蜂巢由活方块实体读写；重存走同一条 `read` → `saveAdditional` 路径，
+        // 存档格式只有一份实现。
+        // Beehives are read and written by the live block entity; resaving goes
+        // through the same `read` then `saveAdditional` path, so there is one format.
+        "minecraft:beehive" => (
+            crate::behaviour::machines::beehive_entity::BeehiveEntity::read(
+                mc_bamboo_core::BlockPos::new(0, 0, 0),
+                raw,
+            )
+            .additional(),
+            BEEHIVE_OMIT,
+        ),
         "minecraft:jigsaw" => (jigsaw(raw, state), &[][..]),
         "minecraft:end_gateway" => (end_gateway(raw), &[][..]),
         "minecraft:sculk_catalyst" => (sculk_catalyst(raw), &[][..]),
@@ -94,6 +106,10 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
     };
     Some(Resaved::new(fields, omit))
 }
+
+/// 蜂巢的 `flower_pos` 只在有值时写。
+/// A beehive writes `flower_pos` only when it has one.
+const BEEHIVE_OMIT: &[&str] = &["flower_pos"];
 
 /// 官方认识、可选且当前状态不写的键：编码时从读盘条目里删掉，避免带上旧值。
 /// 不在这张表里的未知键按 D9 原样保留。

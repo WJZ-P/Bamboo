@@ -179,7 +179,7 @@ impl BeehiveEntity {
         }
     }
 
-    /// 按官方 NBT 解码。坏条目整条列表回空，花位置形状不对就丢掉。
+    /// 按官方 NBT 解码。坏条目整条列表回空，花位置形状不对就丢掉，读盘不限只数。
     pub fn read(pos: BlockPos, tag: &Tag) -> Self {
         let bees = match tag::field(tag, "bees") {
             Some(Tag::List(values)) => values
@@ -191,9 +191,13 @@ impl BeehiveEntity {
         };
         let raw = tag::int_array(tag, "flower_pos");
         let flower_pos = (raw.len() == 3).then(|| BlockPos::new(raw[0], raw[1], raw[2]));
+        // 官方 `loadAdditional` 对每一条调 `storeBee`，那只是 `List.add`，读盘不按
+        // 三只截断；三只的上限只在 `addOccupant`（蜂主动进巢）时检查。
+        // Vanilla `loadAdditional` calls `storeBee` for every entry, which is a plain
+        // `List.add`; the three-bee cap only applies in `addOccupant`.
         Self {
             pos,
-            bees: bees.into_iter().take(MAX_OCCUPANTS).collect(),
+            bees,
             flower_pos,
         }
     }
