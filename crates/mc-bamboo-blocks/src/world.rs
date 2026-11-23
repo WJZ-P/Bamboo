@@ -3510,6 +3510,9 @@ impl<'a> World<'a> {
     ///
     /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
     pub fn tick_entities(&mut self) {
+        // 一刻开头清空寻路去重集合（测试构建的压测探针；正式构建是空操作）。
+        #[cfg(test)]
+        crate::entity::mob::timing::new_tick!();
         self.level.begin_entity_tick();
         for id in self.level.entity_uids() {
             let Some(mut entity) = self.level.take_entity(id) else {
@@ -3539,6 +3542,9 @@ impl<'a> World<'a> {
             }
         }
         self.level.end_entity_tick();
+        // 精确驱动只有一个线程；把分段计数并进全局汇总（正式构建是空操作）。
+        #[cfg(test)]
+        crate::entity::mob::timing::imp::flush_counters();
     }
 
     /// 和 [`World::tick_entities`] 同一套顺序，但把这一拍 tick 过的实体留下。

@@ -231,6 +231,9 @@ fn compute_timed(
     executor: &dyn Executor,
 ) -> (Computed, Duration) {
     let mut times = PhaseTimes::default();
+    // 一刻开头清空寻路去重集合（测试构建的压测探针；正式构建是空操作）。
+    #[cfg(test)]
+    crate::entity::mob::timing::new_tick!();
     let clone_start = Instant::now();
     let (uids, rows, starting_state) = entities.take_states_for_tick();
     // 每个实体一份起点的公开数据：tick 要拿它拼成完整 `Entity`。这是唯一必需的
@@ -283,10 +286,17 @@ fn compute_timed(
     let mut jobs: Vec<Box<dyn FnOnce() + Send + '_>> = Vec::with_capacity(tasks.len());
     for slice in tasks.chunks_mut(1) {
         let shared_ref: &Shared<'_> = &shared;
-        jobs.push(Box::new(move || run_task(&mut slice[0], shared_ref)));
+        jobs.push(Box::new(move || {
+            run_task(&mut slice[0], shared_ref);
+            // 测试构建里各算阶段线程把分段计数并进全局汇总；正式构建是空操作。
+            #[cfg(test)]
+            crate::entity::mob::timing::imp::flush_counters();
+        }));
     }
     executor.run(jobs);
     drop(tasks);
+    #[cfg(test)]
+    crate::entity::mob::timing::imp::flush_counters();
     times.compute = compute_start.elapsed();
 
     (

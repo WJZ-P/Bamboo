@@ -40,7 +40,21 @@ use crate::{
 pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let mut kind = std::mem::replace(&mut me.kind, EntityKind::Tnt(PrimedTnt { fuse: 0 }));
     if let EntityKind::Mob(mob) = &mut kind {
+        // 测试构建的压测探针：按类型和离最近玩家的距离档记账。`cfg(test)` 之外是空操作。
+        #[cfg(test)]
+        {
+            let mut nearest = f64::INFINITY;
+            ctx.blocks().for_each_player(&mut |player| {
+                if player.alive && !player.spectator {
+                    let dx = player.position.x - me.position.x;
+                    let dz = player.position.z - me.position.z;
+                    nearest = nearest.min(dx * dx + dz * dz);
+                }
+            });
+            timing::begin_mob!(mob.mob_type.entity_type(), nearest);
+        }
         tick_mob(me, mob, ctx);
+        timing::end_mob!();
     }
     me.kind = kind;
     super::enderman::flush_block_goal(me, ctx);
@@ -1492,17 +1506,23 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let phase = me.tick_count.wrapping_add(me.id);
         let fox = mob.mob_type == super::MobType::Fox;
         if phase % 2 != 0 && me.tick_count > 1 {
-            targets.tick_running(false, me, mob, ctx);
-            if fox {
-                super::fox::after_target_change(mob);
+            {
+                timing::span!(Targeting);
+                targets.tick_running(false, me, mob, ctx);
+                if fox {
+                    super::fox::after_target_change(mob);
+                }
             }
             goals.tick_running(false, me, mob, ctx);
         } else {
-            targets.tick(me, mob, ctx);
-            // `Fox.setTarget(null)` 当场结束保护，后面的目标就看得到。
-            // `Fox.setTarget(null)` ends the defence at once for the goals after it.
-            if fox {
-                super::fox::after_target_change(mob);
+            {
+                timing::span!(Targeting);
+                targets.tick(me, mob, ctx);
+                // `Fox.setTarget(null)` 当场结束保护，后面的目标就看得到。
+                // `Fox.setTarget(null)` ends the defence at once for the goals after it.
+                if fox {
+                    super::fox::after_target_change(mob);
+                }
             }
             goals.tick(me, mob, ctx);
         }
@@ -2256,6 +2276,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let cramming = ctx.blocks().block_game_rules().max_entity_cramming;
     let crowd = (others.len() + players.len()) as i32;
     if cramming > 0 && crowd > cramming - 1 && me.random.next_int_bounded(4) == 0 {
+        timing::record_cramming!();
         hurt_server(
             me,
             mob,
@@ -2264,6 +2285,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             6.0,
         );
     }
+    timing::record_push!(others.len() as u64);
     // `Entity.push(Entity)` 只有 `!entity.isVehicle()` 才推得动自己这一半；载具和它的
     // 乘客共享 root vehicle，整对被 `isPassengerOfSameVehicle` 跳过，所以这里也不推。
     // `Entity.push(Entity)` pushes its own half only when `!entity.isVehicle()`; a
