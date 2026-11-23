@@ -12,6 +12,7 @@ publish = false
 default = ["oracle", "probe-online"]
 # 这几个 crate 依赖生成的数据。生成文件坏了的时候用 --no-default-features 编译，generate 才跑得起来。
 oracle = [
+    "dep:mc-bamboo-advancements",
     "dep:mc-bamboo-blocks",
     "dep:mc-bamboo-command",
     "dep:mc-bamboo-core",
@@ -30,6 +31,7 @@ probe-online = ["dep:mc-bamboo-server", "dep:rand_core", "dep:rsa", "dep:tokio"]
 
 [dependencies]
 flate2.workspace = true
+mc-bamboo-advancements = { workspace = true, optional = true }
 mc-bamboo-blocks = { workspace = true, optional = true }
 mc-bamboo-command = { workspace = true, optional = true }
 mc-bamboo-core = { workspace = true, optional = true }
@@ -47,4 +49,5 @@ rand_core = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
+sha2 = { workspace = true, features = ["oid"] }
 tokio = { workspace = true, optional = true }

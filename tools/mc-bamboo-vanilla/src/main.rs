@@ -136,6 +136,8 @@
 //! 用 `--no-default-features` 编译，`generate` 不需要它们。
 
 #[cfg(feature = "oracle")]
+mod advancement_oracle;
+#[cfg(feature = "oracle")]
 mod beard;
 #[cfg(feature = "oracle")]
 mod chunk_content_oracle;
@@ -270,6 +272,8 @@ const OUTPUT_DIR: &str = "crates/mc-bamboo-data/src/generated";
 const PROBE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/Probe.java";
 #[cfg(feature = "oracle")]
 const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
+#[cfg(feature = "oracle")]
+const ADVANCEMENT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/AdvancementOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
 #[cfg(feature = "oracle")]
@@ -460,6 +464,7 @@ fn run() -> Result<(), String> {
             probe_with_marker(host, port, java, marker_block, marker_command)
         }
         ["oracle", java, ref options @ ..] => oracle(java, options),
+        ["advancement-oracle", java, ref options @ ..] => advancement_oracle_cli(java, options),
         ["light", java, ref options @ ..] => light(java, options),
         ["menu", java, ref options @ ..] => menu(java, options),
         ["machine", java] => machine(java),
@@ -703,6 +708,16 @@ fn execute_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn execute_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn advancement_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    advancement_oracle::run(official_program(java, ADVANCEMENT_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn advancement_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
