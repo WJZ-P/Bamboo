@@ -10,11 +10,8 @@
 //! Bamboo does not rebuild the player; the state reset lives in
 //! [`crate::player_respawn`].
 
-use mc_bamboo_blocks::{
-    World,
-    entity::mob::{DamageKind, DamageSource, DeathMessageType},
-};
-use mc_bamboo_core::{BlockPos, Hand, Vec3};
+use mc_bamboo_blocks::entity::mob::{DamageKind, DamageSource, DeathMessageType};
+use mc_bamboo_core::{BlockPos, Hand};
 use mc_bamboo_data::gamerules;
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue, defaults},
@@ -23,7 +20,11 @@ use mc_bamboo_protocol::{
     text::{Component, TranslateArg},
 };
 
-use crate::{inbound::PlayerId, links, region::Region};
+use std::collections::BTreeMap;
+
+use mc_bamboo_blocks::{PlayerDeathDrops, entity::Entities};
+
+use crate::{inbound::PlayerId, links, player::Player, player_hurt::HurtParts, region::Region};
 
 /// `minecraft:vanishing_curse` 在附魔注册表里的 ID。
 const VANISHING_CURSE: i32 = 41;
@@ -374,24 +375,27 @@ pub(crate) fn victim_component(name: &str, uuid: [u8; 16]) -> Component {
 }
 
 /// 血量归零：走一次完整的官方死亡流程。
-/// 只有 `!dead` 且血量不大于 0 时才有作用；由 `player_hurt::hurt_player`
-/// 和饥饿伤害在造成伤害后调用。
+/// 只有 `!dead` 且血量不大于 0 时才有作用；由 `player_hurt::hurt_player_in` 在造成伤害后调用。
+/// 返回要在世界里生成的掉落（物品和经验）：生成不发包，交给调用方在这之后做
+/// （`World::spawn_player_death_drops`）。
 ///
-/// Runs the official death flow once after health reached zero. Called by the
-/// hurt path and by starvation damage.
-pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
-    let Some(player) = region.players.get(&id) else {
-        return;
-    };
+/// Runs the official death flow once after health reached zero and returns the
+/// drops for the caller to spawn.
+pub(crate) fn die_in(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    _source: DamageSource,
+) -> Option<PlayerDeathDrops> {
+    let player = parts.players.get(&id)?;
     if player.dead || player.health.health > 0.0 {
-        return;
+        return None;
     }
     let position = player.position();
     let name = player.name.clone();
     let uuid = *player.uuid.as_bytes();
     let in_combat = player.in_combat;
-    let keep_inventory = region.global.rules.bool(gamerules::KEEP_INVENTORY);
-    let show_messages = region.global.rules.bool(gamerules::SHOW_DEATH_MESSAGES);
+    let keep_inventory = parts.rules.bool(gamerules::KEEP_INVENTORY);
+    let show_messages = parts.rules.bool(gamerules::SHOW_DEATH_MESSAGES);
     let spectator = player.game_mode == GameMode::Spectator;
     let level = player.experience.level;
     // `getKillCredit()`：优先 `lastHurtByPlayer`，否则 `lastHurtByMob`。
@@ -410,7 +414,7 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
     };
 
     // 官方在广播死亡消息之前先给死者发 player_combat_kill。
-    region.links.send(
+    parts.links.send(
         id,
         &PlayerCombatKill {
             player_id: id.0,
@@ -422,14 +426,14 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
             content: &death_message,
             overlay: false,
         });
-        crate::chat::broadcast_system_message(region, &frames, None);
+        crate::chat::broadcast_system_frames(parts.players, parts.links, &frames, None);
     }
 
     // `Player.dropEquipment`：!keepInventory 时先清消失诅咒，再 dropAll。
     // `LivingEntity.dropAllDeathLoot` 里 `dropExperience` 紧跟在 dropEquipment 后面。
     let mut drops = Vec::new();
     if !keep_inventory {
-        let player = region.players.get_mut(&id).expect("玩家刚才还在");
+        let player = parts.players.get_mut(&id).expect("玩家刚才还在");
         for slot in &mut player.inventory.slots {
             if slot.is_empty() {
                 continue;
@@ -447,34 +451,19 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
     } else {
         (level.saturating_mul(7)).min(100)
     };
-    {
-        let (mut block_level, ticks) = region.block_level();
-        let mut world = World::new(&mut block_level, ticks);
-        // `LivingEntity.createItemStackToDrop`：眼睛高度 -0.3，拾取延迟 40。
-        let at = Vec3::new(
-            position.x,
-            position.y + 1.62 - 0.300_000_011_920_928_96,
-            position.z,
-        );
-        for stack in drops {
-            let Some(entity_id) = world.spawn_at_location(at, stack) else {
-                continue;
-            };
-            world.with_entity_mut(entity_id, &mut |entity| {
-                if let Some(item) = entity.ground_mut() {
-                    item.set_pickup_delay(40);
-                }
-            });
-        }
-        if reward > 0 {
-            mc_bamboo_blocks::entity::award(&mut world, position, reward);
-        }
-    }
+    // 生成掉落交给调用方：`LivingEntity.createItemStackToDrop` 的眼高 -0.3、
+    // 拾取延迟 40 和经验球拆分都在 `World::spawn_player_death_drops` 里。
+    let drops = PlayerDeathDrops {
+        position,
+        items: drops,
+        experience: reward,
+    };
     // 官方 `ServerPlayer.die` 不清经验；等级经验在下一刻 `PlayerList.respawn`
     // 的 `restoreFrom` 里丢掉（keepInventory 时原样留下）。Bamboo 原地重置，
     // 所以到重生那一刻才按 `reset_after_respawn` 清。
-    let player = region.players.get_mut(&id).expect("玩家刚才还在");
+    let player = parts.players.get_mut(&id).expect("玩家刚才还在");
     player.dead = true;
+    player.weapon_use = None;
     player.health.death_time = 0;
     player.last_death_location = Some(BlockPos::containing(position));
     player.in_combat = false;
@@ -484,11 +473,11 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
     player.sync.metadata_dirty = true;
 
     // `LivingEntity.die` 的 `broadcastEntityEvent(entity, 3)`：死亡动画给跟踪者。
-    broadcast_death_event(region, id);
+    broadcast_death_event(parts.links, id);
 
     // `combatTracker.recheckStatus` 在死亡时若还在战斗里就 `onLeaveCombat`。
     if in_combat {
-        region.links.send(id, &PlayerCombatEnd { duration: 0 });
+        parts.links.send(id, &PlayerCombatEnd { duration: 0 });
     }
 
     // 官方 `ServerPlayer` 不读 `IMMEDIATE_RESPAWN`：规则只由 `PlayerList`（进服）
@@ -502,35 +491,46 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
     // `PERFORM_RESPAWN` right after the death-screen packet; the server always
     // waits for it and ignores it while health > 0. Without a client packet
     // the player stays dead.
-    let player = region.players.get_mut(&id).expect("玩家刚才还在");
+    let player = parts.players.get_mut(&id).expect("玩家刚才还在");
     player.awaiting_respawn = true;
+    Some(drops)
 }
 
 /// `CombatTracker.recordDamage`：一次 `amount != 0` 的完整受击写一条记录。
 /// `fallDistance` 取玩家当时的 `Motion.fall_distance`（官方 `LivingEntity.fallDistance`），
 /// `fallLocation` 由 `FallLocation.getCurrentFallLocation` 给，Bamboo 这一期
 /// 还没有攀爬物 / 水中判定，恒 `None`。
-pub(crate) fn record_combat(region: &mut Region, id: PlayerId, source: &DamageSource, damage: f32) {
+pub(crate) fn record_combat(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    source: &DamageSource,
+    damage: f32,
+) {
     // 先只读地把显示组件查出来，再借 `players` 写状态。
-    let attacker = attacker_name(region, source);
-    let weapon = named_weapon(region, source);
-    let fall_distance = region
+    let attacker = attacker_name(parts.players, parts.entities, parts.attacker, source);
+    let weapon = named_weapon(parts.players, source);
+    let fall_distance = parts
         .players
         .get(&id)
         .map(|player| player.motion.fall_distance as f32)
         .unwrap_or(0.0);
     let uid = source.attacker.or(source.direct);
     let player_credit = uid
-        .and_then(|uid| region.players.get(&PlayerId(uid)))
+        .and_then(|uid| parts.players.get(&PlayerId(uid)))
         .map(|other| victim_component(&other.name, *other.uuid.as_bytes()));
     let mob_credit = uid
-        .and_then(|uid| region.entities.public_at(uid))
+        .and_then(|uid| {
+            parts
+                .attacker
+                .filter(|public| public.uid == uid)
+                .or_else(|| parts.entities.public_at(uid))
+        })
         .and_then(|public| {
             matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
                 .then(|| attacker.clone())
                 .flatten()
         });
-    let Some(player) = region.players.get_mut(&id) else {
+    let Some(player) = parts.players.get_mut(&id) else {
         return;
     };
     player.combat_entries.push(CombatEntry {
@@ -605,13 +605,20 @@ fn has_vanishing_curse(stack: &ItemStack) -> bool {
 
 /// `DamageSource.getEntity().getDisplayName()`：玩家用名字，实体用自定义名或
 /// `entity.minecraft.<type>` 翻译组件。
-fn attacker_name(region: &Region, source: &DamageSource) -> Option<Component> {
+fn attacker_name(
+    players: &BTreeMap<PlayerId, Player>,
+    entities: &Entities,
+    ticking: Option<&mc_bamboo_blocks::entity::EntityPublic>,
+    source: &DamageSource,
+) -> Option<Component> {
     use mc_bamboo_nbt::Tag;
     let uid = source.attacker.or(source.direct)?;
-    if let Some(player) = region.players.get(&PlayerId(uid)) {
+    if let Some(player) = players.get(&PlayerId(uid)) {
         return Some(victim_component(&player.name, *player.uuid.as_bytes()));
     }
-    let public = region.entities.public_at(uid)?;
+    let public = ticking
+        .filter(|public| public.uid == uid)
+        .or_else(|| entities.public_at(uid))?;
     if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind
         && let Some(tag) = &mob.custom_name
     {
@@ -665,9 +672,9 @@ fn uuid_text(bytes: &[u8; 16]) -> String {
 }
 
 /// `getLocalizedDeathMessage` 里攻击者主手物品的 `custom_name`。
-fn named_weapon(region: &Region, source: &DamageSource) -> Option<Component> {
+fn named_weapon(players: &BTreeMap<PlayerId, Player>, source: &DamageSource) -> Option<Component> {
     let uid = source.attacker.or(source.direct)?;
-    let player = region.players.get(&PlayerId(uid))?;
+    let player = players.get(&PlayerId(uid))?;
     let stack = player.inventory.held(Hand::Main);
     if stack.is_empty() {
         return None;
@@ -691,12 +698,12 @@ fn named_weapon(region: &Region, source: &DamageSource) -> Option<Component> {
 ///
 /// Official `broadcastEntityEvent`: the death animation goes to every tracker
 /// including the player.
-pub(crate) fn broadcast_death_event(region: &mut Region, id: PlayerId) {
+pub(crate) fn broadcast_death_event(links: &mut links::Links, id: PlayerId) {
     let frames = links::encode_frames(&EntityEvent {
         entity_id: id.0,
         event: 3,
     });
-    region.links.broadcast(&frames);
+    links.broadcast(&frames);
 }
 
 /// 装备槽里带消失诅咒的一件物品（对拍和单测注入用）。

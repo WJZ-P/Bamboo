@@ -10,6 +10,11 @@ use mc_bamboo_data::{blocks, registries::entity_type as kinds};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 
+mod arrow;
+mod egg;
+mod spit;
+mod splash_potion;
+
 use super::tag::{self, Error, Result, put};
 use crate::{
     BlockState,
@@ -52,6 +57,10 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::Tnt { .. } => kinds::TNT,
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
         crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
+        crate::entity::KindPublic::Arrow(arrow) => arrow.variant.entity_type(),
+        crate::entity::KindPublic::LlamaSpit(_) => kinds::LLAMA_SPIT,
+        crate::entity::KindPublic::Egg(_) => kinds::EGG,
+        crate::entity::KindPublic::SplashPotion(_) => kinds::SPLASH_POTION,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -68,7 +77,16 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     put(
         &mut out,
         "Rotation",
-        Tag::List(vec![Tag::Float(public.yaw), Tag::Float(0.0)]),
+        Tag::List(vec![
+            Tag::Float(public.yaw),
+            Tag::Float(match &public.kind {
+                crate::entity::KindPublic::Arrow(arrow) => arrow.pitch,
+                crate::entity::KindPublic::LlamaSpit(spit) => spit.pitch,
+                crate::entity::KindPublic::Egg(egg) => egg.x_rot,
+                crate::entity::KindPublic::SplashPotion(potion) => potion.x_rot,
+                _ => 0.0,
+            }),
+        ]),
     );
     put(&mut out, "fall_distance", Tag::Double(state.fall_distance));
     put(
@@ -81,7 +99,14 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     put(&mut out, "OnGround", Tag::Byte(i8::from(public.on_ground)));
     put(&mut out, "Invulnerable", Tag::Byte(0));
     put(&mut out, "PortalCooldown", Tag::Int(0));
-    put(&mut out, "UUID", entity_uuid_tag(public.uid));
+    let uuid = match &public.kind {
+        crate::entity::KindPublic::Arrow(arrow) => uuid_tag(&arrow.uuid),
+        crate::entity::KindPublic::LlamaSpit(spit) => uuid_tag(&spit.uuid),
+        crate::entity::KindPublic::Egg(egg) => uuid_tag(&egg.uuid),
+        crate::entity::KindPublic::SplashPotion(potion) => uuid_tag(&potion.uuid),
+        _ => entity_uuid_tag(public.uid),
+    };
+    put(&mut out, "UUID", uuid);
 
     match &public.kind {
         crate::entity::KindPublic::FallingBlock { state: block, .. } => {
@@ -117,6 +142,30 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             );
         }
         crate::entity::KindPublic::Mob(_) => {}
+        crate::entity::KindPublic::Arrow(_) => {
+            let crate::entity::KindState::Arrow(saved) = &state.kind else {
+                return Err(Error::new("mismatched arrow entity halves"));
+            };
+            arrow::write(saved, &mut out)?;
+        }
+        crate::entity::KindPublic::LlamaSpit(_) => {
+            let crate::entity::KindState::LlamaSpit(saved) = &state.kind else {
+                return Err(Error::new("mismatched llama spit entity halves"));
+            };
+            spit::write(saved, &mut out);
+        }
+        crate::entity::KindPublic::Egg(_) => {
+            let crate::entity::KindState::Egg(saved) = &state.kind else {
+                return Err(Error::new("mismatched egg entity halves"));
+            };
+            egg::write(saved, &mut out)?;
+        }
+        crate::entity::KindPublic::SplashPotion(_) => {
+            let crate::entity::KindState::SplashPotion(saved) = &state.kind else {
+                return Err(Error::new("mismatched splash potion entity halves"));
+            };
+            splash_potion::write(saved, &mut out)?;
+        }
         crate::entity::KindPublic::ExperienceOrb { value } => {
             let crate::entity::KindState::ExperienceOrb(saved) = &state.kind else {
                 return Err(Error::new("mismatched experience orb entity halves"));
@@ -178,6 +227,15 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         // `split` 不读尺寸，拼回来时按 `kind` 重算。
         dimensions: (0.0, 0.0),
         kind: match id {
+            "minecraft:arrow" => EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], false))),
+            "minecraft:spectral_arrow" => {
+                EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], true)))
+            }
+            "minecraft:llama_spit" => EntityKind::LlamaSpit(Box::new(spit::read(tag, rotation[1]))),
+            "minecraft:egg" => EntityKind::Egg(Box::new(egg::read(tag, rotation[1]))),
+            "minecraft:splash_potion" => {
+                EntityKind::SplashPotion(Box::new(splash_potion::read(tag, rotation[1])))
+            }
             "minecraft:falling_block" => {
                 let block = match tag::field(tag, "BlockState") {
                     Some(value) => tag::decode_block_state(value)?,

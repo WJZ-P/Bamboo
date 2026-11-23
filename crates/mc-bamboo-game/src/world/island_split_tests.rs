@@ -157,6 +157,20 @@ pub(super) fn set_up(seed: u64, mut server: Harness) -> Scene {
         .global
         .rules_mut()
         .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
+    // 自然刷怪每刻按刷怪区块数从岛的世界随机源取数（打乱区块列表），而这个场景逐位比较
+    // 拆合前后的随机源状态。关掉 `spawn_mobs` 后刷怪阶段一个随机数都不取，比较的前提
+    // 「场景不取随机数」仍然成立（`assert_no_draws`）。
+    //
+    // Natural spawning draws from the island's world random every tick (the spawn
+    // chunk shuffle), and these scenes compare random state across splits bit for
+    // bit. With `spawn_mobs` off the spawn stage draws nothing, so the premise of
+    // `assert_no_draws` still holds.
+    server
+        .world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::SPAWN_MOBS, "false");
     server.world.publish_global();
     let centers = centers_for(seed);
     let mut next = rng(seed ^ 0x5555);
@@ -898,6 +912,60 @@ pub(super) fn assert_alive(scene: &Scene) {
             .any(|(_, seen_by)| !seen_by.is_empty()),
         "实体没有人看着"
     );
+}
+
+#[test]
+fn an_embedded_arrow_moves_without_its_skeleton_owner() {
+    use mc_bamboo_blocks::entity::{EntityKind, mob::MobType};
+
+    with_stack(|| {
+        let mut scene = build(13);
+        let position = |chunk: ChunkPos| {
+            Vec3::new(
+                f64::from(chunk.x * 16) + 0.5,
+                f64::from(Y + 8),
+                f64::from(chunk.z * 16) + 0.5,
+            )
+        };
+        let shooter_pos = position(scene.centers[0]);
+        let arrow_pos = position(scene.centers[1]);
+        let parent = island(&mut scene);
+        let shooter = parent
+            .region
+            .entities
+            .spawn(Entity::by_mob_type(MobType::Skeleton, shooter_pos));
+        let owner_uuid = parent
+            .region
+            .entities
+            .get(shooter)
+            .unwrap()
+            .kind
+            .mob()
+            .unwrap()
+            .uuid;
+        let mut embedded = Entity::arrow(arrow_pos);
+        let EntityKind::Arrow(data) = &mut embedded.kind else {
+            unreachable!()
+        };
+        data.owner = Some(shooter);
+        data.owner_uuid = Some(owner_uuid);
+        data.in_ground = true;
+        data.life = 177;
+        data.shake_time = 3;
+        let id = parent.region.entities.spawn(embedded);
+        let expected = parent.region.entities.get(id).unwrap();
+        let mut child = split(&mut scene, &[1].into_iter().collect());
+        let parent = island(&mut scene);
+        assert!(parent.region.entities.get(id).is_none());
+        assert!(child.region.entities.get(shooter).is_none());
+        assert_eq!(child.region.entities.get(id).unwrap().kind, expected.kind);
+        child.region.rebase_clock(-12);
+        parent.absorb_island(child, 12);
+        let joined = parent.region.entities.get(id).unwrap();
+        assert_eq!(joined.kind, expected.kind);
+        assert_eq!(joined.random, expected.random);
+        assert!(parent.region.entities.get(shooter).is_some());
+    });
 }
 
 /// 拆了马上合回来，和从没拆过的世界逐位相同（含网络 ID、版本号、跨组的先后），之后

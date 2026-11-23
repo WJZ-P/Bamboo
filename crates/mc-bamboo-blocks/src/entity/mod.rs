@@ -9,11 +9,15 @@
 //! They tick after scheduled ticks and random ticks. Vanilla ticks entities before
 //! block entities; those already ran inside the scheduled-tick step.
 
+pub mod arrow;
 pub mod ctx;
 pub mod mob;
 pub mod parallel;
 pub mod random;
+pub mod spit;
+pub mod splash_potion;
 pub mod store;
+pub mod thrown_egg;
 pub mod view;
 
 mod explosion;
@@ -21,6 +25,7 @@ mod falling;
 mod item;
 mod orb;
 mod physics;
+mod resize;
 mod tnt;
 
 use mc_bamboo_core::{Axis, BlockPos, Vec3};
@@ -201,6 +206,19 @@ pub enum EntityKind {
     Tnt(PrimedTnt),
     Item(GroundItem),
     ExperienceOrb(ExperienceOrb),
+    Arrow(Box<arrow::Arrow>),
+    /// 羊驼的口水。
+    ///
+    /// A llama's spit.
+    LlamaSpit(Box<spit::LlamaSpit>),
+    /// 扔出的鸡蛋。
+    ///
+    /// A thrown egg.
+    Egg(Box<thrown_egg::ThrownEgg>),
+    /// 扔出的喷溅药水。
+    ///
+    /// A thrown splash potion.
+    SplashPotion(Box<splash_potion::SplashPotion>),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -215,6 +233,10 @@ impl EntityKind {
             Self::Tnt(_) => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
+            Self::Arrow(arrow) => arrow.variant.entity_type(),
+            Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
+            Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
+            Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -411,6 +433,10 @@ impl Entity {
             &EntityKind::Tnt(data) => tnt::tick_tnt(self, data, ctx),
             EntityKind::Item(_) => Entity::tick_item(self, ctx),
             EntityKind::ExperienceOrb(_) => orb::tick_orb(self, ctx),
+            EntityKind::Arrow(_) => arrow::tick(self, ctx),
+            EntityKind::LlamaSpit(_) => spit::tick(self, ctx),
+            EntityKind::Egg(_) => thrown_egg::tick(self, ctx),
+            EntityKind::SplashPotion(_) => splash_potion::tick(self, ctx),
             EntityKind::Mob(_) => {}
         }
     }
@@ -430,7 +456,34 @@ impl Entity {
     /// `EntityType.COW.create`：构造函数链。UUID 和朝向的随机数在
     /// [`EntityStore::spawn`] 设好随机源以后取，见 [`Entity::finish_mob_random`]。
     pub fn cow(position: Vec3) -> Self {
-        Self::new(EntityKind::Mob(Box::new(mob::Mob::cow())), position)
+        Self::mob_of(mob::MobType::Cow, position)
+    }
+
+    /// `EntityType.ZOMBIE.create`。
+    pub fn zombie(position: Vec3) -> Self {
+        Self::mob_of(mob::MobType::Zombie, position)
+    }
+
+    /// `EntityType.HUSK.create`。
+    pub fn husk(position: Vec3) -> Self {
+        Self::mob_of(mob::MobType::Husk, position)
+    }
+
+    /// 按注册表类型构造生物；未知类型返回 `None`，调用方按命令失败处理。
+    pub fn by_mob_type(kind: mob::MobType, position: Vec3) -> Self {
+        let mut entity = Self::new(EntityKind::Mob(Box::new(mob::Mob::new(kind))), position);
+        // `Panda` 构造函数：成年时打开捡物。
+        // The `Panda` constructor enables loot pickup for adults.
+        if kind == mob::MobType::Panda
+            && let Some(mob) = entity.kind.mob_mut()
+        {
+            mob.can_pick_up_loot = true;
+        }
+        entity
+    }
+
+    fn mob_of(kind: mob::MobType, position: Vec3) -> Self {
+        Self::by_mob_type(kind, position)
     }
 
     /// 构造函数里的随机数：`Entity` 的 UUID 两个 `nextLong`，`LivingEntity` 的
@@ -442,6 +495,42 @@ impl Entity {
         mob.uuid = mob::insecure_uuid(&mut self.random);
         self.y_rot = self.random.next_float() * 6.283_185_5;
         mob.y_head_rot = self.y_rot;
+        if mob.mob_type == mob::MobType::Rabbit {
+            // 兔子构造时抽取一次头部闲置动画延迟；只在客户端使用其结果。
+            // The rabbit constructor draws a head-idle delay used only by the client.
+            let _ = self.random.next_int_bounded(40);
+        }
+        if mob.mob_type == mob::MobType::Fox {
+            // `Mob` 构造函数里 `registerGoals` 建 `SleepGoal`，字段初始化取一次倒计时。
+            // `registerGoals` in the `Mob` constructor draws the `SleepGoal` countdown.
+            let countdown = mob::fox::sleep_countdown(&mut self.random);
+            mob::fox::set_sleep_countdown(mob, countdown);
+        }
+        if mob.mob_type == mob::MobType::Chicken {
+            // `Chicken` 构造函数最后的 `eggTime = nextInt(6000) + 6000`。
+            // The `Chicken` constructor's trailing `eggTime = nextInt(6000) + 6000`.
+            mob.egg_time = self.random.next_int_bounded(6000) + 6000;
+        }
+        if mob.mob_type == mob::MobType::Slime {
+            mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
+        }
+        if let Some(brain) = mob.brain.as_mut() {
+            // `LivingEntity` 构造函数最后的 `makeBrain`：每个传感器一次 `nextInt(scanRate)`。
+            // The `makeBrain` at the end of the `LivingEntity` constructor: one
+            // `nextInt(scanRate)` per sensor.
+            brain.seed_shuffles(self.random.state());
+            brain.randomly_delay_start(&mut self.random);
+        }
+        if mob.mob_type == mob::MobType::Armadillo {
+            // `Armadillo` 构造函数最后的 `scuteTime = pickNextScuteDropTime()`。
+            // The `Armadillo` constructor's trailing `scuteTime = pickNextScuteDropTime()`.
+            mob.armadillo.scute_time = self.random.next_int_bounded(6000) + 6000;
+        }
+        if mob::squid::is_squid(mob.mob_type) {
+            // `Squid` 构造函数最后的 `tentacleSpeed`，取一次 `nextFloat`。
+            // The `Squid` constructor's trailing `tentacleSpeed`, one `nextFloat`.
+            mob.squid.tentacle_speed = mob::squid::roll_tentacle_speed(&mut self.random);
+        }
     }
 
     /// 对生物跑一段逻辑；不是生物时返回 `None`。

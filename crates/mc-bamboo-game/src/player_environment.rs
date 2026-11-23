@@ -85,10 +85,31 @@ impl Environment {
 /// `Entity.igniteForTicks`: only extends a shorter remaining burn.
 pub(crate) fn ignite_for_ticks(region: &mut Region, id: PlayerId, ticks: i32) {
     if let Some(player) = region.players.get_mut(&id) {
-        player.environment.remaining_fire_ticks =
-            player.environment.remaining_fire_ticks.max(ticks.max(0));
-        player.sync.metadata_dirty = true;
+        ignite_player(player, ticks);
     }
+}
+
+/// `Entity.igniteForTicks` 落在一名玩家上：剩余刻数更短才延长，然后 `clearFreeze`。
+pub(crate) fn ignite_player(player: &mut Player, ticks: i32) {
+    if player.environment.remaining_fire_ticks < ticks {
+        set_player_fire_ticks(player, ticks);
+    }
+    if player.environment.ticks_frozen != 0 {
+        player.environment.ticks_frozen = 0;
+    }
+    player.sync.metadata_dirty = true;
+}
+
+/// `Player.setRemainingFireTicks`：能力无敌的玩家最多保留 1 刻。
+///
+/// `Player.setRemainingFireTicks`: ability invulnerability caps the timer at one tick.
+pub(crate) fn set_player_fire_ticks(player: &mut Player, ticks: i32) {
+    player.environment.remaining_fire_ticks =
+        if player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative {
+            ticks.min(1)
+        } else {
+            ticks
+        };
 }
 
 /// `Entity.clearFire`。

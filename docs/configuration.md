@@ -51,21 +51,27 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 ### 世界生成相关的键
 
 世界生成接进游戏后，这四个键生效（解析在 `mc-bamboo-game/src/world_options.rs`，
-接进流水线见 `docs/worldgen.md`）：
+接进流水线见 `docs/worldgen.md`）。桌面端设置页的「世界生成」一组直接编辑这四项：
+种子输入框（留空 = 随机）、世界类型下拉、生成结构开关，世界类型是超平坦时还能编辑
+`generator-settings` 的 JSON 文本；保存时按官方 `Properties.store` 的写法写回
+`server.properties`（值里的 `:` 等字符转义成 `\:`），往返和命令行版读写同一份文件。
+`level-type` 保存时归一成注册名，旧名 `default` / `largebiomes` 会写成
+`minecraft:normal` / `minecraft:large_biomes`（语义不变）。
 
 | 键 | 类型 | 官方 26.3 默认值 | 作用 |
 |---|---|---|---|
 | `level-seed` | 字符串 | ``（空） | 空 = 随机种子（首次存档时写进 `world_gen_settings.dat` 后固定）；数字按 `Long.parseLong`；其它字符串按 `String.hashCode()` |
 | `level-type` | 字符串 | `minecraft:normal` | 世界预设。认 `normal` / `flat` / `large_biomes` / `amplified`（含旧名 `default` / `largebiomes`）；查不到回退 `normal` 并记日志；**新世界默认 normal，不再是超平坦** |
-| `generator-settings` | JSON | `{}` | 只在 `flat` 预设生效，`FlatLevelGeneratorSettings.CODEC` 的 `layers` / `biome`（`features` / `lakes` 等本轮不接）；坏 JSON 回退默认超平坦预设 |
-| `generate-structures` | bool | `true` | 先读进来存进 `world_gen_settings.dat`；结构阶段接上后生效，目前结构阶段是空实现 |
+| `generator-settings` | JSON | `{}` | 只在 `flat` 预设生效，`FlatLevelGeneratorSettings.CODEC` 的 `layers` / `biome` / `features` / `lakes` / `structure_overrides`；坏 JSON 回退默认超平坦预设 |
+| `generate-structures` | bool | `true` | 控制新区块的结构起点与放置（噪声世界和超平坦都生效），也写进 `world_gen_settings.dat`；关掉不影响地物和湖 |
 
 **只对全新世界生效**：世界存在 `data/minecraft/world_gen_settings.dat` 时，种子、
 世界类型和 flat 预设一律以存档为准，`level-type` / `level-seed` 改了也不影响老存档
 （官方行为）。四种 `level-type` 的差别：三种噪声世界共用 `minecraft:overworld`
 群系预设，只是 `NoiseGeneratorSettings` 不同（`normal`=`overworld`、
-`large_biomes`=`large_biomes`、`amplified`=`amplified`）；`flat` 走 `FlatLevelSource`。
-`generate-structures` 目前只存储、不影响生成。
+`large_biomes`=`large_biomes`、`amplified`=`amplified`）；`flat` 对应 `FlatLevelSource`。默认超平坦预设选要塞和村庄；
+自定义预设省略 `structure_overrides` 时选固定群系适用的全部内置结构集，显式 `[]` 不选任何集。
+`generate-structures=false` 时地物阶段不放结构件（村庄、要塞等），地形、`features` 和 `lakes` 照常生成。
 
 **和 `ServerConfig::default()` 的关系**：写出来的文件和这份表格一律用官方默认值；
 `ServerConfig::default()` 是「不读配置文件」的嵌入用法（单元测试、oracle、probe、
@@ -139,6 +145,7 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 | `auth_read_timeout_seconds` | 整数（秒） | `5` | 等 session server 回下一段字节的时限 |
 | `entity_threads` | 整数 | `0` | 实体并行线程数（实验）。0 = 精确模式，≥ 1 = 性能模式 |
 | `chunk_worker_threads` | 整数 | `0` | 区块计算池的线程数：区块的解析、生成和存盘序列化放到多少条常驻后台线程上做。0 = 在世界线程上内联做 |
+| `spawn_per_player_cap` | 布尔 | `true` | 自然刷怪按玩家算上限：每名玩家附近的同类生物不超过官方 `maxInstancesPerChunk`。`false` 只剩官方的全局上限 `maxInstancesPerChunk * 刷怪区块数 / 289` |
 | `deliveries_per_tick` | 整数 | `64` | Director 信箱每刻最多交付多少个区块；0 表示不限 |
 | `reclaims_per_tick` | 整数 | `64` | Director 信箱每刻最多收回多少个区块；0 表示不限 |
 | `island_threads` | 整数 | 逻辑核数的一半，夹在 2 到 8 之间 | 岛的 tick 线程数。0 = 齐步（精确模式，岛在世界线程上内联跑，和官方逐位一致）；≥ 1 = 分离（岛的一刻在 tick 线程上跑，和主控并行，区块交付晚一刻）。缺省值在第一次启动时按这台机器算好写进文件。见下面「岛的 tick 线程」 |
@@ -186,6 +193,20 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 - 默认先保持 0。等真实地形生成接进来、压测确认收益之后再改默认值。
 - 调试用的环境变量 `BAMBOO_FAKE_GEN_DELAY_US=<微秒>` 让超平坦生成器每个区块多睡
   这么久，模拟慢的生成器，只用于测量，不进配置文件。
+
+### 世界生成缓存
+
+以下三项位于 `bamboo.toml`，桌面端「Bamboo 优化设置」也可编辑，重启服务端后生效。
+它们只影响重新计算的频率和内存，不会改动世界生成结果或卸载已交付的区块。
+
+| 键 | 默认值 | 范围 | 作用 |
+| --- | ---: | ---: | --- |
+| `worldgen_terrain_cache_mb` | 128 | 0–4096 | 进程级 CARVERS 地形缓存载荷预算（MiB）；1/4 留给调色板压缩冷层。0 不保留条目。 |
+| `worldgen_feature_cache_mb` | 64 | 0–1024 | 进程级地物写增量缓存载荷预算（MiB）。0 不保留条目；跑图时设得太小会反复计算邻居地物。 |
+| `worldgen_cache_idle_seconds` | 30 | 0–3600 | 区块计算池无在途任务，且距上一次缓存查询达到该秒数，就清空两份缓存。0 只禁用空闲清理，不禁用按依赖释放和上限淘汰。 |
+
+预算不包含在途任务、仍被引用的快照、生成器、表和队列自身的开销，不能当作进程内存上限。
+测量见 [世界生成缓存压测](performance-optimizations.md#23-世界生成缓存按依赖与空闲释放)。
 
 ### 岛的 tick 线程
 
@@ -326,6 +347,8 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
   路径；命令行版用 `bamboo --server-dir <这个路径>` 就读写同一份。
 - APP 的设置页分成「官方设置」和「Bamboo 优化设置」两个分区：前者写
   `server.properties`，后者写 `bamboo.toml`。每一项下面标了对应的文件里的键名和默认值。
+  「世界生成」一组（种子、世界类型、生成结构、超平坦设置）和上面四个键一一对应，
+  只对新建的世界生效，已有存档按存档里的世界生成参数继续。
 - 老版本 APP 把设置存在应用配置目录的 `server-settings.json` 里。第一次启动时如果
   服务器目录里两个新文件都不存在且老文件存在，就导入一次、写成新文件，之后不再读它。
   老文件**保留不删**（用户数据），只是不再读取。旧文件里「正版验证 + 代理转发」这种

@@ -20,7 +20,7 @@ use mc_bamboo_blocks::{
         entity::{entity_uuid_tag, read_entity, write_entity},
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
     },
-    entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt},
+    entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt, arrow::Pickup},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::{blocks, items::STONE, version};
@@ -501,8 +501,9 @@ fn run_cases(
         let _ = case.encoded.as_ref();
     }
 
-    // 4. 实体：Bamboo 写出三种实体（含官方默认值、极端值、带组件的物品），
-    //    官方 FakeLevel 真的 load 再 save，按键比较。
+    // 4. 实体：Bamboo 写出实体 NBT，官方 FakeLevel 加载并重存，按键比较。
+    // 4. Entities: write NBT in Bamboo, then load and resave in the official
+    // FakeLevel and compare by key.
     let entities = entity_cases();
     let request = json!({"command": "entities", "entities": entities.iter().map(canonical_tag).collect::<Vec<_>>()});
     let answer = ask(stdin, lines, request)?;
@@ -530,6 +531,17 @@ fn run_cases(
                 rebuilt.is_some(),
                 format!("entity {label}: Bamboo cannot read the official NBT"),
             );
+            if matches!(&tag, Tag::Compound(fields) if fields.iter().any(|(key, value)| {
+                key == "id"
+                    && matches!(value, Tag::String(id) if id == "minecraft:arrow" || id == "minecraft:egg" || id == "minecraft:llama_spit")
+            })) && let Some(row) = rebuilt
+            {
+                let saved = write_entity(&row).map_err(|error| error.to_string())?;
+                report.check(
+                    canonical_tag(&saved) == *written,
+                    format!("entity {label}: Bamboo projectile load -> save changed the NBT"),
+                );
+            }
         }
     }
 
@@ -616,14 +628,44 @@ fn run_cases(
             ),
         );
     }
-    {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    for kind in [
+        MobType::Cow,
+        MobType::Mooshroom,
+        MobType::Pig,
+        MobType::Sheep,
+        MobType::Chicken,
+        MobType::Goat,
+        MobType::Frog,
+        MobType::Tadpole,
+        MobType::PolarBear,
+        MobType::Ocelot,
+        MobType::Cat,
+        MobType::Creeper,
+        MobType::Spider,
+        MobType::CaveSpider,
+        MobType::Enderman,
+        MobType::Squid,
+        MobType::GlowSquid,
+        MobType::Cod,
+        MobType::Salmon,
+        MobType::TropicalFish,
+        MobType::Pufferfish,
+    ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
-        let uid = store.spawn(Entity::cow(Vec3::new(0.5, 64.0, -3.5)));
+        let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
+        let mut extra = (0_u8, 0_i32);
         store.with_mut(uid, |entity| {
             entity.y_rot = 33.5;
             entity.with_mob(|me, mob| {
                 mob.y_head_rot = me.y_rot;
                 mob.y_body_rot = me.y_rot;
+                if kind == MobType::Sheep {
+                    // 浅蓝、已剪毛：非默认的羊毛字节。
+                    // Light blue and sheared: a non-default wool byte.
+                    mob.wool = 3 | 16;
+                }
+                extra = (mob.wool, mob.egg_time);
             });
         });
         let row = store.get(uid).expect("刚生成").split();
@@ -632,14 +674,16 @@ fn run_cases(
         let answer = ask(
             stdin,
             lines,
-            json!({"command": "fresh-cow", "x": 0.5, "y": 64.0, "z": -3.5, "yaw": 33.5, "uuid": uuid}),
+            json!({"command": "fresh-cow", "type": kind.name(), "wool": extra.0, "egg": extra.1,
+                "x": 0.5, "y": 64.0, "z": -3.5, "yaw": 33.5, "uuid": uuid}),
         )?;
         let official = sorted_attributes(answer.written.clone().unwrap_or(Value::Null));
         let bamboo = sorted_attributes(canonical_tag(&ours));
         report.check(
             official == bamboo,
             format!(
-                "fresh cow: Bamboo save differs from the official one: {}",
+                "fresh {}: Bamboo save differs from the official one: {}",
+                kind.name(),
                 first_difference(&official, &bamboo)
             ),
         );
@@ -1444,7 +1488,148 @@ fn entity_cases() -> Vec<Tag> {
     with_uuid.retain(|(key, _)| key != "UUID");
     with_uuid.push(("UUID".to_owned(), uuid));
     out.push(Tag::Compound(with_uuid));
+    out.extend(arrow_archive_cases());
+    out.extend(spit_archive_cases());
+    out.extend(egg_archive_cases());
+    out.extend(fish_archive_cases());
     out
+}
+
+fn fish_archive_cases() -> [Tag; 4] {
+    use mc_bamboo_blocks::entity::mob::{MobType, fish};
+
+    [
+        MobType::Cod,
+        MobType::Salmon,
+        MobType::TropicalFish,
+        MobType::Pufferfish,
+    ]
+    .map(|kind| {
+        let mut store = mc_bamboo_blocks::EntityStore::new();
+        let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(1.5, 63.0, -2.5)));
+        store.with_mut(uid, |entity| {
+            entity.with_mob(|me, mob| {
+                mob.fish.from_bucket = true;
+                match kind {
+                    MobType::Salmon => mob.fish.variant = 2,
+                    MobType::TropicalFish => mob.fish.variant = fish::pack_variant(9, 10, 4),
+                    MobType::Pufferfish => mob.fish.puff_state = 2,
+                    _ => {}
+                }
+                fish::refresh_dimensions(me, mob);
+            });
+        });
+        write_entity(&store.get(uid).expect("fresh fish").split()).expect("fish archive")
+    })
+}
+
+/// 扔出的鸡蛋：带主人、离开主人、无重力的蓝蛋，和一枚刚生成的普通蛋。
+///
+/// Thrown eggs: a blue egg with an owner, left owner and no gravity, and a fresh plain egg.
+fn egg_archive_cases() -> [Tag; 2] {
+    use mc_bamboo_blocks::entity::thrown_egg::EggShot;
+    let shot = |item, position| EggShot {
+        position,
+        direction: Vec3::new(1.0, 0.0, 0.0),
+        power: 1.5,
+        uncertainty: 1.0,
+        source_movement: None,
+        owner: None,
+        owner_uuid: None,
+        item: ItemStack::new(item, 16),
+    };
+    let mut blue = Entity::thrown_egg(&shot(
+        mc_bamboo_data::items::BLUE_EGG,
+        Vec3::new(1.5, 65.5, -2.0),
+    ));
+    blue.id = 26;
+    blue.delta = Vec3::new(0.9, -0.3, 0.1);
+    blue.y_rot = 40.0;
+    let EntityKind::Egg(egg) = &mut blue.kind else {
+        unreachable!()
+    };
+    egg.uuid = 26_u128.to_be_bytes();
+    egg.owner_uuid = Some(17_u128.to_be_bytes());
+    egg.x_rot = -12.5;
+    egg.no_gravity = true;
+    egg.left_owner = true;
+    egg.has_been_shot = true;
+    let mut plain = Entity::thrown_egg(&shot(
+        mc_bamboo_data::items::EGG,
+        Vec3::new(2.5, 66.0, -2.0),
+    ));
+    plain.id = 27;
+    if let EntityKind::Egg(egg) = &mut plain.kind {
+        egg.uuid = 27_u128.to_be_bytes();
+    }
+    [blue, plain].map(|entity| write_entity(&entity.split()).unwrap())
+}
+
+fn arrow_archive_cases() -> [Tag; 2] {
+    let mut flight = Entity::arrow(Vec3::new(1.5, 65.25, -2.0));
+    flight.id = 24;
+    flight.remaining_fire_ticks = 73;
+    flight.delta = Vec3::new(1.4, -0.25, 0.2);
+    flight.y_rot = 75.0;
+    let EntityKind::Arrow(arrow) = &mut flight.kind else {
+        unreachable!()
+    };
+    arrow.uuid = 24_u128.to_be_bytes();
+    arrow.owner_uuid = Some(17_u128.to_be_bytes());
+    arrow.pitch = -10.0;
+    arrow.no_gravity = true;
+    arrow.critical = true;
+    arrow.pierce = 2;
+    arrow.pickup = Pickup::CreativeOnly;
+    arrow.base_damage = 3.25;
+    arrow.weapon = Some(ItemStack::new(mc_bamboo_data::items::BOW, 1));
+    arrow.has_been_shot = true;
+    arrow.left_owner = true;
+
+    let mut embedded = Entity::arrow(Vec3::new(1.5, 64.25, -2.0));
+    embedded.id = 25;
+    let EntityKind::Arrow(arrow) = &mut embedded.kind else {
+        unreachable!()
+    };
+    arrow.uuid = 25_u128.to_be_bytes();
+    arrow.in_ground = true;
+    arrow.last_state = Some(BlockState(blocks::STONE));
+    arrow.shake_time = 6;
+    arrow.life = 1199;
+    arrow.pickup = Pickup::Allowed;
+
+    [flight, embedded].map(|entity| write_entity(&entity.split()).unwrap())
+}
+
+/// 羊驼口水的两道存档题：飞行中、带主人且已离开主人的，和刚造出来什么都没设的。
+///
+/// Two llama spit save cases: one in flight with an owner it has left, and a bare new one.
+fn spit_archive_cases() -> [Tag; 2] {
+    let mut flight = Entity::new(
+        EntityKind::LlamaSpit(Box::default()),
+        Vec3::new(1.5, 65.25, -2.0),
+    );
+    flight.id = 26;
+    flight.delta = Vec3::new(1.2, -0.06, 0.4);
+    flight.y_rot = 71.5;
+    let EntityKind::LlamaSpit(spit) = &mut flight.kind else {
+        unreachable!()
+    };
+    spit.uuid = 26_u128.to_be_bytes();
+    spit.owner_uuid = Some(17_u128.to_be_bytes());
+    spit.pitch = -3.5;
+    spit.left_owner = true;
+    spit.has_been_shot = true;
+
+    let mut bare = Entity::new(
+        EntityKind::LlamaSpit(Box::default()),
+        Vec3::new(1.5, 64.25, -2.0),
+    );
+    bare.id = 27;
+    if let EntityKind::LlamaSpit(spit) = &mut bare.kind {
+        spit.uuid = 27_u128.to_be_bytes();
+    }
+    [flight, bare].map(|entity| write_entity(&entity.split()).unwrap())
 }
 
 /// 一段最小合法的区块 NBT，只为检查 `block_entities` 的键能原样通过官方 parse/write。
@@ -1470,6 +1655,65 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("UUID", uuid.clone()),
         ]),
     )];
+    // 哞菇：缺省（红色、没有炖菜效果）和棕色带两条效果（一条时长等于缺省 160，存盘时省略）。
+    // Mooshrooms: the default (red, no stew effects) and a brown one with two effects, one
+    // at the default duration of 160 that the save omits.
+    out.push((
+        "mooshroom bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:mooshroom".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    ));
+    let stew = |id: &str, duration: Option<i32>| {
+        let mut entry = vec![("id", Tag::String(id.to_owned()))];
+        if let Some(duration) = duration {
+            entry.push(("duration", Tag::Int(duration)));
+        }
+        compound(entry)
+    };
+    out.push((
+        "mooshroom brown stew".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:mooshroom".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("Age", Tag::Int(-1200)),
+            ("Type", Tag::String("brown".to_owned())),
+            (
+                "stew_effects",
+                Tag::List(vec![
+                    stew("minecraft:regeneration", Some(140)),
+                    stew("minecraft:blindness", Some(160)),
+                    stew("minecraft:saturation", None),
+                ]),
+            ),
+        ]),
+    ));
+    out.push((
+        "polar bear with persistent anger".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:polar_bear".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("anger_end_time", Tag::Long(9876543210)),
+            ("angry_at", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]),
+    ));
+    out.push((
+        "cat tamed rich".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:cat".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("variant", Tag::String("minecraft:calico".to_owned())),
+            ("sound_variant", Tag::String("minecraft:royal".to_owned())),
+            ("CollarColor", Tag::Byte(11)),
+            ("Sitting", Tag::Byte(1)),
+            ("Owner", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]),
+    ));
     out.push((
         "rich".to_owned(),
         compound(vec![
@@ -1557,6 +1801,7 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("variant", Tag::String("minecraft:cold".to_owned())),
         ]),
     ));
+    out.extend(brain_resave_cases());
     let mut store = mc_bamboo_blocks::EntityStore::new();
     let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
     let row = store.get(uid).expect("刚生成").split();
@@ -1601,6 +1846,174 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
         write_entity(&orb_row).expect("经验球能写出"),
     ));
     out
+}
+
+/// 跑大脑的生物的重存题：山羊的三个布尔值、犰狳的状态和掉鳞甲计时，以及 `Brain` 里
+/// 带和不带 `ttl` 的记忆；没有编解码器的记忆（`ram_target`）读档时丢掉。
+///
+/// Resave cases for brain-driven mobs: the goat's three booleans, the armadillo state
+/// and scute timer, and `Brain` memories with and without `ttl`; memories without a codec
+/// (`ram_target`) are dropped on load.
+fn brain_resave_cases() -> Vec<(String, Tag)> {
+    let compound = |entries: Vec<(&str, Tag)>| {
+        Tag::Compound(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
+        )
+    };
+    let uuid = Tag::IntArray(vec![0x0bad_f00d, 0x1357_9bdf, -0x2468_ace0, 0x600d_0001]);
+    let pos = Tag::List(vec![Tag::Double(4.5), Tag::Double(64.0), Tag::Double(-2.5)]);
+    let memory = |value: Tag, ttl: Option<i64>| {
+        let mut entries = vec![("value", value)];
+        if let Some(ttl) = ttl {
+            entries.push(("ttl", Tag::Long(ttl)));
+        }
+        compound(entries)
+    };
+    let goat_memories = compound(vec![(
+        "memories",
+        compound(vec![
+            ("minecraft:ram_cooldown_ticks", memory(Tag::Int(321), None)),
+            (
+                "minecraft:long_jump_cooling_down",
+                memory(Tag::Int(45), None),
+            ),
+            (
+                "minecraft:ram_target",
+                memory(
+                    Tag::List(vec![Tag::Double(1.0), Tag::Double(2.0), Tag::Double(3.0)]),
+                    None,
+                ),
+            ),
+        ]),
+    )]);
+    let armadillo_memories = compound(vec![(
+        "memories",
+        compound(vec![
+            (
+                "minecraft:danger_detected_recently",
+                memory(Tag::Byte(1), Some(57)),
+            ),
+            (
+                "minecraft:temptation_cooldown_ticks",
+                memory(Tag::Int(90), None),
+            ),
+        ]),
+    )]);
+    let frog_memories = compound(vec![(
+        "memories",
+        compound(vec![
+            ("minecraft:is_pregnant", memory(compound(vec![]), None)),
+            ("minecraft:is_in_water", memory(compound(vec![]), None)),
+            (
+                "minecraft:long_jump_cooling_down",
+                memory(Tag::Int(77), None),
+            ),
+        ]),
+    )]);
+    vec![
+        // 青蛙：品种存带命名空间的名字；`canBeABaby` 为假，`Age` 三个键不读也不写。
+        // Frogs: the variant is saved namespaced; `canBeABaby` is false, so the three
+        // `Age` keys are neither read nor written.
+        (
+            "frog_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:frog".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "frog_warm_pregnant".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:frog".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("variant", Tag::String("minecraft:warm".to_owned())),
+                ("Age", Tag::Int(-600)),
+                ("Brain", frog_memories),
+            ]),
+        ),
+        // 蝌蚪：自己的 `Age` 和 `AgeLocked`；`FromBucket` 写出来恒为真。
+        // Tadpoles: their own `Age` and `AgeLocked`; `FromBucket` always saves as true.
+        (
+            "tadpole_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:tadpole".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "tadpole_aged_locked".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:tadpole".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("Age", Tag::Int(12345)),
+                ("AgeLocked", Tag::Byte(1)),
+                ("FromBucket", Tag::Byte(0)),
+            ]),
+        ),
+        (
+            "goat_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:goat".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "goat_screaming_one_horn".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:goat".to_owned())),
+                ("Pos", pos.clone()),
+                (
+                    "Rotation",
+                    Tag::List(vec![Tag::Float(140.0), Tag::Float(-5.0)]),
+                ),
+                ("UUID", uuid.clone()),
+                ("IsScreamingGoat", Tag::Byte(1)),
+                ("HasLeftHorn", Tag::Byte(0)),
+                ("HasRightHorn", Tag::Byte(1)),
+                ("Age", Tag::Int(-600)),
+                ("Brain", goat_memories),
+            ]),
+        ),
+        // 骆驼：`LastPoseTick` 负数表示坐着，正数表示上次换姿势的 `gameTime`。
+        // Camels: a negative `LastPoseTick` means sitting; a positive one is the
+        // `gameTime` of the last pose change.
+        (
+            "camel_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:camel".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "camel_sitting".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:camel".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("LastPoseTick", Tag::Long(-1000)),
+            ]),
+        ),
+        (
+            "armadillo_scared".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:armadillo".to_owned())),
+                ("Pos", pos),
+                ("UUID", uuid),
+                ("state", Tag::String("scared".to_owned())),
+                ("scute_time", Tag::Int(1234)),
+                ("Brain", armadillo_memories),
+            ]),
+        ),
+    ]
 }
 
 /// 把规范 JSON 里 `attributes` 列表按 `id` 排序。

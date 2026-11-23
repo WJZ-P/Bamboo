@@ -225,6 +225,9 @@ impl TickLevels {
         self.blocks.iter().copied().collect()
     }
 
+    /// 测试用的能 tick 实体的区块，按坐标有序。
+    ///
+    /// The entity-ticking chunks in coordinate order, for tests.
     #[cfg(test)]
     pub(crate) fn entity_chunks(&self) -> BTreeSet<ChunkPos> {
         self.entities.iter().copied().collect()

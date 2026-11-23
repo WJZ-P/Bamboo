@@ -129,6 +129,19 @@ pub enum KindPublic {
     },
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
+    Arrow(super::arrow::ArrowPublic),
+    /// 羊驼的口水：同步要的 UUID、主人和俯仰角。
+    ///
+    /// Llama spit: the UUID, owner and pitch the sync layer needs.
+    LlamaSpit(super::spit::LlamaSpitPublic),
+    /// 扔出的鸡蛋：同步要它的物品、主人和俯仰角。
+    ///
+    /// A thrown egg: the sync layer reads its item, owner and pitch.
+    Egg(Box<super::thrown_egg::EggPublic>),
+    /// 扔出的喷溅药水。
+    ///
+    /// A thrown splash potion.
+    SplashPotion(Box<super::splash_potion::SplashPotionPublic>),
 }
 
 impl KindPublic {
@@ -139,6 +152,10 @@ impl KindPublic {
             Self::Tnt { .. } => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
+            Self::Arrow(arrow) => arrow.variant.entity_type(),
+            Self::LlamaSpit(_) => mc_bamboo_data::registries::entity_type::LLAMA_SPIT,
+            Self::Egg(_) => mc_bamboo_data::registries::entity_type::EGG,
+            Self::SplashPotion(_) => mc_bamboo_data::registries::entity_type::SPLASH_POTION,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -189,6 +206,10 @@ pub enum KindState {
     ExperienceOrb(super::ExperienceOrb),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
+    Arrow(Box<super::arrow::Arrow>),
+    LlamaSpit(Box<super::spit::LlamaSpit>),
+    Egg(Box<super::thrown_egg::ThrownEgg>),
+    SplashPotion(Box<super::splash_potion::SplashPotion>),
 }
 
 /// `FallingBlockEntity` 里别人不读的字段。
@@ -302,6 +323,12 @@ impl EntityRow {
                 orb.value = value;
                 EntityKind::ExperienceOrb(orb)
             }
+            (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
+            (KindPublic::LlamaSpit(_), KindState::LlamaSpit(spit)) => EntityKind::LlamaSpit(spit),
+            (KindPublic::Egg(_), KindState::Egg(egg)) => EntityKind::Egg(egg),
+            (KindPublic::SplashPotion(_), KindState::SplashPotion(potion)) => {
+                EntityKind::SplashPotion(potion)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -372,11 +399,24 @@ impl Entity {
                 KindPublic::ExperienceOrb { value: orb.value },
                 KindState::ExperienceOrb(orb),
             ),
+            EntityKind::Arrow(arrow) => (
+                KindPublic::Arrow(arrow.public(self.remaining_fire_ticks)),
+                KindState::Arrow(arrow),
+            ),
+            EntityKind::LlamaSpit(spit) => (
+                KindPublic::LlamaSpit(spit.public()),
+                KindState::LlamaSpit(spit),
+            ),
+            EntityKind::Egg(egg) => (
+                KindPublic::Egg(Box::new(egg.public(self.remaining_fire_ticks))),
+                KindState::Egg(egg),
+            ),
+            EntityKind::SplashPotion(potion) => (
+                KindPublic::SplashPotion(Box::new(potion.public(self.remaining_fire_ticks))),
+                KindState::SplashPotion(potion),
+            ),
             EntityKind::Mob(mob) => (
-                KindPublic::Mob(Box::new(super::mob::MobPublic::of(
-                    &mob,
-                    self.remaining_fire_ticks,
-                ))),
+                KindPublic::Mob(Box::new(super::mob::MobPublic::of(&mob, self.in_water))),
                 KindState::Mob(mob),
             ),
         };
@@ -874,6 +914,18 @@ impl EntityStore {
         entity.finish_item_random();
         super::orb::finish_spawn(&mut entity, Vec3::default());
         entity.finish_mob_random();
+        if let EntityKind::Arrow(arrow) = &mut entity.kind {
+            arrow.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::LlamaSpit(spit) = &mut entity.kind {
+            spit.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::Egg(egg) = &mut entity.kind {
+            egg.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
+        if let EntityKind::SplashPotion(potion) = &mut entity.kind {
+            potion.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         entity
     }
 
@@ -1145,10 +1197,27 @@ impl EntityStore {
     pub fn take_mob_events(&mut self) -> Vec<(EntityUid, Vec<super::mob::MobEvent>)> {
         let mut out = Vec::new();
         let take = |row: &mut EntityRow| -> Option<(EntityUid, Vec<super::mob::MobEvent>)> {
-            let super::KindState::Mob(mob) = &mut row.state.kind else {
-                return None;
-            };
-            (!mob.events.is_empty()).then(|| (row.public.uid, std::mem::take(&mut mob.events)))
+            match &mut row.state.kind {
+                super::KindState::Mob(mob) => (!mob.events.is_empty())
+                    .then(|| (row.public.uid, std::mem::take(&mut mob.events))),
+                // 药水箭褪色的 `broadcastEntityEvent(this, 0)` 走同一条事件通道。
+                // A tipped arrow's fading `broadcastEntityEvent(this, 0)` shares this channel.
+                super::KindState::Arrow(arrow) => {
+                    super::arrow::take_potion_puff(arrow).then(|| {
+                        (
+                            row.public.uid,
+                            vec![super::mob::MobEvent::EntityEvent { event: 0 }],
+                        )
+                    })
+                }
+                super::KindState::Egg(egg) => super::thrown_egg::take_cracked(egg).then(|| {
+                    (
+                        row.public.uid,
+                        vec![super::mob::MobEvent::EntityEvent { event: 3 }],
+                    )
+                }),
+                _ => None,
+            }
         };
         for &row in self.index.values() {
             if let Some(entry) = self.slots[row].as_mut()
@@ -1175,6 +1244,19 @@ impl EntityStore {
     ///
     /// Keep a discarded entity's pending events for the sync layer.
     pub fn keep_departed_events(&mut self, entity: &Entity) {
+        // 鸡蛋命中的那一刻就消失；`broadcastEntityEvent(this, 3)` 跟死亡事件走同一条路。
+        // An egg vanishes on its impact tick; event 3 takes the same path as death events.
+        if let EntityKind::Egg(egg) = &entity.kind
+            && egg.is_cracked()
+        {
+            self.departed_mob_events.insert(
+                entity.id,
+                (
+                    ChunkPos::containing(entity.position.x, entity.position.z),
+                    vec![super::mob::MobEvent::EntityEvent { event: 3 }],
+                ),
+            );
+        }
         if let Some(mob) = entity.kind.mob()
             && !mob.events.is_empty()
         {

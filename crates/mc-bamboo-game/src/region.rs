@@ -258,6 +258,13 @@ pub(crate) struct Region {
     pub(crate) random: LevelRandom,
     /// 红石缓存，一个 region 一份；开关从 `bamboo.toml` 读，默认关。
     pub(crate) redstone_cache: mc_bamboo_blocks::cache::RedstoneCache,
+    /// 自然刷怪要不要按玩家算上限（`bamboo.toml` 的 `spawn_per_player_cap`）；
+    /// 关掉只剩官方的全局上限。
+    ///
+    /// Whether natural spawning caps each category per player
+    /// (`spawn_per_player_cap` in `bamboo.toml`); off keeps only the vanilla
+    /// global cap.
+    pub(crate) spawn_per_player_cap: bool,
     /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
@@ -445,6 +452,7 @@ impl Region {
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 mc_bamboo_blocks::cache::CacheConfig::default(),
             ),
+            spawn_per_player_cap: true,
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
@@ -621,35 +629,8 @@ impl Region {
 
     /// 方块逻辑要的世界和计划刻队列。它们借用不同的字段，所以要一起拿。
     pub(crate) fn block_level(&mut self) -> (RegionLevel<'_>, &mut BlockTicks) {
-        let level = RegionLevel {
-            chunks: &mut self.chunks,
-            changes: &mut self.block_changes,
-            block_items: &mut self.block_items,
-            break_tool: mc_bamboo_protocol::item::ItemStack::empty(),
-            players: &mut self.players,
-            random: &self.random,
-            redstone: &mut self.redstone,
-            block_entities: &mut self.block_entities,
-            block_events: &mut self.block_events,
-            containers: &mut self.containers,
-            entities: &mut self.entities,
-            loot_sequences: &self.loot_sequences,
-            block_rules: self.global.block_rules,
-            block_weather: self.global.block_weather,
-            sky_darken: self.global.sky_darken,
-            difficulty: self.global.difficulty,
-            world_border: self.global.world_border.clone(),
-            command_blocks: &mut self.command_blocks,
-            tick_levels: &self.tick_levels,
-            dirty: &mut self.dirty,
-            chunk_profiler: self
-                .profiler
-                .chunk_timing_enabled()
-                .then_some(&self.profiler),
-            partition_profiler: self.profiler.partition_enabled().then_some(&self.profiler),
-            partitions: &self.partitioning.partitions,
-        };
-        (level, &mut self.block_ticks)
+        let (level, ticks, _) = self.split_level(false);
+        (level, ticks)
     }
 
     /// 带红石缓存的方块逻辑入口：只有游戏 tick 的两段用得到。
@@ -660,6 +641,29 @@ impl Region {
         &mut BlockTicks,
         &mut mc_bamboo_blocks::cache::RedstoneCache,
     ) {
+        self.split_level(false)
+    }
+
+    /// 精确驱动的实体循环用的世界：额外借出连接、音效种子和规则，生物打玩家时
+    /// 能在自己的 tick 里当场走玩家受伤的正式入口（[`RegionLevel::player_side`]）。
+    pub(crate) fn entity_level(&mut self) -> (RegionLevel<'_>, &mut BlockTicks) {
+        let (level, ticks, _) = self.split_level(true);
+        (level, ticks)
+    }
+
+    fn split_level(
+        &mut self,
+        with_players: bool,
+    ) -> (
+        RegionLevel<'_>,
+        &mut BlockTicks,
+        &mut mc_bamboo_blocks::cache::RedstoneCache,
+    ) {
+        let player_side = with_players.then(|| crate::interaction::level::PlayerSide {
+            links: &mut self.links,
+            sound_seeds: &self.sound_seed_generator,
+            rules: &self.global.rules,
+        });
         let level = RegionLevel {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
@@ -676,6 +680,13 @@ impl Region {
             block_rules: self.global.block_rules,
             block_weather: self.global.block_weather,
             sky_darken: self.global.sky_darken,
+            clock_ticks: self.global.clock.total_ticks,
+            world_seed: self.global.seed,
+            sea_level: if self.global.world_gen.level_type.is_flat() {
+                -63
+            } else {
+                63
+            },
             difficulty: self.global.difficulty,
             world_border: self.global.world_border.clone(),
             command_blocks: &mut self.command_blocks,
@@ -687,6 +698,7 @@ impl Region {
                 .then_some(&self.profiler),
             partition_profiler: self.profiler.partition_enabled().then_some(&self.profiler),
             partitions: &self.partitioning.partitions,
+            player_side,
         };
         (level, &mut self.block_ticks, &mut self.redstone_cache)
     }

@@ -28,7 +28,7 @@ use mc_bamboo_protocol::{
         AddEntity, AttributeModifier, AttributeOperation, AttributeSnapshot, BundleDelimiter,
         EntityData, EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot,
         PositionDelta, PositionPath, RemoveEntities, RotateHead, SetEntityData, SetEntityMotion,
-        TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
+        SetPassengers, TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
     },
 };
 use uuid::Uuid;
@@ -51,8 +51,10 @@ const FORCED_TELEPORT_PERIOD: u32 = 400;
 /// 跟踪范围按区块算，一格区块 16 格。
 const BLOCKS_PER_CHUNK: i32 = 16;
 
-/// `update_attributes` 上一次发过的属性状态（ID、基础值、永久修饰符）。
-type AttributeState = (i32, f64, Vec<(String, f64, i32)>);
+/// `update_attributes` 上一次发过的属性状态（ID、基础值、修饰符、脏代数）。
+///
+/// Last synced state for `update_attributes` (id, base, modifiers, dirty generation).
+type AttributeState = (i32, f64, Vec<(String, f64, i32)>, u64);
 
 /// 一个世界里全部被跟踪的实体。
 #[derive(Debug, Default)]
@@ -227,6 +229,10 @@ pub struct TrackedEntity {
     /// `ServerEntity.tickCount`，每刻加一，周期判定和强制位置同步都用。
     tick_count: i32,
     was_on_ground: bool,
+    /// 上次发出去的乘客名单。官方 `ServerEntity.lastPassengers`。
+    ///
+    /// The passenger list last sent, vanilla `ServerEntity.lastPassengers`.
+    last_passengers: Vec<i32>,
     /// 上次发出去的引信，TNT 每 tick 都变。
     last_fuse: i32,
     /// 上次发出去的物品堆。空堆是默认值，不单独发。
@@ -254,6 +260,7 @@ impl TrackedEntity {
             ticks_since_step: -1,
             tick_count: 0,
             was_on_ground: snapshot.on_ground,
+            last_passengers: snapshot.passengers.clone(),
             last_fuse: snapshot.data.fuse().unwrap_or(0),
             last_stack: snapshot
                 .data
@@ -281,7 +288,7 @@ impl TrackedEntity {
             entity_id: snapshot.id,
             uuid: snapshot
                 .data
-                .mob_uuid()
+                .stable_uuid()
                 .map_or_else(|| entity_uuid(snapshot.id), Uuid::from_bytes),
             entity_type: snapshot.entity_type,
             position: self.base,
@@ -291,15 +298,19 @@ impl TrackedEntity {
             head_yaw: self.last_head,
             data: snapshot.add_data(),
         })];
-        // 官方 `trackedDataValues` 在构造时总是非 null（哪怕空表），所以配对时
-        // 总有一个 `set_entity_data`，空表时只有一个结束标记。
-        // Vanilla's `trackedDataValues` is never null, so pairing always sends
-        // one `set_entity_data`; an empty list only carries the end marker.
-        out.push(packet_body(&SetEntityData {
-            entity_id: snapshot.id,
-            items: &self.last_data,
-        }));
+        // 官方箭的 trackedDataValues 为空时不发；其它类型保留现有空表包行为。
+        // Vanilla skips empty arrow metadata; other types retain their existing empty packet.
+        if !matches!(snapshot.data, KindData::Arrow(_) | KindData::LlamaSpit(_))
+            || !self.last_data.is_empty()
+        {
+            out.push(packet_body(&SetEntityData {
+                entity_id: snapshot.id,
+                items: &self.last_data,
+            }));
+        }
         // `LivingEntity` 的可同步属性，属性表里哪些是同步的由数据层给出。
+        // 官方 `AttributeSnapshot` 带 `getModifiers()` 的全部修饰符，临时的（效果、装备、
+        // 细雪减速）也在里面。
         // Syncable `LivingEntity` attributes; the data layer says which ones.
         if let KindData::Mob(mob) = &snapshot.data {
             let mut snapshots = Vec::new();
@@ -312,7 +323,6 @@ impl TrackedEntity {
                     entry
                         .modifiers
                         .iter()
-                        .filter(|modifier| modifier.permanent)
                         .map(|modifier| AttributeModifier {
                             id: &modifier.id,
                             amount: modifier.amount,
@@ -347,6 +357,17 @@ impl TrackedEntity {
                     attributes: &attributes,
                 }));
             }
+            // `sendPairingData`：非空的装备槽一个 `set_equipment`。
+            let slots: Vec<_> = mob
+                .equipment
+                .iter()
+                .map(|(slot, stack)| (*slot, stack))
+                .collect();
+            if let Some(packet) =
+                mc_bamboo_protocol::packet::play::SetEquipment::new(snapshot.id, &slots)
+            {
+                out.push(packet_body(&packet));
+            }
         }
         out
     }
@@ -367,7 +388,9 @@ impl TrackedEntity {
         let mut packets = Vec::new();
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
-        self.ticks_since_step += 1;
+        if !snapshot.data.is_projectile() {
+            self.ticks_since_step += 1;
+        }
         if snapshot.sync_position {
             self.ticks_since_step = 0;
         }
@@ -426,6 +449,9 @@ impl TrackedEntity {
                     items.push(item);
                 }
             }
+            // `packDirty` 按 ID 顺序遍历，补进来的脏项也要排进去。
+            // `packDirty` walks the IDs in order, including the forced items.
+            items.sort_by_key(EntityData::index);
             self.last_data = data;
             if !items.is_empty() {
                 packets.push(packet_body(&SetEntityData {
@@ -453,7 +479,11 @@ impl TrackedEntity {
         }
         self.tick_count += 1;
         if sync_velocity {
-            self.last_movement = snapshot.delta;
+            // 箭的 syncVelocity 来自 markHurt；官方这个分支不更新常规速度基线。
+            // Arrow syncVelocity comes from markHurt; vanilla leaves its regular velocity baseline intact.
+            if !snapshot.data.is_projectile() {
+                self.last_movement = snapshot.delta;
+            }
             packets.push(packet_body(&SetEntityMotion {
                 entity_id: snapshot.id,
                 movement: snapshot.delta,
@@ -488,7 +518,22 @@ impl TrackedEntity {
                 .find(|item| EntityData::index(item) == index);
             let item = match now {
                 Some(item) if Some(item) != before => item.clone(),
-                None if before.is_some() => default_data(index),
+                None if matches!(snapshot.data, KindData::Arrow(_)) => match index {
+                    0 => EntityData::SharedFlags(0),
+                    5 => EntityData::NoGravity(false),
+                    entity_types::ARROW_FLAGS => EntityData::ArrowFlags(0),
+                    entity_types::ARROW_PIERCE => EntityData::ArrowPierce(0),
+                    entity_types::ARROW_IN_GROUND => EntityData::ArrowInGround(false),
+                    entity_types::ARROW_COLOR => EntityData::ArrowColor(-1),
+                    _ => continue,
+                },
+                None if before.is_some() => default_data_for_type(
+                    index,
+                    match &snapshot.data {
+                        KindData::Mob(mob) => mob.mob_type,
+                        _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
+                    },
+                ),
                 _ => continue,
             };
             out.push(item);
@@ -549,7 +594,6 @@ impl TrackedEntity {
             let modifiers = entry
                 .modifiers
                 .iter()
-                .filter(|modifier| modifier.permanent)
                 .map(|modifier| {
                     let operation = match modifier.operation {
                         mc_bamboo_blocks::entity::mob::attributes::Operation::AddValue => 0,
@@ -559,7 +603,7 @@ impl TrackedEntity {
                     (modifier.id.clone(), modifier.amount, operation)
                 })
                 .collect();
-            current.push((entry.id, entry.base, modifiers));
+            current.push((entry.id, entry.base, modifiers, entry.sync_version));
         }
         if current == self.last_attributes {
             return Vec::new();
@@ -568,7 +612,10 @@ impl TrackedEntity {
             .iter()
             .filter(|entry| {
                 !self.last_attributes.iter().any(|previous| {
-                    previous.0 == entry.0 && previous.1 == entry.1 && previous.2 == entry.2
+                    previous.0 == entry.0
+                        && previous.1 == entry.1
+                        && previous.2 == entry.2
+                        && previous.3 == entry.3
                 })
             })
             .map(|entry| entry.0)
@@ -579,7 +626,7 @@ impl TrackedEntity {
         }
         let mut snapshots = Vec::new();
         let mut modifiers: Vec<Vec<AttributeModifier<'_>>> = Vec::new();
-        for (id, base, list) in &current {
+        for (id, base, list, _) in &current {
             if !changed.contains(id) {
                 continue;
             }
@@ -645,7 +692,10 @@ impl TrackedEntity {
             self.teleport_delay = 0;
             return Some(Movement::Sync);
         }
-        let send_position = has_moved(self.base, snapshot.position)
+        let arrow = matches!(snapshot.data, KindData::Arrow(_));
+        let rotation_changed = arrow || rotation_changed;
+        let send_position = arrow
+            || has_moved(self.base, snapshot.position)
             || self.tick_count % FORCED_POS_UPDATE_PERIOD == 0;
         if !send_position {
             return rotation_changed.then_some(Movement::Rotation);
@@ -691,6 +741,10 @@ pub struct Snapshot {
     pub sync_position: bool,
     /// `LivingEntity.isFallFlying()`：为真时即使 `trackDelta` 为假也查速度。
     pub fall_flying: bool,
+    /// 骑在上面的玩家，官方的 `Entity.getPassengers()`。
+    ///
+    /// The players riding this entity, vanilla `Entity.getPassengers()`.
+    pub passengers: Vec<i32>,
 }
 
 /// 配对和同步时要发的、按实体类型不同的元数据。
@@ -709,6 +763,13 @@ pub enum KindData {
         value: i32,
     },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
+    Arrow(mc_bamboo_blocks::entity::arrow::ArrowPublic),
+    /// 羊驼口水：没有自己的元数据。
+    ///
+    /// Llama spit, with no metadata of its own.
+    LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
+    Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
+    SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
 }
 
 impl Snapshot {
@@ -725,10 +786,26 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
-            needs_sync: false,
-            sync_velocity: false,
+            needs_sync: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.needs_sync,
+                KindPublic::Mob(mob) => mob.needs_sync,
+                KindPublic::LlamaSpit(spit) => spit.needs_sync,
+                KindPublic::Egg(egg) => egg.needs_sync,
+                KindPublic::SplashPotion(potion) => potion.needs_sync,
+                _ => false,
+            },
+            sync_velocity: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.sync_velocity,
+                KindPublic::Egg(egg) => egg.sync_velocity,
+                KindPublic::SplashPotion(potion) => potion.sync_velocity,
+                _ => false,
+            },
             sync_position: false,
             fall_flying: false,
+            passengers: match &public.kind {
+                KindPublic::Mob(mob) => mob.passengers.clone(),
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -736,6 +813,10 @@ impl Snapshot {
     fn add_data(&self) -> i32 {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
+            KindData::Arrow(arrow) => arrow.owner.unwrap_or(0),
+            KindData::LlamaSpit(spit) => spit.owner.unwrap_or(0),
+            KindData::Egg(egg) => egg.owner.unwrap_or(0),
+            KindData::SplashPotion(potion) => potion.owner.unwrap_or(0),
             KindData::Tnt { .. }
             | KindData::Item(_)
             | KindData::ExperienceOrb { .. }
@@ -759,7 +840,22 @@ impl KindData {
             KindPublic::Item { stack, .. } => Self::Item(stack.clone()),
             KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
+            KindPublic::Arrow(arrow) => Self::Arrow(*arrow),
+            KindPublic::LlamaSpit(spit) => Self::LlamaSpit(*spit),
+            KindPublic::Egg(egg) => Self::Egg(egg.clone()),
+            KindPublic::SplashPotion(potion) => Self::SplashPotion(potion.clone()),
         }
+    }
+
+    /// `InterpolationHandler.NO_OP` 的弹射物：位置包不带攒下的步数，`syncVelocity` 不动速度基线。
+    ///
+    /// Projectiles with a no-op interpolation handler: no stepped position paths, and
+    /// `syncVelocity` leaves the velocity baseline alone.
+    fn is_projectile(&self) -> bool {
+        matches!(
+            self,
+            Self::Arrow(_) | Self::Egg(_) | Self::LlamaSpit(_) | Self::SplashPotion(_)
+        )
     }
 
     /// 同步用到的那个数字。下落的方块和物品没有。
@@ -768,7 +864,11 @@ impl KindData {
             Self::FallingBlock { .. }
             | Self::Item(_)
             | Self::ExperienceOrb { .. }
-            | Self::Mob(_) => None,
+            | Self::Mob(_)
+            | Self::Arrow(_)
+            | Self::LlamaSpit(_)
+            | Self::Egg(_)
+            | Self::SplashPotion(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -779,14 +879,22 @@ impl KindData {
             Self::FallingBlock { .. }
             | Self::Tnt { .. }
             | Self::ExperienceOrb { .. }
-            | Self::Mob(_) => None,
+            | Self::Mob(_)
+            | Self::Arrow(_)
+            | Self::LlamaSpit(_)
+            | Self::Egg(_)
+            | Self::SplashPotion(_) => None,
         }
     }
 
     /// 生物自己的 UUID；其它三类按网络 ID 派生。
-    fn mob_uuid(&self) -> Option<[u8; 16]> {
+    fn stable_uuid(&self) -> Option<[u8; 16]> {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
+            Self::Arrow(arrow) => Some(arrow.uuid),
+            Self::LlamaSpit(spit) => Some(spit.uuid),
+            Self::Egg(egg) => Some(egg.uuid),
+            Self::SplashPotion(potion) => Some(potion.uuid),
             _ => None,
         }
     }
@@ -795,6 +903,10 @@ impl KindData {
     fn mob_x_rot(&self) -> Option<f32> {
         match self {
             Self::Mob(mob) => Some(mob.x_rot),
+            Self::Arrow(arrow) => Some(arrow.pitch),
+            Self::LlamaSpit(spit) => Some(spit.pitch),
+            Self::Egg(egg) => Some(egg.x_rot),
+            Self::SplashPotion(potion) => Some(potion.x_rot),
             _ => None,
         }
     }
@@ -823,8 +935,58 @@ impl KindData {
             Self::ExperienceOrb { value } if *value != 0 => {
                 vec![EntityData::ExperienceValue(*value)]
             }
-            Self::ExperienceOrb { .. } => Vec::new(),
-            Self::Mob(mob) => mob_non_default_data(mob),
+            Self::ExperienceOrb { .. } | Self::LlamaSpit(_) => Vec::new(),
+            Self::Arrow(arrow) => {
+                let mut data = Vec::new();
+                if arrow.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if arrow.no_gravity {
+                    data.push(EntityData::NoGravity(true));
+                }
+                if arrow.critical {
+                    data.push(EntityData::ArrowFlags(1));
+                }
+                if arrow.pierce != 0 {
+                    data.push(EntityData::ArrowPierce(arrow.pierce));
+                }
+                if arrow.in_ground {
+                    data.push(EntityData::ArrowInGround(true));
+                }
+                if arrow.color != -1 {
+                    data.push(EntityData::ArrowColor(arrow.color));
+                }
+                data
+            }
+            Self::Mob(mob) => {
+                if mob.mob_type.is_monster() {
+                    monster_non_default_data(mob)
+                } else {
+                    mob_non_default_data(mob)
+                }
+            }
+            Self::Egg(egg) => {
+                let mut data = Vec::new();
+                if egg.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if egg.no_gravity {
+                    data.push(EntityData::NoGravity(true));
+                }
+                data.push(EntityData::Item(egg.item.clone()));
+                data
+            }
+            Self::SplashPotion(potion) => {
+                let mut data = Vec::new();
+                if potion.on_fire {
+                    data.push(EntityData::SharedFlags(1));
+                }
+                if potion.no_gravity {
+                    data.push(EntityData::NoGravity(true));
+                }
+                data.push(EntityData::Item(potion.item.clone()));
+                data
+            }
         }
     }
 }
@@ -834,25 +996,163 @@ impl KindData {
 ///
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
-fn default_data(index: u8) -> EntityData {
-    match index {
-        0 => EntityData::SharedFlags(0),
-        1 => EntityData::AirSupply(300),
-        3 => EntityData::CustomNameVisible(false),
-        4 => EntityData::Silent(false),
-        5 => EntityData::NoGravity(false),
-        6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
-        7 => EntityData::TicksFrozen(0),
-        9 => EntityData::Health(1.0),
-        15 => EntityData::MobFlags(0),
-        16 => EntityData::Baby(false),
-        17 => EntityData::AgeLocked(false),
-        18 => EntityData::CowVariant(1),
-        19 => EntityData::CowSoundVariant(0),
-        // `CustomName` 是 optional component，空时写 boolean false。
-        // `CustomName` is an optional component; absent is a false boolean.
-        2 => EntityData::NoCustomName,
-        _ => EntityData::SharedFlags(0),
+fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Wolf
+        && let Some(data) = wolf_default_data(index)
+    {
+        return data;
+    }
+    if kind.is_equine() && index >= mc_bamboo_data::entity_types::HORSE_FLAGS {
+        return equine_default_data(index, kind);
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Armadillo
+        && index == mc_bamboo_data::entity_types::ARMADILLO_STATE
+    {
+        return EntityData::ArmadilloState(0);
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::FROG_VARIANT => {
+                let variant = mc_bamboo_blocks::entity::mob::frog::Variant::default();
+                return EntityData::FrogVariant(variant.network_id());
+            }
+            facts::FROG_TONGUE_TARGET => return EntityData::FrogTongueTarget(None),
+            _ => {}
+        }
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Goat {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::GOAT_SCREAMING => return EntityData::GoatScreaming(false),
+            facts::GOAT_LEFT_HORN => return EntityData::GoatLeftHorn(true),
+            facts::GOAT_RIGHT_HORN => return EntityData::GoatRightHorn(true),
+            _ => {}
+        }
+    }
+    if let Some(data) = farm_default_data(index, kind) {
+        return data;
+    }
+    if let Some(data) = fish_default_data(index, kind) {
+        return data;
+    }
+    // 海豚 / 美西螈的 18、19、20 是它们自己的元数据，不是牛的花色和叫声。
+    // A dolphin / axolotl's 18, 19, 20 are their own accessors, not cow variants.
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as water_facts;
+    match (kind, index) {
+        (MobType::Dolphin, water_facts::DOLPHIN_GOT_FISH) => {
+            return EntityData::DolphinGotFish(false);
+        }
+        (MobType::Dolphin, water_facts::DOLPHIN_MOISTNESS) => {
+            return EntityData::DolphinMoistness(2400);
+        }
+        (MobType::Axolotl, water_facts::AXOLOTL_VARIANT) => {
+            return EntityData::AxolotlVariant(0);
+        }
+        (MobType::Axolotl, water_facts::AXOLOTL_PLAYING_DEAD) => {
+            return EntityData::AxolotlPlayingDead(false);
+        }
+        (MobType::Axolotl, water_facts::AXOLOTL_FROM_BUCKET) => {
+            return EntityData::AxolotlFromBucket(false);
+        }
+        _ => {}
+    }
+    // 海龟的 18、19 是「有蛋」「正在产卵」两个布尔，不是牛的花色和叫声；
+    // 从 true 变回 false 时要发这两条默认值。
+    // A turtle's 18 and 19 are the has-egg / laying-egg booleans, not the cow
+    // variants; send these defaults when either flips back to false.
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Turtle {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::TURTLE_HAS_EGG => return EntityData::TurtleHasEgg(false),
+            facts::TURTLE_LAYING_EGG => return EntityData::TurtleLayingEgg(false),
+            _ => {}
+        }
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Pig {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::PIG_BOOST_TIME => return EntityData::PigBoostTime(0),
+            facts::PIG_VARIANT => {
+                return EntityData::PigVariant(pig_variant_id("minecraft:temperate"));
+            }
+            facts::PIG_SOUND_VARIANT => {
+                return EntityData::PigSoundVariant(pig_sound_variant_default());
+            }
+            _ => {}
+        }
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Enderman {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::ENDERMAN_CARRY_STATE => return EntityData::EndermanCarried(None),
+            facts::ENDERMAN_CREEPY => return EntityData::EndermanCreepy(false),
+            facts::ENDERMAN_STARED_AT => return EntityData::EndermanStaredAt(false),
+            _ => {}
+        }
+    }
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::CREEPER_SWELL_DIR => return EntityData::CreeperSwellDir(-1),
+            facts::CREEPER_POWERED => return EntityData::CreeperPowered(false),
+            facts::CREEPER_IGNITED => return EntityData::CreeperIgnited(false),
+            _ => {}
+        }
+    }
+    if kind.climbs_walls() {
+        use mc_bamboo_data::entity_types as facts;
+        if index == facts::SPIDER_FLAGS {
+            return EntityData::SpiderFlags(0);
+        }
+    }
+    match (index, kind.uses_baby_metadata()) {
+        (16, true) => EntityData::Baby(false),
+        // 女巫的 index 17 是 `DATA_USING_ITEM`（BOOLEAN），不是僵尸的特殊类型。
+        //
+        // The witch's index 17 is `DATA_USING_ITEM` (a boolean), not the zombie special type.
+        (17, true) if kind == mc_bamboo_blocks::entity::mob::MobType::Witch => {
+            EntityData::WitchUsingItem(false)
+        }
+        (17, true) => EntityData::SpecialType(0),
+        (18, true) => EntityData::DrownedConverting(false),
+        _ => match index {
+            0 => EntityData::SharedFlags(0),
+            1 => EntityData::AirSupply(300),
+            3 => EntityData::CustomNameVisible(false),
+            4 => EntityData::Silent(false),
+            5 => EntityData::NoGravity(false),
+            6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
+            7 => EntityData::TicksFrozen(0),
+            8 => EntityData::LivingFlags(0),
+            9 => EntityData::Health(1.0),
+            15 => EntityData::MobFlags(0),
+            16 => EntityData::Baby(false),
+            17 => EntityData::AgeLocked(false),
+            entity_types::RABBIT_VARIANT
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Rabbit =>
+            {
+                EntityData::RabbitVariant(0)
+            }
+            entity_types::FOX_TYPE if kind == mc_bamboo_blocks::entity::mob::MobType::Fox => {
+                EntityData::FoxType(0)
+            }
+            entity_types::FOX_FLAGS if kind == mc_bamboo_blocks::entity::mob::MobType::Fox => {
+                EntityData::FoxFlags(0)
+            }
+            entity_types::FOX_TRUSTED_0 | entity_types::FOX_TRUSTED_1
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Fox =>
+            {
+                EntityData::FoxTrusted(index, None)
+            }
+            18 => EntityData::CowVariant(1),
+            19 => EntityData::CowSoundVariant(0),
+            // `CustomName` 是 optional component，空时写 boolean false。
+            // `CustomName` is an optional component; absent is a false boolean.
+            2 => EntityData::NoCustomName,
+            _ => EntityData::SharedFlags(0),
+        },
     }
 }
 
@@ -862,6 +1162,235 @@ fn default_data(index: u8) -> EntityData {
 /// Every non-default metadata item of a cow, in ascending index order. This is
 /// vanilla `SynchedEntityData.getNonDefaultValues`, including shared flags,
 /// health, the baby flag, variant and sound variant.
+/// 僵尸/尸壳的元数据。官方 `ClassTreeIdRegistry` 按类树导出：
+/// 16 `ZombieBaby`(BOOL)、17 `SpecialType`(INT)、18 `DrownedConverting`(BOOL)，
+/// 和牛的 `AgeableMob.Baby`(16) 不是同一个字段。
+fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    use mc_bamboo_protocol::packet::play::Pose;
+    let mut flags = 0u8;
+    if mob.on_fire {
+        flags |= 1;
+    }
+    if mob.glowing {
+        flags |= 1 << 6;
+    }
+    // `Entity.FLAG_SWIMMING` = 1<<4。
+    // `Entity.FLAG_SWIMMING` is 1<<4.
+    if mob.swimming {
+        flags |= 1 << 4;
+    }
+    let mut out = Vec::new();
+    if flags != 0 {
+        out.push(EntityData::SharedFlags(flags));
+    }
+    if mob.dying {
+        out.push(EntityData::Pose(Pose::Dying));
+    }
+    if mob.air_supply != 300 {
+        out.push(EntityData::AirSupply(mob.air_supply));
+    }
+    if let Some(name) = &mob.custom_name {
+        out.push(EntityData::CustomName(name.clone()));
+    }
+    if mob.custom_name_visible {
+        out.push(EntityData::CustomNameVisible(true));
+    }
+    if mob.silent {
+        out.push(EntityData::Silent(true));
+    }
+    if mob.no_gravity {
+        out.push(EntityData::NoGravity(true));
+    }
+    if mob.ticks_frozen != 0 {
+        out.push(EntityData::TicksFrozen(mob.ticks_frozen));
+    }
+    out.push(EntityData::Health(mob.health));
+    if mob.using_item_flags != 0 {
+        out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
+    let mut mob_flags = 0u8;
+    if mob.no_ai {
+        mob_flags |= 1;
+    }
+    if mob.left_handed {
+        mob_flags |= 2;
+    }
+    if mob.aggressive {
+        mob_flags |= 4;
+    }
+    if mob_flags != 0 {
+        out.push(EntityData::MobFlags(mob_flags));
+    }
+    // 骷髅的 `DATA_STRAY_CONVERSION_ID` 和沼骸的 `DATA_SHEARED` 都是 index 16 的 BOOLEAN，
+    // 和这里的 `Baby` 字节完全相同；变回假时走 `default_data_for_type` 的 16 号缺省。
+    // `Skeleton.DATA_STRAY_CONVERSION_ID` and `Bogged.DATA_SHEARED` are index-16 booleans,
+    // byte-identical to `Baby`; the reset goes through `default_data_for_type`.
+    if mob.zombie_baby || mob.skeleton_flag {
+        out.push(EntityData::Baby(true));
+    }
+    if mob.zombie_special_type != 0 {
+        out.push(EntityData::SpecialType(mob.zombie_special_type));
+    }
+    if mob.drowned_converting {
+        out.push(EntityData::DrownedConverting(true));
+    }
+    if mob.witch_using_item {
+        out.push(EntityData::WitchUsingItem(true));
+    }
+    if let Some(carried) = mob.enderman_carried {
+        out.push(EntityData::EndermanCarried(Some(carried.0 as i32)));
+    }
+    if mob.enderman_creepy {
+        out.push(EntityData::EndermanCreepy(true));
+    }
+    if mob.enderman_stared_at {
+        out.push(EntityData::EndermanStaredAt(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Creeper {
+        // `Creeper.defineSynchedData`：膨胀方向缺省 -1，带电和点燃缺省 false。
+        // `Creeper.defineSynchedData`: swell direction defaults to -1, the flags to false.
+        if mob.creeper_swell_dir != -1 {
+            out.push(EntityData::CreeperSwellDir(mob.creeper_swell_dir));
+        }
+        if mob.creeper_powered {
+            out.push(EntityData::CreeperPowered(true));
+        }
+        if mob.creeper_ignited {
+            out.push(EntityData::CreeperIgnited(true));
+        }
+    }
+    if mob.mob_type.climbs_walls() && mob.spider_flags != 0 {
+        // `Spider.DATA_FLAGS_ID`：缺省 0，攀爬位是第 0 位。
+        // `Spider.DATA_FLAGS_ID`: default 0, bit 0 is climbing.
+        out.push(EntityData::SpiderFlags(mob.spider_flags));
+    }
+    out
+}
+
+/// 狐狸自己的四项元数据，按 index 升序：品种 18、标志 19、两个信任格 20 和 21。
+///
+/// The four fox items in index order: variant, flags and two trusted slots.
+fn fox_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    let mut out = Vec::new();
+    if mob.fox_variant != 0 {
+        out.push(EntityData::FoxType(mob.fox_variant));
+    }
+    if mob.fox_flags != 0 {
+        out.push(EntityData::FoxFlags(mob.fox_flags));
+    }
+    for (index, trusted) in [entity_types::FOX_TRUSTED_0, entity_types::FOX_TRUSTED_1]
+        .into_iter()
+        .zip(mob.fox_trusted)
+    {
+        if trusted.is_some() {
+            out.push(EntityData::FoxTrusted(index, trusted));
+        }
+    }
+    out
+}
+
+/// 马科自己那几项的默认值：标志 0、花色 0、没箱子、力量 0。
+///
+/// Defaults of the equine items: no flags, variant 0, no chest, strength 0.
+fn equine_default_data(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types::{HORSE_FLAGS, LLAMA_STRENGTH, LLAMA_VARIANT};
+    match index {
+        HORSE_FLAGS => EntityData::HorseFlags(0),
+        LLAMA_STRENGTH => EntityData::LlamaStrength(0),
+        LLAMA_VARIANT => EntityData::LlamaVariant(0),
+        _ if kind == MobType::Horse => EntityData::HorseVariant(0),
+        _ => EntityData::HorseChest(false),
+    }
+}
+
+/// 马科在 `AgeableMob` 之后的元数据，按 index 升序：`AbstractHorse` 的标志，
+/// 然后马的花色，或者箱子马的箱子、羊驼的力量和毛色。
+///
+/// Equine metadata after `AgeableMob`, by ascending index: the `AbstractHorse`
+/// flags, then the horse variant, or the chest, llama strength and variant.
+fn equine_non_default_data(
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+    equine: &mc_bamboo_blocks::entity::mob::equine::EquinePublic,
+) -> Vec<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    let mut out = Vec::new();
+    if equine.flags != 0 {
+        out.push(EntityData::HorseFlags(equine.flags));
+    }
+    if kind == MobType::Horse {
+        if equine.variant != 0 {
+            out.push(EntityData::HorseVariant(equine.variant));
+        }
+        return out;
+    }
+    if equine.chested {
+        out.push(EntityData::HorseChest(true));
+    }
+    if kind == MobType::Llama {
+        if equine.strength != 0 {
+            out.push(EntityData::LlamaStrength(equine.strength));
+        }
+        if equine.variant != 0 {
+            out.push(EntityData::LlamaVariant(equine.variant));
+        }
+    }
+    out
+}
+
+/// 狼（含 `TamableAnimal`）各项元数据的默认值：标志 0、没有主人、不歪头、红项圈、
+/// 没有仇恨、苍白狼、经典叫声。
+///
+/// Wolf defaults, including the two `TamableAnimal` items.
+fn wolf_default_data(index: u8) -> Option<EntityData> {
+    use mc_bamboo_blocks::entity::mob::wolf;
+    Some(match index {
+        entity_types::TAME_FLAGS => EntityData::TameFlags(0),
+        entity_types::TAME_OWNER => EntityData::TameOwner(None),
+        entity_types::WOLF_INTERESTED => EntityData::WolfInterested(false),
+        entity_types::WOLF_COLLAR => EntityData::WolfCollar(WOLF_DEFAULT_COLLAR),
+        entity_types::WOLF_ANGER_END_TIME => EntityData::WolfAngerEndTime(-1),
+        entity_types::WOLF_VARIANT => EntityData::WolfVariant(wolf::default_variant()),
+        entity_types::WOLF_SOUND_VARIANT => {
+            EntityData::WolfSoundVariant(wolf::default_sound_variant())
+        }
+        _ => return None,
+    })
+}
+
+/// `Wolf.DEFAULT_COLLAR_COLOR`：`DyeColor.RED` 的 ID。
+const WOLF_DEFAULT_COLLAR: i32 = 14;
+
+/// 狼的非默认元数据，按 index 升序（18 到 24）。
+///
+/// The non-default wolf items in index order (18 to 24).
+fn wolf_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    use mc_bamboo_blocks::entity::mob::wolf;
+    let mut out = Vec::new();
+    if mob.tame_flags != 0 {
+        out.push(EntityData::TameFlags(mob.tame_flags));
+    }
+    if mob.owner.is_some() {
+        out.push(EntityData::TameOwner(mob.owner));
+    }
+    if mob.wolf_interested {
+        out.push(EntityData::WolfInterested(true));
+    }
+    if mob.wolf_collar != WOLF_DEFAULT_COLLAR {
+        out.push(EntityData::WolfCollar(mob.wolf_collar));
+    }
+    if mob.wolf_anger_end_time != -1 {
+        out.push(EntityData::WolfAngerEndTime(mob.wolf_anger_end_time));
+    }
+    if mob.wolf_variant != wolf::default_variant() {
+        out.push(EntityData::WolfVariant(mob.wolf_variant));
+    }
+    if mob.wolf_sound_variant != wolf::default_sound_variant() {
+        out.push(EntityData::WolfSoundVariant(mob.wolf_sound_variant));
+    }
+    out
+}
+
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
@@ -874,14 +1403,13 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.on_fire {
         flags |= 1;
     }
+    if mob.sprinting {
+        flags |= ENTITY_FLAG_SPRINTING;
+    }
     if mob.glowing {
         flags |= 1 << 6;
     }
-    let _ = (
-        ENTITY_FLAG_FALL_FLYING,
-        ENTITY_FLAG_SHIFT_KEY_DOWN,
-        ENTITY_FLAG_SPRINTING,
-    );
+    let _ = (ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN);
     let mut out = Vec::new();
     if flags != 0 {
         out.push(EntityData::SharedFlags(flags));
@@ -890,6 +1418,23 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         out.push(EntityData::Pose(
             mc_bamboo_protocol::packet::play::Pose::Dying,
         ));
+    } else if mob.goat.long_jumping {
+        out.push(EntityData::Pose(
+            mc_bamboo_protocol::packet::play::Pose::LongJumping,
+        ));
+    } else if mob.ocelot_crouching || mob.cat.crouching {
+        out.push(EntityData::Pose(
+            mc_bamboo_protocol::packet::play::Pose::Crouching,
+        ));
+    } else if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        use mc_bamboo_blocks::entity::mob::frog::Pose as FrogPose;
+        use mc_bamboo_protocol::packet::play::Pose;
+        match mob.frog.pose {
+            FrogPose::Standing => {}
+            FrogPose::Croaking => out.push(EntityData::Pose(Pose::Croaking)),
+            FrogPose::LongJumping => out.push(EntityData::Pose(Pose::LongJumping)),
+            FrogPose::UsingTongue => out.push(EntityData::Pose(Pose::UsingTongue)),
+        }
     }
     if mob.air_supply != 300 {
         out.push(EntityData::AirSupply(mob.air_supply));
@@ -912,12 +1457,21 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     // `LivingEntity` 的 `DATA_LIVING_ENTITY_FLAGS` 恒为 0，`DATA_HEALTH_ID` 默认 1。
     // The living flags are always 0 and health defaults to 1.
     out.push(EntityData::Health(mob.health));
+    if mob.using_item_flags != 0 {
+        out.push(EntityData::LivingFlags(mob.using_item_flags));
+    }
     let mut mob_flags = 0u8;
     if mob.no_ai {
         mob_flags |= 1;
     }
     if mob.left_handed {
         mob_flags |= 2;
+    }
+    // `Mob.setAggressive` 也写这一位，官方对所有生物都同步（狼、狐狸用近战目标时置位）。
+    // `Mob.setAggressive` writes this bit too, for every mob (set while a wolf or fox
+    // melee goal runs).
+    if mob.aggressive {
+        mob_flags |= 4;
     }
     if mob_flags != 0 {
         out.push(EntityData::MobFlags(mob_flags));
@@ -928,15 +1482,402 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     if mob.age_locked {
         out.push(EntityData::AgeLocked(true));
     }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Wolf {
+        // 狼的 18、19 是驯服标志和主人，不是牛的花色和叫声。
+        // A wolf's 18 and 19 are the taming items, not the cow variants.
+        out.extend(wolf_non_default_data(mob));
+        return out;
+    }
+    if let Some(equine) = &mob.equine {
+        out.extend(equine_non_default_data(mob.mob_type, equine));
+        return out;
+    }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.
-    if mob.variant.registry_id() != 1 {
-        out.push(EntityData::CowVariant(mob.variant.registry_id()));
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Rabbit && mob.rabbit_variant != 0 {
+        out.push(EntityData::RabbitVariant(mob.rabbit_variant));
     }
-    if mob.sound_variant.registry_id() != 0 {
-        out.push(EntityData::CowSoundVariant(mob.sound_variant.registry_id()));
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Fox {
+        out.extend(fox_non_default_data(mob));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Armadillo {
+        // 犰狳只有 `ARMADILLO_STATE` 一项，缺省 `IDLE`（0）。
+        // Armadillos only add `ARMADILLO_STATE`, `IDLE` (0) by default.
+        if mob.armadillo_state != 0 {
+            out.push(EntityData::ArmadilloState(mob.armadillo_state));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        // 青蛙多两项：品种（缺省温带）和舌头目标（缺省空）。
+        // Frogs add two: the variant (temperate by default) and the tongue target (empty
+        // by default).
+        if mob.frog.variant != mc_bamboo_blocks::entity::mob::frog::Variant::default() {
+            out.push(EntityData::FrogVariant(mob.frog.variant.network_id()));
+        }
+        if mob.frog.tongue_target.is_some() {
+            out.push(EntityData::FrogTongueTarget(mob.frog.tongue_target));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Tadpole {
+        // 蝌蚪只有鱼的 `FROM_BUCKET`（从来不写）和自己的 `AGE_LOCKED`（上面已经放了）。
+        // Tadpoles only have the fish `FROM_BUCKET` (never written) and their own
+        // `AGE_LOCKED`, pushed above.
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Goat {
+        // 山羊的 18、19、20 是尖叫和两只角，缺省假、真、真。
+        // A goat's 18, 19 and 20 are screaming and the two horns: false, true, true.
+        if mob.goat.screaming {
+            out.push(EntityData::GoatScreaming(true));
+        }
+        if !mob.goat.left_horn {
+            out.push(EntityData::GoatLeftHorn(false));
+        }
+        if !mob.goat.right_horn {
+            out.push(EntityData::GoatRightHorn(false));
+        }
+        return out;
+    }
+    if fish_non_default_data(mob, &mut out) {
+        return out;
+    }
+    if farm_non_default_data(mob, &mut out) {
+        return out;
+    }
+    if water_mob_non_default_data(mob, &mut out) {
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Pig {
+        let variant = mob.variant.name();
+        if variant != "minecraft:temperate" {
+            out.push(EntityData::PigVariant(pig_variant_id(variant)));
+        }
+        let sound = mob.pig_sound_variant.registry_id();
+        if sound != pig_sound_variant_default() {
+            out.push(EntityData::PigSoundVariant(sound));
+        }
+    } else {
+        if mob.variant.registry_id() != 1 {
+            out.push(EntityData::CowVariant(mob.variant.registry_id()));
+        }
+        if mob.sound_variant.registry_id() != 0 {
+            out.push(EntityData::CowSoundVariant(mob.sound_variant.registry_id()));
+        }
     }
     out
+}
+
+/// 玩家音源的音效包（挤奶、染色、剪毛）。
+///
+/// A player-category sound packet (milking, dyeing, shearing).
+fn player_sound(sound: &str, position: mc_bamboo_core::Vec3, seed: i64) -> EventPacket {
+    EventPacket::Sound(mc_bamboo_protocol::packet::play::Sound {
+        sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
+        inline: None,
+        source: mc_bamboo_data::sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    })
+}
+
+/// 羊和鸡的默认实体数据：羊毛 0，鸡 temperate / classic。
+///
+/// Sheep and chicken defaults: wool 0, chicken temperate / classic.
+fn farm_default_data(
+    index: u8,
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+) -> Option<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as facts;
+    match (kind, index) {
+        (MobType::Sheep, facts::SHEEP_WOOL) => Some(EntityData::SheepWool(0)),
+        (MobType::Slime, facts::CUBE_MOB_SIZE) => Some(EntityData::CubeMobSize(1)),
+        (MobType::Mooshroom, facts::MOOSHROOM_TYPE) => Some(EntityData::MooshroomType(0)),
+        (MobType::PolarBear, facts::POLAR_BEAR_STANDING) => {
+            Some(EntityData::PolarBearStanding(false))
+        }
+        (MobType::Panda, facts::PANDA_UNHAPPY) => Some(EntityData::PandaUnhappy(0)),
+        (MobType::Panda, facts::PANDA_SNEEZE) => Some(EntityData::PandaSneeze(0)),
+        (MobType::Panda, facts::PANDA_EAT) => Some(EntityData::PandaEat(0)),
+        (MobType::Panda, facts::PANDA_MAIN_GENE) => Some(EntityData::PandaMainGene(0)),
+        (MobType::Panda, facts::PANDA_HIDDEN_GENE) => Some(EntityData::PandaHiddenGene(0)),
+        (MobType::Panda, facts::PANDA_FLAGS) => Some(EntityData::PandaFlags(0)),
+        (MobType::Ocelot, facts::OCELOT_TRUSTING) => Some(EntityData::OcelotTrusting(false)),
+        (MobType::Cat, facts::TAME_FLAGS) => Some(EntityData::TameFlags(0)),
+        (MobType::Cat, facts::TAME_OWNER) => Some(EntityData::TameOwner(None)),
+        (MobType::Cat, facts::CAT_VARIANT) => Some(EntityData::CatVariant(
+            mc_bamboo_blocks::entity::mob::cat::default_variant(),
+        )),
+        (MobType::Cat, facts::CAT_IS_LYING) => Some(EntityData::CatIsLying(false)),
+        (MobType::Cat, facts::CAT_RELAX_STATE_ONE) => Some(EntityData::CatRelaxStateOne(false)),
+        (MobType::Cat, facts::CAT_COLLAR) => Some(EntityData::CatCollar(
+            mc_bamboo_blocks::entity::mob::cat::DEFAULT_COLLAR,
+        )),
+        (MobType::Cat, facts::CAT_SOUND_VARIANT) => Some(EntityData::CatSoundVariant(
+            mc_bamboo_blocks::entity::mob::cat::default_sound_variant(),
+        )),
+        (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
+            Some(EntityData::GlowSquidDarkTicks(0))
+        }
+        (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
+            registry_index(chicken_variants(), "minecraft:temperate"),
+        )),
+        (MobType::Chicken, facts::CHICKEN_SOUND_VARIANT) => Some(EntityData::ChickenSoundVariant(
+            registry_index(chicken_sound_variants(), "minecraft:classic"),
+        )),
+        _ => None,
+    }
+}
+
+/// 鱼的默认实体数据：不在桶里、鲑鱼 medium、热带鱼 KOB 白/白、河豚不鼓。
+///
+/// Fish defaults: not from a bucket, salmon medium, tropical KOB white/white,
+/// pufferfish deflated.
+fn fish_default_data(
+    index: u8,
+    kind: mc_bamboo_blocks::entity::mob::MobType,
+) -> Option<EntityData> {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as facts;
+    match (kind, index) {
+        (
+            MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish,
+            facts::FISH_FROM_BUCKET,
+        ) => Some(EntityData::FishFromBucket(false)),
+        (MobType::Salmon, facts::SALMON_VARIANT) => Some(EntityData::SalmonVariant(1)),
+        (MobType::TropicalFish, facts::TROPICAL_FISH_VARIANT) => {
+            Some(EntityData::TropicalFishVariant(0))
+        }
+        (MobType::Pufferfish, facts::PUFFERFISH_PUFF_STATE) => {
+            Some(EntityData::PufferfishPuffState(0))
+        }
+        _ => None,
+    }
+}
+
+/// 海豚 / 美西螈偏离默认值的实体数据；不是这两种时返回假。
+///
+/// Dolphin / axolotl data that differs from the defaults; false for other kinds.
+fn water_mob_non_default_data(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    out: &mut Vec<EntityData>,
+) -> bool {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    match mob.mob_type {
+        MobType::Dolphin => {
+            if mob.dolphin_got_fish {
+                out.push(EntityData::DolphinGotFish(true));
+            }
+            // `MOISTNESS_LEVEL` 的默认 2400；只有偏离时才发。
+            // `MOISTNESS_LEVEL` defaults to 2400; only a deviation is sent.
+            if mob.dolphin_moistness != 2400 {
+                out.push(EntityData::DolphinMoistness(mob.dolphin_moistness));
+            }
+            true
+        }
+        MobType::Axolotl => {
+            // `DATA_VARIANT` 默认 0（lucy）。
+            // `DATA_VARIANT` defaults to 0 (lucy).
+            if mob.axolotl_variant != 0 {
+                out.push(EntityData::AxolotlVariant(mob.axolotl_variant));
+            }
+            if mob.axolotl_playing_dead {
+                out.push(EntityData::AxolotlPlayingDead(true));
+            }
+            if mob.axolotl_from_bucket {
+                out.push(EntityData::AxolotlFromBucket(true));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 鱼偏离默认的实体数据。
+///
+/// Fish data that differs from the defaults.
+fn fish_non_default_data(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    out: &mut Vec<EntityData>,
+) -> bool {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    if !matches!(
+        mob.mob_type,
+        MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish
+    ) {
+        return false;
+    }
+    if mob.fish_from_bucket {
+        out.push(EntityData::FishFromBucket(true));
+    }
+    match mob.mob_type {
+        MobType::Salmon if mob.fish_variant != 1 => {
+            out.push(EntityData::SalmonVariant(mob.fish_variant));
+        }
+        MobType::TropicalFish if mob.fish_variant != 0 => {
+            out.push(EntityData::TropicalFishVariant(mob.fish_variant));
+        }
+        MobType::Pufferfish if mob.puff_state != 0 => {
+            out.push(EntityData::PufferfishPuffState(mob.puff_state));
+        }
+        _ => {}
+    }
+    true
+}
+
+/// 羊和鸡偏离默认的实体数据；不是这两种时返回假。
+///
+/// Sheep and chicken data that differs from the defaults; false for other kinds.
+fn farm_non_default_data(
+    mob: &mc_bamboo_blocks::entity::mob::MobPublic,
+    out: &mut Vec<EntityData>,
+) -> bool {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    match mob.mob_type {
+        MobType::Sheep => {
+            if mob.wool != 0 {
+                out.push(EntityData::SheepWool(mob.wool));
+            }
+            true
+        }
+        // `AbstractCubeMob.ID_SIZE` 缺省是 1。
+        // `AbstractCubeMob.ID_SIZE` defaults to 1.
+        MobType::Slime => {
+            if mob.cube_size != 1 {
+                out.push(EntityData::CubeMobSize(mob.cube_size));
+            }
+            true
+        }
+        MobType::Mooshroom => {
+            if mob.mooshroom_brown {
+                out.push(EntityData::MooshroomType(1));
+            }
+            true
+        }
+        MobType::PolarBear => {
+            if mob.polar_bear_standing {
+                out.push(EntityData::PolarBearStanding(true));
+            }
+            true
+        }
+        MobType::Panda => {
+            let panda = &mob.panda;
+            if panda.unhappy_counter != 0 {
+                out.push(EntityData::PandaUnhappy(panda.unhappy_counter));
+            }
+            if panda.sneeze_counter != 0 {
+                out.push(EntityData::PandaSneeze(panda.sneeze_counter));
+            }
+            if panda.eat_counter != 0 {
+                out.push(EntityData::PandaEat(panda.eat_counter));
+            }
+            if panda.main_gene != 0 {
+                out.push(EntityData::PandaMainGene(panda.main_gene));
+            }
+            if panda.hidden_gene != 0 {
+                out.push(EntityData::PandaHiddenGene(panda.hidden_gene));
+            }
+            if panda.flags != 0 {
+                out.push(EntityData::PandaFlags(panda.flags));
+            }
+            true
+        }
+        MobType::Ocelot => {
+            if mob.ocelot_trusting {
+                out.push(EntityData::OcelotTrusting(true));
+            }
+            true
+        }
+        MobType::Cat => {
+            use mc_bamboo_blocks::entity::mob::cat;
+            if mob.tame_flags != 0 {
+                out.push(EntityData::TameFlags(mob.tame_flags));
+            }
+            if mob.owner.is_some() {
+                out.push(EntityData::TameOwner(mob.owner));
+            }
+            if mob.cat.variant != cat::default_variant() {
+                out.push(EntityData::CatVariant(mob.cat.variant));
+            }
+            if mob.cat.lying {
+                out.push(EntityData::CatIsLying(true));
+            }
+            if mob.cat.relax_state_one {
+                out.push(EntityData::CatRelaxStateOne(true));
+            }
+            if mob.cat.collar != cat::DEFAULT_COLLAR {
+                out.push(EntityData::CatCollar(mob.cat.collar));
+            }
+            if mob.cat.sound_variant != cat::default_sound_variant() {
+                out.push(EntityData::CatSoundVariant(mob.cat.sound_variant));
+            }
+            true
+        }
+        MobType::Chicken => {
+            let variant = registry_index(chicken_variants(), mob.variant.name());
+            if variant != registry_index(chicken_variants(), "minecraft:temperate") {
+                out.push(EntityData::ChickenVariant(variant));
+            }
+            let sound = mob.chicken_sound_variant.registry_id();
+            if sound != registry_index(chicken_sound_variants(), "minecraft:classic") {
+                out.push(EntityData::ChickenSoundVariant(sound));
+            }
+            true
+        }
+        // 鱿鱼没有花色；发光鱿鱼多一项变暗计时。
+        // Squid have no variant; glow squid add the dark countdown.
+        MobType::Squid | MobType::GlowSquid => {
+            if mob.dark_ticks != 0 {
+                out.push(EntityData::GlowSquidDarkTicks(mob.dark_ticks));
+            }
+            true
+        }
+        MobType::Turtle => {
+            if mob.turtle_has_egg {
+                out.push(EntityData::TurtleHasEgg(true));
+            }
+            if mob.turtle_laying_egg {
+                out.push(EntityData::TurtleLayingEgg(true));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn chicken_variants() -> &'static [&'static str] {
+    mc_bamboo_data::component_registries::registry_names::CHICKEN_VARIANT
+}
+
+fn chicken_sound_variants() -> &'static [&'static str] {
+    mc_bamboo_data::component_registries::registry_names::CHICKEN_SOUND_VARIANT
+}
+
+fn registry_index(names: &[&str], name: &str) -> i32 {
+    names
+        .iter()
+        .position(|entry| *entry == name)
+        .expect("variant in the registry") as i32
+}
+
+fn pig_variant_id(name: &str) -> i32 {
+    mc_bamboo_data::component_registries::registry_names::PIG_VARIANT
+        .iter()
+        .position(|entry| *entry == name)
+        .expect("pig variant in the registry") as i32
+}
+
+fn pig_sound_variant_default() -> i32 {
+    mc_bamboo_data::component_registries::registry_names::PIG_SOUND_VARIANT
+        .iter()
+        .position(|entry| *entry == "minecraft:classic")
+        .expect("classic pig sound variant in the registry") as i32
 }
 
 /// 把这一刻的生物事件换成「包 ID + 包体」字节，按事件发生顺序。
@@ -953,7 +1894,7 @@ pub fn event_packets(
     let mut out = Vec::new();
     for (id, mob_events) in events {
         for event in mob_events {
-            out.push(event_packet(*id, event, &mut sound_seed).body());
+            out.extend(event_packet(*id, event, &mut sound_seed).body());
         }
     }
     out
@@ -973,13 +1914,25 @@ enum EventPacket {
     ///
     /// Sent to the players within the sound's range (vanilla `PlayerList.broadcast`).
     Sound(mc_bamboo_protocol::packet::play::Sound),
+    /// `ServerLevel.sendParticles`：发给所在方块中心离粒子不到 32 格的玩家。
+    ///
+    /// `ServerLevel.sendParticles`: sent to the players whose block centre is within 32
+    /// blocks of the particle.
+    Particles {
+        body: Vec<u8>,
+        position: mc_bamboo_core::Vec3,
+    },
+    /// 没有包（`set_equipment` 至少要一个槽）。
+    Nothing,
 }
 
 impl EventPacket {
-    fn body(&self) -> Vec<u8> {
+    fn body(&self) -> Option<Vec<u8>> {
         match self {
-            Self::Tracking(body) => body.clone(),
-            Self::Sound(sound) => packet_body(sound),
+            Self::Tracking(body) => Some(body.clone()),
+            Self::Sound(sound) => Some(packet_body(sound)),
+            Self::Particles { body, .. } => Some(body.clone()),
+            Self::Nothing => None,
         }
     }
 }
@@ -1008,26 +1961,61 @@ fn event_packet(
             entity_id: id,
             event: 18,
         })),
-        MobEvent::MilkSound { position } => EventPacket::Sound(Sound {
-            sound: i32::from(mc_bamboo_data::sounds::sound_event(
-                "minecraft:entity.cow.milk",
-            )),
-            inline: None,
-            source: mc_bamboo_data::sounds::PLAYERS,
-            x: position.x,
-            y: position.y,
-            z: position.z,
-            volume: 1.0,
-            pitch: 1.0,
-            seed: sound_seed(),
-        }),
-        MobEvent::Damage { kind, attacker } => {
+        MobEvent::EntityEvent { event } => EventPacket::Tracking(packet_body(&EntityEvent {
+            entity_id: id,
+            event: *event,
+        })),
+        MobEvent::Equipment(changes) => {
+            let slots: Vec<_> = changes.iter().map(|(slot, stack)| (*slot, stack)).collect();
+            match mc_bamboo_protocol::packet::play::SetEquipment::new(id, &slots) {
+                Some(packet) => EventPacket::Tracking(packet_body(&packet)),
+                None => EventPacket::Nothing,
+            }
+        }
+        MobEvent::MilkSound { position } => {
+            player_sound("minecraft:entity.cow.milk", *position, sound_seed())
+        }
+        MobEvent::PlayerSound { sound, position } => player_sound(sound, *position, sound_seed()),
+        MobEvent::Particles {
+            particle,
+            position,
+            offset,
+            speed,
+            count,
+        } => {
+            // 简单粒子的 `ParticleTypes.STREAM_CODEC` 只有类型 ID。
+            // A simple particle's `ParticleTypes.STREAM_CODEC` is the type id alone.
+            let mut options = Vec::new();
+            mc_bamboo_protocol::codec::write_varint(&mut options, *particle);
+            EventPacket::Particles {
+                body: packet_body(&mc_bamboo_protocol::packet::play::LevelParticles {
+                    options: &options,
+                    override_limiter: false,
+                    always_show: false,
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    x_dist: offset.x as f32,
+                    y_dist: offset.y as f32,
+                    z_dist: offset.z as f32,
+                    max_speed: *speed,
+                    count: *count,
+                    randomization: mc_bamboo_protocol::packet::play::Randomization::Default,
+                }),
+                position: *position,
+            }
+        }
+        MobEvent::Damage {
+            kind,
+            attacker,
+            direct,
+        } => {
             let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
             EventPacket::Tracking(packet_body(&DamageEvent {
                 entity_id: id,
                 damage_type,
                 source_cause: *attacker,
-                source_direct: *attacker,
+                source_direct: direct.or(*attacker),
                 position: None,
             }))
         }
@@ -1036,16 +2024,22 @@ fn event_packet(
             volume,
             pitch,
             position,
+            hostile,
+            seed,
         } => EventPacket::Sound(Sound {
             sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
             inline: None,
-            source: mc_bamboo_data::sounds::NEUTRAL,
+            source: if *hostile {
+                mc_bamboo_data::sounds::HOSTILE
+            } else {
+                mc_bamboo_data::sounds::NEUTRAL
+            },
             x: position.x,
             y: position.y,
             z: position.z,
             volume: *volume,
             pitch: *pitch,
-            seed: sound_seed(),
+            seed: seed.unwrap_or_else(sound_seed),
         }),
     }
 }
@@ -1082,8 +2076,36 @@ fn send_mob_events(
                     }
                 }
                 EventPacket::Sound(sound) => crate::interaction::send_sound(region, None, &sound),
+                EventPacket::Particles { body, position } => {
+                    send_particles(region, &body, position)
+                }
+                EventPacket::Nothing => {}
             }
         }
+    }
+}
+
+/// `ServerLevel.sendParticles(player, false, x, y, z, packet)`：玩家所在方块的中心离粒子
+/// 不到 32 格才发（`BlockPos.closerToCenterThan`）。
+///
+/// `ServerLevel.sendParticles(player, false, x, y, z, packet)`: only players whose block
+/// centre is within 32 blocks get the packet (`BlockPos.closerToCenterThan`).
+fn send_particles(region: &mut Region, body: &[u8], position: mc_bamboo_core::Vec3) {
+    let frames = frame_from_body(body);
+    let near: Vec<_> = region
+        .players
+        .iter()
+        .filter(|(_, player)| {
+            let block = mc_bamboo_core::BlockPos::containing(player.position());
+            let dx = f64::from(block.x) + 0.5 - position.x;
+            let dy = f64::from(block.y) + 0.5 - position.y;
+            let dz = f64::from(block.z) + 0.5 - position.z;
+            dx * dx + dy * dy + dz * dz < 32.0 * 32.0
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for player in near {
+        region.links.send_frames(player, &frames);
     }
 }
 
@@ -1347,6 +2369,19 @@ fn entity_uuid(id: i32) -> Uuid {
 /// Once per tick, vanilla `ServerEntity.sendChanges`. All decisions live in
 /// [`TrackedEntity::step`]; this wrapper only frames the packets and sends them.
 fn send_changes(snapshot: &Snapshot, tracked: &mut TrackedEntity, links: &mut Links) {
+    // 官方 `ServerEntity.sendChanges` 先比乘客名单，再发位置和元数据。
+    // Vanilla `ServerEntity.sendChanges` compares the passengers first, then position and metadata.
+    if snapshot.passengers != tracked.last_passengers {
+        let body = packet_body(&SetPassengers {
+            vehicle: snapshot.id,
+            passengers: &snapshot.passengers,
+        });
+        let frames = frame_from_body(&body);
+        for &viewer in &tracked.seen_by {
+            links.send_frames(viewer, &frames);
+        }
+        tracked.last_passengers.clone_from(&snapshot.passengers);
+    }
     let needs_sync = snapshot.needs_sync;
     let sync_velocity = snapshot.sync_velocity;
     let mut frames = Vec::new();

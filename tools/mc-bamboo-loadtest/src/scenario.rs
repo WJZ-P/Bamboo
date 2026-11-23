@@ -136,6 +136,12 @@ const ROAM_TIME_EVERY: i64 = 1200;
 const ROAM_WEATHER_EVERY: i64 = 2400;
 const ROAM_SETBLOCK_EVERY: i64 = 1800;
 const ROAM_GAMERULE_EVERY: i64 = 3000;
+/// `islands-roam` 从控制台改一名假玩家的游戏模式、给他加效果的周期（刻）。
+///
+/// How often `islands-roam` changes a bot's game mode and gives it an
+/// effect from the console (ticks).
+const ROAM_GAMEMODE_EVERY: i64 = 700;
+const ROAM_EFFECT_EVERY: i64 = 500;
 /// `islands-roam` 每隔这么多刻从控制台发一次 `defaultgamemode creative`（要整个世界的命令）。
 /// 第一刻也发一次：假玩家进服时就是创造模式，飞着赶路不会因为「悬空太久」被踢。
 ///
@@ -367,6 +373,8 @@ struct Plan {
     placed: BTreeSet<String>,
     /// `islands-roam` 已经发过第一条 `defaultgamemode creative`。
     roam_started: bool,
+    /// `islands-roam` 已经从控制台 `op` 过的假玩家。
+    opped: BTreeSet<String>,
     forced: bool,
     installed: bool,
 }
@@ -420,6 +428,7 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
             .unwrap_or(0),
         placed: BTreeSet::new(),
         roam_started: false,
+        opped: BTreeSet::new(),
         forced: false,
         installed: false,
     });
@@ -814,6 +823,24 @@ fn roam_actions(world: &mut BenchWorld<'_>, plan: &mut Plan) {
         let name = &names[pick(1, names.len())];
         let (x, z) = roam_camp_spot(pick(2, ROAM_CAMPS));
         let _ = world.teleport_player(name, Vec3::new(x, FLAT_SURFACE_Y, z));
+    }
+    // 假玩家自己发的 `gamemode` / `kill @s` / `effect` 要管理员：新名字各 `op` 一次。
+    // Bots' own `gamemode` / `kill @s` / `effect` need operators: op each new name once.
+    for name in &names {
+        if plan.opped.insert(name.clone()) {
+            world.console_command(&format!("op {name}"));
+        }
+    }
+    if now % ROAM_GAMEMODE_EVERY == 0 && !names.is_empty() {
+        // 改别的岛上的人的模式（他本来就是创造，不改状态）：借他脚下那格的岛。
+        // Another island's player (already creative, so nothing changes):
+        // borrows the island under their feet.
+        let name = &names[pick(6, names.len())];
+        world.console_command(&format!("gamemode creative {name}"));
+    }
+    if now % ROAM_EFFECT_EVERY == 0 && !names.is_empty() {
+        let name = &names[pick(7, names.len())];
+        world.console_command(&format!("effect give {name} minecraft:speed 5"));
     }
     if now % ROAM_TP_EVERY == 0 && names.len() >= 2 {
         let a = pick(3, names.len());

@@ -1153,6 +1153,14 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // Action-bar text and the command-block editor are not part of a block case.
             | Effect::Overlay { .. }
             | Effect::OpenCommandBlock { .. }
+            // 生物对玩家的伤害意图不属于方块题，游戏层单独处理。
+            | Effect::HurtPlayer { .. }
+            | Effect::IgnitePlayer { .. }
+            // 药水箭给玩家的效果不属于方块题。
+            //
+            // Potion-arrow effects on players are not part of a block case.
+            | Effect::PlayerEffect { .. }
+            | Effect::HealPlayer { .. }
             | Effect::SleepInBed { .. } => None,
         })
         .collect()
@@ -1266,6 +1274,10 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::CampfireChanged { .. }
             | Effect::Overlay { .. }
             | Effect::OpenCommandBlock { .. }
+            | Effect::HurtPlayer { .. }
+            | Effect::IgnitePlayer { .. }
+            | Effect::PlayerEffect { .. }
+            | Effect::HealPlayer { .. }
             | Effect::SleepInBed { .. } => {}
         }
     }

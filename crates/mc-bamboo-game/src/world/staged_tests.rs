@@ -4,14 +4,14 @@
 //! `worldgen.rs` / `gen-world` 测过纯函数；这一条把两者接起来，确认计算池线程上
 //! 调 `OverworldGenerator`、世界线程按回执交付的盒子里是噪声地形而不是超平坦模板，
 //! 并且生成期光照（`light` 阶段算出的天空光 + 方块光、`isLightOn=true`）真的落进
-//! 交付盒子，1 线程和 4 线程逐格相同。
+//! 交付盒子，1、2、4、8 线程逐格相同。
 //!
 //! End-to-end: a `normal` world delivers real terrain through the Director's
 //! `Staged` pipeline + compute pool. `director/tests.rs` covers the state
 //! machine and `worldgen.rs`/`gen-world` cover the pure functions; this wires
 //! them together and checks the delivered box is noise terrain, that the
 //! generation-time sky + block light (`isLightOn=true`) is baked in, and that
-//! 1-thread and 4-thread results are cell-by-cell identical.
+//! 1-, 2-, 4- and 8-thread results are cell-by-cell identical.
 
 use std::{
     collections::BTreeMap,
@@ -26,6 +26,66 @@ use crate::{
     world::{World, WorldConfig},
     world_options::{LevelType, WorldGenConfig},
 };
+
+/// 单个计算任务毫无进展的停滞上限：只要池子还在不断吐回执就不算超时，
+/// 避免机器满载时按总墙钟超时误判。
+///
+/// Stall timeout when no single compute reply arrives: as long as the pool
+/// keeps delivering replies the test does not time out under heavy CPU load.
+const COMPUTE_STALL_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// 每个等待阶段的防挂死底线：待办队列非空不代表真正推进了。
+///
+/// Final watchdog for each wait phase: a nonempty backlog does not prove progress.
+const PIPELINE_WATCHDOG: Duration = Duration::from_secs(900);
+
+/// 池子里有在途任务时阻塞等至少一条回执，避免主线程和岛线程空转抢占计算线程。
+///
+/// While compute jobs are in flight, block until at least one pool reply
+/// arrives so the test and island threads do not busy-spin and starve workers.
+fn wait_for_compute_progress(
+    world: &mut World,
+    last_progress: &mut Instant,
+    deadline: Instant,
+    context: &str,
+) {
+    while world.master.host.compute_in_pool() > 0 {
+        check_pipeline_deadline(deadline, context);
+        if world
+            .master
+            .host
+            .wait_for_compute_reply(Duration::from_millis(100))
+        {
+            *last_progress = Instant::now();
+            return;
+        }
+        assert!(
+            last_progress.elapsed() < COMPUTE_STALL_TIMEOUT,
+            "{context}: no compute progress for {COMPUTE_STALL_TIMEOUT:?}"
+        );
+    }
+}
+
+/// 每个等待阶段的绝对防挂死底线：超过就失败，而不是无限等下去。
+///
+/// Absolute per-phase hang guard: fail past the deadline instead of looping forever.
+fn check_pipeline_deadline(deadline: Instant, context: &str) {
+    assert!(
+        Instant::now() < deadline,
+        "{context}: pipeline watchdog expired after {PIPELINE_WATCHDOG:?}"
+    );
+}
+
+/// 区块平面是否仍有待交付 / 待处理的计算工作。
+///
+/// Whether the chunk plane still has pending compute or delivery work.
+fn has_pending_work(world: &World) -> bool {
+    let (deliveries, reclaims) = world.islands.mailbox.backlog();
+    world.master.host.compute_in_flight() > 0
+        || world.master.host.posted_len() > 0
+        || deliveries > 0
+        || reclaims > 0
+}
 
 /// 起一个 normal 世界、强制加载原点区块，等它交付，再确认里面是真正的噪声地形。
 ///
@@ -44,6 +104,9 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
         // 显式给 1 条计算线程，走 `ChunkJob` 在池子线程上调 `OverworldGenerator`。
         // One explicit worker: `ChunkJob` calls `OverworldGenerator` on a pool thread.
         chunk_worker_threads: 1,
+        // 避免机器极忙时默认 30 s 的岛判死时限误杀测试里的家岛。
+        // Avoid tripping the default 30 s dead-island timeout on a busy host.
+        island_dead_timeout: Duration::from_secs(300),
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
@@ -53,19 +116,32 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
         forced: true,
     });
 
-    // 交付每刻有预算，池子回执下一刻才收；循环到区块到位，给足时间。
+    // 交付每刻有预算，池子回执下一刻才收；池子在算时阻塞等回执，不空转抢 CPU。
     // Delivery has a per-tick budget and pool replies arrive a tick later;
-    // loop until the chunk lands.
-    let deadline = Instant::now() + Duration::from_secs(600);
+    // wait on pool replies while workers run instead of busy-spinning.
+    let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
+    let mut idle_ticks = 0_u32;
     loop {
         let _ = world.tick();
         if world.islands.region.chunks.is_loaded(origin) {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "staged pipeline did not deliver the origin chunk in 600 s"
-        );
+        let context = "staged pipeline waiting for origin chunk";
+        check_pipeline_deadline(deadline, context);
+        if world.master.host.compute_in_pool() > 0 {
+            idle_ticks = 0;
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, context);
+        } else if has_pending_work(&world) {
+            last_progress = Instant::now();
+            idle_ticks = 0;
+        } else {
+            idle_ticks += 1;
+            assert!(
+                idle_ticks < 20,
+                "staged pipeline went idle before delivering the origin chunk"
+            );
+        }
     }
 
     // 生成的盒子 `untouched=false`，超平坦模板是 `true`：确认交付的不是模板。
@@ -119,6 +195,7 @@ fn generated_cells_with_seed(
             ..WorldGenConfig::default()
         },
         chunk_worker_threads: threads,
+        island_dead_timeout: Duration::from_secs(300),
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
@@ -126,14 +203,18 @@ fn generated_cells_with_seed(
     // Compare the assembled FULL output before promotion consumes its generation marks.
     world.load_chunks_unpaced(positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
 
-    let deadline = Instant::now() + Duration::from_secs(900);
+    let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
+    let context = format!("normal-world generation (threads={threads})");
     let mut quiet = 0;
+    let mut idle_unloaded_ticks = 0_u32;
     loop {
         let _ = world.tick();
         let all_loaded = positions
             .iter()
             .all(|pos| world.islands.region.chunks.is_loaded(*pos));
         let idle = world.master.host.compute_in_flight() == 0;
+        check_pipeline_deadline(deadline, &context);
         if all_loaded && idle {
             quiet += 1;
             // 池子空了以后再跑几刻，让待办任务和世界线程的增量合并都落地。
@@ -142,13 +223,22 @@ fn generated_cells_with_seed(
             if quiet >= 4 {
                 break;
             }
-        } else {
-            quiet = 0;
+            continue;
         }
-        assert!(
-            Instant::now() < deadline,
-            "normal-world generation did not settle in 900 s (threads={threads})"
-        );
+        quiet = 0;
+        if world.master.host.compute_in_pool() > 0 {
+            idle_unloaded_ticks = 0;
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, &context);
+        } else if has_pending_work(&world) {
+            last_progress = Instant::now();
+            idle_unloaded_ticks = 0;
+        } else {
+            idle_unloaded_ticks += 1;
+            assert!(
+                idle_unloaded_ticks < 40,
+                "normal-world generation went idle before delivering all chunks (threads={threads})"
+            );
+        }
     }
 
     let capacity = WORLD_HEIGHT as usize * 256;
@@ -192,45 +282,47 @@ fn generated_cells_with_seed(
     out
 }
 
-/// 验收：1 线程和 4 线程的计算池生成同一片 normal 世界区块，逐格方块、天空光、
+/// 验收：1、2、4、8 线程的计算池生成同一片 normal 世界区块，逐格方块、天空光、
 /// 方块光都完全相同。`features` 的邻居写增量按 `TaskId` 顺序追加、完工按来源中心的
 /// 固定先后合并，`light` 阶段的生成期光照是从只读快照算出的纯函数，两者都与线程
 /// 调度无关。
 ///
-/// Acceptance: 1-thread and 4-thread compute pools produce byte-identical
+/// Acceptance: 1-, 2-, 4- and 8-thread compute pools produce byte-identical
 /// blocks AND sky/block light for the same area. Feature deltas merge in
 /// `TaskId` order and are merged in a fixed source order; generation-time light is a pure
 /// function of the read-only snapshots, so neither depends on scheduling.
 #[test]
-fn one_and_four_threads_generate_identical_feature_blocks() {
+fn worker_counts_generate_identical_feature_blocks() {
     let positions: Vec<ChunkPos> = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))
         .collect();
     let one = generated_cells(1, &positions);
-    let four = generated_cells(4, &positions);
     assert_eq!(one.len(), 9);
-    assert_eq!(
-        one.keys().collect::<Vec<_>>(),
-        four.keys().collect::<Vec<_>>()
-    );
-    for (pos, a) in &one {
-        let b = four.get(pos).expect("both runs delivered the same chunks");
-        assert_eq!(
-            a.blocks, b.blocks,
-            "chunk {pos:?} blocks differ across threads"
+    for threads in [2, 4, 8] {
+        let other = generated_cells(threads, &positions);
+        assert!(
+            one.keys().eq(other.keys()),
+            "loaded chunks differ with {threads} workers"
         );
-        assert_eq!(
-            a.sky, b.sky,
-            "chunk {pos:?} sky light differs across threads"
-        );
-        assert_eq!(
-            a.block, b.block,
-            "chunk {pos:?} block light differs across threads"
-        );
-        assert_eq!(
-            a.light_on, b.light_on,
-            "chunk {pos:?} isLightOn differs across threads"
-        );
+        for (pos, a) in &one {
+            let b = &other[pos];
+            assert_eq!(
+                a.blocks, b.blocks,
+                "chunk {pos:?} blocks differ with {threads} workers"
+            );
+            assert_eq!(
+                a.sky, b.sky,
+                "chunk {pos:?} sky light differs with {threads} workers"
+            );
+            assert_eq!(
+                a.block, b.block,
+                "chunk {pos:?} block light differs with {threads} workers"
+            );
+            assert_eq!(
+                a.light_on, b.light_on,
+                "chunk {pos:?} isLightOn differs with {threads} workers"
+            );
+        }
     }
 }
 
@@ -348,6 +440,7 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
             ..WorldGenConfig::default()
         },
         chunk_worker_threads: 4,
+        island_dead_timeout: Duration::from_secs(300),
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
@@ -363,7 +456,10 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
     // 等到有区块的地物增量或光照已经回到世界线程、但还有区块没交付。
     // Wait until some features deltas or light reached the world thread while
     // some chunks are still undelivered.
-    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
+    let context = "waiting for mid-pipeline generation state";
+    let mut idle_ticks = 0_u32;
     loop {
         let _ = world.tick();
         let [_, deltas, light, _] = world.master.host.generation_leftovers();
@@ -374,18 +470,31 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         if (!deltas.is_empty() || !light.is_empty()) && delivered < positions.len() {
             break;
         }
+        check_pipeline_deadline(deadline, context);
         assert!(
             delivered < positions.len(),
             "everything was delivered before a mid-pipeline state was observed"
         );
-        assert!(Instant::now() < deadline, "generation never got going");
+        if world.master.host.compute_in_pool() > 0 {
+            idle_ticks = 0;
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, context);
+        } else if has_pending_work(&world) {
+            last_progress = Instant::now();
+            idle_ticks = 0;
+        } else {
+            idle_ticks += 1;
+            assert!(idle_ticks < 40, "generation never got going");
+        }
     }
     for &pos in &positions {
         world.apply_ticket(TicketOp::Forced { pos, forced: false });
     }
 
-    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut last_progress = Instant::now();
+    let deadline = last_progress + PIPELINE_WATCHDOG;
+    let context = "draining compute pool after dropping tickets";
     let mut quiet = 0;
+    let mut stalled_ticks = 0_u32;
     loop {
         let _ = world.tick();
         let idle = world.master.host.compute_in_flight() == 0
@@ -396,20 +505,30 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
                 .debug_state()
                 .records()
                 .is_empty();
+        check_pipeline_deadline(deadline, context);
         if idle {
             quiet += 1;
             if quiet >= 8 {
                 break;
             }
-        } else {
-            quiet = 0;
+            continue;
         }
-        assert!(
-            Instant::now() < deadline,
-            "world did not settle after dropping tickets: {} in flight, {} records",
-            world.master.host.compute_in_flight(),
-            world.master.host.director().debug_state().records().len()
-        );
+        quiet = 0;
+        if world.master.host.compute_in_pool() > 0 {
+            stalled_ticks = 0;
+            wait_for_compute_progress(&mut world, &mut last_progress, deadline, context);
+        } else if has_pending_work(&world) {
+            last_progress = Instant::now();
+            stalled_ticks = 0;
+        } else {
+            stalled_ticks += 1;
+            assert!(
+                stalled_ticks < 200,
+                "world did not settle after dropping tickets: {} in flight, {} records",
+                world.master.host.compute_in_flight(),
+                world.master.host.director().debug_state().records().len()
+            );
+        }
     }
     let [partials, deltas, light, structures] = world.master.host.generation_leftovers();
     assert!(

@@ -213,7 +213,11 @@ fn shutdown_gives_up_on_a_stuck_island_but_still_saves_global_state() {
         }
         server.world.master.island_stop_timeout = Duration::from_millis(300);
         let release = Arc::new(AtomicBool::new(false));
-        server.world.islands.test_hook = Some(IslandTestHook::Stall(Arc::clone(&release)));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        server.world.islands.test_hook = Some(IslandTestHook::StallNotifying {
+            entered: entered_tx,
+            release: Arc::clone(&release),
+        });
         let sender = server.inbox_sender();
         let (done, result) = mpsc::channel();
         let ticker = thread::Builder::new()
@@ -225,13 +229,19 @@ fn shutdown_gives_up_on_a_stuck_island_but_still_saves_global_state() {
                 server
             })
             .unwrap();
+        // 先确认岛真的卡在了 tick 线程上，再验证没有关服请求时主控一直等。
+        // Confirm the island is actually stalled on its tick thread before
+        // verifying the master keeps waiting without a shutdown request.
+        entered_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("岛应在 60 秒内进入卡顿点");
         // 慢的一刻：没有关服请求时主控一直等，不会自己放弃。
         // A slow tick: without a shutdown request the master keeps waiting.
         assert!(result.recv_timeout(Duration::from_millis(600)).is_err());
         let requested = Instant::now();
         sender.send(Inbound::Shutdown).unwrap();
         let (broke, _) = result
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(Duration::from_secs(60))
             .expect("关服不能死等卡住的岛");
         let waited = requested.elapsed();
         let server = ticker.join().unwrap();

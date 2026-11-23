@@ -12,6 +12,11 @@ use mc_bamboo_core::Aabb;
 /// 配方表的数据结构和官方数据包导出的全部配方。
 pub mod recipe;
 
+/// 自然刷怪的类别上限和每个群系的刷怪设置。
+///
+/// Natural-spawn category caps and per-biome spawn settings.
+pub mod spawning;
+
 pub use recipe::{
     CookingKind, FireworkShape, Ingredient, PotionIngredient, Recipe, RecipeKind, RecipeType,
     Stack, has_dye_component, is_damageable,
@@ -22,8 +27,8 @@ pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, gamerules, heightmaps,
-    item_components, item_damage, items, jukebox_songs, light, loot, packets, recipes, registries,
-    saved_world, shapes, sounds, states, structures, tags, version, worldgen,
+    item_components, item_damage, items, jukebox_songs, light, loot, mob_spawns, packets, potions,
+    recipes, registries, saved_world, shapes, sounds, states, structures, tags, version, worldgen,
 };
 
 pub use generated::sounds::{
@@ -85,6 +90,19 @@ pub mod facts {
     pub const PATHFINDABLE_LAND: u64 = 1 << 35;
     /// `isSuffocating(EmptyBlockGetter, pos)`，`Entity.isInWall` 用。
     pub const SUFFOCATING: u64 = 1 << 36;
+    /// `isValidSpawn(EmptyBlockGetter, pos, COW)`：这个状态能不能当生物的落脚块。
+    /// 官方默认是「顶面 `isFaceSturdy(FULL)` 且发光小于 14」，少数方块整个换掉（床、玻璃、
+    /// 树叶、冰、雕刻南瓜等）；用牛来问，因为只有豹猫/鹦鹉和北极熊的方块按实体类型分别回答。
+    ///
+    /// `isValidSpawn(EmptyBlockGetter, pos, COW)`: whether mobs may stand on this state.
+    /// The default is `isFaceSturdy(FULL)` on top and emission below 14, but a few blocks
+    /// replace it outright. Asked with a cow: only the ocelot/parrot and polar-bear blocks
+    /// answer per entity type.
+    pub const VALID_SPAWN: u64 = 1 << 37;
+    /// `isPathfindable(PathComputationType.WATER)`，水中寻路和随机游动选点用。
+    ///
+    /// `isPathfindable(PathComputationType.WATER)`, for swim pathfinding and random swim targets.
+    pub const PATHFINDABLE_WATER: u64 = 1 << 38;
 }
 
 /// 官方 `WalkNodeEvaluator` 给寻路格子分的类别，顺序和官方 `PathType` 一致。

@@ -30,6 +30,12 @@ export type SectionId = (typeof SECTIONS)[number]["id"];
 
 export const GROUPS = [
   { id: "basic", section: "official", title: "基本", hint: "玩家怎么找到这台服务器。" },
+  {
+    id: "world",
+    section: "official",
+    title: "世界生成",
+    hint: "只对新建的世界生效：种子、世界类型和超平坦预设在建世界时写进存档，之后改这里不会改变已有的存档。",
+  },
   { id: "network", section: "official", title: "网络", hint: "连接本身怎么传数据。" },
   {
     id: "auth",
@@ -53,7 +59,7 @@ export const GROUPS = [
     id: "performance",
     section: "bamboo",
     title: "性能",
-    hint: "实体阶段和区块信箱的执行方式。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
+    hint: "实体阶段和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
   },
 ] as const;
 
@@ -81,7 +87,11 @@ interface Common<K extends keyof ServerSettings> {
 }
 
 // 每种控件各自一个类型，`control` 都是单个字面量：这样 switch 和 if 都能把类型收窄干净。
-type Text<K extends keyof ServerSettings> = Common<K> & { maxLength?: number };
+type Text<K extends keyof ServerSettings> = Common<K> & {
+  maxLength?: number;
+  /** 用多行文本框，JSON 这类长文本需要。 */
+  multiline?: boolean;
+};
 type Numeric<K extends keyof ServerSettings> = Common<K> & {
   min: number;
   max: number;
@@ -96,6 +106,26 @@ export type ChoiceField = Common<KeysOf<ServerSettings["forwarding"]>> & {
   control: "choice";
   options: readonly { value: ServerSettings["forwarding"]; label: string }[];
 };
+
+/**
+ * 值是「几个固定字符串之一」的设置项。纯 `string` 的项（种子、JSON 文本）
+ * 不在里面：它们可以填任意文字，做不成下拉。
+ */
+type ChoiceKey = {
+  [K in keyof ServerSettings]: ServerSettings[K] extends string
+    ? string extends ServerSettings[K]
+      ? never
+      : K
+    : never;
+}[keyof ServerSettings];
+
+/** 下拉框，选项的取值类型跟着字段走。 */
+export type SelectField = {
+  [K in ChoiceKey]: Common<K> & {
+    control: "select";
+    options: readonly { value: ServerSettings[K]; label: string }[];
+  };
+}[ChoiceKey];
 export type ToggleField = Common<KeysOf<boolean>> & { control: "toggle" };
 
 export type SettingField =
@@ -104,6 +134,7 @@ export type SettingField =
   | NumberField
   | SliderField
   | ChoiceField
+  | SelectField
   | ToggleField;
 
 /** 心跳必须留出余量：客户端 30 秒收不到任何字节就自己断开。 */
@@ -115,6 +146,10 @@ const MAX_ENTITY_THREADS = 256;
 /** 服务端能接受的区块计算线程数上限，和 `MAX_CHUNK_WORKER_THREADS` 一致。 */
 const MAX_CHUNK_WORKER_THREADS = 64;
 const MAX_MAIL_BUDGET = 65_536;
+/** 世界生成缓存三个键的上限，和服务端 `worldgen_cache` 里的 `MAX_*` 一致。 */
+const MAX_TERRAIN_CACHE_MB = 4096;
+const MAX_FEATURE_CACHE_MB = 1024;
+const MAX_CACHE_IDLE_SECONDS = 3600;
 /** 服务端能接受的岛 tick 线程数上限，和 `MAX_ISLAND_THREADS` 一致。 */
 const MAX_ISLAND_THREADS = 64;
 
@@ -185,6 +220,63 @@ export const FIELDS: readonly SettingField[] = [
     unit: "区块",
     wide: true,
     hint: "客户端的渲染半径，对应官方的 view-distance。越大，玩家进服时要传输的区块越多。",
+  },
+  {
+    key: "levelSeed",
+    group: "world",
+    fileKey: "level-seed",
+    label: "世界种子",
+    control: "text",
+    wide: true,
+    hint: "留空表示新建世界时随机取一个。数字按 Long.parseLong 解释，其它字符串按 Java 的 String.hashCode 算成种子，和官方一致。只对新建的世界生效，已有存档的种子以存档里的为准。",
+  },
+  {
+    key: "levelType",
+    group: "world",
+    fileKey: "level-type",
+    label: "世界类型",
+    control: "select",
+    options: [
+      { value: "normal", label: "默认（噪声地形）" },
+      { value: "flat", label: "超平坦" },
+      { value: "largeBiomes", label: "巨型生物群系" },
+      { value: "amplified", label: "放大化" },
+    ],
+    hint: "新世界用的世界预设，对应官方的 level-type。默认是官方同款噪声地形；选超平坦才能用下面的超平坦设置。只对新建的世界生效，已有存档按存档里的世界类型继续生成。",
+  },
+  {
+    key: "generateStructures",
+    group: "world",
+    fileKey: "generate-structures",
+    label: "生成结构",
+    control: "toggle",
+    wide: true,
+    hint: "对应官方的 generate-structures，默认打开。关掉后新世界不生成村庄、要塞这些结构，只有地形和地物。只对新建的世界生效。",
+  },
+  {
+    key: "generatorSettings",
+    group: "world",
+    fileKey: "generator-settings",
+    label: "超平坦设置",
+    control: "text",
+    multiline: true,
+    wide: true,
+    disabled: (draft) => draft.levelType !== "flat",
+    hint: "世界类型是超平坦时才生效，对应官方的 generator-settings。layers 是从世界底部往上叠的方块层，biome 是群系；官方默认是基岩 1 层、泥土 2 层、草方块 1 层、平原群系，留空或 {} 就是这套默认值。",
+    validate: (draft) => {
+      if (draft.levelType !== "flat") return null;
+      const text = draft.generatorSettings.trim();
+      if (text.length === 0) return null;
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          return "超平坦设置必须是一个 JSON 对象";
+        }
+      } catch {
+        return "超平坦设置不是合法的 JSON";
+      }
+      return null;
+    },
   },
   {
     key: "compressionThreshold",
@@ -324,6 +416,36 @@ export const FIELDS: readonly SettingField[] = [
     hint: "区块的解析、生成和存盘序列化放到多少条常驻后台线程上做。0 = 在世界线程上做（默认）。区块内容和线程数无关，只有区块到达的时刻可能不同。",
   },
   {
+    key: "worldgenTerrainCacheMb",
+    group: "performance",
+    fileKey: "worldgen_terrain_cache_mb",
+    label: "地形缓存上限（MiB）",
+    control: "number",
+    min: 0,
+    max: MAX_TERRAIN_CACHE_MB,
+    hint: "世界生成时暂存的半成品地形最多占多少内存，默认 128。缓存只影响内存和跑图速度，不影响生成结果；周围区块都生成完的条目会立刻释放。0 = 不缓存（跑图明显变慢）。",
+  },
+  {
+    key: "worldgenFeatureCacheMb",
+    group: "performance",
+    fileKey: "worldgen_feature_cache_mb",
+    label: "地物缓存上限（MiB）",
+    control: "number",
+    min: 0,
+    max: MAX_FEATURE_CACHE_MB,
+    hint: "世界生成时暂存的地物（树、矿石等）结果最多占多少内存，默认 64。只影响内存和跑图速度，不影响生成结果。0 = 不缓存。",
+  },
+  {
+    key: "worldgenCacheIdleSeconds",
+    group: "performance",
+    fileKey: "worldgen_cache_idle_seconds",
+    label: "缓存空闲释放（秒）",
+    control: "number",
+    min: 0,
+    max: MAX_CACHE_IDLE_SECONDS,
+    hint: "区块计算队列空闲，且多久没有查询缓存后清空上面两份缓存，默认 30 秒。不会卸载区块。0 = 关闭空闲清理。",
+  },
+  {
     key: "deliveriesPerTick",
     group: "performance",
     fileKey: "deliveries_per_tick",
@@ -384,7 +506,7 @@ export function describeDefault(field: SettingField, defaults: ServerSettings): 
     const value = defaults[field.key];
     return field.unit ? `${value} ${field.unit}` : String(value);
   }
-  if (field.control === "choice") {
+  if (field.control === "choice" || field.control === "select") {
     const value = defaults[field.key];
     return field.options.find((option) => option.value === value)?.label ?? value;
   }

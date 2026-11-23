@@ -249,6 +249,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.PositionPath;
 import net.minecraft.world.entity.player.Abilities;
@@ -2660,6 +2661,17 @@ public final class Probe {
             check("commands: other ops see the admin broadcast",
                     containsText(observer, "[Kitten: Set minecraft:overworld to 1000 tick(s)]"));
 
+            // 这个场景断言的是「世界里恰好有这些东西」，自然刷怪会在正午的平原上刷出
+            // 生物，所以先关掉（和随机刻速度一样属于场景校准）。这个 Gamerule 在 26.3
+            // 叫 `spawn_mobs`。
+            //
+            // This scene asserts an exact set of entities, and natural spawning adds
+            // mobs to a plains world at noon, so turn it off (scene calibration, like
+            // the random tick speed). The 26.3 game rule is called `spawn_mobs`.
+            actor.send(new ServerboundChatCommandPacket("gamerule spawn_mobs false"));
+            await("commands: mob spawning is off",
+                    () -> containsText(actor, "Game rule spawn_mobs is now set to false"));
+
             BlockPos stone = new BlockPos(4, -59, 4);
             BlockPos stairs = new BlockPos(4, -58, 4);
             actor.send(new ServerboundChatCommandPacket("setblock 4 -59 4 stone"));
@@ -2677,8 +2689,14 @@ public final class Probe {
             // 牛的生成包、元数据、属性包和之后的移动包，都要能被官方的包定义解析。
             // The cow's spawn, metadata, attributes and later movement packets must
             // all decode with the official packet definitions.
+            // 牛的自然生成可能在这个场景之前就刷出过牛，所以按「这一次 summoned 多加了一头」
+            // 来数，而不是「全服一共只有一头」。
+            //
+            // Natural spawning may already have added cows before this scene, so count
+            // "this summon added one" instead of "there is exactly one cow in total".
+            int cowsBeforeSummon = actor.cowAdds;
             actor.send(new ServerboundChatCommandPacket("summon minecraft:cow 12 -60 8"));
-            await("cow: /summon sends an add_entity", () -> actor.cowAdds == 1);
+            await("cow: /summon sends an add_entity", () -> actor.cowAdds == cowsBeforeSummon + 1);
             await("cow: the pairing bundle carries metadata", () -> actor.cowData >= 1);
             await("cow: the pairing bundle carries attributes", () -> actor.cowAttributes >= 1);
             check("cow: the client knows the new entity", actor.remotes.containsKey(actor.lastCowId));
@@ -3201,6 +3219,8 @@ public final class Probe {
         /** 最近一次出现的物品实体。 */
         int lastItemId = -1;
         int lastCowId = -1;
+        /** 世界里自然刷出来的生物（牛以外的也算）。它们的属性和元数据包不算进玩家相关的检查。 */
+        final Set<Integer> mobIds = new HashSet<>();
         int cowAdds;
         int cowAttributes;
         int cowData;
@@ -4026,7 +4046,11 @@ public final class Probe {
         }
 
         private void onEntityData(ClientboundSetEntityDataPacket packet) {
-            entityDataPackets += 1;
+            // 只数非生物实体的元数据包：自然刷出的动物随时会发自己的元数据。
+            // Count only non-mob entity data: naturally spawned animals send their own at any time.
+            if (!mobIds.contains(packet.id())) {
+                entityDataPackets += 1;
+            }
             if (packet.id() == lastCowId) {
                 cowData += 1;
             }
@@ -4060,6 +4084,9 @@ public final class Probe {
                 check("cow: attributes carry the cow's movement speed",
                         packet.getValues().stream().anyMatch(snapshot ->
                                 snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));
+                return;
+            }
+            if (mobIds.contains(packet.getEntityId())) {
                 return;
             }
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
@@ -4162,8 +4189,14 @@ public final class Probe {
             boolean tnt = packet.getType() == EntityTypes.TNT;
             boolean item = packet.getType() == EntityTypes.ITEM;
             boolean cow = packet.getType() == EntityTypes.COW;
-            check("entity: only players, falling blocks, primed tnt, items and cows are added",
-                    player || falling || tnt || item || cow);
+            // 生成期和自然刷怪会带来各种动物和怪物，类别不是 MISC 的都算生物。
+            // Generation-time and natural spawning bring all kinds of mobs: anything outside MISC.
+            boolean mob = packet.getType().getCategory() != MobCategory.MISC;
+            if (mob) {
+                mobIds.add(packet.getId());
+            }
+            check("entity: only players, falling blocks, primed tnt, items and mobs are added",
+                    player || falling || tnt || item || mob);
             if (cow) {
                 lastCowId = packet.getId();
                 cowAdds += 1;

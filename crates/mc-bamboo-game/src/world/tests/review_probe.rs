@@ -376,7 +376,14 @@ fn save_off_keeps_chunks_loaded_like_official_no_save() {
 }
 
 /// 每刻判脏的开销不能和已加载区块数成正比：2 万区块、2 千条火把记录，
-/// 真实的 `dirty_loaded_chunks` 只碰改动集合，20 次的均摊耗时远小于 50 ms 预算。
+/// 真实的 `drain_save_changes` / `dirty_loaded_chunks` 只扫改动集合，不扫已加载表。
+/// 用候选集规模和精确结果验证，不依赖墙钟快慢。
+///
+/// Per-tick dirty detection must not scale with loaded chunk count: with
+/// 20,000 loaded chunks and 2,000 torch toggle records, `drain_save_changes`
+/// and `dirty_loaded_chunks` inspect only the change sets, never the whole
+/// loaded table. Verified via candidate counts and exact outputs rather than
+/// wall-clock timing.
 #[test]
 fn dirty_detection_cost_does_not_scale_with_loaded_chunks() {
     let mut store = ChunkStore::loaded();
@@ -399,16 +406,64 @@ fn dirty_detection_cost_does_not_scale_with_loaded_chunks() {
     let mut host = crate::director_host::DirectorHost::new(
         mc_bamboo_world::director::DirectorConfig::default(),
     );
-    let start = std::time::Instant::now();
-    for _ in 0..20 {
-        let dirty = host.dirty_loaded_chunks(&mut island, false);
-        std::hint::black_box(dirty);
-    }
-    let per_tick_ms = start.elapsed().as_millis() / 20;
-    println!("DIRTY_MS_PER_TICK large(20000,2000)={per_tick_ms}");
+    // 没改过任何区块时，改动集合为空：不会把 2 万个已加载区块塞进候选集。
+    // With no chunk edits, the drained change sets are empty: the 20,000 loaded
+    // chunks are never scanned into the candidate sets.
+    let initial = island.drain_save_changes();
     assert!(
-        per_tick_ms < 20,
-        "每刻判脏 {per_tick_ms} ms，和已加载区块数成正比"
+        initial.changed.is_empty() && initial.content.is_empty(),
+        "未改动的 2 万区块不该进改动集合：changed={}, content={}",
+        initial.changed.len(),
+        initial.content.len()
+    );
+    for _ in 0..20 {
+        assert!(
+            host.dirty_loaded_chunks(&mut island, false).is_empty(),
+            "连续多刻无改动时判脏结果为空"
+        );
+    }
+
+    // 只改 3 个区块：改动集合的规模只等于这 3 个，与 2 万个已加载区块无关。
+    // Edit only 3 chunks: the candidate sets hold only those 3, independent of
+    // the 20,000 loaded chunks.
+    let edited = [
+        ChunkPos::new(5, 0),
+        ChunkPos::new(7_500, 0),
+        ChunkPos::new(19_999, 0),
+    ];
+    for &chunk in &edited {
+        let pos = BlockPos::new(chunk.x * 16 + 1, -60, 1);
+        island.region.chunks.set_block(pos, blocks::GOLD_BLOCK);
+        island.region.chunks.mark_changed(chunk);
+        island.region.touch(pos);
+    }
+    let changes = island.drain_save_changes();
+    assert_eq!(
+        changes.changed.len(),
+        edited.len(),
+        "只有改过方块的 3 个区块进入下层改动集合"
+    );
+    assert_eq!(
+        changes.content.len(),
+        edited.len(),
+        "只有 touch 过的 3 个区块进入上层改动集合"
+    );
+
+    // 再改同一组区块，验证完整的 `dirty_loaded_chunks` 只报这 3 个，下一刻回到空。
+    // Edit again and verify full `dirty_loaded_chunks` reports only those 3,
+    // then returns empty on the next tick.
+    for &chunk in &edited {
+        let pos = BlockPos::new(chunk.x * 16 + 2, -60, 2);
+        island.region.chunks.set_block(pos, blocks::DIAMOND_BLOCK);
+        island.region.chunks.mark_changed(chunk);
+        island.region.touch(pos);
+    }
+    let mut dirty = host.dirty_loaded_chunks(&mut island, false);
+    dirty.sort_unstable();
+    assert_eq!(dirty, edited, "判脏只返回真正改过的 3 个区块");
+    assert!(
+        host.dirty_loaded_chunks(&mut island, false).is_empty(),
+        "取走改动集合后下一刻不再扫全表"
     );
 }
 
@@ -507,74 +562,94 @@ fn a_saved_world_delivers_the_nearest_chunk_first() {
 /// reclaims stalled at "not ready" and shutdown (which waits for the save) hung.
 #[test]
 fn all_chunks_reclaim_and_shutdown_completes_after_every_player_leaves() {
-    use std::time::{Duration, Instant};
+    use std::{sync::mpsc, time::Duration};
 
     use mc_bamboo_blocks::entity::Entity;
     use mc_bamboo_core::Vec3;
     use mc_bamboo_protocol::item::ItemStack;
     use mc_bamboo_storage::world_dir::{LevelSource, load_level_data};
 
-    let temp = TempWorld::new("reclaim-shutdown");
-    let dir = WorldDir::new(&temp.0);
-    dir.create_layout().unwrap();
-    let mut server = Harness::new_loaded_with_save(2, &temp.0);
+    // 用带宽裕总超时（60 秒）的辅助线程兜底：既不在机器满载时误报，也能抓到真正的关服挂死。
+    // Run on a helper thread with a 60 s overall timeout so heavy load does not
+    // flake while a genuine shutdown hang fails cleanly.
+    const LIMIT: Duration = Duration::from_secs(60);
+    let (done, finished) = mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .stack_size(crate::island_pool::ISLAND_THREAD_STACK)
+        .spawn(move || {
+            let temp = TempWorld::new("reclaim-shutdown");
+            let dir = WorldDir::new(&temp.0);
+            dir.create_layout().unwrap();
+            let mut server = Harness::new_loaded_with_save(2, &temp.0);
 
-    // 三名玩家在不同位置进服、走动。
-    // Three players join at different positions and move around.
-    let alice = server.join_and_settle("Alice");
-    let bob = server.join_and_settle("Bob");
-    let cara = server.join_and_settle("Cara");
-    server.move_to(&bob, 100.0, 100.0);
-    server.move_to(&cara, -100.0, 100.0);
-    for _ in 0..16 {
-        server.tick();
-    }
-    assert!(
-        server.region().chunks.loaded_count().unwrap_or(0) > 0,
-        "进服后应有一批已加载区块"
-    );
+            // 三名玩家在不同位置进服、走动。
+            // Three players join at different positions and move around.
+            let alice = server.join_and_settle("Alice");
+            let bob = server.join_and_settle("Bob");
+            let cara = server.join_and_settle("Cara");
+            server.move_to(&bob, 100.0, 100.0);
+            server.move_to(&cara, -100.0, 100.0);
+            for _ in 0..16 {
+                server.tick();
+            }
+            assert!(
+                server.region().chunks.loaded_count().unwrap_or(0) > 0,
+                "进服后应有一批已加载区块"
+            );
 
-    // 一个空物品会在这一拍实体 tick 里被 discard。修复前它被 take 出去后既不
-    // put 也不 remove，taken 里永久留一行，让 ready_to_move_chunks 永远为假。
-    // An empty-stack item is discarded this entity tick. Before the fix it was
-    // taken out and never returned, leaving a permanent taken row.
-    let uid = server.spawn_entity(Entity::ground_item(
-        Vec3::new(0.5, 64.0, 0.5),
-        ItemStack::empty(),
-    ));
-    crate::interaction::run_entity_ticks(0, server.region());
-    assert!(
-        server.region().entities.public_at(uid).is_none(),
-        "空物品这一拍应被丢弃"
-    );
-    assert!(
-        server.region().entities.ready_to_move_chunks(),
-        "被丢弃的实体不能让 ready_to_move_chunks 永远为假"
-    );
+            // 一个空物品会在这一拍实体 tick 里被 discard。修复前它被 take 出去后既不
+            // put 也不 remove，taken 里永久留一行，让 ready_to_move_chunks 永远为假。
+            // An empty-stack item is discarded this entity tick. Before the fix it was
+            // taken out and never returned, leaving a permanent taken row.
+            let uid = server.spawn_entity(Entity::ground_item(
+                Vec3::new(0.5, 64.0, 0.5),
+                ItemStack::empty(),
+            ));
+            crate::interaction::run_entity_ticks(0, server.region());
+            assert!(
+                server.region().entities.public_at(uid).is_none(),
+                "空物品这一拍应被丢弃"
+            );
+            assert!(
+                server.region().entities.ready_to_move_chunks(),
+                "被丢弃的实体不能让 ready_to_move_chunks 永远为假"
+            );
 
-    // 全部离开：票撤销，延迟到期后区块全部收回。
-    // All players leave: tickets are dropped and every chunk is reclaimed.
-    server.leave(&alice);
-    server.leave(&bob);
-    server.leave(&cara);
-    let mut reclaimed = false;
-    for _ in 0..3000 {
-        if server.region().chunks.loaded_count().unwrap_or(0) == 0 {
-            reclaimed = true;
-            break;
+            // 全部离开：票撤销，延迟到期后区块全部收回。
+            // All players leave: tickets are dropped and every chunk is reclaimed.
+            server.leave(&alice);
+            server.leave(&bob);
+            server.leave(&cara);
+            let mut reclaimed = false;
+            for _ in 0..3000 {
+                if server.region().chunks.loaded_count().unwrap_or(0) == 0 {
+                    reclaimed = true;
+                    break;
+                }
+                server.tick();
+            }
+            assert!(reclaimed, "所有区块都要收回");
+
+            // 关服在有限时间内完成，且 level.dat 可读（存盘完整）。
+            // Shutdown finishes without hanging and level.dat is readable (save intact).
+            server.shut_down();
+            assert_eq!(
+                load_level_data(&dir).source,
+                LevelSource::Primary,
+                "关服必须写出可读的 level.dat"
+            );
+            let _ = done.send(());
+        })
+        .expect("spawn test thread");
+    match finished.recv_timeout(LIMIT) {
+        Ok(()) => worker.join().expect("test thread"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            if let Err(payload) = worker.join() {
+                std::panic::resume_unwind(payload);
+            }
         }
-        server.tick();
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("关服超过 {LIMIT:?} 仍未完成，可能挂死")
+        }
     }
-    assert!(reclaimed, "所有区块都要收回");
-
-    // 关服在合理时间内完成，且 level.dat 可读（存盘完整）。
-    // Shutdown finishes in bounded time and level.dat is readable (save intact).
-    let started = Instant::now();
-    server.shut_down();
-    assert!(started.elapsed() < Duration::from_secs(30), "关服不能挂死");
-    assert_eq!(
-        load_level_data(&dir).source,
-        LevelSource::Primary,
-        "关服必须写出可读的 level.dat"
-    );
 }

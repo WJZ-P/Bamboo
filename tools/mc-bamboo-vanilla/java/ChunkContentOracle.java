@@ -346,6 +346,27 @@ public final class ChunkContentOracle {
             return source;
         }
 
+        // 官方 NeutralMob.readPersistentAngerSaveData 会顺着 angry_at 的 UUID 走
+        // EntityReference.getLivingEntity，最终落到 ServerLevel.getEntities()；
+        // FakeLevel 没有 entityManager，那一步会空指针，让整只实体加载失败。
+        // 这里按「查不到这个实体」返回 null：persistentAngerTarget 仍保留 UUID 并原样
+        // 写回 angry_at，只有 Mob.target 是空，和官方找不到目标时一致。
+        //
+        // Vanilla NeutralMob.readPersistentAngerSaveData resolves the angry_at UUID
+        // through EntityReference.getLivingEntity down to ServerLevel.getEntities();
+        // FakeLevel has no entityManager, so that call throws and drops the entity.
+        // Returning null models "entity not found": the persistent target keeps its
+        // UUID and is written back to angry_at, only Mob.target stays empty.
+        @Override
+        public net.minecraft.world.entity.Entity getEntityInAnyDimension(java.util.UUID uuid) {
+            return null;
+        }
+
+        @Override
+        public net.minecraft.world.entity.player.Player getPlayerInAnyDimension(java.util.UUID uuid) {
+            return null;
+        }
+
         @Override
         public int getNextEntityId() {
             return nextId++;
@@ -624,7 +645,36 @@ public final class ChunkContentOracle {
          */
         private JsonObject freshCow(JsonObject request) {
             FakeLevel level = FakeLevel.create(official, 1L);
-            Entity cow = net.minecraft.world.entity.EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            net.minecraft.world.entity.EntityType<?> type = request.has("type")
+                    ? net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getValue(
+                            net.minecraft.resources.Identifier.parse(request.get("type").getAsString()))
+                    : net.minecraft.world.entity.EntityTypes.COW;
+            // `EntityType.create` 对怪物要查难度，这个假世界没有；苦力怕直接构造。
+            // `EntityType.create` checks the difficulty for monsters, which this fake level
+            // lacks; creepers are constructed directly.
+            Entity cow = type == net.minecraft.world.entity.EntityTypes.CREEPER
+                    ? new net.minecraft.world.entity.monster.Creeper(
+                            net.minecraft.world.entity.EntityTypes.CREEPER, level)
+                    : type == net.minecraft.world.entity.EntityTypes.SPIDER
+                            ? new net.minecraft.world.entity.monster.spider.Spider(
+                                    net.minecraft.world.entity.EntityTypes.SPIDER, level)
+                            : type == net.minecraft.world.entity.EntityTypes.CAVE_SPIDER
+                                    ? new net.minecraft.world.entity.monster.spider.CaveSpider(
+                                            net.minecraft.world.entity.EntityTypes.CAVE_SPIDER, level)
+                                    : type == net.minecraft.world.entity.EntityTypes.ENDERMAN
+                                            ? new net.minecraft.world.entity.monster.Enderman(
+                                                    net.minecraft.world.entity.EntityTypes.ENDERMAN, level)
+                                            : type.create(level, EntitySpawnReason.COMMAND);
+            // 羊的羊毛字节和鸡的下蛋计时照 Bamboo 一侧设，只比存盘格式。
+            // Copy the sheep wool byte and chicken egg timer from Bamboo; only the format is compared.
+            if (cow instanceof net.minecraft.world.entity.animal.sheep.Sheep sheep && request.has("wool")) {
+                int wool = request.get("wool").getAsInt();
+                sheep.setColor(net.minecraft.world.item.DyeColor.byId(wool & 15));
+                sheep.setSheared((wool & 16) != 0);
+            }
+            if (cow instanceof net.minecraft.world.entity.animal.chicken.Chicken chicken && request.has("egg")) {
+                chicken.eggTime = request.get("egg").getAsInt();
+            }
             cow.snapTo(
                     request.get("x").getAsDouble(),
                     request.get("y").getAsDouble(),

@@ -112,18 +112,34 @@ pub(crate) fn collect_from_region(region: &Region, pos: BlockPos) -> Option<Bloc
     })
 }
 
-/// 爆炸里 `state.getDrops`。工具是空的，没有爆炸半径。
+/// 一格要算掉落的方块：状态、位置、方块实体的组件，以及 `DESTROY_WITH_DECAY` 才有的爆炸半径。
 ///
-/// `state.getDrops` during an explosion. The tool is empty and there is no explosion radius.
+/// One block whose drops are rolled: state, position, block entity components and the
+/// explosion radius that only `DESTROY_WITH_DECAY` supplies.
+pub(crate) struct ExplodedBlock {
+    pub state: BlockState,
+    pub pos: BlockPos,
+    pub block_entity: Option<BlockEntityView>,
+    pub explosion_radius: Option<f32>,
+}
+
+/// 爆炸里 `state.getDrops`。工具是空的；`explosion_radius` 只有 `DESTROY_WITH_DECAY` 才给。
+///
+/// `state.getDrops` during an explosion. The tool is empty; `explosion_radius` is set
+/// only under `DESTROY_WITH_DECAY`.
 pub(crate) fn explosion_loot(
     chunks: &ChunkStore,
     sequences: &mc_bamboo_loot::RandomSequences,
     fallback: &dyn mc_bamboo_blocks::random::RandomSource,
     weather: mc_bamboo_blocks::BlockWeather,
-    state: BlockState,
-    pos: BlockPos,
-    block_entity: Option<BlockEntityView>,
+    block: ExplodedBlock,
 ) -> Vec<ItemStack> {
+    let ExplodedBlock {
+        state,
+        pos,
+        block_entity,
+        explosion_radius,
+    } = block;
     let view = ChunkLevel { chunks, weather };
     let params = BlockDropParams {
         state,
@@ -132,7 +148,7 @@ pub(crate) fn explosion_loot(
         block_entity,
         breaker: None,
         tool: None,
-        explosion_radius: None,
+        explosion_radius,
         luck: 0.0,
     };
     match block_drops(&params, Some(sequences), fallback) {

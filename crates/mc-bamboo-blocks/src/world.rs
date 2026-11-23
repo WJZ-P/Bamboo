@@ -672,6 +672,201 @@ impl<'a> World<'a> {
     }
 
     /// 记下一个发给玩家的结果，官方的 `levelEvent`。
+    /// 生物打玩家：先试 [`Level::hurt_player_now`] 当场落地（玩家死了就在这里生成掉落），
+    /// 这一层做不到时记成延后的 [`Effect::HurtPlayer`] 并按打中算。返回 `wasHurt`。
+    ///
+    /// A mob's hit on a player: applied at once through the level hook when possible,
+    /// otherwise deferred as an effect and reported as a hit.
+    pub fn hurt_player_from_mob(
+        &mut self,
+        target: crate::entity::EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        attacker: Option<&crate::entity::EntityPublic>,
+    ) -> bool {
+        match self.level.hurt_player_now(target, source, amount, attacker) {
+            Some(outcome) => {
+                if let Some(drops) = &outcome.death_drops {
+                    self.spawn_player_death_drops(drops);
+                }
+                outcome.hurt
+            }
+            None => {
+                self.push_effect(Effect::HurtPlayer {
+                    target,
+                    source,
+                    amount,
+                });
+                true
+            }
+        }
+    }
+
+    /// 山羊冲撞把玩家撞开（`LivingEntity.knockback`）：只有精确驱动能当场做。
+    ///
+    /// A goat ram knocking a player back (`LivingEntity.knockback`); only the precise
+    /// driver can apply it.
+    pub fn knock_back_player(
+        &mut self,
+        target: crate::entity::EntityUid,
+        strength: f64,
+        direction: (f64, f64),
+    ) {
+        let _ = self
+            .level
+            .knock_back_player_now(target, strength, direction);
+    }
+
+    /// 生物给玩家点火（`Entity.igniteForTicks`）：能当场就当场，否则记成延后的效果。
+    pub fn ignite_player_from_mob(&mut self, target: crate::entity::EntityUid, ticks: i32) {
+        if !self.level.ignite_player_now(target, ticks) {
+            self.push_effect(Effect::IgnitePlayer { target, ticks });
+        }
+    }
+
+    /// 药水箭命中玩家：`LivingEntity.addEffect`。能当场就当场，否则延后。
+    ///
+    /// A tipped arrow hitting a player: `LivingEntity.addEffect`. Applied at
+    /// once when the level can, otherwise deferred.
+    pub fn give_player_effect(
+        &mut self,
+        target: crate::entity::EntityUid,
+        instance: crate::entity::mob::effects::EffectInstance,
+    ) {
+        if !self.level.give_player_effect_now(target, &instance) {
+            self.push_effect(Effect::PlayerEffect {
+                target,
+                effect: instance.effect,
+                duration: instance.duration,
+                amplifier: instance.amplifier,
+                ambient: instance.ambient,
+                visible: instance.visible,
+                show_icon: instance.show_icon,
+            });
+        }
+    }
+
+    /// 给一头生物挂效果（`LivingEntity.addEffect`）。
+    ///
+    /// Adds an effect to a mob (`LivingEntity.addEffect`).
+    pub fn give_mob_effect(
+        &mut self,
+        target: crate::entity::EntityUid,
+        instance: crate::entity::mob::effects::EffectInstance,
+    ) {
+        self.with_entity_mut(target, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                crate::entity::mob::living::add_effect(mob, instance.clone());
+            });
+        });
+    }
+
+    /// 药水箭的瞬间效果（治疗 / 伤害）在玩家身上当场结算。
+    ///
+    /// A tipped arrow's instantaneous effect (healing or harm) on a player.
+    pub fn instant_player_effect(
+        &mut self,
+        target: crate::entity::EntityUid,
+        effect: i32,
+        amplifier: i32,
+    ) {
+        self.give_player_effect(
+            target,
+            crate::entity::mob::effects::EffectInstance::with_amplifier(effect, 1, amplifier),
+        );
+    }
+
+    /// 喷溅药水给玩家回血（`LivingEntity.heal`）：能当场就当场，否则延后。
+    ///
+    /// Heals a player from a splash potion (`LivingEntity.heal`): applied at once
+    /// when the level can, otherwise deferred.
+    pub fn heal_player(&mut self, target: crate::entity::EntityUid, amount: f32) {
+        if !self.level.heal_player_now(target, amount) {
+            self.push_effect(Effect::HealPlayer { target, amount });
+        }
+    }
+
+    /// 药水箭带给生物的瞬间效果：`MobEffect.applyInstantaneousEffect`。
+    ///
+    /// An arrow's instantaneous effect on a mob: `MobEffect.applyInstantaneousEffect`.
+    pub fn apply_mob_instant_effect(&mut self, target: i32, effect: i32, amplifier: i32) {
+        use crate::entity::mob::effects::{EffectAction, effect_tick_actions};
+        for action in effect_tick_actions(effect, amplifier) {
+            match action {
+                EffectAction::Heal(amount) | EffectAction::InstantHeal(amount) => {
+                    self.with_entity_mut(target, &mut |entity| {
+                        let Some(mob) = entity.kind.mob_mut() else {
+                            return;
+                        };
+                        let max = mob.attributes.value(
+                            mc_bamboo_data::registries::attribute::MAX_HEALTH,
+                        ) as f32;
+                        if mob.health < max {
+                            mob.health = (mob.health + amount).min(max);
+                        }
+                    });
+                }
+                EffectAction::MagicDamage(amount) => {
+                    if self
+                        .level
+                        .entity_public(target)
+                        .is_some_and(|public| matches!(&public.kind, crate::entity::KindPublic::Mob(mob) if mob.health > 1.0))
+                    {
+                        self.hurt_mob(
+                            target,
+                            crate::entity::mob::DamageSource::environment(
+                                crate::entity::mob::DamageKind::Magic,
+                            ),
+                            amount,
+                        );
+                    }
+                }
+                EffectAction::InstantDamage(amount) => {
+                    self.hurt_mob(
+                        target,
+                        crate::entity::mob::DamageSource::environment(
+                            crate::entity::mob::DamageKind::Magic,
+                        ),
+                        amount,
+                    );
+                }
+                EffectAction::WitherDamage(amount) => {
+                    self.hurt_mob(
+                        target,
+                        crate::entity::mob::DamageSource::environment(
+                            crate::entity::mob::DamageKind::Wither,
+                        ),
+                        amount,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `Player.dropEquipment` + `LivingEntity.dropExperience` 的世界部分：物品从眼高
+    /// 往下 0.3 处生成、拾取延迟 40，然后按经验值拆成经验球。
+    pub fn spawn_player_death_drops(&mut self, drops: &crate::level::PlayerDeathDrops) {
+        let at = Vec3::new(
+            drops.position.x,
+            drops.position.y + 1.62 - 0.300_000_011_920_928_96,
+            drops.position.z,
+        );
+        for stack in &drops.items {
+            let Some(entity_id) = self.spawn_at_location(at, stack.clone()) else {
+                continue;
+            };
+            self.with_entity_mut(entity_id, &mut |entity| {
+                if let Some(item) = entity.ground_mut() {
+                    item.set_pickup_delay(40);
+                }
+            });
+        }
+        if drops.experience > 0 {
+            crate::entity::award(self, drops.position, drops.experience);
+        }
+    }
+
     pub fn push_effect(&mut self, effect: Effect) {
         self.level.observe(Observation::Effect(&effect));
         self.effects.push(effect);
@@ -871,6 +1066,13 @@ impl<'a> World<'a> {
     /// `getMaxY`。
     pub fn max_y(&self) -> i32 {
         self.level.max_y()
+    }
+
+    /// `Level.getSeaLevel()`。
+    ///
+    /// `Level.getSeaLevel()`.
+    pub fn sea_level(&self) -> i32 {
+        self.level.sea_level()
     }
 
     /// `isInsideBuildHeight`。
@@ -1769,6 +1971,22 @@ impl<'a> World<'a> {
             .max(self.brightness(LightLayer::Sky, pos) - self.level.sky_darken())
     }
 
+    /// `getMaxLocalRawBrightness(pos, skyDarken)`：雷暴时生物生成规则按 10 算。
+    ///
+    /// `getMaxLocalRawBrightness(pos, skyDarken)`: the monster spawn rule passes 10
+    /// while thundering.
+    pub fn max_local_raw_brightness_with(&self, pos: BlockPos, darken: i32) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos) - darken)
+    }
+
+    /// `getHeight(WORLD_SURFACE, pos)`：最高的非空气方块上面一格。
+    ///
+    /// `getHeight(WORLD_SURFACE, pos)`: one above the highest non-air block.
+    pub fn world_surface_y(&self, pos: BlockPos) -> i32 {
+        self.level.world_surface_y(pos)
+    }
+
     /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。
     pub fn block_light(&self, pos: BlockPos) -> i32 {
         self.brightness(LightLayer::Block, pos)
@@ -1831,14 +2049,26 @@ impl<'a> World<'a> {
         self.level.explosion_block_drops(state, pos)
     }
 
+    /// `DESTROY_WITH_DECAY` 的爆炸掉落：战利品参数带上爆炸半径。
+    ///
+    /// Explosion drops under `DESTROY_WITH_DECAY`: the loot parameters carry the radius.
+    pub(crate) fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.note_access(pos, true);
+        self.level.explosion_block_drops_decayed(state, pos, radius)
+    }
+
     /// 生物死时的战利品，见 [`Level::mob_loot_drops`]。
     pub(crate) fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<crate::entity::EntityUid>,
+        loot: crate::entity::mob::MobDeathLoot,
+        origin: Vec3,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
-        self.level.mob_loot_drops(table, on_fire, killer)
+        self.level.mob_loot_drops(loot, origin)
     }
 
     /// `Block.getDrops`，见 [`Level::block_loot_drops`]。
@@ -1914,13 +2144,10 @@ impl<'a> World<'a> {
         self.level.is_dark_outside()
     }
 
-    /// `ServerPlayer.startSleepInBed` 的怪物检查：`Monster.isPreventingPlayerRest`
-    /// 在床周围 8 × 5 × 8 的盒子里。世界里还没有怪物，假世界也恒为假；
-    /// 僵尸分支接上后由 [`Level`] 覆盖。
+    /// `ServerPlayer.startSleepInBed` 的怪物检查，见 [`Level::monster_prevents_rest`]。
     ///
-    /// The monster check in `ServerPlayer.startSleepInBed`: any
-    /// `Monster.isPreventingPlayerRest` within an 8 × 5 × 8 box around the
-    /// bed. No monsters exist yet; mob implementations override [`Level`].
+    /// The monster check in `ServerPlayer.startSleepInBed`; see
+    /// [`Level::monster_prevents_rest`].
     pub fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
         self.level.monster_prevents_rest(pos)
     }
@@ -2904,6 +3131,22 @@ impl<'a> World<'a> {
         self.level.spawn_entity(entity)
     }
 
+    /// 生成一支射出的箭：先分配 ID 和随机种子（官方构造函数里的 UUID 取数），
+    /// 再按 `Projectile.shoot` 取散布。顺序和官方一致。
+    ///
+    /// Spawns one fired arrow: the id and random seed first (the UUID draw of the
+    /// official constructor), then the spread of `Projectile.shoot`.
+    pub fn spawn_arrow_shot(&mut self, shot: crate::entity::arrow::ArrowShot) -> i32 {
+        let mut entity = self.prepare_entity(Entity::configured_arrow(&shot));
+        entity.shoot_arrow_with_movement(
+            shot.direction,
+            shot.power,
+            shot.uncertainty,
+            shot.source_movement,
+        );
+        self.add_prepared_entity(entity)
+    }
+
     /// 构造一个实体但先不放进世界，见 [`crate::EntityStore::prepare`]。
     pub fn prepare_entity(&mut self, entity: Entity) -> Entity {
         self.level.prepare_entity(entity)
@@ -2993,12 +3236,18 @@ impl<'a> World<'a> {
     pub fn hurt_mob(
         &mut self,
         id: i32,
-        source: crate::entity::mob::DamageSource,
+        mut source: crate::entity::mob::DamageSource,
         amount: f32,
     ) -> bool {
         let Some(mut entity) = self.level.take_entity(id) else {
             return false;
         };
+        if source.attacker_is_player
+            && let Some(uid) = source.attacker
+            && let Some(player) = self.level.player_mob_attack(uid)
+        {
+            source = source.with_player_mob_attack(player);
+        }
         let hurt = {
             let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
             entity
@@ -3024,11 +3273,68 @@ impl<'a> World<'a> {
         let Some(mut entity) = self.level.take_entity(id) else {
             return crate::entity::mob::interact::MobInteraction::pass();
         };
+        let thundering = self.is_thundering();
+        let now = self.game_time();
         let outcome = entity
-            .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request))
+            .with_mob(|me, mob| {
+                crate::entity::mob::interact::interact(me, mob, request, now, thundering)
+            })
             .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
-        self.level.put_entity(entity);
+        let armadillo = entity
+            .kind
+            .mob()
+            .is_some_and(|mob| mob.mob_type == crate::entity::mob::MobType::Armadillo);
+        if outcome.shear && armadillo {
+            crate::entity::mob::armadillo::apply_brush(
+                self,
+                &mut entity,
+                request.hand,
+                &request.held,
+            );
+        } else if outcome.shear {
+            crate::entity::mob::interact::apply_shear(
+                self,
+                &mut entity,
+                request.hand,
+                &request.held,
+            );
+        }
+        if let Some(stack) = outcome.drop_stack.clone() {
+            // `Entity.spawnAtLocation(stack, offset)`：按偏移生成一件掉落物。
+            // `Entity.spawnAtLocation(stack, offset)`: drop at the mob plus offset.
+            self.spawn_at_location(entity.position.add(outcome.drop_offset), stack);
+        }
+        // 山羊的 `playEatingSound` 音高取世界随机源，一次喂食放一到两遍。
+        // A goat's `playEatingSound` is pitched with the level random, once or twice per
+        // feeding.
+        for _ in 0..crate::entity::mob::goat::eating_sounds(&entity, request, &outcome) {
+            let roll = self.random().next_float();
+            entity.with_mob(|me, mob| crate::entity::mob::goat::play_eating_sound(me, mob, roll));
+        }
+        if outcome.damage_held {
+            crate::durability::hurt_hand(self, request.hand, 1);
+        }
+        if outcome.discard {
+            // `Bucketable.bucketMobPickup` 的 `pickupEntity.discard()`：不 `put` 回来
+            // 就等于从表里拿掉，攒下的事件留给同步层。
+            // `pickupEntity.discard()`: leaving it out of the table removes it; keep
+            // the events it queued for the sync layer.
+            entity.discard();
+            self.level.keep_departed_mob_events(&entity);
+        } else {
+            self.level.put_entity(entity);
+        }
         outcome
+    }
+
+    /// 剪毛 / 下蛋这类实体战利品表的掉落，见 [`Level::entity_loot_drops`]。
+    ///
+    /// Shearing or egg-laying loot drops; see [`Level::entity_loot_drops`].
+    pub(crate) fn entity_loot_drops(
+        &mut self,
+        request: crate::entity::mob::EntityLootRequest,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.entity_loot_drops(request)
     }
 
     /// `LivingEntity.addEffect`：给一头生物挂一个效果并刷新属性。
@@ -3048,6 +3354,40 @@ impl<'a> World<'a> {
             .unwrap_or(false);
         self.level.put_entity(entity);
         found
+    }
+
+    /// `Player.causeExtraKnockback` 对生物目标调的 `LivingEntity.knockback`。
+    /// 方向和力道由攻击者给；这是受伤默认击退之外的第二下击退。
+    ///
+    /// The `LivingEntity.knockback` that `Player.causeExtraKnockback` applies to a
+    /// mob target, with the attacker's direction and strength. This is the second
+    /// knockback, on top of the default one inside `hurtServer`.
+    pub fn knockback_mob(&mut self, id: i32, strength: f64, dx: f64, dz: f64) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        let found = entity
+            .with_mob(|me, mob| {
+                crate::entity::mob::living::knockback(me, mob, strength, dx, dz);
+            })
+            .is_some();
+        self.level.put_entity(entity);
+        found
+    }
+
+    /// `Entity.igniteForTicks`：火焰附加把目标点着的刻数，只在比现有着火更久时覆盖。
+    ///
+    /// `Entity.igniteForTicks`: Fire Aspect's ignite ticks, applied only when longer
+    /// than the mob's current remaining fire.
+    pub fn ignite_mob(&mut self, id: i32, ticks: i32) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        if ticks > entity.remaining_fire_ticks {
+            entity.remaining_fire_ticks = ticks;
+        }
+        self.level.put_entity(entity);
+        true
     }
 
     /// `LivingEntity.removeEffect` / `removeAllEffects`：`None` 表示清全部。
@@ -3070,6 +3410,18 @@ impl<'a> World<'a> {
     /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
     pub fn with_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
         self.level.with_just_spawned(id, f)
+    }
+
+    /// 就地改一个已经在 tick 列表里的实体（正在 tick 的那一个不在里面）。
+    ///
+    /// Mutates an entity already in the tick list in place (not the one ticking now).
+    pub fn with_listed_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        f(&mut entity);
+        self.level.put_entity(entity);
+        true
     }
 
     /// 已经在 tick 列表里的实体。正在 tick 的那一个不在里面。
@@ -3723,6 +4075,10 @@ mod tests {
                 | Effect::CampfireChanged { .. }
                 | Effect::Overlay { .. }
                 | Effect::OpenCommandBlock { .. }
+                | Effect::HurtPlayer { .. }
+                | Effect::IgnitePlayer { .. }
+                | Effect::PlayerEffect { .. }
+                | Effect::HealPlayer { .. }
                 | Effect::SleepInBed { .. } => None,
             })
             .collect()

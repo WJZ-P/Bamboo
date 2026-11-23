@@ -413,79 +413,6 @@ pub mod block_entity_type {
     pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
-/// `minecraft:game_event` 内置注册表，按官方注册顺序（存档里的 `Holder` 按名字查它）。
-pub mod game_event {
-    /// 条目数。
-    pub const TOTAL: u32 = 61;
-    /// 条目名，下标就是注册表 ID。
-    pub static NAMES: &[&str] = &["minecraft:block_activate", "minecraft:block_attach", "minecraft:block_change", "minecraft:block_close", "minecraft:block_deactivate", "minecraft:block_destroy", "minecraft:block_detach", "minecraft:block_open", "minecraft:block_place", "minecraft:bounce", "minecraft:container_close", "minecraft:container_open", "minecraft:drink", "minecraft:eat", "minecraft:elytra_glide", "minecraft:entity_action", "minecraft:entity_damage", "minecraft:entity_die", "minecraft:entity_dismount", "minecraft:entity_interact", "minecraft:entity_mount", "minecraft:entity_place", "minecraft:equip", "minecraft:explode", "minecraft:flap", "minecraft:fluid_pickup", "minecraft:fluid_place", "minecraft:hit_ground", "minecraft:instrument_play", "minecraft:item_interact_finish", "minecraft:item_interact_start", "minecraft:jukebox_play", "minecraft:jukebox_stop_play", "minecraft:lightning_strike", "minecraft:note_block_play", "minecraft:prime_fuse", "minecraft:projectile_land", "minecraft:projectile_shoot", "minecraft:resonate_1", "minecraft:resonate_10", "minecraft:resonate_11", "minecraft:resonate_12", "minecraft:resonate_13", "minecraft:resonate_14", "minecraft:resonate_15", "minecraft:resonate_2", "minecraft:resonate_3", "minecraft:resonate_4", "minecraft:resonate_5", "minecraft:resonate_6", "minecraft:resonate_7", "minecraft:resonate_8", "minecraft:resonate_9", "minecraft:sculk_sensor_tendrils_clicking", "minecraft:shear", "minecraft:shriek", "minecraft:splash", "minecraft:step", "minecraft:swim", "minecraft:teleport", "minecraft:unequip"];
-    pub const BLOCK_ACTIVATE: i32 = 0;
-    pub const BLOCK_ATTACH: i32 = 1;
-    pub const BLOCK_CHANGE: i32 = 2;
-    pub const BLOCK_CLOSE: i32 = 3;
-    pub const BLOCK_DEACTIVATE: i32 = 4;
-    pub const BLOCK_DESTROY: i32 = 5;
-    pub const BLOCK_DETACH: i32 = 6;
-    pub const BLOCK_OPEN: i32 = 7;
-    pub const BLOCK_PLACE: i32 = 8;
-    pub const BOUNCE: i32 = 9;
-    pub const CONTAINER_CLOSE: i32 = 10;
-    pub const CONTAINER_OPEN: i32 = 11;
-    pub const DRINK: i32 = 12;
-    pub const EAT: i32 = 13;
-    pub const ELYTRA_GLIDE: i32 = 14;
-    pub const ENTITY_ACTION: i32 = 15;
-    pub const ENTITY_DAMAGE: i32 = 16;
-    pub const ENTITY_DIE: i32 = 17;
-    pub const ENTITY_DISMOUNT: i32 = 18;
-    pub const ENTITY_INTERACT: i32 = 19;
-    pub const ENTITY_MOUNT: i32 = 20;
-    pub const ENTITY_PLACE: i32 = 21;
-    pub const EQUIP: i32 = 22;
-    pub const EXPLODE: i32 = 23;
-    pub const FLAP: i32 = 24;
-    pub const FLUID_PICKUP: i32 = 25;
-    pub const FLUID_PLACE: i32 = 26;
-    pub const HIT_GROUND: i32 = 27;
-    pub const INSTRUMENT_PLAY: i32 = 28;
-    pub const ITEM_INTERACT_FINISH: i32 = 29;
-    pub const ITEM_INTERACT_START: i32 = 30;
-    pub const JUKEBOX_PLAY: i32 = 31;
-    pub const JUKEBOX_STOP_PLAY: i32 = 32;
-    pub const LIGHTNING_STRIKE: i32 = 33;
-    pub const NOTE_BLOCK_PLAY: i32 = 34;
-    pub const PRIME_FUSE: i32 = 35;
-    pub const PROJECTILE_LAND: i32 = 36;
-    pub const PROJECTILE_SHOOT: i32 = 37;
-    pub const RESONATE_1: i32 = 38;
-    pub const RESONATE_10: i32 = 39;
-    pub const RESONATE_11: i32 = 40;
-    pub const RESONATE_12: i32 = 41;
-    pub const RESONATE_13: i32 = 42;
-    pub const RESONATE_14: i32 = 43;
-    pub const RESONATE_15: i32 = 44;
-    pub const RESONATE_2: i32 = 45;
-    pub const RESONATE_3: i32 = 46;
-    pub const RESONATE_4: i32 = 47;
-    pub const RESONATE_5: i32 = 48;
-    pub const RESONATE_6: i32 = 49;
-    pub const RESONATE_7: i32 = 50;
-    pub const RESONATE_8: i32 = 51;
-    pub const RESONATE_9: i32 = 52;
-    pub const SCULK_SENSOR_TENDRILS_CLICKING: i32 = 53;
-    pub const SHEAR: i32 = 54;
-    pub const SHRIEK: i32 = 55;
-    pub const SPLASH: i32 = 56;
-    pub const STEP: i32 = 57;
-    pub const SWIM: i32 = 58;
-    pub const TELEPORT: i32 = 59;
-    pub const UNEQUIP: i32 = 60;
-    /// 注册名对应的 ID。
-    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
-    /// ID 对应的注册名，ID 越界时返回 `None`。
-    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
-}
-
 pub mod entity_type {
     pub const TOTAL: u32 = 161;
     /// 条目名，下标就是注册表 ID。
@@ -804,6 +731,77 @@ pub mod fluid {
     pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
+pub mod game_event {
+    pub const TOTAL: u32 = 61;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:block_activate", "minecraft:block_attach", "minecraft:block_change", "minecraft:block_close", "minecraft:block_deactivate", "minecraft:block_destroy", "minecraft:block_detach", "minecraft:block_open", "minecraft:block_place", "minecraft:bounce", "minecraft:container_close", "minecraft:container_open", "minecraft:drink", "minecraft:eat", "minecraft:elytra_glide", "minecraft:entity_damage", "minecraft:entity_die", "minecraft:entity_dismount", "minecraft:entity_interact", "minecraft:entity_mount", "minecraft:entity_place", "minecraft:entity_action", "minecraft:equip", "minecraft:explode", "minecraft:flap", "minecraft:fluid_pickup", "minecraft:fluid_place", "minecraft:hit_ground", "minecraft:instrument_play", "minecraft:item_interact_finish", "minecraft:item_interact_start", "minecraft:jukebox_play", "minecraft:jukebox_stop_play", "minecraft:lightning_strike", "minecraft:note_block_play", "minecraft:prime_fuse", "minecraft:projectile_land", "minecraft:projectile_shoot", "minecraft:sculk_sensor_tendrils_clicking", "minecraft:shear", "minecraft:shriek", "minecraft:splash", "minecraft:step", "minecraft:swim", "minecraft:teleport", "minecraft:unequip", "minecraft:resonate_1", "minecraft:resonate_2", "minecraft:resonate_3", "minecraft:resonate_4", "minecraft:resonate_5", "minecraft:resonate_6", "minecraft:resonate_7", "minecraft:resonate_8", "minecraft:resonate_9", "minecraft:resonate_10", "minecraft:resonate_11", "minecraft:resonate_12", "minecraft:resonate_13", "minecraft:resonate_14", "minecraft:resonate_15"];
+    pub const BLOCK_ACTIVATE: i32 = 0;
+    pub const BLOCK_ATTACH: i32 = 1;
+    pub const BLOCK_CHANGE: i32 = 2;
+    pub const BLOCK_CLOSE: i32 = 3;
+    pub const BLOCK_DEACTIVATE: i32 = 4;
+    pub const BLOCK_DESTROY: i32 = 5;
+    pub const BLOCK_DETACH: i32 = 6;
+    pub const BLOCK_OPEN: i32 = 7;
+    pub const BLOCK_PLACE: i32 = 8;
+    pub const BOUNCE: i32 = 9;
+    pub const CONTAINER_CLOSE: i32 = 10;
+    pub const CONTAINER_OPEN: i32 = 11;
+    pub const DRINK: i32 = 12;
+    pub const EAT: i32 = 13;
+    pub const ELYTRA_GLIDE: i32 = 14;
+    pub const ENTITY_DAMAGE: i32 = 15;
+    pub const ENTITY_DIE: i32 = 16;
+    pub const ENTITY_DISMOUNT: i32 = 17;
+    pub const ENTITY_INTERACT: i32 = 18;
+    pub const ENTITY_MOUNT: i32 = 19;
+    pub const ENTITY_PLACE: i32 = 20;
+    pub const ENTITY_ACTION: i32 = 21;
+    pub const EQUIP: i32 = 22;
+    pub const EXPLODE: i32 = 23;
+    pub const FLAP: i32 = 24;
+    pub const FLUID_PICKUP: i32 = 25;
+    pub const FLUID_PLACE: i32 = 26;
+    pub const HIT_GROUND: i32 = 27;
+    pub const INSTRUMENT_PLAY: i32 = 28;
+    pub const ITEM_INTERACT_FINISH: i32 = 29;
+    pub const ITEM_INTERACT_START: i32 = 30;
+    pub const JUKEBOX_PLAY: i32 = 31;
+    pub const JUKEBOX_STOP_PLAY: i32 = 32;
+    pub const LIGHTNING_STRIKE: i32 = 33;
+    pub const NOTE_BLOCK_PLAY: i32 = 34;
+    pub const PRIME_FUSE: i32 = 35;
+    pub const PROJECTILE_LAND: i32 = 36;
+    pub const PROJECTILE_SHOOT: i32 = 37;
+    pub const SCULK_SENSOR_TENDRILS_CLICKING: i32 = 38;
+    pub const SHEAR: i32 = 39;
+    pub const SHRIEK: i32 = 40;
+    pub const SPLASH: i32 = 41;
+    pub const STEP: i32 = 42;
+    pub const SWIM: i32 = 43;
+    pub const TELEPORT: i32 = 44;
+    pub const UNEQUIP: i32 = 45;
+    pub const RESONATE_1: i32 = 46;
+    pub const RESONATE_2: i32 = 47;
+    pub const RESONATE_3: i32 = 48;
+    pub const RESONATE_4: i32 = 49;
+    pub const RESONATE_5: i32 = 50;
+    pub const RESONATE_6: i32 = 51;
+    pub const RESONATE_7: i32 = 52;
+    pub const RESONATE_8: i32 = 53;
+    pub const RESONATE_9: i32 = 54;
+    pub const RESONATE_10: i32 = 55;
+    pub const RESONATE_11: i32 = 56;
+    pub const RESONATE_12: i32 = 57;
+    pub const RESONATE_13: i32 = 58;
+    pub const RESONATE_14: i32 = 59;
+    pub const RESONATE_15: i32 = 60;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
+}
+
 pub mod potion {
     pub const TOTAL: u32 = 46;
     /// 条目名，下标就是注册表 ID。
@@ -992,6 +990,25 @@ pub mod menu {
     pub const SMOKER: i32 = 22;
     pub const CARTOGRAPHY_TABLE: i32 = 23;
     pub const STONECUTTER: i32 = 24;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
+}
+
+pub mod stat_type {
+    pub const TOTAL: u32 = 9;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:mined", "minecraft:crafted", "minecraft:used", "minecraft:broken", "minecraft:picked_up", "minecraft:dropped", "minecraft:killed", "minecraft:killed_by", "minecraft:custom"];
+    pub const MINED: i32 = 0;
+    pub const CRAFTED: i32 = 1;
+    pub const USED: i32 = 2;
+    pub const BROKEN: i32 = 3;
+    pub const PICKED_UP: i32 = 4;
+    pub const DROPPED: i32 = 5;
+    pub const KILLED: i32 = 6;
+    pub const KILLED_BY: i32 = 7;
+    pub const CUSTOM: i32 = 8;
     /// 注册名对应的 ID。
     pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
     /// ID 对应的注册名，ID 越界时返回 `None`。

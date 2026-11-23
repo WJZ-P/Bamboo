@@ -134,11 +134,20 @@ final class FeatureLevelHandler implements InvocationHandler {
             BiomeResolver uncachedBiomeResolver, RandomState randomState,
             StructureChunkGrid structureGrid,
             net.minecraft.server.level.ServerLevel serverLevel) {
+        this(center, seed, LevelHeightAccessor.create(settings.noiseSettings().minY(),
+                settings.noiseSettings().height()), settings.seaLevel(), chunks, registries,
+                biomeManager, uncachedBiomeResolver, randomState, structureGrid, serverLevel);
+    }
+
+    FeatureLevelHandler(ChunkPos center, long seed, LevelHeightAccessor dimensions, int seaLevel,
+            TerrainChunkView[] chunks, RegistryAccess registries, BiomeManager biomeManager,
+            BiomeResolver uncachedBiomeResolver, RandomState randomState,
+            StructureChunkGrid structureGrid, net.minecraft.server.level.ServerLevel serverLevel) {
         this.center = center;
         this.seed = seed;
-        this.minY = settings.noiseSettings().minY();
-        this.height = settings.noiseSettings().height();
-        this.seaLevel = settings.seaLevel();
+        this.minY = dimensions.getMinY();
+        this.height = dimensions.getHeight();
+        this.seaLevel = seaLevel;
         this.chunks = chunks;
         this.registries = registries;
         this.biomeManager = biomeManager;
@@ -859,6 +868,99 @@ public final class ChunkgenOracle {
             return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings,
                     forcedX, forcedZ, scan, structures, forcedSeed, chunksFile, mergeOrders,
                     lightPipeline);
+        }
+    }
+
+    // 超平坦对拍复用同一个只在 JVM 内运行的区块代理，不启动服务端。
+    // Reuse the in-JVM chunk fixture for flat decoration without starting a server.
+    static final class FlatFixture {
+        private final Oracle oracle;
+
+        FlatFixture(RegistryAccess registries, CloseableResourceManager resources, Writer out)
+                throws Exception {
+            this.oracle = new Oracle(registries, resources, Options.parse(new String[0]), out);
+        }
+
+        void decorate(net.minecraft.world.level.levelgen.FlatLevelSource generator,
+                long seed, ChunkPos center, boolean generateStructures, JsonObject line)
+                throws Exception {
+            var randomState = RandomState.create(oracle.noiseLookup, seed, false,
+                    Blocks.STONE.defaultBlockState(), 63,
+                    net.minecraft.world.level.levelgen.NoiseRouterData.none());
+            var resolver = generator.getBiomeSource().createUncachedResolver(randomState);
+            var serverLevel = oracle.installEntityStub(seed, generator);
+            var worldOptions = new WorldOptions(seed, generateStructures, false);
+            var dimensions = LevelHeightAccessor.create(-64, 384);
+            var factory = PalettedContainerFactory.create(oracle.registries);
+            generator.validate();
+
+            StructureChunkGrid grid = null;
+            int starts = 0;
+            if (generateStructures) {
+                int radius = StructureChunkGrid.RADIUS;
+                var chunks = new ProtoChunk[StructureChunkGrid.size()][StructureChunkGrid.size()];
+                for (int dx = -radius; dx <= radius; dx++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        chunks[dx + radius][dz + radius] = new ProtoChunk(
+                                new ChunkPos(center.x() + dx, center.z() + dz),
+                                UpgradeData.EMPTY, dimensions, factory, null);
+                    }
+                }
+                grid = new StructureChunkGrid(center, chunks);
+                var state = generator.createState(
+                        oracle.registries.lookupOrThrow(Registries.STRUCTURE_SET), randomState, seed);
+                state.ensureStructuresGenerated();
+                var dimension = net.minecraft.resources.ResourceKey.create(Registries.DIMENSION,
+                        Identifier.withDefaultNamespace("overworld"));
+                for (ProtoChunk[] row : chunks) {
+                    for (ProtoChunk chunk : row) {
+                        var manager = new StructureManager(
+                                Oracle.structureLevel(oracle.registries, chunk, grid, center),
+                                worldOptions, null);
+                        generator.createStructures(oracle.registries, state, manager, chunk,
+                                oracle.templates, dimension);
+                    }
+                }
+                var referenceRegion = Oracle.referenceRegion(center, grid, oracle.registries);
+                ProtoChunk chunk = grid.chunk(center, center.x(), center.z());
+                generator.createReferences(referenceRegion,
+                        new StructureManager(referenceRegion, worldOptions, null), chunk);
+                starts = chunk.getAllStarts().size();
+            }
+            line.addProperty("starts", starts);
+            var chunks = new Oracle.TerrainChunk[9];
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    var pos = new ChunkPos(center.x() + dx, center.z() + dz);
+                    var chunk = grid == null
+                            ? new ProtoChunk(pos, UpgradeData.EMPTY, dimensions, factory, null)
+                            : grid.chunk(center, pos.x(), pos.z());
+                    generator.createBiomes(randomState, Blender.empty(), null, chunk).join();
+                    generator.buildTerrain(chunk, Blender.empty(), randomState, null,
+                            null, null, Set.of()).join();
+                    chunk.setPersistedStatus(ChunkStatus.TERRAIN);
+                    Heightmap.primeHeightmaps(chunk, ChunkStatus.FINAL_HEIGHTMAPS);
+                    chunks[(dz + 1) * 3 + dx + 1] = new Oracle.TerrainChunk(chunk);
+                }
+            }
+            WorldGenLevel[] holder = new WorldGenLevel[1];
+            var handler = new FeatureLevelHandler(center, seed, dimensions, generator.getSeaLevel(),
+                    Oracle.wrapped(chunks), oracle.registries,
+                    new BiomeManager((x, y, z) -> holder[0].getNoiseBiome(x, y, z),
+                            BiomeManager.obfuscateSeed(seed)),
+                    resolver, randomState, grid, serverLevel);
+            holder[0] = (WorldGenLevel) Proxy.newProxyInstance(ChunkgenOracle.class.getClassLoader(),
+                    new Class<?>[] { WorldGenLevel.class }, handler);
+            generator.applyBiomeDecoration(holder[0], chunks[4].chunk(),
+                    new StructureManager(holder[0], worldOptions, null));
+
+            var results = new JsonArray();
+            for (var terrain : chunks) {
+                JsonObject result = new JsonObject();
+                oracle.addBlocks(result, terrain.chunk());
+                results.add(result);
+            }
+            line.add("decorated", results);
         }
     }
 
@@ -2650,7 +2752,7 @@ public final class ChunkgenOracle {
          * returns an inert minecart, and `addFreshEntity` just returns true.
          */
         private net.minecraft.server.level.ServerLevel installEntityStub(
-                long seed, NoiseBasedChunkGenerator generator) {
+                long seed, net.minecraft.world.level.chunk.ChunkGenerator generator) {
             try {
                 Object type = net.minecraft.world.entity.EntityTypes.CHEST_MINECART;
                 setField(net.minecraft.world.entity.EntityType.class, type, "factory",

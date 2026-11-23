@@ -74,6 +74,7 @@ pub const OVERWORLD_PRESET: &str = "minecraft:overworld";
 /// 六条密度函数和所有噪声实例共用一个 [`Compiler`]，所以 `cache` 编号也共用。
 #[derive(Debug)]
 pub struct Generator<'a> {
+    flat_columns: Option<(&'static str, i32, i32)>,
     worldgen: &'a Worldgen,
     settings: &'a Settings,
     biomes: &'a MultiNoiseBiomeSource,
@@ -188,6 +189,7 @@ impl<'a> Generator<'a> {
         let default_block = block_state(raw.get("default_block"))?;
         let default_fluid = block_state(raw.get("default_fluid"))?;
         Ok(Self {
+            flat_columns: None,
             worldgen,
             settings,
             biomes,
@@ -698,6 +700,41 @@ impl<'a> Generator<'a> {
         Ok(bands)
     }
 
+    /// 结构布局用的常数列高度，照 `FlatLevelSource.getBaseHeight`：从地层里反扫第一个
+    /// MOTION_BLOCKING 不透明的层，`OceanFloorWg` 版本的谓词单独算一次。
+    ///
+    /// Cache the constant column heights used by `FlatLevelSource.getBaseHeight`:
+    /// scan the layers for the last MOTION_BLOCKING-opaque one, and compute the
+    /// `OceanFloorWg` variant separately.
+    pub fn set_flat_columns(
+        &mut self,
+        biome: &'static str,
+        min_y: i32,
+        height: i32,
+        layers: &[(u32, i32)],
+    ) {
+        use crate::feature::{
+            flat::terrain_layer,
+            world::{HeightmapKind, is_heightmap_opaque},
+        };
+        let (mut surface, mut floor) = (min_y - 1, min_y - 1);
+        // 官方从 min(layers.size() - 1, heightAccessor.getMaxY()) 反扫，限制的是层下标。
+        // Vanilla caps the layer index (not the resulting world Y) at getMaxY().
+        let count = (min_y + height).max(0) as usize;
+        for (index, state) in crate::feature::flat::layer_states(layers)
+            .take(count)
+            .enumerate()
+        {
+            if terrain_layer(state) {
+                surface = min_y + index as i32;
+                if is_heightmap_opaque(state, HeightmapKind::OceanFloorWg) {
+                    floor = surface;
+                }
+            }
+        }
+        self.flat_columns = Some((biome, surface, floor));
+    }
+
     /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
     ///
     /// 照 `iterateNoiseColumn` 用一块 1×height×1、步长 1 的体积和全新的含水层，自顶向下
@@ -719,6 +756,9 @@ impl<'a> Generator<'a> {
     /// `terrain_with_beardifier`. Keep it EMPTY when a real Beardifier is wired in, or structure
     /// height checks would wrongly include structure terrain and diverge from vanilla.
     pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
+        if let Some((_, surface, _)) = self.flat_columns {
+            return Ok(surface);
+        }
         self.first_occupied_height_impl(block_x, block_z, false)
     }
 
@@ -732,6 +772,9 @@ impl<'a> Generator<'a> {
         block_x: i32,
         block_z: i32,
     ) -> Result<i32, String> {
+        if let Some((_, _, floor)) = self.flat_columns {
+            return Ok(floor);
+        }
         self.first_occupied_height_impl(block_x, block_z, true)
     }
 
@@ -822,6 +865,9 @@ impl<'a> Generator<'a> {
         max_quart_y: i32,
     ) -> Result<Vec<String>, String> {
         let count = max_quart_y - min_quart_y + 1;
+        if let Some((biome, _, _)) = self.flat_columns {
+            return Ok(vec![biome.to_owned(); count.max(0) as usize]);
+        }
         let volume = Volume::new(
             (1, count, 1),
             (
@@ -864,6 +910,44 @@ impl<'a> Generator<'a> {
         Ok(names)
     }
 
+    /// `WorldGenRegion` 上的 `BiomeManager.getBiome(x, y, z)`：八角插值选出 quart 角，
+    /// 再按 `ChunkAccess.getNoiseBiome` 把 quart y 夹进区块高度去查。生成期刷怪用它。
+    ///
+    /// `BiomeManager.getBiome(x, y, z)` on a `WorldGenRegion`: pick the quart corner,
+    /// then clamp its quart y into the chunk height as `ChunkAccess.getNoiseBiome` does.
+    /// Used by world-generation spawning.
+    pub fn region_biome(&self, x: i32, y: i32, z: i32) -> u32 {
+        let zoom = crate::biome_manager::obfuscate_seed(self.seed);
+        let (quart_x, quart_y, quart_z) = crate::biome_manager::fiddled_corner(zoom, x, y, z);
+        self.region_noise_biome(quart_x, quart_y, quart_z)
+    }
+
+    /// `ChunkAccess.getNoiseBiome(quartX, quartY, quartZ)`：quart y 夹进区块高度再问群系源。
+    ///
+    /// `ChunkAccess.getNoiseBiome(quartX, quartY, quartZ)`: clamp the quart y into the
+    /// chunk height, then ask the biome source.
+    pub fn region_noise_biome(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> u32 {
+        let min = self.settings.min_y >> 2;
+        let max = ((self.settings.min_y + self.settings.height) >> 2) - 1;
+        let quart_y = quart_y.clamp(min, max);
+        let mut context = Context::new(self.cache_count);
+        crate::biome_manager::BiomeManager::new(self.biomes, self.seed).noise_biome(
+            &self.router,
+            &mut context,
+            quart_x,
+            quart_y,
+            quart_z,
+        )
+    }
+
+    /// `WorldGenRegion.random`：`worldgen_region_random` 在中心区块世界原点（y = 0）取的源。
+    ///
+    /// `WorldGenRegion.random`: the `worldgen_region_random` source at the center chunk's
+    /// world origin (y = 0).
+    pub fn region_random_at(&self, chunk_x: i32, chunk_z: i32) -> crate::random::Random {
+        self.region_random.at(chunk_x * 16, 0, chunk_z * 16)
+    }
+
     /// 清掉群系参数表 R 树的 `lastResult`。结构起点判定里的单点群系查询会改写它，
     /// 计算池各区块到达顺序不定；地形生成前先清掉才能与调度无关。
     ///
@@ -904,6 +988,40 @@ impl<'a> Generator<'a> {
         ),
         String,
     > {
+        self.run_decoration(input, steps_mask, allowed_kinds, structures, None)
+    }
+
+    pub fn features_flat(
+        &self,
+        input: &crate::feature::FeatureChunks,
+        steps_mask: i32,
+        allowed_kinds: Option<&[String]>,
+        structures: Option<&crate::structure::place_step::StructurePlacement<'_>>,
+        flat: &crate::feature::flat::FlatDecoration<'_>,
+    ) -> Result<
+        (
+            crate::feature::FeatureResult,
+            Option<crate::structure::place_step::PlaceStats>,
+        ),
+        String,
+    > {
+        self.run_decoration(input, steps_mask, allowed_kinds, structures, Some(flat))
+    }
+
+    fn run_decoration(
+        &self,
+        input: &crate::feature::FeatureChunks,
+        steps_mask: i32,
+        allowed_kinds: Option<&[String]>,
+        structures: Option<&crate::structure::place_step::StructurePlacement<'_>>,
+        flat: Option<&crate::feature::flat::FlatDecoration<'_>>,
+    ) -> Result<
+        (
+            crate::feature::FeatureResult,
+            Option<crate::structure::place_step::PlaceStats>,
+        ),
+        String,
+    > {
         let biomes = BiomeManager::new(self.biomes, self.seed);
         // `WorldGenRegion.random`：`getOrCreateRandomFactory("worldgen_region_random")`
         // 在中心区块的**世界原点**（`center.getWorldPosition()`）上取一个随机源。
@@ -922,11 +1040,13 @@ impl<'a> Generator<'a> {
         // `MossyCarpetBlock.placeAt`'s `nextBoolean()` is
         // `XoroshiroRandomSource.nextBoolean() = (nextLong() & 1) != 0` (the low bit).
         // Wrapping it in `WorldgenRandom` would use `next(1)` (the high bit).
-        let region_random = self
-            .region_random
-            .at(input.center_x * 16, 0, input.center_z * 16);
+        let factory = flat.map_or(self.region_random, |_| {
+            Compiler::new(self.seed, false).random_factory("minecraft:worldgen_region_random")
+        });
+        let region_random = factory.at(input.center_x * 16, 0, input.center_z * 16);
         let context = crate::feature::run::FeatureContext {
             registry: &self.features,
+            flat,
             samplers: &self.router,
             biomes: &biomes,
             settings: self.settings,

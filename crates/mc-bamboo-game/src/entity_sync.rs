@@ -60,6 +60,7 @@ struct Metadata {
     shared_flags: u8,
     pose: Pose,
     health: f32,
+    weapon_use_flags: u8,
     main_hand: HumanoidArm,
     model_customisation: u8,
     /// `LivingEntity.DATA_EFFECT_PARTICLES` 的颜色列表。
@@ -74,6 +75,7 @@ impl Metadata {
         shared_flags: 0,
         pose: Pose::Standing,
         health: 1.0,
+        weapon_use_flags: 0,
         main_hand: HumanoidArm::Right,
         model_customisation: 0,
         effect_particles: Vec::new(),
@@ -85,6 +87,10 @@ impl Metadata {
             shared_flags: player.sync.shared_flags,
             pose: player.sync.pose(),
             health: player.health.health,
+            weapon_use_flags: player
+                .weapon_use
+                .as_ref()
+                .map_or(0, |active| 1 | (u8::from(active.hand == Hand::Off) << 1)),
             main_hand: player.client.main_hand,
             model_customisation: player.client.model_customisation,
             effect_particles: player.effects.particle_colors(),
@@ -104,6 +110,8 @@ impl Metadata {
         [
             flags.then_some(EntityData::SharedFlags(self.shared_flags)),
             pose.then_some(EntityData::Pose(self.pose)),
+            (self.weapon_use_flags != previous.weapon_use_flags)
+                .then_some(EntityData::LivingFlags(self.weapon_use_flags)),
             health.then_some(EntityData::Health(self.health)),
             main_hand.then_some(EntityData::MainHand(self.main_hand)),
             model.then_some(EntityData::ModelCustomisation(self.model_customisation)),
@@ -192,6 +200,13 @@ impl EntitySync {
     /// 放置方块时用它决定眼高和碰撞盒。
     pub(crate) fn is_crouching(&self) -> bool {
         self.shift_key_down && !self.flying
+    }
+
+    /// `isSprinting()`：共享标志里的疾跑位。
+    ///
+    /// `isSprinting()`: the sprinting bit of the shared flags.
+    pub(crate) fn is_sprinting(&self) -> bool {
+        self.shared_flags & ENTITY_FLAG_SPRINTING != 0
     }
 
     /// 其他玩家的姿势完全由 index 6 决定，客户端不会根据潜行位自己推算。
@@ -610,9 +625,14 @@ pub(crate) fn broadcast_swing_with_self(region: &mut Region, id: PlayerId, hand:
     region.links.send_frames(id, &frames);
 }
 
-/// `punch`：给观察者发 `swing_animation`。`entities.md` 第 9 节。
+/// `punch`：给观察者发 `swing_animation`，并按官方 `handlePunch` 重置攻击冷却。
+/// `entities.md` 第 9 节。
+///
+/// `punch`: broadcast `swing_animation` and reset the attack cooldown as
+/// `ServerGamePacketListenerImpl.handlePunch` does.
 pub(crate) fn on_punch(region: &mut Region, id: PlayerId) {
     broadcast_swing(region, id, Hand::Main);
+    crate::player_attack::on_punch(region, id);
 }
 
 /// `player_input`：潜行。姿势由派生状态算出来，和标志位落在同一个 `set_entity_data` 里。
@@ -641,20 +661,61 @@ fn may_fly(game_mode: GameMode) -> bool {
     matches!(game_mode, GameMode::Creative | GameMode::Spectator)
 }
 
-/// `player_command`：冲刺和拒绝滑翔，其余动作都忽略。`entities.md` 第 10 节。
-pub(crate) fn on_player_command(region: &mut Region, id: PlayerId, action: PlayerCommandKind) {
+/// `player_command`：冲刺、拒绝滑翔、起跳，以及骑乘时开坐骑物品栏。`entities.md` 第 10 节。
+///
+/// `player_command`: sprinting, refusing the elytra, the riding jump and opening
+/// the mount inventory. `entities.md` section 10.
+pub(crate) fn on_player_command(
+    region: &mut Region,
+    id: PlayerId,
+    action: PlayerCommandKind,
+    data: i32,
+) {
     match action {
         PlayerCommandKind::StartSprinting => set_sprinting(region, id, true),
         PlayerCommandKind::StopSprinting => set_sprinting(region, id, false),
         PlayerCommandKind::StartFallFlying => refuse_fall_flying(region, id),
         PlayerCommandKind::StopSleeping => crate::sleep::stop_sleeping(region, id),
-        PlayerCommandKind::StartRidingJump
-        | PlayerCommandKind::StopRidingJump
-        | PlayerCommandKind::OpenInventory => {}
+        PlayerCommandKind::StartRidingJump => start_riding_jump(region, id, data),
+        PlayerCommandKind::StopRidingJump => stop_riding_jump(region, id),
+        PlayerCommandKind::OpenInventory => crate::riding::open_vehicle_inventory(region, id),
     }
 }
 
-fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) {
+/// `START_RIDING_JUMP`：只对「这名玩家正在控制的载具」生效，官方看
+/// `getControlledVehicle()`、`canJump()` 和正数刻度。
+///
+/// `START_RIDING_JUMP`: only the vehicle this player controls reacts, matching
+/// vanilla's `getControlledVehicle()`, `canJump()` and the positive scale.
+fn start_riding_jump(region: &mut Region, id: PlayerId, scale: i32) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let Some(vehicle) = player.riding.vehicle else {
+        return;
+    };
+    region.entities.with_mut(vehicle, |entity| {
+        entity.with_mob(|me, mob| {
+            mc_bamboo_blocks::entity::mob::start_riding_jump(me, mob, scale);
+        })
+    });
+}
+
+/// `STOP_RIDING_JUMP`：官方 `handleStopJump` 是空的，这里只确认载具还在。
+///
+/// `STOP_RIDING_JUMP`: vanilla `handleStopJump` is empty; this only makes sure the
+/// vehicle still exists.
+fn stop_riding_jump(region: &mut Region, id: PlayerId) {
+    let Some(player) = region.players.get(&id) else {
+        return;
+    };
+    let Some(vehicle) = player.riding.vehicle else {
+        return;
+    };
+    let _ = region.entities.public_at(vehicle);
+}
+
+pub(crate) fn set_sprinting(region: &mut Region, id: PlayerId, sprinting: bool) {
     if let Some(player) = region.players.get_mut(&id) {
         player
             .sync

@@ -35,7 +35,7 @@ use crate::{
     inbound::{Inbound, InboundReceiver, JoinRequest, PlayerId, PlayerInbox, Sequenced},
     interaction::{self, UseItemOn},
     inventory,
-    island::{Borrow, Island, IslandAccess, IslandDrive, Islands, Posted},
+    island::{Borrow, BorrowClass, Island, IslandAccess, IslandDrive, Islands, Posted},
     island_pool::{IslandPool, MAX_ISLAND_THREADS, Wait},
     lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
@@ -116,6 +116,17 @@ pub struct WorldConfig {
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
     /// ≥ 1 = 常驻后台线程。区块内容和线程数无关，只有交付的时刻可能不同。
     pub chunk_worker_threads: usize,
+    /// 世界生成两份全进程缓存的上限和空闲释放秒数（`bamboo.toml` 的三个键）。
+    /// 只影响内存和速度，不影响生成结果。
+    ///
+    /// Limits and idle-release delay of the two process-wide worldgen caches
+    /// (three `bamboo.toml` keys). They affect memory and speed, never output.
+    pub worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings,
+    /// 自然刷怪按玩家算上限（默认开）；关掉只剩官方的全局上限。
+    ///
+    /// Per-player natural spawn caps (on by default); off keeps only the
+    /// vanilla global cap.
+    pub spawn_per_player_cap: bool,
     /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
     pub mail_budget: MailBudget,
     /// 岛的 tick 线程数（岛的实施计划第 6 节第 7 步）。0 = 齐步：岛在世界线程上内联跑，
@@ -191,12 +202,14 @@ impl Default for WorldConfig {
             entity_threads: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
+            worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings::default(),
+            spawn_per_player_cap: true,
             mail_budget: MailBudget::default(),
             island_threads: crate::island::default_island_threads(),
             islands: crate::island::default_islands(),
             island_dead_timeout: crate::island::default_island_dead_timeout(),
             world_dir: None,
-            world_gen: crate::world_options::WorldGenConfig::default(),
+            world_gen: crate::world_options::WorldGenConfig::flat_template(),
             spawn_radius: None,
             broadcast_console_to_ops: true,
             bench: None,
@@ -505,7 +518,10 @@ impl World {
             .and_then(|session| session.loaded_world_gen())
             .cloned()
             .unwrap_or_else(|| config.world_gen.clone());
-        let staged = !infinite_flat && !world_gen.level_type.is_flat();
+        let staged = !infinite_flat
+            && (!world_gen.level_type.is_flat()
+                || world_gen.generate_structures
+                || world_gen.flat != crate::world_options::FlatSettings::default());
         if let Some(save) = save.as_mut() {
             save.set_world_gen(world_gen.clone());
         }
@@ -643,8 +659,10 @@ impl World {
                     ..Default::default()
                 });
         }
+        world.islands.region.spawn_per_player_cap = config.spawn_per_player_cap;
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
+        crate::worldgen_cache::configure(config.worldgen_cache);
         if staged {
             // 真生成比超平坦模板慢得多，默认就用计算池把它挪出世界线程；配置文件
             // 显式给了 `chunk_worker_threads` 就照给的值（0 = 仍然内联）。
@@ -1673,12 +1691,14 @@ impl World {
         #[cfg_attr(not(test), allow(unused_mut))]
         let mut borrow = borrow;
         #[cfg(test)]
-        if self.islands.world_view_off && matches!(borrow, Borrow::World | Borrow::Islands(_)) {
+        if self.islands.world_view_off && matches!(borrow, Borrow::World(_) | Borrow::Islands(..)) {
             borrow = Borrow::All;
         }
         #[cfg(test)]
-        if self.islands.borrow_all_islands && matches!(borrow, Borrow::Islands(_)) {
-            borrow = Borrow::World;
+        if self.islands.borrow_all_islands
+            && let Borrow::Islands(_, class) = &borrow
+        {
+            borrow = Borrow::World(*class);
         }
         // 按需借（计划 4.5.1）：先取「不在主控手里」的岛名单，再 lift 借进来的岛；
         // lift 过的槽位看起来也不在，晚取会多投一份 fan-out 帧。
@@ -1687,14 +1707,14 @@ impl World {
         // it later would post an extra fan-out copy.
         let away = self.islands.away_ids();
         let absent = self.islands.away_players();
-        if matches!(borrow, Borrow::World | Borrow::Islands(_)) {
+        if matches!(borrow, Borrow::World(_) | Borrow::Islands(..)) {
             // 全拼兜底走原来的三段；按需借只并算出来的那几个岛，其余岛只借玩家。
             // Full-join fallback keeps the old three stages; on-demand joins
             // only the planned islands and lends players from the rest.
             let joining = Instant::now();
             let unified = match &borrow {
-                Borrow::World => self.islands.unify(into),
-                Borrow::Islands(ids) => self.islands.unify_subset(into, ids),
+                Borrow::World(_) => self.islands.unify(into),
+                Borrow::Islands(ids, _) => self.islands.unify_subset(into, ids),
                 _ => unreachable!("上面已经筛过"),
             };
             let joined = joining.elapsed();
@@ -1727,18 +1747,45 @@ impl World {
             let dividing = Instant::now();
             self.islands.divide(into, unified);
             let divided = dividing.elapsed();
-            let borrowed = match &borrow {
-                Borrow::World => self.islands.ids().len() as u64,
-                Borrow::Islands(ids) => ids.len() as u64,
-                _ => 0,
+            let (borrowed, class, fallback) = match &borrow {
+                Borrow::World(class) => (self.islands.ids().len() as u64, *class, true),
+                Borrow::Islands(ids, class) => (ids.len() as u64, *class, false),
+                _ => (0, BorrowClass::Other, false),
             };
+            #[cfg(test)]
+            {
+                self.islands.last_borrowed = borrowed as usize;
+                self.islands.last_fallback = fallback;
+            }
             let profiler = self.profiler();
             profiler.record_duration(Metric::IslandUnify, joined);
             profiler.record_duration(Metric::IslandWorldCommand, worked);
             profiler.record_duration(Metric::IslandDivide, divided);
             profiler.record(Metric::IslandBorrowedIslands, borrowed);
-            if matches!(borrow, Borrow::World) {
+            if fallback {
                 profiler.record(Metric::IslandWorldCommandFallbacks, 1);
+            }
+            // 每类命令各记一条「借了几个岛」/「兜底了一次」（计划 4.5.1 第 8 节）。
+            // One borrowed-island sample and one fallback sample per class
+            // (plan 4.5.1, section 8).
+            let borrowed_metric = match class {
+                BorrowClass::Other => None,
+                BorrowClass::Gamemode => Some(Metric::IslandBorrowedGamemode),
+                BorrowClass::Hurt => Some(Metric::IslandBorrowedHurt),
+                BorrowClass::Effect => Some(Metric::IslandBorrowedEffect),
+                BorrowClass::Execute => Some(Metric::IslandBorrowedExecute),
+            };
+            if let Some(metric) = borrowed_metric {
+                profiler.record(metric, borrowed);
+                if fallback {
+                    let metric = match class {
+                        BorrowClass::Gamemode => Metric::IslandFallbackGamemode,
+                        BorrowClass::Hurt => Metric::IslandFallbackHurt,
+                        BorrowClass::Effect => Metric::IslandFallbackEffect,
+                        _ => Metric::IslandFallbackExecute,
+                    };
+                    profiler.record(metric, 1);
+                }
             }
             self.publish_global();
             self.post_fan_out(&away, fan_out);
@@ -1747,7 +1794,7 @@ impl World {
         let away = match borrow {
             Borrow::All => away,
             Borrow::PlayersOf(_) => Vec::new(),
-            Borrow::World | Borrow::Islands(_) => unreachable!("上面已经返回"),
+            Borrow::World(_) | Borrow::Islands(..) => unreachable!("上面已经返回"),
         };
         let gathered = self.islands.gather(into, &borrow);
         let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
@@ -2822,9 +2869,15 @@ impl World {
             PlayRequest::PlayerInput { flags } => {
                 entity_sync::on_player_input(region, player, flags);
             }
-            PlayRequest::PlayerCommand { action } => {
-                entity_sync::on_player_command(region, player, action);
+            PlayRequest::PlayerCommand { action, data } => {
+                entity_sync::on_player_command(region, player, action, data);
             }
+            PlayRequest::MoveVehicle {
+                position,
+                yaw,
+                pitch,
+                on_ground,
+            } => crate::riding::on_move_vehicle(region, player, position, yaw, pitch, on_ground),
             PlayRequest::PlayerAbilities { flags } => {
                 entity_sync::on_player_abilities(region, player, flags);
             }
@@ -3378,6 +3431,9 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_partition_phase();
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::ScheduledTicks);
+    // 官方 `chunkSource.tick` 先刷怪再跑随机刻，位置照它。
+    // Vanilla `chunkSource.tick` spawns before the random ticks; keep that order.
+    crate::natural_spawn::tick(region);
     interaction::run_random_ticks(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
@@ -3387,6 +3443,14 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::BlockEvents);
     interaction::run_entity_ticks(island.entity_threads, region);
+    // 乘客的 `rideTick`：载具这一刻的位置定了，骑手的位置跟上来，要下车的在这里下车。
+    // 官方把乘客紧跟在载具后面 tick，这里放在实体阶段之后、玩家自己的 tick 之前。
+    //
+    // The passenger's `rideTick`: the vehicle position is settled for this tick, so
+    // riders follow it and dismounts land here. Vanilla ticks passengers right
+    // after the vehicle; this runs after the entity phase and before the player's
+    // own tick.
+    crate::riding::tick(region);
     if island.entity_threads == 0 {
         region.profiler.lap(Phase::Entities);
     }
@@ -3407,6 +3471,13 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     lectern::tick(region);
     chat::tick_spam_throttlers(region);
     crate::drops::tick_drop_throttle(region);
+    // `Player.aiStep`：攻击冷却计数每刻加一，主手换物品时清零。
+    // 放在玩家 tick 开头，和官方实体 tick 在 `ServerPlayer.doTick` 之前一致。
+    //
+    // `Player.aiStep`: increment the attack-cooldown ticker each tick and reset
+    // it on a main-hand item swap. Runs at the start of the player tick, like
+    // vanilla's entity tick before `ServerPlayer.doTick`.
+    crate::player_attack::tick(region);
     // 官方 `ServerPlayer.doTick` 里 `set_health` 在 `set_experience` 之前。
     // 伤害冷却递减、按需补 `set_health`。
     //
@@ -3421,6 +3492,10 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     crate::player_environment::tick_environment(region);
     // `LivingEntity.updateUsingItem`：吃东西的剩余刻数和完成结算。
     crate::player_consume::tick(region);
+    // `LivingEntity.updateUsingItem` 的弓 / 弩分支。
+    //
+    // The bow and crossbow branch of `LivingEntity.updateUsingItem`.
+    crate::player_weapon::tick(region);
     // 移动 / 跳跃 / 攻击 / 挖掘累计的饥饿消耗在 tick 末尾落到 FoodData。
     crate::player_exhaustion::flush(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
@@ -3500,6 +3575,13 @@ impl Master {
         // 没接 SaveSession（测试 / oracle）时保持匀速写盘开启；接了就照 `noSave`。
         let saves_enabled = self.save.as_ref().is_none_or(|save| save.auto_save());
         self.host.set_saves_enabled(saves_enabled);
+        // 生成期刷怪读游戏规则 `SPAWN_MOBS`。
+        // World-generation spawning reads the `SPAWN_MOBS` rule.
+        let spawn_mobs = self
+            .global
+            .rules()
+            .bool(mc_bamboo_data::gamerules::SPAWN_MOBS);
+        self.host.set_spawn_mobs(spawn_mobs);
         self.host.tick(island, self.director_tick);
     }
 

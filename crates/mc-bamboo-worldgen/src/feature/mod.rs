@@ -20,6 +20,7 @@ pub mod dispatch;
 #[cfg(test)]
 pub mod dripstone_probe;
 pub mod dripstone_utils;
+pub mod flat;
 pub mod fossil;
 pub mod freeze_top_layer;
 pub mod geode;

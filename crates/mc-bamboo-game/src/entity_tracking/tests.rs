@@ -791,12 +791,15 @@ fn mob_events_reach_trackers_and_sounds_reach_listeners_in_range() {
             MobEvent::Damage {
                 kind: DamageKind::Generic,
                 attacker: None,
+                direct: None,
             },
             MobEvent::Sound {
                 sound: "minecraft:entity.cow.ambient",
                 volume: 1.0,
                 pitch: 1.0,
                 position: Vec3::new(0.5, -60.0, 0.5),
+                hostile: false,
+                seed: None,
             },
             MobEvent::Death,
         ],
@@ -808,4 +811,62 @@ fn mob_events_reach_trackers_and_sounds_reach_listeners_in_range() {
     assert_eq!(received(2), [SOUND], "范围内没跟踪的人只听得到声音");
     assert!(received(3).is_empty(), "正好 16 格听不到（严格小于）");
     assert!(received(4).is_empty(), "远处的人什么都收不到");
+}
+
+/// 戴头盔的僵尸：配对包最后是 `set_equipment`（只有头盔一个槽），头盔的护甲修饰符是临时的，
+/// 也跟着 `update_attributes` 发出去（官方 `AttributeSnapshot` 带全部修饰符）。
+#[test]
+fn a_zombie_pairs_with_its_equipment_and_transient_armor() {
+    use mc_bamboo_blocks::entity::{Entity, mob::equipment::EquipmentUpdate};
+    use mc_bamboo_protocol::packet::play::{EquipmentSlot, SetEquipment};
+
+    let mut zombie = Entity::zombie(Vec3::new(0.5, 64.0, 0.5));
+    zombie.id = 7;
+    let helmet = ItemStack::new(mc_bamboo_data::items::IRON_HELMET, 1);
+    if let Some(mob) = zombie.kind.mob_mut() {
+        mob.equipment.set(EquipmentSlot::Head, helmet.clone());
+        let update = mob.equipment.detect_updates(&mut mob.attributes);
+        assert_eq!(
+            update,
+            EquipmentUpdate {
+                hand_swap: false,
+                changes: vec![(EquipmentSlot::Head, helmet.clone())],
+            }
+        );
+    }
+    let row = zombie.split();
+    let snapshot = Snapshot::of(&row.public);
+    let tracked = TrackedEntity::new(&snapshot);
+    let packets = tracked.pairing_packets(&snapshot);
+    let slots = [(EquipmentSlot::Head, &helmet)];
+    let expected = mc_bamboo_protocol::frame::packet_body(&SetEquipment::new(7, &slots).unwrap());
+    assert_eq!(packets.last(), Some(&expected));
+    let attributes = &packets[packets.len() - 2];
+    let needle = b"minecraft:armor.helmet";
+    assert!(
+        attributes
+            .windows(needle.len())
+            .any(|window| window == needle),
+        "the helmet's armor modifier is synced"
+    );
+}
+
+/// 海龟的 18、19 变回默认时要发两条布尔，不能落到牛的花色上。
+///
+/// A turtle's 18 and 19 must fall back to the two booleans, not to the cow
+/// variants.
+#[test]
+fn turtle_metadata_defaults_are_the_two_booleans() {
+    use mc_bamboo_blocks::entity::mob::MobType;
+    use mc_bamboo_data::entity_types as facts;
+    use mc_bamboo_protocol::packet::play::EntityData;
+
+    assert_eq!(
+        default_data_for_type(facts::TURTLE_HAS_EGG, MobType::Turtle),
+        EntityData::TurtleHasEgg(false)
+    );
+    assert_eq!(
+        default_data_for_type(facts::TURTLE_LAYING_EGG, MobType::Turtle),
+        EntityData::TurtleLayingEgg(false)
+    );
 }

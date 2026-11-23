@@ -5,7 +5,7 @@
 （`CARVERS`），以及后续 `features` / 结构 / 生成期光照接进 Director 的 `Staged` 流水线。
 地物、结构、生成期光照（含 `LIGHT` 阶段的 FEATURES 后输入）、`PostProcessing` 位置表和
 `pale_moss` / 苍白橡树都已逐方块 / 逐格对拍；生成期刷怪（`spawn`）仍是空实现，
-超平坦结构等剩余缺口见文末「还没做」和
+其他剩余缺口见文末「还没做」和
 [`docs/worldgen-remaining.md`](worldgen-remaining.md)。非 `full` 区块续跑由
 `worldgen-resume` 分支单独负责，这一篇不覆盖。
 
@@ -86,8 +86,9 @@ Beardifier；`beard` 子命令对拍它的单点和成批两条路径（见 `doc
 `MultiNoiseBiomeSource.createResolverForChunk` 对六个气候函数在 quart 体积
 `(4, height/4, 4)`、步长 `(4,4,4)` 上各做一次 `sampleVolume`，再 `Climate.target` 量化成定点数查
 R 树。填进区块时 `section` 从下到上、段内 `x → y → z`，和
-`LevelChunkSection.fillBiomesFromNoise` 一样。R 树的 `lastResult` 是每线程一格 `Cell`：平局时选
-哪条依赖查询顺序，所以顺序也照搬。
+`LevelChunkSection.fillBiomesFromNoise` 一样。R 树的 `lastResult` 是每线程一格、按
+`ParameterList` 编号索引的线程本地状态（官方是 `ThreadLocal`）：平局时选哪条依赖查询顺序，
+所以顺序也照搬。
 
 **`NOISE`**：`doFill` 先对整块 `16 × height × 16` 体积做**一次** `finalDensity.sampleVolume`，
 然后 `z → x → y`（y 从顶到底）逐点问 `Aquifer.computeSubstance`。含水层的六条密度函数走
@@ -577,7 +578,7 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   `WorldOptions.parseSeed`），新世界默认 `normal`；`World::build` 用
   `PipelineKind::Staged`、把 `WorldState.seed` 设成配置种子、并默认起一个小计算池
   （`chunk_worker_threads` 未配时取核数一半、夹在 1..=4），让几十毫秒的地形生成
-  不占住 20 TPS 的世界线程。flat 配置仍走原来的超平坦模板 + 一步流水线，行为不变。
+  不占住 20 TPS 的世界线程。自定义或启用结构的 flat 也走 `Staged`。只有关闭结构的默认 flat 保留一步模板。
 * 十个 `ChunkStatus` 阶段是纯函数 `(阶段, 位置, 配置) → RegionColumn`：
   `structure_starts` / `structure_references` 现在按纯函数重算起点和引用（见文末
   「结构阶段」）；`biomes` 透传；`terrain` 一步同时算 quart 群系和
@@ -587,10 +588,15 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   3×3 quart 群系视图和 `possibleBiomes` 并集，不再是早期记录里的 uncached 单点群系。
   `initialize_light` / `spawn` / `full` 原样透传，`light` 已算生成期光照（见下），
   `features` 见下。
-* 数据交接：`Worldgen` 解析一次后按线程 `Box::leak`，`chunk::Generator` 每条计算线程
-  各缓存一份（它的 `ParameterList` 用 `Cell` 记 R 树 `lastResult`，官方是
-  `ThreadLocal`，不能跨线程共享）。生成的方块/群系按官方 `PalettedContainer` 下标写进
-  24 个 `SectionParts`，组装成 `ChunkColumn` / `RegionColumn`。
+* 数据交接：解析好的只读 `Worldgen`（噪声、密度函数、群系表、地物 / 结构定义）经
+  `Worldgen::shared()` 的 `OnceLock` 全进程只解析一次，所有生成线程引用同一份
+  `&'static` 数据（2026-11-21，`op-wgmem`）；`chunk::Generator` 每条计算线程仍各缓存
+  一份，保留随机源、临时缓冲等按线程可变的工作状态。群系 R 树的 `lastResult`
+  （官方 `Climate.RTree` 是实例上的 `ThreadLocal`）从 `ParameterList` 里的 `Cell`
+  改成按「线程 + 表」隔离的线程本地状态，共享数据因此是 `Sync` 的只读数据，结果
+  逐字节不变（见 `docs/performance-optimizations.md` 第 24 节）。生成的方块/群系按
+  官方 `PalettedContainer` 下标写进 24 个 `SectionParts`，组装成
+  `ChunkColumn` / `RegionColumn`。
 * 存档：`data/minecraft/world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 写出
   种子与维度生成器（`flat` 写 `minecraft:flat` + 地层，噪声世界写 `minecraft:noise` +
   settings 注册名），读档时以它为准，空 `level-seed` 的随机种子重启后固定。
@@ -611,9 +617,9 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   世界线程（`director_host.rs` 的 `partials`）把每个区块的 CARVERS 半成品存成不可变
   `Arc<GeneratedChunk>`，发任务时按位置挂到 `ChunkWork::Generate` 上——全是 `Arc` 克隆，
   不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算；
-  这份 CARVERS 缓存是**全进程共用一份**、按总字节 256 MiB 封顶（16 个分片各一把锁，
-  锁内只查表 / 插入、生成在锁外，值是不可变 `Arc`，命中不复制 400 KiB 方块数组，
-  见 `performance-optimizations.md` 第 12 节）。地形是纯函数，命中、淘汰和分片顺序
+  这份 CARVERS 缓存是**全进程共用一份**（16 个分片），载荷预算默认 128 MiB（`bamboo.toml` 的 `worldgen_terrain_cache_mb`）。
+  热层的值是不可变 `Arc`，命中不复制方块；按预算淘汰的条目压缩进冷层，冷命中在锁外解码。
+  生成、解码和热层淘汰后的压缩都在分片锁外（压缩完再短暂拿锁放进冷层）。地形是纯函数，命中、淘汰和分片顺序
   都不改变结果。`terrain` 阶段交回世界线程的也是同一个 `Arc`，`merge_generated`
   直接 `Arc::clone` 进 `partials`。发出后世界线程不再改这份 `Arc`（只在
   `Forgot` / 完工时移除）。
@@ -630,9 +636,11 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   合、同格先写的赢——与线程调度、回执到达顺序无关（`merge_feature_writes`，
   `performance-optimizations.md` 18.10）。
 * **确定性重算**：Bamboo 的调度不保证 8 个邻居的 `features` 都在中心组装前落地，所以中心
-  这次 `features` 用 `cached_feature_run`（线程本地缓存）纯函数重算 8 个邻居中心写进来的
+  这次 `features` 用 `cached_feature_run`（全进程分片缓存）纯函数重算 8 个邻居中心写进来的
   增量，保证本区块需要的集合从自己的 features 结果就齐。`features` 是纯函数、随机数只从
-  种子和坐标派生，命中缓存不改结果。
+  种子和坐标派生，命中缓存不改结果。两份缓存记录邻域消费者的完成位图，已知消费者全完成
+  时释放；未请求的外圈仍可复用，最终由预算淘汰或空闲释放回收。Director 的阶段依赖与
+  `partials` 的所有权保持不变。见 [缓存配置](configuration.md#世界生成缓存)。
 * **验收**：`gen-world <java> --through features`（Bamboo 调**游戏里这份**
   `game_features_with_mask_skipping`）逐方块比 3×3 九宫格；不带白名单时仍保留旧的
   `--ore-only` 语义，`--all-features` 跑全部 11 step / 全部地物，`--feature-types` /
@@ -640,8 +648,8 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   `tools/mc-bamboo-vanilla/feature-e2e.sh` 的 28 个类型全部 PASS；本轮把
   `--all-features --seeds 6 --chunks 36 --salt 7` 扩到 216 中心 / 191102976 格 0 不一致，
   三种噪声预设的 `chunkgen --through features` 也各 216 中心 / 0 skipped / 0 不一致。
-  `world::staged_tests::one_and_four_threads_generate_identical_feature_blocks`
-  用 1 线程和 4 线程计算池生成同一片 3×3 normal 区块，逐格方块相同。
+  `world::staged_tests::worker_counts_generate_identical_feature_blocks`
+  用 1、2、4、8 线程计算池生成同一片 3×3 normal 区块，逐格方块及两层光照相同。
 
 和官方的**语义差异**（写进本轮汇报的疑点清单）：官方邻居溢出的写来自各邻居区块跑到
 `FEATURES` 时的 `WorldGenRegion`，Bamboo 改为中心纯函数重算；增量按中心的固定先后
@@ -668,6 +676,16 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
 天空光 / 方块光；Bamboo 侧逐格比官方 3×3 方块、自己的光引擎、游戏 LIGHT 阶段三组。
 默认 6 个无结构场景 + 3 个带结构场景 0 不一致，`--break-carvers` 把游戏输入退回
 CARVERS 时报 5147 处不一致（改坏确认）。`gen-light` 只覆盖光引擎，不覆盖流水线选的方块。
+
+### 超平坦的结构、地物与湖
+
+`FlatLevelSource.createState` 的固定群系过滤、`structure_overrides` 的可选集合与
+`generate-structures` 共用现有结构起点、引用、放置和存档链路。区别是 flat 用常数
+基础高度，不加 Beardifier；要塞环用种子 0。地物按固定群系调整后的序号播种，
+熔岩湖可单独开关，非阻挡地层到末步才填。`flat-world` 用官方
+`buildTerrain` / `createStructures` / `createReferences` / `applyBiomeDecoration`
+逐格对拍，见 `docs/worldgen-remaining.md` §1.3。超平坦仍不生成期刷怪；
+光照和续生成走已有路径，本轮没有逐格对拍这两个 flat 阶段。
 
 ### `PostProcessing` 位置表和 `pale_moss` 装饰器（第 0 期第 3、4 项）
 
@@ -810,7 +828,8 @@ p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算�
 **计算池默认线程数建议**：保留 `min(4, 核数/2) = 4` 作为默认。实测它把世界线程
 稳稳压在 ~1 ms/tick，已经达成「不拖慢 tick」这个首要目标；本机 ~34 ms/区块、4 线程
 理论约 120 区块/秒，但已被 6 名飞行玩家打满，再加线程会线性增加常驻内存
-（每线程一份 `Worldgen` + `Generator`），而这台 31 GB 机器当时已用到 97%。期望更多
+（每线程一份 `Generator`；解析好的 `Worldgen` 现在全进程共用一份，见
+`docs/performance-optimizations.md` 第 24 节），而这台 31 GB 机器当时已用到 97%。期望更多
 玩家同时在噪声世界飞行、且内存宽裕的部署，再显式把 `chunk_worker_threads` 提到 8，
 以 `compute_backlog` 不再持续增长、`chunk_latency` 回落到亚秒为准；**不要**因为这次
 测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测
@@ -1089,10 +1108,6 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   `TheEndBiomeSource`。`features_per_step` 只按主世界群系导出全局 index，下界 / 末地
   placed feature 会标 `unsupported`；末地岛 / 黑曜石柱 / 折跃门 / 紫颂 / 下界菌 /
   下界要塞 / 堡垒遗迹 / 末地城 / 末影龙都没做。游戏侧仍只有主世界一个维度。
-* 超平坦 `features` / `lakes` / `structure_overrides`：五个 codec 字段全部解析并
-  写进 `world_gen_settings.dat`，`flat-world` 逐字段 / 逐方块对拍 0 不一致；但
-  `FlatGenerator` 只填地层和群系，不生成地物 / 湖 / 结构，关结构时也没有官方
-  `ChunkGeneratorStructureState.createForFlat` 的覆盖行为。
 * `BlendingData` / `Blender` / `BelowZeroRetrogen` 的非空路径（老存档升级、旧区块混合）
   没做：Rust 只有 `Blender.empty()` 分支，存档认识这些键但不写，`DataVersion != 5023`
   明确报错，老布局当空世界；所以当前读老存档**走不到**非空 Blender。

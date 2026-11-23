@@ -102,6 +102,7 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
     player.take_xp_delay = 0;
     player.recorded_criteria = crate::scoreboard::UNRECORDED_CRITERIA;
     player.entity_ticks = 0;
+    player.combat_memory = Default::default();
     player.inventory_cursor = crate::menu::station::InventoryCursor::new();
     player.mining = crate::interaction::mining::Mining::default();
     player.prediction = crate::interaction::BlockPrediction::default();

@@ -76,13 +76,14 @@ pub use interact::{
     run_block_event_phase_with_cache, run_due_ticks, run_due_ticks_with_cache, run_entity_tick,
     run_scheduled_ticks, run_scheduled_ticks_with_cache, use_item, use_item_on,
     use_item_on_checked, use_item_on_checked_with_stack, use_item_on_with_stack,
+    use_item_with_stack,
 };
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use item_use::{StickSelect, debug_stick_select};
 pub use level::{
     ArchiveRedstone, BedProblem, ChunkRedstone, Effect, EntityTables, LecternFacts, Level,
-    LevelEntities, LevelSideState, LevelTables, Observation, RedstoneEntry, RedstoneMemory,
-    Trigger, custom_sound_name, intern_custom_sound,
+    LevelEntities, LevelSideState, LevelTables, Observation, PlayerDeathDrops, PlayerHurtNow,
+    RedstoneEntry, RedstoneMemory, Trigger, custom_sound_name, intern_custom_sound,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};

@@ -1953,6 +1953,8 @@ dependencies = [
 name = "mc-bamboo-game"
 version = "0.0.0"
 dependencies = [
+ "chrono",
+ "libc",
  "mc-bamboo-blocks",
  "mc-bamboo-command",
  "mc-bamboo-core",
@@ -1973,6 +1975,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

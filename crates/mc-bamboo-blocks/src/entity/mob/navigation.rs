@@ -30,6 +30,7 @@ pub struct NavMob {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Navigation {
     pub path: Option<Path>,
+    pub avoid_sun: bool,
     pub speed_modifier: f64,
     pub tick: i32,
     pub last_stuck_check: i32,
@@ -44,6 +45,11 @@ pub struct Navigation {
     /// 绝对时刻（岛的时钟），合并时要平移。
     pub time_last_recompute: i64,
     pub flags: EvaluatorFlags,
+    /// 两栖求值器已经跑过一次：生物的 `PathType.WATER` 代价从此是 0。
+    ///
+    /// The amphibious evaluator has run once: the mob's `PathType.WATER` malus is 0
+    /// from then on.
+    pub cleared_water_malus: bool,
     pub target_pos: Option<BlockPos>,
     pub reach_range: i32,
     pub max_visited_nodes_multiplier: f32,
@@ -51,6 +57,12 @@ pub struct Navigation {
     pub max_visited_nodes: i32,
     pub is_stuck: bool,
     pub required_path_length: f32,
+    /// `WallClimberNavigation`：路径走完后直接朝 `path_to_position` 推三维坐标。
+    ///
+    /// `WallClimberNavigation`: after the path ends, push straight at `path_to_position`.
+    pub wall_climber: bool,
+    /// `WallClimberNavigation.pathToPosition`。
+    pub path_to_position: Option<BlockPos>,
 }
 
 impl Navigation {
@@ -58,6 +70,7 @@ impl Navigation {
     pub fn new(follow_range_base: f64) -> Self {
         Self {
             path: None,
+            avoid_sun: false,
             speed_modifier: 0.0,
             tick: 0,
             last_stuck_check: 0,
@@ -70,12 +83,15 @@ impl Navigation {
             has_delayed_recomputation: false,
             time_last_recompute: 0,
             flags: EvaluatorFlags::default(),
+            cleared_water_malus: false,
             target_pos: None,
             reach_range: 0,
             max_visited_nodes_multiplier: 1.0,
             max_visited_nodes: mth::floor(follow_range_base * 16.0),
             is_stuck: false,
             required_path_length: 16.0,
+            wall_climber: false,
+            path_to_position: None,
         }
     }
 
@@ -106,9 +122,23 @@ impl Navigation {
         self.flags.can_float
     }
 
-    /// `GroundPathNavigation.canUpdatePath`。
-    fn can_update_path(mob: &NavMob) -> bool {
-        mob.path.on_ground || mob.in_liquid
+    /// `WaterBoundPathNavigation` 的 `allowBreaching`；地面导航是 `None`。
+    ///
+    /// `WaterBoundPathNavigation.allowBreaching`; `None` for ground navigation.
+    const fn water(&self) -> Option<bool> {
+        self.flags.swim
+    }
+
+    /// `GroundPathNavigation.canUpdatePath` / `WaterBoundPathNavigation.canUpdatePath`。
+    fn can_update_path(&self, mob: &NavMob) -> bool {
+        if self.flags.amphibious {
+            // `AmphibiousPathNavigation.canUpdatePath` 恒真。
+            return true;
+        }
+        match self.water() {
+            Some(allow_breaching) => allow_breaching || mob.in_liquid,
+            None => mob.path.on_ground || mob.in_liquid,
+        }
     }
 
     /// `moveTo(x, y, z, speed)`。
@@ -118,14 +148,24 @@ impl Navigation {
     }
 
     /// `moveTo(entity, speed)`：`GroundPathNavigation` 也走地面搜索，终点是实体的方块坐标。
+    /// `reach` 由调用方按官方 `createPath(entity, reach)` 给；近战目标是 0。
     pub fn move_to_entity(
         &mut self,
         view: &dyn BlockView,
         mob: &NavMob,
         entity_pos: Vec3,
         speed: f64,
+        reach: i32,
     ) -> bool {
-        let path = self.create_path(view, mob, BlockPos::containing(entity_pos), 1);
+        // 这是三参数的 `moveTo(entity, reach, speed)`：`WallClimberNavigation` 只改写了
+        // 两参数版本（找不到路径也返回真），三参数版本走基类，空路径就返回假、不改速度。
+        // 蜘蛛的目标（`MeleeAttackGoal.tick`）只调三参数版本；`createPath` 照样记下目标方块。
+        // This is the three-argument `moveTo(entity, reach, speed)`. `WallClimberNavigation`
+        // only overrides the two-argument form (which succeeds without a path); the
+        // three-argument form is the base one: a null path returns false and keeps the
+        // speed. Spider goals (`MeleeAttackGoal.tick`) only call this form, and
+        // `createPath` still records the destination block.
+        let path = self.create_path(view, mob, BlockPos::containing(entity_pos), reach);
         path.is_some() && self.move_to_path(view, mob, path, speed)
     }
 
@@ -147,7 +187,7 @@ impl Navigation {
         if self.is_done() {
             return false;
         }
-        self.trim_path(view);
+        self.trim_path(view, mob.path.position);
         if self.path.as_ref().is_none_or(|path| path.node_count() == 0) {
             return false;
         }
@@ -166,11 +206,42 @@ impl Navigation {
         pos: BlockPos,
         reach: i32,
     ) -> Option<Path> {
+        if self.wall_climber {
+            // `WallClimberNavigation.createPath`：先记下目标方块。
+            // `WallClimberNavigation.createPath` records the destination first.
+            self.path_to_position = Some(pos);
+        }
+        // `WaterBoundPathNavigation` 不覆盖 `createPath`：不查加载，也不找地面。
+        // `AmphibiousPathNavigation` 同样用基类实现。
+        // `WaterBoundPathNavigation` keeps the base `createPath`: no loaded check and no
+        // surface search. `AmphibiousPathNavigation` does the same.
+        if self.water().is_some() || self.flags.amphibious {
+            let max_path_length = self.max_path_length(mob.follow_range);
+            return self.create_path_to(view, mob, pos, reach, max_path_length);
+        }
         if !view.is_loaded(pos) {
             return None;
         }
         let pos = find_surface_position(view, pos);
-        self.create_path_to(view, mob, pos, reach)
+        let max_path_length = self.max_path_length(mob.follow_range);
+        self.create_path_to(view, mob, pos, reach, max_path_length)
+    }
+
+    /// `PathNavigation.createPath(BlockPos, reachRange, maxPathLength)`：`GroundPathNavigation`
+    /// 没有覆写这一个，所以不找地表，路径长度上限由调用方给（长跳用 8）。
+    ///
+    /// `PathNavigation.createPath(BlockPos, reachRange, maxPathLength)`, which
+    /// `GroundPathNavigation` does not override: no surface search, and the caller gives
+    /// the path length cap (8 for long jumps).
+    pub fn create_path_within(
+        &mut self,
+        view: &dyn BlockView,
+        mob: &NavMob,
+        pos: BlockPos,
+        reach: i32,
+        max_path_length: f32,
+    ) -> Option<Path> {
+        self.create_path_to(view, mob, pos, reach, max_path_length)
     }
 
     /// `PathNavigation.createPath(Set, regionOffset, offsetUpward, reach, maxPathLength)`。
@@ -180,11 +251,12 @@ impl Navigation {
         mob: &NavMob,
         pos: BlockPos,
         reach: i32,
+        max_path_length: f32,
     ) -> Option<Path> {
         if mob.path.position.y < f64::from(view.min_y()) {
             return None;
         }
-        if !Self::can_update_path(mob) {
+        if !self.can_update_path(mob) {
             return None;
         }
         if let Some(path) = &self.path
@@ -197,11 +269,19 @@ impl Navigation {
             mob: mob.path,
             flags: self.flags,
             target: pos,
-            max_distance_from_start: self.max_path_length(mob.follow_range),
+            max_distance_from_start: max_path_length,
             reach_range: reach,
             max_visited_nodes: self.max_visited_nodes,
             max_visited_nodes_multiplier: self.max_visited_nodes_multiplier,
         };
+        // `AmphibiousNodeEvaluator.prepare` 把生物的水代价设成 0，`done` 只还原另外两种，
+        // 所以第一次寻路之后水代价就一直是 0（见 [`Mob::pathfinding_malus`]）。
+        // `AmphibiousNodeEvaluator.prepare` zeroes the mob's water malus and `done` only
+        // restores the other two, so it stays 0 after the first search (see
+        // [`Mob::pathfinding_malus`]).
+        if self.flags.amphibious {
+            self.cleared_water_malus = true;
+        }
         let path = find_path(view, &request);
         if let Some(path) = &path {
             self.target_pos = Some(path.target);
@@ -220,6 +300,11 @@ impl Navigation {
 
     /// `PathNavigation.tick`。返回要交给 `MoveControl.setWantedPosition` 的位置和速度。
     pub fn tick(&mut self, view: &dyn BlockView, mob: &NavMob) -> Option<(Vec3, f64)> {
+        if self.wall_climber && self.is_done() {
+            // `WallClimberNavigation.tick` 走完路径的那一支。
+            // The finished-path branch of `WallClimberNavigation.tick`.
+            return self.wall_climb_target(mob);
+        }
         self.tick += 1;
         if self.has_delayed_recomputation {
             self.recompute_path(view, mob);
@@ -228,12 +313,12 @@ impl Navigation {
             return None;
         }
         let width = mob.path.width;
-        if Self::can_update_path(mob) {
+        if self.can_update_path(mob) {
             self.follow_the_path(view, mob);
         } else if let Some(path) = &mut self.path
             && !path.is_done()
         {
-            let temp = temp_mob_pos(view, mob, self.flags.can_float);
+            let temp = temp_mob_pos(view, mob, self.flags);
             let next = path.next_entity_pos(width);
             if temp.y > next.y
                 && !mob.path.on_ground
@@ -247,14 +332,49 @@ impl Navigation {
             return None;
         }
         let next = self.path.as_ref()?.next_entity_pos(width);
-        Some((
-            Vec3::new(next.x, ground_y(view, next), next.z),
-            self.speed_modifier,
-        ))
+        // `WaterBoundPathNavigation.getGroundY` 原样返回 `target.y`。
+        // `WaterBoundPathNavigation.getGroundY` returns `target.y` unchanged.
+        let y = if self.water().is_some() || self.flags.amphibious {
+            next.y
+        } else {
+            ground_y(view, next)
+        };
+        Some((Vec3::new(next.x, y, next.z), self.speed_modifier))
     }
 
     fn temp_mob_pos(&self, view: &dyn BlockView, mob: &NavMob) -> Vec3 {
-        temp_mob_pos(view, mob, self.flags.can_float)
+        temp_mob_pos(view, mob, self.flags)
+    }
+
+    /// `WallClimberNavigation.tick` 的 `else` 分支：路径走完后朝目标方块推三维坐标。
+    /// 目标已经在 `width` 以内（或目标在上方且同一列已经够近）时清掉目标。
+    ///
+    /// The `else` branch of `WallClimberNavigation.tick`: push at the destination in
+    /// 3D once the path is done, and clear it when the mob is close enough.
+    fn wall_climb_target(&mut self, mob: &NavMob) -> Option<(Vec3, f64)> {
+        let destination = self.path_to_position?;
+        let width = f64::from(mob.path.width);
+        let position = mob.path.position;
+        let inside = |x: i32, y: i32, z: i32| {
+            let dx = f64::from(x) + 0.5 - position.x;
+            let dy = f64::from(y) + 0.5 - position.y;
+            let dz = f64::from(z) + 0.5 - position.z;
+            dx * dx + dy * dy + dz * dz < width * width
+        };
+        let at_destination = inside(destination.x, destination.y, destination.z);
+        let same_column = inside(destination.x, mth::floor(position.y), destination.z);
+        if at_destination || (position.y > f64::from(destination.y) && same_column) {
+            self.path_to_position = None;
+            return None;
+        }
+        Some((
+            Vec3::new(
+                f64::from(destination.x),
+                f64::from(destination.y),
+                f64::from(destination.z),
+            ),
+            self.speed_modifier,
+        ))
     }
 
     fn follow_the_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
@@ -274,10 +394,17 @@ impl Navigation {
         let dy = (position.y - f64::from(next.y)).abs();
         let dz = (position.z - (f64::from(next.z) + 0.5)).abs();
         let limit = f64::from(self.max_distance_to_waypoint);
-        let close = dx < limit && dz < limit && dy < 1.0;
+        // `getMaxVerticalDistanceToWaypoint`：地面 1，水里 0.5。
+        // `getMaxVerticalDistanceToWaypoint`: 1 on the ground, 0.5 in water.
+        let vertical = if self.flags.swim.is_some() { 0.5 } else { 1.0 };
+        let close = dx < limit && dz < limit && dy < vertical;
+        let direct = self.flags.swim.is_some() || (self.flags.amphibious && mob.in_liquid);
         if close
             || (can_cut_corner(path.next_node().path_type)
-                && should_target_next_node_in_direction(path, temp))
+                // `Frog.FrogPathNavigation.canCutCorner`：水边不抄近路。
+                // `Frog.FrogPathNavigation.canCutCorner`: no shortcuts at the water border.
+                && !(self.flags.frog && path.next_node().path_type == PathType::WaterBorder)
+                && should_target_next_node_in_direction(view, mob, path, temp, direct))
         {
             path.advance();
         }
@@ -332,7 +459,7 @@ impl Navigation {
 
     /// `recomputePath`：方块变了以后的延迟重算。
     pub fn recompute_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
-        if mob.game_time - self.time_last_recompute > 20 && Self::can_update_path(mob) {
+        if mob.game_time - self.time_last_recompute > 20 && self.can_update_path(mob) {
             if let Some(target) = self.target_pos {
                 self.path = None;
                 self.path = self.create_path(view, mob, target, self.reach_range);
@@ -345,7 +472,7 @@ impl Navigation {
     }
 
     /// `PathNavigation.trimPath`：炼药锅格子上抬一格。
-    fn trim_path(&mut self, view: &dyn BlockView) {
+    fn trim_path(&mut self, view: &dyn BlockView, feet: Vec3) {
         let Some(path) = &mut self.path else {
             return;
         };
@@ -370,17 +497,49 @@ impl Navigation {
                 }
             }
         }
+        if self.avoid_sun
+            && !view.can_see_sky(BlockPos::containing(feet.add(Vec3::new(0.0, 0.5, 0.0))))
+            && let Some(first_sunny) = path
+                .nodes
+                .iter()
+                .position(|node| view.can_see_sky(node.pos()))
+        {
+            path.nodes.truncate(first_sunny);
+        }
     }
 
     /// `isStableDestination`：下面一格是实心渲染的。
     pub fn is_stable_destination(view: &dyn BlockView, pos: BlockPos) -> bool {
         view.block_state(pos.below()).is_solid_render()
     }
+
+    /// `isStableDestination` 的虚分派：`WaterBoundPathNavigation` 只要求这一格不是实心渲染。
+    ///
+    /// The virtual `isStableDestination`: `WaterBoundPathNavigation` only wants the cell
+    /// itself not to be solid-render.
+    pub fn stable_destination(&self, view: &dyn BlockView, pos: BlockPos) -> bool {
+        if self.flags.amphibious {
+            // `AmphibiousPathNavigation.isStableDestination`：下面不是空气。
+            return !view.block_state(pos.below()).is_air();
+        }
+        if self.water().is_some() {
+            !view.block_state(pos).is_solid_render()
+        } else {
+            Self::is_stable_destination(view, pos)
+        }
+    }
 }
 
-/// `GroundPathNavigation.getTempMobPos`。
-fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, can_float: bool) -> Vec3 {
+/// `GroundPathNavigation.getTempMobPos`；`WaterBoundPathNavigation` 取 `getY(0.5)`。
+fn temp_mob_pos(view: &dyn BlockView, mob: &NavMob, flags: EvaluatorFlags) -> Vec3 {
     let position = mob.path.position;
+    if flags.swim.is_some() || flags.amphibious {
+        // `AmphibiousPathNavigation.getTempMobPos` 和 `WaterBoundPathNavigation` 一样取
+        // `getY(0.5)`。
+        let y = position.y + f64::from(mob.path.height) * 0.5;
+        return Vec3::new(position.x, y, position.z);
+    }
+    let can_float = flags.can_float;
     Vec3::new(
         position.x,
         f64::from(surface_y(view, mob, can_float)),
@@ -443,7 +602,27 @@ fn can_cut_corner(path_type: PathType) -> bool {
         && path_type != PathType::WalkableDoor
 }
 
-fn should_target_next_node_in_direction(path: &Path, temp: Vec3) -> bool {
+/// `PathNavigation.isClearForMovementBetween(mob, start, stop, false)`：碰撞体射线不被挡。
+///
+/// `PathNavigation.isClearForMovementBetween(mob, start, stop, false)`: a collider ray
+/// that hits nothing.
+fn clear_for_movement(view: &dyn BlockView, mob: &NavMob, start: Vec3, stop: Vec3) -> bool {
+    let to = Vec3::new(stop.x, stop.y + f64::from(mob.path.height) * 0.5, stop.z);
+    view.clip_collider(start, to, mob.path.context).is_none()
+}
+
+/// `shouldTargetNextNodeInDirection`。`direct` 是这种导航有没有 `canMoveDirectly`
+/// （地面导航恒假，水中导航用 [`clear_for_movement`]）。
+///
+/// `shouldTargetNextNodeInDirection`. `direct` says whether this navigation has a
+/// `canMoveDirectly` (always false on the ground, [`clear_for_movement`] in water).
+fn should_target_next_node_in_direction(
+    view: &dyn BlockView,
+    mob: &NavMob,
+    path: &Path,
+    temp: Vec3,
+    direct: bool,
+) -> bool {
     if path.next_node_index + 1 >= path.node_count() {
         return false;
     }
@@ -457,6 +636,9 @@ fn should_target_next_node_in_direction(path: &Path, temp: Vec3) -> bool {
     let next = bottom_centre(path.next_node_pos());
     if temp.distance_to_sqr(next).partial_cmp(&(2.0 * 2.0)) != Some(std::cmp::Ordering::Less) {
         return false;
+    }
+    if direct && clear_for_movement(view, mob, temp, path.next_entity_pos(mob.path.width)) {
+        return true;
     }
     let after = bottom_centre(path.nodes[path.next_node_index + 1].pos());
     let to_next = next.subtract(temp);

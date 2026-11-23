@@ -20,6 +20,9 @@ export interface ServerSnapshot {
 /** 从代理接收玩家信息的方式。 */
 export type Forwarding = "off" | "legacy" | "modern";
 
+/** 新建世界用的世界预设，和官方 `level-type` 的四个注册名一一对应。 */
+export type WorldType = "normal" | "flat" | "largeBiomes" | "amplified";
+
 /** 服务端的全部可调选项。字段和 `src-tauri` 的 `ServerSettings` 一一对应。 */
 export interface ServerSettings {
   /** 服务器目录，只读展示；APP 和命令行版共用这里的两个配置文件。 */
@@ -39,8 +42,22 @@ export interface ServerSettings {
   enforceSecureProfile: boolean;
   forwarding: Forwarding;
   forwardingSecret: string;
+  /** 世界生成种子，空串表示新建世界时随机取一个。只对新建的世界生效。 */
+  levelSeed: string;
+  /** 新建世界的世界类型。已有存档按存档里的类型继续生成。 */
+  levelType: WorldType;
+  /** 新建世界要不要生成结构。 */
+  generateStructures: boolean;
+  /** 超平坦预设的 JSON 原文，只在 levelType 是 flat 时生效。 */
+  generatorSettings: string;
   entityThreads: number;
+  /** 红石缓存（实验），设置页里可以开关。 */
+  redstoneCache: boolean;
   chunkWorkerThreads: number;
+  /** 世界生成缓存：地形 / 地物上限（MiB）和空闲释放秒数。 */
+  worldgenTerrainCacheMb: number;
+  worldgenFeatureCacheMb: number;
+  worldgenCacheIdleSeconds: number;
   deliveriesPerTick: number;
   reclaimsPerTick: number;
   islandThreads: number;
