@@ -218,7 +218,7 @@ public final class ExecuteOracle {
     /** 官方 `AdvancementCommands` 在假玩家上跑整条命令，输出返回值、反馈和判据状态。 */
     private static void emitAdvancement(Writer out, Official official, String line)
             throws Exception {
-        Scene scene = new Scene(official);
+        Scene scene = new Scene(official, true);
         var playerAdvancements = official.server.getAdvancements();
         // 每条题从一份干净的 `PlayerAdvancements` 开始；用 Unsafe 造一个并只填
         // `award` / `revoke` 会读写的字段，不读存档、不发包。
@@ -292,7 +292,7 @@ public final class ExecuteOracle {
     }
 
     private static void emit(Writer out, Official official, String line) throws Exception {
-        Scene scene = new Scene(official);
+        Scene scene = new Scene(official, false);
         String setup = null;
         String command = line;
         int split = line.indexOf(" ;; ");
@@ -439,7 +439,17 @@ public final class ExecuteOracle {
         final ServerLevel level;
         final net.minecraft.server.level.ServerPlayer player;
 
-        Scene(Official official) throws Exception {
+        /**
+         * `forAdvancements` 为真时给假玩家补一份全是 INT 槽的 `SynchedEntityData`，只够
+         * `AdvancementRewards.grant` 读显示名。普通执行题不能装它：`effect give` 会往
+         * 实体数据里写药水粒子列表这类非 INT 的值，类型对不上就会让整条命令失败。
+         *
+         * When `forAdvancements` is true the fake player gets an all-INT `SynchedEntityData`,
+         * just enough for `AdvancementRewards.grant` to read the display name. The plain
+         * execute cases must not install it: `effect give` writes non-INT values such as
+         * the effect particle list, and the type mismatch fails the whole command.
+         */
+        Scene(Official official, boolean forAdvancements) throws Exception {
             level = allocate(FakeLevel.class);
             FakeLevel fake = (FakeLevel) level;
             fake.blocks = blocks;
@@ -494,8 +504,12 @@ public final class ExecuteOracle {
                     new net.minecraft.world.entity.ai.attributes.AttributeMap(
                             LivingEntity.createLivingAttributes().build()));
             set(Entity.class, player, "type", EntityTypes.PLAYER);
+            // `onEffectAdded` 会遍历 `getPassengers()` 把效果发给乘客，不能是 null。
+            // `onEffectAdded` walks `getPassengers()` to send the effect to riders; it must not be null.
+            set(Entity.class, player, "passengers", com.google.common.collect.ImmutableList.of());
             // `AdvancementRewards.grant` 走到 `ServerPlayer.getDisplayName` 时会读实体数据；
-            // 补一个带空表的 `SynchedEntityData`。
+            // 补一个带空表的 `SynchedEntityData`。只在进度题里装，见构造函数说明。
+            if (forAdvancements) {
             var dataClass = Class.forName("net.minecraft.network.syncher.SynchedEntityData$DataItem");
             var arrayType = java.lang.reflect.Array.newInstance(dataClass, 0).getClass();
             // 玩家实体数据的槽位从 0 开始，`ServerPlayer.getDisplayName` 读 18 号；
@@ -518,6 +532,7 @@ public final class ExecuteOracle {
                             arrayType);
             dataCtor.setAccessible(true);
             set(Entity.class, player, "entityData", dataCtor.newInstance(player, dataItems));
+            }
 
             set(net.minecraft.world.entity.player.Player.class, player, "gameProfile",
                     new com.mojang.authlib.GameProfile(

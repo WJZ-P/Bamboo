@@ -137,6 +137,7 @@
 
 #[cfg(feature = "oracle")]
 mod advancement_command_oracle;
+#[cfg(feature = "oracle")]
 mod advancement_oracle;
 #[cfg(feature = "oracle")]
 mod advancement_trigger_oracle;
