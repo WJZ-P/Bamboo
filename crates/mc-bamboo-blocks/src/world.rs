@@ -1080,6 +1080,12 @@ impl<'a> World<'a> {
         self.level
     }
 
+    /// 这次操作背后的可变存储。测试里要把借出去的实体原样放回去。
+    #[cfg(test)]
+    pub(crate) fn level_mut_for_test(&mut self) -> &mut dyn Level {
+        self.level
+    }
+
     /// 实体驱动的入口：写一个 `World` 入口函数给并行/精确两种驱动用。
     pub fn entities_mut(&mut self) -> &mut dyn crate::level::LevelEntities {
         self.level
@@ -4161,6 +4167,7 @@ mod tests {
                 | Effect::OpenCommandBlock { .. }
                 | Effect::HurtPlayer { .. }
                 | Effect::IgnitePlayer { .. }
+                | Effect::DestroyProgress { .. }
                 | Effect::PlayerEffect { .. }
                 | Effect::HealPlayer { .. }
                 | Effect::SleepInBed { .. } => None,

@@ -41,6 +41,7 @@ mod egg;
 mod equine;
 mod fish;
 mod gen_spawn;
+mod golem;
 mod grazing;
 mod llama_spit;
 mod natural_spawn;
@@ -116,6 +117,9 @@ enum Line {
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
+    Golem(Box<golem::GolemCase>),
+    GolemAttackRoll(golem::GolemAttackRollCase),
+    GolemSave(Box<golem::GolemSaveCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
@@ -286,11 +290,28 @@ struct Case {
     /// 每刻生物发出的 `entity_event` 和 `set_equipment`（base64，按发生顺序）。
     #[serde(default)]
     mob_event_packets: Option<Vec<Vec<String>>>,
+    /// 僵尸场景：（刻、x、y、z、状态 ID），那一刻实体 tick 之前直接写进方块表。
+    #[serde(default)]
+    place_at: Vec<[i32; 5]>,
+    /// 僵尸场景：第 `sleep_tick` 刻开头 0 号玩家右键床头 `bed`，官方结果是 `sleep_result`。
+    #[serde(default = "minus_one")]
+    sleep_tick: i32,
+    #[serde(default)]
+    bed: Option<[i32; 3]>,
+    #[serde(default)]
+    sleep_result: String,
+    /// 0 号玩家是创造模式。
+    #[serde(default)]
+    player_creative: bool,
     /// 史莱姆场景：每刻分裂出来的小史莱姆（x、y、z、朝向的位，大小，血量的位）。
     ///
     /// Slime scenes: the children split off each tick (x, y, z and yaw bits, size, health bits).
     #[serde(default)]
     cube_splits: Option<Vec<Vec<[i64; 6]>>>,
+    /// 僵尸场景每刻的 `levelEvent`（`[0, 事件, x, y, z, 数据]`）和
+    /// `destroyBlockProgress`（`[1, 实体, x, y, z, 阶段]`），按发生顺序。
+    #[serde(default)]
+    level_events: Option<Vec<Vec<[i32; 6]>>>,
     /// 每刻 0 号玩家的状态：血量位、受伤冷却、受伤动画、死亡、着火刻数。
     #[serde(default)]
     zombie_player_states: Option<Vec<[i64; 5]>>,
@@ -511,6 +532,9 @@ struct CowSetup {
     /// cow when absent.
     #[serde(default)]
     kind: i32,
+    /// 僵尸场景的队伍编号，-1 不在队伍里。
+    #[serde(default = "minus_one")]
+    team: i32,
     /// 狐狸 `SleepGoal` 构造时取的倒计时，官方那一边报过来。
     ///
     /// The fox `SleepGoal` countdown drawn at construction, from the official side.
@@ -584,6 +608,9 @@ struct PlayerSetup {
     item: i32,
     #[serde(default)]
     looting: i32,
+    /// 僵尸场景的队伍编号，-1 不在队伍里。
+    #[serde(default = "minus_one")]
+    team: i32,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -701,6 +728,10 @@ struct CowStep {
     turtle_laying: i32,
     #[serde(default, rename = "turtleLayCount")]
     turtle_lay_count: i32,
+    /// `getCurrentDifficultyAt(pos).getEffectiveDifficulty()` 的 f32 位；
+    /// `InhabitedTime` 场景逐刻比区域难度。
+    #[serde(default)]
+    ed: i32,
     #[serde(default, rename = "turtleGoingHome")]
     turtle_going_home: bool,
     #[serde(default, rename = "turtleHomeX")]
@@ -769,6 +800,8 @@ struct ZombieFacts {
     /// `WorldGenLevel.getSeed()`, read for slime chunks.
     world_seed: i64,
     inhabited_time: i64,
+    /// `InhabitedTime` 场景：逐刻按候选区块集合累加，并输出区域难度 `ed`。
+    accumulates_inhabited: bool,
     can_see_sky: bool,
     sky_darken: i32,
     difficulty: i32,
@@ -776,6 +809,8 @@ struct ZombieFacts {
     monsters_burn: bool,
     sea_level: i32,
     raining: bool,
+    /// 热群系 / 下界场景注入的 `SNOW_GOLEM_MELTS`。
+    snow_golem_melts: bool,
 }
 
 /// 假世界：方块表、玩家表、世界随机源。和 `entity-oracle` 的那个同一个做法。
@@ -797,8 +832,16 @@ struct MobLevel {
     players: Vec<PlayerView>,
     /// 走真实受伤链路的玩家；有它时 `for_each_player` 和生物打玩家都交给它。
     game: Option<mc_bamboo_game::ReplayPlayers>,
+    /// 逐刻累加的 `InhabitedTime`，和 Java 一侧同规则；区域难度读它。
+    inhabited: HashMap<ChunkPos, i64>,
+    /// 僵尸场景里生物的队伍，按 UUID。
+    mob_teams: HashMap<[u8; 16], u32>,
     /// 改坏确认：`wasHurt` 一律当真。
     wrong_was_hurt: bool,
+    /// 改坏确认 `zombie_hunger`：尸壳给的饥饿少一刻。
+    short_hunger: bool,
+    /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
+    ignore_bed_monsters: bool,
 }
 
 impl LevelTables for MobLevel {
@@ -988,7 +1031,12 @@ impl Level for MobLevel {
         if mc_bamboo_blocks::entity::mob::effects::is_instantaneous(instance.effect) {
             return false;
         }
-        game.give_effect(target, instance.clone());
+        let mut instance = instance.clone();
+        if self.short_hunger {
+            // 改坏确认：尸壳的饥饿少给一刻。
+            instance.duration -= 1;
+        }
+        game.give_effect(target, instance);
         true
     }
 
@@ -1038,6 +1086,14 @@ impl Level for MobLevel {
         self.facts.can_see_sky
     }
 
+    fn is_raining_at(&self, _pos: BlockPos) -> bool {
+        self.facts.raining
+    }
+
+    fn snow_golem_melts(&self, _pos: BlockPos) -> bool {
+        self.facts.snow_golem_melts
+    }
+
     fn clock_ticks(&self) -> i64 {
         self.facts.clock
     }
@@ -1046,8 +1102,22 @@ impl Level for MobLevel {
         self.facts.world_seed
     }
 
-    fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
-        self.facts.inhabited_time
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.mob_teams.get(uuid).copied()
+    }
+
+    fn inhabited_time(&self, chunk: ChunkPos) -> i64 {
+        self.inhabited
+            .get(&chunk)
+            .copied()
+            .unwrap_or(self.facts.inhabited_time)
+    }
+
+    fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
+        if self.ignore_bed_monsters {
+            return false;
+        }
+        mc_bamboo_blocks::monster_prevents_rest_in(self, pos)
     }
 
     fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
@@ -1056,6 +1126,33 @@ impl Level for MobLevel {
 
     fn is_halloween(&self) -> bool {
         self.facts.halloween
+    }
+
+    /// `Block.getDrops`：破门时门的下半被形状更新拆掉，掉一扇门（官方 `dropResources`）。
+    fn block_loot_drops(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        let view = LootBlocks(&self.blocks);
+        let params = mc_bamboo_loot::BlockDropParams {
+            state,
+            pos: (pos.x, pos.y, pos.z),
+            level: &view,
+            block_entity: None,
+            breaker: None,
+            tool: None,
+            explosion_radius: None,
+            luck: 0.0,
+        };
+        match mc_bamboo_loot::block_drops(&params, Some(&self.loot_sequences), self.random.source())
+        {
+            Ok(stacks) => stacks
+                .iter()
+                .map(|stack| mc_bamboo_protocol::item::ItemStack::new(stack.item, stack.count))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// `LivingEntity.dropFromLootTable`：官方一侧用真的 `minecraft:entities/cow` 表，
@@ -1203,6 +1300,44 @@ impl Level for MobLevel {
     }
 }
 
+/// 方块掉落的战利品表能读到的那点世界：假世界的方块表，晴天，主世界。
+struct LootBlocks<'a>(&'a HashMap<BlockPos, BlockState>);
+
+impl mc_bamboo_loot::LevelView for LootBlocks<'_> {
+    fn is_loaded(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+        Some(true)
+    }
+    fn block_state(&self, x: i32, y: i32, z: i32) -> Option<BlockState> {
+        Some(
+            self.0
+                .get(&BlockPos::new(x, y, z))
+                .copied()
+                .unwrap_or(BlockState(mc_bamboo_data::blocks::AIR)),
+        )
+    }
+    fn biome(&self, _: i32, _: i32, _: i32) -> Option<i32> {
+        None
+    }
+    fn can_see_sky(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+        None
+    }
+    fn is_raining(&self) -> Option<bool> {
+        Some(false)
+    }
+    fn is_thundering(&self) -> Option<bool> {
+        Some(false)
+    }
+    fn day_time(&self) -> Option<i64> {
+        None
+    }
+    fn game_time(&self) -> Option<i64> {
+        None
+    }
+    fn dimension(&self) -> Option<&'static str> {
+        Some("minecraft:overworld")
+    }
+}
+
 struct Report {
     cases: u32,
     steps: usize,
@@ -1322,6 +1457,9 @@ impl Report {
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
+                Line::Golem(case) => self.replay_golem(&case),
+                Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
+                Line::GolemSave(case) => self.replay_golem_save(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
@@ -1459,7 +1597,9 @@ impl Report {
                 clock: 0,
                 world_seed: 0,
                 inhabited_time: 0,
+                accumulates_inhabited: case.name.starts_with("zombie_inhabited_"),
                 can_see_sky: case.monsters_burn,
+                snow_golem_melts: false,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
                 bright_outside: case.bright_outside || !zombie_style(&case.name),
@@ -1510,6 +1650,7 @@ impl Report {
                     armor_cover: 0.0,
                     main_hand: player.item,
                     off_hand: 0,
+                    team: u32::try_from(player.team).ok(),
                     combat: Default::default(),
                     effects: Default::default(),
                 })
@@ -1531,10 +1672,27 @@ impl Report {
                         ),
                         health,
                         seed: 0x0DDB_1A5E_5BAD_5EED_i64.wrapping_add(index as i64),
+                        creative: index == 0 && case.player_creative,
                     })
                     .collect();
                 mc_bamboo_game::ReplayPlayers::new(case.difficulty, &setups)
             }),
+            inhabited: Default::default(),
+            mob_teams: if matches!(break_test, Some("zombie_team")) {
+                // 改坏确认：生物不进队伍，同队的玩家也会被当成目标。
+                HashMap::new()
+            } else {
+                case.cows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, cow)| {
+                        let team = u32::try_from(cow.team).ok()?;
+                        Some(((index as u128 + 1).to_be_bytes(), team))
+                    })
+                    .collect()
+            },
+            ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
+            short_hunger: matches!(break_test, Some("zombie_hunger")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
         };
         for &[x, y, z, state] in &case.blocks {
@@ -1724,7 +1882,8 @@ impl Report {
                         if let Some(mob) = entity.kind.mob_mut() {
                             if zombie_kind {
                                 mob.set_zombie_baby(true);
-                                mob.can_break_doors = case.difficulty == 3;
+                                mob.can_break_doors =
+                                    case.difficulty == 3 && !self.no_break_doors();
                                 if mob.can_break_doors {
                                     mob.navigation.flags.can_open_doors = true;
                                     mob.goals.insert_break_door();
@@ -1741,6 +1900,7 @@ impl Report {
                         }
                     } else if zombie_kind
                         && case.difficulty == 3
+                        && !self.no_break_doors()
                         && let Some(mob) = entity.kind.mob_mut()
                     {
                         mob.can_break_doors = true;
@@ -1822,6 +1982,7 @@ impl Report {
             return;
         };
         set_zombie_clock(&mut level, case, 0, break_test);
+        accumulate_inhabited(&mut level, 0, self.break_test.as_deref());
         let ours = snapshot(&level, &ids);
         self.compare(&case.name, 0, &ours, first);
         self.compare_zombie_player(case, &mut level, 0);
@@ -1860,12 +2021,52 @@ impl Report {
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
             set_zombie_clock(&mut level, case, index as i64, self.break_test.as_deref());
+            accumulate_inhabited(&mut level, index as i64, self.break_test.as_deref());
+            for &[tick, x, y, z, state] in &case.place_at {
+                if tick as usize == index {
+                    level
+                        .blocks
+                        .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+                }
+            }
+            if case.sleep_tick >= 0
+                && case.sleep_tick as usize == index
+                && let Some([x, y, z]) = case.bed
+            {
+                let result = try_sleep(&mut level, &mut ticks, case, BlockPos::new(x, y, z));
+                if result != case.sleep_result {
+                    self.mismatches.push(format!(
+                        "{} tick {index} sleep: official {:?} bamboo {result:?}",
+                        case.name, case.sleep_result
+                    ));
+                }
+            }
+            if matches!(self.break_test.as_deref(), Some("zombie_sight")) {
+                // 改坏确认：视线记忆永不过期，僵尸隔着墙也不放弃目标。
+                let mut world = World::new(&mut level, &mut ticks);
+                for &id in &ids {
+                    world.with_entity_mut(id, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            for wrapped in &mut mob.target_goals.goals {
+                                if let mc_bamboo_blocks::entity::mob::goals::Goal::NearestAttackableTarget {
+                                    unseen_ticks,
+                                    ..
+                                } = &mut wrapped.goal
+                                {
+                                    *unseen_ticks = 0;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
             if let Some(game) = level.game.as_mut() {
                 game.tick_cooldowns();
             }
             brain::set_sprint(&mut level.players, case.sprint, index as i32);
             let mut ours_interactions = Vec::new();
             let mut seeded_early = Vec::new();
+            let tick_effects;
             {
                 let mut world = World::new(&mut level, &mut ticks);
                 for &[tick, cow, kind, effect, duration, amplifier] in &case.cow_effect_actions {
@@ -2025,6 +2226,7 @@ impl Report {
                     }
                 }
                 world.tick_entities();
+                tick_effects = world.into_effects();
             }
             // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
             // `ChunkMap.addEntity` 也在同一时刻建 `ServerEntity`。
@@ -2123,6 +2325,31 @@ impl Report {
             self.compare(&case.name, index, &ours, expected);
             self.compare_blocks(case, &level, index);
             self.compare_zombie_player(case, &mut level, index);
+            if let Some(expected) = case.level_events.as_ref().and_then(|all| all.get(index)) {
+                let ours: Vec<[i32; 6]> = tick_effects
+                    .iter()
+                    .filter_map(|effect| match *effect {
+                        mc_bamboo_blocks::Effect::LevelEvent {
+                            event, pos, data, ..
+                        } => Some([0, event, pos.x, pos.y, pos.z, data]),
+                        mc_bamboo_blocks::Effect::Destroyed { pos, state, .. } => {
+                            Some([0, 2001, pos.x, pos.y, pos.z, state.0 as i32])
+                        }
+                        mc_bamboo_blocks::Effect::DestroyProgress {
+                            breaker,
+                            pos,
+                            progress,
+                        } => Some([1, breaker, pos.x, pos.y, pos.z, progress]),
+                        _ => None,
+                    })
+                    .collect();
+                if &ours != expected && self.mismatches.len() < self.show {
+                    self.mismatches.push(format!(
+                        "{} tick {index} level events: official {expected:?} bamboo {ours:?}",
+                        case.name
+                    ));
+                }
+            }
             if let Some(expected) = &case.mob_event_packets
                 && let Some(expected) = expected.get(index)
             {
@@ -2211,10 +2438,14 @@ impl Report {
 
     /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
     fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
-        const SELF_PACKETS: [u8; 5] = [43, 67, 68, 69, 106];
+        const SELF_PACKETS: [u8; 6] = [43, 67, 68, 69, 106, 135];
         let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
             return;
         };
+        // 第 0 刻是场景起点，官方还没跑玩家阶段的 `doTick`。
+        if index > 0 {
+            game.sync_health();
+        }
         let ours: Vec<Vec<u8>> = game
             .take_packets(player.id)
             .into_iter()
@@ -2352,6 +2583,9 @@ impl Report {
                 plain!(wolf_max_hp);
             }
             if name.starts_with("zombie_") || name.starts_with("drowned_") {
+                if name.starts_with("zombie_inhabited_") {
+                    plain!(ed);
+                }
                 plain!(target);
                 plain!(baby);
                 plain!(aggr);
@@ -3775,6 +4009,93 @@ fn table_hashes() -> [i64; 2] {
 
 /// 真实时间模式：这一刻的主世界时钟和由它算出的天色、白天、`MONSTERS_BURN`。
 /// 和官方一侧一样，在实体 tick 之前更新。
+impl Report {
+    fn no_break_doors(&self) -> bool {
+        self.break_test.as_deref() == Some("zombie_door")
+    }
+}
+
+/// `ServerChunkCache.tickSpawningChunk` 第一句：候选区块的 `InhabitedTime` 加一。
+/// 官方一刻只加一次，在实体 tick 之前；和游戏层共用候选区块的纯计算。
+/// 改坏确认 `zombie_inhabited`：跳过一刻（第 3 刻不加）。
+fn accumulate_inhabited(level: &mut MobLevel, tick: i64, break_test: Option<&str>) {
+    if !level.facts.accumulates_inhabited || (break_test == Some("zombie_inhabited") && tick == 3) {
+        return;
+    }
+    let players = level
+        .players
+        .iter()
+        .map(|player| (player.position, player.spectator));
+    for chunk in mc_bamboo_game::spawning_chunk_candidates(players, |_| true) {
+        *level.inhabited.entry(chunk).or_default() += 1;
+    }
+}
+
+/// 0 号玩家右键床头：走正式的 `use_item_on`，从 `Effect::SleepInBed` 读结果，
+/// 名字和官方 `BedSleepingProblem` 一样，成功是 `OK`。
+fn try_sleep(level: &mut MobLevel, ticks: &mut BlockTicks, case: &Case, head: BlockPos) -> String {
+    use mc_bamboo_blocks::{
+        BedProblem, Effect,
+        context::{Actor, BlockHit},
+    };
+
+    let Some(player) = case.players.first() else {
+        return String::new();
+    };
+    let position = Vec3::new(
+        f64::from_bits(player.x as u64),
+        f64::from_bits(player.y as u64),
+        f64::from_bits(player.z as u64),
+    );
+    let creative = case.player_creative;
+    let actor = Actor {
+        uuid: ((1_u128 << 64) | 2).to_be_bytes(),
+        position,
+        yaw: 0.0,
+        head_yaw: 0.0,
+        pitch: 0.0,
+        secondary_use: false,
+        main_hand: mc_bamboo_data::items::AIR,
+        off_hand: mc_bamboo_data::items::AIR,
+        eye_height: f64::from(f32::from_bits(player.eye as u32)),
+        block_interaction_range: if creative { 5.0 } else { 4.5 },
+        may_build: true,
+        prevents_block_drops: creative,
+        can_use_game_master_blocks: false,
+    };
+    let hit = BlockHit {
+        pos: head,
+        face: mc_bamboo_core::Direction::Up,
+        location: Vec3::new(
+            f64::from(head.x) + 0.5,
+            f64::from(head.y) + 0.5625,
+            f64::from(head.z) + 0.5,
+        ),
+        inside: false,
+    };
+    let outcome = mc_bamboo_blocks::interact::use_item_on(
+        level,
+        ticks,
+        &actor,
+        mc_bamboo_core::Hand::Main,
+        &hit,
+    );
+    for effect in &outcome.effects {
+        if let Effect::SleepInBed { problem, .. } = effect {
+            return match problem {
+                None => "OK",
+                Some(BedProblem::NotPossibleNow) => "NOT_POSSIBLE_NOW",
+                Some(BedProblem::NotSafe) => "NOT_SAFE",
+                Some(BedProblem::TooFarAway) => "TOO_FAR_AWAY",
+                Some(BedProblem::Obstructed) => "OBSTRUCTED",
+                Some(BedProblem::OtherProblem) => "OTHER_PROBLEM",
+            }
+            .to_owned();
+        }
+    }
+    "NO_SLEEP".to_owned()
+}
+
 fn set_zombie_clock(level: &mut MobLevel, case: &Case, tick: i64, break_test: Option<&str>) {
     if case.clock_start < 0 {
         return;
@@ -3800,6 +4121,21 @@ fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
             level.entities.get(id).and_then(|entity| {
                 step_of(&entity, lr).map(|mut step| {
                     step.bh = bh;
+                    // 官方 `ServerLevel.getCurrentDifficultyAt(mob.blockPosition())`：
+                    // 时钟、该区块的 `InhabitedTime`、月相。只在 `InhabitedTime`
+                    // 场景逐刻比；其余场景官方不写 `ed`，Bamboo 也填 0。
+                    step.ed = if level.facts.accumulates_inhabited {
+                        let chunk = ChunkPos::containing(entity.position.x, entity.position.z);
+                        mc_bamboo_blocks::sky::effective_difficulty(
+                            level.facts.difficulty,
+                            level.facts.clock,
+                            level.inhabited_time(chunk),
+                            mc_bamboo_blocks::sky::moon_brightness(level.facts.clock),
+                        )
+                        .to_bits() as i32
+                    } else {
+                        0
+                    };
                     // `Frog.getTongueTarget()`：目标已经不在世界里时是空的。
                     // `Frog.getTongueTarget()` is empty once the target has left the world.
                     let frog = entity.kind.mob().is_some_and(|mob| {
@@ -4083,6 +4419,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         turtle_home_x: mob.turtle.home_pos.x,
         turtle_home_y: mob.turtle.home_pos.y,
         turtle_home_z: mob.turtle.home_pos.z,
+        ed: 0,
     }
 }
 

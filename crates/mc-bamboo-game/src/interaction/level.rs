@@ -69,6 +69,8 @@ pub(crate) struct RegionLevel<'a> {
     ///
     /// `Level.getSeaLevel()` for this dimension. -63 for superflat and 63 otherwise.
     pub(crate) sea_level: i32,
+    /// 计分板：玩家和生物的队伍（`TargetGoal` 的同队判断）。
+    pub(crate) scoreboard: &'a crate::scoreboard::Scoreboard,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -190,7 +192,7 @@ impl Level for RegionLevel<'_> {
     /// spectators or dead players; each caller applies its own predicates.
     fn for_each_player(&self, visit: &mut dyn FnMut(&mc_bamboo_blocks::entity::ctx::PlayerView)) {
         for (id, player) in self.players.iter() {
-            visit(&player.view(*id));
+            visit(&player.view_in(*id, self.scoreboard));
         }
     }
 
@@ -452,8 +454,12 @@ impl Level for RegionLevel<'_> {
         })
     }
 
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.scoreboard.entity_team_index(uuid)
+    }
+
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
-        self.chunks.chunk(chunk).archive().inhabited_time
+        self.chunks.inhabited_time(chunk)
     }
 
     /// 精确驱动里生物打玩家：拼出和区域入口同一组借用，当场走玩家受伤的正式入口。
@@ -473,6 +479,7 @@ impl Level for RegionLevel<'_> {
             difficulty: self.difficulty as i32,
             rules: side.rules,
             attacker,
+            defer_health: true,
         };
         let (hurt, death_drops) =
             crate::player_hurt::hurt_player_by_mob(&mut parts, PlayerId(target), source, amount);
@@ -500,6 +507,7 @@ impl Level for RegionLevel<'_> {
             difficulty: self.difficulty as i32,
             rules: side.rules,
             attacker: None,
+            defer_health: true,
         };
         crate::player_hurt::knock_back_player(&mut parts, PlayerId(target), strength, direction);
         true

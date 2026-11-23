@@ -803,6 +803,9 @@ pub(super) fn check_spawn_rules(
                 && valid_mob_spawn_block(world, kind, pos)
                 && world.level().can_see_sky(pos)
         }
+        // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
+        // Neither golem is in a biome spawn table; only the shared rule remains.
+        MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),
     }
 }
 
@@ -1114,6 +1117,7 @@ mod tests {
             armor_cover: 0.0,
             main_hand: 0,
             off_hand: 0,
+            team: None,
             combat: Default::default(),
             effects: Default::default(),
         }

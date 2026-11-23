@@ -753,7 +753,7 @@ pub(crate) struct GlobalView {
     /// 末地时钟，整表同步时和主世界一起发。
     pub(crate) end_clock: Clock,
     pub(crate) rules: Arc<GameRuleSet>,
-    /// 方块逻辑读的那几条规则。
+    /// 方块逻辑读的那几条规则（挤压上限恒为 0，实体逻辑另取一份带配置的快照）。
     pub(crate) block_rules: BlockGameRules,
     /// `GameRules.SEND_COMMAND_FEEDBACK`。
     pub(crate) send_command_feedback: bool,

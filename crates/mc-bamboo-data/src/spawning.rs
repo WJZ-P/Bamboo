@@ -11,7 +11,7 @@ use crate::generated::mob_spawns::{BiomeMobSpawns, MobCategoryDef, MobCategorySp
 use crate::generated::registries;
 
 pub use crate::generated::mob_spawns::{
-    BIOME_MOB_SPAWNS, MOB_CATEGORIES, MobSpawnCostDef, MobSpawnerDef,
+    BIOME_MOB_SPAWNS, MOB_CATEGORIES, MobSpawnCostDef, MobSpawnerDef, SNOW_GOLEM_MELTS,
 };
 
 /// 官方 `MobCategory`，判别值就是 `MobCategory.values()` 的下标。

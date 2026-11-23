@@ -77,6 +77,10 @@ impl SmallMobCase {
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
         }
     }
@@ -414,6 +418,10 @@ impl Report {
             entities: Entities::with_next_id(1 << 24),
             players: Vec::new(),
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
         };
         let mut ticks = BlockTicks::default();

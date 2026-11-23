@@ -61,8 +61,11 @@ pub struct BlockGameRules {
     /// `GameRules.MOB_EXPLOSION_DROP_DECAY`: blocks broken by a mob explosion drop with
     /// probability 1/radius.
     pub mob_explosion_drop_decay: bool,
-    /// `GameRules.MAX_ENTITY_CRAMMING`：`pushEntities` 的挤压上限。
+    /// `GameRules.MAX_ENTITY_CRAMMING`：`pushEntities` 的挤压伤害上限。
     pub max_entity_cramming: i32,
+    /// Bamboo 的 `max_entity_collisions`：每只生物每刻最多处理几次推挤。
+    /// 0 = 不限（精确模式）。不是官方游戏规则，不进存档。
+    pub max_entity_collisions: usize,
 }
 
 impl BlockGameRules {
@@ -90,6 +93,7 @@ impl BlockGameRules {
             mob_drops: bool_default(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
             max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),
+            max_entity_collisions: 0,
         }
     }
 }

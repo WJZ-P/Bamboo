@@ -408,6 +408,12 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.mob_type == MobType::Wolf {
         write_wolf(&mut out, mob);
     }
+    if mob.mob_type == MobType::IronGolem {
+        super::iron_golem::write_nbt(mob, &mut out);
+    }
+    if mob.mob_type == MobType::SnowGolem {
+        super::snow_golem::write_nbt(mob, &mut out);
+    }
     // ---- Sheep / Chicken ----
     if mob.mob_type == MobType::Sheep {
         put(
@@ -844,6 +850,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Parrot {
             super::parrot::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::IronGolem {
+            super::iron_golem::read_nbt(mob, tag);
+        }
+        if mob.mob_type == MobType::SnowGolem {
+            super::snow_golem::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Chicken {
             // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。

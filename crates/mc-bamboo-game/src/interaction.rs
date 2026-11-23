@@ -168,9 +168,14 @@ pub(crate) fn run_block_entity_ticks(region: &mut Region) {
 ///
 /// 精确驱动（默认）整个阶段算完立刻落地，剖析器记为一段；并行驱动（`bamboo.toml` 里 `entity_threads ≥ 1`）
 /// 拆成只读算阶段和落地阶段，剖析器分别记两段。开关存在 `World` 上，创建时读一次。
+/// `pool` 是启动时建好、按刻派活的常驻线程池，所有岛共用一份。
 ///
 /// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
-pub(crate) fn run_entity_ticks(entity_threads: usize, region: &mut Region) {
+pub(crate) fn run_entity_ticks(
+    entity_threads: usize,
+    region: &mut Region,
+    pool: Option<&mc_bamboo_blocks::entity::parallel::WorkerPool>,
+) {
     // 玩家不在实体列表里。官方玩家通常先于后生成的物品 tick，捡起看到的是移动前的位置。
     // Players are not in the entity list. Vanilla players usually tick before later items,
     // so pickup sees the item where it was before this tick's movement.
@@ -180,18 +185,23 @@ pub(crate) fn run_entity_ticks(entity_threads: usize, region: &mut Region) {
         let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
         send_effects(region, None, &outcome.effects);
     } else {
-        parallel_entity_ticks(entity_threads, region);
+        parallel_entity_ticks(entity_threads, region, pool);
     }
 }
 
 /// 并行驱动的两段：算阶段只读区块表和实体表，落地阶段重新构造 `RegionLevel` 和 `World`。
 ///
-/// 每刻起线程的 [`ScopedThreads`] 开销大，只用于实验；常驻线程池留给任务系统
-/// （设计稿第 12 节）。
-pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
+/// 正式服务端传启动时建好的常驻池；只有直接调这段的历史测试没有池，那里临时建一个
+/// （`threads = 1` 时池里一条后台线程也不起）。
+pub(crate) fn parallel_entity_ticks(
+    threads: usize,
+    region: &mut Region,
+    pool: Option<&mc_bamboo_blocks::entity::parallel::WorkerPool>,
+) {
     let game_time = region.tick.game_time();
+    let entity_rules = region.entity_game_rules();
     use mc_bamboo_blocks::entity::{
-        parallel::{ScopedThreads, commit, compute},
+        parallel::{WorkerPool, commit, compute},
         view::ViewFacts,
     };
 
@@ -206,7 +216,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             players,
             ..
         } = &mut *region;
-        let player_views = crate::player::player_views(&*players);
+        let player_views = crate::player::player_views(&*players, &global.scoreboard);
         let block_entity_shapes = crate::entity_view::block_entity_shapes(chunks, block_entities);
         // `pickup_before_entities` 已经跑过；把实体表切进「这一刻正在 tick」的状态。
         // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
@@ -215,7 +225,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
         let facts = ViewFacts {
             min_y: mc_bamboo_world::MIN_Y,
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
-            rules: global.block_rules,
+            rules: entity_rules,
             difficulty: global.difficulty as i32,
             sky_darken: global.sky_darken,
             game_time,
@@ -235,9 +245,19 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             hopper_positions,
             world_border: global.world_border.clone(),
             players: player_views,
+            scoreboard: &global.scoreboard,
         });
-        let executor = ScopedThreads { threads };
-        let computed = compute(&view, entities, &executor);
+        let owned_pool = match pool {
+            Some(_) => None,
+            None => Some(
+                WorkerPool::new("bamboo-entity", threads).unwrap_or_else(|error| {
+                    panic!("could not start the entity worker pool: {error}")
+                }),
+            ),
+        };
+        let executor: &dyn mc_bamboo_blocks::entity::parallel::Executor =
+            pool.or(owned_pool.as_ref()).expect("上面二选一必有执行器");
+        let computed = compute(&view, entities, executor);
         profiler.lap(crate::profiler::Phase::EntityCompute);
         computed
     };
@@ -258,6 +278,12 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
 /// 和 `forEachBlockTickingChunk`（里面是 `tickChunk`）是两个独立的循环。Bamboo 按坐标顺序
 /// 遍历，官方按哈希顺序并打乱前者，这是已有的差异。
 pub(crate) fn run_random_ticks(region: &mut Region) {
+    // `tickSpawningChunk` 第一句是 `incrementInhabitedTime`，在 `tickThunder` 之前。
+    // 官方只在 `TickRateManager.runsNormally()` 时走到这里；Bamboo 没有暂停 / 冻结刻，恒为真。
+    // 累加只写 ChunkStore 的单独一张表，不换区块版本、不进存盘集合。
+    for chunk in crate::natural_spawn::inhabited_time_chunks(region) {
+        region.chunks.increment_inhabited_time(chunk);
+    }
     let chunks = random_ticking_chunks(region);
     // 官方 `tickSpawningChunk` 只在下雨且打雷时调 `tickThunder`；晴天一个随机数都不取。
     // 这里先按天气快照短路，避免每 tick 为每个区块建一次方块世界。
@@ -671,6 +697,11 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     world.spawn_player_death_drops(&drops);
                 }
             }
+            Effect::DestroyProgress {
+                breaker,
+                pos,
+                progress,
+            } => mining::send_destroy_progress(region, breaker, pos, progress),
             Effect::IgnitePlayer { target, ticks } => {
                 crate::player_environment::ignite_for_ticks(
                     region,

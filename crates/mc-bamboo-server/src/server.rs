@@ -571,6 +571,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         enforce_secure_profile: config.enforce_secure_profile,
         admin: AdminSnapshot::default(),
         entity_threads: config.entity_threads,
+        max_entity_collisions: config.max_entity_collisions,
         redstone_cache: config.redstone_cache,
         chunk_worker_threads: config.chunk_worker_threads,
         worldgen_cache: config.worldgen_cache,

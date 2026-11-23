@@ -159,11 +159,13 @@ pub use island_pool::MAX_ISLAND_THREADS;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use loot_stacks::loot_stack;
 pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};
+pub use natural_spawn::spawning_chunk_candidates;
 pub use outgoing::{Outgoing, Segment, SharedFrames};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
 pub use secure_chat::ServiceProfileKeys;
 pub use world::{
-    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig,
+    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World,
+    WorldConfig,
 };
 pub use world_options::WorldGenConfig;
 

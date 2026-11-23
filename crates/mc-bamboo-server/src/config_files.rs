@@ -17,9 +17,9 @@ use std::{
 
 use mc_bamboo_game::{
     DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV, ISLAND_THREADS_ENV,
-    ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_ISLAND_DEAD_SECONDS,
-    MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MIN_ISLAND_DEAD_SECONDS, MailBudget,
-    island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
+    ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS,
+    MAX_ISLAND_DEAD_SECONDS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MIN_ISLAND_DEAD_SECONDS,
+    MailBudget, island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
     recommended_island_threads, world_options::WorldGenConfig,
     worldgen_cache::WorldgenCacheSettings,
 };
@@ -137,6 +137,7 @@ const BAMBOO_KEYS: &[&str] = &[
     "auth_connect_timeout_seconds",
     "auth_read_timeout_seconds",
     "entity_threads",
+    "max_entity_collisions",
     "redstone_cache",
     "chunk_worker_threads",
     "worldgen_terrain_cache_mb",
@@ -169,6 +170,10 @@ pub struct BambooConfig {
     pub auth_read_timeout: Duration,
     /// 实体阶段线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动（实验）。
     pub entity_threads: usize,
+    /// 每只生物每刻最多处理几次推挤（0 = 不限，精确模式）。
+    ///
+    /// Per-mob per-tick push cap (0 = unlimited, exact mode).
+    pub max_entity_collisions: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
@@ -230,6 +235,7 @@ impl Default for BambooConfig {
             auth_connect_timeout: defaults.auth_connect_timeout,
             auth_read_timeout: defaults.auth_read_timeout,
             entity_threads: defaults.entity_threads,
+            max_entity_collisions: defaults.max_entity_collisions,
             redstone_cache: defaults.redstone_cache,
             chunk_worker_threads: defaults.chunk_worker_threads,
             worldgen_cache: defaults.worldgen_cache,
@@ -286,6 +292,11 @@ impl BambooConfig {
                 "# 实体并行线程数（实验）：0 = 精确模式（默认，和官方逐位一致）；>= 1 = 性能模式。\n",
                 "entity_threads = {}\n",
                 "\n",
+                "# 每只生物每刻最多处理几次推挤（Paper 的 collisions.maxEntityCollisions）：\n",
+                "# 0 = 不限（默认，和官方逐位一致）；>= 1 = 够数就停止枚举，挤成一团时散开变慢。\n",
+                "# 不影响 maxEntityCramming 的挤压伤害规则。\n",
+                "max_entity_collisions = {}\n",
+                "\n",
                 "# 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认 false。\n",
                 "redstone_cache = {}\n",
                 "\n",
@@ -333,6 +344,7 @@ impl BambooConfig {
             self.auth_connect_timeout.as_secs(),
             self.auth_read_timeout.as_secs(),
             self.entity_threads,
+            self.max_entity_collisions,
             self.redstone_cache,
             self.chunk_worker_threads,
             self.worldgen_cache.terrain_mb,
@@ -389,6 +401,14 @@ impl BambooConfig {
             ),
             auth_read_timeout: seconds("auth_read_timeout_seconds", defaults.auth_read_timeout),
             entity_threads: integer(table, "entity_threads", file, 0, 0, MAX_ENTITY_THREADS),
+            max_entity_collisions: integer(
+                table,
+                "max_entity_collisions",
+                file,
+                0,
+                0,
+                MAX_ENTITY_COLLISIONS,
+            ),
             redstone_cache: boolean(table, "redstone_cache", file, false),
             chunk_worker_threads: integer(
                 table,
@@ -854,6 +874,7 @@ impl ConfigFiles {
             list_directory: directory.to_path_buf(),
             world_dir: Some(world_dir(directory, self)),
             entity_threads: self.bamboo.entity_threads,
+            max_entity_collisions: self.bamboo.max_entity_collisions,
             redstone_cache: self.bamboo.redstone_cache,
             chunk_worker_threads: self.bamboo.chunk_worker_threads,
             worldgen_cache: self.bamboo.worldgen_cache,
@@ -898,6 +919,7 @@ impl ConfigFiles {
         bamboo.auth_connect_timeout = config.auth_connect_timeout;
         bamboo.auth_read_timeout = config.auth_read_timeout;
         bamboo.entity_threads = config.entity_threads;
+        bamboo.max_entity_collisions = config.max_entity_collisions;
         bamboo.redstone_cache = config.redstone_cache;
         bamboo.chunk_worker_threads = config.chunk_worker_threads;
         bamboo.worldgen_cache = config.worldgen_cache;
@@ -1034,6 +1056,11 @@ impl ConfigFiles {
                 "entity_threads",
                 self.bamboo.entity_threads as u64,
                 defaults.bamboo.entity_threads as u64,
+            ),
+            (
+                "max_entity_collisions",
+                self.bamboo.max_entity_collisions as u64,
+                defaults.bamboo.max_entity_collisions as u64,
             ),
             (
                 "redstone_cache",
@@ -1317,6 +1344,7 @@ mod tests {
         // passthrough drops 59 -> 54.
         assert_eq!(defaults.official.passthrough.len(), 54);
         assert_eq!(defaults.bamboo.entity_threads, 0);
+        assert_eq!(defaults.bamboo.max_entity_collisions, 0);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
         assert_eq!(defaults.bamboo.island_threads, recommended_island_threads());
@@ -1418,11 +1446,12 @@ mod tests {
         let dir = Temp::new();
         fs::write(
             dir.path().join(BAMBOO_FILE),
-            "entity_threads = -1\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
+            "entity_threads = -1\nmax_entity_collisions = -3\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
         )
         .unwrap();
         let loaded = read(dir.path()).unwrap();
         assert_eq!(loaded.bamboo.entity_threads, 0);
+        assert_eq!(loaded.bamboo.max_entity_collisions, 0, "坏值回落到精确模式");
         assert_eq!(loaded.bamboo.deliveries_per_tick, 64);
         assert_eq!(loaded.bamboo.keep_alive_interval, Duration::from_secs(15));
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);
@@ -1525,11 +1554,13 @@ mod tests {
         let mut files = ConfigFiles::default();
         files.official.view_distance = 16;
         files.bamboo.entity_threads = 8;
+        files.bamboo.max_entity_collisions = 8;
         files.bamboo.deliveries_per_tick = 32;
         files.bamboo.island_threads = 3;
         let config = files.to_server_config(dir.path());
         assert_eq!(config.view_distance, 16);
         assert_eq!(config.entity_threads, 8);
+        assert_eq!(config.max_entity_collisions, 8);
         // 环境变量 `BAMBOO_ISLAND_THREADS` 设了就盖过文件（整套测试可能整进程设成 0）。
         // The environment variable overrides the file (a test run may set it to 0).
         assert_eq!(

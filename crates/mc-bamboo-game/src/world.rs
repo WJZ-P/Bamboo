@@ -57,6 +57,8 @@ const MAX_CATCH_UP: Duration = Duration::from_secs(2);
 /// 信箱预算和实体线程数的上限，防住配置文件里的巨值。
 pub const MAX_MAIL_BUDGET: usize = 1 << 16;
 pub const MAX_ENTITY_THREADS: usize = 256;
+/// `max_entity_collisions` 的合法上限（只是防配置写坏，Paper 缺省是 8）。
+pub const MAX_ENTITY_COLLISIONS: usize = 4096;
 /// 区块计算池线程数的上限。
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 
@@ -111,6 +113,8 @@ pub struct WorldConfig {
     pub admin: crate::admin::AdminSnapshot,
     /// 实体阶段的线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动。
     pub entity_threads: usize,
+    /// 每只生物每刻最多处理几次推挤（0 = 不限，精确模式）。
+    pub max_entity_collisions: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
@@ -200,6 +204,7 @@ impl Default for WorldConfig {
             enforce_secure_profile: true,
             admin: crate::admin::AdminSnapshot::default(),
             entity_threads: 0,
+            max_entity_collisions: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings::default(),
@@ -306,6 +311,9 @@ pub(crate) struct Master {
     ///
     /// The detached drive's tick-thread pool; `None` in lockstep.
     pool: Option<IslandPool>,
+    /// 实体并行算阶段的常驻线程池。启动时按 `entity_threads` 建好，所有岛共用；
+    /// 精确模式（`entity_threads = 0`）和单线程时为 `None`。
+    entity_pool: Option<mc_bamboo_blocks::entity::parallel::WorkerPool>,
     /// 等岛交回期间先取出来的主控队列消息（看有没有关服请求），下一刻照常按序号处理。
     ///
     /// Master-queue messages taken out while waiting for the island (to see a
@@ -591,6 +599,7 @@ impl World {
                 port_mode: PortMode::default_for_world(),
                 drive: IslandDrive::from_threads(island_threads),
                 pool: None,
+                entity_pool: None,
                 held_inbound: Vec::new(),
                 island_stop_timeout: ISLAND_STOP_TIMEOUT,
                 island_dead_timeout: config.island_dead_timeout,
@@ -624,6 +633,23 @@ impl World {
                 Islands::new(island)
             },
         };
+        // 实体算阶段的常驻池：启动时建好，按 `entity_threads` 派活。起不来就退回
+        // 精确模式并拒绝启动，不让世界线程每刻临时起线程。
+        let entity_threads = world.islands.entity_threads;
+        if entity_threads > 1 {
+            match mc_bamboo_blocks::entity::parallel::WorkerPool::new(
+                "bamboo-entity",
+                entity_threads,
+            ) {
+                Ok(pool) => world.master.entity_pool = Some(pool),
+                Err(error) => {
+                    let message = format!("could not start the entity worker pool: {error}");
+                    error!(%message, "refusing to start");
+                    world.master.startup_error = Some(message);
+                    world.islands.entity_threads = 0;
+                }
+            }
+        }
         if island_threads > 0 {
             match IslandPool::new(island_threads, run_detached_island) {
                 Ok(pool) => {
@@ -663,6 +689,8 @@ impl World {
                 });
         }
         world.islands.region.spawn_per_player_cap = config.spawn_per_player_cap;
+        world.islands.region.max_entity_collisions =
+            config.max_entity_collisions.min(MAX_ENTITY_COLLISIONS);
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
         crate::worldgen_cache::configure(config.worldgen_cache);
@@ -1423,16 +1451,18 @@ impl World {
                     if !home {
                         island.region.profiler.begin_tick();
                     }
-                    run_island_simulation(island, None);
+                    run_island_simulation(island, None, self.master.entity_pool.as_ref());
                     if !home {
                         island.region.profiler.end_tick();
                     }
                 }
             } else {
                 let port_mode = self.master.port_mode;
+                let entity_pool = self.master.entity_pool.as_ref();
                 run_island_simulation(
                     &mut self.islands,
                     Some((&mut self.master.global, port_mode)),
+                    entity_pool,
                 );
             }
         }
@@ -3446,7 +3476,11 @@ fn run_partition_stage(region: &mut Region, now: i64) {
 /// for bit as before. Detached passes `None`: criteria are queued on the
 /// island for the master to apply at hand-back, and the master sends the
 /// latency update after the hand-back.
-fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortMode)>) {
+fn run_island_simulation(
+    island: &mut Island,
+    master: Option<(&mut Global, PortMode)>,
+    entity_pool: Option<&mc_bamboo_blocks::entity::parallel::WorkerPool>,
+) {
     let (mut global, port_mode) = match master {
         Some((global, mode)) => (Some(global), mode),
         None => (None, PortMode::Queued),
@@ -3469,6 +3503,7 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // Vanilla `ServerLevel.tick` order: block and fluid ticks, random ticks inside
     // `chunkSource.tick`, block events, entities, then block entities. Falling blocks and
     // primed TNT spawned by block or random ticks move in the same game tick.
+    let entity_threads = island.entity_threads;
     let region = &mut island.region;
     region
         .profiler
@@ -3500,7 +3535,7 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_partition_phase();
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::BlockEvents);
-    interaction::run_entity_ticks(island.entity_threads, region);
+    interaction::run_entity_ticks(entity_threads, region, entity_pool);
     // 乘客的 `rideTick`：载具这一刻的位置定了，骑手的位置跟上来，要下车的在这里下车。
     // 官方把乘客紧跟在载具后面 tick，这里放在实体阶段之后、玩家自己的 tick 之前。
     //
@@ -3616,7 +3651,7 @@ fn run_detached_island(island: &mut Island) {
     light_updates::run_light_updates(&mut island.region);
     island.region.profiler.lap(Phase::LightUpdates);
     island.region.advance_tick();
-    run_island_simulation(island, None);
+    run_island_simulation(island, None, None);
     island.save_report = island.save_pass();
 }
 

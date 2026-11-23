@@ -140,6 +140,11 @@ pub struct BiomeMobSpawnFact {
     /// layer, then the biome layer).
     #[serde(rename = "creatureSpawnProbability")]
     pub creature_spawn_probability: u32,
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS` 在这个群系的最终值。
+    ///
+    /// The resolved `SNOW_GOLEM_MELTS` value for this biome.
+    #[serde(default, rename = "snowGolemMelt")]
+    pub snow_golem_melt: bool,
 }
 
 /// 一个类别下的一张加权刷怪表。
@@ -1026,6 +1031,23 @@ pub struct ProjectileFacts {
     ///
     /// The metadata index of `Ocelot.DATA_TRUSTING`.
     pub ocelot_trusting: u8,
+    /// 两种傀儡的元数据 index、属性、眼高和裂纹阈值。
+    ///
+    /// Golem metadata indices, attributes, eye heights and crackiness thresholds.
+    pub iron_golem_flags: u8,
+    pub snow_golem_pumpkin: u8,
+    pub iron_golem_eye_height: f32,
+    pub snow_golem_eye_height: f32,
+    pub iron_golem_max_health: f64,
+    pub iron_golem_movement_speed: f64,
+    pub iron_golem_knockback_resistance: f64,
+    pub iron_golem_attack_damage: f64,
+    pub iron_golem_step_height: f64,
+    pub snow_golem_max_health: f64,
+    pub snow_golem_movement_speed: f64,
+    pub golem_crackiness_low: f32,
+    pub golem_crackiness_medium: f32,
+    pub golem_crackiness_high: f32,
     /// `Cat` 五个元数据访问器 index。
     ///
     /// The five metadata accessor indices of `Cat`.
