@@ -1263,7 +1263,10 @@ fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> V
     if mob.drowned_converting {
         out.push(EntityData::DrownedConverting(true));
     }
-    if mob.witch_using_item {
+    // `Pillager.IS_CHARGING_CROSSBOW` 也是 index 17 的 BOOLEAN，和女巫那一项字节相同。
+    // `Pillager.IS_CHARGING_CROSSBOW` is an index-17 boolean too, byte-identical to the
+    // witch's item.
+    if mob.witch_using_item || mob.pillager_charging {
         out.push(EntityData::WitchUsingItem(true));
     }
     if let Some(carried) = mob.enderman_carried {
@@ -2040,6 +2043,17 @@ fn event_packet(
             player_sound("minecraft:entity.cow.milk", *position, sound_seed())
         }
         MobEvent::PlayerSound { sound, position } => player_sound(sound, *position, sound_seed()),
+        MobEvent::PlayerSoundAt {
+            sound,
+            position,
+            volume,
+        } => {
+            let mut packet = player_sound(sound, *position, sound_seed());
+            if let EventPacket::Sound(sound) = &mut packet {
+                sound.volume = *volume;
+            }
+            packet
+        }
         MobEvent::Particles {
             particle,
             position,

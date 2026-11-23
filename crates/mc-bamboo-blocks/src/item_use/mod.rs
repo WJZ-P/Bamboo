@@ -162,6 +162,9 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::WITCH_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Witch)
         }
+        _ if ctx.item == items::PILLAGER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Pillager)
+        }
         _ if ctx.item == items::SPIDER_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Spider)
         }

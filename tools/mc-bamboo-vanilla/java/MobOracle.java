@@ -141,6 +141,14 @@ import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.world.level.levelgen.PatrolSpawner;
+import net.minecraft.world.level.levelgen.WorldOptions;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.BuiltinStructures;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructurePiece;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.pieces.PiecesContainer;
 import net.minecraft.util.random.WeightedList;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
@@ -262,7 +270,8 @@ public final class MobOracle {
                     "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_tipped_fade", "arrow_spectral_hit", "arrow_power_punch_hit",
                     "skeleton_bow_normal", "skeleton_bow_hard",
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
-                    "skeleton_freeze", "bogged_shear")) {
+                    "skeleton_freeze", "bogged_shear",
+                    "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -366,6 +375,12 @@ public final class MobOracle {
             }
             if ("gen_spawn".equals(only) || "gen_spawn_misc".equals(only) || "gen_spawn_panda".equals(only)) {
                 cases += playGenSpawns(official, out, only);
+            }
+            if (only == null || "patrol_spawn".equals(only) || "patrol".equals(only)) {
+                cases += playPatrolSpawns(official, out, only);
+            }
+            if (only == null || "structure_spawn".equals(only)) {
+                cases += playStructureSpawns(official, out, only);
             }
             if (only == null || "arrow_pickup".equals(only)) {
                 cases += playArrowPickups(official, out);
@@ -1568,6 +1583,127 @@ public final class MobOracle {
      *
      * <p>Frog scenes and their oracle helpers.
      */
+    /**
+     * 掠夺者的场景：闲逛和看别的生物、巡逻队（队长带路、队员跟随）、巡逻途中对峙和进攻。
+     * 射箭的场景在 `playProjectile` 里（箭要带种子）。
+     *
+     * Pillager scenes: strolling and watching other mobs, a patrol (leader ahead, followers
+     * behind), and the stand-off and attack of a patrol. Shooting scenes live in
+     * `playProjectile`, where arrows are seeded.
+     */
+    static final class PillagerScenes {
+        /** 巡逻队长的远处目标。 The patrol leader's far target. */
+        static final BlockPos PATROL_TARGET = new BlockPos(180, 64, 60);
+
+        static void add(List<Scene> scenes) {
+            // 玩家在 20 格外的石墙后面：看不见所以不当目标，但 32 格内有人，`noActionTime`
+            // 每刻归零，闲逛目标不会被 100 刻的门槛挡住。
+            // The player stands 20 blocks away behind a stone wall: unseen and never
+            // targeted, but within 32 blocks, so `noActionTime` resets every tick and the
+            // stroll goal is not gated by its 100-tick limit.
+            Scene idle = new Scene("pillager_idle").ticks(400).difficulty(2);
+            Scenes.ground(idle, 24);
+            idle.fill(17, 64, -6, 17, 67, 6, Blocks.STONE.defaultBlockState());
+            idle.mob(53, 0.5, 64.0, 0.5, 0.0F, 7101L, 0);
+            idle.mob(53, 4.5, 64.0, 2.5, 90.0F, 7102L, 0);
+            idle.mob(0, -3.5, 64.0, -2.5, 180.0F, 7103L, 0);
+            idle.player(20.5, 64.0, 0.5, Items.AIR);
+            scenes.add(idle);
+            // 巡逻队：0 号是队长，带着远处的巡逻目标；另外两只只有「在巡逻」，等队长给目标。
+            // A patrol: mob 0 leads with a far patrol target; the other two are merely
+            // patrolling and wait for the leader's target.
+            Scene patrol = new Scene("pillager_patrol").ticks(420).difficulty(2);
+            Scenes.ground(patrol, 40);
+            patrol.mob(53, 0.5, 64.0, 0.5, 0.0F, 7201L, 0);
+            patrol.mob(53, 2.5, 64.0, -1.5, 0.0F, 7202L, 0);
+            patrol.mob(53, -1.5, 64.0, 1.5, 0.0F, 7203L, 0);
+            scenes.add(patrol);
+            // 没有同伴的队长：第一次巡逻 tick 就不再巡逻。
+            // A leader without companions stops patrolling on its first patrol tick.
+            Scene alone = new Scene("pillager_patrol_alone").ticks(60).difficulty(2);
+            Scenes.ground(alone, 16);
+            alone.mob(53, 0.5, 64.0, 0.5, 0.0F, 7301L, 0);
+            scenes.add(alone);
+            // 巡逻途中看见 14 格外的玩家：原地对峙（`HoldGroundAttackGoal`），不进攻。
+            // A patrol sees a player 14 blocks away: it holds its ground and does not attack.
+            Scene far = new Scene("pillager_hold_far").ticks(160).difficulty(2);
+            Scenes.ground(far, 24);
+            far.mob(53, 0.5, 64.0, 0.5, 0.0F, 7401L, 0);
+            far.mob(53, 1.5, 64.0, 3.5, 0.0F, 7402L, 0);
+            far.player(14.5, 64.0, 0.5, Items.AIR);
+            scenes.add(far);
+            // 玩家在 7 格内：对峙一刻就转进攻，喊同伴，然后给弩装填。场景在第一箭之前结束
+            // （没带种子的箭不能逐刻比）。
+            // A player within 7 blocks: one tick of stand-off, then the attack, the shout
+            // and loading the crossbow. The scene ends before the first shot (an unseeded
+            // arrow cannot be compared tick by tick).
+            Scene near = new Scene("pillager_hold_near").ticks(40).difficulty(2);
+            Scenes.ground(near, 24);
+            near.mob(53, 0.5, 64.0, 0.5, 0.0F, 7501L, 0);
+            near.mob(53, 1.5, 64.0, 3.5, 0.0F, 7502L, 0);
+            near.player(7.5, 64.0, 0.5, Items.AIR);
+            scenes.add(near);
+        }
+
+        /**
+         * 场景开头给掠夺者的起始状态：主手一把弩，巡逻场景再设队长和巡逻标志。
+         *
+         * Start state: a crossbow in the main hand; patrol scenes also set the leader and
+         * the patrolling flag.
+         */
+        static void setup(Scene scene, int index, Mob mob) throws Exception {
+            if (!(mob instanceof net.minecraft.world.entity.monster.illager.Pillager pillager)) return;
+            pillager.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, new ItemStack(Items.CROSSBOW));
+            if (scene.name.startsWith("pillager_patrol") || scene.name.startsWith("pillager_hold")) {
+                if (index == 0) {
+                    pillager.setPatrolLeader(true);
+                    pillager.setPatrolTarget(PATROL_TARGET);
+                } else {
+                    putBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, pillager, "patrolling", true);
+                }
+            }
+        }
+
+        /**
+         * 逐刻状态：巡逻、队长、巡逻目标、装填标志、是否在用物品、已用刻数、弩里的箭数。
+         *
+         * Per-tick state: patrolling, leader, patrol target, charging flag, using item,
+         * ticks used and the number of loaded arrows.
+         */
+        static String state(net.minecraft.world.entity.monster.illager.Pillager pillager) throws Exception {
+            BlockPos target = pillager.getPatrolTarget();
+            var charged = pillager.getMainHandItem().getOrDefault(DataComponents.CHARGED_PROJECTILES,
+                    net.minecraft.world.item.component.ChargedProjectiles.EMPTY);
+            return "pillager:" + getBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, pillager, "patrolling")
+                    + ':' + pillager.isPatrolLeader()
+                    + ':' + (target == null ? "-" : target.getX() + "," + target.getY() + "," + target.getZ())
+                    + ':' + pillager.isChargingCrossbow()
+                    + ':' + pillager.isUsingItem()
+                    + ':' + pillager.getTicksUsingItem()
+                    + ':' + charged.itemCopies().count();
+        }
+
+        /**
+         * 场景结束时确认真的走到了要测的分支。
+         *
+         * After a scene, confirm it reached the branch it is meant to cover.
+         */
+        static void check(Scene scene, List<Mob> mobs) throws Exception {
+            if (!scene.name.startsWith("pillager_")) return;
+            var first = (net.minecraft.world.entity.monster.illager.Pillager) mobs.getFirst();
+            boolean patrolling = getBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, first, "patrolling");
+            boolean ok = switch (scene.name) {
+                case "pillager_patrol" -> patrolling && first.getX() > 12.0
+                        && ((net.minecraft.world.entity.monster.illager.Pillager) mobs.get(1)).hasPatrolTarget();
+                case "pillager_patrol_alone" -> !patrolling;
+                case "pillager_hold_far" -> patrolling && first.getTarget() != null && !first.isAggressive();
+                case "pillager_hold_near" -> first.isAggressive()
+                        && net.minecraft.world.item.CrossbowItem.isCharged(first.getMainHandItem());
+                default -> true;
+            };
+            if (!ok) throw new IllegalStateException("pillager scenario did not exercise " + scene.name);
+        }
+    }
     static final class FrogScenes {
         static void add(List<Scene> scenes) {
             for (long seed : new long[] {11L, 23L}) {
@@ -3868,6 +4004,7 @@ public final class MobOracle {
                 scenes.add(kill);
             }
             slimeScenes(scenes);
+            PillagerScenes.add(scenes);
             Scene witch = new Scene("witch_drink_fire").ticks(140).difficulty(2).fire(200);
             ground(witch, 16);
             witch.mob(51, 0.5, 64.0, 0.5, 0.0F, 503L, 0);
@@ -4155,7 +4292,8 @@ public final class MobOracle {
                 || scene.name.startsWith("camel_")
                 || scene.name.startsWith("witch_drink_") || scene.name.startsWith("drowned_")
                 || scene.name.startsWith("creeper_") || scene.name.startsWith("spider_")
-                || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")) {
+                || scene.name.startsWith("cave_spider_") || scene.name.startsWith("enderman_")
+                || scene.name.startsWith("pillager_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -4928,6 +5066,51 @@ public final class MobOracle {
         return arrow;
     }
 
+    /**
+     * 射箭对拍用的掠夺者：`performRangedAttack` 照 `CrossbowAttackMob.performCrossbowAttack`
+     * 原样走，只是 `performShooting` 用一把带种子的 `CrossbowItem`（`SeedCrossbow`），让箭的
+     * 随机源和 UUID 可重放。装填、射击向量、耐久、音效都是官方代码。
+     *
+     * The pillager for shooting replays: `performRangedAttack` follows
+     * `CrossbowAttackMob.performCrossbowAttack` verbatim except that `performShooting`
+     * runs on a seeded `CrossbowItem` (`SeedCrossbow`), so arrow randoms and UUIDs replay.
+     * Loading, the shot vector, durability and sounds are vanilla code.
+     */
+    private static final class OraclePillager extends net.minecraft.world.entity.monster.illager.Pillager {
+        private SeedCrossbow crossbow;
+
+        private OraclePillager(FakeLevel level) {
+            super(EntityTypes.PILLAGER, level);
+        }
+
+        static OraclePillager create(FakeLevel level) throws Exception {
+            OraclePillager pillager = new OraclePillager(level);
+            // 未注册的 `Item` 子类要临时解冻物品注册表才能构造。
+            // An unregistered `Item` subclass needs the item registry temporarily unfrozen.
+            unfreezeItems();
+            try {
+                pillager.crossbow = new SeedCrossbow(new Item.Properties().durability(465)
+                        .setId(net.minecraft.resources.ResourceKey.create(Registries.ITEM,
+                                net.minecraft.resources.Identifier.withDefaultNamespace("crossbow"))),
+                        level.entitySeeds);
+            } finally {
+                freezeItems();
+            }
+            return pillager;
+        }
+
+        @Override
+        public void performRangedAttack(LivingEntity target, float power) {
+            InteractionHand hand = net.minecraft.world.entity.projectile.ProjectileUtil
+                    .getWeaponHoldingHand(this, Items.CROSSBOW);
+            ItemStack used = this.getItemInHand(hand);
+            if (used.getItem() instanceof CrossbowItem) {
+                this.crossbow.performShooting(this.level(), this, hand, used, 1.6F,
+                        this.rangedAttackUncertainty(this.level()), this.getTarget());
+            }
+            this.onCrossbowAttackPerformed();
+        }
+    }
     private static final class OracleStray extends net.minecraft.world.entity.monster.skeleton.Stray {
         OracleStray(FakeLevel level) {
             super(EntityTypes.STRAY, level);
@@ -4956,7 +5139,9 @@ public final class MobOracle {
     private static String skeletonKinState(Mob shooter) {
         boolean flag = shooter instanceof net.minecraft.world.entity.monster.skeleton.Skeleton skeleton
                 ? skeleton.isShaking()
-                : shooter instanceof net.minecraft.world.entity.monster.skeleton.Bogged bogged && bogged.isSheared();
+                : shooter instanceof net.minecraft.world.entity.monster.illager.Pillager pillager
+                        ? pillager.isChargingCrossbow()
+                        : shooter instanceof net.minecraft.world.entity.monster.skeleton.Bogged bogged && bogged.isSheared();
         return "[" + shooter.getId() + "," + BuiltInRegistries.ENTITY_TYPE.getId(shooter.getType())
                 + "," + (flag ? 1 : 0) + "," + shooter.getTicksFrozen()
                 + "," + Float.floatToRawIntBits(shooter.getHealth())
@@ -5323,6 +5508,157 @@ public final class MobOracle {
         return count;
     }
 
+    // ---- 结构刷怪覆盖（`ChunkGenerator.getMobsAt`）----
+
+    /**
+     * 手工搭两个结构起点（前哨站 + 女巫小屋），用真的 `StructureManager` 和
+     * `ChunkGenerator.getMobsAt` 求若干位置的刷怪表，逐条和 Bamboo 的
+     * `resolve_override` 比。起点布局是固定的，不消耗随机数。
+     *
+     * Hand-build two structure starts (an outpost and a swamp hut) and ask the real
+     * `StructureManager` / `ChunkGenerator.getMobsAt` for the spawn list at several
+     * positions, comparing each with Bamboo's `resolve_override`. The layout is fixed and
+     * draws no random numbers.
+     */
+    private static int playStructureSpawns(Official official, Writer out, String only) throws Exception {
+        if (only != null && !"structure_spawn".startsWith(only)) return 0;
+        out.write(structureSpawnCase(official) + "\n");
+        return 1;
+    }
+
+    /** 一个没有行为的空结构件，只有包围盒。`PiecesContainer` 只读这个盒。 */
+    private static StructurePiece stubPiece(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        return new StubPiece(new BoundingBox(minX, minY, minZ, maxX, maxY, maxZ));
+    }
+
+    /** 只带包围盒的结构件：`StructureStart` / `PiecesContainer` 只读它。 */
+    private static final class StubPiece extends StructurePiece {
+        StubPiece(BoundingBox box) {
+            super(null, 0, box);
+        }
+
+        @Override
+        protected void addAdditionalSaveData(
+                net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext context,
+                net.minecraft.nbt.CompoundTag tag) {}
+
+        @Override
+        public void postProcess(net.minecraft.world.level.WorldGenLevel level, StructureManager structureManager,
+                ChunkGenerator generator, net.minecraft.util.RandomSource random, BoundingBox chunkBB,
+                ChunkPos chunkPos, BlockPos referencePos) {}
+    }
+
+    /** 走官方 `ChunkGenerator.getMobsAt` 的生成器：只借它的结构覆盖分支。 */
+    private static final class StructureSpawnGenerator extends FlatLevelSource {
+        private StructureSpawnGenerator() {
+            super(null);
+        }
+    }
+
+    private static JsonObject structureSpawnCase(Official official) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        // 和 `NaturalSpawnGenerator` 一样跳过构造器：`getMobsAt` 不读任何生成器字段。
+        // Skip the constructor like `NaturalSpawnGenerator`; `getMobsAt` reads no fields.
+        level.chunkSource.naturalGenerator = allocate(StructureSpawnGenerator.class);
+        level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+        put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> level.naturalBiome, 0L));
+        level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        level.injectedCanSeeSky = true;
+        WorldOptions options = new WorldOptions(0L, true, false);
+        StructureManager manager = new StructureManager(level, options, null);
+        put(ServerLevel.class, level, "structureManager", manager);
+
+        var outpost = official.registries.lookupOrThrow(Registries.STRUCTURE)
+                .getOrThrow(BuiltinStructures.PILLAGER_OUTPOST).value();
+        var hut = official.registries.lookupOrThrow(Registries.STRUCTURE)
+                .getOrThrow(BuiltinStructures.SWAMP_HUT).value();
+        // 前哨站：两件之间留出空档，覆盖「整个起点盒命中但不在任何结构件里」那一支。
+        // Outpost: a gap between two pieces covers "inside the start box but in no piece".
+        StructurePiece outpostA = stubPiece(0, 60, 0, 2, 70, 2);
+        StructurePiece outpostB = stubPiece(10, 60, 0, 12, 70, 2);
+        StructurePiece hutPiece = stubPiece(2, 60, 20, 8, 70, 28);
+        StructureStart outpostStart = new StructureStart(outpost, new ChunkPos(0, 0), 0,
+                new PiecesContainer(List.of(outpostA, outpostB)));
+        StructureStart hutStart = new StructureStart(hut, new ChunkPos(0, 1), 0,
+                new PiecesContainer(List.of(hutPiece)));
+        LevelChunk chunk00 = (LevelChunk) level.getChunk(0, 0, ChunkStatus.FULL, false);
+        chunk00.setStartForStructure(outpost, outpostStart);
+        chunk00.addReferenceForStructure(outpost, ChunkPos.pack(0, 0));
+        LevelChunk chunk01 = (LevelChunk) level.getChunk(0, 1, ChunkStatus.FULL, false);
+        chunk01.setStartForStructure(hut, hutStart);
+        chunk01.addReferenceForStructure(hut, ChunkPos.pack(0, 1));
+
+        ChunkGenerator generator = level.getChunkSource().getGenerator();
+        JsonArray queries = new JsonArray();
+        // 前哨站：空档里（STRUCTURE 盒命中）、空档外、以及 CREATURE 类别不覆盖。
+        // Outpost: in the gap (a STRUCTURE-box hit), outside it, and CREATURE has no override.
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 6, 65, 1);
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 6, 65, 15);
+        addStructureQuery(queries, level, manager, generator, MobCategory.CREATURE, 6, 65, 1);
+        // 女巫小屋：结构件里是 PIECE 命中，件外回退群系表；CREATURE 覆盖成猫。
+        // Swamp hut: a piece hit, outside the piece falls back, CREATURE yields the cat.
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 5, 65, 24);
+        addStructureQuery(queries, level, manager, generator, MobCategory.MONSTER, 5, 65, 17);
+        addStructureQuery(queries, level, manager, generator, MobCategory.CREATURE, 5, 65, 24);
+
+        var row = new JsonObject();
+        row.addProperty("type", "structureSpawn");
+        row.addProperty("name", "structure_spawn");
+        row.addProperty("biome", "minecraft:plains");
+        JsonArray starts = new JsonArray();
+        starts.add(structureStartJson("minecraft:pillager_outpost", true, outpostStart));
+        starts.add(structureStartJson("minecraft:swamp_hut", false, hutStart));
+        row.add("starts", starts);
+        row.add("queries", queries);
+        return row;
+    }
+
+    private static JsonObject structureStartJson(String structure, boolean adaptation, StructureStart start) {
+        var row = new JsonObject();
+        row.addProperty("structure", structure);
+        row.addProperty("adaptation", adaptation);
+        JsonArray pieces = new JsonArray();
+        for (StructurePiece piece : start.getPieces()) {
+            BoundingBox box = piece.getBoundingBox();
+            var entry = new JsonArray();
+            entry.add(box.minX());
+            entry.add(box.minY());
+            entry.add(box.minZ());
+            entry.add(box.maxX());
+            entry.add(box.maxY());
+            entry.add(box.maxZ());
+            pieces.add(entry);
+        }
+        row.add("pieces", pieces);
+        return row;
+    }
+
+    private static void addStructureQuery(JsonArray queries, FakeLevel level, StructureManager manager,
+            ChunkGenerator generator, MobCategory category, int x, int y, int z) throws Exception {
+        BlockPos pos = new BlockPos(x, y, z);
+        var list = generator.getMobsAt(level, manager, category, pos);
+        var row = new JsonObject();
+        row.addProperty("category", category.getName());
+        var at = new JsonArray();
+        at.add(x);
+        at.add(y);
+        at.add(z);
+        row.add("pos", at);
+        JsonArray expected = new JsonArray();
+        for (var entry : list.unwrap()) {
+            var item = new JsonArray();
+            item.add(BuiltInRegistries.ENTITY_TYPE.getId(entry.value().type()));
+            item.add(entry.weight());
+            item.add(entry.value().count().minInclusive());
+            item.add(entry.value().count().maxInclusive());
+            expected.add(item);
+        }
+        row.add("expected", expected);
+        queries.add(row);
+    }
+
     // 与 Rust 的刷怪夹具使用相同的地面。
     // Match the floor of the Rust spawn fixtures.
     private static BlockState spawnFloor(String biome) {
@@ -5331,6 +5667,110 @@ public final class MobOracle {
             case "frozen_ocean" -> Blocks.ICE.defaultBlockState();
             default -> Blocks.GRASS_BLOCK.defaultBlockState();
         };
+    }
+
+    // ---- 掠夺者巡逻队（`PatrolSpawner`）----
+
+    /**
+     * 一个巡逻队场景：平地、一名玩家、世界随机源的种子和跑多少刻。
+     * `spawnEnemies` 对应 `tick(level, spawnEnemies)`，`spawnPatrols` 是游戏规则。
+     *
+     * A patrol scene: flat ground, one player, the world random seed and a tick count.
+     * `spawnEnemies` is the `tick(level, spawnEnemies)` argument, `spawnPatrols` the rule.
+     */
+    private record PatrolScene(String name, long seed, int ticks, int difficulty,
+            boolean bright, boolean spawnEnemies, boolean spawnPatrols) {}
+
+    private static int playPatrolSpawns(Official official, Writer out, String only) throws Exception {
+        List<PatrolScene> scenes = List.of(
+                new PatrolScene("patrol_day", 1L, 260000, 2, true, true, true),
+                new PatrolScene("patrol_day_hard", 7L, 260000, 3, true, true, true),
+                new PatrolScene("patrol_night", 2L, 26000, 2, false, true, true),
+                new PatrolScene("patrol_gamerule_off", 3L, 26000, 2, true, true, false),
+                new PatrolScene("patrol_no_enemies", 4L, 26000, 2, true, false, true));
+        int count = 0;
+        for (var scene : scenes) {
+            if (only != null && !scene.name().startsWith(only)) continue;
+            out.write(patrolSpawnCase(official, scene) + "\n");
+            count++;
+        }
+        return count;
+    }
+
+    private static JsonObject patrolSpawnCase(Official official, PatrolScene scene) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        // 和自然生成夹具一样的地面与亮度语义：`naturalScene` 给方块光 0、天空光 15。
+        level.naturalScene = new NaturalScene(scene.name(), EntityTypes.PILLAGER, "plains",
+                scene.difficulty(), 15, 0, scene.bright() ? 0 : 11, false, 0.5, 0, 289, true, false);
+        level.injectedBrightOutside = scene.bright();
+        level.spawnDifficulty = new DifficultyInstance(Difficulty.byId(scene.difficulty()), 0L, 0L, 0.0F);
+        // 环境属性系统要一条能回答群系的 `BiomeManager`，否则群系层取不到值。
+        // The environment-attribute system needs a `BiomeManager` to answer biome lookups.
+        level.naturalBiome = official.registries.lookupOrThrow(Registries.BIOME)
+                .getOrThrow(ResourceKey.create(Registries.BIOME, Identifier.withDefaultNamespace("plains")));
+        put(Level.class, level, "biomeManager", new net.minecraft.world.level.biome.BiomeManager(
+                (x, y, z) -> level.naturalBiome, 0L));
+        level.naturalAttributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+        for (int x = -64; x < 64; x++) {
+            for (int z = -64; z < 64; z++) {
+                level.blocks.put(BlockPos.asLong(x, -63, z), Blocks.GRASS_BLOCK.defaultBlockState());
+            }
+        }
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "PatrolSpawnOracle"), ClientInformation.createDefault());
+        player.setPos(0.5, -62.0, 0.5);
+        level.playersList().add(player);
+        level.getRandom().setSeed(scene.seed());
+        setRule(official, GameRules.SPAWN_PATROLS, scene.spawnPatrols());
+        PatrolSpawner spawner = new PatrolSpawner();
+        JsonArray steps = new JsonArray();
+        for (int tick = 0; tick < scene.ticks(); tick++) {
+            level.gameTime = tick;
+            level.spawned.clear();
+            spawner.tick(level, scene.spawnEnemies());
+            if (level.spawned.isEmpty()) continue;
+            var step = new JsonObject();
+            step.addProperty("tick", tick);
+            step.addProperty("worldSeed", levelSeed(level));
+            JsonArray spawned = new JsonArray();
+            for (Entity entity : level.spawned) {
+                var mob = (net.minecraft.world.entity.monster.PatrollingMonster) entity;
+                var row = new JsonArray();
+                row.add(BuiltInRegistries.ENTITY_TYPE.getId(mob.getType()));
+                row.add((int) (mob.getX() * 2));
+                row.add((int) mob.getY());
+                row.add((int) (mob.getZ() * 2));
+                // `LivingEntity` 构造器用不带种子的实体随机源抽了初始朝向，两边没法比，
+                // 都记 0，和自然生成夹具里史莱姆的朝向一样。
+                // `LivingEntity`'s constructor draws the initial yaw from the unseeded entity
+                // random; not comparable, so both sides record 0 like the slime yaw.
+                row.add(0);
+                row.add(mob.isPatrolLeader() ? 1 : 0);
+                row.add(BuiltInRegistries.ITEM.getId(mob.getMainHandItem().getItem()));
+                row.add(BuiltInRegistries.ITEM.getId(
+                        mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).getItem()));
+                row.add(getBoolean(net.minecraft.world.entity.monster.PatrollingMonster.class, mob, "patrolling") ? 1 : 0);
+                row.add(mob.getPatrolTarget() != null ? 1 : 0);
+                row.add(mob.isLeftHanded() ? 1 : 0);
+                spawned.add(row);
+            }
+            step.add("spawned", spawned);
+            steps.add(step);
+        }
+        setRule(official, GameRules.SPAWN_PATROLS, true);
+        var row = new JsonObject();
+        row.addProperty("type", "patrolSpawn");
+        row.addProperty("name", scene.name());
+        row.addProperty("seed", scene.seed());
+        row.addProperty("ticks", scene.ticks());
+        row.addProperty("difficulty", scene.difficulty());
+        row.addProperty("bright", scene.bright());
+        row.addProperty("spawnEnemies", scene.spawnEnemies());
+        row.addProperty("spawnPatrols", scene.spawnPatrols());
+        row.addProperty("endWorldSeed", levelSeed(level));
+        row.addProperty("endNextTick", getInt(PatrolSpawner.class, spawner, "nextTick"));
+        row.add("steps", steps);
+        return row;
     }
 
     private static JsonObject naturalSpawnCase(Official official, NaturalScene scene, long seed) throws Exception {
@@ -6788,7 +7228,13 @@ public final class MobOracle {
         boolean freeze = name.equals("skeleton_freeze");
         boolean shear = name.equals("bogged_shear");
         boolean passive = freeze || shear;
-        boolean skeleton = name.startsWith("skeleton_") || stray || bogged;
+        // 掠夺者用弩：`pillager_crossbow_multishot` 的弩带多重射击和穿透。射手这一支的分支
+        // （地面、玩家位置、逐刻的射手状态）和骷髅共用。
+        // Pillagers use a crossbow; `pillager_crossbow_multishot` adds Multishot and
+        // Piercing. The shooter branches (ground, player position, per-tick shooter state)
+        // are shared with the skeletons.
+        boolean pillager = name.startsWith("pillager_crossbow");
+        boolean skeleton = name.startsWith("skeleton_") || stray || bogged || pillager;
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
@@ -6872,14 +7318,20 @@ public final class MobOracle {
         var arrows = new ArrayList<net.minecraft.world.entity.projectile.arrow.AbstractArrow>();
         var sync = new java.util.LinkedHashMap<Integer, Sync>();
         if (skeleton) {
-            shooter = stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
+            shooter = pillager ? OraclePillager.create(world)
+                    : stray ? new OracleStray(world) : bogged ? new OracleBogged(world) : new OracleSkeleton(world);
             world.entitySeeds.nextLong();
             setRandom(shooter, 42L);
             shooter.setUUID(new UUID(0, 1));
             shooter.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
             shooter.setYHeadRot(0.0F);
             shooter.setYBodyRot(0.0F);
-            shooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.BOW));
+            ItemStack weapon = new ItemStack(pillager ? Items.CROSSBOW : Items.BOW);
+            if (name.equals("pillager_crossbow_multishot")) {
+                enchant(official, weapon, Enchantments.MULTISHOT, 1);
+                enchant(official, weapon, Enchantments.PIERCING, 1);
+            }
+            shooter.setItemInHand(InteractionHand.MAIN_HAND, weapon);
             world.tracked.add(shooter);
         } else {
             net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow;
@@ -6938,7 +7390,7 @@ public final class MobOracle {
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : skeleton ? 105
+        int ticks = (effectHit || enchanted) ? 4 : freeze ? 450 : shear ? 12 : bogged ? 150 : pillager ? 190 : skeleton ? 105
                 : (piercing || water) ? 3 : 26;
         int conversions = 0;
         int sheared = 0;
@@ -7070,6 +7522,18 @@ public final class MobOracle {
                 frames.append(",\"aggressive\":").append(shooter.isAggressive());
                 frames.append(",\"drawing\":").append(shooter.isUsingItem());
                 frames.append(",\"kin\":").append(skeletonKinState(shooter));
+                if (pillager) {
+                    // 装填完成的音效从世界随机源取音高；弩里的箭数和耐久损耗也逐刻比。
+                    // The loading-end sound draws its pitch from the level random; the
+                    // loaded arrow count and the crossbow damage are compared per tick too.
+                    ItemStack held = shooter.getMainHandItem();
+                    frames.append(",\"levelSeed\":").append(levelSeed(world));
+                    frames.append(",\"crossbow\":[").append(held.getOrDefault(DataComponents.CHARGED_PROJECTILES,
+                                    net.minecraft.world.item.component.ChargedProjectiles.EMPTY).itemCopies().count())
+                            .append(',').append(held.getDamageValue())
+                            .append(',').append(shooter.getTicksUsingItem())
+                            .append(',').append(shooter.getNoActionTime()).append(']');
+                }
                 frames.append(",\"levelEvents\":").append(world.levelEvents.stream().map(Arrays::toString)
                         .collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.levelEvents.clear();
@@ -8884,6 +9348,7 @@ public final class MobOracle {
                 case 50 -> new net.minecraft.world.entity.monster.cubemob.Slime(EntityTypes.SLIME, level);
                 case 51 -> new net.minecraft.world.entity.monster.Witch(EntityTypes.WITCH, level);
                 case 52 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, level);
+                case 53 -> new net.minecraft.world.entity.monster.illager.Pillager(EntityTypes.PILLAGER, level);
                 case 9 -> EntityTypes.HORSE.create(level, EntitySpawnReason.COMMAND);
                 case 10 -> EntityTypes.DONKEY.create(level, EntitySpawnReason.COMMAND);
                 case 11 -> EntityTypes.MULE.create(level, EntitySpawnReason.COMMAND);
@@ -8982,6 +9447,7 @@ public final class MobOracle {
                     && scene.carried != null) {
                 enderman.setCarriedBlock(scene.carried);
             }
+            PillagerScenes.setup(scene, i, mob);
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
             mobs.add(mob);
@@ -9250,6 +9716,7 @@ public final class MobOracle {
             }
         }
         line.append("]");
+        PillagerScenes.check(scene, mobs);
         if (scene.name.equals("witch_drink_fire")) {
             Mob witch = mobs.getFirst();
             if (!witch.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE) || witch.getHealth() != 26.0F) {
@@ -9432,6 +9899,8 @@ public final class MobOracle {
                         .append(':').append(breathing == null ? 0 : breathing.getDuration())
                         .append(':').append(speed == null ? 0 : speed.getDuration())
                         .append("\",\"snd\":\"minecraft:classic\"");
+            } else if (mob instanceof net.minecraft.world.entity.monster.illager.Pillager pillager) {
+                out.append(",\"var\":\"").append(PillagerScenes.state(pillager)).append("\",\"snd\":\"minecraft:classic\"");
             } else if (mob instanceof PolarBear bear) {
                 out.append(",\"var\":\"").append(bearState(bear)).append("\",\"snd\":\"\"");
             } else {
@@ -11894,6 +12363,14 @@ public final class MobOracle {
                             .setBlockState(pos.getX() & 15, pos.getY() & 15, pos.getZ() & 15, state, false);
                 }
             });
+            // 方块是直接写进区段的，高度图没跟着更新；巡逻目标（`LongDistancePatrolGoal`）读
+            // `MOTION_BLOCKING_NO_LEAVES`，这里用官方的 `primeHeightmaps` 按区段内容补算这一张。
+            // 其余高度图保持原样，不影响别的场景。
+            // Blocks are written straight into the sections, so heightmaps are stale. The
+            // patrol goal reads `MOTION_BLOCKING_NO_LEAVES`; prime that one map from the
+            // sections with vanilla's `primeHeightmaps`. The other maps stay untouched so
+            // no other scene changes.
+            Heightmap.primeHeightmaps(chunk, java.util.EnumSet.of(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES));
             chunkCache.put(key, chunk);
             return chunk;
         }

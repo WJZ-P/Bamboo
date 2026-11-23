@@ -1007,3 +1007,50 @@ fn nonzero_loot_seed_matches_the_death_entry() {
         .unwrap();
     assert_eq!(from_entry, from_table);
 }
+
+/// 掠夺者的战利品表只有队长掉不祥之瓶；`type_specific/raider` 的 `is_captain` 读
+/// `Raider.isCaptain()`，`has_raid` 缺省为假。
+///
+/// The pillager table drops the ominous bottle only for a captain: the
+/// `type_specific/raider` predicate reads `Raider.isCaptain()` and defaults `has_raid`
+/// to false.
+#[test]
+fn pillager_captain_drops_the_ominous_bottle() {
+    let level: &TestLevel = Box::leak(Box::new(TestLevel));
+    let drops_for = |captain: bool| {
+        let mut entity = EntityView::new(entity_type_id("minecraft:pillager").unwrap());
+        entity.is_living = true;
+        entity.is_raider = true;
+        entity.is_captain = captain;
+        entity.position = Some(Position::new(0.5, 1.0, 0.5));
+        let params = EntityDeathParams {
+            entity,
+            origin: Position::new(0.5, 1.0, 0.5),
+            damage_source: DamageSourceView {
+                damage_type: 0,
+                is_direct: true,
+                ..DamageSourceView::default()
+            },
+            attacking_entity: None,
+            direct_attacking_entity: None,
+            last_damage_player: None,
+            luck: 0.0,
+            level: Some(level),
+        };
+        entity_death_drops(
+            "minecraft:entities/pillager",
+            &params,
+            7,
+            None,
+            &LegacyRandom::new(1),
+        )
+        .unwrap()
+    };
+    let captain = drops_for(true);
+    assert_eq!(captain.len(), 1);
+    assert_eq!(
+        (captain[0].item, captain[0].count),
+        (items::OMINOUS_BOTTLE, 1)
+    );
+    assert!(drops_for(false).is_empty());
+}

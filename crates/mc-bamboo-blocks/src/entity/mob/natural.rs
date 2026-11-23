@@ -479,9 +479,19 @@ fn can_spawn_mob_at(
     })
 }
 
-/// `NaturalSpawner.mobsAt`（下界要塞那一支不建模）。
+/// `ChunkGenerator.getMobsAt`：`NaturalSpawner.mobsAt` 先查结构刷怪覆盖（前哨站、
+/// 女巫小屋等），落在结构覆盖盒里时用结构的怪物表，否则用群系表。下界要塞那一支
+/// 不建模。覆盖表是静态数据，查表和取权重走的是同一条链。
+///
+/// `ChunkGenerator.getMobsAt`: `NaturalSpawner.mobsAt` consults the structure spawn
+/// override first (outposts, swamp huts, ...); inside an override box the structure's
+/// monster list replaces the biome table. The nether-fortress branch is not modelled.
+/// The override table is static data, so drawing and support checks share one list.
 fn mobs_at(world: &World, category: MobCategory, pos: BlockPos) -> &'static [MobSpawnerDef] {
-    world.level().natural_spawn_table(pos, category)
+    world
+        .level()
+        .structure_spawn_override(pos, category)
+        .unwrap_or_else(|| world.level().natural_spawn_table(pos, category))
 }
 
 /// `level.environmentAttributes().getValue(NATURAL_MOB_SPAWNS, pos)`：主世界就是群系的表。
@@ -613,6 +623,15 @@ fn on_ground_position_ok_for(
 /// phantoms in mid-air and checks the cell itself, not the block below.
 pub(crate) fn is_valid_empty_spawn_block_for(world: &World, kind: MobType, pos: BlockPos) -> bool {
     is_valid_empty_spawn_block(world, kind.fire_immune(), kind.immune_to(), pos)
+}
+
+/// `NaturalSpawner.isValidEmptySpawnBlock`，给掠夺者巡逻队的落点判定用。
+/// 掠夺者不防火、没有 `immuneTo` 标签，两种参数都是默认分支。
+///
+/// `NaturalSpawner.isValidEmptySpawnBlock` for a patrol landing spot. Pillagers
+/// are not fire-immune and have no `immuneTo` tag, so both flags take the default.
+pub(super) fn patrol_spawn_block_ok(world: &World, pos: BlockPos) -> bool {
+    is_valid_empty_spawn_block(world, false, MobType::Pillager.immune_to(), pos)
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
@@ -757,6 +776,13 @@ pub(super) fn check_spawn_rules(
                 && valid_mob_spawn_block(world, kind, pos)
                 && super::stray::sees_sky_through_powder_snow(world, pos)
         }
+        // `PatrollingMonster.checkPatrollingMonsterSpawnRules`：方块光大于 8 不刷，其余走
+        // `checkAnyLightMonsterSpawnRules`（不看天色，只看脚下能不能站；和平难度在函数开头
+        // 已经挡掉）。
+        // `PatrollingMonster.checkPatrollingMonsterSpawnRules`: no spawn above block light
+        // 8, otherwise `checkAnyLightMonsterSpawnRules` (no darkness test, only the footing;
+        // peaceful is rejected at the top of this function).
+        MobType::Pillager => super::pillager::check_spawn_rules(world, pos),
         MobType::Slime => super::slime::check_spawn_rules(world, pos),
         MobType::Bat => super::bat::check_spawn_rules(world, pos),
         // 幻翼登记的是 `Mob::checkMobSpawnRules`；它不在群系刷怪表里，靠 `PhantomSpawner`。
@@ -814,7 +840,7 @@ pub(super) fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
 }
 
 /// `Mob.checkMobSpawnRules` 里的 `isValidSpawn`，`NATURAL` 不是刷怪笼。
-fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
+pub(super) fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     if kind.fire_immune() {
         return true;
@@ -836,10 +862,12 @@ fn is_valid_position_for_mob(
     // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真；新生成的豹猫 `tickCount == 0`，为假。
     // A fresh fish has no bucket flag or name (`removeWhenFarAway` is true); a fresh ocelot
     // has `tickCount == 0` (false).
-    let removes = entity
-        .kind
-        .mob()
-        .is_some_and(|mob| mob.removes_when_far_away(entity.tick_count));
+    // 官方把最近玩家距离传给 `removeWhenFarAway(distSqr)`；巡逻中的袭击者按它判定 128 格。
+    // Vanilla passes the nearest-player distance to `removeWhenFarAway(distSqr)`; a
+    // patrolling raider tests the 128-block threshold against it.
+    let removes = entity.kind.mob().is_some_and(|mob| {
+        mob.removes_when_far_away_at(nearest_player_distance_sqr, entity.tick_count)
+    });
     if nearest_player_distance_sqr > despawn * despawn && removes {
         return false;
     }
@@ -992,6 +1020,10 @@ fn max_spawn_cluster_size(kind: MobType) -> i32 {
         // `Wolf.getMaxSpawnClusterSize` 是 8，其余用 `Mob` 的 4。
         // `Wolf.getMaxSpawnClusterSize` is 8; the rest use the `Mob` default of 4.
         8
+    } else if kind == MobType::Pillager {
+        // `Pillager.getMaxSpawnClusterSize` 是 1。
+        // `Pillager.getMaxSpawnClusterSize` is 1.
+        1
     } else {
         4
     }
