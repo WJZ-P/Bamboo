@@ -84,6 +84,16 @@ pub struct MobInteraction {
     /// Offset added to the mob's position for `drop_stack` (zero by default;
     /// sheared equipment uses the average `PASSENGER` attachment point).
     pub drop_offset: mc_bamboo_core::Vec3,
+    /// `TamableAnimal.tame` / `AbstractHorse.tameWithName`：这次交互驯服了这只动物。
+    /// 调用方按玩家进度触发器把事件发给这名玩家。
+    ///
+    /// `TamableAnimal.tame` / `AbstractHorse.tameWithName` succeeded during this
+    /// interaction; the caller credits the player's advancement trigger.
+    pub tamed: bool,
+    /// `Bucketable.bucketMobPickup`：这次交互拿到了一只生物桶。
+    ///
+    /// `Bucketable.bucketMobPickup` handed back a full mob bucket.
+    pub filled_bucket: bool,
     /// 交互里对自己造成的伤害（鹦鹉吃曲奇）：调用方在实体放回世界后按玩家攻击结算。
     ///
     /// Damage the interaction deals to the mob itself (a parrot eating a cookie): the
@@ -106,6 +116,8 @@ impl MobInteraction {
             limit_creative: true,
             drop_stack: None,
             drop_offset: mc_bamboo_core::Vec3::new(0.0, 0.0, 0.0),
+            tamed: false,
+            filled_bucket: false,
             self_hurt: None,
         }
     }
@@ -165,6 +177,7 @@ pub fn interact(
             replacement: Some(bucket),
             discard: true,
             limit_creative: false,
+            filled_bucket: true,
             ..MobInteraction::pass()
         };
     }

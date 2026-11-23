@@ -264,6 +264,7 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
             .map(|item| item.stack.clone())
             .unwrap_or_else(ItemStack::empty);
         let original = stack.count;
+        let picked_item = stack.item;
         let (left, changed, picked_any) = {
             let Some(player) = region.players.get_mut(&id) else {
                 return;
@@ -277,6 +278,17 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         if !picked_any {
             continue;
         }
+        // `ServerPlayer.take` 的 THROWN_ITEM_PICKED_UP_BY_PLAYER：官方把
+        // 掉落物的 owner（悦灵 / 玩家）作为第三个实体上下文。
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:thrown_item_picked_up_by_player",
+            serde_json::json!({
+                "item": crate::interaction::item_name_of(picked_item),
+                "entity": {"type": "minecraft:player"},
+            }),
+        );
         if let Some(player) = region.players.get_mut(&id) {
             for slot in changed {
                 inventory::send_slot(player, &mut region.links, slot);

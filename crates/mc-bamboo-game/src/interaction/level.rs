@@ -480,6 +480,7 @@ impl Level for RegionLevel<'_> {
             rules: side.rules,
             attacker,
             defer_health: true,
+            pending_triggers: None,
         };
         let (hurt, death_drops) =
             crate::player_hurt::hurt_player_by_mob(&mut parts, PlayerId(target), source, amount);
@@ -508,6 +509,7 @@ impl Level for RegionLevel<'_> {
             rules: side.rules,
             attacker: None,
             defer_health: true,
+            pending_triggers: None,
         };
         crate::player_hurt::knock_back_player(&mut parts, PlayerId(target), strength, direction);
         true

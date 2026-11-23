@@ -138,6 +138,17 @@ pub(crate) fn enchant(
             },
         );
         single_name = player.name.clone();
+        // `EnchantmentHelper.enchantItem` / `EnchantmentMenu` 的 ENCHANTED_ITEM：
+        // 命令成功改完物品后按附魔等级触发。
+        crate::advancement_triggers::record(
+            region,
+            target,
+            "minecraft:enchanted_item",
+            serde_json::json!({"item": mc_bamboo_data::items::ITEMS
+                .get(stack_item as usize)
+                .map(|item| item.name)
+                .unwrap_or("minecraft:air"), "level": level}),
+        );
         changed += 1;
     }
     if changed == 0 {

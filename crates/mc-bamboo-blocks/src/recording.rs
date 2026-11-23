@@ -765,6 +765,10 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::PlayerEffect { .. } => 22,
         Effect::HealPlayer { .. } => 23,
         Effect::DestroyProgress { .. } => 24,
+        Effect::BredAnimals { .. } => 25,
+        Effect::SummonedEntity { .. } => 26,
+        Effect::CrafterCrafted { .. } => 27,
+        Effect::KilledByArrow { .. } => 28,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -904,6 +908,47 @@ fn hash_effect(effect: &Effect) -> u64 {
             breaker.hash(&mut hasher);
             pos.hash(&mut hasher);
             progress.hash(&mut hasher);
+        }
+        Effect::BredAnimals {
+            father,
+            mother,
+            child,
+            lover,
+            position,
+        } => {
+            father.hash(&mut hasher);
+            mother.hash(&mut hasher);
+            child.hash(&mut hasher);
+            lover.hash(&mut hasher);
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            position.z.to_bits().hash(&mut hasher);
+        }
+        Effect::SummonedEntity {
+            entity,
+            position,
+            radius,
+        } => {
+            entity.hash(&mut hasher);
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            position.z.to_bits().hash(&mut hasher);
+            radius.to_bits().hash(&mut hasher);
+        }
+        Effect::CrafterCrafted { recipe, position } => {
+            recipe.hash(&mut hasher);
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            position.z.to_bits().hash(&mut hasher);
+        }
+        Effect::KilledByArrow {
+            shooter,
+            victims,
+            weapon,
+        } => {
+            shooter.hash(&mut hasher);
+            victims.iter().for_each(|victim| victim.hash(&mut hasher));
+            weapon.hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

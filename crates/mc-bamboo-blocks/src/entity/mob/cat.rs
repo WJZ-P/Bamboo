@@ -1043,7 +1043,8 @@ pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest)
             return parent;
         }
     } else if is_food(held) {
-        if me.random.next_int_bounded(3) == 0 {
+        let tamed = me.random.next_int_bounded(3) == 0;
+        if tamed {
             tame::tame(mob, req.player_uuid);
             mob.tame.ordered_to_sit = true;
             mob.events.push(MobEvent::EntityEvent { event: 7 });
@@ -1052,7 +1053,10 @@ pub(super) fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest)
         }
         mob.persistence_required = true;
         play_eating_sound(me, mob);
-        return outcome(InteractionResult::Success, consume);
+        return MobInteraction {
+            tamed,
+            ..outcome(InteractionResult::Success, consume)
+        };
     }
     let result = super::interact::animal_interact(me, mob, req);
     if result.result.consumes_action() {

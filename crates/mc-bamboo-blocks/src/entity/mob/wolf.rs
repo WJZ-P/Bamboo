@@ -544,8 +544,11 @@ pub(super) fn interact(
             return outcome(InteractionResult::Success, consume);
         }
     } else if held.item == items::BONE && !mob.wolf.is_angry(now) {
-        try_to_tame(me, mob, req.player_uuid);
-        return outcome(InteractionResult::SuccessServer, consume);
+        let tamed = try_to_tame(me, mob, req.player_uuid);
+        return MobInteraction {
+            tamed,
+            ..outcome(InteractionResult::SuccessServer, consume)
+        };
     }
     super::interact::animal_interact(me, mob, req)
 }
@@ -564,15 +567,17 @@ pub(super) fn is_food(stack: &ItemStack) -> bool {
 }
 
 /// `Wolf.tryToTame`：狼自己的随机源 `nextInt(3) == 0` 驯服，事件 7；否则事件 6。
-fn try_to_tame(me: &mut Entity, mob: &mut Mob, player: [u8; 16]) {
+fn try_to_tame(me: &mut Entity, mob: &mut Mob, player: [u8; 16]) -> bool {
     if me.random.next_int_bounded(3) == 0 {
         tame::tame(mob, player);
         mob.navigation.stop();
         mob.target = None;
         mob.tame.ordered_to_sit = true;
         mob.events.push(MobEvent::EntityEvent { event: 7 });
+        true
     } else {
         mob.events.push(MobEvent::EntityEvent { event: 6 });
+        false
     }
 }
 

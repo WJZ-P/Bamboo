@@ -80,6 +80,15 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
         world.level_event(SOUND_CRAFTER_FAIL, pos, 0);
         return;
     };
+    // `CrafterBlock.dispenseFrom` 给中心 17x17x17 里的 ServerPlayer 触发判据。
+    world.push_effect(crate::level::Effect::CrafterCrafted {
+        recipe: recipe.id,
+        position: mc_bamboo_core::Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        ),
+    });
     let front = front_of(state.get(ORIENTATION));
     // 倒计时先记下来。接着改 `crafting` 只换属性，不会把方块实体清掉。
     //

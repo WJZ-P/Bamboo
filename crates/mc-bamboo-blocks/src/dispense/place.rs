@@ -12,7 +12,7 @@
 //! clears the pattern. The wither clear lives in `checkSpawn`. After the full pattern matches,
 //! the blocks are cleared here without adding the wither to the world.
 
-use mc_bamboo_core::{BlockPos, Direction};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{blocks, items, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -101,6 +101,16 @@ fn wither_skull(world: &mut World, pos: BlockPos, facing: Direction, mut stack: 
         // `checkSpawn` clears the pattern only after `create` succeeds. The wither is not
         // spawned. The blocks are still cleared.
         clear_wither(world, target);
+        // `WitherSkullBlock.checkSpawn`：给包围盒膨胀 50 格内的玩家触发。
+        world.push_effect(Effect::SummonedEntity {
+            entity: "minecraft:wither",
+            position: Vec3::new(
+                f64::from(target.x) + 0.5,
+                f64::from(target.y) + 0.5,
+                f64::from(target.z) + 0.5,
+            ),
+            radius: 50.0,
+        });
         Shot::optional(without_one(&stack), true)
     } else {
         let equipped = equipment::equip(world, pos, facing, &mut stack);

@@ -1480,6 +1480,7 @@ pub(crate) fn breed_with(
     ctx.emit(
         Command::BreedAnimals {
             variant: mob.variant,
+            lover: mob.love_cause,
             // 哞菇借这个字节传自己的品种（落地时生物状态不在实体上）。
             // Mooshrooms pass their type in this byte: the mob state is detached
             // from the entity when the command lands.
@@ -3055,6 +3056,7 @@ pub(crate) fn apply_breed(
     partner: crate::entity::EntityUid,
     position: Vec3,
     parent: BreedFather,
+    lover: Option<[u8; 16]>,
     world: &mut crate::world::World,
 ) {
     let kind = parent.kind;
@@ -3314,6 +3316,15 @@ pub(crate) fn apply_breed(
     // 但构造时的 yHeadRot 要保留。
     world.with_entity_mut(calf_id, &mut |entity| {
         entity.y_rot = 0.0;
+    });
+    // `Animal.finalizeSpawnChildFromBreeding`：给求爱者发 BRED_ANIMALS，
+    // 三个实体分别是父亲、母亲、幼崽（种类相同）。
+    world.push_effect(crate::level::Effect::BredAnimals {
+        father: kind.name(),
+        mother: kind.name(),
+        child: kind.name(),
+        lover,
+        position,
     });
     if mob_drops {
         // 繁殖不是 `ExperienceOrb.award`：只生成一颗球，值就是 `1 + nextInt(7)`。

@@ -143,6 +143,11 @@ pub(crate) struct HurtParts<'a> {
     /// （官方 `ServerPlayer.doTick`）。生物打人时为真：效果包（例如尸壳给的饥饿）
     /// 必须排在 `set_health` 前面。
     pub defer_health: bool,
+    /// 借用被拆开时把这一刻的触发器事件攒到 `Region::pending_triggers`。
+    /// 精确驱动的实体循环没有这个借用，事件在落地阶段按效果补发。
+    ///
+    /// When the region is split, this borrows the queued advancement events.
+    pub pending_triggers: Option<&'a mut Vec<crate::advancement_triggers::PendingEvent>>,
 }
 
 impl Region {
@@ -157,6 +162,7 @@ impl Region {
             rules: &self.global.rules,
             attacker: None,
             defer_health: false,
+            pending_triggers: Some(&mut self.pending_triggers),
         }
     }
 }
@@ -416,6 +422,24 @@ fn hurt_player_damage(
     // `CombatTracker.recordDamage`、设置击杀归属，只要真正扣了血。
     if outcome.damage > 0.0 {
         crate::player_death::record_combat(parts, id, &source, outcome.damage);
+        // `LivingEntity.hurtServer` 里玩家实际受伤时触发 ENTITY_HURT_PLAYER。
+        let attack_type = source.kind.name();
+        let projectile = matches!(source.kind, mc_bamboo_blocks::entity::mob::DamageKind::Arrow);
+        if let Some(events) = parts.pending_triggers.as_deref_mut() {
+            events.push(crate::advancement_triggers::PendingEvent {
+                player: id,
+                trigger: "minecraft:entity_hurt_player",
+                payload: serde_json::json!({
+                    "damage": {
+                        "blocked": !outcome.full_hit,
+                        "projectile": projectile,
+                        "type": attack_type,
+                        "dealt": amount,
+                        "taken": outcome.damage,
+                    },
+                }),
+            });
+        }
     }
     let dying = parts
         .players

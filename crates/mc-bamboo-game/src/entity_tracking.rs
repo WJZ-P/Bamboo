@@ -2060,6 +2060,8 @@ fn event_packet(
             entity_id: id,
             event: 18,
         })),
+        // 驯服事件不是网络包；在 `send_mob_events` 里按 UUID 触发进度。
+        MobEvent::Tamed { .. } => EventPacket::Nothing,
         MobEvent::EntityEvent { event } => EventPacket::Tracking(packet_body(&EntityEvent {
             entity_id: id,
             event: *event,
@@ -2172,6 +2174,31 @@ fn send_mob_events(
 ) {
     for (id, mob_events) in events {
         for event in mob_events {
+            if let mc_bamboo_blocks::entity::mob::MobEvent::Tamed { player } = event {
+                let kind = region
+                    .entities
+                    .public_at(*id)
+                    .and_then(|public| match &public.kind {
+                        mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.mob_type.name()),
+                        _ => None,
+                    })
+                    .unwrap_or("");
+                let players: Vec<crate::inbound::PlayerId> = region
+                    .players
+                    .iter()
+                    .filter(|(_, candidate)| candidate.uuid.as_bytes() == player)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for player_id in players {
+                    crate::advancement_triggers::record(
+                        region,
+                        player_id,
+                        "minecraft:tame_animal",
+                        serde_json::json!({"entity": {"type": kind}}),
+                    );
+                }
+                continue;
+            }
             let packet = event_packet(*id, event, &mut || {
                 region.sound_seed_generator.source().next_long()
             });

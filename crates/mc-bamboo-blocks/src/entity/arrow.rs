@@ -791,6 +791,49 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
             apply_punch_knockback(world, hit.uid, &source);
         }
         apply_post_hurt_effects(me, world, hit.uid, hit.player);
+        // `AbstractArrow.onHitEntity`：穿透箭攒下的击杀列表，或者普通箭
+        // 打死这一个目标时，给射手触发 KILLED_BY_ARROW。
+        let after = {
+            let EntityKind::Arrow(after) = &me.kind else {
+                return false;
+            };
+            (
+                after.owner_uuid,
+                after
+                    .weapon
+                    .as_ref()
+                    .and_then(|stack| mc_bamboo_data::items::ITEMS.get(stack.item as usize))
+                    .map(|item| item.name)
+                    .unwrap_or("minecraft:bow"),
+                {
+                    let mut names = [""; 5];
+                    let uids = if after.pierced.is_empty() {
+                        vec![hit.uid]
+                    } else {
+                        after.pierced.clone()
+                    };
+                    for (index, uid) in uids.iter().take(5).enumerate() {
+                        names[index] = world
+                            .entity(*uid)
+                            .and_then(|entity| entity.kind.mob().map(|mob| mob.mob_type.name()))
+                            .unwrap_or("minecraft:player");
+                    }
+                    names
+                },
+            )
+        };
+        let killed = !hit.player
+            && world
+                .entity(hit.uid)
+                .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+                .is_none_or(|health| health <= 0.0);
+        if killed {
+            world.push_effect(crate::level::Effect::KilledByArrow {
+                shooter: owner_player.and_then(|p| p.uuid).or(after.0),
+                victims: after.2,
+                weapon: after.1,
+            });
+        }
         if arrow_pierces(me) {
             return true;
         }
