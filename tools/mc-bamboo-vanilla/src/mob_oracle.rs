@@ -37,6 +37,7 @@ use crate::oracle::collect_log;
 
 mod bat;
 mod bee;
+mod bee_ai;
 mod brain;
 mod egg;
 mod equine;
@@ -118,6 +119,7 @@ enum Line {
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
     Bee(Box<bee::BeeCase>),
+    BeeAi(Box<bee_ai::BeeAiCase>),
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
@@ -1333,6 +1335,7 @@ impl Report {
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
                 Line::Bee(case) => self.replay_bee(&case),
+                Line::BeeAi(case) => self.replay_bee_ai(&case),
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),

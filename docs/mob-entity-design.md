@@ -774,9 +774,20 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 `natural-spawn java` 0 不一致。全量 `mob-oracle java` 只剩这台 ARM Mac
 已知的 `Mth.COS_TAB`、`frog_lily_31` 差异。
 
-**已知限制**：蜜蜂的目标集仍是占位，生气蜇人 / 中毒 / 蜇后死亡 / 授粉让作物
-长大 / 跟随拿花的玩家都没有逐刻行为；放出蜜蜂时的攻击目标只设
-`stayOutOfHiveCountdown`；`has_silk_touch` 只读主手 `ENCHANTMENTS`。
+**后续补充（同日）**：`bee_goals.rs` 把目标集全部换成真实实现（攻击、进巢、
+校验巢 / 花、采粉悬停、找巢、回巢、去记住的花、催熟作物、飞行游荡、被打反击、
+生气找玩家），蜇人走 `sting` 伤害 + 难度中毒 + `HasStung` + 蜇后死亡抽签，
+放出巢里的蜂会给附近无目标的蜂设玩家目标。精准采集改读官方
+`PREVENTS_BEE_SPAWNS_WHEN_MINING` 标签。`Level::beehives_near` 是
+`PoiManager.getInRange(BEE_HOME, 20)` 的临时替代（已加载区块 + 段调色板筛选，
+以后换成 POI 查询），精确与并行两种视图给同一份答案。
+`mob-oracle --only bee_ai` 新增 8 个逐刻场景（采蜜、回巢、授粉、蜇人、
+跟随拿花的玩家、愤怒、带蜜、诱惑），比花蜜 / 已蜇 / 计时 / 愤怒 / 血量 /
+随机源 0 不一致；四处改坏确认都能抓到。
+
+**已知限制**：bee_ai 场景用 `NoAI` 比状态机字段，方块扫描、飞行寻路落点、
+作物催熟结果没有与官方逐刻对拍；未加载区块的蜂巢查不到；
+`BeehiveDecorator` 的生成期 NBT 没有与官方逐题对拍。
 
 ### 5.13 08:40 回归修复后合并 main（op-misc，2026-11-21，第 9 轮）
 

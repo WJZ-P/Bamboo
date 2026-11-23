@@ -371,6 +371,15 @@ public final class MobOracle {
                 playWaterMob(official, out, name);
                 cases++;
             }
+            if (only == null || only.startsWith("bee_ai")) {
+                for (String name : List.of("bee_ai_pollinate", "bee_ai_hive",
+                        "bee_ai_pollinate_crop", "bee_ai_sting", "bee_ai_follow_flower",
+                        "bee_ai_angry", "bee_ai_grow", "bee_ai_tempt")) {
+                    if (only != null && !name.startsWith(only)) continue;
+                    playBeeAi(official, out, name);
+                    cases++;
+                }
+            }
             if (only == null || only.equals("bee") || only.startsWith("bee_")) {
                 for (String name : List.of("bee_release_day", "bee_stay_night", "bee_rain",
                         "bee_nectar_honey", "bee_hive_full", "bee_campfire_harvest")) {
@@ -8282,6 +8291,112 @@ public final class MobOracle {
      * `stayOutOfHiveCountdown` 和世界随机源。六个场景分别覆盖白天出巢、夜间留在巢里、
      * 下雨留在巢里、带花蜜回巢加蜜、满蜜不再加、营火安抚时取蜜让蜂暂时不回巢。
      */
+    /** 蜜蜂目标状态机的逐刻对拍：不跑真实的 POI / 寻路（假世界没有 POI 管理器），
+     * 直接按官方字段推进 `Bee.aiStep` / `customServerAiStep` / 目标状态，
+     * Bamboo 侧重放同一组判定。 */
+    private static void playBeeAi(Official official, Writer out, String name) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+        levels.put(net.minecraft.world.level.Level.OVERWORLD, level);
+        put(MinecraftServer.class, official.server, "levels", levels);
+        level.injectedRaining = name.equals("bee_ai_rain");
+        level.injectedCanSeeSky = true;
+        official.attributes = EnvironmentAttributeSystem.builder()
+                .addStaticLayers(level)
+                .addConstantLayer(net.minecraft.world.attribute.EnvironmentAttributes.BEES_STAY_IN_HIVE,
+                        (net.minecraft.world.attribute.EnvironmentAttributeLayer.Constant<Boolean>) v -> false)
+                .build();
+        var bee = EntityTypes.BEE.create(level, EntitySpawnReason.COMMAND);
+        bee.setId(FIRST_ID);
+        setRandom(bee, ENTITY_RANDOM_SEED);
+        bee.setUUID(Mth.createInsecureUUID(bee.getRandom()));
+        bee.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+        bee.setNoAi(true);
+        bee.setYHeadRot(0.0F);
+        bee.setYBodyRot(0.0F);
+        // 构造函数的 `nextInt(20,60)` 已经在 create 里取过，这里再补一次与 Bamboo 对齐。
+        put(net.minecraft.world.entity.animal.bee.Bee.class, bee,
+                "remainingCooldownBeforeLocatingNewFlower", 0);
+        boolean angry = name.equals("bee_ai_angry") || name.equals("bee_ai_sting");
+        boolean grow = name.equals("bee_ai_grow") || name.equals("bee_ai_pollinate_crop");
+        boolean hive = name.equals("bee_ai_hive");
+        boolean follow = name.equals("bee_ai_follow_flower");
+        boolean sting = name.equals("bee_ai_sting");
+        if (grow || name.equals("bee_ai_pollinate")) {
+            setBeeNectar(bee, true);
+        }
+        if (hive) {
+            put(net.minecraft.world.entity.animal.bee.Bee.class, bee, "hivePos",
+                    new BlockPos(2, 64, 0));
+        }
+        level.tracked.add(bee);
+        level.playersList().clear();
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "BeeAiOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1024);
+        player.setPos(1.5, 64.0, 0.5);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        if (follow) {
+            player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND,
+                    new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.DANDELION));
+        }
+        level.playersList().add(player);
+        int ticks = 8;
+        StringBuilder frames = new StringBuilder("[");
+        java.lang.reflect.Field stung = net.minecraft.world.entity.animal.bee.Bee.class
+                .getDeclaredField("timeSinceSting");
+        stung.setAccessible(true);
+        java.lang.reflect.Field noNectar = net.minecraft.world.entity.animal.bee.Bee.class
+                .getDeclaredField("ticksWithoutNectarSinceExitingHive");
+        noNectar.setAccessible(true);
+        java.lang.reflect.Field anger = net.minecraft.world.entity.animal.bee.Bee.class
+                .getDeclaredField("persistentAngerTarget");
+        anger.setAccessible(true);
+        for (int tick = 0; tick <= ticks; tick++) {
+            // 该刻开始时的实体随机源：Bamboo 注入同一状态后重放这一刻。
+            long seedAtTick = randomSeed(bee);
+            if (tick > 0) {
+                level.gameTime++;
+                if (angry && tick == 2) {
+                    bee.setTarget(player);
+                    bee.startPersistentAngerTimer();
+                }
+                if (sting && tick == 3) {
+                    // `Bee.doHurtTarget` 命中后的状态：`HasStung`、停怒、开始蜇后倒计时。
+                    setBeeStung(bee, true);
+                    bee.stopBeingAngry();
+                }
+                if (name.equals("bee_ai_pollinate") && tick == 4) {
+                    bee.dropOffNectar();
+                }
+                bee.checkDespawn();
+                bee.commonTick();
+                bee.tick();
+            }
+            if (tick > 0) frames.append(',');
+            frames.append("{\"nectar\":").append(bee.hasNectar() ? 1 : 0)
+                    .append(",\"stung\":").append(bee.hasStung() ? 1 : 0)
+                    .append(",\"noNectar\":").append(noNectar.getInt(bee))
+                    .append(",\"stingTicks\":").append(stung.getInt(bee))
+                    .append(",\"anger\":").append(bee.isAngry() ? 1 : 0)
+                    .append(",\"health\":").append(Float.floatToRawIntBits(bee.getHealth()))
+                    .append(",\"seed\":").append(seedAtTick)
+                    .append(",\"levelSeed\":").append(levelSeed(level))
+                    .append('}');
+        }
+        out.write("{\"type\":\"beeAi\",\"name\":" + jsonString(name)
+                + ",\"angry\":" + angry + ",\"grow\":" + grow
+                + ",\"hive\":" + hive + ",\"follow\":" + follow
+                + ",\"sting\":" + sting
+                + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+        official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(level).build();
+    }
+
     private static void playBee(Official official, Writer out, String name) throws Exception {
         boolean night = name.equals("bee_stay_night");
         boolean rain = name.equals("bee_rain");
@@ -12041,6 +12156,28 @@ public final class MobOracle {
     // ---- 假服务端和假世界 ----
 
     @SuppressWarnings("unchecked")
+    /** 测试夹具：把 `Bee.DATA_FLAGS_ID` 的已蜇位打开。 */
+    private static void setBeeStung(net.minecraft.world.entity.animal.bee.Bee bee, boolean value)
+            throws Exception {
+        var field = net.minecraft.world.entity.animal.bee.Bee.class.getDeclaredField("DATA_FLAGS_ID");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) field.get(null);
+        byte flags = bee.getEntityData().get(accessor);
+        bee.getEntityData().set(accessor, (byte) (value ? flags | 4 : flags & ~4));
+    }
+
+    /** 测试夹具：把 `Bee.DATA_FLAGS_ID` 的花蜜位打开。 */
+    private static void setBeeNectar(net.minecraft.world.entity.animal.bee.Bee bee, boolean value)
+            throws Exception {
+        var field = net.minecraft.world.entity.animal.bee.Bee.class.getDeclaredField("DATA_FLAGS_ID");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<Byte>) field.get(null);
+        byte flags = bee.getEntityData().get(accessor);
+        bee.getEntityData().set(accessor, (byte) (value ? flags | 8 : flags & ~8));
+    }
+
     private static <T> T allocate(Class<T> type) {
         try {
             return (T) UNSAFE.allocateInstance(type);
@@ -12504,6 +12641,37 @@ public final class MobOracle {
         @Override
         public LevelChunk getChunkNow(int chunkX, int chunkZ) {
             return (LevelChunk) level.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        }
+
+        /** 蜜蜂找巢要用 `PoiManager`：临时目录里建一个空的官方实例。 */
+        private net.minecraft.world.entity.ai.village.poi.PoiManager poiManager;
+
+        @Override
+        public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
+            if (poiManager == null) {
+                try {
+                    var dir = java.nio.file.Files.createTempDirectory("bamboo-bee-poi-");
+                    poiManager = new net.minecraft.world.entity.ai.village.poi.PoiManager(
+                            new net.minecraft.world.level.chunk.storage.RegionStorageInfo(
+                                    "bee-oracle", net.minecraft.world.level.Level.OVERWORLD, "poi"),
+                            dir,
+                            net.minecraft.util.datafix.DataFixers.getDataFixer(),
+                            false,
+                            level.official.registries,
+                            new net.minecraft.world.level.chunk.storage.ChunkIOErrorReporter() {
+                                @Override public void reportChunkLoadFailure(Throwable error,
+                                        net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                        net.minecraft.world.level.ChunkPos pos) {}
+                                @Override public void reportChunkSaveFailure(Throwable error,
+                                        net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                        net.minecraft.world.level.ChunkPos pos) {}
+                            },
+                            level);
+                } catch (Exception error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            return poiManager;
         }
 
         @Override
