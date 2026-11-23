@@ -352,10 +352,8 @@ fn fastutil_record_order<'a>(
         ordered.push(key);
     }
     let mut out = Vec::with_capacity(records.len());
-    if null_key {
-        if let Some(record) = records.get(&0) {
-            out.push(record);
-        }
+    if null_key && let Some(record) = records.get(&0) {
+        out.push(record);
     }
     // `pack()` 走 `values().stream()`：按内部槽下标升序遍历（`MapIterator`
     // 的 for-each 是倒序，但 stream 的 Spliterator 是正序）。
@@ -625,7 +623,7 @@ impl PoiStore {
             self.sections.insert(key, Some(PoiSection::empty()));
             self.set_dirty(pos);
         }
-        self.sections.get_mut(&key).map(Option::as_mut).flatten()
+        self.sections.get_mut(&key).and_then(Option::as_mut)
     }
 
     /// `PoiManager.add`：登记一条 POI，返回是否是新登记。

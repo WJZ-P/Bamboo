@@ -915,16 +915,15 @@ fn worker_loop(
     }
 }
 
-fn read_one(
-    cache: &mut Cache,
-    dir: &WorldDir,
-    pos: ChunkPos,
-) -> (
+/// 一次区块读的三份未压缩 NBT 字节和错误信息。
+type ReadResult = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<String>,
-) {
+);
+
+fn read_one(cache: &mut Cache, dir: &WorldDir, pos: ChunkPos) -> ReadResult {
     let mut error = None;
     let name = RegionPos::of(pos).file_name();
     // 只读已经存在的区域文件：官方读盘不会凭空创建空的 .mca。

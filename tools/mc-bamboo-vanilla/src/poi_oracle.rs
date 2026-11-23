@@ -336,10 +336,10 @@ fn apply_op(store: &mut PoiStore, op: &Value, sabotage: Option<&str>) -> Value {
             store.add(at, kind);
             if sabotage == Some("tickets") {
                 // 故意把 `free_tickets` 初值写成 0（官方是 maxTickets）。
-                if let Some(section) = store.section_mut(SectionPos::of(at)) {
-                    if let Some(record) = section.get_mut(at) {
-                        record.free_tickets = 0;
-                    }
+                if let Some(section) = store.section_mut(SectionPos::of(at))
+                    && let Some(record) = section.get_mut(at)
+                {
+                    record.free_tickets = 0;
                 }
             }
         }
