@@ -483,12 +483,20 @@ async fn walking_deltas_add_up_to_the_real_position() {
     }
     wait_until_seen_at(&bob, id, (x, SPAWN.1, SPAWN.2)).await;
 
-    let moves: Vec<MoveEntityPos> = bob.since(mark);
+    // 超平坦的测试世界会自然刷史莱姆，它们的移动包也会发给 Bob；只看 Alice 的。
+    // The superflat test world spawns slimes naturally and Bob sees their moves too;
+    // only Alice's packets matter here.
+    let moves: Vec<MoveEntityPos> = bob
+        .since::<MoveEntityPos>(mark)
+        .into_iter()
+        .filter(|packet| packet.entity == id)
+        .collect();
     assert!(moves.len() >= 10, "walking must go out as deltas");
-    assert!(moves.iter().all(|packet| packet.entity == id));
     assert!(moves.iter().all(|packet| packet.on_ground));
     assert!(
-        bob.since::<EntityPositionSync>(mark).is_empty(),
+        bob.since::<EntityPositionSync>(mark)
+            .iter()
+            .all(|packet| packet.entity != id),
         "nothing here needs a full sync"
     );
     bob.skip_received();
@@ -510,7 +518,14 @@ async fn after_the_first_cycle_deltas_are_single_steps_of_one_or_two_ticks() {
     }
     wait_until_seen_at(&bob, alice.entity_id, (x, SPAWN.1, SPAWN.2)).await;
 
-    for packet in bob.since::<MoveEntityPos>(mark) {
+    // 只看 Alice 的；测试世界里自然刷出的史莱姆也在动。
+    // Only Alice's packets; naturally spawned slimes move in the test world too.
+    let alice_id = alice.entity_id;
+    for packet in bob
+        .since::<MoveEntityPos>(mark)
+        .into_iter()
+        .filter(|packet| packet.entity == alice_id)
+    {
         let ticks = single_step(&packet.steps).ticks;
         assert!(matches!(ticks, Some(1 | 2)), "ticks of a step: {ticks:?}");
     }
