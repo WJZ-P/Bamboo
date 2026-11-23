@@ -153,6 +153,9 @@ impl GameRuleSet {
             mob_explosion_drop_decay: self.bool(gamerules::MOB_EXPLOSION_DROP_DECAY),
             max_entity_cramming: self.int(gamerules::MAX_ENTITY_CRAMMING),
             max_entity_collisions: 0,
+            mob_throttle_distance: 0,
+            mob_sleep_distance: 0,
+            mob_wakeups_scale: 1,
         }
     }
 

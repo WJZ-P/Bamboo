@@ -270,6 +270,10 @@ pub(crate) struct Region {
     pub(crate) spawn_per_player_cap: bool,
     /// 每只生物每刻最多处理几次推挤（0 = 不限）。
     pub(crate) max_entity_collisions: usize,
+    /// 三档降频的两个距离边界（0 = 关，精确模式）和每刻唤醒名额的倍率。
+    pub(crate) mob_throttle_distance: i32,
+    pub(crate) mob_sleep_distance: i32,
+    pub(crate) mob_wakeups_scale: usize,
     /// `ServerLevel.customSpawners` 里的 `PatrolSpawner`。每岛一份，和官方的每维度一份
     /// 对应，岛拆分时两边各带自己的计时器。
     ///
@@ -470,6 +474,9 @@ impl Region {
             ),
             spawn_per_player_cap: true,
             max_entity_collisions: 0,
+            mob_throttle_distance: 0,
+            mob_sleep_distance: 0,
+            mob_wakeups_scale: 1,
             patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner::default(),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
@@ -668,6 +675,9 @@ impl Region {
     pub(crate) fn entity_game_rules(&self) -> mc_bamboo_blocks::BlockGameRules {
         let mut rules = self.global.block_rules;
         rules.max_entity_collisions = self.max_entity_collisions;
+        rules.mob_throttle_distance = self.mob_throttle_distance;
+        rules.mob_sleep_distance = self.mob_sleep_distance;
+        rules.mob_wakeups_scale = self.mob_wakeups_scale;
         rules
     }
 
@@ -1106,7 +1116,7 @@ mod tests {
     ///
     /// Mob rebase script: a few cows randomly stamp their damage, stuck-check
     /// and recompute times at "now"; each tick observes how long ago each was.
-    fn mob_script(seed: u64, base: i64, shift: Option<(i64, i64, ClockParts)>) -> Vec<[i64; 9]> {
+    fn mob_script(seed: u64, base: i64, shift: Option<(i64, i64, ClockParts)>) -> Vec<[i64; 18]> {
         use mc_bamboo_blocks::entity::Entity;
         use mc_bamboo_core::Vec3;
 
@@ -1127,6 +1137,10 @@ mod tests {
                 mob.last_damage_stamp = now;
                 mob.navigation.last_timeout_check = now;
                 mob.navigation.time_last_recompute = now;
+                // 降频的三个时刻也是岛时钟的绝对刻号，拆岛平移要跟着走。
+                mob.throttle.last_decision = now;
+                mob.throttle.last_active = now;
+                mob.throttle.awake_until = now;
                 region.entities.spawn(cow)
             })
             .collect();
@@ -1134,7 +1148,7 @@ mod tests {
         for step in 1..=150_i64 {
             region.advance_tick();
             let now = region.tick.game_time();
-            let mut row = [0; 9];
+            let mut row = [0; 18];
             for (i, &uid) in cows.iter().enumerate() {
                 let roll = next();
                 let seen = region.entities.with_mut(uid, |cow| {
@@ -1149,9 +1163,12 @@ mod tests {
                         now - mob.last_damage_stamp,
                         now - mob.navigation.last_timeout_check,
                         now - mob.navigation.time_last_recompute,
+                        now - mob.throttle.last_decision,
+                        now - mob.throttle.last_active,
+                        now - mob.throttle.awake_until,
                     ]
                 });
-                row[i * 3..i * 3 + 3].copy_from_slice(&seen.expect("cow is stored"));
+                row[i * 6..i * 6 + 6].copy_from_slice(&seen.expect("cow is stored"));
             }
             out.push(row);
             if let Some((mid, delta, parts)) = shift

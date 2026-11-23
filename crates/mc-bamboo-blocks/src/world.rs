@@ -1091,6 +1091,23 @@ impl<'a> World<'a> {
         self.level
     }
 
+    /// 这一刻的降频计划（uid 升序）。精确驱动内部每刻调它；测试和并行驱动
+    /// 的对拍用同一个入口，保证分档、节奏和唤醒名额逐项一致。关着时返回空表。
+    pub fn throttle_plans(&mut self) -> Vec<crate::entity::ctx::ThrottlePlan> {
+        let config = crate::entity::mob::throttle::Config::of(&self.level.block_game_rules());
+        if !config.enabled() {
+            return Vec::new();
+        }
+        let players = self.level.player_views();
+        let time = self.game_time();
+        crate::entity::mob::throttle::plans_for_tick(
+            self.level.entities_table_mut(),
+            time,
+            config,
+            &players,
+        )
+    }
+
     /// 两段式并行驱动的算阶段之前调用：把实体表切进「这一刻正在 tick」的状态。
     pub fn begin_entity_tick(&mut self) {
         self.level.begin_entity_tick();
@@ -3552,7 +3569,10 @@ impl<'a> World<'a> {
         #[cfg(test)]
         crate::entity::mob::timing::new_tick!();
         self.level.begin_entity_tick();
-        for id in self.level.entity_uids() {
+        // 降频开着时按 uid 升序算好这一刻的计划。两种驱动共用 `plans_for_tick`，
+        // 所以精确和并行的分档、节奏、唤醒名额逐位一致。
+        let plans = self.throttle_plans();
+        for (index, id) in self.level.entity_uids().into_iter().enumerate() {
             let Some(mut entity) = self.level.take_entity(id) else {
                 continue;
             };
@@ -3566,7 +3586,11 @@ impl<'a> World<'a> {
             // 这一拍已经被别的实体丢掉的，官方不再 tick，名单里也不再留下。
             // An entity another one discarded earlier this tick is not ticked. Vanilla drops it from the list.
             if ticks {
-                let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+                let plan = plans
+                    .get(index)
+                    .copied()
+                    .unwrap_or(crate::entity::ctx::ThrottlePlan::FULL);
+                let mut ctx = crate::entity::ctx::PreciseCtx::with_plan(self, id, plan);
                 entity.tick(&mut ctx);
             }
             if entity.removed {
@@ -3594,8 +3618,10 @@ impl<'a> World<'a> {
     /// The physics comparison needs the position after landing.
     pub fn tick_entities_kept(&mut self) -> Vec<crate::entity::Entity> {
         self.level.begin_entity_tick();
+        // 开关打开时和 `tick_entities` 用同一份降频计划；缺省关时是空表。
+        let plans = self.throttle_plans();
         let mut after = Vec::new();
-        for id in self.level.entity_uids() {
+        for (index, id) in self.level.entity_uids().into_iter().enumerate() {
             let Some(mut entity) = self.level.take_entity(id) else {
                 continue;
             };
@@ -3608,7 +3634,11 @@ impl<'a> World<'a> {
                     entity.position.z,
                 ));
             if ticks {
-                let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+                let plan = plans
+                    .get(index)
+                    .copied()
+                    .unwrap_or(crate::entity::ctx::ThrottlePlan::FULL);
+                let mut ctx = crate::entity::ctx::PreciseCtx::with_plan(self, id, plan);
                 entity.tick(&mut ctx);
             }
             after.push(entity.clone());

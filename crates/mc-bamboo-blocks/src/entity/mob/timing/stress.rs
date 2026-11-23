@@ -372,10 +372,12 @@ enum Scene {
     Tower1x1,
     Tower3x3,
     Mixed,
+    /// 玩家附近少、远处多：2000 头牛铺在半径 128 格内，一名玩家在中心。
+    Distant2000,
 }
 
 impl Scene {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Pasture500,
         Self::Pasture2000,
         Self::Chase,
@@ -383,6 +385,7 @@ impl Scene {
         Self::Tower1x1,
         Self::Tower3x3,
         Self::Mixed,
+        Self::Distant2000,
     ];
 
     fn name(self) -> &'static str {
@@ -394,6 +397,7 @@ impl Scene {
             Self::Tower1x1 => "tower-1x1",
             Self::Tower3x3 => "tower-3x3",
             Self::Mixed => "mixed-natural",
+            Self::Distant2000 => "distant-2000",
         }
     }
 
@@ -484,6 +488,27 @@ impl Scene {
                     f64::from(floor),
                     angle.sin() * radius + 0.5,
                 ),
+            ));
+        }
+        (terrain, mobs)
+    }
+
+    /// 玩家附近少、远处多：2000 头牛按网格铺在半径 128 格内，三档都有大量样本。
+    /// 没有围栏，牛会缓慢散开；玩家站在出生点不绕圈。
+    fn distant(count: usize) -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let mut terrain = Terrain::new(floor);
+        terrain.flat(140);
+        terrain.add_player(1, Vec3::new(0.5, f64::from(floor), 0.5));
+        let side = (count as f64).sqrt().ceil() as i32;
+        let step = 256 / side;
+        let mut mobs = Vec::with_capacity(count);
+        for i in 0..count {
+            let x = (i as i32 % side) * step - 128;
+            let z = (i as i32 / side) * step - 128;
+            mobs.push((
+                MobType::Cow,
+                Vec3::new(f64::from(x) + 0.5, f64::from(floor), f64::from(z) + 0.5),
             ));
         }
         (terrain, mobs)
@@ -609,6 +634,10 @@ impl Scene {
                 let (terrain, mobs) = Self::mixed();
                 (terrain, mobs, true)
             }
+            Self::Distant2000 => {
+                let (terrain, mobs) = Self::distant(2000);
+                (terrain, mobs, false)
+            }
         }
     }
 }
@@ -642,6 +671,12 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     // A/B 用：打开挤压上限（Paper 的缺省值 8）。
     if let Ok(raw) = std::env::var("MOB_STRESS_MAX_COLLISIONS") {
         terrain.rules.max_entity_collisions = raw.parse().unwrap_or(8);
+    }
+    // A/B 用：`MOB_STRESS_THROTTLE=1` 打开三档降频（推荐值 32 / 64）。
+    if std::env::var_os("MOB_STRESS_THROTTLE").is_some() {
+        terrain.rules.mob_throttle_distance = 32;
+        terrain.rules.mob_sleep_distance = 64;
+        terrain.rules.mob_wakeups_scale = 1;
     }
     let mut level = StressLevel {
         terrain: terrain.clone(),
@@ -1010,11 +1045,12 @@ fn mob_stress() {
         })
         .unwrap_or_else(|| THREADS.to_vec());
     println!(
-        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={} max-collisions={}",
+        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={} max-collisions={} throttle={}",
         only.as_deref().unwrap_or("all"),
         threads,
         scoped,
-        std::env::var("MOB_STRESS_MAX_COLLISIONS").unwrap_or_else(|_| "off".to_owned())
+        std::env::var("MOB_STRESS_MAX_COLLISIONS").unwrap_or_else(|_| "off".to_owned()),
+        std::env::var_os("MOB_STRESS_THROTTLE").is_some()
     );
     println!("uptime: {}", uptime());
     for scene in Scene::ALL {
@@ -1059,6 +1095,10 @@ fn measure_cramming(scene: Scene, threads: usize, rounds: usize) -> String {
         // A/B 用：打开挤压上限（8，Paper 的缺省值）。
         if std::env::var_os("MOB_STRESS_MAX_COLLISIONS").is_some() {
             terrain.rules.max_entity_collisions = 8;
+        }
+        if std::env::var_os("MOB_STRESS_THROTTLE").is_some() {
+            terrain.rules.mob_throttle_distance = 32;
+            terrain.rules.mob_sleep_distance = 64;
         }
         // 恢复官方默认（24），`Terrain::new` 给的就是 vanilla。
         terrain.rules.max_entity_cramming = BlockGameRules::vanilla().max_entity_cramming;

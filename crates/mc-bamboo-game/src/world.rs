@@ -59,6 +59,10 @@ pub const MAX_MAIL_BUDGET: usize = 1 << 16;
 pub const MAX_ENTITY_THREADS: usize = 256;
 /// `max_entity_collisions` 的合法上限（只是防配置写坏，Paper 缺省是 8）。
 pub const MAX_ENTITY_COLLISIONS: usize = 4096;
+/// 三档降频两个距离的合法上限（只是防配置写坏；推荐值 32 / 64）。
+pub const MAX_MOB_DISTANCE: usize = 4096;
+/// `mob_wakeups_scale` 的合法上限，和 `mc_bamboo_blocks` 里的常量一致。
+pub const MAX_MOB_WAKEUPS_SCALE: usize = mc_bamboo_blocks::entity::mob::throttle::MAX_WAKEUPS_SCALE;
 /// 区块计算池线程数的上限。
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 
@@ -115,6 +119,11 @@ pub struct WorldConfig {
     pub entity_threads: usize,
     /// 每只生物每刻最多处理几次推挤（0 = 不限，精确模式）。
     pub max_entity_collisions: usize,
+    /// 三档降频的两个距离边界（0 = 关，精确模式）：降频档起点、休眠档起点。
+    pub mob_throttle_distance: i32,
+    pub mob_sleep_distance: i32,
+    /// 每刻唤醒名额的倍率（1 = Paper 的缺省值）。
+    pub mob_wakeups_scale: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
@@ -205,6 +214,9 @@ impl Default for WorldConfig {
             admin: crate::admin::AdminSnapshot::default(),
             entity_threads: 0,
             max_entity_collisions: 0,
+            mob_throttle_distance: 0,
+            mob_sleep_distance: 0,
+            mob_wakeups_scale: 1,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings::default(),
@@ -691,6 +703,13 @@ impl World {
         world.islands.region.spawn_per_player_cap = config.spawn_per_player_cap;
         world.islands.region.max_entity_collisions =
             config.max_entity_collisions.min(MAX_ENTITY_COLLISIONS);
+        world.islands.region.mob_throttle_distance = config
+            .mob_throttle_distance
+            .clamp(0, MAX_MOB_DISTANCE as i32);
+        world.islands.region.mob_sleep_distance =
+            config.mob_sleep_distance.clamp(0, MAX_MOB_DISTANCE as i32);
+        world.islands.region.mob_wakeups_scale =
+            config.mob_wakeups_scale.min(MAX_MOB_WAKEUPS_SCALE);
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
         crate::worldgen_cache::configure(config.worldgen_cache);

@@ -31,15 +31,17 @@ use super::{
 use crate::{
     entity::{
         Entity, EntityKind, KindPublic, PrimedTnt,
-        ctx::{BlockView, Command, EntityCtx},
+        ctx::{BlockView, Command, EntityCtx, ThrottlePlan},
     },
     shape::{self, CollisionContext},
 };
 
 /// 生物的一刻，`Entity.tick` 交到这里。`kind` 在这期间被换成一个占位。
-pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
     let mut kind = std::mem::replace(&mut me.kind, EntityKind::Tnt(PrimedTnt { fuse: 0 }));
     if let EntityKind::Mob(mob) = &mut kind {
+        // 计划（分档、豁免、补偿）由驱动在算阶段之前按同一份快照算好；这里不再
+        // 重判状态，精确和并行两种驱动才能逐位一致。
         // 测试构建的压测探针：按类型和离最近玩家的距离档记账。`cfg(test)` 之外是空操作。
         #[cfg(test)]
         {
@@ -53,7 +55,7 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
             });
             timing::begin_mob!(mob.mob_type.entity_type(), nearest);
         }
-        tick_mob(me, mob, ctx);
+        tick_mob(me, mob, ctx, plan);
         timing::end_mob!();
     }
     me.kind = kind;
@@ -74,7 +76,7 @@ pub(crate) fn with_mob<R>(
     result
 }
 
-fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
     timing::span!(Other);
     // `Silverfish.tick` / `Endermite.tick` 在 `super.tick()` 之前把身体朝向设成头朝向。
     // `Silverfish.tick` / `Endermite.tick` set the body rotation before `super.tick()`.
@@ -136,7 +138,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             // The part of `Parrot.aiStep` before `super.aiStep`.
             super::parrot::before_ai_step(me, mob, ctx);
         }
-        ai_step(me, mob, ctx);
+        ai_step(me, mob, ctx, plan);
         if mob.mob_type == super::MobType::Parrot && !me.removed {
             // `Parrot.aiStep` 结尾的 `calculateFlapping`。
             // `calculateFlapping` at the end of `Parrot.aiStep`.
@@ -1069,7 +1071,7 @@ fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 // ---- aiStep ----
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
-fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
     mob.needs_sync = std::mem::take(&mut mob.knockback_sync);
     // `Witch.aiStep` 的喝药段在 `super.aiStep()`（`Monster.aiStep` 的亮度）之前。
     //
@@ -1089,7 +1091,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::ai_step(me, mob, ctx);
     }
-    animal_ai_step(me, mob, ctx);
+    animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
         let mut target_close = false;
         if let Some(uid) = mob.target {
@@ -1122,7 +1124,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 /// `Animal.aiStep` 一路到 `LivingEntity.aiStep` 的公共部分。
 ///
 /// The shared chain from `Animal.aiStep` down to `LivingEntity.aiStep`.
-fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
     // `AbstractFish.aiStep` 在 `LivingEntity.aiStep` 之前：只有这一支的鱼离水才扑腾。
     // `AbstractFish.aiStep` runs before `LivingEntity.aiStep`: only fish flop out of water.
     if super::fish::is_fish(mob.mob_type) {
@@ -1176,7 +1178,15 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // On the server vanilla `Mob.isEffectiveAi()` means "no player is in
         // control": AI stops while a player rides a saddled vehicle, and the
         // client alone decides where it goes.
-        server_ai_step(me, mob, ctx);
+        server_ai_step(me, mob, ctx, plan);
+    }
+    // 休眠档每 20 刻的完整 tick：物理照跑，但这一刻不主动走动。
+    if plan.no_active_move {
+        mob.jumping = false;
+        mob.xxa = 0.0;
+        mob.zza = 0.0;
+        mob.mover.operation = super::control::Operation::Wait;
+        mob.navigation.stop();
     }
     // 跳。
     if mob.jumping {
@@ -1528,10 +1538,10 @@ pub(crate) fn breed_with(
 }
 
 /// `Mob.serverAiStep`。
-fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: ThrottlePlan) {
     mob.no_action_time += 1;
     mob.seen.clear();
-    {
+    if plan.decisions_run {
         timing::span!(Goals);
         // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
         // `tickCount` 是实体自己的 tick 数；`id` 用网络实体 ID。
@@ -1584,40 +1594,12 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
         }
     }
-    // 跑大脑的生物在 `super.customServerAiStep` 之前跑大脑。
-    // Brain-driven mobs run their brain before `super.customServerAiStep`.
-    if mob.mob_type == super::MobType::Armadillo {
-        super::armadillo::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Goat {
-        super::goat::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Frog {
-        super::frog::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Tadpole {
-        super::tadpole::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Camel {
-        super::camel::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Axolotl {
-        super::axolotl::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Enderman {
-        super::enderman::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Bat {
-        super::bat::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Bee {
-        super::bee::custom_server_ai_step(me, mob, ctx);
-    }
-    if mob.mob_type == super::MobType::Ocelot {
-        super::ocelot::custom_server_ai_step(mob);
-    }
-    if mob.mob_type == super::MobType::Cat {
-        super::cat::custom_server_ai_step(mob);
+    // 官方顺序：`navigation.tick` 之后才是 `customServerAiStep`，跑大脑的生物在这里跑大脑。
+    // 大脑和目标同属「决策」，降频时一起跳过；导航沿已有路径仍每刻照跑。
+    // Vanilla order: `customServerAiStep`, where brain mobs run their brain, comes after
+    // `navigation.tick`. Brains are decisions and skip with the goals when throttled.
+    if plan.decisions_run {
+        tick_brains(me, mob, ctx);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1686,6 +1668,44 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `JumpControl.tick`。
     mob.jumping = mob.jump.jump;
     mob.jump.jump = false;
+}
+
+/// 大脑（含传感器）和 `customServerAiStep` 里那一支专属决策。照官方在 `navigation.tick`
+/// 之后调用；降频时和目标一起跳过，导航沿已有路径、移动 / 视线 / 跳跃控制仍每刻照跑。
+fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if mob.mob_type == super::MobType::Armadillo {
+        super::armadillo::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Goat {
+        super::goat::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Frog {
+        super::frog::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Tadpole {
+        super::tadpole::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Enderman {
+        super::enderman::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Bat {
+        super::bat::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Bee {
+        super::bee::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Ocelot {
+        super::ocelot::custom_server_ai_step(mob);
+    }
+    if mob.mob_type == super::MobType::Cat {
+        super::cat::custom_server_ai_step(mob);
+    }
 }
 
 /// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。

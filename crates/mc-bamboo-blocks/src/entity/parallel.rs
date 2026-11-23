@@ -17,7 +17,8 @@ use mc_bamboo_core::ChunkPos;
 use crate::{
     entity::{
         Entity, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
-        ctx::{self, BlockView, Command, CommandBuffer, EntityCtx},
+        ctx::{self, BlockView, Command, CommandBuffer, EntityCtx, ThrottlePlan},
+        mob::throttle,
         store::section_range,
     },
     shape::Aabb,
@@ -432,11 +433,16 @@ struct ParallelCtx<'a> {
     uid: EntityUid,
     shared: &'a Shared<'a>,
     commands: &'a mut CommandBuffer,
+    plan: ThrottlePlan,
 }
 
 impl EntityCtx for ParallelCtx<'_> {
     fn uid(&self) -> EntityUid {
         self.uid
+    }
+
+    fn throttle_plan(&self) -> ThrottlePlan {
+        self.plan
     }
 
     fn blocks(&self) -> &dyn BlockView {
@@ -495,6 +501,8 @@ struct Task<'a> {
     /// 只属于本任务的起点公开数据，逐行移进 `Entity`，不再克隆第二遍。
     public: Vec<EntityPublic>,
     state: Vec<EntityState>,
+    /// 这一刻的降频计划，和精确驱动逐项相同。
+    plans: Vec<ThrottlePlan>,
     results: &'a mut [RowResult],
 }
 
@@ -520,6 +528,16 @@ fn compute_timed(
     #[cfg(test)]
     crate::entity::mob::timing::new_tick!();
     let clone_start = Instant::now();
+    // 降频开着时按 uid 升序算好这一刻的计划；和精确驱动共用 `plans_for_tick`。
+    // 算阶段只能读快照，所以这一步在 `take_states_for_tick` 之前改实体表。
+    let config = throttle::Config::of(&blocks.block_game_rules());
+    let plans = if config.enabled() {
+        let mut players = Vec::new();
+        blocks.for_each_player(&mut |player| players.push(*player));
+        throttle::plans_for_tick(entities, blocks.game_time(), config, &players)
+    } else {
+        Vec::new()
+    };
     let (uids, rows, starting_state) = entities.take_states_for_tick();
     // 每个实体一份起点的公开数据：tick 要拿它拼成完整 `Entity`。这是唯一必需的
     // 克隆；别的实体看到的值直接引用表里那一份不变的快照。
@@ -551,18 +569,27 @@ fn compute_timed(
     let mut tasks: Vec<Task<'_>> = Vec::with_capacity(parts);
     let mut public_left: Vec<EntityPublic> = starting_public;
     let mut state_left: Vec<EntityState> = starting_state;
+    let mut plans_left: &[ThrottlePlan] = &plans;
     let mut results_left: &mut [RowResult] = &mut results;
     let mut first = 0;
     while !public_left.is_empty() {
         let size = chunk_size.min(public_left.len());
         let public: Vec<_> = public_left.drain(..size).collect();
         let state: Vec<_> = state_left.drain(..size).collect();
+        let (task_plans, plan_rest) = if plans.is_empty() {
+            (vec![ThrottlePlan::FULL; size], &[][..])
+        } else {
+            let (head, rest) = std::mem::take(&mut plans_left).split_at(size);
+            (head.to_vec(), rest)
+        };
+        plans_left = plan_rest;
         let (result, result_rest) = std::mem::take(&mut results_left).split_at_mut(size);
         results_left = result_rest;
         tasks.push(Task {
             first,
             public,
             state,
+            plans: task_plans,
             results: result,
         });
         first += size;
@@ -599,7 +626,13 @@ fn compute_timed(
 fn run_task(task: &mut Task<'_>, shared: &Shared<'_>) {
     let mut public = std::mem::take(&mut task.public);
     let mut state = std::mem::take(&mut task.state);
-    for (within, (public, state)) in public.drain(..).zip(state.drain(..)).enumerate() {
+    let mut plans = std::mem::take(&mut task.plans);
+    for (within, ((public, state), plan)) in public
+        .drain(..)
+        .zip(state.drain(..))
+        .zip(plans.drain(..))
+        .enumerate()
+    {
         let row = task.first + within;
         let uid = shared.uids[row];
         let mut me = EntityRow { public, state }.into_entity();
@@ -608,6 +641,7 @@ fn run_task(task: &mut Task<'_>, shared: &Shared<'_>) {
             uid,
             shared,
             commands: &mut result.commands,
+            plan,
         };
         // 所在区块不在实体 tick 范围时跳过这一刻：实体仍留在快照里，位置和年龄不动，
         // 不发命令，别的实体照样查得到它。判断从只读方块视图来，和精确驱动一致。

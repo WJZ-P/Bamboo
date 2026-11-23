@@ -18,10 +18,10 @@ use std::{
 use mc_bamboo_game::{
     DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV, ISLAND_THREADS_ENV,
     ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS,
-    MAX_ISLAND_DEAD_SECONDS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MIN_ISLAND_DEAD_SECONDS,
-    MailBudget, island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
-    recommended_island_threads, world_options::WorldGenConfig,
-    worldgen_cache::WorldgenCacheSettings,
+    MAX_ISLAND_DEAD_SECONDS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MAX_MOB_DISTANCE,
+    MAX_MOB_WAKEUPS_SCALE, MIN_ISLAND_DEAD_SECONDS, MailBudget, island_dead_seconds_from_env,
+    island_threads_from_env, islands_from_env, recommended_island_threads,
+    world_options::WorldGenConfig, worldgen_cache::WorldgenCacheSettings,
 };
 use toml::{Table, Value};
 use tracing::{info, warn};
@@ -138,6 +138,9 @@ const BAMBOO_KEYS: &[&str] = &[
     "auth_read_timeout_seconds",
     "entity_threads",
     "max_entity_collisions",
+    "mob_throttle_distance",
+    "mob_sleep_distance",
+    "mob_wakeups_scale",
     "redstone_cache",
     "chunk_worker_threads",
     "worldgen_terrain_cache_mb",
@@ -174,6 +177,11 @@ pub struct BambooConfig {
     ///
     /// Per-mob per-tick push cap (0 = unlimited, exact mode).
     pub max_entity_collisions: usize,
+    /// 三档降频的两个距离边界（0 = 关，精确模式）：降频档起点、休眠档起点。
+    pub mob_throttle_distance: i32,
+    pub mob_sleep_distance: i32,
+    /// 每刻唤醒名额的倍率（1 = Paper 的缺省值）。
+    pub mob_wakeups_scale: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
@@ -236,6 +244,9 @@ impl Default for BambooConfig {
             auth_read_timeout: defaults.auth_read_timeout,
             entity_threads: defaults.entity_threads,
             max_entity_collisions: defaults.max_entity_collisions,
+            mob_throttle_distance: defaults.mob_throttle_distance,
+            mob_sleep_distance: defaults.mob_sleep_distance,
+            mob_wakeups_scale: defaults.mob_wakeups_scale,
             redstone_cache: defaults.redstone_cache,
             chunk_worker_threads: defaults.chunk_worker_threads,
             worldgen_cache: defaults.worldgen_cache,
@@ -297,6 +308,19 @@ impl BambooConfig {
                 "# 不影响 maxEntityCramming 的挤压伤害规则。\n",
                 "max_entity_collisions = {}\n",
                 "\n",
+                "# 生物三档降频（按到最近玩家的水平距离，三项缺省都是关 = 官方逐位一致）：\n",
+                "# 降频档起点，推荐 32；0 = 不启用降频档。起点外感知 / 决策每 2-4 刻一次，\n",
+                "# 越远越稀；移动、物理、计时器每刻照跑，远处生物反应慢 0.1-0.2 秒。\n",
+                "mob_throttle_distance = {}\n",
+                "\n",
+                "# 休眠档起点，推荐 64；0 = 不启用休眠档。起点外每刻只推进计时器，\n",
+                "# 每 20 刻完整 tick 一次但不主动走动，靠生物自己走进陷阱的农场会变慢。\n",
+                "mob_sleep_distance = {}\n",
+                "\n",
+                "# 休眠太久的生物每刻最多唤醒多少只的倍率：1 = Paper 缺省（动物 4 / 怪物 8 /\n",
+                "# 飞行怪物 8 / 其它 4 只每刻），0 按 1 算，合法范围 0..=16。\n",
+                "mob_wakeups_scale = {}\n",
+                "\n",
                 "# 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认 false。\n",
                 "redstone_cache = {}\n",
                 "\n",
@@ -345,6 +369,9 @@ impl BambooConfig {
             self.auth_read_timeout.as_secs(),
             self.entity_threads,
             self.max_entity_collisions,
+            self.mob_throttle_distance,
+            self.mob_sleep_distance,
+            self.mob_wakeups_scale,
             self.redstone_cache,
             self.chunk_worker_threads,
             self.worldgen_cache.terrain_mb,
@@ -408,6 +435,24 @@ impl BambooConfig {
                 0,
                 0,
                 MAX_ENTITY_COLLISIONS,
+            ),
+            mob_throttle_distance: integer(
+                table,
+                "mob_throttle_distance",
+                file,
+                0,
+                0,
+                MAX_MOB_DISTANCE,
+            ) as i32,
+            mob_sleep_distance: integer(table, "mob_sleep_distance", file, 0, 0, MAX_MOB_DISTANCE)
+                as i32,
+            mob_wakeups_scale: integer(
+                table,
+                "mob_wakeups_scale",
+                file,
+                1,
+                0,
+                MAX_MOB_WAKEUPS_SCALE,
             ),
             redstone_cache: boolean(table, "redstone_cache", file, false),
             chunk_worker_threads: integer(
@@ -875,6 +920,9 @@ impl ConfigFiles {
             world_dir: Some(world_dir(directory, self)),
             entity_threads: self.bamboo.entity_threads,
             max_entity_collisions: self.bamboo.max_entity_collisions,
+            mob_throttle_distance: self.bamboo.mob_throttle_distance,
+            mob_sleep_distance: self.bamboo.mob_sleep_distance,
+            mob_wakeups_scale: self.bamboo.mob_wakeups_scale,
             redstone_cache: self.bamboo.redstone_cache,
             chunk_worker_threads: self.bamboo.chunk_worker_threads,
             worldgen_cache: self.bamboo.worldgen_cache,
@@ -920,6 +968,9 @@ impl ConfigFiles {
         bamboo.auth_read_timeout = config.auth_read_timeout;
         bamboo.entity_threads = config.entity_threads;
         bamboo.max_entity_collisions = config.max_entity_collisions;
+        bamboo.mob_throttle_distance = config.mob_throttle_distance;
+        bamboo.mob_sleep_distance = config.mob_sleep_distance;
+        bamboo.mob_wakeups_scale = config.mob_wakeups_scale;
         bamboo.redstone_cache = config.redstone_cache;
         bamboo.chunk_worker_threads = config.chunk_worker_threads;
         bamboo.worldgen_cache = config.worldgen_cache;
@@ -1061,6 +1112,21 @@ impl ConfigFiles {
                 "max_entity_collisions",
                 self.bamboo.max_entity_collisions as u64,
                 defaults.bamboo.max_entity_collisions as u64,
+            ),
+            (
+                "mob_throttle_distance",
+                self.bamboo.mob_throttle_distance as u64,
+                defaults.bamboo.mob_throttle_distance as u64,
+            ),
+            (
+                "mob_sleep_distance",
+                self.bamboo.mob_sleep_distance as u64,
+                defaults.bamboo.mob_sleep_distance as u64,
+            ),
+            (
+                "mob_wakeups_scale",
+                self.bamboo.mob_wakeups_scale as u64,
+                defaults.bamboo.mob_wakeups_scale as u64,
             ),
             (
                 "redstone_cache",
@@ -1345,6 +1411,10 @@ mod tests {
         assert_eq!(defaults.official.passthrough.len(), 54);
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.max_entity_collisions, 0);
+        // 三档降频缺省全关（精确模式），唤醒倍率是 1。
+        assert_eq!(defaults.bamboo.mob_throttle_distance, 0);
+        assert_eq!(defaults.bamboo.mob_sleep_distance, 0);
+        assert_eq!(defaults.bamboo.mob_wakeups_scale, 1);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
         assert_eq!(defaults.bamboo.island_threads, recommended_island_threads());
@@ -1392,6 +1462,9 @@ mod tests {
             .passthrough
             .push(("my-custom-key".to_owned(), "keep=this".to_owned()));
         files.bamboo.entity_threads = 4;
+        files.bamboo.mob_throttle_distance = 32;
+        files.bamboo.mob_sleep_distance = 64;
+        files.bamboo.mob_wakeups_scale = 2;
         files.bamboo.forwarding = ForwardingMode::Modern;
         files.bamboo.forwarding_secret = "s\"ec\\ret".to_owned();
         files.bamboo.deliveries_per_tick = 0;
@@ -1446,12 +1519,15 @@ mod tests {
         let dir = Temp::new();
         fs::write(
             dir.path().join(BAMBOO_FILE),
-            "entity_threads = -1\nmax_entity_collisions = -3\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
+            "entity_threads = -1\nmax_entity_collisions = -3\nmob_throttle_distance = -9\nmob_sleep_distance = \"far\"\nmob_wakeups_scale = 99\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
         )
         .unwrap();
         let loaded = read(dir.path()).unwrap();
         assert_eq!(loaded.bamboo.entity_threads, 0);
         assert_eq!(loaded.bamboo.max_entity_collisions, 0, "坏值回落到精确模式");
+        assert_eq!(loaded.bamboo.mob_throttle_distance, 0);
+        assert_eq!(loaded.bamboo.mob_sleep_distance, 0);
+        assert_eq!(loaded.bamboo.mob_wakeups_scale, 1, "超上限回落到缺省 1");
         assert_eq!(loaded.bamboo.deliveries_per_tick, 64);
         assert_eq!(loaded.bamboo.keep_alive_interval, Duration::from_secs(15));
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);
@@ -1555,12 +1631,18 @@ mod tests {
         files.official.view_distance = 16;
         files.bamboo.entity_threads = 8;
         files.bamboo.max_entity_collisions = 8;
+        files.bamboo.mob_throttle_distance = 32;
+        files.bamboo.mob_sleep_distance = 64;
+        files.bamboo.mob_wakeups_scale = 3;
         files.bamboo.deliveries_per_tick = 32;
         files.bamboo.island_threads = 3;
         let config = files.to_server_config(dir.path());
         assert_eq!(config.view_distance, 16);
         assert_eq!(config.entity_threads, 8);
         assert_eq!(config.max_entity_collisions, 8);
+        assert_eq!(config.mob_throttle_distance, 32);
+        assert_eq!(config.mob_sleep_distance, 64);
+        assert_eq!(config.mob_wakeups_scale, 3);
         // 环境变量 `BAMBOO_ISLAND_THREADS` 设了就盖过文件（整套测试可能整进程设成 0）。
         // The environment variable overrides the file (a test run may set it to 0).
         assert_eq!(

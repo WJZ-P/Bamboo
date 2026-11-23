@@ -116,9 +116,21 @@ impl TestLevel {
         &self.entities
     }
 
+    /// 方块表的只读快照，给降频对拍的只读视图用。
+    #[cfg(test)]
+    pub(crate) fn blocks_snapshot(&self) -> HashMap<BlockPos, BlockState> {
+        self.blocks.clone()
+    }
+
     /// 给两段式并行驱动的算阶段用。
     pub(crate) fn entities_mut_for_test(&mut self) -> &mut Entities {
         &mut self.entities
+    }
+
+    /// 换一张实体表（降频对拍用固定 ID 起点）。
+    #[cfg(test)]
+    pub(crate) fn set_entities(&mut self, entities: Entities) {
+        self.entities = entities;
     }
 
     /// 测试断言里按具体类型读方块实体。实现者一侧可以直接碰自己的表。

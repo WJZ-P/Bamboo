@@ -81,6 +81,7 @@ pub mod squid;
 pub mod stray;
 pub mod tadpole;
 pub mod tame;
+pub mod throttle;
 pub(crate) mod timing;
 pub mod turtle;
 mod water;
@@ -2395,6 +2396,9 @@ pub struct Mob {
     /// from an older tick reads as zero, so no per-tick store scan is needed.
     /// Not saved or synced.
     pub(super) push_count: (i64, usize),
+    /// 三档降频的「上次运行时刻」和唤醒有效期。开关关着时不参与任何判断，
+    /// 不存档、不同步；绝对刻号是岛时钟，拆岛平移跟着实体走。
+    pub throttle: throttle::MobThrottle,
     pub equine: Option<Box<equine::EquineState>>,
     /// 跑大脑的生物（犰狳）的 `Brain`；用目标选择器的生物是 `None`。
     ///
@@ -2887,6 +2891,7 @@ impl Mob {
             passengers: Vec::new(),
             ejected_passenger: None,
             push_count: (i64::MIN, 0),
+            throttle: throttle::MobThrottle::NEW,
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
@@ -3132,6 +3137,7 @@ impl Mob {
         self.goals.rebase_clock(delta);
         self.anger.rebase(delta);
         self.wolf.rebase(delta);
+        self.throttle.rebase(delta);
     }
 }
 
