@@ -512,6 +512,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         armor_cover: 0.0,
         main_hand: 0,
         off_hand: 0,
+        team: None,
         combat: Default::default(),
         effects: Default::default(),
     };
@@ -562,6 +563,10 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         entities: Entities::with_next_id(2),
         players: vec![player],
         game: None,
+        inhabited: Default::default(),
+        mob_teams: Default::default(),
+        ignore_bed_monsters: false,
+        short_hunger: false,
         wrong_was_hurt: false,
     })
 }

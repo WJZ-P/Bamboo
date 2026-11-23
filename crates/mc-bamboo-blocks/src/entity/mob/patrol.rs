@@ -260,6 +260,7 @@ mod tests {
             armor_cover: 0.0,
             main_hand: 0,
             off_hand: 0,
+            team: None,
             combat: Default::default(),
             effects: Default::default(),
         });

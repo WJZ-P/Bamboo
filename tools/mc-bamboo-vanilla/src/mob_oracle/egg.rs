@@ -145,6 +145,7 @@ impl EggCase {
                 armor_cover: 0.0,
                 main_hand: 0,
                 off_hand: 0,
+                team: None,
                 combat: Default::default(),
                 effects: Default::default(),
             });
@@ -172,6 +173,10 @@ impl EggCase {
             entities: Entities::with_next_id(first_id),
             players: Vec::new(),
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
         }

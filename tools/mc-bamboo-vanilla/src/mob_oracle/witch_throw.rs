@@ -93,8 +93,13 @@ impl WitchThrowCase {
                     position: Vec3::new(self.player_x, 64.0, 0.5),
                     health: f32::from_bits(self.player_health as u32),
                     seed: mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED,
+                    creative: false,
                 }],
             )),
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
         }
     }
@@ -267,6 +272,10 @@ impl Report {
                     "{label} player effects: official {:?}, bamboo {player_effects:?}",
                     expected.player_effects
                 ));
+            }
+            // `ServerPlayer.doTick` 在实体阶段之后按血量快照补 `set_health`。
+            if tick != 0 {
+                player.sync_health();
             }
             let player_packets: Vec<_> = player
                 .take_packets(case.player_id)

@@ -507,7 +507,12 @@ fn increment_destroy_progress(
 }
 
 /// `ServerLevel.destroyBlockProgress`：给附近的、不是自己的玩家发裂纹。
-fn send_destroy_progress(region: &mut Region, breaker: i32, pos: BlockPos, progress: i32) {
+pub(crate) fn send_destroy_progress(
+    region: &mut Region,
+    breaker: i32,
+    pos: BlockPos,
+    progress: i32,
+) {
     let packet = BlockDestruction {
         id: breaker,
         pos,

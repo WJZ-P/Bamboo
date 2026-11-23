@@ -6,8 +6,8 @@
 //! cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
 //! ```
 //!
-//! 场景、口径和报告见 `docs/mob-entity-design.md` 5.9 和
-//! `docs/performance-optimizations.md` 25。这里只测量：所有地形、玩家和生物都由
+//! 场景、口径和报告见 `docs/mob-entity-design.md` 5.22 和
+//! `docs/performance-optimizations.md` 25、26。这里只测量：所有地形、玩家和生物都由
 //! 基准自己搭，走的是生产代码的同一套实体 tick 和并行驱动；计时开关关掉时
 //! 正式二进制里这些探针全是空宏。
 
@@ -25,7 +25,9 @@ use crate::{
         Entities, Entity, EntityStore,
         ctx::PlayerView,
         mob::{MobType, natural},
-        parallel::{Executor, InlineExecutor, ScopedThreads, tick_entities_parallel_timed},
+        parallel::{
+            Executor, InlineExecutor, ScopedThreads, WorkerPool, tick_entities_parallel_timed,
+        },
         view::{BlockSource, SourceView, ViewFacts},
     },
     level::EquipTarget,
@@ -143,6 +145,7 @@ impl Terrain {
             armor_cover: 0.0,
             main_hand: 0,
             off_hand: 0,
+            team: None,
             combat: Default::default(),
             effects: Default::default(),
         });
@@ -626,8 +629,8 @@ struct Sample {
 }
 
 /// 一个场景 × 一个线程数的一轮：搭世界、预热、量 `MEASURE` 刻。
-fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64) -> Sample {
-    let (terrain, mobs, _) = if scene == Scene::Mixed {
+fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool) -> Sample {
+    let (mut terrain, mobs, _) = if scene == Scene::Mixed {
         (
             MIXED_TERRAIN.get_or_init(|| Scene::mixed().0).clone(),
             Vec::new(),
@@ -636,6 +639,10 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64) -> Sample {
     } else {
         scene.build()
     };
+    // A/B 用：打开挤压上限（Paper 的缺省值 8）。
+    if let Ok(raw) = std::env::var("MOB_STRESS_MAX_COLLISIONS") {
+        terrain.rules.max_entity_collisions = raw.parse().unwrap_or(8);
+    }
     let mut level = StressLevel {
         terrain: terrain.clone(),
         random: LevelRandom::new(seed as i64),
@@ -660,10 +667,10 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64) -> Sample {
         }
     }
     let source = SourceView::new(StressSource::new(terrain));
-    let executor: Box<dyn Executor> = if threads <= 1 {
-        Box::new(InlineExecutor)
-    } else {
-        Box::new(ScopedThreads { threads })
+    let executor: Box<dyn Executor> = match (threads, scoped) {
+        (0 | 1, _) => Box::new(InlineExecutor),
+        (_, true) => Box::new(ScopedThreads { threads }),
+        (_, false) => Box::new(WorkerPool::new("mob-stress", threads).expect("起实体线程池")),
     };
     // 混合场景的自然刷怪：每刻对每名玩家周围 8 区块的方形各跑一次
     // `natural::spawn_for_chunk`，直到刷怪上限稳定。
@@ -992,6 +999,8 @@ fn mob_stress() {
     // `MOB_STRESS_SCENE=<名字前缀>` 和 `MOB_STRESS_THREADS=0,1,2` 用来单独复现一个数字；
     // 不给就跑全部，报告里的表格就是这一次完整输出。
     let only = std::env::var("MOB_STRESS_SCENE").ok();
+    // A/B 用：`MOB_STRESS_SCOPED=1` 回到每刻起线程的旧执行器。
+    let scoped = std::env::var("MOB_STRESS_SCOPED").is_ok();
     let threads: Vec<usize> = std::env::var("MOB_STRESS_THREADS")
         .ok()
         .map(|raw| {
@@ -1001,9 +1010,11 @@ fn mob_stress() {
         })
         .unwrap_or_else(|| THREADS.to_vec());
     println!(
-        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?}",
+        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={} max-collisions={}",
         only.as_deref().unwrap_or("all"),
-        threads
+        threads,
+        scoped,
+        std::env::var("MOB_STRESS_MAX_COLLISIONS").unwrap_or_else(|_| "off".to_owned())
     );
     println!("uptime: {}", uptime());
     for scene in Scene::ALL {
@@ -1017,7 +1028,13 @@ fn mob_stress() {
         for &count in &threads {
             let mut rounds = Vec::with_capacity(ROUNDS);
             for round in 0..ROUNDS {
-                rounds.push(run_one(scene, count, natural, 0x5eed + round as u64));
+                rounds.push(run_one(
+                    scene,
+                    count,
+                    natural,
+                    0x5eed + round as u64,
+                    scoped,
+                ));
             }
             print!("{}", summarize(scene, count, rounds));
         }
@@ -1039,6 +1056,10 @@ fn measure_cramming(scene: Scene, threads: usize, rounds: usize) -> String {
     let mut per_round = Vec::new();
     for round in 0..rounds {
         let (mut terrain, mobs, _) = scene.build();
+        // A/B 用：打开挤压上限（8，Paper 的缺省值）。
+        if std::env::var_os("MOB_STRESS_MAX_COLLISIONS").is_some() {
+            terrain.rules.max_entity_collisions = 8;
+        }
         // 恢复官方默认（24），`Terrain::new` 给的就是 vanilla。
         terrain.rules.max_entity_cramming = BlockGameRules::vanilla().max_entity_cramming;
         let mut level = StressLevel {
@@ -1060,7 +1081,7 @@ fn measure_cramming(scene: Scene, threads: usize, rounds: usize) -> String {
         let executor: Box<dyn Executor> = if threads <= 1 {
             Box::new(InlineExecutor)
         } else {
-            Box::new(ScopedThreads { threads })
+            Box::new(WorkerPool::new("mob-stress", threads).expect("起实体线程池"))
         };
         const TICKS: usize = 100;
         imp::take();

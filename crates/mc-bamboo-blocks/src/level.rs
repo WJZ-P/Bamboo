@@ -508,6 +508,20 @@ pub trait LevelEntities {
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic>;
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_entity_in`]，但最多访问 `limit` 个。
+    fn for_each_pushable_in(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        let mut seen = 0;
+        self.for_each_entity_in(area, &mut |public| {
+            if seen < limit && visit(public) {
+                seen += 1;
+            }
+        });
+    }
     /// `addFreshEntity`：tick 期间生成的实体下一 tick 才动。
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid;
     /// 构造实体：分配 ID、取种子和构造时的随机数，还不放进世界，见 [`EntityStore::prepare`]。
@@ -582,6 +596,16 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.entities_table().for_each_in(area, visit);
+    }
+
+    fn for_each_pushable_in(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.entities_table()
+            .for_each_in_limited(area, limit, visit);
     }
 
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid {
@@ -1115,6 +1139,14 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
+    /// 一个实体（按 UUID 找它的计分板名字）所在的队伍，和
+    /// [`PlayerView::team`](crate::entity::ctx::PlayerView::team) 用同一套下标。默认谁都不在队伍里。
+    ///
+    /// The team of an entity looked up by UUID, indexed like `PlayerView::team`.
+    fn entity_team(&self, _uuid: &[u8; 16]) -> Option<u32> {
+        None
+    }
+
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
         0
@@ -1243,20 +1275,7 @@ pub trait Level: LevelSideState + LevelEntities {
     /// intersects the ±8 / ±5 / ±8 box around the bed's bottom centre. Dying monsters
     /// still count, as in vanilla; discarded ones do not.
     fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
-        let x = f64::from(pos.x) + 0.5;
-        let y = f64::from(pos.y);
-        let z = f64::from(pos.z) + 0.5;
-        let area = mc_bamboo_core::Aabb::new(x - 8.0, y - 5.0, z - 8.0, x + 8.0, y + 5.0, z + 8.0);
-        let mut found = false;
-        self.for_each_entity_in(area, &mut |public| {
-            if !public.removed
-                && let crate::entity::KindPublic::Mob(mob) = &public.kind
-                && mob.mob_type.is_monster()
-            {
-                found = true;
-            }
-        });
-        found
+        monster_prevents_rest_in(self, pos)
     }
 
     /// `getDifficulty().getId()`：0 和平、1 简单、2 普通、3 困难。
@@ -2142,6 +2161,26 @@ pub struct PlayerDeathDrops {
     pub experience: i32,
 }
 
+/// [`Level::monster_prevents_rest`] 的缺省实现，单独拿出来让覆盖它的假世界也能调到。
+///
+/// The default body of [`Level::monster_prevents_rest`], callable from overrides.
+pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> bool {
+    let x = f64::from(pos.x) + 0.5;
+    let y = f64::from(pos.y);
+    let z = f64::from(pos.z) + 0.5;
+    let area = mc_bamboo_core::Aabb::new(x - 8.0, y - 5.0, z - 8.0, x + 8.0, y + 5.0, z + 8.0);
+    let mut found = false;
+    level.for_each_entity_in(area, &mut |public| {
+        if !public.removed
+            && let crate::entity::KindPublic::Mob(mob) = &public.kind
+            && mob.mob_type.is_monster()
+        {
+            found = true;
+        }
+    });
+    found
+}
+
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
 ///
 /// The non-block results of one action, handed to the caller for delivery.
@@ -2255,6 +2294,13 @@ pub enum Effect {
         target: EntityUid,
         source: DamageSource,
         amount: f32,
+    },
+    /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：32 格内、不是 `breaker`
+    /// 自己的玩家收到裂纹包。生物破门用它；`progress` 为 -1 时清掉。
+    DestroyProgress {
+        breaker: i32,
+        pos: BlockPos,
+        progress: i32,
     },
     /// `Zombie.doHurtTarget` 的着火传染打到玩家：`igniteForTicks(ticks)`。
     IgnitePlayer { target: EntityUid, ticks: i32 },

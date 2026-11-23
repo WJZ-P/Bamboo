@@ -605,7 +605,7 @@ fn all_chunks_reclaim_and_shutdown_completes_after_every_player_leaves() {
                 Vec3::new(0.5, 64.0, 0.5),
                 ItemStack::empty(),
             ));
-            crate::interaction::run_entity_ticks(0, server.region());
+            crate::interaction::run_entity_ticks(0, server.region(), None);
             assert!(
                 server.region().entities.public_at(uid).is_none(),
                 "空物品这一拍应被丢弃"

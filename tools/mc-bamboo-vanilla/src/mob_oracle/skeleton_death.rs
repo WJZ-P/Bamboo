@@ -62,6 +62,7 @@ pub(super) fn player_view() -> PlayerView {
         armor_cover: 0.0,
         main_hand: items::DIAMOND_SWORD,
         off_hand: 0,
+        team: None,
         combat: Default::default(),
         effects: Default::default(),
     }
@@ -134,6 +135,10 @@ impl Report {
             entities: Entities::with_next_id(1),
             players: vec![player],
             game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
             wrong_was_hurt: false,
         };
         let mut ticks = BlockTicks::default();
