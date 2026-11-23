@@ -2035,10 +2035,7 @@ impl<'a> World<'a> {
     /// Vanilla `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`: the
     /// overworld timeline, then the rain and thunder weather layers.
     pub fn bees_stay_in_hive(&self, _pos: BlockPos) -> bool {
-        let weather = self.level.block_weather();
-        crate::sky::bees_stay_in_hive(self.level.clock_ticks())
-            || weather.rain_level > 0.0
-            || weather.thunder_level > 0.0
+        self.level.bees_stay_in_hive()
     }
 
     /// `Level.isThundering()`：雷暴强度和雨强的乘积超过 0.9 才算打雷。

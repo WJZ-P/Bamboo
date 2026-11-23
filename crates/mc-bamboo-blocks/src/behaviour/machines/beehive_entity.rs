@@ -244,8 +244,11 @@ impl BeehiveEntity {
         let state = world.block_state(self.pos);
         let mut i = 0;
         while i < self.bees.len() {
+            // `BeeData.tick()` 是 `ticksInHive++ > minTicksInHive`：字段先加一，
+            // 但比较用的是加一之前的旧值，所以蜂比 `ticks > min` 晚一刻出巢。
+            let was_due = self.bees[i].ticks_in_hive > self.bees[i].min_ticks_in_hive;
             self.bees[i].ticks_in_hive = self.bees[i].ticks_in_hive.saturating_add(1);
-            if self.bees[i].ticks_in_hive <= self.bees[i].min_ticks_in_hive {
+            if !was_due {
                 i += 1;
                 continue;
             }
@@ -254,8 +257,14 @@ impl BeehiveEntity {
             } else {
                 ReleaseStatus::BeeReleased
             };
-            let occupant = self.bees.remove(i);
-            self.release(world, state, occupant, status, None);
+            // `tickOccupants` 只在 `releaseOccupant` 返回真时移除；被天气 / 出口挡住时
+            // 蜂留在巢里，下一刻再试，而且不重复取花位置 / 蜜等级 / 生成实体的随机数。
+            let occupant = self.bees[i].clone();
+            if self.release(world, state, occupant, status, None).is_some() {
+                self.bees.remove(i);
+            } else {
+                i += 1;
+            }
         }
         if !self.bees.is_empty() && world.random().next_double() < 0.005 {
             world.play_sound(
@@ -332,12 +341,13 @@ impl BeehiveEntity {
             return None;
         }
         let mut entity = occupant.into_entity(self.pos)?;
-        // 官方在蜂还没有记住花、且 10% 概率时用巢里存的花位置；随机数在实体上取。
+        // `releaseOccupant`：巢里存了花、蜂自己没花时，`level.random.nextFloat() < 0.9`
+        // 就用巢里的花（注释里是 10% 概率，字节码是 `< 0.9`，照字节码）。
         if let Some(flower) = self.flower_pos
             && !entity
                 .with_mob(|_, mob| crate::entity::mob::bee::has_saved_flower(mob))
                 .unwrap_or(false)
-            && entity.random.next_float() < 0.9
+            && world.random().next_float() < 0.9
         {
             entity.with_mob(|_, mob| crate::entity::mob::bee::set_saved_flower(mob, Some(flower)));
         }
@@ -464,8 +474,10 @@ pub fn is_sedated(world: &World, pos: BlockPos) -> bool {
                 )],
                 shape::BooleanOp::And,
             );
-        if intersects && lit_campfire(world.block_state(below.below())) {
-            return true;
+        if intersects {
+            // 官方在虚拟柱子与这一格相交时立刻返回「下面一格是否点着的营火」，
+            // 不再往下找，所以隔着一层石板的营火不算冒烟。
+            return lit_campfire(world.block_state(below.below()));
         }
     }
     false

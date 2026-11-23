@@ -1105,6 +1105,14 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// `EnvironmentAttributes.BEES_STAY_IN_HIVE`：主世界的时间线和天气层。
+    /// 对拍夹具可以直接给官方那一侧算出的布尔值。
+    fn bees_stay_in_hive(&self) -> bool {
+        crate::sky::bees_stay_in_hive(self.clock_ticks())
+            || self.block_weather().rain_level > 0.0
+            || self.block_weather().thunder_level > 0.0
+    }
+
     /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线在
     /// [`Level::clock_ticks`] 处求值；有固定时间的维度没有这条时间线，恒假。
     fn monsters_burn(&self) -> bool {
