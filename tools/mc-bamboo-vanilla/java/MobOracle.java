@@ -7029,7 +7029,8 @@ public final class MobOracle {
                         .append(',').append(getInt(LivingEntity.class, cow, "lastHurtByPlayerMemoryTime"))
                         .append(']');
             }
-            frames.append(",\"packets\":[]");
+            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
+                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
             frames.append('}');
             if (broke >= 0 && tick >= broke + (owned ? OWNED_TICKS : 0)) break;
             if (tick > 200) throw new IllegalStateException("egg never landed: " + name);
@@ -8586,8 +8587,7 @@ public final class MobOracle {
                         .getKey(world.spawned.get(i).getType()).toString()));
             }
             frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()));
-            frames.append(",\"packets\":").append(packets.stream().map(MobOracle::jsonString)
-                    .collect(java.util.stream.Collectors.joining(",", "[", "]")));
+            frames.append(",\"packets\":[]");
             frames.append('}');
             if (merge) {
                 for (BlockState state : world.blocks.values()) {
