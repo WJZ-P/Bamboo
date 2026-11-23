@@ -659,10 +659,12 @@ impl Region {
         self.split_level(false)
     }
 
-    /// 实体逻辑读的那份规则：方块快照加 Bamboo 自己的挤压上限配置。
-    /// 方块逻辑仍读 `global.block_rules`（上限恒为 0，不受这个开关影响）。
+    /// 实体逻辑读的那份规则：已发布的方块快照加 Bamboo 自己的挤压上限配置。
+    /// 只改一个字段，不重算整份规则（这条路径每刻要跑很多次）。
     pub(crate) fn entity_game_rules(&self) -> mc_bamboo_blocks::BlockGameRules {
-        self.global.rules.entity_rules(self.max_entity_collisions)
+        let mut rules = self.global.block_rules;
+        rules.max_entity_collisions = self.max_entity_collisions;
+        rules
     }
 
     /// 精确驱动的实体循环用的世界：额外借出连接、音效种子和规则，生物打玩家时
