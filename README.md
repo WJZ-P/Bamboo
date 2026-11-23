@@ -218,16 +218,27 @@ WebView2 的渲染进程不算在内。
 - **玩家左键近战攻击**按官方 26.3 `ServerGamePacketListenerImpl.handleAttack` → `Player.attack` →
   `ServerPlayer.crit` / `magicCrit` / `getEnchantedDamage` 完整实现：攻击冷却（基础伤害
   `×(0.2 + s² × 0.8)`、附魔加成 `× s`）、`ATTACK_SPEED` 属性与 `getCurrentItemAttackStrengthDelay`、
-  挥空 / 攻击 / 换主手物品重置冷却；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
+  挥空 / 攻击 / 换主手物品重置冷却（换物品按官方 `isSameItem` 只比物品 ID，耐久 / 附魔 /
+  数量这类组件变化只刷新缓存、不清冷却）；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
   `MAGIC_CRITICAL_HIT` 动画）；拿剑、在地上、满充能、非暴击非疾跑时的横扫（打主目标
   `inflate(1, 0.25, 1)` 里 3 格内的生物，`sweeping_edge` 按 `L/(L+1)` 加成，发 `SWEEP_ATTACK`
   粒子，横扫命中的生物也照 `doPostAttackEffects` 吃火焰附加 / 节肢杀手效果）；疾跑 /
   `knockback` 附魔 / `attack_knockback` 的额外击退并取消疾跑；锋利 / 亡灵杀手 /
   节肢杀手（及节肢杀手的缓慢）、火焰附加、武器耐久、伤害指示粒子和
   `player.attack.strong / weak / crit / sweep / knockback / nodamage` 音效都真的发到客户端。
-  PVP 按 `server.properties` 的 `pvp` 开关和官方 `canHarmPlayer` 处理（Bamboo 没有队伍）。
-  对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比牛的血量 / 击退速度 / 着火 /
-  受伤时间 / 是否移除和 `damage_event` 包，0 不一致；`--break-self-test attack_charge` 能抓到
+  PVP 按 `server.properties` 的 `pvp` 开关和官方 `canHarmPlayer` 处理（Bamboo 没有队伍）；
+  玩家目标的额外击退、火焰附加点燃、横扫波及都按官方对 `LivingEntity` 一视同仁，
+  额外击退还照 `Player.causeExtraKnockback` 末尾的 `ServerPlayer.syncVelocity` 分支，
+  速度包发出去之后恢复受击前的服务端速度。横扫伤害源沿用主攻击的
+  `damageSource`（含 `isCreativePlayer` 标记），创造模式攻击者也能绕过被横扫目标的
+  受伤无敌帧。`Player.damageStatsAndHearts` 的
+  `awardStat(Stats.DAMAGE_DEALT, Math.round(实际伤害 × 10))` 在会话内累计，
+  `RequestStats` 时作为 `minecraft:custom` 统计发到客户端（`custom_stat` 的注册表 ID
+  由生成器从 `registries.json` 导出）。
+  对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比每头牛的血量 / 击退速度 /
+  着火 / 受伤时间 / 是否移除、**每头牛自己的随机源状态**，以及出站效果包
+  `damage_event` / `sound` / `level_particles` / `animate` / `entity_event`，0 不一致；
+  音效包末尾 8 字节的随机种子不比，见下面已知限制；`--break-self-test attack_charge` 能抓到
   故意改坏的充能值，`--break-self-test sweep_effects` 能抓到漏掉的横扫后附魔效果）；
   `a_critical_attack_emits_its_packets`、`a_sweep_ignites_swept_targets_with_fire_aspect`、
   `a_sweep_attack_emits_its_sound_and_particle`、
@@ -236,31 +247,49 @@ WebView2 的渲染进程不算在内。
   `damage_indicator_particles_follow_the_damage_threshold`
   单测按音效 / 粒子注册表 ID 和动画动作字节，确认暴击 / 附魔暴击动画、横扫 / 伤害
   指示粒子（含 `damageStatsAndHearts` 的 `actualDamage > 2` 门槛）、strong / weak /
-  sweep 音效真的发到客户端、横扫目标也着火且掉血；`crit` / `knockback` / `nodamage`
-  音效仍只由 `a_critical_attack_emits_its_packets` 按包类型松散覆盖或尚未精确断言。
+  sweep 音效真的发到客户端、横扫目标也着火且掉血；`melee_attack_hits_another_player`
+  覆盖玩家互打的伤害、火焰附加、速度恢复和横扫波及第三名玩家。
+  `melee_hit_awards_damage_dealt_on_request_stats` 走完整 `on_attack` → `RequestStats`，
+  配合协议层 `award_stats_encodes_the_damage_dealt_custom_stat` 逐字节比 `award_stats` 包，
+  确认近战命中真的把 `DAMAGE_DEALT` 发到客户端（故意把累计值改成 0，前者立刻失败）。
+  `can_critical_requires_every_modelled_precondition` /
+  `is_sweep_attack_requires_full_charge_ground_and_a_sword` 逐条锁住暴击 / 横扫的
+  官方前置判定（去掉 `onGround` 门控两条都失败，横扫阈值按官方的 double 精度比较）。
+  `a_zero_damage_attack_skips_the_hit_and_its_sound` /
+  `a_rejected_attack_emits_only_the_nodamage_sound` 分别锁住「基础伤害与附魔加成
+  都是 0 时整段跳过」和「`hurtOrSimulate` 被无敌帧拒绝时只发 `nodamage` 音」，
+  `a_weapon_attack_range_component_overrides_the_default` 逐字段比武器
+  `attack_range` 组件，`a_crouching_player_target_keeps_its_real_collision_box`
+  锁住蹲下玩家目标的 1.5 高碰撞盒。每一条都做过改坏自检。
+  `nodamage` 音效只有单测、仍没有对拍场景覆盖。
 - **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
   （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
   `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
   骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
-  节肢杀手的缓慢时长恒用最短 30 刻，官方从**生物自己的随机源**
-  在 `[30, 30 + 10×(L−1)]` 刻取值，Bamboo 没把该随机源暴露给攻击路径；`Stats.DAMAGE_DEALT`
-  统计不写原版 `stats/<UUID>.json`；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
-  （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画 /
-  挥手 / 耐久槽包在 `mob-oracle` 里不逐字节比（官方假世界不捕获这些包，且带种子的音效
-  顺序受两套发包路径影响），由上面的单测确认它们确实发出（`crit` / `knockback` /
-  `nodamage` 音效仍只按包类型松散覆盖或未按 ID 精确断言）；攻击场景的对拍夹具跳过
-  `cow.tick()`，否则官方一侧的重力 / AI 会污染击退速度，逐位比较不可行；PVP 只对另一名
-  玩家结算伤害和受伤链路，额外击退（`causeExtraKnockback`）、火焰附加点燃和横扫波及的
-  玩家都走实体表（`knockback_mob` / `ignite_mob` / 候选收集），而玩家不在实体表里，
-  故这几项对玩家目标不生效（官方 `Player.attack` / `doSweepAttack` 对所有
-  `LivingEntity` 一视同仁）。够距用 `within_block_interaction_range` 加目标所在方块点，
-  官方 `handleAttack` 用 `isWithinAttackRange`（实体交互距离 + 武器攻击距离 + 整个 AABB）
-  并查世界边界和 feature flag，这一层完全没进 `mob-oracle`（夹具直接调 `Player.attack`）；
-  横扫候选盒按主目标位置近似 `inflate(1, 0.25, 1)`，不含玩家和队伍判定；官方
-  `Player.attack` 在 `baseDamage <= 0 && magicBoost <= 0` 时整段跳过（连 `nodamage` 音都不发），
-  Bamboo 没有这道门槛（正常路径 `ATTACK_DAMAGE` 基值 1.0 使 `baseDamage ≥ 0.2`，不触发）；
+  节肢杀手的缓慢时长按 `ApplyMobEffect` 从**受害者自己的随机源**取三次
+  （`nextInt(1)`、时长、等级），落在 `[30, 30 + 10×(L−1)]` 刻、等级恒为 3；`Stats.DAMAGE_DEALT`
+  按官方 `awardStat` 在会话内累计、在 `RequestStats` 时作为 `minecraft:custom` 统计发给客户端，
+  但不写原版 `stats/<UUID>.json`（也不更新统计计分板目标）；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
+  （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画
+  包已经在 `mob-oracle` 里逐字节比，但**音效包末尾 8 字节的随机种子不比**：官方每发一个
+  音效就当场从世界随机源取种子，Bamboo 把一拍的效果攒到末尾统一发，取数顺序因此不同，
+  客户端只用这个种子给音高加一点扰动；横扫候选里的玩家排在生物之后（官方按实体分区
+  顺序），不影响伤害和取数，只影响多目标时的发包顺序；攻击场景的对拍夹具跳过
+  `cow.tick()`，否则官方一侧的重力 / AI 会污染击退速度，逐位比较不可行；PVP 的对拍
+  没有专门场景，只有 `melee_attack_hits_another_player` 单测；玩家目标的额外击退按
+  官方 `ServerPlayer.syncVelocity` 分支在发完速度包后恢复受击前速度，但 Bamboo 没有
+  `syncVelocity` 这个状态位，`ServerEntity` 的逐刻速度同步语义也没有对齐。够距按官方
+  `handleAttack` 的
+  `isWithinAttackRange`：实体交互距离（生存 3.0 / 创造 5.0，武器带 `attack_range`
+  组件时读组件）配 3.0 缓冲，量眼睛到目标整个碰撞盒的闭区间距离，并查世界边界
+  （`mainHandItem.isItemEnabled(enabledFeatures())` 的 feature flag 没查）；这一层完全
+  没进 `mob-oracle`（夹具直接调 `Player.attack`），由
+  `attack_reach_uses_the_entity_interaction_range` 等单测守住；
+  横扫候选按主目标的整个碰撞盒 `inflate(1, 0.25, 1)` 与候选碰撞盒相交判定（不是位置
+  点），玩家也算候选（额外击退 / 火焰附加同样对玩家生效），但仍没有队伍判定；
   `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 只累加 `ADD_VALUE` 修饰符、横扫阈值把 `getSpeed()`
-  写死成 0.1，带乘法修饰符或速度药水时可能不同；受害者装备附魔（荆棘）和
+  写死成 f32 的 0.1（乘 2.5、求平方都照官方用 double），带乘法修饰符或速度药水时
+  可能不同；受害者装备附魔（荆棘）和
   `autoSpinAttack` 的武器来源都未建模。
 
 - 多名玩家进入同一个世界；新世界默认 `normal`（噪声地形，见上面世界生成一节），
@@ -1195,7 +1224,7 @@ WebView2 的渲染进程不算在内。
   （每次开服从 0 数起、不存档）计，不用存档里接着走的 `gameTime`，读档开服时相位才对。
   包里带的 `gameTime` 仍是这一刻 `tickTime` 加一之前的值。发给客户端的流速在时钟暂停或
   `advance_time` 为假时是 0，客户端不会自己把时间往前推。
-  按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家没有效果。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
+  按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家按 `pvp` 设置结算伤害（见「玩家左键近战攻击」）。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
   `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
   不是 JSON 文本组件。组件过一遍官方 `Codec`；执行时按 `ComponentUtils.resolve` 展开：
   `selector` 变成玩家名列表，`score` 查 `/scoreboard` 的分数并套用数字格式（`*` 指接收者，名字当选择器编译），

@@ -3401,6 +3401,22 @@ impl<'a> World<'a> {
         found
     }
 
+    /// 在目标实体自己的随机源上做一次取数：官方 `LivingEntity.getRandom()`。
+    /// 返回 `None` 表示实体已不存在。
+    ///
+    /// Draw from the target entity's own random source, vanilla
+    /// `LivingEntity.getRandom()`. Returns `None` when the entity is gone.
+    pub fn with_mob_random<R>(
+        &mut self,
+        id: i32,
+        f: impl FnOnce(&mut crate::entity::JavaRandom) -> R,
+    ) -> Option<R> {
+        let mut entity = self.level.take_entity(id)?;
+        let result = f(&mut entity.random);
+        self.level.put_entity(entity);
+        Some(result)
+    }
+
     /// `Player.causeExtraKnockback` 对生物目标调的 `LivingEntity.knockback`。
     /// 方向和力道由攻击者给；这是受伤默认击退之外的第二下击退。
     ///

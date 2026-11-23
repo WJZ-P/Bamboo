@@ -3441,6 +3441,12 @@ fn registries_file(data: &VersionData) -> String {
     write_registry_ids(&mut out, data, "banner_pattern", BANNER_PATTERN_REGISTRY);
     write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
     write_registry_ids(&mut out, data, "stat_type", "minecraft:stat_type");
+    // `ClientboundAwardStatsPacket` 的自定义统计按这个内置注册表的 ID 编码，
+    // 玩家近战命中要发 `minecraft:damage_dealt`。
+    //
+    // `ClientboundAwardStatsPacket` encodes custom stats by this built-in registry's
+    // id; the player melee hit awards `minecraft:damage_dealt`.
+    write_registry_ids(&mut out, data, "custom_stat", "minecraft:custom_stat");
 
     let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
     let _ = writeln!(out, "pub mod attribute_defaults {{");

@@ -4204,6 +4204,77 @@ fn left_click_attack_hurts_a_cow() {
     assert_eq!(health, Some(9.0), "满充能空手一次攻击扣 1 点");
 }
 
+/// `handleAttack` 的够距是「实体交互距离（生存 3.0）＋ 3.0 缓冲」，量的是眼睛到
+/// 目标碰撞盒的距离，闭区间。牛盒 0.9×1.4、眼睛高 1.62：D=6.4 命中、D=6.5 不中；
+/// 旧的方块交互距离（4.5 + 3.0）会把 6.5 也判成命中。
+///
+/// `handleAttack`'s reach is the entity interaction range (3.0 in survival) plus
+/// a 3.0 buffer, measured from the eye to the target's collision box as a closed
+/// interval. With a 0.9×1.4 cow and a 1.62 eye height, D=6.4 hits and D=6.5
+/// misses; the old block-interaction reach (4.5 + 3.0) would accept 6.5.
+#[test]
+fn attack_reach_uses_the_entity_interaction_range() {
+    use mc_bamboo_blocks::entity::Entity;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    // 生存模式的攻击距离是 3.0 + 3.0；创造模式是 5.0 + 3.0。
+    //
+    // Survival attack reach is 3.0 + 3.0; creative is 5.0 + 3.0.
+    region.players.get_mut(&client.id).unwrap().game_mode = GameMode::Survival;
+    let position = region.players.get(&client.id).unwrap().position();
+    let near = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 6.4,
+        position.y,
+        position.z,
+    )));
+    let far = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x - 6.5,
+        position.y,
+        position.z,
+    )));
+    region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 100;
+
+    // 近处那头打得中。
+    // The near cow is hit.
+    server.request(&client, PlayRequest::Attack { entity_id: near });
+    server.tick();
+    let health = |server: &Harness, id: i32| {
+        server
+            .world
+            .islands
+            .region
+            .entities
+            .public_at(id)
+            .and_then(|public| match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
+                _ => None,
+            })
+    };
+    assert_eq!(health(&server, near), Some(9.0));
+
+    // 远处那头超出 6.0，攻击被丢弃。
+    // The far cow is past 6.0, so the attack is dropped.
+    server
+        .world
+        .islands
+        .region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .attack_strength_ticker = 100;
+    server.request(&client, PlayRequest::Attack { entity_id: far });
+    server.tick();
+    assert_eq!(health(&server, far), Some(10.0));
+}
+
 /// 满充能下落暴击：暴击动画、攻击音效和伤害指示粒子都真的发到客户端，
 /// 不是只生成效果就丢掉。
 ///
@@ -4323,6 +4394,112 @@ fn a_sweep_ignites_swept_targets_with_fire_aspect() {
     assert!(fire(swept) > 0, "the swept target must be ignited too");
 }
 
+/// 玩家互打（`pvp` 为真）：伤害落在另一名玩家身上，火焰附加点燃它，额外击退
+/// 把速度包发过去，而服务端速度照官方 `ServerPlayer.syncVelocity` 分支改回受击
+/// 前的值；横扫也把旁边的玩家算进候选。
+///
+/// Player-versus-player with `pvp` on: the hit lands on the other player, Fire
+/// Aspect ignites them, the extra knockback sends them a velocity packet, and
+/// the server-side velocity is put back as vanilla's `ServerPlayer.syncVelocity`
+/// branch does. Sweeping counts nearby players too.
+#[test]
+fn melee_attack_hits_another_player() {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    let mut server = Harness::new(8);
+    let attacker = server.join("Kitten");
+    let victim = server.join("Puppy");
+    let bystander = server.join("Bunny");
+    server.tick();
+    attacker.take_frames();
+    victim.take_frames();
+    bystander.take_frames();
+    let region = &mut server.world.islands.region;
+    assert!(
+        region.global.rules.bool(mc_bamboo_data::gamerules::PVP),
+        "pvp defaults to true"
+    );
+    let base = region.players.get(&attacker.id).unwrap().position();
+    {
+        let (players, grid) = (&mut region.players, &mut region.player_grid);
+        for id in [attacker.id, victim.id, bystander.id] {
+            let player = players.get_mut(&id).unwrap();
+            player.game_mode = GameMode::Survival;
+            player.health.health = 20.0;
+        }
+        players
+            .get_mut(&attacker.id)
+            .unwrap()
+            .set_position(grid, base);
+        players
+            .get_mut(&victim.id)
+            .unwrap()
+            .set_position(grid, Vec3::new(base.x + 2.0, base.y, base.z));
+        players
+            .get_mut(&bystander.id)
+            .unwrap()
+            .set_position(grid, Vec3::new(base.x + 2.5, base.y, base.z));
+    }
+    let fire_aspect = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == "minecraft:fire_aspect")
+        })
+        .expect("fire_aspect exists") as i32;
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(fire_aspect, 2)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    let weapon = ItemStack {
+        item: mc_bamboo_data::items::DIAMOND_SWORD,
+        count: 1,
+        added,
+        removed,
+    };
+    let victim_delta = {
+        let player = region.players.get_mut(&attacker.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+        region.players.get(&victim.id).unwrap().motion.delta
+    };
+    server.request(
+        &attacker,
+        PlayRequest::Attack {
+            entity_id: victim.id.0,
+        },
+    );
+    server.tick();
+    let region = &server.world.islands.region;
+    let target = region.players.get(&victim.id).expect("victim");
+    assert!(target.health.health < 20.0, "the victim must take damage");
+    assert!(
+        target.environment.remaining_fire_ticks > 0,
+        "Fire Aspect must ignite the player victim"
+    );
+    // 官方把速度包发出去之后恢复受击前的速度。
+    // Vanilla restores the pre-hit velocity after sending the packet.
+    assert_eq!(
+        target.motion.delta, victim_delta,
+        "the server keeps the pre-hit velocity for a player target"
+    );
+    let swept = region.players.get(&bystander.id).expect("bystander");
+    assert!(
+        swept.health.health < 20.0,
+        "the swept player must take damage"
+    );
+}
+
 /// 某类包里每条帧的首个 VarInt：音效注册表 ID 加一，或粒子 ID。
 ///
 /// The first VarInt of each frame with the given packet id: a sound registry
@@ -4428,6 +4605,71 @@ fn a_sweep_attack_emits_its_sound_and_particle() {
     assert!(
         swept_health.is_some_and(|health| health < 10.0),
         "the swept cow must take damage"
+    );
+}
+
+/// 横扫候选按主目标**整个碰撞盒** `inflate(1, 0.25, 1)` 与候选碰撞盒相交判定，
+/// 不是按位置点：牛宽 0.9，第二头牛在 z+1.5 处位置已超出旧窗口（0.45 + 1 = 1.45），
+/// 但两个碰撞盒仍然相交，官方会扫到它。
+///
+/// Sweep candidates are the mobs whose collision box intersects the main target's
+/// whole box inflated by (1, 0.25, 1), not a position test: a cow 0.9 wide at
+/// z+1.5 is outside the old window (0.45 + 1 = 1.45) by position, yet the two
+/// boxes still intersect, so vanilla sweeps it.
+#[test]
+fn sweep_uses_the_target_collision_box() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let main = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z,
+    )));
+    let edge = region.entities.spawn(Entity::cow(Vec3::new(
+        position.x + 2.0,
+        position.y,
+        position.z + 1.5,
+    )));
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        let weapon = ItemStack::new(items::DIAMOND_SWORD, 1);
+        player.inventory.slots[slot] = weapon.clone();
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+        player.last_main_hand_item = weapon;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: main });
+    server.tick();
+    let health = |server: &Harness, id: i32| {
+        server
+            .world
+            .islands
+            .region
+            .entities
+            .public_at(id)
+            .and_then(|public| match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
+                _ => None,
+            })
+    };
+    assert!(
+        health(&server, main).is_some_and(|hp| hp < 10.0),
+        "the main cow is hit"
+    );
+    assert!(
+        health(&server, edge).is_some_and(|hp| hp < 10.0),
+        "a cow whose box touches the inflated box is swept"
     );
 }
 
@@ -4590,6 +4832,75 @@ fn a_full_strength_attack_emits_the_strong_sound() {
     }
 }
 
+/// 官方 `Player.attack` 在 `hurtOrSimulate` 返回 false 时只播
+/// `PLAYER_ATTACK_NODAMAGE`，不播 strong / weak / crit / sweep，也不扣血。
+/// 用一头刚受伤、还带着无敌帧的牛造出这次拒绝。对拍夹具没有这个场景，
+/// 这里按音效注册表 ID 补上。
+///
+/// Vanilla `Player.attack` plays only `PLAYER_ATTACK_NODAMAGE` when
+/// `hurtOrSimulate` returns false: no strong / weak / crit / sweep and no
+/// damage. A cow still inside its hurt invulnerability window produces the
+/// rejection. The oracle fixtures have no such scene, so pin the sound ids here.
+#[test]
+fn a_rejected_attack_emits_only_the_nodamage_sound() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_data::sounds;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    region.entities.with_mut_including_pending(cow, |entity| {
+        if let Some(mob) = entity.kind.mob_mut() {
+            mob.invulnerable_time = 20;
+        }
+    });
+    {
+        let player = region.players.get_mut(&client.id).unwrap();
+        // 创造模式攻击者的伤害源会穿透无敌帧，这里必须是生存模式。
+        // A creative attacker's source bypasses invulnerability, so stay in survival.
+        player.game_mode = GameMode::Survival;
+        player.attack_strength_ticker = 100;
+        player.on_ground = true;
+        player.motion.fall_distance = 0.0;
+    }
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let frames = client.take_frames();
+    let ids = sound_event_ids(&frames);
+    let sound = |name| i32::from(sounds::sound_event(name));
+    assert!(
+        ids.contains(&sound("minecraft:entity.player.attack.nodamage")),
+        "the nodamage sound must reach the client; sounds seen: {ids:?}"
+    );
+    for absent in [
+        "minecraft:entity.player.attack.weak",
+        "minecraft:entity.player.attack.strong",
+        "minecraft:entity.player.attack.crit",
+        "minecraft:entity.player.attack.sweep",
+    ] {
+        assert!(
+            !ids.contains(&sound(absent)),
+            "the {absent} sound must not be sent"
+        );
+    }
+    let health = server
+        .world
+        .islands
+        .region
+        .entities
+        .get(cow)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.health));
+    assert_eq!(
+        health,
+        Some(10.0),
+        "the rejected hit must not damage the cow"
+    );
+}
+
 /// 官方 `damageStatsAndHearts` 只在实际伤害大于 2 时发 `DAMAGE_INDICATOR`
 /// 粒子：空手满充能（1 点）不发，钻石剑满充能（7 点）发。按粒子 ID 精确断言，
 /// 补上此前只按包类型松散覆盖的伤害指示粒子和它的伤害门槛。
@@ -4640,5 +4951,81 @@ fn damage_indicator_particles_follow_the_damage_threshold() {
     assert!(
         sword.contains(&particle_type::DAMAGE_INDICATOR),
         "7 points of damage must emit damage-indicator particles"
+    );
+}
+
+/// 官方 `Player.damageStatsAndHearts` 给攻击者记 `DAMAGE_DEALT`；客户端发
+/// `RequestStats` 时，`ServerStatsCounter.sendStats` 把这个累计值作为
+/// `minecraft:custom` 统计发出去。值按 `Math.round(实际伤害 × 10)` 算。
+///
+/// Vanilla `Player.damageStatsAndHearts` awards `DAMAGE_DEALT` to the attacker;
+/// `RequestStats` makes `ServerStatsCounter.sendStats` send that cumulative
+/// value as a `minecraft:custom` stat. The value is `Math.round(actual damage × 10)`.
+#[test]
+fn melee_hit_awards_damage_dealt_on_request_stats() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Hand;
+    use mc_bamboo_data::{items, packets::play::clientbound};
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::AwardStats};
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let (cow, health_before) = {
+        let region = &mut server.world.islands.region;
+        let position = region.players.get(&client.id).unwrap().position();
+        let cow = region.entities.spawn(Entity::cow(position));
+        {
+            let player = region.players.get_mut(&client.id).unwrap();
+            let slot = player.inventory.hand_slot(Hand::Main);
+            let stack = ItemStack::new(items::DIAMOND_SWORD, 1);
+            player.inventory.slots[slot] = stack.clone();
+            player.last_main_hand_item = stack;
+            player.attack_strength_ticker = 100;
+            player.on_ground = true;
+            player.motion.fall_distance = 0.0;
+        }
+        let health = region
+            .entities
+            .get(cow)
+            .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+            .expect("cow");
+        (cow, health)
+    };
+
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    client.take_frames();
+
+    let health_after = server
+        .world
+        .islands
+        .region
+        .entities
+        .get(cow)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.health))
+        .expect("cow");
+    let actual_damage = health_before - health_after;
+    let expected = (actual_damage * 10.0).round() as i32;
+    assert!(expected > 0, "the sword hit must damage the cow");
+
+    server.request(
+        &client,
+        PlayRequest::ClientCommand {
+            action: ClientCommandKind::RequestStats,
+        },
+    );
+    server.tick();
+    let frames = client.take_frames();
+    let stats = frames_with_id(&frames, clientbound::AWARD_STATS);
+    assert_eq!(stats.len(), 1, "RequestStats must answer the requester");
+    let expected_body = body_of(encode_frames(&AwardStats {
+        item_used: &[],
+        damage_dealt: Some(expected),
+    }));
+    assert_eq!(
+        stats[0].body, expected_body,
+        "DAMAGE_DEALT must be sent as a minecraft:custom stat"
     );
 }
