@@ -9,7 +9,7 @@ use crate::{
         Entity,
         ctx::Command,
         parallel::{
-            Computed, Executor, InlineExecutor, ScopedThreads, commit, compute, shared_rows_in,
+            Computed, Executor, InlineExecutor, WorkerPool, commit, compute, shared_rows_in,
             tick_entities_parallel,
         },
         view::{FlatSource, SourceView, ViewFacts},
@@ -94,8 +94,9 @@ fn spawn_items(level: &mut TestLevel, count: i32) {
 #[test]
 fn the_executor_runs_every_job_and_keeps_the_partition_count() {
     for threads in [1, 2, 8] {
-        let executor = ScopedThreads { threads };
+        let executor = WorkerPool::new("mob-stress", threads).expect("起实体线程池");
         assert_eq!(executor.parallelism(), threads);
+        assert_eq!(executor.worker_count(), threads - 1, "常驻后台线程数");
         let seen = std::sync::Mutex::new(Vec::new());
         let seen_ref = &seen;
         let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..37)
@@ -129,7 +130,10 @@ fn one_two_and_eight_threads_produce_bit_identical_results() {
     for threads in [1, 2, 8] {
         let mut level = TestLevel::new();
         spawn_items(&mut level, 64);
-        let result = run_parallel(&mut level, &ScopedThreads { threads });
+        let result = run_parallel(
+            &mut level,
+            &WorkerPool::new("mob-stress", threads).expect("起实体线程池"),
+        );
         assert_eq!(
             format!("{result:?}"),
             format!("{baseline:?}"),
@@ -143,7 +147,7 @@ fn one_two_and_eight_threads_produce_bit_identical_results() {
 #[test]
 fn compute_and_commit_match_the_one_step_wrapper() {
     let blocks = flat_blocks();
-    let executor = ScopedThreads { threads: 4 };
+    let executor = WorkerPool::new("mob-test", 4).expect("起实体线程池");
 
     let split = {
         let mut level = TestLevel::new();
@@ -214,7 +218,11 @@ fn isolated_entities_are_identical_in_precise_and_parallel_modes() {
         }
         for _ in 0..6 {
             let mut world = World::new(&mut level, &mut ticks);
-            tick_entities_parallel(&blocks, &mut world, &ScopedThreads { threads: 8 });
+            tick_entities_parallel(
+                &blocks,
+                &mut world,
+                &WorkerPool::new("mob-test", 8).expect("起实体线程池"),
+            );
         }
         World::new(&mut level, &mut ticks).live_entities()
     };
@@ -239,7 +247,11 @@ fn merging_items_are_the_only_observable_difference_class() {
         }
     }
     let mut world = World::new(&mut level, &mut ticks);
-    tick_entities_parallel(&blocks, &mut world, &ScopedThreads { threads: 2 });
+    tick_entities_parallel(
+        &blocks,
+        &mut world,
+        &WorkerPool::new("mob-test", 2).expect("起实体线程池"),
+    );
     let two = world.live_entities();
 
     let mut level = TestLevel::new();
@@ -254,7 +266,11 @@ fn merging_items_are_the_only_observable_difference_class() {
         }
     }
     let mut world = World::new(&mut level, &mut ticks);
-    tick_entities_parallel(&blocks, &mut world, &ScopedThreads { threads: 8 });
+    tick_entities_parallel(
+        &blocks,
+        &mut world,
+        &WorkerPool::new("mob-test", 8).expect("起实体线程池"),
+    );
     let eight = world.live_entities();
     assert_eq!(format!("{two:?}"), format!("{eight:?}"));
 }
@@ -290,7 +306,7 @@ fn stress_reports_compute_apply_and_clone_costs() {
                 ));
             }
         }
-        let executor = ScopedThreads { threads };
+        let executor = WorkerPool::new("mob-stress", threads).expect("起实体线程池");
         let mut totals = crate::entity::parallel::PhaseTimes::default();
         let start = Instant::now();
         for _ in 0..10 {
@@ -387,7 +403,11 @@ fn frozen_chunks_skip_the_same_entities_in_both_drivers() {
         let mut ticks = BlockTicks::new();
         spawn(&mut level, &mut ticks);
         let mut world = World::new(&mut level, &mut ticks);
-        tick_entities_parallel(&gated, &mut world, &ScopedThreads { threads: 2 });
+        tick_entities_parallel(
+            &gated,
+            &mut world,
+            &WorkerPool::new("mob-test", 2).expect("起实体线程池"),
+        );
         world.live_entities()
     };
 
@@ -430,7 +450,11 @@ fn frozen_entities_stay_visible_to_other_entities() {
         Vec3::new(0.6, 70.0, 0.5),
         ItemStack::new(1, 2),
     ));
-    tick_entities_parallel(&gated, &mut world, &ScopedThreads { threads: 1 });
+    tick_entities_parallel(
+        &gated,
+        &mut world,
+        &WorkerPool::new("mob-test", 1).expect("起实体线程池"),
+    );
     assert_eq!(world.entity_ids().len(), 2, "冻结的实体仍在实体名单里");
     assert_eq!(world.live_entities().len(), 2);
 }
@@ -631,4 +655,82 @@ fn all_but(uids: &[i32], index: usize) -> Vec<i32> {
         .filter(|(i, _)| *i != index)
         .map(|(_, &uid)| uid)
         .collect()
+}
+
+/// 常驻池跨刻复用同一批线程：每刻派一批活，线程 ID 不变，结果和逐刻起线程的
+/// 旧执行器、以及精确串行逐位一致。
+#[test]
+fn worker_pool_reuses_its_threads_and_keeps_results_stable() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let pool = WorkerPool::new("mob-pool-reuse", 4).expect("起实体线程池");
+    let threads = Mutex::new(std::collections::BTreeSet::new());
+    let alive = std::sync::Arc::new(AtomicUsize::new(0));
+    for _ in 0..12 {
+        let counter = std::sync::Arc::clone(&alive);
+        let threads_ref = &threads;
+        let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..7)
+            .map(|_| {
+                let counter = std::sync::Arc::clone(&counter);
+                Box::new(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    threads_ref
+                        .lock()
+                        .unwrap()
+                        .insert(format!("{:?}", std::thread::current().id()));
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        pool.run(jobs);
+    }
+    assert_eq!(alive.load(Ordering::Relaxed), 12 * 7, "每份活恰好跑一次");
+    let names = threads.lock().unwrap().clone();
+    assert!(
+        (1..=4).contains(&names.len()),
+        "至多 3 条常驻线程加当前线程，实际 {} 条",
+        names.len()
+    );
+    // 线程身份跨刻稳定：再多派几批，集合不能变大。
+    for _ in 0..8 {
+        let threads_ref = &threads;
+        let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..7)
+            .map(|_| {
+                Box::new(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    threads_ref
+                        .lock()
+                        .unwrap()
+                        .insert(format!("{:?}", std::thread::current().id()));
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        pool.run(jobs);
+    }
+    assert_eq!(
+        *threads.lock().unwrap(),
+        names,
+        "跨刻复用同一批线程，没有新线程 ID"
+    );
+    // 池子 drop 之后不再有后台线程活着（JoinHandle 被 join）。
+    drop(pool);
+
+    let baseline = {
+        let mut level = TestLevel::new();
+        spawn_items(&mut level, 48);
+        run_parallel(&mut level, &InlineExecutor)
+    };
+    for threads in [1, 2, 4] {
+        let mut level = TestLevel::new();
+        spawn_items(&mut level, 48);
+        let pool = WorkerPool::new("mob-pool-results", threads).expect("起实体线程池");
+        let result = run_parallel(&mut level, &pool);
+        assert_eq!(
+            format!("{result:?}"),
+            format!("{baseline:?}"),
+            "threads={threads}"
+        );
+    }
 }

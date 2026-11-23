@@ -304,6 +304,9 @@ pub(crate) struct Master {
     ///
     /// The detached drive's tick-thread pool; `None` in lockstep.
     pool: Option<IslandPool>,
+    /// 实体并行算阶段的常驻线程池。启动时按 `entity_threads` 建好，所有岛共用；
+    /// 精确模式（`entity_threads = 0`）和单线程时为 `None`。
+    entity_pool: Option<mc_bamboo_blocks::entity::parallel::WorkerPool>,
     /// 等岛交回期间先取出来的主控队列消息（看有没有关服请求），下一刻照常按序号处理。
     ///
     /// Master-queue messages taken out while waiting for the island (to see a
@@ -588,6 +591,7 @@ impl World {
                 port_mode: PortMode::default_for_world(),
                 drive: IslandDrive::from_threads(island_threads),
                 pool: None,
+                entity_pool: None,
                 held_inbound: Vec::new(),
                 island_stop_timeout: ISLAND_STOP_TIMEOUT,
                 island_dead_timeout: config.island_dead_timeout,
@@ -621,6 +625,23 @@ impl World {
                 Islands::new(island)
             },
         };
+        // 实体算阶段的常驻池：启动时建好，按 `entity_threads` 派活。起不来就退回
+        // 精确模式并拒绝启动，不让世界线程每刻临时起线程。
+        let entity_threads = world.islands.entity_threads;
+        if entity_threads > 1 {
+            match mc_bamboo_blocks::entity::parallel::WorkerPool::new(
+                "bamboo-entity",
+                entity_threads,
+            ) {
+                Ok(pool) => world.master.entity_pool = Some(pool),
+                Err(error) => {
+                    let message = format!("could not start the entity worker pool: {error}");
+                    error!(%message, "refusing to start");
+                    world.master.startup_error = Some(message);
+                    world.islands.entity_threads = 0;
+                }
+            }
+        }
         if island_threads > 0 {
             match IslandPool::new(island_threads, run_detached_island) {
                 Ok(pool) => {
@@ -1420,16 +1441,18 @@ impl World {
                     if !home {
                         island.region.profiler.begin_tick();
                     }
-                    run_island_simulation(island, None);
+                    run_island_simulation(island, None, self.master.entity_pool.as_ref());
                     if !home {
                         island.region.profiler.end_tick();
                     }
                 }
             } else {
                 let port_mode = self.master.port_mode;
+                let entity_pool = self.master.entity_pool.as_ref();
                 run_island_simulation(
                     &mut self.islands,
                     Some((&mut self.master.global, port_mode)),
+                    entity_pool,
                 );
             }
         }
@@ -3399,7 +3422,11 @@ fn run_partition_stage(region: &mut Region, now: i64) {
 /// for bit as before. Detached passes `None`: criteria are queued on the
 /// island for the master to apply at hand-back, and the master sends the
 /// latency update after the hand-back.
-fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortMode)>) {
+fn run_island_simulation(
+    island: &mut Island,
+    master: Option<(&mut Global, PortMode)>,
+    entity_pool: Option<&mc_bamboo_blocks::entity::parallel::WorkerPool>,
+) {
     let (mut global, port_mode) = match master {
         Some((global, mode)) => (Some(global), mode),
         None => (None, PortMode::Queued),
@@ -3422,6 +3449,7 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // Vanilla `ServerLevel.tick` order: block and fluid ticks, random ticks inside
     // `chunkSource.tick`, block events, entities, then block entities. Falling blocks and
     // primed TNT spawned by block or random ticks move in the same game tick.
+    let entity_threads = island.entity_threads;
     let region = &mut island.region;
     region
         .profiler
@@ -3453,7 +3481,7 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_partition_phase();
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::BlockEvents);
-    interaction::run_entity_ticks(island.entity_threads, region);
+    interaction::run_entity_ticks(entity_threads, region, entity_pool);
     // 乘客的 `rideTick`：载具这一刻的位置定了，骑手的位置跟上来，要下车的在这里下车。
     // 官方把乘客紧跟在载具后面 tick，这里放在实体阶段之后、玩家自己的 tick 之前。
     //
@@ -3567,7 +3595,7 @@ fn run_detached_island(island: &mut Island) {
     light_updates::run_light_updates(&mut island.region);
     island.region.profiler.lap(Phase::LightUpdates);
     island.region.advance_tick();
-    run_island_simulation(island, None);
+    run_island_simulation(island, None, None);
     island.save_report = island.save_pass();
 }
 

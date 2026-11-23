@@ -2628,7 +2628,8 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
   分段时间是 `Instant` 的「自身时间」（嵌套段从外层扣掉），多算阶段线程的时间求和，
   报的是 **CPU 毫秒/刻**，不是墙上毫秒。
 - `entity_threads = 0` 走 `World::tick_entities()`（精确驱动，官方顺序）；
-  1、2、4、8 走 `tick_entities_parallel_timed`（`ScopedThreads`），
+  1、2、4、8 走 `tick_entities_parallel_timed`（报告轮用的是每刻起线程的
+  `ScopedThreads`；后来换成常驻池，见第 26 节），
   同时报 `EntityStore` 框架的四段：复制公开状态（`clone`）、只读算（`compute`）、
   发布 + 名单（`publish`）、按 uid 应用命令（`apply`）。精确驱动这四段恒为 0。
 - 探针全部在 `cfg(test)` 下：正式构建里 `span!` / `begin_mob!` / `record_path!` 等

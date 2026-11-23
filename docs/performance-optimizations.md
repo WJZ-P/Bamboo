@@ -3708,3 +3708,66 @@ p95 / p99 见 `docs/mob-entity-design.md` 5.22.2；它们受同机噪声影响�
   寻路 / 推挤的探针和压测场景都只在 `cfg(test)` 下编译。因此
   `mob-oracle`、`natural-spawn`、探针的对拍结果和 21 节的碰撞快路径数字
   都不应该因为这一节而变化。
+
+## 26. 生物架构第 4 步第一块：推挤空命令、常驻实体线程池、挤压上限（2026-11-23）
+
+这一节记第 4 步第一块的三项改动、复现命令和同轮 A/B 数字。设计稿 4.8 开关清单
+和 `docs/configuration.md` 的 `bamboo.toml` 表是行为的权威描述。
+
+### 26.1 并行算阶段不再「推自己」
+
+并行驱动的 `Shared` 只读快照里留着当前实体那一行（算阶段不能改表）。官方
+`getEntities(this, ...)` 排除自身，精确驱动因为把实体 `take` 出去也查不到自己。
+实现里按 uid 把当前实体从范围查询、按 ID 查和 ID 名单三个入口排除，改掉的是
+压测 5.22.5 里记下的那条口径偏差：`push_entities` 每刻给自己发的
+`Command::PushMob` 空命令（落地时因位移为零直接返回）。两种驱动的结果都不变，
+只是命令数对齐：`pasture-500` 精确 162.2 条/刻，并行从 659.8 降到 159.8；
+`mixed-natural` 精确 0，并行从 77 降到 0。两次同机测量：
+
+```text
+MOB_STRESS_SCENE=pasture-500 MOB_STRESS_THREADS=0,8 \
+  cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+```
+
+| 场景 / 驱动 | 改前 push-cmds/tick | 改后 | 改前 p50 ms/刻 | 改后 |
+| --- | ---: | ---: | ---: | ---: |
+| pasture-500 精确 0 | 162.2 | 162.2 | 4.694 | 4.711 |
+| pasture-500 并行 8 | 659.8 | 159.8 | 3.766 | 5.791 |
+| mixed-natural 精确 0 | 0.0 | 0.0 | 1.037 | 0.943 |
+| mixed-natural 并行 8 | 77 | 0.0 | 1.620 | 0.995 |
+
+（两次测量分别在机器负载 70–80 和 90–110 的尖峰里取的，p50 绝对值受噪声
+影响；稳定的量是命令数和「精确模式逐位不变」。报告轮 5.22.2 的基线同理。）
+
+### 26.2 常驻实体线程池
+
+`parallel.rs` 原来每刻 `std::thread::scope` 起 `threads - 1` 个线程。现在
+`World::build` 在服务端启动时按 `entity_threads` 建好一个 `WorkerPool`
+（`threads - 1` 条常驻后台线程 + 当前线程一份），所有岛共用，按刻派活：
+每份任务放进对应线程的独占信箱，跑完置完成标记；派活线程等齐后返回。
+不共用任务队列，小场景里没有逐任务的锁竞争。结果仍和线程数无关，和精确
+串行逐位一致（掉落物的并行等价测试、`one_two_and_eight_threads...` 等原有
+对拍全部照旧通过）。`ScopedThreads` 保留为压测的 A/B 对照执行器，
+`MOB_STRESS_SCOPED=1` 可以切回每刻起线程。
+
+同轮交替三轮中位数，`mixed-natural`（92 只，每刻约 1 ms，两种配置各跑一次）：
+
+```text
+MOB_STRESS_SCENE=mixed-natural MOB_STRESS_THREADS=0,1,2,4,8 \
+  cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+MOB_STRESS_SCOPED=1 MOB_STRESS_SCENE=mixed-natural MOB_STRESS_THREADS=0,1,2,4,8 \
+  cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+```
+
+| 线程数 | 每刻起线程 p50 ms | 常驻池 p50 ms | 差 |
+| ---: | ---: | ---: | ---: |
+| 0（精确串行） | 1.030 | 0.981 | −4.8% |
+| 1 | 1.086 | 1.001 | −7.8% |
+| 2 | 0.942 | 0.679 | −27.9% |
+| 4 | 0.622 | 0.585 | −5.9% |
+| 8 | 0.593 | 0.539 | −9.1% |
+
+（同机负载 63.47 / 55.32 / 48.57 → 55.69 / 54.06 / 48.27，两组紧挨着跑；
+0 和 1 两种执行器都不起后台线程，差别是同机噪声的尺度。收益集中在
+2–8 线程的派活路径：每刻省掉 `threads - 1` 次线程创建/回收。大场景的
+每刻时间由实体逻辑主导，两种执行器的差别落在噪声里，见 5.22.2。）

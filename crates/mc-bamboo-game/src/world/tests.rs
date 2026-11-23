@@ -854,8 +854,13 @@ impl Harness {
     }
 
     /// 测试并行驱动时直接设线程数，不碰进程级环境变量（同一进程里测试并行跑）。
+    /// 同时按这个数建好常驻池，走正式服务端那条路径。
     pub(crate) fn set_entity_threads(&mut self, threads: usize) {
         self.world.islands.entity_threads = threads;
+        self.world.master.entity_pool = (threads > 1).then(|| {
+            mc_bamboo_blocks::entity::parallel::WorkerPool::new("bamboo-entity-test", threads)
+                .expect("起实体线程池")
+        });
     }
 
     /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数（含邮筒里
