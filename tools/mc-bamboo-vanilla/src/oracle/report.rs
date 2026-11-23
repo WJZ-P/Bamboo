@@ -109,8 +109,8 @@ pub struct Report {
     /// `dispensing` 里发射器真的射出东西的题。
     /// Dispenser cases inside `dispensing` where an item was actually fired.
     dispenser_fired: u64,
-    /// 比较生物桶时从官方列表去掉的、生物自己的声音条数。题本身仍然比较。
-    /// Spawned-mob sounds dropped from the official list. The case is still compared.
+    /// 刚生成的生物那一声被放宽音高的题数。声音本身仍然照比。
+    /// Spawned-mob sounds whose pitch was relaxed. The sound itself is still compared.
     mob_sounds_dropped: u64,
     /// 官方放了 `entity.tnt.primed` 而且这题拿去比较了。
     /// Official played `entity.tnt.primed` and the case was compared.
@@ -156,8 +156,8 @@ impl Report {
         self.dispenser_fired += u64::from(fired);
     }
 
-    /// 这道生物桶题从官方列表去掉了几声生物自己的声音。
-    /// How many spawned-mob sounds this mob-bucket case dropped from the official list.
+    /// 这题有几声刚生成生物的叫声放宽了音高。
+    /// How many spawned-mob sounds had their pitch relaxed in this case.
     pub fn note_mob_sounds(&mut self, dropped: u64) {
         self.mob_sounds_dropped += dropped;
     }
@@ -357,7 +357,7 @@ impl Report {
             }
             if rule == Rule::EntitySound {
                 println!(
-                    "          {:<18} mob sounds dropped from the official list: {} (the case is still compared)",
+                    "          {:<18} spawned-mob sounds compared without pitch: {}",
                     "", self.mob_sounds_dropped
                 );
             }
