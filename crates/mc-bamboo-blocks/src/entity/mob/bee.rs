@@ -234,27 +234,69 @@ pub fn ai_step(mob: &mut Mob, tick_count: i32, in_water: bool, target_close: boo
 pub fn custom_server_ai_step(
     me: &mut crate::entity::Entity,
     mob: &mut Mob,
-    now: i64,
-    difficulty: i32,
+    ctx: &mut dyn crate::entity::ctx::EntityCtx,
 ) {
-    let _ = (difficulty, now);
     let had_stung = mob.bee.has_stung();
-    let bee = &mut mob.bee;
-    if me.in_water {
-        bee.under_water_ticks += 1;
-    } else {
-        bee.under_water_ticks = 0;
+    let drown = {
+        let bee = &mut mob.bee;
+        if me.in_water {
+            bee.under_water_ticks = bee.under_water_ticks.saturating_add(1);
+        } else {
+            bee.under_water_ticks = 0;
+        }
+        bee.under_water_ticks > 20
+    };
+    if drown {
+        let source = super::DamageSource::environment(super::DamageKind::Drown);
+        super::living::hurt_server(me, mob, ctx, source, 1.0);
     }
     if had_stung {
+        let bee = &mut mob.bee;
         bee.time_since_sting = bee.time_since_sting.saturating_add(1);
         let remaining = (1200 - bee.time_since_sting).clamp(1, 1200);
         if bee.time_since_sting % 5 == 0 && me.random.next_int_bounded(remaining) == 0 {
-            mob.health = 0.0;
-            mob.dead = true;
+            // 官方用 `generic` 打掉当前全部血量；这里走同一套无敌 / 死亡路径。
+            let source = super::DamageSource::environment(super::DamageKind::Generic);
+            super::living::hurt_server(me, mob, ctx, source, mob.health);
         }
     }
-    if !bee.has_nectar() {
-        bee.ticks_without_nectar = bee.ticks_without_nectar.saturating_add(1);
+    if !mob.bee.has_nectar() {
+        mob.bee.ticks_without_nectar = mob.bee.ticks_without_nectar.saturating_add(1);
     }
-    let _ = mob.anger.is_angry(now);
+    super::neutral::update(me, mob, ctx, false, |me| anger_seconds(&mut me.random));
+    mob.bee.anger_end_time = mob.anger.end_time;
+}
+
+/// `Bee.doHurtTarget`：命中后按难度给中毒；只有普通 / 困难有 poisoning。
+pub fn poison_instance(mob: &Mob, difficulty: i32) -> Option<super::effects::EffectInstance> {
+    if mob.mob_type != MobType::Bee {
+        return super::spider::poison_instance(mob, difficulty);
+    }
+    let seconds = match difficulty {
+        2 => 10,
+        3 => 18,
+        _ => 0,
+    };
+    (seconds > 0).then(|| {
+        super::effects::EffectInstance::with_amplifier(
+            mc_bamboo_data::registries::mob_effect::POISON,
+            seconds * 20,
+            0,
+        )
+    })
+}
+
+/// `Bee.doHurtTarget` 命中后的状态：`HasStung`、`stopBeingAngry`、蜜蜂自己的蜇刺声。
+pub fn after_attack(mob: &mut Mob) {
+    mob.bee.set_flag(FLAG_HAS_STUNG, true);
+    super::neutral::stop_being_angry(mob);
+    mob.bee.time_since_sting = 0;
+}
+
+/// `NeutralMob.updatePersistentAnger`：`Bee` 的计时按 400–780 秒抽，
+/// `stayAngryIfTargetPresent = false`。
+pub fn anger_seconds(random: &mut crate::entity::JavaRandom) -> i64 {
+    let low = entity_types::BEE_ANGER_MIN_SECONDS as i64;
+    let high = entity_types::BEE_ANGER_MAX_SECONDS as i64;
+    low + i64::from(random.next_int_bounded((high - low + 1) as i32))
 }

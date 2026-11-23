@@ -299,19 +299,31 @@ impl BeehiveEntity {
                 spawn.push(id);
             }
         }
-        // 官方 `angerNearbyBees` 与 `emptyAllLivingFromHive` 的玩家部分：附近 4 格内
-        // 有玩家时设成目标（营火安抚时改成 400 刻不准进巢）。
+        // `emptyAllLivingFromHive`：营火冒烟时 400 刻不准进巢，否则给 4 格内
+        // 无目标的蜂设成最近的玩家（`Util.getRandom` 对多名玩家取一个，
+        // 这里按玩家表顺序取第一个；对拍夹具只放一名玩家）。
+        let close = players
+            .iter()
+            .find(|player| player.position.distance_to_sqr(center(self.pos)) <= 16.0)
+            .map(|player| (player.uid, player.uuid));
+        let now = world.game_time();
         for id in spawn {
             world.with_entity_mut(id, &mut |entity| {
+                let anger = crate::entity::mob::bee::anger_seconds(&mut entity.random);
                 entity.with_mob(|_, mob| {
                     if sedated {
                         crate::entity::mob::bee::set_stay_out_of_hive(
                             mob,
                             entity_types::BEEHIVE_REENTER_TICKS,
                         );
-                    } else {
-                        let _ = players;
-                        crate::entity::mob::bee::set_stay_out_of_hive(mob, 0);
+                    } else if mob.target.is_none()
+                        && let Some((uid, uuid)) = close
+                    {
+                        mob.target = Some(uid);
+                        // 愤怒结束时刻按官方 `startPersistentAngerTimer` 从实体随机源抽。
+                        mob.anger.target = uuid;
+                        mob.anger.end_time = now + anger;
+                        mob.bee.anger_end_time = mob.anger.end_time;
                     }
                 });
             });
@@ -428,6 +440,14 @@ impl BlockEntity for BeehiveEntity {
     fn write_additional(&self) -> Result<Vec<(String, Tag)>> {
         Ok(self.additional())
     }
+}
+
+fn center(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    )
 }
 
 /// 蜂巢周围 8/6/8 盒内的玩家，按 `for_each_player` 的顺序。

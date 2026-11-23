@@ -86,10 +86,11 @@ pub(crate) fn drop_broken_block(
 ///
 /// Vanilla `BlockEntity.collectComponents`: take the snapshot before the block entity
 /// disappears with the block write.
-/// 主手工具上有没有 `minecraft:silk_touch`（`PREVENTS_BEE_SPAWNS_WHEN_MINING`）。
-///
-/// Whether the held tool carries `minecraft:silk_touch`.
-pub(crate) fn has_silk_touch(region: &Region, player: PlayerId) -> bool {
+/// `EnchantmentHelper.hasTag(tool, PREVENTS_BEE_SPAWNS_WHEN_MINING)`。
+/// 先解出主手的 `ENCHANTMENTS`（含物品默认组件），再按官方附魔标签里的 ID 判断。
+pub(crate) fn prevents_bee_spawns_when_mining(region: &Region, player: PlayerId) -> bool {
+    use mc_bamboo_data::registries::data_component_type;
+    use mc_bamboo_protocol::components::ComponentValue;
     let Some(stack) = region
         .players
         .get(&player)
@@ -97,24 +98,28 @@ pub(crate) fn has_silk_touch(region: &Region, player: PlayerId) -> bool {
     else {
         return false;
     };
-    let silk = mc_bamboo_data::component_registries::registry_names::ENCHANTMENT
-        .iter()
-        .position(|name| *name == "minecraft:silk_touch")
-        .unwrap_or(0) as i32;
     let patch = stack.patch();
     let default = mc_bamboo_protocol::components::defaults::resolve(
         stack.item,
         &patch,
-        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        data_component_type::ENCHANTMENTS,
     );
-    let Some(value) = patch
-        .get(mc_bamboo_data::registries::data_component_type::ENCHANTMENTS)
-        .or(default)
-    else {
+    let Some(value) = patch.get(data_component_type::ENCHANTMENTS).or(default) else {
         return false;
     };
-    matches!(value, mc_bamboo_protocol::components::ComponentValue::Enchantments(levels)
-        if levels.iter().any(|&(id, level)| id == silk && level > 0))
+    let ComponentValue::Enchantments(levels) = value else {
+        return false;
+    };
+    let tagged = mc_bamboo_data::tags::TAG_GROUPS
+        .iter()
+        .filter(|group| group.registry == "minecraft:enchantment")
+        .flat_map(|group| group.tags.iter())
+        .find(|tag| tag.name == "minecraft:prevents_bee_spawns_when_mining")
+        .map(|tag| tag.ids)
+        .unwrap_or(&[]);
+    levels
+        .iter()
+        .any(|&(id, level)| level > 0 && tagged.contains(&id))
 }
 
 pub(crate) fn collect_block_entity(

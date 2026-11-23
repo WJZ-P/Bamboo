@@ -391,7 +391,7 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
         // 海龟蛋靠这一步放回少一枚的方块，并留下碎蛋声和 2001 事件。
         // The block's own step of `Block.playerDestroy`; vanilla runs it after the loot.
         // Turtle eggs use it to put one egg fewer back, leaving a break sound and a 2001 event.
-        let silk = crate::block_drops::has_silk_touch(region, snapshot.id);
+        let silk = crate::block_drops::prevents_bee_spawns_when_mining(region, snapshot.id);
         let (mut level, ticks) = region.block_level();
         let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
         mc_bamboo_blocks::player_destroy(&mut world, pos, broken);

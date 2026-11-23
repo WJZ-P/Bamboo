@@ -1548,12 +1548,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::bat::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Bee {
-        super::bee::custom_server_ai_step(
-            me,
-            mob,
-            ctx.blocks().game_time(),
-            ctx.blocks().difficulty(),
-        );
+        super::bee::custom_server_ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::Ocelot {
         super::ocelot::custom_server_ai_step(mob);
@@ -2625,7 +2620,12 @@ pub(crate) fn do_hurt_target(
     if bites && !mob.panda.is_aggressive() {
         mob.panda.did_bite = true;
     }
-    let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
+    let mut source = DamageSource::environment(if mob.mob_type == super::MobType::Bee {
+        DamageKind::Sting
+    } else {
+        DamageKind::MobAttack
+    })
+    .with_non_player_cause(true);
     source.attacker = Some(me.id);
     source.direct = Some(me.id);
     source.attacker_uuid = Some(mob.uuid);
@@ -2652,8 +2652,7 @@ pub(crate) fn do_hurt_target(
         let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
         // `CaveSpider.doHurtTarget`：打中之后按难度给中毒。
         // `CaveSpider.doHurtTarget`: poison the target after a landed hit.
-        if hurt && let Some(effect) = super::spider::poison_instance(mob, ctx.blocks().difficulty())
-        {
+        if hurt && let Some(effect) = super::bee::poison_instance(mob, ctx.blocks().difficulty()) {
             ctx.emit(
                 Command::AddPlayerEffect {
                     target,
@@ -2698,13 +2697,16 @@ pub(crate) fn do_hurt_target(
                 target,
                 source,
                 amount,
-                on_hit: super::spider::poison_instance(mob, ctx.blocks().difficulty()),
+                on_hit: super::bee::poison_instance(mob, ctx.blocks().difficulty()),
             },
             me,
         );
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
+    }
+    if mob.mob_type == super::MobType::Bee {
+        super::bee::after_attack(mob);
     }
 }
 

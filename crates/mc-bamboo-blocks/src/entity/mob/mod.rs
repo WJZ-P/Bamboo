@@ -1447,6 +1447,8 @@ pub enum DamageKind {
     ///
     /// Llama spit, `minecraft:spit`.
     Spit,
+    /// 蜜蜂蜇刺，`minecraft:sting`。
+    Sting,
     Thrown,
     Starve,
     Thorns,
@@ -1491,6 +1493,7 @@ impl DamageKind {
             Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
             Self::Arrow => "minecraft:arrow",
             Self::Spit => "minecraft:spit",
+            Self::Sting => "minecraft:sting",
             Self::Thrown => "minecraft:thrown",
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
@@ -1544,6 +1547,7 @@ impl DamageKind {
             Self::OutOfWorld => "outOfWorld",
             Self::PlayerAttack => "player",
             Self::MobAttack | Self::MobAttackNoAggro | Self::Spit => "mob",
+            Self::Sting => "sting",
             Self::Arrow => "arrow",
             Self::Thrown => "thrown",
             Self::Starve => "starve",
@@ -1581,6 +1585,7 @@ impl DamageKind {
             Self::MobAttackNoAggro,
             Self::Arrow,
             Self::Spit,
+            Self::Sting,
             Self::Thrown,
             Self::Starve,
             Self::Thorns,
