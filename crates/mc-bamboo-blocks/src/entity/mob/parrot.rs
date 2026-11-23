@@ -564,6 +564,9 @@ fn tree_pos(me: &Entity, mob: &Mob, view: &dyn BlockView) -> Option<Vec3> {
                     continue;
                 }
                 let below = view.block_state(pos.below());
+                if below.is_air() {
+                    continue;
+                }
                 let can_sit_on =
                     below.is_a(BlockAncestor::LeavesBlock) || below.is_tagged(block_tags::LOGS);
                 if can_sit_on

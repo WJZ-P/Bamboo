@@ -484,11 +484,43 @@ where
                     let pos = BlockPos::new(x, y, z);
                     let state = (blocks.block_at)(pos);
                     let kind = kind_of(state.0);
-                    // 空形状在官方的所有上下文里都不产生碰撞；边界格子仍按
-                    // 官方的超大形状 / 角格子规则先筛一遍，避免改变返回列表。
-                    // Empty states produce no collision in any official context;
-                    // boundary cells still go through the official corner rules.
-                    if kind == CollisionShapeKind::Empty && corner == 0 {
+                    // 空形状在官方的所有上下文里都不产生碰撞，也不会超大或变成移动活塞。
+                    // Empty states produce no collision in any official context, are never
+                    // oversized and are never moving pistons.
+                    if kind == CollisionShapeKind::Empty {
+                        continue;
+                    }
+                    // 整格形状不伸出 [0, 1]³，也不会是移动活塞或潜影盒；边界格子直接跳过，
+                    // 内部格子按 Aabb 判交，省掉形状查表与动态方块分支。
+                    // Full-block states never extend outside [0, 1]³ and are never moving
+                    // pistons or shulker boxes; skip boundary cells and intersect interior
+                    // cells directly.
+                    if kind == CollisionShapeKind::FullBlock {
+                        if corner != 0 {
+                            continue;
+                        }
+                        let (x_origin, y_origin, z_origin) =
+                            (f64::from(x), f64::from(y), f64::from(z));
+                        if box_.intersects_coords(
+                            x_origin,
+                            y_origin,
+                            z_origin,
+                            x_origin + 1.0,
+                            y_origin + 1.0,
+                            z_origin + 1.0,
+                        ) {
+                            collisions.push((
+                                pos,
+                                vec![shape::Aabb::new(
+                                    x_origin,
+                                    y_origin,
+                                    z_origin,
+                                    x_origin + 1.0,
+                                    y_origin + 1.0,
+                                    z_origin + 1.0,
+                                )],
+                            ));
+                        }
                         continue;
                     }
                     if corner == 1 && !shape::has_large_collision_shape(state) {
