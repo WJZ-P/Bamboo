@@ -223,7 +223,7 @@ fn the_parallel_compute_phase_sees_the_same_players() {
         Vec3::new(8.5, SPAWN_Y + 1.0, 8.5),
         7,
     ));
-    crate::interaction::parallel_entity_ticks(1, server.region());
+    crate::interaction::parallel_entity_ticks(1, server.region(), None);
     let entity = server.region().entities.get(orb).expect("经验球还在表里");
     let EntityKind::ExperienceOrb(state) = &entity.kind else {
         panic!("实体种类应该是经验球");

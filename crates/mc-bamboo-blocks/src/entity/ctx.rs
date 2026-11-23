@@ -573,6 +573,24 @@ pub trait EntityCtx {
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_other_in`]，但 `visit` 返回 `true` 才算一个够数的
+    /// 结果：挤压上限下推到查询里，凑够 `limit` 个就停止枚举。
+    ///
+    /// Like [`Self::for_each_other_in`], but only `true` returns count towards
+    /// `limit`; the push cap stops enumeration once it has enough candidates.
+    fn pushable_others(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        let mut seen = 0;
+        self.for_each_other_in(area, &mut |public| {
+            if seen < limit && visit(public) {
+                seen += 1;
+            }
+        });
+    }
     /// 范围查询里只需要 ID 时用这个：不复制公开数据，共享表里那一份。
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid));
     /// 提交一条对外影响。精确模式当场落地，并行模式进缓冲。
@@ -1521,6 +1539,15 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.world.level().for_each_entity_in(area, visit);
+    }
+
+    fn pushable_others(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.world.level().for_each_pushable_in(area, limit, visit);
     }
 
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {

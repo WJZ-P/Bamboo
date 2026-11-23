@@ -854,8 +854,13 @@ impl Harness {
     }
 
     /// 测试并行驱动时直接设线程数，不碰进程级环境变量（同一进程里测试并行跑）。
+    /// 同时按这个数建好常驻池，走正式服务端那条路径。
     pub(crate) fn set_entity_threads(&mut self, threads: usize) {
         self.world.islands.entity_threads = threads;
+        self.world.master.entity_pool = (threads > 1).then(|| {
+            mc_bamboo_blocks::entity::parallel::WorkerPool::new("bamboo-entity-test", threads)
+                .expect("起实体线程池")
+        });
     }
 
     /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数（含邮筒里
@@ -5096,4 +5101,25 @@ fn melee_hit_awards_damage_dealt_on_request_stats() {
         stats[0].body, expected_body,
         "DAMAGE_DEALT must be sent as a minecraft:custom stat"
     );
+}
+
+/// `max_entity_collisions` 从 `WorldConfig` 走到岛的规则快照：实体逻辑通过
+/// `BlockView::block_game_rules()` 读到配置值。
+#[test]
+fn the_collision_cap_reaches_entity_rules() {
+    use mc_bamboo_blocks::Level;
+
+    let (inbox, receiver) = crate::inbound::channel();
+    let config = WorldConfig {
+        max_entity_collisions: 8,
+        ..Default::default()
+    };
+    let mut world = World::new(config, receiver);
+    let _ = inbox;
+    assert_eq!(world.islands.region.max_entity_collisions, 8);
+    let entity_rules = world.islands.region.entity_game_rules();
+    assert_eq!(entity_rules.max_entity_collisions, 8);
+    // 精确驱动构造 `World` 时读到的规则快照带着配置值；方块逻辑不读这一项。
+    let level = world.islands.region.block_level().0;
+    assert_eq!(level.block_game_rules().max_entity_collisions, 8);
 }

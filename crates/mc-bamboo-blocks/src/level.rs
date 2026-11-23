@@ -508,6 +508,20 @@ pub trait LevelEntities {
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic>;
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_entity_in`]，但最多访问 `limit` 个。
+    fn for_each_pushable_in(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        let mut seen = 0;
+        self.for_each_entity_in(area, &mut |public| {
+            if seen < limit && visit(public) {
+                seen += 1;
+            }
+        });
+    }
     /// `addFreshEntity`：tick 期间生成的实体下一 tick 才动。
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid;
     /// 构造实体：分配 ID、取种子和构造时的随机数，还不放进世界，见 [`EntityStore::prepare`]。
@@ -582,6 +596,16 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.entities_table().for_each_in(area, visit);
+    }
+
+    fn for_each_pushable_in(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.entities_table()
+            .for_each_in_limited(area, limit, visit);
     }
 
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid {
