@@ -64,7 +64,8 @@
   [进度] [判据]`，反馈与失败消息照官方键。
 - **对拍**：`mc-bamboo-vanilla advancement-oracle java [--runs N] [--show N]
   [--break-layout]`，进程内加载官方 `ServerAdvancementManager`，不启动真实服务端、
-  不接受 EULA。`--break-layout` 打乱排版里第一棵根的兄弟顺序，坐标和包字节必须报出来。
+  不接受 EULA。`--break-layout` 打乱排版里第一棵根的兄弟顺序，坐标和包字节必须报出来；
+  `--break-definitions`、`--break-packet`、`--break-save` 是另外三处独立改坏确认。
   `command-oracle` 另加 12 条 `/advancement` 语法题：Java 侧用官方 Brigadier
   `AdvancementCommands.register` 的 dispatcher 解析，Rust 侧用 Bamboo 命令树解析并比较
   `ok` / `trailing:<光标>` / `error`；反馈键按 26.3 `AdvancementCommands$Action` 拼出来的
