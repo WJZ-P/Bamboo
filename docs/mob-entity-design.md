@@ -748,6 +748,36 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 豹猫（共用面最小、非 `TamableAnimal`），严格照上表「一种一个新文件、共用文件最小追加、先小样本
 守 `natural-spawn` 关键路径、各配逐刻场景」；动生成器 / 元数据 index 前先和队长确认。
 
+### 5.22 蜜蜂、蜂巢与蜂箱（2026-11-23，分支 `bees`）
+
+`MobType::ALL` 从 46 扩到 47 种，新增 `Bee`。按 5.12 的接入清单把属性、尺寸、
+元数据 index、音效和蜂巢常量交给生成器导出；`BEE_FLAGS` / `BEE_ANGER_END_TIME`
+进 `EntityData`，`Bee` 的状态在 `entity/mob/bee.rs`，飞行导航 / 移动控制复用
+鹦鹉那一份（`FlyingPathNavigation` + `FlyingMoveControl`），存档走 `nbt.rs`。
+`bee_goals.rs` 按官方优先级注册目标；当前只有繁殖、诱惑、跟随父母和漂浮是
+真实目标，其余找花 / 采蜜 / 回巢 / 授粉 / 生气蜇人仍是占位（保留优先级、
+标志位和官方类名，不取随机数）。
+
+蜂巢方块实体是 `behaviour/machines/beehive_entity.rs`：`bees` 列表、
+`savedFlowerPos`、`serverTick` 的进出巢、`honey_level`、营火安抚、剪刀 / 玻璃瓶
+取蜜、无精准采集挖掉放蜂，以及 `archive::block_entity` 的读盘工厂。生成期
+`BeehiveDecorator` 写 2–3 条 `Occupant.create`，走生成期方块实体交付。
+
+`EnvironmentAttributes.BEES_STAY_IN_HIVE` 没有整套移植：生成器从官方
+`timeline/day.json` 导出两条关键帧，`BlockView::bees_stay_in_hive` 按时间线
+加 RAIN / THUNDER 天气层给同一个布尔，对拍夹具可以直接注入官方值。
+
+对拍：`mob-oracle --only bee` 六个场景（白天出巢、夜晚、下雨、带蜜加蜜、
+满蜜、营火取蜜）逐刻比巢里的蜂、蜜等级、放出数和世界随机源，0 不一致；
+两处改坏确认 `bee_clock` / `bee_honey` 都能抓到；`block_entity_resave`
+与 `chunk-content` 覆盖存档，`oracle java --weather clear` 0 失败，
+`natural-spawn java` 0 不一致。全量 `mob-oracle java` 只剩这台 ARM Mac
+已知的 `Mth.COS_TAB`、`frog_lily_31` 差异。
+
+**已知限制**：蜜蜂的目标集仍是占位，生气蜇人 / 中毒 / 蜇后死亡 / 授粉让作物
+长大 / 跟随拿花的玩家都没有逐刻行为；放出蜜蜂时的攻击目标只设
+`stayOutOfHiveCountdown`；`has_silk_touch` 只读主手 `ENCHANTMENTS`。
+
 ### 5.13 08:40 回归修复后合并 main（op-misc，2026-11-21，第 9 轮）
 
 - 接手时 `HEAD=cf37b3af`，`main` 已前进到 `c9773f61`（35 个 `cx-horse` 提交：马科骑乘、
