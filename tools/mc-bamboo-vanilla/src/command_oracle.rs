@@ -10,7 +10,7 @@
 
 use std::process::Command;
 
-use mc_bamboo_command::{StringReader, Value, argument::entity::parse_entity};
+use mc_bamboo_command::{StringReader, Value, argument::entity::parse_entity, permission};
 use serde_json::Value as Json;
 
 const USAGE: &str = "usage: command-oracle <java> [--show N] [--break-self-test]";
@@ -44,8 +44,25 @@ impl Options {
 #[derive(Debug, Default)]
 struct Stats {
     selectors: u64,
+    advancement_commands: u64,
     mismatches: Vec<String>,
 }
+
+/// 和 Java 侧 `ADVANCEMENT_COMMANDS` 一致。
+const ADVANCEMENT_COMMANDS: &[&str] = &[
+    "advancement grant @s everything",
+    "advancement revoke @s everything",
+    "advancement grant @s only minecraft:story/root",
+    "advancement grant @s only minecraft:story/root crafting_table",
+    "advancement revoke @s only minecraft:story/mine_stone get_stone",
+    "advancement grant @s from minecraft:story/root",
+    "advancement revoke @s until minecraft:story/mine_stone",
+    "advancement grant @s through minecraft:story/upgrade_tools",
+    "advancement grant Kitten everything",
+    "advancement grant @s only minecraft:does_not_exist",
+    "advancement grant @s nope",
+    "advancement grant @s everything extra",
+];
 
 /// 和 `CommandOracle.java` 的 `SELECTORS` 一致。
 const SELECTORS: &[&str] = &[
@@ -97,6 +114,8 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         .map_err(|error| format!("oracle stdout is not UTF-8: {error}"))?;
     let mut stats = Stats::default();
     let mut seen_selectors = Vec::new();
+    let mut seen_advancements = Vec::new();
+    let (graph, _) = mc_bamboo_game::command::test_commands();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let value: Json =
             serde_json::from_str(line).map_err(|error| format!("bad oracle line: {error}"))?;
@@ -125,6 +144,21 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
                         .push(format!("selector {input}: java {expected}, rust {ours}"));
                 }
             }
+            Some("advancement") => {
+                let input = line_string(&value, "input")?;
+                let expected = line_string(&value, "result")?;
+                let ours = advancement_parse(&graph, &input);
+                if options.break_self_test && input == "advancement grant @s everything" {
+                    stats.mismatches.push("break-self-test".to_owned());
+                }
+                stats.advancement_commands += 1;
+                seen_advancements.push(input.clone());
+                if ours != expected {
+                    stats
+                        .mismatches
+                        .push(format!("advancement {input}: java {expected}, rust {ours}"));
+                }
+            }
             Some("command") => return Err("unexpected oracle command line".to_owned()),
             Some("end") => {}
             other => return Err(format!("unexpected oracle line type {other:?}")),
@@ -135,11 +169,19 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             return Err(format!("oracle did not emit selector {selector}"));
         }
     }
+    for command in ADVANCEMENT_COMMANDS {
+        if !seen_advancements.iter().any(|seen| seen == command) {
+            return Err(format!("oracle did not emit advancement command {command}"));
+        }
+    }
     for mismatch in stats.mismatches.iter().take(options.show) {
         println!("{mismatch}");
     }
     if stats.mismatches.is_empty() {
-        println!("command-oracle: {} selectors, all matched", stats.selectors);
+        println!(
+            "command-oracle: {} selectors, {} advancement commands, all matched",
+            stats.selectors, stats.advancement_commands
+        );
         Ok(())
     } else {
         Err(format!(
@@ -352,4 +394,27 @@ fn volume_box(
         origin.y + y1,
         origin.z + z1,
     ))
+}
+
+/// 用 Bamboo 命令树解析一整行 `/advancement`，结果格式和 Java 侧一致：
+/// 能解析 `ok`、有剩余输入 `trailing:<光标>`、解析失败 `error:<异常个数>`。
+fn advancement_parse(graph: &mc_bamboo_command::CommandGraph, input: &str) -> String {
+    match graph.parse(input, permission::GAMEMASTERS) {
+        Ok(parsed) => {
+            if parsed.cursor < input.len() {
+                format!("trailing:{}", parsed.cursor)
+            } else {
+                "ok".to_owned()
+            }
+        }
+        Err(failure) => {
+            // 官方 `ParseResults` 对剩余输入报 `canRead()`，Bamboo 的 `parse`
+            // 把它折成一条异常；按光标位置区分两种结果。
+            if failure.error.key == "command.unknown.argument" {
+                format!("trailing:{}", failure.cursor)
+            } else {
+                "error:1".to_owned()
+            }
+        }
+    }
 }

@@ -100,6 +100,7 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("w", CommandClass::CrossIsland),
     ("me", CommandClass::CrossIsland),
     ("say", CommandClass::CrossIsland),
+    ("advancement", CommandClass::CrossIsland),
 ];
 
 /// 一条命令执行时要看得见多大的世界（岛的实施计划 4.5）。多岛时主控按它决定怎么借。
@@ -193,6 +194,7 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("w", CommandScope::Players),
     ("me", CommandScope::Players),
     ("say", CommandScope::Players),
+    ("advancement", CommandScope::Players),
 ];
 
 /// 一行命令（可以带开头的 `/`）的范围，按它的第一个词查 [`SCOPES`]。认不出来的词解析
@@ -251,11 +253,9 @@ mod tests {
             roots.push((name.clone(), child));
         }
         // 4.4 的 51 个加上 `/summon`、`/kill`、`/damage`、`/effect`、`/execute`、
-        // `/data`、`/experience`、`/xp`。
-        // The 51 of 4.4 plus `/summon`, `/kill`, `/damage`, `/effect`,
-        // `/execute`, `/data`, `/experience`, `/xp`.
-        assert_eq!(roots.len(), 59);
-        assert_eq!(CLASSES.len(), 59);
+        // `/data`、`/experience`、`/xp` 和 `/advancement`。
+        assert_eq!(roots.len(), 60);
+        assert_eq!(CLASSES.len(), 60);
         // 每个顶层字面量都定了范围（计划 4.5），不多不少。
         // Every root literal has a scope (plan 4.5), no more and no fewer.
         let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();

@@ -12,6 +12,7 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/WJZ-P/Bamboo"
 
 [workspace.dependencies]
+mc-bamboo-advancements = { path = "crates/mc-bamboo-advancements", version = "0.0.0" }
 mc-bamboo-auth = { path = "crates/mc-bamboo-auth", version = "0.0.0" }
 mc-bamboo-blocks = { path = "crates/mc-bamboo-blocks", version = "0.0.0" }
 mc-bamboo-command = { path = "crates/mc-bamboo-command", version = "0.0.0" }

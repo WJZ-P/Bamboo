@@ -538,6 +538,7 @@ impl Region {
             players: new_players,
             player_grid,
             links,
+            pending_triggers: Vec::new(),
             chunks: new_chunks,
             tick_levels,
             template_body: self.template_body.clone(),
@@ -746,6 +747,7 @@ impl Region {
             dirty,
             sleep: _,
             phantom_spawner: _,
+            pending_triggers,
         } = other;
         let identity = IslandIdentity {
             random,
@@ -754,6 +756,7 @@ impl Region {
             entity_seeds: entities.entity_seed_source(),
             profiler,
         };
+        self.pending_triggers.extend(pending_triggers);
         self.chunks
             .absorb(chunks)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));

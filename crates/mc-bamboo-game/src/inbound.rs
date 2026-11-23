@@ -76,6 +76,8 @@ pub struct JoinRequest {
     /// Raw gzip bytes the connection layer read from `players/data/<uuid>.dat`.
     /// `None` means a new player (no save, or saving disabled).
     pub player_data: Option<Vec<u8>>,
+    /// 连接层从 `players/advancements/<uuid>.json` 读到的原文。
+    pub player_advancements: Option<String>,
     pub sink: Box<dyn PlayerSink>,
     /// 这名玩家自己的入站队列的收端，进服后挂在玩家上。发端由连接任务留着。
     ///

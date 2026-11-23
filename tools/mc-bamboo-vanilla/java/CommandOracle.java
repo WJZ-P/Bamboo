@@ -6,6 +6,8 @@
 // No server, no save, no EULA: loads the official selector and runs its
 // predicate / order over a fixed entity list, emitting the selected ids.
 
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.ParseResults;
 import com.mojang.brigadier.StringReader;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import java.io.BufferedWriter;
@@ -60,6 +62,22 @@ public final class CommandOracle {
     /** 和 Rust 侧固定场景一致：玩家 1、牛 1<<24、物品 (1<<24)+1。 */
     private static final int[] IDS = {1, 1 << 24, (1 << 24) + 1};
 
+    /** `/advancement` 的语法题：官方 `AdvancementCommands.register` 直接注册到 dispatcher。 */
+    private static final String[] ADVANCEMENT_COMMANDS = {
+        "advancement grant @s everything",
+        "advancement revoke @s everything",
+        "advancement grant @s only minecraft:story/root",
+        "advancement grant @s only minecraft:story/root crafting_table",
+        "advancement revoke @s only minecraft:story/mine_stone get_stone",
+        "advancement grant @s from minecraft:story/root",
+        "advancement revoke @s until minecraft:story/mine_stone",
+        "advancement grant @s through minecraft:story/upgrade_tools",
+        "advancement grant Kitten everything",
+        "advancement grant @s only minecraft:does_not_exist",
+        "advancement grant @s nope",
+        "advancement grant @s everything extra",
+    };
+
     private CommandOracle() {
     }
 
@@ -92,9 +110,48 @@ public final class CommandOracle {
             for (String input : SELECTORS) {
                 emit(out, input);
             }
+            // 官方 `Commands` 的构造器注册全部命令；这里只用它的 dispatcher 解析
+            // `/advancement`，不构造 ServerLevel、不执行命令。
+            CommandDispatcher<net.minecraft.commands.CommandSourceStack> dispatcher =
+                    new CommandDispatcher<>();
+            net.minecraft.server.commands.AdvancementCommands.register(dispatcher);
+            // `Commands.LEVEL_GAMEMASTERS` 读的是 source 的 PermissionSetSupplier，
+            // 这里用 Unsafe 分配一个未初始化的 `CommandSourceStack`，只填权限字段。
+            net.minecraft.commands.CommandSourceStack source =
+                    (net.minecraft.commands.CommandSourceStack) UNSAFE.allocateInstance(
+                            net.minecraft.commands.CommandSourceStack.class);
+            java.lang.reflect.Field permissions =
+                    net.minecraft.commands.CommandSourceStack.class.getDeclaredField("permissions");
+            UNSAFE.putObject(source, UNSAFE.objectFieldOffset(permissions),
+                    net.minecraft.server.permissions.LevelBasedPermissionSet.GAMEMASTER);
+            for (String input : ADVANCEMENT_COMMANDS) {
+                emitAdvancement(out, dispatcher, source, input);
+            }
             out.write("{\"type\":\"end\"}\n");
             out.flush();
         }
+    }
+
+    /**
+     * 官方 Brigadier 对一整行 `/advancement` 的解析结果：能否解析、有没有剩余输入、
+     * 以及失败时的光标。Rust 侧用同一组输入跑自己的命令树并比较。
+     */
+    private static void emitAdvancement(
+            Writer out,
+            CommandDispatcher<net.minecraft.commands.CommandSourceStack> dispatcher,
+            net.minecraft.commands.CommandSourceStack source,
+            String input) throws Exception {
+        ParseResults<net.minecraft.commands.CommandSourceStack> parsed = dispatcher.parse(input, source);
+        String result;
+        if (parsed.getReader().canRead()) {
+            result = "trailing:" + parsed.getReader().getCursor();
+        } else if (parsed.getExceptions().isEmpty()) {
+            result = "ok";
+        } else {
+            result = "error:" + parsed.getExceptions().size();
+        }
+        out.write("{\"type\":\"advancement\",\"input\":" + quote(input)
+                + ",\"result\":" + quote(result) + "}\n");
     }
 
     /**

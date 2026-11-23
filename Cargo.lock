@@ -1880,6 +1880,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-advancements"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "mc-bamboo-data",
+ "mc-bamboo-loot",
+ "mc-bamboo-nbt",
+ "mc-bamboo-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "mc-bamboo-auth"
 version = "0.0.0"
 dependencies = [
@@ -1956,6 +1968,7 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "libc",
+ "mc-bamboo-advancements",
  "mc-bamboo-blocks",
  "mc-bamboo-command",
  "mc-bamboo-core",
@@ -2102,6 +2115,7 @@ name = "mc-bamboo-vanilla"
 version = "0.0.0"
 dependencies = [
  "flate2",
+ "mc-bamboo-advancements",
  "mc-bamboo-blocks",
  "mc-bamboo-command",
  "mc-bamboo-core",
@@ -2119,6 +2133,7 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

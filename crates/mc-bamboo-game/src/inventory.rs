@@ -618,6 +618,8 @@ pub(crate) fn give_or_drop(region: &mut Region, id: PlayerId, stack: ItemStack) 
     if !leftover.is_empty() {
         crate::drops::spawn_throw(region, id, leftover);
     }
+    // 官方 `Inventory` 变化时触发 `inventory_changed`（items 判据）。
+    crate::advancement_triggers::inventory_changed(region, id);
 }
 
 /// 炼药锅记下的物品交换。创造模式就是官方的 `hasInfiniteMaterials`。
