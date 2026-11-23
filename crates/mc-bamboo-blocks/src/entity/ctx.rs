@@ -291,6 +291,10 @@ pub struct PlayerView {
     ///
     /// `isSprinting()`; sprinting players scare armadillos.
     pub sprinting: bool,
+    /// `Entity.isSwimming()`（共享标志位 4）：海豚会跟着游泳的玩家游。
+    ///
+    /// `Entity.isSwimming()` (shared flag 4); dolphins swim with a swimming player.
+    pub swimming: bool,
     pub invisible: bool,
     /// `getArmorCoverPercentage()`，隐身时才用。
     pub armor_cover: f32,

@@ -118,6 +118,10 @@ pub(crate) struct Motion {
     ///
     /// The horizontal-collision bit from the move packet. `setOnGroundWithMovement` stores it.
     pub(crate) client_horizontal_collision: bool,
+    /// `Entity.isSwimming()`（共享标志位 4）。海豚跟着游泳的玩家游时读它。
+    ///
+    /// `Entity.isSwimming()` (shared flag 4); dolphins read it to swim with players.
+    pub(crate) swimming: bool,
     pending_inside: Vec<TravelSegment>,
 }
 
@@ -143,6 +147,7 @@ impl Motion {
             no_physics: false,
             body_height: STANDING_BODY,
             client_horizontal_collision: false,
+            swimming: false,
             pending_inside: Vec::new(),
         }
     }
@@ -388,6 +393,7 @@ fn finish_player(region: &mut Region, id: PlayerId) {
         if let Some(player) = players.get_mut(&id) {
             let sample = PlayerBlocks::new(chunks, block_entities);
             update_body(player, &sample);
+            update_swimming(player, &sample);
         }
     }
     let pending = {
@@ -981,6 +987,52 @@ fn update_body(player: &mut Player, blocks: &PlayerBlocks<'_>) {
     } else {
         SWIMMING_BODY
     };
+}
+
+/// `Player.updateSwimming`：飞行时直接清掉，否则走 `Entity.updateSwimming` 的判定。
+/// 已经在游泳的只要还在水里就保持，进入游泳要求眼睛也浸在水里。游泳状态按这一 tick
+/// 结束时（也就是下一 tick 开始前）的位置算，实体阶段看到的就是官方 `baseTick`
+/// 那一刻的值。
+///
+/// `Player.updateSwimming`: cleared while flying, otherwise the
+/// `Entity.updateSwimming` test. A swimming player stays swimming while still in
+/// water; entering requires the eye under water too. The flag is computed from the
+/// position at the end of this tick (the start of the next one), which is what the
+/// entity phase sees at vanilla's `baseTick` moment.
+fn update_swimming(player: &mut Player, blocks: &PlayerBlocks<'_>) {
+    let swimming = if player.sync.flying {
+        false
+    } else {
+        let in_water = player_in_water(player, blocks);
+        let sprinting = player.sync.is_sprinting();
+        let passenger = player.riding.is_passenger();
+        if player.motion.swimming {
+            sprinting && in_water && !passenger
+        } else {
+            let feet = player.position();
+            let eye = BlockPos::containing(Vec3::new(feet.x, feet.y + player.eye_height(), feet.z));
+            sprinting && !passenger && in_water && fluid_is_water(blocks, eye)
+        }
+    };
+    player.motion.swimming = swimming;
+}
+
+/// 玩家脚下方块（`blockPosition`）的流体是水。
+///
+/// The fluid of the player's feet block (`blockPosition`) is water.
+fn player_in_water(player: &Player, blocks: &PlayerBlocks<'_>) -> bool {
+    let feet = BlockPos::containing(player.position());
+    fluid_is_water(blocks, feet)
+}
+
+/// 这一格的流体在 `#water` 里。
+///
+/// Whether the fluid in this cell is water.
+fn fluid_is_water(blocks: &PlayerBlocks<'_>, pos: BlockPos) -> bool {
+    blocks
+        .state(pos)
+        .fluid()
+        .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER)
 }
 
 fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {

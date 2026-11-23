@@ -23,13 +23,17 @@
 //! the infra-dependent branch return false. Each is listed in the README limitations.
 
 use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_data::registries::mob_effect;
 
 use super::{
     Mob,
-    goals::{Flag, reduced_tick_delay},
+    goals::{self, Flag, reduced_tick_delay},
     living,
 };
-use crate::entity::{Entity, ctx::EntityCtx};
+use crate::entity::{
+    Entity, EntityUid,
+    ctx::{Command, EntityCtx},
+};
 
 /// 海豚专属目标和它们自己的字段。
 ///
@@ -53,7 +57,7 @@ pub enum DolphinGoal {
     ///
     /// `DolphinSwimWithPlayerGoal`: follow a swimming player and grant Dolphin's Grace.
     /// MOVE|LOOK.
-    SwimWithPlayer,
+    SwimWithPlayer { player: Option<EntityUid> },
     /// `DolphinJumpGoal`：在水里隔一阵跃出水面。继承 `JumpGoal`，锁 MOVE|JUMP、不可打断。
     ///
     /// `DolphinJumpGoal`: breach now and then. Inherits `JumpGoal`, locking MOVE|JUMP;
@@ -86,7 +90,7 @@ impl DolphinGoal {
 
     pub(crate) const fn flags(&self) -> &'static [Flag] {
         match self {
-            Self::BreathAir | Self::SwimToTreasure { .. } | Self::SwimWithPlayer => {
+            Self::BreathAir | Self::SwimToTreasure { .. } | Self::SwimWithPlayer { .. } => {
                 &[Flag::Move, Flag::Look]
             }
             Self::MoveToItem { .. } | Self::AvoidGuardian => &[Flag::Move],
@@ -102,7 +106,7 @@ impl DolphinGoal {
             Self::BreathAir => "BreathAirGoal",
             Self::TryFindLiquid => "TryFindLiquidGoal",
             Self::SwimToTreasure { .. } => "DolphinSwimToTreasureGoal",
-            Self::SwimWithPlayer => "DolphinSwimWithPlayerGoal",
+            Self::SwimWithPlayer { .. } => "DolphinSwimWithPlayerGoal",
             Self::Jump { .. } => "DolphinJumpGoal",
             Self::MoveToItem { .. } => "MoveToItemGoal",
             Self::PlayWithItems => "PlayWithItemsGoal",
@@ -139,12 +143,17 @@ impl DolphinGoal {
             // `DolphinSwimToTreasureGoal.canUse`：`gotFish && air >= 100`；不取随机数。
             // `DolphinSwimToTreasureGoal.canUse`: `gotFish && air >= 100`; no draw.
             Self::SwimToTreasure { .. } => mob.dolphin.got_fish && mob.air_supply >= 100,
-            // `DolphinSwimWithPlayerGoal.canUse`：找 10 格内在游泳的玩家。
-            // 夹具里没有玩家，官方的 `getNearestPlayer` 也不取随机数，直接返回假。
-            // `DolphinSwimWithPlayerGoal.canUse`: find a swimming player within ten
-            // blocks. The fixture has no players and vanilla's `getNearestPlayer`
-            // draws nothing, so return false.
-            Self::SwimWithPlayer => false,
+            // `DolphinSwimWithPlayerGoal.canUse`：`getNearestPlayer(SWIM_WITH_PLAYER_TARGETING,
+            // this)`，条件是玩家在游泳且不是自己的攻击目标。
+            // `DolphinSwimWithPlayerGoal.canUse`: `getNearestPlayer(SWIM_WITH_PLAYER_TARGETING,
+            // this)`, requiring a swimming player that is not the dolphin's target.
+            Self::SwimWithPlayer { player } => {
+                let found = nearest_swim_player(me, mob, ctx);
+                *player = found;
+                found.is_some_and(|uid| {
+                    ctx.player(uid).is_some_and(|view| view.swimming) && mob.target != Some(uid)
+                })
+            }
             // `DolphinJumpGoal.canUse`：先取一次 `nextInt(reducedTickDelay(10))`，
             // 再看 6 个步长上的水与水面是否清空。封闭水柱里上方仍是水，几何
             // 判定恒假；照官方保住这一取数后返回假。
@@ -193,10 +202,13 @@ impl DolphinGoal {
                 !*stuck && mob.dolphin.treasure_pos.is_some() && mob.air_supply >= 100
             }
             // `DolphinSwimWithPlayerGoal.canContinueToUse`：玩家还在游泳、距离 < 256。
-            // 夹具里没有玩家，直接假。
-            // `DolphinSwimWithPlayerGoal.canContinueToUse`: the player still swims and
-            // is within 256; no player in the fixture.
-            Self::SwimWithPlayer => false,
+            // `DolphinSwimWithPlayerGoal.canContinueToUse`: the player still swims and is
+            // within 256 (squared, so a 16-block radius).
+            Self::SwimWithPlayer { player } => player.is_some_and(|uid| {
+                ctx.player(uid).is_some_and(|view| {
+                    view.swimming && me.position.distance_to_sqr(view.position) < 256.0
+                })
+            }),
             // `DolphinJumpGoal.canContinueToUse`：还在上冲且没着地。
             // 官方是 `!(yd*yd < 0.03)` / `!(|xRot| < 10)`；NaN 时这两个比较都假、取反为真，
             // 所以用 `partial_cmp` 而不是 `>=` 保住 NaN 语义。
@@ -244,11 +256,14 @@ impl DolphinGoal {
                 mob.navigation.stop();
                 mob.dolphin.treasure_pos = None;
             }
-            // `DolphinSwimWithPlayerGoal.start`：给玩家 `DOLPHINS_GRACE`。
-            // 夹具里没有玩家，药水效果也没接；无随机取数。
-            // `DolphinSwimWithPlayerGoal.start`: grant `DOLPHINS_GRACE`. No player in
-            // the fixture and effects are not wired; no random draw.
-            Self::SwimWithPlayer => {}
+            // `DolphinSwimWithPlayerGoal.start`：给玩家 100 刻 `DOLPHINS_GRACE`。
+            // `DolphinSwimWithPlayerGoal.start`: grant the player 100 ticks of
+            // `DOLPHINS_GRACE`.
+            Self::SwimWithPlayer { player } => {
+                if let Some(uid) = *player {
+                    give_dolphins_grace(me, ctx, uid, 100);
+                }
+            }
             // `DolphinJumpGoal.start`：按运动方向给一个上冲速度、停导航。
             // `DolphinJumpGoal.start`: add an upward impulse along the motion
             // direction and stop navigating.
@@ -285,7 +300,10 @@ impl DolphinGoal {
             }
             // `DolphinSwimWithPlayerGoal.stop`：清玩家、停导航。
             // `DolphinSwimWithPlayerGoal.stop`: clear the player and stop navigating.
-            Self::SwimWithPlayer => mob.navigation.stop(),
+            Self::SwimWithPlayer { player } => {
+                *player = None;
+                mob.navigation.stop();
+            }
             // `DolphinJumpGoal.stop`：俯仰归零。
             // `DolphinJumpGoal.stop`: reset pitch.
             Self::Jump { .. } => mob.x_rot = 0.0,
@@ -301,7 +319,7 @@ impl DolphinGoal {
         let _ = me;
     }
 
-    pub(crate) fn tick(&mut self, me: &mut Entity, mob: &mut Mob, _ctx: &mut dyn EntityCtx) {
+    pub(crate) fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         match self {
             // `DolphinJumpGoal.tick`：出水时记 breached、按速度调俯仰。
             // `DolphinJumpGoal.tick`: track breaching and set pitch from the velocity.
@@ -323,18 +341,90 @@ impl DolphinGoal {
                     mob.x_rot = rotation as f32;
                 }
             }
+            // `DolphinSwimWithPlayerGoal.tick`：盯住玩家；2.5 格内停下，否则游过去
+            // （速度倍率 4.0）；玩家还在游泳时每刻按世界随机源 1/6 的概率续上恩惠。
+            //
+            // `DolphinSwimWithPlayerGoal.tick`: look at the player, stop within 2.5
+            // blocks or swim over at speed 4.0, and refresh the grace with a 1-in-6
+            // world-random roll each tick while the player swims.
+            Self::SwimWithPlayer { player } => {
+                let Some(uid) = *player else {
+                    return;
+                };
+                let Some(target) = ctx.player(uid) else {
+                    return;
+                };
+                // `getMaxHeadYRot() + 20` 与 `getMaxHeadXRot()`：海豚两个都是 1。
+                // `getMaxHeadYRot() + 20` and `getMaxHeadXRot()`: both are 1 on a dolphin.
+                mob.look.set_look_at(
+                    target.position.x,
+                    target.eye_y(),
+                    target.position.z,
+                    21.0,
+                    1.0,
+                );
+                if me.position.distance_to_sqr(target.position) < 6.25 {
+                    mob.navigation.stop();
+                } else {
+                    let view = ctx.blocks();
+                    let nav = living::nav_mob(me, mob, view);
+                    mob.navigation
+                        .move_to_entity(view, &nav, target.position, 4.0, 1);
+                }
+                if target.swimming && ctx.blocks().level_random_int(6) == 0 {
+                    give_dolphins_grace(me, ctx, uid, 100);
+                }
+            }
             // 其余目标的 `tick` 要么依赖缺失设施、要么官方为空，无随机取数。
             // The rest depend on missing infra or have an empty `tick`; no draws.
             Self::BreathAir
             | Self::TryFindLiquid
             | Self::SwimToTreasure { .. }
-            | Self::SwimWithPlayer
             | Self::MoveToItem { .. }
             | Self::PlayWithItems
             | Self::FollowRidden
             | Self::AvoidGuardian => {}
         }
     }
+}
+
+/// `Dolphin.SWIM_WITH_PLAYER_TARGETING`：`forNonCombat().range(10.0).ignoreLineOfSight()`。
+/// 返回最近的合格玩家；官方 `getNearestEntity` 不取随机数。
+///
+/// `Dolphin.SWIM_WITH_PLAYER_TARGETING`: `forNonCombat().range(10.0).ignoreLineOfSight()`.
+/// Returns the nearest qualifying player; vanilla's `getNearestEntity` draws nothing.
+fn nearest_swim_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    let view = ctx.blocks();
+    let mut players = Vec::new();
+    view.for_each_player(&mut |player| players.push(*player));
+    let mut best = -1.0_f64;
+    let mut found = None;
+    for player in players {
+        if !goals::targeting_test(me, mob, view, &player, 10.0, false) {
+            continue;
+        }
+        let distance = me.position.distance_to_sqr(player.position);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(player.uid);
+        }
+    }
+    found
+}
+
+/// `player.addEffect(new MobEffectInstance(MobEffects.DOLPHINS_GRACE, ticks), this.dolphin)`。
+///
+/// `player.addEffect(new MobEffectInstance(MobEffects.DOLPHINS_GRACE, ticks), this.dolphin)`.
+fn give_dolphins_grace(me: &mut Entity, ctx: &mut dyn EntityCtx, target: EntityUid, ticks: i32) {
+    ctx.emit(
+        Command::AddPlayerEffect {
+            target,
+            effect: mob_effect::DOLPHINS_GRACE,
+            duration: ticks,
+            amplifier: 0,
+        },
+        me,
+    );
 }
 
 /// `Entity.getMotionDirection()` 的水平步向：水平位移较大的轴决定正负，
@@ -433,5 +523,127 @@ fn find_liquid_start(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::{blocks, registries::mob_effect};
+
+    use super::*;
+    use crate::{
+        BlockState, BlockTicks, World, entity::Entity, entity::ctx::PlayerView,
+        entity::mob::MobType, testing::TestLevel,
+    };
+
+    /// 一名在 (x, y, z) 游泳的玩家。
+    fn swimmer(uid: EntityUid, position: Vec3) -> PlayerView {
+        PlayerView {
+            uid,
+            uuid: None,
+            position,
+            delta: Vec3::default(),
+            eye_height: 1.62,
+            health: 20.0,
+            look_direction: Vec3::default(),
+            gaze_disguise: false,
+            alive: true,
+            spectator: false,
+            creative: false,
+            sneaking: false,
+            sprinting: true,
+            swimming: true,
+            invisible: false,
+            armor_cover: 0.0,
+            main_hand: 0,
+            off_hand: 0,
+            yaw: 0.0,
+            pitch: 0.0,
+            combat: Default::default(),
+            effects: Default::default(),
+        }
+    }
+
+    /// 一圈水，海豚在原点、玩家在 6 格外的游泳状态：目标是启动、给一次恩惠、
+    /// 把导航指向玩家。
+    ///
+    /// Water all around, a dolphin at the origin and a swimming player six blocks
+    /// away: the goal starts, grants one grace and points the navigation at the player.
+    #[test]
+    fn a_swimming_player_starts_the_goal_and_gets_grace() {
+        let mut level = TestLevel::new();
+        for x in -4..=10 {
+            for y in 60..=68 {
+                for z in -3..=3 {
+                    level.set(BlockPos::new(x, y, z), BlockState(blocks::WATER));
+                }
+            }
+        }
+        level.players.push(swimmer(77, Vec3::new(6.5, 64.0, 0.5)));
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut dolphin = Entity::by_mob_type(MobType::Dolphin, Vec3::new(0.5, 64.0, 0.5));
+        let outcome = dolphin
+            .with_mob(|me, mob| {
+                mob.air_supply = 4800;
+                me.in_water = true;
+                let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, me.id);
+                let mut goal = DolphinGoal::SwimWithPlayer { player: None };
+                let started = goal.can_use(me, mob, &mut ctx);
+                goal.start(me, mob, &mut ctx);
+                goal.tick(me, mob, &mut ctx);
+                (started, mob.look.wanted_x, mob.navigation.is_done())
+            })
+            .expect("a dolphin is a mob");
+        assert!(
+            outcome.0,
+            "a swimming player within ten blocks starts the goal"
+        );
+        assert_eq!(outcome.1, 6.5, "the look control aims at the player");
+        assert!(!outcome.2, "the navigation has a path towards the player");
+        let effects = world.into_effects();
+        let graces: Vec<_> = effects
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect,
+                    crate::Effect::PlayerEffect {
+                        effect,
+                        duration: 100,
+                        amplifier: 0,
+                        ..
+                    } if *effect == mob_effect::DOLPHINS_GRACE
+                )
+            })
+            .collect();
+        // `start` 给一次；`tick` 里 `nextInt(6)` 在测试视图恒为 0，所以再给一次。
+        // One from `start`; the test view always answers 0 to `nextInt(6)`, so `tick`
+        // grants another.
+        assert_eq!(graces.len(), 2, "{effects:?}");
+    }
+
+    /// 不游泳的玩家不触发目标：`canUse` 要求 `isSwimming()`。
+    ///
+    /// A player who is not swimming does not start the goal: `canUse` requires
+    /// `isSwimming()`.
+    #[test]
+    fn a_walking_player_does_not_start_the_goal() {
+        let mut level = TestLevel::new();
+        level.players.push(PlayerView {
+            swimming: false,
+            sprinting: false,
+            ..swimmer(78, Vec3::new(6.5, 64.0, 0.5))
+        });
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut dolphin = Entity::by_mob_type(MobType::Dolphin, Vec3::new(0.5, 64.0, 0.5));
+        let started = dolphin
+            .with_mob(|me, mob| {
+                let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, me.id);
+                let mut goal = DolphinGoal::SwimWithPlayer { player: None };
+                goal.can_use(me, mob, &mut ctx)
+            })
+            .expect("a dolphin is a mob");
+        assert!(!started);
     }
 }

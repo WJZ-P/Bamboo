@@ -45,7 +45,7 @@ mod speleothem;
 mod sponge;
 mod test_block;
 mod tnt;
-mod turtle_egg;
+pub(crate) mod turtle_egg;
 mod waterlogged;
 
 use mc_bamboo_core::BlockPos;

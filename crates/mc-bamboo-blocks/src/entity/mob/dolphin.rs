@@ -118,7 +118,7 @@ pub(super) fn goals() -> GoalSelector {
         (0, Goal::Dolphin(D::BreathAir)),
         (0, Goal::Dolphin(D::TryFindLiquid)),
         (1, Goal::Dolphin(D::SwimToTreasure { stuck: false })),
-        (2, Goal::Dolphin(D::SwimWithPlayer)),
+        (2, Goal::Dolphin(D::SwimWithPlayer { player: None })),
         (
             4,
             Goal::Swim {

@@ -535,6 +535,48 @@ pub(super) fn puffer_touch(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityC
     }
 }
 
+/// `Pufferfish.playerTouch` 的伤害那一步：玩家碰到膨胀的河豚时受 `1 + 状态` 点伤。
+/// 打中时返回这次中毒该挂的刻数（`60 * 状态`），没打中返回 `None`。
+///
+/// The damage step of `Pufferfish.playerTouch`: a player touching an inflated
+/// pufferfish takes `1 + state` damage. Returns the poison duration (`60 * state`) when
+/// the hit lands, `None` otherwise.
+pub fn puffer_player_hit(world: &mut World<'_>, fish: EntityUid, player: EntityUid) -> Option<i32> {
+    let entity = world.entity(fish)?;
+    let mob = entity.kind.mob()?;
+    if mob.mob_type != MobType::Pufferfish || mob.fish.puff_state <= 0 {
+        return None;
+    }
+    let puff_state = mob.fish.puff_state;
+    let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
+    source.attacker = Some(fish);
+    source.direct = Some(fish);
+    source.attacker_uuid = Some(mob.uuid);
+    source.position = Some(entity.position);
+    // 表里取出来的副本不带可靠的 ID，公开快照的 uid 以调用方给的为准。
+    // A copy taken from the table carries no reliable id; the caller's uid is authoritative.
+    let mut attacker = entity.split().public;
+    attacker.uid = fish;
+    let amount = 1.0 + puff_state as f32;
+    if !world.hurt_player_from_mob(player, source, amount, Some(&attacker)) {
+        return None;
+    }
+    Some(60 * puff_state)
+}
+
+/// `player.addEffect(new MobEffectInstance(MobEffects.POISON, seconds, 0), this)`。
+///
+/// `player.addEffect(new MobEffectInstance(MobEffects.POISON, seconds, 0), this)`.
+pub fn puffer_player_poison(world: &mut World<'_>, player: EntityUid, seconds: i32) {
+    world.give_player_effect(
+        player,
+        super::effects::EffectInstance::new(
+            mc_bamboo_data::registries::mob_effect::POISON,
+            seconds,
+        ),
+    );
+}
+
 /// `Pufferfish.SCARY_MOB`：使用官方实体类型标签；创造模式玩家由调用方排除。
 ///
 /// `Pufferfish.SCARY_MOB`: use the vanilla entity-type tag; the caller excludes

@@ -2658,8 +2658,10 @@ pub(crate) fn apply_hurt_player(
 }
 
 /// 落地 `Command::TrampleTurtleEgg`：`TurtleEggBlock.destroyEgg` 从「还是不是蛋」开始的部分。
-/// `nextInt(chance) == 0` 才 `decreaseEggs`：先放碎蛋声（音高也取世界随机数），
-/// 最后一枚用 `destroyBlock(pos, false)`，否则少一枚并发 2001 事件（带减之前的状态）。
+/// `nextInt(chance) == 0` 才 `decreaseEggs`。
+///
+/// Applies `Command::TrampleTurtleEgg`: the part of `TurtleEggBlock.destroyEgg` from the
+/// "is it still an egg" test on; `nextInt(chance) == 0` is required before `decreaseEggs`.
 pub(crate) fn apply_trample_turtle_egg(
     world: &mut crate::world::World,
     pos: BlockPos,
@@ -2672,24 +2674,7 @@ pub(crate) fn apply_trample_turtle_egg(
     if world.random().next_int(chance) != 0 {
         return;
     }
-    let pitch = 0.9 + world.random().next_float() * 0.2;
-    world.play_block_sound(
-        pos,
-        mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.egg_break"),
-        0.7,
-        pitch,
-    );
-    let eggs = state.get(crate::state::EGGS);
-    if eggs <= 1 {
-        world.destroy_block(pos, false, crate::world::UPDATE_LIMIT);
-    } else {
-        world.set_block(pos, state.with(crate::state::EGGS, eggs - 1), 2);
-        world.push_effect(crate::Effect::Destroyed {
-            pos,
-            state,
-            except_initiator: false,
-        });
-    }
+    crate::behaviour::misc::turtle_egg::decrease_eggs(world, pos, state);
 }
 
 /// 落地 [`Command::EatBlock`]：重查目标方块仍在原位后再 `destroyBlock(pos, false)` 吃草，
