@@ -1,0 +1,482 @@
+//! `BeehiveBlockEntity`：巢里存着的蜜蜂、花的位置，以及逐刻的进出巢。
+//!
+//! 存档形状照官方的 `Occupant.LIST_CODEC`（`entity_data` / `ticks_in_hive` /
+//! `min_ticks_in_hive`）和 `flower_pos`。放出蜜蜂、加蜜、营火安抚的部分也在这里，
+//! 方块本身只负责把剪刀 / 玻璃瓶 / 挖掘的时机交给它。
+//!
+//! `BeehiveBlockEntity`: stored bees, the saved flower position and the per-tick
+//! hive logic. The block routes shears, bottles and mining to it.
+
+use std::any::Any;
+
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_data::{BlockAncestor, entity_types, sounds, tags::block_tags};
+use mc_bamboo_nbt::Tag;
+
+use crate::{
+    BlockEntity, BlockState, World,
+    archive::tag::{self, Result},
+    entity::{
+        Entity, EntityRow,
+        mob::{MobType, nbt as mob_nbt},
+    },
+    shape::{self, CollisionContext},
+    state::{FACING, LEVEL_HONEY, LIT},
+};
+
+/// `BeehiveBlockEntity.MAX_OCCUPANTS`。
+const MAX_OCCUPANTS: usize = entity_types::BEEHIVE_MAX_OCCUPANTS as usize;
+/// 没有花蜜的蜂在巢里待多久。
+const MIN_TICKS_NECTARLESS: i32 = entity_types::BEEHIVE_MIN_TICKS_NECTARLESS;
+/// 带着花蜜回巢的蜂在巢里待多久。
+const MIN_TICKS_NECTAR: i32 = entity_types::BEEHIVE_MIN_TICKS_NECTAR;
+/// `BeehiveBlock.MAX_HONEY_LEVELS`。
+const MAX_HONEY: i32 = 5;
+
+/// `IGNORED_BEE_TAGS`：官方存蜂和放蜂时都删掉的 25 个键。
+const IGNORED_BEE_TAGS: &[&str] = &[
+    "Air",
+    "drop_chances",
+    "equipment",
+    "Brain",
+    "CanPickUpLoot",
+    "DeathTime",
+    "fall_distance",
+    "FallFlying",
+    "Fire",
+    "HurtTime",
+    "LeftHanded",
+    "Motion",
+    "NoGravity",
+    "OnGround",
+    "PortalCooldown",
+    "Pos",
+    "Rotation",
+    "sleeping_pos",
+    "CannotEnterHiveTicks",
+    "TicksSincePollination",
+    "CropsGrownSincePollination",
+    "hive_pos",
+    "Passengers",
+    "leash",
+    "UUID",
+];
+
+/// 官方 `Occupant`：`entity_data` 是抹掉了 `id` 和 25 个无关键的实体 NBT。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Occupant {
+    pub entity_data: Tag,
+    pub ticks_in_hive: i32,
+    pub min_ticks_in_hive: i32,
+}
+
+impl Occupant {
+    /// `Occupant.create(ticks)`：生成期的蜂巢每只蜂一条空实体数据。
+    pub fn generated(ticks_in_hive: i32) -> Self {
+        Self {
+            entity_data: Tag::Compound(Vec::new()),
+            ticks_in_hive,
+            min_ticks_in_hive: MIN_TICKS_NECTARLESS,
+        }
+    }
+
+    /// `Occupant.of(Entity)`：实体存档去掉不该带的键，按 `HasNectar` 选最短停留时间。
+    pub fn of(row: &EntityRow) -> Option<Self> {
+        let mut data = mob_nbt::write_mob(row).ok()?;
+        strip_ignored(&mut data);
+        let nectar = tag::bool_or(&data, "HasNectar", false);
+        Some(Self {
+            entity_data: data,
+            ticks_in_hive: 0,
+            min_ticks_in_hive: if nectar {
+                MIN_TICKS_NECTAR
+            } else {
+                MIN_TICKS_NECTARLESS
+            },
+        })
+    }
+
+    /// `BeeData.hasNectar()`。
+    pub fn has_nectar(&self) -> bool {
+        tag::bool_or(&self.entity_data, "HasNectar", false)
+    }
+
+    /// `Occupant.createEntity`：把存着的生物读回来。坐标由调用方按巢的朝向覆盖。
+    fn into_entity(self, hive: BlockPos) -> Option<Entity> {
+        let mut entity = Entity::by_mob_type(MobType::Bee, Vec3::default());
+        let mut data = self.entity_data;
+        strip_ignored(&mut data);
+        // 读盘的实体不重取构造随机数；NBT 里没写坐标 / 朝向，官方按放出位置 snapTo。
+        mob_nbt::load_into(&mut entity, &data).ok()?;
+        entity.with_mob(|_, mob| {
+            crate::entity::mob::bee::set_release_data(mob, hive, self.ticks_in_hive);
+        });
+        entity.with_mob(|_, mob| {
+            mob.no_gravity = true;
+        });
+        Some(entity)
+    }
+
+    fn to_tag(&self) -> Tag {
+        Tag::Compound(vec![
+            ("entity_data".to_owned(), self.entity_data.clone()),
+            ("ticks_in_hive".to_owned(), Tag::Int(self.ticks_in_hive)),
+            (
+                "min_ticks_in_hive".to_owned(),
+                Tag::Int(self.min_ticks_in_hive),
+            ),
+        ])
+    }
+
+    /// `Occupant.CODEC`：三个必填字段，坏条目让整个列表解码失败回空。
+    fn from_tag(value: &Tag) -> Option<Self> {
+        let entity_data = tag::field(value, "entity_data")?;
+        if !matches!(entity_data, Tag::Compound(_)) {
+            return None;
+        }
+        Some(Self {
+            entity_data: entity_data.clone(),
+            ticks_in_hive: tag::java_i32(tag::field(value, "ticks_in_hive")?).ok()?,
+            min_ticks_in_hive: tag::java_i32(tag::field(value, "min_ticks_in_hive")?).ok()?,
+        })
+    }
+}
+
+fn strip_ignored(data: &mut Tag) {
+    if let Tag::Compound(entries) = data {
+        entries.retain(|(key, _)| {
+            !matches!(key.as_str(), "id") && !IGNORED_BEE_TAGS.contains(&key.as_str())
+        });
+    }
+}
+
+/// 放出蜜蜂的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseStatus {
+    /// 带着花蜜回巢：卸蜜并可能增加 `honey_level`。
+    HoneyDelivered,
+    /// 时间到了，正常出巢。
+    BeeReleased,
+    /// 取蜜 / 无精准采集挖掉：无视天气和出口阻挡。
+    Emergency,
+}
+
+/// 蜂巢方块实体。
+#[derive(Debug)]
+pub struct BeehiveEntity {
+    pos: BlockPos,
+    bees: Vec<Occupant>,
+    flower_pos: Option<BlockPos>,
+}
+
+impl BeehiveEntity {
+    /// `BeehiveBlockEntity(pos, state)`。
+    pub fn new(pos: BlockPos) -> Self {
+        Self {
+            pos,
+            bees: Vec::new(),
+            flower_pos: None,
+        }
+    }
+
+    /// 按官方 NBT 解码。坏条目整条列表回空，花位置形状不对就丢掉。
+    pub fn read(pos: BlockPos, tag: &Tag) -> Self {
+        let bees = match tag::field(tag, "bees") {
+            Some(Tag::List(values)) => values
+                .iter()
+                .map(Occupant::from_tag)
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let raw = tag::int_array(tag, "flower_pos");
+        let flower_pos = (raw.len() == 3).then(|| BlockPos::new(raw[0], raw[1], raw[2]));
+        Self {
+            pos,
+            bees: bees.into_iter().take(MAX_OCCUPANTS).collect(),
+            flower_pos,
+        }
+    }
+
+    /// `storeBee`：最多三只。
+    pub fn store(&mut self, occupant: Occupant) -> bool {
+        if self.is_full() {
+            return false;
+        }
+        self.bees.push(occupant);
+        true
+    }
+
+    /// `addOccupant(Bee)`：把一只真的蜜蜂收进巢，返回成功后调用方可以丢弃它。
+    pub fn add_bee(&mut self, row: &EntityRow, keep_flower: bool) -> bool {
+        let Some(occupant) = Occupant::of(row) else {
+            return false;
+        };
+        let flower = tag::int_array(&occupant.entity_data, "flower_pos");
+        if flower.len() == 3 && (self.flower_pos.is_none() || keep_flower) {
+            self.flower_pos = Some(BlockPos::new(flower[0], flower[1], flower[2]));
+        }
+        self.store(occupant)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bees.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.bees.len() >= MAX_OCCUPANTS
+    }
+
+    pub fn occupant_count(&self) -> usize {
+        self.bees.len()
+    }
+
+    pub fn saved_flower_pos(&self) -> Option<BlockPos> {
+        self.flower_pos
+    }
+
+    pub fn set_saved_flower_pos(&mut self, pos: Option<BlockPos>) {
+        self.flower_pos = pos;
+    }
+
+    /// `BeehiveBlockEntity.serverTick`：每只蜂加一刻，到点的按花蜜与否放出。
+    pub fn server_tick(&mut self, world: &mut World) {
+        let state = world.block_state(self.pos);
+        let mut i = 0;
+        while i < self.bees.len() {
+            self.bees[i].ticks_in_hive = self.bees[i].ticks_in_hive.saturating_add(1);
+            if self.bees[i].ticks_in_hive <= self.bees[i].min_ticks_in_hive {
+                i += 1;
+                continue;
+            }
+            let status = if self.bees[i].has_nectar() {
+                ReleaseStatus::HoneyDelivered
+            } else {
+                ReleaseStatus::BeeReleased
+            };
+            let occupant = self.bees.remove(i);
+            self.release(world, state, occupant, status, None);
+        }
+        if !self.bees.is_empty() && world.random().next_double() < 0.005 {
+            world.play_sound(
+                Vec3::new(
+                    f64::from(self.pos.x) + 0.5,
+                    f64::from(self.pos.y),
+                    f64::from(self.pos.z) + 0.5,
+                ),
+                sounds::sound_event("minecraft:block.beehive.work"),
+                sounds::BLOCKS,
+                1.0,
+                1.0,
+                false,
+            );
+        }
+    }
+
+    /// `emptyAllLivingFromHive`：取蜜 / 挖掉时把所有蜜蜂放出来。
+    pub fn release_all(&mut self, world: &mut World, state: BlockState, status: ReleaseStatus) {
+        let bees = std::mem::take(&mut self.bees);
+        let players = nearby_players(world, self.pos);
+        let sedated = is_sedated(world, self.pos);
+        let mut spawn = Vec::new();
+        for occupant in bees {
+            if let Some(id) = self.release(
+                world,
+                state,
+                occupant,
+                status,
+                players.last().map(|p| p.position),
+            ) {
+                spawn.push(id);
+            }
+        }
+        // 官方 `angerNearbyBees` 与 `emptyAllLivingFromHive` 的玩家部分：附近 4 格内
+        // 有玩家时设成目标（营火安抚时改成 400 刻不准进巢）。
+        for id in spawn {
+            world.with_entity_mut(id, &mut |entity| {
+                entity.with_mob(|_, mob| {
+                    if sedated {
+                        crate::entity::mob::bee::set_stay_out_of_hive(
+                            mob,
+                            entity_types::BEEHIVE_REENTER_TICKS,
+                        );
+                    } else {
+                        let _ = players;
+                        crate::entity::mob::bee::set_stay_out_of_hive(mob, 0);
+                    }
+                });
+            });
+        }
+    }
+
+    /// `releaseOccupant`：按官方顺序取随机数、写蜜等级、生成实体并放到朝向的那一面。
+    /// 返回新实体的 ID（放出成功时）；调用方用它决定要不要发怒。
+    fn release(
+        &mut self,
+        world: &mut World,
+        state: BlockState,
+        occupant: Occupant,
+        status: ReleaseStatus,
+        player_pos: Option<Vec3>,
+    ) -> Option<i32> {
+        if world.bees_stay_in_hive(self.pos) && status != ReleaseStatus::Emergency {
+            return None;
+        }
+        let facing = state.try_get(FACING).unwrap_or(Direction::North);
+        let exit = self.pos.relative(facing);
+        let blocked = !world
+            .block_state(exit)
+            .collision_boxes(world, exit, CollisionContext::Empty)
+            .is_empty();
+        if blocked && status != ReleaseStatus::Emergency {
+            return None;
+        }
+        let mut entity = occupant.into_entity(self.pos)?;
+        // 官方在蜂还没有记住花、且 10% 概率时用巢里存的花位置；随机数在实体上取。
+        if let Some(flower) = self.flower_pos
+            && !entity
+                .with_mob(|_, mob| crate::entity::mob::bee::has_saved_flower(mob))
+                .unwrap_or(false)
+            && entity.random.next_float() < 0.9
+        {
+            entity.with_mob(|_, mob| crate::entity::mob::bee::set_saved_flower(mob, Some(flower)));
+        }
+        if status == ReleaseStatus::HoneyDelivered {
+            entity.with_mob(|_, mob| crate::entity::mob::bee::drop_off_nectar(mob));
+            if state.is_tagged(block_tags::BEEHIVES) && state.is_a(BlockAncestor::BeehiveBlock) {
+                let level = state.get(LEVEL_HONEY);
+                if level < MAX_HONEY {
+                    let mut extra = if world.random().next_int(100) == 0 {
+                        2
+                    } else {
+                        1
+                    };
+                    if level + extra > MAX_HONEY {
+                        extra -= 1;
+                    }
+                    let _ = world
+                        .set_block_and_update(self.pos, state.with(LEVEL_HONEY, level + extra));
+                }
+            }
+        }
+        let (width, height) = entity.dimensions;
+        let offset = if blocked {
+            0.0
+        } else {
+            0.55 + f64::from(width) / 2.0
+        };
+        let (dx, _, dz) = facing.normal();
+        entity.position = Vec3::new(
+            f64::from(self.pos.x) + 0.5 + offset * f64::from(dx),
+            f64::from(self.pos.y) + 0.5 - f64::from(height) / 2.0,
+            f64::from(self.pos.z) + 0.5 + offset * f64::from(dz),
+        );
+        world.play_block_sound(
+            self.pos,
+            sounds::sound_event("minecraft:block.beehive.exit"),
+            1.0,
+            1.0,
+        );
+        let id = world.spawn_entity(entity);
+        let _ = player_pos;
+        Some(id)
+    }
+
+    /// `saveAdditional`：两个键无条件写，花位置只在有值时写。
+    pub fn additional(&self) -> Vec<(String, Tag)> {
+        let mut out = vec![(
+            "bees".to_owned(),
+            Tag::List(self.bees.iter().map(Occupant::to_tag).collect()),
+        )];
+        if let Some(flower) = self.flower_pos {
+            out.push((
+                "flower_pos".to_owned(),
+                Tag::IntArray(vec![flower.x, flower.y, flower.z]),
+            ));
+        }
+        out
+    }
+}
+
+impl BlockEntity for BeehiveEntity {
+    fn pos(&self) -> BlockPos {
+        self.pos
+    }
+
+    fn tick(&mut self, world: &mut World) {
+        self.server_tick(world);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>> {
+        Ok(self.additional())
+    }
+}
+
+/// 蜂巢周围 8/6/8 盒内的玩家，按 `for_each_player` 的顺序。
+fn nearby_players(world: &World, pos: BlockPos) -> Vec<crate::entity::ctx::PlayerView> {
+    let mut found = Vec::new();
+    let center = Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    );
+    let level: &dyn crate::Level = world.level();
+    level.for_each_player(&mut |player| {
+        let dx = player.position.x - center.x;
+        let dy = player.position.y - center.y;
+        let dz = player.position.z - center.z;
+        if dx.abs() <= 8.0 && dy.abs() <= 6.0 && dz.abs() <= 8.0 {
+            found.push(*player);
+        }
+    });
+    found
+}
+
+/// `CampfireBlock.isSmokeyPos`：下面 1..5 格有点着的营火（或隔着虚拟柱子）时为真。
+pub fn is_sedated(world: &World, pos: BlockPos) -> bool {
+    for distance in 1..=5 {
+        let below = pos.relative_by(Direction::Down, distance);
+        let state = world.block_state(below);
+        if lit_campfire(state) {
+            return true;
+        }
+        // `SHAPE_VIRTUAL_POST` 是 4/16 宽的柱子：绝大多数带碰撞形状的方块都与它相交，
+        // 空气和没有碰撞形状的方块不相交。
+        let post = state.collision_boxes(world, below, CollisionContext::Empty);
+        let intersects = !post.is_empty()
+            && shape::join_is_not_empty(
+                &post,
+                &[mc_bamboo_core::Aabb::new(
+                    6.0 / 16.0,
+                    0.0,
+                    6.0 / 16.0,
+                    10.0 / 16.0,
+                    1.0,
+                    10.0 / 16.0,
+                )],
+                shape::BooleanOp::And,
+            );
+        if intersects && lit_campfire(world.block_state(below.below())) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `CampfireBlock.isLitCampfire`。
+fn lit_campfire(state: BlockState) -> bool {
+    state.is_tagged(block_tags::CAMPFIRES) && state.try_get(LIT).unwrap_or(false)
+}
+
+/// `BeehiveBlock.newBlockEntity`：放置时给方块挂一个空蜂巢。
+pub fn create_block_entity(pos: BlockPos) -> Box<dyn BlockEntity> {
+    Box::new(BeehiveEntity::new(pos))
+}

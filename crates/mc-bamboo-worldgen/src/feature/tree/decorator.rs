@@ -545,13 +545,29 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
             .find(|&pos| self.is_air(pos) && self.is_air(horizontal(pos, 2)));
         if let Some(hive) = hive {
             self.set(hive, nest);
-            // 方块实体里存蜜蜂：只比方块，但随机数要照取。
-            // Bees go into the block entity: only blocks are compared, but the random
-            // draws still have to happen.
+            // `BeehiveDecorator.place`：2–3 只蜂，每只 `Occupant.create(nextInt(599))`。
+            // 只比方块时也要照取这些随机数，NBT 交给生成期方块实体交付路径。
             let bees = 2 + self.random.next_int(2);
-            for _ in 0..bees {
-                self.random.next_int(599);
-            }
+            let occupants: Vec<mc_bamboo_nbt::Tag> = (0..bees)
+                .map(|_| {
+                    let ticks = self.random.next_int(599);
+                    mc_bamboo_nbt::Tag::Compound(vec![
+                        (
+                            "entity_data".to_owned(),
+                            mc_bamboo_nbt::Tag::Compound(Vec::new()),
+                        ),
+                        ("ticks_in_hive".to_owned(), mc_bamboo_nbt::Tag::Int(ticks)),
+                        ("min_ticks_in_hive".to_owned(), mc_bamboo_nbt::Tag::Int(600)),
+                    ])
+                })
+                .collect();
+            let nbt = mc_bamboo_nbt::Tag::Compound(vec![(
+                "bees".to_owned(),
+                mc_bamboo_nbt::Tag::List(occupants),
+            )]);
+            self.place
+                .world
+                .set_block_entity(hive.0, hive.1, hive.2, &nbt);
         }
     }
 

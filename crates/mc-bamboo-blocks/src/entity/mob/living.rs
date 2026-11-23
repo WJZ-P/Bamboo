@@ -1056,6 +1056,17 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::enderman::ai_step(me, mob, ctx);
     }
     animal_ai_step(me, mob, ctx);
+    if mob.mob_type == super::MobType::Bee {
+        let mut target_close = false;
+        if let Some(uid) = mob.target {
+            ctx.blocks().for_each_player(&mut |player| {
+                if player.uid == uid && player.position.distance_to_sqr(me.position) < 4.0 {
+                    target_close = true;
+                }
+            });
+        }
+        super::bee::ai_step(mob, me.tick_count, me.in_water, target_close);
+    }
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
     }
@@ -1503,6 +1514,14 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Bat {
         super::bat::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Bee {
+        super::bee::custom_server_ai_step(
+            me,
+            mob,
+            ctx.blocks().game_time(),
+            ctx.blocks().difficulty(),
+        );
+    }
     if mob.mob_type == super::MobType::Ocelot {
         super::ocelot::custom_server_ai_step(mob);
     }
@@ -1610,6 +1629,11 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
     if mob.mob_type == super::MobType::Parrot {
         // `Parrot` 用 `FlyingMoveControl`。
         // Parrots use `FlyingMoveControl`.
+        super::parrot::move_control_tick(me, mob);
+        return;
+    }
+    if mob.mob_type == super::MobType::Bee {
+        // `Bee` 也用 `FlyingMoveControl`（参数 20, true 的效果在配置里）。
         super::parrot::move_control_tick(me, mob);
         return;
     }
@@ -1941,7 +1965,7 @@ fn travel_in_air(
     // 0.91 的空气阻力，而不是 0.98。
     // `LivingEntity.travelInAir`: an `omnidirectionalAirMover()` (parrot, bee) uses the
     // 0.91 air drag vertically instead of 0.98.
-    let vertical = if mob.mob_type == super::MobType::Parrot {
+    let vertical = if matches!(mob.mob_type, super::MobType::Parrot | super::MobType::Bee) {
         horizontal_air
     } else {
         modified_friction(0.98, air_drag)

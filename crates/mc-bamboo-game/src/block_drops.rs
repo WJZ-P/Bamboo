@@ -74,6 +74,37 @@ pub(crate) fn drop_broken_block(
 ///
 /// Vanilla `BlockEntity.collectComponents`: take the snapshot before the block entity
 /// disappears with the block write.
+/// 主手工具上有没有 `minecraft:silk_touch`（`PREVENTS_BEE_SPAWNS_WHEN_MINING`）。
+///
+/// Whether the held tool carries `minecraft:silk_touch`.
+pub(crate) fn has_silk_touch(region: &Region, player: PlayerId) -> bool {
+    let Some(stack) = region
+        .players
+        .get(&player)
+        .map(|p| p.inventory.held(mc_bamboo_core::Hand::Main))
+    else {
+        return false;
+    };
+    let silk = mc_bamboo_data::component_registries::registry_names::ENCHANTMENT
+        .iter()
+        .position(|name| *name == "minecraft:silk_touch")
+        .unwrap_or(0) as i32;
+    let patch = stack.patch();
+    let default = mc_bamboo_protocol::components::defaults::resolve(
+        stack.item,
+        &patch,
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+    );
+    let Some(value) = patch
+        .get(mc_bamboo_data::registries::data_component_type::ENCHANTMENTS)
+        .or(default)
+    else {
+        return false;
+    };
+    matches!(value, mc_bamboo_protocol::components::ComponentValue::Enchantments(levels)
+        if levels.iter().any(|&(id, level)| id == silk && level > 0))
+}
+
 pub(crate) fn collect_block_entity(
     containers: &BTreeMap<BlockPos, crate::container::ContainerEntry>,
     pos: BlockPos,

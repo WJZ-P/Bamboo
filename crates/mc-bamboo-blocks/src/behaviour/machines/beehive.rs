@@ -11,7 +11,7 @@ use mc_bamboo_data::{
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    behaviour::{Behaviour, Plain, common::facing_the_player},
+    behaviour::{Behaviour, Plain, common::facing_the_player, machines::beehive_entity},
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     item_exchange::ItemExchange,
@@ -26,6 +26,13 @@ const MAX_HONEY_LEVELS: i32 = 5;
 pub(super) struct Beehive;
 
 impl Behaviour for Beehive {
+    /// `BaseEntityBlock` 的 `newBlockEntity`：放下巢时挂一个空方块实体。
+    fn on_place(&self, _state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        if !world.has_block_entity(pos) {
+            world.set_block_entity(beehive_entity::create_block_entity(pos));
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -75,6 +82,15 @@ impl Behaviour for Beehive {
                     1.0,
                     true,
                 );
+            }
+            // 官方 `releaseBeesAndResetHoneyLevel` 先清蜜，再 EMERGENCY 放蜂；
+            // 营火在下面时只清蜜。
+            if !beehive_entity::is_sedated(world, pos) {
+                let released: Option<()> = world
+                    .with_block_entity::<beehive_entity::BeehiveEntity, _>(pos, |hive, world| {
+                        hive.release_all(world, state, beehive_entity::ReleaseStatus::Emergency);
+                    });
+                let _ = released;
             }
             world.set_block_and_update(pos, state.with(LEVEL_HONEY, 0));
             return InteractionResult::Success;

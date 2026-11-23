@@ -1,7 +1,6 @@
 // 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。
 
 pub mod biomes;
-pub mod environment;
 pub mod block_classes;
 pub mod block_maps;
 pub mod block_transformers;
@@ -11,6 +10,7 @@ pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
 pub mod entity_types;
+pub mod environment;
 pub mod gamerules;
 pub mod heightmaps;
 pub mod item_components;

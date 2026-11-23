@@ -266,6 +266,12 @@ pub enum EntityData {
     ///
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
     GlowSquidDarkTicks(i32),
+    /// `Bee.DATA_FLAGS_ID`，BYTE：2 翻滚、4 已蜇、8 有花蜜。
+    ///
+    /// `Bee.DATA_FLAGS_ID`, a BYTE: rolling, stung and nectar bits.
+    BeeFlags(u8),
+    /// `Bee.DATA_ANGER_END_TIME`，LONG（变长）。
+    BeeAngerEndTime(i64),
     /// `Bat.DATA_ID_FLAGS`，BYTE：第 0 位是倒挂。
     ///
     /// `Bat.DATA_ID_FLAGS`, a BYTE; bit 0 is resting.
@@ -511,6 +517,8 @@ impl EntityData {
             Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
             Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
             Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
+            Self::BeeFlags(_) => mc_bamboo_data::entity_types::BEE_FLAGS,
+            Self::BeeAngerEndTime(_) => mc_bamboo_data::entity_types::BEE_ANGER_END_TIME,
             Self::BatFlags(_) => mc_bamboo_data::entity_types::BAT_FLAGS,
             Self::PhantomSize(_) => mc_bamboo_data::entity_types::PHANTOM_SIZE,
             Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
@@ -552,7 +560,7 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
             }
-            Self::WolfAngerEndTime(value) => {
+            Self::WolfAngerEndTime(value) | Self::BeeAngerEndTime(value) => {
                 write_data_header(out, self.index(), SERIALIZER_LONG);
                 crate::codec::write_varlong(out, *value);
             }
@@ -810,6 +818,7 @@ impl EntityData {
             Self::PandaMainGene(gene)
             | Self::PandaHiddenGene(gene)
             | Self::PandaFlags(gene)
+            | Self::BeeFlags(gene)
             | Self::BatFlags(gene) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*gene);

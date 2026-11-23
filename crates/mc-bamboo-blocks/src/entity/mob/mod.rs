@@ -17,6 +17,8 @@ pub mod attributes;
 pub mod avoid;
 pub mod axolotl;
 pub mod bat;
+pub mod bee;
+pub mod bee_goals;
 pub mod bogged;
 pub mod brain;
 pub mod bucketable;
@@ -168,13 +170,14 @@ pub enum MobType {
     Bat,
     Phantom,
     Camel,
+    Bee,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 47] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -221,6 +224,7 @@ impl MobType {
         Self::Tadpole,
         Self::Bat,
         Self::Phantom,
+        Self::Bee,
     ];
 
     /// 注册表 ID。
@@ -273,6 +277,7 @@ impl MobType {
             Self::Bat => ids::BAT,
             Self::Phantom => ids::PHANTOM,
             Self::Camel => ids::CAMEL,
+            Self::Bee => ids::BEE,
         }
     }
 
@@ -325,6 +330,7 @@ impl MobType {
             Self::Bat => "minecraft:bat",
             Self::Phantom => "minecraft:phantom",
             Self::Camel => "minecraft:camel",
+            Self::Bee => "minecraft:bee",
         }
     }
 
@@ -339,6 +345,7 @@ impl MobType {
             Self::Goat => Some(item_tags::GOAT_FOOD),
             Self::Frog | Self::Tadpole => Some(item_tags::FROG_FOOD),
             Self::Camel => Some(item_tags::CAMEL_FOOD),
+            Self::Bee => Some(item_tags::BEE_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
             Self::Ocelot => Some(item_tags::OCELOT_FOOD),
@@ -427,6 +434,7 @@ impl MobType {
             // 坐姿尺寸在 `Mob::dimensions` 里按 `camel.pose` 覆盖。
             // Sitting dimensions are overridden by `Mob::dimensions` from `camel.pose`.
             (Self::Camel, baby) => camel::dimensions(baby, false),
+            (Self::Bee, _) => bee::dimensions(),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
@@ -537,7 +545,7 @@ impl MobType {
     pub const fn has_no_ambient_sound(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Pufferfish | Self::Slime | Self::Tadpole
+            Self::Creeper | Self::Pufferfish | Self::Slime | Self::Tadpole | Self::Bee
         )
     }
 
@@ -555,6 +563,7 @@ impl MobType {
                 | Self::Pillager
                 | Self::Ocelot
                 | Self::Cat
+                | Self::Bee
         )
     }
 
@@ -716,7 +725,7 @@ impl MobType {
     /// Types that override `checkFallDamage` with an empty body (parrots, bats and
     /// phantoms).
     pub const fn ignores_fall_damage_check(self) -> bool {
-        matches!(self, Self::Parrot | Self::Bat | Self::Phantom)
+        matches!(self, Self::Parrot | Self::Bat | Self::Phantom | Self::Bee)
     }
 
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
@@ -788,6 +797,7 @@ impl MobType {
             Self::Bat => "minecraft:entities/bat",
             Self::Phantom => "minecraft:entities/phantom",
             Self::Camel => "minecraft:entities/camel",
+            Self::Bee => "minecraft:entities/bee",
         }
     }
 
@@ -823,7 +833,7 @@ impl MobType {
             0.1
         } else if matches!(
             self,
-            Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf
+            Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf | Self::Bee
         ) {
             0.4
         } else {
@@ -892,6 +902,8 @@ impl MobType {
             // [`living::play_ambient_sound`].
             Self::Parrot => Some("minecraft:entity.parrot.ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
+            // `Bee.getAmbientSound()` 返回 null：不出环境音也不抽音高的随机数。
+            Self::Bee => None,
         }
     }
 
@@ -936,6 +948,7 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.hurt"),
             Self::Phantom => Some("minecraft:entity.phantom.hurt"),
             Self::Camel => Some("minecraft:entity.camel.hurt"),
+            Self::Bee => Some("minecraft:entity.bee.hurt"),
         }
     }
 
@@ -980,6 +993,7 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.death"),
             Self::Phantom => Some("minecraft:entity.phantom.death"),
             Self::Camel => Some("minecraft:entity.camel.death"),
+            Self::Bee => Some("minecraft:entity.bee.death"),
         }
     }
 
@@ -1031,6 +1045,8 @@ impl MobType {
             // Phantoms keep the default `playStepSound`: the block's own step sound.
             Self::Phantom => None,
             Self::Camel => Some("minecraft:entity.camel.step"),
+            // `Bee.playStepSound` 是空实现。
+            Self::Bee => None,
         }
     }
 
@@ -1084,6 +1100,7 @@ impl MobType {
             Self::Bat => items::BAT_SPAWN_EGG,
             Self::Phantom => items::PHANTOM_SPAWN_EGG,
             Self::Camel => items::CAMEL_SPAWN_EGG,
+            Self::Bee => items::BEE_SPAWN_EGG,
         }
     }
 
@@ -1136,6 +1153,7 @@ impl MobType {
             Self::Bat => "entity.minecraft.bat",
             Self::Phantom => "entity.minecraft.phantom",
             Self::Camel => "entity.minecraft.camel",
+            Self::Bee => "entity.minecraft.bee",
         }
     }
 
@@ -2282,6 +2300,8 @@ pub struct Mob {
     ///
     /// The camel's pose state machine synced values and dash timer.
     pub camel: camel::Camel,
+    /// 蜜蜂的元数据字节、巢 / 花位置和授粉状态；别的生物是缺省值。
+    pub bee: bee::Bee,
     /// `Tadpole.age`：到 24000 变成青蛙。蝌蚪不是 `AgeableMob`，和 `age` 是两回事。
     ///
     /// `Tadpole.age`: a frog at 24000. Tadpoles are not `AgeableMob`s, so this is
@@ -2404,6 +2424,7 @@ impl Mob {
             MobType::Bat => bat::attributes(),
             MobType::Phantom => phantom::attributes(),
             MobType::Camel => camel::attributes(),
+            MobType::Bee => bee::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2468,6 +2489,7 @@ impl Mob {
             // alongside the brain.
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
+            MobType::Bee => bee_goals::goals(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -2523,6 +2545,7 @@ impl Mob {
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),
+            MobType::Bee => bee_goals::target_goals(),
             MobType::Pillager => pillager::targets(),
             kind => equine::targets(kind),
         };
@@ -2718,6 +2741,7 @@ impl Mob {
             goat: goat::Goat::default(),
             frog: frog::Frog::default(),
             camel: camel::Camel::default(),
+            bee: bee::Bee::default(),
             tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
@@ -2761,6 +2785,9 @@ impl Mob {
         }
         if mob_type == MobType::Parrot {
             parrot::configure(&mut mob);
+        }
+        if mob_type == MobType::Bee {
+            bee::configure(&mut mob);
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -2970,6 +2997,9 @@ impl Mob {
 /// 别的实体和追踪同步能读到的生物数据。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobPublic {
+    /// `Bee.DATA_FLAGS_ID` 和 `DATA_ANGER_END_TIME`。
+    pub bee_flags: u8,
+    pub bee_anger_end_time: i64,
     pub mob_type: MobType,
     pub uuid: [u8; 16],
     /// 同步 `update_attributes` 用的属性表（只含已经实例化的条目）。
@@ -3187,6 +3217,8 @@ pub struct MobPublic {
 impl MobPublic {
     pub fn of(mob: &Mob, in_water: bool) -> Self {
         Self {
+            bee_flags: mob.bee.flags,
+            bee_anger_end_time: mob.bee.anger_end_time,
             mob_type: mob.mob_type,
             uuid: mob.uuid,
             attributes: mob.attributes.clone(),

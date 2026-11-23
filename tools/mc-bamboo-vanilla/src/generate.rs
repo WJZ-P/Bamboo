@@ -775,7 +775,10 @@ fn environment_file(data: &VersionData) -> Result<String, String> {
         .get("tracks")
         .and_then(|tracks| tracks.get("minecraft:gameplay/bees_stay_in_hive"))
         .ok_or("BEES_STAY_IN_HIVE is not in the day timeline")?;
-    let modifier = track.get("modifier").and_then(Value::as_str).unwrap_or("or");
+    let modifier = track
+        .get("modifier")
+        .and_then(Value::as_str)
+        .unwrap_or("or");
     if modifier != "or" {
         return Err(format!("unexpected BEES_STAY_IN_HIVE modifier: {modifier}"));
     }
@@ -818,7 +821,6 @@ fn environment_file(data: &VersionData) -> Result<String, String> {
 
 fn module_file() -> String {
     "pub mod biomes;
-pub mod environment;
 pub mod block_classes;
 pub mod block_maps;
 pub mod block_transformers;
@@ -828,6 +830,7 @@ pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
 pub mod entity_types;
+pub mod environment;
 pub mod gamerules;
 pub mod heightmaps;
 pub mod item_components;

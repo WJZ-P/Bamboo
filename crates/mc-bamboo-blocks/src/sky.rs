@@ -246,7 +246,9 @@ mod tests {
         assert!(bees_stay_in_hive(env::BEES_STAY_IN_HIVE_END_TICK - 1));
         assert!(!bees_stay_in_hive(env::BEES_STAY_IN_HIVE_END_TICK));
         // 时间线按 24000 刻循环。
-        assert!(bees_stay_in_hive(env::BEES_STAY_IN_HIVE_START_TICK + DAY_PERIOD));
+        assert!(bees_stay_in_hive(
+            env::BEES_STAY_IN_HIVE_START_TICK + DAY_PERIOD
+        ));
     }
 
     #[test]

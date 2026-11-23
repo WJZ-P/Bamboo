@@ -789,6 +789,9 @@ pub(super) fn check_spawn_rules(
         // Phantoms register `Mob::checkMobSpawnRules`; they are in no biome table and
         // come from the `PhantomSpawner`.
         MobType::Phantom => valid_mob_spawn_block(world, kind, pos),
+        // 蜜蜂不在任何群系刷怪表里，也没有 `SpawnPlacements` 规则。
+        // Bees are in no biome spawn table and have no `SpawnPlacements` rule.
+        MobType::Bee => true,
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)

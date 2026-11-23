@@ -514,6 +514,11 @@ impl Entity {
         if mob.mob_type == mob::MobType::Slime {
             mob.cube.move_y_rot = mob::slime::constructor_move_y_rot(self.y_rot);
         }
+        if mob.mob_type == mob::MobType::Bee {
+            // `Bee` 构造函数的 `Mth.nextInt(random, 20, 60)`。
+            mob.bee.remaining_cooldown_before_locating_new_flower =
+                self.random.next_int_bounded(40) + 20;
+        }
         if let Some(brain) = mob.brain.as_mut() {
             // `LivingEntity` 构造函数最后的 `makeBrain`：每个传感器一次 `nextInt(scanRate)`。
             // The `makeBrain` at the end of the `LivingEntity` constructor: one
