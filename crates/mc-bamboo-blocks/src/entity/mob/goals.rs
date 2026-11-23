@@ -133,14 +133,33 @@ pub enum Goal {
     /// 官方已注册、这一期还不建模的目标。保留优先级和标志位锁顺序；
     /// `canUse` 恒假、不取随机数，名字仍进对拍的 running names。
     Unavailable(&'static str),
-    /// 村庄目标在没有 POI 数据的世界里只保留一次实体随机源取数（间隔按官方构造参数）。
-    ///
-    /// A village goal with no POI data keeps only its entity-random draw
-    /// (the interval comes from the official constructor argument).
-    GolemDrawRng {
-        name: &'static str,
-        interval: i32,
+    /// `MoveTowardsTargetGoal`：朝当前目标用 `DefaultRandomPos.getPosTowards` 找落点。
+    MoveTowardsTarget {
+        speed: f64,
+        within: f32,
+        wanted: Vec3,
+        target: Option<EntityUid>,
     },
+    /// `GolemRandomStrollInVillageGoal`：没有村庄时退回 `LandRandomPos.getPos`。
+    GolemStroll {
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+        force_trigger: bool,
+    },
+    /// `MoveBackToVillageGoal`：没有村庄段时 `getPosition` 恒为 null。
+    GolemBackToVillage {
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+        force_trigger: bool,
+    },
+    /// `OfferFlowerGoal`：白天抽 `nextInt(8000)`；没有村民时找不到送礼对象。
+    OfferFlower {
+        tick: i32,
+    },
+    /// `DefendVillageTargetGoal`：附近没有村民，`canUse` 恒假。
+    DefendVillageTarget,
     /// `ZombieAttackGoal` / `MeleeAttackGoal`：追着当前目标走并在 20 刻间隔挥手。
     MeleeAttack {
         speed: f64,
@@ -591,7 +610,12 @@ impl Goal {
             | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
-            Self::Unavailable(_) | Self::GolemDrawRng { .. } | Self::RandomStand { .. } => &[],
+            Self::Unavailable(_) | Self::RandomStand { .. } => &[],
+            Self::MoveTowardsTarget { .. }
+            | Self::GolemStroll { .. }
+            | Self::GolemBackToVillage { .. } => &[Flag::Move],
+            Self::OfferFlower { .. } => &[Flag::Move, Flag::Look],
+            Self::DefendVillageTarget => &[Flag::Target],
             Self::RunAroundLikeCrazy { .. } => &[Flag::Move],
             Self::MeleeAttack { .. } | Self::Bow(_) | Self::RangedAttack { .. } => {
                 &[Flag::Move, Flag::Look]
@@ -706,7 +730,12 @@ impl Goal {
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
-            Self::Unavailable(name) | Self::GolemDrawRng { name, .. } => name,
+            Self::Unavailable(name) => name,
+            Self::MoveTowardsTarget { .. } => "MoveTowardsTargetGoal",
+            Self::GolemStroll { .. } => "GolemRandomStrollInVillageGoal",
+            Self::GolemBackToVillage { .. } => "MoveBackToVillageGoal",
+            Self::OfferFlower { .. } => "OfferFlowerGoal",
+            Self::DefendVillageTarget => "DefendVillageTargetGoal",
             Self::MeleeAttack { class, .. } => class,
             Self::Swell { .. } => "SwellGoal",
             Self::Fox(goal) => goal.name(),
@@ -1743,10 +1772,36 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
-        Goal::GolemDrawRng { interval, .. } => {
-            me.random.next_int_bounded(*interval);
-            false
+        Goal::MoveTowardsTarget {
+            within,
+            wanted,
+            target,
+            ..
+        } => super::golem_goals::move_towards_can_use(me, mob, ctx, *within, wanted, target),
+        Goal::GolemStroll {
+            interval,
+            wanted,
+            force_trigger,
+            ..
+        } => super::golem_goals::stroll_can_use(
+            me,
+            mob,
+            ctx,
+            *interval,
+            wanted,
+            force_trigger,
+            false,
+        ),
+        Goal::GolemBackToVillage {
+            interval,
+            wanted,
+            force_trigger,
+            ..
+        } => {
+            super::golem_goals::stroll_can_use(me, mob, ctx, *interval, wanted, force_trigger, true)
         }
+        Goal::OfferFlower { .. } => super::golem_goals::offer_flower_can_use(me, ctx),
+        Goal::DefendVillageTarget => super::golem_goals::defend_village_can_use(),
         Goal::Swell { .. } => swell_can_use(me, mob, ctx),
         Goal::RandomStand { next_stand } => {
             super::equine::random_stand_can_use(me, mob, next_stand)
@@ -2263,7 +2318,13 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             *grow_tired_timer -= 1;
             *grow_tired_timer > 0
         }
-        Goal::Unavailable(_) | Goal::GolemDrawRng { .. } | Goal::RandomStand { .. } => false,
+        Goal::Unavailable(_) | Goal::RandomStand { .. } => false,
+        Goal::MoveTowardsTarget { within, target, .. } => {
+            super::golem_goals::move_towards_can_continue(me, mob, ctx, *within, *target)
+        }
+        Goal::GolemStroll { .. } | Goal::GolemBackToVillage { .. } => !mob.navigation.is_done(),
+        Goal::OfferFlower { tick } => *tick > 0,
+        Goal::DefendVillageTarget => false,
         Goal::RunAroundLikeCrazy { .. } => super::equine::tame::can_continue(mob),
         Goal::MeleeAttack {
             track_target,
@@ -2446,6 +2507,13 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
         }
+        Goal::MoveTowardsTarget { speed, wanted, .. }
+        | Goal::GolemStroll { speed, wanted, .. }
+        | Goal::GolemBackToVillage { speed, wanted, .. } => {
+            super::golem_goals::stroll_start(me, mob, ctx, *wanted, *speed)
+        }
+        Goal::OfferFlower { tick } => *tick = adjusted_tick_delay(false, 400),
+        Goal::DefendVillageTarget => {}
         Goal::RandomStroll { speed, wanted, .. } | Goal::DrownedGoToWater { speed, wanted } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
@@ -2528,7 +2596,6 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Float
         | Goal::OcelotAttack { .. }
         | Goal::Unavailable(_)
-        | Goal::GolemDrawRng { .. }
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
@@ -2697,7 +2764,11 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.navigation.stop();
         }
         Goal::FollowParent { parent, .. } => *parent = None,
-        Goal::Stroll { .. } => mob.navigation.stop(),
+        Goal::Stroll { .. } | Goal::GolemStroll { .. } | Goal::GolemBackToVillage { .. } => {
+            mob.navigation.stop()
+        }
+        Goal::MoveTowardsTarget { target, .. } => super::golem_goals::clear_target(target),
+        Goal::OfferFlower { .. } | Goal::DefendVillageTarget => {}
         Goal::Avoid(avoid) => avoid.stop(),
         Goal::Fox(goal) => goal.stop_with_world(me, mob, ctx),
         Goal::Phantom(goal) => goal.stop(me, mob, ctx),
@@ -2724,7 +2795,6 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::Panic { .. }
         | Goal::RandomLookAround { .. }
         | Goal::Unavailable(_)
-        | Goal::GolemDrawRng { .. }
         | Goal::CubeFloat
         | Goal::CubeAttack { .. }
         | Goal::CubeRandomDirection { .. }
@@ -3136,13 +3206,17 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             }
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
+        Goal::OfferFlower { tick } => super::golem_goals::offer_flower_tick(tick),
         Goal::RunAroundLikeCrazy { .. } => super::equine::tame::tick(me, mob, ctx),
         Goal::Swim { .. } | Goal::PufferfishPuff => {}
         Goal::FollowFlock { time_to_recalc, .. } => {
             super::fish::flock_tick(time_to_recalc, me, mob, ctx)
         }
         Goal::Unavailable(_)
-        | Goal::GolemDrawRng { .. }
+        | Goal::GolemStroll { .. }
+        | Goal::GolemBackToVillage { .. }
+        | Goal::MoveTowardsTarget { .. }
+        | Goal::DefendVillageTarget
         | Goal::HurtByTarget { .. }
         | Goal::LlamaHurtByTarget { .. }
         | Goal::LeapAtTarget { .. }
@@ -3868,6 +3942,9 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
             | super::MobType::Bat
             | super::MobType::Phantom
             | super::MobType::Pillager
+            // `AbstractGolem` 不覆写 `getWalkTargetValue`，用 `PathfinderMob` 的缺省 0。
+            | super::MobType::IronGolem
+            | super::MobType::SnowGolem
     ) {
         return 0.0;
     }

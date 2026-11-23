@@ -7,6 +7,7 @@
 //! Village behaviour is out of scope; its goals keep their vanilla registration
 //! slots. A player-created golem never targets players, and no golem targets creepers.
 
+use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{
     entity_types,
     registries::{attribute, entity_type},
@@ -109,22 +110,34 @@ pub(super) fn goals(_navigation: &mut Navigation) -> GoalSelector {
     };
     GoalSelector::from_goals(vec![
         wrap(1, Goal::melee(1.0, true)),
-        wrap(2, Goal::Unavailable("MoveTowardsTargetGoal")),
-        wrap(2, Goal::Unavailable("MoveBackToVillageGoal")),
+        wrap(
+            2,
+            Goal::MoveTowardsTarget {
+                speed: 0.9,
+                within: 32.0,
+                wanted: Vec3::default(),
+                target: None,
+            },
+        ),
+        wrap(
+            2,
+            Goal::GolemBackToVillage {
+                speed: 0.6,
+                interval: 10,
+                wanted: Vec3::default(),
+                force_trigger: false,
+            },
+        ),
         wrap(
             4,
-            Goal::GolemDrawRng {
-                name: "GolemRandomStrollInVillageGoal",
-                interval: 120,
+            Goal::GolemStroll {
+                speed: 0.6,
+                interval: 240,
+                wanted: Vec3::default(),
+                force_trigger: false,
             },
         ),
-        wrap(
-            5,
-            Goal::GolemDrawRng {
-                name: "OfferFlowerGoal",
-                interval: 8000,
-            },
-        ),
+        wrap(5, Goal::OfferFlower { tick: 0 }),
         wrap(
             7,
             Goal::LookAtPlayer {
@@ -160,7 +173,7 @@ pub(super) fn target_goals() -> GoalSelector {
         goal,
     };
     GoalSelector::from_goals(vec![
-        wrap(1, Goal::Unavailable("DefendVillageTargetGoal")),
+        wrap(1, Goal::DefendVillageTarget),
         wrap(
             2,
             Goal::HurtByTarget {

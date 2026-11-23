@@ -488,7 +488,15 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`。
     // 冲刺且不在水/岩浆里、不潜行、活着时，脚下方块可见就消耗两次 `nextDouble`（粒子位置）。
     // While sprinting out of water/lava, uncrouched and alive, a visible block below draws two `nextDouble`s.
-    if mob.sprinting
+    // `IronGolem.canSpawnSprintParticle()` 完全覆写缺省实现：不看疾跑 / 潜行 / 水，
+    // 只看水平速度的平方和一次 `nextInt(5)`。
+    if mob.mob_type == super::MobType::IronGolem {
+        if me.delta.x * me.delta.x + me.delta.z * me.delta.z > 2.500_000_277_905_201e-7
+            && me.random.next_int_bounded(5) == 0
+        {
+            spawn_sprint_particle(me, ctx.blocks());
+        }
+    } else if mob.sprinting
         && !me.in_water
         && !mob.ocelot.crouching
         && !mob.cat.crouching

@@ -2771,11 +2771,20 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
   死亡掉落，雪闲逛 / 关 `mobGriefing` / 剪南瓜 / 雨 / 热群系 / 扔雪球 / 追击）、
   8 题 `golem_attack_roll` 近战伤害抽样、4 题 `golem_save` 存档读回；
   4 种改坏确认（`golem_flags`、`golem_snow`、`golem_repair`、`golem_shear`）都能抓到。
-  有猎物的场景官方寻路器会取几十次随机数，Bamboo 的寻路取数次数不同，这几例逐刻比血量、
-  目标、铺雪、生成物和世界随机源，但不比实体随机源与坐标。全量 `mob-oracle` 只剩
-  ARM Mac 上已知的 12 处 `Mth.COS_TAB` 和青蛙 `dy` 末位差。
+  五个村庄目标都按「周围没有村庄 / 村民」时官方真正走的路径实现：`MoveTowardsTargetGoal`
+  用 `DefaultRandomPos.getPosTowards(16, 7, PI/2)` 抽 10 次落点，`MoveBackToVillageGoal`
+  抽完 `nextInt(5)` 后因为 `findSectionClosestToVillage` 找不到村庄段而放弃，
+  `GolemRandomStrollInVillageGoal` 先取一到两次**世界**随机源 `nextFloat` 再退回
+  `LandRandomPos.getPos(10, 7)`（用实体随机源），`OfferFlowerGoal` 白天先抽
+  `nextInt(8000)` 再因找不到送礼对象返回，`DefendVillageTargetGoal` 附近没有村民恒假。
+  另外 `IronGolem.canSpawnSprintParticle()` 覆写了缺省实现：只看水平速度平方和
+  `nextInt(5)`，不看疾跑 / 水中 / 潜行，`Entity.baseTick` 每刻都要走它。
+  `walk_target_value` 对两种傀儡用 `PathfinderMob` 的缺省 0。
+  12 个逐刻场景（含 3 个有猎物的）全部逐刻比实体随机源、坐标、朝向、血量、目标、
+  猎物血量、铺雪、生成物和世界随机源，`--only golem` 只剩 ARM Mac 上已知的
+  12 处 `Mth.COS_TAB`；官方那一侧的猎物移除后帧里记 `null`，和 Bamboo 的移除时刻对齐。
 
-**已知限制**：村民 / POI 还没有，村庄目标只占位；铜傀儡实体没做，只保留原有方块逻辑；
+**已知限制**：村民 / POI 还没有，村庄目标走的是「没有村庄」的官方路径；铜傀儡实体没做，只保留原有方块逻辑；
 玩家扔雪球没有冷却；`MoveTowardsTargetGoal` / `DefendVillageTargetGoal` 没建模；
 `Level.is_raining_at` / `SNOW_GOLEM_MELTS` 的精确世界答案来自生成器导出的群系表，
 并行只读视图按区块调色板覆盖。

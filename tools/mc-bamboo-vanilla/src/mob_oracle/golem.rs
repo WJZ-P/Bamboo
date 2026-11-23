@@ -164,9 +164,6 @@ impl Report {
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         let (golem_id, prey_id) = case.spawn(&mut World::new(&mut level, &mut ticks));
-        // 有猎物的场景官方寻路会取几十次随机数；Bamboo 的寻路器取数次数不同，
-        // 这里仍逐刻比血量、目标、铺雪、生成物和世界随机源，但不比实体随机源与坐标。
-        let compare_motion_seed = !case.prey;
         let mut seen_snow = 0;
         let mut seen_spawns = 0;
         for (tick, expected) in case.frames.iter().enumerate() {
@@ -225,7 +222,7 @@ impl Report {
                 }
             } else {
                 let label = format!("{} tick {tick}", case.name);
-                if compare_motion_seed && motion != expected.motion {
+                if motion != expected.motion {
                     self.mismatch(format!(
                         "{label} motion: official {:?}, bamboo {motion:?}",
                         expected.motion
@@ -237,13 +234,13 @@ impl Report {
                         expected.state
                     ));
                 }
-                if compare_motion_seed && seed != expected.seed {
+                if seed != expected.seed {
                     self.mismatch(format!(
                         "{label} seed: official {}, bamboo {seed}",
                         expected.seed
                     ));
                 }
-                if compare_motion_seed && target != expected.target {
+                if target != expected.target {
                     self.mismatch(format!(
                         "{label} target: official {}, bamboo {target}",
                         expected.target
@@ -261,8 +258,7 @@ impl Report {
                     entity.random.state(),
                 ]
             });
-            let compare_prey = !case.name.ends_with("_attack") || !case.iron;
-            if compare_prey && prey != expected.prey {
+            if prey != expected.prey {
                 self.mismatch(format!(
                     "{} tick {tick} prey: official {:?}, bamboo {prey:?}",
                     case.name, expected.prey
@@ -297,7 +293,7 @@ impl Report {
                 ));
             }
             let level_seed = level.random.source().seed();
-            if compare_motion_seed && level_seed != expected.level_seed {
+            if level_seed != expected.level_seed {
                 self.mismatch(format!(
                     "{} tick {tick} level random: official {}, bamboo {level_seed}",
                     case.name, expected.level_seed

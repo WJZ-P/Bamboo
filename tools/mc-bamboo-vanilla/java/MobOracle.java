@@ -8606,12 +8606,14 @@ public final class MobOracle {
                     golemInteract(golem, player);
                 }
                 if (death && tick == 2) golem.hurtServer(world, world.damageSources().genericKill(), 200.0F);
+
                 for (Mob mob : mobs) {
                     if (mob.isRemoved()) continue;
                     mob.checkDespawn();
                     mob.commonTick();
                     mob.tick();
                 }
+
             }
             if (tick != 0) frames.append(',');
             frames.append("{\"motion\":").append(projectileMotion(golem))
@@ -8623,7 +8625,7 @@ public final class MobOracle {
                                     readStatic(golem.getClass(), iron ? "DATA_FLAGS_ID" : "DATA_PUMPKIN_ID")) & 0xFF}))
                     .append(",\"seed\":").append(randomSeed(golem))
                     .append(",\"target\":").append(golem.getTarget() == null ? -1 : golem.getTarget().getId())
-                    .append(",\"prey\":").append(prey == null ? "null" : Arrays.toString(new long[] {
+                    .append(",\"prey\":").append(prey == null || prey.isRemoved() ? "null" : Arrays.toString(new long[] {
                             Double.doubleToRawLongBits(prey.getDeltaMovement().y),
                             Float.floatToRawIntBits(prey.getHealth()), randomSeed(prey)}))
                     .append(",\"snow\":");
@@ -12532,13 +12534,8 @@ public final class MobOracle {
             return false;
         }
 
-        /** 铁傀儡的 `MoveBackToVillageGoal` 在村庄里直接返回，不去问空 POI 管理器。 */
-        @Override
-        public boolean isVillage(BlockPos pos) {
-            return golemFixture;
-        }
-
-        /** 假世界没有村庄段；傀儡闲逛目标拿到空列表后退回普通随机落点。 */
+        /** 假世界没有 POI 管理器；`sectionsToVillage` 给一个「很远」的值，
+         *  这样 `isVillage` 为假、村庄段列表为空，两个村庄目标都走没有村庄的真实路径。 */
         @Override
         public int sectionsToVillage(net.minecraft.core.SectionPos section) {
             return golemFixture ? Integer.MAX_VALUE : super.sectionsToVillage(section);

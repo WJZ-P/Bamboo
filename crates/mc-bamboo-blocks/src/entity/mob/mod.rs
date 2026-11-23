@@ -41,6 +41,7 @@ pub mod fox_goals;
 pub mod frog;
 pub mod goals;
 pub mod goat;
+mod golem_goals;
 pub mod interact;
 pub mod iron_golem;
 pub mod living;
