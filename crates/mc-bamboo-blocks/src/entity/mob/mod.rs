@@ -33,6 +33,7 @@ pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
 pub(crate) mod enderman;
+pub mod endermite;
 pub mod equine;
 pub mod equipment;
 pub mod fish;
@@ -42,6 +43,7 @@ pub mod frog;
 pub mod goals;
 pub mod goat;
 mod golem_goals;
+pub mod infested;
 pub mod interact;
 pub mod iron_golem;
 pub mod living;
@@ -65,6 +67,7 @@ pub mod polar_bear;
 pub mod rabbit;
 pub mod raider;
 pub mod sheep;
+pub mod silverfish;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod slime;
@@ -173,13 +176,15 @@ pub enum MobType {
     Camel,
     IronGolem,
     SnowGolem,
+    Silverfish,
+    Endermite,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 50] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -228,6 +233,8 @@ impl MobType {
         Self::Phantom,
         Self::IronGolem,
         Self::SnowGolem,
+        Self::Silverfish,
+        Self::Endermite,
     ];
 
     /// 注册表 ID。
@@ -282,6 +289,8 @@ impl MobType {
             Self::Camel => ids::CAMEL,
             Self::IronGolem => ids::IRON_GOLEM,
             Self::SnowGolem => ids::SNOW_GOLEM,
+            Self::Silverfish => ids::SILVERFISH,
+            Self::Endermite => ids::ENDERMITE,
         }
     }
 
@@ -336,6 +345,8 @@ impl MobType {
             Self::Camel => "minecraft:camel",
             Self::IronGolem => "minecraft:iron_golem",
             Self::SnowGolem => "minecraft:snow_golem",
+            Self::Silverfish => "minecraft:silverfish",
+            Self::Endermite => "minecraft:endermite",
         }
     }
 
@@ -455,6 +466,7 @@ impl MobType {
             (Self::Turtle, baby) => turtle::dimensions(self, baby),
             (Self::Dolphin, baby) => dolphin::dimensions(baby),
             (Self::Axolotl, baby) => axolotl::dimensions(baby),
+            (Self::Silverfish | Self::Endermite, _) => infested::dimensions(self),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -486,6 +498,8 @@ impl MobType {
                 | Self::Spider
                 | Self::CaveSpider
                 | Self::Enderman
+                | Self::Silverfish
+                | Self::Endermite
         ) || self.is_skeleton()
     }
 
@@ -539,7 +553,12 @@ impl MobType {
     pub const fn full_target_rules(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman | Self::Pillager
+            Self::Creeper
+                | Self::Spider
+                | Self::CaveSpider
+                | Self::Enderman
+                | Self::Pillager
+                | Self::Endermite
         ) || self.is_skeleton()
     }
 
@@ -726,7 +745,7 @@ impl MobType {
     /// `Entity.getMovementEmission().emitsSounds()`: squid override it to `EVENTS` and
     /// move silently.
     pub const fn emits_movement_sounds(self) -> bool {
-        !squid::is_squid(self) && !matches!(self, Self::Bat)
+        !squid::is_squid(self) && !matches!(self, Self::Bat | Self::Silverfish | Self::Endermite)
     }
 
     /// `LivingEntity.isPushable()`：蝙蝠覆写成假，不推别人也不被推。
@@ -756,6 +775,9 @@ impl MobType {
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
     pub const fn xp_reward(self) -> i32 {
+        if matches!(self, Self::Endermite) {
+            return mc_bamboo_data::entity_types::ENDERMITE_XP_REWARD;
+        }
         // `Phantom` 构造函数里也是 `xpReward = 5`。
         // The `Phantom` constructor sets `xpReward = 5` as well.
         if self.is_monster() || matches!(self, Self::Phantom) {
@@ -816,6 +838,8 @@ impl MobType {
             Self::Camel => "minecraft:entities/camel",
             Self::IronGolem => "minecraft:entities/iron_golem",
             Self::SnowGolem => "minecraft:entities/snow_golem",
+            Self::Silverfish => "minecraft:entities/silverfish",
+            Self::Endermite => "minecraft:entities/endermite",
         }
     }
 
@@ -922,6 +946,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.ambient"),
             Self::IronGolem => None,
             Self::SnowGolem => Some("minecraft:entity.snow_golem.ambient"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.ambient"),
+            Self::Endermite => Some("minecraft:entity.endermite.ambient"),
         }
     }
 
@@ -968,6 +994,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.hurt"),
             Self::IronGolem => Some("minecraft:entity.iron_golem.hurt"),
             Self::SnowGolem => Some("minecraft:entity.snow_golem.hurt"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
+            Self::Endermite => Some("minecraft:entity.endermite.hurt"),
         }
     }
 
@@ -1014,6 +1042,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.death"),
             Self::IronGolem => Some("minecraft:entity.iron_golem.death"),
             Self::SnowGolem => Some("minecraft:entity.snow_golem.death"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.death"),
+            Self::Endermite => Some("minecraft:entity.endermite.death"),
         }
     }
 
@@ -1067,6 +1097,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.step"),
             Self::IronGolem => Some("minecraft:entity.iron_golem.step"),
             Self::SnowGolem => None,
+            Self::Silverfish => Some("minecraft:entity.silverfish.step"),
+            Self::Endermite => Some("minecraft:entity.endermite.step"),
         }
     }
 
@@ -1122,6 +1154,8 @@ impl MobType {
             Self::Camel => items::CAMEL_SPAWN_EGG,
             Self::IronGolem => items::IRON_GOLEM_SPAWN_EGG,
             Self::SnowGolem => items::SNOW_GOLEM_SPAWN_EGG,
+            Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
+            Self::Endermite => items::ENDERMITE_SPAWN_EGG,
         }
     }
 
@@ -1176,6 +1210,8 @@ impl MobType {
             Self::Camel => "entity.minecraft.camel",
             Self::IronGolem => "entity.minecraft.iron_golem",
             Self::SnowGolem => "entity.minecraft.snow_golem",
+            Self::Silverfish => "entity.minecraft.silverfish",
+            Self::Endermite => "entity.minecraft.endermite",
         }
     }
 
@@ -2259,6 +2295,10 @@ pub struct Mob {
     /// The phantom size, target point, anchor, attack phase and move-control speed;
     /// default for every other mob.
     pub phantom: phantom::PhantomState,
+    /// 末影螨的 `Lifetime`；别的生物恒为 0。
+    ///
+    /// The endermite's `Lifetime`; zero for every other mob.
+    pub endermite: endermite::EndermiteState,
     /// 海龟的专属状态，别的生物恒为缺省值。
     ///
     /// Turtle state; default for every other mob.
@@ -2450,6 +2490,8 @@ impl Mob {
             MobType::Camel => camel::attributes(),
             MobType::IronGolem => iron_golem::attributes(),
             MobType::SnowGolem => snow_golem::attributes(),
+            MobType::Silverfish => silverfish::attributes(),
+            MobType::Endermite => endermite::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2516,6 +2558,8 @@ impl Mob {
             MobType::Phantom => phantom::goals(),
             MobType::IronGolem => iron_golem::goals(&mut navigation),
             MobType::SnowGolem => snow_golem::goals(&mut navigation),
+            MobType::Silverfish => silverfish::goals(&mut navigation),
+            MobType::Endermite => endermite::goals(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -2574,6 +2618,8 @@ impl Mob {
             MobType::Pillager => pillager::targets(),
             MobType::IronGolem => iron_golem::target_goals(),
             MobType::SnowGolem => snow_golem::target_goals(),
+            MobType::Silverfish => silverfish::targets(),
+            MobType::Endermite => endermite::targets(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -2754,6 +2800,7 @@ impl Mob {
                 target: None,
             },
             phantom: phantom::PhantomState::default(),
+            endermite: endermite::EndermiteState::default(),
             turtle: turtle::TurtleState::default(),
             fish: fish::FishState::new(),
             dolphin: dolphin::DolphinState::new(),

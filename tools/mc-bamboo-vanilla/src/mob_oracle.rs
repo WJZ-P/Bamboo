@@ -52,6 +52,7 @@ mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
+mod small_mob;
 mod squid;
 mod structure_spawn;
 mod water_mob;
@@ -119,6 +120,9 @@ enum Line {
     Golem(Box<golem::GolemCase>),
     GolemAttackRoll(golem::GolemAttackRollCase),
     GolemSave(Box<golem::GolemSaveCase>),
+    SmallMob(Box<small_mob::SmallMobCase>),
+    SmallMobSave(small_mob::SmallMobSaveCase),
+    SmallMobDeath(small_mob::SmallMobDeathCase),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -1335,6 +1339,9 @@ impl Report {
                 Line::Golem(case) => self.replay_golem(&case),
                 Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
                 Line::GolemSave(case) => self.replay_golem_save(&case),
+                Line::SmallMob(case) => self.replay_small_mob(&case),
+                Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
+                Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),

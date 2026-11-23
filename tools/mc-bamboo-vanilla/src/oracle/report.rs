@@ -41,6 +41,8 @@ pub struct Mismatch {
     /// The world random seed differs on a dispenser or crafter case: the number or order of
     /// draws did not match.
     pub random: bool,
+    /// 生成的实体类型列表不同。
+    pub spawned: bool,
     pub panic: Option<String>,
 }
 
@@ -55,6 +57,7 @@ impl Mismatch {
             && !self.ticks
             && !self.gained
             && !self.random
+            && !self.spawned
             && self.panic.is_none()
     }
 }
@@ -655,6 +658,7 @@ fn render_official(text: &mut String, case: &Case, mismatch: &Mismatch) {
     contents_lines(text, &answer.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.0, mismatch.ticks);
     gained_lines(text, &answer.gained, mismatch.gained);
+    spawned_lines(text, &answer.spawned, mismatch.spawned);
 }
 
 fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mismatch) {
@@ -677,6 +681,15 @@ fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mism
     contents_lines(text, &replayed.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.1, mismatch.ticks);
     gained_lines(text, &replayed.gained, mismatch.gained);
+    spawned_lines(text, &replayed.spawned, mismatch.spawned);
+}
+
+fn spawned_lines(text: &mut String, spawned: &[String], differ: bool) {
+    if spawned.is_empty() {
+        return;
+    }
+    let mark = if differ { "*" } else { " " };
+    let _ = writeln!(text, "  {mark}    spawned {}", spawned.join(", "));
 }
 
 fn level_event_lines(text: &mut String, events: &[LevelPlay], differ: bool) {

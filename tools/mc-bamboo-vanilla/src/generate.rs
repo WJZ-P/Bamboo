@@ -3643,6 +3643,30 @@ fn entity_types_file(data: &VersionData) -> String {
     ] {
         let _ = writeln!(out, "pub const {name}: u8 = {value};");
     }
+    // 蠹虫和末影螨的属性、寿命由官方类导出，别在运行时代码里写死。眼高在
+    // `monsterFacts` 表里，和苦力怕 / 蜘蛛的在同一处生成。
+    // Silverfish/endermite attributes and the life cap come from vanilla; their eye
+    // heights are in `monsterFacts` alongside creepers and spiders.
+    for (name, value) in [
+        ("SILVERFISH_MAX_HEALTH", facts.silverfish_max_health),
+        ("SILVERFISH_MOVEMENT_SPEED", facts.silverfish_movement_speed),
+        ("SILVERFISH_ATTACK_DAMAGE", facts.silverfish_attack_damage),
+        ("ENDERMITE_MAX_HEALTH", facts.endermite_max_health),
+        ("ENDERMITE_MOVEMENT_SPEED", facts.endermite_movement_speed),
+        ("ENDERMITE_ATTACK_DAMAGE", facts.endermite_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+    let _ = writeln!(
+        out,
+        "pub const ENDERMITE_MAX_LIFE: i32 = {};",
+        facts.endermite_max_life
+    );
+    let _ = writeln!(
+        out,
+        "pub const ENDERMITE_XP_REWARD: i32 = {};",
+        facts.endermite_xp_reward
+    );
     let _ = writeln!(
         out,
         "pub const PARROT_SOUND_MAP_SIZE: i32 = {};",
