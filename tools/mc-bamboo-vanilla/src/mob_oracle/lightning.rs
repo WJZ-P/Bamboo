@@ -203,7 +203,7 @@ impl Report {
             if tick != 0 {
                 ticks.set_time(1000 + tick as i64);
                 if let Some(at) = case.player
-                    && tick as i32 >= case.player_tick + i32::from(broken)
+                    && tick as i32 >= case.player_tick
                 {
                     level.players = vec![super::bat::player_view(case.first_id + 2, at)];
                 }
@@ -227,7 +227,7 @@ impl Report {
             let player_extra =
                 i64::from(tick >= case.player_tick as usize && case.player.is_some());
             spawned = (all.len() as i64 + player_extra).max(spawned);
-            let ours = [
+            let mut ours = [
                 trap,
                 tame,
                 expected[2],
@@ -235,6 +235,10 @@ impl Report {
                 expected[4],
                 expected[5],
             ];
+            if broken && case.player.is_some() {
+                // 改坏确认：触发后故意不驯服，逐刻结果立刻分叉。
+                ours[1] = 0;
+            }
             if &ours != expected {
                 self.mismatch(format!(
                     "{} tick {tick} trap: official {expected:?}, bamboo {ours:?}",
