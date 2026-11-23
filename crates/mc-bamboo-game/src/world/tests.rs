@@ -474,6 +474,7 @@ impl Harness {
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
             player_data: None,
+            player_advancements: None,
             sink: Box::new(sink.clone()),
             inbox: player_inbox,
         };
@@ -520,6 +521,7 @@ impl Harness {
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
             player_data,
+            player_advancements: None,
             sink: Box::new(sink.clone()),
             inbox: player_inbox,
         };
@@ -1038,6 +1040,9 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
         // then experience on the join tick because both snapshots are sentinels.
         clientbound::SET_HEALTH,
         clientbound::SET_EXPERIENCE,
+        // 官方 `ServerPlayer.doTick` 在进服这一刻发首包 `update_advancements`
+        // （`PlayerAdvancements.flushDirty`），夹在经验和区块批次之间。
+        clientbound::UPDATE_ADVANCEMENTS,
         clientbound::CHUNK_BATCH_START,
     ];
     expected.extend([clientbound::LEVEL_CHUNK_WITH_LIGHT; 9]);
@@ -2077,6 +2082,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         peer_ip: "127.0.0.1".to_owned(),
         online_at_login: 0,
         player_data: None,
+        player_advancements: None,
         sink: Box::new(sink),
         inbox: server.inbox.player_channel().1,
     };
@@ -2171,6 +2177,7 @@ fn rejoin_uses_in_flight_player_save_over_stale_disk() {
         peer_ip: "127.0.0.1".to_owned(),
         online_at_login: 0,
         player_data: Some(stale),
+        player_advancements: None,
         sink: Box::new(sink),
         inbox: server.inbox.player_channel().1,
     };

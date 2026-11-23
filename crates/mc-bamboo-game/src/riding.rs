@@ -142,6 +142,13 @@ pub(crate) fn mount(region: &mut Region, id: PlayerId, vehicle: EntityUid) {
     region.entities.with_mut(vehicle, |entity| {
         entity.with_mob(|_, mob| mob.passengers.push(id.0))
     });
+    // 官方 `StartRidingTrigger.trigger(ServerPlayer)`。
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:started_riding",
+        serde_json::json!({}),
+    );
 }
 
 /// 下车。官方 `Player.rideTick → stopRiding`：按载具的位置算好落点，清掉两边的关系，

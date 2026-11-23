@@ -134,6 +134,8 @@ pub enum PlayRequest {
     ///
     /// The player reports a chat public key. Official `ServerboundChatSessionUpdatePacket`.
     ChatSession(crate::packet::play::RemoteChatSession),
+    /// 打开或关闭进度界面，官方 `ServerboundSeenAdvancementsPacket`。
+    SeenAdvancements(super::SeenAdvancements),
     /// 客户端请求命令补全。`command` 是输入框里的整段文字，可能以 `/` 开头。
     ///
     /// The client asks for suggestions. `command` is the whole input and may start with `/`.
@@ -452,6 +454,12 @@ impl PlayRequest {
                 entries: read_game_rules(&mut reader)?,
             },
             serverbound::SET_COMMAND_BLOCK => read_command_block(&mut reader)?,
+            serverbound::SEEN_ADVANCEMENTS => {
+                return super::advancement::decode_seen_advancements(
+                    &mut reader,
+                    serverbound::SEEN_ADVANCEMENTS,
+                );
+            }
             other => return Ok(Self::Other(other)),
         };
         reader.finish()?;

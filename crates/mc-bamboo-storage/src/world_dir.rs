@@ -146,6 +146,16 @@ impl WorldDir {
         self.players_data_dir().join(format!("{uuid}.dat_old"))
     }
 
+    /// 官方 26.3 `LevelResource.PLAYER_ADVANCEMENTS_DIR`：进度档案是
+    /// `<世界>/players/advancements/<uuid>.json`，和玩家 NBT 不是同一个目录。
+    pub fn player_advancements_dir(&self) -> PathBuf {
+        self.root.join("players/advancements")
+    }
+
+    pub fn player_advancements(&self, uuid: &str) -> PathBuf {
+        self.player_advancements_dir().join(format!("{uuid}.json"))
+    }
+
     /// `id` 形如 `minecraft:game_rules` → `data/minecraft/game_rules.dat`。
     pub fn saved_data(&self, id: &str) -> PathBuf {
         let (ns, name) = id.split_once(':').unwrap_or(("minecraft", id));
@@ -194,6 +204,7 @@ impl WorldDir {
             self.root.join("data"),
             self.root.join("data/minecraft"),
             self.players_data_dir(),
+            self.player_advancements_dir(),
             self.dimension_data_dir(),
             self.region_dir(),
             self.entities_dir(),
@@ -574,6 +585,26 @@ pub fn read_saved_data_at(path: &Path) -> Option<Tag> {
 /// Written files are `level.dat`, `game_rules.dat`, `world_border.dat`,
 /// `world_clocks.dat`, `world_gen_settings.dat`, `chunk_tickets.dat` and one
 /// `command_storage.dat` per namespace, all via `SaveSession::encode_saves`.
+/// 连接层进服时读一份官方格式的进度档案（纯文本 JSON）。
+/// 文件不存在、读失败或不是 UTF-8 时返回 `None`，按新玩家处理；不 panic。
+pub fn read_player_advancements(dir: &WorldDir, uuid: &str) -> Option<String> {
+    fs::read_to_string(dir.player_advancements(uuid)).ok()
+}
+
+/// 存盘 / 退出时写进度档案。官方 `PlayerAdvancements.save` 用 UTF-8 的
+/// `Files.newBufferedWriter`，不做备份轮换；这里照它原子替换。
+pub fn write_player_advancements(dir: &WorldDir, uuid: &str, text: &str) -> io::Result<()> {
+    let path = dir.player_advancements(uuid);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // 官方直接覆盖；tmp + rename 保证中途关服不会留下半个 JSON。
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text.as_bytes())?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

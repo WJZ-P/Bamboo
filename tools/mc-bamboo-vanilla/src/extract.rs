@@ -53,6 +53,9 @@ pub struct Extracted {
     /// Raw `timeline` JSON from the data pack, keyed by namespaced id.
     #[serde(default)]
     pub timelines: BTreeMap<String, String>,
+    /// 进度定义原文，按完整标识符排列。
+    /// Raw advancement definitions keyed by namespaced identifier.
+    pub advancements: BTreeMap<String, String>,
     /// 数据包里的战利品表原文：带命名空间的名字 → JSON。
     ///
     /// Loot table JSON from the data pack, keyed by namespaced id.
@@ -1383,6 +1386,9 @@ pub struct VersionData {
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
     pub packets: BTreeMap<String, PacketReport>,
+    /// 进度定义原文，按完整标识符排列。
+    /// Raw advancement definitions keyed by namespaced identifier.
+    pub advancements: BTreeMap<String, String>,
     /// 战利品表原文：带命名空间的名字 → JSON。
     ///
     /// Loot table JSON, keyed by namespaced id.
@@ -1519,6 +1525,7 @@ fn read_version_data(
         builtin_registries,
         packets,
         timelines: extracted.timelines,
+        advancements: extracted.advancements,
         loot_tables: extracted.loot_tables,
         loot_predicates: extracted.loot_predicates,
         context_int_providers: extracted.context_int_providers,

@@ -511,8 +511,33 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
     };
     let (was_hurt, actual_damage) = land_attack(region, id, entity_id, &target, &plan);
     if was_hurt {
+        // 官方 `PlayerHurtEntityTrigger` / `KilledTrigger`（玩家攻击实体）。
+        let kind = region
+            .entities
+            .public_at(entity_id)
+            .map(|public| format!("{:?}", public.kind))
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "entity": {"type": kind},
+            "damage": actual_damage,
+        });
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:player_hurt_entity",
+            payload.clone(),
+        );
+        crate::advancement_triggers::record(region, id, "minecraft:player_killed_entity", payload);
         finish_hit(region, id, entity_id, &target, &plan, actual_damage);
     }
+    // `PlayerInteractTrigger`：玩家右键实体在 `interaction::on_interact_entity` 里报，
+    // 这里是左键攻击，报 `any_block_use` 之外的交互事件。
+    crate::advancement_triggers::record(
+        region,
+        id,
+        "minecraft:player_interacted_with_entity",
+        serde_json::json!({"entity": {"type": ""}}),
+    );
 }
 
 /// `handleAttack` 的目标解析：世界边界、够距、可攻击、PVP 开关和自己不能打自己。

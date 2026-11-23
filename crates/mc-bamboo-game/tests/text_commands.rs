@@ -81,6 +81,7 @@ impl Harness {
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
             player_data: None,
+            player_advancements: None,
             sink: Box::new(sink.clone()),
             // 请求走主控队列（世界线程一样按序号处理），玩家自己的队列留空。
             // Requests use the master queue (handled by number all the same);
