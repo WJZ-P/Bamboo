@@ -111,8 +111,20 @@ pub(super) fn goals(_navigation: &mut Navigation) -> GoalSelector {
         wrap(1, Goal::melee(1.0, true)),
         wrap(2, Goal::Unavailable("MoveTowardsTargetGoal")),
         wrap(2, Goal::Unavailable("MoveBackToVillageGoal")),
-        wrap(4, Goal::Unavailable("GolemRandomStrollInVillageGoal")),
-        wrap(5, Goal::Unavailable("OfferFlowerGoal")),
+        wrap(
+            4,
+            Goal::GolemDrawRng {
+                name: "GolemRandomStrollInVillageGoal",
+                interval: 120,
+            },
+        ),
+        wrap(
+            5,
+            Goal::GolemDrawRng {
+                name: "OfferFlowerGoal",
+                interval: 8000,
+            },
+        ),
         wrap(
             7,
             Goal::LookAtPlayer {
@@ -214,14 +226,8 @@ pub(super) fn do_hurt_target(
     mob.events.push(MobEvent::EntityEvent {
         event: ATTACK_EVENT,
     });
-    let attack = mob.attributes.value(attribute::ATTACK_DAMAGE) as f32;
-    let whole = attack as i32;
-    let amount = if whole > 0 {
-        attack / 2.0 + me.random.next_int_bounded(whole) as f32
-    } else {
-        attack
-    };
-    let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
+    let amount = attack_amount(me, mob);
+    let mut source = DamageSource::environment(DamageKind::MobAttack);
     source.attacker = Some(me.id);
     source.direct = Some(me.id);
     source.attacker_uuid = Some(mob.uuid);
@@ -256,6 +262,19 @@ pub(super) fn do_hurt_target(
     hit
 }
 
+/// `IronGolem.doHurtTarget` 的伤害：`floor(damage)/2 + nextInt(floor(damage))`。
+///
+/// The damage of `IronGolem.doHurtTarget`.
+pub fn attack_amount(me: &mut Entity, mob: &Mob) -> f32 {
+    let attack = mob.attributes.value(attribute::ATTACK_DAMAGE) as f32;
+    let whole = attack as i32;
+    if whole > 0 {
+        attack / 2.0 + me.random.next_int_bounded(whole) as f32
+    } else {
+        attack
+    }
+}
+
 /// `IronGolem.hurtServer`：裂纹档位变了就多播一声。
 pub(super) fn hurt_server(
     me: &mut Entity,
@@ -265,7 +284,7 @@ pub(super) fn hurt_server(
     amount: f32,
 ) -> bool {
     let before = crackiness(mob);
-    let hurt = living::hurt_server(me, mob, ctx, source, amount);
+    let hurt = living::living_hurt_server(me, mob, ctx, source, amount);
     if hurt && crackiness(mob) != before {
         living::play_sound(me, mob, "minecraft:entity.iron_golem.damage", 1.0, 1.0);
     }

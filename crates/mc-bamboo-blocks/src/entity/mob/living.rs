@@ -1055,15 +1055,15 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::ai_step(me, mob, ctx);
     }
-    // 铁傀儡与雪傀儡的 `aiStep` 在 `super.aiStep()` 之前跑自己的那一段。
-    // Golem `aiStep` overrides run their own part before `super.aiStep()`.
+    animal_ai_step(me, mob, ctx);
+    // 铁傀儡与雪傀儡的 `aiStep` 先跑 `super.aiStep()`，再跑自己的那一段。
+    // Golem `aiStep` overrides run their own part after `super.aiStep()`.
     if mob.mob_type == super::MobType::IronGolem {
         super::iron_golem::ai_step(me, mob, ctx);
     }
     if mob.mob_type == super::MobType::SnowGolem {
         super::snow_golem::ai_step(me, mob, ctx);
     }
-    animal_ai_step(me, mob, ctx);
     if equine {
         super::equine::ai_step_end(me, mob, ctx);
     }

@@ -133,6 +133,14 @@ pub enum Goal {
     /// 官方已注册、这一期还不建模的目标。保留优先级和标志位锁顺序；
     /// `canUse` 恒假、不取随机数，名字仍进对拍的 running names。
     Unavailable(&'static str),
+    /// 村庄目标在没有 POI 数据的世界里只保留一次实体随机源取数（间隔按官方构造参数）。
+    ///
+    /// A village goal with no POI data keeps only its entity-random draw
+    /// (the interval comes from the official constructor argument).
+    GolemDrawRng {
+        name: &'static str,
+        interval: i32,
+    },
     /// `ZombieAttackGoal` / `MeleeAttackGoal`：追着当前目标走并在 20 刻间隔挥手。
     MeleeAttack {
         speed: f64,
@@ -579,7 +587,7 @@ impl Goal {
             | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
-            Self::Unavailable(_) | Self::RandomStand { .. } => &[],
+            Self::Unavailable(_) | Self::GolemDrawRng { .. } | Self::RandomStand { .. } => &[],
             Self::RunAroundLikeCrazy { .. } => &[Flag::Move],
             Self::MeleeAttack { .. } | Self::Bow(_) | Self::RangedAttack { .. } => {
                 &[Flag::Move, Flag::Look]
@@ -652,6 +660,7 @@ impl Goal {
                 | Self::CubeFloat
                 | Self::CubeAttack { .. }
                 | Self::WitchRangedAttack { .. }
+                | Self::SnowGolemRangedAttack { .. }
                 | Self::DrownedGoToBeach { .. }
                 | Self::Swell { .. }
                 | Self::SquidFlee { .. }
@@ -693,7 +702,7 @@ impl Goal {
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
             Self::LookAtPlayer { .. } => "LookAtPlayerGoal",
             Self::RandomLookAround { .. } => "RandomLookAroundGoal",
-            Self::Unavailable(name) => name,
+            Self::Unavailable(name) | Self::GolemDrawRng { name, .. } => name,
             Self::MeleeAttack { class, .. } => class,
             Self::Swell { .. } => "SwellGoal",
             Self::Fox(goal) => goal.name(),
@@ -1730,6 +1739,10 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RandomLookAround { .. } => me.random.next_float() < 0.02,
         Goal::Unavailable(_) => false,
+        Goal::GolemDrawRng { interval, .. } => {
+            me.random.next_int_bounded(*interval);
+            false
+        }
         Goal::Swell { .. } => swell_can_use(me, mob, ctx),
         Goal::RandomStand { next_stand } => {
             super::equine::random_stand_can_use(me, mob, next_stand)
@@ -2243,7 +2256,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             *grow_tired_timer -= 1;
             *grow_tired_timer > 0
         }
-        Goal::Unavailable(_) | Goal::RandomStand { .. } => false,
+        Goal::Unavailable(_) | Goal::GolemDrawRng { .. } | Goal::RandomStand { .. } => false,
         Goal::RunAroundLikeCrazy { .. } => super::equine::tame::can_continue(mob),
         Goal::MeleeAttack {
             track_target,
@@ -2508,6 +2521,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Float
         | Goal::OcelotAttack { .. }
         | Goal::Unavailable(_)
+        | Goal::GolemDrawRng { .. }
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
         | Goal::CubeKeepJumping
@@ -2703,6 +2717,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::Panic { .. }
         | Goal::RandomLookAround { .. }
         | Goal::Unavailable(_)
+        | Goal::GolemDrawRng { .. }
         | Goal::CubeFloat
         | Goal::CubeAttack { .. }
         | Goal::CubeRandomDirection { .. }
@@ -3120,6 +3135,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             super::fish::flock_tick(time_to_recalc, me, mob, ctx)
         }
         Goal::Unavailable(_)
+        | Goal::GolemDrawRng { .. }
         | Goal::HurtByTarget { .. }
         | Goal::LlamaHurtByTarget { .. }
         | Goal::LeapAtTarget { .. }

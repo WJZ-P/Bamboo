@@ -2600,3 +2600,47 @@ Brain 行为里，只有单元测试、`NoAI` 夹具不触发，没有和官方�
 `customServerAiStep` 尾部、只有单元测试、无官方逐刻对拍；海豚恩惠 / 引路、美西螈攻击 /
 繁殖、桶装鱼 / 海龟蛋孵化逐刻场景仍是已知限制；桶装鱼、海龟蛋孵化的主体仍是
 「已写未验证（无逐刻场景）」。详见本轮汇报。
+
+### 5.22 铁傀儡、雪傀儡和雪球（`golem` 分支）
+
+`MobType::ALL` 从 46 种扩到 48 种；两种傀儡都不在群系刷怪表里，只由 `/summon`、刷怪蛋和
+雕刻南瓜图案生成。村庄相关（村民召唤、送花、回村、村庄闲逛、村庄守卫的搜索）不做，
+对应目标按官方优先级占位；`GolemRandomStrollInVillageGoal`（`nextInt(120)`）和
+`OfferFlowerGoal`（`nextInt(8000)`）在没有 POI 的夹具里仍保留实体随机源的两次取数，
+`MoveBackToVillageGoal` 在 `isVillage` 为真时直接短路，逐刻随机源才对得上。
+
+- **铁傀儡**（`iron_golem.rs`）：属性、眼高和 `Crackiness.GOLEM` 的三个阈值都由生成器从
+  `IronGolem.createAttributes()` / `EntityTypes.IRON_GOLEM` / `Crackiness` 导出。近战伤害
+  `floor(damage)/2 + nextInt(floor(damage))`，命中后 `0.4 * (1 - 击退抗性)` 的上抛用一条
+  `Command::LiftMob` 落地；四档裂纹跨档多播一声；铁锭回 25 血（血量没变返回 PASS）；
+  持久愤怒复用 `neutral.rs`，`PlayerCreated` / `anger_end_time` / `angry_at` 存盘。
+  `doPush` 碰到敌对生物（苦力怕除外）1/20 设成目标；`canAttack` 拦玩家造的傀儡打玩家。
+  官方没有自然回血，字节码里没有 heal。
+- **雪傀儡**（`snow_golem.rs`）：4 血 / 0.2 移速；`RangedAttackGoal(1.25, 20, 10)` 每 20 刻
+  扔一颗雪球，`shoot(dx, dy + sqrt(dx²+dz²)*0.2, dz, 1.6, 12)`；`SNOW_GOLEM_MELTS`
+  按群系查生成的表（7 个热群系为真），`LivingEntity.aiStep` 尾部的 `isSensitiveToWater`
+  在水 / 雨里每刻 1 点溺水；`mobGriefing` 开着时四角铺一层雪（用 `BlockView` 的
+  `snow_layer_can_survive` 判脚下支撑），落地走 `Command::PlaceSnowTrail`；剪刀剪南瓜，
+  `shearing/snow_golem` 掉雕刻南瓜，`Pumpkin` 存盘。
+- **雪球**：按主代理的选择把 `ThrownEgg` 扩成官方 `ThrowableItemProjectile` 的通用结构：
+  `ThrowableKind { Egg, Snowball }` 决定 `add_entity` 的实体类型、存档 id 和命中处理，
+  鸡蛋路径逐位不变（`mob-oracle --only egg` 全过）。`Snowball.onHitEntity` 对 `Blaze`
+  打 3 点、其余 0 点，广播事件 3 后消失；`SnowballItem.use` 让玩家右键扔雪球。
+  以后的末影珍珠 / 附魔之瓶也接到这里，不另起一套。
+- **方块层**（`behaviour/machines/pumpkin.rs`）：`trySpawnGolem` 依次试雪 / 铁 / 铜完整图案，
+  生成实体插在 `clearPatternBlocks`（2001 事件）和 `updatePatternBlocks`（邻居更新）之间，
+  脚底位置取图案指定格 + (0.5, 0.05, 0.5)，铁傀儡额外 `setPlayerCreated(true)`。
+  `BlockOracle` 新增 4 道固定图案题（雪、铁、腿被挡的铁、铜块），`oracle java --weather clear`
+  0 失败。
+- **对拍**：`mob-oracle --only golem` 12 个逐刻场景（铁闲逛 / 追击 / 修复 / 玩家造的 /
+  死亡掉落，雪闲逛 / 关 `mobGriefing` / 剪南瓜 / 雨 / 热群系 / 扔雪球 / 追击）、
+  8 题 `golem_attack_roll` 近战伤害抽样、4 题 `golem_save` 存档读回；
+  4 种改坏确认（`golem_flags`、`golem_snow`、`golem_repair`、`golem_shear`）都能抓到。
+  有猎物的场景官方寻路器会取几十次随机数，Bamboo 的寻路取数次数不同，这几例逐刻比血量、
+  目标、铺雪、生成物和世界随机源，但不比实体随机源与坐标。全量 `mob-oracle` 只剩
+  ARM Mac 上已知的 12 处 `Mth.COS_TAB` 和青蛙 `dy` 末位差。
+
+**已知限制**：村民 / POI 还没有，村庄目标只占位；铜傀儡实体没做，只保留原有方块逻辑；
+玩家扔雪球没有冷却；`MoveTowardsTargetGoal` / `DefendVillageTargetGoal` 没建模；
+`Level.is_raining_at` / `SNOW_GOLEM_MELTS` 的精确世界答案来自生成器导出的群系表，
+并行只读视图按区块调色板覆盖。

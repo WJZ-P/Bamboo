@@ -842,6 +842,21 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 整列都是空气时是世界底部下面一格。
     ///
     /// `isRainingAt` 和 `tickPrecipitation` 用得到。有真实高度图的实现应该覆盖它。
+    /// `Level.isRainingAt(pos)`：精确世界按天气、天空可见性、高度图和降水类型算；
+    /// 夹具可以直接覆盖，让注入的天气状态与官方假世界一致。
+    ///
+    /// `Level.isRainingAt(pos)`: the precise world derives it from weather, sky
+    /// visibility, the heightmap and precipitation; oracles may override it.
+    fn is_raining_at(&self, pos: BlockPos) -> bool {
+        if !self.block_weather().is_raining() || !self.can_see_sky(pos) {
+            return false;
+        }
+        if self.heightmap_y(pos) > pos.y {
+            return false;
+        }
+        self.precipitation_facts(pos).precipitation == crate::weather::Precipitation::Rain
+    }
+
     fn heightmap_y(&self, pos: BlockPos) -> i32 {
         for y in (self.min_y()..=self.max_y()).rev() {
             let state = self.block_state(BlockPos::new(pos.x, y, pos.z));
@@ -1109,6 +1124,18 @@ pub trait Level: LevelSideState + LevelEntities {
     /// [`Level::clock_ticks`] 处求值；有固定时间的维度没有这条时间线，恒假。
     fn monsters_burn(&self) -> bool {
         !self.dimension_has_fixed_time() && crate::sky::monsters_burn(self.clock_ticks())
+    }
+
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`：按这一格的群系查生成的表。
+    /// 夹具可以覆盖它，模拟热群系或下界。
+    ///
+    /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`, looked up from the generated
+    /// biome table. Oracles can override it for hot biomes or the Nether.
+    fn snow_golem_melts(&self, pos: BlockPos) -> bool {
+        mc_bamboo_data::spawning::SNOW_GOLEM_MELTS
+            .get(usize::try_from(self.biome_id(pos)).unwrap_or(usize::MAX))
+            .copied()
+            .unwrap_or(false)
     }
 
     /// `getOverworldClockTime()`：主世界时钟的整数刻，和算 `skyDarken` 的是同一个值。

@@ -508,7 +508,7 @@ impl BlockView for World<'_> {
     }
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {
-        World::is_raining_at(self, pos)
+        self.level().is_raining_at(pos)
     }
 
     fn is_thundering(&self) -> bool {
@@ -516,10 +516,7 @@ impl BlockView for World<'_> {
     }
 
     fn snow_golem_melts(&self, pos: BlockPos) -> bool {
-        mc_bamboo_data::spawning::SNOW_GOLEM_MELTS
-            .get(usize::try_from(self.biome_id(pos)).unwrap_or(usize::MAX))
-            .copied()
-            .unwrap_or(false)
+        self.level().snow_golem_melts(pos)
     }
 
     fn is_bright_outside(&self) -> bool {
