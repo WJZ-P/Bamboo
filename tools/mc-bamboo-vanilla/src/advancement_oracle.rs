@@ -135,13 +135,10 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
         let mut run_command = clone_command(&command);
         run_command.args(["layout", &format!("{}", run * 7)]);
         let layout_lines = lines(run_command)?;
-        let run_order = layout_lines
-            .iter()
-            .find(|line| line["type"] == "order")
-            .ok_or("官方没有导出兄弟顺序")?;
-        let digest = order_digest(run_order);
+        // 同一份 `layout-node` 兄弟顺序：Java 侧从跑三步的那棵官方排版树导出。
+        let digest = layout_digest(&layout_lines);
         digests.push(digest.clone());
-        let child_order = external_order(run_order)?;
+        let child_order = external_layout_order(&layout_lines)?;
         let mut tree = AdvancementTree::parse(
             mc_bamboo_data::ADVANCEMENTS_JSON,
             TreeOrder::External,
@@ -373,32 +370,27 @@ fn compare_definitions(
     Ok(())
 }
 
-fn order_digest(order: &Value) -> String {
+fn layout_digest(lines: &[Value]) -> String {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
-    for (id, children) in order["children"]
-        .as_object()
-        .map(|map| map.iter().collect::<Vec<_>>())
-        .unwrap_or_default()
-    {
-        if !children.as_array().is_some_and(|array| array.len() > 1) {
-            continue;
-        }
-        digest.update(id.as_bytes());
-        digest.update([0]);
-        for child in children.as_array().unwrap_or(&Vec::new()) {
-            digest.update(child.as_str().unwrap_or("").as_bytes());
-            digest.update([0xff]);
+    for line in lines.iter().filter(|line| line["type"] == "layout-node") {
+        let children = line["children"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if children.len() > 1 {
+            digest.update(line["id"].as_str().unwrap_or("").as_bytes());
+            for child in children {
+                digest.update(child.as_str().unwrap_or("").as_bytes());
+                digest.update([0xff]);
+            }
         }
     }
     format!("{:x}", digest.finalize())[..12].to_owned()
 }
 
-fn external_order(order: &Value) -> Result<Vec<Vec<String>>, String> {
-    let children = order["children"]
-        .as_object()
-        .ok_or("官方兄弟顺序不是对象")?;
-    // 下标按 Bamboo 的 id 顺序；`AdvancementTree::apply_order` 也按 id 找节点。
+/// 把 `layout-node` 行铺成按定义 id 排列的兄弟顺序。官方的排版树只含有显示节点。
+fn external_layout_order(lines: &[Value]) -> Result<Vec<Vec<String>>, String> {
     let definitions: Value = serde_json::from_str(mc_bamboo_data::ADVANCEMENTS_JSON)
         .map_err(|error| error.to_string())?;
     let ids: Vec<&str> = definitions["advancements"]
@@ -407,9 +399,13 @@ fn external_order(order: &Value) -> Result<Vec<Vec<String>>, String> {
         .keys()
         .map(String::as_str)
         .collect();
-    let mut result = Vec::with_capacity(ids.len());
-    for id in ids {
-        result.push(strings(children.get(id)));
+    let mut result: Vec<Vec<String>> = (0..ids.len()).map(|_| Vec::new()).collect();
+    for line in lines.iter().filter(|line| line["type"] == "layout-node") {
+        let id = line["id"].as_str().ok_or("layout-node 没有 id")?;
+        let Some(index) = ids.iter().position(|candidate| *candidate == id) else {
+            continue;
+        };
+        result[index] = strings(line.get("children"));
     }
     Ok(result)
 }
@@ -434,43 +430,29 @@ fn compare_layout(
             tree.nodes[index].x.to_bits() == x.to_bits(),
             format!("第 {run} 次（顺序 {digest}）{id}: x 不同"),
         );
-        // 官方 null 轮廓游标的一个边界情形（默认 JVM 的特定排列下才会出现），
-        // 见 docs/advancements.md；其它 123+ 个节点逐个比位模式。
-        const NULL_CONTOUR_CASES: &[&str] = &[
-            "minecraft:husbandry/place_dried_ghast_in_water",
-            "minecraft:adventure/fall_from_world_height",
-            "minecraft:adventure/honey_block_slide",
-            "minecraft:adventure/use_lodestone",
-        ];
-        if !NULL_CONTOUR_CASES.contains(&id) {
-            report.check(
-                tree.nodes[index].y.to_bits() == y.to_bits(),
-                format!("第 {run} 次（顺序 {digest}）{id}: y 不同"),
-            );
-        }
+        report.check(
+            tree.nodes[index].y.to_bits() == y.to_bits(),
+            format!(
+                "第 {run} 次（顺序 {digest}）{id}: y 不同 (ours {}, official {y})",
+                tree.nodes[index].y
+            ),
+        );
         // 官方单条包的字节：包内容由 Bamboo 的协议层重写一遍。
         let official = base64_decode(line["packet"].as_str().unwrap_or(""))?;
         let ours = single_update_packet(tree, index, x, y);
-        let complex_icon = !tree.nodes[index]
-            .advancement
-            .display
-            .as_ref()
-            .is_some_and(|display| display.icon_components.is_empty());
-        if !complex_icon {
-            let ours = if break_packet && seen == 0 {
-                let mut broken = ours;
-                if let Some(byte) = broken.first_mut() {
-                    *byte ^= 1;
-                }
-                broken
-            } else {
-                ours
-            };
-            report.check(
-                official == ours,
-                format!("第 {run} 次（顺序 {digest}）{id}: 包字节不同"),
-            );
-        }
+        let ours = if break_packet && seen == 0 {
+            let mut broken = ours;
+            if let Some(byte) = broken.first_mut() {
+                *byte ^= 1;
+            }
+            broken
+        } else {
+            ours
+        };
+        report.check(
+            official == ours,
+            format!("第 {run} 次（顺序 {digest}）{id}: 包字节不同"),
+        );
         seen += 1;
     }
     report.check(seen == tree.displayed.len(), "官方显示节点数不同");

@@ -157,6 +157,61 @@ public final class AdvancementOracle {
 
     private static void emitLayout(Writer out, ServerAdvancementManager manager) throws Exception {
         RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registryAccess());
+        // 关键：官方 `AdvancementNode.children` 是身份哈希集合，两次遍历之间身份哈希
+        // 发号会推进，顺序未必相同。这里先为每个根重建一次 `TreeNodePosition` 树，
+        // 把「排版真正看到的直接孩子顺序」导出，再让同一棵树跑完三步并读坐标。
+        // Rust 侧拿这份顺序当输入，比较的才是同一份树。
+        Class<?> positionClass = Class.forName("net.minecraft.advancements.TreeNodePosition");
+        java.lang.reflect.Constructor<?> ctor = positionClass.getDeclaredConstructor(
+                AdvancementNode.class, positionClass, positionClass, int.class, int.class);
+        ctor.setAccessible(true);
+        java.lang.reflect.Field nodeField = positionClass.getDeclaredField("node");
+        nodeField.setAccessible(true);
+        java.lang.reflect.Field childrenField = positionClass.getDeclaredField("children");
+        childrenField.setAccessible(true);
+        java.lang.reflect.Field xField = positionClass.getDeclaredField("x");
+        xField.setAccessible(true);
+        java.lang.reflect.Field yField = positionClass.getDeclaredField("y");
+        yField.setAccessible(true);
+        java.lang.reflect.Method first = positionClass.getDeclaredMethod("firstWalk");
+        first.setAccessible(true);
+        java.lang.reflect.Method second = positionClass.getDeclaredMethod(
+                "secondWalk", float.class, int.class, float.class);
+        second.setAccessible(true);
+        java.lang.reflect.Method third = positionClass.getDeclaredMethod("thirdWalk", float.class);
+        third.setAccessible(true);
+        java.util.Map<String, Object> positions = new java.util.LinkedHashMap<>();
+        for (AdvancementNode root : manager.tree().roots()) {
+            if (root.advancement().display().isEmpty()) {
+                continue;
+            }
+            Object position = ctor.newInstance(root, null, null, 1, 0);
+            java.util.ArrayDeque<Object> queue = new java.util.ArrayDeque<>();
+            queue.add(position);
+            while (!queue.isEmpty()) {
+                Object current = queue.remove();
+                AdvancementNode node = (AdvancementNode) nodeField.get(current);
+                String id = node.holder().id().toString();
+                positions.put(id, current);
+                JsonObject order = new JsonObject();
+                order.addProperty("type", "layout-node");
+                order.addProperty("id", id);
+                @SuppressWarnings("unchecked")
+                List<Object> children = (List<Object>) childrenField.get(current);
+                JsonArray names = new JsonArray();
+                for (Object child : children) {
+                    names.add(((AdvancementNode) nodeField.get(child)).holder().id().toString());
+                    queue.add(child);
+                }
+                order.add("children", names);
+                write(out, order);
+            }
+            first.invoke(position);
+            float minimum = (float) second.invoke(position, 0.0f, 0, yField.getFloat(position));
+            if (minimum < 0.0f) {
+                third.invoke(position, -minimum);
+            }
+        }
         // 全部显示节点的坐标，以及每个节点单独组成一条 update 包时的字节。
         List<AdvancementNode> shown = new ArrayList<>();
         for (AdvancementNode node : manager.tree().nodes()) {
@@ -166,6 +221,7 @@ public final class AdvancementOracle {
         }
         shown.sort(Comparator.comparing(node -> node.holder().id().toString()));
         for (AdvancementNode node : shown) {
+            Object position = positions.get(node.holder().id().toString());
             ClientboundUpdateAdvancementsPacket packet = new ClientboundUpdateAdvancementsPacket(
                     true,
                     List.of(ClientboundUpdateAdvancementsPacket.PositionedAdvancement.fromNode(node)),
@@ -179,8 +235,8 @@ public final class AdvancementOracle {
             JsonObject item = new JsonObject();
             item.addProperty("type", "position");
             item.addProperty("id", node.holder().id().toString());
-            item.addProperty("x", node.x());
-            item.addProperty("y", node.y());
+            item.addProperty("x", xField.getInt(position));
+            item.addProperty("y", yField.getFloat(position));
             item.addProperty("packet", Base64.getEncoder().encodeToString(bytes));
             write(out, item);
         }

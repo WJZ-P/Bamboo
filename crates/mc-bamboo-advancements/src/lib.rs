@@ -290,55 +290,18 @@ fn string_list(value: &Value, what: &str) -> Result<Vec<String>, TreeError> {
         .collect()
 }
 
-/// 把 JSON 值转成对应的 NBT 标签，文本组件和图标组件值共用。
-fn json_tag(value: &Value, what: &str) -> Result<mc_bamboo_nbt::Tag, TreeError> {
-    let _ = what;
-    // 类型不对时把出错的字段带上，递归调用不必每层都重算。
-    use mc_bamboo_nbt::Tag;
-    match value {
-        Value::String(text) => Ok(Tag::String(text.clone())),
-        Value::Object(object) => {
-            let mut entries = Vec::with_capacity(object.len());
-            for (key, value) in object {
-                let tag = match value {
-                    Value::String(text) => Tag::String(text.clone()),
-                    Value::Bool(flag) => Tag::Byte(i8::from(*flag)),
-                    Value::Array(values) => Tag::List(
-                        values
-                            .iter()
-                            .map(|value| json_tag(value, what))
-                            .collect::<Result<Vec<_>, _>>()?,
-                    ),
-                    Value::Object(_) => json_tag(value, what)?,
-                    Value::Number(number) => Tag::String(number.to_string()),
-                    Value::Null => continue,
-                };
-                entries.push((key.clone(), tag));
-            }
-            Ok(Tag::Compound(entries))
-        }
-        Value::Bool(flag) => Ok(Tag::Byte(i8::from(*flag))),
-        Value::Number(number) => Ok(Tag::String(number.to_string())),
-        Value::Array(values) => Ok(Tag::List(
-            values
-                .iter()
-                .map(|value| json_tag(value, what))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        Value::Null => Ok(Tag::Compound(Vec::new())),
-    }
-}
-
-fn component_tag(value: &Value, what: &str) -> Result<mc_bamboo_nbt::Tag, TreeError> {
-    json_tag(value, what)
-}
-
-/// 把 JSON 的图标组件补丁编码成线上字节。只支持内置进度用到的三种组件。
+/// 把 JSON 的图标组件补丁编码成线上字节。
+///
+/// 官方 `ItemStackTemplate.STREAM_CODEC` 里的 `DataComponentPatch` 用每个组件自己的
+/// `Codec` 编码，不能直接把数据包 JSON 当 NBT 写。这里先按组件的存档 codec
+///（`mc_bamboo_protocol::components::archive::components::decode_value`）把 JSON 转成
+/// 类型化的 `ComponentValue`，再走 `ComponentPatch::write` 写线上格式。
 fn icon_components(
     object: &serde_json::Map<String, Value>,
     id: &str,
 ) -> Result<Vec<(i32, Vec<u8>)>, TreeError> {
     use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentValue, PatchEntry, archive::components};
     let mut result = Vec::new();
     for (name, value) in object {
         let kind = match name.as_str() {
@@ -349,12 +312,52 @@ fn icon_components(
             "minecraft:tooltip_display" => kinds::TOOLTIP_DISPLAY,
             other => return Err(bad(format!("进度 {id} 的图标有不支持的组件 {other}"))),
         };
-        let tag = component_tag(value, &format!("进度 {id} 的图标组件 {name}"))?;
-        let mut bytes = Vec::new();
-        tag.write_network(&mut bytes);
+        let tag = component_json_tag(value, name)?;
+        let typed: ComponentValue = components::decode_value(kind, &tag, 0)
+            .map_err(|error| bad(format!("进度 {id} 的图标组件 {name}: {error}")))?;
+        let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+        patch.put(kind, PatchEntry::Set(typed));
+        // `ComponentPatch::write` 前面带 added/removed 两个计数；这里只要这一项的值。
+        let mut full = Vec::new();
+        patch.write(&mut full);
+        let mut cursor = mc_bamboo_protocol::components::cursor::Cursor::new(&full);
+        let decoded = mc_bamboo_protocol::components::ComponentPatch::read(&mut cursor)
+            .map_err(|error| bad(format!("进度 {id} 的图标组件 {name}: {error}")))?;
+        let (added, _) = decoded.to_opaque();
+        let bytes = added
+            .first()
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or_else(|| bad(format!("进度 {id} 的图标组件 {name} 没有值")))?;
         result.push((kind, bytes));
     }
     Ok(result)
+}
+
+/// 数据包里的组件值转成官方存档 `Codec` 认的 NBT 标签。
+fn component_json_tag(value: &Value, name: &str) -> Result<mc_bamboo_nbt::Tag, TreeError> {
+    use mc_bamboo_nbt::Tag;
+    match value {
+        Value::String(text) => Ok(Tag::String(text.clone())),
+        Value::Bool(flag) => Ok(Tag::Byte(i8::from(*flag))),
+        Value::Number(number) => number
+            .as_i64()
+            .map(|value| Tag::Int(value as i32))
+            .or_else(|| number.as_f64().map(|value| Tag::Double(value)))
+            .ok_or_else(|| bad(format!("组件 {name} 的数字不合法"))),
+        Value::Array(values) => Ok(Tag::List(
+            values
+                .iter()
+                .map(|value| component_json_tag(value, name))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Object(entries) => Ok(Tag::Compound(
+            entries
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), component_json_tag(value, name)?)))
+                .collect::<Result<Vec<_>, TreeError>>()?,
+        )),
+        Value::Null => Ok(Tag::Compound(Vec::new())),
+    }
 }
 
 impl AdvancementTree {
@@ -671,11 +674,11 @@ fn parse_display(id: &str, object: &serde_json::Map<String, Value>) -> Result<Di
         Some(components) => icon_components(components, id)?,
         None => Vec::new(),
     };
-    let title = component_tag(
+    let title = component_json_tag(
         field(object, "title").ok_or_else(|| bad(format!("进度 {id} 的显示缺 title")))?,
         "title",
     )?;
-    let description = component_tag(
+    let description = component_json_tag(
         field(object, "description")
             .ok_or_else(|| bad(format!("进度 {id} 的显示缺 description")))?,
         "description",

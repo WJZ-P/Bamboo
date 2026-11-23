@@ -200,7 +200,9 @@ impl Tree {
                 .unwrap_or(self.positions[parent].children[0]);
             vor = self.next_or_thread(vor).unwrap_or(index);
             self.positions[vor].ancestor = index;
-            let shift = self.positions[vil].y + sil - self.positions[vir].y - sir + 1.0;
+            // 官方字节码：vil.y + sil 与 vir.y + sir 各先相加，再 fsub、再 +1。
+            // 左结合减法会在 f32 下舍入出不同结果，不能改写成连续减法。
+            let shift = (self.positions[vil].y + sil) - (self.positions[vir].y + sir) + 1.0;
             if shift > 0.0 {
                 let ancestor = self.get_ancestor(vil, default_ancestor, index);
                 self.move_subtree(index, ancestor, shift);
