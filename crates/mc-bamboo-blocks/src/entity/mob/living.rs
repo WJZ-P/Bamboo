@@ -143,6 +143,10 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             super::parrot::after_ai_step(me, mob);
         }
     }
+    // `Bee.tick` 在 `super.tick()` 之后的花蜜粒子与翻滚动画。
+    if mob.mob_type == super::MobType::Bee && !me.removed {
+        super::bee_goals::nectar_particles(me, mob, ctx);
+    }
     // `Zombie.tick` 结尾的 `drowningTracker.tick()`，在 `super.tick()` 之后。
     // The `drowningTracker.tick()` at the end of `Zombie.tick`, after `super.tick()`.
     if mob.mob_type == super::MobType::Zombie {

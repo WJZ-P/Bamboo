@@ -106,6 +106,23 @@ pub trait BlockView {
         true
     }
 
+    /// 这一格有没有活的蜂巢方块实体，以及它是不是已满（3 只）。
+    /// 并行只读视图没有方块实体表，按「存在且未满」回答。
+    fn beehive_full(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// 这一格有没有方块实体表条目。`World` 转发到 `Level`。
+    fn has_block_entity(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// 已加载区块里 `radius` 格内的蜂巢 / 蜂箱。顺序固定为 `(x, y, z)` 升序。
+    /// 这是 `PoiManager.getInRange(BEE_HOME, 20)` 的临时替代，以后换成 POI 查询。
+    fn beehives_near(&self, _center: BlockPos, _radius: i32) -> Vec<BlockPos> {
+        Vec::new()
+    }
+
     /// 官方 `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`。
     ///
     /// 主世界按时间线的两条关键帧给值；`RAIN` / `THUNDER` 两张天气覆盖层在雨强
@@ -466,6 +483,19 @@ impl BlockView for World<'_> {
 
     fn game_time(&self) -> i64 {
         World::game_time(self)
+    }
+
+    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        World::beehives_near(self, center, radius)
+    }
+
+    fn beehive_full(&self, pos: BlockPos) -> bool {
+        self.block_entity::<crate::behaviour::machines::beehive_entity::BeehiveEntity>(pos)
+            .is_some_and(|hive| hive.is_full())
+    }
+
+    fn has_block_entity(&self, pos: BlockPos) -> bool {
+        World::has_block_entity(self, pos)
     }
 
     fn bees_stay_in_hive(&self, pos: BlockPos) -> bool {
@@ -1020,6 +1050,19 @@ pub enum Command {
     TadpoleGrowUp {
         from: Box<super::mob::Mob>,
     },
+    /// 蜜蜂进巢：把当前生物存进 `BeehiveBlockEntity`，再把它从实体表里移除。
+    BeeEnterHive {
+        hive: BlockPos,
+    },
+    /// 蜜蜂授粉作物：写方块状态并发 2011 事件。
+    BeeGrowCrop {
+        pos: BlockPos,
+        state: BlockState,
+    },
+    /// `Bee.tick` 的花蜜粒子：每次两发 `level.random.nextDouble()`。
+    BeeNectarParticles {
+        count: usize,
+    },
     /// `TryLaySpawnOnFluidNearLand`：`setBlockAndUpdate(pos, FROGSPAWN)`。
     ///
     /// `TryLaySpawnOnFluidNearLand`: `setBlockAndUpdate(pos, FROGSPAWN)`.
@@ -1433,6 +1476,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::SetMobDelta { target, delta } => {
             world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
+        }
+        Command::BeeEnterHive { hive } => super::mob::bee_goals::apply_enter_hive(me, world, hive),
+        Command::BeeGrowCrop { pos, state } => {
+            world.level_event(2011, pos, 15);
+            let _ = world.set_block_and_update(pos, state);
+        }
+        Command::BeeNectarParticles { count } => {
+            for _ in 0..count {
+                let _ = world.random().next_double();
+                let _ = world.random().next_double();
+            }
         }
         Command::FrogEat {
             target,

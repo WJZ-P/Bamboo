@@ -2029,6 +2029,12 @@ impl<'a> World<'a> {
         self.level.block_weather().is_raining()
     }
 
+    /// `PoiManager.getInRange(BEE_HOME, 20)` 的临时替代：只查已加载区块。
+    /// 以后换成 POI 查询；未加载区块的蜂巢当前为不可见。
+    pub fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        self.level.beehives_near(center, radius)
+    }
+
     /// `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`：主世界时间线，
     /// 再叠上 `RAIN` / `THUNDER` 两张天气层（强度大于 0 就置真）。
     ///
