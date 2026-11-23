@@ -79,8 +79,16 @@ pub fn read(brain: &mut Brain, saved: &Tag) {
 
 fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
     match kind {
-        MemoryType::IsPanicking | MemoryType::DangerDetectedRecently => match raw {
+        MemoryType::IsPanicking
+        | MemoryType::DangerDetectedRecently
+        | MemoryType::HuntingCooldown => match raw {
             Tag::Byte(value) => Some(MemoryValue::Bool(*value != 0)),
+            _ => None,
+        },
+        // `Unit.CODEC` 存成空 compound，读回来是 `Unit`。
+        // `Unit.CODEC` writes an empty compound; reading it back yields `Unit`.
+        MemoryType::IsInWater | MemoryType::IsPregnant => match raw {
+            Tag::Compound(_) => Some(MemoryValue::Unit),
             _ => None,
         },
         _ => tag::java_i32(raw).ok().map(MemoryValue::Int),

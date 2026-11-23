@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod bat;
 mod brain;
 mod egg;
 mod equine;
@@ -43,11 +44,13 @@ mod gen_spawn;
 mod grazing;
 mod llama_spit;
 mod natural_spawn;
+mod phantom;
 mod projectile;
 mod shot;
 mod skeleton_death;
 mod skeleton_spawn;
 mod squid;
+mod water_mob;
 mod witch_throw;
 
 const MIN_Y: i32 = -64;
@@ -106,7 +109,12 @@ enum Line {
     EggThrow(egg::EggThrowCase),
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
+    Bat(Box<bat::BatCase>),
     Fish(Box<fish::FishCase>),
+    PhantomSpawn(Box<phantom::PhantomSpawnCase>),
+    Phantom(Box<phantom::PhantomCase>),
+    WaterMob(Box<water_mob::WaterMobCase>),
+    AxolotlBreed(water_mob::AxolotlBreedCase),
     End(End),
 }
 
@@ -541,6 +549,16 @@ struct CowSetup {
     /// The block state an enderman carries; 0 means empty-handed.
     #[serde(default)]
     carried: i32,
+    /// 海龟场景：开局带蛋标志。
+    ///
+    /// Turtle scenes: the starting has-egg flag.
+    #[serde(default, rename = "turtleEgg")]
+    turtle_egg: bool,
+    /// 海龟场景：家方块（x, y, z）。
+    ///
+    /// Turtle scenes: the home block (x, y, z).
+    #[serde(default, rename = "turtleHome")]
+    turtle_home: [i32; 3],
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,14 +682,32 @@ struct CowStep {
     rider_count: usize,
     #[serde(default)]
     owner: Option<String>,
+    /// 海龟逐刻状态；别的生物官方那侧不写这几个键，缺省全是 0 / false。
+    ///
+    /// Turtle per-tick state; the official side omits these keys for other mobs,
+    /// so they default to 0 / false.
+    #[serde(default, rename = "turtleEgg")]
+    turtle_egg: i32,
+    #[serde(default, rename = "turtleLaying")]
+    turtle_laying: i32,
+    #[serde(default, rename = "turtleLayCount")]
+    turtle_lay_count: i32,
+    #[serde(default, rename = "turtleGoingHome")]
+    turtle_going_home: bool,
+    #[serde(default, rename = "turtleHomeX")]
+    turtle_home_x: i32,
+    #[serde(default, rename = "turtleHomeY")]
+    turtle_home_y: i32,
+    #[serde(default, rename = "turtleHomeZ")]
+    turtle_home_z: i32,
 }
 
-/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊，以及苦力怕、
-/// 蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
+/// 走 Java 一侧 `playZombie` 的场景：僵尸，兔子、狐狸、狼，犰狳、山羊、青蛙、蝌蚪、
+/// 骆驼，以及苦力怕、蜘蛛、洞穴蜘蛛、末影人、史莱姆、女巫和溺尸。
 ///
 /// Scenes played by the Java `playZombie` driver: zombies, the wild animals,
-/// armadillos and goats, plus creepers, spiders, cave spiders, endermen, slimes,
-/// witches and drowned.
+/// armadillos, goats, frogs, tadpoles and camels, plus creepers, spiders, cave spiders,
+/// endermen, slimes, witches and drowned.
 fn zombie_style(name: &str) -> bool {
     [
         "zombie_",
@@ -680,6 +716,9 @@ fn zombie_style(name: &str) -> bool {
         "wolf_",
         "armadillo_",
         "goat_",
+        "frog_",
+        "tadpole_",
+        "camel_",
         "polar_bear_fight_",
         "creeper_",
         "spider_",
@@ -1044,7 +1083,17 @@ impl Level for MobLevel {
             Some(view)
         };
         let source = loot.source;
-        let attacker = source.attacker.and_then(player);
+        if loot.victim == mc_bamboo_blocks::entity::mob::MobType::Slime {
+            victim.cube_mob_size = Some(loot.cube_size);
+        }
+        // 生物打死生物：攻击者按伤害来源带的类型建。
+        // A mob killing a mob: the attacker comes from the type carried by the source.
+        let typed = source.attacker_type.map(|kind| {
+            let mut view = EntityView::new(kind);
+            view.is_living = true;
+            view
+        });
+        let attacker = source.attacker.and_then(player).or(typed);
         let direct = source.direct.and_then(player).or_else(|| {
             source
                 .projectile_motion
@@ -1253,7 +1302,12 @@ impl Report {
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
+                Line::Bat(case) => self.replay_bat(&case),
                 Line::Fish(case) => self.replay_fish(&case),
+                Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
+                Line::Phantom(case) => self.replay_phantom(&case),
+                Line::WaterMob(case) => self.replay_water_mob(&case),
+                Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
@@ -1488,11 +1542,13 @@ impl Report {
                 let yaw = f32::from_bits(cow.yaw as u32);
                 // 场景编号（两侧同一套，别撞号）：1 僵尸、2 尸壳、3 猪、4 羊、5 鸡、
                 // 6 兔子、7 狐狸、8 狼、9..=12 马科、13 犰狳、14 山羊、15 熊猫、
-                // 16 北极熊、17 哞菇、40..=43 敌对生物、60 海龟，其余是牛。
+                // 16 北极熊、17 哞菇、18 青蛙、19 蝌蚪、20 骆驼、
+                // 40..=43 敌对生物、60 海龟，其余是牛。
                 // Scene kind ids (one shared set, no collisions): 1 zombie, 2 husk,
                 // 3 pig, 4 sheep, 5 chicken, 6 rabbit, 7 fox, 8 wolf, 9..=12 equines,
                 // 13 armadillo, 14 goat, 15 panda, 16 polar bear, 17 mooshroom,
-                // 40..=43 hostiles, 60 turtle; anything else is a cow.
+                // 18 frog, 19 tadpole, 20 camel, 40..=43 hostiles, 60 turtle;
+                // anything else is a cow.
                 let kind = match cow.kind {
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
@@ -1505,9 +1561,15 @@ impl Report {
                     9..=12 => equine::scene_kind(cow.kind),
                     13 => mc_bamboo_blocks::entity::mob::MobType::Armadillo,
                     14 => mc_bamboo_blocks::entity::mob::MobType::Goat,
+                    18 => mc_bamboo_blocks::entity::mob::MobType::Frog,
+                    19 => mc_bamboo_blocks::entity::mob::MobType::Tadpole,
+                    20 => mc_bamboo_blocks::entity::mob::MobType::Camel,
                     15 => mc_bamboo_blocks::entity::mob::MobType::Panda,
                     16 => mc_bamboo_blocks::entity::mob::MobType::PolarBear,
                     17 => mc_bamboo_blocks::entity::mob::MobType::Mooshroom,
+                    21 => mc_bamboo_blocks::entity::mob::MobType::Ocelot,
+                    22 => mc_bamboo_blocks::entity::mob::MobType::Cat,
+                    23 => mc_bamboo_blocks::entity::mob::MobType::Parrot,
                     40 => mc_bamboo_blocks::entity::mob::MobType::Creeper,
                     41 => mc_bamboo_blocks::entity::mob::MobType::Spider,
                     42 => mc_bamboo_blocks::entity::mob::MobType::CaveSpider,
@@ -1580,6 +1642,22 @@ impl Report {
                         if cow.carried != 0 {
                             mob.set_carried_block(Some(BlockState(cow.carried as u32)));
                         }
+                        // 海龟场景：把开局带蛋和家方块写进状态，和官方那一侧一致。
+                        // Turtle scenes: seed the starting has-egg flag and home position,
+                        // matching the official side.
+                        if kind == mc_bamboo_blocks::entity::mob::MobType::Turtle {
+                            mob.turtle.home_pos = BlockPos::new(
+                                cow.turtle_home[0],
+                                cow.turtle_home[1],
+                                cow.turtle_home[2],
+                            );
+                            mob.turtle.has_egg = cow.turtle_egg;
+                            // 改坏确认：把带蛋标志取反，产卵场景从第一刻起状态就不一致。
+                            // Break-self-test: flip the has-egg flag so the lay scenes mismatch.
+                            if matches!(break_test, Some("turtle_egg")) {
+                                mob.turtle.has_egg = !mob.turtle.has_egg;
+                            }
+                        }
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if let Some(mob) = entity.kind.mob_mut()
@@ -1604,7 +1682,13 @@ impl Report {
                             mob.y_body_rot = yaw;
                         }
                     }
-                    if cow.age != 0 && !slime {
+                    let tadpole = kind == mc_bamboo_blocks::entity::mob::MobType::Tadpole;
+                    if tadpole {
+                        // 蝌蚪的「年龄」那一列是它自己的 `Tadpole.age`。
+                        // For tadpoles the age column is their own `Tadpole.age`.
+                        entity.with_mob(|_, mob| mob.tadpole_age = cow.age);
+                    }
+                    if cow.age != 0 && !slime && !tadpole {
                         // 牛按 `AgeableMob` 的负年龄判幼年；僵尸场景沿用
                         // Java 一侧的 `setBaby(age != 0)`，正数也表示幼年。
                         let baby = zombie_kind || cow.age < 0;
@@ -1792,7 +1876,11 @@ impl Report {
                     let mut uuid = [0u8; 16];
                     uuid[..8].copy_from_slice(&1_u64.to_be_bytes());
                     uuid[8..].copy_from_slice(&(2_u64 + player_index as u64).to_be_bytes());
-                    let held = mc_bamboo_protocol::item::ItemStack::new(item, 1);
+                    let held = if item == 0 {
+                        mc_bamboo_protocol::item::ItemStack::empty()
+                    } else {
+                        mc_bamboo_protocol::item::ItemStack::new(item, 1)
+                    };
                     let request = mc_bamboo_blocks::entity::mob::interact::MobInteractRequest {
                         player_uid: player.id,
                         player_uuid: uuid,
@@ -2252,6 +2340,13 @@ impl Report {
                 plain!(tmp);
                 plain!(rider_count);
                 plain!(owner);
+                plain!(turtle_egg);
+                plain!(turtle_laying);
+                plain!(turtle_lay_count);
+                plain!(turtle_going_home);
+                plain!(turtle_home_x);
+                plain!(turtle_home_y);
+                plain!(turtle_home_z);
             }
             if diffs.is_empty() {
                 continue;
@@ -3671,6 +3766,17 @@ fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
             level.entities.get(id).and_then(|entity| {
                 step_of(&entity, lr).map(|mut step| {
                     step.bh = bh;
+                    // `Frog.getTongueTarget()`：目标已经不在世界里时是空的。
+                    // `Frog.getTongueTarget()` is empty once the target has left the world.
+                    let frog = entity.kind.mob().is_some_and(|mob| {
+                        mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog
+                    });
+                    if frog
+                        && step.goat >> 4 != 0
+                        && level.entities.get((step.goat >> 4) - 1).is_none()
+                    {
+                        step.goat &= 15;
+                    }
                     step.brain = brain::dump(level, &entity);
                     step
                 })
@@ -3840,7 +3946,13 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         fire: entity.remaining_fire_ticks,
         air: mob.air_supply,
         seed: entity.random.state(),
-        age: mob.age,
+        age: if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Tadpole {
+            // 蝌蚪：自己的年龄，锁住时再加 `1 << 20`。
+            // Tadpoles: their own age, plus `1 << 20` while locked.
+            mob.tadpole_age + if mob.age_locked { 1 << 20 } else { 0 }
+        } else {
+            mob.age
+        },
         love: mob.in_love,
         lh: mob.left_handed,
         fr: mob
@@ -3930,6 +4042,13 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
             .as_ref()
             .and_then(|state| state.owner.as_ref())
             .map(uuid_text),
+        turtle_egg: i32::from(mob.turtle.has_egg),
+        turtle_laying: i32::from(mob.turtle.laying_egg),
+        turtle_lay_count: mob.turtle.lay_egg_counter,
+        turtle_going_home: mob.turtle.going_home,
+        turtle_home_x: mob.turtle.home_pos.x,
+        turtle_home_y: mob.turtle.home_pos.y,
+        turtle_home_z: mob.turtle.home_pos.z,
     }
 }
 
@@ -3937,6 +4056,19 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
 ///
 /// The goat's four flag bits, matching `goat` in the Java `zombieStepJson`.
 fn goat_flags(mob: &mc_bamboo_blocks::entity::mob::Mob) -> i32 {
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Frog {
+        // 青蛙借这一列：姿势占低 4 位，舌头目标的实体 ID 加一放在高位。
+        // Frogs borrow this column: the pose in the low four bits and the tongue
+        // target's entity id plus one above them.
+        use mc_bamboo_blocks::entity::mob::frog::Pose;
+        let pose = match mob.frog.pose {
+            Pose::Standing => 0,
+            Pose::Croaking => 1,
+            Pose::LongJumping => 2,
+            Pose::UsingTongue => 3,
+        };
+        return pose | mob.frog.tongue_target.map_or(0, |uid| uid + 1) << 4;
+    }
     if mob.mob_type != mc_bamboo_blocks::entity::mob::MobType::Goat {
         return 0;
     }
@@ -4013,6 +4145,35 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
             mob.panda.eat_counter,
             mob.panda.flags,
         ),
+        MobType::Ocelot => format!(
+            "t{}|c{}|s{}",
+            u8::from(mob.ocelot.trusting),
+            u8::from(mob.ocelot.crouching),
+            u8::from(mob.sprinting),
+        ),
+        MobType::Cat => format!(
+            "t{}|o{}|p{}|l{}|r{}|c{}|v{}|cr{}|s{}|u{}",
+            u8::from(mob.tame.is_tame()),
+            u8::from(mob.tame.ordered_to_sit),
+            u8::from(mob.tame.in_sitting_pose()),
+            u8::from(mob.cat.lying),
+            u8::from(mob.cat.relax_state_one),
+            mob.cat.collar,
+            mob.cat.variant_name(),
+            u8::from(mob.cat.crouching),
+            u8::from(mob.sprinting),
+            mob.tame
+                .owner
+                .map_or_else(|| "-".to_owned(), |uuid| uuid_text(&uuid)),
+        ),
+        MobType::Parrot => format!(
+            "t{}|o{}|s{}|v{}|r{}",
+            u8::from(mob.tame.is_tame()),
+            u8::from(mob.tame.ordered_to_sit),
+            u8::from(mob.tame.in_sitting_pose()),
+            mob.parrot.variant,
+            mob.parrot.ride_cooldown,
+        ),
         MobType::Creeper => mc_bamboo_blocks::entity::mob::creeper::describe(mob),
         MobType::Enderman => mob.describe_enderman(),
         MobType::Spider | MobType::CaveSpider => {
@@ -4030,6 +4191,20 @@ fn farm_variant(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
 /// Mirrors `MobOracle.spawnVariants`.
 fn spawn_variants(mob: &mc_bamboo_blocks::entity::mob::Mob) -> Option<[String; 2]> {
     use mc_bamboo_blocks::entity::mob::MobType;
+    if mob.mob_type == MobType::Frog {
+        // 青蛙：品种和 `FrogAi.initMemories` 抽的长跳冷却。
+        // Frogs: the variant and the long-jump cooldown `FrogAi.initMemories` drew.
+        let cooldown = mob
+            .brain
+            .as_deref()
+            .and_then(|brain| {
+                brain.memories.int(
+                    mc_bamboo_blocks::entity::mob::brain::memory::MemoryType::LongJumpCooldownTicks,
+                )
+            })
+            .unwrap_or(-1);
+        return Some([mob.frog.variant.key().to_owned(), cooldown.to_string()]);
+    }
     let variant = match mob.mob_type {
         MobType::Chicken => mob.variant.name().to_owned(),
         MobType::Cow | MobType::Pig | MobType::Sheep => farm_variant(mob),
@@ -4046,7 +4221,13 @@ fn farm_sound(mob: &mc_bamboo_blocks::entity::mob::Mob) -> String {
     match mob.mob_type {
         MobType::Pig => mob.pig_sound_variant.name().to_owned(),
         MobType::Chicken => mob.chicken_sound_variant.name().to_owned(),
-        MobType::Sheep | MobType::Mooshroom | MobType::PolarBear | MobType::Panda => String::new(),
+        MobType::Cat => mob.cat.sound_variant_name().to_owned(),
+        MobType::Parrot => String::new(),
+        MobType::Sheep
+        | MobType::Mooshroom
+        | MobType::PolarBear
+        | MobType::Panda
+        | MobType::Ocelot => String::new(),
         _ => mob.sound_variant.name().to_owned(),
     }
 }

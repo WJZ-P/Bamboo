@@ -963,6 +963,8 @@ pub struct ProjectileFacts {
     pub pig_sound_variant_serializer: i32,
     pub sheep_wool: u8,
     pub glow_squid_dark_ticks: u8,
+    pub bat_flags: u8,
+    pub phantom_size: u8,
     pub fish_from_bucket: u8,
     pub salmon_variant: u8,
     pub tropical_fish_variant: u8,
@@ -982,6 +984,13 @@ pub struct ProjectileFacts {
     pub goat_screaming: u8,
     pub goat_left_horn: u8,
     pub goat_right_horn: u8,
+    /// `Frog.DATA_VARIANT_ID` 和 `DATA_TONGUE_TARGET_ID` 的下标和序列化器。
+    ///
+    /// The indices and serializers of `Frog.DATA_VARIANT_ID` and `DATA_TONGUE_TARGET_ID`.
+    pub frog_variant: u8,
+    pub frog_variant_serializer: i32,
+    pub frog_tongue_target: u8,
+    pub frog_tongue_target_serializer: i32,
     /// `MushroomCow.DATA_TYPE` 的元数据 index。
     ///
     /// The metadata index of `MushroomCow.DATA_TYPE`.
@@ -999,12 +1008,42 @@ pub struct ProjectileFacts {
     pub panda_main_gene: u8,
     pub panda_hidden_gene: u8,
     pub panda_flags: u8,
+    /// `Ocelot.DATA_TRUSTING` 的元数据 index。
+    ///
+    /// The metadata index of `Ocelot.DATA_TRUSTING`.
+    pub ocelot_trusting: u8,
+    /// `Cat` 五个元数据访问器 index。
+    ///
+    /// The five metadata accessor indices of `Cat`.
+    pub cat_variant: u8,
+    pub cat_is_lying: u8,
+    pub cat_relax_state_one: u8,
+    pub cat_collar: u8,
+    pub cat_sound_variant: u8,
+    /// `Parrot.DATA_VARIANT_ID` 的元数据 index（INT 序列化器）。
+    ///
+    /// The metadata index of `Parrot.DATA_VARIANT_ID` (INT serializer).
+    pub parrot_variant: u8,
+    /// `Parrot.MOB_SOUND_MAP` 的条目数，`getAmbient` 模仿叫声时 `nextInt` 的上界。
+    ///
+    /// The size of `Parrot.MOB_SOUND_MAP`, the `nextInt` bound when imitating a sound.
+    pub parrot_sound_map_size: i32,
     /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
     ///
     /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).
     pub stew_flowers: Vec<(i32, Vec<[i32; 2]>)>,
     pub turtle_has_egg: u8,
     pub turtle_laying_egg: u8,
+    #[serde(default)]
+    pub dolphin_got_fish: u8,
+    #[serde(default)]
+    pub dolphin_moistness: u8,
+    #[serde(default)]
+    pub axolotl_variant: u8,
+    #[serde(default)]
+    pub axolotl_playing_dead: u8,
+    #[serde(default)]
+    pub axolotl_from_bucket: u8,
     /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
     ///
     /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.

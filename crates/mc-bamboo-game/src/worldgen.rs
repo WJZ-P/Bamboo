@@ -82,7 +82,18 @@ pub struct GeneratedChunk {
     /// 官方 `PostProcessing` 位置表（doFill 的含水层格 + FEATURES 的标记）。
     /// Official `PostProcessing` positions (doFill aquifer cells + FEATURES marks).
     pub post_processing: Vec<(i32, i32, i32)>,
+    /// `FEATURES` 写下的方块实体：世界坐标和地物 / 结构给的自定义键（不含 `id` 与
+    /// 坐标，组装时按方块状态补上）。同一格最多一条。
+    ///
+    /// Block entities written during `FEATURES`: world position plus the custom
+    /// keys a feature or structure supplied (no `id` or coordinates; assembly adds
+    /// them from the block state). At most one per cell.
+    pub block_entities: Vec<GeneratedBlockEntity>,
 }
+
+/// 一条生成期方块实体：世界坐标 `(x, y, z)` 和自定义键的复合标签。
+/// One generated block entity: world position `(x, y, z)` and its custom keys.
+pub type GeneratedBlockEntity = ((i32, i32, i32), Tag);
 
 // 解析好的只读 `Worldgen` 全进程共用一份（`Worldgen::shared()`）；每条计算线程只
 // 缓存按种子/设置建好的 `Generator`。`Generator` 引用共享 `Worldgen` 里的群系
@@ -352,6 +363,9 @@ pub fn generated_chunk_from_column(column: &RegionColumn, pos: ChunkPos) -> Gene
         biomes,
         heightmaps: compute_heightmaps_public_owned(chunk),
         post_processing: post_processing_from_archive(chunk.archive(), pos),
+        // 读盘柱子的方块实体由 `adopt_upper_content` 从盘上内容装回。
+        // A disk column's block entities come back through `adopt_upper_content`.
+        block_entities: Vec::new(),
     }
 }
 
@@ -423,6 +437,7 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
         biomes: vec![cells; SECTION_COUNT],
         heightmaps,
         post_processing: Vec::new(),
+        block_entities: Vec::new(),
     }
 }
 
@@ -1333,6 +1348,7 @@ pub fn generate_chunk_with_beardifier(
             biomes,
             heightmaps,
             post_processing: terrain.post_processing,
+            block_entities: Vec::new(),
         })
     })
 }
@@ -1353,6 +1369,7 @@ pub fn generate_biomes(config: &WorldGenConfig, x: i32, z: i32) -> Result<Genera
             biomes,
             heightmaps,
             post_processing: Vec::new(),
+            block_entities: Vec::new(),
         })
     })
 }
@@ -1446,9 +1463,19 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
     });
     // 光照层 None、isLightOn=false -> 运行时补算。
     // Light layers None/off -> settled at runtime.
+    // 生成期方块实体补上 `id` 和坐标成为完整条目，和读盘条目一样挂进柱子并交给
+    // 游戏层的表；方块状态没有这种方块实体的跳过（`ProtoChunk` 也不会留它）。
+    // Generated block entities gain `id` and coordinates to become full entries,
+    // attached and handed to the game tables exactly like disk entries; cells whose
+    // state carries no block entity are skipped.
+    let (owner, entries) = generated_block_entity_entries(chunk);
     let parts = ChunkColumnParts {
         sections,
         heightmaps,
+        preserved_block_entities: entries
+            .iter()
+            .map(|(x, y, z, kind, tag)| (*x, *y, *z, *kind, tag.clone()))
+            .collect(),
         ..ChunkColumnParts::default()
     };
     let mut column = ChunkColumn::from_parts(parts)
@@ -1474,7 +1501,7 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
             )),
             ..Default::default()
         });
-    Ok(RegionColumn::from_parts(RegionColumnParts {
+    let mut parts = RegionColumnParts {
         column: Box::new(column),
         ticks: None,
         block_entities: Default::default(),
@@ -1484,7 +1511,80 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         command_blocks: Default::default(),
         books: Default::default(),
         entities: Default::default(),
-    }))
+    };
+    if let Some(owner) = owner {
+        let tags: Vec<Tag> = entries.into_iter().map(|entry| entry.4).collect();
+        let mut problems = Vec::new();
+        crate::region::chunk_content::install_block_entities(
+            &mut parts,
+            owner,
+            &tags,
+            &mut problems,
+        );
+        if let Some(problem) = problems.first() {
+            return Err(format!(
+                "generated block entity at {}: {}",
+                problem.at, problem.message
+            ));
+        }
+    }
+    Ok(RegionColumn::from_parts(parts))
+}
+
+/// 一条装进柱子的方块实体：区块内 `x`、世界 `y`、区块内 `z`、类型、完整条目。
+type ColumnBlockEntity = (usize, i32, usize, i32, Tag);
+
+/// 把 [`GeneratedChunk::block_entities`] 补成完整条目（`id` 按方块状态取，坐标写进去，
+/// 自定义键原样跟在后面）。区块归属取第一条的坐标，坐标不在这个区块、出了世界高度、
+/// 或者方块状态没有方块实体的条目跳过。
+///
+/// Complete [`GeneratedChunk::block_entities`] into full entries (`id` from the
+/// block state, coordinates written, custom keys kept). The owning chunk comes from
+/// the first entry; entries outside it, outside the world height, or on a state
+/// without a block entity are skipped.
+fn generated_block_entity_entries(
+    chunk: &GeneratedChunk,
+) -> (Option<ChunkPos>, Vec<ColumnBlockEntity>) {
+    let Some(&((first_x, _, first_z), _)) = chunk.block_entities.first() else {
+        return (None, Vec::new());
+    };
+    let owner = ChunkPos::new(first_x >> 4, first_z >> 4);
+    let mut out = Vec::new();
+    for ((x, y, z), custom) in &chunk.block_entities {
+        if ChunkPos::new(x >> 4, z >> 4) != owner || !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(y) {
+            continue;
+        }
+        let (local_x, local_z) = ((x & 15) as usize, (z & 15) as usize);
+        let state = chunk
+            .blocks
+            .get((y - MIN_Y) as usize)
+            .and_then(|layer| layer.get(local_x * WIDTH + local_z))
+            .copied()
+            .unwrap_or(blocks::AIR);
+        let Some(kind) = mc_bamboo_data::block_of_state(state).and_then(|b| b.block_entity_type)
+        else {
+            continue;
+        };
+        let Some(id) = mc_bamboo_data::registries::block_entity_type::name_of(kind) else {
+            continue;
+        };
+        let mut fields = vec![
+            ("id".to_owned(), Tag::String(id.to_owned())),
+            ("x".to_owned(), Tag::Int(*x)),
+            ("y".to_owned(), Tag::Int(*y)),
+            ("z".to_owned(), Tag::Int(*z)),
+        ];
+        if let Tag::Compound(entries) = custom {
+            fields.extend(
+                entries
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), "id" | "x" | "y" | "z"))
+                    .cloned(),
+            );
+        }
+        out.push((local_x, *y, local_z, kind, Tag::Compound(fields)));
+    }
+    (Some(owner), out)
 }
 
 /// 把 256 列的世界高度编成官方 `LongArrayTag` 的 9 位一项、按字对齐的 long 数组。

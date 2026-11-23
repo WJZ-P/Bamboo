@@ -87,6 +87,11 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Creeper {
         super::creeper::tick(me, mob, ctx);
     }
+    // `ShoulderRidingEntity.tick`：上肩冷却先加一。
+    // `ShoulderRidingEntity.tick`: the shoulder cooldown goes up first.
+    if mob.mob_type == super::MobType::Parrot {
+        mob.parrot.ride_cooldown += 1;
+    }
     // `LivingEntity.tick` → `Entity.tick` → `Mob.baseTick`。
     base_tick(me, mob, ctx);
     detect_equipment_updates(mob);
@@ -97,7 +102,17 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::drowned::update_swimming(me, mob, target_in_water);
     }
     if !me.removed {
+        if mob.mob_type == super::MobType::Parrot {
+            // `Parrot.aiStep` 在 `super.aiStep` 之前的部分。
+            // The part of `Parrot.aiStep` before `super.aiStep`.
+            super::parrot::before_ai_step(me, mob, ctx);
+        }
         ai_step(me, mob, ctx);
+        if mob.mob_type == super::MobType::Parrot && !me.removed {
+            // `Parrot.aiStep` 结尾的 `calculateFlapping`。
+            // `calculateFlapping` at the end of `Parrot.aiStep`.
+            super::parrot::after_ai_step(me, mob);
+        }
     }
     // `Zombie.tick` 结尾的 `drowningTracker.tick()`，在 `super.tick()` 之后。
     // The `drowningTracker.tick()` at the end of `Zombie.tick`, after `super.tick()`.
@@ -110,7 +125,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         super::spider::tick(me, mob);
     }
     // `tickHeadTurn` → `Mob` 改成 `BodyRotationControl.clientTick`。
-    body_rotation_tick(me, mob);
+    body_rotation_tick(me, mob, ctx.blocks().game_time());
     range_checks(me, mob);
     // `LivingEntity.tick`：睡着的生物（只有狐狸）抬头角清零。
     // `LivingEntity.tick`: a sleeping mob (only foxes) levels its head.
@@ -149,15 +164,38 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Wolf && !me.removed {
         super::wolf::tick_after(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Cat && !me.removed {
+        super::cat::tick_after(me, mob);
+    }
     // `Armadillo.tick` 在 `super.tick()` 之后夹头、数 `inStateTicks`。
     // `Armadillo.tick` clamps the head and counts `inStateTicks` after `super.tick()`.
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::tick_after(mob);
     }
+    // `Bat.tick` 在 `super.tick()` 之后：倒挂时钉住位置，飞行时竖直速度乘 0.6。
+    // `Bat.tick` after `super.tick()`: pin a hanging bat, damp a flying bat's vertical speed.
+    if mob.mob_type == super::MobType::Bat {
+        super::bat::tick_after(me, mob);
+    }
+    // `Camel.tick` 在 `super.tick()` 之后：冲刺、冷却、夹头、坐在水里站起。
+    // `Camel.tick` after `super.tick()`: dash, cooldown, head clamp, stand up in water.
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::tick_after(me, mob, ctx);
+    }
     // `AbstractHorse.tick` 在 `super.tick()` 之后推进计时器。
     // `AbstractHorse.tick` advances its timers after `super.tick()`.
     if mob.mob_type.is_equine() {
         super::equine::tick_end(mob);
+    }
+    // `Dolphin.tick()` 在 `super.tick()` 之后：湿度、干死、搁浅扑腾。
+    // `Dolphin.tick()` after `super.tick()`: moistness, drying out, beached flopping.
+    if mob.mob_type == super::MobType::Dolphin {
+        super::dolphin::tick(me, mob, ctx);
+    }
+    // `Axolotl.customServerAiStep` 尾部：把 `PLAY_DEAD_TICKS` 记忆映射成元数据。
+    // Tail of `Axolotl.customServerAiStep`: map the PLAY_DEAD_TICKS memory to metadata.
+    if mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::sync_playing_dead(mob);
     }
 }
 
@@ -249,7 +287,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let near_sqr = 32.0 * 32.0;
     // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
     // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
-    if !persistent && distance > far_sqr && mob.removes_when_far_away() {
+    if !persistent && distance > far_sqr && mob.removes_when_far_away(me.tick_count) {
         me.discard();
         return;
     }
@@ -259,7 +297,7 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         && distance > near_sqr
     {
         // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
-        if mob.removes_when_far_away() {
+        if mob.removes_when_far_away(me.tick_count) {
             me.discard();
         }
     } else if distance < near_sqr {
@@ -383,14 +421,61 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
     mob_base_tick(me, mob, ctx);
-    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
+    if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
+        // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
+        // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply` (squid and fish).
         super::water::handle_air_supply(me, mob, ctx, pre_tick_air);
+    } else if mob.mob_type == super::MobType::Axolotl && !mob.no_ai {
+        // `Axolotl.baseTick` 的 `handleAirSupply`（`!isNoAi()` 才跑）。
+        // `Axolotl.baseTick`'s `handleAirSupply` (only when `!isNoAi()`).
+        super::axolotl::handle_air_supply(me, mob, ctx, pre_tick_air);
     }
+    // 海豚把 `handleAirSupply` 覆写成空实现，氧气完全由 `LivingEntity.baseTick` 算；
+    // 美西螈 `isNoAi()` 时也只剩 `LivingEntity.baseTick` 的那一层。
+    // A dolphin overrides `handleAirSupply` to a no-op, so air is entirely
+    // `LivingEntity.baseTick`; a no-AI axolotl falls back to that layer too.
+}
+
+/// `Entity.spawnSprintParticle`：服务端虽然不发粒子，但仍消耗两次 `random.nextDouble()`。
+///
+/// `Entity.spawnSprintParticle`: the server does not emit particles, yet still draws two `random.nextDouble()`s.
+fn spawn_sprint_particle(me: &mut Entity, view: &dyn BlockView) {
+    use mc_bamboo_data::blocks;
+    let state = view.block_state(me.on_pos(view, 0.2));
+    if state.is_air()
+        || matches!(
+            state.block_id() as u32,
+            blocks::BARRIER
+                | blocks::BUBBLE_COLUMN
+                | blocks::END_GATEWAY
+                | blocks::END_PORTAL
+                | blocks::LIGHT
+                | blocks::WATER
+                | blocks::LAVA
+                | blocks::MOVING_PISTON
+                | blocks::STRUCTURE_VOID
+        )
+    {
+        return;
+    }
+    me.random.next_double();
+    me.random.next_double();
 }
 
 /// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
 fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Entity.baseTick`。
+    // 冲刺且不在水/岩浆里、不潜行、活着时，脚下方块可见就消耗两次 `nextDouble`（粒子位置）。
+    // While sprinting out of water/lava, uncrouched and alive, a visible block below draws two `nextDouble`s.
+    if mob.sprinting
+        && !me.in_water
+        && !mob.ocelot.crouching
+        && !mob.cat.crouching
+        && !is_in_lava(me, mob)
+        && is_alive(me, mob)
+    {
+        spawn_sprint_particle(me, ctx.blocks());
+    }
     mob.was_in_powder_snow = mob.in_powder_snow;
     mob.in_powder_snow = false;
     mob.was_eye_in_water = eye_in_fluid(mob, fluid_tags::WATER);
@@ -443,19 +528,20 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         {
             // 牛不能在水下呼吸，没有效果；`OXYGEN_BONUS` 是 0，不取随机数。溺尸在
             // `#can_breathe_under_water` 里，水生生物和水呼吸效果同理不消耗空气，
-            // 反而按官方补气。
-            //
+            // 反而按官方补气；海豚 / 美西螈的最大氧气和补气方式按类型分派。
             // A cow cannot breathe underwater and has no effect; `OXYGEN_BONUS` is zero so
             // there is no draw. The drowned is in `#can_breathe_under_water`, and aquatic
-            // mobs and the water-breathing effect refill air as vanilla does.
+            // mobs and the water-breathing effect refill air as vanilla does; dolphins and
+            // axolotls override the max and refill by kind.
             let can_breathe = mob.mob_type == super::MobType::Drowned
                 || mob.mob_type.can_breathe_under_water()
                 || mob
                     .effects
                     .has(mc_bamboo_data::registries::mob_effect::WATER_BREATHING);
+            let max_air = mob.mob_type.max_air_supply();
             if can_breathe {
-                if mob.air_supply < 300 {
-                    mob.air_supply = (mob.air_supply + 4).min(300);
+                if mob.air_supply < max_air {
+                    mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
                 }
             } else {
                 mob.air_supply -= 1;
@@ -470,8 +556,8 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     );
                 }
             }
-        } else if mob.air_supply < 300 {
-            mob.air_supply = (mob.air_supply + 4).min(300);
+        } else if mob.air_supply < mob.mob_type.max_air_supply() {
+            mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
         }
         mob.last_pos = Some(me.block_position());
     }
@@ -536,9 +622,25 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::wolf::play_ambient_sound(me, mob, ctx.blocks().game_time());
                 return;
             }
+            if mob.mob_type == super::MobType::Cat {
+                super::cat::play_ambient_sound(me, mob);
+                return;
+            }
+            if mob.mob_type == super::MobType::Parrot {
+                // `Parrot.getAmbientSound` 用世界随机源挑模仿音。
+                // `Parrot.getAmbientSound` picks an imitation with the level random.
+                super::parrot::ambient_sound(me, mob, ctx);
+                return;
+            }
             // 受惊的犰狳没有叫声：`makeSound` 不跑，也不取音高。
             // A scared armadillo has no ambient sound, so no pitch draws either.
             if super::armadillo::is_scared(mob) {
+                return;
+            }
+            // `Bat.getAmbientSound`：倒挂时四次里三次不叫，不叫就不取音高。
+            // `Bat.getAmbientSound`: a hanging bat stays quiet three times in four and
+            // then draws no pitch.
+            if mob.mob_type == super::MobType::Bat && super::bat::ambient_is_muted(me, mob) {
                 return;
             }
             // `Entity.makeSound` 遇到空的叫声直接返回，也不取音高的两个随机数。
@@ -560,6 +662,14 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
     match mob.mob_type {
         kind if kind.has_no_ambient_sound() => None,
         super::MobType::Turtle if me.in_water || !me.on_ground || mob.is_baby() => None,
+        // `Dolphin.getAmbientSound`：水里 / 水外两种。
+        // `Dolphin.getAmbientSound`: water / land variants.
+        super::MobType::Dolphin => Some(super::dolphin::ambient_voice(me.in_water)),
+        // `Axolotl.getAmbientSound` 加 `playAmbientSound` 的装死判断。
+        // `Axolotl.getAmbientSound` plus `playAmbientSound`'s playing-dead gate.
+        super::MobType::Axolotl => {
+            super::axolotl::ambient_voice(mob.axolotl.playing_dead, me.in_water)
+        }
         _ => Some(voice_of(mob, Voice::Ambient, me.in_water)),
     }
 }
@@ -596,6 +706,7 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
             .hurt_sound()
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Hurt),
+                super::MobType::Cat => super::cat::sound(mob, super::cat::Sound::Hurt),
                 super::MobType::Pig => mob.pig_sound_variant.hurt(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[1],
                 super::MobType::Slime => super::slime::hurt_sound(mob),
@@ -607,6 +718,7 @@ fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
             .death_sound()
             .unwrap_or_else(|| match mob.mob_type {
                 super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Death),
+                super::MobType::Cat => super::cat::sound(mob, super::cat::Sound::Death),
                 super::MobType::Pig => mob.pig_sound_variant.death(mob.is_baby()),
                 super::MobType::Chicken => super::chicken::sounds(mob)[2],
                 super::MobType::Slime => super::slime::death_sound(mob),
@@ -769,7 +881,14 @@ pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
         super::wolf::play_ambient_sound(me, mob, 0);
         return;
     }
+    if mob.mob_type == super::MobType::Cat {
+        super::cat::play_ambient_sound(me, mob);
+        return;
+    }
     if mob.mob_type.has_no_ambient_sound() {
+        return;
+    }
+    if mob.mob_type == super::MobType::Bat && super::bat::ambient_is_muted(me, mob) {
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {
@@ -845,7 +964,14 @@ pub(super) fn voice_pitch(me: &mut Entity, mob: &Mob) -> f32 {
     let first = me.random.next_float();
     let second = me.random.next_float();
     let base = if mob.is_baby() { 1.5 } else { 1.0 };
-    (first - second) * 0.2 + base
+    let pitch = (first - second) * 0.2 + base;
+    if mob.mob_type == super::MobType::Bat {
+        // `Bat.getVoicePitch()`：`super.getVoicePitch() * 0.95F`。
+        // `Bat.getVoicePitch()`: `super.getVoicePitch() * 0.95F`.
+        pitch * 0.95
+    } else {
+        pitch
+    }
 }
 
 /// `Entity.isInWall`：眼睛那一小片和会让人窒息的方块重叠。
@@ -903,7 +1029,7 @@ fn tick_death(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    mob.needs_sync = false;
+    mob.needs_sync = std::mem::take(&mut mob.knockback_sync);
     // `Witch.aiStep` 的喝药段在 `super.aiStep()`（`Monster.aiStep` 的亮度）之前。
     //
     // The potion part of `Witch.aiStep` runs before `super.aiStep()`, which is the
@@ -1038,6 +1164,8 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                 super::equine::tick_ridden(me, mob, view.yaw, view.pitch);
             }
             me.delta = Vec3::default();
+        } else if mob.mob_type == super::MobType::Phantom {
+            super::phantom::travel(me, mob, ctx, input);
         } else if super::squid::is_squid(mob.mob_type) {
             // `Squid.travel`：只有 `move(SELF, deltaMovement)`。
             // `Squid.travel` is a bare `move(SELF, deltaMovement)`.
@@ -1155,6 +1283,9 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if super::turtle::is_turtle(mob.mob_type) {
         super::turtle::ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Tadpole {
+        super::tadpole::ai_step(me, mob, ctx);
     }
     if mob.age_lock_particle_timer > 0 {
         if mob.age_lock_particle_timer % 2 == 0 {
@@ -1278,7 +1409,9 @@ pub(crate) fn breed_with(
             father_fox: mob.fox.variant,
             father_love: mob.love_cause,
             father_wolf: Box::new((mob.wolf, mob.tame)),
+            father_cat: mob.cat,
             father_screaming: mob.goat.screaming,
+            father_axolotl: mob.axolotl.variant,
         },
         me,
     );
@@ -1343,8 +1476,29 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Goat {
         super::goat::custom_server_ai_step(me, mob, ctx);
     }
+    if mob.mob_type == super::MobType::Frog {
+        super::frog::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Tadpole {
+        super::tadpole::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::custom_server_ai_step(me, mob, ctx);
+    }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Bat {
+        super::bat::custom_server_ai_step(me, mob, ctx);
+    }
+    if mob.mob_type == super::MobType::Ocelot {
+        super::ocelot::custom_server_ai_step(mob);
+    }
+    if mob.mob_type == super::MobType::Cat {
+        super::cat::custom_server_ai_step(mob);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1370,18 +1524,60 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if mob.mob_type == super::MobType::Slime {
         super::slime::move_control_tick(me, mob);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Phantom {
+        // `PhantomLookControl.tick` 是空的。
+        // `PhantomLookControl.tick` is empty.
+        super::phantom::move_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Tadpole {
+        move_control_tick(me, mob, ctx.blocks());
+        super::tadpole::look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Frog {
+        // `Frog.FrogLookControl.resetXRotOnTick`：舌头有目标时不把俯仰归零。
+        // `Frog.FrogLookControl.resetXRotOnTick`: the pitch is kept while the tongue has
+        // a target.
+        let keep_x_rot = super::frog::has_tongue_target(mob, ctx);
+        super::frog::move_control_tick(me, mob);
+        look_control_tick_with(me, mob, !keep_x_rot);
     } else if mob.mob_type == super::MobType::Drowned {
         let target = super::goals::current_combat_target(mob, ctx);
         let target_in_water = super::goals::current_target_in_water(mob, ctx);
         super::drowned::move_control_tick(me, mob, ctx.blocks(), target, target_in_water);
         look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Axolotl {
+        // `AxolotlMoveControl` / `AxolotlLookControl`：装死时两支都停。
+        // `AxolotlMoveControl` / `AxolotlLookControl`: both stop while playing dead.
+        super::axolotl::move_control_tick(me, mob);
+        super::axolotl::look_control_tick(me, mob);
+    } else if mob.mob_type == super::MobType::Dolphin {
+        // 海豚的 `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` 与
+        // `SmoothSwimmingLookControl(this, 10)`。
+        // The dolphin's `SmoothSwimmingMoveControl(85, 10, 0.02F, 0.1F, true)` and
+        // `SmoothSwimmingLookControl(this, 10)`.
+        super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
+        super::smooth_swim::look_tick(me, mob, 10.0);
     } else {
+        if mob.mob_type == super::MobType::Camel {
+            // `CamelMoveControl.tick` 在 `super.tick()` 之前。
+            // `CamelMoveControl.tick` runs before `super.tick()`.
+            super::camel::before_move_control(me, mob, ctx.blocks().game_time());
+        }
         move_control_tick(me, mob, ctx.blocks());
         look_control_tick(me, mob);
     }
     // `JumpControl.tick`。
     mob.jumping = mob.jump.jump;
     mob.jump.jump = false;
+}
+
+/// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。
+///
+/// `Mob.getHeadRotSpeed()`: 35 for frogs, 10 otherwise.
+pub(crate) fn head_rot_speed(mob: &Mob) -> f32 {
+    if mob.mob_type == super::MobType::Frog {
+        35.0
+    } else {
+        control::HEAD_ROT_SPEED as f32
+    }
 }
 
 /// `Mob.setSpeed`：同时设 `zza`。
@@ -1400,6 +1596,12 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
     }
     if super::fish::is_fish(mob.mob_type) {
         super::fish::move_control_tick(me, mob);
+        return;
+    }
+    if mob.mob_type == super::MobType::Parrot {
+        // `Parrot` 用 `FlyingMoveControl`。
+        // Parrots use `FlyingMoveControl`.
+        super::parrot::move_control_tick(me, mob);
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {
@@ -1461,7 +1663,15 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
 
 /// `LookControl.tick`。
 fn look_control_tick(me: &mut Entity, mob: &mut Mob) {
-    if mob.mob_type != super::MobType::Fox || super::fox::resets_x_rot(mob) {
+    let reset_x_rot = mob.mob_type != super::MobType::Fox || super::fox::resets_x_rot(mob);
+    look_control_tick_with(me, mob, reset_x_rot);
+}
+
+/// `LookControl.tick`，`resetXRotOnTick()` 的结果由调用方给。
+///
+/// `LookControl.tick` with the caller's `resetXRotOnTick()`.
+fn look_control_tick_with(me: &mut Entity, mob: &mut Mob, reset_x_rot: bool) {
+    if reset_x_rot {
         mob.x_rot = clamp_x_rot(0.0, mob.x_rot);
     }
     if mob.look.look_at_cooldown > 0 {
@@ -1491,16 +1701,30 @@ fn max_head_y_rot(mob: &Mob) -> f32 {
     } else if mob.mob_type == super::MobType::Goat {
         // `Goat.getMaxHeadYRot`。
         15.0
+    } else if mob.mob_type == super::MobType::Frog {
+        // `Frog.getMaxHeadYRot`。
+        5.0
+    } else if mob.mob_type == super::MobType::Camel {
+        // `Camel.getMaxHeadYRot()`。
+        super::camel::max_head_y_rot()
     } else {
         MAX_HEAD_Y_ROT as f32
     }
 }
 
-/// `BodyRotationControl.clientTick`；犰狳受惊时整个跳过。
+/// `BodyRotationControl.clientTick`；犰狳受惊、骆驼 `refuseToMove()` 时整个跳过。
 ///
-/// `BodyRotationControl.clientTick`; skipped entirely for a scared armadillo.
-fn body_rotation_tick(me: &Entity, mob: &mut Mob) {
+/// `BodyRotationControl.clientTick`; skipped entirely for a scared armadillo and
+/// for a camel that `refuseToMove()` (`CamelBodyRotationControl`).
+fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
     if super::armadillo::is_scared(mob) {
+        return;
+    }
+    if mob.mob_type == super::MobType::Phantom {
+        super::phantom::body_rotation_tick(me, mob);
+        return;
+    }
+    if mob.mob_type == super::MobType::Camel && super::camel::refuse_to_move(mob, time) {
         return;
     }
     let dx = me.position.x - me.old_position.x;
@@ -1563,6 +1787,29 @@ pub(crate) fn jump_boost_power(mob: &Mob) -> f32 {
         .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0))
 }
 
+/// `LivingEntity.setSprinting`：更新共享疾跑标志并在 `MOVEMENT_SPEED` 上增删
+/// `minecraft:sprinting`（+0.3F，`ADD_MULTIPLIED_TOTAL`，临时修饰符）。
+///
+/// `LivingEntity.setSprinting`: update the shared sprinting flag and add/remove the
+/// transient `minecraft:sprinting` (+0.3F, `ADD_MULTIPLIED_TOTAL`) speed modifier.
+pub(super) fn set_sprinting(mob: &mut Mob, sprinting: bool) {
+    mob.sprinting = sprinting;
+    if let Some(speed) = mob.attributes.instance(attribute::MOVEMENT_SPEED) {
+        let removed = speed.remove_modifier("minecraft:sprinting");
+        if sprinting {
+            speed.modifiers.push(super::attributes::Modifier {
+                id: "minecraft:sprinting".to_owned(),
+                amount: f64::from(0.3_f32),
+                operation: super::attributes::Operation::AddMultipliedTotal,
+                permanent: false,
+            });
+        }
+        if removed || sprinting {
+            speed.touch_sync();
+        }
+    }
+}
+
 /// `jumpFromGround`。
 fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
@@ -1576,6 +1823,12 @@ fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let power = strength * multiplier * block_jump_factor(me, view) + boost;
     if power > 1.0e-5 {
         me.delta.y = mth::java_max(f64::from(power), me.delta.y);
+        if mob.sprinting {
+            let angle = me.y_rot * (std::f32::consts::PI / 180.0);
+            let sin = f64::from(mth::sin(f64::from(angle)));
+            let cos = f64::from(mth::cos(f64::from(angle)));
+            me.delta = me.delta.add(Vec3::new(-sin * 0.2, 0.0, cos * 0.2));
+        }
         mob.needs_sync = true;
     }
     if is_rabbit {
@@ -1586,7 +1839,13 @@ fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
 // ---- travel ----
 
 /// `LivingEntity.travel`。
-fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
+fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, mut input: Vec3) {
+    // `Camel.travel`：`refuseToMove && onGround` 时把水平速度和输入清零，再跑 `super.travel`。
+    // `Camel.travel`: zero horizontal velocity / input while refusing on ground, then
+    // `super.travel`.
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::travel(me, mob, ctx.blocks().game_time(), &mut input);
+    }
     let in_liquid = is_in_liquid(me, mob);
     let levitation = mob.effects.amplifier(mob_effect::LEVITATION);
     if in_liquid {
@@ -1669,7 +1928,15 @@ fn travel_in_air(
     let air_drag = mob.attributes.value(attribute::AIR_DRAG_MODIFIER) as f32;
     let horizontal_air = modified_friction(0.91, air_drag);
     let horizontal = block_friction * horizontal_air;
-    let vertical = modified_friction(0.98, air_drag);
+    // `LivingEntity.travelInAir`：`omnidirectionalAirMover()`（鹦鹉、蜜蜂）竖直方向也用
+    // 0.91 的空气阻力，而不是 0.98。
+    // `LivingEntity.travelInAir`: an `omnidirectionalAirMover()` (parrot, bee) uses the
+    // 0.91 air drag vertically instead of 0.98.
+    let vertical = if mob.mob_type == super::MobType::Parrot {
+        horizontal_air
+    } else {
+        modified_friction(0.98, air_drag)
+    };
     me.delta = Vec3::new(
         movement.x * f64::from(horizontal),
         y * f64::from(vertical),
@@ -1742,9 +2009,10 @@ pub(crate) fn on_climbable(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> 
     if mob.mob_type.climbs_walls() {
         return super::spider::on_climbable(mob);
     }
-    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓。
+    // `AbstractHorse.onClimbable` 恒假，马科不爬梯子和藤蔓；`Phantom.onClimbable` 也恒假。
     // `AbstractHorse.onClimbable` is always false; equines never climb ladders or vines.
-    if mob.mob_type.is_equine() {
+    // `Phantom.onClimbable` is always false as well.
+    if mob.mob_type.is_equine() || mob.mob_type == super::MobType::Phantom {
         return false;
     }
     let pos = me.block_position();
@@ -1788,10 +2056,26 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
         super::fish::travel_in_water(me, mob, ctx, input);
         return;
     }
+    // `Frog.travelInWater` 换掉了水里的推进。
+    // `Frog.travelInWater` replaces the in-water thrust.
+    if me.in_water && mob.mob_type == super::MobType::Frog {
+        super::frog::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     // `Turtle.travelInWater` 换掉了水里的推进。
     // `Turtle.travelInWater` replaces the in-water thrust.
     if me.in_water && super::turtle::is_turtle(mob.mob_type) {
         super::turtle::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    // `Dolphin.travelInWater` / `Axolotl.travelInWater` 换掉水里的推进。
+    // `Dolphin.travelInWater` / `Axolotl.travelInWater` replace the in-water thrust.
+    if me.in_water && mob.mob_type == super::MobType::Dolphin {
+        super::dolphin::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    if me.in_water && mob.mob_type == super::MobType::Axolotl {
+        super::axolotl::travel_in_water(me, mob, ctx, input);
         return;
     }
     let falling = me.delta.y <= 0.0;
@@ -1869,14 +2153,22 @@ fn jump_out_of_fluid(me: &mut Entity, mob: &Mob, view: &dyn BlockView, old_y: f6
 
 // ---- 推挤 ----
 
-/// `LivingEntity.pushEntities`：身边的生物互相推开。
+/// `LivingEntity.pushEntities`：身边的生物互相推开。蝙蝠把它覆写成空的，别人的
+/// `EntitySelector.pushableBy` 也因为 `isPushable()` 为假而跳过蝙蝠。
+///
+/// `LivingEntity.pushEntities`: nearby mobs shove each other apart. Bats override it with
+/// an empty body, and `EntitySelector.pushableBy` skips them as `isPushable()` is false.
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if !mob.mob_type.is_pushable() {
+        return;
+    }
     let bounds = me.bounding_box();
     let mut others = Vec::new();
     ctx.for_each_other_in(bounds, &mut |other| {
         if let KindPublic::Mob(public) = &other.kind
             && !other.removed
             && public.is_alive()
+            && public.mob_type.is_pushable()
         {
             others.push((other.uid, other.position));
         }
@@ -1921,6 +2213,9 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     for position in players {
         if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
             me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+            // `Entity.push(Entity)` 推开自己那一半时也置 `needsSync`。
+            // The self half of `Entity.push(Entity)` also sets `needsSync`.
+            mob.needs_sync = true;
         }
     }
     for (uid, position) in others {
@@ -1999,6 +2294,11 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Panda {
         mob.panda.sit(false);
     }
+    // `Parrot.hurtServer`：受伤时取消坐下命令。
+    // `Parrot.hurtServer`: damage clears the sitting order.
+    if mob.mob_type == super::MobType::Parrot {
+        mob.tame.ordered_to_sit = false;
+    }
     // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
     // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.
     let amount = if mob.mob_type == super::MobType::Armadillo {
@@ -2009,7 +2309,27 @@ pub(crate) fn hurt_server(
     if super::squid::is_squid(mob.mob_type) {
         return super::squid::hurt_server(me, mob, ctx, source, amount);
     }
+    if mob.mob_type == super::MobType::Bat {
+        return super::bat::hurt_server(me, mob, ctx, source, amount);
+    }
+    // `Axolotl.hurtServer` 在父类之前做装死判定（`PLAY_DEAD_TICKS`）。
+    // `Axolotl.hurtServer` runs the play-dead roll before the superclass.
+    if mob.mob_type == super::MobType::Axolotl {
+        let has_source = source.attacker.is_some() || source.direct.is_some();
+        super::axolotl::maybe_play_dead(me, mob, amount, has_source);
+    }
     living_hurt_server(me, mob, ctx, source, amount)
+}
+
+/// `isInvulnerableTo` 里已建模的部分：已移除，或无敌且伤害不能穿透。
+///
+/// The modelled part of `isInvulnerableTo`: removed, or invulnerable to a source that
+/// does not bypass it.
+pub(super) fn is_invulnerable_to(me: &Entity, mob: &Mob, source: &DamageSource) -> bool {
+    me.removed
+        || ((mob.invulnerable || mob.invulnerable_time > 0)
+            && !source.kind.bypasses_invulnerability()
+            && !source.creative_player)
 }
 
 /// `LivingEntity.hurtServer`。
@@ -2020,12 +2340,7 @@ pub(super) fn living_hurt_server(
     source: DamageSource,
     amount: f32,
 ) -> bool {
-    // `isInvulnerableTo`。
-    if me.removed
-        || ((mob.invulnerable || mob.invulnerable_time > 0)
-            && !source.kind.bypasses_invulnerability()
-            && !source.creative_player)
-    {
+    if is_invulnerable_to(me, mob, &source) {
         return false;
     }
     // `Wolf.hurtServer`：没有免疫就先站起来，再走 `super.hurtServer`。
@@ -2068,14 +2383,14 @@ fn hurt_living(
             return false;
         }
         actually_hurt(me, mob, source, amount - mob.last_hurt);
-        after_actually_hurt(me, mob, &source);
+        after_actually_hurt(me, mob, &source, ctx.blocks().game_time());
         mob.last_hurt = amount;
         false
     } else {
         mob.last_hurt = amount;
         mob.damage_cooldown = 20;
         actually_hurt(me, mob, source, amount);
-        after_actually_hurt(me, mob, &source);
+        after_actually_hurt(me, mob, &source, ctx.blocks().game_time());
         mob.hurt_duration = 10;
         mob.hurt_time = mob.hurt_duration;
         true
@@ -2141,9 +2456,16 @@ fn hurt_living(
 /// 物种覆写的 `actuallyHurt` 在 `super` 之后的那部分。
 ///
 /// The part of species `actuallyHurt` overrides after `super`.
-fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource) {
+fn after_actually_hurt(me: &mut Entity, mob: &mut Mob, source: &DamageSource, time: i64) {
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::after_actually_hurt(me, mob, source);
+    }
+    // `Camel.actuallyHurt` 在 `super` 之前 `standUpInstantly()`；纯状态改动、不取随机数，
+    // 放在 `super` 之后对可观察状态等价。
+    // `Camel.actuallyHurt` calls `standUpInstantly()` before `super`; a pure state change
+    // with no random draw, so after `super` is equivalent for observable state.
+    if mob.mob_type == super::MobType::Camel {
+        super::camel::after_actually_hurt(mob, time);
     }
 }
 
@@ -2182,11 +2504,14 @@ fn actually_hurt(me: &mut Entity, mob: &mut Mob, source: DamageSource, amount: f
 }
 
 /// `LivingEntity.knockback`。
-pub(crate) fn knockback(me: &mut Entity, mob: &Mob, strength: f64, dx: f64, dz: f64) {
+pub(crate) fn knockback(me: &mut Entity, mob: &mut Mob, strength: f64, dx: f64, dz: f64) {
     let strength = strength * (1.0 - mob.attributes.value(attribute::KNOCKBACK_RESISTANCE));
     if strength <= 0.0 {
         return;
     }
+    // 官方在这里置 `needsSync`，留到下一次 `sendChanges`。
+    // Vanilla sets `needsSync` here and keeps it until the next `sendChanges`.
+    mob.knockback_sync = true;
     let (mut dx, mut dz) = (dx, dz);
     let delta = me.delta;
     while dx * dx + dz * dz < f64::from(1.0e-5_f32) {
@@ -2435,16 +2760,19 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
         }
         return;
     }
-    if !mob.mob_type.is_monster() {
+    // 幻翼不是 `Monster`，但经验是构造函数里固定的 5，走下面怪物那一支。
+    // Phantoms are not `Monster`s, yet their fixed 5 experience takes the monster branch.
+    if !mob.mob_type.is_monster() && mob.mob_type != super::MobType::Phantom {
         mob.events.push(MobEvent::Death);
-        animal_death_drops(
-            me,
-            mob,
-            ctx,
-            source,
-            by_player && adult && drops,
-            adult && drops,
-        );
+        // `Tadpole.shouldDropExperience` 为假：不掉经验，也不取那次随机数。蝙蝠的
+        // `xpReward` 是 0，`Mob.getBaseExperienceReward` 不取随机数。
+        // `Tadpole.shouldDropExperience` is false: no experience and no draw for it. A
+        // bat's `xpReward` is 0 and `Mob.getBaseExperienceReward` draws nothing.
+        let experience = by_player
+            && adult
+            && drops
+            && !matches!(mob.mob_type, super::MobType::Tadpole | super::MobType::Bat);
+        animal_death_drops(me, mob, ctx, source, experience, adult && drops);
         return;
     }
     // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
@@ -2479,6 +2807,7 @@ pub(crate) struct BreedFather {
     pub(crate) love: Option<[u8; 16]>,
     pub(crate) wolf: super::wolf::Wolf,
     pub(crate) tame: super::tame::Tamable,
+    pub(crate) cat: super::cat::Cat,
     /// 山羊父亲是否尖叫。
     ///
     /// Whether the goat father is screaming.
@@ -2487,6 +2816,10 @@ pub(crate) struct BreedFather {
     ///
     /// The panda father's main and hidden genes.
     pub(crate) genes: Option<(u8, u8)>,
+    /// 美西螈父亲的花色。
+    ///
+    /// The axolotl father's variant.
+    pub(crate) axolotl: i32,
 }
 /// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
 /// 按槽位顺序掉装备（鞍），最后 `Animal.getBaseExperienceReward` 取 `1 + nextInt(3)`。
@@ -2550,6 +2883,12 @@ pub(crate) fn apply_breed(
         super::turtle::breed(me, partner, position, world);
         return;
     }
+    // `Frog.spawnChildFromBreeding`：只有 `finalizeSpawnChildFromBreeding` 那一半。
+    // `Frog.spawnChildFromBreeding`: only the `finalizeSpawnChildFromBreeding` half.
+    if kind == super::MobType::Frog {
+        super::frog::breed(me, partner, position, world);
+        return;
+    }
     let mother = world.entity(partner).and_then(|entity| {
         entity
             .kind
@@ -2559,9 +2898,16 @@ pub(crate) fn apply_breed(
     let mother_wolf = world
         .entity(partner)
         .and_then(|entity| entity.kind.mob().map(|mob| mob.wolf));
+    let mother_cat = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.cat));
+    let mother_axolotl = world
+        .entity(partner)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.axolotl.variant));
     let mut rabbit_variant = super::rabbit::Variant::default();
     let mut fox = None;
     let mut wolf = None;
+    let mut cat = None;
     // 哞菇的品种自己抽（`getOffspringVariant`），不取牛那个 `nextBoolean`。
     // Mooshrooms draw their own type (`getOffspringVariant`) instead of the cow `nextBoolean`.
     let calf_brown = (kind == super::MobType::Mooshroom).then(|| {
@@ -2617,12 +2963,21 @@ pub(crate) fn apply_breed(
     let equine = foal.is_some();
     let sheep = kind == super::MobType::Sheep;
     let mut from_father = true;
+    let mut axolotl_variant = None;
     match kind {
         super::MobType::Wolf => {
             wolf = Some(super::wolf::offspring(
                 me,
                 (&parent.wolf, &parent.tame),
                 mother_wolf,
+                world,
+            ));
+        }
+        super::MobType::Cat => {
+            cat = Some(super::cat::offspring(
+                me,
+                (&parent.cat, &parent.tame),
+                mother_cat,
                 world,
             ));
         }
@@ -2646,8 +3001,19 @@ pub(crate) fn apply_breed(
         super::MobType::Sheep
         | super::MobType::Panda
         | super::MobType::Mooshroom
+        | super::MobType::Ocelot
         | super::MobType::Armadillo
         | super::MobType::Goat => {}
+        // 美西螈先赌 1/1200 的稀有蓝，没中才用 `nextBoolean` 取父母之一。
+        // The axolotl rolls 1/1200 for the rare blue first, then one `nextBoolean`
+        // picks a parent.
+        super::MobType::Axolotl => {
+            axolotl_variant = Some(super::axolotl::offspring_variant(
+                &mut me.random,
+                parent.axolotl,
+                mother_axolotl.unwrap_or(super::axolotl::DEFAULT_VARIANT),
+            ));
+        }
         _ if equine => {}
         _ => {
             // 牛、猪、鸡用父亲的随机源 `nextBoolean` 选花纹。
@@ -2733,6 +3099,13 @@ pub(crate) fn apply_breed(
                 super::tame::set_tame(mob, true, true);
             }
         }
+        if let Some((cat, tamable)) = cat.take() {
+            mob.cat = cat;
+            mob.tame = tamable;
+            if tamable.is_tame() {
+                super::tame::set_tame(mob, true, true);
+            }
+        }
         set_age(me, mob, -24000);
         match lamb_color {
             Some(color) => super::sheep::set_color(mob, color),
@@ -2740,6 +3113,12 @@ pub(crate) fn apply_breed(
         }
         if let Some(brown) = calf_brown {
             mob.mooshroom.brown = brown;
+        }
+        if let Some(variant) = axolotl_variant {
+            mob.axolotl.variant = variant;
+            // `Axolotl.getBreedOffspring` 的 `baby.setPersistenceRequired()`。
+            // `baby.setPersistenceRequired()` from `Axolotl.getBreedOffspring`.
+            mob.persistence_required = true;
         }
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;
@@ -2801,9 +3180,13 @@ pub(crate) fn apply_push(
     if other_pushable {
         world.with_entity_mut(other, &mut |entity| {
             entity.delta = entity.delta.add(Vec3::new(-dx, 0.0, -dz));
+            // 被推开的一方和 `Entity.push(Entity)` 一样置 `needsSync`。
+            // The pushed side sets `needsSync` as in `Entity.push(Entity)`.
+            entity.with_mob(|_, mob| mob.needs_sync = true);
         });
     }
     if self_pushable {
         me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
+        me.with_mob(|_, mob| mob.needs_sync = true);
     }
 }

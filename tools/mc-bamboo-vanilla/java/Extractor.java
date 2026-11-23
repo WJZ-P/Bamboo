@@ -1197,6 +1197,8 @@ public final class Extractor {
         out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
         out.addProperty("sheepWool", entityAccessor(net.minecraft.world.entity.animal.sheep.Sheep.class, "DATA_WOOL_ID").id());
         out.addProperty("glowSquidDarkTicks", entityAccessor(net.minecraft.world.entity.animal.squid.GlowSquid.class, "DATA_DARK_TICKS_REMAINING").id());
+        out.addProperty("batFlags", entityAccessor(net.minecraft.world.entity.ambient.Bat.class, "DATA_ID_FLAGS").id());
+        out.addProperty("phantomSize", entityAccessor(net.minecraft.world.entity.monster.Phantom.class, "ID_SIZE").id());
         out.addProperty("fishFromBucket", entityAccessor(net.minecraft.world.entity.animal.fish.AbstractFish.class, "FROM_BUCKET").id());
         out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
         out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
@@ -1206,6 +1208,12 @@ public final class Extractor {
         out.addProperty("pufferfishPuffState", entityAccessor(net.minecraft.world.entity.animal.fish.Pufferfish.class, "PUFF_STATE").id());
         out.addProperty("turtleHasEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG").id());
         out.addProperty("turtleLayingEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "LAYING_EGG").id());
+        out.addProperty("dolphinGotFish", entityAccessor(net.minecraft.world.entity.animal.dolphin.Dolphin.class, "GOT_FISH").id());
+        out.addProperty("dolphinMoistness", entityAccessor(net.minecraft.world.entity.animal.dolphin.Dolphin.class, "MOISTNESS_LEVEL").id());
+        Class<?> axolotl = net.minecraft.world.entity.animal.axolotl.Axolotl.class;
+        out.addProperty("axolotlVariant", entityAccessor(axolotl, "DATA_VARIANT").id());
+        out.addProperty("axolotlPlayingDead", entityAccessor(axolotl, "DATA_PLAYING_DEAD").id());
+        out.addProperty("axolotlFromBucket", entityAccessor(axolotl, "FROM_BUCKET").id());
         Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
         var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
         var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");
@@ -1222,6 +1230,13 @@ public final class Extractor {
         out.addProperty("goatScreaming", entityAccessor(goat, "DATA_IS_SCREAMING_GOAT").id());
         out.addProperty("goatLeftHorn", entityAccessor(goat, "DATA_HAS_LEFT_HORN").id());
         out.addProperty("goatRightHorn", entityAccessor(goat, "DATA_HAS_RIGHT_HORN").id());
+        Class<?> frog = net.minecraft.world.entity.animal.frog.Frog.class;
+        var frogVariant = entityAccessor(frog, "DATA_VARIANT_ID");
+        var frogTongue = entityAccessor(frog, "DATA_TONGUE_TARGET_ID");
+        out.addProperty("frogVariant", frogVariant.id());
+        out.addProperty("frogVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(frogVariant.serializer()));
+        out.addProperty("frogTongueTarget", frogTongue.id());
+        out.addProperty("frogTongueTargetSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(frogTongue.serializer()));
         out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
         out.add("stewFlowers", stewFlowers());
         out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());
@@ -1232,6 +1247,22 @@ public final class Extractor {
         out.addProperty("pandaMainGene", entityAccessor(panda, "MAIN_GENE_ID").id());
         out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
         out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
+        out.addProperty("ocelotTrusting", entityAccessor(net.minecraft.world.entity.animal.feline.Ocelot.class, "DATA_TRUSTING").id());
+        Class<?> cat = net.minecraft.world.entity.animal.feline.Cat.class;
+        out.addProperty("catVariant", entityAccessor(cat, "DATA_VARIANT_ID").id());
+        out.addProperty("catIsLying", entityAccessor(cat, "IS_LYING").id());
+        out.addProperty("catRelaxStateOne", entityAccessor(cat, "RELAX_STATE_ONE").id());
+        out.addProperty("catCollar", entityAccessor(cat, "DATA_COLLAR_COLOR").id());
+        out.addProperty("catSoundVariant", entityAccessor(cat, "DATA_SOUND_VARIANT_ID").id());
+        // 鹦鹉的 DATA_VARIANT_ID 用 INT 序列化器，index 紧随 TamableAnimal 之后。
+        // The parrot's DATA_VARIANT_ID uses the INT serializer; its index follows TamableAnimal.
+        Class<?> parrot = net.minecraft.world.entity.animal.parrot.Parrot.class;
+        out.addProperty("parrotVariant", entityAccessor(parrot, "DATA_VARIANT_ID").id());
+        // Parrot.getAmbient 在 nextInt(1000)==0 时 nextInt(MOB_SOUND_MAP.size()) 挑模仿的音效。
+        // Parrot.getAmbient draws nextInt(MOB_SOUND_MAP.size()) to pick an imitated sound.
+        java.lang.reflect.Field soundMap = parrot.getDeclaredField("MOB_SOUND_MAP");
+        soundMap.setAccessible(true);
+        out.addProperty("parrotSoundMapSize", ((java.util.Map<?, ?>) soundMap.get(null)).size());
         out.add("potionEffects", potionEffects());
         var effectRegistry = BuiltInRegistries.MOB_EFFECT;
         JsonArray colors = new JsonArray();

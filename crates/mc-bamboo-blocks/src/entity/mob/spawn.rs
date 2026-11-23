@@ -114,6 +114,13 @@ pub enum SpawnGroup {
     ///
     /// Rabbits, foxes and wolves: the group size plus the shared variant.
     Wild(super::wild_spawn::WildGroup),
+    /// `Axolotl.AxolotlGroupData`：组计数加两个共享的常见花色编号。
+    ///
+    /// `Axolotl.AxolotlGroupData`: the group counter plus two shared common variant ids.
+    Axolotl {
+        types: [i32; 2],
+        group_size: i32,
+    },
 }
 
 /// `Spider.SpiderEffectsGroupData`：同一组蜘蛛共享的药水效果。
@@ -347,6 +354,19 @@ fn finalize_spawn_in_group(
         super::panda::finalize_spawn(entity, world.random(), group);
         return;
     }
+    if kind == MobType::Ocelot {
+        super::ocelot::finalize_spawn(entity, world.random(), group);
+        return;
+    }
+    if kind == MobType::Cat {
+        let moon = crate::sky::moon_brightness(world.level().clock_ticks());
+        super::cat::finalize_spawn(entity, world.random(), moon, group);
+        return;
+    }
+    if kind == MobType::Parrot {
+        super::parrot::finalize_spawn(entity, world.random(), group);
+        return;
+    }
     if kind.is_zombie() {
         super::zombie_spawn::finalize_spawn(world, kind, entity, reason, group);
         if kind == MobType::Drowned {
@@ -358,7 +378,13 @@ fn finalize_spawn_in_group(
         super::slime::finalize_spawn(world, entity, group);
         return;
     }
-    if matches!(kind, MobType::Creeper | MobType::Enderman) {
+    if kind == MobType::Phantom {
+        super::phantom::finalize_spawn(entity, world.random());
+        return;
+    }
+    // 蝙蝠没有自己的 `finalizeSpawn`，和苦力怕一样只有 `Mob.finalizeSpawn`。
+    // Bats have no `finalizeSpawn` of their own: just `Mob.finalizeSpawn`, as creepers.
+    if matches!(kind, MobType::Creeper | MobType::Enderman | MobType::Bat) {
         super::creeper::finalize_spawn(entity, world.random());
         return;
     }
@@ -386,7 +412,23 @@ fn finalize_spawn_in_group(
         super::turtle::finalize_spawn(entity, world.random(), group);
         return;
     }
+    if kind == MobType::Dolphin {
+        super::dolphin::finalize_spawn(entity, world.random(), group);
+        return;
+    }
+    if kind == MobType::Axolotl {
+        super::axolotl::finalize_spawn(world, entity, reason, group);
+        return;
+    }
     if kind.is_equine() {
+        // `Camel.finalizeSpawn`：先 `initMemories`（空、不取数）和
+        // `resetLastPoseChangeTickToFullStand(gameTime)`，再走 `AbstractHorse.finalizeSpawn`。
+        // `Camel.finalizeSpawn`: `initMemories` (empty, no draws) and
+        // `resetLastPoseChangeTickToFullStand(gameTime)` before `AbstractHorse.finalizeSpawn`.
+        if kind == MobType::Camel {
+            let time = world.game_time();
+            super::camel::finalize_pose(entity, time);
+        }
         super::equine::finalize_spawn(entity, world.random(), group);
         return;
     }
@@ -431,10 +473,18 @@ pub(super) fn finalize_generated(
             | MobType::PolarBear
             | MobType::Armadillo
             | MobType::Goat
+            | MobType::Frog
     ) {
         finalize_cow(kind, entity, biome, region_random, group);
     } else if kind == MobType::Panda {
         super::panda::finalize_spawn(entity, region_random, group);
+    } else if kind == MobType::Ocelot {
+        super::ocelot::finalize_spawn(entity, region_random, group);
+    } else if kind == MobType::Cat {
+        let moon = crate::sky::moon_brightness(world.level().clock_ticks());
+        super::cat::finalize_spawn(entity, region_random, moon, group);
+    } else if kind == MobType::Parrot {
+        super::parrot::finalize_spawn(entity, region_random, group);
     } else if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
         super::wild_spawn::finalize(kind, entity, biome, region_random, group);
     } else if kind.is_equine() {
@@ -482,6 +532,12 @@ pub(super) fn finalize_cow(
         // `selectVariantToSpawn` draws `nextInt(1)` even for a single best candidate.
         let _ = random.next_int(1);
     }
+    if kind == MobType::Frog {
+        // `Frog.finalizeSpawn`：选完品种再 `FrogAi.initMemories`，然后才是 `super`。
+        // `Frog.finalizeSpawn`: the variant, then `FrogAi.initMemories`, then `super`.
+        let variant = frog_variant_for_biome(biome);
+        entity.with_mob(|_, mob| super::frog::finalize_spawn(mob, variant, random));
+    }
     // 各物种自己那层 `finalizeSpawn` 的取数：羊的毛色、鸡 / 猪 / 牛的叫声，都在
     // `AgeableMob` 那层之前。
     // Each species' own `finalizeSpawn` draws (sheep colour, chicken / pig / cow sound)
@@ -501,6 +557,7 @@ pub(super) fn finalize_cow(
                 | MobType::Pig
                 | MobType::Mooshroom
                 | MobType::PolarBear
+                | MobType::Frog
         ))
     .then(|| {
         if random.next_int(2) == 0 {
@@ -529,7 +586,7 @@ pub(super) fn finalize_cow(
     };
     let baby = data.roll_baby(random);
     entity.with_mob(|me, mob| {
-        if has_variant {
+        if has_variant && kind != MobType::Frog {
             mob.variant = variant;
         }
         if let Some(color) = sheep_color {
@@ -600,6 +657,20 @@ fn cow_variant_for_biome(biome: i32) -> CowVariant {
         CowVariant::Cold
     } else {
         CowVariant::Temperate
+    }
+}
+
+/// `frog_variant` 的生成条件：暖和冷各按一个群系标签，优先级 1；其余是温带。
+///
+/// The `frog_variant` spawn conditions: warm and cold each go by a biome tag at
+/// priority 1; everything else is temperate.
+pub(super) fn frog_variant_for_biome(biome: i32) -> super::frog::Variant {
+    if biome_tag_contains("minecraft:spawns_warm_variant_frogs", biome) {
+        super::frog::Variant::Warm
+    } else if biome_tag_contains("minecraft:spawns_cold_variant_frogs", biome) {
+        super::frog::Variant::Cold
+    } else {
+        super::frog::Variant::Temperate
     }
 }
 

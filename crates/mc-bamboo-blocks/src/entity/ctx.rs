@@ -143,6 +143,24 @@ pub trait BlockView {
         false
     }
 
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：这一列挡运动的最高方块上面一格，整列
+    /// 都不挡时是世界底部下面一格。缺省实现逐格读方块；有真实高度图的视图覆盖它。
+    ///
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`: one above the highest
+    /// motion-blocking block of the column, or one below the world bottom when nothing
+    /// blocks. The default reads blocks one by one; views with a real heightmap override it.
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        for y in (self.min_y()..=self.max_y()).rev() {
+            let state = self.block_state(BlockPos::new(pos.x, y, pos.z));
+            if state.is_tagged(mc_bamboo_data::tags::block_tags::BLOCKS_MOTION_IN_HEIGHTMAP)
+                || !state.fluid().is_empty()
+            {
+                return y + 1;
+            }
+        }
+        self.min_y() - 1
+    }
+
     /// `getMaxLocalRawBrightness(pos, skyDarken)`：方块光和减去天色后的天空光里亮的那个。
     fn max_local_raw_brightness(&self, _pos: BlockPos, _darken: i32) -> i32 {
         0
@@ -393,6 +411,10 @@ impl BlockView for World<'_> {
 
     fn sea_level(&self) -> i32 {
         World::sea_level(self)
+    }
+
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        self.level().heightmap_y(pos)
     }
 
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
@@ -717,10 +739,18 @@ pub enum Command {
         ///
         /// The father's wolf and taming state, for the pup's variant, owner and collar.
         father_wolf: Box<(super::mob::wolf::Wolf, super::mob::tame::Tamable)>,
+        /// 猫父亲的状态（落地时父亲正被拆出来跑 tick）。
+        ///
+        /// The cat father's state (detached while the command lands).
+        father_cat: super::mob::cat::Cat,
         /// 父亲是不是尖叫山羊：山羊幼崽可能随它。
         ///
         /// Whether the father is a screaming goat; a kid may take after it.
         father_screaming: bool,
+        /// 父亲的美西螈花色（落地时父亲不在实体表里）。
+        ///
+        /// The axolotl father's variant (it is not in the table when this lands).
+        father_axolotl: i32,
     },
     /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
     ///
@@ -918,6 +948,35 @@ pub enum Command {
         dx: f64,
         dz: f64,
     },
+    /// `Tadpole.ageUp`：`convertTo(FROG, ConversionParams.single(this, false, false), ..)`，
+    /// 按 `from` 这一刻的状态造出青蛙；发出者自己随后 `discard`。
+    ///
+    /// `Tadpole.ageUp`: `convertTo(FROG, ConversionParams.single(this, false, false), ..)`
+    /// builds the frog from the state `from` has this tick; the emitter discards itself.
+    TadpoleGrowUp {
+        from: Box<super::mob::Mob>,
+    },
+    /// `TryLaySpawnOnFluidNearLand`：`setBlockAndUpdate(pos, FROGSPAWN)`。
+    ///
+    /// `TryLaySpawnOnFluidNearLand`: `setBlockAndUpdate(pos, FROGSPAWN)`.
+    LayFrogspawn {
+        pos: BlockPos,
+    },
+    /// `ShootTongue.tick` 伸舌头的那一刻：`target.setDeltaMovement(delta)`。
+    ///
+    /// The tongue shot of `ShootTongue.tick`: `target.setDeltaMovement(delta)`.
+    SetMobDelta {
+        target: EntityUid,
+        delta: Vec3,
+    },
+    /// `ShootTongue.eatEntity`：`doHurtTarget`，打死了当场 `remove(KILLED)`。
+    ///
+    /// `ShootTongue.eatEntity`: `doHurtTarget`, then `remove(KILLED)` at once on a kill.
+    FrogEat {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
     /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` 加 `addFreshEntity`：
     /// 山羊掉角，速度由调用方给。
     ///
@@ -1033,7 +1092,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             father_fox,
             father_love,
             father_wolf,
+            father_cat,
             father_screaming,
+            father_axolotl,
         } => super::mob::living::apply_breed(
             me,
             partner,
@@ -1047,8 +1108,10 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 love: father_love,
                 wolf: father_wolf.0,
                 tame: father_wolf.1,
+                cat: father_cat,
                 screaming: father_screaming,
                 genes: father_genes,
+                axolotl: father_axolotl,
             },
             world,
         ),
@@ -1268,6 +1331,19 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 false,
             );
         }
+        Command::TadpoleGrowUp { from } => super::mob::tadpole::apply_grow_up(me, &from, world),
+        Command::LayFrogspawn { pos } => {
+            let state = crate::state::BlockState(mc_bamboo_data::blocks::FROGSPAWN);
+            world.set_block(pos, state, 3);
+        }
+        Command::SetMobDelta { target, delta } => {
+            world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
+        }
+        Command::FrogEat {
+            target,
+            source,
+            amount,
+        } => super::mob::frog::apply_eat(world, target, source, amount),
         Command::LayTurtleEgg { pos, eggs } => {
             let pitch = 0.9 + world.random().next_float() * 0.2;
             world.play_block_sound(
@@ -1276,9 +1352,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 0.3,
                 pitch,
             );
-            let block =
-                &mc_bamboo_data::blocks::BLOCKS[mc_bamboo_data::blocks::TURTLE_EGG as usize];
-            let state = crate::state::BlockState(block.default_state);
+            // `blocks::TURTLE_EGG` 已经是默认状态 ID，不是方块注册表下标。
+            // `blocks::TURTLE_EGG` is already the default state id, not a block registry index.
+            let state = crate::state::BlockState(mc_bamboo_data::blocks::TURTLE_EGG);
             world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
         }
     }

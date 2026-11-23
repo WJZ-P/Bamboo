@@ -366,6 +366,7 @@ fn rebuild_final_heightmaps(column: &RegionColumn) -> BTreeMap<&'static str, Vec
         biomes: vec![vec![0_u32; 64]; SECTION_COUNT],
         heightmaps: BTreeMap::new(),
         post_processing: Vec::new(),
+        block_entities: Vec::new(),
     };
     crate::worldgen::compute_heightmaps_public(&generated)
 }

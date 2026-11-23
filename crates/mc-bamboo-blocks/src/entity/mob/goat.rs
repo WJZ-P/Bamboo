@@ -10,7 +10,7 @@
 //! The four long-jump and ram behaviours (`LongJumpMidJump`, `LongJumpToRandomPos`,
 //! `RamTarget`, `PrepareRamNearestTarget`) live here too, each following its vanilla class.
 
-use mc_bamboo_core::{Aabb, BlockPos, Direction, Vec3, mth};
+use mc_bamboo_core::{Aabb, BlockPos, Direction, Vec3, jmath, mth};
 use mc_bamboo_data::{
     blocks, items,
     registries::{attribute, mob_effect},
@@ -23,7 +23,7 @@ use super::{
     attributes::{Attribute, Attributes},
     brain::{
         Activity, ActivityData, Brain, Cx,
-        behavior::{Class, Gate, Kind, MoveToTargetSink},
+        behavior::{Class, Gate, Kind, MoveToTargetSink, Speed},
         memory::{
             MemoryStatus::{self, Registered, ValueAbsent, ValuePresent},
             MemoryType, MemoryValue, PositionTracker, WalkTarget,
@@ -198,6 +198,7 @@ fn core_activity() -> ActivityData {
                 speed: 2.0,
                 environmental: false,
                 armadillo: false,
+                camel: false,
             },
             Kind::LookAtTargetSink { min: 45, max: 90 },
             Kind::MoveToTargetSink(MoveToTargetSink::new(false)),
@@ -233,7 +234,7 @@ fn idle_activity() -> ActivityData {
             (
                 1,
                 Kind::FollowTemptation {
-                    speed: 1.25,
+                    speed: Speed::fixed(1.25),
                     close_adult: 2.5,
                     close_baby: 2.5,
                 },
@@ -243,7 +244,7 @@ fn idle_activity() -> ActivityData {
                 Kind::BabyFollowAdult {
                     min: 5,
                     max: 16,
-                    speed: 1.25,
+                    speed: Speed::fixed(1.25),
                 },
             ),
             (
@@ -254,7 +255,7 @@ fn idle_activity() -> ActivityData {
                         (Kind::RandomStroll { speed: 1.0 }, 2),
                         (
                             Kind::WalkTargetFromLook {
-                                speed: 1.0,
+                                speed: Speed::fixed(1.0),
                                 close_enough: 3,
                             },
                             2,
@@ -313,6 +314,13 @@ fn ram_activity() -> ActivityData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LongJump {
     candidates: Vec<(BlockPos, i32)>,
+    /// `LongJumpToPreferredBlock` 的 `notPrefferedJumpCandidates` 和
+    /// `currentlyWantingPreferredOnes`；山羊用不到。
+    ///
+    /// `notPrefferedJumpCandidates` and `currentlyWantingPreferredOnes` of
+    /// `LongJumpToPreferredBlock`; unused by goats.
+    not_preferred: Vec<(BlockPos, i32)>,
+    wanting_preferred: bool,
     initial_position: Option<Vec3>,
     chosen: Option<Vec3>,
     tries: i32,
@@ -330,6 +338,8 @@ impl Default for LongJump {
     fn default() -> Self {
         Self {
             candidates: Vec::new(),
+            not_preferred: Vec::new(),
+            wanting_preferred: false,
             initial_position: None,
             chosen: None,
             tries: 0,
@@ -402,6 +412,40 @@ const PREPARE_RAM_REQUIRED: &[(MemoryType, MemoryStatus)] = &[
 /// `MAX_LONG_JUMP_WIDTH` / `MAX_LONG_JUMP_HEIGHT` and `MAX_JUMP_VELOCITY_MULTIPLIER`.
 const LONG_JUMP_RANGE: i32 = 5;
 const MAX_JUMP_VELOCITY_MULTIPLIER: f32 = 3.571_428_8;
+
+/// 一种生物的长跳参数：`LongJumpToRandomPos` / `LongJumpToPreferredBlock` 构造函数的
+/// 实参，加上 `getDimensions(Pose.LONG_JUMPING)`。
+///
+/// One mob's long-jump parameters: the constructor arguments of `LongJumpToRandomPos` /
+/// `LongJumpToPreferredBlock` plus `getDimensions(Pose.LONG_JUMPING)`.
+pub(super) struct JumpSpec {
+    pub height: i32,
+    pub width: i32,
+    pub dimensions: (f32, f32),
+    pub sound: &'static str,
+    /// `acceptableLandingSpot`。
+    pub landing: fn(&Cx, BlockPos) -> bool,
+    /// `preferredBlockTag` 和 `preferredBlocksChance`。
+    ///
+    /// `preferredBlockTag` and `preferredBlocksChance`.
+    pub preferred: Option<(mc_bamboo_data::BlockTag, f32)>,
+}
+
+fn goat_spec(mob: &Mob) -> JumpSpec {
+    let (width, height, _) = pose_dimensions(mob.is_baby(), true);
+    JumpSpec {
+        height: LONG_JUMP_RANGE,
+        width: LONG_JUMP_RANGE,
+        dimensions: (width, height),
+        sound: if mob.goat.screaming {
+            "minecraft:entity.goat.screaming.long_jump"
+        } else {
+            "minecraft:entity.goat.long_jump"
+        },
+        landing: default_landing,
+        preferred: None,
+    }
+}
 /// `RAM_MIN_DISTANCE`、`RAM_MAX_DISTANCE`、`RAM_PREPARE_TIME`。
 ///
 /// `RAM_MIN_DISTANCE`, `RAM_MAX_DISTANCE` and `RAM_PREPARE_TIME`.
@@ -442,7 +486,7 @@ impl Behavior {
 
     pub(super) fn extra_start(&mut self, cx: &mut Cx) -> bool {
         match self {
-            Self::LongJump(_) => long_jump_extra_start(cx),
+            Self::LongJump(_) => long_jump_extra_start(cx, LONG_JUMP_INTERVAL),
             Self::Ram { .. } => cx.memories.has(MemoryType::RamTarget),
             Self::MidJump | Self::PrepareRam(_) => true,
         }
@@ -454,7 +498,7 @@ impl Behavior {
                 cx.mob.discard_friction = true;
                 set_long_jumping(cx, true);
             }
-            Self::LongJump(jump) => long_jump_start(jump, cx),
+            Self::LongJump(jump) => long_jump_start(jump, cx, &goat_spec(cx.mob)),
             Self::Ram { direction } => {
                 let Some(target) = cx.memories.vec3(MemoryType::RamTarget) else {
                     return;
@@ -482,7 +526,7 @@ impl Behavior {
     pub(super) fn can_still_use(&mut self, cx: &mut Cx) -> bool {
         match self {
             Self::MidJump => !cx.me.on_ground,
-            Self::LongJump(jump) => long_jump_can_still_use(jump, cx),
+            Self::LongJump(jump) => long_jump_can_still_use(jump, cx, LONG_JUMP_INTERVAL),
             Self::Ram { .. } => cx.memories.has(MemoryType::RamTarget),
             Self::PrepareRam(prepare) => prepare.candidate.is_some_and(|candidate| {
                 sensor::living(cx, candidate.target).is_some_and(|view| view.alive)
@@ -493,7 +537,7 @@ impl Behavior {
     pub(super) fn tick(&mut self, cx: &mut Cx) {
         match self {
             Self::MidJump => {}
-            Self::LongJump(jump) => long_jump_tick(jump, cx),
+            Self::LongJump(jump) => long_jump_tick(jump, cx, &goat_spec(cx.mob)),
             Self::Ram { direction } => ram_tick(*direction, cx),
             Self::PrepareRam(prepare) => prepare_ram_tick(prepare, cx),
         }
@@ -518,7 +562,7 @@ impl Behavior {
 /// `level.playSound(null, body, sound, NEUTRAL, volume, pitch)`：不看 `isSilent`。
 ///
 /// `level.playSound(null, body, sound, NEUTRAL, volume, pitch)`, which ignores `isSilent`.
-fn level_sound(cx: &mut Cx, sound: &'static str, volume: f32, pitch: f32) {
+pub(super) fn level_sound(cx: &mut Cx, sound: &'static str, volume: f32, pitch: f32) {
     cx.mob.events.push(MobEvent::Sound {
         sound,
         volume,
@@ -583,8 +627,8 @@ fn mid_jump_stop(cx: &mut Cx) {
 
 // ---- LongJumpToRandomPos ----
 
-fn half_long_jump_cooldown(cx: &mut Cx) {
-    let cooldown = sample_level(cx.ctx.blocks(), LONG_JUMP_INTERVAL) / 2;
+fn half_long_jump_cooldown(cx: &mut Cx, interval: (i32, i32)) {
+    let cooldown = sample_level(cx.ctx.blocks(), interval) / 2;
     cx.memories.set(
         MemoryType::LongJumpCooldownTicks,
         MemoryValue::Int(cooldown),
@@ -595,7 +639,7 @@ fn half_long_jump_cooldown(cx: &mut Cx) {
 ///
 /// `checkExtraStartConditions`: on the ground, out of water and lava and not inside a
 /// honey block; otherwise half a cooldown.
-fn long_jump_extra_start(cx: &mut Cx) -> bool {
+pub(super) fn long_jump_extra_start(cx: &mut Cx, interval: (i32, i32)) -> bool {
     let can_start = cx.me.on_ground
         && !cx.me.in_water
         && !living::is_in_lava(cx.me, cx.mob)
@@ -605,7 +649,7 @@ fn long_jump_extra_start(cx: &mut Cx) -> bool {
             .block_state(cx.me.block_position())
             .is(blocks::HONEY_BLOCK);
     if !can_start {
-        half_long_jump_cooldown(cx);
+        half_long_jump_cooldown(cx, interval);
     }
     can_start
 }
@@ -616,15 +660,15 @@ fn long_jump_extra_start(cx: &mut Cx) -> bool {
 /// `start`: 20 tries, remember the take-off position and list every block of the
 /// surrounding 11×11×11 but the mob's own as a candidate weighted by its squared
 /// distance, in `BlockPos.betweenClosed` order (x, then y, then z).
-fn long_jump_start(jump: &mut LongJump, cx: &mut Cx) {
+pub(super) fn long_jump_start(jump: &mut LongJump, cx: &mut Cx, spec: &JumpSpec) {
     jump.chosen = None;
     jump.tries = 20;
     jump.initial_position = Some(cx.me.position);
     let here = cx.me.block_position();
     jump.candidates.clear();
-    for z in -LONG_JUMP_RANGE..=LONG_JUMP_RANGE {
-        for y in -LONG_JUMP_RANGE..=LONG_JUMP_RANGE {
-            for x in -LONG_JUMP_RANGE..=LONG_JUMP_RANGE {
+    for z in -spec.width..=spec.width {
+        for y in -spec.height..=spec.height {
+            for x in -spec.width..=spec.width {
                 if (x, y, z) != (0, 0, 0) {
                     jump.candidates
                         .push((here.offset(x, y, z), x * x + y * y + z * z));
@@ -632,15 +676,26 @@ fn long_jump_start(jump: &mut LongJump, cx: &mut Cx) {
             }
         }
     }
+    // `LongJumpToPreferredBlock.start`：清掉备选，用生物自己的随机源决定这次挑不挑偏好方块。
+    // `LongJumpToPreferredBlock.start`: clear the fallbacks and let the mob's own random
+    // decide whether this jump wants a preferred block.
+    if let Some((_, chance)) = spec.preferred {
+        jump.not_preferred.clear();
+        jump.wanting_preferred = cx.me.random.next_float() < chance;
+    }
 }
 
-fn long_jump_can_still_use(jump: &mut LongJump, cx: &mut Cx) -> bool {
+pub(super) fn long_jump_can_still_use(
+    jump: &mut LongJump,
+    cx: &mut Cx,
+    interval: (i32, i32),
+) -> bool {
     let valid = jump.initial_position == Some(cx.me.position)
         && jump.tries > 0
         && !cx.me.in_water
         && (jump.chosen.is_some() || !jump.candidates.is_empty());
     if !valid && !cx.memories.has(MemoryType::LongJumpMidJump) {
-        half_long_jump_cooldown(cx);
+        half_long_jump_cooldown(cx, interval);
         cx.memories.erase(MemoryType::LookTarget);
     }
     valid
@@ -649,10 +704,10 @@ fn long_jump_can_still_use(jump: &mut LongJump, cx: &mut Cx) -> bool {
 /// `tick`：选好了就等 40 刻起跳，没选好就再挑一轮。
 ///
 /// `tick`: once a jump is chosen wait 40 ticks and leap; otherwise pick again.
-fn long_jump_tick(jump: &mut LongJump, cx: &mut Cx) {
+pub(super) fn long_jump_tick(jump: &mut LongJump, cx: &mut Cx, spec: &JumpSpec) {
     let Some(chosen) = jump.chosen else {
         jump.tries -= 1;
-        pick_candidate(jump, cx);
+        pick_candidate(jump, cx, spec);
         return;
     };
     if cx.time - jump.prepare_start < 40 {
@@ -667,12 +722,47 @@ fn long_jump_tick(jump: &mut LongJump, cx: &mut Cx) {
     cx.me.delta = chosen.scale(boosted / length);
     cx.memories
         .set(MemoryType::LongJumpMidJump, MemoryValue::Bool(true));
-    let sound = if cx.mob.goat.screaming {
-        "minecraft:entity.goat.screaming.long_jump"
-    } else {
-        "minecraft:entity.goat.long_jump"
+    level_sound(cx, spec.sound, 1.0, 1.0);
+}
+
+/// `WeightedRandom.getRandomItem(level.getRandom(), jumpCandidates, PossibleJump::weight)`
+/// 加 `jumpCandidates::remove`：总权重为 0 时不取随机数、什么都不给。
+///
+/// `WeightedRandom.getRandomItem(level.getRandom(), jumpCandidates, PossibleJump::weight)`
+/// plus `jumpCandidates::remove`: a zero total draws nothing and yields nothing.
+fn draw_candidate(jump: &mut LongJump, cx: &Cx) -> Option<(BlockPos, i32)> {
+    let total: i32 = jump.candidates.iter().map(|&(_, weight)| weight).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut selection = cx.level_next_int(total);
+    let index = jump.candidates.iter().position(|&(_, weight)| {
+        selection -= weight;
+        selection < 0
+    })?;
+    Some(jump.candidates.remove(index))
+}
+
+/// `getJumpCandidate`：`LongJumpToPreferredBlock` 想要偏好方块时一直抽到脚下是偏好
+/// 方块的候选，别的都攒进备选；候选抽完了给第一个备选。
+///
+/// `getJumpCandidate`: when `LongJumpToPreferredBlock` wants a preferred block it draws
+/// until a candidate stands on one, shelving the rest; with the candidates used up it
+/// hands out the first shelved one.
+fn jump_candidate(jump: &mut LongJump, cx: &Cx, spec: &JumpSpec) -> Option<(BlockPos, i32)> {
+    let Some((tag, _)) = spec.preferred.filter(|_| jump.wanting_preferred) else {
+        return draw_candidate(jump, cx);
     };
-    level_sound(cx, sound, 1.0, 1.0);
+    while !jump.candidates.is_empty() {
+        if let Some(candidate) = draw_candidate(jump, cx) {
+            let below = cx.ctx.blocks().block_state(candidate.0.below());
+            if below.is_tagged(tag) {
+                return Some(candidate);
+            }
+            jump.not_preferred.push(candidate);
+        }
+    }
+    (!jump.not_preferred.is_empty()).then(|| jump.not_preferred.remove(0))
 }
 
 /// `pickCandidate`：按权重抽候选（世界随机源），直到抽到一个落点合格、算得出起跳速度、
@@ -680,18 +770,12 @@ fn long_jump_tick(jump: &mut LongJump, cx: &mut Cx) {
 ///
 /// `pickCandidate`: draw weighted candidates (level random) until one is an acceptable
 /// landing spot with a jump vector that cannot be walked to; each draw leaves the list.
-fn pick_candidate(jump: &mut LongJump, cx: &mut Cx) {
+fn pick_candidate(jump: &mut LongJump, cx: &mut Cx, spec: &JumpSpec) {
     while !jump.candidates.is_empty() {
-        let total: i32 = jump.candidates.iter().map(|&(_, weight)| weight).sum();
-        let mut selection = cx.level_next_int(total);
-        let Some(index) = jump.candidates.iter().position(|&(_, weight)| {
-            selection -= weight;
-            selection < 0
-        }) else {
+        let Some((target, _)) = jump_candidate(jump, cx, spec) else {
             continue;
         };
-        let (target, _) = jump.candidates.remove(index);
-        if !acceptable_landing(cx, target) {
+        if !acceptable_landing(cx, target, spec) {
             continue;
         }
         let center = Vec3::new(
@@ -699,7 +783,7 @@ fn pick_candidate(jump: &mut LongJump, cx: &mut Cx) {
             f64::from(target.y) + 0.5,
             f64::from(target.z) + 0.5,
         );
-        let Some(vector) = optimal_jump_vector(jump, cx, center) else {
+        let Some(vector) = optimal_jump_vector(jump, cx, center, spec.dimensions) else {
             continue;
         };
         cx.memories.set(
@@ -719,57 +803,74 @@ fn pick_candidate(jump: &mut LongJump, cx: &mut Cx) {
     }
 }
 
-/// `isAcceptableLandingPosition` 加 `defaultAcceptableLandingSpot`：不在自己这一列，
-/// 下面一格实心，落点的寻路代价是 0。
+/// `isAcceptableLandingPosition`：不在自己这一列，再问这种生物自己的落点判定。
 ///
-/// `isAcceptableLandingPosition` plus `defaultAcceptableLandingSpot`: another column,
-/// solid below and a zero pathfinding malus.
-fn acceptable_landing(cx: &Cx, target: BlockPos) -> bool {
+/// `isAcceptableLandingPosition`: another column, then the mob's own landing test.
+fn acceptable_landing(cx: &Cx, target: BlockPos, spec: &JumpSpec) -> bool {
     let here = cx.me.block_position();
     if here.x == target.x && here.z == target.z {
         return false;
     }
+    (spec.landing)(cx, target)
+}
+
+/// `LongJumpToRandomPos.defaultAcceptableLandingSpot`：下面一格实心，落点的寻路代价是 0。
+///
+/// `LongJumpToRandomPos.defaultAcceptableLandingSpot`: solid below and a zero
+/// pathfinding malus.
+pub(super) fn default_landing(cx: &Cx, target: BlockPos) -> bool {
     let view = cx.ctx.blocks();
     view.block_state(target.below()).is_solid_render()
-        && cx.mob.malus.get(static_path_type(view, target)) == 0.0
+        && cx.mob.pathfinding_malus(static_path_type(view, target)) == 0.0
 }
 
 /// `calculateOptimalJumpVector`：把 65、70、75、80 四个角度洗牌，取第一个算得出来的。
 ///
 /// `calculateOptimalJumpVector`: shuffle the angles 65, 70, 75 and 80 and take the first
 /// that yields a vector.
-fn optimal_jump_vector(jump: &mut LongJump, cx: &Cx, target: Vec3) -> Option<Vec3> {
+fn optimal_jump_vector(
+    jump: &mut LongJump,
+    cx: &Cx,
+    target: Vec3,
+    dimensions: (f32, f32),
+) -> Option<Vec3> {
     let mut angles = [65, 70, 75, 80];
     jump.angle_random.shuffle(&mut angles);
     let strength = cx.mob.attributes.value(attribute::JUMP_STRENGTH);
     let max_velocity = (strength * f64::from(MAX_JUMP_VELOCITY_MULTIPLIER)) as f32;
     angles
         .into_iter()
-        .find_map(|angle| jump_vector_for_angle(cx, target, max_velocity, angle))
+        .find_map(|angle| jump_vector_for_angle(cx, target, max_velocity, angle, dimensions))
 }
 
 /// `LongJumpUtil.calculateJumpVectorForAngle(body, target, maxVelocity, angle, true)`。
 ///
 /// `LongJumpUtil.calculateJumpVectorForAngle(body, target, maxVelocity, angle, true)`.
-fn jump_vector_for_angle(cx: &Cx, target: Vec3, max_velocity: f32, angle: i32) -> Option<Vec3> {
+fn jump_vector_for_angle(
+    cx: &Cx,
+    target: Vec3,
+    max_velocity: f32,
+    angle: i32,
+    (width, height): (f32, f32),
+) -> Option<Vec3> {
     let from = cx.me.position;
     let plane = Vec3::new(target.x - from.x, 0.0, target.z - from.z)
         .normalize()
         .scale(0.5);
     let direction = target.subtract(plane).subtract(from);
     let radians = angle as f32 * std::f32::consts::PI / 180.0;
-    let xz_angle = direction.z.atan2(direction.x);
+    let xz_angle = jmath::atan2(direction.z, direction.x);
     let r2 = direction
         .subtract(Vec3::new(0.0, direction.y, 0.0))
         .length_sqr();
     let r = r2.sqrt();
     let y = direction.y;
     let gravity = cx.mob.attributes.value(attribute::GRAVITY);
-    let sin_double = f64::from(2.0 * radians).sin();
-    let cos_squared = f64::from(radians).cos() * f64::from(radians).cos();
-    let sin = f64::from(radians).sin();
-    let cos = f64::from(radians).cos();
-    let (sin_xz, cos_xz) = (xz_angle.sin(), xz_angle.cos());
+    let sin_double = jmath::sin(f64::from(2.0 * radians));
+    let cos_squared = jmath::cos(f64::from(radians)) * jmath::cos(f64::from(radians));
+    let sin = jmath::sin(f64::from(radians));
+    let cos = jmath::cos(f64::from(radians));
+    let (sin_xz, cos_xz) = (jmath::sin(xz_angle), jmath::cos(xz_angle));
     let v0_squared = r2 * gravity / (r * sin_double - 2.0 * y * cos_squared);
     if v0_squared < 0.0 {
         return None;
@@ -781,7 +882,6 @@ fn jump_vector_for_angle(cx: &Cx, target: Vec3, max_velocity: f32, angle: i32) -
     let v0r = v0 * cos;
     let v0y = v0 * sin;
     let samples = mth::ceil(r / v0r) * 2;
-    let (width, height, _) = pose_dimensions(cx.mob.is_baby(), true);
     let mut ri = 0.0;
     let mut previous: Option<Vec3> = None;
     for _ in 0..samples - 1 {
@@ -904,7 +1004,7 @@ fn closest_ram_target(cx: &mut Cx) -> Option<EntityUid> {
 fn walkable_block(cx: &Cx, pos: BlockPos) -> bool {
     let view = cx.ctx.blocks();
     Navigation::is_stable_destination(view, pos)
-        && cx.mob.malus.get(static_path_type(view, pos)) == 0.0
+        && cx.mob.pathfinding_malus(static_path_type(view, pos)) == 0.0
 }
 
 /// `calculateRammingStartPosition`：从目标那格往北、东、南、西各走最多 7 格能站的，
@@ -1355,6 +1455,7 @@ pub(super) fn interact(mob: &mut Mob, req: &MobInteractRequest) -> Option<MobInt
         limit_creative: true,
         drop_stack: None,
         drop_offset: Vec3::new(0.0, 0.0, 0.0),
+        self_hurt: None,
     })
 }
 
@@ -1479,6 +1580,7 @@ mod tests {
             limit_creative: true,
             drop_stack: None,
             drop_offset: Vec3::new(0.0, 0.0, 0.0),
+            self_hurt: None,
         };
         assert_eq!(
             eating_sounds(&goat, &request(1, false, items::WHEAT), &fed(false)),

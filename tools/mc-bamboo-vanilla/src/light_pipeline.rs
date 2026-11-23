@@ -492,6 +492,7 @@ fn generated_chunk(
         biomes,
         heightmaps: Default::default(),
         post_processing: Vec::new(),
+        block_entities: Vec::new(),
     })
 }
 

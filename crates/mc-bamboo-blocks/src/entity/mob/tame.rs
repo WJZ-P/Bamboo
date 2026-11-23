@@ -75,7 +75,7 @@ impl Tamable {
 ///
 /// Whether this kind is a `TamableAnimal`.
 pub const fn is_tamable(kind: MobType) -> bool {
-    matches!(kind, MobType::Wolf)
+    matches!(kind, MobType::Wolf | MobType::Cat | MobType::Parrot)
 }
 
 /// `TamableAnimal.setTame(isTame, includeSideEffects)`。
@@ -83,6 +83,11 @@ pub fn set_tame(mob: &mut Mob, tame: bool, side_effects: bool) {
     mob.tame.set_flag(FLAG_TAME, tame);
     if side_effects {
         apply_taming_side_effects(mob);
+    }
+    // `Cat.setTame` 覆写 `setTame`，无论 `includeSideEffects` 都重算躲玩家目标。
+    // `Cat.setTame` overrides `setTame` to reassess its avoid-players goal regardless of `includeSideEffects`.
+    if mob.mob_type == MobType::Cat {
+        super::cat::reassess_tame_goals(mob);
     }
 }
 

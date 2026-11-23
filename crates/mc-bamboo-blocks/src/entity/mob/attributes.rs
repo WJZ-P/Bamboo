@@ -40,6 +40,13 @@ pub struct Attribute {
     pub base: f64,
     pub modifiers: Vec<Modifier>,
     pub instantiated: bool,
+    /// 官方 `AttributeInstance.setDirty()` 的代数计数：即使改完后值与修饰符表和上次相同
+    /// （例如疾跑每刻删了又加 `minecraft:sprinting`），官方仍会发 `update_attributes`。
+    ///
+    /// Generation counter for vanilla `AttributeInstance.setDirty()`: even when the final
+    /// value and modifier list match the last sync (e.g. sprinting removes and re-adds
+    /// `minecraft:sprinting` every tick), vanilla still emits `update_attributes`.
+    pub sync_version: u64,
 }
 
 /// 属性的取值范围，`RangedAttribute` 的 `minValue` / `maxValue`。
@@ -76,6 +83,7 @@ impl Attribute {
             base,
             modifiers: Vec::new(),
             instantiated: false,
+            sync_version: 0,
         }
     }
 
@@ -110,8 +118,17 @@ impl Attribute {
         self.modifiers.iter().find(|modifier| modifier.id == id)
     }
 
-    pub fn remove_modifier(&mut self, id: &str) {
+    pub fn remove_modifier(&mut self, id: &str) -> bool {
+        let before = self.modifiers.len();
         self.modifiers.retain(|modifier| modifier.id != id);
+        self.modifiers.len() != before
+    }
+
+    /// 标记一次官方 `setDirty()`，让下一次属性同步发出 `update_attributes`。
+    ///
+    /// Record a vanilla `setDirty()` so the next attribute sync emits `update_attributes`.
+    pub fn touch_sync(&mut self) {
+        self.sync_version = self.sync_version.wrapping_add(1);
     }
 }
 
@@ -263,6 +280,23 @@ impl Attributes {
             .retain(|entry| entry.id != attribute::TEMPT_RANGE);
         attributes.set_base(attribute::MAX_HEALTH, defaults::MAX_HEALTH);
         attributes.set_base(attribute::MOVEMENT_SPEED, defaults::MOVEMENT_SPEED);
+        attributes
+    }
+
+    /// `Monster.createMonsterAttributes()`：`Mob` 的缺省属性加攻击力（注册表缺省值 2）。
+    ///
+    /// `Monster.createMonsterAttributes()`: the mob defaults plus attack damage at its
+    /// registry default of 2.
+    pub(super) fn monster() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut attributes = Self::mob();
+        if attributes.get(attribute::ATTACK_DAMAGE).is_none() {
+            attributes.entries.push(Attribute::new(
+                attribute::ATTACK_DAMAGE,
+                defaults::ATTACK_DAMAGE,
+            ));
+        }
+        attributes.set_base(attribute::ATTACK_DAMAGE, defaults::ATTACK_DAMAGE);
         attributes
     }
 

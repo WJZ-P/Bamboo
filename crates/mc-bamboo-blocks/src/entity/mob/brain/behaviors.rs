@@ -22,6 +22,90 @@ use super::{
 };
 use crate::entity::EntityUid;
 
+/// `BehaviorBuilder.triggerIf(predicate)` 的实体谓词：青蛙用 `Entity::onGround` /
+/// `Entity::isInWater`。声明式 `OneShot`，`getRequiredMemories()` 是空集、不取随机数，
+/// 谓词成立就在同一刻启动又停下（`OneShot.triggerOrStop`）。匿名子类在对拍里记父类
+/// `OneShot`，和其余声明式行为一致。
+///
+/// The entity predicate of `BehaviorBuilder.triggerIf(predicate)`: frogs use
+/// `Entity::onGround` / `Entity::isInWater`. A declarative `OneShot` with an empty
+/// `getRequiredMemories()` and no random draw; when the predicate holds it starts and
+/// stops within the same tick. Its anonymous subclass dumps as the parent `OneShot` in
+/// the oracle, like the other declarative behaviours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trigger {
+    OnGround,
+    InWater,
+}
+
+impl Trigger {
+    fn matches(self, on_ground: bool, in_water: bool) -> bool {
+        match self {
+            Self::OnGround => on_ground,
+            Self::InWater => in_water,
+        }
+    }
+}
+
+/// `BehaviorBuilder.triggerIf(predicate, oneShot)` 里的实体谓词。官方是/// `sequence(triggerIf(predicate), oneShot)`：两个 `OneShot` 串起来，谓词成立才跑后面那个，
+/// 整条仍是 `OneShot`（对拍类名 `OneShot`），必需记忆取后面那个的。骆驼用
+/// `Predicate.not(Camel::refuseToMove)`。
+///
+/// The entity predicate of `BehaviorBuilder.triggerIf(predicate, oneShot)`. Vanilla is
+/// `sequence(triggerIf(predicate), oneShot)`: two chained `OneShot`s where the predicate must
+/// hold before the inner one runs; the whole thing stays a `OneShot` (dumped as `OneShot`)
+/// and required memories come from the inner one. Camels use
+/// `Predicate.not(Camel::refuseToMove)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BodyPredicate {
+    /// `Predicate.not(Camel::refuseToMove)`。
+    CamelNotRefuseToMove,
+}
+
+impl BodyPredicate {
+    fn matches(self, cx: &Cx) -> bool {
+        match self {
+            Self::CamelNotRefuseToMove => !super::super::camel::refuse_to_move(cx.mob, cx.time),
+        }
+    }
+}
+
+/// 速度修正：固定值，或按「在水里 / 在陆上」分别取值（美西螈的
+/// `AxolotlAi::getSpeedModifier` 一族）。
+///
+/// A speed modifier: a constant, or one value in water and another on land (the
+/// axolotl's `AxolotlAi::getSpeedModifier` family).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Speed {
+    Fixed(f32),
+    WaterOrLand { water: f32, land: f32 },
+}
+
+impl Speed {
+    /// 固定值。
+    ///
+    /// A constant speed modifier.
+    pub const fn fixed(value: f32) -> Self {
+        Self::Fixed(value)
+    }
+
+    /// 这一刻的速度修正。
+    ///
+    /// The speed modifier for this tick.
+    pub const fn value(self, in_water: bool) -> f32 {
+        match self {
+            Self::Fixed(value) => value,
+            Self::WaterOrLand { water, land } => {
+                if in_water {
+                    water
+                } else {
+                    land
+                }
+            }
+        }
+    }
+}
+
 /// 一个具体行为和它自己的字段。
 ///
 /// One concrete behaviour and its own fields.
@@ -38,6 +122,7 @@ pub enum Kind {
         speed: f32,
         environmental: bool,
         armadillo: bool,
+        camel: bool,
     },
     /// `LookAtTargetSink(min, max)`。
     LookAtTargetSink { min: i32, max: i32 },
@@ -68,12 +153,12 @@ pub enum Kind {
     /// `FollowTemptation(speed, closeEnough)`: `close_baby` / `close_adult` are the stop
     /// distances by age (armadillo 1 / 2, others 2.5 / 2.5).
     FollowTemptation {
-        speed: f32,
+        speed: Speed,
         close_adult: f64,
         close_baby: f64,
     },
     /// `BabyFollowAdult.create(UniformInt(min, max), speed)`。
-    BabyFollowAdult { min: i32, max: i32, speed: f32 },
+    BabyFollowAdult { min: i32, max: i32, speed: Speed },
     /// `RandomLookAround(UniformInt(min, max), maxYaw, minPitch, maxPitch)`。
     RandomLookAround {
         min_interval: i32,
@@ -85,11 +170,27 @@ pub enum Kind {
     /// `RandomStroll.stroll(speed)`。
     RandomStroll { speed: f32 },
     /// `SetWalkTargetFromLookTarget.create(speed, closeEnough)`。
-    WalkTargetFromLook { speed: f32, close_enough: i32 },
+    WalkTargetFromLook { speed: Speed, close_enough: i32 },
     /// `DoNothing(min, max)`。
     DoNothing { min: i32, max: i32 },
+    /// `BehaviorBuilder.triggerIf(predicate)`：声明式一次性触发（青蛙的着地 / 在水里）。
+    ///
+    /// `BehaviorBuilder.triggerIf(predicate)`: a declarative one-shot trigger (the frog's
+    /// on-ground / in-water predicates).
+    TriggerIf(Trigger),
+    /// `BehaviorBuilder.triggerIf(predicate, oneShot)`：包住另一个一次性行为（骆驼）。
+    ///
+    /// `BehaviorBuilder.triggerIf(predicate, oneShot)`: wraps another one-shot (camels).
+    TriggerIfWrapped {
+        predicate: BodyPredicate,
+        inner: Box<Kind>,
+    },
     /// `GateBehavior` / `RunOne`。
     Gate(Box<Gate>),
+    /// 骆驼自己的行为。
+    ///
+    /// The camel's own behaviours.
+    Camel(super::super::camel::Behavior),
     /// 犰狳自己的行为。
     ///
     /// The armadillo's own behaviours.
@@ -98,6 +199,28 @@ pub enum Kind {
     ///
     /// Goat-only behaviours.
     Goat(super::super::goat::Behavior),
+    /// 青蛙专属行为。
+    ///
+    /// Frog-only behaviours.
+    Frog(super::super::frog::Behavior),
+    /// 美西螈专属行为。
+    ///
+    /// Axolotl-only behaviours.
+    Axolotl(super::super::axolotl::Behavior),
+}
+
+impl Kind {
+    /// `BehaviorBuilder.triggerIf(predicate, oneShot)`：整条是 `OneShot`，谓词成立才跑
+    /// 被包住的那个行为。
+    ///
+    /// `BehaviorBuilder.triggerIf(predicate, oneShot)`: the whole thing is a `OneShot` that
+    /// runs the wrapped behaviour only when the predicate holds.
+    pub fn trigger_if(predicate: BodyPredicate, inner: Kind) -> Self {
+        Self::TriggerIfWrapped {
+            predicate,
+            inner: Box::new(inner),
+        }
+    }
 }
 
 /// `MoveToTargetSink` 的字段。`path` 只记有没有：官方比的是对象身份，只影响要不要重写
@@ -197,14 +320,19 @@ impl Kind {
             Self::LookAtPlayerSometimes { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
-            | Self::WalkTargetFromLook { .. } => Class::OneShot,
+            | Self::WalkTargetFromLook { .. }
+            | Self::TriggerIf(_)
+            | Self::TriggerIfWrapped { .. } => Class::OneShot,
             Self::DoNothing { min, max } => Class::DoNothing {
                 min: *min,
                 max: *max,
             },
             Self::Gate(_) => Class::Gate,
+            Self::Camel(behavior) => behavior.class(),
             Self::Armadillo(behavior) => behavior.class(),
             Self::Goat(behavior) => behavior.class(),
+            Self::Frog(behavior) => behavior.class(),
+            Self::Axolotl(behavior) => behavior.class(),
         }
     }
 
@@ -213,7 +341,10 @@ impl Kind {
     /// `getRequiredMemories()` with each entry status.
     pub(super) fn required(&self) -> &[(MemoryType, MemoryStatus)] {
         match self {
-            Self::Swim { .. } | Self::DoNothing { .. } => &[],
+            Self::Swim { .. } | Self::DoNothing { .. } | Self::TriggerIf(_) => &[],
+            // `sequence` 的必需记忆 = 谓词的（空）+ 被包住那个行为的。
+            // `sequence`'s memories = the predicate's (empty) + the wrapped behaviour's.
+            Self::TriggerIfWrapped { inner, .. } => inner.required(),
             Self::AnimalPanic { .. } => PANIC_REQUIRED,
             Self::LookAtTargetSink { .. } => LOOK_SINK_REQUIRED,
             Self::MoveToTargetSink(_) => MOVE_SINK_REQUIRED,
@@ -231,8 +362,11 @@ impl Kind {
             Self::RandomStroll { .. } => STROLL_REQUIRED,
             Self::WalkTargetFromLook { .. } => WALK_FROM_LOOK_REQUIRED,
             Self::Gate(gate) => &gate.entry,
+            Self::Camel(behavior) => behavior.required(),
             Self::Armadillo(behavior) => behavior.required(),
             Self::Goat(behavior) => behavior.required(),
+            Self::Frog(behavior) => behavior.required(),
+            Self::Axolotl(behavior) => behavior.required(),
         }
     }
 
@@ -242,8 +376,12 @@ impl Kind {
     pub(super) fn name(&self) -> &'static str {
         match self {
             Self::Swim { .. } => "Swim",
-            Self::AnimalPanic { armadillo, .. } => {
-                if *armadillo {
+            Self::AnimalPanic {
+                armadillo, camel, ..
+            } => {
+                if *camel {
+                    "CamelPanic"
+                } else if *armadillo {
                     "ArmadilloPanic"
                 } else {
                     "AnimalPanic"
@@ -255,14 +393,19 @@ impl Kind {
             Self::LookAtPlayerSometimes { .. }
             | Self::BabyFollowAdult { .. }
             | Self::RandomStroll { .. }
-            | Self::WalkTargetFromLook { .. } => "OneShot",
+            | Self::WalkTargetFromLook { .. }
+            | Self::TriggerIf(_)
+            | Self::TriggerIfWrapped { .. } => "OneShot",
             Self::MakeLove { .. } => "AnimalMakeLove",
             Self::FollowTemptation { .. } => "FollowTemptation",
             Self::RandomLookAround { .. } => "RandomLookAround",
             Self::DoNothing { .. } => "DoNothing",
             Self::Gate(gate) => gate.name(),
+            Self::Camel(behavior) => behavior.name(),
             Self::Armadillo(behavior) => behavior.name(),
             Self::Goat(behavior) => behavior.name(),
+            Self::Frog(behavior) => behavior.name(),
+            Self::Axolotl(behavior) => behavior.name(),
         }
     }
 
@@ -283,6 +426,11 @@ impl Kind {
         match self {
             Self::Swim { .. } => goals::float_can_use(cx.me, cx.mob),
             Self::AnimalPanic { environmental, .. } => {
+                // `CamelPanic.checkExtraStartConditions`：还要求 `!isMobControlled()`。
+                // `CamelPanic.checkExtraStartConditions`: also requires `!isMobControlled()`.
+                if cx.mob.mob_type == MobType::Camel && cx.mob.controlling_passenger().is_some() {
+                    return false;
+                }
                 let tag = if *environmental {
                     "minecraft:panic_environmental_causes"
                 } else {
@@ -302,8 +450,11 @@ impl Kind {
             Self::MakeLove { partner, .. } => {
                 cx.mob.in_love > 0 && find_breed_partner(cx, *partner).is_some()
             }
+            Self::Camel(behavior) => behavior.extra_start(cx),
             Self::Armadillo(behavior) => behavior.extra_start(cx),
             Self::Goat(behavior) => behavior.extra_start(cx),
+            Self::Frog(behavior) => behavior.extra_start(cx),
+            Self::Axolotl(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -316,6 +467,11 @@ impl Kind {
             Self::AnimalPanic { armadillo, .. } => {
                 if *armadillo {
                     super::super::armadillo::roll_out(cx.me, cx.mob);
+                }
+                // `CamelPanic.start`：先 `standUpInstantly()` 再走 `super.start()`。
+                // `CamelPanic.start`: `standUpInstantly()` before `super.start()`.
+                if cx.mob.mob_type == MobType::Camel {
+                    super::super::camel::stand_up_instantly(cx.mob, cx.time);
                 }
                 cx.memories.set(IsPanicking, MemoryValue::Bool(true));
                 cx.memories.erase(WalkTarget);
@@ -375,8 +531,11 @@ impl Kind {
                 cx.memories
                     .set(GazeCooldownTicks, MemoryValue::Int(cooldown));
             }
+            Self::Camel(behavior) => behavior.start(cx),
             Self::Armadillo(behavior) => behavior.start(cx),
             Self::Goat(behavior) => behavior.start(cx),
+            Self::Frog(behavior) => behavior.start(cx),
+            Self::Axolotl(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -406,8 +565,11 @@ impl Kind {
                     && !cx.memories.has(BreedTarget)
                     && !cx.memories.has(IsPanicking)
             }
+            Self::Camel(behavior) => behavior.can_still_use(cx),
             Self::Armadillo(behavior) => behavior.can_still_use(cx),
             Self::Goat(behavior) => behavior.can_still_use(cx),
+            Self::Frog(behavior) => behavior.can_still_use(cx),
+            Self::Axolotl(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -436,7 +598,16 @@ impl Kind {
                 if let Some(target) = cx.memories.look_target()
                     && let Some(at) = current_position(cx, target)
                 {
-                    cx.mob.look.set_look_at_default(at.x, at.y, at.z);
+                    // `setLookAt(pos)` 用 `getHeadRotSpeed()` 和 `getMaxHeadXRot()`。
+                    // `setLookAt(pos)` uses `getHeadRotSpeed()` and `getMaxHeadXRot()`.
+                    let speed = living::head_rot_speed(cx.mob);
+                    cx.mob.look.set_look_at(
+                        at.x,
+                        at.y,
+                        at.z,
+                        speed,
+                        super::super::control::MAX_HEAD_X_ROT as f32,
+                    );
                 }
             }
             Self::MoveToTargetSink(sink) => move_sink_tick(sink, cx),
@@ -461,6 +632,11 @@ impl Kind {
                 if cx.me.position.distance_to_sqr(view.position) < 9.0 && cx.time >= *spawn_child_at
                 {
                     living::breed_with(cx.me, cx.mob, cx.ctx, partner);
+                    // `Frog.spawnChildFromBreeding`：不生幼崽，自己记成怀孕。
+                    // `Frog.spawnChildFromBreeding`: no child; the frog becomes pregnant.
+                    if cx.mob.mob_type == MobType::Frog {
+                        cx.memories.set(IsPregnant, MemoryValue::Unit);
+                    }
                     cx.memories.erase(BreedTarget);
                     sensor::set_partner_memory(cx, partner, BreedTarget, None);
                 }
@@ -500,14 +676,17 @@ impl Kind {
                                 track_eye: false,
                                 target_eye: false,
                             },
-                            speed: *speed,
+                            speed: speed.value(cx.me.in_water),
                             close_enough: 2,
                         }),
                     );
                 }
             }
+            Self::Camel(behavior) => behavior.tick(cx),
             Self::Armadillo(behavior) => behavior.tick(cx),
             Self::Goat(behavior) => behavior.tick(cx),
+            Self::Frog(behavior) => behavior.tick(cx),
+            Self::Axolotl(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -533,8 +712,11 @@ impl Kind {
                 cx.memories.erase(WalkTarget);
                 cx.memories.erase(LookTarget);
             }
+            Self::Camel(behavior) => behavior.stop(cx),
             Self::Armadillo(behavior) => behavior.stop(cx),
             Self::Goat(behavior) => behavior.stop(cx),
+            Self::Frog(behavior) => behavior.stop(cx),
+            Self::Axolotl(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -599,7 +781,7 @@ impl Kind {
                             track_eye: false,
                             target_eye: false,
                         },
-                        speed: *speed,
+                        speed: speed.value(cx.me.in_water),
                         close_enough: *min - 1,
                     };
                     cx.memories.set(
@@ -635,13 +817,23 @@ impl Kind {
                     WalkTarget,
                     MemoryValue::Walk(WalkTarget {
                         target,
-                        speed: *speed,
+                        speed: speed.value(cx.me.in_water),
                         close_enough: *close_enough,
                     }),
                 );
                 true
             }
+            Self::TriggerIf(trigger) => trigger.matches(cx.me.on_ground, cx.me.in_water),
+            // `sequence(triggerIf(predicate), oneShot)`：谓词成立才跑被包住的那个 `OneShot`。
+            // `sequence(triggerIf(predicate), oneShot)`: the inner `OneShot` runs only when
+            // the predicate holds.
+            Self::TriggerIfWrapped { predicate, inner } => {
+                predicate.matches(cx) && inner.trigger(cx)
+            }
+            Self::Camel(behavior) => behavior.trigger(cx),
             Self::Armadillo(behavior) => behavior.trigger(cx),
+            Self::Frog(behavior) => behavior.trigger(cx),
+            Self::Axolotl(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }
@@ -947,4 +1139,47 @@ fn lock_gaze_and_walk_to_each_other(cx: &mut Cx, partner: EntityUid, speed: f32,
     cx.memories.set(WalkTarget, walk_to(partner));
     sensor::set_partner_memory(cx, partner, LookTarget, Some(look_at(me)));
     sensor::set_partner_memory(cx, partner, WalkTarget, Some(walk_to(me)));
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::entity::mob::brain::behavior::Class;
+
+    use super::*;
+
+    /// `BehaviorBuilder.triggerIf` 的两个谓词和官方 `Entity::onGround` / `isInWater`
+    /// 对应；声明式行为是 `OneShot`、没有必需记忆、对拍类名 `OneShot`。
+    ///
+    /// The two `BehaviorBuilder.triggerIf` predicates match vanilla `Entity::onGround` /
+    /// `isInWater`; the declarative behaviour is a `OneShot` with no required memories and
+    /// dumps as `OneShot`.
+    #[test]
+    fn trigger_if_predicates_match_vanilla() {
+        assert!(Trigger::OnGround.matches(true, false));
+        assert!(!Trigger::OnGround.matches(false, true));
+        assert!(Trigger::InWater.matches(false, true));
+        assert!(!Trigger::InWater.matches(true, false));
+
+        let kind = Kind::TriggerIf(Trigger::OnGround);
+        assert!(matches!(kind.class(), Class::OneShot));
+        assert!(kind.required().is_empty());
+        assert_eq!(kind.name(), "OneShot");
+    }
+
+    /// `BehaviorBuilder.triggerIf(predicate, oneShot)`（`sequence`）整条仍是 `OneShot`，
+    /// 必需记忆取被包住那个行为的（骆驼 `RandomStroll` 要 `WALK_TARGET` 缺席）。
+    ///
+    /// `BehaviorBuilder.triggerIf(predicate, oneShot)` (`sequence`) stays a `OneShot` and
+    /// takes its required memories from the wrapped behaviour (the camel's `RandomStroll`
+    /// needs `WALK_TARGET` absent).
+    #[test]
+    fn wrapped_trigger_if_takes_inner_memories() {
+        let kind = Kind::trigger_if(
+            BodyPredicate::CamelNotRefuseToMove,
+            Kind::RandomStroll { speed: 2.0 },
+        );
+        assert!(matches!(kind.class(), Class::OneShot));
+        assert_eq!(kind.name(), "OneShot");
+        assert_eq!(kind.required(), STROLL_REQUIRED);
+    }
 }

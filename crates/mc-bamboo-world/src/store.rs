@@ -317,6 +317,17 @@ impl ChunkStore {
         self.edited.get(&pos).unwrap_or(&self.template)
     }
 
+    /// 消费完工表后把已加载区块标脏，即使处理没有改变方块也要保存空表。
+    /// Persist a consumed generation table even when no block changed.
+    pub fn clear_post_processing(&mut self, pos: ChunkPos) {
+        if self.is_loaded(pos) && self.chunk(pos).archive().post_processing.is_some() {
+            self.edited
+                .chunk_mut(pos, &self.template)
+                .clear_post_processing();
+            self.mark_changed(pos);
+        }
+    }
+
     /// 这个区块的方块和光照都和模板一样，可以共用模板的编码。
     pub fn is_template(&self, pos: ChunkPos) -> bool {
         !self.edited.contains_key(&pos) && !self.light.is_materialized(pos)
@@ -346,10 +357,10 @@ impl ChunkStore {
     /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`，读区块里一直维护着的高度图。
     /// 高度超出世界时返回 `None`。
     pub fn heightmap_y(&self, pos: BlockPos) -> Option<i32> {
-        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
+        if !is_inside_world(pos.y) {
             return None;
         }
-        Some(self.chunk(pos.chunk()).heightmap_y(
+        Some(self.loaded_chunk(pos.chunk())?.heightmap_y(
             HeightmapKind::MotionBlocking,
             local(pos.x),
             local(pos.z),
@@ -362,10 +373,7 @@ impl ChunkStore {
     /// `getHeight(WORLD_SURFACE, pos)`: one above the highest non-air block, read from
     /// the `WORLD_SURFACE` heightmap. `None` when the chunk is not loaded.
     pub fn world_surface_y(&self, pos: BlockPos) -> Option<i32> {
-        if !self.is_loaded(pos.chunk()) {
-            return None;
-        }
-        Some(self.chunk(pos.chunk()).heightmap_y(
+        Some(self.loaded_chunk(pos.chunk())?.heightmap_y(
             HeightmapKind::WorldSurface,
             local(pos.x),
             local(pos.z),
@@ -374,11 +382,11 @@ impl ChunkStore {
 
     /// 这一格所在 quart 位置的群系注册表 ID。高度超出世界时返回 `None`。
     pub fn biome_at(&self, pos: BlockPos) -> Option<u32> {
-        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
+        if !is_inside_world(pos.y) {
             return None;
         }
         Some(
-            self.chunk(pos.chunk())
+            self.loaded_chunk(pos.chunk())?
                 .biome_at(local(pos.x), pos.y, local(pos.z)),
         )
     }
@@ -387,13 +395,8 @@ impl ChunkStore {
     /// 没加载的区块一段也没有。和逐段问 [`Self::is_randomly_ticking_section`] 的答案相同，
     /// 只查一次区块表、只读区块里的一个字。
     pub fn randomly_ticking_sections(&self, pos: ChunkPos) -> u32 {
-        if !self.is_loaded(pos) {
-            return 0;
-        }
-        self.edited
-            .get(&pos)
-            .unwrap_or(&self.template)
-            .randomly_ticking_sections()
+        self.loaded_chunk(pos)
+            .map_or(0, Chunk::randomly_ticking_sections)
     }
 
     /// 区块 `pos` 里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段有会随机刻的方块。

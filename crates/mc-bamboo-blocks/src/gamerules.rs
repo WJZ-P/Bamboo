@@ -48,6 +48,10 @@ pub struct BlockGameRules {
     pub spawn_mobs: bool,
     /// `GameRules.SPAWN_MONSTERS`。和 `spawn_mobs` 一起决定 `isSpawningMonsters()`。
     pub spawn_monsters: bool,
+    /// `GameRules.SPAWN_PHANTOMS`。`PhantomSpawner.tick` 开头读它。
+    ///
+    /// `GameRules.SPAWN_PHANTOMS`, read at the top of `PhantomSpawner.tick`.
+    pub spawn_phantoms: bool,
     /// `GameRules.MOB_GRIEFING`。
     pub mob_griefing: bool,
     /// `GameRules.MOB_DROPS`：生物死时掉不掉战利品和经验。
@@ -81,6 +85,7 @@ impl BlockGameRules {
             max_snow_accumulation_height: int_default(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
             spawn_mobs: bool_default(gamerules::SPAWN_MOBS),
             spawn_monsters: bool_default(gamerules::SPAWN_MONSTERS),
+            spawn_phantoms: bool_default(gamerules::SPAWN_PHANTOMS),
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
@@ -168,6 +173,7 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "lava_source_conversion" => rules.lava_source_conversion = value,
         "spread_vines" => rules.spread_vines = value,
         "spawn_mobs" => rules.spawn_mobs = value,
+        "spawn_phantoms" => rules.spawn_phantoms = value,
         "mob_griefing" => rules.mob_griefing = value,
         "mob_drops" => rules.mob_drops = value,
         "mob_explosion_drop_decay" => rules.mob_explosion_drop_decay = value,

@@ -316,14 +316,33 @@ impl RegionColumn {
     /// Move upper-layer content from another box while keeping this box's
     /// blocks/light. A non-full disk chunk keeps its pending entities/ticks
     /// across the resumed stages, just like vanilla's shared ChunkAccess.
+    ///
+    /// 盘上的区块还没跑到 `features` 时没有方块实体，续跑的 `features` 刚放下的
+    /// （箱子的战利品表、刷怪笼）留在当前盒子里；盘上有方块实体内容时整组用盘上的。
+    /// A disk chunk saved before `features` has no block entities, so the ones
+    /// the resumed `features` just placed stay; when the disk has any, the disk's
+    /// whole group is used.
     pub fn adopt_upper_content(&mut self, source: RegionColumn) {
         self.ticks = source.ticks;
-        self.block_entities = source.block_entities;
-        self.redstone = source.redstone;
-        self.containers = source.containers;
-        self.block_items = source.block_items;
-        self.command_blocks = source.command_blocks;
-        self.books = source.books;
+        let source_has_block_entities = !source.block_entities.entities().is_empty()
+            || !source.containers.is_empty()
+            || !source.block_items.is_empty()
+            || !source.command_blocks.is_empty()
+            || !source.books.is_empty()
+            || source
+                .column
+                .chunk()
+                .preserved_block_entities()
+                .next()
+                .is_some();
+        if source_has_block_entities {
+            self.block_entities = source.block_entities;
+            self.redstone = source.redstone;
+            self.containers = source.containers;
+            self.block_items = source.block_items;
+            self.command_blocks = source.command_blocks;
+            self.books = source.books;
+        }
         self.entities = source.entities;
     }
 

@@ -126,6 +126,13 @@ fn check_fall_damage(
     state: BlockState,
     pos: BlockPos,
 ) {
+    // `Parrot.checkFallDamage`、`Bat.checkFallDamage` 和幻翼的都是空实现：不掉血，
+    // 不累计、不清零摔落距离，也不补那次流体更新。
+    // The parrot, bat and phantom `checkFallDamage` overrides are empty: no fall
+    // damage, no fall distance bookkeeping and no fluid update.
+    if mob.mob_type.ignores_fall_damage_check() {
+        return;
+    }
     if !me.in_water {
         update_fluid_interaction(me, mob, ctx.blocks());
     }
@@ -152,8 +159,9 @@ fn fall_on(
     distance: f64,
 ) {
     if state.is(blocks::TURTLE_EGG) {
-        // `TurtleEggBlock.fallOn`：僵尸一系（含尸壳）落上去不踩蛋，其它生物 1/3。
-        if !mob.mob_type.is_monster() {
+        // `TurtleEggBlock.fallOn`：`instanceof Zombie` 才不踩，其他生物 1/3。
+        // `TurtleEggBlock.fallOn`: only `instanceof Zombie` is exempt, others 1 in 3.
+        if !mob.mob_type.is_zombie() {
             destroy_turtle_egg(me, ctx, pos, 3);
         }
         cause_fall_damage(me, mob, ctx, distance, 1.0);
@@ -196,6 +204,11 @@ fn cause_fall_damage(
         // `Goat.calculateFallDamage`：少算 10 点。
         // `Goat.calculateFallDamage`: ten points less.
         damage -= 10;
+    }
+    if mob.mob_type == super::MobType::Frog {
+        // `Frog.calculateFallDamage`：少算 5 点。
+        // `Frog.calculateFallDamage`: five points less.
+        damage -= 5;
     }
     if damage > 0 {
         living::hurt_server(
@@ -314,6 +327,13 @@ fn movement_emission(
                 let pitch = 1.0 + (first - second) * 0.4;
                 super::living::play_sound(me, mob, mob.mob_type.swim_sound(), volume, pitch);
             }
+        }
+    } else if on_state.is_air() && mob.mob_type == super::MobType::Parrot {
+        // `Parrot.isFlapping()` 加 `onFlap()`：脚下是空气时按飞行距离放翅膀声。
+        // `Parrot.isFlapping()` and `onFlap()`: above air, play the wing sound per distance.
+        if mob.fly_dist > mob.parrot.next_flap {
+            super::living::play_sound(me, mob, "minecraft:entity.parrot.fly", 0.15, 1.0);
+            mob.parrot.next_flap = mob.fly_dist + mob.parrot.flap_speed / 2.0;
         }
     }
 }
@@ -602,7 +622,19 @@ fn step_on(
 
 /// `TurtleEggBlock.destroyEgg`：生物（非海龟、蝙蝠、玩家）要 `mobGriefing`；
 /// 之后的世界随机数和改方块在命令落地时做。
+///
+/// `TurtleEggBlock.destroyEgg`: mobs other than turtles, bats and players need
+/// `mobGriefing`; the world-random draw and the block change land with the command.
 fn destroy_turtle_egg(me: &mut Entity, ctx: &mut dyn EntityCtx, pos: BlockPos, chance: i32) {
+    // `canDestroyEgg`：海龟在自家蛋上走过不踩（蝙蝠没有建模）。
+    // `canDestroyEgg`: a turtle walking over its own eggs does nothing (bats are not modelled).
+    if me
+        .kind
+        .mob()
+        .is_some_and(|mob| mob.mob_type == super::MobType::Turtle)
+    {
+        return;
+    }
     if !ctx.blocks().block_game_rules().mob_griefing {
         return;
     }

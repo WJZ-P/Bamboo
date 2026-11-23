@@ -15,14 +15,20 @@
 pub mod armadillo;
 pub mod attributes;
 pub mod avoid;
+pub mod axolotl;
+pub mod bat;
 pub mod bogged;
 pub mod brain;
 pub mod bucketable;
+pub mod camel;
+pub mod cat;
 pub mod chicken;
 pub mod control;
 pub mod conversion;
 pub mod creeper;
 pub mod damage;
+pub mod dolphin;
+pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
 pub(crate) mod enderman;
@@ -31,6 +37,7 @@ pub mod equipment;
 pub mod fish;
 pub mod fox;
 pub mod fox_goals;
+pub mod frog;
 pub mod goals;
 pub mod goat;
 pub mod interact;
@@ -42,8 +49,12 @@ pub mod natural_gen;
 pub mod navigation;
 pub mod nbt;
 pub mod neutral;
+pub mod ocelot;
 pub mod panda;
+pub mod parrot;
 pub mod path;
+pub mod phantom;
+pub mod phantom_spawner;
 mod pig;
 pub mod polar_bear;
 pub mod rabbit;
@@ -51,10 +62,12 @@ pub mod sheep;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod slime;
+pub mod smooth_swim;
 pub mod spawn;
 pub mod spider;
 pub mod squid;
 pub mod stray;
+pub mod tadpole;
 pub mod tame;
 pub(crate) mod timing;
 pub mod turtle;
@@ -115,6 +128,9 @@ pub enum MobType {
     Chicken,
     PolarBear,
     Panda,
+    Ocelot,
+    Cat,
+    Parrot,
     Zombie,
     Husk,
     Skeleton,
@@ -134,19 +150,26 @@ pub enum MobType {
     TropicalFish,
     Pufferfish,
     Turtle,
+    Dolphin,
+    Axolotl,
     Horse,
     Donkey,
     Mule,
     Llama,
     Armadillo,
     Goat,
+    Frog,
+    Tadpole,
+    Bat,
+    Phantom,
+    Camel,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 45] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -157,10 +180,14 @@ impl MobType {
         Self::Chicken,
         Self::PolarBear,
         Self::Panda,
+        Self::Ocelot,
+        Self::Cat,
+        Self::Parrot,
         Self::Horse,
         Self::Donkey,
         Self::Mule,
         Self::Llama,
+        Self::Camel,
         Self::Zombie,
         Self::Husk,
         Self::Skeleton,
@@ -180,8 +207,14 @@ impl MobType {
         Self::TropicalFish,
         Self::Pufferfish,
         Self::Turtle,
+        Self::Dolphin,
+        Self::Axolotl,
         Self::Armadillo,
         Self::Goat,
+        Self::Frog,
+        Self::Tadpole,
+        Self::Bat,
+        Self::Phantom,
     ];
 
     /// 注册表 ID。
@@ -198,6 +231,9 @@ impl MobType {
             Self::Chicken => ids::CHICKEN,
             Self::PolarBear => ids::POLAR_BEAR,
             Self::Panda => ids::PANDA,
+            Self::Ocelot => ids::OCELOT,
+            Self::Cat => ids::CAT,
+            Self::Parrot => ids::PARROT,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
             Self::Skeleton => ids::SKELETON,
@@ -217,12 +253,19 @@ impl MobType {
             Self::TropicalFish => ids::TROPICAL_FISH,
             Self::Pufferfish => ids::PUFFERFISH,
             Self::Turtle => ids::TURTLE,
+            Self::Dolphin => ids::DOLPHIN,
+            Self::Axolotl => ids::AXOLOTL,
             Self::Horse => ids::HORSE,
             Self::Donkey => ids::DONKEY,
             Self::Mule => ids::MULE,
             Self::Llama => ids::LLAMA,
             Self::Armadillo => ids::ARMADILLO,
             Self::Goat => ids::GOAT,
+            Self::Frog => ids::FROG,
+            Self::Tadpole => ids::TADPOLE,
+            Self::Bat => ids::BAT,
+            Self::Phantom => ids::PHANTOM,
+            Self::Camel => ids::CAMEL,
         }
     }
 
@@ -239,6 +282,9 @@ impl MobType {
             Self::Chicken => "minecraft:chicken",
             Self::PolarBear => "minecraft:polar_bear",
             Self::Panda => "minecraft:panda",
+            Self::Ocelot => "minecraft:ocelot",
+            Self::Cat => "minecraft:cat",
+            Self::Parrot => "minecraft:parrot",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
             Self::Skeleton => "minecraft:skeleton",
@@ -258,12 +304,19 @@ impl MobType {
             Self::TropicalFish => "minecraft:tropical_fish",
             Self::Pufferfish => "minecraft:pufferfish",
             Self::Turtle => "minecraft:turtle",
+            Self::Dolphin => "minecraft:dolphin",
+            Self::Axolotl => "minecraft:axolotl",
             Self::Horse => "minecraft:horse",
             Self::Donkey => "minecraft:donkey",
             Self::Mule => "minecraft:mule",
             Self::Llama => "minecraft:llama",
             Self::Armadillo => "minecraft:armadillo",
             Self::Goat => "minecraft:goat",
+            Self::Frog => "minecraft:frog",
+            Self::Tadpole => "minecraft:tadpole",
+            Self::Bat => "minecraft:bat",
+            Self::Phantom => "minecraft:phantom",
+            Self::Camel => "minecraft:camel",
         }
     }
 
@@ -276,7 +329,12 @@ impl MobType {
             Self::Wolf => Some(item_tags::WOLF_FOOD),
             Self::Armadillo => Some(item_tags::ARMADILLO_FOOD),
             Self::Goat => Some(item_tags::GOAT_FOOD),
+            Self::Frog | Self::Tadpole => Some(item_tags::FROG_FOOD),
+            Self::Camel => Some(item_tags::CAMEL_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
+            Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
+            Self::Ocelot => Some(item_tags::OCELOT_FOOD),
+            Self::Cat => Some(item_tags::CAT_FOOD),
             _ => None,
         }
     }
@@ -298,7 +356,10 @@ impl MobType {
     }
 
     pub const fn is_equine(self) -> bool {
-        matches!(self, Self::Horse | Self::Donkey | Self::Mule | Self::Llama)
+        matches!(
+            self,
+            Self::Horse | Self::Donkey | Self::Mule | Self::Llama | Self::Camel
+        )
     }
 
     /// 成年和幼年的（宽，高，眼高）。
@@ -344,16 +405,35 @@ impl MobType {
             (Self::Pig, baby) => pig::dimensions(baby),
             (Self::Armadillo, baby) => armadillo::dimensions(baby),
             (Self::Goat, baby) => goat::dimensions(baby),
+            (Self::Frog, baby) => frog::dimensions(baby),
+            (Self::Tadpole, _) => tadpole::dimensions(),
+            // 大小 0 的尺寸；别的大小看 [`Mob::dimensions`]。
+            // Size 0; other sizes go through [`Mob::dimensions`].
+            (Self::Phantom, _) => phantom::dimensions(0),
+            // `EntityTypes.BAT`：`sized(0.5F, 0.9F).eyeHeight(0.45F)`。
+            // `EntityTypes.BAT`: `sized(0.5F, 0.9F).eyeHeight(0.45F)`.
+            (Self::Bat, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (facts.width, facts.height, 0.45)
+            }
+            // 坐姿尺寸在 `Mob::dimensions` 里按 `camel.pose` 覆盖。
+            // Sitting dimensions are overridden by `Mob::dimensions` from `camel.pose`.
+            (Self::Camel, baby) => camel::dimensions(baby, false),
             (Self::Sheep, baby) => sheep::dimensions(baby),
             (Self::Chicken, baby) => chicken::dimensions(baby),
             (Self::Mooshroom, baby) => mooshroom::dimensions(baby),
             (Self::PolarBear, baby) => polar_bear::dimensions(baby),
             (Self::Panda, baby) => panda::dimensions(baby),
+            (Self::Ocelot, baby) => ocelot::dimensions(baby),
+            (Self::Cat, baby) => cat::dimensions(baby),
+            (Self::Parrot, _) => parrot::dimensions(),
             (Self::Squid | Self::GlowSquid, baby) => squid::dimensions(self, baby),
             (Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish, _) => {
                 fish::dimensions(self, 1, 0)
             }
             (Self::Turtle, baby) => turtle::dimensions(self, baby),
+            (Self::Dolphin, baby) => dolphin::dimensions(baby),
+            (Self::Axolotl, baby) => axolotl::dimensions(baby),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -431,7 +511,10 @@ impl MobType {
     /// Kinds whose `Mob.getAmbientSound()` is null: `makeSound(null)` plays nothing and
     /// draws no pitch.
     pub const fn has_no_ambient_sound(self) -> bool {
-        matches!(self, Self::Creeper | Self::Pufferfish | Self::Slime)
+        matches!(
+            self,
+            Self::Creeper | Self::Pufferfish | Self::Slime | Self::Tadpole
+        )
     }
 
     /// 走路声用脚下方块的 `SoundType`（`Entity.playStepSound` 的缺省实现），不是生物自己的音效。
@@ -440,7 +523,13 @@ impl MobType {
     pub const fn uses_block_step_sound(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Enderman | Self::Witch | Self::Slime
+            Self::Creeper
+                | Self::Enderman
+                | Self::Witch
+                | Self::Slime
+                | Self::Phantom
+                | Self::Ocelot
+                | Self::Cat
         )
     }
 
@@ -464,7 +553,7 @@ impl MobType {
     /// that only implements `Enemy`). Despawning, peaceful removal and the sound category
     /// follow it.
     pub const fn is_enemy(self) -> bool {
-        self.is_monster() || matches!(self, Self::Slime)
+        self.is_monster() || matches!(self, Self::Slime | Self::Phantom)
     }
 
     /// `EntityType.getCategory()` 的消失距离。牛是 `CREATURE`（32），
@@ -478,7 +567,16 @@ impl MobType {
     /// `Mob.removeWhenFarAway`: false for cows, true for monsters; squid are not
     /// `Animal`s and keep the default of true.
     pub const fn removes_when_far_away(self) -> bool {
-        self.is_enemy() || squid::is_squid(self)
+        // 鱿鱼、海豚（`AgeableWaterCreature`）、鱼（`WaterAnimal`）和蝙蝠不是 `Animal`，沿用
+        // `Mob.removeWhenFarAway` 的缺省值真；美西螈由 `Mob::removes_when_far_away` 单判
+        // （装过桶或起了名就不消失）；敌对生物按 `is_enemy` 判定。
+        // Squid, dolphins (AgeableWaterCreature), fish (WaterAnimal) and bats keep the
+        // `Mob.removeWhenFarAway` default of true; the axolotl is handled in
+        // `Mob::removes_when_far_away` (never once bucketed or named); enemies follow
+        // `is_enemy`.
+        self.is_enemy()
+            || squid::is_squid(self)
+            || matches!(self, Self::Bat | Self::Dolphin | Self::Axolotl)
     }
     /// `LivingEntity.canBreatheUnderwater()`：`#can_breathe_under_water` 里已建模的水生生物。
     /// 标签里还有 `#undead`，僵尸和骷髅的溺水行为沿用旧实现，这里不改。
@@ -487,7 +585,12 @@ impl MobType {
     /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
     /// drowning keeps its earlier behaviour and is not changed here.
     pub const fn can_breathe_under_water(self) -> bool {
-        squid::is_squid(self) || fish::is_fish(self) || turtle::is_turtle(self)
+        squid::is_squid(self)
+            || fish::is_fish(self)
+            || turtle::is_turtle(self)
+            // 幻翼在 `#undead` 里，`#can_breathe_under_water` 收了整个标签。
+            // Phantoms are `#undead`, which `#can_breathe_under_water` includes.
+            || matches!(self, Self::Axolotl | Self::Frog | Self::Phantom)
     }
 
     /// 是不是官方 `WaterAnimal`（鱼）：有氧气处理、不吃水流、生成时不查液体，
@@ -504,24 +607,37 @@ impl MobType {
     /// Whether this is an `AgeableMob` (cow, pig, sheep, chicken, squid): saves the three
     /// `Age` keys and grows up.
     pub const fn is_ageable(self) -> bool {
-        !self.is_monster() && !fish::is_fish(self)
+        !self.is_monster() && !fish::is_fish(self) && !matches!(self, Self::Bat | Self::Phantom)
     }
 
-    /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼；以后加海豚）：离水掉氧气、
-    /// 不吃水流、生成时不查液体。
+    /// `AgeableMob.canBeABaby()`：青蛙覆盖成假。它的年龄照样能被设成负数（组里后来的
+    /// 成员按概率 `setAge(-24000)`），但不算幼年、不长大，`Age` 三个键也不存。
     ///
-    /// Whether this is on vanilla's `AgeableWaterCreature` branch (squid and glow squid;
-    /// dolphins later): air drains out of water, currents do not push it and spawning
-    /// skips the liquid check.
+    /// `AgeableMob.canBeABaby()`, overridden to false by frogs. Their age can still go
+    /// negative (later group members roll `setAge(-24000)`), but they are not babies, never
+    /// grow up and do not save the three `Age` keys.
+    pub const fn can_be_a_baby(self) -> bool {
+        !matches!(self, Self::Frog | Self::Parrot)
+    }
+
+    /// 是不是官方 `AgeableWaterCreature` 一支（鱿鱼、发光鱿鱼、海豚）：不吃水流，
+    /// 生成时不查液体。海豚把 `handleAirSupply` 覆写为空实现，氧气单独处理。
+    ///
+    /// Whether this is on vanilla's `AgeableWaterCreature` branch (squid, glow squid and
+    /// dolphins): currents do not push it and spawning skips the liquid check. A dolphin
+    /// overrides `handleAirSupply` to a no-op, so its air is handled separately.
     pub const fn is_ageable_water_creature(self) -> bool {
-        squid::is_squid(self)
+        squid::is_squid(self) || matches!(self, Self::Dolphin)
     }
 
     /// `Entity.isPushedByFluid()`：`AgeableWaterCreature` 覆盖成假。
     ///
     /// `Entity.isPushedByFluid()`, overridden to false by `AgeableWaterCreature`.
     pub const fn is_pushed_by_fluid(self) -> bool {
-        !(self.is_ageable_water_creature() || self.is_water_animal() || turtle::is_turtle(self))
+        !(self.is_ageable_water_creature()
+            || self.is_water_animal()
+            || turtle::is_turtle(self)
+            || matches!(self, Self::Frog))
     }
 
     /// 是不是官方 `Animal`（有求爱和喂食）：非怪物里除掉 `AgeableWaterCreature` 一支。
@@ -529,7 +645,10 @@ impl MobType {
     /// Whether this is a vanilla `Animal` (love and feeding): every non-monster except the
     /// `AgeableWaterCreature` branch.
     pub const fn is_animal(self) -> bool {
-        !self.is_monster() && !self.is_ageable_water_creature() && !self.is_water_animal()
+        !self.is_monster()
+            && !self.is_ageable_water_creature()
+            && !self.is_water_animal()
+            && !matches!(self, Self::Bat | Self::Phantom)
     }
 
     /// `Entity.getSwimSound`：鱼覆盖成 `entity.fish.swim`，海龟是 `entity.turtle.swim`，其余是
@@ -542,6 +661,10 @@ impl MobType {
             fish::SWIM_SOUND
         } else if turtle::is_turtle(self) {
             "minecraft:entity.turtle.swim"
+        } else if matches!(self, Self::Dolphin) {
+            "minecraft:entity.dolphin.swim"
+        } else if matches!(self, Self::Axolotl) {
+            "minecraft:entity.axolotl.swim"
         } else {
             "minecraft:entity.generic.swim"
         }
@@ -552,19 +675,43 @@ impl MobType {
     /// `Entity.getMovementEmission().emitsSounds()`: squid override it to `EVENTS` and
     /// move silently.
     pub const fn emits_movement_sounds(self) -> bool {
-        !squid::is_squid(self)
+        !squid::is_squid(self) && !matches!(self, Self::Bat)
+    }
+
+    /// `LivingEntity.isPushable()`：蝙蝠覆写成假，不推别人也不被推。
+    ///
+    /// `LivingEntity.isPushable()`, overridden to false by bats, which neither push nor
+    /// get pushed.
+    pub const fn is_pushable(self) -> bool {
+        !matches!(self, Self::Bat)
+    }
+
+    /// 把 `checkFallDamage` 覆写成空方法的类型（鹦鹉、蝙蝠和幻翼）。
+    ///
+    /// Types that override `checkFallDamage` with an empty body (parrots, bats and
+    /// phantoms).
+    pub const fn ignores_fall_damage_check(self) -> bool {
+        matches!(self, Self::Parrot | Self::Bat | Self::Phantom)
     }
 
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
     ///
     /// Types registered as `IN_WATER` in `SpawnPlacements`.
     pub const fn spawns_in_water(self) -> bool {
-        squid::is_squid(self) || fish::is_fish(self)
+        squid::is_squid(self)
+            || fish::is_fish(self)
+            || matches!(self, Self::Dolphin | Self::Axolotl)
     }
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
     pub const fn xp_reward(self) -> i32 {
-        if self.is_monster() { 5 } else { 0 }
+        // `Phantom` 构造函数里也是 `xpReward = 5`。
+        // The `Phantom` constructor sets `xpReward = 5` as well.
+        if self.is_monster() || matches!(self, Self::Phantom) {
+            5
+        } else {
+            0
+        }
     }
 
     /// `LivingEntity.dropAllDeathLoot` 用的战利品表。
@@ -580,6 +727,9 @@ impl MobType {
             Self::Chicken => "minecraft:entities/chicken",
             Self::PolarBear => "minecraft:entities/polar_bear",
             Self::Panda => "minecraft:entities/panda",
+            Self::Ocelot => "minecraft:entities/ocelot",
+            Self::Cat => "minecraft:entities/cat",
+            Self::Parrot => "minecraft:entities/parrot",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
             Self::Skeleton => "minecraft:entities/skeleton",
@@ -599,26 +749,37 @@ impl MobType {
             Self::TropicalFish => "minecraft:entities/tropical_fish",
             Self::Pufferfish => "minecraft:entities/pufferfish",
             Self::Turtle => "minecraft:entities/turtle",
+            Self::Dolphin => "minecraft:entities/dolphin",
+            Self::Axolotl => "minecraft:entities/axolotl",
             Self::Horse => "minecraft:entities/horse",
             Self::Donkey => "minecraft:entities/donkey",
             Self::Mule => "minecraft:entities/mule",
             Self::Llama => "minecraft:entities/llama",
             Self::Armadillo => "minecraft:entities/armadillo",
             Self::Goat => "minecraft:entities/goat",
+            Self::Frog => "minecraft:entities/frog",
+            Self::Tadpole => "minecraft:entities/tadpole",
+            Self::Bat => "minecraft:entities/bat",
+            Self::Phantom => "minecraft:entities/phantom",
+            Self::Camel => "minecraft:entities/camel",
         }
     }
 
     /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
     /// 尸壳不烧，僵尸、溺尸和骷髅一支烧。
     pub const fn burns_in_daylight(self) -> bool {
-        matches!(self, Self::Zombie | Self::Drowned) || self.is_skeleton()
+        matches!(self, Self::Zombie | Self::Drowned | Self::Phantom) || self.is_skeleton()
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
-        if self.is_equine() {
+        if matches!(self, Self::Ocelot) {
+            900
+        } else if self.is_equine() {
             400
-        } else if self.is_enemy() {
+        } else if self.is_enemy() || matches!(self, Self::Bat) {
+            // `Mob.getAmbientSoundInterval()` 的缺省值；蝙蝠没有覆写。
+            // The `Mob.getAmbientSoundInterval()` default, which bats keep.
             80
         } else if turtle::is_turtle(self) {
             200
@@ -631,6 +792,9 @@ impl MobType {
     pub const fn sound_volume(self) -> f32 {
         if self.is_equine() {
             0.8
+        } else if matches!(self, Self::Bat) {
+            // `Bat.getSoundVolume()`。
+            0.1
         } else if matches!(
             self,
             Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf
@@ -679,12 +843,28 @@ impl MobType {
             Self::Cod | Self::Salmon | Self::TropicalFish => Some(fish::ambient_sound(self)),
             Self::Pufferfish => None,
             Self::Turtle => None,
+            // 海豚和水陆两栖的美西螈叫声看环境，见 `living::ambient_voice`。
+            // Dolphin and amphibious-axolotl ambience depend on the environment; see
+            // `living::ambient_voice`.
+            Self::Dolphin => Some("minecraft:entity.dolphin.ambient"),
+            Self::Axolotl => Some("minecraft:entity.axolotl.idle_air"),
             Self::Horse => Some("minecraft:entity.horse.ambient"),
             Self::Donkey => Some("minecraft:entity.donkey.ambient"),
             Self::Mule => Some("minecraft:entity.mule.ambient"),
             Self::Llama => Some("minecraft:entity.llama.ambient"),
             Self::Armadillo => Some("minecraft:entity.armadillo.ambient"),
             Self::Goat => Some("minecraft:entity.goat.ambient"),
+            Self::Frog => Some("minecraft:entity.frog.ambient"),
+            Self::Tadpole => None,
+            Self::Bat => Some("minecraft:entity.bat.ambient"),
+            Self::Phantom => Some("minecraft:entity.phantom.ambient"),
+            Self::Ocelot => Some("minecraft:entity.ocelot.ambient"),
+            Self::Cat => Some("minecraft:entity.cat.stray_ambient"),
+            // 鹦鹉的叫声有模仿分支，由 [`living::play_ambient_sound`] 拦截。
+            // Parrot ambient sounds have an imitation branch handled in
+            // [`living::play_ambient_sound`].
+            Self::Parrot => Some("minecraft:entity.parrot.ambient"),
+            Self::Camel => Some("minecraft:entity.camel.ambient"),
         }
     }
 
@@ -697,6 +877,9 @@ impl MobType {
             Self::Sheep => Some("minecraft:entity.sheep.hurt"),
             Self::PolarBear => Some("minecraft:entity.polar_bear.hurt"),
             Self::Panda => Some("minecraft:entity.panda.hurt"),
+            Self::Ocelot => Some("minecraft:entity.ocelot.hurt"),
+            Self::Cat => None,
+            Self::Parrot => Some("minecraft:entity.parrot.hurt"),
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
             Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
@@ -712,12 +895,19 @@ impl MobType {
                 Some(fish::hurt_sound(self))
             }
             Self::Turtle => Some("minecraft:entity.turtle.hurt"),
+            Self::Dolphin => Some("minecraft:entity.dolphin.hurt"),
+            Self::Axolotl => Some("minecraft:entity.axolotl.hurt"),
             Self::Horse => Some("minecraft:entity.horse.hurt"),
             Self::Donkey => Some("minecraft:entity.donkey.hurt"),
             Self::Mule => Some("minecraft:entity.mule.hurt"),
             Self::Llama => Some("minecraft:entity.llama.hurt"),
             Self::Armadillo => Some("minecraft:entity.armadillo.hurt"),
             Self::Goat => Some("minecraft:entity.goat.hurt"),
+            Self::Frog => Some("minecraft:entity.frog.hurt"),
+            Self::Tadpole => Some("minecraft:entity.tadpole.hurt"),
+            Self::Bat => Some("minecraft:entity.bat.hurt"),
+            Self::Phantom => Some("minecraft:entity.phantom.hurt"),
+            Self::Camel => Some("minecraft:entity.camel.hurt"),
         }
     }
 
@@ -730,6 +920,9 @@ impl MobType {
             Self::Sheep => Some("minecraft:entity.sheep.death"),
             Self::PolarBear => Some("minecraft:entity.polar_bear.death"),
             Self::Panda => Some("minecraft:entity.panda.death"),
+            Self::Ocelot => Some("minecraft:entity.ocelot.death"),
+            Self::Cat => None,
+            Self::Parrot => Some("minecraft:entity.parrot.death"),
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
             Self::Skeleton => Some("minecraft:entity.skeleton.death"),
@@ -745,12 +938,19 @@ impl MobType {
                 Some(fish::death_sound(self))
             }
             Self::Turtle => Some("minecraft:entity.turtle.death"),
+            Self::Dolphin => Some("minecraft:entity.dolphin.death"),
+            Self::Axolotl => Some("minecraft:entity.axolotl.death"),
             Self::Horse => Some("minecraft:entity.horse.death"),
             Self::Donkey => Some("minecraft:entity.donkey.death"),
             Self::Mule => Some("minecraft:entity.mule.death"),
             Self::Llama => Some("minecraft:entity.llama.death"),
             Self::Armadillo => Some("minecraft:entity.armadillo.death"),
             Self::Goat => Some("minecraft:entity.goat.death"),
+            Self::Frog => Some("minecraft:entity.frog.death"),
+            Self::Tadpole => Some("minecraft:entity.tadpole.death"),
+            Self::Bat => Some("minecraft:entity.bat.death"),
+            Self::Phantom => Some("minecraft:entity.phantom.death"),
+            Self::Camel => Some("minecraft:entity.camel.death"),
         }
     }
 
@@ -784,12 +984,24 @@ impl MobType {
             // `AbstractFish.playStepSound` is empty.
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => None,
             Self::Turtle => Some("minecraft:entity.turtle.shamble"),
+            // 海豚和美西螈游泳时不发脚步声（`playStepSound` 不走一般路径）。
+            // Neither emits a ground step sound while swimming.
+            Self::Dolphin | Self::Axolotl => None,
             Self::Horse => Some("minecraft:entity.horse.step"),
             Self::Donkey => Some("minecraft:entity.horse.step"),
             Self::Mule => Some("minecraft:entity.horse.step"),
             Self::Llama => Some("minecraft:entity.llama.step"),
             Self::Armadillo => Some("minecraft:entity.armadillo.step"),
             Self::Goat => Some("minecraft:entity.goat.step"),
+            Self::Frog => Some("minecraft:entity.frog.step"),
+            // `MovementEmission.EVENTS`：没有脚步声。
+            // `MovementEmission.EVENTS`: no step sound.
+            Self::Tadpole | Self::Bat | Self::Ocelot | Self::Cat => None,
+            Self::Parrot => Some("minecraft:entity.parrot.step"),
+            // 幻翼没覆写 `playStepSound`，用方块自己的脚步声。
+            // Phantoms keep the default `playStepSound`: the block's own step sound.
+            Self::Phantom => None,
+            Self::Camel => Some("minecraft:entity.camel.step"),
         }
     }
 
@@ -807,6 +1019,9 @@ impl MobType {
             Self::Chicken => items::CHICKEN_SPAWN_EGG,
             Self::PolarBear => items::POLAR_BEAR_SPAWN_EGG,
             Self::Panda => items::PANDA_SPAWN_EGG,
+            Self::Ocelot => items::OCELOT_SPAWN_EGG,
+            Self::Cat => items::CAT_SPAWN_EGG,
+            Self::Parrot => items::PARROT_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
             Self::Skeleton => items::SKELETON_SPAWN_EGG,
@@ -826,12 +1041,19 @@ impl MobType {
             Self::TropicalFish => items::TROPICAL_FISH_SPAWN_EGG,
             Self::Pufferfish => items::PUFFERFISH_SPAWN_EGG,
             Self::Turtle => items::TURTLE_SPAWN_EGG,
+            Self::Dolphin => items::DOLPHIN_SPAWN_EGG,
+            Self::Axolotl => items::AXOLOTL_SPAWN_EGG,
             Self::Horse => items::HORSE_SPAWN_EGG,
             Self::Donkey => items::DONKEY_SPAWN_EGG,
             Self::Mule => items::MULE_SPAWN_EGG,
             Self::Llama => items::LLAMA_SPAWN_EGG,
             Self::Armadillo => items::ARMADILLO_SPAWN_EGG,
             Self::Goat => items::GOAT_SPAWN_EGG,
+            Self::Frog => items::FROG_SPAWN_EGG,
+            Self::Tadpole => items::TADPOLE_SPAWN_EGG,
+            Self::Bat => items::BAT_SPAWN_EGG,
+            Self::Phantom => items::PHANTOM_SPAWN_EGG,
+            Self::Camel => items::CAMEL_SPAWN_EGG,
         }
     }
 
@@ -848,6 +1070,9 @@ impl MobType {
             Self::Chicken => "entity.minecraft.chicken",
             Self::PolarBear => "entity.minecraft.polar_bear",
             Self::Panda => "entity.minecraft.panda",
+            Self::Ocelot => "entity.minecraft.ocelot",
+            Self::Cat => "entity.minecraft.cat",
+            Self::Parrot => "entity.minecraft.parrot",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
             Self::Skeleton => "entity.minecraft.skeleton",
@@ -867,12 +1092,19 @@ impl MobType {
             Self::TropicalFish => "entity.minecraft.tropical_fish",
             Self::Pufferfish => "entity.minecraft.pufferfish",
             Self::Turtle => "entity.minecraft.turtle",
+            Self::Dolphin => "entity.minecraft.dolphin",
+            Self::Axolotl => "entity.minecraft.axolotl",
             Self::Horse => "entity.minecraft.horse",
             Self::Donkey => "entity.minecraft.donkey",
             Self::Mule => "entity.minecraft.mule",
             Self::Llama => "entity.minecraft.llama",
             Self::Armadillo => "entity.minecraft.armadillo",
             Self::Goat => "entity.minecraft.goat",
+            Self::Frog => "entity.minecraft.frog",
+            Self::Tadpole => "entity.minecraft.tadpole",
+            Self::Bat => "entity.minecraft.bat",
+            Self::Phantom => "entity.minecraft.phantom",
+            Self::Camel => "entity.minecraft.camel",
         }
     }
 
@@ -898,10 +1130,13 @@ impl MobType {
         use mc_bamboo_data::spawning::MobCategory;
         match self {
             Self::Squid => MobCategory::WaterCreature,
+            Self::Dolphin => MobCategory::WaterCreature,
+            Self::Axolotl => MobCategory::Axolotls,
             Self::GlowSquid => MobCategory::UndergroundWaterCreature,
             Self::Cod | Self::Salmon | Self::TropicalFish | Self::Pufferfish => {
                 MobCategory::WaterAmbient
             }
+            Self::Bat => MobCategory::Ambient,
             _ if self.is_enemy() => MobCategory::Monster,
             _ => MobCategory::Creature,
         }
@@ -927,6 +1162,35 @@ impl MobType {
     /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
     pub const fn fire_immune(self) -> bool {
         false
+    }
+
+    /// `LivingEntity.getMaxAirSupply()`：海豚 4800、美西螈 6000，其余 300。
+    ///
+    /// `LivingEntity.getMaxAirSupply()`: 4800 for dolphins, 6000 for axolotls, 300 otherwise.
+    pub const fn max_air_supply(self) -> i32 {
+        match self {
+            Self::Dolphin => 4800,
+            Self::Axolotl => 6000,
+            _ => 300,
+        }
+    }
+
+    /// `LivingEntity.increaseAirSupply(current)`：海豚整支覆写成直接回满，
+    /// 其余是 `min(current + 4, max)`。
+    ///
+    /// `LivingEntity.increaseAirSupply(current)`: dolphins override it to return the
+    /// maximum outright; everyone else uses `min(current + 4, max)`.
+    pub const fn increase_air_supply(self, current: i32) -> i32 {
+        if matches!(self, Self::Dolphin) {
+            self.max_air_supply()
+        } else {
+            let filled = current + 4;
+            if filled < self.max_air_supply() {
+                filled
+            } else {
+                self.max_air_supply()
+            }
+        }
     }
 
     /// `EntityType.Builder.immuneTo(tag)`：`isBlockDangerous` 对这个标签里的方块恒假。
@@ -1106,6 +1370,10 @@ pub enum DamageKind {
     IndirectMagic,
     Wither,
     Explosion,
+    /// 海豚 / 美西螈 / 鱼离水干死，`minecraft:dry_out`。
+    ///
+    /// Dolphins, axolotls and fish drying out: `minecraft:dry_out`.
+    DryOut,
     /// `minecraft:player_explosion`：有直接和间接来源实体的爆炸（苦力怕炸人就是这种）。
     ///
     /// `minecraft:player_explosion`: an explosion with a direct and a causing entity,
@@ -1143,6 +1411,7 @@ impl DamageKind {
             Self::IndirectMagic => "minecraft:indirect_magic",
             Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
+            Self::DryOut => "minecraft:dry_out",
             Self::PlayerExplosion => "minecraft:player_explosion",
         }
     }
@@ -1196,6 +1465,7 @@ impl DamageKind {
             Self::IndirectMagic => "indirectMagic",
             Self::Wither => "wither",
             Self::Explosion => "explosion",
+            Self::DryOut => "dryout",
             Self::PlayerExplosion => "explosion.player",
         }
     }
@@ -1231,6 +1501,7 @@ impl DamageKind {
             Self::IndirectMagic,
             Self::Wither,
             Self::Explosion,
+            Self::DryOut,
             Self::PlayerExplosion,
         ];
         all.into_iter()
@@ -1337,7 +1608,8 @@ impl DamageKind {
             | Self::InFire
             | Self::Lava
             | Self::HotFloor
-            | Self::SweetBerryBush => TENTH,
+            | Self::SweetBerryBush
+            | Self::DryOut => TENTH,
             _ => 0.0,
         }
     }
@@ -1424,6 +1696,13 @@ pub struct DamageSource {
     /// The owner of a tamed wolf attacker, credited as the responsible player.
     pub owner_credit: Option<[u8; 16]>,
     pub(super) looting_level: i32,
+    /// 攻击者的实体类型（注册表 ID）。打人的生物自己正在 tick、不在实体表里，战利品表的
+    /// `source_entity` 条件（青蛙吃史莱姆）查不到它，就靠这个。
+    ///
+    /// The attacker's entity type (registry id). A mob that attacks while ticking is not
+    /// in the entity table, so loot `source_entity` conditions (a frog eating a slime)
+    /// fall back to this.
+    pub attacker_type: Option<i32>,
 }
 
 impl DamageSource {
@@ -1446,6 +1725,7 @@ impl DamageSource {
             arrow_punch: 0,
             owner_credit: None,
             looting_level: 0,
+            attacker_type: None,
         }
     }
 
@@ -1528,6 +1808,7 @@ impl DamageSource {
             arrow_punch: 0,
             owner_credit: None,
             looting_level: 0,
+            attacker_type: None,
         }
     }
 
@@ -1838,6 +2119,22 @@ pub struct Mob {
     ///
     /// The panda's genes, flags and counters.
     pub panda: panda::Panda,
+    /// `Entity.isSprinting()`：共享标志第 3 位，同时在 `MOVEMENT_SPEED` 上挂 0.3F 临时加成。
+    ///
+    /// `Entity.isSprinting()`: shared flag 3, paired with the 0.3F transient speed modifier.
+    pub sprinting: bool,
+    /// 豹猫的信任标志和潜行姿势。
+    ///
+    /// The ocelot's trusting flag and crouching pose.
+    pub ocelot: ocelot::Ocelot,
+    /// 猫的花色、叫声变体、项圈颜色、躺卧和潜行状态。
+    ///
+    /// The cat's coat/sound variants, collar colour, lying and crouching state.
+    pub cat: cat::Cat,
+    /// 鹦鹉的品种和扇翅状态。
+    ///
+    /// The parrot's variant and flapping state.
+    pub parrot: parrot::Parrot,
     /// 中立生物的持久愤怒（`NeutralMob`），北极熊在用。
     ///
     /// Persistent anger of neutral mobs (`NeutralMob`); polar bears use it.
@@ -1856,6 +2153,15 @@ pub struct Mob {
     ///
     /// Squid and glow squid state; default for every other mob.
     pub squid: squid::SquidState,
+    /// 蝙蝠的标志字节和飞行目标；别的生物是缺省值。
+    ///
+    /// The bat flag byte and flight target; default for every other mob.
+    pub bat: bat::BatState,
+    /// 幻翼的大小、目标点、锚点、攻击阶段和移动控制的速度；别的生物是缺省值。
+    ///
+    /// The phantom size, target point, anchor, attack phase and move-control speed;
+    /// default for every other mob.
+    pub phantom: phantom::PhantomState,
     /// 海龟的专属状态，别的生物恒为缺省值。
     ///
     /// Turtle state; default for every other mob.
@@ -1864,12 +2170,27 @@ pub struct Mob {
     ///
     /// Fish state; default for every other mob.
     pub fish: fish::FishState,
+    /// 海豚的专属状态，别的生物恒为缺省值。
+    ///
+    /// Dolphin state; default for every other mob.
+    pub dolphin: dolphin::DolphinState,
+    /// 美西螈的专属状态，别的生物恒为缺省值。
+    ///
+    /// Axolotl state; default for every other mob.
+    pub axolotl: axolotl::AxolotlState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
     ///
     /// `Entity.needsSync`: `jumpFromGround` fired this tick, so the move packets carry velocity.
     pub needs_sync: bool,
+    /// 上一次同步之后被击退过（`LivingEntity.knockback` 里的 `needsSync = true`）。受伤常常
+    /// 发生在生物自己的一刻之外，所以先记在这里，下一刻开头并进 `needs_sync`。不存档。
+    ///
+    /// Knocked back since the last sync (`needsSync = true` in `LivingEntity.knockback`).
+    /// Hits often land outside the mob's own tick, so the flag waits here and is folded
+    /// into `needs_sync` at the start of the next tick. Not saved.
+    pub knockback_sync: bool,
     /// `hurtMarked`：速度要强制同步一次。
     pub hurt_marked: bool,
     /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
@@ -1900,6 +2221,19 @@ pub struct Mob {
     ///
     /// The goat synced data and long-jump pose.
     pub goat: goat::Goat,
+    /// 青蛙的品种、姿势和伸舌头的目标。
+    ///
+    /// The frog's variant, pose and tongue target.
+    pub frog: frog::Frog,
+    /// 骆驼的姿势状态机同步值和冲刺计时。
+    ///
+    /// The camel's pose state machine synced values and dash timer.
+    pub camel: camel::Camel,
+    /// `Tadpole.age`：到 24000 变成青蛙。蝌蚪不是 `AgeableMob`，和 `age` 是两回事。
+    ///
+    /// `Tadpole.age`: a frog at 24000. Tadpoles are not `AgeableMob`s, so this is
+    /// separate from `age`.
+    pub tadpole_age: i32,
     /// `LivingEntity.discardFriction`：长跳途中 `travelInAir` 不乘摩擦。
     ///
     /// `LivingEntity.discardFriction`: `travelInAir` skips friction during a long jump.
@@ -1984,11 +2318,16 @@ impl Mob {
             MobType::Slime => slime::attributes(),
             MobType::PolarBear => polar_bear::attributes(),
             MobType::Panda => panda::attributes(),
+            MobType::Ocelot => ocelot::attributes(),
+            MobType::Cat => cat::attributes(),
+            MobType::Parrot => parrot::attributes(),
             MobType::Squid | MobType::GlowSquid => squid::attributes(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::attributes()
             }
             MobType::Turtle => turtle::attributes(),
+            MobType::Dolphin => dolphin::attributes(),
+            MobType::Axolotl => axolotl::attributes(),
             MobType::Creeper => creeper::attributes(),
             MobType::Enderman => enderman::attributes(),
             MobType::Spider => spider::attributes(MobType::Spider),
@@ -1998,6 +2337,11 @@ impl Mob {
             MobType::Witch => witch::attributes(),
             MobType::Armadillo => armadillo::attributes(),
             MobType::Goat => goat::attributes(),
+            MobType::Frog => frog::attributes(),
+            MobType::Tadpole => tadpole::attributes(),
+            MobType::Bat => bat::attributes(),
+            MobType::Phantom => phantom::attributes(),
+            MobType::Camel => camel::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2034,24 +2378,47 @@ impl Mob {
             MobType::Slime => slime::goals(&mut navigation),
             MobType::PolarBear => polar_bear::goals(&mut navigation),
             MobType::Panda => panda::goals(&mut navigation),
+            MobType::Ocelot => ocelot::goals(&mut navigation),
+            MobType::Cat => cat::goals(&mut navigation),
+            MobType::Parrot => parrot::goals(&mut navigation),
             MobType::Squid | MobType::GlowSquid => squid::goals(),
             MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
                 fish::goals(mob_type)
             }
             MobType::Turtle => turtle::goals(&mut navigation),
+            MobType::Dolphin => dolphin::goals(),
+            MobType::Axolotl => axolotl::goals(),
             MobType::Creeper => creeper::goals(&mut navigation),
             MobType::Enderman => enderman::goals(&mut navigation),
             MobType::Spider | MobType::CaveSpider => spider::goals(&mut navigation),
             MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
             MobType::Drowned => drowned::goals(&mut navigation),
             MobType::Witch => witch::goals(&mut navigation),
-            MobType::Armadillo | MobType::Goat => GoalSelector::default(),
+            // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的。
+            // Bats and camels do not override `registerGoals`: both selectors stay empty.
+            MobType::Armadillo | MobType::Goat | MobType::Frog | MobType::Bat | MobType::Camel => {
+                GoalSelector::default()
+            }
+            // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
+            // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
+            // alongside the brain.
+            MobType::Tadpole => fish::goals(mob_type),
+            MobType::Phantom => phantom::goals(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
             // `WaterBoundPathNavigation.createPathFinder`：只有海豚允许跃出水面。
             // `WaterBoundPathNavigation.createPathFinder`: only dolphins may breach.
             navigation.flags.swim = Some(false);
+        }
+        if mob_type == MobType::Dolphin {
+            // `WaterBoundPathNavigation(this, level)`，`allowBreaching = true`。
+            // `WaterBoundPathNavigation(this, level)` with allowBreaching = true.
+            navigation.flags.swim = Some(true);
+        }
+        if mob_type == MobType::Axolotl {
+            // `AmphibiousPathNavigation(this, level)`。
+            navigation.flags.amphibious = true;
         }
         let target_goals = match mob_type {
             MobType::Cow
@@ -2060,9 +2427,16 @@ impl Mob {
             | MobType::Sheep
             | MobType::Chicken
             | MobType::Armadillo
-            | MobType::Goat => GoalSelector::default(),
+            | MobType::Goat
+            | MobType::Frog
+            | MobType::Tadpole
+            | MobType::Bat
+            | MobType::Camel => GoalSelector::default(),
             MobType::PolarBear => polar_bear::target_goals(),
             MobType::Panda => panda::target_goals(),
+            MobType::Ocelot => ocelot::target_goals(),
+            MobType::Cat => cat::target_goals(),
+            MobType::Parrot => GoalSelector::default(),
             MobType::Fox => fox::target_goals(),
             MobType::Wolf => wolf::target_goals(),
             MobType::Rabbit
@@ -2071,7 +2445,9 @@ impl Mob {
             | MobType::Cod
             | MobType::Salmon
             | MobType::TropicalFish
-            | MobType::Pufferfish => GoalSelector::default(),
+            | MobType::Pufferfish
+            | MobType::Axolotl => GoalSelector::default(),
+            MobType::Dolphin => dolphin::target_goals(),
             MobType::Skeleton | MobType::Stray | MobType::Bogged => {
                 GoalSelector::skeleton_targets()
             }
@@ -2082,6 +2458,7 @@ impl Mob {
             MobType::Slime => slime::targets(),
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
+            MobType::Phantom => phantom::target_goals(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -2099,7 +2476,7 @@ impl Mob {
             in_powder_snow: false,
             was_in_powder_snow: false,
             ticks_frozen: 0,
-            air_supply: 300,
+            air_supply: mob_type.max_air_supply(),
             move_dist: 0.0,
             fly_dist: 0.0,
             next_step: 1.0,
@@ -2183,6 +2560,12 @@ impl Mob {
                     fish::malus()
                 }
                 MobType::Turtle => turtle::malus(),
+                MobType::Dolphin => dolphin::malus(),
+                MobType::Axolotl => axolotl::malus(),
+                MobType::Tadpole => fish::malus(),
+                // 蝙蝠直接继承 `Mob`，没有 `Animal` 的两项覆盖。
+                // Bats extend `Mob` directly, without the two `Animal` overrides.
+                MobType::Bat | MobType::Phantom => Malus::monster(),
                 _ => Malus::animal(),
             },
             persistence_required: false,
@@ -2237,20 +2620,37 @@ impl Mob {
             mooshroom: mooshroom::Mooshroom::default(),
             polar_bear: polar_bear::PolarBear::default(),
             panda: panda::Panda::default(),
+            sprinting: false,
+            ocelot: ocelot::Ocelot::default(),
+            cat: cat::Cat::default(),
+            parrot: parrot::Parrot::default(),
             anger: neutral::Anger::default(),
             creeper: creeper::CreeperState::default(),
             spider: spider::SpiderState::default(),
             enderman: enderman::EndermanState::default(),
             squid: squid::SquidState::default(),
+            // `Bat` 构造函数：服务端一出生就倒挂。
+            // The `Bat` constructor: a server-side bat starts out resting.
+            bat: bat::BatState {
+                flags: u8::from(mob_type == MobType::Bat),
+                target: None,
+            },
+            phantom: phantom::PhantomState::default(),
             turtle: turtle::TurtleState::default(),
             fish: fish::FishState::new(),
+            dolphin: dolphin::DolphinState::new(),
+            axolotl: axolotl::AxolotlState::new(),
             events: Vec::new(),
             needs_sync: false,
+            knockback_sync: false,
             hurt_marked: false,
             pending_breed: None,
             brain: new_brain(mob_type),
             armadillo: armadillo::Armadillo::default(),
             goat: goat::Goat::default(),
+            frog: frog::Frog::default(),
+            camel: camel::Camel::default(),
+            tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,
@@ -2274,10 +2674,25 @@ impl Mob {
             mob.malus
                 .set(mc_bamboo_data::PathType::OnTopOfPowderSnow, -1.0);
         }
+        if mob_type == MobType::Frog {
+            frog::configure(&mut mob);
+        }
+        if mob_type == MobType::Tadpole {
+            // `Tadpole.fromBucket()` 恒真（`setFromBucket` 是空的）：永远不会自然消失。
+            // `Tadpole.fromBucket()` is always true (`setFromBucket` does nothing), so
+            // tadpoles never despawn.
+            mob.fish.from_bucket = true;
+        }
         if mob_type == MobType::Armadillo {
             // `Armadillo` 构造函数里的 `getNavigation().setCanFloat(true)`。
             // The `Armadillo` constructor's `getNavigation().setCanFloat(true)`.
             mob.navigation.flags.can_float = true;
+        }
+        if mob_type == MobType::Camel {
+            camel::configure(&mut mob);
+        }
+        if mob_type == MobType::Parrot {
+            parrot::configure(&mut mob);
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -2300,11 +2715,25 @@ impl Mob {
                 == mc_bamboo_data::items::LEATHER_BOOTS
     }
 
+    /// `Mob.getPathfindingMalus`。两栖寻路跑过一次以后水的代价是 0：
+    /// `AmphibiousNodeEvaluator.prepare` 改了它，`done` 没有改回来。
+    ///
+    /// `Mob.getPathfindingMalus`. Water costs 0 once an amphibious search has run:
+    /// `AmphibiousNodeEvaluator.prepare` changes it and `done` never restores it.
+    pub fn pathfinding_malus(&self, path_type: mc_bamboo_data::PathType) -> f32 {
+        if path_type == mc_bamboo_data::PathType::Water && self.navigation.cleared_water_malus {
+            0.0
+        } else {
+            self.malus.get(path_type)
+        }
+    }
+
     pub fn is_baby(&self) -> bool {
         if self.mob_type.uses_baby_metadata() {
             self.zombie_baby
         } else {
-            self.age < 0
+            // `AgeableMob.isBaby`：`canBeABaby() && getAge() < 0`。
+            self.mob_type.can_be_a_baby() && self.age < 0
         }
     }
 
@@ -2336,8 +2765,17 @@ impl Mob {
             let (width, height, _) = slime::dimensions(self.cube.size);
             return (width, height);
         }
+        if self.mob_type == MobType::Phantom {
+            let (width, height, _) = phantom::dimensions(self.phantom.size);
+            return (width, height);
+        }
         if self.mob_type == MobType::Goat {
             let (width, height, _) = goat::pose_dimensions(self.is_baby(), self.goat.long_jumping);
+            return (width, height);
+        }
+        if self.mob_type == MobType::Camel {
+            let sitting = self.camel.pose == camel::Pose::Sitting;
+            let (width, height, _) = camel::dimensions(self.is_baby(), sitting);
             return (width, height);
         }
         if fish::is_fish(self.mob_type) {
@@ -2349,24 +2787,39 @@ impl Mob {
         (width, height)
     }
 
-    /// `Mob.removeWhenFarAway`。鱼覆盖成 `!fromBucket && !hasCustomName`。
+    /// `Mob.removeWhenFarAway`。鱼覆盖成 `!fromBucket && !hasCustomName`；
+    /// 豹猫覆盖成 `!isTrusting && tickCount > 2400`。
     ///
-    /// `Mob.removeWhenFarAway`; fish override it with `!fromBucket && !hasCustomName`.
-    pub fn removes_when_far_away(&self) -> bool {
+    /// `Mob.removeWhenFarAway`; fish override it with `!fromBucket && !hasCustomName`,
+    /// and ocelots with `!isTrusting && tickCount > 2400`.
+    pub fn removes_when_far_away(&self, tick_count: i32) -> bool {
         if fish::is_fish(self.mob_type) {
             return !self.fish.from_bucket && self.custom_name.is_none();
+        }
+        if self.mob_type == MobType::Axolotl {
+            // `Axolotl.removeWhenFarAway`：装过桶或起了名就不消失。
+            // `Axolotl.removeWhenFarAway`: never once bucketed or named.
+            return !self.axolotl.from_bucket && self.custom_name.is_none();
+        }
+        if self.mob_type == MobType::Ocelot {
+            return ocelot::removes_when_far_away(self, tick_count);
+        }
+        if self.mob_type == MobType::Cat {
+            return cat::removes_when_far_away(self, tick_count);
         }
         self.mob_type.removes_when_far_away()
     }
 
     /// `isPersistenceRequired() || requiresCustomPersistence()`：从桶里放出来的鱼
-    /// （`AbstractFish`）和搬着方块的末影人（`Enderman`）不会自然消失。
+    /// （`AbstractFish`）、装过桶的美西螈和搬着方块的末影人（`Enderman`）不会自然消失。
     ///
     /// `isPersistenceRequired() || requiresCustomPersistence()`: fish released from a
-    /// bucket (`AbstractFish`) and endermen carrying a block (`Enderman`) never despawn.
+    /// bucket (`AbstractFish`), bucketed axolotls and endermen carrying a block
+    /// (`Enderman`) never despawn.
     pub fn requires_custom_persistence(&self) -> bool {
         self.persistence_required
             || (fish::is_fish(self.mob_type) && self.fish.from_bucket)
+            || (self.mob_type == MobType::Axolotl && self.axolotl.from_bucket)
             || self.enderman.carried.is_some()
     }
 
@@ -2444,6 +2897,11 @@ pub struct MobPublic {
     /// The attribute table for `update_attributes` (instantiated entries only).
     pub attributes: Attributes,
     pub health: f32,
+    /// 当前挂着的状态效果，同步 `DATA_EFFECT_PARTICLES` / `DATA_EFFECT_AMBIENCE_ID` 用。
+    ///
+    /// The active status effects, synced through `DATA_EFFECT_PARTICLES` /
+    /// `DATA_EFFECT_AMBIENCE_ID`.
+    pub status_effects: effects::EffectMap,
     pub baby: bool,
     /// `AgeableMob.AGE_LOCKED` 元数据。
     pub age_locked: bool,
@@ -2511,6 +2969,23 @@ pub struct MobPublic {
     ///
     /// The synced panda fields.
     pub panda: panda::PandaPublic,
+    /// `Entity.isSprinting()`：共享标志第 3 位。
+    ///
+    /// `Entity.isSprinting()`: shared flag 3.
+    pub sprinting: bool,
+    /// `Ocelot.DATA_TRUSTING` 与潜行姿势。
+    ///
+    /// `Ocelot.DATA_TRUSTING` and the crouching pose.
+    pub ocelot_trusting: bool,
+    pub ocelot_crouching: bool,
+    /// 猫的同步状态。
+    ///
+    /// Synced state of a cat.
+    pub cat: cat::Cat,
+    /// 鹦鹉的同步状态。
+    ///
+    /// Synced state of a parrot.
+    pub parrot: parrot::Parrot,
     /// 苦力怕的三项同步元数据：`DATA_SWELL_DIR`、`DATA_IS_POWERED`、`DATA_IS_IGNITED`。
     ///
     /// The three synced creeper items: swell direction, powered and ignited.
@@ -2526,6 +3001,10 @@ pub struct MobPublic {
     pub enderman_stared_at: bool,
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`。
     pub dark_ticks: i32,
+    /// `Bat.DATA_ID_FLAGS`。
+    pub bat_flags: u8,
+    /// `Phantom.ID_SIZE`。
+    pub phantom_size: i32,
     /// 鱼的桶标记、花纹和河豚的膨胀程度。
     ///
     /// The fish bucket flag, variant and the pufferfish puff state.
@@ -2540,11 +3019,30 @@ pub struct MobPublic {
     ///
     /// `AbstractSchoolingFish.schoolSize`.
     pub school_size: i32,
+    /// 青蛙的品种、姿势和舌头目标。
+    ///
+    /// The frog's variant, pose and tongue target.
+    pub frog: frog::Frog,
+    /// 骆驼的 `DASH` / `LAST_POSE_CHANGE_TICK` / 姿势。
+    ///
+    /// The camel's `DASH` / `LAST_POSE_CHANGE_TICK` / pose.
+    pub camel: camel::Camel,
     /// `Turtle.HAS_EGG` / `LAYING_EGG`。
     ///
     /// `Turtle.HAS_EGG` / `LAYING_EGG`.
     pub turtle_has_egg: bool,
     pub turtle_laying_egg: bool,
+    /// `Dolphin.GOT_FISH` / `MOISTNESS_LEVEL`。
+    ///
+    /// `Dolphin.GOT_FISH` / `MOISTNESS_LEVEL`.
+    pub dolphin_got_fish: bool,
+    pub dolphin_moistness: i32,
+    /// `Axolotl.DATA_VARIANT` / `DATA_PLAYING_DEAD` / `FROM_BUCKET`。
+    ///
+    /// `Axolotl.DATA_VARIANT` / `DATA_PLAYING_DEAD` / `FROM_BUCKET`.
+    pub axolotl_variant: i32,
+    pub axolotl_playing_dead: bool,
+    pub axolotl_from_bucket: bool,
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
@@ -2611,6 +3109,7 @@ impl MobPublic {
             uuid: mob.uuid,
             attributes: mob.attributes.clone(),
             health: mob.health,
+            status_effects: mob.effects.clone(),
             baby: mob.is_baby(),
             age_locked: mob.age_locked,
             x_rot: mob.x_rot,
@@ -2647,6 +3146,11 @@ impl MobPublic {
             mooshroom_brown: mob.mooshroom.brown,
             polar_bear_standing: mob.polar_bear.standing,
             panda: panda::PandaPublic::of(&mob.panda),
+            sprinting: mob.sprinting,
+            ocelot_trusting: mob.ocelot.trusting,
+            ocelot_crouching: mob.ocelot.crouching,
+            cat: mob.cat,
+            parrot: mob.parrot.clone(),
             creeper_swell_dir: mob.creeper.swell_dir,
             creeper_powered: mob.creeper.powered,
             creeper_ignited: mob.creeper.ignited,
@@ -2655,13 +3159,24 @@ impl MobPublic {
             enderman_creepy: mob.enderman.creepy,
             enderman_stared_at: mob.enderman.stared_at,
             dark_ticks: mob.squid.dark_ticks,
-            fish_from_bucket: mob.fish.from_bucket,
+            bat_flags: mob.bat.flags,
+            phantom_size: mob.phantom.size,
+            frog: mob.frog,
+            camel: mob.camel,
+            // 蝌蚪的 `FROM_BUCKET` 同步数据从来不写，一直是假。
+            // A tadpole never writes its synced `FROM_BUCKET`, which stays false.
+            fish_from_bucket: mob.fish.from_bucket && mob.mob_type != MobType::Tadpole,
             fish_variant: mob.fish.variant,
             puff_state: mob.fish.puff_state,
             fish_leader: mob.fish.leader,
             school_size: mob.fish.school_size,
             turtle_has_egg: mob.turtle.has_egg,
             turtle_laying_egg: mob.turtle.laying_egg,
+            dolphin_got_fish: mob.dolphin.got_fish,
+            dolphin_moistness: mob.dolphin.moistness,
+            axolotl_variant: mob.axolotl.variant,
+            axolotl_playing_dead: mob.axolotl.playing_dead,
+            axolotl_from_bucket: mob.axolotl.from_bucket,
             on_fire: mob.visible_fire,
             persistence_required: mob.persistence_required,
             ticks_frozen: mob.ticks_frozen,
@@ -2701,8 +3216,17 @@ impl MobPublic {
             let (width, height, _) = slime::dimensions(self.cube_size);
             return (width, height);
         }
+        if self.mob_type == MobType::Phantom {
+            let (width, height, _) = phantom::dimensions(self.phantom_size);
+            return (width, height);
+        }
         if self.mob_type == MobType::Goat {
             let (width, height, _) = goat::pose_dimensions(self.baby, self.goat.long_jumping);
+            return (width, height);
+        }
+        if self.mob_type == MobType::Camel {
+            let sitting = self.camel.pose == camel::Pose::Sitting;
+            let (width, height, _) = camel::dimensions(self.baby, sitting);
             return (width, height);
         }
         if fish::is_fish(self.mob_type) {
@@ -2737,6 +3261,10 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
     match kind {
         MobType::Armadillo => Some(Box::new(armadillo::brain())),
         MobType::Goat => Some(Box::new(goat::brain())),
+        MobType::Frog => Some(Box::new(frog::brain())),
+        MobType::Tadpole => Some(Box::new(tadpole::brain())),
+        MobType::Camel => Some(Box::new(camel::brain())),
+        MobType::Axolotl => Some(Box::new(axolotl::brain())),
         _ => None,
     }
 }
@@ -2825,5 +3353,31 @@ mod tests {
             assert!(mob.can_break_doors);
             assert_eq!(mob.mob_type, MobType::Zombie);
         });
+    }
+
+    /// 每种 `MobType` 的注册表 ID 必须两两不同，且能从 `by_entity_type` 反查回自己。
+    /// 新增生物时若漏进 `ALL` 或撞了已有 ID，官方刷怪表条目会被映射错（或漏映射），
+    /// `natural-spawn` 关键路径随即分叉。
+    ///
+    /// Every `MobType` must have a distinct registry id that resolves back to
+    /// itself via `by_entity_type`. When a kind is added, omitting it from `ALL`
+    /// or reusing an existing id mismaps (or drops) a vanilla spawn-table entry
+    /// and diverges the `natural-spawn` critical path.
+    #[test]
+    fn mob_type_registry_ids_round_trip() {
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in MobType::ALL {
+            let id = kind.entity_type();
+            assert!(
+                seen.insert(id),
+                "duplicate entity_type id {id} for {kind:?}"
+            );
+            assert_eq!(
+                MobType::by_entity_type(id),
+                Some(kind),
+                "by_entity_type({id}) does not resolve to {kind:?}"
+            );
+        }
+        assert_eq!(seen.len(), MobType::ALL.len());
     }
 }

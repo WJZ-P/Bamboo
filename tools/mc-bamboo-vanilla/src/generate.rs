@@ -3585,7 +3585,16 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PANDA_MAIN_GENE", facts.panda_main_gene),
         ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
         ("PANDA_FLAGS", facts.panda_flags),
+        ("OCELOT_TRUSTING", facts.ocelot_trusting),
+        ("CAT_VARIANT", facts.cat_variant),
+        ("CAT_IS_LYING", facts.cat_is_lying),
+        ("CAT_RELAX_STATE_ONE", facts.cat_relax_state_one),
+        ("CAT_COLLAR", facts.cat_collar),
+        ("CAT_SOUND_VARIANT", facts.cat_sound_variant),
+        ("PARROT_VARIANT", facts.parrot_variant),
         ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
+        ("BAT_FLAGS", facts.bat_flags),
+        ("PHANTOM_SIZE", facts.phantom_size),
         ("FISH_FROM_BUCKET", facts.fish_from_bucket),
         ("SALMON_VARIANT", facts.salmon_variant),
         ("TROPICAL_FISH_VARIANT", facts.tropical_fish_variant),
@@ -3596,11 +3605,23 @@ fn entity_types_file(data: &VersionData) -> String {
         ("GOAT_SCREAMING", facts.goat_screaming),
         ("GOAT_LEFT_HORN", facts.goat_left_horn),
         ("GOAT_RIGHT_HORN", facts.goat_right_horn),
+        ("FROG_VARIANT", facts.frog_variant),
+        ("FROG_TONGUE_TARGET", facts.frog_tongue_target),
         ("TURTLE_HAS_EGG", facts.turtle_has_egg),
         ("TURTLE_LAYING_EGG", facts.turtle_laying_egg),
+        ("DOLPHIN_GOT_FISH", facts.dolphin_got_fish),
+        ("DOLPHIN_MOISTNESS", facts.dolphin_moistness),
+        ("AXOLOTL_VARIANT", facts.axolotl_variant),
+        ("AXOLOTL_PLAYING_DEAD", facts.axolotl_playing_dead),
+        ("AXOLOTL_FROM_BUCKET", facts.axolotl_from_bucket),
     ] {
         let _ = writeln!(out, "pub const {name}: u8 = {value};");
     }
+    let _ = writeln!(
+        out,
+        "pub const PARROT_SOUND_MAP_SIZE: i32 = {};",
+        facts.parrot_sound_map_size
+    );
     let _ = writeln!(
         out,
         "pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &{:?};",
@@ -3623,6 +3644,11 @@ fn entity_types_file(data: &VersionData) -> String {
         (
             "ARMADILLO_STATE_SERIALIZER",
             facts.armadillo_state_serializer,
+        ),
+        ("FROG_VARIANT_SERIALIZER", facts.frog_variant_serializer),
+        (
+            "FROG_TONGUE_TARGET_SERIALIZER",
+            facts.frog_tongue_target_serializer,
         ),
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");

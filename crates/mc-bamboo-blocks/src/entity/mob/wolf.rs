@@ -422,7 +422,7 @@ pub(crate) fn offspring(
 ///
 /// `DyeColor.getMixedColor`: look the two dyes up as a 2×1 crafting grid;
 /// otherwise the level random picks one of them.
-fn mixed_dye(world: &mut crate::world::World, first: i32, second: i32) -> i32 {
+pub(super) fn mixed_dye(world: &mut crate::world::World, first: i32, second: i32) -> i32 {
     if let Some(mixed) = dye_from_recipes(first, second) {
         return mixed;
     }
@@ -481,7 +481,7 @@ pub(super) fn dye_of(stack: &ItemStack) -> Option<i32> {
 }
 
 /// 物品 `food` 组件的营养值。
-fn nutrition_of(stack: &ItemStack) -> Option<i32> {
+pub(super) fn nutrition_of(stack: &ItemStack) -> Option<i32> {
     use mc_bamboo_data::registries::data_component_type as kinds;
     use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, defaults};
     let patch = ComponentPatch::from_opaque(stack).ok()?;

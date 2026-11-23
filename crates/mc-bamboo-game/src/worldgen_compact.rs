@@ -3,7 +3,7 @@
 //! 和官方 `PalettedContainer` 同一个思路，但不受存档 / 协议格式约束（这份数据
 //! 只活在内存里）：方块按 16 层一段切成 24 段，每段一张调色板 + 每格
 //! `ceil(log2(调色板长度))` 位的紧排索引，只有一种方块的段 0 位。群系、高度图、
-//! `PostProcessing` 很小，原样留着。解码结果和原始地形逐格相同（有测试）。
+//! `PostProcessing`、方块实体很小，原样留着。解码结果和原始地形逐格相同（有测试）。
 //!
 //! 实测（`examples/terrain_compact_bench.rs`，`performance-optimizations.md`
 //! 第 23 节）：压缩 20 倍，编码约 130 µs，解码约 57 µs。
@@ -13,7 +13,7 @@
 //! `PalettedContainer` without the save / wire format constraints (this data only
 //! lives in memory): 24 sections of 16 layers, each a palette plus tightly packed
 //! `ceil(log2(palette len))`-bit indices, 0 bits for a uniform section. Biomes,
-//! heightmaps and `PostProcessing` are small and kept as they are. Decoding
+//! heightmaps, `PostProcessing` and block entities are small and kept as they are. Decoding
 //! returns exactly the original terrain (tested). Measured: 20x smaller, about
 //! 130 µs to encode and 57 µs to decode.
 
@@ -143,6 +143,7 @@ impl CompactTerrain {
                 biomes: chunk.biomes.clone(),
                 heightmaps: chunk.heightmaps.clone(),
                 post_processing: chunk.post_processing.clone(),
+                block_entities: chunk.block_entities.clone(),
             },
         }
     }
@@ -160,6 +161,7 @@ impl CompactTerrain {
             biomes: self.rest.biomes.clone(),
             heightmaps: self.rest.heightmaps.clone(),
             post_processing: self.rest.post_processing.clone(),
+            block_entities: self.rest.block_entities.clone(),
         }
     }
 

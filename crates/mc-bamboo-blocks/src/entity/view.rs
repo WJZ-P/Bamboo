@@ -440,6 +440,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
         self.0.facts().sea_level
     }
 
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        self.0.heightmap_y(pos)
+    }
+
     fn game_time(&self) -> i64 {
         self.0.facts().game_time
     }

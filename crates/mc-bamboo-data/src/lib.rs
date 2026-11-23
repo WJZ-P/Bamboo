@@ -797,14 +797,38 @@ pub fn is_client_syncable_attribute(id: i32) -> bool {
         .is_some_and(|name| CLIENT_SYNCABLE_ATTRIBUTES.binary_search(&name).is_ok())
 }
 
+/// 每个状态所属方块的注册表 ID，编译期从 [`blocks::BLOCKS`] 的连续区间展开，
+/// 让热路径上的 [`block_id_of_state`] 变成一次下标访问。
+///
+/// The block registry id of each state, expanded at compile time from the
+/// contiguous ranges in [`blocks::BLOCKS`] so [`block_id_of_state`] is an O(1) index.
+static STATE_TO_BLOCK: [u16; blocks::TOTAL_STATES as usize] = {
+    let mut table = [0u16; blocks::TOTAL_STATES as usize];
+    let mut block_id = 0usize;
+    while block_id < blocks::BLOCKS.len() {
+        let start = blocks::BLOCKS[block_id].first_state as usize;
+        let end = if block_id + 1 < blocks::BLOCKS.len() {
+            blocks::BLOCKS[block_id + 1].first_state as usize
+        } else {
+            blocks::TOTAL_STATES as usize
+        };
+        let mut state = start;
+        while state < end {
+            table[state] = block_id as u16;
+            state += 1;
+        }
+        block_id += 1;
+    }
+    table
+};
+
 /// 一个状态所属方块的注册表 ID，状态 ID 不存在时返回 `None`。
-pub fn block_id_of_state(state: u32) -> Option<usize> {
+#[inline]
+pub const fn block_id_of_state(state: u32) -> Option<usize> {
     if state >= blocks::TOTAL_STATES {
         return None;
     }
-    // 生成器保证了状态 ID 从 0 开始，按方块 ID 连续递增。
-    let next = blocks::BLOCKS.partition_point(|block| block.first_state <= state);
-    next.checked_sub(1)
+    Some(STATE_TO_BLOCK[state as usize] as usize)
 }
 
 /// 一个方块有多少个状态。

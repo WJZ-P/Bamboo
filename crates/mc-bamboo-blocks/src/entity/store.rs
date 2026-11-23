@@ -772,26 +772,47 @@ impl EntityStore {
     }
 
     /// 这两个子索引是不是和主表一致；调试构建和单测用它守住 O(1) 的取放路径。
+    /// 直接核对已有集合的包含关系和总元素数，不在热路径上重新分配三张表。
+    ///
+    /// Whether the sub-indices match the main table. Checks membership and element
+    /// counts in place without allocating fresh maps.
     fn sub_index_matches(&self) -> bool {
-        let mut by_type: BTreeMap<usize, BTreeSet<EntityUid>> = BTreeMap::new();
-        let mut by_chunk: HashMap<ChunkPos, BTreeSet<EntityUid>> = HashMap::new();
-        let mut hard = BTreeSet::new();
+        if self.by_type.values().any(BTreeSet::is_empty)
+            || self.by_chunk.values().any(BTreeSet::is_empty)
+        {
+            return false;
+        }
+        let mut live = 0usize;
+        let mut hard = 0usize;
         for (&uid, &row) in &self.index {
-            if let Some(entry) = self.slots.get(row).and_then(Option::as_ref) {
-                by_type
-                    .entry(entry.public.kind.type_index())
-                    .or_default()
-                    .insert(uid);
-                by_chunk
-                    .entry(entry.public.chunk_position())
-                    .or_default()
-                    .insert(uid);
-                if is_hard_colliding(&entry.public) {
-                    hard.insert(uid);
+            let Some(entry) = self.slots.get(row).and_then(Option::as_ref) else {
+                continue;
+            };
+            live += 1;
+            if !self
+                .by_type
+                .get(&entry.public.kind.type_index())
+                .is_some_and(|uids| uids.contains(&uid))
+            {
+                return false;
+            }
+            if !self
+                .by_chunk
+                .get(&entry.public.chunk_position())
+                .is_some_and(|uids| uids.contains(&uid))
+            {
+                return false;
+            }
+            if is_hard_colliding(&entry.public) {
+                hard += 1;
+                if !self.hard_colliding.contains(&uid) {
+                    return false;
                 }
             }
         }
-        self.by_type == by_type && self.hard_colliding == hard && self.by_chunk == by_chunk
+        let type_total: usize = self.by_type.values().map(BTreeSet::len).sum();
+        let chunk_total: usize = self.by_chunk.values().map(BTreeSet::len).sum();
+        type_total == live && chunk_total == live && self.hard_colliding.len() == hard
     }
 
     /// 只给改坏确认用：从按区块的子索引里漏掉一个实体。
@@ -892,6 +913,7 @@ impl EntityStore {
         for ((row, public), state) in rows.iter().copied().zip(public).zip(state) {
             self.replace_row(row, EntityRow { public, state }, true);
         }
+        debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
     }
 
     /// `addFreshEntity`：分配 ID 放进世界。tick 期间生成的实体下一 tick 才动。
@@ -1073,14 +1095,10 @@ impl EntityStore {
         // uid 指向这一行」是一回事，只是不用扫整张索引。
         // This row is indexed (its uid points at it). Rows and uids are one to
         // one, so this equals "some uid points at this row" without a scan.
-        let indexed = old.as_ref().map(|entry| entry.public.uid).filter(|uid| {
-            debug_assert_eq!(
-                self.index.get(uid) == Some(&row),
-                self.index.values().any(|&indexed| indexed == row),
-                "实体的行和 uid 不是一一对应"
-            );
-            self.index.get(uid) == Some(&row)
-        });
+        let indexed = old
+            .as_ref()
+            .map(|entry| entry.public.uid)
+            .filter(|uid| self.index.get(uid) == Some(&row));
         if let (Some(uid), Some(old)) = (indexed, old.as_ref()) {
             let (from, to) = (old.public.chunk_position(), new.public.chunk_position());
             if from != to {
@@ -1119,7 +1137,6 @@ impl EntityStore {
             self.grid_insert(row, &new.public);
         }
         self.slots[row] = Some(new);
-        debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
     }
 
     fn index_sub(&mut self, uid: EntityUid, public: &EntityPublic) {
@@ -1343,6 +1360,7 @@ impl EntityStore {
         for row in pending {
             self.insert_row(row);
         }
+        debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
     }
 
     /// 并行算阶段的只读名单：uid 升序的 ID 和对应的槽位行号。

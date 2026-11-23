@@ -456,6 +456,63 @@ AI 内部量，服务端不建模，无玩家可感知差异。没有改动任�
 
 其余已知差异见 README「马科的已知限制」。
 
+**与 main 合并（2026-11-21，14:35 追加，op-water）。** `main`（`c9773f61`：马科骑乘 / 农场动物
+收尾、哞菇 / 北极熊 / 熊猫、苦力怕组、缓存与计时测试）合进分支，唯一冲突是 `README.md`：按 main
+结构保留新版羊 / 鸡条目，保留 op-water 的鱿鱼限制句与「海豚 / 美西螈」条目，删掉块内重复的弓条目，
+自然生成夹具说明取并集、数字改成 330 例 1320 刻。`generated/` 重跑 `extract`：`entity_types.rs`
+由生成器重排并去掉分支手写的 6 行注释（常量值不变），`registries.rs` 逐字节一致；`mob-oracle`
+场景编号两边无新增重复。复核：`cargo check --workspace --all-targets` 通过、全量 `mob-oracle`
+1740 例 163321 刻 0 不一致、`--only natural_spawn` 330 例 1320 刻、`natural-spawn` 1727 例、
+`island_command` 4 passed、`--break-self-test water_mob` 抓到 12 处不一致。海豚 / 美西螈逐刻场景、
+故意改坏确认与自然生成接入全部复核通过；Brain 相关行为与海龟产卵 / 孵化 / 回家场景仍未做，
+见 README 已知限制。本轮未改动任何生物行为代码。
+
+**海龟产卵 / 回家逐刻场景（2026-11-21，第七轮）。** 见文末「海龟的实施现状」：新增四个
+逐刻场景、开局带蛋 / 家方块钩子、逐刻状态比较和覆盖断言，故意改坏确认有效；顺带修掉
+`Command::LayTurtleEgg` 的越界崩溃。合并状态：`main = c9773f61` 仍是 HEAD 的祖先，
+`git merge main` 报 Already up to date。全量 `mob-oracle` 1744 例 165621 刻 0 不一致。
+
+**与 main 合并（2026-11-21，14:35 追加，第八轮，op-water）。** 本轮 `main` 已前进到
+`650625b5`（Brain AI 框架、犰狳、山羊），比分支多 20 个提交，按「每轮先 merge main」执行。
+三处冲突都按 main 结构解并集：① `entity/mob/mod.rs` 保留两边的 `axolotl` / `brain` 模块声明，
+`MobType::ALL` 收下 Dolphin / Axolotl / Armadillo / Goat 四项、长度由 30 改成 32（合并后枚举
+共 32 个变体）；② 本文件按 main 把 5.9 定为「大脑 AI、犰狳、山羊」、5.10 定为「中立生物地基和
+北极熊」，去掉分支重复的 5.9 标题，保留两段 op-water 记录；③ `MobOracle.java` 的
+`cowSetupJson` 同时 append 海龟的 `turtleEgg` / `turtleHome` 和大脑的 `sensors` / `scute`，
+`zombieStepJson` 同时保留海龟与山羊两个 `instanceof` 状态块（补回各自闭合括号）。
+`generated/` 用合并后的生成器重跑 `extract`，`entity_types.rs` 与自动合并结果逐字节一致。
+`mob-oracle` 场景编号两边不重复：水生生物走 `squid` / `fish` / `water_mob` 独立驱动，不与
+cow-kind 表里犰狳 13 / 山羊 14 / 海龟 60 撞号；Rust `CowSetup` / `CowStep` 两侧字段自动合并齐全。
+合并把工作区检出成 CRLF、而仓库是 LF，逐文件转回 LF 后 diff 只剩真实内容改动。
+复核：`cargo check --workspace --all-targets`、`cargo fmt --check`、
+`cargo clippy --workspace --all-targets -- -D warnings` 全通过；全量 `mob-oracle`
+1757 例 170741 刻 0 不一致（brain 新增 13 场景 5120 刻正好对上），`--only dolphin`
+3 场景 603 刻、`--only axolotl` 4 场景 804 刻、`--break-self-test water_mob` 抓到 12 处不一致，
+`natural-spawn` 1727 例 0 不一致；`natural.rs` / `spawn.rs` 的水生生成规则接入经核对未被覆盖。
+`island_command` 4 passed、`mc-bamboo-blocks` 779 passed、`mc-bamboo-vanilla` 101 + 8 passed、
+`cargo check -p mc-bamboo-desktop` 通过、联机探针 769/769。05:00 两处回归（sheep_eat 位置、
+岛 1 随机源）的修复在 `9f210652` 已在 main，本轮全量对拍与 `island_command` 复核未复发。
+本轮未改动任何生物行为代码，只做合并、行尾规范化和文档。
+
+**与 main 合并（2026-11-21，第九轮，op-water）。** 起始 `HEAD = 6f85fff8`（第八轮），
+`main = 54ee195a`：比合并基点 `650625b5` 多 8 个提交（`fceb0a89` 一带，op-wgmem 的
+「一份共享 Worldgen 数据集」，改 `worldgen` / `climate` / 生成线程与文档），与
+`mc-bamboo-blocks` 的水生生物代码不重叠。按「每轮先 merge main」执行，`git merge main`
+自动合并、无冲突（只 `README.md` 自动并入 main 的 9 行条目，水生条目原样保留）。`generated/`
+用合并后的生成器重跑 `extract`（JDK 26），`git status` 干净、逐字节幂等；`mob-oracle`
+场景编号两边不重复（cow-kind 表 1..=17 / 40..=43 / 60，水生走 squid / fish / water_mob
+独立驱动）。复核全通过：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo check --workspace --all-targets`、全量 `mob-oracle` 1757 例 170741 刻 0 不一致、
+`--only dolphin` 3 场景 603 刻、`--only axolotl` 4 场景 804 刻、`--only sheep_eat` 3 场景 900 刻、
+`--only natural_spawn` 342 例、`natural-spawn` 1727 例、`--break-self-test water_mob` 抓到 12 处、
+`island_command` 4 passed、`mc-bamboo-blocks` 779 passed、`mc-bamboo-vanilla` 101 + 8 passed、
+`cargo check -p mc-bamboo-desktop`、联机探针 769/769。05:00 两处回归（sheep_eat 位置、岛 1
+随机源，修复在 `9f210652`）复核未复发；09:30 追加的海豚 / 美西螈逐刻对拍、故意改坏确认与
+自然生成接入全部复核仍 0 不一致。本轮未改动任何生物行为代码，只做合并与文档；Brain 驱动的
+剩余已知限制（引路 / 恩惠 / 装死回血 / 攻击水生怪物 / 繁殖）需动 `living.rs` 的 tick 顺序与
+目标分派，按「超出已定设计、需改线程模型或 tick 顺序的部分停下来写汇报，不要自己定」留给
+队长定夺，见 README 已知限制与本轮汇报。
+
 ### 5.9 大脑 AI、犰狳、山羊（2026-11-21，分支 `brain`）
 
 **已做**（代码在 `entity/mob/brain/`、`entity/mob/armadillo.rs`、`entity/mob/goat.rs`）：
@@ -490,6 +547,45 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
 执行；大脑跟着实体走，岛拆合不需要新的按实体迁移。
 
 其余已知差异见 README「大脑生物的已知限制」。
+
+### 5.10 青蛙和蝌蚪（2026-11-21，分支 `brain`）
+
+**已做**（代码在 `entity/mob/frog.rs`、`entity/mob/tadpole.rs`、`behaviour/misc/frogspawn.rs`、
+`mc-bamboo-core/src/jmath.rs`）：
+
+| 部分 | 官方 | Bamboo | 验证 |
+|---|---|---|---|
+| 青蛙大脑 | `Frog`、`FrogAi`、`Croak`、`TryFindLand`、`TryFindLandNearLiquid`、`TryLaySpawnOnFluidNearLand`、`StartAttacking`、`StopAttackingIfTargetInvalid`、`ShootTongue`、`RandomStroll.swim` | `frog::Behavior`（挂在 `Kind::Frog`） | `frog_*` 16 场景 |
+| 长跳 | `LongJumpToRandomPos`、`LongJumpToPreferredBlock`、`LongJumpMidJump`、`LongJumpUtil` | `goat::JumpSpec` + `goat::LongJump`（山羊和青蛙共用） | `frog_lily_*`、`frog_long_jump`、`goat_long_jump` |
+| 传感器 | `FrogAttackablesSensor`、`IsInWaterSensor`、`TemptingSensor(FROG_TEMPTATIONS)` | `SensorKind::FrogAttackables` / `IsInWater` / `FrogTemptations` | 同上 |
+| 移动和寻路 | `SmoothSwimmingMoveControl`、`SmoothSwimmingLookControl`、`Frog.FrogPathNavigation` / `FrogNodeEvaluator`、`Frog.travelInWater` | `frog::move_control_tick`、`tadpole::look_control_tick`、`EvaluatorFlags.frog` | `frog_pool_*`、`frog_deep_*`、`tadpole_swim_*` |
+| 蝌蚪 | `Tadpole`、`TadpoleAi`、`AbstractFish` 的三个目标 | `tadpole.rs` + `fish.rs`（`is_fish` 含蝌蚪） | `tadpole_*` 8 场景 |
+| 蛙卵 | `FrogspawnBlock.tick` / `spawnTadpoles` | `behaviour/misc/frogspawn.rs` | 单元测试 |
+| 存档和同步 | `VariantUtils.writeVariant`、`Tadpole.add/readAdditionalSaveData`、`DATA_VARIANT_ID` / `DATA_TONGUE_TARGET_ID` | `mob/nbt.rs`、`entity_tracking.rs`（下标和序列化器由生成器导出） | `chunk-content` 4 个重存用例 |
+
+**几处照官方的怪行为。**
+- `AmphibiousNodeEvaluator.prepare` 把生物的水代价设成 0，`done` 只还原 `WALKABLE` 和
+  `WATER_BORDER`：青蛙构造时设的水代价 4 在第一次寻路之后就一直是 0。Bamboo 在
+  `Navigation.cleared_water_malus` 记这件事，`Mob::pathfinding_malus` 读它
+  （随机落点的 `GoalUtils.hasMalus`、长跳落点判定都走这里）。
+- 蝌蚪没有覆盖 `AbstractFish.registerGoals`，目标选择器和大脑同时在跑；拿着粘液球的玩家
+  一边被大脑跟随、一边被 `AvoidEntityGoal` 躲开。
+- 青蛙 `canBeABaby` 为假，但 `AgeableMob.finalizeSpawn` 照样可能 `setAge(-24000)`：
+  `Mob::is_baby` 对青蛙恒假，年龄不涨也不存。
+- `ShootTongue.eatEntity` 打死猎物后当场 `remove(KILLED)`：猎物只标记丢弃，轮到它时
+  tick 循环把它拿掉、这一刻攒下的事件（死亡动画）照样发出去；同一刻青蛙的
+  `getTongueTarget()` 已经是空的，俯仰归零。
+
+**随机源。** 长跳抽落点、行为时长、产卵后蛙卵的孵化延迟、品种和长跳冷却用世界随机源；
+`LongJumpToPreferredBlock.start` 的「这次挑不挑偏好方块」、漫步落点、喂蝌蚪的粒子位置
+用生物自己的随机源；角度洗牌和闸门洗牌按 `shuffle_seed` 派生（和山羊同一套序号）。
+
+**对拍夹具的三处改动。** 假世界的 `getEntity(int)` 不再返回已移除的实体（真实的
+`ServerLevel` 在 `setRemoved` 的回调里就把它从查找表里拿掉）；假世界的 `setBlock` 不跑
+`onPlace`，蛙卵的孵化延迟在那里补抽一次；大脑快照里跟踪已移除实体的记忆记成 `?`。
+
+**没做**：骆驼（`Camel` / `CamelAi`，见汇报里的排期）；岩浆怪和蛙明灯掉落；蛙卵被下落的
+方块砸碎。
 ### 5.10 中立生物地基和北极熊（2026-11-21）
 
 - **`NeutralMob`**（`entity/mob/neutral.rs`，新文件）：`persistentAngerEndTime` /
@@ -538,6 +634,436 @@ Bamboo 的会飞出去，之后山羊看不看得见它就不一样了。繁殖�
   `finalizeSpawn`（组数据 `AgeableMobGroupData(0.2)`）。
 - 已知差异：`ITEM` / `SNEEZE` 粒子不发（取数照官方）；喷嚏让同伴跳的水中判定没有建模；
   幼崽金蒲公英的 `Animal.mobInteract` 兜底未接。青蛙、骆驼仍等 `Brain`（犰狳、山羊见 5.9）。
+
+### 5.11 08:40 合并回归的根因与端到端复现（op-misc，2026-11-21）
+
+- 队长 08:40 看到的两处快速检查失败，在 `op-misc` 的最终提交上均已修复并验证：
+  `MobOracle.java` 的 `caseVariant(Mob) throws Exception`（被调的 `farmVariant(Animal)` 声明了
+  `throws Exception`，单文件源码编译需要这一行）；`goals.rs` 的 `NearestAttackableTargetGoal`
+  对 `TargetType` 显式穷举，`Fox` 只搜狐狸实体，不再经 `_ if kind.available()` 兜底。
+- 根因（第 5 轮静态分析，本轮端到端复现确认）：旧代码 `available()` 把 `Fox` 也算作已实现，
+  北极熊的 Fox 目标因此落进 `nearest_attackable` 的玩家搜索。`polar_bear_idle` 出生点附近有玩家，
+  熊从第 1 刻起就有了目标、愤怒结束时间 `e1778`，并多取一次随机数，世界随机源随之分叉。
+  故意把 `Fox` 分支改回 `nearest_attackable` 后，`mob-oracle --only polar_bear` 精确复现
+  `tick 1 ... official "s0|w0|e0|t-" bamboo "s0|w0|e1778|t...0002"`，恢复后 0 不一致。
+- 现状：`git merge main` 为 Already up to date（`main` 已是 `op-misc` 的祖先，合进 main 是快进）；
+  全套 `mob-oracle` 1677 例 160485 刻 0 不一致、`natural-spawn` 1727 例 0 不一致。
+  下次合并冲突解决请保留上面两处（显式 `Fox` 分支、`throws Exception`）。
+- 其余生物：山羊 / 青蛙 / 犰狳 / 骆驼用 `Brain`（`GoatAi` / `FrogAi` / `ArmadilloAi` /
+  `CamelAi`），骆驼 / 鹦鹉上肩还要载具与乘客（世界模型 8.2 未定），按「建议顺序」由队长先整合
+  `brain` 分支、定案载具后再接；猫 / 鹦鹉 / 豹猫用 `tame.rs`，各一个新文件、共用文件最小追加、
+  各配逐刻对拍场景。本轮不新增 `MobType`，避免刚被撤回的合并再次扩大共用文件冲突面。
+
+### 5.12 剩余生物的状态与接入规格（op-misc，2026-11-21，第 8 轮）
+
+**本轮复核**：按规矩先 `git merge main`，当时返回 `Already up to date`（`main=2448b76c`）。
+收尾时 `main` 又前进到 `826bf524`（cx-farm 的猪羊鸡 / thrown-eggs 工作），按 04:30 追加再次
+`git merge main`：无冲突，`goals.rs` 未被 main 改动，08:40 的显式 Fox 修复完好；`MobOracle.java`
+与本文档为自动合并。08:40 两处修复逐字核对仍在：`MobOracle.java` 的
+`caseVariant(Mob mob) throws Exception`、`goals.rs` 的显式 `TargetType::Fox` 分支
+（`available()` 已从本分支彻底移除）；5.11 节在。全套检查在最终合并提交上重跑、全部通过
+（数字见本轮汇报）。**本轮不新增生物、不新增 `MobType`**，理由见下。下面行号均以当前提交
+为准，合并后可能漂移，定位以 `fn` 名 / 符号名为准。
+
+**剩余 7 种的状态**（任务清单：山羊、青蛙、犰狳、骆驼、鹦鹉、豹猫、猫）：
+
+| 生物 | 状态 | 前置 |
+|---|---|---|
+| 哞菇 | 已对拍（`e1d69b66`，剪成牛 / 炖蘑菇 / 闪电变色） | — |
+| 北极熊 | 已对拍（`08e297cf` 修 Fox 目标后 11 例 1121 刻 0 不一致） | — |
+| 熊猫 | 已对拍（6 场景 3278 刻 + 512 题基因遗传 0 不一致） | — |
+| 山羊 / 青蛙 / 犰狳 / 骆驼 | 没做 | 官方 `Brain`（`GoatAi`/`FrogAi`/`ArmadilloAi`/`CamelAi`），本仓库只有 `GoalSelector`（5.9）；骆驼另需载具 |
+| 鹦鹉 | 没做（仅生成期放置模拟 `natural_gen.rs`） | 上肩需载具 / 乘客（世界模型 8.2 未定） |
+| 豹猫 / 猫 | 没做 | 无硬前置（`registerGoals()`，非 `Brain`），但接入面见下 |
+
+**5 种被前置挡住**：5.9 / 5.10 / 5.11 已确认 `Brain` 是「下一步的公共地基」、`brain` 分支未合入
+main；世界模型 8.2「载具和它的乘客」未定案，牵涉岛拆分与一刻顺序。按「超出设计文档、又必须
+改动线程模型或 tick 顺序的部分停下来写汇报，不要自己定」，不自行引入 `Brain` / 载具。
+
+**豹猫 / 猫本轮也不做**：二者技术上可行（官方 `Ocelot` / `Cat` 都用 `registerGoals()`，非
+`Brain`），但新增 `MobType` 会一次性改到一批和 `cx-wild` / `cx-horse` / `op-water` 等并行队员
+高度共用的文件（下表），且 `by_entity_type`（`mod.rs:719`，遍历 `ALL`）把官方刷怪表的
+`minecraft:ocelot` 条目（`registries.rs:585` 已有 ID 92）映射成新种类后，会直接碰到「必须
+0 不一致」的关键路径 `natural-spawn` 与 `check_spawn_rules`。本分支刚被撤回过一次合并，
+单轮无人值守（一旦开工无法收敛必留半成品、违背「检查要干净」）不宜扩大共用文件冲突面；
+5.11 的「建议顺序」也把它们排在 `Brain` / 载具整合之后。这是判断取舍、非硬阻塞。
+
+**更正 5.11 一处**：豹猫 `Ocelot extends Animal`，**不是** `TamableAnimal`，用
+`DATA_TRUSTING` 信任位（无主人 / 跟随 / 坐下）；只有猫 / 鹦鹉是 `TamableAnimal`、才复用
+`tame.rs`。豹猫新文件应自带 `trusting` 状态，不动 `tame.rs:77` 的 `is_tamable`。
+
+**豹猫（`Ocelot`）接入规格**（官方 `net.minecraft.world.entity.animal.feline.Ocelot.java`）：
+
+- 属性 `createAttributes()`：`MAX_HEALTH` 10.0、`MOVEMENT_SPEED` 0.3F、`ATTACK_DAMAGE` 3.0。
+  成年尺寸取 `entity_types.rs:114`（0.6×0.7）；幼崽 `BABY_DIMENSIONS` 0.3×0.35、眼高 0.34375。
+  ambient 间隔 900。**注意**：`entity_types.rs` 目前只有 `RABBIT_MAX_HEALTH`（`:204`）/
+  `FOX_MAX_HEALTH`（`:215`）等，没有 `OCELOT_MAX_HEALTH` / `OCELOT_MOVEMENT_SPEED` /
+  `OCELOT_ATTACK_DAMAGE`；按「版本数字由生成器导出，不要手写」，做豹猫要先动生成器 /
+  `Extractor.java` 的实体属性导出（共用文件禁区），须先和队长确认。
+- `registerGoals()` 优先级（照官方）：goal 1 `FloatGoal`、3 `OcelotTemptGoal(0.6,
+  OCELOT_FOOD, canScare)`、7 `LeapAtTargetGoal(0.3F)`、8 `OcelotAttackGoal`、9
+  `BreedGoal(0.8)`、10 `WaterAvoidingRandomStrollGoal(0.8, 1.0000001E-5F)`、11
+  `LookAtPlayerGoal(Player, 10)`；target 1 `NearestAttackableTargetGoal<Chicken>`、
+  1 `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`；`reassessTrustingGoals`
+  在 `!trusting` 时加 goal 4 `OcelotAvoidEntityGoal<Player>(16, 0.8, 1.33)`。
+- `goals.rs` 现状：`Goal::Float/Tempt/LeapAtTarget/Breed/Stroll/LookAtPlayer/Avoid/
+  MeleeAttack/NearestAttackableTarget`（`:33` 起）齐备；`TargetType`（`:293`）已有 `Turtle`、
+  **缺 `Chicken`**，`Turtle` 的 `BABY_ON_LAND_SELECTOR`（只选陆地幼年海龟）要特判；
+  `OcelotTemptGoal.canScare` / `OcelotAvoidEntityGoal` / `OcelotAttackGoal` 的 `trusting`
+  闸门与官方子类名（`Goal::name`）要按种类补。
+- 每刻 `customServerAiStep`：按 moveControl speed `0.6`→`CROUCHING`、`1.33`→
+  `STANDING`+疾跑、其余 `STANDING`；接 `living.rs` 每刻分派。
+  `removeWhenFarAway`：`!trusting && tickCount > 2400`。
+- 交互 `mobInteract`：tempt 未跑或在跑、`!trusting`、`OCELOT_FOOD`（`tags.rs:461` 已有）、
+  `distanceToSqr<9` → `usePlayerItem` 后 `nextInt(3)==0` 才 `setTrusting(true)` + 心形粒子 +
+  event 41，否则烟粒子 + event 40；`spawnTrustingParticles` 取 7 组
+  `nextGaussian()*0.02`（世界随机源取数须对齐）。接 `interact.rs`。
+- 存盘：`addAdditionalSaveData` / `readAdditionalSaveData` 的 `Trusting` 布尔，接 `nbt.rs`。
+- **关键路径取数**：`checkOcelotSpawnRules` 是 `random.nextInt(3) != 0`；`natural.rs:625`
+  的 `check_spawn_rules` 是穷举 `match`，必须补 Ocelot 分支，否则编译不过且 `natural-spawn`
+  分叉。`checkSpawnObstruction`：海平面以上、脚下 `GRASS_BLOCK` 或 `LEAVES`、无液体。
+- `spawn.rs`：`:335` `finalize_spawn_in_group` 按 kind 分派，豹猫 `finalizeSpawn` 的
+  `groupData == null → AgeableMobGroupData(1.0F)`；`:149` `/summon`、`:196` 刷怪蛋。
+  `getBreedOffspring` 为 `OCELOT(BREEDING)`。
+- `mod.rs` 需最小追加的点（下列为 `fn` 起始行，分支在其后）：`:77` 枚举、`:113`
+  `ALL: [Self; 28]`→29、`:145` `entity_type()`、`:179` 官方名字、`:220` `is_food` 的 tag、
+  `:246` `dimensions`、`:454` `loot_table`、`:494` `ambient_sound_interval`、
+  `:526`/`:565`/`:592`/`:622` 音效、`:642` `spawn_egg`（`items.rs:1303` 的
+  `OCELOT_SPAWN_EGG`）、`:688` 翻译键；`:719` `by_entity_type` 自动覆盖。
+- 元数据 `DATA_TRUSTING` 的 `SynchedEntityData` index 来源（生成器是否导出、还是像
+  `living.rs:1145` 熊猫那样按种类写）**待确认**；若需动生成器同样撞共用文件禁区。
+- 对拍：`MobOracle.java` 与 `mob_oracle.rs` 目前都**没有** ocelot 场景，新建逐刻场景须覆盖
+  信任 `nextInt(3)`、avoid-player、扑击、Chicken / Turtle 目标、pose / sprint。
+
+**猫（`Cat`）接入规格**（官方 `net.minecraft.world.entity.animal.feline.Cat.java extends
+TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目标）：比豹猫多
+`DATA_VARIANT_ID`（`CatVariant` registry，26.3 为 registry holder）、`DATA_COLLAR_COLOR`、
+`DATA_SOUND_VARIANT_ID`（`Cat.java:77-84`）；`finalizeSpawn` 用
+`VariantUtils.selectVariantToSpawn` + `CatSoundVariants.pickRandomSoundVariant` 抽品种
+（`Cat.java:398-406`）；驯服 `nextInt(3)`、`mobInteract` 喂食回血（`:408` 起）、怕苦力怕、
+晨间礼物、蹭人。村庄猫按任务「可先不做」。品种接 `mc-bamboo-data` 的 registry holder 面更大
+（`component_registries.rs:1521` 有 `CAT_VARIANT` 表、`registries.rs:776` 有 ID），故排在豹猫之后。
+
+**下一轮建议**：按 5.11 顺序，先由队长整合 `brain` 分支、定案载具；解锁前若仍要产出，优先选
+豹猫（共用面最小、非 `TamableAnimal`），严格照上表「一种一个新文件、共用文件最小追加、先小样本
+守 `natural-spawn` 关键路径、各配逐刻场景」；动生成器 / 元数据 index 前先和队长确认。
+
+### 5.13 08:40 回归修复后合并 main（op-misc，2026-11-21，第 9 轮）
+
+- 接手时 `HEAD=cf37b3af`，`main` 已前进到 `c9773f61`（35 个 `cx-horse` 提交：马科骑乘、
+  `equine/tame.rs` 的 `RunAroundLikeCrazyGoal`、`riding.rs`、狼驼目标、羊驼吐口水等），
+  `main` 不是 `HEAD` 的祖先。按 08:40「最优先」先 `git merge main`。
+- 三个 `changed in both` 文件里 `MobOracle.java` 与本文档自动合并，`goals.rs` 是唯一内容冲突：
+  `main` 保留 `TargetType::available()`（`Fox`/`FoxPrey`/`Wolf` 算已实现）加 `_ if kind.available()`
+  兜底；`op-misc` 是 `08e297cf` 删掉 `available()`、对 `TargetType` 显式穷举的版本。冲突解决保留
+  `op-misc` 的显式穷举，`impl TargetType` 开头加一条中英双语警示注释防止下次合并把兜底加回。
+- 自动合并另把 `main` 新增的 `TargetType::Wolf => nearest_wild_wolf_target(...)`
+  （羊驼 `LlamaAttackWolfGoal`）与 `op-misc` 的 `Villager|...|Wolf|Endermite => None` 拼进同一个
+  `match`，`Wolf` 出现两次（文本合并成功、语义重复）。已从 `=> None` 那支删掉 `Wolf`，保留 `main`
+  的专门分支，`match` 仍穷举 11 个变体。
+- 08:40 两处修复逐字核对仍在：`MobOracle.java:954` 的 `caseVariant(Mob mob) throws Exception`、
+  `goals.rs` 的显式 `TargetType::Fox` 分支。全套 `mob-oracle` 在合并态 1733 例 161914 刻 0 不一致
+  （含合入的 `llama_spit` / `arrow` 场景），`polar_bear_idle` 的 tick 1 回归未复现。
+- 前置重新核查（基于含 `cx-horse` 的新 `main`）：`Brain`（`GoatAi`/`FrogAi`/`ArmadilloAi`/
+  `CamelAi`）在 `mc-bamboo-blocks` 仍无任何实现；新合入的 `riding.rs` 是「玩家骑实体、客户端
+  权威」，README 马科已知限制写明「载具 + 骑手不可分」「岛拆分」未做，世界模型 8.2 乘客归属仍未
+  定案；通用 `tame.rs`（`cx-wild`）在，`equine/tame.rs` 是马科专用甩人驯服、不是通用驯服。故 5.12
+  的「剩余 7 种」结论不变：4 种等 `Brain`，骆驼 / 鹦鹉上肩等 8.2，猫 / 豹猫技术上可行但共用文件
+  冲突面大。**本轮不新增 `MobType`、不新增生物**，理由见本轮汇报第 4 节。
+- 全套检查（fmt / clippy / `cargo check --workspace --all-targets` / `cargo test -p mc-bamboo-blocks`
+  / `cargo test -p mc-bamboo-vanilla` / `cargo check -p mc-bamboo-desktop` / 全套 `mob-oracle` /
+  `natural-spawn` / `tools/probe.sh`）全部通过，数字见本轮汇报第 2 节。
+
+### 5.14 第 10 轮：合入复核与 chunk-content 北极熊存档缺陷修复（op-misc，2026-11-21）
+
+- 按队长追加先 `git merge main`，返回 `Already up to date`：`main`（`c9773f61`）是
+  `HEAD`（`3c6a9dfd`）的祖先，本轮无新冲突、无冲突解决。08:40 两处修复逐字复核仍在：
+  `MobOracle.java:954` 的 `caseVariant(Mob mob) throws Exception`、`goals.rs:1534` 的
+  显式 `TargetType::Fox` 分支（`available()` 仍已移除，只剩防回退的中英双语警示注释）。
+- **修好 `chunk-content` 长期存在的 1 处失败（关键路径「存档格式」）**：夹具
+  「polar bear with persistent anger」过去报 `official could not load this entity`
+  （`1 of 495 checks failed`）。根因不是存档格式：官方
+  `NeutralMob.readPersistentAngerSaveData` 读 `angry_at` 后会走
+  `EntityReference.getLivingEntity` → `ServerLevel.getEntityInAnyDimension` →
+  `ServerLevel.getEntities()`，而 `ChunkContentOracle.java` 的 `FakeLevel` 用 Unsafe
+  分配、没初始化 `entityManager`，`NullPointerException` 被
+  `EntityType.loadStaticEntity` 吞掉，`loadEntityRecursive` 返回 null。Bamboo 写的
+  `angry_at`（`IntArrayTag`，4 个 int）与官方 `UUIDUtil.CODEC`（`Codec.INT_STREAM`）
+  本来逐键一致；`brain` 分支疑点 20 记的「与官方 26.3 `EntityReference` 复合格式
+  不符、官方侧加载不了」是误判（用不吞异常的 `EntityType.create` 打印 cause 链定位到
+  `ServerLevel.getEntities` 的 `entityManager == null`）。
+- 修法（只动 Java 夹具 `ChunkContentOracle.java`，21 行，提交 `3a4bcc62`）：给
+  `FakeLevel` 补 `getEntityInAnyDimension` / `getPlayerInAnyDimension` 两个 override
+  返回 null，表示「查不到这个实体」；`persistentAngerTarget` 保留 UUID 并原样写回
+  `angry_at`，只有 `Mob.target` 为空，和官方找不到目标一致。修复后 `chunk-content`
+  为 **496 checks passed**（原 1/495 失败）。Bamboo 的 `neutral.rs` / `nbt.rs` 未改，
+  北极熊 `angry_at` 存档与官方逐键一致得到对拍确认。
+- **前置按最新情报重新核查**：`brain` 分支（`9b846b6b`，报告 15:22）已做完山羊 / 犰狳
+  和 Brain 框架、是当前 `main` 的直接后代、可无冲突 fast-forward 合进 main；青蛙仍
+  整块未做，brain 报告明确「单独开一整轮按 `FrogAi` 整块搬完再对拍，不要先落半截
+  实体骨架」；骆驼等 `docs/mob-entity-design.md` 5.8 骑乘定稿。故任务清单里
+  山羊 / 犰狳 / 青蛙 / 骆驼都已有专门分支或硬前置，**本轮不重做、不抢做**。
+- 剩 3 种：鹦鹉上肩等世界模型 8.2「载具和它的乘客」定案；豹猫 / 猫技术上可行
+  （`registerGoals()`，非 Brain），但按 5.12 须先动生成器 / `Extractor.java` 导出
+  `OCELOT_*` 属性与元数据 index、新建 `MobOracle.java` / `mob_oracle.rs` 逐刻场景，
+  属「须先和队长确认」的共用文件禁区。队长 09:00 追加与 brain 报告的当前节奏是
+  「把各分支整理干净、可 fast-forward、不要开半截 WIP 挡住合进 main」，单轮无人
+  值守不宜扩大这批共用文件冲突面，故**本轮不新增 `MobType`、不新增生物**。
+- 本轮全套检查（fmt / clippy / `cargo test -p mc-bamboo-blocks` /
+  `cargo test -p mc-bamboo-vanilla` / `cargo check -p mc-bamboo-desktop` / 全套
+  `mob-oracle` / `natural-spawn` / `chunk-content` / `tools/probe.sh`）在最终提交上
+  实跑，结果见本轮汇报第 2 节。请队长定夺下一步：合进 main，或单独开一整轮做
+  某一种生物。
+
+### 5.15 第 11 轮：合并含 Brain / 山羊 / 犰狳的 main 并全套复核（op-misc，2026-11-21）
+
+- 接手时 `HEAD=2d5ac486`、`main=c9773f61`。本轮按 04:30 / 08:40「先 `git merge main`」执行时，
+  `main` 已被别的队员推进到 `650625b5`（"Merge the Brain AI framework with armadillos and
+  goats"），合并**不是 no-op**：产生双亲合并 `56060028`，带入 47 文件 / 6797 行
+  （`entity/mob/brain/`、`goat.rs`、`armadillo.rs`、`MobType::ALL` 28→30、`natural.rs` /
+  `spawn.rs` 按 kind 分发、`MobOracle.java` +450 行、`chunk_content_oracle.rs` 等）。
+  自此 `main` 是 `HEAD` 的祖先，合回 main 是无冲突 fast-forward。
+- 08:40 两处修复 + 第 10 轮 chunk-content 修复在自动合并后逐字复核仍在：
+  `MobOracle.java:958` 的 `caseVariant(Mob mob) throws Exception`（main 给该文件 +450 行、
+  行号漂移，签名与双语警示注释都保留）、`goals.rs:1534` 的显式 `TargetType::Fox` 分支与
+  `impl TargetType` 开头的防回退注释（`available()` 仍已移除）、`ChunkContentOracle.java:361,366`
+  的 `FakeLevel` 两个 override。`goals.rs` 本次只把 `float_can_use` / `damage_type_tagged` /
+  `look_for_water` / `nearest_tempting_player` 改成 `pub(super)` 供 Brain 复用，目标匹配未动。
+- 全套检查在最终提交上实跑、全部通过（数字见本轮汇报第 2 节）：fmt / clippy `-D warnings` /
+  `cargo check --workspace --all-targets` / `cargo check -p mc-bamboo-desktop` /
+  `cargo test -p mc-bamboo-blocks` 775 通过 / `cargo test -p mc-bamboo-vanilla` 109 通过 /
+  全套 `mob-oracle` 1746 例 167034 刻 0 不一致（含 `polar_bear_idle`，回归未复现）/
+  `--only polar_bear` 11 例 1121 刻 0 / `natural-spawn` 1727 例 0 / `chunk-content` 503 项 /
+  `tools/probe.sh` 769/769。
+- **前置状态更新**：Brain 框架（5.9）、山羊、犰狳已随 main 落地，任务清单里这三种不再是
+  「没做」；青蛙的硬前置「缺 Brain」已解除，只剩「整块一轮按 `FrogAi` 搬完再对拍」的时间约束
+  （brain 报告明确不要先落半截实体骨架）；骆驼仍等 5.8 骑乘 / 世界模型 8.2 载具；
+  鹦鹉上肩仍等 8.2；豹猫 / 猫仍须新增 `MobType`。
+- **更正 5.12 的前置判断**：5.12 说「做豹猫须先动生成器 / `Extractor.java` 导出 `OCELOT_*`
+  属性」——属性一项不准确。`panda.rs` 的 `attributes()` 把 20.0 / 0.15 / 6.0 手写在新文件里
+  （照官方 `Panda.createAttributes`），`entity_types.rs` 的 `FACTS[ocelot]`（`:114`，0.6×0.7）
+  已由生成器导出、可直接读；元数据 `DATA_TRUSTING` 的 index 才需要 `Extractor.java` 的
+  `entityAccessor(Ocelot.class, "DATA_TRUSTING").id()` 一行（brain 已把这条导出链路用在
+  `ARMADILLO_STATE` / `GOAT_*`）。故剩余硬约束不是「属性导出」，而是新增 `MobType` 碰
+  `natural-spawn` / `check_spawn_rules` 关键路径、新建 Java/Rust 逐刻场景、动 `Extractor.java` /
+  generated 共用文件前的确认。
+- **合并带来的文档编号遗留（报告队长，不自行重编号）**：main 把 5.9 改成「大脑 AI」、
+  原 5.9→5.10、原 5.10（熊猫）→5.11，但 op-misc 特有的 `5.11 08:40 根因`、`5.12`、`5.13`、
+  `5.14` 未随之重排，当前文件有两个 `### 5.11`（熊猫、08:40 根因），且 5.12~5.14 里
+  「5.9 / 5.10 / 5.11 已确认」「按 5.11 顺序」「更正 5.11 一处」等交叉引用在新编号下语义
+  已错乱。重编号会大改这个共用文件、并与并行队员再冲突，留给队长统一处理。
+- 本轮不新增 `MobType`、不新增生物：单轮无人值守的核心任务是合并与全套复核，树已可
+  fast-forward，青蛙按 brain 报告须整块一轮，其余有硬前置。请队长定夺下一步：
+  (A) 把合并提交 fast-forward 合进 main；(B) 单独开一整轮按 5.12 规格做豹猫或青蛙。
+
+### 5.16 第 12 轮：再次合并 main、全套复核、查实 panda_breed 偶发不一致的根因（op-misc，2026-11-21）
+
+- 接手时 `HEAD=f694ca4f`、`main=54ee195a`（第 11 轮结束时 main 又前进了 8 个 `op-wgmem`
+  世界生成内存优化提交：`worldgen.rs` / `climate.rs` / `worldgen_spawn.rs` 等，不碰三处修复文件、
+  设计文档、`natural.rs` / `spawn.rs` / `mod.rs`）。按 04:30 / 08:40「最优先」先 `git merge main`，
+  产生双亲合并 `e74eefab`；`git merge-base --is-ancestor main HEAD` 为 0，自此 main 又是 HEAD
+  的祖先，合回 main 是无冲突 fast-forward。合并只带进 10 个 worldgen / README / 性能文档文件，
+  无内容冲突、无需按 kind 手工解决。
+- 三处 08:40 / 第 10 轮修复逐字复核仍在：`MobOracle.java:958` 的
+  `caseVariant(Mob mob) throws Exception`、`goals.rs:1534` 的显式 `TargetType::Fox` 分支
+  （`available()` 已移除）、`ChunkContentOracle.java:361,366` 的 `FakeLevel` 两个 override。
+- 全套检查在最终提交上实跑、全部通过（数字见本轮汇报第 2 节）：`cargo fmt --check` 0 /
+  `cargo clippy --workspace --all-targets -- -D warnings` 0 警告 /
+  `cargo check --workspace --all-targets` 0 / `cargo check -p mc-bamboo-desktop` 0 /
+  `cargo test -p mc-bamboo-blocks` 775 通过 0 失败 6 忽略 /
+  `cargo test -p mc-bamboo-vanilla` 101 单元 + 8 集成 = 109 通过 0 失败 /
+  `cargo build -p mc-bamboo-vanilla`（worldgen 合并后重链）0 /
+  全套 `mob-oracle` 1746 例 167034 刻 0 不一致 / `--only polar_bear` 11 例 1121 刻 0 /
+  `natural-spawn` 1727 例 0 / `chunk-content` 503 项通过 /
+  `tools/probe.sh` 769/769（`JAVA` 设成 JDK 26）。
+- **查实第 11 轮疑点 1 的根因，并推翻其「并行干扰」结论**：`panda_breed` 约 6% 的偶发
+  12 处不一致不是并行 java / 高负载干扰，而是官方夹具自身的随机不确定性。官方
+  `Panda.getBreedOffspring`（`net.minecraft.world.entity.animal.panda.Panda`）先
+  `EntityTypes.PANDA.create` 造幼崽，`Entity` 的 `random` 字段是无种子的
+  `RandomSource.create()`（`RandomSource.create()` → `RandomSupport.generateUniqueSeed()`，
+  即 `SEED_UNIQUIFIER.updateAndGet(...) ^ System.nanoTime()`，含墙钟），随后
+  `baby.setGeneFromParents(this, partner)` 从这个幼崽自己的 `Entity.random` 抽两次
+  `nextInt(32) == 0` 的变异；夹具的 `reseedBorn`（`MobOracle.java:9394`）要等到这一刻
+  `collectBorn` 才把幼崽随机源换成确定性的岛种子，晚于基因抽取；`spawnJson`（`:8223`）
+  对新生幼崽也不序列化基因。于是官方一侧的幼崽主 / 隐基因带约 2×(1/32)≈6% 的墙钟
+  变异，而 Bamboo 侧 `panda::offspring_genes` 用确定性种子重放、几乎不触发变异，
+  两边在 `var: g5/0` 与 `g0/0` 上分叉，连带元数据同步包字节数 18 vs 15。
+  验证：在持有全机 heavy 锁、无并行 java 的干净负载下连跑
+  `mob-oracle --only panda` 12 次，第 11 次复现出逐字相同的 `tick 60 ... g5/0`↔`g0/0`
+  与 12 处不一致，其余 11 次全 0——与两次 1/32 变异、约 6% 的概率吻合；第 11 轮把它判成
+  「并行重活干扰」是误判。Bamboo 的基因遗传本身是对的：独立的 `playPandaGenes`
+  512 题（显式 `setRandom(baby, babySeed)` 后再 `setGeneFromParents`）逐题 0 不一致。
+- **故意不改夹具、写进本轮汇报疑点 1 请队长核实**：干净修法要么在官方幼崽构造时
+  （`getBreedOffspring` 之前）就把 `Entity.random` 换成确定性种子（要钩官方实体构造、
+  动 `MobOracle.java` 共用夹具），要么把新生幼崽的基因像 `seed` / `uuid` / 朝向一样当成
+  「场景起点」交给 Bamboo（要给 `Spawn` 加字段并改动 `panda_breed` 比对了什么，可能
+  「改掉测试的本意」）。两者都是动共用文件 / 改对拍语义的取舍，无人值守单轮不宜自己定；
+  且这约 6% 的抖动是官方夹具、不是玩家可感知的行为差异，写进 README 已知限制会误导，
+  故只记在本节与汇报疑点 1，附最小修法建议供队长定夺。
+- 第 11 轮疑点 2（probe 767/769 的 `durability: the break event is 47`，实体事件到达顺序的
+  时序断言）本轮 `tools/probe.sh` 一次即 769/769，未复现；仍是高负载下的偶发时序，不改代码。
+- 两个 `### 5.11` 与 5.12~5.14 的错乱交叉引用（第 11 轮疑点 3）本轮仍未自行重编号，
+  留给队长统一处理（理由同 5.15）。
+- 本轮不新增 `MobType`、不新增生物：剩余五种（青蛙 / 骆驼 / 鹦鹉 / 豹猫 / 猫）各有硬前置
+  （Brain 整块一轮、载具 / 世界模型 8.2 未定案、新增 `MobType` 撞 `natural-spawn` 关键路径
+  与 `Extractor.java` / generated 共用文件禁区「须先和队长确认」），无人值守单轮无法确认、
+  也不宜在可 fast-forward 的干净树上开半截 WIP。请队长二选一：(A) 把 `e74eefab` 直接
+  fast-forward 合进 main；(B) 单独开一整轮按 5.12 / brain 规格做一种（豹猫共用面最小）。
+
+### 5.17 第 13 轮：合并 33980ce0、修复合并引入的编译中断、全套复核（op-misc，2026-11-21）
+
+- 接手时 `HEAD=3cf0a9fa`（第 12 轮报告）、`main=33980ce0`。第 12 轮明确「会话中途不再追
+  合并 33980ce0」：main 相对 `merge-base=54ee195a` 又前进了 41 个提交（op-hostile2 的女巫 /
+  史莱姆 / 溺尸 / 流浪者 / 沼骸、便携 desktop 构建脚本、四次 main 合并与「full mob-oracle
+  fix」）。本轮按 04:30 / 08:40「最优先」把这该 main 合进来：`2042107b` 是 ort 自动合并、
+  无内容冲突、双亲；`goals.rs` / `MobOracle.java` / 本文档三个共用文件自动合并，无需按 kind
+  手工解决。合并后 `git merge-base --is-ancestor main HEAD` = 0，合回 main 是 fast-forward。
+- **本轮实质的代码修复：合并引入的编译中断**。main 的 op-water 工作给 `TargetType` 加了
+  `Axolotl` 变体（`drowned.rs:168` 的溺尸目标占位，官方 `NearestAttackableTargetGoal<Axolotl>`，
+  Bamboo 没有该实体），而 op-misc 的 08:40 修复把 `Goals::canUse` 的 `match kind` 改成显式穷举，
+  两者合到一起后 `cargo build -p mc-bamboo-vanilla` 报 `E0004: &mut TargetType::Axolotl not
+  covered`。修法（`a44a6c3d`，`goals.rs` 6 行、中英双语注释）：把 `Axolotl` 并进 `=> None`
+  那一支，语义和 main 的 `available()` 不含 Axolotl → `_ => None` 一致——仍按间隔取
+  `nextInt(interval)`、不查世界。`nearest_attackable` 只有显式
+  Player / GuardedPlayer / AngerPlayer 一个调用方，op-misc 去掉 `!kind.available()` 守卫安全。
+- 三处 08:40 / 第 10 轮修复在合并态逐字复核仍在：`MobOracle.java:977` 的
+  `caseVariant(Mob mob) throws Exception`（被调 `farmVariant(Animal) throws Exception`，
+  单文件源码编译需要这一行）、`goals.rs:1690` 的显式 `TargetType::Fox` 分支（`available()`
+  仍已彻底移除、`impl TargetType` 开头的防回退双语警示注释在）、`ChunkContentOracle.java`
+  的 `FakeLevel` 两个 override（`getSeaLevel` / `getPlayerInAnyDimension`）。
+- **08:40 撤回合并的根因（沿用 5.11，本轮在合并态复核）**：一次冲突解决把两处修复静默回退——
+  `caseVariant` 丢了 `throws Exception`（整个 `mob-oracle` 编译不过）、`Fox` 显式分支被 main
+  旧的 `_ if kind.available() => nearest_attackable` 兜底取代（旧 `available()` 把 Fox 也算
+  已实现，北极熊的 Fox 目标落进玩家搜索，出生点玩家被设成目标、愤怒结束时间 `e1778`、从第 1
+  刻起多取一次随机数，世界随机源随之分叉，即 `polar_bear_idle` 的 12 处不一致）。当前 main
+  （`e83ce946` / `6037f3d2` 一带）已自带这两处修复：`goals.rs` 的显式 Fox 分支在 `available()`
+  兜底之前、`MobOracle.java` 的 `caseVariant` 带 `throws Exception`。故本轮干净的 ort 合并
+  两者都在，`polar_bear_idle`（`mob-oracle --only polar_bear` 11 例 1121 刻）未复现回归。
+- 全套检查在最终提交上实跑、全部通过（数字见本轮汇报第 2 节）：`cargo fmt --check` /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo check --workspace --all-targets`
+  / `cargo check -p mc-bamboo-desktop` / `cargo test -p mc-bamboo-blocks` 790 通过 0 失败
+  6 忽略 / `cargo test -p mc-bamboo-vanilla` 101 单元 + 8 集成 = 109 通过 / 全套 `mob-oracle`
+  1773 例 170990 刻 0 不一致 / `--only polar_bear` 11 例 1121 刻 0 / `natural-spawn`
+  1727 例 0 / `chunk-content` 503 项通过 / `tools/probe.sh` 769/769（`JAVA` 设成 JDK 26）。
+- 本轮不新增 `MobType`、不新增生物：核心任务是「合并当前 main、修复合并引入的编译中断、
+  全套复核、保持可 fast-forward 的干净树」，剩余五种的前置沿用 5.16；两个 `### 5.11` 与
+  5.12~5.14 的错乱交叉引用仍未自行重编号，留给队长统一处理（理由同 5.15 / 5.16）。
+
+### 5.18 第 14 轮：独立复核 08:40 撤回合并的修复、新增 MobType 注册表守卫（op-misc，2026-11-21）
+
+- 接手时 `HEAD=c188de3a`（第 13 轮报告）、`main=33980ce0`。本轮开头复核：`main` 仍是
+  `HEAD` 的祖先（`git merge-base --is-ancestor` = 0、`HEAD..main` 为空），`git merge main`
+  返回 `Already up to date`（本轮 main 未再前进）。按 04:30 / 08:40「先 `git merge main`」
+  执行、无需合并提交；`git status --short` 干净，合回 main 仍是 fast-forward。
+- **08:40 两处修复本轮逐字复核、仍在本分支**（未重做，均为历史提交）：
+  `MobOracle.java:977` 的 `caseVariant(Mob mob) throws Exception`（被调
+  `farmVariant(Animal) throws Exception`，单文件源码编译要求这一行）、`goals.rs:1690` 的显式
+  `TargetType::Fox` 分支（北极熊 Fox 目标只搜狐狸、不落回 `nearest_attackable` 玩家搜索；
+  `available()` 仍已彻底移除、`impl TargetType` 开头的防回退双语警示注释在）。因 op-misc 已是
+  main 的 fast-forward 后代，队长把 op-misc 合进 main 不再需要冲突解决，这两处修复不会被
+  静默回退——这正是 08:40「撤回合并」的根因（5.11 / 5.17）已被消除的机制。
+- **本轮实质代码改动：`mod.rs` tests 模块新增 1 个回归测试**
+  `mob_type_registry_ids_round_trip`（26 行、中英双语注释）。断言 `MobType::ALL` 每种的
+  `entity_type()` 两两不同、且 `by_entity_type(id)` 能反查回自己。这是给「剩余五种生物各要
+  新增 `MobType`」做的前置守卫：漏进 `ALL` 或撞了已有注册表 ID 会静默把官方刷怪表条目
+  映射错（或漏映射）、直接分叉 `natural-spawn` 关键路径。不改任何游戏行为、不碰生成器。
+- **本轮不新增 `MobType`、不新增生物**（沿用 5.15 / 5.16 / 5.17 判断）：剩余五种
+  （青蛙 / 骆驼 / 鹦鹉 / 豹猫 / 猫）都需要 `Extractor.java` 导出的实体数据访问器 index
+  （`generated/entity_types.rs` 已有这五种的尺寸 facts，但 `pub const` 访问器常量里没有
+  它们的 `DATA_*`；`Extractor.java` 只为已做生物导出 `entityAccessor(...).id()`）——按 5.12 /
+  5.15「动生成器 / 元数据 index 前先和队长确认」，无人值守单轮无法确认。青蛙另须按 brain
+  报告整块一轮搬完 `FrogAi`；骆驼 / 鹦鹉上肩须等世界模型 8.2「载具和它的乘客」定案（涉
+  tick 顺序 / 岛拆分，按架构规矩停下写汇报、不自己定）；豹猫 / 猫新增 `MobType` 会一次改到
+  ~35 处穷举 match、14 个共用文件并碰 `natural-spawn` / `check_spawn_rules` 关键路径，还要
+  新建 Java / Rust 逐刻场景，与并行队员冲突面大。故本轮只做复核 + 一个安全守卫。
+- 两个 `### 5.11` 与 5.12~5.14 的错乱交叉引用仍未自行重编号，留给队长统一处理（理由同
+  5.15 / 5.16 / 5.17）。
+- 全套完成标准检查在最终提交上重跑，逐项数字与结果见本轮汇报 `reports/op-misc.md` 第 2 节。
+- 交接：请队长二选一 —— (A) 把本轮提交 fast-forward 合进 main；(B) 先确认 `Extractor.java`
+  的 `DATA_*` 导出、再单独开一整轮按 5.12 规格做豹猫（共用面最小）或按 brain 规格整块做青蛙。
+
+### 5.19 第 15 轮：合并青蛙与骆驼 main、实现豹猫与猫并通过逐刻与存档对拍（op-misc，2026-11-22）
+
+- **合并 main**：先后合并 `4ad4370c`（青蛙 / 蝌蚪 / Brain）与 `c72e9b0d`（骆驼 / Brain 姿势机），
+  合并后 `main` 为 `HEAD` 祖先，合回 `main` 为无冲突 fast-forward。合并骆驼时因 `main` 占用了
+  `MobOracle` 场景编号 `20`（`MobType::Camel`），将豹猫与猫的场景编号顺延为 `21` / `22`，避免碰撞；
+  `MobType::ALL` 扩至 40 种并由 `mob_type_registry_ids_round_trip` 守卫。
+- **实现豹猫（`ocelot.rs`，提交 `3b9c3c27`）**：
+  - 生成器导出 `OCELOT_TRUSTING = 18`；属性 10 / 0.3F / 3.0，成年 0.6×0.7、幼崽 0.3×0.35（眼高 0.34375）；
+    `Trusting` 存盘与同步。
+  - 新增 `LivingEntity.setSprinting` 瞬态速度修饰符（`+0.3F` `AddMultipliedTotal`）、`Attribute.sync_version`
+    脏计数（每次 `setSprinting(true)` 按官方 `AttributeInstance.setDirty()` 触发下一次同步包）和
+    `Entity.spawnSprintParticle` 服务端 `2 × nextDouble()` 随机取数。
+  - 完整目标链（`Float` / `OcelotAvoidEntityGoal` / `OcelotTemptGoal` / `LeapAtTarget` / `OcelotAttackGoal` /
+    `Breed` / `WaterAvoidingRandomStroll` / `LookAtPlayer`，捕杀 `Chicken` 与陆地幼年 `Turtle`）、信任交互
+    （1/3 + 7 组高斯取数 + 事件 40/41）、丛林/竹林 `MONSTER` 自然刷怪（`checkOcelotSpawnRules` 2/3 与
+    `checkSpawnObstruction` 要求海平面以上、草方块或树叶且无液体）。
+  - 顺手修了两处既有的海龟缺陷（`ocelot_hunt_turtle` 暴露）：`turtle.rs` 眼高从 `height` 改为
+    `height * 0.85`（成年 0.34、幼年 0.102，对齐 `EntityTypes.TURTLE`），`TurtleRandomStrollGoal` 改用
+    `PLAIN_STROLL` 并补全 `TurtleRandomStrollGoal` / `TurtlePanicGoal` / `TurtleBreedGoal` 的 `subclass_name`。
+- **实现猫（`cat.rs`，提交 `ab1a863e`）**：
+  - 生成器导出 5 个索引（`CAT_VARIANT` / `CAT_IS_LYING` / `CAT_RELAX_STATE_ONE` / `CAT_COLLAR` /
+    `CAT_SOUND_VARIANT`），协议层补 `SERIALIZER_CAT_VARIANT = 21` 与 `SERIALIZER_CAT_SOUND_VARIANT = 22`。
+  - 复用 `tame.rs` 可驯服框架与 `wolf::mixed_dye` / `nutrition_of`；实现 11 种花色、2 种叫声变体 × 9 槽位
+    （含幼猫 `entity.baby_cat.*`）、月相选花色（满月 `>= 0.9` 允许 `all_black`）、驯服 / 染项圈 / 喂鱼回血 /
+    求爱繁殖（不重抽 `sound_variant`）/ 切换坐站、`CatTemptGoal` / `CatLieOnBlockGoal` / `CatSitOnBlockGoal` /
+    捕杀兔子与陆地幼年海龟、以及 `interact.rs::play_eating_sound` 对猫吃食声的分派。
+- **未实现与交接**：本分支 10 种动物至此已完成 9 种（哞菇、山羊、北极熊、熊猫、青蛙/蝌蚪、犰狳、骆驼、
+  豹猫、猫），仅剩 **鹦鹉（Parrot）**（需飞行导航 `FlyingPathNavigation` + 玩家肩膀乘骑 `ShoulderRidingEntity`
+  与世界模型 8.2 乘客方案）。猫的村庄 `CatSpawner`、沼泽小屋猫、睡觉主人的 `CatRelaxOnOwnerGoal`/晨间礼物、
+  `CatSitOnBlockGoal` 箱子开合人数判定以及苦力怕躲避豹猫/猫的 `AvoidEntityGoal` 均已记入 README 已知限制与汇报。
+
+---
+
+### 5.20 第 16 轮：实现鹦鹉、飞行导航与鹦鹉的自然刷怪（op-misc，2026-11-22）
+
+- **新基础设施**：
+  - `path.rs` 新增 `EvaluatorFlags.fly` 与 `FlyNodeEvaluator` 的逐位移植（`fly_start` / `fly_probe` /
+    `fly_neighbors` / `fly_path_type`）：六轴 + 单轴斜向 + 水平对角 + 八个斜向角，探测顺序照官方；
+    `WALKABLE` 节点代价加一；`OPEN` 格的下方规则（`FIRE` / `DAMAGING` / `COCOA` / `FENCE` / 其余转
+    `WALKABLE`）和 `checkNeighbourBlocks` 保留传入类型。小体型生物的十个随机起点候选没有接（鹦鹉的
+    `getSize()` 是 0.633、本该走那条，见 §5.21）。
+  - `navigation.rs`：飞行导航的 `canUpdatePath`（不是乘客恒真）、`createPath` 跳过加载与地表检查、
+    `tick` 的 `getGroundY` 跳过、`getTempMobPos` 用实体坐标、`stable_destination` 用实心近似；
+    `canMoveDirectly` 的「流体也算阻挡」目前只挡源方块水（已知差异）。
+  - `control` / `living.rs`：`FlyingMoveControl(10, false)`（空中用 `FLYING_SPEED`、`setNoGravity`、
+    `yya` 竖直速度）、`omnidirectionalAirMover` 的竖直 0.91 空气阻力、`Parrot.checkFallDamage` 空实现、
+    `hurtServer` 清坐姿。
+  - `goals.rs` 新增 `Goal::Parrot` 与 `hover_random_pos` / `air_and_water_random_pos`；`RandomPos`
+    家族的扇形偏移改成官方的 f32 乘法 + `Mth.SQRT_OF_TWO`（float）常量。
+  - 实体跟踪补 `DATA_EFFECT_PARTICLES` / `DATA_EFFECT_AMBIENCE_ID`（可见效果的颜色列表，ARGB 补不透明
+    alpha），曲奇中毒的死亡刻因此和官方包一致。
+- **鹦鹉（`parrot.rs`）**：属性 6 / 0.2 / 0.4 / 3、尺寸 0.5×0.9（眼高 0.765）、五种颜色
+  （`PARROT_VARIANT = 20`，`Variant` 用官方旧版整数编码存盘）、不繁殖、不能长大；`Parrot.registerGoals`
+  的 8 个目标（恐慌 / 浮水 / 看玩家 / 坐下 / 跟主人 / `ParrotWanderGoal` / `LandOnOwnersShoulderGoal` /
+  `FollowMobGoal` 占位）；种子 1/10 驯服（事件 7/6、吃食声两次 `nextFloat`）、曲奇中毒 900 刻 + 玩家攻击
+  `Float.MAX_VALUE`（`MobInteraction::self_hurt` 交给游戏层结算）、主人切换坐站；每 400 刻的世界随机源模仿
+  附近生物、每 1000 次的叫声里挑 42 条模仿音之一；`calculateFlapping` 与翅膀声；自然刷怪
+  `#parrots_spawnable_on` + 亮度 > 8；`finalizeSpawn` 抽品种 + `AgeableMobGroupData(false)`（不抽幼崽）。
+- **对拍**：`mob-oracle --only parrot` 4 例 860 刻 0 不一致（`parrot_idle` 树桩闲逛、`parrot_tame`
+  驯服与坐站、`parrot_cookie` 中毒死亡含掉落与包、`parrot_imitate` 模仿僵尸）；`natural_spawn` 734 例
+  2936 刻 0 不一致（`parrot_jungle=31`、`parrot_jungle_dim=0`）；`gen_spawn` 7000 例 0 不一致
+  （新增 `gen_parrot`）。
+- **已知限制与交接**：上肩只做到 `LandOnOwnersShoulderGoal` 运行（冷却、主人旁观者、没命令坐下），
+  玩家 `ShoulderEntityLeft` / `Right` 存档与同步未建模，所以两箱相交时不 `discard()`；`FollowMobGoal`
+  占位；`MOB_SOUND_MAP` 的 `HashMap` 迭代顺序按名字排序近似；悬停落点的随机源错位已在 §5.21 定位并修掉；
+  玩家的飞行 / 水里 / 细雪状态没进 `PlayerView`；拴绳未建模。
+
+
+### 5.21 第 17 轮：补上 `LandRandomPos.generateRandomPosTowardDirection` 的 `isNotStable`（op-misc，2026-11-22）
+
+- **根因**：`goals.rs` 的 `land_toward_direction` 只做了官方的「越界」和「离家」两个判定，少了第三个
+  `!GoalUtils.isNotStable(mob.getNavigation(), pos)`。Bamboo 里这个函数只有 `hover_random_pos` 调用
+  （`land_random_pos` 是另一份内联实现、本来就带 `stable_destination`），所以只有悬停落点缺这条判定：
+  官方会丢掉一批「目标格站不住」的候选，Bamboo 却接受，10 次抽点的接受序列因此不同，从选中落点那一刻起
+  实体随机源就错位两次。
+- **修复**：补上 `!stable_destination(mob, view, pos)`（飞行导航里是 `FlyingPathNavigation.isStableDestination`
+  的实心方块近似，见 README 已知差异）。
+- **验证**：`mob-oracle --only parrot` 4 例 860 刻仍 0 不一致；一个临时的无树桩 400 刻悬停场景（平坦地面、
+  种子 906、未进对拍表）从 308 处不一致降到 3 处，随机源逐刻一致；残留 3 处（第 245–247 刻）只有 `xr` / `hr`，
+  官方那几刻 `LookAtPlayerGoal` 已在看玩家、Bamboo 还没开始，随机源相同，原因未查到。
+- **仍没做**：`FlyNodeEvaluator.getStart` 小体型生物（`getSize() < 1.0`）的十个随机起点候选——寻路请求里没有
+  实体随机源，只试包围盒四角；鹦鹉的 `getSize()` 是 0.633，理论上会走那条，只在起点格代价为负时触发。
 
 ---
 
@@ -1401,7 +1927,7 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
 
 ## 鱿鱼和发光鱿鱼的实施现状
 
-鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，以后海豚、鱼类也要用的公共部分在 `entity/mob/water.rs`：
+鱿鱼一支是官方的 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`）。专属逻辑在 `entity/mob/squid.rs`，海豚和鱼类共用的公共部分在 `entity/mob/water.rs`（见文末海豚一节）：
 
 - `water::handle_air_supply`（`AgeableWaterCreature.handleAirSupply`，在 `super.baseTick()` 之后用这一刻开始时的氧气算）、`water::surface_spawn_rules`（`checkSurfaceAgeableWaterCreatureSpawnRules`）、`water::in_water_position_ok`（`SpawnPlacementTypes.IN_WATER`）和 `water::finalize_ageable`（不带花色那一层的 `AgeableMob.finalizeSpawn` + `Mob.finalizeSpawn`）。
 - `MobType` 新增几个按类型的开关，别的水生生物加进来时只改这些函数：`is_ageable_water_creature`、`is_animal`（存档的 `InLove` / `LoveCause` 只有 `Animal` 写）、`can_breathe_under_water`、`is_pushed_by_fluid`、`emits_movement_sounds`（`MovementEmission.EVENTS` 不放脚步声、也不取游泳声的两个随机数）、`spawns_in_water`。
@@ -1429,7 +1955,7 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   （六个方向 + 两边都可走的四个水平对角），`WaterBoundPathNavigation` 的
   `canUpdatePath` / `getTempMobPos` / `getGroundY` / `isStableDestination` /
   `getMaxVerticalDistanceToWaypoint` 都按 `flags.swim` 分派；鱼的
-  `allowBreaching` 是假（以后海豚为真）。`BlockState::is_pathfindable_water` 来自新导出的
+  `allowBreaching` 是假，海豚是真（见文末海豚一节）。`BlockState::is_pathfindable_water` 来自新导出的
   `PATHFINDABLE_WATER` 状态事实。
 - 移动：`fish::move_control_tick`（`FishMoveControl`）、`fish::travel_in_water`
   （`AbstractFish.travelInWater`）、`fish::ai_step`（离水扑腾）；`motion::movement_emission`
@@ -1459,7 +1985,8 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   `FromBucket = true` 的鱼（朝向取 `level.random`，`finalizeSpawn` 用 `BUCKET` 原因，
   之后套组件并 `loadFromBucketTag`），发射器倒鱼桶也生成。鲑鱼存 `salmon/size`，
   热带鱼存 `tropical_fish/pattern` / `base_color` / `pattern_color`，其余只有默认数据。
-  美西螈 / 蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。
+  美西螈现已建模（见文末），倒美西螈桶会放出 `FromBucket = true` 的美西螈；
+  蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。
   验证：块级单元测试（组件拆分、只改有的键、存档往返）、游戏层两条（生存换桶、
   创造加桶）、发射器一条（生成的鱼 + 随机源种子）。没有 Java 逐刻对拍。
 - 2026-11-21 修掉的三处：`AbstractFish.aiStep`（离水扑腾）原来对所有动物都跑，陆地动物
@@ -1478,7 +2005,7 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   贴着 `BLOCKED` 的水是 `WATER_BORDER`、搜索期间 `WATER` / `WALKABLE` / `WATER_BORDER`
   的代价临时改成 0 / 6 / 4）和 `AmphibiousPathNavigation`（`canUpdatePath` 恒真、
   `getTempMobPos` 取 `getY(0.5)`、`getGroundY` 原样、`isStableDestination` 要求下面
-  不是空气、只在液体里允许直走）。美西螈以后直接用这个开关。
+  不是空气、只在液体里允许直走）。美西螈现在直接用这个开关（见文末）。
 - 实体：`Mob.turtle`（家方块、`travelPos`、`goingHome`、`layEggCounter`、`has_egg`、
   `laying_egg`、回家目标的两个计数、产卵 `MoveToBlockGoal` 的四个进度）。属性、
   尺寸（幼年 0.3 倍）、水 / 门三种 `PathfindingMalus`、音效（幼年受伤和死亡、
@@ -1507,7 +2034,118 @@ index 由生成器从 `SuspiciousEffectHolder` / `MushroomCow` 导出。
   非默认才发。长大的那一刻按 `entities/turtle_grow` 掉鳞甲（走 `EntityLootRequest`）。
 - 验证：`mob-oracle --only zombie_turtle_ai`（类型 60，借僵尸场景的多生物路径）四个场景：
   沙滩找水两个种子、幼年、水下远行，共 1500 刻 **0 不一致**（位置、速度、朝向、随机源、
-  氧气、运行中的目标、路径节点）。产卵、孵化、回家还没有场景，也没有自然生成夹具。
+  氧气、运行中的目标、路径节点）。产卵和回家见下一段，孵化仍只有单元测试，没有自然生成夹具。
+- 验证（2026-11-21 追加）：`mob-oracle --only zombie_turtle_egg` 四个新场景（带蛋产卵三个
+  种子、离家 12 格回家）加既有的僵尸踩蛋场景共 8 例 3220 刻 **0 不一致**。`Scene.turtleEgg`
+  开局把 `has_egg` 和家方块写进两侧；`zombieStepJson` 逐刻比带蛋 / 正在产卵 / 产卵计数 /
+  回家标志 / 家方块，方块表散列 `bh` 覆盖蛋放下那一刻；Java 侧断言每个产卵场景确实产下蛋；
+  `--break-self-test turtle_egg` 把带蛋标志取反，抓到 12 处不一致。孵化的随机刻会生成实体，
+  `oracle` 明确按 `EntityRandomTick` 排除，只有 `behaviour/misc/turtle_egg.rs` 的单元测试。
+  同时修掉 `ctx.rs` 里 `Command::LayTurtleEgg` 把状态 ID 当方块注册表下标用的越界崩溃
+  （之前从没被跑到，游戏里海龟一产卵就会 panic）。全量 `mob-oracle` 复核 1744 例 165621 刻
+  0 不一致。
+
+## 海豚和美西螈的实施现状（2026-11-21/22，分支 `op-water`）
+
+海豚是官方 `Dolphin`（`AgeableWaterCreature` = `AgeableMob` 但不是 `Animal`），美西螈是
+`Animal` + `Bucketable`、官方用 Brain（`AxolotlAi`）驱动。两者专属逻辑各自在
+`entity/mob/dolphin.rs` / `entity/mob/axolotl.rs`，美西螈的大脑在
+`entity/mob/axolotl/ai.rs`，共用的水面刷怪规则、`AgeableMob` 组数据那一层在
+`entity/mob/water.rs`。
+
+- 实体：`Mob.dolphin`（`got_fish` / `moistness` / `treasure_pos` / `stuck`）、
+  `Mob.axolotl`（`variant` / `playing_dead` / `from_bucket`；装死倒计时是大脑记忆
+  `PLAY_DEAD_TICKS`，不再放实体状态里）。
+  属性、尺寸（幼年 `BABY_DIMENSIONS`）、`WATER` 的 `PathfindingMalus`、音效、战利品表
+  `entities/dolphin` / `entities/axolotl`、刷怪蛋、`/summon` 的 `by_entity_type` 都按官方。
+- 氧气：海豚覆写 `handleAirSupply` 为空（氧气走 `LivingEntity.baseTick`）、`increaseAirSupply`
+  直接回满，满值 4800；美西螈满值 6000，`baseTick` 之后按 `preTick - 1` 掉、到 -20 归零并
+  受 2 点 `dry_out`。`living::base_tick` 按 `squid::is_squid` / `fish::is_fish` /
+  `MobType::Axolotl` 分派，海豚不进 `handleAirSupply`，`isNoAi()` 时只剩 `LivingEntity.baseTick`。
+- 海豚：`Dolphin.tick` 在 `super.tick()` 后管湿度 `Moistness`（2400，水 / 雨里回满、否则每刻减一，
+  到 0 受 1 点 `dry_out`）、离水着地扑腾（两个 `nextFloat` 定水平速度、一个定 `yRot`、`needsSync`）。
+  `SmoothSwimmingMoveControl` + 允许跃出水面的 `WaterBoundPathNavigation`（`swim = Some(true)`）；
+  `travelInWater` 是 `moveRelative` + `move(SELF)` + ×0.9、无攻击目标每刻下沉 0.005。
+  拿 `#fishes` 右键走自己的 `mobInteract`：幼年 `ageUp`、成年 `gotFish`，消费一条鱼。
+- 美西螈：五花色，`finalizeSpawn` 抽两个常见花色编号组成 `AxolotlGroupData`、再抽一个给这一只，
+  一组第三只起是幼年、`BUCKET` 原因直接返回；`hurtServer` 前按官方短路判定写
+  `PLAY_DEAD_TICKS = 200`；两栖寻路（`AmphibiousPathNavigation`）、`travelInWater` 没有
+  重力项、不吃水流。
+- 美西螈大脑（`axolotl/ai.rs`）：`Axolotl.BRAIN_PROVIDER` 的五个传感器（顺序照官方）和
+  `AxolotlAi.getActivities()` 的四个活动 `core` / `idle` / `fight` / `play_dead`，
+  优先级、行为表、进入条件、退出时清的记忆照官方（`mob-oracle` 逐字比这张表）。
+  捕猎：`AxolotlAttackablesSensor`（8 格、在水里、`#axolotl_always_hostiles` 或没有
+  `HAS_HUNTING_COOLDOWN` 时的 `#axolotl_hunt_targets`）→ `StartAttacking` → `FIGHT`
+  （`StopAttackingIfTargetInvalid`、`SetWalkTargetFromAttackTargetIfTargetOutOfReach`、
+  `MeleeAttack(20)`、繁殖时清 `ATTACK_TARGET`）→ `Mob.doHurtTarget`；`updateActivity`
+  从 `FIGHT` 退出时记 2400 刻捕猎冷却。游泳：`TryFindLiquid(6, 0.15,
+  #axolotl_tries_to_find)`、`RandomStroll.swim(0.5)`、`SetWalkTargetFromLookTarget`
+  （水 / 陆要和自己在不在水里一致），速度按 `getSpeedModifier` 0.5 / 0.15、追击与跟随成年
+  0.6 / 0.15。装死：`PlayDead`（200 刻，开始时清 `WALK_TARGET` / `LOOK_TARGET`、加 200 刻
+  等级 0 的 `REGENERATION`）和 `ValidatePlayDead.create`（每刻递减，到 0 清
+  `PLAY_DEAD_TICKS` 与 `HURT_BY_ENTITY`）；`customServerAiStep` 尾部只把记忆映射成
+  `playingDead` 元数据。
+- 装桶 / 存档 / 同步：`Bucketable`（鲑鱼 / 热带鱼的花纹组件之外）为美西螈写
+  `bucket_entity_data` 的 `Variant` / `Age` / `AgeLocked`，倒桶 / 发射器按 `MobBucketItem.spawn`
+  放出 `FromBucket = true` 的美西螈；`GotFish` / `Moistness`、`Variant` / `FromBucket` 进存档
+  （`nbt.rs`）；`GOT_FISH`(18) / `MOISTNESS_LEVEL`(19)、`DATA_VARIANT`(18) /
+  `DATA_PLAYING_DEAD`(19) / `FROM_BUCKET`(20) 在 `entity_tracking.rs` / `packet/play/entity.rs`
+  同步，多岛拆合时这些状态随 `Mob` 整块搬。
+- 自然生成：`natural.rs` 的 `check_spawn_rules` 给海豚接
+  `checkSurfaceAgeableWaterCreatureSpawnRules`（和鱿鱼同源）、给美西螈接
+  `checkAxolotlSpawnRules`（脚下 `axolotls_spawnable_on` 黏土）；`spawn.rs` 的 `finalizeSpawn`
+  走 `dolphin::finalize_spawn` / `axolotl::finalize_spawn`，组数据 `SpawnGroup::Axolotl`；
+  `MobType::mob_category` 给海豚 `WaterCreature`、美西螈 `Axolotls`。
+- 验证：`mob-oracle --only dolphin`（4 场景 804 刻）/ `--only axolotl`（4 场景 804 刻），
+  两边都设 `NoAI`、给同一个显式实体随机源种子、不重放构造取数，逐刻比位置、速度、朝向、
+  随机源、氧气、年龄、着地 / 在水里、各自元数据、尺寸和世界随机源，**0 不一致**；
+  海豚场景还逐字比官方 `goalSelector` 注册表（14 个目标的优先级、类名、标志位掩码，
+  `DolphinJumpGoal` 继承 `JumpGoal` 锁 MOVE|JUMP）；美西螈场景逐字比大脑结构表（传感器
+  类名 / 扫描间隔 / `requires()`、行为表的优先级 / 活动 / 类名与官方遍历顺序、活动进入条件、
+  退出时清的记忆），4 个场景全等；
+  `--break-self-test water_mob` 把 `got_fish` / `playing_dead` 改坏能在第 0 刻被抓到，
+  `--break-self-test dolphin_goals` 清空海豚目标注册表、`--break-self-test axolotl_brain`
+  加一个假传感器也会被抓到。
+  `mob-oracle --only natural_spawn` 的 `dolphin_ocean` / `axolotl_lush` 夹具（后者把底层水换成黏土）
+  各刷出 37 / 40 只，0 不一致；`natural-spawn`（全部）1727 例 0 不一致。
+- 已知限制：海豚 `registerGoals` 的十四个目标和 `HurtByTargetGoal` 已建成真目标
+  （`dolphin.rs` / `dolphin_goals.rs`，优先级 / 类名 / 标志位 / 次序照官方；
+  `canUse` / `canContinueToUse` / `start` / `tick` 按官方翻译），不再是 `Unavailable` 占位。
+  但 `findNearestMapStructure`、船 / 鹦鹉螺、掉落物实体、游泳玩家、`DOLPHINS_GRACE`
+  这些设施还没接，依赖它们的分支按 `fox_goals` 做法保住取数次数与顺序后返回假——引路去宝藏、
+  给玩家 `DOLPHINS_GRACE`、捡物、躲守卫者仍不发生。**goalSelector 没有逐刻对拍**：夹具开
+  `NoAI`，只核对注册表与 NoAI 分支，真跑目标所需的导航 / 移动控制 / `DefaultRandomPos`
+  落点 / 标志位锁定保真没逐刻验证，跃水与呼吸换气也未和官方逐刻比较；美西螈大脑的
+  传感器 / 记忆 / 四个活动与捕猎、游泳、装死已按官方接线，但**行为没有逐 tick 对拍**
+  （夹具开 `NoAI`，Brain 不跑），只有结构表与单元测试覆盖；繁殖已按官方实现（见下一小节），
+  `Axolotl.onStopAttacking` 的再生回调、
+  `swingForAttack` 挥手动画没建模（`AxolotlLookControl` / `AxolotlMoveControl` 已按
+  `SmoothSwimming*` 参数接上，见下一小节）；
+  拴绳、刷怪蛋对着水面用、粒子 / 动画、`SWIM` 游戏事件、
+  死亡掉落的逐题 loot-oracle 都没做。逐刻对拍开 `NoAI`，没覆盖 AI / 受伤 / 繁殖 / 死亡路径。
+
+### 第 14 轮补完：繁殖、桶、控制与踩蛋（2026-11-22）
+
+- 繁殖：`Axolotl.getBreedOffspring` 的花色在 `axolotl::offspring_variant`。先
+  `nextInt(1200)`；命中时 `Variant.getRareSpawnVariant` 从单元素名单再抽一次
+  `nextInt(1)`，否则一次 `nextBoolean` 取父亲或母亲。两条分支都恰好两次取数。父亲花色
+  随 `Command::BreedAnimals` 新增的 `father_axolotl` 落到 `apply_breed`（命令落地时父亲
+  不在实体表里），幼崽的年龄和尺寸走通用 `set_age`。
+- 桶：`Axolotl.saveToBucketTag` 的 `HuntingCooldown = brain.getTimeUntilExpiry(...)`
+  （剩余刻）写进 `bucket_entity_data`，`loadFromBucketTag` 用同一个数作时长恢复。Bamboo
+  的记忆 TTL 本来就是相对刻，语义一致。
+- 喂食：`Axolotl.usePlayerItem` 把热带鱼桶换成水桶（创造模式手里不变）。
+- 移动 / 视角：新模块 `entity/mob/smooth_swim.rs` 收 `SmoothSwimmingMoveControl` /
+  `SmoothSwimmingLookControl`，青蛙、蝌蚪、鱼、海豚、美西螈共用。美西螈
+  `(85, 10, 0.1, 0.5, false)`，装死时移动和视角都停；海豚 `(85, 10, 0.02, 0.1, true)`
+  与 `SmoothSwimmingLookControl(10)`（之前海豚落到通用 `MoveControl`）。
+- 海龟蛋：`fallOn` 只豁免僵尸一系（原来错误地豁免所有怪物），`destroyEgg` 排除海龟。
+- 验证：`mob-oracle --only axolotl` 47 例 847 刻 0 不一致（含 43 例繁殖花色，
+  `--break-self-test axolotl_breed` 故意改坏能被抓到）；`--only zombie_turtle_egg`
+  8 例 3220 刻 0 不一致；`--only frog` 16 例 9000 刻、`--only tadpole` 8 例 2360 刻、
+  `--only salmon` 1 例 241 刻 0 不一致，确认共用控制重构没改行为。
+- 仍未做：美西螈 AI 的逐 tick 对拍、`onStopAttacking` 的玩家再生、`swingForAttack`、
+  拴绳、海龟蛋的玩家破坏与 `getShape`。
 
 ## 与 main 合并后的现状（op-hostile2，2026-11-21）
 
@@ -1606,3 +2244,201 @@ main 的结构取并集：`README.md` 的已建模生物清单合到牛/猪/羊/
 
 全量 `mob-oracle`（不带 `--only`）实测 **1773 例、170990 刻、0 不一致**；`--only natural_spawn`
 **686 例、2744 刻、0 不一致**；`--only gen_spawn` **7000 例、0 不一致**。
+
+## 蝙蝠的实施现状（cl-ambient，2026-11-22）
+
+官方 `Bat`（`AmbientCreature` → `Mob`，不是 `PathfinderMob`）。代码在 `entity/mob/bat.rs`，状态是 `Mob.bat`（`BatState`：`DATA_ID_FLAGS` 整个字节和不存档的 `targetPosition`）。
+
+- **属性和事实**：6 点血，尺寸 0.5×0.9、眼高 0.45；`MobCategory.AMBIENT`（消失距离 128，`removeWhenFarAway` 为真，和平难度照样存在）；叫声间隔用 `Mob` 的缺省值 80，音量 0.1，`getVoicePitch()` 乘 0.95（叫声、受伤、死亡三种声音都乘）；倒挂时 `getAmbientSound` 先取 `nextInt(4)`，不是 0 就不叫、也不取音高。
+- **AI**：两个目标选择器都是空的。`customServerAiStep`（在 `Mob.serverAiStep` 里导航之后、移动控制之前）：倒挂时头上不是导体就起飞；否则 1/200 把头转到 `nextInt(360)`，4 格内有看得见的玩家（`forNonCombat().range(4.0)`，带潜行 / 隐身的可见度和视线）就起飞；起飞时发世界事件 1025（静音的不发）。飞行时目标方块不是空气或落到世界底就丢掉，没有目标、1/30、或离目标中心不到 2 格时重抽（x 两次 `nextInt(7)`、y 一次 `nextInt(6)`、z 两次），朝目标加速并转身，1/100 且头上是导体时倒挂。`MoveControl` 处于 `WAIT`，所以官方写的 `zza = 0.5F` 当刻就被清零。
+- **`tick` 尾部**：倒挂时速度清零、`setPosRaw` 到这一格顶部下面一个身高；飞行时竖直速度乘 0.6（`double` 常量）。物理还是普通的 `LivingEntity.travel`（有重力）。
+- **覆写成空的几个方法**：`pushEntities` / `doPush` / `isPushable`（`MobType::is_pushable`：蝙蝠不推别人，别人的推挤名单也不收它）、`checkFallDamage`（`MobType::ignores_fall_damage_check`：摔落距离不累计也不清零）、`getMovementEmission` 是 `EVENTS`（没有脚步声）。
+- **受伤**：`Bat.hurtServer` 没有免疫就先醒过来再走父类。蝙蝠的实体类型是 `dontTrackDeltas`，速度包只在 `needsSync` 时发；`LivingEntity.knockback` 置的 `needsSync` 现在记在 `Mob.knockback_sync` 里，下一刻开头并进 `needs_sync`（受伤常常发生在生物自己的一刻之外）。
+- **生成**：`SpawnPlacements` 登记 `ON_GROUND` + `Bat.checkBatSpawnRules`：在 `WORLD_SURFACE` 高度图之下、世界随机源 `nextBoolean` 为假、`getMaxLocalRawBrightness` 不超过 `nextInt(4)`、脚下在 `#bats_spawnable_on` 里，再加 `Mob.checkMobSpawnRules`。`finalizeSpawn` 只有 `Mob` 那一层（跟随距离加成和左撇子）。蝙蝠不是 `PathfinderMob`，`checkSpawnRules` 恒真。**26.3 的 `checkBatSpawnRules` 里已经没有万圣节的亮度窗口，也不再和海平面比较**（任务说明里的这两条是旧版本的规则），所以这里没有实现它们。
+- **存档和同步**：`BatFlags`（BYTE）；元数据 `BAT_FLAGS`（下标由生成器导出，现在是 16）。可用 `/summon` 和刷怪蛋生成。
+
+岛的拆合：新增的按实体状态是 `Mob.bat`（标志字节和一个绝对方块坐标的飞行目标，目标不存档、随实体整行搬）和 `Mob.knockback_sync`（一个布尔），都不带时钟，拆合时不用平移。
+
+对拍：`mob-oracle --only bat`（`bat_open` 没有天花板第一刻起飞、`bat_wake` 倒挂着等玩家走近、`bat_hurt` 被牛打醒再打死、`bat_low` 在两格高的洞里飞到重新倒挂再被玩家吵醒，共 4 例 2424 刻）逐刻比位置、速度、朝向、随机源、血量、标志位、飞行目标、摔落距离、`zza`、世界事件、世界随机源和出站包，0 不一致；故意改坏（玩家晚一刻走近）能抓到。`mob-oracle --only bat_spawn`（`bat_dark`、`bat_dim`、`bat_open`、`bat_peaceful`，24 例 96 刻）0 不一致，`--break-self-test natural_spawn` 把 `bat_dim` 的方块光改成 15 能抓到。
+
+已知差异：
+
+- 官方 `setPosRaw` 不刷新碰撞箱，开始倒挂的那一刻到下一刻 `travel` 里的 `move` 之间，碰撞箱还停在原来的高度（最多低 0.1 格）；Bamboo 的碰撞箱始终跟着位置。只影响这一小段里的流体检测和被打飞时的碰撞。
+- 击退发生在生物自己这一刻的 `aiStep` 之后时（别的生物的攻击命令落地），`needsSync` 晚一刻生效；只有蝙蝠（不跟踪速度）看得出来，表现是击退的速度包晚一刻。真实联机里生物的 `hurtMarked` 速度包本来就还没有接到同步层（既有差异）。
+- 拴绳（`canBeLeashed` 为假）和压力板 / 绊线（`isIgnoringBlockTriggers` 为真）：Bamboo 的生物本来就没有拴绳，也不触发这两种方块，所以没有要做的。
+
+## 幻翼的实施现状（cl-ambient，2026-11-22）
+
+官方 `Phantom`（`Mob implements Enemy`，既不是 `Monster` 也不是 `PathfinderMob`）。代码在 `entity/mob/phantom.rs`、`entity/mob/phantom_spawner.rs`（刷怪器），游戏层入口在 `phantom_spawn.rs`、`sleep.rs`（`TIME_SINCE_REST`）。状态是 `Mob.phantom`（`PhantomState`：大小、`moveTargetPoint`、`anchorPoint`、是否俯冲、`PhantomMoveControl.speed`）。
+
+- **属性和尺寸**：`DefaultAttributes.PHANTOM` 用 `Monster.createMonsterAttributes()`（`Mob.createMobAttributes()` 加攻击力 2）：20 点血、跟随 16、攻击力基础 2；经验 5，战利品表 `entities/phantom`，`#undead`（所以 `#can_breathe_under_water` 成立）。`getDefaultDimensions` 把基础尺寸 0.9×0.5、眼高 0.175 乘 `1 + 0.15 * size`；`size` 同步（`PHANTOM_SIZE`，下标 16），攻击力基础值在 `onSyncedDataUpdated` 里改成 `6 + size`。`setPhantomSize(0)` 在新建实体上不改变同步值，因此**不会**触发更新，大小 0 的幻翼保持 2 点攻击力；读档时 `setPhantomSize` 才会按读到的值改尺寸和攻击力。
+- **AI**（`registerGoals` 的优先级照官方）：目标选择器只有 1 `PhantomAttackPlayerTargetGoal`，`nextScanTick` 初值 `reducedTickDelay(20)`，每 60 折半后再扫。扫描范围 64 格、碰撞箱外扩 (16, 64, 16)，按 Y 从高到低排（稳定排序），用 `forCombat`（不限制距离、要活着、不旁观、非创造、非和平、有视线）。目标选择器先于行为选择器跑，两个选择器共用隔刻判断——和其他生物一样。
+  - 1 `PhantomAttackStrategyGoal`（不占标志位）：`start` 把 `nextSweepTick` 设成 `adjustedTickDelay(10)`、回到盘旋、把锚点放到目标头上 `20 + nextInt(20)` 格（低于海平面时改到 `sea_level + 1`）。每刻倒数，到 0 时转俯冲、重设锚点、按 `adjustedTickDelay((8 + nextInt(4)) * 20)` 排下一次，放 `entity.phantom.swoop`（音量 10，音高 `0.95 + nextFloat * 0.1`）。`stop` 把锚点按 `getHeightmapPos(MOTION_BLOCKING, anchor).above(10 + nextInt(20))` 抬高。
+  - 2 `PhantomSweepAttackGoal`（占 `MOVE`）：`canUse` 要求有目标和俯冲；每刻把 `moveTargetPoint` 设成目标 `getY(0.5)`，碰撞箱外扩 0.2 与目标碰撞箱相交就 `doHurtTarget`、回到盘旋、发世界事件 1039（静音的不发）；撞墙或 `wasHurtRecently` 也回到盘旋。`stop` 清目标、回盘旋。猫的 16 格搜索和 `cat.hiss()` 分支没有建模：猫本身已在 main 上，但俯冲目标的 `canContinueToUse` 里要替别的实体发声，`EntityCtx` 还没有按实体发声的接口，`isScaredOfCat` 恒假（见已知差异）。
+  - 3 `PhantomCircleAroundAnchorGoal`（占 `MOVE`）：没有目标或还在盘旋时运行；`start` 抽 `distance = 5 + nextFloat * 10`、`height = -4 + nextFloat * 9`、`clockwise = nextBoolean ? 1 : -1`；每刻按 350 / 250 / 450 折半的间隔重抽高度、距离（超过 15 回到 5 并反向）、角度（`nextFloat * 2π`），到点、目标点下方是实心方块、上方是实心方块时 `selectNext`。`selectNext` 没有锚点时用当前方块，角度加 `clockwise * 15°`，目标点 = 锚点 + (`distance * cos`, `-4 + height`, `distance * sin`)。
+- **移动和朝向**：`PhantomMoveControl.tick` 撞墙时 `yRot += 180`、速度回 0.1；否则按目标点算水平/三维距离，最多转 4°，`yBodyRot` 跟着 `yRot`，转身小于 3° 时速度往 1.8 逼近（步长 `0.005 * (1.8 / speed)`），否则往 0.2 逼近（步长 0.025）；俯仰取 `atan2(-dy, 水平距离)`，速度按朝向和俯仰分解后与当前速度混合 20%。`PhantomLookControl.tick` 是空的；`PhantomBodyRotationControl.clientTick` 让头跟上一刻的身体、身体跟 `yRot`。`travel` 是 `travelFlying(input, 0.2F)`（水 0.02/0.8、岩浆 0.02/0.5、空气 0.2/0.91），没有重力；`onClimbable` 恒假、`checkFallDamage` 空。
+- **刷怪器**：`PhantomSpawner` 在主世界每刻跑（`ServerChunkCache.tickChunks` 里自然刷怪和随机刻之后、方块事件和实体之前）。`spawnMobs && spawnMonsters && spawnPhantoms` 都开时 `nextTick--`，到 0 后先 `nextTick += (60 + nextInt(60)) * 20`，再要求 `skyDarken >= 5 || !hasSkyLight`。对每个非旁观玩家：`!hasSkyLight || y >= seaLevel && canSeeSky(feet)`，`effectiveDifficulty > nextFloat() * 3`（先取数），`Mth.clamp(TIME_SINCE_REST, 1, MAX)` 的 `nextInt(value) >= 72000`，落点 `feet.above(20 + nextInt(15)).east(-10 + nextInt(21)).south(-10 + nextInt(21))`（取数顺序 y、x、z），`NaturalSpawner.isValidEmptySpawnBlock` 通过后按 `1 + nextInt(difficulty.getId() + 1)` 生成一组；每只 `snapTo(落点, 0, 0)`，`finalizeSpawn` 把锚点设到头上 5 格、大小 0，再走 `Mob.finalizeSpawn`（跟随距离加成和左撇子各取一次世界随机数）。
+- **`TIME_SINCE_REST`**（最小实现）：`Player.time_since_rest`，不睡觉的每一刻 `wrapping_add(1)`（官方是 `StatsCounter` 的 int，`awardStat` 一样环绕）；`ServerPlayer.startSleeping` 对应 `on_sleep_in_bed` 清零；`ServerPlayer.die` 对应玩家死亡清零。刷怪器只读它，并按 `i32::MAX` 夹。**没有**写原版 `stats/<uuid>.json`，重启后从 0 重新累计（见已知差异）。
+- **存档和同步**：`anchor_pos`（`BlockPos` 数组，空时不写）和 `size`（int）；`PHANTOM_SIZE` 同步。`moveTargetPoint` / `attackPhase` / `PhantomMoveControl.speed` 不存档（官方也不存）。可用 `/summon minecraft:phantom` 和幻翼刷怪蛋生成。
+- **岛拆合**：新增按实体状态 `Mob.phantom`（绝对方块坐标的锚点、大小、不存档的目标点和阶段、速度），拆岛随实体整行搬。`PhantomSpawner.nextTick` 是岛级状态：拆岛时两边从同一个倒数继续（官方整个主世界只有一个刷怪器），并岛时吸收方保留自己的。
+
+公共接缝的修正：`Entity.push` 在官方会给自己和对方都置 `needsSync`；Bamboo 的 `push_entities` / `apply_push` 原来只改 `delta`，幻翼贴着玩家俯冲咬人时官方每刻都发移动包、Bamboo 不发，导致之后的相对位置包错位。现在两半被推开时都会置 `Mob.needs_sync`（位移本身不变），全量 `mob-oracle` 复跑 0 不一致。
+
+对拍：`mob-oracle --only phantom` 6 例 534 刻 0 不一致——`phantom_spawn_night`（11 只）、`phantom_spawn_rested` / `phantom_spawn_day` / `phantom_spawn_off`（都不生成，分别验证 `TIME_SINCE_REST`、天色、规则关）；`phantom_hunt`（有玩家，走到盘旋 → 俯冲 → 咬中 1039，240 刻）和 `phantom_burn`（无玩家、露天白天，真的着火）。逐刻比位置、速度、四个朝向、血量、`hurtTime` / `deathTime` / `noActionTime`、大小、俯冲标志、目标、锚点、`moveTargetPoint`、着火刻数、实体随机源、世界随机源、世界事件和出站包。改坏确认：`--break-self-test phantom_spawn`（刷怪器整段不跑）和 `--break-self-test phantom_ai`（出生点高一格）都能抓到。全量 `mob-oracle`（不带 `--only`）1841 例 190745 刻、`--only natural_spawn` 746 例 2984 刻，0 不一致；蝙蝠仍是 0。
+
+已知差异：
+
+- 幻翼怕猫：`PhantomSweepAttackGoal.canContinueToUse` 的 16 格猫搜索和 `cat.hiss()` 没有建模。猫现在已在 main 上，但 `EntityCtx` 只能替自己发声，没有「让另一只实体发声」的接口；把嘶声放在幻翼位置会错位，所以整段先不做，`isScaredOfCat` 恒假，俯冲不会被猫打断。
+- `TIME_SINCE_REST` 不写原版统计文件：重启后从 0 重新累计；官方从 `stats/<uuid>.json` 读回来。只影响幻翼刷怪的时间门槛（要累计 72000 刻）。
+- 刷怪器按岛保存：官方整个主世界只有一个 `PhantomSpawner`（一个 `nextTick`），Bamboo 每个岛各有一份；拆岛时两份从同一个倒数继续，并岛时保留吸收方的。多岛同时有玩家时尝试次数可能比官方多。
+- 客户端专用的表现不在服务端：`Phantom.tick` 的扇翅音效和 `MYCELIUM` 粒子、`isFlapping()` 的相位、`shouldRenderAtSqrDistance` 恒真都只影响客户端；Bamboo 只发官方的服务端音效 / 世界事件。
+- 俯冲时玩家那一侧的推挤只做生物自己的一半（和其他生物一样）：玩家的速度变化和 `needsSync` 不结算，伤害走游戏层的 `hurt_player`。对拍里玩家是不受伤的替身，所以没有逐刻比玩家血量。
+- 刷怪器按玩家顺序取数：官方按 `ServerLevel.players` 的加入顺序遍历，Bamboo 的 `region.players` 是按 `PlayerId` 排序的 `BTreeMap`；正常情况下两者一致，玩家退出重进后 `PlayerId` 可能和加入顺序不同，多个玩家同时满足条件时刷怪落点 / 数量可能和官方不同。
+
+## 官方联机探针与每刻耗时热点修复（cl-ambient，2026-11-22）
+
+把蝙蝠 / 幻翼接进自然刷怪后，`tools/probe.sh` 在 debug 构建下偶发掉刻（`Can't keep up!`），
+导致爬柱子与移动检查被 `moved too quickly` 拉回：
+
+- **实体阶段（`entities`）热点**：`EntityStore::replace_row` 原本在每次 `put_entity` / `with_entity_mut`
+  都运行 `debug_assert!(self.sub_index_matches())`，而 `sub_index_matches` 每次从头分配并重建三套
+  `BTreeMap` / `HashMap` / `BTreeSet`，对 $N$ 个实体形成每刻 $O(N^2)$ 的堆分配开销；改成零分配原地校验并移到每刻结束
+  （`end_tick` / `publish_rows`）后，单生物每刻开销从 ~121–152 µs 降到 ~26–46 µs。
+- **方块反查与碰撞热点**：`mc_bamboo_data::block_id_of_state` 从 1286 项二分查找改为编译期静态表
+  `STATE_TO_BLOCK` 的 $O(1)$ 下标访问；`collect_block_collisions_impl` 对空气和完整方块直接短路，不再走多余形状盒查询。
+- **自然刷怪阶段（`natural_spawn`）热点**：超平坦平原上 `Ambient`（蝙蝠）在地面层被 `check_spawn_rules`
+  拒绝后，每刻会在全部 ~240 个可刷怪区块跑满 3 组 × 8 步尝试。将 `spawning::for_biome_id` 改为按生物群系 ID
+  直接索引 `LazyLock` 数组、`nearest_player_distance_sqr` 直接遍历已收集的 `state.players`、
+  `BlockState::is_valid_spawn_surface` 先测 `VALID_SPAWN` 位、`ChunkStore` 高度图与群系查询合并成单次哈希查找、
+  外层循环复用 `RegionLevel` 与 `World` 后，`natural_spawn` 耗时回到与 `main` 一致的水平。
+- **`Probe.java` 保持原有严格度**：撤回对位置拉回的容忍（`toleratingPullbacks` 等），只保留两项合理校准：
+  门音效检查只数 `SoundSource.BLOCKS`（排除自然刷怪生物的环境音），以及把官方本来就会广播的 `damage_event`
+  加入包白名单。
+
+## 与 main 五次合并及装死回血（op-water，2026-11-21，第十轮）
+
+按队长 14:35 追加先 `git merge main`（`33980ce0`，含女巫 / 史莱姆 / 溺尸 / 流浪者 / 沼骸、
+桌面构建脚本、投掷物与药水）。8 个文本冲突按 main 的结构取并集：`MobType` 枚举自动合并成
+37 种（本分支的海豚 / 美西螈 + main 的五个敌对），`ALL` 长度改 37，`attributes` / `goals` /
+`target_goals` 三张表并入海豚 / 美西螈、去掉重复的 `Skeleton` arm，`removes_when_far_away`
+改用 main 的 `is_enemy()` 并保留水生分支，`living.rs` 的水下呼吸合并 main 的溺尸 /
+`WATER_BREATHING` 与本分支的 `max_air_supply` / `increase_air_supply` 分派，`natural.rs` 的
+`checkSpawnObstruction` 保留美西螈分支。`generated/entity_types.rs` 用 `extract` 重跑后逐字节
+一致；`mob-oracle` 场景编号表（1–17 / 40–43 / 50–52 / 60）两边不重复，水生走独立驱动。
+Java 侧 `playNaturalSpawnScenes` 并入本分支的海豚 / 美西螈夹具（`dolphin_ocean` /
+`axolotl_lush`、`clayFloor`），Rust 侧 `natural_spawn.rs` 保留 main 的 `floors` / `water_depth`
+并注入 `clay_floor`。
+
+合并后 `mob-oracle --only natural_spawn` 一度报 9 处 `axolotl_lush` 不一致：main 把 spawned
+数组扩成 12 列、美西螈花色放在最后一列（index 11），本分支的 `spawn_row` 仍按 11 列布局放在
+index 8。按官方夹具把 `spawn_row` 的 index 8 去掉美西螈分支、index 11 补上 `Axolotl` 后，
+698 例 2792 刻 0 不一致。
+
+本轮新写一处生物行为：美西螈装死按官方 `ValidatePlayDead.create` 每刻递减
+`PLAY_DEAD_TICKS`、到 0 后下一刻复位 `playingDead`，装死一开始按 `PlayDead.start` 加
+200 刻等级 0 的 `REGENERATION`（`axolotl.rs` 的 `update_playing_dead`，复用已有的
+`living::add_effect` 与效果系统）。这段不取随机数、不动 tick 顺序、`NoAI` 对拍夹具不触发，
+新增一个单元测试覆盖 200 刻倒计时 / 效果只加一次 / NoAI 不动，没有和官方逐刻对拍。
+全量 `mob-oracle` 复核 **1784 例 174697 刻 0 不一致**，`--only natural_spawn` 698 例 2792 刻、
+`natural-spawn` 1727 例、`--only dolphin` 3 例 603 刻、`--only axolotl` 4 例 804 刻、
+`--only sheep_eat` 3 例 900 刻全部 0 不一致，`--break-self-test water_mob` 故意改坏抓到
+12 处（RC=1）。
+
+剩余已知限制：海豚十四个目标和 `HurtByTargetGoal` 仍是 `Unavailable`（引路、恩惠、跃水、
+捡物、近战都不发生），美西螈 Brain 的传感器 / 记忆 / 活动、攻击水生怪物、繁殖（1/1200 蓝色）
+没建模，装死只有单元测试没有逐刻对拍。正确接 Brain 需要改 `living.rs` 的
+`custom_server_ai_step` / tick 顺序与对拍夹具（开 `NoAI=false`），按任务书「超出已定设计又必须
+改动 tick 顺序的部分停下来写进汇报」留给队长决定。
+
+## 第十一轮复核（op-water，2026-11-21）
+
+第十轮（合并 `33980ce0` + 装死回血）提交后没有写汇报，本轮把记录补齐并在最终提交
+`7975682d` 上跑完完成标准。当前 `main = 33980ce0`，`git merge main` 返回
+`Already up to date`（领先 16、落后 0，合并基点就是 main HEAD），14:35 追加要求的合并已由
+`219d8cb6` 提交，本轮无需再合。本轮不改动任何生物行为代码：任务书原文第 1 段剩下的海豚恩惠 /
+引路、美西螈攻击 / 繁殖、桶装鱼与海龟蛋孵化逐刻场景都依赖 Brain 框架、结构定位、物品实体或
+「会生成实体的随机刻」对拍设施，按「超出已定设计又必须改动 tick 顺序的部分停下来写进汇报」
+留给队长决定，避免再次触发 05:00 那类回归。
+
+最终提交上实测（java 对拍与探针按新规走 `node W:/data/bamboo-agents/tools/heavy.js`，同一时间
+只跑一条重活）：`cargo fmt --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings`
+干净（0 warning、未加 allow）；`cargo check --workspace --all-targets` 通过；
+`cargo check -p mc-bamboo-desktop` 通过；`cargo test -p mc-bamboo-blocks` 795 passed / 0 failed /
+6 ignored；`cargo test -p mc-bamboo-vanilla` 101 + 8 passed；
+`cargo test -p mc-bamboo-game --lib island_command` 4 passed（05:00 回归 2 未复发）。
+工作区全量 `cargo test --no-fail-fast` 被 cargo shim 按 `verify-scope.md` 拦下（RC=2），没有绕过，
+按提示改跑各 `-p` 测试，全量由队长合并时统一跑。java 侧：全量 `mob-oracle` **1784 例 174697 刻
+0 不一致**；`--only dolphin` 3 例 603 刻、`--only axolotl` 4 例 804 刻、`--only squid` 4 例 1184 刻、
+`--only sheep_eat` 3 例 900 刻（05:00 回归 1 未复发）、`--only natural_spawn` 698 例 2792 刻全部
+0 不一致；`--break-self-test water_mob` 故意改坏抓到 12 处（RC=1）；`natural-spawn` 1727 例
+0 不一致；官方 `tools/probe.sh`（JDK 26）一次 766/770（重锁排队期间时序抖动）、换端口重跑
+**769/769**，`WORLD-DIR` 全过、正常关服。`natural.rs` 的 check_spawn_rules / `spawn.rs` 的
+finalizeSpawn 水生分派在合并后完整保留。
+
+疑点（详见本轮汇报）：装死倒计时 / `REGENERATION` 一段仍挂在 `customServerAiStep` 尾部而不是
+Brain 行为里，只有单元测试、`NoAI` 夹具不触发，没有和官方逐刻对拍；海豚恩惠 / 引路、美西螈
+攻击 / 繁殖仍是已知限制。按生物列状态：鱿鱼 / 发光鱿鱼、鳕鱼 / 鲑鱼 / 热带鱼 / 河豚、桶装鱼、
+海龟、海豚、美西螈十类主体全部「已逐刻对拍 0 不一致」；Brain 驱动的特有行为为「已知限制 / 未做」。
+
+## 第十二轮：合并 main（青蛙 / 蝌蚪 / Brain）后复核（op-water，2026-11-21）
+
+本轮按「每轮开始先 `git merge main`」与 14:35 追加，先 `git merge main` 把 main 从
+`33980ce0` 追到 `4ad4370c`（10 个提交：青蛙 / 蝌蚪 / 蛙卵、完整 Brain 框架层、便携桌面构建
+脚本、缓存改造、山羊长跳共用等）。合并基点仍是 `33980ce0`。本轮**不新写生物行为代码**，
+只解冲突、重生成 generated、按 main 结构对齐现状、复核；理由见本轮汇报第 4 节（第十一轮
+已把可独立实现的水生生物主体做完并逐刻对拍，剩下的都依赖 Brain / tick 顺序，按任务书停下
+汇报）。合并带来的青蛙 / 蝌蚪行为是 main 已完成且自带对拍的内容，不属本分支新写。
+
+**冲突（5 个文件，按 main 结构 + 两边内容并入）**：
+- `README.md`、`docs/mob-entity-design.md`：两边各自累计的「现状」段落。`MobType::ALL`
+  由 37 种合成 39 种（本分支海豚 / 美西螈 + main 青蛙 / 蝌蚪），`--only natural_spawn`
+  数字按实测更新；设计文档并入 main 新增的「5.10 青蛙和蝌蚪」节（HEAD 该处为空）。main
+  自身有两个 5.10 编号（青蛙蝌蚪、中立生物地基和北极熊），按「按 main 结构」原样保留，
+  未自行重编号。
+- `entity/mob/bucketable.rs`（7 处）：HEAD 建模美西螈桶、main 建模蝌蚪桶，两边都保留 ——
+  `bucket_item` / `kind_of_bucket` 同时收 `AXOLOTL_BUCKET` / `TADPOLE_BUCKET`，
+  `save_default_data` / `load_default_data` 各写各的物种块（花色 / 年龄 / 锁定标志），
+  `pickup` 音效合成三路 match（美西螈 `fill_axolotl`、蝌蚪 `fill_tadpole`、其余 `fill_fish`）。
+  `is_mob_bucket` 合并后只剩 `SULFUR_CUBE_BUCKET`：美西螈和蝌蚪都已建模，都走
+  `kind_of_bucket` → `spawn_from_bucket`，不再进「未建模仍取随机数」的分支。
+- `entity/mob/mod.rs`（3 处）：`can_breathe_under_water` 同时保留 Axolotl 与 Frog；保留
+  main 新增的 `can_be_a_baby`（青蛙恒假）并保留本分支海豚感知的 `is_ageable_water_creature`
+  注释；malus 分派同时保留 Dolphin / Axolotl / Tadpole 三条。
+- `entity/ctx.rs`：海龟蛋注释两边二选一，行为无关。
+- **自动合并的一处真 bug**：两边都把 `MobType::ALL` 从 35 扩到 37（各加 2 种、加在不同位置），
+  git 把 4 个元素都留下、长度声明却停在 `[Self; 37]`。改成 `[Self; 39]` 后
+  `cargo check --workspace --all-targets` 才通过。`entity_type()` / `generated/entity_types.rs`
+  的按 kind match 自动合并后已覆盖全部 39 种。
+
+**场景编号不冲突**：水生生物走名字路由（`squid` / `fish` / `water_mob` 独立驱动，不占
+`cow.kind` 数字表），main 的青蛙 18 / 蝌蚪 19 只进那张数字表；两边编号无交集。全量
+`mob-oracle` 1808 例 0 不一致间接验证。`extract`（JDK 26）重新生成 generated/ 成功
+（1511 结构模板 / 169 丛林神殿指令 / 协议 777），逐字节幂等、工作区无新增改动。
+
+**最终提交上实测**（java 对拍与探针走 `node W:/data/bamboo-agents/tools/heavy.js` 共享锁，
+前台跑）：`cargo fmt --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings`
+干净（0 warning、未加 allow）；`cargo check --workspace --all-targets` 通过；
+`cargo check -p mc-bamboo-desktop` 通过；`cargo test -p mc-bamboo-blocks`
+**808 passed / 0 failed / 6 ignored**（223.71s，比第十一轮 795 / 412s 更快，main 缓存改造生效）；
+`cargo test -p mc-bamboo-vanilla` 101 + 8 passed；
+`cargo test -p mc-bamboo-game --lib island_command` 4 passed（05:00 回归 2 未复发）。
+工作区全量 `cargo test --no-fail-fast` 被 cargo shim 按 `verify-scope.md` 拦下（RC=2），
+没有绕过。java 侧：全量 `mob-oracle` **1808 例 186057 刻 0 不一致**（含全部青蛙 / 蝌蚪场景
+与本分支全部水生场景）；`natural-spawn` 1727 例 0 不一致；`--only natural_spawn`
+**716 例 2864 刻 0 不一致**（含 frog_day / frog_warm / dolphin_ocean / axolotl_lush）；
+`--only dolphin` 3 例 603 刻、`--only axolotl` 4 例 804 刻、`--only squid` 4 例 1184 刻、
+`--only sheep_eat` 3 例 900 刻（05:00 回归 1 未复发）全部 0 不一致；
+`--break-self-test water_mob` 故意改坏抓到 gotFish 位扰动（RC=1，每轮最多一次）；
+官方 `tools/probe.sh`（JDK 26，端口 26337）**769/769 checks passed**，`WORLD-DIR` 全过、
+正常关服、level.dat / 6 玩家数据 / 4 区域文件都在。`natural.rs` 的 check_spawn_rules 与
+`spawn.rs` 的 finalizeSpawn 水生分派（squid / fish / turtle / dolphin / axolotl）合并后完整保留。
+
+**05:00 两处回归根因（复核，未复发）**：回归 1 `sheep_eat` 是鱼类「离水着地扑腾」被无条件
+套到陆地生物，修复在 `9f210652`（`living.rs` 用 `super::fish::is_fish` 门控）；回归 2
+`island_command` seed 40 是拆 / 并岛随机源没从世界种子确定性派生，修复在 `d74cf013`。
+本轮没有改流体 / 移动 / 碰撞 / 世界随机源代码，全量对拍与两个专项检查都在最终提交上通过。
+
+疑点与按生物列状态沿用第十一轮，本轮未改动生物行为代码：装死倒计时 / `REGENERATION` 仍挂
+`customServerAiStep` 尾部、只有单元测试、无官方逐刻对拍；海豚恩惠 / 引路、美西螈攻击 /
+繁殖、桶装鱼 / 海龟蛋孵化逐刻场景仍是已知限制；桶装鱼、海龟蛋孵化的主体仍是
+「已写未验证（无逐刻场景）」。详见本轮汇报。
