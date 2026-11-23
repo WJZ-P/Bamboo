@@ -421,10 +421,25 @@ impl Entity {
 
     /// 这个 tick 的 `tick()`。逻辑只看得到上下文接口，见 [`ctx`]。
     pub(crate) fn tick(&mut self, ctx: &mut dyn ctx::EntityCtx) {
+        let plan = ctx.throttle_plan();
+        // 休眠档每刻只推进计时器，不跑物理、不取随机数。全速 / 降频档和官方
+        // 逐刻路径完全相同；降频只收窄 `living::server_ai_step` 里的决策段。
+        if plan.tier.is_sleep() && !plan.no_active_move {
+            if matches!(self.kind, EntityKind::Mob(_)) {
+                let mut kind = std::mem::replace(&mut self.kind, EntityKind::Tnt(PrimedTnt::new()));
+                if let EntityKind::Mob(mob) = &mut kind {
+                    mob::throttle::sleep_mob_timers(self, mob);
+                }
+                self.kind = kind;
+            } else {
+                mob::throttle::sleep_other_timers(self);
+            }
+            return;
+        }
         // 生物在 `commonTick` 之前还要跑 `checkDespawn`，整段自己管。
         // Mobs run `checkDespawn` before `commonTick`, so they handle the whole tick.
         if matches!(self.kind, EntityKind::Mob(_)) {
-            mob::living::tick(self, ctx);
+            mob::living::tick(self, ctx, plan);
             return;
         }
         self.common_tick();

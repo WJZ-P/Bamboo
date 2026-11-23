@@ -1103,6 +1103,14 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
 
+    /// 和 [`Self::for_each_player`] 同一份名单，按值返回；给降频算档用。
+    /// 默认实现仍然走一遍 `for_each_player`，两种驱动看到同一份玩家。
+    fn player_views(&self) -> Vec<crate::entity::ctx::PlayerView> {
+        let mut out = Vec::new();
+        self.for_each_player(&mut |player| out.push(*player));
+        out
+    }
+
     /// 现实中的本地日期，不是世界时间。
     ///
     /// The local calendar date, independent of the world clock.

@@ -99,6 +99,11 @@ pub struct ServerConfig {
     pub entity_threads: usize,
     /// 每只生物每刻最多处理几次推挤（0 = 不限，精确模式）。
     pub max_entity_collisions: usize,
+    /// 三档降频的两个距离边界（0 = 关，精确模式）：降频档起点、休眠档起点。
+    pub mob_throttle_distance: i32,
+    pub mob_sleep_distance: i32,
+    /// 每刻唤醒名额的倍率（1 = Paper 的缺省值）。
+    pub mob_wakeups_scale: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
@@ -198,6 +203,9 @@ impl Default for ServerConfig {
             world_dir: None,
             entity_threads: 0,
             max_entity_collisions: 0,
+            mob_throttle_distance: 0,
+            mob_sleep_distance: 0,
+            mob_wakeups_scale: 1,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: mc_bamboo_game::worldgen_cache::WorldgenCacheSettings::default(),

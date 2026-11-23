@@ -24,7 +24,7 @@ use crate::{
     world::World,
 };
 
-use super::{Entity, EntityPublic, EntityUid, FallingBlock};
+use super::{Entity, EntityPublic, EntityUid, FallingBlock, mob::throttle};
 
 /// 只读的方块/碰撞视图。实体逻辑和寻路只经它读世界；并行阶段共享同一份只读快照。
 ///
@@ -529,6 +529,29 @@ impl BlockView for World<'_> {
     }
 }
 
+/// 驱动在每刻开头按 uid 升序算好的降频计划。只由刻号、uid、距离和令牌桶决定，
+/// 精确和并行两种驱动构造出同一份；豁免由实体自己的 tick 覆盖成全速档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThrottlePlan {
+    pub tier: throttle::Tier,
+    /// 这一刻决策（目标选择器、目标、大脑）跑不跑。
+    pub decisions_run: bool,
+    /// 休眠档每 20 刻的完整 tick 里不主动走动（AI 停摆，物理照跑）。
+    pub no_active_move: bool,
+    /// 限量唤醒的有效期（绝对刻号）；不大于当前刻号表示没被唤醒。
+    pub wake_until: i64,
+}
+
+impl ThrottlePlan {
+    /// 开关关着、或名单里没有这个实体：官方完整 tick。
+    pub const FULL: Self = Self {
+        tier: throttle::Tier::Full,
+        decisions_run: true,
+        no_active_move: false,
+        wake_until: i64::MIN,
+    };
+}
+
 /// 实体一刻能用到的全部上下文。精确和并行各有一个实现。
 ///
 /// 读别的实体只能读到 [`EntityPublic`]，访问顺序按 uid 升序。世界随机源不在这里：
@@ -539,6 +562,10 @@ pub trait EntityCtx {
     fn uid(&self) -> EntityUid;
     /// 只读的方块视图。调用方只在这个方法调用的期间借用，不能跨过 `emit`。
     fn blocks(&self) -> &dyn BlockView;
+    /// 驱动给这一刻这个实体算好的降频计划。缺省是完整 tick（精确模式）。
+    fn throttle_plan(&self) -> ThrottlePlan {
+        ThrottlePlan::FULL
+    }
     /// 按 ID 读别的实体的公开数据。自己已经被驱动从表里取出来，查不到是正常的。
     fn other(&self, uid: EntityUid) -> Option<EntityPublic>;
     /// 按 ID 读一名玩家（骑手）。不在本岛时返回 `None`。
@@ -1424,11 +1451,21 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
 pub struct PreciseCtx<'w, 'a> {
     world: &'w mut World<'a>,
     uid: EntityUid,
+    plan: ThrottlePlan,
 }
 
 impl<'w, 'a> PreciseCtx<'w, 'a> {
     pub fn new(world: &'w mut World<'a>, uid: EntityUid) -> Self {
-        Self { world, uid }
+        Self {
+            world,
+            uid,
+            plan: ThrottlePlan::FULL,
+        }
+    }
+
+    /// 只给实体驱动用：带上这一刻算好的降频计划。
+    pub fn with_plan(world: &'w mut World<'a>, uid: EntityUid, plan: ThrottlePlan) -> Self {
+        Self { world, uid, plan }
     }
 
     /// 取回世界，给驱动在 tick 之间用。
@@ -1440,6 +1477,10 @@ impl<'w, 'a> PreciseCtx<'w, 'a> {
 impl EntityCtx for PreciseCtx<'_, '_> {
     fn uid(&self) -> EntityUid {
         self.uid
+    }
+
+    fn throttle_plan(&self) -> ThrottlePlan {
+        self.plan
     }
 
     fn blocks(&self) -> &dyn BlockView {

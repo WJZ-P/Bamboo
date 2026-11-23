@@ -349,6 +349,10 @@ impl ServerSettings {
             entity_threads: self.entity_threads as usize,
             // 桌面界面不暴露这一项，按精确模式（0 = 不限）。
             max_entity_collisions: defaults.max_entity_collisions,
+            // 桌面界面也不暴露三档降频，按精确模式（两个距离都是 0）。
+            mob_throttle_distance: defaults.mob_throttle_distance,
+            mob_sleep_distance: defaults.mob_sleep_distance,
+            mob_wakeups_scale: defaults.mob_wakeups_scale,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
             worldgen_cache: WorldgenCacheSettings {

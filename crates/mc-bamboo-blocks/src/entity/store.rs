@@ -562,6 +562,8 @@ pub struct EntityStore {
     /// left: with the row gone, an island split has nothing else to tell
     /// which side the events belong to.
     departed_mob_events: BTreeMap<EntityUid, (ChunkPos, Vec<super::mob::MobEvent>)>,
+    /// 三档降频的限量唤醒令牌桶（每岛一份）。缺省按刻号 0 的满桶起。
+    wake_tokens: super::mob::throttle::WakeTokens,
 }
 
 impl Default for EntityStore {
@@ -585,6 +587,10 @@ impl Default for EntityStore {
             wake_events: Vec::new(),
             spawn_snapshots: BTreeMap::new(),
             departed_mob_events: BTreeMap::new(),
+            wake_tokens: super::mob::throttle::WakeTokens::full(
+                0,
+                super::mob::throttle::Config::OFF,
+            ),
         }
     }
 }
@@ -1352,20 +1358,43 @@ impl EntityStore {
         (public.bounding_box(), stack)
     }
 
-    /// 岛合并时把各实体记着的绝对时刻平移 `delta`。现在只有生物有：
-    /// 受伤时刻、导航的卡住检查和重算时刻。tick 中被拿走的行不在表里，
-    /// 合并只在两刻之间发生，所以不会漏。
-    ///
-    /// Shift every absolute time stamp held by entities by `delta` on an island
-    /// merge. Only mobs have any: the damage stamp and the navigation stuck-check
-    /// and recompute times. Rows taken out mid-tick are absent, but merges only
-    /// happen between ticks.
+    /// 岛合并时把各实体记着的绝对时刻平移 `delta`。生物身上的受伤时刻、
+    /// 导航的卡住检查和重算时刻，以及降频的三个时刻都要跟着走。
+    /// tick 中被拿走的行不在表里，合并只在两刻之间发生，所以不会漏。
     pub fn rebase(&mut self, delta: i64) {
         let rows = self.slots.iter_mut().flatten().chain(&mut self.pending);
         for row in rows {
             if let KindState::Mob(mob) = &mut row.state.kind {
                 mob.rebase(delta);
             }
+        }
+        self.wake_tokens.rebase(delta);
+    }
+
+    /// 三档降频的限量唤醒令牌桶。
+    pub fn wake_tokens(&self) -> super::mob::throttle::WakeTokens {
+        self.wake_tokens
+    }
+
+    /// 一刻开头推进令牌桶之后把状态写回来。
+    pub fn set_wake_tokens(&mut self, tokens: super::mob::throttle::WakeTokens) {
+        self.wake_tokens = tokens;
+    }
+
+    /// 拆岛：新实体表从满桶开始，刻号和上限跟原表一致。
+    pub fn split_wake_tokens(&self) -> super::mob::throttle::WakeTokens {
+        self.wake_tokens.split_full()
+    }
+
+    /// 只对一行做一次可变借用，给 [`super::mob::throttle::plans_for_tick`] 用：
+    /// 不改槽位、不动任何子索引，公开的 uid 和位置都不变。
+    pub fn with_throttle_row_mut(
+        &mut self,
+        row: usize,
+        f: &mut dyn FnMut(&mut EntityPublic, &mut EntityState),
+    ) {
+        if let Some(slot) = self.slots.get_mut(row).and_then(Option::as_mut) {
+            f(&mut slot.public, &mut slot.state);
         }
     }
 
@@ -1521,6 +1550,8 @@ impl EntityStore {
             ids: self.ids.clone(),
             seeds,
             watched_sections: self.watched_sections.clone(),
+            // 拆岛时两边都从满桶开始：令牌数只由刻号和类别决定，和生物数无关。
+            wake_tokens: self.wake_tokens.split_full(),
             ..Self::default()
         };
         // 还没交给同步层的生成快照跟着实体走：同步层在实体所在的岛上按它建跟踪状态。
@@ -1613,6 +1644,8 @@ impl EntityStore {
         }
         self.preserved.append(&mut other.preserved);
         self.watched_sections.extend(other.watched_sections);
+        // 合并：两个岛的刻号已经对齐，按类别取两份里剩余令牌较多的那份。
+        self.wake_tokens.absorb(other.wake_tokens);
         self.wake_events.append(&mut other.wake_events);
         for (uid, entry) in std::mem::take(&mut other.departed_mob_events) {
             let previous = self.departed_mob_events.insert(uid, entry);

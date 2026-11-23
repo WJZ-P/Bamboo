@@ -66,6 +66,14 @@ pub struct BlockGameRules {
     /// Bamboo 的 `max_entity_collisions`：每只生物每刻最多处理几次推挤。
     /// 0 = 不限（精确模式）。不是官方游戏规则，不进存档。
     pub max_entity_collisions: usize,
+    /// Bamboo 的 `mob_throttle_distance`：降频档起点（到最近玩家的水平距离）。
+    /// 0 = 不启用降频档。不是官方游戏规则，不进存档。
+    pub mob_throttle_distance: i32,
+    /// Bamboo 的 `mob_sleep_distance`：休眠档起点。0 = 不启用休眠档。
+    pub mob_sleep_distance: i32,
+    /// Bamboo 的 `mob_wakeups_scale`：每刻唤醒名额的倍率（1 = Paper 缺省值）。
+    /// 0 按 1 算，防止配置写坏让整套唤醒失效。
+    pub mob_wakeups_scale: usize,
 }
 
 impl BlockGameRules {
@@ -94,6 +102,9 @@ impl BlockGameRules {
             mob_explosion_drop_decay: bool_default(gamerules::MOB_EXPLOSION_DROP_DECAY),
             max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),
             max_entity_collisions: 0,
+            mob_throttle_distance: 0,
+            mob_sleep_distance: 0,
+            mob_wakeups_scale: 1,
         }
     }
 }
