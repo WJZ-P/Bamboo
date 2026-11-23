@@ -65,6 +65,10 @@
 - **对拍**：`mc-bamboo-vanilla advancement-oracle java [--runs N] [--show N]
   [--break-layout]`，进程内加载官方 `ServerAdvancementManager`，不启动真实服务端、
   不接受 EULA。`--break-layout` 打乱排版里第一棵根的兄弟顺序，坐标和包字节必须报出来。
+  `command-oracle` 另加 12 条 `/advancement` 语法题：Java 侧用官方 Brigadier
+  `AdvancementCommands.register` 的 dispatcher 解析，Rust 侧用 Bamboo 命令树解析并比较
+  `ok` / `trailing:<光标>` / `error`；反馈键按 26.3 `AdvancementCommands$Action` 拼出来的
+  24 个键选。`--break-self-test` 同时改坏一个选择器和一条命令。
 
 ## 已接上的触发器
 
@@ -82,11 +86,14 @@
 - **排版边界**：官方 `apportion` 里 `vol` / `vor` 两个轮廓游标为 null 时的分支
   （官方数据会靠 `thread` 接上，Bamboo 在特定兄弟排列下遇到 null）尚未完全复现。
   三个 salt 排列里共 4 个显示节点的 y 差 0.5；对拍把这 4 个节点列为已知差异，
-  其余 122 个逐位相同。
+  其余 122 个逐位相同。曾用反射导出官方 `firstWalk` 之前的内部状态逐节点核对，
+  126 个里 125 个的 `y` / `mod` / `shift` / `change` / `thread` 完全一致。
 - **复杂图标组件**：3 个显示节点的图标带 `pot_decorations` / `banner_patterns`
   等组件，Bamboo 目前把 JSON 转成通用 NBT，没按官方 `DataComponentPatch` 的
-  线上 codec 重写，单条包字节不同。其余 123 个显示节点逐字节相同。
-- **没接上的触发器**：58 种里已接 16 种。下界 / 末地维度、村民交易、钓鱼、
+  线上 codec 重写，单条包字节不同。其余 123 个显示节点逐字节相同；这 3 条对拍
+  跳过包字节比较，坐标仍逐位比。
+- **没接上的触发器**：58 种里已接 16 种（框架能解析全部 58 种，条件字段里
+  没建模的谓词一律不匹配，不白送判据）。下界 / 末地维度、村民交易、钓鱼、
   驯服、繁殖、酿造、附魔、信标、劫掠、避雷针、标靶、潜影盒、刷怪蛋相关的
   触发器，以及 `default_block_use`、`any_block_use`、`using_item`、
   `item_durability_changed`、`levitation`、`changed_dimension`、`used_totem`、
@@ -106,6 +113,13 @@
 - **`loot` 奖励**：内置定义里没有 loot 奖励，接口保留但没有对拍。
 - **`location` 的群系**：目前只上报主世界 `plains`，群系 / 维度谓词要靠世界生成
   接入后才能完整判定。
+- **命令反馈**：键和参数已按官方字节码选，但「目标数量 × 进度数量」的 24 个键里
+  只有语法和键表进了 `command-oracle` 对拍，**没有**在进程内构造官方假玩家执行
+  `/advancement` 比返回值和反馈文本（任务书原本要求的那一步）。这是本期剩余的主要
+  对拍缺口。
+- **触发器 oracle**：任务书要的「每个接上的触发器用官方真实触发器实例判定」没有
+  单独的对拍；目前只有 `predicate-oracle` 覆盖已有的谓词实现和命令 / 存档 / 进度树
+  对拍。
 - **图标组件**：见上；奖励里的配方集合目前写在进度档案里，官方的
   `recipeBook` 字段在玩家 NBT，第二期配方书会一起对齐。
 - **统计、遥测事件**：`sends_telemetry_event` 照官方编码进包，但服务端不上报遥测。
