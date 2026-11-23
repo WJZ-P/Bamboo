@@ -143,12 +143,12 @@ pub struct TrapSpawn {
 
 /// `SkeletonTrapGoal.createSkeleton`：先跑 `Skeleton.finalizeSpawn`（装备生成与
 /// `populateDefaultEquipmentEnchantments` 都在世界随机源上），再把主手和头盔的
-/// `enchantments` 组件清成空、按 `MOB_SPAWN_EQUIPMENT` 提供器重抽一次。
-/// 头盔若为空就补一顶铁头盔。所有取数仍走世界随机源，和官方一致。
+/// `enchantments` 组件清成空、按 `MOB_SPAWN_EQUIPMENT` 提供器用骷髅自己的
+/// 实体随机源重抽一次。头盔若为空就补一顶铁头盔。
 ///
 /// Vanilla `createSkeleton`: `finalizeSpawn`, then clear and re-enchant MAINHAND
-/// and HEAD with the `MOB_SPAWN_EQUIPMENT` provider; fill an empty head slot
-/// with an iron helmet.
+/// and HEAD with the `MOB_SPAWN_EQUIPMENT` provider using the skeleton's own
+/// random; fill an empty head slot with an iron helmet.
 fn trap_rider(world: &mut World<'_>, position: Vec3, special: f32, seed: Option<i64>) -> Entity {
     use mc_bamboo_protocol::packet::play::EquipmentSlot;
     // `EntityType.create` 先分配实体 ID / 种子，再跑 `finalizeSpawn`；官方
