@@ -118,11 +118,11 @@ impl AdvancementProgress {
         write_varint(out, self.criteria.len() as i32);
         for (name, done) in &self.criteria {
             write_string(out, name);
-            // `CriterionProgress.STREAM_CODEC` 是 optional(INSTANT)，INSTANT 是秒 + 纳秒。
+            // `CriterionProgress.STREAM_CODEC` 是 optional(INSTANT)，
+            // 26.3 的 `ByteBufCodecs.INSTANT` = LONG.map(Instant::ofEpochMilli, Instant::toEpochMilli)。
             write_bool(out, done.is_some());
             if let Some(date) = done {
-                write_i64(out, date.timestamp());
-                write_i32_millis(out, date.timestamp_subsec_nanos());
+                write_i64(out, date.timestamp_millis());
             }
         }
     }
@@ -174,11 +174,6 @@ impl AdvancementProgress {
             requirements: Vec::new(),
         })
     }
-}
-
-fn write_i32_millis(out: &mut Vec<u8>, nanos: u32) {
-    use mc_bamboo_protocol::codec::write_i32;
-    write_i32(out, nanos as i32);
 }
 
 /// 官方 `ExtraCodecs.temporalCodec` 用 `ZonedDateTime` 解析本地时区的时间串。

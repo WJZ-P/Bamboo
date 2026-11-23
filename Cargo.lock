@@ -1967,6 +1967,7 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "libc",
+ "mc-bamboo-advancements",
  "mc-bamboo-blocks",
  "mc-bamboo-command",
  "mc-bamboo-core",
