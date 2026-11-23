@@ -1970,21 +1970,9 @@ fn register_advancement(builder: &mut Builder, root: usize) {
         let targets = builder.argument(node, "target", players_argument(), 0);
         let everything = builder.literal(targets, "everything", 0);
         builder.run_island(everything, function);
-        let criterion = builder.argument(
-            everything,
-            "criterion",
-            ArgumentType::String(mc_bamboo_command::StringKind::SingleWord),
-            0,
-        );
-        builder.run_island(criterion, function);
         for mode in ["only", "from", "through", "until"] {
             let mode_node = builder.literal(targets, mode, 0);
-            let id = builder.argument(
-                mode_node,
-                "advancement",
-                ArgumentType::String(mc_bamboo_command::StringKind::SingleWord),
-                0,
-            );
+            let id = builder.argument(mode_node, "advancement", ArgumentType::ResourceLocation, 0);
             builder.run_island(id, function);
             let with_criterion = builder.argument(
                 id,
