@@ -1490,7 +1490,7 @@ public final class ChunkgenOracle {
                 }
             }
             switch (order) {
-                case "center-first", "post-process" -> centers.add(0, new int[] {0, 0});
+                case "center-first" -> centers.add(0, new int[] {0, 0});
                 case "center-last" -> centers.add(new int[] {0, 0});
                 default -> throw new IllegalArgumentException("unknown merge order " + order);
             }
@@ -1518,12 +1518,6 @@ public final class ChunkgenOracle {
                 runs++;
             }
 
-            if ("post-process".equals(order)) {
-                writePostProcessDiagnostic(seed, pos, area, runs, generatorSettings, randomState,
-                        resolver, structureGrid, entityStub);
-                return;
-            }
-
             JsonObject line = new JsonObject();
             line.addProperty("type", "merged");
             line.addProperty("seed", seed);
@@ -1538,93 +1532,6 @@ public final class ChunkgenOracle {
             }
             line.add("writes", counts);
             addBlocks(line, area[12].chunk());
-            write(line);
-        }
-
-        /**
-         * 完工后处理诊断：9 个中心按 center-first 写进共享 ProtoChunk 之后，按目标的
-         * `PostProcessing` 表逐条走 `LevelChunk.postProcessGeneration` 的分支：流体非空
-         * （`FluidState.tick`）和 `LiquidBlock`（`BlockState.tick`）只计数不模拟；其余跑官方
-         * `Block.updateFromNeighbourShapes`，变了就 `setBlock(pos, s, 276)`。交回会变的格子
-         * 数和按方块分的计数，以及处理后的目标方块。只是诊断：Bamboo 还没有这一步。
-         *
-         * Post-processing diagnostic: after the 9 centers write center-first into the
-         * shared ProtoChunks, walk the target's `PostProcessing` like
-         * `LevelChunk.postProcessGeneration`: fluid (`FluidState.tick`) and
-         * `LiquidBlock` (`BlockState.tick`) entries are only counted; the rest run the
-         * official `Block.updateFromNeighbourShapes` and `setBlock(pos, s, 276)` on change.
-         */
-        private void writePostProcessDiagnostic(long seed, ChunkPos pos, TerrainChunk[] area,
-                int runs, NoiseGeneratorSettings generatorSettings, RandomState randomState,
-                BiomeResolver resolver, StructureChunkGrid structureGrid,
-                net.minecraft.server.level.ServerLevel entityStub) throws Exception {
-            TerrainChunk[] view = view3x3(area, 0, 0);
-            final WorldGenLevel[] holder = new WorldGenLevel[1];
-            FeatureLevelHandler handler = new FeatureLevelHandler(pos, seed, generatorSettings,
-                    wrapped(view), this.registries,
-                    new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
-                            BiomeManager.obfuscateSeed(seed)),
-                    resolver, randomState, structureGrid, entityStub);
-            WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
-                    ChunkgenOracle.class.getClassLoader(), new Class<?>[] {WorldGenLevel.class},
-                    handler);
-            holder[0] = level;
-            ProtoChunk target = area[12].chunk();
-            it.unimi.dsi.fastutil.shorts.ShortList[] post = target.getPostProcessing();
-            int entries = 0;
-            int fluid = 0;
-            int liquid = 0;
-            int changed = 0;
-            java.util.TreeMap<String, Integer> byBlock = new java.util.TreeMap<>();
-            JsonArray cells = new JsonArray();
-            for (int i = 0; i < post.length; i++) {
-                if (post[i] == null) {
-                    continue;
-                }
-                short[] packed = post[i].toShortArray();
-                for (short value : packed) {
-                    entries++;
-                    BlockPos at = ProtoChunk.unpackOffsetCoordinates(value,
-                            target.getSectionYFromSectionIndex(i), pos);
-                    BlockState state = target.getBlockState(at);
-                    if (!state.getFluidState().isEmpty()) {
-                        fluid++;
-                    }
-                    if (state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock) {
-                        liquid++;
-                        continue;
-                    }
-                    BlockState updated = net.minecraft.world.level.block.Block
-                            .updateFromNeighbourShapes(state, level, at);
-                    if (updated != state) {
-                        changed++;
-                        byBlock.merge(net.minecraft.core.registries.BuiltInRegistries.BLOCK
-                                .getKey(state.getBlock()).toString(), 1, Integer::sum);
-                        level.setBlock(at, updated, 276);
-                        JsonArray cell = new JsonArray();
-                        cell.add(at.getX());
-                        cell.add(at.getY());
-                        cell.add(at.getZ());
-                        cell.add(state.toString());
-                        cell.add(updated.toString());
-                        cells.add(cell);
-                    }
-                }
-            }
-            JsonObject line = new JsonObject();
-            line.addProperty("type", "postprocess");
-            line.addProperty("seed", seed);
-            line.addProperty("x", pos.x());
-            line.addProperty("z", pos.z());
-            line.addProperty("runs", runs);
-            line.addProperty("entries", entries);
-            line.addProperty("fluid", fluid);
-            line.addProperty("liquid", liquid);
-            line.addProperty("changed", changed);
-            JsonObject blocks = new JsonObject();
-            byBlock.forEach(blocks::addProperty);
-            line.add("byBlock", blocks);
-            line.add("cells", cells);
             write(line);
         }
 
@@ -1657,6 +1564,7 @@ public final class ChunkgenOracle {
             java.util.Map<BlockState, Integer> ids = new java.util.HashMap<>();
             JsonArray sources = new JsonArray();
             JsonArray marks = new JsonArray();
+            JsonArray entitySources = new JsonArray();
             int runs = 0;
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
@@ -1685,6 +1593,11 @@ public final class ChunkgenOracle {
                     // Marks this center added to the target: each section's entries
                     // past the clean prefix, in call order (marks only append).
                     marks.add(saved[12].newMarks(target));
+                    // 这个中心在目标区块里留下的方块实体（干净地形没有方块实体，
+                    // 还原时表也换回去，所以目标里的全是这一次写的）。
+                    // Block entities this center left in the target (the clean
+                    // terrain has none and the restore swaps the tables back).
+                    entitySources.add(blockEntityRows(target, true));
                     JsonArray writes = new JsonArray();
                     AreaSnapshot clean = saved[12];
                     for (int y = 0; y < height; y++) {
@@ -1731,6 +1644,7 @@ public final class ChunkgenOracle {
             line.add("writePalette", names);
             line.add("sources", sources);
             line.add("marks", marks);
+            line.add("blockEntities", entitySources);
             // 还原后目标的 `postProcessing` 就是干净地形（doFill / 地表）的标记。
             // After the restore the target's `postProcessing` is the clean terrain marks.
             addBlocks(line, target);
@@ -3111,6 +3025,37 @@ public final class ChunkgenOracle {
          * `saveWithFullMetadata`. The DUMMY nbt left in `pendingBlockEntities` by
          * `WorldGenRegion.setBlock` is a placeholder, not an entity, so it is skipped.
          */
+        /**
+         * 区块里全部方块实体的 `[x,y,z,SNBT]`，按 y、x、z 排序。`withDummy` 为真时
+         * `WorldGenRegion.setBlock` 留下的 DUMMY 占位也列出（SNBT 写成 "DUMMY"）。
+         *
+         * The chunk's block entities as `[x,y,z,SNBT]` sorted by y, x, z; with
+         * `withDummy` the DUMMY placeholders are listed too, as "DUMMY".
+         */
+        private JsonArray blockEntityRows(ChunkAccess chunk, boolean withDummy) {
+            JsonArray entities = new JsonArray();
+            List<BlockPos> positions = new ArrayList<>(chunk.getBlockEntitiesPos());
+            positions.sort(Comparator.comparingInt((BlockPos p) -> p.getY())
+                    .thenComparingInt(p -> p.getX()).thenComparingInt(p -> p.getZ()));
+            for (BlockPos pos : positions) {
+                CompoundTag tag = chunk.getBlockEntityNbtForSaving(pos, registries);
+                if (tag == null) {
+                    continue;
+                }
+                boolean dummy = "DUMMY".equals(tag.getStringOr("id", ""));
+                if (dummy && !withDummy) {
+                    continue;
+                }
+                JsonArray entry = new JsonArray();
+                entry.add(pos.getX());
+                entry.add(pos.getY());
+                entry.add(pos.getZ());
+                entry.add(dummy ? "DUMMY" : tag.toString());
+                entities.add(entry);
+            }
+            return entities;
+        }
+
         private void addBlockEntities(JsonObject line, ChunkAccess chunk) {
             JsonArray entities = new JsonArray();
             List<BlockPos> positions = new ArrayList<>(chunk.getBlockEntitiesPos());

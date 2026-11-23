@@ -402,6 +402,11 @@ pub(crate) struct Master {
 /// as delivered and after a save round trip.
 #[doc(hidden)]
 pub type PostProcessingTables = (Vec<Vec<u16>>, Vec<Vec<u16>>);
+
+/// 对拍脚手架用的一条计划刻：`(坐标, 是否流体, 注册表 ID, 触发时刻, 优先级)`。
+/// Oracle scaffolding: one scheduled tick `(pos, is_fluid, id, trigger, priority)`.
+#[doc(hidden)]
+pub type ScheduledTickRow = (mc_bamboo_core::BlockPos, bool, i64, i64, i32);
 impl World {
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
@@ -980,6 +985,18 @@ impl World {
         );
     }
 
+    /// 对拍按加载等级交付区块。33 能单独检查完工组装，32 触发半径一的后处理。
+    /// Request a loading tier independently of simulation for generation comparisons.
+    #[doc(hidden)]
+    pub fn load_chunks_unpaced(&mut self, positions: &[ChunkPos], level: i32) {
+        use mc_bamboo_world::ticket::TicketType;
+        self.apply_ticket_ops(positions.iter().map(|&pos| TicketOp::Add {
+            ty: TicketType::PlayerLoading,
+            pos,
+            level,
+        }));
+    }
+
     /// 测量脚手架用：某个区块是否已经交付进 region。
     /// Benchmark-only: whether a chunk has been delivered into the region.
     #[doc(hidden)]
@@ -1037,6 +1054,97 @@ impl World {
         )
         .unwrap_or_default();
         Some(Ok((delivered, reloaded)))
+    }
+
+    /// 对拍脚手架用：已加载区块现在写盘会写出的区块 NBT（未压缩的根复合标签）。
+    /// `None` 表示没加载或表正忙。
+    ///
+    /// Oracle scaffolding: the chunk NBT a save would write right now (the
+    /// uncompressed root compound); `None` when not loaded or busy.
+    #[doc(hidden)]
+    pub fn chunk_nbt_unpaced(
+        &self,
+        pos: mc_bamboo_core::ChunkPos,
+    ) -> Option<Result<mc_bamboo_nbt::Tag, String>> {
+        let island = self.islands.get(self.islands.island_of_chunk(pos)?)?;
+        let packed = match island.region.encode_loaded_column(pos)? {
+            Ok(packed) => packed,
+            Err(error) => return Some(Err(error)),
+        };
+        let bytes = packed.chunk?;
+        Some(
+            mc_bamboo_nbt::read_named(&bytes, mc_bamboo_nbt::Accounter::uncompressed_quota())
+                .map(|(_, entries)| mc_bamboo_nbt::Tag::Compound(entries))
+                .map_err(|error| format!("cannot read encoded chunk: {error}")),
+        )
+    }
+
+    /// 对拍脚手架用：区块现在能不能发给玩家（`send_chunks` 用的同一个判断）。
+    /// Oracle scaffolding: whether the chunk may be sent now (`send_chunks`' check).
+    #[doc(hidden)]
+    pub fn chunk_ready_to_send_unpaced(&self, pos: mc_bamboo_core::ChunkPos) -> bool {
+        self.islands
+            .island_of_chunk(pos)
+            .and_then(|id| self.islands.get(id))
+            .is_some_and(|island| island.region.tick_levels.ready_to_send(pos))
+    }
+
+    /// 对拍脚手架用：区块的完工后处理是否已经做完。
+    /// Oracle scaffolding: whether the chunk's generation post-processing has run.
+    #[doc(hidden)]
+    pub fn chunk_post_processed_unpaced(&self, pos: mc_bamboo_core::ChunkPos) -> bool {
+        self.islands
+            .island_of_chunk(pos)
+            .and_then(|id| self.islands.get(id))
+            .is_some_and(|island| island.region.tick_levels.prepared(pos))
+    }
+
+    /// 对拍脚手架用：落在 `chunks` 里的排队计划刻，连同所在岛计划刻队列的当前时钟。
+    /// 每条是 `(坐标, 是否流体, 注册表 ID, 触发时刻, 优先级)`，方块的在前，各自按执行顺序。
+    ///
+    /// Oracle scaffolding: the scheduled ticks inside `chunks`, plus the island
+    /// queue's current clock. Each entry is `(pos, is_fluid, registry id, trigger,
+    /// priority)`, block ticks first, each in execution order.
+    #[doc(hidden)]
+    pub fn scheduled_ticks_unpaced(
+        &self,
+        chunks: &[mc_bamboo_core::ChunkPos],
+    ) -> Option<(i64, Vec<ScheduledTickRow>)> {
+        let island = self
+            .islands
+            .get(self.islands.island_of_chunk(*chunks.first()?)?)?;
+        let ticks = &island.region.block_ticks;
+        let inside = |pos: mc_bamboo_core::BlockPos| {
+            chunks.contains(&mc_bamboo_core::ChunkPos::new(pos.x >> 4, pos.z >> 4))
+        };
+        let mut rows: Vec<ScheduledTickRow> = ticks
+            .pending()
+            .filter(|tick| inside(tick.pos))
+            .map(|tick| {
+                (
+                    tick.pos,
+                    false,
+                    tick.block as i64,
+                    tick.trigger_tick,
+                    tick.priority as i32,
+                )
+            })
+            .collect();
+        rows.extend(
+            ticks
+                .pending_fluids()
+                .filter(|tick| inside(tick.pos))
+                .map(|tick| {
+                    (
+                        tick.pos,
+                        true,
+                        i64::from(tick.fluid),
+                        tick.trigger_tick,
+                        tick.priority as i32,
+                    )
+                }),
+        );
+        Some((ticks.now(), rows))
     }
 
     /// 测量脚手架用：计算池里还有没有在途任务。
@@ -1291,6 +1399,7 @@ impl World {
             self.record_delivery_metrics();
             self.profiler().lap(Phase::Delivery);
             for island in self.islands.iter_mut() {
+                crate::generation_post_process::prepare_ticking_chunks(&mut island.region);
                 light_updates::run_light_updates(&mut island.region);
             }
             self.profiler().lap(Phase::LightUpdates);
@@ -3478,6 +3587,7 @@ fn run_detached_island(island: &mut Island) {
     // 派出去之前的那段（主控收包、交接）不算进任何阶段，交接本身另记 `island_handoff`。
     // The time before dispatch is no phase; the hand-over goes to `island_handoff`.
     island.region.profiler.restart_lap();
+    crate::generation_post_process::prepare_ticking_chunks(&mut island.region);
     light_updates::run_light_updates(&mut island.region);
     island.region.profiler.lap(Phase::LightUpdates);
     island.region.advance_tick();

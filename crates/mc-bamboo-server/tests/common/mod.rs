@@ -187,10 +187,15 @@ impl TestServer {
 
     /// 停止服务端，等它完全结束。
     pub async fn shutdown(&mut self) {
+        self.shutdown_within(TEST_DEADLINE).await;
+    }
+
+    /// 和 [`shutdown`](Self::shutdown) 相同，等待上限由调用方给（普通世界存盘慢）。
+    pub async fn shutdown_within(&mut self, deadline: Duration) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
-        timeout(TEST_DEADLINE, &mut self.task)
+        timeout(deadline, &mut self.task)
             .await
             .expect("server kept running after shutdown")
             .unwrap();
