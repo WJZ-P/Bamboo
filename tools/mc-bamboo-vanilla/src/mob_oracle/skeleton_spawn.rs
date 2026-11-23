@@ -150,7 +150,7 @@ impl Report {
         }
         let pos = BlockPos::new(0, 64, 0);
         let id = if case.egg {
-            spawn::spawn_egg(&mut world, MobType::Skeleton, pos, false, None)
+            spawn::spawn_egg(&mut world, MobType::Skeleton, pos, true, false, None)
         } else {
             spawn::summon_mob(
                 &mut world,

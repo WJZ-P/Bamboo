@@ -628,6 +628,7 @@ mod tests {
             &mut world,
             MobType::Skeleton,
             BlockPos::new(1, 64, 0),
+            true,
             false,
             None,
         );
