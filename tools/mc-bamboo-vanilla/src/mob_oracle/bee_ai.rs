@@ -77,9 +77,14 @@ impl BeeAiCase {
                 off_hand: 0,
                 combat: Default::default(),
                 effects: Default::default(),
+                team: None,
             }],
             game: None,
             wrong_was_hurt: false,
+            inhabited: std::collections::HashMap::new(),
+            mob_teams: std::collections::HashMap::new(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
         }
     }
 }
