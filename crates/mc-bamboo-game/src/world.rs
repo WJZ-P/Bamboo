@@ -3432,9 +3432,15 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::ScheduledTicks);
     // 官方 `chunkSource.tick` 先刷怪再跑随机刻，位置照它。
-    // Vanilla `chunkSource.tick` spawns before the random ticks; keep that order.
+    // Vanilla `chunkSource.tick` spawns before the random ticks; keep it that way.
     crate::natural_spawn::tick(region);
     interaction::run_random_ticks(region);
+    // `ServerChunkCache.tickChunks` 在逐区块随机刻之后才调 `tickCustomSpawners`，主世界的
+    // 自定义刷怪器里有 `PhantomSpawner`；世界随机源因此排在随机刻的取数之后。
+    // `ServerChunkCache.tickChunks` calls `tickCustomSpawners` after the per-chunk random
+    // ticks; the overworld's custom spawners include `PhantomSpawner`, so their level
+    // random draws follow the random-tick draws.
+    crate::phantom_spawn::tick(region);
     region.profiler.lap(Phase::RandomTicks);
     region.profiler.begin_chunk_phase(ChunkPhase::BlockEvents);
     region.profiler.begin_partition_phase();

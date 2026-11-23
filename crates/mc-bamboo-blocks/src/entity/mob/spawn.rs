@@ -378,7 +378,13 @@ fn finalize_spawn_in_group(
         super::slime::finalize_spawn(world, entity, group);
         return;
     }
-    if matches!(kind, MobType::Creeper | MobType::Enderman) {
+    if kind == MobType::Phantom {
+        super::phantom::finalize_spawn(entity, world.random());
+        return;
+    }
+    // 蝙蝠没有自己的 `finalizeSpawn`，和苦力怕一样只有 `Mob.finalizeSpawn`。
+    // Bats have no `finalizeSpawn` of their own: just `Mob.finalizeSpawn`, as creepers.
+    if matches!(kind, MobType::Creeper | MobType::Enderman | MobType::Bat) {
         super::creeper::finalize_spawn(entity, world.random());
         return;
     }

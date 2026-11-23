@@ -578,6 +578,10 @@ impl Region {
             partitioning: self.partitioning.fresh_like(),
             dirty,
             sleep: crate::sleep::SleepStatus::default(),
+            // 官方只有一个刷怪器；拆岛时两边从同一个倒数继续，合并时吸收方保留自己的。
+            // Vanilla has one spawner; a split continues both from the same countdown,
+            // and a merge keeps the absorber's.
+            phantom_spawner: self.phantom_spawner,
         })
     }
 
@@ -737,6 +741,7 @@ impl Region {
             partitioning: _,
             dirty,
             sleep: _,
+            phantom_spawner: _,
         } = other;
         let identity = IslandIdentity {
             random,

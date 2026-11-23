@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod bat;
 mod brain;
 mod egg;
 mod equine;
@@ -43,6 +44,7 @@ mod gen_spawn;
 mod grazing;
 mod llama_spit;
 mod natural_spawn;
+mod phantom;
 mod projectile;
 mod shot;
 mod skeleton_death;
@@ -107,7 +109,10 @@ enum Line {
     EggThrow(egg::EggThrowCase),
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
+    Bat(Box<bat::BatCase>),
     Fish(Box<fish::FishCase>),
+    PhantomSpawn(Box<phantom::PhantomSpawnCase>),
+    Phantom(Box<phantom::PhantomCase>),
     WaterMob(Box<water_mob::WaterMobCase>),
     AxolotlBreed(water_mob::AxolotlBreedCase),
     End(End),
@@ -1297,7 +1302,10 @@ impl Report {
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
+                Line::Bat(case) => self.replay_bat(&case),
                 Line::Fish(case) => self.replay_fish(&case),
+                Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
+                Line::Phantom(case) => self.replay_phantom(&case),
                 Line::WaterMob(case) => self.replay_water_mob(&case),
                 Line::AxolotlBreed(case) => self.replay_axolotl_breed(&case),
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),

@@ -559,9 +559,9 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     if kind.spawns_in_water() {
         return super::water::in_water_position_ok(world, pos);
     }
-    // 狐狸注册的是 `NO_RESTRICTIONS`，位置恒可用。
-    // Foxes are registered with `NO_RESTRICTIONS`, which accepts every position.
-    kind == MobType::Fox
+    // 狐狸和幻翼注册的是 `NO_RESTRICTIONS`，位置恒可用。
+    // Foxes and phantoms are registered with `NO_RESTRICTIONS`, which accepts every position.
+    matches!(kind, MobType::Fox | MobType::Phantom)
         || on_ground_position_ok_for(
             world,
             kind.entity_type(),
@@ -604,6 +604,15 @@ fn on_ground_position_ok_for(
     }
     is_valid_empty_spawn_block(world, fire_immune, immune_to, pos)
         && is_valid_empty_spawn_block(world, fire_immune, immune_to, above)
+}
+
+/// `NaturalSpawner.isValidEmptySpawnBlock` 对单独一格：自定义刷怪器在半空中放幻翼时
+/// 只查落点自己，不查落脚方块。
+///
+/// `NaturalSpawner.isValidEmptySpawnBlock` for one cell: the custom spawner drops
+/// phantoms in mid-air and checks the cell itself, not the block below.
+pub(crate) fn is_valid_empty_spawn_block_for(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    is_valid_empty_spawn_block(world, kind.fire_immune(), kind.immune_to(), pos)
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
@@ -749,6 +758,11 @@ pub(super) fn check_spawn_rules(
                 && super::stray::sees_sky_through_powder_snow(world, pos)
         }
         MobType::Slime => super::slime::check_spawn_rules(world, pos),
+        MobType::Bat => super::bat::check_spawn_rules(world, pos),
+        // 幻翼登记的是 `Mob::checkMobSpawnRules`；它不在群系刷怪表里，靠 `PhantomSpawner`。
+        // Phantoms register `Mob::checkMobSpawnRules`; they are in no biome table and
+        // come from the `PhantomSpawner`.
+        MobType::Phantom => valid_mob_spawn_block(world, kind, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)

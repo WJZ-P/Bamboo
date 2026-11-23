@@ -1658,6 +1658,8 @@ fn farm_default_data(
         (MobType::GlowSquid, facts::GLOW_SQUID_DARK_TICKS) => {
             Some(EntityData::GlowSquidDarkTicks(0))
         }
+        (MobType::Bat, facts::BAT_FLAGS) => Some(EntityData::BatFlags(0)),
+        (MobType::Phantom, facts::PHANTOM_SIZE) => Some(EntityData::PhantomSize(0)),
         (MobType::Chicken, facts::CHICKEN_VARIANT) => Some(EntityData::ChickenVariant(
             registry_index(chicken_variants(), "minecraft:temperate"),
         )),
@@ -1881,6 +1883,22 @@ fn farm_non_default_data(
         MobType::Squid | MobType::GlowSquid => {
             if mob.dark_ticks != 0 {
                 out.push(EntityData::GlowSquidDarkTicks(mob.dark_ticks));
+            }
+            true
+        }
+        // 蝙蝠只多一项标志字节，缺省 0（飞行）。
+        // Bats add one flag byte, 0 (flying) by default.
+        MobType::Bat => {
+            if mob.bat_flags != 0 {
+                out.push(EntityData::BatFlags(mob.bat_flags));
+            }
+            true
+        }
+        // 幻翼只多一项大小，缺省 0。
+        // Phantoms add one size item, 0 by default.
+        MobType::Phantom => {
+            if mob.phantom_size != 0 {
+                out.push(EntityData::PhantomSize(mob.phantom_size));
             }
             true
         }

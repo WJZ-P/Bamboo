@@ -464,6 +464,9 @@ pub(crate) fn die_in(
     let player = parts.players.get_mut(&id).expect("玩家刚才还在");
     player.dead = true;
     player.weapon_use = None;
+    // `ServerPlayer.die` 的 `resetStat(TIME_SINCE_REST)`：死亡清零，幻翼刷怪器读它。
+    // `ServerPlayer.die` resets `TIME_SINCE_REST`, which the phantom spawner reads.
+    player.time_since_rest = 0;
     player.health.death_time = 0;
     player.last_death_location = Some(BlockPos::containing(position));
     player.in_combat = false;

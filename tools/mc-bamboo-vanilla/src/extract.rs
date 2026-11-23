@@ -963,6 +963,8 @@ pub struct ProjectileFacts {
     pub pig_sound_variant_serializer: i32,
     pub sheep_wool: u8,
     pub glow_squid_dark_ticks: u8,
+    pub bat_flags: u8,
+    pub phantom_size: u8,
     pub fish_from_bucket: u8,
     pub salmon_variant: u8,
     pub tropical_fish_variant: u8,

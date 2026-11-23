@@ -266,6 +266,14 @@ pub enum EntityData {
     ///
     /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
     GlowSquidDarkTicks(i32),
+    /// `Bat.DATA_ID_FLAGS`，BYTE：第 0 位是倒挂。
+    ///
+    /// `Bat.DATA_ID_FLAGS`, a BYTE; bit 0 is resting.
+    BatFlags(u8),
+    /// `Phantom.ID_SIZE`，INT。
+    ///
+    /// `Phantom.ID_SIZE`, an INT.
+    PhantomSize(i32),
     /// `AbstractFish.FROM_BUCKET`，BOOLEAN，index 16。
     ///
     /// `AbstractFish.FROM_BUCKET`, a BOOLEAN at index 16.
@@ -503,6 +511,8 @@ impl EntityData {
             Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
             Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
             Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
+            Self::BatFlags(_) => mc_bamboo_data::entity_types::BAT_FLAGS,
+            Self::PhantomSize(_) => mc_bamboo_data::entity_types::PHANTOM_SIZE,
             Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
             Self::SalmonVariant(_) => mc_bamboo_data::entity_types::SALMON_VARIANT,
             Self::TropicalFishVariant(_) => mc_bamboo_data::entity_types::TROPICAL_FISH_VARIANT,
@@ -797,11 +807,14 @@ impl EntityData {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *value);
             }
-            Self::PandaMainGene(gene) | Self::PandaHiddenGene(gene) | Self::PandaFlags(gene) => {
+            Self::PandaMainGene(gene)
+            | Self::PandaHiddenGene(gene)
+            | Self::PandaFlags(gene)
+            | Self::BatFlags(gene) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*gene);
             }
-            Self::GlowSquidDarkTicks(ticks) => {
+            Self::GlowSquidDarkTicks(ticks) | Self::PhantomSize(ticks) => {
                 write_data_header(out, self.index(), SERIALIZER_INT);
                 write_varint(out, *ticks);
             }

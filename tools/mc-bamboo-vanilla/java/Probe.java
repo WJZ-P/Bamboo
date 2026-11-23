@@ -422,6 +422,10 @@ public final class Probe {
             // Vanilla sends `container_set_data` when the loom selects a pattern.
             "handleContainerSetData",
             "handleContainerSetSlot",
+            // 受击实体周围看得到它的人也收 `damage_event`（`ServerLevel.broadcastDamageEvent`）。
+            // Players tracking a hurt entity also get `damage_event`
+            // (`ServerLevel.broadcastDamageEvent`).
+            "handleDamageEvent",
             "handleDisconnect",
             "handleDisguisedChat",
             "handleEntityEvent",
@@ -726,6 +730,19 @@ public final class Probe {
         return Math.abs(first.x - second.x) <= POSITION_TOLERANCE
                 && Math.abs(first.y - second.y) <= POSITION_TOLERANCE
                 && Math.abs(first.z - second.z) <= POSITION_TOLERANCE;
+    }
+
+    /**
+     * 从 `from` 之后收到的方块音效。自然生成的生物会发自己的环境音，
+     * 这里只数 `SoundSource.BLOCKS` 的包。
+     *
+     * Block sounds received after `from`. Naturally spawned mobs emit their own
+     * ambient sounds, so only the `SoundSource.BLOCKS` packets are counted.
+     */
+    private static List<ClientboundSoundPacket> blockSoundsSince(Join join, int from) {
+        return join.sounds.subList(from, join.sounds.size()).stream()
+                .filter(sound -> sound.getSource() == SoundSource.BLOCKS)
+                .toList();
     }
 
     /** 告示牌一面第 `line` 行，`front_text`/`back_text` 里 `messages` 的字符串。 */
@@ -1455,8 +1472,8 @@ public final class Probe {
                 return state != null && state.is(Blocks.OAK_DOOR);
             });
             await("sound: " + observer.player + " hears the door being placed",
-                    () -> observer.sounds.size() == otherSounds + 1);
-            ClientboundSoundPacket placed = observer.sounds.getLast();
+                    () -> blockSoundsSince(observer, otherSounds).size() == 1);
+            ClientboundSoundPacket placed = blockSoundsSince(observer, otherSounds).getFirst();
             check("sound: the place sound is the wood one", placed.getSound().value() == SoundEvents.WOOD_PLACE);
             check("sound: the place sound comes from the block", placed.getSource() == SoundSource.BLOCKS);
             check("sound: the place sound is at the block center",
@@ -1464,7 +1481,7 @@ public final class Probe {
             check("sound: the place sound has the block volume", placed.getVolume() == 1.0f);
             check("sound: the place sound has the block pitch", placed.getPitch() == 0.8f);
             pumpFor(SETTLE_MILLIS);
-            check("sound: the placer hears nothing", actor.sounds.size() == ownSounds);
+            check("sound: the placer hears nothing", blockSoundsSince(actor, ownSounds).isEmpty());
 
             // `DoorBlock.playSound`：`getRandom().nextFloat() * 0.1F + 0.9F`。
             int beforeOpen = observer.sounds.size();
@@ -1477,8 +1494,8 @@ public final class Probe {
             await("sound: the door opens", () -> observer.blocks.containsKey(door)
                     && observer.blocks.get(door).getValue(DoorBlock.OPEN));
             await("sound: " + observer.player + " hears the door open",
-                    () -> observer.sounds.size() == beforeOpen + 1);
-            ClientboundSoundPacket opened = observer.sounds.getLast();
+                    () -> blockSoundsSince(observer, beforeOpen).size() == 1);
+            ClientboundSoundPacket opened = blockSoundsSince(observer, beforeOpen).getFirst();
             check("sound: the open sound is the wooden door one",
                     opened.getSound().value() == SoundEvents.WOODEN_DOOR_OPEN);
             check("sound: the open sound comes from the block", opened.getSource() == SoundSource.BLOCKS);
@@ -1488,7 +1505,7 @@ public final class Probe {
             check("sound: the open sound has a random pitch",
                     opened.getPitch() >= 0.9f && opened.getPitch() < 1.0f);
             pumpFor(SETTLE_MILLIS);
-            check("sound: the door opener hears nothing", actor.sounds.size() == ownBeforeOpen);
+            check("sound: the door opener hears nothing", blockSoundsSince(actor, ownBeforeOpen).isEmpty());
 
             // 门会挡住另一个玩家这一段，从下半截破坏，两格一起走。
             int breaking = actor.nextSequence();

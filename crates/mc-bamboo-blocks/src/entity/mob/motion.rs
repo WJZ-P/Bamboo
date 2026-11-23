@@ -126,11 +126,11 @@ fn check_fall_damage(
     state: BlockState,
     pos: BlockPos,
 ) {
-    // `Parrot.checkFallDamage` 是空实现：鹦鹉从任何时候摔下来都不掉血，也不跑
-    // `LivingEntity` 那一套落地处理。
-    // `Parrot.checkFallDamage` is empty: parrots never take fall damage and skip the
-    // whole `LivingEntity` landing path.
-    if mob.mob_type == super::MobType::Parrot {
+    // `Parrot.checkFallDamage`、`Bat.checkFallDamage` 和幻翼的都是空实现：不掉血，
+    // 不累计、不清零摔落距离，也不补那次流体更新。
+    // The parrot, bat and phantom `checkFallDamage` overrides are empty: no fall
+    // damage, no fall distance bookkeeping and no fluid update.
+    if mob.mob_type.ignores_fall_damage_check() {
         return;
     }
     if !me.in_water {
