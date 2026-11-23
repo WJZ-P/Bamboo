@@ -3810,3 +3810,21 @@ MOB_STRESS_MAX_COLLISIONS=8 MOB_STRESS_SCENE=tower-1x1 MOB_STRESS_THREADS=0,8 \
 **已知行为差异**：打开后被推的次数少了，挤成一团的生物散开得慢；上限只作用于
 `pushEntities` 发出的推挤命令，不改 `maxEntityCramming` 的伤害规则。
 计数按岛的刻号归零（不是绝对时间），拆岛 / 并岛时跟着实体走。
+
+### 26.4 验收
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo fmt --check` / `cargo clippy --workspace --all-targets` | 通过，0 警告 |
+| `cargo test --workspace` | 全过（含 `mc-bamboo-game` 1302 项、并行等价对拍、掉落物/经验球测试） |
+| `mob-oracle java`（缺省配置） | 12 处不一致，全是这台 ARM Mac 已知的 `Mth.COS_TAB` 末位差（11 个数 + 一份 hash）；本轮没有出现青蛙长跳末位差 |
+| `natural-spawn java` | 1727 例，0 不一致 |
+| `entity-oracle java` | 40 例 748 步，0 不一致 |
+| `move-oracle java` | 59 例，0 不一致 |
+| `tools/probe.sh . 28310`（精确） | 769/769，正常关服，`world-dir` 通过 |
+| `tools/probe.sh . 28312 --loaded`（精确，两遍） | 769/769 + 769/769，正常关服，`world-dir` 和三项区块顺序判据都通过 |
+
+压测复现开关：`MOB_STRESS_SCENE` / `MOB_STRESS_THREADS` 筛场景和线程数，
+`MOB_STRESS_SCOPED=1` 切回每刻起线程的旧执行器（26.2 的 A/B），
+`MOB_STRESS_MAX_COLLISIONS=8` 打开挤压上限（26.3 的 A/B）。每个数字跑三轮、
+每轮 200 刻预热 + 300 刻测量，取中位数。
