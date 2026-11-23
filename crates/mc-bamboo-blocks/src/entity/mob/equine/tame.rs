@@ -102,7 +102,8 @@ pub(in crate::entity::mob) fn tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn
             tame_with_name(mob, Some(uuid));
             // 马科的驯服发生在 AI tick 里，不在交互结果上；用实体事件把
             // 玩家 UUID 带回游戏层，让进度触发器也能补上这一条。
-            mob.events.push(crate::entity::mob::MobEvent::Tamed { player: uuid });
+            mob.events
+                .push(crate::entity::mob::MobEvent::Tamed { player: uuid });
             return;
         }
         modify_temper(mob, 5);

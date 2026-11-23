@@ -815,8 +815,12 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 victims,
                 weapon,
             } => {
-                let victims: Vec<&str> = victims.iter().copied().filter(|v| !v.is_empty()).collect();
-                let unique = victims.iter().collect::<std::collections::BTreeSet<_>>().len();
+                let victims: Vec<&str> =
+                    victims.iter().copied().filter(|v| !v.is_empty()).collect();
+                let unique = victims
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
                 // `AbstractArrow.onHitEntity`：射手是玩家时给这名玩家触发。
                 if let Some(uuid) = shooter {
                     let ids: Vec<PlayerId> = region

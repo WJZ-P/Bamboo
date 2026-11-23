@@ -302,7 +302,16 @@ mod tests {
     fn destroyed_count(effects: Vec<Effect>) -> usize {
         effects
             .iter()
-            .filter(|effect| !matches!(effect, Effect::Sound { .. }))
+            .filter(|effect| {
+                !matches!(
+                    effect,
+                    Effect::Sound { .. }
+                        | Effect::SummonedEntity { .. }
+                        | Effect::BredAnimals { .. }
+                        | Effect::CrafterCrafted { .. }
+                        | Effect::KilledByArrow { .. }
+                )
+            })
             .count()
     }
 

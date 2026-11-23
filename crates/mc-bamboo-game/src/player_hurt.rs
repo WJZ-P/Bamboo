@@ -424,7 +424,10 @@ fn hurt_player_damage(
         crate::player_death::record_combat(parts, id, &source, outcome.damage);
         // `LivingEntity.hurtServer` 里玩家实际受伤时触发 ENTITY_HURT_PLAYER。
         let attack_type = source.kind.name();
-        let projectile = matches!(source.kind, mc_bamboo_blocks::entity::mob::DamageKind::Arrow);
+        let projectile = matches!(
+            source.kind,
+            mc_bamboo_blocks::entity::mob::DamageKind::Arrow
+        );
         if let Some(events) = parts.pending_triggers.as_deref_mut() {
             events.push(crate::advancement_triggers::PendingEvent {
                 player: id,

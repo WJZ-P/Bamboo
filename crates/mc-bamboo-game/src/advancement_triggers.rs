@@ -172,8 +172,9 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
     // 全触发器共同的 `player` 谓词：官方在每个 TriggerInstance 里都检查它。
     // Bamboo 只实现了「无条件」这一种，写了实体子谓词就判不匹配。
     if let Some(player) = fields.get("player")
-        && (player.as_object().is_some_and(|map| map.len() > 1
-            || map.keys().any(|key| key != "type"))
+        && (player
+            .as_object()
+            .is_some_and(|map| map.len() > 1 || map.keys().any(|key| key != "type"))
             || !entity_predicate_matches(player, payload.get("player")))
     {
         return false;
@@ -197,9 +198,11 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
         | "minecraft:recipe_unlocked"
         | "minecraft:placed_block"
         | "minecraft:item_used_on_block"
-        | "minecraft:consume_item" => known_conditions(&[
-            "item", "recipe", "recipes", "block", "blocks", "id", "location", "biome",
-        ]) && matches_item_or_id(conditions, payload),
+        | "minecraft:consume_item" => {
+            known_conditions(&[
+                "item", "recipe", "recipes", "block", "blocks", "id", "location", "biome",
+            ]) && matches_item_or_id(conditions, payload)
+        }
         "minecraft:inventory_changed" => oracle_inventory_changed(conditions, payload),
         "minecraft:location" => location_matches(conditions, payload),
         "minecraft:player_killed_entity"
@@ -210,8 +213,7 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
         }
         // 下面这一组是本期新接的入口。
         "minecraft:enchanted_item" => {
-            known_conditions(&["item", "levels"])
-                && matches_item_field(conditions, payload)
+            known_conditions(&["item", "levels"]) && matches_item_field(conditions, payload)
         }
         "minecraft:item_durability_changed" => {
             known_conditions(&["item", "durability", "delta"])
@@ -220,18 +222,20 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
         "minecraft:filled_bucket" | "minecraft:crafter_recipe_crafted" => {
             known_conditions(&["item", "recipes"]) && matches_item_field(conditions, payload)
         }
-        "minecraft:enter_block" => known_conditions(&["block", "blocks", "state"])
-            && (fields.contains_key("state") == false)
-            && matches_id(conditions, payload),
+        "minecraft:enter_block" => {
+            known_conditions(&["block", "blocks", "state"])
+                && !fields.contains_key("state")
+                && matches_id(conditions, payload)
+        }
         "minecraft:tame_animal" | "minecraft:summoned_entity" => {
             known_conditions(&["entity"]) && entity_field_matches(conditions, payload, "entity")
         }
         "minecraft:bred_animals" => {
             known_conditions(&["child", "parent", "partner"])
                 && ["child", "parent", "partner"].iter().all(|key| {
-                    fields
-                        .get(*key)
-                        .is_none_or(|expected| entity_predicate_matches(expected, payload.get(*key)))
+                    fields.get(*key).is_none_or(|expected| {
+                        entity_predicate_matches(expected, payload.get(*key))
+                    })
                 })
         }
         "minecraft:entity_killed_player" => {
@@ -277,7 +281,10 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
                 && fields.get("distance").is_none_or(|distance| {
                     bound_matches(
                         distance.get("y"),
-                        payload.get("distance").and_then(|d| d.get("y")).and_then(Value::as_f64),
+                        payload
+                            .get("distance")
+                            .and_then(|d| d.get("y"))
+                            .and_then(Value::as_f64),
                     )
                 })
         }
@@ -293,10 +300,7 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
 /// 官方 `Criterion.CODEC` 实例的判定对拍入口。事件和条件都是 JSON 文本。
 #[cfg(any(test, feature = "oracle-samples"))]
 pub fn matches_trigger(trigger: &str, event: &str, conditions: &str) -> bool {
-    let payload = event
-        .split_once('|')
-        .map(|(_, json)| json)
-        .unwrap_or("{}");
+    let payload = event.split_once('|').map(|(_, json)| json).unwrap_or("{}");
     let payload: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
     let conditions: Value = serde_json::from_str(conditions).unwrap_or(Value::Null);
     matches(trigger, &payload, &conditions)
@@ -444,7 +448,16 @@ fn min_max_matches(expected: Option<&Value>, actual: Option<&Value>) -> bool {
 /// 官方 `LocationTrigger`：条件里的 `position` / `biome` / `dimension` 都要对得上。
 fn location_matches(conditions: &Value, payload: &Value) -> bool {
     // `location` / `position` / `smokey` / `light` 等本层没建模：出现就不算匹配。
-    let known = ["biome", "dimension", "feature", "position", "x", "y", "z", "player"];
+    let known = [
+        "biome",
+        "dimension",
+        "feature",
+        "position",
+        "x",
+        "y",
+        "z",
+        "player",
+    ];
     if conditions
         .as_object()
         .is_some_and(|map| map.keys().any(|key| !known.contains(&key.as_str())))

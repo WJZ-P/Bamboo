@@ -399,10 +399,12 @@ pub(crate) fn die_in(
             mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.mob_type.name()),
             _ => None,
         })
-        .or_else(|| parts.attacker.and_then(|public| match &public.kind {
-            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.mob_type.name()),
-            _ => None,
-        }))
+        .or_else(|| {
+            parts.attacker.and_then(|public| match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.mob_type.name()),
+                _ => None,
+            })
+        })
         .unwrap_or("minecraft:player");
     if let Some(events) = parts.pending_triggers.as_deref_mut() {
         events.push(crate::advancement_triggers::PendingEvent {

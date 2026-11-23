@@ -1582,6 +1582,8 @@ mod tests {
             limit_creative: true,
             drop_stack: None,
             drop_offset: Vec3::new(0.0, 0.0, 0.0),
+            tamed: false,
+            filled_bucket: false,
             self_hurt: None,
         };
         assert_eq!(

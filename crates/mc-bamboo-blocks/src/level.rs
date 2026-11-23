@@ -2219,7 +2219,10 @@ pub enum Effect {
     /// 合成器合成成功。游戏层按半径给附近玩家触发 `CRAFTER_RECIPE_CRAFTED`。
     ///
     /// A crafter crafted a recipe. The game layer credits nearby players' triggers.
-    CrafterCrafted { recipe: &'static str, position: mc_bamboo_core::Vec3 },
+    CrafterCrafted {
+        recipe: &'static str,
+        position: mc_bamboo_core::Vec3,
+    },
     /// 空桶舀起了东西。游戏层按 `ItemUtils.createFilledResult` 把 `item` 交还到 `hand`。
     ///
     /// An empty bucket picked something up. The game layer runs `ItemUtils.createFilledResult`

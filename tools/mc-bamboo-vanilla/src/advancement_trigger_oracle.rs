@@ -73,7 +73,9 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
                     .and_then(Json::as_bool)
                     .ok_or("trigger line missing official")?;
                 let mut ours = mc_bamboo_game::advancement_triggers::matches_trigger(
-                    &trigger, &event, &conditions,
+                    &trigger,
+                    &event,
+                    &conditions,
                 );
                 if options.break_self_test && cases == 0 {
                     ours = !ours;
