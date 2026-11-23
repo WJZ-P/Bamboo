@@ -401,7 +401,14 @@ fn finalize_spawn_in_group(
     }
     // 蝙蝠没有自己的 `finalizeSpawn`，和苦力怕一样只有 `Mob.finalizeSpawn`。
     // Bats have no `finalizeSpawn` of their own: just `Mob.finalizeSpawn`, as creepers.
-    if matches!(kind, MobType::Creeper | MobType::Enderman | MobType::Bat) {
+    if matches!(
+        kind,
+        MobType::Creeper
+            | MobType::Enderman
+            | MobType::Bat
+            | MobType::Silverfish
+            | MobType::Endermite
+    ) {
         super::creeper::finalize_spawn(entity, world.random());
         return;
     }

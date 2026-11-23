@@ -32,6 +32,7 @@ pub mod dolphin;
 pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
+pub mod endermite;
 pub(crate) mod enderman;
 pub mod equine;
 pub mod equipment;
@@ -41,6 +42,7 @@ pub mod fox_goals;
 pub mod frog;
 pub mod goals;
 pub mod goat;
+pub mod infested;
 pub mod interact;
 pub mod living;
 pub mod mooshroom;
@@ -69,6 +71,7 @@ pub mod slime;
 pub mod smooth_swim;
 pub mod spawn;
 pub mod spider;
+pub mod silverfish;
 pub mod squid;
 pub mod stray;
 pub mod tadpole;
@@ -168,13 +171,15 @@ pub enum MobType {
     Bat,
     Phantom,
     Camel,
+    Silverfish,
+    Endermite,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 48] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -221,6 +226,8 @@ impl MobType {
         Self::Tadpole,
         Self::Bat,
         Self::Phantom,
+        Self::Silverfish,
+        Self::Endermite,
     ];
 
     /// 注册表 ID。
@@ -273,6 +280,8 @@ impl MobType {
             Self::Bat => ids::BAT,
             Self::Phantom => ids::PHANTOM,
             Self::Camel => ids::CAMEL,
+            Self::Silverfish => ids::SILVERFISH,
+            Self::Endermite => ids::ENDERMITE,
         }
     }
 
@@ -325,6 +334,8 @@ impl MobType {
             Self::Bat => "minecraft:bat",
             Self::Phantom => "minecraft:phantom",
             Self::Camel => "minecraft:camel",
+            Self::Silverfish => "minecraft:silverfish",
+            Self::Endermite => "minecraft:endermite",
         }
     }
 
@@ -442,6 +453,7 @@ impl MobType {
             (Self::Turtle, baby) => turtle::dimensions(self, baby),
             (Self::Dolphin, baby) => dolphin::dimensions(baby),
             (Self::Axolotl, baby) => axolotl::dimensions(baby),
+            (Self::Silverfish | Self::Endermite, _) => infested::dimensions(self),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -473,6 +485,8 @@ impl MobType {
                 | Self::Spider
                 | Self::CaveSpider
                 | Self::Enderman
+                | Self::Silverfish
+                | Self::Endermite
         ) || self.is_skeleton()
     }
 
@@ -527,6 +541,7 @@ impl MobType {
         matches!(
             self,
             Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman | Self::Pillager
+                | Self::Endermite
         ) || self.is_skeleton()
     }
 
@@ -700,7 +715,8 @@ impl MobType {
     /// `Entity.getMovementEmission().emitsSounds()`: squid override it to `EVENTS` and
     /// move silently.
     pub const fn emits_movement_sounds(self) -> bool {
-        !squid::is_squid(self) && !matches!(self, Self::Bat)
+        !squid::is_squid(self)
+            && !matches!(self, Self::Bat | Self::Silverfish | Self::Endermite)
     }
 
     /// `LivingEntity.isPushable()`：蝙蝠覆写成假，不推别人也不被推。
@@ -730,6 +746,9 @@ impl MobType {
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
     pub const fn xp_reward(self) -> i32 {
+        if matches!(self, Self::Endermite) {
+            return mc_bamboo_data::entity_types::ENDERMITE_XP_REWARD;
+        }
         // `Phantom` 构造函数里也是 `xpReward = 5`。
         // The `Phantom` constructor sets `xpReward = 5` as well.
         if self.is_monster() || matches!(self, Self::Phantom) {
@@ -788,6 +807,8 @@ impl MobType {
             Self::Bat => "minecraft:entities/bat",
             Self::Phantom => "minecraft:entities/phantom",
             Self::Camel => "minecraft:entities/camel",
+            Self::Silverfish => "minecraft:entities/silverfish",
+            Self::Endermite => "minecraft:entities/endermite",
         }
     }
 
@@ -892,6 +913,8 @@ impl MobType {
             // [`living::play_ambient_sound`].
             Self::Parrot => Some("minecraft:entity.parrot.ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.ambient"),
+            Self::Endermite => Some("minecraft:entity.endermite.ambient"),
         }
     }
 
@@ -936,6 +959,8 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.hurt"),
             Self::Phantom => Some("minecraft:entity.phantom.hurt"),
             Self::Camel => Some("minecraft:entity.camel.hurt"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
+            Self::Endermite => Some("minecraft:entity.endermite.hurt"),
         }
     }
 
@@ -980,6 +1005,8 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.death"),
             Self::Phantom => Some("minecraft:entity.phantom.death"),
             Self::Camel => Some("minecraft:entity.camel.death"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.death"),
+            Self::Endermite => Some("minecraft:entity.endermite.death"),
         }
     }
 
@@ -1031,6 +1058,8 @@ impl MobType {
             // Phantoms keep the default `playStepSound`: the block's own step sound.
             Self::Phantom => None,
             Self::Camel => Some("minecraft:entity.camel.step"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.step"),
+            Self::Endermite => Some("minecraft:entity.endermite.step"),
         }
     }
 
@@ -1084,6 +1113,8 @@ impl MobType {
             Self::Bat => items::BAT_SPAWN_EGG,
             Self::Phantom => items::PHANTOM_SPAWN_EGG,
             Self::Camel => items::CAMEL_SPAWN_EGG,
+            Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
+            Self::Endermite => items::ENDERMITE_SPAWN_EGG,
         }
     }
 
@@ -1136,6 +1167,8 @@ impl MobType {
             Self::Bat => "entity.minecraft.bat",
             Self::Phantom => "entity.minecraft.phantom",
             Self::Camel => "entity.minecraft.camel",
+            Self::Silverfish => "entity.minecraft.silverfish",
+            Self::Endermite => "entity.minecraft.endermite",
         }
     }
 
@@ -2215,6 +2248,10 @@ pub struct Mob {
     /// The phantom size, target point, anchor, attack phase and move-control speed;
     /// default for every other mob.
     pub phantom: phantom::PhantomState,
+    /// 末影螨的 `Lifetime`；别的生物恒为 0。
+    ///
+    /// The endermite's `Lifetime`; zero for every other mob.
+    pub endermite: endermite::EndermiteState,
     /// 海龟的专属状态，别的生物恒为缺省值。
     ///
     /// Turtle state; default for every other mob.
@@ -2404,6 +2441,8 @@ impl Mob {
             MobType::Bat => bat::attributes(),
             MobType::Phantom => phantom::attributes(),
             MobType::Camel => camel::attributes(),
+            MobType::Silverfish => silverfish::attributes(),
+            MobType::Endermite => endermite::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2468,6 +2507,8 @@ impl Mob {
             // alongside the brain.
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
+            MobType::Silverfish => silverfish::goals(&mut navigation),
+            MobType::Endermite => endermite::goals(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -2524,6 +2565,8 @@ impl Mob {
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),
             MobType::Pillager => pillager::targets(),
+            MobType::Silverfish => silverfish::targets(),
+            MobType::Endermite => endermite::targets(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -2704,6 +2747,7 @@ impl Mob {
                 target: None,
             },
             phantom: phantom::PhantomState::default(),
+            endermite: endermite::EndermiteState::default(),
             turtle: turtle::TurtleState::default(),
             fish: fish::FishState::new(),
             dolphin: dolphin::DolphinState::new(),

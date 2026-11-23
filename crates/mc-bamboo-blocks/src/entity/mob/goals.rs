@@ -14,7 +14,7 @@ use super::{Mob, living, navigation::Navigation, path::static_path_type};
 use crate::{
     entity::{
         Entity, EntityUid, KindPublic,
-        ctx::{BlockView, EntityCtx, PlayerView},
+        ctx::{BlockView, Command, EntityCtx, PlayerView},
     },
     shape::{self, CollisionContext},
     state::SupportType,
@@ -287,6 +287,25 @@ pub enum Goal {
         block_pos: Option<BlockPos>,
         reached_target: bool,
     },
+    /// `Silverfish.SilverfishWakeUpFriendsGoal`：受伤后倒数，然后扫虫蚀方块唤醒同伴。
+    ///
+    /// `Silverfish.SilverfishWakeUpFriendsGoal`: wake nearby infested blocks after a hit.
+    SilverfishWakeFriends {
+        look_for_friends: i32,
+    },
+    /// `Silverfish.SilverfishMergeWithStoneGoal`：`RandomStrollGoal(1.0, 10)` 的子类，
+    /// 偶尔把旁边的宿主方块变成虫蚀方块并消失。
+    ///
+    /// `Silverfish.SilverfishMergeWithStoneGoal`: a `RandomStrollGoal(1.0, 10)` that
+    /// occasionally turns a neighbouring host block into its infested state.
+    SilverfishMergeWithStone {
+        direction: mc_bamboo_core::Direction,
+        do_merge: bool,
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+        force_trigger: bool,
+    },
     /// `RandomStrollGoal`（不避水）：`DefaultRandomPos.getPos(mob, 10, 7)`。
     ///
     /// `RandomStrollGoal` (not water avoiding): `DefaultRandomPos.getPos(mob, 10, 7)`.
@@ -453,9 +472,9 @@ pub enum TargetType {
     ///
     /// The llama's `LlamaAttackWolfGoal`: untamed wolves.
     Wolf,
-    /// 末影人的 `NearestAttackableTargetGoal<Endermite>`；末影螨还没实现。
+    /// 末影人的 `NearestAttackableTargetGoal<Endermite>`。
     ///
-    /// The enderman's `NearestAttackableTargetGoal<Endermite>`; endermites are not modelled.
+    /// The enderman's `NearestAttackableTargetGoal<Endermite>`.
     Endermite,
     /// 豹猫的 `NearestAttackableTargetGoal<Chicken>`。
     ///
@@ -588,7 +607,10 @@ impl Goal {
             | Self::CubeAttack { .. }
             | Self::CubeRandomDirection { .. }
             | Self::CubeKeepJumping => super::slime::flags(self),
-            Self::DrownedGoToWater { .. } | Self::RandomStroll { .. } => &[Flag::Move],
+            Self::DrownedGoToWater { .. }
+            | Self::RandomStroll { .. }
+            | Self::SilverfishMergeWithStone { .. } => &[Flag::Move],
+            Self::SilverfishWakeFriends { .. } => &[],
             // `MoveToBlockGoal` 同时锁 MOVE 和 JUMP。
             //
             // `MoveToBlockGoal` locks MOVE and JUMP.
@@ -638,6 +660,7 @@ impl Goal {
                 | Self::CubeFloat
                 | Self::CubeAttack { .. }
                 | Self::WitchRangedAttack { .. }
+                | Self::SilverfishWakeFriends { .. }
                 | Self::DrownedGoToBeach { .. }
                 | Self::Swell { .. }
                 | Self::SquidFlee { .. }
@@ -716,6 +739,8 @@ impl Goal {
             Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
             Self::RandomStroll { .. } => "RandomStrollGoal",
             Self::WitchHealRaiders { .. } => "NearestHealableRaiderTargetGoal",
+            Self::SilverfishWakeFriends { .. } => "SilverfishWakeUpFriendsGoal",
+            Self::SilverfishMergeWithStone { .. } => "SilverfishMergeWithStoneGoal",
             Self::WitchRangedAttack { .. } => "RangedAttackGoal",
             Self::PandaSit => "PandaSitGoal",
             Self::PandaLieOnBack => "PandaLieOnBackGoal",
@@ -1487,6 +1512,57 @@ fn light_dependent_magic(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> f32 {
 
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
+        Goal::SilverfishWakeFriends { look_for_friends } => *look_for_friends > 0,
+        Goal::SilverfishMergeWithStone {
+            direction,
+            do_merge,
+            interval,
+            wanted,
+            force_trigger,
+            ..
+        } => {
+            *do_merge = false;
+            if mob.target.is_some() || !mob.navigation.is_done() {
+                return false;
+            }
+            if ctx.blocks().block_game_rules().mob_griefing
+                && me.random.next_int_bounded(reduced_tick_delay(10)) == 0
+            {
+                *direction = match me.random.next_int_bounded(6) {
+                    0 => mc_bamboo_core::Direction::Down,
+                    1 => mc_bamboo_core::Direction::Up,
+                    2 => mc_bamboo_core::Direction::North,
+                    3 => mc_bamboo_core::Direction::South,
+                    4 => mc_bamboo_core::Direction::West,
+                    _ => mc_bamboo_core::Direction::East,
+                };
+                let base = BlockPos::containing(Vec3::new(
+                    me.position.x,
+                    me.position.y + 0.5,
+                    me.position.z,
+                ))
+                .relative(*direction);
+                if super::infested::is_compatible_host_block(ctx.blocks().block_state(base)) {
+                    *do_merge = true;
+                    return true;
+                }
+            }
+            // `RandomStrollGoal.canUse` 的间隔是 10（不是折半后的 5）：
+            // 官方向父类传的 10 在 `RandomStrollGoal` 内部又折半一次。
+            if !*force_trigger {
+                if mob.no_action_time >= 100
+                    || me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0
+                {
+                    return false;
+                }
+            }
+            let Some(found) = default_random_pos(me, mob, ctx.blocks(), 10, 7) else {
+                return false;
+            };
+            *wanted = found;
+            *force_trigger = false;
+            true
+        }
         Goal::Bow(_) => {
             super::skeleton::bow_slot(mob).is_some() && combat_target(mob, ctx).is_some()
         }
@@ -1847,6 +1923,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Chicken => {
                     nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Chicken)
                 }
+                // `Enderman.NearestAttackableTargetGoal<Endermite>`：末影螨现在已建模。
+                // `Enderman.NearestAttackableTargetGoal<Endermite>`: endermites now exist.
+                TargetType::Endermite => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Endermite)
+                }
                 TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
                     public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
                 }),
@@ -1862,8 +1943,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 | TargetType::IronGolem
                 | TargetType::Turtle
                 | TargetType::Axolotl
-                | TargetType::Fish
-                | TargetType::Endermite => None,
+                | TargetType::Fish => None,
             };
             // 找到了玩家，还要身边有幼崽才动手。
             // A player was found; a cub must be nearby as well.
@@ -2060,6 +2140,10 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
 
 fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
+        Goal::SilverfishWakeFriends { .. } => true,
+        Goal::SilverfishMergeWithStone { do_merge, .. } => {
+            !*do_merge && !mob.navigation.is_done()
+        }
         Goal::EndermanGaze(goal) => goal.can_continue(me, mob, ctx),
         Goal::EndermanFreeze => super::enderman::freeze_target(me, mob, ctx).is_some(),
         Goal::EndermanBlock { .. } => can_use(goal, me, mob, ctx),
@@ -2374,6 +2458,31 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
 
 fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::SilverfishWakeFriends { .. } => {}
+        Goal::SilverfishMergeWithStone {
+            do_merge,
+            direction,
+            speed,
+            wanted,
+            ..
+        } => {
+            if !*do_merge {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation
+                    .move_to(ctx.blocks(), &nav, *wanted, *speed);
+                return;
+            }
+            let base = BlockPos::containing(Vec3::new(
+                me.position.x,
+                me.position.y + 0.5,
+                me.position.z,
+            ))
+            .relative(*direction);
+            let state = ctx.blocks().block_state(base);
+            if super::infested::is_compatible_host_block(state) {
+                ctx.emit(Command::SilverfishMerge { pos: base }, me);
+            }
+        }
         Goal::EndermanGaze(goal) => goal.start(mob),
         Goal::EndermanFreeze => mob.navigation.stop(),
         Goal::EndermanBlock { .. } => {}
@@ -2635,6 +2744,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
 
 fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::SilverfishWakeFriends { .. } => {}
+        Goal::SilverfishMergeWithStone { .. } => mob.navigation.stop(),
         Goal::EndermanGaze(goal) => goal.stop(me, mob),
         Goal::EndermanFreeze | Goal::EndermanBlock { .. } => {}
         Goal::Bow(bow) => bow.stop(mob),
@@ -2765,6 +2876,13 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::SilverfishWakeFriends { look_for_friends } => {
+            *look_for_friends -= 1;
+            if *look_for_friends <= 0 {
+                super::silverfish::wake_tick(me, mob, ctx);
+            }
+        }
+        Goal::SilverfishMergeWithStone { .. } => {}
         Goal::EndermanGaze(goal) => goal.tick(me, mob, ctx),
         Goal::EndermanFreeze => {
             if let Some(player) = mob.target.and_then(|uid| player_by_uid(ctx.blocks(), uid)) {
@@ -3783,6 +3901,13 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     }
     if mob.mob_type == super::MobType::Turtle {
         return super::turtle::walk_target_value(mob, view, pos);
+    }
+    // `Silverfish.getWalkTargetValue`：脚下是宿主方块给 10，否则走怪物那一支。
+    // `Silverfish.getWalkTargetValue`: ten over a host block, else the monster branch.
+    if mob.mob_type == super::MobType::Silverfish
+        && super::infested::is_compatible_host_block(view.block_state(pos.below()))
+    {
+        return 10.0;
     }
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);

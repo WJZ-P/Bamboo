@@ -61,6 +61,7 @@ pub use behaviour::machines::{
     signal_lectern_page,
 };
 pub use behaviour::misc::turtle_egg::player_destroy;
+pub use entity::mob::infested::spawn_after_break;
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents, ChunkBlockEntities};
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
