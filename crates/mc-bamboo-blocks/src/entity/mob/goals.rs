@@ -481,10 +481,14 @@ pub enum TargetType {
     ///
     /// The ocelot / cat `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`.
     BabyTurtleOnLand,
-    /// 傀儡的敌对生物目标，选择器按种类排除苦力怕。
+    /// 铁傀儡的敌对生物目标，选择器排除苦力怕。
     ///
-    /// A golem's hostile-mob target; the selector excludes creepers.
-    GolemPrey,
+    /// The iron golem's hostile-mob target; creepers are excluded.
+    IronGolemPrey,
+    /// 雪傀儡的敌对生物目标，选择器是 `instanceof Enemy`（包括苦力怕）。
+    ///
+    /// The snow golem's hostile-mob target: `instanceof Enemy` (creepers included).
+    SnowGolemPrey,
 }
 
 impl TargetType {
@@ -1876,9 +1880,12 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Chicken => {
                     nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Chicken)
                 }
-                TargetType::GolemPrey => nearest_mob_target(me, mob, ctx, |kind| {
+                TargetType::IronGolemPrey => nearest_mob_target(me, mob, ctx, |kind| {
                     kind.is_enemy() && kind != super::MobType::Creeper
                 }),
+                TargetType::SnowGolemPrey => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind.is_enemy())
+                }
                 TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
                     public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
                 }),
@@ -4454,13 +4461,9 @@ pub(super) fn attack_candidate(
     if !alive {
         return None;
     }
-    // 傀儡不打苦力怕。
-    // Golems never attack creepers.
-    let is_golem = matches!(
-        mob.mob_type,
-        super::MobType::IronGolem | super::MobType::SnowGolem
-    );
-    if is_golem && target.mob_type == super::MobType::Creeper {
+    // 铁傀儡不打苦力怕；雪傀儡的 `Enemy` 选择器包括苦力怕。
+    // Only the iron golem refuses creepers; the snow golem's `Enemy` selector includes them.
+    if mob.mob_type == super::MobType::IronGolem && target.mob_type == super::MobType::Creeper {
         return None;
     }
     Some(target)

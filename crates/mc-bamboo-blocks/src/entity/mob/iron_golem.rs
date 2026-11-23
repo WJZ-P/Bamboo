@@ -171,7 +171,7 @@ pub(super) fn target_goals() -> GoalSelector {
         // `NearestAttackableTargetGoal<Player>(10, true, false, NeutralMob.isAngryAt)`。
         wrap(3, nearest(TargetType::AngerPlayer, reduced_tick_delay(10))),
         // `NearestAttackableTargetGoal<Mob>(5, false, false, Enemy && !Creeper)`。
-        wrap(3, nearest(TargetType::GolemPrey, reduced_tick_delay(5))),
+        wrap(3, nearest(TargetType::IronGolemPrey, reduced_tick_delay(5))),
         wrap(4, Goal::Unavailable("ResetUniversalAngerTargetGoal")),
     ])
 }

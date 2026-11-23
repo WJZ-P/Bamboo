@@ -140,7 +140,7 @@ pub(super) fn target_goals() -> GoalSelector {
     GoalSelector::from_ordered_pairs(vec![(
         1,
         Goal::NearestAttackableTarget {
-            kind: TargetType::GolemPrey,
+            kind: TargetType::SnowGolemPrey,
             interval: reduced_tick_delay(10),
             unseen_ticks: 0,
             found: None,
