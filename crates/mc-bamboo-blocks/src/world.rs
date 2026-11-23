@@ -3586,8 +3586,10 @@ impl<'a> World<'a> {
     /// The physics comparison needs the position after landing.
     pub fn tick_entities_kept(&mut self) -> Vec<crate::entity::Entity> {
         self.level.begin_entity_tick();
+        // 开关打开时和 `tick_entities` 用同一份降频计划；缺省关时是空表。
+        let plans = self.throttle_plans();
         let mut after = Vec::new();
-        for id in self.level.entity_uids() {
+        for (index, id) in self.level.entity_uids().into_iter().enumerate() {
             let Some(mut entity) = self.level.take_entity(id) else {
                 continue;
             };
@@ -3600,7 +3602,11 @@ impl<'a> World<'a> {
                     entity.position.z,
                 ));
             if ticks {
-                let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+                let plan = plans
+                    .get(index)
+                    .copied()
+                    .unwrap_or(crate::entity::ctx::ThrottlePlan::FULL);
+                let mut ctx = crate::entity::ctx::PreciseCtx::with_plan(self, id, plan);
                 entity.tick(&mut ctx);
             }
             after.push(entity.clone());
