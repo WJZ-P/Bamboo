@@ -2213,6 +2213,9 @@ cargo build --release -p mc-bamboo-game --example terrain_cache_bench
 ./target/release/examples/terrain_cache_bench --entry-bytes        # 单条 414720 B
 ./target/release/examples/terrain_cache_bench --chunks 58 --threads 4 --seed 2026
 ./target/release/examples/terrain_cache_bench --chunks 58 --threads 8 --seed 2026
+# 只改地形缓存上限，其余设置保持默认，用来量预算 A/B：
+./target/release/examples/terrain_cache_bench --chunks 8 --threads 2 --terrain-mb 128 --label default
+./target/release/examples/terrain_cache_bench --chunks 8 --threads 2 --terrain-mb 8 --label mb8
 ```
 
 ### 14.5 怎么确认结果没变，以及没做的事
