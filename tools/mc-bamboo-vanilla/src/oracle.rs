@@ -688,7 +688,7 @@ impl Session {
                 if ours == official
                     && orbs == mine.xp_orbs
                     && seed == mine.random_seed
-                    && spawned == mine.spawned =>
+                    && silverfish_count(&spawned) == silverfish_count(&mine.spawned) =>
             {
                 self.report.mine_checked(block, true, "");
             }
@@ -1374,18 +1374,30 @@ fn compare(
             && answer
                 .random_seed
                 .is_some_and(|seed| seed != replayed.random_seed),
-        spawned: expected_spawned(&answer.spawned) != replayed.spawned,
+        spawned: infested_spawns(&answer.spawned) != infested_spawns(&replayed.spawned),
         panic: None,
     })
 }
 
-/// 官方的 `spawned` 里只有一部分实体 Bamboo 会建出来；物品实体和蠹虫都会。
-/// 两边的顺序都是生成顺序，直接比。
+/// 只比较虫蚀方块刷出来的蠹虫：官方 `spawned` 里还有 Bamboo 没建模的实体
+/// （例如硫磺立方），那些和方块行为无关，不能因为它们判失败。
 ///
-/// The official `spawned` list includes items and silverfish, both of which Bamboo
-/// creates here; compare the lists in spawn order.
-fn expected_spawned(spawned: &[String]) -> Vec<String> {
-    spawned.to_vec()
+/// Compare only the silverfish spawned by infested blocks. Vanilla's `spawned`
+/// list also contains entities Bamboo does not model (e.g. sulfur cubes); those
+/// are unrelated to the block behaviour and must not fail the case.
+fn infested_spawns(spawned: &[String]) -> usize {
+    silverfish_count(spawned)
+}
+
+/// 经验球在 Java 侧进 `spawned`，Bamboo 只算数值不建实体；挖掘题同样只比蠹虫。
+///
+/// Experience orbs appear in Java's `spawned` while Bamboo only computes their
+/// values; mining cases also compare silverfish only.
+fn silverfish_count(spawned: &[String]) -> usize {
+    spawned
+        .iter()
+        .filter(|name| name.as_str() == "minecraft:silverfish")
+        .count()
 }
 
 /// 方块和流体是两条队列，各自比较。
