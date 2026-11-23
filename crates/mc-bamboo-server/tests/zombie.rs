@@ -29,6 +29,7 @@ use mc_bamboo_data::{
 use mc_bamboo_protocol::{
     codec::Reader,
     components::{ComponentValue, PatchEntry},
+    packet::play::GameEvent,
 };
 use mc_bamboo_server::ServerConfig;
 use tokio::time::sleep;
@@ -264,6 +265,18 @@ async fn a_zombie_in_the_rain_does_not_burn() {
     let lists = Lists::new();
     let server = TestServer::start(lists.config()).await;
     let player = enter(&server, &["time set 1000", "weather rain"]).await;
+    // 雨量每刻只涨 0.01，过了 0.2 才算 `isRaining`；这之前的十几刻里僵尸照样会被太阳
+    // 点着（官方也一样）。等服务端发出 `START_RAINING` 再召唤。
+    // The rain level rises 0.01 per tick and only counts as `isRaining` past 0.2; until
+    // then the sun can still ignite a zombie, as in vanilla. Summon after the server
+    // sends `START_RAINING`.
+    wait_for(&player, "开始下雨", Duration::from_secs(10), |frames| {
+        frames.iter().any(|frame| {
+            frame.id == clientbound::GAME_EVENT
+                && frame.body.first() == Some(&GameEvent::START_RAINING)
+        })
+    })
+    .await;
     let zombie = summon(&player, "").await;
     assert_stays_unburnt(&player, zombie, "下雨").await;
 }
