@@ -1146,7 +1146,8 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         crate::advancement_triggers::record(region, id, "minecraft:placed_block", payload.clone());
         crate::advancement_triggers::record(region, id, "minecraft:item_used_on_block", payload);
     }
-    // `AnyBlockInteractionTrigger`：这次右键 consumesAction 时由 listener 触发。
+    // `ServerGamePacketListenerImpl.handleUseItemOn` 在结果 consumesAction 之后
+    // 给这次右键触发 ANY_BLOCK_USE；BLOCK_USE loot context 带方块与手持物品。
     let clicked_block = block_name(region, packet.pos);
     if outcome.result.consumes_action() {
         crate::advancement_triggers::record(
@@ -1157,7 +1158,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         );
     }
     // `DefaultBlockInteractionTrigger`：`useWithoutItem` 成功且用的是主手。
-    if outcome.used_without_item && packet.hand == Hand::Main {
+    if outcome.used_without_item && packet.hand == Hand::Main && outcome.result.consumes_action() {
         crate::advancement_triggers::record(
             region,
             id,
