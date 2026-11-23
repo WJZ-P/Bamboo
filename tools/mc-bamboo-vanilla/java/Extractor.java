@@ -55,6 +55,11 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.VarInt;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.util.StringRepresentable;
+import net.minecraft.util.random.Weighted;
+import net.minecraft.util.random.WeightedList;
+import net.minecraft.util.valueproviders.ConstantInt;
+import net.minecraft.util.valueproviders.IntProvider;
+import net.minecraft.util.valueproviders.UniformInt;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.RegistryOps;
@@ -80,11 +85,14 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.animal.axolotl.Axolotl;
@@ -153,6 +161,7 @@ import net.minecraft.world.level.biome.BiomeGenerationSettings;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.biome.FeatureSorter;
+import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
@@ -234,6 +243,13 @@ public final class Extractor {
     private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
     private static final long FACT_PATHFINDABLE_LAND = 1L << 35;
     private static final long FACT_SUFFOCATING = 1L << 36;
+    /**
+     * {@code BlockBehaviour.BlockStateBase.isValidSpawn}：这个状态能不能当生物的落脚块。
+     *
+     * <p>用牛来问，因为只有豹猫/鹦鹉和北极熊的方块会按实体类型分别回答；这三种 Bamboo 都不生成。
+     */
+    private static final long FACT_VALID_SPAWN = 1L << 37;
+    private static final long FACT_PATHFINDABLE_WATER = 1L << 38;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
     /** 26.3 主世界多噪声预设 `collectPossibleBiomes().distinct()` 的数量。 */
@@ -271,6 +287,8 @@ public final class Extractor {
             root.add("blocks", blocks());
             root.add("items", items());
             root.add("entityTypes", entityTypes());
+            root.add("projectileFacts", projectileFacts());
+            root.add("monsterFacts", monsterFacts());
             root.add("stateTables", new StateTables().build());
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
@@ -291,6 +309,7 @@ public final class Extractor {
             root.add("componentEnums", componentEnums());
             root.add("jukeboxSongs", jukeboxSongs(layers.compositeAccess()));
             root.add("worldgen", worldgen(layers.compositeAccess()));
+            root.add("mobSpawns", mobSpawns(layers.compositeAccess()));
             root.add("gameRules", gameRules());
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
             JsonArray itemComponents = new JsonArray();
@@ -1134,6 +1153,279 @@ public final class Extractor {
         return types;
     }
 
+    // 读取实际类树分配后的元数据索引和骷髅的眼高。
+    // Read the allocated class-tree metadata indices and the skeleton eye height.
+    private static JsonObject projectileFacts() throws ReflectiveOperationException {
+        JsonObject out = new JsonObject();
+        out.addProperty("arrowFlags", arrowAccessorId("ID_FLAGS"));
+        out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
+        out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
+        Field color = net.minecraft.world.entity.projectile.arrow.Arrow.class.getDeclaredField("ID_EFFECT_COLOR");
+        color.setAccessible(true);
+        out.addProperty("arrowColor", ((net.minecraft.network.syncher.EntityDataAccessor<?>) color.get(null)).id());
+        out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        var rabbit = net.minecraft.world.entity.EntityTypes.RABBIT.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(Rabbit.class, "BABY_DIMENSIONS", null);
+        var attributes = Rabbit.createAttributes().build();
+        var rabbitVariant = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(Rabbit.class, "DATA_TYPE_ID", null);
+        out.addProperty("rabbitEyeHeight", rabbit.eyeHeight());
+        out.addProperty("rabbitBabyWidth", baby.width());
+        out.addProperty("rabbitBabyHeight", baby.height());
+        out.addProperty("rabbitBabyEyeHeight", baby.eyeHeight());
+        out.addProperty("rabbitVariant", rabbitVariant.id());
+        out.addProperty("rabbitMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("rabbitMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("rabbitAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        addFoxFacts(out);
+        addWolfFacts(out);
+        out.addProperty("llamaEyeHeight", net.minecraft.world.entity.EntityTypes.LLAMA.getDimensions().eyeHeight());
+        out.addProperty("muleEyeHeight", net.minecraft.world.entity.EntityTypes.MULE.getDimensions().eyeHeight());
+        out.addProperty("donkeyEyeHeight", net.minecraft.world.entity.EntityTypes.DONKEY.getDimensions().eyeHeight());
+        out.addProperty("horseEyeHeight", net.minecraft.world.entity.EntityTypes.HORSE.getDimensions().eyeHeight());
+        var equine = "net.minecraft.world.entity.animal.equine.";
+        out.addProperty("horseFlags", accessorId(equine + "AbstractHorse", "DATA_ID_FLAGS"));
+        out.addProperty("horseVariant", accessorId(equine + "Horse", "DATA_ID_TYPE_VARIANT"));
+        out.addProperty("horseChest", accessorId(equine + "AbstractChestedHorse", "DATA_ID_CHEST"));
+        out.addProperty("llamaStrength", accessorId(equine + "Llama", "DATA_STRENGTH_ID"));
+        out.addProperty("llamaVariant", accessorId(equine + "Llama", "DATA_VARIANT_ID"));
+        Class<?> pig = net.minecraft.world.entity.animal.pig.Pig.class;
+        out.addProperty("pigBoostTime", entityAccessor(pig, "DATA_BOOST_TIME").id());
+        var variant = entityAccessor(pig, "DATA_VARIANT_ID");
+        var sound = entityAccessor(pig, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("pigVariant", variant.id());
+        out.addProperty("pigSoundVariant", sound.id());
+        out.addProperty("pigVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(variant.serializer()));
+        out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
+        out.addProperty("sheepWool", entityAccessor(net.minecraft.world.entity.animal.sheep.Sheep.class, "DATA_WOOL_ID").id());
+        out.addProperty("glowSquidDarkTicks", entityAccessor(net.minecraft.world.entity.animal.squid.GlowSquid.class, "DATA_DARK_TICKS_REMAINING").id());
+        out.addProperty("batFlags", entityAccessor(net.minecraft.world.entity.ambient.Bat.class, "DATA_ID_FLAGS").id());
+        out.addProperty("phantomSize", entityAccessor(net.minecraft.world.entity.monster.Phantom.class, "ID_SIZE").id());
+        out.addProperty("fishFromBucket", entityAccessor(net.minecraft.world.entity.animal.fish.AbstractFish.class, "FROM_BUCKET").id());
+        out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
+        out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
+        JsonArray tropicalFishCommonVariants = new JsonArray();
+        TropicalFish.COMMON_VARIANTS.forEach(common -> tropicalFishCommonVariants.add(common.getPackedId()));
+        out.add("tropicalFishCommonVariants", tropicalFishCommonVariants);
+        out.addProperty("pufferfishPuffState", entityAccessor(net.minecraft.world.entity.animal.fish.Pufferfish.class, "PUFF_STATE").id());
+        out.addProperty("turtleHasEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "HAS_EGG").id());
+        out.addProperty("turtleLayingEgg", entityAccessor(net.minecraft.world.entity.animal.turtle.Turtle.class, "LAYING_EGG").id());
+        out.addProperty("dolphinGotFish", entityAccessor(net.minecraft.world.entity.animal.dolphin.Dolphin.class, "GOT_FISH").id());
+        out.addProperty("dolphinMoistness", entityAccessor(net.minecraft.world.entity.animal.dolphin.Dolphin.class, "MOISTNESS_LEVEL").id());
+        Class<?> axolotl = net.minecraft.world.entity.animal.axolotl.Axolotl.class;
+        out.addProperty("axolotlVariant", entityAccessor(axolotl, "DATA_VARIANT").id());
+        out.addProperty("axolotlPlayingDead", entityAccessor(axolotl, "DATA_PLAYING_DEAD").id());
+        out.addProperty("axolotlFromBucket", entityAccessor(axolotl, "FROM_BUCKET").id());
+        Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
+        var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
+        var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("chickenVariant", chickenVariant.id());
+        out.addProperty("chickenSoundVariant", chickenSound.id());
+        out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
+        out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
+        out.addProperty("cubeMobSize", entityAccessor(net.minecraft.world.entity.monster.cubemob.AbstractCubeMob.class, "ID_SIZE").id());
+        out.addProperty("slimeEyeHeight", net.minecraft.world.entity.EntityTypes.SLIME.getDimensions().eyeHeight());
+        var armadilloState = entityAccessor(net.minecraft.world.entity.animal.armadillo.Armadillo.class, "ARMADILLO_STATE");
+        out.addProperty("armadilloState", armadilloState.id());
+        out.addProperty("armadilloStateSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(armadilloState.serializer()));
+        Class<?> goat = net.minecraft.world.entity.animal.goat.Goat.class;
+        out.addProperty("goatScreaming", entityAccessor(goat, "DATA_IS_SCREAMING_GOAT").id());
+        out.addProperty("goatLeftHorn", entityAccessor(goat, "DATA_HAS_LEFT_HORN").id());
+        out.addProperty("goatRightHorn", entityAccessor(goat, "DATA_HAS_RIGHT_HORN").id());
+        Class<?> frog = net.minecraft.world.entity.animal.frog.Frog.class;
+        var frogVariant = entityAccessor(frog, "DATA_VARIANT_ID");
+        var frogTongue = entityAccessor(frog, "DATA_TONGUE_TARGET_ID");
+        out.addProperty("frogVariant", frogVariant.id());
+        out.addProperty("frogVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(frogVariant.serializer()));
+        out.addProperty("frogTongueTarget", frogTongue.id());
+        out.addProperty("frogTongueTargetSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(frogTongue.serializer()));
+        out.addProperty("mooshroomType", entityAccessor(net.minecraft.world.entity.animal.cow.MushroomCow.class, "DATA_TYPE").id());
+        out.add("stewFlowers", stewFlowers());
+        out.addProperty("polarBearStanding", entityAccessor(net.minecraft.world.entity.animal.polarbear.PolarBear.class, "DATA_STANDING_ID").id());
+        Class<?> panda = net.minecraft.world.entity.animal.panda.Panda.class;
+        out.addProperty("pandaUnhappy", entityAccessor(panda, "UNHAPPY_COUNTER").id());
+        out.addProperty("pandaSneeze", entityAccessor(panda, "SNEEZE_COUNTER").id());
+        out.addProperty("pandaEat", entityAccessor(panda, "EAT_COUNTER").id());
+        out.addProperty("pandaMainGene", entityAccessor(panda, "MAIN_GENE_ID").id());
+        out.addProperty("pandaHiddenGene", entityAccessor(panda, "HIDDEN_GENE_ID").id());
+        out.addProperty("pandaFlags", entityAccessor(panda, "DATA_ID_FLAGS").id());
+        out.addProperty("ocelotTrusting", entityAccessor(net.minecraft.world.entity.animal.feline.Ocelot.class, "DATA_TRUSTING").id());
+        Class<?> cat = net.minecraft.world.entity.animal.feline.Cat.class;
+        out.addProperty("catVariant", entityAccessor(cat, "DATA_VARIANT_ID").id());
+        out.addProperty("catIsLying", entityAccessor(cat, "IS_LYING").id());
+        out.addProperty("catRelaxStateOne", entityAccessor(cat, "RELAX_STATE_ONE").id());
+        out.addProperty("catCollar", entityAccessor(cat, "DATA_COLLAR_COLOR").id());
+        out.addProperty("catSoundVariant", entityAccessor(cat, "DATA_SOUND_VARIANT_ID").id());
+        // 鹦鹉的 DATA_VARIANT_ID 用 INT 序列化器，index 紧随 TamableAnimal 之后。
+        // The parrot's DATA_VARIANT_ID uses the INT serializer; its index follows TamableAnimal.
+        Class<?> parrot = net.minecraft.world.entity.animal.parrot.Parrot.class;
+        out.addProperty("parrotVariant", entityAccessor(parrot, "DATA_VARIANT_ID").id());
+        // Parrot.getAmbient 在 nextInt(1000)==0 时 nextInt(MOB_SOUND_MAP.size()) 挑模仿的音效。
+        // Parrot.getAmbient draws nextInt(MOB_SOUND_MAP.size()) to pick an imitated sound.
+        java.lang.reflect.Field soundMap = parrot.getDeclaredField("MOB_SOUND_MAP");
+        soundMap.setAccessible(true);
+        out.addProperty("parrotSoundMapSize", ((java.util.Map<?, ?>) soundMap.get(null)).size());
+        out.add("potionEffects", potionEffects());
+        var effectRegistry = BuiltInRegistries.MOB_EFFECT;
+        JsonArray colors = new JsonArray();
+        for (int id = 0; id < effectRegistry.size(); id++) {
+            colors.add(effectRegistry.byId(id).getColor());
+        }
+        out.add("effectColors", colors);
+        return out;
+    }
+
+    /**
+     * 药水注册表每条药水自带的效果列表，顺序就是注册表 ID。
+     * `PotionContents.forEachEffect` 和药水箭的 `doPostHurtEffects` 都读它。
+     */
+    private static JsonArray potionEffects() {
+        JsonArray out = new JsonArray();
+        for (net.minecraft.world.item.alchemy.Potion potion : BuiltInRegistries.POTION) {
+            JsonArray effects = new JsonArray();
+            for (net.minecraft.world.effect.MobEffectInstance effect : potion.getEffects()) {
+                JsonArray entry = new JsonArray();
+                entry.add(BuiltInRegistries.MOB_EFFECT.getId(effect.getEffect().value()));
+                entry.add(effect.getDuration());
+                entry.add(effect.getAmplifier());
+                effects.add(entry);
+            }
+            out.add(effects);
+        }
+        return out;
+    }
+
+    /**
+     * `SuspiciousEffectHolder.tryGet(item)` 不为空的物品和它的迷之炖菜效果：
+     * `[物品 ID, [[效果 ID, 刻数], ...]]`，按物品注册表顺序。棕色哞菇吃花时读它。
+     *
+     * Items with a `SuspiciousEffectHolder` and their stew effects, in item registry
+     * order: `[item id, [[effect id, ticks], ...]]`. Brown mooshrooms read it.
+     */
+    private static JsonArray stewFlowers() {
+        JsonArray out = new JsonArray();
+        for (net.minecraft.world.item.Item item : BuiltInRegistries.ITEM) {
+            var holder = net.minecraft.world.level.block.SuspiciousEffectHolder.tryGet(item);
+            if (holder == null) {
+                continue;
+            }
+            JsonArray effects = new JsonArray();
+            for (var entry : holder.getSuspiciousEffects().effects()) {
+                JsonArray pair = new JsonArray();
+                pair.add(BuiltInRegistries.MOB_EFFECT.getId(entry.effect().value()));
+                pair.add(entry.duration());
+                effects.add(pair);
+            }
+            JsonArray row = new JsonArray();
+            row.add(BuiltInRegistries.ITEM.getId(item));
+            row.add(effects);
+            out.add(row);
+        }
+        return out;
+    }
+
+    /** 狐狸的尺寸、元数据下标和属性。 */
+    private static void addFoxFacts(JsonObject out) throws ReflectiveOperationException {
+        Class<?> fox = net.minecraft.world.entity.animal.fox.Fox.class;
+        var adult = net.minecraft.world.entity.EntityTypes.FOX.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(fox, "BABY_DIMENSIONS", null);
+        var attributes = net.minecraft.world.entity.animal.fox.Fox.createAttributes().build();
+        out.addProperty("foxEyeHeight", adult.eyeHeight());
+        out.addProperty("foxBabyWidth", baby.width());
+        out.addProperty("foxBabyHeight", baby.height());
+        out.addProperty("foxBabyEyeHeight", baby.eyeHeight());
+        for (String[] accessor : new String[][] {
+                {"foxTrusted0", "DATA_TRUSTED_ID_0"}, {"foxTrusted1", "DATA_TRUSTED_ID_1"},
+                {"foxType", "DATA_TYPE_ID"}, {"foxFlags", "DATA_FLAGS_ID"}}) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(fox, accessor[1], null);
+            out.addProperty(accessor[0], data.id());
+        }
+        out.addProperty("foxMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("foxMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("foxAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        out.addProperty("foxSafeFallDistance", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.SAFE_FALL_DISTANCE));
+        out.addProperty("foxFollowRange", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE));
+    }
+
+    /** 狼的尺寸、元数据下标（含 `TamableAnimal` 的两项）和属性。 */
+    private static void addWolfFacts(JsonObject out) throws ReflectiveOperationException {
+        Class<?> wolf = net.minecraft.world.entity.animal.wolf.Wolf.class;
+        Class<?> tamable = net.minecraft.world.entity.TamableAnimal.class;
+        var adult = net.minecraft.world.entity.EntityTypes.WOLF.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(wolf, "BABY_DIMENSIONS", null);
+        var attributes = net.minecraft.world.entity.animal.wolf.Wolf.createAttributes().build();
+        out.addProperty("wolfEyeHeight", adult.eyeHeight());
+        out.addProperty("wolfBabyWidth", baby.width());
+        out.addProperty("wolfBabyHeight", baby.height());
+        out.addProperty("wolfBabyEyeHeight", baby.eyeHeight());
+        for (String[] accessor : new String[][] {
+                {"tameFlags", "DATA_FLAGS_ID"}, {"tameOwner", "DATA_OWNERUUID_ID"}}) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(tamable, accessor[1], null);
+            out.addProperty(accessor[0], data.id());
+        }
+        for (String[] accessor : new String[][] {
+                {"wolfInterested", "DATA_INTERESTED_ID"}, {"wolfCollar", "DATA_COLLAR_COLOR"},
+                {"wolfAngerEndTime", "DATA_ANGER_END_TIME"}, {"wolfVariant", "DATA_VARIANT_ID"},
+                {"wolfSoundVariant", "DATA_SOUND_VARIANT_ID"}}) {
+            var data = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(wolf, accessor[1], null);
+            out.addProperty(accessor[0], data.id());
+        }
+        out.addProperty("wolfMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("wolfMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("wolfAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+    }
+
+    /** 任意类的私有 `EntityDataAccessor` 静态字段分到的 index。 */
+    private static int accessorId(String owner, String name) throws ReflectiveOperationException {
+        Field field = Class.forName(owner).getDeclaredField(name);
+        field.setAccessible(true);
+        return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
+    }
+
+    private static net.minecraft.network.syncher.EntityDataAccessor<?> entityAccessor(Class<?> type, String name) throws ReflectiveOperationException {
+        Field field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
+    }
+
+    private static int arrowAccessorId(String name) throws ReflectiveOperationException {
+        Field field = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
+    }
+
+    // 敌对生物各自定义的元数据按类树分配后的 index，以及实体类型的眼高。
+    // 键是生成的常量名，生成器原样写成 `pub const`。
+    // Class-tree metadata indices of the hostile mobs and their eye heights.
+    // Keys are the generated constant names.
+    private static JsonObject monsterFacts() throws ReflectiveOperationException {
+        JsonObject ids = new JsonObject();
+        Class<?> creeper = net.minecraft.world.entity.monster.Creeper.class;
+        Class<?> spider = net.minecraft.world.entity.monster.spider.Spider.class;
+        Class<?> enderman = net.minecraft.world.entity.monster.Enderman.class;
+        ids.addProperty("CREEPER_SWELL_DIR", accessorId(creeper, "DATA_SWELL_DIR"));
+        ids.addProperty("CREEPER_POWERED", accessorId(creeper, "DATA_IS_POWERED"));
+        ids.addProperty("CREEPER_IGNITED", accessorId(creeper, "DATA_IS_IGNITED"));
+        ids.addProperty("SPIDER_FLAGS", accessorId(spider, "DATA_FLAGS_ID"));
+        ids.addProperty("ENDERMAN_CARRY_STATE", accessorId(enderman, "DATA_CARRY_STATE"));
+        ids.addProperty("ENDERMAN_CREEPY", accessorId(enderman, "DATA_CREEPY"));
+        ids.addProperty("ENDERMAN_STARED_AT", accessorId(enderman, "DATA_STARED_AT"));
+        JsonObject eyes = new JsonObject();
+        eyes.addProperty("CREEPER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.CREEPER.getDimensions().eyeHeight());
+        eyes.addProperty("SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.SPIDER.getDimensions().eyeHeight());
+        eyes.addProperty("CAVE_SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.CAVE_SPIDER.getDimensions().eyeHeight());
+        eyes.addProperty("ENDERMAN_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.ENDERMAN.getDimensions().eyeHeight());
+        JsonObject out = new JsonObject();
+        out.add("dataIds", ids);
+        out.add("eyeHeights", eyes);
+        return out;
+    }
+
+    private static int accessorId(Class<?> owner, String name) throws ReflectiveOperationException {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
+    }
+
     /** 官方数据包的全部配方，按注册表的顺序。`getRecipeFor` 取第一条匹配的，先后由这个顺序决定。 */
     private static JsonObject recipes(RegistryAccess registries) throws ReflectiveOperationException {
         JsonArray entries = new JsonArray();
@@ -1515,6 +1807,104 @@ public final class Extractor {
             }
             result.add(entries);
         }
+        return result;
+    }
+
+    /**
+     * 自然刷怪要用的数据：`MobCategory` 的上限表，以及每个群系的 `Biome.getMobSettings()`
+     * （按类别的加权刷怪表和刷怪代价）。
+     *
+     * <p>`SpawnerData.count()` 在官方生成器里只有常量与均匀分布两种，这里显式展开成
+     * `min` / `max`；出现别的 `IntProvider` 直接报错，逼着换版本时重新核对。
+     * 条目顺序就是 `WeightedList.unwrap()` 的顺序，Rust 侧按同一顺序累加权重取随机项。
+     *
+     * <p>Natural spawning data: the `MobCategory` caps and every biome's
+     * `Biome.getMobSettings()` (weighted spawn lists per category plus spawn costs).
+     * `SpawnerData.count()` is only a constant or a uniform range in the vanilla
+     * generator, so it is flattened to `min` / `max`; any other `IntProvider` fails
+     * loudly. Entry order is `WeightedList.unwrap()` order, which the Rust side uses
+     * to walk the cumulative weights.
+     */
+    private static JsonObject mobSpawns(RegistryAccess registries) {
+        JsonObject result = new JsonObject();
+        JsonArray categories = new JsonArray();
+        for (MobCategory category : MobCategory.values()) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", category.getName());
+            entry.addProperty("max", category.getMaxInstancesPerChunk());
+            entry.addProperty("friendly", category.isFriendly());
+            entry.addProperty("persistent", category.isPersistent());
+            entry.addProperty("despawnDistance", category.getDespawnDistance());
+            entry.addProperty("noDespawnDistance", category.getNoDespawnDistance());
+            categories.add(entry);
+        }
+        result.add("categories", categories);
+
+        JsonObject biomes = new JsonObject();
+        Registry<Biome> biomeRegistry = registries.lookupOrThrow(Registries.BIOME);
+        for (Identifier name : biomeRegistry.keySet().stream().sorted().toList()) {
+            // 26.3 的刷怪设置是群系的环境属性 `NATURAL_MOB_SPAWNS`，按 overlay 叠在空表上。
+            // 26.3 keeps spawn settings in the positional biome attribute
+            // `NATURAL_MOB_SPAWNS`; overlay them onto the empty table.
+            MobSpawnSettings settings = biomeRegistry.getValue(name).getAttributes()
+                    .applyModifier(EnvironmentAttributes.NATURAL_MOB_SPAWNS, MobSpawnSettings.EMPTY);
+            JsonObject biome = new JsonObject();
+            JsonArray byCategory = new JsonArray();
+            for (MobCategory category : MobCategory.values()) {
+                WeightedList<MobSpawnSettings.SpawnerData> spawns = settings.getMobsToSpawn(category);
+                if (spawns.isEmpty()) {
+                    continue;
+                }
+                JsonObject row = new JsonObject();
+                row.addProperty("category", category.getName());
+                JsonArray entries = new JsonArray();
+                for (Weighted<MobSpawnSettings.SpawnerData> weighted : spawns.unwrap()) {
+                    MobSpawnSettings.SpawnerData data = weighted.value();
+                    JsonObject spawn = new JsonObject();
+                    spawn.addProperty("type", BuiltInRegistries.ENTITY_TYPE.getKey(data.type()).toString());
+                    spawn.addProperty("weight", weighted.weight());
+                    IntProvider count = data.count();
+                    if (count instanceof ConstantInt constant) {
+                        spawn.addProperty("min", constant.value());
+                        spawn.addProperty("max", constant.value());
+                    } else if (count instanceof UniformInt uniform) {
+                        spawn.addProperty("min", uniform.minInclusive());
+                        spawn.addProperty("max", uniform.maxInclusive());
+                    } else {
+                        throw new IllegalStateException("unsupported spawn count " + count);
+                    }
+                    entries.add(spawn);
+                }
+                row.add("entries", entries);
+                byCategory.add(row);
+            }
+            biome.add("categories", byCategory);
+
+            JsonArray costs = new JsonArray();
+            Map<String, MobSpawnSettings.MobSpawnCost> costsByName = new TreeMap<>();
+            settings.allSpawnCosts().forEach((type, cost) ->
+                    costsByName.put(BuiltInRegistries.ENTITY_TYPE.getKey(type).toString(), cost));
+            for (Map.Entry<String, MobSpawnSettings.MobSpawnCost> cost : costsByName.entrySet()) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("type", cost.getKey());
+                entry.addProperty("charge", cost.getValue().charge());
+                entry.addProperty("energyBudget", cost.getValue().energyBudget());
+                costs.add(entry);
+            }
+            biome.add("costs", costs);
+            // 生成期刷怪的概率：先过主世界维度层，再过群系层（`EnvironmentAttributeSystem` 的顺序）。
+            // World-generation creature odds: overworld dimension layer, then the biome layer.
+            float creatureProbability = biomeRegistry.getValue(name).getAttributes().applyModifier(
+                    EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
+                    registries.lookupOrThrow(Registries.DIMENSION_TYPE)
+                            .getValue(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD)
+                            .attributes()
+                            .applyModifier(EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY,
+                                    EnvironmentAttributes.CREATURE_WORLD_GEN_SPAWN_PROBABILITY.defaultValue()));
+            biome.addProperty("creatureSpawnProbability", Integer.toUnsignedLong(Float.floatToRawIntBits(creatureProbability)));
+            biomes.add(name.toString(), biome);
+        }
+        result.add("biomes", biomes);
         return result;
     }
 
@@ -2019,6 +2409,9 @@ public final class Extractor {
             facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.LAND)
                     ? FACT_PATHFINDABLE_LAND : 0;
             facts |= state.isSuffocating(EMPTY, pos) ? FACT_SUFFOCATING : 0;
+            facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.WATER)
+                    ? FACT_PATHFINDABLE_WATER : 0;
+            facts |= state.isValidSpawn(EMPTY, pos, EntityTypes.COW) ? FACT_VALID_SPAWN : 0;
             return facts;
         }
 

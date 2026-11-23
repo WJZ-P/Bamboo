@@ -416,6 +416,39 @@ pub(crate) enum Metric {
     /// Multi-island: fallbacks to a full join when the island set cannot be
     /// planned (one sample per fallback).
     IslandWorldCommandFallbacks,
+    /// 多岛：每条 `/gamemode` 借了几个岛（含发起人的岛；兜底 = 全部岛）。
+    ///
+    /// Multi-island: islands borrowed by each `/gamemode` (the sender's
+    /// included; a fallback counts every island).
+    IslandBorrowedGamemode,
+    /// 多岛：每条 `/kill` / `/damage` 借了几个岛。
+    ///
+    /// Multi-island: islands borrowed by each `/kill` or `/damage`.
+    IslandBorrowedHurt,
+    /// 多岛：每条 `/effect` 借了几个岛。
+    ///
+    /// Multi-island: islands borrowed by each `/effect`.
+    IslandBorrowedEffect,
+    /// 多岛：每条 `/execute` 借了几个岛。
+    ///
+    /// Multi-island: islands borrowed by each `/execute`.
+    IslandBorrowedExecute,
+    /// 多岛：`/gamemode` 退回全拼的次数（每兜底一次一条样本）。
+    ///
+    /// Multi-island: `/gamemode` fallbacks to a full join (one sample each).
+    IslandFallbackGamemode,
+    /// 多岛：`/kill` / `/damage` 退回全拼的次数。
+    ///
+    /// Multi-island: `/kill` and `/damage` fallbacks to a full join.
+    IslandFallbackHurt,
+    /// 多岛：`/effect` 退回全拼的次数。
+    ///
+    /// Multi-island: `/effect` fallbacks to a full join.
+    IslandFallbackEffect,
+    /// 多岛：`/execute` 退回全拼的次数。
+    ///
+    /// Multi-island: `/execute` fallbacks to a full join.
+    IslandFallbackExecute,
     /// 混合驱动：岛派出时全部 tick 线程都忙着，从派出到开跑等了多久（每次一条样本）。
     /// 这一段不算交接（`island_handoff` 只记线程空着时的唤醒和交回）。
     ///
@@ -433,7 +466,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 34] = [
+    const ALL: [Self; 42] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -466,6 +499,14 @@ impl Metric {
         Self::IslandWorldCommand,
         Self::IslandBorrowedIslands,
         Self::IslandWorldCommandFallbacks,
+        Self::IslandBorrowedGamemode,
+        Self::IslandBorrowedHurt,
+        Self::IslandBorrowedEffect,
+        Self::IslandBorrowedExecute,
+        Self::IslandFallbackGamemode,
+        Self::IslandFallbackHurt,
+        Self::IslandFallbackEffect,
+        Self::IslandFallbackExecute,
         Self::IslandQueueWait,
         Self::IslandDroppedTicks,
     ];
@@ -504,6 +545,14 @@ impl Metric {
             Self::IslandWorldCommand => "island_world_command",
             Self::IslandBorrowedIslands => "island_borrowed_islands",
             Self::IslandWorldCommandFallbacks => "island_world_command_fallbacks",
+            Self::IslandBorrowedGamemode => "island_borrowed_gamemode",
+            Self::IslandBorrowedHurt => "island_borrowed_hurt",
+            Self::IslandBorrowedEffect => "island_borrowed_effect",
+            Self::IslandBorrowedExecute => "island_borrowed_execute",
+            Self::IslandFallbackGamemode => "island_fallback_gamemode",
+            Self::IslandFallbackHurt => "island_fallback_hurt",
+            Self::IslandFallbackEffect => "island_fallback_effect",
+            Self::IslandFallbackExecute => "island_fallback_execute",
             Self::IslandQueueWait => "island_queue_wait",
             Self::IslandDroppedTicks => "island_dropped_ticks",
             Self::SkippedCatchUps => "skipped_catch_ups",
@@ -530,9 +579,17 @@ impl Metric {
             Self::FlushBytes => "bytes",
             Self::IslandCount => "islands",
             Self::IslandTopologyWait | Self::IslandDroppedTicks => "ticks",
+            Self::IslandBorrowedGamemode
+            | Self::IslandBorrowedHurt
+            | Self::IslandBorrowedEffect
+            | Self::IslandBorrowedExecute => "islands",
             Self::IslandSplitDeferrals
             | Self::IslandBorrowedIslands
-            | Self::IslandWorldCommandFallbacks => "times",
+            | Self::IslandWorldCommandFallbacks
+            | Self::IslandFallbackGamemode
+            | Self::IslandFallbackHurt
+            | Self::IslandFallbackEffect
+            | Self::IslandFallbackExecute => "times",
             Self::IslandCrossings => "players",
             Self::SkippedCatchUps => "times",
             Self::TickTotal
@@ -1623,36 +1680,32 @@ mod tests {
 
     #[test]
     fn lap_charges_time_to_the_named_phase() {
-        let mut profiler = Profiler::with_report_interval(None);
+        // 用可控假时钟推进，不靠真实睡眠，断言精确耗时。
+        // Advance a manual clock instead of sleeping so assertions are exact.
+        let mut profiler = Profiler::with_manual_clock();
         profiler.begin_tick();
         for phase in Phase::ALL {
-            std::thread::sleep(Duration::from_micros(50));
+            profiler.advance_clock(Duration::from_micros(50));
             profiler.lap(phase);
         }
         profiler.end_tick();
         for phase in Phase::ALL {
-            assert_eq!(
-                profiler.histogram(Series::Phase(phase)).count(),
-                1,
-                "{}",
-                phase.name()
-            );
+            let hist = profiler.histogram(Series::Phase(phase));
+            assert_eq!(hist.count(), 1, "{}", phase.name());
+            assert_eq!(hist.sum(), 50_000, "{}", phase.name());
         }
-        assert_eq!(
-            profiler
-                .histogram(Series::Metric(Metric::TickTotal))
-                .count(),
-            1
-        );
+        let total = profiler.histogram(Series::Metric(Metric::TickTotal));
+        assert_eq!(total.count(), 1);
+        assert_eq!(total.sum(), 50_000 * Phase::ALL.len() as u128);
     }
 
     #[test]
     fn sub_phase_totals_are_per_tick_and_do_not_move_the_parent_lap() {
-        let mut profiler = Profiler::with_report_interval(None);
+        let mut profiler = Profiler::with_manual_clock();
         profiler.begin_tick();
         for sub in [SubPhase::DeliverStorage, SubPhase::DeliverStorage] {
             profiler.start_sub(sub);
-            std::thread::sleep(Duration::from_micros(50));
+            profiler.advance_clock(Duration::from_micros(50));
             profiler.end_sub();
         }
         profiler.lap(Phase::Delivery);
@@ -1663,17 +1716,16 @@ mod tests {
             "一刻一条合计样本"
         );
         let first_total = profiler.sub_histogram(SubPhase::DeliverStorage).sum();
-        assert!(first_total >= 80_000, "两次调用都算进去了");
+        assert_eq!(first_total, 100_000, "两次调用都算进去了");
         assert_eq!(
             profiler.sub_histogram(SubPhase::EncodeBody).count(),
             1,
             "没调用的子段也记 0"
         );
         assert_eq!(profiler.sub_histogram(SubPhase::EncodeBody).sum(), 0);
-        assert_eq!(
-            profiler.histogram(Series::Phase(Phase::Delivery)).count(),
-            1
-        );
+        let delivery = profiler.histogram(Series::Phase(Phase::Delivery));
+        assert_eq!(delivery.count(), 1);
+        assert_eq!(delivery.sum(), 100_000, "父阶段 lap 不受子段影响");
         profiler.end_tick();
         assert_eq!(
             profiler.sub_histogram(SubPhase::DeliverStorage).count(),
@@ -1691,26 +1743,26 @@ mod tests {
 
     #[test]
     fn an_abandoned_tick_does_not_poison_the_next_one() {
-        let mut profiler = Profiler::with_report_interval(None);
+        let mut profiler = Profiler::with_manual_clock();
         profiler.begin_tick();
-        std::thread::sleep(Duration::from_millis(2));
+        profiler.advance_clock(Duration::from_millis(2));
         // 模拟 process_inbox 提前返回：没有 lap、没有 end_tick。
         profiler.begin_tick();
+        profiler.advance_clock(Duration::from_micros(100));
         profiler.lap(Phase::Inbox);
         profiler.end_tick();
-        assert_eq!(profiler.histogram(Series::Phase(Phase::Inbox)).count(), 1);
+        let inbox = profiler.histogram(Series::Phase(Phase::Inbox));
+        assert_eq!(inbox.count(), 1);
+        assert_eq!(inbox.sum(), 100_000, "废弃的那一刻不能污染下一刻的耗时");
         assert_eq!(
             profiler
                 .histogram(Series::Phase(Phase::LightUpdates))
                 .count(),
             0
         );
-        assert_eq!(
-            profiler
-                .histogram(Series::Metric(Metric::TickTotal))
-                .count(),
-            1
-        );
+        let total = profiler.histogram(Series::Metric(Metric::TickTotal));
+        assert_eq!(total.count(), 1);
+        assert_eq!(total.sum(), 100_000);
     }
 
     #[test]

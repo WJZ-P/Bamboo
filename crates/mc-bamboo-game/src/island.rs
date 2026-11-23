@@ -335,6 +335,14 @@ pub(crate) enum IslandTestHook {
     RecordThread(std::sync::Arc<std::sync::Mutex<Option<String>>>),
     /// 卡住，直到这个标志被置上。
     Stall(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    /// 进入卡住点时通知调用方，再一直等到 `release` 被置上。
+    ///
+    /// Notify the caller once the worker reaches the stall point, then wait
+    /// until `release` is set.
+    StallNotifying {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
     /// 每一刻开头都睡这么久（真的慢岛，给烟雾测试用），一直留着。
     Lag(std::time::Duration),
     Panic,
@@ -575,8 +583,13 @@ pub(crate) struct Islands {
     /// 测试专用：拼了几次（确认命令真的走了这条路）。
     #[cfg(test)]
     pub(crate) unified: usize,
-    /// 最近一次借了几个岛（含发起人岛；0 表示没有拼）。
+    /// 测试专用：最近一条按需借 / 全拼兜底的命令看得见几个岛的 `Region`（含发起人
+    /// 的岛；只借了自己的岛是 1，兜底是全部岛）。别的借法不写它，测试先清零。
+    #[cfg(test)]
     pub(crate) last_borrowed: usize,
+    /// 测试专用：最近一条借岛的命令是不是退回了全拼。
+    #[cfg(test)]
+    pub(crate) last_fallback: bool,
     /// 测试专用：故意改坏按需借（等价性对照的改坏确认）。
     #[cfg(test)]
     pub(crate) borrow_break: BorrowBreak,
@@ -600,7 +613,10 @@ impl Islands {
             borrow_all_islands: false,
             #[cfg(test)]
             unified: 0,
+            #[cfg(test)]
             last_borrowed: 0,
+            #[cfg(test)]
+            last_fallback: false,
             #[cfg(test)]
             borrow_break: BorrowBreak::None,
         }
@@ -1028,7 +1044,7 @@ impl Islands {
             return gathered;
         }
         let others: Vec<RegionId> = match borrow {
-            Borrow::All | Borrow::World | Borrow::Islands(_) => self
+            Borrow::All | Borrow::World(_) | Borrow::Islands(..) => self
                 .parked_ids()
                 .into_iter()
                 .filter(|&id| id != into)
@@ -1141,7 +1157,6 @@ impl Islands {
         {
             self.unified += 1;
         }
-        self.last_borrowed = islands.len();
         let others: Vec<RegionId> = self
             .ids()
             .into_iter()
@@ -1255,6 +1270,28 @@ pub(crate) enum BorrowBreak {
     MissUuid,
     /// `divide` 少还原一个岛的随机源。
     MissIdentity,
+    /// 候选筛查漏掉目标玩家（`gamemode` / `kill` / `damage` / `/execute`）。
+    MissCandidatePlayer,
+    /// `/effect` 漏借目标非玩家实体所在的岛。
+    MissEffect,
+}
+
+/// 按命令类别给借岛采样（计划 4.5.1：每类命令分开看借了几个岛、兜底几次）。
+///
+/// Command classes for the borrow samples (plan 4.5.1: borrowed islands and
+/// fallbacks per command class).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BorrowClass {
+    /// 其余命令（只进总的借岛指标）。
+    Other,
+    /// `/gamemode`。
+    Gamemode,
+    /// `/kill` 和 `/damage`。
+    Hurt,
+    /// `/effect`。
+    Effect,
+    /// `/execute`（不论链尾）。
+    Execute,
 }
 
 /// 主控借玩家时要哪些岛上的玩家（借玩家的唯一入口 `World::on_master` 的参数）。以后
@@ -1278,14 +1315,14 @@ pub(crate) enum Borrow {
     /// player commands that read blocks behave as on a single island (plan
     /// 4.5). Now only the fallback when on-demand borrowing cannot work out
     /// the island set (plan 4.5.1). Needs every island parked.
-    World,
+    World(BorrowClass),
     /// 只把这几座岛的 `Region` 并进发起人的岛，其余岛只借玩家（计划 4.5.1）。
     /// 集合恒含发起人的岛；只有一座岛时完全不拼。
     ///
     /// Join only these islands' `Region`s into the sender's; the rest lend
     /// only their players (plan 4.5.1). The set always contains the sender's
     /// island; with a single island nothing is joined.
-    Islands(std::collections::BTreeSet<RegionId>),
+    Islands(std::collections::BTreeSet<RegionId>, BorrowClass),
     /// 只要这几名玩家所在的岛。
     ///
     /// Only the islands these players are on.
@@ -1466,6 +1503,12 @@ impl Island {
                 *name.lock().unwrap() = std::thread::current().name().map(str::to_owned);
             }
             Some(IslandTestHook::Stall(release)) => {
+                while !release.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            Some(IslandTestHook::StallNotifying { entered, release }) => {
+                let _ = entered.send(());
                 while !release.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }

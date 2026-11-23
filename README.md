@@ -10,7 +10,7 @@ A Minecraft server written from scratch in Rust
 
 </div>
 
-> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。新世界默认 `normal`（和官方一样的噪声地形：群系、地表、洞穴峡谷），`level-type=flat` 可切回超平坦；terrain / 地物 / 结构阶段的纯函数已接进 Director 流水线并逐方块对拍 0 不一致；**还没有生物**（见下面世界生成的已知限制）。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。服务器目录里的 `server.properties` / `bamboo.toml` 可以调视距、线程数、红石缓存、区块计算池，以及 `level-seed` / `level-type` / `generator-settings` / `generate-structures` 四个世界生成键；世界目录按 `level-name` 放在服务器目录下。
+> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。新世界默认 `normal`（和官方一样的噪声地形：群系、地表、洞穴峡谷），`level-type=flat` 可切回超平坦；terrain / 地物 / 结构阶段的纯函数已接进 Director 流水线并逐方块对拍 0 不一致；**自然刷怪只覆盖已建模的几种生物**（牛、猪、羊、鸡、马、驴、骡、羊驼、鹦鹉、僵尸、尸壳、骷髅、流浪者、沼骸、史莱姆、溺尸、女巫；群系刷怪表里其它条目仍占权重但不生成，见「自然生成」一节和「现在能玩什么」），它们也能用命令和刷怪蛋生成。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、已实现的实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。服务器目录里的 `server.properties` / `bamboo.toml` 可以调视距、线程数、红石缓存、区块计算池，以及 `level-seed` / `level-type` / `generator-settings` / `generate-structures` 四个世界生成键；世界目录按 `level-name` 放在服务器目录下。
 
 ## 运行
 
@@ -33,12 +33,17 @@ pnpm install
 pnpm start
 ```
 
-打包用 `pnpm tauri build`。
+打包用 `pnpm tauri build`（生成 MSI 和 NSIS 安装包）。只要免安装的单个程序时用 `pnpm portable`
+（即 `tauri build --no-bundle`），产物是 `target/release/bamboo-desktop.exe`，不生成安装包。
 
 桌面端有总览、控制台、玩家和设置四个页面。设置页分成「官方设置」和「Bamboo 优化设置」
 两个分区，读写 APP 数据目录 `server/` 下的 `server.properties` 和 `bamboo.toml`，
 和命令行版完全是同一套文件。每一项都写了用途和默认值，越界的值和互斥的组合
-（比如正版验证加代理转发）会当场提示。老版本的 `server-settings.json` 第一次启动时
+（比如正版验证加代理转发）会当场提示。「世界生成」一组能改新世界的种子、世界类型、
+生成结构开关和超平坦预设；种子和世界类型只对新建的世界生效，已有存档不会变。
+「Bamboo 优化设置」能调世界生成的地形和地物缓存；两份缓存按依赖释放，并默认在
+生成空闲 30 秒后清空。不改生成结果、不卸载区块，也不保证进程工作集降回启动时的大小。
+老版本的 `server-settings.json` 第一次启动时
 导入一次，之后不再读它。服务端只在启动时读一次，所以改完要重启服务器才生效。
 
 控制台顶部有 CPU 和内存监控，每秒更新一次，曲线显示最近 60 秒，参照任务管理器。
@@ -110,7 +115,7 @@ WebView2 的渲染进程不算在内。
   最近还没匀速轮到的脏改动和没落完的快照；`/save-off` 期间不写盘也不卸载。
   方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家）改了不标脏；
   以后接结构、生物群系存档时要补上对应的标脏入口。
-- 只持久化改动过的（脏）区块。flat 世界没改过的按超平坦模板重建；噪声世界生成的区块
+- 只持久化改动过的（脏）区块。关结构的默认 flat 未改过的区块按模板重建；走多阶段的世界生成的区块
   一律算「改过」而写盘（官方可以丢弃原样生成区块，见世界生成已知限制）。
   `data/minecraft/world_gen_settings.dat` 用官方 `WorldGenSettings.CODEC` 写出这一局的
   种子和维度生成器：flat 写 `minecraft:flat` + 地层（层和超平坦模板一致），噪声世界写
@@ -161,6 +166,102 @@ WebView2 的渲染进程不算在内。
 的 `encode_loaded_column`；合并提交 `7e23929`、`be36ac3`、`1828b8c`）
 
 ## 现在能玩什么
+
+- `/summon minecraft:skeleton` 和骷髅刷怪蛋生成会射箭的骷髅；带 NBT 召唤时和官方一样不执行默认装备生成，无弓时走近战。骷髅复用敌对生物的难度、日晒、装备和战利品流程。普通箭可命中实体或插地，支撑方块失去碰撞后掉落；可拾取的箭按库存、模式和震颤时间判定，普通骷髅的箭不可拾取。箭的运动和插地状态会同步，已建模实体字段写入 Anvil 实体存档。火矢扫过水面会按 `WaterFluid.entityInside` 熄火并播放一次 `entity.generic.extinguish_fire`；穿透箭命中后会在同一刻沿剩余线段重新取候选和方块效果。
+- **流浪者和沼骸**：`/summon minecraft:stray` / `minecraft:bogged` 和各自的刷怪蛋；复用骷髅的目标、装备生成、日晒、战利品（`entities/stray` / `entities/bogged`，含玩家击杀才掉的药水箭）和存档。流浪者的箭带 600 刻缓慢，沼骸生命 16、射击间隔 70 刻（困难 50 刻）、箭带 100 刻中毒；效果写在箭的 `potion_contents` 自定义效果里，箭的颜色随之同步。沼骸可用剪刀剪下蘑菇（`shearing/bogged`，每堆在身高处掉落，`sheared` 存盘并同步）。骷髅在细雪里连续 140 刻后开始转化（同步「发抖」标志），再过 300 刻变成流浪者：装备和掉落几率、效果、名字、标签等按 `ConversionType.SINGLE` 搬过去，播放 1048 号世界事件；`StrayConversionTime` / `FreezingTime` 存盘。骷髅和流浪者不会被冻（`canFreeze`），穿 `#freeze_immune_wearables` 的生物也不会。两者都接进了自然刷怪（流浪者要求看得见天、可在细雪里生成）。敌对生物找目标时照官方跳过无敌（创造模式）玩家。已知限制：转化不搬乘客 / 载具 / 拴绳 / 队伍 / 睡觉位置（Bamboo 没有这些），着火标志位不单独搬；流浪者 / 沼骸的自然刷怪规则已用 `mob-oracle --only stray_spawn`（找天正例 90 只、无天 / 和平 0 只）和 `--only bogged_spawn`（正例 48 只、和平 0 只）端到端对拍 0 不一致，但夹具的 `canSeeSky` 是注入常量，细雪上方连续跳过的那一支没单独区分；沼骸剪蘑菇不发 `SHEAR` 游戏事件，发射器剪蘑菇未接入；骷髅一支躲狼（`AvoidEntityGoal`）、拾取地上物品、副手药水箭当弹药都未做（沿用骷髅现状）。骷髅一支「看不见目标 60 刻后放弃」的计数以前每刻多加一次（约 30 刻就放弃），已照官方改回只在 `canContinueToUse` 里计数。
+- **史莱姆**：`/summon minecraft:slime`（`Size` 是大小减一）和刷怪蛋。大小决定尺寸（0.52 × 大小）、生命上限（大小的平方）、移速（0.2 + 0.1 × 大小）、攻击力和经验（都等于大小）。用自己的移动控制一跳一跳地走：每跳之间等 `10 + nextInt(20)` 刻（追击时除以 3），没有目标时每 40–100 刻随机换个方向，在液体里上浮；不寻路。目标是 16 格内看得见、高度差不超过 4 格的玩家（和铁傀儡，Bamboo 还没有）。大小大于 1 的史莱姆碰到玩家就按近战范围和视线打一下（`AbstractCubeMob.playerTouch`），打中才放攻击音效。死后被移除时分裂成 `2 + nextInt(3)` 只小一号的（照 `ConversionType.SPLIT_ON_DEATH` 搬效果、名字、标签等），最小的一号掉 0–2 个粘液球（`entities/slime` 的 `type_specific/cube_mob` 谓词读大小）。自然生成照 `Slime.checkSlimeSpawnRules`：史莱姆区块（`WorldgenRandom.seedSlimeChunk`，读世界种子）里 y < 40 的 1/10，和 `#allows_surface_slime_spawns` 群系 y 在 (50, 70) 之间、按月相（满月 0.5 到新月 0）和亮度的地表生成；生成盒按 `spawnDimensionsScale` 放大 4 倍，生成时的大小 1 / 2 / 4 按 `setSpawnSize` 抽。存盘 `Size`、`wasOnGround` 和 `AgeableMob` 的三个键。同步大小（实体数据 index 18）。已知限制：落地 / 跳跃的挤压动画只在客户端，服务端只保住随机取数和音效；脚步声用脚下方块的（不看上面一格的雪层 / 地毯）；分裂不搬乘客 / 拴绳 / 队伍；水里改大小时的溅水音效和粒子未做；岩浆怪未做。
+- **溺尸**：`/summon minecraft:drowned` 和溺尸刷怪蛋；属性是僵尸那一套加 `STEP_HEIGHT = 1.0`。两栖寻路照 `AmphibiousPathNavigation` / `AmphibiousNodeEvaluator`：寻路恒可重算，水里贴着阻挡方块算水边、水里多出上下两个竖直水邻格，求值器在水里的起点换成碰撞盒最小角；在液体中，导航可用忽略流体的碰撞形状射线提前推进到下一节点；代价覆盖照官方只在一次搜索期间生效（水 0、走地 6、水边 4，搜索开始临时改、结束还原，生物身上常驻的只有水 0，否则 `GoalUtils.hasMalus` 会把随机漫游的落点全拒掉）；`canFloat` 对溺尸不生效，入水跳跃仍是 0.3。身体碰水且想游时，`DrownedMoveControl` 直接朝目标加速；上一刻的眼部流体检测也在水里时，`travelInWater` 才走 0.01 的相对移动并每刻乘 0.9。游泳的共享标志（index 0 第 4 位）随 `updateSwimming` 同步。白天的目标只算暗处或水里的玩家。目标列表按官方顺序（玩家、村民、铁傀儡、美西螈占位、海龟）。自然生成照 `Drowned.checkDrownedSpawnRules`：脚下是水、海平面 5 格以下 1/40（`#more_frequent_drowned_spawns` 群系 1/15），放置类型是 `IN_WATER`。白天在岸上会找水（`DrownedGoToWaterGoal`），夜里在水下会朝海平面游（`DrownedSwimUpGoal`），夜里泡在近海面水里会找岸边（`DrownedGoToBeachGoal`，倒计时取 `nextInt(200)`）。生成时 3% 副手鹦鹉螺壳，`nextFloat() > 0.9` 时 `nextInt(16)` 小于 10 拿三叉戟、否则钓鱼竿（不拿盔甲）。僵尸眼睛在水里连续 600 刻后开始溺水转化（同步 index 18），再过 300 刻变成溺尸并跑 `handleAttributes`、播 1040 号世界事件；`DrownedConversionTime` / `InWaterTime` 存盘。溺尸在 `#can_breathe_under_water` 里，泡水不掉空气。战利品走 `entities/drowned`；战利品表对拍 64 题、0 排除、0 不一致（不含装备掉落）。`mob-oracle --only drowned_spawn` 覆盖固定两区块的深海、浅海、浅河和强光浅河，34 例 136 刻、15 次实际生成、0 不一致；溺尸的生成盒允许液体，但仍检查实体遮挡。`mob-oracle --only drowned_`（夜间平地追击、水中追击、向海平面上浮）3 例 200 刻 0 不一致，逐刻比较位置、速度、路径、游泳标志和随机源。已知限制：**三叉戟投掷没做**（投掷物实体还没有），拿三叉戟的溺尸只走近战，`DrownedTridentAttackGoal` 只占目标顺序；鹦鹉僵尸骑手只取随机数、不生成坐骑；尚未对拍真实海洋群系混合刷怪表、坐骑分支、装备掉落和存档 NBT；两种水中场景是静水夹具，没有覆盖跨越水面、流动水或上岸；海平面由 `Level::sea_level()` 给（噪声世界 63、超平坦 -63）。白天找水的 10 次尝试里 Bamboo 和官方的目标搜索顺序也可能不同。
+- **女巫**：`/summon minecraft:witch` 和刷怪蛋；生命 26、移速 0.25。`Witch.aiStep` 的四支选药（水下呼吸、抗火、治疗、速度）按官方顺序各抽一次 `nextFloat`，喝药时主手换成药水、`usingTime = 32`、移速 -0.25；喝完后清空主手、按物品组件挂上效果，瞬时治疗在效果刻生效；喝药标志是 index 17 的布尔元数据。每 60 刻朝目标扔一瓶喷溅药水：选药照 `Witch.performRangedAttack` 的短路顺序（袭击者按血量给治疗 / 再生并清目标；8 格外且无缓慢给缓慢；血量 ≥ 8 且无中毒给剧毒；3 格内、无虚弱且 25% 概率给虚弱；否则瞬间伤害，只有虚弱一支取 `nextFloat`），提前量按目标速度算。喷溅药水是新的投掷物实体，飞行物理和鸡蛋同一条 `ThrowableProjectile`（重力 0.05），命中后按 `ThrownSplashPotion.onHitAsPotion` 的 4 格水平 / 2 格竖直范围、`computeMargin` 与距离衰减分效果：瞬时治疗 / 伤害按 `(int)(scale * base + 0.5)` 取整并对亡灵反转，其余按 `scale * duration * durationScale + 0.5` 挂上（20 刻以内不挂），跳过有免疫标签的效果；命中实体不再打额外的 0 点 `thrown` 伤害，改用 `indirectMagic` 伤害源击退；广播 2002 / 2007 和 1053 / 1054 号世界事件。魔法、间接魔法和荆棘伤害只吃 15%，自己打自己为 0。战利品走 `entities/witch`。四种自饮药水有 `mob-oracle --only witch_drink`（3 例 268 刻 0 不一致）；投掷有 `mob-oracle --only witch_throw`（远距离缓慢 / 剧毒 / 瞬间伤害、近距离虚弱与自身溅射免疫、对牛（受伤）和僵尸（亡灵被治疗）的范围效果，3 例 553 刻逐刻比位置、血量、效果时长、等级事件和随机源，0 不一致）；普通自然生成按原版群系表和怪物登场规则（`mob-oracle --only witch_spawn`：18 例 72 刻 0 不一致）。已知限制：Bamboo 没有袭击系统，`Raider` 的四个目标和治疗袭击者目标只占顺序（后者照样每刻抽一次 `nextBoolean`）；未实现灭火、美西螈回水及 `onHitBlock` 的营火 / 蜡烛行为；滞留药水云、喷溅水瓶对末影人的伤害、袭击和女巫小屋的刷怪未实现；官方 `#witch_resistant_to`（`DamageTypeTagsProvider`）还含 `sonic_boom`（监守者音爆），Bamboo 没有这个伤害类型、也没有监守者，女巫对它的 15% 抗性这条路径不可达（魔法 / 间接魔法 / 荆棘三项已按 0.15 实现）。
+
+- **掠夺者**：可用 `/summon minecraft:pillager` 或掠夺者刷怪蛋生成；属性照 `Pillager.createAttributes()`（0.35 移速、24 血、5 攻击、32 跟随）。目标顺序按 `PatrollingMonster` → `Raider` → `AbstractIllager` → `Pillager` 的注册链：巡逻、四个袭击目标（占位，`canUse` 恒假、不取随机数）、`FloatGoal`、躲嘎枝（占位）、原地对峙、`RangedCrossbowAttackGoal`（1.0 移速、8 格射程）、随机漫游、看玩家 / 看生物。弩复用玩家弩的装填状态机（25 刻装填、20–39 刻后射击、`CHARGED_PROJECTILES` 的箭数、多重射击三发），箭复用箭实体。生成时主手弩，`nextFloat() < 0.25 * special` 走一次随机附魔，再 `nextInt(300) == 0` 给穿透 I；非 PATROL 原因下 6% 概率当队长，队长戴必掉的灾厄旗帜。音效、`Inventory` / `PatrolLeader` / `Patrolling` / `patrol_target` 存档、读档 `setCanPickUpLoot(true)` 都按官方。死亡按 `entities/pillager` 掉落，只有队长（`type_specific/raider` 的 `is_captain`）掉不祥之瓶。对拍：`mob-oracle --only pillager` 8 例 1653 刻 0 不一致（装填 / 射击 / 多重射击、巡逻、原地对峙），`loot-oracle --entity-table minecraft:entities/pillager` 4000 例 0 不一致（一半队长）。**袭击不在范围内**：`Wave` / `RaidId` / `CanJoinRaid` 只作为存档数据，不祥旗帜只当头盔物品，没有袭击和村庄英雄（队长照常掉不祥之瓶，但瓶子不能用来触发袭击）；村民 / 铁傀儡目标只占注册位。
+- **巡逻队（`PatrolSpawner`）**：每 `12000 + nextInt(1200)` 刻、白天、五分之一概率、离随机玩家 24–47 格处按区域难度刷一支掠夺者巡逻队：0 号是带巡逻目标的队长，其余是跟随者；落点要过 `isValidEmptySpawnBlock`、方块光 ≤ 8 和脚下可生成。位置门槛是主世界时钟 ≥ 120000 刻且群系不是蘑菇岛，周围 10 格区块都要加载。对拍：`mob-oracle --only patrol` 5 例 598000 刻、15 名成员 0 不一致，连结束时的世界随机源种子和计时器都比。已知限制：Bamboo 还没有村庄 / POI，`isCloseToVillage` 跳过；选玩家按 `BTreeMap` 的 ID 顺序而不是官方加入顺序（夹具只有一名玩家）；巡逻队生成时身体朝向固定为 0（官方保留构造器的无种子随机朝向），队长的 `findPatrolTarget` 也用无种子实体随机源，这两项只要求「有目标」不逐位比。
+- **结构刷怪覆盖**：`natural.rs` 的自然刷怪先查位置所在结构的刷怪覆盖表，命中就用结构表替换群系表，否则回退群系表。数据在 `mc-bamboo-data::spawning::STRUCTURE_SPAWN_OVERRIDES`：前哨站 `STRUCTURE` 盒的 `MONSTER` 换成掠夺者，女巫小屋 `PIECE` 盒的 `MONSTER` / `CREATURE` 换成女巫 / 猫；新增结构只要加一行。查询照 `ChunkGenerator.getMobsAt`：区块的 `STRUCTURE_REFERENCES` → 引用区块的 `STRUCTURE_STARTS` → 按起点盒（含 `terrainAdaptation` 12 格外扩）或结构件盒判定。对拍：`mob-oracle --only structure_spawn` 6 个查询 0 不一致（前哨站空档命中、盒外回退、类别不覆盖、女巫小屋件内 / 件外）。已知限制：前哨站的 jigsaw 结构件还没生成，正式世界里暂时不会出现前哨站起点（机制和表已就绪，女巫小屋已能真实验证）；结构起点按种子重算而不再读区块里的 `structures` 标签；引用遍历顺序是 `BTreeMap` 而非官方哈希序（覆盖盒不重叠，暂无影响）；`RegionLevel` 的群系表仍是既有的默认平原限制。
+- **苦力怕**：可用 `/summon minecraft:creeper`（含 `powered` / `Fuse` / `ExplosionRadius` / `ignited` NBT）或苦力怕刷怪蛋生成，也会在黑暗处自然生成。属性、目标优先级和注册顺序照官方 `Creeper.registerGoals`：离目标不到 3 格开始膨胀（`SwellGoal`），超过 7 格或看不见就收缩，膨胀满 30 刻爆炸；摔落会提前膨胀（最多到引信前 5 刻），有目标时肯从高处跳下（`getMaxFallDistance`）；打火石和火焰弹右键点燃（打火石扣 1 点耐久，火焰弹消耗一个）。爆炸走 `ExplosionInteraction.MOB`：按官方射线算被炸的方块，按距离和曝光度伤害生物和玩家（伤害类型 `player_explosion`，死亡消息是「被苦力怕炸死」），生物按爆炸击退抗性被推开；`mobGriefing` 关着时不破坏方块，`mobExplosionDropDecay`（默认开）下方块掉落带爆炸半径衰减；带电时威力翻倍。死亡按 `entities/creeper` 战利品表掉火药，被骷髅射死时掉一张 `#creeper_drop_music_discs` 唱片，经验 5。膨胀方向、带电、点燃三项元数据同步给客户端，四个存档键和官方逐键一致。对拍：`mob-oracle --only creeper`（9 个场景 920 刻，逐刻比位置、速度、膨胀计数、目标、随机源、旁边的牛受的伤害和击退、真实玩家的血量和死亡消息字节，0 不一致）、`loot-oracle --entity-table minecraft:entities/creeper`（4000 例 0 不一致）、`chunk-content` 的新建苦力怕存档。已知限制：不发 `ClientboundExplodePacket`，所以客户端听不到爆炸声、看不到爆炸粒子，玩家也不会被爆炸推开（和 TNT 一样）；没有闪电实体，雷击不会把苦力怕变成带电的（只能用 NBT）；猫和豹猫还不存在，两个 `AvoidEntityGoal` 只占注册位；带电苦力怕炸死僵尸、骷髅、苦力怕时不掉头颅（`killedEntity` 的 `charged_creeper` 表未接）；身上有药水效果时爆炸不留滞留药水云；爆炸不推开也不伤害经验球、箭、下落方块和点燃的 TNT（只处理掉落物、生物和玩家），多个受害者的处理顺序是掉落物、生物（实体 ID 升序）、玩家，官方按实体分区顺序；`GameEvent` 不发；攻击挥手动画（`swingForAttack`）不发。
+- **蜘蛛和洞穴蜘蛛**：可用 `/summon minecraft:spider` / `minecraft:cave_spider` 或对应刷怪蛋生成，也会在黑暗处自然生成。属性、尺寸（含眼高）和 `Spider.registerGoals` 的注册顺序照官方：躲犰狳的目标占注册位（犰狳还没有）；`LeapAtTargetGoal` 在离目标 2–4 格且站在地上时按 1/3 跳扑；`SpiderAttackGoal` 是 `MeleeAttackGoal(mob, 1.0, true)` 加「亮处每刻 1/100 放弃目标」；目标只有 `SpiderTargetGoal`，亮处不启动，白天因此中立。导航是 `WallClimberNavigation`：`Spider.tick` 把这一刻的 `horizontalCollision` 写进 `DATA_FLAGS_ID` 第 0 位，`onClimbable()` 读这个标志，贴墙时每刻上升 0.2；路径走完后朝目标方块的三维坐标推。蛛网不减速蜘蛛，中毒效果对蜘蛛无效。困难模式自然生成时按 `getSpecialMultiplier` 的概率带一个随机效果（速度 / 力量 / 回复 / 隐身，同一组共享），无限时长。洞穴蜘蛛生命 12、碰撞箱 0.7×0.5，命中时普通难度给 7 秒、困难给 15 秒中毒（中毒由目标自己 tick，和官方一样 25 >> 等级 刻一跳）。死亡按 `entities/spider` / `entities/cave_spider` 战利品表掉落，经验 5；攀爬位同步给客户端。对拍：`mob-oracle --only spider_` / `--only cave_spider_`（夜里追玩家、被打后翻过一整面石墙、白天中立、洞穴蜘蛛追击五个场景 840 刻逐刻比位置、攀爬位、状态、目标和随机源，0 不一致；`MeleeAttackGoal.tick` 的三参数 `moveTo` 在爬墙时算不出路径会返回假、重算间隔加 15，和官方一样不走 `WallClimberNavigation` 两参数版本的「没路也成功」；移速和官方一样按 float `0.3F` 存，白天 0.8 倍速散步时才看得出这一位）。已知限制：骷髅骑士（1% 骑蜘蛛）没有生成，骑乘机制还没有；洞穴蜘蛛打玩家后的中毒没有进对拍（`mob-oracle` 的假玩家不吃效果），只有单测覆盖；`AvoidEntityGoal` 的犰狳一项占位；不吃蛛网（`makeStuckInBlock` 的蜘蛛分支）没有对拍；踩脚下蛛网/甜浆果的减速是在 `entityInside` 里做的，和官方一致但没有逐条对拍。
+- **末影人**：可用 `/summon minecraft:enderman`（含 `carriedBlockState` / `anger_end_time` / `angry_at` NBT）或末影人刷怪蛋生成，也会在黑暗处自然生成。属性（40 生命、7 攻击、0.3 移速、64 跟随、1.0 格阶高）、尺寸（0.6×2.9，眼高 2.55）和 `Enderman.registerGoals` 的注册顺序照官方：`FloatGoal`、`EndermanFreezeWhenLookedAt`、`MeleeAttackGoal(1.0, false)`、`WaterAvoidingRandomStrollGoal(1.0, 0.0)`、`LookAtPlayerGoal(8)`、`RandomLookAroundGoal`、`EndermanLeaveBlockGoal(10)`、`EndermanTakeBlockGoal(11)`；目标选择器是 `EndermanLookForPlayerGoal(1)`、`HurtByTargetGoal(2)`、`NearestAttackableTargetGoal<Endermite>(3)`（末影螨还不存在，但 `nextInt(5)` 那一笔照取）、`ResetUniversalAngerTargetGoal(4)`（占位，全局怒气规则默认关）。注视判定照 `LivingEntity.isLookingAtMe(player, 0.025, true, false, getEyeY())`：视线夹角、128 格上限、方块遮挡（`COLLIDER`），戴 `#gaze_disguise_equipment`（雕刻南瓜）不算；被盯 3 刻（`adjustedTickDelay(5)`）后锁定，锁定时每刻抬头看玩家并冻结移动，距离 4 格内随机传送；目标跑出 16 格后每 15 刻朝玩家方向传送一次（8×16 的偏移）并重试。怒气：有目标时每刻重抽 400–780 刻的计时（`PERSISTENT_ANGER_TIME`），目标变创造 / 旁观 / 和平、目标死掉（生物）或计时到期且没目标时消气；`angry_at` / `anger_end_time` 存盘。传送照 `LivingEntity.randomTeleport`：世界边界夹取、从落点向下找 `#entities_can_teleport_to`、`noCollision` + 不含液体 + 盒子内没有 `#enderman_does_not_teleport_to`、下方一格不是水；成功时发实体事件 46 和一声 `entity.enderman.teleport`。白天（`isBrightOutside`、亮度 > 0.5、看得见天、距上一次目标变化 600 刻以上）按 `nextFloat() * 30 < (亮度 - 0.4) * 2` 随机传送并清目标；怕水：每刻在水里或雨里受 1 点溺水伤害，之后 9/10 概率传送躲开；所有 `#is_projectile` 的伤害（箭、羊驼口水）不掉血，改成连续 64 次尝试传送。搬方块：`mobGriefing` 开着时，空手每 10 刻判定一次 `EndermanTakeBlockGoal`（半径 2、高 3，`#enderman_holdable` 且射线能到就捡起默认状态）；搬着方块时每 2000 刻判定一次 `EndermanLeaveBlockGoal`（半径 1、高 2，目标格是空气、下方不是基岩且是完整碰撞方块、`canSurvive`、格子里没有别的实体），放下后清空；搬着方块的末影人不自然消失（`requiresCustomPersistence`）。死亡按 `entities/enderman` 战利品表掉末影珍珠（0–1），再按 `dropCustomDeathLoot` 用一把带精准采集的假钻石斧把搬着的方块按方块表掉出来，经验 5。搬着的方块（可选方块状态序列化器）、`creepy`、`stared_at` 三项元数据同步给客户端，`carriedBlockState` / `anger_end_time` / `angry_at` 存档和官方逐键一致。对拍：`mob-oracle --only enderman_`（注视、注视锥边缘、不注视、白天露天传送、夜里淋雨、箭射、捡方块、带方块放置 9 个场景 61416 刻（白天场景跑 1200 刻，跨过 `targetChangeTime + 600` 的门槛，白天传送的判定和取数真的被比到；改坏 `nextFloat() * 30` 为 20 时第 685 刻起报不一致），逐刻比位置、速度、血量、目标、搬着的方块、`creepy` / `stared_at` 和随机源，0 不一致）、`chunk-content` 的新建末影人存档、`natural-spawn`。已知限制：末影螨、末影龙和末地维度都没有；`readPersistentAngerSaveData` 的「读档时立刻把 `angry_at` 设成目标」没有做（读档时手上没有实体表），读档后要到下一次被激怒才会恢复目标；被投掷的喷溅水瓶（`hurtWithCleanWater`）没接，喷溅药水实体还没有；传送只发一声（官方在旧位置广播一声、新位置再 `playSound` 一声），也不发 `GameEvent.TELEPORT`；`isPassenger()` 相关的判断没有（没有乘客）；死亡时搬着的方块掉落用的是 `BlockPos.containing(死亡位置)` 的中心当 `ORIGIN`（官方用精确的实体坐标），而且这条没有和官方逐题对拍；白天传送的 `hasChunkAt` 用 `is_loaded` 近似；末影人走路声只有脚下方块的 `SoundType`（和苦力怕一样，没有 `playCombinationStepSounds`）；随机传送后的那一两刻头部 / 身体朝向可能和官方不同（长场景里白天传送时能看到：我们的头被 `LookControl.clampHeadRotationToBody` 夹到身体 ±75 度，官方停在原值；位置、目标、随机源一致），没有收敛，方块场景因此把天色固定在傍晚来避开；`EndermanLookForPlayerGoal` 在目标玩家下线 / 跨岛时读作目标消失，官方手里的实体引用会继续跟；刷怪笼没做（洞穴蜘蛛的刷怪笼也还没有）。
+- **猪**：可用 `/summon` 或猪刷怪蛋生成；支持食物、寻路、繁殖（幼崽随机继承一方花纹）、掉落、花纹和声音变种、上鞍（鞍走 `SetEquipment` 同步，死亡必掉）及存档。已知限制：胡萝卜钓竿只能诱惑；未接入载具/乘客、骑乘、下马、钓竿加速、剪除鞍、发射器上鞍、带自定义组件的上鞍/刷怪蛋和雷击转化；已上鞍的猪被空手右键时官方会让玩家骑上去并返回 SUCCESS，Bamboo 返回 PASS；喂掉手里最后一件食物时官方那一格留着数量 0、物品还在的堆（`ItemStack.is` 仍为真），猪的 `TemptGoal` 继续被诱惑，Bamboo 把格子清空，诱惑目标停下并进入 50 刻冷却（牛、羊、鸡同理）。
+- **哞菇**：可用 `/summon` 或哞菇刷怪蛋生成，蘑菇岛（`mooshrooms_spawnable_on` + 亮度）自然刷出；属性、目标、叫声同牛（叫声固定 `classic`），脚下是菌丝时游荡权重 10。碗接蘑菇煲，棕色哞菇喂花（`SuspiciousEffectHolder` 表由生成器导出）后接迷之炖菜（带 `suspicious_stew_effects` 组件），桶挤奶，小麦繁殖 / 催熟；繁殖时父母同色先抽 1/1024 变异再二选一。剪刀把它换成一头牛（公共模块 `conversion.rs`，官方 `Mob.convertTo` 的 `SINGLE`：抄位置、朝向、速度、年龄、效果、名字、标签等，血量不抄），按 `shearing/mooshroom` 表掉 5 个对应颜色的蘑菇并扣剪刀耐久。`Type` / `stew_effects` 存盘，`DATA_TYPE` 同步。对拍：`mob-oracle --only mooshroom` 7 例 0 不一致，`chunk-content` 含新生和棕色带效果两例。已知限制：喂花的 `SMOKE` / `EFFECT` 粒子和剪毛的 `EXPLOSION` 粒子不发；剪毛声发成按坐标的音效包（官方是跟随实体的 `sound_entity` 包，羊同此）；Bamboo 还没有闪电实体，雷击换色（`thunder_hit`）已写但没有调用方；`SHEAR` 游戏事件不发；发射器剪哞菇未接入；转换出的牛照官方 `convertCommon` 抄着火显示标志（`setSharedFlagOnFire`）。
+- **熊猫**：可用 `/summon` 或熊猫刷怪蛋生成，丛林按 `checkAnimalSpawnRules` 自然刷出。两份基因按官方显性 / 隐性规则决定七种外观之一（`Brown` / `Weak` 要两份相同才显现），`MainGene` / `HiddenGene` 存盘，`UNHAPPY_COUNTER` / `SNEEZE_COUNTER` / `EAT_COUNTER` / `MAIN_GENE_ID` / `HIDDEN_GENE_ID` / `DATA_ID_FLAGS` 同步。属性 20 血 / 跟随 16 / 速度 0.15 / 攻击 6，虚弱基因 10 血、懒惰基因速度 0.07（只在 `finalizeSpawn` / 繁殖后重设，和官方一样读档不重设）。右键竹子：成年求爱、幼年加速长大、求爱冷却中或成年时坐下吃（吃掉后手里那份消失，中途换竹子会丢下旧的）；脚下有 `panda_eats_from_ground` 的物品会捡进主手。六种移动 / 闲逛目标：panic（坐下就停）、繁殖（附近 8 格找不到竹子就不乐意 32 刻并在 30 秒内不再试）、攻击（做不了动作时不启动）、诱惑、躲避玩家 / 怪物（只有担心基因）、坐下、仰躺（懒惰）、打喷嚏（幼年；虚弱先抽 1/500）、看玩家、打滚（幼年或顽皮）、跟随父母、避水闲逛。打喷嚏按 `gameplay/panda_sneeze` 掉礼物并让 10 格内成年熊猫跳一下；好斗熊猫被同伴叫来（`HurtByTargetGoal.setAlertOthers`，只叫好斗的）；吃到竹子或咬过一口就停手。繁殖在 `getBreedOffspring` 里按官方顺序抽父母各一次 `nextBoolean` 和幼崽两次 1/32 变异。对拍：`mob-oracle --only panda` 6 个逐刻场景（闲逛、三种基因、吃竹子、打喷嚏、繁殖、死亡掉落）+ 512 题基因遗传，共 3278 刻 0 不一致；`--only natural_spawn_panda` 对拍丛林亮度 15 / 8 的产率、双基因与世界随机源，`--only gen_spawn_panda` 对拍竹林完整动物表的生成位置、双基因与随机源指纹。已知限制：吃东西的 `ITEM` 粒子和喷嚏的 `SNEEZE` 粒子不发（取数照官方）；`PandaLookAtPlayerGoal` 的 `lookAt` 只在目标被清掉时重找，跨刻保持的细节和官方一致但未单独对拍；雷雨坐下依赖 `BlockView::is_thundering`，只有真实世界和对拍注入过；喷嚏让同伴跳的水中判定没有建模（只看 `onGround`）；幼崽拿金蒲公英走 `Animal.mobInteract` 的兜底未接；熊猫的 `canBeLeashed` 为假，拴绳本来就没建模。
+- **北极熊**：可用 `/summon` 或北极熊刷怪蛋生成，冰冻海洋和冰冻深海这两个「替代方块」群系按 `checkPolarBearSpawnRules`（亮度 + 脚下 `polar_bears_spawnable_on_alternate`）刷，其它群系走 `checkAnimalSpawnRules`；属性 30 血 / 跟随 20 / 速度 0.25 / 攻击 6，`getWaterSlowDown` 0.98。`PolarBearMeleeAttackGoal`（不要求看得见目标）在够不着但在「目标宽度 + 3」格内时站起来吼（40 刻冷却）再扑咬；幼崽挨打时叫来成年北极熊后自己停手（`alertOther` 只认成年），成年熊带崽时主动打 10 格内的玩家（搜索距离减半）；持久愤怒（`neutral.rs`，`anger_end_time` / `angry_at` 存盘）让被打的熊记住 20–39 秒。成年熊只在环境伤害下恐慌，幼崽和别的动物一样；幼年用 `BABY_DIMENSIONS`，组生成按 `AgeableMobGroupData(1.0)` 从第二只起都是幼崽；幼崽叫声是 `ambient_baby`；`DATA_STANDING_ID` 同步。对拍：`mob-oracle --only polar_bear` 11 例 1121 刻 0 不一致（闲逛带崽、柱子上的玩家、死亡掉落含着火、环境恐慌、挨打反击、带崽打玩家、打幼崽叫帮手、和平难度、成年 / 幼崽选狐）。已知限制：成年熊可选狐狸为目标，幼崽不会；狐狸反向躲熊的目标还未接；`universalAnger` 游戏规则没建模（恒为假，`ResetUniversalAngerTargetGoal` 只占位）；官方玩家死亡时 `NeutralMob.playerDied` 会按 `forgive_dead_players` 消气，Bamboo 没有接（对拍的假世界没有玩家死亡，`polar_bear_fight_cub` 场景因此止于玩家 2 血）。
+- **豹猫**：可用 `/summon minecraft:ocelot` 或豹猫刷怪蛋生成，在丛林与竹林群系按官方 `MONSTER` 刷怪表自然刷出（`checkOcelotSpawnRules` 2/3 概率，`checkSpawnObstruction` 要求海平面以上、脚下为草方块或 `#leaves` 且无液体）。属性 10 血 / 0.3 移速 / 3 攻击，成年 0.6×0.7、幼崽 0.3×0.35（眼高 0.34375）；`DATA_TRUSTING`（index 18）同步、`Trusting` 存盘。每刻按移动速度修饰符切换潜行姿势（0.6 速 `Pose::Crouching`）和疾跑（1.33 速 `setSprinting` 挂瞬态 `+0.3F` 移速加成、`Attribute.sync_version` 逐刻触发同步与 `spawnSprintParticle` 两次 `nextDouble` 取数）。未信任时远离 16 格内玩家；手持 `#ocelot_food` 诱惑（`OcelotTemptGoal` 会受惊），3 格内喂食按 1/3 概率信任（事件 41/40 与 7 组高斯粒子取数）；繁殖与 100% 组幼年（`AgeableMobGroupData(1.0F)`）；捕杀鸡与陆地幼年海龟；未信任且存活超 2400 刻可远离消失。已知限制：苦力怕躲避豹猫的 `AvoidEntityGoal` 仍是占位未接；信任成功 / 失败只发实体事件 41/40（客户端自播粒子），服务端不另发粒子包但保留官方随机取数；拴绳未建模。
+- **猫**：可用 `/summon minecraft:cat` 或猫刷怪蛋生成。复用 `tame.rs` 可驯服框架（驯服、跟随、坐下、传送主人、`TamableAnimalPanicGoal`），支持 11 种花色（`minecraft:cat_variant`）、2 种叫声变体（`minecraft:cat_sound_variant`：成年 `classic` / `royal` 与幼猫 `entity.baby_cat.*` 共 9 组音效）与项圈颜色（`CollarColor`，默认红 14）。`finalizeSpawn` 跑 5% 幼猫、按月相亮度（满月 `>= 0.9` 允许 `all_black`）选花色并随机挑叫声变体。未驯服喂 `#cat_food` 1/3 概率驯服并立刻坐下、标持久化并播吃食声；已驯服主人可染项圈（`#cat_collar_dyes`）、喂鱼回血（1×营养或 1）、求爱繁殖（父母花色二选一、项圈混色，和官方一样不重抽 `sound_variant`）或切换坐站。实现 `CatTemptGoal`（300/250 刻切换目标玩家、未驯服每 100 刻乞食声）、`CatLieOnBlockGoal`（床，同步 `IS_LYING`、每 5 刻呼噜声）、`CatSitOnBlockGoal`（箱子、点燃的熔炉、床尾）以及未驯服远离玩家、捕杀兔子与陆地幼年海龟、存活超 2400 刻可远离消失。5 项元数据（`CAT_VARIANT` / `CAT_IS_LYING` / `CAT_RELAX_STATE_ONE` / `CAT_COLLAR` / `CAT_SOUND_VARIANT`）走官方注册表序列化器同步，`variant` / `sound_variant` / `CollarColor` / `Owner` / `Sitting` 与官方逐键存档一致。已知限制：村庄 `CatSpawner` 与沼泽小屋结构刷猫未实现（村庄猫按任务暂不做）；玩家睡觉未建模，故 `CatRelaxOnOwnerGoal`（睡在主人身上与清晨礼物 `gameplay/cat_morning_gift`）未接；`CatSitOnBlockGoal` 的箱子打开人数（`ChestBlockEntity.getOpenCount`）暂未暴露在 `BlockView` 上，箱子按关闭处理；苦力怕躲避猫的 `AvoidEntityGoal` 仍是占位未接；拴绳未建模。
+- **鹦鹉**（2026-11-22，分支 `op-misc`）：可用 `/summon minecraft:parrot` 或鹦鹉刷怪蛋生成，丛林按 `checkParrotSpawnRules`（脚下 `#parrots_spawnable_on` + 亮度 > 8）自然刷出。属性 6 血 / 0.2 移速 / 0.4 飞行速度 / 3 攻击，尺寸 0.5×0.9（眼高 0.765）；五种颜色（`DATA_VARIANT_ID` index 20，`Variant` 按官方旧版整数编码存盘），`canBeABaby` 为假、不繁殖。新增**飞行导航**：`FlyNodeEvaluator` 逐位移植（六向 + 十二个斜向邻居、`WALKABLE` 加一、飞行的路径类型规则），`FlyingPathNavigation` 的起点、临时位置、`getGroundY` 跳过和地表检查跳过，`FlyingMoveControl(10, false)`（空中用 `FLYING_SPEED`、每刻设 `noGravity`、`yya` 推竖直速度），`LivingEntity.travelInAir` 的 `omnidirectionalAirMover` 竖直空气阻力 0.91，`Parrot.aiStep` 的 `calculateFlapping`（含下落时 `delta.y *= 0.6`）和翅膀声。复用 `tame.rs`：`#parrot_food` 种子按 1/10 概率驯服（事件 7 / 6，吃食声音高取两次 `nextFloat`），主人按右键在站在地上时切换坐下；曲奇（`#parrot_poisonous_food`）中毒 900 刻并按玩家攻击结算 `Float.MAX_VALUE` 伤害（交互后由游戏层用 `MobInteraction::self_hurt` 落地）。每 400 刻按世界随机源抽一次模仿附近生物（20 格内、类型在 `MOB_SOUND_MAP` 里、非静音，取一只后按它的类型放模仿音），叫声每 1000 次抽一次从 42 条模仿音里挑；`ParrotWanderGoal` 的树桩落点（±3/±6/±3、树叶或原木上方两格空）和 `HoverRandomPos` / `AirAndWaterRandomPos` 的悬停落点都已接。对拍：`mob-oracle --only parrot` 4 例 860 刻 0 不一致（树桩闲逛、驯服与坐站、曲奇死亡含掉落和包、模仿僵尸叫声）；`--only natural_spawn` 734 例（`parrot_jungle=31`、`parrot_jungle_dim=0`）、`--only gen_spawn` 7000 例 0 不一致。已知限制：**上肩只做到目标运行**——`LandOnOwnersShoulderGoal` 的 `canUse` / `tick` 照官方跑（冷却 100 刻、主人不是旁观者、没命令坐下），但玩家肩膀存档（`ShoulderEntityLeft` / `Right`）和同步没建模，两只碰撞箱相交时官方会把鹦鹉 `discard()` 存进玩家，Bamboo 先让它留在原地，所以对拍场景在冷却到期（第 101 刻）前结束；`FollowMobGoal` 只占优先级位（不跑）；`MOB_SOUND_MAP` 在官方是 `HashMap`，迭代顺序和按名字排序的表不同，每 1000 次叫声里选到的具体模仿音可能不一致；悬停落点一开始从选中落点那一刻起就和官方差两次实体随机取数，根因是 `LandRandomPos.generateRandomPosTowardDirection` 少了官方的第三个判定 `GoalUtils.isNotStable`（`FlyingPathNavigation.isStableDestination`，这里用「目标格是实心方块」近似），已补上：补上后一个无树桩的 400 刻临时悬停场景（种子 906，未进对拍表）从 308 处不一致降到 3 处，随机源逐刻一致；残留的 3 处（第 245–247 刻）只有 `xr` / `hr`：那几刻官方 `LookAtPlayerGoal` 已经在看玩家、`Bamboo` 还没开始，而两边随机源逐刻相同，所以不是取数问题，原因没查到（怀疑两个选择器整刻跑的相位和官方差一刻）；飞行寻路的 `FlyNodeEvaluator.getStart` 少了小体型生物那十个随机候选：鹦鹉的包围盒 `getSize()` 是 0.633（`< 1.0`），官方会从实体随机源抽最多十个起点候选，`Bamboo` 的寻路请求里没有实体随机源，只试包围盒四角；只在起点格代价为负时才走这条，对拍场景没触发；`PlayerView` 没有玩家的飞行 / 水里 / 细雪状态，`LandOnOwnersShoulderGoal.canUse` 只检查了旁观者；`Parrot.getAmbientSound` 的世界随机源取数顺序和模仿判定的随机源都在，但没有和真实客户端核对过模仿音的听感；拴绳未建模。
+- **羊**：可用 `/summon` 或羊刷怪蛋生成；自然生成颜色按群系权重（含 1/500 粉色），剪刀剪毛按 `shearing/sheep` 战利品表掉 1–3 团羊毛并扣剪刀耐久，染料染色，`EatBlockGoal` 吃草让草方块变泥土并长回羊毛（幼年加速长大），繁殖按合成配方混色、混不出时按世界随机源选一方；死亡按颜色和剪毛状态选子战利品表；`Sheared` / `Color` 存盘，羊毛字节同步。脚下有矮草（`edible_for_sheep`）时先吃矮草（`mob-oracle` 的 `sheep_eat_plant`）；`mobGriefing` 关掉时方块不变，但羊照样长回羊毛、幼年加速（`sheep_eat_no_grief`）。已知限制：`EatBlockGoal` 的游戏事件（`EAT` / `SHEAR`）不发；发射器剪羊毛未接入。
+- **鸡**：可用 `/summon` 或鸡刷怪蛋生成；花纹和叫声变种、构造时的下蛋计时（`6000 + nextInt(6000)`）、按 `gameplay/chicken_lay` 礼物表按花纹下（蓝 / 棕）蛋、缓慢下落、种子繁殖和 `EggLayTime` / `IsChickenJockey` 存盘。玩家右键和发射器都能扔出鸡蛋（含蓝 / 棕蛋）；玩家每次扔蛋按物品种类计一次 `ITEM_USED`，创造模式照计，当前只在会话内累计。命中时对生物打 0 点 `thrown` 伤害（有击退），按蛋自己的随机源 1/8 孵小鸡、其中 1/32 孵四只，小鸡按蛋的花纹组件定花纹、从零尺寸找空位放下；发射器扔蛋那一刻的位置、速度、散布和剩余物品与官方逐位一致（`mob-oracle` 的 `egg_dispense` / `egg_dispense_up`）；玩家扔的蛋打中动物时记下 `lastHurtByPlayer`、动物恐慌逃跑，和官方逐刻一致（`egg_hit_cow_owned`）。已知限制：鸡骑士不生成（`IsChickenJockey` 恒写 0）；扇翅膀只影响客户端动画，服务端不记 `flyDist` 的翅膀游戏事件。下蛋声在战利品落地前取音高，礼物表求值失败时官方不放声音，Bamboo 仍会放。扔出的鸡蛋：首刻的气泡柱推力不建模；撞到方块不触发 `onProjectileHit`（标靶、钟、紫颂花等），也不发 `PROJECTILE_SHOOT` / `PROJECTILE_LAND` 游戏事件；打中下落方块不 `markHurt`；水体熄火复用箭的扫掠流体判定，在进出水都发生在同一刻时也会触发；流动水仍按整格水平范围近似，降雨熄火未建模；孵化找空位按盒子切格子求最近点，没有复刻 `VoxelShape` 合并坐标时 1e-7 的容差和同距并列时的遍历顺序。雪球等其它投掷物还没有实现，右键雪球不会扔出。
+- **鱿鱼 / 发光鱿鱼**：可用 `/summon` 或刷怪蛋生成，也会自然生成（鱿鱼 `WATER_CREATURE`：`IN_WATER` 落点 + 海平面下 13 格以内、下面是水、上面是水方块；发光鱿鱼 `UNDERGROUND_WATER_CREATURE`：海平面下 33 格以下、原始亮度 0、这一格是水方块；组里第二只起 5% 幼年）。10 点血；按触手节拍游动（两个不占标志位的目标只写移动向量，`travel` 只是 `move`），不吃水流；离水每刻掉 1 点氧气，到 -20 受 2 点溺水伤害；被生物（含玩家）打到时喷墨（喷墨声 + 30 个 `squid_ink` / `glow_squid_ink` 粒子包，发给 32 格内的玩家）并逃离攻击者，发光鱿鱼再变暗 100 刻（`DarkTicksRemaining` 存盘并同步）；死亡按 `entities/squid` / `entities/glow_squid` 掉墨囊 / 荧光墨囊，被玩家打死给 1–3 点经验。逐刻对拍见 `mob-oracle --only squid` / `--only glow`。已知限制：拴绳（`canBeLeashed`）未实现；刷怪蛋对着水面用（`SpawnEggItem.use` 的流体射线）和对着鱿鱼用（生幼崽）未实现，只能点方块；`SWIM` 等游戏事件不发；守卫者还没有，美西螈的 `AxolotlAttackablesSensor` 会把水里的鱿鱼 / 发光鱿鱼当捕猎目标（`#axolotl_hunt_targets`），但大脑运行没有逐 tick 对拍；非生物来源的伤害照官方 `Squid.hurtServer` 返回假（不喷墨）。
+- **蝙蝠**（分支 `cl-ambient`，2026-11-22）：`AmbientCreature` 一支，可用 `/summon` 或刷怪蛋生成，也会自然生成（`AMBIENT`：`ON_GROUND` 落点，在 `WORLD_SURFACE` 高度图之下、世界随机源 `nextBoolean` 为假、亮度不超过 `nextInt(4)`、脚下在 `#bats_spawnable_on` 里；26.3 已经没有万圣节窗口和海平面条件）。6 点血；没有目标也不寻路：倒挂时头上不是导体或 4 格内有看得见的玩家就起飞（世界事件 1025），飞行时朝随机方块加速、竖直速度每刻乘 0.6，1/100 且头上是导体时重新倒挂并钉在方块下面；倒挂时四次里三次不叫，音量 0.1、音高 ×0.95；不推人也不被推、没有摔落伤害、没有脚步声；受伤先醒过来；`BatFlags` 存盘、标志字节同步。`mob-oracle --only bat`（4 例 2424 刻）和 `--only bat_spawn`（24 例 96 刻）0 不一致。已知限制：开始倒挂那一刻官方的碰撞箱比位置晚一刻更新（最多 0.1 格），Bamboo 不模拟；击退落在自己这一刻之后时速度包晚一刻。
+- **幻翼**（分支 `cl-ambient`，2026-11-22）：官方 `Phantom`（`Mob implements Enemy`，不是 `Monster` 也不寻路），可用 `/summon minecraft:phantom` 或幻翼刷怪蛋生成；白天在露天会像亡灵一样着火（`#burn_in_daylight`），被玩家打死给 5 点经验、按 `entities/phantom` 掉幻翼膜。20 点血、跟随 16；`size` 0–64 存档并同步，尺寸按 `1 + 0.15 * size` 缩放（眼高一起缩放），攻击力基础值 `6 + size`（`setPhantomSize(0)` 不触发更新，所以大小 0 的幻翼仍是 2 点攻击）。AI 照官方四个目标：目标选择器每 60 刻扫描一次 64 格内、碰撞箱外扩 (16, 64, 16) 的玩家（按 Y 从高到低，`forCombat`），`PhantomAttackStrategyGoal` 把锚点放到目标头上 20–39 格（低于海平面时改到海平面上一格）、倒数 5 刻后转入俯冲并按 `(8 + nextInt(4)) * 20` 折半排下一次，放 `entity.phantom.swoop` 音效；`PhantomSweepAttackGoal` 朝目标身体中间飞，0.2 格接触就咬一口（攻击力、世界事件 1039），撞墙或刚受伤也回到盘旋；`PhantomCircleAroundAnchorGoal` 每刻以 15° 绕锚点转，距离 5–15、高度 -4..5，350 / 250 / 450 折半的随机重抽，到点或上下被方块挡住时重选。`PhantomMoveControl` 每刻最多转 4°、速度在 0.1 / 1.8 / 0.2 之间逼近，速度往新方向混合 20%，`travel` 是 `travelFlying(0.2)`：水 0.8、岩浆 0.5、空气 0.91，没有重力。**幻翼刷怪器**（`PhantomSpawner`，主世界每刻）：`spawnMobs` / `spawnMonsters` / `spawnPhantoms` 都开、`nextTick` 倒数到 0（`(60 + nextInt(60)) * 20`）后，夜里 / 雷暴或没有天空光、非旁观者、海平面以上且看得见天、区域难度大于 `nextFloat() * 3`、`clamp(TIME_SINCE_REST, 1, MAX)` 的 `nextInt` 至少 72000，才在玩家头顶 20–34 格、水平 ±10 格找一个空位，按 `1 + nextInt(difficulty + 1)` 只数逐只生成并 `finalizeSpawn`（锚点头上 5 格、大小 0）。`TIME_SINCE_REST` 补了最小实现：不睡觉每刻 +1（int 环绕）、入睡清零、死亡清零；没有写原版 `stats/<uuid>.json`，重启后从 0 重新累计。`mob-oracle --only phantom`（4 个刷怪器场景 + `phantom_hunt` 盘旋 / 俯冲 / 咬中 + `phantom_burn` 白天着火，6 例 534 刻）0 不一致；两个改坏确认（刷怪器整段不跑、出生点高一格）都能抓到。全量 `mob-oracle` 1841 例 190745 刻、`--only natural_spawn` 746 例 2984 刻，0 不一致。对拍还暴露并修了一个公共同步问题：`Entity.push` 推开自己那一半时官方置 `needsSync`，Bamboo 之前只改速度；现在生物互推的两半都会置位（不改变推开的位移）。已知限制：幻翼怕猫的 `PhantomSweepAttackGoal` 分支没有建模（16 格内的猫搜索和 `cat.hiss()` 都不做，不会被吓跑）；刷怪器 / `nextTick` 按岛保存，拆岛时两边从同一个倒数继续、并岛时保留吸收方的，而官方整个主世界只有一个刷怪器；客户端专用的扇翅音效、`MYCELIUM` 粒子和 `isFlapping` 不在服务端；`moveTargetPoint` / `attackPhase` / `PhantomMoveControl.speed` 不存档（官方也不存）。
+- **鳕鱼 / 鲑鱼 / 热带鱼 / 河豚**：`WaterAnimal` → `AbstractFish` 一支，可用 `/summon` 和刷怪蛋生成，并会自然生成（`WATER_AMBIENT`：`IN_WATER` 落点 + 海平面下 13 格内、下面是水、上面是水方块；热带鱼在繁茂洞穴仍要求上下水，但不限海平面高度）。3 点血；水下用 `WaterBoundPathNavigation`（`SwimNodeEvaluator`，不允许跃出水面），`FishMoveControl` 每刻上浮 0.005、速度按 0.125 插值；`travelInWater` 推进 0.01、乘 0.9、没有目标时每刻下沉 0.005；离水落在方块上会扑腾（`cod.flop` 等，取两次 `nextFloat` 定音高）并重设 `needsSync`；氧气按 `WaterAnimal.handleAirSupply` 掉，到 -20 受 2 点溺水伤害。目标：0 惊慌、4 `RandomSwimmingGoal`（`BehaviorUtils.getRandomSwimmablePos`，最多 11 次抽点）、5 `FollowFlockLeaderGoal`（成群）；河豚多一个 1 `PufferfishPuffGoal`。鲑鱼的花纹（small / medium / large，权重 30/50/15）按尺寸缩放并同步、存 `type`；热带鱼的花纹打包值（低 16 位花纹、16–23 底色、24–31 花纹色，22 个常见组合由官方导出）按组共享、存 `Variant`；河豚 `PuffState` 0/1/2 决定尺寸、膨胀时蜇附近生物（1+状态点伤害 + 60×状态刻中毒）并存 `PuffState`；河豚没有叫声（`makeSound(null)` 不取音高随机数）。鱼群按 `FollowFlockLeaderGoal` 跟随同种的领头鱼（8 格内、最多到各自的 `getMaxSchoolSize`）。自然生成按官方 `getMaxSpawnClusterSize`（鳕鱼 / 热带鱼 8、鲑鱼 5、河豚 8）和 `TropicalFish.isMaxGroupSizeReached`（单条不成群时一组只出这一条）收尾；`WATER_AMBIENT` 的 `canSpawnFarFromPlayer` 为假（离玩家超过 64 格不刷），鱼不是 `Animal` 所以 `getWalkTargetValue` 取 0。桶装（`Bucketable`）：拿水桶右键活鱼会放 `item.bucket.fill_fish`、把鱼从世界拿掉并换给玩家对应的鱼桶，`bucket_entity_data` 存 `NoAI` / `Silent` / `NoGravity` / `Glowing` / `Invulnerable` / `PersistenceRequired` / `Health`，鲑鱼的 `salmon/size`、热带鱼的三个花纹组件另存；倒鱼桶先放水源再按 `MobBucketItem.spawn` 放出 `FromBucket = true` 的鱼（朝向取 `level.random`，`finalizeSpawn` 用 `BUCKET` 原因，再套组件和 `loadFromBucketTag`），发射器倒鱼桶同样会生成鱼。逐刻对拍见 `mob-oracle --only cod` / `salmon` / `tropical` / `puffer` / `natural_fish`。已知限制：玩家附近 8 格内的 `AvoidEntityGoal`（优先级 2）未建模；鱼群的初始跟群倒计时在官方是构造函数里从实体随机源抽的（那时还没有种子），这里固定为折半后的 100；`Pufferfish.playerTouch`（玩家碰到被蜇）未接；水花声（`entity.fish.swim`）现在和其他生物一样按体积发 `ClientboundSoundPacket`。
+- **海豚 / 美西螈**（分支 `op-water`，2026-11-21）：海豚是 `AgeableWaterCreature`（`AgeableMob` 但不是 `Animal`），美西螈是 `Animal` + `Bucketable`，都可用 `/summon` 和刷怪蛋生成，也会自然生成（海豚 `WATER_CREATURE`：和鱿鱼同源的 `checkSurfaceAgeableWaterCreatureSpawnRules`，`IN_WATER` 落点、海平面下 13 格以内、下面是水、上面是水方块；美西螈 `AXOLOTLS` 类别：`IN_WATER` 落点、脚下是 `axolotls_spawnable_on` 黏土，`checkSpawnObstruction` 只剩 `isUnobstructed`、不查液体）。海豚 10 血 / 1.2 移速 / 3 攻击，满氧气 4800、`handleAirSupply` 覆写成空（氧气走 `LivingEntity.baseTick`）、`increaseAirSupply` 直接回满；`SmoothSwimmingMoveControl` + `SmoothSwimmingLookControl` + `WaterBoundPathNavigation`（`allowBreaching = true`，唯一能跃出水面的水生生物）；`travelInWater` 是 `moveRelative` + `move(SELF)` + ×0.9，没有攻击目标时每刻下沉 0.005；`Dolphin.tick` 在 `super.tick()` 后管湿度 `Moistness`（2400，在水里 / 雨里回满，否则每刻减一、到 0 受 1 点 `dry_out`）、`isNoAi()` 把氧气回满、离水着地扑腾（两个 `nextFloat` 定水平速度、一个定 `yRot`、置 `needsSync`）。美西螈 14 血 / 1.0 移速 / 2 攻击 / 台阶高 1，满氧气 6000，`handleAirSupply` 在水里 / 雨里回满、否则 `preTick - 1`、到 -20 归零并受 2 点 `dry_out`，两栖寻路（`AmphibiousPathNavigation`）、`travelInWater` 没有重力项；五花色（0 lucy / 1 wild / 2 gold / 3 cyan / 4 blue 稀有），`finalizeSpawn` 从世界随机源抽两个常见花色作组数据、再抽一个给这一只，一组第三只起是幼年、`BUCKET` 原因直接返回；`hurtServer` 按官方短路判定置 `PLAY_DEAD_TICKS = 200`，`customServerAiStep` 映射成 `playingDead` 元数据，叫声水里 `idle_water` / 水外 `idle_air`、装死时不叫；装桶走 `Bucketable`（`item.bucket.fill_axolotl`，`bucket_entity_data` 存 `Variant` / `Age` / `AgeLocked`，有捕猎冷却时再存剩余刻 `HuntingCooldown`），倒桶 / 发射器放出 `FromBucket = true` 的美西螈；喂热带鱼桶按 `Axolotl.usePlayerItem` 交回一个水桶（生存模式扣掉桶里的鱼，创造模式手里不变）。海豚 `GotFish` / `Moistness`、美西螈 `Variant` / `FromBucket` 存盘并同步（`GOT_FISH`(18) / `MOISTNESS_LEVEL`(19)、`DATA_VARIANT`(18) / `DATA_PLAYING_DEAD`(19) / `FROM_BUCKET`(20)）；拿鱼右键海豚：幼年加速长大、成年置 `gotFish`，消费一条鱼。死亡按 `entities/dolphin` / `entities/axolotl` 掉战利品表，经验按 `Animal` / `AgeableWaterCreature.getBaseExperienceReward`（`1 + nextInt(3)`）。逐刻对拍：`mob-oracle --only dolphin` / `--only axolotl`（海豚 4 场景 804 刻、美西螈 4 场景 804 刻，两边设 `NoAI`、同一实体随机源种子，逐位比位置 / 速度 / 朝向 / 随机源 / 氧气 / 年龄 / 着地 / 在水里 / 各自元数据 / 尺寸 / 世界随机源，0 不一致；海豚场景还逐字比官方 `goalSelector` 注册表：每个目标的优先级、类名、标志位掩码，14 个目标与 `targetSelector` 的次序一致），`--break-self-test water_mob` 故意改坏 `gotFish` / `playingDead`、`--break-self-test dolphin_goals` 清空海豚目标注册表都能被抓到；自然生成夹具 `dolphin_ocean` / `axolotl_lush` 在 `mob-oracle --only natural_spawn` 里比类型、坐标、朝向、幼年、花色和随机源，0 不一致。已知限制：官方 `Dolphin.registerGoals` 的十四个目标（`BreathAirGoal`、`TryFindLiquidGoal`、引路去宝藏的 `DolphinSwimToTreasureGoal`、给玩家海豚恩惠 `DOLPHINS_GRACE` 的 `DolphinSwimWithPlayerGoal`、`RandomSwimmingGoal`、`RandomLookAroundGoal`、`LookAtPlayerGoal`、`DolphinJumpGoal`、`MeleeAttackGoal`、`MoveToItemGoal`、`PlayWithItemsGoal`、跟船 / 鹦鹉螺的 `FollowPlayerRiddenEntityGoal`、躲守卫者的 `AvoidEntityGoal`）和 `targetSelector` 的 `HurtByTargetGoal` 已建成真目标（`dolphin.rs` / `dolphin_goals.rs`，优先级、类名、标志位、注册次序照官方；`DolphinJumpGoal` 继承 `JumpGoal` 锁 MOVE|JUMP），不再是 `Unavailable` 占位。`canUse` / `canContinueToUse` / `start` / `tick` 按官方翻译，但 `findNearestMapStructure`、船 / 鹦鹉螺、掉落物实体、游泳玩家、`DOLPHINS_GRACE` 药水效果这些设施本仓库还没接，依赖它们的分支按 `fox_goals` 的既有做法保住取数次数与顺序后返回假，所以引路去宝藏 / 沉船、给玩家海豚恩惠、捡物、躲守卫者仍不会发生。**goalSelector 没有逐刻对拍**：夹具开 `NoAI` 只核对注册表与 NoAI 分支，真跑目标所需的 `WaterBoundPathNavigation` / `SmoothSwimmingMoveControl` / `DefaultRandomPos` 落点 / 标志位锁定保真没有逐刻验证；跃水（`DolphinJumpGoal`）与呼吸换气（`BreathAirGoal` / `TryFindLiquidGoal`）虽是真实逻辑，也未和官方逐刻比较。美西螈官方用 Brain（`AxolotlAi`）驱动、没有 `goalSelector`，Bamboo 现在按官方挂了大脑（`axolotl/ai.rs`）：五个传感器（`NearestLivingEntitySensor`、`AdultSensor`、`HurtBySensor`、`AxolotlAttackablesSensor`、`TemptingSensor`，顺序照 `BRAIN_PROVIDER`）和四个活动（`core` / `idle` / `fight` / `play_dead`，优先级、行为表、进入条件、退出时清的记忆照 `AxolotlAi`）；捕猎走 `AxolotlAttackablesSensor`（8 格内、在水里、`#axolotl_always_hostiles` 或没有 `HAS_HUNTING_COOLDOWN` 时的 `#axolotl_hunt_targets`）→ `StartAttacking` → `FIGHT`（`StopAttackingIfTargetInvalid`、`SetWalkTargetFromAttackTargetIfTargetOutOfReach`、`MeleeAttack(20)`、繁殖时清目标）→ 打中走 `Mob.doHurtTarget`；退出战斗时 `updateActivity` 记 2400 刻捕猎冷却；游泳走 `TryFindLiquid(6, 0.15, #axolotl_tries_to_find)` 和 `RandomStroll.swim(0.5)`，水陆速度按 `getSpeedModifier` 0.5 / 0.15、追击 0.6 / 0.15；装死按 `PlayDead`（200 刻，开始时清目标、给 200 刻等级 0 的 `REGENERATION`）和 `ValidatePlayDead.create`（每刻递减 `PLAY_DEAD_TICKS`，到 0 清记忆）在 Brain 里跑，`customServerAiStep` 尾部只把记忆映射成 `playingDead` 元数据。`mob-oracle --only axolotl` 的四个场景除 NoAI 逐刻外还逐字比大脑的结构表（传感器类名 / 扫描间隔 / 必需记忆、行为表的优先级 / 活动 / 类名与官方遍历顺序、活动进入条件、退出时清的记忆），`--break-self-test axolotl_brain` 加一个假传感器能抓到；**大脑的行为没有逐 tick 对拍**（夹具开 `NoAI`，Brain 不跑），捕猎 / 游泳 / 装死的运行时表现只有单元测试和结构表覆盖；繁殖（含 1/1200 蓝色）的产品花色抽取 `getBreedOffspring` 已按官方实现（稀有蓝时 `getRareSpawnVariant` 从单元素名单再抽一次，两条分支都恰好两次取数；`mob-oracle --only axolotl_breed` 43 例逐题比花色与取数后父亲随机源，0 不一致），`Axolotl.onStopAttacking` 给击杀者附近 20 格玩家加再生、`swingForAttack` 挥手动画、`TemptingSensor` 之外的捡物细节还没建模；拴绳（`canBeLeashed`）、刷怪蛋对着水面用、游泳粒子 / 动画、`SWIM` 游戏事件、`DOLPHINS_GRACE` 效果落地、死亡掉落的逐题 loot-oracle 都没做。
+- **海龟**（分支 `op-water`，2026-11-21）：`Animal` 一支，可用 `/summon` 生成，也会自然生成（`CREATURE`：`ON_GROUND` 落点，脚下是沙子、亮度 > 8、海平面 +4 以下）。30 点血、0.25 速度、台阶高度 1；两栖寻路（`AmphibiousPathNavigation` + `AmphibiousNodeEvaluator`：水里也能走，接受上下两个水邻居，贴着 `BLOCKED` 的水算 `WATER_BORDER`）；`travelInWater` 推进 0.1、乘 0.9，没目标且不在回家附近时每刻下沉 0.005；`nextStep` 是 `moveDist + 0.15`。能在水下呼吸（`#can_breathe_under_water`），游泳声是 `entity.turtle.swim`（音量 ×1.5）。`TurtleMoveControl`：水里每刻上浮 0.005、离家 16 格外速度减半（不低于 0.08）、幼年再除以 3（不低于 0.06），地上速度减半（不低于 0.06），走向目标时速度按 0.125 插值并按高度差补竖直速度，不跳。目标按官方优先级：0 惊慌（先找 7 格内的水）、1 繁殖、1 产卵、2 诱惑、3 找水（`TurtleGoToWaterGoal`，24 格内、脚下两格那一层的水，陆地上的幼年总会找）、4 回家、7 远行（`TurtleTravelGoal`：在水里朝 ±512 格的随机远点一段段游，有远行目标时 `TurtlePathNavigation` 只把水格当落点）、8 看玩家、9 随机漫步（水里、回家途中、身上有蛋时不逛）。两栖寻路在水里按 `AmphibiousNodeEvaluator.getStart` 从包围盒最小角起步。家方块在 `finalizeSpawn` 和读档时记下（`home_pos`）；求爱成功不生成幼崽，母亲挂上 `has_egg`（同步 `HAS_EGG`，存 `has_egg`），6000 刻后不冷却；回家 9 格内、站在沙子上时按 `TurtleLayEggGoal` 放下 1–4 只海龟蛋（`HATCH` 从 0 起、音效音高取世界随机源）；蛋的随机刻按 `TURTLE_EGG_HATCH_CHANCE` 推进 `HATCH`，第三阶段孵出 `EGGS` 只带家方块的幼年海龟；长大成人时按 `entities/turtle_grow` 掉鳞甲。受伤 / 死亡音分幼年，叫声只在成年、水外、站在地上时发（其余不取音高随机数）。已知限制：远行目标检查落点周围 34 格的区块（`hasChunksAt`），Bamboo 的实体视图把所有区块都当作已加载；蛋在三更半夜的孵化概率按 `Timelines` 的 21062–21905 刻用 1.0，其余时段用 0.002，没有建模其它时间线属性；`TurtleEggBlock` 的 `stepOn` / `fallOn` 踩碎已实现（`stepOn` 100 分之一、`fallOn` 3 分之一，只有僵尸一系落地豁免、海龟不踩，`mob_griefing` 关掉时不踩，`--only zombie_turtle_egg` 8 例 3220 刻 0 不一致）；玩家破坏掉蛋（`playerDestroy` 的 `decreaseEggs`：一次只减一枚，没有精准采集时战利品表不掉东西）和 `getShape` 的蛋数形状没做。逐刻对拍：`mob-oracle --only zombie_turtle_ai`（沙滩找水两个种子、幼年、水下远行，共 1500 刻 0 不一致）；`--only zombie_turtle_egg`（带蛋产卵三个种子、离家 12 格回家，外加既有的僵尸踩蛋场景，共 8 例 3220 刻 0 不一致，逐刻比带蛋 / 正在产卵 / 产卵计数 / 回家标志 / 家方块和整张方块表散列，Java 侧有「确实产下蛋」的覆盖断言，`--break-self-test turtle_egg` 故意改坏抓到 12 处不一致）。孵化仍只有方块行为的单元测试：会生成实体的随机刻被 `oracle` 明确排除（`EntityRandomTick`），没有逐刻场景。
+- 玩家手持弓右键拉弓，松手按 `getPowerForTime` 射出，满弓暴击；创造模式或无限附魔按官方 `useAmmo` 决定是否消耗箭，无限附魔只对普通箭生效，省下的箭标记为只能创造模式拾取。力量 / 冲击 / 火矢 / 穿透附魔和耐久损耗已接入。弩要先装填（`charged_projectiles` 组件，快速装填 II 缩短到 15 刻），装好后再次右键射出；多重射击一次三发、只消耗一支箭。发射器对准箭、药水箭和光灵箭时生成真的箭实体并播放 1002。药水箭命中后按 `PotionContents.forEachEffect` 施加效果（`potion_duration_scale` 生效），光灵箭给 200 刻发光。弓和弩成功开火各计一次 `Stats.ITEM_USED`，客户端请求时回同步；一组多重射击仍只计一次。
+- **箭和骷髅的已知限制**：没有自然刷怪、骷髅变体，或铁傀儡和小海龟的具体行为（骷髅会躲狼，狼也会追骷髅）。弩未接烟花火箭和 `SHOT_CROSSBOW` 进度。开火统计不写原版 `stats/<UUID>.json`，也不更新统计计分板目标；玩家用物标志已同步，但没有官方开始使用时立即同步装备的专门路径。弓继承已接受的客户端位移（在地面时去掉竖直分量）；弩不继承。跨维度和载具上的射手位移未对拍。快速装填音效标志按玩家使用状态存放，不复现官方 `CrossbowItem` 共享实例的多玩家交错。药水箭连续插地 600 刻后按 `Arrow.tick` 褪色：广播实体事件 0，拾取物变回普通箭，颜色回到 -1；`inGroundTime` 不进存档，读档后重新计数，和官方一样。药水箭的瞬间效果（治疗 / 伤害）对生物当场结算，对玩家走延后的 `Effect::PlayerEffect`；`Effect` 落地比官方 `addEffect` 晚一个实体阶段（同一刻内）。箭不触发标靶、木按钮、振动或命中特效；未建模的载具、盾牌弹反和组队/PVP 规则也不参与命中。箭支持只关闭重力、仍保留碰撞的 `NoGravity`，但未实现独立的 no-physics 飞行分支。水体熄火按整格水平范围近似流体形状，流动水可能和官方不同；目前只对箭和扔出的蛋做这条判定。未同步受击者身上插着的箭数量。骷髅生成按现实本地日期判断万圣节；同类武器重装备后仍不强制重建正在运行的目标。骷髅装备掉率的抢夺取致因玩家命中时的主手（包括玩家拥有的箭）；尚不支持无法在本岛解析的致因玩家及自定义掉落附魔效果。精确模式当场落地命中，并行模式用本刻快照取首批碰撞候选，穿透后的重查发生在命令落地时、看到的是落地时刻的实体表，目标在同一刻移动或失效时可能不同。
+- `/summon minecraft:rabbit` 和兔子刷怪蛋生成兔子：按群系选品种（雪地白兔/白斑兔、沙漠金兔，其余棕/盐/黑），用自己的移动和跳跃控制一跳一跳地走，躲玩家（8 格）、狼（10 格）和敌对生物（4 格），会爬出细雪、啃成熟胡萝卜（`mobGriefing`），吃胡萝卜/金胡萝卜/蒲公英繁殖，幼崽按 1/20 取群系品种、否则随机继承父母一方。存档写 `RabbitType`、`MoreCarrotTicks`，网络同步品种和跳跃事件。`mob-oracle --only rabbit_` 11 个场景逐刻 0 不一致，`loot-oracle --entity-table minecraft:entities/rabbit` 0 不一致。
+- **兔子的已知限制**：杀手兔（品种 99）读写品种号，但不加护甲、攻击目标和名字，行为和普通兔子一样；「躲」的目标只认玩家、狼、僵尸/尸壳/骷髅（其余敌对生物还没有）；躲避取点用平台的 `sin`/`cos`，和 Java `Math.sin` 理论上可能差一位。
+- `/summon minecraft:fox` 和狐狸刷怪蛋生成狐狸：`finalizeSpawn` 按群系定红狐/雪狐，20% 叼一件东西，并按品种加捕猎目标（和官方一样，直接构造或繁殖出来的狐狸要读盘后才会捕猎）。白天有遮挡、周围没人时睡觉，夜里会尖叫；躲玩家（16 格，潜行和信任的玩家除外）；盯梢兔子、蹲下、扑跳，扑进雪层会脸朝下栽进去；吃浆果丛和发光浆果、捡地上的东西（多的放回、旧的吐出去）、叼满 600 刻后吃掉吃的；坐着四处张望；喂甜浆果/发光浆果繁殖，幼崽信任两边的喂食者。存档写 `Trusted`、`Sleeping`、`Type`、`Sitting`、`Crouching`，网络同步品种、标志和两个信任格。`mob-oracle --only fox_` 11 个场景逐刻 0 不一致，`loot-oracle --entity-table minecraft:entities/fox` 0 不一致。
+- **狐狸的已知限制**：没有村庄 POI，`StrollThroughVillageGoal` 只取随机数、`SeekShelterGoal` 的「在村里」恒假；保护信任对象（`DefendTrustedTargetGoal`）拿不到玩家的 `getLastHurtByMob`，只取随机数不触发；捕猎鱼、小海龟和躲避北极熊的目标只注册不命中（躲狼已接上，驯服的狼不躲；鸡已接上：狐狸会盯梢、扑跳和捕猎鸡，鸡也会让狐狸警觉，`fox_hunt_chicken` 场景逐刻对拍过）；吃东西只算 `Consumable` 的随机数、声音和减一个，不应用吃后效果（`on_consume_effects`）也不换 `use_remainder`；捡东西不发 `take_item_entity` 包、不记 `thrower`；刷怪蛋对着成年狐狸生幼崽时的信任没接；`Fox.FoxAlertableEntitiesSelector` 对生物只排除别的狐狸和已驯服的动物（生物的睡觉/潜行状态还没有）；对拍里兔子死后的掉落物 Java 一侧不进实体表，捕猎场景在狐狸去捡之前结束。生物捡东西（`Mob.aiStep` 那一段）只给狐狸实现，僵尸/骷髅的 `CanPickUpLoot` 仍不生效。
+- 兔子和狐狸新增的公共机制：`entity/mob/avoid.rs`（`AvoidEntityGoal`，带狐狸的过滤条件）、`LeapAtTargetGoal`、`MeleeAttackGoal` 的 `followingTargetEvenIfNotSeen`、目标的 `isInterruptable`、能在细雪上走的生物（`powder_snow_walkable_mobs` 或皮革靴）的碰撞和攀爬、所有生物 `jumpFromGround` 的 `needsSync`。近战范围按官方 `getAttackBoundingBox` 只水平膨胀（以前竖直也膨胀了）。
+- `/summon minecraft:wolf` 和狼刷怪蛋生成狼：`finalizeSpawn` 按 `wolf_variant` 的群系条件选品种（森林、草原、丛林、恶地等八种，其余苍白狼），七种叫声随机一种。野狼闲逛、讨食（盯着拿骨头或肉的玩家歪头）、追兔子和狐狸、打骷髅；被打后记仇 20–39 秒并呼叫附近同主人的狼一起上，仇恨按 `anger_end_time` / `angry_at` 存盘和同步。骨头驯服（狼自己的随机源 1/3，事件 7/6），驯服后最大生命 40、回满并坐下；主人空手右键切换坐下/起身；喂肉按营养值的两倍回血；染料换项圈色；离主人 10 格以上跟随、12 格以上瞬移到主人身边（恐慌时也会瞬移）；主人被打或主人打了谁，没坐着的狼去咬（玩家的 `lastHurtByMob` / `lastHurtMob` 由游戏层记录）；驯服的狼咬死的东西算主人的。两只驯服、发情、没坐着的狼繁殖，幼崽继承主人，项圈色按合成配方混色。淋雨或下水变湿，上岸后抖水（事件 8/56）。存档写 `Owner`、`Sitting`、`CollarColor`、`variant`、`sound_variant`、`anger_end_time`、`angry_at`，网络同步驯服标志、主人、讨食、项圈、仇恨结束时刻、品种和叫声（尾巴高度由客户端按同步的血量算）。`mob-oracle --only wolf_` 12 个场景逐刻 0 不一致，`loot-oracle --entity-table minecraft:entities/wolf` 0 不一致。
+- **狼的已知限制**：狼铠（装备、吸收伤害、开裂、用犰狳鳞甲修）没做，拿着狼铠右键会当成空手切换坐姿；`universalAnger` / `forgiveDeadPlayers` 规则 Bamboo 没有，按官方默认（关 / 开）的效果处理，`ResetUniversalAngerTargetGoal` 恒不启动，玩家死后不主动原谅；读盘时 `angry_at` 只记 UUID、不当场把它设成目标，旧版 `AngerTime` 不换算；按名字存的旧主人（`OldUsersConverter`）不转换；驯服的狼死亡时不给主人发死亡消息，`TAME_ANIMAL` 进度不触发；野狼会追羊（`wolf_hunt_sheep` 场景逐刻对拍过）；海龟、苦力怕、恶魂仍未实现；狼躲羊驼（`WolfAvoidEntityGoal` 按羊驼力量）、羊驼打野狼（`LlamaAttackWolfGoal` 四分之一跟随距离）和「保护主人时排除驯服马科」（`Wolf.wantsToAttack`）都已接入，但这三条没有专属逐刻对拍场景，只过回归场景；拴绳、骑乘不存在，`unableToMoveToOwner` 只看坐下和主人是不是旁观者；主人只按玩家找；玩家用弓箭命中时不记 `lastHurtMob`（只记近战），所以「主人射谁狼就咬谁」不触发；生物被玩家推开时只算生物那一半，推挤顺序按「先玩家后生物」，和官方实体分区的顺序可能不同；`CollarColor` 只认字节标签；两只狼繁殖没有逐刻对拍（夹具只比场景原有的生物，幼崽不在比对范围里），试做过的繁殖场景从第 162 刻起位置发散（官方停在同伴旁边、Bamboo 继续走了约 0.15 格），原因没查。
+- 狼带来的公共机制：`entity/mob/tame.rs`（可驯服动物：驯服 / 坐下 / 跟随主人 / 保护主人 / 瞬移，猫和鹦鹉可以直接用）、游戏层 `player_combat_memory.rs`（玩家的 `lastHurtByMob` / `lastHurtMob`）、生物被重叠的玩家推开、兔子 / 狐狸 / 骷髅躲狼、动物同步攻击性位。
+- **兔子、狐狸、狼的自然生成**：三种都接进了运行时自然刷怪和生成期刷怪。刷怪规则是各自的方块标签（`#rabbits_spawnable_on` / `#foxes_spawnable_on` / `#wolves_spawnable_on`）加原始亮度 > 8；狐狸的放置方式是 `NO_RESTRICTIONS`，狼一簇最多 8 只。`finalizeSpawn` 的组数据在 `entity/mob/wild_spawn.rs`：兔子一组共用第一只的品种、第二只起都是幼崽（`RabbitGroupData`，幼年概率 1.0，那一次 `nextFloat` 照取）；狐狸一组共用品种、第三只起是幼崽（`FoxGroupData`）；狼群共用品种、叫声各抽各的、不生幼崽（`WolfPackData`）。`MobType::by_entity_type` 现在认所有建模了的动物，所以猪、羊、鸡也真的会自然刷出来（之前只有牛）。`mob-oracle --only gen_spawn` 加了针叶林和雪地针叶林场景（7000 例：类型、坐标、朝向、幼年、左撇子、品种、狼的叫声、狐狸叼的物品，0 不一致；另要求牛、猪、羊、鸡都实际比到生成品种），`--only natural_spawn` 加了猪、羊、鸡和三种野生动物的场景（整组 252 例 1008 刻 0 不一致）。**已知限制**：品种的群系条件（兔子的两个群系标签、狐狸的雪地标签、狼的八条）是照官方手写的，数据包改了不会跟；对拍用的是公式地形和固定群系，没有拿官方真实世界逐区块比过。
+- 马、驴、骡、羊驼（`entity/mob/equine*`）：`/summon` 和刷怪蛋按官方 `finalizeSpawn` 随机血量、速度、跳跃、花色和羊驼力量；繁殖按 `createOffspringAttribute` 遗传三项属性，马和驴生骡；吃草、甩尾、自然回血、扬蹄（`RandomStandGoal`、受伤 1/3 概率）、不爬梯子和藤蔓（`AbstractHorse.onClimbable` 恒假）、官方目标表；喂食加脾气、驯服后的发情，没驯服时拿东西右键发脾气，驴骡羊驼装箱子，鞍、马铠和羊驼地毯，幼马走 `interactOn` 的兜底也能套鞍；剪刀右键卸下穿戴的装备（`Mob.attemptToShearEquipment`，按 `EquipmentSlot.VALUES` 顺序先身体后鞍、在 `PASSENGER` 附着点均值处掉落、播组件里的 `shearing_sound`、生存扣 1 耐久并受绑定诅咒限制，潜行或被骑时跳过）；潜行右键驯服的个体打开坐骑物品栏（`mount_screen_open` + `HorseInventoryMenu` 的鞍、身体、箱子格和 Shift 点击路由，穿装备时照官方两次 `onEquipItem`）；马、驴、骡摔落超过 1 格播落地声；脚步按官方 `playStepSound` 取脚下方块的声音类型（上面盖着雪层算雪，木头是 `horse.step_wood`），被骑着的马按 `gallopSoundCounter` 在前五步后每三步播奔跑步声（每次用马自己的随机源判定 1/10 的喷气声），羊驼恒为 `llama.step`；羊驼被打后回击（`LlamaHurtByTargetGoal` + `RangedAttackGoal`），吐出 `llama_spit` 实体（飞行、命中扣 1 点、存档 NBT 和同步包按官方），吐一口就停；繁殖出生标记 `Bred` 的幼崽按 `followMommy` 给最近的同类算路径；死亡掉落战利品表、鞍、马铠、地毯、箱子和箱子里的东西；实体元数据、存档 NBT 都按官方。对拍：`mob-oracle --only equine`（生成、繁殖、含剪刀的 504 题交互、40 题死亡、12 题存档往返，共 684 题，含 `set_entity_data` 字节）、`--only zombie_equine`（22 个逐刻场景，含 4 个甩人、4 个当场驯服、以及羊驼近距锁定野狼 / 远距不锁定而野狼躲羊驼 2 个场景）和 `--only llama_spit`（2 个 160 刻的吐口水场景，逐刻比羊驼、口水和玩家血量，以及口水的同步包）；口水的存档在 `chunk-content` 里和官方逐键比。
+- **马科的已知限制**：**骑乘只做了一部分**——右键成年个体上马、未驯服的马科会乱跑并按脾气判定驯服（失败则甩下骑手并加 5 点脾气）、潜行下马、下马时按官方 `getDismountLocationForPassenger`（含 `DismountHelper.canDismountTo` 世界边界检查）在载具两侧找落脚点、下车后 60 刻内不能再上（`boardingCooldown`）、`set_passengers` 同步、骑手位置跟随载具（含扬蹄 `standAnimO` 偏移）、载具位置由客户端的 `move_vehicle` 决定、`start_riding_jump` 的扬蹄和跳跃声、骑乘时按物品栏键打开坐骑物品栏（`OPEN_INVENTORY`）都在。载具位置按官方 `handleMoveVehicle` 校验：夹取、`wrapDegrees`、100 平方格的「移动太快」、`move(MoverType.PLAYER)` 的方块扫掠、和包里位置 0.25 格的 `moved wrongly` 容差，以及 `noCollision(oldAABB)` 的放行分支。没上鞍的载具能骑，但控制权不在客户端（`tickPlayer` 只在 `getControllingPassenger()` 是自己时才记 `lastVehicle`），位置由它自己的 AI 决定，`move_vehicle` 报的位置按「超过一格或离上次重置 20 刻」发回去。**没做**：`isEntityCollidingWithAnythingNew`（Bamboo 的实体之间没有碰撞，撞别的生物不拉回）；载具的摔落伤害和 `clientVehicleIsFloating` 检测；受客户端控制的载具走 `move_vehicle` 时未执行 `Entity.move` 的脚步声与移动振动；发射器给驯服马科装备鞍 / 马铠 / 地毯（`AbstractHorse.canDispenserEquipIntoSlot`，发射器目前只看玩家）；玩家下线时载具跟着 `RootVehicle` 存进玩家档（重进后站在地上）；岛拆分时把「载具 + 骑手」当成不可分的一组（现在两者位置相同，通常落在同一个岛，边界上可能被拆开）。跳跃本身由客户端模拟，服务端只播声音和扬蹄（和官方服务端一致：官方 `START_RIDING_JUMP` 只调 `AbstractHorse.handleStartJump`，真正的冲量 `tickRidden`→`executeRidersJump` 因 `Player.isClientAuthoritative()` 恒真、`isLocalInstanceAuthoritative()` 在服务端为假而只在客户端算；`playerJumpPendingScale` / `allowStandSliding` / `getRiddenInput` 是客户端权威的内部量，Bamboo 服务端不建模，位置由 `move_vehicle` 提供，无玩家可感知差异）。坐骑物品栏的点击逻辑只有单元测试，没有和官方菜单逐题对拍；鞍位和身体位不看绑定诅咒（和玩家盔甲槽一样；剪刀卸装已按官方看绑定诅咒），交互距离按属性默认值加创造模式修饰算，不读玩家被命令改过的属性。马科不播方块的通用落地声（`SoundType.getFallSound`，Bamboo 的生物都还没有），只有自己的 `horse.land`。羊驼不组商队（`LlamaFollowCaravanGoal` 是不取数的占位）；`LlamaAttackWolfGoal` 和 `WolfAvoidEntityGoal` 已有专属逐刻对拍场景（`zombie_equine_llama_wolf_near` / `_far`），驯服狼保护主人时排除驯服马科（`Wolf.wantsToAttack`）只有单元测试；口水打到方块时不调方块的 `onProjectileHit`（和箭一样，标靶、钟、紫颂花不响应），着火口水每 20 刻的 `onFire` 受伤没建模（口水一碰非空气方块就消失，实际烧不起来）。幼崽拿金蒲公英只看交互那只手。装备音效的种子取自生物随机源的 `nextLong`，但发出的包用的是区域的种子源。存档里 `attributes` 列表的顺序和官方的哈希表顺序不同（读档不看顺序）。
+- **大脑 AI**（`entity/mob/brain/`）：官方 `Brain` 的 Rust 版，给不用 `GoalSelector` 的新生物用。记忆带可选过期时间（`ExpirableValue`），没登记的记忆读作没有；传感器按 `scanRate` 扫描、起始延迟随机；活动带进入条件和退出时要清的记忆，`setActiveActivityToFirstValid` 换活动；行为有 `Behavior`（时长取世界随机源）、`BehaviorBuilder` 拼的一次性触发、`DoNothing`、`GateBehavior` / `RunOne` 四种。一刻顺序照 `Brain.tick`（记忆过期 → 传感器 → 按优先级启动 → 推进正在跑的），行为排列复刻官方 `TreeMap<优先级, HashMap<活动, LinkedHashSet>>` 的遍历顺序；大脑在 `customServerAiStep` 里跑，走目标选择器的生物不受影响。记忆按 `Brain.Packed` 的格式存盘（只存有编解码器的）。`mob-oracle` 逐刻比活动、正在跑的行为和全部记忆。
+- **犰狳**：`/summon`、刷怪蛋、自然刷怪和生成期刷怪（`#armadillo_spawnable_on`）；恐慌、被疾跑的玩家、亡灵或上次打它的生物吓到缩成球（`DANGER_DETECTED_RECENTLY`，偶尔窥视；官方骑乘中的玩家也算，Bamboo 没有骑乘）、缩着挨打伤害按 `(伤害 − 1) / 2` 算、跟随蜘蛛眼诱惑、繁殖、幼崽跟大人、闲逛和环顾；定时掉鳞甲，刷子刷下鳞甲（扣刷子耐久）；状态同步、`state` / `scute_time` 存盘。`mob-oracle --only armadillo_` 6 个场景逐刻 0 不一致。
+- **山羊**：`/summon`、刷怪蛋、自然刷怪和生成期刷怪（`#goats_spawnable_on`）；`finalizeSpawn` 用世界随机源（生成期用区域随机源）定长跳和冲撞冷却、2% 尖叫山羊、成年 10% 少一只角；核心、闲逛、长跳、冲撞四个活动：长跳在周围 11×11×11 里按距离平方加权抽落点（走得到的不跳）、四个角度洗牌、逐段检查碰撞、起跳 40 刻后跳出、落地减速；冲撞找最近的可冲撞目标（不是山羊、在世界边界内、能当敌人、看得见），在目标东南西北 4–7 格找走得到的起跑点、低头 20 刻后以 3 倍速冲过去，撞到活体打 `mob_attack_no_aggro` 伤害再按速度和药水击退（玩家也会被撞开），撞到 `#snaps_goat_horn` 方块掉一只角（角的乐器按 UUID 的 `hashCode` 选）；空桶挤奶，小麦繁殖（幼崽 2% 或随父母一方尖叫），摔落伤害少 10 点，长跳姿势同步并缩小碰撞箱；三个同步布尔值和 `IsScreamingGoat` / `HasLeftHorn` / `HasRightHorn` 存盘（`chunk-content` 重存对拍过，含大脑记忆）。`mob-oracle --only goat_` 7 个场景逐刻 0 不一致（闲逛、石台长跳、撞牛、撞玩家、诱惑和挤奶、撞墙掉角）。
+- **青蛙**：`/summon`、刷怪蛋、自然刷怪和生成期放置（`#frogs_spawnable_on`，亮度够）；品种按群系标签选（`#spawns_warm_variant_frogs` 暖、`#spawns_cold_variant_frogs` 冷，其余温带），`finalizeSpawn` 用世界随机源抽长跳冷却。`FrogAi` 的六个活动：闲逛（漫步、蹲叫 60 刻）、游泳（`SmoothSwimmingMoveControl`，`TryFindLand` 按曼哈顿距离找岸）、长跳（`LongJumpToPreferredBlock`：5×9×9 里加权抽落点，一半的概率优先睡莲和大型垂滴叶，活板门和流体按 `FrogAi.isAcceptableLandingSpot` 判）、伸舌头（只吃大小 1 的史莱姆类；走近到 1.75 格内把猎物拉过来，6 刻后 `doHurtTarget`，打死当场移除；走不到的记进 `unreachable_tongue_targets` 100 刻）、产卵（两只喂粘液球后其中一只怀孕，走到水边在水面放蛙卵）和惊慌。寻路是 `Frog.FrogPathNavigation`（两栖、睡莲上面算 `OPEN`、深水加代价、水边不抄近路）；水里用 `Frog.travelInWater`，摔落伤害少 5 点，不吃水流，能在水下呼吸。青蛙 `canBeABaby` 为假：组里后来的成员照样可能被 `setAge(-24000)`，但不算幼年、年龄不涨（存档也不写 `Age`），这一只在重新载入前喂不出求爱——官方就是这样。品种、姿势（蹲叫 / 长跳 / 伸舌头）和舌头目标同步给客户端，`variant` 存盘（`chunk-content` 重存对拍过，含 `is_pregnant` / `is_in_water` 记忆）。`mob-oracle --only frog_` 16 个场景逐刻 0 不一致（平地、睡莲池塘、石台长跳、水池上岸、开阔水域、吃史莱姆、玻璃罩里够不到的史莱姆、繁殖产卵、挨打和摔落、负年龄）；自然刷怪 `frog_day` / `frog_warm` / `frog_dim` 连品种和冷却一起比。
+- **蝌蚪**：`/summon`、刷怪蛋、蛙卵孵化（计划刻到点方块碎掉，孵出 2–5 只不会消失的蝌蚪）和蝌蚪桶。它是 `AbstractFish`：鱼的惊慌、躲玩家（`AvoidEntityGoal`）、随机游泳三个目标和 `TadpoleAi` 的大脑（跟随粘液球、游泳漫步）一起跑，离水扑腾、掉氧气；移动和看的控制是 `SmoothSwimmingMoveControl` / `SmoothSwimmingLookControl`。喂粘液球把剩余时间缩掉一成，金蒲公英锁住 / 解开年龄；年龄到 24000 刻变成青蛙（`convertTo`，按所在群系定品种，新青蛙不会消失）。`Age` / `AgeLocked` 存盘，`FromBucket` 恒写真，桶里带年龄。`mob-oracle --only tadpole_` 8 个场景逐刻 0 不一致（游泳、引诱加喂食和锁年龄、挨打、岸上扑腾、水里和岸上长成青蛙、装桶）。
+- **青蛙和蝌蚪的已知限制**：岩浆怪还没有，所以青蛙吃岩浆怪掉蛙明灯这条走不到（史莱姆掉一个粘液球的条件靠伤害来源带的攻击者类型，没有逐刻对拍掉落物）。长跳向量里的 `Math.sin` / `Math.cos` 用正确舍入的值：JVM 的英特尔桩代码大约每 800 次有一次差一个末位（`mc-bamboo-core` 的 `jmath`，`Math.atan2` 是 fdlibm 的逐位移植）。蛙卵被下落的方块砸碎（`entityInside`）没做；孵化没有接方块行为对拍（`Rule::TimerTick`），只有单元测试。长成青蛙之后的那只青蛙不在对拍夹具里（只比变的那一刻的移除、世界随机源和大脑）。青蛙 `age` 是负数时客户端同步的 `DATA_BABY_ID` 官方为真、Bamboo 为假（客户端对青蛙不看这一位）。行为放的声音（`level.playSound(null, body, ...)`）音源类别统一按中立发，官方产卵声是 `BLOCKS`。骆驼还没做。
+- **大脑生物的已知限制**：`RunOne` 和山羊长跳角度的洗牌在官方用不带种子的随机源（`ShufflingList` 的 `generateUniqueSeed`、`Collections` 的静态 `Random`），Bamboo 按出生时生物随机源的状态和序号算种子，对拍两边按同一公式重设；传感器起始延迟官方取 `Sensor` 的静态随机源，Bamboo 取不到同一串数，对拍按官方报的值设。官方几个静态 `TargetingConditions` 的距离跟着「最后一个扫描的传感器」的跟随距离变，Bamboo 每个生物用自己的跟随距离。并行（性能）模式下世界随机源读作 0：行为时长取最短、长跳按列表顺序抽落点。山羊冲撞的目标检测把玩家排在生物后面（官方按实体分区的顺序）；盾牌格挡减半（`applyItemBlocking`）和被撞者的 `doPostAttackEffects`（荆棘等）没做；长跳的 `noCollision` 不看船、潜影贝这类硬碰撞实体（Bamboo 还没有）；盔甲架不存在，`mobGriefing` 那一条不起作用。`Goat.setYHeadRot` 的 ±15 度夹角只在读档时做（传送没做）。山羊繁殖没有逐刻对拍（夹具只比场景原有的生物）。
+
+- **玩家左键近战攻击**按官方 26.3 `ServerGamePacketListenerImpl.handleAttack` → `Player.attack` →
+  `ServerPlayer.crit` / `magicCrit` / `getEnchantedDamage` 完整实现：攻击冷却（基础伤害
+  `×(0.2 + s² × 0.8)`、附魔加成 `× s`）、`ATTACK_SPEED` 属性与 `getCurrentItemAttackStrengthDelay`、
+  挥空 / 攻击 / 换主手物品重置冷却；`s > 0.9` 且下落中的暴击 `× 1.5`（发 `CRITICAL_HIT` /
+  `MAGIC_CRITICAL_HIT` 动画）；拿剑、在地上、满充能、非暴击非疾跑时的横扫（打主目标
+  `inflate(1, 0.25, 1)` 里 3 格内的生物，`sweeping_edge` 按 `L/(L+1)` 加成，发 `SWEEP_ATTACK`
+  粒子，横扫命中的生物也照 `doPostAttackEffects` 吃火焰附加 / 节肢杀手效果）；疾跑 /
+  `knockback` 附魔 / `attack_knockback` 的额外击退并取消疾跑；锋利 / 亡灵杀手 /
+  节肢杀手（及节肢杀手的缓慢）、火焰附加、武器耐久、伤害指示粒子和
+  `player.attack.strong / weak / crit / sweep / knockback / nodamage` 音效都真的发到客户端。
+  PVP 按 `server.properties` 的 `pvp` 开关和官方 `canHarmPlayer` 处理（Bamboo 没有队伍）。
+  对拍：`mob-oracle --only player_attack`（13 场景 91 刻，逐刻比牛的血量 / 击退速度 / 着火 /
+  受伤时间 / 是否移除和 `damage_event` 包，0 不一致；`--break-self-test attack_charge` 能抓到
+  故意改坏的充能值，`--break-self-test sweep_effects` 能抓到漏掉的横扫后附魔效果）；
+  `a_critical_attack_emits_its_packets`、`a_sweep_ignites_swept_targets_with_fire_aspect`、
+  `a_sweep_attack_emits_its_sound_and_particle`、
+  `an_enchanted_attack_emits_the_magic_critical_animation`、`a_weak_attack_emits_its_sound`、
+  `a_full_strength_attack_emits_the_strong_sound` 和
+  `damage_indicator_particles_follow_the_damage_threshold`
+  单测按音效 / 粒子注册表 ID 和动画动作字节，确认暴击 / 附魔暴击动画、横扫 / 伤害
+  指示粒子（含 `damageStatsAndHearts` 的 `actualDamage > 2` 门槛）、strong / weak /
+  sweep 音效真的发到客户端、横扫目标也着火且掉血；`crit` / `knockback` / `nodamage`
+  音效仍只由 `a_critical_attack_emits_its_packets` 按包类型松散覆盖或尚未精确断言。
+- **玩家近战攻击的已知限制**：`Item.getAttackDamageBonus`（重锤等）、`PIERCING_WEAPON`
+  （长矛）和 `MINIMUM_ATTACK_CHARGE` 只做前置拦截，不做对应武器的行为；暴击前置判定里
+  `onClimbable` / `isInWater` 按缺省值（Bamboo 没有梯子 / 水中状态），失明用 `EffectMap`、
+  骑乘用 `riding.vehicle` 分别判 `isMobilityRestricted()` / `isPassenger()`（后两条真判了）；
+  节肢杀手的缓慢时长恒用最短 30 刻，官方从**生物自己的随机源**
+  在 `[30, 30 + 10×(L−1)]` 刻取值，Bamboo 没把该随机源暴露给攻击路径；`Stats.DAMAGE_DEALT`
+  统计不写原版 `stats/<UUID>.json`；`attackStrengthTicker` 的每刻递增放在玩家 tick 开头
+  （官方在实体 `aiStep`），只在同一刻边界的取数顺序可能差一刻；攻击音效 / 粒子 / 动画 /
+  挥手 / 耐久槽包在 `mob-oracle` 里不逐字节比（官方假世界不捕获这些包，且带种子的音效
+  顺序受两套发包路径影响），由上面的单测确认它们确实发出（`crit` / `knockback` /
+  `nodamage` 音效仍只按包类型松散覆盖或未按 ID 精确断言）；攻击场景的对拍夹具跳过
+  `cow.tick()`，否则官方一侧的重力 / AI 会污染击退速度，逐位比较不可行；PVP 只对另一名
+  玩家结算伤害和受伤链路，额外击退（`causeExtraKnockback`）、火焰附加点燃和横扫波及的
+  玩家都走实体表（`knockback_mob` / `ignite_mob` / 候选收集），而玩家不在实体表里，
+  故这几项对玩家目标不生效（官方 `Player.attack` / `doSweepAttack` 对所有
+  `LivingEntity` 一视同仁）。够距用 `within_block_interaction_range` 加目标所在方块点，
+  官方 `handleAttack` 用 `isWithinAttackRange`（实体交互距离 + 武器攻击距离 + 整个 AABB）
+  并查世界边界和 feature flag，这一层完全没进 `mob-oracle`（夹具直接调 `Player.attack`）；
+  横扫候选盒按主目标位置近似 `inflate(1, 0.25, 1)`，不含玩家和队伍判定；官方
+  `Player.attack` 在 `baseDamage <= 0 && magicBoost <= 0` 时整段跳过（连 `nodamage` 音都不发），
+  Bamboo 没有这道门槛（正常路径 `ATTACK_DAMAGE` 基值 1.0 使 `baseDamage ≥ 0.2`，不触发）；
+  `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 只累加 `ADD_VALUE` 修饰符、横扫阈值把 `getSpeed()`
+  写死成 0.1，带乘法修饰符或速度药水时可能不同；受害者装备附魔（荆棘）和
+  `autoSpinAttack` 的武器来源都未建模。
 
 - 多名玩家进入同一个世界；新世界默认 `normal`（噪声地形，见上面世界生成一节），
   `level-type=flat` 用超平坦；登录模式由服务器目录里的 `online-mode` 决定（官方默认正版验证）。
@@ -217,7 +318,9 @@ WebView2 的渲染进程不算在内。
   生存模式消耗一个，手里空了就换成结果，放不下的按 `Player.drop` 掉在地上。只有生物、没有流体的桶（硫磺立方桶）不在这里消耗。
   舀起的声音用方块上导出的 `BucketPickup.getPickupSound`（`PLAYERS`，在玩家脚下，跳过这名玩家）。倒出的声音用生成器从官方导出的
   `playEmptySound`：水桶和岩浆桶是 `BLOCKS`，生物桶是各自的 `emptySound` 和 `NEUTRAL`，都在方块中心、跳过玩家。
-  鱼桶倒出的只有水，没有鱼；硫磺立方桶不放方块，只放自己的倒出声。生物的 `playAmbientSound` 不发。
+  鱼桶倒出水之后按 `MobBucketItem.checkExtraContent` 在落点生成 `FromBucket = true` 的鱼并叫一声；发射器倒鱼桶同样生成。
+  美西螈现已建模，倒美西螈桶（含发射器）按 `MobBucketItem.spawn` 放出 `FromBucket = true` 的美西螈，`bucket_entity_data` 存花色 / 年龄 / 锁定标志；`BUCKET` 原因下 `finalizeSpawn` 直接返回，世界随机源只取朝向那一次 `nextFloat`。
+  蝌蚪 / 硫磺立方桶还没建模，只按官方 `EntityType.create` 的次数取随机数。硫磺立方桶不放方块，只放自己的倒出声。
 - 方块音效：放下方块、开门和活板门、按钮和拉杆、栅栏门、音符盒（含头颅的自定义音效）、钟、唱片机（放入 1010、取出和拆掉 1011）、
   活塞伸出和收回、箱子、铜箱子、木桶、末影箱和潜影盒的开合、投掷器的 1000/1001/2000、空发射器的 1001、
   TNT 点燃（红石、打火石，以及火烧掉 TNT 时的 `prime`）、未氧化的铜傀儡雕像被斧头唤醒时的生成音效、炼药锅、桶、流体、营火和蜡烛、
@@ -267,7 +370,9 @@ WebView2 的渲染进程不算在内。
   成功发 1000，失败发 1001，两种都再发朝向的 2000。空的发射器只发 1001。
   默认抛出和塞不回发射器的余料都会在 `getDispensePosition` 生成真的物品实体：位置是方块中心沿朝向外 0.7 格，
   速度取官方 `spawnItem` 的一个 `nextDouble` 和三个 `triangle`，这套随机数只取一次。
-  TNT 生成点燃的实体并播放 `entity.tnt.primed`。箭、船、矿车、盔甲架和刷怪蛋仍见已知限制。
+  TNT 生成点燃的实体并播放 `entity.tnt.primed`。箭、药水箭和光灵箭按 `ProjectileDispenseBehavior` 生成真的箭实体：
+  位置是 `getDispensePosition` 再加 0.1 的 y，速度 1.1、散布 6，拾取方式是允许，声音换成 1002（仍发朝向上方的 2000）。
+  船、矿车、盔甲架和刷怪蛋仍见已知限制。
   目标正好是空漏斗时按官方规则给它排 8 刻冷却。
   合成器被信号触发后隔 4 刻走官方 `CrafterBlock.dispenseFrom`：查 3×3 配方，没有配方或产物为空只发 1050；
   成功时把 `crafting` 亮起六刻（方块实体滴答器到时关掉），产物和剩余物按 `HopperBlockEntity.addItem` 放进
@@ -401,10 +506,11 @@ WebView2 的渲染进程不算在内。
   对拍在 `normal` / `large_biomes` / `amplified` 上多个种子把出生区块和最终出生点与官方
   逐个比，0 不一致。`saved-data` 让官方 `WorldGenSettings.CODEC` 复核了噪声生成器的形状
   （三种 settings id 都过）。
-- **flat `generator-settings`** 照 `FlatLevelGeneratorSettings.CODEC` 解析全部五个字段
-  （`layers` / `biome` / `features` / `lakes` / `structure_overrides`）并写进
-  `world_gen_settings.dat`；`flat-world <java>` 让官方 `FlatLevelSource.buildTerrain` 与
-  `generate_chunk` 逐方块对拍，5 组配置 / 491520 个方块 0 不一致。
+- **flat `generator-settings`**：五个字段保存到 `world_gen_settings.dat`。
+  `structure_overrides` 缺省选所有符合固定群系的结构集，显式 `[]` 选空集；
+  `generate-structures=false` 关结构而不关地物和湖。`features`、`lakes` 和非阻挡地层
+  的末步填充均经过 Director 流水线。`flat-world <java>` 比 11 格 terrain 和 54 格
+  FEATURES（含村庄、关结构、空覆盖、虚空平台/雪层、平原草、熔岩湖），共 6,389,760 方块 0 不一致。
 - release 实测 `generate_chunk` 各阶段耗时、在 `normal` 世界上跑了 6 个飞行假玩家的压测
   （生成不占世界线程、默认 4 线程会积压区块），数字和计算池默认线程数建议见 `docs/worldgen.md`。
 
@@ -448,12 +554,19 @@ WebView2 的渲染进程不算在内。
   再放地物，区块 NBT 写 `structures` 键并能读盘恢复；`structure-pipeline` 对拍把官方 17×17 的
   `createStructures` / `createReferences` 与游戏里的同一条路径逐项比（28 行 / 2482 结构件 0 不一致，
   改坏确认会失败）。放置已对拍的 jigsaw / 矿井 / 要塞 / 海底神殿 / 林地府邸 / 雪屋 / 沉船 / 海底遗迹
-  会在游戏里写方块（含四个单件结构与废弃传送门）；`spawn` 仍不刷怪，游戏里**还没有生物**。
+  会在游戏里写方块（含四个单件结构与废弃传送门）；`spawn` 阶段的生成期刷怪见下面「生成期刷怪」一条。
   `features` 与官方的**语义差异**：官方邻居溢出的写来自各邻居区块跑到 `FEATURES` 时的 `WorldGenRegion`，
   结果取决于实际的生成先后；Bamboo 在中心这次 `features` 里用纯函数重算 8 个邻居中心写进来的增量，按
   来源中心的固定先后（C 自己最先、邻居按 `(dz,dx)`）合、同格先写的赢，邻居快照是干净的 CARVERS 地形。结果与线程
   调度无关、可重现，但边界上重叠的写入可能和某一次官方生成不同；地物越来越多后要重新核对。
-  后期处理位置表、`ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
+  `PostProcessing` 位置表已按官方 `markPosForPostProcessing` 逐段对拍并写进存档
+  （`gen-world --through features` 比 packed short，两种 salt 的 6×36 扩大样本各 0 不一致；
+  完工表按「地形标记 + 9 个中心的标记」组装，`feature-merge` 比交付盒子和存档往返）。
+  区块加载等级跨入 `BLOCK_TICKING` 时，拥有它的岛按这张表做 `postProcessGeneration`
+  （形状更新、流体 tick），清表后才发包（`mc-bamboo-vanilla post-process` 对拍）；
+  地物和结构写下的方块实体随九中心组装进交付盒子；
+  `ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成仍由 `worldgen-resume`
+  分支负责。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
   出生点的 `setInitialSpawn` 链已按官方逐段移植并对拍（`getOrigin` 气候螺旋、
   `PlayerSpawnFinder` 的 11×11 螺旋 + 高度图/流体/碰撞、`fixupSpawnHeight` 兜底），
@@ -464,9 +577,17 @@ WebView2 的渲染进程不算在内。
   `COLLISION_FULL_BLOCK` 事实近似，对 CARVERS 的完整方块/流体/空气等价。`setInitialSpawn`
   本身不调 `fixupSpawnHeight`（那是 `PlayerSpawnFinder.findSpawn` 进服兜底），Bamboo 只在
   11×11 整片找不到落点这一罕见情形用它，且在实测种子上是恒等变换。flat 世界仍保留旧的
-  超平坦出生点（`(8, 0, 8)`），`initial_spawn` 只对三种噪声世界生效；flat 的
-  `features` / `lakes` / `structure_overrides` 已解析并写入存档，但超平坦地形只填地层和群系，
-  不生成地物/湖/结构（对应阶段没接）。奖励箱按官方专用服务端默认关闭。
+  超平坦出生点（`(8, 0, 8)`），`initial_spawn` 只对三种噪声世界生效。超平坦结构只用内置注册表：
+  `structure_overrides` 里的 `#tag` 或任何查不到的名字都按 `lenientOptionalFieldOf` 当作
+  缺省（生成该固定群系适用的全部结构集），不展开标签；缺 `layers` 的 JSON 官方会整份解析失败、
+  回退默认预设，Bamboo 只对 `structure_overrides` 做同样的回退，同一 JSON 里的 `biome` /
+  `features` / `lakes` 仍会生效。
+  未对拍所有结构、群系组合或超平坦光照与续生成。
+  世界生成缓存（[配置](docs/configuration.md#世界生成缓存)）只影响速度和内存，不影响结果：官方在
+  `ChunkMap.releaseGeneration` 等真实持有引用处释放，Bamboo 用「邻域使用者完成位 + 空闲定时」近似，
+  已生成区域最外几圈可能提前释放、下次再要时现算（约 10–20 ms/区块）；空闲清理是进程级策略，
+  官方没有对应行为。默认地形 128 MiB、地物 64 MiB、空闲 30 s。
+  奖励箱按官方专用服务端默认关闭。
   随机种子（`level-seed` 为空）用 `nanoTime ^ uniquifier` 近似官方 `RandomSupport`，进程内固定，
   只和官方「空种子 = 随机」的语义一致、不逐位比较。`normal` 世界的飞行压测已实跑：生成
   不占世界线程（`tick_total` p50 0.12–1.18 ms），但默认 4 线程在 6 个飞行玩家下会积压
@@ -478,6 +599,66 @@ WebView2 的渲染进程不算在内。
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`。第二轮 features 接入见
   `docs/worldgen.md`、`docs/worldgen-features-plan.md`、`docs/world-model-design.md` 5.3.1 / 第 16 节）
+- **世界生成数据全进程共用一份**（`op-wgmem`，2026-11-21）：只读的解析结果（噪声、密度函数、
+  群系表、地物 / 结构定义）由 `Worldgen::shared()` 的 `OnceLock` 只解析一次，所有生成线程引用
+  同一份 `&'static`，每条线程只留自己的 `Generator` 和随机 / 临时缓冲。群系 R 树 `lastResult`
+  （官方 `ThreadLocal`）从 `Cell` 改成「线程 + 表」的线程本地状态，共享数据是 `Sync` 的只读数据；
+  `gen-world` / `--through features` / `structure-e2e` 0 不一致、`staged_tests` 1/2/4/8 线程
+  逐字节相同。4 / 8 线程闲置 RSS 实测 889 → 700 / 1476 → 1094 MiB（各 3 轮中位数，见
+  `docs/performance-optimizations.md` 第 24 节）。**已知限制**：数据随编译嵌入、进程内只有一份，
+  将来支持运行时换数据包或同进程多份生成数据时 `shared()` 要按实例索引；解析失败的错误会被
+  `OnceLock` 缓存到进程结束（当前内嵌数据恒能解析）。
+- **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
+  （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
+  `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
+  （`crates/mc-bamboo-data/src/generated/mob_spawns.rs`），不手写。已做：每刻重算计数
+  （`createState`）、全局上限 `maxInstancesPerChunk * spawnableChunkCount / 289`、
+  `spawn_mobs` / `spawn_monsters` 规则、`gameTime % 400 == 0` 才刷的持久类别、按玩家的上限
+  （`bamboo.toml` 的 `spawn_per_player_cap`，默认开）、`getRandomPosWithin` 与
+  `WORLD_SURFACE` 高度图、离玩家和出生点 24 格、`ON_GROUND` 的方块/光照/碰撞条件、
+  `Monster.isDarkEnoughToSpawn`、`PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`）、
+  `finalizeSpawn` 与按组生成（牛按 `AgeableMobGroupData` 抽幼年；马按 `HorseGroupData`、羊驼按 `LlamaGroupData` 同组共享毛色，驴和骡的幼年概率是 0.2；马科的 `getMaxSpawnClusterSize` 是 6）。刷怪区块列表用岛自己的
+  世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
+  - **只有已建模的生物会真的生成**（`MobType::ALL` 的 46 种：牛、哞菇、猪、羊、鸡、北极熊、熊猫、豹猫、猫、鹦鹉、马、驴、骡、羊驼、骆驼、兔子、狐狸、狼、犰狳、山羊、青蛙、蝌蚪、僵尸、尸壳、骷髅、流浪者、沼骸、史莱姆、溺尸、女巫、掠夺者、苦力怕、蜘蛛、洞穴蜘蛛、末影人、鱿鱼、发光鱿鱼、鳕鱼、鲑鱼、热带鱼、河豚、海龟、海豚、美西螈、蝙蝠、幻翼；其中豹猫挂在丛林 / 竹林 `MONSTER` 表，猫不在群系刷怪表内，蝙蝠和幻翼各有自己的刷怪路径，掠夺者由巡逻队刷怪器和前哨站结构刷出）：群系刷怪表里其它条目仍占原版权重，抽完组大小后结束这一组。官方会继续尝试生成该物种、消耗后续随机数，并把实际生成的实体计入上限；所以**只有刷怪表里全是已建模物种的情形**逐刻产率和官方一致。`ON_GROUND` 按实体类型检查落脚块，冰和霜冰只允许北极熊通过此层，北极熊自己的群系与亮度规则仍须通过。已对拍的刷怪路径（`mob-oracle --only natural_spawn`，当前 770 例 3080 刻 0 不一致）覆盖单条目刷怪表、固定区块顺序、四档难度、日 / 夜 / 雷暴 / 火把、24/32/128 格、全局与局部上限、史莱姆区块和沼泽月相、流浪者找天和沼骸的雪地 / 沼泽群系表、犰狳与山羊、鱿鱼 / 发光鱿鱼 / 鱼类的水体夹具，鹦鹉的丛林白天与暗处，以及海豚 / 美西螈、青蛙 / 蝌蚪和野生动物的夹具；猪和鸡各有温带 / 暖 / 冷三种花色的白天场景（`pig_temperate`、`pig_day`、`pig_cold`、`chicken_day`、`chicken_warm`、`chicken_cold`），另比每只的花色 / 羊毛颜色和叫声，鸡的 `eggTime` 取自实体自己没播种的随机源不比，另有马、驴、羊驼各一个白天场景。水生生物的海平面由游戏层按世界类型给（超平坦 -63，噪声世界读设置，进程内只解析一次）。真实群系里混着未建模物种时，后续随机序列和产率仍会偏离，等这些生物合进来后自动对齐。幻翼不在群系刷怪表里，只由主世界的 `PhantomSpawner` 刷出（见上一条）。
+  - 生成位置的实体阻挡照 `Mob.checkSpawnObstruction` 看所有 `blocksBuilding` 实体（生物、
+    TNT、下落方块和玩家）；`noCollision(AABB)` 只看方块和硬碰撞实体（Bamboo 还没有船、矿车）。
+  - 僵尸和尸壳的 `finalizeSpawn` 已按 `Zombie` / `Husk.finalizeSpawn` 完整移植（跟随距离、左撇子、
+    捡物、组内共享的幼年、鸡骑士判定、破门、盔甲与武器、附魔、万圣节头饰、`handleAttributes`、
+    尸壳的二次捡物判定）。Bamboo 还没有鸡骑士、骆驼尸壳和焦尸：鸡骑士只取数不生成，尸壳 10% 的
+    骆驼尸壳 + 焦尸骑手只给长矛、不生成坐骑和骑手，之后的世界随机序列与官方不同。
+  - 未做：下界要塞的 `FORTRESS_ENEMIES`、刷怪笼、`customSpawners` 里的猫和流浪商人、刷怪增援。
+    结构刷怪覆盖（前哨站 / 女巫小屋）和 `PatrolSpawner` 已接入，见上面的「掠夺者」「巡逻队」
+    「结构刷怪覆盖」三条。
+  - `spawnableChunkCount` 取本岛玩家周围 17×17 方形的并集，不依赖区块加载状态；旁观者由
+    `spectators_generate_chunks` 决定是否计入。官方使用维度级票据追踪器，跨岛与票据尚在
+    交付时可能不同。
+  - 刷怪列表只收已达方块 tick 等级、水平离非旁观玩家不到 128 格的区块，打乱后再检查
+    实体 tick 等级。Bamboo 以坐标顺序收集，官方为哈希顺序；无限超平坦用模拟距离近似票据等级。
+    官方在遍历刷怪区块时穿插雷击；Bamboo 保留既有的雷击/随机刻阶段，雷暴下取数顺序不同。
+  - `doMobSpawning` 为假时整段不跑、一个随机数都不取；官方这时仍会打乱刷怪区块列表。
+- **生成期刷怪（`spawnMobsForChunkGeneration`，本轮接入）**：噪声世界新生成的区块（以及盘上
+  还没到 `SPAWN` 就续跑的区块）在 Director 完工组装时按查询点群系的 `CREATURE` 刷怪表和
+  `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（生成器导出，0.1 / 0.07 / 0.04 / 0.03）刷动物，生物放进
+  区块的实体盒，随区块交付和存盘；超平坦和 `doMobSpawning` 为假时不刷，和官方一样。装饰随机源
+  （循环、选表、组大小、起点、漂移、朝向）与区域随机源（`finalizeSpawn`）分开建，查询点
+  `(minX, 319, minZ)` 的全分辨率群系和 quart 群系分别决定刷怪表和概率。`mob-oracle --only gen_spawn`
+  用官方平原表和公式地形（台阶、水、沙、树叶、草丛，四种光照）比对装饰随机源指纹、
+  已建模动物的类型、坐标、朝向，以及区域随机源同步时的幼年、左撇子、农场动物的花色 / 羊毛颜色和叫声、
+  马科的属性、变种、花色与力量；`mob-oracle --only gen_spawn_misc` 另对拍蘑菇岛与冰冻海洋的动物表，
+  `--only gen_spawn_panda` 对拍竹林，都比随机源指纹与每只动物的类型、坐标、朝向、幼年和左撇子。
+  **已知差异**：
+  - 竹林的鹦鹉只模拟生成期放置，推进装饰随机源，不生成实体、不推进鹦鹉 `finalizeSpawn` 的区域随机源。因此同区块若先生成过鹦鹉，后续区域随机源上的属性仍可能偏离原版。
+  - 真正生成的有牛、猪、羊、鸡、兔子、狐狸、狼、马、驴、骡、羊驼、犰狳、山羊、青蛙、哞菇、北极熊、熊猫，
+    它们的 `finalizeSpawn` 都取区域随机源。
+    海龟、骆驼、炽足兽的放置规则还没翻译，抽到时停止这个
+    区块的生成期刷怪（之后的取数没法对齐）。这些生物合进来后在 `natural_gen.rs` 的放置表里接上。
+    海龟虽然已经能在运行时自然生成，生成期这一支还没接。
+  - 刷怪在世界线程的完工组装里跑，不在计算池的 `spawn` 阶段：那一刻计算线程还拿不到最终方块
+    和光照。每个区块平均只取一两个随机数。
+  - 中心区块外的格子按空气、无光照数据读（官方 `spawn` 只要求邻居到 `biomes`）；群系按纯函数
+    重算，没有读区块里存的群系，R 树 `lastResult` 的平局可能和官方批量结果不同。对拍夹具用固定
+    群系，查询点位置（八角插值、quart y 夹进区块高度）只有单元测试，没有和官方真实世界对拍。
+  - 生成的实体 UUID 由世界种子和区块坐标派生（官方实体随机源不带种子）。
 - 地物（`ChunkStatus.FEATURES`）阶段：纯函数已按 `docs/worldgen-features-plan.md` 的分类
   逐类移植，接入游戏流水线由流水线分支负责。按 5.2 的分类，非植被里已按官方 26.3
   移植并对拍 0 不一致的有 `ore`（流水线里程碑）、`disk`、`underwater_magma`、
@@ -516,8 +697,8 @@ WebView2 的渲染进程不算在内。
   `freeze_top_layer` 已移植并逐方块 0 不一致：它复用 `biome_temperature` 里的
   `getHeightAdjustedTemperature`，逐点群系由主循环的 `BiomeManager` 未缓存解算器给出，
   没有改 `Feature::place` 签名（在 `composition.rs` 的 `place_feature` 里单开一个分支）。
-  已移植的类型都不产生方块实体，所以 `FeatureResult` 的方块实体 / POI / 后期处理位置表输出
-  也还没补；接进游戏时按 `docs/world-model-design.md` 5.3.1 合 9 宫格快照和写增量。
+  已移植的类型都不产生方块实体（本段是早期记录）；`FeatureResult` 现在带
+  方块实体和 `PostProcessing` 位置表，后者已逐段对拍并随 `build_region_column` 写进存档。
 - 结构生成（`docs/worldgen-structures-plan.md`）已接进 Director（本轮）：**所有**结构的起点、引用、
   Beardifier 和 `structures` 存档键都照官方生成并存盘；`cb-wg-structures` 合入 main 后
   四个代码生成单件结构与废弃传送门的 `postProcess` 也已逐方块对拍 0 不一致，允许清单里
@@ -568,7 +749,9 @@ WebView2 的渲染进程不算在内。
   jigsaw 结构件生成（`JigsawPlacement.addPieces`、五种 pool element、村庄 5 种 / 前哨站 /
   古城 / 试炼密室 / 古迹废墟的结构件列表与官方对拍）仍没做；`pillager_outposts` 的排除区只有
   单元测试、未进官方逐格对拍。整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y
-  基本恒定），两条路径各自用故意改坏单独验过。
+  基本恒定），两条路径各自用故意改坏单独验过。结构刷怪覆盖已照 `ChunkGenerator.getMobsAt`
+  接好（前哨站 / 女巫小屋，见生物一节的「结构刷怪覆盖」），前哨站要等 jigsaw 结构件生成后才会
+  真的在正式世界里出现并刷出掠夺者。
 - 多件式结构的结构件布局与前置判定（分支 `cb-wg-multipiece`）：
   `mc-bamboo-worldgen::structure::pieces` 把四个「用代码生成结构件列表」的结构布局**全部**
   移植成纯函数——废弃矿井（普通 / 恶地）、要塞、海底神殿、林地府邸
@@ -779,8 +962,8 @@ WebView2 的渲染进程不算在内。
   对拍：`chunkgen --through features` 放开全部 26 组含树的 placed feature，随机 156 个
   中心区块 0 不一致；红树林沼泽、斑驳森林、黑森林、蘑菇岛各取 3×3 的定点区块
   （共 72 个中心）0 不一致；把树叶 `distance`、红树根、白杨横向原木各故意改坏一处都会
-  报不一致。已知限制：`pale_moss` 装饰器没做（它要放 `pale_moss_patch`，属于还没移植的
-  `vegetation_patch`），所以苍白橡树整棵标 `unsupported`；蜂巢里的蜜蜂、战利品这类方块
+  报不一致。苍白橡树的 `pale_moss`（含递归 `pale_moss_patch`）也已移植；种子 0
+  的苍郁花园定点 9 个中心、7,962,624 方块 0 不一致。蜂巢里的蜜蜂、战利品这类方块
   实体内容没有对拍，只照取了随机数；`HashSet` 的一个桶超过 8 个元素时 Java 会把它变成
   红黑树，这种情况没有复现，只置了标记（树的坐标聚在一起，哈希几乎不冲突）。
 - Beardifier / 结构对地形密度的影响（分支 `cb-wg-beard`）：`mc-bamboo-worldgen::beardifier`
@@ -842,7 +1025,7 @@ WebView2 的渲染进程不算在内。
   **`freeze_top_layer` 的已知前提**：features 阶段没有生成期光照，官方
   `Biome.shouldFreeze` / `shouldSnow` 里的 `getBrightness(BLOCK) < 10` 恒成立；
   Rust 侧不查亮度，`ChunkgenOracle` 的代理把方块光返回 0、天空光返回 15。
-- 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算；方块 oracle 默认正午，另有 `--clock-ticks 18000` 的夜晚批。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
+- 红石的已知差异：发射器射箭、药水箭和光灵箭时生成真的箭实体，事件是 1002；雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹仍走默认抛出，官方那些是弹射物，这些弹射物出现事件 1002、1004、1018 或 1051 时，方块 oracle 仍排除整题；箭触发的 1002 会比较。默认抛出和余料都生成真的物品实体。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶倒水后会生成鱼，但方块 oracle 的假世界不 tick 实体，生物自己的环境音不进比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，生物和箭没有接上这些方块触发，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算；方块 oracle 默认正午，另有 `--clock-ticks 18000` 的夜晚批。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但官方 `PistonMovingBlockEntity` 的
   `moveCollidedEntities`、`moveStuckEntities`、`fixEntityWithinPistonBase` 三段没实现：掉落物、下落方块
   和点燃的 TNT 不会被活塞推动，也不会被粘液块、蜂蜜块带着走。移动中的活塞按方块实体算出的形状挡住实体；
@@ -860,6 +1043,7 @@ WebView2 的渲染进程不算在内。
   铁砧落地发 1031，摔碎发 1029；滴水石摔碎发 1045，硫磺尖刺发 1052；刷子方块摔碎在碰撞盒中心发 2001。
   点燃的 TNT 播放 `entity.tnt.primed` 并生成实体。它不走传送门，也不被水推动。爆炸会打到地上的物品，
   但不发 `ClientboundExplodePacket`（官方的爆炸声和粒子在这个包里，不在 `playSound`）。
+  TNT 的爆炸不伤生物和玩家；生物引发的爆炸（苦力怕）会，见上面苦力怕一条。
   TNT 爆炸在换成空气之前按 `getDrops` 收集掉落，整圈方块处理完再 `popResource`；`tntExplosionDropDecay` 默认是假，
   所以不传爆炸半径，`explosion_decay` 不取数。TNT 自己的 `dropFromExplosion` 是假，不掉 TNT 物品。
   容器被炸开时，`dropContents` 仍在这一圈里、在后面 TNT 的引信之前取 `level.random`。不调用 `spawnAfterBreak`：
@@ -871,7 +1055,7 @@ WebView2 的渲染进程不算在内。
   游戏规则 `tnt_explodes` 为假时不点燃、不爆炸，也不取朝向和短引信的随机数。默认是真。非玩家实体的 ID 从 16777216 起，不和玩家共用计数器。
   未氧化的铜傀儡雕像被斧头点中时方块消失并播放 `entity.copper_golem.spawn`，不生成铜傀儡。
 - 流体只有主世界的流动速度。源头转换读 `water_source_conversion`（默认真）和 `lava_source_conversion`（默认假）。岩浆会点燃旁边的方块，岩浆变高时官方随机地慢四倍，
-  Bamboo 用同一个随机源。鱼桶倒出来的只有水，没有鱼；倒出声仍按这种桶自己的 `emptySound` 播放。
+  Bamboo 用同一个随机源。鱼桶现在会生成鱼，但方块 oracle 的假世界不 tick 实体，鱼的 `playAmbientSound` 不进比较；倒出声仍按这种桶自己的 `emptySound` 播放。
   比较时从官方声音列表里去掉这只桶生成的生物自己的声音：`MobBucketItem.spawn` 只调用一次
   `playAmbientSound`，经 `Entity.playSound` 发出，不跳过玩家，注册表名以 `minecraft:entity.<这种生物>.` 开头
   （生物是生成器导出的 `MobBucketItem.type`）。桶自己的那一声会跳过玩家，留下来照比。
@@ -956,7 +1140,7 @@ WebView2 的渲染进程不算在内。
   玻璃瓶对着满蜜的蜂巢即使创造模式也消耗一个，手里空了就换成蜜瓶，否则放进背包，放不下就按 `Player.drop` 丢掉；不放蜜蜂、不检查营火的烟，也不记统计。
   要生成实体、改世界生成或者看物品组件的物品还不能用：
   骨粉不能让树苗长成树、不能催大型蘑菇和草方块上的植物，刷怪蛋、矿车、盔甲架、拴绳放不出来，水瓶不能把泥土变成泥巴，
-  刷子只吃掉点击。世界生成决定的方块（紫颂花生长）和要生成实体（海龟蛋、嗅探兽蛋、青蛙卵）的随机刻也不做。
+  刷子只吃掉点击。世界生成决定的方块（紫颂花生长）和要生成实体（嗅探兽蛋、青蛙卵）的随机刻也不做；海龟蛋的随机刻会推进 `HATCH` 并在第三阶段孵出小海龟。
 - 生存模式的挖掘有进度、裂纹和工具耐久。硬度不是 0 时按 `tool` 的 `damage_per_block` 扣，剪刀不看硬度、剪火不扣。
   创造模式不扣。冒险模式挖得动的时候照样扣，旁观模式挖不动。耐久用完物品减一，并发实体事件。
   生存和冒险模式挖掉方块后按战利品表生成物品实体，创造和旁观不掉。不给经验，也不调用 `spawnAfterBreak`，
@@ -965,7 +1149,7 @@ WebView2 的渲染进程不算在内。
   `copy_components` 的 `block_entity` 来源把容器内容、自定义名、锁、战利品表、旗帜图案和陶罐纹样带回掉落物。
   掉落上由战利品函数写出的组件
   经统一的 `JSON → NBT → 组件补丁` 转换写进物品堆，解不开的单项丢掉并记警告；`/loot` 和开箱填充也用这一份转换。
-  盔甲受伤、打实体、弓、钓竿、鞘翅和盾牌也不扣耐久。实体死亡仍不调用战利品表，开箱已经接上（见下一段）。
+  盔甲受伤、打实体、钓竿、鞘翅和盾牌也不扣耐久；弓和弩射出一发扣一点，创造模式不扣。实体死亡仍不调用战利品表，开箱已经接上（见下一段）。
   矿石、幽匿这类方块破坏时官方 `spawnAfterBreak` 还会按 `xpRange` 生成经验球并取一份随机数，
   这里没有经验球，也不取这份随机数（`Level::spawn_after_break_random` 只留了钩子）。
   冒险模式按官方 `Player.blockActionRestricted` 判定：主手的 `can_break` 能匹配这一格才挖得动；放置按官方
@@ -1007,7 +1191,7 @@ WebView2 的渲染进程不算在内。
   `World`、并行的实体只读视图、随机刻里读亮度的作物 / 草和菌丝蔓延 / 冰雪融化 /
   阳光探测器都读这一份值。还没接的差异：雷击生成的实体、闪电对避雷针/实体/方块的作用和
   苦力怕充能，以及天空、雾和云的颜色变化（客户端自己算颜色）。刷怪、伤害和合成限制这些规则还没接到对应系统。
-  生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟；进服 / 重生按官方 `sendLevelInfo` 发两份时钟的整表同步，`/time` 和 `/gamerule advance_time` 各发单独 / 整表更新，每 20 刻再发一次只带 `gameTime` 的空表同步；这个周期按官方 `MinecraftServer.tickCount`
+  生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；弓和弩射出一发扣一点；盔甲、近战武器、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟；进服 / 重生按官方 `sendLevelInfo` 发两份时钟的整表同步，`/time` 和 `/gamerule advance_time` 各发单独 / 整表更新，每 20 刻再发一次只带 `gameTime` 的空表同步；这个周期按官方 `MinecraftServer.tickCount`
   （每次开服从 0 数起、不存档）计，不用存档里接着走的 `gameTime`，读档开服时相位才对。
   包里带的 `gameTime` 仍是这一刻 `tickTime` 加一之前的值。发给客户端的流速在时钟暂停或
   `advance_time` 为假时是 0，客户端不会自己把时间往前推。
@@ -1157,6 +1341,11 @@ WebView2 的渲染进程不算在内。
 - 实体容器（矿车、船）没有移植，`EntityKind` 只有物品、下落方块和点燃的 TNT；
   官方漏斗的 `getEntityContainer` 会读中心 1×1×1 盒里的容器实体，这一支连官方行为本身都缺，
   闲置漏斗休眠也按「没有这类实体」处理。
+- 桌面端设置页保存这四个世界生成键时和官方的写法有两处差别（语义不变）：`level-type` 的旧名
+  `default` / `largebiomes` 会归一成 `minecraft:normal` / `minecraft:large_biomes`，种子和
+  `generator-settings` 的前后空白会去掉；官方保留文件里的原字符串。另外，世界类型是超平坦时，
+  界面里解析不了的 `generator-settings`（坏 JSON、未知方块或群系）会**拒绝保存并提示**，
+  而官方只是记一条 error、静默用默认超平坦预设。命令行版和直接改文件都不受影响。
 
 （2026-11-14 按实现更新：`docs/performance-optimizations.md` 7g.1–7g.6 / 7i / 第 9 节、
 `docs/configuration.md`、`README.md`「现在能玩什么」的世界边界条目、`crates/mc-bamboo-server/src/config_files.rs`；
@@ -1227,6 +1416,10 @@ protocol blocks world
 ```bash
 cargo run -p mc-bamboo-vanilla -- generate <server.jar>
 ```
+
+`generated/` 下的注册表由生成器按官方注册顺序（报告里的 `protocol_id`）导出，不要手写或按名字排序：
+`game_event` 等表在 26.3 的官方顺序里 `entity_action` 在 `entity_place` 之后、`resonate_1..15` 在末尾，
+和字典序不同。存档里的振动事件只按名字查注册过的条目，不依赖数字 ID，顺序只影响常量取值。
 
 然后启动 Bamboo，用官方网络代码让三个客户端走一遍进服、移动、建造、聊天和开关箱子，检查收到的每个包。
 区块包里的方块和流体计数、高度图都由官方代码从解出来的方块重算，再和收到的值逐段比较：
@@ -1357,8 +1550,10 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen <java 路径> \
 
 `gen-world` 是接进游戏后的对拍：同一套官方出题，Bamboo 侧调的是**游戏里用的那份**
 `game::worldgen::generate_chunk`（`OverworldGenerator` 走 `Staged` 流水线时的纯函数）
-而不是直接调 `mc-bamboo-worldgen`，逐 quart 格、逐方块比较 CARVERS 快照；两边都不跑
-地物/结构/光照。`--break-self-test` 故意改坏一个方块，确认对拍会报不一致：
+而不是直接调 `mc-bamboo-worldgen`。默认逐 quart 格、逐方块比较 CARVERS 快照；
+`--through features --all-features` 跑完 11 个 decoration step，逐格比 3×3 方块、
+方块实体和 `PostProcessing` 位置表。`--break-self-test` 故意改坏一个方块，确认
+对拍会报不一致：
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- gen-world <java 路径> \

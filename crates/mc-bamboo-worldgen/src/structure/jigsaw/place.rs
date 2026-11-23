@@ -476,6 +476,16 @@ pub fn place_processed(
             let nbt = match &block.nbt {
                 None => None,
                 Some(tag) if is_randomizable_container(&block.state.name) => {
+                    // `StructureTemplate.placeInWorld` 对每个 `RandomizableContainer` 都取一次
+                    // `nextLong` 写进模板 nbt，不看有没有 `LootTable`（试炼密室里只有
+                    // `Items: []` 的木桶也取），否则后面容器的种子会错开。
+                    // `placeInWorld` draws `nextLong` for every `RandomizableContainer`,
+                    // with or without a `LootTable` (the trial chambers' `Items: []`
+                    // barrel too); skipping it shifts every later container's seed.
+                    let seed = match worldgen_random {
+                        Some(source) => source.next_long(),
+                        None => random.next_long(),
+                    };
                     // `RandomizableContainer` 读入模板 nbt 时，`LootTable` 不存在就清空
                     // 整份 `LootTable` 状态；随后写入的 `LootTableSeed`（可能非 0）
                     // 不会单独存出。古城箱子只有 `Items`、没有表，所以要丢掉这个种子。
@@ -500,10 +510,6 @@ pub fn place_processed(
                         // `next(32)` values. Asking the inner `Random` instead uses Xoroshiro's
                         // single 64-bit draw, which only differs in the low bits. The game path
                         // must use that `WorldgenRandom`; stand-alone oracles fall back to `Random`.
-                        let seed = match worldgen_random {
-                            Some(source) => source.next_long(),
-                            None => random.next_long(),
-                        };
                         Some(overwrite_loot_table_seed(tag, seed))
                     }
                 }
@@ -936,17 +942,17 @@ pub trait BlockWriter {
 }
 
 impl BlockWriter for crate::feature::world::FeatureWorld<'_> {
-    /// 官方 `StructureTemplate.placeInWorld` 走 `level.setBlock(...)` →
-    /// `ChunkAccess.setBlockState`，会按 `Heightmap.update` 增量维护四张 FINAL 高度图。
-    /// 结构件写完后的 `freeze_top_layer` 等 step 10 地物会读它们，所以这里不能只改
-    /// `blocks` 不更新 `heights`。
+    /// 官方 `StructureTemplate.placeInWorld` 走 `level.setBlock(..., 820)` →
+    /// `ChunkAccess.setBlockState`，会按 `Heightmap.update` 增量维护四张 FINAL 高度图；
+    /// `flags` 含 bit 16，所以 `WorldGenRegion.setBlock` 不跑
+    /// `getPostProcessPos`、不记 `PostProcessing`。
     ///
-    /// Vanilla's `StructureTemplate.placeInWorld` goes through
-    /// `ChunkAccess.setBlockState`, which incrementally updates the four FINAL
-    /// heightmaps. Step-10 features such as `freeze_top_layer` read those, so the
-    /// plain `set_block` path would leave them stale.
+    /// Vanilla's `StructureTemplate.placeInWorld` uses `level.setBlock(..., 820)`
+    /// → `ChunkAccess.setBlockState`, which incrementally updates the four FINAL
+    /// heightmaps. Bit 16 in `flags` means `WorldGenRegion.setBlock` skips
+    /// `getPostProcessPos`, so no `PostProcessing` entry is recorded.
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
-        crate::feature::world::FeatureWorld::set_block_with_heightmaps(self, x, y, z, state)
+        crate::feature::world::FeatureWorld::set_structure_block(self, x, y, z, state)
     }
 
     /// 官方 `blockEntity.loadWithComponents(...)`：nbt 交给假世界的方块实体表。

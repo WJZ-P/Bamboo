@@ -11,12 +11,16 @@ use mc_bamboo_blocks::{
     entity::{ENTITY_RANDOM_SEED, Entity, JavaRandom},
 };
 use mc_bamboo_core::{Vec3, mth};
-use mc_bamboo_protocol::{item::ItemStack, packet::play::GameMode};
+use mc_bamboo_protocol::{
+    item::ItemStack,
+    packet::play::{GameEvent, GameMode},
+};
 
 use crate::{
     entity_tracking,
     inbound::PlayerId,
     inventory::{self, Inventory},
+    links,
     player::Player,
     region::Region,
 };
@@ -122,6 +126,70 @@ pub(crate) fn pickup_before_entities(region: &mut Region) {
     }
 }
 
+/// `AbstractCubeMob.playerTouch`：玩家碰到史莱姆，史莱姆能打就打一下，打中了放攻击音效。
+/// 官方在 `Player.aiStep` 的 `touch(entity)` 里调，要求玩家活着。
+///
+/// `AbstractCubeMob.playerTouch`: a slime the player touches hits back when it can and plays
+/// its attack sound on a hit. Vanilla calls it from `touch(entity)` in `Player.aiStep`, for
+/// living players only.
+fn slime_touch(region: &mut Region, id: PlayerId, slime: mc_bamboo_blocks::entity::EntityUid) {
+    let alive = region
+        .players
+        .get(&id)
+        .is_some_and(|player| !player.health.is_dead_or_dying());
+    if !alive {
+        return;
+    }
+    // 带玩家那一半的世界：受伤当场走正式入口，和生物在自己 tick 里打人是同一条路。
+    // A world with the player half: the hit runs the real hurt path at once, the same way
+    // a mob hits from its own tick.
+    let (mut level, ticks) = region.entity_level();
+    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    mc_bamboo_blocks::entity::mob::slime::player_touch(&mut world, slime, id.0);
+}
+
+/// `Pufferfish.playerTouch`：玩家碰到膨胀的河豚时受伤、中毒，没被静音时再给这名玩家
+/// 发一次 `PUFFER_FISH_STING` 游戏事件（客户端播蜇刺声）。官方在 `Player.aiStep` 的
+/// `touch(entity)` 里调，没有近战范围判定。
+///
+/// `Pufferfish.playerTouch`: hurt and poison a player touching an inflated pufferfish,
+/// then send the `PUFFER_FISH_STING` game event to that player unless silenced. Vanilla
+/// calls it from `touch(entity)` in `Player.aiStep` with no melee-range check.
+fn puffer_touch(
+    region: &mut Region,
+    id: PlayerId,
+    fish: mc_bamboo_blocks::entity::EntityUid,
+    silent: bool,
+) {
+    let alive = region
+        .players
+        .get(&id)
+        .is_some_and(|player| !player.health.is_dead_or_dying());
+    if !alive {
+        return;
+    }
+    let seconds = {
+        let (mut level, ticks) = region.entity_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        mc_bamboo_blocks::entity::mob::fish::puffer_player_hit(&mut world, fish, id.0)
+    };
+    let Some(seconds) = seconds else {
+        return;
+    };
+    // 官方顺序：先发游戏事件，再 `addEffect`。
+    // Vanilla order: the game event first, then `addEffect`.
+    if !silent {
+        let frames = links::encode_frames(&GameEvent {
+            event: GameEvent::PUFFER_FISH_STING,
+            param: 0.0,
+        });
+        region.links.send_frames(id, &frames);
+    }
+    let (mut level, ticks) = region.entity_level();
+    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    mc_bamboo_blocks::entity::mob::fish::puffer_player_poison(&mut world, id.0, seconds);
+}
+
 fn pickup_for(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get(&id) else {
         return;
@@ -158,6 +226,36 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
         };
+        if let mc_bamboo_blocks::entity::EntityKind::Mob(mob) = &entity.kind {
+            let mob_type = mob.mob_type;
+            let silent = mob.silent;
+            // 官方 `Player.aiStep` 只碰 `!isRemoved()` 的实体；已经打上移除标记的还留在
+            // 这一拍的名单里。
+            // Vanilla `Player.aiStep` only touches entities with `!isRemoved()`; a
+            // discarded entity still sits in this tick's list.
+            if entity.removed {
+                continue;
+            }
+            if mob_type == mc_bamboo_blocks::entity::mob::MobType::Slime {
+                slime_touch(region, id, entity_id);
+            } else if mob_type == mc_bamboo_blocks::entity::mob::MobType::Pufferfish {
+                puffer_touch(region, id, entity_id, silent);
+            }
+            continue;
+        }
+        if let mc_bamboo_blocks::entity::EntityKind::Arrow(arrow) = &entity.kind {
+            if !entity.removed
+                && arrow.in_ground
+                && arrow.shake_time == 0
+                && region
+                    .players
+                    .get(&id)
+                    .is_some_and(|player| !player.health.is_dead_or_dying())
+            {
+                pickup_arrow(region, id, entity_id, arrow, creative);
+            }
+            continue;
+        }
         if !mc_bamboo_blocks::entity::can_pick_up(&entity, &owner) {
             continue;
         }
@@ -210,6 +308,40 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
     }
 }
 
+fn pickup_arrow(
+    region: &mut Region,
+    id: PlayerId,
+    uid: i32,
+    arrow: &mc_bamboo_blocks::entity::arrow::Arrow,
+    creative: bool,
+) {
+    use mc_bamboo_blocks::entity::arrow::Pickup;
+    match arrow.pickup {
+        Pickup::Disallowed => return,
+        Pickup::CreativeOnly if !creative => return,
+        Pickup::CreativeOnly => {}
+        Pickup::Allowed => {
+            let Some(player) = region.players.get_mut(&id) else {
+                return;
+            };
+            let before = player.inventory.slots.clone();
+            let (_, added) = player
+                .inventory
+                .receive_with_add_result(arrow.pickup_item.clone(), creative);
+            for slot in changed_slots(&before, &player.inventory) {
+                inventory::send_slot(player, &mut region.links, slot);
+            }
+            if !added {
+                return;
+            }
+        }
+    }
+    entity_tracking::broadcast_take(region, uid, id, 1);
+    region
+        .entities
+        .with_mut(uid, |entity| entity.removed = true);
+}
+
 fn changed_slots(before: &[ItemStack], inventory: &Inventory) -> Vec<usize> {
     before
         .iter()
@@ -253,4 +385,211 @@ fn throw_delta(player: &mut Player) -> Vec3 {
 /// The player's random seed is derived from the id, same as entities, so tests can replay it.
 pub(crate) fn player_random(id: PlayerId) -> JavaRandom {
     JavaRandom::new(i64::from(id.0) ^ ENTITY_RANDOM_SEED)
+}
+
+/// 用真实玩家拾取流程重放一支箭；满背包时可预留一叠箭的空位。
+///
+/// Replay one arrow through the real pickup phase, optionally with a full inventory
+/// and an existing arrow stack of the specified size.
+#[cfg(any(test, feature = "oracle-samples"))]
+pub fn replay_arrow_pickup(
+    count: i32,
+    pickup: mc_bamboo_blocks::entity::arrow::Pickup,
+    grounded: bool,
+    shake: u8,
+    creative: bool,
+    full_inventory: Option<i32>,
+) -> (bool, i32, i32) {
+    use mc_bamboo_blocks::entity::EntityKind;
+    use mc_bamboo_data::items;
+    let id = PlayerId(100);
+    let at = Vec3::new(0.5, 64.0, 0.5);
+    let mut region = Region::new(2, 20, false);
+    let mut player = Player::new(
+        id,
+        uuid::Uuid::nil(),
+        "ArrowTest".to_owned(),
+        if creative {
+            GameMode::Creative
+        } else {
+            GameMode::Survival
+        },
+        mc_bamboo_protocol::packet::play::ClientInformation::default(),
+        at,
+    );
+    if let Some(arrows) = full_inventory {
+        player.inventory.slots[9..45].fill(ItemStack::new(items::STONE, 64));
+        if arrows > 0 {
+            player.inventory.slots[inventory::HOTBAR_START] = ItemStack::new(items::ARROW, arrows);
+        }
+    }
+    region.insert_player(player);
+    let mut entity = Entity::arrow(at);
+    let EntityKind::Arrow(arrow) = &mut entity.kind else {
+        unreachable!()
+    };
+    arrow.pickup = pickup;
+    arrow.in_ground = grounded;
+    arrow.shake_time = shake;
+    arrow.pickup_item = ItemStack::new(items::ARROW, count);
+    let uid = region.entities.spawn(entity);
+    pickup_before_entities(&mut region);
+    let entity = region.entities.get(uid).unwrap();
+    let EntityKind::Arrow(arrow) = &entity.kind else {
+        unreachable!()
+    };
+    let arrows = region.players[&id]
+        .inventory
+        .slots
+        .iter()
+        .filter(|stack| stack.item == items::ARROW)
+        .map(|stack| stack.count)
+        .sum();
+    (entity.removed, arrows, arrow.pickup_item.count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, arrow::Pickup};
+    use mc_bamboo_protocol::packet::play::ClientInformation;
+    use uuid::Uuid;
+
+    #[test]
+    fn partial_arrow_pickup_leaves_the_original_arrow_in_survival() {
+        assert_eq!(
+            replay_arrow_pickup(2, Pickup::Allowed, true, 0, false, Some(63)),
+            (false, 64, 2),
+        );
+        assert_eq!(
+            replay_arrow_pickup(2, Pickup::Allowed, true, 0, true, Some(63)),
+            (true, 64, 2),
+        );
+    }
+
+    /// 膨胀到最高一档的河豚：玩家碰到它时掉血并中毒 120 刻。测试区域的难度是简单，
+    /// `MobAttack` 按难度缩放：3 点变成 `3 / 2 + 1 = 2.5`。
+    ///
+    /// A pufferfish at the top puff state: a touching player loses health and gets 120
+    /// ticks of poison. The test region is on easy difficulty, so `MobAttack` scales:
+    /// 3 becomes `3 / 2 + 1 = 2.5`.
+    #[test]
+    fn a_puffed_pufferfish_hurts_and_poisons_a_touching_player() {
+        let id = PlayerId(101);
+        let mut region = Region::new(2, 20, false);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        region.insert_player(Player::new(
+            id,
+            Uuid::nil(),
+            "PufferTest".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            at,
+        ));
+        let mut fish = Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::Pufferfish,
+            Vec3::new(0.9, 64.0, 0.5),
+        );
+        fish.with_mob(|_, mob| {
+            mob.fish.puff_state = 2;
+            mob.uuid = [7; 16];
+        })
+        .expect("a pufferfish is a mob");
+        region.entities.spawn(fish);
+        pickup_before_entities(&mut region);
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 17.5);
+        assert!(
+            player
+                .effects
+                .has(mc_bamboo_data::registries::mob_effect::POISON)
+        );
+    }
+
+    #[test]
+    fn a_deflated_pufferfish_does_not_hurt_a_touching_player() {
+        let id = PlayerId(102);
+        let mut region = Region::new(2, 20, false);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        region.insert_player(Player::new(
+            id,
+            Uuid::nil(),
+            "PufferTest".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            at,
+        ));
+        let fish = Entity::by_mob_type(
+            mc_bamboo_blocks::entity::mob::MobType::Pufferfish,
+            Vec3::new(0.9, 64.0, 0.5),
+        );
+        region.entities.spawn(fish);
+        pickup_before_entities(&mut region);
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 20.0);
+        assert!(
+            !player
+                .effects
+                .has(mc_bamboo_data::registries::mob_effect::POISON)
+        );
+    }
+
+    #[test]
+    fn embedded_arrow_pickup_checks_mode_and_shake() {
+        let id = PlayerId(100);
+        let mut region = Region::new(2, 20, false);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        region.insert_player(Player::new(
+            id,
+            Uuid::nil(),
+            "ArrowTest".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            at,
+        ));
+        let embed = |pickup, shake_time, region: &mut Region| {
+            let mut entity = Entity::arrow(at);
+            let EntityKind::Arrow(arrow) = &mut entity.kind else {
+                unreachable!()
+            };
+            arrow.pickup = pickup;
+            arrow.in_ground = true;
+            arrow.shake_time = shake_time;
+            region.entities.spawn(entity)
+        };
+        let refused = embed(Pickup::Disallowed, 0, &mut region);
+        let shaky = embed(Pickup::Allowed, 1, &mut region);
+        let creative = embed(Pickup::CreativeOnly, 0, &mut region);
+        let ready = embed(Pickup::Allowed, 0, &mut region);
+
+        pickup_before_entities(&mut region);
+        for stays in [refused, shaky, creative] {
+            assert!(!region.entities.get(stays).unwrap().removed);
+        }
+        assert!(region.entities.get(ready).unwrap().removed);
+        assert_eq!(
+            region.players[&id]
+                .inventory
+                .slots
+                .iter()
+                .filter(|stack| stack.item == mc_bamboo_data::items::ARROW)
+                .map(|stack| stack.count)
+                .sum::<i32>(),
+            1
+        );
+
+        region.players.get_mut(&id).unwrap().game_mode = GameMode::Creative;
+        pickup_before_entities(&mut region);
+        assert!(region.entities.get(creative).unwrap().removed);
+        assert_eq!(
+            region.players[&id]
+                .inventory
+                .slots
+                .iter()
+                .filter(|stack| stack.item == mc_bamboo_data::items::ARROW)
+                .map(|stack| stack.count)
+                .sum::<i32>(),
+            1
+        );
+    }
 }

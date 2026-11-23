@@ -216,10 +216,16 @@ impl PlayerHealth {
         rules::armor_values(equipment)
     }
 
-    /// 官方 `Player.attack` 里 `ATTACK_DAMAGE` 加上主手武器的 `attribute_modifiers`。
-    /// 这一期没有冷却 / 暴击 / 附魔加成，只做一次 `player_attack` 伤害。
+    /// 官方 `Player.createAttributes()` 把玩家的 `ATTACK_DAMAGE` 基值设成 1.0，
+    /// 不是属性的注册表缺省 2.0；再加主手武器的 `attribute_modifiers`。
+    /// 冷却 / 暴击 / 附魔加成在 [`crate::player_attack`] 里接着算。
+    ///
+    /// `Player.createAttributes()` sets the player's `ATTACK_DAMAGE` base to 1.0,
+    /// not the registry default 2.0; then add the main-hand weapon's
+    /// `attribute_modifiers`. Cooldown / crit / enchantments are applied in
+    /// [`crate::player_attack`].
     pub fn attack_damage(held: &ItemStack) -> f32 {
-        let mut damage = mc_bamboo_data::registries::attribute_defaults::ATTACK_DAMAGE as f32;
+        let mut damage = 1.0_f32;
         if held.is_empty() {
             return damage;
         }
@@ -280,11 +286,10 @@ impl PlayerHealth {
         self.hurt_duration = outcome.hurt_duration;
         self.last_damage_source = Some(source.kind);
         if outcome.full_hit
-            && let Some(at) = source.position
+            && let Some((dx, dz)) = source.knockback_direction(position)
         {
-            // `ServerPlayer.indicateDamage`: atan2(dz, dx) 转角度再减玩家朝向。
-            let dx = at.x - position.x;
-            let dz = at.z - position.z;
+            // ServerPlayer.indicateDamage：同一击退方向先取 atan2(dz, dx)，再减玩家朝向。
+            // ServerPlayer.indicateDamage takes atan2(dz, dx) of the knockback direction.
             // 官方 `Mth.atan2` 再乘 `57.2957763671875d`（常量，不是 180/PI）。
             self.hurt_dir = (mc_bamboo_core::mth::atan2(dz, dx) * 57.295_776_367_187_5_f64) as f32;
         }

@@ -193,6 +193,9 @@ pub(crate) fn on_sleep_in_bed(
         let player = region.players.get_mut(&id).expect("玩家还在");
         player.sync.sleeping = true;
         player.sleep = Some(Sleeping { pos, counter: 0 });
+        // `ServerPlayer.startSleeping`：`resetStat(TIME_SINCE_REST)` 清零。
+        // `ServerPlayer.startSleeping`: `resetStat(TIME_SINCE_REST)` clears it.
+        player.time_since_rest = 0;
         let now = region.tick;
         crate::movement::teleport(
             player,
@@ -271,6 +274,13 @@ pub(crate) fn tick_sleep_counters(region: &mut Region) {
     // 这里每刻也重算一次，人数变了才广播。
     update_sleeping_player_list(region);
     for player in region.players.values_mut() {
+        // `ServerPlayer.doTick`：`TIME_SINCE_REST` 在没睡觉的每一刻 +1。官方用
+        // `awardStat` 累加到同一份 int 上；这里也按 int 环绕，和 `StatsCounter` 一致。
+        // `ServerPlayer.doTick`: `TIME_SINCE_REST` gains 1 on every non-sleeping tick.
+        // Vanilla accumulates into one int via `awardStat`; wrap the same way.
+        if player.sleep.is_none() {
+            player.time_since_rest = player.time_since_rest.wrapping_add(1);
+        }
         if let Some(sleep) = player.sleep.as_mut() {
             sleep.counter = (sleep.counter + 1).min(DEEP_SLEEP_TICKS);
         }
@@ -411,4 +421,61 @@ pub(crate) fn skip_night(
         .expect("overworld clock")
         .set_total_ticks(next);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    const ID: PlayerId = PlayerId(1);
+
+    fn region_with_player() -> Region {
+        let mut region = Region::new(10, 20, false);
+        region.insert_player(Player::new(
+            ID,
+            Uuid::from_u128(1),
+            "Tester".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(8.5, 64.0, 8.5),
+        ));
+        region
+    }
+
+    #[test]
+    fn time_since_rest_counts_awake_ticks_and_stops_while_sleeping() {
+        let mut region = region_with_player();
+        for _ in 0..5 {
+            tick_sleep_counters(&mut region);
+        }
+        assert_eq!(region.players[&ID].time_since_rest, 5);
+
+        // 睡觉的每一刻不再 +1；`startSleeping` 的清零见下一条。
+        // Sleeping ticks do not add; the `startSleeping` reset is checked next.
+        region.players.get_mut(&ID).unwrap().sleep = Some(Sleeping {
+            pos: BlockPos::new(8, 64, 8),
+            counter: 0,
+        });
+        for _ in 0..3 {
+            tick_sleep_counters(&mut region);
+        }
+        assert_eq!(region.players[&ID].time_since_rest, 5);
+    }
+
+    #[test]
+    fn starting_to_sleep_clears_time_since_rest() {
+        let mut region = region_with_player();
+        for _ in 0..7 {
+            tick_sleep_counters(&mut region);
+        }
+        assert_eq!(region.players[&ID].time_since_rest, 7);
+        on_sleep_in_bed(&mut region, ID, BlockPos::new(8, 64, 8), false, None);
+        assert!(region.players[&ID].sleep.is_some());
+        assert_eq!(region.players[&ID].time_since_rest, 0);
+    }
 }

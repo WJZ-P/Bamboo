@@ -57,33 +57,24 @@ pub(crate) fn damage(
             match target {
                 Target::Player(attacker) => {
                     if let Some(player) = region.players.get(&attacker) {
-                        source.attacker = Some(attacker.0);
                         source.direct = Some(attacker.0);
-                        source.attacker_uuid = Some(*player.uuid.as_bytes());
                         source.position = Some(player.position());
                     }
                 }
                 Target::World(uid) => {
-                    source.attacker = Some(uid);
                     source.direct = Some(uid);
-                    source.scale_when_non_player = true;
                     if let Some(public) = region.entities.public_at(uid) {
                         source.position = Some(public.position);
                     }
                 }
             }
+            set_causing_entity(&mut source, region, target);
         }
     }
     if let Some(cause) = parsed.get("cause").and_then(Value::as_entity) {
         let targets = select::targets(region, id, level, cause)?;
         if let Some(&target) = targets.first() {
-            source.attacker = Some(match target {
-                Target::Player(player) => player.0,
-                Target::World(uid) => uid,
-            });
-            if matches!(target, Target::World(_)) {
-                source.scale_when_non_player = true;
-            }
+            set_causing_entity(&mut source, region, target);
         }
     }
     let targets = select::targets(region, id, level, selector)?;
@@ -140,4 +131,67 @@ pub(crate) fn damage(
     );
     feedback::success(region, id, message, true);
     Ok(())
+}
+
+fn set_causing_entity(source: &mut DamageSource, region: &Region, target: Target) {
+    // `by` 是直接实体，`from` 只替换致因实体及其属性。
+    // `by` is the direct entity; `from` replaces only the causing entity and its properties.
+    source.attacker_is_player = false;
+    source.creative_player = false;
+    source.attacker_uuid = None;
+    source.scale_when_non_player = false;
+    source.attacker = Some(match target {
+        Target::Player(id) => {
+            if let Some(player) = region.players.get(&id) {
+                source.attacker_is_player = true;
+                source.creative_player =
+                    player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative;
+                source.attacker_uuid = Some(*player.uuid.as_bytes());
+            }
+            id.0
+        }
+        Target::World(uid) => {
+            use mc_bamboo_blocks::entity::KindPublic;
+            source.scale_when_non_player = region
+                .entities
+                .public_at(uid)
+                .is_some_and(|entity| matches!(entity.kind, KindPublic::Mob(_)));
+            uid
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::Player;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+
+    #[test]
+    fn from_replaces_credit_but_keeps_the_direct_damage_entity() {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1025);
+        let uuid = uuid::Uuid::from_u128(52);
+        region.insert_player(Player::new(
+            id,
+            uuid,
+            "Killer".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(2.5, 64.0, 0.5),
+        ));
+        let mut source = DamageSource::environment(DamageKind::Arrow);
+        source.direct = Some(4);
+        set_causing_entity(&mut source, &region, Target::Player(id));
+        assert_eq!(source.direct, Some(4));
+        assert_eq!(source.attacker, Some(id.0));
+        assert_eq!(source.attacker_uuid, Some(*uuid.as_bytes()));
+        assert!(source.attacker_is_player);
+        set_causing_entity(&mut source, &region, Target::World(4));
+        assert_eq!(source.attacker, Some(4));
+        assert_eq!(source.attacker_uuid, None);
+        assert!(!source.attacker_is_player);
+        assert!(!source.scale_when_non_player);
+    }
 }

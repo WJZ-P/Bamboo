@@ -36,6 +36,26 @@ use crate::{
     },
 };
 
+// 对拍改坏确认：关掉结构件的 `SHAPE_CHECK_BLOCKS` 标记。
+// Oracle break confirmation: suppress structure-piece `SHAPE_CHECK_BLOCKS` marks.
+thread_local! {
+    static SKIP_SHAPE_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 关掉 / 恢复结构件的 `PostProcessing` 形状检查标记；仅供对拍改坏确认。
+/// Disable / restore structure-piece `PostProcessing` shape-check marks;
+/// only for the oracle's break confirmation.
+pub fn set_skip_shape_check(skip: bool) {
+    SKIP_SHAPE_CHECK.with(|slot| slot.set(skip));
+}
+
+/// 当前是否关掉了结构件的形状检查标记；`place.rs` 复用同一个开关。
+/// Whether structure-piece shape-check marks are currently suppressed;
+/// `place.rs` shares the switch.
+pub(crate) fn skip_shape_check_public() -> bool {
+    SKIP_SHAPE_CHECK.with(|slot| slot.get())
+}
+
 /// 本轮已经逐方块对拍 0 不一致的结构类型；其余起点和引用照官方生成，但放置标
 /// `unsupported` 跳过。`structure::single` 的四个代码生成单件结构和废弃传送门的
 /// `postProcess` 由另一个分支负责，等它合进来再打开。
@@ -74,7 +94,8 @@ pub struct FeaturePlacementContext<'a> {
     pub registry: &'a Registry,
     pub samplers: &'a crate::settings::Samplers,
     pub biomes: &'a crate::biome_manager::BiomeManager<'a>,
-    pub settings: &'a crate::settings::Settings,
+    pub generation: WorldGenerationContext,
+    pub flat: Option<&'a crate::feature::flat::FlatDecoration<'a>>,
     pub region_random: &'a Random,
     /// 3×3 quart 群系格，`BiomeFilter` 用。
     pub feature_chunks: &'a FeatureChunks,
@@ -364,9 +385,12 @@ fn place_start(
                 let place_random =
                     pieces::make_random(options.seed ^ 0x5DEECE66D, input.center_x, input.center_z);
                 let before = world.write_count;
+                // 海底神殿的件走 `StructurePiece.placeBlock` / `generateBox`（`flags=2`）。
+                // Monument pieces use `StructurePiece.placeBlock` / `generateBox` (`flags=2`).
                 let mut level = FeaturePieceLevel {
                     world,
                     world_random: WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0))),
+                    mark_shape_check: true,
                 };
                 let sea_level = level.world.sea_level;
                 pieces::ocean_monument_place::place_in_chunk(
@@ -425,6 +449,7 @@ fn place_start(
                 let mut adapter = FeaturePieceLevel {
                     world,
                     world_random,
+                    mark_shape_check: false,
                 };
                 pieces::woodland_mansion::after_place(pieces, &mut adapter, &chunk_bb);
             }
@@ -533,11 +558,7 @@ fn place_feature_pool_element(
     let Some(placed) = placed else {
         return Ok(());
     };
-    let generation = WorldGenerationContext {
-        min_y: ctx.settings.min_y,
-        height: ctx.settings.height,
-        sea_level: ctx.settings.sea_level,
-    };
+    let generation = ctx.generation;
     // `BiomeFilter.shouldPlace` 问 `WorldGenLevel.getBiome(pos)`：先按
     // `obfuscateSeed(worldSeed)` 做八角 fiddled distance 选 quart 角，再读 3×3
     // 的 quart 格；越界才回退单点气候重算。与主地物循环用同一条路径。
@@ -548,6 +569,9 @@ fn place_feature_pool_element(
     let zoom_seed = crate::biome_manager::obfuscate_seed(world.seed);
     let mut density_context = crate::sampler::Context::uncached();
     let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
+        if let Some(flat) = ctx.flat {
+            return flat.biome;
+        }
         let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
         match crate::feature::world::noise_biome_in(
             biomes, center_x, center_z, min_y, corner.0, corner.1, corner.2,
@@ -563,6 +587,7 @@ fn place_feature_pool_element(
         }
     };
     let mut env = PlacementEnv {
+        flat: ctx.flat,
         generation,
         biome_at: &mut biome_at,
         registry: ctx.registry,
@@ -690,6 +715,7 @@ fn place_layout_piece(
     let mut adapter = FeaturePieceLevel {
         world,
         world_random,
+        mark_shape_check: kind != "mansion",
     };
     match kind {
         "igloo" | "shipwreck" | "ocean_ruin" => {
@@ -1001,6 +1027,14 @@ fn dispatch_stronghold(
 struct FeaturePieceLevel<'w, 'a> {
     world: &'w mut FeatureWorld<'a>,
     world_random: WorldgenRandom,
+    /// 为真时 `set_block` 是 `StructurePiece.placeBlock`（`flags=2`：记
+    /// `SHAPE_CHECK_BLOCKS`、跑 `getPostProcessPos`）；为假时是府邸模板的
+    /// `StructureTemplate.placeInWorld`（`flags=820`，含 bit 16，两样都不记）。
+    /// When true, `set_block` is `StructurePiece.placeBlock` (`flags=2`: marks
+    /// `SHAPE_CHECK_BLOCKS` and runs `getPostProcessPos`); when false it is the
+    /// mansion templates' `StructureTemplate.placeInWorld` (`flags=820`, bit 16
+    /// set, neither).
+    mark_shape_check: bool,
 }
 
 impl PieceLevel for FeaturePieceLevel<'_, '_> {
@@ -1009,6 +1043,32 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
     }
 
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        // `StructurePiece.placeBlock`：写入后若方块在
+        // `SHAPE_CHECK_BLOCKS`（各种栅栏、火把、梯子、铁栏杆）里就记进
+        // `PostProcessing`，供加载后的形状更新重跑。
+        // `StructurePiece.placeBlock`: after the write, mark the position when
+        // the block is in `SHAPE_CHECK_BLOCKS` (fences, torches, ladder, iron
+        // bars) so a later load can redo the shape update.
+        if self.mark_shape_check
+            && !skip_shape_check_public()
+            && let Some(block) = mc_bamboo_data::block_of_state(state)
+            && super::place::shape_check_block(block.name)
+        {
+            self.world.mark_pos_for_post_processing(x, y, z);
+        }
+        if self.mark_shape_check {
+            self.world.set_block_with_heightmaps(x, y, z, state)
+        } else {
+            self.world.set_structure_block(x, y, z, state)
+        }
+    }
+
+    /// 结构件直接 `level.setBlock(..., 2)` 的写入，不记 `SHAPE_CHECK_BLOCKS`；
+    /// `flags=2` 不含 bit 16，`WorldGenRegion.setBlock` 照常跑 `getPostProcessPos`。
+    /// A direct `level.setBlock(..., 2)` write: no `SHAPE_CHECK_BLOCKS` mark, but
+    /// `flags=2` lacks bit 16, so `WorldGenRegion.setBlock` still runs
+    /// `getPostProcessPos`.
+    fn set_block_direct(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
         self.world.set_block_with_heightmaps(x, y, z, state)
     }
 
@@ -1195,6 +1255,7 @@ mod tests {
             blocks,
             biomes,
             heights,
+            post_processing: std::array::from_fn(|_| Vec::new()),
         }
     }
 }

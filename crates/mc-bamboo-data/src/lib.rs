@@ -13,8 +13,12 @@ use mc_bamboo_core::Aabb;
 pub mod recipe;
 
 /// 官方触发器注册表（按数字 ID）及进度定义（按名字）。
-/// The trigger registry in numeric order and the advancement definitions by name.
 pub const ADVANCEMENTS_JSON: &str = include_str!("generated/advancements.json");
+
+/// 自然刷怪的类别上限和每个群系的刷怪设置。
+///
+/// Natural-spawn category caps and per-biome spawn settings.
+pub mod spawning;
 
 pub use recipe::{
     CookingKind, FireworkShape, Ingredient, PotionIngredient, Recipe, RecipeKind, RecipeType,
@@ -26,8 +30,8 @@ pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, gamerules, heightmaps,
-    item_components, item_damage, items, jukebox_songs, light, loot, packets, recipes, registries,
-    saved_world, shapes, sounds, states, structures, tags, version, worldgen,
+    item_components, item_damage, items, jukebox_songs, light, loot, mob_spawns, packets, potions,
+    recipes, registries, saved_world, shapes, sounds, states, structures, tags, version, worldgen,
 };
 
 pub use generated::sounds::{
@@ -89,6 +93,19 @@ pub mod facts {
     pub const PATHFINDABLE_LAND: u64 = 1 << 35;
     /// `isSuffocating(EmptyBlockGetter, pos)`，`Entity.isInWall` 用。
     pub const SUFFOCATING: u64 = 1 << 36;
+    /// `isValidSpawn(EmptyBlockGetter, pos, COW)`：这个状态能不能当生物的落脚块。
+    /// 官方默认是「顶面 `isFaceSturdy(FULL)` 且发光小于 14」，少数方块整个换掉（床、玻璃、
+    /// 树叶、冰、雕刻南瓜等）；用牛来问，因为只有豹猫/鹦鹉和北极熊的方块按实体类型分别回答。
+    ///
+    /// `isValidSpawn(EmptyBlockGetter, pos, COW)`: whether mobs may stand on this state.
+    /// The default is `isFaceSturdy(FULL)` on top and emission below 14, but a few blocks
+    /// replace it outright. Asked with a cow: only the ocelot/parrot and polar-bear blocks
+    /// answer per entity type.
+    pub const VALID_SPAWN: u64 = 1 << 37;
+    /// `isPathfindable(PathComputationType.WATER)`，水中寻路和随机游动选点用。
+    ///
+    /// `isPathfindable(PathComputationType.WATER)`, for swim pathfinding and random swim targets.
+    pub const PATHFINDABLE_WATER: u64 = 1 << 38;
 }
 
 /// 官方 `WalkNodeEvaluator` 给寻路格子分的类别，顺序和官方 `PathType` 一致。
@@ -783,14 +800,38 @@ pub fn is_client_syncable_attribute(id: i32) -> bool {
         .is_some_and(|name| CLIENT_SYNCABLE_ATTRIBUTES.binary_search(&name).is_ok())
 }
 
+/// 每个状态所属方块的注册表 ID，编译期从 [`blocks::BLOCKS`] 的连续区间展开，
+/// 让热路径上的 [`block_id_of_state`] 变成一次下标访问。
+///
+/// The block registry id of each state, expanded at compile time from the
+/// contiguous ranges in [`blocks::BLOCKS`] so [`block_id_of_state`] is an O(1) index.
+static STATE_TO_BLOCK: [u16; blocks::TOTAL_STATES as usize] = {
+    let mut table = [0u16; blocks::TOTAL_STATES as usize];
+    let mut block_id = 0usize;
+    while block_id < blocks::BLOCKS.len() {
+        let start = blocks::BLOCKS[block_id].first_state as usize;
+        let end = if block_id + 1 < blocks::BLOCKS.len() {
+            blocks::BLOCKS[block_id + 1].first_state as usize
+        } else {
+            blocks::TOTAL_STATES as usize
+        };
+        let mut state = start;
+        while state < end {
+            table[state] = block_id as u16;
+            state += 1;
+        }
+        block_id += 1;
+    }
+    table
+};
+
 /// 一个状态所属方块的注册表 ID，状态 ID 不存在时返回 `None`。
-pub fn block_id_of_state(state: u32) -> Option<usize> {
+#[inline]
+pub const fn block_id_of_state(state: u32) -> Option<usize> {
     if state >= blocks::TOTAL_STATES {
         return None;
     }
-    // 生成器保证了状态 ID 从 0 开始，按方块 ID 连续递增。
-    let next = blocks::BLOCKS.partition_point(|block| block.first_state <= state);
-    next.checked_sub(1)
+    Some(STATE_TO_BLOCK[state as usize] as usize)
 }
 
 /// 一个方块有多少个状态。

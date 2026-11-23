@@ -27,7 +27,7 @@ use super::{
     monster_room::{self, MonsterRoomFeature},
     multiface::MultifaceGrowthFeature,
     ores,
-    placement::OreFeature,
+    placement::{OreFeature, PlaceOutcome},
     sculk_patch::{self, SculkPatchFeature},
     simple_block::SimpleBlockFeature,
     speleothem::{self, SpeleothemFeature},
@@ -35,7 +35,7 @@ use super::{
     spike::{self, SpikeFeature},
     spring::{self, SpringFeature},
     template_feature::{self, TemplateFeature},
-    tree::{TreeFeature, fallen::FallenTreeFeature},
+    tree::{TreeFeature, decorator::Recursion, fallen::FallenTreeFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
     vines::VinesFeature,
     world::FeatureWorld,
@@ -84,6 +84,7 @@ pub enum Leaf {
     Tree(Box<TreeFeature>),
     UnderwaterMagma(UnderwaterMagmaFeature),
     Vines(VinesFeature),
+    VoidStartPlatform,
 }
 
 impl Leaf {
@@ -158,6 +159,7 @@ pub fn parse_leaf<'a>(
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
         }
         "minecraft:vines" => Leaf::Vines(VinesFeature::parse(config)?),
+        "minecraft:void_start_platform" => Leaf::VoidStartPlatform,
         _ => return None,
     };
     leaf.is_supported().then_some(leaf)
@@ -166,16 +168,18 @@ pub fn parse_leaf<'a>(
 /// `Feature.place` 的一个候选位置，返回是否放了方块（官方 `placedAny`）。
 ///
 /// One candidate of `Feature.place`; returns whether a block was placed (`placedAny`).
-pub fn place_leaf(
+pub fn place_leaf<'r>(
     leaf: &Leaf,
     world: &mut FeatureWorld<'_>,
-    random: &WorldgenRandom,
+    random: &'r WorldgenRandom,
     // `level.getRandom()`，只有 `MossyCarpetBlock.placeAt` 这类调用用它。
     // `level.getRandom()`, used only by calls such as `MossyCarpetBlock.placeAt`.
     region_random: &crate::random::Random,
     pos: Pos,
-) -> bool {
-    match leaf {
+    biome_at: &'r mut dyn FnMut(i32, i32, i32) -> u32,
+    recursion: Option<&'r Recursion<'r>>,
+) -> PlaceOutcome {
+    let placed = match leaf {
         Leaf::Bamboo(feature) => feature.place(world, random, pos),
         Leaf::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
         Leaf::BlockPile(feature) => block_pile::place(feature, world, random, pos),
@@ -200,8 +204,15 @@ pub fn place_leaf(
         Leaf::Spike(spike) => spike::place(spike, world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
         Leaf::Template(feature) => template_feature::place(feature, world, random, pos),
-        Leaf::Tree(tree) => tree.place(world, random, pos),
+        Leaf::Tree(tree) => {
+            return tree.place(world, random, pos, biome_at, recursion);
+        }
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
+        Leaf::VoidStartPlatform => super::flat::place_void_platform(world, pos),
+    };
+    PlaceOutcome {
+        supported: true,
+        placed,
     }
 }

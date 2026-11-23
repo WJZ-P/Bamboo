@@ -12,7 +12,7 @@
 //!
 //! 每批前清一次缓存，量完打印一块 CSV 行：区块数、线程数、墙钟中位数 / p95、
 //! 吞吐、进程峰值 RSS、缓存条目数与实测堆字节、命中率、跨线程重复计算次数。
-//! RSS 峰值用 `getrusage(RUSAGE_SELF).ru_maxrss`（macOS 是字节）读，测量时
+//! RSS 峰值以字节报告：Unix 读 `getrusage`，Windows 读峰值工作集；测量时
 //! 不编译、不开别的进程。
 //!
 //! Measure the terrain cache's resident memory, hit rate and per-chunk wall clock
@@ -114,56 +114,39 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[index.min(sorted.len() - 1)]
 }
 
-/// 进程峰值常驻内存（字节）。macOS 的 `ru_maxrss` 单位就是字节。
-/// Peak resident set size in bytes; macOS `ru_maxrss` is already in bytes.
+/// 进程峰值常驻内存（字节）。
+///
+/// Peak resident set size in bytes.
+#[cfg(unix)]
 fn peak_rss_bytes() -> u64 {
-    #[repr(C)]
-    struct RUsage {
-        ru_utime: [i64; 2],
-        ru_stime: [i64; 2],
-        ru_maxrss: i64,
-        ru_ixrss: i64,
-        ru_idrss: i64,
-        ru_isrss: i64,
-        ru_minflt: i64,
-        ru_majflt: i64,
-        ru_nswap: i64,
-        ru_inblock: i64,
-        ru_oublock: i64,
-        ru_msgsnd: i64,
-        ru_msgrcv: i64,
-        ru_nsignals: i64,
-        ru_nvcsw: i64,
-        ru_nivcsw: i64,
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) } != 0 {
+        return 0;
     }
-    unsafe extern "C" {
-        fn getrusage(who: i32, usage: *mut RUsage) -> i32;
-    }
-    let mut usage = RUsage {
-        ru_utime: [0; 2],
-        ru_stime: [0; 2],
-        ru_maxrss: 0,
-        ru_ixrss: 0,
-        ru_idrss: 0,
-        ru_isrss: 0,
-        ru_minflt: 0,
-        ru_majflt: 0,
-        ru_nswap: 0,
-        ru_inblock: 0,
-        ru_oublock: 0,
-        ru_msgsnd: 0,
-        ru_msgrcv: 0,
-        ru_nsignals: 0,
-        ru_nvcsw: 0,
-        ru_nivcsw: 0,
-    };
-    // RUSAGE_SELF = 0. 只读进程自己的计数，失败就报 0，不让基准 panic。
-    // RUSAGE_SELF = 0; read only our own counters and report 0 on failure.
-    let ok = unsafe { getrusage(0, &raw mut usage) };
-    if ok == 0 {
-        usage.ru_maxrss.max(0) as u64
+    let peak = usage.ru_maxrss.max(0) as u64;
+    if cfg!(target_vendor = "apple") {
+        peak
     } else {
+        peak * 1024
+    }
+}
+
+#[cfg(windows)]
+fn peak_rss_bytes() -> u64 {
+    use windows_sys::Win32::System::{
+        ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+        Threading::GetCurrentProcess,
+    };
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut usage = PROCESS_MEMORY_COUNTERS {
+        cb: size,
+        ..Default::default()
+    };
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut usage, size) };
+    if ok == 0 {
         0
+    } else {
+        usage.PeakWorkingSetSize as u64
     }
 }
 

@@ -129,17 +129,28 @@ mod bench {
         for px in (-half..half).step_by(32) {
             for pz in (-half..half).step_by(32) {
                 level.players.push(PlayerView {
+                    uuid: None,
                     uid: 1_000_000 + level.players.len() as i32,
+                    yaw: 0.0,
+                    pitch: 0.0,
                     position: Vec3::new(f64::from(px) + 16.5, 64.0, f64::from(pz) + 16.5),
+                    delta: Vec3::default(),
                     eye_height: 1.62,
+                    health: 20.0,
+                    look_direction: Vec3::default(),
+                    gaze_disguise: false,
                     alive: true,
                     spectator: false,
                     creative: false,
                     sneaking: false,
+                    sprinting: false,
+                    swimming: false,
                     invisible: false,
                     armor_cover: 0.0,
                     main_hand: 0,
                     off_hand: 0,
+                    combat: Default::default(),
+                    effects: Default::default(),
                 });
             }
         }

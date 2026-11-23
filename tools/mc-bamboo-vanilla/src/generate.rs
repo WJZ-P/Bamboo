@@ -56,6 +56,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "biomes.rs", &biomes_file(&data.biomes))?;
+    write_file(output_dir, "mob_spawns.rs", &mob_spawns_file(data)?)?;
     write_file(output_dir, "version.rs", &version_file(data))?;
     write_file(output_dir, "packets.rs", &packets_file(data))?;
     write_file(output_dir, "blocks.rs", &blocks)?;
@@ -70,6 +71,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "item_damage.rs", &item_damage)?;
     write_file(output_dir, "items.rs", &items)?;
     write_file(output_dir, "jukebox_songs.rs", &jukebox_songs_file(data))?;
+    write_file(output_dir, "potions.rs", &potions_file(data))?;
     write_file(output_dir, "recipes.rs", &recipes)?;
     write_file(output_dir, "light.rs", &light)?;
     write_file(output_dir, "states.rs", &states)?;
@@ -776,7 +778,9 @@ pub mod items;
 pub mod jukebox_songs;
 pub mod light;
 pub mod loot;
+pub mod mob_spawns;
 pub mod packets;
+pub mod potions;
 pub mod recipes;
 pub mod registries;
 pub mod saved_world;
@@ -830,6 +834,178 @@ fn biomes_file(biomes: &[BiomeClimateFact]) -> String {
     }
     let _ = writeln!(out, "];");
     out
+}
+
+/// `MobCategory` 的照抄顺序，和 `mc-bamboo-data` 的 `MobCategory` 一一对应。
+const MOB_CATEGORY_ORDER: [&str; 8] = [
+    "monster",
+    "creature",
+    "ambient",
+    "axolotls",
+    "underground_water_creature",
+    "water_creature",
+    "water_ambient",
+    "misc",
+];
+
+/// 自然刷怪的上限表和每个群系的加权刷怪表，实体类型按注册表 ID 写死。
+///
+/// The natural-spawn caps and per-biome weighted spawn lists, with entity types
+/// resolved to registry ids.
+fn mob_spawns_file(data: &VersionData) -> Result<String, String> {
+    let facts = &data.mob_spawns;
+    let names: Vec<&str> = facts.categories.iter().map(|c| c.name.as_str()).collect();
+    if names != MOB_CATEGORY_ORDER {
+        return Err(format!(
+            "MobCategory 的顺序变了: {names:?}，期望 {MOB_CATEGORY_ORDER:?}"
+        ));
+    }
+    let entity_names = registry_entries(data, ENTITY_TYPE_REGISTRY).unwrap_or(&[]);
+    let entity_id = |name: &str| -> Result<i32, String> {
+        entity_names
+            .iter()
+            .position(|entry| entry == name)
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or_else(|| format!("群里刷怪表引用了未知实体 {name}"))
+    };
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一个 `MobCategory` 的常量，下标和 `MobCategory` 的判别值一致。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobCategoryDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// `getMaxInstancesPerChunk()`。");
+    let _ = writeln!(out, "    pub max_instances: i32,");
+    let _ = writeln!(out, "    /// `isFriendly()`。");
+    let _ = writeln!(out, "    pub friendly: bool,");
+    let _ = writeln!(out, "    /// `isPersistent()`。");
+    let _ = writeln!(out, "    pub persistent: bool,");
+    let _ = writeln!(out, "    /// `getDespawnDistance()`。");
+    let _ = writeln!(out, "    pub despawn_distance: i32,");
+    let _ = writeln!(out, "    /// `getNoDespawnDistance()`。");
+    let _ = writeln!(out, "    pub no_despawn_distance: i32,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// `MobCategory.values()`，顺序就是官方的声明顺序。");
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static MOB_CATEGORIES: &[MobCategoryDef] = &[");
+    for category in &facts.categories {
+        let _ = writeln!(
+            out,
+            "    MobCategoryDef {{ name: {:?}, max_instances: {}, friendly: {}, persistent: {}, despawn_distance: {}, no_despawn_distance: {} }},",
+            category.name,
+            category.max,
+            category.friendly,
+            category.persistent,
+            category.despawn_distance,
+            category.no_despawn_distance
+        );
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+
+    let _ = writeln!(
+        out,
+        "/// 加权刷怪表里的一项（`MobSpawnSettings.SpawnerData` 加权重）。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobSpawnerDef {{");
+    let _ = writeln!(out, "    /// `minecraft:entity_type` 的注册表 ID。");
+    let _ = writeln!(out, "    pub entity_type: i32,");
+    let _ = writeln!(out, "    pub weight: i32,");
+    let _ = writeln!(out, "    /// `SpawnerData.count()` 的下界。");
+    let _ = writeln!(out, "    pub min: i32,");
+    let _ = writeln!(out, "    /// `SpawnerData.count()` 的上界。");
+    let _ = writeln!(out, "    pub max: i32,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 一个类别下的加权刷怪表。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobCategorySpawns {{");
+    let _ = writeln!(out, "    /// `MobCategory` 的下标。");
+    let _ = writeln!(out, "    pub category: u8,");
+    let _ = writeln!(out, "    pub entries: &'static [MobSpawnerDef],");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// 一个实体的刷怪代价（`MobSpawnSettings.MobSpawnCost`）。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct MobSpawnCostDef {{");
+    let _ = writeln!(out, "    pub entity_type: i32,");
+    let _ = writeln!(out, "    pub charge: f64,");
+    let _ = writeln!(out, "    pub energy_budget: f64,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 一个群系的刷怪设置，按群系注册名排序。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct BiomeMobSpawns {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub categories: &'static [MobCategorySpawns],");
+    let _ = writeln!(out, "    pub costs: &'static [MobSpawnCostDef],");
+    let _ = writeln!(
+        out,
+        "    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层）。"
+    );
+    let _ = writeln!(out, "    pub creature_spawn_probability: f32,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// 每个群系的刷怪设置。没有条目的群系不在这里，查不到就是空表。"
+    );
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static BIOME_MOB_SPAWNS: &[BiomeMobSpawns] = &[");
+    for (biome, settings) in &facts.biomes {
+        let _ = writeln!(out, "    BiomeMobSpawns {{");
+        let _ = writeln!(out, "        name: {biome:?},");
+        let _ = writeln!(out, "        categories: &[");
+        for category in &settings.categories {
+            let index = MOB_CATEGORY_ORDER
+                .iter()
+                .position(|name| *name == category.category)
+                .ok_or_else(|| format!("未知 MobCategory {}", category.category))?;
+            let _ = writeln!(out, "            MobCategorySpawns {{");
+            let _ = writeln!(out, "                category: {index},");
+            let _ = writeln!(out, "                entries: &[");
+            for entry in &category.entries {
+                let _ = writeln!(
+                    out,
+                    "                    MobSpawnerDef {{ entity_type: {}, weight: {}, min: {}, max: {} }},",
+                    entity_id(&entry.entity_type)?,
+                    entry.weight,
+                    entry.min,
+                    entry.max
+                );
+            }
+            let _ = writeln!(out, "                ],");
+            let _ = writeln!(out, "            }},");
+        }
+        let _ = writeln!(out, "        ],");
+        let _ = writeln!(out, "        costs: &[");
+        for cost in &settings.costs {
+            let _ = writeln!(
+                out,
+                "            MobSpawnCostDef {{ entity_type: {}, charge: {:?}, energy_budget: {:?} }},",
+                entity_id(&cost.entity_type)?,
+                cost.charge,
+                cost.energy_budget
+            );
+        }
+        let _ = writeln!(out, "        ],");
+        let _ = writeln!(
+            out,
+            "        creature_spawn_probability: f32::from_bits({:#010x}),",
+            settings.creature_spawn_probability
+        );
+        let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];");
+    Ok(out)
 }
 
 fn version_file(data: &VersionData) -> String {
@@ -3267,6 +3443,7 @@ fn registries_file(data: &VersionData) -> String {
     write_registry_ids(&mut out, data, "mob_effect", MOB_EFFECT_REGISTRY);
     write_registry_ids(&mut out, data, "banner_pattern", BANNER_PATTERN_REGISTRY);
     write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
+    write_registry_ids(&mut out, data, "stat_type", "minecraft:stat_type");
 
     let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
     let _ = writeln!(out, "pub mod attribute_defaults {{");
@@ -3323,7 +3500,308 @@ fn entity_types_file(data: &VersionData) -> String {
             float_literal(type_.height),
         );
     }
+    let _ = writeln!(out, "];\n");
+    let facts = &data.projectile_facts;
+    let _ = writeln!(out, "pub const ARROW_FLAGS: u8 = {};", facts.arrow_flags);
+    let _ = writeln!(out, "pub const ARROW_PIERCE: u8 = {};", facts.arrow_pierce);
+    let _ = writeln!(
+        out,
+        "pub const ARROW_IN_GROUND: u8 = {};",
+        facts.arrow_in_ground
+    );
+    let _ = writeln!(out, "pub const ARROW_COLOR: u8 = {};", facts.arrow_color);
+    let _ = writeln!(
+        out,
+        "pub const SKELETON_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.skeleton_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const LLAMA_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.llama_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const MULE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.mule_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const DONKEY_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.donkey_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const HORSE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.horse_eye_height)
+    );
+    for (name, id) in [
+        ("HORSE_FLAGS", facts.horse_flags),
+        ("HORSE_VARIANT", facts.horse_variant),
+        ("HORSE_CHEST", facts.horse_chest),
+        ("LLAMA_STRENGTH", facts.llama_strength),
+        ("LLAMA_VARIANT", facts.llama_variant),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {id};");
+    }
+    for (name, value) in [
+        ("EYE_HEIGHT", facts.rabbit_eye_height),
+        ("BABY_WIDTH", facts.rabbit_baby_width),
+        ("BABY_HEIGHT", facts.rabbit_baby_height),
+        ("BABY_EYE_HEIGHT", facts.rabbit_baby_eye_height),
+    ] {
+        let _ = writeln!(
+            out,
+            "pub const RABBIT_{name}: f32 = {};",
+            float_literal(value)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "pub const RABBIT_VARIANT: u8 = {};",
+        facts.rabbit_variant
+    );
+    for (name, value) in [
+        ("MAX_HEALTH", facts.rabbit_max_health),
+        ("MOVEMENT_SPEED", facts.rabbit_movement_speed),
+        ("ATTACK_DAMAGE", facts.rabbit_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const RABBIT_{name}: f64 = {value:?};");
+    }
+    fox_facts(&mut out, facts);
+    wolf_facts(&mut out, facts);
+    for (name, value) in [
+        ("PIG_BOOST_TIME", facts.pig_boost_time),
+        ("PIG_VARIANT", facts.pig_variant),
+        ("PIG_SOUND_VARIANT", facts.pig_sound_variant),
+        ("SHEEP_WOOL", facts.sheep_wool),
+        ("POLAR_BEAR_STANDING", facts.polar_bear_standing),
+        ("PANDA_UNHAPPY", facts.panda_unhappy),
+        ("PANDA_SNEEZE", facts.panda_sneeze),
+        ("PANDA_EAT", facts.panda_eat),
+        ("PANDA_MAIN_GENE", facts.panda_main_gene),
+        ("PANDA_HIDDEN_GENE", facts.panda_hidden_gene),
+        ("PANDA_FLAGS", facts.panda_flags),
+        ("OCELOT_TRUSTING", facts.ocelot_trusting),
+        ("CAT_VARIANT", facts.cat_variant),
+        ("CAT_IS_LYING", facts.cat_is_lying),
+        ("CAT_RELAX_STATE_ONE", facts.cat_relax_state_one),
+        ("CAT_COLLAR", facts.cat_collar),
+        ("CAT_SOUND_VARIANT", facts.cat_sound_variant),
+        ("PARROT_VARIANT", facts.parrot_variant),
+        ("GLOW_SQUID_DARK_TICKS", facts.glow_squid_dark_ticks),
+        ("BAT_FLAGS", facts.bat_flags),
+        ("PHANTOM_SIZE", facts.phantom_size),
+        ("FISH_FROM_BUCKET", facts.fish_from_bucket),
+        ("SALMON_VARIANT", facts.salmon_variant),
+        ("TROPICAL_FISH_VARIANT", facts.tropical_fish_variant),
+        ("PUFFERFISH_PUFF_STATE", facts.pufferfish_puff_state),
+        ("CHICKEN_VARIANT", facts.chicken_variant),
+        ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
+        ("ARMADILLO_STATE", facts.armadillo_state),
+        ("GOAT_SCREAMING", facts.goat_screaming),
+        ("GOAT_LEFT_HORN", facts.goat_left_horn),
+        ("GOAT_RIGHT_HORN", facts.goat_right_horn),
+        ("FROG_VARIANT", facts.frog_variant),
+        ("FROG_TONGUE_TARGET", facts.frog_tongue_target),
+        ("TURTLE_HAS_EGG", facts.turtle_has_egg),
+        ("TURTLE_LAYING_EGG", facts.turtle_laying_egg),
+        ("DOLPHIN_GOT_FISH", facts.dolphin_got_fish),
+        ("DOLPHIN_MOISTNESS", facts.dolphin_moistness),
+        ("AXOLOTL_VARIANT", facts.axolotl_variant),
+        ("AXOLOTL_PLAYING_DEAD", facts.axolotl_playing_dead),
+        ("AXOLOTL_FROM_BUCKET", facts.axolotl_from_bucket),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    let _ = writeln!(
+        out,
+        "pub const PARROT_SOUND_MAP_SIZE: i32 = {};",
+        facts.parrot_sound_map_size
+    );
+    let _ = writeln!(
+        out,
+        "pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &{:?};",
+        facts.tropical_fish_common_variants
+    );
+    for (name, value) in [
+        ("PIG_VARIANT_SERIALIZER", facts.pig_variant_serializer),
+        (
+            "PIG_SOUND_VARIANT_SERIALIZER",
+            facts.pig_sound_variant_serializer,
+        ),
+        (
+            "CHICKEN_VARIANT_SERIALIZER",
+            facts.chicken_variant_serializer,
+        ),
+        (
+            "CHICKEN_SOUND_VARIANT_SERIALIZER",
+            facts.chicken_sound_variant_serializer,
+        ),
+        (
+            "ARMADILLO_STATE_SERIALIZER",
+            facts.armadillo_state_serializer,
+        ),
+        ("FROG_VARIANT_SERIALIZER", facts.frog_variant_serializer),
+        (
+            "FROG_TONGUE_TARGET_SERIALIZER",
+            facts.frog_tongue_target_serializer,
+        ),
+    ] {
+        let _ = writeln!(out, "pub const {name}: i32 = {value};");
+    }
+    let _ = writeln!(
+        out,
+        "pub const CUBE_MOB_SIZE: u8 = {};",
+        facts.cube_mob_size
+    );
+    let _ = writeln!(
+        out,
+        "pub const SLIME_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.slime_eye_height)
+    );
+    mooshroom_facts(&mut out, facts);
+    // 敌对生物自己定义的元数据 index 和眼高，按常量名排序。
+    // Hostile-mob metadata indices and eye heights, sorted by constant name.
+    for (name, id) in &data.monster_facts.data_ids {
+        let _ = writeln!(out, "pub const {name}: u8 = {id};");
+    }
+    for (name, eye) in &data.monster_facts.eye_heights {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(*eye));
+    }
+    out
+}
+
+/// 哞菇的元数据 index 和「花 → 迷之炖菜效果」表（官方 `SuspiciousEffectHolder`）。
+///
+/// The mooshroom metadata index and the flower → suspicious stew effects table
+/// (vanilla `SuspiciousEffectHolder`).
+fn mooshroom_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    let _ = writeln!(
+        out,
+        "pub const MOOSHROOM_TYPE: u8 = {};",
+        facts.mooshroom_type
+    );
+    let _ = writeln!(
+        out,
+        "/// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。"
+    );
+    let _ = writeln!(out, "pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[");
+    for (item, effects) in &facts.stew_flowers {
+        let list: Vec<String> = effects
+            .iter()
+            .map(|[effect, duration]| format!("({effect}, {duration})"))
+            .collect();
+        let _ = writeln!(out, "    ({item}, &[{}]),", list.join(", "));
+    }
     let _ = writeln!(out, "];");
+}
+
+/// 狼的尺寸、元数据下标（含 `TamableAnimal` 的两项）和属性。
+///
+/// The wolf dimensions, metadata indices (with the two `TamableAnimal` ones)
+/// and attributes.
+fn wolf_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    for (name, value) in [
+        ("WOLF_EYE_HEIGHT", facts.wolf_eye_height),
+        ("WOLF_BABY_WIDTH", facts.wolf_baby_width),
+        ("WOLF_BABY_HEIGHT", facts.wolf_baby_height),
+        ("WOLF_BABY_EYE_HEIGHT", facts.wolf_baby_eye_height),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("TAME_FLAGS", facts.tame_flags),
+        ("TAME_OWNER", facts.tame_owner),
+        ("WOLF_INTERESTED", facts.wolf_interested),
+        ("WOLF_COLLAR", facts.wolf_collar),
+        ("WOLF_ANGER_END_TIME", facts.wolf_anger_end_time),
+        ("WOLF_VARIANT", facts.wolf_variant),
+        ("WOLF_SOUND_VARIANT", facts.wolf_sound_variant),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("WOLF_MAX_HEALTH", facts.wolf_max_health),
+        ("WOLF_MOVEMENT_SPEED", facts.wolf_movement_speed),
+        ("WOLF_ATTACK_DAMAGE", facts.wolf_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+}
+
+/// 狐狸的尺寸、元数据下标和属性。
+///
+/// The fox dimensions, metadata indices and attributes.
+fn fox_facts(out: &mut String, facts: &crate::extract::ProjectileFacts) {
+    for (name, value) in [
+        ("EYE_HEIGHT", facts.fox_eye_height),
+        ("BABY_WIDTH", facts.fox_baby_width),
+        ("BABY_HEIGHT", facts.fox_baby_height),
+        ("BABY_EYE_HEIGHT", facts.fox_baby_eye_height),
+    ] {
+        let _ = writeln!(out, "pub const FOX_{name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("TRUSTED_0", facts.fox_trusted0),
+        ("TRUSTED_1", facts.fox_trusted1),
+        ("TYPE", facts.fox_type),
+        ("FLAGS", facts.fox_flags),
+    ] {
+        let _ = writeln!(out, "pub const FOX_{name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("MAX_HEALTH", facts.fox_max_health),
+        ("MOVEMENT_SPEED", facts.fox_movement_speed),
+        ("ATTACK_DAMAGE", facts.fox_attack_damage),
+        ("SAFE_FALL_DISTANCE", facts.fox_safe_fall_distance),
+        ("FOLLOW_RANGE", facts.fox_follow_range),
+    ] {
+        let _ = writeln!(out, "pub const FOX_{name}: f64 = {value:?};");
+    }
+}
+
+/// 药水注册表每条药水的效果，下标是 `minecraft:potion` 的注册表 ID。
+///
+/// The effects of each potion, indexed by the `minecraft:potion` registry id.
+fn potions_file(data: &VersionData) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一条药水效果：(`minecraft:mob_effect` ID、刻数、等级)。"
+    );
+    let _ = writeln!(out, "pub static EFFECTS: &[&[(i32, i32, i32)]] = &[");
+    for effects in &data.projectile_facts.potion_effects {
+        let _ = write!(out, "    &[");
+        for (index, [effect, duration, amplifier]) in effects.iter().enumerate() {
+            if index != 0 {
+                let _ = write!(out, ", ");
+            }
+            let _ = write!(out, "({effect}, {duration}, {amplifier})");
+        }
+        let _ = writeln!(out, "],");
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 药水 ID 对应的效果；越界时返回 `None`。");
+    let _ = writeln!(
+        out,
+        "pub fn effects(potion: i32) -> Option<&'static [(i32, i32, i32)]> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    usize::try_from(potion).ok().and_then(|id| EFFECTS.get(id)).copied()"
+    );
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 状态效果注册表中各条目的 RGB 色值。");
+    let _ = writeln!(out, "///");
+    let _ = writeln!(out, "/// RGB colours indexed by mob-effect registry ID.");
+    let _ = writeln!(
+        out,
+        "pub static EFFECT_COLORS: &[i32] = &{:?};",
+        data.projectile_facts.effect_colors
+    );
     out
 }
 

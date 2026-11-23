@@ -249,6 +249,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.PositionPath;
 import net.minecraft.world.entity.player.Abilities;
@@ -421,6 +422,10 @@ public final class Probe {
             // Vanilla sends `container_set_data` when the loom selects a pattern.
             "handleContainerSetData",
             "handleContainerSetSlot",
+            // 受击实体周围看得到它的人也收 `damage_event`（`ServerLevel.broadcastDamageEvent`）。
+            // Players tracking a hurt entity also get `damage_event`
+            // (`ServerLevel.broadcastDamageEvent`).
+            "handleDamageEvent",
             "handleDisconnect",
             "handleDisguisedChat",
             "handleEntityEvent",
@@ -727,6 +732,19 @@ public final class Probe {
                 && Math.abs(first.z - second.z) <= POSITION_TOLERANCE;
     }
 
+    /**
+     * 从 `from` 之后收到的方块音效。自然生成的生物会发自己的环境音，
+     * 这里只数 `SoundSource.BLOCKS` 的包。
+     *
+     * Block sounds received after `from`. Naturally spawned mobs emit their own
+     * ambient sounds, so only the `SoundSource.BLOCKS` packets are counted.
+     */
+    private static List<ClientboundSoundPacket> blockSoundsSince(Join join, int from) {
+        return join.sounds.subList(from, join.sounds.size()).stream()
+                .filter(sound -> sound.getSource() == SoundSource.BLOCKS)
+                .toList();
+    }
+
     /** 告示牌一面第 `line` 行，`front_text`/`back_text` 里 `messages` 的字符串。 */
     private static String signLine(CompoundTag tag, String side, int line) {
         if (tag == null) {
@@ -737,6 +755,24 @@ public final class Probe {
                 .filter(messages -> messages.size() > line)
                 .flatMap(messages -> messages.getString(line))
                 .orElse(null);
+    }
+
+    /**
+     * `join` 从第 `from` 条起收到的、属于实体 `entity` 的第一个实体事件；还没有就是 null。
+     *
+     * The first entity event `join` received from index `from` on that belongs to
+     * `entity`, or null if none has arrived yet.
+     */
+    private static Byte entityEventFrom(Join join, int from, int entity) {
+        // 网络线程先后追加两张表，读的时候以较短的那张为准。
+        // The network thread appends to both lists in turn; read up to the shorter one.
+        int size = Math.min(join.entityEvents.size(), join.entityEventSources.size());
+        for (int i = from; i < size; i++) {
+            if (join.entityEventSources.get(i) == entity) {
+                return join.entityEvents.get(i);
+            }
+        }
+        return null;
     }
 
     /** 官方的包不公开这个字段，客户端要靠 Level 才取得到实体。 */
@@ -1454,8 +1490,8 @@ public final class Probe {
                 return state != null && state.is(Blocks.OAK_DOOR);
             });
             await("sound: " + observer.player + " hears the door being placed",
-                    () -> observer.sounds.size() == otherSounds + 1);
-            ClientboundSoundPacket placed = observer.sounds.getLast();
+                    () -> blockSoundsSince(observer, otherSounds).size() == 1);
+            ClientboundSoundPacket placed = blockSoundsSince(observer, otherSounds).getFirst();
             check("sound: the place sound is the wood one", placed.getSound().value() == SoundEvents.WOOD_PLACE);
             check("sound: the place sound comes from the block", placed.getSource() == SoundSource.BLOCKS);
             check("sound: the place sound is at the block center",
@@ -1463,7 +1499,7 @@ public final class Probe {
             check("sound: the place sound has the block volume", placed.getVolume() == 1.0f);
             check("sound: the place sound has the block pitch", placed.getPitch() == 0.8f);
             pumpFor(SETTLE_MILLIS);
-            check("sound: the placer hears nothing", actor.sounds.size() == ownSounds);
+            check("sound: the placer hears nothing", blockSoundsSince(actor, ownSounds).isEmpty());
 
             // `DoorBlock.playSound`：`getRandom().nextFloat() * 0.1F + 0.9F`。
             int beforeOpen = observer.sounds.size();
@@ -1476,8 +1512,8 @@ public final class Probe {
             await("sound: the door opens", () -> observer.blocks.containsKey(door)
                     && observer.blocks.get(door).getValue(DoorBlock.OPEN));
             await("sound: " + observer.player + " hears the door open",
-                    () -> observer.sounds.size() == beforeOpen + 1);
-            ClientboundSoundPacket opened = observer.sounds.getLast();
+                    () -> blockSoundsSince(observer, beforeOpen).size() == 1);
+            ClientboundSoundPacket opened = blockSoundsSince(observer, beforeOpen).getFirst();
             check("sound: the open sound is the wooden door one",
                     opened.getSound().value() == SoundEvents.WOODEN_DOOR_OPEN);
             check("sound: the open sound comes from the block", opened.getSource() == SoundSource.BLOCKS);
@@ -1487,7 +1523,7 @@ public final class Probe {
             check("sound: the open sound has a random pitch",
                     opened.getPitch() >= 0.9f && opened.getPitch() < 1.0f);
             pumpFor(SETTLE_MILLIS);
-            check("sound: the door opener hears nothing", actor.sounds.size() == ownBeforeOpen);
+            check("sound: the door opener hears nothing", blockSoundsSince(actor, ownBeforeOpen).isEmpty());
 
             // 门会挡住另一个玩家这一段，从下半截破坏，两格一起走。
             int breaking = actor.nextSequence();
@@ -2550,14 +2586,16 @@ public final class Probe {
                         ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, grass, Direction.UP, sequence));
                 actor.send(new ServerboundPlayerActionPacket(
                         ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, grass, Direction.UP, actor.nextSequence()));
-                await("durability: the pickaxe breaks", () -> actor.entityEvents.size() > ownEvents
-                        && actor.slots.containsKey(HOTBAR_START)
-                        && actor.slots.get(HOTBAR_START).isEmpty());
+                await("durability: the pickaxe breaks",
+                        () -> entityEventFrom(actor, ownEvents, actor.entityId) != null
+                                && actor.slots.containsKey(HOTBAR_START)
+                                && actor.slots.get(HOTBAR_START).isEmpty());
                 check("durability: the break event is 47",
-                        actor.entityEvents.get(ownEvents) == EQUIPMENT_BREAK_MAIN_HAND);
-                await("durability: the observer sees the break", () -> observer.entityEvents.size() > otherEvents);
+                        entityEventFrom(actor, ownEvents, actor.entityId) == EQUIPMENT_BREAK_MAIN_HAND);
+                await("durability: the observer sees the break",
+                        () -> entityEventFrom(observer, otherEvents, actor.entityId) != null);
                 check("durability: the observer's break event is 47",
-                        observer.entityEvents.get(otherEvents) == EQUIPMENT_BREAK_MAIN_HAND);
+                        entityEventFrom(observer, otherEvents, actor.entityId) == EQUIPMENT_BREAK_MAIN_HAND);
             } finally {
                 if (survival) {
                     actor.gameModeParam = Float.NaN;
@@ -2660,6 +2698,17 @@ public final class Probe {
             check("commands: other ops see the admin broadcast",
                     containsText(observer, "[Kitten: Set minecraft:overworld to 1000 tick(s)]"));
 
+            // 这个场景断言的是「世界里恰好有这些东西」，自然刷怪会在正午的平原上刷出
+            // 生物，所以先关掉（和随机刻速度一样属于场景校准）。这个 Gamerule 在 26.3
+            // 叫 `spawn_mobs`。
+            //
+            // This scene asserts an exact set of entities, and natural spawning adds
+            // mobs to a plains world at noon, so turn it off (scene calibration, like
+            // the random tick speed). The 26.3 game rule is called `spawn_mobs`.
+            actor.send(new ServerboundChatCommandPacket("gamerule spawn_mobs false"));
+            await("commands: mob spawning is off",
+                    () -> containsText(actor, "Game rule spawn_mobs is now set to false"));
+
             BlockPos stone = new BlockPos(4, -59, 4);
             BlockPos stairs = new BlockPos(4, -58, 4);
             actor.send(new ServerboundChatCommandPacket("setblock 4 -59 4 stone"));
@@ -2677,8 +2726,14 @@ public final class Probe {
             // 牛的生成包、元数据、属性包和之后的移动包，都要能被官方的包定义解析。
             // The cow's spawn, metadata, attributes and later movement packets must
             // all decode with the official packet definitions.
+            // 牛的自然生成可能在这个场景之前就刷出过牛，所以按「这一次 summoned 多加了一头」
+            // 来数，而不是「全服一共只有一头」。
+            //
+            // Natural spawning may already have added cows before this scene, so count
+            // "this summon added one" instead of "there is exactly one cow in total".
+            int cowsBeforeSummon = actor.cowAdds;
             actor.send(new ServerboundChatCommandPacket("summon minecraft:cow 12 -60 8"));
-            await("cow: /summon sends an add_entity", () -> actor.cowAdds == 1);
+            await("cow: /summon sends an add_entity", () -> actor.cowAdds == cowsBeforeSummon + 1);
             await("cow: the pairing bundle carries metadata", () -> actor.cowData >= 1);
             await("cow: the pairing bundle carries attributes", () -> actor.cowAttributes >= 1);
             check("cow: the client knows the new entity", actor.remotes.containsKey(actor.lastCowId));
@@ -3201,6 +3256,8 @@ public final class Probe {
         /** 最近一次出现的物品实体。 */
         int lastItemId = -1;
         int lastCowId = -1;
+        /** 世界里自然刷出来的生物（牛以外的也算）。它们的属性和元数据包不算进玩家相关的检查。 */
+        final Set<Integer> mobIds = new HashSet<>();
         int cowAdds;
         int cowAttributes;
         int cowData;
@@ -3224,6 +3281,9 @@ public final class Probe {
         /** 收到的实体事件字节。物品损坏是 47 或 48。 */
         // Entity-event bytes. An item break is 47 or 48.
         final List<Byte> entityEvents = new ArrayList<>();
+        /** 和 `entityEvents` 一一对应的实体 ID。测试世界会自然刷出生物，它们也发实体事件。 */
+        // The entity id of each `entityEvents` entry. Naturally spawned mobs send entity events too.
+        final List<Integer> entityEventSources = new ArrayList<>();
         int acks;
         int stats;
         int openContainerId = -1;
@@ -3740,12 +3800,13 @@ public final class Probe {
         }
 
         private void onEntityEvent(ClientboundEntityEventPacket packet) {
+            int entity = privateInt(packet, ClientboundEntityEventPacket.class, "entityId");
             entityEvents.add(packet.getEventId());
+            entityEventSources.add(entity);
             if (permissionEventChecked) {
                 return;
             }
             permissionEventChecked = true;
-            int entity = privateInt(packet, ClientboundEntityEventPacket.class, "entityId");
             check("commands: the permission event names this player", entity == entityId);
             // 离线探针的工作目录里 ops.json 把 Kitten、Mochi、Latecomer 写成 4。
             // Visitor 和 Spectator 不在名单里。正版那台服务端没有这份名单。
@@ -4026,7 +4087,11 @@ public final class Probe {
         }
 
         private void onEntityData(ClientboundSetEntityDataPacket packet) {
-            entityDataPackets += 1;
+            // 只数非生物实体的元数据包：自然刷出的动物随时会发自己的元数据。
+            // Count only non-mob entity data: naturally spawned animals send their own at any time.
+            if (!mobIds.contains(packet.id())) {
+                entityDataPackets += 1;
+            }
             if (packet.id() == lastCowId) {
                 cowData += 1;
             }
@@ -4060,6 +4125,9 @@ public final class Probe {
                 check("cow: attributes carry the cow's movement speed",
                         packet.getValues().stream().anyMatch(snapshot ->
                                 snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));
+                return;
+            }
+            if (mobIds.contains(packet.getEntityId())) {
                 return;
             }
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
@@ -4162,8 +4230,14 @@ public final class Probe {
             boolean tnt = packet.getType() == EntityTypes.TNT;
             boolean item = packet.getType() == EntityTypes.ITEM;
             boolean cow = packet.getType() == EntityTypes.COW;
-            check("entity: only players, falling blocks, primed tnt, items and cows are added",
-                    player || falling || tnt || item || cow);
+            // 生成期和自然刷怪会带来各种动物和怪物，类别不是 MISC 的都算生物。
+            // Generation-time and natural spawning bring all kinds of mobs: anything outside MISC.
+            boolean mob = packet.getType().getCategory() != MobCategory.MISC;
+            if (mob) {
+                mobIds.add(packet.getId());
+            }
+            check("entity: only players, falling blocks, primed tnt, items and mobs are added",
+                    player || falling || tnt || item || mob);
             if (cow) {
                 lastCowId = packet.getId();
                 cowAdds += 1;

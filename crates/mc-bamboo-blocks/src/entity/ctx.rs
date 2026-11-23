@@ -129,9 +129,36 @@ pub trait BlockView {
         2
     }
 
+    /// `Level.getSeaLevel()`：生成器的海平面。默认是噪声主世界的 63；超平坦是 -63，
+    /// 由游戏层的只读视图按世界类型给出。
+    ///
+    /// `Level.getSeaLevel()`: the generator's sea level. Defaults to the noise
+    /// overworld's 63; superflat is -63, which the game's read-only view supplies.
+    fn sea_level(&self) -> i32 {
+        63
+    }
+
     /// `canSeeSky(pos)`：天空光是 15 就看得见天。
     fn can_see_sky(&self, _pos: BlockPos) -> bool {
         false
+    }
+
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：这一列挡运动的最高方块上面一格，整列
+    /// 都不挡时是世界底部下面一格。缺省实现逐格读方块；有真实高度图的视图覆盖它。
+    ///
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`: one above the highest
+    /// motion-blocking block of the column, or one below the world bottom when nothing
+    /// blocks. The default reads blocks one by one; views with a real heightmap override it.
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        for y in (self.min_y()..=self.max_y()).rev() {
+            let state = self.block_state(BlockPos::new(pos.x, y, pos.z));
+            if state.is_tagged(mc_bamboo_data::tags::block_tags::BLOCKS_MOTION_IN_HEIGHTMAP)
+                || !state.fluid().is_empty()
+            {
+                return y + 1;
+            }
+        }
+        self.min_y() - 1
     }
 
     /// `getMaxLocalRawBrightness(pos, skyDarken)`：方块光和减去天色后的天空光里亮的那个。
@@ -144,15 +171,95 @@ pub trait BlockView {
         false
     }
 
+    /// `Level.isThundering()`：担心基因的熊猫在雷雨天会坐下。
+    ///
+    /// `Level.isThundering()`: a worried panda sits down during a thunderstorm.
+    fn is_thundering(&self) -> bool {
+        false
+    }
+
+    /// `Level.isBrightOutside()`：主世界没有固定时间，天色暗于 4 才算夜里。
+    ///
+    /// `Level.isBrightOutside()`: the overworld has no fixed time, so night
+    /// starts when `skyDarken` reaches 4.
+    fn is_bright_outside(&self) -> bool {
+        self.sky_darken() < 4
+    }
+
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线求值。
+    fn monsters_burn(&self) -> bool {
+        crate::sky::monsters_burn(self.clock_ticks())
+    }
+
+    /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
+    fn clock_ticks(&self) -> i64 {
+        0
+    }
+
+    /// `getCurrentDifficultyAt(pos).getEffectiveDifficulty()`：区域难度。
+    /// 默认把区块的 `InhabitedTime` 当 0。
+    fn effective_difficulty(&self, _pos: BlockPos) -> f32 {
+        let clock = self.clock_ticks();
+        crate::sky::effective_difficulty(
+            self.difficulty(),
+            clock,
+            0,
+            crate::sky::moon_brightness(clock),
+        )
+    }
+
     /// `level.random.nextFloat()`。只有精确模式的世界能当场取世界随机数；
     /// 并行的只读视图给 0，取数的地方列在设计稿的性能模式差异里。
     fn level_random_float(&self) -> f32 {
         0.0
     }
 
+    /// `level.random.nextInt(bound)`：大脑行为的时长、偶尔看人的间隔用它。并行视图同上给 0。
+    ///
+    /// `level.random.nextInt(bound)`, for brain behaviour durations and look intervals;
+    /// 0 on parallel views as above.
+    fn level_random_int(&self, _bound: i32) -> i32 {
+        0
+    }
+
     /// `level.random.nextBoolean()`，并行视图同上。
     fn level_random_boolean(&self) -> bool {
         false
+    }
+
+    /// 生物身上装备的 `hurtAndBreak(amount, entity, slot)`：耐久附魔用 `level.random`。
+    /// 返回装备是不是坏了。并行的只读视图没有世界随机源，按没有耐久附魔算
+    /// （带耐久附魔的装备扣耐久的次数和原版不同，是性能模式差异）。
+    fn hurt_mob_equipment(
+        &self,
+        stack: &mut mc_bamboo_protocol::item::ItemStack,
+        amount: i32,
+    ) -> bool {
+        crate::durability::hurt_equipment(stack, amount, &crate::random::LegacyRandom::new(0))
+    }
+}
+
+/// 生物选药或决策时要看的目标药水效果（女巫的 `performRangedAttack` 读这三项）。
+///
+/// Target potion effects inspected by mob AI (`Witch.performRangedAttack` reads these three).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetEffects {
+    pub slowness: bool,
+    pub poison: bool,
+    pub weakness: bool,
+}
+
+impl TargetEffects {
+    /// 从效果表提取这三项标志。
+    ///
+    /// Extracts the three flags from an active effect map.
+    pub fn from_map(effects: &super::mob::effects::EffectMap) -> Self {
+        use mc_bamboo_data::registries::mob_effect;
+        Self {
+            slowness: effects.has(mob_effect::SLOWNESS),
+            poison: effects.has(mob_effect::POISON),
+            weakness: effects.has(mob_effect::WEAKNESS),
+        }
     }
 }
 
@@ -162,19 +269,67 @@ pub trait BlockView {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerView {
     pub uid: EntityUid,
+    pub uuid: Option<[u8; 16]>,
     pub position: Vec3,
+    /// `Entity.getDeltaMovement()`，女巫计算投掷提前量时读它。
+    ///
+    /// `Entity.getDeltaMovement()`, read by witches to lead thrown potions.
+    pub delta: Vec3,
     pub eye_height: f32,
+    /// `LivingEntity.getHealth()`，女巫选毒药还是伤害药水时读它。
+    ///
+    /// `LivingEntity.getHealth()`, read by witches when picking poison vs harming.
+    pub health: f32,
+    pub look_direction: Vec3,
+    pub gaze_disguise: bool,
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
     /// `isDiscrete()`，也就是潜行。
     pub sneaking: bool,
+    /// `isSprinting()`：犰狳会被疾跑的玩家吓到。
+    ///
+    /// `isSprinting()`; sprinting players scare armadillos.
+    pub sprinting: bool,
+    /// `Entity.isSwimming()`（共享标志位 4）：海豚会跟着游泳的玩家游。
+    ///
+    /// `Entity.isSwimming()` (shared flag 4); dolphins swim with a swimming player.
+    pub swimming: bool,
     pub invisible: bool,
     /// `getArmorCoverPercentage()`，隐身时才用。
     pub armor_cover: f32,
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 朝向，骑乘时用作骑手的朝向（`AbstractHorse.getRiddenRotation`）。
+    ///
+    /// The facing, used as the rider's rotation while riding
+    /// (`AbstractHorse.getRiddenRotation`).
+    pub yaw: f32,
+    pub pitch: f32,
+    /// 战斗记忆，被驯服的狼保护主人时读。
+    ///
+    /// Combat memory, read by tamed wolves guarding their owner.
+    pub combat: PlayerCombat,
+    /// 目标身上的缓慢 / 中毒 / 虚弱状态，女巫选药时读它。
+    ///
+    /// Whether the target has slowness, poison or weakness, read by witches.
+    pub effects: TargetEffects,
+}
+
+/// 玩家的 `getLastHurtByMob` / `getLastHurtMob` 和两个时间戳（玩家自己的 tick 数），
+/// 以及 `getLastDamageSource(100)` 存在且不在 `#no_wolf_retaliation` 里。
+///
+/// A player's `getLastHurtByMob` / `getLastHurtMob` with their timestamps (the
+/// player's own tick count), and whether `getLastDamageSource(100)` exists and
+/// is outside `#no_wolf_retaliation`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayerCombat {
+    pub last_hurt_by_mob: Option<EntityUid>,
+    pub last_hurt_by_mob_timestamp: i32,
+    pub last_hurt_mob: Option<EntityUid>,
+    pub last_hurt_mob_timestamp: i32,
+    pub retaliation_damage: bool,
 }
 
 impl PlayerView {
@@ -258,6 +413,14 @@ impl BlockView for World<'_> {
         World::max_y(self)
     }
 
+    fn sea_level(&self) -> i32 {
+        World::sea_level(self)
+    }
+
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        self.level().heightmap_y(pos)
+    }
+
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
         World::brightness(self, layer, pos)
     }
@@ -318,12 +481,51 @@ impl BlockView for World<'_> {
         World::is_raining_at(self, pos)
     }
 
+    fn is_thundering(&self) -> bool {
+        World::is_thundering(self)
+    }
+
+    fn is_bright_outside(&self) -> bool {
+        self.level().is_bright_outside()
+    }
+
+    fn monsters_burn(&self) -> bool {
+        self.level().monsters_burn()
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.level().clock_ticks()
+    }
+
+    fn effective_difficulty(&self, pos: BlockPos) -> f32 {
+        let clock = self.level().clock_ticks();
+        crate::sky::effective_difficulty(
+            self.level().difficulty_id(),
+            clock,
+            self.level()
+                .inhabited_time(ChunkPos::new(pos.x >> 4, pos.z >> 4)),
+            crate::sky::moon_brightness(clock),
+        )
+    }
+
     fn level_random_float(&self) -> f32 {
         self.random().next_float()
     }
 
+    fn level_random_int(&self, bound: i32) -> i32 {
+        self.random().next_int(bound)
+    }
+
     fn level_random_boolean(&self) -> bool {
         self.random().next_boolean()
+    }
+
+    fn hurt_mob_equipment(
+        &self,
+        stack: &mut mc_bamboo_protocol::item::ItemStack,
+        amount: i32,
+    ) -> bool {
+        crate::durability::hurt_equipment(stack, amount, self.random())
     }
 }
 
@@ -339,6 +541,19 @@ pub trait EntityCtx {
     fn blocks(&self) -> &dyn BlockView;
     /// 按 ID 读别的实体的公开数据。自己已经被驱动从表里取出来，查不到是正常的。
     fn other(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 按 ID 读一名玩家（骑手）。不在本岛时返回 `None`。
+    ///
+    /// Reads one player (a rider) by id. `None` when they are not on this island.
+    fn player(&self, uid: EntityUid) -> Option<PlayerView> {
+        let mut found = None;
+        self.blocks().for_each_player(&mut |player| {
+            if player.uid == uid {
+                found = Some(*player);
+            }
+        });
+        found
+    }
+
     /// 这一刻参与 tick 的实体 ID，按 uid 升序。
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
@@ -350,6 +565,35 @@ pub trait EntityCtx {
     /// `me` 是发出者的完整视图；落地函数可以直接改它，tick 函数在 `emit` 之后
     /// 看到的就是改完的自己。tick 函数不能根据 `emit` 之后自己的状态分支。
     fn emit(&mut self, command: Command, me: &mut Entity);
+    /// 生物打一名玩家（官方 `Mob.doHurtTarget` 里的 `target.hurtServer`），返回 `wasHurt`。
+    ///
+    /// 精确驱动当场落地，返回真实结果；并行驱动缓冲成 [`Command::HurtPlayer`]，
+    /// 一律按打中算（性能模式的已知差异）。
+    ///
+    /// `attacker` 是打人的生物这一刻完整的公开数据（tick 期间 `me.kind` 被临时取走，
+    /// 死亡消息要从这里拿名字和 UUID）。
+    ///
+    /// A mob hits a player. The precise driver applies it at once and returns the real
+    /// `wasHurt`; the parallel driver buffers a command and reports a hit.
+    fn hurt_player(
+        &mut self,
+        target: EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        me: &mut Entity,
+        attacker: &EntityPublic,
+    ) -> bool {
+        let _ = attacker;
+        self.emit(
+            Command::HurtPlayer {
+                target,
+                source,
+                amount,
+            },
+            me,
+        );
+        true
+    }
 }
 
 /// 下落方块「算」阶段得到的落地判定事实，随命令带进落地阶段。
@@ -364,12 +608,94 @@ pub struct LandFacts {
 /// 一条对外影响，按「意图」而不是底层操作划分。
 ///
 /// 底层操作（写方块、发事件、生成实体、取世界随机数）都在 [`apply`] 的内部发生。
-/// 给以后生物和 AI 预留的命令名：`ChangeBlock`、`TriggerBlock`、`Damage`、`Push`、
+/// 给以后生物和 AI 预留的命令名：`ChangeBlock`、`TriggerBlock`、
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    ShootMobArrow {
+        position: Vec3,
+        direction: Vec3,
+        owner_uuid: [u8; 16],
+        weapon: ItemStack,
+        difficulty: i32,
+        /// `Stray.getArrow` / `Bogged.getArrow` 加的效果：（效果 ID，时长）。
+        ///
+        /// The effect added by `Stray.getArrow` / `Bogged.getArrow`: (effect id, duration).
+        effect: Option<(i32, i32)>,
+    },
+    ArrowImpact {
+        block: Option<BlockHit>,
+        hits: Vec<super::arrow::ArrowEntityHit>,
+        end: Vec3,
+    },
+    /// `Llama.spit` 生成口水（`Projectile.spawnProjectileUsingShoot`）。
+    ///
+    /// `Llama.spit` spawns a spit (`Projectile.spawnProjectileUsingShoot`).
+    ShootLlamaSpit(super::spit::SpitShot),
+    /// `LlamaSpit.onHitEntity`：口水打到一个实体。
+    ///
+    /// `LlamaSpit.onHitEntity`: the spit hit an entity.
+    SpitHit(super::spit::SpitHit),
+    /// 鸡蛋这一刻撞到东西：`ThrownEgg.onHit`（打目标、孵小鸡、碎掉）。
+    ///
+    /// The egg hit something this tick: `ThrownEgg.onHit` (hurt, hatch, break).
+    EggImpact {
+        hit: super::thrown_egg::EggHit,
+    },
+    /// 扔出的药水这一刻撞到东西：`AbstractThrownPotion.onHit`。
+    ///
+    /// The splash potion hit something this tick: `AbstractThrownPotion.onHit`.
+    SplashPotionImpact {
+        hit: super::splash_potion::SplashHit,
+    },
+    /// 女巫扔一瓶药水：`Projectile.spawnProjectileUsingShoot`。
+    ///
+    /// The witch throws one potion: `Projectile.spawnProjectileUsingShoot`.
+    ThrowSplashPotion {
+        shot: Box<super::splash_potion::SplashShot>,
+    },
+    /// 生物的弩 `CrossbowItem.performShooting`：装着的箭逐支生成、射出。
+    ///
+    /// A mob's crossbow `CrossbowItem.performShooting`: spawn and shoot each loaded arrow.
+    ShootCrossbow {
+        shots: Vec<super::arrow::ArrowShot>,
+    },
+    /// `Raider.HoldGroundAttackGoal` 的喊话：同伴 `setTarget(target)`，`stop` 那次还
+    /// `setAggressive(true)`。
+    ///
+    /// The shout of `Raider.HoldGroundAttackGoal`: allies `setTarget(target)`, and the
+    /// `stop` call also does `setAggressive(true)`.
+    RaiderShout {
+        others: Vec<EntityUid>,
+        target: EntityUid,
+        aggressive: bool,
+    },
+    /// `LongDistancePatrolGoal` 的队长给同伴 `setPatrolTarget(pathTarget)`。
+    ///
+    /// A patrol leader's `setPatrolTarget(pathTarget)` on its companions.
+    SetPatrolTarget {
+        others: Vec<EntityUid>,
+        target: BlockPos,
+    },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
-    Explode { center: Vec3, radius: f32 },
+    Explode {
+        center: Vec3,
+        radius: f32,
+    },
+    /// 生物引发的爆炸（`Level.ExplosionInteraction.MOB`）：射线、伤害生物和玩家、
+    /// 按 `mobGriefing` 破坏方块。发出者就是爆炸的来源实体。
+    ///
+    /// A mob-caused explosion (`Level.ExplosionInteraction.MOB`): rays, damage to mobs and
+    /// players, and block damage under `mobGriefing`. The emitter is the source entity.
+    ExplodeMob {
+        center: Vec3,
+        radius: f32,
+        /// 来源生物这一刻的公开数据：它正在 tick，`me.kind` 是占位，死亡消息要靠它拿名字。
+        ///
+        /// The source mob's public data: it is mid-tick with a placeholder `me.kind`, and
+        /// death messages need its name.
+        source: Box<EntityPublic>,
+    },
     /// 下落方块这一刻的落地判定和后果：能不能放回去、发 1031 还是 1029、
     /// 要不要掉成物品、自己消不消失。需要 `&mut World` 的只读判定也在这里。
     ///
@@ -381,11 +707,15 @@ pub enum Command {
         land: LandFacts,
     },
     /// 与附近的物品合并。候选 ID 按 uid 升序，落地时重新读双方当前状态。
-    MergeWithNeighbours { others: Vec<EntityUid> },
+    MergeWithNeighbours {
+        others: Vec<EntityUid>,
+    },
     /// 漏斗吸取：跑 `HopperBlock.entityInside` 的整段，写容器也写自己。
     SuckIntoHopper,
     /// `Entity.spawnAtLocation`：生成一件掉落物。
-    DropItem { stack: ItemStack },
+    DropItem {
+        stack: ItemStack,
+    },
     /// `LivingEntity.pushEntities` 里的一次 `doPush`：对方被推开，自己被推回来。
     /// 落地时按双方当前的位置重算，`from` 是算阶段看到的对方位置。
     PushMob {
@@ -393,21 +723,315 @@ pub enum Command {
         from: Vec3,
         self_pushable: bool,
     },
-    /// `LivingEntity.dropAllDeathLoot`：按战利品表掉东西，再按经验值生成经验球。
-    /// 表名为空时只掉经验。
-    DropMobLoot {
-        table: &'static str,
-        on_fire: bool,
-        killer: Option<EntityUid>,
-        experience: i32,
+    /// 死亡战利品表，与装备和经验分开，保留原版的生成顺序。
+    ///
+    /// Death loot table, separate from equipment and XP to preserve vanilla order.
+    DropMobLoot(super::mob::MobDeathLoot),
+    EndermanBlock {
+        origin: BlockPos,
+        pos: BlockPos,
+        place: bool,
+    },
+    AwardDeathExperience {
+        amount: i32,
     },
     /// `ExperienceOrb.scanForMerges`：周围同值的球合并到自己身上。
-    MergeExperienceOrbs { others: Vec<EntityUid>, value: i32 },
-    /// `BreedGoal.breed` → `Animal.spawnChildFromBreeding`：给伴侣设冷却、生小牛和经验球。
-    /// 父亲自己那一份状态已经在 `serverAiStep` 里改好（年龄递减还在后面）。
-    BreedCows {
+    MergeExperienceOrbs {
+        others: Vec<EntityUid>,
+        value: i32,
+    },
+    /// 给伴侣设冷却，生成幼崽和经验球；发起繁殖的亲本已进入冷却。
+    ///
+    /// Reset the other parent and spawn offspring and XP; the initiating parent is on cooldown.
+    BreedAnimals {
+        variant: super::mob::CowVariant,
+        wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
+        /// 熊猫父亲的显性 / 隐性基因（落地时父亲不在实体表里）。
+        ///
+        /// The panda father's main and hidden genes (it is not in the table when this lands).
+        father_genes: Option<(u8, u8)>,
+        /// 父亲的种类和兔子品种：落地时父亲正被拆出来跑 tick，读不到。
+        ///
+        /// The father's type and rabbit variant; it is detached while the command lands.
+        kind: super::mob::MobType,
+        father_rabbit: super::mob::rabbit::Variant,
+        /// 父亲的狐狸品种和求爱者：狐狸幼崽要信任两边的求爱者。
+        ///
+        /// The father's fox variant and love cause; a fox kit trusts both causes.
+        father_fox: super::mob::fox::Variant,
+        father_love: Option<[u8; 16]>,
+        /// 父亲的狼状态和驯服状态：幼崽的品种、主人和项圈色要用。
+        ///
+        /// The father's wolf and taming state, for the pup's variant, owner and collar.
+        father_wolf: Box<(super::mob::wolf::Wolf, super::mob::tame::Tamable)>,
+        /// 猫父亲的状态（落地时父亲正被拆出来跑 tick）。
+        ///
+        /// The cat father's state (detached while the command lands).
+        father_cat: super::mob::cat::Cat,
+        /// 父亲是不是尖叫山羊：山羊幼崽可能随它。
+        ///
+        /// Whether the father is a screaming goat; a kid may take after it.
+        father_screaming: bool,
+        /// 父亲的美西螈花色（落地时父亲不在实体表里）。
+        ///
+        /// The axolotl father's variant (it is not in the table when this lands).
+        father_axolotl: i32,
+    },
+    /// `HurtByTargetGoal.alertOthers` 在狼身上：别的狼 `setTarget(target)`。
+    ///
+    /// `HurtByTargetGoal.alertOthers` for wolves: the others target the attacker.
+    WolfAlert {
+        others: Vec<EntityUid>,
+        target: EntityUid,
+    },
+    /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
+    HurtPlayer {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
+    /// `Zombie.doHurtTarget` 的着火传染（打到玩家）。
+    IgnitePlayer {
+        target: EntityUid,
+        ticks: i32,
+    },
+    /// `Mob.doHurtTarget` 打到另一头生物。`on_hit` 是命中后立刻挂上的效果
+    /// （洞穴蜘蛛的中毒），只有伤害真的落地才生效。
+    ///
+    /// `Mob.doHurtTarget` against another mob. `on_hit` is applied only if the hurt lands
+    /// (the cave spider's poison).
+    HurtMob {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+        on_hit: Option<super::mob::effects::EffectInstance>,
+    },
+    /// `LivingEntity.addEffect` 对玩家：洞穴蜘蛛打中玩家后的中毒。
+    ///
+    /// `LivingEntity.addEffect` on a player: the cave spider's poison after a hit.
+    AddPlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+        amplifier: i32,
+    },
+    /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
+    MobLevelEvent {
+        event: i32,
+        pos: mc_bamboo_core::BlockPos,
+        data: i32,
+    },
+    /// `TurtleLayEggGoal` 的 `level.setBlockAndUpdate` 加产蛋音效。
+    ///
+    /// `TurtleLayEggGoal`'s `level.setBlockAndUpdate` plus the egg-laying sound.
+    LayTurtleEgg {
+        pos: mc_bamboo_core::BlockPos,
+        eggs: i32,
+    },
+    /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
+    /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
+    /// 兔子吃掉一龄胡萝卜作物。
+    ///
+    /// A rabbit removes one growth stage from a carrot crop.
+    RabbitEatCarrots {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    RemoveMobBlock {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `Fox.pickUpItem` 的世界一侧：多出来的放回地上，原来叼着的吐出去，捡起的那件消失。
+    ///
+    /// The level side of `Fox.pickUpItem`: drop the extra, spit the old item
+    /// and discard the picked entity.
+    FoxPickUpItem {
+        item: EntityUid,
+        rest: Option<ItemStack>,
+        spit: Option<ItemStack>,
+        spit_at: mc_bamboo_core::Vec3,
+    },
+    /// `FoxBreedGoal.start` 对伴侣调的 `clearStates`。
+    FoxClearStates {
+        target: EntityUid,
+    },
+    /// `FoxEatBerriesGoal.pickSweetBerries` 的世界一侧。
+    FoxPickBerries {
+        pos: mc_bamboo_core::BlockPos,
+        age: i32,
+        took_one: bool,
+    },
+    /// `CaveVines.use` 被狐狸调用。
+    FoxPickGlowBerries {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `TurtleEggBlock.destroyEgg` 里取世界随机数之后的部分：`nextInt(chance) == 0`
+    /// 时 `decreaseEggs`。世界随机数只在落地时取，两种驱动取数顺序一样。
+    TrampleTurtleEgg {
+        pos: mc_bamboo_core::BlockPos,
+        chance: i32,
+    },
+    /// `ZombieAttackTurtleEggGoal.playBreakSound`：音高取世界随机数。
+    TurtleEggBreakSound {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `level.playSound(null, pos, sound, source, volume, pitch)`：方块中心的音效。
+    MobBlockSound {
+        pos: mc_bamboo_core::BlockPos,
+        sound: &'static str,
+        source: mc_bamboo_data::sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+    },
+    ProjectileExtinguished {
+        pitch: f32,
+    },
+    /// `Pufferfish.touch`：先 `hurtServer`，打中了才下毒并放蜇刺声。
+    ///
+    /// `Pufferfish.touch`: hurt first, and only on a hit add the poison and the sting
+    /// sound.
+    PufferSting {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+        seconds: i32,
+        position: mc_bamboo_core::Vec3,
+    },
+    /// `AbstractSchoolingFish.startFollowing`：跟随者记住领头并给领头的群计数加一。
+    ///
+    /// `AbstractSchoolingFish.startFollowing`: the follower remembers its leader and the
+    /// leader's school count goes up by one.
+    SchoolFollow {
+        leader: EntityUid,
+        follower: EntityUid,
+    },
+    /// `AbstractSchoolingFish.stopFollowing`：跟随者离开，领头群计数减一。
+    ///
+    /// `AbstractSchoolingFish.stopFollowing`: the follower leaves and the leader's count
+    /// goes down by one.
+    SchoolLeave {
+        leader: EntityUid,
+        follower: EntityUid,
+    },
+    /// `EatBlockGoal.tick` 在 `mobGriefing` 下的改方块：吃掉脚下的草，或把下面的草方块变成泥土。
+    ///
+    /// `EatBlockGoal.tick` under `mobGriefing`: eat the plant at the feet, or turn the grass
+    /// block below into dirt.
+    EatBlock {
+        pos: mc_bamboo_core::BlockPos,
+        grass_below: bool,
+    },
+    /// `dropFromGiftLootTable(.., spawnAtLocation)`：鸡下蛋这类礼物表，掉在原点。
+    ///
+    /// `dropFromGiftLootTable(.., spawnAtLocation)`: gift tables such as egg laying, dropped at
+    /// the origin.
+    DropEntityLoot(super::mob::EntityLootRequest),
+    /// `Mob.convertTo(type, ConversionParams.single(..))`：按 `from` 这一刻的状态造出目标
+    /// 生物；发出者自己随后 `discard`。`level_event` 是转化音效的世界事件。
+    ///
+    /// `Mob.convertTo(type, ConversionParams.single(..))`: create the target from the state
+    /// `from` has this tick; the emitter discards itself. `level_event` is the conversion
+    /// sound.
+    ConvertMob {
+        from: Box<super::mob::Mob>,
+        to: super::mob::MobType,
+        level_event: i32,
+        /// 新生物要不要跑 `Zombie.handleAttributes`（僵尸变溺尸的 `postConversionStep`）。
+        ///
+        /// Whether the new mob runs `Zombie.handleAttributes`, the zombie's
+        /// `postConversionStep`.
+        zombie_attributes: bool,
+    },
+    /// `AbstractCubeMob.remove`：死掉的史莱姆被移除时，按 `from` 这一刻的状态分裂出小一号的
+    /// 几只。数量和朝向已经在发出者的随机源上取好。
+    ///
+    /// `AbstractCubeMob.remove`: a dead slime splits into smaller cubes built from the state
+    /// `from` has this tick. The count and facings were already drawn on the emitter's random.
+    SplitCubeMob {
+        from: Box<super::mob::Mob>,
+        half_size: i32,
+        children: Vec<super::mob::slime::SplitChild>,
+    },
+    /// 改另一只跑大脑的生物的记忆（`AnimalMakeLove` 给伴侣设繁殖、走路和看的目标）。
+    ///
+    /// Writes another brain-driven mob's memory (`AnimalMakeLove` setting the partner's
+    /// breed, walk and look targets).
+    SetBrainMemory {
+        target: EntityUid,
+        memory: super::mob::brain::memory::MemoryType,
+        value: Option<super::mob::brain::memory::MemoryValue>,
+    },
+    /// `RamTarget.tick` 撞到活体：`hurtServer(noAggroMobAttack)`，然后不管打没打中都
+    /// `knockback(strength, dx, dz)`。
+    ///
+    /// `RamTarget.tick` hitting a living entity: `hurtServer(noAggroMobAttack)`, then
+    /// `knockback(strength, dx, dz)` whether or not the hit landed.
+    RamHit {
+        target: EntityUid,
+        player: bool,
+        source: super::mob::DamageSource,
+        amount: f32,
+        strength: f64,
+        dx: f64,
+        dz: f64,
+    },
+    /// `Tadpole.ageUp`：`convertTo(FROG, ConversionParams.single(this, false, false), ..)`，
+    /// 按 `from` 这一刻的状态造出青蛙；发出者自己随后 `discard`。
+    ///
+    /// `Tadpole.ageUp`: `convertTo(FROG, ConversionParams.single(this, false, false), ..)`
+    /// builds the frog from the state `from` has this tick; the emitter discards itself.
+    TadpoleGrowUp {
+        from: Box<super::mob::Mob>,
+    },
+    /// `TryLaySpawnOnFluidNearLand`：`setBlockAndUpdate(pos, FROGSPAWN)`。
+    ///
+    /// `TryLaySpawnOnFluidNearLand`: `setBlockAndUpdate(pos, FROGSPAWN)`.
+    LayFrogspawn {
+        pos: BlockPos,
+    },
+    /// `ShootTongue.tick` 伸舌头的那一刻：`target.setDeltaMovement(delta)`。
+    ///
+    /// The tongue shot of `ShootTongue.tick`: `target.setDeltaMovement(delta)`.
+    SetMobDelta {
+        target: EntityUid,
+        delta: Vec3,
+    },
+    /// `ShootTongue.eatEntity`：`doHurtTarget`，打死了当场 `remove(KILLED)`。
+    ///
+    /// `ShootTongue.eatEntity`: `doHurtTarget`, then `remove(KILLED)` at once on a kill.
+    FrogEat {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
+    /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` 加 `addFreshEntity`：
+    /// 山羊掉角，速度由调用方给。
+    ///
+    /// `new ItemEntity(level, x, y, z, stack, dx, dy, dz)` plus `addFreshEntity`: a goat
+    /// dropping a horn with the caller's velocity.
+    DropItemWithDelta {
+        stack: ItemStack,
+        delta: Vec3,
+    },
+    /// `HurtByTargetGoal.alertOthers`：把 `enemy` 设成这些同伴的目标（已有目标的跳过）。
+    ///
+    /// `HurtByTargetGoal.alertOthers`: make `enemy` the target of these allies, skipping
+    /// those that already have one.
+    AlertMobs {
+        others: Vec<EntityUid>,
+        enemy: EntityUid,
+    },
+    /// `Panda.pickUpItem`：把脚下那份吃的拿进主手。
+    ///
+    /// `Panda.pickUpItem`: take the edible stack into the main hand.
+    PickUpItem {
+        item: EntityUid,
+    },
+    /// `Panda.afterSneeze`：附近的成年熊猫原地跳一下。
+    ///
+    /// `Panda.afterSneeze`: nearby adult pandas hop.
+    JumpMobs {
+        others: Vec<EntityUid>,
     },
 }
 
@@ -418,6 +1042,11 @@ pub enum Command {
 pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
     match command {
         Command::Explode { center, radius } => world.explode_tnt(center, radius),
+        Command::ExplodeMob {
+            center,
+            radius,
+            source,
+        } => world.explode_mob(&source, center, radius),
         Command::LandFallingBlock {
             data,
             entity_drops,
@@ -428,6 +1057,47 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::MergeWithNeighbours { others } => {
             Entity::apply_merge_with_neighbours(me, &others, world);
         }
+        Command::ShootMobArrow {
+            position,
+            direction,
+            owner_uuid,
+            weapon,
+            difficulty,
+            effect,
+        } => {
+            let shot = super::mob::skeleton::MobArrowShot {
+                position,
+                direction,
+                owner_uuid,
+                weapon,
+                difficulty,
+                effect,
+            };
+            super::mob::skeleton::spawn_arrow(world, me.id, shot);
+        }
+        Command::ArrowImpact { block, hits, end } => {
+            super::arrow::impact(me, world, hits, block, end)
+        }
+        Command::ShootLlamaSpit(shot) => super::spit::spawn(world, me.id, shot),
+        Command::SpitHit(hit) => super::spit::hit_entity(me, world, hit),
+        Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
+        Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
+        Command::ThrowSplashPotion { shot } => {
+            world.spawn_splash_shot(&shot);
+        }
+        Command::ShootCrossbow { shots } => {
+            for shot in shots {
+                world.spawn_arrow_shot(shot);
+            }
+        }
+        Command::RaiderShout {
+            others,
+            target,
+            aggressive,
+        } => super::mob::raider::apply_shout(world, &others, target, aggressive),
+        Command::SetPatrolTarget { others, target } => {
+            super::mob::raider::apply_patrol_target(world, &others, target);
+        }
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
@@ -437,17 +1107,295 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             from,
             self_pushable,
         } => super::mob::living::apply_push(me, other, from, self_pushable, world),
-        Command::DropMobLoot {
-            table,
-            on_fire,
-            killer,
-            experience,
-        } => super::mob::living::apply_death_drops(me, table, on_fire, killer, experience, world),
+        Command::EndermanBlock { origin, pos, place } => {
+            super::mob::enderman::apply_block_goal(me, world, origin, pos, place)
+        }
+        Command::DropMobLoot(loot) => {
+            for stack in world.mob_loot_drops(loot, me.position) {
+                world.spawn_at_location(me.position, stack);
+            }
+        }
+        Command::AwardDeathExperience { amount } => {
+            super::orb::award(world, me.position, amount);
+        }
         Command::MergeExperienceOrbs { others, value } => {
             super::orb::apply_merge(me, &others, value, world)
         }
-        Command::BreedCows { partner, position } => {
-            super::mob::living::apply_breed(me, partner, position, world)
+        Command::BreedAnimals {
+            variant,
+            wool,
+            partner,
+            position,
+            father_genes,
+            kind,
+            father_rabbit,
+            father_fox,
+            father_love,
+            father_wolf,
+            father_cat,
+            father_screaming,
+            father_axolotl,
+        } => super::mob::living::apply_breed(
+            me,
+            partner,
+            position,
+            super::mob::living::BreedFather {
+                kind,
+                variant,
+                wool,
+                rabbit: father_rabbit,
+                fox: father_fox,
+                love: father_love,
+                wolf: father_wolf.0,
+                tame: father_wolf.1,
+                cat: father_cat,
+                screaming: father_screaming,
+                genes: father_genes,
+                axolotl: father_axolotl,
+            },
+            world,
+        ),
+        Command::WolfAlert { others, target } => {
+            super::mob::wolf_goals::apply_alert(world, &others, target);
+        }
+        Command::HurtPlayer {
+            target,
+            source,
+            amount,
+        } => {
+            super::mob::living::apply_hurt_player(world, me, target, source, amount);
+        }
+        Command::IgnitePlayer { target, ticks } => world.ignite_player_from_mob(target, ticks),
+        Command::HurtMob {
+            target,
+            source,
+            amount,
+            on_hit,
+        } => {
+            if world.hurt_mob(target, source, amount)
+                && let Some(effect) = on_hit
+            {
+                world.give_mob_effect(target, effect);
+            }
+        }
+        Command::AddPlayerEffect {
+            target,
+            effect,
+            duration,
+            amplifier,
+        } => {
+            world.give_player_effect(
+                target,
+                super::mob::effects::EffectInstance::with_amplifier(effect, duration, amplifier),
+            );
+        }
+        Command::MobLevelEvent { event, pos, data } => {
+            world.push_effect(crate::Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator: false,
+            });
+        }
+        Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
+        Command::FoxPickUpItem {
+            item,
+            rest,
+            spit,
+            spit_at,
+        } => super::mob::fox::apply_pick_up(me, world, item, rest, spit, spit_at),
+        Command::FoxClearStates { target } => {
+            world.with_entity_mut(target, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fox.clear_states());
+            });
+        }
+        Command::FoxPickBerries { pos, age, took_one } => {
+            super::mob::fox::apply_pick_berries(world, pos, age, took_one)
+        }
+        Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
+        Command::RemoveMobBlock { pos } => {
+            let _ = world.remove_block(pos);
+        }
+        Command::SetBrainMemory {
+            target,
+            memory,
+            value,
+        } => {
+            let mut value = value;
+            world.with_entity_mut(target, &mut |entity| {
+                entity.with_mob(|_, mob| {
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.memories.set_or_erase(memory, value.take());
+                    }
+                });
+            });
+        }
+        Command::RamHit {
+            target,
+            player,
+            source,
+            amount,
+            strength,
+            dx,
+            dz,
+        } => super::mob::goat::apply_ram_hit(
+            me,
+            world,
+            target,
+            player,
+            source,
+            amount,
+            (strength, dx, dz),
+        ),
+        Command::DropItemWithDelta { stack, delta } => {
+            world.spawn_entity(Entity::ground_item_with_delta(me.position, stack, delta));
+        }
+        Command::DropEntityLoot(request) => {
+            let origin = request.origin;
+            for stack in world.entity_loot_drops(request) {
+                world.spawn_at_location(origin, stack);
+            }
+        }
+        Command::AlertMobs { others, enemy } => {
+            super::mob::polar_bear::apply_alert(world, &others, enemy);
+        }
+        Command::PickUpItem { item } => {
+            super::mob::panda::apply_pick_up(world, item, me);
+        }
+        Command::JumpMobs { others } => {
+            for other in others {
+                world.with_entity_mut(other, &mut |entity| {
+                    let power = entity.kind.mob().map_or(0.0, |mob| {
+                        mob.attributes
+                            .value(mc_bamboo_data::registries::attribute::JUMP_STRENGTH)
+                            as f32
+                    });
+                    if power > 1.0e-5 {
+                        entity.delta.y = entity.delta.y.max(f64::from(power));
+                    }
+                });
+            }
+        }
+        Command::EatBlock { pos, grass_below } => {
+            super::mob::living::apply_eat_block(world, pos, grass_below);
+        }
+        Command::ConvertMob {
+            from,
+            to,
+            level_event,
+            zombie_attributes,
+        } => super::mob::conversion::apply_convert(
+            me,
+            &from,
+            to,
+            level_event,
+            zombie_attributes,
+            world,
+        ),
+        Command::SplitCubeMob {
+            from,
+            half_size,
+            children,
+        } => super::mob::slime::apply_split(me, &from, half_size, &children, world),
+        Command::TrampleTurtleEgg { pos, chance } => {
+            super::mob::living::apply_trample_turtle_egg(world, pos, chance);
+        }
+        Command::TurtleEggBreakSound { pos } => {
+            let pitch = 0.9 + world.random().next_float() * 0.2;
+            world.play_block_sound(
+                pos,
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.egg_break"),
+                0.7,
+                pitch,
+            );
+        }
+        Command::ProjectileExtinguished { pitch } => {
+            super::arrow::play_extinguished_sound(me, world, pitch);
+        }
+        Command::PufferSting {
+            target,
+            source,
+            amount,
+            seconds,
+            position,
+        } => {
+            if world.hurt_mob(target, source, amount) {
+                let poison = mc_bamboo_data::registries::mob_effect::POISON;
+                world.with_entity_mut(target, &mut |entity| {
+                    entity.with_mob(|_, mob| {
+                        super::mob::living::add_effect(
+                            mob,
+                            super::mob::effects::EffectInstance::new(poison, seconds),
+                        )
+                    });
+                });
+                world.play_sound(
+                    position,
+                    mc_bamboo_data::sound_event("minecraft:entity.puffer_fish.sting"),
+                    mc_bamboo_data::sounds::NEUTRAL,
+                    1.0,
+                    1.0,
+                    false,
+                );
+            }
+        }
+        Command::SchoolFollow { leader, follower } => {
+            world.with_entity_mut(follower, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.leader = Some(leader));
+            });
+            world.with_entity_mut(leader, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.school_size += 1);
+            });
+        }
+        Command::SchoolLeave { leader, follower } => {
+            world.with_entity_mut(follower, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.leader = None);
+            });
+            world.with_entity_mut(leader, &mut |entity| {
+                entity.with_mob(|_, mob| mob.fish.school_size -= 1);
+            });
+        }
+        Command::MobBlockSound {
+            pos,
+            sound,
+            source,
+            volume,
+            pitch,
+        } => {
+            world.play_sound(
+                crate::world::block_center_public(pos),
+                mc_bamboo_data::sounds::sound_event(sound),
+                source,
+                volume,
+                pitch,
+                false,
+            );
+        }
+        Command::TadpoleGrowUp { from } => super::mob::tadpole::apply_grow_up(me, &from, world),
+        Command::LayFrogspawn { pos } => {
+            let state = crate::state::BlockState(mc_bamboo_data::blocks::FROGSPAWN);
+            world.set_block(pos, state, 3);
+        }
+        Command::SetMobDelta { target, delta } => {
+            world.with_listed_entity_mut(target, &mut |entity| entity.delta = delta);
+        }
+        Command::FrogEat {
+            target,
+            source,
+            amount,
+        } => super::mob::frog::apply_eat(world, target, source, amount),
+        Command::LayTurtleEgg { pos, eggs } => {
+            let pitch = 0.9 + world.random().next_float() * 0.2;
+            world.play_block_sound(
+                pos,
+                mc_bamboo_data::sounds::sound_event("minecraft:entity.turtle.lay_egg"),
+                0.3,
+                pitch,
+            );
+            // `blocks::TURTLE_EGG` 已经是默认状态 ID，不是方块注册表下标。
+            // `blocks::TURTLE_EGG` is already the default state id, not a block registry index.
+            let state = crate::state::BlockState(mc_bamboo_data::blocks::TURTLE_EGG);
+            world.set_block(pos, state.with(crate::state::EGGS, eggs), 3);
         }
     }
 }
@@ -500,6 +1448,19 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn emit(&mut self, command: Command, me: &mut Entity) {
         apply(command, me, self.world);
+    }
+
+    fn hurt_player(
+        &mut self,
+        target: EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        _me: &mut Entity,
+        attacker: &EntityPublic,
+    ) -> bool {
+        // 打人的生物正被驱动拿在手里，不在表里；把它这一刻的公开数据带过去。
+        self.world
+            .hurt_player_from_mob(target, source, amount, Some(attacker))
     }
 }
 

@@ -33,8 +33,8 @@ use serde_json::{Value, json};
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: resume-world <java> [--seeds N] [--chunks N] [--salt S] \
-     [--structures] [--break-self-test] [--break-neighbor] [--break-light] [--show N] \
-     [--seed S] [--chunk X Z]";
+     [--structures] [--break-self-test] [--break-neighbor] [--break-light] \
+     [--break-post-processing] [--show N] [--seed S] [--chunk X Z]";
 const SOURCE: &str = "tools/mc-bamboo-vanilla/java/ResumeWorldOracle.java";
 const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java";
 /// 官方 `Heightmap.Types.sendToClient()` 的四张图，也是存档会写出的图。
@@ -59,6 +59,7 @@ struct Options {
     break_self_test: bool,
     break_neighbor: bool,
     break_light: bool,
+    break_post_processing: bool,
     show: usize,
     /// 固定种子 / 固定区块（`--seed S --chunk X Z`），用于结构起点坐标。
     seed: Option<i64>,
@@ -75,6 +76,7 @@ impl Options {
             break_self_test: false,
             break_neighbor: false,
             break_light: false,
+            break_post_processing: false,
             show: 8,
             seed: None,
             chunk: None,
@@ -91,6 +93,7 @@ impl Options {
                 "--break-self-test" => options.break_self_test = true,
                 "--break-neighbor" => options.break_neighbor = true,
                 "--break-light" => options.break_light = true,
+                "--break-post-processing" => options.break_post_processing = true,
                 "--seed" => options.seed = Some(next()?.parse().map_err(|_| USAGE)?),
                 "--chunk" => {
                     let x = next()?.parse().map_err(|_| USAGE)?;
@@ -115,8 +118,12 @@ struct Stats {
     heightmaps: u64,
     light_cells: u64,
     block_entities: u64,
+    /// 比较过的 `PostProcessing` 条目数。
+    post_processing: u64,
     mismatches: Vec<String>,
     breaks: u64,
+    /// 「替换代替追加」改坏确认报出来的用例数。
+    replace_breaks: u64,
     /// 真正比到非空结构起点 / 引用的用例数。
     structure_cases: u64,
 }
@@ -133,6 +140,11 @@ struct FullChunk {
     heightmap_words: BTreeMap<String, Vec<i64>>,
     block_entities: Vec<(i32, i32, i32, String)>,
     structures: BTreeMap<String, String>,
+    /// 中心区块官方 FULL 的 `PostProcessing`（24 段 packed short）：地形标记 +
+    /// 9 个中心各自记进来的标记，按约定顺序（中心先、slot 升序）拼成。
+    post_processing: Vec<Vec<u16>>,
+    /// 中心区块官方 TERRAIN 阶段的 `PostProcessing`（doFill 含水层标记）。
+    post_processing_terrain: Vec<Vec<u16>>,
 }
 
 pub fn run(options: &[&str], java: &str) -> Result<(), String> {
@@ -148,9 +160,20 @@ pub fn run(options: &[&str], java: &str) -> Result<(), String> {
     let merged = official_merged_blocks(java, &options)?;
     for full in &mut official {
         let key = (full.seed, full.pos.x, full.pos.z);
-        let Some(blocks) = merged.get(&key) else {
+        let Some(baseline) = merged.get(&key) else {
             return Err(format!("no isolated merge line for {key:?}"));
         };
+        // 官方 FULL 的 `PostProcessing` 也取 9 中心那条线：单中心的 `features` 行
+        // 只有中心自己记的标记，少了邻居中心记进来的。两条线的地形标记必须相同。
+        // Official FULL `PostProcessing` also comes from the 9-center line; the
+        // single-center line lacks neighbors' marks. Terrain marks must agree.
+        if baseline.post_processing.terrain != full.post_processing_terrain {
+            return Err(format!(
+                "{key:?}: isolated terrain PostProcessing differs from the features line"
+            ));
+        }
+        full.post_processing = baseline.post_processing.full.clone();
+        let blocks = &baseline.blocks;
         let names = blocks
             .iter()
             .map(|&state| mc_bamboo_worldgen::feature::state::official_name(state))
@@ -179,6 +202,8 @@ pub fn run(options: &[&str], java: &str) -> Result<(), String> {
             blocks: state_ids.chunks(256).map(<[u32]>::to_vec).collect(),
             biomes: vec![vec![0_u32; 64]; mc_bamboo_world::SECTION_COUNT],
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         let words = mc_bamboo_game::worldgen::final_heightmap_words(&generated)
             .map_err(|e| format!("final heightmaps {key:?}: {e}"))?;
@@ -306,22 +331,47 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
         heightmaps,
         light_cells,
         block_entities,
+        post_processing,
         mismatches,
         breaks,
+        replace_breaks,
         structure_cases,
     } = stats;
     println!(
         "resume-world: {requests} requests, {cases} resumed cases, {blocks} blocks, \
          {biomes} quart cells, {heightmaps} heightmap columns, {light_cells} light cells, \
-         {block_entities} block entities, {structure_cases} structured cases, {} mismatches, \
-         {breaks} break checks",
+         {block_entities} block entities, {post_processing} post-processing entries, \
+         {structure_cases} structured cases, {} mismatches, {breaks} break checks",
         mismatches.len(),
     );
-    if options.break_self_test || options.break_neighbor || options.break_light {
+    if options.break_self_test
+        || options.break_neighbor
+        || options.break_light
+        || options.break_post_processing
+    {
         if breaks == 0 {
             return Err("resume-world break check did not run".to_owned());
         }
-        println!("resume-world break checks: {breaks} confirmed mismatches");
+        if options.break_post_processing && replace_breaks == 0 {
+            return Err("resume-world: the replace-instead-of-append break never ran".to_owned());
+        }
+        let undetected: Vec<&String> = mismatches
+            .iter()
+            .filter(|message| message.contains("was not detected"))
+            .collect();
+        if !undetected.is_empty() {
+            for message in &undetected {
+                println!("  {message}");
+            }
+            return Err(format!(
+                "resume-world: {} break checks were not detected",
+                undetected.len()
+            ));
+        }
+        println!(
+            "resume-world break checks: {breaks} confirmed mismatches \
+             ({replace_breaks} replace-instead-of-append)"
+        );
         return Ok(());
     }
     if cases != requests as u64 || blocks == 0 {
@@ -517,8 +567,14 @@ fn byte_values(value: &Value) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-/// `(种子, x, z) → 逐格方块状态`（官方一口气生成到 FULL 的结果）。
-type BlockBaselines = BTreeMap<(i64, i32, i32), Vec<u32>>;
+/// 官方一口气生成到 FULL 的一个区块：逐格方块状态和 `PostProcessing`。
+struct Baseline {
+    blocks: Vec<u32>,
+    post_processing: crate::feature_merge::IsolatedPostProcessing,
+}
+
+/// `(种子, x, z) → 官方 FULL 基准`。
+type BlockBaselines = BTreeMap<(i64, i32, i32), Baseline>;
 
 /// 官方 `ChunkgenOracle --merge-neighbors isolated` 的 9 中心写增量，
 /// 按游戏同一份 `merge_feature_writes` 合成中心最终方块。
@@ -625,15 +681,27 @@ fn official_merged_blocks(java: &str, options: &Options) -> Result<BlockBaseline
             groups.push(mc_bamboo_game::worldgen_features::FeatureWrites {
                 slot: slot as u8,
                 deltas,
+                marks: Vec::new(),
+                block_entities: Vec::new(),
             });
         }
         let mut chunk = mc_bamboo_game::worldgen::GeneratedChunk {
             blocks: terrain.chunks(256).map(<[u32]>::to_vec).collect(),
             biomes: Vec::new(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         mc_bamboo_game::worldgen_features::merge_feature_writes(&mut chunk, groups);
-        out.insert((seed, x, z), chunk.blocks.into_iter().flatten().collect());
+        let post_processing = crate::feature_merge::isolated_post_processing(&value)
+            .map_err(|error| format!("isolated ({seed},{x},{z}): {error}"))?;
+        out.insert(
+            (seed, x, z),
+            Baseline {
+                blocks: chunk.blocks.into_iter().flatten().collect(),
+                post_processing,
+            },
+        );
     }
     let status = child
         .wait()
@@ -914,6 +982,9 @@ fn official_full_chunks(
                 } else {
                     BTreeMap::new()
                 };
+                let post_processing = packed_sections(chunks[4].get("postProcessing"))?;
+                let post_processing_terrain =
+                    packed_sections(chunks[4].get("postProcessingTerrain"))?;
                 out.push(FullChunk {
                     seed,
                     pos: ChunkPos::new(x, z),
@@ -923,6 +994,8 @@ fn official_full_chunks(
                     heightmap_words,
                     block_entities,
                     structures,
+                    post_processing,
+                    post_processing_terrain,
                 });
             }
             "coverage" | "end" | "noise" | "surface" | "carvers" => {}
@@ -1082,6 +1155,8 @@ fn make_request(
             "heightmap_words": words,
             "block_entities": block_entities,
             "structures": full.structures,
+            "post_processing": full.post_processing,
+            "post_processing_terrain": full.post_processing_terrain,
         },
     })
 }
@@ -1171,6 +1246,7 @@ fn compare_case(
         &feature_result.block_entities,
     );
     compare_structures(stats, &label, &full_nbt, &clean);
+    compare_post_processing(stats, &label, &full.post_processing, &clean.post_processing);
     if clean.saved_status != ChunkStatus::Full {
         stats.mismatches.push(format!(
             "{label}: saved status {:?}, expected full",
@@ -1230,6 +1306,60 @@ fn compare_case(
                 .push(format!("{label}: break-light was not detected"));
         } else {
             stats.breaks += 1;
+        }
+    }
+    // `PostProcessing` 改坏确认，两处：
+    // * 读回时丢掉盘上的表（FEATURES 存档，表里已是完工标记）；
+    // * 续跑 `features` 时用新标记替换而不是追加（TERRAIN 存档，盘上只有地形
+    //   标记；地形标记为空的区块替换和追加没有区别，跳过）。
+    // Two `PostProcessing` break checks: drop the disk table on read (FEATURES
+    // save), and replace instead of append when resuming `features` (TERRAIN
+    // save; skipped when the terrain table is empty, where both agree).
+    let post_breaks = [
+        (
+            ChunkStatus::Features,
+            ResumeBreak::DiscardPostProcessing,
+            true,
+        ),
+        (
+            ChunkStatus::Terrain,
+            ResumeBreak::ReplacePostProcessing,
+            full.post_processing_terrain
+                .iter()
+                .any(|section| !section.is_empty()),
+        ),
+    ];
+    for (at, kind, applicable) in post_breaks {
+        if !(options.break_post_processing && stage == at && mode == "none" && applicable) {
+            continue;
+        }
+        let broken = resume_chunk(
+            &config,
+            &ResumeCase {
+                pos,
+                chunk_nbt: nbt.clone(),
+                stage,
+            },
+            &neighbor_tags,
+            Some(kind),
+        )
+        .map_err(|error| format!("{label}: break-post-processing {kind:?} failed: {error}"))?;
+        let mut probe = Stats::default();
+        compare_post_processing(
+            &mut probe,
+            &label,
+            &full.post_processing,
+            &broken.post_processing,
+        );
+        if probe.mismatches.is_empty() {
+            stats.mismatches.push(format!(
+                "{label}: break-post-processing {kind:?} was not detected"
+            ));
+        } else {
+            stats.breaks += 1;
+            if kind == ResumeBreak::ReplacePostProcessing {
+                stats.replace_breaks += 1;
+            }
         }
     }
     if options.break_neighbor && stage == ChunkStatus::StructureStarts && mode == "same" {
@@ -1491,6 +1621,80 @@ fn compare_structures(
     // 带结构一组必须真的比到非空 starts / References，避免「结构没生成」的假绿。
     if official.contains("minecraft:") || clean.structures.contains("minecraft:") {
         stats.structure_cases += 1;
+    }
+}
+
+/// 官方 features 行里的 `PostProcessing` 是 24 段 packed short；解析成同样形状。
+///
+/// Parse the official features line's 24 packed-short `PostProcessing` sections.
+fn packed_sections(value: Option<&Value>) -> Result<Vec<Vec<u16>>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let sections = value
+        .as_array()
+        .ok_or("PostProcessing is not an array".to_owned())?;
+    sections
+        .iter()
+        .map(|section| {
+            section
+                .as_array()
+                .ok_or("PostProcessing section is not an array".to_owned())?
+                .iter()
+                .map(|entry| {
+                    entry
+                        .as_u64()
+                        .map(|packed| packed as u16)
+                        .ok_or("bad packed PostProcessing short".to_owned())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// 逐段比较完工后的 `PostProcessing`，段内按标记顺序逐项比。
+///
+/// Compare the finished `PostProcessing` section by section, entry order included.
+fn compare_post_processing(
+    stats: &mut Stats,
+    label: &str,
+    official: &[Vec<u16>],
+    game: &[Vec<u16>],
+) {
+    if official.len() != mc_bamboo_world::SECTION_COUNT {
+        stats.mismatches.push(format!(
+            "{label}: official PostProcessing has {} sections, expected {}",
+            official.len(),
+            mc_bamboo_world::SECTION_COUNT
+        ));
+        return;
+    }
+    if game.len() != official.len() {
+        stats.mismatches.push(format!(
+            "{label}: game PostProcessing has {} sections, expected {}",
+            game.len(),
+            official.len()
+        ));
+        return;
+    }
+    for (section, (want, have)) in official.iter().zip(game.iter()).enumerate() {
+        stats.post_processing += want.len() as u64;
+        if want == have {
+            continue;
+        }
+        let first = want
+            .iter()
+            .zip(have.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(want.len().min(have.len()));
+        stats.mismatches.push(format!(
+            "{label}: PostProcessing section {section}: official {} entries vs game {}, \
+             first diff at {first}: official {:?}, game {:?}",
+            want.len(),
+            have.len(),
+            want.get(first),
+            have.get(first)
+        ));
     }
 }
 

@@ -43,8 +43,8 @@ use crate::{
     region::RegionColumn,
     world_options::WorldGenConfig,
     worldgen::{
-        GeneratedChunk, build_region_column, cached_beardified_chunk, cached_generate_chunk,
-        with_generator,
+        GeneratedBlockEntity, GeneratedChunk, build_region_column, cached_beardified_chunk,
+        cached_generate_chunk, with_generator,
     },
     worldgen_profile::{
         BUILD_VIEW_CALLS, BUILD_VIEW_CELLS, BUILD_VIEW_NS, BUILD_VIEW_TERRAIN_MISSES,
@@ -59,6 +59,10 @@ use crate::{
 /// One feature `setBlock` write in world coordinates `(x, y, z, state id)`.
 pub(crate) type BlockDelta = (i32, i32, i32, u32);
 
+/// 一条 `PostProcessing` 标记的世界坐标 `(x, y, z)`。
+/// The world position `(x, y, z)` of one `PostProcessing` mark.
+pub type MarkPos = (i32, i32, i32);
+
 /// 一个来源中心写进目标区块的全部地物写。`slot` 是来源中心相对目标区块的
 /// 3×3 下标 `(dz+1)*3+(dx+1)`；中心自己是 4，其余按 `slot` 升序后到。
 /// 只有 `features` 阶段产生这些写，完工时 `assemble_feature_column` 按 `slot`
@@ -69,7 +73,7 @@ pub(crate) type BlockDelta = (i32, i32, i32, u32);
 /// target itself, then neighbors in ascending slot order. Only the `features`
 /// stage produces these; `assemble_feature_column` merges by `slot` order, so
 /// the first writer of a cell determines its final state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FeatureWrites {
     /// 来源中心的 3×3 下标；`assemble_feature_column` 按它升序排先后。
     /// The source center's 3×3 index; assembly orders writers by it.
@@ -77,6 +81,24 @@ pub struct FeatureWrites {
     /// 这一中心的写增量（同一格最多一条，见 `feature::world::last_writes`）。
     /// The center's writes (at most one per cell, see `feature::world::last_writes`).
     pub deltas: Vec<BlockDelta>,
+    /// 这一中心跑 `features` 时新记进目标区块的 `PostProcessing` 世界坐标，按
+    /// `markPosForPostProcessing` 的调用顺序、保留重复；不含输入地形已带的标记。
+    /// 官方 `WorldGenRegion.markPosForPostProcessing` 把标记记进坐标所属的区块，
+    /// 所以邻居中心也会往目标区块里加。
+    ///
+    /// `PostProcessing` positions this center newly marked inside the target
+    /// chunk during `features`, in `markPosForPostProcessing` call order with
+    /// duplicates kept; marks already carried by the input terrain are excluded.
+    /// Vanilla records a mark in the chunk owning the position, so neighbor
+    /// centers add to the target too.
+    pub marks: Vec<MarkPos>,
+    /// 这一中心跑 `features` 时在目标区块里写下的方块实体（同一格最后一份）。
+    /// 组装时跟着赢得该格方块的来源走，见 [`merge_feature_writes`]。
+    ///
+    /// Block entities this center wrote inside the target chunk during
+    /// `features` (last one per cell). Assembly keeps the one from the source
+    /// that won the cell's block, see [`merge_feature_writes`].
+    pub block_entities: Vec<GeneratedBlockEntity>,
 }
 
 /// 按中心的固定先后合并一组写：中心自己（`CENTER`）最先，其余 8 个来源按
@@ -96,6 +118,17 @@ pub struct FeatureWrites {
 /// last write (real data has at most one per source per cell, see
 /// `feature::world::last_writes`). Out-of-range y values are ignored by
 /// `apply_deltas`.
+///
+/// `PostProcessing` 也在这里合：`chunk.post_processing`（地形标记，或读盘恢复的表）
+/// 保持在前，各来源的 `marks` 按同一个固定先后追加，组内保持调用顺序、保留重复。
+/// 官方跨中心的先后取决于调度，本身不确定；这里取约定顺序，每段的多重集合与
+/// 官方相同。
+///
+/// `PostProcessing` is merged here too: `chunk.post_processing` (terrain marks, or
+/// the table restored from disk) stays first and each source's `marks` are
+/// appended in the same fixed order, keeping call order and duplicates. Vanilla's
+/// cross-center order depends on scheduling; this is the agreed order, with each
+/// section's multiset equal to vanilla's.
 pub fn merge_feature_writes(
     chunk: &mut GeneratedChunk,
     groups: impl IntoIterator<Item = FeatureWrites>,
@@ -106,29 +139,72 @@ pub fn merge_feature_writes(
         u8,
         std::collections::HashMap<(i32, i32, i32), u32>,
     > = std::collections::BTreeMap::new();
+    let mut marks: std::collections::BTreeMap<u8, Vec<MarkPos>> = std::collections::BTreeMap::new();
+    let mut entities: std::collections::BTreeMap<
+        u8,
+        std::collections::HashMap<(i32, i32, i32), Tag>,
+    > = std::collections::BTreeMap::new();
     for group in groups {
+        if !group.block_entities.is_empty() {
+            entities
+                .entry(group.slot)
+                .or_default()
+                .extend(group.block_entities);
+        }
         let writes = per_slot.entry(group.slot).or_default();
         for &(x, y, z, state) in &group.deltas {
             if (MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
                 writes.insert((x, y, z), state);
             }
         }
+        if !group.marks.is_empty() {
+            marks.entry(group.slot).or_default().extend(group.marks);
+        }
+    }
+    let source_order = |slot: &u8| (u8::from(*slot != CENTER as u8), *slot);
+    let mut mark_order: Vec<(u8, Vec<MarkPos>)> = marks.into_iter().collect();
+    mark_order.sort_by_key(|(slot, _)| source_order(slot));
+    for (_, group) in mark_order {
+        chunk.post_processing.extend(group);
     }
     // 固定先后：中心自己最先，其余按 slot 升序。从后往前覆盖，先写的留下。
     // Fixed order: the center first, then ascending slots. Walk backwards so
     // earlier sources overwrite later ones and the first writer survives.
     let mut order: Vec<u8> = per_slot.keys().copied().collect();
-    order.sort_by_key(|&slot| (u8::from(slot != CENTER as u8), slot));
-    let mut winners: std::collections::HashMap<(i32, i32, i32), u32> =
+    order.sort_by_key(source_order);
+    let mut winners: std::collections::HashMap<(i32, i32, i32), (u8, u32)> =
         std::collections::HashMap::new();
-    for slot in order.into_iter().rev() {
+    for &slot in order.iter().rev() {
         for ((x, y, z), state) in per_slot.remove(&slot).unwrap_or_default() {
-            winners.insert((x, y, z), state);
+            winners.insert((x, y, z), (slot, state));
         }
+    }
+    // 方块实体跟着赢得这一格方块的来源走：官方共享 `ProtoChunk` 里后写的方块
+    // 先丢掉旧方块实体，赢家的写也带走它自己的方块实体。没有任何来源改过方块的
+    // 格子，取先后顺序里第一个写了方块实体的来源。
+    // A block entity follows the source that won the cell's block: in vanilla's
+    // shared `ProtoChunk` a later block write drops the old block entity. Cells no
+    // source changed take the first source, in order, that wrote one.
+    let mut entity_order: Vec<u8> = entities.keys().copied().collect();
+    entity_order.sort_by_key(source_order);
+    let mut placed: std::collections::BTreeMap<(i32, i32, i32), Tag> =
+        std::collections::BTreeMap::new();
+    for slot in entity_order {
+        for (at, tag) in entities.remove(&slot).unwrap_or_default() {
+            let owns = winners.get(&at).is_none_or(|&(winner, _)| winner == slot);
+            if owns && !placed.contains_key(&at) {
+                placed.insert(at, tag);
+            }
+        }
+    }
+    if !placed.is_empty() {
+        let changed: std::collections::BTreeSet<(i32, i32, i32)> = placed.keys().copied().collect();
+        chunk.block_entities.retain(|(at, _)| !changed.contains(at));
+        chunk.block_entities.extend(placed);
     }
     let mut out: Vec<BlockDelta> = winners
         .into_iter()
-        .map(|((x, y, z), state)| (x, y, z, state))
+        .map(|((x, y, z), (_, state))| (x, y, z, state))
         .collect();
     // 每格只留一条，排序只为让落盘顺序也确定，与哈希表迭代次序无关。
     // One entry per cell; sorted so even the apply order is deterministic.
@@ -214,18 +290,16 @@ pub(crate) fn run_features(
 }
 
 /// `worldgen.json` 的 `processor_list` 只随数据版本变，和种子、世界类型、区块坐标
-/// 都无关。解析整份 JSON（`Worldgen::load`）实测约 24 ms，若每个区块的 `features`
-/// 调用都重来一次，它会盖过地物本身。进程里缓存一份解析结果，之后只克隆这张表
-/// （每条计算线程各持一份，结构放置只读它）。
+/// 都无关。基于共享的 `Worldgen` 解析一次处理器表，结构放置直接借用该表。
 ///
 /// `processor_list` depends only on the bundled data version, not on the seed,
-/// world type or chunk position. Parsing the whole JSON costs ~24 ms, which would
-/// dwarf the features work if repeated per chunk; cache it process-wide.
+/// world type or chunk position. Parse it once from the shared `Worldgen` and
+/// borrow the resulting table during structure placement.
 fn processor_lists() -> Result<&'static ProcessorLists, String> {
     static LISTS: OnceLock<Result<ProcessorLists, String>> = OnceLock::new();
     LISTS
         .get_or_init(|| {
-            let worldgen = Worldgen::load()?;
+            let worldgen = Worldgen::shared()?;
             let raw = worldgen
                 .raw()
                 .get("processor_list")
@@ -255,29 +329,13 @@ fn run_features_filtered(
     ),
     String,
 > {
-    if config.level_type.is_flat() {
-        // flat 世界没有噪声地物；流水线也不是 Staged，这里只是防御。
-        // Flat worlds have no noise features; the pipeline is not Staged either.
-        return Ok((
-            FeatureResult {
-                blocks: std::array::from_fn(|_| {
-                    vec![vec![mc_bamboo_data::blocks::AIR; 256]; WORLD_HEIGHT as usize]
-                }),
-                deltas: std::array::from_fn(|_| Vec::new()),
-                block_entities: Vec::new(),
-                unsupported: false,
-            },
-            None,
-        ));
+    if !config.level_type.is_flat() {
+        crate::worldgen_structures::reset_generator_biome_state(config)?;
     }
-    // 结构阶段 / 邻居起点重算改写了共享的群系 R 树 `lastResult`；地物的
-    // `BiomeFilter` 走单点查询，从确定状态起步才与计算池的区块到达顺序无关。
-    // Structure stages / neighbour-start recomputation mutated the shared biome
-    // R-tree `lastResult`; features' BiomeFilter uses single-point lookups, so
-    // start clean to stay independent of compute-pool arrival order.
-    crate::worldgen_structures::reset_generator_biome_state(config)?;
     let blocks: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.blocks.clone());
     let biomes: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.biomes.clone());
+    let post_processing: [Vec<(i32, i32, i32)>; 9] =
+        view.each_ref().map(|chunk| chunk.post_processing.clone());
     let heights: [Heightmaps; 9] = blocks
         .each_ref()
         .map(|chunk| prime_heightmaps(chunk, MIN_Y, WORLD_HEIGHT));
@@ -289,13 +347,17 @@ fn run_features_filtered(
         blocks,
         biomes,
         heights,
+        post_processing,
     };
     // `applyBiomeDecoration` 的结构分支：按中心区块的 `References` 反查每个起点，
     // 按 `structure.step()` 分组；`generate-structures=false` 时整段跳过。
     // Vanilla's structure branch: resolve the starts referenced by the center,
     // group by `structure.step()`; skipped when `generate-structures=false`.
-    let references =
-        crate::worldgen_structures::structure_references_stage(config, cx, cz).unwrap_or_default();
+    let references = if config.generate_structures {
+        crate::worldgen_structures::structure_references_stage(config, cx, cz)?
+    } else {
+        Default::default()
+    };
     let mut starts: Vec<StartInput> = Vec::new();
     if config.generate_structures {
         for (structure, keys) in &references {
@@ -361,9 +423,23 @@ fn run_features_filtered(
     // 在 features 里按同样顺序查它，进主循环前清到确定状态。
     // Resolving starts/references above mutates the shared biome R-tree
     // `lastResult`; clear it before the feature loop reads it.
-    crate::worldgen_structures::reset_generator_biome_state(config)?;
+    if !config.level_type.is_flat() {
+        crate::worldgen_structures::reset_generator_biome_state(config)?;
+    }
     with_generator(config, |generator| {
-        generator.features_with_structures(&input, steps_mask, allowed_kinds, Some(&placement))
+        let placement = Some(&placement);
+        if config.level_type.is_flat() {
+            let flat = &config.flat;
+            let decoration = mc_bamboo_worldgen::feature::flat::FlatDecoration {
+                biome: flat.biome,
+                features: flat.features,
+                lakes: flat.lakes,
+                layers: &flat.layers,
+            };
+            generator.features_flat(&input, steps_mask, allowed_kinds, placement, &decoration)
+        } else {
+            generator.features_with_structures(&input, steps_mask, allowed_kinds, placement)
+        }
     })
 }
 
@@ -490,6 +566,8 @@ pub fn game_pipeline(
             blocks: blocks[index].clone(),
             biomes: biomes[index].clone(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
+            block_entities: Vec::new(),
         })
     });
     let (_result, stats) = run_features_filtered(
@@ -565,9 +643,25 @@ pub fn game_pipeline(
 /// eight hold the overflow into the neighbors.
 struct FeatureRun {
     deltas: [Vec<BlockDelta>; 9],
+    /// 这次运行写下的方块实体，按目标格（3×3 下标）分开。
+    /// Block entities this run wrote, split by target cell (3×3 index).
+    block_entities: [Vec<GeneratedBlockEntity>; 9],
+    /// 这次运行新记的 `PostProcessing` 标记，按目标格（3×3 下标）分开，组内保持
+    /// 调用顺序；不含输入地形已带的标记。
+    ///
+    /// `PostProcessing` marks newly recorded by this run, split by target cell
+    /// (3×3 index) in call order; input terrain marks are excluded.
+    marks: [Vec<MarkPos>; 9],
 }
 
-type FeatureCacheKey = (i64, Option<&'static str>, i32, i32, bool);
+type FeatureCacheKey = (
+    i64,
+    Option<&'static str>,
+    i32,
+    i32,
+    bool,
+    Option<crate::world_options::FlatSettings>,
+);
 /// 一个中心的地物结果，或正在算它的线程占位。等待方在 `OnceLock` 上等，
 /// 拿到的是计算方放进来的同一个 `Arc`。
 /// A center's feature result, or the in-flight placeholder. Waiters block on
@@ -587,10 +681,28 @@ struct FeatureShard {
     inflight: HashMap<FeatureCacheKey, FeatureSlot>,
     order: std::collections::VecDeque<FeatureCacheKey>,
     bytes: usize,
+    /// 每条条目「5×5 里哪些区块已经完工」的位图，满了就删（见 `worldgen_cache`）。
+    /// Per-entry bitmap of assembled chunks in its 5×5; the entry is dropped
+    /// once it is full (see `worldgen_cache`).
+    finished: HashMap<FeatureCacheKey, u32>,
+}
+
+impl FeatureShard {
+    /// 删掉一条条目和它的占位、位图，更新字节数；删掉的结果交回调用方，
+    /// 好在放开分片锁以后再释放。
+    /// Remove an entry with its placeholder and bitmap and update the bytes;
+    /// the removed result is handed back so it can be freed after the shard
+    /// lock is released.
+    fn remove_entry(&mut self, key: &FeatureCacheKey) -> Option<Arc<FeatureRun>> {
+        let removed = self.entries.remove(key)?;
+        self.inflight.remove(key);
+        self.finished.remove(key);
+        self.bytes = self.bytes.saturating_sub(feature_run_heap_bytes(&removed));
+        Some(removed)
+    }
 }
 
 const FEATURE_CACHE_SHARDS: usize = 16;
-const FEATURE_CACHE_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 static FEATURE_CACHE: OnceLock<Vec<std::sync::Mutex<FeatureShard>>> = OnceLock::new();
 
 fn feature_shards() -> &'static [std::sync::Mutex<FeatureShard>] {
@@ -611,10 +723,104 @@ fn feature_shard_index(key: &FeatureCacheKey) -> usize {
 /// 一条地物结果的实测堆字节数（9 份写增量的容量之和）。
 /// Measured heap bytes held by one feature result (sum of 9 delta capacities).
 fn feature_run_heap_bytes(run: &FeatureRun) -> usize {
-    run.deltas
+    let deltas: usize = run
+        .deltas
         .iter()
         .map(|deltas| deltas.capacity() * size_of::<BlockDelta>())
-        .sum()
+        .sum();
+    let marks: usize = run
+        .marks
+        .iter()
+        .map(|marks| marks.capacity() * size_of::<(i32, i32, i32)>())
+        .sum();
+    // 方块实体的标签大小不好精确量，按每条 256 字节估。
+    // Block entity tags are hard to measure exactly; estimate 256 bytes each.
+    let block_entities: usize = run
+        .block_entities
+        .iter()
+        .map(|list| list.capacity() * (size_of::<GeneratedBlockEntity>() + 256))
+        .sum();
+    deltas + marks + block_entities
+}
+
+fn feature_cache_key(config: &WorldGenConfig, cx: i32, cz: i32) -> FeatureCacheKey {
+    (
+        config.seed,
+        config.level_type.settings_id(),
+        cx,
+        cz,
+        config.generate_structures,
+        config.level_type.is_flat().then(|| config.flat.clone()),
+    )
+}
+
+/// `(cx, cz)` 的 5×5 里第 `bit` 个区块已经完工；25 个都完工就删掉这条地物结果。
+/// 条目不在缓存里时什么都不做。
+///
+/// Chunk `bit` of the 5×5 around `(cx, cz)` has been assembled; drop this
+/// feature result once all 25 are. Missing entries are left alone. The removed
+/// result is freed outside the lock.
+pub(crate) fn mark_feature_chunk_finished(config: &WorldGenConfig, cx: i32, cz: i32, bit: u32) {
+    let key = feature_cache_key(config, cx, cz);
+    let Ok(mut shard) = feature_shards()[feature_shard_index(&key)].lock() else {
+        return;
+    };
+    if !shard.entries.contains_key(&key) {
+        return;
+    }
+    let done = shard.finished.entry(key.clone()).or_default();
+    *done |= 1 << bit;
+    if *done != crate::worldgen_cache::ALL_5X5 {
+        return;
+    }
+    let removed = shard.remove_entry(&key);
+    // `order` 里的旧键留给淘汰循环跳过；攒多了压一遍。
+    // The stale key in `order` is skipped by eviction; compact when many.
+    if shard.order.len() > 2 * shard.entries.len() + 64 {
+        let FeatureShard { entries, order, .. } = &mut *shard;
+        order.retain(|key| entries.contains_key(key));
+    }
+    drop(shard);
+    drop(removed);
+}
+
+/// 空闲释放：清空全部条目；正在算的占位留着，计算方算完照常提交。
+/// Idle release: drop every entry; in-flight placeholders stay so a computing
+/// thread still commits.
+pub(crate) fn release_feature_cache() {
+    for shard in feature_shards() {
+        let Ok(mut shard) = shard.lock() else {
+            continue;
+        };
+        let keys: Vec<FeatureCacheKey> = shard.entries.keys().cloned().collect();
+        // 删掉的结果攒起来，放开这一片的锁以后再释放。
+        // Collect the removed results and free them after this shard's lock is released.
+        let removed: Vec<Arc<FeatureRun>> = keys
+            .iter()
+            .filter_map(|key| shard.remove_entry(key))
+            .collect();
+        shard.order.clear();
+        shard.order.shrink_to_fit();
+        shard.entries.shrink_to_fit();
+        shard.inflight.shrink_to_fit();
+        shard.finished.shrink_to_fit();
+        drop(shard);
+        drop(removed);
+    }
+}
+
+/// 地物结果缓存现在的条目数和实测字节数（压测 / 测试用）。
+/// Current entry count and measured bytes of the feature cache (benchmarks / tests).
+#[doc(hidden)]
+pub fn feature_cache_usage() -> (usize, usize) {
+    let mut usage = (0, 0);
+    for shard in feature_shards() {
+        if let Ok(shard) = shard.lock() {
+            usage.0 += shard.entries.len();
+            usage.1 += shard.bytes;
+        }
+    }
+    usage
 }
 
 /// 测量 / 冷启动用：清掉整份地物结果缓存。
@@ -682,7 +888,7 @@ pub(crate) fn cached_generate_chunk_with_structures(
     x: i32,
     z: i32,
 ) -> Result<Arc<GeneratedChunk>, String> {
-    if !config.generate_structures {
+    if !config.generate_structures || config.level_type.is_flat() {
         return cached_generate_chunk(config, x, z);
     }
     let beardifier = crate::worldgen_structures::beardifier_for(config, x, z)?;
@@ -701,13 +907,8 @@ fn cached_feature_run(
 ) -> Result<Arc<FeatureRun>, String> {
     crate::worldgen_profile::count(&FEATURE_RUN_CALLS);
     crate::worldgen_profile::record_feature_center(config.seed, cx, cz);
-    let key = (
-        config.seed,
-        config.level_type.settings_id(),
-        cx,
-        cz,
-        config.generate_structures,
-    );
+    crate::worldgen_cache::touch();
+    let key = feature_cache_key(config, cx, cz);
     let shards = feature_shards();
     let index = feature_shard_index(&key);
     // 锁内只查表 / 放占位；地物在锁外算。同一个中心只有一条线程真正在算，
@@ -728,7 +929,7 @@ fn cached_feature_run(
         } else {
             crate::worldgen_profile::count(&FEATURE_RUN_MISSES);
             let slot = Arc::new(OnceLock::new());
-            shard.inflight.insert(key, Arc::clone(&slot));
+            shard.inflight.insert(key.clone(), Arc::clone(&slot));
             slot
         }
     };
@@ -751,27 +952,63 @@ fn cached_feature_run(
     };
     // 只有计算方提交条目；等待方直接返回，避免重复计字节。
     // Only the computing thread commits; waiters just return.
-    if let Ok(mut shard) = shards[index].lock()
-        && !shard.entries.contains_key(&key)
-    {
-        shard.order.push_back(key);
-        shard.entries.insert(key, Arc::clone(&run));
-        shard.bytes += feature_run_heap_bytes(&run);
-        let target = FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS * 3 / 4;
-        if shard.bytes > FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS {
-            while shard.bytes > target {
-                let Some(oldest) = shard.order.pop_front() else {
-                    break;
-                };
-                let Some(removed) = shard.entries.remove(&oldest) else {
-                    continue;
-                };
-                shard.bytes = shard.bytes.saturating_sub(feature_run_heap_bytes(&removed));
-                shard.inflight.remove(&oldest);
-            }
-        }
+    let limit = crate::worldgen_cache::feature_byte_limit() / FEATURE_CACHE_SHARDS;
+    let committed = commit_feature_run(&shards[index], key, &slot, &run, limit);
+    if committed {
+        // 这个中心算完了：它读过的 3×3 地形各少一个使用者（锁外做）。
+        // This center is done: its 3×3 terrain has one consumer fewer (done
+        // outside the feature shard lock).
+        crate::worldgen_cache::feature_run_computed(config, cx, cz);
     }
     Ok(run)
+}
+
+/// 把算好的地物结果放进分片，按这一片的字节上限 `limit`（`bamboo.toml` 的
+/// `worldgen_feature_cache_mb` 均分到各片）淘汰最旧的；返回这次是不是新放进去的。
+///
+/// Insert a computed feature result and evict the oldest past this shard's
+/// byte limit `limit` (`worldgen_feature_cache_mb` in `bamboo.toml` split
+/// across shards); returns whether it was newly inserted.
+fn commit_feature_run(
+    shard: &std::sync::Mutex<FeatureShard>,
+    key: FeatureCacheKey,
+    slot: &FeatureSlot,
+    run: &Arc<FeatureRun>,
+    limit: usize,
+) -> bool {
+    let Ok(mut shard) = shard.lock() else {
+        return false;
+    };
+    if shard.entries.contains_key(&key) {
+        return false;
+    }
+    if limit == 0 {
+        // 上限为 0 不留条目：自己的占位也要拿掉，否则它带着结果一直留在
+        // `inflight` 里，既不计字节也不会被淘汰或空闲释放清掉。
+        // A zero limit keeps no entry: drop our placeholder too, or it would
+        // keep the result in `inflight` forever, uncounted and never evicted
+        // or idle-released.
+        if shard
+            .inflight
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+        {
+            shard.inflight.remove(&key);
+        }
+        return false;
+    }
+    shard.order.push_back(key.clone());
+    shard.entries.insert(key, Arc::clone(run));
+    shard.bytes += feature_run_heap_bytes(run);
+    if shard.bytes > limit {
+        while shard.bytes > limit * 3 / 4 {
+            let Some(oldest) = shard.order.pop_front() else {
+                break;
+            };
+            shard.remove_entry(&oldest);
+        }
+    }
+    true
 }
 
 /// 真正跑一遍 `applyBiomeDecoration`：拼视图、调纯函数、只保留 9 份写增量
@@ -785,11 +1022,48 @@ fn compute_feature_run(
 ) -> Result<Arc<FeatureRun>, String> {
     let view = build_view(config, cx, cz)?;
     let terrain = Arc::clone(&view[CENTER]);
+    let input_marks: usize = view.iter().map(|chunk| chunk.post_processing.len()).sum();
     let result = run_features(config, cx, cz, view)?;
     let own = center_writes(cx, cz, &terrain, &result);
     let mut deltas = result.deltas;
     deltas[CENTER] = own;
-    Ok(Arc::new(FeatureRun { deltas }))
+    let marks = split_new_marks(cx, cz, &result.post_processing, input_marks);
+    let mut block_entities: [Vec<GeneratedBlockEntity>; 9] = std::array::from_fn(|_| Vec::new());
+    for ((x, y, z), tag) in result.block_entities {
+        let dx = (x >> 4) - cx;
+        let dz = (z >> 4) - cz;
+        if (-1..=1).contains(&dx) && (-1..=1).contains(&dz) {
+            block_entities[((dz + 1) * 3 + dx + 1) as usize].push(((x, y, z), tag));
+        }
+    }
+    Ok(Arc::new(FeatureRun {
+        deltas,
+        block_entities,
+        marks,
+    }))
+}
+
+/// 把一次运行的 `PostProcessing` 去掉输入地形带的前缀，按目标格（3×3 下标）分开。
+/// `FeatureWorld::new` 把 9 格输入标记按格序摊平放在最前，新标记只往后追加。
+///
+/// Drop the input-terrain prefix from one run's `PostProcessing` and split the
+/// new marks by target cell. `FeatureWorld::new` flattens the 9 inputs first in
+/// cell order; new marks are only appended.
+fn split_new_marks(
+    cx: i32,
+    cz: i32,
+    all: &[(i32, i32, i32)],
+    input_marks: usize,
+) -> [Vec<(i32, i32, i32)>; 9] {
+    let mut out: [Vec<(i32, i32, i32)>; 9] = std::array::from_fn(|_| Vec::new());
+    for &(x, y, z) in all.get(input_marks..).unwrap_or(&[]) {
+        let dx = (x >> 4) - cx;
+        let dz = (z >> 4) - cz;
+        if (-1..=1).contains(&dx) && (-1..=1).contains(&dz) {
+            out[((dz + 1) * 3 + dx + 1) as usize].push((x, y, z));
+        }
+    }
+    out
 }
 
 /// 测试用：只用纯函数（`build_view` 的 3×3 + 8 个邻居中心的溢出）算出一个区块
@@ -830,6 +1104,8 @@ pub fn feature_writes_into(
     let mut out = vec![FeatureWrites {
         slot: CENTER as u8,
         deltas: own.deltas[CENTER].clone(),
+        marks: own.marks[CENTER].clone(),
+        block_entities: own.block_entities[CENTER].clone(),
     }];
     for dz in -1..=1 {
         for dx in -1..=1 {
@@ -844,6 +1120,8 @@ pub fn feature_writes_into(
             out.push(FeatureWrites {
                 slot: slot as u8,
                 deltas: run.deltas[index].clone(),
+                marks: run.marks[index].clone(),
+                block_entities: run.block_entities[index].clone(),
             });
         }
     }
@@ -972,7 +1250,8 @@ pub mod oracle_merge {
     use std::sync::Mutex;
 
     use super::{
-        CENTER, FeatureWrites, WorldGenConfig, feature_writes_into as game_feature_writes_into,
+        CENTER, FeatureWrites, MarkPos, WorldGenConfig,
+        feature_writes_into as game_feature_writes_into,
     };
 
     /// 故意改坏合并，确认对拍抓得到。
@@ -985,6 +1264,15 @@ pub mod oracle_merge {
         /// 同格冲突退回旧规则：状态 ID 最大的赢。
         /// Revert same-cell conflicts to the old rule: the largest state id wins.
         LargestStateWins,
+        /// 只丢掉 `(cx+dx, cz+dz)` 这个邻居记进本区块的 `PostProcessing` 标记，
+        /// 方块写照旧。
+        /// Drop only the `PostProcessing` marks from the neighbor at
+        /// `(cx+dx, cz+dz)`; its block writes stay.
+        DropNeighborMarks { dx: i32, dz: i32 },
+        /// 组装时丢掉全部来源写下的方块实体（方块照旧），确认方块实体比较器会报。
+        /// Drop every source's block entities at assembly (blocks stay), so the
+        /// block entity comparison must report it.
+        DropBlockEntities,
     }
 
     /// 开关只对这一个种子生效，别的世界不受影响。
@@ -1016,6 +1304,17 @@ pub mod oracle_merge {
             MergeBreak::DropNeighbor { dx, dz } => {
                 let slot = ((dz + 1) * 3 + dx + 1) as u8;
                 groups.retain(|group| group.slot != slot);
+            }
+            MergeBreak::DropNeighborMarks { dx, dz } => {
+                let slot = ((dz + 1) * 3 + dx + 1) as u8;
+                for group in groups.iter_mut().filter(|group| group.slot == slot) {
+                    group.marks.clear();
+                }
+            }
+            MergeBreak::DropBlockEntities => {
+                for group in groups.iter_mut() {
+                    group.block_entities.clear();
+                }
             }
             MergeBreak::LargestStateWins => {
                 // 旧规则：按 `(x,y,z,state)` 排序后同格最后一条（状态 ID 最大）生效。
@@ -1054,6 +1353,24 @@ pub mod oracle_merge {
         let mut out: [Vec<super::BlockDelta>; 9] = std::array::from_fn(|_| Vec::new());
         for group in groups {
             out[group.slot as usize] = group.deltas;
+        }
+        Ok(out)
+    }
+
+    /// 记进 `(cx, cz)` 的新 `PostProcessing` 标记，按来源中心分 9 份，下标同
+    /// [`feature_writes_into`]；组内保持调用顺序。
+    ///
+    /// New `PostProcessing` marks recorded into `(cx, cz)`, split by source center
+    /// with the same indexing as [`feature_writes_into`], in call order.
+    pub fn feature_marks_into(
+        config: &WorldGenConfig,
+        cx: i32,
+        cz: i32,
+    ) -> Result<[Vec<MarkPos>; 9], String> {
+        let groups = game_feature_writes_into(config, cx, cz)?;
+        let mut out: [Vec<MarkPos>; 9] = std::array::from_fn(|_| Vec::new());
+        for group in groups {
+            out[group.slot as usize] = group.marks;
         }
         Ok(out)
     }
@@ -1229,6 +1546,8 @@ mod tests {
                 blocks: empty.blocks.clone(),
                 biomes: empty.biomes.clone(),
                 heightmaps: Default::default(),
+                post_processing: Vec::new(),
+                block_entities: Vec::new(),
             })
         });
         let view_real = std::array::from_fn(|_| {
@@ -1236,6 +1555,8 @@ mod tests {
                 blocks: real.blocks.clone(),
                 biomes: real.biomes.clone(),
                 heightmaps: Default::default(),
+                post_processing: Vec::new(),
+                block_entities: Vec::new(),
             })
         });
         let a = run_features(&config, cx, cz, view_empty).unwrap();
@@ -1275,6 +1596,76 @@ mod tests {
             (0..9).any(|index| index != CENTER && !fresh.deltas[index].is_empty()),
             "the test center must spill into some neighbor"
         );
+    }
+
+    /// 按依赖释放：5×5 个区块都完工，这个中心的地物结果才删；删了再要，
+    /// 现算出来的和原来逐条相同。
+    /// Dependency release: a center's feature result goes only once all 5×5
+    /// chunks are assembled; asking again recomputes identical writes.
+    #[test]
+    fn feature_run_is_released_when_its_5x5_is_assembled() {
+        let config = normal(0x0fea_7c0e);
+        let (cx, cz) = (12, 6);
+        let cached = |config: &WorldGenConfig| {
+            let key = feature_cache_key(config, cx, cz);
+            let shard = feature_shards()[feature_shard_index(&key)].lock().unwrap();
+            shard.entries.contains_key(&key)
+        };
+        let first = cached_feature_run(&config, cx, cz).unwrap();
+        let positions: Vec<ChunkPos> = (-2..=2)
+            .flat_map(|dz| (-2..=2).map(move |dx| ChunkPos::new(cx + dx, cz + dz)))
+            .collect();
+        for &pos in &positions[..24] {
+            crate::worldgen_cache::chunk_finished(&config, pos);
+        }
+        assert!(cached(&config), "one chunk of the 5x5 is not assembled");
+        crate::worldgen_cache::chunk_finished(&config, positions[24]);
+        assert!(!cached(&config), "the whole 5x5 is assembled");
+        let again = cached_feature_run(&config, cx, cz).unwrap();
+        assert!(!Arc::ptr_eq(&first, &again), "recomputed after the release");
+        assert_eq!(first.deltas, again.deltas);
+        assert_eq!(first.marks, again.marks);
+    }
+
+    /// 上限为 0 时不留条目，计算方自己的占位也拿掉；别人的新占位不动。
+    /// A zero limit keeps no entry and drops the computer's own placeholder,
+    /// but leaves a newer placeholder from someone else alone.
+    #[test]
+    fn a_zero_limit_keeps_neither_entry_nor_placeholder() {
+        let key = feature_cache_key(&normal(0x0fea_0000), 3, -4);
+        let run = Arc::new(FeatureRun {
+            deltas: Default::default(),
+            marks: Default::default(),
+            block_entities: Default::default(),
+        });
+        let shard = std::sync::Mutex::new(FeatureShard::default());
+        let ours: FeatureSlot = Arc::new(OnceLock::new());
+        shard
+            .lock()
+            .unwrap()
+            .inflight
+            .insert(key.clone(), Arc::clone(&ours));
+        assert!(!commit_feature_run(&shard, key.clone(), &ours, &run, 0));
+        {
+            let shard = shard.lock().unwrap();
+            assert!(shard.entries.is_empty() && shard.inflight.is_empty());
+        }
+        let newer: FeatureSlot = Arc::new(OnceLock::new());
+        shard
+            .lock()
+            .unwrap()
+            .inflight
+            .insert(key.clone(), Arc::clone(&newer));
+        assert!(!commit_feature_run(&shard, key.clone(), &ours, &run, 0));
+        assert!(shard.lock().unwrap().inflight.contains_key(&key));
+        assert!(commit_feature_run(
+            &shard,
+            key.clone(),
+            &newer,
+            &run,
+            1 << 20
+        ));
+        assert!(shard.lock().unwrap().entries.contains_key(&key));
     }
 
     /// 多条线程同时要同一个中心：只有一条真正去算，其余等它，拿到的是同一个
@@ -1346,6 +1737,8 @@ mod tests {
                 .map(|&slot| FeatureWrites {
                     slot,
                     deltas: vec![(3, 0, 5, 100 + slot as u32), (slot as i32, 1, 6, 222)],
+                    marks: Vec::new(),
+                    block_entities: Vec::new(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -1357,6 +1750,8 @@ mod tests {
         c.push(FeatureWrites {
             slot: CENTER as u8,
             deltas: vec![(3, 0, 5, 999)],
+            marks: Vec::new(),
+            block_entities: Vec::new(),
         });
         let ca = assemble_feature_column(&terrain, &mut a).unwrap();
         let cb = assemble_feature_column(&terrain, &mut b).unwrap();
@@ -1450,5 +1845,75 @@ mod tests {
         let mut again = (*terrain).clone();
         merge_feature_writes(&mut again, reversed);
         assert_eq!(again.blocks, expected.blocks);
+    }
+
+    /// `PostProcessing` 合并：已有的表在前，来源按「中心先、slot 升序」追加，
+    /// 组内保持顺序和重复，与分组传入顺序无关。
+    /// PostProcessing merge: the existing table first, sources appended center
+    /// first then ascending slot, in-group order and duplicates kept, independent
+    /// of the order groups arrive in.
+    #[test]
+    fn merge_feature_writes_appends_marks_in_source_order() {
+        let base = GeneratedChunk {
+            blocks: vec![vec![0_u32; 256]; WORLD_HEIGHT as usize],
+            biomes: Vec::new(),
+            heightmaps: Default::default(),
+            post_processing: vec![(0, 1, 0)],
+            block_entities: Vec::new(),
+        };
+        let group = |slot: u8, marks: Vec<(i32, i32, i32)>| FeatureWrites {
+            slot,
+            deltas: Vec::new(),
+            marks,
+            block_entities: Vec::new(),
+        };
+        let groups = vec![
+            group(7, vec![(7, 0, 0)]),
+            group(0, vec![(0, 0, 0), (0, 0, 0)]),
+            group(CENTER as u8, vec![(4, 2, 0), (4, 1, 0)]),
+            group(2, Vec::new()),
+        ];
+        let expected = vec![
+            (0, 1, 0),
+            (4, 2, 0),
+            (4, 1, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+            (7, 0, 0),
+        ];
+        let mut chunk = base.clone();
+        merge_feature_writes(&mut chunk, groups.iter().cloned());
+        assert_eq!(chunk.post_processing, expected);
+        let mut reversed = base;
+        merge_feature_writes(&mut reversed, groups.into_iter().rev());
+        assert_eq!(reversed.post_processing, expected);
+    }
+
+    /// 每个来源记进目标区块的标记都落在目标区块里，且不重复带上输入地形的标记。
+    /// Every source's marks land inside the target chunk and never repeat the
+    /// input terrain marks.
+    #[test]
+    fn feature_marks_land_in_the_target_chunk() {
+        let config = normal(0x0fea_7c10);
+        let (cx, cz) = (3, -2);
+        let groups = feature_writes_into(&config, cx, cz).unwrap();
+        let terrain = cached_generate_chunk(&config, cx, cz).unwrap();
+        let mut total = 0;
+        for group in &groups {
+            for &(x, _, z) in &group.marks {
+                assert_eq!((x >> 4, z >> 4), (cx, cz), "slot {}", group.slot);
+            }
+            total += group.marks.len();
+        }
+        let mut chunk = (*terrain).clone();
+        merge_feature_writes(&mut chunk, groups);
+        assert_eq!(
+            chunk.post_processing.len(),
+            terrain.post_processing.len() + total
+        );
+        assert_eq!(
+            &chunk.post_processing[..terrain.post_processing.len()],
+            terrain.post_processing.as_slice()
+        );
     }
 }

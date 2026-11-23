@@ -344,12 +344,29 @@ impl Inventory {
     ///
     /// Vanilla `Inventory.add` mutates the stack it is given. This returns what did not fit.
     /// Creative mode clears the leftover, so the caller sees a successful add.
-    pub(crate) fn receive(&mut self, mut incoming: ItemStack, creative: bool) -> ItemStack {
+    pub(crate) fn receive(&mut self, incoming: ItemStack, creative: bool) -> ItemStack {
+        self.receive_with_add_result(incoming, creative).0
+    }
+
+    /// 返回余量和 `Inventory.add` 的布尔值。最后一轮放不下时，
+    /// 生存模式即使已塞进一部分，也返回 false。
+    ///
+    /// Returns the remainder and vanilla's `Inventory.add` result. In survival,
+    /// partial insertion can still return false if the last pass made no progress.
+    pub(crate) fn receive_with_add_result(
+        &mut self,
+        mut incoming: ItemStack,
+        creative: bool,
+    ) -> (ItemStack, bool) {
         if incoming.is_empty() {
-            return incoming;
+            return (incoming, false);
         }
         if incoming.is_damaged() {
-            return self.receive_damaged(incoming, creative);
+            return if self.add_damaged(incoming.clone(), creative) {
+                (ItemStack::empty(), true)
+            } else {
+                (incoming, false)
+            };
         }
         let mut last;
         loop {
@@ -361,17 +378,10 @@ impl Inventory {
             }
         }
         if incoming.count == last && creative {
-            ItemStack::empty()
+            (ItemStack::empty(), true)
         } else {
-            incoming
-        }
-    }
-
-    fn receive_damaged(&mut self, incoming: ItemStack, creative: bool) -> ItemStack {
-        if self.add_damaged(incoming.clone(), creative) {
-            ItemStack::empty()
-        } else {
-            incoming
+            let accepted = incoming.count < last;
+            (incoming, accepted)
         }
     }
 
@@ -509,7 +519,18 @@ pub(crate) fn on_set_carried_item(region: &mut Region, id: PlayerId, slot: i16) 
         return;
     };
     match usize::try_from(slot) {
-        Ok(index) if index < HOTBAR_SIZE => player.inventory.select(index),
+        Ok(index) if index < HOTBAR_SIZE => {
+            if usize::from(player.inventory.selected) != index
+                && player
+                    .weapon_use
+                    .as_ref()
+                    .is_some_and(|active| active.hand == Hand::Main)
+            {
+                player.weapon_use = None;
+                player.sync.metadata_dirty = true;
+            }
+            player.inventory.select(index);
+        }
         _ => debug!(player = id.0, slot, "ignoring an invalid carried item slot"),
     }
 }
@@ -555,6 +576,9 @@ pub(crate) fn swap_hands(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
+    if player.weapon_use.take().is_some() {
+        player.sync.metadata_dirty = true;
+    }
     let main_hand = player.inventory.hand_slot(Hand::Main);
     if player.inventory.slots[main_hand] == player.inventory.slots[OFF_HAND] {
         return;

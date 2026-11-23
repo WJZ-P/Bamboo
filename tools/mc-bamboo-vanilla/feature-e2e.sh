@@ -49,6 +49,12 @@ CASES=(
     "minecraft:random_selector|9|--seeds 3 --chunks 8 --salt 7"
     "minecraft:simple_block|9|--seeds 1 --chunk 0 52 --scan 5"
     "minecraft:tree|9|--seeds 1 --chunk 13 -400 --scan 9"
+    # 苍白橡树的 pale_moss 装饰器要递归放 pale_moss_patch；salt 1 的多种子
+    # 苍郁花园坐标触发它，两种类型都单独做干净跑 + 改坏确认。
+    # The pale oak's pale_moss decorator recursively places pale_moss_patch;
+    # these salt-1 pale-garden coordinates trigger it. Both types get a clean
+    # run and a break confirmation.
+    "minecraft:vegetation_patch|9|--seeds 6 --chunks 36 --salt 1"
     "minecraft:vegetation_patch|9|--seeds 3 --chunks 8 --salt 7"
     "minecraft:vines|9|--seeds 3 --chunks 8 --salt 7"
     "minecraft:weighted_random_selector|9|--seeds 3 --chunks 8 --salt 7"

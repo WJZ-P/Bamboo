@@ -881,6 +881,7 @@ pub enum EntityValue {
     Float(f32),
     Pose(i32),
     Arm(i32),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -919,10 +920,23 @@ impl Packet for SetEntityData {
 fn read_entity_value(reader: &mut Reader<'_>, index: u8, serializer: i32) -> EntityValue {
     let expected = match index {
         0 | 8 | 16 => 0,
-        1 | 7 | 12 | 13 | 18 => 1,
+        1 | 7 | 12 | 13 => 1,
         9 | 17 => 3,
         6 => 20,
-        15 => 42,
+        // 玩家的 15 是主手（`HumanoidArm`），生物的 15 是 `Mob` 的 BYTE 标志位（无 AI、
+        // 左撇子、攻击中）。测试世界会自然刷出生物，这里不知道实体类型，两种都收。
+        // Index 15 is the main arm (`HumanoidArm`) on players and the `Mob` BYTE flags
+        // (no AI, left-handed, aggressive) on mobs. The test world spawns mobs
+        // naturally and the entity type is unknown here, so accept both.
+        15 if matches!(serializer, 0 | 42) => serializer,
+        // 18 以上是各种生物自己的字段，同一个 index 在不同类型上的序列化器不同：
+        // 马科的 18 是 BYTE 标志位，19 是 INT 花色（马）或 BOOLEAN 箱子（驴、骡），
+        // 羊驼的 20 / 21 是 INT。这里不知道实体类型，只收这三种序列化器。
+        // Indices from 18 up belong to each mob type, and one index takes different
+        // serializers on different types: equines use a BYTE of flags at 18, an INT
+        // coat (horse) or a BOOLEAN chest (donkey, mule) at 19, and llamas INTs at 20
+        // and 21. The entity type is unknown here, so accept just these three.
+        18..=21 if matches!(serializer, 0 | 1 | 8) => serializer,
         other => panic!("metadata index {other} is not used in M2"),
     };
     assert_eq!(
@@ -933,6 +947,7 @@ fn read_entity_value(reader: &mut Reader<'_>, index: u8, serializer: i32) -> Ent
         0 => EntityValue::Byte(byte(reader)),
         1 => EntityValue::Int(varint(reader)),
         3 => EntityValue::Float(float(reader)),
+        8 => EntityValue::Bool(boolean(reader)),
         20 => EntityValue::Pose(varint(reader)),
         42 => EntityValue::Arm(varint(reader)),
         other => unreachable!("serializer {other}"),

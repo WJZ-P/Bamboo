@@ -48,6 +48,10 @@ use crate::{
     region::Region,
 };
 
+mod mount;
+
+pub(crate) use mount::open as open_mount;
+
 const STATE_ID_MASK: i32 = 32767;
 const CONTAINER_STACK_LIMIT: i32 = 99;
 /// 玩家物品栏菜单的槽位数，和 `Inventory.slots` 一样长。
@@ -114,6 +118,10 @@ enum Kind {
     Anvil,
     Cartography,
     Enchantment,
+    /// 坐骑物品栏，`HorseInventoryMenu`；带箱子的列数。
+    ///
+    /// A mount inventory, `HorseInventoryMenu`, carrying its chest columns.
+    Mount(u8),
 }
 
 impl Kind {
@@ -162,6 +170,7 @@ impl Kind {
             Self::Grindstone => 39,
             Self::Anvil | Self::Cartography => 39,
             Self::Enchantment => 38,
+            Self::Mount(_) => self.player_start() + 36,
         }
     }
 
@@ -190,6 +199,9 @@ impl Kind {
             Self::Grindstone => 3,
             Self::Anvil | Self::Cartography => 3,
             Self::Enchantment => 2,
+            // 鞍、身体，再加三行箱子。
+            // Saddle, body, then three rows of chest.
+            Self::Mount(columns) => 2 + 3 * usize::from(columns),
         }
     }
 
@@ -229,6 +241,9 @@ impl Kind {
             Self::Anvil => menu::ANVIL,
             Self::Cartography => menu::CARTOGRAPHY_TABLE,
             Self::Enchantment => menu::ENCHANTMENT,
+            // 坐骑物品栏不在菜单注册表里，用 `mount_screen_open` 打开，不走这里。
+            // Mount inventories are not in the menu registry; `mount_screen_open` opens them.
+            Self::Mount(_) => -1,
         }
     }
 
@@ -247,6 +262,7 @@ impl Kind {
             Self::Anvil => "container.repair",
             Self::Cartography => "container.cartography_table",
             Self::Enchantment => "container.enchant",
+            Self::Mount(_) => "",
         }
     }
 }
@@ -300,6 +316,12 @@ enum Role {
     EnchantLapis,
     Machine,
     Armor(i32),
+    /// 坐骑的鞍位和身体位（`ArmorSlot`）、箱子格（普通 `Slot`）。
+    ///
+    /// The mount's saddle and body slots (`ArmorSlot`) and chest slots (plain `Slot`).
+    MountSaddle,
+    MountBody,
+    MountChest,
     Player,
 }
 
@@ -407,6 +429,10 @@ pub(crate) struct Station {
     /// World effects to settle when an anvil, cartography, or enchantment result is taken in a real world.
     effects: Vec<WorldEffect>,
     packets: Vec<Outgoing>,
+    /// 坐骑物品栏指向的生物，只有 [`Kind::Mount`] 有。
+    ///
+    /// The mob behind a mount inventory; only [`Kind::Mount`] has one.
+    mount: Option<mount::Mount>,
 }
 
 /// 一次取出结果后世界线程要做的动作，顺序和官方 `onTake` 一致。
@@ -462,6 +488,7 @@ impl Station {
             map_locked: false,
             effects: Vec::new(),
             packets: Vec::new(),
+            mount: None,
         }
     }
 
@@ -526,6 +553,9 @@ impl Station {
     }
 
     pub(crate) fn still_valid(&self, region: &Region, id: PlayerId) -> bool {
+        if let Kind::Mount(_) = self.kind {
+            return mount::still_valid(self, region, id);
+        }
         let Some(player) = region.players.get(&id) else {
             return false;
         };
@@ -616,6 +646,12 @@ impl Station {
                 1 => Role::EnchantLapis,
                 _ => Role::Player,
             },
+            Kind::Mount(_) => match index {
+                0 => Role::MountSaddle,
+                1 => Role::MountBody,
+                _ if index < self.kind.player_start() => Role::MountChest,
+                _ => Role::Player,
+            },
             Kind::Furnace | Kind::BlastFurnace | Kind::Smoker | Kind::Brewing => {
                 if index < self.kind.machine_len() {
                     Role::Machine
@@ -675,6 +711,7 @@ impl Station {
             Role::LoomPattern => loom::is_pattern_item(stack),
             Role::GrindInput => grindstone::may_place(stack),
             Role::Armor(slot) => is_equippable_in_slot(stack, slot),
+            Role::MountSaddle | Role::MountBody => self.mount_accepts(index, stack),
             Role::SmithInput => match index {
                 0 => is_smithing_template(stack.item),
                 1 => is_smithing_base(stack.item),
@@ -685,7 +722,8 @@ impl Station {
             | Role::StoneInput
             | Role::Player
             | Role::AnvilInput
-            | Role::EnchantItem => true,
+            | Role::EnchantItem
+            | Role::MountChest => true,
         }
     }
 
@@ -714,7 +752,10 @@ impl Station {
             && !stack.is_empty()
             && stack.item == items::BUCKET;
         let potion = self.kind == Kind::Brewing && index < 3;
-        let armor = matches!(self.role(index), Role::Armor(_));
+        let armor = matches!(
+            self.role(index),
+            Role::Armor(_) | Role::MountSaddle | Role::MountBody
+        );
         let cap = if bucket_fuel || potion || armor {
             1
         } else {
@@ -756,7 +797,9 @@ impl Station {
     }
 
     fn set_by_player(&mut self, index: usize, stack: ItemStack) {
+        let previous = self.slots[index].clone();
         self.store(index, stack);
+        self.note_mount_equip(index, previous);
         self.on_set_item(index);
         self.on_set_changed(index);
     }
@@ -1259,6 +1302,7 @@ impl Station {
             Kind::Anvil => self.route_combiner(index, stack),
             Kind::Cartography => self.route_cartography(index, stack),
             Kind::Enchantment => self.route_enchantment(index, stack),
+            Kind::Mount(_) => self.route_mount(index, stack),
         }
     }
 
@@ -2733,6 +2777,7 @@ fn flush_crafter(region: &mut Region, station: &mut Station) {
 
 fn pull_machine(region: &mut Region, station: &mut Station) {
     match station.kind {
+        Kind::Mount(_) => mount::pull(region, station),
         Kind::Crafter => pull_crafter(region, station),
         Kind::Furnace | Kind::BlastFurnace | Kind::Smoker => {
             let (level, _) = region.block_level();
@@ -2759,6 +2804,10 @@ fn pull_machine(region: &mut Region, station: &mut Station) {
 }
 
 fn flush_machine(region: &mut Region, id: PlayerId, station: &mut Station) {
+    if let Kind::Mount(_) = station.kind {
+        mount::flush(region, station);
+        return;
+    }
     if station.kind == Kind::Crafter {
         flush_crafter(region, station);
         return;

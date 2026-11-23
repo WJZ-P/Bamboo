@@ -18,6 +18,8 @@ use crate::{
 /// 实体元数据序列化器的 ID。顺序是 `EntityDataSerializers` 静态块里 `registerSerializer` 的调用顺序。
 const SERIALIZER_BYTE: i32 = 0;
 const SERIALIZER_INT: i32 = 1;
+/// `EntityDataSerializers.LONG`：变长整数。
+const SERIALIZER_LONG: i32 = 2;
 const SERIALIZER_FLOAT: i32 = 3;
 /// `EntityDataSerializers.OPTIONAL_COMPONENT`，注册顺序里的第 7 个。
 ///
@@ -29,15 +31,25 @@ const SERIALIZER_OPTIONAL_COMPONENT: i32 = 6;
 const SERIALIZER_ITEM_STACK: i32 = 7;
 const SERIALIZER_BOOLEAN: i32 = 8;
 const SERIALIZER_BLOCK_POS: i32 = 10;
+/// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`，注册顺序第 13 个。
+const SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE: i32 = 13;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
+const SERIALIZER_OPTIONAL_BLOCK_STATE: i32 = 15;
 /// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
 const SERIALIZER_PARTICLES: i32 = 17;
 const SERIALIZER_POSE: i32 = 20;
 /// `EntityDataSerializers.COW_VARIANT`，注册顺序里的第 24 个。
 ///
+/// `EntityDataSerializers.CAT_VARIANT` / `CAT_SOUND_VARIANT`（21、22 号注册）。
+///
+/// `EntityDataSerializers.CAT_VARIANT` and `CAT_SOUND_VARIANT` (serializer ids 21 and 22).
+const SERIALIZER_CAT_VARIANT: i32 = 21;
+const SERIALIZER_CAT_SOUND_VARIANT: i32 = 22;
 /// `EntityDataSerializers.COW_VARIANT`, the 24th `registerSerializer` call.
 const SERIALIZER_COW_VARIANT: i32 = 23;
 const SERIALIZER_COW_SOUND_VARIANT: i32 = 24;
+const SERIALIZER_WOLF_VARIANT: i32 = 25;
+const SERIALIZER_WOLF_SOUND_VARIANT: i32 = 26;
 const SERIALIZER_HUMANOID_ARM: i32 = 42;
 
 /// `set_entity_data` 的结束标记。
@@ -107,7 +119,19 @@ pub enum Pose {
     Swimming = 3,
     SpinAttack = 4,
     Crouching = 5,
+    /// 山羊长跳途中。
+    ///
+    /// A goat in mid long jump.
+    LongJumping = 6,
     Dying = 7,
+    /// 青蛙蹲叫。
+    ///
+    /// A croaking frog.
+    Croaking = 8,
+    /// 青蛙伸舌头。
+    ///
+    /// A frog using its tongue.
+    UsingTongue = 9,
 }
 
 /// 玩家实体或物品实体的一项元数据。
@@ -177,12 +201,221 @@ pub enum EntityData {
     ///
     /// index 18, COW_VARIANT. `Cow.DATA_VARIANT_ID`, a VarInt registry id.
     CowVariant(i32),
+    /// `Rabbit.DATA_TYPE_ID`：普通整数序列化器，值为旧版品种 ID。
+    ///
+    /// `Rabbit.DATA_TYPE_ID`: ordinary integer serializer, with a legacy variant ID.
+    RabbitVariant(i32),
     /// index 19，COW_SOUND_VARIANT。`Cow.DATA_SOUND_VARIANT_ID`。
     CowSoundVariant(i32),
+    PigBoostTime(i32),
+    PigVariant(i32),
+    PigSoundVariant(i32),
+    /// `Sheep.DATA_WOOL_ID`（BYTE）：低 4 位颜色，第 5 位已剪毛。
+    ///
+    /// `Sheep.DATA_WOOL_ID` (BYTE): colour in the low four bits, bit 4 when sheared.
+    SheepWool(u8),
+    /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID`，注册表 ID。
+    ///
+    /// `Chicken.DATA_VARIANT_ID` / `DATA_SOUND_VARIANT_ID` as registry IDs.
+    ChickenVariant(i32),
+    ChickenSoundVariant(i32),
+    /// `Armadillo.ARMADILLO_STATE`：状态的网络 ID（`ARMADILLO_STATE` 序列化器，VarInt）。
+    ///
+    /// `Armadillo.ARMADILLO_STATE`: the state'"'"'s network id (its own serializer, a VarInt).
+    ArmadilloState(i32),
+    /// `Goat` 的三个 BOOLEAN：尖叫、左角、右角（缺省假、真、真）。
+    ///
+    /// The three `Goat` booleans: screaming, left horn and right horn (false, true and
+    /// true by default).
+    GoatScreaming(bool),
+    GoatLeftHorn(bool),
+    GoatRightHorn(bool),
+    /// `Frog.DATA_VARIANT_ID`：`frog_variant` 注册表里的网络 ID。
+    ///
+    /// `Frog.DATA_VARIANT_ID`: the network id in the `frog_variant` registry.
+    FrogVariant(i32),
+    /// `Frog.DATA_TONGUE_TARGET_ID`（`OPTIONAL_UNSIGNED_INT`）：舌头目标的实体 ID。
+    ///
+    /// `Frog.DATA_TONGUE_TARGET_ID` (`OPTIONAL_UNSIGNED_INT`): the tongue target's
+    /// entity id.
+    FrogTongueTarget(Option<i32>),
+    /// `MushroomCow.DATA_TYPE`（INT）：0 红色，1 棕色。
+    ///
+    /// `MushroomCow.DATA_TYPE` (INT): 0 red, 1 brown.
+    MooshroomType(i32),
+    /// `PolarBear.DATA_STANDING_ID`（BOOLEAN）：站起来警告。
+    ///
+    /// `PolarBear.DATA_STANDING_ID` (BOOLEAN): standing up to warn.
+    PolarBearStanding(bool),
+    /// 熊猫的三个计数器（INT）。
+    ///
+    /// The three panda counters (INT).
+    PandaUnhappy(i32),
+    PandaSneeze(i32),
+    PandaEat(i32),
+    /// 熊猫的显性 / 隐性基因（BYTE，`Panda.Gene` 的 id）。
+    ///
+    /// The panda main and hidden genes (BYTE, a `Panda.Gene` id).
+    PandaMainGene(u8),
+    PandaHiddenGene(u8),
+    /// `Panda.DATA_ID_FLAGS`（BYTE）：2 打喷嚏、4 打滚、8 坐下、16 仰躺。
+    ///
+    /// `Panda.DATA_ID_FLAGS` (BYTE): sneezing, rolling, sitting, on its back.
+    PandaFlags(u8),
+    /// `GlowSquid.DATA_DARK_TICKS_REMAINING`，INT。
+    ///
+    /// `GlowSquid.DATA_DARK_TICKS_REMAINING`, an INT.
+    GlowSquidDarkTicks(i32),
+    /// `Bat.DATA_ID_FLAGS`，BYTE：第 0 位是倒挂。
+    ///
+    /// `Bat.DATA_ID_FLAGS`, a BYTE; bit 0 is resting.
+    BatFlags(u8),
+    /// `Phantom.ID_SIZE`，INT。
+    ///
+    /// `Phantom.ID_SIZE`, an INT.
+    PhantomSize(i32),
+    /// `AbstractFish.FROM_BUCKET`，BOOLEAN，index 16。
+    ///
+    /// `AbstractFish.FROM_BUCKET`, a BOOLEAN at index 16.
+    FishFromBucket(bool),
+    /// `Salmon.DATA_TYPE` / `TropicalFish.DATA_ID_TYPE_VARIANT` / `Pufferfish.PUFF_STATE`，
+    /// 都在 index 17，INT。
+    ///
+    /// `Salmon.DATA_TYPE` / `TropicalFish.DATA_ID_TYPE_VARIANT` / `Pufferfish.PUFF_STATE`,
+    /// all at index 17 as an INT.
+    SalmonVariant(i32),
+    TropicalFishVariant(i32),
+    PufferfishPuffState(i32),
+    /// `Turtle.HAS_EGG` / `Turtle.LAYING_EGG`，BOOLEAN。
+    ///
+    /// `Turtle.HAS_EGG` / `Turtle.LAYING_EGG`, BOOLEANs.
+    TurtleHasEgg(bool),
+    TurtleLayingEgg(bool),
+    /// `Dolphin.GOT_FISH`，BOOLEAN，index 18。
+    ///
+    /// `Dolphin.GOT_FISH`, a BOOLEAN at index 18.
+    DolphinGotFish(bool),
+    /// `Dolphin.MOISTNESS_LEVEL`，INT，index 19。
+    ///
+    /// `Dolphin.MOISTNESS_LEVEL`, an INT at index 19.
+    DolphinMoistness(i32),
+    /// `Axolotl.DATA_VARIANT`，INT，index 18。
+    ///
+    /// `Axolotl.DATA_VARIANT`, an INT at index 18.
+    AxolotlVariant(i32),
+    /// `Axolotl.DATA_PLAYING_DEAD`，BOOLEAN，index 19。
+    ///
+    /// `Axolotl.DATA_PLAYING_DEAD`, a BOOLEAN at index 19.
+    AxolotlPlayingDead(bool),
+    /// `Axolotl.FROM_BUCKET`，BOOLEAN，index 20。
+    ///
+    /// `Axolotl.FROM_BUCKET`, a BOOLEAN at index 20.
+    AxolotlFromBucket(bool),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
     ExperienceValue(i32),
+    /// index 17，INT。`Zombie.DATA_SPECIAL_TYPE_ID`。
+    SpecialType(i32),
+    /// `AbstractCubeMob.ID_SIZE`（INT）：史莱姆的大小。
+    ///
+    /// `AbstractCubeMob.ID_SIZE` (INT): the slime size.
+    CubeMobSize(i32),
+    /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
+    DrownedConverting(bool),
+    /// index 17，BOOLEAN。`Witch.DATA_USING_ITEM`（`Entity` 0–7、`LivingEntity` 8–14、
+    /// `Mob` 15、`Raider.IS_CELEBRATING` 16、`Witch.DATA_USING_ITEM` 17）。
+    ///
+    /// index 17, BOOLEAN. `Witch.DATA_USING_ITEM` (Entity 0–7, LivingEntity 8–14, Mob 15,
+    /// Raider.IS_CELEBRATING 16, Witch.DATA_USING_ITEM 17).
+    WitchUsingItem(bool),
+    /// `Creeper.DATA_SWELL_DIR`（INT，缺省 -1）、`DATA_IS_POWERED`、`DATA_IS_IGNITED`（BOOLEAN）。
+    ///
+    /// `Creeper.DATA_SWELL_DIR` (INT, default -1), `DATA_IS_POWERED` and `DATA_IS_IGNITED`.
+    CreeperSwellDir(i32),
+    CreeperPowered(bool),
+    CreeperIgnited(bool),
+    /// `Spider.DATA_FLAGS_ID`（BYTE，缺省 0，第 0 位是攀爬）。
+    ///
+    /// `Spider.DATA_FLAGS_ID` (BYTE, default 0, bit 0 is climbing).
+    SpiderFlags(u8),
+    EndermanCarried(Option<i32>),
+    EndermanCreepy(bool),
+    EndermanStaredAt(bool),
+    /// `Ocelot.DATA_TRUSTING`：BOOLEAN。
+    ///
+    /// `Ocelot.DATA_TRUSTING`: BOOLEAN.
+    OcelotTrusting(bool),
+    /// `Cat.DATA_VARIANT_ID`：`cat_variant` 注册表 ID。
+    ///
+    /// `Cat.DATA_VARIANT_ID`: `cat_variant` registry id.
+    CatVariant(i32),
+    /// `Cat.IS_LYING`：BOOLEAN。
+    ///
+    /// `Cat.IS_LYING`: BOOLEAN.
+    CatIsLying(bool),
+    /// `Cat.RELAX_STATE_ONE`：BOOLEAN。
+    ///
+    /// `Cat.RELAX_STATE_ONE`: BOOLEAN.
+    CatRelaxStateOne(bool),
+    /// `Cat.DATA_COLLAR_COLOR`：INT（`DyeColor` ID）。
+    ///
+    /// `Cat.DATA_COLLAR_COLOR`: INT (`DyeColor` id).
+    CatCollar(i32),
+    /// `Cat.DATA_SOUND_VARIANT_ID`：`cat_sound_variant` 注册表 ID。
+    ///
+    /// `Cat.DATA_SOUND_VARIANT_ID`: `cat_sound_variant` registry id.
+    CatSoundVariant(i32),
+    /// `Parrot.DATA_VARIANT_ID`：INT，0..=4。
+    ///
+    /// `Parrot.DATA_VARIANT_ID`: INT, 0..=4.
+    ParrotVariant(i32),
+    ArrowFlags(u8),
+    ArrowPierce(i8),
+    ArrowInGround(bool),
+    /// `Fox.DATA_TYPE_ID`：INT，红 0 雪 1。
+    ///
+    /// `Fox.DATA_TYPE_ID`: INT, red 0 and snow 1.
+    FoxType(i32),
+    /// `Fox.DATA_FLAGS_ID`：BYTE。
+    FoxFlags(u8),
+    /// `Fox.DATA_TRUSTED_ID_0` / `_1`：OPTIONAL_LIVING_ENTITY_REFERENCE（可空 UUID）。
+    ///
+    /// `Fox.DATA_TRUSTED_ID_0` / `_1`: an optional UUID reference.
+    FoxTrusted(u8, Option<[u8; 16]>),
+    /// BYTE。`AbstractHorse.DATA_ID_FLAGS`：2 驯服、8 繁殖过、16 吃草、32 扬蹄、64 张嘴。
+    ///
+    /// BYTE. `AbstractHorse.DATA_ID_FLAGS`: tame, bred, eating, standing, open mouth.
+    HorseFlags(u8),
+    /// INT。`Horse.DATA_ID_TYPE_VARIANT`：低字节毛色，第二个字节斑纹。
+    ///
+    /// INT. `Horse.DATA_ID_TYPE_VARIANT`: coat in the low byte, markings in the next.
+    HorseVariant(i32),
+    /// BOOLEAN。`AbstractChestedHorse.DATA_ID_CHEST`。
+    HorseChest(bool),
+    /// INT。`Llama.DATA_STRENGTH_ID`。
+    LlamaStrength(i32),
+    /// INT。`Llama.DATA_VARIANT_ID`。
+    LlamaVariant(i32),
+    ArrowColor(i32),
+    /// `TamableAnimal.DATA_FLAGS_ID`：BYTE，坐姿 1、驯服 4。
+    ///
+    /// `TamableAnimal.DATA_FLAGS_ID`: BYTE, sitting 1 and tame 4.
+    TameFlags(u8),
+    /// `TamableAnimal.DATA_OWNERUUID_ID`：可空的 UUID 引用。
+    ///
+    /// `TamableAnimal.DATA_OWNERUUID_ID`: an optional UUID reference.
+    TameOwner(Option<[u8; 16]>),
+    /// `Wolf.DATA_INTERESTED_ID`：BOOLEAN。
+    WolfInterested(bool),
+    /// `Wolf.DATA_COLLAR_COLOR`：INT，`DyeColor` 的 ID。
+    WolfCollar(i32),
+    /// `Wolf.DATA_ANGER_END_TIME`：LONG（变长）。
+    WolfAngerEndTime(i64),
+    /// `Wolf.DATA_VARIANT_ID`：`wolf_variant` 注册表 ID。
+    WolfVariant(i32),
+    /// `Wolf.DATA_SOUND_VARIANT_ID`：`wolf_sound_variant` 注册表 ID。
+    WolfSoundVariant(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -211,19 +444,173 @@ impl EntityData {
             | Self::TntFuse(_)
             | Self::LivingFlags(_)
             | Self::ExperienceValue(_) => 8,
+            Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
+            Self::ArrowPierce(_) => mc_bamboo_data::entity_types::ARROW_PIERCE,
+            Self::ArrowInGround(_) => mc_bamboo_data::entity_types::ARROW_IN_GROUND,
+            Self::HorseFlags(_) => mc_bamboo_data::entity_types::HORSE_FLAGS,
+            Self::HorseVariant(_) => mc_bamboo_data::entity_types::HORSE_VARIANT,
+            Self::HorseChest(_) => mc_bamboo_data::entity_types::HORSE_CHEST,
+            Self::LlamaStrength(_) => mc_bamboo_data::entity_types::LLAMA_STRENGTH,
+            Self::LlamaVariant(_) => mc_bamboo_data::entity_types::LLAMA_VARIANT,
+            Self::ArrowColor(_) => mc_bamboo_data::entity_types::ARROW_COLOR,
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,
-            Self::ModelCustomisation(_) | Self::AgeLocked(_) => 17,
-            Self::CowVariant(_) => 18,
+            Self::ModelCustomisation(_)
+            | Self::AgeLocked(_)
+            | Self::SpecialType(_)
+            | Self::WitchUsingItem(_) => 17,
+            Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
+            Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
+            Self::CreeperSwellDir(_) => mc_bamboo_data::entity_types::CREEPER_SWELL_DIR,
+            Self::CreeperPowered(_) => mc_bamboo_data::entity_types::CREEPER_POWERED,
+            Self::CreeperIgnited(_) => mc_bamboo_data::entity_types::CREEPER_IGNITED,
+            Self::FoxType(_) => mc_bamboo_data::entity_types::FOX_TYPE,
+            Self::FoxFlags(_) => mc_bamboo_data::entity_types::FOX_FLAGS,
+            Self::FoxTrusted(index, _) => *index,
+            Self::TameFlags(_) => mc_bamboo_data::entity_types::TAME_FLAGS,
+            Self::TameOwner(_) => mc_bamboo_data::entity_types::TAME_OWNER,
+            Self::WolfInterested(_) => mc_bamboo_data::entity_types::WOLF_INTERESTED,
+            Self::WolfCollar(_) => mc_bamboo_data::entity_types::WOLF_COLLAR,
+            Self::WolfAngerEndTime(_) => mc_bamboo_data::entity_types::WOLF_ANGER_END_TIME,
+            Self::WolfVariant(_) => mc_bamboo_data::entity_types::WOLF_VARIANT,
+            Self::WolfSoundVariant(_) => mc_bamboo_data::entity_types::WOLF_SOUND_VARIANT,
+            Self::PigBoostTime(_) => mc_bamboo_data::entity_types::PIG_BOOST_TIME,
+            Self::PigVariant(_) => mc_bamboo_data::entity_types::PIG_VARIANT,
+            Self::PigSoundVariant(_) => mc_bamboo_data::entity_types::PIG_SOUND_VARIANT,
+            Self::SheepWool(_) => mc_bamboo_data::entity_types::SHEEP_WOOL,
+            Self::CubeMobSize(_) => mc_bamboo_data::entity_types::CUBE_MOB_SIZE,
+            Self::ChickenVariant(_) => mc_bamboo_data::entity_types::CHICKEN_VARIANT,
+            Self::ChickenSoundVariant(_) => mc_bamboo_data::entity_types::CHICKEN_SOUND_VARIANT,
+            Self::ArmadilloState(_) => mc_bamboo_data::entity_types::ARMADILLO_STATE,
+            Self::GoatScreaming(_) => mc_bamboo_data::entity_types::GOAT_SCREAMING,
+            Self::GoatLeftHorn(_) => mc_bamboo_data::entity_types::GOAT_LEFT_HORN,
+            Self::GoatRightHorn(_) => mc_bamboo_data::entity_types::GOAT_RIGHT_HORN,
+            Self::FrogVariant(_) => mc_bamboo_data::entity_types::FROG_VARIANT,
+            Self::FrogTongueTarget(_) => mc_bamboo_data::entity_types::FROG_TONGUE_TARGET,
+            Self::MooshroomType(_) => mc_bamboo_data::entity_types::MOOSHROOM_TYPE,
+            Self::PolarBearStanding(_) => mc_bamboo_data::entity_types::POLAR_BEAR_STANDING,
+            Self::PandaUnhappy(_) => mc_bamboo_data::entity_types::PANDA_UNHAPPY,
+            Self::PandaSneeze(_) => mc_bamboo_data::entity_types::PANDA_SNEEZE,
+            Self::PandaEat(_) => mc_bamboo_data::entity_types::PANDA_EAT,
+            Self::PandaMainGene(_) => mc_bamboo_data::entity_types::PANDA_MAIN_GENE,
+            Self::PandaHiddenGene(_) => mc_bamboo_data::entity_types::PANDA_HIDDEN_GENE,
+            Self::PandaFlags(_) => mc_bamboo_data::entity_types::PANDA_FLAGS,
+            Self::OcelotTrusting(_) => mc_bamboo_data::entity_types::OCELOT_TRUSTING,
+            Self::CatVariant(_) => mc_bamboo_data::entity_types::CAT_VARIANT,
+            Self::CatIsLying(_) => mc_bamboo_data::entity_types::CAT_IS_LYING,
+            Self::CatRelaxStateOne(_) => mc_bamboo_data::entity_types::CAT_RELAX_STATE_ONE,
+            Self::CatCollar(_) => mc_bamboo_data::entity_types::CAT_COLLAR,
+            Self::CatSoundVariant(_) => mc_bamboo_data::entity_types::CAT_SOUND_VARIANT,
+            Self::ParrotVariant(_) => mc_bamboo_data::entity_types::PARROT_VARIANT,
+            Self::EndermanCarried(_) => mc_bamboo_data::entity_types::ENDERMAN_CARRY_STATE,
+            Self::EndermanCreepy(_) => mc_bamboo_data::entity_types::ENDERMAN_CREEPY,
+            Self::EndermanStaredAt(_) => mc_bamboo_data::entity_types::ENDERMAN_STARED_AT,
+            Self::SpiderFlags(_) => mc_bamboo_data::entity_types::SPIDER_FLAGS,
+            Self::GlowSquidDarkTicks(_) => mc_bamboo_data::entity_types::GLOW_SQUID_DARK_TICKS,
+            Self::BatFlags(_) => mc_bamboo_data::entity_types::BAT_FLAGS,
+            Self::PhantomSize(_) => mc_bamboo_data::entity_types::PHANTOM_SIZE,
+            Self::FishFromBucket(_) => mc_bamboo_data::entity_types::FISH_FROM_BUCKET,
+            Self::SalmonVariant(_) => mc_bamboo_data::entity_types::SALMON_VARIANT,
+            Self::TropicalFishVariant(_) => mc_bamboo_data::entity_types::TROPICAL_FISH_VARIANT,
+            Self::PufferfishPuffState(_) => mc_bamboo_data::entity_types::PUFFERFISH_PUFF_STATE,
+            Self::TurtleHasEgg(_) => mc_bamboo_data::entity_types::TURTLE_HAS_EGG,
+            Self::TurtleLayingEgg(_) => mc_bamboo_data::entity_types::TURTLE_LAYING_EGG,
+            Self::DolphinGotFish(_) => mc_bamboo_data::entity_types::DOLPHIN_GOT_FISH,
+            Self::DolphinMoistness(_) => mc_bamboo_data::entity_types::DOLPHIN_MOISTNESS,
+            Self::AxolotlVariant(_) => mc_bamboo_data::entity_types::AXOLOTL_VARIANT,
+            Self::AxolotlPlayingDead(_) => mc_bamboo_data::entity_types::AXOLOTL_PLAYING_DEAD,
+            Self::AxolotlFromBucket(_) => mc_bamboo_data::entity_types::AXOLOTL_FROM_BUCKET,
         }
     }
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
+            Self::TameFlags(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value);
+            }
+            Self::TameOwner(uuid) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE,
+                );
+                out.push(u8::from(uuid.is_some()));
+                if let Some(uuid) = uuid {
+                    out.extend_from_slice(uuid);
+                }
+            }
+            Self::WolfInterested(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::WolfCollar(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::WolfAngerEndTime(value) => {
+                write_data_header(out, self.index(), SERIALIZER_LONG);
+                crate::codec::write_varlong(out, *value);
+            }
+            Self::WolfVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_WOLF_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::WolfSoundVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_WOLF_SOUND_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::FoxType(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::FoxFlags(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value);
+            }
+            Self::FoxTrusted(_, uuid) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    SERIALIZER_OPTIONAL_LIVING_ENTITY_REFERENCE,
+                );
+                out.push(u8::from(uuid.is_some()));
+                if let Some(uuid) = uuid {
+                    out.extend_from_slice(uuid);
+                }
+            }
+            Self::ArrowFlags(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value);
+            }
+            Self::ArrowPierce(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value as u8);
+            }
+            Self::ArrowColor(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::ArrowInGround(value)
+            | Self::HorseChest(value)
+            | Self::GoatScreaming(value)
+            | Self::GoatLeftHorn(value)
+            | Self::GoatRightHorn(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                out.push(u8::from(*value));
+            }
+            Self::HorseFlags(flags) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*flags);
+            }
+            Self::HorseVariant(value) | Self::LlamaStrength(value) | Self::LlamaVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
             Self::Item(stack) => {
                 write_data_header(out, 8, SERIALIZER_ITEM_STACK);
                 // 组件按官方原样发给所有观察者。
@@ -334,6 +721,166 @@ impl EntityData {
                 write_data_header(out, 19, SERIALIZER_COW_SOUND_VARIANT);
                 write_varint(out, *variant);
             }
+            Self::PigBoostTime(value) | Self::PigVariant(value) | Self::PigSoundVariant(value) => {
+                use mc_bamboo_data::entity_types as facts;
+                let serializer = match self {
+                    Self::PigVariant(_) => facts::PIG_VARIANT_SERIALIZER,
+                    Self::PigSoundVariant(_) => facts::PIG_SOUND_VARIANT_SERIALIZER,
+                    _ => SERIALIZER_INT,
+                };
+                write_data_header(out, self.index(), serializer);
+                write_varint(out, *value);
+            }
+            Self::SheepWool(wool) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*wool);
+            }
+            Self::FrogVariant(variant) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::FROG_VARIANT_SERIALIZER,
+                );
+                write_varint(out, *variant);
+            }
+            // `ByteBufCodecs.OPTIONAL_VAR_INT`：空是 0，否则是值加一。
+            // `ByteBufCodecs.OPTIONAL_VAR_INT`: 0 when empty, otherwise the value plus one.
+            Self::FrogTongueTarget(target) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::FROG_TONGUE_TARGET_SERIALIZER,
+                );
+                write_varint(out, target.map_or(0, |id| id + 1));
+            }
+            Self::ArmadilloState(state) => {
+                write_data_header(
+                    out,
+                    self.index(),
+                    mc_bamboo_data::entity_types::ARMADILLO_STATE_SERIALIZER,
+                );
+                write_varint(out, *state);
+            }
+            Self::ChickenVariant(value) | Self::ChickenSoundVariant(value) => {
+                use mc_bamboo_data::entity_types as facts;
+                let serializer = if matches!(self, Self::ChickenVariant(_)) {
+                    facts::CHICKEN_VARIANT_SERIALIZER
+                } else {
+                    facts::CHICKEN_SOUND_VARIANT_SERIALIZER
+                };
+                write_data_header(out, self.index(), serializer);
+                write_varint(out, *value);
+            }
+            Self::MooshroomType(kind) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::PolarBearStanding(standing) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *standing);
+            }
+            Self::OcelotTrusting(trusting) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *trusting);
+            }
+            Self::CatVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_CAT_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::CatIsLying(value) | Self::CatRelaxStateOne(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::CatCollar(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::CatSoundVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_CAT_SOUND_VARIANT);
+                write_varint(out, *value);
+            }
+            Self::ParrotVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::PandaUnhappy(value) | Self::PandaSneeze(value) | Self::PandaEat(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::PandaMainGene(gene)
+            | Self::PandaHiddenGene(gene)
+            | Self::PandaFlags(gene)
+            | Self::BatFlags(gene) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*gene);
+            }
+            Self::GlowSquidDarkTicks(ticks) | Self::PhantomSize(ticks) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *ticks);
+            }
+            Self::FishFromBucket(from_bucket) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *from_bucket);
+            }
+            Self::TurtleHasEgg(value) | Self::TurtleLayingEgg(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::DolphinGotFish(value)
+            | Self::AxolotlPlayingDead(value)
+            | Self::AxolotlFromBucket(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *value);
+            }
+            Self::DolphinMoistness(value) | Self::AxolotlVariant(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::SalmonVariant(value)
+            | Self::TropicalFishVariant(value)
+            | Self::PufferfishPuffState(value) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *value);
+            }
+            Self::SpecialType(kind) => {
+                write_data_header(out, 17, SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::CreeperSwellDir(direction) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *direction);
+            }
+            Self::EndermanCarried(state) => {
+                write_data_header(out, self.index(), SERIALIZER_OPTIONAL_BLOCK_STATE);
+                write_varint(out, state.unwrap_or(0));
+            }
+            Self::CreeperPowered(flag)
+            | Self::CreeperIgnited(flag)
+            | Self::EndermanCreepy(flag)
+            | Self::EndermanStaredAt(flag) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *flag);
+            }
+            Self::SpiderFlags(flags) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*flags);
+            }
+            Self::RabbitVariant(kind) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::CubeMobSize(size) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *size);
+            }
+            Self::DrownedConverting(converting) => {
+                write_data_header(out, 18, SERIALIZER_BOOLEAN);
+                write_bool(out, *converting);
+            }
+            Self::WitchUsingItem(using) => {
+                write_data_header(out, 17, SERIALIZER_BOOLEAN);
+                write_bool(out, *using);
+            }
         }
     }
 }
@@ -359,6 +906,30 @@ impl ClientboundPacket for SetEntityData<'_> {
             item.write(out);
         }
         out.push(ENTITY_DATA_END);
+    }
+}
+
+/// 载具和它的乘客，`ClientboundSetPassengersPacket`：载具的实体 ID 加一个 varint 数组，
+/// 长度在前，按乘客的上下车顺序。空数组表示没人骑。
+///
+/// A vehicle and its passengers, `ClientboundSetPassengersPacket`: the vehicle's
+/// entity id and a length-prefixed varint array in riding order. An empty array
+/// clears the vehicle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetPassengers<'a> {
+    pub vehicle: i32,
+    pub passengers: &'a [i32],
+}
+
+impl ClientboundPacket for SetPassengers<'_> {
+    const ID: i32 = clientbound::SET_PASSENGERS;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.vehicle);
+        write_varint(out, self.passengers.len() as i32);
+        for &passenger in self.passengers {
+            write_varint(out, passenger);
+        }
     }
 }
 
@@ -518,6 +1089,35 @@ impl ClientboundPacket for SwingAnimation {
         write_varint(out, self.hand as i32);
         write_varint(out, self.animation as i32);
         write_varint(out, self.duration);
+    }
+}
+
+/// 官方 `ClientboundAnimatePacket`：VarInt 实体 ID + 一个字节的动作。
+/// 26.3 把挥手挪到了 `swing_animation`，这里只剩暴击的两种动作：
+/// `CRITICAL_HIT = 1`、`MAGIC_CRITICAL_HIT = 2`，`WAKE_UP = 0` 不用。
+///
+/// Vanilla `ClientboundAnimatePacket`: a VarInt entity id and one action byte.
+/// 26.3 moved swinging to `swing_animation`; only the two critical-hit actions
+/// remain here: `CRITICAL_HIT = 1` and `MAGIC_CRITICAL_HIT = 2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Animate {
+    pub entity_id: i32,
+    pub action: u8,
+}
+
+impl Animate {
+    /// `ClientboundAnimatePacket.CRITICAL_HIT`。
+    pub const CRITICAL_HIT: u8 = 1;
+    /// `ClientboundAnimatePacket.MAGIC_CRITICAL_HIT`。
+    pub const MAGIC_CRITICAL_HIT: u8 = 2;
+}
+
+impl ClientboundPacket for Animate {
+    const ID: i32 = clientbound::ANIMATE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.entity_id);
+        out.push(self.action);
     }
 }
 
@@ -828,6 +1428,22 @@ mod tests {
             body(&SwingAnimation::default_swing(5, Hand::Main)),
             hex("05 00 01 06")
         );
+    }
+
+    #[test]
+    fn animate_packet_matches_official_bytes() {
+        let crit = Animate {
+            entity_id: ENTITY,
+            action: Animate::CRITICAL_HIT,
+        };
+        assert_eq!(body(&crit), hex("07 01"));
+        assert_eq!(frame(&crit), hex("03 02 07 01"));
+
+        let magic = Animate {
+            entity_id: ENTITY,
+            action: Animate::MAGIC_CRITICAL_HIT,
+        };
+        assert_eq!(body(&magic), hex("07 02"));
     }
 
     #[test]

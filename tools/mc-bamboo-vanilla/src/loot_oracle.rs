@@ -30,7 +30,8 @@ use serde_json::Value;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str = "usage: loot-oracle <java> [--cases N] [--seed S] [--show N]";
+const USAGE: &str =
+    "usage: loot-oracle <java> [--entity-table ID] [--cases N] [--seed S] [--show N]";
 const DEFAULT_SHOW: usize = 5;
 
 #[derive(Debug, Default)]
@@ -45,7 +46,7 @@ impl Options {
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--cases" | "--seed" => {
+                "--entity-table" | "--cases" | "--seed" => {
                     let value = args.next().ok_or(USAGE)?;
                     options
                         .forwarded

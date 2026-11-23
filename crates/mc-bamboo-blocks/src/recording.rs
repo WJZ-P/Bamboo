@@ -759,7 +759,11 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::CampfireChanged { .. } => 16,
         Effect::Overlay { .. } => 17,
         Effect::OpenCommandBlock { .. } => 18,
+        Effect::HurtPlayer { .. } => 20,
         Effect::SleepInBed { .. } => 19,
+        Effect::IgnitePlayer { .. } => 21,
+        Effect::PlayerEffect { .. } => 22,
+        Effect::HealPlayer { .. } => 23,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -856,6 +860,40 @@ fn hash_effect(effect: &Effect) -> u64 {
         } => {
             entity_id.hash(&mut hasher);
             menu_slot.hash(&mut hasher);
+        }
+        Effect::HurtPlayer {
+            target,
+            source,
+            amount,
+        } => {
+            target.hash(&mut hasher);
+            std::hash::Hash::hash(&source.kind, &mut hasher);
+            amount.to_bits().hash(&mut hasher);
+        }
+        Effect::IgnitePlayer { target, ticks } => {
+            target.hash(&mut hasher);
+            ticks.hash(&mut hasher);
+        }
+        Effect::PlayerEffect {
+            target,
+            effect,
+            duration,
+            amplifier,
+            ambient,
+            visible,
+            show_icon,
+        } => {
+            target.hash(&mut hasher);
+            effect.hash(&mut hasher);
+            duration.hash(&mut hasher);
+            amplifier.hash(&mut hasher);
+            ambient.hash(&mut hasher);
+            visible.hash(&mut hasher);
+            show_icon.hash(&mut hasher);
+        }
+        Effect::HealPlayer { target, amount } => {
+            target.hash(&mut hasher);
+            amount.to_bits().hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);
@@ -1562,6 +1600,7 @@ impl Level for Recording<'_> {
                 value.max_block_modifications,
                 value.max_snow_accumulation_height,
                 value.spawn_mobs,
+                value.spawn_monsters,
             ),
         );
         value
@@ -1727,6 +1766,18 @@ impl Level for Recording<'_> {
 
     fn explosion_block_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
         let value = self.level.explosion_block_drops(state, pos);
+        self.read(Some(pos), K_DROPS, (0_u8, state.0, hash_slots(&value)));
+        self.uncacheable(Uncacheable::Random);
+        value
+    }
+
+    fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<ItemStack> {
+        let value = self.level.explosion_block_drops_decayed(state, pos, radius);
         self.read(Some(pos), K_DROPS, (0_u8, state.0, hash_slots(&value)));
         self.uncacheable(Uncacheable::Random);
         value

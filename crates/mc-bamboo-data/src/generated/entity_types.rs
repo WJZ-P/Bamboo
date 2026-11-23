@@ -181,3 +181,136 @@ pub static FACTS: &[EntityTypeFacts] = &[
     EntityTypeFacts { name: "minecraft:player", client_tracking_range: 32, update_interval: 2, track_deltas: false, width: 0.6, height: 1.8 },
     EntityTypeFacts { name: "minecraft:fishing_bobber", client_tracking_range: 4, update_interval: 5, track_deltas: true, width: 0.25, height: 0.25 },
 ];
+
+pub const ARROW_FLAGS: u8 = 8;
+pub const ARROW_PIERCE: u8 = 9;
+pub const ARROW_IN_GROUND: u8 = 10;
+pub const ARROW_COLOR: u8 = 11;
+pub const SKELETON_EYE_HEIGHT: f32 = 1.74;
+pub const LLAMA_EYE_HEIGHT: f32 = 1.7765;
+pub const MULE_EYE_HEIGHT: f32 = 1.52;
+pub const DONKEY_EYE_HEIGHT: f32 = 1.425;
+pub const HORSE_EYE_HEIGHT: f32 = 1.52;
+pub const HORSE_FLAGS: u8 = 18;
+pub const HORSE_VARIANT: u8 = 19;
+pub const HORSE_CHEST: u8 = 19;
+pub const LLAMA_STRENGTH: u8 = 20;
+pub const LLAMA_VARIANT: u8 = 21;
+pub const RABBIT_EYE_HEIGHT: f32 = 0.59;
+pub const RABBIT_BABY_WIDTH: f32 = 0.24;
+pub const RABBIT_BABY_HEIGHT: f32 = 0.4;
+pub const RABBIT_BABY_EYE_HEIGHT: f32 = 0.39;
+pub const RABBIT_VARIANT: u8 = 18;
+pub const RABBIT_MAX_HEALTH: f64 = 3.0;
+pub const RABBIT_MOVEMENT_SPEED: f64 = 0.30000001192092896;
+pub const RABBIT_ATTACK_DAMAGE: f64 = 3.0;
+pub const FOX_EYE_HEIGHT: f32 = 0.4;
+pub const FOX_BABY_WIDTH: f32 = 0.36;
+pub const FOX_BABY_HEIGHT: f32 = 0.42000002;
+pub const FOX_BABY_EYE_HEIGHT: f32 = 0.34375;
+pub const FOX_TRUSTED_0: u8 = 20;
+pub const FOX_TRUSTED_1: u8 = 21;
+pub const FOX_TYPE: u8 = 18;
+pub const FOX_FLAGS: u8 = 19;
+pub const FOX_MAX_HEALTH: f64 = 10.0;
+pub const FOX_MOVEMENT_SPEED: f64 = 0.30000001192092896;
+pub const FOX_ATTACK_DAMAGE: f64 = 2.0;
+pub const FOX_SAFE_FALL_DISTANCE: f64 = 5.0;
+pub const FOX_FOLLOW_RANGE: f64 = 32.0;
+pub const WOLF_EYE_HEIGHT: f32 = 0.68;
+pub const WOLF_BABY_WIDTH: f32 = 0.3;
+pub const WOLF_BABY_HEIGHT: f32 = 0.425;
+pub const WOLF_BABY_EYE_HEIGHT: f32 = 0.34375;
+pub const TAME_FLAGS: u8 = 18;
+pub const TAME_OWNER: u8 = 19;
+pub const WOLF_INTERESTED: u8 = 20;
+pub const WOLF_COLLAR: u8 = 21;
+pub const WOLF_ANGER_END_TIME: u8 = 22;
+pub const WOLF_VARIANT: u8 = 23;
+pub const WOLF_SOUND_VARIANT: u8 = 24;
+pub const WOLF_MAX_HEALTH: f64 = 8.0;
+pub const WOLF_MOVEMENT_SPEED: f64 = 0.30000001192092896;
+pub const WOLF_ATTACK_DAMAGE: f64 = 4.0;
+pub const PIG_BOOST_TIME: u8 = 18;
+pub const PIG_VARIANT: u8 = 19;
+pub const PIG_SOUND_VARIANT: u8 = 20;
+pub const SHEEP_WOOL: u8 = 18;
+pub const POLAR_BEAR_STANDING: u8 = 18;
+pub const PANDA_UNHAPPY: u8 = 18;
+pub const PANDA_SNEEZE: u8 = 19;
+pub const PANDA_EAT: u8 = 20;
+pub const PANDA_MAIN_GENE: u8 = 21;
+pub const PANDA_HIDDEN_GENE: u8 = 22;
+pub const PANDA_FLAGS: u8 = 23;
+pub const OCELOT_TRUSTING: u8 = 18;
+pub const CAT_VARIANT: u8 = 20;
+pub const CAT_IS_LYING: u8 = 21;
+pub const CAT_RELAX_STATE_ONE: u8 = 22;
+pub const CAT_COLLAR: u8 = 23;
+pub const CAT_SOUND_VARIANT: u8 = 24;
+pub const PARROT_VARIANT: u8 = 20;
+pub const GLOW_SQUID_DARK_TICKS: u8 = 18;
+pub const BAT_FLAGS: u8 = 16;
+pub const PHANTOM_SIZE: u8 = 16;
+pub const FISH_FROM_BUCKET: u8 = 16;
+pub const SALMON_VARIANT: u8 = 17;
+pub const TROPICAL_FISH_VARIANT: u8 = 17;
+pub const PUFFERFISH_PUFF_STATE: u8 = 17;
+pub const CHICKEN_VARIANT: u8 = 18;
+pub const CHICKEN_SOUND_VARIANT: u8 = 19;
+pub const ARMADILLO_STATE: u8 = 18;
+pub const GOAT_SCREAMING: u8 = 18;
+pub const GOAT_LEFT_HORN: u8 = 19;
+pub const GOAT_RIGHT_HORN: u8 = 20;
+pub const FROG_VARIANT: u8 = 18;
+pub const FROG_TONGUE_TARGET: u8 = 19;
+pub const TURTLE_HAS_EGG: u8 = 18;
+pub const TURTLE_LAYING_EGG: u8 = 19;
+pub const DOLPHIN_GOT_FISH: u8 = 18;
+pub const DOLPHIN_MOISTNESS: u8 = 19;
+pub const AXOLOTL_VARIANT: u8 = 18;
+pub const AXOLOTL_PLAYING_DEAD: u8 = 19;
+pub const AXOLOTL_FROM_BUCKET: u8 = 20;
+pub const PARROT_SOUND_MAP_SIZE: i32 = 42;
+pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &[117506305, 117899265, 185008129, 117441793, 118161664, 65536, 50726144, 67764993, 234882305, 67110144, 117441025, 16778497, 101253888, 50660352, 918529, 235340288, 918273, 67108865, 917504, 459008, 67699456, 67371009];
+pub const PIG_VARIANT_SERIALIZER: i32 = 28;
+pub const PIG_SOUND_VARIANT_SERIALIZER: i32 = 29;
+pub const CHICKEN_VARIANT_SERIALIZER: i32 = 30;
+pub const CHICKEN_SOUND_VARIANT_SERIALIZER: i32 = 31;
+pub const ARMADILLO_STATE_SERIALIZER: i32 = 36;
+pub const FROG_VARIANT_SERIALIZER: i32 = 27;
+pub const FROG_TONGUE_TARGET_SERIALIZER: i32 = 19;
+pub const CUBE_MOB_SIZE: u8 = 18;
+pub const SLIME_EYE_HEIGHT: f32 = 0.325;
+pub const MOOSHROOM_TYPE: u8 = 18;
+/// `SuspiciousEffectHolder`：(物品 ID, [(效果 ID, 刻数)])，按物品 ID 升序。
+pub static STEW_FLOWERS: &[(i32, &[(i32, i32)])] = &[
+    (298, &[(22, 7)]),
+    (299, &[(22, 7)]),
+    (300, &[(14, 220)]),
+    (301, &[(8, 140)]),
+    (302, &[(15, 100)]),
+    (303, &[(22, 7)]),
+    (304, &[(11, 60)]),
+    (305, &[(14, 220)]),
+    (306, &[(17, 140)]),
+    (307, &[(17, 140)]),
+    (308, &[(17, 140)]),
+    (309, &[(17, 140)]),
+    (310, &[(9, 140)]),
+    (311, &[(7, 100)]),
+    (312, &[(18, 220)]),
+    (313, &[(19, 140)]),
+    (314, &[(15, 100)]),
+];
+pub const CREEPER_IGNITED: u8 = 18;
+pub const CREEPER_POWERED: u8 = 17;
+pub const CREEPER_SWELL_DIR: u8 = 16;
+pub const ENDERMAN_CARRY_STATE: u8 = 16;
+pub const ENDERMAN_CREEPY: u8 = 17;
+pub const ENDERMAN_STARED_AT: u8 = 18;
+pub const SPIDER_FLAGS: u8 = 16;
+pub const CAVE_SPIDER_EYE_HEIGHT: f32 = 0.45;
+pub const CREEPER_EYE_HEIGHT: f32 = 1.445;
+pub const ENDERMAN_EYE_HEIGHT: f32 = 2.55;
+pub const SPIDER_EYE_HEIGHT: f32 = 0.65;

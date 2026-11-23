@@ -56,6 +56,7 @@ mod entity_view;
 mod experience;
 mod experience_pickup;
 mod gamerules;
+pub mod generation_post_process;
 mod global;
 mod global_port;
 mod inbound;
@@ -65,6 +66,7 @@ mod island;
 mod island_partition;
 mod island_partition_stats;
 mod island_pool;
+mod item_use_stats;
 mod lectern;
 mod light_updates;
 mod links;
@@ -72,13 +74,19 @@ mod lock;
 mod loot_stacks;
 mod menu;
 mod movement;
+mod natural_spawn;
 mod outgoing;
 mod pacing;
 mod partition_stats;
+mod patrol_spawn;
+mod phantom_spawn;
 mod player;
+mod player_attack;
+mod player_combat_memory;
 pub mod player_consume;
 pub mod player_death;
 pub mod player_effects;
+pub mod player_egg;
 pub mod player_environment;
 pub mod player_exhaustion;
 mod player_grid;
@@ -87,9 +95,17 @@ pub mod player_hurt;
 mod player_move;
 pub mod player_respawn;
 mod player_save;
+pub mod player_weapon;
 mod pos_map;
 mod profiler;
 pub mod region;
+#[cfg(feature = "oracle-samples")]
+mod replay_players;
+mod riding;
+#[cfg(feature = "oracle-samples")]
+pub use drops::replay_arrow_pickup;
+#[cfg(feature = "oracle-samples")]
+pub use replay_players::{ReplayPlayerSetup, ReplayPlayers};
 #[cfg(feature = "oracle-samples")]
 #[doc(hidden)]
 pub mod resume_replay;
@@ -100,6 +116,10 @@ mod secure_chat;
 mod sign;
 mod sleep;
 pub(crate) mod spawn_landing;
+/// 结构刷怪覆盖（`ChunkGenerator.getMobsAt`）；对拍工具也用它。
+///
+/// The structure spawn override (`ChunkGenerator.getMobsAt`), also used by the oracle.
+pub mod structure_spawn;
 mod tick_levels;
 mod weather;
 mod world;
@@ -107,8 +127,11 @@ mod world_gen_settings;
 pub mod world_options;
 mod world_state;
 pub mod worldgen;
+pub mod worldgen_cache;
+pub mod worldgen_compact;
 pub mod worldgen_features;
 pub mod worldgen_light;
+mod worldgen_mobs;
 #[doc(hidden)]
 pub mod worldgen_profile;
 mod worldgen_spawn;
@@ -904,8 +927,18 @@ fn replay_effect_state(region: &region::Region, id: inbound::PlayerId, cows: &[i
 /// Replays a whole player-hurt scene through the production hurt path for the
 /// official comparison. Returns per-tick raw-bit state and per-tick packet
 /// bytes. Gated behind the `oracle-samples` feature.
+/// `replay_player_hurt` 的三组逐刻结果。
+///
+/// The three per-tick result groups of `replay_player_hurt`.
 #[cfg(feature = "oracle-samples")]
-pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec<Vec<Vec<u8>>>) {
+pub struct ReplayPlayerHurtOutput {
+    pub steps: Vec<PlayerHurtStep>,
+    pub packets: Vec<Vec<Vec<u8>>>,
+    pub cow_states: Vec<Vec<CowAttackState>>,
+}
+
+#[cfg(feature = "oracle-samples")]
+pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> ReplayPlayerHurtOutput {
     use mc_bamboo_blocks::entity::mob::DamageSource;
     use mc_bamboo_core::Vec3;
     use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
@@ -975,6 +1008,10 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
     player.health.health = scene.health;
     player.health.absorption = scene.absorption;
     player.health.food.exhaustion = scene.exhaustion;
+    player.attack_strength_ticker = scene.attack_charge;
+    player.motion.fall_distance = scene.attack_fall;
+    player.on_ground = scene.attack_ground;
+    player.last_main_hand_item = player.inventory.held(mc_bamboo_core::Hand::Main).clone();
     // 六个装备槽按官方顺序构造，带默认组件（铁甲 / 保护附魔）。
     // Java 场景里的顺序是 [靴子, 护腿, 胸甲, 头盔, 主手]，
     // Bamboo 的菜单槽位是主手 36、副手 45、靴子 8、护腿 7、胸甲 6、头盔 5。
@@ -998,6 +1035,10 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
         }
         player.inventory.slots[menu] = stack;
     }
+    if !scene.attack_enchants.is_empty() {
+        let slot = player.inventory.hand_slot(mc_bamboo_core::Hand::Main);
+        player.inventory.slots[slot] = enchanted_weapon(scene.equipment[4], &scene.attack_enchants);
+    }
     player.random = mc_bamboo_blocks::entity::JavaRandom::from_state(scene.seed);
     let capture = Capture::default();
     region.links.add(id, Box::new(capture.clone()));
@@ -1018,6 +1059,9 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
         .add(observer, Box::new(observer_capture.clone()));
     region.insert_player(watcher);
     region.insert_player(player);
+    if scene.attack_sprint {
+        entity_sync::set_sprinting(&mut region, id, true);
+    }
     region.global.difficulty = scene.difficulty_value();
     // 1a 的官方假世界明确不跑 `FoodData.tick` / `tickRegeneration`；
     // 关掉自然回血后满血满饥饿的玩家状态不会因食物阶段而改变。
@@ -1030,27 +1074,47 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
         );
     }
     region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
-    let cow = if scene.attack_cow {
-        // Java 假世界里玩家先占 FIRST_ID，牛接着拿 FIRST_ID+1。
+    // 第一头 dummy 只用来对齐官方假世界的实体 ID；`real_cows` 是 Java
+    // `stepJson(cows)` 里真正逐刻比较的那几头。
+    //
+    // The first dummy cow only aligns entity ids with the official fake world;
+    // `real_cows` are the ones Java reports per tick.
+    let (cow, real_cows) = if scene.attack_cow {
         let _ = region
             .entities
             .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(
                 20.5, 64.0, 0.5,
             )));
-        Some(
-            region
-                .entities
-                .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(
-                    2.5, 64.0, 0.5,
-                ))),
-        )
+        let mut real =
+            vec![
+                region
+                    .entities
+                    .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(
+                        2.5, 64.0, 0.5,
+                    ))),
+            ];
+        for &(x, y, z) in &scene.extra_cow_positions {
+            real.push(
+                region
+                    .entities
+                    .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(x, y, z))),
+            );
+        }
+        (real.first().copied(), real)
     } else {
-        None
+        (None, Vec::new())
     };
     // 初始的 `set_health` 也归到 tick 0，和官方 `doTick` 一样。
     let mut steps = Vec::new();
     let mut packets = Vec::new();
     player_hurt::tick(&mut region);
+    // 官方 `causeFoodExhaustion` 当场写 FoodData；Bamboo 的攻击走 pending，
+    // 对拍里在取快照前 flush，才和官方逐刻的 exhaustion 一致。
+    //
+    // Vanilla writes FoodData immediately; Bamboo's attack uses pending. Flush
+    // before the snapshot so the per-tick exhaustion matches in the oracle.
+    crate::player_exhaustion::flush(&mut region);
+    let mut cow_steps = vec![cow_states(&region, &real_cows)];
     let target = region.players.get(&id).expect("玩家");
     steps.push(PlayerHurtStep::of(target));
     region.links.flush();
@@ -1122,12 +1186,73 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
             }
         }
         player_hurt::tick(&mut region);
+        crate::player_exhaustion::flush(&mut region);
+        cow_steps.push(cow_states(&region, &real_cows));
         let target = region.players.get(&id).expect("玩家");
         steps.push(PlayerHurtStep::of(target));
         region.links.flush();
         packets.push(frames(&capture, &observer_capture));
     }
-    (steps, packets)
+    ReplayPlayerHurtOutput {
+        steps,
+        packets,
+        cow_states: cow_steps,
+    }
+}
+
+/// 给对拍武器挂上官方导出的附魔 ID / 等级。
+///
+/// Attach generated enchantment ids / levels to the oracle weapon.
+#[cfg(feature = "oracle-samples")]
+fn enchanted_weapon(item: i32, enchants: &[(String, i32)]) -> mc_bamboo_protocol::item::ItemStack {
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+    let mut stack = mc_bamboo_protocol::item::ItemStack::new(item, 1);
+    let levels: Vec<(i32, i32)> = enchants
+        .iter()
+        .filter_map(|(name, level)| {
+            mc_bamboo_data::registries::SYNCED_REGISTRIES
+                .iter()
+                .find(|registry| registry.name == "minecraft:enchantment")
+                .and_then(|registry| registry.entries.iter().position(|entry| *entry == name))
+                .map(|id| (id as i32, *level))
+        })
+        .collect();
+    let mut patch = ComponentPatch::from_opaque(&stack).unwrap_or_default();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(levels)),
+    );
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+    stack
+}
+
+/// 逐刻取每头牛的状态，供攻击场景对拍。
+///
+/// Snapshot each cow's state per tick for the attack scenes.
+#[cfg(feature = "oracle-samples")]
+fn cow_states(region: &region::Region, cows: &[i32]) -> Vec<CowAttackState> {
+    cows.iter()
+        .map(|&uid| match region.entities.get(uid) {
+            Some(entity) => CowAttackState {
+                hp: entity
+                    .kind
+                    .mob()
+                    .map_or(0, |mob| mob.health.to_bits() as i32),
+                dx: entity.delta.x.to_bits() as i64,
+                dy: entity.delta.y.to_bits() as i64,
+                dz: entity.delta.z.to_bits() as i64,
+                fire: entity.remaining_fire_ticks,
+                hurt_time: entity.kind.mob().map_or(0, |mob| mob.hurt_time),
+                removed: entity.removed,
+            },
+            None => CowAttackState {
+                removed: true,
+                ..Default::default()
+            },
+        })
+        .collect()
 }
 
 /// 1b 玩家生命对拍场景（死亡 / 重生 / 饥饿与回血）。
@@ -1589,6 +1714,32 @@ pub struct ReplayPlayerHurt {
     /// 对拍改坏确认：跳过无敌帧 / 击退。
     pub no_cooldown: bool,
     pub no_knockback: bool,
+    /// 攻击场景：玩家 `attackStrengthTicker` 的初值、疾跑 / 下落状态，
+    /// 主手武器上的附魔，以及横扫用的额外牛的位置。
+    ///
+    /// Attack scenes: the initial `attackStrengthTicker`, sprint / fall state,
+    /// main-hand enchantments, and extra cows for sweeping.
+    pub attack_charge: i32,
+    pub attack_sprint: bool,
+    pub attack_fall: f64,
+    pub attack_ground: bool,
+    pub attack_enchants: Vec<(String, i32)>,
+    pub extra_cow_positions: Vec<(f64, f64, f64)>,
+}
+
+/// 攻击场景里每头牛的逐刻状态，全部用原始位比较。
+///
+/// Per-tick state of each cow in an attack scene, all compared as raw bits.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CowAttackState {
+    pub hp: i32,
+    pub dx: i64,
+    pub dy: i64,
+    pub dz: i64,
+    pub fire: i32,
+    pub hurt_time: i32,
+    pub removed: bool,
 }
 
 #[cfg(feature = "oracle-samples")]
@@ -2528,4 +2679,204 @@ pub fn replay_player_consume(
         packets.push(filtered);
     }
     (steps, packets)
+}
+
+/// 一次射箭重放的场景：武器、弹药、拉弓刻数、附魔和视角。
+///
+/// One shot replay scene: weapon, ammo, draw ticks, enchantments and view angles.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayShot {
+    pub weapon: i32,
+    pub ammo_item: i32,
+    pub ammo_count: i32,
+    pub hold_ticks: i32,
+    pub yaw: i32,
+    pub pitch: i32,
+    pub movement: Option<mc_bamboo_core::Vec3>,
+    pub enchantments: Vec<(String, i32)>,
+    pub potion: Option<i32>,
+    pub creative: bool,
+}
+
+/// 一支箭的初始状态，按原始位记录。
+///
+/// One arrow's initial state, as raw bits.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayShotArrow {
+    /// 位置 x/y/z、速度 x/y/z 的 f64 原始位。
+    pub motion: [i64; 6],
+    pub yaw: i32,
+    pub pitch: i32,
+    pub critical: bool,
+    pub pierce: i32,
+    pub fire: i32,
+    pub pickup: u8,
+    /// `pickup` 物品堆的物品 ID 和数量。
+    pub item: i32,
+    pub count: i32,
+}
+
+/// 一次射箭重放的结果。
+///
+/// One shot replay result.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayShotResult {
+    pub arrows: Vec<ReplayShotArrow>,
+    pub ammo: i32,
+    pub ammo_item: i32,
+    pub weapon_damage: i32,
+    pub player_seed: i64,
+    pub level_seed: i64,
+}
+
+/// 玩家射箭的正式重放，用和游戏里同一套 `player_weapon` 入口。
+///
+/// The production replay of a player shot, through the same `player_weapon`
+/// entry points the game uses.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_shot(scene: &ReplayShot) -> ReplayShotResult {
+    use mc_bamboo_core::{Hand, Vec3};
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry},
+        item::ItemStack,
+        packet::play::{ClientInformation, GameMode},
+    };
+    use uuid::Uuid;
+
+    let mut region = region::Region::new(2, 20, false);
+    region.random = mc_bamboo_blocks::LevelRandom::new(1);
+    let id = inbound::PlayerId(1 << 24);
+    let game_mode = if scene.creative {
+        GameMode::Creative
+    } else {
+        GameMode::Survival
+    };
+    let mut player = player::Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Oracle0".to_owned(),
+        game_mode,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    player.yaw = f32::from_bits(scene.yaw as u32);
+    player.head_yaw = player.yaw;
+    player.pitch = f32::from_bits(scene.pitch as u32);
+    player.motion.known_movement = scene.movement.unwrap_or_default();
+    player.random =
+        mc_bamboo_blocks::entity::JavaRandom::new(mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED);
+    let main = player.inventory.hand_slot(Hand::Main);
+    player.inventory.slots[main] = ItemStack::new(scene.weapon, 1);
+    player.inventory.slots[main + 1] = ItemStack::new(scene.ammo_item, scene.ammo_count);
+    let mut ammo_patch = ComponentPatch::new();
+    if let Some(potion) = scene.potion {
+        ammo_patch.put(
+            mc_bamboo_data::registries::data_component_type::POTION_CONTENTS,
+            PatchEntry::Set(ComponentValue::PotionContents {
+                potion: Some(potion),
+                custom_color: None,
+                custom_effects: Vec::new(),
+                custom_name: None,
+            }),
+        );
+    }
+    let (added, removed) = ammo_patch.to_opaque();
+    player.inventory.slots[main + 1].added = added;
+    player.inventory.slots[main + 1].removed = removed;
+    let mut weapon_patch = ComponentPatch::new();
+    if !scene.enchantments.is_empty() {
+        let levels: Vec<(i32, i32)> = scene
+            .enchantments
+            .iter()
+            .filter_map(|(name, level)| {
+                mc_bamboo_data::registries::SYNCED_REGISTRIES
+                    .iter()
+                    .find(|registry| registry.name == "minecraft:enchantment")
+                    .and_then(|registry| registry.entries.iter().position(|entry| entry == name))
+                    .map(|id| (id as i32, *level))
+            })
+            .collect();
+        weapon_patch.put(
+            mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(levels)),
+        );
+    }
+    let (added, removed) = weapon_patch.to_opaque();
+    player.inventory.slots[main].added = added;
+    player.inventory.slots[main].removed = removed;
+    region.insert_player(player);
+
+    player_weapon::start(&mut region, id, Hand::Main);
+    // 弩要多跑一刻：官方 `onUseTick` 在递减之前调用，装满发生在第 hold 刻。
+    //
+    // A crossbow needs one more tick: `onUseTick` runs before the decrement, so
+    // loading happens on the hold-th tick.
+    let ticks = scene.hold_ticks + i32::from(scene.weapon == mc_bamboo_data::items::CROSSBOW);
+    for _ in 0..ticks {
+        player_weapon::tick(&mut region);
+    }
+    if scene.weapon == mc_bamboo_data::items::CROSSBOW {
+        player_weapon::release(&mut region, id);
+        player_weapon::start(&mut region, id, Hand::Main);
+    } else {
+        player_weapon::release(&mut region, id);
+    }
+
+    let arrows = region
+        .entities
+        .ids()
+        .into_iter()
+        .filter_map(|uid| {
+            let entity = region.entities.public_at(uid)?;
+            let mc_bamboo_blocks::entity::KindPublic::Arrow(public) = entity.kind else {
+                return None;
+            };
+            let state = region.entities.get(uid)?;
+            let mc_bamboo_blocks::entity::EntityKind::Arrow(arrow) = &state.kind else {
+                return None;
+            };
+            Some(ReplayShotArrow {
+                motion: [
+                    entity.position.x.to_bits() as i64,
+                    entity.position.y.to_bits() as i64,
+                    entity.position.z.to_bits() as i64,
+                    entity.delta.x.to_bits() as i64,
+                    entity.delta.y.to_bits() as i64,
+                    entity.delta.z.to_bits() as i64,
+                ],
+                yaw: entity.yaw.to_bits() as i32,
+                pitch: public.pitch.to_bits() as i32,
+                critical: public.critical,
+                pierce: i32::from(public.pierce),
+                fire: state.remaining_fire_ticks,
+                pickup: match public.pickup {
+                    mc_bamboo_blocks::entity::arrow::Pickup::Disallowed => 0,
+                    mc_bamboo_blocks::entity::arrow::Pickup::Allowed => 1,
+                    mc_bamboo_blocks::entity::arrow::Pickup::CreativeOnly => 2,
+                },
+                item: arrow.pickup_item.item,
+                count: arrow.pickup_item.count,
+            })
+        })
+        .collect();
+    let held = region.players[&id].inventory.held(Hand::Main).clone();
+    let damage = match mc_bamboo_protocol::components::defaults::resolve(
+        held.item,
+        &held.patch(),
+        mc_bamboo_data::registries::data_component_type::DAMAGE,
+    ) {
+        Some(ComponentValue::Damage(value)) => *value,
+        _ => 0,
+    };
+    ReplayShotResult {
+        arrows,
+        ammo: region.players[&id].inventory.slots[main + 1].count,
+        ammo_item: region.players[&id].inventory.slots[main + 1].item,
+        weapon_damage: damage,
+        player_seed: region.players[&id].random.state(),
+        level_seed: region.random.source().seed(),
+    }
 }

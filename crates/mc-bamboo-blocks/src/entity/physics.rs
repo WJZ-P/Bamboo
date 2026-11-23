@@ -16,7 +16,10 @@
 use std::cmp::Ordering;
 
 use mc_bamboo_core::{Axis, BlockPos, Direction, Vec3, mth};
-use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
+use mc_bamboo_data::{
+    BlockAncestor, blocks,
+    tags::{block_tags, fluid_tags},
+};
 
 use crate::{
     WorldBorder,
@@ -109,6 +112,21 @@ impl Entity {
             placement: false,
             powder_snow_walkable: false,
         })
+    }
+
+    /// 生物的 `CollisionContext.of(entity)`：生物在 tick 里是拆出来的，
+    /// 要单独带上能不能在细雪上走。
+    ///
+    /// `CollisionContext.of(entity)` for a mob. The mob is detached while it
+    /// ticks, so whether it walks on powder snow is passed in separately.
+    pub(crate) fn mob_collision_context(&self, mob: &super::mob::Mob) -> CollisionContext {
+        match self.collision_context() {
+            CollisionContext::Entity(mut context) => {
+                context.powder_snow_walkable = mob.walks_on_powder_snow();
+                CollisionContext::Entity(context)
+            }
+            other => other,
+        }
     }
 
     /// `applyGravity`：每 tick 往速度里加一份重力。这两个实体都没有 `noGravity`。
@@ -404,6 +422,20 @@ impl Entity {
         self.final_movements = movements;
     }
 
+    /// 弹射物逐段调用 `applyEffectsFromBlocks(from, to)`，不重走已处理的位移。
+    ///
+    /// Apply projectile block effects for just this segment, without replaying earlier movement.
+    pub(crate) fn apply_effects_along(&mut self, world: &dyn BlockView, from: Vec3) {
+        self.check_inside_blocks(
+            world,
+            &[Movement {
+                from,
+                to: self.position,
+                original: None,
+            }],
+        );
+    }
+
     /// `checkInsideBlocks`：按轴把每段移动拆开，逐个方块看实体有没有穿过去。
     fn check_inside_blocks(&mut self, world: &dyn BlockView, movements: &[Movement]) {
         if self.removed {
@@ -476,10 +508,39 @@ impl Entity {
                 visited.push(pos);
                 self.block_inside(state);
             }
+            if self.remaining_fire_ticks > 0
+                && matches!(
+                    self.kind,
+                    super::EntityKind::Arrow(_) | super::EntityKind::Egg(_)
+                )
+            {
+                self.extinguish_projectile_in_water(world, pos, from, to);
+            }
             true
         };
         for_each_block_intersected_between(from, to, deflated, &mut visit);
         iterations
+    }
+
+    fn extinguish_projectile_in_water(
+        &mut self,
+        world: &dyn BlockView,
+        pos: BlockPos,
+        from: Vec3,
+        to: Vec3,
+    ) {
+        let fluid = world.fluid_state(pos);
+        if !fluid.is_tagged(fluid_tags::WATER) {
+            return;
+        }
+        let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        let height = f64::from(world.fluid_height(fluid, pos));
+        let fluid_box = Aabb::new(x, y, z, x + 1.0, y + height, z + 1.0);
+        // WaterFluid.entityInside 只在扫过实际流体形状时熄火。
+        // WaterFluid.entityInside extinguishes on intersection with the swept fluid shape.
+        if self.collided_with_shape_moving_from(from, to, &[fluid_box]) {
+            self.remaining_fire_ticks = 0;
+        }
     }
 
     /// `entityInside`：只有蜘蛛网和细雪对这两个实体有影响。

@@ -146,8 +146,11 @@ impl GameRuleSet {
             max_block_modifications: self.int(gamerules::MAX_BLOCK_MODIFICATIONS),
             max_snow_accumulation_height: self.int(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
             spawn_mobs: self.bool(gamerules::SPAWN_MOBS),
+            spawn_monsters: self.bool(gamerules::SPAWN_MONSTERS),
+            spawn_phantoms: self.bool(gamerules::SPAWN_PHANTOMS),
             mob_griefing: self.bool(gamerules::MOB_GRIEFING),
             mob_drops: self.bool(gamerules::MOB_DROPS),
+            mob_explosion_drop_decay: self.bool(gamerules::MOB_EXPLOSION_DROP_DECAY),
             max_entity_cramming: self.int(gamerules::MAX_ENTITY_CRAMMING),
         }
     }

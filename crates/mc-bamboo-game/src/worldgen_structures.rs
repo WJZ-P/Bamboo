@@ -41,7 +41,7 @@ use mc_bamboo_worldgen::{
     },
 };
 
-use crate::world_options::WorldGenConfig;
+use crate::world_options::{FlatSettings, WorldGenConfig};
 
 /// 一个区块的结构阶段数据（起点 + 引用 + 存档标签）。
 ///
@@ -56,17 +56,25 @@ pub struct StructureData {
 /// 按 `(seed, settings, x, z)` 缓存一个区块的富起点。纯函数结果，命中只省时间。
 ///
 /// Cache a chunk's rich starts by `(seed, settings, x, z)`; a hit only saves time.
-type StartsCache = HashMap<(i64, Option<&'static str>, i32, i32), Arc<WorldStructureStarts>>;
-/// 每条计算线程一份 `WorldStructureState` + `SeededRouter`：`SeededRouter` 的 R 树
-/// `lastResult` 是 `Cell`，不能跨线程共享（官方是 `ThreadLocal`）。
+type StartsCache = HashMap<(i32, i32), Arc<WorldStructureStarts>>;
+/// 每条计算线程一份可变工作状态：`WorldStructureState`、`SeededRouter`（密度函数采样器
+/// 缓存）、地形 / 结构 `Generator`（随机源、临时缓冲），以及按配置建好的群系 `preset`。
+/// 解析好的只读 `Worldgen` 由 `Worldgen::shared()` 全进程共用；这些字段因需 `&mut` 或
+/// 按线程缓存仍留在 `thread_local!` 里，群系 R 树的 `lastResult` 也按「线程 + 表」隔离。
 ///
-/// Per-thread `WorldStructureState` + `SeededRouter`: the router's R-tree `lastResult`
-/// is a `Cell` and cannot be shared (vanilla uses a `ThreadLocal`).
+/// Per-thread mutable working state: `WorldStructureState`, `SeededRouter` (density-function
+/// sampler caches), terrain/structure `Generator`s (RNG, scratch buffers), and the per-config
+/// biome `preset`. The parsed, read-only `Worldgen` is shared process-wide via
+/// `Worldgen::shared()`; these fields stay in `thread_local!` because they need `&mut` or are
+/// per-thread caches, and the biome R-tree `lastResult` is isolated per (thread, table).
 struct StructureThread {
     state: WorldStructureState,
     router: SeededRouter,
-    /// 每线程一份：`ParameterList` 的 R 树 `lastResult` 是 `Cell`，不能跨线程共享。
-    /// Per-thread: the parameter list's R-tree `lastResult` is a `Cell`.
+    /// 每线程一份：平坦世界要换成单点群系表；R 树 `lastResult` 现在是「线程 + 表」
+    /// 的线程本地状态，实例本身只读，可全进程共享（这里仍按线程各建一份）。
+    /// Per-thread: flat worlds replace it with a single-point biome table; the
+    /// R-tree `lastResult` is now per-(thread, table) thread-local state and the
+    /// instance itself is read-only and shareable (still built once per thread here).
     preset: MultiNoiseBiomeSource,
     settings: &'static mc_bamboo_worldgen::settings::Settings,
     generator: chunk::Generator<'static>,
@@ -97,11 +105,20 @@ const BEARDIFIER_CACHE_CAP: usize = 4096;
 /// 读盘覆盖表的键：`(seed, settings, x, z)`。
 ///
 /// Key of the disk-overrides map: `(seed, settings, x, z)`.
-type DiskKey = (i64, Option<&'static str>, i32, i32);
+type DiskKey = (ThreadKey, i32, i32);
 /// 每线程解析状态的键：`(seed, settings)`。
 ///
 /// Key of the per-thread parsed state: `(seed, settings)`.
-type ThreadKey = (i64, &'static str);
+type ThreadKey = (i64, Option<&'static str>, Option<FlatSettings>, bool);
+
+fn thread_key(config: &WorldGenConfig) -> ThreadKey {
+    (
+        config.seed,
+        config.level_type.settings_id(),
+        config.level_type.is_flat().then(|| config.flat.clone()),
+        config.generate_structures,
+    )
+}
 
 /// 计算池线程上挂一份读盘带来的 `structures` 标签。游戏侧由世界线程在派任务时调用，
 /// 对拍工具用它模拟「读盘再继续生成相邻区块」。
@@ -109,7 +126,7 @@ type ThreadKey = (i64, &'static str);
 /// Install a disk `structures` tag on a compute thread. The world thread calls this
 /// before dispatch; oracles use it to simulate loading a chunk and generating neighbours.
 pub fn install_disk_structures(config: &WorldGenConfig, x: i32, z: i32, tag: Option<&Tag>) {
-    let key = (config.seed, config.level_type.settings_id(), x, z);
+    let key = (thread_key(config), x, z);
     DISK_STRUCTURES.with(|map| {
         let mut map = map.borrow_mut();
         match tag {
@@ -147,18 +164,15 @@ fn with_thread<T>(
     config: &WorldGenConfig,
     f: impl FnOnce(&mut StructureThread) -> Result<T, String>,
 ) -> Result<T, String> {
-    if config.level_type.is_flat() {
-        return Err("flat worlds have no noise structure state".to_owned());
-    }
     let settings_id = config
         .level_type
         .settings_id()
-        .ok_or("flat worlds have no noise settings")?;
+        .unwrap_or("minecraft:overworld");
     STRUCTURE_THREADS.with(|cache| {
-        let key = (config.seed, settings_id);
+        let key = thread_key(config);
         let mut cache = cache.borrow_mut();
-        if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
-            let worldgen: &'static Worldgen = Box::leak(Box::new(Worldgen::load()?));
+        if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key.clone()) {
+            let worldgen = Worldgen::shared()?;
             let settings = worldgen
                 .settings(settings_id)
                 .ok_or("missing noise settings")?;
@@ -170,6 +184,18 @@ fn with_thread<T>(
                 .entries()
                 .map(|(point, name)| (*point, name.clone()))
                 .collect();
+            let fixed = if config.level_type.is_flat() {
+                Some(
+                    *mc_bamboo_data::registries::biome::NAMES
+                        .get(config.flat.biome as usize)
+                        .ok_or("unknown flat biome")?,
+                )
+            } else {
+                None
+            };
+            let entries = fixed.map_or(entries, |biome| {
+                vec![(ParameterPoint::from_quantized([0; 13]), biome.to_owned())]
+            });
             let preset = MultiNoiseBiomeSource::new(ParameterList::new(entries));
             let mut router = SeededRouter::new(settings, config.seed);
             let state = {
@@ -177,14 +203,51 @@ fn with_thread<T>(
                     router: &mut router,
                     source: &preset,
                 };
-                WorldStructureState::new(worldgen, config.seed, &mut resolver)?
+                if let Some(biome) = fixed {
+                    let all_sets = worldgen
+                        .raw()
+                        .get("structure_set")
+                        .ok_or("missing structure_set")?;
+                    // 内置注册表没有结构集标签；未知 holder 让 lenientOptionalFieldOf 回退到缺省。
+                    // There are no builtin structure-set tags; an unknown holder falls back to absent.
+                    let overrides = config.flat.structure_overrides.as_ref().and_then(|names| {
+                        names
+                            .iter()
+                            .map(|name| {
+                                let name = if name.contains(':') {
+                                    name.clone()
+                                } else {
+                                    format!("minecraft:{name}")
+                                };
+                                all_sets.get(&name).map(|_| name)
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    });
+                    WorldStructureState::new_flat(
+                        worldgen,
+                        config.seed,
+                        &mut resolver,
+                        biome,
+                        overrides.as_deref(),
+                    )?
+                } else {
+                    WorldStructureState::new(worldgen, config.seed, &mut resolver)?
+                }
             };
-            let generator = chunk::Generator::with_settings(
+            let mut generator = chunk::Generator::with_settings(
                 worldgen,
                 settings_id,
                 "minecraft:overworld",
                 config.seed,
             )?;
+            if let Some(biome) = fixed {
+                generator.set_flat_columns(
+                    biome,
+                    mc_bamboo_world::MIN_Y,
+                    mc_bamboo_world::WORLD_HEIGHT,
+                    &config.flat.layers,
+                );
+            }
             entry.insert(StructureThread {
                 state,
                 router,
@@ -206,11 +269,15 @@ pub fn structure_names(config: &WorldGenConfig) -> Vec<String> {
     with_thread(config, |thread| Ok(thread.state.structures.names())).unwrap_or_default()
 }
 
-/// 清掉游戏地形生成器（与结构阶段共用同一个按线程泄漏的 `Worldgen`）的群系
-/// R 树状态，让结构阶段的单点查询不影响随后地形的成批 quart 群系判定。
+/// 清掉游戏地形生成器的群系 R 树状态，让结构阶段的单点查询不影响随后地形的
+/// 成批 quart 群系判定。地形与结构生成器现在引用全进程共用的同一份 `Worldgen`，
+/// 其 `lastResult` 按「线程 + 表」隔离，这条仍在当前线程把起点清到确定状态。
 ///
 /// Clear the game terrain generator's biome R-tree state so structure-stage
 /// single-point queries cannot affect the following batch quart biome lookups.
+/// Terrain and structure generators now reference the same process-wide
+/// `Worldgen`, whose `lastResult` is isolated per (thread, table); this still
+/// resets the current thread to a fixed start.
 pub fn reset_generator_biome_state(config: &WorldGenConfig) -> Result<(), String> {
     crate::worldgen::with_generator(config, |generator| {
         generator.reset_biome_state();
@@ -394,8 +461,11 @@ pub fn structure_starts(
     x: i32,
     z: i32,
 ) -> Result<Arc<WorldStructureStarts>, String> {
-    let key = (config.seed, config.level_type.settings_id(), x, z);
-    let disk = DISK_STRUCTURES.with(|map| map.borrow().get(&key).cloned());
+    let key = (x, z);
+    let disk = DISK_STRUCTURES.with(|map| map.borrow().get(&(thread_key(config), x, z)).cloned());
+    if disk.is_none() && !config.generate_structures {
+        return Ok(Arc::new(WorldStructureStarts::default()));
+    }
     with_thread(config, |thread| {
         // 每次调用都把本线程的 R 树 / 采样器状态清到同一起点：计算池里各区块的
         // 到达顺序不确定，缓存命中与否不能改变之后的群系判定（1/4 线程逐字节一致）。
@@ -419,7 +489,15 @@ pub fn structure_starts(
         let starts = if config.generate_structures {
             let dims = {
                 let s = thread.settings;
-                (s.min_y, s.height, s.sea_level)
+                if config.level_type.is_flat() {
+                    (
+                        mc_bamboo_world::MIN_Y,
+                        mc_bamboo_world::WORLD_HEIGHT,
+                        mc_bamboo_worldgen::feature::flat::SEA_LEVEL,
+                    )
+                } else {
+                    (s.min_y, s.height, s.sea_level)
+                }
             };
             let empty = WorldStructureStarts::default();
             create_structures(
@@ -457,7 +535,7 @@ pub fn structure_references_stage(
     if let Some(cached) = STRUCTURE_THREADS.with(|cache| {
         cache
             .borrow()
-            .get(&(config.seed, config.level_type.settings_id().unwrap_or("")))
+            .get(&thread_key(config))
             .and_then(|thread| thread.references.get(&(x, z)))
             .cloned()
     }) {
@@ -480,10 +558,7 @@ pub fn structure_references_stage(
     }
     let result = structure_references(x, z, &neighbors);
     STRUCTURE_THREADS.with(|cache| {
-        if let Some(thread) = cache
-            .borrow_mut()
-            .get_mut(&(config.seed, config.level_type.settings_id().unwrap_or("")))
-        {
+        if let Some(thread) = cache.borrow_mut().get_mut(&thread_key(config)) {
             thread.references.insert((x, z), result.clone());
         }
     });
@@ -772,6 +847,49 @@ mod tests {
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         }
+    }
+
+    #[test]
+    fn flat_village_start_obeys_overrides_and_global_switch() {
+        use mc_bamboo_worldgen::structure::Placement;
+        let mut config = WorldGenConfig::default();
+        config.flat.structure_overrides = Some(vec!["minecraft:villages".to_owned()]);
+        let (x, z) = with_thread(&config, |thread| {
+            let set = thread.state.sets.sets().get("minecraft:villages").unwrap();
+            let Placement::RandomSpread(placement) = &set.placement else {
+                panic!("not random spread")
+            };
+            Ok(placement.get_potential_structure_chunk(config.seed, 0, 0))
+        })
+        .unwrap();
+        assert!(
+            structure_starts(&config, x, z)
+                .unwrap()
+                .get("minecraft:village_plains")
+                .is_some()
+        );
+        config.generate_structures = false;
+        assert!(
+            structure_starts(&config, x, z)
+                .unwrap()
+                .by_structure
+                .is_empty()
+        );
+        config.generate_structures = true;
+        config.flat.structure_overrides = Some(Vec::new());
+        assert!(
+            structure_starts(&config, x, z)
+                .unwrap()
+                .by_structure
+                .is_empty()
+        );
+        config.flat.structure_overrides = None;
+        assert!(
+            structure_starts(&config, x, z)
+                .unwrap()
+                .get("minecraft:village_plains")
+                .is_some()
+        );
     }
 
     #[test]

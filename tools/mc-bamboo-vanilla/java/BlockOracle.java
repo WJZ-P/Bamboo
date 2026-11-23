@@ -501,7 +501,9 @@ public final class BlockOracle {
         FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
         // 官方日志默认写 stdout。日志框架初始化时记下 System.out，要抢在这之前换掉，否则日志会混进 JSON。
         System.setOut(log);
-        Options options = Options.parse(args);
+        // `--post-process FILE`：完工后处理对拍，和随机题无关，见 {@link #runPostProcess}。
+        String postProcess = args.length == 2 && args[0].equals("--post-process") ? args[1] : null;
+        Options options = Options.parse(postProcess != null ? new String[0] : args);
 
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -521,8 +523,134 @@ public final class BlockOracle {
                 official.blockBrightness = NIGHT_BLOCK_BRIGHTNESS;
             }
             official.applyRules(options.rules);
+            if (postProcess != null) {
+                runPostProcess(official, postProcess, out);
+                return;
+            }
             new Oracle(official, options, out, log).run();
         }
+    }
+
+    /**
+     * 完工后处理对拍：每行一题，给一块 3×3 区块（只给 `minY..=maxY` 这一段高度，其余是空气）和中心区块的
+     * `PostProcessing` 表，在假世界里对中心区块直接调官方 {@code LevelChunk.postProcessGeneration}，交回改了的格子和
+     * 排上的计划刻。
+     *
+     * <pre>
+     *     题：{"x":X,"z":Z,"minY":A,"maxY":B,"states":[...],"post":[[short,...] x 24]}
+     *        states 按 y、世界 x、世界 z 的顺序列 3×3 区块里的全局方块状态 ID（x、z 从 (X-1)*16 起各 48 格）。
+     *     答：{"type":"postprocess","x":X,"z":Z,"changes":[[x,y,z,state],...],
+     *          "ticks":[[x,y,z,"block"|"fluid",id,delay,priority],...],"draws":N}
+     * </pre>
+     *
+     * changes 按 y、x、z 排序；ticks 是处理后还排着的计划刻，按执行顺序，方块的在前，id 是注册表数字 ID，delay 相对
+     * 处理时的游戏时间。draws 是处理期间世界随机源被取了几次（0 表示结果不依赖随机数）。
+     *
+     * Post-processing oracle: per query, a 3×3 chunk area and the center's
+     * `PostProcessing` table; call vanilla {@code LevelChunk.postProcessGeneration}
+     * on the center in the fake level and report changed cells and scheduled ticks.
+     */
+    private static void runPostProcess(Official official, String path, Writer out) throws Exception {
+        int lines = 0;
+        for (String text : java.nio.file.Files.readAllLines(java.nio.file.Path.of(path))) {
+            if (text.isBlank()) {
+                continue;
+            }
+            com.google.gson.JsonObject query = com.google.gson.JsonParser.parseString(text).getAsJsonObject();
+            int chunkX = query.get("x").getAsInt();
+            int chunkZ = query.get("z").getAsInt();
+            int minY = query.get("minY").getAsInt();
+            int maxY = query.get("maxY").getAsInt();
+            JsonArray states = query.getAsJsonArray("states");
+            int baseX = (chunkX - 1) * 16;
+            int baseZ = (chunkZ - 1) * 16;
+            Long2ObjectOpenHashMap<BlockState> scene = new Long2ObjectOpenHashMap<>();
+            int index = 0;
+            for (int y = minY; y <= maxY; y++) {
+                for (int dx = 0; dx < 48; dx++) {
+                    for (int dz = 0; dz < 48; dz++) {
+                        int id = states.get(index++).getAsInt();
+                        if (id != 0) {
+                            scene.put(BlockPos.asLong(baseX + dx, y, baseZ + dz), Block.stateById(id));
+                        }
+                    }
+                }
+            }
+            OracleRandom random = new OracleRandom(OracleRandom.Mode.SEEDED, 0);
+            FakeLevel level = FakeLevel.create(official, random);
+            level.load(scene);
+            FakeChunk chunk = FakeChunk.of(level, chunkX, chunkZ);
+            JsonArray post = query.getAsJsonArray("post");
+            it.unimi.dsi.fastutil.shorts.ShortList[] lists = new it.unimi.dsi.fastutil.shorts.ShortList[post.size()];
+            for (int section = 0; section < lists.length; section++) {
+                it.unimi.dsi.fastutil.shorts.ShortArrayList list = new it.unimi.dsi.fastutil.shorts.ShortArrayList();
+                for (com.google.gson.JsonElement entry : post.get(section).getAsJsonArray()) {
+                    list.add(entry.getAsShort());
+                }
+                lists[section] = list;
+            }
+            set(ChunkAccess.class, chunk, "postProcessing", lists);
+            set(ChunkAccess.class, chunk, "pendingBlockEntities", new HashMap<BlockPos, net.minecraft.nbt.CompoundTag>());
+            set(ChunkAccess.class, chunk, "blockEntities", new HashMap<BlockPos, BlockEntity>());
+            set(ChunkAccess.class, chunk, "upgradeData", net.minecraft.world.level.chunk.UpgradeData.EMPTY);
+            set(LevelChunk.class, chunk, "level", level);
+            chunk.postProcessGeneration(level);
+
+            JsonArray changes = new JsonArray();
+            TreeSet<Long> keys = new TreeSet<>(Comparator.comparingInt((Long key) -> BlockPos.getY(key))
+                    .thenComparingInt(key -> BlockPos.getX(key)).thenComparingInt(key -> BlockPos.getZ(key)));
+            keys.addAll(scene.keySet());
+            keys.addAll(level.blocks.keySet());
+            for (long key : keys) {
+                BlockState before = scene.getOrDefault(key, Blocks.AIR.defaultBlockState());
+                BlockState after = level.blocks.getOrDefault(key, Blocks.AIR.defaultBlockState());
+                if (before == after) {
+                    continue;
+                }
+                JsonArray change = new JsonArray();
+                change.add(BlockPos.getX(key));
+                change.add(BlockPos.getY(key));
+                change.add(BlockPos.getZ(key));
+                change.add(Block.getId(after));
+                changes.add(change);
+            }
+            long now = level.getGameTime();
+            JsonArray ticks = new JsonArray();
+            for (ScheduledTick<Block> tick : level.recordedBlockTicks.pending()) {
+                ticks.add(tickRow(tick, "block", BuiltInRegistries.BLOCK.getId(tick.type()), now));
+            }
+            for (ScheduledTick<Fluid> tick : level.recordedFluidTicks.pending()) {
+                ticks.add(tickRow(tick, "fluid", BuiltInRegistries.FLUID.getId(tick.type()), now));
+            }
+            com.google.gson.JsonObject line = new com.google.gson.JsonObject();
+            line.addProperty("type", "postprocess");
+            line.addProperty("x", chunkX);
+            line.addProperty("z", chunkZ);
+            line.add("changes", changes);
+            line.add("ticks", ticks);
+            line.addProperty("draws", random.draws);
+            out.write(line.toString());
+            out.write("\n");
+            lines++;
+        }
+        com.google.gson.JsonObject end = new com.google.gson.JsonObject();
+        end.addProperty("type", "end");
+        end.addProperty("lines", lines);
+        out.write(end.toString());
+        out.write("\n");
+        out.flush();
+    }
+
+    private static JsonArray tickRow(ScheduledTick<?> tick, String kind, int id, long now) {
+        JsonArray row = new JsonArray();
+        row.add(tick.pos().getX());
+        row.add(tick.pos().getY());
+        row.add(tick.pos().getZ());
+        row.add(kind);
+        row.add(id);
+        row.add(tick.triggerTick() - now);
+        row.add(tick.priority().getValue());
+        return row;
     }
 
     private static Unsafe loadUnsafe() {
@@ -3031,13 +3159,13 @@ public final class BlockOracle {
         private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
         /** 随机填进场景容器的物品。剑用来试堆叠上限 1。后面那些放进发射器才会被红石触发并和官方比较。
          * TNT 会生成点燃的实体，方块、声音、容器和 `level.random` 照常比较。
-         * 箭、船、矿车、刷怪蛋和盔甲架不放进来，那些题会整题排除。
+         * 箭由单独的固定题比较；船、矿车、刷怪蛋和盔甲架不放进随机题。
          *
          * Items placed into scene containers at random. The sword checks a stack limit of 1.
          * The rest are placed in a dispenser so a powered dispenser fires them and the oracle
          * compares the shot. TNT spawns a primed entity; blocks, sounds, contents and
-         * `level.random` are still compared. Arrows, boats, minecarts, spawn eggs and armour
-         * stands are left out. Those cases are excluded wholesale.
+         * `level.random` are still compared. Arrows get dedicated fixtures; boats,
+         * minecarts, spawn eggs and armour stands stay out of the random list.
          */
         private static final List<Item> CONTAINER_ITEMS = List.of(Items.STONE, Items.DIRT, Items.OAK_LOG, Items.BREAD,
                 Items.COBBLESTONE, Items.IRON_INGOT, Items.IRON_SWORD, Items.WATER_BUCKET, Items.LAVA_BUCKET,
@@ -3428,6 +3556,29 @@ public final class BlockOracle {
                         c.actor = new Vec3(4.5, 70.0, 4.5);
                     }
                     c.settle = settle;
+                    cases.add(c);
+                }
+            }
+            return cases;
+        }
+
+        /**
+         * 发射器计划刻固定题：三类箭各走横向和竖向，核对余量、事件、世界随机源。
+         *
+         * Fixed dispenser-tick fixtures for all three arrow items, both horizontally
+         * and vertically. Compare remaining inventory, events and the level random.
+         */
+        List<Case> dispenserArrowCases(int base) {
+            List<Case> cases = new ArrayList<>();
+            BlockPos pos = new BlockPos(0, 64, 0);
+            for (Item item : List.of(Items.ARROW, Items.TIPPED_ARROW, Items.SPECTRAL_ARROW)) {
+                for (Direction direction : List.of(Direction.EAST, Direction.UP)) {
+                    Case c = new Case(base + cases.size(), Kind.TICK, new Subject(Blocks.DISPENSER, item), height);
+                    c.put(pos, Blocks.DISPENSER.defaultBlockState()
+                            .setValue(DispenserBlock.FACING, direction).setValue(DispenserBlock.TRIGGERED, true));
+                    c.putContents(pos, new ItemStack(item, 2));
+                    c.target = pos;
+                    c.actor = new Vec3(4.5, 70.0, 4.5);
                     cases.add(c);
                 }
             }
@@ -4655,23 +4806,29 @@ public final class BlockOracle {
         private static final int HOPPER_CASE_BASE = 2_000_000;
         /** 显式合成器题的 id 从这里开始。 */
         private static final int CRAFTER_CASE_BASE = 3_000_000;
+        private static final int DISPENSER_ARROW_CASE_BASE = 4_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
             List<Case> pistonCases = generator.pistonCases(PISTON_CASE_BASE);
             List<Case> hopperCases = generator.hopperCases(HOPPER_CASE_BASE);
             List<Case> crafterCases = generator.crafterCases(CRAFTER_CASE_BASE);
+            List<Case> dispenserArrowCases = generator.dispenserArrowCases(DISPENSER_ARROW_CASE_BASE);
             boolean single = options.single >= 0;
             boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
                     : includesPistonCases();
             boolean hoppers = single ? options.single >= HOPPER_CASE_BASE && options.single < CRAFTER_CASE_BASE
                     : includesHopperCases();
-            boolean crafters = single ? options.single >= CRAFTER_CASE_BASE : includesCrafterCases();
+            boolean crafters = single ? options.single >= CRAFTER_CASE_BASE
+                    && options.single < DISPENSER_ARROW_CASE_BASE : includesCrafterCases();
+            boolean dispenserArrows = single ? options.single >= DISPENSER_ARROW_CASE_BASE
+                    : options.only == null || Subjects.matches(options.only, Blocks.DISPENSER);
             List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
                     + (hoppers ? hopperCases.size() : 0)
                     + (crafters ? crafterCases.size() : 0)
+                    + (dispenserArrows ? dispenserArrowCases.size() : 0)
                     + mines.size());            int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
@@ -4697,6 +4854,13 @@ public final class BlockOracle {
             }
             if (crafters) {
                 for (Case c : crafterCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
+            if (dispenserArrows) {
+                for (Case c : dispenserArrowCases) {
                     if (!single || c.id == options.single) {
                         runBuilt(c, statsOf(c.subject));
                     }

@@ -20,6 +20,14 @@
 //! 逐方块比较；不一致按「游戏侧谁写了这一格」分类列出。官方线里的 setBlock 次数
 //! 不含矿石（`BulkSectionAccess` 不经过 setBlock），只作参考。
 //!
+//! `isolated` 线还比完工的 `PostProcessing`：官方交回目标的干净地形标记和每个中心
+//! 新记进目标的标记，这里按约定顺序（地形标记在前，然后中心自己、其余 slot 升序）
+//! 逐段拼成基准，和 Director 交付盒子里的表、以及它写盘再读回的表逐段逐项比，
+//! **必须 0 不一致**。官方跨中心的先后取决于调度，本身不确定；按约定顺序比同时
+//! 保证了每段的多重集合相等和每个中心内部的调用顺序。
+//!
+//! 完工后处理（`postProcessGeneration`）的严格对拍在 `post-process` 命令里。
+//!
 //! `feature-merge`: whole-chunk oracle for merging neighbor feature spills. Vanilla
 //! runs `applyBiomeDecoration` on all 9 centers around C, either each on a clean
 //! view (`isolated`, merged here with the game's own `merge_feature_writes`; must
@@ -40,10 +48,10 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_game::{
     MailBudget, World, WorldConfig,
     world_options::{LevelType, WorldGenConfig},
-    worldgen::GeneratedChunk,
+    worldgen::{GeneratedBlockEntity, GeneratedChunk},
     worldgen_features::{
         FeatureWrites, merge_feature_writes,
-        oracle_merge::{MergeBreak, feature_writes_into, set_merge_break},
+        oracle_merge::{MergeBreak, feature_marks_into, feature_writes_into, set_merge_break},
     },
 };
 use mc_bamboo_worldgen::feature::state::{official_name, state_from_official_name};
@@ -53,21 +61,37 @@ use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: feature-merge <java> [--structures] [--target SEED X Z]... \
      [--orders isolated,center-first,center-last] [--threads N] [--show N] \
-     [--break-drop-neighbor DX DZ | --break-largest-state] | --scan SEED X0 Z0 SIDE [--structures]";
+     [--break-drop-neighbor DX DZ | --break-drop-neighbor-marks DX DZ | --break-largest-state | --break-drop-block-entities] \
+     | --scan SEED X0 Z0 SIDE [--structures]";
 
 /// 默认目标（`--scan` 挑的）：(-2,-2) 收到邻居的流体（湖）和树冠溢出，(0,0)、(2,2)
 /// 收到树冠溢出；三块都收到 8 个方向里大部分邻居的溢出。
 /// Default targets picked with `--scan`: (-2,-2) receives fluid (lake) and canopy
 /// spills, (0,0) and (2,2) canopy spills.
 const DEFAULT_TARGETS: &[(i64, i32, i32)] = &[(2026, -2, -2), (2026, 0, 0), (2026, 2, 2)];
-/// `--structures` 的默认目标：试炼密室起点和它的两个邻居，加上上面两块。
-/// Default `--structures` targets: the trial-chambers start, two neighbors, plus two above.
+/// `--structures` 的默认目标：试炼密室起点和它的两个邻居，加上上面两块；再加两块
+/// 结构件 `placeBlock` 会记 `SHAPE_CHECK_BLOCKS`（栅栏 / 火把）的：沼泽小屋
+/// `(-17,22)` 和 `(-155,96)`。
+/// Default `--structures` targets: the trial-chambers start, two neighbors, two
+/// from above, plus two whose `placeBlock` pieces mark `SHAPE_CHECK_BLOCKS`
+/// (fences / torches): the swamp hut `(-17,22)` and `(-155,96)`.
 const DEFAULT_STRUCTURE_TARGETS: &[(i64, i32, i32)] = &[
     (42, 17, 7),
     (42, 16, 6),
     (42, 18, 8),
     (2026, -2, -2),
     (2026, 2, 2),
+    (42, -17, 22),
+    (42, -155, 96),
+    // 方块实体：平原村庄、要塞起点（和矿井重叠）、沙漠神殿的四个箱子、三个互相覆盖的
+    // 海底遗迹件（后放的件换掉可疑的沙砾，方块实体要跟着消失）。
+    // Block entities: a plains village, the stronghold start (overlapping a
+    // mineshaft), the desert pyramid's four chests, and three overlapping ocean
+    // ruin pieces (a later piece replaces suspicious gravel, dropping its entity).
+    (42, -383, -289),
+    (42, -121, 96),
+    (42, -375, -22),
+    (42, 67, -236),
 ];
 
 #[derive(Debug)]
@@ -132,7 +156,20 @@ impl Options {
                     }
                     options.break_mode = Some(MergeBreak::DropNeighbor { dx, dz });
                 }
+                "--break-drop-neighbor-marks" => {
+                    let dx = number(next(&mut index)?)? as i32;
+                    let dz = number(next(&mut index)?)? as i32;
+                    if dx.abs() > 1 || dz.abs() > 1 || (dx == 0 && dz == 0) {
+                        return Err(
+                            "--break-drop-neighbor-marks needs a neighbor offset".to_owned()
+                        );
+                    }
+                    options.break_mode = Some(MergeBreak::DropNeighborMarks { dx, dz });
+                }
                 "--break-largest-state" => options.break_mode = Some(MergeBreak::LargestStateWins),
+                "--break-drop-block-entities" => {
+                    options.break_mode = Some(MergeBreak::DropBlockEntities);
+                }
                 "--scan" => {
                     let seed = number(next(&mut index)?)?;
                     let x = number(next(&mut index)?)? as i32;
@@ -193,7 +230,7 @@ pub fn run(command: Command, queries_path: &Path, args: &[&str]) -> Result<(), S
         .map_err(|error| format!("cannot write {}: {error}", queries_path.display()))?;
 
     // 1. 游戏侧：真实 Director 流水线交付目标区块。
-    let bamboo = director_blocks(&options)?;
+    let (bamboo, bamboo_post, bamboo_entities) = director_blocks(&options)?;
 
     // 2. 官方：9 个中心都跑过的整块。
     let mut command = command;
@@ -213,6 +250,14 @@ pub fn run(command: Command, queries_path: &Path, args: &[&str]) -> Result<(), S
     let mut report = Report {
         options: &options,
         bamboo: &bamboo,
+        bamboo_post: &bamboo_post,
+        bamboo_entities: &bamboo_entities,
+        entity_checks: 0,
+        entity_mismatches: Vec::new(),
+        post_entries: 0,
+        post_mismatches: Vec::new(),
+        post_lines: 0,
+        post_marks_by_source: [0; 9],
         compared: 0,
         cells: 0,
         mismatches: Vec::new(),
@@ -238,17 +283,26 @@ pub fn run(command: Command, queries_path: &Path, args: &[&str]) -> Result<(), S
 
 /// `(种子, x, z)` → Director 交付的整块方块。
 type GameBlocks = HashMap<(i64, i32, i32), Vec<u32>>;
+/// `(种子, x, z)` → Director 交付盒子里的 `PostProcessing`，以及写盘再读回的同一张表。
+/// `(seed, x, z)` → the delivered box's `PostProcessing` and the same table after
+/// a save encode / decode round trip.
+type GamePost = HashMap<(i64, i32, i32), (Vec<Vec<u16>>, Vec<Vec<u16>>)>;
+/// `(种子, x, z)` → Director 交付的区块现在写盘会写出的 `block_entities` 条目。
+/// `(seed, x, z)` → the `block_entities` entries a save of the delivered chunk writes.
+type GameEntities = HashMap<(i64, i32, i32), Vec<mc_bamboo_nbt::Tag>>;
 
 /// 每个种子起一个 `World`，强加载这个种子的全部目标，跑到全部交付、计算池排空，
 /// 读出方块。改坏开关只对这个种子生效，跑完清掉。
 /// One `World` per seed: force-load its targets, run until delivered and the pool
 /// drains, read the blocks. The break switch is scoped to the seed and cleared.
-fn director_blocks(options: &Options) -> Result<GameBlocks, String> {
+fn director_blocks(options: &Options) -> Result<(GameBlocks, GamePost, GameEntities), String> {
     let mut by_seed: BTreeMap<i64, Vec<ChunkPos>> = BTreeMap::new();
     for &(seed, x, z) in &options.targets {
         by_seed.entry(seed).or_default().push(ChunkPos::new(x, z));
     }
     let mut out = HashMap::new();
+    let mut post = HashMap::new();
+    let mut entities = HashMap::new();
     for (seed, positions) in by_seed {
         set_merge_break(options.break_mode.map(|mode| (seed, mode)));
         let (_inbox, receiver) = mc_bamboo_game::inbound_channel();
@@ -268,7 +322,7 @@ fn director_blocks(options: &Options) -> Result<GameBlocks, String> {
             ..WorldConfig::default()
         };
         let mut world = World::new(world_config, receiver);
-        world.force_chunks_unpaced(&positions);
+        world.load_chunks_unpaced(&positions, mc_bamboo_world::ticket::FULL_CHUNK_LEVEL);
         let deadline = Instant::now() + Duration::from_secs(1800);
         let mut quiet = 0;
         loop {
@@ -289,15 +343,101 @@ fn director_blocks(options: &Options) -> Result<GameBlocks, String> {
                 .chunk_blocks_unpaced(pos)
                 .ok_or_else(|| format!("seed {seed}: {pos:?} not delivered"))?;
             out.insert((seed, pos.x, pos.z), blocks);
+            let tables = world
+                .chunk_post_processing_unpaced(pos)
+                .ok_or_else(|| format!("seed {seed}: {pos:?} PostProcessing unavailable"))?
+                .map_err(|error| format!("seed {seed}: {pos:?} save round trip: {error}"))?;
+            post.insert((seed, pos.x, pos.z), tables);
+            let nbt = world
+                .chunk_nbt_unpaced(pos)
+                .ok_or_else(|| format!("seed {seed}: {pos:?} chunk NBT unavailable"))?
+                .map_err(|error| format!("seed {seed}: {pos:?} chunk NBT: {error}"))?;
+            let list = match mc_bamboo_storage::chunk_nbt::field(&nbt, "block_entities") {
+                Some(mc_bamboo_nbt::Tag::List(list)) => list.clone(),
+                _ => Vec::new(),
+            };
+            entities.insert((seed, pos.x, pos.z), list);
         }
         set_merge_break(None);
     }
+    Ok((out, post, entities))
+}
+
+/// 官方一个来源中心的方块实体行 `[x,y,z,SNBT|"DUMMY"]` 转成合并用的条目；DUMMY 用
+/// 只有 `id: "DUMMY"` 的标签表示。
+/// One source's vanilla block entity rows `[x,y,z,SNBT|"DUMMY"]` as merge entries;
+/// DUMMY becomes a tag holding only `id: "DUMMY"`.
+fn official_block_entities(rows: &Value) -> Result<Vec<GeneratedBlockEntity>, String> {
+    let mut out = Vec::new();
+    for row in rows
+        .as_array()
+        .ok_or("block entity source is not an array")?
+    {
+        let row = row.as_array().ok_or("bad block entity row")?;
+        let at = |index: usize| -> Result<i32, String> {
+            row.get(index)
+                .and_then(Value::as_i64)
+                .map(|value| value as i32)
+                .ok_or_else(|| "bad block entity coordinate".to_owned())
+        };
+        let pos = (at(0)?, at(1)?, at(2)?);
+        let text = row
+            .get(3)
+            .and_then(Value::as_str)
+            .ok_or("bad block entity snbt")?;
+        let tag = if text == "DUMMY" {
+            mc_bamboo_nbt::Tag::Compound(vec![(
+                "id".to_owned(),
+                mc_bamboo_nbt::Tag::String("DUMMY".to_owned()),
+            )])
+        } else {
+            mc_bamboo_nbt::parse_snbt(text)
+                .map_err(|error| format!("bad official block entity snbt {text}: {error}"))?
+        };
+        out.push((pos, tag));
+    }
     Ok(out)
+}
+
+fn is_dummy(tag: &mc_bamboo_nbt::Tag) -> bool {
+    matches!(
+        mc_bamboo_storage::chunk_nbt::field(tag, "id"),
+        Some(mc_bamboo_nbt::Tag::String(id)) if id == "DUMMY"
+    )
+}
+
+/// 复合标签的全部键值（值写成 SNBT），按键排序，比较时不看键的先后。
+/// All entries of a compound (values as SNBT), sorted by key so order is ignored.
+fn sorted_entries(tag: &mc_bamboo_nbt::Tag) -> Vec<(String, String)> {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+        return vec![("#tag".to_owned(), tag.to_snbt())];
+    };
+    let mut out: Vec<(String, String)> = entries
+        .iter()
+        .map(|(key, value)| (key.clone(), value.to_snbt()))
+        .collect();
+    out.sort();
+    out
 }
 
 struct Report<'a> {
     options: &'a Options,
     bamboo: &'a GameBlocks,
+    bamboo_post: &'a GamePost,
+    bamboo_entities: &'a GameEntities,
+    /// 比过的方块实体条数。
+    entity_checks: u64,
+    /// 方块实体不一致：必须为空。
+    entity_mismatches: Vec<String>,
+    /// 比过的官方 `PostProcessing` 条目数（交付和读回各算一次）。
+    post_entries: u64,
+    /// `PostProcessing` 不一致：必须为空。
+    post_mismatches: Vec<String>,
+    /// 比过 `PostProcessing` 的 isolated 线数。
+    post_lines: usize,
+    /// 官方各来源中心记进目标的新标记条数之和（下标 (dz+1)*3+(dx+1)），
+    /// 用来确认邻居记进来的标记真的被覆盖到。
+    post_marks_by_source: [u64; 9],
     compared: usize,
     cells: u64,
     mismatches: Vec<String>,
@@ -393,6 +533,16 @@ impl Report<'_> {
             ));
         }
         let game = feature_writes_into(&config(seed, self.options.structures), x, z)?;
+        let entity_sources = value
+            .get("blockEntities")
+            .and_then(Value::as_array)
+            .ok_or("isolated line missing blockEntities")?;
+        if entity_sources.len() != 9 {
+            return Err(format!(
+                "seed {seed} ({x},{z}) isolated: {} block entity sources",
+                entity_sources.len()
+            ));
+        }
         let mut groups = Vec::with_capacity(sources.len());
         let mut source_diffs = Vec::new();
         for (slot, writes) in sources.iter().enumerate() {
@@ -416,6 +566,8 @@ impl Report<'_> {
             groups.push(FeatureWrites {
                 slot: slot as u8,
                 deltas,
+                marks: Vec::new(),
+                block_entities: official_block_entities(&entity_sources[slot])?,
             });
             let mut game_writes: BTreeMap<usize, u32> = BTreeMap::new();
             for &(wx, wy, wz, state) in &game[slot] {
@@ -453,15 +605,174 @@ impl Report<'_> {
                 .collect::<Vec<Vec<u32>>>(),
             biomes: Vec::new(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         merge_feature_writes(&mut merged, groups);
+        self.compare_block_entities(seed, x, z, &merged.block_entities)?;
         let merged = merged.blocks.into_iter().flatten().collect::<Vec<u32>>();
+        self.compare_post_processing(seed, x, z, value)?;
         let note = if source_diffs.is_empty() {
             "per-source writes identical".to_owned()
         } else {
             format!("per-source differences: {}", source_diffs.join("; "))
         };
         self.compare(seed, x, z, "isolated", &merged, note)
+    }
+
+    /// 交付区块写盘的 `block_entities` 和官方 9 个中心的方块实体（按游戏同一条合并
+    /// 规则合好）逐条比：官方有真实数据的位置整条标签逐键相同；官方只有
+    /// `WorldGenRegion.setBlock` 的 DUMMY 占位的位置，交付侧要有一条（构造器默认值，
+    /// 官方升成 `LevelChunk` 时同样补建）；交付侧多出来的位置报错。
+    ///
+    /// Compare the delivered chunk's saved `block_entities` with vanilla's nine
+    /// centers' block entities merged by the game's own rule: real entries must
+    /// match key by key; DUMMY placeholders need some delivered entry (vanilla
+    /// creates the default one at `LevelChunk` promotion); extra delivered
+    /// positions are mismatches.
+    fn compare_block_entities(
+        &mut self,
+        seed: i64,
+        x: i32,
+        z: i32,
+        official: &[GeneratedBlockEntity],
+    ) -> Result<(), String> {
+        let delivered = self
+            .bamboo_entities
+            .get(&(seed, x, z))
+            .ok_or_else(|| format!("no delivered block entities for seed {seed} ({x},{z})"))?;
+        let mut ours: BTreeMap<(i32, i32, i32), Vec<(String, String)>> = BTreeMap::new();
+        for tag in delivered {
+            let int = |key: &str| match mc_bamboo_storage::chunk_nbt::field(tag, key) {
+                Some(mc_bamboo_nbt::Tag::Int(value)) => Ok(*value),
+                _ => Err(format!("delivered block entity without {key}")),
+            };
+            ours.insert((int("x")?, int("y")?, int("z")?), sorted_entries(tag));
+        }
+        for (at, tag) in official {
+            self.entity_checks += 1;
+            let got = ours.remove(at);
+            if is_dummy(tag) {
+                if got.is_none() {
+                    self.entity_mismatches.push(format!(
+                        "seed {seed} ({x},{z}) block entity at {at:?}: vanilla has a pending \
+                         block entity, game has none"
+                    ));
+                }
+                continue;
+            }
+            // 官方 `LevelChunk.getBlockEntityNbtForSaving` 存盘时补 `keepPacked: false`；
+            // `ProtoChunk` 的那份没有。交付的是完工区块，按前者比。
+            // Vanilla `LevelChunk.getBlockEntityNbtForSaving` adds `keepPacked: false`
+            // (the `ProtoChunk` one does not); the delivered chunk is full.
+            let mut want = sorted_entries(tag);
+            if !want.iter().any(|(key, _)| key == "keepPacked") {
+                want.push(("keepPacked".to_owned(), "0b".to_owned()));
+                want.sort();
+            }
+            match got {
+                Some(got) if got == want => {}
+                Some(got) => self.entity_mismatches.push(format!(
+                    "seed {seed} ({x},{z}) block entity at {at:?}: vanilla {want:?}, game {got:?}"
+                )),
+                None => self.entity_mismatches.push(format!(
+                    "seed {seed} ({x},{z}) block entity at {at:?}: vanilla {want:?}, game missing"
+                )),
+            }
+        }
+        for (at, got) in ours {
+            self.entity_mismatches.push(format!(
+                "seed {seed} ({x},{z}) block entity at {at:?}: vanilla none, game {got:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// isolated 线的 `PostProcessing`：官方干净地形标记 + 9 个中心各自新记进目标的
+    /// 标记，按约定顺序（中心自己先、其余 slot 升序）逐段拼成基准；和 Director
+    /// 交付盒子的表、写盘读回的表逐段逐项比。另外逐个来源比标记，便于定位。
+    /// The isolated line's `PostProcessing`: vanilla's clean terrain marks plus the
+    /// 9 centers' new marks, concatenated per section in the agreed order (center
+    /// first, then ascending slot), compared entry by entry with the Director's
+    /// delivered table and its save round trip; per-source marks are diffed too.
+    fn compare_post_processing(
+        &mut self,
+        seed: i64,
+        x: i32,
+        z: i32,
+        value: &Value,
+    ) -> Result<(), String> {
+        let tables = isolated_post_processing(value)
+            .map_err(|error| format!("seed {seed} ({x},{z}): {error}"))?;
+        let (marks, want) = (tables.marks, tables.full);
+        for (total, source) in self.post_marks_by_source.iter_mut().zip(&marks) {
+            *total += source.iter().map(Vec::len).sum::<usize>() as u64;
+        }
+        // 逐来源：游戏的标记（世界坐标）按段打包后与官方同一来源比。
+        // Per source: pack the game's world-space marks and compare with vanilla's.
+        let game_marks = feature_marks_into(&config(seed, self.options.structures), x, z)?;
+        for (slot, game) in game_marks.iter().enumerate() {
+            let mut packed = vec![Vec::new(); mc_bamboo_world::SECTION_COUNT];
+            for &(wx, wy, wz) in game {
+                let section = ((wy - mc_bamboo_world::MIN_Y) >> 4) as usize;
+                if let Some(list) = packed.get_mut(section) {
+                    list.push(((wx & 15) | ((wy & 15) << 4) | ((wz & 15) << 8)) as u16);
+                }
+            }
+            if packed != marks[slot] {
+                let official: usize = marks[slot].iter().map(Vec::len).sum();
+                self.post_mismatches.push(format!(
+                    "seed {seed} ({x},{z}) source {}: official {official} marks vs game {} \
+                     (per-source marks before assembly)",
+                    offset_name(slot),
+                    game.len()
+                ));
+            }
+        }
+        let (delivered, reloaded) = self
+            .bamboo_post
+            .get(&(seed, x, z))
+            .ok_or_else(|| format!("no game PostProcessing for seed {seed} ({x},{z})"))?;
+        for (label, have) in [("delivered", delivered), ("save round trip", reloaded)] {
+            self.post_entries += want.iter().map(Vec::len).sum::<usize>() as u64;
+            if have.len() != want.len() {
+                self.post_mismatches.push(format!(
+                    "seed {seed} ({x},{z}) {label}: {} sections, expected {}",
+                    have.len(),
+                    want.len()
+                ));
+                continue;
+            }
+            for (section, (want, have)) in want.iter().zip(have).enumerate() {
+                if want == have {
+                    continue;
+                }
+                let mut a = want.clone();
+                let mut b = have.clone();
+                a.sort_unstable();
+                b.sort_unstable();
+                let kind = if a == b {
+                    "same multiset, different order"
+                } else {
+                    "different multiset"
+                };
+                let first = want
+                    .iter()
+                    .zip(have)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(want.len().min(have.len()));
+                self.post_mismatches.push(format!(
+                    "seed {seed} ({x},{z}) {label} PostProcessing section {section} ({kind}): \
+                     official {} vs game {}, first diff at {first}: official {:?}, game {:?}",
+                    want.len(),
+                    have.len(),
+                    want.get(first),
+                    have.get(first)
+                ));
+            }
+        }
+        self.post_lines += 1;
+        Ok(())
     }
 
     fn compare(
@@ -590,20 +901,65 @@ impl Report<'_> {
                 ));
             }
         }
+        for line in &self.post_mismatches {
+            println!("  MISMATCH {line}");
+        }
+        for line in self
+            .entity_mismatches
+            .iter()
+            .take(self.options.show.max(20))
+        {
+            println!("  MISMATCH {line}");
+        }
+        println!(
+            "feature-merge block entities: {} vanilla entries compared with the delivered \
+             save, {} mismatches",
+            self.entity_checks,
+            self.entity_mismatches.len()
+        );
         println!(
             "feature-merge: {} target×order lines, {} cells; isolated (fixed-order \
              first-writer merge of vanilla per-center writes) {} differing; shared ProtoChunk \
-             orders {} differing; game spill writes by source {:?}",
+             orders {} differing; game spill writes by source {:?}; PostProcessing {} isolated \
+             lines, {} entries (delivered + save round trip), official new marks by source {:?}, \
+             {} mismatches",
             self.compared,
             self.cells,
             self.isolated_differing,
             self.shared_differing,
-            self.spill_writes
+            self.spill_writes,
+            self.post_lines,
+            self.post_entries,
+            self.post_marks_by_source,
+            self.post_mismatches.len()
         );
         if self.isolated_differing > 0 {
             return Err(format!(
                 "feature-merge: {} differing cells against the isolated merge",
                 self.isolated_differing
+            ));
+        }
+        let isolated_lines = if self.options.orders.iter().any(|order| order == "isolated") {
+            self.options.targets.len()
+        } else {
+            0
+        };
+        if self.post_lines != isolated_lines {
+            return Err(format!(
+                "feature-merge: compared PostProcessing on {} isolated lines, expected {isolated_lines}",
+                self.post_lines
+            ));
+        }
+        if !self.entity_mismatches.is_empty() {
+            return Err(format!(
+                "feature-merge: {} block entity mismatches",
+                self.entity_mismatches.len()
+            ));
+        }
+        if !self.post_mismatches.is_empty() {
+            return Err(format!(
+                "feature-merge: {} PostProcessing mismatches",
+                self.post_mismatches.len()
             ));
         }
         Ok(())
@@ -662,6 +1018,80 @@ fn scan_targets(
         }
     }
     Ok(())
+}
+
+/// 一条官方 isolated 线里的 `PostProcessing`：目标的干净地形标记、9 个来源各自新记的
+/// 标记，以及按约定顺序（地形在前，然后中心自己、其余 slot 升序）逐段拼出的完工表。
+/// A vanilla isolated line's `PostProcessing`: the target's clean terrain marks,
+/// each source's new marks, and the finished table concatenated per section in
+/// the agreed order (terrain, then the center, then ascending slots).
+pub(crate) struct IsolatedPostProcessing {
+    pub(crate) terrain: Vec<Vec<u16>>,
+    pub(crate) marks: Vec<Vec<Vec<u16>>>,
+    pub(crate) full: Vec<Vec<u16>>,
+}
+
+/// 解析 isolated 线的 `postProcessing`（还原后的地形标记）和 `marks`（9 × 24 段）。
+/// Parse an isolated line's `postProcessing` (restored terrain marks) and `marks`.
+pub(crate) fn isolated_post_processing(value: &Value) -> Result<IsolatedPostProcessing, String> {
+    let terrain = packed_sections(value.get("postProcessing"))
+        .map_err(|error| format!("terrain PostProcessing: {error}"))?;
+    let marks = value
+        .get("marks")
+        .and_then(Value::as_array)
+        .ok_or("isolated line missing marks")?
+        .iter()
+        .map(|source| packed_sections(Some(source)))
+        .collect::<Result<Vec<_>, String>>()?;
+    if terrain.len() != mc_bamboo_world::SECTION_COUNT || marks.len() != 9 {
+        return Err(format!(
+            "{} terrain sections, {} mark sources",
+            terrain.len(),
+            marks.len()
+        ));
+    }
+    let mut order: Vec<usize> = vec![4];
+    order.extend((0..9).filter(|&slot| slot != 4));
+    let mut full = terrain.clone();
+    for &slot in &order {
+        if marks[slot].len() != mc_bamboo_world::SECTION_COUNT {
+            return Err(format!(
+                "source {slot}: {} mark sections",
+                marks[slot].len()
+            ));
+        }
+        for (section, entries) in marks[slot].iter().enumerate() {
+            full[section].extend_from_slice(entries);
+        }
+    }
+    Ok(IsolatedPostProcessing {
+        terrain,
+        marks,
+        full,
+    })
+}
+
+/// 官方线里 24 段 packed short 的 `PostProcessing`。
+/// A vanilla line's 24 packed-short `PostProcessing` sections.
+fn packed_sections(value: Option<&Value>) -> Result<Vec<Vec<u16>>, String> {
+    value
+        .and_then(Value::as_array)
+        .ok_or("PostProcessing is not an array")?
+        .iter()
+        .map(|section| {
+            section
+                .as_array()
+                .ok_or("PostProcessing section is not an array")?
+                .iter()
+                .map(|entry| {
+                    entry
+                        .as_u64()
+                        .and_then(|packed| u16::try_from(packed).ok())
+                        .ok_or_else(|| "bad packed PostProcessing short".to_owned())
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// 一条官方线里的整块方块（`palette` + `blocks`，y、x、z 顺序）。

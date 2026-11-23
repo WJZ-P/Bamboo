@@ -923,6 +923,8 @@ fn generate_recorded(
         blocks,
         biomes: region.center().sections().to_vec(),
         heightmaps: Default::default(),
+        post_processing: Vec::new(),
+        block_entities: Vec::new(),
     };
     let column = mc_bamboo_game::worldgen::build_region_column(&chunk)?;
     perf::pause();
@@ -1111,6 +1113,8 @@ impl TerrainView {
             blocks: self.blocks.clone(),
             biomes: self.biomes.clone(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
+            block_entities: Vec::new(),
         }
     }
 }
@@ -1136,6 +1140,7 @@ fn feature_input(
         blocks,
         biomes,
         heights,
+        post_processing: std::array::from_fn(|_| Vec::new()),
     }
 }
 

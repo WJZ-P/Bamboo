@@ -176,6 +176,13 @@ pub fn place(
                         pos.2,
                         if place_air { cave_air } else { fluid },
                     );
+                    // 官方只在挖空的那一层调 markAboveForPostProcessing：
+                    // 上层两格不是空气时各记一次。
+                    // Official calls markAboveForPostProcessing only for the
+                    // carved-air layer.
+                    if place_air {
+                        world.mark_above_for_post_processing(pos);
+                    }
                 }
             }
         }
@@ -204,6 +211,7 @@ pub fn place(
                         && lake.can_replace_with_barrier.test(world, pos)
                     {
                         world.set_block_with_heightmaps(pos.0, pos.1, pos.2, barrier);
+                        world.mark_above_for_post_processing(pos);
                     }
                 }
             }

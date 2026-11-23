@@ -9,14 +9,22 @@
 //! food / regeneration countdowns. Health reaching zero runs the death flow.
 
 use mc_bamboo_blocks::entity::{JavaRandom, mob::DamageSource};
-use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_core::Vec3;
 use mc_bamboo_data::sounds;
 use mc_bamboo_protocol::{
     frame::packet_body,
-    packet::play::{DamageEvent, HurtAnimation, PlayerCombatEnter, SetHealth, Sound},
+    packet::play::{
+        DamageEvent, HurtAnimation, PlayerCombatEnter, SetEntityMotion, SetHealth, Sound,
+    },
 };
 
-use crate::{inbound::PlayerId, player::Player, region::Region};
+use std::collections::BTreeMap;
+
+use mc_bamboo_blocks::{LevelRandom, PlayerDeathDrops, entity::Entities};
+
+use crate::{
+    gamerules::GameRuleSet, inbound::PlayerId, links::Links, player::Player, region::Region,
+};
 
 /// 官方 `ServerPlayer.doTick` 里 `set_health` 的上次值和三个判据。
 /// 血量、饥饿或饱和度是否为 0 变了，才补发一包。
@@ -116,10 +124,44 @@ pub(crate) fn tick(region: &mut Region) {
     }
 }
 
+/// 受伤链路要用到的那一部分区域状态：玩家表、连接、音效种子、实体表（读攻击者名字）
+/// 和规则。精确驱动的实体循环里整个 `Region` 已经拆给了方块世界，生物打玩家时
+/// 从 `RegionLevel` 拼出同一组借用，和区域入口走同一份代码。
+///
+/// The slice of region state the hurt path needs, so a mob's hit can run it from
+/// inside the entity loop where the region is already split up.
+pub(crate) struct HurtParts<'a> {
+    pub players: &'a mut BTreeMap<PlayerId, Player>,
+    pub links: &'a mut Links,
+    pub sound_seeds: &'a LevelRandom,
+    pub entities: &'a Entities,
+    pub difficulty: i32,
+    pub rules: &'a GameRuleSet,
+    /// 正在 tick、不在实体表里的攻击者（精确驱动里打人的生物）。
+    pub attacker: Option<&'a mc_bamboo_blocks::entity::EntityPublic>,
+}
+
+impl Region {
+    /// 拆出受伤链路用的借用。
+    pub(crate) fn hurt_parts(&mut self) -> HurtParts<'_> {
+        HurtParts {
+            players: &mut self.players,
+            links: &mut self.links,
+            sound_seeds: &self.sound_seed_generator,
+            entities: &self.entities,
+            difficulty: self.global.difficulty as i32,
+            rules: &self.global.rules,
+            attacker: None,
+        }
+    }
+}
+
 /// 打一名玩家。返回是否真的受伤（官方 `hurtServer` 的布尔）。
 ///
 /// `source.position` 是 `getSourcePosition()`：击退方向和受伤动画的偏角都用它。
 /// `random` 是这名玩家的实体随机源，击退方向退化成 0 时官方从它取数。
+/// 打死时的掉落在死亡流程的包发完之后生成：生成本身不发包，只取世界随机数，
+/// 死亡流程里没有别的世界随机数，所以和官方「先掉落再发后面的包」等价。
 pub(crate) fn hurt_player(
     region: &mut Region,
     id: PlayerId,
@@ -127,19 +169,169 @@ pub(crate) fn hurt_player(
     amount: f32,
     random: &mut Option<JavaRandom>,
 ) -> bool {
-    let difficulty = region.global.difficulty as i32;
-    let Some(player) = region.players.get_mut(&id) else {
-        return false;
+    let (hurt, drops) = hurt_player_in(&mut region.hurt_parts(), id, source, amount, random);
+    if let Some(drops) = drops {
+        let (mut level, ticks) = region.block_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        world.spawn_player_death_drops(&drops);
+    }
+    hurt
+}
+
+/// 生物打玩家（`Mob.doHurtTarget` 里的 `hurtServer`）：玩家自己的实体随机源
+/// （击退方向退化时取数）按值拷出、打中后写回。精确驱动的钩子和效果阶段都走这里。
+pub(crate) fn hurt_player_by_mob(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    source: DamageSource,
+    amount: f32,
+) -> (bool, Option<PlayerDeathDrops>) {
+    let mut random = parts.players.get(&id).map(|player| player.random);
+    let (hurt, drops) = hurt_player_in(parts, id, source, amount, &mut random);
+    if hurt && let (Some(state), Some(player)) = (random, parts.players.get_mut(&id)) {
+        player.random = state;
+    }
+    if hurt && source.arrow_punch > 0 {
+        apply_arrow_push(parts, id, &source);
+    }
+    (hurt, drops)
+}
+
+/// 玩家的击退抗性：属性缺省值加上装备的修饰符。
+///
+/// The player's knockback resistance: the default plus equipment modifiers.
+fn knockback_resistance(player: &Player) -> f64 {
+    use mc_bamboo_blocks::entity::mob::{
+        attributes::Attribute,
+        equipment::{SLOTS, stack_modifiers},
+    };
+    use mc_bamboo_data::registries::{attribute::KNOCKBACK_RESISTANCE, attribute_defaults};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut resistance = Attribute::new(
+        KNOCKBACK_RESISTANCE,
+        attribute_defaults::KNOCKBACK_RESISTANCE,
+    );
+    for (slot, stack) in SLOTS
+        .into_iter()
+        .zip(player.equipment_stacks(&ItemStack::empty()))
+    {
+        for (kind, modifier) in stack_modifiers(stack, slot) {
+            if kind == KNOCKBACK_RESISTANCE {
+                resistance.remove_modifier(&modifier.id);
+                resistance.modifiers.push(modifier);
+            }
+        }
+    }
+    resistance.value()
+}
+
+/// 山羊冲撞的 `LivingEntity.knockback(strength, dx, dz)`：不管这一下打没打中都推，
+/// 方向和力道由山羊给；推完把速度发给看得见的人和自己。
+///
+/// A goat ram's `LivingEntity.knockback(strength, dx, dz)`, applied whether or not the
+/// hit landed, with the goat's direction and strength; the new velocity goes to the
+/// trackers and the player.
+pub(crate) fn knock_back_player(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    strength: f64,
+    (mut dx, mut dz): (f64, f64),
+) {
+    let Some(player) = parts.players.get_mut(&id) else {
+        return;
+    };
+    let strength = strength * (1.0 - knockback_resistance(player));
+    if strength <= 0.0 {
+        return;
+    }
+    while dx * dx + dz * dz < f64::from(1.0e-5_f32) {
+        dx = (player.random.next_double() - player.random.next_double()) * 0.01;
+        dz = (player.random.next_double() - player.random.next_double()) * 0.01;
+    }
+    let length = (dx * dx + dz * dz).sqrt();
+    let delta = player.motion.delta;
+    let dy = if player.on_ground {
+        0.4_f64.min(delta.y / 2.0 + strength)
+    } else {
+        delta.y
+    };
+    player.motion.delta = Vec3::new(
+        delta.x / 2.0 - dx / length * strength,
+        dy,
+        delta.z / 2.0 - dz / length * strength,
+    );
+    let packet = crate::links::encode_frames(&SetEntityMotion {
+        entity_id: id.0,
+        movement: player.motion.delta,
+    });
+    send_to_tracking_and_self(parts, id, &packet);
+}
+
+fn apply_arrow_push(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
+    let Some(player) = parts.players.get_mut(&id) else {
+        return;
+    };
+    let resistance = knockback_resistance(player);
+    if let Some(push) = source.arrow_push(resistance) {
+        player.motion.delta = player.motion.delta.add(push);
+        let packet = crate::links::encode_frames(&SetEntityMotion {
+            entity_id: id.0,
+            movement: player.motion.delta,
+        });
+        send_to_tracking_and_self(parts, id, &packet);
+    }
+}
+
+/// [`hurt_player`] 的本体：返回 `wasHurt` 和打死时要在世界里生成的掉落。
+pub(crate) fn hurt_player_in(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    source: DamageSource,
+    amount: f32,
+    random: &mut Option<JavaRandom>,
+) -> (bool, Option<PlayerDeathDrops>) {
+    // 火矢先点燃，再伤害；拒绝伤害时只恢复火焰刻数，不恢复冰冻。
+    // Flaming arrows ignite before damage; rejection restores only the fire timer, not freezing.
+    let previous_fire = if source.arrow_ignite_ticks > 0 {
+        parts.players.get_mut(&id).map(|player| {
+            let previous = player.environment.remaining_fire_ticks;
+            crate::player_environment::ignite_player(player, source.arrow_ignite_ticks);
+            previous
+        })
+    } else {
+        None
+    };
+    let outcome = hurt_player_damage(parts, id, source, amount, random);
+    if !outcome.0
+        && let Some(previous) = previous_fire
+        && let Some(player) = parts.players.get_mut(&id)
+    {
+        crate::player_environment::set_player_fire_ticks(player, previous);
+    }
+    outcome
+}
+
+fn hurt_player_damage(
+    parts: &mut HurtParts<'_>,
+    id: PlayerId,
+    source: DamageSource,
+    amount: f32,
+    random: &mut Option<JavaRandom>,
+) -> (bool, Option<PlayerDeathDrops>) {
+    let difficulty = parts.difficulty;
+    let Some(player) = parts.players.get_mut(&id) else {
+        return (false, None);
     };
     // 创造 / 旁观模式的能力无敌（官方 `Player.hurtServer` 的第二道判据）。
     // 这一期把创造模式按 `Abilities.invulnerable` 处理；旁观者直接不受伤。
     if player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Spectator {
-        return false;
+        return (false, None);
     }
     if player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Creative
         && !source.kind.bypasses_invulnerability()
     {
-        return false;
+        return (false, None);
     }
     // `LivingEntity.hurtServer`：`#is_fire` 的伤害被抗火效果完全挡下。
     // `LivingEntity.hurtServer`: fire resistance blocks all `#is_fire` damage.
@@ -148,7 +340,7 @@ pub(crate) fn hurt_player(
             .effects
             .has(mc_bamboo_data::registries::mob_effect::FIRE_RESISTANCE)
     {
-        return false;
+        return (false, None);
     }
     let position = player.position();
     let armor = {
@@ -165,8 +357,12 @@ pub(crate) fn hurt_player(
             .health
             .hurt(amount, source, difficulty, armor, position);
         let Some(outcome) = outcome else {
-            return false;
+            return (false, None);
         };
+        // `resolveMobResponsibleForDamage` 和 `lastDamageSource`：狼保护主人时读。
+        // `resolveMobResponsibleForDamage` and `lastDamageSource`, read by wolves.
+        let now = player.entity_ticks;
+        player.combat_memory.record_hurt(&source, now);
         // `set_entity_data` 的 `Health` 项由下一刻的派生状态阶段发出。
         player.sync.metadata_dirty = true;
         (
@@ -181,15 +377,15 @@ pub(crate) fn hurt_player(
         // 没有 `CombatTracker.recordDamage`，也没有饥饿消耗。
         // 进入战斗包只在那条路径里发；伤害事件、音效和击退由外层骨架发。
         if outcome.damage > 0.0 {
-            send_player_combat_enter(region, id, &source);
+            send_player_combat_enter(parts, id, &source);
         }
-        broadcast_damage_event(region, id, &source);
+        broadcast_damage_event(parts, id, &source);
         // 官方 `dealDefaultKnockback` 里 `indicateDamage` 先发 hurt_animation，
         // 之后才播死亡 / 受伤音效。
         if outcome.knockback {
-            let player = region.players.get_mut(&id).expect("玩家刚才还在");
+            let player = parts.players.get_mut(&id).expect("玩家刚才还在");
             knockback(player, &source, position, random);
-            region.links.send(
+            parts.links.send(
                 id,
                 &HurtAnimation {
                     entity_id: id.0,
@@ -199,32 +395,32 @@ pub(crate) fn hurt_player(
         }
         // `LivingEntity.hurtServer` 在 `isDeadOrDying()` 时播 `getDeathSound()`
         // （玩家的 `entity.player.death`），否则播受伤音效。
-        let dying = region
+        let dying = parts
             .players
             .get(&id)
             .is_some_and(|player| player.health.health <= 0.0);
         if dying {
-            play_sound(region, id, "minecraft:entity.player.death", position);
+            play_sound(parts, id, "minecraft:entity.player.death", position);
         } else {
-            play_hurt_sound(region, id, &source, position);
+            play_hurt_sound(parts, id, &source, position);
         }
     }
     // 官方 `Player.actuallyHurt` 对完整受击和冷却期内的部分受击都写
     // `CombatTracker.recordDamage`、设置击杀归属，只要真正扣了血。
     if outcome.damage > 0.0 {
-        crate::player_death::record_combat(region, id, &source, outcome.damage);
+        crate::player_death::record_combat(parts, id, &source, outcome.damage);
     }
-    let dying = region
+    let dying = parts
         .players
         .get(&id)
         .is_some_and(|player| player.health.health <= 0.0 && !player.dead);
     // 官方 `ServerPlayer.doTick` 在 `die` 之后才补 `set_health`；
     // 死亡流程里的 player_combat_kill / system_chat / entity_event 必须排前面。
-    let send_health = |region: &mut Region| {
-        let player = region.players.get_mut(&id).expect("玩家刚才还在");
+    let send_health = |parts: &mut HurtParts<'_>| {
+        let player = parts.players.get_mut(&id).expect("玩家刚才还在");
         if sync != player.health_sync {
             player.health_sync = sync;
-            region.links.send(
+            parts.links.send(
                 id,
                 &SetHealth {
                     health: sync.health,
@@ -237,15 +433,17 @@ pub(crate) fn hurt_player(
     // `LivingEntity.hurtServer` 在 `isDeadOrDying()` 时调 `die`：
     // 掉落、死亡消息和死亡界面都在这里接上；重生等客户端的
     // `PERFORM_RESPAWN`，不受 `immediate_respawn` 影响。
-    if dying {
-        crate::player_death::die(region, id, source);
-    }
-    send_health(region);
-    true
+    let drops = if dying {
+        crate::player_death::die_in(parts, id, source)
+    } else {
+        None
+    };
+    send_health(parts);
+    (true, drops)
 }
 
 /// `ServerLevel.broadcastDamageEvent`：`damage_event` 发给跟踪者（含自己）。
-fn broadcast_damage_event(region: &mut Region, id: PlayerId, source: &DamageSource) {
+fn broadcast_damage_event(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
     let damage_type = mc_bamboo_data::damage_type_id(source.kind.name()).unwrap_or(0);
     let packet = frame_from_body(&packet_body(&DamageEvent {
         entity_id: id.0,
@@ -256,17 +454,21 @@ fn broadcast_damage_event(region: &mut Region, id: PlayerId, source: &DamageSour
         // 只有 `at <location>` 显式给的位置才发，攻击者位置不写进包里。
         position: source.raw_position,
     }));
-    send_to_tracking_and_self(region, id, &packet);
+    send_to_tracking_and_self(parts, id, &packet);
 }
 
 /// `CombatTracker.recordDamage`：造成者是非玩家生物时，`ServerPlayer.onEnterCombat`
 /// 给玩家自己发一个没有包体的 `player_combat_enter`。
-fn send_player_combat_enter(region: &mut Region, id: PlayerId, source: &DamageSource) {
-    if source.attacker.is_some() && region.players.get(&id).is_some_and(|p| !p.in_combat) {
-        if let Some(player) = region.players.get_mut(&id) {
+fn send_player_combat_enter(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
+    let living_source = source.attacker.is_some()
+        && (source.kind != mc_bamboo_blocks::entity::mob::DamageKind::Arrow
+            || source.attacker_is_player
+            || source.scale_when_non_player);
+    if living_source && parts.players.get(&id).is_some_and(|p| !p.in_combat) {
+        if let Some(player) = parts.players.get_mut(&id) {
             player.in_combat = true;
         }
-        region.links.send(id, &PlayerCombatEnter);
+        parts.links.send(id, &PlayerCombatEnter);
     }
 }
 
@@ -295,15 +497,15 @@ pub(crate) fn play_fall_sound(region: &mut Region, id: PlayerId, damage: i32, po
         seed,
     };
     let frames = crate::links::encode_frames(&sound);
-    send_to_tracking_and_self(region, id, &frames);
+    send_to_tracking_and_self(&mut region.hurt_parts(), id, &frames);
 }
 
-fn play_hurt_sound(region: &mut Region, id: PlayerId, source: &DamageSource, position: Vec3) {
+fn play_hurt_sound(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource, position: Vec3) {
     let name = hurt_sound_name(source);
-    play_sound(region, id, name, position);
+    play_sound(parts, id, name, position);
     // `LivingEntity.playSecondaryHurtSound`：`thorns` 类型再多一声。
     if source.kind == mc_bamboo_blocks::entity::mob::DamageKind::Thorns {
-        let seed = region.sound_seed_generator.source().next_long();
+        let seed = parts.sound_seeds.source().next_long();
         let secondary = Sound {
             sound: i32::from(sounds::sound_event("minecraft:enchant.thorns.hit")),
             inline: None,
@@ -315,7 +517,7 @@ fn play_hurt_sound(region: &mut Region, id: PlayerId, source: &DamageSource, pos
             pitch: 1.0,
             seed,
         };
-        crate::interaction::send_sound(region, Some(id), &secondary);
+        crate::interaction::send_sound_to(parts.players, parts.links, Some(id), &secondary);
     }
 }
 
@@ -337,8 +539,8 @@ fn hurt_sound_name(source: &DamageSource) -> &'static str {
 }
 
 /// `Level.playSeededSound` 的玩家音效：种子取一次世界随机源，广播给范围内除自己以外的玩家。
-fn play_sound(region: &mut Region, id: PlayerId, name: &str, position: Vec3) {
-    let seed = region.sound_seed_generator.source().next_long();
+fn play_sound(parts: &mut HurtParts<'_>, id: PlayerId, name: &str, position: Vec3) {
+    let seed = parts.sound_seeds.source().next_long();
     let sound = Sound {
         sound: i32::from(sounds::sound_event(name)),
         inline: None,
@@ -350,7 +552,7 @@ fn play_sound(region: &mut Region, id: PlayerId, name: &str, position: Vec3) {
         pitch: 1.0,
         seed,
     };
-    crate::interaction::send_sound(region, Some(id), &sound);
+    crate::interaction::send_sound_to(parts.players, parts.links, Some(id), &sound);
 }
 
 /// 把已经编码好的「ID + 包体」加上帧长头。
@@ -363,16 +565,16 @@ fn frame_from_body(body: &[u8]) -> Vec<u8> {
 }
 
 /// 官方 `ChunkMap.sendToTrackingPlayersAndSelf`：观察者是 `seen_by` 加自己。
-fn send_to_tracking_and_self(region: &mut Region, id: PlayerId, packet: &[u8]) {
-    let viewers: Vec<PlayerId> = region
+fn send_to_tracking_and_self(parts: &mut HurtParts<'_>, id: PlayerId, packet: &[u8]) {
+    let viewers: Vec<PlayerId> = parts
         .players
         .get(&id)
         .map(|player| player.sync.seen_by().iter().copied().collect())
         .unwrap_or_default();
     for viewer in viewers {
-        region.links.send_frames(viewer, packet);
+        parts.links.send_frames(viewer, packet);
     }
-    region.links.send_frames(id, packet);
+    parts.links.send_frames(id, packet);
 }
 
 /// 把官方 `getHurtDir()` 的偏角写进 `HurtAnimation` 包。
@@ -390,9 +592,7 @@ fn knockback(
     position: Vec3,
     random: &mut Option<JavaRandom>,
 ) {
-    let (mut dx, mut dz) = source
-        .position
-        .map_or((0.0, 0.0), |at| (at.x - position.x, at.z - position.z));
+    let (mut dx, mut dz) = source.knockback_direction(position).unwrap_or((0.0, 0.0));
     if let Some(random) = random.as_mut()
         && dx * dx + dz * dz < 1.0e-5
     {
@@ -417,64 +617,15 @@ fn knockback(
     player.motion.delta = Vec3::new(delta.x / 2.0 - push_x, dy, delta.z / 2.0 - push_z);
 }
 
-/// 官方 `ServerGamePacketListenerImpl.handleAttack` 的最小版本：
-/// 旁观者、够不到、目标不是生物时忽略；打玩家按官方 `Player.canHarmPlayer`
-/// 的 PVP 缺失处理，明确忽略并记一条日志（1b 之后再做完整 PVP）。
+/// 官方 `ServerGamePacketListenerImpl.handleAttack` → `Player.attack` 的入口。
+/// 完整逻辑（冷却、暴击、横扫、击退、附魔、粒子、音效、动画、PVP）在
+/// [`crate::player_attack`]，这里只保留原来的公共接缝。
+///
+/// Entry point for `ServerGamePacketListenerImpl.handleAttack` → `Player.attack`.
+/// The full logic (cooldown, crit, sweep, knockback, enchantments, particles,
+/// sounds, animations, PVP) lives in [`crate::player_attack`]; this is the seam.
 pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
-    let Some(player) = region.players.get(&id) else {
-        return;
-    };
-    if player.game_mode == mc_bamboo_protocol::packet::play::GameMode::Spectator {
-        return;
-    }
-    let Some(target) = region.entities.public_at(entity_id) else {
-        return;
-    };
-    if target.removed || !matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
-        return;
-    }
-    // 够距：和右键交互同一套判定，官方 `isWithinAttackRange` 的简化版。
-    let position = player.position();
-    let eye_height = player.eye_height();
-    let reach = crate::interaction::interaction_range(player.game_mode);
-    if !crate::interaction::within_block_interaction_range(
-        position,
-        eye_height,
-        reach,
-        mc_bamboo_core::BlockPos::containing(target.position),
-        3.0,
-    ) {
-        return;
-    }
-    let held = player.inventory.held(Hand::Main).clone();
-    // `Player.attack` 命中实体：0.1 点饥饿消耗。
-    crate::player_exhaustion::add_in(region, id, crate::player_exhaustion::ATTACK);
-    let amount = crate::player_health::PlayerHealth::attack_damage(&held);
-    let mut source = DamageSource::player(id.0, position, false);
-    if !held.is_empty()
-        && let Ok(weapon) = u16::try_from(held.item)
-    {
-        source = source.with_weapon(weapon);
-    }
-    let ok = {
-        let (mut level, ticks) = region.block_level();
-        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
-        let ok = world.hurt_mob(entity_id, source, amount);
-        let effects = world.into_effects();
-        crate::interaction::send_effects(region, Some(id), &effects);
-        ok
-    };
-    if ok {
-        // 官方 `Player.attack` 打中之后 `causeFoodExhaustion(0.1f)`，
-        // 挥手包由 `attackVisualEffects` 发给观察者。
-        if let Some(player) = region.players.get_mut(&id) {
-            let food = &mut player.health.food;
-            food.exhaustion =
-                (food.exhaustion + 0.1).min(mc_bamboo_blocks::entity::mob::damage::MAX_EXHAUSTION);
-            player.health_sync = HealthSync::of(player);
-        }
-        crate::entity_sync::broadcast_swing(region, id, Hand::Main);
-    }
+    crate::player_attack::on_attack(region, id, entity_id);
 }
 
 #[cfg(test)]
@@ -510,5 +661,168 @@ mod tests {
         knockback(&mut player, &source, Vec3::default(), &mut None);
         assert_eq!(player.motion.delta.x, -f64::from(0.4_f32));
         assert_eq!(player.motion.delta.z, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod mob_hit_tests {
+    use mc_bamboo_blocks::entity::mob::{DamageKind, DamageSource};
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    fn region_with_player(health: f32) -> (Region, PlayerId) {
+        let mut region = Region::new(2, 20, false);
+        region.global.difficulty = crate::world_state::Difficulty::Normal;
+        let id = PlayerId(1);
+        let mut player = Player::new(
+            id,
+            Uuid::nil(),
+            "Test".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        player.health.health = health;
+        player.inventory.slots[36] =
+            mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::STONE, 3);
+        region.insert_player(player);
+        (region, id)
+    }
+
+    fn zombie_hit() -> DamageSource {
+        let mut source =
+            DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
+        source.attacker = Some(1 << 20);
+        source.direct = Some(1 << 20);
+        source.position = Some(Vec3::new(1.5, 64.0, 0.5));
+        source
+    }
+
+    #[test]
+    fn flaming_arrow_restores_only_fire_after_creative_rejection() {
+        let (mut region, id) = region_with_player(20.0);
+        let player = region.players.get_mut(&id).unwrap();
+        player.game_mode = GameMode::Creative;
+        player.environment.remaining_fire_ticks = 37;
+        player.environment.ticks_frozen = 80;
+        let mut source = DamageSource::environment(DamageKind::Arrow);
+        source.arrow_ignite_ticks = 100;
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(!world.hurt_player_from_mob(id.0, source, 3.0, None));
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 20.0);
+        assert_eq!(player.environment.remaining_fire_ticks, 1);
+        assert_eq!(player.environment.ticks_frozen, 0);
+    }
+
+    #[test]
+    fn flaming_arrow_restores_the_uncapped_fire_timer_in_survival() {
+        let (mut region, id) = region_with_player(20.0);
+        let player = region.players.get_mut(&id).unwrap();
+        player.environment.remaining_fire_ticks = 37;
+        player.environment.ticks_frozen = 80;
+        let mut source = DamageSource::environment(DamageKind::Arrow);
+        source.arrow_ignite_ticks = 100;
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(world.hurt_player_from_mob(id.0, zombie_hit(), 3.0, None));
+            assert!(!world.hurt_player_from_mob(id.0, source, 2.0, None));
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 17.0);
+        assert_eq!(player.environment.remaining_fire_ticks, 37);
+        assert_eq!(player.environment.ticks_frozen, 0);
+    }
+
+    /// 精确驱动的世界当场落地：第一下打中，同一刻的第二下落在无敌帧里返回假，
+    /// 两下都不留延后的效果。
+    #[test]
+    fn the_entity_level_applies_a_mob_hit_at_once() {
+        let (mut region, id) = region_with_player(20.0);
+        let (mut level, ticks) = region.entity_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        assert!(world.hurt_player_from_mob(id.0, zombie_hit(), 3.0, None));
+        assert!(!world.hurt_player_from_mob(id.0, zombie_hit(), 3.0, None));
+        assert!(world.drain_effects().is_empty());
+        drop(world);
+        drop(level);
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 17.0);
+        assert_eq!(player.health.damage_cooldown, 20);
+    }
+
+    /// 鸡蛋打中玩家是 0 点伤害：官方 `Player.hurtServer` 末尾 `damage == 0.0F`
+    /// 直接返回假，不扣血、不进无敌帧、不击退，也不发任何包。
+    ///
+    /// A thrown egg deals 0 damage to a player: vanilla `Player.hurtServer` ends
+    /// with `damage == 0.0F ? false`, so there is no health loss, no cooldown, no
+    /// knockback and no packet.
+    #[test]
+    fn a_thrown_egg_does_not_hurt_a_player() {
+        let (mut region, id) = region_with_player(20.0);
+        let mut source =
+            DamageSource::environment(DamageKind::Thrown).with_position(Vec3::new(1.5, 64.0, 0.5));
+        source.direct = Some(1 << 20);
+        source.projectile_motion = Some(Vec3::new(-1.0, 0.0, 0.0));
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(!world.hurt_player_from_mob(id.0, source, 0.0, None));
+            assert!(world.drain_effects().is_empty());
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 20.0);
+        assert_eq!(player.health.damage_cooldown, 0);
+        assert_eq!(player.health.hurt_time, 0);
+        assert_eq!(player.motion.delta, Vec3::default());
+    }
+
+    /// 方块逻辑和并行驱动的落地阶段没有玩家那一半：记成延后的效果，按打中算。
+    #[test]
+    fn the_block_level_defers_a_mob_hit() {
+        let (mut region, id) = region_with_player(20.0);
+        let (mut level, ticks) = region.block_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        assert!(world.hurt_player_from_mob(id.0, zombie_hit(), 3.0, None));
+        let effects = world.drain_effects();
+        assert!(matches!(
+            effects.as_slice(),
+            [mc_bamboo_blocks::Effect::HurtPlayer { .. }]
+        ));
+        drop(world);
+        drop(level);
+        assert_eq!(region.players[&id].health.health, 20.0);
+    }
+
+    /// 打死玩家时死亡流程当场跑完，背包里的东西在同一刻掉进世界。
+    #[test]
+    fn a_killing_mob_hit_runs_the_death_flow_on_the_spot() {
+        let (mut region, id) = region_with_player(2.0);
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(world.hurt_player_from_mob(id.0, zombie_hit(), 3.0, None));
+        }
+        let player = &region.players[&id];
+        assert!(player.dead);
+        assert!(player.inventory.slots[36].is_empty());
+        let items = region
+            .entities
+            .iter_public()
+            .filter(|public| {
+                matches!(
+                    public.kind,
+                    mc_bamboo_blocks::entity::KindPublic::Item { .. }
+                )
+            })
+            .count();
+        assert_eq!(items, 1);
     }
 }

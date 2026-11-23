@@ -15,7 +15,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use crate::{
     block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents},
     container::Container,
-    entity::{Entity, EntityPublic, EntityStore, EntityUid},
+    entity::{Entity, EntityPublic, EntityStore, EntityUid, mob::DamageSource},
     gamerules::BlockGameRules,
     hopper::HopperEntity,
     random::LevelRandom,
@@ -698,8 +698,21 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界最高的一层（含），`getMaxY`。
     fn max_y(&self) -> i32;
 
+    /// `Level.getSeaLevel()`：海平面。噪声主世界是 63，超平坦是 -63。
+    ///
+    /// `Level.getSeaLevel()`: the sea level. 63 for the noise overworld and -63 for
+    /// superflat.
+    fn sea_level(&self) -> i32 {
+        63
+    }
+
     /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
     fn random(&self) -> &LevelRandom;
+
+    /// 通过游戏层的附魔表执行生成装备附魔。
+    ///
+    /// Apply the mob-spawn equipment enchantment provider from the game registry.
+    fn enchant_mob_spawn_equipment(&self, _stack: &mut ItemStack, _special: f32) {}
 
     /// 只取一个 `next_float()`，供活塞音高这类「取数 → 算参数 → 发效果」的动作使用。
     /// 默认实现转发给 [`Self::random`]；录制包装覆盖它把这次取数记成可重放的效果。
@@ -841,8 +854,23 @@ pub trait Level: LevelSideState + LevelEntities {
         self.min_y() - 1
     }
 
-    /// 这一格所在群系的降水条件，`Biome.getPrecipitationAt(pos, seaLevel)` 加上
-    /// `Biome.warmEnoughToRain(pos, seaLevel)`。默认平原（测试用），真实实现读区块的
+    /// `getHeight(WORLD_SURFACE, pos)`：最高的非空气方块上面一格，整列是空气时是世界底部。
+    /// 自然刷怪取随机起点用得到（`NaturalSpawner.getRandomPosWithin`）。有真实高度图的
+    /// 实现应该覆盖它。
+    ///
+    /// `getHeight(WORLD_SURFACE, pos)`: one above the highest non-air block, or the world
+    /// bottom for an all-air column. Used by `NaturalSpawner.getRandomPosWithin`; levels
+    /// with a real heightmap should override it.
+    fn world_surface_y(&self, pos: BlockPos) -> i32 {
+        for y in (self.min_y()..=self.max_y()).rev() {
+            if !self.block_state(BlockPos::new(pos.x, y, pos.z)).is_air() {
+                return y + 1;
+            }
+        }
+        self.min_y()
+    }
+
+    /// 这一格所在群系的降水条件，`Biome.getPrecipitationAt(pos, seaLevel)` 加上    /// `Biome.warmEnoughToRain(pos, seaLevel)`。默认平原（测试用），真实实现读区块的
     /// 群系调色板再按 `mc-bamboo-worldgen` 算温度。
     fn precipitation_facts(&self, _pos: BlockPos) -> crate::weather::PrecipitationFacts {
         crate::weather::PrecipitationFacts::PLAINS
@@ -853,6 +881,54 @@ pub trait Level: LevelSideState + LevelEntities {
     /// The biome registry id at this cell, for mob variants. Plains by default.
     fn biome_id(&self, _pos: BlockPos) -> i32 {
         mc_bamboo_data::registries::biome::PLAINS
+    }
+
+    /// `ChunkGenerator.getMobsAt` 的加权表。默认取群系表；对拍场景可以固定候选表。
+    ///
+    /// The weighted table from `ChunkGenerator.getMobsAt`. Defaults to the biome table;
+    /// oracle scenes can supply a fixed candidate table.
+    fn natural_spawn_table(
+        &self,
+        pos: BlockPos,
+        category: mc_bamboo_data::spawning::MobCategory,
+    ) -> &'static [mc_bamboo_data::spawning::MobSpawnerDef] {
+        mc_bamboo_data::spawning::for_biome_id(self.biome_id(pos)).mobs_to_spawn(category)
+    }
+
+    /// `ChunkGenerator.getMobsAt` 的结构刷怪覆盖：位置落在某结构的覆盖盒里时，用
+    /// 该结构的怪物表替换群系表（掠夺者前哨站、女巫小屋等）。没有运行时结构数据的
+    /// 实现（测试用的假世界、无结构维度）默认返回 `None`，走群系表。
+    ///
+    /// The structure spawn override of `ChunkGenerator.getMobsAt`: when a position
+    /// lies in a structure's override box, replace the biome table with the
+    /// structure's monster list (pillager outposts, swamp huts, ...). Levels with
+    /// no runtime structure data default to `None` and fall back to the biome table.
+    fn structure_spawn_override(
+        &self,
+        _pos: BlockPos,
+        _category: mc_bamboo_data::spawning::MobCategory,
+    ) -> Option<&'static [mc_bamboo_data::spawning::MobSpawnerDef]> {
+        None
+    }
+
+    /// `EnvironmentAttributes.CAN_PILLAGER_PATROL_SPAWN`：群系属性（只有蘑菇岛关掉）
+    /// 叠加「早期世界」时间线（主世界时钟 120000 刻之前不刷巡逻队）的结果。
+    /// 默认真，供没有时间线的测试世界使用。
+    ///
+    /// `EnvironmentAttributes.CAN_PILLAGER_PATROL_SPAWN`: the biome attribute (only
+    /// mushroom fields disables it) combined with the early-game timeline (no patrols
+    /// before overworld-clock tick 120000). Defaults to true for timeless test levels.
+    fn can_pillager_patrol_spawn(&self, _pos: BlockPos) -> bool {
+        true
+    }
+
+    /// `ServerLevel.hasChunksAt(...)`：巡逻队落点周围 10 格的方块是否都已加载。
+    /// 默认真，供整块都在的测试世界使用。
+    ///
+    /// `ServerLevel.hasChunksAt(...)`: whether the 10-block margin around a patrol
+    /// landing spot is loaded. Defaults to true for fully-present test levels.
+    fn patrol_chunks_loaded(&self, _center: BlockPos, _margin: i32) -> bool {
+        true
     }
 
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
@@ -947,6 +1023,21 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
+    /// `DESTROY_WITH_DECAY` 爆炸里的 `getDrops`：多一个 `EXPLOSION_RADIUS` 参数，
+    /// 战利品表的 `survives_explosion` / `explosion_decay` 按它取随机数。缺省不带半径。
+    ///
+    /// `getDrops` in a `DESTROY_WITH_DECAY` explosion: the extra `EXPLOSION_RADIUS`
+    /// parameter drives `survives_explosion` / `explosion_decay`. Default: no radius.
+    fn explosion_block_drops_decayed(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        radius: f32,
+    ) -> Vec<ItemStack> {
+        let _ = radius;
+        self.explosion_block_drops(state, pos)
+    }
+
     /// `Block.getDrops`，`destroyBlock` 在移除方块之前按战利品表算出的每一组。
     ///
     /// 空堆也交给调用方 `popResource`：官方对每一组都取三次位置偏移。
@@ -960,25 +1051,81 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
-    /// 生物死时的战利品，`LivingEntity.dropFromLootTable`。`table` 是战利品表名，
-    /// 随机数取这张表的随机序列。默认没有战利品。
+    /// 生物死时的战利品，取战利品表自己的随机序列。默认不掉落。
     ///
     /// Mob death loot. The draw uses the table's random sequence. Default: nothing.
     fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<EntityUid>,
+        loot: crate::entity::mob::MobDeathLoot,
+        origin: mc_bamboo_core::Vec3,
     ) -> Vec<ItemStack> {
-        let _ = (table, on_fire, killer);
+        let _ = (loot, origin);
+        Vec::new()
+    }
+
+    /// `dropFromShearingLootTable` / `dropFromGiftLootTable`：原点和实体本身（剪毛时还有工具）。
+    /// 缺省没有掉落。
+    ///
+    /// `dropFromShearingLootTable` / `dropFromGiftLootTable`: origin and this entity, plus the
+    /// tool when shearing. No drops by default.
+    fn entity_loot_drops(
+        &mut self,
+        request: crate::entity::mob::EntityLootRequest,
+    ) -> Vec<ItemStack> {
+        let _ = request;
         Vec::new()
     }
 
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
 
-    /// `getSkyDarken()`。
+    /// 现实中的本地日期，不是世界时间。
+    ///
+    /// The local calendar date, independent of the world clock.
+    fn is_halloween(&self) -> bool {
+        false
+    }
+
+    fn player_mob_attack(&self, _uid: EntityUid) -> Option<crate::entity::mob::PlayerMobAttack> {
+        None
+    }
+
+    /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
+        0
+    }
+
+    /// `Level.isBrightOutside()`：主世界没有固定时间，`skyDarken < 4` 就是白天。
+    fn is_bright_outside(&self) -> bool {
+        !self.dimension_has_fixed_time() && self.sky_darken() < 4
+    }
+
+    /// `DimensionType.hasFixedTime()`。主世界为假。
+    fn dimension_has_fixed_time(&self) -> bool {
+        false
+    }
+
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线在
+    /// [`Level::clock_ticks`] 处求值；有固定时间的维度没有这条时间线，恒假。
+    fn monsters_burn(&self) -> bool {
+        !self.dimension_has_fixed_time() && crate::sky::monsters_burn(self.clock_ticks())
+    }
+
+    /// `getOverworldClockTime()`：主世界时钟的整数刻，和算 `skyDarken` 的是同一个值。
+    /// 默认 0（新世界的第一刻）。
+    fn clock_ticks(&self) -> i64 {
+        0
+    }
+
+    /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。默认 0。
+    ///
+    /// `WorldGenLevel.getSeed()`: the world seed, read for slime chunks. Defaults to 0.
+    fn world_seed(&self) -> i64 {
+        0
+    }
+
+    /// 区块的 `InhabitedTime`：区域难度读它。默认 0。
+    fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
         0
     }
 
@@ -991,13 +1138,92 @@ pub trait Level: LevelSideState + LevelEntities {
         self.sky_darken() >= 4
     }
 
-    /// `Monster.isPreventingPlayerRest` 的近似入口；世界里还没有怪物，默认没有。
-    /// 见 [`World::monster_prevents_rest`](crate::World::monster_prevents_rest)。
+    /// 精确驱动当场落地生物对玩家的一次伤害，官方 `Mob.doHurtTarget` 里的
+    /// `target.hurtServer(...)`。返回真实的 `wasHurt` 和死亡掉落；`None` 表示这一层
+    /// 不能当场落地，调用方改成延后的 [`Effect::HurtPlayer`]。`attacker` 是打人的生物
+    /// 这一刻的公开数据：它正在 tick，不在实体表里，死亡消息要靠它拿名字。
     ///
-    /// Hook for `Monster.isPreventingPlayerRest`; no monsters yet, so false.
-    /// See [`World::monster_prevents_rest`](crate::World::monster_prevents_rest).
-    fn monster_prevents_rest(&self, _pos: BlockPos) -> bool {
+    /// Applies a mob's hit on a player at once in the precise driver. `None` means
+    /// this level cannot, and the caller falls back to a deferred effect.
+    fn hurt_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _source: crate::entity::mob::DamageSource,
+        _amount: f32,
+        _attacker: Option<&crate::entity::EntityPublic>,
+    ) -> Option<PlayerHurtNow> {
+        None
+    }
+
+    /// 精确驱动当场给玩家一次 `LivingEntity.knockback(strength, dx, dz)`（山羊冲撞）。
+    /// `false` 表示这一层做不到，这次击退就没有了。
+    ///
+    /// Applies one `LivingEntity.knockback(strength, dx, dz)` to a player at once in the
+    /// precise driver (a goat ram). `false` means this level cannot, and the push is lost.
+    fn knock_back_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _strength: f64,
+        _direction: (f64, f64),
+    ) -> bool {
         false
+    }
+
+    /// 精确驱动当场给玩家点火（`Entity.igniteForSeconds`）。`false` 表示不能当场做，
+    /// 调用方改成延后的 [`Effect::IgnitePlayer`]。
+    fn ignite_player_now(&mut self, _target: crate::entity::EntityUid, _ticks: i32) -> bool {
+        false
+    }
+
+    /// 精确驱动当场给玩家挂一个状态效果（药水箭命中）。`false` 表示不能当场做，
+    /// 调用方改成延后的 [`Effect::PlayerEffect`]。
+    ///
+    /// Applies a potion effect to a player at once in the precise driver.
+    /// `false` means this level cannot, and the caller falls back to a deferred
+    /// [`Effect::PlayerEffect`].
+    fn give_player_effect_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _instance: &crate::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        false
+    }
+
+    /// 精确驱动当场治疗一名玩家（喷溅治疗药水）。`false` 表示不能当场做，
+    /// 调用方改成延后的 [`Effect::HealPlayer`]。
+    ///
+    /// Heals a player at once in the precise driver (splash healing potion).
+    /// `false` means this level cannot, and the caller falls back to [`Effect::HealPlayer`].
+    fn heal_player_now(&mut self, _target: crate::entity::EntityUid, _amount: f32) -> bool {
+        false
+    }
+
+    /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
+    /// 水平 ±8、竖直 ±5 的盒，`getEntitiesOfClass(Monster.class, box,
+    /// m -> m.isPreventingPlayerRest(level, player))` 非空。
+    ///
+    /// 僵尸和尸壳都不覆盖 `isPreventingPlayerRest`（缺省恒真）。官方的实体查询只看碰撞箱和
+    /// 盒相交（严格不等，只碰到表面不算），不看死活：倒地动画里的僵尸还在区块里，照样
+    /// 挡着；被移除（`discard`）之后才不算。
+    ///
+    /// The monster query of `ServerPlayer.startSleepInBed`: any monster whose box
+    /// intersects the ±8 / ±5 / ±8 box around the bed's bottom centre. Dying monsters
+    /// still count, as in vanilla; discarded ones do not.
+    fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
+        let x = f64::from(pos.x) + 0.5;
+        let y = f64::from(pos.y);
+        let z = f64::from(pos.z) + 0.5;
+        let area = mc_bamboo_core::Aabb::new(x - 8.0, y - 5.0, z - 8.0, x + 8.0, y + 5.0, z + 8.0);
+        let mut found = false;
+        self.for_each_entity_in(area, &mut |public| {
+            if !public.removed
+                && let crate::entity::KindPublic::Mob(mob) = &public.kind
+                && mob.mob_type.is_monster()
+            {
+                found = true;
+            }
+        });
+        found
     }
 
     /// `getDifficulty().getId()`：0 和平、1 简单、2 普通、3 困难。
@@ -1862,6 +2088,27 @@ impl BedProblem {
     }
 }
 
+/// [`Level::hurt_player_now`] 的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerHurtNow {
+    /// 官方 `hurtServer` 的返回值。
+    pub hurt: bool,
+    /// 这一下把玩家打死时，`ServerPlayer.die` 要在世界里生成的掉落。
+    pub death_drops: Option<PlayerDeathDrops>,
+}
+
+/// `Player.dropEquipment` + `LivingEntity.dropExperience`：死亡那一刻要生成的物品和经验。
+/// 游戏层算好，由 [`crate::World::spawn_player_death_drops`] 在世界里生成。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerDeathDrops {
+    /// 玩家死时的位置（经验球的落点）。
+    pub position: mc_bamboo_core::Vec3,
+    /// 按背包顺序掉出的物品。
+    pub items: Vec<mc_bamboo_protocol::item::ItemStack>,
+    /// 经验值，0 表示不掉。
+    pub experience: i32,
+}
+
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
 ///
 /// The non-block results of one action, handed to the caller for delivery.
@@ -1969,6 +2216,32 @@ pub enum Effect {
     /// A permitted player used a command block. The client opens the editor; the server sends
     /// the block-entity data.
     OpenCommandBlock { pos: BlockPos },
+    /// 一次生物对玩家的近战伤害。算阶段记意图，同一刻的实体循环里按实体顺序
+    /// 调玩家的 `hurtServer`（游戏层接正式入口）。
+    HurtPlayer {
+        target: EntityUid,
+        source: DamageSource,
+        amount: f32,
+    },
+    /// `Zombie.doHurtTarget` 的着火传染打到玩家：`igniteForTicks(ticks)`。
+    IgnitePlayer { target: EntityUid, ticks: i32 },
+    /// 药水箭 / 光灵箭命中玩家：`LivingEntity.addEffect`。瞬间效果由游戏层当场结算。
+    ///
+    /// A tipped or spectral arrow hit a player: `LivingEntity.addEffect`.
+    /// The game layer settles instantaneous effects at once.
+    PlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+        amplifier: i32,
+        ambient: bool,
+        visible: bool,
+        show_icon: bool,
+    },
+    /// 喷溅治疗药水按距离缩放给玩家回血：`LivingEntity.heal(amount)`。
+    ///
+    /// A splash healing potion heals a player by a distance-scaled amount.
+    HealPlayer { target: EntityUid, amount: f32 },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

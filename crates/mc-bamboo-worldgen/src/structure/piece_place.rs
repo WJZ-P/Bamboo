@@ -81,8 +81,20 @@ pub trait PieceLevel {
     /// **not limited to the write zone**: `WorldGenRegion` returns real blocks for chunks
     /// outside it (`reorient` and the support pillars do read neighbouring chunks).
     fn get_block(&self, x: i32, y: i32, z: i32) -> u32;
-    /// `LevelWriter.setBlock(pos, state, flags)`。
+    /// `LevelWriter.setBlock(pos, state, flags)`（结构件的 `placeBlock` 路径，
+    /// `flags=2`，按 `SHAPE_CHECK_BLOCKS` 记 `PostProcessing`）。
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool;
+    /// 结构件里**直接**调 `level.setBlock(pos, state, 2)` 的路径：同样更新高度图，
+    /// 但不经过 `StructurePiece.placeBlock`，所以不记 `SHAPE_CHECK_BLOCKS`。
+    /// 默认转发到 [`Self::set_block`]，只有 `FeaturePieceLevel` 区分。
+    ///
+    /// A structure piece's direct `level.setBlock(pos, state, 2)` path: heightmaps
+    /// still update, but it bypasses `StructurePiece.placeBlock` and therefore does
+    /// not record `SHAPE_CHECK_BLOCKS`. Defaults to [`Self::set_block`]; only
+    /// `FeaturePieceLevel` distinguishes the two.
+    fn set_block_direct(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        self.set_block(x, y, z, state)
+    }
     /// `WorldGenRegion.getBlockEntity(...)` 之后写进方块实体的 nbt。默认丢弃；只有
     /// 收集方块实体的调用方（`FeaturePieceLevel`）需要实现。
     ///

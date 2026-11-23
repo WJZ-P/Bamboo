@@ -176,7 +176,7 @@ pub(crate) fn run_entity_ticks(entity_threads: usize, region: &mut Region) {
     // so pickup sees the item where it was before this tick's movement.
     crate::drops::pickup_before_entities(region);
     if entity_threads == 0 {
-        let (mut level, ticks) = region.block_level();
+        let (mut level, ticks) = region.entity_level();
         let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
         send_effects(region, None, &outcome.effects);
     } else {
@@ -219,6 +219,10 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             difficulty: global.difficulty as i32,
             sky_darken: global.sky_darken,
             game_time,
+            weather: global.block_weather,
+            clock_ticks: global.clock.total_ticks,
+            monsters_burn: mc_bamboo_blocks::sky::monsters_burn(global.clock.total_ticks),
+            sea_level: crate::natural_spawn::sea_level_of(global),
             ..ViewFacts::default()
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
@@ -428,7 +432,10 @@ pub(crate) fn on_player_action(
         PlayerActionKind::DropAllItems => crate::drops::drop_held(region, id, true),
         PlayerActionKind::DropItem => crate::drops::drop_held(region, id, false),
         PlayerActionKind::SwapItemWithOffhand => inventory::swap_hands(region, id),
-        PlayerActionKind::ReleaseUseItem => crate::player_consume::release(region, id),
+        PlayerActionKind::ReleaseUseItem => {
+            crate::player_consume::release(region, id);
+            crate::player_weapon::release(region, id);
+        }
         PlayerActionKind::Stab => {}
     }
 }
@@ -643,6 +650,64 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::command_block::open(region, id, pos);
                 }
             }
+            Effect::HurtPlayer {
+                target,
+                source,
+                amount,
+            } => {
+                // 只有并行驱动走到这里：精确驱动在生物自己的 tick 里当场落地
+                // （`RegionLevel::hurt_player_now`）。并行驱动按实体顺序把意图收进
+                // effects 逐个走正式入口，算阶段已经按「打中」取过数（性能模式差异）。
+                let id = crate::inbound::PlayerId(target);
+                let (_, drops) = crate::player_hurt::hurt_player_by_mob(
+                    &mut region.hurt_parts(),
+                    id,
+                    source,
+                    amount,
+                );
+                if let Some(drops) = drops {
+                    let (mut level, ticks) = region.block_level();
+                    let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+                    world.spawn_player_death_drops(&drops);
+                }
+            }
+            Effect::IgnitePlayer { target, ticks } => {
+                crate::player_environment::ignite_for_ticks(
+                    region,
+                    crate::inbound::PlayerId(target),
+                    ticks,
+                );
+            }
+            Effect::PlayerEffect {
+                target,
+                effect,
+                duration,
+                amplifier,
+                ambient,
+                visible,
+                show_icon,
+            } => {
+                let id = crate::inbound::PlayerId(target);
+                if mc_bamboo_blocks::entity::mob::effects::is_instantaneous(effect) {
+                    crate::player_effects::apply_instantaneous(region, id, effect, amplifier);
+                } else {
+                    let mut instance =
+                        mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_flags(
+                            effect, duration, amplifier, ambient, visible,
+                        );
+                    instance.show_icon = show_icon;
+                    crate::player_effects::give(region, id, instance);
+                }
+            }
+            Effect::HealPlayer { target, amount } => {
+                let id = crate::inbound::PlayerId(target);
+                if let Some(player) = region.players.get_mut(&id)
+                    && player.health.health > 0.0
+                {
+                    let max = crate::player_effects::max_health(player);
+                    player.health.health = (player.health.health + amount).min(max);
+                }
+            }
             Effect::SleepInBed {
                 pos,
                 set_spawn,
@@ -700,6 +765,16 @@ fn send_level_event(
 /// `playSeededSound` 的广播。范围是音效的固定范围，没有就是音量大于 1 时的 16 × 音量，否则 16。
 /// 内联的音效是 `createVariableRangeEvent`，没有固定范围。
 pub(crate) fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
+    send_sound_to(&region.players, &mut region.links, except, sound);
+}
+
+/// [`send_sound`] 只用玩家表和连接的那一半。
+pub(crate) fn send_sound_to(
+    players: &std::collections::BTreeMap<PlayerId, Player>,
+    links: &mut crate::links::Links,
+    except: Option<PlayerId>,
+    sound: &Sound,
+) {
     let range = if sound.inline.is_some() {
         if sound.volume > 1.0 {
             16.0 * sound.volume
@@ -717,7 +792,7 @@ pub(crate) fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &
     };
     let range = f64::from(range);
     let frames = encode_frames(sound);
-    for player in region.players.values() {
+    for player in players.values() {
         if Some(player.id) == except {
             continue;
         }
@@ -726,7 +801,7 @@ pub(crate) fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &
         let dy = sound.y - y;
         let dz = sound.z - z;
         if dx * dx + dy * dy + dz * dz < range * range {
-            region.links.send_frames(player.id, &frames);
+            links.send_frames(player.id, &frames);
         }
     }
 }
@@ -997,12 +1072,27 @@ pub(crate) fn on_use_item(
     // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
     // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
     let actor = actor_of(player);
+    // 鱼桶要从这一堆上的组件还原鱼，先抄下来。
+    // A fish bucket restores its fish from this stack's components, so copy it first.
+    let held = player.inventory.held(hand).clone();
     if crate::player_consume::start(region, id, hand) {
+        return;
+    }
+    // `BowItem.use` / `CrossbowItem.use`：拉弓、装填，或者射出手里已经装好的弩。
+    //
+    // `BowItem.use` / `CrossbowItem.use`: draw, load, or fire a charged crossbow.
+    if crate::player_weapon::start(region, id, hand) {
+        return;
+    }
+    // `EggItem.use`：扔出鸡蛋，返回 `SUCCESS`。
+    // `EggItem.use`: throw the egg and return `SUCCESS`.
+    if crate::player_egg::throw(region, id, hand) {
+        swing(region, id, hand, InteractionResult::Success);
         return;
     }
 
     let (mut level, ticks) = region.block_level();
-    let outcome = mc_bamboo_blocks::use_item(&mut level, ticks, &actor, hand);
+    let outcome = mc_bamboo_blocks::use_item_with_stack(&mut level, ticks, &actor, hand, &held);
 
     // 睡莲这类 `PlaceOnWaterBlockItem` 的放置走这条路，一样要把组件留给方块实体。
     if let Some(placed) = outcome.placed_at {
@@ -1038,8 +1128,8 @@ pub(crate) fn on_interact_entity(
     hand: Hand,
     using_secondary_action: bool,
 ) {
-    // 官方把 `usingSecondaryAction` 记成潜行键；牛的交互不读这个标志。
-    let _ = using_secondary_action;
+    // 官方把 `usingSecondaryAction` 记成潜行键；马科用它判断开物品栏。
+    // Vanilla stores `usingSecondaryAction` as the sneak key; equines read it.
     // 先把玩家和目标的只读数据抄出来，`block_level()` 要独占借 `region`。
     let Some((game_mode, position, eye_height, player_uuid, main_held, off_held)) =
         region.players.get(&id).map(|player| {
@@ -1092,20 +1182,43 @@ pub(crate) fn on_interact_entity(
             held,
             creative,
             position,
+            sneaking: using_secondary_action,
         };
-        let outcome = {
+        // 剪刀在交互里扣耐久，所以交互期间把玩家的手交给方块逻辑。
+        // Shears lose durability inside the interaction, so lend the hands to block logic.
+        let outcome = crate::durability::run(region, id, try_hand, |region| {
             let (mut level, ticks) = region.block_level();
             let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
             world.interact_mob(entity_id, &request)
-        };
+        });
         if !outcome.result.consumes_action() {
             continue;
         }
-        if outcome.shrink_held {
+        // `createFilledResult` 自己会消耗手里的一个，有交回物品时不再另扣。
+        // `createFilledResult` consumes the held item itself, so no extra shrink then.
+        if outcome.shrink_held && outcome.replacement.is_none() {
             inventory::shrink_held(region, id, try_hand);
         }
         if let Some(replacement) = outcome.replacement {
-            inventory::give_filled_result(region, id, try_hand, replacement, true);
+            inventory::give_filled_result(
+                region,
+                id,
+                try_hand,
+                replacement,
+                outcome.limit_creative,
+            );
+        }
+        // 马科 `openCustomInventoryScreen` 在 `mobInteract` 里当场开菜单，先于挥手。
+        // Equine `openCustomInventoryScreen` opens the menu inside `mobInteract`, before the swing.
+        if outcome.open_inventory {
+            crate::menu::station::open_mount(region, id, entity_id);
+        }
+        // `doPlayerRide` 的 `startRiding`：骑手和载具两边一起改，排在开菜单之后、挥手之前。
+        //
+        // `startRiding` from `doPlayerRide` touches both sides; it goes after the
+        // menu and before the swing.
+        if outcome.ride {
+            crate::riding::mount(region, id, entity_id);
         }
         // 生物事件（爱心、挤奶音效）留在实体表里，同步阶段按官方收件人发出去。
         swing(region, id, try_hand, outcome.result);

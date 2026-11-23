@@ -87,6 +87,11 @@ pub(crate) struct Motion {
     received_move_packets: i32,
     known_move_packets: i32,
     received_position_this_tick: bool,
+    /// 位移箭用的是最近一次被接受的客户端位移，不是物理速度。
+    ///
+    /// The last accepted client displacement, not the physics velocity.
+    pub(crate) known_movement: Vec3,
+    received_movement_this_tick: bool,
     /// 上一个被接受的移动把这一位置成了真。
     ///
     /// Set by the last accepted move.
@@ -113,6 +118,10 @@ pub(crate) struct Motion {
     ///
     /// The horizontal-collision bit from the move packet. `setOnGroundWithMovement` stores it.
     pub(crate) client_horizontal_collision: bool,
+    /// `Entity.isSwimming()`（共享标志位 4）。海豚跟着游泳的玩家游时读它。
+    ///
+    /// `Entity.isSwimming()` (shared flag 4); dolphins read it to swim with players.
+    pub(crate) swimming: bool,
     pending_inside: Vec<TravelSegment>,
 }
 
@@ -128,6 +137,8 @@ impl Motion {
             received_move_packets: 0,
             known_move_packets: 0,
             received_position_this_tick: false,
+            known_movement: Vec3::default(),
+            received_movement_this_tick: false,
             client_is_floating: false,
             above_ground_ticks: 0,
             client_loaded_timeout: CLIENT_LOAD_TIMEOUT,
@@ -136,6 +147,7 @@ impl Motion {
             no_physics: false,
             body_height: STANDING_BODY,
             client_horizontal_collision: false,
+            swimming: false,
             pending_inside: Vec::new(),
         }
     }
@@ -196,6 +208,18 @@ pub(crate) fn on_move_player(
     }
     let reported = position.unwrap_or(player.position());
     let (yaw, pitch) = rotation.unwrap_or((player.yaw, player.pitch));
+    // 骑在载具上时位置由 `positionRider` 决定，移动包只用来更新朝向：官方的客户端
+    // 这时发的是 `move_vehicle`，这里不接受 `move_player` 带来的位置。
+    //
+    // While riding, `positionRider` owns the position: a move packet only updates
+    // the rotation. Vanilla clients send `move_vehicle` then, so the position a
+    // `move_player` carries is ignored.
+    if player.riding.is_passenger() {
+        if rotation.is_some() {
+            set_rotation(player, yaw, pitch);
+        }
+        return;
+    }
     if movement::invalid_position(reported, (yaw, pitch)) {
         links.kick(id, &movement::invalid_movement());
         return;
@@ -308,6 +332,9 @@ pub(crate) fn on_accept_teleportation(
 pub(crate) fn on_client_tick_end(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
         player.motion.received_position_this_tick = false;
+        if !std::mem::take(&mut player.motion.received_movement_this_tick) {
+            player.motion.known_movement = Vec3::default();
+        }
     }
 }
 
@@ -366,6 +393,7 @@ fn finish_player(region: &mut Region, id: PlayerId) {
         if let Some(player) = players.get_mut(&id) {
             let sample = PlayerBlocks::new(chunks, block_entities);
             update_body(player, &sample);
+            update_swimming(player, &sample);
         }
     }
     let pending = {
@@ -583,6 +611,8 @@ fn apply_change(
     player.on_ground = change.on_ground;
     player.motion.client_horizontal_collision = change.horizontal_collision;
     let client_delta = change.target.subtract(start);
+    player.motion.known_movement = client_delta;
+    player.motion.received_movement_this_tick = true;
     // `ServerPlayer.checkMovementStatistics`：按客户端报告的位移算消耗的厘米数。
     // 水 / 梯子 / 游泳的判定直接从玩家当前所在格和脚下格读方块状态，
     // 和官方 `isEyeInFluid` / `isInWater` / `onClimbable` 的方块查询一致。
@@ -959,6 +989,52 @@ fn update_body(player: &mut Player, blocks: &PlayerBlocks<'_>) {
     };
 }
 
+/// `Player.updateSwimming`：飞行时直接清掉，否则走 `Entity.updateSwimming` 的判定。
+/// 已经在游泳的只要还在水里就保持，进入游泳要求眼睛也浸在水里。游泳状态按这一 tick
+/// 结束时（也就是下一 tick 开始前）的位置算，实体阶段看到的就是官方 `baseTick`
+/// 那一刻的值。
+///
+/// `Player.updateSwimming`: cleared while flying, otherwise the
+/// `Entity.updateSwimming` test. A swimming player stays swimming while still in
+/// water; entering requires the eye under water too. The flag is computed from the
+/// position at the end of this tick (the start of the next one), which is what the
+/// entity phase sees at vanilla's `baseTick` moment.
+fn update_swimming(player: &mut Player, blocks: &PlayerBlocks<'_>) {
+    let swimming = if player.sync.flying {
+        false
+    } else {
+        let in_water = player_in_water(player, blocks);
+        let sprinting = player.sync.is_sprinting();
+        let passenger = player.riding.is_passenger();
+        if player.motion.swimming {
+            sprinting && in_water && !passenger
+        } else {
+            let feet = player.position();
+            let eye = BlockPos::containing(Vec3::new(feet.x, feet.y + player.eye_height(), feet.z));
+            sprinting && !passenger && in_water && fluid_is_water(blocks, eye)
+        }
+    };
+    player.motion.swimming = swimming;
+}
+
+/// 玩家脚下方块（`blockPosition`）的流体是水。
+///
+/// The fluid of the player's feet block (`blockPosition`) is water.
+fn player_in_water(player: &Player, blocks: &PlayerBlocks<'_>) -> bool {
+    let feet = BlockPos::containing(player.position());
+    fluid_is_water(blocks, feet)
+}
+
+/// 这一格的流体在 `#water` 里。
+///
+/// Whether the fluid in this cell is water.
+fn fluid_is_water(blocks: &PlayerBlocks<'_>, pos: BlockPos) -> bool {
+    blocks
+        .state(pos)
+        .fluid()
+        .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER)
+}
+
 fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
     let box_ = body_box(player.position(), height).deflated(1.0e-7);
     no_block_collision(
@@ -1018,21 +1094,21 @@ fn block_state(chunks: &ChunkStore, pos: BlockPos) -> BlockState {
 /// The read-only block view for player movement checks. Besides the chunk store it
 /// carries the block-entity table: `moving_piston` is a dynamic shape whose collision
 /// shape comes from the [`PistonMoving`] at that cell.
-struct PlayerBlocks<'a> {
+pub(crate) struct PlayerBlocks<'a> {
     chunks: &'a ChunkStore,
     entities: &'a BlockEntities,
 }
 
 impl PlayerBlocks<'_> {
-    fn new<'a>(chunks: &'a ChunkStore, entities: &'a BlockEntities) -> PlayerBlocks<'a> {
+    pub(crate) fn new<'a>(chunks: &'a ChunkStore, entities: &'a BlockEntities) -> PlayerBlocks<'a> {
         PlayerBlocks { chunks, entities }
     }
 
-    fn state(&self, pos: BlockPos) -> BlockState {
+    pub(crate) fn state(&self, pos: BlockPos) -> BlockState {
         block_state(self.chunks, pos)
     }
 
-    fn piston(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
+    pub(crate) fn piston(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
         let entity = self.entities.find_dyn(pos)?;
         entity
             .as_any()
@@ -1040,7 +1116,7 @@ impl PlayerBlocks<'_> {
             .map(PistonMoving::collision_shape)
     }
 
-    fn shulker(&self, pos: BlockPos) -> Option<Aabb> {
+    pub(crate) fn shulker(&self, pos: BlockPos) -> Option<Aabb> {
         let entity = self.entities.find_dyn(pos)?;
         entity
             .as_any()

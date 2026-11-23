@@ -1,19 +1,7 @@
-//! `flat-world`：把 `generator-settings` 的全部五个字段和超平坦地形逐方块对拍官方。
+//! 用官方 codec、地形和单中心 3×3 装饰视图逐字段、逐方块对拍超平坦。
 //!
-//! `FlatWorldOracle.java` 用官方 `FlatLevelGeneratorSettings.CODEC` 解析一组
-//! generator-settings（验证 `layers` / `biome` / `features` / `lakes` /
-//! `structure_overrides`），再用官方 `FlatLevelSource.buildTerrain` 生成区块，输出
-//! 解码字段和逐方块快照。Bamboo 侧 `FlatSettings::parse` + `generate_chunk`。
-//! `--break-self-test` 故意改坏一个方块确认会失败。
-//!
-//! `flat-world`: compare all five `generator-settings` fields and the flat terrain
-//! against vanilla block-by-block. `FlatWorldOracle.java` parses a set of
-//! generator-settings with the official `FlatLevelGeneratorSettings.CODEC`
-//! (validating `layers` / `biome` / `features` / `lakes` / `structure_overrides`),
-//! generates a chunk with the official `FlatLevelSource.buildTerrain`, and emits
-//! the decoded fields and a per-block snapshot. Bamboo uses
-//! `FlatSettings::parse` + `generate_chunk`. `--break-self-test` deliberately
-//! corrupts one block to confirm the detector fails.
+//! Compare flat codec fields, terrain and the 3×3 decoration view for one
+//! center at a time against vanilla.
 
 use std::process::Command;
 
@@ -54,6 +42,7 @@ impl Options {
 struct Stats {
     cases: u64,
     blocks: u64,
+    decorated_chunks: usize,
     mismatches: Vec<String>,
 }
 
@@ -102,6 +91,9 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
             options.break_self_test,
             &mut first,
         )?;
+        if let Some(case) = value.get("case").and_then(Value::as_str) {
+            compare_decoration(&mut stats, case, &value, flat)?;
+        }
     }
     finish(stats, &options)
 }
@@ -166,14 +158,15 @@ fn compare_fields(stats: &mut Stats, input: &str, value: &Value, flat: &FlatSett
             "layers differ for {input}: official {want_layers:?}, game {our_layers:?}"
         ));
     }
-    let want_overrides: Vec<String> = value
+    let want_overrides: Option<Vec<String>> = value
         .get("structure_overrides")
         .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(empty)
-        .iter()
-        .filter_map(|entry| entry.as_str().map(str::to_owned))
-        .collect();
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect()
+        });
     if flat.structure_overrides != want_overrides {
         stats.mismatches.push(format!(
             "structure_overrides differ for {input}: official {want_overrides:?}, game {:?}",
@@ -259,6 +252,105 @@ fn compare_blocks(
     Ok(())
 }
 
+fn compare_decoration(
+    stats: &mut Stats,
+    case: &str,
+    row: &Value,
+    flat: FlatSettings,
+) -> Result<(), String> {
+    use mc_bamboo_game::{worldgen_features::game_features, worldgen_structures::structure_starts};
+    use mc_bamboo_worldgen::feature::state::state_from_official_name;
+
+    let coordinate = |key| {
+        row.get(key)
+            .and_then(Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or_else(|| format!("missing {key} coordinate"))
+    };
+    let (x, z) = (coordinate("x")?, coordinate("z")?);
+    let config = WorldGenConfig {
+        flat,
+        generate_structures: row["generateStructures"]
+            .as_bool()
+            .ok_or("missing generateStructures")?,
+        ..WorldGenConfig::default()
+    };
+    let starts = structure_starts(&config, x, z)?.by_structure.len();
+    let expected_starts = row["starts"].as_u64().ok_or("missing starts")? as usize;
+    let required_starts = usize::from(case == "village");
+    if starts != expected_starts || expected_starts != required_starts {
+        stats.mismatches.push(format!("flat {case} ({x},{z}) starts: official {expected_starts}, bamboo {starts}, fixture requires {required_starts}"));
+    }
+    let generated = game_features(&config, x, z, None)?;
+    let chunks = row["decorated"]
+        .as_array()
+        .ok_or("missing decorated chunks")?;
+    if chunks.len() != 9 || generated.unsupported {
+        return Err(format!(
+            "flat {case} ({x},{z}): expected 9 chunks and supported decoration, got {} chunks, unsupported={}",
+            chunks.len(),
+            generated.unsupported
+        ));
+    }
+    use mc_bamboo_data::blocks;
+    let mut witnesses: Vec<(&str, u32, usize)> = match case {
+        "village" => vec![("oak_planks", blocks::OAK_PLANKS, 0)],
+        "void-platform-and-deferred-layer" => vec![
+            ("cobblestone", blocks::COBBLESTONE, 0),
+            ("snow", blocks::SNOW, 0),
+        ],
+        "plains-decoration" => vec![("short_grass", blocks::SHORT_GRASS, 0)],
+        "lava-lake" => vec![("lava", blocks::LAVA, 0)],
+        _ => Vec::new(),
+    };
+    for (index, (chunk, bamboo)) in chunks.iter().zip(&generated.blocks).enumerate() {
+        let palette = chunk["palette"]
+            .as_array()
+            .ok_or("missing decoration palette")?;
+        let states: Vec<u32> = palette
+            .iter()
+            .map(|v| state_from_official_name(v.as_str().ok_or("non-string decoration state")?))
+            .collect::<Result<_, _>>()?;
+        let blocks = chunk["blocks"]
+            .as_array()
+            .ok_or("missing decoration blocks")?;
+        if blocks.len() != bamboo.len() * 256 {
+            return Err(format!("flat {case} ({x},{z}): unexpected block count"));
+        }
+        for (cell, (want, &got)) in blocks.iter().zip(bamboo.iter().flatten()).enumerate() {
+            let id = want
+                .as_u64()
+                .and_then(|id| states.get(id as usize))
+                .copied()
+                .ok_or("invalid decoration palette index")?;
+            for (_, state, count) in &mut witnesses {
+                *count += usize::from(*state == id);
+            }
+            if got != id {
+                let bx = (x + index as i32 % 3 - 1) * 16 + (cell as i32 % 256) / 16;
+                let bz = (z + index as i32 / 3 - 1) * 16 + cell as i32 % 16;
+                let by = cell as i32 / 256 - 64;
+                stats.mismatches.push(format!(
+                    "flat {case} ({bx},{by},{bz}): official {id}, bamboo {got}"
+                ));
+            }
+        }
+        stats.blocks += blocks.len() as u64;
+        stats.decorated_chunks += 1;
+    }
+    let mut coverage = String::new();
+    for (name, _, count) in witnesses {
+        if count == 0 {
+            return Err(format!(
+                "flat {case} ({x},{z}): official fixture did not place {name}"
+            ));
+        }
+        coverage.push_str(&format!(", {count} {name}"));
+    }
+    println!("flat-world {case} ({x},{z}): 9 decorated chunks, {starts} starts{coverage}");
+    Ok(())
+}
+
 /// 官方调色板是 `BlockState.toString()`；terrain 只放默认状态，忽略属性即可。
 /// Official palette entries are `BlockState.toString()`; terrain uses default
 /// states only, so properties can be ignored.
@@ -271,14 +363,16 @@ fn state_of(name: &str) -> Option<u32> {
 fn finish(stats: Stats, options: &Options) -> Result<(), String> {
     let count = stats.mismatches.len();
     println!(
-        "flat-world: {} cases, {} blocks, {} mismatches",
-        stats.cases, stats.blocks, count
+        "flat-world: {} cases, {} decorated chunks, {} blocks, {} mismatches",
+        stats.cases, stats.decorated_chunks, stats.blocks, count
     );
     if options.break_self_test {
-        if count == 0 {
+        if count != 1 {
+            for message in stats.mismatches.iter().take(options.show) {
+                eprintln!("  MISMATCH {message}");
+            }
             return Err(
-                "self-test broke a block but flat-world reported 0 mismatches; the detector is broken"
-                    .to_owned(),
+                "self-test expected exactly one mismatch from the deliberate break".to_owned(),
             );
         }
         println!(

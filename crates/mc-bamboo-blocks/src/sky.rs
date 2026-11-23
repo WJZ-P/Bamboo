@@ -84,6 +84,74 @@ pub fn day_sky_light_factor(total_ticks: i64) -> f32 {
     SKY_LIGHT_LEVEL_SEGMENTS[4].3
 }
 
+/// `minecraft:gameplay/monsters_burn` 在 `minecraft:day` 时间线上的两个关键帧：
+/// 12542 刻起为假，23460 刻起为真（布尔轨道是步进的，不插值）。
+const MONSTERS_BURN_OFF: i64 = 12_542;
+const MONSTERS_BURN_ON: i64 = 23_460;
+
+/// 主世界的 `EnvironmentAttributes.MONSTERS_BURN`：属性缺省值假，`day` 时间线用
+/// `or` 叠上去，所以就是时间线在这个时钟刻的值。
+///
+/// The overworld `MONSTERS_BURN`: the attribute defaults to false and the `day`
+/// timeline is applied with `or`, so the value is the timeline's step at this tick.
+pub fn monsters_burn(total_ticks: i64) -> bool {
+    let ticks = total_ticks.rem_euclid(DAY_PERIOD);
+    !(MONSTERS_BURN_OFF..MONSTERS_BURN_ON).contains(&ticks)
+}
+
+/// `minecraft:moon` 时间线的周期：八个月相各一天。
+pub const MOON_PERIOD: i64 = 192_000;
+
+/// `DimensionType.MOON_BRIGHTNESS_PER_PHASE`，按 `MoonPhase.index()` 排。
+const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
+
+/// `ServerLevel.getMoonBrightness(pos)`：`minecraft:visual/moon_phase` 轨道每 24000 刻
+/// 换一个月相（常数缓动），再查每个月相的亮度。
+///
+/// `ServerLevel.getMoonBrightness`: the moon phase track steps every 24000 ticks.
+pub fn moon_brightness(total_ticks: i64) -> f32 {
+    let phase = total_ticks.rem_euclid(MOON_PERIOD) / DAY_PERIOD;
+    MOON_BRIGHTNESS_PER_PHASE[phase as usize]
+}
+
+/// `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE` 在主世界的值：缺省 0，`minecraft:moon`
+/// 时间线用 `maximum` 叠上「月亮亮度 × 0.5」（常数缓动，每个月相一档）。
+///
+/// The overworld value of `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE`: default 0,
+/// raised by the `minecraft:moon` timeline (`maximum` modifier, constant easing) to half the
+/// moon brightness of the current phase.
+pub fn surface_slime_spawn_chance(total_ticks: i64) -> f32 {
+    moon_brightness(total_ticks) * 0.5
+}
+
+/// `DifficultyInstance.calculateDifficulty`：区域难度。`difficulty` 是难度 ID，
+/// `clock_ticks` 是主世界时钟，`inhabited` 是区块的 `InhabitedTime`。
+/// 每一步都是 f32 运算，和官方一致。
+///
+/// `DifficultyInstance.calculateDifficulty`, step by step in f32.
+pub fn effective_difficulty(
+    difficulty: i32,
+    clock_ticks: i64,
+    inhabited: i64,
+    moon_brightness: f32,
+) -> f32 {
+    if difficulty == 0 {
+        return 0.0;
+    }
+    let hard = difficulty == 3;
+    let mut scale = 0.75_f32;
+    let day = ((clock_ticks as f32 + -72_000.0) / 1_440_000.0).clamp(0.0, 1.0) * 0.25;
+    scale += day;
+    let mut local = 0.0_f32;
+    local += (inhabited as f32 / 3_600_000.0).clamp(0.0, 1.0) * if hard { 1.0 } else { 0.75 };
+    local += (moon_brightness * 0.25).clamp(0.0, day);
+    if difficulty == 1 {
+        local *= 0.5;
+    }
+    scale += local;
+    difficulty as f32 * scale
+}
+
 /// 官方 `WeatherAttributes.addBuiltinLayers` 的雨 / 雷暴层。
 ///
 /// `rain` 是 `Level.getRainLevel(1)`，`thunder` 是 `Level.getThunderLevel(1)`，
@@ -155,6 +223,29 @@ mod tests {
         // 11867 → 13670 的中点按官方 `Mth.lerp` 线性插值。
         let middle = (11_867 + 13_670) / 2;
         assert!((day_sky_light_factor(middle) - 0.633_536_7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn monsters_burn_follows_the_day_timeline() {
+        assert!(monsters_burn(0));
+        assert!(monsters_burn(12_541));
+        assert!(!monsters_burn(12_542));
+        assert!(!monsters_burn(23_459));
+        assert!(monsters_burn(23_460));
+        assert!(!monsters_burn(24_000 + 18_000));
+        assert!(!monsters_burn(-6_000));
+    }
+
+    #[test]
+    fn moon_and_regional_difficulty() {
+        assert_eq!(moon_brightness(0), 1.0);
+        assert_eq!(moon_brightness(24_000 * 4), 0.0);
+        assert_eq!(moon_brightness(192_000 + 24_000), 0.75);
+        // 新世界第一天：普通难度 2 × 0.75。
+        assert_eq!(effective_difficulty(2, 0, 0, 1.0), 1.5);
+        assert_eq!(effective_difficulty(0, 9_000_000, 9_000_000, 1.0), 0.0);
+        // 时钟和人气都封顶时困难难度到 3 × (1 + 1 + 0.25) = 6.75。
+        assert_eq!(effective_difficulty(3, 9_000_000, 9_000_000, 1.0), 6.75);
     }
 
     #[test]

@@ -5,8 +5,6 @@
 //! 迭代顺序，见 [`super::java_set`]。注意 `trunkSetter` 也记下了树干正下方那块泥土，
 //! 它在原木列表里排第一个，官方的 `logs.getFirst()` 取到的就是它。
 //!
-//! 还没移植：`pale_moss`（要放 `pale_moss_patch` 这个 configured feature）。
-//!
 //! The `TreeDecorator` subclasses, each translated line by line from official 26.3
 //! `place`.
 //!
@@ -16,7 +14,6 @@
 //! Note that `trunkSetter` also records the dirt block below the trunk; it comes first
 //! in the log list and is what official `logs.getFirst()` returns.
 //!
-//! Not ported: `pale_moss` (it places the `pale_moss_patch` configured feature).
 
 use std::{collections::HashSet, sync::OnceLock};
 
@@ -26,10 +23,15 @@ use mc_bamboo_data::{block_by_name, block_id_of_state, block_tag, facts, state_f
 
 use crate::{
     feature::{
-        provider::IntProvider, state::with_property, state_provider::StateProvider,
+        composition::place_placed,
+        placement::{PlaceOutcome, PlacementEnv},
+        provider::{IntProvider, WorldGenerationContext},
+        registry::Registry,
+        state::with_property,
+        state_provider::StateProvider,
         world::HeightmapKind,
     },
-    random::WorldgenRandom,
+    random::{Random, WorldgenRandom},
 };
 
 use super::{HORIZONTAL, Pos, TreePlace, is_air, is_log, random_horizontal};
@@ -106,6 +108,11 @@ pub enum Decorator {
     CreakingHeart {
         probability: f32,
         heart: u32,
+    },
+    PaleMoss {
+        leaves_probability: f32,
+        trunk_probability: f32,
+        ground_probability: f32,
     },
 }
 
@@ -188,6 +195,11 @@ impl Decorator {
                 states: facing_age_states("minecraft:shelf_mushroom")?,
                 mushroom: block_id_of_state(default_state("minecraft:shelf_mushroom")?)?,
             },
+            "minecraft:pale_moss" => Self::PaleMoss {
+                leaves_probability: float("leaves_probability")?,
+                trunk_probability: float("trunk_probability")?,
+                ground_probability: float("ground_probability")?,
+            },
             "minecraft:creaking_heart" => {
                 let heart = default_state("minecraft:creaking_heart")?;
                 let heart = with_property(heart, "creaking_heart_state", "dormant")?;
@@ -203,8 +215,14 @@ impl Decorator {
     /// 官方 `TreeDecorator.place(context)`。
     ///
     /// Official `TreeDecorator.place(context)`.
-    pub(crate) fn place(&self, place: &mut TreePlace<'_, '_>, random: &WorldgenRandom) {
-        let mut context = Context::new(place, random);
+    pub(crate) fn place<'r, 'a, 'w>(
+        &self,
+        place: &'r mut TreePlace<'a, 'w>,
+        random: &'r WorldgenRandom,
+        biome_at: &'r mut dyn FnMut(i32, i32, i32) -> u32,
+        recursion: Option<&'r Recursion<'r>>,
+    ) -> PlaceOutcome {
+        let mut context = Context::new(place, random, biome_at, recursion);
         match self {
             Self::TrunkVine { vines } => context.trunk_vine(vines),
             Self::LeaveVine { probability, vines } => context.leave_vine(*probability, vines),
@@ -247,8 +265,38 @@ impl Decorator {
             Self::CreakingHeart { probability, heart } => {
                 context.creaking_heart(*probability, *heart);
             }
+            Self::PaleMoss {
+                leaves_probability,
+                trunk_probability,
+                ground_probability,
+            } => context.pale_moss(*leaves_probability, *trunk_probability, *ground_probability),
+        }
+        PlaceOutcome {
+            supported: context.supported,
+            placed: true,
         }
     }
+}
+
+/// `pale_moss` 装饰器递归放 `minecraft:pale_moss_patch` 时需要的只读上下文。
+/// 注册表、世界随机源和高度参数来自主循环，群系回调单独以可变借用传入；
+/// 缺了这份上下文就把整棵树标 unsupported，避免静默跳过的假绿。
+///
+/// Read-only context for the `pale_moss` decorator's recursive
+/// `minecraft:pale_moss_patch` placement. The registry, region random and height
+/// parameters come from the main loop; the biome callback is passed as a separate
+/// mutable borrow. Without it the tree is marked unsupported rather than silently
+/// skipping the recursion.
+pub struct Recursion<'a> {
+    /// `FEATURE` / `PLACED_FEATURE` 注册表。
+    /// The `FEATURE` / `PLACED_FEATURE` registry.
+    pub registry: &'a Registry,
+    /// `WorldGenRegion.getRandom()`。
+    /// `WorldGenRegion.getRandom()`.
+    pub region_random: &'a Random,
+    /// `WorldGenerationContext` 的最小高度、高度和海平面。
+    /// The `WorldGenerationContext` min Y, height and sea level.
+    pub generation: WorldGenerationContext,
 }
 
 fn default_state(name: &str) -> Option<u32> {
@@ -351,13 +399,21 @@ fn horizontal(pos: Pos, direction: usize) -> Pos {
 struct Context<'r, 'a, 'w> {
     place: &'r mut TreePlace<'a, 'w>,
     random: &'r WorldgenRandom,
+    biome_at: &'r mut dyn FnMut(i32, i32, i32) -> u32,
+    recursion: Option<&'r Recursion<'r>>,
+    supported: bool,
     logs: Vec<Pos>,
     leaves: Vec<Pos>,
     roots: Vec<Pos>,
 }
 
 impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
-    fn new(place: &'r mut TreePlace<'a, 'w>, random: &'r WorldgenRandom) -> Self {
+    fn new(
+        place: &'r mut TreePlace<'a, 'w>,
+        random: &'r WorldgenRandom,
+        biome_at: &'r mut dyn FnMut(i32, i32, i32) -> u32,
+        recursion: Option<&'r Recursion<'r>>,
+    ) -> Self {
         // `sort_by_key` 是稳定排序，和 fastutil `ObjectArrayList.sort` 一样。
         // `sort_by_key` is stable, like fastutil's `ObjectArrayList.sort`.
         let sorted = |set: &super::java_set::JavaHashSet| {
@@ -371,6 +427,9 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
             roots: sorted(&place.roots),
             place,
             random,
+            biome_at,
+            recursion,
+            supported: true,
         }
     }
 
@@ -385,9 +444,7 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
     /// `Context.setBlock`：走 `decorationSetter`。
     fn set(&mut self, pos: Pos, state: u32) {
         self.place.decorations.insert(pos);
-        self.place
-            .world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.place.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 
     /// `TrunkVineDecorator.place`。
@@ -773,4 +830,108 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
             self.set(target, heart);
         }
     }
+
+    /// `PaleMossDecorator.place`：洗牌原木列表、取最低的一根，按三个概率分别
+    /// 放 `pale_moss_patch`、给树叶和树干挂苍白悬挂苔藓。
+    ///
+    /// `PaleMossDecorator.place`: shuffle the logs, take the lowest one, then
+    /// place `pale_moss_patch` and hang pale moss below leaves and logs with the
+    /// three configured probabilities.
+    fn pale_moss(
+        &mut self,
+        leaves_probability: f32,
+        trunk_probability: f32,
+        ground_probability: f32,
+    ) {
+        let mut logs = self.logs.clone();
+        shuffle(&mut logs, self.random);
+        // `Collections.min` 和 Rust 的 `min_by_key` 都保留迭代顺序里第一个
+        // 最小值；洗牌后同高度原木的先后会影响这根。
+        // Both `Collections.min` and Rust's `min_by_key` keep the first minimum
+        // in iteration order; the shuffled order among equal heights matters.
+        let Some(&lowest) = logs.iter().min_by_key(|pos| pos.1) else {
+            return;
+        };
+        if self.random.next_float() < ground_probability {
+            let Some(context) = self.recursion else {
+                self.supported = false;
+                return;
+            };
+            // 官方 `lambda$place$1` 直接调 `Feature.place`（不是 PlacedFeature.place）：
+            // 注册表里的 configured feature 没有修饰器链，起点是最低原木的上一格。
+            // Official `lambda$place$1` calls `Feature.place` directly, not
+            // `PlacedFeature.place`; the configured feature has no placement
+            // modifiers and starts one block above the lowest log.
+            let feature_name = serde_json::Value::String("minecraft:pale_moss_patch".to_owned());
+            let mut env = PlacementEnv {
+                flat: None,
+                generation: context.generation,
+                biome_at: self.biome_at,
+                registry: context.registry,
+                top_feature: None,
+                region_random: context.region_random,
+            };
+            let outcome = place_placed(
+                context.registry,
+                &feature_name,
+                &[],
+                self.place.world,
+                &mut env,
+                self.random,
+                (lowest.0, lowest.1 + 1, lowest.2),
+            );
+            self.supported &= outcome.supported;
+        }
+        let hanging = hanging_moss_states();
+        let Some((body, tip)) = hanging else {
+            self.supported = false;
+            return;
+        };
+        for pos in self.logs.clone() {
+            if self.random.next_float() < trunk_probability {
+                let below = (pos.0, pos.1 - 1, pos.2);
+                if self.is_air(below) {
+                    self.add_moss_hanger(below, body, tip);
+                }
+            }
+        }
+        for pos in self.leaves.clone() {
+            if self.random.next_float() < leaves_probability {
+                let below = (pos.0, pos.1 - 1, pos.2);
+                if self.is_air(below) {
+                    self.add_moss_hanger(below, body, tip);
+                }
+            }
+        }
+    }
+
+    /// `PaleMossDecorator.addMossHanger`：检查的是当前格的**下面一格**是不是空气，
+    /// 是则抽 `nextFloat()`；`< 0.5` 就停，否则在当前格写 `tip=false` 并下移，
+    /// 循环结束后在当前格写 `tip=true`。
+    ///
+    /// `PaleMossDecorator.addMossHanger`: test the cell **below** the current one
+    /// for air, draw `nextFloat()` and stop when `< 0.5`; otherwise write
+    /// `tip=false` at the current cell and move down. The final cell gets `tip=true`.
+    fn add_moss_hanger(&mut self, start: Pos, body: u32, tip: u32) {
+        let mut pos = start;
+        while self.is_air((pos.0, pos.1 - 1, pos.2)) {
+            if self.random.next_float() < 0.5 {
+                break;
+            }
+            self.set(pos, body);
+            pos = (pos.0, pos.1 - 1, pos.2);
+        }
+        self.set(pos, tip);
+    }
+}
+
+/// `pale_hanging_moss` 的两个状态：TIP=false 是挂着的苔藓段，TIP=true 是末端。
+///
+/// The two `pale_hanging_moss` states: TIP=false is a body segment, TIP=true the tip.
+fn hanging_moss_states() -> Option<(u32, u32)> {
+    let base = default_state("minecraft:pale_hanging_moss")?;
+    Some((
+        with_property(base, "tip", "false")?,
+        with_property(base, "tip", "true")?,
+    ))
 }

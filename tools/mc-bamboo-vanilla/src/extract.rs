@@ -37,6 +37,8 @@ pub struct Extracted {
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
     pub entity_types: Vec<EntityTypeFacts>,
+    pub projectile_facts: ProjectileFacts,
+    pub monster_facts: MonsterFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -95,6 +97,76 @@ pub struct Extracted {
     /// 群系的气候设置，按注册表 ID。由单独的提取器写进 `biomes.json`。
     #[serde(default)]
     pub biomes: Vec<BiomeClimateFact>,
+    /// 自然刷怪的数据：`MobCategory` 上限表和每个群系的 `MobSpawnSettings`。
+    ///
+    /// Natural-spawn data: the `MobCategory` caps and every biome's `MobSpawnSettings`.
+    #[serde(default)]
+    pub mob_spawns: MobSpawnFacts,
+}
+
+/// `MobCategory` 的上限表和每个群系的刷怪设置。
+///
+/// The `MobCategory` caps and per-biome spawn settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MobSpawnFacts {
+    /// 按官方 `MobCategory.values()` 的顺序。
+    pub categories: Vec<MobCategoryFact>,
+    /// 群系注册名 → 刷怪设置，按名字排序。
+    pub biomes: BTreeMap<String, BiomeMobSpawnFact>,
+}
+
+/// 一个 `MobCategory` 的常量。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobCategoryFact {
+    pub name: String,
+    pub max: i32,
+    pub friendly: bool,
+    pub persistent: bool,
+    pub despawn_distance: i32,
+    pub no_despawn_distance: i32,
+}
+
+/// 一个群系的 `MobSpawnSettings`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct BiomeMobSpawnFact {
+    /// 只包含有刷怪条目的类别，按 `MobCategory.values()` 的顺序。
+    pub categories: Vec<CategorySpawnsFact>,
+    /// `getMobSpawnCost` 的表，按实体类型名排序。
+    pub costs: Vec<MobSpawnCostFact>,
+    /// `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` 的 float 原始位（主世界维度层叠群系层）。
+    ///
+    /// Raw float bits of `CREATURE_WORLD_GEN_SPAWN_PROBABILITY` (overworld dimension
+    /// layer, then the biome layer).
+    #[serde(rename = "creatureSpawnProbability")]
+    pub creature_spawn_probability: u32,
+}
+
+/// 一个类别下的一张加权刷怪表。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CategorySpawnsFact {
+    pub category: String,
+    pub entries: Vec<MobSpawnEntryFact>,
+}
+
+/// 加权表里的一项。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MobSpawnEntryFact {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub weight: i32,
+    pub min: i32,
+    pub max: i32,
+}
+
+/// 一个实体的刷怪代价。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobSpawnCostFact {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub charge: f64,
+    pub energy_budget: f64,
 }
 
 /// 一个群系的气候设置。字段和 `BiomeClimateExtractor.java` 的 JSON 对应。
@@ -835,6 +907,163 @@ pub struct EntityTypeFacts {
     pub height: f32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectileFacts {
+    pub arrow_flags: u8,
+    pub arrow_pierce: u8,
+    pub arrow_in_ground: u8,
+    pub arrow_color: u8,
+    pub skeleton_eye_height: f32,
+    pub rabbit_eye_height: f32,
+    pub rabbit_baby_width: f32,
+    pub rabbit_baby_height: f32,
+    pub rabbit_baby_eye_height: f32,
+    pub rabbit_variant: u8,
+    pub rabbit_max_health: f64,
+    pub rabbit_movement_speed: f64,
+    pub rabbit_attack_damage: f64,
+    pub fox_eye_height: f32,
+    pub fox_baby_width: f32,
+    pub fox_baby_height: f32,
+    pub fox_baby_eye_height: f32,
+    pub fox_trusted0: u8,
+    pub fox_trusted1: u8,
+    pub fox_type: u8,
+    pub fox_flags: u8,
+    pub fox_max_health: f64,
+    pub fox_movement_speed: f64,
+    pub fox_attack_damage: f64,
+    pub fox_safe_fall_distance: f64,
+    pub fox_follow_range: f64,
+    pub wolf_eye_height: f32,
+    pub wolf_baby_width: f32,
+    pub wolf_baby_height: f32,
+    pub wolf_baby_eye_height: f32,
+    pub tame_flags: u8,
+    pub tame_owner: u8,
+    pub wolf_interested: u8,
+    pub wolf_collar: u8,
+    pub wolf_anger_end_time: u8,
+    pub wolf_variant: u8,
+    pub wolf_sound_variant: u8,
+    pub wolf_max_health: f64,
+    pub wolf_movement_speed: f64,
+    pub wolf_attack_damage: f64,
+    pub llama_eye_height: f32,
+    pub mule_eye_height: f32,
+    pub donkey_eye_height: f32,
+    pub horse_eye_height: f32,
+    pub horse_flags: u8,
+    pub horse_variant: u8,
+    pub horse_chest: u8,
+    pub llama_strength: u8,
+    pub llama_variant: u8,
+    pub pig_boost_time: u8,
+    pub pig_variant: u8,
+    pub pig_sound_variant: u8,
+    pub pig_variant_serializer: i32,
+    pub pig_sound_variant_serializer: i32,
+    pub sheep_wool: u8,
+    pub glow_squid_dark_ticks: u8,
+    pub bat_flags: u8,
+    pub phantom_size: u8,
+    pub fish_from_bucket: u8,
+    pub salmon_variant: u8,
+    pub tropical_fish_variant: u8,
+    pub tropical_fish_common_variants: Vec<i32>,
+    pub pufferfish_puff_state: u8,
+    pub chicken_variant: u8,
+    pub chicken_sound_variant: u8,
+    pub chicken_variant_serializer: i32,
+    pub chicken_sound_variant_serializer: i32,
+    pub cube_mob_size: u8,
+    pub slime_eye_height: f32,
+    /// `Armadillo.ARMADILLO_STATE` 的下标和序列化器、山羊的三个布尔元数据。
+    ///
+    /// The `Armadillo.ARMADILLO_STATE` index and serializer, and the goat's three booleans.
+    pub armadillo_state: u8,
+    pub armadillo_state_serializer: i32,
+    pub goat_screaming: u8,
+    pub goat_left_horn: u8,
+    pub goat_right_horn: u8,
+    /// `Frog.DATA_VARIANT_ID` 和 `DATA_TONGUE_TARGET_ID` 的下标和序列化器。
+    ///
+    /// The indices and serializers of `Frog.DATA_VARIANT_ID` and `DATA_TONGUE_TARGET_ID`.
+    pub frog_variant: u8,
+    pub frog_variant_serializer: i32,
+    pub frog_tongue_target: u8,
+    pub frog_tongue_target_serializer: i32,
+    /// `MushroomCow.DATA_TYPE` 的元数据 index。
+    ///
+    /// The metadata index of `MushroomCow.DATA_TYPE`.
+    pub mooshroom_type: u8,
+    /// `PolarBear.DATA_STANDING_ID` 的元数据 index。
+    ///
+    /// The metadata index of `PolarBear.DATA_STANDING_ID`.
+    pub polar_bear_standing: u8,
+    /// 熊猫的六个元数据 index：计数器、基因和标志位。
+    ///
+    /// The six panda metadata indices: the counters, the genes and the flags byte.
+    pub panda_unhappy: u8,
+    pub panda_sneeze: u8,
+    pub panda_eat: u8,
+    pub panda_main_gene: u8,
+    pub panda_hidden_gene: u8,
+    pub panda_flags: u8,
+    /// `Ocelot.DATA_TRUSTING` 的元数据 index。
+    ///
+    /// The metadata index of `Ocelot.DATA_TRUSTING`.
+    pub ocelot_trusting: u8,
+    /// `Cat` 五个元数据访问器 index。
+    ///
+    /// The five metadata accessor indices of `Cat`.
+    pub cat_variant: u8,
+    pub cat_is_lying: u8,
+    pub cat_relax_state_one: u8,
+    pub cat_collar: u8,
+    pub cat_sound_variant: u8,
+    /// `Parrot.DATA_VARIANT_ID` 的元数据 index（INT 序列化器）。
+    ///
+    /// The metadata index of `Parrot.DATA_VARIANT_ID` (INT serializer).
+    pub parrot_variant: u8,
+    /// `Parrot.MOB_SOUND_MAP` 的条目数，`getAmbient` 模仿叫声时 `nextInt` 的上界。
+    ///
+    /// The size of `Parrot.MOB_SOUND_MAP`, the `nextInt` bound when imitating a sound.
+    pub parrot_sound_map_size: i32,
+    /// 带 `SuspiciousEffectHolder` 的物品：(物品 ID, [(效果 ID, 刻数)])。
+    ///
+    /// Items with a `SuspiciousEffectHolder`: (item id, [(effect id, ticks)]).
+    pub stew_flowers: Vec<(i32, Vec<[i32; 2]>)>,
+    pub turtle_has_egg: u8,
+    pub turtle_laying_egg: u8,
+    #[serde(default)]
+    pub dolphin_got_fish: u8,
+    #[serde(default)]
+    pub dolphin_moistness: u8,
+    #[serde(default)]
+    pub axolotl_variant: u8,
+    #[serde(default)]
+    pub axolotl_playing_dead: u8,
+    #[serde(default)]
+    pub axolotl_from_bucket: u8,
+    /// 药水注册表每条药水的效果：(效果 ID、刻数、等级)，下标是药水 ID。
+    ///
+    /// Effects of each potion: (effect id, ticks, amplifier), indexed by potion id.
+    pub potion_effects: Vec<Vec<[i32; 3]>>,
+    pub effect_colors: Vec<i32>,
+}
+
+/// 敌对生物的元数据 index 和眼高；键就是生成的常量名。
+///
+/// Hostile-mob metadata indices and eye heights, keyed by constant name.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonsterFacts {
+    pub data_ids: BTreeMap<String, u8>,
+    pub eye_heights: BTreeMap<String, f32>,
+}
+
 /// 一个物品。列表里的位置就是它的注册表 ID。
 pub struct Item {
     pub name: String,
@@ -1060,6 +1289,8 @@ pub struct VersionData {
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
     pub entity_types: Vec<EntityTypeFacts>,
+    pub projectile_facts: ProjectileFacts,
+    pub monster_facts: MonsterFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -1113,6 +1344,10 @@ pub struct VersionData {
     pub game_rules: Vec<GameRuleFact>,
     /// 群系的气候设置，按 `minecraft:worldgen/biome` 注册表 ID。
     pub biomes: Vec<BiomeClimateFact>,
+    /// 自然刷怪的上限表和每个群系的刷怪设置。
+    ///
+    /// Natural-spawn caps and per-biome spawn settings.
+    pub mob_spawns: MobSpawnFacts,
     /// 官方 codec 编出的超平坦 `world_gen_settings.dat` 内容。
     pub saved_world: SavedWorldFact,
 }
@@ -1194,6 +1429,8 @@ fn read_version_data(
         blocks: extracted.blocks,
         items,
         entity_types: extracted.entity_types,
+        projectile_facts: extracted.projectile_facts,
+        monster_facts: extracted.monster_facts,
         state_tables: extracted.state_tables,
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
@@ -1224,6 +1461,7 @@ fn read_version_data(
         worldgen: extracted.worldgen,
         game_rules: extracted.game_rules,
         biomes: extracted.biomes,
+        mob_spawns: extracted.mob_spawns,
         saved_world,
     })
 }

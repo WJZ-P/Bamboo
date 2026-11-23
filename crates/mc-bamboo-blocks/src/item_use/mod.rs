@@ -57,6 +57,123 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         // `SpawnEggItem.useOn`: spawn on the clicked block (not the adjacent
         // one), never in a fluid block. `shouldOffsetYMore` is false there.
         _ if ctx.item == items::COW_SPAWN_EGG => spawn_egg::cow(world, ctx),
+        _ if ctx.item == items::POLAR_BEAR_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::PolarBear)
+        }
+        _ if ctx.item == items::MOOSHROOM_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Mooshroom)
+        }
+        _ if ctx.item == items::OCELOT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Ocelot)
+        }
+        _ if ctx.item == items::CAT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Cat)
+        }
+        _ if ctx.item == items::RABBIT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Rabbit)
+        }
+        _ if ctx.item == items::FOX_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Fox)
+        }
+        _ if ctx.item == items::WOLF_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Wolf)
+        }
+        _ if ctx.item == items::HORSE_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Horse)
+        }
+        _ if ctx.item == items::DONKEY_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Donkey)
+        }
+        _ if ctx.item == items::MULE_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Mule)
+        }
+        _ if ctx.item == items::LLAMA_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Llama)
+        }
+        _ if ctx.item == items::ARMADILLO_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Armadillo)
+        }
+        _ if ctx.item == items::GOAT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Goat)
+        }
+        _ if ctx.item == items::FROG_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Frog)
+        }
+        _ if ctx.item == items::TADPOLE_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Tadpole)
+        }
+        _ if ctx.item == items::BAT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Bat)
+        }
+        _ if ctx.item == items::PHANTOM_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Phantom)
+        }
+        _ if ctx.item == items::PIG_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Pig)
+        }
+        _ if ctx.item == items::SHEEP_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Sheep)
+        }
+        _ if ctx.item == items::CHICKEN_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Chicken)
+        }
+        _ if ctx.item == items::SQUID_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Squid)
+        }
+        _ if ctx.item == items::GLOW_SQUID_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::GlowSquid)
+        }
+        _ if ctx.item == items::COD_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Cod)
+        }
+        _ if ctx.item == items::SALMON_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Salmon)
+        }
+        _ if ctx.item == items::TROPICAL_FISH_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::TropicalFish)
+        }
+        _ if ctx.item == items::PUFFERFISH_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Pufferfish)
+        }
+        _ if ctx.item == items::ZOMBIE_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Zombie)
+        }
+        _ if ctx.item == items::SKELETON_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Skeleton)
+        }
+        _ if ctx.item == items::CREEPER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Creeper)
+        }
+        _ if ctx.item == items::HUSK_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Husk)
+        }
+        _ if ctx.item == items::STRAY_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Stray)
+        }
+        _ if ctx.item == items::BOGGED_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Bogged)
+        }
+        _ if ctx.item == items::SLIME_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Slime)
+        }
+        _ if ctx.item == items::DROWNED_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Drowned)
+        }
+        _ if ctx.item == items::WITCH_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Witch)
+        }
+        _ if ctx.item == items::PILLAGER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Pillager)
+        }
+        _ if ctx.item == items::SPIDER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Spider)
+        }
+        _ if ctx.item == items::ENDERMAN_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Enderman)
+        }
+        _ if ctx.item == items::CAVE_SPIDER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::CaveSpider)
+        }
         _ => default_use_on(world, item, ctx),
     }
 }

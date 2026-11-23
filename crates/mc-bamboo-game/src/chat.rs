@@ -208,7 +208,15 @@ pub(crate) fn log_player_broadcast(trusted: bool, chat_type_id: i32, name: &str,
 /// ignored.
 pub(crate) fn on_client_command(region: &mut Region, id: PlayerId, action: ClientCommandKind) {
     if action == ClientCommandKind::RequestStats {
-        region.links.send(id, &AwardStats);
+        let Some(player) = region.players.get_mut(&id) else {
+            return;
+        };
+        region.links.send(
+            id,
+            &AwardStats {
+                item_used: &player.item_use_stats.take_dirty(),
+            },
+        );
     } else if action == ClientCommandKind::PerformRespawn {
         crate::player_respawn::respawn(region, id);
     }
@@ -290,8 +298,17 @@ pub(crate) fn broadcast_system_message(
     frames: &[u8],
     except: Option<PlayerId>,
 ) {
-    let ids: Vec<PlayerId> = region
-        .players
+    broadcast_system_frames(&region.players, &mut region.links, frames, except);
+}
+
+/// [`broadcast_system_message`] 只用玩家表和连接的那一半：实体循环里区域已经拆开时用。
+pub(crate) fn broadcast_system_frames(
+    players: &std::collections::BTreeMap<PlayerId, crate::player::Player>,
+    links: &mut Links,
+    frames: &[u8],
+    except: Option<PlayerId>,
+) {
+    let ids: Vec<PlayerId> = players
         .iter()
         .filter(|(id, player)| {
             Some(**id) != except && accepts_system_messages(player.client.chat_visibility, false)
@@ -299,12 +316,12 @@ pub(crate) fn broadcast_system_message(
         .map(|(id, _)| *id)
         .collect();
     for id in ids {
-        region.links.send_frames(id, frames);
+        links.send_frames(id, frames);
     }
     // 不在主控手里的岛上的接收者：那个岛落地时照同样的条件自己发（计划 5.5.3）。
     // Receivers on islands that are away: the island sends under the same
     // rule when it lands (plan 5.5.3).
-    region.links.fan_out(|| {
+    links.fan_out(|| {
         let frames: std::sync::Arc<[u8]> = frames.into();
         std::sync::Arc::new(move |region: &mut Region| {
             broadcast_system_message(region, &frames, except);

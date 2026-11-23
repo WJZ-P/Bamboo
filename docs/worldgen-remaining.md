@@ -14,15 +14,15 @@
 
 | 条目 | 结论 | 用户是否可见 | 量级（人日） |
 |---|---|---|---:|
-| 主世界三种噪声预设、多种子、带/不带结构、超平坦的扩大对拍 | **做完**（0 不一致），但工具本身有两处扩大样本才暴露的缺口 | 缺口只挡回归，不影响已生成的世界 | 0.5–1 |
-| 主世界地物 / 结构 `unsupported` | **部分**：28 类型全 PASS、13 类结构可放；`pale_moss` 装饰器、纯下界/末地结构、生成期实体未覆盖 | 苍郁花园的苍白橡树、部分结构生成期实体 | 2–5 |
-| 超平坦 `structure_overrides`（含关结构） | **没做**：只解析并写进存档，不生成 | 超平坦预设里不会出现村庄 / 湖 / 地物 | 3–6 |
+| 主世界三种噪声预设、多种子、带/不带结构、超平坦的扩大对拍 | **做完**：预设参数及 JVM 固定生成器桩已修；超平坦新增装饰对拍（§1.3） | 无 | 0 |
+| 主世界地物 / 结构 `unsupported` | **部分**：苍白橡树及 `pale_moss` 已对拍；纯下界/末地结构、生成期实体未覆盖 | 部分结构没有生成期实体 | 另见 §2 / §3 |
+| 超平坦 `structure_overrides`（含关结构） | **做完**：结构、地物、湖接入 Staged，定点逐方块对拍见 §1.3 | 村庄、湖和地物按预设出现 | 0 |
 | `BlendingData` / `Blender` / `BelowZeroRetrogen` | **没做**，而且当前**走不到**非空分支 | 读 26.3 之前老存档时不会升级、会当空世界或报错 | 8–15（需先拍板要不要支持老存档） |
-| 非 `full` 区块读回后接着生成 | **没做**，也没有对拍 | 官方写出的半成品区块被 Bamboo 读成 `full` 模板 | 5–8 |
+| 非 `full` 区块读回后接着生成 | **做完**（`ddcaa365`，`resume-world`） | 半成品区块按保存阶段继续生成 | 0 |
 | 高度图 | **做完**（逐位一致）；增量 WG 维护未搬，是纯性能差异 | 无（当前结果正确） | 0–2（可选优化） |
 | `gen-light` 光引擎对拍 | **做完**（0 不一致） | 无 | 0 |
-| 游戏流水线 `light` 阶段的**输入** | **部分 / 有正确性风险**：用 CARVERS 快照，官方用 FEATURES 后视图 | 树冠、萤石、灯笼、结构光源附近可能算错天空光/方块光 | 2–4 |
-| 生成期刷怪（`spawn`） | **没做** | 新区块生成时一只动物都没有 | 15–60（取决于实体范围） |
+| 游戏流水线 `light` 阶段的**输入** | **做完**（`406f71dd`，FEATURES 后方块视图与 `light-pipeline`） | 光照读入树冠、结构光源和邻区增量 | 0 |
+| 生成期刷怪（`spawn`） | **部分**（2026-11-20）：算法和对拍做完，牛、猪、羊、鸡真正生成 | 新区块里有牛、猪、羊、鸡；其它动物等实体合进来 | 见 §2 现状 |
 | 下界 / 末地**生成本身** | **部分**：数学与三套 settings、下界多噪声预设、五群系末地源、无含水层地形已导出/对拍；真维度地形、地物、结构没接 | 进不了下界 / 末地，所以暂时不可见 | 20–40 |
 | 下界 / 末地**游戏侧多维度** | **没做** | 玩家无法进下界 / 末地、无法换维度、重生不回主世界 | 40–80（大项目，需用户拍板） |
 | 性能 | **已有数据**，本轮不优化 | 只影响区块到达延迟 | 0（记录） |
@@ -140,8 +140,8 @@
 **还没被任何对拍覆盖的**：
 - `gen-light` 只比「给定同一批方块 → 光引擎输出」，不比「游戏流水线给光引擎的方块对不对」（§1.7）。
 - `spawn` 阶段完全没有官方对拍（§2）。
-- 非 `full` 读盘续跑没有对拍（§1.5）。
-- `flat-world` 只比 `(0,0)` 一格的 `buildTerrain` 和五字段 codec，不比超平坦的地物/湖/结构生成（§1.3）。
+- 非 `full` 读盘续跑由 `resume-world` 对拍（`ddcaa365`，见 §1.5）。
+- `flat-world` 比五字段、地层和单中心 3×3 FEATURES 视图（§1.3）。
 - `structure-*` 的查询集是固定坐标，不是多种子扫描；扩大样本靠 `structure-e2e` 的 60 个定点 +
   `gen-world --through features --structures`。
 
@@ -159,16 +159,16 @@
 `ServerLevel` 补上，`structure-e2e` 默认集含 `(42,-267,-276)` 水井、`(42,-267,-277)` 化石。
 `minecraft:root_system` 是官方 26.3 自己的死代码（成功路径不可达），不算缺口。
 
-**真正剩下的主世界地物缺口**：
-- `pale_moss` 树装饰器没移植：`feature/tree/decorator.rs:8` 明写「还没移植」，
-  `Decorator::parse` 的 `_ => return None`（`:190` 附近）让 `minecraft:pale_oak` /
-  `minecraft:pale_oak_creaking` 解析失败；`feature/tree/config.rs:191` 的单测甚至固定了
-  `TreeConfig::parse(&features["minecraft:pale_oak"]).is_none()`。苍郁花园的树会标
-  `unsupported` 跳过。`feature/world.rs:392` 等位置还有若干嵌套 provider / 谓词的
-  `unsupported` 兜底，但常见主世界坐标的整步对拍已 0 skipped。
-- 生成期实体只保证官方的随机取数和方块写入序列一致，不比较实体本身
-  （`docs/worldgen-structures-e2e.md` §已知限制）；玩家在游戏里看不见村庄村民、
-  女巫、猫、守卫者等。
+**苍郁花园**：`e474086e` 已移植 `PaleMossDecorator.place`：洗牌原木、用同一随机源
+直接放配置地物 `minecraft:pale_moss_patch`，再在原木及树叶下生成带 `tip` 状态的悬挂苔藓。
+`9cc7f1ba` 的 JVM 桩提供了对应的生成器。种子 0 的苍郁花园用临时测试扫 `Generator::biomes`
+定位到中心 `(447,-489)`（扫描代码已删）：`chunkgen --through features --scan 3` 跑
+9 个中心、81 个 3×3 区块快照、13,824 格群系、7,962,624 方块，0 不一致、0 skipped。
+把悬挂苔藓的 `tip=false` 段改写成圆石后，同一组报 60 处不一致（改坏不提交）；
+只把末端的 `tip=true` 与 `tip=false` 互换时没报出不一致，原因未确认，记在本轮汇报的疑点清单。
+
+**剩余缺口**：部分少见的嵌套 provider / 谓词依然走 `unsupported`。生成期实体只保证
+随机取数和方块写入的序列，不比较实体本身。
 
 **结构**：`crates/mc-bamboo-worldgen/src/structure/place_step.rs:47` 的
 `PLACEABLE_TYPES` 有 13 类；`:317` / `:343` 把不在清单里的起点标 unsupported 跳过。
@@ -178,35 +178,28 @@
 列为「不会有起点」）。`structure-e2e.rs:112` 的 `KNOWN_GAPS` 当前为空；默认 60 查询全 0 不一致，结构件统计见
 `docs/worldgen-structures-e2e.md`。也就是说，**主世界结构本身没有已知的逐方块残差**。
 
-**用户可见影响**：苍郁花园的苍白橡树及其苔藓、垂苔、嘎枝之心不会生成；
-村庄等结构有建筑但没有生成期实体。工作量 2–5 人日（`pale_moss` 装饰器 +
-`pale_moss_patch` 递归放置 + JVM 桩 + 逐类型对拍 2–3 人日；生成期实体若要真放进世界，
-依赖 §2 的实体系统，另算）。依赖：实体系统、`feature-e2e.sh` 新增 case、
-`ChunkgenOracle` 的 `chunkSource` 桩（§0.3）。
+**用户可见影响**：村庄等结构有建筑，但没有生成期实体；实体接入另见 §2。
 
-### 1.3 超平坦关闭结构时的 `structure_overrides` — **没做**
+### 1.3 超平坦 `structure_overrides`、地物、湖 — **已接入**
 
-`crates/mc-bamboo-game/src/world_options.rs:92` 的 `FlatSettings` 按官方
-`FlatLevelGeneratorSettings.CODEC` 解析 `layers` / `biome` / `features` / `lakes` /
-`structure_overrides` 五字段；`world_gen_settings.rs:140` 把 `structure_overrides`
-写进 `world_gen_settings.dat`；`flat_world.rs:111` 的 `compare_fields` 和
-`FlatWorldOracle.java` 的 5 个 case 逐字段对拍（本轮 0 不一致）。但注释和
-`worldgen.rs:248` 的 `flat_chunk` 都明说：这些字段**只影响地物 / 湖 / 结构**，
-Bamboo 的超平坦地形只填地层和群系；`world.rs:467` 对 flat 用 `PipelineKind::Flat`，
-`chunk_generator.rs:91` 的 `FlatGenerator` 任何阶段都 `passthrough_stage`。
+新世界和存档保留 `structure_overrides` 的缺省（所有适用结构集）与显式空列表（不生成结构）。
+默认预设候选是要塞和村庄；`generate-structures=false` 不生成新起点、不放置结构，
+但不禁用地物或湖。对应官方 `FlatLevelSource.createState` /
+`ChunkGeneratorStructureState.createForFlat`：结构集按固定群系过滤，要塞环种子为 0，
+使用固定群系的两次坐标抽样。地形层不受 Beardifier 影响。
 
-官方 `javap -c -p net.minecraft.world.level.levelgen.FlatLevelSource` 里
-`createState` 会把 `structureOverrides()` 传给 `ChunkGeneratorStructureState.createForFlat`；
-`spawnOriginalMobs` 直接 `return`（超平坦不生成期刷怪）；`applyBiomeDecoration`
-仍会按 `features` / `lakes` 放地物和湖。`generate-structures=false` 在噪声世界里由
-`worldgen_structures.rs:410` / `:419` 和 `worldgen_features.rs:685` 跳过结构阶段；
-flat 世界里这个开关和 `structure_overrides` 都不会产生任何结构。
+`FlatLevelGeneratorSettings.adjustGenerationSettings` 用固定群系自己的地物顺序，剔除第
+3、4 步，`lakes=true` 用地下、地表两项熔岩湖覆盖湖步骤，非 MOTION_BLOCKING 的地层
+由 `FillLayerFeature` 在末步补齐。自定义或开结构的超平坦配置与噪声世界共用 Director
+`Staged` 的 terrain / features / light / assemble；关闭结构的默认模板仍走快捷路径。
+超平坦不生成期刷怪，出生点仍沿用 Bamboo 的现有选择（见 README）。
 
-**用户可见影响**：超平坦预设写 `structure_overrides=["minecraft:villages", ...]`、
-`features=true` / `lakes=true` 时，官方有村庄和湖，Bamboo 只有平坦地层。
-工作量 3–6 人日：复用 `FlatLevelSource` 的 `createForFlat` 结构集、超平坦地物白名单、
-湖、结构起点/放置，加 `flat-world` 之外的逐区块对拍。依赖 §1.2 的结构 / 地物纯函数，
-以及决定「flat 是否也走 `Staged` 流水线」。
+`flat-world` 的 11 格 terrain + 54 格 FEATURES 共 6,389,760 方块，0 不一致。
+种子 0：村庄 `(15,2)` 有 1 个起点、21 个橡木木板，关闭结构和显式空列表均为 0
+起点；虚空平台 `(0,0)` 的 1 格圆石和 256 格延后填充的雪、平原的 74 格矮草、
+地表湖 `(107,0)` 的 95 格熔岩都确实比到。
+未验证其他结构类型的 flat 布局、完整 flat 光照和存档续生成。只支持内置注册表，
+不加载数据包自定义结构集或标签。
 
 ### 1.4 `BlendingData` / `Blender` / `BelowZeroRetrogen`（老存档升级）— **没做，且走不到**
 
@@ -231,25 +224,11 @@ flat 世界里这个开关和 `structure_overrides` 都不会产生任何结构�
 老存档升级 oracle），依赖**用户先拍板是否要兼容 26.3 之前存档**；若明确不做，
 这项只需在 README 固定「不支持老存档」即可，0.5 人日。
 
-### 1.5 非 `full` 区块存盘读回、接着生成 — **没做，无对拍**
+### 1.5 非 `full` 区块存盘读回、接着生成 — **做完**
 
-`crates/mc-bamboo-storage/src/chunk_nbt.rs:889` 读任意 `Status`，`:1067` 起对非 `full`
-的 ProtoChunk 用 `ChunkColumn::from_template()` 补齐方块层和光照、重算高度图，
-保留盘上的方块实体 / 计划刻 / 顶层元数据；`:680` 下次写盘写死 `minecraft:full`。
-`crates/mc-bamboo-game/src/region/chunk_content.rs:253` 的 `decode` 组装成
-`DecodedChunk { column, problems }`，**没有把 `status` 交给 Director**；
-`director/pyramid.rs:88` 起的 `LOADING_PYRAMID` 十步全无依赖、直接到 `full`。
-`docs/m3-storage.md` §「外置区块和非 full 的 ProtoChunk」和 README 已知限制都写了
-「官方会从原阶段续跑生成流水线，Bamboo 不会」。
-
-流水线阶段函数本身是纯的（`chunk_generator.rs`），但读盘路径不按 `Status` 选阶段，
-也没有「写几个非 full 状态 → 重启 → 继续生成 → 和官方逐格比」的 oracle。
-
-**用户可见影响**：读官方中途保存的半成品区块时，Bamboo 会把缺失阶段用超平坦模板填掉，
-再当成已经 `full` 的区块交付；地形错误且状态被抬到 `full`。工作量 5–8 人日：
-把 `status` 传进 Director / LOADING_PYRAMID、按阶段恢复 `Arc<GeneratedChunk>` 和
-`feature_deltas` / `generated_light` / `structures`、写多阶段往返 oracle。依赖 §1.6 的高度图、
-§1.2 的地物增量合并、存档层 `chunk_content::decode` 改接口。
+`ddcaa365` 接入 ProtoChunk 按保存的 `Status` 恢复及后续阶段推进；
+`resume-world` 对拍跨盘续生，详见 `docs/m3-storage.md` 和 `docs/worldgen.md`。
+本分支没有重跑超平坦半成品存档对拍。
 
 ### 1.6 高度图：从方块重算还是增量维护，是否逐位一致 — **做完，仅性能差异**
 
@@ -359,6 +338,28 @@ vs 游戏 LIGHT」的整块 oracle，重跑 `gen-light` 和 `structure-e2e`。
   和 `docs/zombie-skeleton-plan.md` 的生物系统是一整个项目。
 
 **建议**：此项需要用户拍板实体范围，不属于「马上能收尾」的小项。
+
+### 现状（2026-11-20，分支 `cx-spawn`）
+
+- 生成器导出每个群系的 `CREATURE_WORLD_GEN_SPAWN_PROBABILITY`（主世界维度层叠群系层，
+  `mob_spawns.rs` 的 `creature_spawn_probability`）。
+- `crates/mc-bamboo-blocks/src/entity/mob/natural_gen.rs` 照官方移植
+  `spawnMobsForChunkGeneration`：装饰随机源驱动循环、选表、组大小、起点、漂移和朝向，
+  区域随机源给 `finalizeSpawn`。牛真正生成；鸡、猪、羊、马、驴、羊驼按
+  `Animal.checkAnimalSpawnRules` 模拟放置、只推进装饰随机源；其余放置规则没翻译的种类抽到时
+  停止这个区块。
+- `crates/mc-bamboo-game/src/worldgen_mobs.rs` 在 Director 完工组装（`Task::Assemble`）里、
+  装好光照之后跑：查询点 `(minX, 319, minZ)` 的全分辨率群系定刷怪表、quart 群系定概率，
+  `WorldGenRegion.random` 取 `worldgen_region_random` 在区块原点的源。生物进区块实体盒，
+  随区块交付和存盘。超平坦、`doMobSpawning` 为假、盘上已过 `SPAWN` 的区块不刷。
+  计算线程的 `spawn` 阶段仍是透传：那时还没有最终方块和光照。
+- 2026-11-20（分支 `cx-wild`）：猪、羊、鸡、兔子、狐狸、狼也真正生成了（`MobType::by_entity_type`
+  列全、放置表加上兔子 / 狼 / 狐狸的规则、组数据在 `wild_spawn.rs`）；对拍场景加了针叶林和雪地
+  针叶林，7000 例 0 不一致，见 `docs/mob-entity-design.md` 11.5。马、驴、羊驼仍只模拟放置。
+- 对拍：`mob-oracle --only gen_spawn`，官方 `NaturalSpawner.spawnMobsForChunkGeneration`
+  跑在 MobOracle 的假世界上（平原真实刷怪表、公式地形、四种光照、2000 个种子），比装饰随机源
+  指纹、牛的类型 / 坐标 / 朝向和区域随机源同步时的幼年与左撇子，0 不一致；`--break-self-test gen_spawn`
+  会报不一致。查询点群系的位置只有单元测试，没有拿官方真实世界对拍。
 
 ---
 
@@ -527,10 +528,9 @@ target/release/mc-bamboo-vanilla wg-perf --seeds 3 --chunks 8 --repeat 3 --skip-
 | 缺口 | 代码位置 | 用户可见影响 | 量级（人日） | 依赖 |
 |---|---|---|---:|---|
 | 出生点 `setInitialSpawn` 仍在 CARVERS 快照上算 | `worldgen_spawn.rs:11`、`:190`；`SpawnOracle.java` 只比到 CARVERS | 树 / 雪层 / 结构改变 `MOTION_BLOCKING` 时，个别种子的出生点和满配官方世界不同 | 1–2 | §1.2 完工方块、`full` 阶段 |
-| `PostProcessing` 位置表恒写 24 个空列表，官方 `ProtoChunk` 其余字段未逐项对拍 | `chunk_nbt.rs:790`、`docs/m3-storage.md` §5.1 | 官方读档后再做一次后处理时行为不同；当前 Bamboo 自己不读这个表 | 2–4 | 地物 / 结构的 `markPosForPostprocessing` |
 | 生成期实体不进假世界，只保证随机序列和方块写入一致 | `docs/worldgen-structures-e2e.md` §已知限制、`ChunkgenOracle.java:2329` | 村庄 / 府邸 / 海底神殿没有村民、悦灵、守卫者、女巫、猫 | 见 §2 | 实体系统 |
 | `features` 邻居溢出合并是「固定来源先后、先写的赢」，官方由调度决定 | `worldgen_features.rs:99`、README 已知限制、`feature-merge` oracle | 边界上重叠写入可能和某一次官方生成不同；本轮 `feature-merge` 3 / 5 行 0 differing | 2–5（若要改成官方调度语义） | Director 任务结构 |
-| 超平坦 / 噪声世界的 `generate-structures=false` 语义不同 | `worldgen_structures.rs:410`、`:419`、`worldgen_features.rs:685`、`world.rs:467` | flat 里关不关结构都一样（本来就没结构） | 见 §1.3 | §1.3 |
+
 | 并行化 / SIMD | `docs/worldgen.md` 末节 | 影响吞吐，不影响逐位一致 | 3–10（可选） | 全部对拍基线 |
 | `docs/worldgen.md` 开头、§「接进游戏」、§「第二轮」、§「结构阶段」还有早期记录 | `worldgen.md:1`、`:580`、`:611`、`:945` | 只影响读者判断 | 0.5 | 本清单 |
 
@@ -540,13 +540,12 @@ target/release/mc-bamboo-vanilla wg-perf --seeds 3 --chunks 8 --repeat 3 --skip-
 
 | 工作包 | 人日 | 前置依赖 | 是否需要用户拍板 |
 |---|---:|---|---|
-| 修 `gen-world` 三处 `LevelType::Normal` + `PaleMossDecorator` 的 JVM 桩，重跑扩大样本 | 0.5–1 | 无 | 否 |
-| 生成期光照输入改成 FEATURES 后视图 + 整块 oracle | 2–4 | `feature-merge` 合并规则 | 否 |
-| `pale_moss` 装饰器 / 苍白橡树 + 逐类型对拍 | 2–3 | 上面的 JVM 桩 | 否 |
-| 超平坦 `features` / `lakes` / `structure_overrides` | 3–6 | 结构 / 地物纯函数；flat 是否走 `Staged` | 是（范围） |
-| 非 `full` 读盘续跑 + 多阶段往返 oracle | 5–8 | `chunk_content::decode` 改接口、存档层 | 否 |
+| `gen-world` 预设参数和 `PaleMossDecorator` JVM 桩 | 已做完 | — | 否 |
+| 生成期光照输入 + 整块 oracle | 已做完（`406f71dd`） | — | 否 |
+| `pale_moss` 装饰器 / 苍白橡树 + 定点对拍 | 已做完 | — | 否 |
+| 超平坦 `features` / `lakes` / `structure_overrides` | 已做完（§1.3） | — | 否 |
+| 非 `full` 读盘续跑 + 多阶段往返 oracle | 已做完（`ddcaa365`） | — | 否 |
 | 出生点改用 `full` 地形 | 1–2 | 完工方块、§1.7 | 否 |
-| `PostProcessing` / `ProtoChunk` 其余字段 | 2–4 | 地物 / 结构写路径 | 否 |
 | `Heightmap.update` 增量维护（纯性能） | 0–2 | 无 | 否 |
 | 生成期刷怪（最小：只放牛） | 5–10 | 环境属性导出、实体表 / 存档、新 oracle | **是（实体范围）** |
 | 生物系统 + 20 种生成期实体全量 | 30–60 | `docs/mob-entity-design.md`、`zombie-skeleton-plan.md` | **是** |
@@ -600,6 +599,30 @@ target/release/mc-bamboo-vanilla wg-perf --seeds 3 --chunks 8 --repeat 3 --skip-
 - 并行化 / SIMD：逐位一致的基线还没把 §1.7 修完，先别动求值顺序。
 - 把 `features` 邻居合并改成官方调度语义：当前 `feature-merge` 0 differing，
   改它要动 Director 任务结构，收益不确定，应等有实际不一致案例再做。
+
+### 第 0 期新增的已知差异（2026-11-19）
+
+- **`PostProcessing` 在带结构模式的标记路径**（已解决）：结构件按字节码分成
+  `placeBlock`（`flags=2`，记 `SHAPE_CHECK_BLOCKS` 并跑 `getPostProcessPos`）、
+  `StructureTemplate.placeInWorld`（`flags=820`，都不记）和直接 `setBlock(..., 2)`
+  （只跑 `getPostProcessPos`）三条路径，`structure-e2e` 带结构比较 0 不一致。完工表
+  也改成「地形标记 + 9 个中心的标记按约定顺序追加」，`feature-merge` / `resume-world`
+  逐段比交付盒子和存档往返，0 不一致（见 `docs/worldgen.md`「`PostProcessing` 位置表」）。
+- **完工后处理 `LevelChunk.postProcessGeneration`**（已解决）：区块加载等级跨入
+  `BLOCK_TICKING` 时在拥有它的岛上按表做形状更新、流体 tick 和液体方块 tick，清表后
+  才可发送；`post-process` 对拍 0 不一致。生成的方块实体也随九中心组装进交付盒子
+  （见 `docs/worldgen.md`「`PostProcessing` 位置表」）。
+
+
+- **沙漠神殿 `(42,-375,-22)` 的结构件重叠写**：`light-pipeline --structures
+  --target 42 -375 -22` 报 281 格方块不一致（官方是橙色 / 蓝色陶瓦与苍白苔藓地毯，
+  游戏侧是砂岩），`feature-merge --structures --isolated --target 42 -375 -22`
+  报同一类差异。原因是多个结构件在同一格写方块，官方由调度先后决定最终状态，
+  Bamboo 按用户已拍板的「固定来源先后、先写的赢」合并。这是已接受的模型差异，
+  不是新缺口：默认结构查询表不放这个坐标，保留 `--target` 做诊断；
+  `structure-e2e` 和默认 `light-pipeline --structures` 都逐格 0 不一致。
+- **非 `full` 区块读回续生成**：§1.5 / §7 里这一行已经单独拆给 `worldgen-resume`
+  分支，不再属于本分支第 0 期；本分支只改自己这边的内容，不动存档读取路径。
 
 ---
 

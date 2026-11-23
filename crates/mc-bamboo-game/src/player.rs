@@ -160,6 +160,22 @@ pub(crate) struct Player {
     pub(crate) environment: crate::player_environment::Environment,
     /// `LivingEntity.useItem` / `useItemRemaining`：正在吃东西 / 喝东西。
     pub(crate) use_item: Option<crate::player_consume::UsingItem>,
+    /// `LivingEntity.useItem` 里的弓和弩。
+    ///
+    /// A bow or crossbow in `LivingEntity.useItem`.
+    pub(crate) weapon_use: Option<crate::player_weapon::WeaponUse>,
+    /// 官方 `Player.attackStrengthTicker`：`aiStep` 每刻加一，攻击 / 挥空 / 换物品清零。
+    /// 相对计数，随玩家整行搬，不需要时钟平移。
+    ///
+    /// Vanilla `Player.attackStrengthTicker`: incremented every `aiStep` tick and
+    /// reset on attack, air swing or item swap. A relative counter needing no rebasing.
+    pub(crate) attack_strength_ticker: i32,
+    /// 官方 `Player.lastItemInMainHand`：主手物品变了才检查要不要重置冷却。
+    ///
+    /// Vanilla `Player.lastItemInMainHand`: the previous main-hand stack, used to
+    /// detect the item swap that resets the attack cooldown.
+    pub(crate) last_main_hand_item: ItemStack,
+    pub(crate) item_use_stats: crate::item_use_stats::ItemUseStats,
     /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
     pub(crate) pending_exhaustion: f32,
     /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
@@ -204,6 +220,16 @@ pub(crate) struct Player {
     /// Entity tick count, used modulo 20/10 by peaceful regeneration. Relative,
     /// so island splits and merges need no rebasing.
     pub(crate) entity_ticks: i32,
+    /// `Stats.CUSTOM.get(Stats.TIME_SINCE_REST)`：没睡觉的每一刻 +1，开始睡觉清零。
+    /// 幻翼自定义刷怪器读它决定要不要在玩家头顶刷怪。
+    ///
+    /// `Stats.CUSTOM.get(Stats.TIME_SINCE_REST)`: +1 on every non-sleeping tick,
+    /// reset on sleep start. The phantom custom spawner reads it.
+    pub(crate) time_since_rest: i32,
+    /// `lastHurtByMob` / `lastHurtMob` / `lastDamageSource`，狼保护主人时读。
+    ///
+    /// Combat memory read by tamed wolves guarding their owner.
+    pub(crate) combat_memory: crate::player_combat_memory::CombatMemory,
     /// `ServerPlayer.respawnConfig` 之外，死亡后一律等待客户端发来的
     /// `PERFORM_RESPAWN`：`immediate_respawn` 只影响客户端要不要显示死亡界面，
     /// 服务端不自己重生，客户端不发就一直是死的。
@@ -213,6 +239,10 @@ pub(crate) struct Player {
     /// screen. The server never respawns on its own; without a client packet
     /// the player stays dead.
     pub(crate) awaiting_respawn: bool,
+    /// 骑乘状态：骑着的载具和载具移动校验用的几个位置。
+    ///
+    /// Riding state: the vehicle and the positions its movement is checked against.
+    pub(crate) riding: crate::riding::Riding,
 }
 
 impl Player {
@@ -273,6 +303,10 @@ impl Player {
             effects: EffectMap::new(),
             environment: crate::player_environment::Environment::default(),
             use_item: None,
+            weapon_use: None,
+            attack_strength_ticker: 0,
+            last_main_hand_item: ItemStack::empty(),
+            item_use_stats: Default::default(),
             pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,
@@ -283,7 +317,10 @@ impl Player {
             dead: false,
             last_death_location: None,
             entity_ticks: 0,
+            time_since_rest: 0,
+            combat_memory: Default::default(),
             awaiting_respawn: false,
+            riding: crate::riding::Riding::default(),
         }
     }
 
@@ -417,18 +454,38 @@ impl Player {
         let off = self.inventory.held(Hand::Off);
         PlayerView {
             uid: id.0,
+            uuid: Some(*self.uuid.as_bytes()),
             position: self.position,
+            delta: self.motion.delta,
             eye_height: self.eye_height() as f32,
-            // 药水效果还没有；`armor_cover` 按四格盔甲里非空的比例算。
-            // Potion effects are not modelled; armor cover follows the worn slots.
+            health: self.health.health,
+            look_direction: Vec3::view_vector(self.yaw, self.pitch),
+            gaze_disguise: self
+                .inventory
+                .equipment(EquipmentSlot::Head)
+                .is_some_and(|stack| {
+                    !stack.is_empty()
+                        && mc_bamboo_blocks::state::item_is_tagged(
+                            stack.item,
+                            mc_bamboo_data::tags::item_tags::GAZE_DISGUISE_EQUIPMENT,
+                        )
+                }),
+            // 隐身仍按默认假处理；`armor_cover` 按四格盔甲里非空的比例算。
+            // Invisibility stays false; armor cover follows the worn slots.
             alive: !self.health.is_dead_or_dying(),
             spectator: self.game_mode == GameMode::Spectator,
             creative: self.game_mode == GameMode::Creative,
             sneaking: self.sync.is_crouching(),
+            sprinting: self.sync.is_sprinting(),
+            swimming: self.motion.swimming,
             invisible: false,
             armor_cover: self.armor_cover(),
             main_hand: if main.is_empty() { 0 } else { main.item },
             off_hand: if off.is_empty() { 0 } else { off.item },
+            yaw: self.yaw,
+            pitch: self.pitch,
+            combat: self.combat_memory.view(self.entity_ticks),
+            effects: mc_bamboo_blocks::entity::ctx::TargetEffects::from_map(&self.effects),
         }
     }
 

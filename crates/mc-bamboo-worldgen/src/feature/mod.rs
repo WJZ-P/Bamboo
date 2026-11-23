@@ -20,6 +20,7 @@ pub mod dispatch;
 #[cfg(test)]
 pub mod dripstone_probe;
 pub mod dripstone_utils;
+pub mod flat;
 pub mod fossil;
 pub mod freeze_top_layer;
 pub mod geode;
@@ -87,6 +88,9 @@ pub struct FeatureChunks {
     pub biomes: [Vec<Vec<u32>>; 9],
     /// 9 个区块的 6 张 primed heightmap，每张 256 个高度（`ChunkAccess.getHeight` 的值）。
     pub heights: [Heightmaps; 9],
+    /// 9 个区块从 `doFill` 带来的 `PostProcessing` 位置，按世界坐标。
+    /// `PostProcessing` positions from `doFill`, per chunk, in world coordinates.
+    pub post_processing: [Vec<(i32, i32, i32)>; 9],
 }
 
 /// `heightmaps::TYPES` 的六种，按官方声明顺序。
@@ -131,6 +135,9 @@ pub struct FeatureResult {
     /// Block-entity nbt written into the world as `(world position, nbt)`; a later write to
     /// the same position replaces the earlier one. Only structure placement fills it today.
     pub block_entities: Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>,
+    /// 官方 `PostProcessing` 的世界坐标列表，按 `markPosForPostProcessing` 调用顺序。
+    /// Official `PostProcessing` positions in `markPosForPostProcessing` call order.
+    pub post_processing: Vec<(i32, i32, i32)>,
     /// 本区块涉及了未移植的地物 / 修饰器 / 谓词，对拍时不参与逐方块比较。
     pub unsupported: bool,
 }

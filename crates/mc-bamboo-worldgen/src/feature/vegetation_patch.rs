@@ -502,6 +502,7 @@ mod tests {
             blocks: std::array::from_fn(|_| chunk_blocks()),
             biomes: std::array::from_fn(|_| sections()),
             heights: std::array::from_fn(|_| crate::feature::Heightmaps::new(min_y)),
+            post_processing: std::array::from_fn(|_| Vec::new()),
         }
     }
 
@@ -541,6 +542,7 @@ mod tests {
         let registry = Registry::parse(root.as_object().unwrap()).unwrap();
         let mut biome_at = |_: i32, _: i32, _: i32| 0_u32;
         let mut env = PlacementEnv {
+            flat: None,
             generation: crate::feature::provider::WorldGenerationContext {
                 min_y: -64,
                 height: 384,
@@ -640,6 +642,7 @@ mod tests {
         let registry = Registry::parse(root.as_object().unwrap()).unwrap();
         let mut biome_at = |_: i32, _: i32, _: i32| 0_u32;
         let mut env = PlacementEnv {
+            flat: None,
             generation: crate::feature::provider::WorldGenerationContext {
                 min_y: -64,
                 height: 384,

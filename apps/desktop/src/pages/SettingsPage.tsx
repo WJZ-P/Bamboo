@@ -2,7 +2,18 @@ import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import styled from "styled-components";
 
 import type { ServerSettings } from "../api/bamboo";
-import { PanelTitle, PixelButton, PixelInput, PixelPanel, PixelSlider } from "../components/pixel";
+import {
+  CollapsibleGroup,
+  GroupTitle,
+  PanelTitle,
+  PixelButton,
+  PixelCollapsible,
+  PixelInput,
+  PixelPanel,
+  PixelSelect,
+  PixelSlider,
+  PixelTextarea,
+} from "../components/pixel";
 import {
   describeDefault,
   FIELDS,
@@ -10,6 +21,7 @@ import {
   GROUPS,
   type NumberField,
   SECTIONS,
+  type SelectField,
   type SettingField,
 } from "../settings/fields";
 import { useServer } from "../state/ServerContext";
@@ -27,7 +39,7 @@ const Grid = styled.div`
   max-width: 720px;
 `;
 
-const Field = styled.label<{ $wide?: boolean }>`
+const Field = styled.div<{ $wide?: boolean }>`
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -131,19 +143,33 @@ export function SettingsPage() {
 
     switch (field.control) {
       case "text":
-      case "password":
+      case "password": {
+        // 多行只给文本项用，密码框永远是单行。
+        // Only plain text fields can be multiline; password stays single-line.
+        const multiline = field.control === "text" && field.multiline === true;
         return (
           <Row>
-            <PixelInput
-              type={field.control === "password" && !revealSecret ? "password" : "text"}
-              aria-label={field.label}
-              value={draft[field.key]}
-              maxLength={field.maxLength}
-              disabled={disabled}
-              aria-invalid={invalid}
-              spellCheck={false}
-              onChange={(event) => setValue(field.key, event.target.value)}
-            />
+            {multiline ? (
+              <PixelTextarea
+                aria-label={field.label}
+                value={draft[field.key]}
+                disabled={disabled}
+                aria-invalid={invalid}
+                spellCheck={false}
+                onChange={(event) => setValue(field.key, event.target.value)}
+              />
+            ) : (
+              <PixelInput
+                type={field.control === "password" && !revealSecret ? "password" : "text"}
+                aria-label={field.label}
+                value={draft[field.key]}
+                maxLength={field.maxLength}
+                disabled={disabled}
+                aria-invalid={invalid}
+                spellCheck={false}
+                onChange={(event) => setValue(field.key, event.target.value)}
+              />
+            )}
             {field.control === "password" && (
               <PixelButton
                 type="button"
@@ -156,6 +182,7 @@ export function SettingsPage() {
             )}
           </Row>
         );
+      }
       case "number":
         return (
           <Row>
@@ -199,6 +226,26 @@ export function SettingsPage() {
             ))}
           </Row>
         );
+      case "select":
+        return (
+          <PixelSelect
+            aria-label={field.label}
+            value={draft[field.key]}
+            disabled={disabled}
+            aria-invalid={invalid}
+            onChange={(event) =>
+              // 原生下拉只给出字符串，这里收窄回这个字段自己的取值类型。
+              // A native select only yields a string; narrow it to this field's type.
+              setValue(field.key, event.target.value as ServerSettings[SelectField["key"]])
+            }
+          >
+            {field.options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </PixelSelect>
+        );
       case "toggle":
         return (
           <Row>
@@ -239,39 +286,56 @@ export function SettingsPage() {
       </PixelPanel>
 
       <Form onSubmit={(event) => void handleSubmit(event)}>
-        {SECTIONS.map((section) => (
-          <div key={section.id}>
-            <PixelPanel>
-              <PanelTitle>{section.title}</PanelTitle>
-              <Lead>{section.hint}</Lead>
-            </PixelPanel>
-            {GROUPS.filter((group) => group.section === section.id).map((group) => (
-              <PixelPanel key={group.id}>
-                <PanelTitle>{group.title}</PanelTitle>
-                <Lead>{group.hint}</Lead>
-                <Grid>
-                  {FIELDS.filter((field) => field.group === group.id).map((field) => (
-                    <Field
-                      key={field.key}
-                      as={field.control === "text" || field.control === "number" ? "label" : "div"}
-                      $wide={field.wide}
-                    >
-                      {field.control === "slider"
-                        ? `${field.label}：${numberText(draft[field.key])}${field.unit ? ` ${field.unit}` : ""}`
-                        : field.label}
-                      {control(field)}
-                      <Hint>{field.hint}</Hint>
-                      <Hint>{field.fileKey} · 默认 {describeDefault(field, defaults)}</Hint>
-                      {errors.has(field.key) && (
-                        <ErrorText role="alert">{errors.get(field.key)}</ErrorText>
-                      )}
-                    </Field>
-                  ))}
-                </Grid>
-              </PixelPanel>
-            ))}
-          </div>
-        ))}
+        {SECTIONS.map((section) => {
+          const groups = GROUPS.filter((group) => group.section === section.id);
+          const groupIds = new Set(groups.map((group) => group.id));
+          // 这张卡片里有几项校验不过：有的话强制展开并在标题栏标出来，免得「保存」按钮
+          // 灰掉却找不到原因。
+          // Invalid fields inside this card: if any, force it open and flag it in the
+          // header, so a greyed-out save button never has a hidden cause.
+          const invalid = FIELDS.filter(
+            (field) => groupIds.has(field.group) && errors.has(field.key),
+          ).length;
+          return (
+            <PixelCollapsible
+              key={section.id}
+              title={section.title}
+              hint={section.hint}
+              forceOpen={invalid > 0}
+              badge={invalid > 0 ? `${invalid} 项有误` : undefined}
+            >
+              {groups.map((group) => (
+                <CollapsibleGroup key={group.id}>
+                  <GroupTitle>{group.title}</GroupTitle>
+                  <Lead>{group.hint}</Lead>
+                  <Grid>
+                    {FIELDS.filter((field) => field.group === group.id).map((field) => (
+                      // 不用 <label> 包整格：点提示文字时浏览器会把焦点送回输入框，点空白处取消不了聚焦。
+                      // 输入框自己带 aria-label。
+                      // Not a wrapping <label>: clicking the hints would send focus back to the
+                      // input, so clicking elsewhere in the cell could never blur it. Inputs carry
+                      // their own aria-label.
+                      <Field
+                        key={field.key}
+                        $wide={field.wide}
+                      >
+                        {field.control === "slider"
+                          ? `${field.label}：${numberText(draft[field.key])}${field.unit ? ` ${field.unit}` : ""}`
+                          : field.label}
+                        {control(field)}
+                        <Hint>{field.hint}</Hint>
+                        <Hint>{field.fileKey} · 默认 {describeDefault(field, defaults)}</Hint>
+                        {errors.has(field.key) && (
+                          <ErrorText role="alert">{errors.get(field.key)}</ErrorText>
+                        )}
+                      </Field>
+                    ))}
+                  </Grid>
+                </CollapsibleGroup>
+              ))}
+            </PixelCollapsible>
+          );
+        })}
 
         <PixelPanel>
           <Actions>

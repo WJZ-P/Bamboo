@@ -40,6 +40,13 @@ pub struct Attribute {
     pub base: f64,
     pub modifiers: Vec<Modifier>,
     pub instantiated: bool,
+    /// 官方 `AttributeInstance.setDirty()` 的代数计数：即使改完后值与修饰符表和上次相同
+    /// （例如疾跑每刻删了又加 `minecraft:sprinting`），官方仍会发 `update_attributes`。
+    ///
+    /// Generation counter for vanilla `AttributeInstance.setDirty()`: even when the final
+    /// value and modifier list match the last sync (e.g. sprinting removes and re-adds
+    /// `minecraft:sprinting` every tick), vanilla still emits `update_attributes`.
+    pub sync_version: u64,
 }
 
 /// 属性的取值范围，`RangedAttribute` 的 `minValue` / `maxValue`。
@@ -76,6 +83,7 @@ impl Attribute {
             base,
             modifiers: Vec::new(),
             instantiated: false,
+            sync_version: 0,
         }
     }
 
@@ -110,8 +118,17 @@ impl Attribute {
         self.modifiers.iter().find(|modifier| modifier.id == id)
     }
 
-    pub fn remove_modifier(&mut self, id: &str) {
+    pub fn remove_modifier(&mut self, id: &str) -> bool {
+        let before = self.modifiers.len();
         self.modifiers.retain(|modifier| modifier.id != id);
+        self.modifiers.len() != before
+    }
+
+    /// 标记一次官方 `setDirty()`，让下一次属性同步发出 `update_attributes`。
+    ///
+    /// Record a vanilla `setDirty()` so the next attribute sync emits `update_attributes`.
+    pub fn touch_sync(&mut self) {
+        self.sync_version = self.sync_version.wrapping_add(1);
     }
 }
 
@@ -185,6 +202,107 @@ impl Attributes {
                 .into_iter()
                 .map(|(id, base)| Attribute::new(id, base))
                 .collect(),
+        }
+    }
+
+    /// `Zombie.createAttributes`：`Monster.createMonsterAttributes` 的全部
+    /// （`createMobAttributes` 加 `ATTACK_DAMAGE`），再覆盖跟随距离 35、
+    /// 速度 0.23、攻击力 3、护甲 2，以及增援概率属性。
+    ///
+    /// `Zombie.createAttributes`: `Monster.createMonsterAttributes` plus
+    /// follow range 35, speed 0.23, attack damage 3, armor 2 and the
+    /// reinforcement-chance attribute.
+    pub fn zombie() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut table = Self::cow();
+        table.set_base(attribute::MAX_HEALTH, defaults::MAX_HEALTH);
+        table.set_base(attribute::MOVEMENT_SPEED, f64::from(0.23_f32));
+        table.set_base(attribute::FOLLOW_RANGE, 35.0);
+        table.set_base(attribute::TEMPT_RANGE, defaults::TEMPT_RANGE);
+        table.set_base(attribute::ARMOR, 2.0);
+        if let Some(entry) = table
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == attribute::ATTACK_DAMAGE)
+        {
+            entry.base = 3.0;
+        } else {
+            table
+                .entries
+                .push(Attribute::new(attribute::ATTACK_DAMAGE, 3.0));
+        }
+        table.entries.push(Attribute::new(
+            attribute::SPAWN_REINFORCEMENTS,
+            defaults::SPAWN_REINFORCEMENTS,
+        ));
+        table
+    }
+
+    /// AbstractSkeleton.createAttributes：Monster 属性加 0.25 移速。
+    ///
+    /// AbstractSkeleton.createAttributes: Monster attributes with 0.25 movement speed.
+    pub fn skeleton() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut table = Self::cow();
+        table.set_base(attribute::MAX_HEALTH, defaults::MAX_HEALTH);
+        table.set_base(attribute::MOVEMENT_SPEED, 0.25);
+        table.set_base(attribute::TEMPT_RANGE, defaults::TEMPT_RANGE);
+        if let Some(entry) = table
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == attribute::ATTACK_DAMAGE)
+        {
+            entry.base = defaults::ATTACK_DAMAGE;
+        } else {
+            table.entries.push(Attribute::new(
+                attribute::ATTACK_DAMAGE,
+                defaults::ATTACK_DAMAGE,
+            ));
+        }
+        table
+    }
+
+    /// 对拍的改坏确认用：直接改一个属性的基础值。
+    pub fn set_base_for_oracle(&mut self, id: i32, base: f64) {
+        self.set_base(id, base);
+    }
+
+    /// `Mob.createMobAttributes()`：生物的缺省属性表。没有 `Animal` 加的 `TEMPT_RANGE`，
+    /// 血量和移动速度是注册表缺省值。
+    ///
+    /// `Mob.createMobAttributes()`: the plain mob defaults, without the `TEMPT_RANGE` that
+    /// `Animal` adds and with registry-default health and movement speed.
+    pub(super) fn mob() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut attributes = Self::cow();
+        attributes
+            .entries
+            .retain(|entry| entry.id != attribute::TEMPT_RANGE);
+        attributes.set_base(attribute::MAX_HEALTH, defaults::MAX_HEALTH);
+        attributes.set_base(attribute::MOVEMENT_SPEED, defaults::MOVEMENT_SPEED);
+        attributes
+    }
+
+    /// `Monster.createMonsterAttributes()`：`Mob` 的缺省属性加攻击力（注册表缺省值 2）。
+    ///
+    /// `Monster.createMonsterAttributes()`: the mob defaults plus attack damage at its
+    /// registry default of 2.
+    pub(super) fn monster() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut attributes = Self::mob();
+        if attributes.get(attribute::ATTACK_DAMAGE).is_none() {
+            attributes.entries.push(Attribute::new(
+                attribute::ATTACK_DAMAGE,
+                defaults::ATTACK_DAMAGE,
+            ));
+        }
+        attributes.set_base(attribute::ATTACK_DAMAGE, defaults::ATTACK_DAMAGE);
+        attributes
+    }
+
+    pub(super) fn set_base(&mut self, id: i32, base: f64) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.base = base;
         }
     }
 

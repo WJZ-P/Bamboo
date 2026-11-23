@@ -15,7 +15,7 @@ use super::{DamageKind, DamageSource, Mob, living};
 use crate::{
     entity::{
         Entity, Movement, axis_component,
-        ctx::{BlockView, EntityCtx},
+        ctx::{BlockView, Command, EntityCtx},
         item::{apply_current, flow_vector, fluid_box},
         physics::{for_each_block_intersected_between, offset_along, sweep_movement, world_boxes},
         with_axis,
@@ -49,7 +49,7 @@ pub(crate) fn move_living(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCt
             me.bounding_box(),
             living::max_up_step(mob),
             me.on_ground,
-            me.collision_context(),
+            me.mob_collision_context(mob),
             world::CollisionBlocks {
                 block_at: |pos| view.block_state(pos),
                 piston_at: |pos| view.moving_piston_shape(pos),
@@ -124,8 +124,15 @@ fn check_fall_damage(
     ctx: &mut dyn EntityCtx,
     ya: f64,
     state: BlockState,
-    _pos: BlockPos,
+    pos: BlockPos,
 ) {
+    // `Parrot.checkFallDamage`、`Bat.checkFallDamage` 和幻翼的都是空实现：不掉血，
+    // 不累计、不清零摔落距离，也不补那次流体更新。
+    // The parrot, bat and phantom `checkFallDamage` overrides are empty: no fall
+    // damage, no fall distance bookkeeping and no fluid update.
+    if mob.mob_type.ignores_fall_damage_check() {
+        return;
+    }
     if !me.in_water {
         update_fluid_interaction(me, mob, ctx.blocks());
     }
@@ -135,7 +142,7 @@ fn check_fall_damage(
     if me.on_ground {
         if me.fall_distance > 0.0 {
             let distance = me.fall_distance;
-            fall_on(me, mob, ctx, state, distance);
+            fall_on(me, mob, ctx, pos, state, distance);
         }
         me.fall_distance = 0.0;
         mob.last_climbable_pos = None;
@@ -147,10 +154,18 @@ fn fall_on(
     me: &mut Entity,
     mob: &mut Mob,
     ctx: &mut dyn EntityCtx,
+    pos: BlockPos,
     state: BlockState,
     distance: f64,
 ) {
-    if state.is(blocks::HAY_BLOCK) || state.is(blocks::HONEY_BLOCK) {
+    if state.is(blocks::TURTLE_EGG) {
+        // `TurtleEggBlock.fallOn`：`instanceof Zombie` 才不踩，其他生物 1/3。
+        // `TurtleEggBlock.fallOn`: only `instanceof Zombie` is exempt, others 1 in 3.
+        if !mob.mob_type.is_zombie() {
+            destroy_turtle_egg(me, ctx, pos, 3);
+        }
+        cause_fall_damage(me, mob, ctx, distance, 1.0);
+    } else if state.is(blocks::HAY_BLOCK) || state.is(blocks::HONEY_BLOCK) {
         cause_fall_damage(me, mob, ctx, distance, 0.2);
     } else if state.is(blocks::SLIME_BLOCK) {
         cause_fall_damage(me, mob, ctx, distance, 0.0);
@@ -176,10 +191,25 @@ fn cause_fall_damage(
     multiplier: f32,
 ) {
     use mc_bamboo_data::registries::attribute;
+    if mob.mob_type.is_equine() {
+        // 马科覆写的 `causeFallDamage` 先播落地声，伤害结算相同。
+        // The equine override plays its landing sound first; damage is unchanged.
+        super::equine::land_sound(me, mob, distance);
+    }
     let power = distance + 1.0e-6 - mob.attributes.value(attribute::SAFE_FALL_DISTANCE);
-    let damage = mth::floor(
+    let mut damage = mth::floor(
         power * f64::from(multiplier) * mob.attributes.value(attribute::FALL_DAMAGE_MULTIPLIER),
     );
+    if mob.mob_type == super::MobType::Goat {
+        // `Goat.calculateFallDamage`：少算 10 点。
+        // `Goat.calculateFallDamage`: ten points less.
+        damage -= 10;
+    }
+    if mob.mob_type == super::MobType::Frog {
+        // `Frog.calculateFallDamage`：少算 5 点。
+        // `Frog.calculateFallDamage`: five points less.
+        damage -= 5;
+    }
     if damage > 0 {
         living::hurt_server(
             me,
@@ -188,6 +218,9 @@ fn cause_fall_damage(
             DamageSource::environment(DamageKind::Fall),
             damage as f32,
         );
+    }
+    if mob.mob_type == super::MobType::Creeper {
+        super::creeper::after_fall(mob, distance);
     }
 }
 
@@ -263,25 +296,65 @@ fn movement_emission(
     mob.fly_dist += length;
     if mob.move_dist > mob.next_step && !on_state.is_air() {
         let same = on_pos == legacy_pos;
-        let mut stepped = step_effects(me, mob, legacy_state, true, collided);
+        // `MovementEmission.EVENTS`（鱿鱼）只发游戏事件：没有脚步声，也不取游泳声的随机数。
+        // `MovementEmission.EVENTS` (squid) only emits game events: no step sound and no
+        // swim-sound draws.
+        let sounds = mob.mob_type.emits_movement_sounds();
+        let mut stepped = step_effects(me, mob, view, legacy_pos, legacy_state, sounds, collided);
         if !same {
-            stepped |= step_effects(me, mob, on_state, false, collided);
+            stepped |= step_effects(me, mob, view, on_pos, on_state, false, collided);
         }
         if stepped {
-            mob.next_step = (mob.move_dist as i32 + 1) as f32;
+            mob.next_step = next_step_value(mob);
         } else if me.in_water {
-            mob.next_step = (mob.move_dist as i32 + 1) as f32;
-            // `waterSwimSound` → `playSwimSound`：两个 `nextFloat`。
-            me.random.next_float();
-            me.random.next_float();
+            mob.next_step = next_step_value(mob);
+            // `waterSwimSound` → `playSwimSound`：音量按速度算，音高取两个 `nextFloat`。
+            // `waterSwimSound` → `playSwimSound`: the volume follows the speed and the
+            // pitch draws two `nextFloat`s.
+            if sounds {
+                let delta = me.delta;
+                let speed = (delta.x * delta.x * 0.2 + delta.y * delta.y + delta.z * delta.z * 0.2)
+                    .sqrt() as f32
+                    * 0.35;
+                let mut volume = mth::java_min_f32(1.0, speed);
+                // `Turtle.playSwimSound`：音量乘 1.5。
+                // `Turtle.playSwimSound` scales the volume by 1.5.
+                if super::turtle::is_turtle(mob.mob_type) {
+                    volume *= 1.5;
+                }
+                let first = me.random.next_float();
+                let second = me.random.next_float();
+                let pitch = 1.0 + (first - second) * 0.4;
+                super::living::play_sound(me, mob, mob.mob_type.swim_sound(), volume, pitch);
+            }
+        }
+    } else if on_state.is_air() && mob.mob_type == super::MobType::Parrot {
+        // `Parrot.isFlapping()` 加 `onFlap()`：脚下是空气时按飞行距离放翅膀声。
+        // `Parrot.isFlapping()` and `onFlap()`: above air, play the wing sound per distance.
+        if mob.fly_dist > mob.parrot.next_flap {
+            super::living::play_sound(me, mob, "minecraft:entity.parrot.fly", 0.15, 1.0);
+            mob.parrot.next_flap = mob.fly_dist + mob.parrot.flap_speed / 2.0;
         }
     }
 }
 
 /// `vibrationAndSoundEffectsFromBlock`。
+/// `Entity.nextStep()`：海龟覆写成 `moveDist + 0.15F`，其余是 `floor(moveDist) + 1`。
+///
+/// `Entity.nextStep()`: turtles override it with `moveDist + 0.15F`.
+fn next_step_value(mob: &Mob) -> f32 {
+    if super::turtle::is_turtle(mob.mob_type) {
+        super::turtle::next_step(mob.move_dist)
+    } else {
+        (mob.move_dist as i32 + 1) as f32
+    }
+}
+
 fn step_effects(
     me: &mut Entity,
     mob: &mut Mob,
+    view: &dyn BlockView,
+    pos: BlockPos,
     state: BlockState,
     play_sound: bool,
     collided: Vec3,
@@ -294,9 +367,44 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
-    if play_sound {
+    if play_sound && mob.mob_type == super::MobType::Slime {
+        // 史莱姆没有覆写 `playStepSound`：放脚下方块的脚步声，音量乘 0.15。
+        // Slimes do not override `playStepSound`: the block's own step sound at 0.15 volume.
+        let sounds = state.sound_type();
+        let name = mc_bamboo_data::sounds::SOUND_EVENTS[usize::from(sounds.step_sound)].name;
+        super::living::play_sound(me, mob, name, sounds.volume * 0.15, sounds.pitch);
+    } else if play_sound && !mob.mob_type.is_water_animal() {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
-        super::living::play_sound(me, mob, mob.sound_variant.step(), 0.15, 1.0);
+        // 马科按自己的 `playStepSound`（方块声音类型、奔跑步声）走。
+        // 苦力怕和末影人走 `Entity.playStepSound`（方块 `SoundType` 的脚步声）。
+        // `AbstractFish.playStepSound` 是空实现，但这一步仍算「踩过」。
+        // `Wolf.playStepSound` 用叫声品种里的脚步声。
+        //
+        // `AbstractCow.playStepSound`: `playSound(stepSound, 0.15F, 1.0F)`.
+        // Equines go through their own `playStepSound` (block sound type, gallop).
+        // Creepers and endermen use `Entity.playStepSound` (the block `SoundType` step sound).
+        // `AbstractFish.playStepSound` is empty yet the step still counts.
+        // `Wolf.playStepSound` uses the step sound of its sound set.
+        if mob.mob_type.is_equine() {
+            super::equine::play_step_sound(me, mob, view, pos, state);
+        } else {
+            let sound = match mob.mob_type {
+                super::MobType::Turtle => super::turtle::step_sound(mob.is_baby()),
+                super::MobType::Wolf => super::wolf::sound(mob, super::wolf::Sound::Step),
+                super::MobType::Pig => super::pig::step_sound(mob.is_baby()),
+                super::MobType::Chicken => super::chicken::sounds(mob)[3],
+                kind => kind.step_sound().unwrap_or(mob.sound_variant.step()),
+            };
+            if mob.mob_type.uses_block_step_sound() {
+                // `Entity.playStepSound`：方块 `SoundType` 的脚步声，音量乘 0.15。
+                // `Entity.playStepSound`: the block `SoundType` step sound at 0.15 volume.
+                let kind = state.sound_type();
+                let sound = mc_bamboo_data::SOUND_EVENTS[usize::from(kind.step_sound)].name;
+                super::living::play_sound(me, mob, sound, kind.volume * 0.15, kind.pitch);
+            } else {
+                super::living::play_sound(me, mob, sound, 0.15, 1.0);
+            }
+        }
     }
     if play_sound
         && state.is_tagged(block_tags::CRYSTAL_SOUND_BLOCKS)
@@ -314,7 +422,7 @@ fn step_effects(
 /// `Entity.isFree(box)`：没有碰撞，也没有液体。
 pub(crate) fn is_free(me: &Entity, mob: &Mob, view: &dyn BlockView, bounds: Aabb) -> bool {
     let _ = mob;
-    if super::path::has_block_collision(view, bounds, me.collision_context(), |pos| {
+    if super::path::has_block_collision(view, bounds, me.mob_collision_context(mob), |pos| {
         view.block_state(pos)
     }) {
         return false;
@@ -445,7 +553,7 @@ pub(crate) fn apply_effects_from_blocks(me: &mut Entity, mob: &mut Mob, ctx: &mu
     if me.on_ground {
         let pos = me.on_pos(ctx.blocks(), 0.2);
         let state = ctx.blocks().block_state(pos);
-        step_on(me, mob, ctx, state);
+        step_on(me, mob, ctx, pos, state);
     }
     let was_on_fire = me.remaining_fire_ticks > 0;
     let was_freezing = mob.ticks_frozen > 0;
@@ -484,9 +592,18 @@ pub(crate) fn apply_effects_from_blocks(me: &mut Entity, mob: &mut Mob, ctx: &mu
     }
 }
 
-/// `Block.stepOn`：岩浆块烫，史莱姆块减速。
-fn step_on(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, state: BlockState) {
-    if state.is(blocks::MAGMA_BLOCK) {
+/// `Block.stepOn`：岩浆块烫，史莱姆块减速，海龟蛋可能被踩坏。
+fn step_on(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    pos: BlockPos,
+    state: BlockState,
+) {
+    if state.is(blocks::TURTLE_EGG) {
+        // 生物不会潜行，`isSteppingCarefully` 恒为假。
+        destroy_turtle_egg(me, ctx, pos, 100);
+    } else if state.is(blocks::MAGMA_BLOCK) {
         living::hurt_server(
             me,
             mob,
@@ -503,11 +620,36 @@ fn step_on(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, state: Block
     }
 }
 
+/// `TurtleEggBlock.destroyEgg`：生物（非海龟、蝙蝠、玩家）要 `mobGriefing`；
+/// 之后的世界随机数和改方块在命令落地时做。
+///
+/// `TurtleEggBlock.destroyEgg`: mobs other than turtles, bats and players need
+/// `mobGriefing`; the world-random draw and the block change land with the command.
+fn destroy_turtle_egg(me: &mut Entity, ctx: &mut dyn EntityCtx, pos: BlockPos, chance: i32) {
+    // `canDestroyEgg`：`instanceof Turtle` 和 `instanceof Bat` 都直接返回假。
+    // `canDestroyEgg`: `instanceof Turtle` and `instanceof Bat` both return false.
+    if me
+        .kind
+        .mob()
+        .is_some_and(|mob| matches!(mob.mob_type, super::MobType::Turtle | super::MobType::Bat))
+    {
+        return;
+    }
+    if !ctx.blocks().block_game_rules().mob_griefing {
+        return;
+    }
+    ctx.emit(Command::TrampleTurtleEgg { pos, chance }, me);
+}
+
 fn run_action(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, action: Action) {
     match action {
         Action::Effect(EffectType::Freeze) => {
             mob.in_powder_snow = true;
-            mob.ticks_frozen = (mob.ticks_frozen + 1).min(140);
+            // `InsideBlockEffectType.FREEZE`：`canFreeze()` 为假时只记「在细雪里」。
+            // `InsideBlockEffectType.FREEZE`: without `canFreeze()` only the flag is set.
+            if super::living::can_freeze(mob) {
+                mob.ticks_frozen = (mob.ticks_frozen + 1).min(140);
+            }
         }
         Action::Effect(EffectType::ClearFreeze) => mob.ticks_frozen = 0,
         Action::Effect(EffectType::FireIgnite) => {
@@ -546,6 +688,14 @@ fn run_action(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, action: A
             }
         }
     }
+}
+
+/// `Entity.igniteForSeconds(8)` 走 `LivingEntity.igniteForTicks`，再把
+/// 燃烧时间属性乘进去。白天燃烧和僵尸着火传染共用这一层。
+///
+/// `Entity.igniteForSeconds(8)` via `LivingEntity.igniteForTicks`.
+pub(crate) fn ignite_for_seconds(me: &mut Entity, mob: &mut Mob, seconds: f32) {
+    ignite_for_ticks(me, mob, mth::floor_f32(seconds * 20.0));
 }
 
 /// `LivingEntity.igniteForTicks` → `Entity.igniteForTicks`：燃烧时间属性是 1。
@@ -647,7 +797,7 @@ fn inside_between(
         if state.is_air() {
             continue;
         }
-        let inside = shape::entity_inside_boxes(state, pos, entity_context(me));
+        let inside = shape::entity_inside_boxes(state, pos, entity_context(me, mob));
         let from_box = me.make_bounding_box_at(from);
         let in_block = shape::is_unit_cube(&inside)
             || from_box.collided_along_vector(to.subtract(from), &world_boxes(&inside, pos));
@@ -687,14 +837,14 @@ fn inside_between(
     last + 1
 }
 
-fn entity_context(me: &Entity) -> shape::EntityContext {
+fn entity_context(me: &Entity, mob: &Mob) -> shape::EntityContext {
     shape::EntityContext {
         fall_distance: me.fall_distance,
         bottom: me.position.y,
         falling_block: false,
         descending: false,
         placement: false,
-        powder_snow_walkable: false,
+        powder_snow_walkable: mob.walks_on_powder_snow(),
     }
 }
 
@@ -715,7 +865,9 @@ fn entity_inside(
             DamageSource::environment(DamageKind::Cactus),
             1.0,
         );
-    } else if state.is(blocks::SWEET_BERRY_BUSH) {
+    } else if state.is(blocks::SWEET_BERRY_BUSH) && mob.mob_type != super::MobType::Fox {
+        // 狐狸（和蜜蜂）不被浆果丛卡住也不扎。
+        // Foxes (and bees) are neither slowed nor pricked by berry bushes.
         me.fall_distance = 0.0;
         me.stuck_speed_multiplier = Vec3::new(f64::from(0.8_f32), 0.75, f64::from(0.8_f32));
         if state.try_get(AGE_3).unwrap_or(0) != 0 {
@@ -733,8 +885,12 @@ fn entity_inside(
             }
         }
     } else if state.is_a(BlockAncestor::WebBlock) {
-        me.fall_distance = 0.0;
-        me.stuck_speed_multiplier = Vec3::new(0.25, f64::from(0.05_f32), 0.25);
+        // `Spider.makeStuckInBlock` 对蜘蛛网直接返回：既不减速也不清摔落距离。
+        // `Spider.makeStuckInBlock` returns early for cobwebs: no slowdown, no fall reset.
+        if !mob.mob_type.climbs_walls() {
+            me.fall_distance = 0.0;
+            me.stuck_speed_multiplier = Vec3::new(0.25, f64::from(0.05_f32), 0.25);
+        }
     } else if state.is_a(BlockAncestor::PowderSnowBlock) {
         if ctx
             .blocks()
@@ -840,6 +996,11 @@ pub(crate) fn update_fluid_interaction(me: &mut Entity, mob: &mut Mob, view: &dy
         }
     }
     me.in_water = in_water;
+    // `isPushedByFluid()` 为假的（水生生物）不吃水流。
+    // Mobs whose `isPushedByFluid()` is false (water creatures) ignore currents.
+    if !mob.mob_type.is_pushed_by_fluid() {
+        return;
+    }
     if in_water && water.count > 0 {
         apply_current(me, &water.current, 0.014);
     }
@@ -912,5 +1073,237 @@ fn splash(me: &mut Entity) {
         me.random.next_double();
         me.random.next_double();
         index += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `TurtleEggBlock.stepOn` / `fallOn` / `canDestroyEgg` 的分派。
+    //! Dispatch for `TurtleEggBlock.stepOn`, `fallOn` and `canDestroyEgg`.
+
+    use super::*;
+    use crate::{
+        BlockTicks, Effect,
+        entity::{
+            ctx::{Command, EntityCtx, PreciseCtx},
+            view::{SourceView, ViewFacts},
+        },
+        state::EGGS,
+        testing::TestLevel,
+        world::World,
+    };
+    use mc_bamboo_data::blocks;
+
+    const EGG_POS: BlockPos = BlockPos::new(0, 63, 0);
+
+    struct EggSource {
+        griefing: bool,
+    }
+
+    impl crate::entity::view::BlockSource for EggSource {
+        fn block_state(&self, pos: BlockPos) -> BlockState {
+            if pos.y == EGG_POS.y {
+                BlockState(blocks::TURTLE_EGG).with(EGGS, 4)
+            } else {
+                BlockState(blocks::AIR)
+            }
+        }
+
+        fn facts(&self) -> ViewFacts {
+            let mut facts = ViewFacts::default();
+            facts.rules.mob_griefing = self.griefing;
+            facts
+        }
+    }
+
+    fn egg_source(griefing: bool) -> SourceView<EggSource> {
+        SourceView::new(EggSource { griefing })
+    }
+
+    /// 收集一次 `step_on` 或 `fall_on` 发出的命令，而不是改世界。
+    /// Collect the commands emitted by one `step_on` / `fall_on` instead of changing the world.
+    struct CollectCtx<T: crate::entity::view::BlockSource> {
+        view: SourceView<T>,
+        commands: Vec<Command>,
+        uid: crate::entity::EntityUid,
+    }
+
+    impl<T: crate::entity::view::BlockSource> CollectCtx<T> {
+        fn new(view: SourceView<T>, uid: crate::entity::EntityUid) -> Self {
+            Self {
+                view,
+                commands: Vec::new(),
+                uid,
+            }
+        }
+    }
+
+    impl<T: crate::entity::view::BlockSource> EntityCtx for CollectCtx<T> {
+        fn uid(&self) -> crate::entity::EntityUid {
+            self.uid
+        }
+
+        fn blocks(&self) -> &dyn BlockView {
+            &self.view
+        }
+
+        fn other(&self, _: crate::entity::EntityUid) -> Option<crate::entity::EntityPublic> {
+            None
+        }
+
+        fn entity_uids(&self) -> Vec<crate::entity::EntityUid> {
+            Vec::new()
+        }
+
+        fn for_each_other_in(&self, _: Aabb, _: &mut dyn FnMut(&crate::entity::EntityPublic)) {}
+
+        fn for_each_other_uid_in(&self, _: Aabb, _: &mut dyn FnMut(crate::entity::EntityUid)) {}
+
+        fn emit(&mut self, command: Command, _me: &mut Entity) {
+            self.commands.push(command);
+        }
+
+        fn hurt_player(
+            &mut self,
+            _: crate::entity::EntityUid,
+            _: DamageSource,
+            _: f32,
+            _: &mut Entity,
+            _: &crate::entity::EntityPublic,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// `step_on` 发出的踩蛋命令，带官方的 1/100。
+    /// The emitted trample command from `step_on`, with vanilla's 1 in 100 chance.
+    fn stepped(kind: super::super::MobType, griefing: bool) -> Option<i32> {
+        let mut me = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
+        let mut ctx = CollectCtx::new(egg_source(griefing), me.id);
+        let mut mob = me.kind.mob_mut().cloned().expect("a mob");
+        step_on(
+            &mut me,
+            &mut mob,
+            &mut ctx,
+            EGG_POS,
+            BlockState(blocks::TURTLE_EGG).with(EGGS, 4),
+        );
+        ctx.commands.into_iter().find_map(|command| match command {
+            Command::TrampleTurtleEgg { chance, .. } => Some(chance),
+            _ => None,
+        })
+    }
+
+    /// `fall_on` 发出的踩蛋命令，带官方的 1/3。
+    /// The emitted trample command from `fall_on`, with vanilla's 1 in 3 chance.
+    fn fallen(kind: super::super::MobType, griefing: bool) -> Option<i32> {
+        let mut me = Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, 0.5));
+        let mut ctx = CollectCtx::new(egg_source(griefing), me.id);
+        let mut mob = me.kind.mob_mut().cloned().expect("a mob");
+        fall_on(
+            &mut me,
+            &mut mob,
+            &mut ctx,
+            EGG_POS,
+            BlockState(blocks::TURTLE_EGG).with(EGGS, 4),
+            0.0,
+        );
+        ctx.commands.into_iter().find_map(|command| match command {
+            Command::TrampleTurtleEgg { chance, .. } => Some(chance),
+            _ => None,
+        })
+    }
+
+    /// `canDestroyEgg`：海龟和蝙蝠都不踩，别的生物按 `mobGriefing`。
+    /// `canDestroyEgg`: turtles and bats never trample; other mobs need `mobGriefing`.
+    #[test]
+    fn turtles_and_bats_never_trample_eggs() {
+        for kind in [super::super::MobType::Turtle, super::super::MobType::Bat] {
+            assert_eq!(stepped(kind, true), None, "{kind:?} must not step on eggs");
+            assert_eq!(fallen(kind, true), None, "{kind:?} must not fall on eggs");
+        }
+        assert_eq!(stepped(super::super::MobType::Cow, true), Some(100));
+        assert_eq!(fallen(super::super::MobType::Cow, true), Some(3));
+    }
+
+    /// `fallOn` 的 `instanceof Zombie` 豁免：僵尸一系落到蛋上不踩，走上去照踩。
+    /// The `instanceof Zombie` exemption of `fallOn`: zombies do not trample on
+    /// landing, but still do when walking.
+    #[test]
+    fn only_zombies_are_exempt_from_falling_on_eggs() {
+        for kind in [
+            super::super::MobType::Zombie,
+            super::super::MobType::Husk,
+            super::super::MobType::Drowned,
+        ] {
+            assert_eq!(fallen(kind, true), None, "{kind:?} fell on eggs");
+            assert_eq!(stepped(kind, true), Some(100));
+        }
+        assert_eq!(fallen(super::super::MobType::Skeleton, true), Some(3));
+    }
+
+    /// `canDestroyEgg` 对非玩家生物要求 `mobGriefing`。
+    /// `canDestroyEgg` requires `mobGriefing` for non-player mobs.
+    #[test]
+    fn mob_griefing_gates_mob_trampling() {
+        assert_eq!(stepped(super::super::MobType::Cow, false), None);
+        assert_eq!(fallen(super::super::MobType::Cow, false), None);
+    }
+
+    /// 命令落地时 `nextInt(chance) == 0` 才减一枚，并发 2001 事件带旧状态。
+    /// The command only removes an egg on `nextInt(chance) == 0`, with a 2001 event
+    /// carrying the old state.
+    #[test]
+    fn the_trample_command_decrements_the_clutch() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let egg = BlockState(blocks::TURTLE_EGG).with(EGGS, 4);
+        level.set(EGG_POS, egg);
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut me = Entity::by_mob_type(super::super::MobType::Cow, Vec3::new(0.5, 64.0, 0.5));
+        // 测试世界的随机源种子是 0，`nextInt(1)` 恒为 0；chance=1 让必踩。
+        // The test world's random seed is 0; chance 1 always tramples.
+        crate::entity::ctx::apply(
+            Command::TrampleTurtleEgg {
+                pos: EGG_POS,
+                chance: 1,
+            },
+            &mut me,
+            &mut world,
+        );
+        let effects = world.drain_effects();
+        drop(world);
+        assert_eq!(level.get(EGG_POS).get(EGGS), 3);
+        assert!(effects.iter().any(|effect| matches!(
+            *effect,
+            Effect::LevelEvent {
+                event: 2001,
+                pos,
+                data,
+                except_initiator: false
+            } if pos == EGG_POS && data == egg.0 as i32
+        )));
+    }
+
+    /// `PreciseCtx` 存在，编译期确认两种驱动都能落地踩蛋命令。
+    /// `PreciseCtx` exists so both drivers can apply the trample command.
+    #[test]
+    fn precise_context_applies_the_same_trample_command() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        level.set(EGG_POS, BlockState(blocks::TURTLE_EGG).with(EGGS, 2));
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut me = Entity::by_mob_type(super::super::MobType::Cow, Vec3::new(0.5, 64.0, 0.5));
+        let mut ctx = PreciseCtx::new(&mut world, me.id);
+        ctx.emit(
+            Command::TrampleTurtleEgg {
+                pos: EGG_POS,
+                chance: 1,
+            },
+            &mut me,
+        );
+        // `ctx` 借着 `world`，两者都在这一段结束时离开作用域。
+        // `ctx` borrows `world`; both leave scope at the end of this block.
+        assert_eq!(level.get(EGG_POS).get(EGGS), 1);
     }
 }
