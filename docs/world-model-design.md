@@ -263,8 +263,8 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
 - **线程模型**：`bamboo.toml` 的 `chunk_worker_threads`，0..=64，默认 0。0 是内联
   执行器，任务当场跑完，行为和以前逐字节相同；≥ 1 起这么多条常驻线程。只用标准库：
   `Mutex<BinaryHeap>` + `Condvar` 做提交队列，`mpsc` 做回执信箱。池子本身是通用的
-  （任务 + 回执，不认识区块），实体并行驱动现在每刻新起线程（`ScopedThreads`），
-  以后也可以改成往这里交任务。
+  （任务 + 回执，不认识区块），实体并行驱动另有一份启动时建好的常驻线程池，
+  按刻派活；两者互不混用。
 - **哪些任务进池**：`Decode`（解开容器、解析两份 NBT）、每个 `Generate` 阶段、
   `Save` 的序列化。`Read` 仍是 IO 线程（停放表命中当场返回）；`Assemble` 只是把盒子
   交回，内联做；D6 匀速保存里仍加载的区块的快照要借用活的 region 表，仍在世界线程上。
@@ -595,8 +595,9 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 `bamboo.toml` 里的 `entity_threads=<n>`（见 `configuration.md`）经 `ServerConfig` 和
 `WorldConfig` 传给 `World`：0 是精确驱动（原行为），≥ 1 用并行驱动，n 是线程数
 （1 表示走并行代码路径但单线程，用来对比）。算阶段用一份只读的
-`ChunkStore` 视图，落地阶段照现在的办法构造 `RegionLevel`。执行器现在用 `ScopedThreads`，
-**每刻起线程，开销大，只用于实验**；常驻线程池是任务系统（第 12 节）的事，这次不做。
+`ChunkStore` 视图，落地阶段照现在的办法构造 `RegionLevel`。执行器在服务端启动时
+按线程数建好 `WorkerPool`（常驻线程 + 当前线程各跑一份）；`ScopedThreads` 只留给
+压测做「每刻起线程」的 A/B 对照。结果仍和线程数无关。
 
 剖析器把并行驱动的实体阶段记成 `entity_compute`（算）和 `entity_commit`（发布、落地、发效果）
 两段；精确驱动仍是 `entities` 一段。
@@ -952,7 +953,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **存档和计算池已做完，M4 多阶段生成还没接进流水线**：`TicketTable`、存档编解码、Director 状态机都接进 `World::tick`；一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，带世界目录时所有区块（盘上有和没有）都走同一条异步读流水线，结果下一刻开头经信箱收回，进服第一批仍按距离交付（`docs/m3-storage.md` 第 14 节 `05d8fa1`）。非 `full` 的 `Status` 按 ProtoChunk 读回、方块光照由模板补齐，`.mcc` 外置区块也能扫到。卸载时脏区块序列化后写盘、pristine 直接丢；Parking 只留作写盘途中缓冲。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`（游戏规则 / 世界生成设置 / 世界边界）、`chunk_tickets.dat`、玩家数据和 `save-all [flush]` / `save-on` / `save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时 `Decode` / 每个 `Generate` 阶段 / `Save` 的序列化在常驻后台线程上做，`Read` 仍在 IO 线程、`Assemble` 内联；默认 0 是世界线程上的 `InlineCodec`，内联和池子跑同一场景盘上字节相同。**运行中的匀速保存照官方字节码，不是 D6 原式**：`MinecraftServer.autoSave` 每 6000 刻一次全量（只写改过的）、`ChunkMap.saveChunksEagerly` 每刻最多 20 个、单区块 200 刻冷却；卸载快照另走 `ceil(待写/6000)`（至少 1）的有上限匀速队列。`Region::encode_loaded_column` 从 `&Region` 用 `BorrowedParts` 只读组装一柱，和卸载存盘共用 `chunk_content::encode_parts`，**不取出/放回盒子、不卸载、不算完待算光照、不发任何包、不改运行态表的顺序和版本号**；写出的 NBT 与卸载逐字节一致。纯上层（容器 / 实体 / 计划刻 / 方块实体 / 红石记忆）改动也由 `Region::dirty` 标脏并参与匀速保存，不必等卸载或 `/save-all`。`/save-all` 立刻给所有已加载脏区块拍快照，`/save-off` 照 `noSave` 暂停。**terrain 生成已接进流水线**（本轮，见 `docs/worldgen.md`「接进游戏」）：`World::build` 对噪声世界及自定义或启用结构的 flat 世界用 `PipelineKind::Staged` + `OverworldGenerator`，`terrain` 阶段把 worldgen 纯函数的结果（quart 群系 + 方块）写进 `RegionColumn`，其余阶段透传；四个 `server.properties` 世界生成键生效、新世界默认 `normal`、`world_gen_settings.dat` 持久化种子与维度生成器、`gen-world` 对拍 0 不一致、默认起小计算池把生成移出世界线程。**第二轮（本轮）**：`features` 阶段接进流水线（见 `docs/worldgen.md`「第二轮」、5.3.1）：`Task::Generate.neighbors` 按 `ChunkStep` 半径带邻居引用、世界线程存不可变 `Arc` CARVERS 快照、计算池跑 `Generator::features()`、写邻居增量按 `TaskId` 合并 + 完工按来源固定先后合（先写的赢）；`gen-world --through features` 对拍 0 不一致、1/4 线程逐字节相同；`initialize_light` / `light` 已在流水线里用邻居快照算出生成期光照（`b2778a8`，`gen-light` 对拍）；真实服务端路径（`collectPossibleBiomes(region,1)` / `carverBiome` / `region.getBiomeManager()`）和六张高度图也已逐方块、逐列对拍 0 不一致。**还没做**：生成时 `initialize_light` / `light` 以外的`spawn` 刷怪、其余地物类型、结构两阶段、ProtoChunk 从非 full 状态继续生成、多条 IO 线程、预编码帧、`fly-20` 飞行压测。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
 | 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **做完（2026-11-18，按 `docs/island-implementation-plan.md` 第 6 节第 0–7 步）**：世界线程就是主控（`Global` + Director），岛在常驻的 tick 线程上跑（`island_threads`）；`island_threads = 0` 是精确模式。现在只有主世界一个维度，「维度之间并行」没有对象 |
 | 5 | 分区器、合并拆分、离境和到达（6.1、6.4、6.5） | 多 region | **做完（2026-11-18，岛的实施计划第 8–10 步）**：分区器、按需拆合、跨岛离境和到达、混合驱动、判死、整个世界的命令；**缺省打开**（`islands = true`）。差异见第 13 节第 11 条，测量见 `docs/profiling.md` 第 16 节。**长时间压力和调参也做完（2026-11-18，计划第 11 步）**：一小时真实聚散轨迹 0 崩溃 / 0 不变量失败、内存不涨，修了「人多的大岛拆不开」和「跨岛搬人不等回执」两个问题，迟滞参数和线程数的缺省按数据不改（`docs/profiling.md` 第 17 节） |
-| 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：后台计算池已经有了（5.3.1，只跑区块的解析、生成、序列化），tick 线程池没有；实体并行用 `ScopedThreads` 每刻起线程（只用于实验），以后可以改成往计算池交任务；只读收尾仍是串行，降级阶梯没有实现 |
+| 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：后台计算池已经有了（5.3.1，只跑区块的解析、生成、序列化），tick 线程池没有；实体并行已换成启动时建好的 `WorkerPool` 常驻线程池；只读收尾仍是串行，降级阶梯没有实现 |
 | 7 | 实体系统：`EntityStore`、`EntityCtx`、两种驱动；现有三种实体迁过去，entity oracle 全绿（第 8 节） | 生物系统的地基 | **做完**：`f918171`、`b99f8b5`，另有 `bamboo.toml` 的 `entity_threads` 开关和两段式 `compute` / `commit`（8.6.1）；生物系统本身还没开始 |
 | 8 | 生物和 AI，按 8.3、8.4 移植 | — | **没做**：只有下落方块、点燃的 TNT 和掉落物三种实体 |
 
@@ -975,7 +976,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 2. **小网格带来更多合并拆分。** 每次合并要等两边都停下，快的一方最多白等慢的一方一刻。第 5 步要测合并频率和等待时间，不行就调大网格。
 
    （2026-11-18 按实测更新，岛的实施计划第 11 步、`docs/profiling.md` 第 17 节）4×4 网格、合并距离 2、拆分距离 4 加 200 刻迟滞下，40 人在 6 处之间飞来飞去的一小时里合并、拆分每小时各 50–150 次，照做前最多等 3 刻（均值约 0.4 刻），单次大多几毫秒、拆大岛时最多上百毫秒；迟滞缩到 60 刻、拆分距离改成 3 都没有改善，网格和参数不改。真正限制并行的是这种来回跑的场景里路上的人一直把几处连成一个岛。
-3. **实体并行的收益取决于“算”的占比**。第 7 步已经做完，3000 个掉落物加 300 个下落方块的压力场景里，收尾优化之后单线程算占整刻约 93%、8 线程整刻快约 4.0 倍，上限由「发布」那 0.21 ms 决定（8.6）。优化之前串行部分占三分之一以上（复制 0.03、发布 0.66、落地 1.28 ms/刻）、8 线程只快 1.8 倍，原因不在设计而在实现：每个掉落物每刻都发一条「被漏斗吸」的命令、空间索引每刻重建，两处都改掉了。**落地阶段不用着色并行**：在这个基准里它只占 0.002 ms/刻，等剖析器在有生物的负载里证明它是瓶颈再说。还没量的是生物的 AI 和寻路；现在 `ScopedThreads` 每刻起线程，并行驱动只能做实验（8.6.1、`docs/performance-optimizations.md` 第 5 节）。
+3. **实体并行的收益取决于“算”的占比**。第 7 步已经做完，3000 个掉落物加 300 个下落方块的压力场景里，收尾优化之后单线程算占整刻约 93%、8 线程整刻快约 4.0 倍，上限由「发布」那 0.21 ms 决定（8.6）。优化之前串行部分占三分之一以上（复制 0.03、发布 0.66、落地 1.28 ms/刻）、8 线程只快 1.8 倍，原因不在设计而在实现：每个掉落物每刻都发一条「被漏斗吸」的命令、空间索引每刻重建，两处都改掉了。**落地阶段不用着色并行**：在这个基准里它只占 0.002 ms/刻，等剖析器在有生物的负载里证明它是瓶颈再说。还没量的是生物的 AI 和寻路；常驻线程池见 8.6.1 和 `docs/performance-optimizations.md` 第 26 节。
 
    （2026-11-12 按实现更新：设计稿 8.6 / 8.6.1、`docs/performance-optimizations.md` 第 5 节；合并提交 `f918171`、`b99f8b5`）
 

@@ -347,6 +347,8 @@ impl ServerSettings {
             // World dir = server dir + level-name, matching the CLI.
             world_dir: Some(PathBuf::from(&self.server_directory).join(self.level_name.trim())),
             entity_threads: self.entity_threads as usize,
+            // 桌面界面不暴露这一项，按精确模式（0 = 不限）。
+            max_entity_collisions: defaults.max_entity_collisions,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
             worldgen_cache: WorldgenCacheSettings {

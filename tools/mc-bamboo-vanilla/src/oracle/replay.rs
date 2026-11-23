@@ -78,6 +78,8 @@ pub struct Replayed {
     /// The internal seed of `level.random` after the case, compared bit for bit with vanilla
     /// on dispenser and crafter cases.
     pub random_seed: i64,
+    /// 这题生成的实体类型，按生成顺序。
+    pub spawned: Vec<String>,
 }
 
 /// 排着队的计划刻。
@@ -972,6 +974,23 @@ pub fn replay(
         Kind::Item => use_item(&mut level, &mut ticks, &actor, action.hand),
         Kind::Random => random_tick(&mut level, &mut ticks, target),
         Kind::Chunk => tick_chunk(&mut level, &mut ticks, target.chunk(), action.speed),
+        Kind::Explode => {
+            let centre = Vec3::new(
+                f64::from(target.x) + 0.5,
+                f64::from(target.y) + 0.5,
+                f64::from(target.z) + 0.5,
+            );
+            let mut world = mc_bamboo_blocks::World::new(&mut level, &mut ticks);
+            world.explode_tnt(centre, 1.0);
+            mc_bamboo_blocks::Outcome {
+                result: mc_bamboo_blocks::InteractionResult::Success,
+                used_without_item: false,
+                placed_at: None,
+                item_exchange: None,
+                gained: None,
+                effects: world.into_effects(),
+            }
+        }
     };
     // `EntityType.spawn` 在 `addFreshEntityWithPassengers` 之后调 `Mob.playAmbientSound`，
     // `Entity.playSound` 再走 `level.playSound(null, ...)`。Bamboo 的这一声记在实体行的
@@ -1012,6 +1031,16 @@ pub fn replay(
         gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
         random_seed: level.random.source().seed(),
+        spawned: level
+            .world_entities
+            .take_spawn_snapshots()
+            .iter()
+            .map(|entity| {
+                mc_bamboo_data::registries::entity_type::name_of(entity.kind.entity_type())
+                    .unwrap_or("minecraft:unknown")
+                    .to_owned()
+            })
+            .collect(),
     })
 }
 
@@ -1066,7 +1095,7 @@ fn run_flow(
 
 fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
     match kind {
-        Kind::Tick | Kind::Flow | Kind::Random | Kind::Chunk => "ticked",
+        Kind::Tick | Kind::Flow | Kind::Random | Kind::Chunk | Kind::Explode => "ticked",
         Kind::Destroy if result == InteractionResult::Fail => "refused",
         Kind::Destroy => "destroyed",
         Kind::Place | Kind::Use | Kind::Item => match result {
@@ -1206,6 +1235,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 生物对玩家的伤害意图不属于方块题，游戏层单独处理。
             | Effect::HurtPlayer { .. }
             | Effect::IgnitePlayer { .. }
+            | Effect::DestroyProgress { .. }
             // 药水箭给玩家的效果不属于方块题。
             //
             // Potion-arrow effects on players are not part of a block case.
@@ -1326,6 +1356,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::OpenCommandBlock { .. }
             | Effect::HurtPlayer { .. }
             | Effect::IgnitePlayer { .. }
+            | Effect::DestroyProgress { .. }
             | Effect::PlayerEffect { .. }
             | Effect::HealPlayer { .. }
             | Effect::SleepInBed { .. } => {}

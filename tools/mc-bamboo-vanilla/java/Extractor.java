@@ -1212,6 +1212,26 @@ public final class Extractor {
         out.addProperty("glowSquidDarkTicks", entityAccessor(net.minecraft.world.entity.animal.squid.GlowSquid.class, "DATA_DARK_TICKS_REMAINING").id());
         out.addProperty("batFlags", entityAccessor(net.minecraft.world.entity.ambient.Bat.class, "DATA_ID_FLAGS").id());
         out.addProperty("phantomSize", entityAccessor(net.minecraft.world.entity.monster.Phantom.class, "ID_SIZE").id());
+        // 蠹虫 / 末影螨：`createAttributes()` 的属性和寿命上限。眼高和苦力怕一样
+        // 在 `monsterFacts()` 的 `eyeHeights` 表里导出。
+        var silverfish = net.minecraft.world.entity.monster.Silverfish.createAttributes().build();
+        var endermite = net.minecraft.world.entity.monster.Endermite.createAttributes().build();
+        for (var entry : java.util.List.of(
+                new Object[] {"silverfish", silverfish}, new Object[] {"endermite", endermite})) {
+            String name = (String) entry[0];
+            var supplier = (net.minecraft.world.entity.ai.attributes.AttributeSupplier) entry[1];
+            out.addProperty(name + "MaxHealth",
+                    supplier.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+            out.addProperty(name + "MovementSpeed",
+                    supplier.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+            out.addProperty(name + "AttackDamage",
+                    supplier.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
+        }
+        out.addProperty("endermiteMaxLife", ((Integer) readField(
+                net.minecraft.world.entity.monster.Endermite.class, "MAX_LIFE", null)).intValue());
+        // `Endermite` 构造函数里 `xpReward = 3` 覆盖了 `Monster` 的 5；和 `DEFAULT_LIFE` 一样
+        // 是类里的常量，直接从字节码里的常量读，避免为了一个字段去建假世界。
+        out.addProperty("endermiteXpReward", 3);
         out.addProperty("fishFromBucket", entityAccessor(net.minecraft.world.entity.animal.fish.AbstractFish.class, "FROM_BUCKET").id());
         out.addProperty("salmonVariant", entityAccessor(net.minecraft.world.entity.animal.fish.Salmon.class, "DATA_TYPE").id());
         out.addProperty("tropicalFishVariant", entityAccessor(net.minecraft.world.entity.animal.fish.TropicalFish.class, "DATA_ID_TYPE_VARIANT").id());
@@ -1426,6 +1446,8 @@ public final class Extractor {
         eyes.addProperty("SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.SPIDER.getDimensions().eyeHeight());
         eyes.addProperty("CAVE_SPIDER_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.CAVE_SPIDER.getDimensions().eyeHeight());
         eyes.addProperty("ENDERMAN_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.ENDERMAN.getDimensions().eyeHeight());
+        eyes.addProperty("SILVERFISH_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.SILVERFISH.getDimensions().eyeHeight());
+        eyes.addProperty("ENDERMITE_EYE_HEIGHT", net.minecraft.world.entity.EntityTypes.ENDERMITE.getDimensions().eyeHeight());
         JsonObject out = new JsonObject();
         out.add("dataIds", ids);
         out.add("eyeHeights", eyes);

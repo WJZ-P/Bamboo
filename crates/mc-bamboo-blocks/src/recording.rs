@@ -764,6 +764,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::IgnitePlayer { .. } => 21,
         Effect::PlayerEffect { .. } => 22,
         Effect::HealPlayer { .. } => 23,
+        Effect::DestroyProgress { .. } => 24,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -894,6 +895,15 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::HealPlayer { target, amount } => {
             target.hash(&mut hasher);
             amount.to_bits().hash(&mut hasher);
+        }
+        Effect::DestroyProgress {
+            breaker,
+            pos,
+            progress,
+        } => {
+            breaker.hash(&mut hasher);
+            pos.hash(&mut hasher);
+            progress.hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);
@@ -1330,6 +1340,21 @@ impl LevelEntities for Recording<'_> {
             (4_u8, area.min_x.to_bits(), area.max_z.to_bits()),
         );
         self.level.for_each_entity_in(area, visit);
+    }
+
+    fn for_each_pushable_in(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.note_entities(4);
+        self.read(
+            None,
+            K_ENTITIES,
+            (4_u8, area.min_x.to_bits(), area.max_z.to_bits()),
+        );
+        self.level.for_each_pushable_in(area, limit, visit);
     }
 
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid {

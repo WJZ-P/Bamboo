@@ -1055,7 +1055,7 @@ fn touch_player(world: &mut World, slots: &mut [ItemStack], creative: bool) {
 ///
 /// The mining comparison result: drops, orb values, and the resulting
 /// `level.random` seed.
-pub(crate) type MinedOutcome = (Vec<(i32, i32)>, Vec<i32>, i64);
+pub(crate) type MinedOutcome = (Vec<(i32, i32)>, Vec<i32>, i64, Vec<String>);
 
 /// 生存挖掘：工具对了才 `getDrops` 再 `popResource`；再按 `spawnAfterBreak`
 /// 采样矿石经验、应用工具附魔并拆成经验球。
@@ -1117,6 +1117,28 @@ pub(crate) fn mined_outcome(
             };
             world.pop_resource(pos, item);
         }
+        // `Block.dropResources` 在掉落之后调 `spawnAfterBreak`：虫蚀方块刷蠹虫。
+        // `Block.dropResources` calls `spawnAfterBreak` after the drops.
+        let mut held = ItemStack::new(tool, 1);
+        if !tool_enchantments.is_empty() {
+            let levels = tool_enchantments
+                .iter()
+                .filter_map(|(name, level)| {
+                    mc_bamboo_loot::enchantment_id(name).map(|id| (id, *level))
+                })
+                .collect();
+            let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+            patch.put(
+                mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+                mc_bamboo_protocol::components::PatchEntry::Set(
+                    mc_bamboo_protocol::components::ComponentValue::Enchantments(levels),
+                ),
+            );
+            let (added, removed) = patch.to_opaque();
+            held.added = added;
+            held.removed = removed;
+        }
+        world.spawn_after_break(BlockState(state), pos, &held);
         let mut drops = Vec::new();
         for id in world.entity_ids() {
             if let Some(entity) = world.entity(id)
@@ -1161,7 +1183,16 @@ pub(crate) fn mined_outcome(
         }
         values
     };
-    Ok((drops, xp_orbs, level.random.source().seed()))
+    let spawned = level
+        .entities
+        .take_spawn_snapshots()
+        .iter()
+        .filter_map(|entity| {
+            mc_bamboo_data::registries::entity_type::name_of(entity.kind.entity_type())
+                .map(str::to_owned)
+        })
+        .collect();
+    Ok((drops, xp_orbs, level.random.source().seed(), spawned))
 }
 
 /// 战利品条件只看这一格。

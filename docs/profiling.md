@@ -37,9 +37,9 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo
 `entities` 一段，算完立刻落地；并行驱动（`entity_threads ≥ 1`）记
 `entity_compute`（只读算阶段）和 `entity_commit`（发布状态、按 uid 升序应用命令、
 发效果）两段，`entities` 没有样本。所以报告里有 18 个阶段，但任何一次运行只会有
-17 个阶段有样本。**实体并行驱动仍用 `ScopedThreads` 每刻起线程**，剖析数字包含这项开销；
-常驻的 `ComputePool` 是区块计算池，只跑区块的 `Decode` / `Generate` / `Save`，不接实体驱动
-（`chunk_worker_threads` 控制，见第 11 节）。两处不要混淆。
+17 个阶段有样本。**实体并行驱动用启动时建好的常驻线程池 `WorkerPool`**（`entity_threads` 控制）；
+常驻的 `ComputePool` 是区块计算池，只跑区块的 `Decode` / `Generate` / `Save`，
+不接实体驱动（`chunk_worker_threads` 控制，见第 11 节）。两处不要混淆。
 
 第二段 `metrics` 里，`tick_total`、`tick_start_lateness` 和
 `tick_interval_deviation` 是时间（ms）：

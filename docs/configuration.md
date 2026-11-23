@@ -144,6 +144,7 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 | `auth_connect_timeout_seconds` | 整数（秒） | `5` | 连接 Mojang session server 的时限 |
 | `auth_read_timeout_seconds` | 整数（秒） | `5` | 等 session server 回下一段字节的时限 |
 | `entity_threads` | 整数 | `0` | 实体并行线程数（实验）。0 = 精确模式，≥ 1 = 性能模式 |
+| `max_entity_collisions` | 整数 | `0` | 每只生物每刻最多处理几次推挤（Paper 的 `collisions.maxEntityCollisions`）。0 = 不限（缺省，和官方逐位一致）；≥ 1 = 上限下推到范围查询、够数停止枚举。挤成一团时生物散开得慢，但 `maxEntityCramming` 的伤害规则不变。合法范围 0..=4096，Paper 缺省是 8 |
 | `chunk_worker_threads` | 整数 | `0` | 区块计算池的线程数：区块的解析、生成和存盘序列化放到多少条常驻后台线程上做。0 = 在世界线程上内联做 |
 | `spawn_per_player_cap` | 布尔 | `true` | 自然刷怪按玩家算上限：每名玩家附近的同类生物不超过官方 `maxInstancesPerChunk`。`false` 只剩官方的全局上限 `maxInstancesPerChunk * 刷怪区块数 / 289` |
 | `deliveries_per_tick` | 整数 | `64` | Director 信箱每刻最多交付多少个区块；0 表示不限 |
@@ -156,6 +157,9 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 
 这一段照 `world-model-design.md` 第 13 节和 `performance-optimizations.md` 第 5 节。
 
+- **挤压上限**（`max_entity_collisions`，默认 `0` = 关）：只在明确设成 ≥ 1 时改变行为；
+  和 `entity_threads` 无关，精确驱动和并行驱动都生效，结果仍和线程数无关。
+  见 `docs/mob-entity-design.md` 4.8。
 - **精确模式**（`entity_threads=0`，默认）：实体逐个算完立刻落地，和官方逐位一致；
   所有 oracle、probe、单元测试都在这个模式下跑。
 - **性能模式**（`entity_threads≥1`）：实体阶段改成「并行算，再按（uid 升序、
@@ -176,7 +180,8 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 `level.random` 的消费序列。同一个 region 内部结果仍然是确定的：同样输入、不同线程数，
 结果相同。
 
-**目前性能模式每刻新起线程，开销大，只用于实验，不建议在正式服开。**
+**实体并行驱动在服务端启动时按 `entity_threads` 建好一批常驻线程，按刻派活；
+`entity_threads = 0/1` 不起后台线程。精确模式（`0`）仍是逐位一致的默认选择。**
 
 ### 区块计算池
 

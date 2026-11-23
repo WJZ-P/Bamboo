@@ -120,6 +120,14 @@ pub trait BlockView {
     /// The players, in `ServerLevel.players()` order. Default: none.
     fn for_each_player(&self, _visit: &mut dyn FnMut(&PlayerView)) {}
 
+    /// 一个实体（按 UUID 找它的计分板名字）所在的队伍，和 [`PlayerView::team`]
+    /// 用同一套下标。默认谁都不在队伍里。
+    ///
+    /// The team of an entity looked up by UUID, indexed like [`PlayerView::team`].
+    fn entity_team(&self, _uuid: &[u8; 16]) -> Option<u32> {
+        None
+    }
+
     /// `getSkyDarken()`：昼夜和天气让天空光暗了多少。
     fn sky_darken(&self) -> i32 {
         0
@@ -304,6 +312,9 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 所在队伍（`getTeam()`）在计分板队伍表里的下标，同一刻的快照里一队一个值；
+    /// 不在队伍里是 `None`。只用来判断和生物是不是同队。
+    pub team: Option<u32>,
     /// 朝向，骑乘时用作骑手的朝向（`AbstractHorse.getRiddenRotation`）。
     ///
     /// The facing, used as the rider's rotation while riding
@@ -463,6 +474,10 @@ impl BlockView for World<'_> {
         self.level().for_each_player(visit);
     }
 
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.level().entity_team(uuid)
+    }
+
     fn sky_darken(&self) -> i32 {
         self.level().sky_darken()
     }
@@ -561,6 +576,24 @@ pub trait EntityCtx {
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_other_in`]，但 `visit` 返回 `true` 才算一个够数的
+    /// 结果：挤压上限下推到查询里，凑够 `limit` 个就停止枚举。
+    ///
+    /// Like [`Self::for_each_other_in`], but only `true` returns count towards
+    /// `limit`; the push cap stops enumeration once it has enough candidates.
+    fn pushable_others(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        let mut seen = 0;
+        self.for_each_other_in(area, &mut |public| {
+            if seen < limit && visit(public) {
+                seen += 1;
+            }
+        });
+    }
     /// 范围查询里只需要 ID 时用这个：不复制公开数据，共享表里那一份。
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid));
     /// 提交一条对外影响。精确模式当场落地，并行模式进缓冲。
@@ -841,15 +874,47 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         eggs: i32,
     },
+    /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：`BreakDoorGoal` 的
+    /// 门上裂纹，`progress` 为 -1 时清掉。
+    DestroyProgress {
+        pos: mc_bamboo_core::BlockPos,
+        progress: i32,
+    },
+    /// `BreakDoorGoal.tick` 到点：`removeBlock(pos, false)`，再 `levelEvent(1021)`
+    /// 和 `levelEvent(2001, 拆完以后这一格的状态)`。
+    BreakDoor {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
+    RemoveMobBlock {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// 兔子吃掉一龄胡萝卜作物。
     ///
     /// A rabbit removes one growth stage from a carrot crop.
     RabbitEatCarrots {
         pos: mc_bamboo_core::BlockPos,
     },
-    RemoveMobBlock {
+    /// `SilverfishWakeUpFriendsGoal`：`Level.destroyBlock(pos, true, silverfish)`。
+    /// 破坏虫蚀方块会再走 `spawnAfterBreak`，也就是又生成一只蠹虫。
+    ///
+    /// `SilverfishWakeUpFriendsGoal`'s griefing branch: destroying an infested
+    /// block runs `spawnAfterBreak` and spawns another silverfish.
+    SilverfishBreak {
+        pos: mc_bamboo_core::BlockPos,
+    },
+    /// `mobGriefing` 关掉时 `setBlockAndUpdate(pos, hostStateByInfested(state))`。
+    ///
+    /// With `mobGriefing` off, replace the infested block by its host state.
+    SilverfishReveal {
+        pos: mc_bamboo_core::BlockPos,
+        host: crate::BlockState,
+    },
+    /// `SilverfishMergeWithStoneGoal.start`：把宿主方块变成虫蚀方块，蠹虫消失。
+    ///
+    /// `SilverfishMergeWithStoneGoal.start`: infest the host block and remove the mob.
+    SilverfishMerge {
         pos: mc_bamboo_core::BlockPos,
     },
     /// `Fox.pickUpItem` 的世界一侧：多出来的放回地上，原来叼着的吐出去，捡起的那件消失。
@@ -1226,8 +1291,44 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::mob::fox::apply_pick_berries(world, pos, age, took_one)
         }
         Command::FoxPickGlowBerries { pos } => super::mob::fox::apply_pick_glow_berries(world, pos),
+        Command::DestroyProgress { pos, progress } => {
+            world.push_effect(crate::Effect::DestroyProgress {
+                breaker: me.id,
+                pos,
+                progress,
+            });
+        }
+        Command::BreakDoor { pos } => {
+            let _ = world.remove_block(pos);
+            for (event, data) in [(1021, 0), (2001, world.block_state(pos).0 as i32)] {
+                world.push_effect(crate::Effect::LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    except_initiator: false,
+                });
+            }
+        }
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::SilverfishBreak { pos } => {
+            let _ = world.destroy_block(pos, true, crate::world::UPDATE_LIMIT);
+        }
+        Command::SilverfishReveal { pos, host } => {
+            let _ = world.set_block_and_update(pos, host);
+        }
+        Command::SilverfishMerge { pos } => {
+            let state = world.block_state(pos);
+            if let Some(infested) = super::mob::infested::infested_state_by_host(state) {
+                let _ = world.set_block_and_update(pos, infested);
+                // `PathfinderMob.spawnAnim` 发实体事件 20，然后 `discard()`。
+                if let Some(mob) = me.kind.mob_mut() {
+                    mob.events
+                        .push(super::mob::MobEvent::EntityEvent { event: 20 });
+                }
+                me.discard();
+            }
         }
         Command::SetBrainMemory {
             target,
@@ -1451,6 +1552,15 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.world.level().for_each_entity_in(area, visit);
+    }
+
+    fn pushable_others(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.world.level().for_each_pushable_in(area, limit, visit);
     }
 
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {

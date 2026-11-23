@@ -1080,6 +1080,12 @@ impl<'a> World<'a> {
         self.level
     }
 
+    /// 这次操作背后的可变存储。测试里要把借出去的实体原样放回去。
+    #[cfg(test)]
+    pub(crate) fn level_mut_for_test(&mut self) -> &mut dyn Level {
+        self.level
+    }
+
     /// 实体驱动的入口：写一个 `World` 入口函数给并行/精确两种驱动用。
     pub fn entities_mut(&mut self) -> &mut dyn crate::level::LevelEntities {
         self.level
@@ -2119,6 +2125,21 @@ impl<'a> World<'a> {
         self.level.spawn_after_break_random(state, pos);
     }
 
+    /// `BlockState.spawnAfterBreak` 的完整一层：先跑已有的随机取数（矿石经验），
+    /// 再让 `InfestedBlock` 有机会刷出蠹虫。工具是挖掉方块的那一件。
+    ///
+    /// The full `BlockState.spawnAfterBreak` layer: the existing random draws
+    /// (ore experience), then the infested block's silverfish spawn.
+    pub fn spawn_after_break(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+        tool: &mc_bamboo_protocol::item::ItemStack,
+    ) {
+        self.spawn_after_break_random(state, pos);
+        crate::entity::mob::infested::spawn_after_break(self, state, pos, tool);
+    }
+
     /// `getBlockRandomPos`。
     pub(crate) fn block_random_pos(&self, origin: BlockPos, y_mask: i32) -> BlockPos {
         self.level.random().block_random_pos(origin, y_mask)
@@ -2868,7 +2889,9 @@ impl<'a> World<'a> {
             for stack in self.block_loot_drops(state, pos) {
                 self.pop_resource(pos, stack);
             }
-            self.spawn_after_break_random(state, pos);
+            // `Block.dropResources` 的 `spawnAfterBreak`：工具是空手（这条路径没有
+            // 玩家），所以精准采集不会挡住虫蚀方块刷蠹虫。
+            self.spawn_after_break(state, pos, &mc_bamboo_protocol::item::ItemStack::empty());
         }
         let fluid = self.fluid_state(pos);
         self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit)
@@ -4144,6 +4167,7 @@ mod tests {
                 | Effect::OpenCommandBlock { .. }
                 | Effect::HurtPlayer { .. }
                 | Effect::IgnitePlayer { .. }
+                | Effect::DestroyProgress { .. }
                 | Effect::PlayerEffect { .. }
                 | Effect::HealPlayer { .. }
                 | Effect::SleepInBed { .. } => None,

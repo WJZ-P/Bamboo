@@ -330,6 +330,18 @@ public final class MobOracle {
                 playSquid(official, out, name);
                 cases++;
             }
+            for (String name : List.of("silverfish_wake", "silverfish_merge", "silverfish_melee",
+                    "endermite_life", "endermite_persistent", "endermite_melee", "endermite_target")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playSmallMob(official, out, name);
+                cases++;
+            }
+            if (only == null || only.equals("small_mob_save")) {
+                cases += playSmallMobSave(official, out);
+            }
+            if (only == null || only.equals("small_mob_death")) {
+                cases += playSmallMobDeath(official, out);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -564,6 +576,33 @@ public final class MobOracle {
         long clockStart = -1;
         /** 真实时间模式下的雨强（`getRainLevel`），雷暴恒 0。 */
         float rain;
+        /** 僵尸场景：生物和玩家的队伍编号（-1 不在队伍里），同号同队。 */
+        java.util.List<Integer> mobTeams = new ArrayList<>();
+        java.util.List<Integer> playerTeams = new ArrayList<>();
+
+        Scene teams(int[] mob, int[] player) {
+            for (int team : mob) mobTeams.add(team);
+            for (int team : player) playerTeams.add(team);
+            return this;
+        }
+
+        /** 僵尸场景：第 `sleepTick` 刻开头 0 号玩家右键床头 `bed`（`startSleepInBed`）。 */
+        int sleepTick = -1;
+        int[] bed;
+        boolean playerCreative;
+        /** 僵尸场景：（刻、x、y、z、状态 ID），实体 tick 之前直接写进方块表。 */
+        final List<int[]> placeAt = new ArrayList<>();
+
+        Scene sleepAt(int tick, int x, int y, int z) {
+            sleepTick = tick;
+            bed = new int[] {x, y, z};
+            return this;
+        }
+
+        Scene placeAt(int tick, int x, int y, int z, BlockState state) {
+            placeAt.add(new int[] {tick, x, y, z, Block.getId(state)});
+            return this;
+        }
         /** 僵尸场景：每只生物头上戴的东西（`null` 是空）和它的初始耐久损耗。 */
         Item helmet;
         int helmetDamage;
@@ -4005,6 +4044,122 @@ public final class MobOracle {
                 kill.mob(1, 1.5, 64.0, 0.5, 0.0F, 29L, 0);
                 kill.player(2.5, 64.0, 0.5, Items.AIR);
                 scenes.add(kill);
+                // 困难难度破门：墙上一扇关着的门，僵尸追墙后的玩家。木门 240 刻后拆掉
+                // （裂纹、敲门声、1021 / 2001 事件逐刻比），铁门和普通难度都破不了。
+                for (String door : new String[] {"oak", "iron", "normal"}) {
+                    Scene doors = new Scene("zombie_door_" + door).ticks(420)
+                            .difficulty(door.equals("normal") ? 2 : 3);
+                    doors.monstersBurn = false;
+                    ground(doors, 12);
+                    BlockState stone = Blocks.STONE.defaultBlockState();
+                    for (int z = -12; z <= 12; z++) {
+                        doors.set(3, 64, z, stone);
+                        doors.set(3, 65, z, stone);
+                    }
+                    // 玩家站在墙后的石柱上：僵尸隔着两格高的墙看得见他。
+                    for (int y = 64; y <= 67; y++) {
+                        doors.set(7, y, 0, stone);
+                    }
+                    Block block = door.equals("iron") ? Blocks.IRON_DOOR : Blocks.OAK_DOOR;
+                    BlockState lower = block.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.DoorBlock.FACING,
+                                    net.minecraft.core.Direction.WEST);
+                    doors.set(3, 64, 0, lower);
+                    doors.set(3, 65, 0, lower.setValue(net.minecraft.world.level.block.DoorBlock.HALF,
+                            net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER));
+                    doors.mob(1, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                    doors.player(7.5, 68.0, 0.5, Items.AIR);
+                    scenes.add(doors);
+                }
+                // 视线记忆：玩家站在够不着的石柱上，僵尸先看见他；第 40 刻一堵墙挡住视线，
+                // `unseenMemoryTicks`（60，减半后 30 刻）用完后放弃目标。
+                Scene sight = new Scene("zombie_lose_sight").ticks(140).difficulty(2);
+                sight.monstersBurn = false;
+                ground(sight, 12);
+                for (int y = 64; y <= 67; y++) sight.set(9, y, 0, Blocks.STONE.defaultBlockState());
+                for (int y = 64; y <= 72; y++) {
+                    for (int z = -4; z <= 4; z++) {
+                        sight.placeAt(40, 6, y, z, Blocks.STONE.defaultBlockState());
+                    }
+                }
+                sight.mob(1, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+                sight.player(9.5, 68.0, 0.5, Items.AIR);
+                scenes.add(sight);
+                // 队伍：同队的玩家不当目标（`TargetingConditions` 的 `isAlliedTo`），
+                // 不同队的照常追。
+                for (int other = 0; other <= 1; other++) {
+                    Scene team = new Scene(other == 0 ? "zombie_same_team" : "zombie_other_team")
+                            .ticks(100).difficulty(2);
+                    team.monstersBurn = false;
+                    ground(team, 12);
+                    team.mob(1, 0.5, 64.0, 0.5, 0.0F, 73L, 0);
+                    team.player(6.5, 64.0, 0.5, Items.AIR);
+                    team.teams(new int[] {0}, new int[] {other});
+                    scenes.add(team);
+                }
+                // 尸壳打中玩家：空手时给饥饿，时长 `140 * (int)` 区域难度（`Husk.doHurtTarget`）。
+                for (int difficulty = 2; difficulty <= 3; difficulty++) {
+                    Scene hunger = new Scene("zombie_husk_hunger_" + difficulty).ticks(60)
+                            .difficulty(difficulty);
+                    hunger.monstersBurn = false;
+                    hunger.realPlayers = true;
+                    ground(hunger, 12);
+                    hunger.mob(2, 0.5, 64.0, 0.5, 0.0F, 23L, 0);
+                    hunger.player(2.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(hunger);
+                }
+                // 床的怪物检查（`startSleepInBed`）：午夜、床头在 (0, 64, 0) 朝东，盒子是床头
+                // 底面中心 ±8 / ±5 / ±8。盒内和盒边附近的僵尸让人睡不了，盒外和盒下方的不挡；
+                // 创造模式不查。
+                String[] beds = {"inside", "edge", "outside", "below", "creative"};
+                double[] bedX = {6.5, 8.8, 10.5, 0.5, -7.0};
+                double[] bedY = {64.0, 64.0, 64.0, 57.0, 64.0};
+                double[] bedZ = {0.5, 0.5, 0.5, 0.5, -6.5};
+                for (int b = 0; b < beds.length; b++) {
+                    Scene sleep = new Scene("zombie_bed_" + beds[b]).ticks(3).difficulty(2);
+                    sleep.monstersBurn = false;
+                    sleep.clockStart = 18000;
+                    ground(sleep, 12);
+                    sleep.set(0, 64, 0, Blocks.BED.red().defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.BedBlock.FACING,
+                                    net.minecraft.core.Direction.EAST)
+                            .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                                    net.minecraft.world.level.block.state.properties.BedPart.HEAD));
+                    sleep.set(-1, 64, 0, Blocks.BED.red().defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.BedBlock.FACING,
+                                    net.minecraft.core.Direction.EAST)
+                            .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                                    net.minecraft.world.level.block.state.properties.BedPart.FOOT));
+                    if (bedY[b] < 64.0) {
+                        for (int x = -3; x <= 3; x++) {
+                            for (int z = -3; z <= 3; z++) {
+                                sleep.set(x, 56, z, Blocks.STONE.defaultBlockState());
+                            }
+                        }
+                    }
+                    sleep.mob(1, bedX[b], bedY[b], bedZ[b], 0.0F, 81L + b, 0);
+                    sleep.player(0.5, 64.0, 2.5, Items.AIR);
+                    sleep.realPlayers = true;
+                    sleep.sleepAt(1, 0, 64, 0);
+                    sleep.playerCreative = beds[b].equals("creative");
+                    scenes.add(sleep);
+                }
+                // `InhabitedTime` 累加：真实时钟 + 玩家，逐刻比区域难度（官方一侧按同一
+                // 候选集合累加，Bamboo 一侧用 `spawning_chunk_candidates`）。
+                // 三个难度各一条；时钟选跨过月相变化的一段，让 moon brightness 也参与。
+                // 简单 / 普通难度各一条，第三条跨过月相边界（时钟跨越 24000 的倍数）。
+                // 不用困难难度：`playZombie` 会给僵尸打开 `canBreakDoors`，而本场景没有门，
+                // 那属于破门行为的另一条对拍。
+                for (int sample = 0; sample < 3; sample++) {
+                    Scene inhabited = new Scene("zombie_inhabited_" + sample).ticks(24)
+                            .difficulty(sample == 0 ? 1 : 2);
+                    inhabited.monstersBurn = false;
+                    inhabited.clockStart = sample == 2 ? 23990 : 156000;
+                    ground(inhabited, 12);
+                    inhabited.mob(1, 0.5, 64.0, 0.5, 0.0F, 23L, 0);
+                    inhabited.player(2.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(inhabited);
+                }
             }
             slimeScenes(scenes);
             PillagerScenes.add(scenes);
@@ -7577,7 +7732,8 @@ public final class MobOracle {
                         .mapToInt(target -> Float.floatToRawIntBits(target.getHealth())).toArray()));
             }
             frames.append('}');
-            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0,
+                    name.startsWith("zombie_husk_hunger_"));
         }
         if (enchanted && (player.getHealth() >= 16.0F || player.getDeltaMovement().x <= 1.2)) {
             throw new IllegalStateException("projectile scenario missed powered damage or Punch");
@@ -8420,6 +8576,293 @@ public final class MobOracle {
     }
 
     /**
+     * 蠹虫和末影螨：逐刻比位置、速度、朝向、随机源、血量、寿命、唤醒倒计时、方块表、
+     * 新生成的实体和世界随机源。
+     *
+     * Silverfish and endermites: per-tick comparison of motion, random, health, lifetime,
+     * wake-up countdown, the block table, freshly spawned entities and the level random.
+     */
+    private static void playSmallMob(Official official, Writer out, String name) throws Exception {
+        boolean silverfish = name.startsWith("silverfish");
+        boolean wake = name.equals("silverfish_wake");
+        boolean merge = name.equals("silverfish_merge");
+        boolean melee = name.endsWith("_melee");
+        boolean life = name.equals("endermite_life");
+        boolean persistent = name.equals("endermite_persistent");
+        boolean target = name.equals("endermite_target");
+        int ticks = life || persistent ? 2410 : target ? 40 : wake ? 30 : merge ? 120 : 100;
+        official.server.sequences = new RandomSequences();
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+        world.levelEvents = new ArrayList<>();
+        for (int x = -6; x <= 6; x++) {
+            for (int z = -6; z <= 6; z++) {
+                world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        if (merge) {
+            // 六个相邻格都是宿主方块：随机选到哪个方向都能钻进去。
+            world.blocks.put(BlockPos.asLong(1, 61, 0), Blocks.STONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(-1, 61, 0), Blocks.COBBLESTONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 61, 1), Blocks.STONE_BRICKS.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 61, -1), Blocks.STONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 62, 0), Blocks.DEEPSLATE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(0, 60, 0), Blocks.STONE.defaultBlockState());
+        }
+        if (wake) {
+            world.blocks.put(BlockPos.asLong(2, 61, 0), Blocks.INFESTED_STONE.defaultBlockState());
+            world.blocks.put(BlockPos.asLong(-2, 61, 0), Blocks.INFESTED_STONE_BRICKS.defaultBlockState());
+        }
+        String blocks = blockArray(world.blocks);
+        Long2ObjectOpenHashMap<BlockState> initial = new Long2ObjectOpenHashMap<>(world.blocks);
+        world.nextId = FIRST_ID;
+        world.spawned = new ArrayList<>();
+        world.particlePackets = true;
+        Bytes events = new Bytes(official.registries);
+        world.packets = events::add;
+        double[] start = {0.5, 61.0, 0.5};
+        EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+        Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+        setRandom(mob, world.entitySeeds.nextLong());
+        RandomSource random = mob.getRandom();
+        mob.setUUID(Mth.createInsecureUUID(random));
+        float yaw = random.nextFloat() * 6.2831855F;
+        mob.setYRot(yaw);
+        mob.setYHeadRot(yaw);
+        mob.setPos(start[0], start[1], start[2]);
+        if (persistent) {
+            Field persistence = Mob.class.getDeclaredField("persistenceRequired");
+            persistence.setAccessible(true);
+            persistence.setBoolean(mob, true);
+        }
+        world.tracked.add(mob);
+        Cow cow = null;
+        if (melee) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource cowRandom = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(cowRandom));
+            float cowYaw = cowRandom.nextFloat() * 6.2831855F;
+            cow.setYRot(cowYaw);
+            cow.setYHeadRot(cowYaw);
+            cow.setPos(3.5, 61.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        Mob enderman = null;
+        if (target) {
+            enderman = EntityTypes.ENDERMAN.create(world, EntitySpawnReason.COMMAND);
+            setRandom(enderman, world.entitySeeds.nextLong());
+            RandomSource enderRandom = enderman.getRandom();
+            enderman.setUUID(Mth.createInsecureUUID(enderRandom));
+            float enderYaw = enderRandom.nextFloat() * 6.2831855F;
+            enderman.setYRot(enderYaw);
+            enderman.setYHeadRot(enderYaw);
+            enderman.setPos(4.5, 61.0, 0.5);
+            world.tracked.add(enderman);
+        }
+        Field lifeField = net.minecraft.world.entity.monster.Endermite.class.getDeclaredField("life");
+        lifeField.setAccessible(true);
+        Field friendsField = Class.forName("net.minecraft.world.entity.monster.Silverfish$SilverfishWakeUpFriendsGoal")
+                .getDeclaredField("lookForFriends");
+        friendsField.setAccessible(true);
+        Object friendsGoal = silverfish ? friendsOf(mob) : null;
+        world.spawned.clear();
+        Sync sync = new Sync(world, mob, official.registries);
+        boolean gone = false;
+        var frames = new StringBuilder("[");
+        int merged = 0;
+        int hurtTicks = 0;
+        for (int tick = 0; tick <= ticks; tick++) {
+            var packets = new ArrayList<String>();
+            if (tick == 0) {
+                sync.entity.sendPairingData(null, sync.bytes::add);
+                packets.addAll(sync.take());
+            } else {
+                world.gameTime++;
+                world.spawned.clear();
+                if (wake && tick == 5) {
+                    mob.hurtServer(world, world.damageSources().magic(), 1.0F);
+                    hurtTicks++;
+                }
+                if (melee && tick == 60) {
+                    mob.hurtServer(world, world.damageSources().mobAttack(cow), 20.0F);
+                }
+                if (!mob.isRemoved()) {
+                    mob.checkDespawn();
+                    mob.commonTick();
+                    mob.tick();
+                }
+                if (enderman != null && !enderman.isRemoved()) {
+                    enderman.checkDespawn();
+                    enderman.commonTick();
+                    enderman.tick();
+                }
+                packets.addAll(events.take());
+                if (mob.isRemoved()) {
+                    if (!gone) {
+                        Bytes removal = new Bytes(official.registries);
+                        removal.add(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(mob.getId()));
+                        packets.addAll(removal.take());
+                    }
+                    gone = true;
+                } else {
+                    sync.entity.sendChanges();
+                    packets.addAll(sync.take());
+                }
+            }
+            frames.append(tick == 0 ? "" : ",");
+            frames.append("{\"gone\":").append(gone);
+            if (!gone) {
+                frames.append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"state\":").append(Arrays.toString(new int[] {
+                                Float.floatToRawIntBits(mob.getHealth()), mob.hurtTime, mob.deathTime,
+                                mob.getNoActionTime(), Float.floatToRawIntBits(mob.yBodyRot),
+                                Float.floatToRawIntBits(mob.getYHeadRot()), Float.floatToRawIntBits(mob.zza),
+                                mob.onGround() ? 1 : 0}))
+                        .append(",\"life\":").append(silverfish ? 0 : lifeField.getInt(mob))
+                        .append(",\"friends\":").append(friendsGoal == null ? 0 : friendsField.getInt(friendsGoal))
+                        .append(",\"target\":").append(enderman == null ? 0
+                                : (enderman.getTarget() == mob ? 1 : enderman.getTarget() == null ? 0 : 2));
+            }
+            frames.append(",\"blocks\":").append(blockStates(initial, world));
+            frames.append(",\"spawned\":[");
+            for (int i = 0; i < world.spawned.size(); i++) {
+                if (i > 0) frames.append(',');
+                frames.append(jsonString(net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE
+                        .getKey(world.spawned.get(i).getType()).toString()));
+            }
+            frames.append("],\"levelSeed\":").append(randomSeed(world.getRandom()));
+            frames.append(",\"packets\":[]");
+            frames.append('}');
+            if (merge) {
+                for (BlockState state : world.blocks.values()) {
+                    if (state.is(Blocks.INFESTED_STONE) || state.is(Blocks.INFESTED_COBBLESTONE)
+                            || state.is(Blocks.INFESTED_STONE_BRICKS) || state.is(Blocks.INFESTED_DEEPSLATE)) {
+                        merged++;
+                        break;
+                    }
+                }
+            }
+        }
+        if (wake && hurtTicks != 1) throw new IllegalStateException(name + ": no hurt");
+        if (life && !gone) throw new IllegalStateException(name + ": lifetime did not expire");
+        if (persistent && gone) throw new IllegalStateException(name + ": persistent mob disappeared");
+        if (target && frames.indexOf("\"target\":1") < 0) {
+            throw new IllegalStateException(name + ": enderman never targeted the endermite");
+        }
+        if (merge && merged == 0) {
+            throw new IllegalStateException(name + ": silverfish never merged with stone");
+        }
+        out.write("{\"type\":\"smallMob\",\"name\":" + jsonString(name)
+                + ",\"firstId\":" + FIRST_ID + ",\"blocks\":" + blocks
+                + ",\"start\":" + Arrays.toString(start)
+                + ",\"silverfish\":" + silverfish
+                + ",\"melee\":" + melee + ",\"persistent\":" + persistent
+                + ",\"enderman\":" + target + ",\"frames\":" + frames + "]}\n");
+        out.flush();
+    }
+
+    /** 蠹虫 / 末影螨存档：`saveWithoutId` 的 SNBT 和读回后再写出的 SNBT。 */
+    private static int playSmallMobSave(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean silverfish : new boolean[] {true, false}) {
+            for (int life : new int[] {0, 2399}) {
+                FakeLevel world = FakeLevel.create(official);
+                EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+                Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+                setRandom(mob, world.entitySeeds.nextLong());
+                mob.setPos(1.5, 64.0, 2.5);
+                mob.setYRot(37.0F);
+                mob.setXRot(12.0F);
+                mob.setHealth(3.0F);
+                if (!silverfish) {
+                    Field field = net.minecraft.world.entity.monster.Endermite.class.getDeclaredField("life");
+                    field.setAccessible(true);
+                    field.setInt(mob, life);
+                    if (life == 2399) {
+                        mob.setPersistenceRequired();
+                    }
+                }
+                var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                mob.saveWithoutId(output);
+                var copy = (Mob) type.create(world, EntitySpawnReason.LOAD);
+                copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries, output.buildResult()));
+                var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                        net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+                copy.saveWithoutId(again);
+                out.write("{\"type\":\"smallMobSave\",\"silverfish\":" + silverfish
+                        + ",\"life\":" + life
+                        + ",\"nbt\":" + jsonString(output.buildResult().toString())
+                        + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    /** 死亡掉落：两种生物的战利品表都是空的，只比经验值和 `spawned` 里的物品。 */
+    private static int playSmallMobDeath(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean silverfish : new boolean[] {true, false}) {
+            for (boolean byPlayer : new boolean[] {true, false}) {
+                official.server.sequences = new RandomSequences();
+                FakeLevel world = FakeLevel.create(official);
+                ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+                world.spawned = new ArrayList<>();
+                EntityType<?> type = silverfish ? EntityTypes.SILVERFISH : EntityTypes.ENDERMITE;
+                Mob mob = (Mob) type.create(world, EntitySpawnReason.COMMAND);
+                setRandom(mob, world.entitySeeds.nextLong());
+                mob.setPos(0.5, 64.0, 0.5);
+                world.tracked.add(mob);
+                ServerPlayer player = null;
+                if (byPlayer) {
+                    player = new ServerPlayer(official.server, world,
+                            new GameProfile(new UUID(1L, 2L), "SmallMobDeath"), ClientInformation.createDefault());
+                    player.setId(FIRST_ID + 1024);
+                    player.setPos(2.5, 64.0, 0.5);
+                    world.playersList().add(player);
+                    world.tracked.add(player);
+                }
+                DamageSource source = byPlayer ? world.damageSources().playerAttack(player)
+                        : world.damageSources().generic();
+                mob.hurtServer(world, source, 100.0F);
+                for (int tick = 0; tick < 25; tick++) {
+                    world.gameTime++;
+                    if (!mob.isRemoved()) {
+                        mob.commonTick();
+                        mob.tick();
+                    }
+                }
+                List<String> items = new ArrayList<>();
+                for (Entity entity : world.spawned) {
+                    if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && !item.getItem().isEmpty()) {
+                        items.add(BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "x" + item.getItem().getCount());
+                    }
+                }
+                items.sort(String::compareTo);
+                out.write("{\"type\":\"smallMobDeath\",\"silverfish\":" + silverfish
+                        + ",\"byPlayer\":" + byPlayer
+                        + ",\"removed\":" + mob.isRemoved()
+                        + ",\"items\":" + items.stream().map(MobOracle::jsonString)
+                                .collect(java.util.stream.Collectors.joining(",", "[", "]")) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    /** `Silverfish.friendsGoal` 的私有字段。 */
+    private static Object friendsOf(Mob mob) throws Exception {
+        Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
+        field.setAccessible(true);
+        return field.get(mob);
+    }
+
+    /**
      * Phantom spawner: drive the official `PhantomSpawner.tick` in the fake
      * `ServerLevel`, one JSON frame per tick with the phantoms it added (block
      * position, size, anchor), the level random seed and the spawner's
@@ -8925,7 +9368,8 @@ public final class MobOracle {
             frames.append(",\"llamaHealth\":").append(Float.floatToRawIntBits(llama.getHealth()));
             frames.append(",\"goals\":").append(jsonString(llama.running()));
             frames.append('}');
-            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0,
+                    name.startsWith("zombie_husk_hunger_"));
         }
         if (spits.size() < 2 || player.getHealth() >= 20.0F) {
             throw new IllegalStateException("llama spit scenario did not exercise " + name
@@ -9160,7 +9604,8 @@ public final class MobOracle {
                         .append('}');
             }
             frames.append("]}");
-            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+            zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0,
+                    name.startsWith("zombie_husk_hunger_"));
         }
         if (potions.isEmpty() || totalEvents == 0) {
             throw new IllegalStateException("witch throw scenario did not exercise " + name
@@ -9194,6 +9639,48 @@ public final class MobOracle {
                 Double.doubleToRawLongBits(v.x), Double.doubleToRawLongBits(v.y), Double.doubleToRawLongBits(v.z),
                 Float.floatToRawIntBits(entity.getYRot()), Float.floatToRawIntBits(entity.getXRot()),
         });
+    }
+
+    /**
+     * `AbstractBedBlock.useWithoutItem` 点在床头：用这张床的 `BedRule` 调 `startSleepInBed`，
+     * 返回失败原因的名字，成功是 `OK`。成功之后的统计和进度在假世界里可能接不上，
+     * 那时玩家已经躺下（`isSleeping`），照样算成功。
+     */
+    private static String trySleep(FakeLevel level, ServerPlayer player, int[] at) {
+        BlockPos pos = new BlockPos(at[0], at[1], at[2]);
+        BlockState state = level.getBlockState(pos);
+        net.minecraft.world.level.block.AbstractBedBlock bed =
+                (net.minecraft.world.level.block.AbstractBedBlock) state.getBlock();
+        try {
+            var result = player.startSleepInBed(bed, state,
+                    net.minecraft.world.attribute.BedRule.CAN_SLEEP_WHEN_DARK, pos);
+            return result.map(MobOracle::bedProblemName, unit -> "OK");
+        } catch (RuntimeException failed) {
+            if (player.isSleeping()) return "OK";
+            throw failed;
+        }
+    }
+
+    /** `BedSleepingProblem` 是带消息的记录：常量按引用认，`BedRule.asProblem` 给的按消息键认。 */
+    private static String bedProblemName(net.minecraft.world.entity.player.Player.BedSleepingProblem problem) {
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.TOO_FAR_AWAY) return "TOO_FAR_AWAY";
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.OBSTRUCTED) return "OBSTRUCTED";
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.OTHER_PROBLEM) return "OTHER_PROBLEM";
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.NOT_SAFE) return "NOT_SAFE";
+        return "NOT_POSSIBLE_NOW";
+    }
+
+    private static int teamOf(java.util.List<Integer> teams, int index) {
+        return index < teams.size() ? teams.get(index) : -1;
+    }
+
+    /** 把计分板名字加进 `t<编号>` 队伍（没有就先建）。 */
+    private static void joinTeam(Level level, String holder, int team) {
+        if (team < 0) return;
+        net.minecraft.world.scores.Scoreboard board = level.getScoreboard();
+        net.minecraft.world.scores.PlayerTeam found = board.getPlayerTeam("t" + team);
+        if (found == null) found = board.addPlayerTeam("t" + team);
+        board.addPlayerToTeam(holder, found);
     }
 
     /** 僵尸场景：官方 `Mob` 逐刻 tick，输出与 `CowStep` 同形的状态加僵尸专属字段。 */
@@ -9299,6 +9786,8 @@ public final class MobOracle {
                     connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
             ((RecordingListener) connection).bytes = sink;
             put(ServerPlayer.class, player, "connection", connection);
+            if (i == 0 && scene.playerCreative) player.setGameMode(GameType.CREATIVE);
+            joinTeam(level, player.getScoreboardName(), teamOf(scene.playerTeams, i));
             players.add(player);
             zombieSinks.add(sink);
         }
@@ -9318,6 +9807,10 @@ public final class MobOracle {
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
         StringBuilder mobEvents = new StringBuilder("[[");
+        java.util.List<int[]> worldEvents = new java.util.ArrayList<>();
+        level.zombieLevelEvents = worldEvents::add;
+        level.shapeUpdates = true;
+        StringBuilder levelEventsJson = new StringBuilder("[[");
         boolean slimeScene = scene.name.startsWith("slime_");
         StringBuilder splits = new StringBuilder("[[]");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
@@ -9373,6 +9866,7 @@ public final class MobOracle {
             // `Mob.serverAiStep` 的 `(tickCount + id) % 2` 才能逐刻一致。
             mob.setId(FIRST_ID + i);
             mob.setUUID(new UUID(0L, i + 1));
+            joinTeam(level, mob.getScoreboardName(), teamOf(scene.mobTeams, i));
             if (mob instanceof net.minecraft.world.entity.monster.cubemob.Slime slime) {
                 // 史莱姆场景用「年龄」那一列带大小；`setSize` 会把朝向改成头的朝向，所以放在
                 // `snapTo` 之前。移动控制的目标角度在构造函数里按没带种子的朝向算，这里对齐成场景的朝向。
@@ -9494,6 +9988,7 @@ public final class MobOracle {
             // The sensor delays and the armadillo scute timer are drawn before the reseed.
             line.append(",\"sensors\":").append(BrainOracle.sensorDelays(mobs.get(i)));
             line.append(",\"scute\":").append(BrainOracle.scuteTime(mobs.get(i)));
+            line.append(",\"team\":").append(teamOf(scene.mobTeams, i));
             line.append('}');
         }
         line.append("],\"players\":[");
@@ -9508,7 +10003,8 @@ public final class MobOracle {
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(player.getYRot()));
             line.append(",\"pitch\":").append(Float.floatToRawIntBits(player.getXRot()));
             line.append(",\"item\":").append(BuiltInRegistries.ITEM.getId(scene.playerItems.get(i)));
-            line.append(",\"looting\":0}");
+            line.append(",\"looting\":0");
+            line.append(",\"team\":").append(teamOf(scene.playerTeams, i)).append('}');
         }
         // 玩家打生物的时刻、对象、伤害量和打的人，和牛场景同一格式。
         // When, whom, how hard and by whom players hit, as in the cow scenes.
@@ -9520,6 +10016,14 @@ public final class MobOracle {
                     .append(Float.floatToRawIntBits((float) hurt[2])).append(',').append((int) hurt[3]).append(']');
         }
         line.append("],\"summons\":[],\"eggs\":[]");
+        line.append(",\"placeAt\":[");
+        for (int i = 0; i < scene.placeAt.size(); i++) {
+            int[] at = scene.placeAt.get(i);
+            if (i > 0) line.append(',');
+            line.append('[').append(at[0]).append(',').append(at[1]).append(',').append(at[2])
+                    .append(',').append(at[3]).append(',').append(at[4]).append(']');
+        }
+        line.append(']');
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -9532,6 +10036,10 @@ public final class MobOracle {
                 scene.realPlayers ? scene.playerHealth : 20.0F));
         line.append(",\"realPlayers\":").append(scene.realPlayers);
         line.append(",\"clockStart\":").append(scene.clockStart);
+        line.append(",\"sleepTick\":").append(scene.sleepTick);
+        line.append(",\"playerCreative\":").append(scene.playerCreative);
+        line.append(",\"bed\":").append(scene.bed == null ? "null"
+                : "[" + scene.bed[0] + "," + scene.bed[1] + "," + scene.bed[2] + "]");
         line.append(",\"rain\":").append(Float.floatToRawIntBits(scene.rain));
         line.append(",\"sprint\":").append(scene.sprint == null ? "null"
                 : "[" + scene.sprint[0] + "," + scene.sprint[1] + "]");
@@ -9551,11 +10059,15 @@ public final class MobOracle {
         line.append("],\"interactions\":null");
         line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
         line.append(",\"steps\":[");
+        if (scene.name.startsWith("zombie_inhabited_")) {
+            incrementInhabitedTime(level, players);
+        }
         line.append(zombieStepJson(mobs, players, level));
         if (scene.realPlayers) {
             zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
-                    lastSentHealth, true);
+                    lastSentHealth, true, scene.name.startsWith("zombie_husk_hunger_"));
         }
+        String sleepResult = "";
         boolean llamaTargetedWolf = false;
         boolean wolfAvoidedLlama = false;
         for (int tick = 1; tick <= scene.ticks; tick++) {
@@ -9564,6 +10076,18 @@ public final class MobOracle {
                 level.clock = scene.clockStart + tick;
                 official.attributes.invalidateTickCache();
                 level.updateSkyBrightness();
+            }
+            if (scene.name.startsWith("zombie_inhabited_")) {
+                incrementInhabitedTime(level, players);
+            }
+            for (int[] at : scene.placeAt) {
+                if (at[0] == tick) {
+                    level.blocks.put(BlockPos.asLong(at[1], at[2], at[3]), Block.stateById(at[4]));
+                    level.chunkCache.clear();
+                }
+            }
+            if (scene.sleepTick == tick) {
+                sleepResult = trySleep(level, players.get(0), scene.bed);
             }
             if (scene.realPlayers) {
                 // 只推进受伤冷却和受伤动画（`ServerPlayer.tick` / `baseTick`），
@@ -9665,10 +10189,19 @@ public final class MobOracle {
             }
             level.tracked.removeIf(Entity::isRemoved);
             appendMobEvents(mobEvents, mobSink.takeRaw());
+            levelEventsJson.append("],[");
+            for (int i = 0; i < worldEvents.size(); i++) {
+                int[] event = worldEvents.get(i);
+                if (i > 0) levelEventsJson.append(',');
+                levelEventsJson.append('[').append(event[0]).append(',').append(event[1]).append(',')
+                        .append(event[2]).append(',').append(event[3]).append(',').append(event[4])
+                        .append(',').append(event[5]).append(']');
+            }
+            worldEvents.clear();
             line.append(',').append(zombieStepJson(mobs, players, level));
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
-                        lastSentHealth, false);
+                        lastSentHealth, false, scene.name.startsWith("zombie_husk_hunger_"));
             }
             // 对拍到驯服或甩人的那一刻。后续骑手落点和玩家移动不属于这个生物目标。
             // Compare through taming or ejection; later rider placement is outside the goal.
@@ -9738,6 +10271,8 @@ public final class MobOracle {
             line.append(",\"cubeSplits\":").append(splits).append(']');
         }
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
+        line.append(",\"sleepResult\":").append(jsonString(sleepResult));
+        line.append(",\"levelEvents\":").append(levelEventsJson).append("]]");
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
@@ -9764,13 +10299,15 @@ public final class MobOracle {
     /** 玩家自己收到的包里要比的那几种：受伤动画、进入 / 离开战斗、死亡界面、血量。 */
     private static final java.util.Set<Integer> ZOMBIE_SELF_PACKETS = java.util.Set.of(
             43, 67, 68, 69, 106);
+    /** 尸壳饥饿场景额外比 `update_mob_effect`（135，VarInt 首字节 0x87）。 */
+    private static final java.util.Set<Integer> EFFECT_PACKET = java.util.Set.of(135);
 
     /**
      * 僵尸场景一刻结束时：按 `ServerPlayer.doTick` 补 `set_health`，记下玩家状态
      * （血量位、受伤冷却、受伤动画、死亡、着火刻数）和这一刻要比的包。
      */
     private static void zombiePlayerStep(ServerPlayer player, Bytes sink, StringBuilder states,
-            StringBuilder packets, float[] lastSentHealth, boolean first) {
+            StringBuilder packets, float[] lastSentHealth, boolean first, boolean compareEffects) {
         float health = player.getHealth();
         if (!first && Float.floatToRawIntBits(health) != Float.floatToRawIntBits(lastSentHealth[0])) {
             lastSentHealth[0] = health;
@@ -9793,7 +10330,9 @@ public final class MobOracle {
         packets.append('[');
         boolean comma = false;
         for (byte[] body : sink.takeRaw()) {
-            if (body.length == 0 || !ZOMBIE_SELF_PACKETS.contains((int) body[0])) continue;
+            // 包 ID 的第一个字节：`update_mob_effect` 是 135，VarInt 写成 0x87 0x01。
+            if (body.length == 0 || !(ZOMBIE_SELF_PACKETS.contains(body[0] & 0xFF)
+                    || (compareEffects && EFFECT_PACKET.contains(body[0] & 0xFF)))) continue;
             if (comma) packets.append(',');
             packets.append('"').append(Base64.getEncoder().encodeToString(body)).append('"');
             comma = true;
@@ -9802,6 +10341,30 @@ public final class MobOracle {
     }
 
     /** 与 `CowStep` 同形；牛专属字段给缺省值，僵尸专属字段逐刻输出。 */
+    /** `ServerChunkCache.tickSpawningChunk` 第一句：刷怪候选区块的 `InhabitedTime` 加一。
+     *  假世界里所有区块都有 ticking chunk，候选 = 非旁观玩家周围 8 格方形内、
+     *  区块中心到玩家水平距离平方小于 16384 的区块（官方三条条件）。 */
+    private static void incrementInhabitedTime(FakeLevel level, java.util.List<ServerPlayer> players) {
+        for (ServerPlayer player : players) {
+            if (player.isSpectator()) continue;
+            int pcx = player.blockPosition().getX() >> 4;
+            int pcz = player.blockPosition().getZ() >> 4;
+            for (int dx = -8; dx <= 8; dx++) {
+                for (int dz = -8; dz <= 8; dz++) {
+                    int cx = pcx + dx;
+                    int cz = pcz + dz;
+                    double centerX = cx * 16 + 8;
+                    double centerZ = cz * 16 + 8;
+                    double ox = centerX - player.getX();
+                    double oz = centerZ - player.getZ();
+                    if (ox * ox + oz * oz >= 16384.0) continue;
+                    long key = ChunkPos.pack(cx, cz);
+                    level.inhabitedTimes.merge(key, 1L, Long::sum);
+                }
+            }
+        }
+    }
+
     private static String zombieStepJson(java.util.List<Mob> mobs,
             java.util.List<ServerPlayer> players, FakeLevel level) throws Exception {
         StringBuilder out = new StringBuilder(512);
@@ -9932,6 +10495,8 @@ public final class MobOracle {
             out.append(",\"ph\":0");
             out.append(",\"pht\":0");
             out.append(",\"pcd\":0");
+            out.append(",\"ed\":").append(Float.floatToRawIntBits(
+                    level.getCurrentDifficultyAt(mob.blockPosition()).getEffectiveDifficulty()));
             out.append(",\"bh\":").append(blockHash(level));
             ItemStack head = mob.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD);
             out.append(",\"hd\":").append(head.isEmpty() ? -1 : head.getDamageValue());
@@ -12266,6 +12831,8 @@ public final class MobOracle {
         boolean realSky;
         long clock;
         float rainLevel;
+        /** `InhabitedTime` 场景：按区块记逐刻累加值，供 `getCurrentDifficultyAt` 读。 */
+        java.util.Map<Long, Long> inhabitedTimes;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -12307,6 +12874,7 @@ public final class MobOracle {
             level.levelData = new TickingLevelData(level);
             level.nextId = 1;
             level.entitySeeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            level.inhabitedTimes = new java.util.HashMap<>();
             // `allocate` 不跑字段初始值，显式给超平坦默认海平面 -63。
             // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
             level.injectedSeaLevel = -63;
@@ -12429,26 +12997,56 @@ public final class MobOracle {
          *  依赖区块缓存，这里直接写表即可。 */
         @Override
         public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
+            BlockState old = getBlockState(pos);
             // 假世界不跑 `onPlace`；蛙卵的 `onPlace` 用世界随机源抽孵化延迟，这里照样抽一次。
             // The fake level skips `onPlace`; frogspawn's draws its hatch delay from the
             // level random there, so draw it here as well.
             if (state.is(Blocks.FROGSPAWN)) {
                 getRandom().nextInt(3600, 12000);
             }
+            // 海龟蛋的 `onPlace`：放在沙子上发 2012 号粒子事件（假世界不跑 `onPlace`）。
+            if (state.is(Blocks.TURTLE_EGG) && getBlockState(pos.below()).is(net.minecraft.tags.BlockTags.SAND)) {
+                levelEvent(null, 2012, pos, 15);
+            }
             blocks.put(pos.asLong(), state);
             chunkCache.clear();
+            if (shapeUpdates && old != state && (flags & 16) == 0 && limit > 0) {
+                old.updateIndirectNeighbourShapes(this, pos, 2, 511);
+                state.updateNeighbourShapes(this, pos, 2, 511);
+                state.updateIndirectNeighbourShapes(this, pos, 2, 511);
+            }
             return true;
         }
 
         @Override
         public boolean removeBlock(BlockPos pos, boolean moving) {
+            BlockState old = getBlockState(pos);
             blocks.remove(pos.asLong());
             chunkCache.clear();
+            if (shapeUpdates) {
+                // 官方 `Level.setBlock` → `markAndNotifyBlock` 的形状更新（flags 3 去掉 1 和 32）：
+                // 门的另一半在这里被 `updateOrDestroy` 拆掉（`destroyBlock`、2001 事件、掉落）。
+                BlockState air = Blocks.AIR.defaultBlockState();
+                old.updateIndirectNeighbourShapes(this, pos, 2, 511);
+                air.updateNeighbourShapes(this, pos, 2, 511);
+                air.updateIndirectNeighbourShapes(this, pos, 2, 511);
+            }
             return true;
         }
 
+        /** 僵尸场景：`removeBlock` 照官方做邻居形状更新。 */
+        boolean shapeUpdates;
+
+        /** 僵尸场景：`levelEvent` 和 `destroyBlockProgress` 按发生顺序记下来
+         *  （`[0, 事件, x, y, z, 数据]` / `[1, 实体, x, y, z, 阶段]`）。 */
+        java.util.function.Consumer<int[]> zombieLevelEvents;
+
         @Override
-        public void destroyBlockProgress(int id, BlockPos pos, int progress) {}
+        public void destroyBlockProgress(int id, BlockPos pos, int progress) {
+            if (zombieLevelEvents != null) {
+                zombieLevelEvents.accept(new int[] {1, id, pos.getX(), pos.getY(), pos.getZ(), progress});
+            }
+        }
 
         /** 官方 `MONSTERS_BURN` 由静态环境属性系统给出；僵尸场景按用例开关。 */
         @Override
@@ -12702,10 +13300,14 @@ public final class MobOracle {
                 return spawnDifficulty;
             }
             if (realSky) {
-                // 官方 `ServerLevel.getCurrentDifficultyAt`：难度、主世界时钟、区块居住时间（假世界 0）、月相亮度。
-                return new net.minecraft.world.DifficultyInstance(getDifficulty(), clock, 0L, getMoonBrightness(pos));
+                // 官方 `ServerLevel.getCurrentDifficultyAt`：难度、主世界时钟、区块居住时间、月相亮度。
+                long inhabited = inhabitedTimes.getOrDefault(
+                        ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4), 0L);
+                return new net.minecraft.world.DifficultyInstance(getDifficulty(), clock, inhabited,
+                        getMoonBrightness(pos));
             }
-            return new net.minecraft.world.DifficultyInstance(Difficulty.NORMAL, gameTime, 0L, 0.0F);
+            // 非真实时间的场景：时钟按游戏刻、月相亮度 0，难度照场景。
+            return new net.minecraft.world.DifficultyInstance(getDifficulty(), gameTime, 0L, 0.0F);
         }
 
         @Override
@@ -12794,6 +13396,9 @@ public final class MobOracle {
         public void levelEvent(Entity source, int type, BlockPos pos, int data) {
             if (levelEvents != null) {
                 levelEvents.add(new int[] {type, pos.getX(), pos.getY(), pos.getZ(), data});
+            }
+            if (zombieLevelEvents != null) {
+                zombieLevelEvents.accept(new int[] {0, type, pos.getX(), pos.getY(), pos.getZ(), data});
             }
         }
 

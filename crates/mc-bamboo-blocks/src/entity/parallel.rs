@@ -52,7 +52,7 @@ impl Executor for InlineExecutor {
 
 /// `std::thread::scope` 每刻起 `threads - 1` 个线程，主线程也跑一份。
 ///
-/// 每刻起线程的开销大，只用于实验；常驻线程池留给任务系统（设计稿第 12 节）。
+/// 正式服务端已经换成长驻池；这里只留给压测做「每刻起线程」的 A/B 对照。
 pub struct ScopedThreads {
     pub threads: usize,
 }
@@ -80,6 +80,242 @@ impl Executor for ScopedThreads {
                 job();
             }
         });
+    }
+}
+
+/// 服务端启动时建好、按刻派活的常驻线程池。主线程也跑最后一份，所以
+/// `threads - 1` 条后台线程加当前线程就是 `threads` 份活。
+///
+/// 每个后台线程有自己的信箱：派活时把「这一刻属于它的那一份」直接放进去，
+/// 跑完置一个原子完成标记。不共用任务队列，小场景里没有逐任务的锁竞争。
+/// 闭包借用算阶段的只读快照，派活线程在 `run` 返回前等所有线程跑完，
+/// 借用不会越过这一刻。结果和线程数无关，执行器只决定谁跑哪一份。
+pub struct WorkerPool {
+    workers: Vec<Worker>,
+    /// 并行份数：后台线程各一份，当前线程最后一份。
+    threads: usize,
+    /// 同一时刻只能有一批任务在跑。正式服务端是一刻一刻串行派活的；
+    /// 分离驱动下多个岛万一同时进来，锁保证它们排队而不是互相覆盖。
+    dispatch: std::sync::Mutex<()>,
+    generation: std::sync::atomic::AtomicU64,
+}
+
+/// 一条后台线程和它独占的信箱。
+struct Worker {
+    slot: std::sync::Arc<WorkerSlot>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// 一份活。`job` 被取走跑时信箱里仍留着这一项，派活线程据此等完成标记。
+struct WorkerJob {
+    generation: u64,
+    job: Option<Box<dyn FnOnce() + Send + 'static>>,
+    panic: Option<Box<dyn std::any::Any + Send + 'static>>,
+}
+
+struct WorkerSlot {
+    state: std::sync::Mutex<Option<WorkerJob>>,
+    ready: std::sync::Condvar,
+    /// 这一份活跑完了（结果留在 `state` 里等派活线程取走）。
+    done: std::sync::atomic::AtomicBool,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+impl WorkerSlot {
+    fn stopped(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<WorkerJob>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl WorkerPool {
+    /// 起 `threads.max(1) - 1` 条常驻线程；起不来时返回错误，调用方退回内联执行器。
+    pub fn new(name: &str, threads: usize) -> std::io::Result<Self> {
+        let threads = threads.max(1);
+        let mut workers = Vec::with_capacity(threads - 1);
+        for index in 0..threads - 1 {
+            let slot = std::sync::Arc::new(WorkerSlot {
+                state: std::sync::Mutex::new(None),
+                ready: std::sync::Condvar::new(),
+                done: std::sync::atomic::AtomicBool::new(false),
+                stop: std::sync::atomic::AtomicBool::new(false),
+            });
+            let worker_slot = std::sync::Arc::clone(&slot);
+            let builder = std::thread::Builder::new().name(format!("{name}-{index}"));
+            match builder.spawn(move || worker_loop(&worker_slot)) {
+                Ok(handle) => workers.push(Worker {
+                    slot,
+                    handle: Some(handle),
+                }),
+                Err(error) => {
+                    // 已经起来的线程也要收干净，不能留下空转的常驻线程。
+                    for worker in &mut workers {
+                        worker
+                            .slot
+                            .stop
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        worker.slot.ready.notify_all();
+                        if let Some(handle) = worker.handle.take() {
+                            let _ = handle.join();
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Self {
+            workers,
+            threads,
+            dispatch: std::sync::Mutex::new(()),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// 常驻线程数（不含当前线程）。
+    #[cfg(test)]
+    pub(crate) fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+}
+
+impl Executor for WorkerPool {
+    fn parallelism(&self) -> usize {
+        self.threads
+    }
+
+    fn run<'a>(&self, jobs: Vec<Box<dyn FnOnce() + Send + 'a>>) {
+        let _dispatch = self
+            .dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = jobs.len();
+        if count <= 1 || self.workers.is_empty() {
+            for job in jobs {
+                job();
+            }
+            return;
+        }
+        // `unsafe` 只用来把闭包的借用期擦成 `'static`：每份活只在这一次
+        // `run` 里被对应的线程跑一次，派活线程等所有线程跑完并把信箱清空后才返回；
+        // 后台线程从不把闭包存到信箱之外。
+        let erase = |job: Box<dyn FnOnce() + Send + 'a>| -> Box<dyn FnOnce() + Send + 'static> {
+            unsafe { std::mem::transmute(job) }
+        };
+        // 派活是串行的，批次号放在池子上递增；信箱里的上一批在 `run` 返回前已取空。
+        let generation = self
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        // 一份闭包对应一整块连续的行，不能拆开；最后一份留给当前线程，
+        // 其余平均分成 `workers.len()` 组，一条线程一组。组数少于线程数时
+        // 有的线程这一刻空着。
+        let mut jobs = jobs;
+        let mine = jobs.pop().expect("至少两份");
+        let groups = self.workers.len().min(jobs.len());
+        let per_group = jobs.len().div_ceil(groups);
+        let mut pieces: Vec<Vec<Box<dyn FnOnce() + Send + 'static>>> =
+            (0..groups).map(|_| Vec::new()).collect();
+        for (index, job) in jobs.into_iter().enumerate() {
+            pieces[(index / per_group).min(groups - 1)].push(erase(job));
+        }
+        for (worker, piece) in self.workers.iter().zip(pieces) {
+            let mut guard = worker.slot.lock();
+            debug_assert!(guard.is_none(), "上一批已经取走");
+            worker
+                .slot
+                .done
+                .store(false, std::sync::atomic::Ordering::Release);
+            let job: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
+                for job in piece {
+                    job();
+                }
+            });
+            *guard = Some(WorkerJob {
+                generation,
+                job: Some(job),
+                panic: None,
+            });
+            worker.slot.ready.notify_all();
+            drop(guard);
+        }
+        // 当前线程也跑最后一份。
+        mine();
+        // 等所有派了活的后台线程跑完，把它们信箱里的结果取走。
+        let mut panic = None;
+        for worker in &self.workers[..groups] {
+            let mut guard = worker.slot.lock();
+            while !worker.slot.done.load(std::sync::atomic::Ordering::Acquire) {
+                guard = worker
+                    .slot
+                    .ready
+                    .wait(guard)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            if let Some(job) = guard.take()
+                && job.generation == generation
+                && panic.is_none()
+            {
+                panic = job.panic;
+            }
+            drop(guard);
+        }
+        // 某一刻的实体逻辑 panic 了：不在池子里吞掉，交回派活线程。
+        if let Some(payload) = panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+/// 后台线程：等自己信箱里出现「还没跑过的活」，取走闭包（信箱里留着这一项，
+/// 派活线程据此等待），跑完置 `done`，然后等下一刻。
+fn worker_loop(slot: &WorkerSlot) {
+    loop {
+        let body = {
+            let mut guard = slot.lock();
+            loop {
+                if slot.stopped() {
+                    return;
+                }
+                let pending = guard
+                    .as_mut()
+                    .filter(|job| job.job.is_some())
+                    .and_then(|job| job.job.take());
+                if let Some(body) = pending {
+                    break body;
+                }
+                guard = slot
+                    .ready
+                    .wait(guard)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        };
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).err();
+        let mut guard = slot.lock();
+        if let Some(job) = guard.as_mut() {
+            job.panic = caught;
+        }
+        slot.done.store(true, std::sync::atomic::Ordering::Release);
+        slot.ready.notify_all();
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        for worker in &mut self.workers {
+            worker
+                .slot
+                .stop
+                .store(true, std::sync::atomic::Ordering::Release);
+            worker.slot.ready.notify_all();
+            if let Some(handle) = worker.handle.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -137,8 +373,16 @@ impl Shared<'_> {
         Some(&self.entities.row_at(self.rows[index])?.public)
     }
 
-    /// 只访问范围覆盖到的那几个格子，不再遍历整张索引。
-    fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+    /// 只访问范围覆盖到的那几个格子，不再遍历整张索引。`exclude` 是当前正在算的实体：
+    /// 官方 `getEntities(this, ...)` 不返回自己，快照里还留着自己那一行是并行模型的
+    /// 实现细节，不是可以让别的实体看到的东西。
+    fn for_each_in(
+        &self,
+        area: Aabb,
+        exclude: EntityUid,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
         let (first, last) = section_range(&area);
         let mut found = Vec::new();
         for x in first.0..=last.0 {
@@ -156,12 +400,20 @@ impl Shared<'_> {
         let mut ordered: Vec<_> = found
             .into_iter()
             .filter_map(|row| self.entities.row_at(row))
-            .filter(|entry| entry.public.bounding_box().intersects(area))
+            .filter(|entry| {
+                entry.public.uid != exclude && entry.public.bounding_box().intersects(area)
+            })
             .map(|entry| (entry.public.uid, &entry.public))
             .collect();
         ordered.sort_unstable_by_key(|(uid, _)| *uid);
+        let mut taken = 0;
         for (_, public) in ordered {
-            visit(public);
+            if taken >= limit {
+                break;
+            }
+            if visit(public) {
+                taken += 1;
+            }
         }
     }
 }
@@ -183,20 +435,44 @@ impl EntityCtx for ParallelCtx<'_> {
     }
 
     fn other(&self, uid: EntityUid) -> Option<EntityPublic> {
-        self.shared.public_of(uid).cloned()
+        // 精确驱动把当前实体从表里拿走了，`other(自己)` 本来就是 `None`。
+        (uid != self.uid)
+            .then(|| self.shared.public_of(uid).cloned())
+            .flatten()
     }
 
     fn entity_uids(&self) -> Vec<EntityUid> {
-        self.shared.uids.to_vec()
+        self.shared
+            .uids
+            .iter()
+            .copied()
+            .filter(|&uid| uid != self.uid)
+            .collect()
     }
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
-        self.shared.for_each_in(area, visit);
+        self.shared
+            .for_each_in(area, self.uid, usize::MAX, &mut |public| {
+                visit(public);
+                true
+            });
+    }
+
+    fn pushable_others(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.shared.for_each_in(area, self.uid, limit, visit);
     }
 
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {
         self.shared
-            .for_each_in(area, &mut |public| visit(public.uid));
+            .for_each_in(area, self.uid, usize::MAX, &mut |public| {
+                visit(public.uid);
+                true
+            });
     }
 
     fn emit(&mut self, command: Command, _me: &mut Entity) {
@@ -453,6 +729,32 @@ pub fn tick_entities_parallel_timed(
         .elapsed()
         .saturating_sub(times.publish + times.clone + times.compute + times.apply);
     times
+}
+
+#[cfg(test)]
+pub(crate) fn shared_rows_in(
+    uids: &[EntityUid],
+    rows: &[usize],
+    entities: &EntityStore,
+    blocks: &(dyn BlockView + Sync),
+    area: Aabb,
+) -> Vec<Vec<EntityUid>> {
+    let shared = Shared {
+        uids,
+        rows,
+        entities,
+        blocks,
+    };
+    uids.iter()
+        .map(|&uid| {
+            let mut seen = Vec::new();
+            shared.for_each_in(area, uid, usize::MAX, &mut |public| {
+                seen.push(public.uid);
+                true
+            });
+            seen
+        })
+        .collect()
 }
 
 #[cfg(test)]

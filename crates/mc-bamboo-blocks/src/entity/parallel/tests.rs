@@ -9,7 +9,7 @@ use crate::{
         Entity,
         ctx::Command,
         parallel::{
-            Computed, Executor, InlineExecutor, ScopedThreads, commit, compute,
+            Computed, Executor, InlineExecutor, WorkerPool, commit, compute, shared_rows_in,
             tick_entities_parallel,
         },
         view::{FlatSource, SourceView, ViewFacts},
@@ -94,8 +94,9 @@ fn spawn_items(level: &mut TestLevel, count: i32) {
 #[test]
 fn the_executor_runs_every_job_and_keeps_the_partition_count() {
     for threads in [1, 2, 8] {
-        let executor = ScopedThreads { threads };
+        let executor = WorkerPool::new("mob-stress", threads).expect("起实体线程池");
         assert_eq!(executor.parallelism(), threads);
+        assert_eq!(executor.worker_count(), threads - 1, "常驻后台线程数");
         let seen = std::sync::Mutex::new(Vec::new());
         let seen_ref = &seen;
         let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..37)
@@ -129,7 +130,10 @@ fn one_two_and_eight_threads_produce_bit_identical_results() {
     for threads in [1, 2, 8] {
         let mut level = TestLevel::new();
         spawn_items(&mut level, 64);
-        let result = run_parallel(&mut level, &ScopedThreads { threads });
+        let result = run_parallel(
+            &mut level,
+            &WorkerPool::new("mob-stress", threads).expect("起实体线程池"),
+        );
         assert_eq!(
             format!("{result:?}"),
             format!("{baseline:?}"),
@@ -143,7 +147,7 @@ fn one_two_and_eight_threads_produce_bit_identical_results() {
 #[test]
 fn compute_and_commit_match_the_one_step_wrapper() {
     let blocks = flat_blocks();
-    let executor = ScopedThreads { threads: 4 };
+    let executor = WorkerPool::new("mob-test", 4).expect("起实体线程池");
 
     let split = {
         let mut level = TestLevel::new();
@@ -214,7 +218,11 @@ fn isolated_entities_are_identical_in_precise_and_parallel_modes() {
         }
         for _ in 0..6 {
             let mut world = World::new(&mut level, &mut ticks);
-            tick_entities_parallel(&blocks, &mut world, &ScopedThreads { threads: 8 });
+            tick_entities_parallel(
+                &blocks,
+                &mut world,
+                &WorkerPool::new("mob-test", 8).expect("起实体线程池"),
+            );
         }
         World::new(&mut level, &mut ticks).live_entities()
     };
@@ -239,7 +247,11 @@ fn merging_items_are_the_only_observable_difference_class() {
         }
     }
     let mut world = World::new(&mut level, &mut ticks);
-    tick_entities_parallel(&blocks, &mut world, &ScopedThreads { threads: 2 });
+    tick_entities_parallel(
+        &blocks,
+        &mut world,
+        &WorkerPool::new("mob-test", 2).expect("起实体线程池"),
+    );
     let two = world.live_entities();
 
     let mut level = TestLevel::new();
@@ -254,7 +266,11 @@ fn merging_items_are_the_only_observable_difference_class() {
         }
     }
     let mut world = World::new(&mut level, &mut ticks);
-    tick_entities_parallel(&blocks, &mut world, &ScopedThreads { threads: 8 });
+    tick_entities_parallel(
+        &blocks,
+        &mut world,
+        &WorkerPool::new("mob-test", 8).expect("起实体线程池"),
+    );
     let eight = world.live_entities();
     assert_eq!(format!("{two:?}"), format!("{eight:?}"));
 }
@@ -290,7 +306,7 @@ fn stress_reports_compute_apply_and_clone_costs() {
                 ));
             }
         }
-        let executor = ScopedThreads { threads };
+        let executor = WorkerPool::new("mob-stress", threads).expect("起实体线程池");
         let mut totals = crate::entity::parallel::PhaseTimes::default();
         let start = Instant::now();
         for _ in 0..10 {
@@ -387,7 +403,11 @@ fn frozen_chunks_skip_the_same_entities_in_both_drivers() {
         let mut ticks = BlockTicks::new();
         spawn(&mut level, &mut ticks);
         let mut world = World::new(&mut level, &mut ticks);
-        tick_entities_parallel(&gated, &mut world, &ScopedThreads { threads: 2 });
+        tick_entities_parallel(
+            &gated,
+            &mut world,
+            &WorkerPool::new("mob-test", 2).expect("起实体线程池"),
+        );
         world.live_entities()
     };
 
@@ -430,7 +450,11 @@ fn frozen_entities_stay_visible_to_other_entities() {
         Vec3::new(0.6, 70.0, 0.5),
         ItemStack::new(1, 2),
     ));
-    tick_entities_parallel(&gated, &mut world, &ScopedThreads { threads: 1 });
+    tick_entities_parallel(
+        &gated,
+        &mut world,
+        &WorkerPool::new("mob-test", 1).expect("起实体线程池"),
+    );
     assert_eq!(world.entity_ids().len(), 2, "冻结的实体仍在实体名单里");
     assert_eq!(world.live_entities().len(), 2);
 }
@@ -531,4 +555,285 @@ fn both_drives_read_the_same_weather_facts() {
     facts.weather = BlockWeather::CLEAR;
     let dry = SourceView::new(FlatSource { floor_y: 64, facts });
     assert!(!dry.is_raining_at(open));
+}
+
+/// 并行算阶段的只读快照里还留着当前实体那一行，但 `getEntities(this, ...)`
+/// 不返回自己：范围查询要排除自己，剩下的按 uid 升序、一个不少。
+#[test]
+fn the_shared_snapshot_excludes_the_entity_being_ticked() {
+    let blocks = flat_blocks();
+    let mut level = TestLevel::new();
+    let mut ticks = BlockTicks::new();
+    {
+        let mut world = World::new(&mut level, &mut ticks);
+        for index in 0..4 {
+            world.spawn_entity(Entity::ground_item(
+                Vec3::new(0.5 + f64::from(index) * 0.2, 70.0, 0.5),
+                ItemStack::new(1, 1),
+            ));
+        }
+    }
+    let area = Aabb::new(-1.0, 60.0, -1.0, 2.0, 80.0, 2.0);
+    let entities = level.entities_mut_for_test();
+    let (uids, rows, states) = entities.take_states_for_tick();
+    let seen = shared_rows_in(&uids, &rows, entities, &blocks, area);
+    assert_eq!(uids.len(), 4);
+    for (index, seen) in seen.iter().enumerate() {
+        assert_eq!(seen.len(), 3, "uid={}", uids[index]);
+        assert!(!seen.contains(&uids[index]), "查到了自己");
+        assert_eq!(
+            seen,
+            &uids
+                .iter()
+                .copied()
+                .filter(|&uid| uid != uids[index])
+                .collect::<Vec<_>>(),
+            "剩下的按 uid 升序"
+        );
+    }
+    // 私有状态只是借出来看了一眼，原样还回去。
+    entities.restore_states(&rows, states);
+}
+
+/// 从实体的 `EntityCtx` 里看自己：`other(自己)`、`entity_uids()` 和范围查询
+/// 三种入口都不返回自己，和精确驱动「当前实体已被 take 出去」的结果一致。
+#[test]
+fn an_entity_context_never_sees_itself() {
+    use crate::entity::ctx::{EntityCtx, PreciseCtx};
+
+    let blocks = flat_blocks();
+    let mut level = TestLevel::new();
+    let mut ticks = BlockTicks::new();
+    {
+        let mut world = World::new(&mut level, &mut ticks);
+        for index in 0..3 {
+            world.spawn_entity(Entity::ground_item(
+                Vec3::new(0.5 + f64::from(index) * 20.0, 70.0, 0.5),
+                ItemStack::new(1, 1),
+            ));
+        }
+    }
+    let uids = World::new(&mut level, &mut ticks).entity_ids();
+    let area = Aabb::new(-100.0, 60.0, -100.0, 100.0, 90.0, 100.0);
+
+    // 精确驱动：把实体 take 出去之后，三种入口都只看得到另外两个。
+    let precise = {
+        let mut world = World::new(&mut level, &mut ticks);
+        let me = uids[1];
+        let taken = world.level_mut_for_test().take_entity(me);
+        let result = {
+            let ctx = PreciseCtx::new(&mut world, me);
+            let mut seen = Vec::new();
+            ctx.for_each_other_uid_in(area, &mut |uid| seen.push(uid));
+            (ctx.other(me), ctx.entity_uids(), seen)
+        };
+        world
+            .level_mut_for_test()
+            .put_entity(taken.expect("实体在表里"));
+        result
+    };
+    assert_eq!(precise.0, None);
+    assert_eq!(precise.1, vec![uids[0], uids[2]]);
+    assert_eq!(precise.2, vec![uids[0], uids[2]]);
+
+    // 并行驱动：快照里还留着当前实体，也必须排除自己。
+    let parallel = {
+        let entities = level.entities_mut_for_test();
+        let (all, rows, states) = entities.take_states_for_tick();
+        let seen = shared_rows_in(&all, &rows, entities, &blocks, area);
+        entities.restore_states(&rows, states);
+        seen
+    };
+    for (index, seen) in parallel.iter().enumerate() {
+        assert_eq!(seen, &all_but(&uids, index), "并行查询 uid={}", uids[index]);
+    }
+}
+
+fn all_but(uids: &[i32], index: usize) -> Vec<i32> {
+    uids.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .map(|(_, &uid)| uid)
+        .collect()
+}
+
+/// 常驻池跨刻复用同一批线程：每刻派一批活，线程 ID 不变，结果和逐刻起线程的
+/// 旧执行器、以及精确串行逐位一致。
+#[test]
+fn worker_pool_reuses_its_threads_and_keeps_results_stable() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let pool = WorkerPool::new("mob-pool-reuse", 4).expect("起实体线程池");
+    let threads = Mutex::new(std::collections::BTreeSet::new());
+    let alive = std::sync::Arc::new(AtomicUsize::new(0));
+    for _ in 0..12 {
+        let counter = std::sync::Arc::clone(&alive);
+        let threads_ref = &threads;
+        let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..7)
+            .map(|_| {
+                let counter = std::sync::Arc::clone(&counter);
+                Box::new(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    threads_ref
+                        .lock()
+                        .unwrap()
+                        .insert(format!("{:?}", std::thread::current().id()));
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        pool.run(jobs);
+    }
+    assert_eq!(alive.load(Ordering::Relaxed), 12 * 7, "每份活恰好跑一次");
+    let names = threads.lock().unwrap().clone();
+    assert!(
+        (1..=4).contains(&names.len()),
+        "至多 3 条常驻线程加当前线程，实际 {} 条",
+        names.len()
+    );
+    // 线程身份跨刻稳定：再多派几批，集合不能变大。
+    for _ in 0..8 {
+        let threads_ref = &threads;
+        let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..7)
+            .map(|_| {
+                Box::new(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    threads_ref
+                        .lock()
+                        .unwrap()
+                        .insert(format!("{:?}", std::thread::current().id()));
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        pool.run(jobs);
+    }
+    assert_eq!(
+        *threads.lock().unwrap(),
+        names,
+        "跨刻复用同一批线程，没有新线程 ID"
+    );
+    // 池子 drop 之后不再有后台线程活着（JoinHandle 被 join）。
+    drop(pool);
+
+    let baseline = {
+        let mut level = TestLevel::new();
+        spawn_items(&mut level, 48);
+        run_parallel(&mut level, &InlineExecutor)
+    };
+    for threads in [1, 2, 4] {
+        let mut level = TestLevel::new();
+        spawn_items(&mut level, 48);
+        let pool = WorkerPool::new("mob-pool-results", threads).expect("起实体线程池");
+        let result = run_parallel(&mut level, &pool);
+        assert_eq!(
+            format!("{result:?}"),
+            format!("{baseline:?}"),
+            "threads={threads}"
+        );
+    }
+}
+
+/// `max_entity_collisions`：每只生物每刻最多发这么多次推挤，计数下一刻归零。
+/// 精确驱动、并行驱动和缺省（0 = 官方行为）都要对。
+#[test]
+fn the_push_cap_limits_commands_and_resets_each_tick() {
+    use crate::entity::mob::MobType;
+
+    /// 12 只牛挤在原点：一个 tick 里每只都看得到另外 11 只。
+    /// 返回每刻结束每只牛身上的 `(刻号, 已处理次数)`。
+    fn crowded(cap: usize, parallel: bool) -> Vec<Vec<(i64, usize)>> {
+        let mut level = TestLevel::new();
+        level.rules.max_entity_collisions = cap;
+        let mut facts = ViewFacts::default();
+        facts.rules.max_entity_collisions = cap;
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for _ in 0..12 {
+                world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.5, 0.5)));
+            }
+        }
+        let mut all = Vec::new();
+        for tick in 0..3 {
+            ticks.set_time(tick);
+            facts.game_time = tick;
+            let blocks = SourceView::new(FlatSource { floor_y: 64, facts });
+            let mut world = World::new(&mut level, &mut ticks);
+            if parallel {
+                tick_entities_parallel(&blocks, &mut world, &InlineExecutor);
+            } else {
+                world.tick_entities();
+            }
+            drop(world);
+            let counts = World::new(&mut level, &mut ticks)
+                .live_entities()
+                .into_iter()
+                .filter_map(|entity| entity.kind.mob().map(|mob| mob.push_count))
+                .collect();
+            all.push(counts);
+        }
+        all
+    }
+
+    for parallel in [false, true] {
+        // 缺省（精确模式）：每只每刻都向另外 11 只发命令，三刻都是 11。
+        let off = crowded(0, parallel);
+        for (index, counts) in off.iter().enumerate() {
+            assert_eq!(counts.len(), 12, "parallel={parallel} tick={index}");
+            assert!(
+                counts
+                    .iter()
+                    .all(|&(tick, used)| tick == index as i64 && used == 11),
+                "parallel={parallel} tick={index}: {counts:?}"
+            );
+        }
+        // 上限 8：查询在够数时就停，每只每刻最多 8 次；三刻都重新有 8 次额度。
+        let on = crowded(8, parallel);
+        for (index, counts) in on.iter().enumerate() {
+            assert_eq!(counts.len(), 12, "parallel={parallel} tick={index}");
+            assert!(
+                counts
+                    .iter()
+                    .all(|&(tick, used)| tick == index as i64 && used == 8),
+                "parallel={parallel} tick={index}: {counts:?}"
+            );
+        }
+    }
+}
+
+/// 上限不能改 `maxEntityCramming` 的挤压伤害：名单被截断时，伤害判定仍按
+/// 完整的候选数走。把 cramming 设成 3，牛就该挨打（随机源固定）。
+#[test]
+fn the_push_cap_does_not_change_cramming_damage() {
+    use crate::entity::mob::MobType;
+
+    /// 返回挨了挤压伤害的牛的头数。
+    fn hurt_cows(cap: usize, cramming: i32) -> usize {
+        let mut level = TestLevel::new();
+        level.rules.max_entity_collisions = cap;
+        level.rules.max_entity_cramming = cramming;
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for _ in 0..12 {
+                world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.5, 0.5)));
+            }
+        }
+        let mut world = World::new(&mut level, &mut ticks);
+        world.tick_entities();
+        drop(world);
+        World::new(&mut level, &mut ticks)
+            .live_entities()
+            .into_iter()
+            .filter(|entity| entity.kind.mob().is_some_and(|mob| mob.health < 10.0))
+            .count()
+    }
+
+    let off_hurt = hurt_cows(0, 3);
+    let on_hurt = hurt_cows(8, 3);
+    assert!(off_hurt > 0, "没上限时挤压伤害生效");
+    assert!(on_hurt > 0, "有上限时挤压伤害照样生效");
+    assert_eq!(off_hurt, on_hurt, "上限不该改伤害判定的结果");
 }

@@ -71,6 +71,10 @@ impl LightningCase {
             game: None,
             wrong_was_hurt: false,
             natural_spawn: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
         }
     }
 }
@@ -181,6 +185,10 @@ impl Report {
             game: None,
             wrong_was_hurt: false,
             natural_spawn: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            short_hunger: false,
+            ignore_bed_monsters: false,
         };
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);

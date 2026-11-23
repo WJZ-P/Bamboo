@@ -37,6 +37,12 @@ pub struct ChunkStore {
     pristine: ChunkMap<PristineMark>,
     /// 方块或光照版本变过的区块。存档每刻只看这个集合，不扫全部已加载区块。
     changed: HashSet<ChunkPos, ChunkHasherBuilder>,
+    /// 区块的 `InhabitedTime`，单独记，不在区块里：官方每刻给刷怪候选区块加一
+    /// （`LevelChunk.incrementInhabitedTime`），既不 `markUnsaved`，也和区块包无关，
+    /// 所以累加不换版本号、不进存盘集合、不把模板区块物化。没有条目的位置是 0。
+    /// 取出（[`Self::take_column`] / [`Self::column_clone`]）时写回区块的存档信息，
+    /// 放入（[`Self::insert_column`]）时从存档信息读出来。
+    inhabited: ChunkMap<i64>,
 }
 
 /// 按区块坐标索引的表，用和票表一样的便宜哈希。读方块的热路径每次都查它。
@@ -126,6 +132,7 @@ impl ChunkStore {
             loaded: None,
             pristine: ChunkMap::default(),
             changed: HashSet::default(),
+            inhabited: ChunkMap::default(),
         }
     }
 
@@ -272,6 +279,7 @@ impl ChunkStore {
         self.light.remove_loaded(pos);
         // 这一柱整个离开了世界，别留着一个指向旧版本号的原样起点。
         self.pristine.remove(&pos);
+        self.inhabited.remove(&pos);
         // 注销之后再重算一遍 3×3：这时 `pos` 已经不算已加载，
         // 邻居段的计数按「那个位置没有方块」修正。
         let Self {
@@ -326,6 +334,17 @@ impl ChunkStore {
                 .clear_post_processing();
             self.mark_changed(pos);
         }
+    }
+
+    /// 区块的 `InhabitedTime`（玩家附近待过的刻数）。区域难度读它。
+    pub fn inhabited_time(&self, pos: ChunkPos) -> i64 {
+        self.inhabited.get(&pos).copied().unwrap_or_default()
+    }
+
+    /// `LevelChunk.incrementInhabitedTime`：加一刻。不换版本号、不进存盘集合。
+    pub fn increment_inhabited_time(&mut self, pos: ChunkPos) {
+        let ticks = self.inhabited.entry(pos).or_default();
+        *ticks = ticks.wrapping_add(1);
     }
 
     /// 这个区块的方块和光照都和模板一样，可以共用模板的编码。
@@ -631,12 +650,13 @@ impl ChunkStore {
         if !self.is_loaded(pos) {
             return None;
         }
-        let chunk = self
+        let mut chunk = self
             .edited
             .chunks
             .get(&pos)
             .cloned()
             .unwrap_or_else(|| self.template.clone());
+        chunk.set_inhabited_time(self.inhabited_time(pos));
         let light = self.light.column_clone(pos);
         let mark = self
             .pristine
@@ -669,11 +689,12 @@ impl ChunkStore {
             .copied()
             .unwrap_or(PristineMark::TEMPLATE);
         let pristine = mark.from_generator && mark.revision == self.revision(pos);
-        let chunk = self
+        let mut chunk = self
             .edited
             .chunks
             .remove(&pos)
             .unwrap_or_else(|| self.template.clone());
+        chunk.set_inhabited_time(self.inhabited.remove(&pos).unwrap_or_default());
         // 注销这一柱的段状态：拿走之后这个位置回到模板（无限平坦世界里方块不变，
         // 这一步是恒等写入；以后按区块加载时这里才是真的注销）。
         let column_light = self.light.take_column(pos);
@@ -711,6 +732,12 @@ impl ChunkStore {
         }
         let from_generator = column.untouched();
         let (chunk, column_light) = column.into_parts();
+        let inhabited = chunk.archive().inhabited_time;
+        if inhabited == 0 {
+            self.inhabited.remove(&pos);
+        } else {
+            self.inhabited.insert(pos, inhabited);
+        }
         self.edited.chunks.insert(pos, chunk);
         self.edited.bump_revision(pos);
         self.light.insert_column(pos, column_light);
@@ -818,6 +845,7 @@ impl ChunkStore {
             )),
             pristine: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
             changed: HashSet::default(),
+            inhabited: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
         };
         let into_loaded = out.loaded.as_mut().expect("刚建好");
         let from_loaded = self.loaded.as_mut().expect("已加载模式");
@@ -836,6 +864,9 @@ impl ChunkStore {
             }
             if self.changed.remove(&pos) {
                 out.changed.insert(pos);
+            }
+            if let Some(ticks) = self.inhabited.remove(&pos) {
+                out.inhabited.insert(pos, ticks);
             }
             if from_loaded.remove(&pos) {
                 into_loaded.insert(pos);
@@ -878,6 +909,7 @@ impl ChunkStore {
             loaded,
             pristine,
             changed,
+            inhabited,
         } = other;
         self.edited.chunks.extend(edited.chunks);
         self.edited.revisions.extend(edited.revisions);
@@ -890,6 +922,7 @@ impl ChunkStore {
             .extend(loaded.expect("已加载模式"));
         self.pristine.extend(pristine);
         self.changed.extend(changed);
+        self.inhabited.extend(inhabited);
         Ok(())
     }
 }

@@ -854,8 +854,13 @@ impl Harness {
     }
 
     /// 测试并行驱动时直接设线程数，不碰进程级环境变量（同一进程里测试并行跑）。
+    /// 同时按这个数建好常驻池，走正式服务端那条路径。
     pub(crate) fn set_entity_threads(&mut self, threads: usize) {
         self.world.islands.entity_threads = threads;
+        self.world.master.entity_pool = (threads > 1).then(|| {
+            mc_bamboo_blocks::entity::parallel::WorkerPool::new("bamboo-entity-test", threads)
+                .expect("起实体线程池")
+        });
     }
 
     /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数（含邮筒里
@@ -2304,6 +2309,74 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
             "a clean chunk must not be re-saved inside the cooldown"
         );
     }
+}
+
+/// `InhabitedTime` 的累加照官方不置脏（`incrementInhabitedTime` 不 `markUnsaved`）：
+/// 只累加的区块不写盘；之后改了方块再存，写进去的是累加后的值。
+#[test]
+fn inhabited_time_is_saved_only_with_another_change() {
+    use mc_bamboo_storage::{
+        anvil::{RegionCompression, RegionFile},
+        chunk_io::ChunkIo,
+        world_dir::WorldDir,
+    };
+
+    let tmp = D6TempDir::new("inhabited");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server
+        .world
+        .master
+        .host
+        .set_io(ChunkIo::open(&dir).unwrap());
+    server.world.islands.region.chunks.finish_light_updates();
+    // 先把加载时已经脏的区块存掉，从干净的状态开始。
+    server
+        .world
+        .master
+        .host
+        .snapshot_all_dirty(&mut server.world.islands.all_mut(), 1);
+    server.world.master.host.flush_io();
+    let _ = written_chunks(&server.world.master.host);
+
+    for _ in 0..5 {
+        server
+            .world
+            .islands
+            .region
+            .chunks
+            .increment_inhabited_time(pos);
+    }
+    server
+        .world
+        .master
+        .host
+        .snapshot_all_dirty(&mut server.world.islands.all_mut(), 2);
+    server.world.master.host.flush_io();
+    assert!(
+        !written_chunks(&server.world.master.host).contains(&pos),
+        "只累加 InhabitedTime 的区块不写盘"
+    );
+
+    server.set_block(BlockPos::new(3, -60, 3), blocks::STONE);
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.chunks.finish_light_updates();
+    server
+        .world
+        .master
+        .host
+        .snapshot_all_dirty(&mut server.world.islands.all_mut(), 3);
+    server.world.master.host.flush_io();
+    assert!(written_chunks(&server.world.master.host).contains(&pos));
+    let path = dir.region_dir().join("r.0.0.mca");
+    let mut region =
+        RegionFile::open(&path, dir.region_dir(), RegionCompression::Zlib).expect("区域文件能打开");
+    let bytes = region.read(pos, 32 << 20).unwrap().expect("区块在盘上");
+    let decoded = mc_bamboo_storage::chunk_nbt::decode_bytes(&bytes).expect("官方格式能解");
+    assert_eq!(decoded.inhabited_time, 5, "存进去的是累加后的值");
 }
 
 /// `save-off` 期间匀速保存整个停掉。
@@ -5028,4 +5101,25 @@ fn melee_hit_awards_damage_dealt_on_request_stats() {
         stats[0].body, expected_body,
         "DAMAGE_DEALT must be sent as a minecraft:custom stat"
     );
+}
+
+/// `max_entity_collisions` 从 `WorldConfig` 走到岛的规则快照：实体逻辑通过
+/// `BlockView::block_game_rules()` 读到配置值。
+#[test]
+fn the_collision_cap_reaches_entity_rules() {
+    use mc_bamboo_blocks::Level;
+
+    let (inbox, receiver) = crate::inbound::channel();
+    let config = WorldConfig {
+        max_entity_collisions: 8,
+        ..Default::default()
+    };
+    let mut world = World::new(config, receiver);
+    let _ = inbox;
+    assert_eq!(world.islands.region.max_entity_collisions, 8);
+    let entity_rules = world.islands.region.entity_game_rules();
+    assert_eq!(entity_rules.max_entity_collisions, 8);
+    // 精确驱动构造 `World` 时读到的规则快照带着配置值；方块逻辑不读这一项。
+    let level = world.islands.region.block_level().0;
+    assert_eq!(level.block_game_rules().max_entity_collisions, 8);
 }

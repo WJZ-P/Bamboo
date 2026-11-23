@@ -97,6 +97,8 @@ pub struct ServerConfig {
     pub world_dir: Option<std::path::PathBuf>,
     /// 实体阶段的线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动（实验）。
     pub entity_threads: usize,
+    /// 每只生物每刻最多处理几次推挤（0 = 不限，精确模式）。
+    pub max_entity_collisions: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
@@ -195,6 +197,7 @@ impl Default for ServerConfig {
             list_directory: std::path::PathBuf::new(),
             world_dir: None,
             entity_threads: 0,
+            max_entity_collisions: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: mc_bamboo_game::worldgen_cache::WorldgenCacheSettings::default(),

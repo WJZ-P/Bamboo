@@ -14,7 +14,7 @@ use super::{Mob, living, navigation::Navigation, path::static_path_type};
 use crate::{
     entity::{
         Entity, EntityUid, KindPublic,
-        ctx::{BlockView, EntityCtx, PlayerView},
+        ctx::{BlockView, Command, EntityCtx, PlayerView},
     },
     shape::{self, CollisionContext},
     state::SupportType,
@@ -289,6 +289,25 @@ pub enum Goal {
         block_pos: Option<BlockPos>,
         reached_target: bool,
     },
+    /// `Silverfish.SilverfishWakeUpFriendsGoal`：受伤后倒数，然后扫虫蚀方块唤醒同伴。
+    ///
+    /// `Silverfish.SilverfishWakeUpFriendsGoal`: wake nearby infested blocks after a hit.
+    SilverfishWakeFriends {
+        look_for_friends: i32,
+    },
+    /// `Silverfish.SilverfishMergeWithStoneGoal`：`RandomStrollGoal(1.0, 10)` 的子类，
+    /// 偶尔把旁边的宿主方块变成虫蚀方块并消失。
+    ///
+    /// `Silverfish.SilverfishMergeWithStoneGoal`: a `RandomStrollGoal(1.0, 10)` that
+    /// occasionally turns a neighbouring host block into its infested state.
+    SilverfishMergeWithStone {
+        direction: mc_bamboo_core::Direction,
+        do_merge: bool,
+        speed: f64,
+        interval: i32,
+        wanted: Vec3,
+        force_trigger: bool,
+    },
     /// `RandomStrollGoal`（不避水）：`DefaultRandomPos.getPos(mob, 10, 7)`。
     ///
     /// `RandomStrollGoal` (not water avoiding): `DefaultRandomPos.getPos(mob, 10, 7)`.
@@ -455,9 +474,9 @@ pub enum TargetType {
     ///
     /// The llama's `LlamaAttackWolfGoal`: untamed wolves.
     Wolf,
-    /// 末影人的 `NearestAttackableTargetGoal<Endermite>`；末影螨还没实现。
+    /// 末影人的 `NearestAttackableTargetGoal<Endermite>`。
     ///
-    /// The enderman's `NearestAttackableTargetGoal<Endermite>`; endermites are not modelled.
+    /// The enderman's `NearestAttackableTargetGoal<Endermite>`.
     Endermite,
     /// 豹猫的 `NearestAttackableTargetGoal<Chicken>`。
     ///
@@ -584,13 +603,17 @@ impl Goal {
             // `MoveToBlockGoal` locks MOVE and JUMP; `TurtleGoHomeGoal` sets none.
             Self::TurtleLayEgg { .. } | Self::TurtleGoToWater { .. } => &[Flag::Move, Flag::Jump],
             Self::TurtleGoHome { .. } | Self::TurtleTravel { .. } => &[],
-            Self::BreakDoor => &[Flag::Move],
+            // `DoorInteractGoal` 的构造函数不设标志位。
+            Self::BreakDoor => &[],
             Self::EatBlock { .. } => &[Flag::Move, Flag::Look, Flag::Jump],
             Self::CubeFloat
             | Self::CubeAttack { .. }
             | Self::CubeRandomDirection { .. }
             | Self::CubeKeepJumping => super::slime::flags(self),
-            Self::DrownedGoToWater { .. } | Self::RandomStroll { .. } => &[Flag::Move],
+            Self::DrownedGoToWater { .. }
+            | Self::RandomStroll { .. }
+            | Self::SilverfishMergeWithStone { .. } => &[Flag::Move],
+            Self::SilverfishWakeFriends { .. } => &[],
             // `MoveToBlockGoal` 同时锁 MOVE 和 JUMP。
             //
             // `MoveToBlockGoal` locks MOVE and JUMP.
@@ -647,6 +670,7 @@ impl Goal {
                 | Self::RangedAttack { .. }
                 | Self::TurtleLayEgg { .. }
                 | Self::TurtleGoToWater { .. }
+                | Self::BreakDoor
         )
     }
 
@@ -719,6 +743,8 @@ impl Goal {
             Self::DrownedGoToBeach { .. } => "DrownedGoToBeachGoal",
             Self::RandomStroll { .. } => "RandomStrollGoal",
             Self::WitchHealRaiders { .. } => "NearestHealableRaiderTargetGoal",
+            Self::SilverfishWakeFriends { .. } => "SilverfishWakeUpFriendsGoal",
+            Self::SilverfishMergeWithStone { .. } => "SilverfishMergeWithStoneGoal",
             Self::WitchRangedAttack { .. } => "RangedAttackGoal",
             Self::PandaSit => "PandaSitGoal",
             Self::PandaLieOnBack => "PandaLieOnBackGoal",
@@ -1490,6 +1516,56 @@ fn light_dependent_magic(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> f32 {
 
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
+        Goal::SilverfishWakeFriends { look_for_friends } => *look_for_friends > 0,
+        Goal::SilverfishMergeWithStone {
+            direction,
+            do_merge,
+            interval,
+            wanted,
+            force_trigger,
+            ..
+        } => {
+            *do_merge = false;
+            if mob.target.is_some() || !mob.navigation.is_done() {
+                return false;
+            }
+            if ctx.blocks().block_game_rules().mob_griefing
+                && me.random.next_int_bounded(reduced_tick_delay(10)) == 0
+            {
+                *direction = match me.random.next_int_bounded(6) {
+                    0 => mc_bamboo_core::Direction::Down,
+                    1 => mc_bamboo_core::Direction::Up,
+                    2 => mc_bamboo_core::Direction::North,
+                    3 => mc_bamboo_core::Direction::South,
+                    4 => mc_bamboo_core::Direction::West,
+                    _ => mc_bamboo_core::Direction::East,
+                };
+                let base = BlockPos::containing(Vec3::new(
+                    me.position.x,
+                    me.position.y + 0.5,
+                    me.position.z,
+                ))
+                .relative(*direction);
+                if super::infested::is_compatible_host_block(ctx.blocks().block_state(base)) {
+                    *do_merge = true;
+                    return true;
+                }
+            }
+            // `RandomStrollGoal.canUse` 的间隔是 10（不是折半后的 5）：
+            // 官方向父类传的 10 在 `RandomStrollGoal` 内部又折半一次。
+            if !*force_trigger
+                && (mob.no_action_time >= 100
+                    || me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0)
+            {
+                return false;
+            }
+            let Some(found) = default_random_pos(me, mob, ctx.blocks(), 10, 7) else {
+                return false;
+            };
+            *wanted = found;
+            *force_trigger = false;
+            true
+        }
         Goal::Bow(_) => {
             super::skeleton::bow_slot(mob).is_some() && combat_target(mob, ctx).is_some()
         }
@@ -1788,7 +1864,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                             })
                             && target_by_uid(mob, ctx, uid).is_some()
                     } else {
-                        !(mob.mob_type.full_target_rules()
+                        !(mob.mob_type.uses_target_memory()
                             || mob.mob_type == super::MobType::PolarBear)
                             || target_by_uid(mob, ctx, uid).is_some()
                     }
@@ -1856,6 +1932,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Chicken => {
                     nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Chicken)
                 }
+                // `Enderman.NearestAttackableTargetGoal<Endermite>`：末影螨现在已建模。
+                // `Enderman.NearestAttackableTargetGoal<Endermite>`: endermites now exist.
+                TargetType::Endermite => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Endermite)
+                }
                 TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
                     public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
                 }),
@@ -1871,8 +1952,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 | TargetType::IronGolem
                 | TargetType::Turtle
                 | TargetType::Axolotl
-                | TargetType::Fish
-                | TargetType::Endermite => None,
+                | TargetType::Fish => None,
             };
             // 找到了玩家，还要身边有幼崽才动手。
             // A player was found; a cub must be nearby as well.
@@ -1996,10 +2076,13 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::SquidRandomMovement => true,
         Goal::SquidFlee { .. } => super::squid::flee_can_use(me, mob, ctx),
+        // `BreakDoorGoal.canUse`：先 `DoorInteractGoal.canUse`（会写 `doorPos` / `hasDoor`），
+        // 再看 `mobGriefing`、困难难度和门没开。
         Goal::BreakDoor => {
-            mob.can_break_doors
+            door_interact_can_use(me, mob, ctx.blocks())
                 && ctx.blocks().block_game_rules().mob_griefing
                 && ctx.blocks().difficulty() == 3
+                && !door_is_open(mob, ctx.blocks())
         }
         Goal::TurtleEgg { .. } => {
             // `RemoveBlockGoal.canUse` 覆写了 `MoveToBlockGoal`：
@@ -2069,6 +2152,10 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
 
 fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
+        // `Goal.canContinueToUse` 缺省是 `canUse()`：倒数到 0 就停。
+        // `Goal.canContinueToUse` defaults to `canUse()`: stop at zero.
+        Goal::SilverfishWakeFriends { look_for_friends } => *look_for_friends > 0,
+        Goal::SilverfishMergeWithStone { do_merge, .. } => !*do_merge && !mob.navigation.is_done(),
         Goal::EndermanGaze(goal) => goal.can_continue(me, mob, ctx),
         Goal::EndermanFreeze => super::enderman::freeze_target(me, mob, ctx).is_some(),
         Goal::EndermanBlock { .. } => can_use(goal, me, mob, ctx),
@@ -2302,9 +2389,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 60)
         }
-        Goal::NearestAttackableTarget { unseen_ticks, .. }
-            if mob.mob_type.full_target_rules() || mob.mob_type == super::MobType::Slime =>
-        {
+        Goal::NearestAttackableTarget { unseen_ticks, .. } if mob.mob_type.uses_target_memory() => {
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
@@ -2331,6 +2416,10 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }
             target_can_continue_seen(me, mob, ctx, unseen_ticks, reduced_tick_delay(300))
         }
+        Goal::HurtByTarget { unseen_ticks, .. } if mob.mob_type.uses_target_memory() => {
+            // `HurtByTargetGoal.start` 把 `unseenMemoryTicks` 设成 300，减半后 150 刻。
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
+        }
         Goal::HurtByTarget { .. } => {
             // `PandaHurtByTargetGoal.canContinueToUse`：吃到了竹子或咬过一口就停手。
             // `PandaHurtByTargetGoal.canContinueToUse`: stop after eating bamboo or biting.
@@ -2341,7 +2430,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }
             // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
             // 旁观、和平难度）读成 null，回退到的 `targetMob` 是同一个玩家，同样打不了；
-            // 打得了还要在跟随距离内。`mustSee` 的视线记忆本期不建模（目标恒看得见）。
+            // 打得了还要在跟随距离内。
             combat_target(mob, ctx).is_some_and(|target| target_in_follow_range(me, mob, target))
         }
         Goal::NearestAttackableTarget { kind, .. } => {
@@ -2359,7 +2448,13 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                     .is_empty()
         }
         Goal::FleeSun { .. } => !mob.navigation.is_done(),
-        Goal::BreakDoor => mob.door_break_time <= 240 && ctx.blocks().difficulty() == 3,
+        // `BreakDoorGoal.canContinueToUse`：没到时间、门没开、离门中心不到 2 格、仍是困难。
+        Goal::BreakDoor => {
+            mob.door_break_time <= DOOR_BREAK_TIME
+                && !door_is_open(mob, ctx.blocks())
+                && center_distance_sqr(mob.door_pos, me.position) < 4.0
+                && ctx.blocks().difficulty() == 3
+        }
         Goal::EatBlock { eat_tick } => *eat_tick > 0,
         Goal::TurtleEgg { .. } => {
             // `MoveToBlockGoal.canContinueToUse`：尝试刻数在
@@ -2383,6 +2478,27 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
 
 fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::SilverfishWakeFriends { .. } => {}
+        Goal::SilverfishMergeWithStone {
+            do_merge,
+            direction,
+            speed,
+            wanted,
+            ..
+        } => {
+            if !*do_merge {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
+                return;
+            }
+            let base =
+                BlockPos::containing(Vec3::new(me.position.x, me.position.y + 0.5, me.position.z))
+                    .relative(*direction);
+            let state = ctx.blocks().block_state(base);
+            if super::infested::is_compatible_host_block(state) {
+                ctx.emit(Command::SilverfishMerge { pos: base }, me);
+            }
+        }
         Goal::EndermanGaze(goal) => goal.start(mob),
         Goal::EndermanFreeze => mob.navigation.stop(),
         Goal::EndermanBlock { .. } => {}
@@ -2589,10 +2705,14 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation.move_to(ctx.blocks(), &nav, *wanted, *speed);
         }
+        // `DoorInteractGoal.start` 记下开门方向，`BreakDoorGoal.start` 清计时。
         Goal::BreakDoor => {
+            mob.door_passed = false;
+            mob.door_open_dir = [
+                (f64::from(mob.door_pos.x) + 0.5 - me.position.x) as f32,
+                (f64::from(mob.door_pos.z) + 0.5 - me.position.z) as f32,
+            ];
             mob.door_break_time = 0;
-            mob.door_break_progress = -1;
-            mob.door_break_pos = None;
         }
         Goal::EatBlock { eat_tick } => {
             // `start`：倒计时、实体事件 10（低头动画）、停下导航。
@@ -2645,6 +2765,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
 
 fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::SilverfishWakeFriends { .. } => {}
+        Goal::SilverfishMergeWithStone { .. } => mob.navigation.stop(),
         Goal::EndermanGaze(goal) => goal.stop(me, mob),
         Goal::EndermanFreeze | Goal::EndermanBlock { .. } => {}
         Goal::Bow(bow) => bow.stop(mob),
@@ -2755,9 +2877,15 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.navigation.stop();
         }
         Goal::FleeSun { .. } | Goal::SquidRandomMovement | Goal::SquidFlee { .. } => {}
+        // `BreakDoorGoal.stop`：清掉裂纹（`lastBreakProgress` 不重置）。
         Goal::BreakDoor => {
-            mob.door_break_time = 0;
-            mob.door_break_progress = -1;
+            ctx.emit(
+                crate::entity::ctx::Command::DestroyProgress {
+                    pos: mob.door_pos,
+                    progress: -1,
+                },
+                me,
+            );
         }
         Goal::EatBlock { eat_tick } => *eat_tick = 0,
         Goal::TurtleEgg { .. } => {
@@ -2776,6 +2904,13 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::SilverfishWakeFriends { look_for_friends } => {
+            *look_for_friends -= 1;
+            if *look_for_friends <= 0 {
+                super::silverfish::wake_tick(me, mob, ctx);
+            }
+        }
+        Goal::SilverfishMergeWithStone { .. } => {}
         Goal::EndermanGaze(goal) => goal.tick(me, mob, ctx),
         Goal::EndermanFreeze => {
             if let Some(player) = mob.target.and_then(|uid| player_by_uid(ctx.blocks(), uid)) {
@@ -3189,22 +3324,41 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::FleeSun { .. } => {}
         Goal::BreakDoor => {
-            // 进度和 1019/1021/2001 事件落地在命令层，这里只推倒计时和取随机数。
-            mob.door_break_time += 1;
+            // `DoorInteractGoal.tick`：走过门中心就记成已通过。
+            let to_x = (f64::from(mob.door_pos.x) + 0.5 - me.position.x) as f32;
+            let to_z = (f64::from(mob.door_pos.z) + 0.5 - me.position.z) as f32;
+            if mob.door_open_dir[0] * to_x + mob.door_open_dir[1] * to_z < 0.0 {
+                mob.door_passed = true;
+            }
+            // `BreakDoorGoal.tick`：1/20 敲门声（挥手动画不建模，不取随机数），
+            // 每十分之一进度发一次裂纹，到点在困难难度下拆门。
             if me.random.next_int_bounded(20) == 0 {
                 ctx.emit(
                     crate::entity::ctx::Command::MobLevelEvent {
                         event: 1019,
-                        pos: mob.door_break_pos.unwrap_or(me.block_position()),
+                        pos: mob.door_pos,
                         data: 0,
                     },
                     me,
                 );
             }
-            if mob.door_break_time >= 240 {
-                mob.door_break_time = 0;
-                let pos = mob.door_break_pos.unwrap_or(me.block_position());
-                ctx.emit(crate::entity::ctx::Command::RemoveMobBlock { pos }, me);
+            mob.door_break_time += 1;
+            let progress = (mob.door_break_time as f32 / DOOR_BREAK_TIME as f32 * 10.0) as i32;
+            if progress != mob.door_break_progress {
+                ctx.emit(
+                    crate::entity::ctx::Command::DestroyProgress {
+                        pos: mob.door_pos,
+                        progress,
+                    },
+                    me,
+                );
+                mob.door_break_progress = progress;
+            }
+            if mob.door_break_time == DOOR_BREAK_TIME && ctx.blocks().difficulty() == 3 {
+                ctx.emit(
+                    crate::entity::ctx::Command::BreakDoor { pos: mob.door_pos },
+                    me,
+                );
             }
         }
         Goal::TurtleEgg { speed } => {
@@ -3415,6 +3569,82 @@ pub(super) fn look_for_water(
         }
     }
     None
+}
+
+/// `BreakDoorGoal.getDoorBreakTime()`：`max(240, doorBreakTime)`，僵尸用的构造函数给 -1。
+const DOOR_BREAK_TIME: i32 = 240;
+
+/// `DoorBlock.isWoodenDoor`：是门方块，且门的类型能用手开（铁门不行）。
+fn is_wooden_door(view: &dyn BlockView, pos: BlockPos) -> bool {
+    let state = view.block_state(pos);
+    state.is_a(mc_bamboo_data::BlockAncestor::DoorBlock)
+        && crate::behaviour::common::field_bool(state.block(), "type.canOpenByHand")
+}
+
+/// `DoorInteractGoal.isOpen`：没有门时假；门已经不是门时顺手清掉 `hasDoor`。
+fn door_is_open(mob: &mut Mob, view: &dyn BlockView) -> bool {
+    if !mob.has_door {
+        return false;
+    }
+    let state = view.block_state(mob.door_pos);
+    if !state.is_a(mc_bamboo_data::BlockAncestor::DoorBlock) {
+        mob.has_door = false;
+        return false;
+    }
+    state.get(crate::state::OPEN)
+}
+
+/// `DoorInteractGoal.canUse`：撞墙了、路径没走完时，在当前和下一个节点里找离自己
+/// 1.5 格内的木门（按节点上方一格、水平距离用节点整数坐标）；都没有就看头顶这一格。
+fn door_interact_can_use(me: &Entity, mob: &mut Mob, view: &dyn BlockView) -> bool {
+    if !me.horizontal_collision {
+        return false;
+    }
+    let Some(path) = &mob.navigation.path else {
+        return false;
+    };
+    if path.is_done() {
+        return false;
+    }
+    let end = (path.next_node_index + 2).min(path.node_count());
+    let mut found = None;
+    for node in &path.nodes[..end] {
+        let door = BlockPos::new(node.x, node.y + 1, node.z);
+        let dx = f64::from(door.x) - me.position.x;
+        let dz = f64::from(door.z) - me.position.z;
+        // `distanceToSqr(doorX, getY(), doorZ)`：Y 用自己的，差为 0。
+        if dx * dx + dz * dz > 2.25 {
+            continue;
+        }
+        let wooden = is_wooden_door(view, door);
+        mob.door_pos = door;
+        mob.has_door = wooden;
+        if wooden {
+            found = Some(door);
+            break;
+        }
+    }
+    if found.is_some() {
+        return true;
+    }
+    let door = me.block_position().above();
+    mob.door_pos = door;
+    mob.has_door = is_wooden_door(view, door);
+    mob.has_door
+}
+
+/// `Vec3i.distToCenterSqr`：到方块中心的距离平方。
+fn center_distance_sqr(pos: BlockPos, at: Vec3) -> f64 {
+    let dx = f64::from(pos.x) + 0.5 - at.x;
+    let dy = f64::from(pos.y) + 0.5 - at.y;
+    let dz = f64::from(pos.z) + 0.5 - at.z;
+    dx * dx + dy * dy + dz * dz
+}
+
+/// `Entity.isAlliedTo(player)`：生物在队伍里，而且和玩家是同一队。
+fn allied(mob: &Mob, view: &dyn BlockView, player: &PlayerView) -> bool {
+    view.entity_team(&mob.uuid)
+        .is_some_and(|team| player.team == Some(team))
 }
 
 /// 按 uid 找一个玩家。
@@ -3798,6 +4028,13 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     }
     if mob.mob_type == super::MobType::Turtle {
         return super::turtle::walk_target_value(mob, view, pos);
+    }
+    // `Silverfish.getWalkTargetValue`：脚下是宿主方块给 10，否则走怪物那一支。
+    // `Silverfish.getWalkTargetValue`: ten over a host block, else the monster branch.
+    if mob.mob_type == super::MobType::Silverfish
+        && super::infested::is_compatible_host_block(view.block_state(pos.below()))
+    {
+        return 10.0;
     }
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
@@ -4363,6 +4600,7 @@ pub(super) fn attack_candidate(
             && player.alive
             && !player.spectator
             && !player.creative
+            && !allied(mob, ctx.blocks(), &player)
             && !super::tame::refuses_target(mob, player.uuid))
         .then(|| CombatTarget::player(player, exact_player_box));
     }
@@ -4607,13 +4845,14 @@ fn nearest_attackable(
         {
             continue;
         }
-        if !targeting_test(me, mob, view, &player, range, true) {
-            continue;
-        }
-        let distance = eye.distance_to_sqr(player.eye_position());
-        if distance < best {
-            best = distance;
-            found = Some(player.uid);
+        if !allied(mob, view, &player) && targeting_test(me, mob, view, &player, range, true) {
+            // `getNearestEntity`：按玩家脚下的位置到生物 (x, eyeY, z) 的距离排名。
+            // `getNearestEntity` ranks the player's feet against the mob's eye point.
+            let distance = player.position.distance_to_sqr(eye);
+            if distance < best {
+                best = distance;
+                found = Some(player.uid);
+            }
         }
     }
     found

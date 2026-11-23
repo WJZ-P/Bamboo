@@ -31,6 +31,62 @@ use crate::region::Region;
 /// within 8 chunks (Chebyshev) of a player.
 const SPAWN_CHUNK_RADIUS: i32 = 8;
 
+/// `ServerChunkCache.tickSpawningChunk` 第一句的候选集合：官方 `ChunkMap.collectSpawningChunks`
+/// 逐刻给这批区块的 `InhabitedTime` 加一（在打乱和自然刷怪之前）。
+///
+/// 三个条件照字节码：候选区块来自 `naturalSpawnChunkCounter`（最大距离 8 的玩家区块方形）、
+/// 有 ticking 区块（`getTickingChunk() != null`）、有非旁观玩家离区块中心水平距离平方小于
+/// 16384。第三条里那名玩家所在的区块必然在前 8 格的方形内，所以纯计算只需
+/// 「ticks_blocks」和玩家（位置、是否旁观）两张表。按坐标升序返回；官方按哈希顺序，
+/// 但 `InhabitedTime` 的累加和顺序无关。
+///
+/// The candidate chunks of vanilla `ServerChunkCache.tickSpawningChunk`, whose first
+/// statement increments `InhabitedTime` for each one. Game and oracle share this.
+pub fn spawning_chunk_candidates(
+    players: impl IntoIterator<Item = (mc_bamboo_core::Vec3, bool)>,
+    ticks_blocks: impl Fn(ChunkPos) -> bool,
+) -> Vec<ChunkPos> {
+    let mut found = BTreeSet::new();
+    for (position, spectator) in players {
+        if spectator {
+            continue;
+        }
+        for chunk in chunk_square(
+            ChunkPos::containing(position.x, position.z),
+            SPAWN_CHUNK_RADIUS,
+        ) {
+            if ticks_blocks(chunk) && natural::is_close_to_spawn_chunk(position, chunk) {
+                found.insert(chunk);
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// 这一刻用于 `InhabitedTime` 累加的刷怪候选区块（按坐标升序）。
+/// 无限超平坦模式没有区块等级，照下面自然刷怪的视距门槛补齐；已加载模式由
+/// `tick_levels` 决定哪些区块能跑方块逻辑。
+///
+/// This tick's spawning-chunk candidates for the `InhabitedTime` increment.
+pub(crate) fn inhabited_time_chunks(region: &Region) -> Vec<ChunkPos> {
+    let radius = crate::interaction::SIMULATION_DISTANCE.min(region.view_distance + 1);
+    let players = region
+        .players
+        .values()
+        .map(|player| (player.position(), player.game_mode == GameMode::Spectator));
+    spawning_chunk_candidates(players, |chunk| {
+        if !region.chunks.is_loaded(chunk) || !region.tick_levels.chunk_ticks_blocks(chunk) {
+            return false;
+        }
+        // 无限模式没有等级，照 `spawning_chunks` 的老口径按玩家视距收窄。
+        region.tick_levels.enabled()
+            || region.players.values().any(|player| {
+                player.game_mode != GameMode::Spectator
+                    && in_chunk_square(player.chunk_pos(), chunk, radius)
+            })
+    })
+}
+
 /// 随机刻之外的自然生成。`spawn_mobs` 关掉时整段不做，一个随机数都不取（官方这时仍会
 /// 打乱刷怪区块列表，这条差异见 README 的已知差异）。
 ///
@@ -171,7 +227,68 @@ fn chunk_square(center: ChunkPos, radius: i32) -> impl Iterator<Item = ChunkPos>
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
     use super::*;
+    use crate::{inbound::PlayerId, player::Player};
+
+    fn region_with(mode: GameMode, at: Vec3) -> Region {
+        let mut region = Region::new(2, 20, false);
+        let id = PlayerId(1);
+        let player = Player::new(
+            id,
+            Uuid::nil(),
+            "Test".to_owned(),
+            mode,
+            ClientInformation::default(),
+            at,
+        );
+        region.players.insert(id, player);
+        region
+    }
+
+    #[test]
+    fn candidates_are_the_chunks_whose_centre_is_within_128_blocks() {
+        let chunks = spawning_chunk_candidates([(Vec3::new(8.0, -60.0, 8.0), false)], |_| true);
+        // 中心 (8, 8) 到 (8 + 16 * 8, 8) 正好 128 格，不算；7 个区块远的算。
+        assert!(chunks.contains(&ChunkPos::new(7, 0)));
+        assert!(!chunks.contains(&ChunkPos::new(8, 0)));
+        assert!(chunks.contains(&ChunkPos::new(5, 5)));
+        assert!(!chunks.contains(&ChunkPos::new(6, 6)));
+        assert!(chunks.contains(&ChunkPos::new(0, 0)));
+        assert!(!chunks.contains(&ChunkPos::new(9, 0)), "8 格方形以外不算");
+    }
+
+    #[test]
+    fn spectators_and_non_ticking_chunks_add_no_candidates() {
+        assert!(
+            spawning_chunk_candidates([(Vec3::new(8.0, -60.0, 8.0), true)], |_| true).is_empty()
+        );
+        assert!(
+            spawning_chunk_candidates([(Vec3::new(8.0, -60.0, 8.0), false)], |_| false).is_empty()
+        );
+    }
+
+    /// 累加只记在单独的表里：区块版本号不变（区块包缓存不失效），模板区块不被物化，
+    /// 也不进存盘集合。
+    #[test]
+    fn incrementing_inhabited_time_leaves_the_chunk_untouched() {
+        let mut region = region_with(GameMode::Survival, Vec3::new(8.0, -60.0, 8.0));
+        let chunk = ChunkPos::new(0, 0);
+        let revision = region.chunks.revision(chunk);
+        let _ = region.chunks.take_changed_chunks();
+        for _ in 0..2 {
+            for pos in inhabited_time_chunks(&region) {
+                region.chunks.increment_inhabited_time(pos);
+            }
+        }
+        assert_eq!(region.chunks.inhabited_time(chunk), 2);
+        assert_eq!(region.chunks.revision(chunk), revision);
+        assert!(region.chunks.is_template(chunk));
+        assert!(region.chunks.take_changed_chunks().is_empty());
+    }
 
     #[test]
     fn the_spawn_chunk_square_is_seventeen_by_seventeen() {

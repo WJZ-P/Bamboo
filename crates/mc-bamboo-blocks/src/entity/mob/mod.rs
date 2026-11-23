@@ -33,6 +33,7 @@ pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
 pub(crate) mod enderman;
+pub mod endermite;
 pub mod equine;
 pub mod equipment;
 pub mod fish;
@@ -41,6 +42,7 @@ pub mod fox_goals;
 pub mod frog;
 pub mod goals;
 pub mod goat;
+pub mod infested;
 pub mod interact;
 pub mod living;
 pub mod mooshroom;
@@ -63,6 +65,7 @@ pub mod polar_bear;
 pub mod rabbit;
 pub mod raider;
 pub mod sheep;
+pub mod silverfish;
 pub mod skeleton;
 mod skeleton_drops;
 pub mod skeleton_horse;
@@ -174,13 +177,15 @@ pub enum MobType {
     SkeletonHorse,
     /// 僵尸马，`ZombieHorse`。
     ZombieHorse,
+    Silverfish,
+    Endermite,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 50] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -229,6 +234,8 @@ impl MobType {
         Self::Phantom,
         Self::SkeletonHorse,
         Self::ZombieHorse,
+        Self::Silverfish,
+        Self::Endermite,
     ];
 
     /// 注册表 ID。
@@ -283,6 +290,8 @@ impl MobType {
             Self::Camel => ids::CAMEL,
             Self::SkeletonHorse => ids::SKELETON_HORSE,
             Self::ZombieHorse => ids::ZOMBIE_HORSE,
+            Self::Silverfish => ids::SILVERFISH,
+            Self::Endermite => ids::ENDERMITE,
         }
     }
 
@@ -337,6 +346,8 @@ impl MobType {
             Self::Camel => "minecraft:camel",
             Self::SkeletonHorse => "minecraft:skeleton_horse",
             Self::ZombieHorse => "minecraft:zombie_horse",
+            Self::Silverfish => "minecraft:silverfish",
+            Self::Endermite => "minecraft:endermite",
         }
     }
 
@@ -466,6 +477,7 @@ impl MobType {
             (Self::Turtle, baby) => turtle::dimensions(self, baby),
             (Self::Dolphin, baby) => dolphin::dimensions(baby),
             (Self::Axolotl, baby) => axolotl::dimensions(baby),
+            (Self::Silverfish | Self::Endermite, _) => infested::dimensions(self),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -497,6 +509,8 @@ impl MobType {
                 | Self::Spider
                 | Self::CaveSpider
                 | Self::Enderman
+                | Self::Silverfish
+                | Self::Endermite
         ) || self.is_skeleton()
     }
 
@@ -543,15 +557,29 @@ impl MobType {
     }
 
     /// 目标选择按官方 `TargetGoal` 的完整规则走（`mustSee` 的视线记忆、生物也能当目标、
-    /// 按真实碰撞箱判近战距离）。僵尸一系还是早先的简化版。
+    /// 按真实碰撞箱判近战距离）。
     ///
     /// Whether targeting follows the full vanilla `TargetGoal` rules (`mustSee` memory,
-    /// mob targets, real hitboxes for melee reach). Zombies keep the earlier simplification.
+    /// mob targets, real hitboxes for melee reach).
     pub const fn full_target_rules(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Spider | Self::CaveSpider | Self::Enderman | Self::Pillager
+            Self::Creeper
+                | Self::Spider
+                | Self::CaveSpider
+                | Self::Enderman
+                | Self::Pillager
+                | Self::Endermite
         ) || self.is_skeleton()
+    }
+
+    /// `TargetGoal.mustSee` 的视线记忆：僵尸一系和完整规则的敌对生物都要按看不见的
+    /// 刻数放弃目标；其余目标只看能不能打、在不在跟随距离内。
+    ///
+    /// Whether `TargetGoal.canContinueToUse` tracks how long the target has been unseen.
+    /// Zombies join the hostile mobs that use the full `mustSee` memory.
+    pub const fn uses_target_memory(self) -> bool {
+        self.full_target_rules() || matches!(self, Self::Slime) || self.is_zombie()
     }
 
     /// `Mob.getAmbientSound()` 返回 null 的种类：`makeSound(null)` 不出声，也不取音高的随机数。
@@ -727,7 +755,7 @@ impl MobType {
     /// `Entity.getMovementEmission().emitsSounds()`: squid override it to `EVENTS` and
     /// move silently.
     pub const fn emits_movement_sounds(self) -> bool {
-        !squid::is_squid(self) && !matches!(self, Self::Bat)
+        !squid::is_squid(self) && !matches!(self, Self::Bat | Self::Silverfish | Self::Endermite)
     }
 
     /// `LivingEntity.isPushable()`：蝙蝠覆写成假，不推别人也不被推。
@@ -757,6 +785,9 @@ impl MobType {
 
     /// `Mob.xpReward`：牛由 `Animal.getBaseExperienceReward` 抽，僵尸固定 5。
     pub const fn xp_reward(self) -> i32 {
+        if matches!(self, Self::Endermite) {
+            return mc_bamboo_data::entity_types::ENDERMITE_XP_REWARD;
+        }
         // `Phantom` 构造函数里也是 `xpReward = 5`。
         // The `Phantom` constructor sets `xpReward = 5` as well.
         if self.is_monster() || matches!(self, Self::Phantom) {
@@ -817,6 +848,8 @@ impl MobType {
             Self::Camel => "minecraft:entities/camel",
             Self::SkeletonHorse => "minecraft:entities/skeleton_horse",
             Self::ZombieHorse => "minecraft:entities/zombie_horse",
+            Self::Silverfish => "minecraft:entities/silverfish",
+            Self::Endermite => "minecraft:entities/endermite",
         }
     }
 
@@ -923,6 +956,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.ambient"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.ambient"),
             Self::ZombieHorse => Some("minecraft:entity.zombie_horse.ambient"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.ambient"),
+            Self::Endermite => Some("minecraft:entity.endermite.ambient"),
         }
     }
 
@@ -969,6 +1004,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.hurt"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.hurt"),
             Self::ZombieHorse => Some("minecraft:entity.zombie_horse.hurt"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
+            Self::Endermite => Some("minecraft:entity.endermite.hurt"),
         }
     }
 
@@ -1015,6 +1052,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.death"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.death"),
             Self::ZombieHorse => Some("minecraft:entity.zombie_horse.death"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.death"),
+            Self::Endermite => Some("minecraft:entity.endermite.death"),
         }
     }
 
@@ -1068,6 +1107,8 @@ impl MobType {
             Self::Camel => Some("minecraft:entity.camel.step"),
             Self::SkeletonHorse => Some("minecraft:entity.skeleton_horse.step_water"),
             Self::ZombieHorse => Some("minecraft:entity.horse.step"),
+            Self::Silverfish => Some("minecraft:entity.silverfish.step"),
+            Self::Endermite => Some("minecraft:entity.endermite.step"),
         }
     }
 
@@ -1123,6 +1164,8 @@ impl MobType {
             Self::Camel => items::CAMEL_SPAWN_EGG,
             Self::SkeletonHorse => items::SKELETON_HORSE_SPAWN_EGG,
             Self::ZombieHorse => items::ZOMBIE_HORSE_SPAWN_EGG,
+            Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
+            Self::Endermite => items::ENDERMITE_SPAWN_EGG,
         }
     }
 
@@ -1177,6 +1220,8 @@ impl MobType {
             Self::Camel => "entity.minecraft.camel",
             Self::SkeletonHorse => "entity.minecraft.skeleton_horse",
             Self::ZombieHorse => "entity.minecraft.zombie_horse",
+            Self::Silverfish => "entity.minecraft.silverfish",
+            Self::Endermite => "entity.minecraft.endermite",
         }
     }
 
@@ -2119,10 +2164,15 @@ pub struct Mob {
     pub using_item_flags: u8,
     /// `Zombie.canBreakDoors`；`finalizeSpawn` 按 0.1 概率置真。
     pub can_break_doors: bool,
-    /// `BreakDoorGoal` 的 240 刻进度，随实体行搬岛。
+    /// `BreakDoorGoal.breakTime`：240 刻破门计时，随实体行搬岛。
     pub door_break_time: i32,
+    /// `BreakDoorGoal.lastBreakProgress`：上次发出去的裂纹阶段，构造时 -1，之后不重置。
     pub door_break_progress: i32,
-    pub door_break_pos: Option<BlockPos>,
+    /// `DoorInteractGoal.doorPos` / `hasDoor` / `passed` / `doorOpenDirX`、`doorOpenDirZ`。
+    pub door_pos: BlockPos,
+    pub has_door: bool,
+    pub door_passed: bool,
+    pub door_open_dir: [f32; 2],
     /// 目标选择器。牛是空的，僵尸/尸壳按官方优先级注册。
     pub target_goals: GoalSelector,
     /// `Zombie.DATA_BABY_ID`：僵尸用布尔元数据，不用 `age < 0`。
@@ -2272,6 +2322,10 @@ pub struct Mob {
     /// The phantom size, target point, anchor, attack phase and move-control speed;
     /// default for every other mob.
     pub phantom: phantom::PhantomState,
+    /// 末影螨的 `Lifetime`；别的生物恒为 0。
+    ///
+    /// The endermite's `Lifetime`; zero for every other mob.
+    pub endermite: endermite::EndermiteState,
     /// 海龟的专属状态，别的生物恒为缺省值。
     ///
     /// Turtle state; default for every other mob.
@@ -2318,6 +2372,14 @@ pub struct Mob {
     /// A passenger ejected this tick, skipped by `push_entities` in the same tick
     /// (vanilla moves the rider off the mount synchronously; Bamboo does it in `riding::tick`).
     pub(super) ejected_passenger: Option<EntityUid>,
+    /// 这一刻已经处理过几次推挤，以及计数属于哪一刻。`max_entity_collisions`
+    /// 打开时才有用；刻号不同就把计数当作 0，不用每刻扫表清零。
+    /// 不存档、不同步。
+    ///
+    /// Pushes handled this tick and the tick the count belongs to. A count
+    /// from an older tick reads as zero, so no per-tick store scan is needed.
+    /// Not saved or synced.
+    pub(super) push_count: (i64, usize),
     pub equine: Option<Box<equine::EquineState>>,
     /// 骷髅马自己的陷阱状态。
     pub skeleton_horse: Option<Box<skeleton_horse::SkeletonHorseState>>,
@@ -2465,6 +2527,8 @@ impl Mob {
             MobType::Camel => camel::attributes(),
             MobType::SkeletonHorse => skeleton_horse::skeleton_attributes(),
             MobType::ZombieHorse => skeleton_horse::zombie_attributes(),
+            MobType::Silverfish => silverfish::attributes(),
+            MobType::Endermite => endermite::attributes(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2541,6 +2605,8 @@ impl Mob {
                 });
                 goals
             }
+            MobType::Silverfish => silverfish::goals(&mut navigation),
+            MobType::Endermite => endermite::goals(&mut navigation),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -2598,6 +2664,8 @@ impl Mob {
             MobType::Phantom => phantom::target_goals(),
             MobType::Pillager => pillager::targets(),
             MobType::SkeletonHorse | MobType::ZombieHorse => GoalSelector::default(),
+            MobType::Silverfish => silverfish::targets(),
+            MobType::Endermite => endermite::targets(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -2719,7 +2787,10 @@ impl Mob {
             can_break_doors: false,
             door_break_time: 0,
             door_break_progress: -1,
-            door_break_pos: None,
+            door_pos: BlockPos::new(0, 0, 0),
+            has_door: false,
+            door_passed: false,
+            door_open_dir: [0.0; 2],
             target_goals,
             zombie_baby: false,
             zombie_special_type: 0,
@@ -2778,6 +2849,7 @@ impl Mob {
                 target: None,
             },
             phantom: phantom::PhantomState::default(),
+            endermite: endermite::EndermiteState::default(),
             turtle: turtle::TurtleState::default(),
             fish: fish::FishState::new(),
             dolphin: dolphin::DolphinState::new(),
@@ -2796,6 +2868,7 @@ impl Mob {
             discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,
+            push_count: (i64::MIN, 0),
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),
