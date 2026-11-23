@@ -9,7 +9,7 @@ use crate::{
         Entity,
         ctx::Command,
         parallel::{
-            Computed, Executor, InlineExecutor, ScopedThreads, commit, compute,
+            Computed, Executor, InlineExecutor, ScopedThreads, commit, compute, shared_rows_in,
             tick_entities_parallel,
         },
         view::{FlatSource, SourceView, ViewFacts},
@@ -531,4 +531,104 @@ fn both_drives_read_the_same_weather_facts() {
     facts.weather = BlockWeather::CLEAR;
     let dry = SourceView::new(FlatSource { floor_y: 64, facts });
     assert!(!dry.is_raining_at(open));
+}
+
+/// 并行算阶段的只读快照里还留着当前实体那一行，但 `getEntities(this, ...)`
+/// 不返回自己：范围查询要排除自己，剩下的按 uid 升序、一个不少。
+#[test]
+fn the_shared_snapshot_excludes_the_entity_being_ticked() {
+    let blocks = flat_blocks();
+    let mut level = TestLevel::new();
+    let mut ticks = BlockTicks::new();
+    {
+        let mut world = World::new(&mut level, &mut ticks);
+        for index in 0..4 {
+            world.spawn_entity(Entity::ground_item(
+                Vec3::new(0.5 + f64::from(index) * 0.2, 70.0, 0.5),
+                ItemStack::new(1, 1),
+            ));
+        }
+    }
+    let area = Aabb::new(-1.0, 60.0, -1.0, 2.0, 80.0, 2.0);
+    let entities = level.entities_mut_for_test();
+    let (uids, rows, states) = entities.take_states_for_tick();
+    let seen = shared_rows_in(&uids, &rows, entities, &blocks, area);
+    assert_eq!(uids.len(), 4);
+    for (index, seen) in seen.iter().enumerate() {
+        assert_eq!(seen.len(), 3, "uid={}", uids[index]);
+        assert!(!seen.contains(&uids[index]), "查到了自己");
+        assert_eq!(
+            seen,
+            &uids
+                .iter()
+                .copied()
+                .filter(|&uid| uid != uids[index])
+                .collect::<Vec<_>>(),
+            "剩下的按 uid 升序"
+        );
+    }
+    // 私有状态只是借出来看了一眼，原样还回去。
+    entities.restore_states(&rows, states);
+}
+
+/// 从实体的 `EntityCtx` 里看自己：`other(自己)`、`entity_uids()` 和范围查询
+/// 三种入口都不返回自己，和精确驱动「当前实体已被 take 出去」的结果一致。
+#[test]
+fn an_entity_context_never_sees_itself() {
+    use crate::entity::ctx::{EntityCtx, PreciseCtx};
+
+    let blocks = flat_blocks();
+    let mut level = TestLevel::new();
+    let mut ticks = BlockTicks::new();
+    {
+        let mut world = World::new(&mut level, &mut ticks);
+        for index in 0..3 {
+            world.spawn_entity(Entity::ground_item(
+                Vec3::new(0.5 + f64::from(index) * 20.0, 70.0, 0.5),
+                ItemStack::new(1, 1),
+            ));
+        }
+    }
+    let uids = World::new(&mut level, &mut ticks).entity_ids();
+    let area = Aabb::new(-100.0, 60.0, -100.0, 100.0, 90.0, 100.0);
+
+    // 精确驱动：把实体 take 出去之后，三种入口都只看得到另外两个。
+    let precise = {
+        let mut world = World::new(&mut level, &mut ticks);
+        let me = uids[1];
+        let taken = world.level_mut_for_test().take_entity(me);
+        let result = {
+            let ctx = PreciseCtx::new(&mut world, me);
+            let mut seen = Vec::new();
+            ctx.for_each_other_uid_in(area, &mut |uid| seen.push(uid));
+            (ctx.other(me), ctx.entity_uids(), seen)
+        };
+        world
+            .level_mut_for_test()
+            .put_entity(taken.expect("实体在表里"));
+        result
+    };
+    assert_eq!(precise.0, None);
+    assert_eq!(precise.1, vec![uids[0], uids[2]]);
+    assert_eq!(precise.2, vec![uids[0], uids[2]]);
+
+    // 并行驱动：快照里还留着当前实体，也必须排除自己。
+    let parallel = {
+        let entities = level.entities_mut_for_test();
+        let (all, rows, states) = entities.take_states_for_tick();
+        let seen = shared_rows_in(&all, &rows, entities, &blocks, area);
+        entities.restore_states(&rows, states);
+        seen
+    };
+    for (index, seen) in parallel.iter().enumerate() {
+        assert_eq!(seen, &all_but(&uids, index), "并行查询 uid={}", uids[index]);
+    }
+}
+
+fn all_but(uids: &[i32], index: usize) -> Vec<i32> {
+    uids.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .map(|(_, &uid)| uid)
+        .collect()
 }

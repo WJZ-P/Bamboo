@@ -898,6 +898,18 @@ impl EntityStore {
         }
     }
 
+    /// 把 `take_states_for_tick` 借出去的私有状态原样还回去，公开数据不动。
+    /// 测试里临时造一份只读快照时用。
+    #[cfg(test)]
+    pub(crate) fn restore_states(&mut self, rows: &[usize], state: Vec<EntityState>) {
+        debug_assert_eq!(rows.len(), state.len());
+        for (&row, state) in rows.iter().zip(state) {
+            if let Some(slot) = self.slots.get_mut(row).and_then(Option::as_mut) {
+                slot.state = state;
+            }
+        }
+    }
+
     /// 发布算阶段得到的公开和私有数据：只动位置变了的行，不重建整张表。
     ///
     /// `rows` 是算阶段那一份 uid 升序名单对应的行号；`commands` 之外的移除由调用方用

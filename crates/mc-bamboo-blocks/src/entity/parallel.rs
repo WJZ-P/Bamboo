@@ -137,8 +137,10 @@ impl Shared<'_> {
         Some(&self.entities.row_at(self.rows[index])?.public)
     }
 
-    /// 只访问范围覆盖到的那几个格子，不再遍历整张索引。
-    fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+    /// 只访问范围覆盖到的那几个格子，不再遍历整张索引。`exclude` 是当前正在算的实体：
+    /// 官方 `getEntities(this, ...)` 不返回自己，快照里还留着自己那一行是并行模型的
+    /// 实现细节，不是可以让别的实体看到的东西。
+    fn for_each_in(&self, area: Aabb, exclude: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) {
         let (first, last) = section_range(&area);
         let mut found = Vec::new();
         for x in first.0..=last.0 {
@@ -156,7 +158,9 @@ impl Shared<'_> {
         let mut ordered: Vec<_> = found
             .into_iter()
             .filter_map(|row| self.entities.row_at(row))
-            .filter(|entry| entry.public.bounding_box().intersects(area))
+            .filter(|entry| {
+                entry.public.uid != exclude && entry.public.bounding_box().intersects(area)
+            })
             .map(|entry| (entry.public.uid, &entry.public))
             .collect();
         ordered.sort_unstable_by_key(|(uid, _)| *uid);
@@ -183,20 +187,28 @@ impl EntityCtx for ParallelCtx<'_> {
     }
 
     fn other(&self, uid: EntityUid) -> Option<EntityPublic> {
-        self.shared.public_of(uid).cloned()
+        // 精确驱动把当前实体从表里拿走了，`other(自己)` 本来就是 `None`。
+        (uid != self.uid)
+            .then(|| self.shared.public_of(uid).cloned())
+            .flatten()
     }
 
     fn entity_uids(&self) -> Vec<EntityUid> {
-        self.shared.uids.to_vec()
+        self.shared
+            .uids
+            .iter()
+            .copied()
+            .filter(|&uid| uid != self.uid)
+            .collect()
     }
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
-        self.shared.for_each_in(area, visit);
+        self.shared.for_each_in(area, self.uid, visit);
     }
 
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {
         self.shared
-            .for_each_in(area, &mut |public| visit(public.uid));
+            .for_each_in(area, self.uid, &mut |public| visit(public.uid));
     }
 
     fn emit(&mut self, command: Command, _me: &mut Entity) {
@@ -453,6 +465,29 @@ pub fn tick_entities_parallel_timed(
         .elapsed()
         .saturating_sub(times.publish + times.clone + times.compute + times.apply);
     times
+}
+
+#[cfg(test)]
+pub(crate) fn shared_rows_in(
+    uids: &[EntityUid],
+    rows: &[usize],
+    entities: &EntityStore,
+    blocks: &(dyn BlockView + Sync),
+    area: Aabb,
+) -> Vec<Vec<EntityUid>> {
+    let shared = Shared {
+        uids,
+        rows,
+        entities,
+        blocks,
+    };
+    uids.iter()
+        .map(|&uid| {
+            let mut seen = Vec::new();
+            shared.for_each_in(area, uid, &mut |public| seen.push(public.uid));
+            seen
+        })
+        .collect()
 }
 
 #[cfg(test)]
