@@ -5044,6 +5044,9 @@ fn the_collision_cap_reaches_entity_rules() {
     let (inbox, receiver) = crate::inbound::channel();
     let config = WorldConfig {
         max_entity_collisions: 8,
+        mob_throttle_distance: 32,
+        mob_sleep_distance: 64,
+        mob_wakeups_scale: 2,
         ..Default::default()
     };
     let mut world = World::new(config, receiver);
@@ -5054,4 +5057,8 @@ fn the_collision_cap_reaches_entity_rules() {
     // 精确驱动构造 `World` 时读到的规则快照带着配置值；方块逻辑不读这一项。
     let level = world.islands.region.block_level().0;
     assert_eq!(level.block_game_rules().max_entity_collisions, 8);
+    assert_eq!(entity_rules.mob_throttle_distance, 32);
+    assert_eq!(entity_rules.mob_sleep_distance, 64);
+    assert_eq!(entity_rules.mob_wakeups_scale, 2);
+    assert_eq!(level.block_game_rules().mob_throttle_distance, 32);
 }

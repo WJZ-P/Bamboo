@@ -1,0 +1,68 @@
+=== off ===
+uptime: 12:09  up 17:49, 2 users, load averages: 7.42 18.58 28.95
+== mixed-natural threads=0 ==
+entities=92 tick-ms p50=0.953 p95=1.813 p99=2.136
+parts-ms/tick: other=0.075 travel=0.449 block-effects=0.046 push=0.009 targeting=0.004 goals=0.073 navigation=0.013 path=0.009 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=18.2 ms/tick=0.124
+band1(32-64): mobs/tick=37.2 ms/tick=0.265
+band2(64+): mobs/tick=38.3 ms/tick=0.252
+== mixed-natural threads=8 ==
+entities=92 tick-ms p50=0.479 p95=1.258 p99=1.385
+parts-ms/tick: other=0.089 travel=0.535 block-effects=0.072 push=0.036 targeting=0.009 goals=0.079 navigation=0.014 path=0.010 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=19.8 ms/tick=0.188
+band1(32-64): mobs/tick=36.6 ms/tick=0.326
+band2(64+): mobs/tick=37.4 ms/tick=0.321
+uptime-end: 12:10  up 17:49, 2 users, load averages: 7.15 18.34 28.80 elapsed=4.4s
+=== on ===
+uptime: 12:10  up 17:49, 2 users, load averages: 7.15 18.34 28.80
+== mixed-natural threads=0 ==
+entities=92 tick-ms p50=0.689 p95=0.998 p99=1.760
+parts-ms/tick: other=0.048 travel=0.269 block-effects=0.034 push=0.006 targeting=0.002 goals=0.022 navigation=0.010 path=0.010 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=19.1 ms/tick=0.123
+band1(32-64): mobs/tick=36.2 ms/tick=0.221
+band2(64+): mobs/tick=9.5 ms/tick=0.061
+== mixed-natural threads=8 ==
+entities=93 tick-ms p50=0.640 p95=0.972 p99=1.972
+parts-ms/tick: other=0.098 travel=0.495 block-effects=0.068 push=0.035 targeting=0.006 goals=0.037 navigation=0.016 path=0.012 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=19.9 ms/tick=0.198
+band1(32-64): mobs/tick=36.2 ms/tick=0.423
+band2(64+): mobs/tick=11.7 ms/tick=0.095
+uptime-end: 12:10  up 17:49, 2 users, load averages: 7.15 18.34 28.80 elapsed=4.3s
+=== off ===
+uptime: 12:10  up 17:49, 2 users, load averages: 8.10 18.35 28.74
+== mixed-natural threads=0 ==
+entities=92 tick-ms p50=1.003 p95=1.775 p99=2.612
+parts-ms/tick: other=0.077 travel=0.465 block-effects=0.046 push=0.010 targeting=0.004 goals=0.072 navigation=0.014 path=0.010 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=18.2 ms/tick=0.144
+band1(32-64): mobs/tick=37.2 ms/tick=0.291
+band2(64+): mobs/tick=38.3 ms/tick=0.280
+== mixed-natural threads=8 ==
+entities=92 tick-ms p50=0.484 p95=1.231 p99=1.430
+parts-ms/tick: other=0.086 travel=0.546 block-effects=0.080 push=0.036 targeting=0.010 goals=0.080 navigation=0.014 path=0.010 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=19.8 ms/tick=0.211
+band1(32-64): mobs/tick=36.6 ms/tick=0.331
+band2(64+): mobs/tick=37.4 ms/tick=0.321
+uptime-end: 12:10  up 17:49, 2 users, load averages: 8.65 18.30 28.66 elapsed=5.4s
+=== on ===
+uptime: 12:10  up 17:49, 2 users, load averages: 8.65 18.30 28.66
+== mixed-natural threads=0 ==
+entities=92 tick-ms p50=0.672 p95=0.948 p99=1.687
+parts-ms/tick: other=0.049 travel=0.257 block-effects=0.033 push=0.006 targeting=0.002 goals=0.021 navigation=0.009 path=0.009 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=19.1 ms/tick=0.124
+band1(32-64): mobs/tick=36.2 ms/tick=0.209
+band2(64+): mobs/tick=9.5 ms/tick=0.059
+== mixed-natural threads=8 ==
+entities=93 tick-ms p50=0.447 p95=0.595 p99=1.342
+parts-ms/tick: other=0.068 travel=0.339 block-effects=0.053 push=0.024 targeting=0.004 goals=0.029 navigation=0.011 path=0.009 
+push-cmds/tick=0.0 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=19.9 ms/tick=0.188
+band1(32-64): mobs/tick=36.2 ms/tick=0.268
+band2(64+): mobs/tick=11.7 ms/tick=0.082
+uptime-end: 12:10  up 17:49, 2 users, load averages: 8.84 18.18 28.56 elapsed=4.0s

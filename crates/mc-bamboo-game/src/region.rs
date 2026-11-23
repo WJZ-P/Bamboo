@@ -1109,7 +1109,7 @@ mod tests {
     ///
     /// Mob rebase script: a few cows randomly stamp their damage, stuck-check
     /// and recompute times at "now"; each tick observes how long ago each was.
-    fn mob_script(seed: u64, base: i64, shift: Option<(i64, i64, ClockParts)>) -> Vec<[i64; 9]> {
+    fn mob_script(seed: u64, base: i64, shift: Option<(i64, i64, ClockParts)>) -> Vec<[i64; 18]> {
         use mc_bamboo_blocks::entity::Entity;
         use mc_bamboo_core::Vec3;
 
@@ -1130,6 +1130,10 @@ mod tests {
                 mob.last_damage_stamp = now;
                 mob.navigation.last_timeout_check = now;
                 mob.navigation.time_last_recompute = now;
+                // 降频的三个时刻也是岛时钟的绝对刻号，拆岛平移要跟着走。
+                mob.throttle.last_decision = now;
+                mob.throttle.last_active = now;
+                mob.throttle.awake_until = now;
                 region.entities.spawn(cow)
             })
             .collect();
@@ -1137,7 +1141,7 @@ mod tests {
         for step in 1..=150_i64 {
             region.advance_tick();
             let now = region.tick.game_time();
-            let mut row = [0; 9];
+            let mut row = [0; 18];
             for (i, &uid) in cows.iter().enumerate() {
                 let roll = next();
                 let seen = region.entities.with_mut(uid, |cow| {
@@ -1152,9 +1156,12 @@ mod tests {
                         now - mob.last_damage_stamp,
                         now - mob.navigation.last_timeout_check,
                         now - mob.navigation.time_last_recompute,
+                        now - mob.throttle.last_decision,
+                        now - mob.throttle.last_active,
+                        now - mob.throttle.awake_until,
                     ]
                 });
-                row[i * 3..i * 3 + 3].copy_from_slice(&seen.expect("cow is stored"));
+                row[i * 6..i * 6 + 6].copy_from_slice(&seen.expect("cow is stored"));
             }
             out.push(row);
             if let Some((mid, delta, parts)) = shift

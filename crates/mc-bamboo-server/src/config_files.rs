@@ -1411,6 +1411,10 @@ mod tests {
         assert_eq!(defaults.official.passthrough.len(), 54);
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.max_entity_collisions, 0);
+        // 三档降频缺省全关（精确模式），唤醒倍率是 1。
+        assert_eq!(defaults.bamboo.mob_throttle_distance, 0);
+        assert_eq!(defaults.bamboo.mob_sleep_distance, 0);
+        assert_eq!(defaults.bamboo.mob_wakeups_scale, 1);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
         assert_eq!(defaults.bamboo.island_threads, recommended_island_threads());
@@ -1458,6 +1462,9 @@ mod tests {
             .passthrough
             .push(("my-custom-key".to_owned(), "keep=this".to_owned()));
         files.bamboo.entity_threads = 4;
+        files.bamboo.mob_throttle_distance = 32;
+        files.bamboo.mob_sleep_distance = 64;
+        files.bamboo.mob_wakeups_scale = 2;
         files.bamboo.forwarding = ForwardingMode::Modern;
         files.bamboo.forwarding_secret = "s\"ec\\ret".to_owned();
         files.bamboo.deliveries_per_tick = 0;
@@ -1512,12 +1519,15 @@ mod tests {
         let dir = Temp::new();
         fs::write(
             dir.path().join(BAMBOO_FILE),
-            "entity_threads = -1\nmax_entity_collisions = -3\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
+            "entity_threads = -1\nmax_entity_collisions = -3\nmob_throttle_distance = -9\nmob_sleep_distance = \"far\"\nmob_wakeups_scale = 99\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
         )
         .unwrap();
         let loaded = read(dir.path()).unwrap();
         assert_eq!(loaded.bamboo.entity_threads, 0);
         assert_eq!(loaded.bamboo.max_entity_collisions, 0, "坏值回落到精确模式");
+        assert_eq!(loaded.bamboo.mob_throttle_distance, 0);
+        assert_eq!(loaded.bamboo.mob_sleep_distance, 0);
+        assert_eq!(loaded.bamboo.mob_wakeups_scale, 1, "超上限回落到缺省 1");
         assert_eq!(loaded.bamboo.deliveries_per_tick, 64);
         assert_eq!(loaded.bamboo.keep_alive_interval, Duration::from_secs(15));
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);
@@ -1621,12 +1631,18 @@ mod tests {
         files.official.view_distance = 16;
         files.bamboo.entity_threads = 8;
         files.bamboo.max_entity_collisions = 8;
+        files.bamboo.mob_throttle_distance = 32;
+        files.bamboo.mob_sleep_distance = 64;
+        files.bamboo.mob_wakeups_scale = 3;
         files.bamboo.deliveries_per_tick = 32;
         files.bamboo.island_threads = 3;
         let config = files.to_server_config(dir.path());
         assert_eq!(config.view_distance, 16);
         assert_eq!(config.entity_threads, 8);
         assert_eq!(config.max_entity_collisions, 8);
+        assert_eq!(config.mob_throttle_distance, 32);
+        assert_eq!(config.mob_sleep_distance, 64);
+        assert_eq!(config.mob_wakeups_scale, 3);
         // 环境变量 `BAMBOO_ISLAND_THREADS` 设了就盖过文件（整套测试可能整进程设成 0）。
         // The environment variable overrides the file (a test run may set it to 0).
         assert_eq!(

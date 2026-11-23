@@ -2272,7 +2272,7 @@ pub struct Mob {
     pub(super) push_count: (i64, usize),
     /// 三档降频的「上次运行时刻」和唤醒有效期。开关关着时不参与任何判断，
     /// 不存档、不同步；绝对刻号是岛时钟，拆岛平移跟着实体走。
-    pub(super) throttle: throttle::MobThrottle,
+    pub throttle: throttle::MobThrottle,
     pub equine: Option<Box<equine::EquineState>>,
     /// 跑大脑的生物（犰狳）的 `Brain`；用目标选择器的生物是 `None`。
     ///

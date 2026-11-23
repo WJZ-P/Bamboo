@@ -1,0 +1,68 @@
+=== distant-2000 off ===
+uptime: 12:13  up 17:53, 2 users, load averages: 6.45 12.43 23.74
+== distant-2000 threads=0 ==
+entities=2000 tick-ms p50=13.388 p95=13.962 p99=14.587
+parts-ms/tick: other=1.352 travel=8.243 block-effects=0.654 push=0.556 targeting=0.042 goals=0.378 navigation=0.271 path=0.029 
+push-cmds/tick=4.3 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=110.9 ms/tick=0.834
+band1(32-64): mobs/tick=402.1 ms/tick=2.245
+band2(64+): mobs/tick=1487.0 ms/tick=8.443
+== distant-2000 threads=8 ==
+entities=2000 tick-ms p50=3.932 p95=4.122 p99=4.391
+parts-ms/tick: other=2.081 travel=10.237 block-effects=1.075 push=2.767 targeting=0.047 goals=2.447 navigation=0.303 path=0.031 
+push-cmds/tick=4.4 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=111.8 ms/tick=1.272
+band1(32-64): mobs/tick=401.2 ms/tick=3.707
+band2(64+): mobs/tick=1487.0 ms/tick=13.883
+uptime-end: 12:14  up 17:53, 2 users, load averages: 5.90 11.70 23.09 elapsed=25.8s
+=== distant-2000 on ===
+uptime: 12:14  up 17:53, 2 users, load averages: 5.90 11.70 23.09
+== distant-2000 threads=0 ==
+entities=2000 tick-ms p50=4.330 p95=11.499 p99=11.959
+parts-ms/tick: other=0.327 travel=2.179 block-effects=0.189 push=0.149 targeting=0.007 goals=0.049 navigation=0.092 path=0.028 
+push-cmds/tick=2.1 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=108.6 ms/tick=0.765
+band1(32-64): mobs/tick=406.4 ms/tick=1.898
+band2(64+): mobs/tick=74.2 ms/tick=0.354
+== distant-2000 threads=8 ==
+entities=2000 tick-ms p50=2.063 p95=3.524 p99=3.766
+parts-ms/tick: other=0.399 travel=2.502 block-effects=0.300 push=0.356 targeting=0.007 goals=0.175 navigation=0.092 path=0.027 
+push-cmds/tick=2.4 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=108.3 ms/tick=0.908
+band1(32-64): mobs/tick=406.7 ms/tick=2.317
+band2(64+): mobs/tick=74.2 ms/tick=0.647
+uptime-end: 12:14  up 17:53, 2 users, load averages: 5.94 11.52 22.89 elapsed=11.2s
+=== distant-2000 off ===
+uptime: 12:14  up 17:53, 2 users, load averages: 5.94 11.52 22.89
+== distant-2000 threads=0 ==
+entities=2000 tick-ms p50=13.401 p95=13.962 p99=14.417
+parts-ms/tick: other=1.351 travel=8.274 block-effects=0.658 push=0.554 targeting=0.042 goals=0.363 navigation=0.275 path=0.029 
+push-cmds/tick=4.3 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=110.9 ms/tick=0.835
+band1(32-64): mobs/tick=402.1 ms/tick=2.250
+band2(64+): mobs/tick=1487.0 ms/tick=8.453
+== distant-2000 threads=8 ==
+entities=2000 tick-ms p50=3.953 p95=4.126 p99=4.252
+parts-ms/tick: other=2.093 travel=10.198 block-effects=1.018 push=2.882 targeting=0.048 goals=2.514 navigation=0.303 path=0.032 
+push-cmds/tick=4.4 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=111.8 ms/tick=1.277
+band1(32-64): mobs/tick=401.2 ms/tick=3.769
+band2(64+): mobs/tick=1487.0 ms/tick=14.052
+uptime-end: 12:14  up 17:54, 2 users, load averages: 5.64 10.98 22.36 elapsed=25.7s
+=== distant-2000 on ===
+uptime: 12:14  up 17:54, 2 users, load averages: 5.64 10.98 22.36
+== distant-2000 threads=0 ==
+entities=2000 tick-ms p50=4.340 p95=11.437 p99=11.921
+parts-ms/tick: other=0.329 travel=2.181 block-effects=0.188 push=0.149 targeting=0.007 goals=0.050 navigation=0.091 path=0.028 
+push-cmds/tick=2.1 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=108.6 ms/tick=0.766
+band1(32-64): mobs/tick=406.4 ms/tick=1.900
+band2(64+): mobs/tick=74.2 ms/tick=0.354
+== distant-2000 threads=8 ==
+entities=2000 tick-ms p50=2.134 p95=3.497 p99=3.847
+parts-ms/tick: other=0.409 travel=2.596 block-effects=0.308 push=0.363 targeting=0.007 goals=0.173 navigation=0.097 path=0.028 
+push-cmds/tick=2.4 cramming-hits/tick=0.0
+band0(0-32): mobs/tick=108.3 ms/tick=0.934
+band1(32-64): mobs/tick=406.7 ms/tick=2.408
+band2(64+): mobs/tick=74.2 ms/tick=0.643
+uptime-end: 12:15  up 17:54, 2 users, load averages: 5.32 10.73 22.14 elapsed=11.4s

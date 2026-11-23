@@ -8,7 +8,7 @@ use crate::{
     BlockState, BlockTicks, World,
     entity::{
         Entity, EntityKind,
-        mob::{Mob, MobType, throttle},
+        mob::{MobType, throttle},
         parallel::{InlineExecutor, ScopedThreads, tick_entities_parallel},
         view::{BlockSource, SourceView, ViewFacts},
     },
@@ -148,30 +148,29 @@ fn exemptions_force_full_speed() {
         }
         // 逐项摆状态：攻击目标、刚受伤、受伤动画、着火、没落地、水流、幼年、
         // 求爱、点燃的苦力怕（最后一只换成苦力怕）。
-        let cases: Vec<Box<dyn Fn(&mut Mob)>> = vec![
-            Box::new(|m| m.target = Some(1)),
-            Box::new(|m| m.last_damage_stamp = 100),
-            Box::new(|m| m.hurt_time = 3),
-            Box::new(|_| {}), // 着火在 Entity 上，下面单独设
-            Box::new(|_| {}), // 没落地在 Entity 上
-            Box::new(|_| {}), // 水流在 Entity 上
-            Box::new(|m| m.age = -100),
-            Box::new(|m| m.in_love = 100),
-            Box::new(|m| m.creeper.ignited = true),
-        ];
-        for (index, f) in cases.iter().enumerate() {
-            let uid = 2 + index as i32;
+        // 每项豁免改哪个字段：着火 / 没落地 / 水流在 `Entity` 上（下面按 index 设），
+        // 其余在 `Mob` 上。索引 8 的牛换成点燃的苦力怕。
+        for index in 0..9 {
+            let uid = 2 + index;
             world.with_entity_mut(uid, &mut |entity| {
                 let EntityKind::Mob(mob) = &mut entity.kind else {
                     panic!("是生物");
                 };
-                f(mob);
+                match index {
+                    0 => mob.target = Some(1),
+                    1 => mob.last_damage_stamp = 100,
+                    2 => mob.hurt_time = 3,
+                    6 => mob.age = -100,
+                    7 => mob.in_love = 100,
+                    _ => {}
+                }
                 match index {
                     3 => entity.remaining_fire_ticks = 5,
                     4 => entity.on_ground = false,
                     5 => entity.in_water = true,
                     8 => {
                         mob.mob_type = MobType::Creeper;
+                        mob.creeper.ignited = true;
                     }
                     _ => {}
                 }

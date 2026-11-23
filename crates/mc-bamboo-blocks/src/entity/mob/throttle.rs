@@ -206,7 +206,7 @@ impl WakeTokens {
         self.time = self.time.max(other.time);
         self.caps = other.caps;
         for (value, theirs) in self.values.iter_mut().zip(other.values) {
-            *value = (*value).max(theirs).min(usize::MAX);
+            *value = (*value).max(theirs);
         }
     }
 
