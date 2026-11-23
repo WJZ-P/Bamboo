@@ -471,3 +471,56 @@ fn random_copper_step(world: &mut World, cursor: BlockPos) -> Option<BlockPos> {
 fn block_of_id(id: i32) -> &'static mc_bamboo_data::Block {
     &blocks::BLOCKS[id as usize]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockTicks, testing::TestLevel};
+    use mc_bamboo_data::blocks;
+
+    /// 第一刻按官方顺序取三个 `nextInt(3)` 一组，共四组偏移。
+    #[test]
+    fn spawn_fire_draws_three_integers_per_spread() {
+        let mut random = JavaRandom::new(7);
+        let offsets = spawn_fire_offsets(BlockPos::new(0, 64, 0), 4, &mut random);
+        assert_eq!(offsets.len(), 5);
+        let mut expected = JavaRandom::new(7);
+        for _ in 0..4 {
+            let _ = expected.next_int_bounded(3);
+            let _ = expected.next_int_bounded(3);
+            let _ = expected.next_int_bounded(3);
+        }
+        assert_eq!(random.state(), expected.state());
+    }
+
+    /// 视觉闪电不引火，但仍抽闪光概率、种子和第一刻的火格。
+    #[test]
+    fn visual_bolt_keeps_flash_draws() {
+        let mut entity = entity(Vec3::new(0.5, 64.0, 0.5), true);
+        entity.id = 7;
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, entity.id);
+        entity.common_tick();
+        super::tick(&mut entity, &mut ctx);
+        let EntityKind::LightningBolt(bolt) = &entity.kind else {
+            panic!("lightning bolt");
+        };
+        assert!(bolt.visual_only);
+        // 视觉闪电第一刻不取 `spawnFire` 的 12 个数，但 `life` 仍减一。
+        assert_eq!(bolt.life, 1);
+    }
+
+    /// 避雷针被劈中后置 `POWERED` 并排 8 刻；非避雷针不动。
+    #[test]
+    fn rod_is_powered() {
+        let mut level = TestLevel::new();
+        let pos = BlockPos::new(0, 64, 0);
+        level.set(pos, BlockState(blocks::STONE));
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        power_lightning_rod(&mut world, pos);
+        assert!(world.block_state(pos).is(blocks::STONE));
+    }
+}
