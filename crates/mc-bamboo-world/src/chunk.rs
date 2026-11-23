@@ -930,6 +930,10 @@ impl Chunk {
         &self.archive
     }
 
+    pub(crate) fn clear_post_processing(&mut self) {
+        self.archive.post_processing = None;
+    }
+
     /// 读盘组装时写入顶层附加信息。
     pub fn set_archive(&mut self, archive: ChunkArchiveMeta) {
         self.archive = archive;

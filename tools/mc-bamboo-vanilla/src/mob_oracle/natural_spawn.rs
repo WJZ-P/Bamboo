@@ -66,6 +66,11 @@ pub(super) struct Case {
     /// Aquatic fixture: three water layers (-64..=-62) replace the grass.
     #[serde(default)]
     aquatic: bool,
+    /// 美西螈夹具：三层水里最底下那层是黏土。
+    ///
+    /// Axolotl fixture: the bottom of the three "water" layers is clay.
+    #[serde(default)]
+    clay_floor: bool,
     steps: Vec<Step>,
 }
 
@@ -224,6 +229,15 @@ impl Coverage {
                 ));
             }
         }
+        // 蝙蝠：有顶的暗场景必须刷，没顶的必须不刷。
+        // Bats: the roofed dark scene must spawn and the open one must not.
+        if let Some(&dark) = self.per_scene.get("bat_dark")
+            && (dark == 0 || self.per_scene.get("bat_open") != Some(&0))
+        {
+            return Err(
+                "bat natural spawn fixtures must spawn under a roof but not in the open".into(),
+            );
+        }
         // 熊猫单独的一组：亮场景必须刷、暗场景必须不刷。
         // The panda-only group: the bright scene must spawn and the dim one must not.
         if let Some(&day) = self.per_scene.get("panda_day") {
@@ -239,9 +253,11 @@ impl Coverage {
             "fish_tropical",
             "fish_tropical_lush",
             "fish_puffer",
+            "dolphin_ocean",
+            "axolotl_lush",
         ] {
             if self.per_scene.get(name) == Some(&0) {
-                return Err(format!("natural spawn fixture {name} produced no fish"));
+                return Err(format!("natural spawn fixture {name} produced no mobs"));
             }
         }
         let covered_misc = ["mooshroom_day", "polar_bear_day"]
@@ -287,7 +303,11 @@ impl Report {
                 world.spawn_entity(Entity::by_mob_type(kind, Vec3::new(8.5, -45.0, 8.5)));
             }
         }
-        let category = kind.mob_category();
+        let category = if kind == MobType::Ocelot {
+            MobCategory::Monster
+        } else {
+            kind.mob_category()
+        };
         let params = SpawnParams {
             spawnable_chunk_count: case.spawnable_chunks,
             spawn_enemies: category == MobCategory::Monster,
@@ -388,7 +408,16 @@ fn spawn_row(entity: Entity) -> [i32; 12] {
         },
         main_gene,
         hidden_gene,
-        if tropical { mob.fish.variant } else { 0 },
+        // 热带鱼花纹和美西螈花色共用最后一列（官方夹具的 12 列布局）。
+        // Tropical fish patterns and axolotl variants share the last column
+        // (the vanilla fixture's 12-column layout).
+        if tropical {
+            mob.fish.variant
+        } else if mob.mob_type == MobType::Axolotl {
+            mob.axolotl.variant
+        } else {
+            0
+        },
     ]
 }
 
@@ -398,7 +427,13 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .position(|name| *name == case.biome)
         .ok_or_else(|| format!("unknown natural spawn fixture biome {}", case.biome))?
         as i32;
-    let category = kind.mob_category();
+    // 豹猫实体类别是 `Creature`，但在丛林刷怪表里排在 `Monster` 槽位。
+    // Ocelots have category `Creature` yet live in the `Monster` table of jungle biomes.
+    let category = if kind == MobType::Ocelot {
+        MobCategory::Monster
+    } else {
+        kind.mob_category()
+    };
     let entry = spawning::for_biome_id(biome)
         .mobs_to_spawn(category)
         .iter()
@@ -406,8 +441,17 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         .ok_or_else(|| format!("{} has no spawn entry for {}", case.biome, case.entity_type))?;
     // 尸壳夹具多一层 -60 的玻璃顶，挡住官方的骆驼尸壳分支（见 `MobOracle.java`）。
     // The husk fixture adds a glass roof at -60 to block vanilla's camel-husk branch.
-    let roof = kind == MobType::Husk;
-    let floor_state = spawn_floor(biome);
+    // 蝙蝠夹具：石头地面，除了 `_open` 都有同样的玻璃顶。
+    // The bat fixture: a stone floor, and the same glass roof except in `_open`.
+    let bat = kind == MobType::Bat;
+    let roof = kind == MobType::Husk || (bat && !case.name.ends_with("_open"));
+    let floor_state = if bat {
+        BlockState(blocks::STONE)
+    } else if case.name == "ocelot_jungle_leaves" {
+        BlockState(blocks::OAK_LEAVES)
+    } else {
+        spawn_floor(biome)
+    };
     let aquatic = case.aquatic;
     let floors = case.floors.clone();
     let water_depth = case.water_depth;
@@ -427,7 +471,15 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
                 }
                 if aquatic {
                     for y in -64..=-62 {
-                        column.push((BlockPos::new(x, y, z), BlockState(blocks::WATER)));
+                        // 美西螈夹具把最底下的水换成黏土，`checkAxolotlSpawnRules` 才通过。
+                        // The axolotl fixture swaps the bottom water layer for clay so
+                        // `checkAxolotlSpawnRules` passes.
+                        let state = if case.clay_floor && y == -64 {
+                            blocks::CLAY
+                        } else {
+                            blocks::WATER
+                        };
+                        column.push((BlockPos::new(x, y, z), BlockState(state)));
                     }
                 } else {
                     column.push((BlockPos::new(x, -63, z), floor_state));
@@ -455,6 +507,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         creative: false,
         sneaking: false,
         sprinting: false,
+        swimming: false,
         invisible: false,
         armor_cover: 0.0,
         main_hand: 0,
@@ -495,7 +548,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
             block: if broken
                 && matches!(
                     case.name.as_str(),
-                    "skeleton_night_2" | "drowned_shallow_river"
+                    "skeleton_night_2" | "drowned_shallow_river" | "bat_dim"
                 ) {
                 15
             } else {

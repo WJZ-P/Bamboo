@@ -9,7 +9,7 @@ use mc_bamboo_core::{Aabb, Vec3, mth};
 use mc_bamboo_data::registries::attribute;
 
 use super::{
-    super::{MobPublic as KindPublicMob, MobType, goals, living},
+    super::{MobPublic as KindPublicMob, MobType, camel, goals, living},
     behavior::Cx,
     memory::{MemoryType, MemoryValue, NearestVisible},
 };
@@ -34,6 +34,22 @@ pub enum SensorKind {
     NearestPlayers,
     /// `NearestItemSensor`。
     NearestItems,
+    /// `FrogAttackablesSensor`（`NearestVisibleLivingEntitySensor` 子类）。
+    ///
+    /// `FrogAttackablesSensor` (a `NearestVisibleLivingEntitySensor` subclass).
+    FrogAttackables,
+    /// `TemptingSensor(FrogAi.getTemptations())`，即 `SensorType.FROG_TEMPTATIONS`。
+    ///
+    /// `TemptingSensor(FrogAi.getTemptations())`, i.e. `SensorType.FROG_TEMPTATIONS`.
+    FrogTemptations,
+    /// `IsInWaterSensor`。
+    ///
+    /// `IsInWaterSensor`.
+    IsInWater,
+    /// `AxolotlAttackablesSensor`（`NearestVisibleLivingEntitySensor` 子类）。
+    ///
+    /// `AxolotlAttackablesSensor` (a `NearestVisibleLivingEntitySensor` subclass).
+    AxolotlAttackables,
 }
 
 impl SensorKind {
@@ -70,6 +86,46 @@ impl SensorKind {
                 MemoryType::NearestVisibleAttackablePlayers,
             ],
             Self::NearestItems => &[MemoryType::NearestVisibleWantedItem],
+            // `FrogAttackablesSensor.requires()` = 视线表 + `NEAREST_ATTACKABLE`
+            // + `UNREACHABLE_TONGUE_TARGETS`（`Sets.union(super.requires(), ...)`）。
+            //
+            // `FrogAttackablesSensor.requires()` = the visible-entity table +
+            // `NEAREST_ATTACKABLE` + `UNREACHABLE_TONGUE_TARGETS`.
+            Self::FrogAttackables => &[
+                MemoryType::NearestVisibleLivingEntities,
+                MemoryType::NearestAttackable,
+                MemoryType::UnreachableTongueTargets,
+            ],
+            Self::FrogTemptations => &[MemoryType::TemptingPlayer],
+            Self::IsInWater => &[MemoryType::IsInWater],
+            // `AxolotlAttackablesSensor.requires()` = 视线表 + `NEAREST_ATTACKABLE`
+            // + `HAS_HUNTING_COOLDOWN`。
+            //
+            // `AxolotlAttackablesSensor.requires()` = the visible-entity table +
+            // `NEAREST_ATTACKABLE` + `HAS_HUNTING_COOLDOWN`.
+            Self::AxolotlAttackables => &[
+                MemoryType::NearestVisibleLivingEntities,
+                MemoryType::NearestAttackable,
+                MemoryType::HuntingCooldown,
+            ],
+        }
+    }
+
+    /// 官方传感器类的简单类名，对拍时和 Java 的 `getSimpleName()` 一致。
+    ///
+    /// The vanilla sensor class's simple name, matching Java's `getSimpleName()`.
+    pub const fn class_name(self) -> &'static str {
+        match self {
+            Self::NearestLivingEntities => "NearestLivingEntitySensor",
+            Self::HurtBy => "HurtBySensor",
+            Self::FoodTemptations | Self::FrogTemptations => "TemptingSensor",
+            Self::NearestAdult => "AdultSensor",
+            Self::ArmadilloScareDetected => "MobSensor",
+            Self::NearestPlayers => "PlayerSensor",
+            Self::NearestItems => "NearestItemSensor",
+            Self::FrogAttackables => "FrogAttackablesSensor",
+            Self::IsInWater => "IsInWaterSensor",
+            Self::AxolotlAttackables => "AxolotlAttackablesSensor",
         }
     }
 }
@@ -110,6 +166,15 @@ impl Sensor {
             }
             SensorKind::NearestPlayers => sense_players(cx),
             SensorKind::NearestItems => sense_items(cx),
+            SensorKind::FrogAttackables => super::super::frog::sense_attackables(cx),
+            // `FROG_TEMPTATIONS` 和 `TemptingSensor.forAnimal()` 同形：青蛙的
+            // `isFood` 就是 `#frog_food`，`goals::nearest_tempting_player` 走同一张表。
+            //
+            // `FROG_TEMPTATIONS` has the same shape as `TemptingSensor.forAnimal()`:
+            // the frog's `isFood` is `#frog_food`, the same table this lookup uses.
+            SensorKind::FrogTemptations => sense_temptations(cx),
+            SensorKind::IsInWater => super::super::frog::sense_is_in_water(cx),
+            SensorKind::AxolotlAttackables => super::super::axolotl::sense_attackables(cx),
         }
     }
 }
@@ -211,12 +276,22 @@ fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
 fn mob_view(uid: EntityUid, position: Vec3, removed: bool, mob: &KindPublicMob) -> LivingView {
     let (width, height) = mob.dimensions();
     let half = f64::from(width) / 2.0;
+    // 骆驼坐下时 `getEyeHeight()` 跟着姿势变（2.275 → 0.845），看它的幼崽的
+    // `LookControl` 读的就是这个动态眼高，不能用按种类算出来的静态值。
+    // A sitting camel's `getEyeHeight()` follows the pose (2.275 → 0.845); a
+    // watching baby's `LookControl` reads that live eye height, not a static
+    // per-species value.
+    let eye_height = if mob.mob_type == MobType::Camel {
+        camel::dimensions(mob.baby, mob.camel.pose == camel::Pose::Sitting).2
+    } else {
+        mob.mob_type.dimensions(mob.baby).2
+    };
     LivingView {
         uid,
         player: false,
         mob_type: Some(mob.mob_type),
         position,
-        eye_height: mob.mob_type.dimensions(mob.baby).2,
+        eye_height,
         bounding_box: Aabb::new(
             position.x - half,
             position.y,

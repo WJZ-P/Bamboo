@@ -116,7 +116,7 @@ impl SquidCase {
 /// `damageSources().mobAttack(cow)`：和 `Mob.doHurtTarget` 造的来源一样。
 ///
 /// `damageSources().mobAttack(cow)`, the same source `Mob.doHurtTarget` builds.
-fn cow_attack(level: &MobLevel, cow: i32) -> DamageSource {
+pub(super) fn cow_attack(level: &MobLevel, cow: i32) -> DamageSource {
     let entity = level.entities.get(cow).expect("the cow is alive");
     let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
     source.attacker = Some(cow);
@@ -126,7 +126,7 @@ fn cow_attack(level: &MobLevel, cow: i32) -> DamageSource {
     source
 }
 
-fn take_hurt_marked(level: &mut MobLevel, ticks: &mut BlockTicks, id: i32) -> bool {
+pub(super) fn take_hurt_marked(level: &mut MobLevel, ticks: &mut BlockTicks, id: i32) -> bool {
     let mut marked = false;
     World::new(level, ticks).with_entity_mut(id, &mut |entity| {
         if let Some(mob) = entity.kind.mob_mut() {

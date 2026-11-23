@@ -63,6 +63,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::MOOSHROOM_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Mooshroom)
         }
+        _ if ctx.item == items::OCELOT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Ocelot)
+        }
+        _ if ctx.item == items::CAT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Cat)
+        }
         _ if ctx.item == items::RABBIT_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Rabbit)
         }
@@ -89,6 +95,18 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         }
         _ if ctx.item == items::GOAT_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Goat)
+        }
+        _ if ctx.item == items::FROG_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Frog)
+        }
+        _ if ctx.item == items::TADPOLE_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Tadpole)
+        }
+        _ if ctx.item == items::BAT_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Bat)
+        }
+        _ if ctx.item == items::PHANTOM_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Phantom)
         }
         _ if ctx.item == items::PIG_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Pig)
@@ -143,6 +161,9 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         }
         _ if ctx.item == items::WITCH_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Witch)
+        }
+        _ if ctx.item == items::PILLAGER_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Pillager)
         }
         _ if ctx.item == items::SPIDER_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Spider)

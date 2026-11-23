@@ -60,6 +60,7 @@ pub use behaviour::machines::{
     CampfireEntity, PistonMoving, ShulkerBoxEntity, ShulkerStatus, open_lid_box, reset_lectern,
     signal_lectern_page,
 };
+pub use behaviour::misc::turtle_egg::player_destroy;
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents, ChunkBlockEntities};
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};

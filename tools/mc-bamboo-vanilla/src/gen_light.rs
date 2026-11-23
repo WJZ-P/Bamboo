@@ -349,6 +349,7 @@ fn generated_chunk(palette: &[u32], indices: &[u32]) -> Result<GeneratedChunk, S
         biomes,
         heightmaps: Default::default(),
         post_processing: Vec::new(),
+        block_entities: Vec::new(),
     })
 }
 

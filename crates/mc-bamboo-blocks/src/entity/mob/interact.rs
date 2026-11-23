@@ -84,6 +84,11 @@ pub struct MobInteraction {
     /// Offset added to the mob's position for `drop_stack` (zero by default;
     /// sheared equipment uses the average `PASSENGER` attachment point).
     pub drop_offset: mc_bamboo_core::Vec3,
+    /// 交互里对自己造成的伤害（鹦鹉吃曲奇）：调用方在实体放回世界后按玩家攻击结算。
+    ///
+    /// Damage the interaction deals to the mob itself (a parrot eating a cookie): the
+    /// caller resolves it as a player attack once the mob is back in the world.
+    pub self_hurt: Option<f32>,
 }
 
 impl MobInteraction {
@@ -101,6 +106,7 @@ impl MobInteraction {
             limit_creative: true,
             drop_stack: None,
             drop_offset: mc_bamboo_core::Vec3::new(0.0, 0.0, 0.0),
+            self_hurt: None,
         }
     }
 }
@@ -115,6 +121,9 @@ pub(super) fn is_food(kind: MobType, item: i32) -> bool {
         MobType::Sheep => sheep::is_food(item),
         MobType::Chicken => chicken::is_food(item),
         MobType::Llama => item_is_tagged(item, mc_bamboo_data::tags::item_tags::LLAMA_FOOD),
+        // `Camel.isFood` 认 `#camel_food`（仙人掌），不走马科的 `horse_food`。
+        // `Camel.isFood` uses `#camel_food` (cactus), not the equine `horse_food`.
+        MobType::Camel => item_is_tagged(item, item_tags::CAMEL_FOOD),
         kind if kind.is_equine() => {
             item_is_tagged(item, mc_bamboo_data::tags::item_tags::HORSE_FOOD)
         }
@@ -159,8 +168,20 @@ pub fn interact(
             ..MobInteraction::pass()
         };
     }
+    if mob.mob_type == MobType::Tadpole {
+        // 蝌蚪不是 `Animal`：自己的两支都不中就是 `Mob.mobInteract` 的 `PASS`。
+        // Tadpoles are not `Animal`s: when neither of their own branches applies the
+        // result is the `PASS` of `Mob.mobInteract`.
+        return super::tadpole::interact(me, mob, req).unwrap_or_else(MobInteraction::pass);
+    }
     if mob.mob_type == super::MobType::Wolf {
         return super::wolf::interact(me, mob, req, now);
+    }
+    if mob.mob_type == MobType::Cat {
+        return super::cat::interact(me, mob, req);
+    }
+    if mob.mob_type == MobType::Parrot {
+        return super::parrot::interact(me, mob, req);
     }
     if mob.mob_type == MobType::Armadillo
         && let Some(outcome) = super::armadillo::interact(me, mob, req)
@@ -175,8 +196,31 @@ pub fn interact(
     if mob.mob_type.is_equine() {
         return super::equine::interact(me, mob, req);
     }
+    // `Dolphin.mobInteract`：手里是 `#fishes` 时放吃鱼声，幼崽加速长大、成年记下
+    // `gotFish`，并消费一个鱼。这是它自己的 `mobInteract`，不走 `Animal.mobInteract`。
+    // `Dolphin.mobInteract`: a `#fishes` item plays the eat sound, ages a baby up or
+    // sets `gotFish`, and consumes one fish. This is its own `mobInteract`, not
+    // `Animal.mobInteract`.
+    if mob.mob_type == MobType::Dolphin
+        && !req.held.is_empty()
+        && item_is_tagged(req.held.item, mc_bamboo_data::tags::item_tags::FISHES)
+    {
+        living::play_sound(me, mob, "minecraft:entity.dolphin.eat", 1.0, 1.0);
+        super::dolphin::feed(me, mob);
+        return MobInteraction {
+            result: InteractionResult::Success,
+            shrink_held: !req.creative,
+            replacement: None,
+            ..MobInteraction::pass()
+        };
+    }
     if mob.mob_type == MobType::Mooshroom
         && let Some(outcome) = mooshroom::interact(me, mob, req)
+    {
+        return outcome;
+    }
+    if mob.mob_type == MobType::Ocelot
+        && let Some(outcome) = super::ocelot::interact(me, mob, req)
     {
         return outcome;
     }
@@ -229,6 +273,15 @@ pub(super) fn animal_interact(
     // `Turtle.canFallInLove`：身上有蛋时不进求爱。
     // `Turtle.canFallInLove`: no love while carrying an egg.
     let can_fall_in_love = mob.mob_type != MobType::Turtle || !mob.turtle.has_egg;
+    // `Axolotl.usePlayerItem`：热带鱼桶喂完换成水桶（创造模式手里不变）。
+    // `Axolotl.usePlayerItem`: the tropical fish bucket turns into a water bucket
+    // (creative keeps the bucket).
+    let (shrink_held, replacement) =
+        if mob.mob_type == MobType::Axolotl && req.held.item == items::TROPICAL_FISH_BUCKET {
+            (false, Some(ItemStack::new(items::WATER_BUCKET, 1)))
+        } else {
+            (!req.creative, None)
+        };
     if age == 0 && mob.in_love <= 0 && can_fall_in_love {
         // `Animal.setInLove(player)`：600 刻求爱、记住玩家 UUID、发爱心事件 18。
         mob.in_love = 600;
@@ -237,8 +290,8 @@ pub(super) fn animal_interact(
         play_eating_sound(me, mob);
         return MobInteraction {
             result: InteractionResult::SuccessServer,
-            shrink_held: !req.creative,
-            replacement: None,
+            shrink_held,
+            replacement,
             ..MobInteraction::pass()
         };
     }
@@ -249,8 +302,8 @@ pub(super) fn animal_interact(
         play_eating_sound(me, mob);
         return MobInteraction {
             result: InteractionResult::Success,
-            shrink_held: !req.creative,
-            replacement: None,
+            shrink_held,
+            replacement,
             ..MobInteraction::pass()
         };
     }
@@ -258,13 +311,26 @@ pub(super) fn animal_interact(
     MobInteraction::pass()
 }
 
-/// `Animal.playEatingSound`：缺省不出声，猪和犰狳各有自己的。
+/// `Animal.playEatingSound`：缺省不出声，猪、犰狳和青蛙各有自己的。
 ///
-/// `Animal.playEatingSound`: silent by default; pigs and armadillos have their own.
+/// `Animal.playEatingSound`: silent by default; pigs, armadillos and frogs have their own.
 fn play_eating_sound(me: &mut Entity, mob: &mut Mob) {
     match mob.mob_type {
         MobType::Pig => pig::play_eating_sound(me, mob),
+        MobType::Cat => super::cat::play_eating_sound(me, mob),
         MobType::Armadillo => living::make_sound(me, mob, "minecraft:entity.armadillo.eat"),
+        // `Frog.playEatingSound`：`level.playSound(null, this, FROG_EAT, NEUTRAL, 2.0F, 1.0F)`，
+        // 不看 `isSilent`、不取音高。
+        // `Frog.playEatingSound`: `level.playSound(null, this, FROG_EAT, NEUTRAL, 2.0F,
+        // 1.0F)`, ignoring `isSilent` and drawing no pitch.
+        MobType::Frog => mob.events.push(MobEvent::Sound {
+            sound: "minecraft:entity.frog.eat",
+            volume: 2.0,
+            pitch: 1.0,
+            position: me.position,
+            hostile: false,
+            seed: None,
+        }),
         _ => {}
     }
 }
@@ -300,5 +366,53 @@ pub fn age_up(me: &mut Entity, mob: &mut Mob, seconds: i32, force: bool) {
     }
     if mob.age == 0 {
         living::set_age(me, mob, mob.forced_age);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(item: i32) -> MobInteractRequest {
+        MobInteractRequest {
+            player_uid: 1,
+            player_uuid: [0; 16],
+            hand: Hand::Main,
+            held: ItemStack::new(item, 1),
+            creative: false,
+            position: Vec3::default(),
+            sneaking: false,
+        }
+    }
+
+    /// `Axolotl.usePlayerItem`：热带鱼桶喂完交回一个水桶，不单纯扣掉。
+    ///
+    /// `Axolotl.usePlayerItem`: feeding with a tropical fish bucket hands back a
+    /// water bucket instead of consuming the bucket outright.
+    #[test]
+    fn an_axolotl_fed_a_tropical_fish_bucket_gets_a_water_bucket_back() {
+        let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
+        let outcome = entity
+            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH_BUCKET), 0, false))
+            .expect("an axolotl mob");
+        assert_eq!(outcome.result, InteractionResult::SuccessServer);
+        assert!(!outcome.shrink_held);
+        assert_eq!(
+            outcome.replacement.expect("a water bucket").item,
+            items::WATER_BUCKET
+        );
+        assert_eq!(entity.kind.mob().expect("a mob").in_love, 600);
+    }
+
+    /// 别的食物照旧只扣一个。
+    ///
+    /// Other foods still just shrink the held stack.
+    #[test]
+    fn an_axolotl_fed_something_else_just_shrinks_the_stack() {
+        let mut entity = Entity::by_mob_type(MobType::Axolotl, Vec3::new(0.5, 62.0, 0.5));
+        let outcome = entity
+            .with_mob(|me, mob| interact(me, mob, &request(items::TROPICAL_FISH), 0, false))
+            .expect("an axolotl mob");
+        assert_eq!(outcome.result, InteractionResult::Pass);
     }
 }

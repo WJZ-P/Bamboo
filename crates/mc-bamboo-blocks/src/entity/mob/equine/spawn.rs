@@ -32,7 +32,12 @@ pub(in crate::entity::mob) fn finalize_spawn(
             MobType::Llama => llama_group(state, random, group),
             _ => chested_horse_group(group),
         };
-        randomize_attributes(mob, random);
+        // `Camel` 没有覆盖 `AbstractHorse.randomizeAttributes`（基类是空的），所以骆驼不抽属性。
+        // `Camel` does not override `AbstractHorse.randomizeAttributes` (empty base), so no
+        // attribute draws for camels.
+        if mob.mob_type != MobType::Camel {
+            randomize_attributes(mob, random);
+        }
         if age.roll_baby(random) {
             living::set_age(me, mob, BABY_START_AGE);
         }
@@ -97,5 +102,6 @@ fn chested_horse_group(group: &mut Option<SpawnGroup>) -> &mut AgeableGroupData 
         SpawnGroup::Spider(_) => unreachable!("equine with a spider spawn group"),
         SpawnGroup::FishSchool { .. } => unreachable!("equine with a fish spawn group"),
         SpawnGroup::Wild(_) => unreachable!("equine with a wild animal group"),
+        SpawnGroup::Axolotl { .. } => unreachable!("equine with an axolotl spawn group"),
     }
 }

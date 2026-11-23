@@ -203,6 +203,7 @@ pub fn run(options: &[&str], java: &str) -> Result<(), String> {
             biomes: vec![vec![0_u32; 64]; mc_bamboo_world::SECTION_COUNT],
             heightmaps: Default::default(),
             post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         let words = mc_bamboo_game::worldgen::final_heightmap_words(&generated)
             .map_err(|e| format!("final heightmaps {key:?}: {e}"))?;
@@ -681,6 +682,7 @@ fn official_merged_blocks(java: &str, options: &Options) -> Result<BlockBaseline
                 slot: slot as u8,
                 deltas,
                 marks: Vec::new(),
+                block_entities: Vec::new(),
             });
         }
         let mut chunk = mc_bamboo_game::worldgen::GeneratedChunk {
@@ -688,6 +690,7 @@ fn official_merged_blocks(java: &str, options: &Options) -> Result<BlockBaseline
             biomes: Vec::new(),
             heightmaps: Default::default(),
             post_processing: Vec::new(),
+            block_entities: Vec::new(),
         };
         mc_bamboo_game::worldgen_features::merge_feature_writes(&mut chunk, groups);
         let post_processing = crate::feature_merge::isolated_post_processing(&value)

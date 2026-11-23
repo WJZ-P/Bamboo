@@ -40,6 +40,10 @@ pub enum Goal {
     ///
     /// The fox's own goals.
     Fox(super::fox_goals::FoxGoal),
+    /// 幻翼自己的目标。
+    ///
+    /// The phantom's own goals.
+    Phantom(super::phantom::PhantomGoal),
     /// 可驯服动物共用的目标（坐下、跟随主人、保护主人）。
     ///
     /// The shared tamable-animal goals.
@@ -48,6 +52,23 @@ pub enum Goal {
     ///
     /// The wolf's own goals.
     Wolf(super::wolf_goals::WolfGoal),
+    /// 掠夺者一支的目标：巡逻、守阵、弩、看别的生物。
+    ///
+    /// The raider-branch goals: patrol, hold ground, crossbow and watching other mobs.
+    Raider(super::raider::RaiderGoal),
+    /// 海豚自己的目标（呼吸、找水、引路、跃水、玩物品、跟船）。
+    ///
+    /// The dolphin's own goals (breathing, finding water, treasure leading, jumping,
+    /// item play, following boats).
+    Dolphin(super::dolphin_goals::DolphinGoal),
+    /// 猫自己的目标。
+    ///
+    /// The cat's own goals.
+    Cat(super::cat::CatGoal),
+    /// 鹦鹉自己的目标。
+    ///
+    /// The parrot's own goals.
+    Parrot(super::parrot::ParrotGoal),
     /// `LeapAtTargetGoal`：离目标 2 到 4 格、站在地上时扑过去。
     ///
     /// `LeapAtTargetGoal`: leap at a target 2 to 4 blocks away.
@@ -68,6 +89,18 @@ pub enum Goal {
         speed: f64,
         player: Option<EntityUid>,
         calm_down: i32,
+        /// `TemptGoal.canScare` 的状态：豹猫 / 猫对未信任或未驯服的玩家受惊。
+        ///
+        /// State for `TemptGoal.canScare`: ocelots and cats are scared by sudden movement.
+        scare: Option<TemptScare>,
+    },
+    /// `OcelotAttackGoal`：豹猫和猫按距离切换潜行 / 冲刺并每 20 刻扑击。
+    ///
+    /// `OcelotAttackGoal`: ocelots and cats switch crouch / sprint by distance and strike
+    /// every 20 ticks.
+    OcelotAttack {
+        target: Option<EntityUid>,
+        attack_time: i32,
     },
     FollowParent {
         speed: f64,
@@ -362,6 +395,18 @@ pub enum Goal {
     },
 }
 
+/// `TemptGoal.canScare` 记录的玩家上次位置与朝向。
+///
+/// The last player position and rotation remembered by `TemptGoal.canScare`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TemptScare {
+    pub px: f64,
+    pub py: f64,
+    pub pz: f64,
+    pub p_rot_x: f64,
+    pub p_rot_y: f64,
+}
+
 /// [`Goal::AvoidEntity`] 躲的是哪一类。
 ///
 /// What a [`Goal::AvoidEntity`] runs from.
@@ -412,22 +457,22 @@ pub enum TargetType {
     ///
     /// The enderman's `NearestAttackableTargetGoal<Endermite>`; endermites are not modelled.
     Endermite,
+    /// 豹猫的 `NearestAttackableTargetGoal<Chicken>`。
+    ///
+    /// The ocelot's `NearestAttackableTargetGoal<Chicken>`.
+    Chicken,
+    /// 豹猫 / 猫的 `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`。
+    ///
+    /// The ocelot / cat `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`.
+    BabyTurtleOnLand,
 }
 
 impl TargetType {
-    /// Bamboo 现在有没有这种实体；没有时对应的目标直接跳过。
-    pub const fn available(self) -> bool {
-        matches!(
-            self,
-            Self::Player
-                | Self::GuardedPlayer
-                | Self::AngerPlayer
-                | Self::Fox
-                | Self::FoxPrey
-                | Self::Wolf
-        )
-    }
-
+    // 目标类型一律在 `canUse` 里显式穷举；不要加回 `available()` 兜底，
+    // 否则北极熊的 Fox 目标会落进玩家搜索，愤怒时间与世界随机源从第 1 刻起分叉。
+    // Every target kind is matched explicitly in `canUse`; do not reintroduce an
+    // `available()` fallback, or the polar bear's Fox target falls into the player
+    // search and the anger time and world random source diverge from tick 1.
     /// `TargetGoal.getFollowDistance` 相对 `FOLLOW_RANGE` 的倍数。
     ///
     /// The `TargetGoal.getFollowDistance` factor on `FOLLOW_RANGE`.
@@ -509,11 +554,17 @@ impl Goal {
             | Self::Avoid(_)
             | Self::Swim { .. } => &[Flag::Move],
             Self::Fox(goal) => goal.flags(),
+            Self::Phantom(goal) => goal.flags(),
             Self::Tame(goal) => goal.flags(),
             Self::Wolf(goal) => goal.flags(),
-            Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
-                &[Flag::Move, Flag::Look]
-            }
+            Self::Raider(goal) => goal.flags(),
+            Self::Dolphin(goal) => goal.flags(),
+            Self::Cat(goal) => goal.flags(),
+            Self::Parrot(goal) => goal.flags(),
+            Self::Breed { .. }
+            | Self::Tempt { .. }
+            | Self::OcelotAttack { .. }
+            | Self::RandomLookAround { .. } => &[Flag::Move, Flag::Look],
             Self::FollowParent { .. } => &[],
             Self::LookAtPlayer { .. } => &[Flag::Look],
             Self::Unavailable(_) | Self::RandomStand { .. } => &[],
@@ -562,6 +613,15 @@ impl Goal {
         if let Self::Fox(goal) = self {
             return goal.every_tick();
         }
+        if let Self::Raider(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Cat(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Parrot(goal) = self {
+            return goal.every_tick();
+        }
         // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
         // Float/RandomLookAround/MeleeAttack/MoveToBlock/DoorInteract 为真，
         // LookAtPlayer/RandomStroll/LookAround 的其它目标为假。
@@ -572,6 +632,7 @@ impl Goal {
                 | Self::RabbitRaid(_)
                 | Self::RandomLookAround { .. }
                 | Self::MeleeAttack { .. }
+                | Self::OcelotAttack { .. }
                 | Self::Bow(_)
                 | Self::TurtleEgg { .. }
                 | Self::CubeFloat
@@ -593,6 +654,7 @@ impl Goal {
     pub const fn interruptable(&self) -> bool {
         match self {
             Self::Fox(goal) => goal.interruptable(),
+            Self::Dolphin(goal) => goal.interruptable(),
             _ => true,
         }
     }
@@ -611,6 +673,7 @@ impl Goal {
             Self::Panic { .. } => "PanicGoal",
             Self::Breed { .. } => "BreedGoal",
             Self::Tempt { .. } => "TemptGoal",
+            Self::OcelotAttack { .. } => "OcelotAttackGoal",
             Self::FollowParent { .. } => "FollowParentGoal",
             Self::Stroll { probability, .. } if *probability < 0.0 => "RandomStrollGoal",
             Self::Stroll { .. } => "WaterAvoidingRandomStrollGoal",
@@ -620,8 +683,13 @@ impl Goal {
             Self::MeleeAttack { class, .. } => class,
             Self::Swell { .. } => "SwellGoal",
             Self::Fox(goal) => goal.name(),
+            Self::Phantom(goal) => goal.name(),
             Self::Tame(goal) => goal.name(),
             Self::Wolf(goal) => goal.name(),
+            Self::Raider(goal) => goal.name(),
+            Self::Dolphin(goal) => goal.name(),
+            Self::Cat(goal) => goal.name(),
+            Self::Parrot(goal) => goal.name(),
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
@@ -758,6 +826,7 @@ impl GoalSelector {
                     steering_item: false,
                     player: None,
                     calm_down: 0,
+                    scare: None,
                 },
             ),
             (
@@ -982,7 +1051,9 @@ impl GoalSelector {
     }
 
     /// `Zombie.addBehaviourGoals` 里的 `targetSelector`。缺实体的目标仍注册，
-    /// 但 `TargetType::available()` 为假时 `canUse` 不查世界、不取随机数。
+    /// 尚未实现的类型仍按间隔取数，但不查世界。
+    ///
+    /// Unimplemented types still draw for the interval but do not search the world.
     pub fn zombie_targets() -> Self {
         let wrap = |priority, goal| WrappedGoal {
             priority,
@@ -1063,8 +1134,29 @@ impl GoalSelector {
 
     /// `setCanBreakDoors(false)` 时官方 `removeGoal(BreakDoorGoal)`。
     pub fn remove_break_door(&mut self) {
-        self.goals
-            .retain(|wrapped| !matches!(wrapped.goal, Goal::BreakDoor));
+        self.remove_goals(|goal| matches!(goal, Goal::BreakDoor));
+    }
+
+    /// `GoalSelector.removeAllGoals`：删掉匹配的目标，并同步清掉或平移 `locked` 下标。
+    ///
+    /// `GoalSelector.removeAllGoals`: drop matching goals and update `locked` indices.
+    pub(super) fn remove_goals(&mut self, predicate: impl Fn(&Goal) -> bool) {
+        let mut new_indices = Vec::with_capacity(self.goals.len());
+        let mut next = 0usize;
+        let mut kept = Vec::with_capacity(self.goals.len());
+        for wrapped in self.goals.drain(..) {
+            if predicate(&wrapped.goal) {
+                new_indices.push(None);
+            } else {
+                new_indices.push(Some(next));
+                next += 1;
+                kept.push(wrapped);
+            }
+        }
+        self.goals = kept;
+        for slot in &mut self.locked {
+            *slot = slot.and_then(|index| new_indices.get(index).copied().flatten());
+        }
     }
 
     /// 对拍的改坏确认用：把目标按优先级排序（官方按注册顺序）。
@@ -1216,15 +1308,23 @@ pub(super) const fn melee_attack(speed: f64, track_target: bool, class: &'static
 /// Rabbits and foxes wrap a few shared goals in inner subclasses; the oracle
 /// compares the subclass names.
 fn subclass_name(kind: super::MobType, name: &'static str) -> &'static str {
-    use super::MobType::{Fox, Rabbit, Wolf};
+    use super::MobType::{Cat, Fox, Ocelot, Parrot, Rabbit, Tadpole, Turtle, Wolf};
     match (kind, name) {
-        (Wolf, "PanicGoal") => "TamableAnimalPanicGoal",
+        // `AbstractFish.FishSwimGoal`。
+        (Tadpole, "RandomSwimmingGoal") => "FishSwimGoal",
+        (Turtle, "PanicGoal") => "TurtlePanicGoal",
+        (Turtle, "BreedGoal") => "TurtleBreedGoal",
+        (Turtle, "RandomStrollGoal") => "TurtleRandomStrollGoal",
+        (Wolf | Cat | Parrot, "PanicGoal") => "TamableAnimalPanicGoal",
         (Rabbit, "PanicGoal") => "RabbitPanicGoal",
         (Rabbit, "AvoidEntityGoal") => "RabbitAvoidEntityGoal",
         (Fox, "PanicGoal") => "FoxPanicGoal",
         (Fox, "BreedGoal") => "FoxBreedGoal",
         (Fox, "FollowParentGoal") => "FoxFollowParentGoal",
         (Fox, "LookAtPlayerGoal") => "FoxLookAtPlayerGoal",
+        (Ocelot, "TemptGoal") => "OcelotTemptGoal",
+        (Ocelot, "AvoidEntityGoal") => "OcelotAvoidEntityGoal",
+        (Cat, "AvoidEntityGoal") => "CatAvoidEntityGoal",
         _ => name,
     }
 }
@@ -1304,6 +1404,30 @@ fn swell_tick(target: Option<EntityUid>, me: &Entity, mob: &mut Mob, ctx: &dyn E
     mob.creeper.swell_dir = if seen { 1 } else { -1 };
 }
 
+/// 按 uid 找一个生物或玩家的位置和眼睛位置（不管死活，给 `OcelotAttackGoal.tick` 用）。
+///
+/// Position and eye position of a mob or player by uid regardless of alive state
+/// (used by `OcelotAttackGoal.tick`).
+pub(super) fn entity_look_target(
+    ctx: &dyn EntityCtx,
+    uid: EntityUid,
+) -> Option<(EntityUid, Vec3, Vec3)> {
+    if let Some(player) = player_by_uid(ctx.blocks(), uid) {
+        return Some((uid, player.position, player.eye_position()));
+    }
+    let other = ctx.other(uid)?;
+    let KindPublic::Mob(target) = &other.kind else {
+        return None;
+    };
+    let (_, _, eye) = target.mob_type.dimensions(target.baby);
+    let eye = Vec3::new(
+        other.position.x,
+        other.position.y + f64::from(eye),
+        other.position.z,
+    );
+    Some((uid, other.position, eye))
+}
+
 /// 按 uid 找一个还活着的玩家或生物：（uid，位置，眼睛位置）。
 ///
 /// A living player or mob by uid: (uid, position, eye position).
@@ -1374,12 +1498,31 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         }
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
         Goal::RabbitRaid(raid) => raid.can_use(me, mob, ctx.blocks()),
-        // `RabbitAvoidEntityGoal`：杀手兔不躲。
-        // `RabbitAvoidEntityGoal`: the killer bunny never flees.
-        Goal::Avoid(avoid) => !super::rabbit::is_evil(mob) && avoid.can_use(me, mob, ctx),
+        // `RabbitAvoidEntityGoal`：杀手兔不躲；`OcelotAvoidEntityGoal`：信任的豹猫不躲；
+        // `CatAvoidEntityGoal`：驯服的猫不躲。
+        // `RabbitAvoidEntityGoal`: the killer bunny never flees; `OcelotAvoidEntityGoal`:
+        // trusting ocelots never flee; `CatAvoidEntityGoal`: tamed cats never flee.
+        Goal::Avoid(avoid) => {
+            !super::rabbit::is_evil(mob)
+                && !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+                && !(mob.mob_type == super::MobType::Cat && mob.tame.is_tame())
+                && avoid.can_use(me, mob, ctx)
+        }
+        Goal::OcelotAttack { target, .. } => {
+            let best = mob.target.filter(|&uid| raw_target(ctx, uid).is_some());
+            if best.is_some() {
+                *target = best;
+            }
+            best.is_some()
+        }
         Goal::Fox(goal) => goal.can_use(me, mob, ctx),
+        Goal::Phantom(goal) => goal.can_use(me, mob, ctx),
         Goal::Tame(goal) => goal.can_use(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_use(me, mob, ctx),
+        Goal::Raider(goal) => goal.can_use(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.can_use(me, mob, ctx),
+        Goal::Cat(goal) => goal.can_use(me, mob, ctx),
+        Goal::Parrot(goal) => goal.can_use(me, mob, ctx),
         Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
             // `FoxPanicGoal.shouldPanic`：保护中的狐狸不惊慌。
@@ -1620,17 +1763,18 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             let stamp = mob.last_hurt_by_mob_timestamp;
             stamp != *timestamp
                 && last.is_some_and(|uid| {
-                    if mob.mob_type == super::MobType::Witch {
-                        // `new HurtByTargetGoal(this, Raider.class)`：女巫不报复自己或别的袭击者。
+                    if mob.mob_type.is_raider() {
+                        // `new HurtByTargetGoal(this, Raider.class)`：女巫和掠夺者不报复自己或别的
+                        // 袭击者。
                         //
-                        // `new HurtByTargetGoal(this, Raider.class)`: witches ignore themselves
-                        // and other raiders.
+                        // `new HurtByTargetGoal(this, Raider.class)`: witches and pillagers ignore
+                        // themselves and other raiders.
                         uid != me.id
                             && !ctx.other(uid).is_some_and(|other| {
                                 matches!(
                                     &other.kind,
                                     KindPublic::Mob(other_mob)
-                                        if other_mob.mob_type == super::MobType::Witch
+                                        if other_mob.mob_type.is_raider()
                                 )
                             })
                             && target_by_uid(mob, ctx, uid).is_some()
@@ -1680,15 +1824,19 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
                 return false;
             }
-            // 官方每个 `NearestAttackableTargetGoal` 都先取 `nextInt(interval)`；
-            // 缺实体的目标仍注册、仍取数，只是查不到目标（场景里明确无此类实体）。
             *found = match kind {
                 TargetType::FoxPrey => {
                     nearest_mob_target(me, mob, ctx, super::fox_goals::is_small_prey)
                 }
                 TargetType::Wolf => nearest_wild_wolf_target(me, mob, ctx),
                 // `NearestAttackableTargetGoal<Fox>`：北极熊找狐狸，幼崽不打。
+                // 不要把这个分支并回下面的玩家搜索：08:40 的回归就是 Fox 走了玩家分支，
+                // 出生点玩家被设成目标，愤怒结束时间和世界随机源从第 1 刻起分叉。
+                //
                 // `NearestAttackableTargetGoal<Fox>`: a polar bear looks for foxes; cubs pass.
+                // Never fold this arm back into the player search below: the 08:40 regression
+                // was Fox taking the player branch, which targeted the spawn player and diverged
+                // the anger end time and world random source from tick 1.
                 TargetType::Fox => {
                     if mob.is_baby() {
                         None
@@ -1696,8 +1844,26 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                         nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Fox)
                     }
                 }
-                _ if kind.available() => nearest_attackable(me, mob, ctx, *kind),
-                _ => None,
+                TargetType::Chicken => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Chicken)
+                }
+                TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
+                    public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
+                }),
+                TargetType::Player | TargetType::GuardedPlayer | TargetType::AngerPlayer => {
+                    nearest_attackable(me, mob, ctx, *kind)
+                }
+                // 这些目标在官方仍注册、仍按间隔取数，但 Bamboo 没有对应实体可搜，返回 None。
+                // 美西螈是 main 追加的占位变体（溺尸的目标），同样只保留取数、不查世界。
+                // Vanilla registers these goals and still draws the interval, but Bamboo has no
+                // matching entity to search, so they return None. The axolotl is a placeholder
+                // variant added on main (a drowned target); it keeps the draw but skips the search.
+                TargetType::Villager
+                | TargetType::IronGolem
+                | TargetType::Turtle
+                | TargetType::Axolotl
+                | TargetType::Fish
+                | TargetType::Endermite => None,
             };
             // 找到了玩家，还要身边有幼崽才动手。
             // A player was found; a cub must be nearby as well.
@@ -1903,10 +2069,28 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         }
         Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
         Goal::RabbitRaid(raid) => raid.can_continue(),
-        Goal::Avoid(_) => super::avoid::AvoidEntity::can_continue(mob),
+        Goal::Avoid(_) => {
+            !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+                && !(mob.mob_type == super::MobType::Cat && mob.tame.is_tame())
+                && super::avoid::AvoidEntity::can_continue(mob)
+        }
+        Goal::OcelotAttack { target, .. } => {
+            let Some((_, pos, _)) = target.and_then(|uid| raw_target(ctx, uid)) else {
+                return false;
+            };
+            if me.position.distance_to_sqr(pos) > 225.0 {
+                return false;
+            }
+            !mob.navigation.is_done() || can_use(goal, me, mob, ctx)
+        }
         Goal::Fox(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Phantom(goal) => goal.can_continue(me, mob, ctx),
         Goal::Tame(goal) => goal.can_continue(me, mob, ctx),
         Goal::Wolf(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Raider(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Parrot(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
         // `Drowned.DrownedAttackGoal.canContinueToUse`：僵尸的近战条件加 `okTarget`。
         Goal::RandomStroll { .. } | Goal::DrownedGoToWater { .. } => !mob.navigation.is_done(),
@@ -1962,10 +2146,39 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 }
                 _ => false,
             }),
-        Goal::Tempt { .. }
-        | Goal::SquidRandomMovement
-        | Goal::SquidFlee { .. }
-        | Goal::PufferfishPuff => can_use(goal, me, mob, ctx),
+        Goal::Tempt { player, scare, .. } => {
+            // `TemptGoal.canContinueToUse`：会受惊且距离 < 6 格时，玩家位移或转头超过阈值就惊跑。
+            // `TemptGoal.canContinueToUse`: when scareable within 6 blocks, player movement
+            // or rotation past the threshold stops the tempt.
+            if let Some(scare) = scare.as_mut()
+                && !(mob.mob_type == super::MobType::Ocelot && mob.ocelot.trusting)
+            {
+                let Some(found) = player.and_then(|uid| player_by_uid(ctx.blocks(), uid)) else {
+                    return false;
+                };
+                if me.position.distance_to_sqr(found.position) < 36.0 {
+                    let prev = Vec3::new(scare.px, scare.py, scare.pz);
+                    if found.position.distance_to_sqr(prev) > 0.010_000_000_000_000_002 {
+                        return false;
+                    }
+                    if (f64::from(found.pitch) - scare.p_rot_x).abs() > 5.0
+                        || (f64::from(found.yaw) - scare.p_rot_y).abs() > 5.0
+                    {
+                        return false;
+                    }
+                } else {
+                    scare.px = found.position.x;
+                    scare.py = found.position.y;
+                    scare.pz = found.position.z;
+                }
+                scare.p_rot_x = f64::from(found.pitch);
+                scare.p_rot_y = f64::from(found.yaw);
+            }
+            can_use(goal, me, mob, ctx)
+        }
+        Goal::SquidRandomMovement | Goal::SquidFlee { .. } | Goal::PufferfishPuff => {
+            can_use(goal, me, mob, ctx)
+        }
         Goal::FollowParent { parent, .. } => {
             if mob.age >= 0 || super::fox::is_defending_fox(mob) {
                 return false;
@@ -2062,6 +2275,24 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // does not arise for polar bears.
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
         }
+        // 掠夺者的两类目标都是 `mustSee`：受伤反击记 300 刻，找玩家记 60 刻。弩的目标
+        // `stop()` 会 `setTarget(null)`，`TargetGoal.canContinueToUse` 再从 `targetMob` 捡回来。
+        // Both pillager target goals are `mustSee`: 300 ticks of memory for hurt-by, 60 for
+        // players. The crossbow goal's `stop()` clears the target and
+        // `TargetGoal.canContinueToUse` restores it from `targetMob`.
+        Goal::HurtByTarget { unseen_ticks, .. } if mob.mob_type == super::MobType::Pillager => {
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
+        }
+        Goal::NearestAttackableTarget {
+            unseen_ticks,
+            found,
+            ..
+        } if mob.mob_type == super::MobType::Pillager => {
+            if mob.target.is_none() {
+                mob.target = *found;
+            }
+            target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 60)
+        }
         Goal::NearestAttackableTarget { unseen_ticks, .. }
             if mob.mob_type.full_target_rules() || mob.mob_type == super::MobType::Slime =>
         {
@@ -2150,8 +2381,13 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::RabbitPowderSnow => {}
         Goal::Avoid(avoid) => avoid.start(me, mob, ctx),
         Goal::Fox(goal) => goal.start(me, mob, ctx),
+        Goal::Phantom(goal) => goal.start(me, mob, ctx),
         Goal::Tame(goal) => goal.start(me, mob, ctx),
         Goal::Wolf(goal) => goal.start(me, mob, ctx),
+        Goal::Raider(goal) => goal.start(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.start(me, mob, ctx),
+        Goal::Cat(goal) => goal.start(me, mob, ctx),
+        Goal::Parrot(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target, .. } => {
@@ -2241,8 +2477,17 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
                 );
             }
         }
+        Goal::Tempt { player, scare, .. } => {
+            if let Some(scare) = scare.as_mut()
+                && let Some(found) = player.and_then(|uid| player_by_uid(ctx.blocks(), uid))
+            {
+                scare.px = found.position.x;
+                scare.py = found.position.y;
+                scare.pz = found.position.z;
+            }
+        }
         Goal::Float
-        | Goal::Tempt { .. }
+        | Goal::OcelotAttack { .. }
         | Goal::Unavailable(_)
         | Goal::CubeFloat
         | Goal::CubeRandomDirection { .. }
@@ -2303,6 +2548,11 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             // `PandaHurtByTargetGoal` sets `setAlertOthers()`, calling aggressive pandas.
             if mob.mob_type == super::MobType::Panda {
                 super::panda::alert_pandas(me, mob, ctx);
+            }
+            // `Pillager` 的 `HurtByTargetGoal(this, Raider.class).setAlertOthers()`。
+            // The pillager's `HurtByTargetGoal(this, Raider.class).setAlertOthers()`.
+            if mob.mob_type == super::MobType::Pillager {
+                super::raider::alert_same_kind(me, mob, ctx);
             }
         }
         // `HurtByTargetGoal.start` 再 `TargetGoal.start`：`unseenTicks` 清零。
@@ -2401,12 +2651,21 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.navigation.stop();
             *calm_down = reduced_tick_delay(100);
         }
+        Goal::OcelotAttack { target, .. } => {
+            *target = None;
+            mob.navigation.stop();
+        }
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::Avoid(avoid) => avoid.stop(),
         Goal::Fox(goal) => goal.stop_with_world(me, mob, ctx),
+        Goal::Phantom(goal) => goal.stop(me, mob, ctx),
         Goal::Tame(goal) => goal.stop(mob),
         Goal::Wolf(goal) => goal.stop(mob),
+        Goal::Raider(goal) => goal.stop(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.stop(me, mob, ctx),
+        Goal::Cat(goal) => goal.stop(mob),
+        Goal::Parrot(goal) => goal.stop(mob),
         Goal::LeapAtTarget { .. } => {}
         Goal::Swim { .. } => mob.navigation.stop(),
         // `MoveToBlockGoal` 没有覆写 `stop`：不停导航。
@@ -2714,6 +2973,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                     .move_to_entity(ctx.blocks(), &nav, player.position, *speed, 1);
             }
         }
+        Goal::OcelotAttack {
+            target,
+            attack_time,
+        } => super::ocelot::attack_tick(*target, attack_time, me, mob, ctx),
         Goal::FollowParent {
             speed,
             parent,
@@ -2770,8 +3033,13 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::RabbitPowderSnow => mob.jump.jump = true,
         Goal::Avoid(avoid) => avoid.tick(me, mob, ctx),
         Goal::Fox(goal) => goal.tick(me, mob, ctx),
+        Goal::Phantom(goal) => goal.tick(me, mob, ctx),
         Goal::Tame(goal) => goal.tick(me, mob, ctx),
         Goal::Wolf(goal) => goal.tick(me, mob, ctx),
+        Goal::Raider(goal) => goal.tick(me, mob, ctx),
+        Goal::Dolphin(goal) => goal.tick(me, mob, ctx),
+        Goal::Cat(goal) => goal.tick(me, mob, ctx),
+        Goal::Parrot(goal) => goal.tick(me, mob, ctx),
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
         // `TamableAnimalPanicGoal.tick` teleports to a distant owner first.
         Goal::Panic { .. } if super::tame::is_tamable(mob.mob_type) => {
@@ -3236,6 +3504,12 @@ pub(super) fn nearest_tempting_player(
         let follows = [player.main_hand, player.off_hand].into_iter().any(|item| {
             if steering_item {
                 item == mc_bamboo_data::items::CARROT_ON_A_STICK
+            } else if mob.mob_type == super::MobType::Camel {
+                // 骆驼是马科，但 `TemptingSensor` 用 `Camel.isFood`（`#camel_food`），
+                // 不是马科的 `TemptGoal` 那张表。
+                // The camel is equine, but `TemptingSensor` uses `Camel.isFood`
+                // (`#camel_food`), not the equine `TemptGoal` table.
+                super::interact::is_food(mob.mob_type, item)
             } else if mob.mob_type.is_equine() {
                 crate::state::item_is_tagged(item, super::equine::tempt_tag(mob.mob_type))
             } else {
@@ -3286,6 +3560,7 @@ fn free_partner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<EntityUid
             || public.panicking
             || !public.is_alive()
             || !super::wolf::can_mate(mob, public)
+            || !super::cat::can_mate(mob, public)
         {
             return;
         }
@@ -3344,9 +3619,12 @@ fn random_direction_within_radians(
     max_radians: f64,
 ) -> Option<BlockPos> {
     let centre = mth::atan2(z_dir, x_dir) as f64 - f64::from(std::f32::consts::FRAC_PI_2);
-    let radians = centre + (2.0 * f64::from(me.random.next_float()) - 1.0) * max_radians;
+    // 扇形的偏移在 f32 里算完再提升成 f64，和官方一致。
+    // The fan offset is computed in f32 and then widened to f64, as vanilla does.
+    let spread = f64::from(2.0_f32 * me.random.next_float() - 1.0);
+    let radians = centre + spread * max_radians;
     let dist = mth::lerp(me.random.next_double().sqrt(), horizontal.0, horizontal.1)
-        * std::f64::consts::SQRT_2;
+        * f64::from(std::f32::consts::SQRT_2);
     let x = -dist * radians.sin();
     let z = dist * radians.cos();
     if x.abs() > horizontal.1 || z.abs() > horizontal.1 {
@@ -3380,9 +3658,13 @@ pub(super) fn away_random_pos(
             std::f64::consts::FRAC_PI_2,
         )?;
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`：问的是这只生物自己的导航，
+        // 游泳的导航认的是「不是实心方块」。
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)` asks the mob's own navigation;
+        // a swimming one accepts anything that is not a solid block.
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -3481,7 +3763,7 @@ fn outside_limits(view: &dyn BlockView, pos: BlockPos) -> bool {
 }
 
 fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
-    mob.malus.get(static_path_type(view, pos)) != 0.0
+    mob.pathfinding_malus(static_path_type(view, pos)) != 0.0
 }
 
 /// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
@@ -3491,7 +3773,11 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     // Slimes are not `PathfinderMob`s; `Mob.checkSpawnRules` is always true.
     if matches!(
         mob.mob_type,
-        super::MobType::Slime | super::MobType::Enderman
+        super::MobType::Slime
+            | super::MobType::Enderman
+            | super::MobType::Bat
+            | super::MobType::Phantom
+            | super::MobType::Pillager
     ) {
         return 0.0;
     }
@@ -3504,9 +3790,14 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     if mob.mob_type == super::MobType::Mooshroom {
         return super::mooshroom::walk_target_value(view, pos);
     }
-    // 不是 `Animal` 的生物用 `PathfinderMob.getWalkTargetValue` 的缺省值 0。
-    // Mobs that are not `Animal`s keep the `PathfinderMob.getWalkTargetValue` default of 0.
-    if mob.mob_type.is_ageable_water_creature() || mob.mob_type.is_water_animal() {
+    // 不是 `Animal` 的生物、以及把 `getWalkTargetValue` 覆写成 0 的美西螈，用
+    // `PathfinderMob.getWalkTargetValue` 的缺省值 0。
+    // Mobs that are not `Animal`s, plus the axolotl that overrides
+    // `getWalkTargetValue` to 0, keep the `PathfinderMob` default of 0.
+    if mob.mob_type.is_ageable_water_creature()
+        || mob.mob_type.is_water_animal()
+        || mob.mob_type == super::MobType::Axolotl
+    {
         return 0.0;
     }
     animal_walk_target_value(view, pos)
@@ -3649,9 +3940,13 @@ pub(crate) fn default_random_pos_away(
             f64::from(std::f32::consts::FRAC_PI_2),
         )?;
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`：问的是这只生物自己的导航，
+        // 游泳的导航认的是「不是实心方块」。
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)` asks the mob's own navigation;
+        // a swimming one accepts anything that is not a solid block.
         if outside_limits(view, pos)
             || (restricted && !within_home(mob, pos))
-            || !Navigation::is_stable_destination(view, pos)
+            || !stable_destination(mob, view, pos)
             || has_malus(mob, view, pos)
         {
             return None;
@@ -3725,8 +4020,8 @@ fn random_direction_within_radians_flat(
     let centre = mth::atan2(dir_z, dir_x) - f64::from(std::f32::consts::FRAC_PI_2);
     let spread = f64::from(2.0_f32 * me.random.next_float() - 1.0);
     let yaw = centre + spread * max_radians;
-    let distance =
-        mth::lerp(me.random.next_double().sqrt(), 0.0, max_horizontal) * std::f64::consts::SQRT_2;
+    let distance = mth::lerp(me.random.next_double().sqrt(), 0.0, max_horizontal)
+        * f64::from(std::f32::consts::SQRT_2);
     let x = -distance * yaw.sin();
     let z = distance * yaw.cos();
     if x.abs() > max_horizontal || z.abs() > max_horizontal {
@@ -3767,6 +4062,138 @@ pub(crate) fn land_random_pos(
         }
         Some(moved)
     })
+}
+
+/// `HoverRandomPos.getPos`：朝视线方向找一个能悬停的高度。
+///
+/// `HoverRandomPos.getPos`: hover a few blocks above the ground towards the facing.
+#[expect(clippy::too_many_arguments, reason = "官方方法就是这几个参数")]
+pub(crate) fn hover_random_pos(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    x_dir: f64,
+    z_dir: f64,
+    max_radians: f64,
+    hover_max_height: i32,
+    hover_min_height: i32,
+) -> Option<Vec3> {
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            0,
+            x_dir,
+            z_dir,
+            max_radians,
+        )?;
+        let pos =
+            land_toward_direction(me, mob, view, f64::from(horizontal), restricted, direction)?;
+        let above = me
+            .random
+            .next_int_bounded(hover_max_height - hover_min_height + 1)
+            + hover_min_height;
+        let pos = move_up_to_above_solid(view, pos, above);
+        if view.fluid_state(pos).is_tagged(fluid_tags::WATER) || has_malus(mob, view, pos) {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `AirAndWaterRandomPos.getPos`：朝视线方向找空中或水里的落点。
+///
+/// `AirAndWaterRandomPos.getPos`: an air or water spot towards the facing.
+#[expect(clippy::too_many_arguments, reason = "官方方法就是这几个参数")]
+pub(crate) fn air_and_water_random_pos(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    flying_height: i32,
+    x_dir: f64,
+    z_dir: f64,
+    max_radians: f64,
+) -> Option<Vec3> {
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            flying_height,
+            x_dir,
+            z_dir,
+            max_radians,
+        )?;
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos) || (restricted && !within_home(mob, pos)) {
+            return None;
+        }
+        let pos = move_up_out_of_solid(view, pos);
+        if has_malus(mob, view, pos) {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
+/// `LandRandomPos.generateRandomPosTowardDirection`。
+fn land_toward_direction(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    max_distance: f64,
+    restricted: bool,
+    direction: BlockPos,
+) -> Option<BlockPos> {
+    let pos = toward_direction(me, mob, max_distance, direction);
+    if outside_limits(view, pos)
+        || (restricted && !within_home(mob, pos))
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`：官方的第三个判定。
+        // `GoalUtils.isNotStable(mob.getNavigation(), pos)`, vanilla's third check.
+        || !stable_destination(mob, view, pos)
+    {
+        return None;
+    }
+    Some(pos)
+}
+
+/// `RandomPos.moveUpOutOfSolid`。
+fn move_up_out_of_solid(view: &dyn BlockView, pos: BlockPos) -> BlockPos {
+    if !view.block_state(pos).is_solid() {
+        return pos;
+    }
+    let mut moved = pos.above();
+    while moved.y <= view.max_y() && view.block_state(moved).is_solid() {
+        moved = moved.above();
+    }
+    moved
+}
+
+/// `RandomPos.moveUpToAboveSolid`。
+fn move_up_to_above_solid(view: &dyn BlockView, pos: BlockPos, above_solid: i32) -> BlockPos {
+    if !view.block_state(pos).is_solid() {
+        return pos;
+    }
+    let mut moved = pos.above();
+    while moved.y <= view.max_y() && view.block_state(moved).is_solid() {
+        moved = moved.above();
+    }
+    let first_non_solid = moved.y;
+    while moved.y <= view.max_y() && moved.y - first_non_solid < above_solid {
+        moved = moved.above();
+        if view.block_state(moved).is_solid() {
+            moved = moved.below();
+            break;
+        }
+    }
+    moved
 }
 
 // ---- 敌对目标的查询 ----
@@ -3876,9 +4303,9 @@ pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
 }
 
 fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
-    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼、羊驼和女巫会把别的生物当目标。
-    // Skeletons, creepers, spiders, endermen, polar bears, foxes, wolves, llamas and
-    // witches can target other mobs.
+    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼、羊驼、女巫和豹猫会把别的生物当目标。
+    // Skeletons, creepers, spiders, endermen, polar bears, foxes, wolves, llamas,
+    // witches and ocelots can target other mobs.
     let mobs_allowed = mob.mob_type.full_target_rules()
         || matches!(
             mob.mob_type,
@@ -3887,6 +4314,8 @@ fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Comba
                 | super::MobType::Wolf
                 | super::MobType::Llama
                 | super::MobType::Witch
+                | super::MobType::Ocelot
+                | super::MobType::Cat
         );
     if !mobs_allowed && player_by_uid(ctx.blocks(), uid).is_none() {
         return None;
@@ -3943,7 +4372,7 @@ fn mob_target_view(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<(CombatTarget,
         height: f64::from(target.dimensions().1),
         health: target.health,
         effects: target.effects,
-        is_raider: target.mob_type == super::MobType::Witch,
+        is_raider: target.mob_type.is_raider(),
         width: target.dimensions().0,
         hitbox: other.bounding_box(),
     };
@@ -4110,7 +4539,7 @@ fn nearest_attackable(
     ctx: &dyn EntityCtx,
     kind: TargetType,
 ) -> Option<EntityUid> {
-    if !kind.available() || ctx.blocks().difficulty() == 0 {
+    if ctx.blocks().difficulty() == 0 {
         return None;
     }
     let range = mob
@@ -4237,6 +4666,18 @@ pub(super) fn nearest_mob_target(
     ctx: &dyn EntityCtx,
     matches: impl Fn(super::MobType) -> bool,
 ) -> Option<EntityUid> {
+    nearest_mob_target_with(me, mob, ctx, |public| matches(public.mob_type))
+}
+
+/// 按完整 [`super::MobPublic`] 谓词找最近的可攻击生物目标。
+///
+/// Find the nearest attackable mob target matching a full [`super::MobPublic`] predicate.
+pub(super) fn nearest_mob_target_with(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    matches: impl Fn(&super::MobPublic) -> bool,
+) -> Option<EntityUid> {
     let range = mob
         .attributes
         .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -4246,7 +4687,7 @@ pub(super) fn nearest_mob_target(
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };
-        if other.uid == me.id || other.removed || !public.is_alive() || !matches(public.mob_type) {
+        if other.uid == me.id || other.removed || !public.is_alive() || !matches(public) {
             return;
         }
         let (_, _, eye) = public.mob_type.dimensions(public.baby);

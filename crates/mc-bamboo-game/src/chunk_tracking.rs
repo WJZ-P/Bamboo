@@ -387,7 +387,7 @@ pub(crate) fn send_chunks(region: &mut Region) {
         let chunks = &region.chunks;
         let batch = player.chunks.sender.next_batch(
             player.chunk_pos(),
-            |pos| chunks.is_loaded(pos),
+            |pos| chunks.is_loaded(pos) && region.tick_levels.ready_to_send(pos),
             &mut region.profiler,
         );
         if batch.is_empty() {
@@ -1135,6 +1135,12 @@ mod tests {
         loaded.load(chunk(1, 0), Box::new(ChunkColumn::from_template()));
         region.chunks = loaded;
         region.template_body = encode_template(&region.chunks);
+        // 已加载模式下只发做完完工后处理的区块；两个都先标成已就绪，
+        // 这样 (1, 0) 被跳过只因为它没加载。
+        // In loaded mode only post-processed chunks go out; mark both ready so
+        // (1, 0) is skipped only because it is not loaded.
+        region.tick_levels.mark_ready_for_test(ORIGIN);
+        region.tick_levels.mark_ready_for_test(chunk(1, 0));
         let player = region.players.get_mut(&client.id).expect("玩家在");
         player.chunks.sender.pending.clear();
         player.chunks.sender.batch_quota = 64.0;

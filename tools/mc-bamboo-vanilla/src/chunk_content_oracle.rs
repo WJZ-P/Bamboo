@@ -636,7 +636,11 @@ fn run_cases(
         MobType::Sheep,
         MobType::Chicken,
         MobType::Goat,
+        MobType::Frog,
+        MobType::Tadpole,
         MobType::PolarBear,
+        MobType::Ocelot,
+        MobType::Cat,
         MobType::Creeper,
         MobType::Spider,
         MobType::CaveSpider,
@@ -647,6 +651,8 @@ fn run_cases(
         MobType::Salmon,
         MobType::TropicalFish,
         MobType::Pufferfish,
+        MobType::Witch,
+        MobType::Pillager,
     ] {
         let mut store = mc_bamboo_blocks::EntityStore::new();
         let uid = store.spawn(Entity::by_mob_type(kind, Vec3::new(0.5, 64.0, -3.5)));
@@ -1698,6 +1704,19 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
         ]),
     ));
     out.push((
+        "cat tamed rich".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:cat".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+            ("variant", Tag::String("minecraft:calico".to_owned())),
+            ("sound_variant", Tag::String("minecraft:royal".to_owned())),
+            ("CollarColor", Tag::Byte(11)),
+            ("Sitting", Tag::Byte(1)),
+            ("Owner", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]),
+    ));
+    out.push((
         "rich".to_owned(),
         compound(vec![
             ("id", Tag::String("minecraft:cow".to_owned())),
@@ -1885,7 +1904,61 @@ fn brain_resave_cases() -> Vec<(String, Tag)> {
             ),
         ]),
     )]);
+    let frog_memories = compound(vec![(
+        "memories",
+        compound(vec![
+            ("minecraft:is_pregnant", memory(compound(vec![]), None)),
+            ("minecraft:is_in_water", memory(compound(vec![]), None)),
+            (
+                "minecraft:long_jump_cooling_down",
+                memory(Tag::Int(77), None),
+            ),
+        ]),
+    )]);
     vec![
+        // 青蛙：品种存带命名空间的名字；`canBeABaby` 为假，`Age` 三个键不读也不写。
+        // Frogs: the variant is saved namespaced; `canBeABaby` is false, so the three
+        // `Age` keys are neither read nor written.
+        (
+            "frog_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:frog".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "frog_warm_pregnant".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:frog".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("variant", Tag::String("minecraft:warm".to_owned())),
+                ("Age", Tag::Int(-600)),
+                ("Brain", frog_memories),
+            ]),
+        ),
+        // 蝌蚪：自己的 `Age` 和 `AgeLocked`；`FromBucket` 写出来恒为真。
+        // Tadpoles: their own `Age` and `AgeLocked`; `FromBucket` always saves as true.
+        (
+            "tadpole_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:tadpole".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "tadpole_aged_locked".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:tadpole".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("Age", Tag::Int(12345)),
+                ("AgeLocked", Tag::Byte(1)),
+                ("FromBucket", Tag::Byte(0)),
+            ]),
+        ),
         (
             "goat_bare".to_owned(),
             compound(vec![
@@ -1909,6 +1982,26 @@ fn brain_resave_cases() -> Vec<(String, Tag)> {
                 ("HasRightHorn", Tag::Byte(1)),
                 ("Age", Tag::Int(-600)),
                 ("Brain", goat_memories),
+            ]),
+        ),
+        // 骆驼：`LastPoseTick` 负数表示坐着，正数表示上次换姿势的 `gameTime`。
+        // Camels: a negative `LastPoseTick` means sitting; a positive one is the
+        // `gameTime` of the last pose change.
+        (
+            "camel_bare".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:camel".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+            ]),
+        ),
+        (
+            "camel_sitting".to_owned(),
+            compound(vec![
+                ("id", Tag::String("minecraft:camel".to_owned())),
+                ("Pos", pos.clone()),
+                ("UUID", uuid.clone()),
+                ("LastPoseTick", Tag::Long(-1000)),
             ]),
         ),
         (

@@ -476,6 +476,16 @@ pub fn place_processed(
             let nbt = match &block.nbt {
                 None => None,
                 Some(tag) if is_randomizable_container(&block.state.name) => {
+                    // `StructureTemplate.placeInWorld` 对每个 `RandomizableContainer` 都取一次
+                    // `nextLong` 写进模板 nbt，不看有没有 `LootTable`（试炼密室里只有
+                    // `Items: []` 的木桶也取），否则后面容器的种子会错开。
+                    // `placeInWorld` draws `nextLong` for every `RandomizableContainer`,
+                    // with or without a `LootTable` (the trial chambers' `Items: []`
+                    // barrel too); skipping it shifts every later container's seed.
+                    let seed = match worldgen_random {
+                        Some(source) => source.next_long(),
+                        None => random.next_long(),
+                    };
                     // `RandomizableContainer` 读入模板 nbt 时，`LootTable` 不存在就清空
                     // 整份 `LootTable` 状态；随后写入的 `LootTableSeed`（可能非 0）
                     // 不会单独存出。古城箱子只有 `Items`、没有表，所以要丢掉这个种子。
@@ -500,10 +510,6 @@ pub fn place_processed(
                         // `next(32)` values. Asking the inner `Random` instead uses Xoroshiro's
                         // single 64-bit draw, which only differs in the low bits. The game path
                         // must use that `WorldgenRandom`; stand-alone oracles fall back to `Random`.
-                        let seed = match worldgen_random {
-                            Some(source) => source.next_long(),
-                            None => random.next_long(),
-                        };
                         Some(overwrite_loot_table_seed(tag, seed))
                     }
                 }

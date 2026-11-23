@@ -360,7 +360,8 @@ fn spawn_category_for_position(
             let pos = BlockPos::new(x, y_start, z);
             let xx = f64::from(x) + 0.5;
             let zz = f64::from(z) + 0.5;
-            let Some(nearest) = nearest_player_distance_sqr(world, xx, f64::from(y_start), zz)
+            let Some(nearest) =
+                nearest_player_distance_sqr(&state.players, xx, f64::from(y_start), zz)
             else {
                 continue;
             };
@@ -389,7 +390,7 @@ fn spawn_category_for_position(
             };
             let yaw = world.random().next_float() * 360.0;
             spawn::snap_to(&mut entity, Vec3::new(xx, f64::from(y_start), zz), yaw, 0.0);
-            if !is_valid_position_for_mob(world, &entity, kind, nearest) {
+            if !is_valid_position_for_mob(world, &entity, kind, nearest, params.sea_level) {
                 continue;
             }
             spawn::finalize_spawn_with_group(world, kind, &mut entity, &mut group);
@@ -478,9 +479,19 @@ fn can_spawn_mob_at(
     })
 }
 
-/// `NaturalSpawner.mobsAt`（下界要塞那一支不建模）。
+/// `ChunkGenerator.getMobsAt`：`NaturalSpawner.mobsAt` 先查结构刷怪覆盖（前哨站、
+/// 女巫小屋等），落在结构覆盖盒里时用结构的怪物表，否则用群系表。下界要塞那一支
+/// 不建模。覆盖表是静态数据，查表和取权重走的是同一条链。
+///
+/// `ChunkGenerator.getMobsAt`: `NaturalSpawner.mobsAt` consults the structure spawn
+/// override first (outposts, swamp huts, ...); inside an override box the structure's
+/// monster list replaces the biome table. The nether-fortress branch is not modelled.
+/// The override table is static data, so drawing and support checks share one list.
 fn mobs_at(world: &World, category: MobCategory, pos: BlockPos) -> &'static [MobSpawnerDef] {
-    world.level().natural_spawn_table(pos, category)
+    world
+        .level()
+        .structure_spawn_override(pos, category)
+        .unwrap_or_else(|| world.level().natural_spawn_table(pos, category))
 }
 
 /// `level.environmentAttributes().getValue(NATURAL_MOB_SPAWNS, pos)`：主世界就是群系的表。
@@ -558,9 +569,9 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     if kind.spawns_in_water() {
         return super::water::in_water_position_ok(world, pos);
     }
-    // 狐狸注册的是 `NO_RESTRICTIONS`，位置恒可用。
-    // Foxes are registered with `NO_RESTRICTIONS`, which accepts every position.
-    kind == MobType::Fox
+    // 狐狸和幻翼注册的是 `NO_RESTRICTIONS`，位置恒可用。
+    // Foxes and phantoms are registered with `NO_RESTRICTIONS`, which accepts every position.
+    matches!(kind, MobType::Fox | MobType::Phantom)
         || on_ground_position_ok_for(
             world,
             kind.entity_type(),
@@ -605,6 +616,24 @@ fn on_ground_position_ok_for(
         && is_valid_empty_spawn_block(world, fire_immune, immune_to, above)
 }
 
+/// `NaturalSpawner.isValidEmptySpawnBlock` 对单独一格：自定义刷怪器在半空中放幻翼时
+/// 只查落点自己，不查落脚方块。
+///
+/// `NaturalSpawner.isValidEmptySpawnBlock` for one cell: the custom spawner drops
+/// phantoms in mid-air and checks the cell itself, not the block below.
+pub(crate) fn is_valid_empty_spawn_block_for(world: &World, kind: MobType, pos: BlockPos) -> bool {
+    is_valid_empty_spawn_block(world, kind.fire_immune(), kind.immune_to(), pos)
+}
+
+/// `NaturalSpawner.isValidEmptySpawnBlock`，给掠夺者巡逻队的落点判定用。
+/// 掠夺者不防火、没有 `immuneTo` 标签，两种参数都是默认分支。
+///
+/// `NaturalSpawner.isValidEmptySpawnBlock` for a patrol landing spot. Pillagers
+/// are not fire-immune and have no `immuneTo` tag, so both flags take the default.
+pub(super) fn patrol_spawn_block_ok(world: &World, pos: BlockPos) -> bool {
+    is_valid_empty_spawn_block(world, false, MobType::Pillager.immune_to(), pos)
+}
+
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
 fn is_valid_empty_spawn_block(
     world: &World,
@@ -613,6 +642,9 @@ fn is_valid_empty_spawn_block(
     pos: BlockPos,
 ) -> bool {
     let state = world.block_state(pos);
+    if state.is_air() {
+        return true;
+    }
     if state.is_collision_shape_full_block() {
         return false;
     }
@@ -673,6 +705,15 @@ pub(super) fn check_spawn_rules(
         MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish => {
             super::fish::check_spawn_rules(world, kind, pos, sea_level)
         }
+        // `Dolphin` 用 `checkSurfaceAgeableWaterCreatureSpawnRules`（和鱿鱼同源）。
+        // The dolphin uses `checkSurfaceAgeableWaterCreatureSpawnRules` (same as squid).
+        MobType::Dolphin => super::dolphin::check_spawn_rules(world, sea_level, pos),
+        // `Axolotl.checkAxolotlSpawnRules`：脚下是 `axolotls_spawnable_on`（黏土）。
+        // `Axolotl.checkAxolotlSpawnRules`: the block below is in
+        // `axolotls_spawnable_on` (clay).
+        MobType::Axolotl => world
+            .block_state(pos.below())
+            .is_tagged(block_tags::AXOLOTLS_SPAWNABLE_ON),
         // `Turtle.checkTurtleSpawnRules`：海平面 +4 以下、沙子上、亮度足够。
         // `Turtle.checkTurtleSpawnRules`: below sea level + 4, on sand and bright.
         MobType::Turtle => {
@@ -692,6 +733,15 @@ pub(super) fn check_spawn_rules(
         // `Goat.checkGoatSpawnRules`。
         // `Goat.checkGoatSpawnRules`.
         MobType::Goat => bright_spawn_rules(world, pos, block_tags::GOATS_SPAWNABLE_ON),
+        // `Frog.checkFrogSpawnRules`。
+        // `Frog.checkFrogSpawnRules`.
+        MobType::Frog => bright_spawn_rules(world, pos, block_tags::FROGS_SPAWNABLE_ON),
+        // `Camel.checkCamelSpawnRules`：`#camels_spawnable_on` + 亮度。
+        // `Camel.checkCamelSpawnRules`: `#camels_spawnable_on` plus brightness.
+        MobType::Camel => bright_spawn_rules(world, pos, block_tags::CAMELS_SPAWNABLE_ON),
+        // 蝌蚪没有登记 `SpawnPlacements`：没有规则，恒真。
+        // Tadpoles have no `SpawnPlacements` entry: no rule, always true.
+        MobType::Tadpole => true,
         MobType::Cow
         | MobType::Pig
         | MobType::Sheep
@@ -699,10 +749,15 @@ pub(super) fn check_spawn_rules(
         | MobType::Horse
         | MobType::Donkey
         | MobType::Mule
-        | MobType::Llama => animal_spawn_rules(world, pos),
+        | MobType::Llama
+        | MobType::Cat => animal_spawn_rules(world, pos),
         MobType::Mooshroom => super::mooshroom::spawn_rules(world, pos),
         MobType::PolarBear => super::polar_bear::spawn_rules(world, pos),
         MobType::Panda => super::panda::spawn_rules(world, pos),
+        MobType::Ocelot => super::ocelot::spawn_rules(world.random()),
+        // `Parrot.checkParrotSpawnRules`：`#parrots_spawnable_on` 加亮度。
+        // `Parrot.checkParrotSpawnRules`: `#parrots_spawnable_on` plus brightness.
+        MobType::Parrot => super::parrot::spawn_rules(world, pos),
         MobType::Zombie
         | MobType::Skeleton
         | MobType::Bogged
@@ -721,7 +776,19 @@ pub(super) fn check_spawn_rules(
                 && valid_mob_spawn_block(world, kind, pos)
                 && super::stray::sees_sky_through_powder_snow(world, pos)
         }
+        // `PatrollingMonster.checkPatrollingMonsterSpawnRules`：方块光大于 8 不刷，其余走
+        // `checkAnyLightMonsterSpawnRules`（不看天色，只看脚下能不能站；和平难度在函数开头
+        // 已经挡掉）。
+        // `PatrollingMonster.checkPatrollingMonsterSpawnRules`: no spawn above block light
+        // 8, otherwise `checkAnyLightMonsterSpawnRules` (no darkness test, only the footing;
+        // peaceful is rejected at the top of this function).
+        MobType::Pillager => super::pillager::check_spawn_rules(world, pos),
         MobType::Slime => super::slime::check_spawn_rules(world, pos),
+        MobType::Bat => super::bat::check_spawn_rules(world, pos),
+        // 幻翼登记的是 `Mob::checkMobSpawnRules`；它不在群系刷怪表里，靠 `PhantomSpawner`。
+        // Phantoms register `Mob::checkMobSpawnRules`; they are in no biome table and
+        // come from the `PhantomSpawner`.
+        MobType::Phantom => valid_mob_spawn_block(world, kind, pos),
         MobType::Drowned => super::drowned::check_spawn_rules(world, pos),
         MobType::Husk => {
             is_dark_enough_to_spawn(world, pos)
@@ -773,7 +840,7 @@ pub(super) fn is_dark_enough_to_spawn(world: &World, pos: BlockPos) -> bool {
 }
 
 /// `Mob.checkMobSpawnRules` 里的 `isValidSpawn`，`NATURAL` 不是刷怪笼。
-fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
+pub(super) fn valid_mob_spawn_block(world: &World, kind: MobType, pos: BlockPos) -> bool {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     if kind.fire_immune() {
         return true;
@@ -789,13 +856,24 @@ fn is_valid_position_for_mob(
     entity: &Entity,
     kind: MobType,
     nearest_player_distance_sqr: f64,
+    sea_level: i32,
 ) -> bool {
     let despawn = f64::from(kind.mob_category().facts().despawn_distance);
-    // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真。
-    // A fresh fish has no bucket flag and no name, so `removeWhenFarAway` is true.
-    let removes = kind.removes_when_far_away() || super::fish::is_fish(kind);
+    // 新生成的鱼还没有桶标记和名字，`removeWhenFarAway` 为真；新生成的豹猫 `tickCount == 0`，为假。
+    // A fresh fish has no bucket flag or name (`removeWhenFarAway` is true); a fresh ocelot
+    // has `tickCount == 0` (false).
+    // 官方把最近玩家距离传给 `removeWhenFarAway(distSqr)`；巡逻中的袭击者按它判定 128 格。
+    // Vanilla passes the nearest-player distance to `removeWhenFarAway(distSqr)`; a
+    // patrolling raider tests the 128-block threshold against it.
+    let removes = entity.kind.mob().is_some_and(|mob| {
+        mob.removes_when_far_away_at(nearest_player_distance_sqr, entity.tick_count)
+    });
     if nearest_player_distance_sqr > despawn * despawn && removes {
         return false;
+    }
+    if kind == MobType::Ocelot {
+        return pathfinder_spawn_rules(world, entity, entity.block_position())
+            && super::ocelot::check_spawn_obstruction(world, entity, sea_level);
     }
     // `Drowned.checkSpawnObstruction` 只检查实体遮挡；水生生物（`AgeableWaterCreature`
     // 和 `WaterAnimal`）也只剩 `isUnobstructed`，不查液体；其余生物还检查盒内液体。
@@ -808,6 +886,9 @@ fn is_valid_position_for_mob(
         && (kind == MobType::Drowned
             || kind.is_ageable_water_creature()
             || kind.is_water_animal()
+            // 美西螈的 `checkSpawnObstruction` 也只剩 `isUnobstructed`，不查液体。
+            // The axolotl's `checkSpawnObstruction` is `isUnobstructed` alone, no liquid check.
+            || kind == MobType::Axolotl
             || !contains_any_liquid(world, bounds))
         && is_unobstructed_by_entities(world, bounds)
 }
@@ -939,6 +1020,10 @@ fn max_spawn_cluster_size(kind: MobType) -> i32 {
         // `Wolf.getMaxSpawnClusterSize` 是 8，其余用 `Mob` 的 4。
         // `Wolf.getMaxSpawnClusterSize` is 8; the rest use the `Mob` default of 4.
         8
+    } else if kind == MobType::Pillager {
+        // `Pillager.getMaxSpawnClusterSize` 是 1。
+        // `Pillager.getMaxSpawnClusterSize` is 1.
+        1
     } else {
         4
     }
@@ -964,22 +1049,21 @@ pub fn is_close_to_spawn_chunk(position: Vec3, chunk: ChunkPos) -> bool {
 }
 
 /// `Level.getNearestPlayer(x, y, z, -1.0, false)` 的距离平方：只排除旁观者，
-/// 创造模式玩家照官方一样算数。
+/// 创造模式玩家照官方一样算数。[`SpawnState`] 在这一刻开头已经滤掉旁观者存好了视图，
+/// 直接遍历切片，不在每个候选步上重新经虚调用构造玩家视图。
 ///
 /// The squared distance of `Level.getNearestPlayer(x, y, z, -1.0, false)`: only
-/// spectators are skipped, creative players count as in vanilla.
-fn nearest_player_distance_sqr(world: &World, x: f64, y: f64, z: f64) -> Option<f64> {
+/// spectators are skipped, creative players count as in vanilla. [`SpawnState`]
+/// already holds the non-spectator player views for this tick.
+fn nearest_player_distance_sqr(players: &[PlayerView], x: f64, y: f64, z: f64) -> Option<f64> {
     let mut best: Option<f64> = None;
-    world.for_each_player(&mut |player| {
-        if player.spectator {
-            return;
-        }
+    for player in players {
         let dx = player.position.x - x;
         let dy = player.position.y - y;
         let dz = player.position.z - z;
         let distance = dx * dx + dy * dy + dz * dz;
         best = Some(best.map_or(distance, |current| current.min(distance)));
-    });
+    }
     best
 }
 
@@ -1017,6 +1101,7 @@ mod tests {
             creative: false,
             sneaking: false,
             sprinting: false,
+            swimming: false,
             invisible: false,
             armor_cover: 0.0,
             main_hand: 0,

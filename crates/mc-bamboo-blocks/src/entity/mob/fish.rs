@@ -84,7 +84,11 @@ impl FishState {
 pub(crate) const fn is_fish(kind: MobType) -> bool {
     matches!(
         kind,
-        MobType::Cod | MobType::Salmon | MobType::TropicalFish | MobType::Pufferfish
+        MobType::Cod
+            | MobType::Salmon
+            | MobType::TropicalFish
+            | MobType::Pufferfish
+            | MobType::Tadpole
     )
 }
 
@@ -102,6 +106,7 @@ pub(crate) const fn is_schooling(kind: MobType) -> bool {
 const fn eye_height(kind: MobType) -> f32 {
     match kind {
         MobType::Cod => 0.195,
+        MobType::Tadpole => super::tadpole::dimensions().2,
         MobType::Salmon | MobType::TropicalFish => 0.26,
         _ => 0.455,
     }
@@ -191,6 +196,21 @@ pub(super) fn goals(kind: MobType) -> GoalSelector {
             },
         },
     ];
+    if kind == MobType::Tadpole {
+        // `AvoidEntityGoal(Player, 8.0F, 1.6, 1.4)`。别的鱼这一条还没建模，见 README。
+        // `AvoidEntityGoal(Player, 8.0F, 1.6, 1.4)`. Not modelled for the other fish yet;
+        // see the README.
+        goals.push(WrappedGoal {
+            priority: 2,
+            running: false,
+            goal: Goal::Avoid(super::avoid::AvoidEntity::new(
+                super::avoid::AvoidClass::Player,
+                8.0,
+                1.6,
+                1.4,
+            )),
+        });
+    }
     if kind == MobType::Pufferfish {
         goals.push(WrappedGoal {
             priority: 1,
@@ -515,6 +535,48 @@ pub(super) fn puffer_touch(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityC
     }
 }
 
+/// `Pufferfish.playerTouch` 的伤害那一步：玩家碰到膨胀的河豚时受 `1 + 状态` 点伤。
+/// 打中时返回这次中毒该挂的刻数（`60 * 状态`），没打中返回 `None`。
+///
+/// The damage step of `Pufferfish.playerTouch`: a player touching an inflated
+/// pufferfish takes `1 + state` damage. Returns the poison duration (`60 * state`) when
+/// the hit lands, `None` otherwise.
+pub fn puffer_player_hit(world: &mut World<'_>, fish: EntityUid, player: EntityUid) -> Option<i32> {
+    let entity = world.entity(fish)?;
+    let mob = entity.kind.mob()?;
+    if mob.mob_type != MobType::Pufferfish || mob.fish.puff_state <= 0 {
+        return None;
+    }
+    let puff_state = mob.fish.puff_state;
+    let mut source = DamageSource::environment(DamageKind::MobAttack).with_non_player_cause(true);
+    source.attacker = Some(fish);
+    source.direct = Some(fish);
+    source.attacker_uuid = Some(mob.uuid);
+    source.position = Some(entity.position);
+    // 表里取出来的副本不带可靠的 ID，公开快照的 uid 以调用方给的为准。
+    // A copy taken from the table carries no reliable id; the caller's uid is authoritative.
+    let mut attacker = entity.split().public;
+    attacker.uid = fish;
+    let amount = 1.0 + puff_state as f32;
+    if !world.hurt_player_from_mob(player, source, amount, Some(&attacker)) {
+        return None;
+    }
+    Some(60 * puff_state)
+}
+
+/// `player.addEffect(new MobEffectInstance(MobEffects.POISON, seconds, 0), this)`。
+///
+/// `player.addEffect(new MobEffectInstance(MobEffects.POISON, seconds, 0), this)`.
+pub fn puffer_player_poison(world: &mut World<'_>, player: EntityUid, seconds: i32) {
+    world.give_player_effect(
+        player,
+        super::effects::EffectInstance::new(
+            mc_bamboo_data::registries::mob_effect::POISON,
+            seconds,
+        ),
+    );
+}
+
 /// `Pufferfish.SCARY_MOB`：使用官方实体类型标签；创造模式玩家由调用方排除。
 ///
 /// `Pufferfish.SCARY_MOB`: use the vanilla entity-type tag; the caller excludes
@@ -617,6 +679,7 @@ const fn flop_sound(kind: MobType) -> &'static str {
         MobType::Cod => "minecraft:entity.cod.flop",
         MobType::Salmon => "minecraft:entity.salmon.flop",
         MobType::TropicalFish => "minecraft:entity.tropical_fish.flop",
+        MobType::Tadpole => "minecraft:entity.tadpole.flop",
         _ => "minecraft:entity.puffer_fish.flop",
     }
 }
@@ -633,6 +696,11 @@ pub(super) const SWIM_SOUND: &str = "minecraft:entity.fish.swim";
 /// by 0.125 towards the target, add a little vertical speed from the height difference
 /// and turn the body towards the target.
 pub(super) fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
+    // 蝌蚪的构造函数把移动控制换成了 `SmoothSwimmingMoveControl`。
+    // The tadpole constructor swaps in `SmoothSwimmingMoveControl`.
+    if mob.mob_type == MobType::Tadpole {
+        return super::frog::move_control_tick(me, mob);
+    }
     if super::living::eye_in_fluid(mob, mc_bamboo_data::tags::fluid_tags::WATER) {
         let delta = me.delta;
         me.delta = Vec3::new(delta.x, delta.y + 0.005, delta.z);
@@ -674,7 +742,20 @@ pub(super) fn random_swim_pos(
     mob: &mut Mob,
     view: &dyn crate::entity::ctx::BlockView,
 ) -> Option<Vec3> {
-    let mut target = super::goals::default_random_pos(me, mob, view, 10, 7);
+    random_swimmable_pos(me, mob, view, 10, 7)
+}
+
+/// `BehaviorUtils.getRandomSwimmablePos(body, maxHorizontalDistance, maxVerticalDistance)`。
+///
+/// `BehaviorUtils.getRandomSwimmablePos(body, maxHorizontalDistance, maxVerticalDistance)`.
+pub(super) fn random_swimmable_pos(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn crate::entity::ctx::BlockView,
+    horizontal: i32,
+    vertical: i32,
+) -> Option<Vec3> {
+    let mut target = super::goals::default_random_pos(me, mob, view, horizontal, vertical);
     let mut count = 0;
     while let Some(pos) = target {
         if view
@@ -687,7 +768,7 @@ pub(super) fn random_swim_pos(
             break;
         }
         count += 1;
-        target = super::goals::default_random_pos(me, mob, view, 10, 7);
+        target = super::goals::default_random_pos(me, mob, view, horizontal, vertical);
     }
     target
 }

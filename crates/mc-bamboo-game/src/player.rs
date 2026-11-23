@@ -164,6 +164,17 @@ pub(crate) struct Player {
     ///
     /// A bow or crossbow in `LivingEntity.useItem`.
     pub(crate) weapon_use: Option<crate::player_weapon::WeaponUse>,
+    /// 官方 `Player.attackStrengthTicker`：`aiStep` 每刻加一，攻击 / 挥空 / 换物品清零。
+    /// 相对计数，随玩家整行搬，不需要时钟平移。
+    ///
+    /// Vanilla `Player.attackStrengthTicker`: incremented every `aiStep` tick and
+    /// reset on attack, air swing or item swap. A relative counter needing no rebasing.
+    pub(crate) attack_strength_ticker: i32,
+    /// 官方 `Player.lastItemInMainHand`：主手物品变了才检查要不要重置冷却。
+    ///
+    /// Vanilla `Player.lastItemInMainHand`: the previous main-hand stack, used to
+    /// detect the item swap that resets the attack cooldown.
+    pub(crate) last_main_hand_item: ItemStack,
     pub(crate) item_use_stats: crate::item_use_stats::ItemUseStats,
     /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
     pub(crate) pending_exhaustion: f32,
@@ -209,6 +220,12 @@ pub(crate) struct Player {
     /// Entity tick count, used modulo 20/10 by peaceful regeneration. Relative,
     /// so island splits and merges need no rebasing.
     pub(crate) entity_ticks: i32,
+    /// `Stats.CUSTOM.get(Stats.TIME_SINCE_REST)`：没睡觉的每一刻 +1，开始睡觉清零。
+    /// 幻翼自定义刷怪器读它决定要不要在玩家头顶刷怪。
+    ///
+    /// `Stats.CUSTOM.get(Stats.TIME_SINCE_REST)`: +1 on every non-sleeping tick,
+    /// reset on sleep start. The phantom custom spawner reads it.
+    pub(crate) time_since_rest: i32,
     /// `lastHurtByMob` / `lastHurtMob` / `lastDamageSource`，狼保护主人时读。
     ///
     /// Combat memory read by tamed wolves guarding their owner.
@@ -287,6 +304,8 @@ impl Player {
             environment: crate::player_environment::Environment::default(),
             use_item: None,
             weapon_use: None,
+            attack_strength_ticker: 0,
+            last_main_hand_item: ItemStack::empty(),
             item_use_stats: Default::default(),
             pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,
@@ -298,6 +317,7 @@ impl Player {
             dead: false,
             last_death_location: None,
             entity_ticks: 0,
+            time_since_rest: 0,
             combat_memory: Default::default(),
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
@@ -457,6 +477,7 @@ impl Player {
             creative: self.game_mode == GameMode::Creative,
             sneaking: self.sync.is_crouching(),
             sprinting: self.sync.is_sprinting(),
+            swimming: self.motion.swimming,
             invisible: false,
             armor_cover: self.armor_cover(),
             main_hand: if main.is_empty() { 0 } else { main.item },
