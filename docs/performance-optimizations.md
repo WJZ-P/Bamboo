@@ -2213,6 +2213,9 @@ cargo build --release -p mc-bamboo-game --example terrain_cache_bench
 ./target/release/examples/terrain_cache_bench --entry-bytes        # 单条 414720 B
 ./target/release/examples/terrain_cache_bench --chunks 58 --threads 4 --seed 2026
 ./target/release/examples/terrain_cache_bench --chunks 58 --threads 8 --seed 2026
+# 只改地形缓存上限，其余设置保持默认，用来量预算 A/B：
+./target/release/examples/terrain_cache_bench --chunks 8 --threads 2 --terrain-mb 128 --label default
+./target/release/examples/terrain_cache_bench --chunks 8 --threads 2 --terrain-mb 8 --label mb8
 ```
 
 ### 14.5 怎么确认结果没变，以及没做的事
@@ -3549,7 +3552,9 @@ CARVERS 地形和地物写增量仍是进程级的纯函数缓存。Director 在
   OnceLock<Result<Worldgen, String>>` 只解析一次，返回同一份 `&'static Worldgen`；
   `with_generator` / `with_thread` 以及 `processor_lists` / `select_spawn` /
   `noise_sea_level` 等只读调用都改用它。每条线程仍各缓存自己的 `Generator`（编译好的
-  采样器、随机源、临时缓冲），但都引用共享的 `Worldgen`。
+  采样器、随机源、临时缓冲），但都引用共享的 `Worldgen`。`op-memprof` 后续又把只读地物注册表
+  `Registry` 从每 `Generator` 各 `parse` 一份改成解析进 `Worldgen` 一份共享（见
+  `docs/profiling.md` §20.1），结果逐字节不变。
 - 唯一挡住共享的是 `Climate.ParameterList` 的 `last_result: Cell<Option<usize>>`
   （R 树 `lastResult`，官方 `Climate.RTree` 是实例上的 `ThreadLocal`，`Cell` 让
   `Worldgen` 变成 `!Sync`）。改成按「线程 + 表」隔离：`ParameterList` 持一个进程内唯一

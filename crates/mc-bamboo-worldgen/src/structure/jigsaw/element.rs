@@ -17,7 +17,7 @@ use crate::{
     structure::{
         BoundingBox,
         processor::ProcessorListRef,
-        template::{Direction, JointType, StructureTemplate},
+        template::{Direction, JointType, TemplateShape},
     },
 };
 use serde_json::Value;
@@ -225,7 +225,7 @@ impl PoolElement {
         match self {
             Self::Empty | Self::Feature { .. } => Ok((0, 0, 0)),
             Self::Single { location, .. } => {
-                let template = StructureTemplate::load_cached(location)?;
+                let template = TemplateShape::load(location)?;
                 Ok(rotation.size(template.size))
             }
             Self::List { elements, .. } => {
@@ -248,7 +248,7 @@ impl PoolElement {
         match self {
             Self::Empty => Err("EmptyPoolElement has no bounding box".to_owned()),
             Self::Single { location, .. } => {
-                let template = StructureTemplate::load_cached(location)?;
+                let template = TemplateShape::load(location)?;
                 Ok(rotation.bounding_box(position, template.size))
             }
             Self::List { elements, .. } => {
@@ -300,7 +300,7 @@ impl PoolElement {
                 joint: JointType::Rollable,
             }]),
             Self::Single { location, .. } => {
-                let template = StructureTemplate::load_cached(location)?;
+                let template = TemplateShape::load(location)?;
                 // `getJigsaws(position, rotation)`：`getRandomPalette` 按**世界位置**选
                 // palette，然后 `Palette.jigsaws()` 已是 `(y, x, z)` 顺序。
                 // `getJigsaws(position, rotation)`: `getRandomPalette` picks the palette

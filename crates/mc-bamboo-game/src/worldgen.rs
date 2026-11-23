@@ -95,19 +95,20 @@ pub struct GeneratedChunk {
 /// One generated block entity: world position `(x, y, z)` and its custom keys.
 pub type GeneratedBlockEntity = ((i32, i32, i32), Tag);
 
-// 解析好的只读 `Worldgen` 全进程共用一份（`Worldgen::shared()`）；每条计算线程只
-// 缓存按种子/设置建好的 `Generator`。`Generator` 引用共享 `Worldgen` 里的群系
-// `ParameterList`，其 R 树 `lastResult` 是「线程 + 表」各自的线程本地状态（官方是
-// `ThreadLocal`），所以查询历史仍按线程隔离。官方的 `RandomState` 由
-// `ChunkMap` 创建和持有，并非每条工作线程一份。
-// The parsed, read-only `Worldgen` is shared process-wide (`Worldgen::shared()`);
-// each compute thread caches only the per-seed/per-settings `Generator`s. A
+// 解析好的只读 `Worldgen` 全进程共用一份（`Worldgen::shared()`），按种子/设置编译好的
+// `Generator` 也全进程共用一份（`Worldgen::shared_generator`）。每条计算线程只留一个
+// `Arc` 句柄。`Generator` 引用共享 `Worldgen` 里的群系 `ParameterList`，其 R 树
+// `lastResult` 是「线程 + 表」各自的线程本地状态（官方是 `ThreadLocal`），所以查询历史
+// 仍按线程隔离。官方的 `RandomState` 由 `ChunkMap` 创建和持有，并非每条工作线程一份。
+// The parsed, read-only `Worldgen` is shared process-wide (`Worldgen::shared()`), and so
+// is the per-seed/per-settings compiled `Generator`
+// (`Worldgen::shared_generator`): each compute thread keeps only an `Arc` handle. A
 // `Generator` references the shared `Worldgen`'s biome `ParameterList`, whose
 // R-tree `lastResult` is per-(thread, table) thread-local state (vanilla:
 // `ThreadLocal`), so lookup history stays thread-isolated. Vanilla creates and
 // owns its `RandomState` in `ChunkMap`, not on each worker.
 thread_local! {
-    static GENERATORS: RefCell<HashMap<(i64, &'static str), chunk::Generator<'static>>> =
+    static GENERATORS: RefCell<HashMap<(i64, &'static str), Arc<chunk::Generator<'static>>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -132,15 +133,10 @@ pub(crate) fn with_generator<T>(
     GENERATORS.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
-            // 只读数据全进程共用一份；每线程只建自己的 `Generator`。
-            // The read-only data is shared process-wide; each thread builds its own `Generator`.
+            // 只读数据全进程共用一份；每线程只留一个 `Arc` 句柄。
+            // The read-only data is shared process-wide; each thread keeps only an `Arc`.
             let worldgen = Worldgen::shared()?;
-            let generator = chunk::Generator::with_settings(
-                worldgen,
-                settings_id,
-                "minecraft:overworld",
-                config.seed,
-            )?;
+            let generator = worldgen.shared_generator(settings_id, config.seed)?;
             entry.insert(generator);
         }
         let generator = cache.get(&key).expect("generator was just inserted");

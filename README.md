@@ -637,6 +637,88 @@ WebView2 的渲染进程不算在内。
   `docs/performance-optimizations.md` 第 24 节）。**已知限制**：数据随编译嵌入、进程内只有一份，
   将来支持运行时换数据包或同进程多份生成数据时 `shared()` 要按实例索引；解析失败的错误会被
   `OnceLock` 缓存到进程结束（当前内嵌数据恒能解析）。
+- **内存构成实测与结构模板压缩**（`op-memprof`，2026-11-21）：新增堆分析器
+  `tools/mc-bamboo-memprof` —— 记账全局分配器按调用栈统计还活着的字节，再按归属汇总，
+  另读 Windows 进程工作集、私有提交、堆与地址空间、线程栈；`run.sh` 固定种子 20261121、
+  视距 8，在「起服后空载 / 一名假玩家在线 / 玩家离开后」三个时刻各取一份读数。实测最大头是
+  **解析后的结构模板 NBT**：在线约 318 MB、玩家离开后仍约 318 MB 不释放（官方
+  `StructureTemplateManager` 的 `structureRepository` 也是全量常驻，Bamboo 原先还按线程各留一份）。
+  两项原型已落地：① 拼装阶段只留「尺寸 + 拼图方块」的全进程共用外形表，整份模板按需解析进
+  **有上限**的线程本地缓存（`crates/mc-bamboo-worldgen/src/structure/template.rs` 的
+  `TemplateShape`）；② 缓存的压缩区块帧 `shrink_to_fit` 掉按未压缩长度预留的多余容量
+  （`crates/mc-bamboo-game/src/outgoing.rs`）。同一固定种子、不带分析器的 release 服务端实测
+  在线工作集 588 → 260 MB、玩家离开后 505 → 201 MB；`jigsaw templates` / `jigsaws` / `pieces`
+  与 `gen-world` 结构位置 0 不一致。**已知限制**：有界模板缓存是**故意和官方不同**的——官方
+  `getOrCreate` 的 `structureRepository` 从不清空，Bamboo 攒到 `CACHE_BLOCK_BUDGET` 个方块项
+  就整表清空、下次重新解析（模板不可变、可重解析，结果逐字节不变，只多花一点 CPU）；全进程
+  外形表用一把 `Mutex`，多生成线程同时查外形会短暂争用，没测吞吐影响。堆分析器自身每块多一个
+  ≥8 字节的头、另占 76 MB 站点表，进程级读数偏大，真实读数一律以不带分析器的 `bamboo` 为准；
+  归属规则是按函数名匹配的启发式，改函数命名或内联会串类；只在 Windows 上有 PDB / `HeapCompact`
+  实现。`HeapCompact` 压实实验显示空闲堆块不会退还给系统，故没有改分配器。
+- **地物注册表全进程共享**（`op-memprof` 续，2026-11-22）：堆实测里优化后最大的常驻项是
+  每条生成线程各 `parse` 一份的只读 `feature::registry::Registry`（在线 / 离开后约 25 MB 常驻）。
+  现把它解析进 `Worldgen`（已由 `Worldgen::shared()` 全进程共用一份），`chunk::Generator` 改为
+  借用 `&'a Registry`，去掉每线程副本。结果逐字节不变：`gen-world --through features`
+  （3538944 方块）、`chunkgen`、`structures`、`structure-rings`、`jigsaw templates` 全 0 不一致。
+  同口径重测该归属 25.14 → 0 MB、共享 `Worldgen` 22.02 → 24.93 MB（吸收唯一一份），净常驻约
+  −22 MB；不带分析器的 release 服务端玩家离开后工作集 181 → 157 MB，见
+  `W:/data/bamboo-agents/reports/op-memprof.md` 与 `docs/profiling.md` §20.1。
+- **结构状态与群系表全进程共享**（`op-memprof` 续，2026-11-22）：每条计算线程原先各自解析
+  一份 `WorldStructureState`（结构集、结构 / jigsaw 注册表、模板池、要塞环位置）和一份群系
+  `ParameterList`。两者构造后只读，现按 `(seed, settings, flat)` 全进程缓存一份 `Arc`，R 树
+  `lastResult` 仍是线程本地。结果逐字节不变：`structures`、`structure-rings`、
+  `chunkgen --through features` 全 0 不一致；同口径重测气候树 6.85 → 1.71 MB、结构状态类
+  15.74 → 10.56 MB，约 −10.9 MB 常驻，`plain` 离开后工作集 157 → 145 MB，见
+  `docs/profiling.md` §20.2。**已知限制**：共享缓存按 `(seed, settings, flat)` 常驻不回收，
+  进程内换种子 / 平坦设置会累积多份（改动前每线程缓存同样不回收，只是每份副本更多）。
+- **`Worldgen` 只留启服后还会读的注册表**（`op-memprof` 续，2026-11-22）：`Worldgen::raw` 原先
+  克隆整份 `worldgen.json`。启服后只有 10 张顶层表会被读（噪声设置、密度函数、地表规则 / 条件、
+  雕刻器、结构集 / 结构、模板池、处理阀），多噪声预设、地物三张表、`features_per_step`、
+  `block_state_provider`、`end_biomes`、`noise` 解析完就没人再读；现在只复制那 10 张
+  （`crates/mc-bamboo-worldgen/src/lib.rs` 的 `RUNTIME_TABLES`）。结果逐字节不变——只是不再
+  保留没人读的键：`chunkgen --through features`、`structures` 全 0 不一致。同一快照
+  `shared Worldgen` 24.93 → 11.50 MB（−13.43 MB 常驻）；不带分析器的 release 服务端
+  54.6 / 212.4 / 145.0 → 38.9 / 192.5 / 128.3 MB（空载 / 在线 / 离开后，忙机器 ±10–20 MB），
+  见 `docs/profiling.md` §20.3。模板池后来进一步改成进程级常驻，`RUNTIME_TABLES` 收到 9 张，
+  见下一条。
+- **不再重复全量解析世界生成数据 + 模板池进程级常驻**（`op-memprof` 续，2026-11-22）：
+  `chunk::Generator::with_settings` 原先通过 `parse_settings` **重新解析整份 `worldgen.json`**
+  （4.4 MB）只为取一个几 KB 的 `noise_settings` 条目，每条生成线程各付一次；
+  `feature::fossil::chain` 每次放化石也要解析两遍。现在都直接取 `Worldgen::raw()` 里已有的
+  `noise_settings` / `processor_list`，无调用者的 `feature::noise_state::holder_registry()`
+  一并删掉。拼图模板池 `template_pool` 只随数据版本变，解析一次存进 `Worldgen::template_pools()`，
+  `WorldStructureState` 克隆 `Arc`，`raw` 从 10 张收到 9 张。结果逐字节不变：`chunkgen
+  --through features`（886272 项）、`jigsaw pools`（2205 池 / 19994 件）全 0 不一致。同一快照
+  `startup` 的 tracked live 13.5 → 11.9 MB、`shared Worldgen` 11.50 → 8.41 MB（−3.09 MB）。
+  **已知限制**：`TemplatePools::parse` 在启服时就预计算 `max_size`，因而会提前加载模板外形；
+  空服比改动前多约 1.5 MB（有玩家时本来就会加载），见 `docs/profiling.md` §20.4。另实测
+  「玩家离开后」：离开 20 s 时工作集 296.7 MB，3 s 后 104.2 MB（默认 30 s 空闲释放清掉
+  128 MB 地形 + 64 MB 地物两份缓存），再强制 `EmptyWorkingSet` 只降到 2.2 MB 而私有提交仍是
+  90.1 MB（纯换出页面，不是真正归还）。所以用户看到的「离开后掉不下来」有一部分是读数早于
+  空闲释放；两份缓存的 MB 上限就是在线峰值的硬上限，可在 `bamboo.toml` 调小。
+- **sin 表与结构群系 R 树去重**（`op-memprof` 续，2026-11-22）：`Mth.sin` 的 65536 项表
+  原在 `mc-bamboo-core`、`carver`、`feature::ores`、`feature::dripstone_utils` 和
+  `mc-bamboo-loot` 各建一份（各 256 KB），现在只留 `mc-bamboo-core::mth` 那一张。
+  `ParameterList` 的 R 树 / 参数点 / 值改为 `Arc` 共享，新增 `fork()`：结构线程不再从条目
+  重建一棵群系 R 树，而是 fork `Worldgen` 里的预置，只换 `lastResult` 槽的编号（官方每份
+  `ParameterList` 的 `ThreadLocal lastResult` 本来就独立）。同一在线快照「template pools and
+  structure state」9.43 → 7.90–8.52 MB，结果逐字节不变（`chunkgen --through features` 3545088 项、
+  `structure-rings` / `structures` / `structure-validity` 全 0 不一致）。见
+  `docs/profiling.md` §20.5。剩下这 7.9 MB 里约 6 MB 是**每条计算线程各编译一份**的密度函数
+  采样器（`SeededRouter`），见下一条。
+- **一份编译好的生成器 + 丢掉路由的重写记忆**（`op-memprof` 续，2026-11-22）：用计数分配器
+  实测，一个 `SeededRouter` 建成后留下 ≈1.43 MB，其中 ≈1.28 MB 是 `Compiler` 的
+  `SLICE_UNIFORM_AXES` 重写记忆（用地址钉住整份密度函数图），编译完就没用了；
+  一个 `chunk::Generator` ≈237 KB，而每条计算线程原本一个、结构线程再一个。现在
+  `SeededRouter::new` 编译完立刻 `Compiler::release_rewrites()`，`Worldgen::shared_generator`
+  按 `(设置, 种子)` 全进程缓存一份 `Arc<chunk::Generator>`，地形线程和结构线程共用（平坦世界
+  要先覆盖常数列，仍按线程各建一份）。为了让生成器能跨线程共享，`material::System` 的
+  陶土色带随机源改成 `prepare` 的局部变量（只在那里用一次，取数顺序不变）。实测同一
+  `left` 快照「template pools and structure state」7.84 → 1.54 MB、「generators」
+  1.16 → 0 MB，合计约 **−7 MB 常驻**；进程级读数在忙机器噪声里看不出来。结果逐字节不变：
+  `chunkgen --through features` 3545088 项、`structures`、`structure-rings` 全 0 不一致，
+  见 `docs/profiling.md` §20.6。**已知限制**：共享生成器按 `(设置, 种子)` 常驻不回收；
+  `SeededRouter` 自身仍有每线程一份采样器（约 146 KB），可以再共享但收益小。
 - **自然刷怪（本轮接入）**：`NaturalSpawner` 已照官方移植并接进岛的一刻，位置在随机刻之前
   （`ServerChunkCache.tickChunks` 先刷怪再跑随机刻）。群系刷怪表、`MobCategory` 上限和
   `spawn_cost` 由生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性导出
@@ -1400,6 +1482,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、战利品表、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
 | `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、战利品表、世界边界和世界生成 |
+| `tools/mc-bamboo-memprof` | 堆内存分析器：用记账全局分配器按调用栈统计还活着的字节、按归属汇总，实测空载 / 一人在线 / 玩家离开后的进程内存构成（`run.sh` 起服取样，Windows + PDB 符号解析） |
 
 依赖方向是单向的：
 
@@ -1424,7 +1507,7 @@ protocol blocks world
 `chunkgen` / `worldgen` / `gen-world` oracle 用其余的数学并逐格对拍。它依赖 `data`
 （官方导出的世界生成数据和群系气候表）和 `blocks`（里面有官方的 `LegacyRandomSource`）。
 `loot` 算方块掉落、实体死亡和箱子填充，由 `game` 在挖掘、爆炸、`destroyBlock`、`/loot` 和容器第一次读写时调用；
-它依赖 `data`（嵌入的战利品表 JSON）和 `blocks`（随机源、方块状态）。
+它依赖 `data`（嵌入的战利品表 JSON）、`blocks`（随机源、方块状态）和 `core`（`Mth.sin` 的查找表）。
 
 ## 线程模型
 

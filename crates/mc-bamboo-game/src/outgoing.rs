@@ -80,7 +80,13 @@ impl SharedFrames {
             )?));
         }
         let started = std::time::Instant::now();
-        let bytes = compression::encode_frames(&self.raw, threshold)?;
+        let mut bytes = compression::encode_frames(&self.raw, threshold)?;
+        // 压缩缓冲区按未压缩的长度预留，区块帧压完通常只剩几分之一；这份结果会跟着
+        // 帧缓存留很久，所以把多出来的容量还回去。
+        // The buffer is reserved at the uncompressed length and a chunk frame
+        // compresses to a fraction of that; the result lives as long as the
+        // frame cache entry, so give the spare capacity back.
+        bytes.shrink_to_fit();
         let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
         COMPRESS_NANOS.fetch_add(elapsed, Ordering::Relaxed);
         COMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);

@@ -24,7 +24,11 @@ use mc_bamboo_blocks::LegacyRandom;
 
 use crate::{
     random::{Random, WorldgenRandom},
-    structure::{pieces::Piece, template::StructureTemplate, template_place},
+    structure::{
+        pieces::Piece,
+        template::{StructureTemplate, TemplateShape},
+        template_place,
+    },
 };
 
 use super::HDir;
@@ -406,7 +410,7 @@ pub fn generate(seed: i64, chunk_x: i32, chunk_z: i32, start_y: i32) -> Result<V
         let size = match sizes.get(&id) {
             Some(size) => *size,
             None => {
-                let size = StructureTemplate::load(&id)?.size;
+                let size = TemplateShape::load(&id)?.size;
                 sizes.insert(id.clone(), size);
                 size
             }

@@ -15,7 +15,12 @@
 //! and the rest live in `nbt`. Bytes come from `mc-bamboo-data::structures` and are
 //! parsed, never rewritten.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    sync::{Arc, LazyLock, Mutex},
+};
 
 use mc_bamboo_blocks::LegacyRandom;
 use mc_bamboo_data::structures as blob;
@@ -28,7 +33,46 @@ thread_local! {
     /// Cache of parsed templates, the counterpart of vanilla
     /// `StructureTemplateManager.getOrCreate`'s `structureRepository`. Templates are
     /// immutable, so each id is parsed once.
-    static CACHE: RefCell<HashMap<String, Rc<StructureTemplate>>> = RefCell::new(HashMap::new());
+    ///
+    /// 和官方不同的是这里有上限：只有真正要摆方块的模板才进来，攒到
+    /// [`CACHE_BLOCK_BUDGET`] 个方块项就整个清空。模板可以随时重新解析，清空不影响结果。
+    ///
+    /// Unlike vanilla this cache is bounded: only templates whose blocks are
+    /// actually placed land here, and it is emptied once it holds
+    /// [`CACHE_BLOCK_BUDGET`] block entries. Templates can be re-parsed at any
+    /// time, so emptying never changes results.
+    static CACHE: RefCell<TemplateCache> = RefCell::new(TemplateCache::default());
+}
+
+/// 一条线程的模板缓存最多留多少个方块项（每项约 56 字节）。
+///
+/// Block entries the template cache of one thread may hold (about 56 bytes each).
+const CACHE_BLOCK_BUDGET: usize = 400_000;
+
+/// 全进程共用的模板「外形」：尺寸和拼图方块。拼装阶段只看这些，全部 1500 多个模板的
+/// 外形加起来只有几 MB，所以一直留着；整份模板（每格一项）则按需解析。
+///
+/// Process-wide template shapes: size and jigsaw blocks. Assembly looks at
+/// nothing else, and the shapes of all 1500-odd templates take a few MB, so
+/// they are kept for good while full templates are parsed on demand.
+static SHAPES: LazyLock<Mutex<HashMap<String, Arc<TemplateShape>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Default)]
+struct TemplateCache {
+    templates: HashMap<String, Rc<StructureTemplate>>,
+    blocks: usize,
+}
+
+impl TemplateCache {
+    fn insert(&mut self, name: &str, template: Rc<StructureTemplate>) {
+        if self.blocks + template.blocks.len() > CACHE_BLOCK_BUDGET {
+            self.templates.clear();
+            self.blocks = 0;
+        }
+        self.blocks += template.blocks.len();
+        self.templates.insert(name.to_owned(), template);
+    }
 }
 
 type Compound = [(String, Tag)];
@@ -220,6 +264,66 @@ impl JigsawEntry {
     }
 }
 
+/// 模板里拼装阶段（`getSize` / `getBoundingBox` / `getJigsaws`）用得到的部分。
+///
+/// The part of a template that assembly (`getSize` / `getBoundingBox` /
+/// `getJigsaws`) needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateShape {
+    pub size: (i32, i32, i32),
+    pub palette_count: usize,
+    /// 同 [`StructureTemplate::palette_jigsaws`]。
+    ///
+    /// Same as [`StructureTemplate::palette_jigsaws`].
+    pub palette_jigsaws: Vec<Vec<JigsawEntry>>,
+}
+
+impl TemplateShape {
+    /// 按注册名取外形；第一次要解析整份模板，但只留下外形。找不到的模板和官方一样
+    /// 当成空模板。
+    ///
+    /// Shape by id. The first lookup parses the whole template but keeps only
+    /// the shape. A missing id is the empty template, as in vanilla.
+    pub fn load(name: &str) -> Result<Arc<Self>, String> {
+        let mut shapes = SHAPES
+            .lock()
+            .map_err(|_| "template shape lock is poisoned")?;
+        if let Some(shape) = shapes.get(name) {
+            return Ok(shape.clone());
+        }
+        let shape = Arc::new(StructureTemplate::parse_named(name)?.into_shape());
+        shapes.insert(name.to_owned(), shape.clone());
+        Ok(shape)
+    }
+
+    /// 同 [`StructureTemplate::jigsaws_at`]。
+    ///
+    /// Same as [`StructureTemplate::jigsaws_at`].
+    pub fn jigsaws_at(&self, position: (i32, i32, i32)) -> &[JigsawEntry] {
+        match pick_palette(self.palette_count, position) {
+            Some(index) => self.palette_jigsaws.get(index).map_or(&[], Vec::as_slice),
+            None => &[],
+        }
+    }
+}
+
+/// `StructurePlaceSettings.getRandomPalette(palettes, pos)` 选中的 palette 序号。
+///
+/// 官方 `getRandom(pos)` 是 `RandomSource.create(Mth.getSeed(pos))`，只由位置决定，
+/// **不消耗**世界生成随机源。
+///
+/// Index of the palette `StructurePlaceSettings.getRandomPalette(palettes, pos)`
+/// picks. Vanilla `getRandom(pos)` is `RandomSource.create(Mth.getSeed(pos))`: the
+/// choice depends only on the position and draws nothing from the worldgen random.
+fn pick_palette(palette_count: usize, position: (i32, i32, i32)) -> Option<usize> {
+    if palette_count == 0 {
+        return None;
+    }
+    let seed = crate::random::positional_seed(position.0, position.1, position.2);
+    let random = crate::random::Random::Legacy(LegacyRandom::new(seed));
+    Some(random.next_int(palette_count as i32) as usize)
+}
+
 /// 一块结构模板。
 ///
 /// One parsed structure template.
@@ -255,17 +359,32 @@ impl StructureTemplate {
     /// Same lookup but returning a shared handle; the hot paths
     /// (`getBoundingBox` / `getJigsaws`) use it to avoid re-parsing NBT per piece.
     pub fn load_cached(name: &str) -> Result<Rc<Self>, String> {
-        if let Some(template) = CACHE.with(|cache| cache.borrow().get(name).cloned()) {
+        if let Some(template) = CACHE.with(|cache| cache.borrow().templates.get(name).cloned()) {
             return Ok(template);
         }
-        let template = match blob::get(name) {
-            Some(bytes) => Rc::new(Self::parse(bytes)?),
+        let template = Rc::new(Self::parse_named(name)?);
+        CACHE.with(|cache| cache.borrow_mut().insert(name, template.clone()));
+        Ok(template)
+    }
+
+    /// 不经过任何缓存，解析一份模板。
+    ///
+    /// Parses one template, bypassing every cache.
+    fn parse_named(name: &str) -> Result<Self, String> {
+        match blob::get(name) {
+            Some(bytes) => Self::parse(bytes),
             // 官方 `getOrCreate` 对缺失的模板返回空模板，不是错误。
             // Vanilla `getOrCreate` returns an empty template for a missing id.
-            None => Rc::new(Self::empty()),
-        };
-        CACHE.with(|cache| cache.borrow_mut().insert(name.to_owned(), template.clone()));
-        Ok(template)
+            None => Ok(Self::empty()),
+        }
+    }
+
+    fn into_shape(self) -> TemplateShape {
+        TemplateShape {
+            size: self.size,
+            palette_count: self.palettes.len(),
+            palette_jigsaws: self.palette_jigsaws,
+        }
     }
 
     /// `new StructureTemplate()`：size 0、无 palette、无方块、无实体、无拼图方块。
@@ -290,12 +409,7 @@ impl StructureTemplate {
     /// picks. Vanilla `getRandom(pos)` is `RandomSource.create(Mth.getSeed(pos))`: the
     /// choice depends only on the position and draws nothing from the worldgen random.
     pub fn palette_index(&self, position: (i32, i32, i32)) -> Option<usize> {
-        if self.palettes.is_empty() {
-            return None;
-        }
-        let seed = crate::random::positional_seed(position.0, position.1, position.2);
-        let random = crate::random::Random::Legacy(LegacyRandom::new(seed));
-        Some(random.next_int(self.palettes.len() as i32) as usize)
+        pick_palette(self.palettes.len(), position)
     }
 
     /// `getJigsaws(position, rotation)` 取到的那个 palette 的拼图方块（未旋转）。

@@ -594,7 +594,14 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   一份，保留随机源、临时缓冲等按线程可变的工作状态。群系 R 树的 `lastResult`
   （官方 `Climate.RTree` 是实例上的 `ThreadLocal`）从 `ParameterList` 里的 `Cell`
   改成按「线程 + 表」隔离的线程本地状态，共享数据因此是 `Sync` 的只读数据，结果
-  逐字节不变（见 `docs/performance-optimizations.md` 第 24 节）。生成的方块/群系按
+  逐字节不变（见 `docs/performance-optimizations.md` 第 24 节）。`op-memprof` 的堆实测又把
+  结构模板从「每条线程常驻全量解析」改成全进程外形表 + 有界按需解析（在线约 318 → 4 MB，
+  见 `W:/data/bamboo-agents/reports/op-memprof.md`），生成结果逐字节不变。只读地物注册表
+  `feature::registry::Registry` 原本也每条 `Generator` 各 `parse` 一份（约 25 MB 常驻），
+  `op-memprof` 续把它解析进 `Worldgen` 一并全进程共享、`Generator` 改为借用，
+  `gen-world --through features` 逐字节 0 不一致（见 `docs/profiling.md` §20.1）。同一续篇
+  （§20.3）又把 `Worldgen::raw` 收紧到启服后还会读的 10 张顶层表，其余解析完就丢，
+  `shared Worldgen` 24.93 → 11.50 MB，生成结果不变。生成的方块/群系按
   官方 `PalettedContainer` 下标写进 24 个 `SectionParts`，组装成
   `ChunkColumn` / `RegionColumn`。
 * 存档：`data/minecraft/world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 写出
@@ -828,8 +835,8 @@ p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算�
 **计算池默认线程数建议**：保留 `min(4, 核数/2) = 4` 作为默认。实测它把世界线程
 稳稳压在 ~1 ms/tick，已经达成「不拖慢 tick」这个首要目标；本机 ~34 ms/区块、4 线程
 理论约 120 区块/秒，但已被 6 名飞行玩家打满，再加线程会线性增加常驻内存
-（每线程一份 `Generator`；解析好的 `Worldgen` 现在全进程共用一份，见
-`docs/performance-optimizations.md` 第 24 节），而这台 31 GB 机器当时已用到 97%。期望更多
+（当时每线程一份 `Generator`；解析好的 `Worldgen` 和编译好的 `Generator` 现在都全进程
+共用一份，见 `docs/profiling.md` §20.6），而这台 31 GB 机器当时已用到 97%。期望更多
 玩家同时在噪声世界飞行、且内存宽裕的部署，再显式把 `chunk_worker_threads` 提到 8，
 以 `compute_backlog` 不再持续增长、`chunk_latency` 回落到亚秒为准；**不要**因为这次
 测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测
@@ -854,7 +861,9 @@ main 上 CPU 随线程数涨，是地物结果缓存按线程各存一份、同�
 现在全进程共享（每个中心一次）。地形缓存现算数等于 13×13 下界，`build_view` 的耗时
 几乎全是替别人算地形。仍剩的一份重复是每个交付区块自己的 features 任务又跑一遍本中心
 地物（约 6 ms），去掉它的设计在 `performance-optimizations.md` 18.6，等确认。另外每条计算线程第一次用时要建自己的
-`Worldgen` / `Generator` / 结构状态，约 1 s CPU，长跑服务器只付一次。
+`SeededRouter`（`Worldgen`、结构状态、群系表和编译好的 `Generator` 已全进程共享），
+约 1 s CPU，长跑服务器只付一次；`SeededRouter` 编译完会丢掉重写记忆，只留约 146 KB 采样器
+（`docs/profiling.md` §20.6）。
 
 ### 分阶段、分高度带的耗时（`wg-perf`）
 

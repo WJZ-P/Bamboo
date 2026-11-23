@@ -1,7 +1,7 @@
 //! 量地形缓存的常驻内存、命中率和整块生成墙钟（release 构建）。
 //!
 //! `cargo run --release -p mc-bamboo-game --example terrain_cache_bench -- \
-//!     [--chunks N] [--threads T] [--seed S] [--label NAME]`
+//!     [--chunks N] [--threads T] [--seed S] [--label NAME] [--terrain-mb N]`
 //!
 //! 每批按「中心区块」跑游戏里同一份 `game_features`：一个中心要 9 个 CARVERS
 //! 地形（3×3），相邻中心大量重叠，正好是这块缓存的用途。工作和线上的计算池一样
@@ -46,6 +46,10 @@ struct Options {
     threads: usize,
     seed: i64,
     label: String,
+    /// 地形缓存上限（MiB）；`None` 用配置里的默认值，只改这一项。
+    /// Terrain cache limit in MiB; `None` keeps the configured default and
+    /// changes nothing else.
+    terrain_mb: Option<usize>,
 }
 
 impl Options {
@@ -55,6 +59,7 @@ impl Options {
             threads: 4,
             seed: 2026,
             label: "run".to_owned(),
+            terrain_mb: None,
         };
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -67,6 +72,9 @@ impl Options {
                 "--threads" => options.threads = value()?.parse().map_err(|e| format!("{e}"))?,
                 "--seed" => options.seed = value()?.parse().map_err(|e| format!("{e}"))?,
                 "--label" => options.label = value()?,
+                "--terrain-mb" => {
+                    options.terrain_mb = Some(value()?.parse().map_err(|e| format!("{e}"))?)
+                }
                 "--entry-bytes" => {
                     let config = config(options.seed);
                     let chunk = mc_bamboo_game::worldgen::generate_chunk(&config, 123, 456)
@@ -76,7 +84,7 @@ impl Options {
                 }
                 _ => {
                     return Err(format!(
-                        "usage: terrain_cache_bench [--chunks N] [--threads T] [--seed S] [--label NAME] [--entry-bytes]\nunknown argument {arg}"
+                        "usage: terrain_cache_bench [--chunks N] [--threads T] [--seed S] [--label NAME] [--terrain-mb N] [--entry-bytes]\nunknown argument {arg}"
                     ));
                 }
             }
@@ -155,6 +163,15 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    // 只覆盖地形上限这一项，其余设置（地物上限、空闲秒数）保持默认。
+    // Override only the terrain limit; every other setting keeps its default.
+    if let Some(terrain_mb) = options.terrain_mb {
+        use mc_bamboo_game::worldgen_cache::{WorldgenCacheSettings, configure};
+        configure(WorldgenCacheSettings {
+            terrain_mb,
+            ..WorldgenCacheSettings::default()
+        });
+    }
     let config = Arc::new(config(options.seed));
     let total = options.side * options.side;
     // 先在主线程预热一次：解析 Worldgen、建 Generator、填一份线程本地状态。

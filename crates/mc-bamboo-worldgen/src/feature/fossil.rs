@@ -149,8 +149,16 @@ impl FossilFeature {
     /// Resolve one chain from the `processor_list` registry; `None` when it contains an
     /// unported processor kind.
     fn chain(&self, name: &str) -> Option<Chain> {
-        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).ok()?;
-        let list = root.get("processor_list")?.get(name)?;
+        // 用共享的 `Worldgen` 里那份 `processor_list`，别再整份解析 `worldgen.json`：
+        // 这段在放置化石时执行，每次全员重解析会白白吃掉几 MB 临时内存。
+        // Read `processor_list` from the shared `Worldgen` instead of re-parsing the whole
+        // `worldgen.json`: this runs while placing a fossil and the full parse would burn
+        // several MB of temporary memory each time.
+        let list = crate::Worldgen::shared()
+            .ok()?
+            .raw()
+            .get("processor_list")?
+            .get(name)?;
         let processors = list.get("processors")?.as_array()?;
         let mut steps = Vec::with_capacity(processors.len());
         for processor in processors {

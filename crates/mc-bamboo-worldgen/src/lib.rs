@@ -55,7 +55,10 @@ pub mod spline;
 pub mod structure;
 pub mod volume;
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use serde_json::Value;
 
@@ -63,11 +66,32 @@ use crate::{
     biome::{MultiNoiseBiomeSource, TheEndBiomeSource},
     climate::{ParameterList, ParameterPoint},
     density::{FunctionRegistry, NoiseRegistry},
+    feature::registry::Registry,
     settings::Settings,
+    structure::jigsaw::TemplatePools,
 };
 
 /// `worldgen` 数据里一条多噪声预设的 13 个定点数：六个区间加一个 `offset`。
 const PRESET_PARAMETER_COUNT: usize = 13;
+
+/// 启服、加载世界时还会读的顶层注册表。`Generator` 编译含水层 / 地表规则 / 雕刻器、
+/// 出生点搜索、结构流水线和处理阀都从这里取 JSON；其余表解析完就没人读。
+///
+/// Top-level registries still read at startup and world load: `Generator` compiles the
+/// aquifer, surface rules and carvers from them, and spawn search, the structure
+/// pipeline and processor lists read them too. Everything else is dead once parsing
+/// finishes.
+const RUNTIME_TABLES: [&str; 9] = [
+    "noise_settings",
+    "density_function",
+    "material_rule",
+    "material_condition",
+    "carver",
+    "biome_carvers",
+    "structure_set",
+    "structure",
+    "processor_list",
+];
 
 /// 官方数据包里世界生成那几个注册表，解析好的样子。
 #[derive(Debug)]
@@ -77,8 +101,39 @@ pub struct Worldgen {
     settings: HashMap<String, Settings>,
     presets: HashMap<String, MultiNoiseBiomeSource>,
     end_biomes: TheEndBiomeSource,
-    /// 地表规则和雕刻器要用的原始注册表，官方 codec 的 JSON。
+    /// 只读地物注册表，解析期定好，随 `Worldgen::shared()` 全进程共用一份。
+    ///
+    /// The read-only feature registry, fixed at parse time and shared process-wide
+    /// via `Worldgen::shared()`.
+    features: Registry,
+    /// 解析好的拼图模板池：只和数据版本有关，和种子、世界类型、区块坐标都无关。
+    /// 官方每世界一份 `StructureTemplatePool` 注册表，这里和地物注册表一样全进程共用。
+    ///
+    /// The parsed jigsaw template pools: they depend only on the data version, not on
+    /// the seed, world type or chunk position. Vanilla keeps one registry per world;
+    /// here it is shared process-wide like the feature registry.
+    pools: Arc<TemplatePools>,
+    /// 启服、加载世界时还会读的顶层注册表，官方 codec 的 JSON 原样保留。
+    ///
+    /// 只留 [`RUNTIME_TABLES`] 那几个：解析完就没人再读的（多噪声预设、地物三表、
+    /// `features_per_step`、`block_state_provider`、`end_biomes`、`noise`）不再常驻，
+    /// `template_pool` 改由 [`Worldgen::template_pools`] 提供。
+    ///
+    /// The top-level registries still read at startup and world load, kept as the
+    /// official codec JSON. Only [`RUNTIME_TABLES`] survive here; tables nobody reads
+    /// after parsing (multi-noise presets, the three feature tables,
+    /// `features_per_step`, `block_state_provider`, `end_biomes`, `noise`) are dropped,
+    /// and `template_pool` lives in [`Worldgen::template_pools`].
     raw: serde_json::Map<String, Value>,
+    /// 按 (设置, 种子) 共享的生成器。编译结果是只读的，官方的 `RandomState` 也由
+    /// `ChunkMap` 建一份给所有工作线程用，所以全进程只留一份；平坦世界要在建好之后
+    /// 覆盖常数列，仍按线程各建一份，不进这张表。
+    ///
+    /// Generators shared per (settings, seed). The compiled result is read-only and
+    /// vanilla's `RandomState` is also a single `ChunkMap`-owned instance used by every
+    /// worker, so one per process is enough. Flat worlds override the constant columns
+    /// after construction and stay per-thread, outside this table.
+    generators: Mutex<HashMap<(String, i64), Arc<chunk::Generator<'static>>>>,
 }
 
 impl Worldgen {
@@ -180,13 +235,41 @@ impl Worldgen {
             barrens: end_biome("barrens")?,
         };
 
+        // 地物注册表只读，随 Worldgen 全进程共用一份，这里只解析一次（四条键上面已校验）。
+        // The feature registry is read-only and shared process-wide with Worldgen;
+        // parse it once here (the four feature keys were shape-checked above).
+        let features = Registry::parse(root)?;
+
+        // 模板池同理：和种子无关，解析一次放进 `Worldgen`，`raw` 里就不再留这份 JSON。
+        // Template pools likewise depend only on the data version; parse them once into
+        // `Worldgen` and drop the JSON from `raw`.
+        let pools = Arc::new(TemplatePools::parse(
+            root.get("template_pool").ok_or("missing template_pool")?,
+        )?);
+
+        // 这里只复制启服后还会读的表，别把整份 JSON 都留着：`multi_noise_presets`、
+        // 地物三表、`features_per_step` 等解析完就没人再读，常驻下来白白占几 MB。
+        // Copy only the tables still read after startup instead of the whole document:
+        // the presets, the feature tables and `features_per_step` are dead once
+        // parsing finishes and would otherwise sit in memory for nothing.
+        let mut raw = serde_json::Map::with_capacity(RUNTIME_TABLES.len());
+        for name in RUNTIME_TABLES {
+            let value = root
+                .get(name)
+                .ok_or_else(|| format!("missing worldgen table {name}"))?;
+            raw.insert(name.to_owned(), value.clone());
+        }
+
         Ok(Self {
             noises,
             functions,
             settings,
             presets,
             end_biomes,
-            raw: root.clone(),
+            features,
+            pools,
+            raw,
+            generators: Mutex::new(HashMap::new()),
         })
     }
 
@@ -216,9 +299,60 @@ impl Worldgen {
         &self.end_biomes
     }
 
-    /// 导出数据里还没解析成 Rust 结构的原始注册表。
+    /// 导出数据里启服后还会读的原始注册表，只有 [`RUNTIME_TABLES`] 那几张。
+    ///
+    /// The raw registries still read after startup: only the [`RUNTIME_TABLES`] ones.
     pub fn raw(&self) -> &serde_json::Map<String, Value> {
         &self.raw
+    }
+
+    /// 全进程共用的只读地物注册表。
+    ///
+    /// The process-wide shared, read-only feature registry.
+    pub fn features(&self) -> &Registry {
+        &self.features
+    }
+
+    /// 全进程共用的拼图模板池；结构状态克隆 `Arc` 即可，不再各自解析。
+    ///
+    /// The process-wide jigsaw template pools; a structure state clones the `Arc`
+    /// instead of parsing its own copy.
+    pub fn template_pools(&self) -> &Arc<TemplatePools> {
+        &self.pools
+    }
+
+    /// 取一份 (设置, 种子) 共用的生成器，第一次调用时编译。
+    ///
+    /// 只有 `Worldgen::shared()` 那份能给出 `'static` 生命周期。编译结果是只读的：
+    /// 每条线程的可变状态（`Context`、群系 R 树 `lastResult`）都在调用点按线程持有，
+    /// 所以多个工作线程可以同时用同一份生成器。
+    ///
+    /// One generator per (settings, seed), compiled on first use. Only the
+    /// `Worldgen::shared()` instance can hand out a `'static` lifetime. The compiled
+    /// result is read-only: per-thread mutable state (`Context`, the biome R-tree
+    /// `lastResult`) lives at the call sites, so several workers can use one generator
+    /// at the same time.
+    pub fn shared_generator(
+        &'static self,
+        settings_id: &str,
+        seed: i64,
+    ) -> Result<Arc<chunk::Generator<'static>>, String> {
+        let key = (settings_id.to_owned(), seed);
+        let mut cache = self
+            .generators
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(found) = cache.get(&key) {
+            return Ok(Arc::clone(found));
+        }
+        let generator = Arc::new(chunk::Generator::with_settings(
+            self,
+            settings_id,
+            chunk::OVERWORLD_PRESET,
+            seed,
+        )?);
+        cache.insert(key, Arc::clone(&generator));
+        Ok(generator)
     }
 }
 
@@ -266,6 +400,7 @@ mod tests {
     use super::*;
     use crate::{
         climate::TargetPoint,
+        sampler::{Compiler, Context, Path},
         settings::{RouterOutput, SeededRouter},
     };
 
@@ -302,6 +437,36 @@ mod tests {
         assert!(worldgen.preset("minecraft:overworld").is_some());
         assert!(worldgen.preset("minecraft:nether").is_some());
         assert_eq!(worldgen.end_biomes().end, "minecraft:the_end");
+    }
+
+    /// `raw` 只留启服后还会读的表，别又把整份 JSON 带回来。
+    ///
+    /// `raw` must keep only the tables still read after startup; the rest would
+    /// otherwise be resident for the whole process for nothing.
+    #[test]
+    fn raw_keeps_only_the_runtime_tables() {
+        let worldgen = worldgen();
+        let raw = worldgen.raw();
+        for name in RUNTIME_TABLES {
+            assert!(raw.contains_key(name), "{name} should be kept");
+        }
+        for name in [
+            "multi_noise_presets",
+            "feature",
+            "placed_feature",
+            "biome_features",
+            "features_per_step",
+            "block_state_provider",
+            "end_biomes",
+            "noise",
+            "template_pool",
+        ] {
+            assert!(!raw.contains_key(name), "{name} should be dropped");
+        }
+        assert_eq!(raw.len(), RUNTIME_TABLES.len());
+        // 模板池转成了 `Worldgen::template_pools()`，不再以 JSON 常驻。
+        // Template pools now live in `Worldgen::template_pools()`, not as JSON.
+        assert_eq!(worldgen.template_pools().len(), 245);
     }
 
     /// 六条 17 位有效数字的噪声振幅必须和官方运行时的 double 逐位相同。
@@ -573,6 +738,55 @@ mod tests {
             let ours = router.sample(output, x, y, z);
             assert_eq!(ours.to_bits() as i32, expected, "{settings} {output:?}");
         }
+    }
+
+    /// 丢掉编译期的重写记忆之后，`SeededRouter::compile` 仍然编译出同样的采样器。
+    ///
+    /// After dropping the compile-time rewrite memo, `SeededRouter::compile` still
+    /// produces the same sampler.
+    #[test]
+    fn compile_after_releasing_rewrites_matches_a_fresh_compiler() {
+        let worldgen = worldgen();
+        let settings = worldgen.settings("minecraft:overworld").expect("有主世界");
+        let function = worldgen
+            .functions()
+            .get("minecraft:overworld/offset")
+            .expect("有这一条")
+            .clone();
+
+        let mut router = SeededRouter::new(settings, 5);
+        let sampler = router.compile(&function);
+        let mut fresh = Compiler::new(5, settings.legacy_random_source);
+        let reference = fresh.compile(&function);
+        let mut context = Context::uncached();
+        for (x, y, z) in [(0, 0, 0), (123, -64, -456), (-1_000_003, 320, 999_999)] {
+            let ours = router.sample_with(&sampler, Path::Point, x, y, z);
+            let official = reference.sample(&mut context, Path::Point, x, y, z);
+            assert_eq!(ours.to_bits(), official.to_bits(), "at {x} {y} {z}");
+        }
+    }
+
+    /// 同一个 (设置, 种子) 只编译一份生成器，换一个种子才编译新的。
+    ///
+    /// One generator per (settings, seed); a different seed compiles a new one.
+    #[test]
+    fn shared_generator_is_one_per_settings_and_seed() {
+        let worldgen = Worldgen::shared().expect("共享数据");
+        let first = worldgen
+            .shared_generator("minecraft:overworld", 7)
+            .expect("能建生成器");
+        let again = worldgen
+            .shared_generator("minecraft:overworld", 7)
+            .expect("能建生成器");
+        assert!(Arc::ptr_eq(&first, &again));
+        let other_seed = worldgen
+            .shared_generator("minecraft:overworld", 8)
+            .expect("能建生成器");
+        assert!(!Arc::ptr_eq(&first, &other_seed));
+        let other_settings = worldgen
+            .shared_generator("minecraft:large_biomes", 7)
+            .expect("能建生成器");
+        assert!(!Arc::ptr_eq(&first, &other_settings));
     }
 
     /// 群系在几个已知的 quart 坐标上和官方一样。
