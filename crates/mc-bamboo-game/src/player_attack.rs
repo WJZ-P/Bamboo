@@ -309,10 +309,18 @@ fn is_sweep_attack(
     if !full || crit || sprint || !player.on_ground {
         return false;
     }
-    let speed = PLAYER_WALKING_SPEED;
+    // 官方 `getSpeed(): F` 先 `f2d` 再乘 2.5，`Mth.square(D)` 和
+    // `Vec3.horizontalDistanceSqr()` 都是 double；f32 里 `0.1F × 2.5` 会舍成
+    // 正好 0.25，把 0.25 格位移误判成不够慢。
+    //
+    // Vanilla's `getSpeed(): F` is widened with `f2d` before the ×2.5, and
+    // both `Mth.square(D)` and `Vec3.horizontalDistanceSqr()` are doubles.
+    // In f32 `0.1F × 2.5` rounds to exactly 0.25 and would wrongly reject a
+    // 0.25-block displacement.
+    let speed = f64::from(PLAYER_WALKING_SPEED);
     let max = speed * 2.5;
     let motion = player.motion.known_movement;
-    let horizontal = (motion.x * motion.x + motion.z * motion.z) as f32;
+    let horizontal = motion.x * motion.x + motion.z * motion.z;
     if horizontal >= max * max {
         return false;
     }
@@ -1421,13 +1429,13 @@ mod tests {
     }
 
     /// 官方 `Player.isSweepAttack` 的前置：满充能、非暴击、非疾跑、着地、水平
-    /// 移动够慢、拿剑。`getSpeed()` 这里按 README 已知限制写死基值 0.1，所以
-    /// 阈值 `0.1 × 2.5` 的平方 = 0.0625。
+    /// 移动够慢、拿剑。`getSpeed()` 这里按 README 已知限制写死 f32 基值 0.1；
+    /// 阈值在 double 里算，约 0.0625000019。
     ///
     /// Vanilla `Player.isSweepAttack`'s gates: full strength, non-critical,
     /// non-sprint, on ground, slow horizontal movement, holding a sword.
-    /// `getSpeed()` is the README-known-limit 0.1 base, so the threshold is
-    /// `(0.1 × 2.5)² = 0.0625`.
+    /// `getSpeed()` is the README-known-limit f32 0.1 base; the threshold is
+    /// computed in double and is about 0.0625000019.
     #[test]
     fn is_sweep_attack_requires_full_charge_ground_and_a_sword() {
         let mut region = Region::new(2, 20, false);
@@ -1465,13 +1473,20 @@ mod tests {
         assert!(!sweep(&region, &sword, true, false, false));
         region.players.get_mut(&id).unwrap().on_ground = true;
 
-        // 水平速度 ≥ (0.1×2.5)² = 0.0625 → 不横扫；慢于它 → 横扫。
-        // Horizontal speed ≥ (0.1×2.5)² = 0.0625 → no sweep; slower → sweep.
+        // 水平位移平方 ≥ (0.1F×2.5)² → 不横扫；慢于它 → 横扫。
+        // Horizontal distance squared ≥ (0.1F×2.5)² → no sweep; slower → sweep.
         region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.3, 0.0, 0.0);
         assert!(!sweep(&region, &sword, true, false, false));
-        // 官方是严格 `<`：`dcmpg >= 0` 时返回 false，正好等于阈值也不横扫。
-        // Vanilla is a strict `<` (`dcmpg >= 0` returns false): equality does not sweep.
+        // 0.25² = 0.0625 仍略小于 double 里的阈值 0.0625000019，官方会横扫；
+        // 用 f32 算阈值会把它错判成不横扫。
+        // 0.25² = 0.0625 is still just under the double threshold 0.0625000019,
+        // so vanilla sweeps; an f32 threshold would wrongly reject it.
         region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.25, 0.0, 0.0);
+        assert!(sweep(&region, &sword, true, false, false));
+        // 阈值本身严格排除（`dcmpg >= 0` → false）。
+        // The threshold itself is excluded (`dcmpg >= 0` → false).
+        let max = f64::from(PLAYER_WALKING_SPEED) * 2.5;
+        region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(max, 0.0, 0.0);
         assert!(!sweep(&region, &sword, true, false, false));
         region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.2, 0.0, 0.0);
         assert!(sweep(&region, &sword, true, false, false));

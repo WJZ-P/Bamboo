@@ -1187,7 +1187,7 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
   `× 0.6` 并 `setSprinting(false)`。暴击 / 横扫两处前置判定由
   `can_critical_requires_every_modelled_precondition` /
   `is_sweep_attack_requires_full_charge_ground_and_a_sword` 单测逐条守住（去掉
-  `onGround` 门控两条都会失败，速度平方正好等于阈值也不横扫）。够距的
+  `onGround` 门控两条都会失败，速度平方按官方的 double 阈值比较）。够距的
   `attack_range` 组件逐字段覆盖、蹲下玩家目标取真实碰撞盒尺寸，以及零伤害整段跳过
   和 `nodamage` 音效，分别由 `a_weapon_attack_range_component_overrides_the_default` /
   `a_crouching_player_target_keeps_its_real_collision_box` /

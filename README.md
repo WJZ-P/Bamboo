@@ -254,7 +254,7 @@ WebView2 的渲染进程不算在内。
   确认近战命中真的把 `DAMAGE_DEALT` 发到客户端（故意把累计值改成 0，前者立刻失败）。
   `can_critical_requires_every_modelled_precondition` /
   `is_sweep_attack_requires_full_charge_ground_and_a_sword` 逐条锁住暴击 / 横扫的
-  官方前置判定（去掉 `onGround` 门控两条都失败，横扫速度阈值正好相等也不横扫）。
+  官方前置判定（去掉 `onGround` 门控两条都失败，横扫阈值按官方的 double 精度比较）。
   `a_zero_damage_attack_skips_the_hit_and_its_sound` /
   `a_rejected_attack_emits_only_the_nodamage_sound` 分别锁住「基础伤害与附魔加成
   都是 0 时整段跳过」和「`hurtOrSimulate` 被无敌帧拒绝时只发 `nodamage` 音」，
@@ -288,7 +288,8 @@ WebView2 的渲染进程不算在内。
   横扫候选按主目标的整个碰撞盒 `inflate(1, 0.25, 1)` 与候选碰撞盒相交判定（不是位置
   点），玩家也算候选（额外击退 / 火焰附加同样对玩家生效），但仍没有队伍判定；
   `ATTACK_SPEED` / `ATTACK_KNOCKBACK` 只累加 `ADD_VALUE` 修饰符、横扫阈值把 `getSpeed()`
-  写死成 0.1，带乘法修饰符或速度药水时可能不同；受害者装备附魔（荆棘）和
+  写死成 f32 的 0.1（乘 2.5、求平方都照官方用 double），带乘法修饰符或速度药水时
+  可能不同；受害者装备附魔（荆棘）和
   `autoSpinAttack` 的武器来源都未建模。
 
 - 多名玩家进入同一个世界；新世界默认 `normal`（噪声地形，见上面世界生成一节），
