@@ -69,6 +69,8 @@ pub enum Goal {
     ///
     /// The parrot's own goals.
     Parrot(super::parrot::ParrotGoal),
+    /// 蜜蜂自己的目标（官方 `Bee` 的内部子类）。
+    Bee(super::bee_goals::BeeGoal),
     /// `LeapAtTargetGoal`：离目标 2 到 4 格、站在地上时扑过去。
     ///
     /// `LeapAtTargetGoal`: leap at a target 2 to 4 blocks away.
@@ -623,6 +625,7 @@ impl Goal {
             Self::Dolphin(goal) => goal.flags(),
             Self::Cat(goal) => goal.flags(),
             Self::Parrot(goal) => goal.flags(),
+            Self::Bee(goal) => goal.flags(),
             Self::Breed { .. }
             | Self::Tempt { .. }
             | Self::OcelotAttack { .. }
@@ -693,6 +696,9 @@ impl Goal {
             return goal.every_tick();
         }
         if let Self::Parrot(goal) = self {
+            return goal.every_tick();
+        }
+        if let Self::Bee(goal) = self {
             return goal.every_tick();
         }
         // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
@@ -770,6 +776,7 @@ impl Goal {
             Self::Dolphin(goal) => goal.name(),
             Self::Cat(goal) => goal.name(),
             Self::Parrot(goal) => goal.name(),
+            Self::Bee(goal) => goal.name(),
             Self::LeapAtTarget { .. } => "LeapAtTargetGoal",
             Self::Bow(_) => "RangedBowAttackGoal",
             Self::HurtByTarget { .. } => "HurtByTargetGoal",
@@ -1657,6 +1664,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::Dolphin(goal) => goal.can_use(me, mob, ctx),
         Goal::Cat(goal) => goal.can_use(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_use(me, mob, ctx),
+        Goal::Bee(goal) => goal.can_use(me, mob, ctx),
         Goal::LeapAtTarget { .. } => leap_can_use(me, mob, ctx),
         Goal::Panic { target, .. } => {
             // `FoxPanicGoal.shouldPanic`：保护中的狐狸不惊慌。
@@ -2272,6 +2280,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::Dolphin(goal) => goal.can_continue(me, mob, ctx),
         Goal::Cat(goal) => goal.can_continue(me, mob, ctx),
         Goal::Parrot(goal) => goal.can_continue(me, mob, ctx),
+        Goal::Bee(goal) => goal.can_continue(me, mob, ctx),
         Goal::LeapAtTarget { .. } => !me.on_ground,
         // `Drowned.DrownedAttackGoal.canContinueToUse`：僵尸的近战条件加 `okTarget`。
         Goal::RandomStroll { .. } | Goal::DrownedGoToWater { .. } => !mob.navigation.is_done(),
@@ -2604,6 +2613,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
         Goal::Dolphin(goal) => goal.start(me, mob, ctx),
         Goal::Cat(goal) => goal.start(me, mob, ctx),
         Goal::Parrot(goal) => goal.start(me, mob, ctx),
+        Goal::Bee(goal) => goal.start(me, mob, ctx),
         Goal::LeapAtTarget { yd } => leap_start(me, mob, ctx, *yd),
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target, .. } => {
@@ -2900,6 +2910,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Dolphin(goal) => goal.stop(me, mob, ctx),
         Goal::Cat(goal) => goal.stop(mob),
         Goal::Parrot(goal) => goal.stop(mob),
+        Goal::Bee(goal) => goal.stop(me, mob, ctx),
         Goal::LeapAtTarget { .. } => {}
         Goal::Swim { .. } => mob.navigation.stop(),
         // `MoveToBlockGoal` 没有覆写 `stop`：不停导航。
@@ -3330,6 +3341,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::Dolphin(goal) => goal.tick(me, mob, ctx),
         Goal::Cat(goal) => goal.tick(me, mob, ctx),
         Goal::Parrot(goal) => goal.tick(me, mob, ctx),
+        Goal::Bee(goal) => goal.tick(me, mob, ctx),
         // `TamableAnimalPanicGoal.tick`：能走向主人且离得远时先瞬移过去。
         // `TamableAnimalPanicGoal.tick` teleports to a distant owner first.
         Goal::Panic { .. } if super::tame::is_tamable(mob.mob_type) => {

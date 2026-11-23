@@ -17,6 +17,8 @@ pub mod attributes;
 pub mod avoid;
 pub mod axolotl;
 pub mod bat;
+pub mod bee;
+pub mod bee_goals;
 pub mod bogged;
 pub mod brain;
 pub mod bucketable;
@@ -174,6 +176,7 @@ pub enum MobType {
     Bat,
     Phantom,
     Camel,
+    Bee,
     IronGolem,
     SnowGolem,
     Silverfish,
@@ -184,7 +187,7 @@ impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -231,6 +234,7 @@ impl MobType {
         Self::Tadpole,
         Self::Bat,
         Self::Phantom,
+        Self::Bee,
         Self::IronGolem,
         Self::SnowGolem,
         Self::Silverfish,
@@ -287,6 +291,7 @@ impl MobType {
             Self::Bat => ids::BAT,
             Self::Phantom => ids::PHANTOM,
             Self::Camel => ids::CAMEL,
+            Self::Bee => ids::BEE,
             Self::IronGolem => ids::IRON_GOLEM,
             Self::SnowGolem => ids::SNOW_GOLEM,
             Self::Silverfish => ids::SILVERFISH,
@@ -343,6 +348,7 @@ impl MobType {
             Self::Bat => "minecraft:bat",
             Self::Phantom => "minecraft:phantom",
             Self::Camel => "minecraft:camel",
+            Self::Bee => "minecraft:bee",
             Self::IronGolem => "minecraft:iron_golem",
             Self::SnowGolem => "minecraft:snow_golem",
             Self::Silverfish => "minecraft:silverfish",
@@ -361,6 +367,7 @@ impl MobType {
             Self::Goat => Some(item_tags::GOAT_FOOD),
             Self::Frog | Self::Tadpole => Some(item_tags::FROG_FOOD),
             Self::Camel => Some(item_tags::CAMEL_FOOD),
+            Self::Bee => Some(item_tags::BEE_FOOD),
             Self::Turtle => Some(item_tags::TURTLE_FOOD),
             Self::Axolotl => Some(item_tags::AXOLOTL_FOOD),
             Self::Ocelot => Some(item_tags::OCELOT_FOOD),
@@ -449,6 +456,7 @@ impl MobType {
             // 坐姿尺寸在 `Mob::dimensions` 里按 `camel.pose` 覆盖。
             // Sitting dimensions are overridden by `Mob::dimensions` from `camel.pose`.
             (Self::Camel, baby) => camel::dimensions(baby, false),
+            (Self::Bee, _) => bee::dimensions(),
             (Self::IronGolem, _) => iron_golem::dimensions(),
             (Self::SnowGolem, _) => snow_golem::dimensions(),
             (Self::Sheep, baby) => sheep::dimensions(baby),
@@ -578,7 +586,12 @@ impl MobType {
     pub const fn has_no_ambient_sound(self) -> bool {
         matches!(
             self,
-            Self::Creeper | Self::Pufferfish | Self::Slime | Self::Tadpole | Self::IronGolem
+            Self::Creeper
+                | Self::Pufferfish
+                | Self::Slime
+                | Self::Tadpole
+                | Self::Bee
+                | Self::IronGolem
         )
     }
 
@@ -596,6 +609,7 @@ impl MobType {
                 | Self::Pillager
                 | Self::Ocelot
                 | Self::Cat
+                | Self::Bee
         )
     }
 
@@ -770,7 +784,7 @@ impl MobType {
     /// Types that override `checkFallDamage` with an empty body (parrots, bats and
     /// phantoms).
     pub const fn ignores_fall_damage_check(self) -> bool {
-        matches!(self, Self::Parrot | Self::Bat | Self::Phantom)
+        matches!(self, Self::Parrot | Self::Bat | Self::Phantom | Self::Bee)
     }
 
     /// `SpawnPlacements` 里登记成 `IN_WATER` 的类型。
@@ -845,6 +859,7 @@ impl MobType {
             Self::Bat => "minecraft:entities/bat",
             Self::Phantom => "minecraft:entities/phantom",
             Self::Camel => "minecraft:entities/camel",
+            Self::Bee => "minecraft:entities/bee",
             Self::IronGolem => "minecraft:entities/iron_golem",
             Self::SnowGolem => "minecraft:entities/snow_golem",
             Self::Silverfish => "minecraft:entities/silverfish",
@@ -884,7 +899,7 @@ impl MobType {
             0.1
         } else if matches!(
             self,
-            Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf
+            Self::Cow | Self::Mooshroom | Self::Squid | Self::GlowSquid | Self::Wolf | Self::Bee
         ) {
             0.4
         } else {
@@ -953,6 +968,8 @@ impl MobType {
             // [`living::play_ambient_sound`].
             Self::Parrot => Some("minecraft:entity.parrot.ambient"),
             Self::Camel => Some("minecraft:entity.camel.ambient"),
+            // `Bee.getAmbientSound()` 返回 null：不出环境音也不抽音高的随机数。
+            Self::Bee => None,
             Self::IronGolem => None,
             Self::SnowGolem => Some("minecraft:entity.snow_golem.ambient"),
             Self::Silverfish => Some("minecraft:entity.silverfish.ambient"),
@@ -1001,6 +1018,7 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.hurt"),
             Self::Phantom => Some("minecraft:entity.phantom.hurt"),
             Self::Camel => Some("minecraft:entity.camel.hurt"),
+            Self::Bee => Some("minecraft:entity.bee.hurt"),
             Self::IronGolem => Some("minecraft:entity.iron_golem.hurt"),
             Self::SnowGolem => Some("minecraft:entity.snow_golem.hurt"),
             Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
@@ -1049,6 +1067,7 @@ impl MobType {
             Self::Bat => Some("minecraft:entity.bat.death"),
             Self::Phantom => Some("minecraft:entity.phantom.death"),
             Self::Camel => Some("minecraft:entity.camel.death"),
+            Self::Bee => Some("minecraft:entity.bee.death"),
             Self::IronGolem => Some("minecraft:entity.iron_golem.death"),
             Self::SnowGolem => Some("minecraft:entity.snow_golem.death"),
             Self::Silverfish => Some("minecraft:entity.silverfish.death"),
@@ -1104,6 +1123,8 @@ impl MobType {
             // Phantoms keep the default `playStepSound`: the block's own step sound.
             Self::Phantom => None,
             Self::Camel => Some("minecraft:entity.camel.step"),
+            // `Bee.playStepSound` 是空实现。
+            Self::Bee => None,
             Self::IronGolem => Some("minecraft:entity.iron_golem.step"),
             Self::SnowGolem => None,
             Self::Silverfish => Some("minecraft:entity.silverfish.step"),
@@ -1161,6 +1182,7 @@ impl MobType {
             Self::Bat => items::BAT_SPAWN_EGG,
             Self::Phantom => items::PHANTOM_SPAWN_EGG,
             Self::Camel => items::CAMEL_SPAWN_EGG,
+            Self::Bee => items::BEE_SPAWN_EGG,
             Self::IronGolem => items::IRON_GOLEM_SPAWN_EGG,
             Self::SnowGolem => items::SNOW_GOLEM_SPAWN_EGG,
             Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
@@ -1217,6 +1239,7 @@ impl MobType {
             Self::Bat => "entity.minecraft.bat",
             Self::Phantom => "entity.minecraft.phantom",
             Self::Camel => "entity.minecraft.camel",
+            Self::Bee => "entity.minecraft.bee",
             Self::IronGolem => "entity.minecraft.iron_golem",
             Self::SnowGolem => "entity.minecraft.snow_golem",
             Self::Silverfish => "entity.minecraft.silverfish",
@@ -1478,6 +1501,8 @@ pub enum DamageKind {
     ///
     /// Llama spit, `minecraft:spit`.
     Spit,
+    /// 蜜蜂蜇刺，`minecraft:sting`。
+    Sting,
     Thrown,
     Starve,
     Thorns,
@@ -1522,6 +1547,7 @@ impl DamageKind {
             Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
             Self::Arrow => "minecraft:arrow",
             Self::Spit => "minecraft:spit",
+            Self::Sting => "minecraft:sting",
             Self::Thrown => "minecraft:thrown",
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
@@ -1575,6 +1601,7 @@ impl DamageKind {
             Self::OutOfWorld => "outOfWorld",
             Self::PlayerAttack => "player",
             Self::MobAttack | Self::MobAttackNoAggro | Self::Spit => "mob",
+            Self::Sting => "sting",
             Self::Arrow => "arrow",
             Self::Thrown => "thrown",
             Self::Starve => "starve",
@@ -1612,6 +1639,7 @@ impl DamageKind {
             Self::MobAttackNoAggro,
             Self::Arrow,
             Self::Spit,
+            Self::Sting,
             Self::Thrown,
             Self::Starve,
             Self::Thorns,
@@ -2388,6 +2416,8 @@ pub struct Mob {
     ///
     /// The camel's pose state machine synced values and dash timer.
     pub camel: camel::Camel,
+    /// 蜜蜂的元数据字节、巢 / 花位置和授粉状态；别的生物是缺省值。
+    pub bee: bee::Bee,
     /// `Tadpole.age`：到 24000 变成青蛙。蝌蚪不是 `AgeableMob`，和 `age` 是两回事。
     ///
     /// `Tadpole.age`: a frog at 24000. Tadpoles are not `AgeableMob`s, so this is
@@ -2510,6 +2540,7 @@ impl Mob {
             MobType::Bat => bat::attributes(),
             MobType::Phantom => phantom::attributes(),
             MobType::Camel => camel::attributes(),
+            MobType::Bee => bee::attributes(),
             MobType::IronGolem => iron_golem::attributes(),
             MobType::SnowGolem => snow_golem::attributes(),
             MobType::Silverfish => silverfish::attributes(),
@@ -2578,6 +2609,7 @@ impl Mob {
             // alongside the brain.
             MobType::Tadpole => fish::goals(mob_type),
             MobType::Phantom => phantom::goals(),
+            MobType::Bee => bee_goals::goals(&mut navigation),
             MobType::IronGolem => iron_golem::goals(&mut navigation),
             MobType::SnowGolem => snow_golem::goals(&mut navigation),
             MobType::Silverfish => silverfish::goals(&mut navigation),
@@ -2637,6 +2669,7 @@ impl Mob {
             MobType::Drowned => drowned::targets(),
             MobType::Witch => witch::targets(),
             MobType::Phantom => phantom::target_goals(),
+            MobType::Bee => bee_goals::target_goals(),
             MobType::Pillager => pillager::targets(),
             MobType::IronGolem => iron_golem::target_goals(),
             MobType::SnowGolem => snow_golem::target_goals(),
@@ -2840,6 +2873,7 @@ impl Mob {
             goat: goat::Goat::default(),
             frog: frog::Frog::default(),
             camel: camel::Camel::default(),
+            bee: bee::Bee::default(),
             iron_golem: iron_golem::IronGolem::default(),
             snow_golem: snow_golem::SnowGolem::default(),
             tadpole_age: 0,
@@ -2886,6 +2920,9 @@ impl Mob {
         }
         if mob_type == MobType::Parrot {
             parrot::configure(&mut mob);
+        }
+        if mob_type == MobType::Bee {
+            bee::configure(&mut mob);
         }
         if mob_type == MobType::Wolf {
             wolf::configure(&mut mob);
@@ -3095,6 +3132,9 @@ impl Mob {
 /// 别的实体和追踪同步能读到的生物数据。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobPublic {
+    /// `Bee.DATA_FLAGS_ID` 和 `DATA_ANGER_END_TIME`。
+    pub bee_flags: u8,
+    pub bee_anger_end_time: i64,
     pub mob_type: MobType,
     pub uuid: [u8; 16],
     /// 同步 `update_attributes` 用的属性表（只含已经实例化的条目）。
@@ -3314,6 +3354,8 @@ pub struct MobPublic {
 impl MobPublic {
     pub fn of(mob: &Mob, in_water: bool) -> Self {
         Self {
+            bee_flags: mob.bee.flags,
+            bee_anger_end_time: mob.bee.anger_end_time,
             mob_type: mob.mob_type,
             uuid: mob.uuid,
             attributes: mob.attributes.clone(),

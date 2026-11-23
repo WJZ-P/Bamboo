@@ -36,6 +36,9 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod bat;
+mod bee;
+mod bee_ai;
+mod bee_release;
 mod brain;
 mod egg;
 mod equine;
@@ -117,6 +120,9 @@ enum Line {
     EggDispense(egg::EggDispenseCase),
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
+    Bee(Box<bee::BeeCase>),
+    BeeAi(Box<bee_ai::BeeAiCase>),
+    BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
     GolemAttackRoll(golem::GolemAttackRollCase),
     GolemSave(Box<golem::GolemSaveCase>),
@@ -809,6 +815,8 @@ struct ZombieFacts {
     monsters_burn: bool,
     sea_level: i32,
     raining: bool,
+    /// 蜂巢对拍直接注入官方的 `BEES_STAY_IN_HIVE` 常量层。
+    bees_stay: Option<bool>,
     /// 热群系 / 下界场景注入的 `SNOW_GOLEM_MELTS`。
     snow_golem_melts: bool,
 }
@@ -1118,6 +1126,12 @@ impl Level for MobLevel {
             return false;
         }
         mc_bamboo_blocks::monster_prevents_rest_in(self, pos)
+    }
+
+    fn bees_stay_in_hive(&self) -> bool {
+        self.facts.bees_stay.unwrap_or_else(|| {
+            self.facts.raining || mc_bamboo_blocks::sky::bees_stay_in_hive(self.facts.clock)
+        })
     }
 
     fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
@@ -1457,6 +1471,9 @@ impl Report {
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
+                Line::Bee(case) => self.replay_bee(&case),
+                Line::BeeAi(case) => self.replay_bee_ai(&case),
+                Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
                 Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
                 Line::GolemSave(case) => self.replay_golem_save(&case),
@@ -1610,6 +1627,7 @@ impl Report {
                 },
                 sea_level: case.sea_level,
                 raining: case.raining,
+                bees_stay: None,
             },
             natural_spawn: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),

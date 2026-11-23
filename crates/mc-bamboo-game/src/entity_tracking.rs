@@ -997,6 +997,14 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    use mc_bamboo_data::entity_types as facts;
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Bee {
+        return match index {
+            facts::BEE_FLAGS => EntityData::BeeFlags(0),
+            facts::BEE_ANGER_END_TIME => EntityData::BeeAngerEndTime(-1),
+            _ => EntityData::MobFlags(0),
+        };
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Wolf
         && let Some(data) = wolf_default_data(index)
     {
@@ -1529,6 +1537,15 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     if mob.age_locked {
         out.push(EntityData::AgeLocked(true));
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Bee {
+        if mob.bee_flags != 0 {
+            out.push(EntityData::BeeFlags(mob.bee_flags));
+        }
+        if mob.bee_anger_end_time != -1 {
+            out.push(EntityData::BeeAngerEndTime(mob.bee_anger_end_time));
+        }
+        return out;
     }
     if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Wolf {
         // 狼的 18、19 是驯服标志和主人，不是牛的花色和叫声。

@@ -78,6 +78,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
     write_file(output_dir, "entity_types.rs", &entity_types_file(data))?;
+    write_file(output_dir, "environment.rs", &environment_file(data)?)?;
     write_file(
         output_dir,
         "component_registries.rs",
@@ -759,6 +760,68 @@ fn const_name(name: &str) -> Result<String, String> {
     Ok(name.to_ascii_uppercase())
 }
 
+/// 官方 `data/minecraft/timeline/day.json` 里 `BEES_STAY_IN_HIVE` 轨迹的关键帧。
+///
+/// The keyframes of the `BEES_STAY_IN_HIVE` track from the vanilla day timeline.
+fn environment_file(data: &VersionData) -> Result<String, String> {
+    use serde_json::Value;
+    let raw = data
+        .timelines
+        .get("minecraft:day")
+        .ok_or("the vanilla day timeline is missing")?;
+    let day: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let period = day
+        .get("period_ticks")
+        .and_then(Value::as_i64)
+        .ok_or("the day timeline has no period_ticks")?;
+    let track = day
+        .get("tracks")
+        .and_then(|tracks| tracks.get("minecraft:gameplay/bees_stay_in_hive"))
+        .ok_or("BEES_STAY_IN_HIVE is not in the day timeline")?;
+    let modifier = track
+        .get("modifier")
+        .and_then(Value::as_str)
+        .unwrap_or("or");
+    if modifier != "or" {
+        return Err(format!("unexpected BEES_STAY_IN_HIVE modifier: {modifier}"));
+    }
+    let mut frames = Vec::new();
+    for frame in track
+        .get("keyframes")
+        .and_then(Value::as_array)
+        .ok_or("BEES_STAY_IN_HIVE has no keyframes")?
+    {
+        let ticks = frame
+            .get("ticks")
+            .and_then(Value::as_i64)
+            .ok_or("a BEES_STAY_IN_HIVE keyframe has no ticks")?;
+        let value = frame
+            .get("value")
+            .and_then(Value::as_bool)
+            .ok_or("a BEES_STAY_IN_HIVE keyframe has no boolean value")?;
+        frames.push((ticks, value));
+    }
+    if frames.len() != 2 || !frames[0].1 || frames[1].1 {
+        return Err("unexpected BEES_STAY_IN_HIVE keyframes".to_owned());
+    }
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 主世界「蜜蜂留在巢里」时间线的关键帧。");
+    let _ = writeln!(out, "///");
+    let _ = writeln!(out, "/// From `data/minecraft/timeline/day.json`.");
+    let _ = writeln!(out, "pub const DAY_PERIOD_TICKS: i64 = {period};");
+    let _ = writeln!(
+        out,
+        "pub const BEES_STAY_IN_HIVE_START_TICK: i64 = {};",
+        frames[0].0
+    );
+    let _ = writeln!(
+        out,
+        "pub const BEES_STAY_IN_HIVE_END_TICK: i64 = {};",
+        frames[1].0
+    );
+    Ok(out)
+}
+
 fn module_file() -> String {
     "pub mod biomes;
 pub mod block_classes;
@@ -770,6 +833,7 @@ pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
 pub mod entity_types;
+pub mod environment;
 pub mod gamerules;
 pub mod heightmaps;
 pub mod item_components;
@@ -3675,6 +3739,40 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const PARROT_SOUND_MAP_SIZE: i32 = {};",
         facts.parrot_sound_map_size
     );
+    for (name, value) in [
+        ("BEE_FLAGS", facts.bee_flags),
+        ("BEE_ANGER_END_TIME", facts.bee_anger_end_time),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("BEE_EYE_HEIGHT", facts.bee_eye_height),
+        ("BEE_FLAP_DEGREES_PER_TICK", facts.bee_flap_degrees_per_tick),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
+    for (name, value) in [
+        ("BEE_MAX_HEALTH", facts.bee_max_health),
+        ("BEE_FLYING_SPEED", facts.bee_flying_speed),
+        ("BEE_MOVEMENT_SPEED", facts.bee_movement_speed),
+        ("BEE_ATTACK_DAMAGE", facts.bee_attack_damage),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f64 = {value:?};");
+    }
+    for (name, value) in [
+        ("BEE_TICKS_PER_FLAP", facts.bee_ticks_per_flap),
+        ("BEE_ANGER_MIN_SECONDS", facts.bee_anger_min_seconds),
+        ("BEE_ANGER_MAX_SECONDS", facts.bee_anger_max_seconds),
+        ("BEEHIVE_MAX_OCCUPANTS", facts.beehive_max_occupants),
+        (
+            "BEEHIVE_MIN_TICKS_NECTARLESS",
+            facts.beehive_min_ticks_nectarless,
+        ),
+        ("BEEHIVE_MIN_TICKS_NECTAR", facts.beehive_min_ticks_nectar),
+        ("BEEHIVE_REENTER_TICKS", facts.beehive_reenter_ticks),
+    ] {
+        let _ = writeln!(out, "pub const {name}: i32 = {value};");
+    }
     let _ = writeln!(
         out,
         "pub const TROPICAL_FISH_COMMON_VARIANTS: &[i32] = &{:?};",

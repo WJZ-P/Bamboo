@@ -86,6 +86,42 @@ pub(crate) fn drop_broken_block(
 ///
 /// Vanilla `BlockEntity.collectComponents`: take the snapshot before the block entity
 /// disappears with the block write.
+/// `EnchantmentHelper.hasTag(tool, PREVENTS_BEE_SPAWNS_WHEN_MINING)`。
+/// 先解出主手的 `ENCHANTMENTS`（含物品默认组件），再按官方附魔标签里的 ID 判断。
+pub(crate) fn prevents_bee_spawns_when_mining(region: &Region, player: PlayerId) -> bool {
+    use mc_bamboo_data::registries::data_component_type;
+    use mc_bamboo_protocol::components::ComponentValue;
+    let Some(stack) = region
+        .players
+        .get(&player)
+        .map(|p| p.inventory.held(mc_bamboo_core::Hand::Main))
+    else {
+        return false;
+    };
+    let patch = stack.patch();
+    let default = mc_bamboo_protocol::components::defaults::resolve(
+        stack.item,
+        &patch,
+        data_component_type::ENCHANTMENTS,
+    );
+    let Some(value) = patch.get(data_component_type::ENCHANTMENTS).or(default) else {
+        return false;
+    };
+    let ComponentValue::Enchantments(levels) = value else {
+        return false;
+    };
+    let tagged = mc_bamboo_data::tags::TAG_GROUPS
+        .iter()
+        .filter(|group| group.registry == "minecraft:enchantment")
+        .flat_map(|group| group.tags.iter())
+        .find(|tag| tag.name == "minecraft:prevents_bee_spawns_when_mining")
+        .map(|tag| tag.ids)
+        .unwrap_or(&[]);
+    levels
+        .iter()
+        .any(|&(id, level)| level > 0 && tagged.contains(&id))
+}
+
 pub(crate) fn collect_block_entity(
     containers: &BTreeMap<BlockPos, crate::container::ContainerEntry>,
     pos: BlockPos,

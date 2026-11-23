@@ -757,6 +757,31 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
+    /// 以 `center` 为中心、`radius` 格（切比雪夫）内、已加载区块里的蜂巢 /
+    /// 蜂箱方块位置。返回顺序固定为 `(x, y, z)` 升序，调用方按离自己的距离
+    /// 做稳定排序；未加载的区块整块跳过。
+    ///
+    /// 这是 `PoiManager.getInRange(BEE_HOME, 20)` 的临时替代：以后换成 POI 查询。
+    /// 名称与避雷针那边同类查询保持一致（都放在 `Level` 上、都叫 `*_near`）。
+    /// 默认实现逐格扫方块状态；游戏层按区块段调色板先筛。
+    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        let mut out = Vec::new();
+        for x in (center.x - radius)..=(center.x + radius) {
+            for y in (center.y - radius)..=(center.y + radius) {
+                for z in (center.z - radius)..=(center.z + radius) {
+                    let pos = BlockPos::new(x, y, z);
+                    if self
+                        .block_state(pos)
+                        .is_tagged(mc_bamboo_data::tags::block_tags::BEEHIVES)
+                    {
+                        out.push(pos);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// 这个区块里哪些区块段 [`is_randomly_ticking_section`](Self::is_randomly_ticking_section)：
     /// 第 i 位对应从世界底部数起的第 i 段。
     ///
@@ -1150,6 +1175,14 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `DimensionType.hasFixedTime()`。主世界为假。
     fn dimension_has_fixed_time(&self) -> bool {
         false
+    }
+
+    /// `EnvironmentAttributes.BEES_STAY_IN_HIVE`：主世界的时间线和天气层。
+    /// 对拍夹具可以直接给官方那一侧算出的布尔值。
+    fn bees_stay_in_hive(&self) -> bool {
+        crate::sky::bees_stay_in_hive(self.clock_ticks())
+            || self.block_weather().rain_level > 0.0
+            || self.block_weather().thunder_level > 0.0
     }
 
     /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线在

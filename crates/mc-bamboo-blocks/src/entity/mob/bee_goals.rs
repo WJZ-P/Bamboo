@@ -1,0 +1,933 @@
+//! 蜜蜂的目标：官方 `Bee.registerGoals` 里所有内部子类，逐条照 26.3 字节码。
+//!
+//! 官方的 `BaseBeeGoal` 把 `canUse` / `canContinueToUse` 包了一层「没在生气」；
+//! 这里统一在 [`BeeGoal::can_use`] / [`BeeGoal::can_continue`] 入口判断。
+//! 写方块、进巢、粒子这类要动世界的操作走 [`Command`]，两种驱动顺序一致。
+//!
+//! Bee goals: every inner class of vanilla `Bee.registerGoals`, translated from
+//! the 26.3 bytecode. World mutations go through `Command` so both drives agree.
+
+use std::collections::HashMap;
+
+use super::{
+    GoalSelector, Mob,
+    goals::{self, Flag, Goal, WrappedGoal},
+    living,
+    navigation::Navigation,
+};
+use crate::entity::{
+    Entity,
+    ctx::{BlockView, Command, EntityCtx},
+};
+use crate::{
+    behaviour::machines::beehive_entity::BeehiveEntity,
+    state::{AGE_3, AGE_7, AGE_15, BERRIES, BlockState},
+    world::World,
+};
+use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_data::{blocks, registries::mob_effect, tags::block_tags};
+
+/// `Bee` 的内部目标。每个变体自带逐刻状态，名字是官方类名。
+#[derive(Debug, Clone, PartialEq)]
+pub enum BeeGoal {
+    /// `BeeAttackGoal(1.4, true)`：生气且没蜇过时走常规近战。
+    Attack,
+    /// `BeeEnterHiveGoal`：在巢 2 格内、想进巢、巢没满时把自己存进去。
+    EnterHive,
+    /// `ValidateHiveGoal`：每 20 刻检查巢还有效。
+    ValidateHive,
+    /// `ValidateFlowerGoal`：每 20 刻检查记住的花是不是花。
+    ValidateFlower,
+    /// `BeePollinateGoal`：找花、悬停、采粉 400 刻后拿蜜。
+    Pollinate(Pollinate),
+    /// `BeeLocateHiveGoal`：200 刻一次找 20 格内没满的巢。
+    LocateHive,
+    /// `BeeGoToHiveGoal`：飞回巢，2400 刻 / 卡住 60 刻就放弃。
+    GoToHive(HiveTravel),
+    /// `BeeGoToKnownFlowerGoal`：600 刻没蜜后飞回记住的花。
+    GoToFlower(FlowerTravel),
+    /// `BeeGrowCropGoal`：带蜜且巢有效时给下面的作物催熟。
+    GrowCrops,
+    /// `BeeWanderGoal`：飞行随机落点。
+    Wander,
+    /// `BeeHurtByOtherGoal`：被打时反击，愤怒消失就停。
+    HurtByOther,
+    /// `BeeBecomeAngryTargetGoal`：生气且没蜇过时找 10 格内玩家。
+    BecomeAngryTarget,
+    /// `ResetUniversalAngerTargetGoal`：占位（全局怒气规则默认关）。
+    ResetUniversalAnger,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Pollinate {
+    pub successful_pollinating_ticks: i32,
+    pub last_sound_played_tick: i32,
+    pub pollinating: bool,
+    pub hover_pos: Option<Vec3>,
+    pub pollinating_ticks: i32,
+    pub unreachable_flowers: HashMap<BlockPos, i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HiveTravel {
+    pub travelling_ticks: i32,
+    pub ticks_stuck: i32,
+    pub blacklist: Vec<BlockPos>,
+    pub last_path: Option<crate::entity::mob::path::Path>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FlowerTravel {
+    pub travelling_ticks: i32,
+}
+
+impl BeeGoal {
+    pub const fn flags(&self) -> &'static [Flag] {
+        match self {
+            Self::Attack
+            | Self::HurtByOther
+            | Self::BecomeAngryTarget
+            | Self::ResetUniversalAnger => &[],
+            _ => &[Flag::Move],
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Attack => "BeeAttackGoal",
+            Self::EnterHive => "BeeEnterHiveGoal",
+            Self::ValidateHive => "ValidateHiveGoal",
+            Self::ValidateFlower => "ValidateFlowerGoal",
+            Self::Pollinate(_) => "BeePollinateGoal",
+            Self::LocateHive => "BeeLocateHiveGoal",
+            Self::GoToHive(_) => "BeeGoToHiveGoal",
+            Self::GoToFlower(_) => "BeeGoToKnownFlowerGoal",
+            Self::GrowCrops => "BeeGrowCropGoal",
+            Self::Wander => "BeeWanderGoal",
+            Self::HurtByOther => "BeeHurtByOtherGoal",
+            Self::BecomeAngryTarget => "BeeBecomeAngryTargetGoal",
+            Self::ResetUniversalAnger => "ResetUniversalAngerTargetGoal",
+        }
+    }
+
+    pub const fn every_tick(&self) -> bool {
+        matches!(self, Self::Pollinate(_))
+    }
+
+    /// `BaseBeeGoal.canUse` 的闸门：愤怒时不跑生活目标。
+    fn calm(&self, mob: &Mob) -> bool {
+        match self {
+            Self::Attack
+            | Self::HurtByOther
+            | Self::BecomeAngryTarget
+            | Self::ResetUniversalAnger => true,
+            _ => !mob.anger.is_angry(0),
+        }
+    }
+}
+
+fn wrap(priority: i32, goal: Goal) -> WrappedGoal {
+    WrappedGoal {
+        priority,
+        running: false,
+        goal,
+    }
+}
+
+/// `Bee.registerGoals`：0..9 的目标优先级和三个目标目标。
+pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
+    navigation.flags.fly = true;
+    GoalSelector::from_goals(vec![
+        wrap(0, Goal::Bee(BeeGoal::Attack)),
+        wrap(1, Goal::Bee(BeeGoal::EnterHive)),
+        wrap(
+            2,
+            Goal::Breed {
+                speed: 1.0,
+                partner: None,
+                love_time: 0,
+            },
+        ),
+        wrap(
+            3,
+            Goal::Tempt {
+                steering_item: false,
+                speed: 1.25,
+                player: None,
+                calm_down: 0,
+                scare: None,
+            },
+        ),
+        wrap(3, Goal::Bee(BeeGoal::ValidateHive)),
+        wrap(3, Goal::Bee(BeeGoal::ValidateFlower)),
+        wrap(4, Goal::Bee(BeeGoal::Pollinate(Pollinate::default()))),
+        wrap(
+            5,
+            Goal::FollowParent {
+                speed: 1.25,
+                parent: None,
+                time_to_recalc_path: 0,
+            },
+        ),
+        wrap(5, Goal::Bee(BeeGoal::LocateHive)),
+        wrap(5, Goal::Bee(BeeGoal::GoToHive(HiveTravel::default()))),
+        wrap(6, Goal::Bee(BeeGoal::GoToFlower(FlowerTravel::default()))),
+        wrap(7, Goal::Bee(BeeGoal::GrowCrops)),
+        wrap(8, Goal::Bee(BeeGoal::Wander)),
+        wrap(9, Goal::Float),
+    ])
+}
+
+pub(super) fn target_goals() -> GoalSelector {
+    GoalSelector::from_goals(vec![
+        wrap(1, Goal::Bee(BeeGoal::HurtByOther)),
+        wrap(2, Goal::Bee(BeeGoal::BecomeAngryTarget)),
+        wrap(3, Goal::Bee(BeeGoal::ResetUniversalAnger)),
+    ])
+}
+
+/// `Bee.wantsToEnterHive`。
+fn wants_to_enter_hive(mob: &Mob, view: &dyn BlockView) -> bool {
+    if mob.bee.stay_out_of_hive > 0
+        || mob.bee.pollinating
+        || mob.bee.has_stung()
+        || mob.target.is_some()
+    {
+        return false;
+    }
+    let tired = mob.bee.ticks_without_nectar >= 3600;
+    if !(mob.bee.has_nectar()
+        || tired
+        || view.bees_stay_in_hive(mob.bee.hive_pos.unwrap_or(BlockPos::new(0, 0, 0))))
+    {
+        return false;
+    }
+    // `isHiveNearFire`：巢附近一格有火时不进巢。
+    if let Some(hive) = mob.bee.hive_pos {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if view
+                        .block_state(hive.offset(dx, dy, dz))
+                        .is(mc_bamboo_data::blocks::FIRE)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn hive_valid(mob: &Mob, view: &dyn BlockView, me: &Entity) -> bool {
+    let Some(hive) = mob.bee.hive_pos else {
+        return false;
+    };
+    !too_far(me, hive, 48.0) && view.block_state(hive).is_tagged(block_tags::BEEHIVES)
+}
+
+fn closer_than(me: &Entity, pos: BlockPos, distance: f64) -> bool {
+    let center = Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    );
+    me.position.distance_to_sqr(center) < distance * distance
+}
+
+fn is_angry(mob: &Mob, now: i64) -> bool {
+    mob.anger.is_angry(now)
+}
+
+impl BeeGoal {
+    pub(super) fn can_use(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
+        if !self.calm(mob) {
+            return false;
+        }
+        let view = ctx.blocks();
+        let now = view.game_time();
+        match self {
+            Self::Attack => {
+                is_angry(mob, now)
+                    && !mob.bee.has_stung()
+                    && goals::combat_target(mob, ctx).is_some()
+            }
+            Self::EnterHive => {
+                let Some(hive) = mob.bee.hive_pos else {
+                    return false;
+                };
+                wants_to_enter_hive(mob, view)
+                    && closer_than(me, hive, 2.0)
+                    && view.has_block_entity(hive)
+                    && !view.beehive_full(hive)
+            }
+            Self::ValidateHive | Self::ValidateFlower => {
+                me.tick_count % 20 == 0
+                    && match self {
+                        Self::ValidateHive => !hive_valid(mob, view, me),
+                        _ => {
+                            let Some(flower) = mob.bee.saved_flower_pos else {
+                                return false;
+                            };
+                            !view
+                                .block_state(flower)
+                                .is_tagged(block_tags::BEE_ATTRACTIVE)
+                        }
+                    }
+            }
+            Self::Pollinate(p) => {
+                if mob.bee.remaining_cooldown_before_locating_new_flower > 0
+                    || mob.bee.has_nectar()
+                    || view.is_raining_at(me.block_position())
+                {
+                    return false;
+                }
+                if let Some(flower) = find_nearby_flower(me, mob, view, p, now) {
+                    mob.bee.saved_flower_pos = Some(flower);
+                    let nav = living::nav_mob(me, mob, view);
+                    let _ = mob.navigation.move_to(
+                        view,
+                        &nav,
+                        Vec3::new(
+                            f64::from(flower.x) + 0.5,
+                            f64::from(flower.y) + 0.5,
+                            f64::from(flower.z) + 0.5,
+                        ),
+                        1.2,
+                    );
+                    return true;
+                }
+                // `Mth.nextInt(random, 20, 60)`。
+                mob.bee.remaining_cooldown_before_locating_new_flower =
+                    me.random.next_int_bounded(41) + 20;
+                false
+            }
+            Self::LocateHive => {
+                mob.bee.remaining_cooldown_before_locating_new_hive == 0
+                    && mob.bee.hive_pos.is_none()
+                    && wants_to_enter_hive(mob, view)
+            }
+            Self::GoToHive(_) => {
+                let Some(hive) = mob.bee.hive_pos else {
+                    return false;
+                };
+                !too_far(me, hive, 48.0)
+                    && mob.home.is_none()
+                    && wants_to_enter_hive(mob, view)
+                    && !closer_than(me, hive, 2.0)
+                    && view.block_state(hive).is_tagged(block_tags::BEEHIVES)
+            }
+            Self::GoToFlower(_) => {
+                let Some(flower) = mob.bee.saved_flower_pos else {
+                    return false;
+                };
+                mob.home.is_none()
+                    && mob.bee.ticks_without_nectar > 600
+                    && !closer_than(me, flower, 2.0)
+            }
+            Self::GrowCrops => {
+                mob.bee.crops_grown < 10
+                    && me.random.next_float() >= 0.3
+                    && mob.bee.has_nectar()
+                    && hive_valid(mob, view, me)
+            }
+            Self::Wander => mob.navigation.is_done() && me.random.next_int_bounded(10) == 0,
+            Self::HurtByOther => mob.last_hurt_by_mob.is_some() && mob.anger.is_angry(now),
+            Self::BecomeAngryTarget => {
+                is_angry(mob, now) && !mob.bee.has_stung() && nearest_angry_player(me, mob, ctx)
+            }
+            Self::ResetUniversalAnger => false,
+        }
+    }
+
+    pub(super) fn can_continue(
+        &mut self,
+        me: &mut Entity,
+        mob: &mut Mob,
+        ctx: &dyn EntityCtx,
+    ) -> bool {
+        if !self.calm(mob) {
+            return false;
+        }
+        let view = ctx.blocks();
+        let now = view.game_time();
+        match self {
+            Self::Attack => {
+                is_angry(mob, now)
+                    && !mob.bee.has_stung()
+                    && goals::target_goal_can_continue(me, mob, ctx)
+            }
+            Self::Pollinate(p) => {
+                if !p.pollinating
+                    || mob.bee.saved_flower_pos.is_none()
+                    || view.is_raining_at(me.block_position())
+                {
+                    return false;
+                }
+                if p.successful_pollinating_ticks > 400 {
+                    return me.random.next_float() < 0.2;
+                }
+                true
+            }
+            Self::GoToHive(_) => self.can_use(me, mob, ctx),
+            Self::GoToFlower(_) => self.can_use(me, mob, ctx),
+            Self::GrowCrops => self.can_use(me, mob, ctx),
+            Self::Wander => !mob.navigation.is_done(),
+            Self::HurtByOther => {
+                is_angry(mob, now) && goals::target_goal_can_continue(me, mob, ctx)
+            }
+            Self::BecomeAngryTarget => {
+                if !is_angry(mob, now) || mob.bee.has_stung() || mob.target.is_none() {
+                    return false;
+                }
+                goals::target_goal_can_continue(me, mob, ctx)
+            }
+            Self::EnterHive
+            | Self::ValidateHive
+            | Self::ValidateFlower
+            | Self::LocateHive
+            | Self::ResetUniversalAnger => false,
+        }
+    }
+
+    pub(super) fn start(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+        let view = ctx.blocks();
+        match self {
+            Self::Attack => {
+                let nav = living::nav_mob(me, mob, view);
+                if let Some(target) = goals::combat_target(mob, ctx) {
+                    let _ = mob
+                        .navigation
+                        .move_to_entity(view, &nav, target.position, 1.4, 0);
+                }
+            }
+            Self::EnterHive => {
+                if let Some(hive) = mob.bee.hive_pos {
+                    ctx.emit(Command::BeeEnterHive { hive }, me);
+                }
+            }
+            Self::ValidateHive => mob.bee.hive_pos = None,
+            Self::ValidateFlower => {
+                mob.bee.saved_flower_pos = None;
+                mob.bee.remaining_cooldown_before_locating_new_flower =
+                    me.random.next_int_bounded(41) + 20;
+            }
+            Self::Pollinate(p) => {
+                p.successful_pollinating_ticks = 0;
+                p.pollinating_ticks = 0;
+                p.last_sound_played_tick = 0;
+                p.pollinating = true;
+                mob.bee.pollinating = true;
+                mob.bee.ticks_without_nectar = 0;
+            }
+            Self::LocateHive => {
+                mob.bee.remaining_cooldown_before_locating_new_hive = 200;
+                let mut hives = view.beehives_near(me.block_position(), 20);
+                hives.retain(|pos| !view.beehive_full(*pos));
+                hives.sort_by(|a, b| {
+                    me.position
+                        .distance_to_sqr(center_vec(*a))
+                        .total_cmp(&me.position.distance_to_sqr(center_vec(*b)))
+                });
+                let blacklist = locate_blacklist(mob);
+                if let Some(hive) = hives.iter().find(|pos| !blacklist.contains(pos)) {
+                    mob.bee.hive_pos = Some(*hive);
+                } else if let Some(hive) = hives.first() {
+                    if let Some(Goal::Bee(BeeGoal::GoToHive(t))) = mob
+                        .goals
+                        .goals
+                        .iter_mut()
+                        .map(|wrapped| &mut wrapped.goal)
+                        .find(|goal| matches!(goal, Goal::Bee(BeeGoal::GoToHive(_))))
+                    {
+                        t.blacklist.clear();
+                    }
+                    mob.bee.hive_pos = Some(*hive);
+                }
+            }
+            Self::GoToHive(t) => {
+                t.travelling_ticks = 0;
+                t.ticks_stuck = 0;
+            }
+            Self::GoToFlower(t) => t.travelling_ticks = 0,
+            Self::Wander => {
+                if let Some(pos) = wander_pos(me, mob, view) {
+                    let nav = living::nav_mob(me, mob, view);
+                    let path = mob
+                        .navigation
+                        .create_path(view, &nav, BlockPos::containing(pos), 1);
+                    let _ = mob.navigation.move_to_path(view, &nav, path, 1.0);
+                }
+            }
+            Self::HurtByOther => {
+                mob.target = mob.last_hurt_by_mob;
+            }
+            Self::BecomeAngryTarget => {
+                // `NearestAttackableTargetGoal.start`：把选中的玩家设成目标。
+                let _ = me;
+            }
+            Self::GrowCrops | Self::ResetUniversalAnger => {}
+        }
+    }
+
+    pub(super) fn stop(&mut self, me: &mut Entity, mob: &mut Mob, _ctx: &mut dyn EntityCtx) {
+        match self {
+            Self::Pollinate(p) => {
+                if p.successful_pollinating_ticks > 400 {
+                    mob.bee.set_flag(super::bee::FLAG_HAS_NECTAR, true);
+                    mob.bee.ticks_without_nectar = 0;
+                }
+                p.pollinating = false;
+                mob.bee.pollinating = false;
+                mob.navigation.stop();
+                mob.bee.remaining_cooldown_before_locating_new_flower = 200;
+            }
+            Self::GoToHive(t) => {
+                t.travelling_ticks = 0;
+                t.ticks_stuck = 0;
+                mob.navigation.stop();
+            }
+            Self::GoToFlower(t) => {
+                t.travelling_ticks = 0;
+                mob.navigation.stop();
+            }
+            Self::HurtByOther | Self::BecomeAngryTarget => mob.target = None,
+            Self::Attack
+            | Self::EnterHive
+            | Self::ValidateHive
+            | Self::ValidateFlower
+            | Self::LocateHive
+            | Self::GrowCrops
+            | Self::Wander
+            | Self::ResetUniversalAnger => {
+                let _ = me;
+            }
+        }
+    }
+
+    pub(super) fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+        let view = ctx.blocks();
+        match self {
+            Self::Attack => {
+                let Some(target) = goals::combat_target(mob, ctx) else {
+                    return;
+                };
+                let nav = living::nav_mob(me, mob, view);
+                let _ = mob
+                    .navigation
+                    .move_to_entity(view, &nav, target.position, 1.4, 0);
+                mob.look.set_look_at_default(
+                    target.position.x,
+                    target.eye_position().y,
+                    target.position.z,
+                );
+                if me.position.distance_to_sqr(target.position) <= 4.0 && me.tick_count % 20 == 0 {
+                    living::do_hurt_target(me, mob, ctx, target.uid);
+                }
+            }
+            Self::Pollinate(p) => pollinate_tick(p, me, mob, ctx),
+            Self::GoToHive(t) => hive_tick(t, me, mob, ctx),
+            Self::GoToFlower(t) => flower_tick(t, me, mob, ctx),
+            Self::GrowCrops => grow_crops_tick(me, mob, ctx),
+            Self::Wander => {}
+            Self::HurtByOther | Self::BecomeAngryTarget => {
+                if let Some(target) = goals::combat_target(mob, ctx) {
+                    let nav = living::nav_mob(me, mob, view);
+                    let _ = mob
+                        .navigation
+                        .move_to_entity(view, &nav, target.position, 1.4, 0);
+                }
+            }
+            Self::EnterHive
+            | Self::ValidateHive
+            | Self::ValidateFlower
+            | Self::LocateHive
+            | Self::ResetUniversalAnger => {}
+        }
+    }
+}
+
+fn too_far(me: &Entity, pos: BlockPos, distance: f64) -> bool {
+    !closer_than(me, pos, distance)
+}
+
+fn center_vec(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    )
+}
+
+fn locate_blacklist(mob: &Mob) -> Vec<BlockPos> {
+    mob.goals
+        .goals
+        .iter()
+        .find_map(|wrapped| match &wrapped.goal {
+            Goal::Bee(BeeGoal::GoToHive(t)) => Some(t.blacklist.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn nearest_angry_player(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
+    let mut best: Option<(f64, crate::entity::EntityUid)> = None;
+    ctx.blocks().for_each_player(&mut |player| {
+        if !player.alive || player.creative || player.spectator {
+            return;
+        }
+        let distance = me.position.distance_to_sqr(player.position);
+        if distance > 100.0 {
+            return;
+        }
+        if best.is_none_or(|(d, _)| distance < d) {
+            best = Some((distance, player.uid));
+        }
+    });
+    if let Some((_, uid)) = best {
+        mob.target = Some(uid);
+        return true;
+    }
+    false
+}
+
+/// `BeePollinateGoal.findNearbyFlower`：曼哈顿距离 5 内、按官方扫描顺序取第一朵能到的花。
+fn find_nearby_flower(
+    me: &mut Entity,
+    mob: &mut Mob,
+    view: &dyn BlockView,
+    p: &mut Pollinate,
+    now: i64,
+) -> Option<BlockPos> {
+    let origin = me.block_position();
+    let nav = living::nav_mob(me, mob, view);
+    let mut out = None;
+    for distance in 0_i32..=5 {
+        for x in -distance..=distance {
+            for y in -distance..=distance {
+                for z in -distance..=distance {
+                    if x.abs() + y.abs() + z.abs() != distance {
+                        continue;
+                    }
+                    let pos = origin.offset(x, y, z);
+                    if !view.block_state(pos).is_tagged(block_tags::BEE_ATTRACTIVE) {
+                        continue;
+                    }
+                    let until = p.unreachable_flowers.get(&pos).copied();
+                    if until.is_some_and(|until| now < until) {
+                        p.unreachable_flowers.insert(pos, until.unwrap_or(0));
+                        continue;
+                    }
+                    if mob.navigation.create_path(view, &nav, pos, 1).is_some() {
+                        out = Some(pos);
+                        break;
+                    }
+                    p.unreachable_flowers.insert(pos, now + 600);
+                }
+                if out.is_some() {
+                    break;
+                }
+            }
+            if out.is_some() {
+                break;
+            }
+        }
+        if out.is_some() {
+            break;
+        }
+    }
+    out
+}
+
+fn pollinate_tick(p: &mut Pollinate, me: &mut Entity, mob: &mut Mob, _ctx: &mut dyn EntityCtx) {
+    let Some(flower) = mob.bee.saved_flower_pos else {
+        return;
+    };
+    p.pollinating_ticks += 1;
+    if p.pollinating_ticks > 600 {
+        drop_flower(mob, me);
+        p.pollinating = false;
+        mob.bee.pollinating = false;
+        mob.bee.remaining_cooldown_before_locating_new_flower = 200;
+        return;
+    }
+    let target = Vec3::new(
+        f64::from(flower.x) + 0.5,
+        f64::from(flower.y) + 0.6,
+        f64::from(flower.z) + 0.5,
+    );
+    if me.position.distance_to_sqr(target) > 1.0 {
+        p.hover_pos = Some(target);
+        mob.mover
+            .set_wanted_position(target.x, target.y, target.z, 0.35);
+        return;
+    }
+    if p.hover_pos.is_none() {
+        p.hover_pos = Some(target);
+    }
+    let close = me.position.distance_to_sqr(p.hover_pos.unwrap_or(target)) <= 0.1;
+    let mut move_wanted = true;
+    if close {
+        if me.random.next_int_bounded(25) == 0 {
+            let offset = (me.random.next_float() * 2.0 - 1.0) * 0.333_333_34;
+            let another = (me.random.next_float() * 2.0 - 1.0) * 0.333_333_34;
+            p.hover_pos = Some(Vec3::new(
+                target.x + f64::from(offset),
+                target.y,
+                target.z + f64::from(another),
+            ));
+            mob.navigation.stop();
+        } else {
+            move_wanted = false;
+        }
+        mob.look.set_look_at_default(target.x, target.y, target.z);
+    }
+    if move_wanted && let Some(pos) = p.hover_pos {
+        mob.mover.set_wanted_position(pos.x, pos.y, pos.z, 0.35);
+    }
+    p.successful_pollinating_ticks += 1;
+    if me.random.next_float() < 0.05
+        && p.successful_pollinating_ticks > p.last_sound_played_tick + 60
+    {
+        p.last_sound_played_tick = p.successful_pollinating_ticks;
+        super::living::play_sound(me, mob, "minecraft:entity.bee.pollinate", 1.0, 1.0);
+    }
+}
+
+fn drop_flower(mob: &mut Mob, me: &mut Entity) {
+    mob.bee.saved_flower_pos = None;
+    mob.bee.remaining_cooldown_before_locating_new_flower = me.random.next_int_bounded(41) + 20;
+}
+
+fn hive_tick(t: &mut HiveTravel, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let Some(hive) = mob.bee.hive_pos else {
+        return;
+    };
+    t.travelling_ticks += 1;
+    if t.travelling_ticks > 2400 {
+        t.blacklist.push(hive);
+        if t.blacklist.len() > 3 {
+            t.blacklist.remove(0);
+        }
+        drop_hive(mob, me);
+        return;
+    }
+    if !mob.navigation.is_done() {
+        return;
+    }
+    let view = ctx.blocks();
+    if closer_than(me, hive, 16.0) {
+        let nav = living::nav_mob(me, mob, view);
+        let reach = if closer_than(me, hive, 3.0) { 1 } else { 2 };
+        let path = mob.navigation.create_path(view, &nav, hive, reach);
+        let reached = path.is_some();
+        let _ = mob.navigation.move_to_path(view, &nav, path, 1.0);
+        if !reached {
+            t.blacklist.push(hive);
+            drop_hive(mob, me);
+            return;
+        }
+        if let Some(last) = &t.last_path
+            && mob
+                .navigation
+                .path
+                .as_ref()
+                .is_some_and(|path| path.same_as(Some(last)))
+        {
+            t.ticks_stuck += 1;
+            if t.ticks_stuck > 60 {
+                drop_hive(mob, me);
+                t.ticks_stuck = 0;
+            }
+        } else {
+            t.last_path = mob.navigation.path.clone();
+        }
+    } else if too_far(me, hive, 48.0) {
+        drop_hive(mob, me);
+    } else {
+        pathfind_randomly_towards(me, mob, ctx, hive);
+    }
+}
+
+fn drop_hive(mob: &mut Mob, _me: &mut Entity) {
+    mob.bee.hive_pos = None;
+    mob.bee.remaining_cooldown_before_locating_new_hive = 200;
+}
+
+fn flower_tick(t: &mut FlowerTravel, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let Some(flower) = mob.bee.saved_flower_pos else {
+        return;
+    };
+    t.travelling_ticks += 1;
+    if t.travelling_ticks > 2400 {
+        drop_flower(mob, me);
+        return;
+    }
+    if !mob.navigation.is_done() {
+        return;
+    }
+    if too_far(me, flower, 48.0) {
+        drop_flower(mob, me);
+    } else {
+        pathfind_randomly_towards(me, mob, ctx, flower);
+    }
+}
+
+/// `Bee.pathfindRandomlyTowards`：`AirRandomPos.getPosTowards` + `moveTo(...,1.0)`。
+fn pathfind_randomly_towards(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    target: BlockPos,
+) {
+    let view = ctx.blocks();
+    let pos = goals::default_random_pos_towards(
+        me,
+        mob,
+        view,
+        6,
+        8,
+        center_vec(target),
+        std::f32::consts::FRAC_PI_2,
+    );
+    let Some(pos) = pos else {
+        return;
+    };
+    mob.navigation.max_visited_nodes_multiplier = 0.5;
+    let nav = living::nav_mob(me, mob, view);
+    let _ = mob.navigation.move_to(view, &nav, pos, 1.0);
+}
+
+fn wander_pos(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) -> Option<Vec3> {
+    let direction = if hive_valid(mob, view, me)
+        && let Some(hive) = mob.bee.hive_pos
+        && !closer_than_pos(me, hive, wander_threshold(mob))
+    {
+        let center = center_vec(hive);
+        Vec3::new(center.x - me.position.x, 0.0, center.z - me.position.z).normalize()
+    } else {
+        Vec3::view_vector(me.y_rot, mob.x_rot)
+    };
+    let mut pos = goals::hover_random_pos(
+        me,
+        mob,
+        view,
+        8,
+        7,
+        direction.x,
+        direction.z,
+        1.570_796_4,
+        3,
+        1,
+    );
+    if pos.is_none() {
+        pos = goals::air_and_water_random_pos(
+            me,
+            mob,
+            view,
+            8,
+            4,
+            -2,
+            direction.x,
+            direction.z,
+            std::f64::consts::PI / 2.0,
+        );
+    }
+    pos
+}
+
+fn closer_than_pos(me: &Entity, pos: BlockPos, distance: i32) -> bool {
+    closer_than(me, pos, f64::from(distance))
+}
+
+fn wander_threshold(mob: &Mob) -> i32 {
+    let reduced = if mob.bee.hive_pos.is_some() || mob.bee.saved_flower_pos.is_some() {
+        24
+    } else {
+        16
+    };
+    48 - reduced
+}
+
+fn grow_crops_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if me.random.next_int_bounded(30) != 0 {
+        return;
+    }
+    let mut updates = Vec::new();
+    for distance in 1..=2 {
+        let pos = me
+            .block_position()
+            .relative_by(mc_bamboo_core::Direction::Down, distance);
+        let state = ctx.blocks().block_state(pos);
+        if !state.is_tagged(block_tags::BEE_GROWABLES) {
+            continue;
+        }
+        if let Some(grown) = grown_state(state) {
+            updates.push((pos, grown));
+        }
+    }
+    for (pos, grown) in updates {
+        ctx.emit(Command::BeeGrowCrop { pos, state: grown }, me);
+        mob.bee.crops_grown += 1;
+    }
+}
+
+fn grown_state(state: BlockState) -> Option<BlockState> {
+    let crop = state.is(blocks::WHEAT)
+        || state.is(blocks::CARROTS)
+        || state.is(blocks::POTATOES)
+        || state.is(blocks::BEETROOTS);
+    if crop && let Some(age) = state.try_get(AGE_7) {
+        if age >= 7 {
+            return None;
+        }
+        return state.try_with(AGE_7, age + 1);
+    }
+    if let Some(age) = state.try_get(AGE_15) {
+        if age >= 7 {
+            return None;
+        }
+        return state.try_with(AGE_15, age + 1);
+    }
+    if state.is(blocks::SWEET_BERRY_BUSH)
+        && let Some(age) = state.try_get(AGE_3)
+        && age < 3
+    {
+        return state.try_with(AGE_3, age + 1);
+    }
+    if state.is(blocks::CAVE_VINES) || state.is(blocks::CAVE_VINES_PLANT) {
+        // `performBonemeal` 对洞穴藤蔓用 `BERRIES` 位；Bamboo 目前只做这一位。
+        return state.try_with(BERRIES, true);
+    }
+    None
+}
+
+/// `Command::BeeEnterHive` 的落地：存进巢、发进巢声，然后把自己丢掉。
+pub fn apply_enter_hive(me: &mut Entity, world: &mut World, hive: BlockPos) {
+    let row = me.clone().split();
+    let stored = world.with_block_entity::<BeehiveEntity, _>(hive, |entity, world| {
+        entity.add_bee(&row, world.random().next_boolean())
+    });
+    if stored == Some(true) {
+        me.removed = true;
+    }
+}
+
+/// `Bee.tick` 的花蜜粒子：官方先 `nextFloat() < 0.05`，再 `nextInt(2)+1` 次
+/// 两发 `level.random.nextDouble()`。这里只做取数，粒子包未建。
+pub fn nectar_particles(me: &mut Entity, mob: &Mob, ctx: &mut dyn EntityCtx) {
+    if !mob.bee.has_nectar() || mob.bee.crops_grown >= 10 || me.random.next_float() >= 0.05 {
+        return;
+    }
+    let count = me.random.next_int_bounded(2) + 1;
+    ctx.emit(
+        Command::BeeNectarParticles {
+            count: count as usize,
+        },
+        me,
+    );
+}
+
+/// 蜜蜂用到的 POISON 效果 ID（对拍状态列会读）。
+pub const POISON: i32 = mob_effect::POISON;

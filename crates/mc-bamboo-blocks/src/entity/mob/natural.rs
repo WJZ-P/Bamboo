@@ -789,6 +789,9 @@ pub(super) fn check_spawn_rules(
         // Phantoms register `Mob::checkMobSpawnRules`; they are in no biome table and
         // come from the `PhantomSpawner`.
         MobType::Phantom => valid_mob_spawn_block(world, kind, pos),
+        // 蜜蜂不在任何群系刷怪表里，也没有 `SpawnPlacements` 规则。
+        // Bees are in no biome spawn table and have no `SpawnPlacements` rule.
+        MobType::Bee => true,
         // 蠹虫和末影螨都不在群系刷怪表里：刷怪笼 / `/summon` / 刷怪蛋才生成。
         // 官方 `checkSilverfishSpawnRules` / `checkEndermiteSpawnRules` 只在刷怪笼
         // （`EntitySpawnReason.isSpawner`）或 5 格内没有玩家时允许，这里不给自然刷怪用。

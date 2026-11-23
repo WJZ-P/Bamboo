@@ -12,6 +12,7 @@
 //! Dispenser item behaviour lives in `crate::dispense`. Blocks that open a screen only consume the click.
 
 mod beehive;
+pub mod beehive_entity;
 mod brewing;
 mod campfire;
 mod campfire_entity;

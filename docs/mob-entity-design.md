@@ -756,6 +756,55 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 豹猫（共用面最小、非 `TamableAnimal`），严格照上表「一种一个新文件、共用文件最小追加、先小样本
 守 `natural-spawn` 关键路径、各配逐刻场景」；动生成器 / 元数据 index 前先和队长确认。
 
+### 5.22 蜜蜂、蜂巢与蜂箱（2026-11-23，分支 `bees`）
+
+`MobType::ALL` 从 46 扩到 47 种，新增 `Bee`。按 5.12 的接入清单把属性、尺寸、
+元数据 index、音效和蜂巢常量交给生成器导出；`BEE_FLAGS` / `BEE_ANGER_END_TIME`
+进 `EntityData`，`Bee` 的状态在 `entity/mob/bee.rs`，飞行导航 / 移动控制复用
+鹦鹉那一份（`FlyingPathNavigation` + `FlyingMoveControl`），存档走 `nbt.rs`。
+`bee_goals.rs` 按官方优先级注册目标；当前只有繁殖、诱惑、跟随父母和漂浮是
+真实目标，其余找花 / 采蜜 / 回巢 / 授粉 / 生气蜇人仍是占位（保留优先级、
+标志位和官方类名，不取随机数）。
+
+蜂巢方块实体是 `behaviour/machines/beehive_entity.rs`：`bees` 列表、
+`savedFlowerPos`、`serverTick` 的进出巢、`honey_level`、营火安抚、剪刀 / 玻璃瓶
+取蜜、无精准采集挖掉放蜂，以及 `archive::block_entity` 的读盘工厂。生成期
+`BeehiveDecorator` 写 2–3 条 `Occupant.create`，走生成期方块实体交付。
+
+`EnvironmentAttributes.BEES_STAY_IN_HIVE` 没有整套移植：生成器从官方
+`timeline/day.json` 导出两条关键帧，`BlockView::bees_stay_in_hive` 按时间线
+加 RAIN / THUNDER 天气层给同一个布尔，对拍夹具可以直接注入官方值。
+
+对拍：`mob-oracle --only bee` 六个场景（白天出巢、夜晚、下雨、带蜜加蜜、
+满蜜、营火取蜜）逐刻比巢里的蜂、蜜等级、放出数和世界随机源，0 不一致；
+两处改坏确认 `bee_clock` / `bee_honey` 都能抓到；`block_entity_resave`
+与 `chunk-content` 覆盖存档，`oracle java --weather clear` 0 失败，
+`natural-spawn java` 0 不一致。全量 `mob-oracle java` 只剩这台 ARM Mac
+已知的 `Mth.COS_TAB`、`frog_lily_31` 差异。
+
+**后续补充（同日）**：`bee_goals.rs` 把目标集全部换成真实实现（攻击、进巢、
+校验巢 / 花、采粉悬停、找巢、回巢、去记住的花、催熟作物、飞行游荡、被打反击、
+生气找玩家），蜇人走 `sting` 伤害 + 难度中毒 + `HasStung` + 蜇后死亡抽签，
+放出巢里的蜂会给附近无目标的蜂设玩家目标。精准采集改读官方
+`PREVENTS_BEE_SPAWNS_WHEN_MINING` 标签。`Level::beehives_near` 是
+`PoiManager.getInRange(BEE_HOME, 20)` 的临时替代（已加载区块 + 段调色板筛选，
+以后换成 POI 查询），精确与并行两种视图给同一份答案。
+`mob-oracle --only bee_ai` 新增 8 个逐刻场景（采蜜、回巢、授粉、蜇人、
+跟随拿花的玩家、愤怒、带蜜、诱惑），比花蜜 / 已蜇 / 计时 / 愤怒 / 血量 /
+随机源 0 不一致；四处改坏确认都能抓到。
+
+放出蜂巢里的蜂按官方拆成两段：`emptyAllLivingFromHive(玩家本身, ...)` 的
+4 格距离 / 营火 400 刻，与 `BeehiveBlock.angerNearbyBees` 的 8/6/8 盒 +
+每只蜂一次 `world.random.nextInt(玩家数)`。剪刀 / 玻璃瓶 / 挖巢三条调用方
+各自传发起动作的玩家；挖巢顺序是先放出再激怒，取蜜顺序是先激怒再放出。
+`mob-oracle --only bee_release` 四例逐刻比目标 / 倒计时 / 世界随机源，
+少取一次随机数的改坏确认有效。`bee_ai` 场景仍用 `NoAI` 只比状态机字段，
+等正式 POI 系统合进 main 后再开任务让官方侧跑完整 AI 对拍。
+
+**已知限制**：bee_ai 场景用 `NoAI` 比状态机字段，方块扫描、飞行寻路落点、
+作物催熟结果没有与官方逐刻对拍；未加载区块的蜂巢查不到；
+`BeehiveDecorator` 的生成期 NBT 没有与官方逐题对拍。
+
 ### 5.13 08:40 回归修复后合并 main（op-misc，2026-11-21，第 9 轮）
 
 - 接手时 `HEAD=cf37b3af`，`main` 已前进到 `c9773f61`（35 个 `cx-horse` 提交：马科骑乘、
