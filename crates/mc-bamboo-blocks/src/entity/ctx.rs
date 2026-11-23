@@ -106,6 +106,18 @@ pub trait BlockView {
         true
     }
 
+    /// 官方 `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`。
+    ///
+    /// 主世界按时间线的两条关键帧给值；`RAIN` / `THUNDER` 两张天气覆盖层在雨强
+    /// 或雷暴强度大于 0 时把它设为真。别的维度没有这套时间线，按缺省假处理。
+    ///
+    /// Vanilla `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`: the
+    /// overworld timeline contributes the two keyframes, and the rain/thunder weather
+    /// layers force it true while their intensity is positive.
+    fn bees_stay_in_hive(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// `getGameTime()`：岛的时钟。没有时钟的视图给 0。
     fn game_time(&self) -> i64 {
         0
@@ -454,6 +466,10 @@ impl BlockView for World<'_> {
 
     fn game_time(&self) -> i64 {
         World::game_time(self)
+    }
+
+    fn bees_stay_in_hive(&self, pos: BlockPos) -> bool {
+        World::bees_stay_in_hive(self, pos)
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {

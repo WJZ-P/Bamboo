@@ -48,6 +48,11 @@ pub struct Extracted {
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
     pub sound_tables: SoundTables,
+    /// 数据包里的 `timeline` 原文：带命名空间的名字 → JSON。
+    ///
+    /// Raw `timeline` JSON from the data pack, keyed by namespaced id.
+    #[serde(default)]
+    pub timelines: BTreeMap<String, String>,
     /// 数据包里的战利品表原文：带命名空间的名字 → JSON。
     ///
     /// Loot table JSON from the data pack, keyed by namespaced id.
@@ -1335,6 +1340,10 @@ pub struct VersionData {
     /// 按官方 `Heightmap.Types.values()` 的顺序。
     pub heightmaps: Vec<HeightmapType>,
     pub sound_tables: SoundTables,
+    /// 数据包里的 `timeline` 原文：带命名空间的名字 → JSON。
+    ///
+    /// Raw `timeline` JSON from the data pack, keyed by namespaced id.
+    pub timelines: BTreeMap<String, String>,
     /// 属性名字 → 默认值。
     pub attribute_defaults: BTreeMap<String, f64>,
     /// 内置注册表名 → 按 ID 排列的条目。
@@ -1476,6 +1485,7 @@ fn read_version_data(
         attribute_defaults: extracted.attribute_defaults,
         builtin_registries,
         packets,
+        timelines: extracted.timelines,
         loot_tables: extracted.loot_tables,
         loot_predicates: extracted.loot_predicates,
         context_int_providers: extracted.context_int_providers,

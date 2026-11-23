@@ -86,8 +86,8 @@ pub fn day_sky_light_factor(total_ticks: i64) -> f32 {
 
 /// `minecraft:gameplay/monsters_burn` 在 `minecraft:day` 时间线上的两个关键帧：
 /// 12542 刻起为假，23460 刻起为真（布尔轨道是步进的，不插值）。
-const MONSTERS_BURN_OFF: i64 = 12_542;
-const MONSTERS_BURN_ON: i64 = 23_460;
+const MONSTERS_BURN_OFF: i64 = mc_bamboo_data::environment::BEES_STAY_IN_HIVE_START_TICK;
+const MONSTERS_BURN_ON: i64 = mc_bamboo_data::environment::BEES_STAY_IN_HIVE_END_TICK;
 
 /// 主世界的 `EnvironmentAttributes.MONSTERS_BURN`：属性缺省值假，`day` 时间线用
 /// `or` 叠上去，所以就是时间线在这个时钟刻的值。
@@ -97,6 +97,18 @@ const MONSTERS_BURN_ON: i64 = 23_460;
 pub fn monsters_burn(total_ticks: i64) -> bool {
     let ticks = total_ticks.rem_euclid(DAY_PERIOD);
     !(MONSTERS_BURN_OFF..MONSTERS_BURN_ON).contains(&ticks)
+}
+
+/// 主世界的 `EnvironmentAttributes.BEES_STAY_IN_HIVE`：`day` 时间线用 `or`
+/// 叠在缺省值假上，所以取值就是这两条关键帧之间的那一段。
+///
+/// The overworld `BEES_STAY_IN_HIVE`: the `day` timeline is applied with `or`
+/// on top of the false default, so it is true between these two keyframes.
+pub fn bees_stay_in_hive(total_ticks: i64) -> bool {
+    let ticks = total_ticks.rem_euclid(mc_bamboo_data::environment::DAY_PERIOD_TICKS);
+    (mc_bamboo_data::environment::BEES_STAY_IN_HIVE_START_TICK
+        ..mc_bamboo_data::environment::BEES_STAY_IN_HIVE_END_TICK)
+        .contains(&ticks)
 }
 
 /// `minecraft:moon` 时间线的周期：八个月相各一天。
@@ -223,6 +235,18 @@ mod tests {
         // 11867 → 13670 的中点按官方 `Mth.lerp` 线性插值。
         let middle = (11_867 + 13_670) / 2;
         assert!((day_sky_light_factor(middle) - 0.633_536_7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bees_stay_in_hive_follows_the_day_timeline() {
+        use mc_bamboo_data::environment as env;
+        assert!(!bees_stay_in_hive(0));
+        assert!(!bees_stay_in_hive(env::BEES_STAY_IN_HIVE_START_TICK - 1));
+        assert!(bees_stay_in_hive(env::BEES_STAY_IN_HIVE_START_TICK));
+        assert!(bees_stay_in_hive(env::BEES_STAY_IN_HIVE_END_TICK - 1));
+        assert!(!bees_stay_in_hive(env::BEES_STAY_IN_HIVE_END_TICK));
+        // 时间线按 24000 刻循环。
+        assert!(bees_stay_in_hive(env::BEES_STAY_IN_HIVE_START_TICK + DAY_PERIOD));
     }
 
     #[test]

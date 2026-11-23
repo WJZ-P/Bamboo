@@ -297,6 +297,7 @@ public final class Extractor {
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
             root.add("soundTables", new SoundTables().build());
+            root.add("timelines", dataFiles(resources, "timeline"));
             root.add("lootTables", dataFiles(resources, "loot_table"));
             root.add("lootPredicates", dataFiles(resources, "predicate"));
             root.add("contextIntProviders", dataFiles(resources, "context_int_provider"));

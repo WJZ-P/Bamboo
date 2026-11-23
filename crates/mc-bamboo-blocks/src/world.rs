@@ -2029,6 +2029,18 @@ impl<'a> World<'a> {
         self.level.block_weather().is_raining()
     }
 
+    /// `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`：主世界时间线，
+    /// 再叠上 `RAIN` / `THUNDER` 两张天气层（强度大于 0 就置真）。
+    ///
+    /// Vanilla `EnvironmentAttributeSystem.getValue(BEES_STAY_IN_HIVE, pos)`: the
+    /// overworld timeline, then the rain and thunder weather layers.
+    pub fn bees_stay_in_hive(&self, _pos: BlockPos) -> bool {
+        let weather = self.level.block_weather();
+        crate::sky::bees_stay_in_hive(self.level.clock_ticks())
+            || weather.rain_level > 0.0
+            || weather.thunder_level > 0.0
+    }
+
     /// `Level.isThundering()`：雷暴强度和雨强的乘积超过 0.9 才算打雷。
     pub fn is_thundering(&self) -> bool {
         self.level.block_weather().is_thundering()

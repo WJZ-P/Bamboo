@@ -448,6 +448,13 @@ impl<T: BlockSource> BlockView for SourceView<T> {
         self.0.facts().game_time
     }
 
+    fn bees_stay_in_hive(&self, _pos: BlockPos) -> bool {
+        let facts = self.0.facts();
+        crate::sky::bees_stay_in_hive(facts.clock_ticks)
+            || facts.weather.rain_level > 0.0
+            || facts.weather.thunder_level > 0.0
+    }
+
     fn can_see_sky(&self, pos: BlockPos) -> bool {
         self.brightness(LightLayer::Sky, pos) >= 15
     }
