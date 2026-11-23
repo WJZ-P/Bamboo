@@ -388,10 +388,14 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     {
         crate::block_drops::drop_broken_block(region, broken, pos, snapshot.id, block_entity);
         // `Block.playerDestroy` 里方块自己的那一步，官方在战利品之后调。
+        // 海龟蛋靠这一步放回少一枚的方块，并留下碎蛋声和 2001 事件。
         // The block's own step of `Block.playerDestroy`; vanilla runs it after the loot.
+        // Turtle eggs use it to put one egg fewer back, leaving a break sound and a 2001 event.
         let (mut level, ticks) = region.block_level();
         let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
         mc_bamboo_blocks::player_destroy(&mut world, pos, broken);
+        let effects = world.into_effects();
+        send_effects(region, Some(snapshot.id), &effects);
     }
     true
 }
@@ -1088,6 +1092,44 @@ mod tests {
         stop(&server, &client, GROUND, Direction::Up, 3);
         server.tick();
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
+    }
+
+    /// `TurtleEggBlock.playerDestroy`：挖掉一摞 4 枚蛋后放回 3 枚，碎蛋声和
+    /// 带减之前状态的 2001 事件都要发给旁边的人。
+    ///
+    /// `TurtleEggBlock.playerDestroy`: breaking a clutch of four leaves three eggs
+    /// behind; the watcher also gets the break sound and the 2001 event carrying
+    /// the state before the decrement.
+    #[test]
+    fn breaking_a_clutch_leaves_one_egg_fewer_and_sends_its_effects() {
+        let (mut server, miner, watcher) = two_players();
+        survive(&mut server, &miner, items::AIR);
+        let egg = mc_bamboo_blocks::state::BlockState(blocks::TURTLE_EGG)
+            .with(mc_bamboo_blocks::state::EGGS, 4);
+        set_block(&mut server, GROUND, egg.0);
+
+        start(&server, &miner, GROUND, Direction::Up, 1);
+        // 空手挖硬度 0.5 的蛋每刻 1 / 0.5 / 30；攒过 0.7 再松手才会当场挖掉。
+        // Bare-handed progress on a 0.5-hardness egg is 1 / 0.5 / 30 per tick;
+        // only a stop past 0.7 breaks it immediately.
+        for _ in 0..12 {
+            server.tick();
+        }
+        watcher.take_frames();
+        miner.take_frames();
+        stop(&server, &miner, GROUND, Direction::Up, 2);
+        server.tick();
+
+        let remaining = egg.with(mc_bamboo_blocks::state::EGGS, 3);
+        assert_eq!(block_at(&mut server, GROUND), Some(remaining.0));
+        let frames = watcher.take_frames();
+        assert!(frames_with_id(&frames, clientbound::SOUND).len() >= 1);
+        assert!(
+            frames_with_id(&frames, clientbound::LEVEL_EVENT)
+                .iter()
+                .any(|frame| frame.body == level_event(2001, GROUND, egg.0 as i32).body),
+            "the 2001 event must carry the state before the decrement: {frames:?}"
+        );
     }
 
     #[test]
