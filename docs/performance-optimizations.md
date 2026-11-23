@@ -3910,3 +3910,20 @@ on 0.447，第一遍 off 0.479、on 0.640，这一格受同机噪声影响较大
 - 4.1 的「寻路优先级低」依赖独立寻路阶段，本轮没有做；降频档跳过决策
   已经让寻路请求自然变少（`distant-2000` 精确驱动 0.4 条/刻不变，因为牛
   本来就很少寻路）。留给第 4 步的寻路阶段。
+
+### 27.4 验收
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo fmt` / `cargo clippy --workspace --all-targets` | 通过，0 警告 |
+| `cargo test --workspace` | 全过（含本轮 7 项降频单测、`mc-bamboo-game` 的岛时钟平移断言、配置往返） |
+| `mob-oracle java`（缺省配置） | 12 处不一致，全是这台 ARM Mac 已知的 `Mth.COS_TAB` 末位差（11 个数 + 一份 hash）；无青蛙长跳末位差 |
+| `natural-spawn java` | 1727 例，0 不一致 |
+| `entity-oracle java` | 40 例 748 步，0 不一致 |
+| `move-oracle java` | 59 例，0 不一致 |
+| 探针，缺省配置（28500；28504 `--loaded`） | 769/769；两遍各 769/769，正常关服，`world-dir` 和区块顺序判据通过 |
+| 探针，打开 32/64（28502；28506 `--loaded`） | 769/769；两遍各 769/769，正常关服，`world-dir` 和区块顺序判据通过 |
+
+探针的「打开」配置在临时目录里另写一份 `bamboo.toml`（只设
+`mob_throttle_distance = 32` / `mob_sleep_distance = 64` /
+`mob_wakeups_scale = 1`），不改仓库里的脚本和缺省文件；端口都在 28500 以上。
