@@ -757,6 +757,24 @@ public final class Probe {
                 .orElse(null);
     }
 
+    /**
+     * `join` 从第 `from` 条起收到的、属于实体 `entity` 的第一个实体事件；还没有就是 null。
+     *
+     * The first entity event `join` received from index `from` on that belongs to
+     * `entity`, or null if none has arrived yet.
+     */
+    private static Byte entityEventFrom(Join join, int from, int entity) {
+        // 网络线程先后追加两张表，读的时候以较短的那张为准。
+        // The network thread appends to both lists in turn; read up to the shorter one.
+        int size = Math.min(join.entityEvents.size(), join.entityEventSources.size());
+        for (int i = from; i < size; i++) {
+            if (join.entityEventSources.get(i) == entity) {
+                return join.entityEvents.get(i);
+            }
+        }
+        return null;
+    }
+
     /** 官方的包不公开这个字段，客户端要靠 Level 才取得到实体。 */
     private static int privateInt(Object packet, Class<?> owner, String name) {
         try {
@@ -2568,14 +2586,16 @@ public final class Probe {
                         ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, grass, Direction.UP, sequence));
                 actor.send(new ServerboundPlayerActionPacket(
                         ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, grass, Direction.UP, actor.nextSequence()));
-                await("durability: the pickaxe breaks", () -> actor.entityEvents.size() > ownEvents
-                        && actor.slots.containsKey(HOTBAR_START)
-                        && actor.slots.get(HOTBAR_START).isEmpty());
+                await("durability: the pickaxe breaks",
+                        () -> entityEventFrom(actor, ownEvents, actor.entityId) != null
+                                && actor.slots.containsKey(HOTBAR_START)
+                                && actor.slots.get(HOTBAR_START).isEmpty());
                 check("durability: the break event is 47",
-                        actor.entityEvents.get(ownEvents) == EQUIPMENT_BREAK_MAIN_HAND);
-                await("durability: the observer sees the break", () -> observer.entityEvents.size() > otherEvents);
+                        entityEventFrom(actor, ownEvents, actor.entityId) == EQUIPMENT_BREAK_MAIN_HAND);
+                await("durability: the observer sees the break",
+                        () -> entityEventFrom(observer, otherEvents, actor.entityId) != null);
                 check("durability: the observer's break event is 47",
-                        observer.entityEvents.get(otherEvents) == EQUIPMENT_BREAK_MAIN_HAND);
+                        entityEventFrom(observer, otherEvents, actor.entityId) == EQUIPMENT_BREAK_MAIN_HAND);
             } finally {
                 if (survival) {
                     actor.gameModeParam = Float.NaN;
@@ -3261,6 +3281,9 @@ public final class Probe {
         /** 收到的实体事件字节。物品损坏是 47 或 48。 */
         // Entity-event bytes. An item break is 47 or 48.
         final List<Byte> entityEvents = new ArrayList<>();
+        /** 和 `entityEvents` 一一对应的实体 ID。测试世界会自然刷出生物，它们也发实体事件。 */
+        // The entity id of each `entityEvents` entry. Naturally spawned mobs send entity events too.
+        final List<Integer> entityEventSources = new ArrayList<>();
         int acks;
         int stats;
         int openContainerId = -1;
@@ -3777,12 +3800,13 @@ public final class Probe {
         }
 
         private void onEntityEvent(ClientboundEntityEventPacket packet) {
+            int entity = privateInt(packet, ClientboundEntityEventPacket.class, "entityId");
             entityEvents.add(packet.getEventId());
+            entityEventSources.add(entity);
             if (permissionEventChecked) {
                 return;
             }
             permissionEventChecked = true;
-            int entity = privateInt(packet, ClientboundEntityEventPacket.class, "entityId");
             check("commands: the permission event names this player", entity == entityId);
             // 离线探针的工作目录里 ops.json 把 Kitten、Mochi、Latecomer 写成 4。
             // Visitor 和 Spectator 不在名单里。正版那台服务端没有这份名单。
