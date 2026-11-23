@@ -274,15 +274,14 @@ impl Level for StressLevel {
             })
             .unwrap_or(registries::biome::PLAINS as u32) as i32
     }
-    /// 混合场景只让牛 / 羊 / 猪 / 鸡和僵尸进表，权重照官方平原表，保持刷怪
-    /// 的取数顺序和真实群系一致（未建模的种类仍参加抽签）。
+    /// `ChunkGenerator.getMobsAt`：按这一格的真群系查官方刷怪表（未建模的种类
+    /// 仍参加抽签，权重和取数顺序不变）。
     fn natural_spawn_table(
         &self,
         pos: BlockPos,
         category: spawning::MobCategory,
     ) -> &'static [spawning::MobSpawnerDef] {
-        let _ = pos;
-        spawning::for_biome_id(registries::biome::PLAINS).mobs_to_spawn(category)
+        spawning::for_biome_id(self.biome_id(pos)).mobs_to_spawn(category)
     }
     fn world_surface_y(&self, pos: BlockPos) -> i32 {
         self.terrain.surface_at(pos.x, pos.z)
