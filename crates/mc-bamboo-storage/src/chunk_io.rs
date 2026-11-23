@@ -60,6 +60,8 @@ enum Request {
         seq: u64,
         chunk: Option<Vec<u8>>,
         entities: Option<Vec<u8>>,
+        /// `poi/r.X.Z.mca` 里的这一格；`None` 表示删掉这一格。
+        poi: Option<Vec<u8>>,
         timestamp: i32,
     },
     /// 某个区块有了更新的快照：丢掉还没落盘的旧 seq。
@@ -126,6 +128,7 @@ pub enum Reply {
         generation: u64,
         chunk: Option<Vec<u8>>,
         entities: Option<Vec<u8>>,
+        poi: Option<Vec<u8>>,
         error: Option<String>,
     },
     /// 一次写已经落盘，世界线程可以丢掉对应的写盘途中缓冲，并按 `present`
@@ -206,6 +209,7 @@ impl ChunkIo {
     pub fn open(dir: &WorldDir) -> io::Result<Self> {
         fs::create_dir_all(dir.region_dir())?;
         fs::create_dir_all(dir.entities_dir())?;
+        fs::create_dir_all(dir.poi_dir())?;
         let layout = dir.clone();
         let known = Arc::new(Mutex::new(scan_existing_chunks(&dir.region_dir())));
         let (requests, rx) = mpsc::channel::<Request>();
@@ -333,9 +337,9 @@ impl ChunkIo {
         });
     }
 
-    /// 提交一个写请求。`chunk` / `entities` 为 `None` 表示删掉对应文件里的这一格。
-    /// 这里**不**更新 `known`（盘上真实状态），只登记在途；世界线程收到
-    /// `Written` 回执才 `set_known`。写失败时 `has_chunk` 不会撒谎。
+    /// 提交一个写请求。`chunk` / `entities` / `poi` 为 `None` 表示删掉对应
+    /// 文件里的这一格。这里**不**更新 `known`（盘上真实状态），只登记在途；
+    /// 世界线程收到 `Written` 回执才 `set_known`。写失败时 `has_chunk` 不会撒谎。
     /// This does NOT update `known` (on-disk truth); only registers the in-flight
     /// write. The world thread calls `set_known` on the `Written` ack, so a failed
     /// write never makes `has_chunk` lie.
@@ -345,6 +349,19 @@ impl ChunkIo {
         seq: u64,
         chunk: Option<Vec<u8>>,
         entities: Option<Vec<u8>>,
+    ) {
+        self.submit_write_with_poi(pos, seq, chunk, entities, None);
+    }
+
+    /// 和 [`Self::submit_write`] 同一条队列、同一个栅栏，额外带上 `poi/` 那一格。
+    /// 存档编排走这一条：三份文件在一次写请求里一起落盘。
+    pub fn submit_write_with_poi(
+        &self,
+        pos: ChunkPos,
+        seq: u64,
+        chunk: Option<Vec<u8>>,
+        entities: Option<Vec<u8>>,
+        poi: Option<Vec<u8>>,
     ) {
         self.inflight
             .lock()
@@ -357,6 +374,7 @@ impl ChunkIo {
             seq,
             chunk,
             entities,
+            poi,
             timestamp: unix_seconds(),
         }) {
             // 通道断了：这次写根本没入队，撤掉刚登记的在途标记。
@@ -568,10 +586,10 @@ impl Cache {
                     let _ = region.sync();
                 }
             }
-            let directory = if kind == 0 {
-                dir.region_dir()
-            } else {
-                dir.entities_dir()
+            let directory = match kind {
+                0 => dir.region_dir(),
+                1 => dir.entities_dir(),
+                _ => dir.poi_dir(),
             };
             let region = open_region(&directory, key.1, RegionCompression::Zlib)
                 .map_err(|e| io::Error::other(e.to_string()))?;
@@ -587,10 +605,10 @@ impl Cache {
         let mut failures = Vec::new();
         for ((kind, region_pos), region) in &mut self.files {
             if let Err(error) = region.sync() {
-                let directory = if *kind == 0 {
-                    dir.region_dir()
-                } else {
-                    dir.entities_dir()
+                let directory = match *kind {
+                    0 => dir.region_dir(),
+                    1 => dir.entities_dir(),
+                    _ => dir.poi_dir(),
                 };
                 failures.push((
                     directory.join(region_pos.file_name()).display().to_string(),
@@ -651,6 +669,7 @@ fn panic_replies(request: &Request) -> Vec<Reply> {
             generation: *generation,
             chunk: None,
             entities: None,
+            poi: None,
             error: Some(message),
         }],
         Request::Write { pos, seq, .. } => vec![Reply::WriteFailed {
@@ -686,6 +705,7 @@ fn panic_replies(request: &Request) -> Vec<Reply> {
             generation: *generation,
             chunk: None,
             entities: None,
+            poi: None,
             error: Some(message),
         }],
         Request::Barrier { seq } => vec![Reply::Flushed {
@@ -774,13 +794,14 @@ fn worker_loop(
                     task_id,
                     generation,
                 } => {
-                    let (chunk, entities, error) = read_one(&mut cache, &dir, pos);
+                    let (chunk, entities, poi, error) = read_one(&mut cache, &dir, pos);
                     outbox.push(Reply::Read {
                         pos,
                         task_id,
                         generation,
                         chunk,
                         entities,
+                        poi,
                         error,
                     });
                 }
@@ -789,11 +810,13 @@ fn worker_loop(
                     seq,
                     chunk,
                     entities,
+                    poi,
                     timestamp,
                 } => {
                     if latest.get(&pos) == Some(&seq) {
                         let present = chunk.is_some();
-                        let failures = write_one(&mut cache, &dir, pos, chunk, entities, timestamp);
+                        let failures =
+                            write_one(&mut cache, &dir, pos, chunk, entities, poi, timestamp);
                         // 只有两份都写成功才回 Written；失败绝不谎报成功。
                         if failures.is_empty() {
                             outbox.push(Reply::Written { pos, seq, present });
@@ -896,7 +919,12 @@ fn read_one(
     cache: &mut Cache,
     dir: &WorldDir,
     pos: ChunkPos,
-) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<String>) {
+) -> (
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<String>,
+) {
     let mut error = None;
     let name = RegionPos::of(pos).file_name();
     // 只读已经存在的区域文件：官方读盘不会凭空创建空的 .mca。
@@ -939,25 +967,51 @@ fn read_one(
     } else {
         None
     };
-    (chunk, entities, error)
+    let poi = if dir.poi_dir().join(&name).exists() {
+        match cache.file(dir, 2, pos) {
+            Ok(region) => match region.read(pos, READ_LIMIT) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    if error.is_none() {
+                        error = Some(format!("poi {pos:?}: {e}"));
+                    }
+                    None
+                }
+            },
+            Err(e) => {
+                if error.is_none() {
+                    error = Some(format!("open poi {pos:?}: {e}"));
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+    (chunk, entities, poi, error)
 }
 
-/// 写 `region/` 和 `entities/` 两份，返回失败的 `(路径, 原因)`。
-/// Write the `region/` and `entities/` files; return `(path, reason)` failures.
+/// 写 `region/`、`entities/` 和 `poi/` 三份，返回失败的 `(路径, 原因)`。
+/// Write the `region/`, `entities/` and `poi/` files; return `(path, reason)` failures.
 fn write_one(
     cache: &mut Cache,
     dir: &WorldDir,
     pos: ChunkPos,
     chunk: Option<Vec<u8>>,
     entities: Option<Vec<u8>>,
+    poi: Option<Vec<u8>>,
     timestamp: i32,
 ) -> Vec<(String, String)> {
     let mut failures = Vec::new();
-    for (kind, data) in [(0u8, chunk.as_deref()), (1u8, entities.as_deref())] {
-        let directory = if kind == 0 {
-            dir.region_dir()
-        } else {
-            dir.entities_dir()
+    for (kind, data) in [
+        (0u8, chunk.as_deref()),
+        (1u8, entities.as_deref()),
+        (2u8, poi.as_deref()),
+    ] {
+        let directory = match kind {
+            0 => dir.region_dir(),
+            1 => dir.entities_dir(),
+            _ => dir.poi_dir(),
         };
         let path = directory.join(RegionPos::of(pos).file_name());
         match cache.file(dir, kind, pos) {
@@ -1084,6 +1138,7 @@ mod tests {
                 generation: 7,
                 chunk: Some(b"chunk-nbt".to_vec()),
                 entities: Some(b"entity-nbt".to_vec()),
+                poi: None,
                 error: None,
             }]
         );
@@ -1242,6 +1297,40 @@ mod tests {
             }]
         );
         assert!(region.exists(), "放行后写真的落盘");
+        io.close();
+    }
+
+    /// POI 和 region / entities 走同一条写请求、同一个 flush 栅栏，落在
+    /// `poi/r.X.Z.mca`，并且能被下一次读请求读回来。
+    #[test]
+    fn poi_writes_share_the_queue_and_land_in_the_poi_dir() {
+        let tmp = TempDir::new("poi-io");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        let pos = ChunkPos::new(1, -1);
+        io.submit_write_with_poi(
+            pos,
+            1,
+            Some(b"chunk".to_vec()),
+            None,
+            Some(b"poi-nbt".to_vec()),
+        );
+        io.flush().unwrap();
+        let written: Vec<_> = collect(&io)
+            .into_iter()
+            .filter(|r| matches!(r, Reply::Written { .. }))
+            .collect();
+        assert_eq!(written.len(), 1, "一次写只有一条成功回执");
+        assert!(dir.poi_dir().join(RegionPos::of(pos).file_name()).exists());
+
+        io.submit_read(pos, 9, 2);
+        io.flush().unwrap();
+        let reads = collect(&io);
+        assert!(reads.iter().any(|r| matches!(
+            r,
+            Reply::Read { poi: Some(bytes), .. } if bytes == b"poi-nbt"
+        )));
         io.close();
     }
 

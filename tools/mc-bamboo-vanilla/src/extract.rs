@@ -34,6 +34,9 @@ pub struct Extracted {
     pub synced_registries: Vec<SyncedRegistry>,
     pub tags: Vec<TagGroup>,
     pub block_states: BlockStates,
+    /// 按注册表 ID 排列的 21 种 POI 类型。旧的提取结果没有这一项。
+    #[serde(default)]
+    pub poi_types: Vec<PoiTypeFact>,
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
     pub entity_types: Vec<EntityTypeFacts>,
@@ -458,6 +461,18 @@ pub struct Tag {
 pub struct BlockStates {
     pub total: u32,
     pub defaults: BTreeMap<String, u32>,
+}
+
+/// `PoiTypes.bootstrap` 注册的一种 POI 类型。
+#[derive(Debug, Deserialize)]
+pub struct PoiTypeFact {
+    pub name: String,
+    #[serde(rename = "maxTickets")]
+    pub max_tickets: i32,
+    #[serde(rename = "validRange")]
+    pub valid_range: i32,
+    /// 全部匹配方块状态的全局 ID，顺序照官方 `matchingStates()` 的迭代顺序。
+    pub states: Vec<u32>,
 }
 
 /// 一个方块。列表里的位置就是它的注册表 ID。
@@ -1294,6 +1309,7 @@ pub struct VersionData {
     pub synced_registries: Vec<SyncedRegistry>,
     pub tags: Vec<TagGroup>,
     pub block_states: BlockStates,
+    pub poi_types: Vec<PoiTypeFact>,
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
     pub entity_types: Vec<EntityTypeFacts>,
@@ -1431,6 +1447,7 @@ fn read_version_data(
         synced_registries: extracted.synced_registries,
         tags: extracted.tags,
         block_states: extracted.block_states,
+        poi_types: extracted.poi_types,
         blocks: extracted.blocks,
         items,
         entity_types: extracted.entity_types,

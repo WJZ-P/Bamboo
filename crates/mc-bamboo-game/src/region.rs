@@ -21,7 +21,7 @@ use mc_bamboo_protocol::packet::play::{
     InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime,
     UpdateAttributes,
 };
-use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
+use mc_bamboo_world::{flat, light::LightChanges, poi::PoiStore, store::ChunkStore};
 
 use crate::{
     chunk_encoding::{ChunkCache, encode_template},
@@ -227,6 +227,9 @@ pub(crate) struct Region {
     pub(crate) player_grid: PlayerGrid,
     pub(crate) links: Links,
     pub(crate) chunks: ChunkStore,
+    /// POI 段：`SectionPos → PoiSection`，按 `ChunkPos` 分脏。和 `chunks` 平级，
+    /// 改动不进 `ChunkRevision`，也不进区块包缓存；单独存到 `poi/`。
+    pub(crate) poi: PoiStore,
     /// 每个已交付区块的等级档位和由此算出的 tick 集合。只从 Director 的消息更新。
     pub(crate) tick_levels: TickLevels,
     /// 没改过的区块共用的编码结果。
@@ -447,6 +450,7 @@ impl Region {
             links: Links::default(),
             tick_levels: TickLevels::new(chunks.is_loaded_mode()),
             chunks,
+            poi: PoiStore::new(),
             template_body,
             chunk_cache: ChunkCache::default(),
             block_changes: BlockChanges::default(),
@@ -678,6 +682,7 @@ impl Region {
         });
         let level = RegionLevel {
             chunks: &mut self.chunks,
+            poi: &mut self.poi,
             changes: &mut self.block_changes,
             block_items: &mut self.block_items,
             break_tool: mc_bamboo_protocol::item::ItemStack::empty(),

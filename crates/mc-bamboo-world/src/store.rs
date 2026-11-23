@@ -410,6 +410,32 @@ impl ChunkStore {
         )
     }
 
+    /// `LevelChunkSection.maybeHas(PoiTypes::hasPoi)` 的等价查询：这一段的调色板里
+    /// 有没有能匹配 POI 的方块状态。全局 ID 形式没有调色板，保守返回 `true`。
+    /// 区块没加载或段越界时返回 `false`。
+    ///
+    /// `SectionPos.y` 是 `y >> 4`；区块加载时 `checkConsistencyWithBlocks` 用它先
+    /// 跳过整段没有 POI 方块的段，避免逐格扫 16³ 格。
+    pub fn section_may_have_poi(&self, pos: ChunkPos, section_y: i32) -> bool {
+        if !self.is_loaded(pos) {
+            return false;
+        }
+        let chunk = self.edited.get(&pos).unwrap_or(&self.template);
+        let index = match usize::try_from(section_y - (MIN_Y >> 4)) {
+            Ok(index) => index,
+            Err(_) => return false,
+        };
+        let Some(section) = chunk.sections().get(index) else {
+            return false;
+        };
+        use crate::palette::PaletteView;
+        match section.blocks().palette() {
+            PaletteView::Single(state) => crate::poi::has_poi(state),
+            PaletteView::Indirect(states) => states.iter().any(|&state| crate::poi::has_poi(state)),
+            PaletteView::Global => true,
+        }
+    }
+
     /// 区块 `pos` 里哪些区块段有会随机刻的方块：第 i 位对应从世界底部数起的第 i 段。
     /// 没加载的区块一段也没有。和逐段问 [`Self::is_randomly_ticking_section`] 的答案相同，
     /// 只查一次区块表、只读区块里的一个字。

@@ -198,6 +198,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
     let computed = {
         let Region {
             chunks,
+            poi,
             entities,
             block_entities,
             global,
@@ -227,6 +228,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
             chunks,
+            poi,
             tick_levels,
             facts,
             open_shulker_boxes: block_entity_shapes.open_shulker_boxes,

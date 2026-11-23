@@ -347,6 +347,20 @@ pub(super) fn furnish_with_sand(
         Vec3::default(),
     ));
 
+    // 两张床的床头和一个钟：POI 段和方块同批搬，拆岛漏搬 Poi 时核对 / 指纹要报出来。
+    // 这里只往 POI 表里放记录、不放方块，免得新方块改变机器 / 实体的碰撞，
+    // 破坏「场景不取随机数」这个逐位比较的前提。一条记录扣掉票，另一条留着。
+    let bed_head = at(center, 7, Y, 4);
+    let bell = at(center, 8, Y + 1, 4);
+    region
+        .poi
+        .add(bed_head, mc_bamboo_data::poi::poi_type_id("home").unwrap());
+    region
+        .poi
+        .add(bell, mc_bamboo_data::poi::poi_type_id("meeting").unwrap());
+    region.poi.take(|_| true, |_, _| true, bed_head, 8);
+    region.poi.mark_dirty(center);
+
     // 在烧的熔炉。
     let furnace = at(center, 5, Y, 2);
     region.chunks.set_block(furnace, blocks::FURNACE);
@@ -526,6 +540,14 @@ pub(super) fn fingerprint(
                 "revision {pos:?} {:?}",
                 region.chunks.revision(pos)
             );
+        }
+    }
+    // POI 段：每个已加载段的记录（含票数）按坐标排好，拆合前后逐项相同。
+    for (key, records) in region.poi.snapshot() {
+        let chunk = ChunkPos::new(key.0, key.2);
+        let _ = writeln!(out[group(chunk)], "poi {key:?} {:?}", records);
+        if strict {
+            let _ = writeln!(out[global], "poi {key:?} {:?}", records);
         }
     }
     for tick in region.block_ticks.pending() {
@@ -721,6 +743,19 @@ pub(super) fn misplaced(
             .loaded_positions()
             .into_iter()
             .any(wrong_chunk),
+    );
+    check(
+        "Poi",
+        region
+            .poi
+            .snapshot()
+            .iter()
+            .any(|((x, _, z), _)| wrong_chunk(ChunkPos::new(*x, *z)))
+            || region
+                .poi
+                .dirty_chunks()
+                .iter()
+                .any(|&pos| wrong_chunk(pos)),
     );
     check(
         "TickLevels",

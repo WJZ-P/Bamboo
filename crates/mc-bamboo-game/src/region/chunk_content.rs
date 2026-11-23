@@ -105,6 +105,8 @@ pub(crate) trait EncodeParts {
     fn book(&self, pos: BlockPos) -> Option<&Book>;
     fn entity_rows(&self) -> &[EntityRow];
     fn preserved_entities(&self) -> &[Tag];
+    /// 这一列的 POI 段；`None` 表示没有 POI 数据（不写 `poi/` 那一格）。
+    fn poi(&self) -> Option<&mc_bamboo_world::poi::PoiColumn>;
 }
 
 /// 把一个区块束整个写成官方的两份 NBT。
@@ -271,6 +273,7 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
         command_blocks: BTreeMap::new(),
         books: BTreeMap::new(),
         entities: ChunkEntities::default(),
+        poi: Default::default(),
     };
 
     // 1. 计划刻。

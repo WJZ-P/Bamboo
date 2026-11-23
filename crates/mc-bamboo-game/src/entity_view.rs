@@ -20,13 +20,18 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::{BlockAncestor, blocks};
-use mc_bamboo_world::{MIN_Y, SECTION_SIZE, palette::PaletteView, store::ChunkStore};
+use mc_bamboo_world::{
+    MIN_Y, SECTION_SIZE, light::SectionPos, palette::PaletteView, poi::PoiStore, store::ChunkStore,
+};
 
 use crate::tick_levels::TickLevels;
 
 /// 算阶段只读的世界事实。字段都在 tick 开始时按值拷进来，不借用 `Region` 的可变部分。
 pub(crate) struct ReadOnlyWorld<'a> {
     pub(crate) chunks: &'a ChunkStore,
+    /// 本岛 POI 表的只读快照：精确驱动从 `RegionLevel` 读，这里从同一份表读，
+    /// 两种驱动不分叉（见 `docs/villager-plan.md` §6.2 风险 3）。
+    pub(crate) poi: &'a PoiStore,
     /// 和精确驱动共用的实体 tick 集合，两种驱动跳过的实体必须一样。
     pub(crate) tick_levels: &'a TickLevels,
     pub(crate) facts: ViewFacts,
@@ -84,6 +89,44 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn inhabited_time(&self, chunk: ChunkPos) -> i64 {
         self.chunks.inhabited_time(chunk)
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        self.poi.get_type(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        let Some(occupancy) = crate::poi_query::occupancy(occupancy) else {
+            return 0;
+        };
+        self.poi
+            .get_count_in_range(|found| found == kind, center, radius, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        let occupancy = crate::poi_query::occupancy(occupancy)?;
+        self.poi.find_closest(
+            |found| found == kind,
+            position_filter,
+            center,
+            radius,
+            occupancy,
+        )
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        self.poi.sections_to_village(SectionPos::of(pos))
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        self.poi.is_close_to_village(pos, sections)
     }
 
     fn section_has_collision(&self, section_x: i32, section_y: i32, section_z: i32) -> bool {
