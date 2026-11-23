@@ -165,29 +165,26 @@
 
 ## 已知差异
 
-- **没接上的触发器**：58 种里已接 16 种（框架能解析全部 58 种，条件字段里
-  没建模的谓词一律不匹配，不白送判据）。下界 / 末地维度、村民交易、钓鱼、
-  驯服、繁殖、酿造、附魔、信标、劫掠、避雷针、标靶、潜影盒、刷怪蛋相关的
-  触发器，以及 `default_block_use`、`any_block_use`、`using_item`、
-  `item_durability_changed`、`levitation`、`changed_dimension`、`used_totem`、
-  `nether_travel`、`fishing_rod_hooked`、`channeled_lightning`、`shot_crossbow`、
-  `spear_mobs`、`killed_by_arrow`、`hero_of_the_village`、`voluntary_exile`、
-  `slide_down_block`、`bee_nest_destroyed`、`target_hit`、`avoid_vibration`、
-  `player_generates_container_loot`、`thrown_item_picked_up_by_entity`、
-  `thrown_item_picked_up_by_player`、`player_interacted_with_entity`、
-  `player_sheared_equipment`、`started_riding`、`lightning_strike`、
-  `fall_from_height`、`ride_entity_in_lava`、`kill_mob_near_sculk_catalyst`、
-  `allay_drop_item_on_block`、`crafter_recipe_crafted`、`fall_after_explosion`、
-  `impossible`、`enchanted_item`、`brewed_potion`、`construct_beacon`、
-  `used_ender_eye`、`summoned_entity`、`bred_animals`、`cured_zombie_villager`、
-  `tame_animal`、`villager_trade`、`ender_eye` 类都只解析不触发：Bamboo 没有
-  对应系统，或者现有事件入口还没把事件原文传进来。
-- **`function` 奖励**：Bamboo 没有函数系统，留到第二期。内置 26.3 定义里没有 function 奖励。
-- **触发器 oracle 覆盖**：4070 条判定只覆盖 6 种有固定事件输入的触发器；
-  其余已接触发器的官方实例判定还没有单独出题。
-- **图标组件**：见上；奖励里的配方集合目前写在进度档案里，官方的
-  `recipeBook` 字段在玩家 NBT，第二期配方书会一起对齐。
+- **触发器覆盖**：58 种全部能解析并建监听；32 种在 `CONNECTED_TRIGGERS` 里
+  （见表），其中 12 种有明确的现有事件调用点，另外 20 种是「待接」——
+  系统已有、只差一个 `record` 调用点。26 种「不做」的触发器列进表里，
+  原因都是 Bamboo 没有对应系统（下界 / 末地、村庄与袭击、钓鱼、悦灵、标靶等）。
+  条件字段没建模时一律判为不匹配，不白送判据。
+- **触发器 oracle 覆盖**：`advancement-trigger-oracle` 的 4070 条判定覆盖
+  6 种有固定事件输入的触发器（`inventory_changed`、`location`、`consume_item`、
+  `placed_block`、`item_used_on_block`、`tick`）；其余触发器的官方实例判定
+  还没单独出题。
+- **`function` 奖励**：Bamboo 没有函数系统，留到第二期。内置 26.3 定义里没有
+  function 奖励。
+- **配方书**：奖励里的配方集合目前写在进度档案里；官方的 `recipeBook` 字段在
+  玩家 NBT，第二期配方书会一起对齐。
 - **统计、遥测事件**：`sends_telemetry_event` 照官方编码进包，但服务端不上报遥测。
+- **命令执行对拍的范围**：假玩家的物品栏 / 实体数据只初始化到能跑
+  `/advancement` 的程度，`grant @s everything` 会走到配方奖励里更深的字段，
+  所以执行对拍用 `revoke everything` 预置状态 + `only/from/through/until`
+  组题；`everything` 的语法题仍在 `command-oracle` 里覆盖。
+- **群系**：`location` 现在从 `ChunkStore::biome_at` 查真实群系 ID，但超平坦
+  世界里区块的群系表固定是 plains，其它群系只由已生成的噪声世界区块给出。
 
 ## 第二期（配方书）
 
