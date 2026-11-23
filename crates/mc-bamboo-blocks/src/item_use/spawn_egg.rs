@@ -167,4 +167,18 @@ mod tests {
         );
         assert!(level.entities().ids().is_empty());
     }
+
+    /// `SpawnEggItem.use` 对着水面用 `(false, false)`：不做下落扫描，实体直接落在
+    /// 射线命中那一格的格底。Bamboo 目前还没接这条 `Item.use` 路径，这里验证
+    /// `spawn_egg` 的两个标志位不会被混淆。
+    #[test]
+    fn the_water_surface_pair_places_at_the_cell_bottom() {
+        let pos = BlockPos::new(3, 64, 5);
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = spawn::spawn_egg(&mut world, MobType::Cow, pos, false, false, None);
+        let entity = world.entity(uid).unwrap();
+        assert_eq!(entity.position, Vec3::new(3.5, 64.0, 5.5));
+    }
 }
