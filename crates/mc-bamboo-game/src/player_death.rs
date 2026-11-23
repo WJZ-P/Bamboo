@@ -384,11 +384,34 @@ pub(crate) fn victim_component(name: &str, uuid: [u8; 16]) -> Component {
 pub(crate) fn die_in(
     parts: &mut HurtParts<'_>,
     id: PlayerId,
-    _source: DamageSource,
+    source: DamageSource,
 ) -> Option<PlayerDeathDrops> {
     let player = parts.players.get(&id)?;
     if player.dead || player.health.health > 0.0 {
         return None;
+    }
+    // `Entity.awardKillScore`：死亡时给死者触发 ENTITY_KILLED_PLAYER，
+    // 比较的是击杀者实体（这里用攻击者的实体类型）。
+    let killer = source
+        .attacker
+        .and_then(|uid| parts.entities.public_at(uid))
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.mob_type.name()),
+            _ => None,
+        })
+        .or_else(|| {
+            parts.attacker.and_then(|public| match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.mob_type.name()),
+                _ => None,
+            })
+        })
+        .unwrap_or("minecraft:player");
+    if let Some(events) = parts.pending_triggers.as_deref_mut() {
+        events.push(crate::advancement_triggers::PendingEvent {
+            player: id,
+            trigger: "minecraft:entity_killed_player",
+            payload: serde_json::json!({"entity": {"type": killer}}),
+        });
     }
     let position = player.position();
     let name = player.name.clone();

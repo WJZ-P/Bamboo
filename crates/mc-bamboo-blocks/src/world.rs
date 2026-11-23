@@ -4185,7 +4185,11 @@ mod tests {
                 | Effect::DestroyProgress { .. }
                 | Effect::PlayerEffect { .. }
                 | Effect::HealPlayer { .. }
-                | Effect::SleepInBed { .. } => None,
+                | Effect::SleepInBed { .. }
+                | Effect::BredAnimals { .. }
+                | Effect::SummonedEntity { .. }
+                | Effect::CrafterCrafted { .. }
+                | Effect::KilledByArrow { .. } => None,
             })
             .collect()
     }

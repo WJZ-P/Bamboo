@@ -1241,7 +1241,12 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // Potion-arrow effects on players are not part of a block case.
             | Effect::PlayerEffect { .. }
             | Effect::HealPlayer { .. }
-            | Effect::SleepInBed { .. } => None,
+            | Effect::SleepInBed { .. }
+            // 进度触发器的记账效应不属于方块题，游戏层单独处理。
+            | Effect::BredAnimals { .. }
+            | Effect::SummonedEntity { .. }
+            | Effect::KilledByArrow { .. }
+            | Effect::CrafterCrafted { .. } => None,
         })
         .collect()
 }
@@ -1359,7 +1364,11 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::DestroyProgress { .. }
             | Effect::PlayerEffect { .. }
             | Effect::HealPlayer { .. }
-            | Effect::SleepInBed { .. } => {}
+            | Effect::SleepInBed { .. }
+            | Effect::BredAnimals { .. }
+            | Effect::SummonedEntity { .. }
+            | Effect::KilledByArrow { .. }
+            | Effect::CrafterCrafted { .. } => {}
         }
     }
     (events, sounds)

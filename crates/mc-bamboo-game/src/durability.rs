@@ -38,7 +38,44 @@ pub(crate) fn run<R>(
     let Some(prepared) = prepare(region, id, hand) else {
         return body(region);
     };
+    let before = (
+        mc_bamboo_blocks::durability::damage_of(&prepared.hands.main),
+        mc_bamboo_blocks::durability::damage_of(&prepared.hands.off),
+    );
     let (result, hands) = with_player_hands(prepared.hands, || body(region));
+    let after = (
+        mc_bamboo_blocks::durability::damage_of(&hands.main),
+        mc_bamboo_blocks::durability::damage_of(&hands.off),
+    );
+    // `ItemStack.applyDamage` 每次耐久变化都触发 ITEM_DURABILITY_CHANGED。
+    for (hand, (before, after)) in [
+        (Hand::Main, (before.0, after.0)),
+        (Hand::Off, (before.1, after.1)),
+    ] {
+        let Some(delta) = after.zip(before).map(|(after, before)| after - before) else {
+            continue;
+        };
+        if delta == 0 {
+            continue;
+        }
+        let stack = match hand {
+            Hand::Main => &hands.main,
+            Hand::Off => &hands.off,
+        };
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:item_durability_changed",
+            serde_json::json!({
+                "item": mc_bamboo_data::items::ITEMS
+                    .get(stack.item as usize)
+                    .map(|item| item.name)
+                    .unwrap_or("minecraft:air"),
+                "durability": after.unwrap_or(0),
+                "delta": delta,
+            }),
+        );
+    }
     finish(region, id, hand, prepared.used_count, hands);
     result
 }

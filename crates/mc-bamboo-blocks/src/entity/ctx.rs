@@ -877,6 +877,10 @@ pub enum Command {
     /// Reset the other parent and spawn offspring and XP; the initiating parent is on cooldown.
     BreedAnimals {
         variant: super::mob::CowVariant,
+        /// `AgeableMob.getLoveCause()`：官方把进度判据发给这名玩家。
+        ///
+        /// `AgeableMob.getLoveCause()`: vanilla credits this player's criterion.
+        lover: Option<[u8; 16]>,
         wool: u8,
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
@@ -1315,6 +1319,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::BreedAnimals {
             variant,
+            lover,
             wool,
             partner,
             position,
@@ -1345,6 +1350,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 genes: father_genes,
                 axolotl: father_axolotl,
             },
+            lover,
             world,
         ),
         Command::WolfAlert { others, target } => {

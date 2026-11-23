@@ -42,7 +42,7 @@ const TWO_ABOVE: BlockPos = BlockPos::new(11, -59, 8);
 
 const TOP_CENTER: (f32, f32, f32) = (0.5, 1.0, 0.5);
 
-fn settled() -> (Harness, Client) {
+pub(super) fn settled() -> (Harness, Client) {
     let mut server = Harness::new(8);
     let client = server.join_and_settle("Kitten");
     client.take_frames();
@@ -184,7 +184,7 @@ fn give(server: &Harness, client: &Client, slot: i16, item: i32) {
 }
 
 /// 放进主手，也就是初始选中的快捷栏第一格。
-fn hold(server: &Harness, client: &Client, item: i32) {
+pub(super) fn hold(server: &Harness, client: &Client, item: i32) {
     give(server, client, 36, item);
 }
 
@@ -207,7 +207,7 @@ fn look(server: &mut Harness, client: &Client, yaw: f32, pitch: f32) {
     client.take_frames();
 }
 
-fn move_player(server: &mut Harness, client: &Client, x: f64, y: f64, z: f64) {
+pub(super) fn move_player(server: &mut Harness, client: &Client, x: f64, y: f64, z: f64) {
     // 交互测试要的是人已经在这个位置，包括站进方块里。移动包会被速度或碰撞拉回去。
     //
     // Interaction tests need the player already at this position, including inside a block.
@@ -215,7 +215,7 @@ fn move_player(server: &mut Harness, client: &Client, x: f64, y: f64, z: f64) {
     crate::player_move::place_player(server.region(), client.id, Vec3::new(x, y, z));
 }
 
-fn set_block(server: &mut Harness, pos: BlockPos, state: u32) {
+pub(super) fn set_block(server: &mut Harness, pos: BlockPos, state: u32) {
     server.region().chunks.set_block(pos, state);
 }
 
@@ -1669,7 +1669,7 @@ fn a_lily_pad_lands_on_the_water_in_view() {
 }
 
 /// 浮在 `GROUND` 正上方往下看，拿着 `item` 用一下。
-fn use_looking_down(server: &mut Harness, client: &Client, item: i32) {
+pub(super) fn use_looking_down(server: &mut Harness, client: &Client, item: i32) {
     move_player(server, client, 11.5, -59.0, 8.5);
     hold(server, client, item);
     server.tick();
@@ -2802,3 +2802,6 @@ mod weapon_tests;
 
 #[path = "egg_tests.rs"]
 mod egg_tests;
+
+#[path = "advancement_tests.rs"]
+mod advancement_tests;

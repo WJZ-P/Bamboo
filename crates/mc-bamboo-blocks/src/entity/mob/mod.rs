@@ -2454,6 +2454,12 @@ pub enum MobEvent {
     Poof,
     /// `broadcastEntityEvent(this, 18)`：开始求爱 / 繁殖时的爱心。
     Hearts,
+    /// `TamableAnimal.tame` / `AbstractHorse.tameWithName`：这次驯服归这名玩家。
+    /// 不是网络包，游戏层用它触发 `TAME_ANIMAL` 进度。
+    ///
+    /// `TamableAnimal.tame` / `AbstractHorse.tameWithName` credited this player.
+    /// Not a packet; the game layer turns it into a `TAME_ANIMAL` trigger.
+    Tamed { player: [u8; 16] },
     /// `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，不是中立生物。
     MilkSound { position: Vec3 },
     /// `ServerLevel.sendParticles`：一个粒子包，发给 32 格内的玩家（按玩家所在方块的中心算）。

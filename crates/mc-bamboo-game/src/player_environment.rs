@@ -159,9 +159,24 @@ pub(crate) fn on_land(region: &mut Region, id: PlayerId) {
         return;
     };
     let distance = player.motion.fall_distance;
+    let position = player.position();
     let amount = fall_damage(player, distance);
+    let alive = player.health.health > 0.0;
+    // `ServerPlayer.resetFallDistance`：还活着且记下了起跳位置时触发距离判据。
+    // Bamboo 没有 `startingToFallPosition`，落点 y 加上下落距离就是起点 y。
+    if alive {
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:fall_from_height",
+            serde_json::json!({
+                "start_y": position.y + distance,
+                "distance": {"y": distance},
+                "player_y": position.y,
+            }),
+        );
+    }
     if amount > 0 {
-        let position = player.position();
         // `getFallDamageSound` 在 `hurt` 之前播。
         crate::player_hurt::play_fall_sound(region, id, amount, position);
         hurt(region, id, DamageKind::Fall, amount as f32);
@@ -359,6 +374,17 @@ fn tick_player(region: &mut Region, id: PlayerId) {
     }
     // 卡墙 / 仙人掌 / 甜浆果 / 岩浆块：都在 `Entity.checkInsideBlocks` 里。
     if in_wall {
+        // `ServerPlayer.onInsideBlock`：每刻在方块里都触发 ENTER_BLOCK。
+        let block = mc_bamboo_data::blocks::BLOCKS
+            .get(eye_state.0 as usize)
+            .map(|block| block.name)
+            .unwrap_or("minecraft:air");
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:enter_block",
+            serde_json::json!({"block": block, "blocks": block}),
+        );
         hurt(region, id, DamageKind::InWall, 1.0);
     }
     if in_cactus {

@@ -691,6 +691,7 @@ impl Region {
             links: &mut self.links,
             sound_seeds: &self.sound_seed_generator,
             rules: &self.global.rules,
+            pending_triggers: &mut self.pending_triggers,
         });
         let level = RegionLevel {
             chunks: &mut self.chunks,

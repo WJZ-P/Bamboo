@@ -488,6 +488,13 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
             Effect::FilledBucket { item, hand } => {
                 if let Some(id) = initiator {
                     inventory::give_filled_result(region, id, hand, ItemStack::new(item, 1), true);
+                    // `BucketItem.use` 拿到满桶之后，服务端触发 FILLED_BUCKET。
+                    crate::advancement_triggers::record(
+                        region,
+                        id,
+                        "minecraft:filled_bucket",
+                        serde_json::json!({"item": item_name_of(item)}),
+                    );
                 }
             }
             Effect::EmptiedBucket { hand } => {
@@ -748,6 +755,116 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::sleep::on_sleep_in_bed(region, id, pos, set_spawn, problem);
                 }
             }
+            Effect::BredAnimals {
+                father,
+                mother,
+                child,
+                lover,
+                ..
+            } => {
+                // `Animal.finalizeSpawnChildFromBreeding`：官方把判据发给求爱者。
+                if let Some(uuid) = lover {
+                    let ids: Vec<PlayerId> = region
+                        .players
+                        .iter()
+                        .filter(|(_, player)| *player.uuid.as_bytes() == uuid)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in ids {
+                        crate::advancement_triggers::record(
+                            region,
+                            id,
+                            "minecraft:bred_animals",
+                            serde_json::json!({
+                                "parent": {"type": father},
+                                "partner": {"type": mother},
+                                "child": {"type": child},
+                            }),
+                        );
+                    }
+                }
+            }
+            Effect::SummonedEntity {
+                entity,
+                position,
+                radius,
+            } => {
+                // 官方按召唤实体的包围盒膨胀后的 AABB 找附近的 ServerPlayer。
+                let ids: Vec<PlayerId> = region
+                    .players
+                    .iter()
+                    .filter(|(_, player)| {
+                        let p = player.position();
+                        (p.x - position.x).abs() <= radius
+                            && (p.y - position.y).abs() <= radius
+                            && (p.z - position.z).abs() <= radius
+                    })
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    crate::advancement_triggers::record(
+                        region,
+                        id,
+                        "minecraft:summoned_entity",
+                        serde_json::json!({"entity": {"type": entity}}),
+                    );
+                }
+            }
+            Effect::KilledByArrow {
+                shooter,
+                victims,
+                weapon,
+            } => {
+                let victims: Vec<&str> =
+                    victims.iter().copied().filter(|v| !v.is_empty()).collect();
+                let unique = victims
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
+                // `AbstractArrow.onHitEntity`：射手是玩家时给这名玩家触发。
+                if let Some(uuid) = shooter {
+                    let ids: Vec<PlayerId> = region
+                        .players
+                        .iter()
+                        .filter(|(_, player)| *player.uuid.as_bytes() == uuid)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in ids {
+                        crate::advancement_triggers::record(
+                            region,
+                            id,
+                            "minecraft:killed_by_arrow",
+                            serde_json::json!({
+                                "victims": victims.iter().map(|v| serde_json::json!({"type": v})).collect::<Vec<_>>(),
+                                "unique_entity_types": unique,
+                                "fired_from_weapon": weapon,
+                            }),
+                        );
+                    }
+                }
+            }
+            Effect::CrafterCrafted { recipe, position } => {
+                // `CrafterBlock.dispenseFrom`：17x17x17 的盒子里每名玩家。
+                let ids: Vec<PlayerId> = region
+                    .players
+                    .iter()
+                    .filter(|(_, player)| {
+                        let p = player.position();
+                        (p.x - position.x).abs() <= 8.5
+                            && (p.y - position.y).abs() <= 8.5
+                            && (p.z - position.z).abs() <= 8.5
+                    })
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    crate::advancement_triggers::record(
+                        region,
+                        id,
+                        "minecraft:crafter_recipe_crafted",
+                        serde_json::json!({"recipes": recipe}),
+                    );
+                }
+            }
         }
     }
 }
@@ -853,6 +970,14 @@ fn block_update(pos: BlockPos, state: u32) -> BlockUpdate {
 }
 
 /// `use_item_on`，官方 `handleUseItemOn` 的顺序。`blocks-inventory.md` 3.1、第 6 章。
+/// 物品注册表 ID 的完整名字，方块层只给出 ID。
+pub(crate) fn item_name_of(item: i32) -> String {
+    mc_bamboo_data::items::ITEMS
+        .get(item as usize)
+        .map(|item| item.name.to_owned())
+        .unwrap_or_default()
+}
+
 fn item_name(region: &Region, id: PlayerId, hand: mc_bamboo_core::Hand) -> String {
     region
         .players
@@ -1021,13 +1146,26 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         crate::advancement_triggers::record(region, id, "minecraft:placed_block", payload.clone());
         crate::advancement_triggers::record(region, id, "minecraft:item_used_on_block", payload);
     }
-    // `DefaultBlockInteractionTrigger` / `AnyBlockInteractionTrigger`：任何右键方块。
-    crate::advancement_triggers::record(
-        region,
-        id,
-        "minecraft:any_block_use",
-        serde_json::json!({"block": block_name(region, packet.pos)}),
-    );
+    // `ServerGamePacketListenerImpl.handleUseItemOn` 在结果 consumesAction 之后
+    // 给这次右键触发 ANY_BLOCK_USE；BLOCK_USE loot context 带方块与手持物品。
+    let clicked_block = block_name(region, packet.pos);
+    if outcome.result.consumes_action() {
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:any_block_use",
+            serde_json::json!({"block": clicked_block.clone()}),
+        );
+    }
+    // `DefaultBlockInteractionTrigger`：`useWithoutItem` 成功且用的是主手。
+    if outcome.used_without_item && packet.hand == Hand::Main && outcome.result.consumes_action() {
+        crate::advancement_triggers::record(
+            region,
+            id,
+            "minecraft:default_block_use",
+            serde_json::json!({"block": clicked_block}),
+        );
+    }
     send_effects(region, Some(id), &outcome.effects);
     // 炼药锅的 `createFilledResult` 和洗染料。方块逻辑只记账，物品栏在这里改。
     // A cauldron's `createFilledResult` or dye wash. Block behaviour records it; the inventory changes here.
@@ -1266,6 +1404,37 @@ pub(crate) fn on_interact_entity(
         });
         if !outcome.result.consumes_action() {
             continue;
+        }
+        // `TamableAnimal.tame` / `AbstractHorse.tameWithName`：交互里当场驯服成功。
+        if outcome.tamed {
+            let kind = region
+                .entities
+                .public_at(entity_id)
+                .and_then(|public| match &public.kind {
+                    mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.mob_type.name()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            crate::advancement_triggers::record(
+                region,
+                id,
+                "minecraft:tame_animal",
+                serde_json::json!({"entity": {"type": kind}}),
+            );
+        }
+        // `Bucketable.bucketMobPickup`：鱼桶 / 美西螈桶 / 蝌蚪桶也是 FILLED_BUCKET。
+        if outcome.filled_bucket {
+            let item = outcome
+                .replacement
+                .as_ref()
+                .map(|stack| item_name_of(stack.item))
+                .unwrap_or_default();
+            crate::advancement_triggers::record(
+                region,
+                id,
+                "minecraft:filled_bucket",
+                serde_json::json!({"item": item}),
+            );
         }
         // `createFilledResult` 自己会消耗手里的一个，有交回物品时不再另扣。
         // `createFilledResult` consumes the held item itself, so no extra shrink then.

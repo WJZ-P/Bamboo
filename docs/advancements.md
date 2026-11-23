@@ -87,8 +87,8 @@
 
 ## 58 种触发器的接入表
 
-「已接」= 有事件入口且会判定；「待接」= Bamboo 已有对应系统、这一期暂没挂事件入口；
-「不做」= Bamboo 没有对应系统（下界 / 末地 / 村庄 / 钓鱼 / 袭击等），只解析不触发。
+「已接」= 有事件入口且会判定；「不做」= Bamboo 没有对应系统（下界 / 末地 /
+村庄 / 钓鱼 / 袭击 / 不死图腾 / 标靶等），只解析不触发。
 所有 58 种的判据 JSON 都能解析；条件字段没建模时一律判为不匹配，不白送判据。
 
 | 触发器 | 状态 | 入口 / 缺失 |
@@ -101,7 +101,7 @@
 | `placed_block` | 已接 | `interaction::on_use_item_on` 放置成功 |
 | `item_used_on_block` | 已接 | `interaction::on_use_item_on` |
 | `any_block_use` | 已接 | `interaction::on_use_item_on` |
-| `default_block_use` | 待接 | `interaction::on_use_item_on` 里有 `useWithoutItem`，尚未区分 default |
+| `default_block_use` | 已接 | `interaction::use_held_item`：`used_without_item` 且主手、结果 consumesAction |
 | `consume_item` | 已接 | `player_consume::complete` |
 | `slept_in_bed` | 已接 | `sleep::on_sleep_in_bed` |
 | `effects_changed` | 已接 | `player_effects::give` |
@@ -111,21 +111,21 @@
 | `started_riding` | 已接 | `riding::mount` |
 | `shot_crossbow` | 已接 | `player_weapon::shoot_crossbow` |
 | `using_item` | 已接 | `player_weapon::spawn_arrow` |
-| `enchanted_item` | 待接 | `command::enchant` 有附魔成功入口，尚未挂事件 |
-| `tame_animal` | 待接 | `mc-bamboo-blocks::entity::mob::tame::tame` 有，尚未挂事件 |
-| `bred_animals` | 待接 | `mc-bamboo-blocks::entity::mob::living::apply_breed` 有，尚未挂事件 |
-| `entity_killed_player` | 待接 | `player_death::die_in` 有，借用被拆成 `HurtParts`，尚未挂事件 |
-| `entity_hurt_player` | 待接 | `player_hurt::hurt_player_in` 有，同上 |
-| `used_totem` | 待接 | 不死图腾判定尚未建模 |
-| `killed_by_arrow` | 待接 | 箭命中实体在 `mc-bamboo-blocks::entity::arrow` 里，尚未回传玩家 |
-| `item_durability_changed` | 待接 | `mc-bamboo-blocks::durability` 有，尚未挂事件 |
-| `fall_from_height` | 待接 | `player_hurt::hurt_player_in` 有摔落伤害，尚未分类 |
-| `thrown_item_picked_up_by_player` | 待接 | `interaction` 的掉落物拾取有，尚未挂事件 |
-| `summoned_entity` | 待接 | `command::summon` / 刷怪蛋有，尚未挂事件 |
-| `target_hit` | 待接 | 标靶方块尚未建模 |
-| `enter_block` | 待接 | `player_environment::tick_environment` 有卡墙判定，尚未挂事件 |
-| `filled_bucket` | 待接 | `inventory` 的桶交换有，尚未挂事件 |
-| `crafter_recipe_crafted` | 待接 | `mc-bamboo-blocks::crafter` 有，尚未挂事件 |
+| `enchanted_item` | 已接 | `command::enchant` 成功改完主手物品，传物品与等级 |
+| `tame_animal` | 已接 | `MobInteraction::tamed` / `MobEvent::Tamed`（狼、猫、马科驯服） |
+| `bred_animals` | 已接 | `Effect::BredAnimals`：幼崽落地时按求爱者 UUID 触发 |
+| `entity_killed_player` | 已接 | `player_death::die_in`：击杀者实体类型经 `HurtParts` 回传 |
+| `entity_hurt_player` | 已接 | `player_hurt::hurt_player_damage`：实际扣血时带伤害来源与数值 |
+| `used_totem` | 不做 | 不死图腾 / `checkTotemDeathProtection` 系统 Bamboo 没有建模 |
+| `killed_by_arrow` | 已接 | `Effect::KilledByArrow`：箭击杀实体时回传射手、受击者类型与武器 |
+| `item_durability_changed` | 已接 | `durability::run` 比较两只手前后的 `damage` 值 |
+| `fall_from_height` | 已接 | `player_environment::on_land`：落地时按下落距离与起点 y 触发 |
+| `thrown_item_picked_up_by_player` | 已接 | `drops::pickup_before_entities`：玩家收下掉落物时触发 |
+| `summoned_entity` | 已接 | `Effect::SummonedEntity`：南瓜图案生成铁 / 雪 / 铜傀儡（5 格）、凋灵头图案（50 格） |
+| `target_hit` | 不做 | 标靶方块 / 红石信号强度系统 Bamboo 没有建模 |
+| `enter_block` | 已接 | `player_environment::tick_player`：卡在方块里时传方块状态 |
+| `filled_bucket` | 已接 | `Effect::FilledBucket` / `MobInteraction::filled_bucket`：装流体与装生物桶 |
+| `crafter_recipe_crafted` | 已接 | `Effect::CrafterCrafted`：合成器吐出产物时给 17³ 内玩家 |
 | `impossible` | 不做 | 官方定义里没用到；永不触发 |
 | `brewed_potion` | 不做 | 酿造台出药水的玩家归因没做 |
 | `construct_beacon` | 不做 | 信标层级变化没做 |
@@ -152,28 +152,38 @@
 | `avoid_vibration` | 不做 | 幽匿感测体没做 |
 | `fall_after_explosion` | 不做 | 爆炸后摔落归因没做 |
 
-「待接」的 20 种里，绝大部分事件已经在 `Region::pending_triggers` 的框架覆盖范围内
-（`record` + `drain`），补的是一个调用点，不需要另起事件系统。
+18 个原「待接」触发器现在都接在现有入口上：方块层新加的
+`Effect::BredAnimals` / `SummonedEntity` / `KilledByArrow` / `CrafterCrafted`
+把借用被拆开的事件带回 `send_effects`，其余用 `HurtParts::pending_triggers`
+或直接 `record`，统一由 `Region::pending_triggers` 的 `drain` 在玩家 tick 末尾派发。
+`used_totem`（不死图腾）与 `target_hit`（标靶方块）改列「不做」：Bamboo 没有
+对应的判定系统，只保留判据解析。
 
 `advancement-trigger-oracle java` 用官方 `ServerAdvancementManager` 里
-`Criterion.CODEC` 解析出的**真实触发器实例**对 9 组固定事件输入判定，导出
-6 种触发器（`inventory_changed`、`location`、`consume_item`、`placed_block`、
-`item_used_on_block`、`tick`）共 4070 条判定，Rust 侧用同一组规则复放，
-0 不一致；`--break-self-test` 改坏一处。`loot` 奖励接了现有的
-`LootTable::get_random_items_with_seed` + `inventory::give_or_drop`；
-`location` 的群系接了 `ChunkStore::biome_at` + `BIOME_CLIMATES`。
+`Criterion.CODEC` 解析出的**真实触发器实例**，在 JVM 内的假世界、假物品栏和
+`LootContext` 上反射调用实例自己的 `matches`，对 43 组固定事件输入判定，
+导出 19 种触发器共 4253 条判定；Rust 侧 `advancement_triggers::matches_trigger`
+复用正式判定规则逐条复放，0 不一致；`--break-self-test` 改坏一处能报出来。
+`loot` 奖励接了现有的 `LootTable::get_random_items_with_seed` +
+`inventory::give_or_drop`；`location` 的群系接了 `ChunkStore::biome_at` +
+`BIOME_CLIMATES`。
+
+游戏内集成测试（`interaction/advancement_tests.rs`）走真实流程验证判据完成：
+驯服狼拿到 `husbandry/tame_an_animal`、两头牛繁殖拿到
+`husbandry/breed_an_animal`、水桶装鳕鱼完成 `tactical_fishing` 的
+`cod_bucket` 判据，另有空桶舀水与空手右键合成器的事件记录检查。
 
 ## 已知差异
 
-- **触发器覆盖**：58 种全部能解析并建监听；32 种在 `CONNECTED_TRIGGERS` 里
-  （见表），其中 12 种有明确的现有事件调用点，另外 20 种是「待接」——
-  系统已有、只差一个 `record` 调用点。26 种「不做」的触发器列进表里，
-  原因都是 Bamboo 没有对应系统（下界 / 末地、村庄与袭击、钓鱼、悦灵、标靶等）。
-  条件字段没建模时一律判为不匹配，不白送判据。
-- **触发器 oracle 覆盖**：`advancement-trigger-oracle` 的 4070 条判定覆盖
-  6 种有固定事件输入的触发器（`inventory_changed`、`location`、`consume_item`、
-  `placed_block`、`item_used_on_block`、`tick`）；其余触发器的官方实例判定
-  还没单独出题。
+- **触发器覆盖**：58 种全部能解析并建监听；31 种在 `CONNECTED_TRIGGERS` 里
+  （见表），都有明确的现有事件调用点。27 种「不做」的触发器列进表里，原因都是
+  Bamboo 没有对应系统（下界 / 末地、村庄与袭击、钓鱼、悦灵、不死图腾、标靶等）。
+  条件字段没建模时一律判为不匹配，不白送判据：实体谓词只实现了
+  `minecraft:entity_type`，物品谓词按 ID / 标签，伤害谓词按 `blocked` 与
+  `#minecraft:is_projectile`，距离谓词按 `y` 的 min / max。
+- **触发器 oracle 覆盖**：`advancement-trigger-oracle` 的 4253 条判定覆盖
+  19 种有固定事件输入的触发器；其余 39 种（含 27 种「不做」）没有官方实例
+  判定题，判据 JSON 仍全部能解析。
 - **`function` 奖励**：Bamboo 没有函数系统，留到第二期。内置 26.3 定义里没有
   function 奖励。
 - **配方书**：奖励里的配方集合目前写在进度档案里；官方的 `recipeBook` 字段在

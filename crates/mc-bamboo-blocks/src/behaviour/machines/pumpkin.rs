@@ -185,6 +185,13 @@ fn spawn_golem(
         }
     });
     world.add_prepared_entity(entity);
+    // `CarvedPumpkinBlock.spawnGolemInWorld` 在实体落地后给包围盒膨胀 5 格内的
+    // 所有 ServerPlayer 触发 SUMMONED_ENTITY。
+    world.push_effect(Effect::SummonedEntity {
+        entity: kind.name(),
+        position,
+        radius: 5.0,
+    });
 }
 
 /// `CarvedPumpkinBlock.clearPatternBlocks`：每格清成空气，并按顺序发 2001 破坏事件。
@@ -295,7 +302,16 @@ mod tests {
     fn destroyed_count(effects: Vec<Effect>) -> usize {
         effects
             .iter()
-            .filter(|effect| !matches!(effect, Effect::Sound { .. }))
+            .filter(|effect| {
+                !matches!(
+                    effect,
+                    Effect::Sound { .. }
+                        | Effect::SummonedEntity { .. }
+                        | Effect::BredAnimals { .. }
+                        | Effect::CrafterCrafted { .. }
+                        | Effect::KilledByArrow { .. }
+                )
+            })
             .count()
     }
 

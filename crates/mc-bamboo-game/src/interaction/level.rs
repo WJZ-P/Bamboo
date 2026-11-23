@@ -100,6 +100,8 @@ pub(crate) struct PlayerSide<'a> {
     pub(crate) links: &'a mut crate::links::Links,
     pub(crate) sound_seeds: &'a LevelRandom,
     pub(crate) rules: &'a crate::gamerules::GameRuleSet,
+    /// 精确驱动的实体循环把受伤产生的进度事件也攒回区域队列。
+    pub(crate) pending_triggers: &'a mut Vec<crate::advancement_triggers::PendingEvent>,
 }
 
 impl LevelTables for RegionLevel<'_> {
@@ -533,6 +535,7 @@ impl Level for RegionLevel<'_> {
             rules: side.rules,
             attacker,
             defer_health: true,
+            pending_triggers: Some(side.pending_triggers),
         };
         let (hurt, death_drops) =
             crate::player_hurt::hurt_player_by_mob(&mut parts, PlayerId(target), source, amount);
@@ -561,6 +564,7 @@ impl Level for RegionLevel<'_> {
             rules: side.rules,
             attacker: None,
             defer_health: true,
+            pending_triggers: Some(side.pending_triggers),
         };
         crate::player_hurt::knock_back_player(&mut parts, PlayerId(target), strength, direction);
         true

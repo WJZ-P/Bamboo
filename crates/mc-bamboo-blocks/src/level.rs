@@ -2221,6 +2221,41 @@ pub enum Effect {
     },
     /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
     TorchBurnout { pos: BlockPos },
+    /// 一次繁殖落地了幼崽。游戏层按 `lover` 找出求爱者，触发 `BRED_ANIMALS`。
+    ///
+    /// A breeding produced offspring. The game layer credits the `lover` player's
+    /// `BRED_ANIMALS` trigger.
+    BredAnimals {
+        father: &'static str,
+        mother: &'static str,
+        child: &'static str,
+        lover: Option<[u8; 16]>,
+        position: mc_bamboo_core::Vec3,
+    },
+    /// 一次召唤落地了实体：铁 / 雪 / 铜傀儡、凋灵。游戏层按半径给附近玩家触发。
+    ///
+    /// A golem or wither was summoned. The game layer credits nearby players' triggers.
+    SummonedEntity {
+        entity: &'static str,
+        position: mc_bamboo_core::Vec3,
+        radius: f64,
+    },
+    /// 箭击中并杀死了实体：游戏层给射手触发 `KILLED_BY_ARROW`。
+    ///
+    /// An arrow killed an entity; the game layer credits the shooter's trigger.
+    KilledByArrow {
+        shooter: Option<[u8; 16]>,
+        /// 被击杀的实体类型名字（最多 5 个，超过按 5 计）。
+        victims: [&'static str; 5],
+        weapon: &'static str,
+    },
+    /// 合成器合成成功。游戏层按半径给附近玩家触发 `CRAFTER_RECIPE_CRAFTED`。
+    ///
+    /// A crafter crafted a recipe. The game layer credits nearby players' triggers.
+    CrafterCrafted {
+        recipe: &'static str,
+        position: mc_bamboo_core::Vec3,
+    },
     /// 空桶舀起了东西。游戏层按 `ItemUtils.createFilledResult` 把 `item` 交还到 `hand`。
     ///
     /// An empty bucket picked something up. The game layer runs `ItemUtils.createFilledResult`
