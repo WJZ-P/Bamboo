@@ -265,6 +265,8 @@ pub(crate) struct Region {
     /// (`spawn_per_player_cap` in `bamboo.toml`); off keeps only the vanilla
     /// global cap.
     pub(crate) spawn_per_player_cap: bool,
+    /// 每只生物每刻最多处理几次推挤（0 = 不限）。
+    pub(crate) max_entity_collisions: usize,
     /// `ServerLevel.customSpawners` 里的 `PatrolSpawner`。每岛一份，和官方的每维度一份
     /// 对应，岛拆分时两边各带自己的计时器。
     ///
@@ -463,6 +465,7 @@ impl Region {
                 mc_bamboo_blocks::cache::CacheConfig::default(),
             ),
             spawn_per_player_cap: true,
+            max_entity_collisions: 0,
             patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner::default(),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
@@ -656,6 +659,12 @@ impl Region {
         self.split_level(false)
     }
 
+    /// 实体逻辑读的那份规则：方块快照加 Bamboo 自己的挤压上限配置。
+    /// 方块逻辑仍读 `global.block_rules`（上限恒为 0，不受这个开关影响）。
+    pub(crate) fn entity_game_rules(&self) -> mc_bamboo_blocks::BlockGameRules {
+        self.global.rules.entity_rules(self.max_entity_collisions)
+    }
+
     /// 精确驱动的实体循环用的世界：额外借出连接、音效种子和规则，生物打玩家时
     /// 能在自己的 tick 里当场走玩家受伤的正式入口（[`RegionLevel::player_side`]）。
     pub(crate) fn entity_level(&mut self) -> (RegionLevel<'_>, &mut BlockTicks) {
@@ -671,6 +680,7 @@ impl Region {
         &mut BlockTicks,
         &mut mc_bamboo_blocks::cache::RedstoneCache,
     ) {
+        let entity_rules = self.entity_game_rules();
         let player_side = with_players.then(|| crate::interaction::level::PlayerSide {
             links: &mut self.links,
             sound_seeds: &self.sound_seed_generator,
@@ -689,7 +699,7 @@ impl Region {
             containers: &mut self.containers,
             entities: &mut self.entities,
             loot_sequences: &self.loot_sequences,
-            block_rules: self.global.block_rules,
+            block_rules: entity_rules,
             block_weather: self.global.block_weather,
             sky_darken: self.global.sky_darken,
             clock_ticks: self.global.clock.total_ticks,

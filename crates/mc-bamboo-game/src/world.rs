@@ -57,6 +57,8 @@ const MAX_CATCH_UP: Duration = Duration::from_secs(2);
 /// 信箱预算和实体线程数的上限，防住配置文件里的巨值。
 pub const MAX_MAIL_BUDGET: usize = 1 << 16;
 pub const MAX_ENTITY_THREADS: usize = 256;
+/// `max_entity_collisions` 的合法上限（只是防配置写坏，Paper 缺省是 8）。
+pub const MAX_ENTITY_COLLISIONS: usize = 4096;
 /// 区块计算池线程数的上限。
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 
@@ -111,6 +113,8 @@ pub struct WorldConfig {
     pub admin: crate::admin::AdminSnapshot,
     /// 实体阶段的线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动。
     pub entity_threads: usize,
+    /// 每只生物每刻最多处理几次推挤（0 = 不限，精确模式）。
+    pub max_entity_collisions: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
@@ -200,6 +204,7 @@ impl Default for WorldConfig {
             enforce_secure_profile: true,
             admin: crate::admin::AdminSnapshot::default(),
             entity_threads: 0,
+            max_entity_collisions: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings::default(),
@@ -681,6 +686,8 @@ impl World {
                 });
         }
         world.islands.region.spawn_per_player_cap = config.spawn_per_player_cap;
+        world.islands.region.max_entity_collisions =
+            config.max_entity_collisions.min(MAX_ENTITY_COLLISIONS);
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
         crate::worldgen_cache::configure(config.worldgen_cache);

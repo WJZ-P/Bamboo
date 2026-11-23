@@ -152,7 +152,15 @@ impl GameRuleSet {
             mob_drops: self.bool(gamerules::MOB_DROPS),
             mob_explosion_drop_decay: self.bool(gamerules::MOB_EXPLOSION_DROP_DECAY),
             max_entity_cramming: self.int(gamerules::MAX_ENTITY_CRAMMING),
+            max_entity_collisions: 0,
         }
+    }
+
+    /// 实体逻辑读的那份快照，另外带上 Bamboo 自己的挤压上限配置。
+    pub(crate) fn entity_rules(&self, max_entity_collisions: usize) -> BlockGameRules {
+        let mut rules = self.block_snapshot();
+        rules.max_entity_collisions = max_entity_collisions;
+        rules
     }
 
     /// 存档里要写的规则：默认特性开着的那些，按注册表顺序，键是带命名空间的标识符。

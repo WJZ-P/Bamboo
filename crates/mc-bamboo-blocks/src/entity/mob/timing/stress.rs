@@ -629,7 +629,7 @@ struct Sample {
 
 /// 一个场景 × 一个线程数的一轮：搭世界、预热、量 `MEASURE` 刻。
 fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool) -> Sample {
-    let (terrain, mobs, _) = if scene == Scene::Mixed {
+    let (mut terrain, mobs, _) = if scene == Scene::Mixed {
         (
             MIXED_TERRAIN.get_or_init(|| Scene::mixed().0).clone(),
             Vec::new(),
@@ -638,6 +638,10 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     } else {
         scene.build()
     };
+    // A/B 用：打开挤压上限（Paper 的缺省值 8）。
+    if let Ok(raw) = std::env::var("MOB_STRESS_MAX_COLLISIONS") {
+        terrain.rules.max_entity_collisions = raw.parse().unwrap_or(8);
+    }
     let mut level = StressLevel {
         terrain: terrain.clone(),
         random: LevelRandom::new(seed as i64),
@@ -1005,10 +1009,11 @@ fn mob_stress() {
         })
         .unwrap_or_else(|| THREADS.to_vec());
     println!(
-        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={}",
+        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={} max-collisions={}",
         only.as_deref().unwrap_or("all"),
         threads,
-        scoped
+        scoped,
+        std::env::var("MOB_STRESS_MAX_COLLISIONS").unwrap_or_else(|_| "off".to_owned())
     );
     println!("uptime: {}", uptime());
     for scene in Scene::ALL {
@@ -1050,6 +1055,10 @@ fn measure_cramming(scene: Scene, threads: usize, rounds: usize) -> String {
     let mut per_round = Vec::new();
     for round in 0..rounds {
         let (mut terrain, mobs, _) = scene.build();
+        // A/B 用：打开挤压上限（8，Paper 的缺省值）。
+        if std::env::var_os("MOB_STRESS_MAX_COLLISIONS").is_some() {
+            terrain.rules.max_entity_collisions = 8;
+        }
         // 恢复官方默认（24），`Terrain::new` 给的就是 vanilla。
         terrain.rules.max_entity_cramming = BlockGameRules::vanilla().max_entity_cramming;
         let mut level = StressLevel {

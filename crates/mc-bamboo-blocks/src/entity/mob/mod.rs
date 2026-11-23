@@ -2261,6 +2261,14 @@ pub struct Mob {
     /// A passenger ejected this tick, skipped by `push_entities` in the same tick
     /// (vanilla moves the rider off the mount synchronously; Bamboo does it in `riding::tick`).
     pub(super) ejected_passenger: Option<EntityUid>,
+    /// 这一刻已经处理过几次推挤，以及计数属于哪一刻。`max_entity_collisions`
+    /// 打开时才有用；刻号不同就把计数当作 0，不用每刻扫表清零。
+    /// 不存档、不同步。
+    ///
+    /// Pushes handled this tick and the tick the count belongs to. A count
+    /// from an older tick reads as zero, so no per-tick store scan is needed.
+    /// Not saved or synced.
+    pub(super) push_count: (i64, usize),
     pub equine: Option<Box<equine::EquineState>>,
     /// 跑大脑的生物（犰狳）的 `Brain`；用目标选择器的生物是 `None`。
     ///
@@ -2722,6 +2730,7 @@ impl Mob {
             discard_friction: false,
             passengers: Vec::new(),
             ejected_passenger: None,
+            push_count: (i64::MIN, 0),
             equine: mob_type
                 .is_equine()
                 .then(|| Box::new(equine::EquineState::default())),

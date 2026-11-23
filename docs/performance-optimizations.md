@@ -3771,3 +3771,40 @@ MOB_STRESS_SCOPED=1 MOB_STRESS_SCENE=mixed-natural MOB_STRESS_THREADS=0,1,2,4,8 
 0 和 1 两种执行器都不起后台线程，差别是同机噪声的尺度。收益集中在
 2–8 线程的派活路径：每刻省掉 `threads - 1` 次线程创建/回收。大场景的
 每刻时间由实体逻辑主导，两种执行器的差别落在噪声里，见 5.22.2。）
+
+### 26.3 挤压上限开关
+
+`bamboo.toml` 的 `max_entity_collisions`（缺省 `0` = 关，精确模式）：设成 N>0 时
+每只生物每刻最多处理 N 次推挤，上限下推到实体范围查询（够数就停止枚举），
+`Mob` 上的计数按岛的刻号归零。精确驱动和并行驱动都读同一份规则快照，
+结果仍和线程数无关。`maxEntityCramming` 的伤害判定用**完整**的候选名单，
+不受这个开关影响（Paper 的 `collisions.maxEntityCollisions` 也是这个语义）。
+缺省关闭时所有逐刻对拍、探针和单元测试都是官方行为。
+
+同轮交替三轮中位数，`tower-1x1` / `tower-3x3`（350 只牛，
+`maxEntityCramming = 0`，负载 350 只稳定）：
+
+```text
+MOB_STRESS_SCENE=tower-1x1 MOB_STRESS_THREADS=0,8 \
+  cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+MOB_STRESS_MAX_COLLISIONS=8 MOB_STRESS_SCENE=tower-1x1 MOB_STRESS_THREADS=0,8 \
+  cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+```
+
+| 场景 / 线程数 | 关 p50 ms/刻 | 开（8） p50 | 关 push-cmds/刻 | 开（8） |
+| --- | ---: | ---: | ---: | ---: |
+| tower-1x1 / 0 | 132.321 | 4.171 | 122 150 | 2 800 |
+| tower-1x1 / 8 | 87.661 | 2.928 | 122 150 | 2 800 |
+| tower-3x3 / 0 | 28.716 | 6.267 | 30 167.5 | 2 800 |
+| tower-3x3 / 8 | 27.091 | 4.130 | 30 566.9 | 2 800 |
+
+（同一次会话、机器负载 52.81 / 68.45 / 65.60 起，关的 1×1 测量撞上一波
+编译尖峰，绝对值偏大；报告轮 5.22.2 的同场景基线是 85.462 / 85.451 ms，
+和这里「开」之后的 4.171 / 2.928 对得上量级。命令数从 122 150 截到
+`350 × 8 = 2800`，正是每只每刻 8 次的定义；3×3 同理。
+另在默认 `maxEntityCramming = 24` 下单独跑 100 刻：开关两档最后都只剩 24 只，
+伤害判定依旧生效，见 5.22.4。）
+
+**已知行为差异**：打开后被推的次数少了，挤成一团的生物散开得慢；上限只作用于
+`pushEntities` 发出的推挤命令，不改 `maxEntityCramming` 的伤害规则。
+计数按岛的刻号归零（不是绝对时间），拆岛 / 并岛时跟着实体走。

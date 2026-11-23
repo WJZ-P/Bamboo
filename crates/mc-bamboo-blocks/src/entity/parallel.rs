@@ -376,7 +376,13 @@ impl Shared<'_> {
     /// 只访问范围覆盖到的那几个格子，不再遍历整张索引。`exclude` 是当前正在算的实体：
     /// 官方 `getEntities(this, ...)` 不返回自己，快照里还留着自己那一行是并行模型的
     /// 实现细节，不是可以让别的实体看到的东西。
-    fn for_each_in(&self, area: Aabb, exclude: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) {
+    fn for_each_in(
+        &self,
+        area: Aabb,
+        exclude: EntityUid,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
         let (first, last) = section_range(&area);
         let mut found = Vec::new();
         for x in first.0..=last.0 {
@@ -400,8 +406,14 @@ impl Shared<'_> {
             .map(|entry| (entry.public.uid, &entry.public))
             .collect();
         ordered.sort_unstable_by_key(|(uid, _)| *uid);
+        let mut taken = 0;
         for (_, public) in ordered {
-            visit(public);
+            if taken >= limit {
+                break;
+            }
+            if visit(public) {
+                taken += 1;
+            }
         }
     }
 }
@@ -439,12 +451,28 @@ impl EntityCtx for ParallelCtx<'_> {
     }
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
-        self.shared.for_each_in(area, self.uid, visit);
+        self.shared
+            .for_each_in(area, self.uid, usize::MAX, &mut |public| {
+                visit(public);
+                true
+            });
+    }
+
+    fn pushable_others(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.shared.for_each_in(area, self.uid, limit, visit);
     }
 
     fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {
         self.shared
-            .for_each_in(area, self.uid, &mut |public| visit(public.uid));
+            .for_each_in(area, self.uid, usize::MAX, &mut |public| {
+                visit(public.uid);
+                true
+            });
     }
 
     fn emit(&mut self, command: Command, _me: &mut Entity) {
@@ -720,7 +748,10 @@ pub(crate) fn shared_rows_in(
     uids.iter()
         .map(|&uid| {
             let mut seen = Vec::new();
-            shared.for_each_in(area, uid, &mut |public| seen.push(public.uid));
+            shared.for_each_in(area, uid, usize::MAX, &mut |public| {
+                seen.push(public.uid);
+                true
+            });
             seen
         })
         .collect()

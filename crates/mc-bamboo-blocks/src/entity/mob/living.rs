@@ -2191,16 +2191,34 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if !mob.mob_type.is_pushable() {
         return;
     }
+    let rules = ctx.blocks().block_game_rules();
+    let cap = rules.max_entity_collisions;
+    let tick = ctx.blocks().game_time();
+    // 刻号不同就从 0 起算，不必每刻扫一遍实体表；精确串行和并行算阶段都读
+    // 同一个岛时钟，两种驱动的计数一致。
+    let used = if mob.push_count.0 == tick {
+        mob.push_count.1
+    } else {
+        0
+    };
+    let remaining = if cap == 0 {
+        usize::MAX
+    } else {
+        cap.saturating_sub(used)
+    };
     let bounds = me.bounding_box();
     let mut others = Vec::new();
-    ctx.for_each_other_in(bounds, &mut |other| {
+    // 上限下推到查询里：够数就停止枚举，塔场景不必把几百个候选全排一遍。
+    ctx.pushable_others(bounds, remaining, &mut |other| {
         if let KindPublic::Mob(public) = &other.kind
             && !other.removed
             && public.is_alive()
             && public.mob_type.is_pushable()
         {
             others.push((other.uid, other.position));
+            return true;
         }
+        false
     });
     // `getPushableEntities` 也收玩家（旁观者除外）；玩家那一侧的推力服务端不生效，
     // 这里只算生物自己被推开的那一半。跳过自己的乘客和这一刻刚甩掉的骑手。
@@ -2218,11 +2236,31 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             players.push(player.position);
         }
     });
+    // `maxEntityCramming` 的伤害判定用的是**没截断**的名单：Paper 的
+    // `maxEntityCollisions` 不改这条规则。上限打开且名单可能被截断时才补一次
+    // 完整计数（只有开着挤压伤害的场景才需要，塔压测把规则设成 0 就跳过）。
     if others.is_empty() && players.is_empty() {
         return;
     }
-    let cramming = ctx.blocks().block_game_rules().max_entity_cramming;
-    let crowd = (others.len() + players.len()) as i32;
+    let cramming = rules.max_entity_cramming;
+    // 上限打开时还要按完整的候选数判定伤害；名单已经够触发就不用再数一遍，
+    // 绝大多数拥挤场景走这条快路径。
+    let crowd = if cap == 0
+        || cramming <= 0
+        || others.len() + players.len() > (cramming - 1).max(0) as usize
+    {
+        (others.len() + players.len()) as i32
+    } else {
+        let mut count = 0;
+        ctx.for_each_other_in(bounds, &mut |other| {
+            if matches!(&other.kind, KindPublic::Mob(public)
+                if !other.removed && public.is_alive() && public.mob_type.is_pushable())
+            {
+                count += 1;
+            }
+        });
+        count + players.len() as i32
+    };
     if cramming > 0 && crowd > cramming - 1 && me.random.next_int_bounded(4) == 0 {
         timing::record_cramming!();
         hurt_server(
@@ -2241,15 +2279,24 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `isPassengerOfSameVehicle`, so a ridden mob stays put.
     let pushable_self =
         is_alive(me, mob) && !on_climbable(me, mob, ctx.blocks()) && !mob.is_vehicle();
+    // 玩家排在生物后面（官方先实体后玩家）；上限只保留前面的名额。
+    let mut handled = 0;
     for position in players {
+        if handled >= remaining {
+            break;
+        }
         if pushable_self && let Some((dx, dz)) = push_amount(position, me.position) {
             me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
             // `Entity.push(Entity)` 推开自己那一半时也置 `needsSync`。
             // The self half of `Entity.push(Entity)` also sets `needsSync`.
             mob.needs_sync = true;
         }
+        handled += 1;
     }
     for (uid, position) in others {
+        if handled >= remaining {
+            break;
+        }
         ctx.emit(
             Command::PushMob {
                 other: uid,
@@ -2258,7 +2305,9 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             },
             me,
         );
+        handled += 1;
     }
+    mob.push_count = (tick, used.saturating_add(handled));
 }
 
 /// `Entity.push(Entity)` 的数学部分：返回推开的水平量。

@@ -1332,6 +1332,21 @@ impl LevelEntities for Recording<'_> {
         self.level.for_each_entity_in(area, visit);
     }
 
+    fn for_each_pushable_in(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
+        self.note_entities(4);
+        self.read(
+            None,
+            K_ENTITIES,
+            (4_u8, area.min_x.to_bits(), area.max_z.to_bits()),
+        );
+        self.level.for_each_pushable_in(area, limit, visit);
+    }
+
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid {
         self.note_entities(5);
         let uid = self.level.spawn_entity(entity);

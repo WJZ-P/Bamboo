@@ -734,3 +734,106 @@ fn worker_pool_reuses_its_threads_and_keeps_results_stable() {
         );
     }
 }
+
+/// `max_entity_collisions`：每只生物每刻最多发这么多次推挤，计数下一刻归零。
+/// 精确驱动、并行驱动和缺省（0 = 官方行为）都要对。
+#[test]
+fn the_push_cap_limits_commands_and_resets_each_tick() {
+    use crate::entity::mob::MobType;
+
+    /// 12 只牛挤在原点：一个 tick 里每只都看得到另外 11 只。
+    /// 返回每刻结束每只牛身上的 `(刻号, 已处理次数)`。
+    fn crowded(cap: usize, parallel: bool) -> Vec<Vec<(i64, usize)>> {
+        let mut level = TestLevel::new();
+        level.rules.max_entity_collisions = cap;
+        let mut facts = ViewFacts::default();
+        facts.rules.max_entity_collisions = cap;
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for _ in 0..12 {
+                world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.5, 0.5)));
+            }
+        }
+        let mut all = Vec::new();
+        for tick in 0..3 {
+            ticks.set_time(tick);
+            facts.game_time = tick;
+            let blocks = SourceView::new(FlatSource { floor_y: 64, facts });
+            let mut world = World::new(&mut level, &mut ticks);
+            if parallel {
+                tick_entities_parallel(&blocks, &mut world, &InlineExecutor);
+            } else {
+                world.tick_entities();
+            }
+            drop(world);
+            let counts = World::new(&mut level, &mut ticks)
+                .live_entities()
+                .into_iter()
+                .filter_map(|entity| entity.kind.mob().map(|mob| mob.push_count))
+                .collect();
+            all.push(counts);
+        }
+        all
+    }
+
+    for parallel in [false, true] {
+        // 缺省（精确模式）：每只每刻都向另外 11 只发命令，三刻都是 11。
+        let off = crowded(0, parallel);
+        for (index, counts) in off.iter().enumerate() {
+            assert_eq!(counts.len(), 12, "parallel={parallel} tick={index}");
+            assert!(
+                counts
+                    .iter()
+                    .all(|&(tick, used)| tick == index as i64 && used == 11),
+                "parallel={parallel} tick={index}: {counts:?}"
+            );
+        }
+        // 上限 8：查询在够数时就停，每只每刻最多 8 次；三刻都重新有 8 次额度。
+        let on = crowded(8, parallel);
+        for (index, counts) in on.iter().enumerate() {
+            assert_eq!(counts.len(), 12, "parallel={parallel} tick={index}");
+            assert!(
+                counts
+                    .iter()
+                    .all(|&(tick, used)| tick == index as i64 && used == 8),
+                "parallel={parallel} tick={index}: {counts:?}"
+            );
+        }
+    }
+}
+
+/// 上限不能改 `maxEntityCramming` 的挤压伤害：名单被截断时，伤害判定仍按
+/// 完整的候选数走。把 cramming 设成 3，牛就该挨打（随机源固定）。
+#[test]
+fn the_push_cap_does_not_change_cramming_damage() {
+    use crate::entity::mob::MobType;
+
+    /// 返回挨了挤压伤害的牛的头数。
+    fn hurt_cows(cap: usize, cramming: i32) -> usize {
+        let mut level = TestLevel::new();
+        level.rules.max_entity_collisions = cap;
+        level.rules.max_entity_cramming = cramming;
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for _ in 0..12 {
+                world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.5, 0.5)));
+            }
+        }
+        let mut world = World::new(&mut level, &mut ticks);
+        world.tick_entities();
+        drop(world);
+        World::new(&mut level, &mut ticks)
+            .live_entities()
+            .into_iter()
+            .filter(|entity| entity.kind.mob().is_some_and(|mob| mob.health < 10.0))
+            .count()
+    }
+
+    let off_hurt = hurt_cows(0, 3);
+    let on_hurt = hurt_cows(8, 3);
+    assert!(off_hurt > 0, "没上限时挤压伤害生效");
+    assert!(on_hurt > 0, "有上限时挤压伤害照样生效");
+    assert_eq!(off_hurt, on_hurt, "上限不该改伤害判定的结果");
+}

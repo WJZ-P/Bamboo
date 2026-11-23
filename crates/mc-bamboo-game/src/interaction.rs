@@ -199,6 +199,7 @@ pub(crate) fn parallel_entity_ticks(
     pool: Option<&mc_bamboo_blocks::entity::parallel::WorkerPool>,
 ) {
     let game_time = region.tick.game_time();
+    let entity_rules = region.entity_game_rules();
     use mc_bamboo_blocks::entity::{
         parallel::{WorkerPool, commit, compute},
         view::ViewFacts,
@@ -224,7 +225,7 @@ pub(crate) fn parallel_entity_ticks(
         let facts = ViewFacts {
             min_y: mc_bamboo_world::MIN_Y,
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
-            rules: global.block_rules,
+            rules: entity_rules,
             difficulty: global.difficulty as i32,
             sky_darken: global.sky_darken,
             game_time,

@@ -884,6 +884,25 @@ impl EntityStore {
 
     /// 空间索引：和 `area` 相交的实体公开数据，按 uid 升序。
     pub fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        self.for_each_in_limited(area, usize::MAX, &mut |public| {
+            visit(public);
+            true
+        });
+    }
+
+    /// 同 [`Self::for_each_in`]，但 `visit` 返回 `true` 才算一个「够数的」结果：
+    /// 收集到 `limit` 个就停止枚举。挤压上限下推到这里，塔场景不必把几百个
+    /// 候选全排一遍；不合适的实体（掉落物、不可推挤的生物）不占额度。
+    ///
+    /// Like [`Self::for_each_in`], but only `true` returns count towards
+    /// `limit`; enumeration stops at `limit`. A non-matching entity does not
+    /// consume the push budget.
+    pub fn for_each_in_limited(
+        &self,
+        area: Aabb,
+        limit: usize,
+        visit: &mut dyn FnMut(&EntityPublic) -> bool,
+    ) {
         let mut found: Vec<(EntityUid, &EntityPublic)> = self
             .grid_rows_in(area)
             .into_iter()
@@ -893,8 +912,14 @@ impl EntityStore {
             .collect();
         // BTreeMap 的键有序，但槽位会被回收复用，行号顺序不等于 uid 顺序。
         found.sort_unstable_by_key(|(uid, _)| *uid);
+        let mut taken = 0;
         for (_, public) in found {
-            visit(public);
+            if taken >= limit {
+                break;
+            }
+            if visit(public) {
+                taken += 1;
+            }
         }
     }
 
