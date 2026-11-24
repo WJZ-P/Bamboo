@@ -220,6 +220,47 @@ fn leaving_saves_the_pearl_and_removes_it_from_the_world() {
     assert_eq!(region.players[&id].saved_ender_pearls, saved);
 }
 
+/// 世界层的下线路径：`on_leave` 之后飞行中的珍珠不再留在世界里。
+#[test]
+fn leaving_the_game_removes_the_flying_pearl() {
+    use crate::world::tests::Harness;
+    use mc_bamboo_blocks::entity::thrown_egg::EggShot;
+
+    let mut server = Harness::new_loaded_with_drive(2, crate::island::IslandDrive::Lockstep);
+    let client = server.join_and_settle("Pearl");
+    let pearl = {
+        let region = server.region();
+        let shot = EggShot {
+            position: Vec3::new(8.5, 70.0, 8.5),
+            direction: Vec3::new(0.0, 0.0, 0.0),
+            power: 1.0,
+            uncertainty: 0.0,
+            projectile: ThrowableKind::EnderPearl,
+            source_movement: None,
+            owner: Some(client.id.0),
+            owner_uuid: Some(*client.uuid.as_bytes()),
+            item: ItemStack::new(items::ENDER_PEARL, 1),
+        };
+        let uid = {
+            let (mut level, ticks) = region.block_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            world.spawn_egg_shot(&shot)
+        };
+        register(region, client.id, uid);
+        uid
+    };
+    server.leave(&client);
+    server.tick();
+    let region = server.world_region();
+    assert!(
+        region
+            .entities
+            .get(pearl)
+            .is_none_or(|entity| entity.removed),
+        "下线后珍珠从世界里移除"
+    );
+}
+
 #[test]
 fn the_landing_teleport_moves_the_player_and_resets_fall_distance() {
     let (mut region, id) = region_with_pearl_player();
