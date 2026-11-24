@@ -2385,7 +2385,10 @@ fn send_mob_events(
                         region,
                         player_id,
                         "minecraft:cured_zombie_villager",
-                        serde_json::json!({}),
+                        serde_json::json!({
+                            "zombie": {"type": "minecraft:zombie_villager"},
+                            "villager": {"type": "minecraft:villager"}
+                        }),
                     );
                 }
                 continue;
