@@ -2044,13 +2044,13 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Endermite => {
                     nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Endermite)
                 }
-                // `Turtle.BABY_ON_LAND_SELECTOR`：`isBaby() && !isInWater()`。僵尸 / 溺尸 /
-                // 狐狸 / 豹猫 / 猫的海龟目标共用这一个选择器。
-                // `Turtle.BABY_ON_LAND_SELECTOR`: `isBaby() && !isInWater()`. Zombies,
-                // drowned, foxes, ocelots and cats share this selector.
-                TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
-                    public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
-                }),
+                // `Turtle.BABY_ON_LAND_SELECTOR`：僵尸 / 溺尸 / 狐狸 / 豹猫 / 猫 / 野狼的
+                // 海龟目标共用这一个选择器。
+                // `Turtle.BABY_ON_LAND_SELECTOR`: shared by the turtle goals of zombies,
+                // drowned, foxes, ocelots, cats and wolves.
+                TargetType::BabyTurtleOnLand => {
+                    nearest_mob_target_with(me, mob, ctx, baby_turtle_on_land)
+                }
                 // `AbstractVillager`：官方还含流浪商人，Bamboo 没有建模，只匹配村民。
                 // `AbstractVillager`: vanilla also covers wandering traders, which are not
                 // modelled; match villagers only.
@@ -5177,6 +5177,17 @@ const fn is_schooling_fish(kind: super::MobType) -> bool {
     )
 }
 
+/// `Turtle.BABY_ON_LAND_SELECTOR`：`isBaby() && !isInWater()`。
+/// [`TargetType::BabyTurtleOnLand`] 的海龟目标和野狼的 `NonTameRandomTargetGoal`
+/// 共用这一个选择器，选目标和重测目标都用它。
+///
+/// `Turtle.BABY_ON_LAND_SELECTOR`: `isBaby() && !isInWater()`. Both the
+/// [`TargetType::BabyTurtleOnLand`] turtle goal and the wild wolf's
+/// `NonTameRandomTargetGoal` share this selector, for finding and re-testing a target.
+pub(super) fn baby_turtle_on_land(public: &super::MobPublic) -> bool {
+    public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
+}
+
 /// `NearestAttackableTargetGoal.findTarget` 的生物分支：`FOLLOW_RANGE` 方盒里、
 /// 类型符合、看得见、在跟随距离内的最近一个（从眼睛高度量）。
 ///
@@ -5450,5 +5461,28 @@ mod tests {
         for kind in [MobType::Pufferfish, MobType::Squid, MobType::Tadpole] {
             assert!(!is_schooling_fish(kind));
         }
+    }
+
+    /// `Turtle.BABY_ON_LAND_SELECTOR`：只有陆地上的幼年海龟命中；水里、成年、
+    /// 别的生物都不命中。野狼的 `NonTameRandomTargetGoal` 和海龟目标共用它。
+    ///
+    /// `Turtle.BABY_ON_LAND_SELECTOR`: only a baby turtle out of water matches; a
+    /// turtle in water, an adult, or another mob does not. Shared by the wild
+    /// wolf's `NonTameRandomTargetGoal` and the turtle goal.
+    #[test]
+    fn baby_turtle_on_land_selector_matches_vanilla() {
+        use super::super::{Mob, MobPublic, MobType};
+
+        let mut baby = Mob::new(MobType::Turtle);
+        baby.age = -24000;
+        assert!(super::baby_turtle_on_land(&MobPublic::of(&baby, false)));
+        // 水里不选。/ In water: not selected.
+        assert!(!super::baby_turtle_on_land(&MobPublic::of(&baby, true)));
+
+        let adult = Mob::new(MobType::Turtle);
+        assert!(!super::baby_turtle_on_land(&MobPublic::of(&adult, false)));
+
+        let other = Mob::new(MobType::Cod);
+        assert!(!super::baby_turtle_on_land(&MobPublic::of(&other, false)));
     }
 }

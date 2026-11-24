@@ -27,11 +27,11 @@ pub enum WolfTarget {
     AngryPlayer,
     /// `(5) NonTameRandomTargetGoal(Animal, false, PREY_SELECTOR)`：羊、兔子、狐狸。
     Prey,
-    /// `(6) NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)`：海龟已建模，
-    /// 但这条野狼目标还没接（`find_target` 仍返回 `None`）。
+    /// `(6) NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)`：陆地上的
+    /// 幼年海龟，复用 [`goals::TargetType::BabyTurtleOnLand`] 的选择器。
     ///
-    /// `(6) NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)`: turtles are
-    /// modelled now, but this wild-wolf goal is still unwired (`find_target` returns `None`).
+    /// `(6) NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)`: baby turtles
+    /// on land, reusing the [`goals::TargetType::BabyTurtleOnLand`] selector.
     BabyTurtle,
     /// `(7) NearestAttackableTargetGoal(AbstractSkeleton, false)`。
     Skeleton,
@@ -203,7 +203,8 @@ impl WolfGoal {
                 unseen_ticks,
             } => {
                 if kind.wild_only() {
-                    return found.is_some_and(|uid| prey_still_valid(me, mob, ctx, uid));
+                    return found
+                        .is_some_and(|uid| wild_target_still_valid(me, mob, ctx, uid, *kind));
                 }
                 let seen = kind.must_see().then_some(unseen_ticks);
                 target_goal_continue(me, mob, ctx, seen, 60)
@@ -364,7 +365,11 @@ fn find_target(
         WolfTarget::Skeleton => {
             goals::nearest_mob_target(me, mob, ctx, |kind| kind == MobType::Skeleton)
         }
-        WolfTarget::BabyTurtle => None,
+        // `Turtle.BABY_ON_LAND_SELECTOR`：陆地上的幼年海龟。
+        // `Turtle.BABY_ON_LAND_SELECTOR`: a baby turtle out of water.
+        WolfTarget::BabyTurtle => {
+            goals::nearest_mob_target_with(me, mob, ctx, goals::baby_turtle_on_land)
+        }
     }
 }
 
@@ -406,18 +411,31 @@ fn nearest_angry_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Opti
     found
 }
 
-/// `NonTameRandomTargetGoal.canContinueToUse`：用找目标时的条件重测原来那一个
-/// （活着、能打、跟随距离内、看得见）。
+/// `NonTameRandomTargetGoal.canContinueToUse`：用找目标时的选择器重测原来那一个
+/// （活着、符合选择器、跟随距离内、看得见）。猎物和幼年海龟各有自己的选择器。
 ///
-/// Re-test the found target against the finding conditions.
-fn prey_still_valid(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> bool {
+/// `NonTameRandomTargetGoal.canContinueToUse`: re-test the found target against the
+/// finding selector (alive, matching, within follow range, in sight). Prey and baby
+/// turtles have their own selectors.
+fn wild_target_still_valid(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    uid: EntityUid,
+    kind: WolfTarget,
+) -> bool {
     let Some(other) = ctx.other(uid) else {
         return false;
     };
     let KindPublic::Mob(public) = &other.kind else {
         return false;
     };
-    if other.removed || !public.is_alive() || !is_prey(public.mob_type) {
+    let matches = match kind {
+        WolfTarget::Prey => is_prey(public.mob_type),
+        WolfTarget::BabyTurtle => goals::baby_turtle_on_land(public),
+        WolfTarget::AngryPlayer | WolfTarget::Skeleton => false,
+    };
+    if other.removed || !public.is_alive() || !matches {
         return false;
     }
     let range = mob
@@ -498,5 +516,69 @@ pub(crate) fn apply_alert(
         world.with_entity_mut(other, &mut |entity| {
             entity.with_mob(|_, mob| mob.target = Some(target));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockTicks, World, state::BlockState, world::UPDATE_ALL};
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    /// 平地上野狼会挑陆地幼年海龟当目标；成年海龟不是 `BABY_ON_LAND_SELECTOR`
+    /// 的命中对象，野狼不会锁它（周围没有别的猎物 / 玩家 / 骷髅）。
+    ///
+    /// A wild wolf on flat ground targets a land baby turtle; an adult turtle is
+    /// not matched by `BABY_ON_LAND_SELECTOR` and is never locked on (no other
+    /// prey, player or skeleton around).
+    #[test]
+    fn a_wild_wolf_targets_a_land_baby_turtle() {
+        let run = |baby: bool| {
+            let mut level = crate::testing::TestLevel::new();
+            let mut ticks = BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            for x in -8..=8 {
+                for z in -8..=8 {
+                    world.set_block(
+                        BlockPos::new(x, 63, z),
+                        BlockState(blocks::STONE),
+                        UPDATE_ALL,
+                    );
+                }
+            }
+            let wolf = world.spawn_entity(Entity::by_mob_type(
+                MobType::Wolf,
+                mc_bamboo_core::Vec3::new(0.5, 64.0, 0.5),
+            ));
+            let turtle = world.spawn_entity(Entity::by_mob_type(
+                MobType::Turtle,
+                mc_bamboo_core::Vec3::new(2.5, 64.0, 0.5),
+            ));
+            // 幼年靠负年龄；`no_ai` 让海龟别乱跑，保持在视线和跟随距离内。
+            // A negative age makes it a baby; `no_ai` keeps it still and in sight.
+            world.with_entity_mut(turtle, &mut |entity| {
+                let _ = entity.with_mob(|_, mob| {
+                    if baby {
+                        mob.age = -24000;
+                    }
+                    mob.no_ai = true;
+                });
+            });
+            for _ in 0..200 {
+                world.tick_entities();
+                if let Some(entity) = world.entity(wolf)
+                    && entity
+                        .kind
+                        .mob()
+                        .is_some_and(|mob| mob.target == Some(turtle))
+                {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(run(true), "a wild wolf must target a land baby turtle");
+        assert!(!run(false), "an adult turtle must not be a target");
     }
 }
