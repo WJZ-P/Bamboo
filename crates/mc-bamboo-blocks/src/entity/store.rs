@@ -104,6 +104,11 @@ pub struct EntityPublic {
     pub yaw: f32,
     pub removed: bool,
     pub precise: bool,
+    /// `Entity.vehicle`：这一刻开始时骑着的载具；别的实体只看得到这份快照。
+    ///
+    /// `Entity.vehicle` at the start of this tick; other entities only see this
+    /// snapshot of the riding relation.
+    pub vehicle: Option<EntityUid>,
 }
 
 /// 种类里别人读得到的部分，其余字段在 [`KindState`]。
@@ -264,6 +269,10 @@ pub struct EntityState {
     pub movement_this_tick: Vec<Movement>,
     pub final_movements: Vec<Movement>,
     pub random: JavaRandom,
+    /// `Entity.boardingCooldown`，每刻 `baseTick` 减一；不存档。
+    ///
+    /// `Entity.boardingCooldown`, decremented in `baseTick` every tick; not saved.
+    pub boarding_cooldown: i32,
 }
 
 /// 一行的两半。取出、放回和命令落地都用这个值。
@@ -377,6 +386,8 @@ impl EntityRow {
             y_rot: public.yaw,
             first_tick: state.first_tick,
             remaining_fire_ticks: state.remaining_fire_ticks,
+            vehicle: public.vehicle,
+            boarding_cooldown: state.boarding_cooldown,
         }
     }
 }
@@ -452,6 +463,7 @@ impl Entity {
                 yaw: self.y_rot,
                 removed: self.removed,
                 precise: self.requires_precise_position,
+                vehicle: self.vehicle,
             },
             state: EntityState {
                 kind: state_kind,
@@ -470,6 +482,7 @@ impl Entity {
                 movement_this_tick: self.movement_this_tick,
                 final_movements: self.final_movements,
                 random: self.random,
+                boarding_cooldown: self.boarding_cooldown,
             },
         }
     }
@@ -687,7 +700,16 @@ impl EntityStore {
             let Some(request) = mob.navigation.pending_request.take() else {
                 continue;
             };
-            let uid = row.public.uid;
+            // 挂起请求属于它那份导航的 owner，而不是恰好存下这行的 uid。控制载具的
+            // 骑手借载具导航发请求：`NavMob.owner_uid` 是载具，结果也要按载具 uid 记账、
+            // 挂回载具的导航，下一刻骑手再借到它。普通生物 owner_uid 就等于本行 uid。
+            //
+            // The pending request belongs to the owner of its navigation, not
+            // necessarily the row that happens to hold it. A controlling rider
+            // borrows the vehicle's navigation, so `NavMob.owner_uid` is the
+            // vehicle: account and deliver by that uid. For an ordinary mob the
+            // two are equal.
+            let uid = request.nav.owner_uid;
             out.push(super::mob::pathfinding::Pending::new(
                 uid,
                 request,
@@ -1204,10 +1226,43 @@ impl EntityStore {
     }
 
     /// 从 tick 列表里拿掉。正在 tick 的实体只标记 `discard`，由 tick 循环丢掉。
+    /// `Entity.setRemoved` 还会把仍在表里的实体乘客摘下来（这里只清载具名单，
+    /// 乘客自己的 `vehicle` 由驱动的 `rideTick` 在下一刻清）。
+    ///
+    /// Removes an entity from the tick list. Vanilla `setRemoved` also drops its
+    /// entity passengers; clear the vehicle's list here, and the driver clears
+    /// each passenger's `vehicle` link on its next `rideTick`.
+    fn clear_passenger_vehicle(&mut self, passenger: EntityUid, vehicle: EntityUid) {
+        let Some(row) = self.index.get(&passenger).copied() else {
+            return;
+        };
+        if let Some(entry) = self
+            .slots
+            .get_mut(row)
+            .and_then(Option::as_mut)
+            .filter(|entry| entry.public.vehicle == Some(vehicle))
+        {
+            entry.public.vehicle = None;
+            entry.state.boarding_cooldown = 60;
+        }
+    }
+
     pub fn remove(&mut self, uid: EntityUid) {
         if !self.index.contains_key(&uid) {
             return;
         }
+        // 直接读公开快照，不把私有状态移出来再拼回去：发布阶段可能已经把两半
+        // 分别换过（并行驱动），`with_mut` 会把它们重新拆错。
+        let (vehicle, passengers) = self
+            .public_at(uid)
+            .map(|public| {
+                let passengers = match &public.kind {
+                    KindPublic::Mob(mob) => mob.passengers.clone(),
+                    _ => Vec::new(),
+                };
+                (public.vehicle, passengers)
+            })
+            .unwrap_or((None, Vec::new()));
         self.unindex_sub(uid);
         let row = self.index.remove(&uid).expect("刚查过 uid");
         self.taken.remove(&uid);
@@ -1217,6 +1272,37 @@ impl EntityStore {
             self.grid_remove(row, &entry.public);
         }
         self.free.push(row);
+        // `Entity.setRemoved`：`reason.shouldDestroy()` 时先 `this.stopRiding()`，
+        // 再 `getPassengers().forEach(stopRiding)`。两边都当刻断，不等下一次 tick 的
+        // `tickPassenger` 补；被移除的实体已经离表，不重新落位。
+        //
+        // Vanilla `Entity.setRemoved` detaches the entity from its own vehicle and
+        // ejects its passengers immediately, without a dismount reposition.
+        if let Some(vehicle) = vehicle {
+            self.detach_passenger(vehicle, uid);
+        }
+        for passenger in passengers {
+            if passenger < FIRST_ENTITY_ID {
+                continue;
+            }
+            self.clear_passenger_vehicle(passenger, uid);
+        }
+    }
+
+    /// 从载具的乘客名单里摘掉一个 uid（公开与私有两份都要改）。
+    fn detach_passenger(&mut self, vehicle: EntityUid, passenger: EntityUid) {
+        let Some(row) = self.index.get(&vehicle).copied() else {
+            return;
+        };
+        let Some(entry) = self.slots.get_mut(row).and_then(Option::as_mut) else {
+            return;
+        };
+        if let KindPublic::Mob(mob) = &mut entry.public.kind {
+            mob.passengers.retain(|&uid| uid != passenger);
+        }
+        if let KindState::Mob(mob) = &mut entry.state.kind {
+            mob.passengers.retain(|&uid| uid != passenger);
+        }
     }
 
     /// tick 期间取出一行。取出的行不在表里，别的实体读不到它，和现在的 `take` 一致。
@@ -1553,6 +1639,43 @@ impl EntityStore {
         debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
     }
 
+    /// 按 `tick_rows()` 的顺序，每个实体属于哪一棵骑乘树的根（给的是根在名单里的
+    /// 下标）。没有载具、载具已离表、或链条成环时自己是根。精确驱动的降频计划和
+    /// 并行驱动的分组都用这一份，保证两种驱动对同一棵树给同一个计划、同一份活。
+    ///
+    /// For each entity in `tick_rows()` order, the index of the root of its
+    /// riding tree. An entity with no vehicle, a missing vehicle or a cyclic
+    /// chain is its own root. Both drivers use this to give one tree one plan
+    /// and one unit of work.
+    pub fn riding_roots(&self) -> Vec<usize> {
+        let (uids, rows) = self.tick_rows();
+        let mut by_uid = std::collections::BTreeMap::new();
+        for (index, &uid) in uids.iter().enumerate() {
+            by_uid.insert(uid, index);
+        }
+        let mut out = Vec::with_capacity(uids.len());
+        for index in 0..uids.len() {
+            let mut current = index;
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(&next) = self
+                .slots
+                .get(rows[current])
+                .and_then(Option::as_ref)
+                .and_then(|entry| entry.public.vehicle)
+                .and_then(|vehicle| by_uid.get(&vehicle))
+            {
+                if next == index || !seen.insert(next) {
+                    // 链条绕回自己：坏数据不 panic，整棵树按当前节点算根。
+                    current = next;
+                    break;
+                }
+                current = next;
+            }
+            out.push(current);
+        }
+        out
+    }
+
     /// 并行算阶段的只读名单：uid 升序的 ID 和对应的槽位行号。
     /// 公开数据和空间索引直接引用表本身，不再复制一份。
     pub fn tick_rows(&self) -> (Vec<EntityUid>, Vec<usize>) {
@@ -1663,6 +1786,47 @@ impl EntityStore {
             .copied()
             .collect();
         moved.sort_unstable();
+        // 载具和乘客必须去同一个岛：先按区块选出要走的，再沿 `vehicle` /
+        // `Passengers` 两边补全整组。任何一头落在要搬的区块里，整组都搬。
+        // Vehicles and riders must stay on one island: seed from the chunks, then
+        // close the set over both `vehicle` and `Passengers` links.
+        if !moved.is_empty() {
+            let mut neighbours: BTreeMap<EntityUid, Vec<EntityUid>> = BTreeMap::new();
+            let mut link = |a: EntityUid, b: EntityUid| {
+                if a != b && self.index.contains_key(&a) && self.index.contains_key(&b) {
+                    neighbours.entry(a).or_default().push(b);
+                    neighbours.entry(b).or_default().push(a);
+                }
+            };
+            for (&uid, &row) in &self.index {
+                let Some(entry) = self.slots[row].as_ref() else {
+                    continue;
+                };
+                if let Some(vehicle) = entry.public.vehicle {
+                    link(vehicle, uid);
+                }
+                if let KindPublic::Mob(mob) = &entry.public.kind {
+                    for &passenger in &mob.passengers {
+                        if passenger >= FIRST_ENTITY_ID {
+                            link(uid, passenger);
+                        }
+                    }
+                }
+            }
+            let mut seen: BTreeSet<EntityUid> = moved.iter().copied().collect();
+            let mut stack = moved.clone();
+            while let Some(uid) = stack.pop() {
+                if let Some(list) = neighbours.get(&uid) {
+                    for &next in list {
+                        if seen.insert(next) {
+                            moved.push(next);
+                            stack.push(next);
+                        }
+                    }
+                }
+            }
+            moved.sort_unstable();
+        }
         // 新岛的种子源由调用方给（岛这一层按世界种子、起源 section 和建岛时刻派生，
         // 计划 3.3「岛的随机源」），不掺原岛种子源的状态；原岛的不动（拆了马上合回来
         // 逐位相同）。
@@ -1748,7 +1912,44 @@ impl EntityStore {
             });
         self.wake_events = kept;
         out.wake_events = moved;
+        // 不变量：拆完以后两张表之间不能再有骑乘引用。
+        #[cfg(debug_assertions)]
+        {
+            self.debug_assert_no_links_to(&out);
+            out.debug_assert_no_links_to(self);
+        }
         Ok(out)
+    }
+
+    /// 调试断言：本表里的实体没有引用 `other` 里的实体（双向）。只查两边都还在表里的
+    /// uid，已经删掉的悬空引用不算跨岛。
+    ///
+    /// Debug assertion that no entity here links to an entity in `other`, in
+    /// either direction. Only live ids on both sides count; dangling links to
+    /// removed entities are not cross-island references.
+    #[cfg(debug_assertions)]
+    fn debug_assert_no_links_to(&self, other: &Self) {
+        for (&uid, &row) in &self.index {
+            let Some(entry) = self.slots[row].as_ref() else {
+                continue;
+            };
+            if let Some(vehicle) = entry.public.vehicle {
+                debug_assert!(
+                    !other.index.contains_key(&vehicle),
+                    "rider {uid} and its vehicle {vehicle} ended up on different islands"
+                );
+            }
+            if let KindPublic::Mob(mob) = &entry.public.kind {
+                for &passenger in &mob.passengers {
+                    if passenger >= FIRST_ENTITY_ID {
+                        debug_assert!(
+                            !other.index.contains_key(&passenger),
+                            "vehicle {uid} and its passenger {passenger} ended up on different islands"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 岛合并：[`Self::split_off`] 的逆操作。另一张表的实体按 uid 升序放进来，行号
@@ -2274,6 +2475,43 @@ mod tests {
         assert!(!store.sub_index_matches());
     }
 
+    /// 载具和乘客按组拆：种子只命中载具或只命中乘客的区块时整组一起走，拆完两边
+    /// 都没有跨岛的骑乘引用。
+    ///
+    /// Vehicles and riders split as one group: a seed that only covers the
+    /// vehicle's or only the rider's chunk still moves both.
+    #[test]
+    fn a_rider_and_its_vehicle_are_split_as_one_group() {
+        use crate::entity::mob::MobType;
+
+        for seed_chunk in [ChunkPos::new(0, 0), ChunkPos::new(2, 0)] {
+            let mut store = EntityStore::new();
+            let chicken = store.spawn(Entity::by_mob_type(
+                MobType::Chicken,
+                Vec3::new(0.5, 64.0, 0.5),
+            ));
+            let zombie = store.spawn(Entity::by_mob_type(
+                MobType::Zombie,
+                Vec3::new(40.5, 64.0, 0.5),
+            ));
+            store.with_mut(chicken, |entity| {
+                entity.with_mob(|_, mob| mob.passengers.push(zombie));
+            });
+            store.with_mut(zombie, |entity| entity.vehicle = Some(chicken));
+            let island = store
+                .split_off(&BTreeSet::from([seed_chunk]), 7)
+                .expect("静止");
+            let mut ids = island.ids();
+            ids.sort_unstable();
+            assert_eq!(ids, vec![chicken, zombie], "seed {seed_chunk:?}");
+            assert!(store.ids().is_empty(), "seed {seed_chunk:?}");
+            store.absorb(island);
+            assert_eq!(store.ids(), vec![chicken, zombie]);
+            let row = store.get(zombie).expect("合并回来了");
+            assert_eq!(row.vehicle, Some(chicken));
+        }
+    }
+
     fn item_at(x: f64) -> Entity {
         Entity::ground_item(Vec3::new(x, 64.0, 0.5), ItemStack::new(1, 1))
     }
@@ -2507,5 +2745,54 @@ mod tests {
         store.insert_chunk(moved);
         assert_eq!(store.iter().collect::<Vec<_>>(), before);
         assert_eq!(store.entity_seed_state(), state, "整盒搬运不取种子");
+    }
+}
+
+#[cfg(test)]
+mod riding_remove_tests {
+    use mc_bamboo_core::Vec3;
+
+    use super::*;
+
+    fn pair() -> (EntityStore, EntityUid, EntityUid) {
+        let mut store = EntityStore::new();
+        let vehicle = store.spawn(Entity::cow(Vec3::new(0.5, 64.0, 0.5)));
+        let passenger = store.spawn(Entity::cow(Vec3::new(0.5, 64.0, 0.5)));
+        store.with_mut_including_pending_dyn(passenger, &mut |entity| {
+            entity.vehicle = Some(vehicle);
+        });
+        store.with_mut_including_pending_dyn(vehicle, &mut |entity| {
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.passengers.push(passenger);
+            }
+        });
+        (store, vehicle, passenger)
+    }
+
+    #[test]
+    fn removing_a_passenger_clears_the_vehicle_list_at_once() {
+        let (mut store, vehicle, passenger) = pair();
+        assert_eq!(
+            store.get(vehicle).unwrap().kind.mob().unwrap().passengers,
+            [passenger]
+        );
+        store.remove(passenger);
+        // `Entity.setRemoved` 当场 `this.stopRiding()`：不能留一个悬空的乘客 uid
+        // 等下一次 `tickPassenger` 去摘。
+        let vehicle_entity = store.get(vehicle).expect("vehicle stays");
+        assert!(vehicle_entity.kind.mob().unwrap().passengers.is_empty());
+        assert!(match &store.public_at(vehicle).unwrap().kind {
+            KindPublic::Mob(mob) => mob.passengers.is_empty(),
+            _ => true,
+        });
+    }
+
+    #[test]
+    fn removing_a_vehicle_ejects_its_passenger_at_once() {
+        let (mut store, vehicle, passenger) = pair();
+        store.remove(vehicle);
+        let rider = store.get(passenger).expect("passenger stays");
+        assert_eq!(rider.vehicle, None);
+        assert_eq!(rider.boarding_cooldown, 60);
     }
 }

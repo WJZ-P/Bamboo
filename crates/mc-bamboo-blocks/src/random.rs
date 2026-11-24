@@ -45,6 +45,16 @@ impl LegacyRandom {
         self.next_gaussian.set(None);
     }
 
+    /// 写入另一个 `LegacyRandom` 的 `seed()`（已异过多重常数），不重置高斯缓存。
+    /// 只在「副本随机源取完数后写回真源」这一条路径上用。
+    ///
+    /// Set the raw internal seed from another `LegacyRandom::seed()` without
+    /// resetting the gaussian cache; only used to mirror draws back into the
+    /// world random.
+    pub fn set_seed_raw(&self, seed: i64) {
+        self.seed.set(seed);
+    }
+
     /// `next(bits)`：线性同余走一步，取高 `bits` 位。
     ///
     /// 官方 `WorldgenRandom` 包着这个源时直接调用它，所以这里是公开的。

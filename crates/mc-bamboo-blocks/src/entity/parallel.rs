@@ -10,6 +10,8 @@
 //! [`commit`] 把算好的命令按序落地，需要完整的 `World`。游戏层在两段之间
 //! 可以重新构造 `World`（区块表被 `RegionLevel` 独占借着，没法同时借出只读视图）。
 
+mod riding;
+
 use std::time::{Duration, Instant};
 
 use mc_bamboo_core::ChunkPos;
@@ -495,17 +497,6 @@ impl EntityCtx for ParallelCtx<'_> {
     }
 }
 
-/// 一块连续的行：算阶段只写自己的这几行，别的都是只读共享。
-struct Task<'a> {
-    first: usize,
-    /// 只属于本任务的起点公开数据，逐行移进 `Entity`，不再克隆第二遍。
-    public: Vec<EntityPublic>,
-    state: Vec<EntityState>,
-    /// 这一刻的降频计划，和精确驱动逐项相同。
-    plans: Vec<ThrottlePlan>,
-    results: &'a mut [RowResult],
-}
-
 /// 算：只读方块、可写实体表。不需要 `World`。
 ///
 /// 公开数据和空间索引只读表里的那一份，各行的私有状态移进任务再移回，不克隆
@@ -562,58 +553,60 @@ fn compute_timed(
         blocks,
     };
     let count = uids.len();
-    let parts = executor.parallelism().max(1).min(count.max(1));
-    let chunk_size = count.div_ceil(parts);
     let compute_start = Instant::now();
 
-    // 用 split_at_mut 把三份平行数组切成不相交的可变切片，任务里不再上锁。
-    let mut results: Vec<RowResult> = (0..count).map(|_| RowResult::default()).collect();
-    let mut tasks: Vec<Task<'_>> = Vec::with_capacity(parts);
-    let mut public_left: Vec<EntityPublic> = starting_public;
-    let mut state_left: Vec<EntityState> = starting_state;
-    let mut plans_left: &[ThrottlePlan] = &plans;
-    let mut results_left: &mut [RowResult] = &mut results;
-    let mut first = 0;
-    while !public_left.is_empty() {
-        let size = chunk_size.min(public_left.len());
-        let public: Vec<_> = public_left.drain(..size).collect();
-        let state: Vec<_> = state_left.drain(..size).collect();
-        let (task_plans, plan_rest) = if plans.is_empty() {
-            (vec![ThrottlePlan::FULL; size], &[][..])
-        } else {
-            let (head, rest) = std::mem::take(&mut plans_left).split_at(size);
-            (head.to_vec(), rest)
-        };
-        plans_left = plan_rest;
-        let (result, result_rest) = std::mem::take(&mut results_left).split_at_mut(size);
-        results_left = result_rest;
-        tasks.push(Task {
-            first,
-            public,
-            state,
-            plans: task_plans,
-            results: result,
-        });
-        first += size;
-    }
-
-    let mut jobs: Vec<Box<dyn FnOnce() + Send + '_>> = Vec::with_capacity(tasks.len());
-    for slice in tasks.chunks_mut(1) {
+    // 一棵骑乘树就是一份活：根和它的乘客在同一线程里按 `tickNonPassenger` 的顺序算。
+    // 没有骑乘关系时每棵树只有一个节点，切法和以前按 uid 连续切片等价。每份活写自己
+    // 的局部结果，跑完由主线程按 uid 升序并回总表，落地顺序和以前完全一样。
+    let groups = riding::riding_groups(&uids, &starting_public);
+    let parts = executor.parallelism().max(1).min(groups.len().max(1));
+    let trees_per_task = groups.len().div_ceil(parts).max(1);
+    let mut jobs: Vec<Box<dyn FnOnce() + Send + '_>> = Vec::with_capacity(parts);
+    type JobSlot = std::sync::Arc<std::sync::Mutex<Vec<(usize, RowResult)>>>;
+    let mut slots: Vec<JobSlot> = Vec::with_capacity(parts);
+    for group_of_trees in groups.chunks(trees_per_task) {
+        let mut inputs: Vec<Vec<TreeRow>> = Vec::with_capacity(group_of_trees.len());
+        for tree in group_of_trees {
+            inputs.push(build_tree_rows(
+                tree,
+                &uids,
+                &starting_public,
+                &starting_state,
+                &plans,
+            ));
+        }
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        slots.push(std::sync::Arc::clone(&slot));
         let shared_ref: &Shared<'_> = &shared;
         jobs.push(Box::new(move || {
-            run_task(&mut slice[0], shared_ref);
+            for tree in &mut inputs {
+                run_tree(tree, shared_ref);
+            }
+            let mut out = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            for tree in inputs {
+                for row in tree {
+                    out.push((row.index, row.result));
+                }
+            }
             // 测试构建里各算阶段线程把分段计数并进全局汇总；正式构建是空操作。
             #[cfg(test)]
             crate::entity::mob::timing::imp::flush_counters();
         }));
     }
     executor.run(jobs);
-    drop(tasks);
+    let mut results: Vec<RowResult> = (0..count).map(|_| RowResult::default()).collect();
+    for slot in slots {
+        let mut done =
+            std::mem::take(&mut *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        for (index, result) in done.drain(..) {
+            results[index] = result;
+        }
+    }
     #[cfg(test)]
     crate::entity::mob::timing::imp::flush_counters();
     times.compute = compute_start.elapsed();
 
-    run_pathfinding_phase(blocks, entities, &uids, &mut results, executor);
+    run_pathfinding_phase(blocks, entities, &mut results, executor);
 
     (
         Computed {
@@ -626,6 +619,61 @@ fn compute_timed(
     )
 }
 
+/// 一份活里的一行：`index` 是它在 uid 升序总名单里的位置，`vehicle_slot` 是它的
+/// 载具在这棵树里的位置（根为 `None`），`passenger_index` 是它在载具乘客表里的序号。
+///
+/// One row of a job: `index` is its position in the uid-ascending list,
+/// `vehicle_slot` the position of its vehicle in the same tree (`None` for the
+/// root), and `passenger_index` its ordinal in the vehicle's passenger list.
+struct TreeRow {
+    index: usize,
+    input: Option<(EntityPublic, EntityState)>,
+    plan: ThrottlePlan,
+    vehicle_slot: Option<usize>,
+    passenger_index: usize,
+    result: RowResult,
+}
+
+fn build_tree_rows(
+    tree: &[usize],
+    uids: &[EntityUid],
+    public: &[EntityPublic],
+    state: &[EntityState],
+    plans: &[ThrottlePlan],
+) -> Vec<TreeRow> {
+    let mut rows = Vec::with_capacity(tree.len());
+    for (within, &index) in tree.iter().enumerate() {
+        let (vehicle_slot, passenger_index) = if within == 0 {
+            (None, 0)
+        } else {
+            let vehicle = public[index].vehicle;
+            let slot = tree
+                .iter()
+                .take(within)
+                .position(|&candidate| Some(uids[candidate]) == vehicle);
+            let ordinal = slot
+                .and_then(|slot| {
+                    let list = match &public[tree[slot]].kind {
+                        crate::entity::KindPublic::Mob(mob) => &mob.passengers,
+                        _ => return None,
+                    };
+                    list.iter().position(|&uid| uid == uids[index])
+                })
+                .unwrap_or(0);
+            (slot, ordinal)
+        };
+        rows.push(TreeRow {
+            index,
+            input: Some((public[index].clone(), state[index].clone())),
+            plan: plans.get(index).copied().unwrap_or(ThrottlePlan::FULL),
+            vehicle_slot,
+            passenger_index,
+            result: RowResult::default(),
+        });
+    }
+    rows
+}
+
 /// 独立寻路阶段（并行驱动）：从算阶段的实体状态里收请求，去重、排优先级、
 /// 按节点预算挑出后分给线程，结果按固定顺序汇总。开关关着时什么都不做。
 ///
@@ -635,7 +683,6 @@ fn compute_timed(
 fn run_pathfinding_phase(
     blocks: &(dyn BlockView + Sync),
     entities: &mut EntityStore,
-    uids: &[EntityUid],
     results: &mut [RowResult],
     executor: &dyn Executor,
 ) {
@@ -646,7 +693,7 @@ fn run_pathfinding_phase(
     }
     let now = blocks.game_time();
     let mut requests = Vec::new();
-    for (index, result) in results.iter_mut().enumerate() {
+    for result in results.iter_mut() {
         let Some(state) = result.state.as_mut() else {
             continue;
         };
@@ -656,8 +703,14 @@ fn run_pathfinding_phase(
         let Some(request) = mob.navigation.pending_request.take() else {
             continue;
         };
+        // 和精确驱动的 `take_path_requests` 一致：按导航 owner 记账。控制载具的骑手
+        // 借载具导航，请求属于载具，key 用 `owner_uid`（载具）而不是本结果行的 uid。
+        // Match the precise driver's `take_path_requests`: key by navigation owner.
+        // A controlling rider borrows the vehicle's navigation, so the request
+        // belongs to the vehicle and is keyed by `owner_uid`.
+        let uid = request.nav.owner_uid;
         requests.push(pathfinding::Pending::new(
-            uids[index],
+            uid,
             request,
             now,
             mob.target.is_some(),
@@ -707,40 +760,111 @@ fn run_pathfinding_phase(
         .finish(now, config, groups, results);
 }
 
-/// 一个任务里的所有实体按顺序算完；任务之间互不相交。
-fn run_task(task: &mut Task<'_>, shared: &Shared<'_>) {
-    let mut public = std::mem::take(&mut task.public);
-    let mut state = std::mem::take(&mut task.state);
-    let mut plans = std::mem::take(&mut task.plans);
-    for (within, ((public, state), plan)) in public
-        .drain(..)
-        .zip(state.drain(..))
-        .zip(plans.drain(..))
-        .enumerate()
-    {
-        let row = task.first + within;
-        let uid = shared.uids[row];
-        let mut me = EntityRow { public, state }.into_entity();
-        let result = &mut task.results[within];
-        let mut ctx = ParallelCtx {
-            uid,
-            shared,
-            commands: &mut result.commands,
-            plan,
+/// 一棵骑乘树：`tree[0]` 是根，按 `ServerLevel.tickNonPassenger` 先 tick 根，再按
+/// 乘客表顺序对实体乘客跑 `commonTick + rideTick + positionRider`。乘客看到的是
+/// 本刻开头其它实体的只读快照，但定位用的是刚 tick 完的载具这一刻末的位置。
+///
+/// One riding tree: the root ticks first, then entity passengers run
+/// `commonTick + rideTick + positionRider` in boarding order. Passengers read
+/// the tick-start snapshot for other entities but are positioned against their
+/// just-ticked vehicle.
+fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
+    for within in 0..tree.len() {
+        let Some((public, state)) = tree[within].input.take() else {
+            continue;
         };
-        // 所在区块不在实体 tick 范围时跳过这一刻：实体仍留在快照里，位置和年龄不动，
-        // 不发命令，别的实体照样查得到它。判断从只读方块视图来，和精确驱动一致。
-        if shared
-            .blocks
-            .chunk_ticks_entities(ChunkPos::containing(me.position.x, me.position.z))
+
+        let mut me = EntityRow { public, state }.into_entity();
+        let is_root = within == 0;
+        let vehicle_slot = tree[within].vehicle_slot;
+        if !is_root {
+            // `Entity.rideTick` 先把速度清零，再跑自己的 tick。
+            me.delta = mc_bamboo_core::Vec3::default();
+        }
+        // `Mob.getNavigation` / `getMoveControl` 在控制载具时转给载具：整棵树在同一份
+        // 活里，直接从已 tick 完的载具结果取它的导航/移动控制与按载具尺寸的快照。
+        // Vanilla `Mob.getNavigation` / `getMoveControl` delegate to the vehicle;
+        // the whole riding tree is one job, so take the vehicle's post-tick result.
+        let borrowing = if !is_root && let Some(slot) = vehicle_slot {
+            let vehicle = tree.get(slot).and_then(|row| {
+                Some(
+                    EntityRow {
+                        public: row.result.public.as_ref()?.clone(),
+                        state: row.result.state.as_ref()?.clone(),
+                    }
+                    .into_entity(),
+                )
+            });
+            vehicle.is_some_and(|vehicle| {
+                crate::entity::riding::begin_nav_borrow(&mut me, &vehicle, shared.blocks)
+            })
+        } else {
+            false
+        };
         {
-            // `Entity::tick` 内部会跑 `common_tick`，这里不能重复。
-            me.tick(&mut ctx);
+            let result = &mut tree[within].result;
+            let mut ctx = ParallelCtx {
+                uid: shared.uids[tree[within].index],
+                shared,
+                commands: &mut result.commands,
+                plan: tree[within].plan,
+            };
+            // 所在区块不在实体 tick 范围时跳过这一刻：实体仍留在快照里，位置和年龄
+            // 不动，不发命令，别的实体照样查得到它。两种驱动共用这个判断。
+            if shared
+                .blocks
+                .chunk_ticks_entities(ChunkPos::containing(me.position.x, me.position.z))
+            {
+                me.tick(&mut ctx);
+            }
+        }
+        // 把改过的共享导航/移动控制写回载具结果，恢复骑手自己的两份。
+        // Write the mutated shared state back to the vehicle's result and restore
+        // the rider's own navigation / move control.
+        if borrowing
+            && let Some((navigation, mover)) = crate::entity::riding::end_nav_borrow(&mut me)
+            && let Some(slot) = vehicle_slot
+            && let Some(state) = tree[slot].result.state.as_mut()
+        {
+            crate::entity::riding::put_borrowed_nav_state(state, navigation, mover);
+        }
+        if !is_root {
+            // `LivingEntity.rideTick` 的复位落距，以及 `positionRider`。
+            me.fall_distance = 0.0;
+            if let Some(vehicle_slot) = vehicle_slot {
+                let Some(vehicle_public) = tree[vehicle_slot].result.public.as_ref() else {
+                    continue;
+                };
+                let passenger_public = me.clone().split().public;
+                let at = crate::entity::riding::rider_position(
+                    vehicle_public,
+                    &passenger_public,
+                    tree[within].passenger_index,
+                );
+                me.position = at;
+            } else {
+                // 载具不在本刻的名单里：按官方 `baseTick` 的分支当场下车。
+                crate::entity::riding::dismount(&mut me, None);
+            }
+            // 官方 `checkDespawn` 对乘客排在 `rideTick` 之后；`tick_mob` 对乘客跳过，
+            // 由这里补上。
+            // Vanilla runs a passenger's `checkDespawn` after its `rideTick`; the
+            // tick path skips it for passengers, so it happens here.
+            if !me.removed {
+                let result = &mut tree[within].result;
+                let mut ctx = ParallelCtx {
+                    uid: shared.uids[tree[within].index],
+                    shared,
+                    commands: &mut result.commands,
+                    plan: tree[within].plan,
+                };
+                crate::entity::mob::living::check_despawn_entity(&mut me, &mut ctx);
+            }
         }
         let split = me.split();
-        result.removed = split.public.removed;
-        result.public = Some(split.public);
-        result.state = Some(split.state);
+        tree[within].result.removed = split.public.removed;
+        tree[within].result.public = Some(split.public);
+        tree[within].result.state = Some(split.state);
     }
 }
 

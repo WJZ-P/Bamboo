@@ -579,6 +579,16 @@ impl PhaseState {
     pub fn delivery_count(&self) -> usize {
         self.deliveries.len()
     }
+
+    /// 只给单元测试读：当前待交付结果的 `(记账 uid, 导航 owner)`，不取走。
+    /// 用来确认控制载具的骑手发起的请求按载具 uid 记账。
+    #[cfg(test)]
+    pub(crate) fn delivery_owners(&self) -> Vec<(EntityUid, EntityUid)> {
+        self.deliveries
+            .values()
+            .map(|outcome| (outcome.uid, outcome.nav.owner_uid))
+            .collect()
+    }
 }
 
 /// 下一刻开头把结果装进生物的导航：开始走 / 覆盖重算路径 / 留给原调用点取走。

@@ -44,6 +44,7 @@ fn nav_request(local: u32, target: BlockPos) -> NavRequest {
             in_liquid: false,
             follow_range: 16.0,
             game_time: 0,
+            owner_uid: 1,
         },
         action: Action::MoveTo { speed: 1.0 },
         at: target,
@@ -276,4 +277,34 @@ fn disabled_config_clears_pending_state() {
     );
     assert_eq!(state.deferred_len(), 0);
     assert_eq!(state.delivery_count(), 0);
+}
+
+/// 挂起请求按导航 owner 记账，不是按恰好存下它的那一行 uid。控制载具的骑手借
+/// 载具导航发请求，语义归属是载具（`NavMob.owner_uid`）；`take_path_requests`
+/// 必须据此记账，结果才会挂回载具的导航、下一刻骑手再借到它。
+///
+/// A pending request is keyed by its navigation owner, not by the row that
+/// happens to hold it. A controlling rider borrows the vehicle's navigation,
+/// so the request belongs to the vehicle (`NavMob.owner_uid`).
+#[test]
+fn take_path_requests_keys_by_navigation_owner() {
+    let mut level = crate::testing::TestLevel::new();
+    let mut ticks = crate::BlockTicks::new();
+    let uid = {
+        let mut world = crate::World::new(&mut level, &mut ticks);
+        world.spawn_entity(crate::entity::Entity::cow(Vec3::new(0.5, 64.0, 0.5)))
+    };
+    // 造一条 owner 与本行 uid 不同的挂起请求：模拟「请求挂在别人的导航上」。
+    let owner = uid + 7;
+    let mut pending = nav_request(1, BlockPos::new(2, 64, 3));
+    pending.nav.owner_uid = owner;
+    crate::World::new(&mut level, &mut ticks).with_entity_mut(uid, &mut |entity| {
+        entity.kind.mob_mut().unwrap().navigation.pending_request = Some(pending);
+    });
+
+    let requests = level.entities_mut_for_test().take_path_requests(0);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].uid, owner, "必须按导航 owner 记账");
+    assert_ne!(requests[0].uid, uid, "不能按存下请求的行 uid 记账");
+    assert_eq!(requests[0].nav.owner_uid, owner);
 }

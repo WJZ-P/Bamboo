@@ -29,6 +29,29 @@ pub enum Flag {
     Target = 3,
 }
 
+/// `Entity.hasControllingPassenger()`：载具不是 NoAI，第一位乘客是能控制载具的
+/// 生物（不在 `#non_controlling_rider` 里），或者上鞍载具上的玩家。官方
+/// `RandomStrollGoal.canUse` 用它当场短路，连随机数都不取。
+///
+/// Vanilla `Entity.hasControllingPassenger()`: the first passenger is a mob that
+/// can control the vehicle (or a player on a saddled vehicle). Official
+/// `RandomStrollGoal.canUse` short-circuits on it before drawing any random.
+fn has_controlling_passenger(mob: &Mob, ctx: &dyn EntityCtx) -> bool {
+    if mob.no_ai {
+        return false;
+    }
+    let Some(&first) = mob.passengers.first() else {
+        return false;
+    };
+    if mob.controlling_passenger().is_some() {
+        return true;
+    }
+    ctx.other(first).is_some_and(|public| match &public.kind {
+        KindPublic::Mob(rider) => rider.mob_type != super::MobType::Slime,
+        _ => false,
+    })
+}
+
 /// 一个目标和它自己的状态。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Goal {
@@ -1771,6 +1794,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             force_trigger,
             ..
         } => {
+            // `RandomStrollGoal.canUse` 的第一句：有控制乘客就当场返回，不抽随机数。
+            // `RandomStrollGoal.canUse`: a controlling passenger returns early, no draw.
+            if has_controlling_passenger(mob, ctx) {
+                return false;
+            }
             // `Turtle.TurtleRandomStrollGoal.canUse`：水里、回家途中、身上有蛋都不逛。
             // `Turtle.TurtleRandomStrollGoal.canUse`: no strolling in water, going home or
             // carrying an egg.
@@ -2109,9 +2137,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::CubeRandomDirection { .. } => {
             combat_target(mob, ctx).is_none() && super::slime::can_pick_direction(me, mob)
         }
-        // `!isPassenger()`：没有骑乘。
-        // `!isPassenger()`: riding is not modelled.
-        Goal::CubeKeepJumping => true,
+        // `CubeMobKeepOnJumpingGoal.canUse` 是 `!isPassenger()`。
+        // `CubeMobKeepOnJumpingGoal.canUse` is `!isPassenger()`.
+        Goal::CubeKeepJumping => me.vehicle.is_none(),
         Goal::DrownedGoToWater { wanted, .. } => {
             // `DrownedGoToWaterGoal.canUse`：白天、不在水里、找得到水。
             // `DrownedGoToWaterGoal.canUse`: daylight, not in water and water found.
