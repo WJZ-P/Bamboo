@@ -151,6 +151,8 @@ const MAX_MOB_DISTANCE = 4096;
 const MAX_MOB_WAKEUPS_SCALE = 16;
 /** 每个岛每刻寻路节点预算的上限，和 `MAX_PATHFINDING_BUDGET` 一致。 */
 const MAX_PATHFINDING_BUDGET = 1_048_576;
+/** 村民大脑降频间隔上限（刻），和 `MAX_VILLAGER_BRAIN_INTERVAL` 一致。 */
+const MAX_VILLAGER_BRAIN_INTERVAL = 6000;
 /** 服务端能接受的区块计算线程数上限，和 `MAX_CHUNK_WORKER_THREADS` 一致。 */
 const MAX_CHUNK_WORKER_THREADS = 64;
 const MAX_MAIL_BUDGET = 65_536;
@@ -473,6 +475,44 @@ export const FIELDS: readonly SettingField[] = [
     control: "toggle",
     wide: true,
     hint: "同一只生物连续寻路失败超过 10 次后，40 刻（2 秒）内不再计算它的请求，够不着的怪重试变稀。只在独立寻路阶段打开时有意义，默认关闭。",
+  },
+  {
+    key: "villagerLobotomize",
+    group: "performance",
+    fileKey: "villager_lobotomize",
+    label: "被困村民降频",
+    control: "toggle",
+    wide: true,
+    hint: "照 Purpur 的 lobotomize：四个水平邻格均不可通行的被困村民（如交易大厅 1×1 隔间）按间隔运行大脑，减少 CPU 占用。被打、遇敌、恐慌、交易或听到钟声时立刻恢复每刻运行。默认关闭，推荐开启。",
+  },
+  {
+    key: "villagerLobotomizeInterval",
+    group: "performance",
+    fileKey: "villager_lobotomize_interval",
+    label: "被困村民大脑间隔（刻）",
+    control: "number",
+    min: 1,
+    max: MAX_VILLAGER_BRAIN_INTERVAL,
+    hint: "被困村民每隔多少刻运行一次大脑，推荐 100（5 秒）。合法范围 1 到 6000。",
+  },
+  {
+    key: "villagerLobotomizeWaitTradeLock",
+    group: "performance",
+    fileKey: "villager_lobotomize_wait_trade_lock",
+    label: "被困村民等待交易锁定",
+    control: "toggle",
+    wide: true,
+    hint: "打开后只对已交易过（经验 > 0）的被困村民降频，避免影响新村民认领工作站和刷新职业。推荐开启。",
+  },
+  {
+    key: "villagerSleepBrainInterval",
+    group: "performance",
+    fileKey: "villager_sleep_brain_interval",
+    label: "睡觉村民大脑间隔（刻）",
+    control: "number",
+    min: 0,
+    max: MAX_VILLAGER_BRAIN_INTERVAL,
+    hint: "睡着的村民每隔多少刻运行一次大脑；听到钟声、附近有敌对生物或恐慌时自动豁免。0 = 关闭（默认），推荐 5，合法范围 0 到 6000。",
   },
   {
     key: "redstoneCache",

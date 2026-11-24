@@ -83,6 +83,15 @@ pub struct BlockGameRules {
     pub mob_pathfinding_budget: u32,
     /// 连续寻路失败超过 10 次后 40 刻内不再试（Paper 的数值）。不进存档。
     pub mob_pathfinding_fail_cooldown: bool,
+    /// 被困村民降频（照 Purpur 的 lobotomize，缺省关）：四水平邻格均不可通行时按
+    /// `villager_lobotomize_interval` 刻运行一次大脑。不进存档、不同步客户端。
+    pub villager_lobotomize: bool,
+    /// 被困村民大脑运行间隔（刻），推荐 100，至少 1。不进存档。
+    pub villager_lobotomize_interval: i32,
+    /// 为真时只对已锁定交易（`xp > 0`）的被困村民降频。推荐 true。不进存档。
+    pub villager_lobotomize_wait_trade_lock: bool,
+    /// 睡觉村民大脑运行间隔（刻）：0 = 关（精确模式），推荐 5。不进存档。
+    pub villager_sleep_brain_interval: i32,
 }
 
 impl BlockGameRules {
@@ -118,6 +127,10 @@ impl BlockGameRules {
             mob_pathfinding_phase: false,
             mob_pathfinding_budget: 0,
             mob_pathfinding_fail_cooldown: false,
+            villager_lobotomize: false,
+            villager_lobotomize_interval: 100,
+            villager_lobotomize_wait_trade_lock: true,
+            villager_sleep_brain_interval: 0,
         }
     }
 }

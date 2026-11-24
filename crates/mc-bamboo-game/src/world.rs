@@ -67,6 +67,9 @@ pub const MAX_MOB_WAKEUPS_SCALE: usize = mc_bamboo_blocks::entity::mob::throttle
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 /// 独立寻路阶段每岛每刻节点预算的合法上限（只是防配置写坏）。
 pub const MAX_PATHFINDING_BUDGET: u32 = 1 << 20;
+/// 村民大脑降频间隔上限（刻），与 `mc_bamboo_blocks` 保持一致。
+pub const MAX_VILLAGER_BRAIN_INTERVAL: i32 =
+    mc_bamboo_blocks::entity::mob::throttle::MAX_VILLAGER_BRAIN_INTERVAL;
 
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
 /// 收到关服请求之后最多再等一个还在跑的岛多久。正常的一刻是几毫秒到几十毫秒，
@@ -133,6 +136,12 @@ pub struct WorldConfig {
     pub mob_pathfinding_budget: u32,
     /// 寻路失败冷却（Paper 的连续 10 次失败后 40 刻不再试）。
     pub mob_pathfinding_fail_cooldown: bool,
+    /// 被困村民降频（Purpur lobotomize，缺省关）：间隔与是否等待交易锁定。
+    pub villager_lobotomize: bool,
+    pub villager_lobotomize_interval: i32,
+    pub villager_lobotomize_wait_trade_lock: bool,
+    /// 睡觉村民大脑运行间隔（刻，0 = 关，精确模式）。
+    pub villager_sleep_brain_interval: i32,
     /// 红石缓存（实验）：结果和官方逐位一致，对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
@@ -229,6 +238,10 @@ impl Default for WorldConfig {
             mob_pathfinding_phase: false,
             mob_pathfinding_budget: 0,
             mob_pathfinding_fail_cooldown: false,
+            villager_lobotomize: false,
+            villager_lobotomize_interval: 100,
+            villager_lobotomize_wait_trade_lock: true,
+            villager_sleep_brain_interval: 0,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings::default(),
@@ -733,6 +746,15 @@ impl World {
         world.islands.region.mob_pathfinding_budget =
             config.mob_pathfinding_budget.min(MAX_PATHFINDING_BUDGET);
         world.islands.region.mob_pathfinding_fail_cooldown = config.mob_pathfinding_fail_cooldown;
+        world.islands.region.villager_lobotomize = config.villager_lobotomize;
+        world.islands.region.villager_lobotomize_interval = config
+            .villager_lobotomize_interval
+            .clamp(1, MAX_VILLAGER_BRAIN_INTERVAL);
+        world.islands.region.villager_lobotomize_wait_trade_lock =
+            config.villager_lobotomize_wait_trade_lock;
+        world.islands.region.villager_sleep_brain_interval = config
+            .villager_sleep_brain_interval
+            .clamp(0, MAX_VILLAGER_BRAIN_INTERVAL);
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
         crate::worldgen_cache::configure(config.worldgen_cache);

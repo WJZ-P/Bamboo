@@ -1231,24 +1231,172 @@ pub fn refresh_brain_offline(me: &mut Entity, mob: &mut Mob) {
     mob.brain = Some(Box::new(fresh));
 }
 
-/// `Villager.customServerAiStep`：推进大脑（支持降频跳刻 `decision_gap`），随后
-/// `!isNoAi()` 时照官方抽 `this.random.nextInt(100)`（袭击冒汗粒子判定，保持随机序列一致）。
+/// 判据（对照 Purpur `Villager.canTravelFrom` / `canTravelTo`）：
+/// 检查村民脚部所在格的东、西、北、南四个水平邻格。任一邻格可水平进入（脚部格与成年村民的
+/// 头部格都不是阻挡型 `PathType`，且下方 3 格内有可落脚方块或水）即视为未受困；
+/// 四个水平邻格全部不可通行时判为被困（例如 1×1 石墙加工作站的交易隔间）。
 ///
-/// `Villager.customServerAiStep`: ticks the brain (advancing by `decision_gap` when
-/// throttled), then draws `this.random.nextInt(100)` while `!isNoAi()` to keep the mob's
-/// RNG sequence aligned with vanilla's raid-sweat check.
+/// Stuck criterion (matching Purpur `Villager.canTravelFrom` / `canTravelTo`):
+/// checks the four horizontal neighbours (E/W/N/S) of the villager's feet block. If any
+/// neighbour can be stepped into horizontally (passable `PathType` at feet and, for adults,
+/// head, with solid footing or water within 3 blocks down), the villager is free; otherwise
+/// all four neighbours are impassable and the villager is stuck (e.g. a 1×1 trading stall).
+pub fn is_villager_stuck(me: &Entity, mob: &Mob, blocks: &dyn BlockView) -> bool {
+    let feet = BlockPos::containing(Vec3::new(
+        me.position.x,
+        me.position.y + 0.0625,
+        me.position.z,
+    ));
+    let adult = !mob.is_baby();
+    const DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    !DIRS
+        .into_iter()
+        .any(|(dx, dz)| can_step_into_neighbor(blocks, feet.offset(dx, 0, dz), adult))
+}
+
+fn can_step_into_neighbor(blocks: &dyn BlockView, pos: BlockPos, adult: bool) -> bool {
+    use super::path;
+    use mc_bamboo_data::PathType;
+
+    let passable = |pt: PathType| {
+        matches!(
+            pt,
+            PathType::Open
+                | PathType::Walkable
+                | PathType::WalkableDoor
+                | PathType::DoorOpen
+                | PathType::DoorWoodClosed
+                | PathType::Rail
+                | PathType::Water
+                | PathType::WaterBorder
+                | PathType::Trapdoor
+                | PathType::OnTopOfTrapdoor
+        )
+    };
+    if !passable(path::state_path_type(blocks.block_state(pos))) {
+        return false;
+    }
+    if adult && !passable(path::state_path_type(blocks.block_state(pos.above()))) {
+        return false;
+    }
+    // 下方 3 格内有可落脚方块或水即可（避免把悬空 1×1 柱子 / 岩浆沟误判成未受困）。
+    // Require safe footing or water within 3 blocks down (so a 1×1 pillar over a pit/lava counts as stuck).
+    for dy in 1..=3 {
+        let below = path::state_path_type(blocks.block_state(pos.offset(0, -dy, 0)));
+        if matches!(
+            below,
+            PathType::Lava | PathType::Fire | PathType::Damaging | PathType::DamageCautious
+        ) {
+            return false;
+        }
+        if below != PathType::Open {
+            return true;
+        }
+    }
+    false
+}
+
+/// `Villager.customServerAiStep`：推进大脑（支持三档降频、被困村民降频与睡觉村民降频，
+/// 跳过刻由 `Brain::tick_by(gap)` 补齐），随后 `!isNoAi()` 时照官方抽
+/// `this.random.nextInt(100)`（袭击冒汗粒子判定，保持随机序列一致）。
+///
+/// `Villager.customServerAiStep`: ticks the brain (supporting three-tier, stuck-villager
+/// lobotomize, and sleeping-villager throttling via `Brain::tick_by(gap)`), then draws
+/// `this.random.nextInt(100)` while `!isNoAi()` to keep the RNG sequence aligned with vanilla.
 pub(super) fn custom_server_ai_step(
     me: &mut Entity,
     mob: &mut Mob,
     ctx: &mut dyn EntityCtx,
     decision_gap: i64,
 ) {
-    if let Some(mut brain) = mob.brain.take() {
-        brain.tick_by(me, mob, ctx, decision_gap.max(1));
-        mob.brain = Some(brain);
-    }
-    if !mob.no_ai {
-        let _ = me.random.next_int_bounded(100);
+    let blocks = ctx.blocks();
+    let rules = blocks.block_game_rules();
+    let now = blocks.game_time();
+
+    let lobotomize_on = rules.villager_lobotomize;
+    let sleep_interval = i64::from(rules.villager_sleep_brain_interval.max(0));
+
+    let effective_gap = if !lobotomize_on && sleep_interval <= 1 {
+        // 精确模式快速路径：两项村民降频开关都关着，与官方逐位一致。
+        // Exact-mode fast path: both villager throttling switches are off.
+        mob.throttle.villager_last_brain = now;
+        Some(decision_gap.max(1))
+    } else {
+        let general_exempt = super::throttle::villager_throttle_exempt(mob, now);
+        let hostile_near = mob
+            .brain
+            .as_deref()
+            .is_some_and(|brain| brain.memories.has(NearestHostile));
+        let hurt_now = mob.hurt_time > 0
+            || (mob.last_damage_source.is_some()
+                && now.saturating_sub(mob.last_damage_stamp) <= 40)
+            || mob
+                .brain
+                .as_deref()
+                .is_some_and(|brain| brain.memories.has(HurtBy));
+
+        let mut target_interval: i64 = 1;
+
+        // 睡觉村民降频：钟声 / 敌对生物 / 恐慌（及交易、袭击、隐藏）豁免。
+        if sleep_interval > 1 && mob.villager.sleeping && !general_exempt && !hostile_near {
+            target_interval = target_interval.max(sleep_interval);
+        }
+
+        // 被困村民降频（照 Purpur lobotomize）：被打 / 敌对生物 / 恐慌 / 交易 / 钟声立刻回每刻。
+        if lobotomize_on {
+            let interval = i64::from(rules.villager_lobotomize_interval.max(1));
+            let eligible = !general_exempt
+                && !hurt_now
+                && !hostile_near
+                && (!rules.villager_lobotomize_wait_trade_lock || mob.villager.xp > 0);
+            if !eligible {
+                mob.throttle.villager_lobotomized = false;
+                mob.throttle.villager_lobotomize_checked = i64::MIN;
+            } else {
+                let recheck = mob.throttle.villager_lobotomize_checked == i64::MIN
+                    || now.saturating_sub(mob.throttle.villager_lobotomize_checked) >= interval;
+                if recheck {
+                    mob.throttle.villager_lobotomized = is_villager_stuck(me, mob, blocks);
+                    mob.throttle.villager_lobotomize_checked = now;
+                }
+                if mob.throttle.villager_lobotomized {
+                    target_interval = target_interval.max(interval);
+                }
+            }
+        } else {
+            mob.throttle.villager_lobotomized = false;
+            mob.throttle.villager_lobotomize_checked = i64::MIN;
+        }
+
+        let last = mob.throttle.villager_last_brain;
+        let run_now = if target_interval <= 1 || last == i64::MIN {
+            true
+        } else {
+            let elapsed = now.saturating_sub(last);
+            let phase = super::throttle::decision_phase(now, me.id);
+            elapsed >= target_interval || phase.rem_euclid(target_interval) == 0
+        };
+        if run_now {
+            let gap = if last == i64::MIN {
+                decision_gap.max(1)
+            } else {
+                now.saturating_sub(last).max(decision_gap).max(1)
+            };
+            mob.throttle.villager_last_brain = now;
+            Some(gap)
+        } else {
+            None
+        }
+    };
+
+    if let Some(gap) = effective_gap {
+        if let Some(mut brain) = mob.brain.take() {
+            brain.tick_by(me, mob, ctx, gap);
+            mob.brain = Some(brain);
+        }
+        if !mob.no_ai {
+            let _ = me.random.next_int_bounded(100);
+        }
     }
 }
 
@@ -1409,5 +1557,259 @@ mod tests {
             mob.brain.as_ref().unwrap().active_names(),
             vec!["core", "idle"]
         );
+    }
+
+    /// 被困判据：1×1 石墙 + 工作站隔间判被困，空地 / 木门 / 5×5 房间不困，
+    /// 1 格净空成年困、幼年不困，四面深坑判被困。
+    #[test]
+    fn stuck_villager_detection_matches_four_neighbor_criterion() {
+        use crate::BlockState;
+        use mc_bamboo_data::blocks;
+
+        let mut level = TestLevel::new();
+        for x in -8..=8 {
+            for z in -8..=8 {
+                level.set(BlockPos::new(x, 63, z), BlockState(blocks::STONE));
+            }
+        }
+        let mut ticks = BlockTicks::new();
+        let adult_me = Entity::by_mob_type(MobType::Villager, Vec3::new(0.5, 64.0, 0.5));
+        let adult_mob = Mob::new(MobType::Villager);
+        let mut baby_mob = Mob::new(MobType::Villager);
+        baby_mob.age = -24_000;
+
+        // 空地：不困。
+        {
+            let world = World::new(&mut level, &mut ticks);
+            assert!(!is_villager_stuck(&adult_me, &adult_mob, &world));
+        }
+
+        // 1×1 交易隔间：三面两格高石墙 + 前面工作站（木桶）。
+        for y in 64..66 {
+            level.set(BlockPos::new(-1, y, 0), BlockState(blocks::STONE));
+            level.set(BlockPos::new(1, y, 0), BlockState(blocks::STONE));
+            level.set(BlockPos::new(0, y, -1), BlockState(blocks::STONE));
+        }
+        level.set(BlockPos::new(0, 64, 1), BlockState(blocks::BARREL));
+        {
+            let world = World::new(&mut level, &mut ticks);
+            assert!(is_villager_stuck(&adult_me, &adult_mob, &world));
+        }
+
+        // 把工作站换成橡木门：村民会开门，不算被困。
+        level.set(BlockPos::new(0, 64, 1), BlockState(blocks::OAK_DOOR));
+        {
+            let world = World::new(&mut level, &mut ticks);
+            assert!(!is_villager_stuck(&adult_me, &adult_mob, &world));
+        }
+
+        // 把前面留 1 格高矮缝（y=64 空气，y=65 石头）：成年被困，幼年不困。
+        level.set(BlockPos::new(0, 64, 1), BlockState(blocks::AIR));
+        level.set(BlockPos::new(0, 65, 1), BlockState(blocks::STONE));
+        {
+            let world = World::new(&mut level, &mut ticks);
+            assert!(is_villager_stuck(&adult_me, &adult_mob, &world));
+            assert!(!is_villager_stuck(&adult_me, &baby_mob, &world));
+        }
+
+        // 四面 4 格深坑的 1×1 孤柱：判被困。
+        level.set(BlockPos::new(0, 65, 1), BlockState(blocks::AIR));
+        let pillar_me = Entity::by_mob_type(MobType::Villager, Vec3::new(6.5, 64.0, 6.5));
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            level.set(BlockPos::new(6 + dx, 63, 6 + dz), BlockState(blocks::AIR));
+        }
+        {
+            let world = World::new(&mut level, &mut ticks);
+            assert!(is_villager_stuck(&pillar_me, &adult_mob, &world));
+        }
+    }
+
+    /// 被困村民降频：`wait_trade_lock` 守门、按 `interval` 跳刻走 `Brain::tick_by(gap)`，
+    /// 受伤 / 遇敌 / 恐慌 / 交易 / 钟声时立刻回到每刻运行。
+    #[test]
+    fn lobotomize_throttles_stuck_villager_and_wakes_immediately_on_danger() {
+        use crate::BlockState;
+        use mc_bamboo_data::blocks;
+
+        let mut level = TestLevel::new();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                level.set(BlockPos::new(x, 63, z), BlockState(blocks::STONE));
+            }
+        }
+        for y in 64..66 {
+            level.set(BlockPos::new(-1, y, 0), BlockState(blocks::STONE));
+            level.set(BlockPos::new(1, y, 0), BlockState(blocks::STONE));
+            level.set(BlockPos::new(0, y, -1), BlockState(blocks::STONE));
+        }
+        level.set(BlockPos::new(0, 64, 1), BlockState(blocks::LECTERN));
+        level.rules.villager_lobotomize = true;
+        level.rules.villager_lobotomize_interval = 20;
+        level.rules.villager_lobotomize_wait_trade_lock = true;
+
+        let mut ticks = BlockTicks::new();
+        let mut me = Entity::by_mob_type(MobType::Villager, Vec3::new(0.5, 64.0, 0.5));
+        let mut mob = Mob::new(MobType::Villager);
+
+        // xp == 0 且 wait_trade_lock == true：不降频，每刻都跑大脑。
+        for t in 1..=5 {
+            ticks.set_time(t);
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            custom_server_ai_step(&mut me, &mut mob, &mut ctx, 1);
+            assert_eq!(mob.throttle.villager_last_brain, t);
+            assert!(!mob.throttle.villager_lobotomized);
+        }
+
+        // 交易锁定（xp > 0）后进入被困降频：20 刻内只跑 1–2 次大脑，且带 TTL 的记忆在醒来时按 gap 扣减。
+        mob.villager.xp = 1;
+        mob.brain.as_mut().unwrap().memories.set_with_ttl(
+            GolemDetectedRecently,
+            MemoryValue::Bool(true),
+            100,
+        );
+        let mut brain_runs = 0;
+        for t in 6..=45 {
+            ticks.set_time(t);
+            let prev = mob.throttle.villager_last_brain;
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            custom_server_ai_step(&mut me, &mut mob, &mut ctx, 1);
+            if mob.throttle.villager_last_brain != prev {
+                brain_runs += 1;
+            }
+        }
+        assert!(mob.throttle.villager_lobotomized);
+        assert!(
+            brain_runs <= 3,
+            "expected <= 3 brain ticks across 40 ticks at interval=20, got {brain_runs}"
+        );
+        // 过期记忆已按跳过刻数推进（不会停留在 97+）。
+        let ttl = mob
+            .brain
+            .as_ref()
+            .unwrap()
+            .memories
+            .time_until_expiry(GolemDetectedRecently);
+        assert!(ttl <= 70, "expected TTL to advance by gap, got {ttl}");
+
+        // 被打时立刻回到每刻运行。
+        mob.hurt_time = 10;
+        for t in 46..=49 {
+            ticks.set_time(t);
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            custom_server_ai_step(&mut me, &mut mob, &mut ctx, 1);
+            assert_eq!(mob.throttle.villager_last_brain, t);
+            assert!(!mob.throttle.villager_lobotomized);
+        }
+        mob.hurt_time = 0;
+
+        // 身边有敌对生物时立刻回到每刻运行。
+        mob.brain
+            .as_mut()
+            .unwrap()
+            .memories
+            .set(NearestHostile, MemoryValue::Entity(99));
+        ticks.set_time(50);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            custom_server_ai_step(&mut me, &mut mob, &mut ctx, 1);
+        }
+        assert_eq!(mob.throttle.villager_last_brain, 50);
+        assert!(!mob.throttle.villager_lobotomized);
+    }
+
+    /// 睡觉村民降频：睡着时每 N 刻跑大脑；听到钟声、敌对生物或恐慌时豁免，立刻回每刻。
+    #[test]
+    fn sleeping_villager_throttles_and_exempts_bell_hostile_panic() {
+        let mut level = TestLevel::new();
+        level.rules.villager_sleep_brain_interval = 5;
+        let mut ticks = BlockTicks::new();
+        let mut me = Entity::by_mob_type(MobType::Villager, Vec3::new(0.5, 64.0, 0.5));
+        let mut mob = Mob::new(MobType::Villager);
+        mob.villager.sleeping = true;
+        // 把活动切到 REST，避免 `WakeUp` 立刻叫醒。
+        mob.brain
+            .as_mut()
+            .unwrap()
+            .set_active_activity_if_possible(Activity::Rest);
+
+        let mut runs = 0;
+        for t in 1..=20 {
+            ticks.set_time(t);
+            let prev = mob.throttle.villager_last_brain;
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            custom_server_ai_step(&mut me, &mut mob, &mut ctx, 1);
+            if mob.throttle.villager_last_brain != prev {
+                runs += 1;
+            }
+        }
+        assert!(
+            (4..=6).contains(&runs),
+            "expected ~4-5 brain runs in 20 ticks at interval=5, got {runs}"
+        );
+
+        // 钟声有效期内豁免：每刻都跑。
+        mob.brain
+            .as_mut()
+            .unwrap()
+            .memories
+            .set(HeardBellTime, MemoryValue::Long(20));
+        for t in 21..=25 {
+            ticks.set_time(t);
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            custom_server_ai_step(&mut me, &mut mob, &mut ctx, 1);
+            assert_eq!(mob.throttle.villager_last_brain, t);
+        }
+    }
+
+    /// 三档降频里的村民豁免：PANIC / RAID / PRE_RAID / HIDE、正在交易、HEARD_BELL_TIME 300 刻内。
+    #[test]
+    fn three_tier_throttle_exempts_villager_emergencies_trading_and_bell() {
+        use super::super::throttle;
+
+        let mut mob = Mob::new(MobType::Villager);
+        assert!(!throttle::exempt(&mob, 1000, true, false, 0));
+
+        // 正在交易。
+        mob.villager.trading = true;
+        assert!(throttle::exempt(&mob, 1000, true, false, 0));
+        mob.villager.trading = false;
+
+        // 四种紧急活动。
+        for act in [
+            Activity::Panic,
+            Activity::Raid,
+            Activity::PreRaid,
+            Activity::Hide,
+        ] {
+            mob.brain
+                .as_mut()
+                .unwrap()
+                .set_active_activity_if_possible(act);
+            assert!(
+                throttle::exempt(&mob, 1000, true, false, 0),
+                "{act:?} must exempt villager from throttling"
+            );
+        }
+        mob.brain
+            .as_mut()
+            .unwrap()
+            .set_active_activity_if_possible(Activity::Idle);
+        assert!(!throttle::exempt(&mob, 1000, true, false, 0));
+
+        // HEARD_BELL_TIME：300 刻内豁免，超过 300 刻不再豁免。
+        mob.brain
+            .as_mut()
+            .unwrap()
+            .memories
+            .set(HeardBellTime, MemoryValue::Long(1000));
+        assert!(throttle::exempt(&mob, 1000, true, false, 0));
+        assert!(throttle::exempt(&mob, 1299, true, false, 0));
+        assert!(!throttle::exempt(&mob, 1300, true, false, 0));
     }
 }

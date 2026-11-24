@@ -281,6 +281,11 @@ pub(crate) struct Region {
     pub(crate) mob_pathfinding_phase: bool,
     pub(crate) mob_pathfinding_budget: u32,
     pub(crate) mob_pathfinding_fail_cooldown: bool,
+    /// 被困村民与睡觉村民大脑降频配置（缺省关）。
+    pub(crate) villager_lobotomize: bool,
+    pub(crate) villager_lobotomize_interval: i32,
+    pub(crate) villager_lobotomize_wait_trade_lock: bool,
+    pub(crate) villager_sleep_brain_interval: i32,
     /// `ServerLevel.customSpawners` 里的 `PatrolSpawner`。每岛一份，和官方的每维度一份
     /// 对应，岛拆分时两边各带自己的计时器。
     ///
@@ -488,6 +493,10 @@ impl Region {
             mob_pathfinding_phase: false,
             mob_pathfinding_budget: 0,
             mob_pathfinding_fail_cooldown: false,
+            villager_lobotomize: false,
+            villager_lobotomize_interval: 100,
+            villager_lobotomize_wait_trade_lock: true,
+            villager_sleep_brain_interval: 0,
             patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner::default(),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
@@ -692,6 +701,10 @@ impl Region {
         rules.mob_pathfinding_phase = self.mob_pathfinding_phase;
         rules.mob_pathfinding_budget = self.mob_pathfinding_budget;
         rules.mob_pathfinding_fail_cooldown = self.mob_pathfinding_fail_cooldown;
+        rules.villager_lobotomize = self.villager_lobotomize;
+        rules.villager_lobotomize_interval = self.villager_lobotomize_interval;
+        rules.villager_lobotomize_wait_trade_lock = self.villager_lobotomize_wait_trade_lock;
+        rules.villager_sleep_brain_interval = self.villager_sleep_brain_interval;
         rules
     }
 
