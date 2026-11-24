@@ -297,6 +297,9 @@ impl ReplayPlayers {
         {
             using.remaining = 72_000 - held;
         }
+        // 和正式服务端一样，先按装备重建属性表（手里三叉戟的攻击速度修饰符）。
+        // Rebuild the attribute table from equipment first, like the server tick.
+        crate::player_attributes::rebuild(&mut self.region);
         crate::player_weapon::release(&mut self.region, id);
     }
 
@@ -318,6 +321,11 @@ impl ReplayPlayers {
         // `attackStrengthTicker` 恒为 0；这里也不推进它。
         // The official oracle side does not run `Player.aiStep`, so
         // `attackStrengthTicker` stays 0; do not advance it here either.
+        // 正式服务端每刻先重建属性表再攻击（`world.rs` 的 `player_attributes::rebuild`），
+        // 攻击冷却要读手里三叉戟的攻击速度修饰符。
+        // The server rebuilds the attribute table before attacking each tick; the
+        // attack cooldown reads the held trident's attack-speed modifier.
+        crate::player_attributes::rebuild(&mut self.region);
         crate::player_auto_spin::tick(&mut self.region);
         crate::player_weapon::tick(&mut self.region);
         crate::entity_sync::update_derived_state(&mut self.region);
