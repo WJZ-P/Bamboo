@@ -285,6 +285,7 @@ impl ProjectileCase {
     fn level(&self) -> MobLevel {
         MobLevel {
             natural_spawn: None,
+            biome: None,
             blocks: self
                 .blocks
                 .iter()

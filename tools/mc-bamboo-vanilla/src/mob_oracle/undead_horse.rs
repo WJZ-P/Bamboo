@@ -68,6 +68,7 @@ fn level(blocks: &[[i32; 4]], first_id: i32) -> MobLevel {
         random: LevelRandom::new(1),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
         looting: Vec::new(),
+        biome: None,
         rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
         facts: ZombieFacts {
             difficulty: 2,

@@ -193,6 +193,7 @@ fn fixture(case: &Case) -> MobLevel {
             ..ZombieFacts::default()
         },
         natural_spawn: None,
+        biome: None,
         redstone: Default::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
