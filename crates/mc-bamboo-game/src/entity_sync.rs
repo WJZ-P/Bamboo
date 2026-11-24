@@ -87,10 +87,14 @@ impl Metadata {
             shared_flags: player.sync.shared_flags,
             pose: player.sync.pose(),
             health: player.health.health,
+            // `DATA_LIVING_ENTITY_FLAGS`：使用物品位（0/1）加自旋攻击位（4）。
+            // `DATA_LIVING_ENTITY_FLAGS`: the using-item bits (0/1) plus the
+            // auto-spin-attack bit (4).
             weapon_use_flags: player
                 .weapon_use
                 .as_ref()
-                .map_or(0, |active| 1 | (u8::from(active.hand == Hand::Off) << 1)),
+                .map_or(0, |active| 1 | (u8::from(active.hand == Hand::Off) << 1))
+                | crate::player_auto_spin::living_flag(player),
             main_hand: player.client.main_hand,
             model_customisation: player.client.model_customisation,
             effect_particles: player.effects.particle_colors(),

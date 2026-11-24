@@ -426,6 +426,14 @@ pub enum EntityData {
     /// INT。`Llama.DATA_VARIANT_ID`。
     LlamaVariant(i32),
     ArrowColor(i32),
+    /// `ThrownTrident.DATA_ID_LOYALTY`：BYTE，忠诚等级（索引 11，只在三叉戟上用）。
+    ///
+    /// `ThrownTrident.DATA_ID_LOYALTY`: BYTE, the loyalty level (index 11, tridents only).
+    TridentLoyalty(u8),
+    /// `ThrownTrident.DATA_ID_FOIL`：BOOLEAN，附魔光效（索引 12）。
+    ///
+    /// `ThrownTrident.DATA_ID_FOIL`: BOOLEAN, the enchantment glint (index 12).
+    TridentFoil(bool),
     /// `TamableAnimal.DATA_FLAGS_ID`：BYTE，坐姿 1、驯服 4。
     ///
     /// `TamableAnimal.DATA_FLAGS_ID`: BYTE, sitting 1 and tame 4.
@@ -481,6 +489,8 @@ impl EntityData {
             Self::LlamaStrength(_) => mc_bamboo_data::entity_types::LLAMA_STRENGTH,
             Self::LlamaVariant(_) => mc_bamboo_data::entity_types::LLAMA_VARIANT,
             Self::ArrowColor(_) => mc_bamboo_data::entity_types::ARROW_COLOR,
+            Self::TridentLoyalty(_) => mc_bamboo_data::entity_types::TRIDENT_LOYALTY,
+            Self::TridentFoil(_) => mc_bamboo_data::entity_types::TRIDENT_FOIL,
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
@@ -622,7 +632,7 @@ impl EntityData {
                     out.extend_from_slice(uuid);
                 }
             }
-            Self::ArrowFlags(value) => {
+            Self::ArrowFlags(value) | Self::TridentLoyalty(value) => {
                 write_data_header(out, self.index(), SERIALIZER_BYTE);
                 out.push(*value);
             }
@@ -635,6 +645,7 @@ impl EntityData {
                 write_varint(out, *value);
             }
             Self::ArrowInGround(value)
+            | Self::TridentFoil(value)
             | Self::HorseChest(value)
             | Self::GoatScreaming(value)
             | Self::GoatLeftHorn(value)
@@ -1575,6 +1586,23 @@ mod tests {
                 items: &[ambient],
             }),
             hex("07 0b 08 01 ff")
+        );
+    }
+
+    #[test]
+    fn trident_loyalty_and_foil_metadata_match_official_indices() {
+        let loyalty = EntityData::TridentLoyalty(3);
+        let foil = EntityData::TridentFoil(true);
+        assert_eq!(
+            loyalty.index(),
+            mc_bamboo_data::entity_types::TRIDENT_LOYALTY
+        );
+        assert_eq!(foil.index(), mc_bamboo_data::entity_types::TRIDENT_FOIL);
+        // 11 号 BYTE=0 值 3，12 号 BOOLEAN=8 值 1，最后 0xff 收尾。
+        // index 11 BYTE=0 value 3, index 12 BOOLEAN=8 value 1, then the 0xff end marker.
+        assert_eq!(
+            set_entity_data(7, &[loyalty, foil]),
+            hex("07 0b 00 03 0c 08 01 ff")
         );
     }
 }

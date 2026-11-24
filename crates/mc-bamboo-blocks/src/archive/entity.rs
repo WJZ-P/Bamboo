@@ -354,10 +354,21 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         // `split` 不读尺寸，拼回来时按 `kind` 重算。
         dimensions: (0.0, 0.0),
         kind: match id {
-            "minecraft:arrow" => EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], false))),
-            "minecraft:spectral_arrow" => {
-                EntityKind::Arrow(Box::new(arrow::read(tag, rotation[1], true)))
-            }
+            "minecraft:arrow" => EntityKind::Arrow(Box::new(arrow::read(
+                tag,
+                rotation[1],
+                crate::entity::arrow::ArrowVariant::Normal,
+            ))),
+            "minecraft:spectral_arrow" => EntityKind::Arrow(Box::new(arrow::read(
+                tag,
+                rotation[1],
+                crate::entity::arrow::ArrowVariant::Spectral { duration: 200 },
+            ))),
+            "minecraft:trident" => EntityKind::Arrow(Box::new(arrow::read(
+                tag,
+                rotation[1],
+                crate::entity::arrow::ArrowVariant::Trident,
+            ))),
             "minecraft:llama_spit" => EntityKind::LlamaSpit(Box::new(spit::read(tag, rotation[1]))),
             "minecraft:egg" => EntityKind::Egg(Box::new(egg::read(
                 tag,

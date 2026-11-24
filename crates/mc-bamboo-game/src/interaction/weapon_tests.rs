@@ -347,3 +347,97 @@ fn releasing_a_crossbow_at_the_charge_threshold_loads_it() {
     assert_eq!(player.inventory.slots[37].count, 4);
     assert!(arrows(&mut server).is_empty());
 }
+
+#[test]
+fn a_charged_trident_throws_and_consumes_itself() {
+    use mc_bamboo_blocks::entity::arrow::ArrowVariant;
+    let (mut server, client) = settled();
+    put(&mut server, &client, 36, ItemStack::new(items::TRIDENT, 1));
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .game_mode = GameMode::Survival;
+    client.take_frames();
+
+    use_item(&mut server, &client, 1);
+    server.tick();
+    for _ in 0..10 {
+        server.tick();
+    }
+    release_item(&mut server, &client);
+    server.tick();
+
+    let spawned = arrows(&mut server);
+    assert_eq!(spawned.len(), 1, "蓄力够时扔出一支三叉戟");
+    assert_eq!(spawned[0].variant, ArrowVariant::Trident);
+    assert_eq!(spawned[0].pickup, Pickup::Allowed);
+    let player = server.region().players.get(&client.id).unwrap();
+    assert!(
+        player.inventory.slots[36].is_empty(),
+        "生存模式消耗掉手里的三叉戟"
+    );
+    assert_eq!(
+        request_stats(&mut server, &client),
+        [item_used_count(items::TRIDENT, 1)]
+    );
+}
+
+#[test]
+fn a_trident_released_too_early_throws_nothing() {
+    let (mut server, client) = settled();
+    put(&mut server, &client, 36, ItemStack::new(items::TRIDENT, 1));
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .game_mode = GameMode::Survival;
+
+    use_item(&mut server, &client, 1);
+    server.tick();
+    for _ in 0..8 {
+        server.tick();
+    }
+    release_item(&mut server, &client);
+    server.tick();
+
+    assert!(arrows(&mut server).is_empty(), "蓄力不足 10 刻不扔");
+    let player = server.region().players.get(&client.id).unwrap();
+    assert_eq!(player.inventory.slots[36].item, items::TRIDENT);
+    assert_eq!(request_stats(&mut server, &client), [[0x00]]);
+}
+
+#[test]
+fn a_creative_trident_is_kept_and_marked_creative_only() {
+    let (mut server, client) = settled();
+    put(&mut server, &client, 36, ItemStack::new(items::TRIDENT, 1));
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .game_mode = GameMode::Creative;
+    client.take_frames();
+
+    use_item(&mut server, &client, 1);
+    server.tick();
+    for _ in 0..10 {
+        server.tick();
+    }
+    release_item(&mut server, &client);
+    server.tick();
+
+    let spawned = arrows(&mut server);
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned[0].pickup, Pickup::CreativeOnly);
+    let player = server.region().players.get(&client.id).unwrap();
+    let held = player.inventory.slots[36].clone();
+    assert_eq!(held.item, items::TRIDENT, "创造模式不消耗三叉戟");
+    assert_eq!(
+        defaults::resolve(held.item, &held.patch(), kinds::DAMAGE),
+        Some(&ComponentValue::Damage(0)),
+        "创造模式不扣耐久"
+    );
+}

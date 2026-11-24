@@ -186,6 +186,14 @@ pub const ARROW_FLAGS: u8 = 8;
 pub const ARROW_PIERCE: u8 = 9;
 pub const ARROW_IN_GROUND: u8 = 10;
 pub const ARROW_COLOR: u8 = 11;
+/// `ThrownTrident.DATA_ID_LOYALTY`：BYTE，继承 `AbstractArrow` 之后的第一项自有元数据。
+///
+/// `ThrownTrident.DATA_ID_LOYALTY`: BYTE, the first accessor after `AbstractArrow`.
+pub const TRIDENT_LOYALTY: u8 = 11;
+/// `ThrownTrident.DATA_ID_FOIL`：BOOLEAN，是否有附魔光效。
+///
+/// `ThrownTrident.DATA_ID_FOIL`: BOOLEAN, whether it has the enchantment glint.
+pub const TRIDENT_FOIL: u8 = 12;
 pub const SKELETON_EYE_HEIGHT: f32 = 1.74;
 pub const LLAMA_EYE_HEIGHT: f32 = 1.7765;
 pub const MULE_EYE_HEIGHT: f32 = 1.52;

@@ -164,6 +164,10 @@ pub(crate) struct Player {
     ///
     /// A bow or crossbow in `LivingEntity.useItem`.
     pub(crate) weapon_use: Option<crate::player_weapon::WeaponUse>,
+    /// `LivingEntity` 的自旋攻击状态（激流三叉戟）。
+    ///
+    /// The `LivingEntity` auto-spin attack state (a riptide trident).
+    pub(crate) auto_spin_attack: crate::player_auto_spin::AutoSpinAttack,
     /// 官方 `Player.attackStrengthTicker`：`aiStep` 每刻加一，攻击 / 挥空 / 换物品清零。
     /// 相对计数，随玩家整行搬，不需要时钟平移。
     ///
@@ -313,6 +317,7 @@ impl Player {
             environment: crate::player_environment::Environment::default(),
             use_item: None,
             weapon_use: None,
+            auto_spin_attack: crate::player_auto_spin::AutoSpinAttack::default(),
             attack_strength_ticker: 0,
             last_main_hand_item: ItemStack::empty(),
             item_use_stats: Default::default(),
