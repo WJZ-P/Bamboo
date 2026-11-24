@@ -96,11 +96,17 @@ pub struct FlowerTravel {
 impl BeeGoal {
     pub const fn flags(&self) -> &'static [Flag] {
         match self {
-            Self::Attack
-            | Self::HurtByOther
-            | Self::BecomeAngryTarget
+            Self::Attack => &[Flag::Move, Flag::Look],
+            Self::Pollinate(_) | Self::GoToHive(_) | Self::GoToFlower(_) | Self::Wander => {
+                &[Flag::Move]
+            }
+            Self::HurtByOther | Self::BecomeAngryTarget => &[Flag::Target],
+            Self::EnterHive
+            | Self::ValidateHive { .. }
+            | Self::ValidateFlower { .. }
+            | Self::LocateHive
+            | Self::GrowCrops
             | Self::ResetUniversalAnger => &[],
-            _ => &[Flag::Move],
         }
     }
 
@@ -127,13 +133,13 @@ impl BeeGoal {
     }
 
     /// `BaseBeeGoal.canUse` 的闸门：愤怒时不跑生活目标。
-    fn calm(&self, mob: &Mob) -> bool {
+    fn calm(&self, mob: &Mob, now: i64) -> bool {
         match self {
             Self::Attack
             | Self::HurtByOther
             | Self::BecomeAngryTarget
             | Self::ResetUniversalAnger => true,
-            _ => !mob.anger.is_angry(0),
+            _ => !mob.anger.is_angry(now),
         }
     }
 }
@@ -211,7 +217,7 @@ pub(super) fn target_goals() -> GoalSelector {
 }
 
 /// `Bee.wantsToEnterHive`。
-fn wants_to_enter_hive(mob: &Mob, view: &dyn BlockView) -> bool {
+fn wants_to_enter_hive(me: &Entity, mob: &Mob, view: &dyn BlockView) -> bool {
     if mob.bee.stay_out_of_hive > 0
         || mob.bee.pollinating
         || mob.bee.has_stung()
@@ -219,15 +225,14 @@ fn wants_to_enter_hive(mob: &Mob, view: &dyn BlockView) -> bool {
     {
         return false;
     }
-    let tired = mob.bee.ticks_without_nectar >= 3600;
-    if !(mob.bee.has_nectar()
-        || tired
-        || view.bees_stay_in_hive(mob.bee.hive_pos.unwrap_or(BlockPos::new(0, 0, 0))))
-    {
+    let tired = mob.bee.ticks_without_nectar > 3600;
+    if !(mob.bee.has_nectar() || tired || view.bees_stay_in_hive(me.block_position())) {
         return false;
     }
-    // `isHiveNearFire`：巢附近一格有火时不进巢。
-    if let Some(hive) = mob.bee.hive_pos {
+    // `isHiveNearFire`：仅在 `getBeehiveBlockEntity() != null` 时检查巢周围一格有没有火。
+    if hive_valid(mob, view, me)
+        && let Some(hive) = mob.bee.hive_pos
+    {
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
@@ -276,7 +281,7 @@ pub(crate) fn init_validate_cooldowns(mob: &mut Mob, random: &mut crate::entity:
     }
 }
 
-fn hive_valid(mob: &Mob, view: &dyn BlockView, me: &Entity) -> bool {
+pub(super) fn hive_valid(mob: &Mob, view: &dyn BlockView, me: &Entity) -> bool {
     let Some(hive) = mob.bee.hive_pos else {
         return false;
     };
@@ -300,11 +305,11 @@ fn is_angry(mob: &Mob, now: i64) -> bool {
 
 impl BeeGoal {
     pub(super) fn can_use(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
-        if !self.calm(mob) {
-            return false;
-        }
         let view = ctx.blocks();
         let now = view.game_time();
+        if !self.calm(mob, now) {
+            return false;
+        }
         match self {
             Self::Attack => {
                 is_angry(mob, now)
@@ -315,7 +320,7 @@ impl BeeGoal {
                 let Some(hive) = mob.bee.hive_pos else {
                     return false;
                 };
-                wants_to_enter_hive(mob, view)
+                wants_to_enter_hive(me, mob, view)
                     && closer_than(me, hive, 2.0)
                     && view.has_block_entity(hive)
                     && !view.beehive_full(hive)
@@ -358,7 +363,7 @@ impl BeeGoal {
             Self::LocateHive => {
                 mob.bee.remaining_cooldown_before_locating_new_hive == 0
                     && mob.bee.hive_pos.is_none()
-                    && wants_to_enter_hive(mob, view)
+                    && wants_to_enter_hive(me, mob, view)
             }
             Self::GoToHive(_) => {
                 let Some(hive) = mob.bee.hive_pos else {
@@ -366,7 +371,7 @@ impl BeeGoal {
                 };
                 !too_far(me, hive, 48.0)
                     && mob.home.is_none()
-                    && wants_to_enter_hive(mob, view)
+                    && wants_to_enter_hive(me, mob, view)
                     && !closer_than(me, hive, 2.0)
                     && view.block_state(hive).is_tagged(block_tags::BEEHIVES)
             }
@@ -399,11 +404,11 @@ impl BeeGoal {
         mob: &mut Mob,
         ctx: &dyn EntityCtx,
     ) -> bool {
-        if !self.calm(mob) {
-            return false;
-        }
         let view = ctx.blocks();
         let now = view.game_time();
+        if !self.calm(mob, now) {
+            return false;
+        }
         match self {
             Self::Attack => {
                 is_angry(mob, now)

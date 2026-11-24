@@ -1207,15 +1207,17 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     }
     animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
-        let mut target_close = false;
-        if let Some(uid) = mob.target {
-            ctx.blocks().for_each_player(&mut |player| {
-                if player.uid == uid && player.position.distance_to_sqr(me.position) < 4.0 {
-                    target_close = true;
-                }
-            });
-        }
-        super::bee::ai_step(mob, me.tick_count, me.in_water, target_close);
+        let target_close = super::goals::combat_target(mob, ctx)
+            .is_some_and(|target| target.position.distance_to_sqr(me.position) < 4.0);
+        let view = ctx.blocks();
+        let hive_valid = super::bee_goals::hive_valid(mob, view, me);
+        super::bee::ai_step(
+            mob,
+            me.tick_count,
+            view.game_time(),
+            hive_valid,
+            target_close,
+        );
     }
     // 铁傀儡与雪傀儡的 `aiStep` 先跑 `super.aiStep()`，再跑自己的那一段。
     // Golem `aiStep` overrides run their own part after `super.aiStep()`.
