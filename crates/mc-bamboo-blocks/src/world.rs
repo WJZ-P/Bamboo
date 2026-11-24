@@ -3997,6 +3997,11 @@ impl<'a> World<'a> {
     fn eject_passenger_ids(&mut self, list: &[EntityUid]) {
         for &passenger_id in list {
             if passenger_id < crate::entity::FIRST_ENTITY_ID {
+                // 玩家乘客由游戏层按官方 `getDismountLocationForPassenger` 落位；
+                // 这一刻只在方块层记下关系已断，不碰玩家表。
+                self.level
+                    .entities_table_mut()
+                    .enqueue_ejected_player(passenger_id);
                 continue;
             }
             let Some(mut passenger) = self.level.take_entity(passenger_id) else {

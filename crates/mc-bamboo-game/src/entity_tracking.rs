@@ -828,7 +828,7 @@ impl PassengerIndex {
         }
     }
 
-    fn list(&self, vehicle: i32) -> Option<&[i32]> {
+    pub(crate) fn list(&self, vehicle: i32) -> Option<&[i32]> {
         self.lists.get(&vehicle).map(Vec::as_slice)
     }
 }

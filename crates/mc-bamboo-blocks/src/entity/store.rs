@@ -607,6 +607,15 @@ pub struct EntityStore {
     /// left: with the row gone, an island split has nothing else to tell
     /// which side the events belong to.
     departed_mob_events: BTreeMap<EntityUid, (ChunkPos, Vec<super::mob::MobEvent>)>,
+    /// `Entity.setRemoved` / `ejectPassengers` 甩下来的玩家乘客。方块层没有玩家行，
+    /// 游戏层在自己的阶段取走并按官方 `Avatar.removeVehicle` 找落点。
+    /// 拆岛时跟着这张表走，rebase 不碰，absorb 并进来。
+    ///
+    /// Player passengers ejected by `Entity.setRemoved` / `ejectPassengers`. The
+    /// block layer has no player rows; the game layer drains these in its own
+    /// phase and applies vanilla `Avatar.removeVehicle` landing. This field
+    /// splits and merges with the entity table.
+    ejected_player_passengers: BTreeSet<EntityUid>,
     /// 三档降频的限量唤醒令牌桶（每岛一份）。缺省按刻号 0 的满桶起。
     wake_tokens: super::mob::throttle::WakeTokens,
     /// 独立寻路阶段（开关，缺省关）的每岛状态：挂起请求、下一刻交付、失败冷却。
@@ -635,6 +644,7 @@ impl Default for EntityStore {
             wake_events: Vec::new(),
             spawn_snapshots: BTreeMap::new(),
             departed_mob_events: BTreeMap::new(),
+            ejected_player_passengers: BTreeSet::new(),
             wake_tokens: super::mob::throttle::WakeTokens::full(
                 0,
                 super::mob::throttle::Config::OFF,
@@ -1293,10 +1303,39 @@ impl EntityStore {
         }
         for passenger in passengers {
             if passenger < FIRST_ENTITY_ID {
+                // `Avatar.removeVehicle` 的一半由游戏层做；这里只记下是谁要下车。
+                self.enqueue_ejected_player(passenger);
                 continue;
             }
             self.clear_passenger_vehicle(passenger, uid);
         }
+    }
+
+    /// 记下 `Entity.setRemoved` / `ejectPassengers` 甩下来的玩家乘客，等游戏层
+    /// 在自己的阶段统一 `stopRiding`（官方 `Avatar.removeVehicle` 的落点）。
+    ///
+    /// Queue a player passenger ejected by `Entity.setRemoved` /
+    /// `ejectPassengers`; the game layer applies `stopRiding` in its own phase.
+    pub fn enqueue_ejected_player(&mut self, player: EntityUid) {
+        if player < FIRST_ENTITY_ID {
+            self.ejected_player_passengers.insert(player);
+        }
+    }
+
+    /// 取走待下车的玩家乘客（uid 升序）。一次卸下，不会重复下车。
+    ///
+    /// Drain the pending player dismounts in ascending uid order, once each.
+    pub fn take_ejected_players(&mut self) -> Vec<EntityUid> {
+        std::mem::take(&mut self.ejected_player_passengers)
+            .into_iter()
+            .collect()
+    }
+
+    /// 待下车的玩家乘客，只读（拆合核对用）。
+    ///
+    /// Pending player dismounts, for the split/merge ownership check.
+    pub fn ejected_players(&self) -> &BTreeSet<EntityUid> {
+        &self.ejected_player_passengers
     }
 
     /// 从载具的乘客名单里摘掉一个 uid（公开与私有两份都要改）。
@@ -1994,6 +2033,8 @@ impl EntityStore {
             let previous = self.spawn_snapshots.insert(uid, public);
             debug_assert!(previous.is_none(), "生成快照的实体 ID 重复");
         }
+        self.ejected_player_passengers
+            .extend(std::mem::take(&mut other.ejected_player_passengers));
     }
 
     /// 还没交给同步层的生成快照：实体 ID 和快照所在的区块，uid 升序。拆合核对用。
@@ -2804,5 +2845,35 @@ mod riding_remove_tests {
         let rider = store.get(passenger).expect("passenger stays");
         assert_eq!(rider.vehicle, None);
         assert_eq!(rider.boarding_cooldown, 60);
+    }
+
+    /// 玩家和生物乘客从同一份名单里被甩下来：生物当场断关系，玩家只进待下车
+    /// 队列，由游戏层按 `getDismountLocationForPassenger` 落位。
+    #[test]
+    fn removing_a_vehicle_ejects_player_and_mob_passengers_together() {
+        let (mut store, vehicle, rider) = pair();
+        let player = 7;
+        store.with_mut(vehicle, |entity| {
+            entity.with_mob(|_, mob| {
+                assert!(super::super::riding::add_passenger(
+                    &mut mob.passengers,
+                    player,
+                    true
+                ));
+            })
+        });
+        assert_eq!(
+            match &store.public_at(vehicle).unwrap().kind {
+                KindPublic::Mob(mob) => mob.passengers.clone(),
+                _ => Vec::new(),
+            },
+            [player, rider]
+        );
+        store.remove(vehicle);
+        assert_eq!(store.take_ejected_players(), vec![player]);
+        assert!(store.take_ejected_players().is_empty(), "一次卸下");
+        let passenger = store.get(rider).expect("mob passenger stays");
+        assert_eq!(passenger.vehicle, None);
+        assert_eq!(passenger.boarding_cooldown, 60);
     }
 }

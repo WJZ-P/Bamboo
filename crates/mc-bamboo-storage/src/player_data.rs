@@ -976,17 +976,17 @@ mod tests {
         let mut data = sample();
         let nested = Tag::Compound(vec![
             ("id".to_owned(), Tag::String("minecraft:pig".to_owned())),
-            ("Pos".to_owned(), Tag::List(vec![
-                Tag::Double(1.5),
-                Tag::Double(64.0),
-                Tag::Double(-3.25),
-            ])),
+            (
+                "Pos".to_owned(),
+                Tag::List(vec![
+                    Tag::Double(1.5),
+                    Tag::Double(64.0),
+                    Tag::Double(-3.25),
+                ]),
+            ),
         ]);
         let vehicle = Tag::Compound(vec![
-            (
-                "Attach".to_owned(),
-                Tag::IntArray(vec![1, 2, 3, 4]),
-            ),
+            ("Attach".to_owned(), Tag::IntArray(vec![1, 2, 3, 4])),
             ("Entity".to_owned(), nested.clone()),
         ]);
         data.root_vehicle = Some(vehicle.clone());

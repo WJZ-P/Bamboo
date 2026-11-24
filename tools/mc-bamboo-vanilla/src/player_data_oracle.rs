@@ -1398,7 +1398,10 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     cases.push(("player root vehicle with nested passengers".into(), mounted));
     let mut simple_mount = cases[2].1.clone();
     simple_mount.root_vehicle = Some(root_vehicle_tag(false));
-    cases.push(("player root vehicle without passengers".into(), simple_mount));
+    cases.push((
+        "player root vehicle without passengers".into(),
+        simple_mount,
+    ));
     cases
 }
 

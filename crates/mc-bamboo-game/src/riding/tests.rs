@@ -744,3 +744,315 @@ fn rearing_shifts_the_passenger_offset_for_horses_only() {
     assert!((llama_offset.y - 1.37).abs() < 1e-6);
     assert!((llama_offset.z - (-0.3)).abs() < 1e-6);
 }
+
+/// 一名玩家和一只生物共用同一份乘客名单：服务端把玩家插到生物前面，
+/// `getFirstPassenger` / `getControllingPassenger` 都从这份名单算，
+/// 玩家侧的 `Riding.vehicle` 与名单双向一致。
+#[test]
+fn players_and_mobs_share_one_ordered_passenger_list() {
+    use mc_bamboo_blocks::entity::{Entity, FIRST_ENTITY_ID};
+    use mc_bamboo_protocol::packet::play::{ClientInformation, EquipmentSlot, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(7);
+    region.insert_player(Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    let horse = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    // 先上一名生物乘客，再让玩家上车：官方 `Entity.addPassenger` 把玩家插到 0 号。
+    let mob_rider = region
+        .entities
+        .spawn(Entity::cow(Vec3::new(0.5, 64.0, 0.5)));
+    region.entities.with_mut(horse, |entity| {
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, mob_rider, false);
+        })
+    });
+    region.entities.with_mut(mob_rider, |entity| {
+        entity.vehicle = Some(horse);
+    });
+    // 改装 `mount` 的一人限制只在「名单非空且没有玩家」时放行：这里名单里已有
+    // 一名生物，按官方 `canAddPassenger` 本应拒绝；用统一的 `add_passenger`
+    // 直接构造混合名单，验证读取侧而不是交互策略。
+    region.entities.with_mut(horse, |entity| {
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+        })
+    });
+    if let Some(player) = region.players.get_mut(&id) {
+        player.riding.vehicle = Some(horse);
+    }
+    let list = super::passengers(&region, horse);
+    assert_eq!(list, vec![id.0, mob_rider]);
+    assert!(id.0 < FIRST_ENTITY_ID);
+    // `Mob.getFirstPassenger` / `getControllingPassenger` 都读这一份名单。
+    let (first, controlling) = region
+        .entities
+        .get(horse)
+        .map(|entity| {
+            let mob = entity.kind.mob().expect("horse is a mob");
+            (mob.first_passenger(), mob.controlling_passenger())
+        })
+        .unwrap();
+    assert_eq!(first, Some(id.0));
+    assert_eq!(controlling, None, "no saddle yet");
+    assert!(super::check_consistency(&region).is_empty());
+    assert_eq!(super::player_vehicles(&region).get(&id), Some(&horse));
+    assert_eq!(super::player_passenger_count(&region, horse), 1);
+    // 上鞍之后控制乘客就是名单里的第一个（这名玩家）。
+    region.entities.with_mut(horse, |entity| {
+        entity.with_mob(|_, mob| {
+            mob.equipment.set(
+                EquipmentSlot::Saddle,
+                mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::SADDLE, 1),
+            );
+        })
+    });
+    let controlling = region
+        .entities
+        .get(horse)
+        .and_then(|entity| entity.kind.mob().map(|mob| mob.controlling_passenger()))
+        .unwrap();
+    assert_eq!(controlling, Some(id.0));
+}
+
+/// 双向一致检查能抓到「玩家侧说在骑、名单里没有他」和「名单里有、玩家侧没有」。
+#[test]
+fn consistency_check_reports_both_sides_of_a_broken_link() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(3);
+    region.insert_player(Player::new(
+        id,
+        Uuid::from_u128(2),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    let horse = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    super::mount(&mut region, id, horse);
+    assert!(super::check_consistency(&region).is_empty());
+    region.players.get_mut(&id).unwrap().riding.vehicle = None;
+    assert_eq!(super::check_consistency(&region).len(), 1);
+    region.players.get_mut(&id).unwrap().riding.vehicle = Some(horse);
+    region.entities.with_mut(horse, |entity| {
+        entity.with_mob(|_, mob| mob.passengers.clear())
+    });
+    assert_eq!(super::check_consistency(&region).len(), 1);
+}
+
+/// 载具死亡 / 被移除时，玩家和生物乘客走同一条 `removePassenger`：方块层把
+/// 玩家记进待下车队列，游戏层的 `rideTick` 用 `getDismountLocationForPassenger`
+/// 落位；生物乘客停在原地。同步阶段只发一份含两份乘客的 `set_passengers`。
+#[test]
+fn removing_the_vehicle_dismounts_player_and_mob_together() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{entity_tracking::Snapshot, inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(5);
+    region.insert_player(Player::new(
+        id,
+        Uuid::from_u128(3),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    let horse = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    let mob_rider = region
+        .entities
+        .spawn(Entity::cow(Vec3::new(0.5, 64.0, 0.5)));
+    super::mount(&mut region, id, horse);
+    region.entities.with_mut(horse, |entity| {
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, mob_rider, false);
+        })
+    });
+    region.entities.with_mut(mob_rider, |entity| {
+        entity.vehicle = Some(horse);
+    });
+    // 同步层的快照直接读这唯一一份名单，配对时按它发一次 `set_passengers`。
+    let snapshot = Snapshot::of(region.entities.public_at(horse).unwrap());
+    assert_eq!(snapshot.passengers, vec![id.0, mob_rider]);
+    let index = crate::entity_tracking::PassengerIndex::of(std::slice::from_ref(&snapshot));
+    assert_eq!(index.list(horse), Some(&[id.0, mob_rider][..]));
+
+    // `setRemoved` 把生物乘客当场摘掉，玩家只进队列。
+    region.entities.remove(horse);
+    assert_eq!(region.entities.take_ejected_players(), vec![id.0]);
+    assert_eq!(region.entities.public_at(mob_rider).unwrap().vehicle, None);
+    let position = region.entities.public_at(mob_rider).unwrap().position;
+    super::tick(&mut region);
+    assert_eq!(region.players[&id].riding.vehicle, None);
+    assert_eq!(
+        region.entities.public_at(mob_rider).unwrap().position,
+        position
+    );
+    assert!(super::check_consistency(&region).is_empty());
+    // 载具离表之后没有新的 `set_passengers` 包：移除包由实体跟踪发。
+}
+
+/// `ServerPlayer.saveParentVehicle` / `loadAndSpawnParentVehicle`：骑着带生物乘客
+/// 的马下线时，存档 `RootVehicle` 带上 `Attach`、整棵 `Passengers` 和玩家重新
+/// 骑上的那一份关系。两名玩家乘客时官方不写 `RootVehicle`。
+#[test]
+fn root_vehicle_save_and_load_round_trips_the_whole_passenger_tree() {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(9);
+    region.insert_player(Player::new(
+        id,
+        Uuid::from_u128(4),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    let horse = region.entities.spawn(Entity::by_mob_type(
+        MobType::Horse,
+        Vec3::new(2.5, 64.0, -3.5),
+    ));
+    let mob_rider = region
+        .entities
+        .spawn(Entity::cow(Vec3::new(2.5, 65.0, -3.5)));
+    super::mount(&mut region, id, horse);
+    region.entities.with_mut(horse, |entity| {
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, mob_rider, false);
+        })
+    });
+    region.entities.with_mut(mob_rider, |entity| {
+        entity.vehicle = Some(horse);
+    });
+    assert_eq!(super::player_passenger_count(&region, horse), 1);
+
+    let tag = super::root_vehicle_save(&region, id).expect("riding player saves RootVehicle");
+    let Tag::Compound(entries) = &tag else {
+        panic!("RootVehicle is a compound");
+    };
+    assert!(entries.iter().any(|(key, _)| key == "Attach"));
+    let entity_tag = entries
+        .iter()
+        .find(|(key, _)| key == "Entity")
+        .map(|(_, value)| value)
+        .expect("Entity child");
+    let text = entity_tag.to_snbt();
+    assert!(text.contains("Passengers"), "{text}");
+    assert!(text.contains("minecraft:cow"), "{text}");
+
+    // 下线：移除整棵树，再按存档放回一个新世界（新实体号）。
+    for uid in [horse, mob_rider] {
+        region.entities.remove(uid);
+    }
+    region.players.get_mut(&id).unwrap().riding.vehicle = None;
+    super::load_root_vehicle(&mut region, id, &tag);
+    let vehicle = region.players[&id].riding.vehicle.expect("remounted");
+    assert_ne!(vehicle, horse, "read-back entities get fresh ids");
+    assert_eq!(super::passengers(&region, vehicle).first(), Some(&id.0));
+    assert!(super::check_consistency(&region).is_empty());
+    let nested = super::passengers(&region, vehicle)
+        .iter()
+        .copied()
+        .find(|&p| p >= mc_bamboo_blocks::entity::FIRST_ENTITY_ID)
+        .expect("the mob rider came back");
+    assert_eq!(
+        region.entities.public_at(nested).unwrap().vehicle,
+        Some(vehicle)
+    );
+
+    // 没在骑东西时不写 `RootVehicle`。
+    super::stop_riding(&mut region, id);
+    assert_eq!(super::root_vehicle_save(&region, id), None);
+    // 两名玩家乘客时也不写：玩家档只接管「恰好一名玩家」的载具。
+    let other = PlayerId(10);
+    region.insert_player(Player::new(
+        other,
+        Uuid::from_u128(5),
+        "Other".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    ));
+    // 直接补上第二位玩家（交互层的一人限制不在这里测）。
+    region.players.get_mut(&id).unwrap().riding.vehicle = Some(vehicle);
+    region.entities.with_mut(vehicle, |entity| {
+        entity.with_mob(|_, mob| {
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, id.0, true);
+            mc_bamboo_blocks::entity::riding::add_passenger(&mut mob.passengers, other.0, true);
+        })
+    });
+    region.players.get_mut(&other).unwrap().riding.vehicle = Some(vehicle);
+    assert_eq!(super::player_passenger_count(&region, vehicle), 2);
+    assert_eq!(super::root_vehicle_save(&region, id), None);
+}
+
+/// `RootVehicle` 坏数据（没有 `Entity`、未知实体类型、`Attach` 对不上）不能让
+/// 进服路径 panic，也不能留下半棵没挂上玩家的乘客树。
+#[test]
+fn a_broken_root_vehicle_never_panics_or_leaves_orphans() {
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use uuid::Uuid;
+
+    use crate::{inbound::PlayerId, player::Player, region::Region};
+
+    let mut region = Region::new(2, 20, false);
+    let id = PlayerId(11);
+    region.insert_player(Player::new(
+        id,
+        Uuid::from_u128(6),
+        "Rider".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    ));
+    let before = region.entities.ids().len();
+    for tag in [
+        Tag::String("oops".to_owned()),
+        Tag::Compound(vec![("Attach".to_owned(), Tag::IntArray(vec![1, 2, 3, 4]))]),
+        Tag::Compound(vec![(
+            "Entity".to_owned(),
+            Tag::Compound(vec![(
+                "id".to_owned(),
+                Tag::String("minecraft:not_an_entity".to_owned()),
+            )]),
+        )]),
+    ] {
+        super::load_root_vehicle(&mut region, id, &tag);
+        assert_eq!(region.players[&id].riding.vehicle, None);
+        assert_eq!(region.entities.ids().len(), before, "no orphans");
+    }
+}
