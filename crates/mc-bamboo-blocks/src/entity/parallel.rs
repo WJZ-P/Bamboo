@@ -458,6 +458,19 @@ impl EntityCtx for ParallelCtx<'_> {
             .flatten()
     }
 
+    fn with_other(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        if uid == self.uid {
+            return false;
+        }
+        match self.shared.public_of(uid) {
+            Some(public) => {
+                visit(public);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn entity_uids(&self) -> Vec<EntityUid> {
         self.shared
             .uids

@@ -771,8 +771,11 @@ fn add_unreachable_target(cx: &mut Cx, target: EntityUid) {
     if should_add {
         list.push(target);
     }
-    cx.memories
-        .set_with_ttl(UnreachableTongueTargets, MemoryValue::Entities(list), 100);
+    cx.memories.set_with_ttl(
+        UnreachableTongueTargets,
+        MemoryValue::Entities(list.into()),
+        100,
+    );
 }
 
 /// `ShootTongue.checkExtraStartConditions`：先看走不走得到（路径终点离目标不到 1.75），

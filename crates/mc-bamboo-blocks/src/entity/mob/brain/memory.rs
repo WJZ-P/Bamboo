@@ -9,6 +9,8 @@
 //! `getTimeUntilExpiry` also reports for empty slots. Unregistered memories read as
 //! absent and ignore writes, like vanilla's `getMemorySlotIfPresent` returning `null`.
 
+use std::sync::Arc;
+
 use mc_bamboo_core::{BlockPos, Vec3};
 
 use super::super::DamageSource;
@@ -284,13 +286,14 @@ impl WalkTarget {
 }
 
 /// `NearestVisibleLivingEntities`：附近的活体按距离排好，视线判定第一次问到时才算，
-/// 算过的记下来。
+/// 算过的记下来。实体表用共享切片，`NearestLivingEntities` 和这条记忆共用同一份数据。
 ///
 /// `NearestVisibleLivingEntities`: nearby living entities by distance; the visibility
-/// test runs lazily the first time each one is asked about and is then cached.
+/// test runs lazily the first time each one is asked about and is then cached. The uid
+/// list is a shared slice so `NearestLivingEntities` and this memory share one allocation.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NearestVisible {
-    pub entities: Vec<EntityUid>,
+    pub entities: Arc<[EntityUid]>,
     /// 和 `entities` 对齐的缓存，`None` 是还没算过。
     ///
     /// A cache aligned with `entities`; `None` means not tested yet.
@@ -298,7 +301,7 @@ pub struct NearestVisible {
 }
 
 impl NearestVisible {
-    pub fn new(entities: Vec<EntityUid>) -> Self {
+    pub fn new(entities: Arc<[EntityUid]>) -> Self {
         let visible = vec![None; entities.len()];
         Self { entities, visible }
     }
@@ -316,7 +319,7 @@ pub enum MemoryValue {
     Long(i64),
     Vec3(Vec3),
     Entity(EntityUid),
-    Entities(Vec<EntityUid>),
+    Entities(Arc<[EntityUid]>),
     Visible(NearestVisible),
     Walk(WalkTarget),
     Look(PositionTracker),
@@ -532,7 +535,7 @@ impl Memories {
 
     pub fn entities(&self, kind: MemoryType) -> Option<&[EntityUid]> {
         match self.get(kind) {
-            Some(MemoryValue::Entities(list)) => Some(list),
+            Some(MemoryValue::Entities(list)) => Some(list.as_ref()),
             _ => None,
         }
     }
@@ -599,12 +602,12 @@ mod tests {
         memories.register(MemoryType::NearestLivingEntities);
         memories.set(
             MemoryType::NearestLivingEntities,
-            MemoryValue::Entities(vec![3]),
+            MemoryValue::Entities(Arc::from([3])),
         );
         assert!(memories.has(MemoryType::NearestLivingEntities));
         memories.set(
             MemoryType::NearestLivingEntities,
-            MemoryValue::Entities(Vec::new()),
+            MemoryValue::Entities(Arc::default()),
         );
         assert!(!memories.has(MemoryType::NearestLivingEntities));
     }

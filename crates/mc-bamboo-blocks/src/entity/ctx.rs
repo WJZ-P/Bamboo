@@ -732,6 +732,22 @@ pub trait EntityCtx {
     }
     /// 按 ID 读别的实体的公开数据。自己已经被驱动从表里取出来，查不到是正常的。
     fn other(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 借用别的实体的公开数据，找到时返回 `true`。热路径里用它省掉整份
+    /// [`EntityPublic`] 的克隆。默认退回 [`Self::other`] 的克隆实现；精确和并行
+    /// 两种真实驱动都覆盖成直接借用表里的那一行。
+    ///
+    /// Borrows another entity's public data; `true` when found. Hot paths use it to
+    /// avoid cloning a whole [`EntityPublic`]. The default falls back to the cloning
+    /// [`Self::other`]; both real drivers override it to borrow the stored row directly.
+    fn with_other(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        match self.other(uid) {
+            Some(public) => {
+                visit(&public);
+                true
+            }
+            None => false,
+        }
+    }
     /// 按 ID 读一名玩家（骑手）。不在本岛时返回 `None`。
     ///
     /// Reads one player (a rider) by id. `None` when they are not on this island.
@@ -1795,6 +1811,10 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn other(&self, uid: EntityUid) -> Option<EntityPublic> {
         self.world.level().entity_public(uid)
+    }
+
+    fn with_other(&self, uid: EntityUid, visit: &mut dyn FnMut(&EntityPublic)) -> bool {
+        self.world.level().with_entity_public(uid, visit)
     }
 
     fn entity_uids(&self) -> Vec<EntityUid> {

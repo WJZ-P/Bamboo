@@ -1028,7 +1028,7 @@ fn closest_ram_target(cx: &mut Cx) -> Option<EntityUid> {
         Some(MemoryValue::Visible(visible)) => visible.entities.clone(),
         _ => return None,
     };
-    list.into_iter().find(|&uid| {
+    list.iter().copied().find(|&uid| {
         sensor::living(cx, uid).is_some_and(|view| ram_targetable(cx, &view))
             && sensor::visible_contains(cx, uid)
     })

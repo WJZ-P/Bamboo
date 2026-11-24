@@ -5,6 +5,8 @@
 //! delay), the concrete sensors Bamboo uses, and the shared lookups of other living
 //! entities (players or mobs).
 
+use std::sync::Arc;
+
 use mc_bamboo_core::{Aabb, Vec3, mth};
 use mc_bamboo_data::registries::attribute;
 
@@ -216,25 +218,30 @@ impl LivingView {
     }
 }
 
-/// 按 uid 读一个活体：先找玩家，再找实体表。自己读不到（tick 期间被取出来了）。
+/// 按 uid 读一个活体。先借用实体表：命中就一定是生物，省掉为了「是不是玩家」而
+/// 遍历全部玩家；没命中才去玩家名单里找。自己读不到（tick 期间被取出来了）。
 ///
-/// Reads a living entity by uid: players first, then the entity table. The mob itself
-/// is not visible (it is taken out while ticking).
+/// Reads a living entity by uid. It borrows the entity table first — a hit is
+/// definitely a mob, so it avoids scanning every player just to decide whether the
+/// entity is a player; only a miss falls back to the player list. The mob itself is
+/// not visible (it is taken out while ticking).
 pub fn living(cx: &Cx, uid: EntityUid) -> Option<LivingView> {
+    let mut mob = None;
+    cx.ctx.with_other(uid, &mut |public| {
+        if let KindPublic::Mob(m) = &public.kind {
+            mob = Some(mob_view(public.uid, public.position, public.removed, m));
+        }
+    });
+    if mob.is_some() {
+        return mob;
+    }
     let mut found = None;
     cx.ctx.blocks().for_each_player(&mut |player| {
         if player.uid == uid {
             found = Some(player_view(player));
         }
     });
-    if found.is_some() {
-        return found;
-    }
-    let other = cx.ctx.other(uid)?;
-    let KindPublic::Mob(mob) = &other.kind else {
-        return None;
-    };
-    Some(mob_view(other.uid, other.position, other.removed, mob))
+    found
 }
 
 fn player_view(player: &crate::entity::ctx::PlayerView) -> LivingView {
@@ -359,9 +366,9 @@ fn visible_at(cx: &mut Cx, index: usize, view: &LivingView) -> bool {
     result
 }
 
-fn visible_list(cx: &Cx) -> Option<Vec<EntityUid>> {
+fn visible_list(cx: &Cx) -> Option<Arc<[EntityUid]>> {
     match cx.memories.get(MemoryType::NearestVisibleLivingEntities) {
-        Some(MemoryValue::Visible(visible)) => Some(visible.entities.clone()),
+        Some(MemoryValue::Visible(visible)) => Some(Arc::clone(&visible.entities)),
         _ => None,
     }
 }
@@ -391,7 +398,7 @@ pub fn find_closest_visible(
     filter: &mut dyn FnMut(&LivingView) -> bool,
 ) -> Option<EntityUid> {
     let list = visible_list(cx)?;
-    for (index, uid) in list.into_iter().enumerate() {
+    for (index, uid) in list.iter().copied().enumerate() {
         let Some(view) = living(cx, uid) else {
             continue;
         };
@@ -448,10 +455,12 @@ fn sense_nearest_living(cx: &mut Cx) {
         }
     });
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let list: Vec<EntityUid> = found.into_iter().map(|(_, uid)| uid).collect();
+    // 两条记忆共用同一份实体表：一次分配，不再整表克隆一遍。
+    // Both memories share one uid list: one allocation, no second full clone.
+    let list: Arc<[EntityUid]> = found.into_iter().map(|(_, uid)| uid).collect();
     cx.memories.set(
         MemoryType::NearestLivingEntities,
-        MemoryValue::Entities(list.clone()),
+        MemoryValue::Entities(Arc::clone(&list)),
     );
     cx.memories.set(
         MemoryType::NearestVisibleLivingEntities,
@@ -530,7 +539,8 @@ fn sense_players(cx: &mut Cx) {
             .distance_to_sqr(a.position)
             .total_cmp(&position.distance_to_sqr(b.position))
     });
-    let ids = |list: &[LivingView]| list.iter().map(|view| view.uid).collect::<Vec<_>>();
+    let ids =
+        |list: &[LivingView]| -> Arc<[EntityUid]> { list.iter().map(|view| view.uid).collect() };
     cx.memories.set(
         MemoryType::NearestPlayers,
         MemoryValue::Entities(ids(&players)),

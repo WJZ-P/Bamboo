@@ -471,7 +471,7 @@ pub(in crate::entity::mob) fn sense_attackables(cx: &mut Cx) {
     // needs a mutable borrow.
     let mut candidates: Vec<EntityUid> = Vec::new();
     if let Some(MemoryValue::Visible(visible)) = cx.memories.get(NearestVisibleLivingEntities) {
-        for &uid in &visible.entities {
+        for &uid in visible.entities.iter() {
             let Some(other) = cx.ctx.other(uid) else {
                 continue;
             };
