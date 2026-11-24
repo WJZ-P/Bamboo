@@ -109,6 +109,7 @@ impl PearlCase {
                 difficulty: self.difficulty,
                 ..ZombieFacts::default()
             },
+            biome: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
