@@ -13,7 +13,7 @@ use mc_bamboo_data::{PathType, registries::attribute, tags::fluid_tags};
 
 use super::{
     Attributes, DamageKind, DamageSource, Malus, Mob, MobType, control,
-    goals::{Goal, GoalSelector, PLAIN_STROLL, TargetType, WrappedGoal},
+    goals::{Flag, Goal, GoalSelector, PLAIN_STROLL, TargetType, WrappedGoal},
     living, motion,
 };
 use crate::entity::{
@@ -131,12 +131,9 @@ pub fn walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
     }
 }
 
-/// `Guardian.registerGoals` 的 `goalSelector`，按注册顺序。回家目标先用
-/// [`Goal::Unavailable`] 占住优先级，逻辑在后续阶段接入。
+/// `Guardian.registerGoals` 的 `goalSelector`，按注册顺序。
 ///
-/// The `goalSelector` half of `Guardian.registerGoals`, in registration order. The
-/// go-home goal keeps its priority slot as [`Goal::Unavailable`] until its behaviour
-/// is wired in a later phase.
+/// The `goalSelector` half of `Guardian.registerGoals`, in registration order.
 pub fn goals(kind: MobType) -> GoalSelector {
     // `ElderGuardian` 构造函数把 `randomStrollGoal.setInterval(400)`。
     // The `ElderGuardian` constructor calls `randomStrollGoal.setInterval(400)`.
@@ -145,9 +142,15 @@ pub fn goals(kind: MobType) -> GoalSelector {
     } else {
         80
     };
-    GoalSelector::from_goals(vec![
+    let mut selector = GoalSelector::from_goals(vec![
         wrap(4, Goal::GuardianAttack),
-        wrap(5, Goal::Unavailable("MoveTowardsRestrictionGoal")),
+        wrap(
+            5,
+            Goal::MoveTowardsRestriction {
+                speed: 1.0,
+                wanted: Vec3::default(),
+            },
+        ),
         wrap(
             7,
             Goal::Stroll {
@@ -185,7 +188,13 @@ pub fn goals(kind: MobType) -> GoalSelector {
                 look_time: 0,
             },
         ),
-    ])
+    ]);
+    // 官方 `randomStrollGoal.setFlags(EnumSet.of(MOVE, LOOK))`：只覆盖守卫者的
+    // 游走目标（下标 2），不动其它生物的 `Goal::Stroll`。
+    // Vanilla `randomStrollGoal.setFlags(EnumSet.of(MOVE, LOOK))`: override only the
+    // guardian's stroll goal (index 2), leaving other mobs' `Goal::Stroll` alone.
+    selector.set_flags(2, &[Flag::Move, Flag::Look]);
+    selector
 }
 
 fn wrap(priority: i32, goal: Goal) -> WrappedGoal {
@@ -588,6 +597,7 @@ mod tests {
         let priorities: Vec<i32> = table.iter().map(|wrapped| wrapped.priority).collect();
         assert_eq!(priorities, vec![4, 5, 7, 8, 8, 9]);
         assert!(matches!(table[0].goal, Goal::GuardianAttack));
+        assert!(matches!(table[1].goal, Goal::MoveTowardsRestriction { .. }));
         assert!(matches!(
             table[2].goal,
             Goal::Stroll {
@@ -631,6 +641,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// 官方 `setFlags`：优先级 4/5/7 都是 MOVE|LOOK；7 的 `Stroll` 靠选择器层
+    /// 覆盖，不改其它生物（下标 3 的 `LookAtPlayer` 仍是 LOOK）。
+    ///
+    /// Vanilla `setFlags`: priorities 4/5/7 are MOVE|LOOK; the stroll at 7 is
+    /// overridden at the selector level, leaving other mobs' `Stroll` alone (index
+    /// 3 `LookAtPlayer` is still LOOK).
+    #[test]
+    fn guardian_goal_flags() {
+        let selector = goals(MobType::Guardian);
+        assert_eq!(selector.flags(0), &[Flag::Move, Flag::Look]);
+        assert_eq!(selector.flags(1), &[Flag::Move, Flag::Look]);
+        assert_eq!(selector.flags(2), &[Flag::Move, Flag::Look]);
+        assert_eq!(selector.flags(3), &[Flag::Look]);
     }
 
     /// `Guardian.getAttackDuration()`：普通 80，远古 60。
