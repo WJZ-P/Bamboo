@@ -659,11 +659,12 @@ public final class PlayerAttributesOracle {
             byte[] bambooSpeed = Base64.getDecoder().decode(request.get("speedDirty").getAsString());
             byte[] bambooComplex = Base64.getDecoder().decode(request.get("complexDirty").getAsString());
 
-            // 1. 构造官方 AttributeMap（将 36 项全部实例化以便全量同步），依次生成三份官方包。
+            // 1. 构造官方 AttributeMap（创造模式进服的真实 getSyncableAttributes()）。
             AttributeMap map = new AttributeMap(Player.createAttributes().build());
-            for (Holder<Attribute> holder : playerAttributes) {
-                map.getInstance(holder);
-            }
+            map.getInstance(Attributes.BLOCK_INTERACTION_RANGE)
+                    .addOrUpdateTransientModifier(CREATIVE_BLOCK_RANGE);
+            map.getInstance(Attributes.ENTITY_INTERACTION_RANGE)
+                    .addOrUpdateTransientModifier(CREATIVE_ENTITY_RANGE);
             ClientboundUpdateAttributesPacket vanillaFull =
                     new ClientboundUpdateAttributesPacket(42, map.getSyncableAttributes());
             map.getAttributesToSync().clear();
@@ -674,7 +675,7 @@ public final class PlayerAttributesOracle {
                     new ClientboundUpdateAttributesPacket(42, map.getAttributesToSync());
             map.getAttributesToSync().clear();
 
-            // 3. 效率 V 钻石镐 + 创造模式 + 疾跑。
+            // 3. 效率 V 钻石镐 + 切回生存模式 + 疾跑。
             Holder.Reference<Enchantment> efficiency =
                     enchantments.get(Identifier.parse("minecraft:efficiency")).orElseThrow();
             ItemStack pickaxe = new ItemStack(Items.DIAMOND_PICKAXE);
@@ -689,9 +690,9 @@ public final class PlayerAttributesOracle {
                 }
             });
             map.getInstance(Attributes.BLOCK_INTERACTION_RANGE)
-                    .addOrUpdateTransientModifier(CREATIVE_BLOCK_RANGE);
+                    .removeModifier(CREATIVE_BLOCK_RANGE);
             map.getInstance(Attributes.ENTITY_INTERACTION_RANGE)
-                    .addOrUpdateTransientModifier(CREATIVE_ENTITY_RANGE);
+                    .removeModifier(CREATIVE_ENTITY_RANGE);
             AttributeInstance speedInst = map.getInstance(Attributes.MOVEMENT_SPEED);
             speedInst.removeModifier(SPRINTING_SPEED.id());
             speedInst.addTransientModifier(SPRINTING_SPEED);

@@ -3434,7 +3434,7 @@ pub fn replay_speed_sync_packets(omit_dirty: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>
         id,
         Uuid::from_u128(42),
         "Alice".to_owned(),
-        GameMode::Survival,
+        GameMode::Creative,
         ClientInformation::default(),
         Vec3::new(0.5, 64.0, 0.5),
     );
@@ -3442,7 +3442,7 @@ pub fn replay_speed_sync_packets(omit_dirty: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>
     region.links.add(id, Box::new(capture.clone()));
     region.insert_player(player);
 
-    // 1. 进服全量同步。
+    // 1. 创造模式进服初始同步（两项创造触及距离）。
     player_attributes::send_full_to_self(&mut region, id);
     region.links.flush();
     let full_body = extract_update_body(&capture);
@@ -3461,7 +3461,7 @@ pub fn replay_speed_sync_packets(omit_dirty: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>
     region.links.flush();
     let speed_body = extract_update_body(&capture);
 
-    // 3. 主手效率 V 钻石镐 + 创造模式 + 疾跑脏同步。
+    // 3. 主手效率 V 钻石镐 + 切回生存模式 + 疾跑脏同步。
     let efficiency_id = mc_bamboo_data::registries::SYNCED_REGISTRIES
         .iter()
         .find(|r| r.name == "minecraft:enchantment")
@@ -3482,7 +3482,7 @@ pub fn replay_speed_sync_packets(omit_dirty: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>
     {
         let p = region.players.get_mut(&id).expect("player");
         p.inventory.slots[36] = pickaxe;
-        p.game_mode = GameMode::Creative;
+        p.game_mode = GameMode::Survival;
         p.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
     }
     player_attributes::rebuild(&mut region);

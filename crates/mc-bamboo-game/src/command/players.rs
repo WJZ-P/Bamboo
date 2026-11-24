@@ -309,9 +309,9 @@ pub(crate) fn apply_mode(
         },
     );
     region.links.send(target, &abilities);
-    // 切模式后按新游戏模式重建属性（创造模式触及距离），给玩家自己发全量。
-    // Rebuild attributes for the new game mode (creative reach) and send full.
-    crate::player_attributes::send_full_to_self(region, target);
+    // 切模式后按新游戏模式重建属性（创造模式触及距离），立即同步变化的脏属性。
+    // Rebuild attributes for the new game mode and immediately sync dirty changes.
+    crate::player_attributes::sync_after_mode_change(region, target);
     // Tab 名单是全局的：经端口交给主控（直接实现下当场广播，和以前同一位置）。
     // The tab list is global: hand it to the master through the port (the
     // direct implementation broadcasts right here, as before).

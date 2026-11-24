@@ -1190,29 +1190,16 @@ mod tests {
         assert!(caught, "leaving mobs out of the rebase went unnoticed");
     }
 
-    /// 全量属性同步不再发硬编码的两条，而是真实属性表里全部 32 个可同步属性。
-    /// 解一遍 `update_attributes` 的字节，确认 entity_id、条数、逐项基础值和
-    /// "只发 is_client_syncable_attribute" 都对。
+    /// 初始属性同步照官方 `AttributeMap.getSyncableAttributes()`：只发基础值偏离缺省
+    /// 或带修饰符的可同步属性（纯生存空包、创造含两项触及距离、改基础值或挂药水后只发
+    /// 对应可同步属性，不发非同步属性）。
     #[test]
     fn full_attribute_sync_uses_the_real_table() {
+        use mc_bamboo_blocks::entity::mob::effects::EffectInstance;
         use mc_bamboo_core::Vec3;
+        use mc_bamboo_data::registries::{attribute, mob_effect};
         use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
         use uuid::Uuid;
-
-        let mut region = Region::new(2, 20, false);
-        let id = crate::inbound::PlayerId(1);
-        region.insert_player(crate::player::Player::new(
-            id,
-            Uuid::nil(),
-            "T".to_owned(),
-            GameMode::Survival,
-            ClientInformation::default(),
-            Vec3::default(),
-        ));
-        let player = &region.players[&id];
-
-        let frames = crate::player_attributes::full_frames(player).expect("full frames");
-        let body = crate::world::tests::body_of(frames);
 
         fn varint(buf: &[u8], at: &mut usize) -> i32 {
             let mut value = 0i32;
@@ -1228,34 +1215,64 @@ mod tests {
             }
         }
 
+        // 1. 纯生存缺省状态无实例化属性，不发空包（与官方重生 / 进服一致）。
+        let mut plain = crate::player::Player::new(
+            crate::inbound::PlayerId(1),
+            Uuid::nil(),
+            "T".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::default(),
+        );
+        assert!(crate::player_attributes::full_frames(&plain).is_none());
+
+        // 2. 创造模式发两项触及距离，另加改过基础值的 MAX_HEALTH 与速度药水、
+        //    以及非同步的 ATTACK_DAMAGE（不应出现）。
+        plain.game_mode = GameMode::Creative;
+        plain
+            .attributes
+            .instance(attribute::MAX_HEALTH)
+            .unwrap()
+            .base = 26.0;
+        plain
+            .attributes
+            .instance(attribute::ATTACK_DAMAGE)
+            .unwrap()
+            .base = 5.0;
+        plain
+            .effects
+            .add(EffectInstance::with_amplifier(mob_effect::SPEED, 200, 0));
+        crate::player_attributes::rebuild_player(&mut plain, false);
+
+        let frames = crate::player_attributes::full_frames(&plain).expect("non-empty frames");
+        let body = crate::world::tests::body_of(frames);
         let mut at = 0;
         assert_eq!(varint(&body, &mut at), 1, "entity_id");
         let count = varint(&body, &mut at);
-        // 玩家 supplier 有 36 个属性，其中可同步的比注册表 32 个少一个
-        // （flying_speed 不在 player.createAttributes 里），所以按表算期望值。
-        let syncable = player
-            .attributes
-            .entries
-            .iter()
-            .filter(|entry| mc_bamboo_data::is_client_syncable_attribute(entry.id))
-            .count() as i32;
-        assert_eq!(count, syncable, "all client-syncable attributes");
+        assert_eq!(
+            count, 4,
+            "block/entity reach + modified MAX_HEALTH + speed MOVEMENT_SPEED"
+        );
         let mut ids = Vec::new();
         for _ in 0..count {
             let attribute_id = varint(&body, &mut at);
             let base = f64::from_be_bytes(body[at..at + 8].try_into().unwrap());
             at += 8;
             let modifiers = varint(&body, &mut at);
-            assert_eq!(modifiers, 0, "a plain player has no modifiers yet");
-            assert_eq!(base, player.attributes.base(attribute_id), "base");
+            for _ in 0..modifiers {
+                let len = varint(&body, &mut at) as usize;
+                at += len + 8;
+                let _op = varint(&body, &mut at);
+            }
+            assert_eq!(base, plain.attributes.base(attribute_id), "base");
             ids.push(attribute_id);
         }
         assert_eq!(at, body.len(), "no trailing bytes");
-
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len() as i32, syncable, "no duplicate ids");
+        assert!(ids.contains(&attribute::BLOCK_INTERACTION_RANGE));
+        assert!(ids.contains(&attribute::ENTITY_INTERACTION_RANGE));
+        assert!(ids.contains(&attribute::MAX_HEALTH));
+        assert!(ids.contains(&attribute::MOVEMENT_SPEED));
+        assert!(!ids.contains(&attribute::ATTACK_DAMAGE));
         assert!(
             ids.iter()
                 .all(|id| mc_bamboo_data::is_client_syncable_attribute(*id)),

@@ -288,19 +288,46 @@ pub(crate) fn syncable_states(player: &Player) -> Vec<AttributeState> {
         .collect()
 }
 
-/// 把可同步属性编成 `UpdateAttributes` 帧。`only` 给定时只发这些 id（脏同步），
-/// 为 `None` 时发全部（全量同步）。返回的是可直接 `send_frames` 的完整帧。
+/// 玩家属性表的缺省基础值（照 `Player.createAttributes`）。
+/// 只有基础值偏离缺省或挂了修饰符的属性才算「已实例化」，进服 / 重生 / 配对的
+/// `AttributeMap.getSyncableAttributes()` 只发这些，和官方 26.3 一致。
 ///
-/// Encode `UpdateAttributes` frames for the syncable attributes. `only` restricts
-/// to dirty ids; `None` sends all. Returns complete frames ready for `send_frames`.
+/// Whether an attribute entry is non-default (base changed from `Attributes::player`
+/// or carries modifiers), matching vanilla's lazy `AttributeMap.getSyncableAttributes()`.
+fn is_instantiated_syncable(entry: &mc_bamboo_blocks::entity::mob::attributes::Attribute) -> bool {
+    if !is_client_syncable_attribute(entry.id) {
+        return false;
+    }
+    if !entry.modifiers.is_empty() {
+        return true;
+    }
+    let default_base = Attributes::player().base(entry.id);
+    entry.base.to_bits() != default_base.to_bits()
+}
+
+/// 把可同步属性编成 `UpdateAttributes` 帧。`only` 给定时只发这些 id（脏同步），
+/// 为 `None` 时发所有非缺省 / 带修饰符的可同步属性（进服 / 重生 / 配对，照官方
+/// `AttributeMap.getSyncableAttributes()`）。返回的是可直接 `send_frames` 的完整帧。
+///
+/// Encode `UpdateAttributes` frames for syncable attributes. `only` restricts
+/// to dirty ids; `None` sends instantiated syncable attributes (base differs
+/// from default or modifiers non-empty), matching vanilla `getSyncableAttributes()`.
 fn attribute_frames(player: &Player, only: Option<&[i32]>) -> Option<Vec<u8>> {
-    let wanted = |id: i32| only.is_none_or(|ids| ids.contains(&id));
-    let mut snapshots = Vec::new();
-    let mut modifiers: Vec<Vec<AttributeModifier<'_>>> = Vec::new();
-    for entry in &player.attributes.entries {
-        if !is_client_syncable_attribute(entry.id) || !wanted(entry.id) {
-            continue;
-        }
+    let mut selected: Vec<&mc_bamboo_blocks::entity::mob::attributes::Attribute> = player
+        .attributes
+        .entries
+        .iter()
+        .filter(|entry| match only {
+            Some(ids) => is_client_syncable_attribute(entry.id) && ids.contains(&entry.id),
+            None => is_instantiated_syncable(entry),
+        })
+        .collect();
+    // 按注册表 ID 排序，输出顺序稳定且与官方按 ID / 字典序一致。
+    // Sort by registry id so packet order is deterministic.
+    selected.sort_by_key(|entry| entry.id);
+    let mut snapshots = Vec::with_capacity(selected.len());
+    let mut modifiers: Vec<Vec<AttributeModifier<'_>>> = Vec::with_capacity(selected.len());
+    for entry in selected {
         let list = entry
             .modifiers
             .iter()
@@ -335,19 +362,18 @@ fn attribute_frames(player: &Player, only: Option<&[i32]>) -> Option<Vec<u8>> {
     }))
 }
 
-/// 全量可同步属性帧（进服 / 重生 / 配对）。
+/// 进服 / 重生 / 配对的可同步属性帧（官方 `AttributeMap.getSyncableAttributes()`）。
 ///
-/// Full syncable-attribute frames (join / respawn / pairing).
+/// Initial / pairing syncable-attribute frames (`AttributeMap.getSyncableAttributes()`).
 pub(crate) fn full_frames(player: &Player) -> Option<Vec<u8>> {
     attribute_frames(player, None)
 }
 
-/// 进服 / 重生 / 切模式：给玩家自己发全量属性，并记下已同步状态。
+/// 进服 / 重生：给玩家自己发当前非缺省或带修饰符的可同步属性，并记下已同步状态。
 /// 先按当前状态重建一次，保证发出的属性和随后每刻重建的一致（不会有首刻假脏）。
 ///
-/// Send full attributes to the player's own client and record the synced state.
-/// Rebuilds first so the sent state matches the next tick's rebuild (no spurious
-/// first-tick dirty packet).
+/// Send initial syncable attributes to the player's own client and record the
+/// synced state. Rebuilds first so the next tick emits no spurious dirty packet.
 pub(crate) fn send_full_to_self(region: &mut Region, id: PlayerId) {
     let (frames, states) = {
         let Region {
@@ -368,12 +394,63 @@ pub(crate) fn send_full_to_self(region: &mut Region, id: PlayerId) {
     }
 }
 
+/// 切换游戏模式后立刻重建并把变化了的脏属性发给自己和观察者（例如从创造切回生存时
+/// 发空的修饰符列表清除创造触及加成）。
+///
+/// Rebuilds after a game-mode change and immediately sends dirty attributes
+/// (including cleared modifiers) to observers and self.
+pub(crate) fn sync_after_mode_change(region: &mut Region, id: PlayerId) {
+    let (frames, viewers, current) = {
+        let Region {
+            players, chunks, ..
+        } = region;
+        let Some(player) = players.get_mut(&id) else {
+            return;
+        };
+        let on_solid = frost_block_solid(player, chunks);
+        rebuild_player(player, on_solid);
+        let current = syncable_states(player);
+        let sent = &player.sync.sent_attributes;
+        let frames = if sent.is_empty() {
+            full_frames(player)
+        } else {
+            let changed: Vec<i32> = current
+                .iter()
+                .filter(|state| {
+                    !sent.iter().any(|prev| {
+                        prev.0 == state.0
+                            && prev.1 == state.1
+                            && prev.2 == state.2
+                            && prev.3 == state.3
+                    })
+                })
+                .map(|state| state.0)
+                .collect();
+            if changed.is_empty() {
+                None
+            } else {
+                attribute_frames(player, Some(&changed))
+            }
+        };
+        let viewers: Vec<PlayerId> = player.sync.seen_by().iter().copied().collect();
+        (frames, viewers, current)
+    };
+    if let Some(frames) = frames {
+        for viewer in &viewers {
+            region.links.send_frames(*viewer, &frames);
+        }
+        region.links.send_frames(id, &frames);
+    }
+    if let Some(player) = region.players.get_mut(&id) {
+        player.sync.sent_attributes = current;
+    }
+}
+
 /// 每刻脏属性同步：和自己 + 观察者上次发出的状态比，变了就发 `UpdateAttributes`。
-/// `sent_attributes` 为空时（进服第一刻 / 重生后清空）发全量。
+/// `sent_attributes` 为空时（未走进服同步的测试构造）发非缺省 / 带修饰符项。
 ///
 /// Per-tick dirty attribute sync. Compares with the last-sent state and sends
-/// changed attributes to the player and every observer. An empty
-/// `sent_attributes` (first tick / after a respawn reset) sends everything.
+/// changed attributes to the player and every observer.
 pub(crate) fn sync_dirty(region: &mut Region) {
     let ids: Vec<PlayerId> = region.players.keys().copied().collect();
     for id in ids {
@@ -383,10 +460,10 @@ pub(crate) fn sync_dirty(region: &mut Region) {
             };
             let current = syncable_states(player);
             let sent = &player.sync.sent_attributes;
-            let changed: Vec<i32> = if sent.is_empty() {
-                current.iter().map(|state| state.0).collect()
+            let frames = if sent.is_empty() {
+                full_frames(player)
             } else {
-                current
+                let changed: Vec<i32> = current
                     .iter()
                     .filter(|state| {
                         !sent.iter().any(|prev| {
@@ -397,12 +474,12 @@ pub(crate) fn sync_dirty(region: &mut Region) {
                         })
                     })
                     .map(|state| state.0)
-                    .collect()
-            };
-            let frames = if changed.is_empty() {
-                None
-            } else {
-                attribute_frames(player, Some(&changed))
+                    .collect();
+                if changed.is_empty() {
+                    None
+                } else {
+                    attribute_frames(player, Some(&changed))
+                }
             };
             let viewers: Vec<PlayerId> = player.sync.seen_by().iter().copied().collect();
             (frames, viewers, current)
