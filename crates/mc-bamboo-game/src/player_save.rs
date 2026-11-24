@@ -40,6 +40,11 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
     });
     player.health.save(&mut data);
     player.environment.save(&mut data);
+    // `LivingEntity.addAdditionalSaveData`：总是写 `attributes`（只含已实例化属性的基础值和永久修饰符）。
+    // `LivingEntity.addAdditionalSaveData`: always writes `attributes` (instantiated bases + permanent modifiers only).
+    data.attributes = Some(mc_bamboo_blocks::entity::mob::nbt::attributes_tag(
+        &player.attributes,
+    ));
     // `LivingEntity.addAdditionalSaveData`：空表不写 `active_effects`。
     if !player.effects.is_empty() {
         data.active_effects = Some(mc_bamboo_blocks::entity::mob::nbt::effects_tag(
@@ -110,15 +115,44 @@ pub fn restore_experience_seed(player: &mut Player, data: Option<&PlayerData>) {
 /// [`restore_experience_seed`] handles `XpSeed` because it decides whether a
 /// random number is drawn.
 pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
-    player.health.restore(data);
-    player.environment.restore(data);
-    // `LivingEntity.readAdditionalSaveData`：读盘不触发 `onEffectAdded` 的包，
-    // 属性修饰和最大血量由玩家效果层在下一刻重建。
+    // 官方 `LivingEntity.readAdditionalSaveData` 先读 `attributes` 和 `active_effects`，
+    // 再读 `Health` 并按 `getMaxHealth()` 夹取。先恢复物品栏、属性和效果，再重建临时修饰符，
+    // 这样超过 20 的最大生命在读盘时不会被截断。
+    //
+    // Vanilla `LivingEntity.readAdditionalSaveData` loads `attributes` and
+    // `active_effects` before `Health`. Restore inventory, attributes and effects
+    // first, then rebuild transient modifiers so health > 20 is not truncated.
+    player.attributes = mc_bamboo_blocks::entity::mob::attributes::Attributes::player();
+    if let Some(tag) = &data.attributes {
+        mc_bamboo_blocks::entity::mob::nbt::read_attributes_tag(&mut player.attributes, tag);
+    }
+    // `LivingEntity.readAdditionalSaveData`：读盘不触发 `onEffectAdded` 的包。
     player.effects = data
         .active_effects
         .as_ref()
         .map(mc_bamboo_blocks::entity::mob::nbt::read_effects_tag)
         .unwrap_or_default();
+    player.inventory.selected = data.selected_item_slot.clamp(0, 8) as u8;
+    for item in &data.inventory {
+        if let Some(menu) = disk_to_menu(item.slot)
+            && let Some(slot) = player.inventory.slots.get_mut(menu)
+        {
+            *slot = item.stack.clone();
+        }
+    }
+    for item in &data.ender_items {
+        if item.slot >= 0
+            && let Some(slot) = player.ender_chest.slots.get_mut(item.slot as usize)
+        {
+            *slot = item.stack.clone();
+        }
+    }
+    crate::player_attributes::rebuild_player(player, false);
+    let max_health = player
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
+    player.health.restore(data, max_health);
+    player.environment.restore(data);
     player.experience = Experience {
         level: data.xp_level,
         total: data.xp_total,
@@ -136,21 +170,6 @@ pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
     player.pitch = data.rotation[1];
     player.head_yaw = data.rotation[0];
     player.on_ground = data.on_ground;
-    player.inventory.selected = data.selected_item_slot.clamp(0, 8) as u8;
-    for item in &data.inventory {
-        if let Some(menu) = disk_to_menu(item.slot)
-            && let Some(slot) = player.inventory.slots.get_mut(menu)
-        {
-            *slot = item.stack.clone();
-        }
-    }
-    for item in &data.ender_items {
-        if item.slot >= 0
-            && let Some(slot) = player.ender_chest.slots.get_mut(item.slot as usize)
-        {
-            *slot = item.stack.clone();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -173,5 +192,93 @@ mod tests {
                 assert_eq!(back, menu, "slot {disk}");
             }
         }
+    }
+
+    #[test]
+    fn attributes_save_only_bases_and_permanent_modifiers_and_preserve_high_health() {
+        use mc_bamboo_blocks::entity::mob::{
+            attributes::{Modifier, Operation},
+            effects::EffectInstance,
+        };
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_data::registries::{attribute, mob_effect};
+        use mc_bamboo_protocol::packet::play::{ClientInformation, ENTITY_FLAG_SPRINTING};
+
+        let mut player = Player::new(
+            crate::inbound::PlayerId(1),
+            uuid::Uuid::nil(),
+            "Attr".to_owned(),
+            GameMode::Creative,
+            ClientInformation::default(),
+            Vec3::default(),
+        );
+        // 修改基础值 + 三种永久修饰符。
+        if let Some(inst) = player.attributes.instance(attribute::MAX_HEALTH) {
+            inst.base = 30.0;
+            inst.modifiers.push(Modifier {
+                id: "minecraft:perm_add".to_owned(),
+                amount: 10.0,
+                operation: Operation::AddValue,
+                permanent: true,
+            });
+        }
+        if let Some(inst) = player.attributes.instance(attribute::MOVEMENT_SPEED) {
+            inst.modifiers.push(Modifier {
+                id: "minecraft:perm_mul_base".to_owned(),
+                amount: 0.25,
+                operation: Operation::AddMultipliedBase,
+                permanent: true,
+            });
+            inst.modifiers.push(Modifier {
+                id: "minecraft:perm_mul_total".to_owned(),
+                amount: 0.1,
+                operation: Operation::AddMultipliedTotal,
+                permanent: true,
+            });
+        }
+        // 加上各种临时修饰符（药水、疾跑、创造触及距离）：绝不能写进磁盘 modifiers。
+        player
+            .effects
+            .add(EffectInstance::with_amplifier(mob_effect::SPEED, 200, 1));
+        player.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
+        crate::player_attributes::rebuild_player(&mut player, false);
+        player.health.health = 36.5;
+
+        let data = runtime_player_data(&player);
+        let gzip = data.to_gzip().expect("gzip encodes");
+        let loaded_data = PlayerData::from_gzip(&gzip).expect("gzip decodes");
+
+        // 磁盘上不含任何临时修饰符（minecraft:effect.speed / minecraft:sprinting / creative）。
+        let nbt_text = format!("{:?}", loaded_data.attributes);
+        assert!(!nbt_text.contains("minecraft:effect.speed"), "{nbt_text}");
+        assert!(!nbt_text.contains("minecraft:sprinting"), "{nbt_text}");
+        assert!(
+            !nbt_text.contains("minecraft:creative_mode_block_range"),
+            "{nbt_text}"
+        );
+        assert!(nbt_text.contains("minecraft:perm_add"), "{nbt_text}");
+
+        // 读回新玩家：永久修饰符、修改过的基础值和 36.5 血量都保留。
+        let mut restored = Player::new(
+            crate::inbound::PlayerId(1),
+            uuid::Uuid::nil(),
+            "Attr".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::default(),
+        );
+        restore_inventory(&mut restored, &loaded_data);
+        assert_eq!(restored.attributes.base(attribute::MAX_HEALTH), 30.0);
+        assert_eq!(restored.attributes.value(attribute::MAX_HEALTH), 40.0);
+        assert_eq!(restored.health.health, 36.5);
+        let speed = restored
+            .attributes
+            .get(attribute::MOVEMENT_SPEED)
+            .expect("movement_speed");
+        assert!(speed.modifier("minecraft:perm_mul_base").is_some());
+        assert!(speed.modifier("minecraft:perm_mul_total").is_some());
+        // 疾跑没恢复（不存档），但药水效果随 active_effects 恢复并重建了修饰符。
+        assert!(speed.modifier("minecraft:sprinting").is_none());
+        assert!(speed.modifier("minecraft:effect.speed").is_some());
     }
 }

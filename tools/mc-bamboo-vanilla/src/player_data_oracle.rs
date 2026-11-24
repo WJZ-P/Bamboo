@@ -365,6 +365,23 @@ fn run_cases(
         );
     }
 
+    // 3a2. 玩家属性的运行时存档往返：只存基础值 + 永久修饰符，临时修饰符不落盘，>20 HP 不截断。
+    {
+        let (max_bits, hp_bits, has_perm, had_transient) = mc_bamboo_game::replay_attributes_save();
+        report.cases += 1;
+        report.check(
+            max_bits == 30.0_f64.to_bits()
+                && hp_bits == 28.5_f32.to_bits()
+                && has_perm
+                && !had_transient,
+            format!(
+                "attributes save round-trip: max={} hp={} has_perm={has_perm} had_transient={had_transient}",
+                f64::from_bits(max_bits),
+                f32::from_bits(hp_bits)
+            ),
+        );
+    }
+
     // 3b. 玩家经验：官方 Player / ServerPlayer 的公式、存档往返，逐位比较。
     run_xp_cases(stdin, lines, report)?;
     run_xp_seed_cases(stdin, lines, report)?;
@@ -840,6 +857,20 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
         get("food_level") == json!(data.food_level),
         format!("{name}: foodLevel"),
     );
+    // `attributes`：把 Bamboo 写出的列表按官方 `AttributeInstance.Packed.LIST_CODEC` 再编一次，
+    // 和规范 JSON 按键比较。
+    let expected_attributes = match &data.attributes {
+        Some(Tag::List(attrs)) => canonical_tag(&Tag::List(attrs.clone())),
+        _ => json!({"type": 9, "values": []}),
+    };
+    report.check(
+        get("attributes") == expected_attributes,
+        format!(
+            "{name}: attributes official={} bamboo={}",
+            get("attributes"),
+            expected_attributes
+        ),
+    );
     // `active_effects`：把 Bamboo 写出的列表按官方 codec 再编一次，
     // 和规范 JSON 按键比较；空表时官方不写这个键。
     let expected_effects = match &data.active_effects {
@@ -1201,6 +1232,60 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     with_effects.active_effects = Some(effects_tag(&effects));
     cases.push(("player active effects".into(), with_effects));
 
+    // 玩家属性表：`AttributeInstance.Packed.LIST_CODEC` 的双向往返（空表、
+    // 改基础值、三种永久修饰符、以及不会落盘的临时修饰符）。
+    {
+        use mc_bamboo_blocks::entity::mob::{
+            attributes::{Attributes, Modifier, Operation},
+            nbt::attributes_tag,
+        };
+        use mc_bamboo_data::registries::attribute;
+
+        let mut empty_attrs = cases[0].1.clone();
+        empty_attrs.attributes = Some(attributes_tag(&Attributes::player()));
+        cases.push(("player empty attributes".into(), empty_attrs));
+
+        let mut with_attrs = cases[0].1.clone();
+        let mut attrs = Attributes::player();
+        if let Some(inst) = attrs.instance(attribute::MAX_HEALTH) {
+            inst.base = 30.0;
+            inst.modifiers.push(Modifier {
+                id: "minecraft:perm_add".to_owned(),
+                amount: 4.5,
+                operation: Operation::AddValue,
+                permanent: true,
+            });
+            inst.modifiers.push(Modifier {
+                id: "minecraft:transient_skip".to_owned(),
+                amount: 99.0,
+                operation: Operation::AddValue,
+                permanent: false,
+            });
+        }
+        if let Some(inst) = attrs.instance(attribute::MOVEMENT_SPEED) {
+            inst.modifiers.push(Modifier {
+                id: "minecraft:perm_mul_base".to_owned(),
+                amount: 0.25,
+                operation: Operation::AddMultipliedBase,
+                permanent: true,
+            });
+            inst.modifiers.push(Modifier {
+                id: "minecraft:perm_mul_total".to_owned(),
+                amount: -0.1,
+                operation: Operation::AddMultipliedTotal,
+                permanent: true,
+            });
+        }
+        if let Some(inst) = attrs.instance(attribute::ATTACK_DAMAGE) {
+            inst.base = 3.5;
+        }
+        with_attrs.attributes = Some(attributes_tag(&attrs));
+        cases.push((
+            "player attributes with permanent modifiers".into(),
+            with_attrs,
+        ));
+    }
+
     let mut frozen = cases[0].1.clone();
     frozen.fire = 200;
     frozen.air = 137;
@@ -1364,6 +1449,64 @@ fn player_spec(data: &PlayerData) -> Value {
     }
     if !data.preserved.is_empty() {
         spec["unknown_tag"] = json!("keep");
+    }
+    if let Some(Tag::List(attrs)) = &data.attributes {
+        let rows: Vec<Value> = attrs
+            .iter()
+            .filter_map(|tag| {
+                let Tag::Compound(entries) = tag else {
+                    return None;
+                };
+                let get = |key: &str| {
+                    entries
+                        .iter()
+                        .rev()
+                        .find(|(name, _)| name == key)
+                        .map(|(_, value)| value.clone())
+                };
+                let id = match get("id") {
+                    Some(Tag::String(v)) => v,
+                    _ => return None,
+                };
+                let base = match get("base") {
+                    Some(Tag::Double(v)) => v,
+                    _ => 0.0,
+                };
+                let mut row = json!({"id": id, "base": base});
+                if let Some(Tag::List(mods)) = get("modifiers") {
+                    let mod_rows: Vec<Value> = mods
+                        .iter()
+                        .filter_map(|m| {
+                            let Tag::Compound(me) = m else {
+                                return None;
+                            };
+                            let mget = |key: &str| {
+                                me.iter()
+                                    .rev()
+                                    .find(|(name, _)| name == key)
+                                    .map(|(_, value)| value.clone())
+                            };
+                            let mid = match mget("id") {
+                                Some(Tag::String(v)) => v,
+                                _ => return None,
+                            };
+                            let amount = match mget("amount") {
+                                Some(Tag::Double(v)) => v,
+                                _ => 0.0,
+                            };
+                            let op = match mget("operation") {
+                                Some(Tag::String(v)) => v,
+                                _ => return None,
+                            };
+                            Some(json!({"id": mid, "amount": amount, "operation": op}))
+                        })
+                        .collect();
+                    row["modifiers"] = json!(mod_rows);
+                }
+                Some(row)
+            })
+            .collect();
+        spec["attributes"] = json!(rows);
     }
     if let Some(Tag::List(effects)) = &data.active_effects {
         let rows: Vec<Value> = effects

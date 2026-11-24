@@ -18,7 +18,7 @@ use mc_bamboo_protocol::{
     packet::play::{
         ChangeDifficulty, ClockState, CommonPlayerSpawnInfo, ContainerSetContent, GameEvent,
         GameMode, InitializeBorder, PlayerPosition, Respawn, SetDefaultSpawnPosition,
-        SetEntityData, SetEquipment, SetExperience, SetHeldSlot, SetTime, UpdateAttributes,
+        SetEntityData, SetEquipment, SetExperience, SetHeldSlot, SetTime,
     },
 };
 
@@ -26,7 +26,7 @@ use crate::{
     inbound::PlayerId,
     player::Player,
     player_health::{FoodData, PlayerHealth},
-    region::{CREATIVE_ATTRIBUTES, DIMENSION, Region},
+    region::{DIMENSION, Region},
     world_state::RespawnData,
 };
 
@@ -81,15 +81,38 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
+    // 官方重建 `ServerPlayer` 再 `restoreFrom(old, false)`：效果表清空，
+    // 属性表保留修改过的基础值（`assignBaseValues`），清掉永久修饰符，
+    // 再按保留下来的装备与游戏模式重建临时修饰符。
+    // Vanilla rebuilds `ServerPlayer` and calls `restoreFrom(old, false)`:
+    // effects clear, attribute base values carry over (`assignBaseValues`),
+    // permanent modifiers clear, then transient modifiers rebuild.
+    player.effects = mc_bamboo_blocks::entity::mob::effects::EffectMap::new();
+    player.environment = crate::player_environment::Environment::default();
+    let mut fresh_attributes = mc_bamboo_blocks::entity::mob::attributes::Attributes::player();
+    for old in &player.attributes.entries {
+        if let Some(entry) = fresh_attributes
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == old.id)
+            && entry.base.to_bits() != old.base.to_bits()
+        {
+            entry.base = old.base;
+            entry.instantiated = true;
+        }
+    }
+    player.attributes = fresh_attributes;
+    player.sync.sent_attributes.clear();
+    transfer_inventory_xp_and_score(player, keep);
+    crate::player_attributes::rebuild_player(player, false);
+    let max_health = player
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
     player.health = PlayerHealth {
+        health: max_health,
         food: FoodData::default(),
         ..PlayerHealth::default()
     };
-    // 官方重建 `ServerPlayer` 再 `restoreFrom`：效果表是空的，
-    // 重生序列里 `sendActivePlayerEffects` 因此不发效果包。
-    // Vanilla rebuilds `ServerPlayer` before `restoreFrom`, so effects are empty.
-    player.effects = mc_bamboo_blocks::entity::mob::effects::EffectMap::new();
-    player.environment = crate::player_environment::Environment::default();
     player.dead = false;
     player.awaiting_respawn = false;
     player.in_combat = false;
@@ -110,7 +133,6 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
     player.motion = crate::player_move::Motion::new(position);
     player.teleport = crate::movement::Teleport::default();
     player.sync.metadata_dirty = true;
-    transfer_inventory_xp_and_score(player, keep);
 }
 
 /// 官方 `PlayerList.respawn` 的等价物。把玩家放到重生点、发整套包。
@@ -363,9 +385,9 @@ fn send_pairing_packets(region: &mut Region, id: PlayerId) {
         return;
     };
     // 官方 `ServerEntity.sendPairingData` 从 `entityData.packDirty` 起，
-    // 新玩家全部元数据都算脏：Health(20)、主手、模型层。
+    // 新玩家全部元数据都算脏：Health（按当前最大生命）、主手、模型层。
     let items = [
-        mc_bamboo_protocol::packet::play::EntityData::Health(20.0),
+        mc_bamboo_protocol::packet::play::EntityData::Health(player.health.health),
         mc_bamboo_protocol::packet::play::EntityData::MainHand(player.client.main_hand),
         mc_bamboo_protocol::packet::play::EntityData::ModelCustomisation(
             player.client.model_customisation,
@@ -378,15 +400,6 @@ fn send_pairing_packets(region: &mut Region, id: PlayerId) {
             items: &items,
         },
     );
-    if player.game_mode == GameMode::Creative {
-        region.links.send(
-            id,
-            &UpdateAttributes {
-                entity_id: id.0,
-                attributes: &CREATIVE_ATTRIBUTES,
-            },
-        );
-    }
     let empty = ItemStack::empty();
     let stacks = player.equipment_stacks(&empty);
     let slots = [
@@ -425,6 +438,12 @@ fn send_pairing_packets(region: &mut Region, id: PlayerId) {
     region
         .links
         .send(id, &crate::region::abilities_for(player.game_mode));
+    // 重生给玩家自己发全量可同步属性（官方 restoreFrom 后重建属性表）。
+    // 放在所有 `player` 只读借用结束之后，好把 `&mut Region` 交出去。
+    //
+    // Full syncable attributes to the player after respawn. Placed after the
+    // last immutable `player` borrow so `&mut Region` is free.
+    crate::player_attributes::send_full_to_self(region, id);
     // 下一刻 `player_hurt::tick` 会按 lastSent* 哨兵补 set_health，
     // `experience::sync_dirty` 补 set_experience，和官方 `doTick` 一致。
 }

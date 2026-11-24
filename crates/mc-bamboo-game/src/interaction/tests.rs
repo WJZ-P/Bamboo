@@ -305,6 +305,8 @@ fn items_that_cannot_destroy_send_the_block_back() {
 
     for (item, _) in unable {
         hold(&server, &client, item as i32);
+        server.tick();
+        client.take_frames();
         destroy(&server, &client, GROUND, 1);
         server.tick();
 
@@ -1182,6 +1184,8 @@ fn items_that_are_not_blocks_place_nothing() {
 
     for item in [items::DIAMOND_SWORD, items::WATER_BUCKET, items::STICK] {
         hold(&server, &client, item);
+        server.tick();
+        client.take_frames();
         click_top(&server, &client, GROUND, 1);
         server.tick();
 
@@ -1781,6 +1785,8 @@ fn sequence_zero_and_the_largest_one_are_acked() {
 fn every_refused_prediction_is_acked_after_the_blocks_it_touched() {
     let (mut server, client) = settled();
     hold(&server, &client, items::DIAMOND_SWORD);
+    server.tick();
+    client.take_frames();
 
     // 破坏被拒绝，放置也被拒绝，够不到的再来一次，一个 ack 就要盖住这三个。
     destroy(&server, &client, GROUND, 1);
@@ -2307,6 +2313,8 @@ fn hold_stack(server: &mut Harness, client: &Client, stack: ItemStack) {
 
 fn set_adventure(server: &mut Harness, client: &Client) {
     player_mut(server, client).game_mode = GameMode::Adventure;
+    server.tick();
+    client.take_frames();
 }
 
 /// 只包含 `state` 这一种方块的谓词。
@@ -2433,6 +2441,8 @@ fn adventure_mode_cannot_break_a_block_outside_can_break() {
 
 fn set_spectator(server: &mut Harness, client: &Client) {
     player_mut(server, client).game_mode = GameMode::Spectator;
+    server.tick();
+    client.take_frames();
 }
 
 #[test]

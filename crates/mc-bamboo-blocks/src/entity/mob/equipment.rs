@@ -8,7 +8,10 @@
 //! and saddle are for equines), the drop chances and the last-sent copies
 //! `detectEquipmentUpdates` compares against.
 
-use mc_bamboo_data::registries::data_component_type as kinds;
+use mc_bamboo_data::{
+    component_enums,
+    registries::{SYNCED_REGISTRIES, attribute, data_component_type as kinds},
+};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue, defaults},
@@ -62,9 +65,244 @@ pub const fn slot_group_applies(group: i32, slot: EquipmentSlot) -> bool {
     }
 }
 
-/// `ItemStack.forEachModifier(slot, ...)` 的组件部分：`attribute_modifiers` 里组匹配这个槽的
-/// 条目，按组件顺序。挂上去的都是临时修饰符（`addTransientModifier`），不存盘。
-/// 附魔给的属性效果（`EnchantmentHelper.forEachModifier`）这一期不建模。
+/// `net.minecraft.world.item.enchantment.LevelBasedValue` 里八条
+/// `minecraft:attributes` 附魔会用到的三种形态。`calculate(int)` 返回 `float`。
+///
+/// The three `LevelBasedValue` shapes used by the attribute enchantments;
+/// `calculate(int)` returns a `float`.
+#[derive(Debug, Clone, Copy)]
+enum LevelBasedValue {
+    Linear {
+        base: f32,
+        per_level_above_first: f32,
+    },
+    LevelsSquared {
+        added: f32,
+    },
+    Fraction {
+        numerator: &'static LevelBasedValue,
+        denominator: &'static LevelBasedValue,
+    },
+}
+
+impl LevelBasedValue {
+    /// `LevelBasedValue.calculate(int)`：linear / levels_squared / fraction。
+    /// int 的减法和乘法按官方 `isub` / `Mth.square` 回绕，越界等级不 panic。
+    ///
+    /// `LevelBasedValue.calculate(int)`. The int subtraction/multiplication wrap
+    /// like vanilla `isub` / `Mth.square`, so an out-of-range level cannot panic.
+    fn calculate(self, level: i32) -> f32 {
+        match self {
+            Self::Linear {
+                base,
+                per_level_above_first,
+            } => base + per_level_above_first * (level.wrapping_sub(1) as f32),
+            Self::LevelsSquared { added } => (level.wrapping_mul(level) as f32) + added,
+            Self::Fraction {
+                numerator,
+                denominator,
+            } => {
+                let den = denominator.calculate(level);
+                if den == 0.0 {
+                    0.0
+                } else {
+                    numerator.calculate(level) / den
+                }
+            }
+        }
+    }
+}
+
+/// 一条 `EnchantmentAttributeEffect`：`minecraft:attributes` 附魔效果。
+struct EnchantmentAttributeEffect {
+    /// 附魔注册名（`minecraft:enchantment` 注册表里的名字）。
+    enchantment: &'static str,
+    /// JSON 的 `id`；`getModifier` 用 `withSuffix("/" + slot)` 拼修饰符 ID。
+    id: &'static str,
+    attribute: i32,
+    amount: LevelBasedValue,
+    operation: Operation,
+    /// 附魔定义的 `slots`（`EquipmentSlotGroup` 名字），`matchingSlot` 用。
+    groups: &'static [&'static str],
+}
+
+// 横扫之刃的分子 / 分母是两条 linear，单独作为静态节点让 `Fraction` 引用。
+// Sweeping Edge's numerator / denominator are two linear nodes.
+static SWEEPING_NUMERATOR: LevelBasedValue = LevelBasedValue::Linear {
+    base: 1.0,
+    per_level_above_first: 1.0,
+};
+static SWEEPING_DENOMINATOR: LevelBasedValue = LevelBasedValue::Linear {
+    base: 2.0,
+    per_level_above_first: 1.0,
+};
+
+/// 官方 26.3 里带 `minecraft:attributes` 的八个附魔，逐条从
+/// `data/minecraft/enchantment/*.json` 抄出的 amount / attribute / operation / slots。
+/// `amount` 的 `calculate(level)` 是 `float`，`getModifier` 再 `f2d` 成 `double`。
+///
+/// The eight 26.3 enchantments carrying `minecraft:attributes`, transcribed from
+/// the official enchantment JSON. `amount.calculate(level)` is a `float` that
+/// `getModifier` widens to `double`.
+static ENCHANTMENT_ATTRIBUTE_EFFECTS: &[EnchantmentAttributeEffect] = &[
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:aqua_affinity",
+        id: "minecraft:enchantment.aqua_affinity",
+        attribute: attribute::SUBMERGED_MINING_SPEED,
+        amount: LevelBasedValue::Linear {
+            base: 4.0,
+            per_level_above_first: 4.0,
+        },
+        operation: Operation::AddMultipliedTotal,
+        groups: &["head"],
+    },
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:blast_protection",
+        id: "minecraft:enchantment.blast_protection",
+        attribute: attribute::EXPLOSION_KNOCKBACK_RESISTANCE,
+        amount: LevelBasedValue::Linear {
+            base: 0.15,
+            per_level_above_first: 0.15,
+        },
+        operation: Operation::AddValue,
+        groups: &["armor"],
+    },
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:depth_strider",
+        id: "minecraft:enchantment.depth_strider",
+        attribute: attribute::WATER_MOVEMENT_EFFICIENCY,
+        amount: LevelBasedValue::Linear {
+            base: 0.33333334,
+            per_level_above_first: 0.33333334,
+        },
+        operation: Operation::AddValue,
+        groups: &["feet"],
+    },
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:efficiency",
+        id: "minecraft:enchantment.efficiency",
+        attribute: attribute::MINING_EFFICIENCY,
+        amount: LevelBasedValue::LevelsSquared { added: 1.0 },
+        operation: Operation::AddValue,
+        groups: &["mainhand"],
+    },
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:fire_protection",
+        id: "minecraft:enchantment.fire_protection",
+        attribute: attribute::BURNING_TIME,
+        amount: LevelBasedValue::Linear {
+            base: -0.15,
+            per_level_above_first: -0.15,
+        },
+        operation: Operation::AddMultipliedBase,
+        groups: &["armor"],
+    },
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:respiration",
+        id: "minecraft:enchantment.respiration",
+        attribute: attribute::OXYGEN_BONUS,
+        amount: LevelBasedValue::Linear {
+            base: 1.0,
+            per_level_above_first: 1.0,
+        },
+        operation: Operation::AddValue,
+        groups: &["head"],
+    },
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:sweeping_edge",
+        id: "minecraft:enchantment.sweeping_edge",
+        attribute: attribute::SWEEPING_DAMAGE_RATIO,
+        amount: LevelBasedValue::Fraction {
+            numerator: &SWEEPING_NUMERATOR,
+            denominator: &SWEEPING_DENOMINATOR,
+        },
+        operation: Operation::AddValue,
+        groups: &["mainhand"],
+    },
+    EnchantmentAttributeEffect {
+        enchantment: "minecraft:swift_sneak",
+        id: "minecraft:enchantment.swift_sneak",
+        attribute: attribute::SNEAKING_SPEED,
+        amount: LevelBasedValue::Linear {
+            base: 0.15,
+            per_level_above_first: 0.15,
+        },
+        operation: Operation::AddValue,
+        groups: &["legs"],
+    },
+];
+
+/// `Enchantment.matchingSlot(slot)`：`definition.slots()` 里任一组 `test(slot)` 为真。
+///
+/// `Enchantment.matchingSlot(slot)`: any definition slot group tests this slot.
+fn matching_slot(groups: &[&str], slot: EquipmentSlot) -> bool {
+    groups.iter().any(|group| {
+        component_enums::names::EQUIPMENT_SLOT_GROUP
+            .iter()
+            .position(|name| *name == *group)
+            .is_some_and(|group_id| slot_group_applies(group_id as i32, slot))
+    })
+}
+
+/// `EnchantmentHelper.forEachModifier(stack, slot, ...)` 的属性部分：逐条附魔和等级，
+/// `matchingSlot` 过滤，再按 `getModifier(level, slot)` 拼带槽位后缀的临时修饰符。
+///
+/// The attribute half of `EnchantmentHelper.forEachModifier`. Each enchantment
+/// level whose `matchingSlot` passes yields a transient modifier with a
+/// slot-suffixed id via `getModifier(level, slot)`.
+fn enchantment_attribute_modifiers(
+    patch: &ComponentPatch,
+    item: i32,
+    slot: EquipmentSlot,
+) -> Vec<(i32, Modifier)> {
+    let Some(ComponentValue::Enchantments(levels)) =
+        defaults::resolve(item, patch, kinds::ENCHANTMENTS)
+    else {
+        return Vec::new();
+    };
+    let Some(registry) = SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for &(enchant_id, level) in levels.iter() {
+        let Some(name) = usize::try_from(enchant_id)
+            .ok()
+            .and_then(|index| registry.entries.get(index))
+            .copied()
+        else {
+            continue;
+        };
+        for effect in ENCHANTMENT_ATTRIBUTE_EFFECTS
+            .iter()
+            .filter(|effect| effect.enchantment == name)
+        {
+            if !matching_slot(effect.groups, slot) {
+                continue;
+            }
+            out.push((
+                effect.attribute,
+                Modifier {
+                    // getModifier: id = effect.id.withSuffix("/" + slot.getSerializedName())。
+                    id: format!("{}/{}", effect.id, slot_name(slot)),
+                    amount: f64::from(effect.amount.calculate(level)),
+                    operation: effect.operation,
+                    permanent: false,
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// `ItemStack.forEachModifier(slot, ...)`：先 `attribute_modifiers` 组件里组匹配这个槽的
+/// 条目（按组件顺序），再 `EnchantmentHelper.forEachModifier` 的附魔属性效果。
+/// 两者挂的都是临时修饰符（`addTransientModifier`），不存盘。
+///
+/// `ItemStack.forEachModifier(slot, ...)`: the component's matching entries in
+/// order, then the enchantment `minecraft:attributes` effects. Both are transient.
 pub fn stack_modifiers(stack: &ItemStack, slot: EquipmentSlot) -> Vec<(i32, Modifier)> {
     let Ok(patch) = ComponentPatch::from_opaque(stack) else {
         return Vec::new();
@@ -93,6 +331,7 @@ pub fn stack_modifiers(stack: &ItemStack, slot: EquipmentSlot) -> Vec<(i32, Modi
             ));
         }
     }
+    out.extend(enchantment_attribute_modifiers(&patch, stack.item, slot));
     out
 }
 
@@ -433,5 +672,235 @@ mod tests {
             Tag::String("x".to_owned()),
         )])));
         assert!(equipment.default_drop_chances());
+    }
+
+    fn enchantment_id(name: &str) -> i32 {
+        SYNCED_REGISTRIES
+            .iter()
+            .find(|registry| registry.name == "minecraft:enchantment")
+            .and_then(|registry| registry.entries.iter().position(|entry| *entry == name))
+            .expect("enchantment is registered") as i32
+    }
+
+    /// 一个挂了单条附魔的 `DIAMOND_PICKAXE`。
+    fn enchanted(name: &str, level: i32) -> ItemStack {
+        use mc_bamboo_data::registries::data_component_type::ENCHANTMENTS;
+        use mc_bamboo_protocol::components::PatchEntry;
+
+        let mut stack = ItemStack::new(mc_bamboo_data::items::DIAMOND_PICKAXE, 1);
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(vec![(
+                enchantment_id(name),
+                level,
+            )])),
+        );
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+        stack
+    }
+
+    /// `stack_modifiers` 里只看附魔那部分（物品自己的 `attribute_modifiers` 也会在结果里）。
+    fn enchant_modifiers(stack: &ItemStack, slot: EquipmentSlot) -> Vec<(i32, Modifier)> {
+        stack_modifiers(stack, slot)
+            .into_iter()
+            .filter(|(_, modifier)| modifier.id.starts_with("minecraft:enchantment."))
+            .collect()
+    }
+
+    #[test]
+    fn level_based_value_matches_the_official_formulas() {
+        // levels_squared: Mth.square(level) + added。效率 V = 25 + 1 = 26。
+        assert_eq!(
+            LevelBasedValue::LevelsSquared { added: 1.0 }.calculate(5),
+            26.0
+        );
+        assert_eq!(
+            LevelBasedValue::LevelsSquared { added: 1.0 }.calculate(1),
+            2.0
+        );
+        // linear: base + per * (level - 1)。
+        assert_eq!(
+            LevelBasedValue::Linear {
+                base: 1.0,
+                per_level_above_first: 1.0
+            }
+            .calculate(3),
+            3.0
+        );
+        // fraction: 分母为 0 时是 0，否则 numerator / denominator。
+        assert_eq!(
+            LevelBasedValue::Fraction {
+                numerator: &SWEEPING_NUMERATOR,
+                denominator: &SWEEPING_DENOMINATOR,
+            }
+            .calculate(1),
+            0.5
+        );
+        assert_eq!(
+            LevelBasedValue::Fraction {
+                numerator: &SWEEPING_NUMERATOR,
+                denominator: &LevelBasedValue::Linear {
+                    base: 0.0,
+                    per_level_above_first: 0.0,
+                },
+            }
+            .calculate(3),
+            0.0
+        );
+    }
+
+    #[test]
+    fn efficiency_v_adds_twenty_six_mining_efficiency_in_the_main_hand() {
+        let mods = enchant_modifiers(
+            &enchanted("minecraft:efficiency", 5),
+            EquipmentSlot::MainHand,
+        );
+        assert_eq!(mods.len(), 1);
+        let (attribute, modifier) = &mods[0];
+        assert_eq!(
+            *attribute,
+            mc_bamboo_data::registries::attribute::MINING_EFFICIENCY
+        );
+        assert_eq!(modifier.id, "minecraft:enchantment.efficiency/mainhand");
+        assert_eq!(modifier.amount, 26.0);
+        assert_eq!(modifier.operation, Operation::AddValue);
+        assert!(!modifier.permanent);
+    }
+
+    #[test]
+    fn enchantment_modifiers_only_apply_in_matching_slots() {
+        // efficiency 的 slots=[mainhand]：戴头上、放副手都不给修饰符。
+        for slot in [
+            EquipmentSlot::Head,
+            EquipmentSlot::OffHand,
+            EquipmentSlot::Feet,
+        ] {
+            assert!(
+                enchant_modifiers(&enchanted("minecraft:efficiency", 5), slot).is_empty(),
+                "efficiency must not apply in {slot:?}"
+            );
+        }
+        // armor 组：胸甲有，主手没有。
+        let blast = enchanted("minecraft:blast_protection", 2);
+        assert_eq!(enchant_modifiers(&blast, EquipmentSlot::Chest).len(), 1);
+        assert!(enchant_modifiers(&blast, EquipmentSlot::MainHand).is_empty());
+    }
+
+    #[test]
+    fn every_official_attribute_enchantment_yields_its_effect() {
+        // (name, level, slot, 期望属性, 期望 amount, 期望运算, 期望 id)。
+        let cases: &[(&str, i32, EquipmentSlot, i32, f64, Operation, &str)] = &[
+            (
+                "minecraft:aqua_affinity",
+                1,
+                EquipmentSlot::Head,
+                mc_bamboo_data::registries::attribute::SUBMERGED_MINING_SPEED,
+                4.0,
+                Operation::AddMultipliedTotal,
+                "minecraft:enchantment.aqua_affinity/head",
+            ),
+            (
+                "minecraft:blast_protection",
+                1,
+                EquipmentSlot::Chest,
+                mc_bamboo_data::registries::attribute::EXPLOSION_KNOCKBACK_RESISTANCE,
+                f64::from(0.15_f32),
+                Operation::AddValue,
+                "minecraft:enchantment.blast_protection/chest",
+            ),
+            (
+                "minecraft:depth_strider",
+                1,
+                EquipmentSlot::Feet,
+                mc_bamboo_data::registries::attribute::WATER_MOVEMENT_EFFICIENCY,
+                f64::from(0.33333334_f32),
+                Operation::AddValue,
+                "minecraft:enchantment.depth_strider/feet",
+            ),
+            (
+                "minecraft:efficiency",
+                3,
+                EquipmentSlot::MainHand,
+                mc_bamboo_data::registries::attribute::MINING_EFFICIENCY,
+                10.0,
+                Operation::AddValue,
+                "minecraft:enchantment.efficiency/mainhand",
+            ),
+            (
+                "minecraft:fire_protection",
+                1,
+                EquipmentSlot::Legs,
+                mc_bamboo_data::registries::attribute::BURNING_TIME,
+                f64::from(-0.15_f32),
+                Operation::AddMultipliedBase,
+                "minecraft:enchantment.fire_protection/legs",
+            ),
+            (
+                "minecraft:respiration",
+                3,
+                EquipmentSlot::Head,
+                mc_bamboo_data::registries::attribute::OXYGEN_BONUS,
+                3.0,
+                Operation::AddValue,
+                "minecraft:enchantment.respiration/head",
+            ),
+            (
+                "minecraft:sweeping_edge",
+                3,
+                EquipmentSlot::MainHand,
+                mc_bamboo_data::registries::attribute::SWEEPING_DAMAGE_RATIO,
+                0.75,
+                Operation::AddValue,
+                "minecraft:enchantment.sweeping_edge/mainhand",
+            ),
+            (
+                "minecraft:swift_sneak",
+                3,
+                EquipmentSlot::Legs,
+                mc_bamboo_data::registries::attribute::SNEAKING_SPEED,
+                f64::from(0.15_f32 + 0.15_f32 * 2.0_f32),
+                Operation::AddValue,
+                "minecraft:enchantment.swift_sneak/legs",
+            ),
+        ];
+        for &(name, level, slot, want_attribute, want_amount, want_operation, want_id) in cases {
+            let mods = enchant_modifiers(&enchanted(name, level), slot);
+            assert_eq!(mods.len(), 1, "{name} in {slot:?}");
+            let (attribute, modifier) = &mods[0];
+            assert_eq!(*attribute, want_attribute, "{name} attribute");
+            assert_eq!(modifier.id, want_id, "{name} id");
+            assert_eq!(modifier.amount, want_amount, "{name} amount");
+            assert_eq!(modifier.operation, want_operation, "{name} operation");
+        }
+    }
+
+    #[test]
+    fn an_enchantment_with_no_attribute_effect_yields_nothing() {
+        // 锋利没有 minecraft:attributes，不能凭空造出修饰符。
+        assert!(
+            enchant_modifiers(
+                &enchanted("minecraft:sharpness", 5),
+                EquipmentSlot::MainHand
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn extreme_enchantment_levels_do_not_panic() {
+        // 客户端能传任意等级；linear 的 level-1、levels_squared 的乘法都要回绕不 panic。
+        for level in [i32::MIN, -1, 0, 1, i32::MAX] {
+            let _ = enchant_modifiers(
+                &enchanted("minecraft:efficiency", level),
+                EquipmentSlot::MainHand,
+            );
+            let _ = enchant_modifiers(
+                &enchanted("minecraft:respiration", level),
+                EquipmentSlot::Head,
+            );
+        }
     }
 }

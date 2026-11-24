@@ -14,12 +14,11 @@ use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory, entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
-use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
+use mc_bamboo_data::registries::{dimension_type, world_clock};
 use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
-    AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameEvent, GameMode,
-    InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime,
-    UpdateAttributes,
+    EntityData, GameEvent, GameMode, InitializeBorder, Login, PlayerAbilities,
+    SetDefaultSpawnPosition, SetEntityData, SetTime,
 };
 use mc_bamboo_world::{flat, light::LightChanges, poi::PoiStore, store::ChunkStore};
 
@@ -104,30 +103,6 @@ pub(crate) const ABILITIES: PlayerAbilities = PlayerAbilities {
     flying_speed: 0.05,
     walking_speed: 0.1,
 };
-
-/// 创造模式的触及距离加成完全由服务端下发，客户端代码里没有这两个数。
-///
-/// The creative reach bonus is sent by the server. The client code does not contain these numbers.
-pub(crate) const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
-    AttributeSnapshot {
-        attribute: attribute::BLOCK_INTERACTION_RANGE,
-        base: 4.5,
-        modifiers: &[AttributeModifier {
-            id: "minecraft:creative_mode_block_range",
-            amount: 0.5,
-            operation: AttributeOperation::AddValue,
-        }],
-    },
-    AttributeSnapshot {
-        attribute: attribute::ENTITY_INTERACTION_RANGE,
-        base: 3.0,
-        modifiers: &[AttributeModifier {
-            id: "minecraft:creative_mode_entity_range",
-            amount: 2.0,
-            operation: AttributeOperation::AddValue,
-        }],
-    },
-];
 
 /// 岛的时钟（模拟时间）。计划刻队列的 `now`、方块实体的休眠时钟、容器重查、讲台、
 /// 传送确认、红石缓存都以它为准（岛的实施计划 5.1）。岛建立时取当时的
@@ -890,13 +865,9 @@ impl Region {
                 items: &items,
             },
         );
-        self.links.send(
-            id,
-            &UpdateAttributes {
-                entity_id: id.0,
-                attributes: &CREATIVE_ATTRIBUTES,
-            },
-        );
+        // 进服第 6 步同时把全量可同步属性发给玩家自己。
+        // Step 6 also sends the full syncable attributes to the player.
+        crate::player_attributes::send_full_to_self(self, id);
     }
 
     /// 官方 `PlayerList.sendLevelInfo`：`initialize_border` 开头，然后 `set_time`、
@@ -1219,29 +1190,93 @@ mod tests {
         assert!(caught, "leaving mobs out of the rebase went unnoticed");
     }
 
+    /// 初始属性同步照官方 `AttributeMap.getSyncableAttributes()`：只发基础值偏离缺省
+    /// 或带修饰符的可同步属性（纯生存空包、创造含两项触及距离、改基础值或挂药水后只发
+    /// 对应可同步属性，不发非同步属性）。
     #[test]
-    fn creative_attributes_match_the_official_bytes() {
-        let mut frames = Vec::new();
-        mc_bamboo_protocol::packet::ClientboundPacket::write_body(
-            &UpdateAttributes {
-                entity_id: 1,
-                attributes: &CREATIVE_ATTRIBUTES,
-            },
-            &mut frames,
-        );
+    fn full_attribute_sync_uses_the_real_table() {
+        use mc_bamboo_blocks::entity::mob::effects::EffectInstance;
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_data::registries::{attribute, mob_effect};
+        use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+        use uuid::Uuid;
 
-        let mut expected = vec![0x01, 0x02, 0x08];
-        expected.extend_from_slice(&4.5f64.to_be_bytes());
-        expected.extend_from_slice(&[0x01, 0x23]);
-        expected.extend_from_slice(b"minecraft:creative_mode_block_range");
-        expected.extend_from_slice(&0.5f64.to_be_bytes());
-        expected.extend_from_slice(&[0x00, 0x0d]);
-        expected.extend_from_slice(&3.0f64.to_be_bytes());
-        expected.extend_from_slice(&[0x01, 0x24]);
-        expected.extend_from_slice(b"minecraft:creative_mode_entity_range");
-        expected.extend_from_slice(&2.0f64.to_be_bytes());
-        expected.push(0x00);
-        assert_eq!(expected.len(), 113);
-        assert_eq!(frames, expected);
+        fn varint(buf: &[u8], at: &mut usize) -> i32 {
+            let mut value = 0i32;
+            let mut shift = 0;
+            loop {
+                let byte = buf[*at];
+                *at += 1;
+                value |= i32::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return value;
+                }
+                shift += 7;
+            }
+        }
+
+        // 1. 纯生存缺省状态无实例化属性，不发空包（与官方重生 / 进服一致）。
+        let mut plain = crate::player::Player::new(
+            crate::inbound::PlayerId(1),
+            Uuid::nil(),
+            "T".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::default(),
+        );
+        assert!(crate::player_attributes::full_frames(&plain).is_none());
+
+        // 2. 创造模式发两项触及距离，另加改过基础值的 MAX_HEALTH 与速度药水、
+        //    以及非同步的 ATTACK_DAMAGE（不应出现）。
+        plain.game_mode = GameMode::Creative;
+        plain
+            .attributes
+            .instance(attribute::MAX_HEALTH)
+            .unwrap()
+            .base = 26.0;
+        plain
+            .attributes
+            .instance(attribute::ATTACK_DAMAGE)
+            .unwrap()
+            .base = 5.0;
+        plain
+            .effects
+            .add(EffectInstance::with_amplifier(mob_effect::SPEED, 200, 0));
+        crate::player_attributes::rebuild_player(&mut plain, false);
+
+        let frames = crate::player_attributes::full_frames(&plain).expect("non-empty frames");
+        let body = crate::world::tests::body_of(frames);
+        let mut at = 0;
+        assert_eq!(varint(&body, &mut at), 1, "entity_id");
+        let count = varint(&body, &mut at);
+        assert_eq!(
+            count, 4,
+            "block/entity reach + modified MAX_HEALTH + speed MOVEMENT_SPEED"
+        );
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            let attribute_id = varint(&body, &mut at);
+            let base = f64::from_be_bytes(body[at..at + 8].try_into().unwrap());
+            at += 8;
+            let modifiers = varint(&body, &mut at);
+            for _ in 0..modifiers {
+                let len = varint(&body, &mut at) as usize;
+                at += len + 8;
+                let _op = varint(&body, &mut at);
+            }
+            assert_eq!(base, plain.attributes.base(attribute_id), "base");
+            ids.push(attribute_id);
+        }
+        assert_eq!(at, body.len(), "no trailing bytes");
+        assert!(ids.contains(&attribute::BLOCK_INTERACTION_RANGE));
+        assert!(ids.contains(&attribute::ENTITY_INTERACTION_RANGE));
+        assert!(ids.contains(&attribute::MAX_HEALTH));
+        assert!(ids.contains(&attribute::MOVEMENT_SPEED));
+        assert!(!ids.contains(&attribute::ATTACK_DAMAGE));
+        assert!(
+            ids.iter()
+                .all(|id| mc_bamboo_data::is_client_syncable_attribute(*id)),
+            "only client-syncable attributes"
+        );
     }
 }

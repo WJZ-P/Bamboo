@@ -13,8 +13,7 @@ use mc_bamboo_blocks::entity::mob::damage::{
     self as rules, ArmorValues, DifficultyId, HurtOutcome,
 };
 use mc_bamboo_core::Vec3;
-use mc_bamboo_data::registries::attribute;
-use mc_bamboo_protocol::{components::ComponentValue, item::ItemStack};
+use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_storage::player_data::PlayerData;
 
 /// 官方 `FoodData` 的四个字段。`tick_timer` 按 `FoodData.tick` 推进并存读档。
@@ -125,7 +124,12 @@ impl PlayerHealth {
     /// 之后按 `natural_health_regeneration` 走「满饥饿快速回血 / 半饱慢回血 /
     /// 饥饿掉血」三段；没落在任何一段里 `tickTimer` 归零。
     /// `isHurt()` 是 `getHealth() > 0 && getHealth() < getMaxHealth()`。
-    pub fn tick_food(&mut self, difficulty: DifficultyId, natural_regen: bool) -> FoodTick {
+    pub fn tick_food(
+        &mut self,
+        difficulty: DifficultyId,
+        natural_regen: bool,
+        max_health: f32,
+    ) -> FoodTick {
         let food = &mut self.food;
         if food.exhaustion > 4.0 {
             food.exhaustion -= 4.0;
@@ -135,7 +139,7 @@ impl PlayerHealth {
                 food.food_level = (food.food_level - 1).max(0);
             }
         }
-        let is_hurt = self.health > 0.0 && self.health < rules::MAX_HEALTH;
+        let is_hurt = self.health > 0.0 && self.health < max_health;
         if natural_regen && food.saturation > 0.0 && is_hurt && food.food_level >= 20 {
             food.tick_timer += 1;
             if food.tick_timer >= 10 {
@@ -170,15 +174,15 @@ impl PlayerHealth {
     /// 官方 `ServerPlayer.tickRegeneration`：和平 + 自然回血时每 20 刻回 1 血
     /// 并加 1 饱和度（上限 20），每 10 刻加 1 饥饿（上限 20）。
     /// `tick` 是玩家的实体 tick 数，调用方存相对计数。
-    pub fn tick_peaceful(&mut self, tick: i32) -> PeacefulRegen {
+    pub fn tick_peaceful(&mut self, tick: i32, max_health: f32) -> PeacefulRegen {
         let mut result = PeacefulRegen {
             heal: false,
             saturation_up: false,
             food_up: false,
         };
         if tick % 20 == 0 {
-            if self.health > 0.0 && self.health < rules::MAX_HEALTH {
-                self.health = (self.health + 1.0).min(rules::MAX_HEALTH);
+            if self.health > 0.0 && self.health < max_health {
+                self.health = (self.health + 1.0).min(max_health);
                 result.heal = true;
             }
             if self.food.saturation < 20.0 {
@@ -194,8 +198,8 @@ impl PlayerHealth {
     }
 
     /// `LivingEntity.heal`：夹到最大血量。
-    pub fn heal(&mut self, amount: f32) {
-        self.health = (self.health + amount).min(rules::MAX_HEALTH);
+    pub fn heal(&mut self, amount: f32, max_health: f32) {
+        self.health = (self.health + amount).min(max_health);
     }
 
     /// 官方 `Player.getArmorCoverPercentage()`：四格盔甲里非空的比例。
@@ -216,41 +220,6 @@ impl PlayerHealth {
         rules::armor_values(equipment)
     }
 
-    /// 官方 `Player.createAttributes()` 把玩家的 `ATTACK_DAMAGE` 基值设成 1.0，
-    /// 不是属性的注册表缺省 2.0；再加主手武器的 `attribute_modifiers`。
-    /// 冷却 / 暴击 / 附魔加成在 [`crate::player_attack`] 里接着算。
-    ///
-    /// `Player.createAttributes()` sets the player's `ATTACK_DAMAGE` base to 1.0,
-    /// not the registry default 2.0; then add the main-hand weapon's
-    /// `attribute_modifiers`. Cooldown / crit / enchantments are applied in
-    /// [`crate::player_attack`].
-    pub fn attack_damage(held: &ItemStack) -> f32 {
-        let mut damage = 1.0_f32;
-        if held.is_empty() {
-            return damage;
-        }
-        let Ok(patch) = mc_bamboo_protocol::components::ComponentPatch::from_opaque(held) else {
-            return damage;
-        };
-        if let Some(ComponentValue::AttributeModifiers(entries)) =
-            mc_bamboo_protocol::components::defaults::resolve(
-                held.item,
-                &patch,
-                mc_bamboo_data::registries::data_component_type::ATTRIBUTE_MODIFIERS,
-            )
-        {
-            for entry in entries {
-                if entry.attribute == attribute::ATTACK_DAMAGE
-                    && entry.modifier.operation == 0
-                    && (entry.slot == 0 || entry.slot == 1 || entry.slot == 3)
-                {
-                    damage += entry.modifier.amount as f32;
-                }
-            }
-        }
-        damage
-    }
-
     /// 一次完整受伤。返回状态的增量，包和击退由调用方按 `HurtOutcome` 发。
     pub fn hurt(
         &mut self,
@@ -259,11 +228,12 @@ impl PlayerHealth {
         difficulty: DifficultyId,
         armor: ArmorValues,
         position: Vec3,
+        max_health: f32,
     ) -> Option<HurtOutcome> {
         if self.is_dead_or_dying() || self.invulnerable_time > 0 {
             return None;
         }
-        let outcome = rules::hurt(
+        let outcome = rules::hurt_with_max_health(
             amount,
             source.kind,
             difficulty,
@@ -276,6 +246,7 @@ impl PlayerHealth {
             self.hurt_time,
             self.hurt_duration,
             armor,
+            max_health,
         )?;
         self.health = outcome.health;
         self.absorption = outcome.absorption;
@@ -296,9 +267,13 @@ impl PlayerHealth {
         Some(outcome)
     }
 
-    /// 把官方存盘字段写进运行时。
-    pub fn restore(&mut self, data: &PlayerData) {
-        self.health = data.health.clamp(0.0, rules::MAX_HEALTH);
+    /// 把官方存盘字段写进运行时。血量按当前 `MAX_HEALTH` 夹取（官方先读 `attributes`
+    /// 再读 `Health`，所以高于 20 的最大生命不会被截断）。
+    ///
+    /// Restores the saved fields into runtime state, clamping health to the
+    /// resolved `MAX_HEALTH` (vanilla reads `attributes` before `Health`).
+    pub fn restore(&mut self, data: &PlayerData, max_health: f32) {
+        self.health = data.health.clamp(0.0, max_health.max(1.0));
         // 官方 `LivingEntity.readAdditionalSaveData` 走 `internalSetAbsorptionAmount`，
         // 不夹到属性上限；`setAbsorptionAmount` 的夹取只发生在效果变化那一路上。
         self.absorption = data.absorption.max(0.0);
@@ -413,7 +388,7 @@ mod tests {
         assert_eq!(data.absorption, 3.0);
         assert_eq!(data.food_tick_timer, 42);
         let mut restored = PlayerHealth::default();
-        restored.restore(&data);
+        restored.restore(&data, rules::MAX_HEALTH);
         assert_eq!(restored.health, 7.5);
         assert_eq!(restored.absorption, 3.0);
         assert_eq!(restored.hurt_time, 6);
