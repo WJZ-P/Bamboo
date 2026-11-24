@@ -24,6 +24,11 @@ pub const FLAG_HAS_NECTAR: u8 = 8;
 pub struct Bee {
     /// 元数据字节；只用到第 2、4、8 位。
     pub flags: u8,
+    /// 构造后 `DATA_FLAGS_ID` 是否发生过变更（即使随后改回 0，首次 `packDirty` 仍会发）。
+    ///
+    /// Whether `DATA_FLAGS_ID` changed after construction (still emitted by the first `packDirty`
+    /// even if reset back to 0, e.g. `HasNectar` loaded then cleared by `dropOffNectar`).
+    pub flags_dirty: bool,
     /// `DATA_ANGER_END_TIME`，绝对时刻；-1 表示没在生气。
     pub anger_end_time: i64,
     pub time_since_sting: i32,
@@ -46,6 +51,7 @@ impl Default for Bee {
     fn default() -> Self {
         Self {
             flags: 0,
+            flags_dirty: false,
             anger_end_time: -1,
             time_since_sting: 0,
             ticks_without_nectar: 0,
@@ -70,10 +76,14 @@ impl Bee {
     }
 
     pub fn set_flag(&mut self, flag: u8, value: bool) {
-        if value {
-            self.flags |= flag;
+        let next = if value {
+            self.flags | flag
         } else {
-            self.flags &= !flag;
+            self.flags & !flag
+        };
+        if next != self.flags {
+            self.flags = next;
+            self.flags_dirty = true;
         }
     }
 
