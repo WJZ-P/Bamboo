@@ -1182,13 +1182,16 @@ impl EntityStore {
         }
         // 直接读公开快照，不把私有状态移出来再拼回去：发布阶段可能已经把两半
         // 分别换过（并行驱动），`with_mut` 会把它们重新拆错。
-        let passengers = self
+        let (vehicle, passengers) = self
             .public_at(uid)
-            .and_then(|public| match &public.kind {
-                KindPublic::Mob(mob) => Some(mob.passengers.clone()),
-                _ => None,
+            .map(|public| {
+                let passengers = match &public.kind {
+                    KindPublic::Mob(mob) => mob.passengers.clone(),
+                    _ => Vec::new(),
+                };
+                (public.vehicle, passengers)
             })
-            .unwrap_or_default();
+            .unwrap_or((None, Vec::new()));
         self.unindex_sub(uid);
         let row = self.index.remove(&uid).expect("刚查过 uid");
         self.taken.remove(&uid);
@@ -1198,11 +1201,36 @@ impl EntityStore {
             self.grid_remove(row, &entry.public);
         }
         self.free.push(row);
+        // `Entity.setRemoved`：`reason.shouldDestroy()` 时先 `this.stopRiding()`，
+        // 再 `getPassengers().forEach(stopRiding)`。两边都当刻断，不等下一次 tick 的
+        // `tickPassenger` 补；被移除的实体已经离表，不重新落位。
+        //
+        // Vanilla `Entity.setRemoved` detaches the entity from its own vehicle and
+        // ejects its passengers immediately, without a dismount reposition.
+        if let Some(vehicle) = vehicle {
+            self.detach_passenger(vehicle, uid);
+        }
         for passenger in passengers {
             if passenger < FIRST_ENTITY_ID {
                 continue;
             }
             self.clear_passenger_vehicle(passenger, uid);
+        }
+    }
+
+    /// 从载具的乘客名单里摘掉一个 uid（公开与私有两份都要改）。
+    fn detach_passenger(&mut self, vehicle: EntityUid, passenger: EntityUid) {
+        let Some(row) = self.index.get(&vehicle).copied() else {
+            return;
+        };
+        let Some(entry) = self.slots.get_mut(row).and_then(Option::as_mut) else {
+            return;
+        };
+        if let KindPublic::Mob(mob) = &mut entry.public.kind {
+            mob.passengers.retain(|&uid| uid != passenger);
+        }
+        if let KindState::Mob(mob) = &mut entry.state.kind {
+            mob.passengers.retain(|&uid| uid != passenger);
         }
     }
 
@@ -2641,5 +2669,54 @@ mod tests {
         store.insert_chunk(moved);
         assert_eq!(store.iter().collect::<Vec<_>>(), before);
         assert_eq!(store.entity_seed_state(), state, "整盒搬运不取种子");
+    }
+}
+
+#[cfg(test)]
+mod riding_remove_tests {
+    use mc_bamboo_core::Vec3;
+
+    use super::*;
+
+    fn pair() -> (EntityStore, EntityUid, EntityUid) {
+        let mut store = EntityStore::new();
+        let vehicle = store.spawn(Entity::cow(Vec3::new(0.5, 64.0, 0.5)));
+        let passenger = store.spawn(Entity::cow(Vec3::new(0.5, 64.0, 0.5)));
+        store.with_mut_including_pending_dyn(passenger, &mut |entity| {
+            entity.vehicle = Some(vehicle);
+        });
+        store.with_mut_including_pending_dyn(vehicle, &mut |entity| {
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.passengers.push(passenger);
+            }
+        });
+        (store, vehicle, passenger)
+    }
+
+    #[test]
+    fn removing_a_passenger_clears_the_vehicle_list_at_once() {
+        let (mut store, vehicle, passenger) = pair();
+        assert_eq!(
+            store.get(vehicle).unwrap().kind.mob().unwrap().passengers,
+            [passenger]
+        );
+        store.remove(passenger);
+        // `Entity.setRemoved` 当场 `this.stopRiding()`：不能留一个悬空的乘客 uid
+        // 等下一次 `tickPassenger` 去摘。
+        let vehicle_entity = store.get(vehicle).expect("vehicle stays");
+        assert!(vehicle_entity.kind.mob().unwrap().passengers.is_empty());
+        assert!(match &store.public_at(vehicle).unwrap().kind {
+            KindPublic::Mob(mob) => mob.passengers.is_empty(),
+            _ => true,
+        });
+    }
+
+    #[test]
+    fn removing_a_vehicle_ejects_its_passenger_at_once() {
+        let (mut store, vehicle, passenger) = pair();
+        store.remove(vehicle);
+        let rider = store.get(passenger).expect("passenger stays");
+        assert_eq!(rider.vehicle, None);
+        assert_eq!(rider.boarding_cooldown, 60);
     }
 }
