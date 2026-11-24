@@ -626,7 +626,8 @@ pub(super) fn flying_move_control_tick(
         let horizontal = (dx * dx + dz * dz).sqrt();
         if dy.abs() > f64::from(1.0e-5_f32) || horizontal.abs() > f64::from(1.0e-5_f32) {
             let pitch = (-(mth::atan2(dy, horizontal) * 57.295_776_367_187_5)) as f32;
-            mob.x_rot = super::control::move_rotlerp(mob.x_rot, pitch, max_turn);
+            let rotated = super::control::move_rotlerp(mob.x_rot, pitch, max_turn);
+            mob.x_rot = super::control::clamp_x_rot(rotated, mob.x_rot);
             mob.yya = if dy > 0.0 { speed } else { -speed };
         }
     } else {
