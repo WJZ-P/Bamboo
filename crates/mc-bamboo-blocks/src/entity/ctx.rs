@@ -908,6 +908,26 @@ pub enum Command {
     PlaceSnowTrail {
         cells: Vec<BlockPos>,
     },
+    /// 冰霜行者 `replace_disk`：把算阶段选中的水面格逐格换成 `frosted_ice`（age 0）。
+    ///
+    /// Frost walker `replace_disk`: replace the selected water cells with `frosted_ice`.
+    FreezeWater {
+        cells: Vec<BlockPos>,
+    },
+    /// 灵魂疾行 `TICK` 的 `minecraft:soul` 粒子：服务端沿用既有粒子命令的做法，
+    /// 消耗实体随机数但不单独发粒子包。
+    ///
+    /// Soul speed `TICK` soul particles: as with existing particle commands, consume
+    /// the entity random draws on the server without emitting a separate packet.
+    SoulSpeedParticles {
+        position: Vec3,
+    },
+    /// 灵魂疾行 `TICK` 的 `minecraft:particle.soul_escape` 音效。
+    ///
+    /// Soul speed `TICK` `particle.soul_escape` sound.
+    SoulSpeedSound {
+        position: Vec3,
+    },
     /// 扔出的药水这一刻撞到东西：`AbstractThrownPotion.onHit`。
     ///
     /// The splash potion hit something this tick: `AbstractThrownPotion.onHit`.
@@ -1437,6 +1457,29 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             for pos in cells {
                 world.set_block_and_update(pos, snow);
             }
+        }
+        Command::FreezeWater { cells } => {
+            let ice = BlockState(mc_bamboo_data::blocks::FROSTED_ICE);
+            for pos in cells {
+                let _ = world.set_block_and_update(pos, ice);
+            }
+        }
+        Command::SoulSpeedParticles { .. } => {
+            let _ = me.random.next_double();
+            let _ = me.random.next_double();
+        }
+        Command::SoulSpeedSound { position } => {
+            // pitch 是 uniform(0.6, 1.0)，用实体随机源取样。
+            // pitch is uniform(0.6, 1.0), sampled from the entity random source.
+            let pitch = 0.6 + me.random.next_float() * 0.4;
+            world.play_sound(
+                position,
+                mc_bamboo_data::sound_event("minecraft:particle.soul_escape"),
+                mc_bamboo_data::sounds::NEUTRAL,
+                0.6,
+                pitch,
+                false,
+            );
         }
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::LightningTick(facts) => super::lightning::apply(me, world, facts),

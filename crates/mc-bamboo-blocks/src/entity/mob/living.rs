@@ -133,7 +133,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Pillager && !me.removed {
         super::crossbow::use_tick(me, mob, ctx);
     }
-    detect_equipment_updates(mob);
+    detect_equipment_updates(me, mob, ctx);
     // `Drowned.updateSwimming()` 在 `Entity.baseTick` 里，紧跟流体跟踪之后。
     // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
     if mob.mob_type == super::MobType::Drowned {
@@ -274,13 +274,24 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
-fn detect_equipment_updates(mob: &mut Mob) {
+/// 靴子槽变化时还要撤掉旧的 location 效果并对当前装备立即重跑一次。
+///
+/// `LivingEntity.detectEquipmentUpdates`: compare equipment before `aiStep`. A boot-slot
+/// change also deactivates the old location effects and re-runs on current equipment.
+fn detect_equipment_updates(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let update = mob.equipment.detect_updates(&mut mob.attributes);
+    let feet_changed = update
+        .changes
+        .iter()
+        .any(|(slot, _)| *slot == mc_bamboo_protocol::packet::play::EquipmentSlot::Feet);
     if update.hand_swap {
         mob.events.push(MobEvent::EntityEvent { event: 55 });
     }
     if !update.changes.is_empty() {
         mob.events.push(MobEvent::Equipment(update.changes));
+    }
+    if feet_changed {
+        super::enchantment_wiring::reequip(me, mob, ctx);
     }
 }
 
@@ -518,6 +529,9 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 /// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
+    // 官方 `LivingEntity.baseTick` 开头的 `EnchantmentHelper.tickEffects`（TICK 组件）。
+    // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
+    super::enchantment_wiring::tick(me, mob, ctx);
     mob_base_tick(me, mob, ctx);
     if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
@@ -670,7 +684,14 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         } else if mob.air_supply < mob.mob_type.max_air_supply() {
             mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
         }
-        mob.last_pos = Some(me.block_position());
+        // 官方：`blockPosition()` 与 `lastPos` 不等时更新并 `onChangedBlock`。
+        // Vanilla: when `blockPosition()` differs from `lastPos`, update it and
+        // call `onChangedBlock` → `runLocationChangedEffects`.
+        let pos = me.block_position();
+        if mob.last_pos != Some(pos) {
+            mob.last_pos = Some(pos);
+            super::enchantment_wiring::run_location(me, mob, ctx);
+        }
     }
     if mob.hurt_time > 0 {
         mob.hurt_time -= 1;
