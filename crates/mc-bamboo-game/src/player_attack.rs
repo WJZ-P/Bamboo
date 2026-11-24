@@ -1415,7 +1415,9 @@ mod tests {
     #[test]
     fn weapon_component_gates_the_extra_item_used_stat() {
         assert!(weapon_component(&stack(mc_bamboo_data::items::TRIDENT)));
-        assert!(weapon_component(&stack(mc_bamboo_data::items::DIAMOND_SWORD)));
+        assert!(weapon_component(&stack(
+            mc_bamboo_data::items::DIAMOND_SWORD
+        )));
         assert!(!weapon_component(&ItemStack::empty()));
         assert!(!weapon_component(&stack(mc_bamboo_data::items::STICK)));
     }

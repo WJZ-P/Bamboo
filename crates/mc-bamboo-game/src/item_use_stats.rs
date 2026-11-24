@@ -18,6 +18,7 @@ pub(crate) struct ItemUseStats {
 }
 
 impl ItemUseStats {
+    #[cfg(feature = "oracle-samples")]
     /// 当前累计值（物品 ID 升序），对拍里比较 `ITEM_USED` 用；不清脏标记。
     ///
     /// Current cumulative values (item id order) for oracle comparison; does
