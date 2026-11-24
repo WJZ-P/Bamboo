@@ -565,14 +565,14 @@ pub struct PerformancePreset {
     pub mob_wakeups_scale: u32,
 }
 
-/// 单测用：把一组预设套到设置草稿上，再走正常的写文件路径检查结果。
-/// 界面的保存路径是前端合并后调 `save`，生产代码不需要这个方法。
+/// 一键预设写进设置的一项动作，只碰这五个字段。
 ///
-/// Test-only helper that applies a preset to a draft so the tests can exercise
-/// the normal file-writing path. The UI merges the values itself and calls
-/// `save`, so production code does not need this.
-#[cfg(test)]
+/// The single write action of a one-click preset; it touches only the five
+/// knobs.
 impl PerformancePreset {
+    /// 只改这五项，其它字段原样保留。
+    ///
+    /// Change only the five knobs and leave every other field untouched.
     fn apply_to(self, settings: &mut ServerSettings) {
         settings.entity_threads = self.entity_threads;
         settings.max_entity_collisions = self.max_entity_collisions;
@@ -580,6 +580,24 @@ impl PerformancePreset {
         settings.mob_sleep_distance = self.mob_sleep_distance;
         settings.mob_wakeups_scale = self.mob_wakeups_scale;
     }
+}
+
+/// 以上次保存的设置为基准套用一键预设。
+///
+/// 界面上还没保存的修改不参与合并：结果里除了这五项，其它字段全部来自 `saved`。
+/// 前端拿到结果后照常走 `save` 写文件，再把草稿里的这五项同步成新值。
+///
+/// Apply a one-click preset on top of the last saved settings. Unsaved edits
+/// in the UI never take part: apart from the five knobs every field comes from
+/// `saved`. The frontend then writes the result through the normal `save` path
+/// and syncs those five values into its draft.
+pub fn merge_performance_preset(
+    saved: &ServerSettings,
+    preset: PerformancePreset,
+) -> ServerSettings {
+    let mut merged = saved.clone();
+    preset.apply_to(&mut merged);
+    merged
 }
 
 /// 两张预设：推荐开启的值，和恢复原版精确模式的值。
@@ -1276,8 +1294,7 @@ mod tests {
         assert_eq!(recommended.mob_sleep_distance, 64);
         assert_eq!(recommended.mob_wakeups_scale, 1);
 
-        let mut settings = ServerSettings::default();
-        recommended.apply_to(&mut settings);
+        let settings = merge_performance_preset(&ServerSettings::default(), recommended);
         assert_eq!(settings.validate(), Ok(()));
         let (bamboo, _) = write_settings(&settings);
         assert!(
@@ -1311,9 +1328,8 @@ mod tests {
     #[test]
     fn the_exact_preset_restores_the_vanilla_values() {
         let presets = performance_presets();
-        let mut settings = ServerSettings::default();
-        presets.recommended.apply_to(&mut settings);
-        presets.exact.apply_to(&mut settings);
+        let recommended = merge_performance_preset(&ServerSettings::default(), presets.recommended);
+        let settings = merge_performance_preset(&recommended, presets.exact);
         assert_eq!(settings.entity_threads, 0);
         assert_eq!(settings.max_entity_collisions, 0);
         assert_eq!(settings.mob_throttle_distance, 0);
@@ -1327,6 +1343,69 @@ mod tests {
         assert!(bamboo.contains("mob_throttle_distance = 0\n"), "{bamboo}");
         assert!(bamboo.contains("mob_sleep_distance = 0\n"), "{bamboo}");
         assert!(bamboo.contains("mob_wakeups_scale = 1\n"), "{bamboo}");
+    }
+
+    /// 一键预设以磁盘上已保存的设置为基准：界面上其它字段的未保存修改不能跟着写进文件。
+    /// The preset merges on top of the last saved settings, so unsaved edits to
+    /// any other field must never reach the files.
+    #[test]
+    fn the_one_click_preset_does_not_write_unsaved_edits() {
+        let saved = ServerSettings {
+            host: "saved.example".to_owned(),
+            motd: "savedmotd".to_owned(),
+            max_players: 20,
+            view_distance: 12,
+            ..Default::default()
+        };
+        // 界面上还没保存的修改：只有这五项以外的字段不同。
+        let draft = ServerSettings {
+            host: "draft.example".to_owned(),
+            motd: "unsavedmotd".to_owned(),
+            max_players: 99,
+            view_distance: 18,
+            ..saved.clone()
+        };
+        let preset = performance_presets().recommended;
+        let merged = merge_performance_preset(&saved, preset);
+
+        assert_eq!(merged.entity_threads, preset.entity_threads);
+        assert_eq!(merged.max_entity_collisions, preset.max_entity_collisions);
+        assert_eq!(merged.mob_throttle_distance, preset.mob_throttle_distance);
+        assert_eq!(merged.mob_sleep_distance, preset.mob_sleep_distance);
+        assert_eq!(merged.mob_wakeups_scale, preset.mob_wakeups_scale);
+        // 其它字段全部来自已保存的设置，草稿里的值一个都不在结果里。
+        assert_eq!(merged.host, saved.host);
+        assert_eq!(merged.motd, saved.motd);
+        assert_eq!(merged.max_players, saved.max_players);
+        assert_eq!(merged.view_distance, saved.view_distance);
+        assert_ne!(merged.host, draft.host);
+        assert_ne!(merged.motd, draft.motd);
+        assert_ne!(merged.max_players, draft.max_players);
+        assert_ne!(merged.view_distance, draft.view_distance);
+
+        let (bamboo, properties) = write_settings(&merged);
+        assert!(
+            properties.contains("server-ip=saved.example\n"),
+            "{properties}"
+        );
+        assert!(properties.contains("motd=savedmotd\n"), "{properties}");
+        assert!(properties.contains("max-players=20\n"), "{properties}");
+        assert!(properties.contains("view-distance=12\n"), "{properties}");
+        assert!(!properties.contains("draft.example"), "{properties}");
+        assert!(!properties.contains("unsavedmotd"), "{properties}");
+        assert!(!properties.contains("max-players=99"), "{properties}");
+        assert!(!properties.contains("view-distance=18"), "{properties}");
+        assert!(
+            bamboo.contains(&format!("entity_threads = {}\n", preset.entity_threads)),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains(&format!(
+                "max_entity_collisions = {}\n",
+                preset.max_entity_collisions
+            )),
+            "{bamboo}"
+        );
     }
 
     /// 两张预设的 JSON 用固定的 camelCase 拼写，前端才能直接套到字段上。

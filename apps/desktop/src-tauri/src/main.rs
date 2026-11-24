@@ -48,6 +48,7 @@ fn main() {
             commands::save_settings,
             commands::default_settings,
             commands::performance_presets,
+            commands::merge_performance_preset,
             commands::recent_logs,
             commands::recent_metrics,
         ])

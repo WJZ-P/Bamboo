@@ -119,11 +119,21 @@ const DifferenceList = styled.ul`
   line-height: 1.7;
 `;
 
+/** 一键预设会改的五个字段；保存成功后只同步这几项到草稿。 */
+const PRESET_KEYS = [
+  "entityThreads",
+  "maxEntityCollisions",
+  "mobThrottleDistance",
+  "mobSleepDistance",
+  "mobWakeupsScale",
+] as const satisfies readonly (keyof ServerSettings)[];
+
 /** 输入框里显示的数字。NaN 表示正在编辑或者填了非数字，显示成空。 */
 const numberText = (value: number) => (Number.isNaN(value) ? "" : String(value));
 
 export function SettingsPage() {
-  const { settings, defaults, presets, snapshot, updateSettings } = useServer();
+  const { settings, defaults, presets, snapshot, updateSettings, applyPerformancePreset } =
+    useServer();
   const [draft, setDraft] = useState<ServerSettings | null>(settings);
   /** 数字输入框正在编辑的原文，只在当前这一轮编辑里盖住草稿的数值。 */
   const [editing, setEditing] = useState<Partial<Record<keyof ServerSettings, string>>>({});
@@ -132,8 +142,9 @@ export function SettingsPage() {
   const [confirmingPreset, setConfirmingPreset] = useState(false);
 
   useEffect(() => {
-    setDraft(settings);
-    setEditing({});
+    // 设置第一次到达时填草稿；之后 settings 变化（普通保存或一键预设）不覆盖还没保存的编辑。
+    // Fill the draft when settings first arrive; later changes never overwrite unsaved edits.
+    setDraft((current) => current ?? settings);
   }, [settings]);
 
   if (!draft || !defaults) {
@@ -170,16 +181,28 @@ export function SettingsPage() {
     event.preventDefault();
     try {
       await updateSettings(draft);
+      setEditing({});
       setMessage(snapshot?.running ? "已保存，重启服务器后生效" : "已保存");
     } catch (reason) {
       setMessage(String(reason));
     }
   };
 
-  /** 把一组预设套到当前草稿上，照常走保存路径，界面上的字段跟着刷新。 */
+  /**
+   * 以上次保存的设置为基准套用预设，只把这五项同步到草稿；
+   * 界面上其它未保存的修改留在草稿里，不会写进文件。
+   */
   const applyPreset = async (preset: PerformancePreset, applied: string) => {
     try {
-      await updateSettings({ ...draft, ...preset });
+      const saved = await applyPerformancePreset(preset);
+      setDraft((current) => (current ? { ...current, ...preset } : saved));
+      setEditing((current) => {
+        const next = { ...current };
+        for (const key of PRESET_KEYS) {
+          delete next[key];
+        }
+        return next;
+      });
       setMessage(snapshot?.running ? `${applied}，重启服务器后生效` : applied);
     } catch (reason) {
       setMessage(String(reason));

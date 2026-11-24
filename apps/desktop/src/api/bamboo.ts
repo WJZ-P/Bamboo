@@ -120,6 +120,9 @@ export const saveSettings = (settings: ServerSettings) =>
 export const defaultSettings = () => invoke<ServerSettings>("default_settings");
 /** 一键性能模式的推荐值和恢复原版精确模式的值。 */
 export const performancePresets = () => invoke<PerformancePresets>("performance_presets");
+/** 以已保存的设置为基准套用预设，结果只改那五项；其它字段原样保留。 */
+export const mergePerformancePreset = (saved: ServerSettings, preset: PerformancePreset) =>
+  invoke<ServerSettings>("merge_performance_preset", { saved, preset });
 export const recentLogs = () => invoke<LogLine[]>("recent_logs");
 export const recentMetrics = () => invoke<MetricsSample[]>("recent_metrics");
 

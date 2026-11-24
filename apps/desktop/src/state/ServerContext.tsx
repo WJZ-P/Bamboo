@@ -12,10 +12,12 @@ import {
   defaultSettings,
   getSnapshot,
   loadSettings,
+  mergePerformancePreset,
   onPlayersChanged,
   onStateChanged,
   performancePresets,
   saveSettings,
+  type PerformancePreset,
   type PerformancePresets,
   type ServerSettings,
   type ServerSnapshot,
@@ -36,6 +38,8 @@ interface ServerContextValue {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   updateSettings: (settings: ServerSettings) => Promise<void>;
+  /** 以已保存的设置为基准套用一键预设并保存，返回保存后的完整设置。 */
+  applyPerformancePreset: (preset: PerformancePreset) => Promise<ServerSettings>;
   dismissError: () => void;
 }
 
@@ -112,6 +116,23 @@ export function ServerProvider({ children }: { children: ReactNode }) {
     setSettings(next);
   }, []);
 
+  /**
+   * 以上次保存的设置为基准合并预设，界面草稿里其它未保存的修改不参与。
+   * Merge a preset on top of the last saved settings; other unsaved draft
+   * edits are deliberately left out.
+   */
+  const applyPerformancePreset = useCallback(
+    async (preset: PerformancePreset) => {
+      if (!settings) {
+        throw new Error("设置还没有加载完");
+      }
+      const merged = await mergePerformancePreset(settings, preset);
+      await updateSettings(merged);
+      return merged;
+    },
+    [settings, updateSettings],
+  );
+
   const dismissError = useCallback(() => setError(null), []);
 
   const value = useMemo(
@@ -125,6 +146,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
       start,
       stop,
       updateSettings,
+      applyPerformancePreset,
       dismissError,
     }),
     [
@@ -137,6 +159,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
       start,
       stop,
       updateSettings,
+      applyPerformancePreset,
       dismissError,
     ],
   );

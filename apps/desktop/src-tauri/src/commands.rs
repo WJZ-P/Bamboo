@@ -10,7 +10,7 @@ use crate::{
     controller::{ServerController, ServerSnapshot},
     log_bridge::{LogHub, LogLine},
     metrics::{MetricsHub, MetricsSample},
-    settings::{self, PerformancePresets, ServerSettings},
+    settings::{self, PerformancePreset, PerformancePresets, ServerSettings},
 };
 
 #[tauri::command]
@@ -57,6 +57,15 @@ pub fn default_settings(app: AppHandle) -> Result<ServerSettings, String> {
 #[tauri::command]
 pub fn performance_presets() -> PerformancePresets {
     settings::performance_presets()
+}
+
+/// 以已保存的设置为基准套用预设，只改五项；界面随后照常调 `save_settings`。
+#[tauri::command]
+pub fn merge_performance_preset(
+    saved: ServerSettings,
+    preset: PerformancePreset,
+) -> ServerSettings {
+    settings::merge_performance_preset(&saved, preset)
 }
 
 #[tauri::command]
