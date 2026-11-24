@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import styled from "styled-components";
 
-import type { ServerSettings } from "../api/bamboo";
+import type { PerformancePreset, ServerSettings } from "../api/bamboo";
 import {
   CollapsibleGroup,
   GroupTitle,
@@ -81,20 +81,70 @@ const Actions = styled.div`
   gap: 12px;
 `;
 
+/** 性能分组下面的一键预设区域，比外面的卡片浅一层。 */
+const PresetPanel = styled.div`
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 2px solid ${({ theme }) => theme.color.panelShade};
+  background: rgba(0, 0, 0, 0.05);
+`;
+
+const PresetTitle = styled.h3`
+  margin: 0 0 6px;
+  font-size: ${({ theme }) => theme.font.body};
+  font-weight: 400;
+`;
+
+/** 确认框铺在整页上面，挡住下面的操作。 */
+const Overlay = styled.div`
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+`;
+
+const ConfirmBox = styled(PixelPanel)`
+  width: min(560px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+`;
+
+const DifferenceList = styled.ul`
+  margin: 0 0 12px;
+  padding-left: 22px;
+  line-height: 1.7;
+`;
+
+/** 一键预设会改的五个字段；保存成功后只同步这几项到草稿。 */
+const PRESET_KEYS = [
+  "entityThreads",
+  "maxEntityCollisions",
+  "mobThrottleDistance",
+  "mobSleepDistance",
+  "mobWakeupsScale",
+] as const satisfies readonly (keyof ServerSettings)[];
+
 /** 输入框里显示的数字。NaN 表示正在编辑或者填了非数字，显示成空。 */
 const numberText = (value: number) => (Number.isNaN(value) ? "" : String(value));
 
 export function SettingsPage() {
-  const { settings, defaults, snapshot, updateSettings } = useServer();
+  const { settings, defaults, presets, snapshot, updateSettings, applyPerformancePreset } =
+    useServer();
   const [draft, setDraft] = useState<ServerSettings | null>(settings);
   /** 数字输入框正在编辑的原文，只在当前这一轮编辑里盖住草稿的数值。 */
   const [editing, setEditing] = useState<Partial<Record<keyof ServerSettings, string>>>({});
   const [revealSecret, setRevealSecret] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [confirmingPreset, setConfirmingPreset] = useState(false);
 
   useEffect(() => {
-    setDraft(settings);
-    setEditing({});
+    // 设置第一次到达时填草稿；之后 settings 变化（普通保存或一键预设）不覆盖还没保存的编辑。
+    // Fill the draft when settings first arrive; later changes never overwrite unsaved edits.
+    setDraft((current) => current ?? settings);
   }, [settings]);
 
   if (!draft || !defaults) {
@@ -131,10 +181,47 @@ export function SettingsPage() {
     event.preventDefault();
     try {
       await updateSettings(draft);
+      setEditing({});
       setMessage(snapshot?.running ? "已保存，重启服务器后生效" : "已保存");
     } catch (reason) {
       setMessage(String(reason));
     }
+  };
+
+  /**
+   * 以上次保存的设置为基准套用预设，只把这五项同步到草稿；
+   * 界面上其它未保存的修改留在草稿里，不会写进文件。
+   */
+  const applyPreset = async (preset: PerformancePreset, applied: string) => {
+    try {
+      const saved = await applyPerformancePreset(preset);
+      setDraft((current) => (current ? { ...current, ...preset } : saved));
+      setEditing((current) => {
+        const next = { ...current };
+        for (const key of PRESET_KEYS) {
+          delete next[key];
+        }
+        return next;
+      });
+      setMessage(snapshot?.running ? `${applied}，重启服务器后生效` : applied);
+    } catch (reason) {
+      setMessage(String(reason));
+    }
+  };
+
+  const enablePerformance = async () => {
+    if (!presets) {
+      return;
+    }
+    setConfirmingPreset(false);
+    await applyPreset(presets.recommended, "已启用性能模式，推荐值已写入 bamboo.toml");
+  };
+
+  const restoreExact = () => {
+    if (!presets) {
+      return;
+    }
+    void applyPreset(presets.exact, "已恢复原版精确模式");
   };
 
   const control = (field: SettingField): ReactNode => {
@@ -331,6 +418,34 @@ export function SettingsPage() {
                       </Field>
                     ))}
                   </Grid>
+                  {group.id === "performance" && (
+                    <PresetPanel>
+                      <PresetTitle>一键性能模式</PresetTitle>
+                      <Lead>
+                        把最吃 CPU 的几项一次写好：实体并行线程数设成本机逻辑核数，
+                        挤压上限 8、生物降频 32 格、生物休眠 64 格、唤醒倍率 1。
+                        点之前会先列出和官方逐位一致模式的差别。
+                      </Lead>
+                      <Actions>
+                        <PixelButton
+                          type="button"
+                          $variant="bamboo"
+                          disabled={!presets}
+                          onClick={() => setConfirmingPreset(true)}
+                        >
+                          一键性能模式
+                        </PixelButton>
+                        <PixelButton type="button" disabled={!presets} onClick={restoreExact}>
+                          恢复原版精确模式
+                        </PixelButton>
+                        {presets && (
+                          <Hint>
+                            推荐：{presets.recommended.entityThreads} 条实体线程
+                          </Hint>
+                        )}
+                      </Actions>
+                    </PresetPanel>
+                  )}
                 </CollapsibleGroup>
               ))}
             </PixelCollapsible>
@@ -349,6 +464,42 @@ export function SettingsPage() {
           </Actions>
         </PixelPanel>
       </Form>
+
+      {confirmingPreset && presets && (
+        <Overlay>
+          <ConfirmBox
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="performance-confirm-title"
+          >
+            <PanelTitle id="performance-confirm-title">启用一键性能模式？</PanelTitle>
+            <Lead>会把推荐值写进 bamboo.toml。相对官方逐位一致的模式，会有这些差别：</Lead>
+            <DifferenceList>
+              <li>生物反应慢一点：32 格外的生物每 2–4 刻才决策一次，反应晚 0.1–0.2 秒。</li>
+              <li>远处生物休眠：64 格外的生物基本不动，每 20 刻才完整 tick 一次。</li>
+              <li>64 格外的刷怪塔效率会下降：靠生物自己走进陷阱的农场变慢。</li>
+              <li>挤成一团的生物散开慢：每只每刻只处理前 8 次推挤。</li>
+              <li>并行时实体看到的是这一刻开始时的状态，物品合并最多晚一刻。</li>
+            </DifferenceList>
+            <Lead>
+              实体并行线程数会设成这台电脑的 {presets.recommended.entityThreads} 条逻辑线程。
+              服务器正在运行时，写入的配置要到下次启动才生效。
+            </Lead>
+            <Actions>
+              <PixelButton
+                type="button"
+                $variant="bamboo"
+                onClick={() => void enablePerformance()}
+              >
+                确认启用
+              </PixelButton>
+              <PixelButton type="button" onClick={() => setConfirmingPreset(false)}>
+                取消
+              </PixelButton>
+            </Actions>
+          </ConfirmBox>
+        </Overlay>
+      )}
     </>
   );
 }
