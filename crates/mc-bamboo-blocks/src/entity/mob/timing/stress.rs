@@ -161,8 +161,15 @@ impl Terrain {
 
     /// 铺一块 `radius × radius` 的平地（`y = floor_y - 1` 草方块，`floor_y` 是站的高度）。
     fn flat(&mut self, radius: i32) {
-        for x in -radius..=radius {
-            for z in -radius..=radius {
+        self.flat_around(0, 0, radius);
+    }
+
+    /// 同 [`Self::flat`]，但以 `(cx, cz)` 为中心（结构刷怪场景的玩家在真实结构附近）。
+    ///
+    /// Like [`Self::flat`] but centred on `(cx, cz)`.
+    fn flat_around(&mut self, cx: i32, cz: i32, radius: i32) {
+        for x in cx - radius..=cx + radius {
+            for z in cz - radius..=cz + radius {
                 self.set(BlockPos::new(x, self.floor_y - 1, z), blocks::GRASS_BLOCK);
             }
         }
@@ -1029,14 +1036,22 @@ impl Scene {
         (terrain, mobs)
     }
 
-    /// 结构刷怪：玩家站在前哨站 / 女巫小屋旁（按坐标散布的自然刷怪区块里查结构），
+    /// 结构刷怪：种子 42 的噪声主世界里 `(-17,22)` 区块有一座真实的女巫小屋
+    /// （`docs/worldgen-structures-e2e.md` 的代表区块），玩家就站在它旁边，
     /// 开着自然刷怪；结构索引走游戏侧的真实路径。
+    ///
+    /// Structure spawning: seed 42 has a real swamp hut at chunk `(-17,22)`;
+    /// the player stands next to it with natural spawning on.
     fn structure_spawn() -> (Terrain, Vec<(MobType, Vec3)>) {
         let floor = 64;
+        let (px, pz) = (-17 * 16 + 8, 22 * 16 + 8);
         let mut terrain = Terrain::new(floor);
-        terrain.flat(80);
+        terrain.flat_around(px, pz, 40);
         terrain.sky_darken = 4;
-        terrain.add_player(1, Vec3::new(0.5, f64::from(floor), 0.5));
+        terrain.add_player(
+            1,
+            Vec3::new(f64::from(px) + 0.5, f64::from(floor), f64::from(pz) + 0.5),
+        );
         (terrain, Vec::new())
     }
 
@@ -1236,7 +1251,7 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
         block_events: BlockEvents::default(),
         structure: (scene == Scene::StructureSpawn).then(|| {
             let config = WorldGenConfig {
-                seed: 20_261_116,
+                seed: 42,
                 level_type: LevelType::Normal,
                 ..WorldGenConfig::default()
             };
@@ -1391,7 +1406,17 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     let move_players = |level: &mut StressLevel, i: usize| {
         let angle = (i as f64) * std::f64::consts::TAU / 120.0;
         let mut players = level.terrain.players.lock().expect("player mutex");
-        if natural || matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
+        if scene == Scene::StructureSpawn {
+            // 结构刷怪场景的玩家绕着女巫小屋走，始终在结构覆盖盒附近。
+            // The structure-spawn player walks around the swamp hut, always nearby.
+            if let Some(player) = players.first_mut() {
+                player.position = Vec3::new(
+                    f64::from(-17 * 16 + 8) + 0.5 + angle.cos() * 6.0,
+                    64.0,
+                    f64::from(22 * 16 + 8) + 0.5 + angle.sin() * 6.0,
+                );
+            }
+        } else if natural || matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
             if let Some(player) = players.first_mut() {
                 player.position = Vec3::new(angle.cos() * 10.0, 64.0, angle.sin() * 10.0);
             }
@@ -1978,6 +2003,24 @@ fn guardian_perf_scenes_tick_cleanly_and_structure_index_is_wired() {
         }
         imp::take();
         let _ = imp::take_all_counters();
+    }
+
+    // 种子 42 的噪声主世界在 (-17,22) 区块有真实女巫小屋：场景的玩家确实站在结构旁。
+    {
+        let world_config = WorldGenConfig {
+            seed: 42,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let index = std::cell::RefCell::new(StructureSpawnIndex::default());
+        // 种子 42 的女巫小屋结构件盒是 x -272..-264、y 64..70、z 352..358。
+        let hut_pos = BlockPos::new(-268, 65, 355);
+        assert_eq!(
+            override_at_indexed_for_bench(&world_config, &index, hut_pos, MobCategory::Monster)
+                .map(|table| table[0].entity_type),
+            Some(entity_type::WITCH),
+            "真实女巫小屋覆盖盒要命中"
+        );
     }
 
     // 人造女巫小屋：索引路径第一次查询就建好行，朴素路径给同一张覆盖表。
