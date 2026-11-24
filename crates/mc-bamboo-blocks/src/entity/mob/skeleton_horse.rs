@@ -189,15 +189,24 @@ fn trap_rider(world: &mut World<'_>, position: Vec3, special: f32, seed: Option<
 }
 
 /// `SkeletonTrapGoal.tick` 的落地：一道视觉闪电、原马上的骷髅和三匹新的骷髅马骑士。
-/// 生成顺序照官方 `tick`：闪电 → 第一名骑士 → （马、骑士）× 3。
-pub fn spawn_trap(world: &mut World, facts: TrapSpawn) {
+/// 生成顺序照官方 `tick`：闪电 → 第一名骑士 → （马、骑士）× 3。四名骑士都
+/// `startRiding` 各自的骷髅马；原马正在 tick、不在实体表里，直接改两边的链接。
+///
+/// Vanilla `SkeletonTrapGoal.tick`: a visual bolt, the rider on the trap horse and
+/// three new horse/rider pairs, each rider starting to ride its horse. The trap
+/// horse is mid-tick and not in the store, so its links are set directly.
+pub fn spawn_trap(world: &mut World, vehicle: &mut Entity, facts: TrapSpawn) {
     let bolt = crate::entity::lightning::entity(facts.position, true);
     world.spawn_entity(bolt);
     let special = ((facts.effective - 2.0) / 2.0).clamp(0.0, 1.0);
     // 骑在原陷阱马上的第一名骷髅。
     let first_seed = facts.rider_seeds.first().copied();
     let rider = trap_rider(world, facts.position, special, first_seed);
-    world.add_prepared_entity(rider);
+    let first = world.add_prepared_entity(rider);
+    world.with_entity_mut(first, &mut |entity| entity.vehicle = Some(vehicle.id));
+    vehicle.with_mob(|_, mob| {
+        crate::entity::riding::add_passenger(&mut mob.passengers, first, false);
+    });
     for (index, (dx, dz)) in facts.pushes.iter().enumerate() {
         let seed = facts.rider_seeds.get(index + 1).copied();
         let mut horse = Entity::by_mob_type(MobType::SkeletonHorse, facts.position);
@@ -210,9 +219,10 @@ pub fn spawn_trap(world: &mut World, facts: TrapSpawn) {
             mob.persistence_required = true;
         });
         horse.delta = Vec3::new(*dx, 0.0, *dz);
-        world.spawn_entity(horse);
+        let horse_id = world.spawn_entity(horse);
         let rider = trap_rider(world, facts.position, special, seed);
-        world.add_prepared_entity(rider);
+        let rider_id = world.add_prepared_entity(rider);
+        world.start_riding(rider_id, horse_id);
     }
 }
 
