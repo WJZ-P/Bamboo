@@ -828,6 +828,26 @@ fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
         {
             crate::entity::riding::put_borrowed_nav_state(state, navigation, mover);
         }
+        // `RangedBowAttackGoal.tick()` 的 `vehicle.lookAt`：把这一刻转向目标的请求
+        // 落到载具行。精确驱动在借导航写回处做同样的事。
+        let vehicle_look = crate::entity::riding::take_vehicle_look(&mut me);
+        if let (Some(target_eye), Some(slot)) = (vehicle_look, vehicle_slot) {
+            let rebuilt = tree.get(slot).and_then(|row| {
+                Some(
+                    EntityRow {
+                        public: row.result.public.as_ref()?.clone(),
+                        state: row.result.state.as_ref()?.clone(),
+                    }
+                    .into_entity(),
+                )
+            });
+            if let Some(mut vehicle) = rebuilt {
+                crate::entity::riding::apply_vehicle_look(&mut vehicle, target_eye);
+                let split = vehicle.split();
+                tree[slot].result.public = Some(split.public);
+                tree[slot].result.state = Some(split.state);
+            }
+        }
         if !is_root {
             // `LivingEntity.rideTick` 的复位落距，以及 `positionRider`。
             me.fall_distance = 0.0;
@@ -859,6 +879,22 @@ fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
                     plan: tree[within].plan,
                 };
                 crate::entity::mob::living::check_despawn_entity(&mut me, &mut ctx);
+            }
+        }
+        // `AbstractSkeleton.rideTick` / `Drowned.rideTick` 结尾：控制载具的骷髅/溺尸
+        // 把载具的 `yBodyRot` 抄成自己的，让蜘蛛骑士朝向一致（精确驱动同样处理）。
+        if !is_root && let Some(slot) = vehicle_slot {
+            let vehicle = tree.get(slot).and_then(|row| {
+                Some(
+                    EntityRow {
+                        public: row.result.public.as_ref()?.clone(),
+                        state: row.result.state.as_ref()?.clone(),
+                    }
+                    .into_entity(),
+                )
+            });
+            if let Some(vehicle) = vehicle {
+                crate::entity::riding::sync_rider_body_rotation(&mut me, &vehicle);
             }
         }
         let split = me.split();
