@@ -408,6 +408,9 @@ public final class MobOracle {
             if (only == null || "villager_brain".startsWith(only) || only.startsWith("villager_brain")) {
                 cases += playVillagerBrain(official, out, only);
             }
+            if (only == null || "villager_poi_acquire".startsWith(only) || only.startsWith("villager_poi")) {
+                cases += playVillagerPoi(official, out, only);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -11532,6 +11535,181 @@ public final class MobOracle {
         return cases;
     }
 
+    /**
+     * 村民第 4 期 POI 夹具验证与最小 `AcquirePoi` 场景：
+     * 1) 在真 `PoiManager` 上验证工作站、床（仅床头）、钟的登记与 `take` / `release` 票数及村庄距离；
+     * 2) 放一个工作站（堆肥桶）加一只无业成年村民，不开 NoAi 跑真大脑到 `AcquirePoi` 认领，
+     *    逐刻记录大脑、运动、随机源、职业与工作站剩余票数，并标出第 3 期排期截止刻 `phase3UntilTick`。
+     */
+    private static int playVillagerPoi(Official official, Writer out, String only) throws Exception {
+        String name = "villager_poi_acquire";
+        if (only != null && !name.startsWith(only)) {
+            return 0;
+        }
+        // 1. 验证夹具对工作站、床、钟的 POI 登记和真实 take / release 票数。
+        String poiChecksJson;
+        FakeLevel checkLevel = FakeLevel.create(official);
+        try {
+            BlockPos wsPos = new BlockPos(4, 64, 0);
+            BlockPos bedHead = new BlockPos(0, 64, 4);
+            BlockPos bedFoot = new BlockPos(0, 64, 5);
+            BlockPos bellPos = new BlockPos(-4, 64, 0);
+            checkLevel.placeWorkstation(wsPos, Blocks.COMPOSTER.defaultBlockState());
+            checkLevel.placeBed(bedHead, Direction.NORTH);
+            checkLevel.placeBell(bellPos);
+            checkLevel.enableRealPoi();
+            checkLevel.getPoiManager().tick(() -> true);
+
+            int wsInit = checkLevel.poiFreeTickets(wsPos);
+            boolean wsTake1 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(wsPos), wsPos, 1).isPresent();
+            int wsAfter1 = checkLevel.poiFreeTickets(wsPos);
+            boolean wsTake2 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(wsPos), wsPos, 1).isPresent();
+            boolean wsRel = checkLevel.getPoiManager().release(wsPos);
+            int wsAfterRel = checkLevel.poiFreeTickets(wsPos);
+
+            int bedInit = checkLevel.poiFreeTickets(bedHead);
+            int bedFootTickets = checkLevel.poiFreeTickets(bedFoot);
+            boolean bedTake1 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bedHead), bedHead, 1).isPresent();
+            int bedAfter1 = checkLevel.poiFreeTickets(bedHead);
+            boolean bedTake2 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bedHead), bedHead, 1).isPresent();
+            boolean bedRel = checkLevel.getPoiManager().release(bedHead);
+            int bedAfterRel = checkLevel.poiFreeTickets(bedHead);
+
+            int bellInit = checkLevel.poiFreeTickets(bellPos);
+            boolean bellTake1 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bellPos), bellPos, 1).isPresent();
+            int bellAfter1 = checkLevel.poiFreeTickets(bellPos);
+            boolean bellTake2 = checkLevel.getPoiManager().take(h -> true, (h, p) -> p.equals(bellPos), bellPos, 1).isPresent();
+            int bellAfter2 = checkLevel.poiFreeTickets(bellPos);
+            boolean bellRel = checkLevel.getPoiManager().release(bellPos);
+            int bellAfterRel = checkLevel.poiFreeTickets(bellPos);
+            int villageDist = checkLevel.getPoiManager().sectionsToVillage(
+                    net.minecraft.core.SectionPos.of(bellPos));
+
+            if (wsInit != 1 || !wsTake1 || wsAfter1 != 0 || wsTake2 || !wsRel || wsAfterRel != 1
+                    || bedInit != 1 || bedFootTickets != -1 || !bedTake1 || bedAfter1 != 0 || bedTake2 || !bedRel || bedAfterRel != 1
+                    || bellInit != 32 || !bellTake1 || bellAfter1 != 31 || !bellTake2 || bellAfter2 != 30 || !bellRel || bellAfterRel != 31
+                    || villageDist != 0) {
+                throw new IllegalStateException("POI fixture ticket check failed: ws=" + wsInit + "/" + wsAfter1 + "/" + wsAfterRel
+                        + " bed=" + bedInit + "/" + bedFootTickets + "/" + bedAfter1 + "/" + bedAfterRel
+                        + " bell=" + bellInit + "/" + bellAfter1 + "/" + bellAfter2 + "/" + bellAfterRel
+                        + " villageDist=" + villageDist);
+            }
+            poiChecksJson = "{\"workstation\":[" + wsInit + "," + wsAfter1 + "," + (wsTake2 ? 1 : 0) + "," + wsAfterRel + "]"
+                    + ",\"bed\":[" + bedInit + "," + bedFootTickets + "," + bedAfter1 + "," + (bedTake2 ? 1 : 0) + "," + bedAfterRel + "]"
+                    + ",\"bell\":[" + bellInit + "," + bellAfter1 + "," + bellAfter2 + "," + bellAfterRel + "]"
+                    + ",\"bellVillageDist\":" + villageDist + "}";
+        } finally {
+            checkLevel.closeRealPoi();
+        }
+
+        // 2. 最小真大脑场景：平地 + 1 个堆肥桶 + 1 只无业成年村民，跑真大脑到 AcquirePoi。
+        FakeLevel world = FakeLevel.create(official);
+        try {
+            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+            levels.put(net.minecraft.world.level.Level.OVERWORLD, world);
+            put(MinecraftServer.class, official.server, "levels", levels);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            BlockPos wsPos = new BlockPos(4, 64, 0);
+            world.placeWorkstation(wsPos, Blocks.COMPOSTER.defaultBlockState());
+            world.enableRealPoi();
+            world.getPoiManager().tick(() -> true);
+
+            long clockStart = 2000L;
+            long mobSeed = 71L;
+            long sensorDelay = 1L;
+            int totalTicks = 60;
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = clockStart;
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                    world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            mob.setYHeadRot(0.0F);
+            mob.setYBodyRot(0.0F);
+            put(net.minecraft.world.entity.ai.Brain.class, mob.getBrain(), "lastScheduleUpdate", -9999L);
+            mob.getBrain().updateActivityFromSchedule(world.environmentAttributes(), world.getGameTime(), mob.position());
+            setRandom(mob, mobSeed);
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+            BrainOracle.fixSensorDelays(mob, sensorDelay);
+            world.tracked.add(mob);
+
+            String table = brainTable(mob);
+            int firstClaimTick = -1;
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= totalTicks; tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    world.clock = clockStart + tick;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+                    mob.commonTick();
+                    mob.tick();
+                    world.getPoiManager().tick(() -> true);
+                }
+                int freeTickets = world.poiFreeTickets(wsPos);
+                if (firstClaimTick < 0 && (freeTickets == 0
+                        || mob.getBrain().hasMemoryValue(
+                                net.minecraft.world.entity.ai.memory.MemoryModuleType.POTENTIAL_JOB_SITE))) {
+                    firstClaimTick = tick;
+                }
+                String prof = mob.getVillagerData().profession().unwrapKey().orElseThrow()
+                        .identifier().toString();
+                if (tick > 0) frames.append(',');
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                        .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append(",\"poiFreeTickets\":").append(freeTickets)
+                        .append(",\"profession\":").append(jsonString(prof))
+                        .append('}');
+            }
+            frames.append(']');
+            if (firstClaimTick <= 0 || world.poiFreeTickets(wsPos) != 0) {
+                throw new IllegalStateException("villager_poi_acquire did not claim workstation: firstClaimTick="
+                        + firstClaimTick + " freeTickets=" + world.poiFreeTickets(wsPos));
+            }
+            out.write("{\"type\":\"villagerPoi\",\"name\":" + jsonString(name)
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"clockStart\":" + clockStart
+                    + ",\"mobSeed\":" + mobSeed
+                    + ",\"sensorDelay\":" + sensorDelay
+                    + ",\"workstation\":[" + wsPos.getX() + "," + wsPos.getY() + "," + wsPos.getZ() + "]"
+                    + ",\"firstClaimTick\":" + firstClaimTick
+                    + ",\"phase3UntilTick\":" + (firstClaimTick - 1)
+                    + ",\"poiChecks\":" + poiChecksJson
+                    + ",\"brainTable\":" + table
+                    + ",\"frames\":" + frames + "}\n");
+            out.flush();
+            return 1;
+        } finally {
+            world.closeRealPoi();
+        }
+    }
+
     /** `Silverfish.friendsGoal` 的私有字段。 */
     private static Object friendsOf(Mob mob) throws Exception {
         Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
@@ -17327,6 +17505,8 @@ public final class MobOracle {
             level.injectedSeaLevel = -63;
             level.emptyPoi = allocate(EmptyPoi.class);
             level.blockEntities = new Long2ObjectOpenHashMap<>();
+            put(ServerLevel.class, level, "debugSynchronizers",
+                    new net.minecraft.util.debug.LevelDebugSynchronizers(level));
             return level;
         }
 
@@ -17369,6 +17549,44 @@ public final class MobOracle {
             if (newPoi.isPresent()) {
                 realPoi.add(pos, newPoi.get());
             }
+        }
+
+        /** 村民第 4 期夹具接口：放置工作站方块并在真 POI 已开启时同步登记。 */
+        void placeWorkstation(BlockPos pos, BlockState state) {
+            BlockState old = blocks.getOrDefault(pos.asLong(), Blocks.AIR.defaultBlockState());
+            blocks.put(pos.asLong(), state);
+            updateRealPoi(pos, old, state);
+        }
+
+        /** 村民第 4 期夹具接口：按朝向放置床头与床尾（仅 `PART=HEAD` 登记 `home` POI，1 票）。 */
+        void placeBed(BlockPos headPos, Direction facing) {
+            BlockPos footPos = headPos.relative(facing.getOpposite());
+            BlockState head = Blocks.BED.red().defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.BedBlock.FACING, facing)
+                    .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                            net.minecraft.world.level.block.state.properties.BedPart.HEAD);
+            BlockState foot = Blocks.BED.red().defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.BedBlock.FACING, facing)
+                    .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                            net.minecraft.world.level.block.state.properties.BedPart.FOOT);
+            placeWorkstation(headPos, head);
+            placeWorkstation(footPos, foot);
+        }
+
+        /** 村民第 4 期夹具接口：放置钟（登记 `meeting` POI，32 票、村庄中心）。 */
+        void placeBell(BlockPos pos) {
+            placeWorkstation(pos, Blocks.BELL.defaultBlockState());
+        }
+
+        /** 读取真 POI 管理器中该格的剩余票数；不存在该格记录时返回 -1。 */
+        int poiFreeTickets(BlockPos pos) {
+            if (realPoi == null) return -1;
+            return realPoi.getInSquare(h -> true, pos, 1,
+                    net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy.ANY)
+                    .filter(r -> r.getPos().equals(pos))
+                    .mapToInt(net.minecraft.world.entity.ai.village.poi.PoiRecord::getFreeTickets)
+                    .findFirst()
+                    .orElse(-1);
         }
 
         /** 把方块实体登记进假世界表，供 `getBlockEntity(pos)` / `Bee.doesHiveHaveSpace` 读取。 */
