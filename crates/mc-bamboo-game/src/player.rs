@@ -2,7 +2,11 @@
 //!
 //! 每个领域的状态放在各自模块的类型里，这里只把它们组合起来。
 
-use mc_bamboo_blocks::entity::{JavaRandom, ctx::PlayerView, mob::effects::EffectMap};
+use mc_bamboo_blocks::entity::{
+    JavaRandom,
+    ctx::PlayerView,
+    mob::{attributes::Attributes, effects::EffectMap, enchantment_effects::ActiveLocationEffects},
+};
 use mc_bamboo_core::{Aabb, BlockPos, ChunkPos, Hand, Vec3};
 use mc_bamboo_protocol::{
     item::ItemStack,
@@ -154,6 +158,31 @@ pub(crate) struct Player {
     /// `LivingEntity.activeEffects`: the same shared map as mobs, with
     /// relative countdowns only.
     pub(crate) effects: EffectMap,
+    /// `LivingEntity.attributes`：玩家属性表，基础值来自 `Player.createAttributes`。
+    /// 每刻由 [`crate::player_attributes::rebuild`] 从装备 / 效果 / 游戏模式重算修饰符。
+    ///
+    /// The player attribute map. Every tick
+    /// [`crate::player_attributes::rebuild`] recomputes its modifiers from
+    /// equipment, effects and game mode.
+    pub(crate) attributes: Attributes,
+    /// `LivingEntity.activeLocationDependentEnchantments`：`location_changed` 效果的
+    /// 激活状态，以及灵魂疾行临时修饰符的当前等级（0 表示没挂）。
+    ///
+    /// `LivingEntity.activeLocationDependentEnchantments`: active state of each
+    /// `location_changed` effect, plus the level of the soul-speed transient
+    /// modifiers (0 means none).
+    pub(crate) location_effects: ActiveLocationEffects,
+    pub(crate) soul_speed_level: i32,
+    /// `LivingEntity.lastPos`：整数方块坐标跨格才重跑 `runLocationChangedEffects`。
+    ///
+    /// `LivingEntity.lastPos`: `runLocationChangedEffects` re-runs only when
+    /// the integer block position changes.
+    pub(crate) last_location_pos: Option<BlockPos>,
+    /// 上一刻靴子槽的物品；变化时先停掉旧的 location 效果再立即重跑。
+    ///
+    /// Last tick's boots stack; on change the old location effects stop and
+    /// the current ones run immediately.
+    pub(crate) last_location_boots: ItemStack,
     /// `Entity` 的环境状态：着火、氧气、细雪冻结。全是相对倒计时。
     ///
     /// `Entity` environment state: fire, air, powder-snow freeze. All relative counters.
@@ -275,7 +304,7 @@ impl Player {
         // a load with `XpSeed == 0` draws once from `this.random`
         // (see [`restore_experience_seed`]).
         let enchantment_seed = 0;
-        Self {
+        let mut player = Self {
             id,
             uuid,
             name,
@@ -314,6 +343,11 @@ impl Player {
             recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
             health: PlayerHealth::default(),
             effects: EffectMap::new(),
+            attributes: Attributes::player(),
+            location_effects: ActiveLocationEffects::default(),
+            soul_speed_level: 0,
+            last_location_pos: None,
+            last_location_boots: ItemStack::empty(),
             environment: crate::player_environment::Environment::default(),
             use_item: None,
             weapon_use: None,
@@ -339,7 +373,9 @@ impl Player {
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
             advancements: crate::advancements::PlayerAdvancements::default(),
-        }
+        };
+        crate::player_attributes::rebuild_player(&mut player, false);
+        player
     }
 
     /// 实体位置，也就是脚底。
@@ -493,6 +529,11 @@ impl Player {
             alive: !self.health.is_dead_or_dying(),
             spectator: self.game_mode == GameMode::Spectator,
             creative: self.game_mode == GameMode::Creative,
+            game_mode: self.game_mode as i32,
+            mining_fatigue: self
+                .effects
+                .get(mc_bamboo_data::registries::mob_effect::MINING_FATIGUE)
+                .map(|instance| (instance.amplifier, instance.duration)),
             sneaking: self.sync.is_crouching(),
             sprinting: self.sync.is_sprinting(),
             swimming: self.motion.swimming,

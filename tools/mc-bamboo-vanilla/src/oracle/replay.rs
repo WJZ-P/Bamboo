@@ -1248,7 +1248,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::KilledByArrow { .. }
             | Effect::CrafterCrafted { .. }
             // 末影珍珠的传送意图不属于方块题，游戏层单独处理。
-            | Effect::EnderPearlTeleport { .. } => None,
+            | Effect::EnderPearlTeleport { .. }
+            | Effect::GuardianElderEffect { .. } => None,
         })
         .collect()
 }
@@ -1371,7 +1372,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::SummonedEntity { .. }
             | Effect::KilledByArrow { .. }
             | Effect::CrafterCrafted { .. }
-            | Effect::EnderPearlTeleport { .. } => {}
+            | Effect::EnderPearlTeleport { .. }
+            | Effect::GuardianElderEffect { .. } => {}
         }
     }
     (events, sounds)

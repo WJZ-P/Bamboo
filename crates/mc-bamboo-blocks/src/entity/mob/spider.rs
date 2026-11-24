@@ -425,6 +425,8 @@ mod tests {
                 health: 20.0,
                 alive: true,
                 spectator: false,
+                game_mode: 0,
+                mining_fatigue: None,
                 creative: false,
                 sneaking: false,
                 sprinting: false,

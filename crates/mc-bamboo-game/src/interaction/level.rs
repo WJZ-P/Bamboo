@@ -22,7 +22,7 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::GameMode,
 };
-use mc_bamboo_world::{MIN_Y, flat, palette::PaletteView, poi::PoiStore, store::ChunkStore};
+use mc_bamboo_world::{MIN_Y, flat, poi::PoiStore, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
 use crate::{
@@ -196,127 +196,18 @@ impl Level for RegionLevel<'_> {
         self.chunks.is_loaded(chunk)
     }
 
-    /// 雷击找避雷针：先看区块段调色板，段里没有避雷针状态就整段跳过。
-    /// 顺序照官方 POI 流（区块 x、z、段 y、段内坐标），以后换成正式 POI 查询。
-    fn lightning_rod_near(&self, center: BlockPos, radius: i32) -> Option<BlockPos> {
-        use mc_bamboo_world::SECTION_SIZE;
-        if radius < 0 {
-            return None;
-        }
-        let chunks = radius.div_euclid(SECTION_SIZE) + 1;
-        let centre = ChunkPos::new(center.x >> 4, center.z >> 4);
-        let radius_sq = i64::from(radius) * i64::from(radius);
-        let mut best: Option<(i64, BlockPos)> = None;
-        for chunk_x in (centre.x - chunks)..=(centre.x + chunks) {
-            for chunk_z in (centre.z - chunks)..=(centre.z + chunks) {
-                let chunk_pos = ChunkPos::new(chunk_x, chunk_z);
-                if !self.chunks.is_loaded(chunk_pos) {
-                    continue;
-                }
-                let chunk = self
-                    .chunks
-                    .edited(chunk_pos)
-                    .unwrap_or_else(|| self.chunks.template());
-                let base_x = chunk_x * SECTION_SIZE;
-                let base_z = chunk_z * SECTION_SIZE;
-                for (section_index, section) in chunk.sections().iter().enumerate() {
-                    let has_rod = match section.blocks().palette() {
-                        PaletteView::Global => true,
-                        PaletteView::Single(state) => {
-                            mc_bamboo_blocks::lightning_rod::is_lightning_rod(BlockState(state))
-                        }
-                        PaletteView::Indirect(table) => table.iter().any(|&state| {
-                            mc_bamboo_blocks::lightning_rod::is_lightning_rod(BlockState(state))
-                        }),
-                    };
-                    if !has_rod {
-                        continue;
-                    }
-                    let base_y = MIN_Y + section_index as i32 * SECTION_SIZE;
-                    for y in 0..SECTION_SIZE {
-                        for z in 0..SECTION_SIZE {
-                            for x in 0..SECTION_SIZE {
-                                let pos = BlockPos::new(base_x + x, base_y + y, base_z + z);
-                                let dx = i64::from(pos.x - center.x);
-                                let dz = i64::from(pos.z - center.z);
-                                if dx.abs() > i64::from(radius) || dz.abs() > i64::from(radius) {
-                                    continue;
-                                }
-                                let dy = i64::from(pos.y - center.y);
-                                let distance = dx * dx + dy * dy + dz * dz;
-                                if distance > radius_sq
-                                    || best.is_some_and(|(old, _)| distance >= old)
-                                {
-                                    continue;
-                                }
-                                let state = self.block_state(pos);
-                                if !mc_bamboo_blocks::lightning_rod::is_lightning_rod(state) {
-                                    continue;
-                                }
-                                if pos.y != self.world_surface_y(pos) - 1 {
-                                    continue;
-                                }
-                                best = Some((distance, pos.above()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        best.map(|(_, pos)| pos)
-    }
-
-    /// 已加载区块里半径内的蜂巢 / 蜂箱：先用段调色板把没有 `beehive` /
-    /// `bee_nest` 状态的整段跳过，再逐格读状态。以后换成 POI 查询。
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`：`beehive` /
+    /// `bee_nest` 两类 POI 的全部位置，保持官方遍历序。精确驱动读的是本岛
+    /// `PoiStore` 的当前状态（放 / 挖蜂巢时同刻登记）。
+    ///
+    /// Vanilla `PoiManager.getInRange(#bee_home, center, radius, ANY)`: all
+    /// `beehive` / `bee_nest` POIs in official traversal order, read from the
+    /// island's live `PoiStore`.
     fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
-        use mc_bamboo_data::{block_id_of_state, blocks, tags::block_tags};
-        let min_y = mc_bamboo_world::MIN_Y;
-        let max_y = min_y + mc_bamboo_world::WORLD_HEIGHT - 1;
-        let lo = BlockPos::new(center.x - radius, center.y - radius, center.z - radius);
-        let hi = BlockPos::new(center.x + radius, center.y + radius, center.z + radius);
-        let mut out = Vec::new();
-        for cx in (lo.x >> 4)..=(hi.x >> 4) {
-            for cz in (lo.z >> 4)..=(hi.z >> 4) {
-                let chunk = ChunkPos::new(cx, cz);
-                if !self.chunks.is_loaded(chunk) {
-                    continue;
-                }
-                let column = self.chunks.chunk(chunk);
-                let sy0 = lo.y.max(min_y) >> 4;
-                let sy1 = hi.y.min(max_y) >> 4;
-                for sy in sy0..=sy1 {
-                    let Some(section) = column.sections().get((sy - (min_y >> 4)) as usize) else {
-                        continue;
-                    };
-                    let hive_in_palette = |state: u32| {
-                        block_id_of_state(state).is_some_and(|id| {
-                            id == blocks::BEEHIVE as usize || id == blocks::BEE_NEST as usize
-                        })
-                    };
-                    if !section.maybe_has(hive_in_palette) {
-                        continue;
-                    }
-                    let y0 = (sy << 4).max(lo.y).max(min_y);
-                    let y1 = (sy << 4) + 15;
-                    let y1 = y1.min(hi.y).min(max_y);
-                    let x0 = (cx << 4).max(lo.x);
-                    let x1 = ((cx << 4) + 15).min(hi.x);
-                    let z0 = (cz << 4).max(lo.z);
-                    let z1 = ((cz << 4) + 15).min(hi.z);
-                    for x in x0..=x1 {
-                        for y in y0..=y1 {
-                            for z in z0..=z1 {
-                                let pos = BlockPos::new(x, y, z);
-                                if self.block_state(pos).is_tagged(block_tags::BEEHIVES) {
-                                    out.push(pos);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out
+        crate::poi_query::bee_homes_in_range(&*self.poi, center, radius)
+            .into_iter()
+            .map(|(_, pos)| pos)
+            .collect()
     }
 
     /// 本岛的玩家。官方 `ServerLevel.players()` 不过滤旁观者和死亡状态，

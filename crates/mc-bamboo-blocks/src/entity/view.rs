@@ -169,7 +169,8 @@ pub trait BlockSource: Sync {
         true
     }
 
-    /// 已加载区块的蜂巢位置，供 `BeeLocateHiveGoal` 用；默认没有（以后换成 POI 查询）。
+    /// 官方 `PoiManager.getInRange(#bee_home, ...)` 的全部位置，供
+    /// `BeeLocateHiveGoal` 用；有 POI 表的视图覆盖它，没有 POI 数据的默认返回空。
     /// 并行视图没有方块实体表，`beehive_full` 按未满处理。
     fn beehives_near(&self, _center: BlockPos, _radius: i32) -> Vec<BlockPos> {
         Vec::new()

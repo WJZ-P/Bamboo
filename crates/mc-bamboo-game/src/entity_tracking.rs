@@ -1010,8 +1010,14 @@ impl KindData {
                 if arrow.no_gravity {
                     data.push(EntityData::NoGravity(true));
                 }
-                if arrow.critical {
-                    data.push(EntityData::ArrowFlags(1));
+                // `AbstractArrow.ID_FLAGS`：crit 是 bit 0，noPhysics 是 bit 1
+                // （`setNoPhysics` 用 setFlag(2, ...)）。忠诚返回时两者都要同步。
+                // `AbstractArrow.ID_FLAGS`: crit is bit 0, noPhysics is bit 1
+                // (`setNoPhysics` uses setFlag(2, ...)); both must be synced
+                // while a loyal trident returns.
+                let flags = u8::from(arrow.critical) | (u8::from(arrow.no_physics) << 1);
+                if flags != 0 {
+                    data.push(EntityData::ArrowFlags(flags));
                 }
                 if arrow.pierce != 0 {
                     data.push(EntityData::ArrowPierce(arrow.pierce));
@@ -1130,6 +1136,14 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             facts::GOAT_SCREAMING => return EntityData::GoatScreaming(false),
             facts::GOAT_LEFT_HORN => return EntityData::GoatLeftHorn(true),
             facts::GOAT_RIGHT_HORN => return EntityData::GoatRightHorn(true),
+            _ => {}
+        }
+    }
+    if mc_bamboo_blocks::entity::mob::guardian::is_guardian(kind) {
+        use mc_bamboo_data::entity_types as facts;
+        match index {
+            facts::GUARDIAN_MOVING => return EntityData::GuardianMoving(false),
+            facts::GUARDIAN_ATTACK_TARGET => return EntityData::GuardianAttackTarget(0),
             _ => {}
         }
     }
@@ -1607,6 +1621,16 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     // `LivingEntity` 的 `DATA_LIVING_ENTITY_FLAGS` 恒为 0，`DATA_HEALTH_ID` 默认 1。
     // The living flags are always 0 and health defaults to 1.
     out.push(EntityData::Health(mob.health));
+    // `Guardian.DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET`：只在偏离默认时发。
+    // `Guardian.DATA_ID_MOVING` / `DATA_ID_ATTACK_TARGET`: sent only when non-default.
+    if mc_bamboo_blocks::entity::mob::guardian::is_guardian(mob.mob_type) {
+        if mob.guardian_moving {
+            out.push(EntityData::GuardianMoving(true));
+        }
+        if mob.guardian_attack_target != 0 {
+            out.push(EntityData::GuardianAttackTarget(mob.guardian_attack_target));
+        }
+    }
     effect_data(mob, &mut out);
     if mob.using_item_flags != 0 {
         out.push(EntityData::LivingFlags(mob.using_item_flags));

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
 use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_world::poi::{Occupancy, PoiStore};
 
 use crate::block_entity::{BlockEntities, BlockEvents};
 
@@ -68,6 +69,9 @@ pub(crate) struct TestLevel {
     pub(crate) clock_ticks: i64,
     /// `Level.block_weather()` 的天气快照，默认晴天；引雷测试要设成雷暴。
     pub(crate) weather: crate::weather::BlockWeather,
+    /// POI 只读表。假世界放 POI 方块时同刻登记，让 `findLightningRod` 等
+    /// POI 查询在单测里能跑（只在测试构建里用 `mc-bamboo-world`）。
+    pub(crate) poi: PoiStore,
 }
 
 impl TestLevel {
@@ -96,12 +100,15 @@ impl TestLevel {
             sky_darken: 0,
             clock_ticks: 0,
             weather: crate::weather::BlockWeather::CLEAR,
+            poi: PoiStore::new(),
         }
     }
 
     /// 直接写一格，不做任何连锁。
     pub(crate) fn set(&mut self, pos: BlockPos, state: BlockState) {
+        let old = self.block_state(pos);
         self.blocks.insert(pos, state);
+        self.poi.on_block_state_change(pos, old.0, state.0);
     }
 
     pub(crate) fn get(&self, pos: BlockPos) -> BlockState {
@@ -263,14 +270,39 @@ impl Level for TestLevel {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return false;
         }
-        if !self.block_state(pos).is_same_block(state) {
+        let old = self.block_state(pos);
+        if !old.is_same_block(state) {
             self.signs.remove(&pos);
             self.note_block_sounds.remove(&pos);
         }
         self.blocks.insert(pos, state);
+        self.poi.on_block_state_change(pos, old.0, state.0);
         self.writes.push((pos, state));
         self.drop_order.push(("write", self.writes.len()));
         true
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        let occupancy = match occupancy {
+            0 => Occupancy::HasSpace,
+            1 => Occupancy::IsOccupied,
+            2 => Occupancy::Any,
+            _ => return None,
+        };
+        self.poi.find_closest(
+            |found| found == kind,
+            position_filter,
+            center,
+            radius,
+            occupancy,
+        )
     }
 
     fn is_unobstructed(&self, _boxes: &[Aabb]) -> bool {

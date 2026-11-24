@@ -494,9 +494,13 @@ pub(crate) fn is_damageable_stack(stack: &ItemStack) -> bool {
     is_damageable(stack.item, &patch)
 }
 
-/// 生物身上的 `hurtAndBreak(amount, entity, slot)`：没有玩家，耐久附魔用 `level.random`。
-/// 坏了就数量减一并返回真，实体事件由调用方发。
-pub(crate) fn hurt_equipment(stack: &mut ItemStack, amount: i32, random: &LegacyRandom) -> bool {
+/// `ItemStack.hurtAndBreak(amount, entity, slot)`：耐久附魔按 `random` 取数，
+/// 坏了就把数量减一并返回真，装备破损事件由调用方发。玩家和生物共用这一条路径。
+///
+/// `ItemStack.hurtAndBreak(amount, entity, slot)`: durability enchantments draw
+/// from `random`; on break the count drops by one and the caller broadcasts the
+/// equipment-break event. Shared by players and mobs.
+pub fn hurt_equipment(stack: &mut ItemStack, amount: i32, random: &LegacyRandom) -> bool {
     let Ok(patch) = ComponentPatch::from_opaque(stack) else {
         return false;
     };

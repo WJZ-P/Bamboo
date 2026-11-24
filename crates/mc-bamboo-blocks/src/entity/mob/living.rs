@@ -133,7 +133,7 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if mob.mob_type == super::MobType::Pillager && !me.removed {
         super::crossbow::use_tick(me, mob, ctx);
     }
-    detect_equipment_updates(mob);
+    detect_equipment_updates(me, mob, ctx);
     // `Drowned.updateSwimming()` 在 `Entity.baseTick` 里，紧跟流体跟踪之后。
     // `Drowned.updateSwimming()` runs in `Entity.baseTick`, right after the fluid update.
     if mob.mob_type == super::MobType::Drowned {
@@ -274,13 +274,24 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
 }
 
 /// `LivingEntity.detectEquipmentUpdates`：在 `aiStep` 之前比较装备，变了的槽发给跟踪的玩家。
-fn detect_equipment_updates(mob: &mut Mob) {
+/// 靴子槽变化时还要撤掉旧的 location 效果并对当前装备立即重跑一次。
+///
+/// `LivingEntity.detectEquipmentUpdates`: compare equipment before `aiStep`. A boot-slot
+/// change also deactivates the old location effects and re-runs on current equipment.
+fn detect_equipment_updates(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let update = mob.equipment.detect_updates(&mut mob.attributes);
+    let feet_changed = update
+        .changes
+        .iter()
+        .any(|(slot, _)| *slot == mc_bamboo_protocol::packet::play::EquipmentSlot::Feet);
     if update.hand_swap {
         mob.events.push(MobEvent::EntityEvent { event: 55 });
     }
     if !update.changes.is_empty() {
         mob.events.push(MobEvent::Equipment(update.changes));
+    }
+    if feet_changed {
+        super::enchantment_wiring::reequip(me, mob, ctx);
     }
 }
 
@@ -518,6 +529,9 @@ pub(crate) fn max_up_step(mob: &Mob) -> f32 {
 /// `super.baseTick()`; every other mob only runs the latter.
 fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let pre_tick_air = mob.air_supply;
+    // 官方 `LivingEntity.baseTick` 开头的 `EnchantmentHelper.tickEffects`（TICK 组件）。
+    // `EnchantmentHelper.tickEffects` at the head of vanilla `LivingEntity.baseTick`.
+    super::enchantment_wiring::tick(me, mob, ctx);
     mob_base_tick(me, mob, ctx);
     if super::squid::is_squid(mob.mob_type) || super::fish::is_fish(mob.mob_type) {
         // `AgeableWaterCreature` / `WaterAnimal.handleAirSupply`（鱿鱼和鱼）。
@@ -670,7 +684,14 @@ fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         } else if mob.air_supply < mob.mob_type.max_air_supply() {
             mob.air_supply = mob.mob_type.increase_air_supply(mob.air_supply);
         }
-        mob.last_pos = Some(me.block_position());
+        // 官方：`blockPosition()` 与 `lastPos` 不等时更新并 `onChangedBlock`。
+        // Vanilla: when `blockPosition()` differs from `lastPos`, update it and
+        // call `onChangedBlock` → `runLocationChangedEffects`.
+        let pos = me.block_position();
+        if mob.last_pos != Some(pos) {
+            mob.last_pos = Some(pos);
+            super::enchantment_wiring::run_location(me, mob, ctx);
+        }
     }
     if mob.hurt_time > 0 {
         mob.hurt_time -= 1;
@@ -790,6 +811,17 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
+    // 守卫者 / 远古守卫者：环境、受伤、死亡音都分水中 / 岸上两套。
+    // Guardian / elder guardian: ambient, hurt and death sounds all have water / land
+    // variants.
+    if super::guardian::is_guardian(mob.mob_type) {
+        let elder = mob.mob_type == super::MobType::ElderGuardian;
+        return match voice {
+            Voice::Hurt => super::guardian::hurt_sound(elder, in_water),
+            Voice::Death => super::guardian::death_sound(elder, in_water),
+            _ => super::guardian::ambient_sound(elder, in_water),
+        };
+    }
     if mob.mob_type == super::MobType::Goat {
         return super::goat::voice(mob, voice);
     }
@@ -1053,6 +1085,15 @@ fn sound_volume(mob: &Mob) -> f32 {
 }
 
 fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
+    // 守卫者的环境音按水 / 岸和种类分派（表里返回 `None`）。
+    // Guardian ambience is dispatched by water / land and kind (the table returns
+    // `None`).
+    if super::guardian::is_guardian(mob.mob_type) {
+        return super::guardian::ambient_sound(
+            mob.mob_type == super::MobType::ElderGuardian,
+            in_water,
+        );
+    }
     match mob.mob_type {
         super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
@@ -1158,6 +1199,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::ai_step(me, mob, ctx);
+    }
+    // `Guardian.aiStep` 的服务端部分在 `super.aiStep()`（Monster）之前。
+    // The server part of `Guardian.aiStep` runs before `super.aiStep()` (Monster).
+    if super::guardian::is_guardian(mob.mob_type) {
+        super::guardian::ai_step(me, mob);
     }
     animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
@@ -1814,6 +1860,11 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision
     if mob.mob_type == super::MobType::Villager {
         super::villager_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
     }
+    if mob.mob_type == super::MobType::ElderGuardian {
+        // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
+        // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
+        super::guardian::custom_server_ai_step(me, mob, ctx);
+    }
 }
 
 /// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。
@@ -1839,6 +1890,12 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
     // `Panda.PandaMoveControl.tick`: no move control while an action is playing.
     if mob.mob_type == super::MobType::Panda && !mob.panda_can_perform_action(view.is_thundering())
     {
+        return;
+    }
+    if super::guardian::is_guardian(mob.mob_type) {
+        // `Guardian` 用 `GuardianMoveControl`。
+        // Guardians use `GuardianMoveControl`.
+        super::guardian::move_control_tick(me, mob);
         return;
     }
     if super::fish::is_fish(mob.mob_type) {
@@ -2308,6 +2365,12 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
         super::fish::travel_in_water(me, mob, ctx, input);
         return;
     }
+    // `Guardian.travelInWater` 换掉水里的推进。
+    // `Guardian.travelInWater` replaces the whole in-water thrust.
+    if me.in_water && super::guardian::is_guardian(mob.mob_type) {
+        super::guardian::travel_in_water(me, mob, ctx, input);
+        return;
+    }
     // `Frog.travelInWater` 换掉了水里的推进。
     // `Frog.travelInWater` replaces the in-water thrust.
     if me.in_water && mob.mob_type == super::MobType::Frog {
@@ -2660,6 +2723,12 @@ pub(crate) fn hurt_server(
     }
     if mob.mob_type == super::MobType::Bat {
         return super::bat::hurt_server(me, mob, ctx, source, amount);
+    }
+    // `Guardian.hurtServer` 的尖刺反伤与 `randomStrollGoal.trigger()` 在父类之前。
+    // `Guardian.hurtServer` runs its thorns reflection and stroll trigger before its
+    // superclass.
+    if super::guardian::is_guardian(mob.mob_type) {
+        return super::guardian::hurt_server(me, mob, ctx, source, amount);
     }
     // `Axolotl.hurtServer` 在父类之前做装死判定（`PLAY_DEAD_TICKS`）。
     // `Axolotl.hurtServer` runs the play-dead roll before the superclass.

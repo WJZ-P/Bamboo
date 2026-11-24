@@ -121,8 +121,8 @@ pub trait BlockView {
         false
     }
 
-    /// 已加载区块里 `radius` 格内的蜂巢 / 蜂箱。顺序固定为 `(x, y, z)` 升序。
-    /// 这是 `PoiManager.getInRange(BEE_HOME, 20)` 的临时替代，以后换成 POI 查询。
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)` 的全部位置，
+    /// 保持官方遍历序；有 POI 数据的视图覆盖它，没有的默认返回空。
     fn beehives_near(&self, _center: BlockPos, _radius: i32) -> Vec<BlockPos> {
         Vec::new()
     }
@@ -406,6 +406,16 @@ pub struct PlayerView {
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
+    /// 官方 `GameType` 的 ID：0 生存、1 创造、2 冒险、3 旁观。
+    /// `isSurvival()` 为真的是生存（0）和冒险（2）。
+    ///
+    /// Vanilla `GameType` id: 0 survival, 1 creative, 2 adventure, 3 spectator.
+    /// `isSurvival()` holds for survival (0) and adventure (2).
+    pub game_mode: i32,
+    /// 身上的挖掘疲劳 `(等级, 剩余刻数)`；没有该效果时是 `None`。
+    ///
+    /// The active mining fatigue `(amplifier, remaining ticks)`; `None` when absent.
+    pub mining_fatigue: Option<(i32, i32)>,
     /// `isDiscrete()`，也就是潜行。
     pub sneaking: bool,
     /// `isSprinting()`：犰狳会被疾跑的玩家吓到。
@@ -920,6 +930,26 @@ pub enum Command {
     PlaceSnowTrail {
         cells: Vec<BlockPos>,
     },
+    /// 冰霜行者 `replace_disk`：把算阶段选中的水面格逐格换成 `frosted_ice`（age 0）。
+    ///
+    /// Frost walker `replace_disk`: replace the selected water cells with `frosted_ice`.
+    FreezeWater {
+        cells: Vec<BlockPos>,
+    },
+    /// 灵魂疾行 `TICK` 的 `minecraft:soul` 粒子：服务端沿用既有粒子命令的做法，
+    /// 消耗实体随机数但不单独发粒子包。
+    ///
+    /// Soul speed `TICK` soul particles: as with existing particle commands, consume
+    /// the entity random draws on the server without emitting a separate packet.
+    SoulSpeedParticles {
+        position: Vec3,
+    },
+    /// 灵魂疾行 `TICK` 的 `minecraft:particle.soul_escape` 音效。
+    ///
+    /// Soul speed `TICK` `particle.soul_escape` sound.
+    SoulSpeedSound {
+        position: Vec3,
+    },
     /// 扔出的药水这一刻撞到东西：`AbstractThrownPotion.onHit`。
     ///
     /// The splash potion hit something this tick: `AbstractThrownPotion.onHit`.
@@ -1000,6 +1030,14 @@ pub enum Command {
     SuckIntoHopper,
     /// `Entity.spawnAtLocation`：生成一件掉落物。
     DropItem {
+        stack: ItemStack,
+    },
+    /// `ThrownTrident` 主人不可接受时的 `spawnAtLocation(stack, 0.1f)`：比通用
+    /// `DropItem` 多抬高 0.1 格（`(double) 0.1f`）。
+    ///
+    /// `ThrownTrident`'s `spawnAtLocation(stack, 0.1f)` for an unacceptable
+    /// owner: 0.1 above the entity (`(double) 0.1f`), unlike the plain `DropItem`.
+    DropTridentItem {
         stack: ItemStack,
     },
     /// `Entity.playSound(TRIDENT_RETURN, 10, 1)`：忠诚三叉戟第一刻的返回音效。
@@ -1113,6 +1151,15 @@ pub enum Command {
         effect: i32,
         duration: i32,
         amplifier: i32,
+    },
+    /// `ElderGuardian.customServerAiStep`：给挂上挖掘疲劳的玩家发
+    /// `GUARDIAN_ELDER_EFFECT` 游戏事件包。
+    ///
+    /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT` game
+    /// event packet to a player who received mining fatigue.
+    GuardianElderEffect {
+        target: EntityUid,
+        silent: bool,
     },
     /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
     MobLevelEvent {
@@ -1441,6 +1488,29 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 world.set_block_and_update(pos, snow);
             }
         }
+        Command::FreezeWater { cells } => {
+            let ice = BlockState(mc_bamboo_data::blocks::FROSTED_ICE);
+            for pos in cells {
+                let _ = world.set_block_and_update(pos, ice);
+            }
+        }
+        Command::SoulSpeedParticles { .. } => {
+            let _ = me.random.next_double();
+            let _ = me.random.next_double();
+        }
+        Command::SoulSpeedSound { position } => {
+            // pitch 是 uniform(0.6, 1.0)，用实体随机源取样。
+            // pitch is uniform(0.6, 1.0), sampled from the entity random source.
+            let pitch = 0.6 + me.random.next_float() * 0.4;
+            world.play_sound(
+                position,
+                mc_bamboo_data::sound_event("minecraft:particle.soul_escape"),
+                mc_bamboo_data::sounds::NEUTRAL,
+                0.6,
+                pitch,
+                false,
+            );
+        }
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::LightningTick(facts) => super::lightning::apply(me, world, facts),
         Command::SkeletonTrap(facts) => super::mob::skeleton_horse::spawn_trap(world, me, facts),
@@ -1463,6 +1533,12 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
+        }
+        Command::DropTridentItem { stack } => {
+            world.spawn_at_location(
+                me.position.add(Vec3::new(0.0, f64::from(0.1_f32), 0.0)),
+                stack,
+            );
         }
         Command::TridentReturnSound { position } => {
             world.play_sound(
@@ -1562,6 +1638,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 target,
                 super::mob::effects::EffectInstance::with_amplifier(effect, duration, amplifier),
             );
+        }
+        Command::GuardianElderEffect { target, silent } => {
+            world.push_effect(crate::Effect::GuardianElderEffect { target, silent });
         }
         Command::MobLevelEvent { event, pos, data } => {
             world.push_effect(crate::Effect::LevelEvent {

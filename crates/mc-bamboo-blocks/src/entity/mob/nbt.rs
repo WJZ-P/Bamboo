@@ -17,8 +17,8 @@ use mc_bamboo_data::registries::{attribute, mob_effect};
 use mc_bamboo_nbt::Tag;
 
 use super::{
-    CowSoundVariant, CowVariant, Mob, MobType,
-    attributes::{Attribute, Modifier, Operation},
+    CowSoundVariant, CowVariant, MobType,
+    attributes::{Attribute, Attributes, Modifier, Operation},
     effects::{EffectInstance, EffectMap},
     living,
 };
@@ -244,7 +244,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         "current_impulse_context_reset_grace_time",
         Tag::Int(mob.impulse_grace_time),
     );
-    put(&mut out, "attributes", attributes_tag(mob));
+    put(&mut out, "attributes", attributes_tag(&mob.attributes));
     if !mob.effects.is_empty() {
         put(&mut out, "active_effects", effects_tag(&mob.effects));
     }
@@ -704,8 +704,8 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         // ---- LivingEntity.readAdditionalSaveData ----
         mob.absorption = tag::float_or(tag, "AbsorptionAmount", 0.0).max(0.0);
-        if let Some(Tag::List(entries)) = tag::field(tag, "attributes") {
-            apply_attributes(mob, entries);
+        if let Some(tag) = tag::field(tag, "attributes") {
+            read_attributes_tag(&mut mob.attributes, tag);
         }
         // 官方先读 `attributes` 再读 `active_effects`，然后按效果重建修饰，
         // `Health` 才按新的最大血量夹。读盘不触发 `onEffectAdded` 的包。
@@ -1002,14 +1002,25 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
     loaded.ok_or_else(|| Error::new("not a mob"))
 }
 
+/// 读一个已经是 `attributes` 列表的标签（玩家存档层和生物层共用）。
+/// 非列表或坏条目直接跳过，绝不 panic。
+///
+/// Reads a tag that is already the `attributes` list (shared by players and mobs).
+/// Non-list tags and malformed entries are skipped without panicking.
+pub fn read_attributes_tag(attributes: &mut Attributes, tag: &Tag) {
+    if let Tag::List(entries) = tag {
+        apply_attributes(attributes, entries);
+    }
+}
+
 /// `AttributeMap.apply`：逐条找实例（懒创建）、设基础值、加永久修饰符。
-/// 牛没有的属性官方记一条警告跳过。
-fn apply_attributes(mob: &mut Mob, entries: &[Tag]) {
+/// 实体没有的属性官方记一条警告跳过。
+fn apply_attributes(attributes: &mut Attributes, entries: &[Tag]) {
     for entry in entries {
         let Some(id) = tag::string_or(entry, "id").and_then(attribute::by_name) else {
             continue;
         };
-        let Some(instance) = mob.attributes.instance(id) else {
+        let Some(instance) = attributes.instance(id) else {
             continue;
         };
         if let Some(base) = tag::field(entry, "base").and_then(|value| tag::java_f64(value).ok()) {
@@ -1039,12 +1050,14 @@ fn apply_attributes(mob: &mut Mob, entries: &[Tag]) {
 
 /// `AttributeInstance.Packed.LIST_CODEC`：懒创建过的实例，`base` 总写，`modifiers`
 /// 只写永久的、空时省掉。官方按哈希序遍历（每次开服都可能不同），这里按注册表 ID。
+/// 负零按官方 `DoubleTag.valueOf` 归一成正零。
 ///
 /// Instantiated attributes only; `base` always, permanent `modifiers` when any.
 /// Vanilla iterates in identity-hash order; this writes in registry id order.
-fn attributes_tag(mob: &Mob) -> Tag {
-    let mut entries: Vec<&Attribute> = mob
-        .attributes
+/// Negative zero is normalized to positive zero like `DoubleTag.valueOf`.
+pub fn attributes_tag(attributes: &Attributes) -> Tag {
+    let zero_double = |v: f64| Tag::Double(if v == 0.0 { 0.0 } else { v });
+    let mut entries: Vec<&Attribute> = attributes
         .entries
         .iter()
         .filter(|entry| entry.instantiated)
@@ -1059,7 +1072,7 @@ fn attributes_tag(mob: &Mob) -> Tag {
                         "id".to_owned(),
                         Tag::String(attribute::name_of(entry.id).unwrap_or("").to_owned()),
                     ),
-                    ("base".to_owned(), Tag::Double(entry.base)),
+                    ("base".to_owned(), zero_double(entry.base)),
                 ];
                 let modifiers: Vec<Tag> = entry
                     .modifiers
@@ -1068,7 +1081,7 @@ fn attributes_tag(mob: &Mob) -> Tag {
                     .map(|modifier| {
                         Tag::Compound(vec![
                             ("id".to_owned(), Tag::String(modifier.id.clone())),
-                            ("amount".to_owned(), Tag::Double(modifier.amount)),
+                            ("amount".to_owned(), zero_double(modifier.amount)),
                             (
                                 "operation".to_owned(),
                                 Tag::String(operation_name(modifier.operation).to_owned()),

@@ -13,7 +13,10 @@ use common::{
     disconnect_body, frame, move_player_pos, packet_id, player_loaded, translated,
 };
 use mc_bamboo_data::packets::play;
-use mc_bamboo_protocol::codec::Reader;
+use mc_bamboo_protocol::{
+    codec::{Reader, write_varint},
+    packet::play::PlayerInfoUpdate,
+};
 use mc_bamboo_server::ServerConfig;
 use tokio::time::timeout;
 
@@ -52,6 +55,30 @@ async fn read_system_chat(client: &mut Client) -> Vec<u8> {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|part| part == needle)
+}
+
+/// `player_info_update` 是否把名为 `name` 的玩家加进了 Tab 列表。
+/// 只有 `ADD_PLAYER` 动作会写带长度前缀的玩家名，周期性的延迟 / 游戏模式更新不写名字，
+/// 据此把真正的进服广播和杂项更新区分开。名字在线上是 VarInt 长度加字节。
+///
+/// Whether a `player_info_update` added a player called `name` to the tab list.
+/// Only `ADD_PLAYER` writes the length-prefixed name; periodic latency /
+/// game-mode updates do not, which tells a join broadcast apart from the rest.
+fn tab_list_adds(info: &[u8], name: &str) -> bool {
+    let mut reader = Reader::new(info);
+    if reader.varint().ok() != Some(play::clientbound::PLAYER_INFO_UPDATE) {
+        return false;
+    }
+    let Ok(actions) = reader.bytes(1) else {
+        return false;
+    };
+    if actions[0] & PlayerInfoUpdate::ADD_PLAYER == 0 {
+        return false;
+    }
+    let mut needle = Vec::new();
+    write_varint(&mut needle, name.len() as i32);
+    needle.extend_from_slice(name.as_bytes());
+    contains(reader.rest(), &needle)
 }
 
 /// 等 `done` 完成，这段时间一直回心跳，否则这名玩家自己也会超时。
@@ -274,12 +301,41 @@ async fn client_leaving_in_the_middle_of_the_join_leaves_no_ghost() {
     let leaving = server.join("Ghost").await;
     drop(leaving);
 
+    // 玩家表里不能留下幽灵：不管世界线程有没有见过这名玩家，它都得只剩 Watcher。
     server.wait_for_players(&["Watcher"]).await;
 
-    let removal = watcher
-        .read_until_answering(play::clientbound::PLAYER_INFO_REMOVE)
-        .await;
-    assert_eq!(packet_id(&removal), play::clientbound::PLAYER_INFO_REMOVE);
+    // 发一个 ping 当栅栏：服务端按序号处理消息，pong 到达时这次进服
+    // （被世界线程看见或没看见）都尘埃落定，观察者该收的名单包都收到了。
+    let mut ping = vec![play::serverbound::PING_REQUEST as u8];
+    ping.extend_from_slice(&1i64.to_be_bytes());
+    watcher.send(&frame(&ping)).await;
+    let received = timeout(TEST_DEADLINE, async {
+        let mut packets = Vec::new();
+        loop {
+            let payload = watcher.read_frame().await;
+            let id = packet_id(&payload);
+            if id == play::clientbound::KEEP_ALIVE {
+                watcher.answer_keep_alive(&payload).await;
+            }
+            if id == play::clientbound::PONG_RESPONSE {
+                return packets;
+            }
+            packets.push(payload);
+        }
+    })
+    .await
+    .expect("pong should arrive");
+
+    // 两种时序都正确：世界线程见过这名玩家，就既广播加入又广播移除；
+    // 没见过，就连一个名单包都不发。但不能只广播一半，那会让观察者看到幽灵。
+    let added = received.iter().any(|packet| tab_list_adds(packet, "Ghost"));
+    let removed = received
+        .iter()
+        .any(|packet| packet_id(packet) == play::clientbound::PLAYER_INFO_REMOVE);
+    assert_eq!(
+        added, removed,
+        "the observer must see both the add and the remove, or neither"
+    );
 
     // 同名玩家可以马上回来。
     let mut returning = server.join("Ghost").await;

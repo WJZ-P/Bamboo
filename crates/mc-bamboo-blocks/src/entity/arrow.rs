@@ -83,6 +83,10 @@ pub struct ArrowPublic {
     pub pickup: Pickup,
     pub on_fire: bool,
     pub no_gravity: bool,
+    /// `AbstractArrow.ID_FLAGS` 的 noPhysics 位（忠诚返回中的三叉戟）。
+    ///
+    /// The noPhysics bit of `AbstractArrow.ID_FLAGS` (a returning loyal trident).
+    pub no_physics: bool,
     pub needs_sync: bool,
     pub sync_velocity: bool,
     pub variant: ArrowVariant,
@@ -208,6 +212,7 @@ impl Arrow {
             pickup: self.pickup,
             on_fire: remaining_fire_ticks > 0,
             no_gravity: self.no_gravity,
+            no_physics: self.no_physics,
             needs_sync: self.needs_sync,
             sync_velocity: self.sync_velocity,
             variant: self.variant,
@@ -559,8 +564,11 @@ fn trident_tick(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
             arrow.pickup_item.clone(),
         )
     };
-    // `loyalty > 0 && (!dealtDamage || isNoPhysics()) && owner != null`。
-    if loyalty == 0 || (dealt_damage && !no_physics) {
+    // `loyalty > 0 && (dealtDamage || isNoPhysics()) && owner != null`：只有命中过
+    // （或已在返回途中置了 noPhysics）才飞回；刚投出、还没命中时继续正常飞行。
+    // `loyalty > 0 && (dealtDamage || isNoPhysics()) && owner != null`: fly back
+    // only after a hit, or once noPhysics marks the return as already in progress.
+    if loyalty == 0 || (!dealt_damage && !no_physics) {
         return false;
     }
     let owner_uid = owner.or_else(|| owner_uuid.and_then(|uuid| resolve_owner(ctx, uuid)));
@@ -574,7 +582,9 @@ fn trident_tick(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
     // `!isAcceptibleReturnOwner()`: owner dead or spectating -> drop and discard.
     if !owner.alive || (owner.is_player && owner.spectator) {
         if pickup == Pickup::Allowed {
-            ctx.emit(Command::DropItem { stack: pickup_item }, me);
+            // 官方 `spawnAtLocation(getPickupItem(), 0.1f)`：掉落物抬高 0.1 格。
+            // Vanilla `spawnAtLocation(getPickupItem(), 0.1f)`: drop 0.1 above.
+            ctx.emit(Command::DropTridentItem { stack: pickup_item }, me);
         }
         me.removed = true;
         return false;
@@ -733,12 +743,23 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let blocks = ctx.blocks();
     let position = me.position;
     let collision = me.collision_context();
-    // `AbstractArrow.tick()` 里 `flag = !isNoPhysics()`：noPhysics 时整段
-    // clip / 命中 / 移动物理都跳过，位置只按速度推进（忠诚返回中的三叉戟）。
-    // `AbstractArrow.tick()`'s `flag = !isNoPhysics()`: with no physics the whole
-    // clip / hit / move section is skipped and only the position advances.
+    // `AbstractArrow.tick()` 里 `flag = !isNoPhysics()`：noPhysics 时跳过
+    // clip / 命中 / 碰撞与重力，但仍要按「取负速度」更新朝向、
+    // `setPos(pos + delta)`，再照常跑 0.99 空气阻力与 `Projectile.tick()`
+    // 收尾（`finish_flight` 里对 noPhysics 跳过重力）。忠诚返回的三叉戟走这里。
+    // `AbstractArrow.tick()`'s `flag = !isNoPhysics()`: with no physics the
+    // clip / hit / collision / gravity sections are skipped, but rotation
+    // (from the negated delta) and `setPos(pos + delta)` still happen, followed
+    // by the usual 0.99 air drag and `Projectile.tick()` tail (`finish_flight`
+    // skips gravity for noPhysics). A returning loyal trident takes this path.
     if matches!(&me.kind, EntityKind::Arrow(arrow) if arrow.no_physics) {
+        let (yaw, pitch) = rotation(Vec3::new(-movement.x, movement.y, -movement.z));
+        me.y_rot = lerp_rotation(me.y_rot, yaw);
         me.position = position.add(movement);
+        if let EntityKind::Arrow(arrow) = &mut me.kind {
+            arrow.pitch = lerp_rotation(arrow.pitch, pitch);
+        }
+        finish_flight(me, blocks);
         return;
     }
     let EntityKind::Arrow(arrow) = &mut me.kind else {
@@ -824,9 +845,26 @@ fn find_targets(me: &Entity, ctx: &dyn EntityCtx, end: Vec3) -> Vec<ArrowEntityH
     let collision = me.collision_context();
     let mut hits = Vec::new();
     let margin = f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3));
+    // `ThrownTrident.findHitEntities` 把单次 `findHitEntity` 包成单元素集合，
+    // 后者走 `ProjectileUtil.getEntityHitResult(..., computeMargin)` —— 总是直接
+    // 裁剪按 margin 膨胀后的包围盒。普通箭走 `findHitEntities` 的
+    // `getManyEntityHitResult`（先精确盒、未命中才膨胀盒）。三叉戟命中后 REVERSE
+    // 反弹且留在场上，膨胀盒接触点会逐刻可见，必须按官方各自路径区分。
+    //
+    // `ThrownTrident.findHitEntities` wraps the single `findHitEntity`, which
+    // runs `ProjectileUtil.getEntityHitResult(..., computeMargin)` — it always
+    // clips the margin-inflated box. Ordinary arrows use `findHitEntities`'s
+    // `getManyEntityHitResult` (exact box first, inflated box only as a fallback).
+    // A deflected trident stays in the world, so its inflated contact is visible
+    // tick by tick; the two paths must match vanilla separately.
+    let trident = arrow.variant.is_trident();
     let mut consider = |uid, feet, bb: Aabb, player| {
         if (arrow.left_owner || Some(uid) != arrow.owner) && !arrow.pierced.contains(&uid) {
-            let contact = clip_entity_with_margin(blocks, bb, position, end, collision, margin);
+            let contact = if trident {
+                clip_entity(bb.inflated(margin), position, end)
+            } else {
+                clip_entity_with_margin(blocks, bb, position, end, collision, margin)
+            };
             if let Some(contact) = contact {
                 hits.push((
                     position.distance_to_sqr(feet),
@@ -854,6 +892,15 @@ fn find_targets(me: &Entity, ctx: &dyn EntityCtx, end: Vec3) -> Vec<ArrowEntityH
     hits.into_iter().map(|(_, hit)| hit).collect()
 }
 
+/// `ProjectileUtil.getManyEntityHitResult`：普通箭 / 穿刺箭先裁剪精确包围盒，
+/// 未命中时才用 `computeMargin` 膨胀的包围盒，并检查「接触点→盒心」之间有无方块
+/// 遮挡（结果取膨胀盒的外侧接触点）。`AbstractArrow.findHitEntities` 走这里。
+///
+/// Vanilla `ProjectileUtil.getManyEntityHitResult` (ordinary / piercing arrows):
+/// clip the exact box first, then fall back to the `computeMargin`-inflated box,
+/// checking for a block between the outside contact and the box center; the
+/// result is the inflated box's outside contact. `AbstractArrow.findHitEntities`
+/// uses this path.
 fn clip_entity_with_margin(
     view: &dyn BlockView,
     bb: Aabb,
@@ -1729,15 +1776,18 @@ fn hit_block(me: &mut Entity, world: &mut World<'_>, hit: BlockHit) {
     arrow.critical = false;
     arrow.pierce = 0;
     arrow.pierced.clear();
-    play_hit_sound(me, world);
     if let EntityKind::Arrow(arrow) = &mut me.kind
         && !arrow.variant.is_trident()
     {
         arrow.sound = arrow_hit_sound();
     }
     // `channeling` 的 `hit_block`：命中的方块是避雷针、雷暴且露天时召唤闪电。
+    // 官方 `AbstractArrow.onHitBlock` 先跑 `hitBlockEnchantmentEffects`（引雷），
+    // 再播落地音效，所以这里也必须在 `play_hit_sound` 之前，音效顺序才对得上。
     // `channeling`'s `hit_block`: a lightning-rod block in a thunderstorm under
-    // open sky summons a bolt.
+    // open sky summons a bolt. Vanilla `AbstractArrow.onHitBlock` runs
+    // `hitBlockEnchantmentEffects` before the ground sound, so this must come
+    // ahead of `play_hit_sound` for the sound order to match.
     if let EntityKind::Arrow(arrow) = &me.kind
         && arrow.variant.is_trident()
     {
@@ -1746,6 +1796,7 @@ fn hit_block(me: &mut Entity, world: &mut World<'_>, hit: BlockHit) {
         let state = world.block_state(hit.pos);
         channeling_strike(world, &stack, hit.location, hit.pos, owner_uid, true, state);
     }
+    play_hit_sound(me, world);
 }
 
 fn play_hit_sound(me: &mut Entity, world: &mut World<'_>) {
@@ -1759,9 +1810,13 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
     if !me.in_water {
         me.delta = me.delta.scale(f64::from(0.99_f32));
     }
-    if matches!(&me.kind, EntityKind::Arrow(arrow) if !arrow.in_ground && !arrow.no_gravity) {
+    if matches!(&me.kind, EntityKind::Arrow(arrow)
+        if !arrow.in_ground && !arrow.no_gravity && !arrow.no_physics)
+    {
         // Entity.applyGravity 把整支向量加上 (0, -g, 0)，也会规范化反弹留下的 -0。
-        // Entity.applyGravity adds (0, -g, 0) to the whole vector, normalizing -0 after a reversal.
+        // `AbstractArrow.tick()` 对 noPhysics 跳过重力（忠诚返回中的三叉戟）。
+        // Entity.applyGravity adds (0, -g, 0) to the whole vector, normalizing -0
+        // after a reversal. `AbstractArrow.tick()` skips gravity for noPhysics.
         me.delta = me.delta.add(Vec3::new(0.0, -0.05, 0.0));
     }
     let in_lava = me.update_projectile_fluid(blocks);
@@ -2474,13 +2529,17 @@ mod tests {
         assert!(state.dealt_damage);
     }
 
-    fn loyal_trident(owner_uid: i32, position: Vec3, loyalty: u8) -> Entity {
+    /// `dealt_damage` 建模「是否已经命中过」：官方忠诚返回只在命中后触发。
+    /// `dealt_damage` models whether the trident has already hit: vanilla only
+    /// returns a loyal trident after it has dealt damage.
+    fn loyal_trident(owner_uid: i32, position: Vec3, loyalty: u8, dealt_damage: bool) -> Entity {
         let mut entity = Entity::trident(position);
         if let EntityKind::Arrow(arrow) = &mut entity.kind {
             arrow.loyalty = loyalty;
             arrow.owner = Some(owner_uid);
             arrow.owner_uuid = Some([1; 16]);
             arrow.pickup = Pickup::Allowed;
+            arrow.dealt_damage = dealt_damage;
         }
         entity
     }
@@ -2497,6 +2556,8 @@ mod tests {
             gaze_disguise: false,
             alive,
             spectator: false,
+            game_mode: 0,
+            mining_fatigue: None,
             creative: false,
             sneaking: false,
             sprinting: false,
@@ -2521,7 +2582,7 @@ mod tests {
         level.players.push(owner);
         let mut ticks = crate::BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
-        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, true));
         world.tick_entities();
         {
             let trident = world.entity(id).expect("still returning");
@@ -2530,9 +2591,15 @@ mod tests {
             };
             assert!(arrow.no_physics);
             assert_eq!(arrow.client_side_return_trident_tick_count, 1);
-            // `delta = old * 0.95 + normalize(toOwner) * 0.05*L`（初速为 0）。
+            // `delta = old * 0.95 + normalize(toOwner) * 0.05*L`（初速为 0），
+            // 之后 `super.tick()` 仍施加 0.99 空气阻力（noPhysics 也照施）。
+            // `delta = old*0.95 + normalize(toOwner)*0.05*L` (initial speed 0),
+            // then `super.tick()` still applies the 0.99 air drag even with noPhysics.
             let to_owner = Vec3::new(3.0, (64.0 + 1.62) - 65.0, 0.0);
-            let expected = to_owner.normalize().scale(0.05 * 3.0);
+            let expected = to_owner
+                .normalize()
+                .scale(0.05 * 3.0)
+                .scale(f64::from(0.99_f32));
             assert!(
                 (trident.delta.x - expected.x).abs() < 1.0e-9
                     && (trident.delta.y - expected.y).abs() < 1.0e-9,
@@ -2561,7 +2628,7 @@ mod tests {
         level.players.push(owner);
         let mut ticks = crate::BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
-        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, true));
         world.tick_entities();
         assert!(world.entity(id).is_none(), "the trident is discarded");
         let mut items = 0;
@@ -2584,7 +2651,7 @@ mod tests {
         level.players.push(owner);
         let mut ticks = crate::BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
-        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3));
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, true));
         world.tick_entities();
         let _ = world.drain_effects();
         world.tick_entities();
@@ -2600,6 +2667,37 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, crate::level::Effect::Sound { sound: s, .. } if *s == sound)),
             "no return sound on the second tick"
+        );
+    }
+
+    /// 刚投出、还没命中的忠诚三叉戟不会立刻飞回：官方 `dealtDamage || isNoPhysics()`
+    /// 在命中前为假，这一刻只做正常飞行（不置 noPhysics、不播返回音效）。
+    /// A freshly thrown loyal trident does not return before it hits: vanilla's
+    /// `dealtDamage || isNoPhysics()` is false before a hit, so it just flies.
+    #[test]
+    fn a_loyal_trident_keeps_flying_until_it_hits() {
+        let mut level = crate::testing::TestLevel::new();
+        let owner = return_player(7, Vec3::new(3.5, 64.0, 0.5), true);
+        level.players.push(owner);
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let id = world.spawn_entity(loyal_trident(7, Vec3::new(0.5, 65.0, 0.5), 3, false));
+        world.tick_entities();
+        {
+            let trident = world.entity(id).expect("still flying");
+            let EntityKind::Arrow(arrow) = &trident.kind else {
+                panic!("expected a trident");
+            };
+            assert!(!arrow.no_physics, "no return before a hit");
+            assert_eq!(arrow.client_side_return_trident_tick_count, 0);
+        }
+        let sound = i32::from(sounds::sound_event("minecraft:item.trident.return"));
+        let effects = world.drain_effects();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, crate::level::Effect::Sound { sound: s, .. } if *s == sound)),
+            "no return sound before a hit"
         );
     }
 

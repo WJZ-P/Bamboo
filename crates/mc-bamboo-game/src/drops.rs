@@ -200,28 +200,29 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
     let reach = player.bounding_box().inflate(1.0, 0.5, 1.0);
     let owner = *player.uuid.as_bytes();
     let creative = player.game_mode == GameMode::Creative;
-    // 官方 `ItemEntity.playerTouch` 只碰到玩家附近的物品；原来的全表遍历让
-    // 「玩家数 × 实体数」都进热路径，岛场景里互不相邻的组互相拖慢。
-    // `for_each_in` 内部已经按 `intersects(reach)` 精确过滤、按 uid 升序访问，
-    // 和原来 `iter().filter(intersects)` 的名单和落地顺序逐项相同。
+    // 官方 `Player.aiStep` 用一次 `Level.getEntities(this, aabb)` 按实体分区
+    // 顺序（`SectionPos.asLong` 升序）取候选：经验球和非经验球都在这个顺序里，
+    // 最后 `Util.getRandom(orbs, random)` 只挑一颗。`for_each_in_section_order`
+    // 复刻这个顺序；`intersects(reach)` 在遍历内部精确过滤。
     //
-    // Vanilla `ItemEntity.playerTouch` only sees items near the player. Scanning
-    // the whole table made the cost proportional to players × entities, so
-    // far-apart island groups slowed each other down. `for_each_in` already
-    // applies the same `intersects(reach)` test and visits in ascending uid
-    // order, giving the same candidate list and order as the old `iter()`.
+    // Vanilla `Player.aiStep` collects candidates with one
+    // `Level.getEntities(this, aabb)` in entity-section order
+    // (`SectionPos.asLong` ascending); both orbs and other entities come from
+    // that order, and `Util.getRandom(orbs, random)` picks one orb at the end.
     let mut ids = Vec::new();
     let mut orbs = Vec::new();
-    region.entities.for_each_in(reach, &mut |public| {
-        if matches!(
-            public.kind,
-            mc_bamboo_blocks::entity::KindPublic::ExperienceOrb { .. }
-        ) {
-            orbs.push(public.uid);
-        } else {
-            ids.push(public.uid);
-        }
-    });
+    region
+        .entities
+        .for_each_in_section_order(reach, &mut |public| {
+            if matches!(
+                public.kind,
+                mc_bamboo_blocks::entity::KindPublic::ExperienceOrb { .. }
+            ) {
+                orbs.push(public.uid);
+            } else {
+                ids.push(public.uid);
+            }
+        });
     for entity_id in ids {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
@@ -306,11 +307,12 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
     }
     // 官方 `Player.aiStep` 把经验球单独收集起来，最后只碰一颗：
     // `Util.getRandom(list, this.random)` 在名单非空时取一次 `nextInt(size)`。
-    // 其它实体（掉落物）是逐个碰的，上面已经按 uid 升序做完。
+    // 其它实体（掉落物）是逐个碰的，上面已经按实体分区顺序做完。
     //
     // Official `Player.aiStep` collects orbs separately and touches exactly one
     // at the end: `Util.getRandom(list, this.random)` draws one `nextInt(size)`
-    // when the list is non-empty. Other entities were touched above in uid order.
+    // when the list is non-empty. Other entities were touched above in section
+    // order.
     if !orbs.is_empty() {
         let Some(player) = region.players.get_mut(&id) else {
             return;

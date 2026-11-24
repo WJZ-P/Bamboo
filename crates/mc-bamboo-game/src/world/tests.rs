@@ -4382,6 +4382,7 @@ fn a_critical_attack_emits_its_packets() {
         player.motion.fall_distance = 2.0;
         player.on_ground = false;
         player.last_main_hand_item = player.inventory.held(Hand::Main).clone();
+        crate::player_attributes::rebuild_player(player, false);
     }
     server.request(&client, PlayRequest::Attack { entity_id: cow });
     server.tick();
@@ -4461,6 +4462,7 @@ fn a_sweep_ignites_swept_targets_with_fire_aspect() {
         player.on_ground = true;
         player.motion.fall_distance = 0.0;
         player.last_main_hand_item = weapon;
+        crate::player_attributes::rebuild_player(player, false);
     }
     server.request(&client, PlayRequest::Attack { entity_id: main });
     server.tick();
@@ -4551,6 +4553,7 @@ fn melee_attack_hits_another_player() {
         player.on_ground = true;
         player.motion.fall_distance = 0.0;
         player.last_main_hand_item = weapon;
+        crate::player_attributes::rebuild_player(player, false);
         region.players.get(&victim.id).unwrap().motion.delta
     };
     server.request(
@@ -4658,6 +4661,7 @@ fn a_sweep_attack_emits_its_sound_and_particle() {
         player.on_ground = true;
         player.motion.fall_distance = 0.0;
         player.last_main_hand_item = weapon;
+        crate::player_attributes::rebuild_player(player, false);
     }
     server.request(&client, PlayRequest::Attack { entity_id: main });
     server.tick();
@@ -4728,6 +4732,7 @@ fn sweep_uses_the_target_collision_box() {
         player.on_ground = true;
         player.motion.fall_distance = 0.0;
         player.last_main_hand_item = weapon;
+        crate::player_attributes::rebuild_player(player, false);
     }
     server.request(&client, PlayRequest::Attack { entity_id: main });
     server.tick();
@@ -4811,6 +4816,7 @@ fn an_enchanted_attack_emits_the_magic_critical_animation() {
         player.on_ground = true;
         player.motion.fall_distance = 0.0;
         player.last_main_hand_item = weapon;
+        crate::player_attributes::rebuild_player(player, false);
     }
     server.request(&client, PlayRequest::Attack { entity_id: cow });
     server.tick();
@@ -5012,6 +5018,7 @@ fn damage_indicator_particles_follow_the_damage_threshold() {
                 let stack = ItemStack::new(item, 1);
                 player.inventory.slots[slot] = stack.clone();
                 player.last_main_hand_item = stack;
+                crate::player_attributes::rebuild_player(player, false);
             }
             player.attack_strength_ticker = 100;
             player.on_ground = true;
@@ -5062,6 +5069,7 @@ fn melee_hit_awards_damage_dealt_on_request_stats() {
             let stack = ItemStack::new(items::DIAMOND_SWORD, 1);
             player.inventory.slots[slot] = stack.clone();
             player.last_main_hand_item = stack;
+            crate::player_attributes::rebuild_player(player, false);
             player.attack_strength_ticker = 100;
             player.on_ground = true;
             player.motion.fall_distance = 0.0;
@@ -5100,13 +5108,17 @@ fn melee_hit_awards_damage_dealt_on_request_stats() {
     let frames = client.take_frames();
     let stats = frames_with_id(&frames, clientbound::AWARD_STATS);
     assert_eq!(stats.len(), 1, "RequestStats must answer the requester");
+    // `ItemStack.hurtEnemy` 对带 `WEAPON` 组件的钻石剑额外记一次
+    // `Stats.ITEM_USED.get(item)`，和 `DAMAGE_DEALT` 一起发。
+    // `ItemStack.hurtEnemy` also awards `Stats.ITEM_USED.get(item)` for the
+    // diamond sword's `WEAPON` component, sent alongside `DAMAGE_DEALT`.
     let expected_body = body_of(encode_frames(&AwardStats {
-        item_used: &[],
+        item_used: &[(items::DIAMOND_SWORD, 1)],
         damage_dealt: Some(expected),
     }));
     assert_eq!(
         stats[0].body, expected_body,
-        "DAMAGE_DEALT must be sent as a minecraft:custom stat"
+        "DAMAGE_DEALT and the weapon's ITEM_USED must be sent together"
     );
 }
 

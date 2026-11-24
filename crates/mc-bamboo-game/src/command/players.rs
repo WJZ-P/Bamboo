@@ -7,12 +7,8 @@ use mc_bamboo_command::{
     EntitySelector, GameMode as CommandMode, Message, ParsedCommand, Value, permission,
 };
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::registries::{attribute, attribute_defaults};
 use mc_bamboo_protocol::{
-    packet::play::{
-        AttributeSnapshot, ChatVisibility, DisguisedChat, GameEvent, GameMode, PlayerAbilities,
-        UpdateAttributes,
-    },
+    packet::play::{ChatVisibility, DisguisedChat, GameEvent, GameMode, PlayerAbilities},
     text::{Component, TranslateArg},
 };
 
@@ -25,26 +21,13 @@ use crate::{
     global_port::{GlobalEffect, GlobalPort},
     inbound::PlayerId,
     player::Player,
-    region::{self, Region},
+    region::Region,
 };
 
 use mc_bamboo_data::registries::chat_type;
 
 const FLYING_SPEED: f32 = 0.05;
 const WALKING_SPEED: f32 = 0.1;
-
-const PLAIN_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
-    AttributeSnapshot {
-        attribute: attribute::BLOCK_INTERACTION_RANGE,
-        base: attribute_defaults::BLOCK_INTERACTION_RANGE,
-        modifiers: &[],
-    },
-    AttributeSnapshot {
-        attribute: attribute::ENTITY_INTERACTION_RANGE,
-        base: attribute_defaults::ENTITY_INTERACTION_RANGE,
-        modifiers: &[],
-    },
-];
 
 pub(crate) fn gamemode(
     port: &mut GlobalPort<'_>,
@@ -326,18 +309,9 @@ pub(crate) fn apply_mode(
         },
     );
     region.links.send(target, &abilities);
-    let attributes: &[AttributeSnapshot<'_>] = if protocol == GameMode::Creative {
-        &region::CREATIVE_ATTRIBUTES
-    } else {
-        &PLAIN_ATTRIBUTES
-    };
-    region.links.send(
-        target,
-        &UpdateAttributes {
-            entity_id: target.0,
-            attributes,
-        },
-    );
+    // 切模式后按新游戏模式重建属性（创造模式触及距离），立即同步变化的脏属性。
+    // Rebuild attributes for the new game mode and immediately sync dirty changes.
+    crate::player_attributes::sync_after_mode_change(region, target);
     // Tab 名单是全局的：经端口交给主控（直接实现下当场广播，和以前同一位置）。
     // The tab list is global: hand it to the master through the port (the
     // direct implementation broadcasts right here, as before).

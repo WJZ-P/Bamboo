@@ -20,9 +20,7 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3, mth};
 use mc_bamboo_data::{
     gamerules,
-    registries::{
-        attribute, attribute_defaults, data_component_type as kinds, mob_effect, particle_type,
-    },
+    registries::{attribute, data_component_type as kinds, mob_effect, particle_type},
     sounds,
     tags::{self, item_tags},
 };
@@ -35,7 +33,7 @@ use mc_bamboo_protocol::{
 
 use crate::{
     durability, entity_sync, inbound::PlayerId, interaction, item_use_stats, links::encode_frames,
-    player::Player, player_exhaustion, player_health, player_hurt, region::Region,
+    player::Player, player_exhaustion, player_hurt, region::Region,
 };
 
 /// `getAttackStrengthScale(0.5F)` 的容差，官方 `Player.attack` 里恒为 0.5。
@@ -60,23 +58,11 @@ const ATTACK_EXHAUSTION: f32 = 0.1;
 ///
 /// The tolerance of `cannotAttackWithItem(mainHandItem, 5)`.
 const CHARGE_TOLERANCE: f32 = 5.0;
-/// `Abilities.getWalkingSpeed()` 的缺省值，也就是玩家 `MOVEMENT_SPEED` 的基值。
-/// 注册表通用缺省 0.7 是给其它生物用的，玩家这里被 `Player` 覆盖成 0.1。
-///
-/// `Abilities.getWalkingSpeed()` default, i.e. the player's `MOVEMENT_SPEED`
-/// base. The registry default 0.7 is for other mobs; `Player` overrides it to 0.1.
-const PLAYER_WALKING_SPEED: f32 = 0.1;
 /// `handleAttack` 传给 `isWithinAttackRange(mainHandItem, targetBounds, 3.0)` 的缓冲区。
 ///
 /// The buffer `handleAttack` passes to
 /// `isWithinAttackRange(mainHandItem, targetBounds, 3.0)`.
 const ATTACK_RANGE_BUFFER: f64 = 3.0;
-/// `Player.CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER_VALUE`：创造模式的
-/// `ServerPlayer` 给 `ENTITY_INTERACTION_RANGE` 加的临时修饰符。
-///
-/// `Player.CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER_VALUE`: the transient
-/// modifier creative `ServerPlayer`s add to `ENTITY_INTERACTION_RANGE`.
-const CREATIVE_ENTITY_INTERACTION_RANGE: f32 = 2.0;
 
 /// `Player.aiStep`：每刻把 `attackStrengthTicker` 加一；主手物品有任何变化
 /// （数量 / 组件）就刷新缓存，但只有换成另一种物品（官方 `isSameItem`，只比
@@ -118,58 +104,11 @@ pub(crate) fn on_punch(region: &mut Region, id: PlayerId) {
     }
 }
 
-/// `getAttributeValue(Attributes.ATTACK_SPEED)`：缺省值加主手武器的
-/// `attribute_modifiers`（`ADD_VALUE`，主手槽）。
+/// `getCurrentItemAttackStrengthDelay()` = `(float)(1.0 / getAttributeValue(ATTACK_SPEED) × 20)`。
 ///
-/// `getAttributeValue(Attributes.ATTACK_SPEED)`: the default plus the main-hand
-/// weapon's `attribute_modifiers` (`ADD_VALUE`, main-hand slots).
-fn attack_speed(held: &ItemStack) -> f64 {
-    attribute_value(
-        held,
-        attribute::ATTACK_SPEED,
-        attribute_defaults::ATTACK_SPEED,
-    )
-}
-
-/// `getAttributeValue(Attributes.ATTACK_KNOCKBACK)`。
-///
-/// `getAttributeValue(Attributes.ATTACK_KNOCKBACK)`.
-fn attack_knockback(held: &ItemStack) -> f64 {
-    attribute_value(
-        held,
-        attribute::ATTACK_KNOCKBACK,
-        attribute_defaults::ATTACK_KNOCKBACK,
-    )
-}
-
-fn attribute_value(held: &ItemStack, wanted: i32, default: f64) -> f64 {
-    let mut value = default;
-    if held.is_empty() {
-        return value;
-    }
-    let Ok(patch) = ComponentPatch::from_opaque(held) else {
-        return value;
-    };
-    if let Some(ComponentValue::AttributeModifiers(entries)) =
-        defaults::resolve(held.item, &patch, kinds::ATTRIBUTE_MODIFIERS)
-    {
-        for entry in entries {
-            if entry.attribute == wanted
-                && entry.modifier.operation == 0
-                && (entry.slot == 0 || entry.slot == 1 || entry.slot == 3)
-            {
-                value += entry.modifier.amount;
-            }
-        }
-    }
-    value
-}
-
-/// `getCurrentItemAttackStrengthDelay()` = `(float)(1.0 / ATTACK_SPEED × 20)`。
-///
-/// `getCurrentItemAttackStrengthDelay()` = `(float)(1.0 / ATTACK_SPEED × 20)`.
-fn strength_delay(held: &ItemStack) -> f32 {
-    (1.0 / attack_speed(held) * 20.0) as f32
+/// `getCurrentItemAttackStrengthDelay()` = `(float)(1.0 / getAttributeValue(ATTACK_SPEED) × 20)`.
+fn strength_delay(player: &Player) -> f32 {
+    (1.0 / player.attributes.value(attribute::ATTACK_SPEED) * 20.0) as f32
 }
 
 /// `getAttackStrengthScale(0.5F)` = `clamp((ticker + 0.5) / delay, 0, 1)`。
@@ -261,24 +200,21 @@ fn damage_bonus(held: &ItemStack, entity_type: i32) -> f32 {
     bonus
 }
 
-/// `EnchantmentHelper.modifyKnockback` 的加成 + `ATTACK_KNOCKBACK`，再 `/ 2`。
+/// `EnchantmentHelper.modifyKnockback` 的加成 + `(float) getAttributeValue(ATTACK_KNOCKBACK)`，再 `/ 2`。
 ///
-/// `EnchantmentHelper.modifyKnockback` bonus plus `ATTACK_KNOCKBACK`, then `/ 2`.
-fn attack_knockback_amount(held: &ItemStack) -> f32 {
+/// `EnchantmentHelper.modifyKnockback` bonus plus `(float) getAttributeValue(ATTACK_KNOCKBACK)`, then `/ 2`.
+fn attack_knockback_amount(player: &Player, held: &ItemStack) -> f32 {
     let knockback = enchantment_level(held, "minecraft:knockback") as f32;
-    (attack_knockback(held) as f32 + knockback) / 2.0
+    (player.attributes.value(attribute::ATTACK_KNOCKBACK) as f32 + knockback) / 2.0
 }
 
-/// `sweeping_edge` 给 `SWEEPING_DAMAGE_RATIO` 的 `Fraction(L, L+1)`。
+/// `(float) getAttributeValue(SWEEPING_DAMAGE_RATIO)`（`sweeping_edge` 附魔的
+/// `Fraction(L, L+1)` 修饰符已经由属性表提供）。
 ///
-/// `sweeping_edge`'s `Fraction(L, L+1)` for `SWEEPING_DAMAGE_RATIO`.
-fn sweeping_ratio(held: &ItemStack) -> f32 {
-    let level = enchantment_level(held, "minecraft:sweeping_edge") as f32;
-    if level > 0.0 {
-        level / (level + 1.0)
-    } else {
-        0.0
-    }
+/// `(float) getAttributeValue(SWEEPING_DAMAGE_RATIO)`; `sweeping_edge`'s
+/// `Fraction(L, L+1)` modifier lives in the player attribute map.
+fn sweeping_ratio(player: &Player) -> f32 {
+    player.attributes.value(attribute::SWEEPING_DAMAGE_RATIO) as f32
 }
 
 /// `Player.canCriticalAttack`：下落中、不着地、不攀爬、不在水里、没有失明、
@@ -309,15 +245,13 @@ fn is_sweep_attack(
     if !full || crit || sprint || !player.on_ground {
         return false;
     }
-    // 官方 `getSpeed(): F` 先 `f2d` 再乘 2.5，`Mth.square(D)` 和
-    // `Vec3.horizontalDistanceSqr()` 都是 double；f32 里 `0.1F × 2.5` 会舍成
-    // 正好 0.25，把 0.25 格位移误判成不够慢。
+    // 官方 `Player.getSpeed()` 读 `(float) getAttributeValue(MOVEMENT_SPEED)`，
+    // 先 `f2d` 再乘 2.5；`Mth.square(D)` 和 `Vec3.horizontalDistanceSqr()` 都是 double。
     //
-    // Vanilla's `getSpeed(): F` is widened with `f2d` before the ×2.5, and
-    // both `Mth.square(D)` and `Vec3.horizontalDistanceSqr()` are doubles.
-    // In f32 `0.1F × 2.5` rounds to exactly 0.25 and would wrongly reject a
-    // 0.25-block displacement.
-    let speed = f64::from(PLAYER_WALKING_SPEED);
+    // Vanilla's `Player.getSpeed()` reads `(float) getAttributeValue(MOVEMENT_SPEED)`,
+    // widened with `f2d` before the ×2.5; both `Mth.square(D)` and
+    // `Vec3.horizontalDistanceSqr()` are doubles.
+    let speed = f64::from(player.attributes.value(attribute::MOVEMENT_SPEED) as f32);
     let max = speed * 2.5;
     let motion = player.motion.known_movement;
     let horizontal = motion.x * motion.x + motion.z * motion.z;
@@ -478,6 +412,7 @@ struct AttackPlan {
     /// Only positive values push the target, damp the attacker and stop sprint.
     extra_knockback: f32,
     sweep: bool,
+    sweeping_ratio: f32,
     source: DamageSource,
     knockback_sound: Option<&'static str>,
     sweep_targets: Vec<SweepTarget>,
@@ -522,8 +457,10 @@ fn attack_inner(
     let held = player.inventory.held(Hand::Main).clone();
     let ticker = player.attack_strength_ticker;
     let game_mode = player.game_mode;
+    let entity_reach = player.attributes.value(attribute::ENTITY_INTERACTION_RANGE) as f32;
     let eye = Vec3::new(position.x, position.y + eye_height, position.z);
-    let Some(target) = resolve_target(region, id, entity_id, eye, game_mode, &held) else {
+    let Some(target) = resolve_target(region, id, entity_id, eye, game_mode, entity_reach, &held)
+    else {
         return;
     };
     let request = AttackRequest {
@@ -580,9 +517,10 @@ fn resolve_target(
     entity_id: i32,
     eye: Vec3,
     game_mode: GameMode,
+    entity_reach: f32,
     held: &ItemStack,
 ) -> Option<TargetInfo> {
-    let range = attack_range(held, game_mode);
+    let range = attack_range(held, entity_reach);
     let creative = game_mode == GameMode::Creative;
     if let Some(public) = region.entities.public_at(entity_id) {
         if public.removed || !is_attackable(&public.kind) {
@@ -691,7 +629,7 @@ impl AttackRange {
 ///
 /// `LivingEntity.getAttackRangeWith(weaponItem)`: use the weapon's `ATTACK_RANGE`
 /// component when present, otherwise `AttackRange.defaultFor`.
-fn attack_range(held: &ItemStack, game_mode: GameMode) -> AttackRange {
+fn attack_range(held: &ItemStack, entity_reach: f32) -> AttackRange {
     if !held.is_empty()
         && let Ok(patch) = ComponentPatch::from_opaque(held)
         && let Some(ComponentValue::AttackRange {
@@ -711,22 +649,7 @@ fn attack_range(held: &ItemStack, game_mode: GameMode) -> AttackRange {
             hitbox_margin: *hitbox_margin,
         };
     }
-    AttackRange::default_for(entity_interaction_range(game_mode))
-}
-
-/// `getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE)`：注册表缺省 3.0，
-/// 创造模式的 `ServerPlayer` 再叠加 2.0 的临时修饰符。玩家的这个属性没有
-/// 来自物品的修饰符。
-///
-/// `getAttributeValue(Attributes.ENTITY_INTERACTION_RANGE)`: registry default
-/// 3.0 plus the 2.0 creative transient modifier. No item adds to it for players.
-fn entity_interaction_range(game_mode: GameMode) -> f32 {
-    let base = attribute_defaults::ENTITY_INTERACTION_RANGE as f32;
-    if game_mode == GameMode::Creative {
-        base + CREATIVE_ENTITY_INTERACTION_RANGE
-    } else {
-        base
-    }
+    AttackRange::default_for(entity_reach)
 }
 
 /// 目标实体的碰撞盒，官方 `Entity.makeBoundingBox(position)`：以脚底位置为中心、
@@ -768,7 +691,7 @@ fn plan_attack(
         req.yaw,
         req.base_damage_override,
     );
-    let delay = strength_delay(held);
+    let delay = strength_delay(&region.players[&id]);
     if has_piercing_weapon(held) || cannot_attack_with_item(ticker, held, delay) {
         return None;
     }
@@ -777,8 +700,11 @@ fn plan_attack(
     // 其余物品（含剑）都不加，这里按官方缺省跳过。
     //
     // `Item.getAttackDamageBonus` defaults to 0 in 26.3; swords add nothing.
-    let base_damage_0 =
-        base_damage_override.unwrap_or_else(|| player_health::PlayerHealth::attack_damage(held));
+    let base_damage_0 = base_damage_override.unwrap_or_else(|| {
+        region.players[&id]
+            .attributes
+            .value(attribute::ATTACK_DAMAGE) as f32
+    });
     let magic_boost = s * damage_bonus(held, target.entity_type);
     let mut base_damage = base_damage_0 * (BASE_SCALE_MIN + s * s * BASE_SCALE_SPAN);
     // `onAttack()` → `resetOnlyAttackStrengthTicker()`。
@@ -810,13 +736,15 @@ fn plan_attack(
     // `getKnockback(target, damageSource) + (knockbackAttack ? 0.5 : 0)`:
     // `Player.attack` passes it to `causeExtraKnockback`; computed here for the
     // landing phase.
-    let extra_knockback = attack_knockback_amount(held) + if knockback_attack { 0.5 } else { 0.0 };
+    let extra_knockback =
+        attack_knockback_amount(player, held) + if knockback_attack { 0.5 } else { 0.0 };
     let critical = full && can_critical(player, target.is_living);
     if critical {
         base_damage *= CRIT_MULTIPLIER;
     }
     let total_damage = base_damage + magic_boost;
     let sweep = is_sweep_attack(player, held, full, critical, knockback_attack);
+    let sweep_ratio = sweeping_ratio(player);
     // 横扫的候选来自实体表，要在借用 `block_level()` 之前取好。
     //
     // Sweep candidates come from the entity store, collected before `block_level()`.
@@ -843,6 +771,7 @@ fn plan_attack(
         critical,
         extra_knockback,
         sweep,
+        sweeping_ratio: sweep_ratio,
         source,
         knockback_sound,
         sweep_targets,
@@ -896,6 +825,7 @@ fn land_attack(
                 let spec = SweepSpec {
                     held: &plan.held,
                     base_damage: plan.base_damage,
+                    sweeping_ratio: plan.sweeping_ratio,
                     s: plan.s,
                     player_position: plan.position,
                     creative: plan.source.creative_player,
@@ -1030,6 +960,14 @@ fn finish_hit(
             },
         );
     }
+    // `itemAttackInteraction` → `ItemStack.hurtEnemy`：带 `WEAPON` 组件的
+    // 武器除了扣耐久，还给攻击者记一次 `Stats.ITEM_USED.get(item)`。
+    //
+    // `itemAttackInteraction` → `ItemStack.hurtEnemy`: a weapon with the
+    // `WEAPON` component also awards one `Stats.ITEM_USED.get(item)`.
+    if weapon_component(&plan.held) {
+        item_use_stats::award(region, id, plan.held.item);
+    }
     // `itemAttackInteraction`：主手武器 `hurtEnemy` 扣 1 点耐久。
     //
     // `itemAttackInteraction`: `hurtEnemy` spends one durability point.
@@ -1049,6 +987,15 @@ fn finish_hit(
     }
     player_exhaustion::add_in(region, id, ATTACK_EXHAUSTION);
     entity_sync::broadcast_swing(region, id, Hand::Main);
+}
+
+/// `ItemStack.has(DataComponents.WEAPON)`：官方 `hurtEnemy` 只有带这个组件的
+/// 武器才记 `ITEM_USED`，空手 / 其它物品不记。
+///
+/// `ItemStack.has(DataComponents.WEAPON)`: vanilla `hurtEnemy` awards
+/// `ITEM_USED` only for stacks with this component.
+fn weapon_component(held: &ItemStack) -> bool {
+    !held.is_empty() && defaults::resolve(held.item, &held.patch(), kinds::WEAPON).is_some()
 }
 
 fn player_is_creative(region: &Region, id: PlayerId) -> bool {
@@ -1250,6 +1197,7 @@ fn collect_sweep_targets(
 struct SweepSpec<'a> {
     held: &'a ItemStack,
     base_damage: f32,
+    sweeping_ratio: f32,
     s: f32,
     player_position: Vec3,
     /// 官方 `doSweepAttack` 复用 `Player.attack` 的同一个 `damageSource`，
@@ -1278,7 +1226,7 @@ fn do_sweep(
     nearby: &[SweepTarget],
     spec: &SweepSpec<'_>,
 ) {
-    let sweep_base = 1.0 + sweeping_ratio(spec.held) * spec.base_damage;
+    let sweep_base = 1.0 + spec.sweeping_ratio * spec.base_damage;
     let radians = f64::from(spec.yaw * (std::f32::consts::PI / 180.0));
     let dx = mth::sin(radians);
     let dz = -mth::cos(radians);
@@ -1388,6 +1336,21 @@ mod tests {
 
     fn stack(item: i32) -> ItemStack {
         ItemStack::new(item, 1)
+    }
+
+    /// `ItemStack.hurtEnemy` 的 `WEAPON` 组件判定：带它的武器记
+    /// `ITEM_USED`，空手和不带该组件的物品不记。
+    ///
+    /// `ItemStack.hurtEnemy`'s `WEAPON` component gate: weapons carrying it
+    /// award `ITEM_USED`, empty hands and other items do not.
+    #[test]
+    fn weapon_component_gates_the_extra_item_used_stat() {
+        assert!(weapon_component(&stack(mc_bamboo_data::items::TRIDENT)));
+        assert!(weapon_component(&stack(
+            mc_bamboo_data::items::DIAMOND_SWORD
+        )));
+        assert!(!weapon_component(&ItemStack::empty()));
+        assert!(!weapon_component(&stack(mc_bamboo_data::items::STICK)));
     }
 
     fn enchanted(item: i32, name: &str, level: i32) -> ItemStack {
@@ -1541,7 +1504,7 @@ mod tests {
         assert!(sweep(&region, &sword, true, false, false));
         // 阈值本身严格排除（`dcmpg >= 0` → false）。
         // The threshold itself is excluded (`dcmpg >= 0` → false).
-        let max = f64::from(PLAYER_WALKING_SPEED) * 2.5;
+        let max = f64::from(0.1_f32) * 2.5;
         region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(max, 0.0, 0.0);
         assert!(!sweep(&region, &sword, true, false, false));
         region.players.get_mut(&id).unwrap().motion.known_movement = Vec3::new(0.2, 0.0, 0.0);
@@ -1603,6 +1566,7 @@ mod tests {
                 added,
                 removed,
             };
+            crate::player_attributes::rebuild_player(player, false);
             player.attack_strength_ticker = 100;
             player.on_ground = true;
             player.motion.fall_distance = 0.0;
@@ -1657,11 +1621,26 @@ mod tests {
         );
     }
 
+    fn player_holding(mode: GameMode, held: ItemStack) -> Player {
+        let mut p = Player::new(
+            PlayerId(1),
+            uuid::Uuid::nil(),
+            "Test".to_owned(),
+            mode,
+            mc_bamboo_protocol::packet::play::ClientInformation::default(),
+            Vec3::new(0.5, 64.0, 0.5),
+        );
+        let slot = p.inventory.hand_slot(Hand::Main);
+        p.inventory.slots[slot] = held;
+        crate::player_attributes::rebuild_player(&mut p, false);
+        p
+    }
+
     #[test]
     fn cooldown_scale_matches_vanilla() {
         // 空手 ATTACK_SPEED=4 → delay=5；ticker=0 时 s=0.1，ticker=5 时 s=1。
-        let empty = ItemStack::empty();
-        let delay = strength_delay(&empty);
+        let player = player_holding(GameMode::Survival, ItemStack::empty());
+        let delay = strength_delay(&player);
         assert_eq!(delay, 5.0);
         assert_eq!(strength_scale(0, delay), 0.1);
         assert_eq!(strength_scale(4, delay), 0.9);
@@ -1673,9 +1652,12 @@ mod tests {
     #[test]
     fn diamond_sword_slows_the_attack() {
         // 钻石剑 ATTACK_SPEED 修饰符 −2.4 → 1.6 → delay = 12.5。
-        let sword = stack(mc_bamboo_data::items::DIAMOND_SWORD);
-        assert!((strength_delay(&sword) - 12.5).abs() < 0.001);
-        assert!((attack_speed(&sword) - 1.6).abs() < 0.001);
+        let player = player_holding(
+            GameMode::Survival,
+            stack(mc_bamboo_data::items::DIAMOND_SWORD),
+        );
+        assert!((strength_delay(&player) - 12.5).abs() < 0.001);
+        assert!((player.attributes.value(attribute::ATTACK_SPEED) - 1.6).abs() < 0.001);
     }
 
     #[test]
@@ -1763,6 +1745,7 @@ mod tests {
             "minecraft:bane_of_arthropods",
             3,
         );
+        crate::player_attributes::rebuild(&mut region);
         region.players.get_mut(&id).unwrap().attack_strength_ticker = 100;
         let spider = region
             .entities
@@ -1840,6 +1823,7 @@ mod tests {
             "minecraft:bane_of_arthropods",
             3,
         );
+        crate::player_attributes::rebuild(&mut region);
         region.players.get_mut(&id).unwrap().attack_strength_ticker = 100;
         let spider = region
             .entities
@@ -1890,6 +1874,7 @@ mod tests {
         let slot = region.players[&id].inventory.hand_slot(Hand::Main);
         region.players.get_mut(&id).unwrap().inventory.slots[slot] = sword.clone();
         region.players.get_mut(&id).unwrap().last_main_hand_item = sword;
+        crate::player_attributes::rebuild(&mut region);
         let main = region
             .entities
             .spawn(Entity::cow(Vec3::new(2.5, 64.0, 0.5)));
@@ -1928,17 +1913,20 @@ mod tests {
             "minecraft:knockback",
             2,
         );
-        assert_eq!(attack_knockback_amount(&knock), 1.0);
+        let knock_player = player_holding(GameMode::Survival, knock.clone());
+        assert_eq!(attack_knockback_amount(&knock_player, &knock), 1.0);
         let sweeping = enchanted(
             mc_bamboo_data::items::DIAMOND_SWORD,
             "minecraft:sweeping_edge",
             3,
         );
-        assert_eq!(sweeping_ratio(&sweeping), 0.75);
-        assert_eq!(
-            sweeping_ratio(&stack(mc_bamboo_data::items::DIAMOND_SWORD)),
-            0.0
+        let sweep_player = player_holding(GameMode::Survival, sweeping);
+        assert_eq!(sweeping_ratio(&sweep_player), 0.75);
+        let plain_player = player_holding(
+            GameMode::Survival,
+            stack(mc_bamboo_data::items::DIAMOND_SWORD),
         );
+        assert_eq!(sweeping_ratio(&plain_player), 0.0);
     }
 
     #[test]
@@ -2078,9 +2066,14 @@ mod tests {
     /// 2.0 in creative. Attack reach uses it, not the 4.5 block-interaction one.
     #[test]
     fn entity_interaction_range_follows_the_creative_modifier() {
-        assert_eq!(entity_interaction_range(GameMode::Survival), 3.0);
-        assert_eq!(entity_interaction_range(GameMode::Creative), 5.0);
-        assert_eq!(entity_interaction_range(GameMode::Adventure), 3.0);
+        let reach = |mode| {
+            player_holding(mode, ItemStack::empty())
+                .attributes
+                .value(attribute::ENTITY_INTERACTION_RANGE) as f32
+        };
+        assert_eq!(reach(GameMode::Survival), 3.0);
+        assert_eq!(reach(GameMode::Creative), 5.0);
+        assert_eq!(reach(GameMode::Adventure), 3.0);
     }
 
     /// 没有 `ATTACK_RANGE` 组件的武器走 `AttackRange.defaultFor`：上限是实体
@@ -2092,7 +2085,7 @@ mod tests {
     #[test]
     fn default_attack_range_uses_the_entity_interaction_range() {
         let empty = ItemStack::empty();
-        let range = attack_range(&empty, GameMode::Survival);
+        let range = attack_range(&empty, 3.0);
         assert_eq!(range.max_reach, 3.0);
         assert_eq!(range.max_creative_reach, 3.0);
         assert_eq!(range.hitbox_margin, 0.0);
@@ -2112,7 +2105,7 @@ mod tests {
         //
         // Creative max is 8.0, so the same cow is out of survival reach but
         // inside creative reach.
-        let creative_range = attack_range(&empty, GameMode::Creative);
+        let creative_range = attack_range(&empty, 5.0);
         assert!(creative_range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, true));
     }
 
@@ -2150,7 +2143,7 @@ mod tests {
             removed,
         };
         assert_eq!(
-            attack_range(&weapon, GameMode::Survival),
+            attack_range(&weapon, 3.0),
             AttackRange {
                 min_reach: 2.0,
                 max_reach: 4.0,
@@ -2166,7 +2159,7 @@ mod tests {
         // `isInRange` uses `[min − margin − buffer, max + margin + buffer]`.
         let eye = Vec3::new(0.5, 64.0, 0.5);
         let bounds = Aabb::new(3.5, 63.5, 0.0, 4.0, 65.0, 1.0);
-        let range = attack_range(&weapon, GameMode::Survival);
+        let range = attack_range(&weapon, 3.0);
         assert!(range.is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, false));
         assert!(range.is_in_range(eye, bounds, ATTACK_RANGE_BUFFER, true));
         // 没有组件时同一个盒子也在范围内，但上界只有 6.0：更远的盒子只有带
@@ -2175,14 +2168,12 @@ mod tests {
         // Without the component the same box is still in range, but the upper
         // limit is 6.0: a farther box needs the component or creative mode.
         let far = Aabb::new(7.9, 63.5, 0.0, 8.4, 65.0, 1.0);
-        assert!(
-            !attack_range(&ItemStack::empty(), GameMode::Survival).is_in_range(
-                eye,
-                far,
-                ATTACK_RANGE_BUFFER,
-                false
-            )
-        );
+        assert!(!attack_range(&ItemStack::empty(), 3.0).is_in_range(
+            eye,
+            far,
+            ATTACK_RANGE_BUFFER,
+            false
+        ));
         assert!(range.is_in_range(eye, far, ATTACK_RANGE_BUFFER, false));
     }
 
@@ -2221,8 +2212,16 @@ mod tests {
         region.insert_player(v);
         let eye = Vec3::new(0.5, 65.62, 0.5);
         let held = ItemStack::empty();
-        let standing = resolve_target(&region, attacker, victim.0, eye, GameMode::Survival, &held)
-            .expect("the standing victim is a valid target");
+        let standing = resolve_target(
+            &region,
+            attacker,
+            victim.0,
+            eye,
+            GameMode::Survival,
+            3.0,
+            &held,
+        )
+        .expect("the standing victim is a valid target");
         assert_eq!(standing.dimensions, (0.6, 1.8));
 
         entity_sync::on_player_input(
@@ -2232,8 +2231,16 @@ mod tests {
         );
         let box3d = region.players[&victim].bounding_box();
         assert!((box3d.max_y - box3d.min_y - 1.5).abs() < 1.0e-9);
-        let crouching = resolve_target(&region, attacker, victim.0, eye, GameMode::Survival, &held)
-            .expect("the crouching victim is a valid target");
+        let crouching = resolve_target(
+            &region,
+            attacker,
+            victim.0,
+            eye,
+            GameMode::Survival,
+            3.0,
+            &held,
+        )
+        .expect("the crouching victim is a valid target");
         assert_eq!(crouching.dimensions, (0.6, 1.5));
     }
 

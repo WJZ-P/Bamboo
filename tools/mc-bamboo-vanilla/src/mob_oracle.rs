@@ -39,6 +39,7 @@ mod attack_target;
 mod bat;
 mod bee;
 mod bee_ai;
+mod bee_locate;
 mod bee_release;
 mod brain;
 mod egg;
@@ -48,6 +49,7 @@ mod fish;
 mod gen_spawn;
 mod golem;
 mod grazing;
+mod guardian_scene;
 mod lightning;
 mod llama_spit;
 mod natural_spawn;
@@ -145,6 +147,7 @@ enum Line {
     UndeadHorseDeath(undead_horse::UndeadHorseDeathCase),
     Bee(Box<bee::BeeCase>),
     BeeAi(Box<bee_ai::BeeAiCase>),
+    BeeLocate(Box<bee_locate::BeeLocateCase>),
     BeeRelease(Box<bee_release::BeeReleaseCase>),
     Golem(Box<golem::GolemCase>),
     GolemAttackRoll(golem::GolemAttackRollCase),
@@ -157,6 +160,7 @@ enum Line {
     VillagerDeath(villager::VillagerDeathCase),
     VillagerBrain(Box<villager::VillagerBrainCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
+    Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -198,6 +202,13 @@ struct Case {
     first_id: i32,
     start_time: i64,
     blocks: Vec<[i32; 4]>,
+    /// 0 号生物靴子槽的附魔（注册名、等级）；空串表示没有。
+    ///
+    /// Enchantment on mob 0's boots (registry name, level); empty means none.
+    #[serde(default)]
+    boot_enchantment: String,
+    #[serde(default)]
+    boot_enchantment_level: i32,
     cows: Vec<CowSetup>,
     players: Vec<PlayerSetup>,
     /// 马科场景：让这名玩家骑上 0 号生物，-1 表示没人骑。
@@ -862,12 +873,24 @@ struct ZombieFacts {
     /// `InhabitedTime` 场景：逐刻按候选区块集合累加，并输出区域难度 `ed`。
     accumulates_inhabited: bool,
     can_see_sky: bool,
+    /// 引雷对拍：只有这个坐标看不到天，用来钉死 `can_see_sky` 的采样点。
+    /// 缺省时全部坐标都按 `can_see_sky` 返回。
+    ///
+    /// Channeling parity: only this position cannot see the sky, pinning down
+    /// the `can_see_sky` sample position. When unset every position uses the
+    /// global `can_see_sky` value.
+    covered_sky_pos: Option<BlockPos>,
     sky_darken: i32,
     difficulty: i32,
     bright_outside: bool,
     monsters_burn: bool,
     sea_level: i32,
     raining: bool,
+    /// 引雷场景：雷雨但不一定靠 `natural_spawn` 注入雷级别。
+    ///
+    /// Channeling scenes: a thunderstorm whose thunder level is injected
+    /// directly rather than through `natural_spawn`.
+    thundering: bool,
     /// 蜂巢对拍直接注入官方的 `BEES_STAY_IN_HIVE` 常量层。
     bees_stay: Option<bool>,
     /// 热群系 / 下界场景注入的 `SNOW_GOLEM_MELTS`。
@@ -875,6 +898,36 @@ struct ZombieFacts {
     /// 村民日程活动（主世界时钟求值；`None` 时按 `clock` 现场算）。
     villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
     baby_villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
+}
+
+/// 给生物穿上带指定附魔的靴子，和官方场景的 `ItemStack.enchant` 一致。
+fn set_enchanted_boots(
+    mob: &mut mc_bamboo_blocks::entity::mob::Mob,
+    enchantment: &str,
+    level: i32,
+) {
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+    let id = mc_bamboo_data::registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|entry| *entry == enchantment)
+        })
+        .expect("scene enchantment exists") as i32;
+    let mut stack = ItemStack::new(mc_bamboo_data::items::DIAMOND_BOOTS, 1);
+    let mut patch = ComponentPatch::from_opaque(&stack).unwrap_or_default();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+        PatchEntry::Set(ComponentValue::Enchantments(vec![(id, level)])),
+    );
+    let (added, removed) = patch.to_opaque();
+    stack.added = added;
+    stack.removed = removed;
+    mob.equipment
+        .set(mc_bamboo_protocol::packet::play::EquipmentSlot::Feet, stack);
 }
 
 /// 假世界：方块表、玩家表、世界随机源。和 `entity-oracle` 的那个同一个做法。
@@ -966,6 +1019,39 @@ impl Level for MobLevel {
             self.blocks.insert(pos, state);
         }
         true
+    }
+
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`。假世界没有
+    /// 常驻的 POI 表，这里按 `blocks` 里当前登记的蜂巢 / 蜂箱状态现建一份
+    /// `PoiStore`，让 `bee_locate` 场景走和真实世界同一套 POI 遍历序。
+    /// 只匹配 `beehive` / `bee_nest` 两类，别的 POI 状态不进候选。
+    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        use mc_bamboo_world::poi::{Occupancy, PoiStore};
+        let beehive = mc_bamboo_data::poi::poi_type_id("beehive");
+        let bee_nest = mc_bamboo_data::poi::poi_type_id("bee_nest");
+        // 官方同一 HashSet 桶内的记录保持插入序；`self.blocks` 是 HashMap，
+        // 迭代序不确定。两边都按 (x,y,z) 排序后登记，并列桶序才可复现。
+        let mut entries: Vec<(BlockPos, u32)> = self
+            .blocks
+            .iter()
+            .map(|(&pos, &state)| (pos, state.0))
+            .collect();
+        entries.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z));
+        let mut poi = PoiStore::new();
+        for (pos, state) in entries {
+            if let Some(kind) = mc_bamboo_data::poi::for_state(state) {
+                poi.add(pos, kind);
+            }
+        }
+        poi.get_in_range(
+            |kind| Some(kind) == beehive || Some(kind) == bee_nest,
+            center,
+            radius,
+            Occupancy::Any,
+        )
+        .into_iter()
+        .map(|record| record.pos)
+        .collect()
     }
 
     fn is_unobstructed(&self, _boxes: &[mc_bamboo_blocks::Aabb]) -> bool {
@@ -1166,10 +1252,11 @@ impl Level for MobLevel {
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
         mc_bamboo_blocks::BlockWeather {
             rain_level: if self.facts.raining { 1.0 } else { 0.0 },
-            thunder_level: if self
-                .natural_spawn
-                .as_ref()
-                .is_some_and(|scene| scene.thunder)
+            thunder_level: if self.facts.thundering
+                || self
+                    .natural_spawn
+                    .as_ref()
+                    .is_some_and(|scene| scene.thunder)
             {
                 1.0
             } else {
@@ -1177,8 +1264,8 @@ impl Level for MobLevel {
             },
         }
     }
-    fn can_see_sky(&self, _pos: BlockPos) -> bool {
-        self.facts.can_see_sky
+    fn can_see_sky(&self, pos: BlockPos) -> bool {
+        self.facts.can_see_sky && self.facts.covered_sky_pos != Some(pos)
     }
 
     fn is_raining_at(&self, _pos: BlockPos) -> bool {
@@ -1582,6 +1669,7 @@ impl Report {
                 Line::UndeadHorseDeath(case) => self.replay_undead_horse_death(&case),
                 Line::Bee(case) => self.replay_bee(&case),
                 Line::BeeAi(case) => self.replay_bee_ai(&case),
+                Line::BeeLocate(case) => self.replay_bee_locate(&case),
                 Line::BeeRelease(case) => self.replay_bee_release(&case),
                 Line::Golem(case) => self.replay_golem(&case),
                 Line::GolemAttackRoll(case) => self.replay_golem_attack_roll(&case),
@@ -1594,6 +1682,7 @@ impl Report {
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
                 Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
+                Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),
@@ -1746,6 +1835,7 @@ impl Report {
                 inhabited_time: 0,
                 accumulates_inhabited: case.name.starts_with("zombie_inhabited_"),
                 can_see_sky: case.monsters_burn,
+                covered_sky_pos: None,
                 snow_golem_melts: false,
                 villager_activity: None,
                 baby_villager_activity: None,
@@ -1759,6 +1849,7 @@ impl Report {
                 },
                 sea_level: case.sea_level,
                 raining: case.raining,
+                thundering: false,
                 bees_stay: None,
             },
             natural_spawn: None,
@@ -1793,6 +1884,8 @@ impl Report {
                     gaze_disguise: false,
                     alive: true,
                     spectator: false,
+                    game_mode: 0,
+                    mining_fatigue: None,
                     creative: false,
                     sneaking: false,
                     sprinting: false,
@@ -1928,6 +2021,26 @@ impl Report {
                     entity.random = JavaRandom::new(cow.seed);
                     entity.y_rot = yaw;
                     entity.old_position = position;
+                    // 改坏确认 `frost_radius`：不给 0 号生物穿靴子，结冰格子必须全对不上。
+                    // Break check `frost_radius`: no boots means no frozen cells.
+                    if !case.boot_enchantment.is_empty()
+                        && index == 0
+                        && break_test != Some("frost_radius")
+                    {
+                        // 官方场景给 0 号生物穿附魔靴子并设 onGround；同种子、
+                        // 同装备才能让 location_changed 效果逐刻对齐。
+                        entity.on_ground = true;
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            // 改坏确认 `frost_level`：等级一律按 1 算，2 级场景的
+                            // 外圈格子必须报不一致。
+                            let level = if break_test == Some("frost_level") {
+                                1
+                            } else {
+                                case.boot_enchantment_level
+                            };
+                            set_enchanted_boots(mob, &case.boot_enchantment, level);
+                        }
+                    }
                     if let Some(mob) = entity.kind.mob_mut() {
                         // 和官方一侧一样，场景里的牛 UUID 是 (0, 下标 + 1)。
                         mob.uuid = (index as u128 + 1).to_be_bytes();
