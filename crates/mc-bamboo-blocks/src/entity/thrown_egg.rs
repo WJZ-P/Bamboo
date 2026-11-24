@@ -578,10 +578,7 @@ fn ender_pearl_impact(me: &mut Entity, world: &mut World<'_>, hit: EggHit) {
     // `portalCooldown`，缺省 0，这里照官方的假分支跳过 `setPortalCooldown`。
     // `isOnPortalCooldown()` is false for a pearl that never teleported; Bamboo
     // entities have no `portalCooldown` yet.
-    world.push_effect(crate::Effect::EnderPearlTeleport {
-        target: owner.uid,
-        position: landing,
-    });
+    world.teleport_player(owner.uid, landing);
     world.hurt_player_from_mob(
         owner.uid,
         DamageSource::environment(DamageKind::EnderPearl),

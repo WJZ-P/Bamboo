@@ -144,6 +144,79 @@ pub struct ReplayEggThrow {
     pub left: i32,
     pub level_seed: i64,
     pub item_used: Vec<(i32, i32)>,
+    /// 扔完之后物品是不是进了冷却。鸡蛋没有 `use_cooldown`，恒假。
+    ///
+    /// Whether the stack is on cooldown after the throw. Eggs have no
+    /// `use_cooldown`, so this is always false for them.
+    pub cooldown: bool,
+}
+
+/// 用游戏里同一个 [`throw`] 入口重放一次扔末影珍珠，连冷却一起回报。
+///
+/// Replays throwing an ender pearl through the same [`throw`] entry and reports the
+/// cooldown it leaves behind.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_pearl_throw(
+    yaw: f32,
+    pitch: f32,
+    movement: Option<mc_bamboo_core::Vec3>,
+    creative: bool,
+) -> Option<ReplayEggThrow> {
+    use mc_bamboo_blocks::entity::EntityKind;
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::ClientInformation};
+
+    let mut region = Region::new(2, 20, false);
+    region.random = mc_bamboo_blocks::LevelRandom::new(1);
+    let id = PlayerId(1 << 24);
+    let mode = if creative {
+        GameMode::Creative
+    } else {
+        GameMode::Survival
+    };
+    let mut player = crate::player::Player::new(
+        id,
+        uuid::Uuid::from_u128(1),
+        "PearlOracle0".to_owned(),
+        mode,
+        ClientInformation::default(),
+        mc_bamboo_core::Vec3::new(0.5, 64.0, 0.5),
+    );
+    player.yaw = yaw;
+    player.head_yaw = yaw;
+    player.pitch = pitch;
+    player.motion.known_movement = movement.unwrap_or_default();
+    let main = player.inventory.hand_slot(Hand::Main);
+    player.inventory.slots[main] = ItemStack::new(items::ENDER_PEARL, 3);
+    region.insert_player(player);
+    if !throw(&mut region, id, Hand::Main) {
+        return None;
+    }
+    let uid = region.entities.ids().into_iter().next()?;
+    let entity = region.entities.get(uid)?;
+    let EntityKind::Egg(egg) = &entity.kind else {
+        return None;
+    };
+    let (p, v) = (entity.position, entity.delta);
+    let player = region.players.get_mut(&id)?;
+    let on_cooldown = player.cooldowns.is_on_cooldown(items::ENDER_PEARL, None);
+    Some(ReplayEggThrow {
+        motion: [
+            p.x.to_bits() as i64,
+            p.y.to_bits() as i64,
+            p.z.to_bits() as i64,
+            v.x.to_bits() as i64,
+            v.y.to_bits() as i64,
+            v.z.to_bits() as i64,
+            i64::from(entity.y_rot.to_bits() as i32),
+            i64::from(egg.x_rot.to_bits() as i32),
+        ],
+        seed: entity.random.state(),
+        item: [egg.item.item, egg.item.count],
+        left: player.inventory.slots[main].count,
+        level_seed: region.random.source().seed(),
+        item_used: player.item_use_stats.take_dirty(),
+        cooldown: on_cooldown,
+    })
 }
 
 /// 用游戏里同一个 [`throw`] 入口重放一次扔棕色鸡蛋。
@@ -208,5 +281,6 @@ pub fn replay_throw(
         left: player.inventory.slots[main].count,
         level_seed: region.random.source().seed(),
         item_used: player.item_use_stats.take_dirty(),
+        cooldown: false,
     })
 }

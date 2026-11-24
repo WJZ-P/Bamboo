@@ -140,6 +140,45 @@ impl ReplayPlayers {
         }
     }
 
+    /// 末影珍珠的传送：`ServerPlayer.teleport` 成功后的位置、速度清零和下落距离清零。
+    ///
+    /// An ender pearl teleport: the position plus the zeroed velocity and fall distance
+    /// of a successful `ServerPlayer.teleport`.
+    pub fn teleport(&mut self, target: EntityUid, position: Vec3) {
+        let Region {
+            players,
+            player_grid,
+            ..
+        } = &mut self.region;
+        let Some(player) = players.get_mut(&PlayerId(target)) else {
+            return;
+        };
+        player.motion.delta = Vec3::default();
+        player.motion.fall_distance = 0.0;
+        player.on_ground = false;
+        player.set_position(player_grid, position);
+    }
+
+    /// 对拍里玩家此刻的位置。
+    ///
+    /// The replay player's current position.
+    pub fn position(&self, target: EntityUid) -> Vec3 {
+        self.region
+            .players
+            .get(&PlayerId(target))
+            .map_or(Vec3::default(), crate::player::Player::position)
+    }
+
+    /// 设玩家的朝向（`yaw`/`pitch`），末影螨 `snapTo` 主人时读它。
+    ///
+    /// Set the player's facing, read when an endermite snaps to its owner.
+    pub fn set_rotation(&mut self, target: EntityUid, yaw: f32, pitch: f32) {
+        if let Some(player) = self.region.players.get_mut(&PlayerId(target)) {
+            player.yaw = yaw;
+            player.pitch = pitch;
+        }
+    }
+
     /// 玩家当前生效的效果列表：`[效果 ID, 剩余时长, 等级]`（按 ID 升序）。
     ///
     /// Active effects on a replay player as `[effect_id, duration, amplifier]` sorted by id.

@@ -1263,6 +1263,20 @@ pub trait Level: LevelSideState + LevelEntities {
         None
     }
 
+    /// 精确驱动当场把玩家放到 `position`（末影珍珠的 `ServerPlayer.teleport` 落点）。
+    /// `false` 表示这一层做不到，调用方改成延后的 [`Effect::EnderPearlTeleport`]。
+    ///
+    /// Apply an ender pearl teleport to a player at once in the precise driver.
+    /// `false` means this level cannot, and the caller defers an
+    /// [`Effect::EnderPearlTeleport`].
+    fn teleport_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _position: mc_bamboo_core::Vec3,
+    ) -> bool {
+        false
+    }
+
     /// 精确驱动当场给玩家一次 `LivingEntity.knockback(strength, dx, dz)`（山羊冲撞）。
     /// `false` 表示这一层做不到，这次击退就没有了。
     ///

@@ -749,6 +749,18 @@ impl<'a> World<'a> {
             .knock_back_player_now(target, strength, direction);
     }
 
+    /// 末影珍珠把主人放到 `position`：能当场做就当场做，否则记成延后的效果。
+    ///
+    /// An ender pearl putting its owner at `position`: at once when the level can,
+    /// otherwise a deferred effect.
+    pub fn teleport_player(&mut self, target: crate::entity::EntityUid, position: Vec3) -> bool {
+        if self.level.teleport_player_now(target, position) {
+            return true;
+        }
+        self.push_effect(Effect::EnderPearlTeleport { target, position });
+        false
+    }
+
     /// 生物给玩家点火（`Entity.igniteForTicks`）：能当场就当场，否则记成延后的效果。
     pub fn ignite_player_from_mob(&mut self, target: crate::entity::EntityUid, ticks: i32) {
         if !self.level.ignite_player_now(target, ticks) {
