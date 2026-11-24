@@ -21,7 +21,9 @@ use crate::entity::{
 };
 use crate::{
     behaviour::machines::beehive_entity::BeehiveEntity,
-    state::{AGE_3, AGE_7, AGE_15, BERRIES, BlockState},
+    state::{
+        AGE_3, AGE_7, AGE_15, BERRIES, BlockState, DOUBLE_BLOCK_HALF, DoubleBlockHalf, WATERLOGGED,
+    },
     world::World,
 };
 use mc_bamboo_core::{BlockPos, Vec3};
@@ -34,10 +36,20 @@ pub enum BeeGoal {
     Attack,
     /// `BeeEnterHiveGoal`：在巢 2 格内、想进巢、巢没满时把自己存进去。
     EnterHive,
-    /// `ValidateHiveGoal`：每 20 刻检查巢还有效。
-    ValidateHive,
-    /// `ValidateFlowerGoal`：每 20 刻检查记住的花是不是花。
-    ValidateFlower,
+    /// `ValidateHiveGoal`：每 20–40 刻（构造时抽）检查已加载的巢是否还有效。
+    ///
+    /// `ValidateHiveGoal`: every 20–40 ticks (drawn at construction), drop the hive if loaded and invalid.
+    ValidateHive {
+        cooldown: i32,
+        last_validate_tick: i64,
+    },
+    /// `ValidateFlowerGoal`：每 20–40 刻（构造时抽）检查已加载的花是否还吸引蜜蜂。
+    ///
+    /// `ValidateFlowerGoal`: every 20–40 ticks (drawn at construction), drop the flower if loaded and invalid.
+    ValidateFlower {
+        cooldown: i32,
+        last_validate_tick: i64,
+    },
     /// `BeePollinateGoal`：找花、悬停、采粉 400 刻后拿蜜。
     Pollinate(Pollinate),
     /// `BeeLocateHiveGoal`：200 刻一次找 20 格内没满的巢。
@@ -96,8 +108,8 @@ impl BeeGoal {
         match self {
             Self::Attack => "BeeAttackGoal",
             Self::EnterHive => "BeeEnterHiveGoal",
-            Self::ValidateHive => "ValidateHiveGoal",
-            Self::ValidateFlower => "ValidateFlowerGoal",
+            Self::ValidateHive { .. } => "ValidateHiveGoal",
+            Self::ValidateFlower { .. } => "ValidateFlowerGoal",
             Self::Pollinate(_) => "BeePollinateGoal",
             Self::LocateHive => "BeeLocateHiveGoal",
             Self::GoToHive(_) => "BeeGoToHiveGoal",
@@ -158,8 +170,20 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 scare: None,
             },
         ),
-        wrap(3, Goal::Bee(BeeGoal::ValidateHive)),
-        wrap(3, Goal::Bee(BeeGoal::ValidateFlower)),
+        wrap(
+            3,
+            Goal::Bee(BeeGoal::ValidateHive {
+                cooldown: 20,
+                last_validate_tick: -1,
+            }),
+        ),
+        wrap(
+            3,
+            Goal::Bee(BeeGoal::ValidateFlower {
+                cooldown: 20,
+                last_validate_tick: -1,
+            }),
+        ),
         wrap(4, Goal::Bee(BeeGoal::Pollinate(Pollinate::default()))),
         wrap(
             5,
@@ -220,11 +244,45 @@ fn wants_to_enter_hive(mob: &Mob, view: &dyn BlockView) -> bool {
     true
 }
 
+/// 官方 `Bee.attractsBees(BlockState)`：`#bee_attractive`、未含水，向日葵只认上半格。
+///
+/// Vanilla `Bee.attractsBees(BlockState)`: `#bee_attractive`, not waterlogged, and only
+/// the upper half of sunflowers.
+pub fn attracts_bees(state: BlockState) -> bool {
+    if !state.is_tagged(block_tags::BEE_ATTRACTIVE) {
+        return false;
+    }
+    if state.try_get(WATERLOGGED).unwrap_or(false) {
+        return false;
+    }
+    if state.is(blocks::SUNFLOWER) {
+        return state.try_get(DOUBLE_BLOCK_HALF) == Some(DoubleBlockHalf::Upper);
+    }
+    true
+}
+
+/// 构造函数里由 `Bee.registerGoals` 抽取 `ValidateHiveGoal` 与 `ValidateFlowerGoal` 的冷却。
+///
+/// Constructor RNG draws in `Bee.registerGoals` for `ValidateHiveGoal` and `ValidateFlowerGoal`.
+pub(crate) fn init_validate_cooldowns(mob: &mut Mob, random: &mut crate::entity::JavaRandom) {
+    for wrapped in &mut mob.goals.goals {
+        match &mut wrapped.goal {
+            Goal::Bee(BeeGoal::ValidateHive { cooldown, .. })
+            | Goal::Bee(BeeGoal::ValidateFlower { cooldown, .. }) => {
+                *cooldown = random.next_int_bounded(21) + 20;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn hive_valid(mob: &Mob, view: &dyn BlockView, me: &Entity) -> bool {
     let Some(hive) = mob.bee.hive_pos else {
         return false;
     };
-    !too_far(me, hive, 48.0) && view.block_state(hive).is_tagged(block_tags::BEEHIVES)
+    !too_far(me, hive, 48.0)
+        && view.has_block_entity(hive)
+        && view.block_state(hive).is_tagged(block_tags::BEEHIVES)
 }
 
 fn closer_than(me: &Entity, pos: BlockPos, distance: f64) -> bool {
@@ -262,20 +320,14 @@ impl BeeGoal {
                     && view.has_block_entity(hive)
                     && !view.beehive_full(hive)
             }
-            Self::ValidateHive | Self::ValidateFlower => {
-                me.tick_count % 20 == 0
-                    && match self {
-                        Self::ValidateHive => !hive_valid(mob, view, me),
-                        _ => {
-                            let Some(flower) = mob.bee.saved_flower_pos else {
-                                return false;
-                            };
-                            !view
-                                .block_state(flower)
-                                .is_tagged(block_tags::BEE_ATTRACTIVE)
-                        }
-                    }
+            Self::ValidateHive {
+                cooldown,
+                last_validate_tick,
             }
+            | Self::ValidateFlower {
+                cooldown,
+                last_validate_tick,
+            } => now > *last_validate_tick + i64::from(*cooldown),
             Self::Pollinate(p) => {
                 if mob.bee.remaining_cooldown_before_locating_new_flower > 0
                     || mob.bee.has_nectar()
@@ -384,8 +436,8 @@ impl BeeGoal {
                 goals::target_goal_can_continue(me, mob, ctx)
             }
             Self::EnterHive
-            | Self::ValidateHive
-            | Self::ValidateFlower
+            | Self::ValidateHive { .. }
+            | Self::ValidateFlower { .. }
             | Self::LocateHive
             | Self::ResetUniversalAnger => false,
         }
@@ -407,11 +459,27 @@ impl BeeGoal {
                     ctx.emit(Command::BeeEnterHive { hive }, me);
                 }
             }
-            Self::ValidateHive => mob.bee.hive_pos = None,
-            Self::ValidateFlower => {
-                mob.bee.saved_flower_pos = None;
-                mob.bee.remaining_cooldown_before_locating_new_flower =
-                    me.random.next_int_bounded(41) + 20;
+            Self::ValidateHive {
+                last_validate_tick, ..
+            } => {
+                if let Some(hive) = mob.bee.hive_pos
+                    && view.is_loaded(hive)
+                    && !hive_valid(mob, view, me)
+                {
+                    drop_hive(mob, me);
+                }
+                *last_validate_tick = view.game_time();
+            }
+            Self::ValidateFlower {
+                last_validate_tick, ..
+            } => {
+                if let Some(flower) = mob.bee.saved_flower_pos
+                    && view.is_loaded(flower)
+                    && !attracts_bees(view.block_state(flower))
+                {
+                    drop_flower(mob, me);
+                }
+                *last_validate_tick = view.game_time();
             }
             Self::Pollinate(p) => {
                 p.successful_pollinating_ticks = 0;
@@ -491,8 +559,8 @@ impl BeeGoal {
             Self::HurtByOther | Self::BecomeAngryTarget => mob.target = None,
             Self::Attack
             | Self::EnterHive
-            | Self::ValidateHive
-            | Self::ValidateFlower
+            | Self::ValidateHive { .. }
+            | Self::ValidateFlower { .. }
             | Self::LocateHive
             | Self::GrowCrops
             | Self::Wander
@@ -536,8 +604,8 @@ impl BeeGoal {
                 }
             }
             Self::EnterHive
-            | Self::ValidateHive
-            | Self::ValidateFlower
+            | Self::ValidateHive { .. }
+            | Self::ValidateFlower { .. }
             | Self::LocateHive
             | Self::ResetUniversalAnger => {}
         }

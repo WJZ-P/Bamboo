@@ -1225,11 +1225,23 @@ impl GoalSelector {
 
     pub(crate) fn rebase_clock(&mut self, delta: i64) {
         for goal in &mut self.goals {
-            if let Goal::MeleeAttack {
-                last_can_use_check, ..
-            } = &mut goal.goal
-            {
-                *last_can_use_check = last_can_use_check.saturating_add(delta);
+            match &mut goal.goal {
+                Goal::MeleeAttack {
+                    last_can_use_check, ..
+                } => {
+                    *last_can_use_check = last_can_use_check.saturating_add(delta);
+                }
+                Goal::Bee(
+                    super::bee_goals::BeeGoal::ValidateHive {
+                        last_validate_tick, ..
+                    }
+                    | super::bee_goals::BeeGoal::ValidateFlower {
+                        last_validate_tick, ..
+                    },
+                ) if *last_validate_tick >= 0 => {
+                    *last_validate_tick = last_validate_tick.saturating_add(delta);
+                }
+                _ => {}
             }
         }
     }
