@@ -757,15 +757,11 @@ pub(crate) fn split_ready(
         {
             return false;
         }
-        // 玩家骑手和载具是不可分的一组：载具那边的区块归哪边，玩家就必须归哪边。
-        // 载具跟着玩家跑到切口对面时推迟拆分，等两边重新对齐（或玩家下车）。
-        if let Some(vehicle) = player.riding.vehicle {
-            let root = crate::riding::root_vehicle(region, vehicle);
-            if let Some(public) = region.entities.public_at(root)
-                && inside(public.chunk_position()) != side
-            {
-                return false;
-            }
+        // 玩家骑手和整棵骑乘树是不可分的一组：树的每一个区块都必须在玩家
+        // 这一边。载具跑到切口对面时推迟拆分，等两边重新对齐（或玩家下车）。
+        let tree_chunks = crate::riding::riding_tree_chunks(region, player.id);
+        if tree_chunks.iter().any(|&pos| inside(pos) != side) {
+            return false;
         }
     }
     !region.entity_tracking.straddles(players)
