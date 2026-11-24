@@ -338,7 +338,7 @@ impl BambooConfig {
                 "# 去重、排优先级、按节点预算算，结果下一刻交给生物；转向晚 50 毫秒。\n",
                 "mob_pathfinding_phase = {}\n",
                 "\n",
-                "# 每个岛每刻最多展开的 A* 节点数，0 = 4096。超出的请求顺延，等得越久越先算。\n",
+                "# 每个岛每刻最多展开的 A* 节点数，0 = 65536。超出的请求顺延，等得越久越先算。\n",
                 "mob_pathfinding_budget = {}\n",
                 "\n",
                 "# 寻路失败冷却（Paper 的数值）：连续失败超过 10 次后 40 刻内不再试。缺省 false。\n",
@@ -1477,6 +1477,9 @@ mod tests {
         assert_eq!(defaults.bamboo.mob_throttle_distance, 0);
         assert_eq!(defaults.bamboo.mob_sleep_distance, 0);
         assert_eq!(defaults.bamboo.mob_wakeups_scale, 1);
+        assert!(!defaults.bamboo.mob_pathfinding_phase);
+        assert_eq!(defaults.bamboo.mob_pathfinding_budget, 0);
+        assert!(!defaults.bamboo.mob_pathfinding_fail_cooldown);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
         assert_eq!(defaults.bamboo.island_threads, recommended_island_threads());
@@ -1527,6 +1530,9 @@ mod tests {
         files.bamboo.mob_throttle_distance = 32;
         files.bamboo.mob_sleep_distance = 64;
         files.bamboo.mob_wakeups_scale = 2;
+        files.bamboo.mob_pathfinding_phase = true;
+        files.bamboo.mob_pathfinding_budget = 8192;
+        files.bamboo.mob_pathfinding_fail_cooldown = true;
         files.bamboo.forwarding = ForwardingMode::Modern;
         files.bamboo.forwarding_secret = "s\"ec\\ret".to_owned();
         files.bamboo.deliveries_per_tick = 0;
@@ -1581,7 +1587,7 @@ mod tests {
         let dir = Temp::new();
         fs::write(
             dir.path().join(BAMBOO_FILE),
-            "entity_threads = -1\nmax_entity_collisions = -3\nmob_throttle_distance = -9\nmob_sleep_distance = \"far\"\nmob_wakeups_scale = 99\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
+            "entity_threads = -1\nmax_entity_collisions = -3\nmob_throttle_distance = -9\nmob_sleep_distance = \"far\"\nmob_wakeups_scale = 99\nmob_pathfinding_phase = \"yes\"\nmob_pathfinding_budget = -1\nmob_pathfinding_fail_cooldown = 3\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
         )
         .unwrap();
         let loaded = read(dir.path()).unwrap();
@@ -1590,6 +1596,9 @@ mod tests {
         assert_eq!(loaded.bamboo.mob_throttle_distance, 0);
         assert_eq!(loaded.bamboo.mob_sleep_distance, 0);
         assert_eq!(loaded.bamboo.mob_wakeups_scale, 1, "超上限回落到缺省 1");
+        assert!(!loaded.bamboo.mob_pathfinding_phase);
+        assert_eq!(loaded.bamboo.mob_pathfinding_budget, 0);
+        assert!(!loaded.bamboo.mob_pathfinding_fail_cooldown);
         assert_eq!(loaded.bamboo.deliveries_per_tick, 64);
         assert_eq!(loaded.bamboo.keep_alive_interval, Duration::from_secs(15));
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);

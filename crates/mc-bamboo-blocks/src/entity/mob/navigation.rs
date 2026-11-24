@@ -334,7 +334,8 @@ impl Navigation {
         // 独立寻路阶段打开时，把搜索换成一条挂起请求；下一刻结果到了再由
         // [`pathfinding::install`] 或下一次 `create_path` 取走。
         if pathfinding::Config::of(&view.block_game_rules()).enabled {
-            return self.deferred_path(request, mob);
+            let hint = self.next_action;
+            return self.deferred_path(request, mob, hint);
         }
         let path = find_path(view, &request);
         if let Some(path) = &path {
@@ -349,10 +350,18 @@ impl Navigation {
     ///
     /// 结果的目标点和这次的请求一致才交付；目标换了就丢掉旧结果、重新挂请求。
     /// 返回 `None` 表示「这一刻还没有路径」，调用点按官方「没有路径」处理。
-    fn deferred_path(&mut self, request: PathRequest, mob: &NavMob) -> Option<Path> {
+    fn deferred_path(
+        &mut self,
+        request: PathRequest,
+        mob: &NavMob,
+        hint: Option<Action>,
+    ) -> Option<Path> {
         let at = request.target;
         if let Some(replay) = self.replay.take() {
-            if !replay.consumed && replay.at == at {
+            // 检查结果的调用点是在重试同一个检查：目标方块可能已经挪了半格，
+            // 仍然按当时存下的目标点交付；`move_to` 则要求目标一致。
+            let retry = matches!(replay.action, Action::Inspect(_)) && hint == Some(replay.action);
+            if !replay.consumed && (replay.at == at || retry) {
                 if replay.path.is_some() {
                     self.target_pos = Some(replay.at);
                     self.reach_range = request.reach_range;
@@ -360,8 +369,8 @@ impl Navigation {
                 }
                 return replay.path;
             }
-            // 目标换了，旧结果作废，落到下面重新挂请求。
         }
+        // 走到这里说明没有可用的结果（目标换了，旧结果已经丢掉），重新挂请求。
         if self
             .pending_request
             .as_ref()

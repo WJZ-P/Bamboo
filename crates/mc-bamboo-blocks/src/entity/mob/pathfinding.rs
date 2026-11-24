@@ -24,7 +24,7 @@ use crate::{
 use super::path::{Path, PathRequest};
 
 /// 缺省的节点预算：chase 场景每刻约 730 个节点，留几倍余量仍能容下突发。
-pub const DEFAULT_BUDGET: u32 = 4096;
+pub const DEFAULT_BUDGET: u32 = 65536;
 /// 连续失败超过这么多次就进入冷却（Paper `SpigotWorldConfig` 的 `10`）。
 pub const FAILURE_THRESHOLD: u32 = 10;
 /// 冷却时长（Paper 的 40 刻）。
@@ -411,7 +411,7 @@ impl PhaseState {
                 .retain(|pending| !cooling.contains(&pending.uid));
         }
         let mut ordered = std::mem::take(&mut self.deferred);
-        ordered.sort_by(|a, b| priority(a, now, players).cmp(&priority(b, now, players)));
+        ordered.sort_by_key(|a| priority(a, now, players));
         // 同一刻、同一只生物只留最后一条：先前的请求已被新目标取代。
         let mut latest: BTreeMap<EntityUid, u64> = BTreeMap::new();
         for pending in &ordered {
@@ -609,10 +609,20 @@ pub fn install(mob: &mut super::Mob, view: &dyn BlockView) {
         return;
     }
     match replay.action {
-        Action::MoveTo { speed } | Action::MoveToEntity { speed } => {
+        Action::MoveTo { speed } => {
             // 结果到了才「开始走」；请求发出的那一刻沿旧路走或原地等。
             mob.navigation
                 .move_to_path(view, &replay.nav, replay.path.clone(), speed);
+            if let Some(slot) = mob.navigation.replay.as_mut() {
+                slot.consumed = true;
+            }
+        }
+        Action::MoveToEntity { speed } => {
+            // 三参数 `moveTo(entity, reach, speed)`：空路径不改旧路径、不改速度。
+            if replay.path.is_some() {
+                mob.navigation
+                    .move_to_path(view, &replay.nav, replay.path.clone(), speed);
+            }
             if let Some(slot) = mob.navigation.replay.as_mut() {
                 slot.consumed = true;
             }

@@ -167,3 +167,68 @@ impl BlockSource for TestSource {
         }
     }
 }
+
+/// 挂起的结果在 `stop`、换目标或序号过期后都丢掉，不塞给生物。
+#[test]
+fn install_drops_cancelled_and_stale_results() {
+    use crate::entity::mob::{
+        Mob, MobType,
+        navigation::NavMob,
+        path::PathMob,
+        pathfinding::{Action, Replay, Use, install},
+    };
+
+    let level = TestLevel::new();
+    let view = test_view(&level, 0);
+    let nav = NavMob {
+        path: PathMob {
+            position: Vec3::new(0.5, 64.0, 0.5),
+            on_ground: true,
+            in_floatable_fluid: false,
+            in_water: false,
+            width: 0.6,
+            height: 1.8,
+            max_up_step: 0.6,
+            max_fall_distance: 3,
+            malus: Default::default(),
+            context: crate::shape::CollisionContext::Empty,
+        },
+        speed: 1.0,
+        in_liquid: false,
+        follow_range: 16.0,
+        game_time: 0,
+    };
+    let replay = |local_serial, target| Replay {
+        serial: (2_u64 << 32) | u64::from(local_serial),
+        local_serial,
+        target,
+        at: BlockPos::new(1, 64, 0),
+        path: None,
+        action: Action::Inspect(Use::Ignore),
+        nav,
+        consumed: false,
+    };
+
+    // stop(): 序号到 3 为止都作废。
+    let mut mob = Mob::new(MobType::Cow);
+    mob.target = None;
+    mob.navigation.request_serial = 3;
+    mob.navigation.stop();
+    mob.navigation.replay = Some(replay(3, -1));
+    install(&mut mob, &view);
+    assert!(mob.navigation.replay.is_none(), "stop 之后的结果要丢掉");
+
+    // 目标变了：发请求时没有目标，结果回来时已经有目标。
+    let mut mob = Mob::new(MobType::Cow);
+    mob.target = Some(9);
+    mob.navigation.replay = Some(replay(4, -1));
+    install(&mut mob, &view);
+    assert!(mob.navigation.replay.is_none(), "换目标之后的结果要丢掉");
+
+    // 目标没变、序号也新：结果留着给原调用点取。
+    let mut mob = Mob::new(MobType::Cow);
+    mob.target = None;
+    mob.navigation.replay = Some(replay(4, -1));
+    install(&mut mob, &view);
+    assert!(mob.navigation.replay.is_some(), "有效结果应当保留");
+}
