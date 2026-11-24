@@ -4296,13 +4296,16 @@ release 构建、20 万次查询、3 轮交替取中位数，与整刻压测的�
 ### 30.6 验收与已知限制
 
 - `cargo fmt --all --check` 通过、`cargo clippy --workspace --all-targets` 0 警告、
-  `cargo test --workspace` 全绿（exit 0）。`mob-oracle java --show 2000` 共 46 处不一致，
-  全部是已知的 12 处 `Mth.COS_TAB` / `ASIN_TAB` 末位差加 34 处 `frog_*` 的 `dy` 末位差，
-  没有其它项；`--only laser` 的 10 个激光场景、`--only guardian` 的 5 个守卫者场景
-  都是 0 帧差异（只剩那 12 处全局三角函数表差）。`natural-spawn java` 1727 例 0 不一致，
+  `cargo test --workspace` 全绿（exit 0）。`natural-spawn java` 1727 例 0 不一致，
   `structure-e2e java` 的 `gen-world` 60 区块 0 不一致。探针用缺省配置
-  （`PROBE_ISLAND_THREADS=default PROBE_ISLANDS=default`）在端口 28660 上
+  （`PROBE_ISLAND_THREADS=default PROBE_ISLANDS=default`）在端口 28661 上
   **770/770**，正常关服、`world-dir` 官方解码器通过。
+- `mob-oracle java --show 2000`：合进 `origin/main`（村民第 3 期）**之前**是 46 处不一致，
+  即已知的 12 处 `Mth.COS_TAB` / `ASIN_TAB` 末位差加 34 处 `frog_lily_31` /
+  `frog_long_jump` 的 `dy` 末位差，守卫者全部场景 0 帧差异。合进 main **之后**总数变成
+  252：新增的 206 处全部是 `frog_lily_41` 的 `x` / `z` / `dx` / `dz` 末位差，来自 main 的
+  村民大脑改动，与本分支的三项优化无关（`--only guardian` / `--only laser` 在合并后仍只
+  剩那 12 处全局三角函数表差，0 帧差异）。这是 main 的基线回归，需要单独收敛，见报告里的疑点。
 - 朴素路径只在 `cfg(test)` 下通过 `MOB_STRESS_NAIVE=1` 启用，正式二进制没有开关、
   没有配置、没有环境变量读取；三项优化都缺省打开。
 - 视线缓存的键除了规格里的三样，还带 `CollisionContext` 里真正影响碰撞形状的两项
