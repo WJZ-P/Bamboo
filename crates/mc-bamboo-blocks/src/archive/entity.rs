@@ -19,8 +19,8 @@ use super::tag::{self, Error, Result, put};
 use crate::{
     BlockState,
     entity::{
-        Entity, EntityKind, EntityRow, ExperienceOrb, FallingBlock, GroundItem, JavaRandom,
-        PrimedTnt,
+        Entity, EntityKind, EntityRow, EntityUid, ExperienceOrb, FallingBlock, GroundItem,
+        JavaRandom, PrimedTnt,
     },
 };
 
@@ -206,7 +206,131 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
     Ok(Tag::Compound(out))
 }
 
-/// 官方 `EntityType.loadEntityRecursive` 的 Bamboo 版。
+/// `Passengers` 嵌套的最大深度。官方读档也递归，但盘上的坏数据不能把栈打穿。
+///
+/// Maximum nesting depth of `Passengers`. Vanilla recurses too, but corrupt
+/// disk data must not overflow the stack.
+const MAX_TREE_DEPTH: usize = 64;
+
+/// 官方 `Entity.save`：写根实体和它的整棵乘客树。乘客不单独成行，而是按
+/// `saveWithoutId` 末尾的 `Passengers` 嵌在载具里；乘客自己的 `Pos` 用载具的 x/z
+/// 加自己的 y。`lookup` 按 uid 取同一份存档里的行，取不到或关系对不上就跳过
+/// （和官方遍历真实对象列表等价，只是坏数据不 panic）。
+///
+/// Vanilla `Entity.save`: write the root and its whole passenger tree. Passengers
+/// are not separate rows; they nest under the vehicle as `Passengers`, with their
+/// `Pos` taken from the vehicle's x/z and their own y.
+pub fn write_entity_tree(
+    row: &EntityRow,
+    lookup: &dyn Fn(EntityUid) -> Option<EntityRow>,
+) -> Result<Tag> {
+    let mut seen = std::collections::BTreeSet::new();
+    seen.insert(row.public.uid);
+    write_tree(row, lookup, &mut seen, 0)
+}
+
+fn write_tree(
+    row: &EntityRow,
+    lookup: &dyn Fn(EntityUid) -> Option<EntityRow>,
+    seen: &mut std::collections::BTreeSet<EntityUid>,
+    depth: usize,
+) -> Result<Tag> {
+    let mut tag = write_entity(row)?;
+    let crate::entity::KindPublic::Mob(mob) = &row.public.kind else {
+        return Ok(tag);
+    };
+    if depth >= MAX_TREE_DEPTH {
+        return Ok(tag);
+    }
+    let mut list = Vec::new();
+    for &uid in &mob.passengers {
+        if uid < crate::entity::FIRST_ENTITY_ID || !seen.insert(uid) {
+            continue;
+        }
+        let Some(child) = lookup(uid) else {
+            continue;
+        };
+        // 双向关系对不上时不信名单：坏数据里两边可能各说各话。
+        if child.public.vehicle != Some(row.public.uid) {
+            continue;
+        }
+        let mut child_tag = write_tree(&child, lookup, seen, depth + 1)?;
+        set_pos_xz(&mut child_tag, row.public.position.x, row.public.position.z);
+        list.push(child_tag);
+    }
+    if !list.is_empty()
+        && let Tag::Compound(entries) = &mut tag
+    {
+        put(entries, "Passengers", Tag::List(list));
+    }
+    Ok(tag)
+}
+
+/// 把乘客的 `Pos` 改成载具的 x/z 加自己的 y（官方 `saveWithoutId` 的乘客分支）。
+///
+/// Rewrite a passenger's `Pos` to the vehicle's x/z plus its own y.
+fn set_pos_xz(tag: &mut Tag, x: f64, z: f64) {
+    let Tag::Compound(entries) = tag else {
+        return;
+    };
+    for (key, value) in entries.iter_mut() {
+        if key != "Pos" {
+            continue;
+        }
+        if let Tag::List(values) = value
+            && values.len() == 3
+        {
+            values[0] = Tag::Double(x);
+            values[2] = Tag::Double(z);
+        }
+    }
+}
+
+/// 官方 `EntityType.loadEntityRecursive` 的 Bamboo 版：读根实体和嵌套的 `Passengers`。
+/// 返回的行按深度优先排列，第一个是根；`next_uid` 从当前值起依次取号并向前推进。
+/// 不认识的根 `id` 返回 [`Ok(None)`]，由调用方整条原样保留。
+///
+/// Vanilla `EntityType.loadEntityRecursive` in Bamboo: read the root and its nested
+/// `Passengers`. Rows come depth-first with the root first; `next_uid` hands out
+/// ids in turn and advances. An unknown root `id` returns [`Ok(None)`).
+pub fn read_entity_tree(tag: &Tag, next_uid: &mut EntityUid) -> Result<Option<Vec<EntityRow>>> {
+    read_tree(tag, next_uid, 0)
+}
+
+fn read_tree(tag: &Tag, next: &mut EntityUid, depth: usize) -> Result<Option<Vec<EntityRow>>> {
+    let uid = *next;
+    *next = uid
+        .checked_add(1)
+        .ok_or_else(|| Error::new("entity ids exhausted"))?;
+    let Some(row) = read_entity(tag, uid)? else {
+        return Ok(None);
+    };
+    let mut entity = row.into_entity();
+    entity.id = uid;
+    let mut out = Vec::new();
+    if depth < MAX_TREE_DEPTH
+        && let Some(Tag::List(children)) = tag::field(tag, "Passengers")
+    {
+        for child_tag in children {
+            let Some(mut sub) = read_tree(child_tag, next, depth + 1)? else {
+                continue;
+            };
+            let child_id = sub[0].public.uid;
+            // `loadPassengersRecursive` 是 `startRiding(vehicle, true, false)`：
+            // 两边的关系直接建立，不看冷却和乘客数。
+            sub[0].public.vehicle = Some(uid);
+            sub[0].state.boarding_cooldown = 0;
+            entity.with_mob(|_, mob| {
+                crate::entity::riding::add_passenger(&mut mob.passengers, child_id, false);
+            });
+            out.extend(sub);
+        }
+    }
+    out.insert(0, entity.split());
+    Ok(Some(out))
+}
+
+/// 官方 `EntityType.loadEntityRecursive` 的单实体版本（不含 `Passengers`）。
 ///
 /// 不认识的 `id` 返回 [`Ok(None)`]，由调用方整条原样保留。`uid` 只是占位：放进岛的
 /// 实体表时重新取号，随机源也在那时从岛的种子源取种子

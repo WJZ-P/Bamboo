@@ -59,6 +59,7 @@ fn sync_full_scan(region: &mut Region) {
         .map(|entity| Snapshot::of(&entity.split().public))
         .collect();
     let view_distance = region.view_distance;
+    let index = PassengerIndex::of(&snapshots);
     for snapshot in snapshots {
         let tracked = &mut region.entity_tracking.tracked;
         tracked
@@ -71,6 +72,7 @@ fn sync_full_scan(region: &mut Region) {
             &snapshot,
             tracked,
             view_distance,
+            &index,
         );
         send_changes(&snapshot, tracked, &mut region.links);
     }
@@ -82,6 +84,7 @@ fn update_pairings_full_scan(
     snapshot: &Snapshot,
     tracked: &mut TrackedEntity,
     view_distance: i32,
+    index: &PassengerIndex,
 ) {
     let mut visible: Vec<PlayerId> = Vec::new();
     for player in players.values() {
@@ -110,7 +113,7 @@ fn update_pairings_full_scan(
         }
     }
     if !gained.is_empty() {
-        let frames = pairing_frames(snapshot, tracked);
+        let frames = pairing_frames(snapshot, tracked, index);
         for viewer in gained {
             tracked.seen_by.insert(viewer);
             links.send_frames(viewer, &frames);
@@ -850,6 +853,45 @@ fn a_zombie_pairs_with_its_equipment_and_transient_armor() {
             .any(|window| window == needle),
         "the helmet's armor modifier is synced"
     );
+}
+
+/// 配对一个骑手：载具的 bundle 以 `set_passengers(自己)` 结尾，骑手的 bundle 以
+/// `set_passengers(载具)` 结尾，名单来自本刻全表索引。
+///
+/// Pairing a jockey: the vehicle ends with `set_passengers(self)` and the rider
+/// with `set_passengers(vehicle)`, using the tick-wide index for the list.
+#[test]
+fn a_jockey_pairs_with_set_passengers_in_both_directions() {
+    use mc_bamboo_blocks::entity::{Entity, mob::MobType};
+    use mc_bamboo_protocol::packet::play::SetPassengers;
+
+    let vehicle_id = 1 << 24;
+    let rider_id = vehicle_id + 1;
+    let mut chicken = Entity::by_mob_type(MobType::Chicken, Vec3::new(0.5, 64.0, 0.5));
+    chicken.id = vehicle_id;
+    let mut zombie = Entity::by_mob_type(MobType::Zombie, Vec3::new(0.5, 64.0, 0.5));
+    zombie.id = rider_id;
+    zombie.vehicle = Some(vehicle_id);
+    if let Some(mob) = chicken.kind.mob_mut() {
+        mob.passengers.push(rider_id);
+    }
+    let chicken = chicken.split();
+    let zombie = zombie.split();
+    let snapshots = vec![Snapshot::of(&chicken.public), Snapshot::of(&zombie.public)];
+    let index = PassengerIndex::of(&snapshots);
+    let expected = mc_bamboo_protocol::frame::packet_body(&SetPassengers {
+        vehicle: vehicle_id,
+        passengers: &[rider_id],
+    });
+    for snapshot in &snapshots {
+        let tracked = TrackedEntity::new(snapshot);
+        let packets = tracked.pairing_packets_in(snapshot, &index);
+        assert_eq!(packets.last(), Some(&expected));
+    }
+    // 没有全表索引时骑手那一侧不知道载具的完整名单，宁可不发也不发错。
+    let tracked = TrackedEntity::new(&snapshots[1]);
+    let packets = tracked.pairing_packets(&snapshots[1]);
+    assert!(packets.last() != Some(&expected));
 }
 
 /// 海龟的 18、19 变回默认时要发两条布尔，不能落到牛的花色上。

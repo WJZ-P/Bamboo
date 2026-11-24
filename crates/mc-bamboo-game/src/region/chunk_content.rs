@@ -13,12 +13,12 @@ use mc_bamboo_blocks::{
     archive::{
         block_entity::{create_block_entity, items_tag},
         default_additional,
-        entity::{read_entity, write_entity},
+        entity::{read_entity_tree, write_entity_tree},
         redstone::{RedstoneFacts, read_redstone, write_redstone},
         resave_additional,
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
     },
-    entity::{ChunkEntities, EntityRow},
+    entity::{ChunkEntities, EntityRow, EntityUid},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction};
 use mc_bamboo_data::registries::block_entity_type as kinds;
@@ -238,10 +238,32 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
     extra.raw_block_entities = Some(merged);
     let chunk = chunk_nbt::encode(column, &extra)?;
 
-    // 3. 实体文件：三种建模实体 + 不认识的类型整条原样保留。
+    // 3. 实体文件：三种建模实体 + 不认识的类型整条原样保留。乘客嵌在载具的
+    //    `Passengers` 里（官方 `Entity.save`），不单独成行。
     let mut file = EntityFile::empty(pos);
-    for row in parts.entity_rows() {
-        match write_entity(row) {
+    let rows = parts.entity_rows();
+    let by_uid: BTreeMap<EntityUid, EntityRow> = rows
+        .iter()
+        .map(|row| (row.public.uid, row.clone()))
+        .collect();
+    let written_under_vehicle = |row: &EntityRow| {
+        row.public.vehicle.is_some_and(|vehicle| {
+            by_uid
+                .get(&vehicle)
+                .is_some_and(|parent| match &parent.public.kind {
+                    mc_bamboo_blocks::entity::KindPublic::Mob(mob) => {
+                        mob.passengers.contains(&row.public.uid)
+                    }
+                    _ => false,
+                })
+        })
+    };
+    for row in rows {
+        if written_under_vehicle(row) {
+            continue;
+        }
+        let tag = write_entity_tree(row, &|uid| by_uid.get(&uid).cloned());
+        match tag {
             Ok(tag) => file.entities.push(tag),
             Err(error) => problems.push(Problem {
                 at: format!("entity {}", row.public.uid),
@@ -298,9 +320,10 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
             message,
         }));
         let (modeled, unknown) = split_entity_entries(file.entities);
+        let mut next_uid = FIRST_UID;
         for (index, tag) in modeled.iter().enumerate() {
-            match read_entity(tag, FIRST_UID + index as i32) {
-                Ok(Some(row)) => rows.push(row),
+            match read_entity_tree(tag, &mut next_uid) {
+                Ok(Some(tree)) => rows.extend(tree),
                 Ok(None) => problems.push(Problem {
                     at: format!("entities[{index}]"),
                     message: "unknown entity id".to_owned(),

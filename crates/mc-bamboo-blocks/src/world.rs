@@ -3824,23 +3824,14 @@ impl<'a> World<'a> {
                 continue;
             };
             if passenger.vehicle != Some(vehicle.uid) || passenger.removed {
-                // 关系已经断了：官方 `tickPassenger` 在这里调 `stopRiding`。
-                let still_listed =
-                    vehicle_passengers(vehicle).is_some_and(|list| list.contains(&passenger_id));
-                let mut list = if still_listed {
-                    vec![passenger_id]
-                } else {
-                    Vec::new()
-                };
+                // 关系已经断了：官方 `tickPassenger` 在这里调 `stopRiding`，两边的关系
+                // 一起摘掉，乘客落回载具顶上。
+                self.remove_passenger_from(vehicle.uid, passenger_id);
                 let spot = self
                     .level
                     .entity_public(vehicle.uid)
                     .map(|public| crate::entity::riding::dismount_location(&public));
-                crate::entity::riding::dismount(
-                    &mut passenger,
-                    spot,
-                    still_listed.then_some(&mut list),
-                );
+                crate::entity::riding::dismount(&mut passenger, spot, None);
                 self.level.put_entity(passenger);
                 continue;
             }
@@ -3850,6 +3841,12 @@ impl<'a> World<'a> {
             let mut ctx = crate::entity::ctx::PreciseCtx::with_plan(self, passenger_id, plan);
             passenger.tick(&mut ctx);
             passenger.fall_distance = 0.0;
+            // 乘客自己的 tick 里可能已经 `stopRiding`（受伤死亡等）：官方这时不再
+            // 定位，直接结束这一支。
+            if passenger.vehicle != Some(vehicle.uid) || passenger.removed {
+                self.level.put_entity(passenger);
+                continue;
+            }
             // 载具此刻的公开快照：它自己的 tick 已经落地，位置是这一刻末的值。
             let Some(current) = ctx.into_world().level.entity_public(vehicle.uid) else {
                 // 载具这一刻被移除了：乘客按最后的公开数据下车。
@@ -3864,13 +3861,24 @@ impl<'a> World<'a> {
             let passenger_public = passenger.clone().split().public;
             let at = crate::entity::riding::rider_position(&current, &passenger_public, index);
             passenger.position = at;
-            passenger.old_position = at;
             passenger.delta = mc_bamboo_core::Vec3::default();
+            // 乘客可能自己也是载具：递归跑它的乘客树。锚点要用 `positionRider`
+            // 之后的乘客位置，所以重新拆一次公开快照。
+            let nested = passenger.clone().split().public;
             self.level.put_entity(passenger);
-            // 乘客可能自己也是载具：递归跑它的乘客树。
-            let nested = passenger_public.clone();
             self.ride_tick_passengers(&nested, plan);
         }
+    }
+
+    /// 把乘客从载具的名单里摘掉（官方 `removePassenger` 的一半；另一半是乘客自己的
+    /// `vehicle`，由 [`crate::entity::riding::dismount`] 清）。
+    ///
+    /// Drops a passenger from its vehicle's list; the passenger's own `vehicle`
+    /// link is cleared by [`crate::entity::riding::dismount`].
+    fn remove_passenger_from(&mut self, vehicle: EntityUid, passenger: EntityUid) {
+        self.level.with_just_spawned(vehicle, &mut |entity| {
+            entity.with_mob(|_, mob| mob.passengers.retain(|&id| id != passenger));
+        });
     }
 
     /// `setRemoved` / `ejectPassengers`：载具离场时把仍在表里的实体乘客摘掉，

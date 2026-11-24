@@ -1620,6 +1620,47 @@ impl EntityStore {
             .copied()
             .collect();
         moved.sort_unstable();
+        // 载具和乘客必须去同一个岛：先按区块选出要走的，再沿 `vehicle` /
+        // `Passengers` 两边补全整组。任何一头落在要搬的区块里，整组都搬。
+        // Vehicles and riders must stay on one island: seed from the chunks, then
+        // close the set over both `vehicle` and `Passengers` links.
+        if !moved.is_empty() {
+            let mut neighbours: BTreeMap<EntityUid, Vec<EntityUid>> = BTreeMap::new();
+            let mut link = |a: EntityUid, b: EntityUid| {
+                if a != b && self.index.contains_key(&a) && self.index.contains_key(&b) {
+                    neighbours.entry(a).or_default().push(b);
+                    neighbours.entry(b).or_default().push(a);
+                }
+            };
+            for (&uid, &row) in &self.index {
+                let Some(entry) = self.slots[row].as_ref() else {
+                    continue;
+                };
+                if let Some(vehicle) = entry.public.vehicle {
+                    link(vehicle, uid);
+                }
+                if let KindPublic::Mob(mob) = &entry.public.kind {
+                    for &passenger in &mob.passengers {
+                        if passenger >= FIRST_ENTITY_ID {
+                            link(uid, passenger);
+                        }
+                    }
+                }
+            }
+            let mut seen: BTreeSet<EntityUid> = moved.iter().copied().collect();
+            let mut stack = moved.clone();
+            while let Some(uid) = stack.pop() {
+                if let Some(list) = neighbours.get(&uid) {
+                    for &next in list {
+                        if seen.insert(next) {
+                            moved.push(next);
+                            stack.push(next);
+                        }
+                    }
+                }
+            }
+            moved.sort_unstable();
+        }
         // 新岛的种子源由调用方给（岛这一层按世界种子、起源 section 和建岛时刻派生，
         // 计划 3.3「岛的随机源」），不掺原岛种子源的状态；原岛的不动（拆了马上合回来
         // 逐位相同）。
@@ -1702,7 +1743,44 @@ impl EntityStore {
             });
         self.wake_events = kept;
         out.wake_events = moved;
+        // 不变量：拆完以后两张表之间不能再有骑乘引用。
+        #[cfg(debug_assertions)]
+        {
+            self.debug_assert_no_links_to(&out);
+            out.debug_assert_no_links_to(self);
+        }
         Ok(out)
+    }
+
+    /// 调试断言：本表里的实体没有引用 `other` 里的实体（双向）。只查两边都还在表里的
+    /// uid，已经删掉的悬空引用不算跨岛。
+    ///
+    /// Debug assertion that no entity here links to an entity in `other`, in
+    /// either direction. Only live ids on both sides count; dangling links to
+    /// removed entities are not cross-island references.
+    #[cfg(debug_assertions)]
+    fn debug_assert_no_links_to(&self, other: &Self) {
+        for (&uid, &row) in &self.index {
+            let Some(entry) = self.slots[row].as_ref() else {
+                continue;
+            };
+            if let Some(vehicle) = entry.public.vehicle {
+                debug_assert!(
+                    !other.index.contains_key(&vehicle),
+                    "rider {uid} and its vehicle {vehicle} ended up on different islands"
+                );
+            }
+            if let KindPublic::Mob(mob) = &entry.public.kind {
+                for &passenger in &mob.passengers {
+                    if passenger >= FIRST_ENTITY_ID {
+                        debug_assert!(
+                            !other.index.contains_key(&passenger),
+                            "vehicle {uid} and its passenger {passenger} ended up on different islands"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 岛合并：[`Self::split_off`] 的逆操作。另一张表的实体按 uid 升序放进来，行号
@@ -2218,6 +2296,43 @@ mod tests {
             .unwrap()
             .remove(&item);
         assert!(!store.sub_index_matches());
+    }
+
+    /// 载具和乘客按组拆：种子只命中载具或只命中乘客的区块时整组一起走，拆完两边
+    /// 都没有跨岛的骑乘引用。
+    ///
+    /// Vehicles and riders split as one group: a seed that only covers the
+    /// vehicle's or only the rider's chunk still moves both.
+    #[test]
+    fn a_rider_and_its_vehicle_are_split_as_one_group() {
+        use crate::entity::mob::MobType;
+
+        for seed_chunk in [ChunkPos::new(0, 0), ChunkPos::new(2, 0)] {
+            let mut store = EntityStore::new();
+            let chicken = store.spawn(Entity::by_mob_type(
+                MobType::Chicken,
+                Vec3::new(0.5, 64.0, 0.5),
+            ));
+            let zombie = store.spawn(Entity::by_mob_type(
+                MobType::Zombie,
+                Vec3::new(40.5, 64.0, 0.5),
+            ));
+            store.with_mut(chicken, |entity| {
+                entity.with_mob(|_, mob| mob.passengers.push(zombie));
+            });
+            store.with_mut(zombie, |entity| entity.vehicle = Some(chicken));
+            let island = store
+                .split_off(&BTreeSet::from([seed_chunk]), 7)
+                .expect("静止");
+            let mut ids = island.ids();
+            ids.sort_unstable();
+            assert_eq!(ids, vec![chicken, zombie], "seed {seed_chunk:?}");
+            assert!(store.ids().is_empty(), "seed {seed_chunk:?}");
+            store.absorb(island);
+            assert_eq!(store.ids(), vec![chicken, zombie]);
+            let row = store.get(zombie).expect("合并回来了");
+            assert_eq!(row.vehicle, Some(chicken));
+        }
     }
 
     fn item_at(x: f64) -> Entity {
