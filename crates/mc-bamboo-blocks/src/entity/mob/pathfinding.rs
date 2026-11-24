@@ -328,15 +328,6 @@ impl PhaseState {
         }
     }
 
-    /// 拆岛后新的一边从空状态开始，只保留刻号；挂起的请求随实体行走，
-    /// 由新的岛下一刻重新发。
-    pub fn split_full(&self) -> Self {
-        Self {
-            last_tick: self.last_tick,
-            ..Self::default()
-        }
-    }
-
     /// 并岛：两个岛的刻号已对齐，保留请求和失败计数里较大的一份。
     pub fn absorb(&mut self, other: Self) {
         self.last_tick = self.last_tick.max(other.last_tick);
