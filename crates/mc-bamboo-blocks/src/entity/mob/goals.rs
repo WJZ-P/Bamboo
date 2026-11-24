@@ -2583,7 +2583,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
                 return false;
             };
             mob.mob_type == super::MobType::ElderGuardian
-                || me.position.distance_to_sqr(target.position) > 9.0
+                || me.position.distance_to_sqr(target.position)
+                    > super::guardian::MIN_TARGET_DISTANCE_SQR
         }
         Goal::RandomLookAround { look_time, .. } => *look_time >= 0,
         Goal::Float
@@ -3601,13 +3602,10 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             {
                 // 伤害基值 1，困难 +2，远古 +2。
                 // Base damage 1, +2 on hard, +2 for the elder guardian.
-                let mut damage = 1.0_f32;
-                if ctx.blocks().difficulty() == 3 {
-                    damage += 2.0;
-                }
-                if mob.mob_type == super::MobType::ElderGuardian {
-                    damage += 2.0;
-                }
+                let damage = super::guardian::laser_damage(
+                    mob.mob_type == super::MobType::ElderGuardian,
+                    ctx.blocks().difficulty() == 3,
+                );
                 // 第一次伤害：`damageSources().indirectMagic(guardian, guardian)`。
                 // First hit: `damageSources().indirectMagic(guardian, guardian)`.
                 let mut source =
@@ -4315,7 +4313,10 @@ fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
     // `instanceof Player` 恒真；`distanceToSqr(guardian) > 9.0`。
     // `instanceof Player` always holds; `distanceToSqr(guardian) > 9.0`.
     view.for_each_player(&mut |player| {
-        if player.creative || me.position.distance_to_sqr(player.position) <= 9.0 {
+        if player.creative
+            || me.position.distance_to_sqr(player.position)
+                <= super::guardian::MIN_TARGET_DISTANCE_SQR
+        {
             return;
         }
         if !allied(mob, view, player) && targeting_test(me, mob, view, player, range, true) {
@@ -4344,7 +4345,8 @@ fn nearest_guardian_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
                 public.mob_type,
                 super::MobType::Squid | super::MobType::GlowSquid | super::MobType::Axolotl
             )
-            || me.position.distance_to_sqr(other.position) <= 9.0
+            || me.position.distance_to_sqr(other.position)
+                <= super::guardian::MIN_TARGET_DISTANCE_SQR
         {
             return;
         }

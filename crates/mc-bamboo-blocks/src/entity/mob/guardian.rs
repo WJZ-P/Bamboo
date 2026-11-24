@@ -39,6 +39,20 @@ pub fn attack_duration(kind: MobType) -> i32 {
     }
 }
 
+/// `GuardianAttackSelector` / `GuardianAttackGoal.canContinueToUse` 的距离平方下限
+/// （官方 `> 9.0`，也就是 3 格）。
+///
+/// The squared-distance floor of `GuardianAttackSelector` /
+/// `GuardianAttackGoal.canContinueToUse` (vanilla `> 9.0`, i.e. 3 blocks).
+pub const MIN_TARGET_DISTANCE_SQR: f64 = 9.0;
+
+/// 激光的间接魔法伤害：基值 1，困难 +2，远古守卫者 +2。
+///
+/// The laser's indirect magic damage: base 1, +2 on hard, +2 for the elder guardian.
+pub fn laser_damage(elder: bool, hard: bool) -> f32 {
+    1.0 + if hard { 2.0 } else { 0.0 } + if elder { 2.0 } else { 0.0 }
+}
+
 /// 官方 `Guardian` / `ElderGuardian` 的自有字段。都不是存档字段。
 ///
 /// The own fields of vanilla `Guardian` / `ElderGuardian`; none is saved to disk.
@@ -626,6 +640,18 @@ mod tests {
     fn guardian_attack_duration() {
         assert_eq!(attack_duration(MobType::Guardian), 80);
         assert_eq!(attack_duration(MobType::ElderGuardian), 60);
+    }
+
+    /// 激光的目标距离下限与伤害：困难 / 远古各 +2。
+    ///
+    /// The laser's target distance floor and damage: hard / elder each add 2.
+    #[test]
+    fn guardian_laser_facts() {
+        assert_eq!(MIN_TARGET_DISTANCE_SQR, 9.0);
+        assert_eq!(laser_damage(false, false), 1.0);
+        assert_eq!(laser_damage(false, true), 3.0);
+        assert_eq!(laser_damage(true, false), 3.0);
+        assert_eq!(laser_damage(true, true), 5.0);
     }
 
     /// 目标与生成规则按字节码：完整目标规则（从而有视线记忆）、`IN_WATER` 生成、
