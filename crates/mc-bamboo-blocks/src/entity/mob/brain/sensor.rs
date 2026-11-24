@@ -438,12 +438,14 @@ fn sense_nearest_living(cx: &mut Cx) {
     let range = cx.mob.attributes.value(attribute::FOLLOW_RANGE);
     let area = cx.me.bounding_box().inflate(range, range, range);
     let me = cx.me.id;
-    let mut found: Vec<(f64, EntityUid)> = Vec::new();
+    // 每项连实体种类一起记下来：玩家为 None，生物为其 mob_type，供按类型预筛。
+    // Each entry also carries its mob type (None for players) for type prefiltering.
+    let mut found: Vec<(f64, EntityUid, Option<MobType>)> = Vec::new();
     let position = cx.me.position;
     cx.ctx.blocks().for_each_player(&mut |player| {
         let view = player_view(player);
         if view.alive && view.bounding_box.intersects(area) {
-            found.push((position.distance_to_sqr(view.position), view.uid));
+            found.push((position.distance_to_sqr(view.position), view.uid, None));
         }
     });
     cx.ctx.for_each_other_in(area, &mut |other| {
@@ -451,20 +453,30 @@ fn sense_nearest_living(cx: &mut Cx) {
             return;
         };
         if other.uid != me && !other.removed && mob.is_alive() {
-            found.push((position.distance_to_sqr(other.position), other.uid));
+            found.push((
+                position.distance_to_sqr(other.position),
+                other.uid,
+                Some(mob.mob_type),
+            ));
         }
     });
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut ids = Vec::with_capacity(found.len());
+    let mut mob_types = Vec::with_capacity(found.len());
+    for (_, uid, mob_type) in found {
+        ids.push(uid);
+        mob_types.push(mob_type);
+    }
     // 两条记忆共用同一份实体表：一次分配，不再整表克隆一遍。
     // Both memories share one uid list: one allocation, no second full clone.
-    let list: Arc<[EntityUid]> = found.into_iter().map(|(_, uid)| uid).collect();
+    let list: Arc<[EntityUid]> = ids.into();
     cx.memories.set(
         MemoryType::NearestLivingEntities,
         MemoryValue::Entities(Arc::clone(&list)),
     );
     cx.memories.set(
         MemoryType::NearestVisibleLivingEntities,
-        MemoryValue::Visible(NearestVisible::new(list)),
+        MemoryValue::Visible(NearestVisible::new(list, mob_types)),
     );
 }
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 
-use super::super::DamageSource;
+use super::super::{DamageSource, MobType};
 use crate::entity::EntityUid;
 
 /// `MemorySlot.NEVER_EXPIRE`。
@@ -287,23 +287,75 @@ impl WalkTarget {
 
 /// `NearestVisibleLivingEntities`：附近的活体按距离排好，视线判定第一次问到时才算，
 /// 算过的记下来。实体表用共享切片，`NearestLivingEntities` 和这条记忆共用同一份数据。
+/// 每项另存一份实体种类，供村民传感器按类型预筛，不用逐项再回查实体表。
 ///
 /// `NearestVisibleLivingEntities`: nearby living entities by distance; the visibility
 /// test runs lazily the first time each one is asked about and is then cached. The uid
-/// list is a shared slice so `NearestLivingEntities` and this memory share one allocation.
+/// list is a shared slice so `NearestLivingEntities` and this memory share one
+/// allocation. Each entry also carries its mob type so villager sensors can prefilter
+/// by type without looking the entity up again.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NearestVisible {
     pub entities: Arc<[EntityUid]>,
-    /// 和 `entities` 对齐的缓存，`None` 是还没算过。
+    /// 和 `entities` 对齐的实体种类；玩家 / 非生物为 `None`。
     ///
-    /// A cache aligned with `entities`; `None` means not tested yet.
+    /// Mob type aligned with `entities`; `None` for players and non-mob entities.
+    pub mob_types: Vec<Option<MobType>>,
+    /// 列表里有没有敌对类型。`VillagerHostilesSensor` 没有敌对类型时可直接擦记忆，
+    /// 不必逐项测距离。当前用 `MobType::is_enemy` 作保守超集：官方精确集合
+    /// `ACCEPTABLE_DISTANCE_FROM_HOSTILES` 的多数灾厄 / 僵尸类生物期 3 才建模，
+    /// 超集只会少做早退、不会误擦；精确的判定走 [`Self::has_type`]。
+    ///
+    /// Whether the list contains a hostile type. `VillagerHostilesSensor` can erase
+    /// its memory at once when there is none, without a per-entry distance test.
+    /// Currently a conservative superset via `MobType::is_enemy`: most of vanilla's
+    /// exact `ACCEPTABLE_DISTANCE_FROM_HOSTILES` set is modelled only in phase 3, and
+    /// a superset only skips the early-out (never wrongly erases). Precise checks
+    /// go through [`Self::has_type`].
+    pub has_hostile_type: bool,
+    /// 和 `entities` 对齐的视线缓存，`None` 是还没算过。
+    ///
+    /// A visibility cache aligned with `entities`; `None` means not tested yet.
     pub visible: Vec<Option<bool>>,
 }
 
 impl NearestVisible {
-    pub fn new(entities: Arc<[EntityUid]>) -> Self {
-        let visible = vec![None; entities.len()];
-        Self { entities, visible }
+    /// `mob_types` 与 `entities` 等长；玩家 / 非生物用 `None`。
+    ///
+    /// `mob_types` is aligned with `entities`; `None` for players / non-mob entities.
+    pub fn new(entities: Arc<[EntityUid]>, mob_types: Vec<Option<MobType>>) -> Self {
+        let len = entities.len();
+        let has_hostile_type = mob_types.iter().flatten().any(|ty| ty.is_enemy());
+        let visible = vec![None; len];
+        Self {
+            entities,
+            mob_types,
+            has_hostile_type,
+            visible,
+        }
+    }
+
+    /// 按实体类型预筛，保持列表顺序，返回匹配项的 (下标, uid)。未来的
+    /// `VillagerBabiesSensor` 先用它筛出村民，再逐项读实时幼年状态。
+    ///
+    /// Prefilters by mob type, keeping list order, returning `(index, uid)` for each
+    /// match. A future `VillagerBabiesSensor` uses it to pick villagers before reading
+    /// each one's live baby status.
+    pub fn prefilter(&self, accept: impl Fn(Option<MobType>) -> bool) -> Vec<(usize, EntityUid)> {
+        self.entities
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(index, _)| accept(self.mob_types.get(*index).copied().flatten()))
+            .collect()
+    }
+
+    /// 列表里有没有满足类型条件的实体（[`Self::has_hostile_type`] 的通用形式）。
+    ///
+    /// Whether any entry satisfies the type predicate (the general form of
+    /// [`Self::has_hostile_type`]).
+    pub fn has_type(&self, accept: impl Fn(Option<MobType>) -> bool) -> bool {
+        self.mob_types.iter().any(|ty| accept(*ty))
     }
 }
 
@@ -642,5 +694,37 @@ mod tests {
             MemoryType::by_name("minecraft:unreachable_tongue_targets"),
             Some(MemoryType::UnreachableTongueTargets)
         );
+    }
+
+    /// 可见列表按类型预筛、保持顺序；敌对类型位是保守超集。
+    ///
+    /// The visible list prefilters by type in order; the hostile bit is a conservative
+    /// superset.
+    #[test]
+    fn nearest_visible_prefilters_by_type_and_tracks_hostiles() {
+        let entities: Arc<[EntityUid]> = Arc::from([10, 11, 12]);
+        let mob_types = vec![None, Some(MobType::Cow), Some(MobType::Zombie)];
+        let visible = NearestVisible::new(entities, mob_types);
+        assert!(visible.has_hostile_type);
+        assert_eq!(
+            visible.prefilter(|ty| ty == Some(MobType::Cow)),
+            vec![(1, 11)]
+        );
+        assert_eq!(
+            visible.prefilter(|ty| ty.is_some_and(|m| m.is_enemy())),
+            vec![(2, 12)]
+        );
+        assert!(
+            visible
+                .prefilter(|ty| ty == Some(MobType::Villager))
+                .is_empty()
+        );
+        assert!(visible.has_type(|ty| ty == Some(MobType::Zombie)));
+        assert!(!visible.has_type(|ty| ty == Some(MobType::Villager)));
+
+        // 只有玩家和非敌对生物时，敌对类型位为假。
+        // Only players and non-hostile mobs: the hostile bit is false.
+        let benign = NearestVisible::new(Arc::from([20, 21]), vec![None, Some(MobType::Cow)]);
+        assert!(!benign.has_hostile_type);
     }
 }
