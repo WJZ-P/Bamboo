@@ -457,6 +457,15 @@ pub struct PoiStore {
     dirty: BTreeSet<ChunkPos>,
     /// 已经从盘上读过的区块；读坏 / 没文件时也记下，避免重复读。
     loaded_chunks: HashSet<ChunkPos, ChunkHasherBuilder>,
+    /// 每段里被占用的「村庄类 POI」计数。表里只留计数 > 0 的段，即当前
+    /// `DistanceTracker` 的源集合；段是不是源只看计数是否为正。
+    /// 只有计数在 0 与正数间切换、或段装卸时，才重建距离表。
+    village_sources: HashMap<(i32, i32, i32), u32, ChunkHasherBuilder>,
+    /// 缓存的距离表，查询直接读它；源集合变化 / 段装卸时同步重建。
+    distance: DistanceTracker,
+    /// `poi-oracle` 的「漏维护计数」改坏自检置位：关掉计数与距离表维护，
+    /// 用来确认对拍能抓到这类漏维护。生产路径恒为 false。
+    village_count_disabled: bool,
 }
 
 impl PoiStore {
@@ -488,6 +497,7 @@ impl PoiStore {
                 }
             }
         }
+        self.resync_village_all();
     }
 
     /// 把一个盒子里带回来的 POI 段整列装进去（不标脏：脏标记由写方块 / 票数变化管）。
@@ -507,6 +517,7 @@ impl PoiStore {
         }
         self.loaded_chunks.remove(&pos);
         self.dirty.remove(&pos);
+        self.resync_village_all();
         out
     }
 
@@ -526,6 +537,8 @@ impl PoiStore {
                 out.loaded_chunks.insert(pos);
             }
         }
+        self.resync_village_all();
+        out.resync_village_all();
         out
     }
 
@@ -534,6 +547,7 @@ impl PoiStore {
         self.sections.extend(other.sections);
         self.dirty.extend(other.dirty);
         self.loaded_chunks.extend(other.loaded_chunks);
+        self.resync_village_all();
     }
 
     /// 已加载段的只读快照，按 `(段坐标, 段内下标)` 排好，拆合前后逐项比。
@@ -628,13 +642,15 @@ impl PoiStore {
 
     /// `PoiManager.add`：登记一条 POI，返回是否是新登记。
     pub fn add(&mut self, pos: BlockPos, kind: PoiType) -> bool {
-        let Some(section) = self.get_or_create(SectionPos::of(pos)) else {
+        let section_pos = SectionPos::of(pos);
+        let Some(section) = self.get_or_create(section_pos) else {
             return false;
         };
         let added = section.add(pos, kind);
         if added {
-            self.set_dirty(SectionPos::of(pos));
+            self.set_dirty(section_pos);
         }
+        self.sync_village_section(section_key(section_pos));
         added
     }
 
@@ -648,6 +664,7 @@ impl PoiStore {
         if removed {
             self.set_dirty(section_pos);
         }
+        self.sync_village_section(section_key(section_pos));
         removed
     }
 
@@ -708,6 +725,7 @@ impl PoiStore {
         let released = record.release_ticket();
         // 官方 `PoiSection.release` 无论还没还成都 `setDirty`。
         self.set_dirty(section_pos);
+        self.sync_village_section(section_key(section_pos));
         released
     }
 
@@ -852,6 +870,7 @@ impl PoiStore {
         let section = self.sections.get_mut(&section_key(section_pos))?.as_mut()?;
         section.get_mut(chosen.pos)?.acquire_ticket();
         self.set_dirty(section_pos);
+        self.sync_village_section(section_key(section_pos));
         Some(chosen.pos)
     }
 
@@ -929,15 +948,8 @@ impl PoiStore {
         from_blocks: Vec<(BlockPos, PoiType)>,
     ) -> bool {
         let key = section_key(pos);
-        match self.sections.get_mut(&key) {
-            Some(Some(section)) => {
-                if section.refresh(from_blocks) {
-                    self.set_dirty(pos);
-                    true
-                } else {
-                    false
-                }
-            }
+        let rebuilt = match self.sections.get_mut(&key) {
+            Some(Some(section)) => section.refresh(from_blocks),
             Some(None) | None => {
                 if from_blocks.is_empty() {
                     return false;
@@ -946,13 +958,14 @@ impl PoiStore {
                     return false;
                 };
                 section.valid = false;
-                let rebuilt = section.refresh(from_blocks);
-                if rebuilt {
-                    self.set_dirty(pos);
-                }
-                rebuilt
+                section.refresh(from_blocks)
             }
+        };
+        if rebuilt {
+            self.set_dirty(pos);
+            self.sync_village_section(key);
         }
+        rebuilt
     }
 }
 
@@ -970,13 +983,20 @@ pub struct DistanceTracker {
     levels: BTreeMap<(i32, i32, i32), u8>,
 }
 
+/// 一段里被占用的「村庄类 POI」条数，即 `PoiSection::is_village_center`
+/// 判定所用的计数形式（`#minecraft:village` 标签 + `IS_OCCUPIED`）。
+fn village_occupied_count(section: &PoiSection) -> u32 {
+    section.find(is_village_type, Occupancy::IsOccupied).len() as u32
+}
+
 impl DistanceTracker {
-    /// 按当前已加载的段重算不动点。
-    pub fn update(&mut self, store: &PoiStore) {
+    /// 从给定的源段集合重算不动点。最小解唯一，所以只要源集合一致，结果就和
+    /// 整表扫描 `update` 逐段相同（少了排队次序，但排队次序不影响最小级别）。
+    fn compute<I: IntoIterator<Item = (i32, i32, i32)>>(&mut self, sources: I) {
         self.levels.clear();
         let mut queue = std::collections::VecDeque::new();
-        for (&key, section) in store.sections_loaded() {
-            if section.is_some_and(PoiSection::is_village_center) {
+        for key in sources {
+            if self.levels.get(&key).is_none_or(|&old| old > 0) {
                 self.levels.insert(key, 0);
                 queue.push_back((key, 0u8));
             }
@@ -1007,6 +1027,16 @@ impl DistanceTracker {
         }
     }
 
+    /// 按当前已加载的段整表重算不动点（朴素实现，供差分 / 校验用）。
+    pub fn update(&mut self, store: &PoiStore) {
+        let sources: Vec<(i32, i32, i32)> = store
+            .sections_loaded()
+            .filter(|(_, section)| section.is_some_and(PoiSection::is_village_center))
+            .map(|(key, _)| *key)
+            .collect();
+        self.compute(sources);
+    }
+
     /// `sectionsToVillage(SectionPos)`：不动点算完后查级别，没条目就是 7。
     pub fn level(&self, pos: SectionPos) -> i32 {
         self.levels
@@ -1029,11 +1059,73 @@ impl PoiStore {
         self.get(pos).is_some_and(PoiSection::is_village_center)
     }
 
-    /// `sectionsToVillage`：重算不动点后取级别。
+    /// `sectionsToVillage`：直接读缓存的距离表。缓存只在源集合变化 / 段装卸
+    /// 时重建，查询不再整表重算；逐段结果与朴素整表重算一致（见差分单测）。
     pub fn sections_to_village(&self, pos: SectionPos) -> i32 {
-        let mut tracker = DistanceTracker::default();
-        tracker.update(self);
-        tracker.level(pos)
+        self.distance.level(pos)
+    }
+
+    /// 只重算一段的源计数；仅当计数在 0 与正数间切换（源出现 / 消失）时重建距离表。
+    fn sync_village_section(&mut self, key: (i32, i32, i32)) {
+        if self.village_count_disabled {
+            return;
+        }
+        let count = self
+            .sections
+            .get(&key)
+            .and_then(Option::as_ref)
+            .map_or(0, village_occupied_count);
+        let was_source = self.village_sources.contains_key(&key);
+        if count > 0 {
+            self.village_sources.insert(key, count);
+        } else {
+            self.village_sources.remove(&key);
+        }
+        if was_source != (count > 0) {
+            self.rebuild_village_distance();
+        }
+    }
+
+    /// 段装卸 / 岛拆合等批量操作后全量重算源计数并重建距离表。
+    fn resync_village_all(&mut self) {
+        if self.village_count_disabled {
+            return;
+        }
+        let sources: Vec<((i32, i32, i32), u32)> = self
+            .sections
+            .iter()
+            .filter_map(|(&key, section)| {
+                let section = section.as_ref()?;
+                let count = village_occupied_count(section);
+                (count > 0).then_some((key, count))
+            })
+            .collect();
+        self.village_sources.clear();
+        for (key, count) in sources {
+            self.village_sources.insert(key, count);
+        }
+        self.rebuild_village_distance();
+    }
+
+    /// 从当前源集合重建距离表（BFS 从源段扩散到 5 级）。
+    fn rebuild_village_distance(&mut self) {
+        if self.village_count_disabled {
+            return;
+        }
+        let sources: Vec<(i32, i32, i32)> = self.village_sources.keys().copied().collect();
+        self.distance.compute(sources);
+    }
+
+    /// 通过 [`Self::section_mut`] 直接改动了影响村庄中心的记录后，调用方用它
+    /// 重建源计数与距离表；其余改动入口会自动维护。
+    pub fn resync_village_distance(&mut self) {
+        self.resync_village_all();
+    }
+
+    /// `poi-oracle` 的「漏维护计数」改坏自检置位：关掉计数与距离表维护，
+    /// 用来确认对拍能抓到这类漏维护。生产路径不调用。
+    pub fn disable_village_count_maintenance(&mut self) {
+        self.village_count_disabled = true;
     }
 
     /// `ServerLevel.isCloseToVillage(pos, sectionDistance)`，超过 6 直接假。
@@ -1044,7 +1136,7 @@ impl PoiStore {
         self.sections_to_village(SectionPos::of(pos)) <= section_distance
     }
 
-    /// 只读地列出已加载的段（含 `None` 段），给 `DistanceTracker` 用。
+    /// 只读地列出已加载的段（含 `None` 段），给朴素整表重算用。
     fn sections_loaded(
         &self,
     ) -> impl Iterator<Item = (&(i32, i32, i32), Option<&PoiSection>)> + '_ {
@@ -1331,6 +1423,110 @@ mod tests {
         assert!(store.snapshot().iter().all(|((x, _, _), _)| *x != 2));
         assert!(!store.is_chunk_loaded(ChunkPos::new(2, 0)));
         assert!(!store.dirty_chunks().contains(&ChunkPos::new(2, 0)));
+    }
+
+    /// 差分：随机增删 POI、装卸段之后，缓存的 `sections_to_village` 每一步
+    /// 都与整表重算的朴素实现逐段一致。覆盖源出现 / 消失、票数变化、
+    /// 段装载（带被占用记录）、段卸载、同位置换类型等路径。
+    #[test]
+    fn village_distance_cache_matches_full_recompute() {
+        // 自带 LCG，序列确定可复现，不引入外部依赖。
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let home = poi::poi_type_id("home").unwrap();
+        let meeting = poi::poi_type_id("meeting").unwrap();
+        let armorer = poi::poi_type_id("armorer").unwrap();
+        let rod = poi::poi_type_id("lightning_rod").unwrap();
+        let kinds = [home, meeting, armorer, rod];
+
+        // 候选位置聚在几个相邻段 / 区块里，让村庄距离拉开 0..5 / 7 的梯度，
+        // 也让朴素 BFS 的覆盖球不至于铺得太大（差分每步都要重算一次）。
+        let mut positions = Vec::new();
+        for cx in -1..=1 {
+            for cz in 0..=1 {
+                for &(dx, dy, dz) in &[(1i32, -60i32, 1i32), (5, -43, 9), (12, -60, 3)] {
+                    positions.push(BlockPos::new(cx * 16 + dx, dy, cz * 16 + dz));
+                }
+            }
+        }
+
+        // 查询网格：既覆盖候选段，也覆盖远到不可达的段。
+        let mut queries = Vec::new();
+        for sx in -3..=3 {
+            for sy in -5..=-2 {
+                for sz in -2..=2 {
+                    queries.push(SectionPos::new(sx, sy, sz));
+                }
+            }
+        }
+
+        let compare = |store: &PoiStore, step: usize| {
+            let mut naive = DistanceTracker::default();
+            naive.update(store);
+            for &q in &queries {
+                assert_eq!(
+                    store.sections_to_village(q),
+                    naive.level(q),
+                    "step {step} at ({},{},{})",
+                    q.x,
+                    q.y,
+                    q.z
+                );
+            }
+        };
+
+        let mut store = PoiStore::new();
+        compare(&store, 0);
+
+        for step in 1..=120 {
+            let op = rand() % 10;
+            let at = positions[(rand() as usize) % positions.len()];
+            let kind = kinds[(rand() as usize) % kinds.len()];
+            match op {
+                0..=2 => {
+                    store.add(at, kind);
+                }
+                3..=4 => {
+                    store.remove(at);
+                }
+                5 => {
+                    store.take(|_| true, |_, _| true, at, 24);
+                }
+                6 => {
+                    store.release(at);
+                }
+                7 => {
+                    // 装载一整列：段里带若干被占用的村庄类 POI（票数 < 上限）。
+                    let chunk = at.chunk();
+                    let y = SectionPos::of(at).y;
+                    let mut section = PoiSection::empty();
+                    for (i, &k) in kinds.iter().enumerate() {
+                        let p = BlockPos::new(at.x, at.y + i as i32, at.z);
+                        section.add(p, k);
+                        if i % 2 == 0
+                            && let Some(record) = section.get_mut(p)
+                        {
+                            record.free_tickets = 0;
+                        }
+                    }
+                    store.install_chunk(chunk, Some(vec![(y, section)]));
+                }
+                8 => {
+                    let _ = store.take_column(at.chunk());
+                }
+                _ => {
+                    // 装载一个没有 POI 数据的列（全是 None 段）。
+                    store.install_chunk(at.chunk(), None);
+                }
+            }
+            compare(&store, step);
+        }
     }
 
     #[test]
