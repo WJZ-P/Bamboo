@@ -1719,7 +1719,10 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     } else {
         nav_mob(me, mob, ctx.blocks())
     };
-    if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
+    // `Bee$1.tick`：授粉期间跳过飞行导航 tick。
+    // `Bee$1.tick`: skip flying navigation tick while pollinating.
+    let skip_nav = mob.mob_type == super::MobType::Bee && mob.bee.pollinating;
+    if !skip_nav && let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
         // 官方 `this.mob.getMoveControl()`：借导航时 getter 转到载具，而此时
         // `mob.mover` 仍是载具那份（控制段才临时换回自己的）。
         // Vanilla `this.mob.getMoveControl()`: while borrowing the getter resolves to
@@ -1809,6 +1812,14 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // `SmoothSwimmingLookControl(this, 10)`.
         super::smooth_swim::move_tick(me, mob, &super::smooth_swim::FROG);
         super::smooth_swim::look_tick(me, mob, 10.0);
+    } else if mob.mob_type == super::MobType::Bee {
+        // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl`（生气时跳过，授粉时不重置俯仰）。
+        // `Bee`: `FlyingMoveControl(this, 20, true)` + `BeeLookControl` (skipped while angry;
+        // keeps pitch while pollinating).
+        move_control_tick(me, mob, ctx.blocks());
+        if !mob.anger.is_angry(ctx.blocks().game_time()) {
+            look_control_tick_with(me, mob, !mob.bee.pollinating);
+        }
     } else {
         if mob.mob_type == super::MobType::Camel {
             // `CamelMoveControl.tick` 在 `super.tick()` 之前。
@@ -1911,8 +1922,9 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
         return;
     }
     if mob.mob_type == super::MobType::Bee {
-        // `Bee` 也用 `FlyingMoveControl`（参数 20, true 的效果在配置里）。
-        super::parrot::move_control_tick(me, mob);
+        // `Bee` 用 `FlyingMoveControl(this, 20, true)`：最大俯仰步长 20°，空闲时原地悬停不恢复重力。
+        // `Bee` uses `FlyingMoveControl(this, 20, true)`: max turn 20°, hovers in place.
+        super::parrot::flying_move_control_tick(me, mob, 20.0, true);
         return;
     }
     if super::turtle::is_turtle(mob.mob_type) {
@@ -2065,9 +2077,11 @@ fn body_rotation_tick(me: &Entity, mob: &mut Mob, time: i64) {
 
 // ---- 跳跃 ----
 
-/// `Mob.jumpInLiquid`：会浮水时加 `(double) 0.04F`。
+/// `Mob.jumpInLiquid`：会浮水时加 `(double) 0.04F`；蜜蜂固定加 `0.01`。
 fn jump_in_liquid(me: &mut Entity, mob: &Mob) {
-    let lift = if mob.navigation.can_float() {
+    let lift = if mob.mob_type == super::MobType::Bee {
+        0.01
+    } else if mob.navigation.can_float() {
         f64::from(0.04_f32)
     } else {
         0.3

@@ -4819,6 +4819,15 @@ pub(super) fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) 
     if mob.mob_type.is_monster() {
         return monster_walk_target_value(view, pos);
     }
+    if mob.mob_type == super::MobType::Bee {
+        // `Bee.getWalkTargetValue`：空气格 10，否则 0。
+        // `Bee.getWalkTargetValue`: 10 for air cells, 0 otherwise.
+        return if view.block_state(pos).is_air() {
+            10.0
+        } else {
+            0.0
+        };
+    }
     if mob.mob_type == super::MobType::Mooshroom {
         return super::mooshroom::walk_target_value(view, pos);
     }
@@ -5004,6 +5013,11 @@ pub(crate) fn default_random_pos_away(
 /// The navigation's `isStableDestination`; a turtle with a travel target
 /// (`TurtlePathNavigation`) only accepts water cells.
 fn stable_destination(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
+    if mob.mob_type == super::MobType::Bee {
+        // `Bee$1.isStableDestination`：下面一格不是空气即可。
+        // `Bee$1.isStableDestination`: the block below is not air.
+        return !view.block_state(pos.below()).is_air();
+    }
     if super::turtle::is_turtle(mob.mob_type) && mob.turtle.travel_pos.is_some() {
         return view.block_state(pos).is(blocks::WATER);
     }
