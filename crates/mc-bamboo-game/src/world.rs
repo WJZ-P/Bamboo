@@ -3621,6 +3621,13 @@ fn run_island_simulation(
     region.profiler.end_partition_phase();
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::BlockEntities);
+    // 玩家属性表：每刻按装备 / 效果 / 游戏模式重算修饰符。挖掘、攻击、效果、同步
+    // 都在这一刻之后读它，和官方实体 tick 里先 `detectEquipmentUpdates` 一致。
+    //
+    // Rebuild the player attribute modifiers from equipment / effects / game mode
+    // before mining, attack, effects and sync read them, like vanilla's entity
+    // tick running `detectEquipmentUpdates` first.
+    crate::player_attributes::rebuild(region);
     // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
     // 这里跟着玩家 tick 放在随机刻之后。
     interaction::tick_mining(region);

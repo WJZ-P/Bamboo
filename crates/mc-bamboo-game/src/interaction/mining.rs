@@ -23,7 +23,10 @@ use super::{
     MAX_Y, REACH_BUFFER, actor_of, adventure, rules, send_current_block, send_effects,
     send_level_event, within_block_interaction_range,
 };
-use crate::{durability, inbound::PlayerId, links::encode_frames, region::Region};
+use crate::{
+    durability, inbound::PlayerId, links::encode_frames, player_attributes::MiningInputs,
+    region::Region,
+};
 
 /// `LevelEvent.PARTICLES_DESTROY_PROGRESS`：挖到一半的裂纹和声音。
 const DESTROY_PROGRESS_EVENT: i32 = 2019;
@@ -82,6 +85,8 @@ struct Snapshot {
     eye_height: f64,
     on_ground: bool,
     mining: Mining,
+    /// `getDestroySpeed` 的属性值 / 状态效果输入，从玩家属性表和效果表读出。
+    mining_inputs: MiningInputs,
 }
 
 fn snapshot(region: &Region, id: PlayerId) -> Option<Snapshot> {
@@ -94,6 +99,7 @@ fn snapshot(region: &Region, id: PlayerId) -> Option<Snapshot> {
         eye_height: player.eye_height(),
         on_ground: player.on_ground,
         mining: player.mining,
+        mining_inputs: crate::player_attributes::mining_inputs(player),
     })
 }
 
@@ -108,13 +114,21 @@ fn block_state(region: &Region, pos: BlockPos) -> BlockState {
     BlockState(region.chunks.block(pos).unwrap_or(blocks::VOID_AIR))
 }
 
-/// `player.getDestroySpeed(state)` 要读的几样东西。
+/// `player.getDestroySpeed(state)` 要读的几样东西：工具 / 物理位置，加上快照里
+/// 已经从玩家属性表 / 效果表算好的属性值和状态效果。
 fn miner_of(level: &dyn Level, snapshot: &Snapshot) -> Miner {
-    Miner::plain(
-        snapshot.actor.main_hand,
-        snapshot.on_ground,
-        block_mining::is_eye_in_water(level, snapshot.actor.eye_position()),
-    )
+    let inputs = snapshot.mining_inputs;
+    Miner {
+        main_hand: snapshot.actor.main_hand,
+        on_ground: snapshot.on_ground,
+        eye_in_water: block_mining::is_eye_in_water(level, snapshot.actor.eye_position()),
+        mining_efficiency: inputs.mining_efficiency,
+        block_break_speed: inputs.block_break_speed,
+        submerged_mining_speed: inputs.submerged_mining_speed,
+        has_dig_speed: inputs.has_dig_speed,
+        dig_speed_amplification: inputs.dig_speed_amplification,
+        mining_fatigue: inputs.mining_fatigue,
+    }
 }
 
 /// 官方在 `incrementDestroyProgress` 里把进度换成裂纹阶段：`(int)(progress * 10.0F)`。
@@ -555,7 +569,10 @@ mod tests {
         registries::data_component_type as kinds,
     };
     use mc_bamboo_protocol::{
-        components::{ComponentValue, cursor::HolderSet, predicate::BlockPredicate},
+        components::{
+            ComponentPatch, ComponentValue, PatchEntry, cursor::HolderSet,
+            predicate::BlockPredicate,
+        },
         item::ItemStack,
         packet::{
             ClientboundPacket,
@@ -1182,5 +1199,83 @@ mod tests {
             [crack(miner.id.0, ABOVE, 10), crack(miner.id.0, ABOVE, -1)]
         );
         assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    }
+
+    /// 一把挂了效率 `level` 的钻石镐（附魔 `minecraft:attributes` 给 MINING_EFFICIENCY）。
+    fn efficiency_pickaxe(level: i32) -> ItemStack {
+        let id = mc_bamboo_data::registries::SYNCED_REGISTRIES
+            .iter()
+            .find(|registry| registry.name == "minecraft:enchantment")
+            .and_then(|registry| {
+                registry
+                    .entries
+                    .iter()
+                    .position(|name| *name == "minecraft:efficiency")
+            })
+            .expect("efficiency is registered") as i32;
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(vec![(id, level)])),
+        );
+        let (added, removed) = patch.to_opaque();
+        let mut stack = ItemStack::new(items::DIAMOND_PICKAXE, 1);
+        stack.added = added;
+        stack.removed = removed;
+        stack
+    }
+
+    /// 效率 V 钻石镐：工具速度 8 加 MINING_EFFICIENCY=26 得 34，每刻进度
+    /// 34 / 1.5 / 30 ≈ 0.7556，STOP_DESTROY_BLOCK 当场（≥ 0.7）把石头挖掉。
+    /// 这是挖掘速度闭环的端到端对拍：Miner 读的是真实玩家属性表 / 附魔修饰符。
+    ///
+    /// Efficiency V diamond pickaxe: (8 + 26) / 1.5 / 30 ≈ 0.7556 per tick, so a
+    /// STOP_DESTROY_BLOCK breaks the stone immediately. End-to-end check that
+    /// Miner reads the real player attribute table / enchantment modifier.
+    #[test]
+    fn efficiency_v_pickaxe_breaks_stone_on_the_first_stop() {
+        let (mut server, client) = settled();
+        player_mut(&mut server, &client).game_mode = GameMode::Survival;
+        player_mut(&mut server, &client).on_ground = true;
+        player_mut(&mut server, &client).inventory.slots[36] = efficiency_pickaxe(5);
+        set_block(&mut server, GROUND, blocks::STONE);
+        // 跑一刻让属性表按装备重算（效率 V → MINING_EFFICIENCY=26）。
+        server.tick();
+        client.take_frames();
+
+        start(&server, &client, GROUND, Direction::Up, 1);
+        server.tick();
+        // 普通挖掘不会自己挖穿，方块还在。
+        assert_eq!(block_at(&mut server, GROUND), Some(blocks::STONE));
+        client.take_frames();
+
+        stop(&server, &client, GROUND, Direction::Up, 2);
+        server.tick();
+        // 效率 V 当场达到 0.7，石头被挖掉。
+        assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
+    }
+
+    /// 改坏确认：不带效率的普通钻石镐，第一次 STOP 只有 8/1.5/30*2 ≈ 0.3556，
+    /// 不到 0.7，方块不会被挖掉（转延迟破坏）。若把效率加成错误套到普通镐上，
+    /// 这条就会红。
+    ///
+    /// Break-check: a plain pickaxe reaches only ≈ 0.3556 on the first STOP and
+    /// must NOT break. This goes red if the efficiency bonus were applied to a
+    /// non-enchanted tool.
+    #[test]
+    fn a_plain_pickaxe_does_not_break_on_the_first_stop() {
+        let (mut server, client) = settled();
+        survive(&mut server, &client, items::DIAMOND_PICKAXE);
+        set_block(&mut server, GROUND, blocks::STONE);
+        server.tick();
+        client.take_frames();
+
+        start(&server, &client, GROUND, Direction::Up, 1);
+        server.tick();
+        client.take_frames();
+
+        stop(&server, &client, GROUND, Direction::Up, 2);
+        server.tick();
+        assert_eq!(block_at(&mut server, GROUND), Some(blocks::STONE));
     }
 }

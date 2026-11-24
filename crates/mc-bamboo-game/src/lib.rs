@@ -87,6 +87,7 @@ mod patrol_spawn;
 mod phantom_spawn;
 mod player;
 mod player_attack;
+mod player_attributes;
 mod player_auto_spin;
 mod player_combat_memory;
 pub mod player_consume;
