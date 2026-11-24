@@ -59,7 +59,7 @@ export const GROUPS = [
     id: "performance",
     section: "bamboo",
     title: "性能",
-    hint: "实体阶段和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
+    hint: "实体阶段、生物降频和区块信箱的执行方式，以及世界生成两份缓存的预算和空闲释放。精确模式是默认值，所有对拍和测试都在这个模式下跑；下面的一键按钮只改和生物性能有关的那几项。",
   },
 ] as const;
 
@@ -143,6 +143,12 @@ const MAX_KEEP_ALIVE_SECONDS = 29;
 const MAX_COMPRESSION_THRESHOLD = 2_097_151;
 /** 服务端能接受的实体线程数上限。 */
 const MAX_ENTITY_THREADS = 256;
+/** 挤压上限的合法上限，和 `MAX_ENTITY_COLLISIONS` 一致（Paper 缺省是 8）。 */
+const MAX_ENTITY_COLLISIONS = 4096;
+/** 三档降频两个距离的上限，和 `MAX_MOB_DISTANCE` 一致。 */
+const MAX_MOB_DISTANCE = 4096;
+/** 休眠生物唤醒倍率的上限，和 `MAX_WAKEUPS_SCALE` 一致。 */
+const MAX_MOB_WAKEUPS_SCALE = 16;
 /** 服务端能接受的区块计算线程数上限，和 `MAX_CHUNK_WORKER_THREADS` 一致。 */
 const MAX_CHUNK_WORKER_THREADS = 64;
 const MAX_MAIL_BUDGET = 65_536;
@@ -394,7 +400,49 @@ export const FIELDS: readonly SettingField[] = [
     min: 0,
     max: MAX_ENTITY_THREADS,
     wide: true,
-    hint: "0 = 精确模式（默认）：实体逐个算完立刻落地，和官方逐位一致，所有 oracle、probe、单元测试都在这个模式下跑。≥ 1 = 性能模式：实体阶段改成「并行算、按 uid 升序串行落地」，3000 个掉落物加 300 个下落方块的场景里 8 线程整刻快 4.0 倍。性能模式相对官方有已知差异：物品合并少看一拍（最多晚一刻合并）、TNT 爆炸的击退晚一刻体现在物理上、漏斗吸走物品后物品自己这一刻的 age 和位置仍按未被吸走算；别的实体看到的也是这一刻开始时的样子。目前每刻新起线程，只用于实验，不建议在正式服开。",
+    hint: "0 = 精确模式（默认）：实体逐个算完立刻落地，和官方逐位一致，所有 oracle、probe、单元测试都在这个模式下跑。≥ 1 = 性能模式：实体阶段改成「并行算、按 uid 升序串行落地」，服务端启动时建好一批常驻线程，不再每刻新起线程。3000 个掉落物加 300 个下落方块的场景里 8 线程整刻快 4.0 倍；2000 头牛的牧场整刻从 24.6 ms 降到 10.6 ms（2.3 倍），追玩家约 2.4 倍；350 只牛挤一格的刷怪塔没有收益（落地阶段串行，用下面的挤压上限）。性能模式相对官方有已知差异：实体看到的别的实体是这一刻开始时的样子；物品合并最多晚一刻；TNT 爆炸的击退晚一刻体现在物理上；漏斗吸走物品后物品自己这一刻的 age 和位置仍按未被吸走算。仍是实验项。",
+  },
+  {
+    key: "maxEntityCollisions",
+    group: "performance",
+    fileKey: "max_entity_collisions",
+    label: "挤压上限（实验）",
+    control: "number",
+    min: 0,
+    max: MAX_ENTITY_COLLISIONS,
+    hint: "每只生物每刻最多处理几次其他生物的推挤，对应 Paper 的 collisions.maxEntityCollisions。0 = 不限（默认，和官方逐位一致）；8 是 Paper 的缺省。打开后 350 只牛挤在 1×1 塔里的整刻从 132.3 ms 降到 4.2 ms（精确驱动约 32 倍），3×3 从 28.7 ms 降到 6.3 ms。和官方的差别：被推的次数少了，挤成一团的生物散开变慢；maxEntityCramming 的挤压伤害仍按完整的候选名单判定，和官方一样，不受这一项影响。",
+  },
+  {
+    key: "mobThrottleDistance",
+    group: "performance",
+    fileKey: "mob_throttle_distance",
+    label: "生物降频距离（实验）",
+    control: "number",
+    min: 0,
+    max: MAX_MOB_DISTANCE,
+    unit: "格",
+    hint: "三档降频的降频档起点：到最近非旁观玩家的水平距离超过它，目标选择器、GoalSelector 和大脑每 2–4 刻才跑一次，越远越稀；移动、导航、方块物理和所有计时器仍每刻照跑。0 = 关闭（默认，和官方逐位一致），推荐 32。打开后远处生物反应慢 0.1–0.2 秒；和休眠档一起打开（32 / 64）时，2000 头牛铺在半径 128 格内、一名玩家在中心的场景整刻从 14.3 ms 降到 4.8 ms（约 3 倍），混合场景约快 29%。",
+  },
+  {
+    key: "mobSleepDistance",
+    group: "performance",
+    fileKey: "mob_sleep_distance",
+    label: "生物休眠距离（实验）",
+    control: "number",
+    min: 0,
+    max: MAX_MOB_DISTANCE,
+    unit: "格",
+    hint: "三档降频的休眠档起点：超过它每刻只推进计时器，每 20 刻做一次完整 tick 但不主动走动；休眠太久的生物按类别轮流唤醒。0 = 关闭（默认，和官方逐位一致），推荐 64。打开后远处生物基本不动，靠生物自己走进陷阱的刷怪塔等农场会变慢；和降频档一起打开（32 / 64）时上面那个 2000 头的场景整刻从 14.3 ms 降到 4.8 ms，但每 20 刻有一次完整 tick，p99 会周期性接近关闭时的水平。",
+  },
+  {
+    key: "mobWakeupsScale",
+    group: "performance",
+    fileKey: "mob_wakeups_scale",
+    label: "休眠唤醒倍率（实验）",
+    control: "number",
+    min: 0,
+    max: MAX_MOB_WAKEUPS_SCALE,
+    hint: "休眠生物的限量唤醒倍率：1 = Paper 的缺省（动物每刻 4 只、怪物 8 只、飞行怪物 8 只、其它 4 只，分别休眠 1200 / 400 / 200 / 1200 刻后成为候选，醒 100 刻）。0 按 1 算，合法范围 0 到 16。只在休眠档启用时有用；调大能让远处生物更快恢复活动，但会削弱休眠档的收益。",
   },
   {
     key: "redstoneCache",
