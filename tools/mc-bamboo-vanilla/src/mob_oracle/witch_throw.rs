@@ -79,6 +79,7 @@ impl WitchThrowCase {
                 ..ZombieFacts::default()
             },
             natural_spawn: None,
+            biome: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),

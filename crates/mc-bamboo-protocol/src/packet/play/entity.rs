@@ -321,6 +321,24 @@ pub enum EntityData {
     ///
     /// `Axolotl.FROM_BUCKET`, a BOOLEAN at index 20.
     AxolotlFromBucket(bool),
+    /// `Villager.DATA_VILLAGER_DATA`（index 19，`VILLAGER_DATA` 序列化器）：
+    /// 品种、职业、等级三个 VarInt。序列化器的 ID 从官方字节码导出。
+    ///
+    /// `Villager.DATA_VILLAGER_DATA` (index 19, the `VILLAGER_DATA` serializer):
+    /// the kind, profession and level as three VarInts.
+    VillagerData {
+        kind: i32,
+        profession: i32,
+        level: i32,
+    },
+    /// `Villager.DATA_VILLAGER_DATA_FINALIZED`（index 20，BOOLEAN）。
+    ///
+    /// `Villager.DATA_VILLAGER_DATA_FINALIZED` (index 20, a BOOLEAN).
+    VillagerDataFinalized(bool),
+    /// `AbstractVillager.DATA_UNHAPPY_COUNTER`（index 18，INT）。
+    ///
+    /// `AbstractVillager.DATA_UNHAPPY_COUNTER` (index 18, an INT).
+    VillagerUnhappy(i32),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
@@ -473,6 +491,14 @@ impl EntityData {
             | Self::SpecialType(_)
             | Self::WitchUsingItem(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
+            // 村民的 18 是 `DATA_UNHAPPY_COUNTER`（INT），不是牛的花色。
+            //
+            // A villager's 18 is `DATA_UNHAPPY_COUNTER` (an INT), not the cow variant.
+            Self::VillagerUnhappy(_) => mc_bamboo_data::villager::UNHAPPY_COUNTER_INDEX,
+            Self::VillagerData { .. } => mc_bamboo_data::villager::VILLAGER_DATA_INDEX,
+            Self::VillagerDataFinalized(_) => {
+                mc_bamboo_data::villager::VILLAGER_DATA_FINALIZED_INDEX
+            }
             Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
             Self::CreeperSwellDir(_) => mc_bamboo_data::entity_types::CREEPER_SWELL_DIR,
@@ -729,6 +755,40 @@ impl EntityData {
             Self::CowVariant(variant) => {
                 write_data_header(out, 18, SERIALIZER_COW_VARIANT);
                 write_varint(out, *variant);
+            }
+            // `VillagerData.STREAM_CODEC`：品种、职业两个注册表 ID 和等级，都是 VarInt。
+            //
+            // `VillagerData.STREAM_CODEC`: the kind and profession registry ids and
+            // the level, all VarInts.
+            Self::VillagerData {
+                kind,
+                profession,
+                level,
+            } => {
+                write_data_header(
+                    out,
+                    mc_bamboo_data::villager::VILLAGER_DATA_INDEX,
+                    mc_bamboo_data::villager::VILLAGER_DATA_SERIALIZER,
+                );
+                write_varint(out, *kind);
+                write_varint(out, *profession);
+                write_varint(out, *level);
+            }
+            Self::VillagerDataFinalized(finalized) => {
+                write_data_header(
+                    out,
+                    mc_bamboo_data::villager::VILLAGER_DATA_FINALIZED_INDEX,
+                    mc_bamboo_data::villager::VILLAGER_DATA_FINALIZED_SERIALIZER,
+                );
+                write_bool(out, *finalized);
+            }
+            Self::VillagerUnhappy(counter) => {
+                write_data_header(
+                    out,
+                    mc_bamboo_data::villager::UNHAPPY_COUNTER_INDEX,
+                    mc_bamboo_data::villager::UNHAPPY_COUNTER_SERIALIZER,
+                );
+                write_varint(out, *counter);
             }
             Self::CowSoundVariant(variant) => {
                 write_data_header(out, 19, SERIALIZER_COW_SOUND_VARIANT);

@@ -100,6 +100,10 @@ import net.minecraft.world.level.GameType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.entity.npc.villager.VillagerData;
+import net.minecraft.world.entity.npc.villager.VillagerProfession;
+import net.minecraft.world.entity.npc.villager.VillagerType;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.InteractionHand;
@@ -342,6 +346,11 @@ public final class MobOracle {
             }
             if (only == null || only.equals("small_mob_death")) {
                 cases += playSmallMobDeath(official, out);
+            }
+            if (only == null || "villager".startsWith(only)) {
+                cases += playVillagerSpawn(official, out);
+                cases += playVillagerSave(official, out);
+                cases += playVillagerDeath(official, out);
             }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
@@ -9244,6 +9253,141 @@ public final class MobOracle {
                 cases++;
             }
         }
+        return cases;
+    }
+
+    /**
+     * 村民生成的群系品种：在假世界里把群系固定成若干项，跑一次 `finalizeSpawn`，
+     * 记下 `VillagerData`、finalized、尺寸和血量。
+     *
+     * Villager spawn types: pin the biome in the fake level, run one `finalizeSpawn` and
+     * report the `VillagerData`, finalized flag, dimensions and health.
+     */
+    private static int playVillagerSpawn(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (String biome : new String[] {"plains", "desert", "snowy_plains", "taiga",
+                "swamp", "jungle", "savanna", "badlands", "ocean", "the_void"}) {
+            FakeLevel world = FakeLevel.create(official);
+            var holder = official.registries.lookupOrThrow(net.minecraft.core.registries.Registries.BIOME)
+                    .getOrThrow(net.minecraft.resources.ResourceKey.create(
+                            net.minecraft.core.registries.Registries.BIOME,
+                            net.minecraft.resources.Identifier.withDefaultNamespace(biome)));
+            world.naturalBiome = holder;
+            put(net.minecraft.world.level.Level.class, world, "biomeManager",
+                    new net.minecraft.world.level.biome.BiomeManager((x, y, z) -> holder, 0L));
+            world.spawnDifficulty = new net.minecraft.world.DifficultyInstance(
+                    net.minecraft.world.Difficulty.NORMAL, 0L, 0L, 0.0F);
+            Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                    world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            mob.setPos(0.5, 64.0, 0.5);
+            mob.finalizeSpawn(world, world.spawnDifficulty,
+                    net.minecraft.world.entity.EntitySpawnReason.COMMAND, null);
+            VillagerData data = mob.getVillagerData();
+            net.minecraft.world.entity.EntityDimensions dimensions =
+                    mob.getDimensions(net.minecraft.world.entity.Pose.STANDING);
+            out.write("{\"type\":\"villagerSpawn\",\"biome\":" + jsonString("minecraft:" + biome)
+                    + ",\"kind\":" + jsonString(data.type().unwrapKey().orElseThrow().identifier().toString())
+                    + ",\"profession\":" + jsonString(data.profession().unwrapKey().orElseThrow().identifier().toString())
+                    + ",\"level\":" + data.level()
+                    + ",\"finalized\":" + mob.getVillagerDataFinalized()
+                    + ",\"dimensions\":[" + dimensions.width() + "," + dimensions.height() + "]"
+                    + ",\"health\":" + mob.getHealth() + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 村民存档：带职业 / 等级 / 食物 / 经验 / 补货时刻 / 八卦，往返一次。 */
+    private static int playVillagerSave(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+        mob.setPos(1.5, 64.0, 2.5);
+        mob.setYRot(37.0F);
+        mob.setXRot(12.0F);
+        var registries = official.registries;
+        VillagerData data = new VillagerData(
+                registries.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_TYPE)
+                        .getOrThrow(VillagerType.TAIGA),
+                registries.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_PROFESSION)
+                        .getOrThrow(VillagerProfession.FARMER),
+                3);
+        mob.setVillagerData(data);
+        mob.setVillagerDataFinalized(true);
+        mob.setVillagerXp(20);
+        put(Villager.class, mob, "foodLevel", 4);
+        put(Villager.class, mob, "lastRestockGameTime", 1234L);
+        put(Villager.class, mob, "lastGossipDecayTime", 5678L);
+        put(Villager.class, mob, "numberOfRestocksToday", 2);
+        mob.getGossips().add(new UUID(3L, 4L), net.minecraft.world.entity.ai.gossip.GossipType.MAJOR_POSITIVE, 5);
+        var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        mob.saveWithoutId(output);
+        var loadedTag = output.buildResult();
+        Villager copy = (Villager) EntityTypes.VILLAGER.create(
+                world, net.minecraft.world.entity.EntitySpawnReason.LOAD);
+        copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries, loadedTag));
+        var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        copy.saveWithoutId(again);
+        out.write("{\"type\":\"villagerSave\",\"name\":\"villager_save\""
+                + ",\"nbt\":" + jsonString(loadedTag.toString())
+                + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** 村民死亡：空战利品表、没有经验，比移除状态、物品和掉落的经验值。 */
+    private static int playVillagerDeath(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean byPlayer : new boolean[] {true, false}) {
+            FakeLevel world = FakeLevel.create(official);
+            world.spawned = new ArrayList<>();
+            Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                    world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            mob.setPos(0.5, 64.0, 0.5);
+            mob.setHealth(20.0F);
+            world.tracked.add(mob);
+            ServerPlayer player = null;
+            if (byPlayer) {
+                player = new ServerPlayer(official.server, world,
+                        new GameProfile(new UUID(1L, 2L), "VillagerDeath"), ClientInformation.createDefault());
+                player.setId(FIRST_ID + 1024);
+                player.setPos(2.5, 64.0, 0.5);
+                world.playersList().add(player);
+                world.tracked.add(player);
+            }
+            DamageSource source = player == null ? world.damageSources().generic()
+                    : world.damageSources().playerAttack(player);
+            mob.hurtServer(world, source, 100.0F);
+            for (int tick = 0; tick < 25; tick++) {
+                world.gameTime++;
+                if (!mob.isRemoved()) {
+                    mob.commonTick();
+                    mob.tick();
+                }
+            }
+            List<String> items = new ArrayList<>();
+            int experience = 0;
+            for (Entity entity : world.spawned) {
+                if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && !item.getItem().isEmpty()) {
+                    items.add(BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "x" + item.getItem().getCount());
+                }
+                if (entity instanceof net.minecraft.world.entity.ExperienceOrb orb) {
+                    experience += orb.getValue();
+                }
+            }
+            items.sort(String::compareTo);
+            out.write("{\"type\":\"villagerDeath\",\"byPlayer\":" + byPlayer
+                    + ",\"removed\":" + mob.isRemoved()
+                    + ",\"items\":" + items.stream().map(MobOracle::jsonString)
+                            .collect(java.util.stream.Collectors.joining(",", "[", "]"))
+                    + ",\"experience\":" + experience + "}\n");
+            cases++;
+        }
+        out.flush();
         return cases;
     }
 

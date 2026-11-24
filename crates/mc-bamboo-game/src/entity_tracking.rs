@@ -998,6 +998,23 @@ impl KindData {
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
     use mc_bamboo_data::entity_types as facts;
+    if kind == mc_bamboo_blocks::entity::mob::MobType::Villager {
+        use mc_bamboo_data::villager;
+        match index {
+            villager::UNHAPPY_COUNTER_INDEX => return EntityData::VillagerUnhappy(0),
+            villager::VILLAGER_DATA_INDEX => {
+                return EntityData::VillagerData {
+                    kind: villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0),
+                    profession: villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0),
+                    level: villager::MIN_VILLAGER_LEVEL,
+                };
+            }
+            villager::VILLAGER_DATA_FINALIZED_INDEX => {
+                return EntityData::VillagerDataFinalized(false);
+            }
+            _ => {}
+        }
+    }
     if kind == mc_bamboo_blocks::entity::mob::MobType::Bee {
         return match index {
             facts::BEE_FLAGS => EntityData::BeeFlags(0),
@@ -1617,6 +1634,30 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         }
         if !mob.goat.right_horn {
             out.push(EntityData::GoatRightHorn(false));
+        }
+        return out;
+    }
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Villager {
+        use mc_bamboo_data::villager;
+        // 按 index 升序：18 不高兴计数、19 `VillagerData`、20 finalized。
+        // Ascending indices: 18 unhappy, 19 `VillagerData`, 20 finalized.
+        if mob.villager_unhappy != 0 {
+            out.push(EntityData::VillagerUnhappy(mob.villager_unhappy));
+        }
+        let default_kind = villager::type_id(villager::DEFAULT_TYPE).unwrap_or(0);
+        let default_profession = villager::profession_id(villager::NONE_PROFESSION).unwrap_or(0);
+        if mob.villager_kind != default_kind
+            || mob.villager_profession != default_profession
+            || mob.villager_level != villager::MIN_VILLAGER_LEVEL
+        {
+            out.push(EntityData::VillagerData {
+                kind: mob.villager_kind,
+                profession: mob.villager_profession,
+                level: mob.villager_level,
+            });
+        }
+        if mob.villager_finalized {
+            out.push(EntityData::VillagerDataFinalized(true));
         }
         return out;
     }

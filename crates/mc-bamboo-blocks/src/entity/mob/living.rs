@@ -2976,6 +2976,21 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
+    // 村民不是 `Animal`：只有战利品表（官方的 `entities/villager` 是空表），
+    // `xpReward` 是 0，没有 `Animal.getBaseExperienceReward` 那次抽数。
+    //
+    // Villagers are not `Animal`s: only the loot table (vanilla's
+    // `entities/villager` is empty), and `xpReward` is 0 with no animal experience draw.
+    if mob.mob_type == super::MobType::Villager {
+        mob.events.push(MobEvent::Death);
+        if drops {
+            ctx.emit(
+                Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+                me,
+            );
+        }
+        return;
+    }
     if mob.mob_type == super::MobType::Slime {
         // `Slime.setSize` 把 `xpReward` 设成大小；史莱姆没有装备加成。
         // `Slime.setSize` sets `xpReward` to the size; slimes carry no equipment bonus.

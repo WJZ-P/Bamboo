@@ -788,6 +788,37 @@ CODEC 键 `spawn_delay`（默认 24000）/ `spawn_chance`（默认 25）。
 - `/summon minecraft:villager` 和刷怪蛋；`removeWhenFarAway = false`；
   `finalizeSpawn` 的群系品种。**村民此时没有大脑、没有职业、没有交易。**
 
+**期 2 实际做法与偏差（2026-11-23，分支 `villager-2`）**
+
+- 数据导出按计划完成，但 `PoiTypes.matchingStates` 这一项按任务书跳过（期 1 的
+  `poi` 分支已经导出，本期不与它重复）。
+- 生成器新增 `villager` 输出：`TRADE_SETS` / `VILLAGER_TRADES` /
+  `VILLAGER_TRADE_TAGS` 保留官方原文，`TRADE_SET_ENTRIES` 把标签按官方顺序递归展开
+  （去重、循环引回报错），另导出 15 个 `Profession`（工作站用「对每个 POI 类型求值」
+  展开成 POI 名字表）、7 个品种、29 条 `VillagerType.byBiome`、5 个 `GossipType`、
+  3 个声望常量、三个元数据 index / 序列化器、尺寸 / 眼高 / 移速 / 等级阈值和两条日程
+  关键帧。生成时校验数量（68 / 391 / 73 / 15 / 7 / 29），每级交易表存在，展开条目都能
+  在 `villager_trade` 里找到；`mc-bamboo-data` 另用单测钉住数量、阈值和关键帧。
+- `MobType::Villager` 接进 `ALL`、注册表 ID、名字、尺寸、音效、刷怪蛋、翻译键、
+  战利品表、`MobCategory::Misc`、`removeWhenFarAway = false`、`is_animal = false`
+  （不是 `Animal`，不写 `InLove`），构造时能开门 / 浮水 / 寻路 48 格 / 捡物。
+- 元数据新增 `EntityData::VillagerUnhappy`(18) / `VillagerData`(19) /
+  `VillagerDataFinalized`(20)，序列化器 ID 由生成器从官方代码导出；游戏层只在非
+  默认时发，回到默认时发默认值。
+- 存档写官方 8 个键，`Offers` / `Inventory` 作为原文 `Tag` 原样保留（期 2 不解释），
+  `Brain` 继续走通用 `brain/nbt.rs`。读档时有 `VillagerData` 或
+  `VillagerDataFinalized` 为真就把 finalized 置真，等级至少 1。
+- 死亡只掉空的 `entities/villager` 表，不掉经验（`xpReward` 为 0，不是 `Animal` 的
+  `1 + nextInt(3)`）。
+- 对拍新增 `mob-oracle --only villager`：10 个群系的生成品种 / finalized / 尺寸 / 血量、
+  1 题存档往返（8 个键 + `Offers` / `Inventory` / `Brain` 逐键比）、2 题死亡；
+  `--break-self-test villager_spawn` 和 `villager_save` 两处改坏都能报出不一致。
+- **偏差**：期 2 没有大脑，所以构造期不取 9 个传感器的起始延迟；`finalizeSpawn` 里
+  `Mob.finalizeSpawn` 的跟随距离加成和左撇子因此和官方随机源不同。期 3 接大脑后
+  会自动对齐，生成场景只比 `VillagerData` / finalized / 尺寸 / 血量，不比随机源。
+  僵尸村民和流浪商人没有放占位枚举：它们会让 `MobType::ALL` 和自然刷怪映射多出
+  两种没有实现的类型，收益很小，留到期 7。
+
 ### 期 3：大脑与日程
 
 - `Activity` 加 8 个变体 + `java_hash` 单测；`MemoryType` 追加约 20 种 +

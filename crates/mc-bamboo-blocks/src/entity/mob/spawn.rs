@@ -87,6 +87,18 @@ impl AgeableGroupData {
         self.group_size += 1;
         baby
     }
+
+    /// `AbstractVillager.finalizeSpawn` 的缺省组数据：`new AgeableMobGroupData(false)`。
+    ///
+    /// The default group data of `AbstractVillager.finalizeSpawn`:
+    /// `new AgeableMobGroupData(false)`.
+    fn without_babies() -> Self {
+        Self {
+            group_size: 0,
+            should_spawn_baby: false,
+            baby_spawn_chance: 0.0,
+        }
+    }
 }
 
 /// 自然生成的组数据（`SpawnGroupData`）：动物的 `AgeableMobGroupData` 和僵尸的
@@ -464,6 +476,10 @@ fn finalize_spawn_in_group(
         super::pillager::finalize_spawn(world, entity, reason);
         return;
     }
+    if kind == MobType::Villager {
+        super::villager::finalize_spawn(world, entity, reason, group);
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
     if matches!(kind, MobType::Rabbit | MobType::Fox | MobType::Wolf) {
@@ -658,6 +674,27 @@ pub(super) fn finalize_ageable(
         }
         finalize_mob(random, mob);
     });
+}
+
+/// `AbstractVillager.finalizeSpawn` 的 `AgeableMob` / `Mob` 两层：没有组数据时用
+/// `new AgeableMobGroupData(false)`，所以村民不会因为组计数变成幼年。
+///
+/// The `AgeableMob` / `Mob` layers of `AbstractVillager.finalizeSpawn`: a missing group
+/// becomes `new AgeableMobGroupData(false)`, so villagers never turn into babies by
+/// group count.
+pub(super) fn finalize_villager_ageable(
+    random: &dyn RandomSource,
+    mob: &mut super::Mob,
+    group: &mut Option<SpawnGroup>,
+) {
+    if !matches!(group, Some(SpawnGroup::Ageable(_))) {
+        *group = Some(SpawnGroup::Ageable(AgeableGroupData::without_babies()));
+    }
+    let Some(SpawnGroup::Ageable(data)) = group else {
+        unreachable!("刚放进去的村民组数据");
+    };
+    let _ = data.roll_baby(random);
+    finalize_mob(random, mob);
 }
 
 pub(super) fn finalize_mob(random: &dyn RandomSource, mob: &mut super::Mob) {
