@@ -74,6 +74,13 @@ pub struct BlockGameRules {
     /// Bamboo 的 `mob_wakeups_scale`：每刻唤醒名额的倍率（1 = Paper 缺省值）。
     /// 0 按 1 算，防止配置写坏让整套唤醒失效。
     pub mob_wakeups_scale: usize,
+    /// Bamboo 的独立寻路阶段开关。false = 官方当场同步算（精确模式）。
+    /// 不是官方游戏规则，不进存档、不同步客户端。
+    pub mob_pathfinding_phase: bool,
+    /// 每个岛每刻最多展开的 A* 节点数；0 = 用缺省预算。不进存档。
+    pub mob_pathfinding_budget: u32,
+    /// 连续寻路失败超过 10 次后 40 刻内不再试（Paper 的数值）。不进存档。
+    pub mob_pathfinding_fail_cooldown: bool,
 }
 
 impl BlockGameRules {
@@ -105,6 +112,9 @@ impl BlockGameRules {
             mob_throttle_distance: 0,
             mob_sleep_distance: 0,
             mob_wakeups_scale: 1,
+            mob_pathfinding_phase: false,
+            mob_pathfinding_budget: 0,
+            mob_pathfinding_fail_cooldown: false,
         }
     }
 }

@@ -90,6 +90,8 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     if me.removed {
         return;
     }
+    // 独立寻路阶段：上一刻的结果在这一刻开头装进导航 / 留给原调用点取走。
+    super::pathfinding::install(mob, ctx.blocks());
     // `Pufferfish.tick` 在 `super.tick()` 之前跑膨胀 / 收缩。
     // `Pufferfish.tick` runs the inflate/deflate machine before `super.tick()`.
     super::fish::pre_tick(me, mob, ctx);

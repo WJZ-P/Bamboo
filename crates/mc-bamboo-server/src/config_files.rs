@@ -19,9 +19,10 @@ use mc_bamboo_game::{
     DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV, ISLAND_THREADS_ENV,
     ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS,
     MAX_ISLAND_DEAD_SECONDS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MAX_MOB_DISTANCE,
-    MAX_MOB_WAKEUPS_SCALE, MIN_ISLAND_DEAD_SECONDS, MailBudget, island_dead_seconds_from_env,
-    island_threads_from_env, islands_from_env, recommended_island_threads,
-    world_options::WorldGenConfig, worldgen_cache::WorldgenCacheSettings,
+    MAX_MOB_WAKEUPS_SCALE, MAX_PATHFINDING_BUDGET, MIN_ISLAND_DEAD_SECONDS, MailBudget,
+    island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
+    recommended_island_threads, world_options::WorldGenConfig,
+    worldgen_cache::WorldgenCacheSettings,
 };
 use toml::{Table, Value};
 use tracing::{info, warn};
@@ -141,6 +142,9 @@ const BAMBOO_KEYS: &[&str] = &[
     "mob_throttle_distance",
     "mob_sleep_distance",
     "mob_wakeups_scale",
+    "mob_pathfinding_phase",
+    "mob_pathfinding_budget",
+    "mob_pathfinding_fail_cooldown",
     "redstone_cache",
     "chunk_worker_threads",
     "worldgen_terrain_cache_mb",
@@ -182,6 +186,12 @@ pub struct BambooConfig {
     pub mob_sleep_distance: i32,
     /// 每刻唤醒名额的倍率（1 = Paper 的缺省值）。
     pub mob_wakeups_scale: usize,
+    /// 独立寻路阶段（实验，缺省关）和每岛每刻节点预算 / 失败冷却。
+    ///
+    /// The opt-in pathfinding phase, its per-island node budget, and the failure cooldown.
+    pub mob_pathfinding_phase: bool,
+    pub mob_pathfinding_budget: u32,
+    pub mob_pathfinding_fail_cooldown: bool,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
@@ -247,6 +257,9 @@ impl Default for BambooConfig {
             mob_throttle_distance: defaults.mob_throttle_distance,
             mob_sleep_distance: defaults.mob_sleep_distance,
             mob_wakeups_scale: defaults.mob_wakeups_scale,
+            mob_pathfinding_phase: false,
+            mob_pathfinding_budget: 0,
+            mob_pathfinding_fail_cooldown: false,
             redstone_cache: defaults.redstone_cache,
             chunk_worker_threads: defaults.chunk_worker_threads,
             worldgen_cache: defaults.worldgen_cache,
@@ -321,6 +334,16 @@ impl BambooConfig {
                 "# 飞行怪物 8 / 其它 4 只每刻），0 按 1 算，合法范围 0..=16。\n",
                 "mob_wakeups_scale = {}\n",
                 "\n",
+                "# 独立寻路阶段（实验，缺省 false = 官方逐位一致）：请求挂起一刻，阶段末尾统一\n",
+                "# 去重、排优先级、按节点预算算，结果下一刻交给生物；转向晚 50 毫秒。\n",
+                "mob_pathfinding_phase = {}\n",
+                "\n",
+                "# 每个岛每刻最多展开的 A* 节点数，0 = 4096。超出的请求顺延，等得越久越先算。\n",
+                "mob_pathfinding_budget = {}\n",
+                "\n",
+                "# 寻路失败冷却（Paper 的数值）：连续失败超过 10 次后 40 刻内不再试。缺省 false。\n",
+                "mob_pathfinding_fail_cooldown = {}\n",
+                "\n",
                 "# 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认 false。\n",
                 "redstone_cache = {}\n",
                 "\n",
@@ -372,6 +395,9 @@ impl BambooConfig {
             self.mob_throttle_distance,
             self.mob_sleep_distance,
             self.mob_wakeups_scale,
+            self.mob_pathfinding_phase,
+            self.mob_pathfinding_budget,
+            self.mob_pathfinding_fail_cooldown,
             self.redstone_cache,
             self.chunk_worker_threads,
             self.worldgen_cache.terrain_mb,
@@ -453,6 +479,21 @@ impl BambooConfig {
                 1,
                 0,
                 MAX_MOB_WAKEUPS_SCALE,
+            ),
+            mob_pathfinding_phase: boolean(table, "mob_pathfinding_phase", file, false),
+            mob_pathfinding_budget: integer(
+                table,
+                "mob_pathfinding_budget",
+                file,
+                0,
+                0,
+                MAX_PATHFINDING_BUDGET as usize,
+            ) as u32,
+            mob_pathfinding_fail_cooldown: boolean(
+                table,
+                "mob_pathfinding_fail_cooldown",
+                file,
+                false,
             ),
             redstone_cache: boolean(table, "redstone_cache", file, false),
             chunk_worker_threads: integer(
@@ -923,6 +964,9 @@ impl ConfigFiles {
             mob_throttle_distance: self.bamboo.mob_throttle_distance,
             mob_sleep_distance: self.bamboo.mob_sleep_distance,
             mob_wakeups_scale: self.bamboo.mob_wakeups_scale,
+            mob_pathfinding_phase: self.bamboo.mob_pathfinding_phase,
+            mob_pathfinding_budget: self.bamboo.mob_pathfinding_budget,
+            mob_pathfinding_fail_cooldown: self.bamboo.mob_pathfinding_fail_cooldown,
             redstone_cache: self.bamboo.redstone_cache,
             chunk_worker_threads: self.bamboo.chunk_worker_threads,
             worldgen_cache: self.bamboo.worldgen_cache,
@@ -971,6 +1015,9 @@ impl ConfigFiles {
         bamboo.mob_throttle_distance = config.mob_throttle_distance;
         bamboo.mob_sleep_distance = config.mob_sleep_distance;
         bamboo.mob_wakeups_scale = config.mob_wakeups_scale;
+        bamboo.mob_pathfinding_phase = config.mob_pathfinding_phase;
+        bamboo.mob_pathfinding_budget = config.mob_pathfinding_budget;
+        bamboo.mob_pathfinding_fail_cooldown = config.mob_pathfinding_fail_cooldown;
         bamboo.redstone_cache = config.redstone_cache;
         bamboo.chunk_worker_threads = config.chunk_worker_threads;
         bamboo.worldgen_cache = config.worldgen_cache;
@@ -1127,6 +1174,21 @@ impl ConfigFiles {
                 "mob_wakeups_scale",
                 self.bamboo.mob_wakeups_scale as u64,
                 defaults.bamboo.mob_wakeups_scale as u64,
+            ),
+            (
+                "mob_pathfinding_phase",
+                u64::from(self.bamboo.mob_pathfinding_phase),
+                u64::from(defaults.bamboo.mob_pathfinding_phase),
+            ),
+            (
+                "mob_pathfinding_budget",
+                u64::from(self.bamboo.mob_pathfinding_budget),
+                u64::from(defaults.bamboo.mob_pathfinding_budget),
+            ),
+            (
+                "mob_pathfinding_fail_cooldown",
+                u64::from(self.bamboo.mob_pathfinding_fail_cooldown),
+                u64::from(defaults.bamboo.mob_pathfinding_fail_cooldown),
             ),
             (
                 "redstone_cache",

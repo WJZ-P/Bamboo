@@ -157,8 +157,7 @@ impl Default for EvaluatorFlags {
 }
 
 impl EvaluatorFlags {
-    /// 压测去重用：把导航类型的几个开关压成一个小整数，不用给生产代码引入新类型。
-    #[cfg(test)]
+    /// 导航类型的几个开关压成一个小整数，给寻路阶段去重和测试探针共用。
     pub(crate) fn nav_id(self) -> u16 {
         let mut id = 0;
         for bit in [
@@ -364,7 +363,15 @@ struct Search<'a> {
 }
 
 /// `PathFinder.findPath` 加上 `PathNavigation.createPath` 里那段 `findPath` 调用。
+///
+/// 独立寻路阶段打开时走 [`find_path_with_nodes`]，把展开节点数交给预算统计；
+/// 精确模式仍走这个同步入口，语句顺序和官方一致。
 pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
+    find_path_with_nodes(view, request).0
+}
+
+/// 同 [`find_path`]，另外返回 `PathFinder.run` 弹出的节点数（A* 展开数）。
+pub fn find_path_with_nodes(view: &dyn BlockView, request: &PathRequest) -> (Option<Path>, u64) {
     super::timing::span!(Path);
     let mut search = Search::new(view, request.mob, request.flags);
     let start = if request.flags.swim.is_some() {
@@ -386,11 +393,11 @@ pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
             reached: false,
         }
     };
+    let visited = search.run(start, &mut target, request);
     // 压测探针：一条进 A\* 的请求、展开了多少节点、成没成功、能不能按起点格 / 终点 /
     // 体型 / 导航类型去重。正式构建里整段是空操作。
     #[cfg(test)]
-    let _visited = {
-        let visited = search.run(start, &mut target, request);
+    {
         use super::timing::imp::PathKey;
         let start_node = search.nodes[start];
         let key = PathKey {
@@ -400,11 +407,10 @@ pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
             nav: request.flags.nav_id(),
         };
         super::timing::record_path!(key, visited, target.best_node.is_some());
-        visited
+    }
+    let Some(best) = target.best_node else {
+        return (None, visited);
     };
-    #[cfg(not(test))]
-    let _ = search.run(start, &mut target, request);
-    let best = target.best_node?;
     let mut chain = vec![search.nodes[best]];
     let mut current = search.nodes[best].came_from;
     while let Some(index) = current {
@@ -412,7 +418,10 @@ pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
         current = search.nodes[index].came_from;
     }
     chain.reverse();
-    Some(Path::new(chain, request.target, target.reached))
+    (
+        Some(Path::new(chain, request.target, target.reached)),
+        visited,
+    )
 }
 
 impl<'a> Search<'a> {

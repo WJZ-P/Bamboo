@@ -564,6 +564,9 @@ pub struct EntityStore {
     departed_mob_events: BTreeMap<EntityUid, (ChunkPos, Vec<super::mob::MobEvent>)>,
     /// 三档降频的限量唤醒令牌桶（每岛一份）。缺省按刻号 0 的满桶起。
     wake_tokens: super::mob::throttle::WakeTokens,
+    /// 独立寻路阶段（开关，缺省关）的每岛状态：挂起请求、下一刻交付、失败冷却。
+    /// 缺省精确模式下恒为空，不进存档、不同步客户端。
+    pathfinding: super::mob::pathfinding::PhaseState,
 }
 
 impl Default for EntityStore {
@@ -591,6 +594,7 @@ impl Default for EntityStore {
                 0,
                 super::mob::throttle::Config::OFF,
             ),
+            pathfinding: super::mob::pathfinding::PhaseState::default(),
         }
     }
 }
@@ -637,6 +641,64 @@ impl EntityStore {
     /// The seed source's current state, for split checks and tests.
     pub const fn entity_seed_state(&self) -> i64 {
         self.seeds.state()
+    }
+
+    /// 独立寻路阶段的状态（每岛一份）。
+    pub fn pathfinding(&self) -> &super::mob::pathfinding::PhaseState {
+        &self.pathfinding
+    }
+
+    pub fn pathfinding_mut(&mut self) -> &mut super::mob::pathfinding::PhaseState {
+        &mut self.pathfinding
+    }
+
+    /// 收走这一刻挂起的寻路请求，交给阶段统一算。按（uid, 序号）升序。
+    ///
+    /// Collect the path requests suspended this tick and hand them to the phase;
+    /// ascending (uid, serial).
+    pub fn take_path_requests(&mut self, now: i64) -> Vec<super::mob::pathfinding::Pending> {
+        let mut out = Vec::new();
+        for row in self.slots.iter_mut().flatten() {
+            let KindState::Mob(mob) = &mut row.state.kind else {
+                continue;
+            };
+            let Some(request) = mob.navigation.pending_request.take() else {
+                continue;
+            };
+            let uid = row.public.uid;
+            out.push(super::mob::pathfinding::Pending::new(
+                uid,
+                request,
+                now,
+                mob.target.is_some(),
+                mob.target.unwrap_or(-1),
+            ));
+        }
+        out.sort_by_key(|pending| (pending.uid, pending.local_serial));
+        out
+    }
+
+    /// 把上一刻算好的结果挂到各生物的导航上；下一刻 `tick_mob` 开头统一处理。
+    ///
+    /// Attach last tick's outcomes to their mobs' navigation; `tick_mob` applies
+    /// them at the start of the next tick.
+    pub fn begin_path_tick(&mut self) {
+        let outcomes = self.pathfinding.take_deliveries();
+        if outcomes.is_empty() {
+            return;
+        }
+        for outcome in outcomes {
+            let Some(&row) = self.index.get(&outcome.uid) else {
+                continue;
+            };
+            let Some(entry) = self.slots[row].as_mut() else {
+                continue;
+            };
+            let KindState::Mob(mob) = &mut entry.state.kind else {
+                continue;
+            };
+            mob.navigation.replay = Some(outcome.replay());
+        }
     }
 
     /// 从指定的实体 ID 开始分配（自己一个新计数器）。oracle 的假世界用这个对齐官方的
@@ -1369,6 +1431,7 @@ impl EntityStore {
             }
         }
         self.wake_tokens.rebase(delta);
+        self.pathfinding.rebase(delta);
     }
 
     /// 三档降频的限量唤醒令牌桶。
@@ -1601,6 +1664,9 @@ impl EntityStore {
             self.free.push(row);
             out.insert_row_quietly(entry);
         }
+        // 寻路阶段里属于搬走生物的请求、结果和失败计数跟着走。
+        let moved_set: BTreeSet<EntityUid> = moved.iter().copied().collect();
+        out.pathfinding = self.pathfinding.split_by(&moved_set);
         let (moved, kept): (Vec<Tag>, Vec<Tag>) = std::mem::take(&mut self.preserved)
             .into_iter()
             .partition(|tag| chunks.contains(&preserved_chunk(tag)));
@@ -1641,6 +1707,7 @@ impl EntityStore {
         self.watched_sections.extend(other.watched_sections);
         // 合并：两个岛的刻号已经对齐，按类别取两份里剩余令牌较多的那份。
         self.wake_tokens.absorb(other.wake_tokens);
+        self.pathfinding.absorb(other.pathfinding);
         self.wake_events.append(&mut other.wake_events);
         for (uid, entry) in std::mem::take(&mut other.departed_mob_events) {
             let previous = self.departed_mob_events.insert(uid, entry);

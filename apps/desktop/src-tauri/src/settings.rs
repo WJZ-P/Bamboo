@@ -353,6 +353,9 @@ impl ServerSettings {
             mob_throttle_distance: defaults.mob_throttle_distance,
             mob_sleep_distance: defaults.mob_sleep_distance,
             mob_wakeups_scale: defaults.mob_wakeups_scale,
+            mob_pathfinding_phase: defaults.mob_pathfinding_phase,
+            mob_pathfinding_budget: defaults.mob_pathfinding_budget,
+            mob_pathfinding_fail_cooldown: defaults.mob_pathfinding_fail_cooldown,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
             worldgen_cache: WorldgenCacheSettings {

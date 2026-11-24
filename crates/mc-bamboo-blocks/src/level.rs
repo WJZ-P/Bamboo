@@ -543,6 +543,17 @@ pub trait LevelEntities {
     fn remove_entity(&mut self, uid: EntityUid);
     fn begin_entity_tick(&mut self);
     fn end_entity_tick(&mut self);
+    /// 独立寻路阶段：把上一刻的结果挂到各生物的导航上。缺省什么都不做。
+    fn begin_path_tick(&mut self) {}
+    /// 收走这一刻挂起的寻路请求。缺省没有。
+    fn take_path_requests(&mut self, _now: i64) -> Vec<crate::entity::mob::pathfinding::Pending> {
+        Vec::new()
+    }
+    /// 取出寻路阶段状态（精确驱动在算搜索时临时搬出去，避免和只读方块视图同时借）。
+    fn take_pathfinding(&mut self) -> crate::entity::mob::pathfinding::PhaseState {
+        Default::default()
+    }
+    fn put_pathfinding(&mut self, _state: crate::entity::mob::pathfinding::PhaseState) {}
     fn take_entity(&mut self, uid: EntityUid) -> Option<Entity>;
     fn put_entity(&mut self, entity: Entity);
     fn live_entities(&self) -> Vec<Entity>;
@@ -658,6 +669,22 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn end_entity_tick(&mut self) {
         self.entities_table_mut().end_tick();
+    }
+
+    fn begin_path_tick(&mut self) {
+        self.entities_table_mut().begin_path_tick();
+    }
+
+    fn take_path_requests(&mut self, now: i64) -> Vec<crate::entity::mob::pathfinding::Pending> {
+        self.entities_table_mut().take_path_requests(now)
+    }
+
+    fn take_pathfinding(&mut self) -> crate::entity::mob::pathfinding::PhaseState {
+        std::mem::take(self.entities_table_mut().pathfinding_mut())
+    }
+
+    fn put_pathfinding(&mut self, state: crate::entity::mob::pathfinding::PhaseState) {
+        *self.entities_table_mut().pathfinding_mut() = state;
     }
 
     fn take_entity(&mut self, uid: EntityUid) -> Option<Entity> {

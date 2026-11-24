@@ -60,6 +60,7 @@ pub mod ocelot;
 pub mod panda;
 pub mod parrot;
 pub mod path;
+pub mod pathfinding;
 pub mod patrol;
 pub mod phantom;
 pub mod phantom_spawner;
