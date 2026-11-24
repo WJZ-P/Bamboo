@@ -9303,7 +9303,10 @@ public final class MobOracle {
                     + ",\"level\":" + data.level()
                     + ",\"finalized\":" + mob.getVillagerDataFinalized()
                     + ",\"dimensions\":[" + dimensions.width() + "," + dimensions.height() + "]"
-                    + ",\"health\":" + mob.getHealth() + "}\n");
+                    + ",\"health\":" + mob.getHealth()
+                    + ",\"followRange\":" + mob.getAttributeValue(
+                            net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)
+                    + ",\"leftHanded\":" + mob.isLeftHanded() + "}\n");
             cases++;
         }
         out.flush();

@@ -930,9 +930,9 @@ meeting + beehive + lightning_rod，跨 3 个高度段 / 多个区块，含拆�
 - 对拍新增 `mob-oracle --only villager`：10 个群系的生成品种 / finalized / 尺寸 / 血量、
   1 题存档往返（8 个键 + `Offers` / `Inventory` / `Brain` 逐键比）、2 题死亡；
   `--break-self-test villager_spawn` 和 `villager_save` 两处改坏都能报出不一致。
-- **偏差**：期 2 没有大脑，所以构造期不取 9 个传感器的起始延迟；`finalizeSpawn` 里
-  `Mob.finalizeSpawn` 的跟随距离加成和左撇子因此和官方随机源不同。期 3 接大脑后
-  会自动对齐，生成场景只比 `VillagerData` / finalized / 尺寸 / 血量，不比随机源。
+- **偏差**：期 2 没有大脑，但在构造末尾照官方九个传感器的扫描间隔
+  （20×7、40、200）消费同样的随机数，所以 `finalizeSpawn` 的跟随距离加成和左撇子
+  与官方一致；生成场景连这两项一起比。期 3 接真大脑时用真传感器替换这段临时取数。
   僵尸村民和流浪商人没有放占位枚举：它们会让 `MobType::ALL` 和自然刷怪映射多出
   两种没有实现的类型，收益很小，留到期 7。
 

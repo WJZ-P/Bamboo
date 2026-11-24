@@ -66,6 +66,13 @@ impl Default for Villager {
     }
 }
 
+/// 官方 `Villager.BRAIN_PROVIDER` 的九个传感器扫描间隔，按注册顺序。
+/// 期 2 只用来消费构造期的随机数，期 3 接到真传感器上后删掉。
+///
+/// The nine sensor scan rates of vanilla `Villager.BRAIN_PROVIDER`, in registration
+/// order. Phase 2 only consumes the constructor draws with them.
+pub(crate) const SENSOR_SCAN_RATES: [i32; 9] = [20, 20, 20, 20, 20, 20, 20, 40, 200];
+
 impl Villager {
     /// `VillagerData` 的完整默认值。
     pub fn is_default_data(&self) -> bool {

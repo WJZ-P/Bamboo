@@ -20,6 +20,8 @@ pub(super) struct VillagerSpawnCase {
     finalized: bool,
     dimensions: [f32; 2],
     health: f32,
+    follow_range: f64,
+    left_handed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +124,9 @@ impl Report {
         let profession = mc_bamboo_data::villager::profession(mob.villager.profession)
             .map_or("", |entry| entry.name);
         let dimensions = mob.dimensions();
+        let follow_range = mob
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let actual = (
             kind,
             profession,
@@ -129,6 +134,8 @@ impl Report {
             mob.villager.finalized,
             [dimensions.0, dimensions.1],
             mob.health,
+            follow_range,
+            mob.left_handed,
         );
         let expected = (
             case.kind.as_str(),
@@ -137,6 +144,8 @@ impl Report {
             case.finalized,
             case.dimensions,
             case.health,
+            case.follow_range,
+            case.left_handed,
         );
         if actual != expected {
             self.mismatch(format!(
