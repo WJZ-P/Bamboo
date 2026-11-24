@@ -20,7 +20,7 @@
 //! compile. Preconditions (asserted): the two parts' loaded chunks are at
 //! least 3 apart, and no view crosses islands (plan 4.2).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{cell::RefCell, collections::{BTreeMap, BTreeSet}};
 
 use mc_bamboo_blocks::{LevelRandom, entity::Entities};
 use mc_bamboo_core::{BlockPos, ChunkPos};
@@ -543,6 +543,9 @@ impl Region {
             loot_sequences,
             entity_seeds: _,
         } = random;
+        let structure_spawn_index = RefCell::new(
+            self.structure_spawn_index.borrow_mut().split_off(chunks),
+        );
         Ok(Region {
             players: new_players,
             player_grid,
@@ -567,6 +570,7 @@ impl Region {
             redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
                 *self.redstone_cache.config(),
             ),
+            structure_spawn_index,
             spawn_per_player_cap: self.spawn_per_player_cap,
             max_entity_collisions: self.max_entity_collisions,
             mob_throttle_distance: self.mob_throttle_distance,
@@ -739,6 +743,7 @@ impl Region {
             block_events,
             random,
             redstone_cache: _,
+            structure_spawn_index,
             spawn_per_player_cap: _,
             max_entity_collisions: _,
             mob_throttle_distance: _,
@@ -781,6 +786,9 @@ impl Region {
             entity_seeds: entities.entity_seed_source(),
             profiler,
         };
+        self.structure_spawn_index
+            .borrow_mut()
+            .absorb(structure_spawn_index.into_inner());
         self.pending_triggers.extend(pending_triggers);
         self.chunks
             .absorb(chunks)

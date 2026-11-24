@@ -523,6 +523,24 @@ pub trait LevelEntities {
     }
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_entity_in`]，但只访问 `types` 里那几种注册表实体类型。
+    /// 没有按类型建索引的实现退回全量扫描加过滤，顺序和结果都不变。
+    ///
+    /// Like [`Self::for_each_entity_in`] but only the given registry entity types.
+    /// Implementations without a type index fall back to a filtered full scan;
+    /// the order and the result are unchanged.
+    fn for_each_entity_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.for_each_entity_in(area, &mut |public| {
+            if types.contains(&public.kind.entity_type()) {
+                visit(public);
+            }
+        });
+    }
     /// `getEntitiesOfClass` 的官方分区顺序（`SectionPos.asLong` 升序，段内加入顺序）。
     ///
     /// Vanilla `EntitySectionStorage` order for `getEntitiesOfClass`.
@@ -636,6 +654,16 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.entities_table().for_each_in(area, visit);
+    }
+
+    fn for_each_entity_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.entities_table()
+            .for_each_of_types_in(area, types, visit);
     }
 
     fn for_each_entity_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {

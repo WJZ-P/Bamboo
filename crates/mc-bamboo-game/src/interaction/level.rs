@@ -67,6 +67,13 @@ pub(crate) struct RegionLevel<'a> {
     /// This session's world-generation parameters, used to recompute structure starts
     /// for the structure spawn override.
     pub(crate) world_gen: &'a crate::world_options::WorldGenConfig,
+    /// 按岛的结构刷怪索引，`Level::structure_spawn_override` 只有 `&self`，
+    /// 所以用 `RefCell` 在第一次查询时填进这一区块的拍平行。
+    ///
+    /// Per-island structure spawn index; `Level::structure_spawn_override` only
+    /// gets `&self`, so a `RefCell` fills the chunk's flattened rows on first query.
+    pub(crate) structure_spawn_index:
+        &'a std::cell::RefCell<crate::structure_spawn::StructureSpawnIndex>,
     /// `Level.getSeaLevel()`：这一维度的海平面。超平坦是 -63，其余是 63。
     ///
     /// `Level.getSeaLevel()` for this dimension. -63 for superflat and 63 otherwise.
@@ -469,7 +476,12 @@ impl Level for RegionLevel<'_> {
         pos: BlockPos,
         category: mc_bamboo_data::spawning::MobCategory,
     ) -> Option<&'static [mc_bamboo_data::spawning::MobSpawnerDef]> {
-        crate::structure_spawn::override_at(self.world_gen, pos, category)
+        crate::structure_spawn::override_at_indexed(
+            self.world_gen,
+            self.structure_spawn_index,
+            pos,
+            category,
+        )
     }
 
     /// `EnvironmentAttributes.CAN_PILLAGER_PATROL_SPAWN`：群系属性（蘑菇岛关掉）叠加

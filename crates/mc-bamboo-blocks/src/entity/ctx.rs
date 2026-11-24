@@ -783,6 +783,23 @@ pub trait EntityCtx {
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 同 [`Self::for_each_other_in`]，但只访问 `types` 里那几种注册表实体类型；
+    /// 顺序仍是 uid 升序，结果与全量扫描后过滤完全相同。
+    ///
+    /// Like [`Self::for_each_other_in`] but only the given registry entity types;
+    /// still in ascending uid order, identical to filtering a full scan.
+    fn for_each_other_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.for_each_other_in(area, &mut |public| {
+            if types.contains(&public.kind.entity_type()) {
+                visit(public);
+            }
+        });
+    }
     /// 同 [`Self::for_each_other_in`]，但 `visit` 返回 `true` 才算一个够数的
     /// 结果：挤压上限下推到查询里，凑够 `limit` 个就停止枚举。
     ///
@@ -1934,6 +1951,17 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.world.level().for_each_entity_in(area, visit);
+    }
+
+    fn for_each_other_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
+        self.world
+            .level()
+            .for_each_entity_of_types_in(area, types, visit);
     }
 
     fn pushable_others(
