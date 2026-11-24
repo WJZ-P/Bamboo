@@ -198,10 +198,10 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
             &mut report,
             options.break_packet,
         )?;
-        if let Some(dir) = &options.save_failures {
-            if report.failures.len() > failures_before {
-                save_failure(dir, run, &digest, &child_order, &layout_lines)?;
-            }
+        if let Some(dir) = &options.save_failures
+            && report.failures.len() > failures_before
+        {
+            save_failure(dir, run, &digest, &child_order, &layout_lines)?;
         }
     }
     report.check(
