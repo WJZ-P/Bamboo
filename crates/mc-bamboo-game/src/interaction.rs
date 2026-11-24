@@ -213,6 +213,7 @@ pub(crate) fn parallel_entity_ticks(
             tick_levels,
             profiler,
             players,
+            block_change_stamp,
             ..
         } = &mut *region;
         let player_views = crate::player::player_views(&*players, &global.scoreboard);
@@ -243,6 +244,7 @@ pub(crate) fn parallel_entity_ticks(
             moving_piston_shapes: block_entity_shapes.moving_piston_shapes,
             shulker_box_shapes: block_entity_shapes.shulker_box_shapes,
             hopper_positions,
+            block_change_stamp: block_change_stamp.get(),
             world_border: global.world_border.clone(),
             players: player_views,
             scoreboard: &global.scoreboard,

@@ -62,6 +62,15 @@ pub trait BlockView {
         context: CollisionContext,
     ) -> Option<BlockHit>;
     fn clip_collider(&self, from: Vec3, to: Vec3, context: CollisionContext) -> Option<BlockHit>;
+    /// 岛级的方块变更版本戳：方块或影响射线形状的方块实体一变就换一个值。
+    /// 没有版本戳的视图给 0（这时缓存不会命中，行为等同于没有缓存）。
+    ///
+    /// Island-level block-change stamp: changes whenever a block or a shape-affecting
+    /// block entity changes. Views without a stamp return 0 (the cache then never
+    /// hits, which is equivalent to no cache).
+    fn block_change_stamp(&self) -> u64 {
+        0
+    }
     fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool;
     fn is_loaded(&self, pos: BlockPos) -> bool;
     fn is_in_world_bounds(&self, pos: BlockPos) -> bool;
@@ -511,6 +520,10 @@ impl BlockView for World<'_> {
 
     fn clip_collider(&self, from: Vec3, to: Vec3, context: CollisionContext) -> Option<BlockHit> {
         World::clip_collider(self, from, to, context)
+    }
+
+    fn block_change_stamp(&self) -> u64 {
+        self.level().block_change_stamp()
     }
 
     fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {

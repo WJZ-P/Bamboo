@@ -69,6 +69,12 @@ impl Default for ViewFacts {
 pub trait BlockSource: Sync {
     fn block_state(&self, pos: BlockPos) -> BlockState;
     fn facts(&self) -> ViewFacts;
+    /// 岛级的方块变更版本戳，默认 0（缓存不命中）。
+    ///
+    /// Island-level block-change stamp; 0 by default (the cache never hits).
+    fn block_change_stamp(&self) -> u64 {
+        0
+    }
 
     /// `EnvironmentAttributes.SNOW_GOLEM_MELTS`：按这一格的群系回答。
     /// 没有群系表的视图按主世界缺省（假）。
@@ -313,6 +319,10 @@ impl<T: BlockSource> SourceView<T> {
 impl<T: BlockSource> BlockView for SourceView<T> {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         self.0.block_state(pos)
+    }
+
+    fn block_change_stamp(&self) -> u64 {
+        self.0.block_change_stamp()
     }
 
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {

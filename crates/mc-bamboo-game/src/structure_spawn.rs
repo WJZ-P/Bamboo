@@ -65,10 +65,7 @@ impl SpawnRow {
     fn contains(&self, pos: BlockPos) -> bool {
         match self.bounding {
             SpawnOverrideBox::Structure => box_contains(&self.whole, pos),
-            SpawnOverrideBox::Piece => self
-                .pieces
-                .iter()
-                .any(|piece| box_contains(piece, pos)),
+            SpawnOverrideBox::Piece => self.pieces.iter().any(|piece| box_contains(piece, pos)),
         }
     }
 }
@@ -95,9 +92,7 @@ fn box_contains(box_: &[i32; 6], pos: BlockPos) -> bool {
 }
 
 fn box_of(bb: BoundingBox) -> [i32; 6] {
-    [
-        bb.min_x, bb.min_y, bb.min_z, bb.max_x, bb.max_y, bb.max_z,
-    ]
+    [bb.min_x, bb.min_y, bb.min_z, bb.max_x, bb.max_y, bb.max_z]
 }
 
 fn piece_box(piece: &StructurePiece) -> [i32; 6] {
@@ -130,7 +125,12 @@ impl StructureSpawnIndex {
     ///
     /// Store a chunk's flattened rows; `None` means no structure override at all.
     #[cfg(test)]
-    pub(crate) fn insert(&mut self, config: &WorldGenConfig, chunk: ChunkPos, rows: ChunkSpawnRows) {
+    pub(crate) fn insert(
+        &mut self,
+        config: &WorldGenConfig,
+        chunk: ChunkPos,
+        rows: ChunkSpawnRows,
+    ) {
         self.ensure_config(config);
         self.chunks.insert(chunk, rows);
     }
@@ -190,7 +190,12 @@ impl StructureSpawnIndex {
 /// both kinds of boxes for every row whose category has an override.
 pub(crate) fn build_rows(
     references: &mc_bamboo_worldgen::structure::References,
-    starts: impl Fn(i32, i32) -> Option<std::sync::Arc<mc_bamboo_worldgen::structure::pipeline::WorldStructureStarts>>,
+    starts: impl Fn(
+        i32,
+        i32,
+    ) -> Option<
+        std::sync::Arc<mc_bamboo_worldgen::structure::pipeline::WorldStructureStarts>,
+    >,
 ) -> ChunkSpawnRows {
     let mut rows = Vec::new();
     for (structure, keys) in references {
@@ -216,12 +221,24 @@ pub(crate) fn build_rows(
     ChunkSpawnRows { rows }
 }
 
-fn flat_row(row: &'static spawning::StructureSpawnOverride, start: &WorldStructureStart) -> SpawnRow {
+fn flat_row(
+    row: &'static spawning::StructureSpawnOverride,
+    start: &WorldStructureStart,
+) -> SpawnRow {
     let whole = box_of(start.bounding_box());
     let pieces = match &start.pieces {
         mc_bamboo_worldgen::structure::pipeline::StartPieces::Layout(pieces) => pieces
             .iter()
-            .map(|piece| [piece.bb[0], piece.bb[1], piece.bb[2], piece.bb[3], piece.bb[4], piece.bb[5]])
+            .map(|piece| {
+                [
+                    piece.bb[0],
+                    piece.bb[1],
+                    piece.bb[2],
+                    piece.bb[3],
+                    piece.bb[4],
+                    piece.bb[5],
+                ]
+            })
             .collect(),
         mc_bamboo_worldgen::structure::pipeline::StartPieces::Jigsaw(pieces) => pieces
             .iter()
@@ -288,7 +305,7 @@ fn override_at_indexed_mut(
     }
     let chunk = pos.chunk();
     index.ensure_config(config);
-    if index.chunks.get(&chunk).is_none() {
+    if !index.chunks.contains_key(&chunk) {
         let rows = build_rows_from_worldgen(config, chunk);
         index.chunks.insert(chunk, rows);
     }
@@ -508,13 +525,23 @@ mod tests {
         install_test_hut(&config);
         let index = RefCell::new(StructureSpawnIndex::default());
         assert_eq!(
-            override_at_indexed(&config, &index, BlockPos::new(5, 65, 5), MobCategory::Monster)
-                .map(|table| table[0].entity_type),
+            override_at_indexed(
+                &config,
+                &index,
+                BlockPos::new(5, 65, 5),
+                MobCategory::Monster
+            )
+            .map(|table| table[0].entity_type),
             Some(entity_type::WITCH)
         );
         assert_eq!(
-            override_at_indexed(&config, &index, BlockPos::new(5, 65, 5), MobCategory::Creature)
-                .map(|table| table[0].entity_type),
+            override_at_indexed(
+                &config,
+                &index,
+                BlockPos::new(5, 65, 5),
+                MobCategory::Creature
+            )
+            .map(|table| table[0].entity_type),
             Some(entity_type::CAT)
         );
         clear_disk_structures();
@@ -565,10 +592,13 @@ mod tests {
                 for y in [58, 60, 65, 70, 72] {
                     let pos = BlockPos::new(x, y, z);
                     for category in MobCategory::ALL {
-                        assert!(same_table(
-                            override_at_indexed(&config, &index, pos, category),
-                            override_at_naive(&config, pos, category),
-                        ), "位置 {pos:?} 类别 {category:?}");
+                        assert!(
+                            same_table(
+                                override_at_indexed(&config, &index, pos, category),
+                                override_at_naive(&config, pos, category),
+                            ),
+                            "位置 {pos:?} 类别 {category:?}"
+                        );
                     }
                 }
             }

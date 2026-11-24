@@ -54,6 +54,10 @@ pub(crate) struct ReadOnlyWorld<'a> {
     /// This island's players, copied in join order at the start of the
     /// compute phase.
     pub(crate) players: Vec<PlayerView>,
+    /// 算阶段开始时的方块变更版本戳（守卫者激光视线缓存的键之一）。
+    ///
+    /// The block-change stamp at the start of the compute phase.
+    pub(crate) block_change_stamp: u64,
     /// 计分板，生物按 UUID 查自己的队伍。
     pub(crate) scoreboard: &'a crate::scoreboard::Scoreboard,
 }
@@ -65,6 +69,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn facts(&self) -> ViewFacts {
         self.facts
+    }
+
+    fn block_change_stamp(&self) -> u64 {
+        self.block_change_stamp
     }
 
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {

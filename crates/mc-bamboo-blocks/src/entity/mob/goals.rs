@@ -3686,7 +3686,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             let eye = target.eye_position();
             mob.look.set_look_at(eye.x, eye.y, eye.z, 90.0, 90.0);
             let uid = target.uid;
-            if !living::has_line_of_sight(me, mob, ctx.blocks(), uid, eye) {
+            if !super::guardian::laser_line_of_sight(me, mob, ctx.blocks(), uid, eye) {
                 mob.target = None;
                 return;
             }

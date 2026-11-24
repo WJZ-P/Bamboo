@@ -25,6 +25,10 @@ const MAX_Y: i32 = 319;
 /// 方块存在表里，没写过的格子是空气，世界外是 `void_air`。随机数的种子固定是 0，玩家总在附近。
 pub(crate) struct TestLevel {
     blocks: HashMap<BlockPos, BlockState>,
+    /// 方块变更版本戳：每次写方块 / 形状变化加一（守卫者视线缓存的差分单测用）。
+    ///
+    /// Block-change stamp, bumped on every write / shape change.
+    block_change_stamp: std::cell::Cell<u64>,
     /// 测试「区块能不能 tick」时手动冻结的区块，两种判断共用这一份。
     pub(crate) frozen_chunks: HashSet<ChunkPos>,
     /// 告示牌的内容。和区块存储一样，换成别的方块时丢掉。
@@ -76,6 +80,7 @@ impl TestLevel {
     pub(crate) fn new() -> Self {
         Self {
             blocks: HashMap::new(),
+            block_change_stamp: std::cell::Cell::new(0),
             frozen_chunks: HashSet::new(),
             signs: HashMap::new(),
             note_block_sounds: HashMap::new(),
@@ -101,8 +106,14 @@ impl TestLevel {
         }
     }
 
+    fn bump_block_change_stamp(&self) {
+        self.block_change_stamp
+            .set(self.block_change_stamp.get().wrapping_add(1));
+    }
+
     /// 直接写一格，不做任何连锁。
     pub(crate) fn set(&mut self, pos: BlockPos, state: BlockState) {
+        self.bump_block_change_stamp();
         let old = self.block_state(pos);
         self.blocks.insert(pos, state);
         self.poi.on_block_state_change(pos, old.0, state.0);
@@ -226,6 +237,12 @@ impl EntityTables for TestLevel {
 }
 
 impl Level for TestLevel {
+    fn block_change_stamp(&self) -> u64 {
+        self.block_change_stamp
+            .get()
+            .wrapping_add(self.block_entities.shape_stamp())
+    }
+
     fn sky_darken(&self) -> i32 {
         self.sky_darken
     }
@@ -263,6 +280,7 @@ impl Level for TestLevel {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return false;
         }
+        self.bump_block_change_stamp();
         let old = self.block_state(pos);
         if !old.is_same_block(state) {
             self.signs.remove(&pos);

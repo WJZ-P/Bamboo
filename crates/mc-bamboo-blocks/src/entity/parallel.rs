@@ -420,9 +420,7 @@ impl Shared<'_> {
             .filter(|entry| {
                 entry.public.uid != exclude
                     && entry.public.bounding_box().intersects(area)
-                    && types.is_none_or(|types| {
-                        types.contains(&entry.public.kind.entity_type())
-                    })
+                    && types.is_none_or(|types| types.contains(&entry.public.kind.entity_type()))
             })
             .map(|entry| (entry.public.uid, &entry.public))
             .collect();
@@ -492,6 +490,10 @@ impl<'a> ParallelBlockView<'a> {
 impl BlockView for ParallelBlockView<'_> {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         self.inner.block_state(pos)
+    }
+
+    fn block_change_stamp(&self) -> u64 {
+        self.inner.block_change_stamp()
     }
 
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {

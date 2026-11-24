@@ -1297,6 +1297,14 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// 岛级的方块变更版本戳，见 [`BlockView::block_change_stamp`](crate::entity::ctx::BlockView::block_change_stamp)。
+    /// 默认 0：没有版本戳的世界不复用视线结果。
+    ///
+    /// Island-level block-change stamp; 0 by default means no sight-result reuse.
+    fn block_change_stamp(&self) -> u64 {
+        0
+    }
+
     /// `Level.isBrightOutside()`：主世界没有固定时间，`skyDarken < 4` 就是白天。
     fn is_bright_outside(&self) -> bool {
         !self.dimension_has_fixed_time() && self.sky_darken() < 4

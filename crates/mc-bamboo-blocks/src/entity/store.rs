@@ -892,7 +892,12 @@ impl EntityStore {
     /// Type-filtered spatial query: visit only the given registry entity types, still
     /// in ascending uid order. Avoids touching every candidate when they mostly
     /// do not match (e.g. a guardian tower full of guardians).
-    pub fn for_each_of_types_in(&self, area: Aabb, types: &[i32], visit: &mut dyn FnMut(&EntityPublic)) {
+    pub fn for_each_of_types_in(
+        &self,
+        area: Aabb,
+        types: &[i32],
+        visit: &mut dyn FnMut(&EntityPublic),
+    ) {
         let mut rows = self.grid_rows_in(area);
         // `grid_rows_in` 按行号排，槽位回收后不等于 uid 序；先按 uid 排，再只访问
         // 属于目标类型的 uid。这样结果和全量查询逐位相同。

@@ -32,6 +32,13 @@ use crate::{
     tick_levels::TickLevels,
 };
 
+/// 换一个新的方块变更版本戳（`wrapping_add` 保证永不溢出 panic）。
+///
+/// Bump the block-change stamp (`wrapping_add` can never panic on overflow).
+fn bump_block_change_stamp(stamp: &std::cell::Cell<u64>) {
+    stamp.set(stamp.get().wrapping_add(1));
+}
+
 /// 一次方块操作借用的 [`Region`](crate::region::Region) 字段。
 pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
@@ -74,6 +81,10 @@ pub(crate) struct RegionLevel<'a> {
     /// gets `&self`, so a `RefCell` fills the chunk's flattened rows on first query.
     pub(crate) structure_spawn_index:
         &'a std::cell::RefCell<crate::structure_spawn::StructureSpawnIndex>,
+    /// 这一岛的方块变更版本戳，写方块 / 改方块实体时加一。
+    ///
+    /// This island's block-change stamp, bumped on block and block-entity writes.
+    pub(crate) block_change_stamp: &'a std::cell::Cell<u64>,
     /// `Level.getSeaLevel()`：这一维度的海平面。超平坦是 -63，其余是 63。
     ///
     /// `Level.getSeaLevel()` for this dimension. -63 for superflat and 63 otherwise.
@@ -342,7 +353,19 @@ impl Level for RegionLevel<'_> {
         if written && flags & mc_bamboo_blocks::world::UPDATE_CLIENTS != 0 {
             self.changes.changed.push(pos);
         }
+        if written {
+            bump_block_change_stamp(self.block_change_stamp);
+        }
         written
+    }
+
+    fn block_change_stamp(&self) -> u64 {
+        // 方块写和方块实体形状变化各有一份版本戳，加在一起就是岛级的戳。
+        // Block writes and block-entity shape changes each have a stamp; their
+        // sum is the island-level stamp.
+        self.block_change_stamp
+            .get()
+            .wrapping_add(self.block_entities.shape_stamp())
     }
 
     /// 发起者自己也算：客户端预测失败时也会发这个包，不查的话方块会放进玩家身体里。
