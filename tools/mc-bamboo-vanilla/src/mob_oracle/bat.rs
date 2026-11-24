@@ -125,6 +125,7 @@ impl BatCase {
             short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
+            biome: None,
         }
     }
 

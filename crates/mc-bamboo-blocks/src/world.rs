@@ -755,6 +755,18 @@ impl<'a> World<'a> {
             .knock_back_player_now(target, strength, direction);
     }
 
+    /// 末影珍珠把主人放到 `position`：能当场做就当场做，否则记成延后的效果。
+    ///
+    /// An ender pearl putting its owner at `position`: at once when the level can,
+    /// otherwise a deferred effect.
+    pub fn teleport_player(&mut self, target: crate::entity::EntityUid, position: Vec3) -> bool {
+        if self.level.teleport_player_now(target, position) {
+            return true;
+        }
+        self.push_effect(Effect::EnderPearlTeleport { target, position });
+        false
+    }
+
     /// 生物给玩家点火（`Entity.igniteForTicks`）：能当场就当场，否则记成延后的效果。
     pub fn ignite_player_from_mob(&mut self, target: crate::entity::EntityUid, ticks: i32) {
         if !self.level.ignite_player_now(target, ticks) {
@@ -2101,6 +2113,20 @@ impl<'a> World<'a> {
     /// `getDifficulty().getId()`，权威副本在全局快照里。
     pub fn difficulty_id(&self) -> i32 {
         self.level.difficulty_id()
+    }
+
+    /// 这一刻世界里的玩家快照，按加入顺序。
+    ///
+    /// This tick's player snapshots, in join order.
+    pub fn player_views(&self) -> Vec<crate::entity::ctx::PlayerView> {
+        self.level.player_views()
+    }
+
+    /// 这名玩家在不在床上。
+    ///
+    /// Whether this player is sleeping.
+    pub fn player_sleeping(&self, uid: crate::entity::EntityUid) -> bool {
+        self.level.player_sleeping(uid)
     }
 
     /// 只取一个 `next_float()`，见 [`Level::next_random_float`]。
@@ -3737,6 +3763,27 @@ impl<'a> World<'a> {
     /// **根实体**按 ID 顺序各 tick 一次，载具 tick 完再按乘客名单递归
     /// `commonTick + rideTick + positionRider` 跑它的乘客树。玩家乘客不在实体表里，
     /// 仍由游戏层自己的一刻跑。
+    fn run_pathfinding_phase(&mut self) {
+        let config = crate::entity::mob::pathfinding::Config::of(
+            &crate::entity::ctx::BlockView::block_game_rules(self),
+        );
+        if !config.enabled {
+            return;
+        }
+        let now = self.game_time();
+        let requests = self.level.take_path_requests(now);
+        let mut phase = self.level.take_pathfinding();
+        let mut players = Vec::new();
+        crate::entity::ctx::BlockView::for_each_player(self, &mut |player| players.push(*player));
+        {
+            let blocks: &dyn crate::entity::ctx::BlockView = self;
+            phase.run(now, config, &players, requests, &|request| {
+                crate::entity::mob::path::find_path_with_nodes(blocks, request)
+            });
+        }
+        self.level.put_pathfinding(phase);
+    }
+
     ///
     /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
     ///
@@ -3749,6 +3796,8 @@ impl<'a> World<'a> {
         #[cfg(test)]
         crate::entity::mob::timing::new_tick!();
         self.level.begin_entity_tick();
+        // 独立寻路阶段：上一刻算好的结果先挂回各生物的导航，`tick_mob` 开头统一处理。
+        self.level.begin_path_tick();
         // 降频开着时按 uid 升序算好这一刻的计划。两种驱动共用 `plans_for_tick`，
         // 所以精确和并行的分档、节奏、唤醒名额逐位一致。乘客跟根实体用同一档。
         let plans = self.throttle_plans();
@@ -3794,6 +3843,7 @@ impl<'a> World<'a> {
             }
         }
         self.level.end_entity_tick();
+        self.run_pathfinding_phase();
         // 精确驱动只有一个线程；把分段计数并进全局汇总（正式构建是空操作）。
         #[cfg(test)]
         crate::entity::mob::timing::imp::flush_counters();
@@ -3948,6 +3998,7 @@ impl<'a> World<'a> {
     /// The physics comparison needs the position after landing.
     pub fn tick_entities_kept(&mut self) -> Vec<crate::entity::Entity> {
         self.level.begin_entity_tick();
+        self.level.begin_path_tick();
         // 开关打开时和 `tick_entities` 用同一份降频计划；缺省关时是空表。
         let plans = self.throttle_plans();
         let mut after = Vec::new();
@@ -3977,6 +4028,7 @@ impl<'a> World<'a> {
             }
         }
         self.level.end_entity_tick();
+        self.run_pathfinding_phase();
         let spawned: Vec<_> = self
             .level
             .live_entities()
@@ -4584,7 +4636,8 @@ mod tests {
                 | Effect::BredAnimals { .. }
                 | Effect::SummonedEntity { .. }
                 | Effect::CrafterCrafted { .. }
-                | Effect::KilledByArrow { .. } => None,
+                | Effect::KilledByArrow { .. }
+                | Effect::EnderPearlTeleport { .. } => None,
             })
             .collect()
     }

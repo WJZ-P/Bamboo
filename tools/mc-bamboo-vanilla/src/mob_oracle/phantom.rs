@@ -88,6 +88,7 @@ impl PhantomSpawnCase {
             short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
+            biome: None,
         }
     }
 
@@ -295,6 +296,7 @@ impl PhantomCase {
             short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
+            biome: None,
         }
     }
 }

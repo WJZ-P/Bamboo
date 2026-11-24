@@ -52,6 +52,7 @@ mod debug_stick;
 mod director_host;
 mod drops;
 mod durability;
+mod ender_pearl;
 mod entity_sync;
 #[doc(hidden)]
 pub mod entity_tracking;
@@ -69,6 +70,7 @@ mod island;
 mod island_partition;
 mod island_partition_stats;
 mod island_pool;
+mod item_cooldowns;
 mod item_use_stats;
 mod lectern;
 mod light_updates;
@@ -166,7 +168,7 @@ pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_mov
 pub use secure_chat::ServiceProfileKeys;
 pub use world::{
     MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET,
-    MAX_MOB_DISTANCE, MAX_MOB_WAKEUPS_SCALE, World, WorldConfig,
+    MAX_MOB_DISTANCE, MAX_MOB_WAKEUPS_SCALE, MAX_PATHFINDING_BUDGET, World, WorldConfig,
 };
 pub use world_options::WorldGenConfig;
 

@@ -369,6 +369,11 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                 rotation[1],
                 crate::entity::thrown_egg::ThrowableKind::Snowball,
             ))),
+            "minecraft:ender_pearl" => EntityKind::Egg(Box::new(egg::read(
+                tag,
+                rotation[1],
+                crate::entity::thrown_egg::ThrowableKind::EnderPearl,
+            ))),
             "minecraft:splash_potion" => {
                 EntityKind::SplashPotion(Box::new(splash_potion::read(tag, rotation[1])))
             }

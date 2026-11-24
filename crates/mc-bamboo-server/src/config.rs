@@ -104,6 +104,10 @@ pub struct ServerConfig {
     pub mob_sleep_distance: i32,
     /// 每刻唤醒名额的倍率（1 = Paper 的缺省值）。
     pub mob_wakeups_scale: usize,
+    /// 独立寻路阶段（实验，缺省关）和每岛每刻节点预算 / 失败冷却。
+    pub mob_pathfinding_phase: bool,
+    pub mob_pathfinding_budget: u32,
+    pub mob_pathfinding_fail_cooldown: bool,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
@@ -206,6 +210,9 @@ impl Default for ServerConfig {
             mob_throttle_distance: 0,
             mob_sleep_distance: 0,
             mob_wakeups_scale: 1,
+            mob_pathfinding_phase: false,
+            mob_pathfinding_budget: 0,
+            mob_pathfinding_fail_cooldown: false,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: mc_bamboo_game::worldgen_cache::WorldgenCacheSettings::default(),

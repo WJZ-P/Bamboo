@@ -109,14 +109,30 @@ impl AvoidEntity {
             return false;
         };
         let view = ctx.blocks();
-        let Some(pos) = goals::default_random_pos_away(me, mob, view, 16, 7, avoided.position)
-        else {
-            return false;
+        // 独立寻路阶段：已经交付的结果按当时选定的点继续，不重抽随机数。
+        let pos = match mob.navigation.replay_target() {
+            Some(at) => Vec3::new(
+                f64::from(at.x) + 0.5,
+                f64::from(at.y),
+                f64::from(at.z) + 0.5,
+            ),
+            None => {
+                let Some(pos) =
+                    goals::default_random_pos_away(me, mob, view, 16, 7, avoided.position)
+                else {
+                    return false;
+                };
+                pos
+            }
         };
         if avoided.position.distance_to_sqr(pos) < avoided.position.distance_to_sqr(me.position) {
             return false;
         }
         let nav = living::nav_mob(me, mob, view);
+        mob.navigation
+            .set_next_action(super::pathfinding::Action::Inspect(
+                super::pathfinding::Use::GoalPath,
+            ));
         self.path =
             mob.navigation
                 .create_path(view, &nav, mc_bamboo_core::BlockPos::containing(pos), 0);

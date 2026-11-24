@@ -809,6 +809,9 @@ pub(super) fn check_spawn_rules(
                 && valid_mob_spawn_block(world, kind, pos)
                 && world.level().can_see_sky(pos)
         }
+        // 村民不在任何群系刷怪表里，只由结构 / 命令 / 刷怪蛋生成。
+        // Villagers are in no biome spawn table; structures, commands and eggs make them.
+        MobType::Villager => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),

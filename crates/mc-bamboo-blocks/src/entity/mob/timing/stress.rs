@@ -369,6 +369,8 @@ enum Scene {
     Pasture2000,
     Chase,
     ChaseObstacles,
+    /// 400 只僵尸追 4 名分散的玩家：寻路请求多、目标多，测去重和优先级。
+    ChaseCrowd,
     Tower1x1,
     Tower3x3,
     Mixed,
@@ -377,11 +379,12 @@ enum Scene {
 }
 
 impl Scene {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Pasture500,
         Self::Pasture2000,
         Self::Chase,
         Self::ChaseObstacles,
+        Self::ChaseCrowd,
         Self::Tower1x1,
         Self::Tower3x3,
         Self::Mixed,
@@ -394,6 +397,7 @@ impl Scene {
             Self::Pasture2000 => "pasture-2000",
             Self::Chase => "chase-flat",
             Self::ChaseObstacles => "chase-obstacles",
+            Self::ChaseCrowd => "chase-crowd",
             Self::Tower1x1 => "tower-1x1",
             Self::Tower3x3 => "tower-3x3",
             Self::Mixed => "mixed-natural",
@@ -488,6 +492,30 @@ impl Scene {
                     f64::from(floor),
                     angle.sin() * radius + 0.5,
                 ),
+            ));
+        }
+        (terrain, mobs)
+    }
+
+    /// 400 只僵尸追 4 名分散的玩家：每只僵尸按 10 格网格铺在 400×400 的平地上，
+    /// 四名玩家各站一角，僵尸各自挑最近的一名。
+    fn crowd() -> (Terrain, Vec<(MobType, Vec3)>) {
+        let floor = 64;
+        let mut terrain = Terrain::new(floor);
+        terrain.flat(200);
+        for (index, (x, z)) in [(-36.5, -36.5), (40.5, -36.5), (-36.5, 40.5), (40.5, 40.5)]
+            .into_iter()
+            .enumerate()
+        {
+            terrain.add_player(index as i32 + 1, Vec3::new(x, f64::from(floor), z));
+        }
+        let mut mobs = Vec::with_capacity(400);
+        for i in 0..400 {
+            let x = (i % 20) * 5 - 50;
+            let z = (i / 20) * 5 - 50;
+            mobs.push((
+                MobType::Zombie,
+                Vec3::new(f64::from(x) + 0.5, f64::from(floor), f64::from(z) + 0.5),
             ));
         }
         (terrain, mobs)
@@ -622,6 +650,10 @@ impl Scene {
                 let (terrain, mobs) = Self::chase(true);
                 (terrain, mobs, false)
             }
+            Self::ChaseCrowd => {
+                let (terrain, mobs) = Self::crowd();
+                (terrain, mobs, false)
+            }
             Self::Tower1x1 => {
                 let (terrain, mobs) = Self::tower(1);
                 (terrain, mobs, false)
@@ -678,6 +710,11 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
         terrain.rules.mob_sleep_distance = 64;
         terrain.rules.mob_wakeups_scale = 1;
     }
+    // A/B 用：`MOB_STRESS_PATHFINDING=<预算>` 打开独立寻路阶段（0 = 缺省预算）。
+    if let Ok(raw) = std::env::var("MOB_STRESS_PATHFINDING") {
+        terrain.rules.mob_pathfinding_phase = true;
+        terrain.rules.mob_pathfinding_budget = raw.parse().unwrap_or(0);
+    }
     let mut level = StressLevel {
         terrain: terrain.clone(),
         random: LevelRandom::new(seed as i64),
@@ -697,6 +734,12 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
             if matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
                 world.with_entity_mut(uid, &mut |entity| {
                     entity.with_mob(|_, mob| mob.target = Some(1));
+                });
+            } else if scene == Scene::ChaseCrowd {
+                let nearest =
+                    if position.x < 4.0 { 1 } else { 2 } + if position.z > 4.0 { 2 } else { 0 };
+                world.with_entity_mut(uid, &mut |entity| {
+                    entity.with_mob(|_, mob| mob.target = Some(nearest));
                 });
             }
         }
@@ -771,19 +814,23 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     };
 
     // 预热。玩家绕圈走，僵尸的目标跟着动；每 20 刻换一个位置。
-    for i in 0..WARM {
+    let move_players = |level: &mut StressLevel, i: usize| {
+        let angle = (i as f64) * std::f64::consts::TAU / 120.0;
+        let mut players = level.terrain.players.lock().expect("player mutex");
         if natural || matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
-            let angle = (i as f64) * std::f64::consts::TAU / 120.0;
-            if let Some(player) = level
-                .terrain
-                .players
-                .lock()
-                .expect("player mutex")
-                .first_mut()
-            {
+            if let Some(player) = players.first_mut() {
                 player.position = Vec3::new(angle.cos() * 10.0, 64.0, angle.sin() * 10.0);
             }
+        } else if scene == Scene::ChaseCrowd {
+            // 四名玩家各自绕自己的角点转，僵尸的目标一直动，寻路请求持续有活干。
+            let corners = [(-36.5, -36.5), (40.5, -36.5), (-36.5, 40.5), (40.5, 40.5)];
+            for (player, (x, z)) in players.iter_mut().zip(corners) {
+                player.position = Vec3::new(x + angle.cos() * 8.0, 64.0, z + angle.sin() * 8.0);
+            }
         }
+    };
+    for i in 0..WARM {
+        move_players(&mut level, i);
         tick(&mut level, &mut ticks, &source, executor.as_ref(), i as i64);
     }
     // 清掉预热期间的计数。
@@ -793,18 +840,7 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
     let mut ticks_ns = Vec::with_capacity(MEASURE);
     let mut framework = [0_u64; 4];
     for i in 0..MEASURE {
-        if natural || matches!(scene, Scene::Chase | Scene::ChaseObstacles) {
-            let angle = ((WARM + i) as f64) * std::f64::consts::TAU / 120.0;
-            if let Some(player) = level
-                .terrain
-                .players
-                .lock()
-                .expect("player mutex")
-                .first_mut()
-            {
-                player.position = Vec3::new(angle.cos() * 10.0, 64.0, angle.sin() * 10.0);
-            }
-        }
+        move_players(&mut level, WARM + i);
         let start = Instant::now();
         let times = tick(
             &mut level,
@@ -1045,12 +1081,13 @@ fn mob_stress() {
         })
         .unwrap_or_else(|| THREADS.to_vec());
     println!(
-        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={} max-collisions={} throttle={}",
+        "mob-stress: rounds={ROUNDS} warm={WARM} measure={MEASURE} scenes={} threads={:?} scoped={} max-collisions={} throttle={} pathfinding={}",
         only.as_deref().unwrap_or("all"),
         threads,
         scoped,
         std::env::var("MOB_STRESS_MAX_COLLISIONS").unwrap_or_else(|_| "off".to_owned()),
-        std::env::var_os("MOB_STRESS_THROTTLE").is_some()
+        std::env::var_os("MOB_STRESS_THROTTLE").is_some(),
+        std::env::var("MOB_STRESS_PATHFINDING").unwrap_or_else(|_| "off".to_owned())
     );
     println!("uptime: {}", uptime());
     for scene in Scene::ALL {

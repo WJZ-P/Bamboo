@@ -277,6 +277,10 @@ pub(crate) struct Region {
     pub(crate) mob_throttle_distance: i32,
     pub(crate) mob_sleep_distance: i32,
     pub(crate) mob_wakeups_scale: usize,
+    /// 独立寻路阶段（实验，缺省关）和它的节点预算 / 失败冷却。
+    pub(crate) mob_pathfinding_phase: bool,
+    pub(crate) mob_pathfinding_budget: u32,
+    pub(crate) mob_pathfinding_fail_cooldown: bool,
     /// `ServerLevel.customSpawners` 里的 `PatrolSpawner`。每岛一份，和官方的每维度一份
     /// 对应，岛拆分时两边各带自己的计时器。
     ///
@@ -481,6 +485,9 @@ impl Region {
             mob_throttle_distance: 0,
             mob_sleep_distance: 0,
             mob_wakeups_scale: 1,
+            mob_pathfinding_phase: false,
+            mob_pathfinding_budget: 0,
+            mob_pathfinding_fail_cooldown: false,
             patrol_spawner: mc_bamboo_blocks::entity::mob::patrol::PatrolSpawner::default(),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
@@ -682,6 +689,9 @@ impl Region {
         rules.mob_throttle_distance = self.mob_throttle_distance;
         rules.mob_sleep_distance = self.mob_sleep_distance;
         rules.mob_wakeups_scale = self.mob_wakeups_scale;
+        rules.mob_pathfinding_phase = self.mob_pathfinding_phase;
+        rules.mob_pathfinding_budget = self.mob_pathfinding_budget;
+        rules.mob_pathfinding_fail_cooldown = self.mob_pathfinding_fail_cooldown;
         rules
     }
 

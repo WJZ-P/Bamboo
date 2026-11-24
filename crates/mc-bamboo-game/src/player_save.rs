@@ -53,6 +53,8 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
             [pos.x, pos.y, pos.z],
         ));
     }
+    // `ServerPlayer.saveEnderPearls`：空集合不写 `ender_pearls` 键。
+    data.ender_pearls = player.saved_ender_pearls.clone();
     // `dead` 是运行时标志（官方 `dead` 不存档），重生后由 health 字段推：
     // 官方读档时 Health<=0 会立刻进入死亡状态，这里按官方存档字段保留。
     data

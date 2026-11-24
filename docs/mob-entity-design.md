@@ -76,6 +76,119 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 
 先不做：特别长的路径跨多刻后台算（需要区块的只读快照）；群体流场。等实测证明预算不够再说。
 
+#### 4.1.1 独立寻路阶段（开关，缺省关）
+
+配置键 `mob_pathfinding_phase` / `mob_pathfinding_budget` /
+`mob_pathfinding_fail_cooldown`，都缺省关，不进存档、不同步客户端。关着时
+`create_path_to` 照官方当场同步算，所有调用点的语句顺序和官方一致；打开后：
+
+1. 算阶段里 `create_path_to` 把请求挂在 `Navigation.pending_request` 上并返回
+   `None`，生物沿旧路径走或原地等；`moveTo` 的 `move_to_path(None)` 不清旧路径。
+2. 实体 tick 结束后驱动收走请求，按起点格 / 终点 / 体型 / 导航类型去重；
+   同一只生物只留这一刻最后一条。排序键（固定，全整数）依次是等待刻数取反、
+   有攻击目标、到最近非旁观玩家的水平距离平方（按位比较）、uid、序号。
+3. 按 `mob_pathfinding_budget`（缺省 65536）选请求：每组按
+   `maxVisitedNodes * multiplier` 估一个节点上界，累加超过预算的整组顺延；
+   顺延的请求下一阶段等待刻数更多，优先级更高。单条就超预算时至少算一条。
+4. 结果下一阶段开头挂回 `Navigation.replay`，`tick_mob` 开头按动作处理：
+   `MoveTo` / `MoveToEntity` 直接开始走；`Recompute` 覆盖导航路径；
+   `Inspect` 留在导航里由原调用点下一次 `create_path` 取走；`Discard` 丢掉。
+5. `Navigation.stop()`、目标变化、序号过期都会作废挂起请求和已算好的结果，
+   不会把过期路径塞给生物。`mob_pathfinding_fail_cooldown` 打开时，同一只生物
+   连续失败超过 10 次后 40 刻内不再计算它的请求。
+6. 精确驱动的搜索在 `World::tick_entities` 末尾串行跑；并行驱动在 `compute`
+   末尾按 `Executor` 的线程数分配，只分派已选请求，结果按固定下标汇总。
+   去重、排序、预算都只依赖刻号、uid、请求内容和整数键，所以精确 / 并行、
+   不同线程数的结果逐位一致。
+
+下表是当前树上**全部**寻路调用点（共 68 处外部调用 + 3 处导航内部调用；
+`main` 后续合入蜜蜂、傀儡、山羊等，比任务书写时的 37 处多）。
+动作记号：**M** = `move_to`（`MoveTo`），**E** = `move_to_entity`
+（`MoveToEntity`），**R** = `recompute_path`（`Recompute`），
+**I(用途)** = 只检查结果（`Inspect`，结果留给原调用点下一次 `create_path` 取），
+**D** = 结果无人使用（`Discard`）。「顺延」一列指等待期间的返回值 / 行为；
+所有 `M` / `E` 在结果是失败时都按官方语义处理（`M` 清旧路径、`E` 返回假且不改速度），
+`I` 的失败处理写在表里。
+
+| 调用点（文件::行为） | 请求时的目标 / 状态 | 结果到达后 | 失败 / 等待 |
+|---|---|---|---|
+| `navigation::move_to` | `BlockPos.containing(at)`，reach 1 | **M**：装路径、按 speed 走 | 失败清旧路径；等待保持旧路径、返回假 |
+| `navigation::move_to_entity` | 实体方块坐标，调用方给的 reach | **E**：路径非空才装、按 speed 走 | 失败返回假、不改速度；等待返回假 |
+| `navigation::recompute_path` | 原 `target_pos`、原 reach | **R**：覆盖导航路径 | 失败留下空路径 |
+| `avoid::AvoidEntity.canUse` | 随机逃跑点（`defaultRandomPosAway`） | **I(GoalPath)**：写 `goal.path`，`canUse` 返回真 | 等待时不重抽（复用存储点）、返回假；失败返回假 |
+| `bee_goals::Pollinate.start`（Attack） | 攻击目标当前位置 | **E** | 失败不改速度 |
+| `bee_goals::Attack.start` | 攻击目标当前位置 | **E** | 同上 |
+| `bee_goals::Wander.start` | 闲逛随机点 | **M** | 失败清旧路径 |
+| `bee_goals::Attack.tick` | 攻击目标当前位置 | **E** | 同上 |
+| `bee_goals::HurtByOther/BecomeAngryTarget.tick` | 攻击目标当前位置 | **E** | 同上 |
+| `bee_goals::find_nearby_flower`（主扫描） | 扫描到的第一朵可到花 | **I(BeeFlower)**：选中这朵花 | 等待时不写不可达名单；失败写 600 刻不可达 |
+| `bee_goals::find_nearby_flower`（取结果） | 上一刻存下的花 | **I(BeeFlower)**：返回这朵花 | 失败时不再扫描 |
+| `bee_goals::hive_tick` | 蜂巢格，reach 1/2 | **I(BeeHive)**：`path.is_some()` 决定走/丢巢 | 等待时不拉黑、不丢巢；失败拉黑并丢巢 |
+| `bee_goals::pathfind_randomly_towards` | 朝中心随机点，节点倍率 0.5 | **M** | 失败清旧路径 |
+| `brain::try_compute_path`（主） | `WalkTarget` 方块 | **I(WalkTarget)**：写 `sink.path`、清/写 `CantReachWalkTargetSince` | 等待保留旧 `sink.path`；失败写记忆、可走随机绕路 |
+| `brain::try_compute_path`（随机绕路） | 朝目标随机点 | **I(WalkTarget)** | 失败返回假 |
+| `cat::move_mob_to_block` | 猫要去的方块上方 | **M** | 失败清旧路径 |
+| `cat::猫趴下/起床 tick` | 床 / 休息点 | **M** | 同上 |
+| `cat::tick`（跟随主人） | 主人当前位置 | **E** | 失败不改速度 |
+| `crossbow::tick` | 攻击目标当前位置 | **E** | 同上 |
+| `dolphin_goals::tick`（攻击） | 攻击目标当前位置 | **E** | 同上 |
+| `dolphin_goals::breath_destination` | 换气点 | **M** | 失败清旧路径 |
+| `equine::follow_mommy` | 母亲当前位置 | **D** | 结果丢掉，不占导航 |
+| `equine::ranged_attack_tick` | 攻击目标当前位置 | **E** | 失败不改速度 |
+| `equine::tame::start` | 骑手 / 驯服目标点 | **M** | 失败清旧路径 |
+| `fish::flock_tick` | 鱼群领头鱼位置 | **E** | 失败不改速度 |
+| `fox_goals::start`（扑跳） | 选定的扑跳点 | **M** | 失败清旧路径 |
+| `fox_goals::stalk_tick` | 攻击目标当前位置 | **E** | 失败不改速度 |
+| `fox_goals::pounce_can_use` | 目标方块，只为预热导航 | **D** | 结果丢掉 |
+| `fox_goals::move_to_first_item` | 目标物品位置 | **E** | 失败不改速度 |
+| `fox_goals::FoxEatBerries.start` | 甜浆果上方 | **M** | 失败清旧路径 |
+| `fox_goals::MoveToBlock.start` | 目标方块上方 | **M** | 同上 |
+| `fox_goals::MoveToBlock.tick`（每 100 刻重算） | 目标方块上方 | **M** | 同上 |
+| `frog::tongue_extra_start` | 攻击目标方块，结果看 `dist_to_target < 1.75` | **I(FrogTongue)**：决定伸舌头 | 等待时返回假且不拉黑；失败忘掉目标并记不可达 |
+| `goat::pick_candidate`（长跳，正常） | 抽到的落点，路径上限 8 | **I(BrainReached)**：`reached` 为假就选这个跳跃 | 等待时按同一落点重试；失败选这个跳跃 |
+| `goat::pick_candidate`（取结果） | 上一刻存下的落点 | **I(BrainReached)**：同上 | 同上 |
+| `goat::ramming_start_position`（正常） | 按距离排序的可站起点 | **I(BrainReached)**：`reached` 为真就冲撞 | 等待时不重扫候选；失败试下一个起点 |
+| `goat::ramming_start_position`（取结果） | 上一刻存下的起点 | **I(BrainReached)**：同上 | 失败返回空 |
+| `goals::MeleeAttack.canUse` | 攻击目标方块 | **I(MeleeStart)**：写 `start_path`，`start` 时装入 | 等待时绕开 20 刻门闸、不启动；失败仍看近战距离 |
+| `goals::AvoidEntity.canUse`（熊猫） | 随机逃跑点 | **I(GoalPath)**：写 `goal.path` | 等待时不重抽、返回假；失败返回假 |
+| `goals::Panic.start` | 逃跑点 | **M** | 失败清旧路径 |
+| `goals::SilverfishMergeWithStone.start` | 合并目标方块 | **M** | 失败清旧路径 |
+| `goals::Stroll.start` | 闲逛点 | **M** | 失败清旧路径 |
+| `goals::RandomStroll/DrownedGoToWater.start` | 闲逛 / 上岸点 | **M** | 失败清旧路径 |
+| `goals::DrownedGoToBeach.start` | 岸上点 | **M** | 失败清旧路径 |
+| `goals::Swim.start` | 游泳点 | **M** | 失败清旧路径 |
+| `goals::FleeSun.start` | 阴凉点 | **M** | 失败清旧路径 |
+| `goals::TurtleEgg.start` | 蛋的方块 | **M** | 失败清旧路径 |
+| `goals::DrownedSwimUp.tick` | 上浮点 | **M** | 失败清旧路径 |
+| `goals::DrownedGoToBeach.tick` | 岸上点 | **M** | 失败清旧路径 |
+| `goals::WitchRangedAttack.tick` | 攻击目标当前位置 | **E** | 失败不改速度 |
+| `goals::SnowGolemRangedAttack.tick` | 攻击目标当前位置 | **E** | 同上 |
+| `goals::Breed.tick` | 伴侣当前位置 | **E** | 同上 |
+| `goals::Tempt.tick` | 诱惑玩家当前位置 | **E** | 同上 |
+| `goals::FollowParent.tick` | 父母当前位置 | **E** | 同上 |
+| `goals::MeleeAttack.tick` | 攻击目标当前位置 | **E**：返回值假时把重算间隔加 15 | 等待时返回假、加 15 刻重算间隔 |
+| `goals::TurtleEgg.tick` | 蛋的方块 | **M** | 失败清旧路径 |
+| `golem_goals::stroll_start` | 闲逛点 | **M** | 失败清旧路径 |
+| `ocelot::attack_tick` | 攻击目标当前位置 | **E** | 失败不改速度 |
+| `panda::sit_start` | 坐下点 | **M** | 失败清旧路径 |
+| `parrot::start` | 闲逛 / 跟随点 | **M** | 失败清旧路径 |
+| `rabbit::move_to_crop` | 农田上方 | **M** | 失败清旧路径 |
+| `raider::patrol_tick` | `patrol_step` 算出的巡逻点 | **I(Patrol)**：成功发 `SetPatrolTarget`（队长） | 等待时按没路径等；失败走 `move_randomly` 并设 200 刻冷却 |
+| `raider::move_randomly` | 自己随机源抽的 ±8 格点 | **M** | 失败清旧路径 |
+| `skeleton::move_and_look` | 攻击目标当前位置 | **E** | 失败不改速度 |
+| `tame::tick` | 主人当前位置 | **E** | 失败不改速度 |
+| `turtle::lay_egg_start` | 产卵点 | **M** | 失败清旧路径 |
+| `turtle::lay_egg_tick` | 产卵点 | **M** | 同上 |
+| `turtle::go_home_tick` | 回家点 | **M** | 同上 |
+| `turtle::go_to_water_start` | 最近的水 | **M** | 同上 |
+| `turtle::go_to_water_tick` | 最近的水 | **M** | 同上 |
+| `turtle::travel_tick` | 旅行点 | **M** | 同上 |
+
+`M` / `E` 的等待行为统一是「沿旧路走或原地等」：`move_to_path(None)` 在
+`pending_request` 非空时不清旧路径；结果到达后 `MoveTo` 成功才替换路径，
+失败按官方清路径 / 返回假。`E` 的调用方在等待期间把返回值当「没有路径」处理，
+结果到达后才走成功 / 失败两支（掠夺者巡逻是这一条的显式例子）。
+
 ### 4.2 三档降频
 
 按到最近玩家的水平距离分档，距离从每个区块的附近玩家表取。
@@ -131,14 +244,25 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 
 | 差异 | 玩家能感觉到什么 | 开关 |
 |---|---|---|
-| 寻路结果晚一刻 | 转向晚 50 毫秒 | 有 |
+| 寻路结果晚一刻 | 转向晚 50 毫秒 | 有，`bamboo.toml` 的 `mob_pathfinding_phase`，缺省 `false`（关，精确模式） |
 | 感知到的是本刻开始时的状态 | 无感 | 并行模型自带 |
 | 降频档 | 远处生物反应慢 0.1–0.2 秒 | 有，`bamboo.toml` 的 `mob_throttle_distance`，缺省 `0`（关，精确模式），推荐 32 |
 | 休眠档 | 远处生物基本不动；靠生物自己走进陷阱的农场变慢 | 有，`bamboo.toml` 的 `mob_sleep_distance`，缺省 `0`（关，精确模式），推荐 64 |
-| 寻路预算用完后顺延 | 极端拥挤时个别生物多等几刻 | 有 |
-| 寻路失败冷却 | 够不着的怪重试变稀 | 有 |
+| 寻路预算用完后顺延 | 极端拥挤时个别生物多等几刻 | 有，`bamboo.toml` 的 `mob_pathfinding_budget`，缺省 `0`（用 65536） |
+| 寻路失败冷却 | 够不着的怪重试变稀 | 有，`bamboo.toml` 的 `mob_pathfinding_fail_cooldown`，缺省 `false` |
 | 挤压上限（`max_entity_collisions`） | 上百只挤一格时推力不完全：每只每刻只处理前 N 次推挤，被推的次数少了、挤成一团时散开得慢；`maxEntityCramming` 的挤压伤害规则照官方不变 | 有，`bamboo.toml` 的 `max_entity_collisions`，缺省 `0`（关，精确模式） |
 | 刷怪上限按玩家算 | 多人时每人附近的怪更均匀 | 有 |
+
+**独立寻路阶段**（`mob_pathfinding_phase` / `mob_pathfinding_budget` /
+`mob_pathfinding_fail_cooldown`，三项缺省都是关）：关着时寻路照官方当场同步算，
+所有对拍和探针都跑在这一档。打开后的差异：转向晚一刻；同一刻同一只生物只算
+最后一条请求；同一刻起点格、终点、体型、导航类型都相同的请求合并成一次搜索；
+预算按 `maxVisitedNodes * multiplier` 的**上界**累加（实际展开数不会超过它，
+所以永远不会超预算，但可能比实际需要更早顺延）；等待期间沿旧路径走；挂起
+结果在 `stop()`、目标变化、序号过期时丢弃。自己挑目标点的调用点在结果回来时
+复用当时存下的目标，不重抽随机数；`moveTo` 结果到达那一刻才用请求时的生物位置
+裁剪路径，和官方用当前刻位置最多差一格。去重、排序、预算、冷却都只用整数键和
+刻号，精确 / 并行驱动、不同线程数逐位一致。
 
 `max_entity_collisions` 是 Paper 的 `collisions.maxEntityCollisions`（缺省 8）：
 `LivingEntity.pushEntities` 里每只生物每刻最多处理 N 次推挤，上限下推到范围查询，
@@ -2905,8 +3029,7 @@ target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.fina
 位置 / 速度 / 朝向 / 随机源 / 血量 / 寿命 / 唤醒倒计时 / 方块表 / 新生成实体 /
 世界随机源全部逐位比较。
 
-**已知限制**：末影珍珠弹射物没实现，`ThrownEnderpearl.onHit` 的 5% 刷末影螨和传送都没做；
-细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
+**已知限制**：细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
 （仓库还没有通用刷怪笼）没建模。
 
 ### 5.26 铁傀儡、雪傀儡和雪球（`golem` 分支）
@@ -2961,4 +3084,53 @@ target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.fina
 玩家扔雪球没有冷却；`MoveTowardsTargetGoal` / `DefendVillageTargetGoal` 没建模；
 `Level.is_raining_at` / `SNOW_GOLEM_MELTS` 的精确世界答案来自生成器导出的群系表，
 并行只读视图按区块调色板覆盖。
+
+### 5.25 末影珍珠（2026-11-23，分支 `ender-pearl`）
+
+**实体**：`ThrowableKind::EnderPearl` 接在 `thrown_egg.rs` 的通用投掷物上。`onHit` 照
+`ThrownEnderpearl`：先按珍珠自己的随机源取 32 组粒子数（`nextDouble` + 两次
+`nextGaussian`；服务端 `addParticle` 是空实现，不发包但取数照发生），`ServerLevel`
+且没被移除才继续；`getOwner()` 为空或 `isAllowedToTeleportOwner` 假就 `discard()`。
+同维度下要求主人 `isAlive && !isSleeping`（`Level::player_sleeping`），Bamboo 只有主世界，
+跨维度的 `canUsePortal(true)` 分支不存在。落点是命中前的 `oldPosition()`，不是
+`HitResult.getLocation()`。主人是玩家且连接仍在接受消息时，先按 `random.nextFloat() < 0.05`、
+`isSpawningMonsters()`（`spawnMobs` 与 `spawnMonsters` 两条规则都开）和难度不是和平刷
+末影螨，`snapTo` 主人的位置与朝向；然后 `ServerPlayer.teleport` 到落点、清下落距离和
+impulse、造成 5 点 `minecraft:ender_pearl` 伤害，最后 `discard()`。命中实体的 0 点伤害只打
+一次（`Projectile.onHitEntity` 在 26.3 是空实现）。伤害类型的数据照
+`data/minecraft/damage_type/ender_pearl.json`：`fall_variants`、`message_id=fall`、
+`exhaustion=0`，并进 `#is_fall` / `#bypasses_armor` / `#no_knockback`。
+
+**物品**：`EnderpearlItem.use` 用 `NEUTRAL` 音源、音量 0.5、音高
+`0.4/(level.random.nextFloat()*0.4+0.8)` 播投掷声；`ServerLevel` 时
+`Projectile.spawnProjectileFromRotation` 以 1.5 力度、散布 1 从眼睛下方 0.1 生成珍珠；
+记 `ITEM_USED`、`stack.consume(1, player)` 后返回 `SUCCESS`。`ItemStack.use` 成功后
+`UseCooldown.apply` 按组件给 20 刻冷却（`ticks() = (int)(seconds*20)`），`ServerPlayerGameMode.useItem`
+开头冷却中直接 `PASS`。玩家身上的 `ItemCooldowns` 和飞行珍珠集合放在 `Player` 里；
+冷却表结构按「冷却组优先，否则物品 ID」可扩展给别的物品。
+
+**存档与票**：`PlayerData.ender_pearls` 是 `childrenList`，每项是整份实体 NBT 加
+`ender_pearl_dimension`，空集合不写键；`player-data` 对拍双向覆盖。上线时
+`loadAndSpawnEnderPearls` 把珍珠放回实体表（主人就是读档玩家时才注册）。下线按
+`PlayerList.remove` 先刷快照、存盘，再把飞行中的珍珠按 `UNLOADED_WITH_PLAYER` 移出世界。
+主人死亡且 `ender_pearls_vanish_on_death` 为真时丢弃。飞行中的珍珠每刻按
+`ThrownEnderpearl.tick` 的 `ticketTimer` 节奏（40 刻超时、返回 39）给自己所在区块续
+半径 2 的 `TicketType::ENDER_PEARL` 票；跨区块先撤旧票再挂新票，珍珠消失撤票。
+已加载模式的集成测试验证：珍珠飞进 6 个区块外、玩家视距只有 2 时，区块仍被交付、
+珍珠继续 tick，最后落地把玩家传过去。
+
+**对拍**：`mob_oracle/ender_pearl.rs` 新增 7 个场景。4 个飞行场景逐刻比珍珠位置 / 速度 /
+朝向 / 随机源、主人位置 / 血量 / `hurtTime` / 存活、末影螨（实体号、位置、朝向、血量）、
+传送声参数（只比珍珠自己发的 `entity.player.teleport`；玩家 / 牛的受伤声走各自的受伤包
+路径，由受伤用例覆盖）和被打的牛；3 个玩家扔出场景比扔出那一刻的珍珠、手里剩下的数量、
+`ITEM_USED` 统计、世界随机源和冷却。落点场景专门用 `oldPosition()`（方块命中点是 64.0，
+落点是 64.09），`pearl_endermite` 用强制种子让 `nextFloat() < 0.05` 命中，
+`pearl_peaceful` 同一颗种子在和平难度不刷螨。两处改坏确认：落点改成 `hit.location`、
+把刷螨条件设为恒假，都会报不一致。
+
+**已知限制**：没有 `connection.isAcceptingMessages()` 的对应物，正在断线的玩家在 Bamboo
+里已经查不到，等价于主人缺失；珍珠票在珍珠消失时立刻撤掉（官方等 40 刻超时，飞行期间
+效果相同）；`isOnPortalCooldown` / `setPortalCooldown` 没建模（Bamboo 没有传送门）；
+服务端不发粒子包；自动存档用每刻刷新的快照，不是存档那一刻的实时实体状态；物品冷却目前
+只被末影珍珠查询。
 

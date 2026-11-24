@@ -5122,6 +5122,9 @@ fn the_collision_cap_reaches_entity_rules() {
         mob_throttle_distance: 32,
         mob_sleep_distance: 64,
         mob_wakeups_scale: 2,
+        mob_pathfinding_phase: true,
+        mob_pathfinding_budget: 8192,
+        mob_pathfinding_fail_cooldown: true,
         ..Default::default()
     };
     let mut world = World::new(config, receiver);
@@ -5136,6 +5139,10 @@ fn the_collision_cap_reaches_entity_rules() {
     assert_eq!(entity_rules.mob_sleep_distance, 64);
     assert_eq!(entity_rules.mob_wakeups_scale, 2);
     assert_eq!(level.block_game_rules().mob_throttle_distance, 32);
+    assert!(entity_rules.mob_pathfinding_phase);
+    assert_eq!(entity_rules.mob_pathfinding_budget, 8192);
+    assert!(entity_rules.mob_pathfinding_fail_cooldown);
+    assert!(level.block_game_rules().mob_pathfinding_phase);
 }
 
 /// 闪电最后一刻 `discard()` 时发出的 `LightningTick` 仍要落地：精确驱动当场写火，

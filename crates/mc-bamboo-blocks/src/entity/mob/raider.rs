@@ -564,8 +564,16 @@ fn patrol_tick(
     leader_speed: f64,
     cooldown_until: &mut i64,
 ) {
-    if !mob.navigation.is_done() {
-        return;
+    let patrol = super::pathfinding::Action::Inspect(super::pathfinding::Use::Patrol);
+    // 独立寻路阶段：请求挂着时按「没有路径」等；结果到了才走成功 / 失败两支。
+    let resuming = mob.navigation.replay_action() == Some(patrol);
+    if !resuming {
+        if !mob.navigation.is_done() {
+            return;
+        }
+        if mob.navigation.awaiting() {
+            return;
+        }
     }
     let leader = mob.raider.patrol_leader;
     let companions = patrol_companions(me, ctx);
@@ -579,17 +587,30 @@ fn patrol_tick(
     } else {
         let path_target = patrol_step(ctx.blocks(), me.position, target);
         let nav = living::nav_mob(me, mob, ctx.blocks());
-        let at = Vec3::new(
-            f64::from(path_target.x),
-            f64::from(path_target.y),
-            f64::from(path_target.z),
-        );
-        let moved = mob.navigation.move_to(
+        mob.navigation
+            .set_next_action(super::pathfinding::Action::Inspect(
+                super::pathfinding::Use::Patrol,
+            ));
+        let path = mob.navigation.create_path(
             ctx.blocks(),
             &nav,
-            at,
-            if leader { leader_speed } else { speed },
+            BlockPos::containing(Vec3::new(
+                f64::from(path_target.x),
+                f64::from(path_target.y),
+                f64::from(path_target.z),
+            )),
+            1,
         );
+        if mob.navigation.awaiting() {
+            return;
+        }
+        let moved = path.is_some()
+            && mob.navigation.move_to_path(
+                ctx.blocks(),
+                &nav,
+                path,
+                if leader { leader_speed } else { speed },
+            );
         if !moved {
             move_randomly(me, mob, ctx.blocks(), speed);
             *cooldown_until = ctx.blocks().game_time() + 200;

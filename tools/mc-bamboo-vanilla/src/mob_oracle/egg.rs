@@ -181,6 +181,7 @@ impl EggCase {
             short_hunger: false,
             wrong_was_hurt: false,
             natural_spawn: None,
+            biome: None,
         }
     }
 
@@ -375,6 +376,7 @@ impl Report {
             left: case.left,
             level_seed: case.level_seed,
             item_used: case.item_used.clone(),
+            cooldown: false,
         };
         if ours != theirs {
             self.mismatch(format!(
@@ -446,7 +448,7 @@ fn chick_state(entity: &Entity, id: i32) -> ChickState {
     }
 }
 
-fn projectile_motion(entity: &Entity, pitch: f32) -> [i64; 8] {
+pub(super) fn projectile_motion(entity: &Entity, pitch: f32) -> [i64; 8] {
     let (p, v) = (entity.position, entity.delta);
     [
         p.x.to_bits() as i64,

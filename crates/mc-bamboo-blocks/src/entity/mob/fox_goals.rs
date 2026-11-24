@@ -418,6 +418,8 @@ fn pounce_can_use(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bo
     let clear = super::fox::is_path_clear(me, ctx.blocks(), target.position);
     if !clear {
         let nav = living::nav_mob(me, mob, ctx.blocks());
+        mob.navigation
+            .set_next_action(super::pathfinding::Action::Discard);
         let _ = mob.navigation.create_path(
             ctx.blocks(),
             &nav,

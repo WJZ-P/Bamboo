@@ -135,6 +135,9 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         _ if ctx.item == items::PUFFERFISH_SPAWN_EGG => {
             spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Pufferfish)
         }
+        _ if ctx.item == items::VILLAGER_SPAWN_EGG => {
+            spawn_egg::use_egg(world, ctx, crate::entity::mob::MobType::Villager)
+        }
         _ if ctx.item == items::ZOMBIE_SPAWN_EGG => {
             spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Zombie)
         }

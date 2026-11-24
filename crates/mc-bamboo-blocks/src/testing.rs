@@ -58,6 +58,10 @@ pub(crate) struct TestLevel {
     pub(crate) border: crate::WorldBorder,
     /// 生物能看见的玩家。默认没有。
     pub(crate) players: Vec<crate::entity::ctx::PlayerView>,
+    /// 这些玩家在睡觉（`LivingEntity.isSleeping()`）。末影珍珠读它。
+    ///
+    /// These players are sleeping (`LivingEntity.isSleeping()`), read by ender pearls.
+    pub(crate) sleeping: Vec<crate::entity::EntityUid>,
     /// `Level.getSkyDarken()`。默认是开阔的白天（0）。
     pub(crate) sky_darken: i32,
 }
@@ -84,6 +88,7 @@ impl TestLevel {
             drop_order: Vec::new(),
             border: crate::WorldBorder::default(),
             players: Vec::new(),
+            sleeping: Vec::new(),
             sky_darken: 0,
         }
     }
@@ -219,6 +224,10 @@ impl Level for TestLevel {
         for player in &self.players {
             visit(player);
         }
+    }
+
+    fn player_sleeping(&self, uid: crate::entity::EntityUid) -> bool {
+        self.sleeping.contains(&uid)
     }
 
     fn world_border(&self) -> crate::WorldBorder {

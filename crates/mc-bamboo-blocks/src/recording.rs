@@ -769,6 +769,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::SummonedEntity { .. } => 26,
         Effect::CrafterCrafted { .. } => 27,
         Effect::KilledByArrow { .. } => 28,
+        Effect::EnderPearlTeleport { .. } => 29,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -949,6 +950,12 @@ fn hash_effect(effect: &Effect) -> u64 {
             shooter.hash(&mut hasher);
             victims.iter().for_each(|victim| victim.hash(&mut hasher));
             weapon.hash(&mut hasher);
+        }
+        Effect::EnderPearlTeleport { target, position } => {
+            target.hash(&mut hasher);
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            position.z.to_bits().hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

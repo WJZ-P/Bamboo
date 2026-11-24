@@ -56,6 +56,18 @@ pub struct Extracted {
     /// Raw `timeline` JSON from the data pack, keyed by namespaced id.
     #[serde(default)]
     pub timelines: BTreeMap<String, String>,
+    /// 内置 `trade_set` 原文：带命名空间的名字 → JSON。
+    #[serde(default)]
+    pub trade_sets: BTreeMap<String, String>,
+    /// 内置 `villager_trade` 原文：带命名空间的名字 → JSON。
+    #[serde(default)]
+    pub villager_trades: BTreeMap<String, String>,
+    /// 内置 `tags/villager_trade` 原文：带命名空间的名字 → JSON。
+    #[serde(default)]
+    pub villager_trade_tags: BTreeMap<String, String>,
+    /// 村民的注册表事实，见 `Extractor.java::villagerFacts`。旧提取结果没有这一项。
+    #[serde(default)]
+    pub villager_facts: VillagerFacts,
     /// 进度定义原文，按完整标识符排列。
     /// Raw advancement definitions keyed by namespaced identifier.
     pub advancements: BTreeMap<String, String>,
@@ -435,6 +447,63 @@ pub struct ExtractedShape {
     /// `FireworkExplosion.Shape` 的序列化名，比如 `burst`。
     pub shape: String,
     pub ingredient: ExtractedIngredient,
+}
+
+/// 村民的注册表事实，由官方代码在 `Bootstrap` 之后直接求值导出。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VillagerFacts {
+    pub professions: Vec<VillagerProfessionFact>,
+    pub by_biome: BTreeMap<String, String>,
+    pub types: Vec<String>,
+    pub poi_types: Vec<String>,
+    pub gossips: Vec<GossipFact>,
+    pub reputation_per_event: i32,
+    pub reputation_per_everlasting: i32,
+    pub reputation_per_trade: i32,
+    pub villager_data_index: u8,
+    pub villager_data_serializer: i32,
+    pub finalized_index: u8,
+    pub finalized_serializer: i32,
+    pub unhappy_index: u8,
+    pub unhappy_serializer: i32,
+    pub movement_speed: f64,
+    pub width: f32,
+    pub height: f32,
+    pub eye_height: f32,
+    pub baby_width: f32,
+    pub baby_height: f32,
+    pub baby_eye_height: f32,
+    pub levels: VillagerLevelFacts,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VillagerProfessionFact {
+    pub name: String,
+    pub held_job_site: Vec<String>,
+    pub acquirable_job_site: Vec<String>,
+    pub requested_items: Vec<String>,
+    pub secondary_poi: Vec<String>,
+    pub trade_sets_by_level: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GossipFact {
+    pub name: String,
+    pub weight: i32,
+    pub max: i32,
+    pub decay_per_day: i32,
+    pub decay_per_transfer: i32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VillagerLevelFacts {
+    pub min: i32,
+    pub max: i32,
+    pub thresholds: Vec<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1409,6 +1478,11 @@ pub struct VersionData {
     ///
     /// Raw `timeline` JSON from the data pack, keyed by namespaced id.
     pub timelines: BTreeMap<String, String>,
+    /// 内置 `trade_set` / `villager_trade` 及其标签的原文。
+    pub trade_sets: BTreeMap<String, String>,
+    pub villager_trades: BTreeMap<String, String>,
+    pub villager_trade_tags: BTreeMap<String, String>,
+    pub villager_facts: VillagerFacts,
     /// 属性名字 → 默认值。
     pub attribute_defaults: BTreeMap<String, f64>,
     /// 内置注册表名 → 按 ID 排列的条目。
@@ -1555,6 +1629,10 @@ fn read_version_data(
         builtin_registries,
         packets,
         timelines: extracted.timelines,
+        trade_sets: extracted.trade_sets,
+        villager_trades: extracted.villager_trades,
+        villager_trade_tags: extracted.villager_trade_tags,
+        villager_facts: extracted.villager_facts,
         advancements: extracted.advancements,
         loot_tables: extracted.loot_tables,
         loot_predicates: extracted.loot_predicates,

@@ -100,6 +100,10 @@ import net.minecraft.world.level.GameType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.entity.npc.villager.VillagerData;
+import net.minecraft.world.entity.npc.villager.VillagerProfession;
+import net.minecraft.world.entity.npc.villager.VillagerType;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.InteractionHand;
@@ -325,6 +329,16 @@ public final class MobOracle {
                 playEggDispense(official, out, name);
                 cases++;
             }
+            for (String name : List.of("pearl_floor", "pearl_hit_cow", "pearl_endermite", "pearl_peaceful")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playEnderPearl(official, out, name);
+                cases++;
+            }
+            for (String name : List.of("pearl_throw", "pearl_throw_moving", "pearl_throw_creative")) {
+                if (only != null && !name.startsWith(only)) continue;
+                playPearlThrow(official, out, name);
+                cases++;
+            }
             for (String name : List.of("squid_swim", "squid_hurt", "squid_beached", "squid_swim_baby",
                     "glow_squid_swim", "glow_squid_hurt")) {
                 if (only != null && !name.startsWith(only)) continue;
@@ -342,6 +356,11 @@ public final class MobOracle {
             }
             if (only == null || only.equals("small_mob_death")) {
                 cases += playSmallMobDeath(official, out);
+            }
+            if (only == null || "villager".startsWith(only)) {
+                cases += playVillagerSpawn(official, out);
+                cases += playVillagerSave(official, out);
+                cases += playVillagerDeath(official, out);
             }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
@@ -7561,6 +7580,296 @@ public final class MobOracle {
         stack.enchant(registry.getOrThrow(key), level);
     }
 
+    /**
+     * 末影珍珠场景的主人：假世界没有 `TicketStorage`，只把注册和 40 刻超时还原，
+     * 不真的挂区块票（区块加载另由已加载模式的集成测试覆盖）。
+     *
+     * The pearl scene's owner: the fake level has no `TicketStorage`, so keep the
+     * registration and the 40-tick timeout without a real ticket.
+     */
+    private static final class OraclePearlPlayer extends ServerPlayer {
+        OraclePearlPlayer(MinecraftServer server, FakeLevel level) {
+            super(server, level, new GameProfile(new UUID(1L, 2L), "PearlOracle"),
+                    ClientInformation.createDefault());
+        }
+
+        @Override
+        public long registerAndUpdateEnderPearlTicket(
+                net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl) {
+            registerEnderPearl(pearl);
+            return net.minecraft.server.level.TicketType.ENDER_PEARL.timeout() - 1;
+        }
+    }
+
+    /** 第一个让珍珠落地时 `nextFloat() < 0.05` 的种子（先取完 32 组粒子数）。 */
+    private static long pearlMiteSeed() {
+        for (long seed = 0; ; seed++) {
+            RandomSource random = new net.minecraft.world.level.levelgen.LegacyRandomSource(seed);
+            for (int i = 0; i < 32; i++) {
+                random.nextDouble();
+                random.nextGaussian();
+                random.nextGaussian();
+            }
+            if (random.nextFloat() < 0.05F) {
+                return seed;
+            }
+        }
+    }
+
+    /**
+     * 末影珍珠：逐刻比珍珠的运动和随机源、主人位置 / 血量 / 受伤动画、末影螨生成、
+     * 传送声参数和被打的牛。
+     *
+     * Ender pearls: per tick compare the pearl motion and random, the owner position,
+     * health and hurt animation, the endermite spawn, the teleport sound arguments and
+     * the struck cow.
+     */
+    private static void playEnderPearl(Official official, Writer out, String name) throws Exception {
+        boolean cowHit = name.equals("pearl_hit_cow");
+        boolean roll = name.equals("pearl_endermite") || name.equals("pearl_peaceful");
+        boolean peaceful = name.equals("pearl_peaceful");
+        FakeLevel world = FakeLevel.create(official);
+        ((TickingLevelData) world.levelData).difficulty = peaceful ? Difficulty.PEACEFUL : Difficulty.NORMAL;
+        for (int x = -8; x <= 24; x++) {
+            for (int z = -8; z <= 8; z++) {
+                world.blocks.put(BlockPos.asLong(x, 63, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        String blocks = blockArray(world.blocks);
+        world.spawned = new ArrayList<>();
+        world.soundLog = new ArrayList<>();
+        // 主人站得离落点足够远，不会被珍珠打到。构造完再重设号，让珍珠拿 FIRST_ID。
+        OraclePearlPlayer owner = new OraclePearlPlayer(official.server, world);
+        owner.setId(FIRST_ID + 1024);
+        world.nextId = FIRST_ID;
+        owner.setPos(20.5, 64.0, 0.0);
+        setRandom(owner, 0x0DDB1A5E5BAD5EEDL);
+        owner.setYRot(45.0F);
+        owner.setYHeadRot(45.0F);
+        owner.setYBodyRot(45.0F);
+        owner.setXRot(12.5F);
+        Bytes sink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", owner);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server",
+                official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = sink;
+        put(ServerPlayer.class, owner, "connection", connection);
+        world.playersList().add(owner);
+        world.tracked.add(owner);
+        double[] ownerStart = new double[] {owner.getX(), owner.getY(), owner.getZ()};
+
+        ItemStack stack = new ItemStack(Items.ENDER_PEARL, 1);
+        var pearl = new net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl(
+                world, owner, stack);
+        pearl.setId(FIRST_ID);
+        setRandom(pearl, world.entitySeeds.nextLong());
+        pearl.setUUID(Mth.createInsecureUUID(pearl.getRandom()));
+        double[] start = cowHit ? new double[] {0.5, 64.5, 0.5} : new double[] {0.5, 65.5, 0.5};
+        double[] dir = cowHit ? new double[] {1.0, 0.0, 0.0} : new double[] {1.0, -0.2, 0.3};
+        pearl.setPos(start[0], start[1], start[2]);
+        pearl.shoot(dir[0], dir[1], dir[2], 1.5F, 1.0F);
+        long forced = 0;
+        if (roll) {
+            forced = pearlMiteSeed();
+            setRandom(pearl, forced);
+        }
+        world.tracked.add(pearl);
+        Cow cow = null;
+        if (cowHit) {
+            cow = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            cow.setId(FIRST_ID + 1);
+            setRandom(cow, world.entitySeeds.nextLong());
+            RandomSource random = cow.getRandom();
+            cow.setUUID(Mth.createInsecureUUID(random));
+            float yaw = random.nextFloat() * 6.2831855F;
+            cow.setYRot(yaw);
+            cow.setYHeadRot(yaw);
+            cow.setPos(5.5, 64.0, 0.5);
+            cow.setNoAi(true);
+            world.tracked.add(cow);
+        }
+        var frames = new StringBuilder("[");
+        int broke = -1;
+        for (int tick = 0; ; tick++) {
+            var sounds = new ArrayList<long[]>();
+            if (tick > 0) {
+                world.gameTime++;
+                if (broke < 0) {
+                    world.soundLog = sounds;
+                    pearl.commonTick();
+                    pearl.tick();
+                }
+                if (cow != null) {
+                    cow.checkDespawn();
+                    cow.commonTick();
+                    cow.tick();
+                }
+                if (pearl.isRemoved() && broke < 0) {
+                    broke = tick;
+                }
+            }
+            frames.append(tick == 0 ? "" : ",");
+            frames.append("{\"pearl\":");
+            if (!pearl.isRemoved()) {
+                frames.append("{\"id\":").append(pearl.getId())
+                        .append(",\"motion\":").append(projectileMotion(pearl))
+                        .append(",\"seed\":").append(randomSeed(pearl)).append('}');
+            } else {
+                frames.append("null");
+            }
+            frames.append(",\"owner\":[").append(Double.doubleToRawLongBits(owner.getX())).append(',')
+                    .append(Double.doubleToRawLongBits(owner.getY())).append(',')
+                    .append(Double.doubleToRawLongBits(owner.getZ())).append(',')
+                    .append(Float.floatToRawIntBits(owner.getHealth())).append(',')
+                    .append(owner.hurtTime).append(',')
+                    .append(owner.isAlive() ? 1 : 0).append(']');
+            frames.append(",\"mites\":[");
+            boolean firstMite = true;
+            for (Entity spawned : world.spawned) {
+                if (!(spawned instanceof net.minecraft.world.entity.monster.Endermite mite)) {
+                    continue;
+                }
+                if (!firstMite) {
+                    frames.append(',');
+                }
+                firstMite = false;
+                frames.append('[').append(mite.getId()).append(',')
+                        .append(Double.doubleToRawLongBits(mite.getX())).append(',')
+                        .append(Double.doubleToRawLongBits(mite.getY())).append(',')
+                        .append(Double.doubleToRawLongBits(mite.getZ())).append(',')
+                        .append(Float.floatToRawIntBits(mite.getYRot())).append(',')
+                        .append(Float.floatToRawIntBits(mite.getXRot())).append(',')
+                        .append(Float.floatToRawIntBits(mite.getHealth())).append(']');
+            }
+            world.spawned.clear();
+            frames.append(']');
+            if (cow != null) {
+                long[] motion = motionBits(cow);
+                frames.append(",\"cow\":[");
+                for (int i = 0; i < motion.length; i++) {
+                    if (i > 0) {
+                        frames.append(',');
+                    }
+                    frames.append(motion[i]);
+                }
+                frames.append(',').append(Float.floatToRawIntBits(cow.getHealth())).append(',')
+                        .append(cow.hurtTime).append(']');
+            } else {
+                frames.append(",\"cow\":null");
+            }
+            frames.append(",\"sounds\":[");
+            // 只比珍珠代码自己发的传送声；玩家 / 牛的受伤声走各自的受伤包路径，
+            // 由受伤相关的用例覆盖。
+            long teleportSound = net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT
+                    .getId(net.minecraft.sounds.SoundEvents.PLAYER_TELEPORT);
+            boolean firstSound = true;
+            for (long[] sound : sounds) {
+                if (sound[0] != teleportSound) {
+                    continue;
+                }
+                if (!firstSound) {
+                    frames.append(',');
+                }
+                firstSound = false;
+                frames.append(Arrays.toString(sound));
+            }
+            frames.append("]}");
+            if (broke >= 0) {
+                break;
+            }
+            if (tick > 200) {
+                throw new IllegalStateException("pearl never landed: " + name + " at " + pearl.position());
+            }
+        }
+        frames.append(']');
+        out.write("{\"type\":\"enderPearl\",\"name\":" + jsonString(name) + ",\"firstId\":" + FIRST_ID
+                + ",\"blocks\":" + blocks + ",\"start\":" + Arrays.toString(start)
+                + ",\"dir\":" + Arrays.toString(dir) + ",\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
+                + ",\"forced\":" + forced + ",\"owner\":[" + Double.doubleToRawLongBits(ownerStart[0]) + ','
+                + Double.doubleToRawLongBits(ownerStart[1]) + ','
+                + Double.doubleToRawLongBits(ownerStart[2]) + "]"
+                + ",\"cow\":" + cowHit + ",\"difficulty\":" + (peaceful ? 0 : 2)
+                + ",\"frames\":" + frames + "}\n");
+        out.flush();
+    }
+
+    /**
+     * 玩家扔珍珠的物品使用：照 `EnderpearlItem.use` 的顺序（投掷声、生成、记统计、扣物品、
+     * `use_cooldown`），比扔出那一刻的珍珠、物品栏、世界随机源和冷却。
+     *
+     * A player's ender pearl use: follow `EnderpearlItem.use` (throw sound, spawn, stat,
+     * consume, `use_cooldown`) and compare the pearl, inventory, level random and cooldown.
+     */
+    private static void playPearlThrow(Official official, Writer out, String name) throws Exception {
+        boolean moving = name.endsWith("_moving");
+        boolean creative = name.endsWith("_creative");
+        float yaw = moving ? 37.0F : -20.0F;
+        float pitch = moving ? -42.0F : -10.0F;
+        FakeLevel level = FakeLevel.create(official);
+        level.nextId = FIRST_ID;
+        level.spawned = new ArrayList<>();
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
+        ServerPlayer player = new ServerPlayer(official.server, level,
+                new GameProfile(new UUID(1L, 2L), "PearlThrowOracle"), ClientInformation.createDefault());
+        player.setId(FIRST_ID + 1024);
+        player.setPos(0.5, 64.0, 0.5);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(yaw);
+        player.setXRot(pitch);
+        player.setYHeadRot(yaw);
+        if (moving) player.setKnownMovement(new Vec3(0.125, -0.25, 0.0625));
+        player.getAbilities().instabuild = creative;
+        Bytes sink = new Bytes(official.registries);
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "server",
+                official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection, "connection",
+                new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = sink;
+        put(ServerPlayer.class, player, "connection", connection);
+        level.playersList().add(player);
+        ItemStack stack = new ItemStack(Items.ENDER_PEARL, 3);
+        player.getInventory().setItem(player.getInventory().getSelectedSlot(), stack);
+        level.playSound(null, player.getX(), player.getY(), player.getZ(),
+                net.minecraft.sounds.SoundEvents.ENDER_PEARL_THROW,
+                net.minecraft.sounds.SoundSource.NEUTRAL,
+                0.5F, 0.4F / (level.getRandom().nextFloat() * 0.4F + 0.8F));
+        var pearl = new net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl(
+                level, player, stack);
+        setRandom(pearl, level.entitySeeds.nextLong());
+        pearl.setUUID(Mth.createInsecureUUID(pearl.getRandom()));
+        net.minecraft.world.entity.projectile.Projectile.spawnProjectile(pearl, level, stack,
+                e -> e.shootFromRotation(player, player.getXRot(), player.getYRot(), 0.0F, 1.5F, 1.0F));
+        var used = net.minecraft.stats.Stats.ITEM_USED.get(stack.getItem());
+        int before = player.getStats().getValue(used);
+        player.awardStat(used);
+        int awarded = player.getStats().getValue(used) - before;
+        stack.consume(1, player);
+        var cooldown = stack.get(net.minecraft.core.component.DataComponents.USE_COOLDOWN);
+        if (cooldown != null) {
+            cooldown.apply(stack, player);
+        }
+        boolean onCooldown = player.getCooldowns().isOnCooldown(stack);
+        ItemStack inside = pearl.getItem();
+        out.write("{\"type\":\"pearlThrow\",\"name\":" + jsonString(name)
+                + ",\"yaw\":" + Float.floatToRawIntBits(yaw)
+                + ",\"pitch\":" + Float.floatToRawIntBits(pitch) + ",\"moving\":" + moving
+                + ",\"creative\":" + creative
+                + ",\"motion\":" + projectileMotion(pearl) + ",\"seed\":" + randomSeed(pearl)
+                + ",\"item\":[" + BuiltInRegistries.ITEM.getId(inside.getItem()) + ',' + inside.getCount() + ']'
+                + ",\"left\":" + player.getInventory().getItem(player.getInventory().getSelectedSlot()).getCount()
+                + ",\"itemUsed\":[[" + BuiltInRegistries.ITEM.getId(Items.ENDER_PEARL) + "," + awarded + "]]"
+                + ",\"cooldown\":" + onCooldown
+                + ",\"levelSeed\":" + randomSeed(level.getRandom()) + "}\n");
+        out.flush();
+    }
+
     private static void playProjectile(Official official, Writer out, String name) throws Exception {
         boolean enchanted = name.equals("arrow_power_punch_hit");
         boolean tipped = name.equals("arrow_tipped_hit");
@@ -9400,6 +9709,144 @@ public final class MobOracle {
         return cases;
     }
 
+    /**
+     * 村民生成的群系品种：在假世界里把群系固定成若干项，跑一次 `finalizeSpawn`，
+     * 记下 `VillagerData`、finalized、尺寸和血量。
+     *
+     * Villager spawn types: pin the biome in the fake level, run one `finalizeSpawn` and
+     * report the `VillagerData`, finalized flag, dimensions and health.
+     */
+    private static int playVillagerSpawn(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (String biome : new String[] {"plains", "desert", "snowy_plains", "taiga",
+                "swamp", "jungle", "savanna", "badlands", "ocean", "the_void"}) {
+            FakeLevel world = FakeLevel.create(official);
+            var holder = official.registries.lookupOrThrow(net.minecraft.core.registries.Registries.BIOME)
+                    .getOrThrow(net.minecraft.resources.ResourceKey.create(
+                            net.minecraft.core.registries.Registries.BIOME,
+                            net.minecraft.resources.Identifier.withDefaultNamespace(biome)));
+            world.naturalBiome = holder;
+            put(net.minecraft.world.level.Level.class, world, "biomeManager",
+                    new net.minecraft.world.level.biome.BiomeManager((x, y, z) -> holder, 0L));
+            world.spawnDifficulty = new net.minecraft.world.DifficultyInstance(
+                    net.minecraft.world.Difficulty.NORMAL, 0L, 0L, 0.0F);
+            Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                    world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            mob.setPos(0.5, 64.0, 0.5);
+            mob.finalizeSpawn(world, world.spawnDifficulty,
+                    net.minecraft.world.entity.EntitySpawnReason.COMMAND, null);
+            VillagerData data = mob.getVillagerData();
+            net.minecraft.world.entity.EntityDimensions dimensions =
+                    mob.getDimensions(net.minecraft.world.entity.Pose.STANDING);
+            out.write("{\"type\":\"villagerSpawn\",\"biome\":" + jsonString("minecraft:" + biome)
+                    + ",\"kind\":" + jsonString(data.type().unwrapKey().orElseThrow().identifier().toString())
+                    + ",\"profession\":" + jsonString(data.profession().unwrapKey().orElseThrow().identifier().toString())
+                    + ",\"level\":" + data.level()
+                    + ",\"finalized\":" + mob.getVillagerDataFinalized()
+                    + ",\"dimensions\":[" + dimensions.width() + "," + dimensions.height() + "]"
+                    + ",\"health\":" + mob.getHealth()
+                    + ",\"followRange\":" + mob.getAttributeValue(
+                            net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)
+                    + ",\"leftHanded\":" + mob.isLeftHanded() + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
+    /** 村民存档：带职业 / 等级 / 食物 / 经验 / 补货时刻 / 八卦，往返一次。 */
+    private static int playVillagerSave(Official official, Writer out) throws Exception {
+        FakeLevel world = FakeLevel.create(official);
+        Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+        mob.setPos(1.5, 64.0, 2.5);
+        mob.setYRot(37.0F);
+        mob.setXRot(12.0F);
+        var registries = official.registries;
+        VillagerData data = new VillagerData(
+                registries.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_TYPE)
+                        .getOrThrow(VillagerType.TAIGA),
+                registries.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_PROFESSION)
+                        .getOrThrow(VillagerProfession.FARMER),
+                3);
+        mob.setVillagerData(data);
+        mob.setVillagerDataFinalized(true);
+        mob.setVillagerXp(20);
+        put(Villager.class, mob, "foodLevel", 4);
+        put(Villager.class, mob, "lastRestockGameTime", 1234L);
+        put(Villager.class, mob, "lastGossipDecayTime", 5678L);
+        put(Villager.class, mob, "numberOfRestocksToday", 2);
+        mob.getGossips().add(new UUID(3L, 4L), net.minecraft.world.entity.ai.gossip.GossipType.MAJOR_POSITIVE, 5);
+        var output = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        mob.saveWithoutId(output);
+        var loadedTag = output.buildResult();
+        Villager copy = (Villager) EntityTypes.VILLAGER.create(
+                world, net.minecraft.world.entity.EntitySpawnReason.LOAD);
+        copy.load(net.minecraft.world.level.storage.TagValueInput.create(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries, loadedTag));
+        var again = net.minecraft.world.level.storage.TagValueOutput.createWithContext(
+                net.minecraft.util.ProblemReporter.DISCARDING, official.registries);
+        copy.saveWithoutId(again);
+        out.write("{\"type\":\"villagerSave\",\"name\":\"villager_save\""
+                + ",\"nbt\":" + jsonString(loadedTag.toString())
+                + ",\"reloaded\":" + jsonString(again.buildResult().toString()) + "}\n");
+        out.flush();
+        return 1;
+    }
+
+    /** 村民死亡：空战利品表、没有经验，比移除状态、物品和掉落的经验值。 */
+    private static int playVillagerDeath(Official official, Writer out) throws Exception {
+        int cases = 0;
+        for (boolean byPlayer : new boolean[] {true, false}) {
+            FakeLevel world = FakeLevel.create(official);
+            world.spawned = new ArrayList<>();
+            Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                    world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            mob.setPos(0.5, 64.0, 0.5);
+            mob.setHealth(20.0F);
+            world.tracked.add(mob);
+            ServerPlayer player = null;
+            if (byPlayer) {
+                player = new ServerPlayer(official.server, world,
+                        new GameProfile(new UUID(1L, 2L), "VillagerDeath"), ClientInformation.createDefault());
+                player.setId(FIRST_ID + 1024);
+                player.setPos(2.5, 64.0, 0.5);
+                world.playersList().add(player);
+                world.tracked.add(player);
+            }
+            DamageSource source = player == null ? world.damageSources().generic()
+                    : world.damageSources().playerAttack(player);
+            mob.hurtServer(world, source, 100.0F);
+            for (int tick = 0; tick < 25; tick++) {
+                world.gameTime++;
+                if (!mob.isRemoved()) {
+                    mob.commonTick();
+                    mob.tick();
+                }
+            }
+            List<String> items = new ArrayList<>();
+            int experience = 0;
+            for (Entity entity : world.spawned) {
+                if (entity instanceof net.minecraft.world.entity.item.ItemEntity item && !item.getItem().isEmpty()) {
+                    items.add(BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "x" + item.getItem().getCount());
+                }
+                if (entity instanceof net.minecraft.world.entity.ExperienceOrb orb) {
+                    experience += orb.getValue();
+                }
+            }
+            items.sort(String::compareTo);
+            out.write("{\"type\":\"villagerDeath\",\"byPlayer\":" + byPlayer
+                    + ",\"removed\":" + mob.isRemoved()
+                    + ",\"items\":" + items.stream().map(MobOracle::jsonString)
+                            .collect(java.util.stream.Collectors.joining(",", "[", "]"))
+                    + ",\"experience\":" + experience + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
     /** `Silverfish.friendsGoal` 的私有字段。 */
     private static Object friendsOf(Mob mob) throws Exception {
         Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
@@ -10414,14 +10861,18 @@ public final class MobOracle {
                 .collect(java.util.stream.Collectors.joining(",", "[", "]"));
     }
 
-    private static String projectileMotion(Entity entity) {
+    private static long[] motionBits(Entity entity) {
         Vec3 pos = entity.position();
         Vec3 v = entity.getDeltaMovement();
-        return Arrays.toString(new long[] {
+        return new long[] {
                 Double.doubleToRawLongBits(pos.x), Double.doubleToRawLongBits(pos.y), Double.doubleToRawLongBits(pos.z),
                 Double.doubleToRawLongBits(v.x), Double.doubleToRawLongBits(v.y), Double.doubleToRawLongBits(v.z),
                 Float.floatToRawIntBits(entity.getYRot()), Float.floatToRawIntBits(entity.getXRot()),
-        });
+        };
+    }
+
+    private static String projectileMotion(Entity entity) {
+        return Arrays.toString(motionBits(entity));
     }
 
     /**
@@ -13195,6 +13646,12 @@ public final class MobOracle {
         }
 
         @Override
+        public boolean isAcceptingMessages() {
+            // 假连接没有 Netty 通道，按「已连上」处理，末影珍珠才会真的传送主人。
+            return true;
+        }
+
+        @Override
         public void markClientUnloadedAfterDeath() {}
     }
 
@@ -14197,6 +14654,8 @@ public final class MobOracle {
 
     private static final class FakeLevel extends ServerLevel {
         List<long[]> projectileExtinguishes;
+        /** 末影珍珠场景：这一刻 `playSound` 的原始参数（音效 ID、音源、坐标位、音量位、音高位）。 */
+        List<long[]> soundLog;
         DifficultyInstance spawnDifficulty;
         NaturalScene naturalScene;
         boolean worldGenRegion;
@@ -14869,6 +15328,16 @@ public final class MobOracle {
             if (packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundSoundPacket(
                         sound, source, x, y, z, volume, pitch, seed));
+            }
+            if (soundLog != null) {
+                soundLog.add(new long[] {
+                        net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.getId(sound.value()),
+                        source.ordinal(),
+                        Double.doubleToRawLongBits(x),
+                        Double.doubleToRawLongBits(y),
+                        Double.doubleToRawLongBits(z),
+                        Float.floatToRawIntBits(volume),
+                        Float.floatToRawIntBits(pitch)});
             }
             if (projectileExtinguishes != null && sound.value() == net.minecraft.sounds.SoundEvents.GENERIC_EXTINGUISH_FIRE) {
                 projectileExtinguishes.add(new long[] {Double.doubleToRawLongBits(x),

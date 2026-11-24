@@ -547,6 +547,17 @@ pub trait LevelEntities {
     fn remove_entity(&mut self, uid: EntityUid);
     fn begin_entity_tick(&mut self);
     fn end_entity_tick(&mut self);
+    /// 独立寻路阶段：把上一刻的结果挂到各生物的导航上。缺省什么都不做。
+    fn begin_path_tick(&mut self) {}
+    /// 收走这一刻挂起的寻路请求。缺省没有。
+    fn take_path_requests(&mut self, _now: i64) -> Vec<crate::entity::mob::pathfinding::Pending> {
+        Vec::new()
+    }
+    /// 取出寻路阶段状态（精确驱动在算搜索时临时搬出去，避免和只读方块视图同时借）。
+    fn take_pathfinding(&mut self) -> crate::entity::mob::pathfinding::PhaseState {
+        Default::default()
+    }
+    fn put_pathfinding(&mut self, _state: crate::entity::mob::pathfinding::PhaseState) {}
     fn take_entity(&mut self, uid: EntityUid) -> Option<Entity>;
     fn put_entity(&mut self, entity: Entity);
     fn live_entities(&self) -> Vec<Entity>;
@@ -666,6 +677,22 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn end_entity_tick(&mut self) {
         self.entities_table_mut().end_tick();
+    }
+
+    fn begin_path_tick(&mut self) {
+        self.entities_table_mut().begin_path_tick();
+    }
+
+    fn take_path_requests(&mut self, now: i64) -> Vec<crate::entity::mob::pathfinding::Pending> {
+        self.entities_table_mut().take_path_requests(now)
+    }
+
+    fn take_pathfinding(&mut self) -> crate::entity::mob::pathfinding::PhaseState {
+        std::mem::take(self.entities_table_mut().pathfinding_mut())
+    }
+
+    fn put_pathfinding(&mut self, state: crate::entity::mob::pathfinding::PhaseState) {
+        *self.entities_table_mut().pathfinding_mut() = state;
     }
 
     fn take_entity(&mut self, uid: EntityUid) -> Option<Entity> {
@@ -1192,6 +1219,14 @@ pub trait Level: LevelSideState + LevelEntities {
         out
     }
 
+    /// 这名玩家在不在床上（`LivingEntity.isSleeping()`）。末影珍珠决定要不要传送主人时读它。
+    ///
+    /// Whether this player is sleeping (`LivingEntity.isSleeping()`), read when an
+    /// ender pearl decides whether it may teleport its owner.
+    fn player_sleeping(&self, _uid: EntityUid) -> bool {
+        false
+    }
+
     /// 现实中的本地日期，不是世界时间。
     ///
     /// The local calendar date, independent of the world clock.
@@ -1337,6 +1372,20 @@ pub trait Level: LevelSideState + LevelEntities {
         _attacker: Option<&crate::entity::EntityPublic>,
     ) -> Option<PlayerHurtNow> {
         None
+    }
+
+    /// 精确驱动当场把玩家放到 `position`（末影珍珠的 `ServerPlayer.teleport` 落点）。
+    /// `false` 表示这一层做不到，调用方改成延后的 [`Effect::EnderPearlTeleport`]。
+    ///
+    /// Apply an ender pearl teleport to a player at once in the precise driver.
+    /// `false` means this level cannot, and the caller defers an
+    /// [`Effect::EnderPearlTeleport`].
+    fn teleport_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _position: mc_bamboo_core::Vec3,
+    ) -> bool {
+        false
     }
 
     /// 精确驱动当场给玩家一次 `LivingEntity.knockback(strength, dx, dz)`（山羊冲撞）。
@@ -2346,6 +2395,16 @@ pub enum Effect {
     /// A crafter crafted a recipe. The game layer credits nearby players' triggers.
     CrafterCrafted {
         recipe: &'static str,
+        position: mc_bamboo_core::Vec3,
+    },
+    /// `ThrownEnderpearl.onHit`：把扔出珍珠的玩家传送到 `position`（珍珠命中前的
+    /// `oldPosition()`）。游戏层走正式的 `movement::teleport` 并清下落距离。
+    ///
+    /// `ThrownEnderpearl.onHit`: teleport the pearl's owner to `position` (the
+    /// projectile's `oldPosition()` before impact). The game layer uses the
+    /// normal `movement::teleport` and clears fall distance.
+    EnderPearlTeleport {
+        target: crate::entity::EntityUid,
         position: mc_bamboo_core::Vec3,
     },
     /// 空桶舀起了东西。游戏层按 `ItemUtils.createFilledResult` 把 `item` 交还到 `hand`。

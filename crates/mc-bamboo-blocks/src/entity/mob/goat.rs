@@ -771,6 +771,33 @@ fn jump_candidate(jump: &mut LongJump, cx: &Cx, spec: &JumpSpec) -> Option<(Bloc
 /// `pickCandidate`: draw weighted candidates (level random) until one is an acceptable
 /// landing spot with a jump vector that cannot be walked to; each draw leaves the list.
 fn pick_candidate(jump: &mut LongJump, cx: &mut Cx, spec: &JumpSpec) {
+    // 独立寻路阶段：结果回来后按当时选定的落点继续，不再抽随机候选。
+    if let Some(target) = cx.mob.navigation.replay_target() {
+        let center = Vec3::new(
+            f64::from(target.x) + 0.5,
+            f64::from(target.y) + 0.5,
+            f64::from(target.z) + 0.5,
+        );
+        if let Some(vector) = optimal_jump_vector(jump, cx, center, spec.dimensions) {
+            cx.memories.set(
+                MemoryType::LookTarget,
+                MemoryValue::Look(PositionTracker::at_block(target)),
+            );
+            let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
+            let path = cx
+                .mob
+                .navigation
+                .create_path_within(cx.ctx.blocks(), &nav, target, 0, 8.0);
+            if path.is_none_or(|path| !path.reached) {
+                jump.chosen = Some(vector);
+                jump.prepare_start = cx.time;
+            }
+        }
+        return;
+    }
+    if cx.mob.navigation.awaiting() {
+        return;
+    }
     while !jump.candidates.is_empty() {
         let Some((target, _)) = jump_candidate(jump, cx, spec) else {
             continue;
@@ -791,10 +818,19 @@ fn pick_candidate(jump: &mut LongJump, cx: &mut Cx, spec: &JumpSpec) {
             MemoryValue::Look(PositionTracker::at_block(target)),
         );
         let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
+        cx.mob
+            .navigation
+            .set_next_action(super::pathfinding::Action::Inspect(
+                super::pathfinding::Use::BrainReached,
+            ));
         let path = cx
             .mob
             .navigation
             .create_path_within(cx.ctx.blocks(), &nav, target, 0, 8.0);
+        if cx.mob.navigation.awaiting() {
+            // 请求刚挂起，下一刻按同一个落点继续。
+            return;
+        }
         if path.is_none_or(|path| !path.reached) {
             jump.chosen = Some(vector);
             jump.prepare_start = cx.time;
@@ -1049,13 +1085,35 @@ fn ramming_start_position(cx: &mut Cx, target_pos: BlockPos) -> Option<BlockPos>
         dx * dx + dy * dy + dz * dz
     };
     possible.sort_by(|a, b| dist_sqr(a).total_cmp(&dist_sqr(b)));
-    possible.into_iter().find(|&pos| {
+    // 独立寻路阶段：结果回来后只核对当时选定的起点，不重扫候选。
+    if let Some(at) = cx.mob.navigation.replay_target() {
+        let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
+        return cx
+            .mob
+            .navigation
+            .create_path(cx.ctx.blocks(), &nav, at, 0)
+            .is_some_and(|path| path.reached)
+            .then_some(at);
+    }
+    if cx.mob.navigation.awaiting() {
+        return None;
+    }
+    for pos in possible {
         let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
         cx.mob
             .navigation
-            .create_path(cx.ctx.blocks(), &nav, pos, 0)
-            .is_some_and(|path| path.reached)
-    })
+            .set_next_action(super::pathfinding::Action::Inspect(
+                super::pathfinding::Use::BrainReached,
+            ));
+        let path = cx.mob.navigation.create_path(cx.ctx.blocks(), &nav, pos, 0);
+        if cx.mob.navigation.awaiting() {
+            return None;
+        }
+        if path.is_some_and(|path| path.reached) {
+            return Some(pos);
+        }
+    }
+    None
 }
 
 fn choose_ram_position(prepare: &mut PrepareRam, cx: &mut Cx, target: EntityUid) {
