@@ -286,7 +286,7 @@ impl Player {
         // a load with `XpSeed == 0` draws once from `this.random`
         // (see [`restore_experience_seed`]).
         let enchantment_seed = 0;
-        Self {
+        let mut player = Self {
             id,
             uuid,
             name,
@@ -351,7 +351,9 @@ impl Player {
             awaiting_respawn: false,
             riding: crate::riding::Riding::default(),
             advancements: crate::advancements::PlayerAdvancements::default(),
-        }
+        };
+        crate::player_attributes::rebuild_player(&mut player, false);
+        player
     }
 
     /// 实体位置，也就是脚底。

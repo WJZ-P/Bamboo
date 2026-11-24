@@ -17,11 +17,15 @@
 //! effects and sync; inbound packets are handled before it, matching the one-tick lag of
 //! vanilla `detectEquipmentUpdates`.
 
-use mc_bamboo_blocks::entity::mob::{
-    attributes::{Attributes, Modifier, Operation},
-    effects::attribute_modifiers,
-    equipment::stack_modifiers,
+use mc_bamboo_blocks::{
+    BlockState,
+    entity::mob::{
+        attributes::{Attributes, Modifier, Operation},
+        effects::attribute_modifiers,
+        equipment::stack_modifiers,
+    },
 };
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{
     is_client_syncable_attribute,
     registries::{attribute, mob_effect},
@@ -93,14 +97,35 @@ pub(crate) fn mining_inputs(player: &Player) -> MiningInputs {
 /// Rebuilds every player's attribute modifiers once per tick, before mining,
 /// attack, effects and sync.
 pub(crate) fn rebuild(region: &mut Region) {
-    for player in region.players.values_mut() {
-        rebuild_one(player);
+    let Region {
+        players, chunks, ..
+    } = region;
+    for player in players.values_mut() {
+        let on_solid = frost_block_solid(player, chunks);
+        rebuild_player(player, on_solid);
     }
+}
+
+/// 官方 `LivingEntity.tryAddFrost`：`!getBlockStateOnLegacy().isAir()`，
+/// 也就是脚底下方 0.2 格（`Entity.getOnPos(0.2F)`）不是空气。
+/// 没冻结时直接返回假，避免每刻无谓查区块。
+///
+/// Vanilla `LivingEntity.tryAddFrost`: `!getBlockStateOnLegacy().isAir()`,
+/// i.e. the block 0.2 below feet is not air. Skips the chunk lookup when not frozen.
+fn frost_block_solid(player: &Player, chunks: &mc_bamboo_world::store::ChunkStore) -> bool {
+    if player.environment.ticks_frozen <= 0 {
+        return false;
+    }
+    let pos = player.position();
+    let below = BlockPos::containing(Vec3::new(pos.x, pos.y - 0.2, pos.z));
+    chunks
+        .block(below)
+        .is_some_and(|id| !BlockState(id).is_air())
 }
 
 /// 官方 `ServerPlayer.updatePlayerAttributes` 的创造模式触及距离修饰符：
 /// `minecraft:creative_mode_block_range` +0.5、`minecraft:creative_mode_entity_range` +2.0，
-/// 都是 `ADD_VALUE`。数值来自官方 `UpdateAttributes` 的逐字节对拍。
+/// 都是 `ADD_VALUE` 临时修饰符。
 fn creative_modifiers() -> [(i32, Modifier); 2] {
     [
         (
@@ -124,12 +149,55 @@ fn creative_modifiers() -> [(i32, Modifier); 2] {
     ]
 }
 
-/// 当前装备 / 效果 / 游戏模式给出的全部临时修饰符，按官方 `addXModifier` 的顺序。
-/// 疾跑、细雪的 transient / permanent 修饰符待接入（任务 #14）。
+/// 官方 `ServerPlayer.updatePlayerAttributes`：蹲下时给
+/// `WAYPOINT_TRANSMIT_RANGE` 挂 `minecraft:waypoint_transmit_range_crouch`
+/// （-1.0，`ADD_MULTIPLIED_TOTAL`，临时修饰符）。
+fn crouch_waypoint_modifier() -> (i32, Modifier) {
+    (
+        attribute::WAYPOINT_TRANSMIT_RANGE,
+        Modifier {
+            id: "minecraft:waypoint_transmit_range_crouch".to_owned(),
+            amount: -1.0,
+            operation: Operation::AddMultipliedTotal,
+            permanent: false,
+        },
+    )
+}
+
+/// 官方 `LivingEntity.SPEED_MODIFIER_SPRINTING`：`minecraft:sprinting`
+/// （`(double) 0.3F`，`ADD_MULTIPLIED_TOTAL`，临时修饰符）。
+fn sprinting_modifier() -> (i32, Modifier) {
+    (
+        attribute::MOVEMENT_SPEED,
+        Modifier {
+            id: "minecraft:sprinting".to_owned(),
+            amount: f64::from(0.3_f32),
+            operation: Operation::AddMultipliedTotal,
+            permanent: false,
+        },
+    )
+}
+
+/// 官方 `LivingEntity.tryAddFrost`：`minecraft:powder_snow`
+/// （`(double) (-0.05F * getPercentFrozen())`，`ADD_VALUE`，临时修饰符）。
+fn powder_snow_modifier(ticks_frozen: i32) -> (i32, Modifier) {
+    let percent = ticks_frozen.min(140) as f32 / 140.0_f32;
+    (
+        attribute::MOVEMENT_SPEED,
+        Modifier {
+            id: "minecraft:powder_snow".to_owned(),
+            amount: f64::from(-0.05_f32 * percent),
+            operation: Operation::AddValue,
+            permanent: false,
+        },
+    )
+}
+
+/// 当前装备 / 效果 / 游戏模式 / 疾跑 / 细雪 / 潜行给出的全部临时修饰符。
 ///
-/// All transient modifiers from equipment, effects and game mode, in vanilla
-/// `addXModifier` order. Sprinting / powder-snow modifiers are not wired yet.
-fn transient_modifiers(player: &Player) -> Vec<(i32, Modifier)> {
+/// All transient modifiers from equipment, effects, game mode, sprinting,
+/// powder snow and crouching.
+fn transient_modifiers(player: &Player, on_solid_for_frost: bool) -> Vec<(i32, Modifier)> {
     let mut mods = Vec::new();
     // 装备：六槽的 attribute_modifiers 组件 + 附魔 minecraft:attributes。
     let empty = ItemStack::empty();
@@ -145,14 +213,30 @@ fn transient_modifiers(player: &Player) -> Vec<(i32, Modifier)> {
     if player.game_mode == GameMode::Creative {
         mods.extend(creative_modifiers());
     }
+    // 潜行隐藏路标发送距离。
+    if player.sync.is_crouching() {
+        mods.push(crouch_waypoint_modifier());
+    }
+    // 疾跑加速。
+    if player.sync.is_sprinting() {
+        mods.push(sprinting_modifier());
+    }
+    // 细雪减速。
+    if on_solid_for_frost && player.environment.ticks_frozen > 0 {
+        mods.push(powder_snow_modifier(player.environment.ticks_frozen));
+    }
     mods
 }
 
-fn rebuild_one(player: &mut Player) {
+/// 重建单名玩家的全部临时修饰符，保留基础值和存档永久修饰符。
+///
+/// Rebuilds one player's transient modifiers, keeping base values and saved
+/// permanent modifiers.
+pub(crate) fn rebuild_player(player: &mut Player, on_solid_for_frost: bool) {
     // 先算成拥有所有权的 Vec，避免和下面 &mut player.attributes 撞借用。
     // Compute into an owned Vec first, so the immutable borrows end before
     // the mutable borrow of `player.attributes` below.
-    let mods = transient_modifiers(player);
+    let mods = transient_modifiers(player, on_solid_for_frost);
     let attributes: &mut Attributes = &mut player.attributes;
     // 存档里的永久修饰符保留，上一刻的临时修饰符整体清掉。
     // Keep saved permanent modifiers, drop all transient ones from last tick.
@@ -266,10 +350,14 @@ pub(crate) fn full_frames(player: &Player) -> Option<Vec<u8>> {
 /// first-tick dirty packet).
 pub(crate) fn send_full_to_self(region: &mut Region, id: PlayerId) {
     let (frames, states) = {
-        let Some(player) = region.players.get_mut(&id) else {
+        let Region {
+            players, chunks, ..
+        } = region;
+        let Some(player) = players.get_mut(&id) else {
             return;
         };
-        rebuild_one(player);
+        let on_solid = frost_block_solid(player, chunks);
+        rebuild_player(player, on_solid);
         (full_frames(player), syncable_states(player))
     };
     if let Some(frames) = frames {
@@ -320,17 +408,18 @@ pub(crate) fn sync_dirty(region: &mut Region) {
             (frames, viewers, current)
         };
         if let Some(frames) = frames {
-            // 官方 `ServerEntity.sendDirtyEntityData` 把脏属性发给所有正在追踪的玩家；
-            // 玩家自己的客户端靠进服 / 重生 / 切模式的全量包和客户端自己按药水效果算出的
-            // 修饰符，不在这里收包。观察者共享同一份字节。
+            // 官方 `ServerEntity.sendDirtyEntityData` 调 `sendToTrackingPlayersAndSelf`：
+            // 脏属性发给所有正在追踪的观察者以及玩家自己，这样客户端的最大生命、移速、
+            // 挖掘速度等状态和服务端保持一致。观察者与自己共享同一份字节。
             //
-            // Vanilla `ServerEntity.sendDirtyEntityData` targets tracking players.
-            // The player's own client gets the full snapshot on join/respawn/game
-            // mode change and derives potion modifiers client-side, so it is not
-            // a target here. All observers share the same bytes.
+            // Vanilla `ServerEntity.sendDirtyEntityData` calls
+            // `sendToTrackingPlayersAndSelf`, sending dirty attributes to every
+            // tracking observer and the player themselves. All recipients share
+            // the same encoded bytes.
             for viewer in &viewers {
                 region.links.send_frames(*viewer, &frames);
             }
+            region.links.send_frames(id, &frames);
         }
         if let Some(player) = region.players.get_mut(&id) {
             player.sync.sent_attributes = current;
@@ -373,7 +462,7 @@ mod tests {
     #[test]
     fn creative_mode_adds_the_two_reach_modifiers() {
         let mut p = player(GameMode::Creative);
-        rebuild_one(&mut p);
+        rebuild_player(&mut p, false);
         let block_reach = p
             .attributes
             .get(attribute::BLOCK_INTERACTION_RANGE)
@@ -423,13 +512,13 @@ mod tests {
     #[test]
     fn rebuild_is_idempotent_and_drops_stale_modifiers() {
         let mut p = player(GameMode::Creative);
-        rebuild_one(&mut p);
+        rebuild_player(&mut p, false);
         let once = p.attributes.clone();
-        rebuild_one(&mut p);
+        rebuild_player(&mut p, false);
         assert_eq!(p.attributes, once);
         // 切回生存，创造修饰符被清掉，触及距离回到基础值。
         p.game_mode = GameMode::Survival;
-        rebuild_one(&mut p);
+        rebuild_player(&mut p, false);
         assert_eq!(p.attributes.value(attribute::BLOCK_INTERACTION_RANGE), 4.5);
         assert!(
             p.attributes
@@ -440,14 +529,47 @@ mod tests {
         );
     }
 
-    /// 速度药水后给观察者发一包脏 `update_attributes`：MOVEMENT_SPEED 带上
-    /// `minecraft:effect.speed`（速度 II = 0.2*(1+1)，ADD_MULTIPLIED_TOTAL）。
-    /// 稳定一刻（属性没变）不该再发包。玩家自己的客户端不收脏包。
-    ///
-    /// A speed potion sends one dirty update_attributes packet to observers for
-    /// MOVEMENT_SPEED with the effect modifier; a stable tick sends none.
     #[test]
-    fn a_speed_potion_sends_a_dirty_attribute_packet_to_observers() {
+    fn sprinting_powder_snow_and_crouch_modifiers_match_vanilla() {
+        use mc_bamboo_protocol::packet::play::ENTITY_FLAG_SPRINTING;
+
+        let mut p = player(GameMode::Survival);
+        // 疾跑：MOVEMENT_SPEED 乘 1 + (double)0.3F。
+        p.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
+        rebuild_player(&mut p, false);
+        let expected_sprint = f64::from(0.1_f32) * (1.0 + f64::from(0.3_f32));
+        assert_eq!(
+            p.attributes.value(attribute::MOVEMENT_SPEED),
+            expected_sprint
+        );
+
+        // 细雪半冻（70/140）且脚下非空气：ADD_VALUE -0.05F * 0.5，在 ADD_MULTIPLIED_TOTAL 之前。
+        p.environment.ticks_frozen = 70;
+        rebuild_player(&mut p, true);
+        let frost = f64::from(-0.05_f32 * (70.0_f32 / 140.0_f32));
+        let expected_both = (f64::from(0.1_f32) + frost) * (1.0 + f64::from(0.3_f32));
+        assert_eq!(p.attributes.value(attribute::MOVEMENT_SPEED), expected_both);
+        // 悬空在空气上时不挂细雪减速。
+        rebuild_player(&mut p, false);
+        assert_eq!(
+            p.attributes.value(attribute::MOVEMENT_SPEED),
+            expected_sprint
+        );
+
+        // 潜行把 WAYPOINT_TRANSMIT_RANGE 乘 0。
+        p.sync.shift_key_down = true;
+        rebuild_player(&mut p, false);
+        assert_eq!(p.attributes.value(attribute::WAYPOINT_TRANSMIT_RANGE), 0.0);
+    }
+
+    /// 速度药水后给观察者和自己各发一包脏 `update_attributes`：MOVEMENT_SPEED 带上
+    /// `minecraft:effect.speed`（速度 II = 0.2*(1+1)，ADD_MULTIPLIED_TOTAL）。
+    /// 稳定一刻（属性没变）不该再发包。
+    ///
+    /// A speed potion sends one dirty update_attributes packet to observers and
+    /// to self for MOVEMENT_SPEED with the effect modifier; a stable tick sends none.
+    #[test]
+    fn a_speed_potion_sends_a_dirty_attribute_packet_to_observers_and_self() {
         use crate::world::tests::{Harness, frames_with_id};
         use mc_bamboo_data::{
             packets::play::clientbound,
@@ -483,11 +605,15 @@ mod tests {
         alice.take_frames();
         bob.take_frames();
 
-        // 稳定一刻：属性没变，观察者也不该再收到属性包。
+        // 稳定一刻：属性没变，观察者和自己都不该再收到属性包。
         server.tick();
         assert!(
             frames_with_id(&bob.take_frames(), clientbound::UPDATE_ATTRIBUTES).is_empty(),
             "no attribute packet on a stable tick"
+        );
+        assert!(
+            frames_with_id(&alice.take_frames(), clientbound::UPDATE_ATTRIBUTES).is_empty(),
+            "no attribute packet to self on a stable tick"
         );
 
         // 给 Alice 速度 II（amplifier=1）。
@@ -498,38 +624,41 @@ mod tests {
         }
         server.tick();
 
-        let frames = bob.take_frames();
-        let updates = frames_with_id(&frames, clientbound::UPDATE_ATTRIBUTES);
-        assert_eq!(updates.len(), 1, "exactly one dirty attribute packet");
-        let body = &updates[0].body;
-        let mut at = 0;
-        assert_eq!(varint(body, &mut at), alice.id.0, "entity_id");
-        let count = varint(body, &mut at);
-        let mut found = false;
-        for _ in 0..count {
-            let id = varint(body, &mut at);
-            at += 8; // base f64
-            let modifiers = varint(body, &mut at);
-            for _ in 0..modifiers {
-                let len = varint(body, &mut at) as usize;
-                let modifier_id = std::str::from_utf8(&body[at..at + len]).unwrap();
-                at += len;
-                let amount = f64::from_be_bytes(body[at..at + 8].try_into().unwrap());
-                at += 8;
-                let operation = varint(body, &mut at);
-                if id == attr::MOVEMENT_SPEED && modifier_id == "minecraft:effect.speed" {
-                    found = true;
-                    assert_eq!(amount, f64::from(0.2_f32) * 2.0, "speed II amount");
-                    assert_eq!(operation, 2, "ADD_MULTIPLIED_TOTAL");
+        for (who, frames) in [
+            ("observer", bob.take_frames()),
+            ("self", alice.take_frames()),
+        ] {
+            let updates = frames_with_id(&frames, clientbound::UPDATE_ATTRIBUTES);
+            assert_eq!(
+                updates.len(),
+                1,
+                "{who}: exactly one dirty attribute packet"
+            );
+            let body = &updates[0].body;
+            let mut at = 0;
+            assert_eq!(varint(body, &mut at), alice.id.0, "{who}: entity_id");
+            let count = varint(body, &mut at);
+            let mut found = false;
+            for _ in 0..count {
+                let id = varint(body, &mut at);
+                at += 8; // base f64
+                let modifiers = varint(body, &mut at);
+                for _ in 0..modifiers {
+                    let len = varint(body, &mut at) as usize;
+                    let modifier_id = std::str::from_utf8(&body[at..at + len]).unwrap();
+                    at += len;
+                    let amount = f64::from_be_bytes(body[at..at + 8].try_into().unwrap());
+                    at += 8;
+                    let operation = varint(body, &mut at);
+                    if id == attr::MOVEMENT_SPEED && modifier_id == "minecraft:effect.speed" {
+                        found = true;
+                        assert_eq!(amount, f64::from(0.2_f32) * 2.0, "{who}: speed II amount");
+                        assert_eq!(operation, 2, "{who}: ADD_MULTIPLIED_TOTAL");
+                    }
                 }
             }
+            assert_eq!(at, body.len(), "{who}: no trailing bytes");
+            assert!(found, "{who}: MOVEMENT_SPEED got the speed effect modifier");
         }
-        assert_eq!(at, body.len(), "no trailing bytes");
-        assert!(found, "MOVEMENT_SPEED got the speed effect modifier");
-        // 玩家自己的客户端不收脏属性包。
-        assert!(
-            frames_with_id(&alice.take_frames(), clientbound::UPDATE_ATTRIBUTES).is_empty(),
-            "no dirty attribute packet to the player's own client"
-        );
     }
 }

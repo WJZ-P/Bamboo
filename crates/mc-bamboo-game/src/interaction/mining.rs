@@ -619,12 +619,14 @@ mod tests {
             .expect("玩家应该在世界里")
     }
 
-    /// 让这名玩家用生存模式、站在地上、主手拿着 `item`。
+    /// 让这名玩家用生存模式、站在地上、主手拿着 `item`，并把这一改动的属性同步冲干净。
     fn survive(server: &mut Harness, client: &Client, item: i32) {
         let player = player_mut(server, client);
         player.game_mode = GameMode::Survival;
         player.on_ground = true;
         player.inventory.slots[36] = ItemStack::new(item, 1);
+        server.tick();
+        client.take_frames();
     }
 
     fn set_block(server: &mut Harness, pos: BlockPos, state: u32) {
@@ -997,6 +999,8 @@ mod tests {
         assert_eq!(client.take_frames(), [ack(1)]);
 
         player_mut(&mut server, &client).game_mode = GameMode::Creative;
+        server.tick();
+        client.take_frames();
         start(&server, &client, pos, Direction::Up, 2);
         server.tick();
         assert_eq!(block_at(&mut server, pos), Some(blocks::AIR));
