@@ -700,7 +700,9 @@ impl Report {
                 }
             };
             let ws_init = free_or_absent(&check_level, ws_pos);
-            let _ = check_level.poi.take(|_| true, |_, p| p == ws_pos, ws_pos, 1);
+            let _ = check_level
+                .poi
+                .take(|_| true, |_, p| p == ws_pos, ws_pos, 1);
             let ws_after1 = free_or_absent(&check_level, ws_pos);
             let ws_take2 = check_level
                 .poi
@@ -733,7 +735,9 @@ impl Report {
             let bell_after2 = free_or_absent(&check_level, bell_pos);
             let _ = check_level.poi.release(bell_pos);
             let bell_after_rel = free_or_absent(&check_level, bell_pos);
-            let bell_village_dist = check_level.poi.sections_to_village(SectionPos::of(bell_pos));
+            let bell_village_dist = check_level
+                .poi
+                .sections_to_village(SectionPos::of(bell_pos));
 
             let ours_checks = PoiTicketChecks {
                 workstation: [ws_init, ws_after1, i32::from(ws_take2), ws_after_rel],

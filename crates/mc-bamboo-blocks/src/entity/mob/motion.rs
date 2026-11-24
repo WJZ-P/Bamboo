@@ -373,10 +373,7 @@ fn step_effects(
         let sounds = state.sound_type();
         let name = mc_bamboo_data::sounds::SOUND_EVENTS[usize::from(sounds.step_sound)].name;
         super::living::play_sound(me, mob, name, sounds.volume * 0.15, sounds.pitch);
-    } else if play_sound
-        && !mob.mob_type.is_water_animal()
-        && mob.mob_type != super::MobType::Bee
-    {
+    } else if play_sound && !mob.mob_type.is_water_animal() && mob.mob_type != super::MobType::Bee {
         // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
         // 马科按自己的 `playStepSound`（方块声音类型、奔跑步声）走。
         // 苦力怕和末影人走 `Entity.playStepSound`（方块 `SoundType` 的脚步声）。
