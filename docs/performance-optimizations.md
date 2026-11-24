@@ -75,6 +75,11 @@
 | 27 | 区块段危险寻路方块计数：每次 `Chunk::set_block` 写随机方块状态（20） | 53.1–53.4 ns | 52.5–54.5 ns | 无可测差别（中位数 +0.1 ns） |
 | 28 | 碰撞快路径：实体压测 1 线程 compute（21） | 59.7 ms / 10 刻 | 48.8 ms / 10 刻 | 1.22× |
 | 29 | 实体追踪配对不再扫全部玩家：`islands-8` 的 `entity_sync_and_tracking` 每刻（22） | 1.230 ms | 0.699 ms | 1.76× |
+| 30 | 结构刷怪索引：`structure-spawn` 每刻结构查询耗时（30） | 119.224–147.377 ms | 0.148–0.153 ms | 约 800× |
+| 30 | 同上：纯生成区块查询单价（微基准） | 188.9 ns | 17.8 ns | 10.6× |
+| 30 | 同上：读盘女巫小屋查询单价（微基准） | 1365.5 ns | 19.4 ns | 70.5× |
+| 30 | 守卫者目标扫描候选数：`guardian-tower-300` 每刻（30） | 1684.3–2403.7 | 0 | 全部省掉 |
+| 30 | 激光视线缓存命中率：`guardian-tower-300`（30） | 0% | 99.8–100% | — |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -4059,3 +4064,152 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
   `Arc<BrainTemplate>` 后，`size_of::<Memories>()` 从 **6400 → 536 字节**（−91.6%），
   `size_of::<Brain>()` 从 **6528 → 664 字节**（−89.8%）。
 
+
+## 30. 守卫者第三段：结果逐位一致的三项优化（2026-11-24）
+
+守卫者第一段（本体、激光、尖刺、远古守卫者，以及全部逐刻对拍）合进 main 之后，
+刷怪塔的热点集中在三处：自然刷怪每次尝试都重进结构阶段、目标选择器把塔里几百只
+守卫者逐个过一遍 `GuardianAttackSelector`、攻击中的守卫者每刻做一次视线射线。
+三项都**缺省打开、不加开关、结果逐位不变**：结构是种子的纯函数；按类型筛只是把
+同一个选择器的谓词下推到实体空间索引；视线缓存只在三样键都没变时复用结果。
+
+### 30.1 原来慢在哪、换成了什么
+
+1. **按岛的结构刷怪索引**（`crates/mc-bamboo-game/src/structure_spawn.rs`）：
+   原来的 `override_at` 每次查询都调 `structure_references_stage`（命中缓存后也要把
+   `BTreeMap<String, Vec<i64>>` 整张克隆），再对每个 packed 键调 `structure_starts`；
+   后者在查缓存**之前**就把本线程的群系 R 树、采样器上下文、生成器群系状态 reset 一遍，
+   读盘恢复的区块还要每次重新解析 `structures` 标签。起点缓存上限 1024 条，289 个中心
+   × 17×17 邻域会不断清空重算。现在按区块一次算好「覆盖行 + 起点包围盒（含
+   `terrainAdaptation` 12 格外扩）+ 结构件盒」，存进 `Region.structure_spawn_index`
+   （`RefCell`，岛拆分 / 合并时按区块搬行），之后只查表。世界生成配置一变，
+   `Global::publish` 清空整张索引，下一次查询按新配置重算。前哨站、女巫小屋和猫用的
+   `PIECE` 路径都受益；海底神殿等以后往 `STRUCTURE_SPAWN_OVERRIDES` 追加一行即可。
+2. **目标搜索按类型筛**（`entity/mob/goals.rs`、`entity/store.rs`）：
+   `NearestAttackableTargetGoal<LivingEntity>` 的候选里全是别的守卫者。新增
+   `EntityCtx::for_each_other_of_types_in`，`EntityStore` 用按注册表类型的子索引在
+   空间查询里下推过滤；候选顺序仍是 uid 升序，所以最近目标、并列时的先后顺序不变。
+   守卫者只问玩家、鱿鱼（含发光鱿鱼）、美西螈三型。
+3. **激光视线缓存**（`entity/mob/guardian.rs`）：键是守卫者眼睛位置和目标眼睛位置的
+   **原始位**（`f64::to_bits`，`NaN` / `-0.0` 不会被当成相等）、目标 uid、岛级方块变更
+   版本戳，外加碰撞上下文里真正会改变形状的两项（`fallDistance > 2.5` 的分档、
+   `powder_snow_walkable`）。版本戳由 `Region.block_change_stamp`（方块写）和
+   `BlockEntities.shape_stamp`（方块实体增删 / 取出 tick / 放回 / 叫醒）相加而成，
+   精确驱动从 `Level` 读、并行驱动从算阶段开始时的 `ViewFacts` 快照读。三样键都没变
+   就复用上次结果；`mob.seen`（按刻清空的 `Sensing` 缓存）仍在真射线时照常写入。
+
+### 30.2 怎么复现
+
+```text
+# 两个场景 × 5 种线程数 × 3 轮中位数，缺省打开三项优化
+MOB_STRESS_SCENE="guardian-tower-300,structure-spawn" \
+MOB_STRESS_THREADS="0,1,2,4,8" MOB_STRESS_MEASURE=30 \
+cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+
+# 同一个二进制的「改之前」：三项优化都走朴素路径
+MOB_STRESS_NAIVE=1 MOB_STRESS_SCENE="guardian-tower-300,structure-spawn" \
+MOB_STRESS_THREADS="0,1,2,4,8" MOB_STRESS_MEASURE=30 \
+cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocapture
+
+# 结构查询单价微基准（3 轮交替取中位数）
+cargo test -p mc-bamboo-game --release --lib structure_query_cost -- --ignored --nocapture
+```
+
+`MOB_STRESS_NAIVE` 是 `cfg(test)` 下的 A/B 开关：结构查询走每次重算的朴素路径、
+目标搜索全量扫描、视线每刻真射线。正式构建里这个开关恒为假，热路径连一次环境变量
+读取都没有；`span!` / `record_*!` 在 `cfg(not(test))` 下全部展开成空宏。
+
+场景口径：`guardian-tower-300` 用「召唤」（`World::spawn_entity`）放 300 只守卫者进
+18×18 的三格深水坑，被量到的玩家在 30 格外，另有一名 8 格外的诱饵玩家当激光目标；
+场景关掉守卫者的游走 / 环顾目标并固定重力，模拟真实刷怪塔里被水柱夹住、攻击时
+站定的守卫者（预热 600 刻让推挤沉降，其余场景 200 刻）。`structure-spawn` 一名玩家
+站在噪声主世界（种子 20261116，`minecraft:overworld` 预设）里，开着自然刷怪；
+自然刷怪到类别上限后 `Monster` / `Creature` 会被过滤掉，所以每刻额外按这两类对
+玩家周围 8 区块的 289 个区块各查一次结构覆盖，才能量到稳定的查询单价。
+两场都是 `ROUNDS=3` 取中位数，测量 30 刻（`guardian-tower-300` 若不指定 `MOB_STRESS_WARM`
+预热 600 刻，`structure-spawn` 200 刻）；线程 `0` 精确串行、`1/2/4/8` 常驻线程池并行。
+测量时机器 1 分钟负载 13–27，前后两次在 14:05–14:15 连续跑完。
+
+### 30.3 优化前 / 后数字（每刻，3 轮中位数）
+
+| 指标 | 线程 | 优化前 | 优化后 |
+|---|---:|---:|---:|
+| `structure-spawn` tick p50（ms） | 0 | 121.483 | 1.974 |
+| | 1 | 123.252 | 2.068 |
+| | 2 | 141.036 | 1.797 |
+| | 4 | 130.693 | 1.752 |
+| | 8 | 124.075 | 1.760 |
+| 结构查询次数 / 刻 | 全部 | 8554.1 | 8554.1 |
+| 结构查询耗时（ms / 刻） | 0 | 119.224 | 0.152 |
+| | 1 | 120.981 | 0.153 |
+| | 2 | 147.377 | 0.150 |
+| | 4 | 138.755 | 0.148 |
+| | 8 | 123.568 | 0.150 |
+| `guardian-tower-300` tick p50（ms） | 0 | 2.015 | 1.963 |
+| | 1 | 1.726 | 1.708 |
+| | 2 | 1.185 | 1.205 |
+| | 4 | 1.144 | 1.187 |
+| | 8 | 1.060 | 1.096 |
+| 目标扫描候选数 / 刻 | 0 | 2403.7 | 0 |
+| | 1/2/4/8 | 1684.3 | 0 |
+| 视线射线次数 / 刻 | 0 | 169.2 | 169.2 |
+| | 1/2/4/8 | 123.3 | 123.3 |
+| 视线缓存命中率 | 0 | 0.0% | 99.8% |
+| | 1/2/4/8 | 0.0% | 100.0% |
+| 推挤命令数 / 刻（塔） | 全部 | 0.0 | 0.0 |
+| 推挤命令数 / 刻（结构） | 全部 | 0.2 | 0.2 |
+
+`guardian-tower-300` 的整刻 p50 前后几乎一样（±0.05 ms）：塔里的瓶颈是 300 只实体的
+物理 / 推挤 / 方块效果，目标搜索和视线加起来只占 `targeting + goals ≈ 0.28 ms/刻`。
+按类型筛省掉的是 1684–2404 次候选访问，视线缓存省掉的是 123–169 次射线；这两项在
+塔里已经不是整刻的主导，但在守卫者数量更多、地形更空（例如单格刷怪塔）的场景里
+占比会上升。推挤命令数前后一致，说明三项优化都没有改变实体的运动或随机源。
+
+`structure-spawn` 的「优化前」数字很大，原因是朴素路径每刻 578 次查询 × 289 个中心，
+`structure_starts` 的 1024 条上限被反复清空，每次都要重跑 17×17 邻域的
+`createStructures`；加上 `References` 整表克隆、每次 reset 群系 R 树 / 采样器上下文，
+正好是这项优化要消掉的重复工作。索引每个区块只算一次，之后是哈希查表 + 盒判定。
+
+### 30.4 结构查询单价微基准
+
+```text
+structure-query (disk hut): indexed 19.4 ns/query naive 1365.5 ns/query ratio 70.49x
+structure-query (generated): indexed 17.8 ns/query naive 188.9 ns/query ratio 10.62x
+```
+
+同一份人造女巫小屋：挂上盘上 `structures` 标签时，朴素路径每次都要重新解析起点；
+不挂标签时剩下的开销是引用表克隆和线程状态 reset，仍有 10.6× 差距。两个口径都是
+release 构建、20 万次查询、3 轮交替取中位数，与整刻压测的口径不同，不能相加。
+
+### 30.5 逐位一致的证据
+
+- **结构索引**：`index_matches_naive_bit_for_bit` 在 −14..=24 的 XZ 网格 × 5 个 Y ×
+  全部 8 个类别上，逐位置逐类别比较索引路径和朴素路径返回的静态表指针（覆盖表是
+  静态数据，两条路径要么都是 `None`、要么是同一个指针）；`flattened_rows_match_start_box_checks`
+  对 `Layout` / `Jigsaw` / `Sparse` 三种结构件表示逐一比对盒判定；
+  `override_at_follows_stored_structure_references` 和
+  `guardian_perf_scenes_tick_cleanly_and_structure_index_is_wired` 覆盖读盘标签的活路径。
+- **按类型筛**：`guardian_typed_target_scan_matches_naive` 在 300 只守卫者混进鱿鱼 /
+  发光鱿鱼 / 美西螈 / 河豚的场景里比较两条路径选出的 uid；候选顺序都是 uid 升序，
+  所以最近目标和并列时的先后都不变。
+- **视线缓存**：`laser_sight_cache_matches_naive_bit_for_bit` 在空视线连续 20 刻、
+  放下 / 拿走挡墙、目标 uid / 眼睛位（含 `-0.0` 与 `0.0` 的原始位差异）、守卫者眼睛位
+  微动、超 128 格截断等 30 次检查里逐位相同，并断言稳定键下命中缓存。
+- 验收时 `mob-oracle java --show 2000` 的守卫者全部场景 0 帧差异（见 30.6）。
+
+### 30.6 验收与已知限制
+
+- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets` 0 警告、
+  `cargo test --workspace` 全绿；`mob-oracle java --show 2000` 除已知的 12 处三角函数表和
+  `frog_*` dy 末位差外 0 不一致；`natural-spawn java`、`structure-e2e` 全过；探针缺省
+  配置 770/770。
+- 朴素路径只在 `cfg(test)` 下通过 `MOB_STRESS_NAIVE=1` 启用，正式二进制没有开关、
+  没有配置、没有环境变量读取；三项优化都缺省打开。
+- 视线缓存的键除了规格里的三样，还带 `CollisionContext` 里真正影响碰撞形状的两项
+  （`fallDistance > 2.5` 的分档、`powder_snow_walkable`）。守卫者的 `Entity` 碰撞上下文
+  恒为 `Entity`，这两项通常不变；带上它们是保守做法，只会降低命中率、不会改变结果。
+- `guardian-tower-300` 为了让守卫者攻击时站定，关掉了游走 / 环顾目标并固定重力，
+  是压测场景的构造，不是生产行为；它的整刻数字只能用来比较三项优化本身，不能当成
+  真实刷怪塔的帧时间。
+- `structure-spawn` 用的是已有的前哨站 / 女巫小屋覆盖表；海底神殿的守卫者刷怪表要等
+  第二段（神殿结构刷怪、远古守卫者随结构生成）合进来，届时可以往同一张索引追加场景。
