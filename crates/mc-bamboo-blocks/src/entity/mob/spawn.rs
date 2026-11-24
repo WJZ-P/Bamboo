@@ -45,6 +45,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.JOCKEY`: a spider/chicken jockey's mount or rider.
     Jockey,
+    /// `EntitySpawnReason.CONVERSION`：生物转化出来的新实体。
+    ///
+    /// `EntitySpawnReason.CONVERSION`: the new entity of a mob conversion.
+    Conversion,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。

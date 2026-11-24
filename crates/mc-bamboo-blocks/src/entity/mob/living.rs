@@ -2985,6 +2985,7 @@ pub(crate) fn do_hurt_target(
     source.attacker = Some(me.id);
     source.direct = Some(me.id);
     source.attacker_uuid = Some(mob.uuid);
+    source.attacker_type = Some(mob.mob_type.entity_type());
     source.position = Some(me.position);
     if super::tame::is_tamable(mob.mob_type) && mob.tame.is_tame() {
         source.owner_credit = mob.tame.owner;
@@ -3068,7 +3069,30 @@ pub(crate) fn do_hurt_target(
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
     } else if let Some(other) = ctx.other(target) {
-        let _ = other;
+        // `Zombie.killedEntity`：普通难度下僵尸打村民要先抽一次自己的
+        // `nextBoolean()`，为真不转化；困难必转、简单不抽也不转。官方在
+        // 死亡那一刻按攻击者判定，Bamboo 的受害者在自己的 tick 里结算，
+        // 所以在这里预读「目标是不是将要死的村民」，把抽签结果放进伤害源。
+        //
+        // `Zombie.killedEntity`: on NORMAL a zombie rolls its own `nextBoolean()`
+        // before converting a villager; HARD always converts, EASY neither draws
+        // nor converts. Vanilla checks the attacker at death time; Bamboo settles
+        // death in the victim's tick, so carry the roll in the damage source.
+        let lethal_villager = {
+            let crate::entity::EntityPublic { kind, .. } = &other;
+            matches!(kind, crate::entity::KindPublic::Mob(public)
+                if public.mob_type == super::MobType::Villager
+                    && public.health > 0.0
+                    && public.health <= amount)
+        };
+        let difficulty = ctx.blocks().difficulty();
+        let mut source = source;
+        if lethal_villager && mob.mob_type.is_zombie() {
+            source.attacker_type = Some(mob.mob_type.entity_type());
+            if difficulty == 2 {
+                source = source.with_villager_conversion_roll(me.random.next_boolean());
+            }
+        }
         ctx.emit(
             Command::HurtMob {
                 target,
@@ -3187,12 +3211,10 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     // Villagers are not `Animal`s: only the loot table (vanilla's
     // `entities/villager` is empty), and `xpReward` is 0 with no animal experience draw.
     if mob.mob_type == super::MobType::Villager {
-        // 僵尸杀死村民时官方走 `Zombie.killedEntity` 的转化分支；僵尸村民还没建模，
-        // 接口挂在死亡路径上，返回假表示按普通死亡处理。
-        // Vanilla routes a villager killed by a zombie through `Zombie.killedEntity`'s
-        // conversion branch; zombie villagers are not modelled, so the hook returns
-        // false and the normal death path runs.
-        if super::conversion::zombie_killed_villager(ctx, &source) {
+        // 僵尸杀死村民时官方走 `Zombie.killedEntity` 的转化分支。
+        // Vanilla routes a villager killed by a zombie through
+        // `Zombie.killedEntity`'s conversion branch.
+        if super::conversion::zombie_killed_villager(me, mob, ctx, &source) {
             return;
         }
         mob.events.push(MobEvent::Death);

@@ -2063,6 +2063,12 @@ pub struct DamageSource {
     /// in the entity table, so loot `source_entity` conditions (a frog eating a slime)
     /// fall back to this.
     pub attacker_type: Option<i32>,
+    /// `Zombie.killedEntity` 的普通难度抽签结果：真表示这一口不转化。
+    /// `None` 表示没有抽过（困难 / 简单 / 别的攻击者），或伤害来自旧存档。
+    ///
+    /// The `Zombie.killedEntity` normal-difficulty roll: true means this kill does
+    /// not convert. Set only for a zombie attacker and a dying villager.
+    pub villager_conversion_roll: Option<bool>,
 }
 
 impl DamageSource {
@@ -2086,6 +2092,7 @@ impl DamageSource {
             owner_credit: None,
             looting_level: 0,
             attacker_type: None,
+            villager_conversion_roll: None,
         }
     }
 
@@ -2116,6 +2123,12 @@ impl DamageSource {
     }
 
     /// 带上攻击者的 UUID。
+    /// 带上 `Zombie.killedEntity` 的抽签结果。
+    pub const fn with_villager_conversion_roll(mut self, roll: bool) -> Self {
+        self.villager_conversion_roll = Some(roll);
+        self
+    }
+
     pub const fn with_attacker_uuid(mut self, uuid: [u8; 16]) -> Self {
         self.attacker_uuid = Some(uuid);
         self
@@ -2169,6 +2182,7 @@ impl DamageSource {
             owner_credit: None,
             looting_level: 0,
             attacker_type: None,
+            villager_conversion_roll: None,
         }
     }
 
@@ -2726,6 +2740,13 @@ pub enum MobEvent {
     /// `TamableAnimal.tame` / `AbstractHorse.tameWithName` credited this player.
     /// Not a packet; the game layer turns it into a `TAME_ANIMAL` trigger.
     Tamed { player: [u8; 16] },
+    /// `ZombieVillager.finishConversion`：治疗者 UUID 给 `CURED_ZOMBIE_VILLAGER`
+    /// 进度触发器；声望广播属于还没建模的八卦系统。不是网络包。
+    ///
+    /// `ZombieVillager.finishConversion`: the healer's UUID feeds the
+    /// `CURED_ZOMBIE_VILLAGER` trigger; reputation belongs to the unmodelled
+    /// gossip system. Not a packet.
+    CuredZombieVillager { player: [u8; 16] },
     /// `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，不是中立生物。
     MilkSound { position: Vec3 },
     /// `ServerLevel.sendParticles`：一个粒子包，发给 32 格内的玩家（按玩家所在方块的中心算）。

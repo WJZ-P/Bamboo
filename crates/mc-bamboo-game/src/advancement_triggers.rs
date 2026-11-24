@@ -45,6 +45,7 @@ pub const CONNECTED_TRIGGERS: &[&str] = &[
     "minecraft:enter_block",
     "minecraft:filled_bucket",
     "minecraft:crafter_recipe_crafted",
+    "minecraft:cured_zombie_villager",
 ];
 
 /// 借用被拆开的地方（实体 tick、`HurtParts`）只压一条事件，玩家 tick 末尾统一 dispatch。
@@ -186,9 +187,10 @@ pub(crate) fn matches(trigger: &str, payload: &Value, conditions: &Value) -> boo
     };
     match trigger {
         // 官方 `SimpleCriterionTrigger` 的判据没有条件字段（或只有 player）。
-        "minecraft:tick" | "minecraft:any_block_use" | "minecraft:default_block_use" => {
-            known_conditions(&[])
-        }
+        "minecraft:tick"
+        | "minecraft:any_block_use"
+        | "minecraft:default_block_use"
+        | "minecraft:cured_zombie_villager" => known_conditions(&[]),
         "minecraft:shot_crossbow" | "minecraft:started_riding" => known_conditions(&[]),
         // 只用事件里的一个 id / 方块 / 物品名字；`location` 那种位置谓词没建模。
         "minecraft:slept_in_bed"
@@ -665,7 +667,7 @@ mod tests {
         let tree = AdvancementTree::global();
         let set: std::collections::BTreeSet<&str> = CONNECTED_TRIGGERS.iter().copied().collect();
         assert_eq!(set.len(), CONNECTED_TRIGGERS.len());
-        assert_eq!(CONNECTED_TRIGGERS.len(), 31);
+        assert_eq!(CONNECTED_TRIGGERS.len(), 32);
         for trigger in CONNECTED_TRIGGERS {
             assert!(tree.triggers.contains(trigger), "{trigger} 不在注册表里");
         }

@@ -168,7 +168,39 @@ pub(crate) fn apply_convert(
     entity.delta = me.delta;
     entity.fall_distance = me.fall_distance;
     entity.on_ground = me.on_ground;
-    entity.with_mob(|_, mob| copy_state(from, mob));
+    entity.with_mob(|_, mob| {
+        copy_state(from, mob);
+        // `ZombieVillager` 与 `Villager` 的互转：官方的 `AfterConversion` 把
+        // `VillagerData` / `Gossips` / `Offers` / `Xp` 和 finalized 一起搬过去。
+        //
+        // `ZombieVillager` <-> `Villager` conversions: the official
+        // `AfterConversion` carries `VillagerData`, `Gossips`, `Offers`, `Xp`
+        // and the finalized flag over.
+        if matches!(
+            (from.mob_type, to),
+            (
+                super::MobType::Villager,
+                super::MobType::ZombieVillager
+            ) | (
+                super::MobType::ZombieVillager,
+                super::MobType::Villager
+            )
+        ) {
+            super::zombie_villager::copy_villager_state(from, mob);
+        }
+        if to == super::MobType::Villager && from.mob_type == super::MobType::ZombieVillager {
+            if let Some(player) = from.zombie_villager.conversion_player {
+                mob.events.push(super::MobEvent::CuredZombieVillager { player });
+            }
+            // 治疗完成：新村民带 200 刻反胃；治疗者的进度事件由游戏层按
+            // `ConversionPlayer` 发（声望系统还没建模）。
+            //
+            // Cure complete: the new villager gets 200 ticks of nausea. The
+            // player's advancement trigger is emitted by the game layer from
+            // `ConversionPlayer` (gossip is not modelled yet).
+            super::zombie_villager::after_cure(mob);
+        }
+    });
     if zombie_attributes {
         // 僵尸的 `postConversionStep`：`converted.handleAttributes(specialMultiplier,
         // CONVERSION)`，取新实体自己的随机源。
@@ -181,6 +213,39 @@ pub(crate) fn apply_convert(
         entity.with_mob(|me, mob| {
             super::zombie_spawn::handle_attributes(mob, &mut me.random, special);
         });
+    }
+    // `Zombie.convertVillagerToZombieVillager` 的 `AfterConversion`：
+    // `finalizeSpawn(CONVERSION, ZombieGroupData(false, true))`，然后按村民的
+    // 数据覆盖职业 / 八卦 / 交易 / 经验。僵尸侧 `finalizeSpawn` 的随机数用
+    // 世界随机源；Bamboo 在构造时已经取过实体的构造随机数，这里只补世界那一段。
+    //
+    // `Zombie.convertVillagerToZombieVillager`'s `AfterConversion`:
+    // `finalizeSpawn(CONVERSION, ZombieGroupData(false, true))`, then the villager's
+    // data overwrites profession / gossip / offers / XP.
+    let infected = from.mob_type == MobType::Villager && to == MobType::ZombieVillager;
+    if infected {
+        let mut group = Some(super::spawn::SpawnGroup::Zombie(
+            super::zombie_spawn::ZombieGroupData {
+                is_baby: false,
+                can_spawn_jockey: true,
+            },
+        ));
+        super::zombie_spawn::finalize_spawn(
+            world,
+            to,
+            &mut entity,
+            super::spawn::SpawnReason::Conversion,
+            &mut group,
+        );
+    }
+    if from.mob_type == MobType::ZombieVillager && to == MobType::Villager {
+        // 治疗完成：官方让新村民跑一次 `finalizeSpawn(CONVERSION, null)`，
+        // 已 finalized 时只会给跟随距离加成和左撇子；这里只需把治疗者的
+        // UUID 交给游戏层发进度触发器。
+        //
+        // Cure complete: vanilla runs `finalizeSpawn(CONVERSION, null)` on the
+        // new villager; a finalized one only gets the follow-range bonus and
+        // left-handedness. The game layer uses the starter UUID for the trigger.
     }
     let pos = entity.block_position();
     world.add_prepared_entity(entity);
@@ -405,17 +470,42 @@ fn convert_common(
 /// 官方在 `Monster.killedEntity` 之后判断：难度为 NORMAL 或 HARD、死者是 `Villager`
 /// 且攻击者是僵尸时，NORMAL 先用僵尸自己的随机源 `nextBoolean()` 掷一次（为真就不转化），
 /// HARD 必定，然后 `convertVillagerToZombieVillager` 生成僵尸村民；转化成功会把击杀统计
-/// 置为假。简单难度不转化、也不消耗随机数，对拍场景用简单难度。
-///
-/// 僵尸村民属于村民第 7 期，Bamboo 还没有这个实体。这里只挂接口：不生成、不取数、
-/// 不假装转化，恒返回 `false` 让调用方照常走普通死亡。`ctx` 和 `source` 留给第 7 期
-/// 判难度、找攻击者和消费僵尸的随机源。
+/// 置为假（Bamboo 的击杀统计没建模，这里只跳过死亡掉落）。简单难度不转化、也不抽数。
+/// 抽签已经在攻击者那一侧的 `doHurtTarget` 里完成，随 [`super::DamageSource`] 带过来。
 ///
 /// The villager conversion branch of `Zombie.killedEntity`. Vanilla converts a villager
 /// killed by a zombie on NORMAL (after the zombie's own `nextBoolean()` roll) or HARD;
-/// EASY neither converts nor draws. Zombie villagers are phase 7 of the villager work and
-/// are not modelled yet, so this hook generates nothing, draws nothing and returns `false`
-/// so the caller follows the normal death path. `ctx` and `source` are kept for phase 7.
-pub(crate) fn zombie_killed_villager(_ctx: &dyn EntityCtx, _source: &super::DamageSource) -> bool {
-    false
+/// EASY neither converts nor draws. The roll is made on the attacker side in
+/// `doHurtTarget` and carried in [`super::DamageSource`].
+pub(crate) fn zombie_killed_villager(
+    me: &mut Entity,
+    mob: &mut super::Mob,
+    ctx: &mut dyn EntityCtx,
+    source: &super::DamageSource,
+) -> bool {
+    let difficulty = ctx.blocks().difficulty();
+    if !matches!(difficulty, 2 | 3) || mob.mob_type != super::MobType::Villager {
+        return false;
+    }
+    let Some(attacker_type) = source.attacker_type else {
+        return false;
+    };
+    if !super::MobType::by_entity_type(attacker_type).is_some_and(|kind| kind.is_zombie()) {
+        return false;
+    }
+    // `nextBoolean()` 为真直接返回，不转化也不生成。
+    // A true `nextBoolean()` returns without converting.
+    if source.villager_conversion_roll.is_some_and(|roll| roll) {
+        return false;
+    }
+    ctx.emit(
+        Command::ConvertMob {
+            from: Box::new(mob.clone()),
+            to: super::MobType::ZombieVillager,
+            level_event: super::zombie_villager::ZOMBIE_INFECTED_EVENT,
+            zombie_attributes: false,
+        },
+        me,
+    );
+    true
 }
