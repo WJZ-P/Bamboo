@@ -16,7 +16,7 @@ use mc_bamboo_core::Vec3;
 use mc_bamboo_core::mth;
 
 use crate::entity::ctx::BlockView;
-use crate::entity::mob::control::MoveControl;
+use crate::entity::mob::control::{self, MoveControl};
 use crate::entity::mob::living::nav_mob_own;
 use crate::entity::mob::navigation::Navigation;
 use crate::entity::mob::{Mob, MobType};
@@ -146,16 +146,34 @@ fn passenger_attachment(vehicle: &EntityPublic, index: usize) -> Vec3 {
 }
 
 /// 乘客的 `EntityAttachment.VEHICLE` 附着点：缺省脚底 0；`EntityTypes.ridingOffset(-0.7)`
-/// 的亡灵/骷髅/掠夺者等是 `(0, 0.7, 0)`，幻翼是 `(0, 0.125, 0)`。
+/// 的亡灵/骷髅等是 `(0, 0.7f, 0)`，掠夺者 `0.6f`，幻翼 `0.125f`。
+///
+/// 幼年僵尸（含尸壳、溺尸）不是把 0.7 折半：`Zombie` 覆写 `getDefaultDimensions`，
+/// 幼年直接返回一张独立的 `BABY_DIMENSIONS = EntityDimensions.scalable(0.49f, 0.98f)
+/// .withEyeHeight(0.775f).withAttachments(VEHICLE, 0, 0.1875f, 0)`，所以 VEHICLE 点是
+/// 硬编码的 `0.1875f`。`getVehicleAttachmentPoint` 用乘客自己的 `getAttachments()`
+/// （= `this.dimensions.attachments()`），因此这个点只按**乘客**的年龄变；载具的
+/// PASSENGER 点则由 `getPassengerRidingPosition` 用**载具**自己的 `getDimensions`
+/// （按载具 `getAgeScale() * getScale()` 缩放）决定——两处各按自己的实体缩放。
+/// 鸡骑士里鸡是成年（不缩），幼年僵尸用 0.1875f，故骑手 y = 64 + 0.7 - 0.1875。
 ///
 /// The passenger's `EntityAttachment.VEHICLE` point: zero at the feet by default;
-/// types registered with `ridingOffset(-0.7)` (undead, skeletons, pillagers) use
-/// `(0, 0.7, 0)`, and phantoms `(0, 0.125, 0)`.
+/// `ridingOffset(-0.7)` (undead, skeletons) gives `(0, 0.7f, 0)`, pillagers `0.6f`,
+/// phantoms `0.125f`. A baby zombie (incl. husk/drowned) is NOT half of 0.7:
+/// `Zombie.getDefaultDimensions` returns a separate hardcoded `BABY_DIMENSIONS`
+/// whose VEHICLE attachment is `0.1875f`. `getVehicleAttachmentPoint` reads the
+/// passenger's own `getAttachments()`, so this point scales by the PASSENGER's age;
+/// the vehicle's PASSENGER point (used by `getPassengerRidingPosition`) scales by
+/// the VEHICLE's own `getAgeScale() * getScale()`. Each side uses its own entity.
+/// In a chicken jockey the adult chicken is unscaled, so the rider sits at
+/// y = 64 + 0.7 - 0.1875 = 64.5125.
 fn vehicle_attachment(passenger: &EntityPublic) -> Vec3 {
     let KindPublic::Mob(mob) = &passenger.kind else {
         return Vec3::default();
     };
     let offset = match mob.mob_type {
+        // `Zombie.BABY_DIMENSIONS` 的 VEHICLE 点；幼年用另一套尺寸，不是 0.7 折半。
+        MobType::Zombie | MobType::Husk | MobType::Drowned if mob.baby => 0.1875_f32,
         MobType::Zombie
         | MobType::Husk
         | MobType::Drowned
@@ -284,6 +302,69 @@ pub(crate) fn begin_nav_borrow(rider: &mut Entity, vehicle: &Entity, view: &dyn 
 /// own. The caller writes the returned pair back to the vehicle.
 pub(crate) fn end_nav_borrow(rider: &mut Entity) -> Option<(Navigation, MoveControl)> {
     rider.kind.mob_mut()?.end_nav_borrow()
+}
+
+/// 取走骑手这一刻记下的「载具也要看向目标」请求；只在借导航时有值。
+///
+/// Take the deferred `vehicle.lookAt` request recorded by the rider's bow goal
+/// this tick; it is `None` unless the rider is borrowing the vehicle's navigation.
+pub(crate) fn take_vehicle_look(rider: &mut Entity) -> Option<Vec3> {
+    rider.kind.mob_mut()?.take_vehicle_look()
+}
+
+/// `RangedBowAttackGoal.tick()` 的 strafe 分支：官方对 `getControlledVehicle()` 的
+/// `Mob` 调 `Mob.lookAt(target, 30, 30)`，从**载具**自身的位置/眼睛把载具的
+/// `yRot`/`xRot` 用 `rotlerp` 转向目标（骑手自己也同时 `lookAt`，但那是另一份状态）。
+/// BowGoal 在借导航的这一刻只记下目标眼睛位置，驱动在借导航写回时调用这里落到载具行。
+///
+/// `Mob.lookAt` 用实体自身 `getX/getZ/getEyeY` 和目标的 `getX/getZ/getEyeY` 算
+/// yaw/pitch，再 `rotlerp(getYRot(), yaw, 30)` / `rotlerp(getXRot(), pitch, 30)`；
+/// 只动 `yRot`、`xRot`，不碰 `yHeadRot` / `yBodyRot`（那两份由载具自己的
+/// `LookControl.tick` 在这一刻早些时候算好，官方也不会被这次 lookAt 改写）。
+///
+/// `RangedBowAttackGoal.tick()`'s strafe branch calls `Mob.lookAt(target, 30, 30)`
+/// on the controlled `Mob` vehicle, rotating the vehicle's own `yRot` / `xRot`
+/// toward the target from its own eye via `rotlerp`. `Mob.lookAt` only writes
+/// `yRot` / `xRot`; head/body rotation is left as the vehicle's own look-control
+/// tick left it earlier this tick.
+pub(crate) fn apply_vehicle_look(vehicle: &mut Entity, target_eye: Vec3) {
+    let Some(mob) = vehicle.kind.mob_mut() else {
+        return;
+    };
+    let dx = target_eye.x - vehicle.position.x;
+    let dz = target_eye.z - vehicle.position.z;
+    let dy = target_eye.y - (vehicle.position.y + f64::from(mob.eye_height));
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    let degrees = |rad: f64| rad * f64::from(180.0_f32 / std::f32::consts::PI);
+    let yaw = degrees(mth::atan2(dz, dx)) as f32 - 90.0;
+    let pitch = -degrees(mth::atan2(dy, horizontal)) as f32;
+    let new_y_rot = control::rotate_towards(vehicle.y_rot, yaw, 30.0);
+    let new_x_rot = control::rotate_towards(mob.x_rot, pitch, 30.0);
+    mob.x_rot = new_x_rot;
+    vehicle.y_rot = new_y_rot;
+}
+
+/// 控制乘客的 `yBodyRot` 跟载具一致：载具转向时（例如追玩家转成 270°）乘客的
+/// 身体朝向当场跟着跳到同一个角度，头朝向随后受 `clampHeadRotationToBody` 约束。
+/// 官方 `AbstractSkeleton.rideTick()` / `Drowned.rideTick()` 显式这么抄
+/// （`super.rideTick()` 后 `if (getControlledVehicle() instanceof PathfinderMob)
+/// this.yBodyRot = vehicle.yBodyRot`）；对拍里蜘蛛骑士（骷髅）和鸡骑士（幼年僵尸）
+/// 都要求这个结果，所以对所有控制乘客统一处理。`getControlledVehicle()` 要求
+/// `vehicle.getControllingPassenger() == this`，正好是 [`controls_vehicle`]。
+///
+/// A controlling rider's `yBodyRot` matches the vehicle's: when the vehicle
+/// turns the rider's body snaps to the same angle and the head is then clamped
+/// to the body. `AbstractSkeleton.rideTick` / `Drowned.rideTick` do this
+/// explicitly; the oracle requires the same result for both the spider jockey
+/// (skeleton) and the chicken jockey (baby zombie), so it is applied to every
+/// controlling rider here.
+pub(crate) fn sync_rider_body_rotation(rider: &mut Entity, vehicle: &Entity) {
+    let (Some(rider_mob), Some(vehicle_mob)) = (rider.kind.mob_mut(), vehicle.kind.mob()) else {
+        return;
+    };
+    if controls_vehicle(vehicle_mob, rider.id, rider_mob) {
+        rider_mob.y_body_rot = vehicle_mob.y_body_rot;
+    }
 }
 
 /// 把共享导航/移动控制写回载具（乘客这一刻可能改了路径和 wanted 位置）。
