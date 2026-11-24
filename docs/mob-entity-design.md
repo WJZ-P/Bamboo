@@ -954,9 +954,10 @@ TamableAnimal`，复用 `tame.rs` 的 `is_tamable` / `Tamable` / 四个公共目
 校验巢 / 花、采粉悬停、找巢、回巢、去记住的花、催熟作物、飞行游荡、被打反击、
 生气找玩家），蜇人走 `sting` 伤害 + 难度中毒 + `HasStung` + 蜇后死亡抽签，
 放出巢里的蜂会给附近无目标的蜂设玩家目标。精准采集改读官方
-`PREVENTS_BEE_SPAWNS_WHEN_MINING` 标签。`Level::beehives_near` 是
-`PoiManager.getInRange(BEE_HOME, 20)` 的临时替代（已加载区块 + 段调色板筛选，
-以后换成 POI 查询），精确与并行两种视图给同一份答案。
+`PREVENTS_BEE_SPAWNS_WHEN_MINING` 标签。`Level::beehives_near` 现在是
+`PoiManager.getInRange(#bee_home, 20, ANY)` 的 POI 查询：精确驱动读本岛
+`PoiStore` 当前状态，并行驱动读本刻开始的 POI 快照；找巢排序照官方用
+`blockPosition().distSqr(pos)`（整数 BlockPos），满巢用方块实体 `isFull()` 过滤。
 `mob-oracle --only bee_ai` 新增 8 个逐刻场景（采蜜、回巢、授粉、蜇人、
 跟随拿花的玩家、愤怒、带蜜、诱惑），比花蜜 / 已蜇 / 计时 / 愤怒 / 血量 /
 随机源 0 不一致；四处改坏确认都能抓到。

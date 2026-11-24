@@ -423,13 +423,7 @@ impl BeeGoal {
             }
             Self::LocateHive => {
                 mob.bee.remaining_cooldown_before_locating_new_hive = 200;
-                let mut hives = view.beehives_near(me.block_position(), 20);
-                hives.retain(|pos| !view.beehive_full(*pos));
-                hives.sort_by(|a, b| {
-                    me.position
-                        .distance_to_sqr(center_vec(*a))
-                        .total_cmp(&me.position.distance_to_sqr(center_vec(*b)))
-                });
+                let hives = nearby_hives_with_space(me.block_position(), view);
                 let blacklist = locate_blacklist(mob);
                 if let Some(hive) = hives.iter().find(|pos| !blacklist.contains(pos)) {
                     mob.bee.hive_pos = Some(*hive);
@@ -560,6 +554,32 @@ fn center_vec(pos: BlockPos) -> Vec3 {
         f64::from(pos.y) + 0.5,
         f64::from(pos.z) + 0.5,
     )
+}
+
+/// 官方 `BlockPos.distSqr(Vec3i)`：整数坐标差的平方和，按 double 累加。
+/// `findNearbyHivesWithSpace` 的稳定排序键，比较的是蜜蜂 `blockPosition()` 与
+/// 巢 `BlockPos` 这两个整数位置，不是浮点位置到巢中心的距离。
+fn hive_dist_sqr(from: BlockPos, to: BlockPos) -> f64 {
+    let dx = f64::from(to.x - from.x);
+    let dy = f64::from(to.y - from.y);
+    let dz = f64::from(to.z - from.z);
+    dx * dx + dy * dy + dz * dz
+}
+
+/// 官方 `Bee$BeeLocateHiveGoal.findNearbyHivesWithSpace()` 的候选表：
+/// POI `getInRange(#bee_home, origin, 20, ANY)`（官方遍历序）→ 满巢过滤
+/// （`BeehiveBlockEntity.isFull()`）→ `Comparator.comparingDouble(origin.distSqr(pos))`
+/// 稳定排序。并列距离时保留 POI 遍历序里的先后。
+///
+/// `LocateHive.start` 和对拍都调这一个函数，保证测的就是生产路径。
+///
+/// Vanilla `findNearbyHivesWithSpace`: POI candidates in official order, minus
+/// full hives, stably sorted by the integer `BlockPos` distance squared.
+pub fn nearby_hives_with_space(origin: BlockPos, view: &dyn BlockView) -> Vec<BlockPos> {
+    let mut hives = view.beehives_near(origin, 20);
+    hives.retain(|pos| !view.beehive_full(*pos));
+    hives.sort_by(|a, b| hive_dist_sqr(origin, *a).total_cmp(&hive_dist_sqr(origin, *b)));
+    hives
 }
 
 fn locate_blacklist(mob: &Mob) -> Vec<BlockPos> {
