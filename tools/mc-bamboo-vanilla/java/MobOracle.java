@@ -209,6 +209,20 @@ public final class MobOracle {
     private static ServerStatsCounter stats;
     private static PlayerAdvancements advancements;
 
+    /** 官方 `ThrownTrident.ID_LOYALTY` / `ID_FOIL` 的元数据索引（反射读 record 的 id）。 */
+    private static String tridentMetadataIds() throws Exception {
+        return "{\"type\":\"tridentMetadata\",\"loyalty\":" + metadataId("ID_LOYALTY")
+                + ",\"foil\":" + metadataId("ID_FOIL") + "}\n";
+    }
+
+    private static int metadataId(String name) throws Exception {
+        java.lang.reflect.Field field =
+                net.minecraft.world.entity.projectile.arrow.ThrownTrident.class.getDeclaredField(name);
+        field.setAccessible(true);
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
+        return accessor.id();
+    }
+
     public static void main(String[] args) {
         PrintStream log = System.err;
         try {
@@ -261,6 +275,9 @@ public final class MobOracle {
             out.write(Integer.toString(SharedConstants.getCurrentVersion().protocolVersion()));
             out.write(",\"tables\":" + tableHashes());
             out.write("}\n");
+            // 实测核对三叉戟的两个元数据索引，不靠类层级推导。
+            // Cross-check the trident metadata indices against the official jar.
+            out.write(tridentMetadataIds());
             int cases = 0;
             for (Scene scene : Scenes.all()) {
                 if (only != null && !scene.name.startsWith(only)) {

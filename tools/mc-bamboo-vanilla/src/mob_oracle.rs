@@ -101,6 +101,13 @@ mod base64_stub {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Line {
     Header(Header),
+    /// 官方 `ThrownTrident.ID_LOYALTY` / `ID_FOIL` 的元数据索引对照。
+    ///
+    /// Cross-check of the official `ThrownTrident.ID_LOYALTY` / `ID_FOIL` indices.
+    TridentMetadata {
+        loyalty: u8,
+        foil: u8,
+    },
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
     Shot(shot::ShotCase),
@@ -1509,6 +1516,9 @@ impl Report {
             })?;
             match parsed {
                 Line::Header(header) => self.check_header(&header)?,
+                Line::TridentMetadata { loyalty, foil } => {
+                    self.replay_trident_metadata(loyalty, foil);
+                }
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
                 Line::Shot(case) => self.replay_shot(&case),
@@ -1625,6 +1635,22 @@ impl Report {
             ));
         }
         Ok(())
+    }
+
+    /// 实测核对 `TRIDENT_LOYALTY` / `TRIDENT_FOIL` 两个元数据索引，不靠类层级推导。
+    ///
+    /// Verify the two metadata indices against the official jar, not by hierarchy.
+    fn replay_trident_metadata(&mut self, loyalty: u8, foil: u8) {
+        let ours = (
+            mc_bamboo_data::entity_types::TRIDENT_LOYALTY,
+            mc_bamboo_data::entity_types::TRIDENT_FOIL,
+        );
+        if ours != (loyalty, foil) {
+            self.mismatch(format!(
+                "trident metadata indices: official loyalty {} foil {}, bamboo loyalty {} foil {}",
+                loyalty, foil, ours.0, ours.1
+            ));
+        }
     }
 
     fn replay(&mut self, case: &Case) {
