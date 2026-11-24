@@ -393,6 +393,19 @@ impl Gate {
         Self::new_gate(entry, Vec::new(), false, false, children)
     }
 
+    /// `new GateBehavior(entry, exitErased, ORDERED, RUN_ONE, children)`：不洗牌、只跑一个、
+    /// 退出时清指定记忆（村民 `MEET` / `IDLE` 的 `TradeWithVillager` / `VillagerMakeLove` 闸门）。
+    ///
+    /// `new GateBehavior(entry, exitErased, ORDERED, RUN_ONE, children)`: unshuffled, run
+    /// one, erases `exit_erased` on stop (villager `TradeWithVillager` / `VillagerMakeLove`).
+    pub fn ordered_run_one(
+        entry: Vec<(MemoryType, MemoryStatus)>,
+        exit_erased: Vec<MemoryType>,
+        children: Vec<(Kind, i32)>,
+    ) -> Self {
+        Self::new_gate(entry, exit_erased, false, true, children)
+    }
+
     fn new_gate(
         entry: Vec<(MemoryType, MemoryStatus)>,
         exit_erased: Vec<MemoryType>,
