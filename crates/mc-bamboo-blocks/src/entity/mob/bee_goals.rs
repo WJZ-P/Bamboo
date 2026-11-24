@@ -994,7 +994,11 @@ fn wander_pos(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) -> Option<Ve
     {
         center_vec(hive).subtract(me.position).normalize()
     } else {
-        Vec3::view_vector(mob.y_rot_o, mob.x_rot_o)
+        // `Bee.getViewVector(0.0F)`：`LivingEntity.getViewYRot(0.0F)` 取 `yHeadRotO`，
+        // `Entity.getViewXRot(0.0F)` 取 `xRotO`。
+        // `Bee.getViewVector(0.0F)`: `LivingEntity.getViewYRot(0.0F)` uses `yHeadRotO`,
+        // and `Entity.getViewXRot(0.0F)` uses `xRotO`.
+        Vec3::view_vector(mob.y_head_rot_o, mob.x_rot_o)
     };
     let mut pos = goals::hover_random_pos(
         me,
