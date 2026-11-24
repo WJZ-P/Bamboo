@@ -12,13 +12,13 @@ use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{PathType, registries::attribute, tags::fluid_tags};
 
 use super::{
-    Attributes, Malus, Mob, MobType, control,
+    Attributes, DamageKind, DamageSource, Malus, Mob, MobType, control,
     goals::{Goal, GoalSelector, PLAIN_STROLL, TargetType, WrappedGoal},
     living, motion,
 };
 use crate::entity::{
-    Entity,
-    ctx::{BlockView, EntityCtx},
+    Entity, KindPublic,
+    ctx::{BlockView, Command, EntityCtx},
 };
 
 /// 是不是守卫者一支。
@@ -358,6 +358,98 @@ pub fn ai_step(me: &mut Entity, mob: &mut Mob) {
     }
 }
 
+/// `Guardian.hurtServer` 反伤条件的类型部分：没在动、伤害不在
+/// `#avoids_guardian_thorns`、也不是 thorns。「直接来源是活体」需要查实体表，
+/// 由 [`hurt_server`] 单独判断。
+///
+/// The type part of `Guardian.hurtServer`'s reflection condition: not moving, damage
+/// outside `#avoids_guardian_thorns` and not thorns. "The direct entity is living"
+/// needs the entity table and is checked by [`hurt_server`].
+pub fn thorns_reflects(mob: &Mob, kind: DamageKind) -> bool {
+    !mob.guardian.moving
+        && !super::goals::damage_type_tagged("minecraft:avoids_guardian_thorns", kind)
+        && kind != DamageKind::Thorns
+}
+
+/// `Guardian.hurtServer`：没在动、伤害不在 `#avoids_guardian_thorns`、不是 thorns、
+/// 且直接来源是活体时，对来源造成 2 点 `thorns` 伤害。无论反伤与否都触发游走，
+/// 顺序照字节码（会影响随机源）。最后走 `Monster.hurtServer`。
+///
+/// `Guardian.hurtServer`: when not moving, the damage is outside
+/// `#avoids_guardian_thorns`, is not thorns, and the direct entity is living, deal 2
+/// points of thorns damage to that entity. The stroll is triggered either way, in
+/// bytecode order (which affects the random source). Finally `Monster.hurtServer`.
+pub fn hurt_server(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    amount: f32,
+) -> bool {
+    let direct = source.direct;
+    let reflects = thorns_reflects(mob, source.kind)
+        && direct.is_some_and(|uid| direct_entity_is_living(ctx, uid));
+    if let Some(uid) = direct.filter(|_| reflects) {
+        // `damageSources().thorns(this)`：来源是守卫者自己。
+        // `damageSources().thorns(this)`: the guardian is the source.
+        let mut thorns = DamageSource::environment(DamageKind::Thorns);
+        thorns.attacker = Some(me.id);
+        thorns.direct = Some(me.id);
+        thorns.attacker_uuid = Some(mob.uuid);
+        thorns.position = Some(me.position);
+        thorns.scale_when_non_player = true;
+        let is_player = {
+            let mut found = false;
+            ctx.blocks().for_each_player(&mut |player| {
+                if player.uid == uid {
+                    found = true;
+                }
+            });
+            found
+        };
+        if is_player {
+            ctx.emit(
+                Command::HurtPlayer {
+                    target: uid,
+                    source: thorns,
+                    amount: 2.0,
+                },
+                me,
+            );
+        } else {
+            ctx.emit(
+                Command::HurtMob {
+                    target: uid,
+                    source: thorns,
+                    amount: 2.0,
+                    on_hit: None,
+                },
+                me,
+            );
+        }
+    }
+    // `randomStrollGoal.trigger()`：无论反伤与否。
+    // `randomStrollGoal.trigger()`: regardless of the thorns hit.
+    mob.guardian.stroll_triggered = true;
+    living::living_hurt_server(me, mob, ctx, source, amount)
+}
+
+/// `DamageSource.getDirectEntity() instanceof LivingEntity`：玩家或生物。
+///
+/// `DamageSource.getDirectEntity() instanceof LivingEntity`: a player or a mob.
+fn direct_entity_is_living(ctx: &dyn EntityCtx, uid: crate::entity::EntityUid) -> bool {
+    let mut found = false;
+    ctx.blocks().for_each_player(&mut |player| {
+        if player.uid == uid {
+            found = true;
+        }
+    });
+    found
+        || ctx
+            .other(uid)
+            .is_some_and(|other| matches!(other.kind, KindPublic::Mob(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use mc_bamboo_data::{PathType, registries::attribute};
@@ -559,6 +651,25 @@ mod tests {
                 .unwrap();
             assert_eq!(sound, Some(expected));
         }
+    }
+
+    /// `Guardian.hurtServer` 的反伤条件：没在动、不在 `#avoids_guardian_thorns`、非 thorns。
+    ///
+    /// `Guardian.hurtServer`'s reflection condition: not moving, outside
+    /// `#avoids_guardian_thorns`, and not thorns.
+    #[test]
+    fn guardian_thorns_conditions() {
+        let mut entity = crate::entity::Entity::by_mob_type(MobType::Guardian, Vec3::default());
+        entity.with_mob(|_, mob| {
+            assert!(thorns_reflects(mob, DamageKind::MobAttack));
+            mob.guardian.moving = true;
+            assert!(!thorns_reflects(mob, DamageKind::MobAttack));
+            mob.guardian.moving = false;
+            assert!(!thorns_reflects(mob, DamageKind::Thorns));
+            // `minecraft:magic` 在 `#avoids_guardian_thorns` 里。
+            // `minecraft:magic` is in `#avoids_guardian_thorns`.
+            assert!(!thorns_reflects(mob, DamageKind::Magic));
+        });
     }
 
     #[test]

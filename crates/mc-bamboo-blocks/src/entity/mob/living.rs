@@ -2690,6 +2690,12 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Bat {
         return super::bat::hurt_server(me, mob, ctx, source, amount);
     }
+    // `Guardian.hurtServer` 的尖刺反伤与 `randomStrollGoal.trigger()` 在父类之前。
+    // `Guardian.hurtServer` runs its thorns reflection and stroll trigger before its
+    // superclass.
+    if super::guardian::is_guardian(mob.mob_type) {
+        return super::guardian::hurt_server(me, mob, ctx, source, amount);
+    }
     // `Axolotl.hurtServer` 在父类之前做装死判定（`PLAY_DEAD_TICKS`）。
     // `Axolotl.hurtServer` runs the play-dead roll before the superclass.
     if mob.mob_type == super::MobType::Axolotl {
