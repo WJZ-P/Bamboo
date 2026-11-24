@@ -126,6 +126,15 @@ struct ProjectileFrame {
     ///
     /// The scene owner's per-tick state: `[alive, spectator]`.
     owner: Option<[i64; 2]>,
+    /// 引雷召唤的闪电：x/y/z 坐标原始位、`cause` 玩家 ID（无则 -1）。
+    ///
+    /// Channeling-summoned bolts: raw x/y/z bits and the cause player id
+    /// (-1 when none).
+    lightning: Option<Vec<[i64; 4]>>,
+    /// 引雷受害者（牛）的血量位（仅 `post_attack` 场景有）。
+    ///
+    /// The channeling victim (cow) health bits (only post_attack scenes).
+    victim: Option<i64>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -365,6 +374,14 @@ impl ProjectileCase {
         self.name == "trident_channeling_mob" || self.name == "trident_channeling_rod"
     }
 
+    fn channeling(&self) -> bool {
+        self.name.starts_with("trident_channeling")
+    }
+
+    fn channeling_mob(&self) -> bool {
+        self.name == "trident_channeling_mob"
+    }
+
     fn level(&self) -> MobLevel {
         MobLevel {
             natural_spawn: None,
@@ -448,20 +465,34 @@ impl ProjectileCase {
                 loyalty
             };
             let mut item = ItemStack::new(mc_bamboo_data::items::TRIDENT, 1);
-            if loyalty > 0 {
+            let mut levels: Vec<(i32, i32)> = Vec::new();
+            if loyalty > 0 || self.channeling() {
                 let registry = mc_bamboo_data::registries::SYNCED_REGISTRIES
                     .iter()
                     .find(|registry| registry.name == "minecraft:enchantment")
                     .unwrap();
-                let id = registry
-                    .entries
-                    .iter()
-                    .position(|entry| *entry == "minecraft:loyalty")
-                    .unwrap() as i32;
+                if loyalty > 0 {
+                    let id = registry
+                        .entries
+                        .iter()
+                        .position(|entry| *entry == "minecraft:loyalty")
+                        .unwrap() as i32;
+                    levels.push((id, i32::from(loyalty)));
+                }
+                if self.channeling() {
+                    // `channeling.json` 的 post_attack / hit_block 效果要物品堆带引雷。
+                    // `channeling.json`'s post_attack / hit_block needs the enchantment.
+                    let id = registry
+                        .entries
+                        .iter()
+                        .position(|entry| *entry == "minecraft:channeling")
+                        .unwrap() as i32;
+                    levels.push((id, 1));
+                }
                 let mut patch = ComponentPatch::new();
                 patch.put(
                     mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
-                    PatchEntry::Set(ComponentValue::Enchantments(vec![(id, i32::from(loyalty))])),
+                    PatchEntry::Set(ComponentValue::Enchantments(levels)),
                 );
                 let (added, removed) = patch.to_opaque();
                 item.added = added;
@@ -474,7 +505,9 @@ impl ProjectileCase {
             // Offline owner: the stack still has loyalty and dealtDamage is set,
             // but both owner fields are null, so `trident_tick` resolves no
             // owner and short-circuits — normal flight, no drop, no return.
-            let has_owner = loyalty > 0 && !self.owner_offline();
+            // 引雷场景也要主人：闪电的 `cause` 是投掷者（ServerPlayer）。
+            // Channeling also needs the owner: the bolt's `cause` is the thrower.
+            let has_owner = (loyalty > 0 || self.channeling()) && !self.owner_offline();
             let shot = TridentShot {
                 position: Vec3::new(0.5, 65.5, 0.5),
                 direction: Vec3::new(1.0, 0.0, 0.0),
@@ -498,6 +531,14 @@ impl ProjectileCase {
             }
             arrow.shoot_arrow(Vec3::new(1.0, 0.0, 0.0), 1.6, 0.0);
             world.add_prepared_entity(arrow);
+            if self.channeling_mob() {
+                // 引雷 post_attack 的受害者：静止的牛，闪电落在它自己的位置。
+                // The channeling post_attack victim: a still cow; the bolt lands
+                // on its own position.
+                let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(6.5, 64.0, 0.5));
+                cow.with_mob(|_, mob| mob.no_ai = true);
+                world.spawn_entity(cow);
+            }
         } else {
             let y = if self.water() {
                 65.25
@@ -584,6 +625,13 @@ impl Report {
     pub(super) fn replay_projectile(&mut self, case: &ProjectileCase) {
         self.cases += 1;
         let mut level = case.level();
+        // 改坏确认 `trident_channeling`：关掉露天条件，引雷就不该召唤闪电、
+        // 也不该播雷声；逐刻的 lightning / sounds 必须报不一致。
+        // Break self-test `trident_channeling`: turn off open sky so channeling
+        // summons no bolt and plays no thunder; lightning / sounds must diverge.
+        if self.break_test.as_deref() == Some("trident_channeling") {
+            level.facts.can_see_sky = false;
+        }
         if self.break_test.as_deref() == Some("arrow_water") {
             // 改坏确认：拿掉水面，熄火音效和火焰刻都应该对不上。
             // Break self-test: drop the water so the extinguish sound and fire ticks must differ.
@@ -632,6 +680,7 @@ impl Report {
             let mut level_events = Vec::new();
             let mut sounds: Vec<[i64; 7]> = Vec::new();
             let mut drops: Vec<[i64; 5]> = Vec::new();
+            let mut bolts: Vec<[i64; 4]> = Vec::new();
             if tick != 0 {
                 if (case.flaming() || case.water()) && tick == 1 {
                     level
@@ -830,6 +879,34 @@ impl Report {
                 packets.push(packet_body(&RemoveEntities { entity_ids: &[uid] }));
             }
             let spawns = level.entities.take_spawn_snapshots();
+            // 官方 `FakeLevel` 把召唤的闪电放进 `world.spawned`、当刻就 `clear()`，
+            // 既不 tick 也不跟踪；这里同样把闪电从回放世界移除，避免它后续的
+            // 伤害 / 点燃 / 音效进入逐刻对拍（闪电实体自身的逐刻行为由
+            // `blocks/entity/lightning.rs` 的单测覆盖）。召唤事件本身仍由
+            // `lightning`（坐标 + cause）与 `sounds`（雷声）严格对拍。
+            // The official `FakeLevel` puts summoned bolts into `world.spawned`
+            // and clears them the same tick, never ticking or tracking them.
+            // Remove them from the replay world here too, so their downstream
+            // damage / ignition / sounds stay out of the tick parity (the bolt's
+            // own tick behavior is covered by `lightning.rs` unit tests). The
+            // summon event itself is still strictly compared via `lightning`
+            // (position + cause) and `sounds` (thunder).
+            if case.channeling() {
+                let bolt_ids: Vec<_> = level
+                    .entities
+                    .ids()
+                    .into_iter()
+                    .filter(|&id| {
+                        level
+                            .entities
+                            .public_at(id)
+                            .is_some_and(|p| matches!(p.kind, KindPublic::LightningBolt(_)))
+                    })
+                    .collect();
+                for id in bolt_ids {
+                    level.entities.remove(id);
+                }
+            }
             // 这一刻新掉出来的物品实体：物品 ID、数量、生成坐标原始位。忠诚三叉戟
             // 主人不可接受时掉出的拾取物就在这里（带 0.1f 抬高后的 y）。
             // Item entities spawned this tick: item id, count, raw spawn position
@@ -843,6 +920,16 @@ impl Report {
                         public.position.x.to_bits() as i64,
                         public.position.y.to_bits() as i64,
                         public.position.z.to_bits() as i64,
+                    ]);
+                }
+                if let KindPublic::LightningBolt(bolt) = &public.kind {
+                    // 引雷闪电：坐标原始位 + `cause` 玩家 ID（无则 -1）。
+                    // Channeling bolt: raw position bits + cause player id (-1 if none).
+                    bolts.push([
+                        public.position.x.to_bits() as i64,
+                        public.position.y.to_bits() as i64,
+                        public.position.z.to_bits() as i64,
+                        bolt.cause.map_or(-1, i64::from),
                     ]);
                 }
             }
@@ -968,6 +1055,28 @@ impl Report {
                 if Some(theirs) != ours {
                     self.mismatch(format!(
                         "{label} owner: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if let Some(theirs) = &expected.lightning
+                && *theirs != bolts
+            {
+                self.mismatch(format!(
+                    "{label} lightning: official {theirs:?}, bamboo {bolts:?}"
+                ));
+            }
+            if let Some(theirs) = expected.victim {
+                // 受害牛在 `first_id + 1`（和 effect_target 场景一致）。
+                // The victim cow is at `first_id + 1` (as in the effect_target scenes).
+                let ours = level.entities.get(case.first_id + 1).and_then(|entity| {
+                    entity
+                        .kind
+                        .mob()
+                        .map(|mob| i64::from(mob.health.to_bits() as i32))
+                });
+                if Some(theirs) != ours {
+                    self.mismatch(format!(
+                        "{label} victim health: official {theirs}, bamboo {ours:?}"
                     ));
                 }
             }

@@ -295,7 +295,8 @@ public final class MobOracle {
                     "skeleton_freeze", "bogged_shear",
                     "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
                     "trident_stick", "trident_loyalty", "trident_owner_offline",
-                    "trident_owner_dead", "trident_spectator")) {
+                    "trident_owner_dead", "trident_spectator",
+                    "trident_channeling_mob", "trident_channeling_rod")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -7979,6 +7980,14 @@ public final class MobOracle {
         boolean ownerOffline = name.equals("trident_owner_offline");
         boolean ownerSpectator = name.equals("trident_spectator");
         boolean ownerDrop = ownerDead || ownerSpectator;
+        // 引雷：`_mob` 命中牛（post_attack，雷雨+露天）召唤闪电；`_rod` 命中避雷针
+        // （hit_block，还需 `#lightning_rods`）。两者都播 item.trident.thunder。
+        // Channeling: `_mob` hits a cow (post_attack, thunderstorm + open sky);
+        // `_rod` hits a lightning rod (hit_block, needs `#lightning_rods` too).
+        // Both play item.trident.thunder.
+        boolean channelingMob = name.equals("trident_channeling_mob");
+        boolean channelingRod = name.equals("trident_channeling_rod");
+        boolean channeling = name.startsWith("trident_channeling");
         // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
         // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
         boolean fade = name.equals("arrow_tipped_fade");
@@ -8004,6 +8013,11 @@ public final class MobOracle {
         }
         BlockPos obstacle = new BlockPos(7, 65, 0);
         if (hasWall) world.blocks.put(obstacle.asLong(), Blocks.STONE.defaultBlockState());
+        if (channelingRod) {
+            // 避雷针：`hit_block` 的 `location_check` 要求 #minecraft:lightning_rods。
+            // A lightning rod: `hit_block`'s `location_check` needs #lightning_rods.
+            world.blocks.put(obstacle.asLong(), Blocks.LIGHTNING_ROD.weathering().unaffected().defaultBlockState());
+        }
         if (water) {
             world.blocks.put(BlockPos.asLong(waterTail ? 4 : 3, 65, 0), Blocks.WATER.defaultBlockState());
             world.projectileExtinguishes = new ArrayList<>();
@@ -8031,12 +8045,23 @@ public final class MobOracle {
             // Compare every sound per tick (land, hit, loyalty return, thunder, drowned shoot).
             world.soundLog = new ArrayList<>();
         }
+        if (channeling) {
+            // 雷雨 + 露天：`weather_check(thundering)` 走 isThundering()，
+            // `location_check.can_see_sky` / entity_properties 走 canSeeSky()。
+            // A thunderstorm + open sky: `weather_check(thundering)` calls
+            // isThundering(); `can_see_sky` calls canSeeSky().
+            world.injectedThundering = true;
+            world.injectedRaining = true;
+            world.injectedCanSeeSky = true;
+            world.channelingSoundFilter = true;
+        }
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
         ServerPlayer player = new ServerPlayer(official.server, world,
                 new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
         player.setId(playerId);
-        double playerX = effectHit ? 18.5 : skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
+        double playerX = (effectHit || channeling) ? 18.5 : skeleton ? 11.5
+                : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
         player.setPos(playerX, 64.0, 0.5);
         setRandom(player, ENTITY_RANDOM_SEED);
         player.setYRot(0.0F);
@@ -8107,13 +8132,20 @@ public final class MobOracle {
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
             arrow.setPos(0.5, 65.5, 0.5);
             arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
+            if (loyalty || channeling) {
+                // 主人是场景玩家：引雷的 post_attack / hit_block 效果上下文需要
+                // 一个 LivingEntity attacker（伤害源的 getEntity()）。
+                // The owner is the scene player: channeling's post_attack /
+                // hit_block context needs a LivingEntity attacker (the damage
+                // source's getEntity()).
+                arrow.setOwner(player);
+            }
             if (loyalty) {
                 // 忠诚返回：主人是场景玩家，`dealtDamage` 预置成「已命中」，
                 // 于是 `tick()` 第一刻就按 (dealtDamage || isNoPhysics) 进入返回分支。
                 // Loyalty: the owner is the scene player and `dealtDamage` starts
                 // as "already hit", so `tick()` enters the return branch on its
                 // very first tick via (dealtDamage || isNoPhysics).
-                arrow.setOwner(player);
                 arrow.pickup = net.minecraft.world.entity.projectile.arrow.AbstractArrow.Pickup.ALLOWED;
                 putBoolean(net.minecraft.world.entity.projectile.arrow.ThrownTrident.class,
                         arrow, "dealtDamage", true);
@@ -8179,6 +8211,15 @@ public final class MobOracle {
             effectTarget.setNoAi(true);
             world.tracked.add(effectTarget);
         }
+        // 引雷 post_attack 的受害者：一只静止的牛，闪电落在它自己的位置。
+        // The channeling post_attack victim: a still cow, the bolt lands on it.
+        Cow channelingVictim = null;
+        if (channelingMob) {
+            channelingVictim = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            channelingVictim.setPos(6.5, 64.0, 0.5);
+            channelingVictim.setNoAi(true);
+            world.tracked.add(channelingVictim);
+        }
         var effectType = spectral ? MobEffects.GLOWING : MobEffects.POISON;
 
         var frames = new StringBuilder("[");
@@ -8208,6 +8249,10 @@ public final class MobOracle {
             // Item entities dropped when a loyal trident's owner is unacceptable:
             // item, count and raw position bits.
             var tridentDrops = new ArrayList<String>();
+            // 引雷召唤的闪电：x/y/z 坐标原始位、cause 玩家 ID（无则 -1）。
+            // Channeling-summoned lightning: raw x/y/z bits and cause player id
+            // (-1 when none).
+            var lightningBolts = new ArrayList<String>();
             // 剪蘑菇那一刻的结果：是否消耗动作、剪刀耐久损耗、掉出来的物品实体。
             // The shearing result of this tick: consumed, shears damage and the dropped items.
             String shearing = null;
@@ -8270,8 +8315,20 @@ public final class MobOracle {
                     }
                 }
                 if (effectTarget != null) effectTarget.tick();
+                if (channelingVictim != null) channelingVictim.tick();
                 world.tracked.removeIf(Entity::isRemoved);
                 for (Entity entity : world.spawned) {
+                    if (channeling && entity instanceof net.minecraft.world.entity.LightningBolt bolt) {
+                        // 召唤的闪电：位置原始位 + cause 玩家 ID（`setCause` 只给 ServerPlayer）。
+                        // Summoned bolt: raw position bits + cause player id (`setCause`
+                        // is only set for a ServerPlayer owner).
+                        Vec3 at = bolt.position();
+                        var cause = bolt.getCause();
+                        lightningBolts.add("[" + Double.doubleToRawLongBits(at.x) + ","
+                                + Double.doubleToRawLongBits(at.y) + ","
+                                + Double.doubleToRawLongBits(at.z) + ","
+                                + (cause == null ? -1 : cause.getId()) + "]");
+                    }
                     if (trident && entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
                         // 忠诚三叉戟主人不可接受时掉落的物品：物品、数量、坐标原始位。
                         // The pickup item dropped for an unacceptable loyal-trident owner.
@@ -8365,6 +8422,15 @@ public final class MobOracle {
                 frames.append(",\"extinguished\":").append(world.projectileExtinguishes.stream()
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.projectileExtinguishes.clear();
+            }
+            if (channeling) {
+                // 引雷逐刻：召唤的闪电（位置+cause）、受害者牛的血量位。
+                // Channeling per tick: summoned bolts (position + cause) and the
+                // victim cow's health bits.
+                frames.append(",\"lightning\":[").append(String.join(",", lightningBolts)).append("]");
+                if (channelingVictim != null) {
+                    frames.append(",\"victim\":").append(Float.floatToRawIntBits(channelingVictim.getHealth()));
+                }
             }
             if (trident) {
                 totalTridentDrops += tridentDrops.size();
@@ -15097,8 +15163,12 @@ public final class MobOracle {
 
     private static final class FakeLevel extends ServerLevel {
         List<long[]> projectileExtinguishes;
-        /** 末影珍珠场景：这一刻 `playSound` 的原始参数（音效 ID、音源、坐标位、音量位、音高位）。 */
+        /** 末影珍珠 / 三叉戟场景：这一刻 `playSound` 的原始参数（音效 ID、音源、坐标位、音量位、音高位）。 */
         List<long[]> soundLog;
+        /** 引雷场景：只记录 `item.trident.*` 的世界音效，跳过受害者叫声（那是实体事件包）。 */
+        /// Channeling scenes: log only `item.trident.*` level sounds, skipping the
+        /// victim's voice (an entity event packet on the Bamboo side).
+        boolean channelingSoundFilter;
         DifficultyInstance spawnDifficulty;
         NaturalScene naturalScene;
         boolean worldGenRegion;
@@ -15128,6 +15198,10 @@ public final class MobOracle {
         int injectedSeaLevel;
         boolean injectedMonstersBurn = true;
         boolean injectedCanSeeSky;
+        /** 引雷场景：雷暴（`weather_check(thundering:true)` 走 `isThundering()`）。 */
+        /// Channeling scenes: a thunderstorm (`weather_check(thundering:true)`
+        /// calls `isThundering()`).
+        boolean injectedThundering;
         /** 傀儡场景没有 POI 管理器，用这个开关让村庄目标走没有村庄的真实路径。 */
         boolean golemFixture;
         /** 僵尸场景的真实时间模式：时钟、雨强由场景给，天色由官方环境属性系统算。 */
@@ -15251,6 +15325,7 @@ public final class MobOracle {
 
         @Override
         public boolean isThundering() {
+            if (injectedThundering) return true;
             return naturalScene == null ? super.isThundering() : naturalScene.thunder();
         }
 
@@ -15773,14 +15848,17 @@ public final class MobOracle {
                         sound, source, x, y, z, volume, pitch, seed));
             }
             if (soundLog != null) {
-                soundLog.add(new long[] {
-                        net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.getId(sound.value()),
-                        source.ordinal(),
-                        Double.doubleToRawLongBits(x),
-                        Double.doubleToRawLongBits(y),
-                        Double.doubleToRawLongBits(z),
-                        Float.floatToRawIntBits(volume),
-                        Float.floatToRawIntBits(pitch)});
+                boolean trident = sound.value().location().getPath().startsWith("item.trident.");
+                if (!channelingSoundFilter || trident) {
+                    soundLog.add(new long[] {
+                            net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.getId(sound.value()),
+                            source.ordinal(),
+                            Double.doubleToRawLongBits(x),
+                            Double.doubleToRawLongBits(y),
+                            Double.doubleToRawLongBits(z),
+                            Float.floatToRawIntBits(volume),
+                            Float.floatToRawIntBits(pitch)});
+                }
             }
             if (projectileExtinguishes != null && sound.value() == net.minecraft.sounds.SoundEvents.GENERIC_EXTINGUISH_FIRE) {
                 projectileExtinguishes.add(new long[] {Double.doubleToRawLongBits(x),

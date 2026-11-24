@@ -845,9 +845,26 @@ fn find_targets(me: &Entity, ctx: &dyn EntityCtx, end: Vec3) -> Vec<ArrowEntityH
     let collision = me.collision_context();
     let mut hits = Vec::new();
     let margin = f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3));
+    // `ThrownTrident.findHitEntities` 把单次 `findHitEntity` 包成单元素集合，
+    // 后者走 `ProjectileUtil.getEntityHitResult(..., computeMargin)` —— 总是直接
+    // 裁剪按 margin 膨胀后的包围盒。普通箭走 `findHitEntities` 的
+    // `getManyEntityHitResult`（先精确盒、未命中才膨胀盒）。三叉戟命中后 REVERSE
+    // 反弹且留在场上，膨胀盒接触点会逐刻可见，必须按官方各自路径区分。
+    //
+    // `ThrownTrident.findHitEntities` wraps the single `findHitEntity`, which
+    // runs `ProjectileUtil.getEntityHitResult(..., computeMargin)` — it always
+    // clips the margin-inflated box. Ordinary arrows use `findHitEntities`'s
+    // `getManyEntityHitResult` (exact box first, inflated box only as a fallback).
+    // A deflected trident stays in the world, so its inflated contact is visible
+    // tick by tick; the two paths must match vanilla separately.
+    let trident = arrow.variant.is_trident();
     let mut consider = |uid, feet, bb: Aabb, player| {
         if (arrow.left_owner || Some(uid) != arrow.owner) && !arrow.pierced.contains(&uid) {
-            let contact = clip_entity_with_margin(blocks, bb, position, end, collision, margin);
+            let contact = if trident {
+                clip_entity(bb.inflated(margin), position, end)
+            } else {
+                clip_entity_with_margin(blocks, bb, position, end, collision, margin)
+            };
             if let Some(contact) = contact {
                 hits.push((
                     position.distance_to_sqr(feet),
@@ -875,6 +892,15 @@ fn find_targets(me: &Entity, ctx: &dyn EntityCtx, end: Vec3) -> Vec<ArrowEntityH
     hits.into_iter().map(|(_, hit)| hit).collect()
 }
 
+/// `ProjectileUtil.getManyEntityHitResult`：普通箭 / 穿刺箭先裁剪精确包围盒，
+/// 未命中时才用 `computeMargin` 膨胀的包围盒，并检查「接触点→盒心」之间有无方块
+/// 遮挡（结果取膨胀盒的外侧接触点）。`AbstractArrow.findHitEntities` 走这里。
+///
+/// Vanilla `ProjectileUtil.getManyEntityHitResult` (ordinary / piercing arrows):
+/// clip the exact box first, then fall back to the `computeMargin`-inflated box,
+/// checking for a block between the outside contact and the box center; the
+/// result is the inflated box's outside contact. `AbstractArrow.findHitEntities`
+/// uses this path.
 fn clip_entity_with_margin(
     view: &dyn BlockView,
     bb: Aabb,
@@ -1750,15 +1776,18 @@ fn hit_block(me: &mut Entity, world: &mut World<'_>, hit: BlockHit) {
     arrow.critical = false;
     arrow.pierce = 0;
     arrow.pierced.clear();
-    play_hit_sound(me, world);
     if let EntityKind::Arrow(arrow) = &mut me.kind
         && !arrow.variant.is_trident()
     {
         arrow.sound = arrow_hit_sound();
     }
     // `channeling` 的 `hit_block`：命中的方块是避雷针、雷暴且露天时召唤闪电。
+    // 官方 `AbstractArrow.onHitBlock` 先跑 `hitBlockEnchantmentEffects`（引雷），
+    // 再播落地音效，所以这里也必须在 `play_hit_sound` 之前，音效顺序才对得上。
     // `channeling`'s `hit_block`: a lightning-rod block in a thunderstorm under
-    // open sky summons a bolt.
+    // open sky summons a bolt. Vanilla `AbstractArrow.onHitBlock` runs
+    // `hitBlockEnchantmentEffects` before the ground sound, so this must come
+    // ahead of `play_hit_sound` for the sound order to match.
     if let EntityKind::Arrow(arrow) = &me.kind
         && arrow.variant.is_trident()
     {
@@ -1767,6 +1796,7 @@ fn hit_block(me: &mut Entity, world: &mut World<'_>, hit: BlockHit) {
         let state = world.block_state(hit.pos);
         channeling_strike(world, &stack, hit.location, hit.pos, owner_uid, true, state);
     }
+    play_hit_sound(me, world);
 }
 
 fn play_hit_sound(me: &mut Entity, world: &mut World<'_>) {
