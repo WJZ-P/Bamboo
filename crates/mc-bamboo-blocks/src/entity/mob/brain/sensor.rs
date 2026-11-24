@@ -160,6 +160,7 @@ impl Sensor {
             return;
         }
         self.time_to_tick = i64::from(self.kind.scan_rate());
+        crate::entity::mob::timing::record_sensor_scan!();
         match self.kind {
             SensorKind::NearestLivingEntities => sense_nearest_living(cx),
             SensorKind::HurtBy => sense_hurt_by(cx),

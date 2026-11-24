@@ -470,6 +470,7 @@ impl Brain {
     /// Behaviour end timestamps use absolute `game_time` and are unaffected. Passing
     /// `gap = 1` (precise mode) is bit-identical to [`Self::tick`].
     pub fn tick_by(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, gap: i64) {
+        crate::entity::mob::timing::record_brain_tick!();
         let step = gap.max(1);
         self.memories.tick_by(step);
         let time = ctx.blocks().game_time();
@@ -488,32 +489,39 @@ impl Brain {
             memories,
             time,
         };
-        for sensor in sensors.iter_mut() {
-            sensor.tick_by(&mut cx, step);
+        {
+            crate::entity::mob::timing::span!(BrainSensors);
+            for sensor in sensors.iter_mut() {
+                sensor.tick_by(&mut cx, step);
+            }
         }
         // `startEachNonRunning`：只遍历核心 + 当前活动桶，按优先级顺序。新启动的行为
         // 按序插进持久的 running 表，保持官方遍历顺序。
         // `startEachNonRunning`: only the core + current activity buckets, in priority
         // order. Newly started behaviours are inserted into the persistent running list
         // in order, preserving vanilla iteration order.
-        for &index in start_bucket.iter() {
-            let node = &mut nodes[index];
-            if node.status == Status::Stopped && node.try_start(&mut cx) {
-                let at = running.partition_point(|&other| other < index);
-                running.insert(at, index);
+        {
+            crate::entity::mob::timing::span!(BrainBehaviors);
+            for &index in start_bucket.iter() {
+                let node = &mut nodes[index];
+                if node.status == Status::Stopped && node.try_start(&mut cx) {
+                    crate::entity::mob::timing::record_behavior_start!();
+                    let at = running.partition_point(|&other| other < index);
+                    running.insert(at, index);
+                }
             }
-        }
-        // `tickEachRunning`：直接遍历持久下标表，不再每刻分配 Vec 或全表筛选；停掉的移除。
-        // `tickEachRunning`: walk the persistent index list directly — no per-tick Vec
-        // allocation or full-table filter; stopped behaviours are removed.
-        let mut at = 0;
-        while at < running.len() {
-            let index = running[at];
-            nodes[index].tick_or_stop(&mut cx);
-            if nodes[index].status == Status::Stopped {
-                running.remove(at);
-            } else {
-                at += 1;
+            // `tickEachRunning`：直接遍历持久下标表，不再每刻分配 Vec 或全表筛选；停掉的移除。
+            // `tickEachRunning`: walk the persistent index list directly — no per-tick Vec
+            // allocation or full-table filter; stopped behaviours are removed.
+            let mut at = 0;
+            while at < running.len() {
+                let index = running[at];
+                nodes[index].tick_or_stop(&mut cx);
+                if nodes[index].status == Status::Stopped {
+                    running.remove(at);
+                } else {
+                    at += 1;
+                }
             }
         }
     }
