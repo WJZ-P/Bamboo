@@ -502,7 +502,7 @@ public final class MobOracle {
                 playAttackTarget(official, out, name);
                 cases++;
             }
-            for (String name : List.of("guardian_swim",
+            for (String name : List.of("guardian_swim", "guardian_flop",
                     "laser_player_normal", "laser_player_hard",
                     "laser_player_elder", "laser_player_elder_hard")) {
                 if (only != null && !name.startsWith(only)) continue;
@@ -10314,8 +10314,11 @@ public final class MobOracle {
     private static void playGuardian(Official official, Writer out, String name) throws Exception {
         boolean elder = name.contains("elder");
         boolean laser = name.startsWith("laser_");
+        boolean flop = name.startsWith("guardian_flop");
         int difficulty = name.contains("hard") ? 3 : 2;
         int ticks = laser ? 100 : 200;
+        double[] guardianAt = flop ? new double[] {0.5, 61.0, 0.5}
+                : new double[] {0.5, 62.0, 0.5};
         FakeLevel world = FakeLevel.create(official);
         world.getRandom().setSeed(9100L);
         world.injectedSeaLevel = -63;
@@ -10325,8 +10328,12 @@ public final class MobOracle {
         for (int x = -8; x <= 8; x++) {
             for (int z = -8; z <= 8; z++) {
                 world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
-                for (int y = 61; y <= 63; y++) {
-                    world.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                // 扑腾场景抽干水，守卫者站在石头地板上。
+                // The flop scene drains the pool so the guardian stands on stone.
+                if (!flop) {
+                    for (int y = 61; y <= 63; y++) {
+                        world.blocks.put(BlockPos.asLong(x, y, z), Blocks.WATER.defaultBlockState());
+                    }
                 }
             }
         }
@@ -10344,7 +10351,7 @@ public final class MobOracle {
         guardian.setYRot(0.0F);
         guardian.setYHeadRot(0.0F);
         guardian.setYBodyRot(0.0F);
-        guardian.setPos(0.5, 62.0, 0.5);
+        guardian.setPos(guardianAt[0], guardianAt[1], guardianAt[2]);
         world.tracked.add(guardian);
         // 激光场景放一名生存模式的玩家在 8 格外（选择器要求 distSqr > 9），
         // 只把它当作目标；不 tick 玩家，逐刻只比守卫者一侧的状态。
@@ -10406,7 +10413,7 @@ public final class MobOracle {
                 // add 2 per tick; Bamboo needs skyDarken=0 for the same >0.5 result,
                 // which keeps the per-tick random draws aligned.
                 + ",\"skyDarken\":0"
-                + ",\"guardian\":" + guardianSetup(elder, new double[] {0.5, 62.0, 0.5}, 42001L)
+                + ",\"guardian\":" + guardianSetup(elder, guardianAt, 42001L)
                 + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player))
                 + ",\"frames\":" + frames + "}\n");
     }
