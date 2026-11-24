@@ -442,8 +442,22 @@ pub(crate) fn last_damage_source(mob: &Mob, now: i64) -> Option<DamageSource> {
     }
 }
 
-/// 导航要的生物快照。
+/// 导航要的生物快照。骑手借载具导航时直接给载具那份，路径按载具的尺寸、位置和
+/// 惩罚算（官方 `PathNavigation.mob` 是载具）。
+///
+/// The navigation snapshot. While a rider borrows the vehicle's navigation this is
+/// the vehicle's snapshot, so paths use the vehicle's size, position and malus
+/// (vanilla `PathNavigation.mob` is the vehicle).
 pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
+    mob.borrowed_nav_mob
+        .unwrap_or_else(|| nav_mob_own(me, mob, view))
+}
+
+/// 不看借用状态，按这个生物自己算快照：骑手 tick 自己那份导航时用。
+///
+/// The mob's own snapshot, ignoring any borrowed vehicle state; used when a rider
+/// ticks its own navigation.
+pub(crate) fn nav_mob_own(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
     let (width, height) = mob.dimensions();
     NavMob {
         path: PathMob {
@@ -466,6 +480,7 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
         in_liquid: is_in_liquid(me, mob),
         follow_range: mob.attributes.value(attribute::FOLLOW_RANGE),
         game_time: view.game_time(),
+        owner_uid: me.id,
     }
 }
 
@@ -1635,9 +1650,25 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             breed_with(me, mob, ctx, partner);
         }
     }
+    // `Mob.serverAiStep` 用字段 `this.navigation.tick()`，不是 getter。借载具导航时
+    // 共享导航归载具自己的 serverAiStep tick，这里只 tick 骑手自己那份（通常闲置），
+    // 换回载具导航后再让大脑与控制段继续看载具导航。
+    //
+    // Vanilla `Mob.serverAiStep` ticks the `this.navigation` field, not the getter.
+    // The shared navigation is ticked by the vehicle's own step; here the rider
+    // only ticks its own idle navigation, then restores the vehicle's for brains.
     timing::span!(Navigation);
-    let nav = nav_mob(me, mob, ctx.blocks());
+    let own_navigation = mob.swap_to_own_navigation();
+    let nav = if own_navigation {
+        nav_mob_own(me, mob, ctx.blocks())
+    } else {
+        nav_mob(me, mob, ctx.blocks())
+    };
     if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
+        // 官方 `this.mob.getMoveControl()`：借导航时 getter 转到载具，而此时
+        // `mob.mover` 仍是载具那份（控制段才临时换回自己的）。
+        // Vanilla `this.mob.getMoveControl()`: while borrowing the getter resolves to
+        // the vehicle, and `mob.mover` is still the vehicle's here.
         if mob.mob_type == super::MobType::Rabbit {
             super::rabbit::set_wanted(me, mob, wanted, speed);
         } else {
@@ -1645,6 +1676,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                 .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
         }
     }
+    mob.restore_borrowed_navigation();
     // 官方顺序：`navigation.tick` 之后才是 `customServerAiStep`，跑大脑的生物在这里跑大脑。
     // 大脑和目标同属「决策」，降频时一起跳过；导航沿已有路径仍每刻照跑。
     // Vanilla order: `customServerAiStep`, where brain mobs run their brain, comes after
@@ -1656,6 +1688,21 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     if mob.age != 0 {
         mob.in_love = 0;
     }
+    // 官方 `moveControl.tick` / `lookControl.tick` / `jumpControl.tick` 用字段：借导航时
+    // 临时换回骑手自己的移动控制（视线 / 跳跃控制本来就不转给载具）。
+    // Vanilla ticks the `this.moveControl` field; while borrowing, temporarily swap the
+    // rider's own move control back in (look / jump controls never delegate).
+    mob.swap_to_own_mover();
+    tick_controls(me, mob, ctx);
+    mob.restore_borrowed_mover();
+}
+
+/// `Mob.serverAiStep` 的 `moveControl.tick` / `lookControl.tick` / `jumpControl.tick`。
+/// 单独成函数是为了让兔子的提前 `return` 只退出这一段，不影响借导航的换回。
+///
+/// The control ticks of `Mob.serverAiStep`, split out so the rabbit's early
+/// `return` does not skip restoring a borrowed move control.
+fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Rabbit {
         super::rabbit::custom_server_ai_step(me, mob);
         super::rabbit::before_move_control(me, mob);

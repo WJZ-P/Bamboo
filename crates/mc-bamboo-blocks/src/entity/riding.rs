@@ -15,8 +15,12 @@
 use mc_bamboo_core::Vec3;
 use mc_bamboo_core::mth;
 
-use crate::entity::mob::MobType;
-use crate::entity::{EntityPublic, EntityUid, KindPublic};
+use crate::entity::ctx::BlockView;
+use crate::entity::mob::control::MoveControl;
+use crate::entity::mob::living::nav_mob_own;
+use crate::entity::mob::navigation::Navigation;
+use crate::entity::mob::{Mob, MobType};
+use crate::entity::{Entity, EntityPublic, EntityUid, KindPublic};
 
 /// 官方 `Entity.addPassenger`：调用方负责保证 `passenger.vehicle` 已经先设成
 /// `Some(vehicle)`（官方的前提），这里只把它挂进载具的乘客名单。服务端上「新乘客是
@@ -193,6 +197,78 @@ pub fn dismount(passenger: &mut crate::entity::Entity, passengers: Option<&mut V
     passenger.boarding_cooldown = 60;
     if let Some(list) = passengers {
         list.retain(|&uid| uid != passenger.id);
+    }
+}
+
+// ---- 骑手借载具导航（`Mob.getNavigation` / `getMoveControl` 的转交）----
+
+/// 官方 `Mob.getControllingPassenger()`：载具不是 `NoAI`、第一位乘客就是这个实体、
+/// 乘客是生物且 `canControlVehicle()`（不在 `#non_controlling_rider` 里；建模范围内
+/// 只有史莱姆在标签里）。满足时载具的 `getNavigation()` / `getMoveControl()` 会转给
+/// 这个乘客所在的载具链顶端，所以骑手的目标与大脑用的是**载具**的导航。
+///
+/// Vanilla `Mob.getControllingPassenger()`: the vehicle is not NoAI, its first
+/// passenger is this rider, and the rider can control vehicles. When true the
+/// rider's goals and brain address the vehicle's navigation (and move control).
+pub(crate) fn controls_vehicle(vehicle_mob: &Mob, rider_uid: EntityUid, rider_mob: &Mob) -> bool {
+    if vehicle_mob.no_ai || vehicle_mob.first_passenger() != Some(rider_uid) {
+        return false;
+    }
+    !matches!(rider_mob.mob_type, MobType::Slime)
+}
+
+/// 乘客 tick 之前：若它控制载具，就把载具的 `Navigation` / `MoveControl` 和按载具
+/// 尺寸算出的 `NavMob` 快照换进骑手字段。`PathRequest`（独立寻路阶段的挂起请求）
+/// 的 owner 就是 `snapshot.owner_uid`，这里天然是载具的 uid。
+///
+/// Before a passenger ticks: if it controls the vehicle, swap the vehicle's
+/// navigation / move control and a vehicle-sized `NavMob` into the rider. The
+/// pending `PathRequest` owner (`snapshot.owner_uid`) is then the vehicle's uid.
+pub(crate) fn begin_nav_borrow(rider: &mut Entity, vehicle: &Entity, view: &dyn BlockView) -> bool {
+    let (Some(rider_mob), Some(vehicle_mob)) = (rider.kind.mob_mut(), vehicle.kind.mob()) else {
+        return false;
+    };
+    if !controls_vehicle(vehicle_mob, rider.id, rider_mob) {
+        return false;
+    }
+    let snapshot = nav_mob_own(vehicle, vehicle_mob, view);
+    let navigation = vehicle_mob.navigation.clone();
+    let mover = vehicle_mob.mover;
+    rider_mob.begin_nav_borrow(navigation, mover, snapshot);
+    true
+}
+
+/// 乘客 tick 之后：取回共享状态，恢复骑手自己的导航与移动控制。调用方把返回值写回
+/// 载具的对应字段。
+///
+/// After a passenger ticks: recover the shared state and restore the rider's
+/// own. The caller writes the returned pair back to the vehicle.
+pub(crate) fn end_nav_borrow(rider: &mut Entity) -> Option<(Navigation, MoveControl)> {
+    rider.kind.mob_mut()?.end_nav_borrow()
+}
+
+/// 把共享导航/移动控制写回载具（乘客这一刻可能改了路径和 wanted 位置）。
+///
+/// Write the shared navigation / move control back to the vehicle (the rider
+/// may have changed the path and wanted position this tick).
+pub(crate) fn put_borrowed_nav(vehicle: &mut Entity, navigation: Navigation, mover: MoveControl) {
+    if let Some(mob) = vehicle.kind.mob_mut() {
+        mob.navigation = navigation;
+        mob.mover = mover;
+    }
+}
+
+/// 并行驱动用：直接改算阶段结果里的私有状态，不用拼回完整 [`Entity`]。
+///
+/// Parallel driver variant: mutate the private state in the computed result.
+pub(crate) fn put_borrowed_nav_state(
+    state: &mut crate::entity::EntityState,
+    navigation: Navigation,
+    mover: MoveControl,
+) {
+    if let crate::entity::KindState::Mob(mob) = &mut state.kind {
+        mob.navigation = navigation;
+        mob.mover = mover;
     }
 }
 

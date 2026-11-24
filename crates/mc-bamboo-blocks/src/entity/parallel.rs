@@ -685,10 +685,31 @@ fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
         };
         let mut me = EntityRow { public, state }.into_entity();
         let is_root = within == 0;
+        let vehicle_slot = tree[within].vehicle_slot;
         if !is_root {
             // `Entity.rideTick` 先把速度清零，再跑自己的 tick。
             me.delta = mc_bamboo_core::Vec3::default();
         }
+        // `Mob.getNavigation` / `getMoveControl` 在控制载具时转给载具：整棵树在同一份
+        // 活里，直接从已 tick 完的载具结果取它的导航/移动控制与按载具尺寸的快照。
+        // Vanilla `Mob.getNavigation` / `getMoveControl` delegate to the vehicle;
+        // the whole riding tree is one job, so take the vehicle's post-tick result.
+        let borrowing = if !is_root && let Some(slot) = vehicle_slot {
+            let vehicle = tree.get(slot).and_then(|row| {
+                Some(
+                    EntityRow {
+                        public: row.result.public.as_ref()?.clone(),
+                        state: row.result.state.as_ref()?.clone(),
+                    }
+                    .into_entity(),
+                )
+            });
+            vehicle.is_some_and(|vehicle| {
+                crate::entity::riding::begin_nav_borrow(&mut me, &vehicle, shared.blocks)
+            })
+        } else {
+            false
+        };
         {
             let result = &mut tree[within].result;
             let mut ctx = ParallelCtx {
@@ -706,10 +727,20 @@ fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
                 me.tick(&mut ctx);
             }
         }
+        // 把改过的共享导航/移动控制写回载具结果，恢复骑手自己的两份。
+        // Write the mutated shared state back to the vehicle's result and restore
+        // the rider's own navigation / move control.
+        if borrowing
+            && let Some((navigation, mover)) = crate::entity::riding::end_nav_borrow(&mut me)
+            && let Some(slot) = vehicle_slot
+            && let Some(state) = tree[slot].result.state.as_mut()
+        {
+            crate::entity::riding::put_borrowed_nav_state(state, navigation, mover);
+        }
         if !is_root {
             // `LivingEntity.rideTick` 的复位落距，以及 `positionRider`。
             me.fall_distance = 0.0;
-            if let Some(vehicle_slot) = tree[within].vehicle_slot {
+            if let Some(vehicle_slot) = vehicle_slot {
                 let Some(vehicle_public) = tree[vehicle_slot].result.public.as_ref() else {
                     continue;
                 };

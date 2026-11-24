@@ -3831,23 +3831,46 @@ impl<'a> World<'a> {
                 self.level.put_entity(passenger);
                 continue;
             }
+            // `Mob.getNavigation` / `getMoveControl` 在骑手控制载具时转给载具：
+            // tick 之前把载具的导航/移动控制与按载具尺寸算的快照换进骑手字段。
+            // Vanilla `Mob.getNavigation` / `getMoveControl` delegate to the vehicle
+            // for a controlling rider: swap the vehicle's state in before the tick.
+            let vehicle_snapshot = self.entity(vehicle.uid);
+            let borrowing = vehicle_snapshot.as_ref().is_some_and(|snapshot| {
+                crate::entity::riding::begin_nav_borrow(&mut passenger, snapshot, self)
+            });
             // `Entity.commonTick` 由 `Entity::tick` 内部跑，这里 `rideTick` 只补
             // 「清零速度 + 乘客自己的 tick + 复位落距 + positionRider」。
             passenger.delta = mc_bamboo_core::Vec3::default();
             let mut ctx = crate::entity::ctx::PreciseCtx::with_plan(self, passenger_id, plan);
             passenger.tick(&mut ctx);
             passenger.fall_distance = 0.0;
+            let world = ctx.into_world();
+            // tick 之后把改过的共享导航/移动控制写回载具，恢复骑手自己的两份。
+            // After the tick, write the mutated shared state back to the vehicle and
+            // restore the rider's own navigation / move control.
+            if borrowing
+                && let Some((navigation, mover)) =
+                    crate::entity::riding::end_nav_borrow(&mut passenger)
+            {
+                let mut shared = Some((navigation, mover));
+                world.with_entity_mut(vehicle.uid, &mut |entity| {
+                    if let Some((navigation, mover)) = shared.take() {
+                        crate::entity::riding::put_borrowed_nav(entity, navigation, mover);
+                    }
+                });
+            }
             // 乘客自己的 tick 里可能已经 `stopRiding`（受伤死亡等）：官方这时不再
             // 定位，直接结束这一支。
             if passenger.vehicle != Some(vehicle.uid) || passenger.removed {
-                self.level.put_entity(passenger);
+                world.level.put_entity(passenger);
                 continue;
             }
             // 载具此刻的公开快照：它自己的 tick 已经落地，位置是这一刻末的值。
-            let Some(current) = ctx.into_world().level.entity_public(vehicle.uid) else {
+            let Some(current) = world.level.entity_public(vehicle.uid) else {
                 // 载具这一刻被移除了：乘客停在原地，只摘关系。
                 crate::entity::riding::dismount(&mut passenger, None);
-                self.level.put_entity(passenger);
+                world.level.put_entity(passenger);
                 continue;
             };
             let passenger_public = passenger.clone().split().public;
@@ -3858,14 +3881,15 @@ impl<'a> World<'a> {
             // Vanilla checks despawn once per entity in uid order; a passenger's
             // check comes after its `rideTick`, so it happens here.
             if !passenger.removed {
-                let mut check = crate::entity::ctx::PreciseCtx::with_plan(self, passenger_id, plan);
+                let mut check =
+                    crate::entity::ctx::PreciseCtx::with_plan(world, passenger_id, plan);
                 crate::entity::mob::living::check_despawn_entity(&mut passenger, &mut check);
             }
             // 乘客可能自己也是载具：递归跑它的乘客树。锚点要用 `positionRider`
             // 之后的乘客位置，所以重新拆一次公开快照。
             let nested = passenger.clone().split().public;
-            self.level.put_entity(passenger);
-            self.ride_tick_passengers(&nested, plan);
+            world.level.put_entity(passenger);
+            world.ride_tick_passengers(&nested, plan);
         }
     }
 

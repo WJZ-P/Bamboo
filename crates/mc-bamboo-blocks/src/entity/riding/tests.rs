@@ -97,3 +97,93 @@ fn a_non_mob_passenger_has_no_vehicle_attachment() {
     let public = tnt.split().public;
     assert_eq!(vehicle_attachment(&public), Vec3::default());
 }
+
+#[test]
+fn a_controlling_rider_borrows_the_vehicle_navigation_and_move_control() {
+    use mc_bamboo_core::BlockPos;
+
+    let mut level = crate::testing::TestLevel::new();
+    let mut ticks = crate::BlockTicks::new();
+    let view = crate::World::new(&mut level, &mut ticks);
+
+    let mut spider = entity(1, MobType::Spider, 0.5);
+    let mut skeleton = entity(2, MobType::Skeleton, 10.0);
+    skeleton.vehicle = Some(1);
+    spider.kind.mob_mut().unwrap().passengers.push(2);
+
+    // 载具和自己那份导航/移动控制各给一个可辨认的状态。
+    spider.kind.mob_mut().unwrap().navigation.tick = 7;
+    spider.kind.mob_mut().unwrap().navigation.target_pos = Some(BlockPos::new(3, 64, 4));
+    spider
+        .kind
+        .mob_mut()
+        .unwrap()
+        .mover
+        .set_wanted_position(9.0, 64.0, 9.0, 1.0);
+    skeleton.kind.mob_mut().unwrap().navigation.tick = 42;
+    skeleton
+        .kind
+        .mob_mut()
+        .unwrap()
+        .mover
+        .set_wanted_position(1.0, 64.0, 1.0, 0.5);
+    let own_nav_tick = skeleton.kind.mob().unwrap().navigation.tick;
+    let (spider_width, _) = spider.kind.mob().unwrap().dimensions();
+
+    assert!(begin_nav_borrow(&mut skeleton, &spider, &view));
+    {
+        let rider = skeleton.kind.mob().unwrap();
+        assert_eq!(rider.navigation.tick, 7, "shared navigation installed");
+        assert_eq!(
+            rider.borrowed_own_navigation.as_ref().unwrap().tick,
+            own_nav_tick
+        );
+        let snapshot = rider.borrowed_nav_mob.unwrap();
+        assert_eq!(snapshot.owner_uid, 1, "path requests belong to the vehicle");
+        assert_eq!(snapshot.path.width, spider_width, "vehicle dimensions");
+        assert_eq!(rider.mover.wanted_x, 9.0, "vehicle mover installed");
+    }
+
+    // 目标代码把路径 / wanted 写进共享状态；tick 完写回载具，恢复自己的。
+    {
+        let rider = skeleton.kind.mob_mut().unwrap();
+        rider.navigation.tick = 8;
+        rider.mover.set_wanted_position(12.0, 64.0, 12.0, 1.25);
+    }
+    let (navigation, mover) = end_nav_borrow(&mut skeleton).expect("borrow ends");
+    assert_eq!(navigation.tick, 8);
+    assert_eq!(mover.wanted_x, 12.0);
+    assert_eq!(skeleton.kind.mob().unwrap().navigation.tick, own_nav_tick);
+    assert_eq!(skeleton.kind.mob().unwrap().mover.wanted_x, 1.0);
+    assert!(skeleton.kind.mob().unwrap().borrowed_nav_mob.is_none());
+
+    put_borrowed_nav(&mut spider, navigation, mover);
+    assert_eq!(spider.kind.mob().unwrap().navigation.tick, 8);
+    assert_eq!(spider.kind.mob().unwrap().mover.wanted_x, 12.0);
+}
+
+#[test]
+fn non_controlling_passengers_do_not_borrow_the_vehicle_navigation() {
+    let mut level = crate::testing::TestLevel::new();
+    let mut ticks = crate::BlockTicks::new();
+    let view = crate::World::new(&mut level, &mut ticks);
+
+    // 史莱姆在 #non_controlling_rider 里。
+    let mut spider = entity(1, MobType::Spider, 0.5);
+    let mut slime = entity(2, MobType::Slime, 10.0);
+    slime.vehicle = Some(1);
+    spider.kind.mob_mut().unwrap().passengers.push(2);
+    assert!(!begin_nav_borrow(&mut slime, &spider, &view));
+
+    // NoAI 载具不产生控制乘客。
+    spider.kind.mob_mut().unwrap().no_ai = true;
+    let mut skeleton = entity(3, MobType::Skeleton, 10.0);
+    skeleton.vehicle = Some(1);
+    spider.kind.mob_mut().unwrap().passengers = vec![3];
+    assert!(!begin_nav_borrow(&mut skeleton, &spider, &view));
+
+    // 第二个乘客不是 getFirstPassenger。
+    spider.kind.mob_mut().unwrap().no_ai = false;
+    spider.kind.mob_mut().unwrap().passengers = vec![2, 3];
+    assert!(!begin_nav_borrow(&mut skeleton, &spider, &view));
+}

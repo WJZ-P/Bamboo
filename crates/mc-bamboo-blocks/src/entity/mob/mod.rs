@@ -100,7 +100,7 @@ use self::{
     control::{BodyRotationControl, JumpControl, LookControl, MoveControl},
     effects::EffectMap,
     goals::GoalSelector,
-    navigation::Navigation,
+    navigation::{NavMob, Navigation},
     path::Malus,
 };
 use super::{EntityUid, JavaRandom};
@@ -2215,6 +2215,24 @@ pub struct Mob {
     pub jump: JumpControl,
     pub body: BodyRotationControl,
     pub navigation: Navigation,
+    /// 骑手借载具导航时的临时状态：自己的导航暂存，`navigation` 字段是载具的。
+    /// 只在乘客 tick 期间非空，tick 边界上总是 `None`。
+    ///
+    /// While a rider borrows its vehicle's navigation, the rider's own navigation
+    /// is parked here and `navigation` holds the vehicle's. Always `None` at a
+    /// tick boundary.
+    pub borrowed_own_navigation: Option<Navigation>,
+    /// 借用期间 [`nav_mob`] 返回载具的寻路快照（尺寸、位置、惩罚都用载具的）。
+    ///
+    /// The vehicle's pathfinding snapshot while the navigation is borrowed.
+    pub borrowed_nav_mob: Option<NavMob>,
+    /// 骑手自己的导航 tick 里 `getMoveControl()` 会转到载具的移动控制；把载具那份
+    /// 暂存这里，tick 完写回载具。骑手自己的 `mover` 仍照官方 tick 自己的字段。
+    ///
+    /// The vehicle's move control, which the rider's own navigation tick addresses
+    /// through `getMoveControl()`; written back to the vehicle after the tick. The
+    /// rider's own `mover` still ticks its own field, as vanilla does.
+    pub borrowed_move_control: Option<MoveControl>,
     pub goals: GoalSelector,
     /// `Sensing` 的视线缓存，每刻清空。
     pub seen: Vec<(EntityUid, bool)>,
@@ -2840,6 +2858,9 @@ impl Mob {
             jump: JumpControl::default(),
             body: BodyRotationControl::default(),
             navigation,
+            borrowed_own_navigation: None,
+            borrowed_nav_mob: None,
+            borrowed_move_control: None,
             goals,
             seen: Vec::new(),
             malus: match mob_type {
@@ -3179,6 +3200,79 @@ impl Mob {
     /// `Entity.getFirstPassenger()`: whoever boarded first.
     pub fn first_passenger(&self) -> Option<EntityUid> {
         self.passengers.first().copied()
+    }
+
+    // ---- 借载具导航（官方 `Mob.getNavigation` / `getMoveControl` 的转交）----
+
+    /// 骑手控制载具时，在它 tick AI 之前把载具的 `Navigation` / `MoveControl` /
+    /// 寻路快照换进字段（目标与大脑用字段访问，等价于官方的 getter），自己的两份
+    /// 暂存起来。只在乘客 tick 期间调用。
+    ///
+    /// Before a controlling rider ticks its AI, install the vehicle's navigation,
+    /// move control and pathfinding snapshot into the fields that goal/brain code
+    /// reads (equivalent to vanilla's getters), parking the rider's own state.
+    pub(crate) fn begin_nav_borrow(
+        &mut self,
+        navigation: Navigation,
+        mover: MoveControl,
+        snapshot: NavMob,
+    ) {
+        self.borrowed_own_navigation = Some(std::mem::replace(&mut self.navigation, navigation));
+        self.borrowed_move_control = Some(std::mem::replace(&mut self.mover, mover));
+        self.borrowed_nav_mob = Some(snapshot);
+    }
+
+    /// tick 之后取回共享状态（写回载具），恢复骑手自己的导航与移动控制。
+    ///
+    /// After the tick, recover the shared state (to write back to the vehicle)
+    /// and restore the rider's own navigation and move control.
+    pub(crate) fn end_nav_borrow(&mut self) -> Option<(Navigation, MoveControl)> {
+        let own_navigation = self.borrowed_own_navigation.take()?;
+        let own_mover = self.borrowed_move_control.take()?;
+        let shared_navigation = std::mem::replace(&mut self.navigation, own_navigation);
+        let shared_mover = std::mem::replace(&mut self.mover, own_mover);
+        self.borrowed_nav_mob = None;
+        Some((shared_navigation, shared_mover))
+    }
+
+    /// 官方 `Mob.serverAiStep` 的 `navigation.tick()` 用的是字段，不是 getter：
+    /// 临时换回骑手自己那份（闲置）导航 tick 一次。返回是否处于借导航状态。
+    ///
+    /// Vanilla `Mob.serverAiStep` ticks `this.navigation` (a field), not the
+    /// getter: swap back the rider's own idle navigation for that one tick.
+    pub(crate) fn swap_to_own_navigation(&mut self) -> bool {
+        let Some(own) = self.borrowed_own_navigation.as_mut() else {
+            return false;
+        };
+        std::mem::swap(&mut self.navigation, own);
+        true
+    }
+
+    /// 把 `navigation` 换回载具那份（目标/大脑随后还要看）。
+    ///
+    /// Swap `navigation` back to the vehicle's (goals/brain still read it).
+    pub(crate) fn restore_borrowed_navigation(&mut self) {
+        if let Some(own) = self.borrowed_own_navigation.as_mut() {
+            std::mem::swap(&mut self.navigation, own);
+        }
+    }
+
+    /// 官方 `moveControl.tick()` 同样用字段：临时换回骑手自己的移动控制。
+    ///
+    /// Vanilla ticks `this.moveControl` (a field): swap back the rider's own.
+    pub(crate) fn swap_to_own_mover(&mut self) {
+        if let Some(own) = self.borrowed_move_control.as_mut() {
+            std::mem::swap(&mut self.mover, own);
+        }
+    }
+
+    /// 把 `mover` 换回载具那份，让驱动写回载具。
+    ///
+    /// Swap `mover` back to the vehicle's for the driver to write back.
+    pub(crate) fn restore_borrowed_mover(&mut self) {
+        if let Some(own) = self.borrowed_move_control.as_mut() {
+            std::mem::swap(&mut self.mover, own);
+        }
     }
 
     /// `Entity.getControllingPassenger()`：上鞍的载具由第一位乘客控制。
