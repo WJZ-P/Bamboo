@@ -426,6 +426,9 @@ public final class MobOracle {
             if (only == null || "zombie_villager_save".startsWith(only)) {
                 cases += playZombieVillagerSave(official, out);
             }
+            if (only == null || "villager_brain".startsWith(only) || only.startsWith("villager_brain")) {
+                cases += playVillagerBrain(official, out, only);
+            }
             for (String name : List.of("bat_open", "bat_wake", "bat_hurt", "bat_low")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playBat(official, out, name);
@@ -1750,6 +1753,12 @@ public final class MobOracle {
                 return Double.doubleToRawLongBits(vec.x) + ";" + Double.doubleToRawLongBits(vec.y) + ";"
                         + Double.doubleToRawLongBits(vec.z);
             }
+            if (value instanceof net.minecraft.core.GlobalPos gp) {
+                return gp.dimension().identifier() + "@" + gp.pos().getX() + ":" + gp.pos().getY() + ":" + gp.pos().getZ();
+            }
+            if (value instanceof BlockPos bp) {
+                return pos(bp);
+            }
             return value.getClass().getSimpleName();
         }
 
@@ -1761,6 +1770,12 @@ public final class MobOracle {
                 // Unreachable tongue targets are UUIDs; scene mobs use (0, index + 1).
                 if (entry instanceof UUID uuid) {
                     out.append(FIRST_ID + uuid.getLeastSignificantBits() - 1);
+                    continue;
+                }
+                if (entry instanceof net.minecraft.core.GlobalPos gp) {
+                    out.append(gp.dimension().identifier()).append('@')
+                            .append(gp.pos().getX()).append(':').append(gp.pos().getY()).append(':')
+                            .append(gp.pos().getZ());
                     continue;
                 }
                 out.append(((Entity) entry).getId());
@@ -11013,6 +11028,163 @@ public final class MobOracle {
         return cases;
     }
 
+    /**
+     * 村民大脑与日程对拍：比结构表（成年默认 / 成年农民 / 幼年）、日程 5 个切换点
+     * （10 / 2000 / 9000 / 11000 / 12000）、幼年日程（3000 / 6000 / 10000 / 12000）、
+     * 受伤恐慌 + 冷静、附近僵尸恐慌 + 逃跑 + 冷静、以及平地闲逛。
+     *
+     * <p>Villager brain and schedule oracle: compares the structural table (adult default,
+     * adult farmer, baby), the five adult schedule transitions (10/2000/9000/11000/12000),
+     * baby schedule transitions (3000/6000/10000/12000), panic from hurt and nearby zombie
+     * plus calm-down, and idle strolling.
+     */
+    private static int playVillagerBrain(Official official, Writer out, String only) throws Exception {
+        record VScene(String name, long clockStart, int ticks, boolean baby, String profession,
+                boolean hasJobSite, boolean hasMeetingPoint, int hurtTick, boolean hasZombie,
+                long mobSeed, long sensorDelay) {}
+        List<VScene> scenes = List.of(
+                new VScene("villager_brain_sched_10", 0L, 60, false, "none", false, false, -1, false, 11L, 1L),
+                new VScene("villager_brain_sched_2000", 1985L, 60, false, "none", true, false, -1, false, 13L, 1L),
+                new VScene("villager_brain_sched_9000", 8985L, 60, false, "none", true, true, -1, false, 17L, 1L),
+                new VScene("villager_brain_sched_11000", 10985L, 60, false, "none", false, true, -1, false, 19L, 1L),
+                new VScene("villager_brain_sched_12000", 11985L, 60, false, "none", false, false, -1, false, 23L, 1L),
+                new VScene("villager_brain_farmer_table", 2000L, 30, false, "farmer", true, false, -1, false, 29L, 1L),
+                new VScene("villager_brain_baby_3000", 2985L, 60, true, "none", false, false, -1, false, 31L, 1L),
+                new VScene("villager_brain_baby_6000", 5985L, 60, true, "none", false, false, -1, false, 37L, 1L),
+                new VScene("villager_brain_baby_10000", 9985L, 60, true, "none", false, false, -1, false, 41L, 1L),
+                new VScene("villager_brain_baby_12000", 11985L, 60, true, "none", false, false, -1, false, 43L, 1L),
+                new VScene("villager_brain_panic_hurt", 500L, 120, false, "none", false, false, 5, false, 47L, 1L),
+                new VScene("villager_brain_panic_zombie", 500L, 160, false, "none", false, false, -1, true, 53L, 1L),
+                new VScene("villager_brain_stroll", 500L, 200, false, "none", false, false, -1, false, 59L, 1L)
+        );
+        int cases = 0;
+        for (VScene scene : scenes) {
+            if (only != null && !scene.name().startsWith(only)) continue;
+            FakeLevel world = FakeLevel.create(official);
+            java.util.Map<Object, Object> levels = new java.util.LinkedHashMap<>();
+            levels.put(net.minecraft.world.level.Level.OVERWORLD, world);
+            put(MinecraftServer.class, official.server, "levels", levels);
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int x = -15; x <= 15; x++) {
+                for (int z = -15; z <= 15; z++) {
+                    world.blocks.put(BlockPos.asLong(x, 63, z), stone);
+                }
+            }
+            world.gameTime = 1000L;
+            world.realSky = true;
+            world.injectedCanSeeSky = true;
+            world.clock = scene.clockStart();
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(world);
+            net.minecraft.world.clock.ClockManager clocks = clock -> new net.minecraft.world.clock.ClockInstance() {
+                public long totalTicks() { return world.clock; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : world.dimensionType().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            official.attributes = builder.build();
+            put(ServerLevel.class, world, "environmentAttributes", official.attributes);
+            world.updateSkyBrightness();
+            world.getRandom().setSeed(1L);
+
+            Villager mob = (Villager) EntityTypes.VILLAGER.create(
+                    world, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+            mob.setId(FIRST_ID);
+            mob.setUUID(new UUID(0L, 1L));
+            mob.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            mob.setYHeadRot(0.0F);
+            mob.setYBodyRot(0.0F);
+            if ("farmer".equals(scene.profession())) {
+                var regs = official.registries;
+                VillagerData data = new VillagerData(
+                        regs.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_TYPE)
+                                .getOrThrow(VillagerType.PLAINS),
+                        regs.lookupOrThrow(net.minecraft.core.registries.Registries.VILLAGER_PROFESSION)
+                                .getOrThrow(VillagerProfession.FARMER),
+                        1);
+                mob.setVillagerData(data);
+                mob.setVillagerXp(1);
+                mob.refreshBrain(world);
+            }
+            if (scene.baby()) {
+                mob.setAge(-24000);
+            }
+            if (scene.hasJobSite()) {
+                mob.getBrain().setMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.JOB_SITE,
+                        net.minecraft.core.GlobalPos.of(net.minecraft.world.level.Level.NETHER, new BlockPos(3, 64, 0)));
+            }
+            if (scene.hasMeetingPoint()) {
+                mob.getBrain().setMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.MEETING_POINT,
+                        net.minecraft.core.GlobalPos.of(net.minecraft.world.level.Level.NETHER, new BlockPos(0, 64, 3)));
+            }
+            put(net.minecraft.world.entity.ai.Brain.class, mob.getBrain(), "lastScheduleUpdate", -9999L);
+            mob.getBrain().updateActivityFromSchedule(world.environmentAttributes(), world.getGameTime(), mob.position());
+            setRandom(mob, scene.mobSeed());
+            BrainOracle.reseedShuffles(mob, randomSeed(mob));
+            BrainOracle.fixSensorDelays(mob, scene.sensorDelay());
+            world.tracked.add(mob);
+
+            List<Mob> sceneMobs = new ArrayList<>();
+            sceneMobs.add(mob);
+            if (scene.hasZombie()) {
+                Zombie zombie = new Zombie(EntityTypes.ZOMBIE, world);
+                zombie.setId(FIRST_ID + 1);
+                zombie.setUUID(new UUID(0L, 2L));
+                zombie.setNoAi(true);
+                zombie.snapTo(4.5, 64.0, 0.5, 0.0F, 0.0F);
+                zombie.setYHeadRot(0.0F);
+                zombie.setYBodyRot(0.0F);
+                setRandom(zombie, 101L);
+                world.tracked.add(zombie);
+                sceneMobs.add(zombie);
+            }
+
+            String table = brainTable(mob);
+            StringBuilder frames = new StringBuilder("[");
+            for (int tick = 0; tick <= scene.ticks(); tick++) {
+                if (tick > 0) {
+                    world.gameTime = 1000L + tick;
+                    world.clock = scene.clockStart() + tick;
+                    official.attributes.invalidateTickCache();
+                    world.updateSkyBrightness();
+                    if (tick == scene.hurtTick()) {
+                        mob.hurtServer(world, world.damageSources().generic(), 2.0F);
+                    }
+                    for (Mob m : sceneMobs) {
+                        m.commonTick();
+                        m.tick();
+                    }
+                }
+                if (tick > 0) frames.append(',');
+                frames.append("{\"brain\":").append(jsonString(BrainOracle.dump(mob)))
+                        .append(",\"motion\":").append(projectileMotion(mob))
+                        .append(",\"seed\":").append(randomSeed(mob))
+                        .append(",\"levelSeed\":").append(randomSeed(world.getRandom()))
+                        .append('}');
+            }
+            frames.append(']');
+            out.write("{\"type\":\"villagerBrain\",\"name\":" + jsonString(scene.name())
+                    + ",\"firstId\":" + FIRST_ID
+                    + ",\"clockStart\":" + scene.clockStart()
+                    + ",\"baby\":" + scene.baby()
+                    + ",\"profession\":" + jsonString(scene.profession())
+                    + ",\"hasJobSite\":" + scene.hasJobSite()
+                    + ",\"hasMeetingPoint\":" + scene.hasMeetingPoint()
+                    + ",\"hurtTick\":" + scene.hurtTick()
+                    + ",\"hasZombie\":" + scene.hasZombie()
+                    + ",\"mobSeed\":" + scene.mobSeed()
+                    + ",\"sensorDelay\":" + scene.sensorDelay()
+                    + ",\"brainTable\":" + table
+                    + ",\"frames\":" + frames + "}\n");
+            cases++;
+        }
+        out.flush();
+        return cases;
+    }
+
     /** `Silverfish.friendsGoal` 的私有字段。 */
     private static Object friendsOf(Mob mob) throws Exception {
         Field field = net.minecraft.world.entity.monster.Silverfish.class.getDeclaredField("friendsGoal");
@@ -16393,7 +16565,7 @@ public final class MobOracle {
 
         @Override
         public ServerLevel getLevel(ResourceKey<Level> key) {
-            return levels.get(key);
+            return levels == null ? null : levels.get(key);
         }
 
         @Override
@@ -16602,6 +16774,77 @@ public final class MobOracle {
                 net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy occupancy) {
             return java.util.Optional.empty();
         }
+
+        @Override
+        public int sectionsToVillage(net.minecraft.core.SectionPos pos) {
+            return 7;
+        }
+
+        @Override
+        public java.util.stream.Stream<com.mojang.datafixers.util.Pair<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>, BlockPos>> findAllWithType(
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type,
+                java.util.function.Predicate<BlockPos> pos, BlockPos center, int radius,
+                net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy occupancy) {
+            return java.util.stream.Stream.empty();
+        }
+
+        @Override
+        public java.util.stream.Stream<com.mojang.datafixers.util.Pair<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>, BlockPos>> findAllClosestFirstWithType(
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type,
+                java.util.function.Predicate<BlockPos> pos, BlockPos center, int radius,
+                net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy occupancy) {
+            return java.util.stream.Stream.empty();
+        }
+
+        @Override
+        public java.util.stream.Stream<BlockPos> findAll(
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type,
+                java.util.function.Predicate<BlockPos> pos, BlockPos center, int radius,
+                net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy occupancy) {
+            return java.util.stream.Stream.empty();
+        }
+
+        @Override
+        public java.util.Optional<BlockPos> take(
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type,
+                java.util.function.BiPredicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>, BlockPos> pos,
+                BlockPos center, int radius) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public boolean release(BlockPos pos) {
+            return false;
+        }
+
+        @Override
+        public boolean exists(BlockPos pos,
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type) {
+            return false;
+        }
+
+        @Override
+        public boolean existsAtPosition(
+                net.minecraft.resources.ResourceKey<net.minecraft.world.entity.ai.village.poi.PoiType> key,
+                BlockPos pos) {
+            return false;
+        }
+
+        @Override
+        public long getCountInRange(
+                java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> type,
+                BlockPos center, int radius,
+                net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy occupancy) {
+            return 0L;
+        }
+
+        @Override
+        public java.util.Optional<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> getType(BlockPos pos) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public void ensureLoadedAndValid(net.minecraft.world.level.LevelReader level, BlockPos center, int radius) {}
     }
 
     private static final class FakeLevel extends ServerLevel {
@@ -17223,6 +17466,17 @@ public final class MobOracle {
         @Override
         public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
             return emptyPoi;
+        }
+
+        /** 假世界没有袭击系统；`SetRaidStatus` / `Villager.customServerAiStep` 查袭击返回 null。 */
+        @Override
+        public net.minecraft.world.entity.raid.Raid getRaidAt(BlockPos pos) {
+            return null;
+        }
+
+        @Override
+        public boolean isRaided(BlockPos pos) {
+            return false;
         }
 
         /** 假世界没有玩家地图；`canSpreadFireAround` 按 Bamboo 的恒真实现短路。 */

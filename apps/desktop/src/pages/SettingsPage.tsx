@@ -119,7 +119,7 @@ const DifferenceList = styled.ul`
   line-height: 1.7;
 `;
 
-/** 一键预设会改的八个字段；保存成功后只同步这几项到草稿。 */
+/** 一键预设会改的十二个字段；保存成功后只同步这几项到草稿。 */
 const PRESET_KEYS = [
   "entityThreads",
   "maxEntityCollisions",
@@ -129,6 +129,10 @@ const PRESET_KEYS = [
   "mobPathfindingPhase",
   "mobPathfindingBudget",
   "mobPathfindingFailCooldown",
+  "villagerLobotomize",
+  "villagerLobotomizeInterval",
+  "villagerLobotomizeWaitTradeLock",
+  "villagerSleepBrainInterval",
 ] as const satisfies readonly (keyof ServerSettings)[];
 
 /** 输入框里显示的数字。NaN 表示正在编辑或者填了非数字，显示成空。 */
@@ -427,7 +431,8 @@ export function SettingsPage() {
                       <Lead>
                         把最吃 CPU 的几项一次写好：实体并行线程数设成本机逻辑核数，
                         挤压上限 8、生物降频 32 格、生物休眠 64 格、唤醒倍率 1，
-                        再打开独立寻路阶段和寻路失败冷却（节点预算 65536）。
+                        打开独立寻路阶段与寻路失败冷却（节点预算 65536），
+                        同时启用被困村民降频（每 100 刻、等待交易锁定）与睡觉村民降频（每 5 刻）。
                         点之前会先列出和官方逐位一致模式的差别。
                       </Lead>
                       <Actions>
@@ -485,6 +490,8 @@ export function SettingsPage() {
               <li>挤成一团的生物散开慢：每只每刻只处理前 8 次推挤。</li>
               <li>生物寻路晚一刻：转向最多比原来慢 0.05 秒。</li>
               <li>连续寻路失败的生物会歇 2 秒再算：够不着的怪重试变稀。</li>
+              <li>被困在隔间且已锁定交易的村民每 100 刻跑一次大脑（遇敌 / 受伤 / 恐慌 / 交易 / 钟声立刻恢复每刻）。</li>
+              <li>睡觉中的村民每 5 刻跑一次大脑（钟声 / 敌对生物 / 恐慌时豁免）。</li>
               <li>并行时实体看到的是这一刻开始时的状态，物品合并最多晚一刻。</li>
             </DifferenceList>
             <Lead>

@@ -19,9 +19,9 @@ use mc_bamboo_game::{
     DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV, ISLAND_THREADS_ENV,
     ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS,
     MAX_ISLAND_DEAD_SECONDS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MAX_MOB_DISTANCE,
-    MAX_MOB_WAKEUPS_SCALE, MAX_PATHFINDING_BUDGET, MIN_ISLAND_DEAD_SECONDS, MailBudget,
-    island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
-    recommended_island_threads, world_options::WorldGenConfig,
+    MAX_MOB_WAKEUPS_SCALE, MAX_PATHFINDING_BUDGET, MAX_VILLAGER_BRAIN_INTERVAL,
+    MIN_ISLAND_DEAD_SECONDS, MailBudget, island_dead_seconds_from_env, island_threads_from_env,
+    islands_from_env, recommended_island_threads, world_options::WorldGenConfig,
     worldgen_cache::WorldgenCacheSettings,
 };
 use toml::{Table, Value};
@@ -145,6 +145,10 @@ const BAMBOO_KEYS: &[&str] = &[
     "mob_pathfinding_phase",
     "mob_pathfinding_budget",
     "mob_pathfinding_fail_cooldown",
+    "villager_lobotomize",
+    "villager_lobotomize_interval",
+    "villager_lobotomize_wait_trade_lock",
+    "villager_sleep_brain_interval",
     "redstone_cache",
     "chunk_worker_threads",
     "worldgen_terrain_cache_mb",
@@ -192,6 +196,11 @@ pub struct BambooConfig {
     pub mob_pathfinding_phase: bool,
     pub mob_pathfinding_budget: u32,
     pub mob_pathfinding_fail_cooldown: bool,
+    /// 被困村民与睡觉村民大脑降频配置（缺省关）。
+    pub villager_lobotomize: bool,
+    pub villager_lobotomize_interval: i32,
+    pub villager_lobotomize_wait_trade_lock: bool,
+    pub villager_sleep_brain_interval: i32,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
@@ -260,6 +269,10 @@ impl Default for BambooConfig {
             mob_pathfinding_phase: false,
             mob_pathfinding_budget: 0,
             mob_pathfinding_fail_cooldown: false,
+            villager_lobotomize: defaults.villager_lobotomize,
+            villager_lobotomize_interval: defaults.villager_lobotomize_interval,
+            villager_lobotomize_wait_trade_lock: defaults.villager_lobotomize_wait_trade_lock,
+            villager_sleep_brain_interval: defaults.villager_sleep_brain_interval,
             redstone_cache: defaults.redstone_cache,
             chunk_worker_threads: defaults.chunk_worker_threads,
             worldgen_cache: defaults.worldgen_cache,
@@ -344,6 +357,16 @@ impl BambooConfig {
                 "# 寻路失败冷却（Paper 的数值）：连续失败超过 10 次后 40 刻内不再试。缺省 false。\n",
                 "mob_pathfinding_fail_cooldown = {}\n",
                 "\n",
+                "# 被困村民降频（照 Purpur 的 lobotomize，缺省 false = 官方逐位一致）：\n",
+                "# 四个水平邻格均不可通行时按间隔跑大脑；被打、遇敌、恐慌、交易、钟声立刻回每刻。\n",
+                "villager_lobotomize = {}\n",
+                "# 被困村民大脑运行间隔（刻），推荐 100，合法范围 1..=6000。\n",
+                "villager_lobotomize_interval = {}\n",
+                "# 为真时只对已锁定交易（xp > 0）的被困村民降频，推荐 true。\n",
+                "villager_lobotomize_wait_trade_lock = {}\n",
+                "# 睡觉村民大脑运行间隔（刻）：0 = 关（精确模式），推荐 5，合法范围 0..=6000。\n",
+                "villager_sleep_brain_interval = {}\n",
+                "\n",
                 "# 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认 false。\n",
                 "redstone_cache = {}\n",
                 "\n",
@@ -398,6 +421,10 @@ impl BambooConfig {
             self.mob_pathfinding_phase,
             self.mob_pathfinding_budget,
             self.mob_pathfinding_fail_cooldown,
+            self.villager_lobotomize,
+            self.villager_lobotomize_interval,
+            self.villager_lobotomize_wait_trade_lock,
+            self.villager_sleep_brain_interval,
             self.redstone_cache,
             self.chunk_worker_threads,
             self.worldgen_cache.terrain_mb,
@@ -495,6 +522,34 @@ impl BambooConfig {
                 file,
                 false,
             ),
+            villager_lobotomize: boolean(
+                table,
+                "villager_lobotomize",
+                file,
+                defaults.villager_lobotomize,
+            ),
+            villager_lobotomize_interval: integer(
+                table,
+                "villager_lobotomize_interval",
+                file,
+                defaults.villager_lobotomize_interval as usize,
+                1,
+                MAX_VILLAGER_BRAIN_INTERVAL as usize,
+            ) as i32,
+            villager_lobotomize_wait_trade_lock: boolean(
+                table,
+                "villager_lobotomize_wait_trade_lock",
+                file,
+                defaults.villager_lobotomize_wait_trade_lock,
+            ),
+            villager_sleep_brain_interval: integer(
+                table,
+                "villager_sleep_brain_interval",
+                file,
+                defaults.villager_sleep_brain_interval as usize,
+                0,
+                MAX_VILLAGER_BRAIN_INTERVAL as usize,
+            ) as i32,
             redstone_cache: boolean(table, "redstone_cache", file, false),
             chunk_worker_threads: integer(
                 table,
@@ -967,6 +1022,10 @@ impl ConfigFiles {
             mob_pathfinding_phase: self.bamboo.mob_pathfinding_phase,
             mob_pathfinding_budget: self.bamboo.mob_pathfinding_budget,
             mob_pathfinding_fail_cooldown: self.bamboo.mob_pathfinding_fail_cooldown,
+            villager_lobotomize: self.bamboo.villager_lobotomize,
+            villager_lobotomize_interval: self.bamboo.villager_lobotomize_interval,
+            villager_lobotomize_wait_trade_lock: self.bamboo.villager_lobotomize_wait_trade_lock,
+            villager_sleep_brain_interval: self.bamboo.villager_sleep_brain_interval,
             redstone_cache: self.bamboo.redstone_cache,
             chunk_worker_threads: self.bamboo.chunk_worker_threads,
             worldgen_cache: self.bamboo.worldgen_cache,
@@ -1018,6 +1077,10 @@ impl ConfigFiles {
         bamboo.mob_pathfinding_phase = config.mob_pathfinding_phase;
         bamboo.mob_pathfinding_budget = config.mob_pathfinding_budget;
         bamboo.mob_pathfinding_fail_cooldown = config.mob_pathfinding_fail_cooldown;
+        bamboo.villager_lobotomize = config.villager_lobotomize;
+        bamboo.villager_lobotomize_interval = config.villager_lobotomize_interval;
+        bamboo.villager_lobotomize_wait_trade_lock = config.villager_lobotomize_wait_trade_lock;
+        bamboo.villager_sleep_brain_interval = config.villager_sleep_brain_interval;
         bamboo.redstone_cache = config.redstone_cache;
         bamboo.chunk_worker_threads = config.chunk_worker_threads;
         bamboo.worldgen_cache = config.worldgen_cache;
@@ -1189,6 +1252,26 @@ impl ConfigFiles {
                 "mob_pathfinding_fail_cooldown",
                 u64::from(self.bamboo.mob_pathfinding_fail_cooldown),
                 u64::from(defaults.bamboo.mob_pathfinding_fail_cooldown),
+            ),
+            (
+                "villager_lobotomize",
+                u64::from(self.bamboo.villager_lobotomize),
+                u64::from(defaults.bamboo.villager_lobotomize),
+            ),
+            (
+                "villager_lobotomize_interval",
+                self.bamboo.villager_lobotomize_interval as u64,
+                defaults.bamboo.villager_lobotomize_interval as u64,
+            ),
+            (
+                "villager_lobotomize_wait_trade_lock",
+                u64::from(self.bamboo.villager_lobotomize_wait_trade_lock),
+                u64::from(defaults.bamboo.villager_lobotomize_wait_trade_lock),
+            ),
+            (
+                "villager_sleep_brain_interval",
+                self.bamboo.villager_sleep_brain_interval as u64,
+                defaults.bamboo.villager_sleep_brain_interval as u64,
             ),
             (
                 "redstone_cache",

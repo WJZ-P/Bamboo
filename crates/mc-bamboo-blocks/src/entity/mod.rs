@@ -571,18 +571,6 @@ impl Entity {
             // `nextInt(scanRate)` per sensor.
             brain.seed_shuffles(self.random.state());
             brain.randomly_delay_start(&mut self.random);
-        } else if mob.mob_type == mob::MobType::Villager {
-            // 期 2 的村民还没有大脑，但官方构造末尾会为九个传感器各抽一次起始延迟。
-            // 照顺序和扫描间隔把这些随机数消费掉，`finalizeSpawn` 的跟随距离加成和
-            // 左撇子才和官方一致；期 3 接真大脑时删掉这一支。
-            //
-            // Phase 2 villagers have no brain, but vanilla still draws one initial
-            // delay per sensor at the end of the constructor. Consume the same draws
-            // in order so `finalizeSpawn`'s follow-range bonus and left-handedness
-            // match. Remove this once the real brain lands in phase 3.
-            for rate in mob::villager::SENSOR_SCAN_RATES {
-                let _ = self.random.next_int_bounded(rate);
-            }
         }
         if mob.mob_type == mob::MobType::Armadillo {
             // `Armadillo` 构造函数最后的 `scuteTime = pickNextScuteDropTime()`。

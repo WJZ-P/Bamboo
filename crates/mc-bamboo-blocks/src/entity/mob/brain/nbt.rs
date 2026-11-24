@@ -5,7 +5,9 @@
 //! Only memories with a codec are written (`MemoryModuleType.canSerialize`); `ttl` only
 //! when the memory expires.
 
+use mc_bamboo_core::BlockPos;
 use mc_bamboo_nbt::Tag;
+use mc_bamboo_protocol::components::value::GlobalPos;
 
 use super::{
     Brain,
@@ -44,6 +46,13 @@ fn value_tag(value: &MemoryValue) -> Option<Tag> {
         MemoryValue::Int(value) => Some(Tag::Int(*value)),
         MemoryValue::Long(value) => Some(Tag::Long(*value)),
         MemoryValue::Unit => Some(Tag::Compound(Vec::new())),
+        MemoryValue::GlobalPos(pos) => Some(Tag::Compound(vec![
+            ("dimension".to_owned(), Tag::String(pos.dimension.clone())),
+            (
+                "pos".to_owned(),
+                Tag::IntArray(vec![pos.pos.x, pos.pos.y, pos.pos.z]),
+            ),
+        ])),
         _ => None,
     }
 }
@@ -81,7 +90,8 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
     match kind {
         MemoryType::IsPanicking
         | MemoryType::DangerDetectedRecently
-        | MemoryType::HuntingCooldown => match raw {
+        | MemoryType::HuntingCooldown
+        | MemoryType::GolemDetectedRecently => match raw {
             Tag::Byte(value) => Some(MemoryValue::Bool(*value != 0)),
             _ => None,
         },
@@ -91,6 +101,27 @@ fn value_of(kind: MemoryType, raw: &Tag) -> Option<MemoryValue> {
             Tag::Compound(_) => Some(MemoryValue::Unit),
             _ => None,
         },
+        // `GlobalPos.CODEC`：`{dimension: String, pos: IntArray[3]}`。
+        // `GlobalPos.CODEC`: `{dimension: String, pos: IntArray[3]}`.
+        MemoryType::Home
+        | MemoryType::JobSite
+        | MemoryType::PotentialJobSite
+        | MemoryType::MeetingPoint => {
+            let dimension = tag::string_or(raw, "dimension")?.to_owned();
+            let Some(Tag::IntArray(coords)) = tag::field(raw, "pos") else {
+                return None;
+            };
+            let [x, y, z] = coords.as_slice() else {
+                return None;
+            };
+            Some(MemoryValue::GlobalPos(GlobalPos {
+                dimension,
+                pos: BlockPos::new(*x, *y, *z),
+            }))
+        }
+        MemoryType::LastWorkedAtPoi | MemoryType::LastSlept | MemoryType::LastWoken => {
+            tag::java_i64(raw).ok().map(MemoryValue::Long)
+        }
         _ => tag::java_i32(raw).ok().map(MemoryValue::Int),
     }
 }
@@ -123,5 +154,100 @@ mod tests {
             42
         );
         assert!(!loaded.memories.has(MemoryType::WalkTarget));
+    }
+
+    /// 村民带编解码器的记忆（`GlobalPos` / `Long` / `Bool` / `Int`）按官方 `Brain.Packed` 格式往返，
+    /// 不带编解码器的记忆（如 `nearest_hostile`）不写盘。
+    #[test]
+    fn villager_serializable_memories_round_trip() {
+        use super::super::{Activity, ActivityData, Brain, behavior::Kind};
+
+        let build = || {
+            let mut brain = Brain::new(
+                &[],
+                vec![ActivityData::sequential(
+                    Activity::Core,
+                    0,
+                    vec![Kind::DoNothing { min: 10, max: 10 }],
+                )],
+            );
+            for kind in [
+                MemoryType::Home,
+                MemoryType::JobSite,
+                MemoryType::LastSlept,
+                MemoryType::LastWoken,
+                MemoryType::LastWorkedAtPoi,
+                MemoryType::GolemDetectedRecently,
+                MemoryType::ItemPickupCooldownTicks,
+                MemoryType::NearestHostile,
+            ] {
+                brain.memories.register(kind);
+            }
+            brain
+        };
+
+        let mut brain = build();
+        let home = GlobalPos {
+            dimension: "minecraft:overworld".to_owned(),
+            pos: BlockPos::new(10, 64, -20),
+        };
+        let job = GlobalPos {
+            dimension: "minecraft:overworld".to_owned(),
+            pos: BlockPos::new(14, 64, -18),
+        };
+        brain
+            .memories
+            .set(MemoryType::Home, MemoryValue::GlobalPos(home.clone()));
+        brain
+            .memories
+            .set(MemoryType::JobSite, MemoryValue::GlobalPos(job.clone()));
+        brain
+            .memories
+            .set(MemoryType::LastSlept, MemoryValue::Long(12_345));
+        brain
+            .memories
+            .set(MemoryType::LastWoken, MemoryValue::Long(24_001));
+        brain
+            .memories
+            .set(MemoryType::LastWorkedAtPoi, MemoryValue::Long(3_000));
+        brain.memories.set_with_ttl(
+            MemoryType::GolemDetectedRecently,
+            MemoryValue::Bool(true),
+            599,
+        );
+        brain
+            .memories
+            .set(MemoryType::ItemPickupCooldownTicks, MemoryValue::Int(40));
+        brain
+            .memories
+            .set(MemoryType::NearestHostile, MemoryValue::Entity(99));
+
+        let saved = write(Some(&brain));
+        let mut loaded = build();
+        read(&mut loaded, &saved);
+
+        assert_eq!(loaded.memories.global_pos(MemoryType::Home), Some(&home));
+        assert_eq!(loaded.memories.global_pos(MemoryType::JobSite), Some(&job));
+        assert_eq!(loaded.memories.long(MemoryType::LastSlept), Some(12_345));
+        assert_eq!(loaded.memories.long(MemoryType::LastWoken), Some(24_001));
+        assert_eq!(
+            loaded.memories.long(MemoryType::LastWorkedAtPoi),
+            Some(3_000)
+        );
+        assert_eq!(
+            loaded.memories.bool(MemoryType::GolemDetectedRecently),
+            Some(true)
+        );
+        assert_eq!(
+            loaded
+                .memories
+                .time_until_expiry(MemoryType::GolemDetectedRecently),
+            599
+        );
+        assert_eq!(
+            loaded.memories.int(MemoryType::ItemPickupCooldownTicks),
+            Some(40)
+        );
+        assert!(!loaded.memories.has(MemoryType::NearestHostile));
     }
 }

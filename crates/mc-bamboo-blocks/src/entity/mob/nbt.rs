@@ -896,6 +896,11 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         }
         if mob.mob_type == MobType::Villager {
             mob.villager.read_nbt(tag);
+            // `Villager.readAdditionalSaveData` 末尾按读出的年龄与职业刷新大脑，
+            // 保留从 `Brain` 标签读回的可序列化记忆。
+            // `Villager.readAdditionalSaveData` refreshes the brain for the loaded age and
+            // profession, keeping serialisable memories read from the `Brain` tag.
+            super::villager_ai::refresh_brain_offline(me, mob);
         }
         if mob.mob_type == MobType::ZombieVillager {
             mob.zombie_villager.read_nbt(&mut mob.villager, tag);

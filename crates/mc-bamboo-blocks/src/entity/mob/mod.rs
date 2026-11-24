@@ -91,6 +91,7 @@ pub mod thunder;
 pub(crate) mod timing;
 pub mod turtle;
 pub mod villager;
+pub mod villager_ai;
 mod water;
 pub mod wild_spawn;
 pub mod witch;
@@ -3912,8 +3913,13 @@ impl MobPublic {
             villager_level: mob.villager.level,
             villager_finalized: mob.villager.finalized,
             villager_unhappy: mob.villager.unhappy,
-            villager: (mob.mob_type == MobType::Villager)
-                .then(|| Box::new(villager::VillagerPublic::of(&mob.villager))),
+            villager: (mob.mob_type == MobType::Villager).then(|| {
+                Box::new(villager::VillagerPublic::of(
+                    &mob.villager,
+                    mob.brain.as_deref(),
+                    &mob.navigation,
+                ))
+            }),
             zombie_villager_converting: mob.zombie_villager.converting,
             phantom_size: mob.phantom.size,
             frog: mob.frog,
@@ -4021,6 +4027,7 @@ pub(crate) fn new_brain(kind: MobType) -> Option<Box<brain::Brain>> {
         MobType::Tadpole => Some(Box::new(tadpole::brain())),
         MobType::Camel => Some(Box::new(camel::brain())),
         MobType::Axolotl => Some(Box::new(axolotl::brain())),
+        MobType::Villager => Some(Box::new(villager_ai::brain(false, 0))),
         _ => None,
     }
 }

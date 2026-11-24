@@ -4852,13 +4852,25 @@ fn pick_best(
     view: &dyn BlockView,
     mut supplier: impl FnMut() -> Option<BlockPos>,
 ) -> Option<Vec3> {
+    pick_best_by(&mut supplier, |pos| {
+        f64::from(walk_target_value(mob, view, pos))
+    })
+}
+
+/// `RandomPos.generateRandomPos(Supplier, ToDoubleFunction)`：抽 10 次，取权重最高者。
+///
+/// `RandomPos.generateRandomPos(Supplier, ToDoubleFunction)`: 10 samples, keeping highest weight.
+fn pick_best_by(
+    supplier: &mut impl FnMut() -> Option<BlockPos>,
+    weight_of: impl Fn(BlockPos) -> f64,
+) -> Option<Vec3> {
     let mut best = f64::NEG_INFINITY;
     let mut best_pos = None;
     for _ in 0..10 {
         let Some(pos) = supplier() else {
             continue;
         };
-        let weight = f64::from(walk_target_value(mob, view, pos));
+        let weight = weight_of(pos);
         if weight > best {
             best = weight;
             best_pos = Some(pos);
@@ -5059,8 +5071,24 @@ pub(crate) fn land_random_pos(
     horizontal: i32,
     vertical: i32,
 ) -> Option<Vec3> {
+    land_random_pos_weighted(me, mob, view, horizontal, vertical, |pos| {
+        f64::from(walk_target_value(mob, view, pos))
+    })
+}
+
+/// `LandRandomPos.getPos(mob, radius, vertical, ToDoubleFunction)`。
+///
+/// `LandRandomPos.getPos(mob, radius, vertical, ToDoubleFunction)`.
+pub(crate) fn land_random_pos_weighted(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    weight_of: impl Fn(BlockPos) -> f64,
+) -> Option<Vec3> {
     let restricted = mob_restricted(me, mob, f64::from(horizontal));
-    pick_best(mob, view, || {
+    let mut supplier = || {
         let direction = random_direction(me, horizontal, vertical);
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
@@ -5070,13 +5098,51 @@ pub(crate) fn land_random_pos(
             return None;
         }
         // `movePosUpOutOfSolid`。
-        let mut moved = pos;
-        if view.block_state(moved).is_solid() {
-            moved = moved.above();
-            while moved.y <= view.max_y() && view.block_state(moved).is_solid() {
-                moved = moved.above();
-            }
+        let moved = move_up_out_of_solid(view, pos);
+        if view.fluid_state(moved).is_tagged(fluid_tags::WATER) || has_malus(mob, view, moved) {
+            return None;
         }
+        Some(moved)
+    };
+    pick_best_by(&mut supplier, weight_of)
+}
+
+/// `LandRandomPos.getPosAway(mob, radius, vertical, avoid)`：在背离 `avoid` 的 ±90° 扇形里取陆地落点。
+/// 若与 `avoid` 重合，照官方从生物随机源抽两次 `nextDouble() - 0.5` 作为背离向量。
+///
+/// `LandRandomPos.getPosAway(mob, radius, vertical, avoid)`: samples a land spot within
+/// ±90° away from `avoid`, falling back to `(nextDouble()-0.5, 0, nextDouble()-0.5)` when
+/// coincident.
+pub(crate) fn land_random_pos_away(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    avoid: Vec3,
+) -> Option<Vec3> {
+    let mut away = me.position.subtract(avoid);
+    if away.length() == 0.0 {
+        away = Vec3::new(
+            me.random.next_double() - 0.5,
+            0.0,
+            me.random.next_double() - 0.5,
+        );
+    }
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            0,
+            away.x,
+            away.z,
+            f64::from(std::f32::consts::FRAC_PI_2),
+        )?;
+        let pos =
+            land_toward_direction(me, mob, view, f64::from(horizontal), restricted, direction)?;
+        let moved = move_up_out_of_solid(view, pos);
         if view.fluid_state(moved).is_tagged(fluid_tags::WATER) || has_malus(mob, view, moved) {
             return None;
         }

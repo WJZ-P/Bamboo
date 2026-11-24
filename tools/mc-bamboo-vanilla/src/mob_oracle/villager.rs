@@ -41,6 +41,33 @@ pub(super) struct VillagerDeathCase {
     experience: i32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VillagerBrainCase {
+    name: String,
+    first_id: i32,
+    clock_start: i64,
+    baby: bool,
+    profession: String,
+    has_job_site: bool,
+    has_meeting_point: bool,
+    hurt_tick: i32,
+    has_zombie: bool,
+    mob_seed: i64,
+    sensor_delay: i64,
+    brain_table: super::water_mob::BrainTable,
+    frames: Vec<VillagerBrainFrame>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VillagerBrainFrame {
+    brain: String,
+    motion: [i64; 8],
+    seed: i64,
+    level_seed: i64,
+}
+
 /// 村民自己的键，加上原样保留的 `Offers` / `Inventory` 和通用的 `Brain`。
 const SAVE_KEYS: &[&str] = &[
     "VillagerData",
@@ -289,6 +316,272 @@ impl Report {
                 case.by_player, case.experience
             ));
         }
+    }
+
+    pub(super) fn replay_villager_brain(&mut self, case: &VillagerBrainCase) {
+        use mc_bamboo_blocks::entity::{
+            JavaRandom,
+            mob::{
+                brain::memory::{MemoryType, MemoryValue},
+                villager_ai,
+            },
+        };
+        use mc_bamboo_protocol::components::value::GlobalPos;
+
+        self.cases += 1;
+        let break_test = self.break_test.clone();
+        let mut blocks = std::collections::HashMap::new();
+        let stone = BlockState(mc_bamboo_data::blocks::STONE);
+        for x in -15..=15 {
+            for z in -15..=15 {
+                blocks.insert(BlockPos::new(x, 63, z), stone);
+            }
+        }
+        let mut level = MobLevel {
+            blocks,
+            random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: Vec::new(),
+            biome: None,
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                clock: case.clock_start,
+                difficulty: 2,
+                ..ZombieFacts::default()
+            },
+            natural_spawn: None,
+            redstone: mc_bamboo_blocks::RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
+            entities: Entities::with_next_id(case.first_id),
+            players: Vec::new(),
+            game: None,
+            inhabited: Default::default(),
+            mob_teams: Default::default(),
+            ignore_bed_monsters: false,
+            short_hunger: false,
+            wrong_was_hurt: false,
+        };
+        let mut ticks = BlockTicks::default();
+        ticks.set_time(1000);
+
+        let update_schedule_clock = |level: &mut MobLevel, clock: i64| {
+            // 改坏确认 `villager_schedule_keyframe`：关键帧错一刻（时钟减 1）。
+            let effective = if break_test.as_deref() == Some("villager_schedule_keyframe") {
+                clock - 1
+            } else {
+                clock
+            };
+            level.facts.clock = effective;
+            level.facts.villager_activity =
+                Some(mc_bamboo_blocks::sky::villager_activity(effective));
+            level.facts.baby_villager_activity =
+                Some(mc_bamboo_blocks::sky::baby_villager_activity(effective));
+        };
+        update_schedule_clock(&mut level, case.clock_start);
+
+        let villager_id;
+        {
+            let mut entity = Entity::by_mob_type(MobType::Villager, Vec3::new(0.5, 64.0, 0.5));
+            entity.with_mob(|me, mob| {
+                if case.profession == "farmer" {
+                    mob.villager.profession =
+                        mc_bamboo_data::villager::profession_id("minecraft:farmer").unwrap_or(0);
+                    mob.villager.xp = 1;
+                    villager_ai::refresh_brain_offline(me, mob);
+                }
+                if case.baby {
+                    let (width, height, eye) = MobType::Villager.dimensions(true);
+                    me.dimensions = (width, height);
+                    mob.age = -24_000;
+                    mob.eye_height = eye;
+                    villager_ai::refresh_brain_offline(me, mob);
+                }
+                if let Some(brain) = mob.brain.as_mut() {
+                    if case.has_job_site {
+                        brain.memories.set(
+                            MemoryType::JobSite,
+                            MemoryValue::GlobalPos(GlobalPos {
+                                dimension: "minecraft:the_nether".to_owned(),
+                                pos: BlockPos::new(3, 64, 0),
+                            }),
+                        );
+                    }
+                    if case.has_meeting_point {
+                        brain.memories.set(
+                            MemoryType::MeetingPoint,
+                            MemoryValue::GlobalPos(GlobalPos {
+                                dimension: "minecraft:the_nether".to_owned(),
+                                pos: BlockPos::new(0, 64, 3),
+                            }),
+                        );
+                    }
+                }
+            });
+            let mut world = World::new(&mut level, &mut ticks);
+            entity.with_mob(|_, mob| {
+                villager_ai::register_brain_goals(mob, &world, 1000);
+            });
+            villager_id = world.spawn_entity(entity);
+            // `spawn_entity` 会跑 `init_mob_state`（改朝向、随机源、传感器延迟和洗牌种子），
+            // 所以在 spawn 之后显式对齐官方场景的初值。
+            world.with_entity_mut(villager_id, &mut |entity| {
+                entity.y_rot = 0.0;
+                entity.old_position = Vec3::new(0.5, 64.0, 0.5);
+                entity.random = JavaRandom::new(case.mob_seed);
+                entity.with_mob(|me, mob| {
+                    mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+                    mob.x_rot = 0.0;
+                    mob.y_rot_o = 0.0;
+                    mob.x_rot_o = 0.0;
+                    mob.y_head_rot = 0.0;
+                    mob.y_head_rot_o = 0.0;
+                    mob.y_body_rot = 0.0;
+                    mob.y_body_rot_o = 0.0;
+                    if let Some(brain) = mob.brain.as_mut() {
+                        brain.seed_shuffles(me.random.state());
+                        for sensor in &mut brain.sensors {
+                            sensor.time_to_tick = case.sensor_delay;
+                        }
+                    }
+                });
+            });
+
+            if case.has_zombie {
+                let z_id = world.spawn_entity(Entity::by_mob_type(
+                    MobType::Zombie,
+                    Vec3::new(4.5, 64.0, 0.5),
+                ));
+                world.with_entity_mut(z_id, &mut |zombie| {
+                    zombie.y_rot = 0.0;
+                    zombie.old_position = Vec3::new(4.5, 64.0, 0.5);
+                    zombie.random = JavaRandom::new(101);
+                    zombie.with_mob(|_, mob| {
+                        mob.uuid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+                        mob.no_ai = true;
+                        mob.x_rot = 0.0;
+                        mob.y_rot_o = 0.0;
+                        mob.x_rot_o = 0.0;
+                        mob.y_head_rot = 0.0;
+                        mob.y_head_rot_o = 0.0;
+                        mob.y_body_rot = 0.0;
+                        mob.y_body_rot_o = 0.0;
+                    });
+                });
+            }
+        }
+
+        // 1. 核对大脑结构表（传感器、行为表、活动进入条件、退出清记忆）。
+        let broken_table = break_test.as_deref() == Some("villager_brain_table");
+        let ours_table = level
+            .entities
+            .get(villager_id)
+            .and_then(|e| {
+                e.kind
+                    .mob()
+                    .and_then(|m| m.brain.as_deref())
+                    .map(|b| super::water_mob::brain_table(b, broken_table))
+            })
+            .unwrap_or_default();
+        if ours_table != case.brain_table {
+            self.mismatch(format!(
+                "{} brain table: official {:?}, bamboo {ours_table:?}",
+                case.name, case.brain_table
+            ));
+        }
+
+        // 2. 逐刻重放并核对大脑状态、坐标/速度/朝向、实体随机源与世界随机源。
+        for (tick, expected) in case.frames.iter().enumerate() {
+            if tick > 0 {
+                let tick_i64 = tick as i64;
+                ticks.set_time(1000 + tick_i64);
+                update_schedule_clock(&mut level, case.clock_start + tick_i64);
+                let mut world = World::new(&mut level, &mut ticks);
+                if tick as i32 == case.hurt_tick {
+                    let source = DamageSource::environment(
+                        mc_bamboo_blocks::entity::mob::DamageKind::Generic,
+                    );
+                    world.hurt_mob(villager_id, source, 2.0);
+                }
+                if break_test.as_deref() == Some("villager_panic_invert") {
+                    // 改坏确认：反转恐慌触发条件（有伤害/敌对时擦掉，平静时强行注入伤害）。
+                    world.with_entity_mut(villager_id, &mut |entity| {
+                        entity.with_mob(|_, mob| {
+                            let hurt_or_hostile = mob.last_damage_source.is_some()
+                                || mob.brain.as_deref().is_some_and(|b| {
+                                    b.memories.has(MemoryType::HurtBy)
+                                        || b.memories.has(MemoryType::NearestHostile)
+                                });
+                            if hurt_or_hostile {
+                                mob.last_damage_source = None;
+                                if let Some(b) = mob.brain.as_mut() {
+                                    b.memories.erase(MemoryType::HurtBy);
+                                    b.memories.erase(MemoryType::NearestHostile);
+                                }
+                            } else {
+                                mob.last_damage_source = Some(DamageSource::environment(
+                                    mc_bamboo_blocks::entity::mob::DamageKind::Generic,
+                                ));
+                                mob.last_damage_stamp = 1000 + tick_i64;
+                            }
+                        });
+                    });
+                }
+                world.tick_entities();
+                if break_test.as_deref() == Some("villager_raid_rng") {
+                    // 改坏确认：破坏 `SetRaidStatus` 每刻对世界随机源的取数。
+                    let _ = world.random().next_int(20);
+                }
+            }
+            let Some(entity) = level.entities.get(villager_id) else {
+                self.mismatch(format!("{} tick {tick}: villager missing", case.name));
+                return;
+            };
+            let mob = entity.kind.mob().expect("villager is mob");
+            let ours_brain = super::brain::dump(&level, &entity);
+            if ours_brain != expected.brain {
+                self.mismatch(format!(
+                    "{} tick {tick} brain: official {:?}, bamboo {:?}",
+                    case.name, expected.brain, ours_brain
+                ));
+            }
+            let (p, v) = (entity.position, entity.delta);
+            let ours_motion = [
+                p.x.to_bits() as i64,
+                p.y.to_bits() as i64,
+                p.z.to_bits() as i64,
+                v.x.to_bits() as i64,
+                v.y.to_bits() as i64,
+                v.z.to_bits() as i64,
+                i64::from(entity.y_rot.to_bits() as i32),
+                i64::from(mob.x_rot.to_bits() as i32),
+            ];
+            if ours_motion != expected.motion {
+                self.mismatch(format!(
+                    "{} tick {tick} motion: official {:?}, bamboo {:?}",
+                    case.name, expected.motion, ours_motion
+                ));
+            }
+            let ours_seed = entity.random.state();
+            if ours_seed != expected.seed {
+                self.mismatch(format!(
+                    "{} tick {tick} mob seed: official {}, bamboo {ours_seed}",
+                    case.name, expected.seed
+                ));
+            }
+            let ours_level_seed = level.random.source().seed();
+            if ours_level_seed != expected.level_seed {
+                self.mismatch(format!(
+                    "{} tick {tick} level random: official {}, bamboo {ours_level_seed}",
+                    case.name, expected.level_seed
+                ));
+            }
+            self.steps += 1;
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+        println!("{}: {} ticks", case.name, case.frames.len());
     }
 }
 

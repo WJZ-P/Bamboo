@@ -168,7 +168,7 @@ pub(crate) fn apply_convert(
     entity.delta = me.delta;
     entity.fall_distance = me.fall_distance;
     entity.on_ground = me.on_ground;
-    entity.with_mob(|_, mob| {
+    entity.with_mob(|me, mob| {
         copy_state(from, mob);
         // `ZombieVillager` 与 `Villager` 的互转：官方的 `AfterConversion` 把
         // `VillagerData` / `Gossips` / `Offers` / `Xp` 和 finalized 一起搬过去。
@@ -194,7 +194,7 @@ pub(crate) fn apply_convert(
             // Cure complete: the new villager gets 200 ticks of nausea. The
             // player's advancement trigger is emitted by the game layer from
             // `ConversionPlayer` (gossip is not modelled yet).
-            super::zombie_villager::after_cure(mob);
+            super::zombie_villager::after_cure(me, mob);
         }
     });
     if zombie_attributes {

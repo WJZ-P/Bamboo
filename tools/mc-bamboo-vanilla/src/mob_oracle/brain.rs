@@ -126,6 +126,15 @@ fn value_text(level: &MobLevel, value: &MemoryValue) -> String {
             point.y.to_bits() as i64,
             point.z.to_bits() as i64
         ),
+        MemoryValue::GlobalPos(gp) => {
+            format!("{}@{}:{}:{}", gp.dimension, gp.pos.x, gp.pos.y, gp.pos.z)
+        }
+        MemoryValue::GlobalPosList(list) => list
+            .iter()
+            .map(|gp| format!("{}@{}:{}:{}", gp.dimension, gp.pos.x, gp.pos.y, gp.pos.z))
+            .collect::<Vec<_>>()
+            .join(";"),
+        MemoryValue::BlockPos(pos) => pos_text(*pos),
     }
 }
 

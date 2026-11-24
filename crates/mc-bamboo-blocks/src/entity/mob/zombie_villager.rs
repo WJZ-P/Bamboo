@@ -337,13 +337,15 @@ pub fn play_cure_sound(me: &mut Entity, mob: &Mob) {
     let _ = me.random.next_float();
 }
 
-/// 完成转化后给新村民挂 200 刻反胃，并给治疗者发进度事件。
+/// 完成转化后给新村民挂 200 刻反胃并重建大脑（`Villager.refreshBrain`）。
 /// 八卦系统还没做：声望只通过 `ConversionPlayer` 留接口。
 ///
-/// After the conversion the new villager gets 200 ticks of nausea. Gossip is not
-/// modelled, so reputation only keeps the `ConversionPlayer` hook.
-pub fn after_cure(mob: &mut Mob) {
+/// After the conversion the new villager gets 200 ticks of nausea and a fresh
+/// brain (`Villager.refreshBrain`). Gossip is not modelled, so reputation only
+/// keeps the `ConversionPlayer` hook.
+pub fn after_cure(me: &mut Entity, mob: &mut Mob) {
     let _ = living::add_effect(mob, EffectInstance::new(mob_effect::NAUSEA, 200));
+    super::villager_ai::refresh_brain_offline(me, mob);
 }
 
 /// `ZombieVillager.getVoicePitch()`：幼年基础音高 2.0，成年 1.0。

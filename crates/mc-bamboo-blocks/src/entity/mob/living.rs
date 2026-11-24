@@ -1524,6 +1524,11 @@ fn animal_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             let request = super::EntityLootRequest::new(super::turtle::grow_loot(), me, mob, None);
             ctx.emit(crate::entity::ctx::Command::DropEntityLoot(request), me);
         }
+        // `Villager.ageBoundaryReached`：幼年长大时重建大脑并切换到成年日程。
+        // `Villager.ageBoundaryReached`: rebuilds the brain and switches to the adult schedule.
+        if was_baby != mob.is_baby() && mob.mob_type == super::MobType::Villager {
+            super::villager_ai::refresh_brain(me, mob, ctx);
+        }
     }
     if super::turtle::is_turtle(mob.mob_type) {
         super::turtle::ai_step(me, mob, ctx);
@@ -1741,7 +1746,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     // Vanilla order: `customServerAiStep`, where brain mobs run their brain, comes after
     // `navigation.tick`. Brains are decisions and skip with the goals when throttled.
     if plan.decisions_run {
-        tick_brains(me, mob, ctx);
+        tick_brains(me, mob, ctx, plan.decision_gap);
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
@@ -1829,7 +1834,7 @@ fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 
 /// 大脑（含传感器）和 `customServerAiStep` 里那一支专属决策。照官方在 `navigation.tick`
 /// 之后调用；降频时和目标一起跳过，导航沿已有路径、移动 / 视线 / 跳跃控制仍每刻照跑。
-fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, decision_gap: i64) {
     if mob.mob_type == super::MobType::Armadillo {
         super::armadillo::custom_server_ai_step(me, mob, ctx);
     }
@@ -1862,6 +1867,9 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     if mob.mob_type == super::MobType::Cat {
         super::cat::custom_server_ai_step(mob);
+    }
+    if mob.mob_type == super::MobType::Villager {
+        super::villager_ai::custom_server_ai_step(me, mob, ctx, decision_gap);
     }
     if mob.mob_type == super::MobType::ElderGuardian {
         // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
