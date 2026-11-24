@@ -452,6 +452,14 @@ pub enum EntityData {
     WolfVariant(i32),
     /// `Wolf.DATA_SOUND_VARIANT_ID`：`wolf_sound_variant` 注册表 ID。
     WolfSoundVariant(i32),
+    /// `Guardian.DATA_ID_MOVING`（BOOLEAN，索引 16）。
+    ///
+    /// `Guardian.DATA_ID_MOVING` (BOOLEAN, index 16).
+    GuardianMoving(bool),
+    /// `Guardian.DATA_ID_ATTACK_TARGET`（INT，索引 17）。
+    ///
+    /// `Guardian.DATA_ID_ATTACK_TARGET` (INT, index 17).
+    GuardianAttackTarget(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -573,6 +581,8 @@ impl EntityData {
             Self::AxolotlVariant(_) => mc_bamboo_data::entity_types::AXOLOTL_VARIANT,
             Self::AxolotlPlayingDead(_) => mc_bamboo_data::entity_types::AXOLOTL_PLAYING_DEAD,
             Self::AxolotlFromBucket(_) => mc_bamboo_data::entity_types::AXOLOTL_FROM_BUCKET,
+            Self::GuardianMoving(_) => mc_bamboo_data::entity_types::GUARDIAN_MOVING,
+            Self::GuardianAttackTarget(_) => mc_bamboo_data::entity_types::GUARDIAN_ATTACK_TARGET,
         }
     }
 
@@ -966,6 +976,14 @@ impl EntityData {
             Self::WitchUsingItem(using) => {
                 write_data_header(out, 17, SERIALIZER_BOOLEAN);
                 write_bool(out, *using);
+            }
+            Self::GuardianMoving(moving) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                write_bool(out, *moving);
+            }
+            Self::GuardianAttackTarget(target) => {
+                write_data_header(out, self.index(), SERIALIZER_INT);
+                write_varint(out, *target);
             }
         }
     }

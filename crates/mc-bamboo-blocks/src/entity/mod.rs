@@ -586,6 +586,15 @@ impl Entity {
             // The `Squid` constructor's trailing `tentacleSpeed`, one `nextFloat`.
             mob.squid.tentacle_speed = mob::squid::roll_tentacle_speed(&mut self.random);
         }
+        if mob::guardian::is_guardian(mob.mob_type) {
+            // `Guardian` 构造函数：`clientSideTailAnimation = random.nextFloat()`，
+            // `clientSideTailAnimationO` 紧跟着取同一个值。会影响实体随机源的起点。
+            // The `Guardian` constructor: `clientSideTailAnimation = random.nextFloat()`,
+            // with `clientSideTailAnimationO` set to the same value. This advances the
+            // entity's random source.
+            mob.guardian.tail_animation = self.random.next_float();
+            mob.guardian.tail_animation_o = mob.guardian.tail_animation;
+        }
     }
 
     /// 对生物跑一段逻辑；不是生物时返回 `None`。

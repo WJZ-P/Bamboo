@@ -812,6 +812,12 @@ pub(super) fn check_spawn_rules(
         // 村民不在任何群系刷怪表里，只由结构 / 命令 / 刷怪蛋生成。
         // Villagers are in no biome spawn table; structures, commands and eggs make them.
         MobType::Villager => true,
+        // 守卫者的自然生成规则（`checkGuardianSpawnRules` / 海底神殿）属于后续段落；
+        // 这里先按"不在群系刷怪表"处理，由命令 / 刷怪蛋 / 结构生成。
+        // Guardian natural-spawn rules (`checkGuardianSpawnRules` / ocean monuments) belong to
+        // a later phase; treat them as absent from biome tables for now (commands, eggs,
+        // structures).
+        MobType::Guardian | MobType::ElderGuardian => true,
         // 两种傀儡都不在群系刷怪表里，只保留命令 / 方块图案生成时共用的规则。
         // Neither golem is in a biome spawn table; only the shared rule remains.
         MobType::IronGolem | MobType::SnowGolem => animal_spawn_rules(world, pos),
@@ -1118,6 +1124,8 @@ mod tests {
             gaze_disguise: false,
             alive: true,
             spectator: false,
+            game_mode: 0,
+            mining_fatigue: None,
             creative: false,
             sneaking: false,
             sprinting: false,

@@ -770,6 +770,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::CrafterCrafted { .. } => 27,
         Effect::KilledByArrow { .. } => 28,
         Effect::EnderPearlTeleport { .. } => 29,
+        Effect::GuardianElderEffect { .. } => 30,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -900,6 +901,10 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::HealPlayer { target, amount } => {
             target.hash(&mut hasher);
             amount.to_bits().hash(&mut hasher);
+        }
+        Effect::GuardianElderEffect { target, silent } => {
+            target.hash(&mut hasher);
+            silent.hash(&mut hasher);
         }
         Effect::DestroyProgress {
             breaker,
