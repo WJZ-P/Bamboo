@@ -42,6 +42,15 @@ impl BlockPos {
         Self::new(self.x + dx, self.y + dy, self.z + dz)
     }
 
+    /// 平移并夹到 `i32` 范围内，给客户端传来的超大偏移用；不触发溢出 panic。
+    pub const fn offset_saturating(self, dx: i32, dy: i32, dz: i32) -> Self {
+        Self::new(
+            self.x.saturating_add(dx),
+            self.y.saturating_add(dy),
+            self.z.saturating_add(dz),
+        )
+    }
+
     pub const fn above(self) -> Self {
         self.relative(Direction::Up)
     }
