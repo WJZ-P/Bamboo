@@ -1270,6 +1270,49 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// `PoiManager.existsAtPosition` / `getType`：这一格登记的 POI 类型 ID，
+    /// `None` 表示没有。默认没有（只读测试视图）。
+    fn poi_type_at(&self, _pos: BlockPos) -> Option<u8> {
+        None
+    }
+
+    /// `PoiManager.getCountInRange`：以 `center` 为心、`radius` 格内
+    /// 指定类型 / 占用口径的记录条数。默认 0。
+    ///
+    /// `occupancy`：`0 = HAS_SPACE`、`1 = IS_OCCUPIED`、`2 = ANY`。
+    fn poi_count_in_range(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+    ) -> usize {
+        0
+    }
+
+    /// `PoiManager.findClosest`：按官方遍历序取距离最近的一格；并列时取遍历序
+    /// 第一个。默认没有。
+    fn poi_find_closest(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+        _position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        None
+    }
+
+    /// `ServerLevel.sectionsToVillage(SectionPos.of(pos))`。默认 7（不可达）。
+    fn poi_sections_to_village(&self, _pos: BlockPos) -> i32 {
+        7
+    }
+
+    /// `ServerLevel.isCloseToVillage(pos, sections)`。默认假。
+    fn poi_is_close_to_village(&self, _pos: BlockPos, _sections: i32) -> bool {
+        false
+    }
+
     /// `Level.isDarkOutside()`：没有固定时间的维度里 `skyDarken >= 4`。
     /// 主世界没有 `hasFixedTime`，床的 `when_dark` 规则走这个判断。
     ///

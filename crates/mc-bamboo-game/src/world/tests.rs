@@ -5190,3 +5190,142 @@ fn lightning_last_tick_commands_match_in_both_drivers() {
     assert!(!precise.1.is_empty());
     assert_eq!(precise, parallel);
 }
+
+/// 通过方块逻辑的共享写入口（`RegionLevel::write_block`，`/setblock` / `/fill` /
+/// `/clone` / 玩家放方块 / 活塞 / 爆炸都走它）放下床头时同刻登记 POI，拆掉时注销；
+/// POI 票数的变化既不换区块包 `ChunkRevision`，也不重发区块包。
+#[test]
+fn block_logic_registers_poi_without_bumping_the_chunk_revision() {
+    use mc_bamboo_blocks::{World, world::UPDATE_CLIENTS};
+    use mc_bamboo_data::poi::{POI_TYPES, poi_type_id};
+
+    let mut server = Harness::new_loaded(2);
+    let client = server.join("Admin");
+    server.tick();
+    server.ensure_loaded(&[ChunkPos::new(0, 0)]);
+    let pos = BlockPos::new(5, -59, 5);
+    let home = poi_type_id("home").unwrap();
+    let bed_head = *POI_TYPES[home as usize].states.first().unwrap();
+    let region = server.region();
+    let before = region.chunks.revision(pos.chunk());
+    assert_eq!(region.poi.get_type(pos), None);
+
+    {
+        let (mut level, ticks) = server.region().block_level();
+        let mut world = World::new(&mut level, ticks);
+        assert!(world.set_block(pos, mc_bamboo_blocks::BlockState(bed_head), UPDATE_CLIENTS));
+        let _ = world.drain_effects();
+    }
+    let region = server.region();
+    assert_eq!(region.chunks.block(pos), Some(bed_head));
+    assert_eq!(region.poi.get_type(pos), Some(home));
+    assert_eq!(region.poi.free_tickets(pos), 1);
+    // 方块本身变了，版本号当然换了；下面单独核对「只有 POI 票变了」的情况。
+    let after_block = region.chunks.revision(pos.chunk());
+    assert_ne!(before, after_block, "方块写入要换版本号");
+
+    region.poi.take(|_| true, |_, _| true, pos, 8);
+    assert_eq!(region.poi.free_tickets(pos), 0);
+    assert_eq!(
+        region.chunks.revision(pos.chunk()),
+        after_block,
+        "POI 扣票不换区块包版本号"
+    );
+    region.poi.release(pos);
+    assert_eq!(region.poi.free_tickets(pos), 1);
+    assert_eq!(
+        region.chunks.revision(pos.chunk()),
+        after_block,
+        "POI 还票不换区块包版本号"
+    );
+
+    {
+        let (mut level, ticks) = server.region().block_level();
+        let mut world = World::new(&mut level, ticks);
+        assert!(world.set_block(
+            pos,
+            mc_bamboo_blocks::BlockState(blocks::AIR),
+            UPDATE_CLIENTS
+        ));
+        let _ = world.drain_effects();
+    }
+    let region = server.region();
+    assert_eq!(region.chunks.block(pos), Some(blocks::AIR));
+    assert_eq!(region.poi.get_type(pos), None);
+    assert!(
+        region.poi.dirty_chunks().contains(&pos.chunk()),
+        "POI 变化要按区块标脏"
+    );
+    let _ = client;
+}
+
+/// 放下床头顶登记 POI，`/save-all flush` 之后 `poi/r.0.0.mca` 里能读回同一条
+/// 记录（含扣掉的票）；这是 `region/` 之外的第三份持久数据。
+#[test]
+fn save_all_flush_persists_poi_in_its_own_region_file() {
+    use mc_bamboo_blocks::{World, world::UPDATE_CLIENTS};
+    use mc_bamboo_storage::{
+        anvil::{RegionCompression, RegionFile},
+        poi_nbt,
+        world_dir::WorldDir,
+    };
+
+    let tmp = D6TempDir::new("poi-persist");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+    let client = server.join("Admin");
+    server.tick();
+    server.ensure_loaded(&[ChunkPos::new(0, 0)]);
+    let pos = BlockPos::new(5, -59, 5);
+    let home = mc_bamboo_data::poi::poi_type_id("home").unwrap();
+    let bed_head = *mc_bamboo_data::poi::POI_TYPES[home as usize]
+        .states
+        .first()
+        .unwrap();
+    {
+        let (mut level, ticks) = server.region().block_level();
+        let mut world = World::new(&mut level, ticks);
+        assert!(world.set_block(pos, mc_bamboo_blocks::BlockState(bed_head), UPDATE_CLIENTS));
+        let _ = world.drain_effects();
+    }
+    server.region().poi.take(|_| true, |_, _| true, pos, 8);
+    assert_eq!(server.region().poi.free_tickets(pos), 0);
+
+    server
+        .world
+        .master
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: true,
+            source: client.id,
+        });
+    for _ in 0..6 {
+        server.tick();
+    }
+    server.world.master.host.flush_io();
+    server.tick();
+
+    let path = dir.poi_dir().join("r.0.0.mca");
+    assert!(path.exists(), "POI 区域文件已经写出");
+    let mut region = RegionFile::open(&path, dir.poi_dir(), RegionCompression::Zlib)
+        .expect("POI 区域文件能打开");
+    let bytes = region
+        .read(ChunkPos::new(0, 0), 32 << 20)
+        .unwrap()
+        .expect("POI 区块在盘上");
+    let tag = mc_bamboo_nbt::read_named(&bytes, mc_bamboo_nbt::Accounter::uncompressed_quota())
+        .map(|(_, entries)| mc_bamboo_nbt::Tag::Compound(entries))
+        .unwrap();
+    let stored = poi_nbt::decode(&tag).expect("官方格式能解");
+    let section = &stored
+        .sections
+        .iter()
+        .find(|(y, _)| *y == (pos.y >> 4))
+        .expect("这一段写进去了")
+        .1;
+    let record = section.get(pos).expect("床头的 POI 记录在盘上");
+    assert_eq!(record.kind, home);
+    assert_eq!(record.free_tickets, 0, "扣掉的票要在盘上");
+}

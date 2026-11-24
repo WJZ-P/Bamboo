@@ -11,4 +11,5 @@ pub mod chunk_io;
 pub mod chunk_nbt;
 pub mod level_dat;
 pub mod player_data;
+pub mod poi_nbt;
 pub mod world_dir;

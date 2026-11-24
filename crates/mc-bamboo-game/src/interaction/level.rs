@@ -22,7 +22,7 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::GameMode,
 };
-use mc_bamboo_world::{MIN_Y, flat, palette::PaletteView, store::ChunkStore};
+use mc_bamboo_world::{MIN_Y, flat, palette::PaletteView, poi::PoiStore, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
 use crate::{
@@ -35,6 +35,8 @@ use crate::{
 /// 一次方块操作借用的 [`Region`](crate::region::Region) 字段。
 pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
+    /// POI 表和 `chunks` 平级：方块写入时同刻登记 / 注销；查询走这一份。
+    pub(crate) poi: &'a mut PoiStore,
     pub(crate) changes: &'a mut BlockChanges,
     /// 方块实体从物品带来的组件，换了方块就丢，见 [`crate::block_items`]。
     pub(crate) block_items: &'a mut crate::pos_map::PosMap<ComponentPatch>,
@@ -415,6 +417,13 @@ impl Level for RegionLevel<'_> {
             self.unpack_loot_table(pos);
         }
         let written = self.chunks.set_block(pos, state.0);
+        if written {
+            // `ServerLevel.updatePOIOnBlockStateChange`：旧 / 新状态对应的 POI 类型
+            // 相等就什么都不做，否则 remove + add。官方丢进主线程队列异步执行，
+            // Bamboo 单世界线程、多岛并行，这里同刻顺序应用（文档里记的已知差异）。
+            let old = previous.map_or(mc_bamboo_data::blocks::VOID_AIR, |old| old.0);
+            self.poi.on_block_state_change(pos, old, state.0);
+        }
         // 官方 `LevelChunk.setBlockState`：换成别的方块时旧的方块实体就没了。
         // 区块里那份 `getUpdateTag` 由 `Chunk::set_block` 自己丢。
         if written && previous.is_some_and(|previous| !previous.is_same_block(state)) {
@@ -595,6 +604,45 @@ impl Level for RegionLevel<'_> {
 
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
         self.chunks.inhabited_time(chunk)
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        self.poi.get_type(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        let Some(occupancy) = crate::poi_query::occupancy(occupancy) else {
+            return 0;
+        };
+        self.poi
+            .get_count_in_range(|found| found == kind, center, radius, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        let occupancy = crate::poi_query::occupancy(occupancy)?;
+        self.poi.find_closest(
+            |found| found == kind,
+            position_filter,
+            center,
+            radius,
+            occupancy,
+        )
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        self.poi
+            .sections_to_village(mc_bamboo_world::light::SectionPos::of(pos))
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        self.poi.is_close_to_village(pos, sections)
     }
 
     /// 精确驱动里生物打玩家：拼出和区域入口同一组借用，当场走玩家受伤的正式入口。

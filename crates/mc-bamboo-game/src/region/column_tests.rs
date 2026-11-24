@@ -1083,7 +1083,14 @@ fn disk_restart_keeps_chunks_players_and_level() {
     };
     assert!(error.is_none(), "读盘没有报错：{error:?}");
     let decoded = InlineCodec
-        .decode(CHUNK, &PackedChunk { chunk, entities })
+        .decode(
+            CHUNK,
+            &PackedChunk {
+                chunk,
+                entities,
+                poi: None,
+            },
+        )
         .expect("解码");
     // 逐项比内容。`from_parts` 重建时部分字段的默认值/顺序会变，重编码的字节
     // 不一定逐字节相同，所以和 `archive_round_trip` 一样比读回的内容。
@@ -1521,7 +1528,14 @@ fn a_half_burnt_furnace_survives_a_disk_restart() {
         unreachable!()
     };
     let decoded = InlineCodec
-        .decode(CHUNK, &PackedChunk { chunk, entities })
+        .decode(
+            CHUNK,
+            &PackedChunk {
+                chunk,
+                entities,
+                poi: None,
+            },
+        )
         .expect("解码成功");
     io.close();
     let parts = decoded.column.parts();
@@ -1715,7 +1729,14 @@ fn sleeping_machines_survive_a_disk_restart() {
             unreachable!()
         };
         let decoded = InlineCodec
-            .decode(CHUNK, &PackedChunk { chunk, entities })
+            .decode(
+                CHUNK,
+                &PackedChunk {
+                    chunk,
+                    entities,
+                    poi: None,
+                },
+            )
             .expect("解码成功");
         io.close();
 

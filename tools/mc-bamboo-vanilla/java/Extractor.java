@@ -284,6 +284,7 @@ public final class Extractor {
             root.add("syncedRegistries", syncedRegistries(layers));
             root.add("tags", tags(layers));
             root.add("blockStates", blockStates());
+            root.add("poiTypes", poiTypes());
             root.add("blocks", blocks());
             root.add("items", items());
             root.add("entityTypes", entityTypes());
@@ -746,6 +747,27 @@ public final class Extractor {
         states.addProperty("total", Block.BLOCK_STATE_REGISTRY.size());
         states.add("defaults", defaults);
         return states;
+    }
+
+    /**
+     * `PoiTypes.bootstrap` 注册的全部 POI 类型，顺序是注册表 ID。
+     * 每种类型的匹配方块状态用全局状态 ID 列出，Bamboo 的 `forState` 直接按下标查。
+     */
+    private static JsonArray poiTypes() {
+        JsonArray types = new JsonArray();
+        BuiltInRegistries.POINT_OF_INTEREST_TYPE.forEach(type -> {
+            JsonObject object = new JsonObject();
+            object.addProperty("name", BuiltInRegistries.POINT_OF_INTEREST_TYPE.getKey(type).toString());
+            object.addProperty("maxTickets", type.maxTickets());
+            object.addProperty("validRange", type.validRange());
+            JsonArray states = new JsonArray();
+            for (BlockState state : type.matchingStates()) {
+                states.add(Block.BLOCK_STATE_REGISTRY.getId(state));
+            }
+            object.add("states", states);
+            types.add(object);
+        });
+        return types;
     }
 
     /** 按注册表 ID 排列的方块。除了状态 ID，其余字段都只看默认状态。 */

@@ -262,6 +262,42 @@ pub trait BlockView {
         crate::sky::monsters_burn(self.clock_ticks())
     }
 
+    /// POI 查询族，和 [`crate::Level`] 上的同名方法给同一份答案
+    /// （精确 / 并行驱动不分叉）。默认没有 POI 数据。
+    fn poi_type_at(&self, _pos: BlockPos) -> Option<u8> {
+        None
+    }
+
+    /// `occupancy`：0 = HAS_SPACE，1 = IS_OCCUPIED，2 = ANY。
+    fn poi_count_in_range(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+    ) -> usize {
+        0
+    }
+
+    fn poi_find_closest(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+        _position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        None
+    }
+
+    fn poi_sections_to_village(&self, _pos: BlockPos) -> i32 {
+        7
+    }
+
+    fn poi_is_close_to_village(&self, _pos: BlockPos, _sections: i32) -> bool {
+        false
+    }
+
     /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
     fn clock_ticks(&self) -> i64 {
         0
@@ -520,6 +556,35 @@ impl BlockView for World<'_> {
                 })
             })
         })
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        self.level().poi_type_at(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        self.level()
+            .poi_count_in_range(center, radius, kind, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        self.level()
+            .poi_find_closest(center, radius, kind, occupancy, position_filter)
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        self.level().poi_sections_to_village(pos)
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        self.level().poi_is_close_to_village(pos, sections)
     }
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {

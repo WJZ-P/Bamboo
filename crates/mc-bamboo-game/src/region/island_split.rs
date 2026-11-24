@@ -147,6 +147,8 @@ fn splitmix(mut z: u64) -> u64 {
 pub(crate) enum IslandPart {
     /// 区块表：方块、两层光照、版本号、原样起点、已加载登记、存盘改动集合。
     Chunks,
+    /// POI 段表：按 `SectionPos` 索引的段、按区块分脏、已装载登记。
+    Poi,
     /// 每区块的 tick 档位和三个 tick 集合、待交出的成员变化。
     TickLevels,
     /// 计划刻（主队列、搁置表、活塞记录、每区块标记）。
@@ -202,8 +204,9 @@ pub(crate) enum IslandPart {
 impl IslandPart {
     /// 全部类别，测试逐类改坏用。
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 25] = [
+    pub(crate) const ALL: [Self; 26] = [
         Self::Chunks,
+        Self::Poi,
         Self::TickLevels,
         Self::BlockTicks,
         Self::BlockEvents,
@@ -405,6 +408,12 @@ impl Region {
             ChunkStore::loaded()
         };
         lap("Chunks");
+        let poi = if moves(IslandPart::Poi) {
+            self.poi.split_off(chunks)
+        } else {
+            mc_bamboo_world::poi::PoiStore::new()
+        };
+        lap("Poi");
         let tick_levels = if moves(IslandPart::TickLevels) {
             self.tick_levels.split_off(chunks)
         } else {
@@ -540,6 +549,7 @@ impl Region {
             links,
             pending_triggers: Vec::new(),
             chunks: new_chunks,
+            poi,
             tick_levels,
             template_body: self.template_body.clone(),
             chunk_cache: ChunkCache::default(),
@@ -710,6 +720,7 @@ impl Region {
             player_grid,
             links,
             chunks,
+            poi,
             tick_levels,
             template_body: _,
             chunk_cache: _,
@@ -767,6 +778,8 @@ impl Region {
             .absorb(chunks)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
         lap("merge Chunks");
+        self.poi.absorb(poi);
+        lap("merge Poi");
         self.tick_levels.absorb(tick_levels);
         lap("merge TickLevels");
         self.block_ticks.absorb(block_ticks);
