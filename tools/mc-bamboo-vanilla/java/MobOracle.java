@@ -502,7 +502,9 @@ public final class MobOracle {
                 playAttackTarget(official, out, name);
                 cases++;
             }
-            for (String name : List.of("guardian_swim")) {
+            for (String name : List.of("guardian_swim",
+                    "laser_player_normal", "laser_player_hard",
+                    "laser_player_elder", "laser_player_elder_hard")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
                 cases++;
@@ -10311,8 +10313,9 @@ public final class MobOracle {
      */
     private static void playGuardian(Official official, Writer out, String name) throws Exception {
         boolean elder = name.contains("elder");
+        boolean laser = name.startsWith("laser_");
         int difficulty = name.contains("hard") ? 3 : 2;
-        int ticks = 200;
+        int ticks = laser ? 100 : 200;
         FakeLevel world = FakeLevel.create(official);
         world.getRandom().setSeed(9100L);
         world.injectedSeaLevel = -63;
@@ -10343,6 +10346,41 @@ public final class MobOracle {
         guardian.setYBodyRot(0.0F);
         guardian.setPos(0.5, 62.0, 0.5);
         world.tracked.add(guardian);
+        // 激光场景放一名生存模式的玩家在 8 格外（选择器要求 distSqr > 9），
+        // 只把它当作目标；不 tick 玩家，逐刻只比守卫者一侧的状态。
+        // Laser scenes add one survival player 8 blocks away (the selector needs
+        // distSqr > 9) as a target; the player is not ticked and only the
+        // guardian's state is compared.
+        ServerPlayer player = null;
+        if (laser) {
+            GameProfile profile = new GameProfile(new UUID(1L, 2L), "GuardianTarget");
+            player = new ServerPlayer(official.server, world, profile,
+                    ClientInformation.createDefault());
+            player.setPos(8.5, 61.0, 0.5);
+            setRandom(player, 42002L);
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            // `ServerPlayer.hurtServer` 会读 `connection.hasClientLoaded()`，假玩家
+            // 需要一个能收包的 stub connection（和其它玩家受伤场景一样）。
+            // `ServerPlayer.hurtServer` reads `connection.hasClientLoaded()`; the fake
+            // player needs a stub connection like the other player-hurt scenes.
+            Bytes sink = new Bytes(official.registries);
+            RecordingListener connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection,
+                    "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class, connection,
+                    "connection", new Connection(PacketFlow.CLIENTBOUND));
+            connection.bytes = sink;
+            put(ServerPlayer.class, player, "connection", connection);
+            // `NearestAttackableTargetGoal<LivingEntity>` 走 `getEntitiesOfClass`，
+            // 所以玩家除了进玩家表也要进假世界的实体表，官方才会把它当目标。
+            // `NearestAttackableTargetGoal<LivingEntity>` uses `getEntitiesOfClass`,
+            // so the player must also be in the fake level's entity list.
+            world.playersList().add(player);
+            world.tracked.add(player);
+        }
         var frames = new StringBuilder("[");
         for (int tick = 0; tick <= ticks; tick++) {
             if (tick > 0) {
@@ -10369,7 +10407,17 @@ public final class MobOracle {
                 // which keeps the per-tick random draws aligned.
                 + ",\"skyDarken\":0"
                 + ",\"guardian\":" + guardianSetup(elder, new double[] {0.5, 62.0, 0.5}, 42001L)
+                + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player))
                 + ",\"frames\":" + frames + "}\n");
+    }
+
+    private static String guardianPlayerSetup(ServerPlayer player) {
+        net.minecraft.world.phys.Vec3 p = player.position();
+        return "{\"uid\":" + player.getId()
+                + ",\"position\":[" + Double.doubleToRawLongBits(p.x) + ','
+                + Double.doubleToRawLongBits(p.y) + ',' + Double.doubleToRawLongBits(p.z) + ']'
+                + ",\"health\":" + Float.floatToRawIntBits(20.0F)
+                + ",\"gameMode\":0}";
     }
 
     /** `Guardian.DATA_ID_ATTACK_TARGET` 的整数值（私有静态字段，反射读）。 */
