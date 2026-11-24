@@ -2585,7 +2585,10 @@ pub(super) fn living_hurt_server(
         return false;
     }
     if mob.mob_type == super::MobType::Enderman {
-        if matches!(source.kind, DamageKind::Arrow | DamageKind::Spit) {
+        if matches!(
+            source.kind,
+            DamageKind::Arrow | DamageKind::Trident | DamageKind::Spit
+        ) {
             super::enderman::dodge_projectile(me, mob, ctx);
             return false;
         }

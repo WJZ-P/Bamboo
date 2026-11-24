@@ -327,7 +327,20 @@ fn pickup_arrow(
     arrow: &mc_bamboo_blocks::entity::arrow::Arrow,
     creative: bool,
 ) {
-    use mc_bamboo_blocks::entity::arrow::Pickup;
+    use mc_bamboo_blocks::entity::arrow::{ArrowVariant, Pickup};
+    // `ThrownTrident.playerTouch`：有主人的三叉戟只有主人能碰；没有主人时谁都能碰。
+    // `ThrownTrident.playerTouch`: only the owner can touch an owned trident;
+    // a trident with no owner can be touched by anyone.
+    if arrow.variant == ArrowVariant::Trident {
+        let owned = region.players.get(&id).is_some_and(|player| {
+            arrow
+                .owner_uuid
+                .is_none_or(|uuid| uuid == *player.uuid.as_bytes())
+        });
+        if !owned {
+            return;
+        }
+    }
     match arrow.pickup {
         Pickup::Disallowed => return,
         Pickup::CreativeOnly if !creative => return,

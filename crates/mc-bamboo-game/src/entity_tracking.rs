@@ -961,7 +961,19 @@ impl KindData {
                 if arrow.in_ground {
                     data.push(EntityData::ArrowInGround(true));
                 }
-                if arrow.color != -1 {
+                if matches!(
+                    arrow.variant,
+                    mc_bamboo_blocks::entity::arrow::ArrowVariant::Trident
+                ) {
+                    // `ThrownTrident` 的 11/12 是忠诚和附魔光效，不是药水箭的颜色。
+                    // A trident's 11/12 are loyalty and foil, not the tipped-arrow colour.
+                    if arrow.loyalty != 0 {
+                        data.push(EntityData::TridentLoyalty(arrow.loyalty));
+                    }
+                    if arrow.foil {
+                        data.push(EntityData::TridentFoil(true));
+                    }
+                } else if arrow.color != -1 {
                     data.push(EntityData::ArrowColor(arrow.color));
                 }
                 data
