@@ -21,6 +21,8 @@ fn scene_kind(kind: i32) -> MobType {
     match kind {
         90 => MobType::Guardian,
         91 => MobType::ElderGuardian,
+        92 => MobType::Squid,
+        93 => MobType::Axolotl,
         _ => unreachable!("unknown guardian kind {kind}"),
     }
 }
@@ -44,7 +46,20 @@ pub(super) struct GuardianCase {
     /// Thorns scenes: one hit on the guardian at a given tick.
     #[serde(default)]
     hurt: Option<GuardianHurt>,
+    /// 生物目标场景的鱿鱼 / 美西螈。
+    ///
+    /// The squid / axolotl in mob-victim scenes.
+    #[serde(default)]
+    victim: Option<GuardianVictim>,
     frames: Vec<GuardianFrameLine>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuardianVictim {
+    kind: i32,
+    position: [i64; 3],
+    seed: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +111,9 @@ struct GuardianFrameLine {
     /// `LivingEntity.damageCooldownTime`（受伤无敌计时）。
     #[serde(default)]
     player_damage_cooldown: i32,
+    /// 生物目标血量的原始位。
+    #[serde(default)]
+    victim_health: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -290,6 +308,33 @@ fn guardian_frames_match(expected: &GuardianFrame, ours: &GuardianFrame) -> bool
     normalized == *expected
 }
 
+/// 生物目标（鱿鱼 / 美西螈）和守卫者一样重放构造后的随机源。
+///
+/// Replays the mob victim's post-construction random source like the guardian.
+fn spawn_victim(case: &GuardianCase, level: &mut MobLevel, ticks: &mut BlockTicks) -> Option<i32> {
+    let setup = case.victim.as_ref()?;
+    let position = Vec3::new(
+        f64::from_bits(setup.position[0] as u64),
+        f64::from_bits(setup.position[1] as u64),
+        f64::from_bits(setup.position[2] as u64),
+    );
+    let mut entity = Entity::by_mob_type(scene_kind(setup.kind), position);
+    entity.old_position = position;
+    let uid = World::new(level, ticks).spawn_entity(entity);
+    level.entities.with_mut(uid, |entity| {
+        entity.random = JavaRandom::new(setup.seed);
+        let _ = mc_bamboo_blocks::entity::mob::insecure_uuid(&mut entity.random);
+        let _ = entity.random.next_float();
+        entity.y_rot = 0.0;
+        if let Some(mob) = entity.kind.mob_mut() {
+            mob.y_head_rot = 0.0;
+            mob.y_body_rot = 0.0;
+            mob.no_ai = true;
+        }
+    });
+    Some(uid)
+}
+
 fn frame_of(level: &MobLevel, id: i32) -> GuardianFrame {
     let Some(entity) = level.entities.get(id) else {
         return GuardianFrame {
@@ -348,6 +393,7 @@ impl Report {
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         let guardian = case.spawn(&mut level, &mut ticks, self.break_test.as_deref());
+        let victim_uid = spawn_victim(case, &mut level, &mut ticks);
         let player_uid = case.player.as_ref().map_or(-1, |setup| setup.uid);
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick != 0 {
@@ -407,6 +453,15 @@ impl Report {
             let ours_player_health = player[0] as i32;
             let ours_damage_cooldown = player[1] as i32;
             let ours_hurt_time = player[2] as i32;
+            let ours_victim_health = victim_uid
+                .and_then(|uid| level.entities.get(uid))
+                .map(|entity| {
+                    entity
+                        .kind
+                        .mob()
+                        .map_or(0, |mob| mob.health.to_bits() as i32)
+                })
+                .unwrap_or(0);
             let label = format!("{} tick {tick}", case.name);
             if expected.guardian.removed == 1 {
                 if ours.removed != 1 {
@@ -416,17 +471,20 @@ impl Report {
                 || expected.player_health != ours_player_health
                 || expected.player_hurt_time != ours_hurt_time
                 || expected.player_damage_cooldown != ours_damage_cooldown
+                || expected.victim_health != ours_victim_health
             {
                 self.mismatch(format!(
-                    "{label}: official {:?}/player({}, {}, {}), bamboo {:?}/player({}, {}, {})",
+                    "{label}: official {:?}/player({}, {}, {})/victim {}, bamboo {:?}/player({}, {}, {})/victim {}",
                     expected.guardian,
                     expected.player_health,
                     expected.player_hurt_time,
                     expected.player_damage_cooldown,
+                    expected.victim_health,
                     ours,
                     ours_player_health,
                     ours_hurt_time,
-                    ours_damage_cooldown
+                    ours_damage_cooldown,
+                    ours_victim_health
                 ));
             }
             self.steps += 1;

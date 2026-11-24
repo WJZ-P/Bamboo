@@ -506,7 +506,8 @@ public final class MobOracle {
                     "laser_player_normal", "laser_player_hard",
                     "laser_player_elder", "laser_player_elder_hard",
                     "guardian_thorns_static", "guardian_thorns_moving",
-                    "guardian_thorns_arrow")) {
+                    "guardian_thorns_arrow",
+                    "laser_mob_victim_squid", "laser_mob_victim_axolotl")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
                 cases++;
@@ -10318,12 +10319,13 @@ public final class MobOracle {
         boolean laser = name.startsWith("laser_");
         boolean flop = name.startsWith("guardian_flop");
         boolean thorns = name.startsWith("guardian_thorns_");
+        boolean mobVictim = name.startsWith("laser_mob_victim_");
         int difficulty = name.contains("hard") ? 3 : 2;
         // 尖刺场景聚焦反伤判定本身（hurt 在 tick 5，再比一刻）；
         // 之后长时间的游走位移受 java.lang.Math.sin/cos 平台末位差影响。
         // Thorns scenes focus on the reflection itself (hurt at tick 5 plus one
         // tick); longer wandering motion is subject to Math.sin/cos platform diffs.
-        int ticks = thorns ? 6 : (laser ? 100 : 200);
+        int ticks = thorns ? 6 : (laser || mobVictim ? 100 : 200);
         double[] guardianAt = flop ? new double[] {0.5, 61.0, 0.5}
                 : new double[] {0.5, 62.0, 0.5};
         FakeLevel world = FakeLevel.create(official);
@@ -10360,6 +10362,28 @@ public final class MobOracle {
         guardian.setYBodyRot(0.0F);
         guardian.setPos(guardianAt[0], guardianAt[1], guardianAt[2]);
         world.tracked.add(guardian);
+        // 生物目标场景：一名鱿鱼 / 美西螈目标（`GuardianAttackSelector` 认这两类）。
+        // Mob-victim scenes: a squid / axolotl target (both accepted by the selector).
+        net.minecraft.world.entity.Mob victim = null;
+        if (mobVictim) {
+            victim = name.contains("squid")
+                    ? (net.minecraft.world.entity.Mob) EntityTypes.SQUID
+                            .create(world, EntitySpawnReason.COMMAND)
+                    : (net.minecraft.world.entity.Mob) EntityTypes.AXOLOTL
+                            .create(world, EntitySpawnReason.COMMAND);
+            setRandom(victim, 42003L);
+            victim.setUUID(Mth.createInsecureUUID(victim.getRandom()));
+            victim.getRandom().nextFloat();
+            victim.setYRot(0.0F);
+            victim.setYHeadRot(0.0F);
+            victim.setYBodyRot(0.0F);
+            victim.setPos(8.5, 62.0, 0.5);
+            // 目标静止：只验证选择器认这两类和激光命中，不引入鱿鱼游动的浮点差。
+            // Keep the victim still: verify the selector and laser hit without
+            // introducing the squid's swimming float drift.
+            victim.setNoAi(true);
+            world.tracked.add(victim);
+        }
         // 激光场景放一名生存模式的玩家在 8 格外（选择器要求 distSqr > 9），
         // 只把它当作目标；不 tick 玩家，逐刻只比守卫者一侧的状态。
         // Laser scenes add one survival player 8 blocks away (the selector needs
@@ -10414,6 +10438,11 @@ public final class MobOracle {
                     guardian.commonTick();
                     guardian.tick();
                 }
+                if (victim != null && !victim.isRemoved()) {
+                    victim.checkDespawn();
+                    victim.commonTick();
+                    victim.tick();
+                }
             }
             if (thorns && tick == 5) {
                 // 玩家近战（或 generic 的非活体来源）打守卫者，触发
@@ -10434,6 +10463,8 @@ public final class MobOracle {
                     .append(player == null ? "0" : player.hurtTime)
                     .append(",\"playerDamageCooldown\":")
                     .append(player == null ? "0" : player.damageCooldownTime)
+                    .append(",\"victimHealth\":")
+                    .append(victim == null ? "0" : Float.floatToRawIntBits(victim.getHealth()))
                     .append('}');
         }
         frames.append(']');
@@ -10450,6 +10481,11 @@ public final class MobOracle {
                 + ",\"skyDarken\":0"
                 + ",\"guardian\":" + guardianSetup(elder, guardianAt, 42001L)
                 + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player))
+                + ",\"victim\":" + (victim == null ? "null"
+                        : "{\"kind\":" + (name.contains("squid") ? "92" : "93")
+                        + ",\"position\":[" + Double.doubleToRawLongBits(8.5) + ','
+                        + Double.doubleToRawLongBits(62.0) + ','
+                        + Double.doubleToRawLongBits(0.5) + "],\"seed\":42003}")
                 + ",\"hurt\":" + (thorns ? "{\"tick\":5,\"amount\":1.0,\"livingDirect\":"
                         + !name.contains("arrow") + ",\"moving\":" + name.contains("moving")
                         + "}" : "null")
