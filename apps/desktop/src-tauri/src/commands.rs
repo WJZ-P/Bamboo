@@ -59,7 +59,7 @@ pub fn performance_presets() -> PerformancePresets {
     settings::performance_presets()
 }
 
-/// 以已保存的设置为基准套用预设，只改五项；界面随后照常调 `save_settings`。
+/// 以已保存的设置为基准套用预设，只改八项；界面随后照常调 `save_settings`。
 #[tauri::command]
 pub fn merge_performance_preset(
     saved: ServerSettings,
