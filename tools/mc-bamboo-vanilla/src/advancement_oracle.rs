@@ -10,7 +10,9 @@
 
 use std::{
     collections::BTreeMap,
+    fs,
     io::{BufRead, BufReader},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -34,6 +36,10 @@ struct Options {
     break_definitions: bool,
     break_packet: bool,
     break_save: bool,
+    /// 把排版对不上的那次兄弟顺序连同官方坐标写到这个目录，每个失败一组文件。
+    save_failures: Option<String>,
+    /// 只跑 Bamboo 这一侧，读回存档的兄弟顺序和官方坐标重放比较，不起 Java 进程。
+    replay: Option<String>,
 }
 
 impl Options {
@@ -45,6 +51,8 @@ impl Options {
             break_definitions: false,
             break_packet: false,
             break_save: false,
+            save_failures: None,
+            replay: None,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -63,6 +71,14 @@ impl Options {
                         .parse()
                         .map_err(|_| "--show 需要非负整数".to_owned())?;
                 }
+                "--save-failures" => {
+                    options.save_failures =
+                        Some(args.next().ok_or("--save-failures 需要目录")?.to_string());
+                }
+                "--replay" => {
+                    options.replay =
+                        Some(args.next().ok_or("--replay 需要文件或目录")?.to_string());
+                }
                 // 改坏确认：四处独立开关，每处都要被对拍报出来。
                 "--break-layout" => options.break_layout = true,
                 "--break-definitions" => options.break_definitions = true,
@@ -76,6 +92,23 @@ impl Options {
         }
         Ok(options)
     }
+}
+
+/// 一组可重放的排版输入：`external_layout_order` 的完整结果加上官方坐标。
+/// x / y 用 f64 存 JSON 数字，重放时按 f32 比较，和在线对拍的读取方式一致。
+/// One replayable layout case: the full external sibling order plus official coordinates.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReplayCase {
+    digest: String,
+    child_order: Vec<Vec<String>>,
+    positions: Vec<ReplayPosition>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReplayPosition {
+    id: String,
+    x: f64,
+    y: f64,
 }
 
 #[derive(Debug, Default)]
@@ -113,6 +146,9 @@ impl Report {
 /// `command` 已经是能运行 `AdvancementOracle.java` 的命令。
 pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
     let options = Options::parse(args)?;
+    if let Some(path) = &options.replay {
+        return replay(path, options.show);
+    }
     let mut report = Report {
         show: options.show,
         ..Default::default()
@@ -153,6 +189,7 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
             tree.apply_order(TreeOrder::External, Some(&broken))
                 .map_err(|error| format!("改坏排版失败：{error}"))?;
         }
+        let failures_before = report.failures.len();
         compare_layout(
             &tree,
             &layout_lines,
@@ -161,6 +198,11 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
             &mut report,
             options.break_packet,
         )?;
+        if let Some(dir) = &options.save_failures
+            && report.failures.len() > failures_before
+        {
+            save_failure(dir, run, &digest, &child_order, &layout_lines)?;
+        }
     }
     report.check(
         digests.len() >= 3
@@ -408,6 +450,119 @@ fn external_layout_order(lines: &[Value]) -> Result<Vec<Vec<String>>, String> {
         result[index] = strings(line.get("children"));
     }
     Ok(result)
+}
+
+/// 把官方 `position` 行里的坐标抽出来，供存档和离线重放用。
+fn official_positions(lines: &[Value]) -> Vec<ReplayPosition> {
+    lines
+        .iter()
+        .filter(|line| line["type"] == "position")
+        .filter_map(|line| {
+            Some(ReplayPosition {
+                id: line["id"].as_str()?.to_owned(),
+                x: line["x"].as_f64()?,
+                y: line["y"].as_f64()?,
+            })
+        })
+        .collect()
+}
+
+/// 把一次排版对不上的完整兄弟顺序和官方坐标写成一个 JSON 文件。
+/// Save one mismatching run's sibling order and official coordinates to a JSON file.
+fn save_failure(
+    dir: &str,
+    run: usize,
+    digest: &str,
+    child_order: &[Vec<String>],
+    lines: &[Value],
+) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|error| format!("无法创建 {dir}：{error}"))?;
+    let case = ReplayCase {
+        digest: digest.to_owned(),
+        child_order: child_order.to_vec(),
+        positions: official_positions(lines),
+    };
+    let path = Path::new(dir).join(format!("{run}-{digest}.json"));
+    let text = serde_json::to_string_pretty(&case).map_err(|error| error.to_string())?;
+    fs::write(&path, text).map_err(|error| format!("无法写 {path:?}：{error}"))?;
+    eprintln!("advancement-oracle: 已把出错顺序存到 {}", path.display());
+    Ok(())
+}
+
+fn replay_files(path: &str) -> Result<Vec<PathBuf>, String> {
+    let target = Path::new(path);
+    if target.is_file() {
+        return Ok(vec![target.to_path_buf()]);
+    }
+    if target.is_dir() {
+        let mut files: Vec<PathBuf> = fs::read_dir(target)
+            .map_err(|error| format!("无法读取 {path}：{error}"))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|file| {
+                file.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect();
+        files.sort();
+        return Ok(files);
+    }
+    Err(format!("重放路径不存在：{path}"))
+}
+
+/// 读回存档，只跑 Bamboo 一侧的排版，和存下的官方坐标逐项比较，不起 Java 进程。
+/// Replay stored cases with the Bamboo layout only, comparing against stored official coordinates.
+fn replay(path: &str, show: usize) -> Result<(), String> {
+    let files = replay_files(path)?;
+    if files.is_empty() {
+        return Err(format!("{path} 里没有可重放的 JSON 文件"));
+    }
+    let mut report = Report {
+        show,
+        ..Default::default()
+    };
+    for file in &files {
+        let text = fs::read_to_string(file).map_err(|error| format!("无法读 {file:?}：{error}"))?;
+        let case: ReplayCase = serde_json::from_str(&text)
+            .map_err(|error| format!("{file:?} 不是合法的存档：{error}"))?;
+        let tree = AdvancementTree::parse(
+            mc_bamboo_data::ADVANCEMENTS_JSON,
+            TreeOrder::External,
+            Some(&case.child_order),
+        )
+        .map_err(|error| format!("解析进度树失败：{error}"))?;
+        for position in &case.positions {
+            let label = format!("{} {}:{}", case.digest, file.display(), position.id);
+            let Some(index) = tree.index(&position.id) else {
+                report.check(false, format!("{label}: Bamboo 缺这个进度"));
+                continue;
+            };
+            let x = position.x as f32;
+            let y = position.y as f32;
+            report.check(
+                tree.nodes[index].x.to_bits() == x.to_bits(),
+                format!("{label}: x 不同"),
+            );
+            report.check(
+                tree.nodes[index].y.to_bits() == y.to_bits(),
+                format!(
+                    "{label}: y 不同 (ours {}, official {y})",
+                    tree.nodes[index].y
+                ),
+            );
+        }
+        report.check(
+            case.positions.len() == tree.displayed.len(),
+            format!("{}: 官方显示节点数不同", case.digest),
+        );
+    }
+    println!("advancement-oracle: 重放了 {} 组兄弟顺序", files.len());
+    report.finish()
 }
 
 fn compare_layout(
