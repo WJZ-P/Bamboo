@@ -450,6 +450,7 @@ pub fn plans_for_tick(
                 plan.decisions_run = plan.tier.decisions_run(phase);
                 if plan.decisions_run {
                     let gap = mob.throttle.gap(game_time);
+                    plan.decision_gap = gap;
                     if gap > 1 {
                         // 按经过的刻数补 `noActionTime`；随机数不重放。
                         let extra = (gap - 1).min(i64::from(i32::MAX)) as i32;

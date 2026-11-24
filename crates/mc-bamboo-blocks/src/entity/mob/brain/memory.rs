@@ -510,18 +510,32 @@ impl Memories {
     /// `Brain.forgetOutdatedMemories` → `MemorySlot.tick`: iterate only the filled slots
     /// with a finite expiry, instead of scanning all 32 slots every tick.
     pub fn tick(&mut self) {
+        self.tick_by(1);
+    }
+
+    /// 一次按 `gap` 刻推进记忆过期（降频后大脑跳刻用，`gap <= 1` 等价于单刻 [`Self::tick`]）。
+    ///
+    /// 逐刻语义下 `ttl == 0` 在第 1 刻清空、`ttl == k` 在第 `k + 1` 刻清空，
+    /// 所以连续跑 `step` 刻等价于：`ttl < step` 清空，否则 `ttl -= step`。
+    ///
+    /// Advances memory expiry by `gap` ticks at once (for throttled brain ticks;
+    /// `gap <= 1` matches single-tick [`Self::tick`]). Under per-tick rules a slot with
+    /// `ttl == k` clears on tick `k + 1`, so `step` ticks clear iff `ttl < step`,
+    /// otherwise subtract `step`.
+    pub fn tick_by(&mut self, gap: i64) {
+        let step = gap.max(1);
         let mut bits = self.expiring;
         while bits != 0 {
             let index = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             let b = 1_u64 << index;
             let slot = &mut self.slots[index];
-            let cleared = if slot.ttl <= 0 {
+            let cleared = if slot.ttl < step {
                 slot.value = None;
                 slot.ttl = NEVER_EXPIRE;
                 true
             } else {
-                slot.ttl -= 1;
+                slot.ttl -= step;
                 false
             };
             if cleared {

@@ -149,11 +149,13 @@ impl Sensor {
         }
     }
 
-    /// `Sensor.tick`：倒计时到 0 就重置成 `scanRate` 并扫描一次。
+    /// `Sensor.tick`：倒计时按 `gap` 推进（降频跳刻时传入经过刻数，精确档为 1），
+    /// 到 0 或以下就重置成 `scanRate` 并扫描一次。
     ///
-    /// `Sensor.tick`: when the countdown reaches 0, reset it to `scanRate` and scan.
-    pub(super) fn tick(&mut self, cx: &mut Cx) {
-        self.time_to_tick -= 1;
+    /// `Sensor.tick`: advance the countdown by `gap` (1 in precise mode, elapsed ticks
+    /// when throttled); when it reaches 0 or below, reset to `scanRate` and scan once.
+    pub(super) fn tick_by(&mut self, cx: &mut Cx, gap: i64) {
+        self.time_to_tick -= gap.max(1);
         if self.time_to_tick > 0 {
             return;
         }

@@ -453,11 +453,25 @@ impl Brain {
         }
     }
 
-    /// `Brain.tick`：记忆过期、传感器、启动、推进。
+    /// `Brain.tick`：记忆过期、传感器、启动、推进（精确单刻）。
     ///
-    /// `Brain.tick`: expire memories, sensors, start, then tick.
+    /// `Brain.tick`: expire memories, sensors, start, then tick (exact single tick).
     pub fn tick(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-        self.memories.tick();
+        self.tick_by(me, mob, ctx, 1);
+    }
+
+    /// 降频档用的跳刻版 `Brain.tick`：记忆过期与传感器倒计时按 `gap`（至少 1）推进，
+    /// 避免 20 刻传感器在降频 4 刻下拖慢成 80 刻。行为的结束时刻用的是绝对 `game_time`
+    /// （`ctx.blocks().game_time()`），不受 `gap` 影响。精确档传 `gap = 1` 与
+    /// [`Self::tick`] 逐位一致。
+    ///
+    /// Throttled `Brain.tick`: advances memory expiry and sensor countdowns by `gap`
+    /// (clamped to >= 1) so 20-tick sensors do not slow down 4× under 4-tick throttling.
+    /// Behaviour end timestamps use absolute `game_time` and are unaffected. Passing
+    /// `gap = 1` (precise mode) is bit-identical to [`Self::tick`].
+    pub fn tick_by(&mut self, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, gap: i64) {
+        let step = gap.max(1);
+        self.memories.tick_by(step);
         let time = ctx.blocks().game_time();
         let Self {
             memories,
@@ -475,7 +489,7 @@ impl Brain {
             time,
         };
         for sensor in sensors.iter_mut() {
-            sensor.tick(&mut cx);
+            sensor.tick_by(&mut cx, step);
         }
         // `startEachNonRunning`：只遍历核心 + 当前活动桶，按优先级顺序。新启动的行为
         // 按序插进持久的 running 表，保持官方遍历顺序。
@@ -863,5 +877,211 @@ mod tests {
         // A registered empty slot satisfies VALUE_ABSENT; an unregistered one never does.
         assert!(brain.requirements_met(Activity::Idle));
         assert!(!brain.requirements_met(Activity::Swim));
+    }
+
+    /// `Memories::tick_by(gap)` 与连续 `gap` 次 `Memories::tick()` 逐槽逐位一致
+    /// （含 `ttl = 0`、`ttl = gap - 1`、`ttl = gap`、`ttl > gap` 与不过期槽）。
+    #[test]
+    fn memory_tick_by_matches_repeated_single_ticks() {
+        for gap in [1_i64, 2, 3, 4, 20] {
+            for ttl in [0_i64, 1, 2, 3, 4, 5, 19, 20, 21] {
+                let mut stepped = Memories::default();
+                let mut looped = Memories::default();
+                for m in [&mut stepped, &mut looped] {
+                    m.register(MemoryType::IsPanicking);
+                    m.register(MemoryType::WalkTarget);
+                    m.set_with_ttl(
+                        MemoryType::IsPanicking,
+                        memory::MemoryValue::Bool(true),
+                        ttl,
+                    );
+                    m.set(MemoryType::WalkTarget, memory::MemoryValue::Unit);
+                }
+                stepped.tick_by(gap);
+                for _ in 0..gap {
+                    looped.tick();
+                }
+                assert_eq!(stepped, looped, "gap={gap} ttl={ttl}");
+            }
+        }
+    }
+
+    /// `Brain::tick_by(gap)` 按 `gap` 推进记忆过期和传感器倒计时，行为的结束时刻仍读
+    /// 绝对 `game_time` 不受 `gap` 影响；精确档 `gap = 1` 与 `Brain::tick()` 一致。
+    #[test]
+    fn brain_tick_by_advances_memories_and_sensors_while_behaviors_use_game_time() {
+        use crate::{
+            BlockTicks, World, entity::ctx::PreciseCtx, entity::mob::MobType, testing::TestLevel,
+        };
+        use mc_bamboo_core::Vec3;
+
+        let mut brain = Brain::new(
+            &[SensorKind::IsInWater],
+            vec![ActivityData::sequential(
+                Activity::Core,
+                0,
+                vec![Kind::DoNothing { min: 10, max: 10 }],
+            )],
+        );
+        brain.memories.register(MemoryType::DangerDetectedRecently);
+        brain.memories.set_with_ttl(
+            MemoryType::DangerDetectedRecently,
+            memory::MemoryValue::Bool(true),
+            10,
+        );
+        brain.sensors[0].time_to_tick = 10;
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut me = Entity::by_mob_type(MobType::Frog, Vec3::new(0.5, 64.0, 0.5));
+        let mut mob = Mob::new(MobType::Frog);
+
+        // t = 100, gap = 1：启动 DoNothing (end = 110)，记忆 ttl 10→9，传感器 10→9。
+        ticks.set_time(100);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 1);
+        }
+        assert_eq!(
+            brain
+                .memories
+                .time_until_expiry(MemoryType::DangerDetectedRecently),
+            9
+        );
+        assert_eq!(brain.sensors[0].time_to_tick, 9);
+        assert_eq!(brain.running_names(), vec!["DoNothing"]);
+
+        // t = 104, gap = 4：记忆 ttl 9→5，传感器 9→5；行为按 game_time=104 < 110 仍在跑。
+        ticks.set_time(104);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 4);
+        }
+        assert_eq!(
+            brain
+                .memories
+                .time_until_expiry(MemoryType::DangerDetectedRecently),
+            5
+        );
+        assert_eq!(brain.sensors[0].time_to_tick, 5);
+        assert_eq!(brain.running_names(), vec!["DoNothing"]);
+
+        // t = 108, gap = 4：记忆 ttl 5→1，传感器 5→1；行为按 game_time=108 < 110 仍在跑。
+        ticks.set_time(108);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 4);
+        }
+        assert_eq!(
+            brain
+                .memories
+                .time_until_expiry(MemoryType::DangerDetectedRecently),
+            1
+        );
+        assert_eq!(brain.sensors[0].time_to_tick, 1);
+        assert_eq!(brain.running_names(), vec!["DoNothing"]);
+
+        // t = 112, gap = 4：记忆 ttl 1 < 4 到期清空；传感器 1 - 4 <= 0 触发并重置为 scan_rate(20)；
+        // DoNothing 按 game_time = 112 > 110 停止。
+        ticks.set_time(112);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let mut ctx = PreciseCtx::new(&mut world, me.id);
+            brain.tick_by(&mut me, &mut mob, &mut ctx, 4);
+        }
+        assert!(!brain.memories.has(MemoryType::DangerDetectedRecently));
+        assert_eq!(
+            brain.sensors[0].time_to_tick,
+            i64::from(SensorKind::IsInWater.scan_rate())
+        );
+        assert!(brain.running_names().is_empty());
+    }
+
+    /// 降频档里的带大脑生物（山羊站在 48 格处，`throttle=32 / sleep=64`）每次决策时拿到
+    /// `decision_gap > 1`，大脑的记忆过期和传感器倒计时按 `decision_gap` 推进；关闭降频时
+    /// `decision_gap` 恒为 1，精确行为不变。
+    #[test]
+    fn throttled_brain_mob_advances_brain_by_decision_gap() {
+        use crate::{
+            BlockGameRules, BlockState, BlockTicks, World,
+            entity::mob::{MobType, throttle},
+            testing::TestLevel,
+        };
+        use mc_bamboo_core::{BlockPos, Vec3};
+        use mc_bamboo_data::blocks;
+
+        let mut level = TestLevel::new();
+        let mut rules = BlockGameRules::vanilla();
+        rules.mob_throttle_distance = 32;
+        rules.mob_sleep_distance = 64;
+        level.rules = rules;
+        level
+            .players
+            .push(throttle::test_player(1, Vec3::new(0.5, 64.0, 0.5)));
+
+        let mut ticks = BlockTicks::new();
+        let uid = {
+            let mut world = World::new(&mut level, &mut ticks);
+            for x in 44..=52 {
+                for z in -4..=4 {
+                    world.set_block(BlockPos::new(x, 63, z), BlockState(blocks::GRASS_BLOCK), 0);
+                }
+            }
+            let uid = world.spawn_entity(Entity::by_mob_type(
+                MobType::Armadillo,
+                Vec3::new(48.5, 64.0, 0.5),
+            ));
+            world.with_entity_mut(uid, &mut |entity| {
+                entity.on_ground = true;
+                entity.with_mob(|_, mob| {
+                    let brain = mob.brain.as_mut().expect("armadillo has a brain");
+                    assert!(
+                        brain
+                            .memories
+                            .is_registered(MemoryType::DangerDetectedRecently)
+                    );
+                    brain.memories.set_with_ttl(
+                        MemoryType::DangerDetectedRecently,
+                        memory::MemoryValue::Bool(true),
+                        30,
+                    );
+                    brain.sensors[0].time_to_tick = 18;
+                });
+            });
+            uid
+        };
+
+        // 跑 12 刻（距离 48 在 [32,64] 中点，period = 3），记忆与传感器应总共推进约 10..=12 刻
+        // 而不是降频后只推进 4 刻。
+        for tick in 1_i64..=12 {
+            ticks.set_time(tick);
+            let mut world = World::new(&mut level, &mut ticks);
+            world.tick_entities();
+        }
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut remaining_ttl = 0;
+        let mut sensor_left = 0;
+        world.with_entity_mut(uid, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                let brain = mob.brain.as_ref().expect("armadillo has a brain");
+                remaining_ttl = brain
+                    .memories
+                    .time_until_expiry(MemoryType::DangerDetectedRecently);
+                sensor_left = brain.sensors[0].time_to_tick;
+            });
+        });
+        // 30 刻的记忆过了 10..=12 刻后剩下 18..=20，而不是只扣了 4 刻剩 26。
+        assert!(
+            (18..=21).contains(&remaining_ttl),
+            "throttled brain memory should advance by decision_gap, got ttl={remaining_ttl}"
+        );
+        // 初始 18 刻的传感器过了 10..=12 刻后剩下 6..=8，而不是只扣 4 刻剩 14。
+        assert!(
+            (6..=9).contains(&sensor_left),
+            "throttled brain sensor should advance by decision_gap, got time_to_tick={sensor_left}"
+        );
     }
 }

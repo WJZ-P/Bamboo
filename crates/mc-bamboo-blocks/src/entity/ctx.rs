@@ -700,6 +700,13 @@ pub struct ThrottlePlan {
     pub tier: throttle::Tier,
     /// 这一刻决策（目标选择器、目标、大脑）跑不跑。
     pub decisions_run: bool,
+    /// 距离上次决策运行过了几刻（至少 1）。全速档 / 精确模式下恒为 1；
+    /// 降频 / 休眠档按这个间隔推进大脑的记忆过期与传感器倒计时。
+    ///
+    /// Ticks elapsed since the last decision run (at least 1). Always 1 in full-speed /
+    /// precise mode; throttled / sleeping brains advance memory expiry and sensor
+    /// countdowns by this gap.
+    pub decision_gap: i64,
     /// 休眠档每 20 刻的完整 tick 里不主动走动（AI 停摆，物理照跑）。
     pub no_active_move: bool,
     /// 限量唤醒的有效期（绝对刻号）；不大于当前刻号表示没被唤醒。
@@ -711,6 +718,7 @@ impl ThrottlePlan {
     pub const FULL: Self = Self {
         tier: throttle::Tier::Full,
         decisions_run: true,
+        decision_gap: 1,
         no_active_move: false,
         wake_until: i64::MIN,
     };

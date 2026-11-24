@@ -96,7 +96,8 @@ pub(in crate::entity::mob) fn custom_server_ai_step(
     ctx: &mut dyn EntityCtx,
 ) {
     if let Some(mut brain) = mob.brain.take() {
-        brain.tick(me, mob, ctx);
+        let gap = ctx.throttle_plan().decision_gap;
+        brain.tick_by(me, mob, ctx, gap);
         update_activity(&mut brain);
         mob.brain = Some(brain);
     }
