@@ -305,28 +305,32 @@ pub(super) fn target_goals() -> GoalSelector {
     selector
 }
 
+/// 狐狸的三条猎物目标都是 `mustSee=false`、`mustReach=false`。
 fn hunt(kind: TargetType, interval: i32) -> Goal {
     Goal::NearestAttackableTarget {
         kind,
         interval: super::goals::reduced_tick_delay(interval),
         unseen_ticks: 0,
         found: None,
+        must_see: false,
         light_gate: false,
     }
 }
 
 /// `Fox.setTargetGoals`：红狐先追陆上猎物，雪狐先追鱼。
-/// 官方加的是同一批目标对象，第二次调用不会再加。
+/// 官方加的是同一批目标对象，第二次调用不会再加。海龟用
+/// `Turtle.BABY_ON_LAND_SELECTOR`，鱼只认成群的那三种。
 ///
 /// `Fox.setTargetGoals`: red foxes prefer land prey, snow foxes fish. The same
-/// goal objects are added, so a second call changes nothing.
+/// goal objects are added, so a second call changes nothing. Turtles use
+/// `Turtle.BABY_ON_LAND_SELECTOR`; only schooling fish count as fish.
 pub fn set_target_goals(mob: &mut Mob) {
     if mob.fox.target_goals_set {
         return;
     }
     mob.fox.target_goals_set = true;
     let land = hunt(TargetType::FoxPrey, 10);
-    let turtle = hunt(TargetType::Turtle, 10);
+    let turtle = hunt(TargetType::BabyTurtleOnLand, 10);
     let fish = hunt(TargetType::Fish, 20);
     let added = if mob.fox.variant == Variant::Red {
         [(4, land), (4, turtle), (6, fish)]

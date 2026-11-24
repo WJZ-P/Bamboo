@@ -115,11 +115,10 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
 }
 
 /// `Pillager.registerGoals` 的 `targetSelector`：受伤反击（不记袭击者的仇，会叫同伴）、
-/// 玩家、村民、铁傀儡。后两种 Bamboo 还没有，目标照样注册、照样取 `nextInt`。
+/// 玩家、村民、铁傀儡。村民目标 `mustSee=false`。
 ///
 /// The `targetSelector` of `Pillager.registerGoals`: hurt by (ignoring raiders, alerting
-/// others), players, villagers and iron golems. The last two are absent from Bamboo; the
-/// goals stay registered and still draw their `nextInt`.
+/// others), players, villagers and iron golems. The villager goal has `mustSee=false`.
 pub(super) fn targets() -> GoalSelector {
     GoalSelector::from_ordered_pairs(vec![
         (
@@ -130,7 +129,7 @@ pub(super) fn targets() -> GoalSelector {
             },
         ),
         (2, Goal::nearest_target(TargetType::Player)),
-        (3, Goal::nearest_target(TargetType::Villager)),
+        (3, Goal::nearest_target_without_sight(TargetType::Villager)),
         (3, Goal::nearest_target(TargetType::IronGolem)),
     ])
 }

@@ -151,6 +151,10 @@ pub(super) fn target_goals() -> GoalSelector {
         interval,
         unseen_ticks: 0,
         found: None,
+        // 三条目标都是 `mustSee=true`（狐狸目标另有未建模的 `mustReach=true`）。
+        // All three goals have `mustSee=true` (the fox goal also has an unmodelled
+        // `mustReach=true`).
+        must_see: true,
         light_gate: false,
     };
     GoalSelector::from_goals(vec![

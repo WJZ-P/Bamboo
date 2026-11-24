@@ -144,6 +144,7 @@ pub(super) fn target_goals() -> GoalSelector {
             interval: reduced_tick_delay(10),
             unseen_ticks: 0,
             found: None,
+            must_see: true,
             light_gate: false,
         },
     )])

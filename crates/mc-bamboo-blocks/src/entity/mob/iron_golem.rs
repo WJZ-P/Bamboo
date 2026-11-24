@@ -160,11 +160,12 @@ pub(super) fn goals(_navigation: &mut Navigation) -> GoalSelector {
 
 /// `IronGolem` 的 target 选择器：村庄守卫、被打记仇、愤怒的玩家、敌对生物、全体愤怒复位。
 pub(super) fn target_goals() -> GoalSelector {
-    let nearest = |kind, interval| Goal::NearestAttackableTarget {
+    let nearest = |kind, interval, must_see| Goal::NearestAttackableTarget {
         kind,
         interval,
         unseen_ticks: 0,
         found: None,
+        must_see,
         light_gate: false,
     };
     let wrap = |priority, goal| WrappedGoal {
@@ -182,9 +183,15 @@ pub(super) fn target_goals() -> GoalSelector {
             },
         ),
         // `NearestAttackableTargetGoal<Player>(10, true, false, NeutralMob.isAngryAt)`。
-        wrap(3, nearest(TargetType::AngerPlayer, reduced_tick_delay(10))),
+        wrap(
+            3,
+            nearest(TargetType::AngerPlayer, reduced_tick_delay(10), true),
+        ),
         // `NearestAttackableTargetGoal<Mob>(5, false, false, Enemy && !Creeper)`。
-        wrap(3, nearest(TargetType::IronGolemPrey, reduced_tick_delay(5))),
+        wrap(
+            3,
+            nearest(TargetType::IronGolemPrey, reduced_tick_delay(5), false),
+        ),
         wrap(4, Goal::Unavailable("ResetUniversalAngerTargetGoal")),
     ])
 }

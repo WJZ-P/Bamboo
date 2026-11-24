@@ -2998,6 +2998,14 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     // Villagers are not `Animal`s: only the loot table (vanilla's
     // `entities/villager` is empty), and `xpReward` is 0 with no animal experience draw.
     if mob.mob_type == super::MobType::Villager {
+        // 僵尸杀死村民时官方走 `Zombie.killedEntity` 的转化分支；僵尸村民还没建模，
+        // 接口挂在死亡路径上，返回假表示按普通死亡处理。
+        // Vanilla routes a villager killed by a zombie through `Zombie.killedEntity`'s
+        // conversion branch; zombie villagers are not modelled, so the hook returns
+        // false and the normal death path runs.
+        if super::conversion::zombie_killed_villager(ctx, &source) {
+            return;
+        }
         mob.events.push(MobEvent::Death);
         if drops {
             ctx.emit(

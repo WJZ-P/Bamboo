@@ -206,12 +206,17 @@ pub enum Goal {
         /// `TargetGoal.unseenTicks`; only polar bears track `mustSee` (a 300 tick memory).
         unseen_ticks: i32,
     },
-    /// `NearestAttackableTargetGoal`：按 `TargetType` 选最近目标，缺省类型跳过。
+    /// `NearestAttackableTargetGoal`：按 `TargetType` 选最近目标。
     NearestAttackableTarget {
         kind: TargetType,
         interval: i32,
         unseen_ticks: i32,
         found: Option<EntityUid>,
+        /// `TargetGoal.mustSee`：只看得见的刻数记忆，不参与 `findTarget` 的视线判定。
+        ///
+        /// `TargetGoal.mustSee`: the unseen-tick memory in `canContinueToUse`; it does
+        /// not affect the line-of-sight test in `findTarget`.
+        must_see: bool,
         /// `Spider.SpiderTargetGoal` 的亮处闸门。
         ///
         /// The bright-light gate of `Spider.SpiderTargetGoal`.
@@ -474,17 +479,22 @@ pub enum AvoidTarget {
     Monster,
 }
 
-/// `NearestAttackableTargetGoal` 的目标类型。缺的实体在 Bamboo 里跳过，
-/// 但注册项、优先级和 `Target` 标志位仍和官方一致。
+/// `NearestAttackableTargetGoal` 的目标类型。注册项、优先级和 `Target` 标志位和官方一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetType {
     Player,
-    Villager,
-    IronGolem,
-    Turtle,
-    /// `Drowned` 的美西螈目标；Bamboo 没有这个实体，只占着顺序。
+    /// `AbstractVillager`：官方还包含流浪商人，Bamboo 只匹配 `MobType::Villager`。
     ///
-    /// The drowned's axolotl target; absent in Bamboo, kept for ordering.
+    /// `AbstractVillager`: vanilla also covers wandering traders; Bamboo matches
+    /// `MobType::Villager` only.
+    Villager,
+    /// `IronGolem`，僵尸 / 溺尸 / 蜘蛛 / 史莱姆 / 掠夺者的目标。
+    ///
+    /// `IronGolem`, the target of zombies, drowned, spiders, slimes and pillagers.
+    IronGolem,
+    /// `Drowned` 的美西螈目标。
+    ///
+    /// The drowned's axolotl target.
     Axolotl,
     /// 狐狸（北极熊的猎物）。
     ///
@@ -503,9 +513,11 @@ pub enum TargetType {
     ///
     /// The fox `landTargetGoal`: chickens and rabbits.
     FoxPrey,
-    /// 狐狸的 `fishTargetGoal`：成群的鱼。
+    /// 狐狸的 `fishTargetGoal`：`AbstractFish` 里 `instanceof AbstractSchoolingFish` 的
+    /// 三种（鳕鱼 / 鲑鱼 / 热带鱼），河豚不在其内。
     ///
-    /// The fox `fishTargetGoal`: schooling fish.
+    /// The fox `fishTargetGoal`: the `AbstractSchoolingFish` subset of `AbstractFish`
+    /// (cod, salmon and tropical fish), excluding pufferfish.
     Fish,
     /// 羊驼的 `LlamaAttackWolfGoal`：没驯服的狼。
     ///
@@ -519,9 +531,11 @@ pub enum TargetType {
     ///
     /// The ocelot's `NearestAttackableTargetGoal<Chicken>`.
     Chicken,
-    /// 豹猫 / 猫的 `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`。
+    /// `Turtle.BABY_ON_LAND_SELECTOR`（幼年且不在水里）。豹猫 / 猫、僵尸 / 溺尸、
+    /// 狐狸的海龟目标用的是同一个选择器，各自的 `mustSee` 由注册点给出。
     ///
-    /// The ocelot / cat `NearestAttackableTargetGoal<Turtle, BABY_ON_LAND_SELECTOR>`.
+    /// `Turtle.BABY_ON_LAND_SELECTOR` (a baby out of water). Ocelots / cats, zombies /
+    /// drowned and foxes share this selector; each registration supplies its own `mustSee`.
     BabyTurtleOnLand,
     /// 铁傀儡的敌对生物目标，选择器排除苦力怕。
     ///
@@ -589,6 +603,7 @@ impl Goal {
             interval: reduced_tick_delay(10),
             unseen_ticks: 0,
             found: None,
+            must_see: true,
             light_gate: true,
         }
     }
@@ -597,11 +612,24 @@ impl Goal {
     ///
     /// `NearestAttackableTargetGoal(mob, type, true)` with the default interval.
     pub(super) fn nearest_target(kind: TargetType) -> Self {
+        Self::nearest_target_with_sight(kind, true)
+    }
+
+    /// `NearestAttackableTargetGoal(mob, type, false)`：缺省间隔，但不记视线丢失。
+    ///
+    /// `NearestAttackableTargetGoal(mob, type, false)` with the default interval and no
+    /// unseen-tick memory.
+    pub(super) fn nearest_target_without_sight(kind: TargetType) -> Self {
+        Self::nearest_target_with_sight(kind, false)
+    }
+
+    fn nearest_target_with_sight(kind: TargetType, must_see: bool) -> Self {
         Self::NearestAttackableTarget {
             kind,
             interval: reduced_tick_delay(10),
             unseen_ticks: 0,
             found: None,
+            must_see,
             light_gate: false,
         }
     }
@@ -1146,10 +1174,11 @@ impl GoalSelector {
         };
     }
 
-    /// `Zombie.addBehaviourGoals` 里的 `targetSelector`。缺实体的目标仍注册，
-    /// 尚未实现的类型仍按间隔取数，但不查世界。
+    /// `Zombie.addBehaviourGoals` 里的 `targetSelector`。四个目标的间隔都是
+    /// `reducedTickDelay(10)`；村民目标 `mustSee=false`，其余为真。
     ///
-    /// Unimplemented types still draw for the interval but do not search the world.
+    /// The `targetSelector` in `Zombie.addBehaviourGoals`. All four goals use
+    /// `reducedTickDelay(10)`; the villager goal has `mustSee=false`, the others `true`.
     pub fn zombie_targets() -> Self {
         let wrap = |priority, goal| WrappedGoal {
             priority,
@@ -1165,46 +1194,12 @@ impl GoalSelector {
                         unseen_ticks: 0,
                     },
                 ),
-                wrap(
-                    2,
-                    Goal::NearestAttackableTarget {
-                        kind: TargetType::Player,
-                        interval: reduced_tick_delay(10),
-                        unseen_ticks: 0,
-                        found: None,
-                        light_gate: false,
-                    },
-                ),
-                wrap(
-                    3,
-                    Goal::NearestAttackableTarget {
-                        kind: TargetType::Villager,
-                        interval: reduced_tick_delay(10),
-                        unseen_ticks: 0,
-                        found: None,
-                        light_gate: false,
-                    },
-                ),
-                wrap(
-                    3,
-                    Goal::NearestAttackableTarget {
-                        kind: TargetType::IronGolem,
-                        interval: reduced_tick_delay(10),
-                        unseen_ticks: 0,
-                        found: None,
-                        light_gate: false,
-                    },
-                ),
-                wrap(
-                    5,
-                    Goal::NearestAttackableTarget {
-                        kind: TargetType::Turtle,
-                        interval: reduced_tick_delay(10),
-                        unseen_ticks: 0,
-                        found: None,
-                        light_gate: false,
-                    },
-                ),
+                wrap(2, Goal::nearest_target(TargetType::Player)),
+                wrap(3, Goal::nearest_target_without_sight(TargetType::Villager)),
+                wrap(3, Goal::nearest_target(TargetType::IronGolem)),
+                // `Turtle.BABY_ON_LAND_SELECTOR`；`mustSee=true`。
+                // `Turtle.BABY_ON_LAND_SELECTOR`, with `mustSee=true`.
+                wrap(5, Goal::nearest_target(TargetType::BabyTurtleOnLand)),
             ],
             locked: [None; 4],
             disabled: [false; 4],
@@ -2049,22 +2044,31 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 TargetType::Endermite => {
                     nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Endermite)
                 }
+                // `Turtle.BABY_ON_LAND_SELECTOR`：`isBaby() && !isInWater()`。僵尸 / 溺尸 /
+                // 狐狸 / 豹猫 / 猫的海龟目标共用这一个选择器。
+                // `Turtle.BABY_ON_LAND_SELECTOR`: `isBaby() && !isInWater()`. Zombies,
+                // drowned, foxes, ocelots and cats share this selector.
                 TargetType::BabyTurtleOnLand => nearest_mob_target_with(me, mob, ctx, |public| {
                     public.mob_type == super::MobType::Turtle && public.baby && !public.in_water
                 }),
+                // `AbstractVillager`：官方还含流浪商人，Bamboo 没有建模，只匹配村民。
+                // `AbstractVillager`: vanilla also covers wandering traders, which are not
+                // modelled; match villagers only.
+                TargetType::Villager => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Villager)
+                }
+                TargetType::IronGolem => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::IronGolem)
+                }
+                TargetType::Axolotl => {
+                    nearest_mob_target(me, mob, ctx, |kind| kind == super::MobType::Axolotl)
+                }
+                // `AbstractSchoolingFish`：鳕鱼 / 鲑鱼 / 热带鱼，河豚不是成群鱼。
+                // `AbstractSchoolingFish`: cod, salmon and tropical fish; pufferfish is not.
+                TargetType::Fish => nearest_mob_target(me, mob, ctx, is_schooling_fish),
                 TargetType::Player | TargetType::GuardedPlayer | TargetType::AngerPlayer => {
                     nearest_attackable(me, mob, ctx, *kind)
                 }
-                // 这些目标在官方仍注册、仍按间隔取数，但 Bamboo 没有对应实体可搜，返回 None。
-                // 美西螈是 main 追加的占位变体（溺尸的目标），同样只保留取数、不查世界。
-                // Vanilla registers these goals and still draws the interval, but Bamboo has no
-                // matching entity to search, so they return None. The axolotl is a placeholder
-                // variant added on main (a drowned target); it keeps the draw but skips the search.
-                TargetType::Villager
-                | TargetType::IronGolem
-                | TargetType::Turtle
-                | TargetType::Axolotl
-                | TargetType::Fish => None,
             };
             // 找到了玩家，还要身边有幼崽才动手。
             // A player was found; a cub must be nearby as well.
@@ -2495,7 +2499,10 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             }
         }
         Goal::NearestAttackableTarget {
-            unseen_ticks, kind, ..
+            unseen_ticks,
+            kind,
+            must_see: true,
+            ..
         } if mob.mob_type == super::MobType::PolarBear => {
             target_still_seen(me, mob, ctx, unseen_ticks, kind.follow_scale(), 60)
         }
@@ -2507,25 +2514,36 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // does not arise for polar bears.
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
         }
-        // 掠夺者的两类目标都是 `mustSee`：受伤反击记 300 刻，找玩家记 60 刻。弩的目标
-        // `stop()` 会 `setTarget(null)`，`TargetGoal.canContinueToUse` 再从 `targetMob` 捡回来。
-        // Both pillager target goals are `mustSee`: 300 ticks of memory for hurt-by, 60 for
-        // players. The crossbow goal's `stop()` clears the target and
-        // `TargetGoal.canContinueToUse` restores it from `targetMob`.
+        // 掠夺者的受伤反击记 300 刻，找玩家 / 铁傀儡记 60 刻；村民目标 `mustSee=false`，
+        // 不记视线丢失。弩的目标 `stop()` 会 `setTarget(null)`，
+        // `TargetGoal.canContinueToUse` 再从 `targetMob` 捡回来。
+        // A pillager remembers hurt-by targets for 300 ticks and seen targets for 60; the
+        // villager goal has `mustSee=false` and keeps no memory. The crossbow goal's
+        // `stop()` clears the target and `TargetGoal.canContinueToUse` restores it from
+        // `targetMob`.
         Goal::HurtByTarget { unseen_ticks, .. } if mob.mob_type == super::MobType::Pillager => {
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 300)
         }
         Goal::NearestAttackableTarget {
             unseen_ticks,
             found,
+            must_see,
             ..
         } if mob.mob_type == super::MobType::Pillager => {
             if mob.target.is_none() {
                 mob.target = *found;
             }
+            if !*must_see {
+                return combat_target(mob, ctx)
+                    .is_some_and(|target| target_in_follow_range(me, mob, target));
+            }
             target_still_seen(me, mob, ctx, unseen_ticks, 1.0, 60)
         }
-        Goal::NearestAttackableTarget { unseen_ticks, .. } if mob.mob_type.uses_target_memory() => {
+        Goal::NearestAttackableTarget {
+            unseen_ticks,
+            must_see: true,
+            ..
+        } if mob.mob_type.uses_target_memory() => {
             let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
@@ -4770,13 +4788,17 @@ pub(super) fn max_head_x_rot(mob: &Mob) -> f32 {
 }
 
 fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
-    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼、羊驼、女巫和豹猫会把别的生物当目标。
+    // 骷髅、苦力怕、蜘蛛、末影人、北极熊、狐狸、狼、羊驼、女巫和豹猫会把别的生物当目标；
+    // 僵尸一系要打村民 / 铁傀儡 / 海龟，史莱姆要打铁傀儡，也都能以生物为目标。
     // Skeletons, creepers, spiders, endermen, polar bears, foxes, wolves, llamas,
-    // witches and ocelots can target other mobs.
+    // witches and ocelots can target other mobs; zombies (villagers, iron golems,
+    // turtles) and slimes (iron golems) do too.
     let mobs_allowed = mob.mob_type.full_target_rules()
+        || mob.mob_type.is_zombie()
         || matches!(
             mob.mob_type,
-            super::MobType::PolarBear
+            super::MobType::Slime
+                | super::MobType::PolarBear
                 | super::MobType::Fox
                 | super::MobType::Wolf
                 | super::MobType::Llama
@@ -5144,6 +5166,17 @@ fn nearest_wild_wolf_target(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> 
     found
 }
 
+/// 狐狸鱼目标的选择器：官方 `instanceof AbstractSchoolingFish`，不含河豚。
+///
+/// The fox fish selector: vanilla's `instanceof AbstractSchoolingFish`, excluding
+/// pufferfish.
+const fn is_schooling_fish(kind: super::MobType) -> bool {
+    matches!(
+        kind,
+        super::MobType::Cod | super::MobType::Salmon | super::MobType::TropicalFish
+    )
+}
+
 /// `NearestAttackableTargetGoal.findTarget` 的生物分支：`FOLLOW_RANGE` 方盒里、
 /// 类型符合、看得见、在跟随距离内的最近一个（从眼睛高度量）。
 ///
@@ -5363,4 +5396,59 @@ pub(super) fn can_target_player(
                 .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE),
             true,
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 僵尸的四个目标：`mustSee` 只有村民为假，海龟用 BABY_ON_LAND_SELECTOR。
+    ///
+    /// The four zombie targets: only the villager goal has `mustSee=false`, and the
+    /// turtle goal uses BABY_ON_LAND_SELECTOR.
+    #[test]
+    fn zombie_targets_match_the_vanilla_constructors() {
+        let goals = GoalSelector::zombie_targets().goals;
+        let entries: Vec<_> = goals
+            .iter()
+            .filter_map(|wrapped| match &wrapped.goal {
+                Goal::NearestAttackableTarget {
+                    kind,
+                    must_see,
+                    interval,
+                    ..
+                } => Some((wrapped.priority, *kind, *must_see, *interval)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (2, TargetType::Player, true, reduced_tick_delay(10)),
+                (3, TargetType::Villager, false, reduced_tick_delay(10)),
+                (3, TargetType::IronGolem, true, reduced_tick_delay(10)),
+                (
+                    5,
+                    TargetType::BabyTurtleOnLand,
+                    true,
+                    reduced_tick_delay(10)
+                ),
+            ]
+        );
+    }
+
+    /// 狐狸的鱼目标只认三种成群鱼，河豚不是 `AbstractSchoolingFish`。
+    ///
+    /// The fox fish selector accepts only the three schooling fish; pufferfish is not
+    /// an `AbstractSchoolingFish`.
+    #[test]
+    fn fox_fish_target_excludes_pufferfish() {
+        use super::super::MobType;
+        for kind in [MobType::Cod, MobType::Salmon, MobType::TropicalFish] {
+            assert!(is_schooling_fish(kind));
+        }
+        for kind in [MobType::Pufferfish, MobType::Squid, MobType::Tadpole] {
+            assert!(!is_schooling_fish(kind));
+        }
+    }
 }
