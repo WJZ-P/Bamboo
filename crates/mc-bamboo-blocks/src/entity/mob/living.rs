@@ -790,6 +790,17 @@ fn ambient_voice(me: &Entity, mob: &Mob) -> Option<&'static str> {
 /// Ambient, hurt and death sounds: equines by kind and age, others by type,
 /// cows by their sound variant.
 fn voice_of(mob: &Mob, voice: Voice, in_water: bool) -> &'static str {
+    // 守卫者 / 远古守卫者：环境、受伤、死亡音都分水中 / 岸上两套。
+    // Guardian / elder guardian: ambient, hurt and death sounds all have water / land
+    // variants.
+    if super::guardian::is_guardian(mob.mob_type) {
+        let elder = mob.mob_type == super::MobType::ElderGuardian;
+        return match voice {
+            Voice::Hurt => super::guardian::hurt_sound(elder, in_water),
+            Voice::Death => super::guardian::death_sound(elder, in_water),
+            _ => super::guardian::ambient_sound(elder, in_water),
+        };
+    }
     if mob.mob_type == super::MobType::Goat {
         return super::goat::voice(mob, voice);
     }
@@ -1053,6 +1064,15 @@ fn sound_volume(mob: &Mob) -> f32 {
 }
 
 fn ambient_sound(mob: &Mob, in_water: bool) -> &'static str {
+    // 守卫者的环境音按水 / 岸和种类分派（表里返回 `None`）。
+    // Guardian ambience is dispatched by water / land and kind (the table returns
+    // `None`).
+    if super::guardian::is_guardian(mob.mob_type) {
+        return super::guardian::ambient_sound(
+            mob.mob_type == super::MobType::ElderGuardian,
+            in_water,
+        );
+    }
     match mob.mob_type {
         super::MobType::Goat => super::goat::voice(mob, Voice::Ambient),
         super::MobType::Enderman if mob.enderman.creepy => "minecraft:entity.enderman.scream",
@@ -1158,6 +1178,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Thrott
     }
     if mob.mob_type == super::MobType::Enderman {
         super::enderman::ai_step(me, mob, ctx);
+    }
+    // `Guardian.aiStep` 的服务端部分在 `super.aiStep()`（Monster）之前。
+    // The server part of `Guardian.aiStep` runs before `super.aiStep()` (Monster).
+    if super::guardian::is_guardian(mob.mob_type) {
+        super::guardian::ai_step(me, mob);
     }
     animal_ai_step(me, mob, ctx, plan);
     if mob.mob_type == super::MobType::Bee {
@@ -1833,6 +1858,12 @@ pub(crate) fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn Block
     {
         return;
     }
+    if super::guardian::is_guardian(mob.mob_type) {
+        // `Guardian` 用 `GuardianMoveControl`。
+        // Guardians use `GuardianMoveControl`.
+        super::guardian::move_control_tick(me, mob);
+        return;
+    }
     if super::fish::is_fish(mob.mob_type) {
         super::fish::move_control_tick(me, mob);
         return;
@@ -2298,6 +2329,12 @@ fn travel_in_fluid(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, inpu
     // `AbstractFish.travelInWater` replaces the whole in-water path.
     if me.in_water && super::fish::is_fish(mob.mob_type) {
         super::fish::travel_in_water(me, mob, ctx, input);
+        return;
+    }
+    // `Guardian.travelInWater` 换掉水里的推进。
+    // `Guardian.travelInWater` replaces the whole in-water thrust.
+    if me.in_water && super::guardian::is_guardian(mob.mob_type) {
+        super::guardian::travel_in_water(me, mob, ctx, input);
         return;
     }
     // `Frog.travelInWater` 换掉了水里的推进。

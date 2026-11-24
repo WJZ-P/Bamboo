@@ -8,14 +8,18 @@
 //! wired in later phases; this module holds attributes, pathfinding malus, the goal
 //! table, sound dispatch and the state that travels with the entity row.
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{PathType, registries::attribute, tags::fluid_tags};
 
 use super::{
-    Attributes, Malus, MobType,
+    Attributes, Malus, Mob, MobType, control,
     goals::{Goal, GoalSelector, PLAIN_STROLL, WrappedGoal},
+    living, motion,
 };
-use crate::entity::ctx::BlockView;
+use crate::entity::{
+    Entity,
+    ctx::{BlockView, EntityCtx},
+};
 
 /// 是不是守卫者一支。
 ///
@@ -219,6 +223,121 @@ pub fn flop_sound(elder: bool) -> &'static str {
     }
 }
 
+/// `Guardian.GuardianMoveControl.tick`：转向、速度 lerp、正弦摆动、看向点 lerp。
+///
+/// `Guardian.GuardianMoveControl.tick`: turning, speed lerp, sinusoidal wobble and
+/// look-at lerp.
+pub fn move_control_tick(me: &mut Entity, mob: &mut Mob) {
+    if mob.mover.operation != control::Operation::MoveTo || mob.navigation.is_done() {
+        living::set_speed(mob, 0.0);
+        mob.guardian.moving = false;
+        return;
+    }
+    let dx = mob.mover.wanted_x - me.position.x;
+    let dy = mob.mover.wanted_y - me.position.y;
+    let dz = mob.mover.wanted_z - me.position.z;
+    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+    let nx = dx / len;
+    let ny = dy / len;
+    let nz = dz / len;
+    let yaw = (mth::atan2(dz, dx) * 57.295_776_367_187_5) as f32 - 90.0;
+    me.y_rot = control::move_rotlerp(me.y_rot, yaw, 90.0);
+    mob.y_body_rot = me.y_rot;
+    let target_speed =
+        (mob.mover.speed_modifier * mob.attributes.value(attribute::MOVEMENT_SPEED)) as f32;
+    let speed = mth::lerp_f32(0.125, mob.speed, target_speed);
+    living::set_speed(mob, speed);
+
+    // 官方这里用 `java.lang.Math.sin/cos`（不是 `Mth` 的查表）。
+    // Vanilla uses `java.lang.Math.sin/cos` here, not the `Mth` lookup tables.
+    let phase = f64::from(me.tick_count + me.id);
+    let a = (phase * 0.5).sin() * 0.05;
+    let radians = f64::from(me.y_rot * 0.017_453_292_f32);
+    let c = radians.cos();
+    let s = radians.sin();
+    let b = (phase * 0.75).sin() * 0.05;
+    let delta = me.delta;
+    me.delta = Vec3::new(
+        delta.x + a * c,
+        delta.y + b * (s + c) * 0.25 + f64::from(speed) * ny * 0.1,
+        delta.z + a * s,
+    );
+
+    let look_x = me.position.x + nx * 2.0;
+    // 官方怪癖：`ny` 已经除过 `len`，这里又除一次。
+    // Vanilla quirk: `ny` is already normalised, yet it is divided by `len` again.
+    let look_y = living::eye_y(me, mob) + ny / len;
+    let look_z = me.position.z + nz * 2.0;
+    // `LookControl.isLookingAtTarget()` = `lookAtCooldown > 0`。
+    let (mut wx, mut wy, mut wz) = (mob.look.wanted_x, mob.look.wanted_y, mob.look.wanted_z);
+    if mob.look.look_at_cooldown <= 0 {
+        wx = look_x;
+        wy = look_y;
+        wz = look_z;
+    }
+    mob.look.set_look_at(
+        mth::lerp(0.125, wx, look_x),
+        mth::lerp(0.125, wy, look_y),
+        mth::lerp(0.125, wz, look_z),
+        10.0,
+        40.0,
+    );
+    mob.guardian.moving = true;
+}
+
+/// `Guardian.travelInWater`：常量 0.1 推进、移动、乘 0.9；没在动且没有目标时下沉 0.005。
+///
+/// `Guardian.travelInWater`: constant 0.1 thrust, move, scale by 0.9, and sink by
+/// 0.005 when not moving and without a target.
+pub fn travel_in_water(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
+    // 官方用常量 0.1F，不是 `getSpeed()`。
+    // Vanilla uses the constant 0.1F, not `getSpeed()`.
+    living::move_relative(me, 0.1, input);
+    let movement = me.delta;
+    motion::move_living(me, mob, ctx, movement);
+    me.delta = me.delta.scale(0.9);
+    if !mob.guardian.moving && mob.target.is_none() {
+        let delta = me.delta;
+        me.delta = Vec3::new(delta.x, delta.y - 0.005, delta.z);
+    }
+}
+
+/// `Guardian.aiStep` 的服务端部分：水里补满氧气、岸上扑腾、有激光目标时朝向头部转角。
+/// `Monster.aiStep` 由调用方随后跑。客户端动画（尾巴 / 尖刺 / 气泡）不在服务端执行。
+///
+/// The server part of `Guardian.aiStep`: refill air in water, flop on land, and face
+/// the head rotation while a laser target is active. The caller runs `Monster.aiStep`
+/// afterwards. Client-side animations (tail / spikes / bubbles) do not run here.
+pub fn ai_step(me: &mut Entity, mob: &mut Mob) {
+    if !living::is_alive(me, mob) {
+        return;
+    }
+    if me.in_water {
+        // `Guardian.aiStep` 水里 `setAirSupply(300)`。
+        // `Guardian.aiStep` sets `setAirSupply(300)` in water.
+        mob.air_supply = 300;
+    } else if me.on_ground {
+        // 地上扑腾：三次 `nextFloat`（x、z 位移和朝向）。
+        // Land flop: three `nextFloat` draws (x/z displacement and yaw).
+        let x = (me.random.next_float() * 2.0 - 1.0) * 0.4;
+        let z = (me.random.next_float() * 2.0 - 1.0) * 0.4;
+        let delta = me.delta;
+        me.delta = Vec3::new(
+            delta.x + f64::from(x),
+            delta.y + 0.5,
+            delta.z + f64::from(z),
+        );
+        me.y_rot = me.random.next_float() * 360.0;
+        me.on_ground = false;
+        mob.needs_sync = true;
+    }
+    // `hasActiveAttackTarget()`：`DATA_ID_ATTACK_TARGET != 0`。
+    // `hasActiveAttackTarget()`: `DATA_ID_ATTACK_TARGET != 0`.
+    if mob.guardian.attack_target != 0 {
+        me.y_rot = mob.y_head_rot;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use mc_bamboo_data::{PathType, registries::attribute};
@@ -313,6 +432,95 @@ mod tests {
         assert!(MobType::Guardian.spawns_in_water());
         assert!(MobType::ElderGuardian.spawns_in_water());
         assert!(MobType::Guardian.is_pushed_by_fluid());
+    }
+
+    /// `Guardian.aiStep`：水里补满氧气、岸上三次 `nextFloat` 扑腾。
+    ///
+    /// `Guardian.aiStep`: refill air in water, three `nextFloat` flop draws on land.
+    #[test]
+    fn guardian_ai_step_water_and_land() {
+        let mut entity = crate::entity::Entity::by_mob_type(MobType::Guardian, Vec3::default());
+        let air = entity
+            .with_mob(|me, mob| {
+                me.in_water = true;
+                mob.air_supply = 123;
+                ai_step(me, mob);
+                mob.air_supply
+            })
+            .unwrap();
+        assert_eq!(air, 300);
+
+        let mut entity = crate::entity::Entity::by_mob_type(MobType::Guardian, Vec3::default());
+        let (y_rot, delta_y, on_ground, needs_sync, random_after) = entity
+            .with_mob(|me, mob| {
+                me.in_water = false;
+                me.on_ground = true;
+                me.delta = Vec3::default();
+                ai_step(me, mob);
+                (
+                    me.y_rot,
+                    me.delta.y,
+                    me.on_ground,
+                    mob.needs_sync,
+                    me.random.state(),
+                )
+            })
+            .unwrap();
+        assert!(!on_ground);
+        assert!(needs_sync);
+        assert_eq!(delta_y, 0.5);
+        assert!((0.0..360.0).contains(&y_rot), "{y_rot}");
+        // 三次 `nextFloat` 都取自实体随机源。
+        // All three `nextFloat` draws come from the entity's random source.
+        let mut reference = crate::entity::Entity::by_mob_type(MobType::Guardian, Vec3::default());
+        reference.with_mob(|me, _| {
+            for _ in 0..3 {
+                me.random.next_float();
+            }
+        });
+        assert_eq!(random_after, reference.random.state());
+    }
+
+    /// 导航结束时 `GuardianMoveControl.tick` 把速度和 `moving` 清零。
+    ///
+    /// `GuardianMoveControl.tick` zeroes speed and `moving` when navigation is done.
+    #[test]
+    fn guardian_move_control_idles_when_navigation_done() {
+        let mut entity = crate::entity::Entity::by_mob_type(MobType::Guardian, Vec3::default());
+        let (speed, moving) = entity
+            .with_mob(|me, mob| {
+                mob.mover.operation = control::Operation::MoveTo;
+                mob.guardian.moving = true;
+                move_control_tick(me, mob);
+                (mob.speed, mob.guardian.moving)
+            })
+            .unwrap();
+        assert_eq!(speed, 0.0);
+        assert!(!moving);
+    }
+
+    /// 环境音经 `living::play_ambient_sound` 按水 / 岸分派，不留空。
+    ///
+    /// Ambience is dispatched by water / land through `living::play_ambient_sound`.
+    #[test]
+    fn guardian_ambient_sound_is_wired() {
+        for (in_water, expected) in [
+            (true, "minecraft:entity.guardian.ambient"),
+            (false, "minecraft:entity.guardian.ambient_land"),
+        ] {
+            let mut entity = crate::entity::Entity::by_mob_type(MobType::Guardian, Vec3::default());
+            entity.in_water = in_water;
+            let sound = entity
+                .with_mob(|me, mob| {
+                    living::play_ambient_sound(me, mob);
+                    mob.events.iter().find_map(|event| match event {
+                        crate::entity::mob::MobEvent::Sound { sound, .. } => Some(*sound),
+                        _ => None,
+                    })
+                })
+                .unwrap();
+            assert_eq!(sound, Some(expected));
+        }
     }
 
     #[test]
