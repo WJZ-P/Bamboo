@@ -2129,7 +2129,12 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 BlockPos::containing(target.position),
                 0,
             );
-            start_path.is_some() || within_melee_range(me, mob, target, ctx)
+            let ok = start_path.is_some() || within_melee_range(me, mob, target, ctx);
+            if mob.mob_type == super::MobType::Bee {
+                ok && mob.anger.is_angry(now) && !mob.bee.has_stung()
+            } else {
+                ok
+            }
         }
         Goal::HurtByTarget { timestamp, .. } => {
             let last = mob.last_hurt_by_mob;
@@ -2745,10 +2750,15 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             {
                 return false;
             }
-            if *track_target {
+            let ok = if *track_target {
                 within_home(mob, BlockPos::containing(target.position))
             } else {
                 !mob.navigation.is_done()
+            };
+            if mob.mob_type == super::MobType::Bee {
+                ok && mob.anger.is_angry(ctx.blocks().game_time()) && !mob.bee.has_stung()
+            } else {
+                ok
             }
         }
         Goal::NearestAttackableTarget {

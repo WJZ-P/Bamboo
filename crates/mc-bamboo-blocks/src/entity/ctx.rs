@@ -207,6 +207,13 @@ pub trait BlockView {
         0
     }
 
+    /// `Level.isRaining()`：全局下雨（蜜蜂授粉目标按它停）。
+    ///
+    /// `Level.isRaining()`: global rain (stops bee pollination).
+    fn is_raining(&self) -> bool {
+        false
+    }
+
     /// `Level.isRainingAt(pos)`。
     fn is_raining_at(&self, _pos: BlockPos) -> bool {
         false
@@ -667,6 +674,10 @@ impl BlockView for World<'_> {
     fn max_local_raw_brightness(&self, pos: BlockPos, darken: i32) -> i32 {
         self.brightness(LightLayer::Block, pos)
             .max(self.brightness(LightLayer::Sky, pos) - darken)
+    }
+
+    fn is_raining(&self) -> bool {
+        World::is_raining(self)
     }
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {

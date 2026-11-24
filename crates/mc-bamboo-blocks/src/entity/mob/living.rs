@@ -2719,6 +2719,11 @@ pub(crate) fn hurt_server(
     if mob.mob_type == super::MobType::Parrot {
         mob.tame.ordered_to_sit = false;
     }
+    // `Bee.hurtServer`：非无敌受伤时停止授粉。
+    // `Bee.hurtServer`: stop pollinating on non-invulnerable damage.
+    if mob.mob_type == super::MobType::Bee && !mob.invulnerable {
+        super::bee_goals::stop_pollinating(mob);
+    }
     // `Armadillo.hurtServer`：受惊时先把伤害变成 `(damage - 1) / 2`。
     // `Armadillo.hurtServer`: while scared, damage becomes `(damage - 1) / 2` first.
     let amount = if mob.mob_type == super::MobType::Armadillo {

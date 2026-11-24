@@ -16,18 +16,20 @@ use super::{
     navigation::Navigation,
 };
 use crate::entity::{
-    Entity,
+    Entity, EntityUid, KindPublic,
     ctx::{BlockView, Command, EntityCtx},
 };
 use crate::{
     behaviour::machines::beehive_entity::BeehiveEntity,
-    state::{
-        AGE_3, AGE_7, AGE_15, BERRIES, BlockState, DOUBLE_BLOCK_HALF, DoubleBlockHalf, WATERLOGGED,
-    },
+    state::{AGE_3, AGE_7, BERRIES, BlockState, DOUBLE_BLOCK_HALF, DoubleBlockHalf, WATERLOGGED},
     world::World,
 };
-use mc_bamboo_core::{BlockPos, Vec3};
-use mc_bamboo_data::{blocks, registries::mob_effect, tags::block_tags};
+use mc_bamboo_core::{Aabb, BlockPos, Vec3};
+use mc_bamboo_data::{
+    blocks,
+    registries::{attribute, mob_effect},
+    tags::block_tags,
+};
 
 /// `Bee` 的内部目标。每个变体自带逐刻状态，名字是官方类名。
 #[derive(Debug, Clone, PartialEq)]
@@ -62,10 +64,13 @@ pub enum BeeGoal {
     GrowCrops,
     /// `BeeWanderGoal`：飞行随机落点。
     Wander,
-    /// `BeeHurtByOtherGoal`：被打时反击，愤怒消失就停。
-    HurtByOther,
-    /// `BeeBecomeAngryTargetGoal`：生气且没蜇过时找 10 格内玩家。
-    BecomeAngryTarget,
+    /// `BeeHurtByOtherGoal`：`HurtByTargetGoal(this).setAlertOthers()`，愤怒消失就停。
+    HurtByOther { timestamp: i32, unseen_ticks: i32 },
+    /// `BeeBecomeAngryTargetGoal`：`NearestAttackableTargetGoal(Player, 10, true, false, isAngryAt)`。
+    BecomeAngryTarget {
+        found: Option<EntityUid>,
+        unseen_ticks: i32,
+    },
     /// `ResetUniversalAngerTargetGoal`：占位（全局怒气规则默认关）。
     ResetUniversalAnger,
 }
@@ -100,7 +105,7 @@ impl BeeGoal {
             Self::Pollinate(_) | Self::GoToHive(_) | Self::GoToFlower(_) | Self::Wander => {
                 &[Flag::Move]
             }
-            Self::HurtByOther | Self::BecomeAngryTarget => &[Flag::Target],
+            Self::HurtByOther { .. } | Self::BecomeAngryTarget { .. } => &[Flag::Target],
             Self::EnterHive
             | Self::ValidateHive { .. }
             | Self::ValidateFlower { .. }
@@ -122,8 +127,8 @@ impl BeeGoal {
             Self::GoToFlower(_) => "BeeGoToKnownFlowerGoal",
             Self::GrowCrops => "BeeGrowCropGoal",
             Self::Wander => "BeeWanderGoal",
-            Self::HurtByOther => "BeeHurtByOtherGoal",
-            Self::BecomeAngryTarget => "BeeBecomeAngryTargetGoal",
+            Self::HurtByOther { .. } => "BeeHurtByOtherGoal",
+            Self::BecomeAngryTarget { .. } => "BeeBecomeAngryTargetGoal",
             Self::ResetUniversalAnger => "ResetUniversalAngerTargetGoal",
         }
     }
@@ -136,8 +141,8 @@ impl BeeGoal {
     fn calm(&self, mob: &Mob, now: i64) -> bool {
         match self {
             Self::Attack
-            | Self::HurtByOther
-            | Self::BecomeAngryTarget
+            | Self::HurtByOther { .. }
+            | Self::BecomeAngryTarget { .. }
             | Self::ResetUniversalAnger => true,
             _ => !mob.anger.is_angry(now),
         }
@@ -156,7 +161,10 @@ fn wrap(priority: i32, goal: Goal) -> WrappedGoal {
 pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     navigation.flags.fly = true;
     GoalSelector::from_goals(vec![
-        wrap(0, Goal::Bee(BeeGoal::Attack)),
+        wrap(
+            0,
+            goals::melee_attack(f64::from(1.4_f32), true, "BeeAttackGoal"),
+        ),
         wrap(1, Goal::Bee(BeeGoal::EnterHive)),
         wrap(
             2,
@@ -210,10 +218,34 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
 
 pub(super) fn target_goals() -> GoalSelector {
     GoalSelector::from_goals(vec![
-        wrap(1, Goal::Bee(BeeGoal::HurtByOther)),
-        wrap(2, Goal::Bee(BeeGoal::BecomeAngryTarget)),
+        wrap(
+            1,
+            Goal::Bee(BeeGoal::HurtByOther {
+                timestamp: 0,
+                unseen_ticks: 0,
+            }),
+        ),
+        wrap(
+            2,
+            Goal::Bee(BeeGoal::BecomeAngryTarget {
+                found: None,
+                unseen_ticks: 0,
+            }),
+        ),
         wrap(3, Goal::Bee(BeeGoal::ResetUniversalAnger)),
     ])
+}
+
+/// `Bee.hurtServer`：受伤时立刻停掉授粉目标。
+///
+/// `Bee.hurtServer`: stop pollinating when damaged.
+pub(super) fn stop_pollinating(mob: &mut Mob) {
+    mob.bee.pollinating = false;
+    for wrapped in &mut mob.goals.goals {
+        if let Goal::Bee(BeeGoal::Pollinate(p)) = &mut wrapped.goal {
+            p.pollinating = false;
+        }
+    }
 }
 
 /// `Bee.wantsToEnterHive`。
@@ -350,7 +382,7 @@ impl BeeGoal {
             Self::Pollinate(p) => {
                 if mob.bee.remaining_cooldown_before_locating_new_flower > 0
                     || mob.bee.has_nectar()
-                    || view.is_raining_at(me.block_position())
+                    || view.is_raining()
                 {
                     return false;
                 }
@@ -365,7 +397,7 @@ impl BeeGoal {
                             f64::from(flower.y) + 0.5,
                             f64::from(flower.z) + 0.5,
                         ),
-                        1.2,
+                        f64::from(1.2_f32),
                     );
                     return true;
                 }
@@ -404,9 +436,23 @@ impl BeeGoal {
                     && hive_valid(mob, view, me)
             }
             Self::Wander => mob.navigation.is_done() && me.random.next_int_bounded(10) == 0,
-            Self::HurtByOther => mob.last_hurt_by_mob.is_some() && mob.anger.is_angry(now),
-            Self::BecomeAngryTarget => {
-                is_angry(mob, now) && !mob.bee.has_stung() && nearest_angry_player(me, mob, ctx)
+            Self::HurtByOther { timestamp, .. } => {
+                mob.last_hurt_by_mob_timestamp != *timestamp
+                    && mob.last_hurt_by_mob.is_some_and(|uid| {
+                        goals::attack_candidate(mob, ctx, uid).is_some_and(|found| {
+                            goals::within_home(mob, BlockPos::containing(found.position))
+                        })
+                    })
+            }
+            Self::BecomeAngryTarget { found, .. } => {
+                if !is_angry(mob, now) || mob.bee.has_stung() {
+                    return false;
+                }
+                if me.random.next_int_bounded(goals::reduced_tick_delay(10)) != 0 {
+                    return false;
+                }
+                *found = nearest_angry_player(me, mob, ctx);
+                found.is_some()
             }
             Self::ResetUniversalAnger => false,
         }
@@ -430,10 +476,7 @@ impl BeeGoal {
                     && goals::target_goal_can_continue(me, mob, ctx)
             }
             Self::Pollinate(p) => {
-                if !p.pollinating
-                    || mob.bee.saved_flower_pos.is_none()
-                    || view.is_raining_at(me.block_position())
-                {
+                if !p.pollinating || mob.bee.saved_flower_pos.is_none() || view.is_raining() {
                     return false;
                 }
                 if p.successful_pollinating_ticks > 400 {
@@ -445,14 +488,18 @@ impl BeeGoal {
             Self::GoToFlower(_) => self.can_use(me, mob, ctx),
             Self::GrowCrops => self.can_use(me, mob, ctx),
             Self::Wander => !mob.navigation.is_done(),
-            Self::HurtByOther => {
-                is_angry(mob, now) && goals::target_goal_can_continue(me, mob, ctx)
+            Self::HurtByOther { unseen_ticks, .. } => {
+                is_angry(mob, now) && target_goal_continue(me, mob, ctx, unseen_ticks, 300)
             }
-            Self::BecomeAngryTarget => {
+            Self::BecomeAngryTarget {
+                found,
+                unseen_ticks,
+            } => {
                 if !is_angry(mob, now) || mob.bee.has_stung() || mob.target.is_none() {
+                    *found = None;
                     return false;
                 }
-                goals::target_goal_can_continue(me, mob, ctx)
+                target_goal_continue(me, mob, ctx, unseen_ticks, 60)
             }
             Self::EnterHive
             | Self::ValidateHive { .. }
@@ -553,12 +600,21 @@ impl BeeGoal {
                     let _ = mob.navigation.move_to_path(view, &nav, path, 1.0);
                 }
             }
-            Self::HurtByOther => {
+            Self::HurtByOther {
+                timestamp,
+                unseen_ticks,
+            } => {
                 mob.target = mob.last_hurt_by_mob;
+                *timestamp = mob.last_hurt_by_mob_timestamp;
+                *unseen_ticks = 0;
+                alert_other_bees(me, mob, ctx);
             }
-            Self::BecomeAngryTarget => {
-                // `NearestAttackableTargetGoal.start`：把选中的玩家设成目标。
-                let _ = me;
+            Self::BecomeAngryTarget {
+                found,
+                unseen_ticks,
+            } => {
+                mob.target = *found;
+                *unseen_ticks = 0;
             }
             Self::GrowCrops | Self::ResetUniversalAnger => {}
         }
@@ -587,7 +643,11 @@ impl BeeGoal {
                 mob.navigation.stop();
                 mob.navigation.max_visited_nodes_multiplier = 1.0;
             }
-            Self::HurtByOther | Self::BecomeAngryTarget => mob.target = None,
+            Self::HurtByOther { .. } => mob.target = None,
+            Self::BecomeAngryTarget { found, .. } => {
+                mob.target = None;
+                *found = None;
+            }
             Self::Attack
             | Self::EnterHive
             | Self::ValidateHive { .. }
@@ -626,14 +686,7 @@ impl BeeGoal {
             Self::GoToFlower(t) => flower_tick(t, me, mob, ctx),
             Self::GrowCrops => grow_crops_tick(me, mob, ctx),
             Self::Wander => {}
-            Self::HurtByOther | Self::BecomeAngryTarget => {
-                if let Some(target) = goals::combat_target(mob, ctx) {
-                    let nav = living::nav_mob(me, mob, view);
-                    let _ = mob
-                        .navigation
-                        .move_to_entity(view, &nav, target.position, 1.4, 0);
-                }
-            }
+            Self::HurtByOther { .. } | Self::BecomeAngryTarget { .. } => {}
             Self::EnterHive
             | Self::ValidateHive { .. }
             | Self::ValidateFlower { .. }
@@ -703,28 +756,96 @@ fn locate_blacklist(mob: &Mob) -> Vec<BlockPos> {
         .unwrap_or_default()
 }
 
-fn nearest_angry_player(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> bool {
-    let mut best: Option<(f64, crate::entity::EntityUid)> = None;
-    ctx.blocks().for_each_player(&mut |player| {
-        if !player.alive || player.creative || player.spectator {
-            return;
-        }
-        let distance = me.position.distance_to_sqr(player.position);
-        if distance > 100.0 {
-            return;
-        }
-        if best.is_none_or(|(d, _)| distance < d) {
-            best = Some((distance, player.uid));
-        }
-    });
-    if let Some((_, uid)) = best {
-        mob.target = Some(uid);
-        return true;
+fn target_goal_continue(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    unseen_ticks: &mut i32,
+    memory: i32,
+) -> bool {
+    if !goals::target_goal_can_continue(me, mob, ctx) {
+        return false;
     }
-    false
+    let Some(target) = goals::combat_target(mob, ctx) else {
+        return false;
+    };
+    if living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position()) {
+        *unseen_ticks = 0;
+    } else {
+        *unseen_ticks += 1;
+        if *unseen_ticks > goals::reduced_tick_delay(memory) {
+            return false;
+        }
+    }
+    true
 }
 
-/// `BeePollinateGoal.findNearbyFlower`：曼哈顿距离 5 内、按官方扫描顺序取第一朵能到的花。
+/// `BeeHurtByOtherGoal.alertOthers`：通知跟随距离 × 10 × 跟随距离内没目标、不同队的其他蜜蜂，
+/// 且当前蜂对攻击者有视线（`BeeHurtByOtherGoal.alertOther`）。
+fn alert_other_bees(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let Some(enemy) = mob.last_hurt_by_mob else {
+        return;
+    };
+    let Some(target) = goals::attack_candidate(mob, ctx, enemy) else {
+        return;
+    };
+    if !living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position()) {
+        return;
+    }
+    let range = mob.attributes.value(attribute::FOLLOW_RANGE);
+    let area = Aabb::new(
+        me.position.x,
+        me.position.y,
+        me.position.z,
+        me.position.x + 1.0,
+        me.position.y + 1.0,
+        me.position.z + 1.0,
+    )
+    .inflate(range, 10.0, range);
+    let mut others = Vec::new();
+    ctx.for_each_other_in(area, &mut |other| {
+        if let KindPublic::Mob(public) = &other.kind
+            && public.mob_type == super::MobType::Bee
+            && !public.has_target
+        {
+            others.push(other.uid);
+        }
+    });
+    if !others.is_empty() {
+        ctx.emit(Command::AlertMobs { others, enemy }, me);
+    }
+}
+
+fn nearest_angry_player(me: &mut Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    let view = ctx.blocks();
+    let difficulty = view.difficulty();
+    let range = mob.attributes.value(attribute::FOLLOW_RANGE);
+    let area = me.bounding_box().inflate(range, 4.0, range);
+    let mut players = Vec::new();
+    view.for_each_player(&mut |player| players.push(*player));
+    let mut best = -1.0_f64;
+    let mut found = None;
+    for player in players {
+        if !super::neutral::is_angry_at_player(mob, &player, difficulty) {
+            continue;
+        }
+        if !super::avoid::player_box(&player).intersects(area) {
+            continue;
+        }
+        if !goals::targeting_test(me, mob, view, &player, range, false, true) {
+            continue;
+        }
+        let distance = player.position.distance_to_sqr(me.position);
+        if best == -1.0 || distance < best {
+            best = distance;
+            found = Some(player.uid);
+        }
+    }
+    found
+}
+
+/// `BeePollinateGoal.findNearbyFlower`：按 `BlockPos.withinBoxByManhattanDistance(origin, 5, 5, 5)`
+/// 顺序取第一朵 `attractsBees` 且可达的花。
 fn find_nearby_flower(
     me: &mut Entity,
     mob: &mut Mob,
@@ -736,54 +857,59 @@ fn find_nearby_flower(
     let nav = living::nav_mob(me, mob, view);
     // 独立寻路阶段：结果回来后直接核对当时选定的花，不再扫描、不重写不可达名单。
     if let Some(at) = mob.navigation.replay_target() {
-        return mob.navigation.create_path(view, &nav, at, 1).map(|_| at);
+        return mob
+            .navigation
+            .create_path(view, &nav, at, 1)
+            .filter(|path| path.reached)
+            .map(|_| at);
     }
     if mob.navigation.awaiting() {
         return None;
     }
+    let mut new_cache = HashMap::new();
     let mut out = None;
-    for distance in 0_i32..=5 {
-        for x in -distance..=distance {
-            for y in -distance..=distance {
-                for z in -distance..=distance {
-                    if x.abs() + y.abs() + z.abs() != distance {
-                        continue;
-                    }
+    'outer: for depth in 0_i32..=15 {
+        let max_x = depth.min(5);
+        for x in -max_x..=max_x {
+            let max_y = (depth - x.abs()).min(5);
+            for y in -max_y..=max_y {
+                let dz = depth - x.abs() - y.abs();
+                if dz > 5 {
+                    continue;
+                }
+                let zs: &[i32] = if dz == 0 { &[0] } else { &[dz, -dz] };
+                for &z in zs {
                     let pos = origin.offset(x, y, z);
-                    if !view.block_state(pos).is_tagged(block_tags::BEE_ATTRACTIVE) {
+                    if !attracts_bees(view.block_state(pos)) {
                         continue;
                     }
-                    let until = p.unreachable_flowers.get(&pos).copied();
-                    if until.is_some_and(|until| now < until) {
-                        p.unreachable_flowers.insert(pos, until.unwrap_or(0));
+                    let until = p.unreachable_flowers.get(&pos).copied().unwrap_or(i64::MIN);
+                    if now < until {
+                        new_cache.insert(pos, until);
                         continue;
                     }
                     mob.navigation
                         .set_next_action(super::pathfinding::Action::Inspect(
                             super::pathfinding::Use::BeeFlower,
                         ));
-                    if mob.navigation.create_path(view, &nav, pos, 1).is_some() {
+                    if mob
+                        .navigation
+                        .create_path(view, &nav, pos, 1)
+                        .is_some_and(|path| path.reached)
+                    {
                         out = Some(pos);
-                        break;
+                        break 'outer;
                     }
                     if mob.navigation.awaiting() {
                         // 请求刚挂起，下一刻按这朵花继续。
                         return None;
                     }
-                    p.unreachable_flowers.insert(pos, now + 600);
-                }
-                if out.is_some() {
-                    break;
+                    new_cache.insert(pos, now + 600);
                 }
             }
-            if out.is_some() {
-                break;
-            }
-        }
-        if out.is_some() {
-            break;
         }
     }
+    p.unreachable_flowers = new_cache;
     out
 }
 
@@ -801,20 +927,29 @@ fn pollinate_tick(p: &mut Pollinate, me: &mut Entity, mob: &mut Mob, _ctx: &mut 
     }
     let target = Vec3::new(
         f64::from(flower.x) + 0.5,
-        f64::from(flower.y) + 0.6,
+        f64::from(flower.y) + f64::from(0.6_f32),
         f64::from(flower.z) + 0.5,
     );
-    if me.position.distance_to_sqr(target) > 1.0 {
+    let speed = f64::from(0.35_f32);
+    if target.distance_to_sqr(me.position).sqrt() > 1.0 {
         p.hover_pos = Some(target);
         mob.mover
-            .set_wanted_position(target.x, target.y, target.z, 0.35);
+            .set_wanted_position(target.x, target.y, target.z, speed);
         return;
     }
     if p.hover_pos.is_none() {
         p.hover_pos = Some(target);
     }
-    let close = me.position.distance_to_sqr(p.hover_pos.unwrap_or(target)) <= 0.1;
+    let close = me
+        .position
+        .distance_to_sqr(p.hover_pos.unwrap_or(target))
+        .sqrt()
+        <= 0.1;
     let mut move_wanted = true;
+    if !close && p.pollinating_ticks > 600 {
+        drop_flower(mob, me);
+        return;
+    }
     if close {
         if me.random.next_int_bounded(25) == 0 {
             let offset = (me.random.next_float() * 2.0 - 1.0) * 0.333_333_34;
@@ -831,7 +966,7 @@ fn pollinate_tick(p: &mut Pollinate, me: &mut Entity, mob: &mut Mob, _ctx: &mut 
         mob.look.set_look_at_default(target.x, target.y, target.z);
     }
     if move_wanted && let Some(pos) = p.hover_pos {
-        mob.mover.set_wanted_position(pos.x, pos.y, pos.z, 0.35);
+        mob.mover.set_wanted_position(pos.x, pos.y, pos.z, speed);
     }
     p.successful_pollinating_ticks += 1;
     if me.random.next_float() < 0.05
@@ -1038,7 +1173,7 @@ fn wander_threshold(mob: &Mob) -> i32 {
 }
 
 fn grow_crops_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    if me.random.next_int_bounded(30) != 0 {
+    if me.random.next_int_bounded(goals::reduced_tick_delay(30)) != 0 {
         return;
     }
     let mut updates = Vec::new();
@@ -1061,30 +1196,21 @@ fn grow_crops_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 }
 
 fn grown_state(state: BlockState) -> Option<BlockState> {
-    let crop = state.is(blocks::WHEAT)
-        || state.is(blocks::CARROTS)
-        || state.is(blocks::POTATOES)
-        || state.is(blocks::BEETROOTS);
-    if crop && let Some(age) = state.try_get(AGE_7) {
-        if age >= 7 {
-            return None;
-        }
-        return state.try_with(AGE_7, age + 1);
+    if state.is(blocks::WHEAT) || state.is(blocks::CARROTS) || state.is(blocks::POTATOES) {
+        let age = state.try_get(AGE_7)?;
+        return (age < 7).then(|| state.try_with(AGE_7, age + 1)).flatten();
     }
-    if let Some(age) = state.try_get(AGE_15) {
-        if age >= 7 {
-            return None;
-        }
-        return state.try_with(AGE_15, age + 1);
+    if state.is(blocks::BEETROOTS) || state.is(blocks::SWEET_BERRY_BUSH) {
+        let age = state.try_get(AGE_3)?;
+        return (age < 3).then(|| state.try_with(AGE_3, age + 1)).flatten();
     }
-    if state.is(blocks::SWEET_BERRY_BUSH)
-        && let Some(age) = state.try_get(AGE_3)
-        && age < 3
+    if state.is(blocks::MELON_STEM) || state.is(blocks::PUMPKIN_STEM) {
+        let age = state.try_get(AGE_7)?;
+        return (age < 7).then(|| state.try_with(AGE_7, age + 1)).flatten();
+    }
+    if (state.is(blocks::CAVE_VINES) || state.is(blocks::CAVE_VINES_PLANT))
+        && state.try_get(BERRIES) == Some(false)
     {
-        return state.try_with(AGE_3, age + 1);
-    }
-    if state.is(blocks::CAVE_VINES) || state.is(blocks::CAVE_VINES_PLANT) {
-        // `performBonemeal` 对洞穴藤蔓用 `BERRIES` 位；Bamboo 目前只做这一位。
         return state.try_with(BERRIES, true);
     }
     None
