@@ -2260,9 +2260,7 @@ fn event_packet(
             event: 18,
         })),
         // 驯服事件不是网络包；在 `send_mob_events` 里按 UUID 触发进度。
-        MobEvent::Tamed { .. } | MobEvent::CuredZombieVillager { .. } => {
-            EventPacket::Nothing
-        }
+        MobEvent::Tamed { .. } | MobEvent::CuredZombieVillager { .. } => EventPacket::Nothing,
         MobEvent::EntityEvent { event } => EventPacket::Tracking(packet_body(&EntityEvent {
             entity_id: id,
             event: *event,
@@ -2375,8 +2373,7 @@ fn send_mob_events(
 ) {
     for (id, mob_events) in events {
         for event in mob_events {
-            if let mc_bamboo_blocks::entity::mob::MobEvent::CuredZombieVillager { player } = event
-            {
+            if let mc_bamboo_blocks::entity::mob::MobEvent::CuredZombieVillager { player } = event {
                 let players: Vec<crate::inbound::PlayerId> = region
                     .players
                     .iter()

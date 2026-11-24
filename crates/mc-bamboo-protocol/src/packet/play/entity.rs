@@ -530,9 +530,7 @@ impl EntityData {
             Self::ZombieVillagerConverting(_) => {
                 mc_bamboo_data::villager::ZOMBIE_VILLAGER_CONVERTING_INDEX
             }
-            Self::ZombieVillagerData { .. } => {
-                mc_bamboo_data::villager::ZOMBIE_VILLAGER_DATA_INDEX
-            }
+            Self::ZombieVillagerData { .. } => mc_bamboo_data::villager::ZOMBIE_VILLAGER_DATA_INDEX,
             Self::ZombieVillagerDataFinalized(_) => {
                 mc_bamboo_data::villager::ZOMBIE_VILLAGER_DATA_FINALIZED_INDEX
             }
