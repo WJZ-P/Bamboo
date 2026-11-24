@@ -76,8 +76,8 @@
 | 28 | 碰撞快路径：实体压测 1 线程 compute（21） | 59.7 ms / 10 刻 | 48.8 ms / 10 刻 | 1.22× |
 | 29 | 实体追踪配对不再扫全部玩家：`islands-8` 的 `entity_sync_and_tracking` 每刻（22） | 1.230 ms | 0.699 ms | 1.76× |
 | 30 | 结构刷怪索引：`structure-spawn` 每刻结构查询耗时（30） | 119.224–147.377 ms | 0.148–0.153 ms | 约 800× |
-| 30 | 同上：纯生成区块查询单价（微基准） | 188.9 ns | 17.8 ns | 10.6× |
-| 30 | 同上：读盘女巫小屋查询单价（微基准） | 1365.5 ns | 19.4 ns | 70.5× |
+| 30 | 同上：纯生成区块查询单价（微基准，3 次中位数） | 217.6 ns | 18.9 ns | 11.5× |
+| 30 | 同上：读盘女巫小屋查询单价（微基准，3 次中位数） | 1525.8 ns | 20.2 ns | 74.6× |
 | 30 | 守卫者目标扫描候选数：`guardian-tower-300` 每刻（30） | 1684.3–2403.7 | 0 | 全部省掉 |
 | 30 | 激光视线缓存命中率：`guardian-tower-300`（30） | 0% | 99.8–100% | — |
 
@@ -4269,13 +4269,16 @@ cargo test -p mc-bamboo-game --release --lib structure_query_cost -- --ignored -
 ### 30.4 结构查询单价微基准
 
 ```text
-structure-query (disk hut): indexed 19.4 ns/query naive 1365.5 ns/query ratio 70.49x
-structure-query (generated): indexed 17.8 ns/query naive 188.9 ns/query ratio 10.62x
+structure-query (disk hut): indexed 20.2 ns/query naive 1525.8 ns/query ratio 74.55x
+structure-query (generated): indexed 18.9 ns/query naive 217.6 ns/query ratio 11.53x
 ```
 
 同一份人造女巫小屋：挂上盘上 `structures` 标签时，朴素路径每次都要重新解析起点；
-不挂标签时剩下的开销是引用表克隆和线程状态 reset，仍有 10.6× 差距。两个口径都是
-release 构建、20 万次查询、3 轮交替取中位数，与整刻压测的口径不同，不能相加。
+不挂标签时剩下的开销是引用表克隆和线程状态 reset，仍有约 11.5× 差距。两个口径都是
+release 构建、20 万次查询、单次运行 3 轮交替取中位数；上表是连续 3 次运行各自的中位数
+再取中位数。机器负载波动明显（读盘朴素路径单次实测 1365.5–2527.5 ns、纯生成朴素路径
+188.9–308.3 ns，索引路径 17.8–20.7 ns），所以这里给中位数而不是某一轮的峰值；
+与整刻压测的口径不同，不能相加。
 
 ### 30.5 逐位一致的证据
 
