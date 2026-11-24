@@ -278,12 +278,23 @@ impl TrackedEntity {
     }
 
     /// 官方 `ServerEntity.sendPairingData` 的包序列，按 bundle 里的顺序。
-    /// 返回的是每个包「ID + 包体」的字节，不含帧长和 bundle 分隔符。
+    /// 返回的是每个包「ID + 包体」的字节，不含帧长和 bundle 分隔符。这里不带载具
+    /// 名单，乘客那一侧的 `set_passengers` 见 [`Self::pairing_packets_in`]。
     ///
     /// The packet sequence of vanilla `ServerEntity.sendPairingData`, in bundle
     /// order. Each item is one packet's "id + body" bytes, without the frame
-    /// length prefix or the bundle delimiters.
+    /// length prefix or the bundle delimiters. Without a vehicle index; see
+    /// [`Self::pairing_packets_in`] for a passenger's `set_passengers`.
     pub fn pairing_packets(&self, snapshot: &Snapshot) -> Vec<Vec<u8>> {
+        self.pairing_packets_in(snapshot, &PassengerIndex::default())
+    }
+
+    /// 同 [`Self::pairing_packets`]，但用这一 tick 的全表索引补上官方最后那句
+    /// 「自己在骑就发载具的 `set_passengers`」。
+    ///
+    /// Like [`Self::pairing_packets`], but with this tick's whole-table index for
+    /// vanilla's trailing `set_passengers(vehicle)` when this entity is a passenger.
+    pub fn pairing_packets_in(&self, snapshot: &Snapshot, index: &PassengerIndex) -> Vec<Vec<u8>> {
         let mut out = vec![packet_body(&AddEntity {
             entity_id: snapshot.id,
             uuid: snapshot
@@ -368,6 +379,22 @@ impl TrackedEntity {
             {
                 out.push(packet_body(&packet));
             }
+        }
+        // 官方 `sendPairingData` 最后两句：自己有乘客就发自己的名单，自己在骑就发
+        // 载具的名单（乘客那一侧客户端才知道自己挂在谁身上）。
+        if !snapshot.passengers.is_empty() {
+            out.push(packet_body(&SetPassengers {
+                vehicle: snapshot.id,
+                passengers: &snapshot.passengers,
+            }));
+        }
+        if let Some(vehicle) = snapshot.vehicle
+            && let Some(list) = index.list(vehicle)
+        {
+            out.push(packet_body(&SetPassengers {
+                vehicle,
+                passengers: list,
+            }));
         }
         out
     }
@@ -745,6 +772,11 @@ pub struct Snapshot {
     ///
     /// The players riding this entity, vanilla `Entity.getPassengers()`.
     pub passengers: Vec<i32>,
+    /// 骑着的载具，官方的 `Entity.getVehicle()`；配对时乘客也要发载具的名单。
+    ///
+    /// The ridden vehicle, vanilla `Entity.getVehicle()`; pairing a passenger
+    /// also sends the vehicle's passenger list.
+    pub vehicle: Option<i32>,
 }
 
 /// 配对和同步时要发的、按实体类型不同的元数据。
@@ -774,6 +806,31 @@ pub enum KindData {
     LlamaSpit(mc_bamboo_blocks::entity::spit::LlamaSpitPublic),
     Egg(Box<mc_bamboo_blocks::entity::thrown_egg::EggPublic>),
     SplashPotion(Box<mc_bamboo_blocks::entity::splash_potion::SplashPotionPublic>),
+}
+
+/// 这一 tick 全表的载具名单。配对乘客时官方发的是载具那一侧的完整名单，而乘客
+/// 自己的快照里只有载具 ID。
+///
+/// A whole-tick index of vehicle passenger lists. Pairing a passenger sends the
+/// vehicle's complete list, which the passenger's own snapshot cannot see.
+#[derive(Debug, Clone, Default)]
+pub struct PassengerIndex {
+    lists: std::collections::BTreeMap<i32, Vec<i32>>,
+}
+
+impl PassengerIndex {
+    pub fn of(snapshots: &[Snapshot]) -> Self {
+        Self {
+            lists: snapshots
+                .iter()
+                .map(|snapshot| (snapshot.id, snapshot.passengers.clone()))
+                .collect(),
+        }
+    }
+
+    fn list(&self, vehicle: i32) -> Option<&[i32]> {
+        self.lists.get(&vehicle).map(Vec::as_slice)
+    }
 }
 
 impl Snapshot {
@@ -810,6 +867,7 @@ impl Snapshot {
                 KindPublic::Mob(mob) => mob.passengers.clone(),
                 _ => Vec::new(),
             },
+            vehicle: public.vehicle,
         }
     }
 
@@ -2362,6 +2420,7 @@ pub(crate) fn sync(region: &mut Region) {
     // pairing uses a coarse grid of players built once per tick.
     prepare_sync(region);
     let snapshots: Vec<Snapshot> = region.entities.iter_public().map(Snapshot::of).collect();
+    let index = PassengerIndex::of(&snapshots);
 
     let view_distance = region.view_distance;
     let cells = PlayerCells::build(&region.players, view_distance);
@@ -2378,6 +2437,7 @@ pub(crate) fn sync(region: &mut Region) {
             &snapshot,
             tracked,
             view_distance,
+            &index,
         );
         send_changes(&snapshot, tracked, &mut region.links);
     }
@@ -2480,6 +2540,7 @@ fn update_pairings(
     snapshot: &Snapshot,
     tracked: &mut TrackedEntity,
     view_distance: i32,
+    index: &PassengerIndex,
 ) {
     // 「停止追踪」直接遍历 `seen_by`：一名玩家是否还看得见，和它在不在候选格
     // 里无关，传送走或视距变小照样会算到。「开始追踪」只遍历粗网格给出的
@@ -2522,7 +2583,7 @@ fn update_pairings(
         }
     }
     if !gained.is_empty() {
-        let frames = pairing_frames(snapshot, tracked);
+        let frames = pairing_frames(snapshot, tracked, index);
         for viewer in gained {
             tracked.seen_by.insert(viewer);
             links.send_frames(viewer, &frames);
@@ -2551,9 +2612,9 @@ fn entity_tracking_range(entity_type: i32) -> i32 {
 
 /// 把实体介绍给新观察者的 bundle。位置和速度都取上次发出去的状态，
 /// 下一个包才接得上。
-fn pairing_frames(snapshot: &Snapshot, tracked: &TrackedEntity) -> Vec<u8> {
+fn pairing_frames(snapshot: &Snapshot, tracked: &TrackedEntity, index: &PassengerIndex) -> Vec<u8> {
     let mut frames = encode_frames(&BundleDelimiter);
-    for body in tracked.pairing_packets(snapshot) {
+    for body in tracked.pairing_packets_in(snapshot, index) {
         frames.extend(frame_from_body(&body));
     }
     frames.extend(encode_frames(&BundleDelimiter));

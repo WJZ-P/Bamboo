@@ -372,6 +372,16 @@ public final class ChunkContentOracle {
             return nextId++;
         }
 
+        // `EntityType.create` 在 `LOAD` 时也走 `canSpawn`，怪物要查难度；
+        // `ServerLevel.serverLevelData` 在假世界里是空，直接给普通难度。
+        //
+        // `EntityType.create` runs `canSpawn` even for `LOAD`, and monsters read the
+        // difficulty, which the fake level's null `serverLevelData` cannot provide.
+        @Override
+        public Difficulty getDifficulty() {
+            return Difficulty.NORMAL;
+        }
+
         @Override
         public BlockState getBlockState(BlockPos pos) {
             BlockState state = blocks.get(pos.asLong());

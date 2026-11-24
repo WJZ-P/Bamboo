@@ -30,7 +30,7 @@ use super::{
 };
 use crate::{
     entity::{
-        Entity, EntityKind, KindPublic, PrimedTnt,
+        Entity, EntityKind, EntityUid, KindPublic, PrimedTnt,
         ctx::{BlockView, Command, EntityCtx, ThrottlePlan},
     },
     shape::{self, CollisionContext},
@@ -86,7 +86,13 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     ) {
         mob.y_body_rot = me.y_rot;
     }
-    check_despawn(me, mob, ctx);
+    // 官方在 `ServerLevel.tick` 的 uid 顺序里对每个实体先 `checkDespawn` 再决定 tick；
+    // 乘客的这次检查发生在它的 `rideTick` 之后，由驱动补做，这里跳过。
+    // Vanilla checks despawn for every entity in uid order before ticking; a
+    // passenger's check runs after its `rideTick`, so the driver does it and we skip.
+    if me.vehicle.is_none() {
+        check_despawn(me, mob, ctx);
+    }
     if me.removed {
         return;
     }
@@ -173,11 +179,28 @@ fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan: Throt
     // 在第一刻才把血量夹到随机出来的最大血量。
     // `refreshDirtyAttributes`: a summoned equine clamps its health on its first tick.
     clamp_health(mob);
-    // `Mob.tick`：每 5 刻按乘客和载具重设控制标志；牛没有乘客，三个都打开。
+    // `Mob.tick`：每 5 刻按乘客和载具重设控制标志。官方 `Mob.updateControlFlags`：
+    // 控制乘客是生物、且不在 `#non_controlling_rider` 里时，MOVE / JUMP / LOOK 都关掉
+    // （史莱姆不在建模范围外，只有史莱姆在标签里）。玩家骑手不算生物，标志保持打开；
+    // 船不在建模范围，JUMP 和 MOVE 同值。
+    //
+    // Vanilla `Mob.updateControlFlags`: a mob passenger outside
+    // `#non_controlling_rider` (only slimes here) disables MOVE / JUMP / LOOK. A
+    // player rider is not a mob, so the flags stay on; boats are out of scope.
     if me.tick_count % 5 == 0 {
-        mob.goals.set_control_flag(Flag::Move, true);
-        mob.goals.set_control_flag(Flag::Jump, true);
-        mob.goals.set_control_flag(Flag::Look, true);
+        let mob_rider = !mob.no_ai
+            && mob.first_passenger().is_some_and(|uid| {
+                ctx.other(uid).is_some_and(|public| match &public.kind {
+                    crate::entity::KindPublic::Mob(rider) => {
+                        rider.mob_type != super::MobType::Slime
+                    }
+                    _ => false,
+                })
+            });
+        let free = !mob_rider;
+        mob.goals.set_control_flag(Flag::Move, free);
+        mob.goals.set_control_flag(Flag::Jump, free);
+        mob.goals.set_control_flag(Flag::Look, free);
     }
     // `AbstractCubeMob.tick`：`super.tick()` 之后的落地判断。
     // `AbstractCubeMob.tick`: the landing check after `super.tick()`.
@@ -313,7 +336,7 @@ pub(crate) fn is_alive(me: &Entity, mob: &Mob) -> bool {
 }
 
 /// `Mob.checkDespawn`。牛不会被远离玩家删掉，但最近的玩家决定 `noActionTime` 归不归零。
-fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+pub(crate) fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // 和平难度 + `!isAllowedInPeaceful()` 直接丢弃，且不再取随机数。
     if ctx.blocks().difficulty() == 0 && !mob.mob_type.allowed_in_peaceful() {
         me.discard();
@@ -354,6 +377,15 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     } else if distance < near_sqr {
         mob.no_action_time = 0;
     }
+}
+
+/// 对一个已经拼好的实体跑 `Mob.checkDespawn`。乘客的检查在 `rideTick` 之后补做，
+/// 调用方负责跳过已经移除的实体。
+///
+/// Run `Mob.checkDespawn` on a fully assembled entity. The driver calls this after
+/// a passenger's `rideTick`; callers skip removed entities.
+pub(crate) fn check_despawn_entity(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+    me.with_mob(|me, mob| check_despawn(me, mob, ctx));
 }
 
 // ---- 流体 ----
@@ -412,8 +444,22 @@ pub(crate) fn last_damage_source(mob: &Mob, now: i64) -> Option<DamageSource> {
     }
 }
 
-/// 导航要的生物快照。
+/// 导航要的生物快照。骑手借载具导航时直接给载具那份，路径按载具的尺寸、位置和
+/// 惩罚算（官方 `PathNavigation.mob` 是载具）。
+///
+/// The navigation snapshot. While a rider borrows the vehicle's navigation this is
+/// the vehicle's snapshot, so paths use the vehicle's size, position and malus
+/// (vanilla `PathNavigation.mob` is the vehicle).
 pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
+    mob.borrowed_nav_mob
+        .unwrap_or_else(|| nav_mob_own(me, mob, view))
+}
+
+/// 不看借用状态，按这个生物自己算快照：骑手 tick 自己那份导航时用。
+///
+/// The mob's own snapshot, ignoring any borrowed vehicle state; used when a rider
+/// ticks its own navigation.
+pub(crate) fn nav_mob_own(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
     let (width, height) = mob.dimensions();
     NavMob {
         path: PathMob {
@@ -436,6 +482,7 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
         in_liquid: is_in_liquid(me, mob),
         follow_range: mob.attributes.value(attribute::FOLLOW_RANGE),
         game_time: view.game_time(),
+        owner_uid: me.id,
     }
 }
 
@@ -515,7 +562,12 @@ fn spawn_sprint_particle(me: &mut Entity, view: &dyn BlockView) {
 
 /// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
 fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    // `Entity.baseTick`。
+    // `Entity.baseTick` 开头：载具被移除时当场 `stopRiding`，再递减下车冷却。
+    // 实体乘客的 `vehicle` 在游戏/世界驱动里维护，这里只按官方递减冷却：
+    // 载具已离表的摘除由驱动的 `rideTick` 递归负责。
+    if me.boarding_cooldown > 0 {
+        me.boarding_cooldown -= 1;
+    }
     // 冲刺且不在水/岩浆里、不潜行、活着时，脚下方块可见就消耗两次 `nextDouble`（粒子位置）。
     // While sprinting out of water/lava, uncrouched and alive, a visible block below draws two `nextDouble`s.
     // `IronGolem.canSpawnSprintParticle()` 完全覆写缺省实现：不看疾跑 / 潜行 / 水，
@@ -1600,9 +1652,25 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
             breed_with(me, mob, ctx, partner);
         }
     }
+    // `Mob.serverAiStep` 用字段 `this.navigation.tick()`，不是 getter。借载具导航时
+    // 共享导航归载具自己的 serverAiStep tick，这里只 tick 骑手自己那份（通常闲置），
+    // 换回载具导航后再让大脑与控制段继续看载具导航。
+    //
+    // Vanilla `Mob.serverAiStep` ticks the `this.navigation` field, not the getter.
+    // The shared navigation is ticked by the vehicle's own step; here the rider
+    // only ticks its own idle navigation, then restores the vehicle's for brains.
     timing::span!(Navigation);
-    let nav = nav_mob(me, mob, ctx.blocks());
+    let own_navigation = mob.swap_to_own_navigation();
+    let nav = if own_navigation {
+        nav_mob_own(me, mob, ctx.blocks())
+    } else {
+        nav_mob(me, mob, ctx.blocks())
+    };
     if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
+        // 官方 `this.mob.getMoveControl()`：借导航时 getter 转到载具，而此时
+        // `mob.mover` 仍是载具那份（控制段才临时换回自己的）。
+        // Vanilla `this.mob.getMoveControl()`: while borrowing the getter resolves to
+        // the vehicle, and `mob.mover` is still the vehicle's here.
         if mob.mob_type == super::MobType::Rabbit {
             super::rabbit::set_wanted(me, mob, wanted, speed);
         } else {
@@ -1610,6 +1678,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
                 .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
         }
     }
+    mob.restore_borrowed_navigation();
     // 官方顺序：`navigation.tick` 之后才是 `customServerAiStep`，跑大脑的生物在这里跑大脑。
     // 大脑和目标同属「决策」，降频时一起跳过；导航沿已有路径仍每刻照跑。
     // Vanilla order: `customServerAiStep`, where brain mobs run their brain, comes after
@@ -1621,6 +1690,21 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, plan:
     if mob.age != 0 {
         mob.in_love = 0;
     }
+    // 官方 `moveControl.tick` / `lookControl.tick` / `jumpControl.tick` 用字段：借导航时
+    // 临时换回骑手自己的移动控制（视线 / 跳跃控制本来就不转给载具）。
+    // Vanilla ticks the `this.moveControl` field; while borrowing, temporarily swap the
+    // rider's own move control back in (look / jump controls never delegate).
+    mob.swap_to_own_mover();
+    tick_controls(me, mob, ctx);
+    mob.restore_borrowed_mover();
+}
+
+/// `Mob.serverAiStep` 的 `moveControl.tick` / `lookControl.tick` / `jumpControl.tick`。
+/// 单独成函数是为了让兔子的提前 `return` 只退出这一段，不影响借导航的换回。
+///
+/// The control ticks of `Mob.serverAiStep`, split out so the rabbit's early
+/// `return` does not skip restoring a borrowed move control.
+fn tick_controls(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Rabbit {
         super::rabbit::custom_server_ai_step(me, mob);
         super::rabbit::before_move_control(me, mob);
@@ -2318,10 +2402,31 @@ fn jump_out_of_fluid(me: &mut Entity, mob: &Mob, view: &dyn BlockView, old_y: f6
 ///
 /// `LivingEntity.pushEntities`: nearby mobs shove each other apart. Bats override it with
 /// an empty body, and `EntitySelector.pushableBy` skips them as `isPushable()` is false.
+/// `Entity.getRootVehicle()`：沿 `vehicle` 往上走到没有载具的那个 uid（自己骑自己时
+/// 到环为止）。`isPassengerOfSameVehicle` 用它判断两边是否同一棵树。
+///
+/// `Entity.getRootVehicle()`: walk `vehicle` links up to the topmost uid, stopping
+/// at a cycle. `isPassengerOfSameVehicle` compares these.
+fn root_vehicle(uid: EntityUid, vehicle: Option<EntityUid>, ctx: &dyn EntityCtx) -> EntityUid {
+    let mut root = uid;
+    let mut current = vehicle;
+    let mut seen = 0_u32;
+    while let Some(next) = current {
+        root = next;
+        seen += 1;
+        if seen > 64 {
+            break;
+        }
+        current = ctx.other(next).and_then(|public| public.vehicle);
+    }
+    root
+}
+
 fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if !mob.mob_type.is_pushable() {
         return;
     }
+    let my_root = root_vehicle(me.id, me.vehicle, ctx);
     let rules = ctx.blocks().block_game_rules();
     let cap = rules.max_entity_collisions;
     let tick = ctx.blocks().game_time();
@@ -2350,6 +2455,7 @@ fn push_entities(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             && !other.removed
             && public.is_alive()
             && public.mob_type.is_pushable()
+            && root_vehicle(other.uid, other.vehicle, ctx) != my_root
         {
             others.push((other.uid, other.position));
             if iron_golem {

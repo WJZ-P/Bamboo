@@ -17,7 +17,7 @@ use std::{
 use mc_bamboo_blocks::{
     BlockState, ChunkTicks,
     archive::{
-        entity::{entity_uuid_tag, read_entity, write_entity},
+        entity::{entity_uuid_tag, read_entity, read_entity_tree, write_entity, write_entity_tree},
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
     },
     entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt, arrow::Pickup},
@@ -519,7 +519,13 @@ fn run_cases(
         );
         report.check(
             case.original.is_some() && case.original == case.written,
-            format!("entity {label}: official load -> save changed the NBT"),
+            format!(
+                "entity {label}: official load -> save changed the NBT: {}",
+                first_difference(
+                    case.original.as_ref().unwrap_or(&Value::Null),
+                    case.written.as_ref().unwrap_or(&Value::Null)
+                )
+            ),
         );
         // Bamboo 也能读回官方写出的 NBT；读回时 uid 重新分配，UUID 不比。
         if let Some(written) = &case.written {
@@ -541,6 +547,49 @@ fn run_cases(
                     canonical_tag(&saved) == *written,
                     format!("entity {label}: Bamboo projectile load -> save changed the NBT"),
                 );
+            }
+            // 嵌套 `Passengers`：Bamboo 读树，行数、两边关系和官方格式都对得上。
+            if let Tag::Compound(fields) = &tag
+                && fields.iter().any(|(key, _)| key == "Passengers")
+            {
+                let mut next = 1 << 24;
+                let tree = read_entity_tree(&tag, &mut next)
+                    .map_err(|error| error.to_string())?
+                    .expect("jockey root is modelled");
+                report.check(
+                    tree.len() == 2,
+                    format!(
+                        "entity {label}: Bamboo read {} rows, expected 2",
+                        tree.len()
+                    ),
+                );
+                if tree.len() == 2 {
+                    let root_uid = tree[0].public.uid;
+                    report.check(
+                        tree[0].public.vehicle.is_none()
+                            && tree[1].public.vehicle == Some(root_uid),
+                        format!("entity {label}: Bamboo lost the rider's vehicle link"),
+                    );
+                    let passengers = match &tree[0].public.kind {
+                        mc_bamboo_blocks::entity::KindPublic::Mob(mob) => &mob.passengers,
+                        _ => unreachable!("a jockey's vehicle is a mob"),
+                    };
+                    report.check(
+                        passengers.as_slice() == [tree[1].public.uid],
+                        format!("entity {label}: Bamboo lost the vehicle's passenger list"),
+                    );
+                    let rows: std::collections::BTreeMap<_, _> = tree
+                        .iter()
+                        .cloned()
+                        .map(|row| (row.public.uid, row))
+                        .collect();
+                    let saved = write_entity_tree(&rows[&root_uid], &|uid| rows.get(&uid).cloned())
+                        .map_err(|error| error.to_string())?;
+                    report.check(
+                        canonical_tag(&saved) == *written,
+                        format!("entity {label}: Bamboo jockey load -> save changed the NBT"),
+                    );
+                }
             }
         }
     }
@@ -1495,7 +1544,54 @@ fn entity_cases() -> Vec<Tag> {
     out.extend(spit_archive_cases());
     out.extend(egg_archive_cases());
     out.extend(fish_archive_cases());
+    out.extend(jockey_archive_cases());
     out
+}
+
+/// 一只带乘客的鸡：`Passengers` 嵌在载具的存档里，乘客的 `Pos` 用载具的 x/z。
+///
+/// A chicken with a rider: `Passengers` nests inside the vehicle and the
+/// passenger's `Pos` uses the vehicle's x/z.
+fn jockey_archive_cases() -> Vec<Tag> {
+    use std::collections::BTreeMap;
+
+    use mc_bamboo_blocks::entity::mob::MobType;
+
+    let mut store = mc_bamboo_blocks::EntityStore::new();
+    let chicken = store.spawn(Entity::by_mob_type(
+        MobType::Chicken,
+        Vec3::new(1.5, 64.0, -2.5),
+    ));
+    let zombie = store.spawn(Entity::by_mob_type(
+        MobType::Zombie,
+        Vec3::new(1.5, 64.0, -1.5),
+    ));
+    store.with_mut(chicken, |entity| {
+        entity.with_mob(|_, mob| mob.passengers.push(zombie));
+    });
+    store.with_mut(zombie, |entity| {
+        entity.vehicle = Some(chicken);
+        entity.position.x = 1.5;
+        entity.position.z = -2.5;
+    });
+    let rows: BTreeMap<i32, mc_bamboo_blocks::entity::EntityRow> =
+        [store.get(chicken), store.get(zombie)]
+            .into_iter()
+            .flatten()
+            .map(|entity| {
+                let row = entity.split();
+                (row.public.uid, row)
+            })
+            .collect();
+    let first = write_entity_tree(&rows[&chicken], &|uid| rows.get(&uid).cloned()).unwrap();
+    // 再读再写一遍：生物读档会补上构造时懒创建的属性（`movement_speed`），官方
+    // 重存也是这个形状；用它当输入，两边比的才是存档层而不是属性惰性创建。
+    let mut next = 1 << 24;
+    let tree = read_entity_tree(&first, &mut next).unwrap().unwrap();
+    let root = tree[0].public.uid;
+    let rebuilt: BTreeMap<i32, mc_bamboo_blocks::entity::EntityRow> =
+        tree.into_iter().map(|row| (row.public.uid, row)).collect();
+    vec![write_entity_tree(&rebuilt[&root], &|uid| rebuilt.get(&uid).cloned()).unwrap()]
 }
 
 fn fish_archive_cases() -> [Tag; 4] {

@@ -386,6 +386,7 @@ pub fn plans_for_tick(
         return Vec::new();
     }
     let (uids, rows) = store.tick_rows();
+    let roots = store.riding_roots();
     let mut tokens = store.wake_tokens();
     tokens.advance(game_time, config);
     let mut plans = Vec::with_capacity(rows.len());
@@ -473,8 +474,19 @@ pub fn plans_for_tick(
         });
         plans.push(plan);
     }
+    // 乘客跟根实体用同一档（主代理确认的约定）：根在 uid 升序名单里的下标由
+    // `riding_roots` 给出，乘客自己的那份计划被根的计划覆盖。
+    // Passengers reuse their root's tier: `riding_roots` gives the root index.
+    let mut shared = plans.clone();
+    for (index, &root) in roots.iter().enumerate() {
+        if root != index
+            && let (Some(plan), Some(&root_plan)) = (shared.get_mut(index), plans.get(root))
+        {
+            *plan = root_plan;
+        }
+    }
     store.set_wake_tokens(tokens);
-    plans
+    shared
 }
 
 /// 休眠档只推进的计时器清单（设计稿 4.2）：实体计数、无敌时间、着火刻数、

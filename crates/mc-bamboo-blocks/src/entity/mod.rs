@@ -15,6 +15,7 @@ pub mod lightning;
 pub mod mob;
 pub mod parallel;
 pub mod random;
+pub mod riding;
 pub mod spit;
 pub mod splash_potion;
 pub mod store;
@@ -335,6 +336,15 @@ pub struct Entity {
     pub first_tick: bool,
     /// `remainingFireTicks`。
     pub remaining_fire_ticks: i32,
+    /// `Entity.vehicle`：骑着的载具。玩家乘客不进实体表，所以只记实体乘客。
+    ///
+    /// `Entity.vehicle`: the ridden vehicle. Player passengers are not in the
+    /// entity table, so only entity passengers are tracked here.
+    pub vehicle: Option<EntityUid>,
+    /// `Entity.boardingCooldown`：下车后 60 刻内不能再上。
+    ///
+    /// `Entity.boardingCooldown`: 60 ticks after dismounting before another mount.
+    pub boarding_cooldown: i32,
 }
 
 impl Entity {
@@ -366,6 +376,8 @@ impl Entity {
             y_rot: 0.0,
             first_tick: true,
             remaining_fire_ticks: 0,
+            vehicle: None,
+            boarding_cooldown: 0,
         }
     }
 
@@ -423,6 +435,9 @@ impl Entity {
     pub(crate) fn common_tick(&mut self) {
         self.old_position = self.position;
         self.tick_count += 1;
+        if self.boarding_cooldown > 0 {
+            self.boarding_cooldown -= 1;
+        }
     }
 
     /// 这个 tick 的 `tick()`。逻辑只看得到上下文接口，见 [`ctx`]。

@@ -1397,7 +1397,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
         Command::LightningTick(facts) => super::lightning::apply(me, world, facts),
-        Command::SkeletonTrap(facts) => super::mob::skeleton_horse::spawn_trap(world, facts),
+        Command::SkeletonTrap(facts) => super::mob::skeleton_horse::spawn_trap(world, me, facts),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);
         }

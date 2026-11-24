@@ -14,7 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_blocks::{
     archive::{
-        block_entity::create_block_entity, read_entity, write_block_entity_additional, write_entity,
+        block_entity::create_block_entity, read_entity, write_block_entity_additional,
+        write_entity_tree,
     },
     entity::EntityRow,
 };
@@ -151,8 +152,16 @@ pub(crate) fn read_view(
                     Err("commands.data.entity.invalid")
                 }
                 Target::World(uid) => {
-                    let row = entity_row(region, uid).ok_or("argument.entity.notfound.entity")?;
-                    write_entity(&row).map_err(|_| "command.failed")
+                    let root = entity_row(region, uid).ok_or("argument.entity.notfound.entity")?;
+                    // 官方 `Entity.saveWithoutId` 给载具写嵌套 `Passengers`：乘客要按
+                    // 同一棵树序列化，不能只写这一行。
+                    // Vanilla `Entity.saveWithoutId` writes nested `Passengers`
+                    // for a vehicle, so serialize the whole riding tree.
+                    let lookup = |passenger: i32| {
+                        let row = region.entities.row_of(passenger)?;
+                        region.entities.row_at(row).cloned()
+                    };
+                    write_entity_tree(&root, &lookup).map_err(|_| "command.failed")
                 }
             }
         }

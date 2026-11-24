@@ -7,7 +7,7 @@ use mc_bamboo_protocol::item::ItemStack;
 
 use super::{
     block_entity::{BlockEntityKind, create_block_entity, write_block_entity_additional},
-    entity::{entity_uuid_tag, read_entity, write_entity},
+    entity::{entity_uuid_tag, read_entity, read_entity_tree, write_entity, write_entity_tree},
     tag::{self, field, put},
     ticks::{decode_chunk_ticks, encode_chunk_ticks},
 };
@@ -308,6 +308,84 @@ fn three_entity_kinds_round_trip() {
         };
         assert_eq!(normalize(tag), normalize(again));
     }
+}
+
+/// `Passengers` 嵌套在载具的存档里，乘客不单独成行；读回来两边关系一致，
+/// 乘客自己的 `Pos` 用载具的 x/z 加自己的 y。
+///
+/// Passengers nest inside their vehicle's tag instead of becoming rows of their
+/// own; the links come back and a passenger's `Pos` uses the vehicle's x/z.
+#[test]
+fn riders_are_saved_inside_their_vehicle() {
+    use std::collections::BTreeMap;
+
+    use crate::entity::{KindPublic, mob::MobType};
+
+    let root_id = 1 << 24;
+    let mut chicken = Entity::by_mob_type(MobType::Chicken, Vec3::new(4.5, 64.0, -3.5));
+    chicken.id = root_id;
+    let mut zombie = Entity::by_mob_type(MobType::Zombie, Vec3::new(9.0, 64.0, 9.0));
+    zombie.id = root_id + 1;
+    zombie.vehicle = Some(root_id);
+    chicken.with_mob(|_, mob| {
+        crate::entity::riding::add_passenger(&mut mob.passengers, zombie.id, false);
+    });
+    let rows: BTreeMap<i32, crate::entity::EntityRow> = [chicken.split(), zombie.split()]
+        .into_iter()
+        .map(|row| (row.public.uid, row))
+        .collect();
+    let lookup = |uid: i32| rows.get(&uid).cloned();
+    let tag = write_entity_tree(&rows[&root_id], &lookup).unwrap();
+    let passenger = match field(&tag, "Passengers") {
+        Some(Tag::List(list)) => list.clone(),
+        other => panic!("no Passengers list: {other:?}"),
+    };
+    assert_eq!(passenger.len(), 1);
+    assert_eq!(
+        field(&passenger[0], "id"),
+        Some(&Tag::String("minecraft:zombie".to_owned()))
+    );
+    assert_eq!(
+        field(&passenger[0], "Pos"),
+        Some(&Tag::List(vec![
+            Tag::Double(4.5),
+            Tag::Double(64.0),
+            Tag::Double(-3.5),
+        ]))
+    );
+
+    let mut next = root_id;
+    let tree = read_entity_tree(&tag, &mut next).unwrap().unwrap();
+    assert_eq!(tree.len(), 2);
+    assert_eq!(tree[0].public.vehicle, None);
+    let KindPublic::Mob(mob) = &tree[0].public.kind else {
+        panic!("chicken is a mob");
+    };
+    assert_eq!(mob.passengers, vec![tree[1].public.uid]);
+    assert_eq!(tree[1].public.vehicle, Some(tree[0].public.uid));
+
+    // 读回来再写一遍：乘客仍然嵌在载具里，位置和 id 不变。
+    let rebuilt: BTreeMap<i32, crate::entity::EntityRow> =
+        tree.into_iter().map(|row| (row.public.uid, row)).collect();
+    let uid = next - 2;
+    let again = write_entity_tree(&rebuilt[&uid], &|id| rebuilt.get(&id).cloned()).unwrap();
+    let passenger = match field(&again, "Passengers") {
+        Some(Tag::List(list)) => list.clone(),
+        other => panic!("no Passengers list after a reload: {other:?}"),
+    };
+    assert_eq!(passenger.len(), 1);
+    assert_eq!(
+        field(&passenger[0], "id"),
+        Some(&Tag::String("minecraft:zombie".to_owned()))
+    );
+    assert_eq!(
+        field(&passenger[0], "Pos"),
+        Some(&Tag::List(vec![
+            Tag::Double(4.5),
+            Tag::Double(64.0),
+            Tag::Double(-3.5),
+        ]))
+    );
 }
 
 #[test]

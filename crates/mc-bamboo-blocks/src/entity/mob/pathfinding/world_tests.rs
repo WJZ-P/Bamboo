@@ -197,6 +197,7 @@ fn install_drops_cancelled_and_stale_results() {
         in_liquid: false,
         follow_range: 16.0,
         game_time: 0,
+        owner_uid: 1,
     };
     let replay = |local_serial, target| Replay {
         serial: (2_u64 << 32) | u64::from(local_serial),
@@ -231,4 +232,124 @@ fn install_drops_cancelled_and_stale_results() {
     mob.navigation.replay = Some(replay(4, -1));
     install(&mut mob, &view);
     assert!(mob.navigation.replay.is_some(), "有效结果应当保留");
+}
+
+/// 寻路阶段打开时，控制载具的骑手把请求挂在**载具**那份导航上：阶段按载具 uid 记账，
+/// 而不是骑手 uid。精确驱动和并行驱动都走同一条写回路径。
+///
+/// With the phase enabled, a controlling rider's path request belongs to the
+/// vehicle's navigation and is keyed by the vehicle uid, not the rider uid.
+#[test]
+fn rider_requests_are_keyed_by_the_vehicle_uid() {
+    let (mut level, mut ticks) = level();
+    // 乘客 ID 必须 >= FIRST_ENTITY_ID：低于它的号在 `ride_tick_passengers` 里被当成
+    // 玩家跳过，骑手就根本不会 tick。用世界实体的号段，和并行逐位一致测试一致。
+    level.set_entities(crate::entity::EntityStore::with_next_id(
+        crate::entity::FIRST_ENTITY_ID,
+    ));
+    let (spider, rider) = {
+        let mut world = World::new(&mut level, &mut ticks);
+        let spider = world.spawn_entity(Entity::by_mob_type(
+            crate::entity::mob::MobType::Spider,
+            Vec3::new(0.5, 64.0, 0.5),
+        ));
+        let rider = world.spawn_entity(Entity::by_mob_type(
+            crate::entity::mob::MobType::Zombie,
+            Vec3::new(0.5, 64.0, 0.5),
+        ));
+        (spider, rider)
+    };
+    prepare(&mut level, &mut ticks, 1);
+    {
+        let mut world = World::new(&mut level, &mut ticks);
+        assert!(world.start_riding(rider, spider));
+    }
+    // 每刻读一次待交付结果的 `(记账 uid, 导航 owner)`，覆盖整段跑下来的所有请求，
+    // 又不用取走结果（正常的交付 / install / 消费流程照常发生）。
+    let mut owners = Vec::new();
+    for tick in 1..=160 {
+        ticks.set_time(tick);
+        World::new(&mut level, &mut ticks).tick_entities();
+        owners.extend(level.entities().pathfinding().delivery_owners());
+    }
+    assert!(
+        level.entities().pathfinding().total_searches > 0,
+        "骑手应当真的发起过寻路请求"
+    );
+    assert!(!owners.is_empty(), "阶段应当为骑手的请求交付过结果");
+    assert!(
+        owners.iter().all(|&(uid, _)| uid == spider),
+        "挂起请求必须按载具 uid 记账: {owners:?}"
+    );
+    assert!(
+        owners.iter().all(|&(_, owner)| owner == spider),
+        "寻路快照的 owner 也必须是载具: {owners:?}"
+    );
+    assert!(
+        !owners.iter().any(|&(uid, _)| uid == rider),
+        "请求不能记在骑手名下: {owners:?}"
+    );
+}
+
+/// 开关打开且有控制骑手时，精确驱动和 1/2/8 线程并行驱动逐位一致：整棵乘客树
+/// （含借来的导航、挂起请求、交付结果）和寻路阶段状态都一样。
+///
+/// With the phase enabled and a controlling rider, the precise driver and the
+/// parallel driver (1/2/8 threads) are bit-identical: the whole riding tree
+/// (borrowed navigation, pending requests, deliveries) and the phase state match.
+#[test]
+fn rider_phase_is_bit_identical_in_precise_and_parallel_modes() {
+    use crate::entity::FIRST_ENTITY_ID;
+
+    fn build() -> (TestLevel, BlockTicks) {
+        let (mut level, mut ticks) = level();
+        level.set_entities(crate::entity::EntityStore::with_next_id(FIRST_ENTITY_ID));
+        let (spider, rider) = {
+            let mut world = World::new(&mut level, &mut ticks);
+            let spider = world.spawn_entity(Entity::by_mob_type(
+                crate::entity::mob::MobType::Spider,
+                Vec3::new(0.5, 64.0, 0.5),
+            ));
+            let rider = world.spawn_entity(Entity::by_mob_type(
+                crate::entity::mob::MobType::Zombie,
+                Vec3::new(0.5, 64.0, 0.5),
+            ));
+            (spider, rider)
+        };
+        prepare(&mut level, &mut ticks, 1);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            assert!(world.start_riding(rider, spider));
+        }
+        (level, ticks)
+    }
+
+    fn snapshot(level: &mut TestLevel, ticks: &mut BlockTicks) -> String {
+        let live = World::new(level, ticks).live_entities();
+        let phase = level.entities().pathfinding();
+        format!("{live:?}|{phase:?}")
+    }
+
+    let ticks_to_run = 40;
+    let (mut precise_level, mut precise_ticks) = build();
+    for tick in 1..=ticks_to_run {
+        precise_ticks.set_time(tick);
+        World::new(&mut precise_level, &mut precise_ticks).tick_entities();
+    }
+    let baseline = snapshot(&mut precise_level, &mut precise_ticks);
+
+    for threads in [1, 2, 8] {
+        let (mut level, mut ticks) = build();
+        for tick in 1..=ticks_to_run {
+            ticks.set_time(tick);
+            let view = test_view(&level, tick);
+            let mut world = World::new(&mut level, &mut ticks);
+            tick_entities_parallel(&view, &mut world, &ScopedThreads { threads });
+        }
+        let got = snapshot(&mut level, &mut ticks);
+        assert_eq!(
+            got, baseline,
+            "threads={threads}: 开关打开 + 控制骑手时精确与并行必须逐位一致"
+        );
+    }
 }

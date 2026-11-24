@@ -13,7 +13,7 @@ use crate::{
     behaviour::machines::{PistonMoving, ShulkerBoxEntity, open_support_shape},
     block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
-    entity::{Entity, PrimedTnt},
+    entity::{Entity, EntityPublic, EntityUid, KindPublic, PrimedTnt},
     fluid::Fluid,
     level::{Effect, LecternFacts, Level, Observation, Trigger},
     random::LegacyRandom,
@@ -357,6 +357,10 @@ pub struct World<'a> {
     content_writes: usize,
     /// 越界统计开关；`World::new` 问一次 `Level`，之后每次读写只判这个布尔值。
     partition_enabled: bool,
+    /// `finalizeSpawn` 里排队的骑士坐骑/骑手，生成入口在实体进表后落地。
+    jockeys: Vec<crate::entity::mob::spawn::JockeyRequest>,
+    /// 鸡骑士第一支找到的已有载具。
+    existing_jockey_vehicle: Option<EntityUid>,
 }
 
 /// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读，移动中活塞的形状从
@@ -626,6 +630,8 @@ impl<'a> World<'a> {
             quiet: 0,
             content_writes: 0,
             partition_enabled,
+            jockeys: Vec::new(),
+            existing_jockey_vehicle: None,
         }
     }
 
@@ -2133,6 +2139,172 @@ impl<'a> World<'a> {
         self.level.random().source()
     }
 
+    /// 把一次 `finalizeSpawn` 里用副本随机源取过的数写回世界随机源。
+    /// `LegacyRandom` 内部是 `Cell`，`&self` 就够；副本和真源同种子起步，
+    /// 因此写回后的状态与一直用真源逐位相同。
+    ///
+    /// Write back the draws made on a copied `LegacyRandom` during one
+    /// `finalizeSpawn`. Its state is a `Cell`, so `&self` suffices.
+    pub fn set_level_random_seed(&self, seed: i64) {
+        self.level.random().source().set_seed_raw(seed);
+    }
+
+    /// `finalizeSpawn` 里排一个骑士坐骑/骑手：此时新实体还没构造，`World` 拿不到
+    /// 生成入口里的 `&mut Entity`，所以只记参数，由 [`Self::finish_jockeys`] 落地。
+    ///
+    /// Queue a jockey mount/rider from `finalizeSpawn`; [`Self::finish_jockeys`]
+    /// creates the entity and links both sides.
+    pub fn queue_jockey(&mut self, request: crate::entity::mob::spawn::JockeyRequest) {
+        self.jockeys.push(request);
+    }
+
+    /// `ServerLevelAccessor.getEntitiesOfClass(Chicken.class, box, ENTITY_NOT_BEING_RIDDEN)`
+    /// 的只读近似：按 uid 升序返回范围内没人骑的鸡。供鸡骑士的第一支判定用。
+    ///
+    /// The read-only part of vanilla's nearby-chicken query: unridden chickens in
+    /// the area, in ascending uid order, for the chicken-jockey first branch.
+    pub fn nearby_unridden_chickens(&self, area: crate::shape::Aabb) -> Vec<EntityUid> {
+        let mut found = Vec::new();
+        self.level.for_each_entity_in(area, &mut |public| {
+            if let super::entity::KindPublic::Mob(mob) = &public.kind
+                && mob.mob_type == super::entity::mob::MobType::Chicken
+                && mob.passengers.is_empty()
+                && public.vehicle.is_none()
+            {
+                found.push(public.uid);
+            }
+        });
+        found
+    }
+
+    /// 给一只已经进表的鸡设上 `Chicken.isChickenJockey`（Bamboo 里用它避免自然消失），
+    /// 再返回它的 ID 供骑士关系落地。
+    pub fn mark_chicken_jockey(&mut self, uid: EntityUid) -> bool {
+        self.level.with_just_spawned(uid, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                if mob.mob_type == super::entity::mob::MobType::Chicken {
+                    mob.chicken_jockey = true;
+                }
+            });
+        })
+    }
+
+    /// 鸡骑士第一支找到已有的鸡时记下载具 ID：`finish_jockeys` 不再新建鸡，
+    /// 只把根实体（幼年僵尸）挂上去。
+    ///
+    /// The first chicken-jockey branch found an existing chicken: remember its id
+    /// so `finish_jockeys` links the root instead of spawning a new one.
+    pub fn set_existing_jockey_vehicle(&mut self, uid: EntityUid) {
+        self.existing_jockey_vehicle = Some(uid);
+    }
+
+    /// 生成入口在 `finalizeSpawn` 之后调用：按官方顺序构造排队的坐骑/骑手，
+    /// 跑它们的 `finalizeSpawn`，放进世界，再 `startRiding`。返回这一批新实体的 ID。
+    ///
+    /// Called by spawn entry points after `finalizeSpawn`: build queued jockeys,
+    /// run their `finalizeSpawn`, add them to the world and call `startRiding`.
+    /// Returns the new entity ids.
+    pub fn finish_jockeys(&mut self, root: EntityUid) -> Vec<EntityUid> {
+        let existing = self.existing_jockey_vehicle.take();
+        let requests = std::mem::take(&mut self.jockeys);
+        let mut added = Vec::with_capacity(requests.len());
+        for request in requests {
+            if request.rider_is_vehicle
+                && let Some(vehicle) = existing
+            {
+                self.start_riding(root, vehicle);
+                continue;
+            }
+            let mut entity = self.prepare_entity(super::entity::Entity::by_mob_type(
+                request.kind,
+                request.position,
+            ));
+            super::entity::mob::spawn::snap_to(&mut entity, request.position, request.yaw, 0.0);
+            entity.with_mob(|me, mob| {
+                mob.y_head_rot = me.y_rot;
+                mob.y_body_rot = me.y_rot;
+            });
+            // 官方 `finalizeSpawn(JOCKEY, null)`：只有骷髅/鸡自己的随机取数。
+            super::entity::mob::spawn::finalize_spawn(
+                self,
+                request.kind,
+                &mut entity,
+                super::entity::mob::spawn::SpawnReason::Jockey,
+            );
+            if request.kind == super::entity::mob::MobType::Chicken {
+                self.level.with_just_spawned(entity.id, &mut |me| {
+                    me.with_mob(|_, mob| mob.chicken_jockey = true);
+                });
+            }
+            let uid = self.add_prepared_entity(entity);
+            added.push(uid);
+            let (vehicle, passenger) = if request.rider_is_vehicle {
+                (uid, root)
+            } else {
+                (root, uid)
+            };
+            self.start_riding(passenger, vehicle);
+        }
+        added
+    }
+
+    /// 官方 `Entity.startRiding(vehicle, force=false, emitEvent=false)`：两边都在表里
+    /// 时按 `canAddPassenger`（一人）、`canRide`（冷却）和防环规则建立关系。
+    ///
+    /// Vanilla `Entity.startRiding(vehicle, false, false)`: link both sides in the
+    /// entity table, following the one-passenger, cooldown and no-cycle rules.
+    pub fn start_riding(&mut self, passenger: EntityUid, vehicle: EntityUid) -> bool {
+        let list = match self.level.entity_public(vehicle) {
+            Some(public) => match &public.kind {
+                super::entity::KindPublic::Mob(mob) => mob.passengers.clone(),
+                _ => Vec::new(),
+            },
+            None => return false,
+        };
+        let Some(passenger_entity) = self.level.entity_public(passenger) else {
+            return false;
+        };
+        let mut chain = Vec::new();
+        let mut at = Some(vehicle);
+        while let Some(uid) = at {
+            if uid == passenger {
+                return false;
+            }
+            chain.push(uid);
+            at = self
+                .level
+                .entity_public(uid)
+                .and_then(|public| public.vehicle);
+        }
+        if !super::entity::riding::can_start_riding(
+            passenger,
+            passenger_entity.vehicle,
+            self.passenger_cooldown(passenger),
+            false,
+            vehicle,
+            &chain,
+            &list,
+        ) {
+            return false;
+        }
+        self.level.with_just_spawned(passenger, &mut |entity| {
+            entity.vehicle = Some(vehicle);
+        });
+        self.level.with_just_spawned(vehicle, &mut |entity| {
+            entity.with_mob(|_, mob| {
+                super::entity::riding::add_passenger(&mut mob.passengers, passenger, false);
+            });
+        });
+        true
+    }
+
+    fn passenger_cooldown(&self, passenger: EntityUid) -> i32 {
+        self.level
+            .entity(passenger)
+            .map(|entity| entity.boarding_cooldown)
+            .unwrap_or(0)
+    }
+
     /// `BlockBehaviour.onExplosionHit` 里的 `getDrops`。假世界默认是空的。
     ///
     /// `getDrops` from `BlockBehaviour.onExplosionHit`. A world without loot returns nothing.
@@ -3603,10 +3775,10 @@ impl<'a> World<'a> {
         self.level.remove_entity(id);
     }
 
-    /// 独立寻路阶段的一刻：收请求、去重、排优先级、按节点预算算。开关关着时什么也不做。
-    ///
-    /// One pathfinding-phase step: collect requests, deduplicate, rank, and search
-    /// within the per-island node budget. A no-op while the switch is off.
+    /// `EntityTickList.forEach` + `ServerLevel.tickNonPassenger`：一个 tick 里所有
+    /// **根实体**按 ID 顺序各 tick 一次，载具 tick 完再按乘客名单递归
+    /// `commonTick + rideTick + positionRider` 跑它的乘客树。玩家乘客不在实体表里，
+    /// 仍由游戏层自己的一刻跑。
     fn run_pathfinding_phase(&mut self) {
         let config = crate::entity::mob::pathfinding::Config::of(
             &crate::entity::ctx::BlockView::block_game_rules(self),
@@ -3628,9 +3800,13 @@ impl<'a> World<'a> {
         self.level.put_pathfinding(phase);
     }
 
-    /// `EntityTickList.forEach`：一个 tick 里所有实体按 ID 顺序各 tick 一次。
     ///
     /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
+    ///
+    /// `EntityTickList.forEach` + `ServerLevel.tickNonPassenger`: every root
+    /// entity ticks once in id order, then its passenger tree runs
+    /// `commonTick + rideTick + positionRider` recursively in boarding order.
+    /// Player passengers stay outside the entity table.
     pub fn tick_entities(&mut self) {
         // 一刻开头清空寻路去重集合（测试构建的压测探针；正式构建是空操作）。
         #[cfg(test)]
@@ -3639,12 +3815,19 @@ impl<'a> World<'a> {
         // 独立寻路阶段：上一刻算好的结果先挂回各生物的导航，`tick_mob` 开头统一处理。
         self.level.begin_path_tick();
         // 降频开着时按 uid 升序算好这一刻的计划。两种驱动共用 `plans_for_tick`，
-        // 所以精确和并行的分档、节奏、唤醒名额逐位一致。
+        // 所以精确和并行的分档、节奏、唤醒名额逐位一致。乘客跟根实体用同一档。
         let plans = self.throttle_plans();
-        for (index, id) in self.level.entity_uids().into_iter().enumerate() {
+        // 名单在本刻开头取一次：递归时按乘客表找人，新生成的实体这一刻不 tick。
+        let uids = self.level.entity_uids();
+        for (index, id) in uids.into_iter().enumerate() {
             let Some(mut entity) = self.level.take_entity(id) else {
                 continue;
             };
+            // 乘客由根实体递归 tick，不再出现在 uid 升序的独立循环里。
+            if entity.vehicle.is_some() {
+                self.level.put_entity(entity);
+                continue;
+            }
             // 所在区块不在实体 tick 范围时，官方跳过这一刻；实体仍留在世界里，
             // 别的实体照常查得到它，位置和年龄都不动。
             let ticks = !entity.removed
@@ -3668,8 +3851,11 @@ impl<'a> World<'a> {
                 // The row leaves the table; hand its pending events to the store
                 // first so the sync layer can send them.
                 self.level.keep_departed_mob_events(&entity);
+                self.eject_passengers_of(&entity);
             } else {
+                let vehicle_public = entity.clone().split().public;
                 self.level.put_entity(entity);
+                self.ride_tick_passengers(&vehicle_public, plan_at(&plans, index, id));
             }
         }
         self.level.end_entity_tick();
@@ -3677,6 +3863,146 @@ impl<'a> World<'a> {
         // 精确驱动只有一个线程；把分段计数并进全局汇总（正式构建是空操作）。
         #[cfg(test)]
         crate::entity::mob::timing::imp::flush_counters();
+    }
+
+    /// `ServerLevel.tickPassenger`：载具这一刻的位置定了以后，按乘客表顺序递归。
+    /// 玩家 ID（小于 `FIRST_ENTITY_ID`）不在实体表里，跳过；实体乘客走
+    /// `commonTick + rideTick`（清速度、跑自己的 tick、复位落距）再按附着点定位。
+    /// 官方在载具被移除或关系已断时当场 `stopRiding`，这里照做。
+    ///
+    /// `ServerLevel.tickPassenger`: recurse over the passenger list after the
+    /// vehicle's position is settled. Player ids are not in the table and are
+    /// skipped; entity passengers run `commonTick + rideTick` and then get
+    /// positioned at the attachment point.
+    fn ride_tick_passengers(
+        &mut self,
+        vehicle: &crate::entity::EntityPublic,
+        plan: crate::entity::ctx::ThrottlePlan,
+    ) {
+        let Some(list) = vehicle_passengers(vehicle) else {
+            return;
+        };
+        for (index, passenger_id) in list.iter().copied().enumerate() {
+            if passenger_id < crate::entity::FIRST_ENTITY_ID {
+                continue;
+            }
+            let Some(mut passenger) = self.level.take_entity(passenger_id) else {
+                continue;
+            };
+            if passenger.vehicle != Some(vehicle.uid) || passenger.removed {
+                // 关系已经断了：官方 `tickPassenger` 在这里调 `stopRiding`，两边的关系
+                // 一起摘掉。生物乘客不挪位置。
+                self.remove_passenger_from(vehicle.uid, passenger_id);
+                crate::entity::riding::dismount(&mut passenger, None);
+                self.level.put_entity(passenger);
+                continue;
+            }
+            // `Mob.getNavigation` / `getMoveControl` 在骑手控制载具时转给载具：
+            // tick 之前把载具的导航/移动控制与按载具尺寸算的快照换进骑手字段。
+            // Vanilla `Mob.getNavigation` / `getMoveControl` delegate to the vehicle
+            // for a controlling rider: swap the vehicle's state in before the tick.
+            let vehicle_snapshot = self.entity(vehicle.uid);
+            let borrowing = vehicle_snapshot.as_ref().is_some_and(|snapshot| {
+                crate::entity::riding::begin_nav_borrow(&mut passenger, snapshot, self)
+            });
+            // `Entity.commonTick` 由 `Entity::tick` 内部跑，这里 `rideTick` 只补
+            // 「清零速度 + 乘客自己的 tick + 复位落距 + positionRider」。
+            passenger.delta = mc_bamboo_core::Vec3::default();
+            let mut ctx = crate::entity::ctx::PreciseCtx::with_plan(self, passenger_id, plan);
+            passenger.tick(&mut ctx);
+            passenger.fall_distance = 0.0;
+            let world = ctx.into_world();
+            // tick 之后把改过的共享导航/移动控制写回载具，恢复骑手自己的两份。
+            // After the tick, write the mutated shared state back to the vehicle and
+            // restore the rider's own navigation / move control.
+            if borrowing
+                && let Some((navigation, mover)) =
+                    crate::entity::riding::end_nav_borrow(&mut passenger)
+            {
+                let mut shared = Some((navigation, mover));
+                world.with_entity_mut(vehicle.uid, &mut |entity| {
+                    if let Some((navigation, mover)) = shared.take() {
+                        crate::entity::riding::put_borrowed_nav(entity, navigation, mover);
+                    }
+                });
+            }
+            // 乘客自己的 tick 里可能已经 `stopRiding`（受伤死亡等）：官方这时不再
+            // 定位，直接结束这一支。
+            if passenger.vehicle != Some(vehicle.uid) || passenger.removed {
+                world.level.put_entity(passenger);
+                continue;
+            }
+            // 载具此刻的公开快照：它自己的 tick 已经落地，位置是这一刻末的值。
+            let Some(current) = world.level.entity_public(vehicle.uid) else {
+                // 载具这一刻被移除了：乘客停在原地，只摘关系。
+                crate::entity::riding::dismount(&mut passenger, None);
+                world.level.put_entity(passenger);
+                continue;
+            };
+            let passenger_public = passenger.clone().split().public;
+            let at = crate::entity::riding::rider_position(&current, &passenger_public, index);
+            passenger.position = at;
+            // 官方的 `checkDespawn` 在 uid 顺序里对每个实体各来一次：乘客的那次排在
+            // 它的 `rideTick` 之后，由这里补上（`tick_mob` 对乘客已经跳过）。
+            // Vanilla checks despawn once per entity in uid order; a passenger's
+            // check comes after its `rideTick`, so it happens here.
+            if !passenger.removed {
+                let mut check =
+                    crate::entity::ctx::PreciseCtx::with_plan(world, passenger_id, plan);
+                crate::entity::mob::living::check_despawn_entity(&mut passenger, &mut check);
+            }
+            // 乘客可能自己也是载具：递归跑它的乘客树。锚点要用 `positionRider`
+            // 之后的乘客位置，所以重新拆一次公开快照。
+            let nested = passenger.clone().split().public;
+            world.level.put_entity(passenger);
+            world.ride_tick_passengers(&nested, plan);
+        }
+    }
+
+    /// 把乘客从载具的名单里摘掉（官方 `removePassenger` 的一半；另一半是乘客自己的
+    /// `vehicle`，由 [`crate::entity::riding::dismount`] 清）。
+    ///
+    /// Drops a passenger from its vehicle's list; the passenger's own `vehicle`
+    /// link is cleared by [`crate::entity::riding::dismount`].
+    fn remove_passenger_from(&mut self, vehicle: EntityUid, passenger: EntityUid) {
+        self.level.with_just_spawned(vehicle, &mut |entity| {
+            entity.with_mob(|_, mob| mob.passengers.retain(|&id| id != passenger));
+        });
+    }
+
+    /// `setRemoved` / `ejectPassengers`：载具离场时把仍在表里的实体乘客摘掉，
+    /// 各给 60 刻冷却；生物乘客停在原地（官方只有玩家会重新落位）。
+    ///
+    /// `setRemoved` / `ejectPassengers`: drop entity passengers when their vehicle
+    /// leaves and give each a 60-tick cooldown; mob passengers stay put (only
+    /// players get a dismount location in vanilla).
+    fn eject_passengers_of(&mut self, vehicle: &crate::entity::Entity) {
+        let Some(list) = entity_passengers(vehicle) else {
+            return;
+        };
+        self.eject_passenger_ids(&list);
+    }
+
+    fn eject_passenger_ids(&mut self, list: &[EntityUid]) {
+        for &passenger_id in list {
+            if passenger_id < crate::entity::FIRST_ENTITY_ID {
+                continue;
+            }
+            let Some(mut passenger) = self.level.take_entity(passenger_id) else {
+                continue;
+            };
+            crate::entity::riding::dismount(&mut passenger, None);
+            if passenger.removed {
+                self.level.keep_departed_mob_events(&passenger);
+            } else {
+                // 级联：乘客的子乘客也一起下车（先拷名单，再把行放回表）。
+                let nested = entity_passengers(&passenger);
+                self.level.put_entity(passenger);
+                if let Some(ids) = nested {
+                    self.eject_passenger_ids(&ids);
+                }
+            }
+        }
     }
 
     /// 和 [`World::tick_entities`] 同一套顺序，但把这一拍 tick 过的实体留下。
@@ -4077,6 +4403,41 @@ pub(crate) fn traverse_blocks<T>(
         }
     }
     None
+}
+
+/// 公开快照里的乘客名单（只有生物载具会有人骑）。
+///
+/// The passenger list in a public snapshot (only mob vehicles can be ridden).
+fn vehicle_passengers(vehicle: &EntityPublic) -> Option<Vec<EntityUid>> {
+    match &vehicle.kind {
+        KindPublic::Mob(mob) => Some(mob.passengers.clone()),
+        _ => None,
+    }
+}
+
+/// 完整实体里的乘客名单，给载具离场时摘人用。
+///
+/// The passenger list in a full entity, used when a vehicle leaves.
+fn entity_passengers(vehicle: &Entity) -> Option<Vec<EntityUid>> {
+    vehicle
+        .kind
+        .mob()
+        .map(|mob| mob.passengers.clone())
+        .filter(|list| !list.is_empty())
+}
+
+/// 按 uid 升序的降频计划里取根实体的那一份；乘客跟根实体用同一档。
+///
+/// The root's plan from the uid-ordered throttle plans; passengers reuse it.
+fn plan_at(
+    plans: &[crate::entity::ctx::ThrottlePlan],
+    index: usize,
+    _uid: EntityUid,
+) -> crate::entity::ctx::ThrottlePlan {
+    plans
+        .get(index)
+        .copied()
+        .unwrap_or(crate::entity::ctx::ThrottlePlan::FULL)
 }
 
 #[cfg(test)]
