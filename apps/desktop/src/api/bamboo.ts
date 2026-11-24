@@ -51,6 +51,14 @@ export interface ServerSettings {
   /** 超平坦预设的 JSON 原文，只在 levelType 是 flat 时生效。 */
   generatorSettings: string;
   entityThreads: number;
+  /** 每只生物每刻最多处理几次推挤，0 = 不限（精确模式）。 */
+  maxEntityCollisions: number;
+  /** 三档降频的降频档起点（格），0 = 不启用。 */
+  mobThrottleDistance: number;
+  /** 三档降频的休眠档起点（格），0 = 不启用。 */
+  mobSleepDistance: number;
+  /** 休眠生物每刻唤醒名额的倍率，1 = Paper 缺省。 */
+  mobWakeupsScale: number;
   /** 红石缓存（实验），设置页里可以开关。 */
   redstoneCache: boolean;
   chunkWorkerThreads: number;
@@ -62,6 +70,21 @@ export interface ServerSettings {
   reclaimsPerTick: number;
   islandThreads: number;
   islands: boolean;
+}
+
+/** 一键性能模式的一组值，字段和 Rust 侧 `PerformancePreset` 一一对应。 */
+export interface PerformancePreset {
+  entityThreads: number;
+  maxEntityCollisions: number;
+  mobThrottleDistance: number;
+  mobSleepDistance: number;
+  mobWakeupsScale: number;
+}
+
+/** 推荐值和恢复原版精确模式的两套值，都由 Rust 侧集中定义。 */
+export interface PerformancePresets {
+  recommended: PerformancePreset;
+  exact: PerformancePreset;
 }
 
 export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";
@@ -95,6 +118,8 @@ export const loadSettings = () => invoke<ServerSettings>("load_settings");
 export const saveSettings = (settings: ServerSettings) =>
   invoke<void>("save_settings", { settings });
 export const defaultSettings = () => invoke<ServerSettings>("default_settings");
+/** 一键性能模式的推荐值和恢复原版精确模式的值。 */
+export const performancePresets = () => invoke<PerformancePresets>("performance_presets");
 export const recentLogs = () => invoke<LogLine[]>("recent_logs");
 export const recentMetrics = () => invoke<MetricsSample[]>("recent_metrics");
 

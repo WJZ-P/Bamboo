@@ -14,7 +14,9 @@ import {
   loadSettings,
   onPlayersChanged,
   onStateChanged,
+  performancePresets,
   saveSettings,
+  type PerformancePresets,
   type ServerSettings,
   type ServerSnapshot,
   startServer,
@@ -26,6 +28,8 @@ interface ServerContextValue {
   settings: ServerSettings | null;
   /** 出厂设置，设置页用它显示每一项的默认值。 */
   defaults: ServerSettings | null;
+  /** 一键性能模式的推荐值和精确模式的值。 */
+  presets: PerformancePresets | null;
   /** 正在启动或停止，这期间按钮不能再点。 */
   busy: boolean;
   error: string | null;
@@ -44,6 +48,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<ServerSnapshot | null>(null);
   const [settings, setSettings] = useState<ServerSettings | null>(null);
   const [defaults, setDefaults] = useState<ServerSettings | null>(null);
+  const [presets, setPresets] = useState<PerformancePresets | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -64,6 +69,9 @@ export function ServerProvider({ children }: { children: ReactNode }) {
       .catch((reason) => setError(errorText(reason)));
     defaultSettings()
       .then((value) => !disposed && setDefaults(value))
+      .catch((reason) => setError(errorText(reason)));
+    performancePresets()
+      .then((value) => !disposed && setPresets(value))
       .catch((reason) => setError(errorText(reason)));
 
     return () => {
@@ -111,6 +119,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
       snapshot,
       settings,
       defaults,
+      presets,
       busy,
       error,
       start,
@@ -118,7 +127,18 @@ export function ServerProvider({ children }: { children: ReactNode }) {
       updateSettings,
       dismissError,
     }),
-    [snapshot, settings, defaults, busy, error, start, stop, updateSettings, dismissError],
+    [
+      snapshot,
+      settings,
+      defaults,
+      presets,
+      busy,
+      error,
+      start,
+      stop,
+      updateSettings,
+      dismissError,
+    ],
   );
 
   return <ServerContext.Provider value={value}>{children}</ServerContext.Provider>;
