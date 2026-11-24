@@ -13,7 +13,7 @@ use mc_bamboo_data::{PathType, registries::attribute, tags::fluid_tags};
 
 use super::{
     Attributes, Malus, Mob, MobType, control,
-    goals::{Goal, GoalSelector, PLAIN_STROLL, WrappedGoal},
+    goals::{Goal, GoalSelector, PLAIN_STROLL, TargetType, WrappedGoal},
     living, motion,
 };
 use crate::entity::{
@@ -26,6 +26,17 @@ use crate::entity::{
 /// Whether this is a guardian (either kind).
 pub fn is_guardian(kind: MobType) -> bool {
     matches!(kind, MobType::Guardian | MobType::ElderGuardian)
+}
+
+/// `Guardian.getAttackDuration()`：普通 80 刻，远古 60 刻。
+///
+/// `Guardian.getAttackDuration()`: 80 ticks normally, 60 for the elder guardian.
+pub fn attack_duration(kind: MobType) -> i32 {
+    if kind == MobType::ElderGuardian {
+        60
+    } else {
+        80
+    }
 }
 
 /// 官方 `Guardian` / `ElderGuardian` 的自有字段。都不是存档字段。
@@ -53,6 +64,14 @@ pub struct GuardianState {
     ///
     /// `DATA_ID_ATTACK_TARGET` (integer metadata): 0 means no laser target.
     pub attack_target: i32,
+    /// `GuardianAttackGoal.stop` 调 `randomStrollGoal.trigger()` 的落地标记：
+    /// tick 期间目标选择器被暂时取走，标记在下一刻的 `Stroll.canUse` 里转为
+    /// `force_trigger`。不存档、不同步。
+    ///
+    /// Landing flag for `randomStrollGoal.trigger()` from `GuardianAttackGoal.stop`:
+    /// the selector is taken out of the mob during its tick, so the flag turns into
+    /// `force_trigger` in the next `Stroll.canUse`. Not saved or synced.
+    pub stroll_triggered: bool,
     /// `GuardianAttackGoal.attackTime`，`start` 时置 -10。
     ///
     /// `GuardianAttackGoal.attackTime`, set to -10 by `start`.
@@ -98,12 +117,12 @@ pub fn walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
     }
 }
 
-/// `Guardian.registerGoals` 的 `goalSelector`，按注册顺序。激光和回家目标先用
+/// `Guardian.registerGoals` 的 `goalSelector`，按注册顺序。回家目标先用
 /// [`Goal::Unavailable`] 占住优先级，逻辑在后续阶段接入。
 ///
 /// The `goalSelector` half of `Guardian.registerGoals`, in registration order. The
-/// laser and go-home goals keep their priority slots as [`Goal::Unavailable`] until
-/// their behaviour is wired in a later phase.
+/// go-home goal keeps its priority slot as [`Goal::Unavailable`] until its behaviour
+/// is wired in a later phase.
 pub fn goals(kind: MobType) -> GoalSelector {
     // `ElderGuardian` 构造函数把 `randomStrollGoal.setInterval(400)`。
     // The `ElderGuardian` constructor calls `randomStrollGoal.setInterval(400)`.
@@ -113,7 +132,7 @@ pub fn goals(kind: MobType) -> GoalSelector {
         80
     };
     GoalSelector::from_goals(vec![
-        wrap(4, Goal::Unavailable("GuardianAttackGoal")),
+        wrap(4, Goal::GuardianAttack),
         wrap(5, Goal::Unavailable("MoveTowardsRestrictionGoal")),
         wrap(
             7,
@@ -164,15 +183,16 @@ fn wrap(priority: i32, goal: Goal) -> WrappedGoal {
 }
 
 /// `Guardian.registerGoals` 的 `targetSelector`：优先级 1 的
-/// `NearestAttackableTargetGoal`。选择器和激光一起在后续阶段接入，先占位。
+/// `NearestAttackableTargetGoal(LivingEntity, 10, mustSee=true, mustReach=false,
+/// GuardianAttackSelector)`。
 ///
 /// The `targetSelector` half of `Guardian.registerGoals`: the priority-1
-/// `NearestAttackableTargetGoal`. Its selector arrives with the laser in a later
-/// phase; kept as a placeholder for now.
+/// `NearestAttackableTargetGoal(LivingEntity, 10, mustSee=true, mustReach=false,
+/// GuardianAttackSelector)`.
 pub fn target_goals() -> GoalSelector {
     GoalSelector::from_goals(vec![wrap(
         1,
-        Goal::Unavailable("NearestAttackableTargetGoal"),
+        Goal::nearest_target(TargetType::GuardianPrey),
     )])
 }
 
@@ -383,6 +403,7 @@ mod tests {
         let table = goals(MobType::Guardian).goals;
         let priorities: Vec<i32> = table.iter().map(|wrapped| wrapped.priority).collect();
         assert_eq!(priorities, vec![4, 5, 7, 8, 8, 9]);
+        assert!(matches!(table[0].goal, Goal::GuardianAttack));
         assert!(matches!(
             table[2].goal,
             Goal::Stroll {
@@ -418,6 +439,23 @@ mod tests {
         let targets = target_goals().goals;
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].priority, 1);
+        assert!(matches!(
+            targets[0].goal,
+            Goal::NearestAttackableTarget {
+                kind: TargetType::GuardianPrey,
+                must_see: true,
+                ..
+            }
+        ));
+    }
+
+    /// `Guardian.getAttackDuration()`：普通 80，远古 60。
+    ///
+    /// `Guardian.getAttackDuration()`: 80 normally, 60 for the elder guardian.
+    #[test]
+    fn guardian_attack_duration() {
+        assert_eq!(attack_duration(MobType::Guardian), 80);
+        assert_eq!(attack_duration(MobType::ElderGuardian), 60);
     }
 
     /// 目标与生成规则按字节码：完整目标规则（从而有视线记忆）、`IN_WATER` 生成、
