@@ -34,6 +34,7 @@ pub mod dolphin;
 pub mod dolphin_goals;
 pub mod drowned;
 pub mod effects;
+pub mod enchantment_effects;
 pub(crate) mod enderman;
 pub mod endermite;
 pub mod equine;
