@@ -388,6 +388,56 @@ pub(super) fn ranged_attack_tick(
 /// players cannot pick it up), shoot it with vanilla's
 /// `spawnProjectileUsingShoot(dx, dy + horizontal*0.2, dz, 1.6, uncertainty)`,
 /// then play `entity.drowned.shoot`.
+/// 官方 `Drowned.performRangedAttack` 的投掷参数：从射手位置、眼高、目标位置、
+/// 目标身高、难度构造一支怪物三叉戟的 `TridentShot`。goal 路径与 mob-oracle
+/// 逐刻对拍共用这一份，避免瞄准公式漂移（`getY(1/3)`、`dy + horizontal*0.2`、
+/// `power 1.6`、`uncertainty = 14 - 4*difficulty`、怪物拾取 `Disallowed`）。
+///
+/// The throw parameters of vanilla `Drowned.performRangedAttack`: build a mob
+/// trident's `TridentShot` from shooter position, eye height, target position,
+/// target height and difficulty. Shared by the goal path and the mob-oracle tick
+/// parity so the aim formula cannot drift (`getY(1/3)`, `dy + horizontal*0.2`,
+/// `power 1.6`, `uncertainty = 14 - 4*difficulty`, mob `Disallowed` pickup).
+// 官方 `performRangedAttack` 的输入确实这么多，逐项都不能省：位置/眼高/目标/身高/
+// 难度决定瞄准与散布，物品堆、主人 id 与 UUID 决定附魔、拾取与主人解析。
+// Vanilla's `performRangedAttack` really takes all of these; none can be dropped.
+#[allow(clippy::too_many_arguments)]
+pub fn aimed_trident_shot(
+    shooter: Vec3,
+    eye_y: f64,
+    target: Vec3,
+    target_height: f32,
+    difficulty: i32,
+    weapon: ItemStack,
+    owner: i32,
+    owner_uuid: [u8; 16],
+) -> crate::entity::arrow::TridentShot {
+    use crate::entity::arrow::Pickup;
+    let position = Vec3::new(shooter.x, eye_y - f64::from(0.1_f32), shooter.z);
+    let dx = target.x - shooter.x;
+    let dz = target.z - shooter.z;
+    // 官方 `getY(1/3)` = `position.y + (double)getBbHeight() * (1/3)`，身高是 float；
+    // `dy + horizontal * 0.2F` 的 `0.2F` 也是先按 float 再转 double。
+    // Vanilla `getY(1/3)` = `position.y + (double)getBbHeight() * (1/3)` where the
+    // height is a float; `dy + horizontal * 0.2F` likewise widens the float 0.2 to double.
+    let target_y = target.y + f64::from(target_height) * 0.333_333_333_333_333_3;
+    let dy = target_y - position.y;
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    // `RangedAttackMob.rangedAttackUncertainty(level) = 14 - 4 * difficulty.id`。
+    let uncertainty = 14.0 - 4.0 * difficulty as f32;
+    crate::entity::arrow::TridentShot {
+        position,
+        direction: Vec3::new(dx, dy + horizontal * f64::from(0.2_f32), dz),
+        power: TRIDENT_SHOOT_POWER,
+        uncertainty,
+        source_movement: None,
+        owner: Some(owner),
+        owner_uuid: Some(owner_uuid),
+        item: weapon,
+        pickup: Pickup::Disallowed,
+    }
+}
+
 pub(super) fn perform_ranged_attack(
     me: &mut Entity,
     mob: &mut Mob,
@@ -400,29 +450,16 @@ pub(super) fn perform_ranged_attack(
     } else {
         ItemStack::new(items::TRIDENT, 1)
     };
-    let position = Vec3::new(
-        me.position.x,
-        living::eye_y(me, mob) - f64::from(0.1_f32),
-        me.position.z,
+    let shot = aimed_trident_shot(
+        me.position,
+        living::eye_y(me, mob),
+        target.position,
+        target.height as f32,
+        ctx.blocks().difficulty(),
+        weapon,
+        me.id,
+        mob.uuid,
     );
-    let dx = target.position.x - me.position.x;
-    let dz = target.position.z - me.position.z;
-    let target_y = target.position.y + target.height * 0.333_333_333_333_333_3;
-    let dy = target_y - position.y;
-    let horizontal = (dx * dx + dz * dz).sqrt();
-    // `RangedAttackMob.rangedAttackUncertainty(level) = 14 - 4 * difficulty.id`。
-    let uncertainty = 14.0 - 4.0 * ctx.blocks().difficulty() as f32;
-    let shot = crate::entity::arrow::TridentShot {
-        position,
-        direction: Vec3::new(dx, dy + horizontal * 0.2, dz),
-        power: TRIDENT_SHOOT_POWER,
-        uncertainty,
-        source_movement: None,
-        owner: Some(me.id),
-        owner_uuid: Some(mob.uuid),
-        item: weapon,
-        pickup: crate::entity::arrow::Pickup::Disallowed,
-    };
     ctx.emit(Command::ShootTrident(shot), me);
     if !mob.silent {
         let pitch = 1.0 / (me.random.next_float() * 0.4 + 0.8);

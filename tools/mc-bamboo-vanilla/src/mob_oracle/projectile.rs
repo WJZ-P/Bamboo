@@ -108,6 +108,38 @@ struct ProjectileFrame {
     ///
     /// Pillager scenes: loaded arrows, crossbow damage, ticks used and `noActionTime`.
     crossbow: Option<[i64; 4]>,
+    /// 本刻的全部音效：音效 ID、声源序号、坐标原始位、音量位、音高位。
+    ///
+    /// All sounds this tick: id, source ordinal, raw x/y/z, volume, pitch.
+    sounds: Option<Vec<[i64; 7]>>,
+    /// 忠诚返回逐刻状态：dealtDamage / noPhysics / 返回计数 / inGroundTime。
+    /// 三叉戟已被丢弃时是 `null`。
+    ///
+    /// Per-tick loyalty state: dealtDamage / noPhysics / return count /
+    /// inGroundTime; `null` once the trident has been removed.
+    trident: Option<Option<[i64; 4]>>,
+    /// 这一刻新掉出来的物品实体：物品 ID、数量、x/y/z 坐标原始位。
+    ///
+    /// Item entities dropped this tick: item id, count and raw x/y/z bits.
+    drops: Option<Vec<[i64; 5]>>,
+    /// 场景主人逐刻状态：`[是否存活, 是否旁观]`。
+    ///
+    /// The scene owner's per-tick state: `[alive, spectator]`.
+    owner: Option<[i64; 2]>,
+    /// 引雷召唤的闪电：x/y/z 坐标原始位、`cause` 玩家 ID（无则 -1）。
+    ///
+    /// Channeling-summoned bolts: raw x/y/z bits and the cause player id
+    /// (-1 when none).
+    lightning: Option<Vec<[i64; 4]>>,
+    /// 引雷受害者（牛）的血量位（仅 `post_attack` 场景有）。
+    ///
+    /// The channeling victim (cow) health bits (only post_attack scenes).
+    victim: Option<i64>,
+    /// 溺尸场景：怪物三叉戟的 pickup 枚举序号（DISALLOWED=0，玩家捡不到）。三叉戟被移除时为 -1。
+    ///
+    /// Drowned scenes: the mob trident's pickup ordinal (DISALLOWED=0, player cannot
+    /// pick it up); -1 once the trident has been removed.
+    pickup: Option<i32>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -282,6 +314,87 @@ impl ProjectileCase {
         self.name == "arrow_water_after_pierce"
     }
 
+    /// 三叉戟逐刻场景：飞行、插地、忠诚返回、引雷、溺尸远程。
+    ///
+    /// Trident tick-by-tick scenes: flight, sticking, loyalty return,
+    /// channeling and the drowned ranged attack.
+    fn trident(&self) -> bool {
+        self.name.starts_with("trident_")
+    }
+
+    /// 忠诚等级（忠诚 / 主人死亡 / 旁观场景）。
+    ///
+    /// Loyalty level for the return / dead-owner / spectator scenes.
+    fn loyalty(&self) -> u8 {
+        if self.name.starts_with("trident_loyalty")
+            || self.name.starts_with("trident_owner")
+            || self.name.starts_with("trident_spectator")
+        {
+            3
+        } else {
+            0
+        }
+    }
+
+    /// 场上预置的 `dealtDamage`：忠诚三叉戟从「已命中」态开始返回。
+    ///
+    /// A pre-set `dealtDamage`: a returning loyal trident starts post-hit.
+    fn dealt_damage(&self) -> bool {
+        self.name == "trident_loyalty"
+            || self.name.starts_with("trident_owner")
+            || self.name.starts_with("trident_spectator")
+    }
+
+    /// 主人死亡：`LivingEntity.isAlive()` 为假，忠诚三叉戟判定主人不可接受并掉落。
+    ///
+    /// Dead owner: `LivingEntity.isAlive()` is false, so a loyal trident drops.
+    fn owner_dead(&self) -> bool {
+        self.name == "trident_owner_dead"
+    }
+
+    /// 主人旁观：`isAcceptibleReturnOwner()` 为假，忠诚三叉戟也掉落。
+    ///
+    /// Spectator owner: `isAcceptibleReturnOwner()` is false, so it drops too.
+    fn owner_spectator(&self) -> bool {
+        self.name == "trident_spectator"
+    }
+
+    /// 主人下线：`getOwner()` 解析成 null，tick 外层短路，不掉落也不返回。
+    ///
+    /// Offline owner: `getOwner()` is null and the outer guard short-circuits,
+    /// so the trident neither drops nor returns.
+    fn owner_offline(&self) -> bool {
+        self.name == "trident_owner_offline"
+    }
+
+    /// 引雷场景雷雨 + 天空可见（避雷针场景还要求避雷针，由方块表给）。
+    ///
+    /// Channeling scenes run in a thunderstorm with open sky (the rod scene
+    /// also needs a lightning rod, supplied by the block table).
+    fn thundering(&self) -> bool {
+        self.name.starts_with("trident_channeling")
+    }
+
+    fn open_sky(&self) -> bool {
+        self.name == "trident_channeling_mob" || self.name == "trident_channeling_rod"
+    }
+
+    fn channeling(&self) -> bool {
+        self.name.starts_with("trident_channeling")
+    }
+
+    fn channeling_mob(&self) -> bool {
+        self.name == "trident_channeling_mob"
+    }
+
+    /// 溺尸远程投掷（普通 / 困难）：怪物三叉戟 pickup=Disallowed，玩家捡不到。
+    ///
+    /// Drowned ranged throw (normal / hard): the mob trident has pickup=Disallowed, so
+    /// the player cannot pick it up.
+    fn drowned(&self) -> bool {
+        self.name.starts_with("trident_drowned")
+    }
+
     fn level(&self) -> MobLevel {
         MobLevel {
             natural_spawn: None,
@@ -297,6 +410,9 @@ impl ProjectileCase {
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             facts: ZombieFacts {
                 difficulty: self.difficulty,
+                raining: self.thundering(),
+                thundering: self.thundering(),
+                can_see_sky: self.open_sky(),
                 ..ZombieFacts::default()
             },
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
@@ -324,7 +440,14 @@ impl ProjectileCase {
         }
     }
 
-    fn spawn(&self, world: &mut World<'_>, mutate: bool, break_pierce: bool) {
+    fn spawn(
+        &self,
+        world: &mut World<'_>,
+        mutate: bool,
+        break_pierce: bool,
+        break_return: bool,
+        break_drowned: bool,
+    ) {
         if self.skeleton {
             let mut skeleton = world.prepare_entity(Entity::by_mob_type(
                 self.shooter_kind(),
@@ -341,6 +464,163 @@ impl ProjectileCase {
                     .set(EquipmentSlot::MainHand, self.shooter_weapon());
             }
             world.add_prepared_entity(skeleton);
+        } else if self.drowned() {
+            // 溺尸远程投掷：用生产 `perform_ranged_attack` 共用的 `aimed_trident_shot`
+            // 构造怪物三叉戟，与官方 `OracleDrowned.performRangedAttack` 的初态对齐
+            // （射手 (0.5,64,0.5)、eye_y=64+1.74f、目标=场景玩家 (6.5,64,0.5)、
+            // getY(1/3)、dy+horizontal*0.2、power 1.6、uncertainty=14-4*difficulty、
+            // pickup=Disallowed）。官方把三叉戟放进 `world.spawned` 后按 FIRST_ID 收进
+            // arrows；这里 `spawn_trident_shot` 走生产 prepare/shoot 路径，作为实体表里
+            // 第一个 prepare 的实体，随机源种子与官方 `entitySeeds.nextLong()` 一致。
+            // owner=FIRST_ID+1 与官方溺尸（getId()=FIRST_ID+1）一致 → 生成包
+            // data=owner id，也让 `me_owner` 能解析出真实生物以触发难度缩放。
+            //
+            // Drowned ranged throw: build the mob trident with the same
+            // `aimed_trident_shot` the production goal uses, matching the official
+            // `OracleDrowned.performRangedAttack` initial state. As the first
+            // prepared entity its random seed lines up with the official
+            // `entitySeeds.nextLong()`; owner=FIRST_ID+1 makes the add-entity
+            // packet's data (owner id) match the official phantom shooter and lets
+            // `me_owner` resolve a real Mob for difficulty damage scaling.
+            use mc_bamboo_blocks::entity::mob::drowned::aimed_trident_shot;
+            let shooter = Entity::by_mob_type(MobType::Drowned, Vec3::new(0.5, 64.0, 0.5));
+            let eye_y = shooter.position.y + f64::from(shooter.kind.mob().unwrap().eye_height);
+            // 改坏确认 trident_drowned：把难度拨错一档，uncertainty / 散布全变，
+            // 逐刻初速与后续位置必须报不一致。
+            // Break self-test: shift the difficulty so uncertainty / spread change;
+            // the per-tick initial velocity and downstream motion must diverge.
+            let difficulty = if break_drowned {
+                self.difficulty + 1
+            } else {
+                self.difficulty
+            };
+            let shot = aimed_trident_shot(
+                Vec3::new(0.5, 64.0, 0.5),
+                eye_y,
+                Vec3::new(self.player_x, 64.0, 0.5),
+                1.8_f32,
+                difficulty,
+                ItemStack::new(mc_bamboo_data::items::TRIDENT, 1),
+                // 主人是真实溺尸（官方 getOwner() 解析成非玩家 LivingEntity），
+                // id 与 Java `setId(FIRST_ID + 1)` 对齐；生成包的 data 也取这个值。
+                // The owner is a real drowned (vanilla getOwner() resolves to a
+                // non-player LivingEntity); the id matches Java's setId and is
+                // also the add-entity packet's data.
+                self.first_id + 1,
+                1_u128.to_be_bytes(),
+            );
+            world.spawn_trident_shot(shot);
+            // 官方幽灵溺尸虽不进 tracked/tick，但 `getOwner()` 是非玩家 LivingEntity，
+            // 困难难度伤害按 `scalesWithDifficulty()` ×1.5。Bamboo 生产代码只有当
+            // `me_owner` 能把主人解析成真实生物时才缩放（`scale_when_non_player`），
+            // 这里补一只 no_ai、放在飞行路径外的溺尸作为主人，使难度缩放按官方生效。
+            // 它是 Mob 生成快照，逐刻包只从 Arrow 快照构造，不会多出发包；no_ai
+            // 且远离三叉戟，不会被当成命中目标或产生额外音效。
+            //
+            // Vanilla's phantom drowned is not tracked/ticked, but getOwner() is a
+            // non-player LivingEntity, so HARD scales damage ×1.5. Bamboo's production
+            // scales only when me_owner resolves a real Mob (scale_when_non_player),
+            // so add an inert, off-path drowned as the owner. Mob spawn snapshots
+            // never become oracle packets (only Arrow ones do); no_ai and far from
+            // the trident, it is neither a hit target nor a source of extra sounds.
+            let mut drowned = Entity::by_mob_type(MobType::Drowned, Vec3::new(0.5, 64.0, -8.0));
+            drowned.with_mob(|_, mob| mob.no_ai = true);
+            world.spawn_entity(drowned);
+        } else if self.trident() {
+            // 三叉戟逐刻对拍：从显式初态出发，和官方一样走 `shoot` 再逐刻
+            // `AbstractArrow.tick`。扔出初态已由 `shot_trident` 单独对拍，这里只比
+            // 飞行 / 插地 / 忠诚 / 引雷的逐刻行为。
+            // Trident tick parity: start from an explicit state, `shoot` like the
+            // official side, then tick `AbstractArrow.tick` frame by frame. The
+            // throw's initial state is already covered by `shot_trident`; here we
+            // compare only the per-tick flight / stick / loyalty / channeling.
+            use mc_bamboo_blocks::entity::arrow::{Pickup, TridentShot};
+            use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+            let loyalty = self.loyalty();
+            // 改坏确认：忠诚等级驱动返回加速度（0.05*L），改掉它逐刻位置/速度
+            // 与 ID_LOYALTY 元数据都应报不一致。
+            // Break self-test: the loyalty level drives the return acceleration
+            // (0.05*L); corrupting it must break the per-tick motion and metadata.
+            let loyalty = if break_return && loyalty > 1 {
+                loyalty - 1
+            } else {
+                loyalty
+            };
+            let mut item = ItemStack::new(mc_bamboo_data::items::TRIDENT, 1);
+            let mut levels: Vec<(i32, i32)> = Vec::new();
+            if loyalty > 0 || self.channeling() {
+                let registry = mc_bamboo_data::registries::SYNCED_REGISTRIES
+                    .iter()
+                    .find(|registry| registry.name == "minecraft:enchantment")
+                    .unwrap();
+                if loyalty > 0 {
+                    let id = registry
+                        .entries
+                        .iter()
+                        .position(|entry| *entry == "minecraft:loyalty")
+                        .unwrap() as i32;
+                    levels.push((id, i32::from(loyalty)));
+                }
+                if self.channeling() {
+                    // `channeling.json` 的 post_attack / hit_block 效果要物品堆带引雷。
+                    // `channeling.json`'s post_attack / hit_block needs the enchantment.
+                    let id = registry
+                        .entries
+                        .iter()
+                        .position(|entry| *entry == "minecraft:channeling")
+                        .unwrap() as i32;
+                    levels.push((id, 1));
+                }
+                let mut patch = ComponentPatch::new();
+                patch.put(
+                    mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+                    PatchEntry::Set(ComponentValue::Enchantments(levels)),
+                );
+                let (added, removed) = patch.to_opaque();
+                item.added = added;
+                item.removed = removed;
+            }
+            let owner_uuid = ((1_u128 << 64) | 2).to_be_bytes();
+            // 下线主人：物品堆仍带忠诚、dealtDamage 仍预置，但 `owner`/`owner_uuid`
+            // 都为空，`trident_tick` 解析不到主人 → 外层短路，既不掉也不返回，
+            // 走正常飞行；对应 Java `put(Projectile,"owner",null)`。
+            // Offline owner: the stack still has loyalty and dealtDamage is set,
+            // but both owner fields are null, so `trident_tick` resolves no
+            // owner and short-circuits — normal flight, no drop, no return.
+            // 引雷场景也要主人：闪电的 `cause` 是投掷者（ServerPlayer）。
+            // Channeling also needs the owner: the bolt's `cause` is the thrower.
+            let has_owner = (loyalty > 0 || self.channeling()) && !self.owner_offline();
+            let shot = TridentShot {
+                position: Vec3::new(0.5, 65.5, 0.5),
+                direction: Vec3::new(1.0, 0.0, 0.0),
+                power: 1.6,
+                uncertainty: 0.0,
+                source_movement: None,
+                owner: has_owner.then_some(self.player_id),
+                owner_uuid: has_owner.then_some(owner_uuid),
+                item,
+                pickup: if loyalty > 0 {
+                    Pickup::Allowed
+                } else {
+                    Pickup::Disallowed
+                },
+            };
+            let mut arrow = world.prepare_entity(Entity::configured_trident(&shot));
+            if self.dealt_damage()
+                && let EntityKind::Arrow(data) = &mut arrow.kind
+            {
+                data.dealt_damage = true;
+            }
+            arrow.shoot_arrow(Vec3::new(1.0, 0.0, 0.0), 1.6, 0.0);
+            world.add_prepared_entity(arrow);
+            if self.channeling_mob() {
+                // 引雷 post_attack 的受害者：静止的牛，闪电落在它自己的位置。
+                // The channeling post_attack victim: a still cow; the bolt lands
+                // on its own position.
+                let mut cow = Entity::by_mob_type(MobType::Cow, Vec3::new(6.5, 64.0, 0.5));
+                cow.with_mob(|_, mob| mob.no_ai = true);
+                world.spawn_entity(cow);
+            }
         } else {
             let y = if self.water() {
                 65.25
@@ -427,6 +707,13 @@ impl Report {
     pub(super) fn replay_projectile(&mut self, case: &ProjectileCase) {
         self.cases += 1;
         let mut level = case.level();
+        // 改坏确认 `trident_channeling`：关掉露天条件，引雷就不该召唤闪电、
+        // 也不该播雷声；逐刻的 lightning / sounds 必须报不一致。
+        // Break self-test `trident_channeling`: turn off open sky so channeling
+        // summons no bolt and plays no thunder; lightning / sounds must diverge.
+        if self.break_test.as_deref() == Some("trident_channeling") {
+            level.facts.can_see_sky = false;
+        }
         if self.break_test.as_deref() == Some("arrow_water") {
             // 改坏确认：拿掉水面，熄火音效和火焰刻都应该对不上。
             // Break self-test: drop the water so the extinguish sound and fire ticks must differ.
@@ -438,12 +725,29 @@ impl Report {
             case.name.ends_with("_rejected") || case.passive(),
             case.flaming().then_some([37, 80]),
         );
+        // 主人不可接受的两条路径：死亡 / 旁观，逐刻行为和掉落物都要对上官方。
+        // The two unacceptable-owner paths: dead / spectator; both the per-tick
+        // behavior and the dropped item must match vanilla.
+        // 改坏确认 `trident_owner`：故意不把主人设成死亡 / 旁观，三叉戟就会错误地
+        // 飞回而不是掉落，逐刻状态、掉落物、主人状态和包都必须报不一致。
+        // Break self-test `trident_owner`: leave the owner acceptable, so the
+        // trident wrongly returns instead of dropping; state, drops, owner and
+        // packets must all diverge.
+        let break_owner = self.break_test.as_deref() == Some("trident_owner");
+        if case.owner_dead() && !break_owner {
+            level.game.as_mut().unwrap().set_dead(case.player_id);
+        }
+        if case.owner_spectator() && !break_owner {
+            level.game.as_mut().unwrap().set_spectator(case.player_id);
+        }
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         case.spawn(
             &mut World::new(&mut level, &mut ticks),
             self.break_test.as_deref() == Some("projectile"),
             self.break_test.as_deref() == Some("arrow_piercing"),
+            self.break_test.as_deref() == Some("trident_return"),
+            self.break_test.as_deref() == Some("trident_drowned"),
         );
         let mut tracking = EntityTracking::default();
         let mut previous = BTreeSet::new();
@@ -457,6 +761,9 @@ impl Report {
         for (tick, expected) in case.frames.iter().enumerate() {
             let mut extinguished = Vec::new();
             let mut level_events = Vec::new();
+            let mut sounds: Vec<[i64; 7]> = Vec::new();
+            let mut drops: Vec<[i64; 5]> = Vec::new();
+            let mut bolts: Vec<[i64; 4]> = Vec::new();
             if tick != 0 {
                 if (case.flaming() || case.water()) && tick == 1 {
                     level
@@ -547,6 +854,30 @@ impl Report {
                         ]
                     })
                 }));
+                sounds.extend(effects.iter().filter_map(|effect| {
+                    let mc_bamboo_blocks::Effect::Sound {
+                        sound,
+                        source,
+                        x,
+                        y,
+                        z,
+                        volume,
+                        pitch,
+                        ..
+                    } = effect
+                    else {
+                        return None;
+                    };
+                    Some([
+                        i64::from(*sound),
+                        i64::from(source.id()),
+                        x.to_bits() as i64,
+                        y.to_bits() as i64,
+                        z.to_bits() as i64,
+                        i64::from(volume.to_bits()),
+                        i64::from(pitch.to_bits()),
+                    ])
+                }));
             }
             if let Some(thermal) = expected.player_thermal {
                 let actual = level
@@ -631,6 +962,60 @@ impl Report {
                 packets.push(packet_body(&RemoveEntities { entity_ids: &[uid] }));
             }
             let spawns = level.entities.take_spawn_snapshots();
+            // 官方 `FakeLevel` 把召唤的闪电放进 `world.spawned`、当刻就 `clear()`，
+            // 既不 tick 也不跟踪；这里同样把闪电从回放世界移除，避免它后续的
+            // 伤害 / 点燃 / 音效进入逐刻对拍（闪电实体自身的逐刻行为由
+            // `blocks/entity/lightning.rs` 的单测覆盖）。召唤事件本身仍由
+            // `lightning`（坐标 + cause）与 `sounds`（雷声）严格对拍。
+            // The official `FakeLevel` puts summoned bolts into `world.spawned`
+            // and clears them the same tick, never ticking or tracking them.
+            // Remove them from the replay world here too, so their downstream
+            // damage / ignition / sounds stay out of the tick parity (the bolt's
+            // own tick behavior is covered by `lightning.rs` unit tests). The
+            // summon event itself is still strictly compared via `lightning`
+            // (position + cause) and `sounds` (thunder).
+            if case.channeling() {
+                let bolt_ids: Vec<_> = level
+                    .entities
+                    .ids()
+                    .into_iter()
+                    .filter(|&id| {
+                        level
+                            .entities
+                            .public_at(id)
+                            .is_some_and(|p| matches!(p.kind, KindPublic::LightningBolt(_)))
+                    })
+                    .collect();
+                for id in bolt_ids {
+                    level.entities.remove(id);
+                }
+            }
+            // 这一刻新掉出来的物品实体：物品 ID、数量、生成坐标原始位。忠诚三叉戟
+            // 主人不可接受时掉出的拾取物就在这里（带 0.1f 抬高后的 y）。
+            // Item entities spawned this tick: item id, count, raw spawn position
+            // bits. A loyal trident's drop for an unacceptable owner lands here
+            // (with the 0.1f raised y).
+            for public in &spawns {
+                if let KindPublic::Item { stack, .. } = &public.kind {
+                    drops.push([
+                        i64::from(stack.item),
+                        i64::from(stack.count),
+                        public.position.x.to_bits() as i64,
+                        public.position.y.to_bits() as i64,
+                        public.position.z.to_bits() as i64,
+                    ]);
+                }
+                if let KindPublic::LightningBolt(bolt) = &public.kind {
+                    // 引雷闪电：坐标原始位 + `cause` 玩家 ID（无则 -1）。
+                    // Channeling bolt: raw position bits + cause player id (-1 if none).
+                    bolts.push([
+                        public.position.x.to_bits() as i64,
+                        public.position.y.to_bits() as i64,
+                        public.position.z.to_bits() as i64,
+                        bolt.cause.map_or(-1, i64::from),
+                    ]);
+                }
+            }
             for public in spawns {
                 if !matches!(public.kind, KindPublic::Arrow(_)) {
                     continue;
@@ -695,6 +1080,103 @@ impl Report {
                 if *theirs != ours {
                     self.mismatch(format!(
                         "{label} player effects: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if self.break_test.as_deref() == Some("trident_sound")
+                && case.trident()
+                && let Some(first) = sounds.first_mut()
+            {
+                // 改坏确认：把落地音效的 ID 改掉，逐刻对拍必须报不一致。
+                // Break self-test: corrupt the land sound id so the tick parity
+                // must report a mismatch.
+                first[0] = -1;
+            }
+            if let Some(theirs) = &expected.sounds
+                && *theirs != sounds
+            {
+                self.mismatch(format!(
+                    "{label} sounds: official {theirs:?}, bamboo {sounds:?}"
+                ));
+            }
+            if let Some(theirs) = expected.trident {
+                let ours =
+                    level
+                        .entities
+                        .get(case.first_id)
+                        .and_then(|entity| match &entity.kind {
+                            EntityKind::Arrow(data) => Some([
+                                i64::from(data.dealt_damage),
+                                i64::from(data.no_physics),
+                                i64::from(data.client_side_return_trident_tick_count),
+                                i64::from(data.in_ground_time),
+                            ]),
+                            _ => None,
+                        });
+                if theirs != ours {
+                    self.mismatch(format!(
+                        "{label} trident state: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if let Some(theirs) = expected.pickup {
+                // 怪物三叉戟 pickup 恒为 Disallowed(0)；玩家碰到也捡不起来。三叉戟
+                // 被丢弃 / 移除时官方给 -1。
+                // A mob trident's pickup is always Disallowed(0); the official side
+                // emits -1 once the trident has been removed.
+                let ours = level
+                    .entities
+                    .get(case.first_id)
+                    .and_then(|entity| match &entity.kind {
+                        EntityKind::Arrow(data) => Some(data.pickup as i32),
+                        _ => None,
+                    })
+                    .unwrap_or(-1);
+                if theirs != ours {
+                    self.mismatch(format!("{label} pickup: official {theirs}, bamboo {ours}"));
+                }
+            }
+            if let Some(theirs) = &expected.drops
+                && *theirs != drops
+            {
+                self.mismatch(format!(
+                    "{label} drops: official {theirs:?}, bamboo {drops:?}"
+                ));
+            }
+            if let Some(theirs) = expected.owner {
+                let ours = level
+                    .game
+                    .as_ref()
+                    .unwrap()
+                    .views()
+                    .iter()
+                    .find(|view| view.uid == case.player_id)
+                    .map(|view| [i64::from(view.alive), i64::from(view.spectator)]);
+                if Some(theirs) != ours {
+                    self.mismatch(format!(
+                        "{label} owner: official {theirs:?}, bamboo {ours:?}"
+                    ));
+                }
+            }
+            if let Some(theirs) = &expected.lightning
+                && *theirs != bolts
+            {
+                self.mismatch(format!(
+                    "{label} lightning: official {theirs:?}, bamboo {bolts:?}"
+                ));
+            }
+            if let Some(theirs) = expected.victim {
+                // 受害牛在 `first_id + 1`（和 effect_target 场景一致）。
+                // The victim cow is at `first_id + 1` (as in the effect_target scenes).
+                let ours = level.entities.get(case.first_id + 1).and_then(|entity| {
+                    entity
+                        .kind
+                        .mob()
+                        .map(|mob| i64::from(mob.health.to_bits() as i32))
+                });
+                if Some(theirs) != ours {
+                    self.mismatch(format!(
+                        "{label} victim health: official {theirs}, bamboo {ours:?}"
                     ));
                 }
             }
