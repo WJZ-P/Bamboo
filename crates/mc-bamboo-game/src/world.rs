@@ -3702,6 +3702,13 @@ fn run_island_simulation(
     chunk_broadcast::broadcast_changes(region);
     region.profiler.lap(Phase::BlockChangeBroadcast);
     entity_sync::sync_entities(region);
+    // 玩家属性：全量（配对后 / 首刻）或逐刻脏属性，发给自己和全部观察者。
+    // 放在 sync_entities 之后，配对新增的观察者已经进了 seen_by。
+    //
+    // Player attributes: full (after pairing / first tick) or per-tick dirty,
+    // sent to the player and all observers. After sync_entities so newly
+    // paired observers are already in seen_by.
+    crate::player_attributes::sync_dirty(region);
     entity_tracking::sync(region);
     entity_sync::send_equipment_changes(region);
     interaction::send_block_changed_acks(region);

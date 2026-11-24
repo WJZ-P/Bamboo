@@ -22,13 +22,19 @@ use mc_bamboo_blocks::entity::mob::{
     effects::attribute_modifiers,
     equipment::stack_modifiers,
 };
-use mc_bamboo_data::registries::{attribute, mob_effect};
+use mc_bamboo_data::{
+    is_client_syncable_attribute,
+    registries::{attribute, mob_effect},
+};
 use mc_bamboo_protocol::{
     item::ItemStack,
-    packet::play::{EquipmentSlot, GameMode},
+    packet::play::{
+        AttributeModifier, AttributeOperation, AttributeSnapshot, EquipmentSlot, GameMode,
+        UpdateAttributes,
+    },
 };
 
-use crate::{player::Player, region::Region};
+use crate::{inbound::PlayerId, links::encode_frames, player::Player, region::Region};
 
 /// 六个玩家装备槽，顺序和 [`Player::equipment_stacks`] 一致（按 `EquipmentSlot` ordinal）。
 ///
@@ -92,8 +98,9 @@ pub(crate) fn rebuild(region: &mut Region) {
     }
 }
 
-/// 官方 `ServerPlayer.updatePlayerAttributes` 的创造模式触及距离修饰符。
-/// 数值和 `region::CREATIVE_ATTRIBUTES` 一致（有逐字节对拍）。
+/// 官方 `ServerPlayer.updatePlayerAttributes` 的创造模式触及距离修饰符：
+/// `minecraft:creative_mode_block_range` +0.5、`minecraft:creative_mode_entity_range` +2.0，
+/// 都是 `ADD_VALUE`。数值来自官方 `UpdateAttributes` 的逐字节对拍。
 fn creative_modifiers() -> [(i32, Modifier); 2] {
     [
         (
@@ -158,6 +165,175 @@ fn rebuild_one(player: &mut Player) {
         if let Some(instance) = attributes.instance(id) {
             instance.remove_modifier(&modifier.id);
             instance.modifiers.push(modifier);
+        }
+    }
+}
+
+/// 一次属性同步的快照状态：(`id`, `base`, `modifiers`, `sync_version`)。
+/// `EntitySync` 存"上次发出的状态"做逐刻脏比对。
+///
+/// One attribute's sync state. `EntitySync` keeps the last-sent states for
+/// the per-tick dirty comparison.
+pub(crate) type AttributeState = (i32, f64, Vec<(String, f64, i32)>, u64);
+
+fn operation_code(operation: Operation) -> i32 {
+    match operation {
+        Operation::AddValue => 0,
+        Operation::AddMultipliedBase => 1,
+        Operation::AddMultipliedTotal => 2,
+    }
+}
+
+/// 当前全部 `is_client_syncable_attribute` 属性的状态（按 entries 顺序）。
+///
+/// The state of every client-syncable attribute, in table order.
+pub(crate) fn syncable_states(player: &Player) -> Vec<AttributeState> {
+    player
+        .attributes
+        .entries
+        .iter()
+        .filter(|entry| is_client_syncable_attribute(entry.id))
+        .map(|entry| {
+            let modifiers = entry
+                .modifiers
+                .iter()
+                .map(|m| (m.id.clone(), m.amount, operation_code(m.operation)))
+                .collect();
+            (entry.id, entry.base, modifiers, entry.sync_version)
+        })
+        .collect()
+}
+
+/// 把可同步属性编成 `UpdateAttributes` 帧。`only` 给定时只发这些 id（脏同步），
+/// 为 `None` 时发全部（全量同步）。返回的是可直接 `send_frames` 的完整帧。
+///
+/// Encode `UpdateAttributes` frames for the syncable attributes. `only` restricts
+/// to dirty ids; `None` sends all. Returns complete frames ready for `send_frames`.
+fn attribute_frames(player: &Player, only: Option<&[i32]>) -> Option<Vec<u8>> {
+    let wanted = |id: i32| only.is_none_or(|ids| ids.contains(&id));
+    let mut snapshots = Vec::new();
+    let mut modifiers: Vec<Vec<AttributeModifier<'_>>> = Vec::new();
+    for entry in &player.attributes.entries {
+        if !is_client_syncable_attribute(entry.id) || !wanted(entry.id) {
+            continue;
+        }
+        let list = entry
+            .modifiers
+            .iter()
+            .map(|m| AttributeModifier {
+                id: &m.id,
+                amount: m.amount,
+                operation: match m.operation {
+                    Operation::AddValue => AttributeOperation::AddValue,
+                    Operation::AddMultipliedBase => AttributeOperation::AddMultipliedBase,
+                    Operation::AddMultipliedTotal => AttributeOperation::AddMultipliedTotal,
+                },
+            })
+            .collect();
+        modifiers.push(list);
+        snapshots.push((entry.id, entry.base));
+    }
+    let attributes: Vec<AttributeSnapshot<'_>> = snapshots
+        .iter()
+        .zip(&modifiers)
+        .map(|(&(id, base), list)| AttributeSnapshot {
+            attribute: id,
+            base,
+            modifiers: list,
+        })
+        .collect();
+    if attributes.is_empty() {
+        return None;
+    }
+    Some(encode_frames(&UpdateAttributes {
+        entity_id: player.id.0,
+        attributes: &attributes,
+    }))
+}
+
+/// 全量可同步属性帧（进服 / 重生 / 配对）。
+///
+/// Full syncable-attribute frames (join / respawn / pairing).
+pub(crate) fn full_frames(player: &Player) -> Option<Vec<u8>> {
+    attribute_frames(player, None)
+}
+
+/// 进服 / 重生 / 切模式：给玩家自己发全量属性，并记下已同步状态。
+/// 先按当前状态重建一次，保证发出的属性和随后每刻重建的一致（不会有首刻假脏）。
+///
+/// Send full attributes to the player's own client and record the synced state.
+/// Rebuilds first so the sent state matches the next tick's rebuild (no spurious
+/// first-tick dirty packet).
+pub(crate) fn send_full_to_self(region: &mut Region, id: PlayerId) {
+    let (frames, states) = {
+        let Some(player) = region.players.get_mut(&id) else {
+            return;
+        };
+        rebuild_one(player);
+        (full_frames(player), syncable_states(player))
+    };
+    if let Some(frames) = frames {
+        region.links.send_frames(id, &frames);
+    }
+    if let Some(player) = region.players.get_mut(&id) {
+        player.sync.sent_attributes = states;
+    }
+}
+
+/// 每刻脏属性同步：和自己 + 观察者上次发出的状态比，变了就发 `UpdateAttributes`。
+/// `sent_attributes` 为空时（进服第一刻 / 重生后清空）发全量。
+///
+/// Per-tick dirty attribute sync. Compares with the last-sent state and sends
+/// changed attributes to the player and every observer. An empty
+/// `sent_attributes` (first tick / after a respawn reset) sends everything.
+pub(crate) fn sync_dirty(region: &mut Region) {
+    let ids: Vec<PlayerId> = region.players.keys().copied().collect();
+    for id in ids {
+        let (frames, viewers, current) = {
+            let Some(player) = region.players.get(&id) else {
+                continue;
+            };
+            let current = syncable_states(player);
+            let sent = &player.sync.sent_attributes;
+            let changed: Vec<i32> = if sent.is_empty() {
+                current.iter().map(|state| state.0).collect()
+            } else {
+                current
+                    .iter()
+                    .filter(|state| {
+                        !sent.iter().any(|prev| {
+                            prev.0 == state.0
+                                && prev.1 == state.1
+                                && prev.2 == state.2
+                                && prev.3 == state.3
+                        })
+                    })
+                    .map(|state| state.0)
+                    .collect()
+            };
+            let frames = if changed.is_empty() {
+                None
+            } else {
+                attribute_frames(player, Some(&changed))
+            };
+            let viewers: Vec<PlayerId> = player.sync.seen_by().iter().copied().collect();
+            (frames, viewers, current)
+        };
+        if let Some(frames) = frames {
+            // 官方 `ServerEntity.sendDirtyEntityData` 把脏属性发给所有正在追踪的玩家；
+            // 玩家自己的客户端靠进服 / 重生 / 切模式的全量包和客户端自己按药水效果算出的
+            // 修饰符，不在这里收包。观察者共享同一份字节。
+            //
+            // Vanilla `ServerEntity.sendDirtyEntityData` targets tracking players.
+            // The player's own client gets the full snapshot on join/respawn/game
+            // mode change and derives potion modifiers client-side, so it is not
+            // a target here. All observers share the same bytes.
+            for viewer in &viewers {
+                region.links.send_frames(*viewer, &frames);
+            }
+        }
+        if let Some(player) = region.players.get_mut(&id) {
+            player.sync.sent_attributes = current;
         }
     }
 }
@@ -261,6 +437,99 @@ mod tests {
                 .unwrap()
                 .modifier("minecraft:creative_mode_block_range")
                 .is_none()
+        );
+    }
+
+    /// 速度药水后给观察者发一包脏 `update_attributes`：MOVEMENT_SPEED 带上
+    /// `minecraft:effect.speed`（速度 II = 0.2*(1+1)，ADD_MULTIPLIED_TOTAL）。
+    /// 稳定一刻（属性没变）不该再发包。玩家自己的客户端不收脏包。
+    ///
+    /// A speed potion sends one dirty update_attributes packet to observers for
+    /// MOVEMENT_SPEED with the effect modifier; a stable tick sends none.
+    #[test]
+    fn a_speed_potion_sends_a_dirty_attribute_packet_to_observers() {
+        use crate::world::tests::{Harness, frames_with_id};
+        use mc_bamboo_data::{
+            packets::play::clientbound,
+            registries::{attribute as attr, mob_effect},
+        };
+
+        fn varint(buf: &[u8], at: &mut usize) -> i32 {
+            let mut value = 0i32;
+            let mut shift = 0;
+            loop {
+                let byte = buf[*at];
+                *at += 1;
+                value |= i32::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return value;
+                }
+                shift += 7;
+            }
+        }
+
+        let mut server = Harness::new(8);
+        let alice = server.join_and_settle("Alice");
+        let bob = server.join_and_settle("Bob");
+        server.tick();
+        server.tick();
+        assert!(
+            server.region().players[&alice.id]
+                .sync
+                .seen_by()
+                .contains(&bob.id),
+            "Bob tracks Alice"
+        );
+        alice.take_frames();
+        bob.take_frames();
+
+        // 稳定一刻：属性没变，观察者也不该再收到属性包。
+        server.tick();
+        assert!(
+            frames_with_id(&bob.take_frames(), clientbound::UPDATE_ATTRIBUTES).is_empty(),
+            "no attribute packet on a stable tick"
+        );
+
+        // 给 Alice 速度 II（amplifier=1）。
+        {
+            let p = server.region().players.get_mut(&alice.id).unwrap();
+            p.effects
+                .add(EffectInstance::with_amplifier(mob_effect::SPEED, 200, 1));
+        }
+        server.tick();
+
+        let frames = bob.take_frames();
+        let updates = frames_with_id(&frames, clientbound::UPDATE_ATTRIBUTES);
+        assert_eq!(updates.len(), 1, "exactly one dirty attribute packet");
+        let body = &updates[0].body;
+        let mut at = 0;
+        assert_eq!(varint(body, &mut at), alice.id.0, "entity_id");
+        let count = varint(body, &mut at);
+        let mut found = false;
+        for _ in 0..count {
+            let id = varint(body, &mut at);
+            at += 8; // base f64
+            let modifiers = varint(body, &mut at);
+            for _ in 0..modifiers {
+                let len = varint(body, &mut at) as usize;
+                let modifier_id = std::str::from_utf8(&body[at..at + len]).unwrap();
+                at += len;
+                let amount = f64::from_be_bytes(body[at..at + 8].try_into().unwrap());
+                at += 8;
+                let operation = varint(body, &mut at);
+                if id == attr::MOVEMENT_SPEED && modifier_id == "minecraft:effect.speed" {
+                    found = true;
+                    assert_eq!(amount, f64::from(0.2_f32) * 2.0, "speed II amount");
+                    assert_eq!(operation, 2, "ADD_MULTIPLIED_TOTAL");
+                }
+            }
+        }
+        assert_eq!(at, body.len(), "no trailing bytes");
+        assert!(found, "MOVEMENT_SPEED got the speed effect modifier");
+        // 玩家自己的客户端不收脏属性包。
+        assert!(
+            frames_with_id(&alice.take_frames(), clientbound::UPDATE_ATTRIBUTES).is_empty(),
+            "no dirty attribute packet to the player's own client"
         );
     }
 }

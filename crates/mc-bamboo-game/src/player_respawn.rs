@@ -18,7 +18,7 @@ use mc_bamboo_protocol::{
     packet::play::{
         ChangeDifficulty, ClockState, CommonPlayerSpawnInfo, ContainerSetContent, GameEvent,
         GameMode, InitializeBorder, PlayerPosition, Respawn, SetDefaultSpawnPosition,
-        SetEntityData, SetEquipment, SetExperience, SetHeldSlot, SetTime, UpdateAttributes,
+        SetEntityData, SetEquipment, SetExperience, SetHeldSlot, SetTime,
     },
 };
 
@@ -26,7 +26,7 @@ use crate::{
     inbound::PlayerId,
     player::Player,
     player_health::{FoodData, PlayerHealth},
-    region::{CREATIVE_ATTRIBUTES, DIMENSION, Region},
+    region::{DIMENSION, Region},
     world_state::RespawnData,
 };
 
@@ -378,15 +378,6 @@ fn send_pairing_packets(region: &mut Region, id: PlayerId) {
             items: &items,
         },
     );
-    if player.game_mode == GameMode::Creative {
-        region.links.send(
-            id,
-            &UpdateAttributes {
-                entity_id: id.0,
-                attributes: &CREATIVE_ATTRIBUTES,
-            },
-        );
-    }
     let empty = ItemStack::empty();
     let stacks = player.equipment_stacks(&empty);
     let slots = [
@@ -425,6 +416,12 @@ fn send_pairing_packets(region: &mut Region, id: PlayerId) {
     region
         .links
         .send(id, &crate::region::abilities_for(player.game_mode));
+    // 重生给玩家自己发全量可同步属性（官方 restoreFrom 后重建属性表）。
+    // 放在所有 `player` 只读借用结束之后，好把 `&mut Region` 交出去。
+    //
+    // Full syncable attributes to the player after respawn. Placed after the
+    // last immutable `player` borrow so `&mut Region` is free.
+    crate::player_attributes::send_full_to_self(region, id);
     // 下一刻 `player_hurt::tick` 会按 lastSent* 哨兵补 set_health，
     // `experience::sync_dirty` 补 set_experience，和官方 `doTick` 一致。
 }
