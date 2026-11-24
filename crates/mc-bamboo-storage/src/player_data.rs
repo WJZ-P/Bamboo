@@ -109,6 +109,13 @@ pub struct PlayerData {
     ///
     /// Vanilla `LivingEntity.active_effects`: the list is omitted when empty.
     pub active_effects: Option<Tag>,
+    /// `ServerPlayer.saveEnderPearls` 的 `ender_pearls` childrenList：每项是
+    /// `ThrownEnderpearl.save()` 的整份实体 NBT，外加 `ender_pearl_dimension`。
+    /// 空表时官方不写这个键。
+    ///
+    /// `ServerPlayer.saveEnderPearls`: one full saved entity tag plus
+    /// `ender_pearl_dimension` per in-flight pearl. The key is absent when empty.
+    pub ender_pearls: Vec<Tag>,
     pub abilities: Abilities,
     pub seen_credits: bool,
     pub spawn_extra_particles_on_fall: bool,
@@ -202,6 +209,7 @@ impl Default for PlayerData {
             food_saturation: 5.0,
             food_exhaustion: 0.0,
             active_effects: None,
+            ender_pearls: Vec::new(),
             abilities: Abilities::default(),
             seen_credits: false,
             spawn_extra_particles_on_fall: false,
@@ -247,6 +255,7 @@ const KNOWN_KEYS: &[&str] = &[
     "foodSaturationLevel",
     "foodExhaustionLevel",
     "active_effects",
+    "ender_pearls",
     "abilities",
     "EnderItems",
     "Dimension",
@@ -383,6 +392,14 @@ impl PlayerData {
         if let Some(list) = &self.active_effects {
             push(&mut root, "active_effects", list.clone());
         }
+        // `saveEnderPearls`：空集合不写键；每项都带自己的 `ender_pearl_dimension`。
+        if !self.ender_pearls.is_empty() {
+            push(
+                &mut root,
+                "ender_pearls",
+                Tag::List(self.ender_pearls.clone()),
+            );
+        }
         push(&mut root, "abilities", self.abilities_tag());
         if let Ok(items) = slots::encode_list(&self.ender_items) {
             push(&mut root, "EnderItems", items);
@@ -448,6 +465,11 @@ impl PlayerData {
         data.food_saturation = opt_f32(entries, "foodSaturationLevel", 5.0)?;
         data.food_exhaustion = opt_f32(entries, "foodExhaustionLevel", 0.0)?;
         data.active_effects = field_of(entries, "active_effects").cloned();
+        // `childrenListOrEmpty`：不是复合标签列表时按空表处理。
+        data.ender_pearls = match field_of(entries, "ender_pearls") {
+            Some(Tag::List(list)) => list.clone(),
+            _ => Vec::new(),
+        };
         data.dimension = opt_string(entries, "Dimension", OVERWORLD)?;
         data.game_type = opt_int(entries, "playerGameType", DEFAULT_GAME_TYPE)?;
         data.previous_game_type = match field_of(entries, "previousPlayerGameType") {

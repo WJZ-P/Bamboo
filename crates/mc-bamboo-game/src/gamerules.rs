@@ -147,6 +147,7 @@ impl GameRuleSet {
             max_snow_accumulation_height: self.int(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
             spawn_mobs: self.bool(gamerules::SPAWN_MOBS),
             spawn_monsters: self.bool(gamerules::SPAWN_MONSTERS),
+            ender_pearls_vanish_on_death: self.bool(gamerules::ENDER_PEARLS_VANISH_ON_DEATH),
             spawn_phantoms: self.bool(gamerules::SPAWN_PHANTOMS),
             mob_griefing: self.bool(gamerules::MOB_GRIEFING),
             mob_drops: self.bool(gamerules::MOB_DROPS),

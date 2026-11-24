@@ -1567,6 +1567,15 @@ pub enum DamageKind {
     /// `minecraft:player_explosion`: an explosion with a direct and a causing entity,
     /// which is what a creeper blast is.
     PlayerExplosion,
+    /// `minecraft:ender_pearl`：珍珠落地时主人受的 5 点摔落类伤害。
+    /// 26.3 的数据文件里是 `FALL_VARIANTS`、`is_fall`、`no_knockback`、
+    /// `bypasses_armor`，`message_id` 是 `fall`，`exhaustion` 为 0。
+    ///
+    /// `minecraft:ender_pearl`: the 5-point fall-like damage an owner takes on
+    /// pearl landing. In 26.3 it is `FALL_VARIANTS`, `is_fall`,
+    /// `no_knockback` and `bypasses_armor`, with `message_id` `fall` and
+    /// zero exhaustion.
+    EnderPearl,
     /// 雷击，`minecraft:lightning_bolt`。
     ///
     /// A lightning strike, `minecraft:lightning_bolt`.
@@ -1606,26 +1615,27 @@ impl DamageKind {
             Self::Explosion => "minecraft:explosion",
             Self::DryOut => "minecraft:dry_out",
             Self::PlayerExplosion => "minecraft:player_explosion",
+            Self::EnderPearl => "minecraft:ender_pearl",
             Self::LightningBolt => "minecraft:lightning_bolt",
         }
     }
 
-    /// 官方 `DamageType.deathMessageType()`：26.3 的数据文件里只有
+    /// 官方 `DamageType.deathMessageType()`：26.3 的数据文件里
     /// `minecraft:fall` / `minecraft:ender_pearl` 是 `FALL_VARIANTS`，
     /// `minecraft:bad_respawn_point` 是 `INTENTIONAL_GAME_DESIGN`。
     ///
-    /// Vanilla `DamageType.deathMessageType()`: only fall damage and ender
-    /// pearl use `FALL_VARIANTS`; bad respawn point uses the linked variant.
+    /// Vanilla `DamageType.deathMessageType()`: fall damage and ender pearl
+    /// use `FALL_VARIANTS`; bad respawn point uses the linked variant.
     pub const fn death_message_type(self) -> DeathMessageType {
         match self {
-            Self::Fall => DeathMessageType::FallVariants,
+            Self::Fall | Self::EnderPearl => DeathMessageType::FallVariants,
             _ => DeathMessageType::Default,
         }
     }
 
     /// `DamageTypeTags.IS_FALL` / `ALWAYS_MOST_SIGNIFICANT_FALL`。
     pub const fn is_fall(self) -> bool {
-        matches!(self, Self::Fall)
+        matches!(self, Self::Fall | Self::EnderPearl)
     }
 
     /// 官方 `DamageType.msgId()`，数据文件里的 `message_id`：死亡消息
@@ -1662,6 +1672,7 @@ impl DamageKind {
             Self::Explosion => "explosion",
             Self::DryOut => "dryout",
             Self::PlayerExplosion => "explosion.player",
+            Self::EnderPearl => "fall",
             Self::LightningBolt => "lightningBolt",
         }
     }
@@ -1700,6 +1711,8 @@ impl DamageKind {
             Self::Explosion,
             Self::DryOut,
             Self::PlayerExplosion,
+            Self::EnderPearl,
+            Self::LightningBolt,
         ];
         all.into_iter()
             .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
@@ -1736,6 +1749,7 @@ impl DamageKind {
                 | Self::Magic
                 | Self::IndirectMagic
                 | Self::Wither
+                | Self::EnderPearl
         )
     }
 

@@ -52,6 +52,7 @@ mod debug_stick;
 mod director_host;
 mod drops;
 mod durability;
+mod ender_pearl;
 mod entity_sync;
 #[doc(hidden)]
 pub mod entity_tracking;
@@ -69,6 +70,7 @@ mod island;
 mod island_partition;
 mod island_partition_stats;
 mod island_pool;
+mod item_cooldowns;
 mod item_use_stats;
 mod lectern;
 mod light_updates;

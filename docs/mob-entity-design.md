@@ -2905,8 +2905,7 @@ target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.fina
 位置 / 速度 / 朝向 / 随机源 / 血量 / 寿命 / 唤醒倒计时 / 方块表 / 新生成实体 /
 世界随机源全部逐位比较。
 
-**已知限制**：末影珍珠弹射物没实现，`ThrownEnderpearl.onHit` 的 5% 刷末影螨和传送都没做；
-细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
+**已知限制**：细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
 （仓库还没有通用刷怪笼）没建模。
 
 ### 5.26 铁傀儡、雪傀儡和雪球（`golem` 分支）
@@ -2961,4 +2960,53 @@ target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.fina
 玩家扔雪球没有冷却；`MoveTowardsTargetGoal` / `DefendVillageTargetGoal` 没建模；
 `Level.is_raining_at` / `SNOW_GOLEM_MELTS` 的精确世界答案来自生成器导出的群系表，
 并行只读视图按区块调色板覆盖。
+
+### 5.25 末影珍珠（2026-11-23，分支 `ender-pearl`）
+
+**实体**：`ThrowableKind::EnderPearl` 接在 `thrown_egg.rs` 的通用投掷物上。`onHit` 照
+`ThrownEnderpearl`：先按珍珠自己的随机源取 32 组粒子数（`nextDouble` + 两次
+`nextGaussian`；服务端 `addParticle` 是空实现，不发包但取数照发生），`ServerLevel`
+且没被移除才继续；`getOwner()` 为空或 `isAllowedToTeleportOwner` 假就 `discard()`。
+同维度下要求主人 `isAlive && !isSleeping`（`Level::player_sleeping`），Bamboo 只有主世界，
+跨维度的 `canUsePortal(true)` 分支不存在。落点是命中前的 `oldPosition()`，不是
+`HitResult.getLocation()`。主人是玩家且连接仍在接受消息时，先按 `random.nextFloat() < 0.05`、
+`isSpawningMonsters()`（`spawnMobs` 与 `spawnMonsters` 两条规则都开）和难度不是和平刷
+末影螨，`snapTo` 主人的位置与朝向；然后 `ServerPlayer.teleport` 到落点、清下落距离和
+impulse、造成 5 点 `minecraft:ender_pearl` 伤害，最后 `discard()`。命中实体的 0 点伤害只打
+一次（`Projectile.onHitEntity` 在 26.3 是空实现）。伤害类型的数据照
+`data/minecraft/damage_type/ender_pearl.json`：`fall_variants`、`message_id=fall`、
+`exhaustion=0`，并进 `#is_fall` / `#bypasses_armor` / `#no_knockback`。
+
+**物品**：`EnderpearlItem.use` 用 `NEUTRAL` 音源、音量 0.5、音高
+`0.4/(level.random.nextFloat()*0.4+0.8)` 播投掷声；`ServerLevel` 时
+`Projectile.spawnProjectileFromRotation` 以 1.5 力度、散布 1 从眼睛下方 0.1 生成珍珠；
+记 `ITEM_USED`、`stack.consume(1, player)` 后返回 `SUCCESS`。`ItemStack.use` 成功后
+`UseCooldown.apply` 按组件给 20 刻冷却（`ticks() = (int)(seconds*20)`），`ServerPlayerGameMode.useItem`
+开头冷却中直接 `PASS`。玩家身上的 `ItemCooldowns` 和飞行珍珠集合放在 `Player` 里；
+冷却表结构按「冷却组优先，否则物品 ID」可扩展给别的物品。
+
+**存档与票**：`PlayerData.ender_pearls` 是 `childrenList`，每项是整份实体 NBT 加
+`ender_pearl_dimension`，空集合不写键；`player-data` 对拍双向覆盖。上线时
+`loadAndSpawnEnderPearls` 把珍珠放回实体表（主人就是读档玩家时才注册）。下线按
+`PlayerList.remove` 先刷快照、存盘，再把飞行中的珍珠按 `UNLOADED_WITH_PLAYER` 移出世界。
+主人死亡且 `ender_pearls_vanish_on_death` 为真时丢弃。飞行中的珍珠每刻按
+`ThrownEnderpearl.tick` 的 `ticketTimer` 节奏（40 刻超时、返回 39）给自己所在区块续
+半径 2 的 `TicketType::ENDER_PEARL` 票；跨区块先撤旧票再挂新票，珍珠消失撤票。
+已加载模式的集成测试验证：珍珠飞进 6 个区块外、玩家视距只有 2 时，区块仍被交付、
+珍珠继续 tick，最后落地把玩家传过去。
+
+**对拍**：`mob_oracle/ender_pearl.rs` 新增 7 个场景。4 个飞行场景逐刻比珍珠位置 / 速度 /
+朝向 / 随机源、主人位置 / 血量 / `hurtTime` / 存活、末影螨（实体号、位置、朝向、血量）、
+传送声参数（只比珍珠自己发的 `entity.player.teleport`；玩家 / 牛的受伤声走各自的受伤包
+路径，由受伤用例覆盖）和被打的牛；3 个玩家扔出场景比扔出那一刻的珍珠、手里剩下的数量、
+`ITEM_USED` 统计、世界随机源和冷却。落点场景专门用 `oldPosition()`（方块命中点是 64.0，
+落点是 64.09），`pearl_endermite` 用强制种子让 `nextFloat() < 0.05` 命中，
+`pearl_peaceful` 同一颗种子在和平难度不刷螨。两处改坏确认：落点改成 `hit.location`、
+把刷螨条件设为恒假，都会报不一致。
+
+**已知限制**：没有 `connection.isAcceptingMessages()` 的对应物，正在断线的玩家在 Bamboo
+里已经查不到，等价于主人缺失；珍珠票在珍珠消失时立刻撤掉（官方等 40 刻超时，飞行期间
+效果相同）；`isOnPortalCooldown` / `setPortalCooldown` 没建模（Bamboo 没有传送门）；
+服务端不发粒子包；自动存档用每刻刷新的快照，不是存档那一刻的实时实体状态；物品冷却目前
+只被末影珍珠查询。
 

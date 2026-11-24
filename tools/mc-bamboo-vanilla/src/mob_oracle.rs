@@ -41,6 +41,7 @@ mod bee_ai;
 mod bee_release;
 mod brain;
 mod egg;
+mod ender_pearl;
 mod equine;
 mod fish;
 mod gen_spawn;
@@ -121,6 +122,8 @@ enum Line {
     Egg(Box<egg::EggCase>),
     EggThrow(egg::EggThrowCase),
     EggDispense(egg::EggDispenseCase),
+    EnderPearl(Box<ender_pearl::PearlCase>),
+    PearlThrow(ender_pearl::PearlThrowCase),
     Squid(Box<squid::SquidCase>),
     Bat(Box<bat::BatCase>),
     Lightning(Box<lightning::LightningCase>),
@@ -1071,6 +1074,18 @@ impl Level for MobLevel {
         true
     }
 
+    fn teleport_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        position: Vec3,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.teleport(target, position);
+        true
+    }
+
     fn sky_darken(&self) -> i32 {
         self.facts.sky_darken
     }
@@ -1489,6 +1504,8 @@ impl Report {
                 Line::Egg(case) => self.replay_egg(&case),
                 Line::EggThrow(case) => self.replay_egg_throw(&case),
                 Line::EggDispense(case) => self.replay_egg_dispense(&case),
+                Line::EnderPearl(case) => self.replay_ender_pearl(&case),
+                Line::PearlThrow(case) => self.replay_pearl_throw(&case),
                 Line::Squid(case) => self.replay_squid(&case),
                 Line::Bat(case) => self.replay_bat(&case),
                 Line::Lightning(case) => self.replay_lightning(&case),

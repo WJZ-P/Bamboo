@@ -294,6 +294,12 @@ pub(crate) struct Master {
     pub(crate) host: DirectorHost,
     /// 上一刻每名玩家所在的区块，用来只在跨区块时发 `PlayerMoved`。
     ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
+    /// 飞行中的末影珍珠：`uid -> (上次挂票的区块, 距下次续票的刻数)`。
+    /// 官方 `ThrownEnderpearl.ticketTimer` 落在实体上，这里放在主控的票表里。
+    ///
+    /// In-flight ender pearls: `uid -> (chunk last ticketed, ticks to refresh)`.
+    /// Vanilla stores `ticketTimer` on the entity; the master keeps it here.
+    ender_pearl_tickets: std::collections::BTreeMap<i32, (ChunkPos, i32)>,
     /// 每名玩家上一次跨区块的方向（只取符号）。需求快照里方向未知时退化为纯距离。
     player_directions: std::collections::BTreeMap<PlayerId, (i32, i32)>,
     /// 上次喂给 Director 的需求快照，位置或方向变了才重算。
@@ -600,6 +606,7 @@ impl World {
                     DirectorHost::new(director_config)
                 },
                 ticket_centers: std::collections::BTreeMap::new(),
+                ender_pearl_tickets: std::collections::BTreeMap::new(),
                 player_directions: std::collections::BTreeMap::new(),
                 player_demand: None,
                 director_tick: 0,
@@ -906,6 +913,17 @@ impl World {
         }
         if !moves.is_empty() {
             self.apply_ticket_ops(moves);
+        }
+        // `ThrownEnderpearl.tick` 的区块票：把本刻所有停放岛上的飞行珍珠收集起来，
+        // 跨区块 / 计时到点重挂，消失的撤票。珍珠静滞室靠它继续 tick。
+        let mut live = std::collections::BTreeMap::new();
+        for island in self.islands.parked() {
+            live.extend(crate::ender_pearl::live_pearls(&island.region));
+        }
+        let pearl_ops =
+            crate::ender_pearl::sync_tickets(&live, &mut self.master.ender_pearl_tickets);
+        if !pearl_ops.is_empty() {
+            self.apply_ticket_ops(pearl_ops);
         }
         if changed {
             self.publish_player_demand();
@@ -2524,6 +2542,10 @@ impl World {
             restore_inventory(player, data);
             crate::player_effects::send_active(region, id);
         }
+        // `loadAndSpawnEnderPearls`：把存下来的飞行珍珠放回实体表并注册到玩家身上。
+        if let Some(data) = &restored {
+            crate::ender_pearl::load(region, id, data);
+        }
         // 官方 `PlayerList.placeNewPlayer` 构造 `PlayerAdvancements` 后由首 tick 发全量包。
         if let Some(player) = region.players.get_mut(&id) {
             player.advancements = crate::advancements::join_state(request_advancements.as_deref());
@@ -2770,8 +2792,12 @@ impl World {
         // `saveAll` 都不看 `noSave`，所以 `/save-off` 期间离开照存（F7）。
         // Official `PlayerList.remove` saves before removing; `PlayerList.save`
         // / `saveAll` ignore `noSave`, so a leave during `/save-off` still saves.
+        // `saveEnderPearls` 用当下还在飞的珍珠，先把快照刷到这一刻。
+        crate::ender_pearl::refresh_snapshot(region, id);
         self.save_one_player(id);
         let region = &mut self.islands.get_mut(island).expect("在表里").region;
+        // 存完之后按 `UNLOADED_WITH_PLAYER` 把珍珠从世界里移除。
+        crate::ender_pearl::remove_on_leave(region, id);
         region.players.remove(&id);
         region.player_grid.remove(id);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
@@ -3554,6 +3580,13 @@ fn run_island_simulation(
     region.profiler.end_partition_phase();
     region.profiler.end_chunk_phase();
     region.profiler.lap(Phase::BlockEvents);
+    // `ThrownEnderpearl.tick` 开头按 `ender_pearls_vanish_on_death` 丢弃死掉主人的珍珠。
+    // 放在实体阶段之前，和官方「珍珠自己的 tick 先检查」同一位置。
+    //
+    // Drop a dead owner's pearls before the entity phase, like the start of the
+    // pearl's own `ThrownEnderpearl.tick`.
+    let vanish = region.entity_game_rules().ender_pearls_vanish_on_death;
+    crate::ender_pearl::remove_dead_owners_pearls(region, vanish);
     interaction::run_entity_ticks(entity_threads, region, entity_pool);
     // 乘客的 `rideTick`：载具这一刻的位置定了，骑手的位置跟上来，要下车的在这里下车。
     // 官方把乘客紧跟在载具后面 tick，这里放在实体阶段之后、玩家自己的 tick 之前。
@@ -3590,6 +3623,8 @@ fn run_island_simulation(
     // it on a main-hand item swap. Runs at the start of the player tick, like
     // vanilla's entity tick before `ServerPlayer.doTick`.
     crate::player_attack::tick(region);
+    // `Player.tick` 的 `cooldowns.tick()`、清掉已经离表的珍珠和每刻的存档快照。
+    crate::ender_pearl::tick(region);
     // 官方 `ServerPlayer.doTick` 里 `set_health` 在 `set_experience` 之前。
     // 伤害冷却递减、按需补 `set_health`。
     //
