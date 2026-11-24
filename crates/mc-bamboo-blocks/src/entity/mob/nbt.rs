@@ -491,7 +491,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         super::parrot::write_nbt(mob, &mut out);
     }
     if mob.mob_type == MobType::Chicken {
-        put(&mut out, "IsChickenJockey", Tag::Byte(0));
+        put(
+            &mut out,
+            "IsChickenJockey",
+            Tag::Byte(i8::from(mob.chicken_jockey)),
+        );
         put(&mut out, "EggLayTime", Tag::Int(mob.egg_time));
     }
     if matches!(mob.mob_type, MobType::Cow | MobType::Pig | MobType::Chicken) {
@@ -864,6 +868,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             super::snow_golem::read_nbt(mob, tag);
         }
         if mob.mob_type == MobType::Chicken {
+            mob.chicken_jockey = tag::bool_or(tag, "IsChickenJockey", false);
             // `input.getInt("EggLayTime").ifPresent`：没有这个键时保留构造时抽的值。
             // A missing key keeps the constructor's roll.
             mob.egg_time = tag::int_or(tag, "EggLayTime", mob.egg_time);

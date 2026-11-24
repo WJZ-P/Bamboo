@@ -195,6 +195,7 @@ fn entity(kind: u32, x: f64, z: f64) -> EntityRow {
             yaw: 0.0,
             removed: false,
             precise: false,
+            vehicle: None,
         },
         state: EntityState {
             kind: state,

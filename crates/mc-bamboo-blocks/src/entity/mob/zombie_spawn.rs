@@ -58,15 +58,19 @@ pub(super) fn finalize_spawn(
         world,
         entity.block_position(),
     ));
-    let random = world.random();
+    // 和蜘蛛骑士一样：副本随机源取完数再写回，好让闭包里能 `&mut World` 排队。
+    let random = crate::random::LegacyRandom::new(world.random().seed());
+    // 官方在这里读的是 `getBoundingBox()`（幼年尺寸），闭包里 `entity` 被借走，
+    // 先按值拷出来。
+    let (position, yaw) = (entity.position, entity.y_rot);
     entity.with_mob(|me, mob| {
-        mob_finalize_spawn(mob, random);
+        mob_finalize_spawn(mob, &random);
         mob.can_pick_up_loot = random.next_float() < 0.55 * special;
-        let data = zombie_group(random, group);
+        let data = zombie_group(&random, group);
         if data.is_baby {
             set_baby(me, mob);
             if data.can_spawn_jockey {
-                roll_chicken_jockey(random);
+                roll_chicken_jockey(world, kind, position, yaw, &random);
             }
         }
         set_can_break_doors(mob, random.next_float() < special * 0.1);
@@ -74,17 +78,18 @@ pub(super) fn finalize_spawn(
         // Drowned override `populateDefaultEquipmentSlots` without `super`: no armour, only
         // the trident or fishing rod.
         if kind == MobType::Drowned {
-            super::drowned::populate_equipment(mob, random);
+            super::drowned::populate_equipment(mob, &random);
         } else {
-            skeleton::populate_armor(mob, random, difficulty, special);
-            populate_weapon(mob, random, difficulty);
+            skeleton::populate_armor(mob, &random, difficulty, special);
+            populate_weapon(mob, &random, difficulty);
         }
-        skeleton::enchant_spawn_equipment(world, mob, random, special);
+        skeleton::enchant_spawn_equipment(world, mob, &random, special);
         if mob.equipment.get(EquipmentSlot::Head).is_empty() && world.level().is_halloween() {
-            skeleton::equip_halloween_head(mob, random);
+            skeleton::equip_halloween_head(mob, &random);
         }
         handle_attributes(mob, &mut me.random, special);
     });
+    world.set_level_random_seed(random.seed());
     if kind == MobType::Husk {
         husk_finalize_spawn(world, entity, reason, special);
     }
@@ -146,17 +151,47 @@ fn set_baby(me: &mut Entity, mob: &mut Mob) {
     me.dimensions = (width, height);
 }
 
-/// 鸡骑士的两次判定。第一支要找附近没人骑的鸡，第二支要新建一只鸡；Bamboo 还没有鸡，
-/// 两支都只取数；第二支命中时官方会多一只鸡并跑它的 `finalizeSpawn`，这里没有。
+/// 鸡骑士的两次判定。第一支 `nextFloat() < 0.05` 时在僵尸碰撞盒外扩 (5,3,5) 里找
+/// 没人骑的鸡，找到就让僵尸骑上第一只（`setChickenJockey(true)`）；否则第二支
+/// 再 `nextFloat() < 0.05`，命中时排队生成一只 `Chicken(JOCKEY)` 并跑它的
+/// `finalizeSpawn`。两次取数的顺序和官方一致。
 ///
-/// The two chicken-jockey rolls. The first looks for a nearby unridden chicken, the
-/// second creates one; Bamboo has no chickens yet, so both only draw. A hit on the second
-/// roll would add a chicken and run its `finalizeSpawn` in vanilla; that is missing here.
-fn roll_chicken_jockey(random: &LegacyRandom) {
-    if f64::from(random.next_float()) >= 0.05 {
-        // 第二支：新建鸡的判定，命中也没有鸡可建。
-        // Second branch: the new-chicken roll; a hit has no chicken to create.
-        random.next_float();
+/// The two chicken-jockey rolls: 5% to find a nearby unridden chicken in the
+/// inflated (5,3,5) box and mount the first one; otherwise another 5% to queue a
+/// fresh `Chicken(JOCKEY)` with its own `finalizeSpawn`. Draw order follows vanilla.
+fn roll_chicken_jockey(
+    world: &mut World<'_>,
+    kind: MobType,
+    position: mc_bamboo_core::Vec3,
+    yaw: f32,
+    random: &LegacyRandom,
+) {
+    if f64::from(random.next_float()) < 0.05 {
+        // 官方查的是 `getBoundingBox().inflate(5, 3, 5)`；幼年僵尸已经 `setBaby(true)`，
+        // 用幼年的尺寸。
+        let (width, height, _) = kind.dimensions(true);
+        let box_ = Aabb::new(
+            position.x - f64::from(width / 2.0),
+            position.y,
+            position.z - f64::from(width / 2.0),
+            position.x + f64::from(width / 2.0),
+            position.y + f64::from(height),
+            position.z + f64::from(width / 2.0),
+        )
+        .inflate(5.0, 3.0, 5.0);
+        if let Some(chicken) = world.nearby_unridden_chickens(box_).into_iter().next() {
+            world.mark_chicken_jockey(chicken);
+            world.set_existing_jockey_vehicle(chicken);
+            return;
+        }
+    }
+    if f64::from(random.next_float()) < 0.05 {
+        world.queue_jockey(super::spawn::JockeyRequest {
+            kind: MobType::Chicken,
+            position,
+            yaw,
+            rider_is_vehicle: true,
+        });
     }
 }
 

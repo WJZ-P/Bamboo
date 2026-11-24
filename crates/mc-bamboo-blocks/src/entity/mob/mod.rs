@@ -2231,6 +2231,11 @@ pub struct Mob {
     /// The chicken sound variant and `eggTime` countdown.
     pub chicken_sound_variant: chicken::SoundVariant,
     pub egg_time: i32,
+    /// `Chicken.isChickenJockey`：鸡骑士的坐骑不会自然消失，存档写 `IsChickenJockey`。
+    ///
+    /// `Chicken.isChickenJockey`: a jockey's chicken does not despawn; saved as
+    /// `IsChickenJockey`.
+    pub chicken_jockey: bool,
     /// `Skeleton.freezingTracker`：细雪里转化成流浪者的计时。只有相对计数，随实体行搬岛。
     ///
     /// `Skeleton.freezingTracker`: the powder-snow conversion into a stray. Relative
@@ -2838,6 +2843,7 @@ impl Mob {
             wool: 0,
             chicken_sound_variant: chicken::SoundVariant::Classic,
             egg_time: 0,
+            chicken_jockey: false,
             freeze_conversion: conversion::ConversionTracker::default(),
             bogged_sheared: false,
             drown_conversion: conversion::ConversionTracker::default(),
@@ -3059,6 +3065,10 @@ impl Mob {
         }
         if self.mob_type == MobType::Cat {
             return cat::removes_when_far_away(self, tick_count);
+        }
+        if self.mob_type == MobType::Chicken {
+            // `Chicken.removeWhenFarAway` 直接返回 `isChickenJockey`。
+            return self.chicken_jockey;
         }
         self.mob_type.removes_when_far_away()
     }

@@ -868,3 +868,69 @@ fn dropping_a_fresh_pool_never_loses_the_stop_wakeup() {
         drop(pool);
     }
 }
+
+/// 一棵蜘蛛骑士树在精确驱动、并行驱动（多种线程数）里逐位一致：乘客只由根驱动
+/// 跑 `rideTick`，位置跟着刚 tick 完的载具。
+///
+/// A spider-jockey tree is bit-identical across the precise driver and the
+/// parallel driver with several thread counts: the passenger only runs its
+/// `rideTick` from the root and follows the just-ticked vehicle.
+#[test]
+fn a_riding_tree_is_identical_in_precise_and_parallel_modes() {
+    use crate::entity::mob::MobType;
+
+    // 只用没有 AI、没有重力的实体，避开两种驱动已有的「别的实体看到的是本刻开头
+    // 快照」这一类差异，专门比骑乘树的驱动顺序和乘客位置。
+    fn setup(level: &mut TestLevel) {
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(level, &mut ticks);
+        let mut vehicle = world.prepare_entity(Entity::by_mob_type(
+            MobType::Spider,
+            Vec3::new(0.5, 64.0, 0.5),
+        ));
+        let mut rider = world.prepare_entity(Entity::by_mob_type(
+            MobType::Skeleton,
+            Vec3::new(0.5, 64.0, 0.5),
+        ));
+        let vehicle_id = vehicle.id;
+        rider.vehicle = Some(vehicle_id);
+        rider.with_mob(|_, mob| {
+            mob.no_ai = true;
+            mob.no_gravity = true;
+        });
+        vehicle.with_mob(|_, mob| {
+            mob.no_ai = true;
+            mob.no_gravity = true;
+            mob.passengers.push(rider.id);
+        });
+        world.add_prepared_entity(vehicle);
+        world.add_prepared_entity(rider);
+    }
+    fn summary(entities: &[Entity]) -> Vec<(i32, Vec3, i32, Option<i32>)> {
+        entities
+            .iter()
+            .map(|me| (me.id, me.position, me.tick_count, me.vehicle))
+            .collect()
+    }
+    for threads in [1, 2, 8] {
+        let executor = WorkerPool::new("riding-tree", threads).expect("起实体线程池");
+        let mut level = TestLevel::new();
+        setup(&mut level);
+        let parallel = run_parallel(&mut level, &executor);
+        let mut precise_level = TestLevel::new();
+        setup(&mut precise_level);
+        let mut ticks = BlockTicks::new();
+        for _ in 0..6 {
+            let mut world = World::new(&mut precise_level, &mut ticks);
+            world.tick_entities();
+        }
+        let precise = World::new(&mut precise_level, &mut ticks).live_entities();
+        assert_eq!(summary(&parallel), summary(&precise), "threads={threads}");
+        // 乘客这一刻的位置跟着蜘蛛，两个驱动都落在同一个附着点上。
+        let at = parallel.iter().find(|me| me.vehicle.is_some()).unwrap();
+        assert!(
+            (at.position.y - (64.0 + 0.765 - 0.7)).abs() < 1.0e-6,
+            "{at:?}"
+        );
+    }
+}

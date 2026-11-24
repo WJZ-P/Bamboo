@@ -324,6 +324,8 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         y_rot: rotation[0],
         first_tick: true,
         remaining_fire_ticks: i32::from(tag::short_or(tag, "Fire", 0)),
+        vehicle: None,
+        boarding_cooldown: 0,
     };
     // 读盘不是新建实体：朝向按 `Rotation` 还原，不再取构造时的随机数，
     // `bob_offs` 这类官方不存的视觉量保持构造器默认值。

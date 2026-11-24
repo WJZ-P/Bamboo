@@ -499,7 +499,12 @@ fn spawn_sprint_particle(me: &mut Entity, view: &dyn BlockView) {
 
 /// `Mob.baseTick` → `LivingEntity.baseTick` → `Entity.baseTick`。
 fn mob_base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    // `Entity.baseTick`。
+    // `Entity.baseTick` 开头：载具被移除时当场 `stopRiding`，再递减下车冷却。
+    // 实体乘客的 `vehicle` 在游戏/世界驱动里维护，这里只按官方递减冷却：
+    // 载具已离表的摘除由驱动的 `rideTick` 递归负责。
+    if me.boarding_cooldown > 0 {
+        me.boarding_cooldown -= 1;
+    }
     // 冲刺且不在水/岩浆里、不潜行、活着时，脚下方块可见就消耗两次 `nextDouble`（粒子位置）。
     // While sprinting out of water/lava, uncrouched and alive, a visible block below draws two `nextDouble`s.
     // `IronGolem.canSpawnSprintParticle()` 完全覆写缺省实现：不看疾跑 / 潜行 / 水，

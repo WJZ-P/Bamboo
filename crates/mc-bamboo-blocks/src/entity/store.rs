@@ -104,6 +104,11 @@ pub struct EntityPublic {
     pub yaw: f32,
     pub removed: bool,
     pub precise: bool,
+    /// `Entity.vehicle`：这一刻开始时骑着的载具；别的实体只看得到这份快照。
+    ///
+    /// `Entity.vehicle` at the start of this tick; other entities only see this
+    /// snapshot of the riding relation.
+    pub vehicle: Option<EntityUid>,
 }
 
 /// 种类里别人读得到的部分，其余字段在 [`KindState`]。
@@ -249,6 +254,10 @@ pub struct EntityState {
     pub movement_this_tick: Vec<Movement>,
     pub final_movements: Vec<Movement>,
     pub random: JavaRandom,
+    /// `Entity.boardingCooldown`，每刻 `baseTick` 减一；不存档。
+    ///
+    /// `Entity.boardingCooldown`, decremented in `baseTick` every tick; not saved.
+    pub boarding_cooldown: i32,
 }
 
 /// 一行的两半。取出、放回和命令落地都用这个值。
@@ -359,6 +368,8 @@ impl EntityRow {
             y_rot: public.yaw,
             first_tick: state.first_tick,
             remaining_fire_ticks: state.remaining_fire_ticks,
+            vehicle: public.vehicle,
+            boarding_cooldown: state.boarding_cooldown,
         }
     }
 }
@@ -430,6 +441,7 @@ impl Entity {
                 yaw: self.y_rot,
                 removed: self.removed,
                 precise: self.requires_precise_position,
+                vehicle: self.vehicle,
             },
             state: EntityState {
                 kind: state_kind,
@@ -448,6 +460,7 @@ impl Entity {
                 movement_this_tick: self.movement_this_tick,
                 final_movements: self.final_movements,
                 random: self.random,
+                boarding_cooldown: self.boarding_cooldown,
             },
         }
     }
@@ -1076,10 +1089,40 @@ impl EntityStore {
     }
 
     /// 从 tick 列表里拿掉。正在 tick 的实体只标记 `discard`，由 tick 循环丢掉。
+    /// `Entity.setRemoved` 还会把仍在表里的实体乘客摘下来（这里只清载具名单，
+    /// 乘客自己的 `vehicle` 由驱动的 `rideTick` 在下一刻清）。
+    ///
+    /// Removes an entity from the tick list. Vanilla `setRemoved` also drops its
+    /// entity passengers; clear the vehicle's list here, and the driver clears
+    /// each passenger's `vehicle` link on its next `rideTick`.
+    fn clear_passenger_vehicle(&mut self, passenger: EntityUid, vehicle: EntityUid) {
+        let Some(row) = self.index.get(&passenger).copied() else {
+            return;
+        };
+        if let Some(entry) = self
+            .slots
+            .get_mut(row)
+            .and_then(Option::as_mut)
+            .filter(|entry| entry.public.vehicle == Some(vehicle))
+        {
+            entry.public.vehicle = None;
+            entry.state.boarding_cooldown = 60;
+        }
+    }
+
     pub fn remove(&mut self, uid: EntityUid) {
         if !self.index.contains_key(&uid) {
             return;
         }
+        // 直接读公开快照，不把私有状态移出来再拼回去：发布阶段可能已经把两半
+        // 分别换过（并行驱动），`with_mut` 会把它们重新拆错。
+        let passengers = self
+            .public_at(uid)
+            .and_then(|public| match &public.kind {
+                KindPublic::Mob(mob) => Some(mob.passengers.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
         self.unindex_sub(uid);
         let row = self.index.remove(&uid).expect("刚查过 uid");
         self.taken.remove(&uid);
@@ -1089,6 +1132,12 @@ impl EntityStore {
             self.grid_remove(row, &entry.public);
         }
         self.free.push(row);
+        for passenger in passengers {
+            if passenger < FIRST_ENTITY_ID {
+                continue;
+            }
+            self.clear_passenger_vehicle(passenger, uid);
+        }
     }
 
     /// tick 期间取出一行。取出的行不在表里，别的实体读不到它，和现在的 `take` 一致。
@@ -1422,6 +1471,43 @@ impl EntityStore {
             self.insert_row(row);
         }
         debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
+    }
+
+    /// 按 `tick_rows()` 的顺序，每个实体属于哪一棵骑乘树的根（给的是根在名单里的
+    /// 下标）。没有载具、载具已离表、或链条成环时自己是根。精确驱动的降频计划和
+    /// 并行驱动的分组都用这一份，保证两种驱动对同一棵树给同一个计划、同一份活。
+    ///
+    /// For each entity in `tick_rows()` order, the index of the root of its
+    /// riding tree. An entity with no vehicle, a missing vehicle or a cyclic
+    /// chain is its own root. Both drivers use this to give one tree one plan
+    /// and one unit of work.
+    pub fn riding_roots(&self) -> Vec<usize> {
+        let (uids, rows) = self.tick_rows();
+        let mut by_uid = std::collections::BTreeMap::new();
+        for (index, &uid) in uids.iter().enumerate() {
+            by_uid.insert(uid, index);
+        }
+        let mut out = Vec::with_capacity(uids.len());
+        for index in 0..uids.len() {
+            let mut current = index;
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(&next) = self
+                .slots
+                .get(rows[current])
+                .and_then(Option::as_ref)
+                .and_then(|entry| entry.public.vehicle)
+                .and_then(|vehicle| by_uid.get(&vehicle))
+            {
+                if next == index || !seen.insert(next) {
+                    // 链条绕回自己：坏数据不 panic，整棵树按当前节点算根。
+                    current = next;
+                    break;
+                }
+                current = next;
+            }
+            out.push(current);
+        }
+        out
     }
 
     /// 并行算阶段的只读名单：uid 升序的 ID 和对应的槽位行号。
