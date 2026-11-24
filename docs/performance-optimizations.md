@@ -4199,10 +4199,14 @@ release 构建、20 万次查询、3 轮交替取中位数，与整刻压测的�
 
 ### 30.6 验收与已知限制
 
-- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets` 0 警告、
-  `cargo test --workspace` 全绿；`mob-oracle java --show 2000` 除已知的 12 处三角函数表和
-  `frog_*` dy 末位差外 0 不一致；`natural-spawn java`、`structure-e2e` 全过；探针缺省
-  配置 770/770。
+- `cargo fmt --all --check` 通过、`cargo clippy --workspace --all-targets` 0 警告、
+  `cargo test --workspace` 全绿（exit 0）。`mob-oracle java --show 2000` 共 46 处不一致，
+  全部是已知的 12 处 `Mth.COS_TAB` / `ASIN_TAB` 末位差加 34 处 `frog_*` 的 `dy` 末位差，
+  没有其它项；`--only laser` 的 10 个激光场景、`--only guardian` 的 5 个守卫者场景
+  都是 0 帧差异（只剩那 12 处全局三角函数表差）。`natural-spawn java` 1727 例 0 不一致，
+  `structure-e2e java` 的 `gen-world` 60 区块 0 不一致。探针用缺省配置
+  （`PROBE_ISLAND_THREADS=default PROBE_ISLANDS=default`）在端口 28660 上
+  **770/770**，正常关服、`world-dir` 官方解码器通过。
 - 朴素路径只在 `cfg(test)` 下通过 `MOB_STRESS_NAIVE=1` 启用，正式二进制没有开关、
   没有配置、没有环境变量读取；三项优化都缺省打开。
 - 视线缓存的键除了规格里的三样，还带 `CollisionContext` 里真正影响碰撞形状的两项
