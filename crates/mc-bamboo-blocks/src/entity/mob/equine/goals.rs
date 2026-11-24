@@ -181,7 +181,12 @@ pub(in crate::entity::mob) fn targets(kind: MobType) -> GoalSelector {
                 unseen_ticks: 0,
                 found: None,
                 // `LlamaAttackWolfGoal(16, false, true, selector)`：`mustSee=false`。
+                // 第三参 `mustReach=true` 在 26.3 对 `NearestAttackableTargetGoal`
+                // 是死字段（`canReach` 从不被调用），这里不建模：够不着的狼照样设目标。
                 // `LlamaAttackWolfGoal(16, false, true, selector)`: `mustSee=false`.
+                // The third arg `mustReach=true` is a dead field in 26.3 for
+                // `NearestAttackableTargetGoal` (`canReach` is never called), so it
+                // is not modelled: unreachable wolves are still selected as targets.
                 must_see: false,
             },
         ),

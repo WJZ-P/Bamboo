@@ -1232,8 +1232,9 @@ mod tests {
         // horses and donkeys from the equine merge; no monster spawns by day.
         for entity in level.entities().iter() {
             let mob = entity.kind.mob().expect("只会有生物");
-            // 平原白天的 `CREATURE` 表里建模了的只有这四种（马、驴还没有）。
-            // Of the plains daytime `CREATURE` list only these four are modelled.
+            // 平原白天的 `CREATURE` 表里建模了的就这六种（含马、驴）。
+            // These six are the modelled daytime plains `CREATURE` entries (horses and
+            // donkeys included).
             assert!(
                 matches!(
                     mob.mob_type,

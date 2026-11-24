@@ -12,7 +12,8 @@
 use mc_bamboo_blocks::entity::{
     Entity, JavaRandom,
     mob::{
-        MobType,
+        MobType, armadillo,
+        avoid::{AvoidClass, AvoidEntity, AvoidFilter},
         goals::{Goal, TargetType},
     },
 };
@@ -21,11 +22,28 @@ use mc_bamboo_protocol::packet::play::EquipmentSlot;
 
 use super::*;
 
-/// 场景编号，两侧共用：沿用牛场景的 1 / 7 / 41 / 52 / 53 / 60，新增 70 起。
+/// `ARMADILLO_STATE` 网络 ID → Bamboo 的 `State`（照官方 BY_ID，id == ordinal）。
+///
+/// `ARMADILLO_STATE` network id → Bamboo `State` (per official BY_ID, id == ordinal).
+fn armadillo_state(id: i32) -> armadillo::State {
+    match id {
+        1 => armadillo::State::Rolling,
+        2 => armadillo::State::Scared,
+        3 => armadillo::State::Unrolling,
+        _ => armadillo::State::Idle,
+    }
+}
+
+/// 场景编号，两侧共用：沿用牛场景的 1 / 7 / 41 / 52 / 53 / 60，新增 70 起；
+/// 8 / 12 / 13 / 16 复用中央场景的狼 / 羊驼 / 犰狳 / 北极熊编号。
 fn scene_kind(kind: i32) -> MobType {
     match kind {
         1 => MobType::Zombie,
         7 => MobType::Fox,
+        8 => MobType::Wolf,
+        12 => MobType::Llama,
+        13 => MobType::Armadillo,
+        16 => MobType::PolarBear,
         41 => MobType::Spider,
         52 => MobType::Drowned,
         53 => MobType::Pillager,
@@ -70,6 +88,9 @@ struct AttackTargetMob {
     fox_variant: i32,
     /// 主手放一把弩。
     crossbow: bool,
+    /// 犰狳受害者的 ARMADILLO_STATE 网络 ID（0 IDLE、2 SCARED 等），缺省 IDLE。
+    #[serde(default)]
+    armadillo_state: i32,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -133,6 +154,17 @@ impl AttackTargetCase {
         ticks: &mut BlockTicks,
         break_test: Option<&str>,
     ) -> (i32, i32) {
+        // 改坏确认「抹掉水」要在实体生成前改关卡：受害者是泡在水里的幼年海龟，
+        // 把水抽掉等价于去掉选择器的 !isInWater 判定，Bamboo 会错误地选中它。
+        // Deliberate breakage "no land gate": strip water before spawning. The victim
+        // is a baby turtle in water; removing the water is equivalent to dropping the
+        // selector's !isInWater check, so Bamboo wrongly picks it as a target.
+        if break_test == Some("wolf_turtle_no_land_gate") && self.name.contains("baby_turtle_water")
+        {
+            level
+                .blocks
+                .retain(|_, state| state.0 != BlockState::WATER.0);
+        }
         let attacker = self.spawn_one(level, ticks, &self.attacker);
         let victim = self.spawn_one(level, ticks, &self.victim);
         match break_test {
@@ -164,6 +196,46 @@ impl AttackTargetCase {
                     for wrapped in &mut mob.target_goals.goals {
                         if let Goal::NearestAttackableTarget { must_see, .. } = &mut wrapped.goal {
                             *must_see = !*must_see;
+                        }
+                    }
+                });
+            }
+            // 改坏确认：把蜘蛛的躲避条件取反，变成躲缩成球的犰狳、不躲 IDLE 的。
+            // 正常场景里官方躲 IDLE、不躲 SCARED，改坏后两侧位移必然分叉。
+            // Deliberate breakage: invert the spider's avoidance condition so it
+            // flees rolled-up armadillos and ignores IDLE ones. Official flees IDLE
+            // and ignores SCARED, so the spider's motion diverges in both scenes.
+            Some("avoid_inverted") if self.name.contains("spider_armadillo") => {
+                level.entities.with_mut(attacker, |entity| {
+                    let Some(mob) = entity.kind.mob_mut() else {
+                        return;
+                    };
+                    for wrapped in &mut mob.goals.goals {
+                        if let Goal::Avoid(avoid) = &mut wrapped.goal {
+                            *avoid = AvoidEntity::new(AvoidClass::Armadillo, 6.0, 1.0, 1.2)
+                                .filtered(AvoidFilter::ArmadilloScared);
+                        }
+                    }
+                });
+            }
+            // 改坏确认：把北极熊的狐狸目标换成搜不到实体的类型，只在够不着的场景
+            // 生效（等价于一个错误实现了 mustReach 的 Bamboo：够不着就拒绝，够得着
+            // 的仍保留）。官方隔着壕沟照样设目标，改坏后 target 字段逐刻不一致。
+            // Deliberate breakage: in the unreachable scene only, turn the polar
+            // bear's fox goal into a kind that finds nothing. This models a Bamboo
+            // that wrongly implements mustReach (reject the unreachable fox, keep
+            // reachable ones). Official still targets the fox across the gap, so the
+            // target field diverges on every tick.
+            Some("reject_unreachable") if self.name.contains("unreachable") => {
+                level.entities.with_mut(attacker, |entity| {
+                    let Some(mob) = entity.kind.mob_mut() else {
+                        return;
+                    };
+                    for wrapped in &mut mob.target_goals.goals {
+                        if let Goal::NearestAttackableTarget { kind, .. } = &mut wrapped.goal
+                            && *kind == TargetType::Fox
+                        {
+                            *kind = TargetType::Player;
                         }
                     }
                 });
@@ -207,6 +279,13 @@ impl AttackTargetCase {
             mob.no_ai = setup.no_ai;
             if setup.baby {
                 mob.age = -24000;
+            }
+            // 犰狳受害者：照官方 switchToState 设好同步状态；NoAI 受害者不会自己退回
+            // IDLE，蜘蛛的 !isScared() 判定整场稳定。
+            // Armadillo victim: mirror official switchToState. The NoAI victim never
+            // unrolls, so the spider's !isScared() decision stays stable all scene.
+            if mob.mob_type == MobType::Armadillo {
+                mob.armadillo.state = armadillo_state(setup.armadillo_state);
             }
             if setup.crossbow {
                 mob.equipment.set(

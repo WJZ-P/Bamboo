@@ -151,9 +151,18 @@ pub(super) fn target_goals() -> GoalSelector {
         interval,
         unseen_ticks: 0,
         found: None,
-        // 三条目标都是 `mustSee=true`（狐狸目标另有未建模的 `mustReach=true`）。
-        // All three goals have `mustSee=true` (the fox goal also has an unmodelled
-        // `mustReach=true`).
+        // 三条目标都是 `mustSee=true`。官方狐狸目标构造里另带 `mustReach=true`，但
+        // 26.3 里它对 `NearestAttackableTargetGoal` 是死字段：`findTarget` 走
+        // `TargetingConditions.test` → `LivingEntity.canAttack(LivingEntity)`，不经过
+        // 唯一读 `mustReach` 的 2 参 `TargetGoal.canAttack`，`canReach` 从不被调用。
+        // 所以这里不建模 `mustReach`：够不着的狐狸照样被设为目标。
+        // All three goals have `mustSee=true`. Official also passes `mustReach=true`
+        // for the fox goal, but in 26.3 it is a dead field for
+        // `NearestAttackableTargetGoal`: `findTarget` goes through
+        // `TargetingConditions.test` -> `LivingEntity.canAttack(LivingEntity)`, never
+        // the 2-arg `TargetGoal.canAttack` that reads `mustReach`, so `canReach` is
+        // never called. We do not model `mustReach`: unreachable foxes are still
+        // selected as targets.
         must_see: true,
         light_gate: false,
     };
