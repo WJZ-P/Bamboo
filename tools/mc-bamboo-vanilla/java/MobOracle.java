@@ -494,7 +494,10 @@ public final class MobOracle {
                     "attack_target_zombie_villager_sight", "attack_target_pillager_villager",
                     "attack_target_spider_golem", "attack_target_drowned_axolotl",
                     "attack_target_zombie_turtle", "attack_target_fox_turtle",
-                    "attack_target_fox_fish")) {
+                    "attack_target_fox_fish", "attack_target_wolf_baby_turtle",
+                    "attack_target_wolf_baby_turtle_water", "attack_target_spider_armadillo_idle",
+                    "attack_target_spider_armadillo_scared", "attack_target_polar_bear_fox",
+                    "attack_target_polar_bear_fox_unreachable", "attack_target_llama_wolf")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playAttackTarget(official, out, name);
                 cases++;
@@ -9930,13 +9933,19 @@ public final class MobOracle {
      */
     /**
      * 攻击目标逐刻对拍：僵尸打村民、掠夺者弩射村民、蜘蛛打铁傀儡、溺尸打美西螈、
-     * 僵尸找陆地上的小海龟、狐狸找小海龟 / 鱼。受害者设 NoAI，官方村民的大脑不会
-     * 逐刻取数；每帧记双方位置 / 速度 / 血量 / 受伤与死亡计时 / 目标。
+     * 僵尸找陆地上的小海龟、狐狸找小海龟 / 鱼、野狼找陆地 / 泡水的小海龟、蜘蛛遇
+     * IDLE / 缩成球犰狳、北极熊找狐狸（含隔着壕沟够不着）、羊驼找狼。受害者设
+     * NoAI，官方村民的大脑不会逐刻取数；每帧记双方位置 / 速度 / 血量 / 受伤与死亡
+     * 计时 / 目标。壕沟场景用地板缺口而非墙（眼高射线不被挡），26.3 官方照样把
+     * 够不着的狐狸设为目标。
      *
      * Attack-target tick comparison: zombie-villager, pillager crossbow, spider-iron
-     * golem, drowned-axolotl, zombie-baby-turtle and fox-baby-turtle / fish. The victim
-     * is NoAI so the official villager brain draws nothing per tick; every frame records
-     * both mobs' motion, health, hurt/death timers and target.
+     * golem, drowned-axolotl, zombie-baby-turtle, fox-baby-turtle / fish, wild wolf
+     * vs baby turtle (land and in water), spider vs IDLE / SCARED armadillo, polar bear
+     * vs fox (reachable and across a gap), and llama vs wolf. The victim is NoAI so the
+     * official villager brain draws nothing per tick; every frame records both mobs'
+     * motion, health, hurt/death timers and target. The gap scene keeps LOS clear (a
+     * floor gap, not a wall) so official still targets the unreachable fox per 26.3.
      */
     private static void playAttackTarget(Official official, Writer out, String name) throws Exception {
         int difficulty = 2;
@@ -9951,6 +9960,15 @@ public final class MobOracle {
         int ticks = 160;
         int wallTick = -1;
         int[] wallBox = null;
+        // 犰狳受害者的 ARMADILLO_STATE 网络 ID：0 IDLE、1 ROLLING、2 SCARED、3 UNROLLING。
+        // 蜘蛛的 predicateOnAvoidEntity 是 !isScared()，只有 IDLE 会被躲。
+        // Victim armadillo's ARMADILLO_STATE network id: 0 IDLE, 1 ROLLING, 2 SCARED,
+        // 3 UNROLLING. The spider's predicateOnAvoidEntity is !isScared(): only IDLE is fled.
+        int victimArmadilloState = 0;
+        // [x0,x1]：y=60 的地板在这一段留空（所有 z），做成看得见却走不过去的壕沟。
+        // [x0,x1]: leave the y=60 floor empty here (all z) for a visible-but-unreachable
+        // gap, so mustSee stays satisfied but pathfinding finds no route.
+        int[] floorGap = null;
         switch (name) {
             case "attack_target_zombie_villager" -> {
                 // 简单难度官方不转化僵尸村民、也不消耗转化随机数。
@@ -10004,6 +10022,72 @@ public final class MobOracle {
                 // ticks already cover targeting, the pounce and the fish's death.
                 ticks = 110;
             }
+            case "attack_target_wolf_baby_turtle" -> {
+                // 野狼的 NonTameRandomTargetGoal(Turtle, false, BABY_ON_LAND_SELECTOR)：
+                // 陆地上的幼年海龟。攻击者是未驯服的狼，受害者 NoAI。
+                // Wild wolf's NonTameRandomTargetGoal: a baby turtle on land.
+                attackerKind = 8;
+                victimKind = 60;
+                baby = true;
+                ticks = 120;
+            }
+            case "attack_target_wolf_baby_turtle_water" -> {
+                // 泡在水里的幼年海龟：官方的 !isInWater() 判定不成立，野狼不该选它。
+                // 两侧正常都不设目标；wolf_turtle_no_land_gate 改坏确认靠它产生差异。
+                // A baby turtle in water: official !isInWater() fails, so the wolf must
+                // not target it. Both sides agree; the no-land-gate breakage diverges here.
+                attackerKind = 8;
+                victimKind = 60;
+                baby = true;
+                water = true;
+                ticks = 40;
+            }
+            case "attack_target_spider_armadillo_idle" -> {
+                // 蜘蛛的 AvoidEntityGoal(Armadillo, 6, 1, 1.2, !isScared())：IDLE 犰狳被躲。
+                // Spider avoids an IDLE armadillo.
+                attackerKind = 41;
+                victimKind = 13;
+                victimArmadilloState = 0;
+                ticks = 40;
+            }
+            case "attack_target_spider_armadillo_scared" -> {
+                // SCARED（缩成球）犰狳：isScared() 为真，蜘蛛不躲，正常逛。
+                // A SCARED (rolled-up) armadillo: isScared() is true, the spider does not flee.
+                attackerKind = 41;
+                victimKind = 13;
+                victimArmadilloState = 2;
+                ticks = 40;
+            }
+            case "attack_target_polar_bear_fox" -> {
+                // 北极熊的 NearestAttackableTargetGoal(Fox, 10, true, true, selector)：能走到。
+                // Polar bear's fox target: reachable.
+                attackerKind = 16;
+                victimKind = 7;
+                ticks = 100;
+            }
+            case "attack_target_polar_bear_fox_unreachable" -> {
+                // 隔着壕沟：视线通（forCombat().checkLineOfSight 只按眼高射线，地板缺口
+                // 不挡），但 y=60 地板在 x=2..4 全 z 留空，寻路无路可走。26.3 里
+                // mustReach=true 是死字段，官方照样把狐狸设为目标并卡住，Bamboo 也照做。
+                // Across a gap: LOS is clear (eye-height ray, floor gap doesn't occlude),
+                // but no path. In 26.3 mustReach is dead, so official still targets the
+                // fox and gets stuck; Bamboo does the same.
+                attackerKind = 16;
+                victimKind = 7;
+                victimAt = new double[] {8.5, 61.0, 0.5};
+                floorGap = new int[] {2, 4};
+                ticks = 50;
+            }
+            case "attack_target_llama_wolf" -> {
+                // 羊驼的 LlamaAttackWolfGoal(16, false, true, selector)：找未驯服的狼。
+                // 刻数压在 RangedAttackGoal 的 40 刻吐口水之前，只比选目标与靠近。
+                // Llama targets an untamed wolf. Ticks stay before the 40-tick spit so
+                // only target selection and approach are compared.
+                attackerKind = 12;
+                victimKind = 8;
+                victimAt = new double[] {2.5, 61.0, 0.5};
+                ticks = 30;
+            }
             default -> throw new IllegalArgumentException("unknown attack-target scene " + name);
         }
         official.server.sequences = new RandomSequences();
@@ -10020,6 +10104,10 @@ public final class MobOracle {
         world.golemFixture = true;
         for (int x = -12; x <= 12; x++) {
             for (int z = -12; z <= 12; z++) {
+                // 壕沟场景：这一段所有 z 都不铺 y=60 地板，做成看得见却走不过去的缺口。
+                // Gap scene: omit the y=60 floor here (all z), leaving a visible-but-
+                // impassable trench; the eye-height LOS ray still passes.
+                if (floorGap != null && x >= floorGap[0] && x <= floorGap[1]) continue;
                 world.blocks.put(BlockPos.asLong(x, 60, z), Blocks.STONE.defaultBlockState());
             }
         }
@@ -10081,6 +10169,14 @@ public final class MobOracle {
         if (baby && victim instanceof net.minecraft.world.entity.AgeableMob ageable) {
             ageable.setBaby(true);
         }
+        if (victim instanceof net.minecraft.world.entity.animal.armadillo.Armadillo armadillo) {
+            // switchToState 只写同步数据；受害者 NoAI，customServerAiStep 不跑，状态不会
+            // 自己退回 IDLE。id == ordinal（见 ARMADILLO_STATE 的 BY_ID）。
+            // switchToState only sets the synched data; the victim is NoAI so
+            // customServerAiStep never runs and the state never unrolls back to IDLE.
+            armadillo.switchToState(
+                    net.minecraft.world.entity.animal.armadillo.Armadillo.ArmadilloState.values()[victimArmadilloState]);
+        }
         world.tracked.add(victim);
         java.util.List<net.minecraft.world.entity.projectile.arrow.AbstractArrow> arrows = new ArrayList<>();
         var frames = new StringBuilder("[");
@@ -10134,8 +10230,9 @@ public final class MobOracle {
                         : Arrays.toString(new int[] {wallTick, wallBox[0], wallBox[1], wallBox[2],
                                 Block.getId(Blocks.STONE.defaultBlockState())}))
                 + ",\"wallBlocks\":" + wallBlocks
-                + ",\"attacker\":" + attackTargetSetup(attackerKind, attackerAt, 42001L, false, false, crossbow)
-                + ",\"victim\":" + attackTargetSetup(victimKind, victimAt, 42002L, baby, victimNoAi, false)
+                + ",\"attacker\":" + attackTargetSetup(attackerKind, attackerAt, 42001L, false, false, crossbow, 0)
+                + ",\"victim\":" + attackTargetSetup(victimKind, victimAt, 42002L, baby, victimNoAi, false,
+                        victimArmadilloState)
                 + ",\"frames\":" + frames + "}\n");
     }
 
@@ -10143,6 +10240,10 @@ public final class MobOracle {
         return switch (kind) {
             case 1 -> new Zombie(EntityTypes.ZOMBIE, world);
             case 7 -> EntityTypes.FOX.create(world, EntitySpawnReason.COMMAND);
+            case 8 -> EntityTypes.WOLF.create(world, EntitySpawnReason.COMMAND);
+            case 12 -> EntityTypes.LLAMA.create(world, EntitySpawnReason.COMMAND);
+            case 13 -> EntityTypes.ARMADILLO.create(world, EntitySpawnReason.COMMAND);
+            case 16 -> new PolarBear(EntityTypes.POLAR_BEAR, world);
             case 41 -> new net.minecraft.world.entity.monster.spider.Spider(EntityTypes.SPIDER, world);
             case 52 -> new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, world);
             case 53 -> OraclePillager.create(world);
@@ -10156,14 +10257,15 @@ public final class MobOracle {
     }
 
     private static String attackTargetSetup(int kind, double[] at, long seed, boolean baby,
-            boolean noAi, boolean crossbow) {
+            boolean noAi, boolean crossbow, int armadilloState) {
         return "{\"kind\":" + kind
                 + ",\"position\":[" + Double.doubleToRawLongBits(at[0]) + ','
                 + Double.doubleToRawLongBits(at[1]) + ',' + Double.doubleToRawLongBits(at[2]) + ']'
                 + ",\"yaw\":" + Float.floatToRawIntBits(0.0F)
                 + ",\"seed\":" + seed
                 + ",\"baby\":" + baby + ",\"noAi\":" + noAi
-                + ",\"foxVariant\":0,\"crossbow\":" + crossbow + '}';
+                + ",\"foxVariant\":0,\"crossbow\":" + crossbow
+                + ",\"armadilloState\":" + armadilloState + '}';
     }
 
     private static String attackTargetFrame(Mob mob) {

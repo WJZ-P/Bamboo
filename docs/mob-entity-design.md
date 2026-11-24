@@ -189,6 +189,21 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 失败按官方清路径 / 返回假。`E` 的调用方在等待期间把返回值当「没有路径」处理，
 结果到达后才走成功 / 失败两支（掠夺者巡逻是这一条的显式例子）。
 
+表里**没有** `TargetGoal.canReach` 一行。北极熊的狐狸目标、羊驼的狼目标构造里
+都带 `mustReach=true`，但照 26.3 字节码，这个字段对 `NearestAttackableTargetGoal`
+是死字段，不产生任何寻路调用：`findTarget()` 走
+`ServerLevel.getNearestEntity(List, TargetingConditions, ...)` →
+`TargetingConditions.test()` → `LivingEntity.canAttack(LivingEntity)`（1 参）；
+`canContinueToUse()` 同样用 1 参 `Mob.canAttack(LivingEntity)`。唯一读 `mustReach`、
+进而调 `canReach`（一次 `createPath(target, 0)` + 终点距离阈值 2.25）的是 2 参
+`TargetGoal.canAttack(LivingEntity, TargetingConditions)`，而它只被
+`HurtByTargetGoal` / `OwnerHurtBy` / `OwnerHurtTarget` / `Fox.DefendTrusted` /
+`TraderLlama.Defend` / `Vex.CopyOwnerTarget` 调用，这些目标构造时全是
+`TargetGoal(Mob, boolean)`（2 参）→ `mustReach=false`。所以 `canReach` 从不被调用，
+够不着的狐狸 / 狼照样被设为目标、寻路卡住。Bamboo 不实现 `canReach`（写成死代码
+没有意义），故 §4.1.1 的寻路调用点表里没有对应行；`mustSee` 的视线记忆仍按
+`canContinueToUse` 的 `unseenTicks` 规则实现。
+
 ### 4.2 三档降频
 
 按到最近玩家的水平距离分档，距离从每个区块的附近玩家表取。
