@@ -504,7 +504,9 @@ public final class MobOracle {
             }
             for (String name : List.of("guardian_swim", "guardian_flop",
                     "laser_player_normal", "laser_player_hard",
-                    "laser_player_elder", "laser_player_elder_hard")) {
+                    "laser_player_elder", "laser_player_elder_hard",
+                    "guardian_thorns_static", "guardian_thorns_moving",
+                    "guardian_thorns_arrow")) {
                 if (only != null && !name.startsWith(only)) continue;
                 playGuardian(official, out, name);
                 cases++;
@@ -10315,8 +10317,13 @@ public final class MobOracle {
         boolean elder = name.contains("elder");
         boolean laser = name.startsWith("laser_");
         boolean flop = name.startsWith("guardian_flop");
+        boolean thorns = name.startsWith("guardian_thorns_");
         int difficulty = name.contains("hard") ? 3 : 2;
-        int ticks = laser ? 100 : 200;
+        // 尖刺场景聚焦反伤判定本身（hurt 在 tick 5，再比一刻）；
+        // 之后长时间的游走位移受 java.lang.Math.sin/cos 平台末位差影响。
+        // Thorns scenes focus on the reflection itself (hurt at tick 5 plus one
+        // tick); longer wandering motion is subject to Math.sin/cos platform diffs.
+        int ticks = thorns ? 6 : (laser ? 100 : 200);
         double[] guardianAt = flop ? new double[] {0.5, 61.0, 0.5}
                 : new double[] {0.5, 62.0, 0.5};
         FakeLevel world = FakeLevel.create(official);
@@ -10359,11 +10366,15 @@ public final class MobOracle {
         // distSqr > 9) as a target; the player is not ticked and only the
         // guardian's state is compared.
         ServerPlayer player = null;
-        if (laser) {
+        if (laser || thorns) {
             GameProfile profile = new GameProfile(new UUID(1L, 2L), "GuardianTarget");
             player = new ServerPlayer(official.server, world, profile,
                     ClientInformation.createDefault());
-            player.setPos(8.5, 61.0, 0.5);
+            // 尖刺场景玩家贴身（选择器要 distSqr > 9，所以不会触发激光）；
+            // 激光场景放 8 格外。
+            // Thorns scenes put the player in melee range (the selector needs
+            // distSqr > 9, so no laser); laser scenes place it 8 blocks away.
+            player.setPos(thorns ? 1.5 : 8.5, 61.0, 0.5);
             setRandom(player, 42002L);
             player.setYRot(0.0F);
             player.setYHeadRot(0.0F);
@@ -10398,8 +10409,23 @@ public final class MobOracle {
                     guardian.tick();
                 }
             }
+            if (thorns && tick == 5) {
+                // 玩家近战（或 generic 的非活体来源）打守卫者，触发
+                // `Guardian.hurtServer` 的尖刺判定。
+                // A player melee hit (or a generic non-living source) triggers
+                // `Guardian.hurtServer`'s thorns branch.
+                if (name.contains("moving")) guardian.setMoving(true);
+                net.minecraft.world.damagesource.DamageSource source = name.contains("arrow")
+                        ? guardian.damageSources().generic()
+                        : guardian.damageSources().playerAttack(player);
+                guardian.hurtServer(world, source, 1.0F);
+            }
             if (tick != 0) frames.append(',');
-            frames.append("{\"guardian\":").append(guardianFrame(guardian)).append('}');
+            frames.append("{\"guardian\":").append(guardianFrame(guardian))
+                    .append(",\"playerHealth\":")
+                    .append(thorns && player != null
+                            ? Float.floatToRawIntBits(player.getHealth()) : "0")
+                    .append('}');
         }
         frames.append(']');
         out.write("{\"type\":\"guardian\",\"name\":" + jsonString(name)
@@ -10415,6 +10441,9 @@ public final class MobOracle {
                 + ",\"skyDarken\":0"
                 + ",\"guardian\":" + guardianSetup(elder, guardianAt, 42001L)
                 + ",\"player\":" + (player == null ? "null" : guardianPlayerSetup(player))
+                + ",\"hurt\":" + (thorns ? "{\"tick\":5,\"amount\":1.0,\"livingDirect\":"
+                        + !name.contains("arrow") + ",\"moving\":" + name.contains("moving")
+                        + "}" : "null")
                 + ",\"frames\":" + frames + "}\n");
     }
 

@@ -8,7 +8,13 @@
 //! flopping. Vanilla constructs the guardian in a fake level; the replay uses the
 //! same blocks and seeds and compares raw bits.
 
-use mc_bamboo_blocks::entity::{Entity, JavaRandom, mob::MobType};
+use mc_bamboo_blocks::{
+    Effect,
+    entity::{
+        Entity, JavaRandom,
+        mob::{DamageKind, DamageSource, MobType},
+    },
+};
 use mc_bamboo_core::Vec3;
 
 use super::*;
@@ -36,7 +42,28 @@ pub(super) struct GuardianCase {
     /// The player target in laser / elder scenes; absent in swim and flop scenes.
     #[serde(default)]
     player: Option<GuardianPlayer>,
+    /// 尖刺场景：在某刻对守卫者造成一次伤害。
+    ///
+    /// Thorns scenes: one hit on the guardian at a given tick.
+    #[serde(default)]
+    hurt: Option<GuardianHurt>,
     frames: Vec<GuardianFrameLine>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuardianHurt {
+    tick: i32,
+    amount: f32,
+    /// 直接来源是不是活体（玩家近战 true，generic false）。
+    ///
+    /// Whether the direct source is living (player melee true, generic false).
+    living_direct: bool,
+    /// 官方一侧在 hurt 前 `setMoving(true)`（移动中不反伤）。
+    ///
+    /// Vanilla calls `setMoving(true)` before the hit (no reflection while moving).
+    #[serde(default)]
+    moving: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +90,8 @@ struct GuardianSetup {
 #[serde(rename_all = "camelCase")]
 struct GuardianFrameLine {
     guardian: GuardianFrame,
+    #[serde(default)]
+    player_health: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -171,7 +200,7 @@ impl GuardianCase {
         }
     }
 
-    fn spawn(&self, level: &mut MobLevel, ticks: &mut BlockTicks) -> i32 {
+    fn spawn(&self, level: &mut MobLevel, ticks: &mut BlockTicks, break_test: Option<&str>) -> i32 {
         let setup = &self.guardian;
         let position = Vec3::new(
             f64::from_bits(setup.position[0] as u64),
@@ -197,6 +226,19 @@ impl GuardianCase {
             };
             mob.y_head_rot = entity.y_rot;
             mob.y_body_rot = entity.y_rot;
+            // 场景级改坏确认：改坏攻击时长 / 尖刺的「没在动」条件。
+            // Scene-level break-self-test: break the attack duration / the
+            // thorns "not moving" condition.
+            match break_test {
+                Some("guardian_attack_duration") => {
+                    mob.guardian.attack_duration_override =
+                        if self.guardian.kind == 91 { 59 } else { 79 };
+                }
+                Some("guardian_thorns_moving") => {
+                    mob.guardian.thorns_ignore_moving = true;
+                }
+                _ => {}
+            }
         });
         id
     }
@@ -207,7 +249,7 @@ impl GuardianCase {
 /// 平台末位差单独归类，不算行为差异。
 ///
 /// `GuardianMoveControl.tick` uses `java.lang.Math.sin/cos`; Rust's `f64::sin/cos`
-/// differs by 1-2 ULP, which only shows up in the wobble displacement. All other
+/// differs by 1-2 ULP (up to 8 bits), which only shows up in the wobble displacement. All other
 /// fields are compared bit for bit.
 fn guardian_frames_match(expected: &GuardianFrame, ours: &GuardianFrame) -> bool {
     let motion_ok = ours
@@ -274,17 +316,75 @@ fn frame_of(level: &MobLevel, id: i32) -> GuardianFrame {
     }
 }
 
+/// 收集这一刻的 `Effect::HurtPlayer`，累计到玩家血量（oracle 里的玩家是静态
+/// 视图，伤害通过效果表达）。
+///
+/// Fold this tick's `Effect::HurtPlayer` effects into the player's health (the
+/// oracle player is a static view; damage is expressed through effects).
+fn apply_player_hurts(world: &mut World<'_>, player_health: &mut f32) {
+    for effect in world.drain_effects() {
+        if let Effect::HurtPlayer { amount, .. } = effect {
+            *player_health -= amount;
+        }
+    }
+}
+
 impl Report {
     pub(super) fn replay_guardian(&mut self, case: &GuardianCase) {
         self.cases += 1;
         let mut level = case.level();
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
-        let guardian = case.spawn(&mut level, &mut ticks);
+        let guardian = case.spawn(&mut level, &mut ticks, self.break_test.as_deref());
+        let mut player_health = case
+            .player
+            .as_ref()
+            .map_or(0.0, |setup| f32::from_bits(setup.health as u32));
+        let player_uid = case.player.as_ref().map_or(-1, |setup| setup.uid);
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick != 0 {
                 ticks.set_time(1000 + tick as i64);
-                World::new(&mut level, &mut ticks).tick_entities();
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+                apply_player_hurts(&mut world, &mut player_health);
+            }
+            // 尖刺场景：这一刻让玩家近战（或 generic）打守卫者，Bamboo 侧的
+            // `Guardian.hurtServer` 会 emit `Command::HurtPlayer`（反伤）。
+            // Thorns scene: a player melee (or generic) hit lands on the guardian;
+            // Bamboo's `Guardian.hurtServer` emits `Command::HurtPlayer`.
+            if let Some(hurt) = &case.hurt
+                && tick == hurt.tick as usize
+            {
+                let mut source = DamageSource::environment(if hurt.living_direct {
+                    DamageKind::PlayerAttack
+                } else {
+                    DamageKind::Generic
+                });
+                if hurt.living_direct {
+                    source.attacker = Some(player_uid);
+                    source.direct = Some(player_uid);
+                    source.attacker_is_player = true;
+                    // `playerAttack(player)` 的伤害源位置就是玩家，击退方向读它。
+                    // The `playerAttack(player)` source position is the player;
+                    // knockback reads it.
+                    if let Some(setup) = &case.player {
+                        source.position = Some(Vec3::new(
+                            f64::from_bits(setup.position[0] as u64),
+                            f64::from_bits(setup.position[1] as u64),
+                            f64::from_bits(setup.position[2] as u64),
+                        ));
+                    }
+                }
+                if hurt.moving {
+                    level.entities.with_mut(guardian, |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.guardian.moving = true;
+                        }
+                    });
+                }
+                let mut world = World::new(&mut level, &mut ticks);
+                world.hurt_mob(guardian, source, hurt.amount);
+                apply_player_hurts(&mut world, &mut player_health);
             }
             let ours = frame_of(&level, guardian);
             let label = format!("{} tick {tick}", case.name);
@@ -292,11 +392,25 @@ impl Report {
                 if ours.removed != 1 {
                     self.mismatch(format!("{label}: official removed, bamboo still present"));
                 }
-            } else if !guardian_frames_match(&expected.guardian, &ours) {
-                self.mismatch(format!(
-                    "{label}: official {:?}, bamboo {:?}",
-                    expected.guardian, ours
-                ));
+            } else {
+                // 玩家血量只在尖刺场景比（激光场景的玩家受伤由 player_hurt 场景
+                // 覆盖，这里只比守卫者一侧）。
+                // Player health is only compared in thorns scenes (laser player
+                // damage is covered by player_hurt scenes; here only the guardian
+                // side is compared).
+                let tracked = if case.hurt.is_some() {
+                    player_health.to_bits() as i32
+                } else {
+                    0
+                };
+                if !guardian_frames_match(&expected.guardian, &ours)
+                    || expected.player_health != tracked
+                {
+                    self.mismatch(format!(
+                        "{label}: official {:?}/player {}, bamboo {:?}/player {}",
+                        expected.guardian, expected.player_health, ours, tracked
+                    ));
+                }
             }
             self.steps += 1;
             if self.mismatches.len() >= self.show {

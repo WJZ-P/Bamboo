@@ -1674,6 +1674,17 @@ fn light_dependent_magic(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> f32 {
     raw / (4.0 - 3.0 * raw)
 }
 
+/// `Guardian.getAttackDuration()`，允许场景级改坏确认覆盖。
+///
+/// `Guardian.getAttackDuration()` with a scene-level break-self-test override.
+fn guardian_attack_duration(mob: &Mob) -> i32 {
+    if mob.guardian.attack_duration_override != 0 {
+        mob.guardian.attack_duration_override
+    } else {
+        super::guardian::attack_duration(mob.mob_type)
+    }
+}
+
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
         Goal::SilverfishWakeFriends { look_for_friends } => *look_for_friends > 0,
@@ -3669,9 +3680,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 if !mob.silent {
                     mob.events.push(super::MobEvent::EntityEvent { event: 21 });
                 }
-            } else if mob.guardian.attack_time
-                >= super::guardian::attack_duration(mob.mob_type)
-            {
+            } else if mob.guardian.attack_time >= guardian_attack_duration(mob) {
                 // 伤害基值 1，困难 +2，远古 +2。
                 // Base damage 1, +2 on hard, +2 for the elder guardian.
                 let damage = super::guardian::laser_damage(

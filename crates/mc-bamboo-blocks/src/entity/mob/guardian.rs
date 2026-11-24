@@ -92,6 +92,17 @@ pub struct GuardianState {
     pub attack_time: i32,
     /// `clientSideTouchedGround`。
     pub touched_ground: bool,
+    /// 场景级改坏确认用：非 0 时覆盖 `Guardian.getAttackDuration()`。
+    /// 正常路径恒为 0。
+    ///
+    /// Scene-level break-self-test hook: overrides `Guardian.getAttackDuration()`
+    /// when nonzero. Always 0 on the normal path.
+    pub attack_duration_override: i32,
+    /// 场景级改坏确认用：为真时尖刺忽略「没在动」条件。正常路径恒为假。
+    ///
+    /// Scene-level break-self-test hook: ignores the "not moving" thorns
+    /// condition when true. Always false on the normal path.
+    pub thorns_ignore_moving: bool,
 }
 
 /// `Guardian.createAttributes` / `ElderGuardian.createAttributes`：
@@ -467,7 +478,7 @@ fn player_gets_fatigue(
 /// outside `#avoids_guardian_thorns` and not thorns. "The direct entity is living"
 /// needs the entity table and is checked by [`hurt_server`].
 pub fn thorns_reflects(mob: &Mob, kind: DamageKind) -> bool {
-    !mob.guardian.moving
+    (mob.guardian.thorns_ignore_moving || !mob.guardian.moving)
         && !super::goals::damage_type_tagged("minecraft:avoids_guardian_thorns", kind)
         && kind != DamageKind::Thorns
 }
