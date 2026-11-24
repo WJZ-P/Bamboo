@@ -1003,7 +1003,11 @@ fn order_entries(entries: Vec<Entry>) -> Vec<Entry> {
             .enumerate()
             .map(|(order, &activity)| (activity.bucket(capacity), order, activity))
             .collect();
-        keyed.sort_unstable_by_key(|&(bucket, order, _)| (bucket, order));
+        // OpenJDK `HashMap.computeIfAbsent` 碰撞时插在桶链表头部（`tab[i] = newNode(..., first)`），
+        // 所以同一桶内后插入的活动排在前面。
+        // OpenJDK `HashMap.computeIfAbsent` prepends collisions to the bucket head
+        // (`tab[i] = newNode(..., first)`), so later-inserted activities iterate first.
+        keyed.sort_unstable_by_key(|&(bucket, order, _)| (bucket, std::cmp::Reverse(order)));
         for (_, _, activity) in keyed {
             for slot in &mut remaining {
                 if slot

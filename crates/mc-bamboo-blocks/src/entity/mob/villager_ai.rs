@@ -131,9 +131,6 @@ pub enum Stub {
     UseBonemeal,
     ShowTradesToPlayer,
     SetLookAndInteractPlayer,
-    SetWalkTargetFromJobSite,
-    SetWalkTargetFromHome,
-    SetWalkTargetFromMeetingPoint,
     GiveGiftToHero,
     PlayTagWithOtherKids,
     InteractWithVillager,
@@ -143,7 +140,6 @@ pub enum Stub {
     SleepInBed,
     SetClosestHomeAsWalkTarget,
     InsideBrownianWalk,
-    MeetTriggerGate,
     TradeWithVillager,
     VillagerMakeLove,
     RingBell,
@@ -330,9 +326,6 @@ impl Stub {
             Self::UseBonemeal => REQ_USE_BONEMEAL,
             Self::ShowTradesToPlayer => REQ_INTERACTION_PRESENT,
             Self::SetLookAndInteractPlayer => REQ_LOOK_INTERACT,
-            Self::SetWalkTargetFromJobSite => REQ_WALK_FROM_JOB,
-            Self::SetWalkTargetFromHome => REQ_WALK_FROM_HOME,
-            Self::SetWalkTargetFromMeetingPoint => REQ_WALK_FROM_MEETING,
             Self::GiveGiftToHero => REQ_GIVE_GIFT,
             Self::PlayTagWithOtherKids => REQ_PLAY_TAG,
             Self::InteractWithVillager | Self::InteractWithCat => REQ_INTERACT_TARGET,
@@ -341,8 +334,7 @@ impl Stub {
             Self::SleepInBed => REQ_SLEEP_IN_BED,
             Self::SetClosestHomeAsWalkTarget => REQ_CLOSEST_HOME,
             Self::InsideBrownianWalk => REQ_WALK_ABSENT,
-            Self::MeetTriggerGate
-            | Self::PreRaidTriggerGate
+            Self::PreRaidTriggerGate
             | Self::ResetRaidStatus
             | Self::RaidCelebrateTriggerGate
             | Self::CelebrateVillagersSurvivedRaid => &[],
@@ -404,6 +396,17 @@ pub enum Behavior {
     WakeUp,
     /// `ReactToBell`：`OneShot`，听到钟声且无袭击时切到 `HIDE`。
     ReactToBell,
+    /// `SetWalkTargetFromBlockMemory.create(memory, speed, closeEnough, tooFar, tooLong)`。
+    WalkTargetFromBlockMemory {
+        memory: MemoryType,
+        speed: f32,
+        close_enough: u16,
+        too_far_distance: u16,
+        too_long_unreachable: u16,
+    },
+    /// `MEET` 优先级 2 的 `TriggerGate(StrollAroundPoi, SocializeAtBell)` 占位：
+    /// 保留 `SocializeAtBell` 对 `level.random.nextInt(100)` 的取数。
+    MeetTriggerGate,
     /// `AcquirePoi` 排期占位：按官方计时抽取 `level.random.nextInt(20)`，真正占领 POI 在期 4。
     AcquirePoiStub {
         slot: PoiAcquireSlot,
@@ -442,7 +445,8 @@ impl Behavior {
             Self::PanicTrigger
             | Self::UpdateActivityFromSchedule
             | Self::SetRaidStatus
-            | Self::WakeUp => &[],
+            | Self::WakeUp
+            | Self::MeetTriggerGate => &[],
             Self::CalmDown => REQ_CALM_DOWN,
             Self::WalkAwayFromEntity { memory, .. } => match memory {
                 NearestHostile => REQ_AWAY_HOSTILE,
@@ -453,6 +457,11 @@ impl Behavior {
             }
             Self::SetEntityLookTarget { .. } => REQ_LOOK_ENTITY,
             Self::ReactToBell => REQ_HEARD_BELL,
+            Self::WalkTargetFromBlockMemory { memory, .. } => match memory {
+                JobSite => REQ_WALK_FROM_JOB,
+                Home => REQ_WALK_FROM_HOME,
+                _ => REQ_WALK_FROM_MEETING,
+            },
             Self::AcquirePoiStub { slot, .. } => slot.required(),
             Self::Unavailable(stub) => stub.required(),
         }
@@ -692,6 +701,94 @@ impl Behavior {
                 cx.set_active_activity_if_possible(Activity::Hide);
                 true
             }
+            Self::WalkTargetFromBlockMemory {
+                memory,
+                speed,
+                close_enough,
+                too_far_distance,
+                too_long_unreachable,
+            } => {
+                let Some(MemoryValue::GlobalPos(global_pos)) = cx.memories.get(*memory).cloned()
+                else {
+                    return false;
+                };
+                let cant_reach = match cx.memories.get(CantReachWalkTargetSince) {
+                    Some(MemoryValue::Long(since)) => Some(*since),
+                    _ => None,
+                };
+                let wrong_dim = global_pos.dimension != "minecraft:overworld";
+                let timed_out = cant_reach.is_some_and(|since| {
+                    cx.time.saturating_sub(since) > i64::from(*too_long_unreachable)
+                });
+                if wrong_dim || timed_out {
+                    cx.memories.erase(*memory);
+                    cx.memories
+                        .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
+                    return true;
+                }
+                let mob_pos = cx.me.block_position();
+                let dist = manhattan(global_pos.pos, mob_pos);
+                let too_far = i32::from(*too_far_distance);
+                let close = i32::from(*close_enough);
+                if dist > too_far {
+                    let towards = Vec3::new(
+                        f64::from(global_pos.pos.x) + 0.5,
+                        f64::from(global_pos.pos.y),
+                        f64::from(global_pos.pos.z) + 0.5,
+                    );
+                    let blocks = cx.ctx.blocks();
+                    let mut picked: Option<Vec3> = None;
+                    let mut tries = 0;
+                    while picked
+                        .is_none_or(|p| manhattan(BlockPos::containing(p), mob_pos) > too_far)
+                    {
+                        picked = goals::default_random_pos_towards(
+                            cx.me,
+                            cx.mob,
+                            blocks,
+                            15,
+                            7,
+                            towards,
+                            std::f32::consts::FRAC_PI_2,
+                        );
+                        tries += 1;
+                        if tries == 1000 {
+                            cx.memories.erase(*memory);
+                            cx.memories
+                                .set(CantReachWalkTargetSince, MemoryValue::Long(cx.time));
+                            return true;
+                        }
+                    }
+                    if let Some(target) = picked {
+                        cx.memories.set(
+                            WalkTarget,
+                            MemoryValue::Walk(WalkTarget::to_point(target, *speed, close)),
+                        );
+                    }
+                } else if dist > close {
+                    cx.memories.set(
+                        WalkTarget,
+                        MemoryValue::Walk(WalkTarget {
+                            target: PositionTracker::at_block(global_pos.pos),
+                            speed: *speed,
+                            close_enough: close,
+                        }),
+                    );
+                }
+                true
+            }
+            Self::MeetTriggerGate => {
+                // `TriggerGate.triggerOneShuffled([StrollAroundPoi, SocializeAtBell])`：
+                // `SocializeAtBell` 在检查维度/距离前先抽 `level.random.nextInt(100)`，
+                // 期 3 保留这一取数以对齐世界随机序列；完整社交行为留到期 4。
+                if cx.memories.has(MeetingPoint)
+                    && cx.memories.has(NearestVisibleLivingEntities)
+                    && !cx.memories.has(InteractionTarget)
+                {
+                    let _ = cx.level_next_int(100);
+                }
+                true
+            }
             Self::AcquirePoiStub {
                 slot,
                 next_scheduled_start,
@@ -720,6 +817,10 @@ fn is_hurt(cx: &Cx) -> bool {
 
 fn has_hostile(cx: &Cx) -> bool {
     cx.memories.has(NearestHostile)
+}
+
+fn manhattan(a: BlockPos, b: BlockPos) -> i32 {
+    (a.x - b.x).abs() + (a.y - b.y).abs() + (a.z - b.z).abs()
 }
 
 fn section_of(pos: BlockPos) -> (i32, i32, i32) {
@@ -870,7 +971,7 @@ fn core_package(speed: f32) -> ActivityData {
     )
 }
 
-fn work_package(is_farmer: bool, _speed: f32) -> ActivityData {
+fn work_package(is_farmer: bool, speed: f32) -> ActivityData {
     let work_at_poi = if is_farmer {
         stub(Stub::WorkAtComposter)
     } else {
@@ -898,7 +999,16 @@ fn work_package(is_farmer: bool, _speed: f32) -> ActivityData {
             ),
             (10, stub(Stub::ShowTradesToPlayer)),
             (10, stub(Stub::SetLookAndInteractPlayer)),
-            (2, stub(Stub::SetWalkTargetFromJobSite)),
+            (
+                2,
+                Kind::Villager(Behavior::WalkTargetFromBlockMemory {
+                    memory: JobSite,
+                    speed,
+                    close_enough: 9,
+                    too_far_distance: 100,
+                    too_long_unreachable: 1200,
+                }),
+            ),
             (3, stub(Stub::GiveGiftToHero)),
             (99, Kind::Villager(Behavior::UpdateActivityFromSchedule)),
         ],
@@ -952,7 +1062,16 @@ fn rest_package(speed: f32) -> ActivityData {
     ActivityData::with_priorities(
         Activity::Rest,
         vec![
-            (2, stub(Stub::SetWalkTargetFromHome)),
+            (
+                2,
+                Kind::Villager(Behavior::WalkTargetFromBlockMemory {
+                    memory: Home,
+                    speed,
+                    close_enough: 1,
+                    too_far_distance: 150,
+                    too_long_unreachable: 1200,
+                }),
+            ),
             (3, stub(Stub::ValidateHome)),
             (3, stub(Stub::SleepInBed)),
             (
@@ -979,14 +1098,23 @@ fn rest_package(speed: f32) -> ActivityData {
     )
 }
 
-fn meet_package(_speed: f32) -> ActivityData {
+fn meet_package(speed: f32) -> ActivityData {
     ActivityData::with_priorities(
         Activity::Meet,
         vec![
-            (2, stub(Stub::MeetTriggerGate)),
+            (2, Kind::Villager(Behavior::MeetTriggerGate)),
             (10, stub(Stub::ShowTradesToPlayer)),
             (10, stub(Stub::SetLookAndInteractPlayer)),
-            (2, stub(Stub::SetWalkTargetFromMeetingPoint)),
+            (
+                2,
+                Kind::Villager(Behavior::WalkTargetFromBlockMemory {
+                    memory: MeetingPoint,
+                    speed,
+                    close_enough: 6,
+                    too_far_distance: 100,
+                    too_long_unreachable: 200,
+                }),
+            ),
             (3, stub(Stub::GiveGiftToHero)),
             (3, stub(Stub::ValidateMeetingPoint)),
             (
