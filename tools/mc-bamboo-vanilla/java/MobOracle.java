@@ -10638,6 +10638,7 @@ public final class MobOracle {
                 "zombie_villager_infect_normal_false", "zombie_villager_infect_hard",
                 "zombie_villager_cure_bars", "zombie_villager_cure_bed",
                 "zombie_villager_cure_plain", "zombie_villager_cure_no_weakness",
+                "zombie_villager_cure_far",
                 "zombie_villager_sunburn");
         int cases = 0;
         for (String name : names) {
@@ -10717,6 +10718,7 @@ public final class MobOracle {
         boolean noWeakness = name.endsWith("no_weakness");
         boolean bars = name.endsWith("bars");
         boolean bed = name.endsWith("bed");
+        boolean far = name.endsWith("far");
         int ticks = infection ? 1 : sunburn ? 8 : 30;
         FakeLevel world = FakeLevel.create(official);
         ((TickingLevelData) world.levelData).difficulty = Difficulty.values()[difficulty];
@@ -10734,7 +10736,7 @@ public final class MobOracle {
         }
         // 加速方块放在 4 格（生效）和 5 格（不生效）处，用来检验半径。
         // Speed-up blocks at 4 (in range) and 5 (out of range) blocks.
-        if (bars) {
+        if (bars || far) {
             world.blocks.put(BlockPos.asLong(4, 61, 0), Blocks.IRON_BARS.defaultBlockState());
             world.blocks.put(BlockPos.asLong(5, 61, 0), Blocks.IRON_BARS.defaultBlockState());
         }
@@ -10760,8 +10762,9 @@ public final class MobOracle {
             world.tracked.add(zombie);
             victim = (net.minecraft.world.entity.Mob)
                     EntityTypes.VILLAGER.create(world, EntitySpawnReason.COMMAND);
-            setRandom(victim, 42002L);
+            setRandom(victim, ENTITY_RANDOM_SEED);
             victim.setUUID(net.minecraft.util.Mth.createInsecureUUID(victim.getRandom()));
+            victim.getRandom().nextFloat();
             victim.setYRot(0.0F);
             victim.setYHeadRot(0.0F);
             victim.setPos(0.5, 61.0, 0.5);
@@ -10773,8 +10776,16 @@ public final class MobOracle {
         } else {
             patient = (net.minecraft.world.entity.monster.zombie.ZombieVillager)
                     EntityTypes.ZOMBIE_VILLAGER.create(world, EntitySpawnReason.COMMAND);
-            setRandom(patient, 5120L);
+            setRandom(patient, 134L);
+            // 构造顺序：UUID 两个 nextLong、随机职业、朝向、9 个传感器延迟。
+            // Constructor order: two UUID longs, the random profession, the
+            // facing and nine sensor delays.
             patient.setUUID(net.minecraft.util.Mth.createInsecureUUID(patient.getRandom()));
+            patient.getRandom().nextInt(net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION.size());
+            patient.getRandom().nextFloat();
+            for (int rate : new int[] {20, 20, 20, 20, 20, 20, 20, 40, 200}) {
+                patient.getRandom().nextInt(rate);
+            }
             patient.setYRot(0.0F);
             patient.setYHeadRot(0.0F);
             patient.setPos(0.5, 61.0, 0.5);

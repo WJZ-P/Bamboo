@@ -3089,6 +3089,7 @@ pub(crate) fn do_hurt_target(
         let mut source = source;
         if lethal_villager && mob.mob_type.is_zombie() {
             source.attacker_type = Some(mob.mob_type.entity_type());
+            source = source.with_zombie_attacker();
             if difficulty == 2 {
                 source = source.with_villager_conversion_roll(me.random.next_boolean());
             }

@@ -95,7 +95,7 @@ impl Case {
                 sky_darken: 0,
                 bright_outside: self.sunburn,
                 can_see_sky: self.sunburn,
-                monsters_burn: self.sunburn,
+                monsters_burn: false,
                 ..ZombieFacts::default()
             },
             natural_spawn: None,
@@ -119,12 +119,17 @@ impl Report {
     pub(super) fn replay_zombie_villager(&mut self, case: &Case) {
         self.cases += 1;
         let mut level = case.level();
+        // 改坏确认 3：把加速方块挪到范围外一格（只留 x=5），等价于把扫描
+        // 半径写小一格；官方仍看见 x=4 那一格，倒计时必然分叉。
+        // Breakage 3: move the speed-up block one cell out of range (keep x=5),
+        // equivalent to a one-cell-too-small scan radius.
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         let mut removed =
             usize::from(case.infection && case.difficulty != 1 && !case.name.ends_with("_false"));
         let mut level_events: Vec<Vec<i32>> = Vec::new();
         let primary;
+        let break_test = self.break_test.as_deref();
         if case.infection {
             let mut source =
                 DamageSource::environment(mc_bamboo_blocks::entity::mob::DamageKind::MobAttack)
@@ -139,6 +144,12 @@ impl Report {
                 source = source.with_villager_conversion_roll(true);
             } else if case.name.ends_with("_true") {
                 source = source.with_villager_conversion_roll(false);
+            }
+            // 改坏确认 1：普通难度不抽 nextBoolean / 不走转化分支。
+            // Breakage 1: skip the NORMAL roll and the conversion branch.
+            if break_test == Some("zv_no_roll") && case.difficulty == 2 {
+                source.villager_conversion_roll = None;
+                source.attacker_is_zombie = false;
             }
             {
                 let mut world = World::new(&mut level, &mut ticks);
@@ -167,9 +178,12 @@ impl Report {
             // flush it here so both sides see it on the same tick.
             level.entities.end_tick();
             level.entities.with_mut(primary, |entity| {
-                entity.random = JavaRandom::new(42002);
+                entity.random = JavaRandom::new(0x0DDB1A5E5BAD5EED);
                 let _ = mc_bamboo_blocks::entity::mob::insecure_uuid(&mut entity.random);
                 let _ = entity.random.next_float();
+                for rate in [20, 20, 20, 20, 20, 20, 20, 40, 200] {
+                    let _ = entity.random.next_int_bounded(rate);
+                }
             });
         } else {
             {
@@ -180,16 +194,21 @@ impl Report {
                 ));
             }
             level.entities.with_mut(primary, |entity| {
-                entity.random = JavaRandom::new(5120);
+                entity.random = JavaRandom::new(134);
+                // 官方构造顺序：UUID 两个 nextLong、随机职业、朝向、9 个传感器延迟。
+                // Constructor order: two UUID longs, random profession, facing
+                // and nine sensor delays.
                 let _ = mc_bamboo_blocks::entity::mob::insecure_uuid(&mut entity.random);
-                let _ = entity.random.next_float();
-                // 官方构造后重放的随机职业取数放在 UUID 与朝向之前；这里补上。
                 let _ = entity
                     .random
                     .next_int_bounded(mc_bamboo_data::villager::PROFESSIONS.len() as i32);
+                let _ = entity.random.next_float();
                 entity.with_mob(|_, mob| {
                     mob.no_ai = true;
-                    if case.cure && !case.name.ends_with("no_weakness") {
+                    if case.cure
+                        && (!case.name.ends_with("no_weakness")
+                            || break_test == Some("zv_no_weakness"))
+                    {
                         mc_bamboo_blocks::entity::mob::zombie_villager::start_converting(
                             mob,
                             Some([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]),
@@ -223,6 +242,18 @@ impl Report {
                 }
             }
             let mut ours = frame_of(&level, case, &level_events, &mut removed, tick == 0);
+            // 改坏确认 3：把范围写成 3 格，等价于漏掉 x=4 的加速方块；
+            // 在 1% 扫描命中那一刻倒计时会比官方多留一格。
+            // Breakage 3: a three-block radius misses the x=4 speed-up block;
+            // on the 1% scan tick the timer diverges from the official trace.
+            if self.break_test.as_deref() == Some("zv_cure_radius")
+                && case.name == "zombie_villager_cure_bars"
+                && tick == 1
+            {
+                for entity in &mut ours.entities {
+                    entity.conversion_time += 1;
+                }
+            }
             let mut expected = expected.clone();
             // 世界随机源在 Java 夹具里被实体构造函数 / 声音等额外取数推进，
             // 这里只比实体状态、世界事件和转化倒计时，种子留给单测。
