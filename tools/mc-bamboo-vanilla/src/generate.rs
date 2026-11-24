@@ -105,6 +105,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     fs::write(&path, advancements)
         .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
     write_file(output_dir, "loot.rs", &loot)?;
+    write_file(output_dir, "villager.rs", &villager_file(data)?)?;
     if !data.game_rules.is_empty() {
         write_file(output_dir, "gamerules.rs", &gamerules)?;
     }
@@ -595,6 +596,359 @@ fn component_registries_file(data: &VersionData) -> Result<String, String> {
     Ok(out)
 }
 
+/// 村民：官方数据包里的交易表、职业 / 品种 / 八卦事实和日程关键帧。
+///
+/// `trade_set` / `villager_trade` 及其标签按官方文件原文导出；标签在这里展开成
+/// 「按职业、按等级的静态条目表」，交易求值留给后续几期。
+fn villager_file(data: &VersionData) -> Result<String, String> {
+    use serde_json::Value;
+
+    let facts = &data.villager_facts;
+    if facts.professions.is_empty() || facts.types.is_empty() || facts.by_biome.is_empty() {
+        return Err("缺少村民注册表事实，先重跑 generate".to_owned());
+    }
+    // 逐文件校验：每张表都是合法 JSON，标签是 {"values": [...]}。
+    for (id, raw) in &data.trade_sets {
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|error| format!("trade_set {id} 不是合法的 JSON：{error}"))?;
+        if value.get("amount").is_none() {
+            return Err(format!("trade_set {id} 没有 amount"));
+        }
+        if value.get("trades").and_then(Value::as_str).is_none() {
+            return Err(format!("trade_set {id} 没有 trades"));
+        }
+    }
+    for (id, raw) in &data.villager_trades {
+        serde_json::from_str::<Value>(raw)
+            .map_err(|error| format!("villager_trade {id} 不是合法的 JSON：{error}"))?;
+    }
+    let mut tags: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (id, raw) in &data.villager_trade_tags {
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|error| format!("标签 {id} 不是合法的 JSON：{error}"))?;
+        let values: Vec<String> = value
+            .get("values")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("标签 {id} 没有 values"))?
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("标签 {id} 有一项不是字符串"))
+            })
+            .collect::<Result<_, String>>()?;
+        tags.insert(id.clone(), values);
+    }
+    // 每个 trade_set 指向一个标签；把嵌套的 `#minecraft:x` 递归展开成条目表。
+    // 顺序照官方标签里的顺序，同名条目不重复。
+    let mut expanded: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (id, raw) in &data.trade_sets {
+        let value: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+        let tag = value["trades"]
+            .as_str()
+            .ok_or_else(|| format!("trade_set {id} 没有 trades"))?;
+        if !tag.starts_with('#') {
+            return Err(format!("trade_set {id} 的 trades 不是标签：{tag}"));
+        }
+        let name = tag[1..].to_owned();
+        let mut entries = Vec::new();
+        expand_tag(&name, &tags, &mut entries, &mut Vec::new())?;
+        if entries.is_empty() {
+            return Err(format!("trade_set {id} 展开成空表"));
+        }
+        for entry in &entries {
+            if !data.villager_trades.contains_key(entry) {
+                return Err(format!("trade_set {id} 引用了不存在的交易 {entry}"));
+            }
+        }
+        expanded.insert(id.clone(), entries);
+    }
+    // 数量对不上说明数据包读漏了（内置包覆盖或目录名写错），在生成时就拦下。
+    for (label, actual, expected) in [
+        ("trade_set", data.trade_sets.len(), 68),
+        ("villager_trade", data.villager_trades.len(), 391),
+        ("tags/villager_trade", data.villager_trade_tags.len(), 73),
+        ("villager_profession", facts.professions.len(), 15),
+        ("villager_type", facts.types.len(), 7),
+        ("VillagerType.byBiome", facts.by_biome.len(), 29),
+    ] {
+        if actual != expected {
+            return Err(format!("{label} 有 {actual} 项，官方是 {expected} 项"));
+        }
+    }
+    // 职业的每级交易表都必须存在，否则期 5 会在运行时才炸。
+    for profession in &facts.professions {
+        for (level, id) in &profession.trade_sets_by_level {
+            if !id.is_empty() && !data.trade_sets.contains_key(id) {
+                return Err(format!(
+                    "{} 的 {level} 级交易表 {id} 不在 trade_set 里",
+                    profession.name
+                ));
+            }
+        }
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "//! 村民：`mc-bamboo-vanilla` 从官方服务端导出的静态表。\n"
+    );
+    write_string_map(
+        &mut out,
+        "内置 `data/minecraft/trade_set/**.json` 原文，按名字排序。",
+        "TRADE_SETS",
+        &data.trade_sets,
+    );
+    write_string_map(
+        &mut out,
+        "内置 `data/minecraft/villager_trade/**.json` 原文，按名字排序。",
+        "VILLAGER_TRADES",
+        &data.villager_trades,
+    );
+    write_string_map(
+        &mut out,
+        "内置 `data/minecraft/tags/villager_trade/**.json` 原文，按名字排序。",
+        "VILLAGER_TRADE_TAGS",
+        &data.villager_trade_tags,
+    );
+    let _ = writeln!(
+        out,
+        "/// 每个 `trade_set` 展开后的条目；嵌套标签已按官方顺序递归展开。"
+    );
+    let _ = writeln!(out, "pub static TRADE_SET_ENTRIES: &[(&str, &[&str])] = &[");
+    for (name, entries) in &expanded {
+        let _ = writeln!(out, "    ({name:?}, &[");
+        for entry in entries {
+            let _ = writeln!(out, "        {entry:?},");
+        }
+        let _ = writeln!(out, "    ]),");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 一个职业的工作站谓词、物品 / 方块集合和每级交易表。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct Profession {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub held_job_site: &'static [&'static str],");
+    let _ = writeln!(out, "    pub acquirable_job_site: &'static [&'static str],");
+    let _ = writeln!(out, "    pub requested_items: &'static [&'static str],");
+    let _ = writeln!(out, "    pub secondary_poi: &'static [&'static str],");
+    let _ = writeln!(out, "    pub trade_sets_by_level: [&'static str; 5],");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(
+        out,
+        "/// `minecraft:villager_profession`，按注册表 ID 排列。"
+    );
+    let _ = writeln!(
+        out,
+        "pub static PROFESSIONS: [Profession; {}] = [",
+        facts.professions.len()
+    );
+    for profession in &facts.professions {
+        let _ = writeln!(out, "    Profession {{");
+        let _ = writeln!(out, "        name: {:?},", profession.name);
+        for (field, values) in [
+            ("held_job_site", &profession.held_job_site),
+            ("acquirable_job_site", &profession.acquirable_job_site),
+            ("requested_items", &profession.requested_items),
+            ("secondary_poi", &profession.secondary_poi),
+        ] {
+            let _ = writeln!(out, "        {field}: &[");
+            for value in values {
+                let _ = writeln!(out, "            {value:?},");
+            }
+            let _ = writeln!(out, "        ],");
+        }
+        let _ = write!(out, "        trade_sets_by_level: [");
+        for level in 1..=5 {
+            let key = profession
+                .trade_sets_by_level
+                .get(&level.to_string())
+                .map(String::as_str)
+                .unwrap_or("");
+            let _ = write!(out, "{key:?}, ");
+        }
+        let _ = writeln!(out, "],");
+        let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(out, "/// `minecraft:villager_type`，按注册表 ID 排列。");
+    let _ = writeln!(
+        out,
+        "pub static VILLAGER_TYPES: &[&str] = &{:?};\n",
+        facts.types
+    );
+    let _ = writeln!(
+        out,
+        "/// `VillagerType.byBiome`：群系注册表名字 → 品种注册表名字。"
+    );
+    let _ = writeln!(out, "pub static TYPE_BY_BIOME: &[(&str, &str)] = &[");
+    for (biome, kind) in &facts.by_biome {
+        let _ = writeln!(out, "    ({biome:?}, {kind:?}),");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(out, "/// 八卦类型：名字、权重、上限和两种衰减。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct GossipType {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub weight: i32,");
+    let _ = writeln!(out, "    pub max: i32,");
+    let _ = writeln!(out, "    pub decay_per_day: i32,");
+    let _ = writeln!(out, "    pub decay_per_transfer: i32,");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(out, "/// `GossipType.values()`，按枚举序号排列。");
+    let _ = writeln!(
+        out,
+        "pub static GOSSIP_TYPES: [GossipType; {}] = [",
+        facts.gossips.len()
+    );
+    for gossip in &facts.gossips {
+        let _ = writeln!(
+            out,
+            "    GossipType {{ name: {:?}, weight: {}, max: {}, decay_per_day: {}, decay_per_transfer: {} }},",
+            gossip.name, gossip.weight, gossip.max, gossip.decay_per_day, gossip.decay_per_transfer
+        );
+    }
+    let _ = writeln!(out, "];\n");
+    for (name, value) in [
+        ("REPUTATION_PER_EVENT", facts.reputation_per_event),
+        (
+            "REPUTATION_PER_EVERLASTING",
+            facts.reputation_per_everlasting,
+        ),
+        ("REPUTATION_PER_TRADE", facts.reputation_per_trade),
+    ] {
+        let _ = writeln!(out, "pub const {name}: i32 = {value};");
+    }
+    let _ = writeln!(out);
+    for (name, value) in [
+        ("VILLAGER_DATA_INDEX", facts.villager_data_index),
+        ("VILLAGER_DATA_FINALIZED_INDEX", facts.finalized_index),
+        ("UNHAPPY_COUNTER_INDEX", facts.unhappy_index),
+    ] {
+        let _ = writeln!(out, "pub const {name}: u8 = {value};");
+    }
+    for (name, value) in [
+        ("VILLAGER_DATA_SERIALIZER", facts.villager_data_serializer),
+        (
+            "VILLAGER_DATA_FINALIZED_SERIALIZER",
+            facts.finalized_serializer,
+        ),
+        ("UNHAPPY_COUNTER_SERIALIZER", facts.unhappy_serializer),
+    ] {
+        let _ = writeln!(out, "pub const {name}: i32 = {value};");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "pub const VILLAGER_MOVEMENT_SPEED: f64 = {:?};",
+        facts.movement_speed
+    );
+    for (name, value) in [
+        ("VILLAGER_WIDTH", facts.width),
+        ("VILLAGER_HEIGHT", facts.height),
+        ("VILLAGER_EYE_HEIGHT", facts.eye_height),
+        ("BABY_VILLAGER_WIDTH", facts.baby_width),
+        ("BABY_VILLAGER_HEIGHT", facts.baby_height),
+        ("BABY_VILLAGER_EYE_HEIGHT", facts.baby_eye_height),
+    ] {
+        let _ = writeln!(out, "pub const {name}: f32 = {};", float_literal(value));
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "pub const MIN_VILLAGER_LEVEL: i32 = {};",
+        facts.levels.min
+    );
+    let _ = writeln!(
+        out,
+        "pub const MAX_VILLAGER_LEVEL: i32 = {};",
+        facts.levels.max
+    );
+    let _ = writeln!(
+        out,
+        "pub static NEXT_LEVEL_XP_THRESHOLDS: &[i32] = &{:?};\n",
+        facts.levels.thresholds
+    );
+
+    // 两条 schedule 轨迹的关键帧：从官方 timeline json 读，不在 Rust 侧手写。
+    let raw = data
+        .timelines
+        .get("minecraft:villager_schedule")
+        .ok_or("缺少 minecraft:villager_schedule 时间线")?;
+    let timeline: Value =
+        serde_json::from_str(raw).map_err(|e| format!("村民时间线不是合法 JSON：{e}"))?;
+    let period = timeline
+        .get("period_ticks")
+        .and_then(Value::as_i64)
+        .ok_or("村民时间线没有 period_ticks")?;
+    let _ = writeln!(
+        out,
+        "pub const VILLAGER_SCHEDULE_PERIOD_TICKS: i64 = {period};"
+    );
+    let tracks = timeline
+        .get("tracks")
+        .and_then(Value::as_object)
+        .ok_or("村民时间线没有 tracks")?;
+    for (track, constant) in [
+        (
+            "minecraft:gameplay/villager_activity",
+            "VILLAGER_ACTIVITY_KEYFRAMES",
+        ),
+        (
+            "minecraft:gameplay/baby_villager_activity",
+            "BABY_VILLAGER_ACTIVITY_KEYFRAMES",
+        ),
+    ] {
+        let frames = tracks
+            .get(track)
+            .and_then(|value| value.get("keyframes"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("村民时间线没有 {track} 的关键帧"))?;
+        let _ = writeln!(out, "/// `{track}` 的关键帧 `(ticks, activity)`。");
+        let _ = writeln!(out, "pub static {constant}: &[(i64, &str)] = &[");
+        for frame in frames {
+            let ticks = frame
+                .get("ticks")
+                .and_then(Value::as_i64)
+                .ok_or("关键帧没有 ticks")?;
+            let value = frame
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or("关键帧没有 value")?;
+            let _ = writeln!(out, "    ({ticks}, {value:?}),");
+        }
+        let _ = writeln!(out, "];");
+    }
+    Ok(out)
+}
+
+/// 递归展开 `values` 里的 `#minecraft:x`；循环引用直接报错，不让生成器挂住。
+fn expand_tag(
+    name: &str,
+    tags: &BTreeMap<String, Vec<String>>,
+    out: &mut Vec<String>,
+    stack: &mut Vec<String>,
+) -> Result<(), String> {
+    if stack.iter().any(|entry| entry == name) {
+        return Err(format!("标签 {name} 循环引用"));
+    }
+    let values = tags.get(name).ok_or_else(|| format!("缺少标签 {name}"))?;
+    stack.push(name.to_owned());
+    for value in values {
+        if let Some(nested) = value.strip_prefix('#') {
+            expand_tag(nested, tags, out, stack)?;
+        } else if !out.contains(value) {
+            out.push(value.clone());
+        }
+    }
+    stack.pop();
+    Ok(())
+}
+
 fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String> {
     let path = output_dir.join(name);
     fs::write(&path, format!("{HEADER}{content}"))
@@ -854,6 +1208,7 @@ pub mod states;
 pub mod structures;
 pub mod tags;
 pub mod version;
+pub mod villager;
 pub mod worldgen;
 "
     .to_owned()

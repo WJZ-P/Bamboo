@@ -31,4 +31,5 @@ pub mod states;
 pub mod structures;
 pub mod tags;
 pub mod version;
+pub mod villager;
 pub mod worldgen;
