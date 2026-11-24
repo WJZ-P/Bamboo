@@ -242,6 +242,7 @@ mod bench_tests {
             books: BTreeMap::new(),
             entities: Default::default(),
             poi: Default::default(),
+            poi_version_changed: false,
         })
     }
 

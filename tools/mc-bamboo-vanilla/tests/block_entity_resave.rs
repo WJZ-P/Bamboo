@@ -414,6 +414,7 @@ fn resave_after(
         books: Default::default(),
         entities: Default::default(),
         poi: Default::default(),
+        poi_version_changed: false,
     };
     edit(&mut parts);
     let column = mc_bamboo_game::region::RegionColumn::from_parts(parts);
@@ -460,6 +461,7 @@ fn resave_after_with(
         books: Default::default(),
         entities: Default::default(),
         poi: Default::default(),
+        poi_version_changed: false,
     };
     edit(&mut parts);
     let column = mc_bamboo_game::region::RegionColumn::from_parts(parts);

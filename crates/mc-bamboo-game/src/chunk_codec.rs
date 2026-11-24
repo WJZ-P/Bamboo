@@ -167,7 +167,12 @@ impl ChunkCodec for InlineCodec {
         }
         if let Some(bytes) = &packed.poi {
             let poi_tag = parse_named(bytes)?;
-            let poi = decode_poi(&poi_tag);
+            let (poi, version_changed) = decode_poi(&poi_tag);
+            // 官方 `PackedChunk.versionChanged` 会给读到的每个段 `setDirty`；
+            // 这里按区块标脏，让这次读盘后的第一份快照把新版本写回去。
+            if version_changed {
+                decoded.column.set_poi_version_changed(true);
+            }
             decoded.column.set_poi(poi);
         }
         Ok(DecodedColumn {
@@ -179,13 +184,20 @@ impl ChunkCodec for InlineCodec {
 
 /// 读回 `poi/` 的根标签。坏数据按官方 `PackedChunk.parse` 处理：读不出来的
 /// 段就当不存在（`Optional.empty()`），随后 `checkConsistencyWithBlocks` 重建。
-fn decode_poi(tag: &Tag) -> PoiColumn {
-    let Ok(PoiChunk { sections, .. }) = poi_nbt::decode(tag) else {
-        return PoiColumn::default();
+fn decode_poi(tag: &Tag) -> (PoiColumn, bool) {
+    let Ok(PoiChunk {
+        sections,
+        version_changed,
+    }) = poi_nbt::decode(tag)
+    else {
+        return (PoiColumn::default(), true);
     };
-    PoiColumn {
-        sections: sections.into_iter().collect(),
-    }
+    (
+        PoiColumn {
+            sections: sections.into_iter().collect(),
+        },
+        version_changed,
+    )
 }
 
 fn named_bytes(tag: &Tag) -> Vec<u8> {
@@ -226,6 +238,49 @@ mod tests {
             column.column().chunk().block(0, -60, 0),
             back.column.column().chunk().block(0, -60, 0)
         );
+    }
+
+    /// POI 是 `PackedChunk` 的第三格：编出来能读回，票数 / 类型 / 位置不丢；
+    /// 坏 / 旧 `DataVersion` 的 POI 标签不 panic，并让盒子记下要重写。
+    #[test]
+    fn poi_travels_in_the_third_blob_and_round_trips() {
+        let pos = ChunkPos::new(0, 0);
+        let mut column = RegionColumn::from_template();
+        let mut section = mc_bamboo_world::poi::PoiSection::empty();
+        let home = mc_bamboo_data::poi::poi_type_id("home").unwrap();
+        let at = mc_bamboo_core::BlockPos::new(3, -60, 5);
+        section.add(at, home);
+        assert!(section.get_mut(at).unwrap().acquire_ticket());
+        let mut sections = std::collections::BTreeMap::new();
+        sections.insert(-4, section);
+        column.set_poi(PoiColumn { sections });
+
+        let codec = InlineCodec;
+        let packed = codec.encode(pos, &column).unwrap();
+        assert!(packed.poi.is_some());
+        let wire = packed.pack();
+        let back = codec
+            .decode(pos, &PackedChunk::unpack(&wire).unwrap())
+            .unwrap();
+        assert!(!back.column.poi_version_changed());
+        let section = &back.column.poi().sections[&-4];
+        assert_eq!(section.get(at).unwrap().kind, home);
+        assert_eq!(section.get(at).unwrap().free_tickets, 0, "扣掉的票要带回");
+
+        // 旧版本：读回来照样有记录，并标记要按新版本重写。
+        let mut old = PackedChunk::unpack(&wire).unwrap();
+        let mut tag = parse_named(old.poi.as_deref().unwrap()).unwrap();
+        if let Tag::Compound(entries) = &mut tag {
+            for (name, value) in entries {
+                if name == "DataVersion" {
+                    *value = Tag::Int(mc_bamboo_data::version::DATA_VERSION - 1);
+                }
+            }
+        }
+        old.poi = Some(named_bytes(&tag));
+        let back = codec.decode(pos, &old).unwrap();
+        assert!(back.column.poi_version_changed());
+        assert!(back.column.poi().sections[&-4].get(at).is_some());
     }
 
     #[test]

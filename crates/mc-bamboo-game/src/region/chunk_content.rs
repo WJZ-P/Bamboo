@@ -274,6 +274,7 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
         books: BTreeMap::new(),
         entities: ChunkEntities::default(),
         poi: Default::default(),
+        poi_version_changed: false,
     };
 
     // 1. 计划刻。

@@ -83,6 +83,9 @@ pub struct RegionColumn {
     /// 这一列按 y 分好组的 POI 段。和方块一起搬、单独存到 `poi/`；
     /// 改动不进 `ChunkRevision`，不触发区块包重发。
     poi: PoiColumn,
+    /// 盘上的 POI `DataVersion` 不是当前版本：交付时按官方
+    /// `PackedChunk.versionChanged` 给这一列标脏。
+    poi_version_changed: bool,
 }
 
 /// 组装盒子之前攒齐的几张表。`ChunkBlockEntities` / `ChunkRedstone` 没有 `Default`，
@@ -100,6 +103,7 @@ struct Parts {
     entities: Option<ChunkEntities>,
     /// 默认空；`take_columns` 和存盘解码各自填值。
     poi: PoiColumn,
+    poi_version_changed: bool,
 }
 
 impl Parts {
@@ -115,6 +119,7 @@ impl Parts {
             books: self.books,
             entities: self.entities.expect("实体盒子已经取出"),
             poi: self.poi,
+            poi_version_changed: self.poi_version_changed,
         })
     }
 }
@@ -155,6 +160,7 @@ pub struct RegionColumnParts {
     pub books: BTreeMap<BlockPos, Book>,
     pub entities: ChunkEntities,
     pub poi: PoiColumn,
+    pub poi_version_changed: bool,
 }
 
 /// [`RegionColumn::parts`] 的只读视图。
@@ -169,6 +175,7 @@ pub struct RegionColumnView<'a> {
     pub books: &'a BTreeMap<BlockPos, Book>,
     pub entities: &'a ChunkEntities,
     pub poi: &'a PoiColumn,
+    pub poi_version_changed: bool,
 }
 
 /// 判断「原样」用的生成器输出盒子。全局缓存一份，构造时算一次模板光照。
@@ -265,7 +272,8 @@ impl ChunkBundle for RegionColumn {
             && self.command_blocks.is_empty()
             && self.books.is_empty()
             && self.entities.is_empty()
-            && self.poi.is_empty();
+            && self.poi.is_empty()
+            && !self.poi_version_changed;
         let result = upper_empty && self.column.untouched();
         // 调试构建里用逐项比较复核：哪条写路径没换版本号，测试会立刻炸出来。
         debug_assert!(
@@ -299,6 +307,7 @@ impl RegionColumn {
             books: BTreeMap::new(),
             entities: ChunkEntities::default(),
             poi: PoiColumn::default(),
+            poi_version_changed: false,
         }
     }
 
@@ -315,6 +324,7 @@ impl RegionColumn {
             books: parts.books,
             entities: parts.entities,
             poi: parts.poi,
+            poi_version_changed: parts.poi_version_changed,
         })
     }
 
@@ -363,6 +373,7 @@ impl RegionColumn {
         // POI 是盘上的第三份数据；和 pendingBlockEntities 一样，续跑阶段换方块层时
         // 必须原样带回，否则读盘后村庄判定会丢掉所有已登记的 POI。
         self.poi = source.poi;
+        self.poi_version_changed = source.poi_version_changed;
     }
 
     /// 生成期刷怪的结果放进这个盒子（官方 `ProtoChunk.addEntity`）。和读盘的行一样，
@@ -394,7 +405,18 @@ impl RegionColumn {
             books: &self.books,
             entities: &self.entities,
             poi: &self.poi,
+            poi_version_changed: self.poi_version_changed,
         }
+    }
+
+    /// 盘上的 POI `DataVersion` 变了：交付时按 `PackedChunk.versionChanged` 标脏。
+    pub fn set_poi_version_changed(&mut self, changed: bool) {
+        self.poi_version_changed = changed;
+    }
+
+    /// `Region` 放进区块时读这个标志，按区块标脏。
+    pub fn poi_version_changed(&self) -> bool {
+        self.poi_version_changed
     }
 
     /// 读盘解码把这一列的 POI 段装进盒子（同 `adopt_upper_content` 的路径）。
@@ -647,6 +669,7 @@ impl Region {
         self.profiler.start_sub(SubPhase::ReclaimTables);
         for (&pos, part) in &mut parts {
             part.poi = self.poi.take_column(pos);
+            part.poi_version_changed = false;
         }
         self.profiler.end_sub();
 
@@ -702,12 +725,16 @@ impl Region {
             books,
             entities,
             poi,
+            poi_version_changed,
         } = *column;
         self.profiler.start_sub(SubPhase::DeliverStorage);
         self.chunks
             .insert_column(pos, world)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
         self.poi.install_column(pos, poi);
+        if poi_version_changed {
+            self.poi.mark_dirty(pos);
+        }
         self.profiler.end_sub();
 
         self.profiler.start_sub(SubPhase::DeliverTables);

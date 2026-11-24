@@ -1286,6 +1286,53 @@ mod tests {
         assert!(!store.is_close_to_village(pos, 7), "超过 6 直接假");
     }
 
+    /// 岛拆合：每个已加载段的记录（含票数）前后逐项相同、不丢；两边各自只
+    /// 有自己的段，合并后没有重复。
+    #[test]
+    fn split_and_absorb_keep_every_loaded_section_record() {
+        let home = poi::poi_type_id("home").unwrap();
+        let meeting = poi::poi_type_id("meeting").unwrap();
+        let mut store = PoiStore::new();
+        for (chunk, y, z) in [(0, -4, 2), (0, -3, 3), (2, -4, 4), (-3, -4, 5)] {
+            let at = BlockPos::new(chunk * 16 + 1, y * 16 + 1, z);
+            store.add(at, if chunk == 2 { meeting } else { home });
+        }
+        store.take(|_| true, |_, _| true, BlockPos::new(2 * 16 + 1, -63, 4), 4);
+        store.take_dirty_chunks();
+        store.mark_dirty(ChunkPos::new(2, 0));
+        let before = store.snapshot();
+        let moving: BTreeSet<ChunkPos> = [ChunkPos::new(2, 0), ChunkPos::new(-3, 0)]
+            .into_iter()
+            .collect();
+
+        let child = store.split_off(&moving);
+        let parent_sections = store.snapshot();
+        let child_sections = child.snapshot();
+        assert!(
+            parent_sections
+                .iter()
+                .all(|((x, _, _), _)| !moving.contains(&ChunkPos::new(*x, 0)))
+        );
+        assert!(
+            child_sections
+                .iter()
+                .all(|((x, _, _), _)| moving.contains(&ChunkPos::new(*x, 0)))
+        );
+        assert_eq!(parent_sections.len() + child_sections.len(), before.len());
+        assert!(store.dirty_chunks().is_empty(), "脏标记跟着段搬走");
+        assert!(child.dirty_chunks().contains(&ChunkPos::new(2, 0)));
+
+        store.absorb(child);
+        assert_eq!(store.snapshot(), before, "合并后逐项相同");
+
+        // 卸载：先取出（存盘快照读它），再从表里丢掉。
+        let taken = store.take_column(ChunkPos::new(2, 0));
+        assert_eq!(taken.sections.len(), 1);
+        assert!(store.snapshot().iter().all(|((x, _, _), _)| *x != 2));
+        assert!(!store.is_chunk_loaded(ChunkPos::new(2, 0)));
+        assert!(!store.dirty_chunks().contains(&ChunkPos::new(2, 0)));
+    }
+
     #[test]
     fn refresh_keeps_tickets_and_marks_the_section_valid() {
         let mut store = PoiStore::new();
