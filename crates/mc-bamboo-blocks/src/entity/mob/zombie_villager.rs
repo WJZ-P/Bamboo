@@ -258,7 +258,7 @@ pub fn start_converting(mob: &mut Mob, player: Option<[u8; 16]>, time: i32, diff
 /// Per-tick conversion progress: with `nextFloat() < 0.01`, scan the 9×9×9 box
 /// around the mob for up to 14 tagged blocks. Each tagged block draws one
 /// `nextFloat() < 0.3` and adds one extra tick of progress.
-pub fn conversion_progress(me: &mut Entity, mob: &Mob, view: &dyn BlockView) -> i32 {
+pub fn conversion_progress(me: &mut Entity, view: &dyn BlockView) -> i32 {
     let mut progress = 1;
     if me.random.next_float() >= 0.01 {
         return progress;
@@ -277,7 +277,7 @@ pub fn conversion_progress(me: &mut Entity, mob: &Mob, view: &dyn BlockView) -> 
                     break 'outer;
                 }
                 let state = view.block_state(BlockPos::new(x, y, z));
-                if is_curing_block(state, mob) {
+                if is_curing_block(state) {
                     if me.random.next_float() < 0.3 {
                         progress += 1;
                     }
@@ -292,7 +292,7 @@ pub fn conversion_progress(me: &mut Entity, mob: &Mob, view: &dyn BlockView) -> 
 /// `#speeds_up_zombie_villager_curing`：铁栏杆和床。
 ///
 /// `#speeds_up_zombie_villager_curing`: iron bars and beds.
-fn is_curing_block(state: BlockState, _mob: &Mob) -> bool {
+fn is_curing_block(state: BlockState) -> bool {
     state.is_tagged(mc_bamboo_data::tags::block_tags::SPEEDS_UP_ZOMBIE_VILLAGER_CURING)
 }
 
@@ -307,7 +307,7 @@ pub fn tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     {
         return;
     }
-    let progress = conversion_progress(me, mob, ctx.blocks());
+    let progress = conversion_progress(me, ctx.blocks());
     mob.zombie_villager.conversion_time -= progress;
     if mob.zombie_villager.conversion_time > 0 {
         return;
@@ -322,19 +322,6 @@ pub fn tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         me,
     );
     me.discard();
-}
-
-/// `handleEntityEvent(16)` 的客户端音高取两次随机数；服务端只消费实体随机数
-/// （客户端由协议层自己算），这里把两次取数补上以保住种子。
-///
-/// `handleEntityEvent(16)` draws two client-side pitch randoms; the server keeps
-/// the entity random in step by consuming both.
-pub fn play_cure_sound(me: &mut Entity, mob: &Mob) {
-    if mob.silent {
-        return;
-    }
-    let _ = me.random.next_float();
-    let _ = me.random.next_float();
 }
 
 /// 完成转化后给新村民挂 200 刻反胃并重建大脑（`Villager.refreshBrain`）。
