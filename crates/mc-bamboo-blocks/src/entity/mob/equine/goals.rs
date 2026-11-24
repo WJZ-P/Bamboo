@@ -180,6 +180,9 @@ pub(in crate::entity::mob) fn targets(kind: MobType) -> GoalSelector {
                 interval: reduced_tick_delay(16),
                 unseen_ticks: 0,
                 found: None,
+                // `LlamaAttackWolfGoal(16, false, true, selector)`：`mustSee=false`。
+                // `LlamaAttackWolfGoal(16, false, true, selector)`: `mustSee=false`.
+                must_see: false,
             },
         ),
     ])

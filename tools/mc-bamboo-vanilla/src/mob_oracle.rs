@@ -35,6 +35,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod attack_target;
 mod bat;
 mod bee;
 mod bee_ai;
@@ -154,6 +155,7 @@ enum Line {
     VillagerSpawn(villager::VillagerSpawnCase),
     VillagerSave(villager::VillagerSaveCase),
     VillagerDeath(villager::VillagerDeathCase),
+    AttackTarget(Box<attack_target::AttackTargetCase>),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -1549,6 +1551,7 @@ impl Report {
                 Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
                 Line::VillagerSave(case) => self.replay_villager_save(&case),
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
+                Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),

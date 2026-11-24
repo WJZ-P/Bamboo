@@ -134,17 +134,19 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
     GoalSelector::from_ordered_pairs(goals)
 }
 
-/// `Drowned.addBehaviourGoals` 里的 `targetSelector`。玩家的那一条带 `okTarget` 条件，
-/// 美西螈占位保住顺序。
+/// `Drowned.addBehaviourGoals` 里的 `targetSelector`。玩家那条带 `okTarget` 条件；
+/// 村民 `mustSee=false`，其余目标为真。海龟用 `BABY_ON_LAND_SELECTOR`。
 ///
-/// The `targetSelector` of `Drowned.addBehaviourGoals`. The player entry carries the
-/// `okTarget` condition; the axolotl entry keeps its slot.
+/// The `targetSelector` of `Drowned.addBehaviourGoals`. The player entry carries
+/// `okTarget`; the villager goal has `mustSee=false`, the others `true`. The turtle
+/// goal uses `BABY_ON_LAND_SELECTOR`.
 pub(super) fn targets() -> GoalSelector {
-    let nearest = |kind, interval| Goal::NearestAttackableTarget {
+    let nearest = |kind, must_see| Goal::NearestAttackableTarget {
         kind,
-        interval,
+        interval: super::goals::reduced_tick_delay(10),
         unseen_ticks: 0,
         found: None,
+        must_see,
         light_gate: false,
     };
     GoalSelector::from_ordered_pairs(vec![
@@ -155,26 +157,13 @@ pub(super) fn targets() -> GoalSelector {
                 unseen_ticks: 0,
             },
         ),
-        (
-            2,
-            nearest(TargetType::Player, super::goals::reduced_tick_delay(10)),
-        ),
-        (
-            3,
-            nearest(TargetType::Villager, super::goals::reduced_tick_delay(10)),
-        ),
-        (
-            3,
-            nearest(TargetType::IronGolem, super::goals::reduced_tick_delay(10)),
-        ),
-        (
-            3,
-            nearest(TargetType::Axolotl, super::goals::reduced_tick_delay(10)),
-        ),
-        (
-            5,
-            nearest(TargetType::Turtle, super::goals::reduced_tick_delay(10)),
-        ),
+        (2, nearest(TargetType::Player, true)),
+        (3, nearest(TargetType::Villager, false)),
+        (3, nearest(TargetType::IronGolem, true)),
+        (3, nearest(TargetType::Axolotl, true)),
+        // `Turtle.BABY_ON_LAND_SELECTOR`；`mustSee=true`。
+        // `Turtle.BABY_ON_LAND_SELECTOR`, with `mustSee=true`.
+        (5, nearest(TargetType::BabyTurtleOnLand, true)),
     ])
 }
 
