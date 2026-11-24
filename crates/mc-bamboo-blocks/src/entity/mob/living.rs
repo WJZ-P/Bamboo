@@ -2987,7 +2987,14 @@ pub(crate) fn do_hurt_target(
     if mob.mob_type == super::MobType::Creeper {
         return;
     }
-    let amount = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0) as f32;
+    let raw_damage = mob.attributes.value(attribute::ATTACK_DAMAGE).max(0.0);
+    // `Bee.doHurtTarget` 把攻击力先截成整数再转浮点：`(float)(int)getAttributeValue(ATTACK_DAMAGE)`。
+    // `Bee.doHurtTarget` truncates attack damage to `int` before casting to `float`.
+    let amount = if mob.mob_type == super::MobType::Bee {
+        (raw_damage as i32) as f32
+    } else {
+        raw_damage as f32
+    };
     // `Panda.doHurtTarget`：不咬回去的好斗熊猫记下这一口，`PandaHurtByTargetGoal` 会停手。
     // `Panda.doHurtTarget`: a non-aggressive panda records the bite so its goal stops.
     let bites = mob.mob_type == super::MobType::Panda;
@@ -3085,6 +3092,12 @@ pub(crate) fn do_hurt_target(
         if bites && hurt {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
+        // `Bee.doHurtTarget`：只有 `hurtServer` 返回真时才置 `HasStung`、熄怒、播蜇刺声。
+        // `Bee.doHurtTarget`: set `HasStung`, stop anger, and play sting sound only on a landed hit.
+        if hurt && mob.mob_type == super::MobType::Bee {
+            super::bee::after_attack(mob);
+            play_sound(me, mob, "minecraft:entity.bee.sting", 1.0, 1.0);
+        }
     } else if let Some(other) = ctx.other(target) {
         let _ = other;
         ctx.emit(
@@ -3099,9 +3112,10 @@ pub(crate) fn do_hurt_target(
         if bites {
             play_sound(me, mob, "minecraft:entity.panda.bite", 1.0, 1.0);
         }
-    }
-    if mob.mob_type == super::MobType::Bee {
-        super::bee::after_attack(mob);
+        if mob.mob_type == super::MobType::Bee {
+            super::bee::after_attack(mob);
+            play_sound(me, mob, "minecraft:entity.bee.sting", 1.0, 1.0);
+        }
     }
 }
 
