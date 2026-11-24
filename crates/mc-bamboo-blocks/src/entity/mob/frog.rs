@@ -784,18 +784,29 @@ fn tongue_extra_start(cx: &mut Cx) -> bool {
     let Some(target) = cx.memories.entity(AttackTarget) else {
         return false;
     };
+    // 独立寻路阶段：结果回来后按当时选定的目标格继续；等待期间别记进不可达名单。
+    let pending_at = cx.mob.navigation.replay_target();
+    if pending_at.is_none() && cx.mob.navigation.awaiting() {
+        return false;
+    }
     let reachable = sensor::living(cx, target).is_some_and(|view| {
+        let at = pending_at.unwrap_or_else(|| BlockPos::containing(view.position));
         let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
         cx.mob
             .navigation
-            .create_path(
-                cx.ctx.blocks(),
-                &nav,
-                BlockPos::containing(view.position),
-                0,
-            )
-            .is_some_and(|path| path.dist_to_target < 1.75)
+            .set_next_action(super::pathfinding::Action::Inspect(
+                super::pathfinding::Use::FrogTongue,
+            ));
+        let path = cx.mob.navigation.create_path(cx.ctx.blocks(), &nav, at, 0);
+        // 刚挂起请求：这一刻不算「够不到」。
+        if cx.mob.navigation.awaiting() {
+            return true;
+        }
+        path.is_some_and(|path| path.dist_to_target < 1.75)
     });
+    if cx.mob.navigation.awaiting() {
+        return false;
+    }
     if !reachable {
         cx.memories.erase(AttackTarget);
         add_unreachable_target(cx, target);

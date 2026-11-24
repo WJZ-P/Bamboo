@@ -454,6 +454,8 @@ impl BeeGoal {
             Self::Wander => {
                 if let Some(pos) = wander_pos(me, mob, view) {
                     let nav = living::nav_mob(me, mob, view);
+                    mob.navigation
+                        .set_next_action(super::pathfinding::Action::MoveTo { speed: 1.0 });
                     let path = mob
                         .navigation
                         .create_path(view, &nav, BlockPos::containing(pos), 1);
@@ -602,6 +604,13 @@ fn find_nearby_flower(
 ) -> Option<BlockPos> {
     let origin = me.block_position();
     let nav = living::nav_mob(me, mob, view);
+    // 独立寻路阶段：结果回来后直接核对当时选定的花，不再扫描、不重写不可达名单。
+    if let Some(at) = mob.navigation.replay_target() {
+        return mob.navigation.create_path(view, &nav, at, 1).map(|_| at);
+    }
+    if mob.navigation.awaiting() {
+        return None;
+    }
     let mut out = None;
     for distance in 0_i32..=5 {
         for x in -distance..=distance {
@@ -619,9 +628,17 @@ fn find_nearby_flower(
                         p.unreachable_flowers.insert(pos, until.unwrap_or(0));
                         continue;
                     }
+                    mob.navigation
+                        .set_next_action(super::pathfinding::Action::Inspect(
+                            super::pathfinding::Use::BeeFlower,
+                        ));
                     if mob.navigation.create_path(view, &nav, pos, 1).is_some() {
                         out = Some(pos);
                         break;
+                    }
+                    if mob.navigation.awaiting() {
+                        // 请求刚挂起，下一刻按这朵花继续。
+                        return None;
                     }
                     p.unreachable_flowers.insert(pos, now + 600);
                 }
@@ -720,7 +737,15 @@ fn hive_tick(t: &mut HiveTravel, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
     if closer_than(me, hive, 16.0) {
         let nav = living::nav_mob(me, mob, view);
         let reach = if closer_than(me, hive, 3.0) { 1 } else { 2 };
+        mob.navigation
+            .set_next_action(super::pathfinding::Action::Inspect(
+                super::pathfinding::Use::BeeHive,
+            ));
         let path = mob.navigation.create_path(view, &nav, hive, reach);
+        if mob.navigation.awaiting() {
+            // 请求刚挂起，下一刻再判断能不能到；等待期间沿旧路走。
+            return;
+        }
         let reached = path.is_some();
         let _ = mob.navigation.move_to_path(view, &nav, path, 1.0);
         if !reached {

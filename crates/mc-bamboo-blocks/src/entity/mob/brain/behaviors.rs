@@ -1023,16 +1023,31 @@ fn move_sink_tick(sink: &mut MoveToTargetSink, cx: &mut Cx) {
 ///
 /// `MoveToTargetSink.tryComputePath`.
 fn try_compute_path(sink: &mut MoveToTargetSink, cx: &mut Cx, walk: WalkTarget) -> bool {
-    let Some(target) = current_block_position(cx, walk.target) else {
+    let Some(mut target) = current_block_position(cx, walk.target) else {
         sink.path = None;
         return false;
     };
+    // 独立寻路阶段：结果回来后按当时选定的点继续；等待期间不做随机绕路。
+    let resuming = cx.mob.navigation.replay_target();
+    if let Some(at) = resuming {
+        target = at;
+    } else if cx.mob.navigation.awaiting() {
+        return false;
+    }
     let nav = living::nav_mob(cx.me, cx.mob, cx.ctx.blocks());
+    cx.mob
+        .navigation
+        .set_next_action(super::super::pathfinding::Action::Inspect(
+            super::super::pathfinding::Use::WalkTarget,
+        ));
     sink.path = cx
         .mob
         .navigation
         .create_path(cx.ctx.blocks(), &nav, target, 0);
     sink.speed = walk.speed;
+    if cx.mob.navigation.awaiting() {
+        return false;
+    }
     if reached_target(cx, walk) {
         cx.memories.erase(CantReachWalkTargetSince);
         return false;
@@ -1046,6 +1061,10 @@ fn try_compute_path(sink: &mut MoveToTargetSink, cx: &mut Cx, walk: WalkTarget) 
     }
     if sink.path.is_some() {
         return true;
+    }
+    if resuming.is_some() {
+        // 刚取回的就是失败结果，下一刻再走随机绕路。
+        return false;
     }
     let toward = Vec3::new(
         f64::from(target.x) + 0.5,

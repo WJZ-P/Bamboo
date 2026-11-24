@@ -65,6 +65,8 @@ pub const MAX_MOB_DISTANCE: usize = 4096;
 pub const MAX_MOB_WAKEUPS_SCALE: usize = mc_bamboo_blocks::entity::mob::throttle::MAX_WAKEUPS_SCALE;
 /// 区块计算池线程数的上限。
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
+/// 独立寻路阶段每岛每刻节点预算的合法上限（只是防配置写坏）。
+pub const MAX_PATHFINDING_BUDGET: u32 = 1 << 20;
 
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
 /// 收到关服请求之后最多再等一个还在跑的岛多久。正常的一刻是几毫秒到几十毫秒，
@@ -124,6 +126,13 @@ pub struct WorldConfig {
     pub mob_sleep_distance: i32,
     /// 每刻唤醒名额的倍率（1 = Paper 的缺省值）。
     pub mob_wakeups_scale: usize,
+    /// 独立寻路阶段（实验，缺省关）：请求挂起一刻，阶段末尾统一去重 / 排优先级 / 按预算算。
+    /// 不是官方游戏规则，不进存档、不同步客户端。
+    pub mob_pathfinding_phase: bool,
+    /// 每个岛每刻最多展开的 A* 节点数；0 = 用缺省预算。只在独立寻路阶段打开时有意义。
+    pub mob_pathfinding_budget: u32,
+    /// 寻路失败冷却（Paper 的连续 10 次失败后 40 刻不再试）。
+    pub mob_pathfinding_fail_cooldown: bool,
     /// 红石缓存（实验）：结果和官方逐位一致，对大型红石电路有效。默认关。
     pub redstone_cache: bool,
     /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
@@ -217,6 +226,9 @@ impl Default for WorldConfig {
             mob_throttle_distance: 0,
             mob_sleep_distance: 0,
             mob_wakeups_scale: 1,
+            mob_pathfinding_phase: false,
+            mob_pathfinding_budget: 0,
+            mob_pathfinding_fail_cooldown: false,
             redstone_cache: false,
             chunk_worker_threads: 0,
             worldgen_cache: crate::worldgen_cache::WorldgenCacheSettings::default(),
@@ -717,6 +729,10 @@ impl World {
             config.mob_sleep_distance.clamp(0, MAX_MOB_DISTANCE as i32);
         world.islands.region.mob_wakeups_scale =
             config.mob_wakeups_scale.min(MAX_MOB_WAKEUPS_SCALE);
+        world.islands.region.mob_pathfinding_phase = config.mob_pathfinding_phase;
+        world.islands.region.mob_pathfinding_budget =
+            config.mob_pathfinding_budget.min(MAX_PATHFINDING_BUDGET);
+        world.islands.region.mob_pathfinding_fail_cooldown = config.mob_pathfinding_fail_cooldown;
         // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
         world.master.host.set_world_gen_config(world_gen.clone());
         crate::worldgen_cache::configure(config.worldgen_cache);

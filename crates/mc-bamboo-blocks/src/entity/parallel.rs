@@ -19,7 +19,7 @@ use crate::{
         Entity, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
         ctx::{self, BlockView, Command, CommandBuffer, EntityCtx, ThrottlePlan},
         mob::throttle,
-        store::section_range,
+        store::{KindState, section_range},
     },
     shape::Aabb,
     world::World,
@@ -538,6 +538,8 @@ fn compute_timed(
     } else {
         Vec::new()
     };
+    // 独立寻路阶段：上一刻算好的结果先挂回实体表里的导航，算阶段 tick 时统一处理。
+    entities.begin_path_tick();
     let (uids, rows, starting_state) = entities.take_states_for_tick();
     // 每个实体一份起点的公开数据：tick 要拿它拼成完整 `Entity`。这是唯一必需的
     // 克隆；别的实体看到的值直接引用表里那一份不变的快照。
@@ -611,6 +613,8 @@ fn compute_timed(
     crate::entity::mob::timing::imp::flush_counters();
     times.compute = compute_start.elapsed();
 
+    run_pathfinding_phase(blocks, entities, &uids, &mut results, executor);
+
     (
         Computed {
             uids,
@@ -620,6 +624,87 @@ fn compute_timed(
         },
         clone_start.elapsed(),
     )
+}
+
+/// 独立寻路阶段（并行驱动）：从算阶段的实体状态里收请求，去重、排优先级、
+/// 按节点预算挑出后分给线程，结果按固定顺序汇总。开关关着时什么都不做。
+///
+/// The pathfinding phase in the parallel driver: collect requests from the
+/// computed states, deduplicate and rank them, split the selected searches across
+/// workers, and merge the results in fixed order. A no-op while the switch is off.
+fn run_pathfinding_phase(
+    blocks: &(dyn BlockView + Sync),
+    entities: &mut EntityStore,
+    uids: &[EntityUid],
+    results: &mut [RowResult],
+    executor: &dyn Executor,
+) {
+    use crate::entity::mob::pathfinding;
+    let config = pathfinding::Config::of(&blocks.block_game_rules());
+    if !config.enabled {
+        return;
+    }
+    let now = blocks.game_time();
+    let mut requests = Vec::new();
+    for (index, result) in results.iter_mut().enumerate() {
+        let Some(state) = result.state.as_mut() else {
+            continue;
+        };
+        let KindState::Mob(mob) = &mut state.kind else {
+            continue;
+        };
+        let Some(request) = mob.navigation.pending_request.take() else {
+            continue;
+        };
+        requests.push(pathfinding::Pending::new(
+            uids[index],
+            request,
+            now,
+            mob.target.is_some(),
+            mob.target.unwrap_or(-1),
+        ));
+    }
+    requests.sort_by_key(|pending| (pending.uid, pending.local_serial));
+    let mut players = Vec::new();
+    blocks.for_each_player(&mut |player| players.push(*player));
+    let groups = entities
+        .pathfinding_mut()
+        .begin(now, config, &players, requests);
+    let count = groups.len();
+    let mut found: Vec<Option<(Option<crate::entity::mob::path::Path>, u64)>> =
+        (0..count).map(|_| None).collect();
+    if count > 0 {
+        let parts = executor.parallelism().max(1).min(count);
+        let chunk = count.div_ceil(parts);
+        let mut left: &mut [Option<(Option<crate::entity::mob::path::Path>, u64)>] = &mut found;
+        let mut start = 0;
+        let mut jobs: Vec<Box<dyn FnOnce() + Send + '_>> = Vec::new();
+        while start < count {
+            let size = chunk.min(count - start);
+            let (head, rest) = std::mem::take(&mut left).split_at_mut(size);
+            left = rest;
+            let selected: Vec<_> = groups[start..start + size]
+                .iter()
+                .map(|group| group[0].request)
+                .collect();
+            jobs.push(Box::new(move || {
+                for (slot, request) in head.iter_mut().zip(selected) {
+                    *slot = Some(crate::entity::mob::path::find_path_with_nodes(
+                        blocks, &request,
+                    ));
+                }
+            }));
+            start += size;
+        }
+        executor.run(jobs);
+    }
+    let results: Vec<_> = found
+        .into_iter()
+        .map(|result| result.unwrap_or((None, 0)))
+        .collect();
+    entities
+        .pathfinding_mut()
+        .finish(now, config, groups, results);
 }
 
 /// 一个任务里的所有实体按顺序算完；任务之间互不相交。

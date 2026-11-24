@@ -374,6 +374,11 @@ impl ServerSettings {
             mob_throttle_distance: self.mob_throttle_distance,
             mob_sleep_distance: self.mob_sleep_distance,
             mob_wakeups_scale: self.mob_wakeups_scale as usize,
+            // 寻路阶段三项还没进桌面界面，先按精确模式（关）。
+            // The pathfinding phase knobs are not in the desktop UI yet; keep them off.
+            mob_pathfinding_phase: defaults.mob_pathfinding_phase,
+            mob_pathfinding_budget: defaults.mob_pathfinding_budget,
+            mob_pathfinding_fail_cooldown: defaults.mob_pathfinding_fail_cooldown,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
             worldgen_cache: WorldgenCacheSettings {

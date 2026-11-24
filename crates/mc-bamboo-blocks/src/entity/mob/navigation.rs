@@ -10,7 +10,10 @@
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{PathType, tags::block_tags, tags::fluid_tags};
 
-use super::path::{EvaluatorFlags, Path, PathMob, PathRequest, find_path, max_y};
+use super::{
+    path::{EvaluatorFlags, Path, PathMob, PathRequest, find_path, max_y},
+    pathfinding::{self, Action, NavRequest, Replay},
+};
 use crate::{entity::ctx::BlockView, shape::CollisionContext};
 
 /// 导航要看的生物状态，每次调用前从生物身上拍一份。
@@ -63,6 +66,18 @@ pub struct Navigation {
     pub wall_climber: bool,
     /// `WallClimberNavigation.pathToPosition`。
     pub path_to_position: Option<BlockPos>,
+    /// 独立寻路阶段（开关打开时）的挂起请求 / 下一刻结果 / 待办动作。
+    /// 三样都只在开关打开时读写，缺省精确模式下恒为空，不存档、不同步。
+    pub pending_request: Option<NavRequest>,
+    pub replay: Option<Replay>,
+    pub next_action: Option<Action>,
+    /// 每只生物自己的请求序号；和 uid 一起组成全岛唯一序号。
+    pub request_serial: u32,
+    /// `stop()` 作废到哪个序号为止：小于等于它的结果到达时直接丢掉。
+    ///
+    /// Results at or below this serial are dropped: the request was cancelled by
+    /// [`Navigation::stop`].
+    pub stop_serial: u32,
 }
 
 impl Navigation {
@@ -92,6 +107,11 @@ impl Navigation {
             required_path_length: 16.0,
             wall_climber: false,
             path_to_position: None,
+            pending_request: None,
+            replay: None,
+            next_action: None,
+            request_serial: 0,
+            stop_serial: 0,
         }
     }
 
@@ -116,6 +136,11 @@ impl Navigation {
 
     pub fn stop(&mut self) {
         self.path = None;
+        // 挂起的请求和还没取走的结果一起作废；结果到达时按序号丢掉。
+        self.pending_request = None;
+        self.replay = None;
+        self.next_action = None;
+        self.stop_serial = self.request_serial;
     }
 
     pub fn can_float(&self) -> bool {
@@ -150,7 +175,14 @@ impl Navigation {
 
     /// `moveTo(x, y, z, speed)`。
     pub fn move_to(&mut self, view: &dyn BlockView, mob: &NavMob, at: Vec3, speed: f64) -> bool {
+        // 开关打开时，这条动作随请求一起挂起；下一刻结果到了才真正开始走。
+        if pathfinding::Config::of(&view.block_game_rules()).enabled {
+            self.next_action = Some(Action::MoveTo { speed });
+        }
         let path = self.create_path(view, mob, BlockPos::containing(at), 1);
+        if path.is_some() {
+            self.next_action = None;
+        }
         self.move_to_path(view, mob, path, speed)
     }
 
@@ -172,7 +204,13 @@ impl Navigation {
         // three-argument form is the base one: a null path returns false and keeps the
         // speed. Spider goals (`MeleeAttackGoal.tick`) only call this form, and
         // `createPath` still records the destination block.
+        if pathfinding::Config::of(&view.block_game_rules()).enabled {
+            self.next_action = Some(Action::MoveToEntity { speed });
+        }
         let path = self.create_path(view, mob, BlockPos::containing(entity_pos), reach);
+        if path.is_some() {
+            self.next_action = None;
+        }
         path.is_some() && self.move_to_path(view, mob, path, speed)
     }
 
@@ -185,6 +223,10 @@ impl Navigation {
         speed: f64,
     ) -> bool {
         let Some(path) = path else {
+            // 独立寻路阶段：请求还挂着，沿旧路走或原地等，别把旧路径清掉。
+            if self.pending_request.is_some() {
+                return false;
+            }
             self.path = None;
             return false;
         };
@@ -289,6 +331,12 @@ impl Navigation {
         if self.flags.amphibious {
             self.cleared_water_malus = true;
         }
+        // 独立寻路阶段打开时，把搜索换成一条挂起请求；下一刻结果到了再由
+        // [`pathfinding::install`] 或下一次 `create_path` 取走。
+        if pathfinding::Config::of(&view.block_game_rules()).enabled {
+            let hint = self.next_action;
+            return self.deferred_path(request, mob, hint);
+        }
         let path = find_path(view, &request);
         if let Some(path) = &path {
             self.target_pos = Some(path.target);
@@ -298,7 +346,87 @@ impl Navigation {
         path
     }
 
-    fn reset_stuck_timeout(&mut self) {
+    /// 独立寻路阶段：把请求挂起，或者取走上一刻已经算好的结果。
+    ///
+    /// 结果的目标点和这次的请求一致才交付；目标换了就丢掉旧结果、重新挂请求。
+    /// 返回 `None` 表示「这一刻还没有路径」，调用点按官方「没有路径」处理。
+    fn deferred_path(
+        &mut self,
+        request: PathRequest,
+        mob: &NavMob,
+        hint: Option<Action>,
+    ) -> Option<Path> {
+        let at = request.target;
+        if let Some(replay) = self.replay.take() {
+            // 检查结果的调用点是在重试同一个检查：目标方块可能已经挪了半格，
+            // 仍然按当时存下的目标点交付；`move_to` 则要求目标一致。
+            let retry = matches!(replay.action, Action::Inspect(_)) && hint == Some(replay.action);
+            if !replay.consumed && (replay.at == at || retry) {
+                if replay.path.is_some() {
+                    self.target_pos = Some(replay.at);
+                    self.reach_range = request.reach_range;
+                    self.reset_stuck_timeout();
+                }
+                return replay.path;
+            }
+        }
+        // 走到这里说明没有可用的结果（目标换了，旧结果已经丢掉），重新挂请求。
+        if self
+            .pending_request
+            .as_ref()
+            .is_some_and(|pending| pending.at == at)
+        {
+            return None;
+        }
+        self.request_serial = self.request_serial.wrapping_add(1);
+        let action = self
+            .next_action
+            .take()
+            .unwrap_or(Action::Inspect(pathfinding::Use::Ignore));
+        self.pending_request = Some(NavRequest {
+            request,
+            nav: *mob,
+            action,
+            at,
+            local_serial: self.request_serial,
+        });
+        None
+    }
+
+    /// 这一刻是不是有一条请求还挂在阶段里（结果还没到）。
+    /// 调用点用它在「等待」时跳过依赖结果的后续语句。
+    pub fn awaiting(&self) -> bool {
+        self.pending_request.is_some()
+    }
+
+    /// 已经交付、还没被取走的结果的目标点。
+    /// 自己挑目标点的调用点用它在下一刻复用原来的目标，不重抽随机数。
+    pub fn replay_target(&self) -> Option<BlockPos> {
+        self.replay
+            .as_ref()
+            .filter(|replay| !replay.consumed)
+            .map(|replay| replay.at)
+    }
+
+    /// 有没有已经交付、还没消费的结果。
+    pub fn has_replay(&self) -> bool {
+        self.replay.as_ref().is_some_and(|replay| !replay.consumed)
+    }
+
+    /// 已经交付、还没消费的结果对应的动作。
+    pub fn replay_action(&self) -> Option<Action> {
+        self.replay
+            .as_ref()
+            .filter(|replay| !replay.consumed)
+            .map(|replay| replay.action)
+    }
+
+    /// 显式登记「结果到了以后做什么」。`move_to*` 自己登记，其余检查结果的调用点用这个。
+    pub fn set_next_action(&mut self, action: Action) {
+        self.next_action = Some(action);
+    }
+
+    pub(crate) fn reset_stuck_timeout(&mut self) {
         self.timeout_cached_node = BlockPos::new(0, 0, 0);
         self.timeout_timer = 0;
         self.timeout_limit = 0.0;
@@ -475,6 +603,9 @@ impl Navigation {
         if mob.game_time - self.time_last_recompute > 20 && self.can_update_path(mob) {
             if let Some(target) = self.target_pos {
                 self.path = None;
+                if pathfinding::Config::of(&view.block_game_rules()).enabled {
+                    self.next_action = Some(Action::Recompute);
+                }
                 self.path = self.create_path(view, mob, target, self.reach_range);
                 self.time_last_recompute = mob.game_time;
                 self.has_delayed_recomputation = false;

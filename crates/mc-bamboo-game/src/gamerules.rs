@@ -157,6 +157,9 @@ impl GameRuleSet {
             mob_throttle_distance: 0,
             mob_sleep_distance: 0,
             mob_wakeups_scale: 1,
+            mob_pathfinding_phase: false,
+            mob_pathfinding_budget: 0,
+            mob_pathfinding_fail_cooldown: false,
         }
     }
 

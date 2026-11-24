@@ -3587,6 +3587,31 @@ impl<'a> World<'a> {
         self.level.remove_entity(id);
     }
 
+    /// 独立寻路阶段的一刻：收请求、去重、排优先级、按节点预算算。开关关着时什么也不做。
+    ///
+    /// One pathfinding-phase step: collect requests, deduplicate, rank, and search
+    /// within the per-island node budget. A no-op while the switch is off.
+    fn run_pathfinding_phase(&mut self) {
+        let config = crate::entity::mob::pathfinding::Config::of(
+            &crate::entity::ctx::BlockView::block_game_rules(self),
+        );
+        if !config.enabled {
+            return;
+        }
+        let now = self.game_time();
+        let requests = self.level.take_path_requests(now);
+        let mut phase = self.level.take_pathfinding();
+        let mut players = Vec::new();
+        crate::entity::ctx::BlockView::for_each_player(self, &mut |player| players.push(*player));
+        {
+            let blocks: &dyn crate::entity::ctx::BlockView = self;
+            phase.run(now, config, &players, requests, &|request| {
+                crate::entity::mob::path::find_path_with_nodes(blocks, request)
+            });
+        }
+        self.level.put_pathfinding(phase);
+    }
+
     /// `EntityTickList.forEach`：一个 tick 里所有实体按 ID 顺序各 tick 一次。
     ///
     /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
@@ -3595,6 +3620,8 @@ impl<'a> World<'a> {
         #[cfg(test)]
         crate::entity::mob::timing::new_tick!();
         self.level.begin_entity_tick();
+        // 独立寻路阶段：上一刻算好的结果先挂回各生物的导航，`tick_mob` 开头统一处理。
+        self.level.begin_path_tick();
         // 降频开着时按 uid 升序算好这一刻的计划。两种驱动共用 `plans_for_tick`，
         // 所以精确和并行的分档、节奏、唤醒名额逐位一致。
         let plans = self.throttle_plans();
@@ -3630,6 +3657,7 @@ impl<'a> World<'a> {
             }
         }
         self.level.end_entity_tick();
+        self.run_pathfinding_phase();
         // 精确驱动只有一个线程；把分段计数并进全局汇总（正式构建是空操作）。
         #[cfg(test)]
         crate::entity::mob::timing::imp::flush_counters();
@@ -3644,6 +3672,7 @@ impl<'a> World<'a> {
     /// The physics comparison needs the position after landing.
     pub fn tick_entities_kept(&mut self) -> Vec<crate::entity::Entity> {
         self.level.begin_entity_tick();
+        self.level.begin_path_tick();
         // 开关打开时和 `tick_entities` 用同一份降频计划；缺省关时是空表。
         let plans = self.throttle_plans();
         let mut after = Vec::new();
@@ -3673,6 +3702,7 @@ impl<'a> World<'a> {
             }
         }
         self.level.end_entity_tick();
+        self.run_pathfinding_phase();
         let spawned: Vec<_> = self
             .level
             .live_entities()

@@ -263,6 +263,8 @@ fn follow_mommy(me: &Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if distance > 4.0 {
         let nav = living::nav_mob(me, mob, ctx.blocks());
         mob.navigation
+            .set_next_action(crate::entity::mob::pathfinding::Action::Discard);
+        mob.navigation
             .create_path(ctx.blocks(), &nav, BlockPos::containing(position), 0);
     }
 }

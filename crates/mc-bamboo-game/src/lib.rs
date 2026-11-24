@@ -168,7 +168,7 @@ pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_mov
 pub use secure_chat::ServiceProfileKeys;
 pub use world::{
     MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET,
-    MAX_MOB_DISTANCE, MAX_MOB_WAKEUPS_SCALE, World, WorldConfig,
+    MAX_MOB_DISTANCE, MAX_MOB_WAKEUPS_SCALE, MAX_PATHFINDING_BUDGET, World, WorldConfig,
 };
 pub use world_options::WorldGenConfig;
 
