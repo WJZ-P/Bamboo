@@ -22,6 +22,10 @@ pub enum AvoidClass {
     Llama,
     Monster,
     PolarBear,
+    /// 蜘蛛躲的犰狳（`AvoidEntityGoal(Armadillo.class, 6.0F, 1.0D, 1.2D, ...)`）。
+    ///
+    /// The armadillos spiders avoid (`AvoidEntityGoal(Armadillo.class, 6.0F, 1.0D, 1.2D, ...)`).
+    Armadillo,
 }
 
 impl AvoidClass {
@@ -33,6 +37,7 @@ impl AvoidClass {
             Self::Monster => kind.is_monster(),
             // 北极熊还没实现。Polar bears are not modelled yet.
             Self::PolarBear => false,
+            Self::Armadillo => kind == MobType::Armadillo,
         }
     }
 }
@@ -61,6 +66,13 @@ pub enum AvoidFilter {
     FoxWolf,
     /// `!isDefending`。
     FoxDefending,
+    /// 蜘蛛的 `predicateOnAvoidEntity`：`!armadillo.isScared()`，即只躲 `IDLE` 状态的
+    /// 犰狳，缩成球（`SCARED` / `ROLLING` / `UNROLLING`）的不躲。
+    ///
+    /// The spider's `predicateOnAvoidEntity`: `!armadillo.isScared()`, so it flees
+    /// only `IDLE` armadillos and ignores rolled-up ones (`SCARED` / `ROLLING` /
+    /// `UNROLLING`).
+    ArmadilloNotScared,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +236,7 @@ impl AvoidEntity {
                     alive: public.is_alive(),
                     tame: public.tame_flags & super::tame::FLAG_TAME != 0,
                     llama_strength: public.equine.map_or(0, |equine| equine.strength),
+                    armadillo_state: public.armadillo_state,
                 }
                 .into(),
             );
@@ -264,6 +277,7 @@ impl AvoidEntity {
                 eye,
                 alive,
                 tame,
+                armadillo_state,
                 ..
             } => {
                 if !alive {
@@ -278,6 +292,13 @@ impl AvoidEntity {
                     self.filter,
                     AvoidFilter::FoxWolf | AvoidFilter::FoxDefending
                 ) && mob.fox.is_defending()
+                {
+                    return false;
+                }
+                // 蜘蛛的 `!isScared()`：`IDLE` 才躲，缩成球的不躲。
+                // The spider's `!isScared()`: only `IDLE` is avoided, not rolled-up states.
+                if self.filter == AvoidFilter::ArmadilloNotScared
+                    && armadillo_state != super::armadillo::State::Idle.id()
                 {
                     return false;
                 }
@@ -302,6 +323,10 @@ enum Candidate {
         alive: bool,
         tame: bool,
         llama_strength: i32,
+        /// `MobPublic.armadillo_state`（`ArmadilloState` 的网络 ID），蜘蛛用。
+        ///
+        /// `MobPublic.armadillo_state` (the `ArmadilloState` network id), used by spiders.
+        armadillo_state: i32,
     },
 }
 
@@ -364,4 +389,36 @@ fn current_position(ctx: &dyn EntityCtx, uid: EntityUid) -> Option<Vec3> {
         return Some(player.position);
     }
     ctx.other(uid).map(|other| other.position)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 蜘蛛的 `avoidClass` 只认犰狳。
+    ///
+    /// The spider's `avoidClass` is armadillos only.
+    #[test]
+    fn armadillo_avoid_class_matches_only_armadillos() {
+        assert!(AvoidClass::Armadillo.matches(MobType::Armadillo));
+        for kind in [MobType::Cow, MobType::Wolf, MobType::Spider] {
+            assert!(!AvoidClass::Armadillo.matches(kind));
+        }
+    }
+
+    /// 蜘蛛的 `!isScared()` 等价于「状态为 `IDLE`」：照字节码只躲 `IDLE`，
+    /// 缩成球的三种状态（`ROLLING` / `SCARED` / `UNROLLING`）都不躲。
+    ///
+    /// The spider's `!isScared()` means "state is `IDLE`": per bytecode only
+    /// `IDLE` is avoided, not the rolled-up states (`ROLLING` / `SCARED` /
+    /// `UNROLLING`).
+    #[test]
+    fn idle_is_the_only_state_a_spider_avoids() {
+        use super::super::armadillo::{State, is_scared};
+        for state in [State::Idle, State::Rolling, State::Scared, State::Unrolling] {
+            let mut armadillo = Mob::new(MobType::Armadillo);
+            armadillo.armadillo.state = state;
+            assert_eq!(!is_scared(&armadillo), state == State::Idle, "{state:?}");
+        }
+    }
 }
