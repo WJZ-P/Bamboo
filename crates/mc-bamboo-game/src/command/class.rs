@@ -33,7 +33,7 @@ pub(crate) enum CommandClass {
 }
 
 /// 4.4 的表：51 个顶层字面量各属哪一类（别名单列），加上后来接入的
-/// `/summon`、`/kill`、`/execute`、`/data`、`/experience` 和 `/xp`。
+/// `/summon`、`/kill`、`/ride`、`/execute`、`/data`、`/experience` 和 `/xp`。
 ///
 /// The 4.4 table: the class of each of the 51 root literals (aliases listed),
 /// plus `/summon`, `/kill`, `/execute`, `/data`, `/experience` and `/xp`.
@@ -85,6 +85,7 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("loot", CommandClass::Global),
     ("random", CommandClass::Global),
     ("kill", CommandClass::Island),
+    ("ride", CommandClass::Island),
     ("damage", CommandClass::Island),
     ("effect", CommandClass::Island),
     ("teleport", CommandClass::CrossIsland),
@@ -180,6 +181,7 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("bossbar", CommandScope::Players),
     ("random", CommandScope::Players),
     ("kill", CommandScope::World),
+    ("ride", CommandScope::World),
     ("damage", CommandScope::World),
     ("effect", CommandScope::World),
     ("teleport", CommandScope::World),
@@ -252,10 +254,10 @@ mod tests {
             };
             roots.push((name.clone(), child));
         }
-        // 4.4 的 51 个加上 `/summon`、`/kill`、`/damage`、`/effect`、`/execute`、
-        // `/data`、`/experience`、`/xp` 和 `/advancement`。
-        assert_eq!(roots.len(), 60);
-        assert_eq!(CLASSES.len(), 60);
+        // 4.4 的 51 个加上 `/summon`、`/kill`、`/ride`、`/damage`、`/effect`、
+        // `/execute`、`/data`、`/experience`、`/xp` 和 `/advancement`。
+        assert_eq!(roots.len(), 61);
+        assert_eq!(CLASSES.len(), 61);
         // 每个顶层字面量都定了范围（计划 4.5），不多不少。
         // Every root literal has a scope (plan 4.5), no more and no fewer.
         let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();
