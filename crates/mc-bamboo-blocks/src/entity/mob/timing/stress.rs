@@ -218,6 +218,7 @@ impl Terrain {
 /// 精确驱动的世界：和 `TestLevel` 同一套接口，但高度图 O(1)、带玩家和自然刷怪表。
 struct StressLevel {
     terrain: Terrain,
+    clock: i64,
     random: LevelRandom,
     entities: Entities,
     redstone: RedstoneMemory,
@@ -344,6 +345,9 @@ impl Level for StressLevel {
     fn sky_darken(&self) -> i32 {
         self.terrain.sky_darken
     }
+    fn clock_ticks(&self) -> i64 {
+        self.terrain.base_clock + self.clock
+    }
     fn monsters_burn(&self) -> bool {
         false
     }
@@ -461,6 +465,7 @@ impl BlockSource for StressSource {
 
     fn facts(&self) -> ViewFacts {
         let clock = self.clock.load(std::sync::atomic::Ordering::Relaxed);
+        let world_clock = self.terrain.base_clock + clock;
         ViewFacts {
             min_y: -64,
             max_y: 319,
@@ -470,7 +475,9 @@ impl BlockSource for StressSource {
             sky_darken: self.terrain.sky_darken,
             monsters_burn: false,
             game_time: clock,
-            clock_ticks: self.terrain.base_clock + clock,
+            clock_ticks: world_clock,
+            villager_activity: crate::sky::villager_activity(world_clock),
+            baby_villager_activity: crate::sky::baby_villager_activity(world_clock),
             ..ViewFacts::default()
         }
     }
@@ -1211,8 +1218,17 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
         terrain.rules.mob_pathfinding_phase = true;
         terrain.rules.mob_pathfinding_budget = raw.parse().unwrap_or(0);
     }
+    // A/B 用：`MOB_STRESS_VILLAGER_OPT=1` 打开桌面性能预设推荐的村民降频开关
+    // （被困村民降频 interval=100、wait_trade_lock=true；睡觉村民降频 interval=5）。
+    if std::env::var_os("MOB_STRESS_VILLAGER_OPT").is_some() {
+        terrain.rules.villager_lobotomize = true;
+        terrain.rules.villager_lobotomize_interval = 100;
+        terrain.rules.villager_lobotomize_wait_trade_lock = true;
+        terrain.rules.villager_sleep_brain_interval = 5;
+    }
     let mut level = StressLevel {
         terrain: terrain.clone(),
+        clock: 0,
         random: LevelRandom::new(seed as i64),
         entities: Entities::with_next_id(2),
         redstone: RedstoneMemory::default(),
@@ -1262,6 +1278,12 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
                     if position.x < 4.0 { 1 } else { 2 } + if position.z > 4.0 { 2 } else { 0 };
                 world.with_entity_mut(uid, &mut |entity| {
                     entity.with_mob(|_, mob| mob.target = Some(nearest));
+                });
+            } else if matches!(scene, Scene::Hall100 | Scene::HallN) {
+                // 交易大厅里的村民默认代表「交易已锁定」的成品隔间（xp > 0），
+                // 开关关/开两边设同一初值，只比较降频配置本身。
+                world.with_entity_mut(uid, &mut |entity| {
+                    entity.with_mob(|_, mob| mob.villager.xp = 10);
                 });
             }
         }
@@ -1318,6 +1340,7 @@ fn run_one(scene: Scene, threads: usize, natural: bool, seed: u64, scoped: bool)
         // `MeleeAttackGoal.canUse` 按 `gameTime - lastCanUseCheck >= 20` 调度；
         // 时钟不走的话近战目标永远不启动，寻路就没活干。和真实服务端一样每刻推进。
         ticks.set_time(game_time);
+        level.clock = game_time;
         source
             .0
             .clock
@@ -1669,7 +1692,7 @@ fn mob_stress() {
         })
         .unwrap_or_else(|| THREADS.to_vec());
     println!(
-        "mob-stress: rounds={ROUNDS} warm={} measure={} scenes={} threads={:?} scoped={} max-collisions={} throttle={} pathfinding={}",
+        "mob-stress: rounds={ROUNDS} warm={} measure={} scenes={} threads={:?} scoped={} max-collisions={} throttle={} villager-opt={} pathfinding={}",
         warm_ticks(None),
         measure_ticks(),
         only.as_deref().unwrap_or("all"),
@@ -1677,6 +1700,7 @@ fn mob_stress() {
         scoped,
         std::env::var("MOB_STRESS_MAX_COLLISIONS").unwrap_or_else(|_| "off".to_owned()),
         std::env::var_os("MOB_STRESS_THROTTLE").is_some(),
+        std::env::var_os("MOB_STRESS_VILLAGER_OPT").is_some(),
         std::env::var("MOB_STRESS_PATHFINDING").unwrap_or_else(|_| "off".to_owned())
     );
     println!("uptime: {}", uptime());
@@ -1733,6 +1757,7 @@ fn measure_cramming(scene: Scene, threads: usize, rounds: usize) -> String {
         terrain.rules.max_entity_cramming = BlockGameRules::vanilla().max_entity_cramming;
         let mut level = StressLevel {
             terrain: terrain.clone(),
+            clock: 0,
             random: LevelRandom::new(0x5eed + round as i64),
             entities: Entities::with_next_id(2),
             redstone: RedstoneMemory::default(),
@@ -1850,6 +1875,7 @@ fn villager_stress_scenarios_register_real_pois_and_tick_cleanly() {
 
         let mut level = StressLevel {
             terrain: terrain.clone(),
+            clock: 0,
             random: LevelRandom::new(7),
             entities: Entities::with_next_id(2),
             redstone: RedstoneMemory::default(),
@@ -1880,6 +1906,7 @@ fn villager_stress_scenarios_register_real_pois_and_tick_cleanly() {
         }
         for t in 0..2 {
             ticks.set_time(t);
+            level.clock = t;
             source
                 .0
                 .clock
@@ -1911,6 +1938,7 @@ fn guardian_perf_scenes_tick_cleanly_and_structure_index_is_wired() {
         let (terrain, mobs, _) = scene.build();
         let mut level = StressLevel {
             terrain: terrain.clone(),
+            clock: 0,
             random: LevelRandom::new(7),
             entities: Entities::with_next_id(2),
             redstone: RedstoneMemory::default(),

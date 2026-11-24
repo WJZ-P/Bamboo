@@ -271,6 +271,20 @@ pub trait BlockView {
         crate::sky::monsters_burn(self.clock_ticks())
     }
 
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY`：成年村民当前日程活动。
+    ///
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY`: current scheduled activity for adult villagers.
+    fn villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        crate::sky::villager_activity(self.clock_ticks())
+    }
+
+    /// `EnvironmentAttributes.BABY_VILLAGER_ACTIVITY`：幼年村民当前日程活动。
+    ///
+    /// `EnvironmentAttributes.BABY_VILLAGER_ACTIVITY`: current scheduled activity for baby villagers.
+    fn baby_villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        crate::sky::baby_villager_activity(self.clock_ticks())
+    }
+
     /// POI 查询族，和 [`crate::Level`] 上的同名方法给同一份答案
     /// （精确 / 并行驱动不分叉）。默认没有 POI 数据。
     fn poi_type_at(&self, _pos: BlockPos) -> Option<u8> {
@@ -645,6 +659,14 @@ impl BlockView for World<'_> {
 
     fn sky_darken(&self) -> i32 {
         self.level().sky_darken()
+    }
+
+    fn villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        self.level().villager_activity()
+    }
+
+    fn baby_villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        self.level().baby_villager_activity()
     }
 
     fn difficulty(&self) -> i32 {

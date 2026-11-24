@@ -36,6 +36,14 @@ pub struct ViewFacts {
     /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线求值，
     /// 发布方用 [`crate::sky::monsters_burn`] 从同一个时钟算好。
     pub monsters_burn: bool,
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY` / `BABY_VILLAGER_ACTIVITY`：
+    /// 主控按主世界时钟和 `villager_schedule.json` 关键帧发布给各岛，和 `sky_darken` 走同一条路径。
+    ///
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY` / `BABY_VILLAGER_ACTIVITY`: published
+    /// by the master from the overworld clock and `villager_schedule.json`, on the same
+    /// path as `sky_darken`.
+    pub villager_activity: crate::entity::mob::brain::Activity,
+    pub baby_villager_activity: crate::entity::mob::brain::Activity,
     /// 主世界时钟的整数刻（`getOverworldClockTime()`），区域难度和月相读它。
     pub clock_ticks: i64,
     /// `getSeaLevel()`：噪声主世界 63，超平坦 -63。
@@ -57,6 +65,8 @@ impl Default for ViewFacts {
             game_time: 0,
             weather: BlockWeather::CLEAR,
             monsters_burn: true,
+            villager_activity: crate::sky::villager_activity(0),
+            baby_villager_activity: crate::sky::baby_villager_activity(0),
             clock_ticks: 0,
             sea_level: 63,
         }
@@ -594,6 +604,14 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn monsters_burn(&self) -> bool {
         self.0.facts().monsters_burn
+    }
+
+    fn villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        self.0.facts().villager_activity
+    }
+
+    fn baby_villager_activity(&self) -> crate::entity::mob::brain::Activity {
+        self.0.facts().baby_villager_activity
     }
 
     fn clock_ticks(&self) -> i64 {

@@ -430,6 +430,8 @@ impl Global {
             weather: self.state.weather,
             block_weather: self.state.weather.snapshot(),
             sky_darken: self.sky_darken(),
+            villager_activity: self.villager_activity(),
+            baby_villager_activity: self.baby_villager_activity(),
             sleep_skip: self.sleep_skip,
             world_border: self.world_border.clone(),
             difficulty: self.state.difficulty,
@@ -462,6 +464,22 @@ impl Global {
             weather.thunder_level,
         );
         mc_bamboo_blocks::sky::sky_darken(self.clock.total_ticks, rain, thunder)
+    }
+
+    /// 成年村民当前日程活动（`villager_schedule.json`），和 `sky_darken` 同路径发布给各岛。
+    ///
+    /// Current adult villager scheduled activity (`villager_schedule.json`), published
+    /// to islands along the same path as `sky_darken`.
+    pub(crate) fn villager_activity(&self) -> mc_bamboo_blocks::entity::mob::brain::Activity {
+        mc_bamboo_blocks::sky::villager_activity(self.clock.total_ticks)
+    }
+
+    /// 幼年村民当前日程活动（`villager_schedule.json`），和 `sky_darken` 同路径发布给各岛。
+    ///
+    /// Current baby villager scheduled activity (`villager_schedule.json`), published
+    /// to islands along the same path as `sky_darken`.
+    pub(crate) fn baby_villager_activity(&self) -> mc_bamboo_blocks::entity::mob::brain::Activity {
+        mc_bamboo_blocks::sky::baby_villager_activity(self.clock.total_ticks)
     }
 
     /// 把快照发布给岛。主控每刻在固定的几处发布（开头、边界推进后、天气和时间推进后）；
@@ -782,6 +800,14 @@ pub(crate) struct GlobalView {
     /// every tick. The exact-mode `World`, the parallel entity view and both
     /// drives read this one value.
     pub(crate) sky_darken: i32,
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY` / `BABY_VILLAGER_ACTIVITY`：
+    /// 由主控按主世界时钟和 `villager_schedule.json` 关键帧算出，最多旧一刻，与 `sky_darken` 同路径。
+    ///
+    /// `EnvironmentAttributes.VILLAGER_ACTIVITY` / `BABY_VILLAGER_ACTIVITY`: computed by
+    /// the master from the overworld clock and `villager_schedule.json`, at most one tick
+    /// stale, on the same path as `sky_darken`.
+    pub(crate) villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
+    pub(crate) baby_villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
     /// 主控这一刻决定跳过夜晚；岛在自己一刻开头据此叫醒玩家。
     ///
     /// The master decided to skip the night this tick; islands wake their

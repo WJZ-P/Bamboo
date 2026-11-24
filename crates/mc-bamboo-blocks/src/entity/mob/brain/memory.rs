@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_protocol::components::value::GlobalPos;
 
 use super::super::{DamageSource, MobType};
 use crate::entity::EntityUid;
@@ -76,13 +77,41 @@ pub enum MemoryType {
     PlayDeadTicks,
     HuntingCooldown,
     AttackCoolingDown,
+    /// 村民的记忆：追加在末尾，保持既有种类下标和 `filled()` 顺序不变（总数 49 <= 64，
+    /// 仍落在 `u64` 位掩码里）。带编解码器的进存档：`home` / `job_site` /
+    /// `potential_job_site` / `meeting_point`（`GlobalPos.CODEC`）、`last_worked_at_poi` /
+    /// `last_slept` / `last_woken`（`Codec.LONG`）、`golem_detected_recently`（`Codec.BOOL`）、
+    /// `item_pickup_cooldown_ticks`（`Codec.INT`）；其余不进存档。
+    ///
+    /// Villager memories appended last so existing indices and `filled()` order stay put
+    /// (49 <= 64, fitting `u64` masks). Those with a codec are saved: `home` / `job_site` /
+    /// `potential_job_site` / `meeting_point` (`GlobalPos.CODEC`), `last_worked_at_poi` /
+    /// `last_slept` / `last_woken` (`Codec.LONG`), `golem_detected_recently` (`Codec.BOOL`),
+    /// `item_pickup_cooldown_ticks` (`Codec.INT`); the rest are not saved.
+    Home,
+    JobSite,
+    PotentialJobSite,
+    MeetingPoint,
+    SecondaryJobSite,
+    VisibleVillagerBabies,
+    InteractionTarget,
+    DoorsToClose,
+    NearestBed,
+    NearestHostile,
+    HidingPlace,
+    HeardBellTime,
+    LastWorkedAtPoi,
+    GolemDetectedRecently,
+    LastSlept,
+    LastWoken,
+    ItemPickupCooldownTicks,
 }
 
 impl MemoryType {
     /// 记忆种类的个数，槽表的长度。
     ///
     /// The number of memory types: the length of the slot table.
-    pub const COUNT: usize = 32;
+    pub const COUNT: usize = 49;
 
     /// 全部种类，按枚举顺序。
     ///
@@ -120,6 +149,23 @@ impl MemoryType {
         Self::PlayDeadTicks,
         Self::HuntingCooldown,
         Self::AttackCoolingDown,
+        Self::Home,
+        Self::JobSite,
+        Self::PotentialJobSite,
+        Self::MeetingPoint,
+        Self::SecondaryJobSite,
+        Self::VisibleVillagerBabies,
+        Self::InteractionTarget,
+        Self::DoorsToClose,
+        Self::NearestBed,
+        Self::NearestHostile,
+        Self::HidingPlace,
+        Self::HeardBellTime,
+        Self::LastWorkedAtPoi,
+        Self::GolemDetectedRecently,
+        Self::LastSlept,
+        Self::LastWoken,
+        Self::ItemPickupCooldownTicks,
     ];
 
     /// 官方注册名（不带命名空间）。
@@ -159,6 +205,23 @@ impl MemoryType {
             Self::PlayDeadTicks => "play_dead_ticks",
             Self::HuntingCooldown => "has_hunting_cooldown",
             Self::AttackCoolingDown => "attack_cooling_down",
+            Self::Home => "home",
+            Self::JobSite => "job_site",
+            Self::PotentialJobSite => "potential_job_site",
+            Self::MeetingPoint => "meeting_point",
+            Self::SecondaryJobSite => "secondary_job_site",
+            Self::VisibleVillagerBabies => "visible_villager_babies",
+            Self::InteractionTarget => "interaction_target",
+            Self::DoorsToClose => "doors_to_close",
+            Self::NearestBed => "nearest_bed",
+            Self::NearestHostile => "nearest_hostile",
+            Self::HidingPlace => "hiding_place",
+            Self::HeardBellTime => "heard_bell_time",
+            Self::LastWorkedAtPoi => "last_worked_at_poi",
+            Self::GolemDetectedRecently => "golem_detected_recently",
+            Self::LastSlept => "last_slept",
+            Self::LastWoken => "last_woken",
+            Self::ItemPickupCooldownTicks => "item_pickup_cooldown_ticks",
         }
     }
 
@@ -186,6 +249,15 @@ impl MemoryType {
                 | Self::IsPregnant
                 | Self::PlayDeadTicks
                 | Self::HuntingCooldown
+                | Self::Home
+                | Self::JobSite
+                | Self::PotentialJobSite
+                | Self::MeetingPoint
+                | Self::LastWorkedAtPoi
+                | Self::GolemDetectedRecently
+                | Self::LastSlept
+                | Self::LastWoken
+                | Self::ItemPickupCooldownTicks
         )
     }
 
@@ -383,6 +455,12 @@ pub enum MemoryValue {
     Walk(WalkTarget),
     Look(PositionTracker),
     Damage(DamageSource),
+    /// `GlobalPos`（`home` / `job_site` / `potential_job_site` / `meeting_point` / `hiding_place`）。
+    GlobalPos(GlobalPos),
+    /// `List<GlobalPos>`（`secondary_job_site`）。
+    GlobalPosList(Vec<GlobalPos>),
+    /// `BlockPos`（`nearest_bed`）。
+    BlockPos(BlockPos),
 }
 
 impl MemoryValue {
@@ -391,6 +469,7 @@ impl MemoryValue {
     /// `Brain.isEmptyCollection`: an empty list counts as no value.
     fn is_empty_collection(&self) -> bool {
         matches!(self, Self::Entities(list) if list.is_empty())
+            || matches!(self, Self::GlobalPosList(list) if list.is_empty())
     }
 }
 
@@ -440,7 +519,7 @@ pub struct MemoryMasks {
 /// 一只生物的全部记忆槽。
 ///
 /// One mob's memory slots.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Memories {
     slots: [Slot; MemoryType::COUNT],
     /// 登记过的记忆位。
@@ -449,6 +528,17 @@ pub struct Memories {
     present: u64,
     /// 有值且会过期（`ttl != NEVER_EXPIRE`）的位，`tick` 只遍历这些。
     expiring: u64,
+}
+
+impl Default for Memories {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| Slot::default()),
+            registered: 0,
+            present: 0,
+            expiring: 0,
+        }
+    }
 }
 
 impl Memories {
@@ -684,6 +774,34 @@ impl Memories {
     pub fn int(&self, kind: MemoryType) -> Option<i32> {
         match self.get(kind) {
             Some(MemoryValue::Int(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn long(&self, kind: MemoryType) -> Option<i64> {
+        match self.get(kind) {
+            Some(MemoryValue::Long(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn bool(&self, kind: MemoryType) -> Option<bool> {
+        match self.get(kind) {
+            Some(MemoryValue::Bool(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn global_pos(&self, kind: MemoryType) -> Option<&GlobalPos> {
+        match self.get(kind) {
+            Some(MemoryValue::GlobalPos(pos)) => Some(pos),
+            _ => None,
+        }
+    }
+
+    pub fn block_pos(&self, kind: MemoryType) -> Option<BlockPos> {
+        match self.get(kind) {
+            Some(MemoryValue::BlockPos(pos)) => Some(*pos),
             _ => None,
         }
     }

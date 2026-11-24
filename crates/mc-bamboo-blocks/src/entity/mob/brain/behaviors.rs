@@ -207,6 +207,10 @@ pub enum Kind {
     ///
     /// Axolotl-only behaviours.
     Axolotl(super::super::axolotl::Behavior),
+    /// 村民专属行为与未接通占位。
+    ///
+    /// Villager-specific behaviours and Phase 4+ placeholders.
+    Villager(super::super::villager_ai::Behavior),
 }
 
 impl Kind {
@@ -249,9 +253,16 @@ impl MoveToTargetSink {
     ///
     /// `new MoveToTargetSink()`: 150 to 250 ticks.
     pub fn new(armadillo: bool) -> Self {
+        Self::with_duration(150, 250, armadillo)
+    }
+
+    /// `new MoveToTargetSink(min, max)`：自定义时长范围（幼年村民 `PLAY` 包用 80..120）。
+    ///
+    /// `new MoveToTargetSink(min, max)`: custom duration range (baby villager `PLAY` uses 80..120).
+    pub fn with_duration(min: i32, max: i32, armadillo: bool) -> Self {
         Self {
-            min: 150,
-            max: 250,
+            min,
+            max,
             armadillo,
             remaining_cooldown: 0,
             path: None,
@@ -338,6 +349,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.class(),
             Self::Frog(behavior) => behavior.class(),
             Self::Axolotl(behavior) => behavior.class(),
+            Self::Villager(behavior) => behavior.class(),
         }
     }
 
@@ -372,6 +384,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.required(),
             Self::Frog(behavior) => behavior.required(),
             Self::Axolotl(behavior) => behavior.required(),
+            Self::Villager(behavior) => behavior.required(),
         }
     }
 
@@ -411,6 +424,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.name(),
             Self::Frog(behavior) => behavior.name(),
             Self::Axolotl(behavior) => behavior.name(),
+            Self::Villager(behavior) => behavior.name(),
         }
     }
 
@@ -460,6 +474,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.extra_start(cx),
             Self::Frog(behavior) => behavior.extra_start(cx),
             Self::Axolotl(behavior) => behavior.extra_start(cx),
+            Self::Villager(behavior) => behavior.extra_start(cx),
             _ => true,
         }
     }
@@ -541,6 +556,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.start(cx),
             Self::Frog(behavior) => behavior.start(cx),
             Self::Axolotl(behavior) => behavior.start(cx),
+            Self::Villager(behavior) => behavior.start(cx),
             _ => {}
         }
     }
@@ -575,6 +591,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.can_still_use(cx),
             Self::Frog(behavior) => behavior.can_still_use(cx),
             Self::Axolotl(behavior) => behavior.can_still_use(cx),
+            Self::Villager(behavior) => behavior.can_still_use(cx),
             _ => false,
         }
     }
@@ -692,6 +709,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.tick(cx),
             Self::Frog(behavior) => behavior.tick(cx),
             Self::Axolotl(behavior) => behavior.tick(cx),
+            Self::Villager(behavior) => behavior.tick(cx),
             _ => {}
         }
     }
@@ -722,6 +740,7 @@ impl Kind {
             Self::Goat(behavior) => behavior.stop(cx),
             Self::Frog(behavior) => behavior.stop(cx),
             Self::Axolotl(behavior) => behavior.stop(cx),
+            Self::Villager(behavior) => behavior.stop(cx),
             _ => {}
         }
     }
@@ -839,6 +858,7 @@ impl Kind {
             Self::Armadillo(behavior) => behavior.trigger(cx),
             Self::Frog(behavior) => behavior.trigger(cx),
             Self::Axolotl(behavior) => behavior.trigger(cx),
+            Self::Villager(behavior) => behavior.trigger(cx),
             _ => false,
         }
     }

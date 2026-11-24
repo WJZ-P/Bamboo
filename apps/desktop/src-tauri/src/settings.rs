@@ -19,7 +19,7 @@ use mc_bamboo_game::worldgen_cache::{
 };
 use mc_bamboo_game::{
     MAX_ENTITY_COLLISIONS, MAX_ENTITY_THREADS, MAX_MOB_DISTANCE, MAX_MOB_WAKEUPS_SCALE,
-    MAX_PATHFINDING_BUDGET,
+    MAX_PATHFINDING_BUDGET, MAX_VILLAGER_BRAIN_INTERVAL,
 };
 use mc_bamboo_server::{
     CLIENT_READ_TIMEOUT, ForwardingMode, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE, ServerConfig,
@@ -161,6 +161,14 @@ fn default_islands() -> bool {
     mc_bamboo_game::DEFAULT_ISLANDS
 }
 
+fn default_villager_lobotomize_interval() -> i32 {
+    100
+}
+
+fn default_villager_lobotomize_wait_trade_lock() -> bool {
+    true
+}
+
 /// 界面里可以修改的服务端设置，分成「官方设置」和「Bamboo 优化设置」两组。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -235,6 +243,24 @@ pub struct ServerSettings {
     /// consecutive failures a mob skips path requests for 40 ticks (2 s).
     /// Only meaningful with the pathfinding phase; off by default.
     pub mob_pathfinding_fail_cooldown: bool,
+    /// 被困村民降频（照 Purpur lobotomize，缺省关）：四水平邻格均不可通行时按间隔运行大脑。
+    ///
+    /// Stuck villager brain throttling (Purpur lobotomize, off by default).
+    pub villager_lobotomize: bool,
+    /// 被困村民大脑运行间隔（刻），推荐 100，合法范围 1..=[`MAX_VILLAGER_BRAIN_INTERVAL`]。
+    ///
+    /// Brain tick interval for stuck villagers (ticks); recommended 100.
+    #[serde(default = "default_villager_lobotomize_interval")]
+    pub villager_lobotomize_interval: i32,
+    /// 为真时只对已锁定交易（`xp > 0`）的被困村民降频，缺省 true。
+    ///
+    /// Only throttle stuck villagers whose trades are locked (`xp > 0`); default true.
+    #[serde(default = "default_villager_lobotomize_wait_trade_lock")]
+    pub villager_lobotomize_wait_trade_lock: bool,
+    /// 睡觉村民大脑运行间隔（刻）：0 = 关（精确模式），推荐 5。
+    ///
+    /// Brain tick interval for sleeping villagers (ticks); 0 = off, recommended 5.
+    pub villager_sleep_brain_interval: i32,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。
     pub redstone_cache: bool,
     /// 区块计算池的线程数：0 = 内联（默认），≥ 1 = 常驻后台线程。
@@ -330,6 +356,10 @@ impl ServerSettings {
             mob_pathfinding_phase: bamboo.mob_pathfinding_phase,
             mob_pathfinding_budget: bamboo.mob_pathfinding_budget,
             mob_pathfinding_fail_cooldown: bamboo.mob_pathfinding_fail_cooldown,
+            villager_lobotomize: bamboo.villager_lobotomize,
+            villager_lobotomize_interval: bamboo.villager_lobotomize_interval,
+            villager_lobotomize_wait_trade_lock: bamboo.villager_lobotomize_wait_trade_lock,
+            villager_sleep_brain_interval: bamboo.villager_sleep_brain_interval,
             redstone_cache: bamboo.redstone_cache,
             chunk_worker_threads: u32::try_from(bamboo.chunk_worker_threads).unwrap_or(u32::MAX),
             worldgen_terrain_cache_mb: u32::try_from(bamboo.worldgen_cache.terrain_mb)
@@ -401,6 +431,10 @@ impl ServerSettings {
             mob_pathfinding_phase: self.mob_pathfinding_phase,
             mob_pathfinding_budget: self.mob_pathfinding_budget,
             mob_pathfinding_fail_cooldown: self.mob_pathfinding_fail_cooldown,
+            villager_lobotomize: self.villager_lobotomize,
+            villager_lobotomize_interval: self.villager_lobotomize_interval,
+            villager_lobotomize_wait_trade_lock: self.villager_lobotomize_wait_trade_lock,
+            villager_sleep_brain_interval: self.villager_sleep_brain_interval,
             redstone_cache: self.redstone_cache,
             chunk_worker_threads: self.chunk_worker_threads as usize,
             worldgen_cache: WorldgenCacheSettings {
@@ -535,6 +569,16 @@ impl ServerSettings {
         if self.mob_pathfinding_budget > MAX_PATHFINDING_BUDGET {
             return Err(format!("寻路节点预算不能超过 {MAX_PATHFINDING_BUDGET}"));
         }
+        if !(1..=MAX_VILLAGER_BRAIN_INTERVAL).contains(&self.villager_lobotomize_interval) {
+            return Err(format!(
+                "被困村民大脑间隔必须在 1 到 {MAX_VILLAGER_BRAIN_INTERVAL} 刻之间"
+            ));
+        }
+        if !(0..=MAX_VILLAGER_BRAIN_INTERVAL).contains(&self.villager_sleep_brain_interval) {
+            return Err(format!(
+                "睡觉村民大脑间隔必须在 0 到 {MAX_VILLAGER_BRAIN_INTERVAL} 刻之间"
+            ));
+        }
         if self.deliveries_per_tick as usize > mc_bamboo_game::MAX_MAIL_BUDGET
             || self.reclaims_per_tick as usize > mc_bamboo_game::MAX_MAIL_BUDGET
         {
@@ -575,6 +619,10 @@ const PRESET_MOB_WAKEUPS_SCALE: u32 = 1;
 const PRESET_MOB_PATHFINDING_PHASE: bool = true;
 const PRESET_MOB_PATHFINDING_BUDGET: u32 = 0;
 const PRESET_MOB_PATHFINDING_FAIL_COOLDOWN: bool = true;
+const PRESET_VILLAGER_LOBOTOMIZE: bool = true;
+const PRESET_VILLAGER_LOBOTOMIZE_INTERVAL: i32 = 100;
+const PRESET_VILLAGER_LOBOTOMIZE_WAIT_TRADE_LOCK: bool = true;
+const PRESET_VILLAGER_SLEEP_BRAIN_INTERVAL: i32 = 5;
 
 /// 一键性能模式写进 `bamboo.toml` 的一组值。
 ///
@@ -595,16 +643,20 @@ pub struct PerformancePreset {
     pub mob_pathfinding_phase: bool,
     pub mob_pathfinding_budget: u32,
     pub mob_pathfinding_fail_cooldown: bool,
+    pub villager_lobotomize: bool,
+    pub villager_lobotomize_interval: i32,
+    pub villager_lobotomize_wait_trade_lock: bool,
+    pub villager_sleep_brain_interval: i32,
 }
 
-/// 一键预设写进设置的一项动作，只碰这八个字段。
+/// 一键预设写进设置的一项动作，只碰这十二个字段。
 ///
-/// The single write action of a one-click preset; it touches only the eight
+/// The single write action of a one-click preset; it touches only the twelve
 /// knobs.
 impl PerformancePreset {
-    /// 只改这八项，其它字段原样保留。
+    /// 只改这十二项，其它字段原样保留。
     ///
-    /// Change only the eight knobs and leave every other field untouched.
+    /// Change only the twelve knobs and leave every other field untouched.
     fn apply_to(self, settings: &mut ServerSettings) {
         settings.entity_threads = self.entity_threads;
         settings.max_entity_collisions = self.max_entity_collisions;
@@ -614,6 +666,10 @@ impl PerformancePreset {
         settings.mob_pathfinding_phase = self.mob_pathfinding_phase;
         settings.mob_pathfinding_budget = self.mob_pathfinding_budget;
         settings.mob_pathfinding_fail_cooldown = self.mob_pathfinding_fail_cooldown;
+        settings.villager_lobotomize = self.villager_lobotomize;
+        settings.villager_lobotomize_interval = self.villager_lobotomize_interval;
+        settings.villager_lobotomize_wait_trade_lock = self.villager_lobotomize_wait_trade_lock;
+        settings.villager_sleep_brain_interval = self.villager_sleep_brain_interval;
     }
 }
 
@@ -677,6 +733,10 @@ pub fn performance_presets() -> PerformancePresets {
             mob_pathfinding_phase: PRESET_MOB_PATHFINDING_PHASE,
             mob_pathfinding_budget: PRESET_MOB_PATHFINDING_BUDGET,
             mob_pathfinding_fail_cooldown: PRESET_MOB_PATHFINDING_FAIL_COOLDOWN,
+            villager_lobotomize: PRESET_VILLAGER_LOBOTOMIZE,
+            villager_lobotomize_interval: PRESET_VILLAGER_LOBOTOMIZE_INTERVAL,
+            villager_lobotomize_wait_trade_lock: PRESET_VILLAGER_LOBOTOMIZE_WAIT_TRADE_LOCK,
+            villager_sleep_brain_interval: PRESET_VILLAGER_SLEEP_BRAIN_INTERVAL,
         },
         // 恢复原版：各项全部关闭，唤醒倍率回到 Paper 的缺省 1。
         // Vanilla: every feature off, wake-up scale back to Paper's 1.
@@ -689,6 +749,10 @@ pub fn performance_presets() -> PerformancePresets {
             mob_pathfinding_phase: false,
             mob_pathfinding_budget: 0,
             mob_pathfinding_fail_cooldown: false,
+            villager_lobotomize: false,
+            villager_lobotomize_interval: 100,
+            villager_lobotomize_wait_trade_lock: true,
+            villager_sleep_brain_interval: 0,
         },
     }
 }
@@ -840,6 +904,10 @@ mod tests {
         assert!(!defaults.mob_pathfinding_phase);
         assert_eq!(defaults.mob_pathfinding_budget, 0);
         assert!(!defaults.mob_pathfinding_fail_cooldown);
+        assert!(!defaults.villager_lobotomize);
+        assert_eq!(defaults.villager_lobotomize_interval, 100);
+        assert!(defaults.villager_lobotomize_wait_trade_lock);
+        assert_eq!(defaults.villager_sleep_brain_interval, 0);
         assert_eq!(defaults.deliveries_per_tick, 64);
         assert_eq!(defaults.reclaims_per_tick, 64);
         assert_eq!(defaults.port, 25565);
@@ -879,6 +947,10 @@ mod tests {
             mob_pathfinding_phase: true,
             mob_pathfinding_budget: 8192,
             mob_pathfinding_fail_cooldown: true,
+            villager_lobotomize: true,
+            villager_lobotomize_interval: 120,
+            villager_lobotomize_wait_trade_lock: false,
+            villager_sleep_brain_interval: 5,
             redstone_cache: true,
             chunk_worker_threads: 3,
             worldgen_terrain_cache_mb: 48,
@@ -914,6 +986,10 @@ mod tests {
         assert!(config.mob_pathfinding_phase);
         assert_eq!(config.mob_pathfinding_budget, 8192);
         assert!(config.mob_pathfinding_fail_cooldown);
+        assert!(config.villager_lobotomize);
+        assert_eq!(config.villager_lobotomize_interval, 120);
+        assert!(!config.villager_lobotomize_wait_trade_lock);
+        assert_eq!(config.villager_sleep_brain_interval, 5);
         assert!(config.redstone_cache);
         assert_eq!(config.chunk_worker_threads, 3);
         assert_eq!(config.worldgen_cache.terrain_mb, 48);
@@ -1365,6 +1441,10 @@ mod tests {
         assert!(recommended.mob_pathfinding_phase);
         assert_eq!(recommended.mob_pathfinding_budget, 0);
         assert!(recommended.mob_pathfinding_fail_cooldown);
+        assert!(recommended.villager_lobotomize);
+        assert_eq!(recommended.villager_lobotomize_interval, 100);
+        assert!(recommended.villager_lobotomize_wait_trade_lock);
+        assert_eq!(recommended.villager_sleep_brain_interval, 5);
 
         let settings = merge_performance_preset(&ServerSettings::default(), recommended);
         assert_eq!(settings.validate(), Ok(()));
@@ -1389,6 +1469,19 @@ mod tests {
             bamboo.contains("mob_pathfinding_fail_cooldown = true\n"),
             "{bamboo}"
         );
+        assert!(bamboo.contains("villager_lobotomize = true\n"), "{bamboo}");
+        assert!(
+            bamboo.contains("villager_lobotomize_interval = 100\n"),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains("villager_lobotomize_wait_trade_lock = true\n"),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains("villager_sleep_brain_interval = 5\n"),
+            "{bamboo}"
+        );
 
         // 读回来要和写进去的一致，界面刷新时看到的就是这些值。
         let temp = Temp::new();
@@ -1407,6 +1500,10 @@ mod tests {
         assert!(loaded.mob_pathfinding_phase);
         assert_eq!(loaded.mob_pathfinding_budget, 0);
         assert!(loaded.mob_pathfinding_fail_cooldown);
+        assert!(loaded.villager_lobotomize);
+        assert_eq!(loaded.villager_lobotomize_interval, 100);
+        assert!(loaded.villager_lobotomize_wait_trade_lock);
+        assert_eq!(loaded.villager_sleep_brain_interval, 5);
     }
 
     #[test]
@@ -1422,6 +1519,10 @@ mod tests {
         assert!(!settings.mob_pathfinding_phase);
         assert_eq!(settings.mob_pathfinding_budget, 0);
         assert!(!settings.mob_pathfinding_fail_cooldown);
+        assert!(!settings.villager_lobotomize);
+        assert_eq!(settings.villager_lobotomize_interval, 100);
+        assert!(settings.villager_lobotomize_wait_trade_lock);
+        assert_eq!(settings.villager_sleep_brain_interval, 0);
         assert_eq!(settings.validate(), Ok(()));
 
         let (bamboo, _) = write_settings(&settings);
@@ -1437,6 +1538,19 @@ mod tests {
         assert!(bamboo.contains("mob_pathfinding_budget = 0\n"), "{bamboo}");
         assert!(
             bamboo.contains("mob_pathfinding_fail_cooldown = false\n"),
+            "{bamboo}"
+        );
+        assert!(bamboo.contains("villager_lobotomize = false\n"), "{bamboo}");
+        assert!(
+            bamboo.contains("villager_lobotomize_interval = 100\n"),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains("villager_lobotomize_wait_trade_lock = true\n"),
+            "{bamboo}"
+        );
+        assert!(
+            bamboo.contains("villager_sleep_brain_interval = 0\n"),
             "{bamboo}"
         );
     }

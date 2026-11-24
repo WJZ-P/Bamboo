@@ -13,7 +13,11 @@ use mc_bamboo_data::villager as facts;
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::components::value::GlobalPos;
 
-use super::spawn::{self, SpawnReason};
+use super::{
+    brain::{Brain, memory::MemoryType},
+    navigation::Navigation,
+    spawn::{self, SpawnReason},
+};
 use crate::{
     archive::tag::{self, put},
     entity::Entity,
@@ -46,6 +50,15 @@ pub struct Villager {
     pub offers: Option<Tag>,
     /// `Inventory` 原文。拾取物品在期 3。
     pub inventory: Option<Tag>,
+    /// `LivingEntity.isSleeping()`：睡在床上时为真（睡觉行为第 4 期接入）。
+    ///
+    /// `LivingEntity.isSleeping()`: true while resting in a bed (sleep behaviour lands in phase 4).
+    pub sleeping: bool,
+    /// 当前是否正在与玩家交易（交易系统第 5 期接入；村民降频豁免看它）。
+    ///
+    /// True while trading with a player (trading lands in phase 5; villager throttling
+    /// exempts trading villagers).
+    pub trading: bool,
 }
 
 impl Default for Villager {
@@ -64,6 +77,8 @@ impl Default for Villager {
             gossips: None,
             offers: None,
             inventory: None,
+            sleeping: false,
+            trading: false,
         }
     }
 }
@@ -121,25 +136,41 @@ pub struct VillagerPublic {
 }
 
 impl VillagerPublic {
-    /// 从现有村民状态造一份：只填职业和经验，其余保持占位（缺省即「还没有」）。
+    /// 从当前村民状态、大脑与导航拍一份公开快照。
     ///
-    /// Builds from the current villager state: fills only profession and experience,
-    /// leaving the rest as placeholders (default means "not present yet").
-    pub fn of(villager: &Villager) -> Self {
+    /// Snapshots the public villager state from the villager, brain, and navigation.
+    pub fn of(villager: &Villager, brain: Option<&Brain>, navigation: &Navigation) -> Self {
+        let (job_site, potential_job_site, last_slept) = match brain {
+            Some(brain) => (
+                brain.memories.global_pos(MemoryType::JobSite).cloned(),
+                brain
+                    .memories
+                    .global_pos(MemoryType::PotentialJobSite)
+                    .cloned(),
+                brain.memories.long(MemoryType::LastSlept),
+            ),
+            None => (None, None, None),
+        };
+        let (path_front, path_back) = match navigation.path.as_ref() {
+            Some(path) if !path.nodes.is_empty() => (
+                Some(path.nodes[0].pos()),
+                path.end_node().map(|node| node.pos()),
+            ),
+            _ => (None, None),
+        };
         Self {
             profession: villager.profession,
             experience: villager.xp,
-            ..Self::default()
+            job_site,
+            potential_job_site,
+            path_front,
+            path_back,
+            sleeping: villager.sleeping,
+            last_slept,
+            breedable: false,
         }
     }
 }
-
-/// 官方 `Villager.BRAIN_PROVIDER` 的九个传感器扫描间隔，按注册顺序。
-/// 期 2 只用来消费构造期的随机数，期 3 接到真传感器上后删掉。
-///
-/// The nine sensor scan rates of vanilla `Villager.BRAIN_PROVIDER`, in registration
-/// order. Phase 2 only consumes the constructor draws with them.
-pub(crate) const SENSOR_SCAN_RATES: [i32; 9] = [20, 20, 20, 20, 20, 20, 20, 40, 200];
 
 impl Villager {
     /// `VillagerData` 的完整默认值。
@@ -259,6 +290,13 @@ pub(crate) fn finalize_spawn(
             mob.villager.finalized = true;
         }
         spawn::finalize_villager_ageable(random, mob, group);
+    });
+    // 按当前世界时钟落地初始日程活动（与官方构造函数末尾 `registerBrainGoals` 一致，不抽随机数）。
+    // Apply the initial schedule activity from the world clock (matches `registerBrainGoals`
+    // at the end of the vanilla constructor; draws no RNG).
+    let game_time = world.game_time();
+    entity.with_mob(|_, mob| {
+        super::villager_ai::register_brain_goals(mob, world, game_time);
     });
 }
 
@@ -419,23 +457,37 @@ mod tests {
         assert_eq!(villager.level, 1);
     }
 
-    /// 命令生成的村民尺寸是成年的，且没有大脑（期 2 的范围）。
+    /// 村民默认尺寸是成年的，构造时即带大脑和日程。
     #[test]
-    fn skeleton_has_no_brain() {
+    fn villager_has_brain_and_adult_dimensions() {
         let villager = super::super::Mob::new(MobType::Villager);
-        assert!(villager.brain.is_none());
+        assert!(villager.brain.is_some());
         assert_eq!(villager.dimensions(), (0.6, 1.95));
     }
 
-    /// `VillagerPublic` 挂在 `KindPublic::Mob` 下，只给村民装箱，非村民为 `None`；
-    /// 现阶段只填职业与经验，其余大脑 / 路径 / 睡觉 / 繁殖位保持缺省占位。
+    /// `VillagerPublic` 挂在 `KindPublic::Mob` 下，只给村民装箱，非村民为 `None`，
+    /// 同步大脑中的工作站、上次睡觉刻和睡眠标志。
     #[test]
-    fn villager_public_skeleton_fills_profession_and_experience_only() {
+    fn villager_public_reads_brain_and_state() {
         let farmer = facts::profession_id("minecraft:farmer").unwrap();
+        let job = GlobalPos {
+            dimension: "minecraft:overworld".to_owned(),
+            pos: BlockPos::new(10, 64, 20),
+        };
         let mut entity = Entity::by_mob_type(MobType::Villager, Vec3::new(1.0, 64.0, 2.0));
         entity.with_mob(|_, mob| {
             mob.villager.profession = farmer;
             mob.villager.xp = 42;
+            mob.villager.sleeping = true;
+            let brain = mob.brain.as_mut().expect("villager has brain");
+            brain.memories.set(
+                MemoryType::JobSite,
+                super::super::brain::memory::MemoryValue::GlobalPos(job.clone()),
+            );
+            brain.memories.set(
+                MemoryType::LastSlept,
+                super::super::brain::memory::MemoryValue::Long(900),
+            );
         });
         let row = entity.split();
         let public = row
@@ -445,12 +497,12 @@ mod tests {
             .expect("村民必须带 VillagerPublic");
         assert_eq!(public.profession, farmer);
         assert_eq!(public.experience, 42);
-        assert_eq!(public.job_site, None);
+        assert_eq!(public.job_site, Some(job));
         assert_eq!(public.potential_job_site, None);
         assert_eq!(public.path_front, None);
         assert_eq!(public.path_back, None);
-        assert!(!public.sleeping);
-        assert_eq!(public.last_slept, None);
+        assert!(public.sleeping);
+        assert_eq!(public.last_slept, Some(900));
         assert!(!public.breedable);
 
         let cow = Entity::by_mob_type(MobType::Cow, Vec3::new(1.0, 64.0, 2.0)).split();

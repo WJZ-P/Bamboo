@@ -158,6 +158,7 @@ enum Line {
     VillagerSpawn(villager::VillagerSpawnCase),
     VillagerSave(villager::VillagerSaveCase),
     VillagerDeath(villager::VillagerDeathCase),
+    VillagerBrain(Box<villager::VillagerBrainCase>),
     AttackTarget(Box<attack_target::AttackTargetCase>),
     Guardian(Box<guardian_scene::GuardianCase>),
     Fish(Box<fish::FishCase>),
@@ -894,6 +895,9 @@ struct ZombieFacts {
     bees_stay: Option<bool>,
     /// 热群系 / 下界场景注入的 `SNOW_GOLEM_MELTS`。
     snow_golem_melts: bool,
+    /// 村民日程活动（主世界时钟求值；`None` 时按 `clock` 现场算）。
+    villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
+    baby_villager_activity: Option<mc_bamboo_blocks::entity::mob::brain::Activity>,
 }
 
 /// 给生物穿上带指定附魔的靴子，和官方场景的 `ItemStack.enchant` 一致。
@@ -1231,6 +1235,18 @@ impl Level for MobLevel {
 
     fn monsters_burn(&self) -> bool {
         self.facts.monsters_burn
+    }
+
+    fn villager_activity(&self) -> mc_bamboo_blocks::entity::mob::brain::Activity {
+        self.facts
+            .villager_activity
+            .unwrap_or_else(|| mc_bamboo_blocks::sky::villager_activity(self.facts.clock))
+    }
+
+    fn baby_villager_activity(&self) -> mc_bamboo_blocks::entity::mob::brain::Activity {
+        self.facts
+            .baby_villager_activity
+            .unwrap_or_else(|| mc_bamboo_blocks::sky::baby_villager_activity(self.facts.clock))
     }
 
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
@@ -1664,6 +1680,7 @@ impl Report {
                 Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
                 Line::VillagerSave(case) => self.replay_villager_save(&case),
                 Line::VillagerDeath(case) => self.replay_villager_death(&case),
+                Line::VillagerBrain(case) => self.replay_villager_brain(&case),
                 Line::AttackTarget(case) => self.replay_attack_target(&case),
                 Line::Guardian(case) => self.replay_guardian(&case),
                 Line::Fish(case) => self.replay_fish(&case),
@@ -1820,6 +1837,8 @@ impl Report {
                 can_see_sky: case.monsters_burn,
                 covered_sky_pos: None,
                 snow_golem_melts: false,
+                villager_activity: None,
+                baby_villager_activity: None,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
                 bright_outside: case.bright_outside || !zombie_style(&case.name),

@@ -63,6 +63,9 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
     /// `Level.getSkyDarken()`：这一刻由全局快照算好的天色变暗值。
     pub(crate) sky_darken: i32,
+    /// 村民 / 幼年村民日程活动快照，和 `sky_darken` 一同从 `GlobalView` 读入。
+    pub(crate) villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
+    pub(crate) baby_villager_activity: mc_bamboo_blocks::entity::mob::brain::Activity,
     /// `getOverworldClockTime()`：主世界时钟的整数刻，`MONSTERS_BURN` 和区域难度读它。
     pub(crate) clock_ticks: i64,
     /// `WorldGenLevel.getSeed()`：世界种子，史莱姆区块读它。
@@ -475,6 +478,14 @@ impl Level for RegionLevel<'_> {
     /// 并行的 `SourceView` 都读这一份。
     fn sky_darken(&self) -> i32 {
         self.sky_darken
+    }
+
+    fn villager_activity(&self) -> mc_bamboo_blocks::entity::mob::brain::Activity {
+        self.villager_activity
+    }
+
+    fn baby_villager_activity(&self) -> mc_bamboo_blocks::entity::mob::brain::Activity {
+        self.baby_villager_activity
     }
 
     /// `getDifficulty().getId()`：权威副本在 `GlobalView`，这里读每刻发布的快照。

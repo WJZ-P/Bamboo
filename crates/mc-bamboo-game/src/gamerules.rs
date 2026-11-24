@@ -160,6 +160,10 @@ impl GameRuleSet {
             mob_pathfinding_phase: false,
             mob_pathfinding_budget: 0,
             mob_pathfinding_fail_cooldown: false,
+            villager_lobotomize: false,
+            villager_lobotomize_interval: 100,
+            villager_lobotomize_wait_trade_lock: true,
+            villager_sleep_brain_interval: 0,
         }
     }
 
