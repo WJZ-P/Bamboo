@@ -299,6 +299,10 @@ public final class Extractor {
             root.add("heightmaps", heightmaps());
             root.add("soundTables", new SoundTables().build());
             root.add("timelines", dataFiles(resources, "timeline"));
+            root.add("tradeSets", dataFiles(resources, "trade_set"));
+            root.add("villagerTrades", dataFiles(resources, "villager_trade"));
+            root.add("villagerTradeTags", dataFiles(resources, "tags/villager_trade"));
+            root.add("villagerFacts", villagerFacts(layers.compositeAccess()));
             root.add("advancements", dataFiles(resources, "advancement"));
             root.add("lootTables", dataFiles(resources, "loot_table"));
             root.add("lootPredicates", dataFiles(resources, "predicate"));
@@ -513,6 +517,128 @@ public final class Extractor {
      *
      * <p>战利品表不是注册表，走官方加载流程读不到，只能像数据包加载器那样按目录读文件。
      */
+    /**
+     * 村民的注册表事实：职业的工作站谓词、想捡的物品、二级工作站、每级交易表，
+     * 群系 → 品种、八卦常量、三个元数据下标和序列化器 ID。
+     *
+     * <p>谓词不是数据，只能对注册过的 POI 类型逐个求值后展开成名字表；职业的名字按
+     * 注册表 ID 排列，后续所有表都按 ID 建，不依赖哈希顺序。
+     */
+    private static JsonObject villagerFacts(HolderLookup.Provider registries) throws ReflectiveOperationException {
+        JsonObject out = new JsonObject();
+        var professions = net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION;
+        var poiTypes = net.minecraft.core.registries.BuiltInRegistries.POINT_OF_INTEREST_TYPE;
+        List<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> pois = new ArrayList<>();
+        for (int id = 0; id < poiTypes.size(); id++) {
+            pois.add(poiTypes.get(id).orElseThrow());
+        }
+        JsonArray professionRows = new JsonArray();
+        for (int id = 0; id < professions.size(); id++) {
+            var profession = professions.byId(id);
+            JsonObject row = new JsonObject();
+            row.addProperty("name", professions.getKey(profession).toString());
+            JsonArray held = new JsonArray();
+            JsonArray acquirable = new JsonArray();
+            for (Holder<net.minecraft.world.entity.ai.village.poi.PoiType> poi : pois) {
+                if (profession.heldJobSite().test(poi)) held.add(poiTypes.getKey(poi.value()).toString());
+                if (profession.acquirableJobSite().test(poi)) acquirable.add(poiTypes.getKey(poi.value()).toString());
+            }
+            row.add("heldJobSite", held);
+            row.add("acquirableJobSite", acquirable);
+            JsonArray requested = new JsonArray();
+            for (var item : profession.requestedItems()) {
+                requested.add(net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(item).toString());
+            }
+            row.add("requestedItems", requested);
+            JsonArray secondary = new JsonArray();
+            for (var block : profession.secondaryPoi()) {
+                secondary.add(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block).toString());
+            }
+            row.add("secondaryPoi", secondary);
+            JsonObject trades = new JsonObject();
+            for (int level = 1; level <= 5; level++) {
+                var key = profession.getTrades(level);
+                trades.addProperty(Integer.toString(level), key == null ? "" : key.identifier().toString());
+            }
+            row.add("tradeSetsByLevel", trades);
+            professionRows.add(row);
+        }
+        out.add("professions", professionRows);
+        // `VillagerType.BY_BIOME` 是私有静态 Map，按群系名字排序导出。
+        @SuppressWarnings("unchecked")
+        Map<net.minecraft.resources.ResourceKey<net.minecraft.world.level.biome.Biome>,
+                net.minecraft.resources.ResourceKey<net.minecraft.world.entity.npc.villager.VillagerType>> byBiome =
+                (Map<net.minecraft.resources.ResourceKey<net.minecraft.world.level.biome.Biome>,
+                        net.minecraft.resources.ResourceKey<net.minecraft.world.entity.npc.villager.VillagerType>>)
+                        readField(net.minecraft.world.entity.npc.villager.VillagerType.class, "BY_BIOME", null);
+        JsonObject biomes = new JsonObject();
+        List<String> keys = new ArrayList<>();
+        for (var key : byBiome.keySet()) keys.add(key.identifier().toString());
+        keys.sort(String::compareTo);
+        for (String key : keys) {
+            var value = byBiome.get(net.minecraft.resources.ResourceKey.create(
+                    net.minecraft.core.registries.Registries.BIOME,
+                    net.minecraft.resources.Identifier.parse(key)));
+            biomes.addProperty(key, value.identifier().toString());
+        }
+        out.add("byBiome", biomes);
+        var types = net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE;
+        JsonArray typeNames = new JsonArray();
+        for (int id = 0; id < types.size(); id++) typeNames.add(types.getKey(types.byId(id)).toString());
+        out.add("types", typeNames);
+        JsonArray poiNames = new JsonArray();
+        for (Holder<net.minecraft.world.entity.ai.village.poi.PoiType> poi : pois) {
+            poiNames.add(poiTypes.getKey(poi.value()).toString());
+        }
+        out.add("poiTypes", poiNames);
+        JsonArray gossip = new JsonArray();
+        for (var type : net.minecraft.world.entity.ai.gossip.GossipType.values()) {
+            JsonObject row = new JsonObject();
+            row.addProperty("name", type.getSerializedName());
+            row.addProperty("weight", type.weight);
+            row.addProperty("max", type.max);
+            row.addProperty("decayPerDay", type.decayPerDay);
+            row.addProperty("decayPerTransfer", type.decayPerTransfer);
+            gossip.add(row);
+        }
+        out.add("gossips", gossip);
+        Class<?> gossipType = net.minecraft.world.entity.ai.gossip.GossipType.class;
+        out.addProperty("reputationPerEvent", (int) readField(gossipType, "REPUTATION_CHANGE_PER_EVENT", null));
+        out.addProperty("reputationPerEverlasting", (int) readField(gossipType, "REPUTATION_CHANGE_PER_EVERLASTING_MEMORY", null));
+        out.addProperty("reputationPerTrade", (int) readField(gossipType, "REPUTATION_CHANGE_PER_TRADE", null));
+        Class<?> villager = net.minecraft.world.entity.npc.villager.Villager.class;
+        Class<?> abstractVillager = net.minecraft.world.entity.npc.villager.AbstractVillager.class;
+        var data = entityAccessor(villager, "DATA_VILLAGER_DATA");
+        var finalized = entityAccessor(villager, "DATA_VILLAGER_DATA_FINALIZED");
+        var unhappy = entityAccessor(abstractVillager, "DATA_UNHAPPY_COUNTER");
+        out.addProperty("villagerDataIndex", data.id());
+        out.addProperty("villagerDataSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(data.serializer()));
+        out.addProperty("finalizedIndex", finalized.id());
+        out.addProperty("finalizedSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(finalized.serializer()));
+        out.addProperty("unhappyIndex", unhappy.id());
+        out.addProperty("unhappySerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(unhappy.serializer()));
+        var attributes = net.minecraft.world.entity.npc.villager.Villager.createAttributes().build();
+        out.addProperty("movementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        var dimensions = net.minecraft.world.entity.EntityTypes.VILLAGER.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(villager, "BABY_DIMENSIONS", null);
+        out.addProperty("width", dimensions.width());
+        out.addProperty("height", dimensions.height());
+        out.addProperty("eyeHeight", dimensions.eyeHeight());
+        out.addProperty("babyWidth", baby.width());
+        out.addProperty("babyHeight", baby.height());
+        out.addProperty("babyEyeHeight", baby.eyeHeight());
+        JsonObject levels = new JsonObject();
+        var dataClass = net.minecraft.world.entity.npc.villager.VillagerData.class;
+        levels.addProperty("min", (int) readField(dataClass, "MIN_VILLAGER_LEVEL", null));
+        levels.addProperty("max", (int) readField(dataClass, "MAX_VILLAGER_LEVEL", null));
+        int[] thresholds = (int[]) readField(dataClass, "NEXT_LEVEL_XP_THRESHOLDS", null);
+        JsonArray thresholdRows = new JsonArray();
+        for (int value : thresholds) thresholdRows.add(value);
+        levels.add("thresholds", thresholdRows);
+        out.add("levels", levels);
+        return out;
+    }
+
     private static JsonObject dataFiles(ResourceManager resources, String directory) throws IOException {
         JsonObject files = new JsonObject();
         for (Map.Entry<Identifier, Resource> entry : resources.listResources(directory, id -> true).entrySet()) {

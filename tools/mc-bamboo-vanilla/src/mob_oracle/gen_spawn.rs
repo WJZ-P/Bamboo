@@ -389,6 +389,7 @@ fn fixture(case: &Case, biome_id: i32) -> MobLevel {
         random: LevelRandom::new(0),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
         looting: Vec::new(),
+        biome: None,
         rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
         facts: ZombieFacts {
             difficulty: 2,

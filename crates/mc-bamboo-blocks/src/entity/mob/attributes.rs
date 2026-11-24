@@ -205,6 +205,18 @@ impl Attributes {
         }
     }
 
+    /// `Villager.createAttributes()`：`Mob.createMobAttributes()` 加移动速度 0.5。
+    ///
+    /// `Villager.createAttributes()`: the mob defaults plus movement speed 0.5.
+    pub fn villager() -> Self {
+        let mut attributes = Self::mob();
+        attributes.set_base(
+            attribute::MOVEMENT_SPEED,
+            mc_bamboo_data::villager::VILLAGER_MOVEMENT_SPEED,
+        );
+        attributes
+    }
+
     /// `Zombie.createAttributes`：`Monster.createMonsterAttributes` 的全部
     /// （`createMobAttributes` 加 `ATTACK_DAMAGE`），再覆盖跟随距离 35、
     /// 速度 0.23、攻击力 3、护甲 2，以及增援概率属性。

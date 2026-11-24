@@ -87,6 +87,7 @@ pub mod throttle;
 pub mod thunder;
 pub(crate) mod timing;
 pub mod turtle;
+pub mod villager;
 mod water;
 pub mod wild_spawn;
 pub mod witch;
@@ -189,13 +190,18 @@ pub enum MobType {
     SnowGolem,
     Silverfish,
     Endermite,
+    /// 村民。期 2 只有骨架：能生成、存档、受伤死亡，没有大脑 / 职业行为 / 交易。
+    ///
+    /// Villagers. Phase 2 is the skeleton only: spawning, saving, damage and death;
+    /// no brain, profession behaviour or trading.
+    Villager,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 54] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -249,6 +255,7 @@ impl MobType {
         Self::SnowGolem,
         Self::Silverfish,
         Self::Endermite,
+        Self::Villager,
     ];
 
     /// 注册表 ID。
@@ -308,6 +315,7 @@ impl MobType {
             Self::SnowGolem => ids::SNOW_GOLEM,
             Self::Silverfish => ids::SILVERFISH,
             Self::Endermite => ids::ENDERMITE,
+            Self::Villager => ids::VILLAGER,
         }
     }
 
@@ -367,6 +375,7 @@ impl MobType {
             Self::SnowGolem => "minecraft:snow_golem",
             Self::Silverfish => "minecraft:silverfish",
             Self::Endermite => "minecraft:endermite",
+            Self::Villager => "minecraft:villager",
         }
     }
 
@@ -516,6 +525,21 @@ impl MobType {
             // `EntityTypes.PILLAGER`: `sized(0.6F, 1.95F)` with the default eye height
             // `height * 0.85F`.
             (Self::Pillager, _) => (0.6, 1.95, 1.95 * 0.85),
+            // `Villager.getDefaultDimensions`：成年 `0.6 × 1.95` 眼高 1.62，幼年
+            // `0.49 × 0.98` 眼高 0.63。
+            //
+            // `Villager.getDefaultDimensions`: 0.6 x 1.95 with eye height 1.62 as an
+            // adult, 0.49 x 0.98 with eye height 0.63 as a baby.
+            (Self::Villager, false) => (
+                mc_bamboo_data::villager::VILLAGER_WIDTH,
+                mc_bamboo_data::villager::VILLAGER_HEIGHT,
+                mc_bamboo_data::villager::VILLAGER_EYE_HEIGHT,
+            ),
+            (Self::Villager, true) => (
+                mc_bamboo_data::villager::BABY_VILLAGER_WIDTH,
+                mc_bamboo_data::villager::BABY_VILLAGER_HEIGHT,
+                mc_bamboo_data::villager::BABY_VILLAGER_EYE_HEIGHT,
+            ),
         }
     }
 
@@ -769,7 +793,7 @@ impl MobType {
             && !self.is_water_animal()
             && !matches!(
                 self,
-                Self::Bat | Self::Phantom | Self::IronGolem | Self::SnowGolem
+                Self::Bat | Self::Phantom | Self::IronGolem | Self::SnowGolem | Self::Villager
             )
     }
 
@@ -895,6 +919,7 @@ impl MobType {
             Self::SnowGolem => "minecraft:entities/snow_golem",
             Self::Silverfish => "minecraft:entities/silverfish",
             Self::Endermite => "minecraft:entities/endermite",
+            Self::Villager => "minecraft:entities/villager",
         }
     }
 
@@ -910,7 +935,7 @@ impl MobType {
             900
         } else if self.is_equine() {
             400
-        } else if self.is_enemy() || matches!(self, Self::Bat) {
+        } else if self.is_enemy() || matches!(self, Self::Bat | Self::Villager) {
             // `Mob.getAmbientSoundInterval()` 的缺省值；蝙蝠没有覆写。
             // The `Mob.getAmbientSoundInterval()` default, which bats keep.
             80
@@ -1007,6 +1032,11 @@ impl MobType {
             Self::SnowGolem => Some("minecraft:entity.snow_golem.ambient"),
             Self::Silverfish => Some("minecraft:entity.silverfish.ambient"),
             Self::Endermite => Some("minecraft:entity.endermite.ambient"),
+            // 睡着和交易中的叫声属于期 3 / 期 5，骨架先出普通环境音。
+            //
+            // Sleeping and trading sounds arrive in phases 3 and 5; the skeleton
+            // plays the plain ambient sound.
+            Self::Villager => Some("minecraft:entity.villager.ambient"),
         }
     }
 
@@ -1058,6 +1088,7 @@ impl MobType {
             Self::SnowGolem => Some("minecraft:entity.snow_golem.hurt"),
             Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
             Self::Endermite => Some("minecraft:entity.endermite.hurt"),
+            Self::Villager => Some("minecraft:entity.villager.hurt"),
         }
     }
 
@@ -1109,6 +1140,7 @@ impl MobType {
             Self::SnowGolem => Some("minecraft:entity.snow_golem.death"),
             Self::Silverfish => Some("minecraft:entity.silverfish.death"),
             Self::Endermite => Some("minecraft:entity.endermite.death"),
+            Self::Villager => Some("minecraft:entity.villager.death"),
         }
     }
 
@@ -1168,6 +1200,10 @@ impl MobType {
             Self::SnowGolem => None,
             Self::Silverfish => Some("minecraft:entity.silverfish.step"),
             Self::Endermite => Some("minecraft:entity.endermite.step"),
+            // 村民没覆写 `playStepSound`，走脚下方块自己的声音。
+            //
+            // Villagers do not override `playStepSound`; the block's sound plays.
+            Self::Villager => None,
         }
     }
 
@@ -1228,6 +1264,7 @@ impl MobType {
             Self::SnowGolem => items::SNOW_GOLEM_SPAWN_EGG,
             Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
             Self::Endermite => items::ENDERMITE_SPAWN_EGG,
+            Self::Villager => items::VILLAGER_SPAWN_EGG,
         }
     }
 
@@ -1287,6 +1324,7 @@ impl MobType {
             Self::SnowGolem => "entity.minecraft.snow_golem",
             Self::Silverfish => "entity.minecraft.silverfish",
             Self::Endermite => "entity.minecraft.endermite",
+            Self::Villager => "entity.minecraft.villager",
         }
     }
 
@@ -1319,6 +1357,10 @@ impl MobType {
                 MobCategory::WaterAmbient
             }
             Self::Bat => MobCategory::Ambient,
+            // `EntityType.VILLAGER` 是 `MobCategory.MISC`。
+            //
+            // `EntityType.VILLAGER` is `MobCategory.MISC`.
+            Self::Villager => MobCategory::Misc,
             _ if self.is_enemy() => MobCategory::Monster,
             _ => MobCategory::Creature,
         }
@@ -2401,6 +2443,11 @@ pub struct Mob {
     pub iron_golem: iron_golem::IronGolem,
     /// 雪傀儡的南瓜标志。
     pub snow_golem: snow_golem::SnowGolem,
+    /// 村民的品种 / 职业 / 等级、补货时刻和原样的交易 / 背包数据。
+    ///
+    /// The villager's kind / profession / level, restock times and the verbatim
+    /// offers / inventory data.
+    pub villager: villager::Villager,
     /// 蝙蝠的标志字节和飞行目标；别的生物是缺省值。
     ///
     /// The bat flag byte and flight target; default for every other mob.
@@ -2631,6 +2678,7 @@ impl Mob {
             MobType::SnowGolem => snow_golem::attributes(),
             MobType::Silverfish => silverfish::attributes(),
             MobType::Endermite => endermite::attributes(),
+            MobType::Villager => Attributes::villager(),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2654,6 +2702,16 @@ impl Mob {
             // `Spider.createNavigation` 用 `WallClimberNavigation`。
             // `Spider.createNavigation` builds a `WallClimberNavigation`.
             navigation.wall_climber = true;
+        }
+        if mob_type == MobType::Villager {
+            // `Villager` 构造函数：能开门、能浮水、要求路径长度 48，并能捡东西。
+            //
+            // The `Villager` constructor: doors, floating, required path length 48
+            // and loot pickup.
+            navigation.flags.can_open_doors = true;
+            navigation.flags.can_float = true;
+            navigation.required_path_length = 48.0;
+            navigation.update_max_visited_nodes(follow_range);
         }
         let goals = match mob_type {
             MobType::Cow | MobType::Mooshroom => GoalSelector::cow(&mut navigation),
@@ -2687,9 +2745,12 @@ impl Mob {
             // 蝙蝠和骆驼没有覆写 `registerGoals`：两个选择器都是空的（骆驼不要 `equine::goals`）。
             // Bats and camels do not override `registerGoals`: both selectors stay empty
             // (no `equine::goals` for camels).
-            MobType::Armadillo | MobType::Goat | MobType::Frog | MobType::Bat | MobType::Camel => {
-                GoalSelector::default()
-            }
+            MobType::Armadillo
+            | MobType::Goat
+            | MobType::Frog
+            | MobType::Bat
+            | MobType::Camel
+            | MobType::Villager => GoalSelector::default(),
             // 蝌蚪没有覆盖 `AbstractFish.registerGoals`，鱼的目标和大脑一起跑。
             // Tadpoles do not override `AbstractFish.registerGoals`: the fish goals run
             // alongside the brain.
@@ -2975,6 +3036,7 @@ impl Mob {
             bee: bee::Bee::default(),
             iron_golem: iron_golem::IronGolem::default(),
             snow_golem: snow_golem::SnowGolem::default(),
+            villager: villager::Villager::default(),
             tadpole_age: 0,
             discard_friction: false,
             passengers: Vec::new(),
@@ -2987,6 +3049,12 @@ impl Mob {
             skeleton_horse: (mob_type == MobType::SkeletonHorse)
                 .then(|| Box::new(skeleton_horse::SkeletonHorseState::default())),
         };
+        if mob_type == MobType::Villager {
+            // `Villager` 构造函数末尾的 `setCanPickUpLoot(true)`。
+            //
+            // The trailing `setCanPickUpLoot(true)` in the `Villager` constructor.
+            mob.can_pick_up_loot = true;
+        }
         if mob_type == MobType::Salmon {
             // `Salmon` 的 `DATA_TYPE` 缺省是 `Variant.MEDIUM`。
             // The `Salmon` `DATA_TYPE` default is `Variant.MEDIUM`.
@@ -3351,6 +3419,15 @@ pub struct MobPublic {
     pub dark_ticks: i32,
     /// `IronGolem.DATA_FLAGS_ID` / `SnowGolem.DATA_PUMPKIN_ID`，都是 BYTE。
     pub golem_flags: u8,
+    /// 村民的 `VillagerData` 三项、`VillagerDataFinalized` 和 `DATA_UNHAPPY_COUNTER`。
+    ///
+    /// The villager's three `VillagerData` items, `VillagerDataFinalized` and the
+    /// unhappy counter.
+    pub villager_kind: i32,
+    pub villager_profession: i32,
+    pub villager_level: i32,
+    pub villager_finalized: bool,
+    pub villager_unhappy: i32,
     /// `Bat.DATA_ID_FLAGS`。
     pub bat_flags: u8,
     /// `Phantom.ID_SIZE`。
@@ -3519,6 +3596,11 @@ impl MobPublic {
             } else {
                 mob.snow_golem.flags
             },
+            villager_kind: mob.villager.kind,
+            villager_profession: mob.villager.profession,
+            villager_level: mob.villager.level,
+            villager_finalized: mob.villager.finalized,
+            villager_unhappy: mob.villager.unhappy,
             phantom_size: mob.phantom.size,
             frog: mob.frog,
             camel: mob.camel,

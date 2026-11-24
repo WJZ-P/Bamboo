@@ -12,6 +12,11 @@ use mc_bamboo_core::Aabb;
 /// 配方表的数据结构和官方数据包导出的全部配方。
 pub mod recipe;
 
+/// 村民的静态数据和按名字 / ID 的查询。
+///
+/// Villager static data and name / id lookups.
+pub mod villager;
+
 /// 官方触发器注册表（按数字 ID）及进度定义（按名字）。
 pub const ADVANCEMENTS_JSON: &str = include_str!("generated/advancements.json");
 

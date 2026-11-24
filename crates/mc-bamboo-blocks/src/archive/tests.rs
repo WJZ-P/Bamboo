@@ -314,12 +314,12 @@ fn three_entity_kinds_round_trip() {
 fn unknown_entity_ids_are_left_to_the_caller() {
     let tag = Tag::Compound(vec![(
         "id".to_owned(),
-        Tag::String("minecraft:villager".to_owned()),
+        Tag::String("minecraft:zombie_villager".to_owned()),
     )]);
     assert!(read_entity(&tag, 1).unwrap().is_none());
     assert_eq!(
         field(&tag, "id"),
-        Some(&Tag::String("minecraft:villager".to_owned()))
+        Some(&Tag::String("minecraft:zombie_villager".to_owned()))
     );
 }
 

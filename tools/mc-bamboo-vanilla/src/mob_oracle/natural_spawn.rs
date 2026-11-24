@@ -521,6 +521,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         random: LevelRandom::new(case.seed),
         loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
         looting: Vec::new(),
+        biome: None,
         rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
         facts: ZombieFacts {
             difficulty: case.difficulty,

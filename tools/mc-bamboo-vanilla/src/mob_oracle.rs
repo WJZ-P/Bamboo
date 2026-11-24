@@ -62,6 +62,7 @@ mod squid;
 mod structure_spawn;
 mod thunder;
 mod undead_horse;
+mod villager;
 mod water_mob;
 mod witch_throw;
 
@@ -143,6 +144,9 @@ enum Line {
     SmallMob(Box<small_mob::SmallMobCase>),
     SmallMobSave(small_mob::SmallMobSaveCase),
     SmallMobDeath(small_mob::SmallMobDeathCase),
+    VillagerSpawn(villager::VillagerSpawnCase),
+    VillagerSave(villager::VillagerSaveCase),
+    VillagerDeath(villager::VillagerDeathCase),
     Fish(Box<fish::FishCase>),
     PhantomSpawn(Box<phantom::PhantomSpawnCase>),
     Phantom(Box<phantom::PhantomCase>),
@@ -847,6 +851,10 @@ struct MobLevel {
     /// 僵尸场景注入的天色 / 天气 / 环境属性；旧场景恒为缺省。
     facts: ZombieFacts,
     natural_spawn: Option<natural_spawn::SceneFacts>,
+    /// 场景显式指定的群系；`None` 时退回 `natural_spawn` 的群系或平原。
+    ///
+    /// An explicit biome for the scene; falls back to `natural_spawn` or plains.
+    biome: Option<i32>,
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
@@ -966,6 +974,9 @@ impl Level for MobLevel {
     }
 
     fn biome_id(&self, _pos: BlockPos) -> i32 {
+        if let Some(biome) = self.biome {
+            return biome;
+        }
         self.natural_spawn
             .as_ref()
             .map_or(mc_bamboo_data::registries::biome::PLAINS, |scene| {
@@ -1525,6 +1536,9 @@ impl Report {
                 Line::SmallMob(case) => self.replay_small_mob(&case),
                 Line::SmallMobSave(case) => self.replay_small_mob_save(&case),
                 Line::SmallMobDeath(case) => self.replay_small_mob_death(&case),
+                Line::VillagerSpawn(case) => self.replay_villager_spawn(&case),
+                Line::VillagerSave(case) => self.replay_villager_save(&case),
+                Line::VillagerDeath(case) => self.replay_villager_death(&case),
                 Line::Fish(case) => self.replay_fish(&case),
                 Line::PhantomSpawn(case) => self.replay_phantom_spawn(&case),
                 Line::Phantom(case) => self.replay_phantom(&case),
@@ -1675,6 +1689,7 @@ impl Report {
                 bees_stay: None,
             },
             natural_spawn: None,
+            biome: None,
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),

@@ -120,6 +120,7 @@ impl Report {
         let player = player_view();
         let mut level = MobLevel {
             natural_spawn: None,
+            biome: None,
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
