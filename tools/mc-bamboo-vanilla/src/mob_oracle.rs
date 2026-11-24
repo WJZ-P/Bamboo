@@ -867,6 +867,11 @@ struct ZombieFacts {
     monsters_burn: bool,
     sea_level: i32,
     raining: bool,
+    /// 引雷场景：雷雨但不一定靠 `natural_spawn` 注入雷级别。
+    ///
+    /// Channeling scenes: a thunderstorm whose thunder level is injected
+    /// directly rather than through `natural_spawn`.
+    thundering: bool,
     /// 蜂巢对拍直接注入官方的 `BEES_STAY_IN_HIVE` 常量层。
     bees_stay: Option<bool>,
     /// 热群系 / 下界场景注入的 `SNOW_GOLEM_MELTS`。
@@ -1150,10 +1155,11 @@ impl Level for MobLevel {
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
         mc_bamboo_blocks::BlockWeather {
             rain_level: if self.facts.raining { 1.0 } else { 0.0 },
-            thunder_level: if self
-                .natural_spawn
-                .as_ref()
-                .is_some_and(|scene| scene.thunder)
+            thunder_level: if self.facts.thundering
+                || self
+                    .natural_spawn
+                    .as_ref()
+                    .is_some_and(|scene| scene.thunder)
             {
                 1.0
             } else {
@@ -1740,6 +1746,7 @@ impl Report {
                 },
                 sea_level: case.sea_level,
                 raining: case.raining,
+                thundering: false,
                 bees_stay: None,
             },
             natural_spawn: None,

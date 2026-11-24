@@ -108,6 +108,10 @@ struct ProjectileFrame {
     ///
     /// Pillager scenes: loaded arrows, crossbow damage, ticks used and `noActionTime`.
     crossbow: Option<[i64; 4]>,
+    /// 本刻的全部音效：音效 ID、声源序号、坐标原始位、音量位、音高位。
+    ///
+    /// All sounds this tick: id, source ordinal, raw x/y/z, volume, pitch.
+    sounds: Option<Vec<[i64; 7]>>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -282,6 +286,26 @@ impl ProjectileCase {
         self.name == "arrow_water_after_pierce"
     }
 
+    /// 三叉戟逐刻场景：飞行、插地、忠诚返回、引雷、溺尸远程。
+    ///
+    /// Trident tick-by-tick scenes: flight, sticking, loyalty return,
+    /// channeling and the drowned ranged attack.
+    fn trident(&self) -> bool {
+        self.name.starts_with("trident_")
+    }
+
+    /// 引雷场景雷雨 + 天空可见（避雷针场景还要求避雷针，由方块表给）。
+    ///
+    /// Channeling scenes run in a thunderstorm with open sky (the rod scene
+    /// also needs a lightning rod, supplied by the block table).
+    fn thundering(&self) -> bool {
+        self.name.starts_with("trident_channeling")
+    }
+
+    fn open_sky(&self) -> bool {
+        self.name == "trident_channeling_mob" || self.name == "trident_channeling_rod"
+    }
+
     fn level(&self) -> MobLevel {
         MobLevel {
             natural_spawn: None,
@@ -297,6 +321,9 @@ impl ProjectileCase {
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             facts: ZombieFacts {
                 difficulty: self.difficulty,
+                raining: self.thundering(),
+                thundering: self.thundering(),
+                can_see_sky: self.open_sky(),
                 ..ZombieFacts::default()
             },
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
@@ -341,6 +368,29 @@ impl ProjectileCase {
                     .set(EquipmentSlot::MainHand, self.shooter_weapon());
             }
             world.add_prepared_entity(skeleton);
+        } else if self.trident() {
+            // 三叉戟逐刻对拍：从显式初态出发，和官方一样走 `shoot` 再逐刻
+            // `AbstractArrow.tick`。扔出初态已由 `shot_trident` 单独对拍，这里只比
+            // 飞行 / 插地 / 忠诚 / 引雷的逐刻行为。
+            // Trident tick parity: start from an explicit state, `shoot` like the
+            // official side, then tick `AbstractArrow.tick` frame by frame. The
+            // throw's initial state is already covered by `shot_trident`; here we
+            // compare only the per-tick flight / stick / loyalty / channeling.
+            use mc_bamboo_blocks::entity::arrow::{Pickup, TridentShot};
+            let shot = TridentShot {
+                position: Vec3::new(0.5, 65.5, 0.5),
+                direction: Vec3::new(1.0, 0.0, 0.0),
+                power: 1.6,
+                uncertainty: 0.0,
+                source_movement: None,
+                owner: None,
+                owner_uuid: None,
+                item: ItemStack::new(mc_bamboo_data::items::TRIDENT, 1),
+                pickup: Pickup::Disallowed,
+            };
+            let mut arrow = world.prepare_entity(Entity::configured_trident(&shot));
+            arrow.shoot_arrow(Vec3::new(1.0, 0.0, 0.0), 1.6, 0.0);
+            world.add_prepared_entity(arrow);
         } else {
             let y = if self.water() {
                 65.25
@@ -457,6 +507,7 @@ impl Report {
         for (tick, expected) in case.frames.iter().enumerate() {
             let mut extinguished = Vec::new();
             let mut level_events = Vec::new();
+            let mut sounds: Vec<[i64; 7]> = Vec::new();
             if tick != 0 {
                 if (case.flaming() || case.water()) && tick == 1 {
                     level
@@ -546,6 +597,30 @@ impl Report {
                             i64::from(source.id()),
                         ]
                     })
+                }));
+                sounds.extend(effects.iter().filter_map(|effect| {
+                    let mc_bamboo_blocks::Effect::Sound {
+                        sound,
+                        source,
+                        x,
+                        y,
+                        z,
+                        volume,
+                        pitch,
+                        ..
+                    } = effect
+                    else {
+                        return None;
+                    };
+                    Some([
+                        i64::from(*sound),
+                        i64::from(source.id()),
+                        x.to_bits() as i64,
+                        y.to_bits() as i64,
+                        z.to_bits() as i64,
+                        i64::from(volume.to_bits()),
+                        i64::from(pitch.to_bits()),
+                    ])
                 }));
             }
             if let Some(thermal) = expected.player_thermal {
@@ -697,6 +772,22 @@ impl Report {
                         "{label} player effects: official {theirs:?}, bamboo {ours:?}"
                     ));
                 }
+            }
+            if self.break_test.as_deref() == Some("trident_sound")
+                && case.trident()
+                && let Some(first) = sounds.first_mut()
+            {
+                // 改坏确认：把落地音效的 ID 改掉，逐刻对拍必须报不一致。
+                // Break self-test: corrupt the land sound id so the tick parity
+                // must report a mismatch.
+                first[0] = -1;
+            }
+            if let Some(theirs) = &expected.sounds
+                && *theirs != sounds
+            {
+                self.mismatch(format!(
+                    "{label} sounds: official {theirs:?}, bamboo {sounds:?}"
+                ));
             }
             if let Some(expected_motion) = expected.shooter {
                 // 转化之后射手换成新生成的那只：取表里编号最大的生物。

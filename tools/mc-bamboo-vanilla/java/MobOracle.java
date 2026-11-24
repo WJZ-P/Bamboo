@@ -293,7 +293,8 @@ public final class MobOracle {
                     "skeleton_bow_normal", "skeleton_bow_hard",
                     "stray_bow_normal", "bogged_bow_normal", "bogged_bow_hard",
                     "skeleton_freeze", "bogged_shear",
-                    "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot")) {
+                    "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
+                    "trident_stick")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -7967,10 +7968,13 @@ public final class MobOracle {
         boolean water = name.startsWith("arrow_water_");
         boolean waterTail = name.equals("arrow_water_after_pierce");
         boolean rejected = name.endsWith("_rejected");
+        // 三叉戟逐刻场景：飞行插地、命中生物、忠诚返回、引雷、溺尸远程。
+        // Trident tick-by-tick scenes: stick / hit mob / loyalty / channeling / drowned.
+        boolean trident = name.startsWith("trident_");
         // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
         // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
         boolean fade = name.equals("arrow_tipped_fade");
-        boolean hasWall = wall || noGravity || despawn || waterTail || fade;
+        boolean hasWall = wall || noGravity || despawn || waterTail || fade || trident;
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -8009,6 +8013,11 @@ public final class MobOracle {
             // 剪蘑菇的战利品表从干净的随机序列开始，和 Bamboo 一侧每个 case 新建一份对应。
             // The shearing table starts from fresh random sequences, like a fresh Bamboo case.
             official.server.sequences = new RandomSequences();
+        }
+        if (trident) {
+            // 逐刻比全部音效（落地、命中、忠诚返回、引雷雷声、溺尸投掷）。
+            // Compare every sound per tick (land, hit, loyalty return, thunder, drowned shoot).
+            world.soundLog = new ArrayList<>();
         }
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
@@ -8056,6 +8065,27 @@ public final class MobOracle {
             }
             shooter.setItemInHand(InteractionHand.MAIN_HAND, weapon);
             world.tracked.add(shooter);
+        } else if (trident) {
+            // 三叉戟从显式初态出发：和 Rust 侧 `configured_trident` 一样读物品堆
+            // 的附魔（忠诚 / 引雷），再走官方 `shoot`。初态本身已由 `shot_trident`
+            // 单独对拍，这里逐刻比 `AbstractArrow.tick` 与 `ThrownTrident.tick`。
+            // A trident from an explicit state: read the enchantments from the
+            // stack like Rust's `configured_trident`, then use the official
+            // `shoot`. The throw's initial state is already covered by
+            // `shot_trident`; here we compare the per-tick flight.
+            ItemStack stack = new ItemStack(Items.TRIDENT);
+            boolean loyalty = name.startsWith("trident_loyalty") || name.startsWith("trident_owner")
+                    || name.startsWith("trident_spectator");
+            if (loyalty) enchant(official, stack, Enchantments.LOYALTY, 3);
+            if (name.startsWith("trident_channeling")) enchant(official, stack, Enchantments.CHANNELING, 1);
+            var arrow = new net.minecraft.world.entity.projectile.arrow.ThrownTrident(
+                    world, 0.5, 65.5, 0.5, stack);
+            setRandom(arrow, world.entitySeeds.nextLong());
+            arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
+            arrow.setPos(0.5, 65.5, 0.5);
+            arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
+            arrows.add(arrow);
+            world.tracked.add(arrow);
         } else {
             net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow;
             if (enchanted) {
@@ -8278,6 +8308,11 @@ public final class MobOracle {
                 frames.append(",\"extinguished\":").append(world.projectileExtinguishes.stream()
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.projectileExtinguishes.clear();
+            }
+            if (trident) {
+                frames.append(",\"sounds\":").append(world.soundLog.stream()
+                        .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                world.soundLog.clear();
             }
             if (enchanted) {
                 Vec3 delta = player.getDeltaMovement();
