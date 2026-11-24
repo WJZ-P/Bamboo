@@ -189,15 +189,24 @@ fn trap_rider(world: &mut World<'_>, position: Vec3, special: f32, seed: Option<
 }
 
 /// `SkeletonTrapGoal.tick` 的落地：一道视觉闪电、原马上的骷髅和三匹新的骷髅马骑士。
-/// 生成顺序照官方 `tick`：闪电 → 第一名骑士 → （马、骑士）× 3。
-pub fn spawn_trap(world: &mut World, facts: TrapSpawn) {
+/// 生成顺序照官方 `tick`：闪电 → 第一名骑士 → （马、骑士）× 3。四名骑士都
+/// `startRiding` 各自的骷髅马；原马正在 tick、不在实体表里，直接改两边的链接。
+///
+/// Vanilla `SkeletonTrapGoal.tick`: a visual bolt, the rider on the trap horse and
+/// three new horse/rider pairs, each rider starting to ride its horse. The trap
+/// horse is mid-tick and not in the store, so its links are set directly.
+pub fn spawn_trap(world: &mut World, vehicle: &mut Entity, facts: TrapSpawn) {
     let bolt = crate::entity::lightning::entity(facts.position, true);
     world.spawn_entity(bolt);
     let special = ((facts.effective - 2.0) / 2.0).clamp(0.0, 1.0);
     // 骑在原陷阱马上的第一名骷髅。
     let first_seed = facts.rider_seeds.first().copied();
     let rider = trap_rider(world, facts.position, special, first_seed);
-    world.add_prepared_entity(rider);
+    let first = world.add_prepared_entity(rider);
+    world.with_entity_mut(first, &mut |entity| entity.vehicle = Some(vehicle.id));
+    vehicle.with_mob(|_, mob| {
+        crate::entity::riding::add_passenger(&mut mob.passengers, first, false);
+    });
     for (index, (dx, dz)) in facts.pushes.iter().enumerate() {
         let seed = facts.rider_seeds.get(index + 1).copied();
         let mut horse = Entity::by_mob_type(MobType::SkeletonHorse, facts.position);
@@ -210,9 +219,10 @@ pub fn spawn_trap(world: &mut World, facts: TrapSpawn) {
             mob.persistence_required = true;
         });
         horse.delta = Vec3::new(*dx, 0.0, *dz);
-        world.spawn_entity(horse);
+        let horse_id = world.spawn_entity(horse);
         let rider = trap_rider(world, facts.position, special, seed);
-        world.add_prepared_entity(rider);
+        let rider_id = world.add_prepared_entity(rider);
+        world.start_riding(rider_id, horse_id);
     }
 }
 
@@ -235,5 +245,69 @@ pub fn set_trap(mob: &mut Mob, trap: bool) {
             running: false,
             goal: Goal::SkeletonTrap,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockTicks, World, testing::TestLevel};
+
+    /// 陷阱触发后四名骑士各自坐在一匹骷髅马上：原陷阱马一名、三匹新马各一名。
+    ///
+    /// A trap seats one rider on the trap horse and one on each of the three new
+    /// horses.
+    #[test]
+    fn a_trap_seats_every_rider_on_a_horse() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        let position = Vec3::new(0.5, 64.0, 0.5);
+        let mut trap = Entity::by_mob_type(MobType::SkeletonHorse, position);
+        // 正在 tick 的原马不在实体表里；表里那份只是占一个 uid。
+        let uid = world.spawn_entity(trap.clone());
+        trap.id = uid;
+        spawn_trap(
+            &mut world,
+            &mut trap,
+            TrapSpawn {
+                position,
+                pushes: vec![(0.0, 0.0); 3],
+                effective: 0.0,
+                rider_seeds: Vec::new(),
+            },
+        );
+        let passengers = trap.kind.mob().expect("a horse").passengers.clone();
+        assert_eq!(passengers.len(), 1);
+        let stored = world.live_entities();
+        let first = stored
+            .iter()
+            .find(|entity| entity.id == passengers[0])
+            .expect("the first rider is in the table");
+        assert_eq!(first.vehicle, Some(uid));
+
+        let horses: Vec<&Entity> = stored
+            .iter()
+            .filter(|entity| {
+                entity
+                    .kind
+                    .mob()
+                    .is_some_and(|mob| mob.mob_type == MobType::SkeletonHorse)
+            })
+            .collect();
+        assert_eq!(horses.len(), 4, "the trap horse and three new ones");
+        let mut riders = 0;
+        for horse in horses {
+            for &rider in &horse.kind.mob().expect("a horse").passengers {
+                let entity = stored
+                    .iter()
+                    .find(|entity| entity.id == rider)
+                    .expect("the rider is in the table");
+                assert_eq!(entity.vehicle, Some(horse.id));
+                riders += 1;
+            }
+        }
+        // 表里的原马副本没有乘客（真正的原马正被 tick），三匹新马各一名。
+        assert_eq!(riders, 3);
     }
 }

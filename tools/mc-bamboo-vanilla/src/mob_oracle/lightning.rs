@@ -306,7 +306,8 @@ impl Report {
             mc_bamboo_blocks::entity::mob::skeleton_horse::set_trap(mob, true);
             mob.age = 0;
         });
-        let _ = world.spawn_entity(horse);
+        let uid = world.spawn_entity(horse.clone());
+        horse.id = uid;
         // 直接复用 `spawn_trap` 的四名骑士生成路径；官方夹具调的是同一个
         // `SkeletonTrapGoal.tick()`，所以世界随机源从同一个种子出发。
         let facts = mc_bamboo_blocks::entity::mob::skeleton_horse::TrapSpawn {
@@ -315,7 +316,7 @@ impl Report {
             effective: 0.0,
             rider_seeds: case.seeds.clone(),
         };
-        mc_bamboo_blocks::entity::mob::skeleton_horse::spawn_trap(&mut world, facts);
+        mc_bamboo_blocks::entity::mob::skeleton_horse::spawn_trap(&mut world, &mut horse, facts);
         let mut ours: Vec<Vec<String>> = Vec::new();
         for entity in world.live_entities() {
             let Some(mob) = entity.kind.mob() else {

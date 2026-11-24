@@ -396,7 +396,8 @@ fn spawn_category_for_position(
             spawn::finalize_spawn_with_group(world, kind, &mut entity, &mut group);
             cluster_size += 1;
             let group_reached = is_max_group_size_reached(kind, entity.kind.mob());
-            world.add_prepared_entity(entity);
+            let uid = world.add_prepared_entity(entity);
+            world.finish_jockeys(uid);
             state.after_spawn(world, kind, pos);
             if cluster_size >= max_spawn_cluster_size(kind) {
                 return;

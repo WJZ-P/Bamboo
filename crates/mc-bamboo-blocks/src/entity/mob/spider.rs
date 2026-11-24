@@ -187,25 +187,38 @@ fn random_effect(random: &dyn RandomSource) -> i32 {
 
 /// `Spider.finalizeSpawn`。
 ///
-/// 先 `Mob.finalizeSpawn` 的两笔取数，骑士判定，再组数据。骑士（骷髅骑蜘蛛）还没有
-/// 骑乘机制，`nextInt(100)` 仍然取，只是不生成。组数据为空时新建；困难难度下
+/// 先 `Mob.finalizeSpawn` 的两笔取数，再 `nextInt(100)` 判骑士；命中时按官方
+/// 排一个 `Skeleton(JOCKEY)`，落地时跑它的 `finalizeSpawn` 再 `startRiding`。
+/// 之后是组数据：组数据为空时新建；困难难度下
 /// `nextFloat() < 0.1F * 特殊系数` 时再 `nextInt(5)`。
 ///
-/// `Spider.finalizeSpawn`: the two `Mob.finalizeSpawn` draws, the jockey roll, then the
-/// group data. The skeleton jockey needs riding, which is not modelled yet; the
-/// `nextInt(100)` still happens. A fresh group data rolls the hard-mode effect.
+/// `Spider.finalizeSpawn`: the two `Mob.finalizeSpawn` draws, the 1% jockey roll
+/// (queue a `Skeleton(JOCKEY)` that runs its own finalize and starts riding),
+/// then the group data. A fresh group data rolls the hard-mode effect.
 pub(super) fn finalize_spawn(
     world: &mut World<'_>,
     entity: &mut Entity,
     _reason: SpawnReason,
     group: &mut Option<SpawnGroup>,
 ) {
+    // `world.random()` 是可变内部状态的 `&LegacyRandom`；排队时要 `&mut World`，
+    // 所以先按值拷一份同种子的随机源给这次 `finalizeSpawn`，取完数再把种子写回去。
+    let random = crate::random::LegacyRandom::new(world.random().seed());
+    finalize_spawn_with_random(world, entity, group, &random);
+    world.set_level_random_seed(random.seed());
+}
+
+fn finalize_spawn_with_random(
+    world: &mut World<'_>,
+    entity: &mut Entity,
+    group: &mut Option<SpawnGroup>,
+    random: &crate::random::LegacyRandom,
+) {
     let hard = BlockView::difficulty(world) == 3;
     let special = special_multiplier(BlockView::effective_difficulty(
         world,
         entity.block_position(),
     ));
-    let random = world.random();
     // `super.finalizeSpawn`：`Mob.finalizeSpawn` 的跟随距离加成和左撇子先取。
     // `super.finalizeSpawn`: the `Mob.finalizeSpawn` follow-range bonus and left-handedness.
     entity.with_mob(|_, mob| {
@@ -226,9 +239,19 @@ pub(super) fn finalize_spawn(
         Some(SpawnGroup::Spider(data)) => data.effect,
         _ => None,
     };
-    // `random.nextInt(100) == 0`：骷髅骑士。骑乘未建模，只保留这次取数。
-    // The skeleton jockey roll; riding is not modelled, only the draw is kept.
-    let _jockey = random.next_int(100) == 0;
+    // `random.nextInt(100) == 0`：骷髅骑士。官方在下一句里 `EntityTypes.SKELETON.create`
+    // 并 `snapTo(蜘蛛位置, yRot, 0)`、`finalizeSpawn(JOCKEY)`、`startRiding`；这里把
+    // 生成排队到 `finish_jockeys`，顺序仍是这一刻 `finalizeSpawn` 之内的取数。
+    if random.next_int(100) == 0 {
+        let position = entity.position;
+        let yaw = entity.y_rot;
+        world.queue_jockey(super::spawn::JockeyRequest {
+            kind: MobType::Skeleton,
+            position,
+            yaw,
+            rider_is_vehicle: false,
+        });
+    }
     if fresh {
         if hard && random.next_float() < SPECIAL_EFFECT_CHANCE * special {
             effect = Some(random_effect(random));

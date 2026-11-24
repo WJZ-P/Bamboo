@@ -41,6 +41,10 @@ pub enum SpawnReason {
     ///
     /// `EntitySpawnReason.PATROL`: a patrol from `PatrolSpawner`.
     Patrol,
+    /// `EntitySpawnReason.JOCKEY`：蜘蛛骑士 / 鸡骑士的坐骑或骑手。
+    ///
+    /// `EntitySpawnReason.JOCKEY`: a spider/chicken jockey's mount or rider.
+    Jockey,
 }
 
 /// `/summon` 失败的原因，对应官方的四条错误。
@@ -150,6 +154,21 @@ pub struct SpiderGroupData {
 /// `Mob.RANDOM_SPAWN_BONUS_ID`。
 pub(super) const RANDOM_SPAWN_BONUS: &str = "minecraft:random_spawn_bonus";
 
+/// 骑士的坐骑/骑手请求：`finalizeSpawn` 里排队，生成入口把它落地。
+/// `rider_is_vehicle` 表示新生成的是坐骑、已有的 `entity` 是骑手（鸡骑士），
+/// 否则新生成的是骑手（蜘蛛骑士）。
+///
+/// A deferred jockey request from `finalizeSpawn`. `rider_is_vehicle` means the
+/// newly spawned entity is the mount (chicken jockey); otherwise it is the rider
+/// (spider jockey).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JockeyRequest {
+    pub kind: MobType,
+    pub position: Vec3,
+    pub yaw: f32,
+    pub rider_is_vehicle: bool,
+}
+
 /// `Level.isInSpawnableBounds`：竖直 `[-2e7, 2e7)`，水平绝对值小于 3e7。
 pub fn is_in_spawnable_bounds(pos: BlockPos) -> bool {
     (-20_000_000..20_000_000).contains(&pos.y)
@@ -201,7 +220,9 @@ pub fn summon_mob(
     if world.has_mob_uuid(&uuid) {
         return Err(SummonError::DuplicateUuid);
     }
-    Ok(world.add_prepared_entity(entity))
+    let uid = world.add_prepared_entity(entity);
+    world.finish_jockeys(uid);
+    Ok(uid)
 }
 
 /// `SpawnEggItem.useOn` 走到 `EntityType.spawn(level, stack, player, pos, SPAWN_ITEM_USE,
@@ -272,6 +293,7 @@ pub fn spawn_egg(
         entity.with_mob(|_, mob| mob.custom_name = Some(name));
     }
     let uid = world.add_prepared_entity(entity);
+    world.finish_jockeys(uid);
     // `Mob.playAmbientSound`：放进世界之后叫一声，用生物自己的随机源取音高。
     if kind == MobType::Fox {
         // `Fox.playAmbientSound` 要看天色和 16 格内的玩家，先在世界里取好。
@@ -745,4 +767,45 @@ pub(super) fn biome_tag_contains(name: &str, biome: i32) -> bool {
         .filter(|group| group.registry == "minecraft:worldgen/biome")
         .flat_map(|group| group.tags.iter())
         .any(|tag| tag.name == name && tag.ids.contains(&biome))
+}
+
+#[cfg(test)]
+mod jockey_tests {
+    use mc_bamboo_core::Vec3;
+
+    use super::*;
+    use crate::{BlockTicks, testing::TestLevel};
+
+    /// 蜘蛛骑士：`nextInt(100)==0` 的那一次取数之后生成骷髅、跑它自己的
+    /// `finalizeSpawn`，再 `startRiding`；世界随机源的两边取数顺序不能变。
+    #[test]
+    fn a_spider_jockey_mounts_a_skeleton() {
+        // 让 `world.random().nextInt(100)` 命中 0：线性同余的初始种子由 TestLevel 给，
+        // 直接换一个种子试到第一笔就是 0。
+        let mut found = false;
+        for seed in 0..200_i64 {
+            let mut level = TestLevel::new();
+            level.random = crate::random::LevelRandom::new(seed);
+            let mut ticks = BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            let before = world.random().seed();
+            let uid = summon_mob(&mut world, MobType::Spider, Vec3::new(0.5, 64.0, 0.5), None)
+                .expect("summon");
+            let after = world.random().seed();
+            let entities = world.live_entities();
+            let rider = entities.iter().find(|entity| entity.vehicle == Some(uid));
+            if let Some(rider) = rider {
+                assert!(
+                    rider
+                        .kind
+                        .mob()
+                        .is_some_and(|mob| mob.mob_type == MobType::Skeleton)
+                );
+                assert_ne!(before, after, "finalizeSpawn 取过世界随机数");
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "总有一个种子命中 1% 蜘蛛骑士");
+    }
 }

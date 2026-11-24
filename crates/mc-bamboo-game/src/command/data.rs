@@ -566,6 +566,42 @@ mod tests {
     }
 
     #[test]
+    fn data_get_entity_on_a_vehicle_includes_nested_passengers() {
+        let (global, mut region, _id) = world();
+        let cow = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(2.5, -60.0, 2.5)));
+        let rider = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(2.5, -60.0, 2.5)));
+        region
+            .entities
+            .with_mut_including_pending_dyn(rider, &mut |entity| {
+                entity.vehicle = Some(cow);
+            });
+        region
+            .entities
+            .with_mut_including_pending_dyn(cow, &mut |entity| {
+                if let Some(mob) = entity.kind.mob_mut() {
+                    mob.passengers.push(rider);
+                }
+            });
+        let source = data_source::Source {
+            kind: data_source::Kind::Entity,
+            block: None,
+            entity: Some(crate::command::select::Target::World(cow)),
+            storage: None,
+        };
+        let tag = data_source::read(&global, &region, &source).expect("vehicle NBT");
+        let text = tag.to_pretty_snbt();
+        assert!(text.contains("Passengers"), "{text}");
+        assert!(
+            text.contains("\"minecraft:cow\""),
+            "passenger id must be nested: {text}"
+        );
+    }
+
+    #[test]
     fn entity_merge_on_a_player_reports_the_official_error() {
         let (mut global, mut region, id) = world();
         let before = region.players[&id].inventory.slots.clone();

@@ -14,7 +14,10 @@ use super::{
     path::{EvaluatorFlags, Path, PathMob, PathRequest, find_path, max_y},
     pathfinding::{self, Action, NavRequest, Replay},
 };
-use crate::{entity::ctx::BlockView, shape::CollisionContext};
+use crate::{
+    entity::{EntityUid, ctx::BlockView},
+    shape::CollisionContext,
+};
 
 /// 导航要看的生物状态，每次调用前从生物身上拍一份。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,6 +30,13 @@ pub struct NavMob {
     /// `getAttributeValue(FOLLOW_RANGE)`。
     pub follow_range: f64,
     pub game_time: i64,
+    /// 这份导航（以及独立寻路阶段里挂起的请求）属于哪个实体。骑手借载具导航时
+    /// 是**载具**的 uid，路径按载具的尺寸和位置算，请求也按载具记账。
+    ///
+    /// Which entity owns this navigation, and therefore any pending path request
+    /// in the dedicated pathfinding phase. A controlling rider borrows the
+    /// vehicle's navigation, so this is the vehicle's uid.
+    pub owner_uid: EntityUid,
 }
 
 /// `PathNavigation` 的状态。
