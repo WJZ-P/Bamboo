@@ -949,6 +949,10 @@ struct MobLevel {
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 常驻 POI 索引表；未登记的场景保持为空，查询返回空。
+    ///
+    /// Persistent POI store; stays empty for scenes that do not register POIs.
+    poi: mc_bamboo_world::poi::PoiStore,
     entities: Entities,
     players: Vec<PlayerView>,
     /// 走真实受伤链路的玩家；有它时 `for_each_player` 和生物打玩家都交给它。
@@ -963,6 +967,37 @@ struct MobLevel {
     short_hunger: bool,
     /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
     ignore_bed_monsters: bool,
+}
+
+impl MobLevel {
+    /// 按 `(x, y, z)` 规范序把当前 `blocks` 里的全部 POI 方块登记到常驻 `poi` 表中，
+    /// 与 Java 侧 `FakeLevel.registerPoiFromBlocks()` 保持同一桶内插入序。
+    ///
+    /// Registers every POI block in `blocks` into the persistent `poi` store in
+    /// canonical `(x, y, z)` order, matching Java `FakeLevel.registerPoiFromBlocks()`.
+    pub(self) fn register_poi_from_blocks(&mut self) {
+        let mut entries: Vec<(BlockPos, u32)> = self
+            .blocks
+            .iter()
+            .map(|(&pos, &state)| (pos, state.0))
+            .collect();
+        entries.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z));
+        for (pos, state) in entries {
+            if let Some(kind) = mc_bamboo_data::poi::for_state(state) {
+                self.poi.add(pos, kind);
+            }
+        }
+    }
+}
+
+fn poi_occupancy(code: u8) -> Option<mc_bamboo_world::poi::Occupancy> {
+    use mc_bamboo_world::poi::Occupancy;
+    match code {
+        0 => Some(Occupancy::HasSpace),
+        1 => Some(Occupancy::IsOccupied),
+        2 => Some(Occupancy::Any),
+        _ => None,
+    }
 }
 
 impl LevelTables for MobLevel {
@@ -1013,45 +1048,65 @@ impl Level for MobLevel {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return false;
         }
+        let old = self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
         if state.is_air() {
             self.blocks.remove(&pos);
         } else {
             self.blocks.insert(pos, state);
         }
+        let _ = self.poi.on_block_state_change(pos, old.0, state.0);
         true
     }
 
-    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`。假世界没有
-    /// 常驻的 POI 表，这里按 `blocks` 里当前登记的蜂巢 / 蜂箱状态现建一份
-    /// `PoiStore`，让 `bee_locate` 场景走和真实世界同一套 POI 遍历序。
-    /// 只匹配 `beehive` / `bee_nest` 两类，别的 POI 状态不进候选。
+    /// 官方 `PoiManager.getInRange(#bee_home, center, radius, ANY)`，直接读常驻 `PoiStore`。
+    /// 没登记 POI 的场景表为空，返回空表。
+    ///
+    /// Vanilla `PoiManager.getInRange(#bee_home, center, radius, ANY)` backed by the
+    /// persistent `PoiStore`; empty when the scene registered no POIs.
     fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
-        use mc_bamboo_world::poi::{Occupancy, PoiStore};
-        let beehive = mc_bamboo_data::poi::poi_type_id("beehive");
-        let bee_nest = mc_bamboo_data::poi::poi_type_id("bee_nest");
-        // 官方同一 HashSet 桶内的记录保持插入序；`self.blocks` 是 HashMap，
-        // 迭代序不确定。两边都按 (x,y,z) 排序后登记，并列桶序才可复现。
-        let mut entries: Vec<(BlockPos, u32)> = self
-            .blocks
-            .iter()
-            .map(|(&pos, &state)| (pos, state.0))
-            .collect();
-        entries.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z));
-        let mut poi = PoiStore::new();
-        for (pos, state) in entries {
-            if let Some(kind) = mc_bamboo_data::poi::for_state(state) {
-                poi.add(pos, kind);
-            }
-        }
-        poi.get_in_range(
-            |kind| Some(kind) == beehive || Some(kind) == bee_nest,
+        mc_bamboo_game::poi_query::bee_homes_in_range(&self.poi, center, radius)
+            .into_iter()
+            .map(|(_, pos)| pos)
+            .collect()
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        self.poi.get_type(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        let Some(occupancy) = poi_occupancy(occupancy) else {
+            return 0;
+        };
+        self.poi
+            .get_count_in_range(|found| found == kind, center, radius, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        let occupancy = poi_occupancy(occupancy)?;
+        self.poi.find_closest(
+            |found| found == kind,
+            position_filter,
             center,
             radius,
-            Occupancy::Any,
+            occupancy,
         )
-        .into_iter()
-        .map(|record| record.pos)
-        .collect()
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        self.poi
+            .sections_to_village(mc_bamboo_world::light::SectionPos::of(pos))
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        self.poi.is_close_to_village(pos, sections)
     }
 
     fn is_unobstructed(&self, _boxes: &[mc_bamboo_blocks::Aabb]) -> bool {
@@ -1857,6 +1912,7 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(case.first_id),
             players: case
                 .players

@@ -16427,6 +16427,9 @@ public final class MobOracle {
 
         @Override
         public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
+            if (level.realPoi != null) {
+                return level.realPoi;
+            }
             if (poiManager == null) {
                 try {
                     var dir = java.nio.file.Files.createTempDirectory("bamboo-bee-poi-");
@@ -16481,6 +16484,31 @@ public final class MobOracle {
                 level.mobPackets.accept(packet);
             }
         }
+    }
+
+    /** 真实目标链 / 村民第 4 期用的 `PoiManager`：真索引、真票数、真村庄距离，
+     * 只把 `ensureLoadedAndValid` 留空（场景方块都在内存里，由夹具按规范序预先登记并随写同步）。 */
+    private static final class RealPoi extends net.minecraft.world.entity.ai.village.poi.PoiManager {
+        RealPoi(java.nio.file.Path dir, RegistryAccess registries) {
+            super(new net.minecraft.world.level.chunk.storage.RegionStorageInfo(
+                    "mob-oracle", Level.OVERWORLD, "poi"),
+                    dir,
+                    net.minecraft.util.datafix.DataFixers.getDataFixer(),
+                    false,
+                    registries,
+                    new net.minecraft.world.level.chunk.storage.ChunkIOErrorReporter() {
+                        @Override public void reportChunkLoadFailure(Throwable error,
+                                net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                ChunkPos pos) {}
+                        @Override public void reportChunkSaveFailure(Throwable error,
+                                net.minecraft.world.level.chunk.storage.RegionStorageInfo info,
+                                ChunkPos pos) {}
+                    },
+                    net.minecraft.world.level.LevelHeightAccessor.create(MIN_Y, HEIGHT));
+        }
+
+        @Override
+        public void ensureLoadedAndValid(net.minecraft.world.level.LevelReader level, BlockPos center, int radius) {}
     }
 
     /** `findLightningRod` 用的空 POI：`allocate` 不跑构造器，覆写 `findClosest` 直接返回空。 */
@@ -16602,6 +16630,11 @@ public final class MobOracle {
         private List<Entity> tracked;
         /** 空 POI 表；延迟到 `create`（`System.setOut` 重定向之后）再建，免得日志绑错流。 */
         private net.minecraft.world.entity.ai.village.poi.PoiManager emptyPoi;
+        /** 开启真 POI 的场景使用；空时退回 `emptyPoi`，不影响旧场景。 */
+        private RealPoi realPoi;
+        private java.nio.file.Path realPoiDir;
+        /** 方块实体表；开启后 `getBlockEntity(pos)` 能拿到蜂巢等活方块实体。 */
+        private Long2ObjectOpenHashMap<net.minecraft.world.level.block.entity.BlockEntity> blockEntities;
         private long gameTime;
         private int nextId;
         /** Bamboo 的岛实体种子源，按生成先后取数。 */
@@ -16675,7 +16708,84 @@ public final class MobOracle {
             // `allocate` skips field initializers; set superflat's default sea level -63 explicitly.
             level.injectedSeaLevel = -63;
             level.emptyPoi = allocate(EmptyPoi.class);
+            level.blockEntities = new Long2ObjectOpenHashMap<>();
             return level;
+        }
+
+        /** 开启真 POI 管理器，把 `blocks` 里已放好的方块按 (x,y,z) 规范序登记。 */
+        void enableRealPoi() throws Exception {
+            if (realPoi == null) {
+                realPoiDir = java.nio.file.Files.createTempDirectory("bamboo-mob-poi-");
+                realPoi = new RealPoi(realPoiDir, official.registries);
+            }
+            registerPoiFromBlocks();
+        }
+
+        /** 按 (x,y,z) 排序把 `blocks` 里的 POI 方块登记进 `realPoi`，与 Bamboo 桶内插入序对齐。 */
+        void registerPoiFromBlocks() {
+            if (realPoi == null) return;
+            List<BlockPos> keys = new ArrayList<>();
+            blocks.keySet().forEach((long packed) -> keys.add(BlockPos.of(packed)));
+            keys.sort(java.util.Comparator.comparingInt((BlockPos p) -> p.getX())
+                    .thenComparingInt(p -> p.getY())
+                    .thenComparingInt(p -> p.getZ()));
+            for (BlockPos pos : keys) {
+                BlockState state = blocks.get(pos.asLong());
+                if (state == null) continue;
+                var poiType = net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(state);
+                if (poiType.isPresent() && !realPoi.exists(pos, h -> true)) {
+                    realPoi.add(pos, poiType.get());
+                }
+            }
+        }
+
+        /** 同步方块变化到 `realPoi`（对应 `ServerLevel.updatePOIOnBlockStateChange`，同刻生效）。 */
+        void updateRealPoi(BlockPos pos, BlockState oldState, BlockState newState) {
+            if (realPoi == null) return;
+            var oldPoi = net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(oldState);
+            var newPoi = net.minecraft.world.entity.ai.village.poi.PoiTypes.forState(newState);
+            if (java.util.Objects.equals(oldPoi, newPoi)) return;
+            if (oldPoi.isPresent()) {
+                realPoi.remove(pos);
+            }
+            if (newPoi.isPresent()) {
+                realPoi.add(pos, newPoi.get());
+            }
+        }
+
+        /** 把方块实体登记进假世界表，供 `getBlockEntity(pos)` / `Bee.doesHiveHaveSpace` 读取。 */
+        void putBlockEntity(net.minecraft.world.level.block.entity.BlockEntity be) {
+            be.setLevel(this);
+            blockEntities.put(be.getBlockPos().asLong(), be);
+        }
+
+        /** 关闭真 POI 管理器并清理临时目录。 */
+        void closeRealPoi() {
+            if (realPoi != null) {
+                try { realPoi.close(); } catch (Exception ignored) {}
+                realPoi = null;
+            }
+            if (realPoiDir != null) {
+                try (var walk = java.nio.file.Files.walk(realPoiDir)) {
+                    walk.sorted(java.util.Comparator.reverseOrder())
+                            .forEach(p -> { try { java.nio.file.Files.deleteIfExists(p); } catch (Exception ignored) {} });
+                } catch (Exception ignored) {}
+                realPoiDir = null;
+            }
+        }
+
+        @Override
+        public net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(BlockPos pos) {
+            if (!isInsideBuildHeight(pos)) {
+                return null;
+            }
+            if (blockEntities != null) {
+                var be = blockEntities.get(pos.asLong());
+                if (be != null) {
+                    return be;
+                }
+            }
+            return super.getBlockEntity(pos);
         }
 
         @SuppressWarnings("unchecked")
@@ -16779,10 +16889,12 @@ public final class MobOracle {
             return realSky ? super.isBrightOutside() : injectedBrightOutside;
         }
 
-        /** 假世界没有 POI / 村庄数据；`MoveThroughVillageGoal.canUse` 在这里
-         *  短路，不取随机源，和 Bamboo 的空注册项一致。 */
+        /** 假世界默认没有 POI / 村庄数据；开启 `realPoi` 时走官方 `sectionsToVillage` 判定。 */
         @Override
         public boolean isCloseToVillage(BlockPos pos, int sections) {
+            if (realPoi != null) {
+                return sections <= 6 && sectionsToVillage(net.minecraft.core.SectionPos.of(pos)) <= sections;
+            }
             return false;
         }
 
@@ -16813,6 +16925,17 @@ public final class MobOracle {
                 levelEvent(null, 2012, pos, 15);
             }
             blocks.put(pos.asLong(), state);
+            if (blockEntities != null) {
+                var be = blockEntities.get(pos.asLong());
+                if (be != null) {
+                    if (be.isValidBlockState(state)) {
+                        be.setBlockState(state);
+                    } else {
+                        blockEntities.remove(pos.asLong());
+                    }
+                }
+            }
+            updateRealPoi(pos, old, state);
             chunkCache.clear();
             if (shapeUpdates && old != state && (flags & 16) == 0 && limit > 0) {
                 old.updateIndirectNeighbourShapes(this, pos, 2, 511);
@@ -16826,6 +16949,10 @@ public final class MobOracle {
         public boolean removeBlock(BlockPos pos, boolean moving) {
             BlockState old = getBlockState(pos);
             blocks.remove(pos.asLong());
+            if (blockEntities != null) {
+                blockEntities.remove(pos.asLong());
+            }
+            updateRealPoi(pos, old, Blocks.AIR.defaultBlockState());
             chunkCache.clear();
             if (shapeUpdates) {
                 // 官方 `Level.setBlock` → `markAndNotifyBlock` 的形状更新（flags 3 去掉 1 和 32）：
@@ -16862,6 +16989,9 @@ public final class MobOracle {
          *  这样 `isVillage` 为假、村庄段列表为空，两个村庄目标都走没有村庄的真实路径。 */
         @Override
         public int sectionsToVillage(net.minecraft.core.SectionPos section) {
+            if (realPoi != null) {
+                return realPoi.sectionsToVillage(section);
+            }
             return golemFixture ? Integer.MAX_VALUE : super.sectionsToVillage(section);
         }
 
@@ -17191,10 +17321,10 @@ public final class MobOracle {
             return tickRate;
         }
 
-        /** 假世界没有 POI 索引表；`findLightningRod` 查不到避雷针，走活物列表。 */
+        /** 默认返回空 POI 表；开启 `realPoi` 后返回真 `PoiManager`。 */
         @Override
         public net.minecraft.world.entity.ai.village.poi.PoiManager getPoiManager() {
-            return emptyPoi;
+            return realPoi != null ? realPoi : emptyPoi;
         }
 
         /** 假世界没有袭击系统；`SetRaidStatus` / `Villager.customServerAiStep` 查袭击返回 null。 */

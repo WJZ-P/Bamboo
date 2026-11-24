@@ -68,6 +68,7 @@ impl BeeCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::new(),
             players: vec![PlayerView {
                 uuid: Some(((1_u128 << 64) | 2).to_be_bytes()),

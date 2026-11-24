@@ -563,6 +563,7 @@ fn fixture(case: &Case, kind: MobType, broken: bool) -> Result<MobLevel, String>
         redstone: Default::default(),
         block_entities: BlockEntities::default(),
         block_events: BlockEvents::default(),
+        poi: mc_bamboo_world::poi::PoiStore::new(),
         entities: Entities::with_next_id(2),
         players: vec![player],
         game: None,

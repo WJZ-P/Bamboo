@@ -76,6 +76,7 @@ impl SquidCase {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: Entities::with_next_id(self.first_id),
             players: Vec::new(),
             game: None,

@@ -128,6 +128,7 @@ impl Report {
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            poi: mc_bamboo_world::poi::PoiStore::new(),
             entities: EntityStore::new(),
             players: Vec::new(),
             game: None,
@@ -142,6 +143,7 @@ impl Report {
                 .blocks
                 .insert(hive_pos(hive), BlockState(hive[3] as u32));
         }
+        level.register_poi_from_blocks();
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         for (index, frame) in case.frames.iter().enumerate() {
