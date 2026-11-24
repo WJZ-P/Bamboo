@@ -12,18 +12,22 @@
 
 mod riding;
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-use mc_bamboo_core::ChunkPos;
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3};
 
 use crate::{
+    BlockGameRules, BlockHit, WorldBorder,
     entity::{
         Entity, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
-        ctx::{self, BlockView, Command, CommandBuffer, EntityCtx, ThrottlePlan},
+        ctx::{self, BlockView, Command, CommandBuffer, EntityCtx, PlayerView, ThrottlePlan},
         mob::throttle,
         store::{KindState, section_range},
     },
-    shape::Aabb,
+    random::LegacyRandom,
+    shape::{Aabb, CollisionContext},
+    state::{BlockState, FluidState, SupportType},
     world::World,
 };
 
@@ -430,10 +434,295 @@ impl Shared<'_> {
     }
 }
 
+/// 并行模式下给 `(game_time, uid, serial)` 生成确定性的 64 位哈希（SplitMix64 混合），
+/// 避免并行驱动的世界随机数永远退化成常量 0，且完全不依赖线程数或其它实体的取数次序。
+///
+/// Deterministic 64-bit SplitMix64 hash of `(game_time, uid, serial)` for parallel
+/// world-random draws: varies per tick, entity and call serial without sharing any
+/// mutable state across threads or depending on thread count.
+pub(crate) fn parallel_random_bits(game_time: i64, uid: EntityUid, serial: u64) -> u64 {
+    const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut z = (game_time as u64)
+        .wrapping_mul(GAMMA)
+        .wrapping_add((i64::from(uid) as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(serial.wrapping_mul(0x94D0_49BB_1331_11EB))
+        .wrapping_add(GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// 并行算阶段里包在只读方块视图外层的每实体适配器：所有只读查询原样转发给
+/// `inner`，唯独四条世界随机入口改为按 `(game_time, uid, serial)` 哈希派生
+/// 确定性的 `LegacyRandom`，跨线程数逐位一致；精确驱动不经过这里。
+///
+/// Per-entity `BlockView` wrapper used during the parallel compute phase: forwards
+/// every read-only query to `inner`, while deriving the four level-random methods
+/// deterministically from `(game_time, uid, serial)` so results are bit-identical
+/// across thread counts. The precise driver does not use this wrapper.
+struct ParallelBlockView<'a> {
+    inner: &'a (dyn BlockView + Sync),
+    game_time: i64,
+    uid: EntityUid,
+    serial: Cell<u64>,
+}
+
+impl<'a> ParallelBlockView<'a> {
+    fn new(inner: &'a (dyn BlockView + Sync), uid: EntityUid) -> Self {
+        Self {
+            inner,
+            game_time: inner.game_time(),
+            uid,
+            serial: Cell::new(0),
+        }
+    }
+
+    fn next_random(&self) -> LegacyRandom {
+        let serial = self.serial.get();
+        self.serial.set(serial.wrapping_add(1));
+        LegacyRandom::new(parallel_random_bits(self.game_time, self.uid, serial) as i64)
+    }
+}
+
+impl BlockView for ParallelBlockView<'_> {
+    fn block_state(&self, pos: BlockPos) -> BlockState {
+        self.inner.block_state(pos)
+    }
+
+    fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
+        self.inner.moving_piston_shape(pos)
+    }
+
+    fn shulker_box_shape(&self, pos: BlockPos) -> Option<Aabb> {
+        self.inner.shulker_box_shape(pos)
+    }
+
+    fn fluid_state(&self, pos: BlockPos) -> FluidState {
+        self.inner.fluid_state(pos)
+    }
+
+    fn block_collisions(
+        &self,
+        box_: Aabb,
+        context: CollisionContext,
+    ) -> Vec<(BlockPos, Vec<Aabb>)> {
+        self.inner.block_collisions(box_, context)
+    }
+
+    fn find_supporting_block(
+        &self,
+        position: Vec3,
+        box_: Aabb,
+        context: CollisionContext,
+    ) -> Option<BlockPos> {
+        self.inner.find_supporting_block(position, box_, context)
+    }
+
+    fn clip_fall_damage_resetting(&self, from: Vec3, to: Vec3) -> bool {
+        self.inner.clip_fall_damage_resetting(from, to)
+    }
+
+    fn clip_collider_source_water(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        context: CollisionContext,
+    ) -> Option<BlockHit> {
+        self.inner.clip_collider_source_water(from, to, context)
+    }
+
+    fn clip_collider(&self, from: Vec3, to: Vec3, context: CollisionContext) -> Option<BlockHit> {
+        self.inner.clip_collider(from, to, context)
+    }
+
+    fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {
+        self.inner.is_face_sturdy(pos, face, support)
+    }
+
+    fn is_loaded(&self, pos: BlockPos) -> bool {
+        self.inner.is_loaded(pos)
+    }
+
+    fn is_in_world_bounds(&self, pos: BlockPos) -> bool {
+        self.inner.is_in_world_bounds(pos)
+    }
+
+    fn min_y(&self) -> i32 {
+        self.inner.min_y()
+    }
+
+    fn max_y(&self) -> i32 {
+        self.inner.max_y()
+    }
+
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
+        self.inner.brightness(layer, pos)
+    }
+
+    fn block_game_rules(&self) -> BlockGameRules {
+        self.inner.block_game_rules()
+    }
+
+    fn fluid_height(&self, fluid: FluidState, pos: BlockPos) -> f32 {
+        self.inner.fluid_height(fluid, pos)
+    }
+
+    fn world_border(&self) -> WorldBorder {
+        self.inner.world_border()
+    }
+
+    fn read_states(&self, min: BlockPos, max: BlockPos, out: &mut Vec<BlockState>) {
+        self.inner.read_states(min, max, out)
+    }
+
+    fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
+        self.inner.any_hopper_in(min, max)
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        self.inner.chunk_ticks_entities(chunk)
+    }
+
+    fn beehive_full(&self, pos: BlockPos) -> bool {
+        self.inner.beehive_full(pos)
+    }
+
+    fn has_block_entity(&self, pos: BlockPos) -> bool {
+        self.inner.has_block_entity(pos)
+    }
+
+    fn beehives_near(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
+        self.inner.beehives_near(center, radius)
+    }
+
+    fn bees_stay_in_hive(&self, pos: BlockPos) -> bool {
+        self.inner.bees_stay_in_hive(pos)
+    }
+
+    fn game_time(&self) -> i64 {
+        self.game_time
+    }
+
+    fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        self.inner.for_each_player(visit)
+    }
+
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.inner.entity_team(uuid)
+    }
+
+    fn sky_darken(&self) -> i32 {
+        self.inner.sky_darken()
+    }
+
+    fn difficulty(&self) -> i32 {
+        self.inner.difficulty()
+    }
+
+    fn sea_level(&self) -> i32 {
+        self.inner.sea_level()
+    }
+
+    fn can_see_sky(&self, pos: BlockPos) -> bool {
+        self.inner.can_see_sky(pos)
+    }
+
+    fn motion_blocking_y(&self, pos: BlockPos) -> i32 {
+        self.inner.motion_blocking_y(pos)
+    }
+
+    fn max_local_raw_brightness(&self, pos: BlockPos, darken: i32) -> i32 {
+        self.inner.max_local_raw_brightness(pos, darken)
+    }
+
+    fn is_raining_at(&self, pos: BlockPos) -> bool {
+        self.inner.is_raining_at(pos)
+    }
+
+    fn is_thundering(&self) -> bool {
+        self.inner.is_thundering()
+    }
+
+    fn snow_golem_melts(&self, pos: BlockPos) -> bool {
+        self.inner.snow_golem_melts(pos)
+    }
+
+    fn snow_layer_can_survive(&self, pos: BlockPos) -> bool {
+        self.inner.snow_layer_can_survive(pos)
+    }
+
+    fn is_bright_outside(&self) -> bool {
+        self.inner.is_bright_outside()
+    }
+
+    fn monsters_burn(&self) -> bool {
+        self.inner.monsters_burn()
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        self.inner.poi_type_at(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        self.inner
+            .poi_count_in_range(center, radius, kind, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        self.inner
+            .poi_find_closest(center, radius, kind, occupancy, position_filter)
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        self.inner.poi_sections_to_village(pos)
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        self.inner.poi_is_close_to_village(pos, sections)
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.inner.clock_ticks()
+    }
+
+    fn effective_difficulty(&self, pos: BlockPos) -> f32 {
+        self.inner.effective_difficulty(pos)
+    }
+
+    fn level_random_float(&self) -> f32 {
+        self.next_random().next_float()
+    }
+
+    fn level_random_int(&self, bound: i32) -> i32 {
+        self.next_random().next_int(bound)
+    }
+
+    fn level_random_boolean(&self) -> bool {
+        self.next_random().next_boolean()
+    }
+
+    fn hurt_mob_equipment(
+        &self,
+        stack: &mut mc_bamboo_protocol::item::ItemStack,
+        amount: i32,
+    ) -> bool {
+        let random = self.next_random();
+        crate::durability::hurt_equipment(stack, amount, &random)
+    }
+}
+
 /// 并行阶段的一个任务：只读公开快照、只写自己的公开和私有行、命令进自己的缓冲。
 struct ParallelCtx<'a> {
     uid: EntityUid,
     shared: &'a Shared<'a>,
+    blocks: &'a ParallelBlockView<'a>,
     commands: &'a mut CommandBuffer,
     plan: ThrottlePlan,
 }
@@ -448,7 +737,7 @@ impl EntityCtx for ParallelCtx<'_> {
     }
 
     fn blocks(&self) -> &dyn BlockView {
-        self.shared.blocks
+        self.blocks
     }
 
     fn other(&self, uid: EntityUid) -> Option<EntityPublic> {
@@ -814,11 +1103,14 @@ fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
         } else {
             false
         };
+        let uid = shared.uids[tree[within].index];
+        let parallel_blocks = ParallelBlockView::new(shared.blocks, uid);
         {
             let result = &mut tree[within].result;
             let mut ctx = ParallelCtx {
-                uid: shared.uids[tree[within].index],
+                uid,
                 shared,
+                blocks: &parallel_blocks,
                 commands: &mut result.commands,
                 plan: tree[within].plan,
             };
@@ -866,8 +1158,9 @@ fn run_tree(tree: &mut [TreeRow], shared: &Shared<'_>) {
             if !me.removed {
                 let result = &mut tree[within].result;
                 let mut ctx = ParallelCtx {
-                    uid: shared.uids[tree[within].index],
+                    uid,
                     shared,
+                    blocks: &parallel_blocks,
                     commands: &mut result.commands,
                     plan: tree[within].plan,
                 };

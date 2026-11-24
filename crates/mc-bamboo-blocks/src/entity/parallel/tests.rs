@@ -1058,3 +1058,114 @@ fn controlling_rider_is_bit_identical_in_precise_and_parallel_modes() {
         );
     }
 }
+
+/// 并行模式的世界随机数按 `(game_time, uid, serial)` 哈希派生：不再退化成恒定 0，
+/// 跨刻 / 跨实体 / 同刻连续调用各自不同，且任意线程数下含大脑生物（调 `level_random_*`）
+/// 的整组实体状态逐位一致。
+#[test]
+fn parallel_world_random_hashes_deterministically_across_thread_counts() {
+    use crate::entity::ctx::BlockView;
+    use crate::entity::mob::MobType;
+    use crate::entity::parallel::{ParallelBlockView, parallel_random_bits};
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    // 哈希值本身在 (game_time, uid, serial) 三个维度上各不相同，且不再退化成 0。
+    assert_ne!(
+        parallel_random_bits(10, 100, 0),
+        parallel_random_bits(10, 100, 1)
+    );
+    assert_ne!(
+        parallel_random_bits(10, 100, 0),
+        parallel_random_bits(10, 101, 0)
+    );
+    assert_ne!(
+        parallel_random_bits(10, 100, 0),
+        parallel_random_bits(11, 100, 0)
+    );
+
+    let base = SourceView::new(FlatSource {
+        floor_y: 64,
+        facts: ViewFacts {
+            game_time: 42,
+            ..ViewFacts::default()
+        },
+    });
+    let view_a = ParallelBlockView::new(&base, 1001);
+    let view_b = ParallelBlockView::new(&base, 1001);
+    let ints_a: Vec<i32> = (0..16).map(|_| view_a.level_random_int(1000)).collect();
+    let ints_b: Vec<i32> = (0..16).map(|_| view_b.level_random_int(1000)).collect();
+    assert_eq!(ints_a, ints_b, "同 (tick, uid, serial) 必须逐位可复现");
+    assert!(
+        ints_a.iter().any(|&v| v != 0),
+        "并行随机整数不能全退化成 0: {ints_a:?}"
+    );
+    let floats: Vec<f32> = (0..16).map(|_| view_a.level_random_float()).collect();
+    assert!(floats.iter().all(|&f| (0.0..1.0).contains(&f)));
+    assert!(floats.iter().any(|&f| f > 0.0));
+    let bools: Vec<bool> = (0..32).map(|_| view_a.level_random_boolean()).collect();
+    assert!(bools.iter().any(|&b| b) && bools.iter().any(|&b| !b));
+
+    // 多只走大脑（DoNothing / 行为时长 / 视线间隔会调 `level_random_int`）和鹦鹉
+    // （会调 `level_random_int` / `level_random_float`）在 1 / 2 / 4 / 8 线程和内联
+    // 执行器下跑 30 刻，结束时所有实体状态逐位一致。
+    fn run_scene(threads: usize) -> String {
+        let mut level = TestLevel::new();
+        level.set_entities(crate::entity::EntityStore::with_next_id(
+            crate::entity::FIRST_ENTITY_ID,
+        ));
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for x in -24..=24 {
+                for z in -24..=24 {
+                    world.set_block(BlockPos::new(x, 63, z), BlockState(blocks::GRASS_BLOCK), 0);
+                }
+            }
+            let kinds = [
+                MobType::Goat,
+                MobType::Frog,
+                MobType::Armadillo,
+                MobType::Parrot,
+                MobType::Camel,
+                MobType::Fox,
+            ];
+            for i in 0..24 {
+                let kind = kinds[i % kinds.len()];
+                let x = ((i % 6) as f64 - 2.5) * 4.0 + 0.5;
+                let z = ((i / 6) as f64 - 1.5) * 4.0 + 0.5;
+                world.spawn_entity(Entity::by_mob_type(kind, Vec3::new(x, 64.0, z)));
+            }
+        }
+        level.entities_mut_for_test().end_tick();
+
+        let executor: Box<dyn Executor> = if threads == 0 {
+            Box::new(InlineExecutor)
+        } else {
+            Box::new(WorkerPool::new("parallel-rng-test", threads).expect("起实体线程池"))
+        };
+        for tick in 1_i64..=30 {
+            ticks.set_time(tick);
+            let view = SourceView::new(FlatSource {
+                floor_y: 63,
+                facts: ViewFacts {
+                    game_time: tick,
+                    ..ViewFacts::default()
+                },
+            });
+            let mut world = World::new(&mut level, &mut ticks);
+            tick_entities_parallel(&view, &mut world, executor.as_ref());
+        }
+        let world = World::new(&mut level, &mut ticks);
+        format!("{:?}", world.live_entities())
+    }
+
+    let baseline = run_scene(0);
+    for threads in [1, 2, 4, 8] {
+        assert_eq!(
+            run_scene(threads),
+            baseline,
+            "threads={threads}: parallel world RNG must be bit-identical across thread counts"
+        );
+    }
+}
