@@ -353,3 +353,79 @@ fn rider_phase_is_bit_identical_in_precise_and_parallel_modes() {
         );
     }
 }
+
+/// 守卫者 / 远古守卫者：精确驱动与 1 / 2 / 8 线程并行驱动逐位一致。
+///
+/// Guardians / elder guardians: precise and 1/2/8-thread parallel drives are
+/// bit-identical.
+#[test]
+fn guardian_precise_and_parallel_drives_match() {
+    use crate::entity::mob::MobType;
+
+    fn state(level: &TestLevel, uid: i32) -> [i64; 10] {
+        let entity = level.entities().get(uid).expect("guardian still present");
+        let mob = entity.kind.mob().expect("a guardian");
+        [
+            entity.position.x.to_bits() as i64,
+            entity.position.y.to_bits() as i64,
+            entity.position.z.to_bits() as i64,
+            entity.delta.x.to_bits() as i64,
+            entity.delta.y.to_bits() as i64,
+            entity.delta.z.to_bits() as i64,
+            entity.y_rot.to_bits() as i64,
+            mob.health.to_bits() as i64,
+            i64::from(mob.guardian.attack_target),
+            i64::from(mob.guardian.moving),
+        ]
+    }
+
+    fn states(level: &TestLevel, uids: &[i32]) -> Vec<[i64; 10]> {
+        uids.iter().map(|&uid| state(level, uid)).collect()
+    }
+
+    let mut worlds = Vec::new();
+    for _ in 0..4 {
+        let (mut level, mut ticks) = level();
+        let uids = {
+            let mut world = World::new(&mut level, &mut ticks);
+            vec![
+                world.spawn_entity(Entity::by_mob_type(
+                    MobType::Guardian,
+                    Vec3::new(0.5, 64.0, 0.5),
+                )),
+                world.spawn_entity(Entity::by_mob_type(
+                    MobType::ElderGuardian,
+                    Vec3::new(6.5, 64.0, 2.5),
+                )),
+            ]
+        };
+        prepare(&mut level, &mut ticks, 1);
+        worlds.push((level, ticks, uids));
+    }
+
+    let ticks_to_run = 50;
+    {
+        let (level, ticks, _) = &mut worlds[0];
+        for tick in 1..=ticks_to_run {
+            ticks.set_time(tick);
+            World::new(level, ticks).tick_entities();
+        }
+    }
+    for (index, threads) in [1, 2, 8].into_iter().enumerate() {
+        let (level, ticks, _) = &mut worlds[index + 1];
+        for tick in 1..=ticks_to_run {
+            ticks.set_time(tick);
+            let view = test_view(level, tick);
+            let mut world = World::new(level, ticks);
+            tick_entities_parallel(&view, &mut world, &ScopedThreads { threads });
+        }
+    }
+    let base = states(&worlds[0].0, &worlds[0].2);
+    for (index, (level, _, uids)) in worlds.iter().enumerate().skip(1) {
+        assert_eq!(
+            states(level, uids),
+            base,
+            "第 {index} 份世界（并行）应当和精确驱动逐位一致"
+        );
+    }
+}
