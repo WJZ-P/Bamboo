@@ -285,18 +285,23 @@ pub(super) fn hive_valid(mob: &Mob, view: &dyn BlockView, me: &Entity) -> bool {
     let Some(hive) = mob.bee.hive_pos else {
         return false;
     };
-    !too_far(me, hive, 48.0)
+    !too_far(me, hive, 48)
         && view.has_block_entity(hive)
         && view.block_state(hive).is_tagged(block_tags::BEEHIVES)
 }
 
-fn closer_than(me: &Entity, pos: BlockPos, distance: f64) -> bool {
-    let center = Vec3::new(
-        f64::from(pos.x) + 0.5,
-        f64::from(pos.y) + 0.5,
-        f64::from(pos.z) + 0.5,
-    );
-    me.position.distance_to_sqr(center) < distance * distance
+/// `Bee.closerThan(BlockPos, int)`：`pos.closerThan(blockPosition(), distance)`（整数方块距离）。
+///
+/// `Bee.closerThan(BlockPos, int)`: integer block distance `pos.closerThan(blockPosition(), distance)`.
+fn closer_than(me: &Entity, pos: BlockPos, distance: i32) -> bool {
+    hive_dist_sqr(me.block_position(), pos) < f64::from(distance) * f64::from(distance)
+}
+
+/// `BlockPos.closerToCenterThan(Position, double)`：实体坐标到方块中心的距离。
+///
+/// `BlockPos.closerToCenterThan(Position, double)`: distance from entity position to block center.
+fn closer_to_center_than(me: &Entity, pos: BlockPos, distance: f64) -> bool {
+    me.position.distance_to_sqr(center_vec(pos)) < distance * distance
 }
 
 fn is_angry(mob: &Mob, now: i64) -> bool {
@@ -320,10 +325,19 @@ impl BeeGoal {
                 let Some(hive) = mob.bee.hive_pos else {
                     return false;
                 };
-                wants_to_enter_hive(me, mob, view)
-                    && closer_than(me, hive, 2.0)
-                    && view.has_block_entity(hive)
-                    && !view.beehive_full(hive)
+                if wants_to_enter_hive(me, mob, view)
+                    && closer_to_center_than(me, hive, 2.0)
+                    && hive_valid(mob, view, me)
+                {
+                    if view.beehive_full(hive) {
+                        // 官方 `BeeEnterHiveGoal.canBeeUse`：贴近后发现满巢直接清空 `hivePos`。
+                        // Vanilla `BeeEnterHiveGoal.canBeeUse`: clears `hivePos` when full.
+                        mob.bee.hive_pos = None;
+                    } else {
+                        return true;
+                    }
+                }
+                false
             }
             Self::ValidateHive {
                 cooldown,
@@ -369,10 +383,10 @@ impl BeeGoal {
                 let Some(hive) = mob.bee.hive_pos else {
                     return false;
                 };
-                !too_far(me, hive, 48.0)
+                !too_far(me, hive, 48)
                     && mob.home.is_none()
                     && wants_to_enter_hive(me, mob, view)
-                    && !closer_than(me, hive, 2.0)
+                    && !has_reached_hive(me, mob, hive)
                     && view.block_state(hive).is_tagged(block_tags::BEEHIVES)
             }
             Self::GoToFlower(_) => {
@@ -381,7 +395,7 @@ impl BeeGoal {
                 };
                 mob.home.is_none()
                     && mob.bee.ticks_without_nectar > 600
-                    && !closer_than(me, flower, 2.0)
+                    && !closer_than(me, flower, 2)
             }
             Self::GrowCrops => {
                 mob.bee.crops_grown < 10
@@ -556,10 +570,12 @@ impl BeeGoal {
                 t.travelling_ticks = 0;
                 t.ticks_stuck = 0;
                 mob.navigation.stop();
+                mob.navigation.max_visited_nodes_multiplier = 1.0;
             }
             Self::GoToFlower(t) => {
                 t.travelling_ticks = 0;
                 mob.navigation.stop();
+                mob.navigation.max_visited_nodes_multiplier = 1.0;
             }
             Self::HurtByOther | Self::BecomeAngryTarget => mob.target = None,
             Self::Attack
@@ -617,8 +633,19 @@ impl BeeGoal {
     }
 }
 
-fn too_far(me: &Entity, pos: BlockPos, distance: f64) -> bool {
+fn too_far(me: &Entity, pos: BlockPos, distance: i32) -> bool {
     !closer_than(me, pos, distance)
+}
+
+/// `BeeGoToHiveGoal.hasReachedTarget(BlockPos)`。
+fn has_reached_hive(me: &Entity, mob: &Mob, hive: BlockPos) -> bool {
+    if closer_than(me, hive, 2) {
+        return true;
+    }
+    mob.navigation
+        .path
+        .as_ref()
+        .is_some_and(|path| path.target == hive && path.reached && path.is_done())
 }
 
 fn center_vec(pos: BlockPos) -> Vec3 {
@@ -815,21 +842,18 @@ fn hive_tick(t: &mut HiveTravel, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         return;
     };
     t.travelling_ticks += 1;
-    if t.travelling_ticks > 2400 {
-        t.blacklist.push(hive);
-        if t.blacklist.len() > 3 {
-            t.blacklist.remove(0);
-        }
-        drop_hive(mob, me);
+    if t.travelling_ticks > goals::reduced_tick_delay(2400) {
+        drop_and_blacklist_hive(t, mob, me);
         return;
     }
     if !mob.navigation.is_done() {
         return;
     }
     let view = ctx.blocks();
-    if closer_than(me, hive, 16.0) {
+    if closer_than(me, hive, 16) {
         let nav = living::nav_mob(me, mob, view);
-        let reach = if closer_than(me, hive, 3.0) { 1 } else { 2 };
+        let reach = if closer_than(me, hive, 3) { 1 } else { 2 };
+        mob.navigation.max_visited_nodes_multiplier = 10.0;
         mob.navigation
             .set_next_action(super::pathfinding::Action::Inspect(
                 super::pathfinding::Use::BeeHive,
@@ -839,11 +863,14 @@ fn hive_tick(t: &mut HiveTravel, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // 请求刚挂起，下一刻再判断能不能到；等待期间沿旧路走。
             return;
         }
-        let reached = path.is_some();
         let _ = mob.navigation.move_to_path(view, &nav, path, 1.0);
+        let reached = mob
+            .navigation
+            .path
+            .as_ref()
+            .is_some_and(|path| path.reached);
         if !reached {
-            t.blacklist.push(hive);
-            drop_hive(mob, me);
+            drop_and_blacklist_hive(t, mob, me);
             return;
         }
         if let Some(last) = &t.last_path
@@ -861,11 +888,21 @@ fn hive_tick(t: &mut HiveTravel, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         } else {
             t.last_path = mob.navigation.path.clone();
         }
-    } else if too_far(me, hive, 48.0) {
+    } else if too_far(me, hive, 48) {
         drop_hive(mob, me);
     } else {
         pathfind_randomly_towards(me, mob, ctx, hive);
     }
+}
+
+fn drop_and_blacklist_hive(t: &mut HiveTravel, mob: &mut Mob, me: &mut Entity) {
+    if let Some(hive) = mob.bee.hive_pos {
+        t.blacklist.push(hive);
+        while t.blacklist.len() > 3 {
+            t.blacklist.remove(0);
+        }
+    }
+    drop_hive(mob, me);
 }
 
 fn drop_hive(mob: &mut Mob, _me: &mut Entity) {
@@ -878,21 +915,21 @@ fn flower_tick(t: &mut FlowerTravel, me: &mut Entity, mob: &mut Mob, ctx: &mut d
         return;
     };
     t.travelling_ticks += 1;
-    if t.travelling_ticks > 2400 {
+    if t.travelling_ticks > goals::reduced_tick_delay(2400) {
         drop_flower(mob, me);
         return;
     }
     if !mob.navigation.is_done() {
         return;
     }
-    if too_far(me, flower, 48.0) {
+    if too_far(me, flower, 48) {
         drop_flower(mob, me);
     } else {
         pathfind_randomly_towards(me, mob, ctx, flower);
     }
 }
 
-/// `Bee.pathfindRandomlyTowards`：`AirRandomPos.getPosTowards` + `moveTo(...,1.0)`。
+/// `Bee.pathfindRandomlyTowards`：`AirRandomPos.getPosTowards` + `moveTo(..., 1.0)`。
 fn pathfind_randomly_towards(
     me: &mut Entity,
     mob: &mut Mob,
@@ -900,14 +937,37 @@ fn pathfind_randomly_towards(
     target: BlockPos,
 ) {
     let view = ctx.blocks();
-    let pos = goals::default_random_pos_towards(
+    let dest = Vec3::new(
+        f64::from(target.x) + 0.5,
+        f64::from(target.y),
+        f64::from(target.z) + 0.5,
+    );
+    let mob_pos = me.block_position();
+    let dy = (dest.y as i32) - mob_pos.y;
+    let y_offset = if dy > 2 {
+        4
+    } else if dy < -2 {
+        -4
+    } else {
+        0
+    };
+    let mut horz = 6;
+    let mut vert = 8;
+    let dist =
+        (mob_pos.x - target.x).abs() + (mob_pos.y - target.y).abs() + (mob_pos.z - target.z).abs();
+    if dist < 15 {
+        horz = dist / 2;
+        vert = dist / 2;
+    }
+    let pos = goals::air_random_pos_towards(
         me,
         mob,
         view,
-        6,
-        8,
-        center_vec(target),
-        std::f32::consts::FRAC_PI_2,
+        horz,
+        vert,
+        y_offset,
+        dest,
+        f64::from(std::f32::consts::PI / 10.0_f32),
     );
     let Some(pos) = pos else {
         return;
@@ -920,12 +980,11 @@ fn pathfind_randomly_towards(
 fn wander_pos(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) -> Option<Vec3> {
     let direction = if hive_valid(mob, view, me)
         && let Some(hive) = mob.bee.hive_pos
-        && !closer_than_pos(me, hive, wander_threshold(mob))
+        && !closer_than(me, hive, wander_threshold(mob))
     {
-        let center = center_vec(hive);
-        Vec3::new(center.x - me.position.x, 0.0, center.z - me.position.z).normalize()
+        center_vec(hive).subtract(me.position).normalize()
     } else {
-        Vec3::view_vector(me.y_rot, mob.x_rot)
+        Vec3::view_vector(mob.y_rot_o, mob.x_rot_o)
     };
     let mut pos = goals::hover_random_pos(
         me,
@@ -935,7 +994,7 @@ fn wander_pos(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) -> Option<Ve
         7,
         direction.x,
         direction.z,
-        1.570_796_4,
+        f64::from(std::f32::consts::FRAC_PI_2),
         3,
         1,
     );
@@ -949,14 +1008,10 @@ fn wander_pos(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) -> Option<Ve
             -2,
             direction.x,
             direction.z,
-            std::f64::consts::PI / 2.0,
+            f64::from(std::f32::consts::FRAC_PI_2),
         );
     }
     pos
-}
-
-fn closer_than_pos(me: &Entity, pos: BlockPos, distance: i32) -> bool {
-    closer_than(me, pos, f64::from(distance))
 }
 
 fn wander_threshold(mob: &Mob) -> i32 {

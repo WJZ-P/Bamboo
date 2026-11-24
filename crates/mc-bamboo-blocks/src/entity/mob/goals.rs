@@ -5217,6 +5217,44 @@ pub(crate) fn hover_random_pos(
     })
 }
 
+/// `AirRandomPos.getPosTowards`：朝目标点方向找不在水里的空中落点。
+///
+/// `AirRandomPos.getPosTowards`: an air spot (excluding water) towards `towards`.
+#[expect(clippy::too_many_arguments, reason = "官方方法就是这几个参数")]
+pub(crate) fn air_random_pos_towards(
+    me: &mut Entity,
+    mob: &Mob,
+    view: &dyn BlockView,
+    horizontal: i32,
+    vertical: i32,
+    flying_height: i32,
+    towards: Vec3,
+    max_radians: f64,
+) -> Option<Vec3> {
+    let dir = towards.subtract(me.position);
+    let restricted = mob_restricted(me, mob, f64::from(horizontal));
+    pick_best(mob, view, || {
+        let direction = random_direction_within_radians(
+            me,
+            (0.0, f64::from(horizontal)),
+            vertical,
+            flying_height,
+            dir.x,
+            dir.z,
+            max_radians,
+        )?;
+        let pos = toward_direction(me, mob, f64::from(horizontal), direction);
+        if outside_limits(view, pos) || (restricted && !within_home(mob, pos)) {
+            return None;
+        }
+        let pos = move_up_out_of_solid(view, pos);
+        if has_malus(mob, view, pos) || view.fluid_state(pos).is_tagged(fluid_tags::WATER) {
+            return None;
+        }
+        Some(pos)
+    })
+}
+
 /// `AirAndWaterRandomPos.getPos`：朝视线方向找空中或水里的落点。
 ///
 /// `AirAndWaterRandomPos.getPos`: an air or water spot towards the facing.
