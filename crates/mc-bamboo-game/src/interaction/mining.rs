@@ -110,11 +110,11 @@ fn block_state(region: &Region, pos: BlockPos) -> BlockState {
 
 /// `player.getDestroySpeed(state)` 要读的几样东西。
 fn miner_of(level: &dyn Level, snapshot: &Snapshot) -> Miner {
-    Miner {
-        main_hand: snapshot.actor.main_hand,
-        on_ground: snapshot.on_ground,
-        eye_in_water: block_mining::is_eye_in_water(level, snapshot.actor.eye_position()),
-    }
+    Miner::plain(
+        snapshot.actor.main_hand,
+        snapshot.on_ground,
+        block_mining::is_eye_in_water(level, snapshot.actor.eye_position()),
+    )
 }
 
 /// 官方在 `incrementDestroyProgress` 里把进度换成裂纹阶段：`(int)(progress * 10.0F)`。
