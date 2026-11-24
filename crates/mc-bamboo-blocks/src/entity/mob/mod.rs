@@ -45,6 +45,7 @@ pub mod frog;
 pub mod goals;
 pub mod goat;
 mod golem_goals;
+pub mod guardian;
 pub mod infested;
 pub mod interact;
 pub mod iron_golem;
@@ -2569,6 +2570,10 @@ pub struct Mob {
     ///
     /// Axolotl state; default for every other mob.
     pub axolotl: axolotl::AxolotlState,
+    /// 守卫者 / 远古守卫者的专属状态，别的生物恒为缺省值。
+    ///
+    /// Guardian / elder guardian state; default for every other mob.
+    pub guardian: guardian::GuardianState,
     /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
     pub events: Vec<MobEvent>,
     /// `Entity.needsSync`：这一刻 `jumpFromGround` 跳过，移动包要带上速度。
@@ -2771,6 +2776,8 @@ impl Mob {
             MobType::Silverfish => silverfish::attributes(),
             MobType::Endermite => endermite::attributes(),
             MobType::Villager => Attributes::villager(),
+            MobType::Guardian => guardian::attributes(false),
+            MobType::ElderGuardian => guardian::attributes(true),
             kind => equine::attributes(kind),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
@@ -2865,6 +2872,7 @@ impl Mob {
             MobType::SnowGolem => snow_golem::goals(&mut navigation),
             MobType::Silverfish => silverfish::goals(&mut navigation),
             MobType::Endermite => endermite::goals(&mut navigation),
+            MobType::Guardian | MobType::ElderGuardian => guardian::goals(),
             kind => equine::goals(kind, &mut navigation),
         };
         if fish::is_fish(mob_type) {
@@ -2880,6 +2888,13 @@ impl Mob {
         if mob_type == MobType::Axolotl {
             // `AmphibiousPathNavigation(this, level)`。
             navigation.flags.amphibious = true;
+        }
+        if guardian::is_guardian(mob_type) {
+            // `Guardian.createNavigation` = `WaterBoundPathNavigation(this, level)`，
+            // 两参数构造，`allowBreaching` 缺省为 false。
+            // `Guardian.createNavigation` = `WaterBoundPathNavigation(this, level)`,
+            // the two-argument constructor, so `allowBreaching` defaults to false.
+            navigation.flags.swim = Some(false);
         }
         let target_goals = match mob_type {
             MobType::Cow
@@ -2927,6 +2942,7 @@ impl Mob {
             MobType::SnowGolem => snow_golem::target_goals(),
             MobType::Silverfish => silverfish::targets(),
             MobType::Endermite => endermite::targets(),
+            MobType::Guardian | MobType::ElderGuardian => guardian::target_goals(),
             kind => equine::targets(kind),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
@@ -3022,6 +3038,9 @@ impl Mob {
                     malus.set(mc_bamboo_data::PathType::Water, 0.0);
                     malus
                 }
+                // 守卫者必须在 `is_monster` 分支之前单列，否则水的代价不是 0。
+                // Guardians must precede the `is_monster` arm or water costs are not zero.
+                MobType::Guardian | MobType::ElderGuardian => guardian::malus(),
                 _ if mob_type.is_monster() => Malus::monster(),
                 MobType::Chicken => chicken::malus(),
                 MobType::Enderman => enderman::malus(),
@@ -3120,6 +3139,7 @@ impl Mob {
             fish: fish::FishState::new(),
             dolphin: dolphin::DolphinState::new(),
             axolotl: axolotl::AxolotlState::new(),
+            guardian: guardian::GuardianState::default(),
             events: Vec::new(),
             needs_sync: false,
             knockback_sync: false,
@@ -3151,6 +3171,11 @@ impl Mob {
             //
             // The trailing `setCanPickUpLoot(true)` in the `Villager` constructor.
             mob.can_pick_up_loot = true;
+        }
+        if mob_type == MobType::ElderGuardian {
+            // `ElderGuardian` 构造函数：`setPersistenceRequired()`。
+            // The `ElderGuardian` constructor: `setPersistenceRequired()`.
+            mob.persistence_required = true;
         }
         if mob_type == MobType::Salmon {
             // `Salmon` 的 `DATA_TYPE` 缺省是 `Variant.MEDIUM`。
