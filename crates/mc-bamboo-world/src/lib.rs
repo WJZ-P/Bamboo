@@ -9,6 +9,7 @@ pub mod director;
 pub mod flat;
 pub mod light;
 pub mod palette;
+pub mod poi;
 pub mod store;
 pub mod ticket;
 

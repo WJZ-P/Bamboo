@@ -61,6 +61,9 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::LlamaSpit(_) => kinds::LLAMA_SPIT,
         crate::entity::KindPublic::Egg(egg) => egg.kind.entity_type(),
         crate::entity::KindPublic::SplashPotion(_) => kinds::SPLASH_POTION,
+        // 官方闪电实体不写进存档（`EntityType.canSerialize` 为假），这里不导出它。
+        // Vanilla lightning bolts are not serialized; do not write them out.
+        crate::entity::KindPublic::LightningBolt(_) => return Ok(Tag::Compound(Vec::new())),
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -141,7 +144,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 tag::encode_block_state(BlockState(blocks::TNT)),
             );
         }
-        crate::entity::KindPublic::Mob(_) => {}
+        crate::entity::KindPublic::Mob(_) | crate::entity::KindPublic::LightningBolt(_) => {}
         crate::entity::KindPublic::Arrow(_) => {
             let crate::entity::KindState::Arrow(saved) = &state.kind else {
                 return Err(Error::new("mismatched arrow entity halves"));
@@ -291,6 +294,7 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                     },
                 })
             }
+            "minecraft:lightning_bolt" => EntityKind::LightningBolt(Box::default()),
             "minecraft:experience_orb" => {
                 let value = i32::from(tag::short_or(tag, "Value", 0));
                 let mut orb = ExperienceOrb::new(value);

@@ -1507,6 +1507,8 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         command_blocks: Default::default(),
         books: Default::default(),
         entities: Default::default(),
+        poi: Default::default(),
+        poi_version_changed: false,
     };
     if let Some(owner) = owner {
         let tags: Vec<Tag> = entries.into_iter().map(|entry| entry.4).collect();

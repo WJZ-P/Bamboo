@@ -508,6 +508,10 @@ pub trait LevelEntities {
     fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic>;
     /// 空间索引范围查询，按 uid 升序访问。
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// `getEntitiesOfClass` 的官方分区顺序（`SectionPos.asLong` 升序，段内加入顺序）。
+    ///
+    /// Vanilla `EntitySectionStorage` order for `getEntitiesOfClass`.
+    fn for_each_entity_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
     /// 同 [`Self::for_each_entity_in`]，但最多访问 `limit` 个。
     fn for_each_pushable_in(
         &self,
@@ -607,6 +611,10 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.entities_table().for_each_in(area, visit);
+    }
+
+    fn for_each_entity_in_section_order(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        self.entities_table().for_each_in_section_order(area, visit);
     }
 
     fn for_each_pushable_in(
@@ -764,6 +772,20 @@ pub trait Level: LevelSideState + LevelEntities {
     ///
     /// Apply the mob-spawn equipment enchantment provider from the game registry.
     fn enchant_mob_spawn_equipment(&self, _stack: &mut ItemStack, _special: f32) {}
+
+    /// 同一套附魔提供器，但用调用方给的随机源（陷阱骑士用骷髅自己的
+    /// `getRandom()`，不是 `level.random`）。默认退回世界随机源。
+    ///
+    /// Same provider with an explicit random source (trap riders use the
+    /// skeleton's own random, not the level random).
+    fn enchant_mob_spawn_equipment_from(
+        &self,
+        stack: &mut ItemStack,
+        special: f32,
+        _random: &dyn crate::random::RandomSource,
+    ) {
+        self.enchant_mob_spawn_equipment(stack, special);
+    }
 
     /// 只取一个 `next_float()`，供活塞音高这类「取数 → 算参数 → 发效果」的动作使用。
     /// 默认实现转发给 [`Self::random`]；录制包装覆盖它把这次取数记成可重放的效果。
@@ -972,6 +994,25 @@ pub trait Level: LevelSideState + LevelEntities {
     /// The biome registry id at this cell, for mob variants. Plains by default.
     fn biome_id(&self, _pos: BlockPos) -> i32 {
         mc_bamboo_data::registries::biome::PLAINS
+    }
+
+    /// 雷击找避雷针时的 POI 替代查询：返回离 `center` 最近的露天避雷针上方一格。
+    /// 默认逐格扫已加载的区块；游戏层覆盖成按区块段调色板先筛。以后换成正式 POI 查询。
+    ///
+    /// A stand-in for the POI query used when lightning looks for a rod: return the
+    /// cell above the nearest exposed lightning rod. The default scans loaded
+    /// chunks cell by cell; the game layer narrows it down with section palettes.
+    /// A full POI index replaces this later.
+    fn lightning_rod_near(&self, center: BlockPos, radius: i32) -> Option<BlockPos> {
+        crate::lightning_rod::nearest_lightning_rod_from(self, center, radius)
+    }
+
+    /// 这个区块现在有没有加载。默认都加载；已加载模式的世界覆盖它。
+    ///
+    /// Whether this chunk is currently loaded. All chunks are loaded by default;
+    /// loaded-mode worlds override it.
+    fn chunk_is_loaded(&self, _chunk: ChunkPos) -> bool {
+        true
     }
 
     /// `ChunkGenerator.getMobsAt` 的加权表。默认取群系表；对拍场景可以固定候选表。
@@ -1254,6 +1295,49 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 区块的 `InhabitedTime`：区域难度读它。默认 0。
     fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
         0
+    }
+
+    /// `PoiManager.existsAtPosition` / `getType`：这一格登记的 POI 类型 ID，
+    /// `None` 表示没有。默认没有（只读测试视图）。
+    fn poi_type_at(&self, _pos: BlockPos) -> Option<u8> {
+        None
+    }
+
+    /// `PoiManager.getCountInRange`：以 `center` 为心、`radius` 格内
+    /// 指定类型 / 占用口径的记录条数。默认 0。
+    ///
+    /// `occupancy`：`0 = HAS_SPACE`、`1 = IS_OCCUPIED`、`2 = ANY`。
+    fn poi_count_in_range(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+    ) -> usize {
+        0
+    }
+
+    /// `PoiManager.findClosest`：按官方遍历序取距离最近的一格；并列时取遍历序
+    /// 第一个。默认没有。
+    fn poi_find_closest(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+        _position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        None
+    }
+
+    /// `ServerLevel.sectionsToVillage(SectionPos.of(pos))`。默认 7（不可达）。
+    fn poi_sections_to_village(&self, _pos: BlockPos) -> i32 {
+        7
+    }
+
+    /// `ServerLevel.isCloseToVillage(pos, sections)`。默认假。
+    fn poi_is_close_to_village(&self, _pos: BlockPos, _sections: i32) -> bool {
+        false
     }
 
     /// `Level.isDarkOutside()`：没有固定时间的维度里 `skyDarken >= 4`。

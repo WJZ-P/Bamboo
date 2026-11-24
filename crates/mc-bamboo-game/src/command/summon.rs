@@ -102,6 +102,23 @@ fn summon(
     } else {
         None
     };
+    if entity == "minecraft:lightning_bolt" {
+        let (result, effects) = {
+            let (mut level, ticks) = region.block_level();
+            let mut world = World::new(&mut level, ticks);
+            let bolt = mc_bamboo_blocks::entity::lightning::entity(position, false);
+            let result = Ok::<i32, SummonError>(world.spawn_entity(bolt));
+            let effects = world.into_effects();
+            (result, effects)
+        };
+        interaction::send_effects(region, Some(id), &effects);
+        return match result {
+            Ok(_) => Ok(()),
+            Err(SummonError::InvalidPosition) => Err(fail("commands.summon.invalidPosition")),
+            Err(SummonError::Failed(_)) => Err(fail("commands.summon.failed")),
+            Err(SummonError::DuplicateUuid) => Err(fail("commands.summon.failed.uuid")),
+        };
+    }
     let Some(kind) = MobType::by_name(&entity) else {
         return Err(fail("commands.summon.failed"));
     };

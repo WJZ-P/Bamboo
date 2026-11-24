@@ -24,7 +24,11 @@ use crate::{
     world::World,
 };
 
-use super::{Entity, EntityPublic, EntityUid, FallingBlock, mob::throttle};
+use super::{
+    Entity, EntityPublic, EntityUid, FallingBlock,
+    lightning::LightningTick,
+    mob::{skeleton_horse::TrapSpawn, throttle},
+};
 
 /// 只读的方块/碰撞视图。实体逻辑和寻路只经它读世界；并行阶段共享同一份只读快照。
 ///
@@ -256,6 +260,42 @@ pub trait BlockView {
     /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线求值。
     fn monsters_burn(&self) -> bool {
         crate::sky::monsters_burn(self.clock_ticks())
+    }
+
+    /// POI 查询族，和 [`crate::Level`] 上的同名方法给同一份答案
+    /// （精确 / 并行驱动不分叉）。默认没有 POI 数据。
+    fn poi_type_at(&self, _pos: BlockPos) -> Option<u8> {
+        None
+    }
+
+    /// `occupancy`：0 = HAS_SPACE，1 = IS_OCCUPIED，2 = ANY。
+    fn poi_count_in_range(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+    ) -> usize {
+        0
+    }
+
+    fn poi_find_closest(
+        &self,
+        _center: BlockPos,
+        _radius: i32,
+        _kind: u8,
+        _occupancy: u8,
+        _position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        None
+    }
+
+    fn poi_sections_to_village(&self, _pos: BlockPos) -> i32 {
+        7
+    }
+
+    fn poi_is_close_to_village(&self, _pos: BlockPos, _sections: i32) -> bool {
+        false
     }
 
     /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
@@ -516,6 +556,35 @@ impl BlockView for World<'_> {
                 })
             })
         })
+    }
+
+    fn poi_type_at(&self, pos: BlockPos) -> Option<u8> {
+        self.level().poi_type_at(pos)
+    }
+
+    fn poi_count_in_range(&self, center: BlockPos, radius: i32, kind: u8, occupancy: u8) -> usize {
+        self.level()
+            .poi_count_in_range(center, radius, kind, occupancy)
+    }
+
+    fn poi_find_closest(
+        &self,
+        center: BlockPos,
+        radius: i32,
+        kind: u8,
+        occupancy: u8,
+        position_filter: &dyn Fn(BlockPos) -> bool,
+    ) -> Option<BlockPos> {
+        self.level()
+            .poi_find_closest(center, radius, kind, occupancy, position_filter)
+    }
+
+    fn poi_sections_to_village(&self, pos: BlockPos) -> i32 {
+        self.level().poi_sections_to_village(pos)
+    }
+
+    fn poi_is_close_to_village(&self, pos: BlockPos, sections: i32) -> bool {
+        self.level().poi_is_close_to_village(pos, sections)
     }
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
@@ -807,6 +876,14 @@ pub enum Command {
     SplashPotionImpact {
         hit: super::splash_potion::SplashHit,
     },
+    /// 闪电这一刻的落地事实：引火、铜除锈、命中实体。
+    ///
+    /// One lightning tick: fires, copper cleaning and entity hits.
+    LightningTick(LightningTick),
+    /// 骷髅陷阱马被玩家触发：视觉闪电和四名骷髅骑士。
+    ///
+    /// A skeleton trap triggered by a player: a visual bolt and four riders.
+    SkeletonTrap(TrapSpawn),
     /// 女巫扔一瓶药水：`Projectile.spawnProjectileUsingShoot`。
     ///
     /// The witch throws one potion: `Projectile.spawnProjectileUsingShoot`.
@@ -1305,6 +1382,8 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             }
         }
         Command::SplashPotionImpact { hit } => super::splash_potion::impact(me, world, hit),
+        Command::LightningTick(facts) => super::lightning::apply(me, world, facts),
+        Command::SkeletonTrap(facts) => super::mob::skeleton_horse::spawn_trap(world, facts),
         Command::ThrowSplashPotion { shot } => {
             world.spawn_splash_shot(&shot);
         }

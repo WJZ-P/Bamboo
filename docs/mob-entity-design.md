@@ -2947,7 +2947,43 @@ cargo test -p mc-bamboo-blocks --release --lib mob_stress -- --ignored --nocaptu
   数字：前者省不了几次搜索，后者是伤害不是推力，第 4 步的挤压上限要限的是
   每条 `PushMob` 命令，不是 `maxEntityCramming` 规则本身。
 
-## 5.23 蠹虫、末影螨与虫蚀方块（silverfish，2026-11-22）
+### 5.23 闪电、避雷针、骷髅陷阱马、骷髅马与僵尸马（2026-11-23，分支 `lightning`）
+
+按 5.12 的接入清单做的最小追加：`MobType` 加两种（骷髅马、僵尸马；合流后共 50 种），
+`EntityKind` / `KindPublic` / `KindState` / `KindData` 增一个 `LightningBolt` 变体。
+生成器 `Extractor.java` 补导出两种马的 `createAttributes` 值和 `BABY_DIMENSIONS`；
+`entity_types.rs` 由 `extract` 重生成。行为都在新文件里：
+`entity/lightning.rs`（构造 / tick / 引火 / 铜除锈 / 避雷针 / `thunderHit`）、
+`entity/mob/thunder.rs`（苦力怕和哞菇的覆盖层）、
+`entity/mob/skeleton_horse.rs`（陷阱目标、属性、存档字段）、
+`lightning_rod.rs`（POI 查询的替代实现）。
+
+`tick_thunder` 现在照字节码做完整落点选择并生成实体，取数顺序和原来一致；
+`lightning_rod_near` 是 `Level` 的默认方法，游戏层 `RegionLevel` 覆盖成
+已加载区块 + 段调色板快路径，不新增索引表、不动存档或 `ChunkStore`。
+`LightningBolt.tick` 把写世界和 `level.random` 取数收进一条 `Command::LightningTick`，
+精确与并行两种驱动共用同一份落地逻辑；`SkeletonTrapGoal` 因 Bamboo 的目标选择器
+有隔刻判定，改为在 `living::tick` 尾部每刻分派一次，落地走 `Command::SkeletonTrap`。
+
+对拍：`mob-oracle --only lightning` / `--only trap` 共 6 个场景（闪电引火、
+视觉闪电、铜除锈、避雷针、陷阱触发和不触发），逐刻比 `life` / `flashes` /
+实体随机源、世界随机源、场景方块末态、`isTrap` / `isTame`，两处
+`--break-self-test` 均能抓到不一致。全量 `mob-oracle` 只剩这台 ARM Mac 的
+12 处 `Mth.COS_TAB` 已知差异；`natural-spawn java` 1727 例 0 不一致；
+`oracle java --weather clear` 与雷暴夜晚批都 0 失败。
+
+后续补充（同一分支）：`findLightningTargetAround` 的活物列表改按官方
+`EntitySectionStorage` 的 `SectionPos.asLong` 升序（x → z → y，段内加入顺序），
+`thunderHit` 的着火按字节码修正为「设 old+1，只有 i32 回绕才点燃 8 秒」；
+新增 `thunder_target` / `thunder_hit` / `trap_gear` / `undead_horse*` 场景并逐位对拍。
+并行驱动补上「算阶段标记移除的实体，其最后一刻命令仍要落地」的修复与双驱动单测。
+陷阱骑士的 `finalizeSpawn` 装备和 `MOB_SPAWN_EQUIPMENT` 附魔照字节码接好，
+随机源用骷髅自己的 `getRandom()`。
+
+这一轮没做的：村民 / 猪的雷击转化，生物骑生物（骑士的 `startRiding` 与乘客同步），
+`LIGHTNING_STRIKE` 游戏事件和天气层雷声，骷髅马 / 僵尸马的 `natural-spawn` 新场景。
+见 README 的已知限制。
+## 5.25 蠹虫、末影螨与虫蚀方块（silverfish，2026-11-22）
 
 **接入清单照 5.12**：`MobType` 枚举 / `ALL`（46 → 48，只追加两项）/ `entity_type()` / `name()` /
 `dimensions()` / `is_monster()` / `full_target_rules()`（末影螨）/ `emits_movement_sounds()`
@@ -2997,7 +3033,7 @@ target_goals 三条分派；`spawn.rs::finalize_spawn_in_group` 复用 `Mob.fina
 细雪攀爬目标只占注册位；末影螨的 `PORTAL` 粒子是客户端专用；要塞的蠹虫刷怪笼
 （仓库还没有通用刷怪笼）没建模。
 
-### 5.24 铁傀儡、雪傀儡和雪球（`golem` 分支）
+### 5.26 铁傀儡、雪傀儡和雪球（`golem` 分支）
 
 `MobType::ALL` 合并后是 50 种（本分支追加两种）；两种傀儡都不在群系刷怪表里，只由 `/summon`、刷怪蛋和
 雕刻南瓜图案生成。村庄相关（村民召唤、送花、回村、村庄闲逛、村庄守卫的搜索）不做，

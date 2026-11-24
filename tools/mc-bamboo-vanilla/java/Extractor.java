@@ -284,6 +284,7 @@ public final class Extractor {
             root.add("syncedRegistries", syncedRegistries(layers));
             root.add("tags", tags(layers));
             root.add("blockStates", blockStates());
+            root.add("poiTypes", poiTypes());
             root.add("blocks", blocks());
             root.add("items", items());
             root.add("entityTypes", entityTypes());
@@ -748,6 +749,27 @@ public final class Extractor {
         return states;
     }
 
+    /**
+     * `PoiTypes.bootstrap` 注册的全部 POI 类型，顺序是注册表 ID。
+     * 每种类型的匹配方块状态用全局状态 ID 列出，Bamboo 的 `forState` 直接按下标查。
+     */
+    private static JsonArray poiTypes() {
+        JsonArray types = new JsonArray();
+        BuiltInRegistries.POINT_OF_INTEREST_TYPE.forEach(type -> {
+            JsonObject object = new JsonObject();
+            object.addProperty("name", BuiltInRegistries.POINT_OF_INTEREST_TYPE.getKey(type).toString());
+            object.addProperty("maxTickets", type.maxTickets());
+            object.addProperty("validRange", type.validRange());
+            JsonArray states = new JsonArray();
+            for (BlockState state : type.matchingStates()) {
+                states.add(Block.BLOCK_STATE_REGISTRY.getId(state));
+            }
+            object.add("states", states);
+            types.add(object);
+        });
+        return types;
+    }
+
     /** 按注册表 ID 排列的方块。除了状态 ID，其余字段都只看默认状态。 */
     private static JsonArray blocks() throws ReflectiveOperationException {
         JsonArray blocks = new JsonArray();
@@ -1183,6 +1205,19 @@ public final class Extractor {
         out.addProperty("muleEyeHeight", net.minecraft.world.entity.EntityTypes.MULE.getDimensions().eyeHeight());
         out.addProperty("donkeyEyeHeight", net.minecraft.world.entity.EntityTypes.DONKEY.getDimensions().eyeHeight());
         out.addProperty("horseEyeHeight", net.minecraft.world.entity.EntityTypes.HORSE.getDimensions().eyeHeight());
+        var skeletonHorse = net.minecraft.world.entity.animal.equine.SkeletonHorse.createAttributes().build();
+        var zombieHorse = net.minecraft.world.entity.animal.equine.ZombieHorse.createAttributes().build();
+        out.addProperty("skeletonHorseMaxHealth", skeletonHorse.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("skeletonHorseMovementSpeed", skeletonHorse.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("zombieHorseMaxHealth", zombieHorse.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("skeletonHorseBabyWidth", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.SkeletonHorse.class, "BABY_DIMENSIONS", null)).width());
+        out.addProperty("skeletonHorseBabyHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.SkeletonHorse.class, "BABY_DIMENSIONS", null)).height());
+        out.addProperty("skeletonHorseBabyEyeHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.SkeletonHorse.class, "BABY_DIMENSIONS", null)).eyeHeight());
+        out.addProperty("skeletonHorseEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON_HORSE.getDimensions().eyeHeight());
+        out.addProperty("zombieHorseEyeHeight", net.minecraft.world.entity.EntityTypes.ZOMBIE_HORSE.getDimensions().eyeHeight());
+        out.addProperty("zombieHorseBabyWidth", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.ZombieHorse.class, "BABY_DIMENSIONS", null)).width());
+        out.addProperty("zombieHorseBabyHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.ZombieHorse.class, "BABY_DIMENSIONS", null)).height());
+        out.addProperty("zombieHorseBabyEyeHeight", ((net.minecraft.world.entity.EntityDimensions) readField(net.minecraft.world.entity.animal.equine.ZombieHorse.class, "BABY_DIMENSIONS", null)).eyeHeight());
         var equine = "net.minecraft.world.entity.animal.equine.";
         out.addProperty("horseFlags", accessorId(equine + "AbstractHorse", "DATA_ID_FLAGS"));
         out.addProperty("horseVariant", accessorId(equine + "Horse", "DATA_ID_TYPE_VARIANT"));

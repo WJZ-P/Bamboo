@@ -24,6 +24,7 @@ use mc_bamboo_world::{
     column::{ChunkColumn, ChunkColumnParts},
     director::ChunkBundle,
     light::generate::GeneratedLight,
+    poi::PoiColumn,
 };
 
 use crate::{
@@ -79,6 +80,12 @@ pub struct RegionColumn {
     books: BTreeMap<BlockPos, Book>,
     /// 这个区块里的下落方块、点燃的 TNT 和掉落物。
     entities: ChunkEntities,
+    /// 这一列按 y 分好组的 POI 段。和方块一起搬、单独存到 `poi/`；
+    /// 改动不进 `ChunkRevision`，不触发区块包重发。
+    poi: PoiColumn,
+    /// 盘上的 POI `DataVersion` 不是当前版本：交付时按官方
+    /// `PackedChunk.versionChanged` 给这一列标脏。
+    poi_version_changed: bool,
 }
 
 /// 组装盒子之前攒齐的几张表。`ChunkBlockEntities` / `ChunkRedstone` 没有 `Default`，
@@ -94,6 +101,9 @@ struct Parts {
     command_blocks: BTreeMap<BlockPos, CommandBlockData>,
     books: BTreeMap<BlockPos, Book>,
     entities: Option<ChunkEntities>,
+    /// 默认空；`take_columns` 和存盘解码各自填值。
+    poi: PoiColumn,
+    poi_version_changed: bool,
 }
 
 impl Parts {
@@ -108,6 +118,8 @@ impl Parts {
             command_blocks: self.command_blocks,
             books: self.books,
             entities: self.entities.expect("实体盒子已经取出"),
+            poi: self.poi,
+            poi_version_changed: self.poi_version_changed,
         })
     }
 }
@@ -147,6 +159,8 @@ pub struct RegionColumnParts {
     pub command_blocks: BTreeMap<BlockPos, CommandBlockData>,
     pub books: BTreeMap<BlockPos, Book>,
     pub entities: ChunkEntities,
+    pub poi: PoiColumn,
+    pub poi_version_changed: bool,
 }
 
 /// [`RegionColumn::parts`] 的只读视图。
@@ -160,6 +174,8 @@ pub struct RegionColumnView<'a> {
     pub command_blocks: &'a BTreeMap<BlockPos, CommandBlockData>,
     pub books: &'a BTreeMap<BlockPos, Book>,
     pub entities: &'a ChunkEntities,
+    pub poi: &'a PoiColumn,
+    pub poi_version_changed: bool,
 }
 
 /// 判断「原样」用的生成器输出盒子。全局缓存一份，构造时算一次模板光照。
@@ -229,6 +245,10 @@ impl super::chunk_content::EncodeParts for RegionColumn {
     fn preserved_entities(&self) -> &[Tag] {
         self.entities.preserved()
     }
+
+    fn poi(&self) -> Option<&mc_bamboo_world::poi::PoiColumn> {
+        Some(&self.poi)
+    }
 }
 
 /// 取走并清零 `is_pristine` 累计的纳秒，给世界线程的剖析器用。
@@ -251,7 +271,9 @@ impl ChunkBundle for RegionColumn {
             && self.block_items.is_empty()
             && self.command_blocks.is_empty()
             && self.books.is_empty()
-            && self.entities.is_empty();
+            && self.entities.is_empty()
+            && self.poi.is_empty()
+            && !self.poi_version_changed;
         let result = upper_empty && self.column.untouched();
         // 调试构建里用逐项比较复核：哪条写路径没换版本号，测试会立刻炸出来。
         debug_assert!(
@@ -284,6 +306,8 @@ impl RegionColumn {
             command_blocks: BTreeMap::new(),
             books: BTreeMap::new(),
             entities: ChunkEntities::default(),
+            poi: PoiColumn::default(),
+            poi_version_changed: false,
         }
     }
 
@@ -299,6 +323,8 @@ impl RegionColumn {
             command_blocks: parts.command_blocks,
             books: parts.books,
             entities: parts.entities,
+            poi: parts.poi,
+            poi_version_changed: parts.poi_version_changed,
         })
     }
 
@@ -344,6 +370,10 @@ impl RegionColumn {
             self.books = source.books;
         }
         self.entities = source.entities;
+        // POI 是盘上的第三份数据；和 pendingBlockEntities 一样，续跑阶段换方块层时
+        // 必须原样带回，否则读盘后村庄判定会丢掉所有已登记的 POI。
+        self.poi = source.poi;
+        self.poi_version_changed = source.poi_version_changed;
     }
 
     /// 生成期刷怪的结果放进这个盒子（官方 `ProtoChunk.addEntity`）。和读盘的行一样，
@@ -374,7 +404,29 @@ impl RegionColumn {
             command_blocks: &self.command_blocks,
             books: &self.books,
             entities: &self.entities,
+            poi: &self.poi,
+            poi_version_changed: self.poi_version_changed,
         }
+    }
+
+    /// 盘上的 POI `DataVersion` 变了：交付时按 `PackedChunk.versionChanged` 标脏。
+    pub fn set_poi_version_changed(&mut self, changed: bool) {
+        self.poi_version_changed = changed;
+    }
+
+    /// `Region` 放进区块时读这个标志，按区块标脏。
+    pub fn poi_version_changed(&self) -> bool {
+        self.poi_version_changed
+    }
+
+    /// 读盘解码把这一列的 POI 段装进盒子（同 `adopt_upper_content` 的路径）。
+    pub fn set_poi(&mut self, poi: PoiColumn) {
+        self.poi = poi;
+    }
+
+    /// 这一列的 POI 段（只读）。
+    pub fn poi(&self) -> &PoiColumn {
+        &self.poi
     }
 
     /// 把生成期算好的天空光 / 方块光装进这一柱，并标记 `isLightOn=true`。
@@ -613,6 +665,14 @@ impl Region {
         }
         self.profiler.end_sub();
 
+        // POI 段和方块同批搬；`take_column` 之后这一列的段不再属于本岛。
+        self.profiler.start_sub(SubPhase::ReclaimTables);
+        for (&pos, part) in &mut parts {
+            part.poi = self.poi.take_column(pos);
+            part.poi_version_changed = false;
+        }
+        self.profiler.end_sub();
+
         // 丢掉属于这些区块的、还没发出去的变化和区块包的缓存。
         self.profiler.start_sub(SubPhase::ReclaimTables);
         for &pos in chunks {
@@ -664,11 +724,17 @@ impl Region {
             command_blocks,
             books,
             entities,
+            poi,
+            poi_version_changed,
         } = *column;
         self.profiler.start_sub(SubPhase::DeliverStorage);
         self.chunks
             .insert_column(pos, world)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
+        self.poi.install_column(pos, poi);
+        if poi_version_changed {
+            self.poi.mark_dirty(pos);
+        }
         self.profiler.end_sub();
 
         self.profiler.start_sub(SubPhase::DeliverTables);
@@ -697,7 +763,8 @@ impl Region {
     /// Director 交付一个完整的区块束到 `pos`（已加载模式）。
     ///
     /// 把世界层和上层内容装进 region（按目标世界的方块重算段状态），
-    /// 再把这个位置登记为已加载。
+    /// 再把这个位置登记为已加载。交付末尾照官方
+    /// `PoiManager.checkConsistencyWithBlocks` 校验每个无效段：按方块重建并保留票数。
     ///
     /// 交付只往各张表里**插入**，不需要「没有实体被借出去」这个取出才有的前提；
     /// [`Self::take_columns`] 仍用完整的 `ready_to_move_columns`。
@@ -716,6 +783,12 @@ impl Region {
         // 按「这一柱已经在了」把 3×3 段状态一次算对，`mark_loaded` 不再重算第二遍。
         self.chunks.mark_loaded(pos);
         self.insert_column_unchecked(pos, column);
+        let chunks = &self.chunks;
+        self.poi.check_loaded_column(
+            |y| chunks.section_may_have_poi(pos, y),
+            |at| chunks.block(at),
+            pos,
+        );
         Ok(())
     }
 
