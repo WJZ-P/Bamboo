@@ -286,6 +286,11 @@ public final class MobOracle {
                 play(official, out, scene);
                 cases++;
             }
+            // 溺尸瞄准公式先用官方私有实现逐位校验一次（自带临时世界，不污染场景）。
+            // Verify the drowned aim formula against the official private method once.
+            if (only == null || "trident_drowned".startsWith(only)) {
+                OracleDrowned.checkAim(official);
+            }
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
@@ -296,7 +301,8 @@ public final class MobOracle {
                     "pillager_crossbow_normal", "pillager_crossbow_hard", "pillager_crossbow_multishot",
                     "trident_stick", "trident_loyalty", "trident_owner_offline",
                     "trident_owner_dead", "trident_spectator",
-                    "trident_channeling_mob", "trident_channeling_rod")) {
+                    "trident_channeling_mob", "trident_channeling_rod",
+                    "trident_drowned", "trident_drowned_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -5493,6 +5499,88 @@ public final class MobOracle {
     }
 
     /**
+     * 溺尸远程投掷对拍用的溺尸：`performRangedAttack` 照官方 `Drowned` 的字节码逐字重现
+     * （`getY(1/3)`、`dy + horizontal*0.20000000298023224`、`power 1.6`、
+     * `uncertainty = rangedAttackUncertainty(level)` = `14 - 4*difficulty`、`DROWNED_SHOOT`），
+     * 只是把生成的 `ThrownTrident` 换成岛种子源重播种（官方实体的随机源不带种子），让散布
+     * 的三次 `triangle` 取数两侧一致；`tridentSoundFilter` 只放行 `item.trident.*` 世界音效，
+     * 所以 `entity.drowned.shoot`（实体事件音）不进 `sounds` 逐刻比较。`checkAim` 用反射调
+     * 官方私有实现在不确定度 0 时逐位校验这里的瞄准向量，防止手写公式和官方漂移。
+     *
+     * The drowned for the ranged-trident tick parity: `performRangedAttack` follows
+     * vanilla `Drowned` bytecode verbatim (`getY(1/3)`, `dy + horizontal*0.2`, `power 1.6`,
+     * `uncertainty = 14 - 4*difficulty`, `DROWNED_SHOOT`), only reseeding the spawned
+     * `ThrownTrident` from the island seed source (vanilla entity random has no seed) so the
+     * three spread `triangle` draws line up. `tridentSoundFilter` keeps only `item.trident.*`
+     * world sounds, so `entity.drowned.shoot` (an entity-event sound) stays out of the per-tick
+     * `sounds` compare. `checkAim` invokes the official private aim at zero uncertainty to
+     * verify the transcribed aim bit-for-bit.
+     */
+    private static final class OracleDrowned extends net.minecraft.world.entity.monster.zombie.Drowned {
+        OracleDrowned(FakeLevel level) {
+            super(EntityTypes.DROWNED, level);
+        }
+
+        static Vec3 aim(Entity drowned, Entity trident, LivingEntity target) {
+            double xd = target.getX() - drowned.getX();
+            double yd = target.getY(0.3333333333333333) - trident.getY();
+            double zd = target.getZ() - drowned.getZ();
+            double yo = Math.sqrt(xd * xd + zd * zd) * 0.20000000298023224;
+            return new Vec3(xd, yd + yo, zd);
+        }
+
+        @Override
+        public void performRangedAttack(LivingEntity target, float power) {
+            FakeLevel world = (FakeLevel) level();
+            ItemStack held = getMainHandItem();
+            ItemStack weapon = held.is(Items.TRIDENT) ? held : new ItemStack(Items.TRIDENT);
+            var trident = new net.minecraft.world.entity.projectile.arrow.ThrownTrident(world, this, weapon);
+            setRandom(trident, world.entitySeeds.nextLong());
+            trident.setUUID(Mth.createInsecureUUID(trident.getRandom()));
+            Vec3 aim = aim(this, trident, target);
+            net.minecraft.world.entity.projectile.Projectile.spawnProjectileUsingShoot(
+                    trident, world, weapon, aim.x, aim.y, aim.z, 1.6F, rangedAttackUncertainty(world));
+            if (!isSilent()) {
+                playSound(net.minecraft.sounds.SoundEvents.DROWNED_SHOOT, 1.0F,
+                        1.0F / (getRandom().nextFloat() * 0.4F + 0.8F));
+            }
+        }
+
+        /**
+         * 用官方 `Drowned.performRangedAttack`（不覆写的普通溺尸）在不确定度 0 时生成一支
+         * 三叉戟；`triangle(0,0)` 恒为 0、不取散布随机，故速度方向就是 `aim` 的归一化。
+         * 把这里手抄的 `aim` 归一化后按官方速度的模长缩放，逐位比对，防止抄写公式和官方漂移。
+         * 用一个临时世界，避免污染场景。
+         *
+         * Uses the official `Drowned.performRangedAttack` (a plain, non-overriding drowned)
+         * at zero uncertainty: `triangle(0,0)` is always 0 and no spread is drawn, so the
+         * velocity direction is exactly the normalized `aim`. The transcribed `aim` is
+         * normalized and scaled to the official velocity's length, then compared bit-for-bit
+         * to guard against formula drift. A throwaway world keeps the scene clean.
+         */
+        static void checkAim(Official official) throws Exception {
+            FakeLevel world = FakeLevel.create(official);
+            ((TickingLevelData) world.levelData).difficulty = Difficulty.NORMAL;
+            var drowned = new net.minecraft.world.entity.monster.zombie.Drowned(EntityTypes.DROWNED, world);
+            drowned.setRangedAttackUncertainty(0.0F);
+            drowned.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            drowned.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.TRIDENT));
+            var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            target.setPos(7.25, 63.5, -3.75);
+            drowned.performRangedAttack(target, 1.6F);
+            Entity shot = world.spawned.getLast();
+            Vec3 velocity = shot.getDeltaMovement();
+            // `getMovementToShoot` 在不确定度 0 时就是 `aim.normalize().scale(power)`。
+            // At zero uncertainty `getMovementToShoot` is exactly `aim.normalize().scale(power)`.
+            Vec3 expected = aim(drowned, shot, target).normalize().scale(1.6F);
+            if (!expected.equals(velocity)) {
+                throw new IllegalStateException("drowned trident aim differs: " + expected
+                        + " vs " + velocity);
+            }
+        }
+    }
+
+    /**
      * 射箭对拍用的掠夺者：`performRangedAttack` 照 `CrossbowAttackMob.performCrossbowAttack`
      * 原样走，只是 `performShooting` 用一把带种子的 `CrossbowItem`（`SeedCrossbow`），让箭的
      * 随机源和 UUID 可重放。装填、射击向量、耐久、音效都是官方代码。
@@ -8006,6 +8094,12 @@ public final class MobOracle {
         boolean channelingMob = name.equals("trident_channeling_mob");
         boolean channelingRod = name.equals("trident_channeling_rod");
         boolean channeling = name.startsWith("trident_channeling");
+        // 溺尸远程投掷：`_hard` 走困难难度，校准 `uncertainty = 14 - 4*difficulty`
+        // （普通 6 / 困难 2），怪物三叉戟 pickup=DISALLOWED 玩家捡不到。
+        // Drowned ranged throw: `_hard` uses HARD difficulty to calibrate
+        // `uncertainty = 14 - 4*difficulty` (6 normal / 2 hard); a mob trident
+        // has pickup=DISALLOWED so the player cannot pick it up.
+        boolean drowned = name.startsWith("trident_drowned");
         // 药水箭插在墙里，中途把 inGroundTime 拨到 597，三刻后褪色。
         // A tipped arrow stuck in the wall; inGroundTime jumps to 597 and it fades three ticks later.
         boolean fade = name.equals("arrow_tipped_fade");
@@ -8071,7 +8165,15 @@ public final class MobOracle {
             world.injectedThundering = true;
             world.injectedRaining = true;
             world.injectedCanSeeSky = true;
-            world.channelingSoundFilter = true;
+            world.tridentSoundFilter = true;
+        }
+        if (drowned) {
+            // 只比 `item.trident.*` 世界音效；`entity.drowned.shoot` 是实体事件音（Bamboo 侧
+            // 走 MobEvent::Sound 实体包，不在 world `sounds` 里），跳过以免两侧通道不一致。
+            // Compare only `item.trident.*` world sounds; `entity.drowned.shoot` is an entity
+            // event sound (Bamboo sends it as a MobEvent::Sound packet, not a world `sounds`
+            // entry), so skip it to keep the two channels symmetric.
+            world.tridentSoundFilter = true;
         }
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
@@ -8131,6 +8233,43 @@ public final class MobOracle {
             }
             shooter.setItemInHand(InteractionHand.MAIN_HAND, weapon);
             world.tracked.add(shooter);
+        } else if (drowned) {
+            // 固定初态触发：用一个带种子的官方 `OracleDrowned` 在 setup 走一次
+            // `performRangedAttack`（官方瞄准 / power 1.6 / uncertainty / 散布取数），
+            // 产出的怪物三叉戟从 `world.spawned` 搬到 arrows/tracked，id 对齐 Bamboo 的 firstId。
+            // 不驱动 goal，避免 `see_time`/`attack_time`/夜间选目标等时序不确定。
+            //
+            // Controlled trigger: run a seeded official `OracleDrowned.performRangedAttack`
+            // once at setup (official aim / power 1.6 / uncertainty / spread draws), then
+            // move the spawned mob trident from `world.spawned` into arrows/tracked with its
+            // id aligned to Bamboo's firstId. We deliberately do not drive the goal so that
+            // `see_time`/`attack_time`/night-only targeting cannot shift the shot tick.
+            OracleDrowned drownedShooter = new OracleDrowned(world);
+            setRandom(drownedShooter, 42L);
+            drownedShooter.setUUID(new UUID(0L, 1L));
+            // 独立的真实 id：既是 add-entity 包的 `data`（主人 id），也让 Bamboo 能把
+            // 主人解析成一只真实生物。官方 `getOwner()` 是非玩家 LivingEntity，困难
+            // 难度下 `scalesWithDifficulty()` 会把伤害 ×1.5；Bamboo 只有真实生物主人
+            // 才缩放，故给幽灵射手一个不与三叉戟冲突的 id，两侧都按官方对齐。
+            // A distinct real id: it is the add-entity `data` (owner id) and lets
+            // Bamboo resolve the owner as a real Mob. Vanilla's `getOwner()` is a
+            // non-player LivingEntity, so HARD scales damage ×1.5; Bamboo scales
+            // only for a real Mob owner, so give the phantom shooter an id that
+            // does not collide with the trident's FIRST_ID.
+            drownedShooter.setId(FIRST_ID + 1);
+            drownedShooter.snapTo(0.5, 64.0, 0.5, 0.0F, 0.0F);
+            drownedShooter.setYHeadRot(0.0F);
+            drownedShooter.setYBodyRot(0.0F);
+            drownedShooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.TRIDENT));
+            drownedShooter.performRangedAttack(player, 1.6F);
+            for (Entity entity : new ArrayList<>(world.spawned)) {
+                if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
+                    arrow.setId(FIRST_ID);
+                    arrows.add(arrow);
+                    world.tracked.add(arrow);
+                }
+            }
+            world.spawned.clear();
         } else if (trident) {
             // 三叉戟从显式初态出发：和 Rust 侧 `configured_trident` 一样读物品堆
             // 的附魔（忠诚 / 引雷），再走官方 `shoot`。初态本身已由 `shot_trident`
@@ -8460,6 +8599,17 @@ public final class MobOracle {
                 frames.append(",\"sounds\":").append(world.soundLog.stream()
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.soundLog.clear();
+                if (drowned) {
+                    // 怪物三叉戟 pickup 恒为 DISALLOWED(0)：玩家碰到也捡不起来，逐刻比这个状态。
+                    // A mob trident's pickup is always DISALLOWED(0): the player cannot pick it
+                    // up. Compare this state each tick.
+                    net.minecraft.world.entity.projectile.arrow.AbstractArrow liveArrow = null;
+                    for (var arrow : arrows) {
+                        if (!arrow.isRemoved()) { liveArrow = arrow; break; }
+                    }
+                    frames.append(",\"pickup\":")
+                            .append(liveArrow == null ? -1 : liveArrow.pickup.ordinal());
+                }
                 // 忠诚返回逐刻状态：dealtDamage / noPhysics / 返回计数 / inGroundTime。
                 // Loyalty return state: dealtDamage / noPhysics / return count / inGroundTime.
                 frames.append(",\"trident\":");
@@ -15295,7 +15445,7 @@ public final class MobOracle {
         /** 引雷场景：只记录 `item.trident.*` 的世界音效，跳过受害者叫声（那是实体事件包）。 */
         /// Channeling scenes: log only `item.trident.*` level sounds, skipping the
         /// victim's voice (an entity event packet on the Bamboo side).
-        boolean channelingSoundFilter;
+        boolean tridentSoundFilter;
         DifficultyInstance spawnDifficulty;
         NaturalScene naturalScene;
         boolean worldGenRegion;
@@ -15976,7 +16126,7 @@ public final class MobOracle {
             }
             if (soundLog != null) {
                 boolean trident = sound.value().location().getPath().startsWith("item.trident.");
-                if (!channelingSoundFilter || trident) {
+                if (!tridentSoundFilter || trident) {
                     soundLog.add(new long[] {
                             net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT.getId(sound.value()),
                             source.ordinal(),

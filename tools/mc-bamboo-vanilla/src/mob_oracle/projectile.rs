@@ -135,6 +135,11 @@ struct ProjectileFrame {
     ///
     /// The channeling victim (cow) health bits (only post_attack scenes).
     victim: Option<i64>,
+    /// 溺尸场景：怪物三叉戟的 pickup 枚举序号（DISALLOWED=0，玩家捡不到）。三叉戟被移除时为 -1。
+    ///
+    /// Drowned scenes: the mob trident's pickup ordinal (DISALLOWED=0, player cannot
+    /// pick it up); -1 once the trident has been removed.
+    pickup: Option<i32>,
 }
 
 /// 一次剪刀右键：是否消耗动作，以及掉出来的物品实体（物品、数量、位置和速度的原始位）。
@@ -382,6 +387,14 @@ impl ProjectileCase {
         self.name == "trident_channeling_mob"
     }
 
+    /// 溺尸远程投掷（普通 / 困难）：怪物三叉戟 pickup=Disallowed，玩家捡不到。
+    ///
+    /// Drowned ranged throw (normal / hard): the mob trident has pickup=Disallowed, so
+    /// the player cannot pick it up.
+    fn drowned(&self) -> bool {
+        self.name.starts_with("trident_drowned")
+    }
+
     fn level(&self) -> MobLevel {
         MobLevel {
             natural_spawn: None,
@@ -427,7 +440,14 @@ impl ProjectileCase {
         }
     }
 
-    fn spawn(&self, world: &mut World<'_>, mutate: bool, break_pierce: bool, break_return: bool) {
+    fn spawn(
+        &self,
+        world: &mut World<'_>,
+        mutate: bool,
+        break_pierce: bool,
+        break_return: bool,
+        break_drowned: bool,
+    ) {
         if self.skeleton {
             let mut skeleton = world.prepare_entity(Entity::by_mob_type(
                 self.shooter_kind(),
@@ -444,6 +464,68 @@ impl ProjectileCase {
                     .set(EquipmentSlot::MainHand, self.shooter_weapon());
             }
             world.add_prepared_entity(skeleton);
+        } else if self.drowned() {
+            // 溺尸远程投掷：用生产 `perform_ranged_attack` 共用的 `aimed_trident_shot`
+            // 构造怪物三叉戟，与官方 `OracleDrowned.performRangedAttack` 的初态对齐
+            // （射手 (0.5,64,0.5)、eye_y=64+1.74f、目标=场景玩家 (6.5,64,0.5)、
+            // getY(1/3)、dy+horizontal*0.2、power 1.6、uncertainty=14-4*difficulty、
+            // pickup=Disallowed）。官方把三叉戟放进 `world.spawned` 后按 FIRST_ID 收进
+            // arrows；这里 `spawn_trident_shot` 走生产 prepare/shoot 路径，作为实体表里
+            // 第一个 prepare 的实体，随机源种子与官方 `entitySeeds.nextLong()` 一致。
+            // owner=FIRST_ID+1 与官方溺尸（getId()=FIRST_ID+1）一致 → 生成包
+            // data=owner id，也让 `me_owner` 能解析出真实生物以触发难度缩放。
+            //
+            // Drowned ranged throw: build the mob trident with the same
+            // `aimed_trident_shot` the production goal uses, matching the official
+            // `OracleDrowned.performRangedAttack` initial state. As the first
+            // prepared entity its random seed lines up with the official
+            // `entitySeeds.nextLong()`; owner=FIRST_ID+1 makes the add-entity
+            // packet's data (owner id) match the official phantom shooter and lets
+            // `me_owner` resolve a real Mob for difficulty damage scaling.
+            use mc_bamboo_blocks::entity::mob::drowned::aimed_trident_shot;
+            let shooter = Entity::by_mob_type(MobType::Drowned, Vec3::new(0.5, 64.0, 0.5));
+            let eye_y = shooter.position.y + f64::from(shooter.kind.mob().unwrap().eye_height);
+            // 改坏确认 trident_drowned：把难度拨错一档，uncertainty / 散布全变，
+            // 逐刻初速与后续位置必须报不一致。
+            // Break self-test: shift the difficulty so uncertainty / spread change;
+            // the per-tick initial velocity and downstream motion must diverge.
+            let difficulty = if break_drowned {
+                self.difficulty + 1
+            } else {
+                self.difficulty
+            };
+            let shot = aimed_trident_shot(
+                Vec3::new(0.5, 64.0, 0.5),
+                eye_y,
+                Vec3::new(self.player_x, 64.0, 0.5),
+                1.8_f32,
+                difficulty,
+                ItemStack::new(mc_bamboo_data::items::TRIDENT, 1),
+                // 主人是真实溺尸（官方 getOwner() 解析成非玩家 LivingEntity），
+                // id 与 Java `setId(FIRST_ID + 1)` 对齐；生成包的 data 也取这个值。
+                // The owner is a real drowned (vanilla getOwner() resolves to a
+                // non-player LivingEntity); the id matches Java's setId and is
+                // also the add-entity packet's data.
+                self.first_id + 1,
+                1_u128.to_be_bytes(),
+            );
+            world.spawn_trident_shot(shot);
+            // 官方幽灵溺尸虽不进 tracked/tick，但 `getOwner()` 是非玩家 LivingEntity，
+            // 困难难度伤害按 `scalesWithDifficulty()` ×1.5。Bamboo 生产代码只有当
+            // `me_owner` 能把主人解析成真实生物时才缩放（`scale_when_non_player`），
+            // 这里补一只 no_ai、放在飞行路径外的溺尸作为主人，使难度缩放按官方生效。
+            // 它是 Mob 生成快照，逐刻包只从 Arrow 快照构造，不会多出发包；no_ai
+            // 且远离三叉戟，不会被当成命中目标或产生额外音效。
+            //
+            // Vanilla's phantom drowned is not tracked/ticked, but getOwner() is a
+            // non-player LivingEntity, so HARD scales damage ×1.5. Bamboo's production
+            // scales only when me_owner resolves a real Mob (scale_when_non_player),
+            // so add an inert, off-path drowned as the owner. Mob spawn snapshots
+            // never become oracle packets (only Arrow ones do); no_ai and far from
+            // the trident, it is neither a hit target nor a source of extra sounds.
+            let mut drowned = Entity::by_mob_type(MobType::Drowned, Vec3::new(0.5, 64.0, -8.0));
+            drowned.with_mob(|_, mob| mob.no_ai = true);
+            world.spawn_entity(drowned);
         } else if self.trident() {
             // 三叉戟逐刻对拍：从显式初态出发，和官方一样走 `shoot` 再逐刻
             // `AbstractArrow.tick`。扔出初态已由 `shot_trident` 单独对拍，这里只比
@@ -665,6 +747,7 @@ impl Report {
             self.break_test.as_deref() == Some("projectile"),
             self.break_test.as_deref() == Some("arrow_piercing"),
             self.break_test.as_deref() == Some("trident_return"),
+            self.break_test.as_deref() == Some("trident_drowned"),
         );
         let mut tracking = EntityTracking::default();
         let mut previous = BTreeSet::new();
@@ -1034,6 +1117,23 @@ impl Report {
                     self.mismatch(format!(
                         "{label} trident state: official {theirs:?}, bamboo {ours:?}"
                     ));
+                }
+            }
+            if let Some(theirs) = expected.pickup {
+                // 怪物三叉戟 pickup 恒为 Disallowed(0)；玩家碰到也捡不起来。三叉戟
+                // 被丢弃 / 移除时官方给 -1。
+                // A mob trident's pickup is always Disallowed(0); the official side
+                // emits -1 once the trident has been removed.
+                let ours = level
+                    .entities
+                    .get(case.first_id)
+                    .and_then(|entity| match &entity.kind {
+                        EntityKind::Arrow(data) => Some(data.pickup as i32),
+                        _ => None,
+                    })
+                    .unwrap_or(-1);
+                if theirs != ours {
+                    self.mismatch(format!("{label} pickup: official {theirs}, bamboo {ours}"));
                 }
             }
             if let Some(theirs) = &expected.drops
