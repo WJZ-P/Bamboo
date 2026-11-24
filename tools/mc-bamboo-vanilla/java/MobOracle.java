@@ -10396,7 +10396,7 @@ public final class MobOracle {
                 // Players do not tick here, so the fluid scan never sets
                 // `wasTouchingWater`; the drowned reads it in `okTarget` and
                 // `wantsToSwim`, so wet scenes set it by hand.
-                put(net.minecraft.world.entity.Entity.class, player, "wasTouchingWater", true);
+                putBoolean(net.minecraft.world.entity.Entity.class, player, "wasTouchingWater", true);
             }
             if (scene.name.startsWith("slime_") || scene.name.startsWith("witch_drink_")) {
                 // 玩家的实体 ID 和 0 号生物撞在一起（都是 `FIRST_ID`）；死亡消息按 ID 找攻击者，
@@ -12274,9 +12274,25 @@ public final class MobOracle {
         return out.append('}').toString();
     }
 
+    /**
+     * `Unsafe` 按偏移直接写字段，不查类型。宽度或类型写错会悄悄写坏堆，等 G1 并发标记
+     * 碰巧扫到才崩（`G1SATBMarkQueueSet::filter` 里的 SIGSEGV），所以每次写之前先核对。
+     *
+     * `Unsafe` writes by offset without type checks. A wrong width or type silently
+     * corrupts the heap and only crashes when G1 concurrent marking happens to scan it
+     * (a SIGSEGV in `G1SATBMarkQueueSet::filter`), so check the type before every write.
+     */
+    private static void requireFieldType(Field field, Class<?> expected) {
+        if (field.getType() != expected) {
+            throw new IllegalStateException(field.getDeclaringClass().getName() + "." + field.getName()
+                    + ": field is " + field.getType().getName() + ", write is " + expected.getName());
+        }
+    }
+
     private static void putInt(Class<?> owner, Object target, String name, int value) {
         try {
             Field field = owner.getDeclaredField(name);
+            requireFieldType(field, int.class);
             UNSAFE.putInt(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
@@ -12872,6 +12888,7 @@ public final class MobOracle {
     private static void putFloat(Class<?> owner, Object target, String name, float value) {
         try {
             Field field = owner.getDeclaredField(name);
+            requireFieldType(field, float.class);
             UNSAFE.putFloat(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
@@ -12881,6 +12898,7 @@ public final class MobOracle {
     private static void putBoolean(Class<?> owner, Object target, String name, boolean value) {
         try {
             Field field = owner.getDeclaredField(name);
+            requireFieldType(field, boolean.class);
             UNSAFE.putBoolean(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
@@ -12890,7 +12908,31 @@ public final class MobOracle {
     private static void put(Class<?> owner, Object target, String name, Object value) {
         try {
             Field field = owner.getDeclaredField(name);
-            UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
+            Class<?> type = field.getType();
+            long offset = UNSAFE.objectFieldOffset(field);
+            // 基本类型字段按自己的宽度写；传进来的必须是对应的包装类。
+            // Primitive fields are written at their own width; the value must be the matching box.
+            if (type == int.class && value instanceof Integer number) {
+                UNSAFE.putInt(target, offset, number);
+            } else if (type == boolean.class && value instanceof Boolean flag) {
+                UNSAFE.putBoolean(target, offset, flag);
+            } else if (type == float.class && value instanceof Float number) {
+                UNSAFE.putFloat(target, offset, number);
+            } else if (type == double.class && value instanceof Double number) {
+                UNSAFE.putDouble(target, offset, number);
+            } else if (type == long.class && value instanceof Long number) {
+                UNSAFE.putLong(target, offset, number);
+            } else if (type == short.class && value instanceof Short number) {
+                UNSAFE.putShort(target, offset, number);
+            } else if (type == byte.class && value instanceof Byte number) {
+                UNSAFE.putByte(target, offset, number);
+            } else if (!type.isPrimitive() && (value == null || type.isInstance(value))) {
+                UNSAFE.putObject(target, offset, value);
+            } else {
+                throw new IllegalStateException("put " + owner.getName() + "." + name + ": field is "
+                        + type.getName() + ", value is "
+                        + (value == null ? "null" : value.getClass().getName()));
+            }
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }

@@ -1179,6 +1179,11 @@ fn clock_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
+#[cfg(not(feature = "oracle"))]
+fn poi_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
 #[cfg(feature = "oracle")]
 fn sleep_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
     sleep_oracle::run(official_program(java, SLEEP_ORACLE_SOURCE)?, options)
