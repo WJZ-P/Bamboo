@@ -841,6 +841,10 @@ pub enum Command {
     ///
     /// `Llama.spit` spawns a spit (`Projectile.spawnProjectileUsingShoot`).
     ShootLlamaSpit(super::spit::SpitShot),
+    /// `Drowned.performRangedAttack`：溺尸朝目标扔一支不可捡的三叉戟。
+    ///
+    /// `Drowned.performRangedAttack`: a drowned throws a non-pickupable trident.
+    ShootTrident(super::arrow::TridentShot),
     /// `LlamaSpit.onHitEntity`：口水打到一个实体。
     ///
     /// `LlamaSpit.onHitEntity`: the spit hit an entity.
@@ -951,6 +955,13 @@ pub enum Command {
     /// `Entity.spawnAtLocation`：生成一件掉落物。
     DropItem {
         stack: ItemStack,
+    },
+    /// `Entity.playSound(TRIDENT_RETURN, 10, 1)`：忠诚三叉戟第一刻的返回音效。
+    ///
+    /// `Entity.playSound(TRIDENT_RETURN, 10, 1)`: the first-tick return sound of a
+    /// loyal trident.
+    TridentReturnSound {
+        position: Vec3,
     },
     /// `LivingEntity.pushEntities` 里的一次 `doPush`：对方被推开，自己被推回来。
     /// 落地时按双方当前的位置重算，`from` 是算阶段看到的对方位置。
@@ -1364,6 +1375,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::arrow::impact(me, world, hits, block, end)
         }
         Command::ShootLlamaSpit(shot) => super::spit::spawn(world, me.id, shot),
+        Command::ShootTrident(shot) => {
+            world.spawn_trident_shot(shot);
+        }
         Command::SpitHit(hit) => super::spit::hit_entity(me, world, hit),
         Command::EggImpact { hit } => super::thrown_egg::impact(me, world, hit),
         Command::ThrowThrowable { shot } => {
@@ -1403,6 +1417,16 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::SuckIntoHopper => crate::hopper::suck_touching_item(world, me),
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
+        }
+        Command::TridentReturnSound { position } => {
+            world.play_sound(
+                position,
+                mc_bamboo_data::sounds::sound_event("minecraft:item.trident.return"),
+                mc_bamboo_data::sounds::NEUTRAL,
+                10.0,
+                1.0,
+                false,
+            );
         }
         Command::PushMob {
             other,

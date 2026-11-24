@@ -209,6 +209,20 @@ public final class MobOracle {
     private static ServerStatsCounter stats;
     private static PlayerAdvancements advancements;
 
+    /** 官方 `ThrownTrident.ID_LOYALTY` / `ID_FOIL` 的元数据索引（反射读 record 的 id）。 */
+    private static String tridentMetadataIds() throws Exception {
+        return "{\"type\":\"tridentMetadata\",\"loyalty\":" + metadataId("ID_LOYALTY")
+                + ",\"foil\":" + metadataId("ID_FOIL") + "}\n";
+    }
+
+    private static int metadataId(String name) throws Exception {
+        java.lang.reflect.Field field =
+                net.minecraft.world.entity.projectile.arrow.ThrownTrident.class.getDeclaredField(name);
+        field.setAccessible(true);
+        var accessor = (net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null);
+        return accessor.id();
+    }
+
     public static void main(String[] args) {
         PrintStream log = System.err;
         try {
@@ -261,6 +275,9 @@ public final class MobOracle {
             out.write(Integer.toString(SharedConstants.getCurrentVersion().protocolVersion()));
             out.write(",\"tables\":" + tableHashes());
             out.write("}\n");
+            // 实测核对三叉戟的两个元数据索引，不靠类层级推导。
+            // Cross-check the trident metadata indices against the official jar.
+            out.write(tridentMetadataIds());
             int cases = 0;
             for (Scene scene : Scenes.all()) {
                 if (only != null && !scene.name.startsWith(only)) {
@@ -308,7 +325,8 @@ public final class MobOracle {
                     "shot_bow_infinity", "shot_bow_tipped", "shot_bow_creative",
                     "shot_crossbow_load", "shot_crossbow_multishot",
                     "shot_crossbow_quick_charge", "shot_crossbow_angled_multishot",
-                    "shot_crossbow_piercing", "shot_dispenser_arrow", "shot_dispenser_arrow_up")) {
+                    "shot_crossbow_piercing", "shot_dispenser_arrow", "shot_dispenser_arrow_up",
+                    "shot_trident", "shot_trident_moving", "shot_trident_creative")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playShot(official, out, name);
                 cases++;
@@ -7090,6 +7108,7 @@ public final class MobOracle {
     private static void playShot(Official official, Writer out, String name) throws Exception {
         boolean dispenser = name.startsWith("shot_dispenser");
         boolean crossbow = name.startsWith("shot_crossbow");
+        boolean trident = name.startsWith("shot_trident");
         boolean creative = name.contains("creative");
         boolean multishot = name.contains("multishot");
         boolean quick = name.contains("quick_charge");
@@ -7147,7 +7166,7 @@ public final class MobOracle {
             player.getAbilities().instabuild = creative;
             level.playersList().add(player);
 
-            ItemStack weapon = new ItemStack(crossbow ? Items.CROSSBOW : Items.BOW);
+            ItemStack weapon = new ItemStack(trident ? Items.TRIDENT : (crossbow ? Items.CROSSBOW : Items.BOW));
             ItemStack ammo = new ItemStack(tipped ? Items.TIPPED_ARROW : Items.ARROW, 5);
             if (tipped) {
                 ammo.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.POISON));
@@ -7177,6 +7196,33 @@ public final class MobOracle {
                     item.onUseTick(level, player, weapon, 72000 - hold);
                     player.stopUsingItem();
                     item.use(level, player, InteractionHand.MAIN_HAND);
+                } else if (trident) {
+                    // 非激流投掷：`TridentItem.releaseUsing` 的顺序，在进程内手写一遍，
+                    // 只是把 `ThrownTrident` 的 factory 换成带可控种子的版本 —— 官方
+                    // 实体的随机源不带种子，`shootFromRotation` 的散布才没法对拍。
+                    // Non-riptide throw: the order of `TridentItem.releaseUsing`,
+                    // written inline with a seeded `ThrownTrident` factory, because
+                    // vanilla's entity random is unseeded and would make the shoot
+                    // spread irreproducible.
+                    player.awardStat(net.minecraft.stats.Stats.ITEM_USED.get(Items.TRIDENT));
+                    weapon.hurtWithoutBreaking(1, player);
+                    ItemStack consumed = weapon.consumeAndReturn(1, player);
+                    long seed = level.entitySeeds.nextLong();
+                    var tridentEntity = net.minecraft.world.entity.projectile.Projectile
+                            .spawnProjectileFromRotation(
+                                (lvl, shooter, stack) -> {
+                                    var t = new net.minecraft.world.entity.projectile.arrow.ThrownTrident(
+                                            lvl, shooter, stack);
+                                    setRandom(t, seed);
+                                    t.setUUID(Mth.createInsecureUUID(t.getRandom()));
+                                    return t;
+                                }, level, consumed, player, 0.0F, 2.5F, 1.0F);
+                    if (player.getAbilities().instabuild) {
+                        tridentEntity.pickup = net.minecraft.world.entity.projectile.arrow
+                                .AbstractArrow.Pickup.CREATIVE_ONLY;
+                    }
+                    level.playSound(null, player, net.minecraft.sounds.SoundEvents.TRIDENT_THROW,
+                            net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 1.0F);
                 } else {
                     SeedBow item = new SeedBow(new Item.Properties().durability(384).setId(net.minecraft.resources.ResourceKey.create(Registries.ITEM, net.minecraft.resources.Identifier.withDefaultNamespace("bow"))), level.entitySeeds);
                     item.releaseUsing(weapon, level, player, 72000 - hold);

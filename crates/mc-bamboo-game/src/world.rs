@@ -3639,6 +3639,11 @@ fn run_island_simulation(
     // it on a main-hand item swap. Runs at the start of the player tick, like
     // vanilla's entity tick before `ServerPlayer.doTick`.
     crate::player_attack::tick(region);
+    // `LivingEntity.tick` 的 `push` 段：自旋攻击计时和撞到实体时的 `Player.attack`。
+    //
+    // The `push` section of `LivingEntity.tick`: the spin-attack timer and the
+    // `Player.attack` on contact.
+    crate::player_auto_spin::tick(region);
     // `Player.tick` 的 `cooldowns.tick()`、清掉已经离表的珍珠和每刻的存档快照。
     crate::ender_pearl::tick(region);
     // 官方 `ServerPlayer.doTick` 里 `set_health` 在 `set_experience` 之前。

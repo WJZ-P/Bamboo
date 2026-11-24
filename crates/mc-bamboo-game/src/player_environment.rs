@@ -411,6 +411,36 @@ fn hurt(region: &mut Region, id: PlayerId, kind: DamageKind, amount: f32) {
 /// 玩家碰撞盒里那几格的方块状态，只用来判「在里面」。
 /// 和官方 `Entity.checkInsideBlocks` 的 Aabb 收缩一致：`0.001` 内缩，
 /// 遍历盒覆盖的每个方块坐标。
+/// `Entity.isInWaterOrRain()`：身体接触水，或者脚下 / 头顶那一格在下 RAIN。
+/// 激流三叉戟的 `use` / `releaseUsing` 用它判断能不能用；放在通用层供别处复用。
+///
+/// `Entity.isInWaterOrRain()`: the body touches water, or the feet / bounding-box
+/// top is being rained on. Used by riptide's `use` / `releaseUsing` gates.
+pub(crate) fn is_in_water_or_rain(region: &mut Region, id: PlayerId) -> bool {
+    let Some(player) = region.players.get(&id) else {
+        return false;
+    };
+    let position = player.position();
+    let eye_y = position.y + player.eye_height();
+    let in_water = {
+        let view = EnvironmentView {
+            chunks: &region.chunks,
+        };
+        view.body_states(position, eye_y)
+            .iter()
+            .any(|(state, _)| state.fluid().is_tagged(fluid_tags::WATER))
+    };
+    if in_water {
+        return true;
+    }
+    // `Entity.isInRain`：`isRainingAt(blockPosition) || isRainingAt(containing(x, bb.maxY, z))`。
+    let feet = BlockPos::containing(position);
+    let top = BlockPos::containing(Vec3::new(position.x, position.y + 1.8, position.z));
+    let (mut level, ticks) = region.block_level();
+    let world = mc_bamboo_blocks::World::new(&mut level, ticks);
+    world.is_raining_at(feet) || world.is_raining_at(top)
+}
+
 struct EnvironmentView<'a> {
     chunks: &'a mc_bamboo_world::store::ChunkStore,
 }

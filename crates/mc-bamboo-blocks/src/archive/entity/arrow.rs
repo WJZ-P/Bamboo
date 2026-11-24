@@ -41,17 +41,22 @@ pub(super) fn write(arrow: &Arrow, out: &mut Vec<(String, Tag)>) -> Result<()> {
     if let ArrowVariant::Spectral { duration } = arrow.variant {
         put(out, "Duration", Tag::Int(duration));
     }
+    if arrow.variant.is_trident() {
+        // `ThrownTrident.addAdditionalSaveData`。
+        put(out, "DealtDamage", Tag::Byte(i8::from(arrow.dealt_damage)));
+    }
     Ok(())
 }
 
-pub(super) fn read(input: &Tag, pitch: f32, spectral: bool) -> Arrow {
+pub(super) fn read(input: &Tag, pitch: f32, variant: ArrowVariant) -> Arrow {
     let mut arrow = Arrow::default();
     arrow.pitch = pitch;
-    if spectral {
-        arrow.variant = ArrowVariant::Spectral {
+    arrow.variant = match variant {
+        ArrowVariant::Spectral { .. } => ArrowVariant::Spectral {
             duration: tag::int_or(input, "Duration", 200),
-        };
-    }
+        },
+        other => other,
+    };
     arrow.no_gravity = tag::bool_or(input, "NoGravity", false);
     arrow.uuid = uuid_from(input, "UUID").unwrap_or([0; 16]);
     arrow.owner_uuid = uuid_from(input, "Owner");
@@ -84,6 +89,16 @@ pub(super) fn read(input: &Tag, pitch: f32, spectral: bool) -> Arrow {
         arrow.pickup_item = item;
     }
     arrow.weapon = tag::field(input, "weapon").and_then(|t| slots::decode_item(t).ok());
+    if arrow.variant.is_trident() {
+        // `ThrownTrident.readAdditionalSaveData`：读回 `DealtDamage`，并从拾取物品
+        // 重算 `ID_LOYALTY` / `ID_FOIL`（这两项不进存档）。
+        //
+        // `ThrownTrident.readAdditionalSaveData`: restore `DealtDamage` and
+        // recompute `ID_LOYALTY`/`ID_FOIL` from the pickup item (not saved).
+        arrow.dealt_damage = tag::bool_or(input, "DealtDamage", false);
+        arrow.loyalty = crate::entity::arrow::loyalty_from_item(&arrow.pickup_item);
+        arrow.foil = crate::entity::arrow::has_foil(&arrow.pickup_item);
+    }
     arrow
 }
 

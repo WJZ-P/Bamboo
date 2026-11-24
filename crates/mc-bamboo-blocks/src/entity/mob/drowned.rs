@@ -1,16 +1,13 @@
 //! 溺尸：官方 `Zombie` → `Drowned`。属性、近战、破门、增援和溺水转化都复用僵尸那一套；
 //! 自己加的是两栖寻路（水里也走）、会游泳的移动控制、只在暗处或目标在水里时才打、
-//! 水上 / 水下的叫声、生成时的手持物（三叉戟 / 钓鱼竿）和 3% 的鹦鹉螺壳。
-//!
-//! 三叉戟投掷（`DrownedTridentAttackGoal` + `ThrownTrident`）本轮没做：投掷物实体本身
-//! 还没有，见 README 的已知限制。
+//! 水上 / 水下的叫声、生成时的手持物（三叉戟 / 钓鱼竿）、3% 的鹦鹉螺壳，以及
+//! `DrownedTridentAttackGoal` 的远程三叉戟投掷。
 //!
 //! Drowned: vanilla `Zombie` → `Drowned`. Attributes, melee, door breaking, reinforcements
 //! and the drowning conversion all reuse the zombie code. Its own parts are amphibious
 //! pathfinding, the swimming move control, attacking only in the dark or against a wet
-//! target, the water/land sound variants, the spawn equipment (trident or fishing rod) and
-//! the 3% nautilus shell. Trident throwing is not modelled because there is no thrown
-//! trident entity yet; see the README limitations.
+//! target, the water/land sound variants, the spawn equipment (trident or fishing rod),
+//! the 3% nautilus shell, and the `DrownedTridentAttackGoal` ranged trident throw.
 
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{items, registries::attribute, tags::fluid_tags};
@@ -93,7 +90,14 @@ pub(super) fn goals(navigation: &mut Navigation) -> GoalSelector {
                 wanted: Vec3::default(),
             },
         ),
-        (2, Goal::Unavailable("DrownedTridentAttackGoal")),
+        (
+            2,
+            Goal::DrownedTridentAttack {
+                target: None,
+                attack_time: -1,
+                see_time: 0,
+            },
+        ),
         (
             2,
             super::goals::melee_attack(1.0, false, "DrownedAttackGoal"),
@@ -327,6 +331,105 @@ pub(super) fn populate_equipment(mob: &mut Mob, random: &crate::random::LegacyRa
         .set(EquipmentSlot::MainHand, ItemStack::new(item, 1));
 }
 
+/// `DrownedTridentAttackGoal(this, 1.0, 40, 10.0f)` 和投掷的参数。
+const TRIDENT_ATTACK_SPEED: f64 = 1.0;
+const TRIDENT_ATTACK_RADIUS: f32 = 10.0;
+const TRIDENT_ATTACK_INTERVAL: i32 = 40;
+const TRIDENT_SHOOT_POWER: f32 = 1.6;
+
+/// `RangedAttackGoal.tick`：视线 / 射程 / 攻击计时，到点调 `performRangedAttack`。
+/// 间隔固定 40（min == max）。
+///
+/// `RangedAttackGoal.tick`: line of sight, range and the attack timer, calling
+/// `performRangedAttack` when due. The interval is a fixed 40 (min == max).
+pub(super) fn ranged_attack_tick(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    target: CombatTarget,
+    attack_time: &mut i32,
+    see_time: &mut i32,
+) {
+    let distance_sqr = me.position.distance_to_sqr(target.position);
+    let seen = living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position());
+    *see_time = if seen { *see_time + 1 } else { 0 };
+    let radius_sqr = f64::from(TRIDENT_ATTACK_RADIUS * TRIDENT_ATTACK_RADIUS);
+    if distance_sqr <= radius_sqr && *see_time >= 5 {
+        mob.navigation.stop();
+    } else {
+        let nav = living::nav_mob(me, mob, ctx.blocks());
+        mob.navigation
+            .move_to_entity(ctx.blocks(), &nav, target.position, TRIDENT_ATTACK_SPEED, 1);
+    }
+    mob.look.set_look_at(
+        target.position.x,
+        target.eye_y(),
+        target.position.z,
+        30.0,
+        30.0,
+    );
+    *attack_time -= 1;
+    if *attack_time == 0 {
+        if !seen {
+            return;
+        }
+        perform_ranged_attack(me, mob, ctx, target);
+        *attack_time = TRIDENT_ATTACK_INTERVAL;
+    } else if *attack_time < 0 {
+        *attack_time = TRIDENT_ATTACK_INTERVAL;
+    }
+}
+
+/// `Drowned.performRangedAttack`：构造一支怪物三叉戟（默认 `DISALLOWED`，玩家捡不到），
+/// 按官方 `spawnProjectileUsingShoot(dx, dy + horizontal*0.2, dz, 1.6, uncertainty)`
+/// 射出，再播 `entity.drowned.shoot`。
+///
+/// `Drowned.performRangedAttack`: build a mob trident (default `DISALLOWED`, so
+/// players cannot pick it up), shoot it with vanilla's
+/// `spawnProjectileUsingShoot(dx, dy + horizontal*0.2, dz, 1.6, uncertainty)`,
+/// then play `entity.drowned.shoot`.
+pub(super) fn perform_ranged_attack(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    target: CombatTarget,
+) {
+    let held = mob.equipment.get(EquipmentSlot::MainHand);
+    let weapon = if held.item == items::TRIDENT {
+        held.clone()
+    } else {
+        ItemStack::new(items::TRIDENT, 1)
+    };
+    let position = Vec3::new(
+        me.position.x,
+        living::eye_y(me, mob) - f64::from(0.1_f32),
+        me.position.z,
+    );
+    let dx = target.position.x - me.position.x;
+    let dz = target.position.z - me.position.z;
+    let target_y = target.position.y + target.height * 0.333_333_333_333_333_3;
+    let dy = target_y - position.y;
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    // `RangedAttackMob.rangedAttackUncertainty(level) = 14 - 4 * difficulty.id`。
+    let uncertainty = 14.0 - 4.0 * ctx.blocks().difficulty() as f32;
+    let shot = crate::entity::arrow::TridentShot {
+        position,
+        direction: Vec3::new(dx, dy + horizontal * 0.2, dz),
+        power: TRIDENT_SHOOT_POWER,
+        uncertainty,
+        source_movement: None,
+        owner: Some(me.id),
+        owner_uuid: Some(mob.uuid),
+        item: weapon,
+        pickup: crate::entity::arrow::Pickup::Disallowed,
+    };
+    ctx.emit(Command::ShootTrident(shot), me);
+    if !mob.silent {
+        let pitch = 1.0 / (me.random.next_float() * 0.4 + 0.8);
+        living::play_sound(me, mob, "minecraft:entity.drowned.shoot", 1.0, pitch);
+    }
+}
+
 /// `Drowned.finalizeSpawn` 在 `Zombie.finalizeSpawn` 之后的部分：3% 的副手鹦鹉螺壳，
 /// 以及自然生成时带三叉戟的有 50% 变成鹦鹉螺僵尸的骑手。后者 Bamboo 没有鹦鹉螺僵尸，
 /// 只照官方取那一次随机数，不生成坐骑。
@@ -492,5 +595,77 @@ mod tests {
             ]
         );
         assert_eq!(mob.target_goals.goals.len(), 6);
+    }
+
+    #[test]
+    fn the_trident_goal_keeps_its_ranged_attack_parameters() {
+        let mob = Mob::new(MobType::Drowned);
+        let wrapped = mob
+            .goals
+            .goals
+            .iter()
+            .find(|wrapped| wrapped.goal.name() == "DrownedTridentAttackGoal")
+            .expect("the trident goal is registered");
+        assert_eq!(wrapped.priority, 2);
+        assert!(matches!(
+            wrapped.goal,
+            Goal::DrownedTridentAttack {
+                target: None,
+                attack_time: -1,
+                see_time: 0,
+            }
+        ));
+    }
+
+    /// 溺尸扔出的三叉戟是怪物的（`DISALLOWED`），物品是三叉戟，且朝目标飞。
+    #[test]
+    fn a_drowned_throws_a_non_pickupable_trident_at_its_target() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut drowned = Entity::by_mob_type(MobType::Drowned, Vec3::new(0.5, 64.0, 0.5));
+        drowned.id = 42;
+        let mut kind = std::mem::replace(
+            &mut drowned.kind,
+            crate::entity::EntityKind::Tnt(crate::entity::PrimedTnt::new()),
+        );
+        let crate::entity::EntityKind::Mob(mob) = &mut kind else {
+            unreachable!()
+        };
+        mob.equipment
+            .set(EquipmentSlot::MainHand, ItemStack::new(items::TRIDENT, 1));
+        let target = CombatTarget::player(
+            crate::entity::mob::throttle::test_player(7, Vec3::new(5.5, 64.0, 0.5)),
+            false,
+        );
+        {
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(&mut world, drowned.id);
+            perform_ranged_attack(&mut drowned, mob, &mut ctx, target);
+        }
+
+        let area = mc_bamboo_core::Aabb::new(-1.0, 63.0, -1.0, 7.0, 67.0, 2.0);
+        let mut trident_uid = None;
+        world
+            .level()
+            .for_each_entity_in_section_order(area, &mut |public| {
+                if matches!(public.kind, crate::entity::KindPublic::Arrow(_)) {
+                    trident_uid = Some(public.uid);
+                }
+            });
+        let trident = world
+            .entity(trident_uid.expect("a trident was thrown"))
+            .unwrap();
+        let crate::entity::EntityKind::Arrow(arrow) = &trident.kind else {
+            panic!("expected a trident");
+        };
+        assert_eq!(arrow.variant, crate::entity::arrow::ArrowVariant::Trident);
+        assert_eq!(arrow.pickup_item.item, items::TRIDENT);
+        assert_eq!(
+            arrow.pickup,
+            crate::entity::arrow::Pickup::Disallowed,
+            "a mob's trident cannot be picked up by players"
+        );
+        assert_eq!(arrow.owner, Some(42));
+        assert!(trident.delta.x > 0.0, "it flies toward the +x target");
     }
 }
