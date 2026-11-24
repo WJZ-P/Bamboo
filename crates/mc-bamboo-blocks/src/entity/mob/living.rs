@@ -1831,6 +1831,11 @@ fn tick_brains(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     if mob.mob_type == super::MobType::Cat {
         super::cat::custom_server_ai_step(mob);
     }
+    if mob.mob_type == super::MobType::ElderGuardian {
+        // `ElderGuardian.customServerAiStep`：范围挖掘疲劳和家。
+        // `ElderGuardian.customServerAiStep`: area mining fatigue and home.
+        super::guardian::custom_server_ai_step(me, mob, ctx);
+    }
 }
 
 /// `Mob.getHeadRotSpeed()`：青蛙 35，其余 10。

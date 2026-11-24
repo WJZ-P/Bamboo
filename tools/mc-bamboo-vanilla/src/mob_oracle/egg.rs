@@ -137,6 +137,8 @@ impl EggCase {
                 pitch: 0.0,
                 alive: true,
                 spectator: false,
+                game_mode: 0,
+                mining_fatigue: None,
                 creative: false,
                 sneaking: false,
                 // 投掷者站着扔蛋，没有疾跑；犰狳才读这个标志。

@@ -392,6 +392,16 @@ pub struct PlayerView {
     pub alive: bool,
     pub spectator: bool,
     pub creative: bool,
+    /// 官方 `GameType` 的 ID：0 生存、1 创造、2 冒险、3 旁观。
+    /// `isSurvival()` 为真的是生存（0）和冒险（2）。
+    ///
+    /// Vanilla `GameType` id: 0 survival, 1 creative, 2 adventure, 3 spectator.
+    /// `isSurvival()` holds for survival (0) and adventure (2).
+    pub game_mode: i32,
+    /// 身上的挖掘疲劳 `(等级, 剩余刻数)`；没有该效果时是 `None`。
+    ///
+    /// The active mining fatigue `(amplifier, remaining ticks)`; `None` when absent.
+    pub mining_fatigue: Option<(i32, i32)>,
     /// `isDiscrete()`，也就是潜行。
     pub sneaking: bool,
     /// `isSprinting()`：犰狳会被疾跑的玩家吓到。
@@ -1068,6 +1078,15 @@ pub enum Command {
         duration: i32,
         amplifier: i32,
     },
+    /// `ElderGuardian.customServerAiStep`：给挂上挖掘疲劳的玩家发
+    /// `GUARDIAN_ELDER_EFFECT` 游戏事件包。
+    ///
+    /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT` game
+    /// event packet to a player who received mining fatigue.
+    GuardianElderEffect {
+        target: EntityUid,
+        silent: bool,
+    },
     /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
     MobLevelEvent {
         event: i32,
@@ -1516,6 +1535,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 target,
                 super::mob::effects::EffectInstance::with_amplifier(effect, duration, amplifier),
             );
+        }
+        Command::GuardianElderEffect { target, silent } => {
+            world.push_effect(crate::Effect::GuardianElderEffect { target, silent });
         }
         Command::MobLevelEvent { event, pos, data } => {
             world.push_effect(crate::Effect::LevelEvent {

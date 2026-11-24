@@ -4664,7 +4664,8 @@ mod tests {
                 | Effect::SummonedEntity { .. }
                 | Effect::CrafterCrafted { .. }
                 | Effect::KilledByArrow { .. }
-                | Effect::EnderPearlTeleport { .. } => None,
+                | Effect::EnderPearlTeleport { .. }
+                | Effect::GuardianElderEffect { .. } => None,
             })
             .collect()
     }

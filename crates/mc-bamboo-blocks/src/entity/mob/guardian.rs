@@ -358,6 +358,84 @@ pub fn ai_step(me: &mut Entity, mob: &mut Mob) {
     }
 }
 
+/// `ElderGuardian.customServerAiStep` 的相位：`(tickCount + id) % 1200 == 0`。
+///
+/// The phase of `ElderGuardian.customServerAiStep`: `(tickCount + id) % 1200 == 0`.
+pub fn is_fatigue_tick(tick_count: i32, id: i32) -> bool {
+    (tick_count + id) % 1200 == 0
+}
+
+/// `ElderGuardian.customServerAiStep`：每 1200 刻给半径 50 内的玩家挂挖掘疲劳，
+/// 并给挂上的玩家发 `GUARDIAN_ELDER_EFFECT`；每刻都检查有没有家。
+///
+/// `ElderGuardian.customServerAiStep`: every 1200 ticks apply mining fatigue to
+/// eligible players within radius 50 and send them `GUARDIAN_ELDER_EFFECT`; check
+/// for a home every tick.
+pub fn custom_server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    if is_fatigue_tick(me.tick_count, me.id) {
+        let allied_team = ctx.blocks().entity_team(&mob.uuid);
+        let mut affected = Vec::new();
+        ctx.blocks().for_each_player(&mut |player| {
+            if player_gets_fatigue(me.position, allied_team, player) {
+                affected.push(player.uid);
+            }
+        });
+        for uid in affected {
+            ctx.emit(
+                Command::AddPlayerEffect {
+                    target: uid,
+                    effect: mc_bamboo_data::registries::mob_effect::MINING_FATIGUE,
+                    duration: 6000,
+                    amplifier: 2,
+                },
+                me,
+            );
+            ctx.emit(
+                Command::GuardianElderEffect {
+                    target: uid,
+                    silent: mob.silent,
+                },
+                me,
+            );
+        }
+    }
+    // `!hasHome() → setHomeTo(blockPosition(), 16)`：每刻都检查。
+    // `!hasHome() → setHomeTo(blockPosition(), 16)`: checked every tick.
+    if mob.home.is_none() {
+        mob.home = Some((me.block_position(), 16));
+    }
+}
+
+/// `MobEffectUtil.addEffectToPlayersAround` 的玩家筛选：生存或冒险、不是盟友、
+/// 距离平方严格小于 50²、且（没有挖掘疲劳 / 现有等级 < 2 / 剩余时长 ≤ 1199）。
+///
+/// `MobEffectUtil.addEffectToPlayersAround`'s player predicate: survival or
+/// adventure, not allied, squared distance strictly below 50², and (no mining
+/// fatigue / amplifier below 2 / remaining duration at most 1199).
+fn player_gets_fatigue(
+    guardian_pos: Vec3,
+    allied_team: Option<u32>,
+    player: &crate::entity::ctx::PlayerView,
+) -> bool {
+    // `GameType.isSurvival()`：生存（0）和冒险（2）。
+    // `GameType.isSurvival()`: survival (0) and adventure (2).
+    if player.game_mode != 0 && player.game_mode != 2 {
+        return false;
+    }
+    if allied_team.is_some_and(|team| player.team == Some(team)) {
+        return false;
+    }
+    // `Vec3.closerThan(pos, 50.0)` 是严格小于。
+    // `Vec3.closerThan(pos, 50.0)` is a strict less-than.
+    if guardian_pos.distance_to_sqr(player.position) >= 2500.0 {
+        return false;
+    }
+    match player.mining_fatigue {
+        None => true,
+        Some((amplifier, duration)) => amplifier < 2 || duration <= 1199,
+    }
+}
+
 /// `Guardian.hurtServer` 反伤条件的类型部分：没在动、伤害不在
 /// `#avoids_guardian_thorns`、也不是 thorns。「直接来源是活体」需要查实体表，
 /// 由 [`hurt_server`] 单独判断。
@@ -651,6 +729,68 @@ mod tests {
                 .unwrap();
             assert_eq!(sound, Some(expected));
         }
+    }
+
+    /// `MobEffectUtil.addEffectToPlayersAround` 的筛选：生存/冒险、非盟友、严格小于
+    /// 50 格、以及挖掘疲劳的等级 / 时长条件。
+    ///
+    /// `MobEffectUtil.addEffectToPlayersAround`'s filter: survival/adventure, not
+    /// allied, strictly within 50 blocks, and the fatigue amplifier / duration rules.
+    #[test]
+    fn elder_fatigue_player_filter() {
+        use crate::entity::mob::throttle::test_player;
+
+        let origin = Vec3::new(0.0, 64.0, 0.0);
+        let mut player = test_player(7, origin);
+        // 生存、站在守卫者身上、没有挖掘疲劳。
+        player.game_mode = 0;
+        player.position = origin;
+        player.mining_fatigue = None;
+        assert!(player_gets_fatigue(origin, None, &player));
+
+        // 冒险也算 `isSurvival()`，创造和旁观不算。
+        player.game_mode = 2;
+        assert!(player_gets_fatigue(origin, None, &player));
+        player.game_mode = 1;
+        assert!(!player_gets_fatigue(origin, None, &player));
+        player.game_mode = 3;
+        assert!(!player_gets_fatigue(origin, None, &player));
+
+        // 盟友（同队）跳过。
+        player.game_mode = 0;
+        player.team = Some(3);
+        assert!(!player_gets_fatigue(origin, Some(3), &player));
+        assert!(player_gets_fatigue(origin, Some(4), &player));
+        player.team = None;
+
+        // 距离平方严格小于 50² = 2500。
+        player.position = Vec3::new(50.0, 64.0, 0.0);
+        assert!(!player_gets_fatigue(origin, None, &player));
+        player.position = Vec3::new(49.0, 64.0, 0.0);
+        assert!(player_gets_fatigue(origin, None, &player));
+
+        // 已有等级 2 且剩余时长 6000：不重挂；等级 < 2 或时长 ≤ 1199 则重挂。
+        player.position = origin;
+        player.mining_fatigue = Some((2, 6000));
+        assert!(!player_gets_fatigue(origin, None, &player));
+        player.mining_fatigue = Some((1, 6000));
+        assert!(player_gets_fatigue(origin, None, &player));
+        player.mining_fatigue = Some((2, 1199));
+        assert!(player_gets_fatigue(origin, None, &player));
+        player.mining_fatigue = Some((2, 1200));
+        assert!(!player_gets_fatigue(origin, None, &player));
+    }
+
+    /// `(tickCount + id) % 1200 == 0` 的相位。
+    ///
+    /// The `(tickCount + id) % 1200 == 0` phase.
+    #[test]
+    fn elder_fatigue_phase() {
+        assert!(is_fatigue_tick(1200, 0));
+        assert!(is_fatigue_tick(1199, 1));
+        assert!(is_fatigue_tick(0, 1200));
+        assert!(!is_fatigue_tick(1199, 0));
+        assert!(!is_fatigue_tick(1201, 0));
     }
 
     /// `Guardian.hurtServer` 的反伤条件：没在动、不在 `#avoids_guardian_thorns`、非 thorns。

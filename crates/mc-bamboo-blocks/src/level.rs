@@ -2534,6 +2534,12 @@ pub enum Effect {
     ///
     /// A splash healing potion heals a player by a distance-scaled amount.
     HealPlayer { target: EntityUid, amount: f32 },
+    /// `ElderGuardian.customServerAiStep`：只给挂上挖掘疲劳的那名玩家发
+    /// `GUARDIAN_ELDER_EFFECT` 游戏事件包。
+    ///
+    /// `ElderGuardian.customServerAiStep`: send the `GUARDIAN_ELDER_EFFECT` game event
+    /// packet only to the player who received mining fatigue.
+    GuardianElderEffect { target: EntityUid, silent: bool },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///
