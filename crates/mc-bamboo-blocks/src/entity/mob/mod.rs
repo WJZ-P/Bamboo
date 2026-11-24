@@ -195,13 +195,15 @@ pub enum MobType {
     /// Villagers. Phase 2 is the skeleton only: spawning, saving, damage and death;
     /// no brain, profession behaviour or trading.
     Villager,
+    Guardian,
+    ElderGuardian,
 }
 
 impl MobType {
     /// 全部已建模的种类，按名字或注册表 ID 查找时遍历它。
     ///
     /// Every modelled kind; lookups by name or registry id walk this list.
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 56] = [
         Self::Cow,
         Self::Mooshroom,
         Self::Rabbit,
@@ -256,6 +258,8 @@ impl MobType {
         Self::Silverfish,
         Self::Endermite,
         Self::Villager,
+        Self::Guardian,
+        Self::ElderGuardian,
     ];
 
     /// 注册表 ID。
@@ -316,6 +320,8 @@ impl MobType {
             Self::Silverfish => ids::SILVERFISH,
             Self::Endermite => ids::ENDERMITE,
             Self::Villager => ids::VILLAGER,
+            Self::Guardian => ids::GUARDIAN,
+            Self::ElderGuardian => ids::ELDER_GUARDIAN,
         }
     }
 
@@ -376,6 +382,8 @@ impl MobType {
             Self::Silverfish => "minecraft:silverfish",
             Self::Endermite => "minecraft:endermite",
             Self::Villager => "minecraft:villager",
+            Self::Guardian => "minecraft:guardian",
+            Self::ElderGuardian => "minecraft:elder_guardian",
         }
     }
 
@@ -510,6 +518,10 @@ impl MobType {
             (Self::Dolphin, baby) => dolphin::dimensions(baby),
             (Self::Axolotl, baby) => axolotl::dimensions(baby),
             (Self::Silverfish | Self::Endermite, _) => infested::dimensions(self),
+            // 守卫者 / 远古守卫者：官方 `EntityTypes.GUARDIAN` / `ELDER_GUARDIAN` 的尺寸与眼高。
+            // Guardian / elder guardian: official `EntityTypes` dimensions and eye heights.
+            (Self::Guardian, _) => (0.85, 0.85, 0.425),
+            (Self::ElderGuardian, _) => (1.9975, 1.9975, 0.99875),
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -558,6 +570,8 @@ impl MobType {
                 | Self::Enderman
                 | Self::Silverfish
                 | Self::Endermite
+                | Self::Guardian
+                | Self::ElderGuardian
         ) || self.is_skeleton()
     }
 
@@ -720,7 +734,10 @@ impl MobType {
     /// `#can_breathe_under_water`. The tag also holds `#undead`; zombie and skeleton
     /// drowning keeps its earlier behaviour and is not changed here.
     pub const fn can_breathe_under_water(self) -> bool {
+        // 守卫者在 `#can_breathe_under_water` 里。
+        // Guardians are in `#can_breathe_under_water`.
         squid::is_squid(self)
+            || matches!(self, Self::Guardian | Self::ElderGuardian)
             || fish::is_fish(self)
             || turtle::is_turtle(self)
             // 幻翼在 `#undead` 里，`#can_breathe_under_water` 收了整个标签。
@@ -821,7 +838,17 @@ impl MobType {
     /// `Entity.getMovementEmission().emitsSounds()`: squid override it to `EVENTS` and
     /// move silently.
     pub const fn emits_movement_sounds(self) -> bool {
-        !squid::is_squid(self) && !matches!(self, Self::Bat | Self::Silverfish | Self::Endermite)
+        !squid::is_squid(self)
+            && !matches!(
+                self,
+                Self::Bat
+                    | Self::Silverfish
+                    | Self::Endermite
+                    // `Guardian.getMovementEmission()` = `EVENTS`。
+                    // `Guardian.getMovementEmission()` = `EVENTS`.
+                    | Self::Guardian
+                    | Self::ElderGuardian
+            )
     }
 
     /// `LivingEntity.isPushable()`：蝙蝠覆写成假，不推别人也不被推。
@@ -853,6 +880,11 @@ impl MobType {
     pub const fn xp_reward(self) -> i32 {
         if matches!(self, Self::Endermite) {
             return mc_bamboo_data::entity_types::ENDERMITE_XP_REWARD;
+        }
+        // 守卫者构造函数里 `xpReward = 10`，覆盖 `Monster` 的 5。
+        // The guardian constructor sets `xpReward = 10`, overriding the monster's 5.
+        if matches!(self, Self::Guardian | Self::ElderGuardian) {
+            return 10;
         }
         // `Phantom` 构造函数里也是 `xpReward = 5`。
         // The `Phantom` constructor sets `xpReward = 5` as well.
@@ -920,6 +952,8 @@ impl MobType {
             Self::Silverfish => "minecraft:entities/silverfish",
             Self::Endermite => "minecraft:entities/endermite",
             Self::Villager => "minecraft:entities/villager",
+            Self::Guardian => "minecraft:entities/guardian",
+            Self::ElderGuardian => "minecraft:entities/elder_guardian",
         }
     }
 
@@ -931,7 +965,11 @@ impl MobType {
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
     pub const fn ambient_sound_interval(self) -> i32 {
-        if matches!(self, Self::Ocelot) {
+        // `Guardian.getAmbientSoundInterval()` = 160。
+        // `Guardian.getAmbientSoundInterval()` = 160.
+        if matches!(self, Self::Guardian | Self::ElderGuardian) {
+            160
+        } else if matches!(self, Self::Ocelot) {
             900
         } else if self.is_equine() {
             400
@@ -1037,6 +1075,9 @@ impl MobType {
             // Sleeping and trading sounds arrive in phases 3 and 5; the skeleton
             // plays the plain ambient sound.
             Self::Villager => Some("minecraft:entity.villager.ambient"),
+            // 守卫者的环境音分水中 / 岸上两套，由 `guardian::ambient_sound` 按 `isInWater` 选。
+            // Guardian ambience has water / land variants picked by `guardian::ambient_sound`.
+            Self::Guardian | Self::ElderGuardian => None,
         }
     }
 
@@ -1089,6 +1130,9 @@ impl MobType {
             Self::Silverfish => Some("minecraft:entity.silverfish.hurt"),
             Self::Endermite => Some("minecraft:entity.endermite.hurt"),
             Self::Villager => Some("minecraft:entity.villager.hurt"),
+            // 守卫者的受伤音分水中 / 岸上两套，由 `guardian::hurt_sound` 按 `isInWater` 选。
+            // Guardian hurt sounds have water / land variants picked by `guardian::hurt_sound`.
+            Self::Guardian | Self::ElderGuardian => None,
         }
     }
 
@@ -1141,6 +1185,9 @@ impl MobType {
             Self::Silverfish => Some("minecraft:entity.silverfish.death"),
             Self::Endermite => Some("minecraft:entity.endermite.death"),
             Self::Villager => Some("minecraft:entity.villager.death"),
+            // 守卫者的死亡音分水中 / 岸上两套，由 `guardian::death_sound` 按 `isInWater` 选。
+            // Guardian death sounds have water / land variants picked by `guardian::death_sound`.
+            Self::Guardian | Self::ElderGuardian => None,
         }
     }
 
@@ -1204,6 +1251,9 @@ impl MobType {
             //
             // Villagers do not override `playStepSound`; the block's sound plays.
             Self::Villager => None,
+            // `Guardian.getMovementEmission()` = `EVENTS`：没有脚步声。
+            // `Guardian.getMovementEmission()` = `EVENTS`: no step sound.
+            Self::Guardian | Self::ElderGuardian => None,
         }
     }
 
@@ -1265,6 +1315,8 @@ impl MobType {
             Self::Silverfish => items::SILVERFISH_SPAWN_EGG,
             Self::Endermite => items::ENDERMITE_SPAWN_EGG,
             Self::Villager => items::VILLAGER_SPAWN_EGG,
+            Self::Guardian => items::GUARDIAN_SPAWN_EGG,
+            Self::ElderGuardian => items::ELDER_GUARDIAN_SPAWN_EGG,
         }
     }
 
@@ -1325,6 +1377,8 @@ impl MobType {
             Self::Silverfish => "entity.minecraft.silverfish",
             Self::Endermite => "entity.minecraft.endermite",
             Self::Villager => "entity.minecraft.villager",
+            Self::Guardian => "entity.minecraft.guardian",
+            Self::ElderGuardian => "entity.minecraft.elder_guardian",
         }
     }
 
@@ -3949,5 +4003,37 @@ mod tests {
             );
         }
         assert_eq!(seen.len(), MobType::ALL.len());
+    }
+
+    /// 守卫者 / 远古守卫者的注册事实：新增种类时别把名字、ID、掉落表和经验填错。
+    ///
+    /// Guardian / elder guardian registry facts: adding the kinds must not mistype
+    /// their names, ids, loot tables or experience.
+    #[test]
+    fn guardian_registry_facts() {
+        use mc_bamboo_data::registries::entity_type as ids;
+        assert_eq!(
+            MobType::by_name("minecraft:guardian"),
+            Some(MobType::Guardian)
+        );
+        assert_eq!(
+            MobType::by_name("minecraft:elder_guardian"),
+            Some(MobType::ElderGuardian)
+        );
+        assert_eq!(MobType::Guardian.entity_type(), ids::GUARDIAN);
+        assert_eq!(MobType::ElderGuardian.entity_type(), ids::ELDER_GUARDIAN);
+        assert_eq!(
+            MobType::Guardian.loot_table(),
+            "minecraft:entities/guardian"
+        );
+        assert_eq!(
+            MobType::ElderGuardian.loot_table(),
+            "minecraft:entities/elder_guardian"
+        );
+        assert_eq!(MobType::Guardian.xp_reward(), 10);
+        assert_eq!(MobType::ElderGuardian.xp_reward(), 10);
+        assert!(MobType::Guardian.is_monster());
+        assert!(MobType::Guardian.can_breathe_under_water());
+        assert!(!MobType::Guardian.emits_movement_sounds());
     }
 }
